@@ -784,6 +784,9 @@ fn session_holds(sv: &mut Supervisor<'_>, run: &TaskRun) -> Option<String> {
     }
 }
 
+/// The `stuck_exit` ask's own options, before its recovery job's.
+pub(super) const STUCK_EXIT_OPTIONS: [&str; 2] = ["exit", "wait"];
+
 /// Raise a session that held `/exit` back as a `stuck_exit` ask to the
 /// inbox once its recovery job escalated (ADR-0047 decision 40), with the
 /// job's `note` and the last lines of its screen, through the ask path that
@@ -818,12 +821,7 @@ pub(super) fn ask_stuck_exit(
         task_id = run.task_id(),
         timeout = sv.cmux.exit_timeout().as_secs(),
     );
-    let mut options: Vec<String> = vec!["exit".into(), "wait".into()];
-    for option in note.map(|note| note.options.as_slice()).unwrap_or_default() {
-        if !options.contains(option) {
-            options.push(option.clone());
-        }
-    }
+    let options = super::recovery::ask_options(&STUCK_EXIT_OPTIONS, note);
     let outcome = ask::ask(
         &mut *sv.queue,
         &sv.layout.main_checkout,

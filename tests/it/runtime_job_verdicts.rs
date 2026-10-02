@@ -229,62 +229,48 @@ fn an_adopted_concern_is_asked_at_the_review_jobs_request() {
     assert_asked_at_the_jobs_request(&db, 2, &format!("supervisor:{}", std::process::id()));
 }
 
-/// A recovery job's output the runtime cannot read, or one with a field or
-/// an action it does not know, retries nothing: the failed run waits to be
-/// recovered by hand (`triage by hand`). A repair of low confidence is not
-/// applied either, but asked, at the job's request. (A repair of high
-/// confidence is applied, at the job's request, in
-/// `runtime_actor_env`; one whose precondition fails is asked in
+/// A recovery job's output the runtime cannot read retries nothing: the
+/// failed run waits to be recovered by hand (`triage by hand`). One
+/// representative here, a known `retry` under a field the runtime does not
+/// know; every broken shape's error is
+/// `domain::recovery::tests::a_broken_verdict_is_refused_with_what_is_wrong`
+/// (task 1415). A repair of low confidence is not applied either, but
+/// asked, at the job's request. (A repair of high confidence is applied,
+/// at the job's request, in `runtime_actor_env`; one whose precondition
+/// fails is asked in
 /// `runtime_triage::a_retry_of_a_run_with_commits_is_refused_and_asked_with_the_jobs_options`.)
 #[test]
 fn a_recovery_verdict_is_applied_only_when_it_holds_and_a_broken_one_fails_closed() {
-    for (verdict, expected) in [
-        (
-            "printf 'no verdict here\\n'".to_owned(),
-            "printed no verdict JSON",
-        ),
-        (
-            recovery(
-                json!({"verdict": "repair", "confidence": "high", "diagnosis": "x",
-                            "actions": [{"action": "retry"}], "force": true}),
-            ),
-            "unknown field `force`",
-        ),
-        (
-            recovery(
-                json!({"verdict": "repair", "confidence": "high", "diagnosis": "x",
-                            "actions": [{"action": "integrate"}]}),
-            ),
-            "unknown variant `integrate`",
-        ),
-    ] {
-        let (_dir, repo, db) = fixture();
-        let backend = TestWorkspace::new(&db, false, "exit 7");
-        let reviewer = TestReviewer::new(&[verdict_script()]).with_triages(&[verdict]);
-        supervise_reviewed(&db, &repo, &backend, &reviewer);
-        let mut queue = SqliteQueue::open(&db).unwrap();
-        let detail = queue.show(TaskId::new(1)).unwrap();
-        assert_eq!(detail.runs.len(), 1, "{expected}: no retry");
-        let run = &detail.runs[0];
-        assert_eq!(run.status(), RunStatus::Failed);
-        let kinds = event_kinds(&detail);
-        assert!(!kinds.contains(&"triage_finished"), "{kinds:?}");
-        assert!(!kinds.contains(&"auto_repaired"), "{kinds:?}");
-        let failed = payloads(&detail, "triage_failed");
-        assert_eq!(failed.len(), 1, "{expected}");
-        let error = failed[0]["error"].as_str().unwrap();
-        assert!(error.contains(expected), "{error}");
-        let status = runtime::status(&db).unwrap();
-        assert!(
-            status["attention"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|a| a["kind"] == "triage_failed" && a["next"] == "triage by hand"),
-            "{status}"
-        );
-        assert!(queue.asks(Default::default()).unwrap().is_empty());
-    }
+    let expected = "unknown field `force`";
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, "exit 7");
+    let reviewer = TestReviewer::new(&[verdict_script()]).with_triages(&[recovery(
+        json!({"verdict": "repair", "confidence": "high", "diagnosis": "x",
+               "actions": [{"action": "retry"}], "force": true}),
+    )]);
+    supervise_reviewed(&db, &repo, &backend, &reviewer);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.runs.len(), 1, "no retry");
+    let run = &detail.runs[0];
+    assert_eq!(run.status(), RunStatus::Failed);
+    let kinds = event_kinds(&detail);
+    assert!(!kinds.contains(&"triage_finished"), "{kinds:?}");
+    assert!(!kinds.contains(&"auto_repaired"), "{kinds:?}");
+    let failed = payloads(&detail, "triage_failed");
+    assert_eq!(failed.len(), 1);
+    let error = failed[0]["error"].as_str().unwrap();
+    assert!(error.contains(expected), "{error}");
+    let status = runtime::status(&db).unwrap();
+    assert!(
+        status["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["kind"] == "triage_failed" && a["next"] == "triage by hand"),
+        "{status}"
+    );
+    assert!(queue.asks(Default::default()).unwrap().is_empty());
 
     // A repair of low confidence is the job's recommendation to a person.
     let (_dir, repo, db) = fixture();
@@ -317,36 +303,26 @@ fn verdict_script() -> String {
     verdict("pass", &[], "unused")
 }
 
-/// The broken outputs of a live run's recovery job, as (verdict, part of
-/// the error): no JSON at all, JSON without a verdict, a verdict with a
-/// field the runtime does not know, and one with an action it does not
-/// know. The two verdicts with a known shape carry `action`, the repair
-/// the alert's test would see applied if the verdict held (for
-/// `prompt_waiting` it would be refused, as the runtime answers a known
-/// dialog before the alert: there the guard is the `job_failed` outcome
-/// and its error, not the keys).
-fn broken_live_verdicts(action: Value) -> [(Option<Value>, &'static str); 4] {
-    [
-        (None, "the recovery job printed no verdict JSON"),
-        (
-            Some(json!({"confidence": "high", "diagnosis": "x", "actions": [action.clone()]})),
-            "missing field `verdict`",
-        ),
-        (
-            Some(
-                json!({"verdict": "repair", "confidence": "high", "diagnosis": "x",
-                        "actions": [action], "force": true}),
-            ),
-            "unknown field `force`",
-        ),
-        (
-            Some(
-                json!({"verdict": "repair", "confidence": "high", "diagnosis": "x",
-                        "actions": [{"action": "kill_session"}]}),
-            ),
-            "unknown variant `kill_session`",
-        ),
-    ]
+/// The broken output of a live run's recovery job each alert's test
+/// gives, as (verdict, part of the error): a verdict with a field the
+/// runtime does not know, carrying `action`, the repair the alert's test
+/// would see applied if the verdict held (for `prompt_waiting` it would be
+/// refused, as the runtime answers a known dialog before the alert: there
+/// the guard is the `job_failed` outcome and its error, not the keys). The
+/// other broken shapes (no JSON, no verdict, an unknown action) are read
+/// alike, by `RecoveryVerdict::parse`, and their errors are
+/// `domain::recovery::tests::a_broken_verdict_is_refused_with_what_is_wrong`;
+/// what a failed job's ask and `recovery_finished` carry for every alert
+/// is `supervise::recovery::tests::a_failed_job_escalates_with_recovery_failed_and_applies_nothing`
+/// and the asks' options
+/// `supervise::recovery::tests::each_live_alerts_ask_offers_its_own_options_then_the_jobs`
+/// (task 1415).
+fn broken_live_verdict(action: Value) -> (Value, &'static str) {
+    (
+        json!({"verdict": "repair", "confidence": "high", "diagnosis": "x",
+               "actions": [action], "force": true}),
+        "unknown field `force`",
+    )
 }
 
 /// What a live run's broken recovery job leaves (ADR-t609-1): its
@@ -382,162 +358,149 @@ fn assert_failed_live_job(
     assert!(backend.keys.lock().unwrap().is_empty(), "{expected}");
 }
 
-/// Task 797: a `long_background` alert's recovery job whose output is no
-/// verdict, or one with a field or an action the runtime does not know,
-/// stops no process, even the orphan its repair names: the `stalled` ask
-/// opens for the inbox with `recovery_failed`, and nothing is applied.
+/// Task 797: a `long_background` alert's recovery job whose output the
+/// runtime cannot read ([`broken_live_verdict`]) stops no process, even the
+/// orphan its repair names: the `stalled` ask opens for the inbox with
+/// `recovery_failed`, and nothing is applied.
 #[test]
 fn a_broken_long_background_recovery_verdict_stops_nothing_and_opens_the_stalled_ask() {
     let stop = json!({"action": "stop_processes", "pids": ["PID"]});
-    for (output, expected) in broken_live_verdicts(stop) {
-        let script = output.map_or_else(
-            || "printf 'no verdict here\\n'".to_owned(),
-            |v| crate::runtime_repair::recovery_verdict(&v),
-        );
-        let (_dir, repo, db) = fixture();
-        let (backend, reviewer, supervisor) =
-            crate::runtime_repair::supervise_long_background(&db, &repo, &script);
-        // Checks that the orphan still runs when the ask is open.
-        let (ask, detail) =
-            crate::runtime_repair::escalated_long_background(&db, &backend, supervisor);
-        assert_eq!(ask.kind, AskKind::Stalled, "{expected}");
-        assert_eq!(ask.options, ["wait", "intervene", "propose"], "{expected}");
-        assert!(
-            ask.question.contains("alert: long_background"),
-            "{}",
-            ask.question
-        );
-        assert_failed_live_job(&detail, &backend, &ask, "long_background", expected);
-        assert_eq!(reviewer.triage_prompts().len(), 1, "{expected}");
-    }
+    let (output, expected) = broken_live_verdict(stop);
+    let script = crate::runtime_repair::recovery_verdict(&output);
+    let (_dir, repo, db) = fixture();
+    let (backend, reviewer, supervisor) =
+        crate::runtime_repair::supervise_long_background(&db, &repo, &script);
+    // Checks that the orphan still runs when the ask is open.
+    let (ask, detail) = crate::runtime_repair::escalated_long_background(&db, &backend, supervisor);
+    assert_eq!(ask.kind, AskKind::Stalled);
+    assert_eq!(ask.options, ["wait", "intervene", "propose"]);
+    assert!(
+        ask.question.contains("alert: long_background"),
+        "{}",
+        ask.question
+    );
+    assert_failed_live_job(&detail, &backend, &ask, "long_background", expected);
+    assert_eq!(reviewer.triage_prompts().len(), 1);
 }
 
-/// Task 797: a `stuck_exit` alert's recovery job whose output is no
-/// verdict, or one with a field or an action the runtime does not know,
-/// does not close the workspace and land the run (its `close_and_proceed`
-/// would hold) and sends no `/exit` or key: the `stuck_exit` ask opens
-/// with `recovery_failed`, and the run lands only once the session exits.
+/// Task 797: a `stuck_exit` alert's recovery job whose output the runtime
+/// cannot read ([`broken_live_verdict`]) does not close the workspace and
+/// land the run (its `close_and_proceed` would hold) and sends no `/exit`
+/// or key: the `stuck_exit` ask opens with `recovery_failed`, and the run
+/// lands only once the session exits.
 #[test]
 fn a_broken_stuck_exit_recovery_verdict_closes_nothing_and_opens_the_stuck_exit_ask() {
-    for (output, expected) in broken_live_verdicts(json!({"action": "close_and_proceed"})) {
-        let script = output.map_or_else(|| "printf 'no verdict here\\n'".to_owned(), recovery);
-        let (_dir, repo, db) = fixture();
-        let base = git_out(&repo, &["rev-parse", "main"]);
-        let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
-        backend.close_ends_session = true;
-        let backend = Arc::new(backend);
-        let run = crate::runtime_review_exit::stuck_exit_after_a_pass(&repo, &db, &backend);
-        let (reviewer, supervisor) =
-            crate::runtime_review_exit::supervise_recovering(&db, &repo, &backend, script);
-        let ask = crate::runtime_review_exit::failed_stuck_exit_job_ask(&db, &run, expected);
-        let mut queue = SqliteQueue::open(&db).unwrap();
-        assert_failed_live_job(
-            &queue.show(TaskId::new(1)).unwrap(),
-            &backend,
-            &ask,
-            "stuck_exit",
-            expected,
-        );
-        assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 0, "{expected}");
-        assert!(
-            backend.closed().is_empty(),
-            "{expected}: {:?}",
-            backend.closed()
-        );
-        assert!(backend.texts.lock().unwrap().is_empty(), "{expected}");
-        assert_eq!(git_out(&repo, &["rev-parse", "main"]), base, "{expected}");
-        // The person's /exit reaches the session; the run lands.
-        fs::write(exit_request_path(run.run_dir().unwrap()), "").unwrap();
-        let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
-        backend.join();
-        assert_eq!(outcome["errors"], json!([]), "{outcome}");
-        assert_landed(
-            &repo,
-            &queue.show(TaskId::new(1)).unwrap().runs[0],
-            "test task",
-            &base,
-        );
-        assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
-        assert_eq!(reviewer.triage_prompts().len(), 1, "{expected}");
-        assert!(payloads(&queue.show(TaskId::new(1)).unwrap(), "auto_repaired").is_empty());
-    }
+    let (output, expected) = broken_live_verdict(json!({"action": "close_and_proceed"}));
+    let (_dir, repo, db) = fixture();
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    backend.close_ends_session = true;
+    let backend = Arc::new(backend);
+    let run = crate::runtime_review_exit::stuck_exit_after_a_pass(&repo, &db, &backend);
+    let (reviewer, supervisor) =
+        crate::runtime_review_exit::supervise_recovering(&db, &repo, &backend, recovery(output));
+    let ask = crate::runtime_review_exit::failed_stuck_exit_job_ask(&db, &run, expected);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    assert_failed_live_job(
+        &queue.show(TaskId::new(1)).unwrap(),
+        &backend,
+        &ask,
+        "stuck_exit",
+        expected,
+    );
+    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 0);
+    assert!(backend.closed().is_empty(), "{:?}", backend.closed());
+    assert!(backend.texts.lock().unwrap().is_empty());
+    assert_eq!(git_out(&repo, &["rev-parse", "main"]), base);
+    // The person's /exit reaches the session; the run lands.
+    fs::write(exit_request_path(run.run_dir().unwrap()), "").unwrap();
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_landed(
+        &repo,
+        &queue.show(TaskId::new(1)).unwrap().runs[0],
+        "test task",
+        &base,
+    );
+    assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
+    assert_eq!(reviewer.triage_prompts().len(), 1);
+    assert!(payloads(&queue.show(TaskId::new(1)).unwrap(), "auto_repaired").is_empty());
 }
 
-/// Task 797: a `prompt_waiting` alert's recovery job whose output is no
-/// verdict, or one with a field or an action the runtime does not know,
-/// answers no dialog (no key, no text): the `answer_prompt` ask opens
-/// with `recovery_failed` and closes once the dialog is gone.
+/// Task 797: a `prompt_waiting` alert's recovery job whose output the
+/// runtime cannot read ([`broken_live_verdict`]) answers no dialog (no
+/// key, no text): the `answer_prompt` ask opens with `recovery_failed`
+/// and closes once the dialog is gone.
 #[test]
 fn a_broken_prompt_waiting_recovery_verdict_answers_nothing_and_opens_the_answer_prompt_ask() {
     let answer = json!({"action": "answer_known_dialog", "dialog": "background_work"});
-    for (output, expected) in broken_live_verdicts(answer) {
-        let script = output.map_or_else(|| "printf 'no verdict here\\n'".to_owned(), recovery);
-        let (_dir, repo, db) = fixture();
-        let mut backend = TestWorkspace::new(&db, false, PROMPTED_AGENT);
-        backend.prompt_wait = Duration::from_millis(300);
-        *backend.screen.lock().unwrap() = crate::runtime_review_adopt::DIALOG_SCREEN.into();
-        let backend = Arc::new(backend);
-        let reviewer = Arc::new(
-            TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")])
-                .with_triages(&[script]),
-        );
-        let supervisor = {
-            let (db, repo, backend, reviewer) =
-                (db.clone(), repo.clone(), backend.clone(), reviewer.clone());
-            thread::spawn(move || {
-                runtime::supervise_with_reviewer(
-                    &db,
-                    &repo,
-                    &*backend,
-                    &claude_stub(&db),
-                    &*reviewer,
-                    Path::new(env!("CARGO_BIN_EXE_dagq")),
-                    &supervise_options(4, true),
-                )
-            })
-        };
-        let open_asks = |queue: &SqliteQueue| queue.asks(AskQuery::default()).unwrap();
-        // The ask opens before the job's `recovery_finished` is recorded:
-        // both are waited for.
-        wait_until(&db, crate::common::STEP_LIMIT, |queue| {
-            !open_asks(queue).is_empty()
-                && !payloads(&queue.show(TaskId::new(1)).unwrap(), "recovery_finished").is_empty()
-        });
-        let mut queue = SqliteQueue::open(&db).unwrap();
-        let asks = open_asks(&queue);
-        assert_eq!(asks.len(), 1, "{expected}: {asks:?}");
-        let ask = asks[0].clone();
-        assert_eq!(ask.kind, AskKind::AnswerPrompt, "{expected}");
-        assert!(
-            ask.question.contains("waits at a choice dialog"),
-            "{}",
-            ask.question
-        );
-        assert_failed_live_job(
-            &queue.show(TaskId::new(1)).unwrap(),
-            &backend,
-            &ask,
-            "prompt_waiting",
-            expected,
-        );
-        assert!(backend.texts.lock().unwrap().is_empty(), "{expected}");
-        assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 0, "{expected}");
-        // Someone answers the dialog: the ask closes, and the run goes on.
-        *backend.screen.lock().unwrap() = WORK_SCREEN.into();
-        wait_until(&db, crate::common::STEP_LIMIT, |queue| {
-            queue.read_ask(ask.id).unwrap().closed_at.is_some()
-        });
-        let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
-        fs::write(
-            exit_request_path(run.run_dir().unwrap()).with_extension("go"),
-            "",
-        )
-        .unwrap();
-        let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
-        backend.join();
-        assert_eq!(outcome["errors"], json!([]), "{outcome}");
-        assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
-        assert_eq!(reviewer.triage_prompts().len(), 1, "{expected}");
-        assert!(payloads(&queue.show(TaskId::new(1)).unwrap(), "auto_repaired").is_empty());
-    }
+    let (output, expected) = broken_live_verdict(answer);
+    let (_dir, repo, db) = fixture();
+    let mut backend = TestWorkspace::new(&db, false, PROMPTED_AGENT);
+    backend.prompt_wait = Duration::from_millis(300);
+    *backend.screen.lock().unwrap() = crate::runtime_review_adopt::DIALOG_SCREEN.into();
+    let backend = Arc::new(backend);
+    let reviewer = Arc::new(
+        TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")])
+            .with_triages(&[recovery(output)]),
+    );
+    let supervisor = {
+        let (db, repo, backend, reviewer) =
+            (db.clone(), repo.clone(), backend.clone(), reviewer.clone());
+        thread::spawn(move || {
+            runtime::supervise_with_reviewer(
+                &db,
+                &repo,
+                &*backend,
+                &claude_stub(&db),
+                &*reviewer,
+                Path::new(env!("CARGO_BIN_EXE_dagq")),
+                &supervise_options(4, true),
+            )
+        })
+    };
+    let open_asks = |queue: &SqliteQueue| queue.asks(AskQuery::default()).unwrap();
+    // The ask opens before the job's `recovery_finished` is recorded:
+    // both are waited for.
+    wait_until(&db, crate::common::STEP_LIMIT, |queue| {
+        !open_asks(queue).is_empty()
+            && !payloads(&queue.show(TaskId::new(1)).unwrap(), "recovery_finished").is_empty()
+    });
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let asks = open_asks(&queue);
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    let ask = asks[0].clone();
+    assert_eq!(ask.kind, AskKind::AnswerPrompt);
+    assert!(
+        ask.question.contains("waits at a choice dialog"),
+        "{}",
+        ask.question
+    );
+    assert_failed_live_job(
+        &queue.show(TaskId::new(1)).unwrap(),
+        &backend,
+        &ask,
+        "prompt_waiting",
+        expected,
+    );
+    assert!(backend.texts.lock().unwrap().is_empty());
+    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 0);
+    // Someone answers the dialog: the ask closes, and the run goes on.
+    *backend.screen.lock().unwrap() = WORK_SCREEN.into();
+    wait_until(&db, crate::common::STEP_LIMIT, |queue| {
+        queue.read_ask(ask.id).unwrap().closed_at.is_some()
+    });
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    fs::write(
+        exit_request_path(run.run_dir().unwrap()).with_extension("go"),
+        "",
+    )
+    .unwrap();
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
+    assert_eq!(reviewer.triage_prompts().len(), 1);
+    assert!(payloads(&queue.show(TaskId::new(1)).unwrap(), "auto_repaired").is_empty());
 }

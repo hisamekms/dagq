@@ -453,6 +453,60 @@ mod tests {
         assert!(!escalate.applies());
     }
 
+    /// Each broken output a recovery job may print, of a run that ended
+    /// and of a live session's alert, is refused with the error the
+    /// failed job's `triage_failed` and `recovery_finished` (and its ask)
+    /// carry: no JSON, no verdict, a field or an action the runtime does
+    /// not know, and a repair without an action (moved from
+    /// `runtime_job_verdicts`, task 1415).
+    #[test]
+    fn a_broken_verdict_is_refused_with_what_is_wrong() {
+        for (text, parts) in [
+            (
+                "no verdict here\n",
+                &["the recovery job printed no verdict JSON"][..],
+            ),
+            (
+                r#"{"confidence": "high", "diagnosis": "x", "actions": [{"action": "stop_processes", "pids": [1]}]}"#,
+                &[
+                    "the recovery job printed no verdict JSON",
+                    "missing field `verdict`",
+                ],
+            ),
+            (
+                r#"{"verdict": "repair", "confidence": "high", "diagnosis": "x", "actions": [{"action": "retry"}], "force": true}"#,
+                &[
+                    "the recovery job printed no verdict JSON",
+                    "unknown field `force`",
+                ],
+            ),
+            (
+                r#"{"verdict": "repair", "confidence": "high", "diagnosis": "x", "actions": [{"action": "close_and_proceed"}], "force": true}"#,
+                &["unknown field `force`"],
+            ),
+            (
+                r#"{"verdict": "repair", "confidence": "high", "diagnosis": "x", "actions": [{"action": "integrate"}]}"#,
+                &[
+                    "the recovery job printed no verdict JSON",
+                    "unknown variant `integrate`",
+                ],
+            ),
+            (
+                r#"{"verdict": "repair", "confidence": "high", "diagnosis": "x", "actions": [{"action": "kill_session"}]}"#,
+                &["unknown variant `kill_session`"],
+            ),
+            (
+                r#"{"verdict": "repair", "confidence": "high", "diagnosis": "x", "actions": []}"#,
+                &["the recovery job's repair verdict names no action"],
+            ),
+        ] {
+            let error = RecoveryVerdict::parse(text).unwrap_err();
+            for part in parts {
+                assert!(error.contains(part), "{text}: {part} in {error}");
+            }
+        }
+    }
+
     #[test]
     fn only_the_runs_own_processes_may_be_stopped() {
         let worktree = Path::new("/runs/r/worktree");

@@ -447,10 +447,10 @@ impl Supervisor<'_> {
             let granted = pending.is_none()
                 && done >= MAX_RECOVERY_ATTEMPTS
                 && verify_fix_round(&events, &self.queue.show(run.task_id())?.events);
-            let used_up = pending.is_none() && done >= MAX_RECOVERY_ATTEMPTS && !granted;
-            let (request, attempt) = match pending {
-                Some(_) => (None, done),
-                None if used_up => (None, done + 1),
+            let (used_up, attempt) = recovery_round(pending.is_some(), done, granted);
+            let request = match pending {
+                Some(_) => None,
+                None if used_up => None,
                 None => {
                     let evidence: Vec<EventId> = events
                         .iter()
@@ -481,7 +481,7 @@ impl Supervisor<'_> {
                             "answer": decided.payload["answer"],
                         });
                     }
-                    (Some(request), done + 1)
+                    Some(request)
                 }
             };
             // Not while the cleanup job is to clear the run's worktree (task
@@ -911,51 +911,11 @@ impl Supervisor<'_> {
         let note = escalation.note(run, alert, attempt);
         let exhausted =
             ResumeCount::of(&self.queue.run_events(run.id())?).exhausted(self.resume_config);
-        let base = if exhausted {
-            EXHAUSTED_OPTIONS
-        } else {
-            TRIAGE_OPTIONS
-        };
-        let mut options: Vec<String> = base.iter().map(|o| (*o).to_owned()).collect();
-        for option in &note.options {
-            if !options.contains(option) {
-                options.push(option.clone());
-            }
-        }
         // Only a run whose `integrate` verification failed is offered the
         // verify fix (ADR-t883-1).
         let verify_failed = verification_failed(&self.queue.run_events(run.id())?);
-        if verify_failed && !options.iter().any(|option| option == VERIFY_FIX_OPTION) {
-            options.push(VERIFY_FIX_OPTION.to_owned());
-        }
-        let verify_fix = if verify_failed {
-            format!(
-                " Its integrate verification failed: if the task's verify itself is wrong, user or inbox first runs `dagq edit {task_id} --verify ...` (or `--no-verify`), then answers `{VERIFY_FIX_OPTION}`; the recovery job runs again with the corrected commands, even once its tries are used up, and can carry the committed branch forward with retry_inherit. Answered without that edit, it goes back to the job like any other option.",
-                task_id = run.task_id()
-            )
-        } else {
-            String::new()
-        };
-        let resume = if exhausted {
-            ""
-        } else {
-            " resume: resume the run's own session with the job's diagnosis."
-        };
-        let others = if note.options.is_empty() {
-            ""
-        } else {
-            " Any other option goes back to the recovery job, which runs again with your choice."
-        };
-        let question = format!(
-            "The supervisor's recovery job for run {run_id} (task {task_id}, {status}; alert: {alert}) did not move it on: {why}.\n{text}\nLast error: {last_error}\nretry: make the task ready for a new run from scratch (this run's work is not carried over).{resume} cancel: cancel the task.{verify_fix}{others}",
-            run_id = run.id(),
-            task_id = run.task_id(),
-            status = run.status().as_str(),
-            alert = alert.as_str(),
-            why = note.why,
-            text = note.text,
-            last_error = or_none(tail(run.last_error().unwrap_or_default(), 500)),
-        );
+        let options = ended_options(&note, exhausted, verify_failed);
+        let question = ended_question(run, alert, &note, exhausted, verify_failed);
         let outcome = ask::ask(
             &mut *self.queue,
             &self.layout.main_checkout,
@@ -1103,5 +1063,201 @@ impl Supervisor<'_> {
             "task_id": run.task_id(),
             "status": run.status(),
         }));
+    }
+}
+
+/// Whether a round of a run that ended finds its alert's jobs used up, and
+/// the number of its job: a `pending` request is the job `done` counted
+/// already; else the next one, used up past [`MAX_RECOVERY_ATTEMPTS`]
+/// unless a person's verify fix was `granted` its round (ADR-t883-1).
+fn recovery_round(pending: bool, done: usize, granted: bool) -> (bool, usize) {
+    if pending {
+        return (false, done);
+    }
+    (done >= MAX_RECOVERY_ATTEMPTS && !granted, done + 1)
+}
+
+/// The options of the `decide` ask of a run that ended: `retry` /
+/// `resume` / `cancel` (without `resume` once its resumes are
+/// `exhausted`), the job's, and the verify fix for a run whose `integrate`
+/// verification failed.
+fn ended_options(note: &Note, exhausted: bool, verify_failed: bool) -> Vec<String> {
+    let base = if exhausted {
+        EXHAUSTED_OPTIONS
+    } else {
+        TRIAGE_OPTIONS
+    };
+    let mut options = super::recovery::ask_options(base, Some(note));
+    if verify_failed && !options.iter().any(|option| option == VERIFY_FIX_OPTION) {
+        options.push(VERIFY_FIX_OPTION.to_owned());
+    }
+    options
+}
+
+/// The question of the `decide` ask of a run that ended: where the run
+/// stands, the escalation's `note`, its last error and what each option
+/// does.
+fn ended_question(
+    run: &TaskRun,
+    alert: RecoveryAlert,
+    note: &Note,
+    exhausted: bool,
+    verify_failed: bool,
+) -> String {
+    let verify_fix = if verify_failed {
+        format!(
+            " Its integrate verification failed: if the task's verify itself is wrong, user or inbox first runs `dagq edit {task_id} --verify ...` (or `--no-verify`), then answers `{VERIFY_FIX_OPTION}`; the recovery job runs again with the corrected commands, even once its tries are used up, and can carry the committed branch forward with retry_inherit. Answered without that edit, it goes back to the job like any other option.",
+            task_id = run.task_id()
+        )
+    } else {
+        String::new()
+    };
+    let resume = if exhausted {
+        ""
+    } else {
+        " resume: resume the run's own session with the job's diagnosis."
+    };
+    let others = if note.options.is_empty() {
+        ""
+    } else {
+        " Any other option goes back to the recovery job, which runs again with your choice."
+    };
+    format!(
+        "The supervisor's recovery job for run {run_id} (task {task_id}, {status}; alert: {alert}) did not move it on: {why}.\n{text}\nLast error: {last_error}\nretry: make the task ready for a new run from scratch (this run's work is not carried over).{resume} cancel: cancel the task.{verify_fix}{others}",
+        run_id = run.id(),
+        task_id = run.task_id(),
+        status = run.status().as_str(),
+        alert = alert.as_str(),
+        why = note.why,
+        text = note.text,
+        last_error = or_none(tail(run.last_error().unwrap_or_default(), 500)),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::recovery::{Escalation, test_run};
+    use super::*;
+
+    /// A round takes the pending request's job, else the next; past the
+    /// alert's jobs it is used up, unless a person's verify fix was granted
+    /// its round (moved from `runtime_triage`, task 1415; when the round is
+    /// granted is `verify_fix_round`'s).
+    #[test]
+    fn a_round_past_the_alerts_jobs_is_used_up_unless_granted() {
+        assert_eq!(recovery_round(false, 0, false), (false, 1));
+        assert_eq!(recovery_round(false, 2, false), (false, 3));
+        assert_eq!(
+            recovery_round(false, MAX_RECOVERY_ATTEMPTS, false),
+            (true, 4)
+        );
+        assert_eq!(
+            recovery_round(false, MAX_RECOVERY_ATTEMPTS, true),
+            (false, 4)
+        );
+        assert_eq!(
+            recovery_round(true, MAX_RECOVERY_ATTEMPTS, false),
+            (false, 3)
+        );
+        assert_eq!(recovery_round(true, 1, false), (false, 1));
+    }
+
+    fn note_of(job: Option<serde_json::Value>) -> Note {
+        let run = test_run(RunStatus::Failed, None);
+        match job {
+            Some(json) => Escalation::Verdict(RecoveryVerdict::parse(&json.to_string()).unwrap()),
+            None => Escalation::UsedUp(MAX_RECOVERY_ATTEMPTS),
+        }
+        .note(&run, RecoveryAlert::Failed, 1)
+    }
+
+    /// The `decide` ask of a run that ended offers `retry`, `resume` and
+    /// `cancel` (no `resume` once its resumes are used up), then the job's
+    /// options, then the verify fix for a run whose `integrate`
+    /// verification failed, even once its jobs are used up (moved from
+    /// `runtime_triage`, task 1415).
+    #[test]
+    fn a_decide_ask_offers_the_triage_options_the_jobs_and_the_verify_fix() {
+        let jobs = note_of(Some(json!({
+            "verdict": "escalate", "confidence": "high", "diagnosis": "x",
+            "options": ["retry anyway", "cancel"],
+        })));
+        assert_eq!(
+            ended_options(&jobs, false, false),
+            ["retry", "resume", "cancel", "retry anyway"]
+        );
+        assert_eq!(
+            ended_options(&jobs, true, false),
+            ["retry", "cancel", "retry anyway"]
+        );
+        assert_eq!(
+            ended_options(&jobs, false, true),
+            [
+                "retry",
+                "resume",
+                "cancel",
+                "retry anyway",
+                VERIFY_FIX_OPTION
+            ]
+        );
+        let used_up = note_of(None);
+        assert_eq!(
+            ended_options(&used_up, false, true),
+            ["retry", "resume", "cancel", VERIFY_FIX_OPTION]
+        );
+        // The job's own verify fix is not offered twice.
+        let fix = note_of(Some(json!({
+            "verdict": "escalate", "confidence": "high", "diagnosis": "x",
+            "options": [VERIFY_FIX_OPTION],
+        })));
+        assert_eq!(
+            ended_options(&fix, false, true),
+            ["retry", "resume", "cancel", VERIFY_FIX_OPTION]
+        );
+    }
+
+    /// The `decide` ask's question names the run and its alert, why a
+    /// person is asked with the job's note, the last error, what each
+    /// option does, the verify fix's `dagq edit` only after a failed
+    /// verification, and the hand-back only when the job gave options
+    /// (moved from `runtime_triage`, task 1415).
+    #[test]
+    fn a_decide_ask_tells_what_each_option_does() {
+        let run = test_run(RunStatus::Failed, Some("session exited with code 7"));
+        let jobs = note_of(Some(json!({
+            "verdict": "escalate", "confidence": "high", "diagnosis": "flaky",
+            "options": ["retry anyway"], "reason_category": "discard",
+        })));
+        let question = ended_question(&run, RecoveryAlert::Failed, &jobs, false, false);
+        for part in [
+            "recovery job for run r1 (task 1, failed; alert: failed) did not move it on: the recovery job could not repair it.",
+            "Why a person: discard",
+            "Diagnosis: flaky",
+            "recovery-failed-1.prompt.txt",
+            "Last error: session exited with code 7",
+            "retry: make the task ready for a new run from scratch",
+            " resume: resume the run's own session",
+            " cancel: cancel the task.",
+            "Any other option goes back to the recovery job",
+        ] {
+            assert!(question.contains(part), "{part}: {question}");
+        }
+        assert!(!question.contains("dagq edit"), "{question}");
+
+        let used_up = note_of(None);
+        let question = ended_question(&run, RecoveryAlert::Failed, &used_up, true, true);
+        for part in [
+            "the recovery job ran 3 times for this alert already (at most 3)",
+            "dagq edit 1 --verify",
+            VERIFY_FIX_OPTION,
+        ] {
+            assert!(question.contains(part), "{part}: {question}");
+        }
+        for absent in [" resume: ", "Any other option"] {
+            assert!(!question.contains(absent), "{absent}: {question}");
+        }
+        let quiet = test_run(RunStatus::Interrupted, None);
+        let question = ended_question(&quiet, RecoveryAlert::Interrupted, &used_up, false, false);
+        assert!(question.contains("Last error: (none)"), "{question}");
     }
 }

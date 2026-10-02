@@ -374,6 +374,19 @@ impl Supervisor<'_> {
     }
 }
 
+/// The options of the ask an escalation opens: the ask kind's own
+/// `base`, then the job's options (`note`, none for an ask without a job)
+/// that are not among them, in order.
+pub(super) fn ask_options(base: &[&str], note: Option<&Note>) -> Vec<String> {
+    let mut options: Vec<String> = base.iter().map(|o| (*o).to_owned()).collect();
+    for option in note.map(|note| note.options.as_slice()).unwrap_or_default() {
+        if !options.contains(option) {
+            options.push(option.clone());
+        }
+    }
+    options
+}
+
 /// The name of a recovery job's file in the run directory: its prompt
 /// (`prompt.txt`), stdout (`out`) and stderr (`err`).
 pub(super) fn job_file(alert: RecoveryAlert, attempt: usize, what: &str) -> String {
@@ -1577,14 +1590,7 @@ impl SessionWatch {
                 text = note.text,
             )
         };
-        let mut options: Vec<String> = STALLED_OPTIONS.iter().map(|o| (*o).to_owned()).collect();
-        options.extend(
-            note.options
-                .iter()
-                .filter(|o| !options.contains(o))
-                .cloned()
-                .collect::<Vec<_>>(),
-        );
+        let mut options = ask_options(&STALLED_OPTIONS, Some(&note));
         // A headless session takes no keys: no `intervene` (task 1179).
         if headless(run) {
             options = super::stall::headless_options(options);
@@ -1737,12 +1743,7 @@ impl SessionWatch {
                 text = note.text,
             )
         };
-        let mut options: Vec<String> = STALLED_OPTIONS.iter().map(|o| (*o).to_owned()).collect();
-        for option in &note.options {
-            if !options.contains(option) {
-                options.push(option.clone());
-            }
-        }
+        let mut options = ask_options(&STALLED_OPTIONS, Some(&note));
         // A headless session takes no keys: no `intervene` (task 1179).
         if headless(run) {
             options = super::stall::headless_options(options);
@@ -1920,9 +1921,216 @@ fn stop_processes(sv: &Supervisor<'_>, run: &TaskRun, pids: &[u32]) -> Result<Ve
     Ok(stopped)
 }
 
+/// A run of task 1 in `/runs/r1` with `status` and `last_error`, for the
+/// unit tests of an escalation's ask here and in `triage.rs`.
+#[cfg(test)]
+pub(super) fn test_run(status: RunStatus, last_error: Option<&str>) -> TaskRun {
+    TaskRun::restore(crate::domain::RunRecord {
+        id: RunId::new("r1").unwrap(),
+        task_id: TaskId::new(1),
+        status,
+        requested_provider: Provider::Claude,
+        actual_provider: Provider::Claude,
+        worker_mode: crate::domain::worker::Worker::default_mode(Provider::Claude),
+        base_commit: CommitSha::parse("a".repeat(40), "commit").unwrap(),
+        branch: Some("dagq/r1".to_owned()),
+        worktree_path: Some("/runs/r1/worktree".to_owned()),
+        workspace_id: None,
+        receipt_path: Some("/runs/r1/receipt.json".to_owned()),
+        log_path: None,
+        result_commit: None,
+        repo_path: None,
+        run_dir: Some("/runs/r1".to_owned()),
+        last_error: last_error.map(str::to_owned),
+        workspace_closed_at: None,
+        created_at: String::new(),
+    })
+    .unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn verdict(json: Value) -> RecoveryVerdict {
+        RecoveryVerdict::parse(&json.to_string()).unwrap()
+    }
+
+    /// What a failed job's escalation tells the inbox and records, for
+    /// every alert (ADR-t609-1, moved from `runtime_job_verdicts`, task
+    /// 1415): why it failed with the job's error, `recovery_failed` as the
+    /// reason, no option of a job, the job's material, and nobody asking
+    /// for it but the supervisor; its `recovery_finished` applies nothing,
+    /// names the ask and the error, with `outcome: job_failed`.
+    #[test]
+    fn a_failed_job_escalates_with_recovery_failed_and_applies_nothing() {
+        let run = test_run(RunStatus::Running, None);
+        let error = "the recovery job printed no verdict JSON: unknown field `force`";
+        for alert in [
+            RecoveryAlert::LongBackground,
+            RecoveryAlert::StuckExit,
+            RecoveryAlert::PromptWaiting,
+            RecoveryAlert::Failed,
+        ] {
+            let failed = Escalation::JobFailed(error.to_owned());
+            assert!(failed.verdict().is_none());
+            assert!(failed.requester(&run, alert, 2).is_none());
+            let note = failed.note(&run, alert, 2);
+            assert_eq!(note.why, format!("the recovery job failed ({error})"));
+            assert_eq!(note.category, AskReason::RecoveryFailed);
+            assert!(note.options.is_empty());
+            assert_eq!(
+                note.text,
+                format!(
+                    "Why a person: recovery_failed\nRecovery material: /runs/r1/recovery-{}-2.prompt.txt",
+                    alert.as_str()
+                )
+            );
+            let finished = failed.finished(
+                alert,
+                2,
+                &note,
+                Some(AskId::new(7)),
+                json!({"marker_at_ms": 5}),
+            );
+            assert_eq!(
+                finished,
+                json!({
+                    "alert": alert, "attempt": 2, "verdict": null, "confidence": null,
+                    "diagnosis": null, "applied": [], "escalated": true, "why": note.why,
+                    "reason_category": "recovery_failed", "ask_id": 7,
+                    "outcome": "job_failed", "error": error, "marker_at_ms": 5,
+                })
+            );
+        }
+        // An open ask of the run already has a person looking.
+        let failed = Escalation::JobFailed(error.to_owned());
+        let note = failed.note(&run, RecoveryAlert::StuckExit, 1);
+        let finished = failed.finished(RecoveryAlert::StuckExit, 1, &note, None, json!({}));
+        assert_eq!(finished["escalated"], false);
+        assert_eq!(finished["outcome"], "job_failed");
+    }
+
+    /// The other escalations: the job's `escalate`, a repair of low
+    /// confidence, one the runtime refused and an alert past its jobs
+    /// (moved from `runtime_triage`, task 1415). The job's verdict carries
+    /// its diagnosis, recommendation, question, options (trimmed, once) and
+    /// its `discard` or `scope` reason, and asks at the job's request.
+    #[test]
+    fn an_escalation_tells_why_and_carries_the_jobs_verdict() {
+        let run = test_run(RunStatus::Failed, None);
+        let alert = RecoveryAlert::Failed;
+        let escalate = Escalation::Verdict(verdict(json!({
+            "verdict": "escalate", "confidence": "high",
+            "diagnosis": "the acceptance cannot be met",
+            "question": " Is task 1 still wanted? ",
+        })));
+        let note = escalate.note(&run, alert, 1);
+        assert_eq!(note.why, "the recovery job could not repair it");
+        assert_eq!(note.category, AskReason::RecoveryFailed);
+        assert_eq!(
+            note.text,
+            "Why a person: recovery_failed\nDiagnosis: the acceptance cannot be met\nQuestion: Is task 1 still wanted?\nRecovery material: /runs/r1/recovery-failed-1.prompt.txt"
+        );
+        assert_eq!(
+            escalate.requester(&run, alert, 1),
+            Some(ActorContext::recovery_job(run.id(), "failed", 1))
+        );
+        let finished = escalate.finished(alert, 1, &note, Some(AskId::new(3)), json!({}));
+        assert_eq!(finished["verdict"], "escalate");
+        assert_eq!(finished["applied"], json!([]));
+        assert!(finished.get("outcome").is_none(), "{finished}");
+
+        let low = Escalation::Verdict(verdict(json!({
+            "verdict": "repair", "confidence": "low", "diagnosis": "maybe the machine slept",
+            "actions": [{"action": "wait", "recheck_after_secs": 0}],
+        })));
+        assert_eq!(
+            low.note(&run, alert, 1).why,
+            "the recovery job was not sure of its repair (confidence low), so it was not applied"
+        );
+
+        let refused = Escalation::Refused(
+            verdict(json!({
+                "verdict": "repair", "confidence": "high", "diagnosis": "flaky",
+                "actions": [{"action": "retry"}],
+                "options": ["retry anyway", " ", "retry anyway "],
+                "reason_category": "discard",
+            })),
+            "its branch holds commits of its own".to_owned(),
+        );
+        let note = refused.note(&run, alert, 1);
+        assert_eq!(
+            note.why,
+            "the runtime did not apply the recovery job's repair: its branch holds commits of its own"
+        );
+        assert_eq!(note.category, AskReason::Discard);
+        assert_eq!(note.options, ["retry anyway"]);
+        for part in [
+            "Why a person: discard",
+            "Diagnosis: flaky",
+            "Recommended: [{\"action\":\"retry\"}]",
+        ] {
+            assert!(note.text.contains(part), "{part}: {}", note.text);
+        }
+        // Only `discard` and `scope` are the job's to give.
+        let failed_reason = Escalation::Verdict(verdict(json!({
+            "verdict": "escalate", "confidence": "high", "diagnosis": "x",
+            "reason_category": "authentication",
+        })));
+        assert_eq!(
+            failed_reason.note(&run, alert, 1).category,
+            AskReason::RecoveryFailed
+        );
+
+        let used_up = Escalation::UsedUp(MAX_RECOVERY_ATTEMPTS);
+        let note = used_up.note(&run, alert, 3);
+        assert_eq!(
+            note.why,
+            "the recovery job ran 3 times for this alert already (at most 3)"
+        );
+        assert_eq!(note.text, "Why a person: recovery_failed");
+        assert!(used_up.requester(&run, alert, 3).is_none());
+    }
+
+    /// The options of each live alert's ask once its job escalates (moved
+    /// from `runtime_job_verdicts`, task 1415): `stalled` (for
+    /// `long_background` and `idle_process`) offers `wait` and `intervene`
+    /// (the queue adds `propose`), `stuck_exit` `exit` and `wait`, and
+    /// `answer_prompt` none of its own; a failed job adds none, a verdict
+    /// its options not already there.
+    #[test]
+    fn each_live_alerts_ask_offers_its_own_options_then_the_jobs() {
+        let run = test_run(RunStatus::Running, None);
+        let failed = Escalation::JobFailed("no verdict".to_owned()).note(
+            &run,
+            RecoveryAlert::LongBackground,
+            1,
+        );
+        assert_eq!(
+            ask_options(&STALLED_OPTIONS, Some(&failed)),
+            ["wait", "intervene"]
+        );
+        assert_eq!(
+            ask_options(&super::super::exit::STUCK_EXIT_OPTIONS, Some(&failed)),
+            ["exit", "wait"]
+        );
+        assert!(ask_options(&[], Some(&failed)).is_empty());
+        assert_eq!(
+            ask_options(&super::super::exit::STUCK_EXIT_OPTIONS, None),
+            ["exit", "wait"]
+        );
+        let jobs = Escalation::Verdict(verdict(json!({
+            "verdict": "escalate", "confidence": "high", "diagnosis": "x",
+            "options": ["wait", "kill it", "kill it"],
+        })))
+        .note(&run, RecoveryAlert::StuckExit, 1);
+        assert_eq!(
+            ask_options(&STALLED_OPTIONS, Some(&jobs)),
+            ["wait", "intervene", "kill it"]
+        );
+        assert_eq!(ask_options(&[], Some(&jobs)), ["wait", "kill it"]);
+    }
 
     /// The processes are sampled every tenth of the threshold in whole
     /// seconds, between a second and a minute, and no less often than a

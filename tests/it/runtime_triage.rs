@@ -176,11 +176,47 @@ fn a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited() 
             triages.len(),
             "round {round}"
         );
+        // The job's own option goes back to the job (ADR-0047 decision
+        // 40), whose next round reads it; past its jobs, none runs.
+        let detail = queue.show(TaskId::new(1)).unwrap();
+        let decided = run_payloads(&detail, &first, "triage_decided");
+        assert_eq!(decided.len(), round);
+        assert_eq!(decided[round - 1]["answer"], "try again");
+        assert_eq!(decided[round - 1]["action"], "recover");
+        assert_eq!(decided[round - 1]["status"], "failed");
+        assert_eq!(decided[round - 1]["ask_id"], json!(ask.id));
+        assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
+        if round < 3 {
+            let requested = run_payloads(&detail, &first, "recovery_requested");
+            assert_eq!(requested.len(), round + 1, "{requested:?}");
+            assert_eq!(requested[round]["attempt"], round + 1);
+            assert_eq!(requested[round]["alert"], "failed");
+            let finished = run_payloads(&detail, &first, "triage_finished");
+            assert_eq!(finished.last().unwrap()["recovery_attempt"], round + 1);
+            assert_eq!(finished.last().unwrap()["action"], "ask");
+            assert_eq!(requested[round]["person_answer"]["answer"], "try again");
+            assert_eq!(requested[round]["person_answer"]["ask_id"], json!(ask.id));
+            let (prompt, _) = &reviewer.triage_prompts()[0];
+            assert!(prompt.contains("try again"), "{prompt}");
+        }
     }
     // The used-up ask still offers the fix; answered after the edit, the
     // job runs once more.
     let ask = decide(&mut queue);
-    assert!(ask.question.contains("used"), "{}", ask.question);
+    assert!(
+        ask.question
+            .contains("the recovery job ran 3 times for this alert already (at most 3)"),
+        "{}",
+        ask.question
+    );
+    let used_up = run_payloads(
+        &queue.show(TaskId::new(1)).unwrap(),
+        &first,
+        "triage_finished",
+    );
+    let used_up = used_up.last().unwrap();
+    assert_eq!(used_up["action"], "ask");
+    assert!(used_up["verdict"].is_null());
     assert!(
         ask.options.contains(&option.to_owned()),
         "{:?}",
@@ -228,7 +264,9 @@ fn a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited() 
 /// A `retry` of a run whose branch holds commits would throw them away, so
 /// the runtime does not apply it (ADR-0047 decision 40): the whole verdict
 /// becomes the `decide` ask, with the job's diagnosis, its actions as the
-/// recommendation, its options added and its reason category.
+/// recommendation, its options added and its reason category. How the
+/// ask's options and question are composed is
+/// `supervise::triage::tests` and `supervise::recovery::tests` (task 1415).
 #[test]
 fn a_retry_of_a_run_with_commits_is_refused_and_asked_with_the_jobs_options() {
     let (_dir, repo, db) = fixture();
@@ -299,42 +337,9 @@ fn a_retry_of_a_run_with_commits_is_refused_and_asked_with_the_jobs_options() {
         ask.question
     );
 
-    // The person picks the job's own option: the supervisor hands it back
-    // to the job, whose next round reads it (ADR-0047 decision 40).
-    queue.answer(ask.id, "retry anyway").unwrap();
-    assert_eq!(
-        ask_attention(&runtime::status(&db).unwrap(), ask.id)[0]["next"],
-        format!("applying the answer of ask {} (runtime)", ask.id)
-    );
-    let reviewer =
-        TestReviewer::new(&[verdict("pass", &[], "unused")]).with_triages(&[recovery(json!({
-            "verdict": "escalate",
-            "confidence": "high",
-            "diagnosis": "the person wants a retry, which throws the commits away",
-            "reason_category": "discard",
-        }))]);
-    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    assert_eq!(detail.runs.len(), 1);
-    let decided = payloads(&detail, "triage_decided");
-    assert_eq!(decided.len(), 1);
-    assert_eq!(decided[0]["answer"], "retry anyway");
-    assert_eq!(decided[0]["action"], "recover");
-    assert_eq!(decided[0]["status"], "failed");
-    assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
-    let requested = payloads(&detail, "recovery_requested");
-    assert_eq!(requested.len(), 2, "{requested:?}");
-    assert_eq!(requested[1]["alert"], "failed");
-    assert_eq!(requested[1]["attempt"], 2);
-    assert_eq!(requested[1]["person_answer"]["answer"], "retry anyway");
-    assert_eq!(requested[1]["person_answer"]["ask_id"], json!(ask.id));
-    let (prompt, _) = &reviewer.triage_prompts()[0];
-    assert!(prompt.contains("retry anyway"), "{prompt}");
-    let finished = payloads(&detail, "triage_finished");
-    assert_eq!(finished.len(), 2);
-    assert_eq!(finished[1]["action"], "ask");
-    assert_eq!(finished[1]["recovery_attempt"], 2);
+    // The answer of a job's own option goes back to the job: its wiring is
+    // in `a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited`
+    // (task 1415).
 }
 
 /// `resume`: the run becomes `needs_session` with the job's instruction,
@@ -594,11 +599,10 @@ fn retry_inherit_carries_the_branch_over_once_and_a_failed_job_is_recovered_by_h
 }
 
 /// `wait` of a run that ended changes nothing until its recheck; then the
-/// job runs again for the same alert. Past [`MAX_RECOVERY_ATTEMPTS`] jobs
-/// the alert is escalated without another job, and a low-confidence repair
-/// in between is not applied.
+/// job runs again for the same alert, and a low-confidence repair is not
+/// applied.
 #[test]
-fn a_wait_runs_the_job_again_and_an_alert_past_its_jobs_is_asked() {
+fn a_wait_runs_the_job_again_and_a_low_confidence_repair_is_asked() {
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, "exit 7");
     let wait = || repair(json!({"action": "wait", "recheck_after_secs": 0}), "slow");
@@ -629,41 +633,12 @@ fn a_wait_runs_the_job_again_and_an_alert_past_its_jobs_is_asked() {
         .unwrap();
     assert!(ask.question.contains("confidence low"), "{}", ask.question);
 
-    // A person hands it back twice more (by hand): the third job waits,
-    // and the fourth round asks without a job.
-    queue.answer(ask.id, "look again").unwrap();
-    queue.close_ask(ask.id).unwrap();
-    let rewind = || {
-        Connection::open(&db)
-            .unwrap()
-            .execute(
-                "UPDATE run_events SET kind='triage_finished_old' WHERE id=(SELECT MAX(id) FROM run_events WHERE kind='triage_finished')",
-                [],
-            )
-            .unwrap();
-    };
-    rewind();
-    let reviewer = TestReviewer::new(&[verdict("pass", &[], "unused")]).with_triages(&[wait()]);
-    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    let requested = payloads(&detail, "recovery_requested");
-    assert_eq!(requested.len(), 3, "{:?}", event_kinds(&detail));
-    assert!(requested.iter().all(|p| p["alert"] == "failed"));
-    let finished = payloads(&detail, "triage_finished");
-    let used_up = finished.last().unwrap();
-    assert_eq!(used_up["action"], "ask");
-    assert!(used_up["verdict"].is_null());
-    let ask = queue
-        .read_ask(AskId::new(used_up["ask_id"].as_i64().unwrap()))
-        .unwrap();
-    assert!(
-        ask.question
-            .contains("the recovery job ran 3 times for this alert already (at most 3)"),
-        "{}",
-        ask.question
-    );
-    assert_eq!(reviewer.triage_prompts().len(), 1);
+    // An alert past its jobs is asked without a job in
+    // `a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited`
+    // (there after a person's answer; a round due after a `wait`, as here,
+    // goes through the same `triage_runs` count); when a round is used up
+    // is `supervise::triage::tests::a_round_past_the_alerts_jobs_is_used_up_unless_granted`
+    // (task 1415).
 }
 
 /// The answers `resume` and `retry` of a triage's ask, applied by the

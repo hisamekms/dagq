@@ -4,8 +4,8 @@ type: design
 title: "生きているsessionの復旧job"
 status: current
 created: 2026-09-26
-updated: 2026-10-02
-last_verified: 2026-10-02
+updated: 2026-10-03
+last_verified: 2026-10-03
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -55,7 +55,7 @@ related:
 
 `integrate`の検証が落ちたことのある終了run（`integration_deferred`の`code: verification_failed`）の`decide`のaskには、runtimeが`edit the task's --verify, then retry_inherit`を足す（[Triage](triage.md)の6）。verifyそのものが壊れていたら、userまたはinboxが`edit --verify` / `--no-verify`で先に直してから、このoptionで答える。jobに戻った次のroundのpromptにはtaskの現在のverifyと`task_edited`（旧値・新値・actor）が載り、修正済みなら`retry_inherit`を選べる。verifyを直した後のこの回答は、alertの3回を使い切った後でももう1回のroundを持つ（Triageの3）。job自身はeditしない（ADR-t883-1）。
 
-`escalate`、`confidence: low`の`repair`、前提の崩れた`repair`、試行の使い切りは、inbox宛てのそのalertのaskにする（決定40のkind）。optionsはそのkindのものにjobの`options`を足したもの（終了runの`decide`では、上のverifyのoptionも）、`reason_category`はjobの`discard` / `scope`、それ以外は`recovery_failed`。questionは今までのaskの文面に、escalateの理由、`Why a person: <reason_category>`、jobの`diagnosis`、推奨の操作（jobの`actions`）、jobの`question`、`recovery-<alert>-<attempt>.prompt.txt`のpathを足したもの。`recovery_finished`（`escalated: true`、`why`、`reason_category`、`ask_id`）を記録する。
+`escalate`、`confidence: low`の`repair`、前提の崩れた`repair`、試行の使い切りは、inbox宛てのそのalertのaskにする（決定40のkind）。optionsはそのkindのものにjobの`options`を足したもの（`recovery::ask_options`。kindのものは`stalled`が`wait` / `intervene`（queueが`propose`を足す）、`stuck_exit`が`exit` / `wait`、`answer_prompt`はなし。終了runの`decide`では、上のverifyのoptionも）、`reason_category`はjobの`discard` / `scope`、それ以外は`recovery_failed`。questionは今までのaskの文面に、escalateの理由、`Why a person: <reason_category>`、jobの`diagnosis`、推奨の操作（jobの`actions`）、jobの`question`、`recovery-<alert>-<attempt>.prompt.txt`のpathを足したもの。`recovery_finished`（`escalated: true`、`why`、`reason_category`、`ask_id`）を記録する。
 
 - `long_background`: receiptの後（task 918）は、backgroundの処理の待ちがreceiptから`resume_timeout`で自分で終わってvalidationに進むので、`idle_process`と同じくaskを開かずに`recovery_finished`（`escalated: false`、`outcome: left_to_phase`、`phase: after_receipt`、`marker_at_ms`）だけを記録する（`recovery::leave_to_phase`）。receiptの前は`kind: stalled`のask。jobの間にreceiptの無いidleの検知の`stalled`のaskが開いていれば、そのaskに混ぜずに`recovery_finished`（`escalated: false`、`outcome: already_asked`）を記録するだけにする。askは[receiptの無いidleの検知](idle-without-receipt.md#receiptの無いidleの検知)の`StallWatch`が自分のaskと同じく扱う（sessionが動けば閉じ、`wait` / `intervene`を適用する）。その`stall_resolved`の`threshold`は`background_alert_secs`。
 - `stalled`: `kind: stalled`のask。`idle_without_receipt`は[receiptの無いidleの検知](idle-without-receipt.md#receiptの無いidleの検知)のaskの文面に上の理由と見立てを足したもの。`send_unconfirmed`のquestionは、送った文の種類と何が起きたか（入力欄に残った / 兆候が無い / ダイアログ）、`reason: send_unconfirmed`、上の理由と見立て、`wait` / `intervene`の意味、送信のときに読んだ画面の末尾。どちらも`StallWatch`に渡し（`stall_resolved`の`threshold`は`idle_without_receipt_secs` / `send_confirm_secs`）、sessionが動けば閉じる。reviseとresumeのsessionでは、その段の終わりにも閉じる。`recovery_finished`には`reason`（`send_unconfirmed`なら`send_event`も）を載せる。closeされていない`stalled`のaskが既にあれば、askは開かず`outcome: already_asked`を記録する。
@@ -65,7 +65,7 @@ related:
 
 ## jobの失敗
 
-[ADR-t609-1](../../adr/2026-09-27-t609-1-failed-live-recovery-job-opens-the-alert-ask.md)（ADR-0047の決定40をamends、task 562）。生きているrunのどのalertでも、jobの失敗（起動できない、非0終了、timeout、verdictが無いか形に合わない）は、escalateと同じそのalertのask（上の「escalate」のkindとoptions）にする。`recover by hand`のattentionは作らない。`RecoveryWatch::follow_for`と`watch_background`はjobの失敗を`Escalation::JobFailed`として返し、各watchがescalateと同じ経路でaskを開く。
+[ADR-t609-1](../../adr/2026-09-27-t609-1-failed-live-recovery-job-opens-the-alert-ask.md)（ADR-0047の決定40をamends、task 562）。生きているrunのどのalertでも、jobの失敗（起動できない、非0終了、timeout、verdictが無いか形に合わない）は、escalateと同じそのalertのask（上の「escalate」のkindとoptions）にする。`recover by hand`のattentionは作らない。`RecoveryWatch::follow_for`と`watch_background`はjobの失敗を`Escalation::JobFailed`として返し、各watchがescalateと同じ経路でaskを開く。askの文面の材料（`Escalation::note`）と`recovery_finished`（`Escalation::finished`。`outcome: job_failed`、`error`、`applied: []`）は副作用のない関数で、壊れた出力の形ごとのerrorは`RecoveryVerdict::parse`が決める（unit testで確かめ、`tests/it/runtime_job_verdicts.rs`はalertごとに代表の1つの壊れた出力で配線を確かめる。task 1415）。
 
 - askの`reason_category`は`recovery_failed`で、questionのescalateの理由は`the recovery job failed (<error>)`、`Why a person: recovery_failed`と`recovery-<alert>-<attempt>.prompt.txt`のpathが続く（jobのverdictが無いので`Diagnosis`と`Recommended`は無い）。
 - `recovery_finished`は`outcome: job_failed`、`error`、`escalated: true`、`ask_id`、`reason_category: recovery_failed`。`recovery_failed`のeventは記録しない。

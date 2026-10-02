@@ -1173,7 +1173,7 @@ pub(super) fn ask_answer_prompt(
             task_id: Some(run.task_id()),
             run_id: Some(run.id().clone()),
             question,
-            options: note.map(|note| note.options.clone()).unwrap_or_default(),
+            options: super::recovery::ask_options(&[], note),
             asked_by: SessionRole::Supervisor.as_str().into(),
             reason_category: note.map_or(AskReason::RecoveryFailed, |note| note.category),
             topics: Vec::new(),

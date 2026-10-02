@@ -3352,6 +3352,12 @@ mod attention_tests {
             let error = ReviewVerdict::parse(bad).unwrap_err();
             assert!(error.contains("no verdict JSON"), "{bad}: {error}");
         }
+        // The error names the field the runtime does not know (the
+        // `review_failed` a person reads, task 1415).
+        let error =
+            ReviewVerdict::parse(r#"{"verdict":"pass","reasons":[],"summary":"ok","land":true}"#)
+                .unwrap_err();
+        assert!(error.contains("unknown field `land`"), "{error}");
     }
 
     /// The reasons carry reason codes (ADR-t947-1): the texts stay in
