@@ -92,7 +92,7 @@ impl SqliteQueue {
         // in one write transaction taken up front so it waits for other
         // writers rather than failing to upgrade a read. The transcripts of
         // the spans it closes are read before (task 543).
-        let _read = read_before(&self.conn, Closing::Run(id, &[kind.as_str()]))?;
+        let _read = read_before(&self.conn, Closing::Event(id, kind.as_str(), &payload))?;
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         match run_event(&self.conn, id, kind, payload) {
             Ok(()) => Ok(self.conn.execute_batch("COMMIT")?),

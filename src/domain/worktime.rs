@@ -808,6 +808,28 @@ pub struct Breakdown {
     pub full_tests: Option<usize>,
     /// Commands that ran llvm-cov.
     pub llvm_cov_runs: Option<usize>,
+    /// The end of the span it was made to (unix milliseconds).
+    pub to: i64,
+    /// The span cut where any interval starts or ends, each piece with
+    /// the category it counts to, in order ([`Breakdown::retarget`]).
+    pub windows: Vec<(i64, i64, &'static str)>,
+    /// What each command runs that is counted, by the cargo rules only:
+    /// one per command, a tool's empty ([`Breakdown::verify`]).
+    pub runs: Option<Vec<Runs>>,
+    /// The classes of `integrate`'s checks the task's verification runs,
+    /// those `verification_repeats` counts.
+    pub wanted: Vec<&'static str>,
+}
+
+/// What one command runs that a [`Breakdown`] counts, by the cargo rules.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Runs {
+    /// What it runs of `integrate`'s checks.
+    pub classes: Vec<&'static str>,
+    /// It runs the whole `cargo test`.
+    pub full_test: bool,
+    /// It runs llvm-cov.
+    pub llvm_cov: bool,
 }
 
 /// The breakdown of the span `from`..`to` (unix milliseconds) of
@@ -822,6 +844,8 @@ pub fn breakdown(
     verification: &[String],
     cargo: bool,
 ) -> Breakdown {
+    #[cfg(test)]
+    super::transcript::count_analysis();
     let to = to.max(from);
     let commands = commands(records, from, to, cargo);
     let order = |category: &str| {
@@ -851,43 +875,133 @@ pub fn breakdown(
         .collect();
     bounds.sort_unstable();
     bounds.dedup();
-    let mut millis: BTreeMap<&'static str, i64> = BTreeMap::new();
-    for pair in bounds.windows(2) {
-        let (start, end) = (pair[0], pair[1]);
-        let category = intervals
-            .iter()
-            .find(|&&(s, e, ..)| s <= start && end <= e)
-            .map_or(IDLE, |&(.., category)| category);
-        *millis.entry(category).or_default() += end - start;
-    }
-    let wanted: Vec<&str> = verification
-        .iter()
-        .flat_map(|command| verification_classes(command))
+    let windows: Vec<(i64, i64, &'static str)> = bounds
+        .windows(2)
+        .map(|pair| {
+            let (start, end) = (pair[0], pair[1]);
+            let category = intervals
+                .iter()
+                .find(|&&(s, e, ..)| s <= start && end <= e)
+                .map_or(IDLE, |&(.., category)| category);
+            (start, end, category)
+        })
         .collect();
-    let shell = || commands.iter().filter_map(|c| c.command.as_deref());
-    Breakdown {
+    let runs: Option<Vec<Runs>> = cargo.then(|| {
+        commands
+            .iter()
+            .map(|c| match c.command.as_deref() {
+                Some(command) => Runs {
+                    classes: verification_classes(command),
+                    full_test: full_test(command),
+                    llvm_cov: parts(command).iter().any(|p| rank(p, true) == LLVM_COV),
+                },
+                None => Runs::default(),
+            })
+            .collect()
+    });
+    let mut breakdown = Breakdown {
         total_millis: to - from,
-        millis,
-        verification_repeats: cargo.then(|| {
-            shell()
-                .filter(|command| {
-                    verification_classes(command)
-                        .iter()
-                        .any(|class| wanted.contains(class))
-                })
-                .count()
-        }),
-        full_tests: cargo.then(|| shell().filter(|command| full_test(command)).count()),
-        llvm_cov_runs: cargo.then(|| {
-            shell()
-                .filter(|command| parts(command).iter().any(|p| rank(p, true) == LLVM_COV))
-                .count()
-        }),
+        millis: BTreeMap::new(),
+        verification_repeats: None,
+        full_tests: None,
+        llvm_cov_runs: None,
         commands,
-    }
+        to,
+        windows,
+        runs,
+        wanted: Vec::new(),
+    };
+    breakdown.count();
+    breakdown.verify(verification);
+    breakdown
 }
 
 impl Breakdown {
+    /// Count again what its commands repeat of `integrate`'s checks, for
+    /// the task's `verification` (task 1334: the verification is read
+    /// under the write lock, and the commands' classes were found before
+    /// it). Nothing without the cargo rules.
+    pub fn verify(&mut self, verification: &[String]) {
+        self.wanted = verification
+            .iter()
+            .flat_map(|command| verification_classes(command))
+            .collect();
+        self.count_repeats();
+    }
+
+    fn count_repeats(&mut self) {
+        self.verification_repeats = self.runs.as_ref().map(|runs| {
+            runs.iter()
+                .filter(|runs| runs.classes.iter().any(|class| self.wanted.contains(class)))
+                .count()
+        });
+    }
+
+    /// Count its seconds by category from its windows, and what its
+    /// commands run.
+    fn count(&mut self) {
+        self.millis = BTreeMap::new();
+        for &(start, end, category) in &self.windows {
+            *self.millis.entry(category).or_default() += end - start;
+        }
+        self.full_tests = self
+            .runs
+            .as_ref()
+            .map(|runs| runs.iter().filter(|runs| runs.full_test).count());
+        self.llvm_cov_runs = self
+            .runs
+            .as_ref()
+            .map(|runs| runs.iter().filter(|runs| runs.llvm_cov).count());
+        self.count_repeats();
+    }
+
+    /// Make it the breakdown of the same span to `to` instead, as
+    /// [`breakdown`] of the same records would (task 1334), with nothing
+    /// of the records read again. To an earlier end it is cut there,
+    /// whatever the records: the commands that start before it are the
+    /// same, each ends at the earlier of its end and `to`, and each window
+    /// before it counts to the same category. To a later end it is longer
+    /// only when every record (the last at `last`) is before its end: the
+    /// commands whose end was not seen end at `to`, and only its last
+    /// window, then not ended by any record, is longer. Returns whether it
+    /// did; otherwise it is left as it was.
+    pub fn retarget(&mut self, last: Option<i64>, to: i64) -> bool {
+        let from = self.to - self.total_millis;
+        let to = to.max(from);
+        if to == self.to {
+            return true;
+        }
+        if to < self.to {
+            if let Some(runs) = self.runs.as_mut() {
+                let mut kept = self.commands.iter().map(|command| command.start < to);
+                runs.retain(|_| kept.next().unwrap_or(false));
+            }
+            self.commands.retain(|command| command.start < to);
+            for command in &mut self.commands {
+                command.end = command.end.min(to);
+            }
+            self.windows.retain(|&(start, ..)| start < to);
+            if let Some(window) = self.windows.last_mut() {
+                window.1 = window.1.min(to);
+            }
+        } else {
+            if last.is_some_and(|last| last >= self.to) {
+                return false;
+            }
+            for command in self.commands.iter_mut().filter(|c| !c.finished) {
+                command.end = to;
+            }
+            match self.windows.last_mut() {
+                Some(window) => window.1 = to,
+                None => self.windows.push((from, to, IDLE)),
+            }
+        }
+        self.total_millis = to - from;
+        self.to = to;
+        self.count();
+        true
+    }
+
     /// The `work` of the span's `session_closed`: values only, no command
     /// and no path (the event rule of ADR A). `heavy` lists the heavy
     /// commands for `timeline`.
@@ -1501,5 +1615,101 @@ mod tests {
         assert_eq!(cargo.verification_repeats, Some(1));
         assert_eq!(cargo.full_tests, Some(2));
         assert_eq!(cargo.llvm_cov_runs, Some(1));
+    }
+
+    /// A breakdown made to one end and moved to another is the breakdown
+    /// made to that end (task 1334): cut to any earlier end, records after
+    /// it or not (a command whose result comes later is cut there), and
+    /// longer to a later end when every record is before the earlier one.
+    /// Longer past a record at or after its end it refuses.
+    #[test]
+    fn a_breakdown_retargeted_is_the_breakdown_to_that_end() {
+        let verification = vec!["cargo llvm-cov --locked --fail-under-lines 80".to_owned()];
+        let finished = [
+            input(0, "go"),
+            bash(1, "a", "cargo test --locked", false),
+            result(9, "a", "test result: ok", false),
+            call(10, "s", "Agent", json!({"prompt": "review"})),
+            result(20, "s", "done", false),
+            line(
+                "assistant",
+                25,
+                json!({"message": {"content": [{"type": "text"}]}}),
+            ),
+        ];
+        let mut running = finished.to_vec();
+        running.extend([
+            bash(30, "b", "cargo build", true),
+            bash(31, "c", "cargo llvm-cov --locked", false),
+        ]);
+        let mut later = running.clone();
+        later.extend([
+            result(60, "c", "ok", false),
+            input(70, "more"),
+            bash(72, "d", "cargo test --locked", false),
+            result(80, "d", "ok", false),
+        ]);
+        for lines in [&finished[..], &running[..], &later[..]] {
+            let records = records(lines);
+            let last = records.iter().map(|r| r.at).max();
+            let fresh = |to: i64| breakdown(&records, ms(0), to, &verification, true);
+            for (from, to) in [
+                (ms(90), ms(120)),
+                (ms(120), ms(90)),
+                (ms(90), ms(75)),
+                (ms(90), ms(31)),
+                (ms(90), ms(5)),
+                (ms(90), ms(0)),
+                (ms(90), -ms(10)),
+                (ms(40), ms(41)),
+            ] {
+                let mut moved = fresh(from);
+                let before = moved.clone();
+                if to > from && last.is_some_and(|last| last >= from) {
+                    assert!(!moved.retarget(last, to), "{from} to {to}");
+                    assert_eq!(moved, before);
+                    continue;
+                }
+                assert!(moved.retarget(last, to), "{from} to {to}");
+                assert_eq!(moved, fresh(to), "{from} to {to}");
+                assert_eq!(moved.payload(), fresh(to).payload());
+            }
+            // A span starting at its end, made longer.
+            let mut empty = breakdown(&records, ms(90), ms(90), &verification, true);
+            assert!(empty.retarget(last, ms(100)));
+            assert_eq!(
+                empty,
+                breakdown(&records, ms(90), ms(100), &verification, true)
+            );
+            let mut same = fresh(ms(90));
+            assert!(same.retarget(last, ms(90)));
+            assert_eq!(same, fresh(ms(90)));
+        }
+    }
+
+    /// The repeats of `integrate`'s checks counted again for another
+    /// verification are those [`breakdown`] counts with it (task 1334);
+    /// without the cargo rules there are none.
+    #[test]
+    fn a_breakdown_counts_its_repeats_again_for_another_verification() {
+        let records = records(&[
+            input(0, "go"),
+            bash(1, "a", "cargo test --locked", false),
+            result(9, "a", "ok", false),
+            bash(10, "b", "cargo llvm-cov nextest --locked", false),
+            result(20, "b", "ok", false),
+        ]);
+        let llvm_cov = vec!["cargo llvm-cov nextest --locked --workspace".to_owned()];
+        let test = vec!["cargo test --locked".to_owned()];
+        for cargo in [true, false] {
+            let mut work = breakdown(&records, ms(0), ms(30), &llvm_cov, cargo);
+            for verification in [&test, &llvm_cov, &Vec::new()] {
+                work.verify(verification);
+                assert_eq!(
+                    work,
+                    breakdown(&records, ms(0), ms(30), verification, cargo)
+                );
+            }
+        }
     }
 }

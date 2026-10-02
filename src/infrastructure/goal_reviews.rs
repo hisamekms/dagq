@@ -277,7 +277,7 @@ impl GoalReviewStore for SqliteQueue {
     fn interrupt_goal_reviews_for_handoff(&mut self, token: &LeaseToken) -> Result<()> {
         let now = self.generators.clock.now();
         // Read transcripts before taking the write lock, as in begin/finish.
-        let _read = sessions::read_before(&self.conn, sessions::Closing::GoalReviews(None))?;
+        let _read = sessions::read_before(&self.conn, sessions::Closing::GoalReviews(None, false))?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -316,7 +316,7 @@ impl GoalReviewStore for SqliteQueue {
     ) -> Result<Option<GoalReviewJob>> {
         let now = self.generators.clock.now();
         // The spans it closes read their transcripts first (task 543).
-        let _read = sessions::read_before(&self.conn, sessions::Closing::GoalReviews(None))?;
+        let _read = sessions::read_before(&self.conn, sessions::Closing::GoalReviews(None, true))?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -423,8 +423,10 @@ impl GoalReviewStore for SqliteQueue {
         let now = self.generators.clock.now();
         let stamp = self.generators.clock.timestamp();
         // The spans it closes read their transcripts first (task 543).
-        let _read =
-            sessions::read_before(&self.conn, sessions::Closing::GoalReviews(Some(job.id)))?;
+        let _read = sessions::read_before(
+            &self.conn,
+            sessions::Closing::GoalReviews(Some(job.id), false),
+        )?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -538,8 +540,10 @@ impl GoalReviewStore for SqliteQueue {
     ) -> Result<()> {
         let now = self.generators.clock.now();
         // The span it closes reads its transcript first (task 543).
-        let _read =
-            sessions::read_before(&self.conn, sessions::Closing::GoalReviews(Some(job.id)))?;
+        let _read = sessions::read_before(
+            &self.conn,
+            sessions::Closing::GoalReviews(Some(job.id), false),
+        )?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;

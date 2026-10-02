@@ -451,7 +451,7 @@ impl PlanReviewStore for SqliteQueue {
     fn interrupt_plan_reviews_for_handoff(&mut self, token: &LeaseToken) -> Result<()> {
         let now = self.generators.clock.now();
         // Read transcripts before taking the write lock, as in begin/finish.
-        let _read = sessions::read_before(&self.conn, sessions::Closing::PlanReviews(None))?;
+        let _read = sessions::read_before(&self.conn, sessions::Closing::PlanReviews(None, false))?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -499,7 +499,7 @@ impl PlanReviewStore for SqliteQueue {
             }
         };
         // The spans it closes read their transcripts first (task 543).
-        let _read = sessions::read_before(&self.conn, sessions::Closing::PlanReviews(None))?;
+        let _read = sessions::read_before(&self.conn, sessions::Closing::PlanReviews(None, true))?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -585,8 +585,10 @@ impl PlanReviewStore for SqliteQueue {
         let now = self.generators.clock.now();
         let stamp = self.generators.clock.timestamp();
         // The spans it closes read their transcripts first (task 543).
-        let _read =
-            sessions::read_before(&self.conn, sessions::Closing::PlanReviews(Some(job.id)))?;
+        let _read = sessions::read_before(
+            &self.conn,
+            sessions::Closing::PlanReviews(Some(job.id), false),
+        )?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -801,8 +803,10 @@ impl PlanReviewStore for SqliteQueue {
         let duration_secs = failure.duration_secs;
         let now = self.generators.clock.now();
         // The spans it closes read their transcripts first (task 543).
-        let _read =
-            sessions::read_before(&self.conn, sessions::Closing::PlanReviews(Some(job.id)))?;
+        let _read = sessions::read_before(
+            &self.conn,
+            sessions::Closing::PlanReviews(Some(job.id), false),
+        )?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;

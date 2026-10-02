@@ -6,7 +6,12 @@
 //! decision 8), and the supervisor records the finished turns of the spans
 //! still open ([`record_open_turns`]). No transcript is read under a write
 //! lock (task 543): a write that may close spans reads theirs first
-//! ([`read_before`]), and the close takes what was read.
+//! ([`read_before`]), and the close takes what was read. The close's
+//! analysis of it (its turns, tokens, models and work breakdown) is made
+//! there too, to the end the close is expected at, and the work's
+//! `worktime.jsonl` is written after the commit (task 1334): under the lock
+//! the close only checks that analysis against what it reads of the queue,
+//! and inserts.
 
 use crate::domain::event_kind::{self, EventKind};
 use std::cell::RefCell;
@@ -30,13 +35,13 @@ use crate::{
             SessionHook, SpanChange, SpanContext, changes, hook_changes, queue_span_kind, scope,
         },
         stats::rfc3339_millis,
-        tokens,
+        tokens::{self, ModelUse, SpanTokens, TokenUsage},
         transcript::{
-            TRANSCRIPT_NOT_CLAUDE, TRANSCRIPT_NOT_READ_BEFORE, Transcript, Turn, Unreadable,
-            millis_text, span_turns, turns,
+            TRANSCRIPT_NOT_CLAUDE, TRANSCRIPT_NOT_READ_BEFORE, Transcript, TranscriptRecord, Turn,
+            Turns, Unreadable, millis_text, span_turns, turns,
         },
         turn::HeadlessSpan,
-        worktime,
+        worktime::{self, Breakdown, Command},
     },
 };
 
@@ -46,13 +51,289 @@ pub const WORKTIME_FILE: &str = "worktime.jsonl";
 thread_local! {
     /// The transcripts of the spans a write transaction about to begin on
     /// this thread may close, read before it began ([`read_before`]).
-    static READ_BEFORE: RefCell<Vec<(OpenSpan, Result<Transcript, Unreadable>)>> =
+    static READ_BEFORE: RefCell<Vec<(OpenSpan, Result<ReadTranscript, Unreadable>)>> =
         const { RefCell::new(Vec::new()) };
     /// Whether the queue's repository is dagq's source, judged before the
     /// same transaction began for the run sessions' spans it may close
     /// ([`dagq_source`]): the judgement runs Git, never under the write
     /// lock.
     static SOURCE_BEFORE: RefCell<Vec<(EventId, bool)>> = const { RefCell::new(Vec::new()) };
+    /// The `worktime.jsonl` lines of the spans a write transaction on this
+    /// thread closed, written when the [`ReadBefore`] of their spans is
+    /// dropped, if their transaction committed (task 1334): the hooks
+    /// [`watch_commits`] puts on the connection follow it.
+    static WORKTIME_AFTER: RefCell<Vec<WorktimeLines>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The SQL function that names a connection [`watch_commits`] watches.
+const CONNECTION_FUNCTION: &str = "dagq_sessions_connection";
+
+/// A span's transcript read before a write transaction, with its turns and
+/// the close's analysis to the end it is expected at (task 1334).
+#[derive(Debug)]
+struct ReadTranscript {
+    transcript: Transcript,
+    turns: Turns,
+    last_at: Option<i64>,
+    analysis: Option<Analysis>,
+}
+
+/// What a close analyses of a transcript: from `start` to `end`, and to
+/// `cut` for its tokens and models (unix milliseconds).
+#[derive(Debug, Clone, PartialEq)]
+struct Want {
+    start: i64,
+    end: i64,
+    cut: i64,
+    /// Whether its tokens are the transcript's (not a headless span's).
+    usage: bool,
+    work: Option<WorkInputs>,
+}
+
+/// What a run session's work breakdown is made with, beside its
+/// transcript.
+#[derive(Debug, Clone, PartialEq)]
+struct WorkInputs {
+    /// Where its `worktime.jsonl` goes; not part of the breakdown.
+    run_dir: Option<String>,
+    verification: Vec<String>,
+    source: bool,
+}
+
+/// The close's analysis of a transcript for a [`Want`].
+#[derive(Debug)]
+struct Analysis {
+    want: Want,
+    /// Every turn of the span (those recorded already included).
+    turns: Vec<Turn>,
+    usage: Option<Result<TokenUsage, &'static str>>,
+    models: Vec<ModelUse>,
+    work: Option<Breakdown>,
+    /// Its tokens and models to every cut, to pick those to an earlier
+    /// one.
+    tokens: SpanTokens,
+}
+
+/// The analysis for `want` of `records`, whose turns are `turns`.
+fn analyse(records: &[TranscriptRecord], turns: &Turns, want: Want) -> Analysis {
+    #[cfg(test)]
+    tests::ANALYSES.with(|analyses| analyses.set(analyses.get() + 1));
+    let tokens = SpanTokens::new(records, want.start, want.cut);
+    let (usage, models) = tokens.at(want.cut);
+    Analysis {
+        turns: span_turns(turns.all(), want.start, Some(want.end), None),
+        usage: want.usage.then_some(usage),
+        models,
+        tokens,
+        work: want.work.as_ref().map(|work| {
+            worktime::breakdown(
+                records,
+                want.start,
+                want.end,
+                &work.verification,
+                work.source,
+            )
+        }),
+        want,
+    }
+}
+
+impl ReadTranscript {
+    fn new(transcript: Transcript) -> Self {
+        Self {
+            turns: turns(&transcript.records),
+            last_at: transcript.last_at(),
+            transcript,
+            analysis: None,
+        }
+    }
+
+    /// The analysis for `want`. Inside a write transaction it is only the
+    /// one made before it (task 1334), moved to `want`'s end and cut
+    /// ([`Analysis::to`]); nothing of the transcript is analysed under the
+    /// write lock, and `None` when it cannot be moved. Outside one,
+    /// analysed now when it was not before or cannot be moved.
+    fn analysis(&mut self, conn: &Connection, want: Want) -> Option<Analysis> {
+        if let Some(made) = self.analysis.take()
+            && let Some(analysis) = made.to(self.last_at, &want)
+        {
+            return Some(analysis);
+        }
+        conn.is_autocommit()
+            .then(|| analyse(&self.transcript.records, &self.turns, want))
+    }
+}
+
+impl Analysis {
+    /// The analysis for `want` made from this one of a transcript whose
+    /// last record is at `last`, as [`analyse`] would make it, with
+    /// nothing of the transcript read (task 1334). To an earlier end and
+    /// cut: the turns are cut there, the tokens and models those it made
+    /// to that cut are picked ([`SpanTokens::at`]), and the work breakdown
+    /// is cut there ([`Breakdown::retarget`]). To a later one: the same,
+    /// the breakdown longer, when every record is before this one's. Its repeats of `integrate`'s checks are counted for the
+    /// verification `want` read. `None` when it cannot be: another start,
+    /// kind of tokens or source, or a later end or cut with a record at or
+    /// after this one's.
+    fn to(mut self, last: Option<i64>, want: &Want) -> Option<Analysis> {
+        let refused = |made: &Want| {
+            info!(
+                "session transcript read before the write does not fit its close: made for {made:?}, wanted {want:?}"
+            );
+            None
+        };
+        let inputs = |want: &Want| {
+            (
+                want.start,
+                want.usage,
+                want.work.as_ref().map(|work| work.source),
+            )
+        };
+        let after = |made: i64, wanted: i64| wanted > made && last.is_some_and(|last| last >= made);
+        if inputs(&self.want) != inputs(want)
+            || after(self.want.end, want.end)
+            || after(self.want.cut, want.cut)
+        {
+            return refused(&self.want);
+        }
+        if want.end < self.want.end {
+            // The turns that start before the end, cut there: those of the
+            // span to that end.
+            self.turns.retain(|turn| turn.start < want.end);
+            for turn in &mut self.turns {
+                turn.end = turn.end.min(want.end);
+            }
+        }
+        if want.cut < self.want.cut {
+            let (usage, models) = self.tokens.at(want.cut);
+            self.usage = want.usage.then_some(usage);
+            self.models = models;
+        }
+        if let (Some(work), Some(inputs)) = (self.work.as_mut(), &want.work) {
+            if !work.retarget(last, want.end) {
+                return refused(&self.want);
+            }
+            work.verify(&inputs.verification);
+        }
+        self.want = want.clone();
+        Some(self)
+    }
+}
+
+/// The `worktime.jsonl` lines of a close of the span `opened` in a write
+/// transaction on `connection`, to append to `path` once the transaction
+/// is committed.
+struct WorktimeLines {
+    opened: EventId,
+    connection: i64,
+    commit: Commit,
+    path: std::path::PathBuf,
+    span: Value,
+    commands: Vec<Command>,
+}
+
+/// Where the transaction of a close's [`WorktimeLines`] is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Commit {
+    /// Neither committed nor rolled back yet.
+    Open,
+    /// Its commit began: rolled back if it fails.
+    Committing,
+    /// Committed: the connection prepared a statement, wrote or committed
+    /// again since, which it does only once the commit finished.
+    Committed,
+}
+
+/// Put on `conn` the hooks that follow its transactions for the
+/// `worktime.jsonl` lines of the closes in them (task 1334): a commit's
+/// lines are written, a rolled back one's never. A close is known by the
+/// transaction that wrote it, not by its event's id, which SQLite gives
+/// again after a rollback (to another writer's close of the same span).
+pub(super) fn watch_commits(conn: &Connection) -> Result<()> {
+    static NEXT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    conn.create_scalar_function(
+        CONNECTION_FUNCTION,
+        0,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+        move |_| Ok(id),
+    )?;
+    // The hooks run on the thread that commits or rolls back, the one that
+    // wrote the lines; they touch no database. A commit that fails after
+    // its hook is rolled back at once, in the same statement, and the
+    // rollback drops its lines; a rollback after anything else on the
+    // connection is another transaction's, and leaves them.
+    conn.commit_hook(Some(move || {
+        follow_commits(id, |commit| match commit {
+            // The commit before it finished: this is another transaction.
+            Commit::Committing => Some(Commit::Committed),
+            Commit::Open => Some(Commit::Committing),
+            Commit::Committed => Some(Commit::Committed),
+        });
+        false
+    }))?;
+    conn.rollback_hook(Some(move || {
+        follow_commits(id, |commit| (commit == Commit::Committed).then_some(commit));
+    }))?;
+    // A statement prepared (another transaction's `BEGIN`, a `ROLLBACK`)
+    // or a row written after a commit began comes after that commit
+    // finished.
+    conn.update_hook(Some(move |_, _: &str, _: &str, _| commit_finished(id)))?;
+    conn.authorizer(Some(move |_: rusqlite::hooks::AuthContext<'_>| {
+        commit_finished(id);
+        rusqlite::hooks::Authorization::Allow
+    }))?;
+    Ok(())
+}
+
+/// The commit begun on `connection` finished: its lines are committed.
+fn commit_finished(connection: i64) {
+    follow_commits(connection, |commit| match commit {
+        Commit::Committing => Some(Commit::Committed),
+        commit => Some(commit),
+    });
+}
+
+/// Move the lines of the transactions of `connection` on this thread to
+/// what `next` makes of where they are; `None` drops them.
+fn follow_commits(connection: i64, next: impl Fn(Commit) -> Option<Commit>) {
+    let _ = WORKTIME_AFTER.try_with(|after| {
+        let Ok(mut after) = after.try_borrow_mut() else {
+            return;
+        };
+        after.retain_mut(|lines| {
+            if lines.connection != connection {
+                return true;
+            }
+            match next(lines.commit) {
+                Some(commit) => {
+                    lines.commit = commit;
+                    true
+                }
+                None => false,
+            }
+        });
+    });
+}
+
+impl WorktimeLines {
+    /// Append them, logging only when that fails.
+    fn append(&self) {
+        let lines: String = self
+            .commands
+            .iter()
+            .map(|command| format!("{}\n", command.line(&self.span)))
+            .collect();
+        if let Err(error) = super::agent_dir::append(&self.path, lines.as_bytes()) {
+            info!(
+                "session span {} ({}): {} not written: {error}",
+                self.opened,
+                self.span["kind"].as_str().unwrap_or_default(),
+                self.path.display()
+            );
+        }
+    }
 }
 
 /// The spans a write about to begin may close.
@@ -60,18 +341,26 @@ thread_local! {
 pub(super) enum Closing<'a> {
     /// The run's, by events of these kinds on it.
     Run(&'a RunId, &'a [&'a str]),
+    /// The run's, by an event of this kind and payload on it: a revise's
+    /// closes end when it was sent.
+    Event(&'a RunId, &'a str, &'a Value),
     /// The observer's, by an event of the queue of this kind and payload.
     Queue(&'a str, &'a Value),
-    /// The plan review's of this id, or of every plan review when `None`.
-    PlanReviews(Option<i64>),
-    /// The goal review's of this id, or of every goal review when `None`.
-    GoalReviews(Option<i64>),
-    /// These spans.
-    Spans(&'a [OpenSpan]),
+    /// The plan review's of this id, or of every plan review when `None`;
+    /// closed as inferred when `true`, as `close_plan_review` closes them.
+    PlanReviews(Option<i64>, bool),
+    /// The goal review's of this id, or of every goal review when `None`;
+    /// closed as inferred when `true`, as `close_goal_review` closes them.
+    GoalReviews(Option<i64>, bool),
+    /// These spans, each closed for this reason.
+    Spans(&'a [(OpenSpan, &'static str)]),
 }
 
 /// The transcripts [`read_before`] read, for the closes of the write that
-/// follows it on this thread; dropped with it.
+/// follows it on this thread; dropped with it. Dropped after that write
+/// (its owner keeps it to the end of the write), it writes the
+/// `worktime.jsonl` lines of the closes of its spans whose transactions
+/// committed (task 1334): those rolled back were dropped then.
 #[must_use = "the transcripts are there only while this lives"]
 pub(super) struct ReadBefore {
     spans: Vec<EventId>,
@@ -85,6 +374,26 @@ impl Drop for ReadBefore {
         SOURCE_BEFORE.with_borrow_mut(|read| {
             read.retain(|(span, _)| !self.spans.contains(span));
         });
+        let lines: Vec<WorktimeLines> = WORKTIME_AFTER.with_borrow_mut(|after| {
+            let (mine, others) = std::mem::take(after)
+                .into_iter()
+                .partition(|lines| self.spans.contains(&lines.opened));
+            *after = others;
+            mine
+        });
+        for lines in lines {
+            if lines.commit == Commit::Open {
+                // Left out rather than perhaps written twice: a close
+                // rolled back is closed again, with its lines, later.
+                info!(
+                    "session span {}: {} not written, its transaction was neither committed nor rolled back",
+                    lines.opened,
+                    lines.path.display()
+                );
+            } else {
+                lines.append();
+            }
+        }
     }
 }
 
@@ -93,7 +402,8 @@ impl Drop for ReadBefore {
 /// 10): a worker's transcript can be megabytes, and reading it under the
 /// write lock kept other processes' writes waiting past the busy timeout.
 /// A span that opens between this and the transaction closes without its
-/// active time ([`TRANSCRIPT_NOT_READ_BEFORE`]). Called inside a
+/// active time ([`TRANSCRIPT_NOT_READ_BEFORE`]). Each transcript is also
+/// analysed for its close as if it closed now (task 1334). Called inside a
 /// transaction it reads nothing.
 pub(super) fn read_before(conn: &Connection, closing: Closing<'_>) -> Result<ReadBefore> {
     if !conn.is_autocommit() {
@@ -115,11 +425,24 @@ pub(super) fn read_before(conn: &Connection, closing: Closing<'_>) -> Result<Rea
                 kinds
                     .iter()
                     .flat_map(|kind| changes(kind, &Value::Null, &open, &context))
-                    .filter_map(|change| match change {
-                        SpanChange::Close { span, .. } => Some(span),
-                        SpanChange::Open(_) => None,
-                    })
+                    .filter_map(closed_span)
                     .collect()
+            }
+        }
+        Closing::Event(run_id, kind, payload) => {
+            if scope(kind) == Some(Scope::Run) {
+                let open = open_spans(conn, "o.run_id=?1", "c.run_id=?1", params![run_id])?;
+                // A revise's closes end when it was sent, as `write_changes`
+                // ends them when that was before the event.
+                let sent = crate::domain::request_sent_at_millis(payload)
+                    .filter(|_| kind == EventKind::ReviseRequested.as_str());
+                changes(kind, payload, &open, &SpanContext::default())
+                    .into_iter()
+                    .filter_map(closed_span)
+                    .map(|(span, reason, _)| (span, reason, sent))
+                    .collect()
+            } else {
+                Vec::new()
             }
         }
         Closing::Queue(kind, payload) => {
@@ -130,32 +453,40 @@ pub(super) fn read_before(conn: &Connection, closing: Closing<'_>) -> Result<Rea
                 };
                 changes(kind, payload, &open, &context)
                     .into_iter()
-                    .filter_map(|change| match change {
-                        SpanChange::Close { span, .. } => Some(span),
-                        SpanChange::Open(_) => None,
-                    })
+                    .filter_map(closed_span)
                     .collect()
             } else {
                 Vec::new()
             }
         }
-        Closing::PlanReviews(plan_review_id) => open_spans(
+        Closing::PlanReviews(plan_review_id, inferred) => open_spans(
             conn,
             "o.run_id IS NULL AND json_extract(o.payload,'$.kind')=?1
              AND (?2 IS NULL OR json_extract(o.payload,'$.plan_review_id')=?2)",
             "c.run_id IS NULL",
             params![PLAN_REVIEW, plan_review_id],
-        )?,
-        Closing::GoalReviews(goal_review_id) => open_goal_reviews(conn, goal_review_id)?,
-        Closing::Spans(spans) => spans.to_vec(),
+        )?
+        .into_iter()
+        .map(|span| (span, Some(job_close_reason(inferred)), None))
+        .collect(),
+        Closing::GoalReviews(goal_review_id, inferred) => open_goal_reviews(conn, goal_review_id)?
+            .into_iter()
+            .map(|span| (span, Some(job_close_reason(inferred)), None))
+            .collect(),
+        Closing::Spans(spans) => spans
+            .iter()
+            .map(|(span, reason)| (span.clone(), Some(*reason), None))
+            .collect(),
     };
-    let mut read_spans = Vec::new();
+    // Made first, so that what was read is dropped with it when a later
+    // span fails.
+    let mut guard = ReadBefore { spans: Vec::new() };
     let mut source = None;
-    for span in spans {
-        if read_spans.contains(&span.opened_event_id) {
+    for (span, reason, sent) in spans {
+        if guard.spans.contains(&span.opened_event_id) {
             continue;
         }
-        read_spans.push(span.opened_event_id);
+        guard.spans.push(span.opened_event_id);
         let transcript = read(conn, &span);
         // A run session's close with its transcript records its work
         // breakdown, whose rules depend on the repository (ADR-t614-1).
@@ -166,20 +497,119 @@ pub(super) fn read_before(conn: &Connection, closing: Closing<'_>) -> Result<Rea
             };
             SOURCE_BEFORE.with_borrow_mut(|read| read.push((span.opened_event_id, source)));
         }
+        let transcript = match transcript {
+            Ok(transcript) => {
+                let mut read = ReadTranscript::new(transcript);
+                let run_id: Option<RunId> = conn.query_row(
+                    "SELECT run_id FROM run_events WHERE id=?1",
+                    [span.opened_event_id],
+                    |r| r.get(0),
+                )?;
+                // The close comes after now, which is after the transcript
+                // was read.
+                let now = now(conn)?;
+                let at = Closing::at(&now, sent, read.last_at);
+                if let Some(mut want) =
+                    want(conn, &span, run_id.as_ref(), reason, &at, read.last_at)?
+                {
+                    // Made past every record, it moves to whatever end the
+                    // close has (`Analysis::to`): the clock may say the
+                    // close is before a record.
+                    if let Some(last) = read.last_at {
+                        want.end = want.end.max(last + 1);
+                        want.cut = want.cut.max(last + 1);
+                    }
+                    read.analysis = Some(analyse(&read.transcript.records, &read.turns, want));
+                }
+                Ok(read)
+            }
+            Err(unreadable) => Err(unreadable),
+        };
         READ_BEFORE.with_borrow_mut(|read| read.push((span, transcript)));
     }
-    Ok(ReadBefore { spans: read_spans })
+    Ok(guard)
+}
+
+impl Closing<'_> {
+    /// When a close predicted at `now` ends: when its revise was `sent`,
+    /// if that was before now, else now, or past the transcript's `last`
+    /// record when the clock says that is later.
+    fn at(now: &str, sent: Option<i64>, last: Option<i64>) -> String {
+        let now_ms = rfc3339_millis(now);
+        match (now_ms, sent) {
+            (Some(now_ms), Some(sent)) if sent < now_ms => millis_text(sent),
+            (Some(now_ms), _) => millis_text(now_ms.max(last.map_or(now_ms, |last| last + 1))),
+            (None, _) => now.to_owned(),
+        }
+    }
+}
+
+/// The span a change closes, with why, and when it ends when that is not
+/// at its event.
+fn closed_span(change: SpanChange) -> Option<(OpenSpan, Option<&'static str>, Option<i64>)> {
+    match change {
+        SpanChange::Close { span, reason } => Some((span, Some(reason), None)),
+        SpanChange::Open(_) => None,
+    }
+}
+
+/// What the close of `span` of `run_id` at `now`, for `reason` (not
+/// inferred when unknown), analyses of its transcript whose last record is
+/// at `last`; `None` when the span's times cannot be read.
+fn want(
+    conn: &Connection,
+    span: &OpenSpan,
+    run_id: Option<&RunId>,
+    reason: Option<&str>,
+    now: &str,
+    last: Option<i64>,
+) -> Result<Option<Want>> {
+    let Some((start, now_ms)) = times(conn, span, now)? else {
+        return Ok(None);
+    };
+    if span.headless() {
+        // Its tokens are its run's turns'; its models and work are to now.
+        let work = match run_id {
+            Some(run_id) => Some(work_inputs(conn, run_id, span)?),
+            None => None,
+        };
+        return Ok(Some(Want {
+            start,
+            end: now_ms,
+            cut: now_ms,
+            usage: false,
+            work,
+        }));
+    }
+    // An inferred close ends at the transcript's last record, which is the
+    // span's: its tokens and models are to just after it.
+    let inferred = reason == Some(INFERRED);
+    let end = match last.filter(|_| inferred) {
+        Some(last) => last.clamp(start, now_ms),
+        None => now_ms,
+    };
+    let work = match run_id.filter(|_| RUN_SESSION.contains(&span.kind())) {
+        Some(run_id) => Some(work_inputs(conn, run_id, span)?),
+        None => None,
+    };
+    Ok(Some(Want {
+        start,
+        end,
+        cut: if inferred { end + 1 } else { end },
+        usage: true,
+        work,
+    }))
 }
 
 /// The transcript of `span` for its close: the one [`read_before`] read,
 /// else, outside a write transaction, read now; else unreadable.
-fn transcript_for_close(conn: &Connection, span: &OpenSpan) -> Result<Transcript, Unreadable> {
+fn transcript_for_close(conn: &Connection, span: &OpenSpan) -> Result<ReadTranscript, Unreadable> {
     let taken = READ_BEFORE.with_borrow_mut(|read| {
         read.iter()
             .position(|(read, _)| read == span)
             .map(|at| read.swap_remove(at).1)
     });
-    taken.unwrap_or_else(|| read(conn, span))
+    taken.unwrap_or_else(|| read(conn, span).map(ReadTranscript::new))
 }
 
 /// Write the spans the event `event_id` (of `kind`, with `payload`, just
@@ -502,8 +932,9 @@ fn close_with(
     }
     let mut closed_at = now.to_owned();
     let mut closed = RunSessionClosed::default();
+    let mut worktime = None;
     if span.headless() {
-        close_headless(
+        worktime = close_headless(
             conn,
             now,
             (task_id, run_id),
@@ -520,22 +951,58 @@ fn close_with(
             &payload,
             &closed_at,
         )?;
+        write_worktime(conn, worktime);
         return Ok(Some(closed).filter(|closed| closed.work.is_some() || closed.tokens.is_some()));
     }
     match (transcript_for_close(conn, span), times(conn, span, now)?) {
-        (Ok(transcript), Some((start, now_ms))) => {
+        (Ok(mut read), Some((start, now_ms))) => {
             let mut end = now_ms;
             if reason == INFERRED
-                && let Some(last) = transcript.last_at()
+                && let Some(last) = read.last_at
             {
                 end = last.clamp(start, now_ms);
             }
+            // What the queue has now: the run's directory and verification,
+            // and the turns recorded so far (another process may have
+            // recorded more since the transcript was read).
+            let work = match run_id.filter(|_| RUN_SESSION.contains(&span.kind())) {
+                Some(run_id) => Some(work_inputs(conn, run_id, span)?),
+                None => None,
+            };
+            // An inferred close ends at the transcript's last record, which
+            // is the span's.
+            let tokens_end = if reason == INFERRED { end + 1 } else { end };
+            let want = Want {
+                start,
+                end,
+                cut: tokens_end,
+                usage: true,
+                work,
+            };
+            let Some(analysis) = read.analysis(conn, want) else {
+                payload["active"] = json!("unavailable");
+                payload["active_unavailable"] = json!(TRANSCRIPT_NOT_READ_BEFORE);
+                insert_at(
+                    conn,
+                    task_id,
+                    run_id,
+                    EventKind::SessionClosed,
+                    &payload,
+                    &closed_at,
+                )?;
+                return Ok(None);
+            };
             if Some(end) != rfc3339_millis(now) {
                 closed_at = millis_text(end);
             }
             let recorded = recorded_turns(conn, span.opened_event_id)?;
             let through = recorded.iter().map(|turn| turn.end).max();
-            let new = span_turns(turns(&transcript.records).all(), start, Some(end), through);
+            let new: Vec<Turn> = analysis
+                .turns
+                .iter()
+                .copied()
+                .filter(|turn| through.is_none_or(|through| turn.start > through))
+                .collect();
             if !new.is_empty() {
                 let turns_payload = turns_payload(span, &new);
                 insert_at(
@@ -550,37 +1017,29 @@ fn close_with(
             let millis: i64 = recorded.iter().chain(&new).map(|turn| turn.millis()).sum();
             payload["active"] = json!("recorded");
             payload["active_secs"] = json!(millis / 1000);
-            // An inferred close ends at the transcript's last record, which
-            // is the span's.
-            let tokens_end = if reason == INFERRED { end + 1 } else { end };
-            match tokens::span_usage(&transcript.records, start, tokens_end) {
-                Ok(usage) => {
+            match analysis.usage {
+                Some(Ok(usage)) => {
                     payload["tokens"] = usage.payload();
                     closed.tokens = Some(usage.payload());
                 }
-                Err(code) => info!(
+                Some(Err(code)) => info!(
                     code,
-                    version = transcript.version().unwrap_or("unknown"),
+                    version = read.transcript.version().unwrap_or("unknown"),
                     "session span {} ({}): tokens not recorded, {code} (Claude Code {})",
                     span.opened_event_id,
                     span.kind(),
-                    transcript.version().unwrap_or("version unknown"),
+                    read.transcript.version().unwrap_or("version unknown"),
                 ),
+                None => {}
             }
             // The model and effort its messages used (task 579), none when
             // no message names a model.
-            tokens::models_payload(
-                &tokens::span_models(&transcript.records, start, tokens_end),
-                &mut payload,
-            );
-            if let Some(run_id) = run_id.filter(|_| RUN_SESSION.contains(&span.kind())) {
-                let breakdown = work_breakdown(conn, run_id, span, &transcript, start, end)?;
-                closed.work = Some(exited_work(
-                    &breakdown,
-                    span.kind(),
-                    &span.payload["attempt"],
-                ));
-                payload["work"] = breakdown;
+            tokens::models_payload(&analysis.models, &mut payload);
+            if let (Some(inputs), Some(breakdown)) = (analysis.want.work, analysis.work) {
+                let (work, lines) = work_breakdown(span, inputs, breakdown);
+                closed.work = Some(exited_work(&work, span.kind(), &span.payload["attempt"]));
+                payload["work"] = work;
+                worktime = lines;
             }
         }
         (Err(unreadable), _) => {
@@ -601,6 +1060,7 @@ fn close_with(
         &payload,
         &closed_at,
     )?;
+    write_worktime(conn, worktime);
     Ok(run_id
         .filter(|_| RUN_SESSION.contains(&span.kind()))
         .filter(|_| closed.work.is_some() || closed.tokens.is_some())
@@ -613,7 +1073,8 @@ fn close_with(
 /// the close), recorded as `session_turns` like a transcript's; its tokens
 /// are the `tokens` its turns recorded from the provider's output. A
 /// Claude session's transcript, when it can be read, still gives the model
-/// and effort and the work breakdown; another provider's has none.
+/// and effort and the work breakdown; another provider's has none. Returns
+/// the work's `worktime.jsonl` lines.
 fn close_headless(
     conn: &Connection,
     now: &str,
@@ -622,12 +1083,12 @@ fn close_headless(
     reason: &str,
     payload: &mut Value,
     closed: &mut RunSessionClosed,
-) -> Result<()> {
+) -> Result<Option<WorktimeLines>> {
     let transcript = transcript_for_close(conn, span);
     let (Some(run_id), Some((start, now_ms))) = (run_id, times(conn, span, now)?) else {
         payload["active"] = json!("unavailable");
         payload["active_unavailable"] = json!("span_time_unparsable");
-        return Ok(());
+        return Ok(None);
     };
     let headless = HeadlessSpan::of(&turn_events(conn, run_id, span.opened_event_id)?, start);
     let recorded = recorded_turns(conn, span.opened_event_id)?;
@@ -652,28 +1113,37 @@ fn close_headless(
         closed.tokens = Some(tokens.payload());
     }
     match transcript {
-        Ok(transcript) => {
-            tokens::models_payload(
-                &tokens::span_models(&transcript.records, start, now_ms),
-                payload,
-            );
-            let breakdown = work_breakdown(conn, run_id, span, &transcript, start, now_ms)?;
-            closed.work = Some(exited_work(
-                &breakdown,
-                span.kind(),
-                &span.payload["attempt"],
-            ));
-            payload["work"] = breakdown;
+        Ok(mut read) => {
+            let want = Want {
+                start,
+                end: now_ms,
+                cut: now_ms,
+                usage: false,
+                work: Some(work_inputs(conn, run_id, span)?),
+            };
+            let Some(analysis) = read.analysis(conn, want) else {
+                return Ok(None);
+            };
+            tokens::models_payload(&analysis.models, payload);
+            let (Some(inputs), Some(breakdown)) = (analysis.want.work, analysis.work) else {
+                return Ok(None);
+            };
+            let (work, lines) = work_breakdown(span, inputs, breakdown);
+            closed.work = Some(exited_work(&work, span.kind(), &span.payload["attempt"]));
+            payload["work"] = work;
+            Ok(lines)
         }
-        Err(unreadable) => debug!(
-            "session span {} ({}): no model or work breakdown, {}: {}",
-            span.opened_event_id,
-            span.kind(),
-            unreadable.code,
-            unreadable.detail
-        ),
+        Err(unreadable) => {
+            debug!(
+                "session span {} ({}): no model or work breakdown, {}: {}",
+                span.opened_event_id,
+                span.kind(),
+                unreadable.code,
+                unreadable.detail
+            );
+            Ok(None)
+        }
     }
-    Ok(())
 }
 
 /// The `turn_started` and `turn_finished` of `run_id` after the event
@@ -690,18 +1160,61 @@ fn turn_events(conn: &Connection, run_id: &RunId, opened: EventId) -> Result<Vec
         .collect::<rusqlite::Result<_>>()?)
 }
 
-/// The work breakdown of `span` of `run_id` from `start` to `end` (unix
-/// milliseconds) in `transcript`: the aggregate for the events, and each
-/// command appended to the run directory's `worktime.jsonl`. Failing to
-/// write that file is only logged.
+/// The work `breakdown` of `span`, made with `inputs`: the aggregate for
+/// the events, and the lines of its commands for the run directory's
+/// `worktime.jsonl`, which [`write_worktime`] writes once the close is
+/// committed.
 fn work_breakdown(
-    conn: &Connection,
-    run_id: &RunId,
     span: &OpenSpan,
-    transcript: &Transcript,
-    start: i64,
-    end: i64,
-) -> Result<Value> {
+    inputs: WorkInputs,
+    breakdown: Breakdown,
+) -> (Value, Option<WorktimeLines>) {
+    let payload = breakdown.payload();
+    let lines = inputs.run_dir.map(|run_dir| {
+        let mut span_payload = span.payload.clone();
+        span_payload["opened_event_id"] = json!(span.opened_event_id);
+        WorktimeLines {
+            opened: span.opened_event_id,
+            connection: 0,
+            commit: Commit::Open,
+            path: std::path::Path::new(&run_dir).join(WORKTIME_FILE),
+            span: span_payload,
+            commands: breakdown.commands,
+        }
+    });
+    (payload, lines)
+}
+
+/// Write `lines` of the `session_closed` just inserted: now outside a write
+/// transaction (the insert committed), else when the [`ReadBefore`] of
+/// their span is dropped, if the transaction committed (task 1334).
+/// Failing to write the file is only logged.
+fn write_worktime(conn: &Connection, lines: Option<WorktimeLines>) {
+    let Some(mut lines) = lines else {
+        return;
+    };
+    if conn.is_autocommit() {
+        lines.append();
+        return;
+    }
+    match conn.query_row(&format!("SELECT {CONNECTION_FUNCTION}()"), [], |r| r.get(0)) {
+        Ok(connection) => {
+            lines.connection = connection;
+            WORKTIME_AFTER.with_borrow_mut(|after| after.push(lines));
+        }
+        // Left out rather than perhaps written for a close rolled back.
+        Err(error) => info!(
+            "session span {}: {} not written, its commit is not watched: {error}",
+            lines.opened,
+            lines.path.display()
+        ),
+    }
+}
+
+/// What the work breakdown of `span` of `run_id` is made with: the run's
+/// directory and its task's verification, and whether the queue's
+/// repository is dagq's source.
+fn work_inputs(conn: &Connection, run_id: &RunId, span: &OpenSpan) -> Result<WorkInputs> {
     let (run_dir, verification): (Option<String>, Option<String>) = conn
         .query_row(
             "SELECT r.run_dir, t.verification_commands FROM task_runs r
@@ -711,36 +1224,13 @@ fn work_breakdown(
         )
         .optional()?
         .unwrap_or_default();
-    let verification: Vec<String> = verification
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default();
-    let breakdown = worktime::breakdown(
-        &transcript.records,
-        start,
-        end,
-        &verification,
-        dagq_source(conn, span)?,
-    );
-    if let Some(run_dir) = run_dir {
-        let mut span_payload = span.payload.clone();
-        span_payload["opened_event_id"] = json!(span.opened_event_id);
-        let lines: String = breakdown
-            .commands
-            .iter()
-            .map(|command| format!("{}\n", command.line(&span_payload)))
-            .collect();
-        let path = std::path::Path::new(&run_dir).join(WORKTIME_FILE);
-        let written = super::agent_dir::append(&path, lines.as_bytes());
-        if let Err(error) = written {
-            info!(
-                "session span {} ({}): {} not written: {error}",
-                span.opened_event_id,
-                span.kind(),
-                path.display()
-            );
-        }
-    }
-    Ok(breakdown.payload())
+    Ok(WorkInputs {
+        run_dir,
+        verification: verification
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default(),
+        source: dagq_source(conn, span)?,
+    })
 }
 
 /// Whether the repository the queue is bound to is dagq's source
@@ -989,7 +1479,7 @@ pub(super) fn close_plan_review(
         "c.run_id IS NULL",
         params![PLAN_REVIEW, plan_review_id],
     )?;
-    let reason = if inferred { INFERRED } else { JOB_FINISHED };
+    let reason = job_close_reason(inferred);
     for span in open {
         let task_id: Option<TaskId> = conn.query_row(
             "SELECT task_id FROM run_events WHERE id=?1",
@@ -999,6 +1489,12 @@ pub(super) fn close_plan_review(
         close(conn, &now(conn)?, task_id, None, &span, reason)?;
     }
     Ok(())
+}
+
+/// Why a plan or goal review's span closes: `inferred` when its job's
+/// supervisor went away, else its job finished.
+fn job_close_reason(inferred: bool) -> &'static str {
+    if inferred { INFERRED } else { JOB_FINISHED }
 }
 
 /// The open spans of the goal review `goal_review_id`, or of every goal
@@ -1023,7 +1519,7 @@ pub(super) fn close_goal_review(
     goal_review_id: i64,
     inferred: bool,
 ) -> Result<()> {
-    let reason = if inferred { INFERRED } else { JOB_FINISHED };
+    let reason = job_close_reason(inferred);
     for span in open_goal_reviews(conn, Some(goal_review_id))? {
         let task_id = span_task(conn, &span)?;
         close(conn, &now(conn)?, task_id, None, &span, reason)?;
@@ -1086,13 +1582,14 @@ fn span_task(conn: &Connection, span: &OpenSpan) -> Result<Option<TaskId>> {
 /// its proposal, with the proposal and its goals; the others are on no
 /// task. Only the spans are written: no run, proposal or planner changes.
 pub(super) fn record_hook(conn: &Connection, hook: &SessionHook) -> Result<Value> {
-    let closing: Vec<OpenSpan> = hook_changes(hook, &open_hook_spans(conn)?, &Value::Null)
-        .into_iter()
-        .filter_map(|change| match change {
-            SpanChange::Close { span, .. } => Some(span),
-            SpanChange::Open(_) => None,
-        })
-        .collect();
+    let closing: Vec<(OpenSpan, &'static str)> =
+        hook_changes(hook, &open_hook_spans(conn)?, &Value::Null)
+            .into_iter()
+            .filter_map(|change| match change {
+                SpanChange::Close { span, reason } => Some((span, reason)),
+                SpanChange::Open(_) => None,
+            })
+            .collect();
     let _read = read_before(conn, Closing::Spans(&closing))?;
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let (task_id, context) = planner_context(&tx, hook)?;
@@ -1174,7 +1671,9 @@ pub(super) fn close_gone_hook_spans(conn: &Connection, gone: &[EventId]) -> Resu
     if spans.is_empty() {
         return Ok(0);
     }
-    let _read = read_before(conn, Closing::Spans(&spans))?;
+    let closing: Vec<(OpenSpan, &'static str)> =
+        spans.iter().map(|span| (span.clone(), INFERRED)).collect();
+    let _read = read_before(conn, Closing::Spans(&closing))?;
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let now = now(&tx)?;
     let mut closed = 0;
@@ -1319,6 +1818,15 @@ mod tests {
     thread_local! {
         /// The transcripts read on this thread.
         pub(super) static READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        /// The transcripts analysed for a close on this thread.
+        pub(super) static ANALYSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// The analyses of transcripts on this thread: those made for a close,
+    /// and every reading of a transcript's records to analyse them (its
+    /// turns, tokens, models or work), wherever it is made.
+    fn analysed() -> usize {
+        ANALYSES.get() + crate::domain::transcript::ANALYSED.with(std::cell::Cell::get)
     }
     use crate::{
         application::TaskStore,
@@ -2662,7 +3170,7 @@ mod tests {
         )
         .unwrap();
         {
-            let _read = read_before(conn, Closing::GoalReviews(None)).unwrap();
+            let _read = read_before(conn, Closing::GoalReviews(None, true)).unwrap();
             let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate).unwrap();
             close_goal_review(&tx, 8, true).unwrap();
             // Closed already: nothing more.
@@ -2899,6 +3407,80 @@ mod tests {
         }
     }
 
+    /// A plan or goal review whose supervisor went away closes as inferred
+    /// in a write transaction with the analysis made before it: its active
+    /// time and turns are its transcript's, and nothing is analysed under
+    /// the lock (task 1334).
+    #[test]
+    fn an_inferred_review_close_takes_the_analysis_made_before_its_write_transaction() {
+        use crate::application::TaskStore;
+        use crate::infrastructure::sqlite::goal_event;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut queue, task_id, _) = run_queue(dir.path());
+        let goal = queue
+            .add_goal(crate::domain::NewGoal {
+                title: "g".into(),
+                description: String::new(),
+                acceptance: String::new(),
+                constraints: String::new(),
+                doc: None,
+                draft: false,
+            })
+            .unwrap()
+            .id();
+        queue.set_goal(task_id, Some(goal)).unwrap();
+        let conn = &queue.conn;
+        event(
+            conn,
+            task_id,
+            None,
+            EventKind::PlanReviewStarted,
+            json!({"proposal_id": 1, "plan_review_id": 7, "attempt": 1,
+                   "session_id": "s-plan", "cwd": "/plan"}),
+        )
+        .unwrap();
+        goal_event(
+            conn,
+            goal,
+            EventKind::GoalReviewStarted,
+            json!({"goal_review_id": 8, "attempt": 1, "session_id": "s-goal", "cwd": "/goal"}),
+        )
+        .unwrap();
+        let start = retime(conn, 0, 100);
+        transcript_in(dir.path(), "/plan", "s-plan", start);
+        transcript_in(dir.path(), "/goal", "s-goal", start);
+        {
+            let _read = read_before(conn, Closing::PlanReviews(None, true)).unwrap();
+            let before = analysed();
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate).unwrap();
+            close_plan_review(&tx, 7, true).unwrap();
+            tx.commit().unwrap();
+            assert_eq!(analysed(), before);
+        }
+        {
+            let _read = read_before(conn, Closing::GoalReviews(None, true)).unwrap();
+            let before = analysed();
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate).unwrap();
+            close_goal_review(&tx, 8, true).unwrap();
+            tx.commit().unwrap();
+            assert_eq!(analysed(), before);
+        }
+        let closed = of_kind(&queue, SESSION_CLOSED);
+        assert_eq!(closed.len(), 2);
+        for (close, kind, session) in [
+            (&closed[0], PLAN_REVIEW, "s-plan"),
+            (&closed[1], GOAL_REVIEW, "s-goal"),
+        ] {
+            assert_eq!(close.payload["kind"], kind);
+            assert_eq!(close.payload["session_id"], session);
+            assert_eq!(close.payload["reason"], INFERRED);
+            assert_eq!(close.payload["active"], "recorded");
+            assert_eq!(close.payload["active_secs"], 30);
+        }
+        assert_eq!(of_kind(&queue, SESSION_TURNS).len(), 2);
+        assert!(READ_BEFORE.with_borrow(Vec::is_empty));
+    }
+
     /// Write the transcript of `session` of a span in `cwd`: two turns,
     /// 5–25 s and 40–50 s after `base`.
     fn transcript_in(dir: &std::path::Path, cwd: &str, session: &str, base: i64) {
@@ -2985,7 +3567,7 @@ mod tests {
             .record_queue_event(EventKind::ObserveFinished, json!({"dir": "/obs"}))
             .unwrap();
         {
-            let _read = read_before(conn, Closing::PlanReviews(Some(7))).unwrap();
+            let _read = read_before(conn, Closing::PlanReviews(Some(7), false)).unwrap();
             let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate).unwrap();
             close_plan_review(&tx, 7, false).unwrap();
             tx.commit().unwrap();
@@ -3332,5 +3914,591 @@ mod tests {
             .query_row("SELECT count(*) FROM run_events", [], |r| r.get(0))
             .unwrap();
         assert_eq!(rows, 0);
+    }
+
+    /// What another writer does between `read_before` and the write
+    /// transaction that closes the worker's span.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Between {
+        Nothing,
+        /// Records the span's finished turns.
+        RecordsTurns,
+        /// Closes the span (its session's exit).
+        Closes,
+        /// Nothing, and the write is rolled back.
+        RolledBack,
+        /// Nothing, the write is rolled back, and then (before the
+        /// `read_before` of the write is dropped) another writer closes
+        /// the span, its close taking the id the rolled back one had.
+        RolledBackThenCloses,
+        /// Nothing, and after the commit another transaction on the same
+        /// connection, writing nothing, is rolled back before the
+        /// `read_before` of the write is dropped.
+        CommittedThenAnotherRolledBack,
+        /// Changes the task's verification.
+        EditsVerification,
+    }
+
+    /// The worker's span closed by a `session_exited` in a write
+    /// transaction after `read_before`, with `between` done by another
+    /// process (a thread on its own connection) in between (or after the
+    /// transaction, for [`Between::RolledBackThenCloses`]): the closes,
+    /// the turns recorded, the lines of `worktime.jsonl`, and the
+    /// transcripts analysed under the write lock.
+    fn close_after(between: Between) -> (Vec<Value>, Vec<Value>, Vec<Value>, usize) {
+        let dir = tempfile::tempdir().unwrap();
+        let (queue, task_id, run) = run_queue(dir.path());
+        let run_dir = dir.path().join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let conn = &queue.conn;
+        bind(conn, dir.path(), "dagq");
+        conn.execute(
+            "UPDATE task_runs SET run_dir=?1",
+            [run_dir.to_str().unwrap()],
+        )
+        .unwrap();
+        event(
+            conn,
+            task_id,
+            Some(&run),
+            EventKind::AgentStarted,
+            json!({"session_id": RUN}),
+        )
+        .unwrap();
+        let start = retime(conn, 0, 100);
+        let project = dir.path().join("config/projects/-wt");
+        std::fs::create_dir_all(&project).unwrap();
+        let line = |kind: &str, secs: i64, content: Value| {
+            json!({"type": kind, "timestamp": millis_text(start + secs * 1000),
+                   "sessionId": RUN, "version": "2.1.283",
+                   "message": {"content": content, "id": format!("m{secs}"),
+                               "model": "claude-opus-4-1",
+                               "usage": {"input_tokens": 10, "output_tokens": secs}}})
+            .to_string()
+        };
+        let bash = |id: &str, command: &str| json!([{"type": "tool_use", "id": id, "name": "Bash", "input": {"command": command}}]);
+        let result = |id: &str| json!([{"type": "tool_result", "tool_use_id": id, "is_error": false, "content": "ok"}]);
+        // Two turns, the first finished (the next input came); a command
+        // in each.
+        let lines = [
+            line("user", 1, json!("go")),
+            line("assistant", 5, bash("a", "cargo test --locked")),
+            line("user", 15, result("a")),
+            line("assistant", 20, json!([{"type": "text"}])),
+            line("user", 30, json!("more")),
+            line("assistant", 32, bash("b", "cargo build")),
+            line("user", 40, result("b")),
+            line("assistant", 45, json!([{"type": "text"}])),
+        ];
+        std::fs::write(project.join(format!("{RUN}.jsonl")), lines.join("\n")).unwrap();
+
+        let read = read_before(conn, Closing::Run(&run, &["session_exited"])).unwrap();
+        let before = analysed();
+        if between == Between::EditsVerification {
+            conn.execute(
+                "UPDATE tasks SET verification_commands=?1",
+                [r#"["cargo test --locked"]"#],
+            )
+            .unwrap();
+        }
+        let other = |between: Between| {
+            let db = dir.path().join("q.db");
+            let config = dir.path().join("config");
+            let run = run.clone();
+            std::thread::spawn(move || {
+                ClaudeTranscripts::use_config_dir_in_test(&config);
+                let other = SqliteQueue::open(&db).unwrap();
+                if between == Between::RecordsTurns {
+                    assert_eq!(record_open_turns(&other.conn).unwrap(), 1);
+                } else {
+                    event(
+                        &other.conn,
+                        task_id,
+                        Some(&run),
+                        EventKind::SessionExited,
+                        json!({"exit_code": 0}),
+                    )
+                    .unwrap();
+                }
+            })
+            .join()
+            .unwrap();
+        };
+        if matches!(between, Between::RecordsTurns | Between::Closes) {
+            other(between);
+        }
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        event(
+            conn,
+            task_id,
+            Some(&run),
+            EventKind::SessionExited,
+            json!({"exit_code": 0}),
+        )
+        .unwrap();
+        // The lines are written after the commit, not under the lock.
+        assert!(!run_dir.join(WORKTIME_FILE).exists() || between == Between::Closes);
+        let under_lock = analysed() - before;
+        let closed_id = || -> Option<i64> {
+            conn.query_row(
+                &format!("SELECT max(id) FROM run_events WHERE kind='{SESSION_CLOSED}'"),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let rolled_back = closed_id();
+        assert!(rolled_back.is_some() || between == Between::Closes);
+        if matches!(between, Between::RolledBack | Between::RolledBackThenCloses) {
+            conn.execute_batch("ROLLBACK").unwrap();
+        } else {
+            conn.execute_batch("COMMIT").unwrap();
+        }
+        if between == Between::RolledBackThenCloses {
+            other(Between::Closes);
+            // The other close is known apart from the one rolled back by
+            // its transaction, not by its id: SQLite gave it the same one.
+            assert_eq!(closed_id(), rolled_back);
+        }
+        if between == Between::CommittedThenAnotherRolledBack {
+            conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK").unwrap();
+        }
+        drop(read);
+        assert!(WORKTIME_AFTER.with_borrow(Vec::is_empty));
+        let payloads = |kind: &str| -> Vec<Value> {
+            of_kind(&queue, kind)
+                .into_iter()
+                .map(|event| event.payload)
+                .collect()
+        };
+        let closed: Vec<Value> = payloads(SESSION_CLOSED)
+            .into_iter()
+            .map(|mut closed| {
+                // The close's time is the run's, not the transcript's.
+                let work = closed["work"].as_object_mut().unwrap();
+                work.remove("total_secs");
+                work["secs"].as_object_mut().unwrap().remove("idle");
+                closed
+            })
+            .collect();
+        let turns: Vec<Value> = payloads(SESSION_TURNS)
+            .iter()
+            .flat_map(|turns| turns["turns"].as_array().unwrap().clone())
+            .collect();
+        let worktime: Vec<Value> = std::fs::read_to_string(run_dir.join(WORKTIME_FILE))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let mut found = (closed, turns, worktime, under_lock);
+        for value in found.0.iter_mut().chain(&mut found.1).chain(&mut found.2) {
+            offsets(value, start);
+        }
+        found
+    }
+
+    /// Make the times in `value` milliseconds after `start`, to compare
+    /// closes of queues made at different times.
+    fn offsets(value: &mut Value, start: i64) {
+        match value {
+            Value::String(text) => {
+                if let Some(at) = rfc3339_millis(text) {
+                    *value = json!(at - start);
+                }
+            }
+            Value::Array(values) => values.iter_mut().for_each(|value| offsets(value, start)),
+            Value::Object(values) => values.values_mut().for_each(|value| offsets(value, start)),
+            _ => {}
+        }
+    }
+
+    /// The analysis made before the write transaction is the close's
+    /// (task 1334): nothing is analysed under the lock, the
+    /// `worktime.jsonl` lines are written once after the commit, and none
+    /// of a close rolled back. Another writer that recorded the span's
+    /// turns, or closed it, in between leaves the same close, turns and
+    /// lines: the turns it recorded are not recorded again, and the span
+    /// is not closed twice.
+    #[test]
+    fn a_close_takes_the_analysis_made_before_its_write_transaction() {
+        let (closed, turns, worktime, under_lock) = close_after(Between::Nothing);
+        assert_eq!(under_lock, 0);
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0]["active"], "recorded");
+        assert_eq!(closed[0]["active_secs"], 19 + 15);
+        assert_eq!(closed[0]["tokens"]["output"], 5 + 20 + 32 + 45);
+        assert_eq!(closed[0]["model"], "claude-opus-4-1");
+        assert_eq!(closed[0]["work"]["secs"]["test"], 10);
+        assert_eq!(closed[0]["work"]["secs"]["build"], 8);
+        assert_eq!(turns.len(), 2);
+        let commands: Vec<&Value> = worktime.iter().map(|line| &line["command"]).collect();
+        assert_eq!(
+            commands,
+            [&json!("cargo test --locked"), &json!("cargo build")]
+        );
+
+        let recorded = close_after(Between::RecordsTurns);
+        assert_eq!(recorded.3, 0);
+        assert_eq!(
+            (&recorded.0, &recorded.1, &recorded.2),
+            (&closed, &turns, &worktime)
+        );
+        let other = close_after(Between::Closes);
+        assert_eq!((&other.0, &other.1, &other.2), (&closed, &turns, &worktime));
+        // The verification read under the lock is the one counted.
+        let (edited, edited_turns, edited_worktime, under_lock) =
+            close_after(Between::EditsVerification);
+        assert_eq!(under_lock, 0);
+        assert_eq!(closed[0]["work"]["verification_repeats"], 0);
+        assert_eq!(edited[0]["work"]["verification_repeats"], 1);
+        let mut expected = closed.clone();
+        expected[0]["work"]["verification_repeats"] = json!(1);
+        assert_eq!(
+            (&edited, &edited_turns, &edited_worktime),
+            (&expected, &turns, &worktime)
+        );
+
+        let (rolled_back, rolled_back_turns, rolled_back_worktime, _) =
+            close_after(Between::RolledBack);
+        assert!(rolled_back.is_empty());
+        assert!(rolled_back_turns.is_empty());
+        assert!(rolled_back_worktime.is_empty());
+        // Another writer's close after the rollback writes its lines once:
+        // not again for the close rolled back.
+        let after = close_after(Between::RolledBackThenCloses);
+        assert_eq!((&after.0, &after.1, &after.2), (&closed, &turns, &worktime));
+        // A rollback of a later transaction leaves a committed close's
+        // lines.
+        let later = close_after(Between::CommittedThenAnotherRolledBack);
+        assert_eq!((&later.0, &later.1, &later.2), (&closed, &turns, &worktime));
+    }
+
+    /// The worker's span closed by a `session_exited` at a fixed time, 100 s
+    /// after it opened, with records of its transcript after that (the
+    /// clock went back): in a write transaction after `read_before`
+    /// (`prepared`, task 1334), or analysed at once, outside a
+    /// transaction, as every close was before. The closes, the turns
+    /// recorded and the lines of `worktime.jsonl` (their times from the
+    /// span's start), and the transcripts analysed under the write lock.
+    fn close_before_records(prepared: bool) -> (Vec<Value>, Vec<Value>, Vec<Value>, usize) {
+        let dir = tempfile::tempdir().unwrap();
+        let (queue, task_id, run) = run_queue(dir.path());
+        let run_dir = dir.path().join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let conn = &queue.conn;
+        bind(conn, dir.path(), "dagq");
+        conn.execute(
+            "UPDATE task_runs SET run_dir=?1",
+            [run_dir.to_str().unwrap()],
+        )
+        .unwrap();
+        event(
+            conn,
+            task_id,
+            Some(&run),
+            EventKind::AgentStarted,
+            json!({"session_id": RUN}),
+        )
+        .unwrap();
+        let start = retime(conn, 0, 100);
+        // The queue's now is 100 s after the span opened; any other time
+        // is SQLite's own.
+        let fixed = millis_text(start + 100_000);
+        let other = Connection::open_in_memory().unwrap();
+        conn.create_scalar_function(
+            "strftime",
+            2,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            move |ctx| {
+                let (format, at): (String, String) = (ctx.get(0)?, ctx.get(1)?);
+                if format == "%Y-%m-%dT%H:%M:%fZ" && at == "now" {
+                    return Ok(Some(fixed.clone()));
+                }
+                other.query_row("SELECT strftime(?1, ?2)", [format, at], |r| {
+                    r.get::<_, Option<String>>(0)
+                })
+            },
+        )
+        .unwrap();
+        let project = dir.path().join("config/projects/-wt");
+        std::fs::create_dir_all(&project).unwrap();
+        let line = |kind: &str, secs: i64, content: Value| {
+            json!({"type": kind, "timestamp": millis_text(start + secs * 1000),
+                   "sessionId": RUN, "version": "2.1.283",
+                   "message": {"content": content, "id": format!("m{secs}"),
+                               "model": if secs < 100 { "claude-opus-4-1" } else { "claude-sonnet-4-5" },
+                               "usage": {"input_tokens": 10, "output_tokens": secs}}})
+            .to_string()
+        };
+        let bash = |id: &str, command: &str| json!([{"type": "tool_use", "id": id, "name": "Bash", "input": {"command": command}}]);
+        let result = |id: &str| json!([{"type": "tool_result", "tool_use_id": id, "is_error": false, "content": "ok"}]);
+        // A command finished before the close, one that runs past it (its
+        // result after it), and a turn wholly after it.
+        let lines = [
+            line("user", 1, json!("go")),
+            line("assistant", 5, bash("a", "cargo test --locked")),
+            line("user", 15, result("a")),
+            line("assistant", 20, json!([{"type": "text"}])),
+            line("user", 80, json!("more")),
+            line("assistant", 90, bash("b", "cargo build")),
+            line("user", 150, result("b")),
+            line("assistant", 155, json!([{"type": "text"}])),
+            line("user", 170, json!("later")),
+            line("assistant", 175, bash("c", "cargo llvm-cov --locked")),
+            line("user", 190, result("c")),
+            line("assistant", 195, json!([{"type": "text"}])),
+        ];
+        std::fs::write(project.join(format!("{RUN}.jsonl")), lines.join("\n")).unwrap();
+        let close = || {
+            event(
+                conn,
+                task_id,
+                Some(&run),
+                EventKind::SessionExited,
+                json!({"exit_code": 0}),
+            )
+            .unwrap();
+        };
+        let mut under_lock = 0;
+        if prepared {
+            let read = read_before(conn, Closing::Run(&run, &["session_exited"])).unwrap();
+            let before = analysed();
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            close();
+            under_lock = analysed() - before;
+            conn.execute_batch("COMMIT").unwrap();
+            drop(read);
+        } else {
+            close();
+        }
+        let payloads = |kind: &str| -> Vec<Value> {
+            of_kind(&queue, kind)
+                .into_iter()
+                .map(|event| event.payload)
+                .collect()
+        };
+        let mut closed = payloads(SESSION_CLOSED);
+        let mut turns: Vec<Value> = payloads(SESSION_TURNS)
+            .iter()
+            .flat_map(|turns| turns["turns"].as_array().unwrap().clone())
+            .collect();
+        let mut worktime: Vec<Value> = std::fs::read_to_string(run_dir.join(WORKTIME_FILE))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        for value in closed.iter_mut().chain(&mut turns).chain(&mut worktime) {
+            offsets(value, start);
+        }
+        (closed, turns, worktime, under_lock)
+    }
+
+    /// A close before records of its transcript (the clock went back) in a
+    /// write transaction takes the analysis made before it, cut at its end
+    /// (task 1334): the same close, turns and `worktime.jsonl` lines as
+    /// when the transcript was analysed to that end at the close, with
+    /// nothing analysed under the lock.
+    #[test]
+    fn a_close_before_records_of_its_transcript_is_the_same_as_before() {
+        let (closed, turns, worktime, _) = close_before_records(false);
+        // What was analysed to the close at 100 s: the turns cut there,
+        // the tokens and models of the messages before it, the command
+        // running then cut there.
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0]["active"], "recorded");
+        assert_eq!(closed[0]["active_secs"], 19 + 20);
+        assert_eq!(closed[0]["tokens"]["output"], 5 + 20 + 90);
+        assert_eq!(closed[0]["model"], "claude-opus-4-1");
+        assert_eq!(closed[0]["work"]["total_secs"], 100);
+        assert_eq!(closed[0]["work"]["secs"]["build"], 10);
+        assert_eq!(turns, [json!([1000, 20000]), json!([80000, 100000])]);
+        let commands: Vec<(&Value, &Value)> = worktime
+            .iter()
+            .map(|line| (&line["command"], &line["end"]))
+            .collect();
+        assert_eq!(
+            commands,
+            [
+                (&json!("cargo test --locked"), &json!(15000)),
+                (&json!("cargo build"), &json!(100000))
+            ]
+        );
+        let (prepared, prepared_turns, prepared_worktime, under_lock) = close_before_records(true);
+        assert_eq!(under_lock, 0);
+        assert_eq!(
+            (prepared, prepared_turns, prepared_worktime),
+            (closed, turns, worktime)
+        );
+    }
+
+    /// The analysis made before a write transaction (task 1334), past
+    /// every record, moves to any end and cut of its close as [`analyse`]
+    /// makes it, with nothing analysed under the lock: later, earlier,
+    /// before a record (the clock went back), in the middle of a command,
+    /// before the span's start; with the repeats of `integrate`'s checks
+    /// counted for the verification read then. It does not move to
+    /// another start, nor to a later end past a record at or after its
+    /// own (`None` in a write transaction, analysed outside one).
+    #[test]
+    fn the_analysis_made_before_moves_to_any_end_of_its_close() {
+        let assistant = |at: i64, id: &str, model: &str, output: i64, content: Value| {
+            json!({"type": "assistant", "timestamp": millis_text(at), "sessionId": RUN,
+                   "message": {"id": id, "model": model, "content": content,
+                               "usage": {"input_tokens": 10, "output_tokens": output}}})
+        };
+        let user = |at: i64, content: Value| {
+            json!({"type": "user", "timestamp": millis_text(at), "sessionId": RUN,
+                   "message": {"content": content}})
+        };
+        let bash = |id: &str, command: &str| json!([{"type": "tool_use", "id": id, "name": "Bash", "input": {"command": command}}]);
+        let result = |id: &str| json!([{"type": "tool_result", "tool_use_id": id, "is_error": false, "content": "ok"}]);
+        let records = Transcript::parse(
+            &[
+                user(1_000, json!("go")),
+                assistant(
+                    2_000,
+                    "m1",
+                    "claude-opus-4-1",
+                    5,
+                    bash("a", "cargo test --locked"),
+                ),
+                user(4_000, result("a")),
+                assistant(
+                    5_000,
+                    "m2",
+                    "claude-sonnet-4-5",
+                    7,
+                    json!([{"type": "text"}]),
+                ),
+                user(6_000, json!("more")),
+                assistant(
+                    6_500,
+                    "m3",
+                    "claude-sonnet-4-5",
+                    3,
+                    bash("b", "cargo build"),
+                ),
+                user(7_500, result("b")),
+                assistant(
+                    8_000,
+                    "m4",
+                    "claude-sonnet-4-5",
+                    9,
+                    json!([{"type": "text"}]),
+                ),
+            ]
+            .map(|line| line.to_string())
+            .join("\n"),
+            RUN,
+        )
+        .unwrap();
+        let want = |start: i64, end: i64, cut: i64, verification: &[&str]| Want {
+            start,
+            end,
+            cut,
+            usage: true,
+            work: Some(WorkInputs {
+                run_dir: None,
+                verification: verification.iter().map(|c| (*c).to_owned()).collect(),
+                source: true,
+            }),
+        };
+        let conn = Connection::open_in_memory().unwrap();
+        let made = |end: i64| {
+            let mut read = ReadTranscript::new(records.clone());
+            read.analysis = Some(analyse(
+                &read.transcript.records,
+                &read.turns,
+                want(0, end, end, &[]),
+            ));
+            read
+        };
+        let fresh = |want: Want| {
+            let read = ReadTranscript::new(records.clone());
+            analyse(&records.records, &read.turns, want)
+        };
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        for (end, cut) in [
+            (12_000, 12_000),
+            (9_000, 9_000),
+            (8_000, 8_001),
+            (7_000, 7_000),
+            (6_800, 6_800),
+            (5_000, 5_001),
+            (3_000, 3_000),
+            (1_500, 1_500),
+            (500, 500),
+            (-100, -100),
+        ] {
+            for verification in [&[][..], &["cargo test --locked"][..]] {
+                let mut read = made(9_000);
+                let before = analysed();
+                let moved = read
+                    .analysis(&conn, want(0, end, cut, verification))
+                    .unwrap();
+                assert_eq!(analysed(), before, "{end}");
+                let expected = fresh(want(0, end, cut, verification));
+                assert_eq!(moved.want, expected.want);
+                assert_eq!(moved.turns, expected.turns, "{end}");
+                assert_eq!(moved.usage, expected.usage, "{end}");
+                assert_eq!(moved.models, expected.models, "{end}");
+                assert_eq!(moved.work, expected.work, "{end}");
+            }
+        }
+        // Another start, or later past a record at or after its end: none
+        // under the lock.
+        for (mut read, want) in [
+            (made(9_000), want(1, 9_000, 9_000, &[])),
+            (made(3_000), want(0, 12_000, 12_000, &[])),
+        ] {
+            let before = analysed();
+            assert!(read.analysis(&conn, want).is_none());
+            assert_eq!(analysed(), before);
+        }
+        conn.execute_batch("ROLLBACK").unwrap();
+        // Outside a write transaction: analysed to that end.
+        let mut read = made(3_000);
+        let later = read.analysis(&conn, want(0, 12_000, 12_000, &[])).unwrap();
+        assert_eq!(later.work, fresh(want(0, 12_000, 12_000, &[])).work);
+        assert_eq!(later.work.unwrap().total_millis, 12_000);
+    }
+
+    /// A revise recorded in a write transaction, typed before its event was
+    /// written, closes the worker's span when it was sent with the analysis
+    /// made before (task 1334): the turn after it is the revise's.
+    #[test]
+    fn a_revise_recorded_in_a_write_transaction_closes_where_it_was_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (queue, task_id, run) = run_queue(dir.path());
+        let conn = &queue.conn;
+        event(
+            conn,
+            task_id,
+            Some(&run),
+            EventKind::AgentStarted,
+            json!({"session_id": RUN}),
+        )
+        .unwrap();
+        let start = retime(conn, 0, 100);
+        transcript(dir.path(), start, &[(5, 25), (61, 80)], None);
+        let sent = (start + 60_000) / 1000;
+        ANALYSES.set(0);
+        let before = analysed();
+        SqliteQueue::record_runtime_event(
+            &queue,
+            &run,
+            EventKind::ReviseRequested,
+            json!({"attempt": 1, "sent_at": sent}),
+        )
+        .unwrap();
+        // Once, before the transaction: the analysis, and its readings of
+        // the records (the turns, the tokens and models to every cut, the
+        // work), none of them again under the lock for the earlier end.
+        assert_eq!(ANALYSES.get(), 1);
+        assert_eq!(analysed() - before, 1 + 3);
+        let spans = spans(&queue);
+        assert_eq!(spans[1].payload["active"], "recorded");
+        assert_eq!(spans[1].payload["active_secs"], 20);
+        assert_eq!(spans[1].created_at, millis_text(sent * 1000));
     }
 }

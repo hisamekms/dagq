@@ -355,10 +355,26 @@ impl Turns {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread read a transcript's records to analyse
+    /// them (its turns, tokens, models or work): the tests of task 1334
+    /// see that none is read under a write lock.
+    pub static ANALYSED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Count one reading of a transcript's records ([`ANALYSED`]).
+#[cfg(test)]
+pub fn count_analysis() {
+    ANALYSED.with(|analysed| analysed.set(analysed.get() + 1));
+}
+
 /// The turns of `records` (ADR-0048 decision 5). A turn ends at the last
 /// output before the next input, a sidechain's included; one with no
 /// output is 0 long. Records before the first input belong to no turn.
 pub fn turns(records: &[TranscriptRecord]) -> Turns {
+    #[cfg(test)]
+    count_analysis();
     let mut turns = Turns::default();
     for record in records {
         match record.role {

@@ -319,6 +319,9 @@ impl SqliteQueue {
             .with_context(|| format!("open queue at {} (use init to create it)", path.display()))?;
         conn.busy_timeout(crate::application::QUEUE_BUSY_TIMEOUT)?;
         conn.pragma_update(None, "foreign_keys", true)?;
+        // The `worktime.jsonl` lines of the session closes written through
+        // it follow its commits (task 1334).
+        super::sessions::watch_commits(&conn)?;
         // Canonical, like the paths `supervise` plans under, so a relative or
         // symlinked `--db` still names the queue's real `runs/`.
         let db = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());

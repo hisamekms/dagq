@@ -93,6 +93,8 @@ pub fn span_usage(
     start: i64,
     end: i64,
 ) -> Result<TokenUsage, &'static str> {
+    #[cfg(test)]
+    super::transcript::count_analysis();
     let mut messages: BTreeMap<String, Message> = BTreeMap::new();
     let mut assistants = 0;
     for (at, record) in records.iter().enumerate() {
@@ -172,6 +174,8 @@ pub struct ModelUse {
 /// tie). A message is counted once, with its first record that names a
 /// model. Empty when no message names one.
 pub fn span_models(records: &[TranscriptRecord], start: i64, end: i64) -> Vec<ModelUse> {
+    #[cfg(test)]
+    super::transcript::count_analysis();
     let mut seen: HashSet<String> = HashSet::new();
     // (model, effort) → (messages, the last message's position).
     let mut pairs: BTreeMap<(String, Option<String>), (i64, usize)> = BTreeMap::new();
@@ -210,6 +214,177 @@ pub fn span_models(records: &[TranscriptRecord], start: i64, end: i64) -> Vec<Mo
         .collect();
     uses.sort_by(|(a, a_last), (b, b_last)| b.messages.cmp(&a.messages).then(b_last.cmp(a_last)));
     uses.into_iter().map(|(model, _)| model).collect()
+}
+
+/// The [`span_usage`] and [`span_models`] of a span's records from `start`
+/// to every cut up to `end` (task 1334), made before a write lock so that a
+/// close only picks those to its cut ([`SpanTokens::at`]). They change only
+/// where an assistant record is, so they are made once per such time, the
+/// records taken in the order of their times, each message's counts, cost
+/// and model kept as [`span_usage`] and [`span_models`] keep them.
+#[derive(Debug, Clone, Default)]
+pub struct SpanTokens {
+    /// Each time of an assistant record, with the usage and models of the
+    /// records to it (a cut just past it), in order.
+    steps: Vec<(i64, Result<TokenUsage, &'static str>, Vec<ModelUse>)>,
+}
+
+/// A message's usage as [`span_usage`] keeps it.
+#[derive(Default)]
+struct Kept {
+    counts: [i64; 4],
+    /// The position and cost of its last record (in the transcript's
+    /// order) with a cost.
+    cost: Option<(usize, f64)>,
+}
+
+impl SpanTokens {
+    pub fn new(records: &[TranscriptRecord], start: i64, end: i64) -> Self {
+        #[cfg(test)]
+        super::transcript::count_analysis();
+        let mut order: Vec<usize> = (0..records.len())
+            .filter(|&at| {
+                let record = &records[at];
+                record.assistant && record.at >= start && record.at < end
+            })
+            .collect();
+        order.sort_by_key(|&at| (records[at].at, at));
+        let mut steps = Vec::new();
+        let mut unsupported = false;
+        let mut messages: BTreeMap<String, Kept> = BTreeMap::new();
+        let mut totals = [0i64; 4];
+        let mut without_cost = 0usize;
+        // The model's message → (its first position naming a model, its
+        // pair); each pair → the positions of the messages it counts.
+        let mut named: BTreeMap<String, (usize, (String, Option<String>))> = BTreeMap::new();
+        let mut pairs: BTreeMap<(String, Option<String>), std::collections::BTreeSet<usize>> =
+            BTreeMap::new();
+        for (index, &at) in order.iter().enumerate() {
+            let record = &records[at];
+            let key = || {
+                record
+                    .message_id
+                    .clone()
+                    .unwrap_or_else(|| format!("#{at}"))
+            };
+            if let Some(usage) = &record.usage {
+                let count = |key: &str| usage.get(key).map(Value::as_i64);
+                match (count("input_tokens"), count("output_tokens")) {
+                    (Some(Some(input)), Some(Some(output))) => {
+                        let cache = |key: &str| count(key).flatten().unwrap_or(0);
+                        let counts = [
+                            input,
+                            output,
+                            cache("cache_read_input_tokens"),
+                            cache("cache_creation_input_tokens"),
+                        ];
+                        let message = messages.entry(key()).or_insert_with(|| {
+                            without_cost += 1;
+                            Kept::default()
+                        });
+                        for ((kept, total), count) in
+                            message.counts.iter_mut().zip(&mut totals).zip(counts)
+                        {
+                            if count > *kept {
+                                *total += count - *kept;
+                                *kept = count;
+                            }
+                        }
+                        if let Some(cost) = record.cost_usd
+                            && message.cost.is_none_or(|(last, _)| last < at)
+                        {
+                            if message.cost.is_none() {
+                                without_cost -= 1;
+                            }
+                            message.cost = Some((at, cost));
+                        }
+                    }
+                    _ => unsupported = true,
+                }
+            }
+            if !record.sidechain
+                && let Some(model) = record.model.as_deref().filter(|m| *m != SYNTHETIC_MODEL)
+            {
+                let pair = (model.to_owned(), record.effort.clone());
+                let key = key();
+                let earlier = match named.get(&key) {
+                    Some((first, _)) if *first < at => None,
+                    Some((first, old)) => Some(Some((*first, old.clone()))),
+                    None => Some(None),
+                };
+                if let Some(replaced) = earlier {
+                    if let Some((first, old)) = replaced
+                        && let Some(positions) = pairs.get_mut(&old)
+                    {
+                        positions.remove(&first);
+                        if positions.is_empty() {
+                            pairs.remove(&old);
+                        }
+                    }
+                    pairs.entry(pair.clone()).or_default().insert(at);
+                    named.insert(key, (at, pair));
+                }
+            }
+            if order
+                .get(index + 1)
+                .is_some_and(|&next| records[next].at == record.at)
+            {
+                continue;
+            }
+            let usage = if unsupported || messages.is_empty() {
+                Err(USAGE_UNSUPPORTED)
+            } else {
+                Ok(TokenUsage {
+                    input: totals[0],
+                    output: totals[1],
+                    cache_read: totals[2],
+                    cache_creation: totals[3],
+                    messages: messages.len() as i64,
+                    // Summed as `span_usage` sums them, in its order.
+                    cost_usd: (without_cost == 0).then(|| {
+                        messages
+                            .values()
+                            .map(|message| message.cost.map_or(0.0, |(_, cost)| cost))
+                            .sum()
+                    }),
+                })
+            };
+            let mut uses: Vec<(ModelUse, usize)> = pairs
+                .iter()
+                .map(|((model, effort), positions)| {
+                    (
+                        ModelUse {
+                            model: model.clone(),
+                            effort: effort.clone(),
+                            messages: positions.len() as i64,
+                        },
+                        positions.last().copied().unwrap_or_default(),
+                    )
+                })
+                .collect();
+            uses.sort_by(|(a, a_last), (b, b_last)| {
+                b.messages.cmp(&a.messages).then(b_last.cmp(a_last))
+            });
+            steps.push((
+                record.at,
+                usage,
+                uses.into_iter().map(|(model, _)| model).collect(),
+            ));
+        }
+        Self { steps }
+    }
+
+    /// The [`span_usage`] and [`span_models`] of its records to `cut` (one
+    /// past the end it was made to is that end's): picked, not counted.
+    pub fn at(&self, cut: i64) -> (Result<TokenUsage, &'static str>, Vec<ModelUse>) {
+        match self.steps.partition_point(|(at, ..)| *at < cut) {
+            0 => (Ok(TokenUsage::default()), Vec::new()),
+            to => {
+                let (_, usage, models) = &self.steps[to - 1];
+                (usage.clone(), models.clone())
+            }
+        }
+    }
 }
 
 /// What a `session_closed` records of `uses`: `model` and `effort` of the
@@ -437,6 +612,186 @@ mod tests {
 
     fn records_of(lines: &[String]) -> Vec<TranscriptRecord> {
         records(lines)
+    }
+
+    /// One assistant record at `ms` for [`span_tokens_pick_what_span_usage_and_span_models_count_to_any_cut`].
+    #[allow(clippy::too_many_arguments)]
+    fn record_at(
+        ms: i64,
+        id: Option<&str>,
+        model: Option<&str>,
+        effort: Option<&str>,
+        counts: Option<(i64, i64)>,
+        cost: Option<f64>,
+        sidechain: bool,
+    ) -> String {
+        let mut message = json!({"content": []});
+        if let Some(id) = id {
+            message["id"] = json!(id);
+        }
+        if let Some(model) = model {
+            message["model"] = json!(model);
+        }
+        if let Some((input, output)) = counts {
+            message["usage"] = json!({"input_tokens": input, "output_tokens": output,
+                                      "cache_read_input_tokens": input * 3});
+        }
+        let mut value = json!({"type": "assistant", "timestamp": millis_text(ms),
+                               "sessionId": SESSION, "message": message});
+        if let Some(effort) = effort {
+            value["effort"] = json!(effort);
+        }
+        if let Some(cost) = cost {
+            value["costUSD"] = json!(cost);
+        }
+        if sidechain {
+            value["isSidechain"] = json!(true);
+        }
+        value.to_string()
+    }
+
+    /// The usage and models [`SpanTokens`] picks to any cut are those
+    /// [`span_usage`] and [`span_models`] count to it (task 1334), with
+    /// records out of the order of their times, the records of one message
+    /// at different times (counts, costs and models), records sharing a
+    /// time, records without an id, a subagent's and synthetic records,
+    /// costs on every message or on some, a usage this reader does not
+    /// know, and records without a usage; before, in and after the span.
+    #[test]
+    fn span_tokens_pick_what_span_usage_and_span_models_count_to_any_cut() {
+        let opus = Some("claude-opus-5-5");
+        let sonnet = Some("claude-sonnet-5");
+        let mixed = records(&[
+            record_at(500, Some("early"), opus, None, Some((1, 1)), None, false),
+            record_at(
+                3_000,
+                Some("a"),
+                opus,
+                Some("high"),
+                Some((5, 2)),
+                None,
+                false,
+            ),
+            record_at(
+                1_000,
+                Some("a"),
+                sonnet,
+                Some("low"),
+                Some((3, 9)),
+                None,
+                false,
+            ),
+            line(2, json!({"type": "user", "message": {"content": "hi"}})),
+            record_at(2_000, None, sonnet, None, Some((7, 7)), None, false),
+            record_at(
+                2_000,
+                Some("b"),
+                opus,
+                Some("high"),
+                Some((2, 4)),
+                None,
+                false,
+            ),
+            record_at(
+                2_500,
+                Some("s"),
+                Some("claude-haiku-4-5"),
+                None,
+                Some((9, 9)),
+                None,
+                true,
+            ),
+            record_at(
+                4_000,
+                Some("c"),
+                Some("<synthetic>"),
+                None,
+                Some((1, 0)),
+                None,
+                false,
+            ),
+            record_at(
+                4_000,
+                Some("b"),
+                sonnet,
+                Some("low"),
+                Some((2, 6)),
+                None,
+                false,
+            ),
+            record_at(1_500, Some("d"), opus, Some("high"), None, None, false),
+            record_at(6_000, None, sonnet, Some("low"), Some((4, 4)), None, false),
+            record_at(
+                5_000,
+                Some("e"),
+                opus,
+                Some("high"),
+                Some((8, 1)),
+                None,
+                false,
+            ),
+            record_at(
+                9_000,
+                Some("late"),
+                sonnet,
+                None,
+                Some((100, 100)),
+                None,
+                false,
+            ),
+        ]);
+        let costed = records(&[
+            record_at(1_000, Some("a"), opus, None, Some((1, 1)), Some(0.1), false),
+            record_at(3_000, Some("a"), opus, None, Some((1, 2)), Some(0.2), false),
+            record_at(2_000, Some("a"), opus, None, Some((1, 3)), Some(0.7), false),
+            record_at(1_500, Some("b"), opus, None, Some((2, 2)), Some(0.3), false),
+            record_at(2_500, None, opus, None, Some((2, 2)), Some(1e-7), false),
+            record_at(2_500, Some("c"), opus, None, Some((2, 2)), None, false),
+            record_at(
+                3_500,
+                Some("c"),
+                opus,
+                None,
+                Some((2, 2)),
+                Some(0.05),
+                false,
+            ),
+        ]);
+        let unknown = records(&[
+            record_at(1_000, Some("a"), opus, None, Some((1, 1)), None, false),
+            line(
+                2,
+                json!({"message": {"id": "x", "usage": {"input_tokens": "3"}}}),
+            ),
+            record_at(3_000, Some("b"), opus, None, Some((1, 1)), None, false),
+        ]);
+        let bare = records(&[
+            record_at(1_000, Some("a"), opus, None, None, None, false),
+            record_at(2_000, Some("b"), opus, None, Some((1, 1)), None, false),
+        ]);
+        for records in [&mixed, &costed, &unknown, &bare] {
+            let mut cuts: Vec<i64> = records
+                .iter()
+                .flat_map(|r| [r.at - 1, r.at, r.at + 1])
+                .chain([i64::MIN / 2, 0, 20_000])
+                .collect();
+            cuts.sort_unstable();
+            cuts.dedup();
+            for (start, end) in [(0, 20_000), (1_000, 4_000), (1_001, 9_000), (7_000, 8_000)] {
+                let tokens = SpanTokens::new(records, start, end);
+                for &cut in &cuts {
+                    let to = cut.min(end);
+                    assert_eq!(
+                        tokens.at(cut),
+                        (
+                            span_usage(records, start, to),
+                            span_models(records, start, to)
+                        ),
+                        "{start}..{end} to {cut}"
+                    );
+                }
+            }
+        }
     }
 
     /// A usage without numeric counts, or assistant records none of which
