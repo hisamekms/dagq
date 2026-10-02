@@ -4,7 +4,7 @@ type: design
 title: "`plan` / `planners`"
 status: current
 created: 2026-09-26
-updated: 2026-10-02
+updated: 2026-10-03
 last_verified: 2026-10-02
 scope: runtime
 related:
@@ -14,9 +14,16 @@ related:
   - design-supervisor-lifecycle-actor-model
   - adr-t803-1
   - adr-t1300-1
+  - adr-t1394-1
+  - adr-t1394-2
+  - adr-t1228-1
+  - adr-t1404-1
+  - design-supervisor-lifecycle-headless-worker
 ---
 
 # `plan` / `planners`
+
+> 人が開くplannerは[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)で廃止し、計画の入口をinboxからの依頼にする予定で、runtimeのplannerの非対話の経路は[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)の予定。どちらも**まだ実装していない**。下の節は今の姿で、予定は末尾の[予定: inboxからの依頼と非対話のplanner](#予定-inboxからの依頼と非対話のplanner)にある。
 
 [ADR-0044](../../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定1・6・12・13。plannerは常駐せず、proposalごとにオンデマンドのworkspaceを開く。use caseは`src/application/planner.rs`、entry pointは`compose::plan` / `compose::planners` / `compose::planner_session`。
 
@@ -32,3 +39,27 @@ related:
 - **`dagq planners [--all] [--cmux EXE]`**: 閉じていないplanner（`--all`で全部）を古い順に、行の各fieldに`state`・`alive`・`idle_since`・`dir`（画面から推定したidleか、推定の区間にbackgroundの表示があるなら`idle_inferred`も）を足して`{"planners": [...]}`で返す。読むだけで、observerとreviewerも打てる（`plan`と`planner-session`は拒む）。
 - **`runner`の片付け**（task 696、goal 54の(3)）: plannerの`runner`はwrapperが動いている間しか使わない（plannerは同じディレクトリで開き直さない）。wrapper（`run_planner_session`）はagentの終了を記録した後（agentが起動できなかったときの127も）に自分の`runner`を消す（動いているプロセスのイメージは残るので、消しても走り続ける）。消せなかった分と、wrapperが終了を記録せずに死んだ分、この変更より前に残った分は、`remove_unused_planner_runners`（`PlannerSession::runner_unused`）が閉じた行も含む全行を見て消す: agentの終了が記録されている、wrapperのPIDが死んでいるかheartbeatが30秒より古い、wrapperが登録されないまま行を作ってから120秒たち行が閉じている（workspaceが開かなかったか、cmuxの一覧に居ない。開いたままのworkspaceは遅れて`runner`を実行しうるので残す）、のどれか。行が閉じているだけでは消さない（wrapperが生きている間は残す）。行とディレクトリの他のfileは残す。行うのは上の行の片付けと同じ回（supervisorのsweepと`plan`の実行時。失敗はsweepではlogだけ、`plan`では`warnings`）
 - **test**: `tests/it/lifecycle_plan.rs`がfakeのcmuxで`plan`の記録・title・env・見た目・workspaceを作れなかったとき、前のDBが残した`idle.json`を開くときに消すこと（`a_new_planner_does_not_take_the_idle_marker_an_old_database_left`）、`plan`の行の片付け（`plan_closes_the_records_of_planners_whose_workspace_and_wrapper_are_gone`: wrapperが死んだか終わった行は閉じ、一覧に居る行・wrapperが生きている行と、一覧が取れないときは閉じない）、runtimeが立てるplanner、wrapperと状態の判定（wrapperが終了の後に自分の`runner`を消すことを含む）、`plan`の`runner`の片付け（終わったwrapperの分は消え、生きているwrapperと起動の猶予の中の分は残る）を、`tests/it/runtime_sweep.rs`の`the_sweep_removes_the_runners_of_planners_whose_wrapper_is_done`がsupervisorのsweepで、終わったか死んだwrapperの`runner`を消し、閉じた行でもwrapperが生きていれば残すことを、`tests/it/runtime_sweep.rs`の`the_sweep_closes_the_records_of_planners_whose_workspace_and_wrapper_are_gone`がsupervisorのsweepで人とruntimeのplannerの行が閉じ（それぞれ`planner_closed`の`abandoned`を1回）、一覧の失敗では閉じないことを、`tests/it/planner_close.rs`がsupervisorのpassで、人のplannerがagentの終了から猶予を過ぎるとworkspaceと行が閉じて`planner_closed`（`person_exited`）が1回残り`events --kind`で読めること、猶予の中・`lost`・生きているplannerと一覧が取れないときは閉じないこと、closeが失敗した行は残って次のpassで閉じることを、`tests/it/lifecycle_plan.rs`の`plan_closes_a_persons_planner_whose_agent_exited_past_the_grace`がsupervisorの居ない`plan`で同じ条件のplannerが閉じることを、`a_planner_session_is_judged_alive_and_idle_like_a_worker`が人のplannerのwrapperが終了の後に閉じる予告をterminalの書き先へちょうど1行で出し、結果の`notice`にも載せることを、`tests/it/plan_review.rs`がruntimeのplannerの終わりの`planner_closed`（`runtime_exited`）を、`tests/e2e.rs`の`plan_opens_planners_side_by_side_that_submit_go_idle_and_exit`が実cmuxとstubのClaudeで、2つのplannerを同時に開き、それぞれがproposalをsubmitしてidleになり、`/exit`で終わるまでを確かめる。`tests/it/planner_screen_idle.rs`が印の無いか古いplannerの画面からの推定を確かめる（[画面からのidleの推定](receipt-and-session-exit.md#画面からのidleの推定)）。identifyの失敗でworkspaceを閉じることは`src/infrastructure/adapters.rs`の`a_created_workspace_cmux_does_not_identify_is_closed`がfakeのcmuxの実行ファイルで確かめる。createが失敗を返してもworkspaceが作られていた場合と、閉じた行に対してwrapperが起動した場合は`tests/it/lifecycle_plan.rs`の`a_planner_workspace_made_although_its_create_failed_is_not_left_open`がfakeのcmux（`create_times_out`）で、descriptionで見つけて閉じ行がerror付きで閉じること、一覧の後に作られたworkspaceは断られたwrapperが閉じること、行が記録するworkspaceの2つ目のwrapperは閉じないことを確かめる。`src/application/actor_executor.rs`の`a_workspace_cmux_made_although_its_create_failed_is_closed`はrunの`create` / `create_resume`とplannerで閉じ、inbox（descriptionがqueueのもの）と他のdescriptionは閉じないことを確かめる。
+
+## 予定: inboxからの依頼と非対話のplanner<a id="予定-inboxからの依頼と非対話のplanner"></a>
+
+[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)と[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)（goal 87）の予定で、**まだ実装していない**。下の表・欄・eventのkind・CLIの綴り・数値は実装のtaskが決める仮のもので、実装したらこの節を今の姿に書き直し、上の節の人のplannerの記述を「廃止前から開いているもの」に絞る。
+
+### 流れ
+
+1. 人がinboxに計画を頼む。inboxは人の言葉を依頼として記録する（仮: `dagq request add --text '<人の言葉>' [--ref ask:N] [--ref task:N] [--ref run:ID] [--ref event:N] [--ref finding:N]`）。inboxが補う文は`--note`で人の言葉と分ける。記録できるのはinboxと`DAGQ_ROLE`の無い人だけで、planner・worker・observer・jobは`authorization_denied`で拒む（capabilityは仮に`request.add`）。一覧と詳細（仮: `dagq requests [--all]` / `dagq requests ID`）は読み取りで、plannerを含む読み取りのroleが打てる。
+2. supervisorは`tend_planners`の各passで、`open`の依頼のうちplannerが立っていない・`planner_question`が開いていない・3回に達していないものに、draftのplanner・findingのplannerと同じ上限`[supervisor] runtime_planners`の中でruntimeのplannerを1つ立てる（仮: `open_request_planners`。`BEGIN IMMEDIATE`で対象の条件を確かめ直してから`planners`の行（`request_id`）と`request_planner_opened`（`request_id`・`planner_id`・`attempt`・`ask_id`）を書く）。titleは`[<repo>]planner#<id> - request <request-id>`。`--no-claude`の間（Codexのplannerができるまで）とqueueの控えの間は立てず、依頼は`open`のまま待ち、`status`のinbox向けの欄（仮: `requests`）に待っている依頼として出る。
+3. 初期prompt（仮: `request_planner_prompt`）は、人の言葉（inboxの補足は分けて）、参照先の中身（askの問いと答え、task・runのreceiptの`summary`と`follow_ups`、eventのpayload、findingの見立てと根拠）、参照から引けるgoal（無ければ`dagq goal list`）、`dagq search` / `related`で既存のtaskと実装済みを確かめる手順、[ADR-t451-1](../../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)の上げる基準（推奨と確信度を載せた`planner_question`は決めきれないものだけ）、`prompt::repository_rules`と記録を読むCLI（`prompt::RECORD_READING`）を載せる。
+4. 結末: plannerが`dagq submit`すると、submitが依頼のplannerのproposalを依頼に結び（`request_proposals`、仮）、最初のsubmitで依頼を`proposed`にして`request_proposed`（`request_id`・`proposal_id`）を記録する。手当てしないときは`dagq request decline ID --reason '...'`（仮。依頼のplanner自身だけが打てる）で`declined`にし、`request_declined`を記録する。決めずに終わったplannerが3回（`MAX_REQUEST_PLANNERS`、仮）に達したら`request_planner_exhausted`で`exhausted`にする。inboxの`watch`は`request_proposed`を報告として受け、`request_declined`と`request_planner_exhausted`はattention（仮: `rephrase or drop the request`）として受ける。
+5. `planner_question`は`--request ID`を持てる。answerの行き先は`planner_answer_route`に依頼を足し、依頼の生きているplannerへ（配送は`claim_planner_answer`で取ってから）、居なければ依頼がまだ`open`ならanswerを持った新しいplannerを立てて渡し、そうでなければ`planner_answer_closed`で閉じる（draftとfindingと同じ形）。
+6. `dagq plan`は何も開かずに失敗し、「計画はinboxに頼む（`dagq request add`）」の案内をerrorに出す。廃止の時点で開いている人のplanner（origin `person`）の行とworkspaceはそのまま扱い、reviseの配送、[ADR-t1300-1](../../adr/2026-10-02-t1300-1-runtime-closes-exited-person-planners-after-a-grace.md)の猶予の後の閉じ（`person_exited`）と行の片付けは変えない。人が`DAGQ_ROLE`の無いterminalで打つ`add` / `submit`は今までどおり通り、持ち主の居ないproposal（`owner_origin: person`、workspaceなし）のreviseはruntimeのplannerが受ける。
+7. 人のplannerを前提にした行き先の読み替え: `draft_planner_exhausted`・`finding_planner_exhausted`・`keep_draft`のdraft・observerの古いdraft goal・goal closeの人の判断は、inboxがそのdraft・finding・goalを参照にした依頼を記録するか、人が自分のterminalで決める（attentionの文面の「in a planner」を依頼の案内に変える）。
+8. [ADR-t1228-1](../../adr/2026-10-02-t1228-1-inbox-and-planner-reach-sessions-through-the-dagq-cli.md)のplannerへの依頼のCLI（task 1229）は、開いているruntimeのplannerへの続きの依頼に使う。新しい依頼は上の1。どちらも依頼のファイルをplannerのディレクトリに写して指す。
+
+### runtimeのplannerの経路
+
+- **選ぶ欄**: `[roles.runtime_planner]`の`route = "interactive" | "headless"`（仮。既定`interactive`）。plannerを立てるpassごとに読み、`planners`の行に`route`を持たせる。動いているplannerの経路は変えない。`[roles.planner]`は新しいplannerに使われなくなる（[Actor model](actor-model.md)）。
+- **非対話のplanner**: plannerのディレクトリに`turns/`（[非対話のworker](headless-worker.md#run-dirのturns)と同じ`request-NNNNNN.json`・`exit`・`limits.json`・`turn-NNNNNN.jsonl`）を置き、wrapper（`planner-session`）がworkerの非対話のwrapperと同じturnの駆動（`headless_session`）で動く。初期promptが最初の依頼。`turn_started` / `turn_finished`はqueueのevent（`planner_id`付き）に記録する。reviseの配送（`plan_revise_sent`）、`planner_question`のanswer、促しは次のturnの依頼にし、`submit_input`・Stop hook・画面からのidleの推定を使わない。`end_runtime_planners`の`/exit`は`exit`の依頼にする。wrapperはworkspaceの中かbackgroundかを[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)の設定で選ぶ（[非対話のworker](headless-worker.md)の予定の節）。
+- **状態**: `planner_view`は非対話のplannerで、turnが動いていれば`working`、最後のturnが終わり取られていない依頼が無ければ`idle`（`idle_since`はturnの終わり）、wrapperが死ねば`lost`。`question_wait`（自分の`planner_question`を待つ）の間は`/exit`しない。`planner_unresponsive`（`subject: "planner"`）はturnが`[stall]`の上限を超えて止められたときと、idleのまま仕事が終わらず`--planner-timeout`を過ぎたときに出す。
+- **使えないとき**: turnの`failure`が`authentication` / `usage_limit` / `launch`なら、plannerを決めずに終わったものに数えず、workerと同じqueueの控え（`queue_hold`のask）で待つ。providerの切り替えは無い。
+- **区間**: kind `runtime_planner`の区間をturnから開いて閉じ（[非対話のworkerの区間](../provider-lifecycle.md#非対話のworkerの区間)と同じ）、区間に`route`を持たせる。`stats`の`sessions.by_kind.runtime_planner`と`kpi`の`session_*`の指標を`route`で分けて出す（仮: `kpi --by route`をplannerにも効かせる）。
+- **ADR-t1228-1のCLI**: 非対話のplannerには、plannerへの依頼は決まった文を次のturnの依頼として置き（作業中のturnがあれば、その後に取られる）、閉じた・`lost`・`exit`を置いたplannerには拒む。`planner screen`は画面が無いこと（仮: `{"screen": null, "reason": "headless", "turns": "<planner dir>/turns"}`）を返し、`planner send`は拒む（`--answer`も。answerはsupervisorがturnとして届ける）。`planner close`は`exit`を置いてwrapperの終わりを待ち、終わらなければADR-t1404-1決定3の手順で止めてから行を閉じ、`planner_closed`（仮: `code: closed_by_request`）を記録する。

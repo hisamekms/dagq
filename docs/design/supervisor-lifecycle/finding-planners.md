@@ -4,10 +4,12 @@ type: design
 title: "Finding planners (supervisor)"
 status: current
 created: 2026-09-27
-updated: 2026-10-02
+updated: 2026-10-03
 last_verified: 2026-09-28
 scope: runtime
 related:
+  - adr-t1394-1
+  - adr-t1394-2
   - adr-t451-1
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-draft-planners
@@ -37,3 +39,10 @@ related:
 ## 今後の姿: 推奨が出せればplannerが決める（未実装、ADR-t451-1）<a id="推奨が出せればplannerが決める未実装"></a>
 
 [ADR-t451-1](../../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)の決定5。**未実装**。findingのplannerも、[Draft planners](draft-planners.md#推奨が出せればplannerが決める未実装)と同じく、推奨が出せる判断（既存のgoalへのtask、新しいgoal、`finding dismiss`）は自分で決めて理由をproposalのtaskの`context`かfindingの`--reason`に書き、`planner_question`はADR-0047決定41の`scope`・`discard`に当たり材料で決めきれないものと確信度が`low`のものだけにする（推奨と確信度を載せる）。findingから作るproposalはfollow_upの上限の対象にならない（ADR-0047決定20）。
+
+## 予定: 人のplannerの廃止と非対話の経路（未実装、ADR-t1394-1・ADR-t1394-2）<a id="予定-人のplannerの廃止と非対話の経路"></a>
+
+[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)と[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)（goal 87）の予定で、**まだ実装していない**。流れの全体は[予定: inboxからの依頼と非対話のplanner](plan-planners.md#予定-inboxからの依頼と非対話のplanner)にある。
+
+- 8の`finding_planner_exhausted`のattention（`decide the finding in a planner`）と、9の「runtimeのplannerが一度も立っていないfindingのanswerは人（人が開いたplannerの質問）」は、人が開くplannerの廃止の後、inboxがそのfindingを参照（`--ref finding:N`）にした計画の依頼を記録し、依頼のplannerが`submit --finding`か`finding dismiss`で決める経路に変わる。人が`DAGQ_ROLE`の無いterminalで打つ`submit --finding` / `finding dismiss`は残る。依頼のplannerがsubmitしたproposalは、依頼とfindingの両方に結ばれる。
+- findingのplannerも`[roles.runtime_planner]`の経路に従う。非対話では、9の答えの打ち込みと10の`/exit`が次のturnの依頼と終了の依頼になり、idleはturnの終わりで判断する。11の改善の上限は変えない（依頼のplannerはfindingを持たないかぎり改善に数えない）。

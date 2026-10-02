@@ -4,10 +4,12 @@ type: design
 title: "Draft planners (supervisor)"
 status: current
 created: 2026-09-26
-updated: 2026-10-02
+updated: 2026-10-03
 last_verified: 2026-10-02
 scope: runtime
 related:
+  - adr-t1394-1
+  - adr-t1394-2
   - adr-t451-1
   - design-supervisor-lifecycle
   - adr-t807-1
@@ -48,3 +50,10 @@ related:
 - **prompt**: runtimeのplannerは、推奨が出せるdraftの採否を自分で決める（採用はsubmit、不採用はcancel）。理由は、採用ならtaskの`context`に、不採用・`keep_draft`ならdraftの`note`に書く。`planner_question`にするのは、ADR-0047決定41の`scope`・`discard`に当たり材料で決めきれないもの、確信度が`low`のもの、[ADR-t808-1](../../adr/2026-09-28-t808-1-runtime-planners-submit-follow-ups-up-to-depth-two.md)の自動で採用しない上限（深さ3以上と、goalが無いか閉じたgoalのfollow_up）に当たるものだけで、問いには推奨（`--recommend`）と確信度を載せる（[ask](ask.md#aiの推奨と確信度未実装)）。
 - **上限**: CLIの`submit`が上限のdraftを拒む規則は変えない。
 - **集計**: [follow_upの種類と判断の集計](#follow_upの種類と判断の集計未実装)の結末に、plannerが自分で決めたものと`planner_question`を経たものを分けて数える（今も`follow_up_adopted`の`by`で分かる）。
+
+## 予定: 人のplannerの廃止と非対話の経路（未実装、ADR-t1394-1・ADR-t1394-2）<a id="予定-人のplannerの廃止と非対話の経路"></a>
+
+[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)と[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)（goal 87）の予定で、**まだ実装していない**。綴りは仮で、流れの全体は[予定: inboxからの依頼と非対話のplanner](plan-planners.md#予定-inboxからの依頼と非対話のplanner)にある。
+
+- **人が開いたplannerで決める、の行き先**: 4の`draft_planner_exhausted`のattention（`decide the draft in a planner`）、5の`keep_draft`で残したdraft、6の「人が開いたplannerからのsubmit」は、人が開くplannerの廃止の後、inboxがそのdraftを参照（`--ref task:N`）にした計画の依頼を記録し、依頼のruntimeのplannerが決めるか、人が`DAGQ_ROLE`の無い自分のterminalで`submit`する経路に変わる。依頼のplannerはruntimeのplannerなので、6の自動で採用しない上限は効き、上限のdraftは`planner_question`の`adopt`を経る。人のterminalからのsubmitは今の「人が開いたplanner」と同じく人の判断を経たものとして扱う（`by: "person"`、深さを0に戻す）。
+- **非対話の経路**: draftのplannerも`[roles.runtime_planner]`の経路に従う。非対話のplannerでは、5の答えの打ち込みと7の`/exit`が次のturnの依頼と終了の依頼になり、7のidleはStop hookのmarkerと画面からの推定でなくturnの終わりで判断する。束・3回の上限・結末の記録（8）は変えない。
