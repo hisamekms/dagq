@@ -2181,6 +2181,7 @@ fn run_agent_with_review_retry(
     close_fail: bool,
     retry: bool,
 ) -> (Fixture, PathBuf, dagq::domain::TaskDetail) {
+    warm_dagq();
     let (dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, script);
     backend.close_fail = close_fail;
@@ -2569,6 +2570,30 @@ pub fn assert_landed(repo: &Path, run: &TaskRun, task_title: &str, expected_pare
     assert!(!git_out(repo, &["branch", "--list", run.branch().unwrap()]).contains("dagq/"));
 }
 
+/// Start the first exec of the `dagq` binary in this test process on a
+/// thread of its own, once, and return at once (task 1416). On the
+/// development host the first exec of the binary from each test process
+/// that cargo started waits about 0.7 s unloaded for macOS's XProtect to
+/// scan it, and any other exec of it meanwhile waits for the same scan;
+/// nextest runs every test in a process of its own, so every test whose
+/// stub session starts the queue service paid it there. Started as a
+/// fixture begins, the scan overlaps the template copies and the
+/// supervisor's claim and provisioning. `--version` reads no queue and
+/// writes nothing, so what the tests read is the same.
+pub fn warm_dagq() {
+    static WARM: std::sync::Once = std::sync::Once::new();
+    WARM.call_once(|| {
+        thread::spawn(|| {
+            let _ = Command::new(env!("CARGO_BIN_EXE_dagq"))
+                .arg("--version")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        });
+    });
+}
+
 /// A validated run plus a ready dependent task, before any landing.
 pub fn awaiting_run() -> (Fixture, PathBuf, PathBuf, TaskRun) {
     awaiting_run_with_review_retry(false)
@@ -2614,6 +2639,7 @@ fn awaiting_run_with_review_retry(retry: bool) -> (Fixture, PathBuf, PathBuf, Ta
 /// `integrate` of the second (its approval) conflicts and parks it as
 /// `needs_session`. Returns the parked run and the landed main.
 pub fn parked_conflict(repo: &Path, db: &Path, backend: &TestWorkspace) -> (TaskRun, String) {
+    warm_dagq();
     let mut queue = SqliteQueue::open(db).unwrap();
     add_ready_task(&mut queue, "second", &[]);
     supervise(db, repo, backend).unwrap();
