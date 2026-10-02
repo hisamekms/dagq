@@ -249,6 +249,7 @@ impl Supervisor<'_> {
                     session_id: job.session_id.as_deref(),
                     launch: Some(launch),
                     without_mcp: false,
+                    without_env: &[],
                     env: Vec::new(),
                     streams: Streams::Files {
                         stdout: &stdout,

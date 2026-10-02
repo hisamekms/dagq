@@ -92,13 +92,16 @@ pub enum SessionAgent<'a> {
     Resume { run: &'a TaskRun },
     /// One turn of a headless worker (ADR-t813-1): `prompt` starting a
     /// session or going on with one, as `session` says, its output to
-    /// `stdout` and `stderr` rather than the wrapper's terminal.
+    /// `stdout` and `stderr` rather than the wrapper's terminal, without
+    /// the variables `without_env` names (`RUSTC_WRAPPER` for a sandboxed
+    /// turn whose sccache server was not confirmed, ADR-t1215-1).
     Turn {
         run: &'a TaskRun,
         prompt: &'a str,
         session: crate::domain::turn::TurnSession<'a>,
         stdout: &'a Path,
         stderr: &'a Path,
+        without_env: &'a [&'a str],
     },
     /// A planner (ADR-0041).
     Planner(PlannerCommand<'a>),
@@ -171,13 +174,16 @@ pub enum ActorProgram<'a> {
     /// A headless job: its session id when known ahead (ADR-0048 decision
     /// 4), its model, whether it loads no MCP server, the environment
     /// beside the actor's (the repository's `[run.env]`, the observer's
-    /// `PATH`) and where its output goes.
+    /// `PATH`), the variables it does not inherit (`RUSTC_WRAPPER` for a
+    /// sandboxed job whose sccache server was not confirmed, ADR-t1215-1)
+    /// and where its output goes.
     Headless {
         program: HeadlessProgram<'a>,
         session_id: Option<&'a str>,
         launch: Option<&'a ActorLaunch>,
         without_mcp: bool,
         env: Vec<(String, String)>,
+        without_env: &'a [&'a str],
         streams: Streams<'a>,
     },
 }
@@ -686,6 +692,7 @@ impl ActorExecutor for HostActorExecutor<'_> {
             ActorProgram::SessionAgent { agent, model } => {
                 let provider = self.provider()?;
                 let mut streams = Streams::Inherit;
+                let mut without: &[&str] = &[];
                 let (mut command, worker) = match agent {
                     SessionAgent::Worker { run, prompt } => {
                         (provider.command(run, prompt)?, Some(run))
@@ -697,8 +704,10 @@ impl ActorExecutor for HostActorExecutor<'_> {
                         session,
                         stdout,
                         stderr,
+                        without_env,
                     } => {
                         streams = Streams::Files { stdout, stderr };
+                        without = without_env;
                         (provider.turn_command(run, prompt, session)?, Some(run))
                     }
                     SessionAgent::Planner(planner) => (provider.planner_command(&planner)?, None),
@@ -728,6 +737,9 @@ impl ActorExecutor for HostActorExecutor<'_> {
                         command.env_remove(name);
                     }
                 }
+                for name in without {
+                    command.env_remove(name);
+                }
                 let child = self
                     .spawner()?
                     .spawn(&command, streams)
@@ -740,6 +752,7 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 launch,
                 without_mcp,
                 env,
+                without_env,
                 streams,
             } => {
                 let provider = self.provider()?;
@@ -786,6 +799,9 @@ impl ActorExecutor for HostActorExecutor<'_> {
                     actor_env.extend(env);
                 }
                 command.envs(env).envs(actor_env);
+                for name in without_env {
+                    command.env_remove(name);
+                }
                 let child = spawner.spawn(&command, streams)?;
                 let child = if client {
                     self.service()?
@@ -1133,6 +1149,7 @@ mod tests {
             session_id: None,
             launch: None,
             without_mcp: false,
+            without_env: &[],
             env: Vec::new(),
             streams: Streams::Null,
         }
@@ -1595,6 +1612,7 @@ mod tests {
                         session_id: Some("s1"),
                         launch: Some(&launch),
                         without_mcp: true,
+                        without_env: &[],
                         // The caller's own names never replace the actor's.
                         env: pairs(&[("PATH", "/bin"), ("DAGQ_ROLE", "user")]),
                         streams: Streams::Null,
@@ -1694,6 +1712,7 @@ mod tests {
                         session_id: None,
                         launch: None,
                         without_mcp: false,
+                        without_env: &[],
                         env: Vec::new(),
                         streams: Streams::Null,
                     },

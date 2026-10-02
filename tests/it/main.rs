@@ -121,6 +121,7 @@ mod runtime_review_questions;
 mod runtime_review_reasons;
 mod runtime_run_env;
 mod runtime_run_files;
+mod runtime_sccache;
 mod runtime_screen_idle;
 mod runtime_screen_idle_input;
 mod runtime_session;

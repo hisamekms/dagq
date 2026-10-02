@@ -30,7 +30,7 @@ use std::{
 };
 
 use super::{
-    AgentProvider, ProcessControl, Queue, RunFiles, Spawned, Spawner, TurnReader,
+    AgentProvider, ProcessControl, Queue, RunFiles, SccacheServer, Spawned, Spawner, TurnReader,
     actor_executor::{
         ActorExecutionSpec, ActorExecutor, ActorProgram, HostActorExecutor, SessionAgent,
         WorkspaceAccess,
@@ -39,6 +39,7 @@ use super::{
 use crate::domain::{
     ActorContext, Provider, TaskRun, event_kind,
     provider_switch::{since_switch, switches},
+    sccache::{SccacheTarget, WRAPPER_VAR},
     stall::StallConfig,
     tokens::TokenUsage,
     turn::{
@@ -71,6 +72,11 @@ pub(super) struct Turns<'a> {
     /// The wrapper of a `needs_session` run's resume: it waits for the
     /// supervisor's request instead of starting with the task's prompt.
     pub(super) resume: bool,
+    /// The sccache its environment names as `RUSTC_WRAPPER`, and how its
+    /// server is looked at: a Codex turn runs in Codex's sandbox, so it
+    /// runs without `RUSTC_WRAPPER` unless the server listens just before
+    /// it starts (ADR-t1215-1). `None` when the wrapper names no sccache.
+    pub(super) sccache: Option<(&'a SccacheTarget, &'a dyn SccacheServer)>,
 }
 
 /// The session of the provider a run is on, as its events since it last
@@ -349,6 +355,45 @@ impl<'a> Turns<'a> {
         }
     }
 
+    /// The variables turn `turn` on `provider` runs without: a Codex turn
+    /// whose sccache server does not listen just before it starts runs
+    /// without `RUSTC_WRAPPER` (its build is uncached but correct), so that
+    /// the sccache client in Codex's sandbox does not start a server that
+    /// keeps the sandbox (ADR-t1215-1); recorded as
+    /// `sccache_wrapper_removed`. The look connects to the port and starts
+    /// nothing.
+    fn sccache_turn(&mut self, turn: u64, provider: Provider) -> &'static [&'static str] {
+        let Some((target, server)) = self.sccache else {
+            return &[];
+        };
+        if provider != Provider::Codex {
+            return &[];
+        }
+        let why = match server.listening(target.port) {
+            Ok(true) => return &[],
+            Ok(false) => format!("no sccache server listens on port {}", target.port),
+            Err(error) => format!("the sccache server could not be looked at: {error:#}"),
+        };
+        tracing::warn!(run_id = %self.run.id(), "run {}: turn {turn} runs without {WRAPPER_VAR}: {why}", self.run.id());
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        if let Err(error) = self.queue.record_runtime_event(
+            self.run.id(),
+            EventKind::SccacheWrapperRemoved,
+            json!({
+                "at": at,
+                "by": "wrapper",
+                "turn": turn,
+                "port": target.port,
+                "reason": why,
+            }),
+        ) {
+            tracing::warn!(run_id = %self.run.id(), error = %format_args!("{error:#}"), "sccache_wrapper_removed could not be recorded: {error:#}");
+        }
+        &[WRAPPER_VAR]
+    }
+
     /// Heartbeat the wrapper; a failure (the queue busy) is only logged,
     /// as the interactive wrapper does.
     fn heartbeat(&mut self) {
@@ -392,6 +437,7 @@ impl<'a> Turns<'a> {
         let agent = self.agent(on.provider)?;
         let mut reader = agent.turn_reader()?;
         let worktree = PathBuf::from(run.worktree_path().context("missing worktree")?);
+        let without_env = self.sccache_turn(turn, on.provider);
         let spawned = HostActorExecutor::new(self.db)
             .with_provider(agent)
             .with_spawner(self.spawner)
@@ -409,6 +455,7 @@ impl<'a> Turns<'a> {
                         },
                         stdout: &stdout,
                         stderr: &stderr,
+                        without_env,
                     },
                     model: Some((&session.model, &session.effort)),
                 },

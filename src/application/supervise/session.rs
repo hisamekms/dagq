@@ -182,6 +182,11 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
             .context("run directory must be new")?;
         let run_env = self.verifier.run_env(&run_dir)?;
         let run = self.queue.run(claimed.id())?;
+        // A Codex worker's turns run in Codex's sandbox: the server they
+        // build through is the supervisor's (ADR-t1215-1).
+        if run.actual_provider() == crate::domain::Provider::Codex {
+            self.ensure_sccache(crate::domain::sccache::CheckReason::BeforeWorker);
+        }
         let task = self.queue.show(run.task_id())?.task;
         let inherited = self.write_prompt(&task, &run, &run_dir)?;
         if let Some(inherited) = &inherited {

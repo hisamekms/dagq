@@ -213,6 +213,9 @@ event_kinds! {
     RunWaitingEnded => "run_waiting_ended",
     RunWaitingStarted => "run_waiting_started",
     RuntimeError => "runtime_error",
+    SccacheServerStartFailed => "sccache_server_start_failed",
+    SccacheServerStarted => "sccache_server_started",
+    SccacheWrapperRemoved => "sccache_wrapper_removed",
     ScopeViolation => "scope_violation",
     ScratchpadRemoved => "scratchpad_removed",
     ScreenCaptureFailed => "screen_capture_failed",
@@ -356,6 +359,10 @@ impl EventKind {
                 // A heartbeat written again after busy failures (task 1119).
                 | SupervisorHeartbeatRetried
                 | RunEnvChanged
+                // The sccache server the supervisor started, or failed to,
+                // outside any sandbox (ADR-t1215-1).
+                | SccacheServerStarted
+                | SccacheServerStartFailed
                 | MarkRecorded
                 | MarkRetracted
                 // The KPI report the supervisor wrote (ADR-0051 decision 20).
@@ -941,6 +948,12 @@ mod tests {
             (EventKind::RunWaitingEnded, "run_waiting_ended"),
             (EventKind::RunWaitingStarted, "run_waiting_started"),
             (EventKind::RuntimeError, "runtime_error"),
+            (
+                EventKind::SccacheServerStartFailed,
+                "sccache_server_start_failed",
+            ),
+            (EventKind::SccacheServerStarted, "sccache_server_started"),
+            (EventKind::SccacheWrapperRemoved, "sccache_wrapper_removed"),
             (EventKind::ScopeViolation, "scope_violation"),
             (EventKind::ScratchpadRemoved, "scratchpad_removed"),
             (EventKind::ScreenCaptureFailed, "screen_capture_failed"),

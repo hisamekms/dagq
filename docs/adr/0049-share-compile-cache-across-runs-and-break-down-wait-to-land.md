@@ -10,6 +10,7 @@ supersedes:
   - adr-0040
 amended_by:
   - adr-t791-1
+  - adr-t1215-1
 owners:
   - hisamekms
 tags:

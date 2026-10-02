@@ -388,6 +388,26 @@ pub struct SuperviseOptions {
     /// Counts the supervisor loop's passes, one at the top of each; tests
     /// keep a clone and wait for passes past a threshold (task 1046).
     pub passes: Arc<AtomicU64>,
+    /// Keep the host's sccache server when `[run.env]`'s `RUSTC_WRAPPER`
+    /// is sccache (ADR-t1215-1): the CLI's supervisor does; `None` (the
+    /// tests unless they ask) looks at no server.
+    pub sccache: Option<SccacheOptions>,
+}
+
+/// How the supervisor keeps the sccache server
+/// ([`SuperviseOptions::sccache`]).
+#[derive(Debug, Clone)]
+pub struct SccacheOptions {
+    /// How long a start may take before it is taken to have failed.
+    pub start_timeout: Duration,
+}
+
+impl Default for SccacheOptions {
+    fn default() -> Self {
+        Self {
+            start_timeout: crate::infrastructure::sccache::START_TIMEOUT,
+        }
+    }
 }
 
 /// How the supervisor keeps the queue's service ([`SuperviseOptions::queue_service`]).
@@ -544,6 +564,7 @@ impl SuperviseOptions {
             broker: None,
             queue_service: None,
             passes: Arc::new(AtomicU64::new(0)),
+            sccache: None,
         }
     }
 
@@ -1131,6 +1152,14 @@ pub fn supervise_with_reviewer(
             }
         }),
         run_e2e,
+        sccache: options.sccache.as_ref().map(|settings| {
+            crate::application::supervise::SccachePort(Arc::new(
+                crate::infrastructure::sccache::SystemSccache::new(
+                    db.parent().unwrap_or(Path::new(".")),
+                    settings.start_timeout,
+                ),
+            ))
+        }),
         layout,
     };
     supervisor::supervise(
@@ -2854,6 +2883,15 @@ pub fn session(
         &LocalSpawner,
         resume,
         own_workspace(&cmux),
+        // The workspace's [run.env] is this process's environment, which
+        // each turn inherits (ADR-t1215-1).
+        crate::domain::sccache::SccacheTarget::of_pairs(
+            &std::env::vars_os()
+                .filter_map(|(key, value)| {
+                    Some((key.into_string().ok()?, value.into_string().ok()?))
+                })
+                .collect::<Vec<_>>(),
+        ),
     )
 }
 
@@ -2874,7 +2912,7 @@ pub fn session_with_provider(
     provider: &dyn AgentProvider,
     spawner: &dyn Spawner,
 ) -> Result<Value> {
-    run_session(db, id, token, provider, None, spawner, false, None)
+    run_session(db, id, token, provider, None, spawner, false, None, None)
 }
 
 /// The wrapper (`resume` for `session --resume`) with `provider`'s agent
@@ -2889,7 +2927,34 @@ pub fn session_with_providers(
     spawner: &dyn Spawner,
     resume: bool,
 ) -> Result<Value> {
-    run_session(db, id, token, provider, other, spawner, resume, None)
+    run_session(db, id, token, provider, other, spawner, resume, None, None)
+}
+
+/// [`session_with_providers`] whose environment names `sccache` as
+/// `RUSTC_WRAPPER` (ADR-t1215-1): a Codex turn runs without it unless its
+/// server listens on the loopback port just before.
+#[allow(clippy::too_many_arguments)]
+pub fn session_with_sccache(
+    db: &Path,
+    id: &RunId,
+    token: &LeaseToken,
+    provider: &dyn AgentProvider,
+    other: Option<&dyn AgentProvider>,
+    spawner: &dyn Spawner,
+    resume: bool,
+    sccache: crate::domain::sccache::SccacheTarget,
+) -> Result<Value> {
+    run_session(
+        db,
+        id,
+        token,
+        provider,
+        other,
+        spawner,
+        resume,
+        None,
+        Some(sccache),
+    )
 }
 
 /// The wrapper of a resumed session: `session --resume`.
@@ -2900,7 +2965,7 @@ pub fn resume_session_with_provider(
     provider: &dyn AgentProvider,
     spawner: &dyn Spawner,
 ) -> Result<Value> {
-    run_session(db, id, token, provider, None, spawner, true, None)
+    run_session(db, id, token, provider, None, spawner, true, None, None)
 }
 
 /// The wrapper (`resume` for `session --resume`) running in the workspace
@@ -2915,7 +2980,17 @@ pub fn session_in_workspace(
     resume: bool,
     own: OwnWorkspace<'_>,
 ) -> Result<Value> {
-    run_session(db, id, token, provider, None, spawner, resume, Some(own))
+    run_session(
+        db,
+        id,
+        token,
+        provider,
+        None,
+        spawner,
+        resume,
+        Some(own),
+        None,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2928,11 +3003,17 @@ fn run_session(
     spawner: &dyn Spawner,
     resume: bool,
     own_workspace: Option<OwnWorkspace<'_>>,
+    sccache: Option<crate::domain::sccache::SccacheTarget>,
 ) -> Result<Value> {
     // The wrapper's events are its own, not the worker's (ADR-t728-1).
     let mut queue = SqliteQueue::open(db)?.with_actor(
         crate::domain::actor::ActorContext::instance(crate::domain::actor::ActorRole::Wrapper, id),
     );
+    // The wrapper only looks at the server; the supervisor starts it.
+    let looker = crate::infrastructure::sccache::SystemSccache {
+        log: PathBuf::new(),
+        start_timeout: Duration::ZERO,
+    };
     wrapper::run_session(
         Session {
             queue: &mut queue,
@@ -2945,6 +3026,8 @@ fn run_session(
             files: &LocalRunFiles,
             pid: std::process::id(),
             own_workspace,
+            sccache: sccache
+                .map(|target| (target, &looker as &dyn crate::application::SccacheServer)),
         },
         id,
         token,

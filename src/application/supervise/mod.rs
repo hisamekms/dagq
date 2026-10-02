@@ -133,6 +133,7 @@ mod release;
 mod report;
 mod resume;
 mod revise;
+mod sccache;
 mod session;
 mod slot_limits;
 mod stale;
@@ -156,6 +157,7 @@ pub use self::queue_service::{
 };
 pub use self::release::{RELEASE_LOOK, ReleasePort};
 pub use self::report::ReportPort;
+pub use self::sccache::SccachePort;
 pub use self::update::{UPDATE_INTERVAL, UpdateSettings};
 use self::{
     ask_requests::*, deliver::*, dialog::*, exit::*, exit_retry::*, headless::*, idle::*, jobs::*,
@@ -415,6 +417,9 @@ pub struct Ports<'a> {
     /// `None` when the repository has no e2e the runtime knows, and such a
     /// run lands without one (`not_configured`).
     pub run_e2e: Option<RunE2ePort>,
+    /// Looks at and starts the host's sccache server when `[run.env]`'s
+    /// `RUSTC_WRAPPER` is sccache (ADR-t1215-1); `None` looks at none.
+    pub sccache: Option<SccachePort>,
     pub layout: Layout,
 }
 
@@ -883,6 +888,8 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         cleanup: cleanup::CleanupWatch::default(),
         run_e2e: ports.run_e2e.clone(),
         e2e: e2e::E2eWaits::default(),
+        sccache_port: ports.sccache.clone(),
+        sccache: sccache::SccacheWatch::default(),
     };
     // Before any job starts again: the jobs a gone supervisor left, and
     // after an exec those the previous binary of this process started.
@@ -1124,6 +1131,9 @@ struct Supervisor<'a> {
     /// The runs waiting for the e2e, and when one that could not run is
     /// tried again.
     e2e: e2e::E2eWaits,
+    /// Looks at and starts the host's sccache server (ADR-t1215-1).
+    sccache_port: Option<SccachePort>,
+    sccache: sccache::SccacheWatch,
 }
 
 /// One executing run between provisioning and rest.
@@ -1343,6 +1353,9 @@ impl Supervisor<'_> {
             // Every pass, draining or not, so a hold on landings ends as soon
             // as the program is found (ADR-0049 decision 9).
             self.check_run_env_programs()?;
+            // And the sccache server, before any sandboxed turn or job
+            // could start one (ADR-t1215-1).
+            self.sccache_pass();
             self.check_landing_branch(options.landing_recheck);
             self.mark_run_env_change()?;
             // Every pass, before any claim: a change of `[conflicts]` takes

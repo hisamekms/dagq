@@ -17,10 +17,10 @@ pub use crate::application::{
     supervise::{RunError, SUPERVISOR_HANDED_OFF},
 };
 pub use crate::compose::{
-    OneShot, ProcessesPort, ReleaseIndexPort, RunE2eOptions, RunFilesPort, SuperviseOptions, ask,
-    doctor, ended_run_material, integrate, rebind, recover, resume_session_with_provider, review,
-    session, session_with_provider, session_with_providers, stats, status, status_for, supervise,
-    supervise_with_reviewer,
+    OneShot, ProcessesPort, ReleaseIndexPort, RunE2eOptions, RunFilesPort, SccacheOptions,
+    SuperviseOptions, ask, doctor, ended_run_material, integrate, rebind, recover,
+    resume_session_with_provider, review, session, session_with_provider, session_with_providers,
+    session_with_sccache, stats, status, status_for, supervise, supervise_with_reviewer,
 };
 pub use crate::infrastructure::claude::{PromptKind, detect_prompt};
 

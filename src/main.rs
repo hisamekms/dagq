@@ -3293,6 +3293,9 @@ fn execute(cli: Cli) -> Result<Value> {
                 }),
                 // The host's Claude Code scratchpads (task 1100).
                 scratchpad_roots: None,
+                // The sccache server [run.env] names, started outside any
+                // sandbox (ADR-t1215-1).
+                sccache: Some(dagq::compose::SccacheOptions::default()),
                 // A supervisor at work keeps the queue's service (ADR-t1233-4
                 // decision 2); a one-shot pass does not.
                 queue_service: (!once).then(|| dagq::compose::QueueServiceOptions {

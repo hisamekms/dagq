@@ -1267,6 +1267,24 @@ pub trait LaunchAgent {
     fn uninstall(&self, label: &str, path: &std::path::Path) -> Result<AgentState>;
 }
 
+/// The sccache server of a `[run.env]` whose `RUSTC_WRAPPER` is sccache
+/// (ADR-t1215-1), looked at and started from outside any sandbox.
+pub trait SccacheServer {
+    /// Whether something listens on the loopback `port`, looked at without
+    /// starting anything: no sccache client runs (a client starts the
+    /// server it does not find, with the caller's environment).
+    fn listening(&self, port: u16) -> Result<bool>;
+    /// Start the server with `program --start-server` and `env` beside this
+    /// process's (the caller puts `SCCACHE_IDLE_TIMEOUT=0` in it), wait
+    /// until it listens on `port`, and read the pid of the process that
+    /// listens there.
+    fn start(&self, program: &Path, env: &[(String, String)], port: u16) -> Result<ServerPid>;
+}
+
+/// The pid of the sccache server [`SccacheServer::start`] started, or why
+/// it could not be read (the server runs either way).
+pub type ServerPid = std::result::Result<u32, String>;
+
 /// Liveness and signals for the supervisor's PID, replaceable in tests.
 pub trait ProcessControl {
     fn alive(&self, pid: u32) -> bool;

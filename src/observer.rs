@@ -607,6 +607,7 @@ pub(crate) fn run_agent(
                     session_id: agent.session_id,
                     launch: Some(agent.launch),
                     without_mcp: true,
+                    without_env: &[],
                     env: vec![("PATH".to_owned(), path)],
                     streams: Streams::Files {
                         stdout: &stdout,

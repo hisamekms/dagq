@@ -748,6 +748,7 @@ pub mod review_reason;
 pub mod run;
 pub mod run_e2e;
 pub mod run_env;
+pub mod sccache;
 pub mod scope;
 pub mod search;
 pub mod sessions;

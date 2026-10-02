@@ -107,6 +107,9 @@ impl Supervisor<'_> {
             // An interactive session parked to move to Codex moves now
             // (ADR-t813-2 decision 5).
             let run = self.switch_parked(run)?;
+            if run.actual_provider() == crate::domain::Provider::Codex {
+                self.ensure_sccache(crate::domain::sccache::CheckReason::BeforeResume);
+            }
             let request = ResumeRequest {
                 main,
                 branch,

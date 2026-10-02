@@ -720,6 +720,13 @@ pub struct TestWorkspace {
     /// The `codex` a headless Codex run's wrapper calls for its turns
     /// ([`headless_codex`]).
     pub codex: Option<PathBuf>,
+    /// The sccache a headless run's wrapper takes its environment to name
+    /// as `RUSTC_WRAPPER` (ADR-t1215-1); `None` names none.
+    pub sccache: Option<dagq::domain::sccache::SccacheTarget>,
+    /// With `sccache`: what the turns inherit as if the wrapper's
+    /// environment held it (the workspace's `[run.env]` in production),
+    /// set before each turn's own variables ([`headless::InheritingSpawner`]).
+    pub inherited_env: Vec<(String, String)>,
 }
 
 impl TestWorkspace {
@@ -773,6 +780,8 @@ impl TestWorkspace {
             headless: None,
             headless_ready: None,
             codex: None,
+            sccache: None,
+            inherited_env: Vec::new(),
         }
     }
     /// Let cmux list `workspace` as if an earlier supervisor opened it.
@@ -884,6 +893,8 @@ impl WorkspaceBackend for TestWorkspace {
         }
         let headless = headless_provider(run, self.headless.as_deref(), self.codex.as_deref());
         let ready = self.headless_ready.clone();
+        let sccache = self.sccache.clone();
+        let inherited_env = self.inherited_env.clone();
         let worker = thread::spawn(move || {
             let spawner = StubSpawner { db: db.clone() };
             if let Some((provider, other)) = headless {
@@ -891,6 +902,22 @@ impl WorkspaceBackend for TestWorkspace {
                     inner: spawner,
                     ready,
                 };
+                if let Some(sccache) = sccache {
+                    let spawner = headless::InheritingSpawner {
+                        inner: spawner,
+                        env: inherited_env,
+                    };
+                    return runtime::session_with_sccache(
+                        &db,
+                        &id,
+                        &LeaseToken::new(&token),
+                        &provider,
+                        Some(&other),
+                        &spawner,
+                        false,
+                        sccache,
+                    );
+                }
                 return runtime::session_with_providers(
                     &db,
                     &id,
@@ -1518,6 +1545,7 @@ if [ "$MODE" = resume ]; then THREAD=$1; PROMPT=$2; else PROMPT=$1; fi
 if [ -n "$REVIEW" ]; then
   printf '%s\n' "$ARGS" >> {dir}/codex-review-args.log
   printf '%s %s\n' "$DAGQ_ROLE" "$DAGQ_ACTOR_ID" >> {dir}/codex-review-actors.log
+  printf '%s\n' "${{RUSTC_WRAPPER-unset}}" >> {dir}/codex-review-wrapper.log
   REVIEW_CALL=$(wc -l < {dir}/codex-review-actors.log | tr -d ' ')
   printf '{{"type":"thread.started","thread_id":"codex-review-thread"}}\n{{"type":"turn.started"}}\n'
   if [ -f {dir}/codex-review-failure.jsonl ]; then
@@ -1544,6 +1572,8 @@ printf '%s %s %s
 ' "$PROMPT" | head -n 1 | cut -c1-80)" >> "$RUN_DIR/stub-calls.log"
 printf '%s
 ' "$ARGS" >> "$RUN_DIR/stub-args.log"
+printf '%s
+' "${{RUSTC_WRAPPER-unset}}" >> "$RUN_DIR/stub-wrapper.log"
 ENDED=
 say() {{ printf '{{"type":"item.completed","item":{{"id":"m%s","type":"agent_message","text":"%s"}}}}
 ' "$TURN" "$1"; }}

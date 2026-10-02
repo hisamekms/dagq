@@ -135,6 +135,38 @@ impl Spawner for ReadySpawner {
     }
 }
 
+/// Starts each command as if the wrapper's own environment held `env`:
+/// those variables come before the command's own, so one the command
+/// removes (a Codex turn's `RUSTC_WRAPPER`, ADR-t1215-1) is not inherited,
+/// as with a real wrapper whose workspace got the `[run.env]`.
+pub struct InheritingSpawner<S> {
+    pub inner: S,
+    pub env: Vec<(String, String)>,
+}
+
+impl<S: Spawner> Spawner for InheritingSpawner<S> {
+    fn spawn(&self, spec: &CommandSpec, streams: Streams<'_>) -> Result<Box<dyn Spawned>> {
+        let mut inherited = CommandSpec::new(spec.get_program());
+        inherited.args(spec.get_args());
+        for (key, value) in &self.env {
+            inherited.env(key, value);
+        }
+        for (key, value) in spec.get_envs() {
+            match value {
+                Some(value) => inherited.env(key, value),
+                None => inherited.env_remove(key),
+            };
+        }
+        if let Some(dir) = spec.get_current_dir() {
+            inherited.current_dir(dir);
+        }
+        if spec.get_new_session() {
+            inherited.new_session();
+        }
+        self.inner.spawn(&inherited, streams)
+    }
+}
+
 /// Have every turn signal readiness with the returned shell command.
 pub fn ready_turn(dir: &Path, backend: &mut TestWorkspace) -> String {
     let ready = dir.join("turn-ready");

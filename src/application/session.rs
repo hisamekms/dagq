@@ -119,6 +119,13 @@ pub struct Session<'a> {
     /// Closed when the run refuses this wrapper and records no such
     /// workspace ([`wrapper_refused`]); `None` outside cmux.
     pub own_workspace: Option<OwnWorkspace<'a>>,
+    /// The sccache the wrapper's environment names as `RUSTC_WRAPPER` and
+    /// how its server is looked at before a Codex turn (ADR-t1215-1);
+    /// `None` names none.
+    pub sccache: Option<(
+        crate::domain::sccache::SccacheTarget,
+        &'a dyn super::SccacheServer,
+    )>,
 }
 
 /// Wrap the agent of run `id` under the lease `token` until it exits; the
@@ -141,6 +148,7 @@ pub fn run_session(
         files,
         pid,
         own_workspace,
+        sccache,
     } = ctx;
     let run = match register(queue, id, token, pid, resume) {
         Ok(run) => run,
@@ -175,6 +183,7 @@ pub fn run_session(
             files,
             pid,
             resume,
+            sccache: sccache.as_ref().map(|(target, server)| (target, *server)),
         }
         .drive(&mut child_may_be_alive)
     } else {

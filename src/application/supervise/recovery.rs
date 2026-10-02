@@ -1072,6 +1072,7 @@ pub(super) fn start_job(
                 session_id,
                 launch: Some(launch),
                 without_mcp: false,
+                without_env: &[],
                 env: Vec::new(),
                 streams: Streams::Files {
                     stdout: &stdout,

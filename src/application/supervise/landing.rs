@@ -399,7 +399,14 @@ impl Supervisor<'_> {
         );
         // The repository's [run.env] reaches the review too (ADR-0023
         // decision 3).
-        let env = self.verifier.run_env(&run_dir)?;
+        let mut env = self.verifier.run_env(&run_dir)?;
+        // A Codex review runs in Codex's sandbox: its server is the
+        // supervisor's to start (ADR-t1215-1).
+        let without_env = if launch.provider == crate::domain::Provider::Codex {
+            self.sccache_before_job(run.id(), "review", attempt, &mut env)
+        } else {
+            &[]
+        };
         let started = (|| {
             let agent = self.job_agent(launch.provider).with_context(|| {
                 format!("no {} runs on this supervisor", launch.provider.as_str())
@@ -421,6 +428,7 @@ impl Supervisor<'_> {
                             launch: Some(launch),
                             without_mcp: false,
                             env,
+                            without_env,
                             streams: Streams::Files {
                                 stdout: &stdout,
                                 stderr: &stderr,

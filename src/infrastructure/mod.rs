@@ -44,6 +44,7 @@ pub mod report_config;
 pub mod run_env;
 pub mod run_files;
 pub mod runtime_store;
+pub mod sccache;
 pub mod schema;
 pub mod search;
 mod sessions;
