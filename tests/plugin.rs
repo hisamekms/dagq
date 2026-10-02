@@ -235,6 +235,9 @@ fn skills_split_the_roles_of_inbox_planner_and_recover() {
         "`triage by hand`",
         "`send the answer of ask <id> to the worker and close it`",
         "`check the e2e host`",
+        "`stop the dead landing's processes`",
+        "`dagq service status`",
+        "`dagq broker status`",
     ] {
         assert!(inbox.contains(next), "dagq-inbox lacks {next}");
     }

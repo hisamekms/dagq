@@ -48,20 +48,18 @@ Before showing an ask whose kind, options or effect you are unsure of, read `ref
 
 ## 4. Report the other attention, act only on the person's word
 
-Report each in a short list (task, status, `next`, gist of `last_error`); act with `dagq-recover` on the person's word. `(runtime)` needs nothing.
+Report each in a short list (task, status, `next`, gist of `last_error`); act with `dagq-recover` on the person's word. `(runtime)` needs nothing. Each `next` in full: `reference/status.md`.
 
-- `read the answer of ask <id> and close it` (`ask_answered`): an answer the runtime does not apply. `stuck_exit` `exit`, `answer_prompt`, `stalled` `intervene`, or the person's own text: carry it out as `${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/session.md` says, then `"$DAGQ" ask close <id>`. `wait`, or nothing to do: `ask close <id>`.
-- `send the answer of ask <id> to the worker and close it`: the supervisor could not type it; `session.md` too.
-- `triage by hand` (`triage_failed`): an ended run's recovery job failed. The person decides with `dagq-recover` section 4. A live run's failed recovery job opens that alert's own ask (`stuck_exit`, `answer_prompt`, `stalled`; `reason_category` `recovery_failed`, ADR-t609-1), shown and answered like any other; `recover by hand` (`recovery_failed`) comes only from one an older runtime recorded (section 4 too).
-- `decide the draft in a planner` (`draft_planner_exhausted`), `decide the finding in a planner` (`finding_planner_exhausted`), `decide the waiting tasks in a planner` (`dependency_stranded`), `check the planner` (`planner_unresponsive`), `plan review by hand` (`plan_review_failed`): tell the person, who works in a planner (`dagq-recover` section 8).
-- A worker provider that cannot be used: runs switch to the other by themselves; the person acts only on a `queue_hold` ask (login, limit). Codex's hold is `status`'s `provider_hold`; headless runs take no keys (`skills/dagq/reference/provider.md`).
-- `install tool` (`run_env_program_missing`): a `[run.env]` program is not on the supervisor's PATH; the person installs it. It clears by itself.
-- `report the update` (`update_installed`): tell its `version`, `commit` (or `release`) and any `reason`/`message` (`reference/watch.md`).
-- `report the review`, `check the failed review`: `reference/watch.md`.
-- `fix the push command` (`kpi_push_abandoned`): the person fixes the KPI push command or its service; a later push clears it.
-- `check the e2e host` (`run_e2e_finished`): a run's e2e could not run 3 times in a row; the person checks the host; it clears itself (`reference/status.md`).
-- `restart supervisor` (`supervisor_stopped`, `supervisor_stale`): `up` once the person says so (`dagq-recover`, section 5).
-- `review by hand`, `review and integrate`, `push main`: `${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/review-by-hand.md`, with the person.
+- `read the answer of ask <id> and close it` (`ask_answered`), `send the answer of ask <id> to the worker and close it`: carry it out (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/session.md`), then `"$DAGQ" ask close <id>`.
+- `triage by hand` (`triage_failed`), `recover by hand` (`recovery_failed`): `dagq-recover` section 4.
+- `decide the draft in a planner`, `decide the finding in a planner`, `decide the waiting tasks in a planner`, `check the planner`, `plan review by hand`: the person, in a planner (`dagq-recover` section 8).
+- `report the update` (`update_installed`), `report the review`, `check the failed review`: tell the person (`reference/watch.md`).
+- `install tool` (`run_env_program_missing`), `fix the push command` (`kpi_push_abandoned`), `check the e2e host` (`run_e2e_finished`): the person fixes it.
+- `stop the dead landing's processes` (`landing_release_stuck`): the person stops its pids.
+- `dagq service status` (`queue_service_down`): `service start` on the person's word.
+- `dagq broker status` (`broker_unhealthy`): show it; it retries.
+- `restart supervisor` (`supervisor_stopped`, `supervisor_stale`): `up` (`dagq-recover` section 5).
+- `review by hand`, `review and integrate`, `push main`: `${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/review-by-hand.md`.
 - `recover run`, `exit the session`: `dagq-recover`.
 
 ## Where your authority ends
