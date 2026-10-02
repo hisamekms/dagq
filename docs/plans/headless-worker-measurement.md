@@ -4,7 +4,7 @@ type: plan
 title: 本番の queue での Claude の非対話の worker と対話の worker の比較と、既定を切り替えるかの推奨
 status: active
 created: 2026-09-30
-updated: 2026-09-30
+updated: 2026-10-02
 owners:
   - hisamekms
 tags:
@@ -24,13 +24,20 @@ related:
 goal 57 の測定。Claude の worker を非対話の経路（[ADR-t813-1](../adr/2026-09-28-t813-1-headless-worker-path.md)）で動かした本番の run を、同じ期間の対話の run と比べ、Claude の既定を非対話に切り替えるかを推奨する。
 
 - 1 回目（task 821、2026-09-30）: 非対話の Claude の run が 0 本で、推奨を出さなかった。その時点の対話の run の基準値は、この文書の git の履歴にある
-- 2 回目（task 1132、この版）: ask 224 で人が了承し、planner が 7 本の task（1097・1096・1042・1058・1110・1107・1050）に `--headless` を付けた。7 本とも Claude の非対話で着地したので、推奨を出す
+- 2 回目（task 1132）: ask 224 で人が了承し、planner が 7 本の task（1097・1096・1042・1058・1110・1107・1050）に `--headless` を付けた。7 本とも Claude の非対話で着地したので、推奨を出す
+- 3 回目（task 1200、2026-10-02）: ask 242 で人が了承し、planner 589 が推奨の条件 2 のために 6 本の task（1021・1053・1098・1119・1129・1197）に `--headless` を付けた。6 本とも Claude の非対話で着地した。推奨の 3 つの条件がそろったかは「[3 回目](#3-回目task-1200)」に書く
 
 この task は測って書くだけで、既定は変えていない。`add` で経路を指定しない task は今も Claude の対話の経路。
 
 ## 結論
 
 **条件付きで、Claude の既定を非対話に切り替えることを推奨する。** 下の「推奨」の 3 つの条件がそろってから、既定の経路を決める ADR を書いて切り替える。
+
+**3 回目（2026-10-02）の時点で、条件はまだそろっていない。** 条件 1（task 1179 の着地）と条件 3（cost の記録）はそろった。条件 2 は、L の task と `[e2e] paths` に触れる task が非対話の Claude で着地したが、`worker_question` の answer の turn と `needs_session` の resume は 6 本のどれにも起きなかった。同じ 2 つの流れは、Claude から Codex にフォールバックした非対話の run で本番を通っている（「[3 回目](#3-回目task-1200)」）。
+
+**人の決定（2026-10-02）**: 人が planner の session で、条件 2 の残り（2a・2b）を待たずに Claude の既定を非対話にすると決め、既定を切り替える ADR と実装を task 1340（goal 85）として登録した（task 1200 の note 60084）。この文書は測定の記録として条件 2 を未達のまま残し、既定の切り替えは task 1340 が行う。この task（1200）は既定を変えていない。
+
+以下の「結論」の箇条書きから「測定を続けるには」までは 2 回目（task 1132）の内容。
 
 - 7 本とも 1 回目の turn が `succeeded` で終わった。失敗・停止・催促・権限の拒否・人への ask・resume は 0 件だった。review の差し戻し（1 件）は、同じ session の resume の turn で直って着地した
 - 同じ area・大きさの対話の run より、work は短く（層ごとの中央値で約 40〜55% 短い）、worker の token は少ない（大きさをそろえた層の中央値で約 40〜75% 少ない）。load の高い帯で動いた run が多いのに短かった
@@ -189,3 +196,117 @@ run ごとの時間と token（秒。`startup` は `agent_started`→最初の c
 - L の task か `[e2e] paths` に触れる task を 1 本。途絶えの停止（900 秒）と turn の上限（14400 秒）に e2e の長い待ちが重なっても turn が止まらないかを見る
 
 集めた後は、この文書の比較の表に run を足し、`turn_finished` の `outcome`・`failure`、`stall_*` の reason、催促の回数、`permission_denials` を run ごとに書き、条件がそろったかを書く。同じ窓の対話の run と、area と大きさの層で並べることは変えない。
+
+## 3 回目（task 1200）
+
+推奨の条件 2 のために `--headless` を付けた 6 本（task 1132 の receipt の follow-up、ask 242 で人が adopt、planner 589 が付けた）の着地の後に、本番の queue を読んだ。
+
+### 読んだ範囲と方法
+
+- 読んだ時点: 2026-10-02T03:10Z（UTC）ごろ。6 本の claim は 2026-10-02T00:36Z〜02:24Z、着地は 00:40Z〜02:51Z
+- 比べる期間: 2026-10-01T12:00Z〜2026-10-02T03:00Z に claim され、着地した、`actual_provider` が `claude` の run。前の run の commit を引き継いだと見られる run（`startup` が 60 秒未満。2026-09-30 の Codex へのフォールバックの期間に失敗した task のやり直しが多い）は両側から外した。外したのは対話 15 本、非対話 3 本。比べるのは planner が測定のために `--headless` を付けた 6 本だけにし、同じ窓のほかの非対話の run（下の一覧の後の 4 本）は入れない
+- 固定バイナリ `~/.local/bin/dagq`（`0.4.0-dev+2f81af3`）で、状態を変えないコマンドだけを使った
+
+```sh
+dagq stats --full                                    # 829 run。runs[] の route / provider / actual_provider / prediction / startup / work / turns / tokens / work_breakdown / land_phases / e2e
+dagq events --run <run> --all --full --limit 2000    # 6 本それぞれ。turn_started / turn_finished / turn_requested / review_* / run_e2e_finished / supervisor_handed_off
+dagq events --all --full --kind ask_opened --since 2026-09-30T00:00:00Z --limit 2000   # 52 件。非対話の run に紐づくものを run_id で絞った
+dagq events --run <run> --all --full                 # Codex にフォールバックした run 8e2e0094・3f7a1148・e12b273b（下の「Codex で通った流れ」）
+dagq timeline fb9ba422-9b2c-4ebe-ad1d-642af0bbe79c   # 1098 の turn の中の background の test
+dagq kpi --since 2026-10-01T12:00:00Z --by provider --by route --area runtime
+```
+
+`kpi` の `route=headless` の層は 27〜31 本で、Codex の run（フォールバックを含む）が 17〜21 本を占める（`provider=codex` と `route` は掛け合わされない）。Claude の非対話の 6 本だけの値は出ないので、比較の表は `stats` の runs から作った。照合の値: `phase.work` は headless 436 / interactive 688、`session_active.worker` は 441 / 620、`resumes_per_run` は 0.968 / 0.286（headless は Codex の resume を含む）、`area=runtime` の `phase.work` は 1060（33 本）。
+
+### 非対話で動かした Claude の run の一覧（3 回目）
+
+| task | run | change | area | 予測の大きさ | claim の load の帯 | turn の数 | 結果 |
+|---|---|---|---|---|---|---|---|
+| 1053 | `4aa1430a` | config | ci+docs | M | 8-16 | 1 | 着地（review pass） |
+| 1021 | `62f3a648` | feature | docs+plugin+runtime+tests | L | 4-8 | 2 | 着地（review revise 1 回の後に pass、着地の前の e2e passed） |
+| 1098 | `fb9ba422` | fix | docs+runtime | M | 4-8 | 1 | 着地（review pass、着地の前の e2e passed） |
+| 1119 | `6000103e` | fix | docs+runtime+tests | M | 4-8 | 1 | 着地（review pass） |
+| 1129 | `b2174d09` | fix | docs+plugin+runtime+tests | M | 4-8 | 2 | 着地（review revise 1 回の後に pass） |
+| 1197 | `c488e968` | fix | docs+runtime+tests | M | 0-4 | 1 | 着地（review pass、着地の前の e2e passed） |
+
+- 6 本とも `provider` = `actual_provider` = `claude`、`provider_switches` は 0。model は `claude-opus-5-5`、effort は `medium`、Claude Code は 2.1.286（比べる対話の run も同じ）
+- area は着地の差分から求めた値（[ADR-t980-1](../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)）。予測の大きさは plan review の `prediction.size`。計画のときの見込み（1021・1053 は判断を含む task、1098 は `[e2e] paths` に触れる task）どおり、1021 は L、1098・1021・1197 は `validation_finished` の `e2e_requirement` が `paths` で着地の前の e2e を流した
+- 同じ窓には、ほかに非対話の Claude の run が 4 本ある（task 1144・1095・1087・1115。2026-10-01T15:53Z〜17:43Z）。どれも 2026-09-30 に Codex へフォールバックして失敗した task の次の run で、`worker_mode` が `headless` で claim された。1 turn で着地し、ask・resume・停止は無い。1095 のほかは `startup` が 60 秒未満で前の run の commit を引き継いだと見られるので、比較の表には入れていない
+
+run ごとの時間と token（秒。定義は 2 回目と同じ。turn の時間は dagq の `turn_started`→`turn_finished`）:
+
+| task | startup | work | turn の時間 | claim→着地 | wait_to_land | worker の token（total / output） | `cost_usd`（turn ごと） |
+|---|---|---|---|---|---|---|---|
+| 1053 | 86 | 188 | 193 | 236 | 38 | 126.7 万 / 14,647 | 1.53 |
+| 1021 | 4269 | 4446 | 4533（2 turn。revise の turn は 80） | 5607 | 1148 | 850.4 万 / 35,835（revise の turn は別に 116.6 万 / 2,836） | 4.54 + revise 0.34 |
+| 1098 | 4123 | 4144 | 4149 | 4855 | 699 | 177.3 万 / 10,749 | 2.49 |
+| 1119 | 2028 | 2389 | 2398 | 3154 | 751 | 797.1 万 / 49,099 | 5.35 |
+| 1129 | 737 | 964 | 1116（2 turn。revise の turn は 147） | 1903 | 926 | 661.7 万 / 40,396（revise の turn は別に 150.6 万 / 9,398） | 4.43 + revise 0.60 |
+| 1197 | 439 | 570 | 578 | 1635 | 1052 | 383.8 万 / 22,236 | 2.66 |
+
+### 同じ期間の対話の run との比較（3 回目）
+
+中央値（`needs_session` と resume は 1 run あたりの平均）。対話は 20 本（S 5・M 8・L 7）:
+
+| 層 | 本数（非対話 / 対話） | startup | work | `work_breakdown` の model | test | claim→着地 | worker の token total | output |
+|---|---|---|---|---|---|---|---|---|
+| 全て | 6 / 20 | 1383 / 459 | 1677 / 590 | 863 / 297 | 357 / 233 | 2529 / 1555 | 522.7 万 / 381.6 万 | 29,036 / 28,793 |
+| runtime を含む、M | 4 / 3 | 1383 / 822 | 1677 / 1060 | 863 / 362 | 357 / 309 | 2529 / 2267 | 522.7 万 / 934.1 万 | 31,316 / 36,741 |
+| runtime を含む、L | 1 / 6 | 4269 / 2411 | 4446 / 3114 | 1274 / 1233 | 1167 / 888 | 5607 / 5377 | 850.4 万 / 3427.6 万 | 35,835 / 118,602 |
+| runtime を含まない、M | 1 / 5 | 86 / 237 | 188 / 427 | 134 / 159 | 0 / 0 | 236 / 671 | 126.7 万 / 316.3 万 | 14,647 / 16,873 |
+
+| 値 | 非対話（6） | 対話（20） |
+|---|---|---|
+| `needs_session` / run | 0 | 0.35 |
+| resume / run | 0 | 0.2 |
+| review の revise のあった run | 2 | 8 |
+| integrate の検証の失敗のあった run | 0 | 1 |
+| 人に届いた ask（run に紐づくもの） | 0 | 4（run 2 本。task 1236 の `approve_landing`、task 1218 の `stalled` 2 件と `approve_landing`） |
+
+読み方:
+
+- **work と startup**: 2 回目と違い、runtime を含む M と L の層では非対話の方が長い。M の 4 本のうち 1098（work 4144 秒）は turn の中で background の test を 2 回（1028 秒と 808 秒。`timeline` の `commands`）待ち、1119（2389 秒）は足した test の stress を 2 回流した（turn の出力）。どちらも turn が自分の test の終わりを待つ時間で、2 回目の 1058 と同じ形。対話の M の 3 本はどれも 8-16 の帯、非対話の M の 4 本は 0-4 か 4-8 の帯で、負荷は非対話を速く見せる向きに効く。本数は M で 4 / 3、L で 1 / 6 で、経路の差として断定はしない
+- **token**: runtime を含む M・L と runtime を含まない M のどれでも非対話の worker の token は少ない（total で約 45〜75%、output で約 13〜70%）。2 回目と同じ向き。全てでは非対話が多いが、非対話は M と L だけ、対話は S を 5 本含む
+- **review の revise**: 1021・1129 とも `test_gap` で、同じ session id の resume（`turn_requested` の `revise request`、`turn_started` の `resume: true`）の 1 turn で直って pass した
+- **人の答え待ち**: 6 本とも `land_phases.ask` は 0
+
+### run ごとの、非対話で起きた問題（3 回目）
+
+| task | `turn_finished` の outcome / failure | stall の reason | 催促（`nudge`） | `permission_denials` | そのほか |
+|---|---|---|---|---|---|
+| 1053 | succeeded / null（17 turns 内部） | 無し | 0 | 0 | 無し |
+| 1021 | 1 turn 目 succeeded / null（62）、2 turn 目（`revise request`）succeeded / null（7） | 無し | 0 | 1（`Write`） | 1 turn 目の途中に supervisor の引き継ぎ（00:41Z）があり、そのまま続いた。`Write` の拒否は 1 回で、turn は成功した。着地の前の e2e は 222 秒で passed（`requirement.paths` は `src/application/integrate.rs`） |
+| 1098 | succeeded / null（16） | 無し | 0 | 0 | turn の途中に supervisor の引き継ぎ（00:41Z）。turn の中の background の test 1028 秒の間も途絶えの停止（900 秒）にかからなかった。着地の前の e2e は 124 秒で passed（`src/infrastructure/adapters.rs`） |
+| 1119 | succeeded / null（67） | 無し | 0 | 0 | turn の途中（02:10Z）と review の途中（02:13Z）に supervisor の引き継ぎ。review は引き継ぎで attempt 2 から始め直して pass（経路と関係しない） |
+| 1129 | 1 turn 目 succeeded / null（55）、2 turn 目（`revise request`）succeeded / null（8） | 無し | 0 | 0 | turn の途中と review の途中に supervisor の引き継ぎ。review は attempt 2 で `test_gap` の revise、resume の turn で直して attempt 3 で pass |
+| 1197 | succeeded / null（37） | 無し | 0 | 0 | turn の途中に supervisor の引き継ぎ（02:27Z）。着地の前の e2e は 187 秒で passed（`src/infrastructure/sessions.rs`） |
+
+- 6 本とも `exit_code` 0、`failure` null。`stall_*`・`provider_switched`・`provider_waiting`・`ask_opened`・`needs_session` の event は 6 本のどれにも無い。integrate の検証は 6 本とも 1 回で通った
+- Claude の `result` の `duration_ms` は、turn の中で background の処理を待った run では dagq の turn の時間より短い（1098 は 323 秒 / 4149 秒、1021 の 1 turn 目は 821 秒、1119 は 1640 秒 / 2398 秒）。上の表の turn の時間は dagq の値を使った
+
+### 推奨の条件がそろったか
+
+| 条件 | そろったか | 根拠 |
+|---|---|---|
+| 1. task 1179 の着地 | そろった | run `2f1f9628` が 2026-09-30T03:14Z に `integrated` |
+| 2a. `worker_question` の answer の turn | 非対話の Claude では起きなかった | 6 本（と同じ窓のほかの 4 本）に `ask_opened` が無い。判断を含む task として選んだ 1021（ask から inbox が見るまでの KPI）・1053（CI の失敗を issue にする）も worker は ask を出さずに決めた |
+| 2b. `needs_session` の resume | 非対話の Claude では起きなかった | 6 本とも `needs_session` 0・resume 0。integrate の検証は 1 回で通り、rebase の衝突も無かった |
+| 2c. L か `[e2e] paths` に触れる task | そろった | L の 1021（`62f3a648`、turn 4453 秒）と、`[e2e] paths` に触れる 1098（`fb9ba422`）・1021・1197（`c488e968`）が非対話の Claude で着地した。どれも着地の前の e2e が passed（`run_e2e_finished`）。1 turn が 4149 秒の 1098 でも途絶えの停止・turn の上限（14400 秒）にかからなかった |
+| 3. cost の記録 | そろった | task 1199（run `989a0924`、2026-09-30T03:31Z 着地）の後、revise の turn の `turn_finished` は `cost_usd` にその turn の値（1021: 0.34、1129: 0.60）、`session_cost_usd` に累計（4.88、5.03）を記録した。`stats` の `turns.by_provider.claude.tokens.cost_usd` は 4.88・5.03 で、2 回目の 1050 のような二重の数え上げは無い |
+
+**3 つの条件はそろっていない。** 条件 2 の 2a と 2b が非対話の Claude で起きていない。
+
+#### Codex で通った流れ
+
+2a と 2b の流れは、2026-09-30 に Claude の利用上限で Claude から Codex にフォールバックした非対話の run（`provider_switched` の `reason: provider_disabled`）で本番を通っている。
+
+- `worker_question` の answer の turn: task 784 の run `8e2e0094`（ask 263）は、answer の後に `turn_requested`（`what: answer of ask 263`）が送られ、次の turn が `succeeded` で終わった。task 824 の run `3f7a1148` も `worker_question` を開いた
+- `needs_session` の resume: task 1028 の run `e12b273b` ほか、フォールバックした run の多くが `turn_requested`（`resolution request`）の turn で直して着地した（`stats` の `needs_session`・`resumes` が 1 以上で `integrated` の run が 20 本）
+
+answer と resume の turn を送る runtime の側（`turn_requested`、session id での resume の呼び出し）は provider に依らない。Claude の `--resume` の呼び出しそのものは、revise の turn で 3 回（2 回目の 1050、3 回目の 1021・1129）通っている。Claude で通っていないのは「answer と resolution の依頼の文を Claude の resume の turn として渡す」組み合わせだけで、リスクは小さいと見る。ただし推奨の条件は「非対話の Claude の run が着地すること」なので、そろったとはしない。
+
+### 続け方
+
+- **人の決定**: 2026-10-02 に人が、2a・2b を待たずに既定を非対話に切り替えると決めた（note 60084）。既定を切り替える ADR と実装は task 1340（goal 85）が行う。「切り替えるときに要る変更」はその task が扱う範囲の手がかりとして残す
+- **切り替えの後に確かめる**: 切り替えの後は経路を指定しない task が非対話の Claude で動くので、2a・2b は普通の run で起きる見込みが高い（同じ窓の対話の M・L の run（15 本）の `needs_session` は 1 run あたり 0.33、runtime を含む L は 0.83。`worker_question` は 2026-09-30 以降の ask 52 件のうち 2 件と稀）。task 1340 の着地の後、最初の `worker_question` の answer の turn と `needs_session` の resume の turn が非対話の Claude で成功したかを `turn_requested`（`answer of ask N`・`resolution request`）と `turn_finished` で確かめる。非対話の経路の問題が見つかったら、それを直す task にする
+- 次にこの文書に足すときは、同じ形（一覧・run ごとの時間・同じ窓の対話の run との層の比較・run ごとの問題・条件の表）で足す
