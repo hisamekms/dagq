@@ -481,15 +481,16 @@ impl StartCheck {
         if self.done || self.sent.elapsed() < wait {
             return false;
         }
-        let input_taken = input.is_some_and(|input| {
-            input.source != InputSource::Agent && input.modified > self.sent_at
-        });
+        // Compared to the millisecond (task 1197): `sent_at` is taken before
+        // the text is typed, so a mark of its millisecond is from before
+        // it, and an adopter reads `sent_at` back to the millisecond.
+        let after = |modified| super::file_time::written_after(modified, self.sent_at);
+        let input_taken =
+            input.is_some_and(|input| input.source != InputSource::Agent && after(input.modified));
         if input_taken
-            || marks.iter().any(|mark| {
-                files
-                    .modified(mark)
-                    .is_ok_and(|modified| modified > self.sent_at)
-            })
+            || marks
+                .iter()
+                .any(|mark| files.modified(mark).is_ok_and(after))
         {
             self.done = true;
             return false;
@@ -1118,6 +1119,50 @@ mod tests {
             &marks,
             input(sent_at + Duration::from_secs(1), InputSource::Unknown)
         ));
+    }
+
+    /// An adopted request (task 1197): its `sent_at` is read back to the
+    /// millisecond. A mark written before it, in the same millisecond or
+    /// the same second, is no sign it was taken; the input marker or a mark
+    /// the hook writes right after it, in a later millisecond, is, and the
+    /// check ends with nothing sent again.
+    #[test]
+    fn an_adopted_request_is_taken_only_by_a_mark_written_after_it() {
+        use super::super::file_time::{at_ns, request_sent_at, request_sent_at_of};
+        use crate::application::memory_files::MemoryFiles;
+        let idle = Path::new("/run/idle.json");
+        let marks = [idle.to_path_buf()];
+        let typed = |at: SystemTime| {
+            Some(InputMarker {
+                modified: at,
+                source: InputSource::Typed,
+                text: None,
+            })
+        };
+        let sent_at = request_sent_at_of(&json!({"sent_at": request_sent_at(at_ns(250, 600_000))}));
+        for before in [at_ns(250, 100_000), at_ns(0, 0)] {
+            let files = MemoryFiles::default();
+            files.put(idle, before, "{}");
+            let mut check = StartCheck::adopted("revise request", TEXT, sent_at, false);
+            assert!(check.due(&files, Duration::ZERO, &marks, typed(before)));
+            assert!(!check.done);
+            // The hook's marks of the send, a millisecond later.
+            files.put(idle, at_ns(251, 0), "{}");
+            assert!(!check.due(&files, Duration::ZERO, &marks, None));
+            assert!(check.done);
+            let mut check = StartCheck::adopted("revise request", TEXT, sent_at, false);
+            files.put(idle, before, "{}");
+            assert!(!check.due(&files, Duration::ZERO, &marks, typed(at_ns(251, 0))));
+            assert!(check.done);
+        }
+        // One recorded in whole seconds before task 1197 reads as its second.
+        let sent_at = request_sent_at_of(&json!({"sent_at": 1_000_000}));
+        let files = MemoryFiles::default();
+        files.put(idle, at_ns(0, 0), "{}");
+        let mut check = StartCheck::adopted("conflict request", TEXT, sent_at, false);
+        assert!(check.due(&files, Duration::ZERO, &marks, None));
+        files.put(idle, at_ns(1, 0), "{}");
+        assert!(!check.due(&files, Duration::ZERO, &marks, None));
     }
 
     #[test]

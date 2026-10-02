@@ -657,9 +657,10 @@ pub(super) fn restarts_exit_timeout(event: &RunEvent) -> bool {
                     .any(|repair| event.payload["repair"] == *repair))
 }
 
-/// When an adopted revise or conflict request was recorded as sent.
+/// When an adopted revise or conflict request was recorded as sent, to the
+/// millisecond (whole seconds for one recorded before task 1197).
 fn adopted_sent_at(payload: &Value) -> SystemTime {
-    UNIX_EPOCH + Duration::from_secs(payload["sent_at"].as_u64().unwrap_or_default())
+    super::file_time::request_sent_at_of(payload)
 }
 
 impl Supervisor<'_> {

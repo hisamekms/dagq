@@ -74,7 +74,8 @@ fn a_passed_run_that_conflicts_with_main_is_rebased_by_its_live_session_and_land
     assert_eq!(precheck["conflicts"], json!(["change.txt"]));
     assert_eq!(precheck["attempt"], 1);
     assert_eq!(precheck["requested"], true);
-    assert!(precheck["sent_at"].is_i64());
+    // Recorded to the millisecond (task 1197).
+    assert!(precheck["sent_at"].is_f64());
     let resolved = payloads(&detail, "conflict_resolved");
     let head = git_out(
         &repo,

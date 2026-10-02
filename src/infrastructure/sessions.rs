@@ -320,10 +320,9 @@ fn write_changes(
     // The spans switch when the revise was sent (`sent_at`), so that its
     // turn is the revise's: a `revise_requested` written after the revise
     // was typed (as before task 241) comes later than that.
-    let at = payload["sent_at"]
-        .as_i64()
+    let at = crate::domain::request_sent_at_millis(payload)
         .filter(|_| kind == EventKind::ReviseRequested)
-        .map(|secs| millis_text(secs * 1000))
+        .map(millis_text)
         .filter(|sent| rfc3339_millis(sent) < rfc3339_millis(&at))
         .unwrap_or(at);
     let mut exited = RunSessionClosed::default();
@@ -1723,6 +1722,38 @@ mod tests {
         let closed = &of_kind(&queue, SESSION_CLOSED)[1];
         assert_eq!(closed.payload["kind"], "revise");
         assert_eq!(closed.payload["active_secs"], 19);
+    }
+
+    /// A revise sent at a time recorded to the millisecond (task 1197)
+    /// switches the spans at that millisecond.
+    #[test]
+    fn a_revise_sent_at_a_millisecond_switches_the_spans_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let (queue, task_id, run) = run_queue(dir.path());
+        let conn = &queue.conn;
+        event(
+            conn,
+            task_id,
+            Some(&run),
+            EventKind::AgentStarted,
+            json!({"session_id": RUN}),
+        )
+        .unwrap();
+        let start = retime(conn, 0, 100);
+        transcript(dir.path(), start, &[(5, 25), (61, 80)], None);
+        let sent = start + 60_250;
+        event(
+            conn,
+            task_id,
+            Some(&run),
+            EventKind::ReviseRequested,
+            json!({"attempt": 1, "sent_at": sent as f64 / 1000.0}),
+        )
+        .unwrap();
+        let spans = spans(&queue);
+        assert_eq!(spans[1].created_at, millis_text(sent));
+        assert_eq!(spans[2].kind, SESSION_OPENED);
+        assert_eq!(spans[2].created_at, millis_text(sent));
     }
 
     /// A span closed as inferred ends at its transcript's last record; its

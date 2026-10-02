@@ -502,9 +502,21 @@ pub fn fix_requested(events: &[RunEvent]) -> bool {
     fix_requested_at(events).is_some()
 }
 
-/// When the request [`fix_requested`] finds was sent (its `sent_at`, unix
-/// seconds; 0 when not recorded): only the `worker_question`s asked since
-/// are the supervisor's to answer (task 582).
+/// The `sent_at` of a revise or conflict request (`revise_requested`, a
+/// requested `conflict_precheck`) in unix milliseconds (task 1197): written
+/// as seconds with the millisecond below the point, or, before task 1197,
+/// as whole seconds; `None` when not recorded or not a number. The
+/// fraction is rounded to the nearest millisecond, which a float of the
+/// seconds keeps exactly.
+pub fn request_sent_at_millis(payload: &serde_json::Value) -> Option<i64> {
+    let secs = payload["sent_at"].as_f64()?;
+    secs.is_finite().then(|| (secs * 1000.0).round() as i64)
+}
+
+/// When the request [`fix_requested`] finds was sent (its `sent_at`, cut
+/// to the unix second an ask's time keeps; 0 when not recorded): only the
+/// `worker_question`s asked since are the supervisor's to answer (task
+/// 582).
 pub fn fix_requested_at(events: &[RunEvent]) -> Option<i64> {
     review_anchor(events)
         .filter(|anchor| {
@@ -514,7 +526,7 @@ pub fn fix_requested_at(events: &[RunEvent]) -> Option<i64> {
                     .iter()
                     .any(|e| e.id > anchor.id && e.kind == "exit_requested")
         })
-        .map(|anchor| anchor.payload["sent_at"].as_i64().unwrap_or_default())
+        .map(|anchor| request_sent_at_millis(&anchor.payload).map_or(0, |ms| ms.div_euclid(1000)))
 }
 
 /// Whether a `needs_session` run's resumed session is on: its latest
@@ -3241,6 +3253,15 @@ mod attention_tests {
         assert!(!session_takes_answers(waiting, &events, 99));
         assert!(session_takes_answers(waiting, &events, 100));
         assert_eq!(fix_requested_at(&events), Some(100));
+        // A request recorded to the millisecond (task 1197) is cut to its
+        // second, the precision of an ask's time.
+        events[5].payload = json!({"requested": true, "sent_at": 100.999});
+        assert_eq!(fix_requested_at(&events), Some(100));
+        assert!(!session_takes_answers(waiting, &events, 99));
+        assert!(session_takes_answers(waiting, &events, 100));
+        events[5].payload = json!({"requested": true});
+        assert_eq!(fix_requested_at(&events), Some(0));
+        events[5].payload = json!({"requested": true, "sent_at": 100});
         // A request the session did not fix ends in its `/exit`.
         events.push(event(7, "exit_requested", serde_json::json!({})));
         assert!(!session_takes_answers(waiting, &events, 0));

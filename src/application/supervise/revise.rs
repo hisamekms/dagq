@@ -103,6 +103,15 @@ fn idle_ends_turn(idle: &IdleMarker, input_at: SystemTime, input: Option<&InputM
     super::file_time::written_after(idle.modified(), input_at) && !idle.turn_open_after(input)
 }
 
+/// Whether a receipt written at `modified` was rewritten after the request
+/// sent at `sent_at`, compared to the millisecond (task 1197): an adopter
+/// reads `sent_at` back to the millisecond it was recorded with, and a
+/// receipt of that millisecond, or of an earlier one in its second, is the
+/// one from before the request.
+pub(super) fn rewritten_after(modified: SystemTime, sent_at: SystemTime) -> bool {
+    super::file_time::written_after(modified, sent_at)
+}
+
 impl ReviseWatch {
     pub(super) fn new(
         run: &TaskRun,
@@ -177,7 +186,7 @@ impl ReviseWatch {
     fn rewritten(&self, sv: &Supervisor<'_>, receipt: &Path) -> bool {
         sv.files
             .modified(receipt)
-            .is_ok_and(|modified| modified > self.sent_at)
+            .is_ok_and(|modified| rewritten_after(modified, self.sent_at))
     }
 
     fn observe(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun) -> Result<Option<ReviseOutcome>> {
@@ -260,7 +269,7 @@ impl ReviseWatch {
             let Ok(modified) = sv.files.modified(receipt) else {
                 return Ok(None);
             };
-            if modified <= self.sent_at {
+            if !rewritten_after(modified, self.sent_at) {
                 return Ok(None);
             }
             let from = unix_seconds(modified) + 1;
@@ -382,6 +391,26 @@ impl ReviseWatch {
 mod tests {
     use super::super::file_time::at_ns;
     use super::*;
+
+    /// Task 1197: an adopted request's `sent_at` is read back to the
+    /// millisecond: a receipt written before it, in the same millisecond or
+    /// earlier in its second, is not rewritten; one a millisecond later is.
+    /// A request recorded in whole seconds reads as that second.
+    #[test]
+    fn a_receipt_of_the_adopted_requests_millisecond_is_not_rewritten() {
+        use super::super::file_time::{request_sent_at, request_sent_at_of};
+        let sent = at_ns(250, 600_000);
+        let adopted = request_sent_at_of(&json!({"sent_at": request_sent_at(sent)}));
+        for sent_at in [sent, adopted] {
+            assert!(!rewritten_after(at_ns(250, 100_000), sent_at));
+            assert!(!rewritten_after(at_ns(0, 0), sent_at));
+            assert!(rewritten_after(at_ns(251, 0), sent_at));
+        }
+        let whole = request_sent_at_of(&json!({"sent_at": 1_000_000}));
+        assert_eq!(whole, at_ns(0, 0));
+        assert!(!rewritten_after(at_ns(0, 999_999), whole));
+        assert!(rewritten_after(at_ns(1, 0), whole));
+    }
 
     /// Task 1050: an idle marker of the millisecond of the revise's last
     /// input (an adopter's, from an event) does not end its turn.

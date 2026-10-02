@@ -412,7 +412,7 @@ impl Supervisor<'_> {
             && self
                 .files
                 .modified(Path::new(receipt))
-                .is_ok_and(|at| at > watch.sent_at)
+                .is_ok_and(|at| super::revise::rewritten_after(at, watch.sent_at))
         {
             self.end_wait(slot, WaitCause::SessionMoved, Some(ask))?;
             return Ok(Step::Continue);

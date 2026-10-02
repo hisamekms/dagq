@@ -43,6 +43,27 @@ pub(super) fn recorded_at(event: &RunEvent) -> SystemTime {
     event_time(event).unwrap_or(UNIX_EPOCH)
 }
 
+/// `at` as the `sent_at` of a revise or conflict request (task 1197): unix
+/// seconds with the millisecond below the point, the precision of
+/// [`to_millis`], so that an adopter compares the files with it as the
+/// supervisor that sent it did. Whole seconds would make a receipt or a
+/// marker written earlier in the same second look written after it.
+pub(super) fn request_sent_at(at: SystemTime) -> Value {
+    let ms = to_millis(at)
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    json!(ms as f64 / 1000.0)
+}
+
+/// The `sent_at` of a recorded revise or conflict request, read back to
+/// the millisecond it was written with (whole seconds before task 1197);
+/// the epoch when not recorded.
+pub(super) fn request_sent_at_of(payload: &Value) -> SystemTime {
+    let ms = crate::domain::request_sent_at_millis(payload).unwrap_or_default();
+    UNIX_EPOCH + Duration::from_millis(u64::try_from(ms).unwrap_or(0))
+}
+
 /// A time of `ms` milliseconds and `ns` nanoseconds past a fixed second,
 /// for the tests of the millisecond's edge: no real clock. A time an adopter
 /// reads from an event is one with `ns` 0; a file's time keeps `ns`.
@@ -81,6 +102,33 @@ mod tests {
         // The next millisecond is after, the one before is not.
         assert!(written_after(at(251, 0), event));
         assert!(!written_after(at(249, 999_999), event));
+    }
+
+    #[test]
+    fn a_request_sent_at_is_read_back_to_its_millisecond() {
+        // Sent at 250.600 ms past the second: recorded and read as 250 ms.
+        let sent = at(250, 600_000);
+        let recorded = json!({"sent_at": request_sent_at(sent)});
+        let adopted = request_sent_at_of(&recorded);
+        assert_eq!(adopted, at(250, 0));
+        // A receipt or a marker written before it, in the same millisecond
+        // or the same second, is not after it; one in a later millisecond
+        // is, as it is for the supervisor that sent it.
+        for before in [at(250, 100_000), at(0, 0), at(100, 0)] {
+            assert!(!written_after(before, adopted));
+            assert!(!written_after(before, sent));
+        }
+        assert!(written_after(at(251, 0), adopted));
+        assert!(written_after(at(251, 0), sent));
+        // Every millisecond of the second reads back exactly.
+        for ms in 0..1000 {
+            let recorded = json!({"sent_at": request_sent_at(at(ms, 999_999))});
+            assert_eq!(request_sent_at_of(&recorded), at(ms, 0));
+        }
+        // A request recorded in whole seconds before task 1197 reads as
+        // that second; one without a time as the epoch.
+        assert_eq!(request_sent_at_of(&json!({"sent_at": 1_000_000})), at(0, 0));
+        assert_eq!(request_sent_at_of(&json!({})), UNIX_EPOCH);
     }
 
     #[test]

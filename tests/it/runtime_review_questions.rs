@@ -77,9 +77,12 @@ fn await_revise_after(db: &std::path::Path, ask: AskId) {
     });
     let mut queue = SqliteQueue::open(db).unwrap();
     let detail = queue.show(TaskId::new(1)).unwrap();
+    // Recorded to the millisecond (task 1197), compared to the second of
+    // the ask.
     let sent_at = payloads(&detail, "revise_requested")[0]["sent_at"]
-        .as_i64()
-        .unwrap();
+        .as_f64()
+        .unwrap()
+        .floor() as i64;
     let created_at = queue.read_ask(ask).unwrap().created_at;
     assert!(created_at < sent_at, "{created_at} {sent_at}");
 }

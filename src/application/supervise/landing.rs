@@ -531,7 +531,7 @@ impl Supervisor<'_> {
                 // Recorded before it is typed: a supervisor that stops in
                 // between leaves an adopter that waits for the session
                 // rather than sending the request a second time.
-                let mut requested = json!({"attempt": attempt, "reasons": verdict.reasons, "sent_at": unix_seconds(sent_at)});
+                let mut requested = json!({"attempt": attempt, "reasons": verdict.reasons, "sent_at": super::file_time::request_sent_at(sent_at)});
                 if let Some(requested) = requested.as_object_mut() {
                     let provider = run.actual_provider();
                     requested.extend(worker.fields_raised(provider, raise.as_ref()));
@@ -775,7 +775,7 @@ impl Supervisor<'_> {
                 // request that could not be sent is withdrawn below.
                 let mut sending = payload.clone();
                 sending["requested"] = json!(true);
-                sending["sent_at"] = json!(unix_seconds(sent_at));
+                sending["sent_at"] = super::file_time::request_sent_at(sent_at);
                 self.queue
                     .record_runtime_event(run.id(), EventKind::ConflictPrecheck, sending)?;
                 submit(
