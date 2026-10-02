@@ -1016,6 +1016,33 @@ fn an_unreadable_verdict_is_reviewed_again_and_a_readable_one_lands() {
     assert!(backend.notifications.lock().unwrap().is_empty());
 }
 
+/// A session that writes its receipt and goes idle before its wrapper has
+/// registered its agent (the wrapper slowed by load between the two) is
+/// not taken to validation while the run is still `starting`: the
+/// supervisor waits for `agent_started`, the wrapper's registration is not
+/// refused ("run is not starting"), and the run is reviewed and lands
+/// (task 1274).
+#[test]
+fn a_session_idle_before_its_agent_is_registered_waits_for_the_agent_and_lands() {
+    let (_dir, repo, db) = fixture();
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    backend.agent_registers_late = true;
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    assert_landed_run(&detail.runs[0], &repo, &base);
+    let kinds = event_kinds(&detail);
+    assert!(
+        position(&kinds, "agent_started") < position(&kinds, "supervision_finished"),
+        "{kinds:?}"
+    );
+}
+
 /// A revise whose rewritten receipt does not name the clean worktree HEAD
 /// (here the commit before the fix) is not handed to validation, which
 /// would fail the run and its work: the live session is asked to rewrite

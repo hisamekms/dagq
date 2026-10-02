@@ -186,6 +186,57 @@ impl Spawner for StubSpawner {
     }
 }
 
+/// How long [`LateAgentSpawner`] holds the agent's registration back
+/// after the stub went idle, unless the run leaves `starting` first: many
+/// supervisor ticks ([`TEST_TICK`]), so a supervisor that took a session
+/// whose agent is not registered yet to validation would do it within.
+const LATE_AGENT_HOLD: Duration = Duration::from_secs(1);
+
+/// [`StubSpawner`], returning the agent to its wrapper (which registers it)
+/// only once the stub wrote its idle marker after its receipt, and then
+/// [`LATE_AGENT_HOLD`] later or as soon as the run is no longer `starting`:
+/// the order a wrapper slowed by load between starting its agent and
+/// registering it sees (task 1274).
+pub struct LateAgentSpawner {
+    pub inner: StubSpawner,
+    pub db: PathBuf,
+    pub run: RunId,
+}
+
+impl Spawner for LateAgentSpawner {
+    fn spawn(&self, spec: &CommandSpec, streams: Streams<'_>) -> Result<Box<dyn Spawned>> {
+        let idle = spec
+            .get_envs()
+            .find(|(key, _)| *key == "IDLE")
+            .and_then(|(_, value)| value)
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow::anyhow!("the agent has no idle marker"))?;
+        let mut child = self.inner.spawn(spec, streams)?;
+        let _waiting = common::within(common::STEP_LIMIT, "the stub agent's idle marker");
+        while !idle.exists() {
+            ensure!(
+                child.try_wait()?.is_none() || idle.exists(),
+                "the stub agent exited before {}",
+                idle.display()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let held = Instant::now();
+        while held.elapsed() < LATE_AGENT_HOLD {
+            let status: String = Connection::open(&self.db)?.query_row(
+                "SELECT status FROM task_runs WHERE id=?1",
+                [&self.run],
+                |r| r.get(0),
+            )?;
+            if status != "starting" {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        Ok(child)
+    }
+}
+
 /// The directory of a fake `cmux` next to the queue at `db`, which appends
 /// the arguments of each call to `calls` there and exits at once: what the
 /// stub agents' `dagq` (a notifying `ask`, a `stats`) resolves as `cmux`
@@ -727,6 +778,11 @@ pub struct TestWorkspace {
     /// environment held it (the workspace's `[run.env]` in production),
     /// set before each turn's own variables ([`headless::InheritingSpawner`]).
     pub inherited_env: Vec<(String, String)>,
+    /// An interactive session's wrapper registers its agent only after the
+    /// stub went idle after its receipt, while the run is `starting`
+    /// ([`LateAgentSpawner`]), as a wrapper slowed by load does (task 1274).
+    /// A headless session ignores it.
+    pub agent_registers_late: bool,
 }
 
 impl TestWorkspace {
@@ -782,6 +838,7 @@ impl TestWorkspace {
             codex: None,
             sccache: None,
             inherited_env: Vec::new(),
+            agent_registers_late: false,
         }
     }
     /// Let cmux list `workspace` as if an earlier supervisor opened it.
@@ -812,6 +869,8 @@ impl TestWorkspace {
         self.closed.lock().unwrap().clone()
     }
     /// Wait for every session wrapper started so far to return successfully.
+    /// A wrapper's error comes with the queue's events, which tell what the
+    /// supervisor did to the run meanwhile (task 1274).
     pub fn join(&self) {
         let workers: Vec<_> = self
             .sessions
@@ -821,11 +880,14 @@ impl TestWorkspace {
             .filter_map(|(id, s)| s.worker.take().map(|worker| (id.clone(), worker)))
             .collect();
         for (id, worker) in workers {
-            joined(
+            let returned = joined(
                 worker,
                 format!("the session wrapper of workspace {id} to return (its stub agent to exit)"),
-            )
-            .unwrap();
+            );
+            if let Err(error) = returned {
+                print_queue_events(&self.db);
+                panic!("the session wrapper of workspace {id} failed: {error:#}");
+            }
         }
     }
     pub fn session_run_dir(&self, workspace_id: &str) -> String {
@@ -895,6 +957,7 @@ impl WorkspaceBackend for TestWorkspace {
         let ready = self.headless_ready.clone();
         let sccache = self.sccache.clone();
         let inherited_env = self.inherited_env.clone();
+        let late = self.agent_registers_late;
         let worker = thread::spawn(move || {
             let spawner = StubSpawner { db: db.clone() };
             if let Some((provider, other)) = headless {
@@ -932,6 +995,20 @@ impl WorkspaceBackend for TestWorkspace {
                 script,
                 db: db.clone(),
             };
+            if late {
+                let spawner = LateAgentSpawner {
+                    inner: spawner,
+                    db: db.clone(),
+                    run: id.clone(),
+                };
+                return runtime::session_with_provider(
+                    &db,
+                    &id,
+                    &LeaseToken::new(&token),
+                    &provider,
+                    &spawner,
+                );
+            }
             runtime::session_with_provider(&db, &id, &LeaseToken::new(&token), &provider, &spawner)
         });
         sessions.push((

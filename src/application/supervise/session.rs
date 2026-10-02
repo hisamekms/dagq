@@ -604,6 +604,11 @@ impl SessionWatch {
         // A session that already ended (on its own, by a person's /exit,
         // or before this supervisor adopted the run) is not asked to exit.
         let session_ended = wrapper.is_some_and(|w| w.exited_at.is_some());
+        // A fast session, or a wrapper slowed by load, can see the receipt and
+        // the idle before the wrapper registers its agent: the run is still
+        // `starting`, and taking it to validation would refuse that
+        // registration and end the session (task 1274).
+        let agent_registered = processes.iter().any(|p| p.role == "agent");
         // Background work the session left running after its receipt is
         // waited for up to the resume timeout, like a resumed session's:
         // work that never ends must not hold the run without an attention.
@@ -615,6 +620,7 @@ impl SessionWatch {
         if self.receipt_seen
             && self.exit_requested.is_none()
             && !session_ended
+            && agent_registered
             && let Some(evidence) = match self.idle_after_receipt_or_screen(sv, run)? {
                 // The session has not answered the request to rewrite
                 // its receipt yet: waited for up to the resume timeout,
