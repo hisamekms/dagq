@@ -56,7 +56,7 @@ fn hold_past_the_stage_timeout(
 const REVISE_ASKING_AGENT: &str = r#"
 commit work; receipt "$(git rev-parse HEAD)"; idle
 while [ ! -f "$MESSAGE" ]; do sleep 0.05; done; rm "$MESSAGE"
-"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which line?' --cmux /usr/bin/true > /dev/null || exit 70
+"$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which line?' --cmux /usr/bin/true > /dev/null || exit 70
 idle
 while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
 cp "$MESSAGE" answer.txt; rm "$MESSAGE"
@@ -72,7 +72,7 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
 
 /// A worker that asks at once and commits the answer it got (`first.txt`).
 const ASKING_AGENT: &str = r#"
-"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
+"$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
 idle
 while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
 cp "$MESSAGE" first.txt; git add first.txt; git commit -q -m answer
@@ -90,7 +90,7 @@ fn resume_asking(gated: bool) -> String {
     };
     format!(
         r#"await_message; rm "$MESSAGE"; {gate}
-"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Keep which side?' --cmux /usr/bin/true > /dev/null || exit 70
+"$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Keep which side?' --cmux /usr/bin/true > /dev/null || exit 70
 idle
 while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
 resolve; receipt "$(git rev-parse HEAD)"; idle; await_exit

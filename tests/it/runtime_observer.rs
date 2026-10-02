@@ -49,6 +49,9 @@ fn observe(
     provider: &dyn AgentProvider,
     options: &dagq::observer::ObserveOptions,
 ) -> Result<Value> {
+    // The job's `dagq` goes to the queue's service (goal 82's stage (3)),
+    // which the fixture stops.
+    common::service::serve(db);
     dagq::observer::observe(
         db,
         provider,
@@ -136,14 +139,15 @@ fn the_observer_takes_its_role_table_and_records_what_it_started_with() {
 fn observe_records_findings_and_a_blocked_ask_and_advances_the_cursor() {
     use dagq::observer::{ObserveMode, read_cursor};
     let (_dir, _repo, db) = fixture();
-    // `dagq` is first on PATH and the queue is in DAGQ_QUEUE; the state
-    // changes the prompt forbids are refused by the CLI itself.
+    // `dagq` is first on PATH and goes to the queue's service with the
+    // observer's token; the state changes the prompt forbids are refused,
+    // by the service or for having no use case in it.
     let provider = ObserverProvider {
         script: r#"
 set -e
 printf '%s' "$DAGQ_ROLE" > role.txt
 printf '%s' "$0" > mcp.txt
-q() { dagq --db "$DAGQ_QUEUE" "$@" > /dev/null; }
+q() { dagq "$@" > /dev/null; }
 q finding record --kind stall --task 1 --summary 'task 1 waits for a slot' --evidence 1
 q finding record --kind stall --task 1 --summary 'task 1 waits for a slot' --evidence 1 --evidence 2
 q finding record --kind capacity --queue --subject idle_slots --summary 'slots idle'
@@ -189,14 +193,21 @@ echo 'observer diagnostic' >&2
     );
     // The agent was started without MCP servers.
     assert_eq!(fs::read_to_string(dir.join("mcp.txt")).unwrap(), "no-mcp");
-    for denied in ["ready.err", "ask.err", "goal.err", "note.err", "draft.err"] {
-        assert!(
-            fs::read_to_string(dir.join(denied))
-                .unwrap()
-                .contains("observer may not change queue state"),
-            "{denied}"
-        );
+    // The service refuses the ask and the note for the observer's principal,
+    // and the planning commands are none of its use cases.
+    for (denied, code) in [
+        ("ready.err", "no_use_case"),
+        ("ask.err", "authorization_denied"),
+        ("goal.err", "no_use_case"),
+        ("note.err", "authorization_denied"),
+        ("draft.err", "no_use_case"),
+    ] {
+        let error: Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(denied)).unwrap()).unwrap();
+        assert_eq!(error["queue_service"]["code"], code, "{denied}: {error}");
     }
+    let refusals = queue_events(&db, "authorization_denied");
+    assert_eq!(refusals.len(), 2, "{refusals:?}");
     assert!(
         fs::read_to_string(dir.join("output.out"))
             .unwrap()
@@ -545,7 +556,7 @@ fn observer_claude_stub(db: &Path) -> PathBuf {
 if [ "$1" = "-p" ]; then
   mode=hourly
   case "$*" in *"daily observation"*) mode=daily ;; esac
-  exec dagq --db "$DAGQ_QUEUE" finding record --goal 1 --kind observed --subject "$mode" --summary "observed by $DAGQ_ROLE"
+  exec dagq finding record --goal 1 --kind observed --subject "$mode" --summary "observed by $DAGQ_ROLE"
 fi
 printf 'test provider\n'
 "#,
@@ -557,6 +568,8 @@ printf 'test provider\n'
 #[test]
 fn supervisor_starts_the_observer_on_its_interval_without_a_run_slot() {
     let (_dir, repo, db) = fixture();
+    // The observer's `dagq` goes to the queue's service.
+    common::service::serve(&db);
     {
         let mut queue = SqliteQueue::open(&db).unwrap();
         queue
@@ -678,8 +691,11 @@ fn observe_reads_again_what_others_wrote_while_its_agent_ran() {
     // Someone else's note lands after the input was read, before the finish.
     let noting = ObserverProvider {
         script:
-            r#"DAGQ_ROLE= dagq --db "$DAGQ_QUEUE" note --task 1 --text 'meanwhile' > /dev/null"#
-                .into(),
+            // A person's note, on the queue itself.
+            format!(
+                "env -u DAGQ_ROLE -u DAGQ_SERVICE_SOCKET -u DAGQ_SERVICE_CREDENTIAL_FILE dagq --db \"{}\" note --task 1 --text 'meanwhile' > /dev/null",
+                db.display()
+            ),
     };
     let quiet = ObserverProvider {
         script: "true".into(),
@@ -828,7 +844,7 @@ fn observe_reads_the_kpis_and_the_improvements_and_keeps_one_kpi_finding_per_sub
     let provider = ObserverProvider {
         script: r#"
 set -e
-q() { dagq --db "$DAGQ_QUEUE" "$@" > /dev/null; }
+q() { dagq "$@" > /dev/null; }
 q finding record --kind kpi --queue --subject 'lead_time/all' --summary 'lead time 90s over 60s for 3 days' --evidence 1
 q finding record --kind kpi --queue --subject 'lead_time/all' --summary 'lead time 95s over 60s for 4 days' --evidence 2
 "#
@@ -901,7 +917,7 @@ impl AgentProvider for BreachRecorder {
                 continue;
             };
             script.push_str(&format!(
-                "dagq --db \"$DAGQ_QUEUE\" finding record --kind {} --queue --subject '{}' --summary 'value {} since {}' --evidence {evidence} > /dev/null\n",
+                "dagq finding record --kind {} --queue --subject '{}' --summary 'value {} since {}' --evidence {evidence} > /dev/null\n",
                 breach["finding_kind"].as_str().unwrap(),
                 breach["subject"].as_str().unwrap(),
                 breach["value"],
@@ -1058,13 +1074,14 @@ fn observe_counts_the_findings_the_observer_closed_and_no_other_close() {
         script: format!(
             r#"
 set -e
-q() {{ dagq --db "$DAGQ_QUEUE" "$@" > /dev/null; }}
+q() {{ dagq "$@" > /dev/null; }}
 q finding resolve {resolved} --reason 'slots are busy again'
 q finding record --kind capacity --queue --subject reopened --summary 'reopened again' --evidence 1
 q finding record --kind capacity --queue --subject dismissed --summary 'dismissed later'
-env -u DAGQ_ROLE dagq --db "$DAGQ_QUEUE" finding dismiss {dismissed} --reason 'not a problem' > /dev/null
+env -u DAGQ_ROLE -u DAGQ_SERVICE_SOCKET -u DAGQ_SERVICE_CREDENTIAL_FILE dagq --db "{db}" finding dismiss {dismissed} --reason 'not a problem' > /dev/null
 "#,
-            dismissed = resolved.as_i64() + 1
+            dismissed = resolved.as_i64() + 1,
+            db = db.display()
         ),
     };
     let finished = observe(&db, &provider, &observe_options(ObserveMode::Hourly)).unwrap();

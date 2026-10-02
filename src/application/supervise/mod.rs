@@ -355,6 +355,9 @@ pub struct Ports<'a> {
     /// (ADR-t1063-1); `None` when this supervisor found no Codex that runs.
     pub codex_jobs: Option<&'a dyn AgentProvider>,
     pub spawner: &'a dyn Spawner,
+    /// The queue service's tokens and socket, which the workers and the
+    /// jobs are given instead of the queue's path (goal 82's stage (3)).
+    pub service_access: &'a dyn super::queue_service::ServiceAccess,
     pub files: Arc<dyn RunFiles>,
     pub processes: Arc<dyn ProcessControl + Send + Sync>,
     pub generators: Generators,
@@ -658,6 +661,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
             .filter(|w| !settings.no_claude || w.provider != crate::domain::Provider::Claude)
             .collect(),
         spawner: ports.spawner,
+        service_access: ports.service_access,
         files: ports.files.clone(),
         processes: ports.processes.clone(),
         review_material: ports.review_material,
@@ -783,6 +787,7 @@ struct Supervisor<'a> {
     /// one of them is not claimed (ADR-t813-2).
     workers: Vec<Worker>,
     spawner: &'a dyn Spawner,
+    service_access: &'a dyn super::queue_service::ServiceAccess,
     files: Arc<dyn RunFiles>,
     processes: Arc<dyn ProcessControl + Send + Sync>,
     review_material: &'a dyn Fn(TaskId) -> Result<Value>,

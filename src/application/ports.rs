@@ -190,6 +190,20 @@ impl CommandSpec {
         self
     }
 
+    /// Take out the first two consecutive arguments `first` `second`;
+    /// whether they were there.
+    pub fn remove_arg_pair(&mut self, first: impl AsRef<OsStr>, second: impl AsRef<OsStr>) -> bool {
+        let (first, second) = (first.as_ref(), second.as_ref());
+        let at = self
+            .args
+            .windows(2)
+            .position(|pair| pair[0] == first && pair[1] == second);
+        if let Some(at) = at {
+            self.args.drain(at..at + 2);
+        }
+        at.is_some()
+    }
+
     /// The process does not inherit `key`.
     pub fn env_remove(&mut self, key: impl AsRef<OsStr>) -> &mut Self {
         self.envs.push((key.as_ref().to_owned(), None));
@@ -604,6 +618,15 @@ pub trait AgentProvider {
     fn broker_tools(&self, command: &mut CommandSpec, config: &std::path::Path) -> bool {
         let _ = (command, config);
         false
+    }
+    /// Let the agent of `command` (a worker's turn or session, or a
+    /// headless job) reach the queue service at `socket`, which its
+    /// client-mode `dagq` calls (ADR-t1233-5 decision 4): a provider whose
+    /// sandbox would refuse the connection allows that socket and nothing
+    /// more. One without a sandbox (Claude Code's agents) leaves the
+    /// command as it is.
+    fn reach_queue_service(&self, command: &mut CommandSpec, socket: &std::path::Path) {
+        let _ = (command, socket);
     }
     /// How long the headless review may take before it counts as failed.
     fn review_timeout(&self) -> std::time::Duration {

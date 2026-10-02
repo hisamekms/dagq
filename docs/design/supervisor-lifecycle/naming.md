@@ -4,8 +4,8 @@ type: design
 title: "Naming"
 status: current
 created: 2026-09-26
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-10-02
+last_verified: 2026-10-02
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -33,7 +33,7 @@ titleは表示専用で、runtimeはどのworkspaceもtitleで探さない（[AD
 
 workspaceは作成時にtitleとcommandのほかに`WorkspaceTags`を持つ（`workspace_create_arguments`が`--name`、`--description`、`--env`、`--group`、`--command`、`--focus false`の順に並べ、`--cwd`を足す）:
 
-- **env**: `DAGQ_ROLE=<role>`と`DAGQ_QUEUE=<canonical db path>`（`application::actor_executor::actor_env`。actor idなどほかの変数は[Roles](roles.md#環境変数)）。roleは`SessionRole`（workspaceを持つのは`supervisor` / `worker` / `planner` / `inbox`）。`cmux workspace env <id> --json`で読め、workspaceの全shellに継承される。inbox session内の`up`の`skipped`判定とpluginのhookはこれを読む。plannerのworkspaceはさらに`DAGQ_PLANNER_ORIGIN=<person|runtime>`（`submit`がproposalの持ち主の種別にする）と`DAGQ_PLANNER_ID=<planner-id>`を持つ。
+- **env**: `DAGQ_ROLE=<role>`と、inbox・planner・supervisorの`DAGQ_QUEUE=<canonical db path>`（workerのworkspaceには無い。goal 82の段(3)。`application::actor_executor::actor_env`。actor idなどほかの変数は[Roles](roles.md#環境変数)）。roleは`SessionRole`（workspaceを持つのは`supervisor` / `worker` / `planner` / `inbox`）。`cmux workspace env <id> --json`で読め、workspaceの全shellに継承される。inbox session内の`up`の`skipped`判定とpluginのhookはこれを読む。plannerのworkspaceはさらに`DAGQ_PLANNER_ORIGIN=<person|runtime>`（`submit`がproposalの持ち主の種別にする）と`DAGQ_PLANNER_ID=<planner-id>`を持つ。
 - **description**: `dagq role=<role> queue=<queue hash>[ run=<run-id>][ task=<id>]`（`workspace_description`）の1行。人向けの補助で、判定には使わない。
 - **group**: queueのworkspace group。`WorkspaceBackend::ensure_group(queue hash, "[<repo>]")`（cmux adapterは`cmux --json --id-format uuids workspace-group create --name "[<repo>]" --external-id <queue hash>`。既にあれば同じgroupが返る）のUUIDを`--group`で渡す。`up`は最初にworkspaceを作るときに1回だけ求め、supervisorはrunのworkspaceを作るたびに求める（cmuxは最後のworkspaceが閉じたgroupを消すので、前のrunのgroup UUIDを持ち越さない）。作れなければwarning（`up`はJSONの`warnings`、supervisorはlogの`warning: cmux workspace group …`）にしてgroupなしでworkspaceを作る。cmuxは`--from`なしの`workspace-group create`でgroupのanchor workspaceを生成するので、queueごとに1つ見出しのworkspaceが増える。
 

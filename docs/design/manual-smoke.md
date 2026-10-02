@@ -47,13 +47,15 @@ related:
 
 #### scratch の worker が打つ `dagq` の環境
 
+task 1236 から worker の `dagq` はクライアントモードで動く（[Queue service](queue-service.md#クライアントモード)）。worker の agent には queue の path（`DAGQ_QUEUE`）は渡らず、scratch の supervisor が渡す queue service の socket（`DAGQ_SERVICE_SOCKET`）と worker の token の file（`DAGQ_SERVICE_CREDENTIAL_FILE`）だけが渡るので、worker の `dagq` は `XDG_DATA_HOME` にも cwd にも依らず、その supervisor の queue の service に届く。`--once` でない `supervise` は queue の service を起動して見張る（無ければ `tq service start`）。worker の `dagq` に scratch のバイナリを使わせるには、下の `PATH` が要る（クライアントモードを持たない古いバイナリは cwd から既定の queue を開こうとする）。
+
 人か inbox が `dagq-smoke` に立てる worker には、使い捨て repository の main checkout の `dagq.toml` の `[run.env]` で `XDG_DATA_HOME` と、scratch の bin を先頭にした `PATH` を渡せる。これはコードで確認した渡し方であり、実 cmux・Claude Code の shell まで含む確認は下の手順で行う。supervisor を起動する terminal の env だけには頼らない。
 
 コードの根拠（2026-09-30）:
 
 - `src/infrastructure/run_env.rs` の `parse_run_env` / `parse_config` は両変数を受け付ける。`load_run_env` / `expand` は `${DAGQ_QUEUE_DIR}` と `${DAGQ_RUN_DIR}` だけを展開する。`$PATH`・`${PATH}`・`$HOME`・`~` は展開されないので、PATH は先頭に足す部分も既存の部分も、展開済みの絶対パスで書く。
 - 同 file の `ShellVerifier::run_env` が main checkout の設定を読み、`src/application/supervise/session.rs` の `Supervisor::provision` がそれを渡す。`src/application/actor_executor.rs` の `HostActorExecutor::spawn`（`RunWorkspace`）は `actor_env` の後に `run_env` を足し、`src/infrastructure/adapters.rs` の `workspace_create_arguments` は各値を `--env KEY=VALUE` にする。この経路で `XDG_DATA_HOME` や `PATH` を後から上書きする処理は無い。PATH の値を丸ごと指定できるので scratch の bin を先頭にできる。ただし cmux や shell の起動設定による変更は実機で確認する。
-- `actor_env` は `DAGQ_ROLE`・`DAGQ_QUEUE`・`DAGQ_ACTOR_ID`・`DAGQ_RUN_ID`・`DAGQ_TASK_ID` を設定する。`[run.env]` は `DAGQ_` で始まる key を拒むため、これらを上書きできない。`DAGQ_QUEUE` が渡ることと CLI の DB の解決は別で、`src/main.rs` の `execute` は `QueueLocation::resolve(cli.db.as_deref(), &cwd)` を呼ぶ。`src/infrastructure/location.rs` の `QueueLocation::resolve` / `data_home` は `--db` があればそれ、無ければ cwd の Git common directory と `XDG_DATA_HOME`（無ければ `~/.local/share`）から解決する。`DAGQ_QUEUE` だけでは通常の CLI の DB の指定にならない。
+- `actor_env` は `DAGQ_ROLE`・`DAGQ_ACTOR_ID`・`DAGQ_RUN_ID`・`DAGQ_TASK_ID` と、inbox・planner には `DAGQ_QUEUE` を設定する（worker の workspace と agent には設定しない。agent には session wrapper が queue service の socket と token の file を足す。task 1236）。`[run.env]` は `DAGQ_` で始まる key を拒むため、これらを上書きできない。`DAGQ_QUEUE` が渡ることと CLI の DB の解決は別で、`src/main.rs` の `execute` は `QueueLocation::resolve(cli.db.as_deref(), &cwd)` を呼ぶ。`src/infrastructure/location.rs` の `QueueLocation::resolve` / `data_home` は `--db` があればそれ、無ければ cwd の Git common directory と `XDG_DATA_HOME`（無ければ `~/.local/share`）から解決する。`DAGQ_QUEUE` だけでは通常の CLI の DB の指定にならない。
 
 人か inbox が行う設定と確認:
 
@@ -65,9 +67,9 @@ related:
    PATH = "<scratch>/bin:<既存のPATHの展開済みの値>"
    ```
 
-2. task の description に、開始時に `command -v dagq`、`printenv XDG_DATA_HOME PATH DAGQ_ROLE DAGQ_QUEUE DAGQ_RUN_ID` と `dagq locate` を記録するよう書く。scratch の worker 自身の run に対する `dagq ask --run "$DAGQ_RUN_ID" --kind worker_question --because scope --topic other --question 'スモークを続けてよいか'` と、answer 後の再開も指定する。queue の作成・登録・起動・answer・後始末は人か inbox が行い、worker は自分の task / run の許された操作だけを行う。
-3. **実機では未確認の確認項目**: 人か inbox が `dagq-smoke` で上記の出力を集める。`command -v` が `<scratch>/bin/dagq`、XDG が `<scratch>/xdg`、role が `worker`、`dagq locate` の `db` が人側の `tq locate` と同じ scratch の queue.db であることを見る。その queue の `tq events --all --full --run RUN` に worker の ask が入り、人か inbox の answer で再開すれば、scratch の worker が scratch のバイナリで自分の queue に打てたと判定する。版・run ID・解決先・ask の ID を結果に残す。
-4. shell の起動設定が PATH を変えるなどして一致しない場合は、原因と実際の PATH を残し、description で `<scratch>/bin/dagq` を絶対パスで指定する。XDG の指定も維持されない場合や `--db` で作った queue なら、worker 用 wrapper を別に作り、`exec '<scratch>/bin/dagq' --db '<scratch の queue.db の絶対パス>' "$@"` としてその絶対パスを description に書く。worker 用 wrapper は `DAGQ_*` を消さず、権限を変えない。人用の `env -u ...` を含む `tq` を worker に使わせない。
+2. task の description に、開始時に `command -v dagq`、`printenv XDG_DATA_HOME PATH DAGQ_ROLE DAGQ_QUEUE DAGQ_RUN_ID DAGQ_SERVICE_SOCKET DAGQ_SERVICE_CREDENTIAL_FILE` と `dagq locate` を記録するよう書く。scratch の worker 自身の run に対する `dagq ask --run "$DAGQ_RUN_ID" --kind worker_question --because scope --topic other --question 'スモークを続けてよいか'` と、answer 後の再開も指定する。queue の作成・登録・起動・answer・後始末は人か inbox が行い、worker は自分の task / run の許された操作だけを行う。
+3. **実機では未確認の確認項目**: 人か inbox が `dagq-smoke` で上記の出力を集める。`command -v` が `<scratch>/bin/dagq`、XDG が `<scratch>/xdg`、role が `worker`、`DAGQ_QUEUE` が空で、`DAGQ_SERVICE_SOCKET` が人側の `tq service status` の `socket` と同じであること、`dagq locate` が `client_mode: true` とその socket を返す（`db` は null）ことを見る。その queue の `tq events --all --full --run RUN` に worker の ask が入り、人か inbox の answer で再開すれば、scratch の worker が scratch のバイナリで自分の queue に打てたと判定する。版・run ID・解決先・ask の ID を結果に残す。
+4. shell の起動設定が PATH を変えるなどして一致しない場合は、原因と実際の PATH を残し、description で `<scratch>/bin/dagq` を絶対パスで指定する。クライアントモードの worker の `dagq` は `--db` を `queue_named` で拒むので、`--db` を足す worker 用 wrapper は使えない（task 1236 より前のバイナリの確認のときだけ、XDG の指定も維持されない場合や `--db` で作った queue なら、worker 用 wrapper を別に作り、`exec '<scratch>/bin/dagq' --db '<scratch の queue.db の絶対パス>' "$@"` としてその絶対パスを description に書く）。worker 用 wrapper は `DAGQ_*` を消さず、権限を変えない。人用の `env -u ...` を含む `tq` を worker に使わせない。
 
 ### stub と実 Claude の使い分け
 
@@ -175,7 +177,7 @@ background のコマンドの summary は `Background command "<Bash tool の de
 3. task を 2 件登録して `ready` にする。どちらも `--verify 'test -f seed.txt'` と、description に「`smoke-<provider>.txt` に 1 行足して commit し、receipt を書く」。
    - Codex: `tq add "codex headless smoke" --provider codex ...`
    - Claude: `tq add "claude headless smoke" --headless ...`
-   - どちらの description にも「最初に `dagq ask --run $DAGQ_RUN_ID --kind worker_question --because scope --topic other --question '続けてよいか'` を打って turn を終え、答えを受けてから作業する」を足し、answer の turn（同じ session か thread の resume）も通す。Codex の worker の sandbox の中の `dagq ask` は queue に書かず、run dir の `ask-requests/` への要求になり、supervisor がそれを検査して ask を開く（[provider-lifecycle](provider-lifecycle.md#codexの非対話のworker)、task 890）。実 Codex の sandbox の中でこの経路が通ることは stub の test では確かめられないので、ここで確かめる。Codex の worker が打つ `dagq` は task 890 を含むバイナリにする（それより前の固定バイナリは queue を開こうとして sandbox に拒まれる）: description に scratch のバイナリの path を書くか、`[run.env]` で scratch のバイナリを先にした `PATH` を渡す。Codex の `dagq ask` は queue の場所を解決しないので `XDG_DATA_HOME` は要らない。
+   - どちらの description にも「最初に `dagq ask --run $DAGQ_RUN_ID --kind worker_question --because scope --topic other --question '続けてよいか'` を打って turn を終え、答えを受けてから作業する」を足し、answer の turn（同じ session か thread の resume）も通す。Codex の worker の sandbox の中の `dagq ask` は queue を開かず、クライアントモードで queue service に送られ、service が worker の principal で判定してその場で ask を開く（task 1236。[Queue service](queue-service.md#クライアントモード)。turn には queue service の socket と token の file が渡り、`DAGQ_ASK_REQUESTS` は渡らない）。実 Codex の workspace-write の sandbox の中から service の socket に届くことは stub の test では確かめられないので、ここで確かめる。Codex の worker が打つ `dagq` は task 1236 を含むバイナリにする（それより前のバイナリはクライアントモードを持たない）: description に scratch のバイナリの path を書くか、`[run.env]` で scratch のバイナリを先にした `PATH` を渡す。クライアントモードの `dagq` は queue の場所を解決しないので `XDG_DATA_HOME` は要らない（scratch の queue の service は、その queue の `up` か `dagq service start` が起動したものを使う）。
    - worker が `dagq` を打つ task のために、使い捨て repository の `dagq.toml` の `[run.env]` に `XDG_DATA_HOME = "<scratch>/xdg"` を置く（[作業の内訳のスモーク](#作業の内訳のスモーク)の注の「worker の `dagq`」）。
    - `tq ready ID --bypass-review` を add が返した ID だけに打つ。
 4. 専用の cmux workspace で `tq supervise --parallel 2 --claude ~/.local/bin/claude --codex ~/.local/bin/codex --log-dir <scratch>/logs --observe-interval 0 --observe-daily false --report-daily false --forecast-snapshots false --host-metrics-interval 0` を起動する。`tq status` の `supervisors[].providers` で claude と codex がどちらも `found: true`、codex の `modes` が `["headless"]` であることを見る。
@@ -185,7 +187,7 @@ background のコマンドの summary は `Background command "<Bash tool の de
    - `tq events --run RUN --full`: `run_claimed` の `provider`・`requested_provider`・`worker_mode`・`provider_version`・`codex_version`（supervisor が Codex の worker を動かすので、どちらの run にも載る）。`turn_requested` / `turn_started` / `turn_finished` の列（`outcome: succeeded`、`failure: null`、`usage` と `tokens`）。Codex は `turn_session_identified`（thread の id）と、`turn_finished` の `tokens_total`。Claude は answer の turn が同じ session の resume（`turn_started` の `session_id` が run の id）。`provider_switched` が無い。
    - run dir の `turns/turn-NNNNNN.jsonl` が CLI の出力（Claude は stream-json、Codex は `--json` の JSONL）で、`turns/` の依頼の記録と対になっている。
    - Codex の run: 着地した commit に `.codex/rules/dagq-deny.rules` が入っていない（`info/exclude`）。`~/.codex/config.toml` の更新時刻が変わっていない（変わっていれば、中身に main checkout の `[projects."…"]` の `trust_level` が足されていないかを見る。codex exec が thread の開始で書く project の trust は、task 1174 から worker の turn が `-c` で worktree の trust を渡して止めている。[provider-lifecycle](provider-lifecycle.md#codexの非対話のworker)）。
-   - Codex の run の ask: 最初の turn の出力（`turns/turn-000001.jsonl` の `command_execution`）で `dagq ask` が `"requested": true` を出して 0 で終わっている。run の `ask_request_taken`（`outcome: opened`、`ask_id`）が 1 件で、run dir の `ask-requests/` には `<id>.taken` だけが残る。ask の `asked_by` が `worker`。answer の turn は `turn_requested` の `what` が `answer of ask N`、`turn_started` の `session_id` が `turn_session_identified` の thread（`codex exec resume`）。`authorization_denied` が無い。
+   - Codex の run の ask: 最初の turn の出力（`turns/turn-000001.jsonl` の `command_execution`）で `dagq ask` が開いた ask（`id`・`kind: worker_question`）を出して 0 で終わっている（`{"error": ..., "queue_service": {"code": "unreachable"}}` なら sandbox から socket に届いていない）。`ask_opened` の event の actor が `worker:<run id>` で、run の `ask_request_taken` は無く、run dir に `ask-requests/` は作られない。ask の `asked_by` が `worker`。answer の turn は `turn_requested` の `what` が `answer of ask N`、`turn_started` の `session_id` が `turn_session_identified` の thread（`codex exec resume`）。`authorization_denied` が無い。
    - `tq stats --full` の `runs[]` の `provider`・`actual_provider`・`route`・`turns`（`by_provider`）。`tq kpi --by provider` と `--by route` に 2 本が分かれて出る。
    - `origin/main` に task ごとに 1 commit。
 7. 余力があれば切り替えも見る: supervisor を止め、`--codex <scratch>/no-such-codex` で起動し直して Codex の task をもう 1 件流すと、非対話の Claude で始まり（`provider_switched`、`phase: start`、`reason: executable_missing`）着地する。
@@ -276,7 +278,7 @@ task 1102 の後、ask 224 で人が了承して planner が `--headless` を付
 
 旧記録の注意: 1050 の `turn_finished.cost_usd` は 1 回目 4.721233400000003、2 回目 6.019502200000002 で、stream の `result.total_cost_usd`（session の累計）をそのまま記録している。`stats.turns.by_provider.claude.tokens.cost_usd` は 10.740735 となり、turn の費用として足すと重複する。これは [非対話の worker の Claude の読み手](supervisor-lifecycle/headless-worker.md) に記載された task 1199 より前の記録で、修正後も過去の記録は補正しない。今回見た不一致と、修正後の実 resume の測定を receipt の follow_ups に残した。
 
-この 7 run では、Claude の着地と revise の同一 session の resume を確認できた。未確認なのは answer と needs_session の resume、provider が使えない場合の切り替え、設定の実行前後の比較、手順 1〜5・7・8 の使い捨て queue での操作。Codex 固有の rules・sandbox・ask-requests の確認点は今回の Claude の対象外で、task 1102 の未確認事項を解消したとはみなさない。
+この 7 run では、Claude の着地と revise の同一 session の resume を確認できた。未確認なのは answer と needs_session の resume、provider が使えない場合の切り替え、設定の実行前後の比較、手順 1〜5・7・8 の使い捨て queue での操作。Codex 固有の rules・sandbox・ask-requests の確認点は今回の Claude の対象外で、task 1102 の未確認事項を解消したとはみなさない（その後 task 1236 で Codex の worker の `dagq ask` は queue service 経由になり、確認点は上の手順の「Codex の run の ask」に変わった）。
 
 ## 非対話の Claude の前提の確認
 
@@ -381,7 +383,7 @@ env -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR=<scratch>/cfg-empty \
 5. 確かめる。
    - `tq events --goal GOAL --full`: `goal_review_started` の `launch` が `{"role": "goal_review", "provider": "codex", "model": null, "effort": "low", "source": "dagq.toml"}` で `session_id` が null。`goal_review_finished` の `decision`（`achieved` のはず）、`session_id`（Codex の thread の id）、`model`（Codex が実際に使った model。読めなければ `model_unknown` の理由）。
    - goal の `goal-reviews/<id>/review.out` が `codex exec --json` の JSONL（`thread.started` … `turn.completed`）で、`command_execution` に `dagq show` などの読み取りがあり、書き込みのコマンドがあれば sandbox に拒まれている。`review.err` に `--dangerously` の類の警告が無い。
-   - `ps` で見た job の process（`codex exec --json --sandbox read-only -C <checkout> -c model_reasoning_effort="low" -- ...`）に bypass の flag が無い（job が短ければ `review.out` の `thread.started` と `tq status` の時刻で代える）。
+   - `ps` で見た job の process（`codex exec --json -C <checkout> -c model_reasoning_effort="low" -c features.network_proxy=true -c default_permissions="dagq_job" -c permissions.dagq_job.extends=":read-only" ... -- ...`。task 1236 から `--sandbox read-only` の代わりに queue service の socket だけを許す profile）に bypass の flag が無く、job の `dagq show` などが `queue_service` の `unreachable` で失敗していない（job が短ければ `review.out` の `thread.started` と `tq status` の時刻で代える）。
    - `~/.codex/sessions/YYYY/MM/DD/rollout-*-<thread>.jsonl` の `turn_context` の `model` が `goal_review_finished` の `model` と同じ。
    - `tq stats --full` の `jobs.goal_review.by_provider.codex` と `by_model.<model>` に 1 件。
    - `~/.codex/config.toml` の更新時刻が変わっていない。

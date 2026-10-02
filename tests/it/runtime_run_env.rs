@@ -59,11 +59,9 @@ fn dagq_toml_run_env_reaches_the_workspace_and_the_verification_commands() {
     assert_eq!(
         backend.tags.lock().unwrap()[0].env,
         vec![
+            // No queue path: the worker's dagq goes to the queue service
+            // (goal 82's stage (3)).
             ("DAGQ_ROLE".to_owned(), "worker".to_owned()),
-            (
-                "DAGQ_QUEUE".to_owned(),
-                canonical.to_str().unwrap().to_owned()
-            ),
             ("DAGQ_ACTOR_ID".to_owned(), format!("worker:{}", run.id())),
             ("DAGQ_RUN_ID".to_owned(), run.id().to_string()),
             ("DAGQ_TASK_ID".to_owned(), task.id().to_string()),
@@ -119,11 +117,9 @@ fn a_resumed_session_gets_the_run_env_too() {
     assert_eq!(
         tags[0].env,
         vec![
+            // No queue path: the worker's dagq goes to the queue service
+            // (goal 82's stage (3)).
             ("DAGQ_ROLE".to_owned(), "worker".to_owned()),
-            (
-                "DAGQ_QUEUE".to_owned(),
-                canonical.to_str().unwrap().to_owned()
-            ),
             ("DAGQ_ACTOR_ID".to_owned(), format!("worker:{}", run.id())),
             ("DAGQ_RUN_ID".to_owned(), run.id().to_string()),
             ("DAGQ_TASK_ID".to_owned(), run.task_id().to_string()),

@@ -26,7 +26,7 @@ const DIALOG_SCREEN: &str = " Auto mode is available\n\n ❯ 1. Yes, turn on aut
 fn markerless_asking_agent() -> String {
     format!(
         r#"{HOOK_FAILED}
-"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
+"$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
 while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
 cp "$MESSAGE" answer.txt; git add answer.txt; git commit -q -m answer
 receipt "$(git rev-parse HEAD)"; await_exit
@@ -228,7 +228,7 @@ fn a_markerless_resumed_session_gets_its_answer_once_its_screen_rests() {
     backend.resume_script_for(
         2,
         r#"await_message; rm "$MESSAGE"; sleep 1.1
-"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which side?' --cmux /usr/bin/true > /dev/null || exit 70
+"$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which side?' --cmux /usr/bin/true > /dev/null || exit 70
 while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
 receipt "$(git rev-parse HEAD)"; await_exit"#,
     );
@@ -281,7 +281,7 @@ fn a_markerless_revised_session_gets_its_answer_once_its_screen_rests() {
         false,
         r#"commit work; receipt "$(git rev-parse HEAD)"; idle
 while [ ! -f "$MESSAGE" ]; do sleep 0.05; done; rm "$MESSAGE"; sleep 1.1
-"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which line?' --cmux /usr/bin/true > /dev/null || exit 70
+"$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which line?' --cmux /usr/bin/true > /dev/null || exit 70
 while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
 cp "$MESSAGE" answer.txt; git add answer.txt; git commit -q -m answer
 receipt "$(git rev-parse HEAD)"; await_exit"#,
@@ -302,6 +302,22 @@ receipt "$(git rev-parse HEAD)"; await_exit"#,
     assert!(!delivered(&db, 1));
     *backend.screen.lock().unwrap() = READY_SCREEN.into();
     wait_until(&db, Duration::from_secs(30), |_| delivered(&db, 1));
+    // At work on the answer until its receipt names the commit that holds
+    // it: a screen left at rest meanwhile would end the revise before the
+    // worker's commit under load, as a session idle with its old receipt.
+    *backend.screen.lock().unwrap() = WORKING_SCREEN.into();
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    let first = run.result_commit().unwrap().as_str().to_owned();
+    wait_until(&db, Duration::from_secs(30), |_| {
+        let receipt: Option<Value> = fs::read(run.receipt_path().unwrap())
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+        receipt.is_some_and(|receipt| {
+            receipt["commit"]
+                .as_str()
+                .is_some_and(|commit| commit != first)
+        })
+    });
     *backend.screen.lock().unwrap() = READY_SCREEN.into();
     let outcome = joined(supervisor, "the supervisor thread to return");
     backend.join();

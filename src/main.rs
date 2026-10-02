@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 
 use dagq::application::commands::operations::{HookSession, Operation, WorkspaceScope};
 use dagq::application::queue_reads::{self as reads, QueueRead};
+use dagq::domain::queue_service::UseCase;
 use dagq::{
     application::TaskStore,
     domain::{
@@ -43,7 +44,7 @@ struct Cli {
     command: Command,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 enum Command {
     /// Initialize the queue, creating its directory if needed. An existing queue is checked, never migrated.
     Init,
@@ -1309,7 +1310,7 @@ fn parse_role(value: Option<String>) -> Result<Option<SessionRole>> {
 /// The statuses of a finding.
 const FINDING_STATUSES: [&str; 4] = ["open", "proposed", "resolved", "dismissed"];
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 enum FindingCommand {
     /// Record a finding. The open or proposed finding of the same kind, target and subject takes
     /// it instead: new evidence adds an occurrence (and reopens a resolved one), a new summary,
@@ -1362,7 +1363,7 @@ enum FindingCommand {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 enum ServiceCommand {
     /// Report whether the queue service runs and answers, its pid, build, API version and
     /// socket, and its attention, without changing anything.
@@ -1385,7 +1386,7 @@ enum ServiceCommand {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 enum BrokerCommand {
     /// Report dagq's Podman machine, the broker's image, the queue's container and its health on
     /// 127.0.0.1, without changing anything.
@@ -1446,7 +1447,7 @@ enum BrokerCommand {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 enum RunCommand {
     /// Print the last lines of the screen of the run's session (at most
     /// 200), recorded as `screen_read` without its text. A headless run has
@@ -1501,7 +1502,7 @@ enum RunCommand {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 enum PlannerCommand {
     /// Print the last lines of the screen of the planner's session (at
     /// most 200), recorded as `screen_read` without its text.
@@ -1532,13 +1533,13 @@ enum PlannerCommand {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 enum AskCommand {
     /// Mark an answered ask read. An open ask is withdrawn by answering it first.
     Close { id: i64 },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 enum DependencyCommand {
     Add {
         task: i64,
@@ -1558,7 +1559,7 @@ enum DependencyCommand {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 enum ProposalCommand {
     /// The submitted and revising proposals, oldest submission first (plan review's order).
     List {
@@ -1573,7 +1574,7 @@ enum ProposalCommand {
     Withdraw { id: i64 },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 enum GoalCommand {
     /// Register a goal; it has no state machine and no verification commands.
     Add {
@@ -2026,6 +2027,13 @@ fn error_json(error: &anyhow::Error) -> Value {
     if let Some(failure) = error.downcast_ref::<dagq::application::broker::BrokerFailure>() {
         return json!({"error": format!("{error:#}"), "broker": failure.to_json()});
     }
+    // A client-mode dagq's failure carries the service's code or its own
+    // (goal 82's stage (3)).
+    if let Some(failure) =
+        error.downcast_ref::<dagq::infrastructure::queue_service::ClientFailure>()
+    {
+        return json!({"error": failure.message, "queue_service": {"code": failure.code}});
+    }
     let Some(denied) = error.downcast_ref::<AuthorizationError>() else {
         return json!({"error": format!("{error:#}")});
     };
@@ -2139,7 +2147,320 @@ fn requested_ask(
     })))
 }
 
+/// The read of the queue `command` is, as the queue service answers it too
+/// (ADR-t1233-5 decision 1): `None` for any other command.
+fn queue_read(command: &Command) -> Option<QueueRead> {
+    Some(match command.clone() {
+        Command::List {
+            status,
+            all,
+            goal_id,
+            limit,
+            before,
+            full,
+        } => QueueRead::List(reads::ListRead {
+            status,
+            all,
+            goal: goal_id,
+            limit,
+            before,
+            full,
+        }),
+        Command::Candidates => QueueRead::Candidates,
+        Command::Graph {
+            goal_id,
+            format,
+            out: None,
+        } => QueueRead::Graph(reads::GraphRead {
+            goal: goal_id,
+            format,
+        }),
+        Command::Status { role } => QueueRead::Status(reads::RoleRead { role }),
+        Command::Asks { open, role, all } => QueueRead::Asks(reads::AsksRead { open, role, all }),
+        Command::Events {
+            after,
+            limit,
+            all,
+            full,
+            run,
+            task,
+            goal,
+            kind,
+            since,
+            until,
+        } => QueueRead::Events(reads::EventsRead {
+            after,
+            limit,
+            all,
+            full,
+            run,
+            task,
+            goal,
+            kind,
+            since,
+            until,
+        }),
+        Command::Timeline { run, gap, full } => {
+            QueueRead::Timeline(reads::TimelineRead { run, gap, full })
+        }
+        Command::Stats {
+            since,
+            until,
+            goal_id,
+            full,
+            cmux: _,
+        } => QueueRead::Stats(reads::StatsRead {
+            since,
+            until,
+            goal: goal_id,
+            full,
+        }),
+        Command::Kpi {
+            period,
+            last,
+            at,
+            since,
+            until,
+            changes,
+            areas,
+            by,
+            cross,
+            compare,
+            window,
+            goal_id,
+        } => QueueRead::Kpi(reads::KpiRead {
+            period,
+            last,
+            at,
+            since,
+            until,
+            changes,
+            areas,
+            by,
+            cross,
+            compare,
+            window,
+            goal: goal_id,
+        }),
+        Command::Forecast {
+            task_id,
+            goal_id,
+            parallel,
+            trials,
+        } => QueueRead::Forecast(reads::ForecastRead {
+            task: task_id,
+            goal: goal_id,
+            parallel,
+            trials,
+        }),
+        Command::Notes {
+            goal_id,
+            task_id,
+            since,
+            limit,
+        } => QueueRead::Notes(reads::NotesRead {
+            goal: goal_id,
+            task: task_id,
+            since,
+            limit,
+        }),
+        Command::Marks { since, until } => QueueRead::Marks(reads::MarksRead { since, until }),
+        Command::Findings {
+            id,
+            all,
+            status,
+            kinds,
+            task,
+            run,
+            goal,
+            queue,
+            full,
+        } => QueueRead::Findings(reads::FindingsRead {
+            id,
+            all,
+            status,
+            kinds,
+            task,
+            run,
+            goal,
+            queue,
+            full,
+        }),
+        Command::Search {
+            query,
+            status,
+            kinds,
+            goal_id,
+            limit,
+            full,
+        } => QueueRead::Search(reads::SearchRead {
+            query,
+            status,
+            kinds,
+            goal: goal_id,
+            limit,
+            full,
+        }),
+        Command::Related {
+            task_id,
+            status,
+            limit,
+        } => QueueRead::Related(reads::RelatedRead {
+            task: task_id,
+            status: status
+                .iter()
+                .map(|status| status.as_str().to_owned())
+                .collect(),
+            limit,
+        }),
+        Command::Goal {
+            command: GoalCommand::List,
+        } => QueueRead::GoalList,
+        Command::Goal {
+            command: GoalCommand::Show { id, full },
+        } => QueueRead::GoalShow(reads::GoalShowRead { id, full }),
+        Command::Lint { tasks, proposals } => QueueRead::Lint(reads::LintRead { tasks, proposals }),
+        Command::Observe {
+            history: true,
+            limit,
+            ..
+        } => QueueRead::ObserveHistory(reads::ObserveHistoryRead { limit }),
+        _ => return None,
+    })
+}
+
+/// The use case and params of the queue service a client-mode `dagq`
+/// sends `command` as (goal 82's stage (3), ADR-t1233-1 decision 7): the
+/// same options the service reads back as the command line's. `None` for
+/// a command the service has no use case for. A `--cmux` is the service's
+/// own: an ask notifies the inbox through it, and `stats` lists the
+/// workspaces with it.
+fn client_request(command: &Command) -> Result<Option<(UseCase, Value)>> {
+    if let Some(read) = queue_read(command) {
+        return Ok(Some(read.request()));
+    }
+    Ok(Some(match command {
+        Command::Show { id, full, events } => (
+            UseCase::Show,
+            json!({"id": id, "full": full, "events": events}),
+        ),
+        Command::Note {
+            task,
+            run,
+            goal,
+            text,
+            kind,
+        } => (
+            UseCase::Note,
+            json!({"task": task, "run": run, "goal": goal, "text": text, "kind": kind}),
+        ),
+        Command::Ask {
+            command: None,
+            kind,
+            question,
+            options,
+            because,
+            topics,
+            task_id,
+            run,
+            finding,
+            cmux: _,
+        } => (
+            UseCase::Ask,
+            json!({"kind": kind, "question": question, "options": options, "because": because,
+                   "topics": topics, "task_id": task_id, "run_id": run, "finding_id": finding}),
+        ),
+        Command::Proposal {
+            command: ProposalCommand::List { all },
+        } => (UseCase::ProposalList, json!({"all": all})),
+        Command::Proposal {
+            command: ProposalCommand::Show { id },
+        } => (UseCase::ProposalShow, json!({"id": id})),
+        Command::Finding {
+            command:
+                FindingCommand::Record {
+                    kind,
+                    task,
+                    run,
+                    goal,
+                    queue: _,
+                    subject,
+                    summary,
+                    detail,
+                    impact,
+                    evidence,
+                    propose,
+                },
+        } => (
+            UseCase::FindingRecord,
+            json!({"kind": kind, "task": task, "run": run, "goal": goal,
+                   // No target is the queue's, as the command line takes it.
+                   "queue": task.is_none() && run.is_none() && goal.is_none(),
+                   "subject": subject, "summary": summary, "detail": detail,
+                   "impact": impact, "evidence": evidence, "propose": propose}),
+        ),
+        Command::Finding {
+            command: FindingCommand::Resolve { id, reason },
+        } => (UseCase::FindingResolve, json!({"id": id, "reason": reason})),
+        Command::Finding {
+            command: FindingCommand::Dismiss { id, reason },
+        } => (UseCase::FindingDismiss, json!({"id": id, "reason": reason})),
+        _ => return Ok(None),
+    }))
+}
+
+/// Run `cli` in client mode (goal 82's stage (3), ADR-t1233-1 decision
+/// 7): as the use case of the queue service at `client`, for the principal
+/// of its token, which the service authorizes on its side whatever role
+/// the environment names. No queue is opened: a command that names one
+/// (`--db`) or is none of the service's use cases is refused, and so is
+/// every command when the service does not answer (fail closed).
+fn client_mode(client: &dagq::infrastructure::queue_service::Client, cli: &Cli) -> Result<Value> {
+    use dagq::infrastructure::queue_service::ClientFailure;
+    if let Some(db) = &cli.db {
+        return Err(ClientFailure::new(
+            "queue_named",
+            format!(
+                "--db {} names a queue to open, and a client-mode dagq (DAGQ_SERVICE_SOCKET is \
+                 set) opens none: run the command without it",
+                db.display()
+            ),
+        )
+        .into());
+    }
+    // `locate` says where the commands go, without the queue's path: the
+    // plugin's `--resolve` runs it first.
+    if matches!(cli.command, Command::Locate) {
+        return Ok(json!({
+            "client_mode": true,
+            "socket": client.socket,
+            "db": null,
+            "db_exists": null,
+            "note": "dagq runs in client mode: its commands go to the queue service at the \
+                     socket, and it opens no queue",
+        }));
+    }
+    let Some((use_case, params)) = client_request(&cli.command)? else {
+        return Err(ClientFailure::new(
+            "no_use_case",
+            "this command is not one of the queue service's use cases, and a client-mode dagq \
+             (DAGQ_SERVICE_SOCKET is set) opens no queue to run it (docs/design/queue-service.md \
+             lists the use cases)",
+        )
+        .into());
+    };
+    client.call(use_case, params)
+}
+
 fn execute(cli: Cli) -> Result<Value> {
+    // A worker's or a job's `dagq` goes to the queue service, which
+    // authorizes it for the principal of its token: neither `DAGQ_ROLE`
+    // nor the queue's path is read (goal 82's stage (3)).
+    if let Some(client) =
+        dagq::infrastructure::queue_service::Client::from_env(|name| env::var(name).ok())
+    {
+        return client_mode(&client, &cli);
+    }
     // Who runs the command (ADR-t728-1 decision 4): no `DAGQ_ROLE` is the
     // user, and a value that is no role stops it before anything is read.
     let actor = ActorContext::from_env(|name| env::var(name).ok())?;
@@ -2477,13 +2798,17 @@ fn execute(cli: Cli) -> Result<Value> {
     }
     // The reads of the queue, as the queue service answers them too
     // (ADR-t1233-5 decision 1).
-    macro_rules! read {
-        ($read:expr) => {
-            read!($read, None)
+    if let Some(read) = queue_read(&cli.command) {
+        use dagq::infrastructure::adapters::{Cmux, executable};
+        // `stats` lists the workspaces with its cmux; a missing one leaves
+        // only `workspace_mismatch` unjudged.
+        let cmux = match &cli.command {
+            Command::Stats { cmux, .. } => {
+                executable(cmux).ok().map(|executable| Cmux { executable })
+            }
+            _ => None,
         };
-        ($read:expr, $cmux:expr) => {
-            dagq::compose::read_queue(&mut queue, &db, &one_shot, $cmux, &$read)?
-        };
+        return dagq::compose::read_queue(&mut queue, &db, &one_shot, cmux.as_ref(), &read);
     }
     Ok(match cli.command {
         Command::Init
@@ -2496,6 +2821,24 @@ fn execute(cli: Cli) -> Result<Value> {
         | Command::Service { .. } => {
             unreachable!()
         }
+        // Answered above as reads.
+        Command::List { .. }
+        | Command::Candidates
+        | Command::Graph { out: None, .. }
+        | Command::Status { .. }
+        | Command::Asks { .. }
+        | Command::Events { .. }
+        | Command::Timeline { .. }
+        | Command::Stats { .. }
+        | Command::Kpi { .. }
+        | Command::Forecast { .. }
+        | Command::Notes { .. }
+        | Command::Marks { .. }
+        | Command::Findings { .. }
+        | Command::Search { .. }
+        | Command::Related { .. }
+        | Command::Lint { .. }
+        | Command::Observe { history: true, .. } => unreachable!("a read is answered above"),
         Command::Add {
             title,
             description,
@@ -2532,21 +2875,6 @@ fn execute(cli: Cli) -> Result<Value> {
                 worker_mode: headless.then_some(WorkerMode::Headless),
             })?,
         )?,
-        Command::List {
-            status,
-            all,
-            goal_id,
-            limit,
-            before,
-            full,
-        } => read!(QueueRead::List(reads::ListRead {
-            status,
-            all,
-            goal: goal_id,
-            limit,
-            before,
-            full,
-        })),
         Command::Show { id, full, events } => {
             let detail = queue.show(TaskId::new(id))?;
             if full {
@@ -2585,9 +2913,6 @@ fn execute(cli: Cli) -> Result<Value> {
                     &findings.into_iter().map(FindingId::new).collect::<Vec<_>>(),
                 )?,
             )?
-        }
-        Command::Lint { tasks, proposals } => {
-            read!(QueueRead::Lint(reads::LintRead { tasks, proposals }))
         }
         Command::Proposal { command } => match command {
             ProposalCommand::List { all } => json!({"proposals": queue.proposals(all)?}),
@@ -2642,9 +2967,8 @@ fn execute(cli: Cli) -> Result<Value> {
             GoalCommand::Ready { id } => {
                 serde_json::to_value(planning!().ready_goal(GoalId::new(id))?)?
             }
-            GoalCommand::List => read!(QueueRead::GoalList),
-            GoalCommand::Show { id, full } => {
-                read!(QueueRead::GoalShow(reads::GoalShowRead { id, full }))
+            GoalCommand::List | GoalCommand::Show { .. } => {
+                unreachable!("a read is answered above")
             }
             GoalCommand::Edit {
                 id,
@@ -2743,17 +3067,6 @@ fn execute(cli: Cli) -> Result<Value> {
                 by: actor.written_by().to_owned(),
             })?)?
         }
-        Command::Notes {
-            goal_id,
-            task_id,
-            since,
-            limit,
-        } => read!(QueueRead::Notes(reads::NotesRead {
-            goal: goal_id,
-            task: task_id,
-            since,
-            limit,
-        })),
         Command::Mark {
             label,
             note,
@@ -2769,9 +3082,6 @@ fn execute(cli: Cli) -> Result<Value> {
                 at,
             },
         })?,
-        Command::Marks { since, until } => {
-            read!(QueueRead::Marks(reads::MarksRead { since, until }))
-        }
         Command::Finding {
             command:
                 FindingCommand::Record {
@@ -2808,63 +3118,6 @@ fn execute(cli: Cli) -> Result<Value> {
         } => {
             serde_json::to_value(dialogue!(&no_cmux).dismiss_finding(FindingId::new(id), &reason)?)?
         }
-        Command::Findings {
-            id,
-            all,
-            status,
-            kinds,
-            task,
-            run,
-            goal,
-            queue: on_queue,
-            full,
-        } => read!(QueueRead::Findings(reads::FindingsRead {
-            id,
-            all,
-            status,
-            kinds,
-            task,
-            run,
-            goal,
-            queue: on_queue,
-            full,
-        })),
-        Command::Search {
-            query,
-            status,
-            kinds,
-            goal_id,
-            limit,
-            full,
-        } => read!(QueueRead::Search(reads::SearchRead {
-            query,
-            status,
-            kinds,
-            goal: goal_id,
-            limit,
-            full,
-        })),
-        Command::Related {
-            task_id,
-            status,
-            limit,
-        } => read!(QueueRead::Related(reads::RelatedRead {
-            task: task_id,
-            status: status
-                .iter()
-                .map(|status| status.as_str().to_owned())
-                .collect(),
-            limit,
-        })),
-        Command::Candidates => read!(QueueRead::Candidates),
-        Command::Graph {
-            goal_id,
-            format,
-            out: None,
-        } => read!(QueueRead::Graph(reads::GraphRead {
-            goal: goal_id,
-            format,
-        })),
         Command::Graph {
             goal_id,
             format,
@@ -2881,7 +3134,6 @@ fn execute(cli: Cli) -> Result<Value> {
                 "tasks": tasks,
             })
         }
-        Command::Status { role } => read!(QueueRead::Status(reads::RoleRead { role })),
         Command::Ask {
             command: Some(AskCommand::Close { id }),
             ..
@@ -2920,35 +3172,6 @@ fn execute(cli: Cli) -> Result<Value> {
         // application records from the actor (ADR-t728-3 decision 2).
         Command::Answer { id, text } => {
             serde_json::to_value(dialogue!(&no_cmux).answer(AskId::new(id), &text)?)?
-        }
-        Command::Asks { open, role, all } => {
-            read!(QueueRead::Asks(reads::AsksRead { open, role, all }))
-        }
-        Command::Events {
-            after,
-            limit,
-            all,
-            full,
-            run,
-            task,
-            goal,
-            kind,
-            since,
-            until,
-        } => read!(QueueRead::Events(reads::EventsRead {
-            after,
-            limit,
-            all,
-            full,
-            run,
-            task,
-            goal,
-            kind,
-            since,
-            until,
-        })),
-        Command::Timeline { run, gap, full } => {
-            read!(QueueRead::Timeline(reads::TimelineRead { run, gap, full }))
         }
         Command::Watch {
             after,
@@ -3417,44 +3640,6 @@ fn execute(cli: Cli) -> Result<Value> {
             )?
         }
         Command::Review { id } => dagq::compose::review(&db, TaskId::new(id))?,
-        Command::Kpi {
-            period,
-            last,
-            at,
-            since,
-            until,
-            changes,
-            areas,
-            by,
-            cross,
-            compare,
-            window,
-            goal_id,
-        } => read!(QueueRead::Kpi(reads::KpiRead {
-            period,
-            last,
-            at,
-            since,
-            until,
-            changes,
-            areas,
-            by,
-            cross,
-            compare,
-            window,
-            goal: goal_id,
-        })),
-        Command::Forecast {
-            task_id,
-            goal_id,
-            parallel,
-            trials,
-        } => read!(QueueRead::Forecast(reads::ForecastRead {
-            task: task_id,
-            goal: goal_id,
-            parallel,
-            trials,
-        })),
         Command::Report {
             period,
             at,
@@ -3468,33 +3653,6 @@ fn execute(cli: Cli) -> Result<Value> {
             out.as_deref(),
             print.is_some(),
         )?,
-        Command::Stats {
-            since,
-            until,
-            goal_id,
-            full,
-            cmux,
-        } => {
-            use dagq::infrastructure::adapters::{Cmux, executable};
-            // A missing cmux leaves only `workspace_mismatch` unjudged.
-            let cmux = executable(&cmux).ok().map(|executable| Cmux { executable });
-            read!(
-                QueueRead::Stats(reads::StatsRead {
-                    since,
-                    until,
-                    goal: goal_id,
-                    full,
-                }),
-                cmux.as_ref()
-            )
-        }
-        Command::Observe {
-            history: true,
-            limit,
-            ..
-        } => read!(QueueRead::ObserveHistory(reads::ObserveHistoryRead {
-            limit
-        })),
         Command::Observe {
             history: false,
             since,

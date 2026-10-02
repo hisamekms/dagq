@@ -66,12 +66,16 @@ case "$(cat "$DIR/codex-mode")" in
     printf '{{"type":"error","message":"You have hit your usage limit. Try again later."}}\n{{"type":"turn.failed","error":{{"message":"You have hit your usage limit."}}}}\n'
     exit 1 ;;
 esac
+# The job's `dagq` reads through the queue service (goal 82's stage (3)).
+env > "$DIR/codex-env.txt"
+'{dagq}' goal show 1 > "$DIR/codex-goal.json" 2> "$DIR/codex-goal.err"
 SESSIONS="$DIR/codex-home/sessions/2026/09/29"
 mkdir -p "$SESSIONS"
 printf '{{"timestamp":"%s","type":"turn_context","payload":{{"model":"{CODEX_MODEL}","effort":"high"}}}}\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" >> "$SESSIONS/rollout-2026-09-29T00-00-00-$THREAD.jsonl"
 cat "$DIR/codex-reply.jsonl"
 printf '{{"type":"turn.completed","usage":{{"input_tokens":10,"output_tokens":2}}}}\n'
 "#,
+        dagq = env!("CARGO_BIN_EXE_dagq"),
     );
     crate::common::template::script(&stub, script);
 
@@ -227,18 +231,50 @@ fn a_goal_review_on_codex_runs_read_only_and_records_its_thread_and_model() {
         "[roles.goal_review]\nprovider = \"codex\"\nmodel = \"gpt-6-astra\"\neffort = \"high\"\n",
     );
     let (goal, done) = goal_done(&fx);
+    let _service = crate::common::service::Served::start(&fx.db);
     let codex = stub_codex(&fx, "ok", &achieved("both items landed"));
     let claude = StubReviewer::new(&[achieved("from Claude")]);
     let outcome = supervise(&fx, &claude, &codex);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     assert!(claude.prompts().is_empty(), "Claude ran no goal review");
+    // The job's `dagq` read the goal through the queue service as the
+    // command line prints it, its environment naming the service and not
+    // the queue's path (goal 82's stage (3)).
+    let dir = fx.db.parent().unwrap();
+    let shown: Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("codex-goal.json")).unwrap())
+            .unwrap_or_else(|_| {
+                panic!(
+                    "{}",
+                    fs::read_to_string(dir.join("codex-goal.err")).unwrap()
+                )
+            });
+    assert_eq!(shown["goal"]["id"], json!(goal), "{shown}");
+    assert_eq!(shown["goal"]["title"], "faster landings", "{shown}");
+    let env = fs::read_to_string(dir.join("codex-env.txt")).unwrap();
+    assert!(env.contains("DAGQ_SERVICE_SOCKET="), "{env}");
+    assert!(
+        !env.lines()
+            .any(|line| line.starts_with("DAGQ_QUEUE=") || line.contains(fx.db.to_str().unwrap())),
+        "{env}"
+    );
     assert!(job_actors(&fx.db).is_empty());
 
     let calls = stub_lines(&fx, "codex-args.txt");
     assert_eq!(calls.len(), 1, "{calls:?}");
     let repo = fx.repo.canonicalize().unwrap();
+    // In place of the read-only sandbox, the profile that keeps it
+    // read-only and offline but lets its `dagq` reach the queue service's
+    // socket (ADR-t1233-5 decision 4).
+    let socket = dagq::infrastructure::queue_service::socket_path(fx.db.parent().unwrap());
+    let profile: String = dagq::infrastructure::codex::job_service_config(&socket)
+        .unwrap()
+        .iter()
+        .map(|config| format!("-c|{config}|"))
+        .collect();
+    assert!(profile.contains(r#"permissions.dagq_job.extends=":read-only""#));
     let expected = format!(
-        "exec|--json|--sandbox|read-only|-C|{}|-m|gpt-6-astra|-c|model_reasoning_effort=\"high\"|--|",
+        "exec|--json|-C|{}|-m|gpt-6-astra|-c|model_reasoning_effort=\"high\"|{profile}--|",
         repo.display()
     );
     assert!(calls[0].starts_with(&expected), "{}", calls[0]);

@@ -222,6 +222,45 @@ pub fn writable_roots_config(roots: &[PathBuf]) -> Result<String> {
 /// 2.). No writable root, network, approval or bypass flag is given.
 pub const JOB_SANDBOX: &str = "read-only";
 
+/// The permission profile a headless job runs in when it reaches the
+/// queue service (ADR-t1233-5 decision 4): Codex's `:read-only`, with the
+/// network on only through Codex's network proxy, which lets the job reach
+/// the service's socket and nothing else ([`job_service_config`]).
+pub const JOB_PROFILE: &str = "dagq_job";
+
+/// The `-c` of a headless job in place of `--sandbox read-only` that let
+/// its `dagq` reach the queue service at `socket` (ADR-t1233-5 decision
+/// 4): the [`JOB_PROFILE`] permission profile extends `:read-only` (no
+/// write anywhere), turns its network on, and allows the one unix socket;
+/// the `network_proxy` feature routes the network through Codex's proxy,
+/// whose domain allowlist is empty, so no TCP connection leaves. Checked
+/// with `codex sandbox` 0.159.2: the socket answers, a TCP connection and
+/// a write are refused, and without the socket's entry the socket is
+/// refused too.
+pub fn job_service_config(socket: &Path) -> Result<Vec<String>> {
+    // The sandbox matches the real path (`/tmp` is `/private/tmp`); a
+    // socket not made yet is named under its real directory.
+    let real = socket.canonicalize().or_else(|_| {
+        let dir = socket.parent().context("a socket has a directory")?;
+        let name = socket.file_name().context("a socket has a name")?;
+        Ok::<_, anyhow::Error>(dir.canonicalize()?.join(name))
+    });
+    let real = real.unwrap_or_else(|_| socket.to_owned());
+    let socket = real
+        .to_str()
+        .with_context(|| format!("{} is not UTF-8", real.display()))?;
+    Ok(vec![
+        "features.network_proxy=true".to_owned(),
+        format!(r#"default_permissions="{JOB_PROFILE}""#),
+        format!(r#"permissions.{JOB_PROFILE}.extends=":read-only""#),
+        format!("permissions.{JOB_PROFILE}.network.enabled=true"),
+        format!(
+            r#"permissions.{JOB_PROFILE}.network.unix_sockets={{{}="allow"}}"#,
+            serde_json::to_string(socket)?
+        ),
+    ])
+}
+
 /// The last `agent_message` of a `codex exec --json` output, in full: the
 /// reply of a headless job; empty when there is none.
 pub fn last_message(stdout: &str) -> String {
@@ -337,13 +376,10 @@ impl AgentProvider for Codex {
         let roots = writable_roots(worktree, run_dir, &cargo_home()?)?;
         write_rules(worktree)?;
         let mut command = CommandSpec::new(&self.executable);
-        // Its `dagq ask` writes a request to the run directory, which the
-        // sandbox lets it write, instead of the queue (ADR-t813-3
-        // decision 3).
-        command.current_dir(worktree).env(
-            crate::domain::ask_request::ASK_REQUESTS_ENV,
-            run_dir.join(crate::domain::ask_request::ASK_REQUESTS_DIR),
-        );
+        // Its `dagq ask` goes to the queue service in client mode, whose
+        // socket the open network of the sandbox reaches (ADR-t1233-5
+        // decisions 4 and 5): no request in the run directory.
+        command.current_dir(worktree);
         command.arg("exec");
         if resume.is_some() {
             command.arg("resume");
@@ -412,6 +448,28 @@ impl AgentProvider for Codex {
     }
     fn job_reply(&self, stdout: &str) -> String {
         last_message(stdout)
+    }
+    /// A job ([`JOB_SANDBOX`]) runs in [`job_service_config`]'s profile
+    /// instead, which reaches the socket and keeps the rest read-only and
+    /// offline. A worker's turn needs nothing: its sandbox's network is
+    /// open (ADR-t813-3 decision 4), and the socket is reached through it.
+    fn reach_queue_service(&self, command: &mut CommandSpec, socket: &Path) {
+        if !command.remove_arg_pair("--sandbox", JOB_SANDBOX) {
+            return;
+        }
+        match job_service_config(socket) {
+            Ok(configs) => {
+                for config in configs {
+                    command.option_args(["-c".to_owned(), config]);
+                }
+            }
+            Err(error) => {
+                // The job keeps the read-only sandbox, and its `dagq`
+                // reports the service unreachable.
+                tracing::warn!("a Codex job cannot be let reach the queue service: {error:#}");
+                command.option_args(["--sandbox", JOB_SANDBOX]);
+            }
+        }
     }
     /// The thread `thread.started` names, and the model of the rollout's
     /// `turn_context` written since the job started.
@@ -622,7 +680,43 @@ mod tests {
                 "review it"
             ]
         );
-        for args in [args(&command), args(&chosen)] {
+        // Reaching the queue service, the job runs in the profile that
+        // allows its socket in place of the read-only sandbox, and nothing
+        // else changes (ADR-t1233-5 decision 4).
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("queue.sock");
+        let mut reaching = command.clone();
+        codex.reach_queue_service(&mut reaching, &socket);
+        let real = dir.path().canonicalize().unwrap().join("queue.sock");
+        let profile = job_service_config(&socket).unwrap();
+        assert_eq!(
+            profile.last().unwrap(),
+            &format!(
+                r#"permissions.dagq_job.network.unix_sockets={{{}="allow"}}"#,
+                serde_json::to_string(real.to_str().unwrap()).unwrap()
+            )
+        );
+        let mut expected = vec![
+            "exec".to_owned(),
+            "--json".to_owned(),
+            "-C".to_owned(),
+            "/repo".to_owned(),
+            "-c".to_owned(),
+            r#"model_reasoning_effort="medium""#.to_owned(),
+        ];
+        for config in &profile {
+            expected.extend(["-c".to_owned(), config.clone()]);
+        }
+        expected.extend(["--".to_owned(), "review it".to_owned()]);
+        assert_eq!(args(&reaching), expected);
+        assert!(profile.contains(&r#"permissions.dagq_job.extends=":read-only""#.to_owned()));
+        assert!(profile.contains(&"features.network_proxy=true".to_owned()));
+        // A command without the read-only sandbox (a worker's turn) is left
+        // as it is.
+        let mut twice = reaching.clone();
+        codex.reach_queue_service(&mut twice, &socket);
+        assert_eq!(twice, reaching);
+        for args in [args(&command), args(&chosen), args(&reaching)] {
             assert!(
                 !args.iter().any(|arg| arg.contains("dangerously")
                     || arg.contains("bypass")
@@ -783,12 +877,18 @@ mod tests {
         expected.extend(sandbox);
         expected.extend(["--", "th-1", "answer"]);
         assert_eq!(args(&resumed), expected);
-        // Both tell its `dagq ask` where the run's ask requests go.
+        // Neither names a directory for ask requests: the worker's `dagq
+        // ask` goes to the queue service (ADR-t1233-5 decision 5), which
+        // the open network of its sandbox reaches as it is.
         for command in [&first, &resumed] {
-            let asks = run_dir.join(crate::domain::ask_request::ASK_REQUESTS_DIR);
-            assert!(command.get_envs().any(|(key, value)| key
-                == crate::domain::ask_request::ASK_REQUESTS_ENV
-                && value == Some(asks.as_os_str())));
+            assert!(
+                !command
+                    .get_envs()
+                    .any(|(key, _)| key == crate::domain::ask_request::ASK_REQUESTS_ENV)
+            );
+            let mut reaching = command.clone();
+            codex.reach_queue_service(&mut reaching, Path::new("/q/service/queue.sock"));
+            assert_eq!(reaching, *command);
         }
         // The rules are in the worktree, excluded.
         assert!(worktree.join(RULES_PATH).is_file());

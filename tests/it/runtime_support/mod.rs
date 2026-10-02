@@ -103,6 +103,7 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         kill_stubs(&self.db);
+        common::service::unserve(&self.db);
     }
 }
 
@@ -133,6 +134,14 @@ pub struct StubSpawner {
 
 impl Spawner for StubSpawner {
     fn spawn(&self, spec: &CommandSpec, streams: Streams<'_>) -> Result<Box<dyn Spawned>> {
+        // A worker's `dagq` goes to the queue's service, which the
+        // supervisor keeps running in production (goal 82's stage (3)).
+        if spec
+            .get_envs()
+            .any(|(key, value)| key == "DAGQ_SERVICE_SOCKET" && value.is_some())
+        {
+            common::service::serve_with(&self.db, &fake_cmux_dir(&self.db).join("cmux"));
+        }
         let mut stubs = stubs();
         let Some(groups) = stubs.entry(self.db.clone()).or_insert(Some(Vec::new())) else {
             bail!("the test's fixture is gone");
@@ -428,7 +437,8 @@ resolve() {
 
 pub struct TestProvider {
     pub script: String,
-    /// The queue, for a script that runs `$DAGQ --db "$DB" ...` as a worker would.
+    /// The queue, which a script reads as `$DB` (the test's own look at
+    /// it); its `$DAGQ ...` goes to the queue service, as a worker's does.
     pub db: PathBuf,
 }
 
@@ -924,7 +934,9 @@ impl WorkspaceBackend for TestWorkspace {
             "{:?}",
             tags.env
         );
-        assert!(tags.env.iter().any(|(k, _)| k == "DAGQ_QUEUE"));
+        // Not the queue's path: the worker's `dagq` goes to the queue
+        // service (goal 82's stage (3)).
+        assert!(!tags.env.iter().any(|(k, _)| k == "DAGQ_QUEUE"));
         // The same actor as the run's worker (ADR-t728-1 decision 4).
         for (name, value) in [
             ("DAGQ_ACTOR_ID", format!("worker:{}", run.id())),
@@ -1440,7 +1452,7 @@ receipt() {{
   printf '{{"run_id":"%s","result":"%s","commit":"%s","tests":{{"status":"passed","evidence_or_reason":"ran"}},"e2e":{{"status":"%s","evidence_or_reason":"stub e2e"}},"subagent_review":{{"status":"passed","evidence_or_reason":"reviewed"}},"summary":"turn %s"}}' "${{DAGQ_RUN_ID:-$SESSION}}" "${{2:-succeeded}}" "$1" "${{3:-not_applicable}}" "$TURN" > "$RECEIPT.tmp"
   mv "$RECEIPT.tmp" "$RECEIPT"
 }}
-ask() {{ "$DAGQ" --db "$DB" ask --run "${{DAGQ_RUN_ID:-$SESSION}}" --kind worker_question --because scope --topic acceptance_conflict --question "$1" --cmux true >/dev/null; }}
+ask() {{ "$DAGQ" ask --run "${{DAGQ_RUN_ID:-$SESSION}}" --kind worker_question --because scope --topic acceptance_conflict --question "$1" --cmux true >/dev/null; }}
 printf '{{"type":"system","subtype":"init","session_id":"%s","model":"stub","permissionMode":"%s"}}\n' "$SESSION" "${{PERMISSION_SAID:-$PERMISSION}}"
 . {turns}
 [ -n "$RESULTED" ] || result
@@ -1479,7 +1491,9 @@ pub fn set_codex_model(dir: &Path, model: &str) {
 /// `result` (`turn.completed` with its usage), `error TEXT` (an `error`
 /// event), `fail TEXT` (`turn.failed`, exit 1), `refused COMMAND` (a
 /// command the sandbox refused), `commit MESSAGE`, `receipt COMMIT
-/// [RESULT] [EVIDENCE]`, `ask QUESTION`.
+/// [RESULT] [EVIDENCE]`, `ask QUESTION`. A read-only job (the run's
+/// review: its job permission profile, or `--sandbox read-only`) logs its
+/// arguments and actor and prints the review's reply instead.
 pub fn headless_codex(dir: &Path, db: &Path) -> PathBuf {
     let stub = dir.join("codex-headless");
     let script = format!(
@@ -1493,7 +1507,7 @@ shift
 if [ "$1" = resume ]; then MODE=resume; shift; fi
 while [ $# -gt 0 ]; do
   case "$1" in
-    -c) case "$2" in sandbox_workspace_write.writable_roots=*) ROOTS=$2 ;; esac; shift 2 ;;
+    -c) case "$2" in sandbox_workspace_write.writable_roots=*) ROOTS=$2 ;; default_permissions=*) REVIEW=1 ;; esac; shift 2 ;;
     --sandbox) [ "$2" = read-only ] && REVIEW=1; shift 2 ;;
     -C|-m) shift 2 ;;
     --) shift; break ;;
@@ -1554,7 +1568,7 @@ receipt() {{
   printf '{{"run_id":"%s","result":"%s","commit":"%s","tests":{{"status":"passed","evidence_or_reason":"ran"}},"e2e":{{"status":"%s","evidence_or_reason":"stub e2e"}},"subagent_review":{{"status":"passed","evidence_or_reason":"reviewed"}},"summary":"turn %s"}}' "$DAGQ_RUN_ID" "${{2:-succeeded}}" "$1" "${{3:-not_applicable}}" "$TURN" > "$RECEIPT.tmp"
   mv "$RECEIPT.tmp" "$RECEIPT"
 }}
-ask() {{ "$DAGQ" --db "$DB" ask --run "$DAGQ_RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question "$1" --cmux true >/dev/null; }}
+ask() {{ "$DAGQ" ask --run "$DAGQ_RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question "$1" --cmux true >/dev/null; }}
 echo "Reading additional input from stdin..." >&2
 printf '{{"type":"thread.started","thread_id":"%s"}}
 {{"type":"turn.started"}}
@@ -2020,9 +2034,11 @@ fn run_agent_with_review_retry(
             .iter()
             .all(|n| n.0.ends_with("approve_landing"))
     );
-    // The run workspace carries its role, queue, actor id, run and task in
-    // its environment (ADR-t728-1 decision 4), a description naming the run
-    // and task, and the queue's group.
+    // The run workspace carries its role, actor id, run and task in its
+    // environment (ADR-t728-1 decision 4), not the queue's path (its
+    // wrapper is named the queue, and its worker the queue service: goal
+    // 82's stage (3)), a description naming the run and task, and the
+    // queue's group.
     let canonical = db.canonicalize().unwrap();
     let hash = QueueLocation::explicit(&canonical).hash();
     assert_eq!(
@@ -2030,7 +2046,6 @@ fn run_agent_with_review_retry(
         vec![WorkspaceTags {
             env: vec![
                 ("DAGQ_ROLE".into(), "worker".into()),
-                ("DAGQ_QUEUE".into(), canonical.to_str().unwrap().into()),
                 ("DAGQ_ACTOR_ID".into(), format!("worker:{}", run.id())),
                 ("DAGQ_RUN_ID".into(), run.id().to_string()),
                 ("DAGQ_TASK_ID".into(), run.task_id().to_string()),

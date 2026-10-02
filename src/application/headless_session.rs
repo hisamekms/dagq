@@ -61,6 +61,9 @@ pub(super) struct Turns<'a> {
     /// binary has none.
     pub(super) other: Option<&'a dyn AgentProvider>,
     pub(super) spawner: &'a dyn Spawner,
+    /// The queue service's socket and the worker's token, which each turn
+    /// is given instead of the queue's path (goal 82's stage (3)).
+    pub(super) queue_service: &'a dyn super::queue_service::ServiceAccess,
     /// Lists the turn's descendants and signals them ([`stop_turn`]).
     pub(super) processes: &'a dyn ProcessControl,
     pub(super) files: &'a dyn RunFiles,
@@ -392,6 +395,7 @@ impl<'a> Turns<'a> {
         let spawned = HostActorExecutor::new(self.db)
             .with_provider(agent)
             .with_spawner(self.spawner)
+            .with_queue_service(self.queue_service)
             .spawn(ActorExecutionSpec::new(
                 ActorContext::worker(run.id(), run.task_id()),
                 WorkspaceAccess::Write(worktree),

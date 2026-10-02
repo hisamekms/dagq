@@ -459,6 +459,8 @@ leave it (the next release asks again).",
             .arg("release-update")
             .args(["--release", version, "--token", self.token.as_str()])
             .envs(layout.supervisor_actor().env())
+            // It opens the queue it names, not a client-mode `dagq`.
+            .env_remove(crate::domain::queue_service::SOCKET_ENV)
             .arg("--to")
             .arg(&layout.runner)
             .arg("--log")

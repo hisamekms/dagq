@@ -336,7 +336,7 @@ fn a_worker_idle_at_its_question_is_not_nudged() {
         &db,
         false,
         r#"
-"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
+"$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
 idle
 while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
 commit work; receipt "$(git rev-parse HEAD)"; idle; await_exit

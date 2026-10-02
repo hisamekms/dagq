@@ -39,7 +39,7 @@ use crate::{
         },
         transcript::millis_text,
     },
-    infrastructure::{adapters::shell_join, asks::AskQuery, sqlite::SqliteQueue},
+    infrastructure::{asks::AskQuery, sqlite::SqliteQueue},
     observer::{HeadlessAgent, run_agent},
 };
 
@@ -228,11 +228,10 @@ fn review_period(
     }
     failure["reasons"] = json!(judgment.as_ref().map(|judged| &judged.reasons));
     let input = gather(queue, db, period, &landings, judgment.as_ref())?;
-    let command = shell_join(&[
-        "dagq".into(),
-        "--db".into(),
-        db.to_string_lossy().into_owned(),
-    ]);
+    // The job's `dagq` goes to the queue service in client mode: the
+    // prompt, an argument of the agent, names no queue path (goal 82's
+    // stage (3)).
+    let command = "dagq";
     let checkout = crate::compose::bound_checkout(queue)?;
     let language = crate::infrastructure::language::language_for_prompt(
         checkout.as_deref(),
@@ -246,7 +245,7 @@ fn review_period(
     };
     failure["dir"] = json!(dir);
     let prompt = crate::domain::language::with_instruction(
-        review_prompt(period, &command, &input, &dir.join("input.json"))?,
+        review_prompt(period, command, &input, &dir.join("input.json"))?,
         language.as_ref(),
     );
     if options.dry_run {

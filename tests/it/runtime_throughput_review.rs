@@ -1,9 +1,16 @@
 //! Runtime tests: the throughput review (ADR-t996-1).
-use crate::runtime_support;
+use crate::{common, runtime_support};
 use dagq::domain::throughput_review::{HOUR_MS, ReviewMode, window};
-use dagq::throughput_review::{PROMPT_LIMIT, ReviewOptions, review};
+use dagq::throughput_review::{PROMPT_LIMIT, ReviewOptions};
 
 use runtime_support::*;
+
+/// `review` with the queue's service running, which the job's `dagq`
+/// reaches in client mode (goal 82's stage (3)); the fixture stops it.
+fn review(db: &Path, provider: &dyn AgentProvider, options: &ReviewOptions) -> Result<Value> {
+    common::service::serve(db);
+    dagq::throughput_review::review(db, provider, options)
+}
 
 /// The review's provider double: the headless job is a shell script in the
 /// review's directory, with the environment the command gives the agent.
@@ -127,12 +134,12 @@ fn land(db: &Path, per_hour: &[usize]) {
 const REVIEWER: &str = r#"
 printf '%s' "$DAGQ_ROLE" > role.txt
 printf '%s' "$0" > mcp.txt
-q() { dagq --db "$DAGQ_QUEUE" "$@" > /dev/null; }
+q() { dagq "$@" > /dev/null; }
 if q note --task 1 --text 'seen' 2> note.err; then exit 3; fi
 if q finding record --kind throughput --queue --summary 's' 2> finding.err; then exit 4; fi
 if q mark 'faster' 2> mark.err; then exit 5; fi
 if q ready 1 2> ready.err; then exit 6; fi
-dagq --db "$DAGQ_QUEUE" kpi > kpi.json || exit 7
+dagq kpi > kpi.json || exit 7
 printf '## Conclusion\n- landings rose to 10 in the hour\n- nothing to do\n\n## Details\nthe numbers\n'
 printf '```next_move\n{"summary": "split the e2e", "why": "verify is the constraint"}\n```\n'
 "#;
@@ -202,13 +209,17 @@ fn an_hour_a_rule_meets_is_reviewed_saved_and_told_to_the_inbox_and_the_job_only
         "throughput-review-job"
     );
     assert_eq!(fs::read_to_string(dir.join("mcp.txt")).unwrap(), "no-mcp");
-    for denied in ["note.err", "finding.err", "mark.err", "ready.err"] {
-        assert!(
-            fs::read_to_string(dir.join(denied))
-                .unwrap()
-                .contains("reviewer may not change queue state"),
-            "{denied}"
-        );
+    // The service refuses the note and the finding for the job's principal,
+    // and a mark and `ready` are none of its use cases.
+    for (denied, code) in [
+        ("note.err", "authorization_denied"),
+        ("finding.err", "authorization_denied"),
+        ("mark.err", "no_use_case"),
+        ("ready.err", "no_use_case"),
+    ] {
+        let error: Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(denied)).unwrap()).unwrap();
+        assert_eq!(error["queue_service"]["code"], code, "{denied}: {error}");
     }
     // It read the KPIs.
     assert!(!fs::read_to_string(dir.join("kpi.json")).unwrap().is_empty());

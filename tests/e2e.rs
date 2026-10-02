@@ -276,7 +276,7 @@ grep -q '"Stop"' "$settings" || { printf 'stub: settings lack a Stop hook\n' >&2
   printf 'argv: --session-id %s --debug-file %s --add-dir %s --settings %s\n' "$session_id" "$debug_file" "$add_dir" "$settings"
   printf 'model: %s effort: %s\n' "$model" "$effort"
   printf 'cwd: %s\n' "$(pwd)"
-  printf 'env: DAGQ_ROLE=%s DAGQ_QUEUE=%s\n' "${DAGQ_ROLE:-}" "${DAGQ_QUEUE:-}"
+  printf 'env: DAGQ_ROLE=%s DAGQ_QUEUE=%s DAGQ_SERVICE_SOCKET=%s\n' "${DAGQ_ROLE:-}" "${DAGQ_QUEUE:-}" "${DAGQ_SERVICE_SOCKET:-}"
   printf 'run env: E2E_SHARED=%s E2E_RUN_DIR=%s\n' "${E2E_SHARED:-}" "${E2E_RUN_DIR:-}"
 } > "$debug_file"
 run_id=$(printf '%s\n' "$prompt" | sed -n 's/^You are executing dagq task [0-9]*, run \(.*\)\.$/\1/p')
@@ -287,7 +287,8 @@ case "$prompt" in
   *E2E-ASK*)
     # A question: register it as a worker_question ask, go idle, and wait
     # for the supervisor to type the answer into this terminal.
-    "$add_dir/runner" --db "$DAGQ_QUEUE" ask --run "$session_id" --kind worker_question \
+    # The worker's dagq goes to the queue service (goal 82's stage (3)).
+    "$add_dir/runner" ask --run "$session_id" --kind worker_question \
       --because scope --topic acceptance_conflict --question 'Which word goes into answer.txt?' > "$add_dir/ask.json"
     # The new ask notified a person through the real cmux.
     grep -Eq '"notified": *true' "$add_dir/ask.json" || { printf 'stub: ask did not notify\n' >&2; exit 66; }
@@ -746,6 +747,15 @@ struct Pass {
     listings: Vec<Value>,
 }
 
+/// Stops the queue's service [`supervise_once`] started when it goes.
+struct ServiceGuard<'a>(&'a Env);
+
+impl Drop for ServiceGuard<'_> {
+    fn drop(&mut self) {
+        let _ = dagq_output(self.0, &[], &["service", "stop"]);
+    }
+}
+
 /// Run `supervise --once` with the given extra arguments and watch the runs of
 /// `tasks` until it exits: their workspace ids must appear in the queue and in
 /// cmux's own list before the sessions end. The stub agents of the pass keep
@@ -764,6 +774,14 @@ fn supervise_once(
     let listed = shared.join("listed");
     let _ = fs::remove_file(&listed);
     fs::write(&watching, "").unwrap();
+    // The queue's service, which `up` starts and a worker's `dagq` goes to
+    // in client mode (goal 82's stage (3)); a one-shot `supervise` keeps
+    // none of its own. It is stopped when the pass ends.
+    dagq(
+        &fixture.env,
+        &["service", "start", "--cmux", fixture.cmux.to_str().unwrap()],
+    );
+    let _service = ServiceGuard(&fixture.env);
     let started = Instant::now();
     let mut child = ChildGuard::new(
         Command::new(BIN)
@@ -1009,11 +1027,16 @@ fn happy_path_runs_a_stub_agent_through_cmux_and_lands_on_main() {
         log.contains("model: claude-opus-5-5 effort: medium"),
         "{log}"
     );
-    // The run workspace's `--env` reached the agent through its shell.
+    // The run workspace's `--env` reached the agent through its shell,
+    // and the wrapper gave the agent the queue service's socket rather than
+    // the queue's path (goal 82's stage (3)).
+    let socket = dagq::infrastructure::queue_service::socket_path(
+        fixture.db.canonicalize().unwrap().parent().unwrap(),
+    );
     assert!(
         log.contains(&format!(
-            "env: DAGQ_ROLE=worker DAGQ_QUEUE={}",
-            fixture.db.canonicalize().unwrap().display()
+            "env: DAGQ_ROLE=worker DAGQ_QUEUE= DAGQ_SERVICE_SOCKET={}",
+            socket.display()
         )),
         "{log}"
     );

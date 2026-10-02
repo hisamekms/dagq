@@ -183,7 +183,14 @@ fn no_claude_run_uses_a_read_only_codex_review_and_lands() {
     assert_eq!(payloads(&detail, "review_finished")[0]["verdict"], "pass");
     assert!(payloads(&detail, "review_failed").is_empty());
     let args = fs::read_to_string(dir.path().join("codex-review-args.log")).unwrap();
-    assert!(args.contains("--sandbox| read-only|"), "{args}");
+    // Read-only, in the profile that lets its `dagq` reach the queue
+    // service's socket in place of `--sandbox read-only` (ADR-t1233-5
+    // decision 4).
+    assert!(
+        args.contains(r#" -c| permissions.dagq_job.extends=":read-only"|"#),
+        "{args}"
+    );
+    assert!(!args.contains("--sandbox|"), "{args}");
     let actors = fs::read_to_string(dir.path().join("codex-review-actors.log")).unwrap();
     assert!(actors.contains("review-job review-job:"), "{actors}");
 }

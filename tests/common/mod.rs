@@ -19,6 +19,7 @@ pub mod actor;
 pub mod cli;
 pub mod lifecycle;
 pub mod queue;
+pub mod service;
 pub mod template;
 
 pub use actor::WithoutActor;

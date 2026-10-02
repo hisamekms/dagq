@@ -108,6 +108,9 @@ pub struct Session<'a> {
     /// supervisor moves there (ADR-t813-2); `None` when there is none.
     pub other: Option<&'a dyn AgentProvider>,
     pub spawner: &'a dyn Spawner,
+    /// The queue service's socket and the worker's token, which the agent
+    /// is given instead of the queue's path (goal 82's stage (3)).
+    pub queue_service: &'a dyn super::queue_service::ServiceAccess,
     /// Lists and signals processes: a headless turn is stopped with its
     /// descendants, which may run outside its group.
     pub processes: &'a dyn ProcessControl,
@@ -133,6 +136,7 @@ pub fn run_session(
         provider,
         other,
         spawner,
+        queue_service,
         processes,
         files,
         pid,
@@ -166,6 +170,7 @@ pub fn run_session(
             provider,
             other,
             spawner,
+            queue_service,
             processes,
             files,
             pid,
@@ -179,6 +184,7 @@ pub fn run_session(
             &run,
             provider,
             spawner,
+            queue_service,
             files,
             pid,
             resume,
@@ -285,6 +291,7 @@ fn drive_agent(
     run: &TaskRun,
     provider: &dyn AgentProvider,
     spawner: &dyn Spawner,
+    queue_service: &dyn super::queue_service::ServiceAccess,
     files: &dyn RunFiles,
     pid: u32,
     resume: bool,
@@ -308,6 +315,7 @@ fn drive_agent(
     let mut child = HostActorExecutor::new(db)
         .with_provider(provider)
         .with_spawner(spawner)
+        .with_queue_service(queue_service)
         .spawn(ActorExecutionSpec::new(
             ActorContext::worker(run.id(), run.task_id()),
             WorkspaceAccess::Write(PathBuf::from(

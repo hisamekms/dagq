@@ -32,6 +32,7 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 use tracing::warn;
 
+use super::queue_service::ServiceAccess;
 use super::{
     AgentProvider, CommandSpec, PlannerCommand, Spawned, Spawner, Streams, WorkspaceBackend,
     WorkspaceTags,
@@ -45,6 +46,7 @@ use crate::domain::{
     actor_model::ActorLaunch,
     authorization::{Capability, grants},
     headless_job::JobAccess,
+    queue_service::{CLIENT_ENV, CREDENTIAL_FILE_ENV, Principal, SOCKET_ENV, client_role},
     sessions::{self, LAUNCH_ENV},
 };
 
@@ -369,7 +371,8 @@ pub trait ActorExecutor {
 }
 
 /// The environment of `actor` on the queue at `queue` (ADR-0026,
-/// ADR-t728-1 decision 4): its role, the queue, its id, its run and task,
+/// ADR-t728-1 decision 4): its role, the queue (not for a worker or a job,
+/// whose `dagq` runs in client mode: [`client_role`]), its id, its run and task,
 /// the kind of span a session's hook records (the inbox's, a planner's by
 /// its origin), a planner's origin and id, and the model it starts with.
 /// Every workspace and headless job of an actor gets exactly this, and the
@@ -384,7 +387,11 @@ pub fn actor_env(
     if let Some(role) = actor.role().env_value() {
         env.push((ROLE_ENV.to_owned(), role.to_owned()));
     }
-    env.push((QUEUE_ENV.to_owned(), path_text(queue)?));
+    // A worker or a job is not given the queue's path: its `dagq` goes to
+    // the queue service ([`client_env`], goal 82's stage (3)).
+    if !client_role(actor.role()) {
+        env.push((QUEUE_ENV.to_owned(), path_text(queue)?));
+    }
     env.push((ACTOR_ID_ENV.to_owned(), actor.actor_id().to_owned()));
     if let Some(run) = actor.run_id() {
         env.push((RUN_ID_ENV.to_owned(), run.to_string()));
@@ -422,6 +429,7 @@ pub struct HostActorExecutor<'a> {
     workspaces: Option<&'a dyn WorkspaceBackend>,
     provider: Option<&'a dyn AgentProvider>,
     spawner: Option<&'a dyn Spawner>,
+    service: Option<&'a dyn ServiceAccess>,
     config: ExecutionConfig,
     no_claude: bool,
 }
@@ -435,6 +443,7 @@ impl<'a> HostActorExecutor<'a> {
             workspaces: None,
             provider: None,
             spawner: None,
+            service: None,
             config: ExecutionConfig::default(),
             no_claude: false,
         }
@@ -471,6 +480,13 @@ impl<'a> HostActorExecutor<'a> {
         self
     }
 
+    /// The tokens and the socket of the queue service, which a worker and
+    /// a job are given instead of the queue's path (goal 82's stage (3)).
+    pub fn with_queue_service(mut self, service: &'a dyn ServiceAccess) -> Self {
+        self.service = Some(service);
+        self
+    }
+
     /// The broker's client a worker is given (ADR-t827-1 decisions 5 and
     /// 7): the `dagq-broker-client` next to `dagq` (this process's own
     /// binary), and only when `version` reads dagq's build from it. A
@@ -495,6 +511,44 @@ impl<'a> HostActorExecutor<'a> {
 
     fn spawner(&self) -> Result<&'a dyn Spawner> {
         self.spawner.context("this executor starts no process")
+    }
+
+    fn service(&self) -> Result<&'a dyn ServiceAccess> {
+        self.service.context(
+            "this executor has no queue service to give the actor (fail closed: it is never \
+             given the queue's path instead)",
+        )
+    }
+
+    /// What the agent of `actor`, a [`client_role`], is given for its
+    /// `dagq` to run in client mode (ADR-t1233-1 decision 7, ADR-t1233-4
+    /// decision 4): the service's socket and the file of its token. `issue`
+    /// issues a new token (a job's, at its start); otherwise the one the
+    /// supervisor issued at the claim or the resume is handed over, and
+    /// one is issued only when there is none (a wrapper started without
+    /// the claim's). The socket is returned for the provider to let its
+    /// sandbox reach it.
+    fn client_env(
+        &self,
+        actor: &ActorContext,
+        issue: bool,
+    ) -> Result<(PathBuf, Vec<(String, String)>)> {
+        let service = self.service()?;
+        let existing = if issue {
+            None
+        } else {
+            service.credential(self.queue, actor.actor_id())
+        };
+        let credential = match existing {
+            Some(file) => file,
+            None => service.issue(self.queue, &Principal::of(actor))?,
+        };
+        let socket = service.socket(self.queue);
+        let env = vec![
+            (SOCKET_ENV.to_owned(), path_text(&socket)?),
+            (CREDENTIAL_FILE_ENV.to_owned(), path_text(&credential)?),
+        ];
+        Ok((socket, env))
     }
 }
 
@@ -574,6 +628,15 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 group,
                 run_env,
             } => {
+                let cmux = self.workspaces()?;
+                // The worker's token, issued at the claim and the resume
+                // (ADR-t1233-4 decision 4); the wrapper hands its file to
+                // the agent. The workspace itself is the wrapper's, which
+                // opens the queue: it gets neither the token nor the
+                // socket.
+                self.service()?
+                    .issue(self.queue, &Principal::of(&actor))
+                    .context("issue the worker's token for the queue service")?;
                 let mut env = actor_env(self.queue, &actor, None, None)?;
                 env.extend(run_env);
                 let tags = WorkspaceTags {
@@ -581,7 +644,6 @@ impl ActorExecutor for HostActorExecutor<'_> {
                     description: Some(description.clone()),
                     group,
                 };
-                let cmux = self.workspaces()?;
                 let created = if resume {
                     cmux.create_resume(task, run, &wrapper, &tags)
                 } else {
@@ -654,6 +716,18 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 // children this actor; set again, the agent is it whatever
                 // the wrapper inherited.
                 command.envs(actor.env());
+                if client_role(actor.role()) {
+                    // The worker's `dagq` goes to the queue service, never
+                    // to the queue's path, which a workspace an older
+                    // binary opened may still name (goal 82's stage (3)).
+                    let (socket, env) = self.client_env(&actor, false)?;
+                    command.env_remove(QUEUE_ENV).envs(env);
+                    provider.reach_queue_service(&mut command, &socket);
+                } else {
+                    for name in CLIENT_ENV {
+                        command.env_remove(name);
+                    }
+                }
                 let child = self
                     .spawner()?
                     .spawn(&command, streams)
@@ -669,6 +743,7 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 streams,
             } => {
                 let provider = self.provider()?;
+                let spawner = self.spawner()?;
                 let mut command = match program {
                     HeadlessProgram::Review {
                         run,
@@ -695,14 +770,29 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 // the job's actor does not set are not inherited from the
                 // starter (a worker's or a planner's session), so the job
                 // is not taken for its run, task or planner (task 902).
-                let actor_env = actor_env(self.queue, &actor, None, None)?;
+                let mut actor_env = actor_env(self.queue, &actor, None, None)?;
                 for name in ACTOR_ENV {
                     if !actor_env.iter().any(|(key, _)| key == name) {
                         command.env_remove(name);
                     }
                 }
+                // A job's `dagq` goes to the queue service with a token of
+                // its own, which ends with it (goal 82's stage (3)).
+                let client = client_role(actor.role());
+                if client {
+                    let (socket, env) = self.client_env(&actor, true)?;
+                    command.env_remove(QUEUE_ENV);
+                    provider.reach_queue_service(&mut command, &socket);
+                    actor_env.extend(env);
+                }
                 command.envs(env).envs(actor_env);
-                let child = self.spawner()?.spawn(&command, streams)?;
+                let child = spawner.spawn(&command, streams)?;
+                let child = if client {
+                    self.service()?
+                        .revoke_on_exit(self.queue, actor.actor_id(), child)
+                } else {
+                    child
+                };
                 Ok(ActorHandle::Process(child))
             }
         }
@@ -770,6 +860,39 @@ mod tests {
         /// The workspaces cmux lists, as (ID, description).
         listed: Mutex<Vec<(String, String)>>,
         closed: Mutex<Vec<String>>,
+        /// The actors a token was issued for, in order.
+        issued: Mutex<Vec<String>>,
+        /// The actors whose token a job's end revokes, in order.
+        revoked: Mutex<Vec<String>>,
+    }
+
+    /// The queue service's socket and token files at fixed paths under
+    /// `/q/service`, by actor id.
+    impl ServiceAccess for Fake {
+        fn socket(&self, _: &Path) -> PathBuf {
+            "/q/service/queue.sock".into()
+        }
+        fn issue(&self, _: &Path, principal: &Principal) -> Result<PathBuf> {
+            self.issued.lock().unwrap().push(principal.actor_id.clone());
+            Ok(format!("/q/service/credentials/{}", principal.actor_id).into())
+        }
+        fn credential(&self, _: &Path, actor_id: &str) -> Option<PathBuf> {
+            self.issued
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|issued| issued == actor_id)
+                .then(|| format!("/q/service/credentials/{actor_id}").into())
+        }
+        fn revoke_on_exit(
+            &self,
+            _: &Path,
+            actor_id: &str,
+            child: Box<dyn Spawned>,
+        ) -> Box<dyn Spawned> {
+            self.revoked.lock().unwrap().push(actor_id.to_owned());
+            child
+        }
     }
 
     impl Fake {
@@ -1060,9 +1183,10 @@ mod tests {
                 None
             )
             .unwrap(),
+            // No queue path: its `dagq` runs in client mode (goal 82's
+            // stage (3)).
             pairs(&[
                 ("DAGQ_ROLE", "worker"),
-                ("DAGQ_QUEUE", "/q/queue.db"),
                 ("DAGQ_ACTOR_ID", "worker:r1"),
                 ("DAGQ_RUN_ID", "r1"),
                 ("DAGQ_TASK_ID", "3"),
@@ -1108,7 +1232,6 @@ mod tests {
             actor_env(queue, &ActorContext::review_job(&run, 2), None, None).unwrap(),
             pairs(&[
                 ("DAGQ_ROLE", "review-job"),
-                ("DAGQ_QUEUE", "/q/queue.db"),
                 ("DAGQ_ACTOR_ID", "review-job:r1:2"),
             ])
         );
@@ -1119,7 +1242,8 @@ mod tests {
         let fake = Fake::default();
         let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
             .with_provider(&fake)
-            .with_spawner(&fake);
+            .with_spawner(&fake)
+            .with_queue_service(&fake);
         let dir = Path::new("/q/job");
         // Not an AI actor.
         for actor in [
@@ -1180,6 +1304,53 @@ mod tests {
         assert!(fake.spawned.lock().unwrap().is_empty());
     }
 
+    /// A worker or a job is never started without the queue service to give
+    /// it, and never given the queue's path instead (goal 82's stage (3)).
+    #[test]
+    fn a_worker_or_a_job_without_the_queue_service_is_not_started() {
+        let (task, run) = claimed_run("r1");
+        let fake = Fake::default();
+        let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
+            .with_workspaces(&fake)
+            .with_provider(&fake)
+            .with_spawner(&fake);
+        let dir = Path::new("/q/job");
+        let worker = || ActorContext::worker(run.id(), run.task_id());
+        for spec in [
+            ActorExecutionSpec::new(
+                worker(),
+                WorkspaceAccess::Write("/w".into()),
+                ActorProgram::RunWorkspace {
+                    task: &task,
+                    run: &run,
+                    wrapper: "wrapper".into(),
+                    resume: false,
+                    description: "d".into(),
+                    group: None,
+                    run_env: Vec::new(),
+                },
+            ),
+            ActorExecutionSpec::new(
+                worker(),
+                WorkspaceAccess::Write("/w".into()),
+                ActorProgram::SessionAgent {
+                    agent: SessionAgent::Resume { run: &run },
+                    model: None,
+                },
+            ),
+            ActorExecutionSpec::new(
+                ActorContext::instance(ActorRole::Observer, "s1"),
+                WorkspaceAccess::Scratch(dir.into()),
+                job(dir),
+            ),
+        ] {
+            let error = executor.spawn(spec).err().unwrap();
+            assert!(error.to_string().contains("no queue service"), "{error}");
+        }
+        assert!(fake.workspaces.lock().unwrap().is_empty());
+        assert!(fake.spawned.lock().unwrap().is_empty());
+    }
+
     #[test]
     fn a_program_needs_the_part_that_starts_it() {
         let (task, run) = claimed_run("r1");
@@ -1229,7 +1400,9 @@ mod tests {
     fn a_run_workspace_carries_the_worker_and_the_run_env_after_it() {
         let (task, run) = claimed_run("r1");
         let fake = Fake::default();
-        let executor = HostActorExecutor::new(Path::new("/q/queue.db")).with_workspaces(&fake);
+        let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
+            .with_workspaces(&fake)
+            .with_queue_service(&fake);
         for resume in [false, true] {
             let handle = executor
                 .spawn(ActorExecutionSpec::new(
@@ -1256,9 +1429,10 @@ mod tests {
             assert_eq!(
                 *tags,
                 WorkspaceTags {
+                    // Neither the queue's path nor the service: the
+                    // workspace runs the wrapper, which opens the queue.
                     env: pairs(&[
                         ("DAGQ_ROLE", "worker"),
-                        ("DAGQ_QUEUE", "/q/queue.db"),
                         ("DAGQ_ACTOR_ID", "worker:r1"),
                         ("DAGQ_RUN_ID", "r1"),
                         ("DAGQ_TASK_ID", "3"),
@@ -1269,6 +1443,8 @@ mod tests {
                 }
             );
         }
+        // The claim and the resume each issue the worker's token.
+        assert_eq!(*fake.issued.lock().unwrap(), ["worker:r1", "worker:r1"]);
     }
 
     /// Task 806: a create that reports failing although cmux made the
@@ -1289,7 +1465,8 @@ mod tests {
             .push(("other".into(), "dagq role=worker run=r2".into()));
         let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
             .with_workspaces(&fake)
-            .with_provider(&fake);
+            .with_provider(&fake)
+            .with_queue_service(&fake);
         for resume in [false, true] {
             let error = executor
                 .spawn(ActorExecutionSpec::new(
@@ -1404,6 +1581,7 @@ mod tests {
         let child = HostActorExecutor::new(Path::new("/q/queue.db"))
             .with_provider(&fake)
             .with_spawner(&fake)
+            .with_queue_service(&fake)
             .spawn(
                 ActorExecutionSpec::new(
                     ActorContext::instance(ActorRole::Observer, "s1"),
@@ -1446,10 +1624,17 @@ mod tests {
                 ("PATH", "/bin"),
                 ("DAGQ_ROLE", "user"),
                 ("DAGQ_ROLE", "observer"),
-                ("DAGQ_QUEUE", "/q/queue.db"),
                 ("DAGQ_ACTOR_ID", "observer:s1"),
+                ("DAGQ_SERVICE_SOCKET", "/q/service/queue.sock"),
+                (
+                    "DAGQ_SERVICE_CREDENTIAL_FILE",
+                    "/q/service/credentials/observer:s1"
+                ),
             ])
         );
+        // Its own token, which its end revokes.
+        assert_eq!(*fake.issued.lock().unwrap(), ["observer:s1"]);
+        assert_eq!(*fake.revoked.lock().unwrap(), ["observer:s1"]);
         // The actor variables the observer does not set are not inherited
         // from the starter's session (task 902), and removed before the
         // variables the command sets.
@@ -1461,6 +1646,7 @@ mod tests {
                 "DAGQ_SESSION_KIND",
                 "DAGQ_PLANNER_ID",
                 "DAGQ_PLANNER_ORIGIN",
+                "DAGQ_QUEUE",
             ]
         );
         let removes = command.get_envs().position(|(_, value)| value.is_none());
@@ -1476,7 +1662,8 @@ mod tests {
         let fake = Fake::default();
         let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
             .with_provider(&fake)
-            .with_spawner(&fake);
+            .with_spawner(&fake)
+            .with_queue_service(&fake);
         let dir = Path::new("/q/job");
         let jobs = [
             ActorContext::recovery_job(run.id(), "failed", 1),
@@ -1517,10 +1704,11 @@ mod tests {
         review(ActorContext::review_job(run.id(), 2).with_run(run.id().clone(), run.task_id()));
         let spawned = fake.spawned.lock().unwrap();
         assert_eq!(spawned.len(), 6);
+        let removed: Vec<_> = ACTOR_ENV[2..].iter().chain(&["DAGQ_QUEUE"]).collect();
         for command in &spawned[..5] {
             assert_eq!(
-                removed_of(command),
-                ACTOR_ENV[2..],
+                removed_of(command).iter().collect::<Vec<_>>(),
+                removed,
                 "{:?}",
                 command.get_program()
             );
@@ -1531,7 +1719,14 @@ mod tests {
             );
         }
         let with_run = &spawned[5];
-        assert_eq!(removed_of(with_run), ACTOR_ENV[4..]);
+        assert_eq!(
+            removed_of(with_run),
+            ACTOR_ENV[4..]
+                .iter()
+                .chain(&["DAGQ_QUEUE"])
+                .copied()
+                .collect::<Vec<_>>()
+        );
         let env = env_of(with_run);
         assert!(
             env.contains(&("DAGQ_RUN_ID".into(), "r1".into())),
@@ -1582,7 +1777,8 @@ mod tests {
         let fake = Fake::default();
         let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
             .with_provider(&fake)
-            .with_spawner(&fake);
+            .with_spawner(&fake)
+            .with_queue_service(&fake);
         for agent in [
             SessionAgent::Worker {
                 run: &run,
@@ -1607,6 +1803,8 @@ mod tests {
                 .map(|arg| arg.to_string_lossy().into_owned())
                 .collect();
             assert!(args.contains(&"opus".to_owned()), "{args:?}");
+            // The worker's `dagq` goes to the queue service with the
+            // run's token, never to the queue's path.
             assert_eq!(
                 env_of(command),
                 pairs(&[
@@ -1614,9 +1812,19 @@ mod tests {
                     ("DAGQ_ACTOR_ID", "worker:r1"),
                     ("DAGQ_RUN_ID", "r1"),
                     ("DAGQ_TASK_ID", "3"),
+                    ("DAGQ_SERVICE_SOCKET", "/q/service/queue.sock"),
+                    (
+                        "DAGQ_SERVICE_CREDENTIAL_FILE",
+                        "/q/service/credentials/worker:r1"
+                    ),
                 ])
             );
+            assert_eq!(removed_of(command), ["DAGQ_QUEUE"]);
         }
+        // The wrapper of a run the claim issued no token for issues one,
+        // once; the resume takes the one there is.
+        assert_eq!(*fake.issued.lock().unwrap(), ["worker:r1"]);
+        assert!(fake.revoked.lock().unwrap().is_empty());
     }
 
     /// The broker's tools (`preferred`) reach a worker, its resume and its
@@ -1645,7 +1853,8 @@ mod tests {
             let fake = Fake::default();
             let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
                 .with_provider(&fake)
-                .with_spawner(&fake);
+                .with_spawner(&fake)
+                .with_queue_service(&fake);
             for agent in [
                 SessionAgent::Worker {
                     run: &run,
@@ -1699,6 +1908,7 @@ mod tests {
         let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
             .with_provider(&fake)
             .with_spawner(&fake)
+            .with_queue_service(&fake)
             .with_config(ExecutionConfig {
                 backend: ExecutorBackend::Host,
                 actors: vec![(ActorRole::Worker, ExecutorBackend::Podman)],

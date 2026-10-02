@@ -42,9 +42,9 @@ use crate::application::commands::DenialLog;
 use crate::application::commands::dialogue::{DialogueStore, MarkChange};
 use crate::application::queue_reads::QueueRead;
 use crate::application::queue_service::{
-    QueueService, QueueServiceControl, ServiceBackend, ServiceProbe, ServiceQueue,
+    QueueService, QueueServiceControl, ServiceAccess, ServiceBackend, ServiceProbe, ServiceQueue,
 };
-use crate::application::{Generators, RunLog, RunNotFound, TaskStore};
+use crate::application::{Exit, Generators, RunLog, RunNotFound, Spawned, TaskStore};
 use crate::domain::queue_service::{
     API_VERSION, LOCK_FILE, LOG_FILE, MAX_REQUEST_BYTES, Principal, SERVICE_DIR, SOCKET_FILE,
     STATE_FILE, ServiceErrorCode, ServiceRequest, ServiceResponse, ServiceState, UseCase,
@@ -276,6 +276,92 @@ pub fn read_token(file: &Path) -> Result<String> {
         .to_owned())
 }
 
+/// The control side's [`ServiceAccess`] on this host: the tokens under the
+/// queue's `service/`, whose files the actors are handed the paths of.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemServiceAccess;
+
+impl ServiceAccess for SystemServiceAccess {
+    fn socket(&self, db: &Path) -> PathBuf {
+        socket_path(&queue_dir_of(db))
+    }
+
+    fn issue(&self, db: &Path, principal: &Principal) -> Result<PathBuf> {
+        Ok(issue(&queue_dir_of(db), principal, unix_now())?.file)
+    }
+
+    fn credential(&self, db: &Path, actor_id: &str) -> Option<PathBuf> {
+        let file = credential_path(&queue_dir_of(db), actor_id);
+        file.is_file().then_some(file)
+    }
+
+    fn revoke_on_exit(
+        &self,
+        db: &Path,
+        actor_id: &str,
+        child: Box<dyn Spawned>,
+    ) -> Box<dyn Spawned> {
+        Box::new(Revoking {
+            child,
+            queue_dir: queue_dir_of(db),
+            actor_id: actor_id.to_owned(),
+            revoked: false,
+        })
+    }
+}
+
+/// A job's process that revokes its token once it has ended: at the wait
+/// that sees it end, or when the handle goes (a job given up is killed
+/// first).
+struct Revoking {
+    child: Box<dyn Spawned>,
+    queue_dir: PathBuf,
+    actor_id: String,
+    revoked: bool,
+}
+
+impl Revoking {
+    fn revoke(&mut self) {
+        if self.revoked {
+            return;
+        }
+        self.revoked = true;
+        if let Err(error) = revoke(&self.queue_dir, &self.actor_id) {
+            warn!(actor_id = %self.actor_id, "the token of {} could not be revoked: {error:#}", self.actor_id);
+        }
+    }
+}
+
+impl Spawned for Revoking {
+    fn id(&self) -> u32 {
+        self.child.id()
+    }
+    fn try_wait(&mut self) -> Result<Option<Exit>> {
+        let exit = self.child.try_wait()?;
+        if exit.is_some() {
+            self.revoke();
+        }
+        Ok(exit)
+    }
+    fn kill(&mut self) -> Result<()> {
+        self.child.kill()
+    }
+    fn wait(&mut self) -> Result<Exit> {
+        let exit = self.child.wait()?;
+        self.revoke();
+        Ok(exit)
+    }
+    fn kill_group(&mut self) -> Result<()> {
+        self.child.kill_group()
+    }
+}
+
+impl Drop for Revoking {
+    fn drop(&mut self) {
+        self.revoke();
+    }
+}
+
 // --- The client --------------------------------------------------------------
 
 /// Send `request` to the service at `socket` and read its answer; an error
@@ -316,6 +402,112 @@ pub fn hello(socket: &Path, timeout: Duration) -> Result<Value> {
         (true, Some(result), _) => Ok(result),
         (_, _, Some(error)) => bail!("{}: {}", error.code.as_str(), error.message),
         _ => bail!("the queue service answered hello with nothing"),
+    }
+}
+
+// --- Client mode (goal 82's stage (3)) --------------------------------------
+
+/// How long a client-mode `dagq` waits for the service's answer: a read of
+/// the whole queue (`stats --full`, `kpi`) may take a while.
+pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Why a client-mode `dagq` did not get its answer: the service's own code
+/// (`authorization_denied`, `unauthenticated`, `bad_request`, `failed`,
+/// `api_version_mismatch`) or the client's (`unreachable`: no service
+/// answers on the socket; `no_credential`: the token's file does not
+/// read; `no_use_case`: the command is none of the service's;
+/// `queue_named`: the command names a queue to open).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientFailure {
+    pub code: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for ClientFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for ClientFailure {}
+
+impl ClientFailure {
+    pub fn new(code: &str, message: impl Into<String>) -> Self {
+        Self {
+            code: code.to_owned(),
+            message: message.into(),
+        }
+    }
+}
+
+/// Where a client-mode `dagq` sends its commands (ADR-t1233-1 decision 7):
+/// the socket and the token's file the control side put in its
+/// environment ([`SOCKET_ENV`](crate::domain::queue_service::SOCKET_ENV),
+/// [`CREDENTIAL_FILE_ENV`](crate::domain::queue_service::CREDENTIAL_FILE_ENV)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Client {
+    pub socket: PathBuf,
+    /// `None` when the environment names none: the service then refuses
+    /// the call as `unauthenticated`.
+    pub credential: Option<PathBuf>,
+}
+
+impl Client {
+    /// The client `env` names: `None` without a socket, when `dagq` opens
+    /// the queue itself.
+    pub fn from_env(env: impl Fn(&str) -> Option<String>) -> Option<Self> {
+        use crate::domain::queue_service::{CREDENTIAL_FILE_ENV, SOCKET_ENV};
+        let named = |name: &str| env(name).filter(|value| !value.trim().is_empty());
+        Some(Self {
+            socket: PathBuf::from(named(SOCKET_ENV)?),
+            credential: named(CREDENTIAL_FILE_ENV).map(PathBuf::from),
+        })
+    }
+
+    /// `use_case` with `params` done by the service as the principal of
+    /// the token: its result, or a [`ClientFailure`]. A service that does
+    /// not answer is a failure; the client never opens the queue instead
+    /// (fail closed).
+    pub fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
+        let token = match &self.credential {
+            Some(file) => Some(
+                read_token(file)
+                    .map_err(|error| ClientFailure::new("no_credential", format!("{error:#}")))?,
+            ),
+            None => None,
+        };
+        let request = ServiceRequest {
+            api_version: API_VERSION,
+            token,
+            use_case,
+            params,
+        };
+        let response = call(&self.socket, &request, CLIENT_TIMEOUT).map_err(|error| {
+            ClientFailure::new(
+                "unreachable",
+                format!(
+                    "{error:#}; a client-mode dagq does not open the queue itself \
+                     (dagq service status, from the control side, says why)"
+                ),
+            )
+        })?;
+        if let Some(error) = response.error {
+            return Err(ClientFailure::new(error.code.as_str(), error.message).into());
+        }
+        if !crate::domain::queue_service::understands(&response) {
+            return Err(ClientFailure::new(
+                ServiceErrorCode::ApiVersionMismatch.as_str(),
+                format!(
+                    "the queue service answers API versions {} to {}, not {API_VERSION}",
+                    response.min_api_version, response.api_version
+                ),
+            )
+            .into());
+        }
+        match (response.ok, response.result) {
+            (true, Some(result)) => Ok(result),
+            _ => Err(ClientFailure::new("failed", "the queue service answered nothing").into()),
+        }
     }
 }
 
@@ -822,8 +1014,12 @@ impl QueueServiceControl for SystemQueueService {
             .stdout(log.try_clone()?)
             .stderr(log);
         // The service is the control side's, whoever started it: no
-        // actor's variables reach it.
-        for name in crate::domain::actor::ACTOR_ENV {
+        // actor's variables reach it, nor a client-mode `dagq`'s (the
+        // service opens the queue it names).
+        for name in crate::domain::actor::ACTOR_ENV
+            .into_iter()
+            .chain(crate::domain::queue_service::CLIENT_ENV)
+        {
             command.env_remove(name);
         }
         // SAFETY: setsid(2), fork(2) and _exit(2) are async-signal-safe and

@@ -780,8 +780,14 @@ pub fn supervise_with_reviewer(
         version: crate::VERSION.to_owned(),
         // The observe command's environment drops the supervisor's actor
         // variables, and the supervisor sets its own when it starts it
-        // (`supervisor:<pid>`); its agent is the observer.
-        observer_env_remove: crate::domain::actor::ACTOR_ENV.map(str::to_owned).to_vec(),
+        // (`supervisor:<pid>`); its agent is the observer. It drops a
+        // client-mode `dagq`'s variables too: the command opens the queue it
+        // names (a supervisor started from a worker's tests inherits them).
+        observer_env_remove: crate::domain::actor::ACTOR_ENV
+            .into_iter()
+            .chain(crate::domain::queue_service::CLIENT_ENV)
+            .map(str::to_owned)
+            .collect(),
         planners_dir: planners_dir(&db),
         plugin_dir: options
             .plugin_dir
@@ -1072,6 +1078,7 @@ pub fn supervise_with_reviewer(
             .as_ref()
             .map(|codex| codex as &dyn AgentProvider),
         spawner: &LocalSpawner,
+        service_access: &crate::infrastructure::queue_service::SystemServiceAccess,
         files: options.files.as_ref().map_or_else(
             || Arc::new(LocalRunFiles) as Arc<dyn RunFiles>,
             |port| port.0.clone(),
@@ -2932,6 +2939,7 @@ fn run_session(
             provider,
             other,
             spawner,
+            queue_service: &crate::infrastructure::queue_service::SystemServiceAccess,
             processes: &SystemProcesses,
             files: &LocalRunFiles,
             pid: std::process::id(),

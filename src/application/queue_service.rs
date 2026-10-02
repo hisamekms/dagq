@@ -540,6 +540,30 @@ pub trait QueueServiceControl: Send + Sync {
     fn stop(&self, timeout: Duration) -> Result<Option<u32>>;
 }
 
+/// What the control side gives an actor whose `dagq` runs in client mode
+/// (goal 82's stage (3), ADR-t1233-4 decision 4): the socket of the queue
+/// at `db`, and the file of a token for the actor's principal. Only the
+/// control side holds it: the supervisor issues a worker's token at the
+/// claim and the resume and a job's at its start, and no command of an AI
+/// actor's issues one.
+pub trait ServiceAccess: Send + Sync {
+    /// The socket of the service of the queue at `db`.
+    fn socket(&self, db: &std::path::Path) -> std::path::PathBuf;
+    /// Issue a token for `principal` (the one its actor held is revoked);
+    /// the file holding it.
+    fn issue(&self, db: &std::path::Path, principal: &Principal) -> Result<std::path::PathBuf>;
+    /// The file of the token `actor_id` holds, `None` when it holds none.
+    fn credential(&self, db: &std::path::Path, actor_id: &str) -> Option<std::path::PathBuf>;
+    /// `child`, which revokes the token of `actor_id` once it has ended (a
+    /// job's, whose token ends with it).
+    fn revoke_on_exit(
+        &self,
+        db: &std::path::Path,
+        actor_id: &str,
+        child: Box<dyn super::Spawned>,
+    ) -> Box<dyn super::Spawned>;
+}
+
 /// `up`'s step (ADR-t1233-4 decision 1): reuse a service of this build
 /// that answers, else start one (replacing one of another build), and
 /// report what was done. A service that does not start stops `up`.

@@ -3024,3 +3024,16 @@ fn cross_names_preserve_unknown_values_and_escape_separators() {
             .any(|key| key.starts_with("cross:"))
     );
 }
+
+#[test]
+fn a_comparison_s_text_reads_back_as_the_same_comparison() {
+    for text in [
+        "12",
+        "2026-09-26T08:52:00.500Z",
+        "1..5,6..@1790000000",
+        "2026-09-01T00:00:00Z..2026-09-08T00:00:00Z,9..12",
+    ] {
+        let spec: CompareSpec = text.parse().unwrap();
+        assert_eq!(spec.text().parse::<CompareSpec>(), Ok(spec), "{text}");
+    }
+}

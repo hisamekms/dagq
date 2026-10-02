@@ -1538,7 +1538,7 @@ fn a_request_stuck_in_the_input_box_is_asked_to_the_inbox() {
     // the ask is open.
     backend.resume_script_for(
         2,
-        "await_message; until \"$DAGQ\" --db \"$DB\" asks --open | grep -q stalled; do sleep 0.05; done; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+        "await_message; until \"$DAGQ\" asks --open | grep -q stalled; do sleep 0.05; done; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
     );
     let outcome = supervise(&db, &repo, &backend).unwrap();
     backend.join();
@@ -1660,7 +1660,7 @@ fn a_request_lost_twice_is_asked_to_the_inbox() {
     // under load took longer, and left the resume without its ask.
     backend.resume_script_for(
         2,
-        "until [ -f \"$EXIT\" ] || \"$DAGQ\" --db \"$DB\" asks --open | grep -q stalled; do sleep 0.05; done",
+        "until [ -f \"$EXIT\" ] || \"$DAGQ\" asks --open | grep -q stalled; do sleep 0.05; done",
     );
     let options = SuperviseOptions {
         stall: Some(

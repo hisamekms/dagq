@@ -261,6 +261,19 @@ pub enum CompareSpec {
     Windows([(Cursor, Cursor); 2]),
 }
 
+impl CompareSpec {
+    /// `--compare` as the command line writes it, which reads back as the
+    /// same comparison ([`Cursor::text`]).
+    pub fn text(self) -> String {
+        match self {
+            Self::At(at) => at.text(),
+            Self::Windows([(a, b), (c, d)]) => {
+                format!("{}..{},{}..{}", a.text(), b.text(), c.text(), d.text())
+            }
+        }
+    }
+}
+
 impl std::str::FromStr for CompareSpec {
     type Err = String;
 

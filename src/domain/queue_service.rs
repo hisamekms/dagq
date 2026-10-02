@@ -33,13 +33,17 @@ pub const STATE_FILE: &str = "state.json";
 pub const LOCK_FILE: &str = "lock";
 /// The log the service a runtime starts writes to.
 pub const LOG_FILE: &str = "service.log";
-/// The variable that will name the socket to a client-mode `dagq` (goal
-/// 82's stage (3)); nothing sets it yet.
+/// The variable that names the socket to a client-mode `dagq` (goal 82's
+/// stage (3)): with it, `dagq` opens no queue and sends its command to the
+/// service (ADR-t1233-1 decision 7).
 pub const SOCKET_ENV: &str = "DAGQ_SERVICE_SOCKET";
-/// The variable that will name the file holding a client's token (stage
-/// (3), ADR-t1233-4 decision 4: the value itself is never in the
-/// environment); nothing sets it yet.
-pub const TOKEN_FILE_ENV: &str = "DAGQ_SERVICE_TOKEN_FILE";
+/// The variable that names the file holding a client's token (ADR-t1233-4
+/// decision 4: the value itself is never in the environment). Its name
+/// says no `TOKEN`: Codex keeps a variable whose name holds `KEY`,
+/// `SECRET` or `TOKEN` out of the commands it runs.
+pub const CREDENTIAL_FILE_ENV: &str = "DAGQ_SERVICE_CREDENTIAL_FILE";
+/// The variables of a client-mode `dagq`.
+pub const CLIENT_ENV: [&str; 2] = [SOCKET_ENV, CREDENTIAL_FILE_ENV];
 /// The longest request line the service reads.
 pub const MAX_REQUEST_BYTES: usize = 1 << 20;
 
@@ -288,6 +292,15 @@ impl Principal {
             _ => actor,
         }
     }
+}
+
+/// Whether the `dagq` of an actor of `role` runs in client mode (goal 82's
+/// stage (3)): the worker (and its resume) and the headless jobs with the
+/// observer get the service's socket and a token instead of the queue's
+/// path. The inbox and the planners open the queue themselves until stage
+/// (5) (ADR-t1233-4 decision 6), as the control side does.
+pub const fn client_role(role: ActorRole) -> bool {
+    matches!(role, ActorRole::Worker | ActorRole::Observer) || role.is_headless_job()
 }
 
 /// Whether a token issued on a run still holds while the run is in

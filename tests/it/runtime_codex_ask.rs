@@ -1,8 +1,9 @@
-//! Runtime tests: a Codex worker's `dagq ask` is a request in its run
-//! directory, which its supervisor opens on the queue (ADR-t813-3
-//! decision 3). The Codex sandbox does not let the worker write the
-//! queue's directory; the stub's turns run without a sandbox, so they show
-//! that the command writes no queue by naming one that cannot be opened.
+//! Runtime tests: a Codex worker's `dagq ask` goes to the queue service in
+//! client mode (ADR-t1233-5 decision 5, amending ADR-t813-3 decision 3),
+//! which opens it at once for the worker's principal. A request in the run
+//! directory, which a turn an older binary started still writes, is opened
+//! by its supervisor until no such turn is left: the tests of that path
+//! write the requests where such a turn did.
 use crate::common;
 use crate::runtime_codex::{
     FINISH, TASK, codex_fixture, detail, finished, open_ask, supervise_thread,
@@ -14,9 +15,6 @@ use dagq::domain::{
     ask_request::{ASK_REQUESTS_DIR, pending_name, taken_name},
 };
 use runtime_support::*;
-
-/// A queue path no command can open: the worker's `ask` must not need it.
-const NO_QUEUE: &str = "/nonexistent/dagq-no-queue/queue.db";
 
 fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
     SqliteQueue::open(db)
@@ -66,21 +64,20 @@ fn request_files(run: &TaskRun) -> Vec<String> {
     names
 }
 
-/// Acceptance (1) and (2): the worker's `dagq ask` succeeds with no queue
-/// it can open, and leaves a request its supervisor opens as the worker's
-/// `worker_question`; the inbox's answer is the next turn's `codex exec
-/// resume` and the run lands. The request is taken once. The ask opens
-/// only at a pass after the turn that asked ended, so the turn's idle
-/// marker may be seconds older than the ask (made so here): the answer
-/// still goes out, the session being between turns.
+/// The worker's `dagq ask` opens the worker's `worker_question` through
+/// the queue service, with no queue path in the turn's environment and no
+/// request in the run directory; the inbox's answer is the next turn's
+/// `codex exec resume` and the run lands. The turn's idle marker may be
+/// seconds older than the ask (made so here): the answer still goes out,
+/// the session being between turns.
 #[test]
-fn a_codex_workers_ask_is_a_request_its_supervisor_opens() {
+fn a_codex_workers_ask_goes_to_the_queue_service() {
     let (dir, repo, db, backend, codex) = codex_fixture();
     set_turns(
         dir.path(),
         &format!(
             r#"case "$TURN" in
-1) "$DAGQ" --db {NO_QUEUE} ask --run "$DAGQ_RUN_ID" --kind worker_question --because scope --topic design_choice --question "which file" --option a.txt --option b.txt > "$RUN_DIR/ask-output.json" 2>&1 || fail "ask failed: $(cat "$RUN_DIR/ask-output.json")"; say asked ;;
+1) env > "$RUN_DIR/turn-env.txt"; "$DAGQ" ask --run "$DAGQ_RUN_ID" --kind worker_question --because scope --topic design_choice --question "which file" --option a.txt --option b.txt > "$RUN_DIR/ask-output.json" 2>&1 || fail "ask failed: $(cat "$RUN_DIR/ask-output.json")"; say asked ;;
 2) case "$PROMPT" in "answer to ask "*) {FINISH} ;; *) say lost ;; esac ;;
 esac"#
         ),
@@ -130,28 +127,33 @@ esac"#
             .any(|p| p["ask_id"] == json!(ask.id) && p["asked_by"] == "worker"),
         "{opened:?}"
     );
-    let notified = backend.notifications.lock().unwrap().clone();
+    // The service told the inbox, through its own cmux.
+    let notified = fs::read_to_string(fake_cmux_dir(&db).join("calls")).unwrap_or_default();
     assert!(
-        notified
-            .iter()
-            .any(|(_, body, _)| body.contains("which file")
-                && body.contains(&format!("run {}", run.id()))),
-        "{notified:?}"
+        notified.contains("ask #1 worker_question --body which file")
+            && notified.contains(&format!("run {}", run.id())),
+        "{notified}"
     );
 
-    // The command wrote a request and said so, and opened no queue.
-    let output: Value = serde_json::from_slice(
-        &fs::read(Path::new(run.run_dir().unwrap()).join("ask-output.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(output["requested"], true, "{output}");
-    let request = output["request"].as_str().unwrap();
-    assert_eq!(request_files(run), [taken_name(request)]);
-    let taken = payloads(&detail, "ask_request_taken");
-    assert_eq!(taken.len(), 1, "{taken:?}");
-    assert_eq!(taken[0]["request"], request);
-    assert_eq!(taken[0]["outcome"], "opened");
-    assert_eq!(taken[0]["ask_id"], json!(ask.id));
+    // The command printed the ask the service opened, wrote no request,
+    // and its turn was given the service, not the queue's path.
+    let run_dir = Path::new(run.run_dir().unwrap());
+    let output: Value =
+        serde_json::from_slice(&fs::read(run_dir.join("ask-output.json")).unwrap()).unwrap();
+    assert_eq!(output["id"], json!(ask.id), "{output}");
+    assert!(!run_dir.join(ASK_REQUESTS_DIR).exists());
+    assert!(payloads(&detail, "ask_request_taken").is_empty());
+    let env = fs::read_to_string(run_dir.join("turn-env.txt")).unwrap();
+    assert!(env.contains("DAGQ_SERVICE_SOCKET="), "{env}");
+    assert!(env.contains("DAGQ_SERVICE_CREDENTIAL_FILE="), "{env}");
+    for line in env.lines().filter(|line| !line.starts_with("DB=")) {
+        assert!(
+            !line.contains("queue's data.db")
+                && !line.starts_with("DAGQ_QUEUE=")
+                && !line.starts_with("DAGQ_ASK_REQUESTS="),
+            "{line}"
+        );
+    }
     assert_eq!(worker_questions(&db).len(), 1);
 
     // The answer went as the next turn, a resume of the same thread.
@@ -186,7 +188,7 @@ fn requests_the_worker_may_not_make_open_no_ask_and_none_opens_twice() {
         )
     };
     let script = [
-        "case \"$TURN\" in\n1) R=\"$DAGQ_ASK_REQUESTS\"; mkdir -p \"$R\"\n".to_owned(),
+        "case \"$TURN\" in\n1) R=\"$RUN_DIR/ask-requests\"; mkdir -p \"$R\"\n".to_owned(),
         request(
             "other",
             r#"{"id":"other","kind":"worker_question","because":"scope","question":"q","topics":["other"],"run_id":"someone-elses-run"}"#,
@@ -391,7 +393,7 @@ fn a_link_in_place_of_the_request_directory_is_not_followed() {
         dir.path(),
         &format!(
             r#"case "$TURN" in
-1) R="$DAGQ_ASK_REQUESTS"; rm -rf "$R"; ln -s '{}' "$R"; say working ;;
+1) R="$RUN_DIR/ask-requests"; rm -rf "$R"; ln -s '{}' "$R"; say working ;;
 *) {FINISH} ;;
 esac"#,
             victim.display()
@@ -422,7 +424,7 @@ fn entries_that_are_no_regular_file_are_refused_untouched_and_hold_nothing() {
         dir.path(),
         &format!(
             r#"case "$TURN" in
-1) R="$DAGQ_ASK_REQUESTS"; mkdir -p "$R"; ln -s '{v}/auth.json' "$R/leak.json"; ln -s '{v}' "$R/linkdir.json"; mkdir "$R/dir.json"; mkfifo "$R/fifo.json"; say working ;;
+1) R="$RUN_DIR/ask-requests"; mkdir -p "$R"; ln -s '{v}/auth.json' "$R/leak.json"; ln -s '{v}' "$R/linkdir.json"; mkdir "$R/dir.json"; mkfifo "$R/fifo.json"; say working ;;
 *) {FINISH} ;;
 esac"#
         ),
@@ -479,9 +481,9 @@ fn a_taken_request_that_cannot_be_moved_holds_nothing() {
         dir.path(),
         &format!(
             r#"case "$TURN" in
-1) R="$DAGQ_ASK_REQUESTS"; mkdir -p "$R/stuck.taken/x"; printf '%s' '{{"id":"stuck","kind":"worker_question","because":"scope","question":"which file","topics":["other"],{own}}}' > "$R/.stuck.tmp"; mv "$R/.stuck.tmp" "$R/stuck.json"; chmod 555 "$R"; say asked ;;
+1) R="$RUN_DIR/ask-requests"; mkdir -p "$R/stuck.taken/x"; printf '%s' '{{"id":"stuck","kind":"worker_question","because":"scope","question":"which file","topics":["other"],{own}}}' > "$R/.stuck.tmp"; mv "$R/.stuck.tmp" "$R/stuck.json"; chmod 555 "$R"; say asked ;;
 2) say working ;;
-*) chmod 755 "$DAGQ_ASK_REQUESTS"; {FINISH} ;;
+*) chmod 755 "$RUN_DIR/ask-requests"; {FINISH} ;;
 esac"#
         ),
     );

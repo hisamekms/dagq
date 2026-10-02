@@ -37,10 +37,7 @@ use crate::{
         stats::StatsQuery,
     },
     infrastructure::{
-        adapters::{SystemProcesses, shell_join},
-        asks::AskQuery,
-        process::LocalSpawner,
-        sqlite::SqliteQueue,
+        adapters::SystemProcesses, asks::AskQuery, process::LocalSpawner, sqlite::SqliteQueue,
     },
     lifecycle::OBSERVER_ROLE,
 };
@@ -179,18 +176,17 @@ pub fn observe(
         open_asks: serde_json::to_value(asks)?,
         graph: json!({"candidates": graph.candidates, "critical": graph.critical}),
     });
-    let command = shell_join(&[
-        "dagq".into(),
-        "--db".into(),
-        db.to_string_lossy().into_owned(),
-    ]);
+    // The job's `dagq` goes to the queue service in client mode: the
+    // prompt, an argument of the agent, names no queue path (goal 82's
+    // stage (3)).
+    let command = "dagq";
     let checkout = crate::compose::bound_checkout(&queue)?;
     let language = crate::infrastructure::language::language_for_prompt(
         checkout.as_deref(),
         options.user_config.as_deref(),
     );
     let prompt = crate::domain::language::with_instruction(
-        observer_prompt(options.mode, &command, since, &input)?,
+        observer_prompt(options.mode, command, since, &input)?,
         language.as_ref(),
     );
     if options.dry_run {
@@ -594,6 +590,7 @@ pub(crate) fn run_agent(
     let mut child = HostActorExecutor::new(db)
         .with_provider(provider)
         .with_spawner(&LocalSpawner)
+        .with_queue_service(&crate::infrastructure::queue_service::SystemServiceAccess)
         .spawn(
             ActorExecutionSpec::new(
                 agent.actor.clone(),

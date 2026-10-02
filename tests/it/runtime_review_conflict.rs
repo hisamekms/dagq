@@ -501,7 +501,7 @@ fn adopt_lost_revise(
         &db,
         false,
         "commit work; receipt \"$(git rev-parse HEAD)\"; idle; \
-         until \"$DAGQ\" --db \"$DB\" asks --open | grep -q stalled; do sleep 0.05; done",
+         until \"$DAGQ\" asks --open | grep -q stalled; do sleep 0.05; done",
     );
     backend.dropped_texts.store(usize::MAX, Ordering::SeqCst);
     let reviewer = TestReviewer::new(&[verdict("pass", &[], "unused")]);

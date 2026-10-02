@@ -116,6 +116,17 @@ impl std::str::FromStr for Cursor {
 }
 
 impl Cursor {
+    /// The cursor as the command line writes it, which reads back as the
+    /// same cursor: the event id, or the time in RFC 3339 with
+    /// milliseconds (a client-mode `dagq` sends it to the queue service
+    /// so).
+    pub fn text(self) -> String {
+        match self {
+            Self::Event(id) => id.to_string(),
+            Self::Time(millis) => crate::domain::marks::utc_text(millis),
+        }
+    }
+
     /// The event id this cursor stands for among `events` (ascending id):
     /// the id itself, or the latest event recorded at or before the time
     /// (0 when none was).
@@ -2084,6 +2095,20 @@ pub fn timestamp_millis(text: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_cursor_s_text_reads_back_as_the_same_cursor() {
+        for text in [
+            "42",
+            "@1790000000",
+            "2026-09-26T08:52:00.123+09:00",
+            "2026-01-01T00:00:00Z",
+        ] {
+            let cursor: Cursor = text.parse().unwrap();
+            assert_eq!(cursor.text().parse::<Cursor>(), Ok(cursor), "{text}");
+        }
+        assert_eq!(Cursor::Event(EventId::new(7)).text(), "7");
+    }
+
     use super::*;
     use serde_json::json;
 

@@ -297,6 +297,8 @@ to wait for the next landing that changes the runtime.",
             .arg("auto-update")
             .args(["--commit", head, "--token", self.token.as_str()])
             .envs(layout.supervisor_actor().env())
+            // It opens the queue it names, not a client-mode `dagq`.
+            .env_remove(crate::domain::queue_service::SOCKET_ENV)
             .arg("--to")
             .arg(&layout.runner)
             .arg("--repo")

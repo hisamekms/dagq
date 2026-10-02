@@ -231,9 +231,11 @@ impl AgentProvider for StubReviewer {
         } else {
             format!("printf '%s\\n' '{verdict}'")
         };
-        // The job's actor (ADR-t728-1 decision 4), for [`job_actors`].
+        // The job's actor (ADR-t728-1 decision 4), for [`job_actors`],
+        // beside the queue, which the job is not named: its token's file is
+        // `<queue dir>/service/credentials/<hash>` (goal 82's stage (3)).
         let script = format!(
-            "printf '%s %s\\n' \"$DAGQ_ROLE\" \"$DAGQ_ACTOR_ID\" >> \"$(dirname \"$DAGQ_QUEUE\")/{JOB_ACTORS}\"; {script}"
+            "printf '%s %s\\n' \"$DAGQ_ROLE\" \"$DAGQ_ACTOR_ID\" >> \"$(dirname \"$(dirname \"$(dirname \"$DAGQ_SERVICE_CREDENTIAL_FILE\")\")\")/{JOB_ACTORS}\"; {script}"
         );
         let mut command = CommandSpec::new("/bin/sh");
         command.current_dir(cwd).arg("-c").arg(script);

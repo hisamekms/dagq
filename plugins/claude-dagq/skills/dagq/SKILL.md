@@ -11,7 +11,7 @@ A goal is the problem several tasks solve together; a task is one unit of work a
 
 Reference files, read only when needed, all in `${CLAUDE_PLUGIN_ROOT}/skills/dagq/`: `reference/locate.md` (install, version warnings, missing or moved queue), `reference/inspect.md` (inspect commands, fields, statuses, priority, editing), `reference/register.md` (registering in detail), `reference/goal-close.md` (closing a goal), `reference/kpi.md` (KPIs, change marks, the weekly throughput review, forecasts, reports, push), `reference/provider.md` (a worker's provider and route, fallbacks, turns) and `reference/authority.md` (what each role is refused, the inbox's delegated record).
 
-Every state change is checked against your role (`DAGQ_ROLE`) by a default-deny policy; a refusal (`<role> may not ...`) changes nothing and is recorded. Take it as the answer and never work around it; the check is advisory on the host, not a sandbox (`reference/authority.md`).
+Every state change is checked against your role (`DAGQ_ROLE`) by a default-deny policy; a refusal (`<role> may not ...`, or a `queue_service` code in client mode) changes nothing. Take it as the answer and never work around it; the check is advisory on the host, not a sandbox (`reference/authority.md`).
 
 ## 1. Locate the binary and the queue
 
@@ -23,6 +23,7 @@ It prints `binary`, `binary_version`, `plugin_version` and the queue (`db`, `db_
 
 - `{"error": ...}` (no binary): pass on its install steps; retry once installed.
 - `{"warning": ...}` on stderr (plugin and binary differ in major.minor): report it and continue.
+- `client_mode: true` (a worker's or a job's dagq): no `db`; commands go to the queue service. Never `init`.
 - `db_exists: false`: run `"${CLAUDE_PLUGIN_ROOT}/bin/dagq" init` once, unless the repository was moved or renamed; then do not `init` and read `reference/locate.md`.
 
 The queue is per repository, resolved from the current directory: run dagq in the tasks' repository. Use `DAGQ="${CLAUDE_PLUGIN_ROOT}/bin/dagq"` below.

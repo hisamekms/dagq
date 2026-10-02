@@ -16,7 +16,7 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Deserializer};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::domain::Resource;
 use crate::domain::kpi::CompareSpec;
@@ -632,6 +632,90 @@ impl QueueRead {
     pub fn resource(&self) -> Resource {
         Resource::Queue
     }
+
+    /// The use case and the params a client-mode `dagq` sends for this
+    /// read (goal 82's stage (3)): what [`Self::parse`] reads back as the
+    /// same read, every option written out.
+    pub fn request(&self) -> (UseCase, Value) {
+        let cursor = |cursor: &Option<Cursor>| cursor.map(Cursor::text);
+        match self {
+            Self::List(read) => (
+                UseCase::List,
+                json!({"status": read.status, "all": read.all, "goal": read.goal,
+                       "limit": read.limit, "before": read.before, "full": read.full}),
+            ),
+            Self::Candidates => (UseCase::Candidates, json!({})),
+            Self::Graph(read) => (
+                UseCase::Graph,
+                json!({"goal": read.goal, "format": read.format}),
+            ),
+            Self::Status(read) => (UseCase::Status, json!({"role": read.role})),
+            Self::Asks(read) => (
+                UseCase::Asks,
+                json!({"open": read.open, "role": read.role, "all": read.all}),
+            ),
+            Self::Events(read) => (
+                UseCase::Events,
+                json!({"after": read.after, "limit": read.limit, "all": read.all,
+                       "full": read.full, "run": read.run, "task": read.task,
+                       "goal": read.goal, "kind": read.kind, "since": read.since,
+                       "until": read.until}),
+            ),
+            Self::Timeline(read) => (
+                UseCase::Timeline,
+                json!({"run": read.run, "gap": read.gap, "full": read.full}),
+            ),
+            Self::Stats(read) => (
+                UseCase::Stats,
+                json!({"since": cursor(&read.since), "until": cursor(&read.until),
+                       "goal": read.goal, "full": read.full}),
+            ),
+            Self::Kpi(read) => (
+                UseCase::Kpi,
+                json!({"period": read.period, "last": read.last, "at": cursor(&read.at),
+                       "since": cursor(&read.since), "until": cursor(&read.until),
+                       "change": read.changes, "area": read.areas, "by": read.by,
+                       "cross": read.cross, "compare": read.compare.map(CompareSpec::text),
+                       "window": read.window, "goal": read.goal}),
+            ),
+            Self::Forecast(read) => (
+                UseCase::Forecast,
+                json!({"task": read.task, "goal": read.goal, "parallel": read.parallel,
+                       "trials": read.trials}),
+            ),
+            Self::Notes(read) => (
+                UseCase::Notes,
+                json!({"goal": read.goal, "task": read.task, "since": read.since,
+                       "limit": read.limit}),
+            ),
+            Self::Marks(read) => (
+                UseCase::Marks,
+                json!({"since": cursor(&read.since), "until": cursor(&read.until)}),
+            ),
+            Self::Findings(read) => (
+                UseCase::Findings,
+                json!({"id": read.id, "all": read.all, "status": read.status,
+                       "kind": read.kinds, "task": read.task, "run": read.run,
+                       "goal": read.goal, "queue": read.queue, "full": read.full}),
+            ),
+            Self::Search(read) => (
+                UseCase::Search,
+                json!({"query": read.query, "status": read.status, "kind": read.kinds,
+                       "goal": read.goal, "limit": read.limit, "full": read.full}),
+            ),
+            Self::Related(read) => (
+                UseCase::Related,
+                json!({"task": read.task, "status": read.status, "limit": read.limit}),
+            ),
+            Self::GoalList => (UseCase::GoalList, json!({})),
+            Self::GoalShow(read) => (UseCase::GoalShow, json!({"id": read.id, "full": read.full})),
+            Self::Lint(read) => (
+                UseCase::Lint,
+                json!({"tasks": read.tasks, "proposals": read.proposals}),
+            ),
+            Self::ObserveHistory(read) => (UseCase::ObserveHistory, json!({"limit": read.limit})),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -682,6 +766,70 @@ mod tests {
         );
         let related = QueueRead::parse(UseCase::Related, &json!({"task": 4})).unwrap();
         assert_eq!(related.unwrap().resource(), Resource::Queue);
+    }
+
+    #[test]
+    fn a_read_s_request_reads_back_as_the_same_read() {
+        for (use_case, params) in [
+            (
+                UseCase::List,
+                json!({"status": ["ready"], "goal": 3, "limit": 5, "before": 9, "full": true}),
+            ),
+            (UseCase::Candidates, json!({})),
+            (UseCase::Graph, json!({"goal": 2, "format": "d2"})),
+            (UseCase::Status, json!({"role": "inbox"})),
+            (UseCase::Asks, json!({"open": true, "role": "planner"})),
+            (
+                UseCase::Events,
+                json!({"after": 4, "limit": 7, "all": true, "full": true, "run": "r1",
+                                      "task": 2, "goal": 1, "kind": ["note"], "since": "1", "until": "@2"}),
+            ),
+            (
+                UseCase::Timeline,
+                json!({"run": "r1", "gap": 30, "full": true}),
+            ),
+            (
+                UseCase::Stats,
+                json!({"since": "12", "until": "2026-09-26T08:52:00.123Z", "goal": 1, "full": true}),
+            ),
+            (
+                UseCase::Kpi,
+                json!({"period": "week", "last": 4, "at": "@1790000000", "change": ["fix"],
+                                   "area": ["runtime"], "by": ["provider"], "cross": true,
+                                   "compare": "1..2,3..4", "window": 9, "goal": 2}),
+            ),
+            (
+                UseCase::Forecast,
+                json!({"task": 3, "parallel": 2, "trials": 50}),
+            ),
+            (UseCase::Notes, json!({"goal": 1, "since": 4, "limit": 3})),
+            (UseCase::Marks, json!({"since": "1", "until": "9"})),
+            (
+                UseCase::Findings,
+                json!({"id": 2, "status": ["open"], "kind": ["stall"], "queue": true, "full": true}),
+            ),
+            (
+                UseCase::Search,
+                json!({"query": "x y", "status": ["ready"], "kind": ["task"], "goal": 1, "limit": 2}),
+            ),
+            (
+                UseCase::Related,
+                json!({"task": 4, "status": ["ready"], "limit": 3}),
+            ),
+            (UseCase::GoalList, json!({})),
+            (UseCase::GoalShow, json!({"id": 2, "full": true})),
+            (UseCase::Lint, json!({"tasks": [1], "proposals": [2]})),
+            (UseCase::ObserveHistory, json!({"limit": 4})),
+        ] {
+            let read = QueueRead::parse(use_case, &params).unwrap().unwrap();
+            let (sent, again) = read.request();
+            assert_eq!(sent, use_case);
+            assert_eq!(
+                QueueRead::parse(sent, &again).unwrap(),
+                Some(read),
+                "{params}"
+            );
+        }
     }
 
     #[test]

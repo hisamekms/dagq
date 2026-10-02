@@ -43,7 +43,13 @@ fn output(binary: &Path, arguments: &[&str]) -> Result<String> {
 
 /// [`output`] with `envs` added to its environment.
 fn output_with(binary: &Path, arguments: &[&str], envs: &[(&str, &str)]) -> Result<String> {
-    let output = Command::new(binary)
+    let mut command = Command::new(binary);
+    // A client-mode `dagq`'s variables do not reach it: it opens the queue
+    // it names (goal 82's stage (3)).
+    for name in crate::domain::queue_service::CLIENT_ENV {
+        command.env_remove(name);
+    }
+    let output = command
         .args(arguments)
         .envs(envs.iter().copied())
         .stdin(Stdio::null())

@@ -62,6 +62,7 @@ impl Supervisor<'_> {
             .with_workspaces(self.cmux)
             .with_provider(agent)
             .with_spawner(self.spawner)
+            .with_queue_service(self.service_access)
     }
     /// Plan paths, create the run directory, worktree and workspace. Any
     /// error leaves what was created for inspection.

@@ -28,7 +28,7 @@ related:
 
 hostで動き、queue DBを開いてユースケース単位のAPIを、service側で認可して提供するプロセス。決定の理由は[ADR-t1233-1](../adr/2026-10-02-t1233-1-control-and-execution-sides-queue-service-broker-and-client-mode.md)（制御側と実行側の分け方・serviceとAPIと認可・unix socket・段）、[ADR-t1233-4](../adr/2026-10-02-t1233-4-queue-service-lifecycle-outage-notice-and-principal-tokens.md)（起動・停止の責任・落ちたときの知らせ方・tokenによるprincipalの認証）、[ADR-t1233-5](../adr/2026-10-02-t1233-5-read-use-cases-read-scope-by-role-and-codex-sandbox-reach.md)（読み取りの範囲）。
 
-今の段（goal 82の段(2)、task 1234・1235・1242）: serviceがあり、`hello`・`ask`・`show`・`note`（task 1234）と、`proposal_list`・`proposal_show`・`finding_record`・`finding_resolve`・`finding_dismiss`（task 1235。goal 80のCodexのobserverの書き込みの経路、[ADR-t1222-1](../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）と、読み取りのroleのjobとworkerが打つqueue全体の読み取り（task 1242。[読み取りのユースケース](#読み取りのユースケース)）のユースケースを答える。**supervisor・inbox・planner・人のCLI・workerとjobのdagqは、今までどおりDBを直接開く。** workerとjobのdagqをクライアントモードにし、DBのpathを渡さないのは段(3)で、tokenの発行と受け渡し（claim・resume・jobの起動）もそこで足す。
+今の段（goal 82の段(2)・(3)、task 1234・1235・1242・1236）: serviceがあり、`hello`・`ask`・`show`・`note`（task 1234）と、`proposal_list`・`proposal_show`・`finding_record`・`finding_resolve`・`finding_dismiss`（task 1235。goal 80のCodexのobserverの書き込みの経路、[ADR-t1222-1](../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）と、読み取りのroleのjobとworkerが打つqueue全体の読み取り（task 1242。[読み取りのユースケース](#読み取りのユースケース)）のユースケースを答える。**worker（resumeを含む）・headlessのjob・observerのdagqはクライアントモードで動き、そのプロセスにはqueue DBのpathを渡さない**（task 1236。[クライアントモード](#クライアントモード)）。supervisor・session wrapperとhook・inbox・planner・人のCLIは、今までどおりDBを直接開く（段(5)まで。ADR-t1233-4決定6）。
 
 名前: この文書の「broker」はqueueのbroker（段(4)）のこと。fs・process・gitを仲介するresource broker（[Resource broker](broker.md)）とは別。
 
@@ -65,10 +65,12 @@ queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）�
 
 serviceは呼び出しのprincipal（`role`・`actor_id`・workerなら`run_id`と`task_id`）をtokenから決め、クライアントが名乗るrole（`DAGQ_ROLE`）は認可に使わない（ADR-t1233-1決定4、ADR-t1233-4決定4）。
 
-- 発行: 制御側（supervisor）だけが`queue_service::issue`で発行する。AI actorにtokenを作るコマンドは無い。tokenは32 bytesの乱数のhex。発行できるprincipalはAI actor（`TrustLevel::UntrustedAgent`）だけで、人と制御側（user・supervisor・wrapper・integrator）は段(5)まで今のままDBを直接開く。同じactor idに発行し直すと前のtokenは失効する（resumeの発行し直し）
-- 失効: `queue_service::revoke`（actor id）が値とprincipalの記録を消す。加えてserviceは、principalがrunを名指すtokenを、そのrunの状態が`integrated`・`succeeded`・`failed`・`interrupted`のとき、またはqueueに無いときに断る（runの終わりで失効。`run_holds_token`）
+- 発行: 制御側だけが`queue_service::issue`で発行する。AI actorにtokenを作るコマンドは無い。tokenは32 bytesの乱数のhex。発行できるprincipalはAI actor（`TrustLevel::UntrustedAgent`）だけで、人と制御側（user・supervisor・wrapper・integrator）は段(5)まで今のままDBを直接開く。同じactor idに発行し直すと前のtokenは失効する（resumeの発行し直し）。発行するのはactorの起動の1か所（`HostActorExecutor`、applicationのport `ServiceAccess`、hostの実装は`SystemServiceAccess`）:
+  - workerのtoken: supervisorがclaimとresumeでrunのworkspaceを開くとき（`ActorProgram::RunWorkspace`）に発行する。workspaceの環境には入れず、session wrapperがagent（対話のsession・resume・非対話のturn）を起動するとき（`ActorProgram::SessionAgent`）にそのfileのpathを渡す。fileが無いとき（claimの発行を経ずに起動したwrapper）だけwrapperが発行する（wrapperも制御側）
+  - jobのtoken: jobを起動するプロセス（supervisor、`observe`・`throughput-review`のコマンド）が起動のとき（`ActorProgram::Headless`）に発行し、jobのプロセスが終わったとき（それを見たwaitか、handleを捨てたとき）に失効させる（`ServiceAccess::revoke_on_exit`）
+- 失効: `queue_service::revoke`（actor id）が値とprincipalの記録を消す。加えてserviceは、principalがrunを名指すtokenを、そのrunの状態が`integrated`・`succeeded`・`failed`・`interrupted`のとき、またはqueueに無いときに断る（runの終わりで失効。`run_holds_token`。workerのtokenのfileはresumeの発行し直しまで残るが、使えない）
 - 断り: tokenが無い（`missing_token`）・発行していない値か失効した（`unknown_token`）・runが終わった（`run_ended`）要求は`unauthenticated`で断り、queueのevent `queue_service_unauthenticated`（`use_case`・`reason`。tokenの値は書かない）に残す。actorはservice自身（role `supervisor`、id `queue-service:<pid>`。制御側の一部）
-- 段(3)で呼び出し元に渡すenvの名前は`DAGQ_SERVICE_SOCKET`（socketのpath）と`DAGQ_SERVICE_TOKEN_FILE`（tokenのfileのpath）。今はどちらも誰も設定しない
+- 呼び出し元に渡すenvは`DAGQ_SERVICE_SOCKET`（socketのpath）と`DAGQ_SERVICE_CREDENTIAL_FILE`（tokenのfileのpath。`domain::queue_service::CLIENT_ENV`）。名前に`TOKEN`を含めないのは、Codexが名前に`KEY`・`SECRET`・`TOKEN`を含む変数を、それが起動するコマンドに渡さないため
 - host構成では同じユーザーのプロセスが他のrunのtokenのfileもDBも読めるので、tokenは誤りを止めて記録を正しくするためのもので、security boundaryではない（ADR-t1233-4決定5、[Security](security.md#host実行は助言的advisory)）
 
 ## ユースケース
@@ -118,7 +120,7 @@ queue全体の読み取り（ADR-t1233-5決定1〜3、task 1242）。1つの読�
 | `lint` | `lint` | `tasks`・`proposals`（どちらかは要る） |
 | `observe_history` | `observe --history` | `limit`（`observer::HISTORY_LIMIT`） |
 
-`show`・`proposal_list`・`proposal_show`は上の表。paramsは書き出すファイルも実行するprogramも受け取らず（`stats`と`planners`の`--cmux`、`graph`の`--out`）、読み取りでserviceが別のprogramを起動するのは`stats`の`workspace_mismatch`のためのserviceの`--cmux`だけ（`graph --format svg`のd2は起動しない）。serviceの`--cmux`が見つからなければ、CLIと同じくworkspaceを見ない。`domain::queue_service::UseCase::of_command`が、dagqのコマンドの引数（サブコマンドから）から行き先のユースケースを決める（段(3)のクライアントモードが使う。`graph --out`・`ask close`・`--history`の無い`observe`は`None`）。
+`show`・`proposal_list`・`proposal_show`は上の表。paramsは書き出すファイルも実行するprogramも受け取らず（`stats`と`planners`の`--cmux`、`graph`の`--out`）、読み取りでserviceが別のprogramを起動するのは`stats`の`workspace_mismatch`のためのserviceの`--cmux`だけ（`graph --format svg`のd2は起動しない）。serviceの`--cmux`が見つからなければ、CLIと同じくworkspaceを見ない。`domain::queue_service::UseCase::of_command`が、dagqのコマンドの引数（サブコマンドから）から行き先のユースケースを決める（`graph --out`・`ask close`・`--history`の無い`observe`は`None`）。クライアントモードは、引数の文字列ではなく読んだコマンドから行き先を決める（[クライアントモード](#クライアントモード)の`client_request`。どちらも同じ行き先になる）。
 
 ### 読み取りのroleとworkerが打つコマンド
 
@@ -131,7 +133,7 @@ promptとskillが打たせるdagqのコマンドと、行き先のユースケ�
 | observer（`QueueCli`） | `observer::observer_prompt` | 読み取り: `findings [ID] [--full]`・`stats`・`kpi`・`marks`・`notes`・`show ID`・`asks`・`graph`・`forecast`・`goal show ID`・`events --full`・`timeline RUN`・`observe --history`。書き込み: `finding record`・`finding resolve`・`ask --kind blocked --finding ID` |
 | スループットの見直しのjob（`QueueCli`） | `throughput_review::review_prompt`と、それが載せるdagq skillの`reference/kpi.md`の手順 | `kpi [--period] [--last] [--area] [--change]`・`stats [--since] [--until] [--full]`・`timeline RUN`・`events --full --kind --since --until`・`asks`・`marks`・`findings`・`show ID`・`forecast` |
 | review job・復旧job（`ReadFiles`） | `prompt::review_prompt`・`prompt::recovery_prompt` | なし（Bashを持たず、dagqを打たない） |
-| runtimeが立てるplanner | `RECORD_READING` | `events --full`・`timeline RUN`（plannerは段(3)でもDBを直接開く） |
+| runtimeが立てるplanner | `RECORD_READING` | `events --full`・`timeline RUN`（plannerは今もDBを直接開く） |
 | worker | runtimeのprompt（`WORKER_READING`） | `ask`（書き込み）。`list`・`show`は作業の初めに打たないよう言う（権限の範囲ではない。ADR-t1233-5決定3） |
 | worker（`measure`のtask） | AGENTS.mdの「テストの制約」のchangeの`measure`、measureのtaskのdescription（commit 2ae2c673のtask、task 1205・1114・1034・1026・601・1200） | `stats --full`・`events --full`・`timeline RUN`・`kpi`（`--compare`・`--area`・`--change`・`--by`）・`marks`・`forecast` |
 | worker・job | dagq skillの`SKILL.md`と`reference/`（`inspect.md`・`kpi.md`・`register.md`・`scope.md`・`provider.md`・`goal-close.md`・`observer.md`） | `list`・`show`・`graph`・`candidates`・`status`・`asks`・`events`・`timeline`・`stats`・`kpi`・`forecast`・`notes`・`marks`・`findings`・`search`・`related`・`proposal list`・`proposal show`・`goal list`・`goal show`・`lint`・`observe --history` |
@@ -140,7 +142,26 @@ promptとskillが打たせるdagqのコマンドと、行き先のユースケ�
 
 - `watch`（`queue.watch`。inboxのもの）、`report`と`graph --out`（`export.file`。ファイルを書く）: jobとworkerのpolicyに無い操作で、今のCLIでも拒まれる
 - `graph --format svg`: hostのd2を起動するので、serviceは読み取りとして受け取らない（`json`と`d2`は答える）。promptとskillはsvgを名指さない
-- `locate`（DBのpathを返す）・`doctor`（hostとDBのファイルの診断）・`service status`・`broker status|logs|audit`・`planners`: 制御側の状態を見るもので、jobのpromptは名指さない。dagq skillは`doctor`を名指すが、AGENTS.mdはworkerの実queueでの`doctor`の確認を人かinboxに任せる。クライアントモードでどう答えるか（DBのpathを出さずに答えるか、届かないことの分かるerrorにするか）は段(3)が決める
+- `locate`（DBのpathを返す）・`doctor`（hostとDBのファイルの診断）・`service status`・`broker status|logs|audit`・`planners`: 制御側の状態を見るもので、jobのpromptは名指さない。dagq skillは`doctor`を名指すが、AGENTS.mdはworkerの実queueでの`doctor`の確認を人かinboxに任せる。クライアントモードでは`locate`がDBのpathを出さずにsocketを答え、ほかは`no_use_case`で断る（[クライアントモード](#クライアントモード)）
+
+## クライアントモード
+
+ADR-t1233-1決定7、ADR-t1233-5決定1・2・5、task 1236。`dagq`（`src/main.rs`の`execute`）は、環境に`DAGQ_SERVICE_SOCKET`があれば、`DAGQ_ROLE`もqueueの解決（cwdや`--db`）も読まずにクライアントモードで動く（`infrastructure::queue_service::Client`）。
+
+- コマンドを引数のとおりに読んで（clapの検査はそのまま）、ユースケースとparamsに写す（`client_request`）。読み取りはCLIの読み取りと同じ`QueueRead`（`queue_read`）を`QueueRead::request`でparamsにし、`QueueRead::parse`がそれを同じ読み取りに読み戻す（cursorと`--compare`は`Cursor::text`・`CompareSpec::text`で読み戻せる文字列にする）。`show`・`note`・`ask`・`proposal list|show`・`finding record|resolve|dismiss`は上の表のparamsにする。`ask`と`stats`の`--cmux`は送らない（serviceの`--cmux`を使う）。`finding record`の対象の無いものは`queue: true`
+- tokenは`DAGQ_SERVICE_CREDENTIAL_FILE`のfileから読み、要求ごとに送る。答えの`result`をCLIと同じに出す（`graph --format d2`の本文もそのまま）。答えを待つのは`CLIENT_TIMEOUT`（300秒）まで
+- 断り（終了コード1、stderrの`{"error": <message>, "queue_service": {"code": <code>}}`）: serviceの`authorization_denied`・`unauthenticated`・`bad_request`・`failed`・`api_version_mismatch`（答えの版がこのbinaryの版を含まないときもこれ）と、クライアントの`unreachable`（socketに答えるserviceが無い）・`no_credential`（tokenのfileが読めない）・`no_use_case`（serviceのユースケースでないコマンド）・`queue_named`（`--db`でqueueを名指した）。どの断りでもDBを開くことに戻らない（fail closed）
+- `no_use_case`になるもの: 計画系（`add`・`edit`・`submit`・`ready`・`goal add`など）・`answer`・`ask close`・`mark`・runtimeの操作（`up`・`integrate`・`review`・`recover`・`observe`（`--history`を除く）・`session`など）・`watch`・`report`・`graph --out`・`doctor`・`service`・`broker`・`init`・`migrate`。段(2)が残した`doctor`（hostとDBのファイルの診断）はこれで断る。`locate`はserviceに送らずに、DBのpathを出さずに答える: `{"client_mode": true, "socket": <socket>, "db": null, "db_exists": null, "note"}`（pluginの`--resolve`が最初に打ち、dagq skillは`db_exists: false`のときだけ`init`を言うので、workerとjobが`init`を試みない。task 1236で決めた）
+- workerとjobのpromptとskillのコマンド（`dagq ask`・`dagq show`など）は変えない。observerとスループットの見直しのpromptは、`dagq --db <db>`ではなく`dagq`を名指す（promptはagentの引数なので、DBのpathを含めない）
+- session wrapper（`session`）とhook（`session-event`）は制御側で、`--db`でDBを開く。runのworkspaceの環境にはserviceの変数を入れないので、wrapperはクライアントモードにならない（agentを起動するときに足す）
+- 確かめるtest: `tests/it/queue_service_client.rs`（CLIのクライアントモード、roleの判定がservice側であること、断り）、`tests/it/runtime_client_mode.rs`（worker・resume・review job・recovery jobのプロセスの環境と引数にDBのpathが無いこと）、`tests/it/runtime_codex_ask.rs`と`tests/it/goal_review_codex.rs`（stubのCodexのworkerとjobからの到達）、observer・スループットの見直し・plan reviewのjobのtest
+
+### Codexのsandboxからの到達（ADR-t1233-5決定4）
+
+- workerのturn（workspace-write、networkを開ける。ADR-t813-3決定4）: そのままsocketに届く。`codex sandbox`（0.159.2）で、workspace-writeで`sandbox_workspace_write.network_access=true`ならunix socketにつなげ、networkを閉じると断られることを確かめた
+- 読み取りだけのjob（goal reviewなど）: `--sandbox read-only`の代わりに、`:read-only`を継いでnetworkをCodexのnetwork proxy経由で開き、serviceのsocket（実path）だけを許すpermission profile `dagq_job`で動かす（`AgentProvider::reach_queue_service`、`codex::job_service_config`。`-c features.network_proxy=true`・`default_permissions="dagq_job"`・`permissions.dagq_job.extends=":read-only"`・`permissions.dagq_job.network.enabled=true`・`permissions.dagq_job.network.unix_sockets={"<socket>"="allow"}`）。`codex sandbox`（0.159.2）で、この設定でsocketに答えが返り、TCPの接続とfileの書き込みは断られ、socketの項を外すとsocketも断られることを確かめた。`codex exec`で同じ設定を確かめたのはstubのCodexまでで、実Codexでのjobの確認は手動スモークに任せる
+- Claude Codeのagentはsandboxを持たないので何も足さない
+- Codexのworkerの`dagq ask`はserviceのユースケースとして送る（ADR-t1233-5決定5）。turnには`DAGQ_ASK_REQUESTS`を渡さなくなった。supervisorがrun dirの`ask-requests/`の要求を取り込む経路（[provider-lifecycle](provider-lifecycle.md#codexの非対話のworker)）は、この変更より前に起動したturnの要求のために残す
 
 ## 起動と停止（ADR-t1233-4決定1・2）
 
@@ -157,7 +178,7 @@ serviceは`dagq --db <db> service serve --cmux <cmux>`で、固定バイナリ�
 
 supervisorが起動し直せなかった（`start_failed`）か、上限に達した（`restart_limit`）ときは、queueのattention `queue_service_down`（`reason`・`message`・`supervisor`）をDBに直接書く（serviceを通らない）。inboxの`watch`と`status`はDBを直接読むので、serviceが落ちても届く。1つの失敗につき1回で、serviceがまた動けば（`queue_service_started`・`queue_service_running`）消える。attentionは`kind: queue_service_down`・`status`にその`reason`・`next: dagq service status`・`last_error`に`message`（`run_id` / `task_id`はnull）。人は`dagq service status`と`service.log`を見て、`up`か`service start`を打ち直す。supervisorも居ないときは今までどおり`restart supervisor`が出る。
 
-段(3)以降のクライアントモードのdagqは、serviceに届かないときに届かないことの分かるerrorを返し、DBを直接開くことへ戻らない（ADR-t1233-1決定7）。
+クライアントモードのdagqは、serviceに届かないときに`unreachable`のerrorを返し、DBを直接開くことへ戻らない（ADR-t1233-1決定7、[クライアントモード](#クライアントモード)）。
 
 ## statusとdoctor
 
@@ -184,6 +205,7 @@ queueのevent（`EventKind::is_queue`）: `queue_service_started`（`by`（`up`�
 
 ## まだ無いもの
 
-- 段(3): workerとjobのdagqのクライアントモード、claim・resume・jobの起動でのtokenの発行と受け渡し、runの終わりでのtokenのfileの片付け、Codexのsandboxからsocketへの到達（ADR-t1233-5決定4）
-- 段(3): クライアントモードの`locate`・`doctor`をどう答えるか（[読み取りのユースケース](#読み取りのユースケース)の「ユースケースの無いコマンド」）
-- 段(4)〜(6)（goal 38）: queueのbroker、supervisorとCLIのservice経由化、integrateのverificationの隔離
+- runの終わりでのworkerのtokenのfileの片付け（serviceはrunの終わったtokenを断るので使えないが、fileは次のresumeの発行し直しか手の片付けまで残る）
+- 実Codexでの読み取りだけのjobのsocketへの到達の確認（`codex sandbox`とstubのCodexまで。上の「Codexのsandboxからの到達」）
+- run dirの`ask-requests/`の取り込みの撤去（この変更より前に起動したturnが残らなくなった後）
+- 段(4)〜(6)（goal 38）: queueのbroker、supervisor・wrapper・hook・CLIのservice経由化、integrateのverificationの隔離
