@@ -1224,6 +1224,12 @@ pub trait WorkspaceBackend {
     fn registration_timeout(&self) -> std::time::Duration {
         std::time::Duration::from_secs(45)
     }
+    /// How long after an attempt to open a headless run's lost session
+    /// again the supervisor makes the next one (task 1372): what stopped
+    /// the wrapper may be cmux itself, which needs time to come back.
+    fn reopen_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(60)
+    }
     /// How long a session may run with neither a receipt nor an idle marker
     /// before the supervisor starts reading its screen for a dialog.
     fn prompt_wait(&self) -> std::time::Duration {
@@ -1607,6 +1613,14 @@ pub trait RunTransitions {
     fn workspace_created(&mut self, id: &RunId, token: &LeaseToken, workspace: &str) -> Result<()>;
     /// The session's wrapper exited: the run moves on by its exit code.
     fn finish_supervision(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun>;
+    /// End a running run's lost session that could not be opened again
+    /// (task 1372) as if its wrapper exited with `exit_code`.
+    fn finish_lost_session(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        exit_code: i32,
+    ) -> Result<TaskRun>;
     /// The session went idle after its receipt and stays open: validating.
     fn finish_supervision_live(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun>;
     fn finish_validation(
@@ -1875,6 +1889,26 @@ pub trait RunCoordination {
     ) -> Result<()>;
     fn register_wrapper(&mut self, id: &RunId, token: &LeaseToken, pid: u32) -> Result<()>;
     fn register_resume_wrapper(&mut self, id: &RunId, token: &LeaseToken, pid: u32) -> Result<()>;
+    /// Forget the processes of a running run whose session was lost, so
+    /// that a new wrapper may register for it (task 1372); refused when a
+    /// wrapper other than the `lost` pid has not recorded its exit.
+    fn clear_lost_session(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        lost: Option<u32>,
+    ) -> Result<()>;
+    /// The lost session of a running run was opened again in `workspace`
+    /// (its `attempt`): the run's workspace, `workspace_created` and
+    /// `auto_repaired` with `repaired`.
+    fn session_reopened(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        workspace: &str,
+        attempt: u64,
+        repaired: serde_json::Value,
+    ) -> Result<()>;
     fn register_agent(&mut self, id: &RunId, wrapper_pid: u32, agent_pid: u32) -> Result<()>;
     fn register_resume_agent(&mut self, id: &RunId, wrapper_pid: u32, agent_pid: u32)
     -> Result<()>;

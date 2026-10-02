@@ -448,8 +448,11 @@ impl SqliteQueue {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
-        let allowed =
-            supervised_run(&tx, id, token)?.is_some_and(|run| run::check_resumable(&run).is_ok());
+        // A running run's lost session opened again (task 1372) starts the
+        // same way: its wrapper waits for the supervisor's request.
+        let allowed = supervised_run(&tx, id, token)?.is_some_and(|run| {
+            run::check_resumable(&run).is_ok() || run::check_reopenable(&run).is_ok()
+        });
         ensure!(allowed, "run is not being resumed by this supervisor");
         tx.execute(
             "INSERT INTO run_processes(run_id,role,pid) VALUES (?1,'wrapper',?2)",
@@ -484,6 +487,77 @@ impl SqliteQueue {
             EventKind::AgentStarted,
             json!({"pid": agent_pid, "session_id": id}),
         )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Forget the processes of the running run `id` leased to `token`
+    /// whose session was lost (task 1372): a new wrapper may register for
+    /// it in the workspace its supervisor opens next. `lost` is the pid of
+    /// the wrapper the supervisor saw lost (`None`: it saw none); a wrapper
+    /// that has not recorded its exit under another pid registered
+    /// meanwhile, and refuses it.
+    pub fn clear_lost_session(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        lost: Option<u32>,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        renew_lease(&tx, id, token, self.generators.clock.now())?;
+        let allowed =
+            supervised_run(&tx, id, token)?.is_some_and(|run| run::check_reopenable(&run).is_ok());
+        ensure!(allowed, "run is not running under this supervisor");
+        let other: Option<u32> = tx
+            .query_row(
+                "SELECT pid FROM run_processes WHERE run_id=?1 AND role='wrapper'
+                 AND exited_at IS NULL",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .filter(|pid| Some(*pid) != lost);
+        if let Some(pid) = other {
+            bail!("a wrapper of run {id} (pid {pid}) registered meanwhile");
+        }
+        tx.execute("DELETE FROM run_processes WHERE run_id=?1", [id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The lost session of the running run `id` was opened again in
+    /// `workspace` (task 1372): it becomes the run's workspace, recorded as
+    /// `workspace_created` with `reopened` (the attempt), and the repair as
+    /// `auto_repaired` with `repaired` for its payload.
+    pub fn session_reopened(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        workspace: &str,
+        attempt: u64,
+        repaired: Value,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        renew_lease(&tx, id, token, self.generators.clock.now())?;
+        apply(
+            &tx,
+            refusals(&self.runs_dir, &self.generators),
+            id,
+            Some(token),
+            || "run is not running under this supervisor".to_owned(),
+            |run| run::reopen_workspace(run, workspace.to_owned()),
+        )?;
+        run_event(
+            &tx,
+            id,
+            EventKind::WorkspaceCreated,
+            json!({"workspace_id": workspace, "reopened": attempt}),
+        )?;
+        run_event(&tx, id, EventKind::AutoRepaired, repaired)?;
         tx.commit()?;
         Ok(())
     }
@@ -709,6 +783,24 @@ impl RunCoordination for SqliteQueue {
     }
     fn register_resume_wrapper(&mut self, id: &RunId, token: &LeaseToken, pid: u32) -> Result<()> {
         SqliteQueue::register_resume_wrapper(self, id, token, pid)
+    }
+    fn clear_lost_session(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        lost: Option<u32>,
+    ) -> Result<()> {
+        SqliteQueue::clear_lost_session(self, id, token, lost)
+    }
+    fn session_reopened(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        workspace: &str,
+        attempt: u64,
+        repaired: Value,
+    ) -> Result<()> {
+        SqliteQueue::session_reopened(self, id, token, workspace, attempt, repaired)
     }
     fn register_agent(&mut self, id: &RunId, wrapper_pid: u32, agent_pid: u32) -> Result<()> {
         SqliteQueue::register_agent(self, id, wrapper_pid, agent_pid)

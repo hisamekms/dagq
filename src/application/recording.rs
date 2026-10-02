@@ -455,6 +455,9 @@ impl WorkspaceBackend for RecordingBackend<'_> {
     fn registration_timeout(&self) -> Duration {
         self.inner.registration_timeout()
     }
+    fn reopen_interval(&self) -> Duration {
+        self.inner.reopen_interval()
+    }
     fn prompt_wait(&self) -> Duration {
         self.inner.prompt_wait()
     }

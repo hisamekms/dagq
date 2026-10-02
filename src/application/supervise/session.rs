@@ -654,36 +654,25 @@ impl SessionWatch {
                 .finish_supervision_live(run.id(), &sv.token)
                 .map(Some);
         }
+        // A lost session no attempt could open again (task 1372) ends as
+        // one that exited, with its lost wrapper's code: the attempts
+        // forgot its processes.
+        let lost_exit = wrapper
+            .is_none()
+            .then(|| sv.reopens.get(run.id()).and_then(|r| r.lost_exit()))
+            .flatten();
+        if let Some(code) = lost_exit {
+            sv.reopens.remove(run.id());
+            self.end_exited(sv, run, false)?;
+            return sv
+                .queue
+                .finish_lost_session(run.id(), &sv.token, code)
+                .map(Some);
+        }
         if let Some(wrapper) = wrapper {
             if wrapper.exited_at.is_some() {
-                match sv.cmux.capture(&self.workspace) {
-                    Ok(screen) => sv
-                        .files
-                        .write(&self.run_dir.join("terminal-final.txt"), screen.as_bytes())?,
-                    Err(error) => sv.queue.record_runtime_event(
-                        run.id(),
-                        EventKind::ScreenCaptureFailed,
-                        reason_of_error(&error, ReasonCode::BackendFailed)
-                            .on(json!({"error": format!("{error:#}")})),
-                    )?,
-                }
-                // Nobody needs to send /exit to a session that exited, nor
-                // answer its dialog.
-                let workspace = self.workspace.clone();
-                self.exit_retry.exited(sv, run, &workspace);
-                for ask in sv
-                    .queue
-                    .close_stuck_exit_asks(run.id(), STUCK_EXIT_CLOSED)?
-                {
-                    info!(run_id = %run.id(), ask_id = %ask.id, "session of {} exited; closed its stuck_exit ask {}", run.id(), ask.id);
-                }
-                close_answer_prompt_asks(sv, run, PROMPT_EXITED_CLOSED)?;
-                self.stall.ended(sv, run)?;
-                self.end_sends(sv, run)?;
-                if let Some(nudge) = &mut self.stale {
-                    nudge.settle(sv, run, SESSION_PHASE, None, "run_ended")?;
-                }
-                self.recovery.stop(sv, run);
+                sv.reopens.remove(run.id());
+                self.end_exited(sv, run, true)?;
                 return sv.queue.finish_supervision(run.id(), &sv.token).map(Some);
             }
             let pulse = wrapper_pulse(
@@ -723,6 +712,11 @@ impl SessionWatch {
                 WrapperPulse::Silent => (),
                 WrapperPulse::Exited => return Ok(None),
                 WrapperPulse::Fresh => {
+                    // A reopen is over once the run's wrapper lives in its
+                    // slot (task 1372).
+                    if sv.reopens.get(run.id()).is_some_and(|r| r.settled()) {
+                        sv.reopens.remove(run.id());
+                    }
                     if self.exit_requested.is_none() {
                         // A silence that ended before any /exit is over:
                         // the session may wait again, and a later silence
@@ -819,6 +813,45 @@ impl SessionWatch {
             }
         }
         Ok(None)
+    }
+
+    /// What follows a session that exited, before its run moves on: its
+    /// screen saved (`capture`; a session lost and not opened again has no
+    /// terminal to read), its `/exit` retries ended, its `stuck_exit` and
+    /// dialog asks closed, its stall and sends settled and its recovery
+    /// job stopped.
+    fn end_exited(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun, capture: bool) -> Result<()> {
+        if capture {
+            match sv.cmux.capture(&self.workspace) {
+                Ok(screen) => sv
+                    .files
+                    .write(&self.run_dir.join("terminal-final.txt"), screen.as_bytes())?,
+                Err(error) => sv.queue.record_runtime_event(
+                    run.id(),
+                    EventKind::ScreenCaptureFailed,
+                    reason_of_error(&error, ReasonCode::BackendFailed)
+                        .on(json!({"error": format!("{error:#}")})),
+                )?,
+            }
+        }
+        // Nobody needs to send /exit to a session that exited, nor
+        // answer its dialog.
+        let workspace = self.workspace.clone();
+        self.exit_retry.exited(sv, run, &workspace);
+        for ask in sv
+            .queue
+            .close_stuck_exit_asks(run.id(), STUCK_EXIT_CLOSED)?
+        {
+            info!(run_id = %run.id(), ask_id = %ask.id, "session of {} exited; closed its stuck_exit ask {}", run.id(), ask.id);
+        }
+        close_answer_prompt_asks(sv, run, PROMPT_EXITED_CLOSED)?;
+        self.stall.ended(sv, run)?;
+        self.end_sends(sv, run)?;
+        if let Some(nudge) = &mut self.stale {
+            nudge.settle(sv, run, SESSION_PHASE, None, "run_ended")?;
+        }
+        self.recovery.stop(sv, run);
+        Ok(())
     }
 
     /// The session went idle after its receipt: ask it once to rewrite a

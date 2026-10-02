@@ -229,6 +229,7 @@ event_kinds! {
     SessionGoneParked => "session_gone_parked",
     SessionIdleObserved => "session_idle_observed",
     SessionOpened => "session_opened",
+    SessionReopenFailed => "session_reopen_failed",
     SessionTurns => "session_turns",
     StaleReceiptNudged => "stale_receipt_nudged",
     StaleReceiptResolved => "stale_receipt_resolved",
@@ -689,6 +690,10 @@ pub const SESSION_EXITED: &str = EventKind::SessionExited.as_str();
 pub const SESSION_GONE_PARKED: &str = EventKind::SessionGoneParked.as_str();
 pub const SESSION_IDLE_OBSERVED: &str = EventKind::SessionIdleObserved.as_str();
 pub const SESSION_OPENED: &str = EventKind::SessionOpened.as_str();
+/// A headless run's lost session the supervisor could not open again
+/// during its wait (task 1372): `attempt`, `cause`, `error`, and the
+/// `workspace_id` it opened when there was one.
+pub const SESSION_REOPEN_FAILED: &str = EventKind::SessionReopenFailed.as_str();
 pub const SESSION_TURNS: &str = EventKind::SessionTurns.as_str();
 pub const STALE_RECEIPT_NUDGED: &str = EventKind::StaleReceiptNudged.as_str();
 pub const STALE_RECEIPT_RESOLVED: &str = EventKind::StaleReceiptResolved.as_str();
@@ -978,6 +983,7 @@ mod tests {
             (EventKind::SessionGoneParked, "session_gone_parked"),
             (EventKind::SessionIdleObserved, "session_idle_observed"),
             (EventKind::SessionOpened, "session_opened"),
+            (EventKind::SessionReopenFailed, "session_reopen_failed"),
             (EventKind::SessionTurns, "session_turns"),
             (EventKind::StaleReceiptNudged, "stale_receipt_nudged"),
             (EventKind::StaleReceiptResolved, "stale_receipt_resolved"),

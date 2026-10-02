@@ -208,3 +208,13 @@ pub fn ready_turn(dir: &Path, backend: &mut TestWorkspace) -> String {
     backend.headless_ready = Some(ready);
     command
 }
+
+/// The home of the stub `codex` of [`headless_codex`], next to it: its
+/// rollouts are under `sessions`.
+pub const CODEX_HOME: &str = "codex-home";
+
+/// Have the stub `codex` in `dir` write each turn's `model` to its
+/// thread's rollout, as Codex does, from now on.
+pub fn set_codex_model(dir: &Path, model: &str) {
+    fs::write(dir.join("codex-model"), model).unwrap();
+}

@@ -63,10 +63,10 @@ use super::{
     or_none, path_text,
     prompt::{
         GoalPredecessorSummary, HEADLESS_NEVER, Inheritance, PredecessorSummary, RecoveryMaterial,
-        ResumeKind, ResumeRequest, TRIAGE_ACCESS, answer_text, continue_text, ended_run_material,
-        prompt, recovery_instruction, recovery_prompt, resume_request, review_prompt,
-        revise_mismatch_request, revise_request, siblings_in_progress, stale_receipt_nudge,
-        stall_nudge,
+        ResumeKind, ResumeRequest, TRIAGE_ACCESS, answer_text, closed_question_notice,
+        continue_text, ended_run_material, prompt, recovery_instruction, recovery_prompt,
+        resume_request, review_prompt, revise_mismatch_request, revise_request,
+        siblings_in_progress, stale_receipt_nudge, stall_nudge,
     },
     recording::{
         RecordingBackend, exit_unsent, reason_of_error, text_on_screen, timed_out_maybe_sent,
@@ -130,6 +130,7 @@ mod queue_service;
 mod recheck;
 mod recovery;
 mod release;
+mod reopen;
 mod report;
 mod resume;
 mod revise;
@@ -852,6 +853,8 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         provider_holds: Vec::new(),
         moved: HashMap::new(),
         hold_continue: HashMap::new(),
+        reopens: HashMap::new(),
+        notice_failures: HashMap::new(),
         draining: false,
         service_up: true,
         update: update::UpdateWatch::default(),
@@ -1057,6 +1060,12 @@ struct Supervisor<'a> {
     /// The held runs whose session gets the fixed text to go on, with the
     /// ask a person answered `done` (task 437).
     hold_continue: HashMap<RunId, AskId>,
+    /// The headless sessions lost during a wait that are opened again
+    /// (task 1372), by run.
+    reopens: HashMap<RunId, reopen::ReopenWatch>,
+    /// The notices of a question closed without its answer that could not
+    /// be sent, by run: tried again a bounded number of times (task 1372).
+    notice_failures: HashMap<RunId, stall::NoticeFailure>,
     /// This pass drains (a stop, a handoff, or claiming stopped after a
     /// provisioning failure): nothing may wait for the program to appear.
     draining: bool,

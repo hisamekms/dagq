@@ -1476,6 +1476,53 @@ pub(crate) fn stall_nudge(
     Ok(lines.join("\n"))
 }
 
+/// What the supervisor sends a worker's session, in place of the nudge,
+/// once its `worker_question` `ask_id` was closed without its answer
+/// reaching it (task 1372): who closed it and what was recorded with it
+/// (`answer`; `ask close` takes no reason of its own), and that the worker
+/// decides within the task or writes a failed receipt, without asking the
+/// same question again. `closed_by` names the closer, `None` when the
+/// close recorded none.
+pub(crate) fn closed_question_notice(
+    run: &TaskRun,
+    ask_id: i64,
+    closed_by: Option<&str>,
+    answer: Option<&str>,
+) -> Result<String> {
+    let receipt = run.receipt_path().context("missing receipt path")?;
+    let route = Route::of(run);
+    let closer = closed_by.map_or_else(|| "someone (not recorded)".to_owned(), str::to_owned);
+    let mut lines = route.opening(format!(
+        "dagq: ask {ask_id} (your worker_question on run {}) was closed by {closer} without an answer delivered to you.",
+        run.id()
+    ));
+    lines.push(match answer.map(str::trim).filter(|a| !a.is_empty()) {
+        Some(answer) => format!("What was recorded with it when it was closed: {answer}"),
+        None => "No reason was recorded with the close.".to_owned(),
+    });
+    let when = if route.headless() {
+        "in this turn"
+    } else {
+        "now"
+    };
+    lines.push(format!(
+        "Do not ask the same question again. Do one of these {when}:"
+    ));
+    lines.push(format!(
+        "1. If the decision is within the task's scope, decide it yourself, go on with the work, commit it and write the receipt at {receipt} (a temporary file in the same directory, then rename), saying in its summary what you decided and why."
+    ));
+    lines.push(format!(
+        "2. If it needs a change outside the task's scope, write a failed receipt at {receipt} whose summary says why and what is needed."
+    ));
+    lines.push(format!("3. {}", route.stop()));
+    lines.push(if route.headless() {
+        "If the turns keep ending without a receipt, the supervisor hands the run to its recovery job.".to_owned()
+    } else {
+        "If nothing changes, the supervisor asks a person to look at this session.".to_owned()
+    });
+    Ok(lines.join("\n"))
+}
+
 /// What the headless reviewer is asked (ADR-0023 decision 2, ADR-0027
 /// decision 2 as ADR-t451-1 decision 3 amends it): where the material is,
 /// the task's acceptance, the verdict schema, where `revise` ends and
@@ -2948,6 +2995,49 @@ mod tests {
             "{running}"
         );
         assert!(!running.contains("No background task"), "{running}");
+    }
+
+    /// Task 1372: the notice of a question closed without its answer says
+    /// who closed it and what was recorded with it (or that nothing was),
+    /// and that the worker decides or writes a failed receipt instead of
+    /// asking again; a headless session is told to do it in this turn.
+    #[test]
+    fn the_notice_of_a_closed_question_names_its_closer_and_what_to_do() {
+        let run = run_on(Provider::Claude, WorkerMode::Interactive);
+        let notice =
+            closed_question_notice(&run, 5, Some("inbox"), Some("ask the planner")).unwrap();
+        assert!(
+            notice.starts_with(&format!(
+                "dagq: ask 5 (your worker_question on run {RUN}) was closed by inbox without an answer delivered to you."
+            )),
+            "{notice}"
+        );
+        assert!(
+            notice.contains("What was recorded with it when it was closed: ask the planner"),
+            "{notice}"
+        );
+        assert!(notice.contains("Do not ask the same question again. Do one of these now:"));
+        assert!(notice.contains("decide it yourself"), "{notice}");
+        assert!(notice.contains("write a failed receipt at /runs/run/receipt.json"));
+        assert!(!notice.contains("dagq ask"), "{notice}");
+        let headless = run_on(Provider::Codex, WorkerMode::Headless);
+        let notice = closed_question_notice(&headless, 5, None, Some("  ")).unwrap();
+        assert!(
+            notice.contains("closed by someone (not recorded)"),
+            "{notice}"
+        );
+        assert!(notice.contains("No reason was recorded with the close."));
+        assert!(notice.contains("Do one of these in this turn:"), "{notice}");
+        assert!(
+            notice.contains("hands the run to its recovery job"),
+            "{notice}"
+        );
+        // Nothing a headless session is never told (task 817).
+        assert!(notice.starts_with(HEADLESS_NEXT_TURN), "{notice}");
+        assert!(notice.contains(HEADLESS_STOP), "{notice}");
+        for never in ["/exit", "this terminal", STOP_BACKGROUND, "went idle"] {
+            assert!(!notice.contains(never), "{never}: {notice}");
+        }
     }
 
     /// Task 7's claimed run, whose worker is `provider` in `mode`.

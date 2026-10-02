@@ -34,6 +34,93 @@ pub(super) const IDLE_REASONS: [&str; 3] = [
     PERMISSION_DENIED,
 ];
 
+/// The notice of a `worker_question` closed without its answer, sent in
+/// place of a nudge (task 1372).
+pub(super) struct ClosedNotice {
+    ask_id: i64,
+    text: String,
+}
+
+/// How many times a notice of a closed question is sent before the
+/// session gets the nudge instead.
+const NOTICE_ATTEMPTS: u8 = 3;
+
+/// The notice of a closed question whose send failed: it is recorded only
+/// once sent, so it is tried again (after the backend's retry backoff),
+/// up to [`NOTICE_ATTEMPTS`].
+#[derive(Debug, Clone, Copy)]
+pub(super) struct NoticeFailure {
+    ask_id: i64,
+    failures: u8,
+    at: Instant,
+}
+
+/// What the watch does with a notice due.
+enum NoticeStep {
+    Send,
+    /// Its last send failed a moment ago: nothing is sent this time.
+    Wait,
+    /// Its sends failed [`NOTICE_ATTEMPTS`] times: the nudge as before.
+    GaveUp,
+}
+
+fn notice_step(sv: &Supervisor<'_>, run: &TaskRun, ask_id: i64) -> NoticeStep {
+    match sv.notice_failures.get(run.id()) {
+        Some(failed) if failed.ask_id == ask_id && failed.failures >= NOTICE_ATTEMPTS => {
+            NoticeStep::GaveUp
+        }
+        Some(failed)
+            if failed.ask_id == ask_id && failed.at.elapsed() < sv.cmux.retry_backoff() =>
+        {
+            NoticeStep::Wait
+        }
+        _ => NoticeStep::Send,
+    }
+}
+
+/// The latest `worker_question` of the run closed without its answer
+/// reaching the session and not told to it yet. An interactive session
+/// must not have moved past its close: a session that ended a turn after
+/// the close took an answer someone typed by hand. A turn that ended
+/// between the answer and the close does not count against it: the answer
+/// was not delivered then. A headless session has no terminal to type
+/// into, and its ask may close before the turn that asked ends.
+fn closed_notice(
+    sv: &Supervisor<'_>,
+    run: &TaskRun,
+    idle: &IdleMarker,
+) -> Result<Option<ClosedNotice>> {
+    // Most runs never had a question closed: no events are read for them.
+    if sv.queue.last_worker_question_closed(run.id())?.is_none() {
+        return Ok(None);
+    }
+    let events = sv.queue.run_events(run.id())?;
+    let Some(closed) = crate::domain::worker_question::closed_undelivered(&events)
+        .into_iter()
+        .rev()
+        .find(|c| {
+            headless(run)
+                || at_event(&c.closed).is_some_and(|at| !written_after(idle.modified(), at))
+        })
+    else {
+        return Ok(None);
+    };
+    let ask = sv.queue.read_ask(AskId::new(closed.ask_id))?;
+    let closer = closed.closed.actor.as_ref().map(|actor| {
+        if actor.id.is_empty() || actor.id == actor.role {
+            actor.role.clone()
+        } else {
+            format!("{} ({})", actor.role, actor.id)
+        }
+    });
+    let text =
+        closed_question_notice(run, closed.ask_id, closer.as_deref(), ask.answer.as_deref())?;
+    Ok(Some(ClosedNotice {
+        ask_id: closed.ask_id,
+        text,
+    }))
+}
+
 /// The setting the idle detections are judged by.
 pub(super) const IDLE_THRESHOLD: &str = "idle_without_receipt_secs";
 
@@ -1294,6 +1381,20 @@ impl StallWatch {
                 return Ok(None);
             }
         }
+        // A question closed without its answer is told in place of the
+        // nudge, or of the recovery job after it (task 1372).
+        if self.wait_from.is_none()
+            && self.recovering.is_none()
+            && let Some(closed) = closed_notice(sv, run, &idle)?
+        {
+            match notice_step(sv, run, closed.ask_id) {
+                NoticeStep::Send => {
+                    return self.send_notice(sv, run, workspace, &idle, idle_secs, now, closed);
+                }
+                NoticeStep::Wait => return Ok(None),
+                NoticeStep::GaveUp => {}
+            }
+        }
         match self.nudge {
             None => self.send_nudge(sv, run, workspace, &idle, idle_secs, now),
             // A person answered `wait` to the ask the stall came to: asked
@@ -1354,6 +1455,19 @@ impl StallWatch {
                 self.open_ask(sv, run, workspace, idle, idle_secs, self.nudge, now, None)?;
             }
             return Ok(None);
+        }
+        // A question closed without its answer is told as the next turn,
+        // in place of the nudge or the recovery job (task 1372).
+        if self.recovering.is_none()
+            && let Some(closed) = closed_notice(sv, run, idle)?
+        {
+            match notice_step(sv, run, closed.ask_id) {
+                NoticeStep::Send => {
+                    return self.send_notice(sv, run, workspace, idle, idle_secs, now, closed);
+                }
+                NoticeStep::Wait => return Ok(None),
+                NoticeStep::GaveUp => {}
+            }
         }
         if let Some(reason) = alert_at_once(mark) {
             return self.recover(
@@ -1511,18 +1625,106 @@ impl StallWatch {
         now: SystemTime,
     ) -> Result<Option<StartCheck>> {
         let background = idle.background_tasks();
-        sv.queue.record_runtime_event(
-            run.id(),
-            EventKind::StallNudged,
-            json!({
-                "phase": PHASE,
-                "idle_secs": idle_secs,
-                "threshold_secs": sv.stall.idle_without_receipt_secs,
-                "background_running": idle.background_running_evidence(),
-                "background_tasks": background,
-                "workspace_id": workspace,
-            }),
-        )?;
+        self.nudged(sv, run, workspace, idle, idle_secs, now, None)?;
+        let text = stall_nudge(run, idle_secs, background, idle.background_running())?;
+        let sent_at = sv.files.now();
+        match submit(sv, run, workspace, Input::Text(&text), "nudge") {
+            Ok(submission) => {
+                self.input_sent(sent_at, Some(&text));
+                info!(run_id = %run.id(), "run {} was idle without a receipt for {idle_secs}s; nudged it in workspace {workspace}", run.id());
+                Ok(Some(StartCheck::new("nudge", &text, sent_at, &submission)))
+            }
+            Err(error) => {
+                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "the nudge of {} could not be typed into workspace {workspace}: {error:#}; asking the inbox instead", run.id());
+                Ok(None)
+            }
+        }
+    }
+
+    /// Send the notice of a question closed without its answer in place of
+    /// the nudge (task 1372), and only once it is sent record it as the
+    /// phase's `stall_nudged` with its `closed_ask`: a send that failed is
+    /// tried again on a later observation ([`notice_step`]), so the notice
+    /// is not taken as told when it never reached the session.
+    #[allow(clippy::too_many_arguments)]
+    fn send_notice(
+        &mut self,
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+        workspace: &str,
+        idle: &IdleMarker,
+        idle_secs: i64,
+        now: SystemTime,
+        closed: ClosedNotice,
+    ) -> Result<Option<StartCheck>> {
+        let sent_at = sv.files.now();
+        let what = "notice of a closed question";
+        match submit(sv, run, workspace, Input::Text(&closed.text), what) {
+            Ok(submission) => {
+                sv.notice_failures.remove(run.id());
+                self.nudged(
+                    sv,
+                    run,
+                    workspace,
+                    idle,
+                    idle_secs,
+                    now,
+                    Some(closed.ask_id),
+                )?;
+                self.input_sent(sent_at, Some(&closed.text));
+                info!(run_id = %run.id(), ask_id = closed.ask_id, "run {} was told in workspace {workspace} that its question {} was closed without an answer", run.id(), closed.ask_id);
+                Ok(Some(StartCheck::new(
+                    "nudge",
+                    &closed.text,
+                    sent_at,
+                    &submission,
+                )))
+            }
+            Err(error) => {
+                let failures = match sv.notice_failures.get(run.id()) {
+                    Some(failed) if failed.ask_id == closed.ask_id => failed.failures + 1,
+                    _ => 1,
+                };
+                sv.notice_failures.insert(
+                    run.id().clone(),
+                    NoticeFailure {
+                        ask_id: closed.ask_id,
+                        failures,
+                        at: Instant::now(),
+                    },
+                );
+                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "the notice of closed question {} could not be sent to {} in workspace {workspace} (failure {failures} of {NOTICE_ATTEMPTS}): {error:#}", closed.ask_id, run.id());
+                Ok(None)
+            }
+        }
+    }
+
+    /// Record `stall_nudged` (with `closed_ask` for the notice of a closed
+    /// question) and count it as the phase's nudge.
+    #[allow(clippy::too_many_arguments)]
+    fn nudged(
+        &mut self,
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+        workspace: &str,
+        idle: &IdleMarker,
+        idle_secs: i64,
+        now: SystemTime,
+        closed_ask: Option<i64>,
+    ) -> Result<()> {
+        let mut payload = json!({
+            "phase": PHASE,
+            "idle_secs": idle_secs,
+            "threshold_secs": sv.stall.idle_without_receipt_secs,
+            "background_running": idle.background_running_evidence(),
+            "background_tasks": idle.background_tasks(),
+            "workspace_id": workspace,
+        });
+        if let Some(ask) = closed_ask {
+            payload["closed_ask"] = json!(ask);
+        }
+        sv.queue
+            .record_runtime_event(run.id(), EventKind::StallNudged, payload)?;
         // A headless session's next nudge follows one that did not move
         // it on.
         if let Some(nudge) = &mut self.nudge
@@ -1546,19 +1748,7 @@ impl StallWatch {
             settled: false,
         });
         self.nudges = self.nudges.saturating_add(1);
-        let text = stall_nudge(run, idle_secs, background, idle.background_running())?;
-        let sent_at = sv.files.now();
-        match submit(sv, run, workspace, Input::Text(&text), "nudge") {
-            Ok(submission) => {
-                self.input_sent(sent_at, Some(&text));
-                info!(run_id = %run.id(), "run {} was idle without a receipt for {idle_secs}s; nudged it in workspace {workspace}", run.id());
-                Ok(Some(StartCheck::new("nudge", &text, sent_at, &submission)))
-            }
-            Err(error) => {
-                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "the nudge of {} could not be typed into workspace {workspace}: {error:#}; asking the inbox instead", run.id());
-                Ok(None)
-            }
-        }
+        Ok(())
     }
 
     /// Raise the session, still idle without a receipt after its nudge, as

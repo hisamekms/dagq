@@ -74,9 +74,104 @@ pub fn topic_codes() -> String {
         .join(", ")
 }
 
+/// A `worker_question` of the run closed without its answer reaching the
+/// worker (task 1372): `ask close` (by a person or the inbox) or the
+/// runtime closed it, and no `ask_delivered` names it. `closed` is the
+/// event that closed it, whose actor says who did.
+#[derive(Debug, Clone)]
+pub struct ClosedQuestion {
+    pub ask_id: i64,
+    pub closed: super::RunEvent,
+}
+
+/// The run's `worker_question`s closed without their answer delivered and
+/// not yet told to the worker (no `stall_nudged` names it as its
+/// `closed_ask`), in the order they were closed.
+pub fn closed_undelivered(events: &[super::RunEvent]) -> Vec<ClosedQuestion> {
+    use super::event_kind::{ASK_ANSWERED, ASK_CLOSED, ASK_DELIVERED, ASK_OPENED, STALL_NUDGED};
+    let id_of = |e: &super::RunEvent| e.payload["ask_id"].as_i64();
+    let names = |kind: &str, field: &str, id: i64| {
+        events
+            .iter()
+            .any(|e| e.kind == kind && e.payload[field].as_i64() == Some(id))
+    };
+    let questions: Vec<i64> = events
+        .iter()
+        .filter(|e| e.kind == ASK_OPENED && e.payload["kind"] == "worker_question")
+        .filter_map(id_of)
+        .collect();
+    let mut closed: Vec<ClosedQuestion> = events
+        .iter()
+        .filter(|e| {
+            e.kind == ASK_CLOSED || (e.kind == ASK_ANSWERED && e.payload["runtime_closed"] == true)
+        })
+        .filter_map(|e| id_of(e).map(|id| (id, e)))
+        .filter(|(id, _)| questions.contains(id))
+        .filter(|(id, _)| !names(ASK_DELIVERED, "ask_id", *id))
+        .filter(|(id, _)| !names(STALL_NUDGED, "closed_ask", *id))
+        .map(|(ask_id, e)| ClosedQuestion {
+            ask_id,
+            closed: e.clone(),
+        })
+        .collect();
+    closed.dedup_by_key(|c| c.ask_id);
+    closed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{EventId, RunEvent};
+    use serde_json::json;
+
+    fn event(id: i64, kind: &str, payload: serde_json::Value) -> RunEvent {
+        RunEvent {
+            id: EventId::new(id),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.into(),
+            payload,
+            created_at: "2026-10-02T00:00:00Z".into(),
+            actor: None,
+        }
+    }
+
+    /// A question closed without `ask_delivered` is one, until a notice
+    /// names it; a delivered one, another kind's close and a close the
+    /// runtime wrote with an answer of its own are told apart.
+    #[test]
+    fn only_questions_closed_without_their_answer_delivered_are_told() {
+        let opened =
+            |id: i64, kind: &str| event(id, "ask_opened", json!({"ask_id": id, "kind": kind}));
+        let mut events = vec![
+            opened(1, "worker_question"),
+            opened(2, "worker_question"),
+            opened(3, "stalled"),
+            opened(4, "worker_question"),
+            event(10, "ask_answered", json!({"ask_id": 1})),
+            event(11, "ask_delivered", json!({"ask_id": 1})),
+            event(12, "ask_answered", json!({"ask_id": 2})),
+            event(13, "ask_closed", json!({"ask_id": 2})),
+            event(14, "ask_closed", json!({"ask_id": 3})),
+            event(
+                15,
+                "ask_answered",
+                json!({"ask_id": 4, "runtime_closed": true}),
+            ),
+        ];
+        let ids = |events: &[RunEvent]| -> Vec<i64> {
+            closed_undelivered(events)
+                .iter()
+                .map(|c| c.ask_id)
+                .collect()
+        };
+        assert_eq!(ids(&events), [2, 4]);
+        assert_eq!(closed_undelivered(&events)[0].closed.id, EventId::new(13));
+        events.push(event(16, "stall_nudged", json!({"closed_ask": 2})));
+        assert_eq!(ids(&events), [4]);
+        assert!(closed_undelivered(&[]).is_empty());
+    }
 
     #[test]
     fn topics_are_trimmed_and_kept_once_in_their_order() {

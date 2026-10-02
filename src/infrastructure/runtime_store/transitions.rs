@@ -212,6 +212,32 @@ impl SqliteQueue {
         Ok(run.relocated(&self.runs_dir))
     }
 
+    /// End the session of a running run whose lost session could not be
+    /// opened again (task 1372) as one whose wrapper exited with
+    /// `exit_code`: its processes were forgotten for the attempts, so no
+    /// wrapper row holds the code.
+    pub fn finish_lost_session(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        exit_code: i32,
+    ) -> Result<TaskRun> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        renew_lease(&tx, id, token, self.generators.clock.now())?;
+        let run = apply_recorded(
+            &tx,
+            refusals(&self.runs_dir, &self.generators),
+            id,
+            Some(token),
+            || "run is not owned by this supervisor".to_owned(),
+            |run| run::end_session(run, Some(exit_code)),
+        )?;
+        tx.commit()?;
+        Ok(run.relocated(&self.runs_dir))
+    }
+
     /// Hand a run whose session went idle after its receipt to validation
     /// with the session still alive (ADR-0027 decision 1): `running` becomes
     /// `validating` under the same lease, and `supervision_finished` records
@@ -981,6 +1007,14 @@ impl RunTransitions for SqliteQueue {
     }
     fn finish_supervision(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun> {
         SqliteQueue::finish_supervision(self, id, token)
+    }
+    fn finish_lost_session(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        exit_code: i32,
+    ) -> Result<TaskRun> {
+        SqliteQueue::finish_lost_session(self, id, token, exit_code)
     }
     fn finish_supervision_live(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun> {
         SqliteQueue::finish_supervision_live(self, id, token)

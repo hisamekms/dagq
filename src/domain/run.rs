@@ -290,6 +290,23 @@ pub fn attach_workspace(mut run: TaskRun, workspace_id: String) -> Result<TaskRu
     Ok(run)
 }
 
+/// Whether a running run's lost session may be opened again in a new
+/// workspace (task 1372): a headless run that waits for an answer keeps
+/// its status while its wrapper is started anew.
+pub fn check_reopenable(run: &TaskRun) -> Result<(), DomainError> {
+    require_status(run, &[RunStatus::Running], "reopen the session of")
+}
+
+/// A running run whose session was lost is opened again in `workspace_id`
+/// (task 1372): it becomes the run's workspace, open; the lost one stays
+/// in the run's `workspace_created` events.
+pub fn reopen_workspace(mut run: TaskRun, workspace_id: String) -> Result<TaskRun, DomainError> {
+    check_reopenable(&run)?;
+    run.workspace_id = Some(workspace_id);
+    run.workspace_closed_at = None;
+    Ok(run)
+}
+
 /// Whether the session wrapper may register: the run is starting in its workspace.
 pub fn check_ready_for_wrapper(run: &TaskRun) -> Result<(), DomainError> {
     require_status(run, &[RunStatus::Starting], "start the wrapper of")?;
@@ -905,6 +922,31 @@ mod tests {
             refused(begin_integration(run), RunStatus::Integrated),
             "integrate"
         );
+    }
+
+    /// A running run's lost session is opened again in a new workspace,
+    /// which becomes its open workspace (task 1372); no other status may.
+    #[test]
+    fn only_a_running_run_reopens_its_session_in_a_new_workspace() {
+        let started = attach_workspace(
+            start_provisioning(run(RunStatus::Claimed), &plan()).unwrap(),
+            "ws".into(),
+        )
+        .unwrap();
+        let running = mark_running(started).unwrap();
+        let mut closed = running.clone();
+        closed.workspace_closed_at = Some(3);
+        let reopened = reopen_workspace(closed, "ws2".into()).unwrap();
+        assert_eq!(reopened.status(), RunStatus::Running);
+        assert_eq!(reopened.workspace_id(), Some("ws2"));
+        assert_eq!(reopened.workspace_closed_at(), None);
+        check_reopenable(&running).unwrap();
+        for status in [RunStatus::Starting, RunStatus::NeedsSession] {
+            assert_eq!(
+                refused(reopen_workspace(run(status), "ws2".into()), status),
+                "reopen the session of"
+            );
+        }
     }
 
     #[test]

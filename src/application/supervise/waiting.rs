@@ -6,6 +6,7 @@
 //! slot (at once when a person already moved the session, else when one is
 //! free, before any new work) and its phase goes on where it stopped.
 
+use super::reopen::Reopen;
 use super::*;
 use crate::domain::EventKind;
 use crate::domain::{
@@ -297,6 +298,13 @@ impl Supervisor<'_> {
         let Some(wrapper) =
             wrapper.filter(|w| w.exited_at.is_none() && !wrapper_dead(self, w, now))
         else {
+            // A headless session lost while it waits is opened again, and
+            // the wait goes on (task 1372). Given up, a session whose
+            // processes an attempt forgot is ended back in its slot as one
+            // that exited.
+            if let Reopen::Waiting = self.reopen_lost_session(slot, &processes, wrapper)? {
+                return Ok(Step::Continue);
+            }
             // Nobody needs to send /exit to a session that ended, nor
             // answer its dialog, while it waits for a slot.
             close_answer_prompt_asks(self, &run, PROMPT_EXITED_CLOSED)?;
@@ -314,6 +322,10 @@ impl Supervisor<'_> {
             return Ok(Step::Continue);
         };
         let wrapper = wrapper.clone();
+        // A reopened session's wrapper registered.
+        if let Some(reopen) = self.reopens.get_mut(run.id()) {
+            reopen.registered();
+        }
         let silent = match &mut slot.phase {
             Phase::Session(watch) => &mut watch.silent,
             Phase::Exiting(watch) => &mut watch.silent,

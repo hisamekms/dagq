@@ -190,6 +190,7 @@ IDとcommitはドメインプリミティブのnewtype（`src/domain/ids.rs`、`
 | --- | --- | --- |
 | `start_provisioning(run, &RunPlan)` | `claimed` | `starting`。`repo_path`・`run_dir`・`branch`・`worktree_path`・`receipt_path`・`log_path`を設定 |
 | `attach_workspace(run, workspace_id)` | `starting`でworkspace未設定 | `workspace_id`を設定 |
+| `reopen_workspace(run, workspace_id)` | `running` | 待ちの最中に失った非対話のsessionを開き直したworkspaceを`workspace_id`にし、`workspace_closed_at`を空に戻す（task 1372。[非対話のworker](supervisor-lifecycle/headless-worker.md#待ちの最中に失ったsessionの開き直し)） |
 | `mark_running(run)` | `starting` | `running` |
 | `finish_session(run, exit_code)` | `starting` / `running` | 0か`None`（sessionを開いたまま、ADR-0027）なら`validating`、非0なら`failed`と`session exited with code N` |
 | `accept(run, result_commit)` | `validating` | `awaiting_integration`と`result_commit` |
@@ -212,7 +213,7 @@ IDとcommitはドメインプリミティブのnewtype（`src/domain/ids.rs`、`
 | `record_close_failure(run, message)` | `awaiting_integration` / `needs_session`で未close | `last_error`（close失敗） |
 | `record_cleanup_failure(run, message)` | どれでも | `last_error`（着地後のworktree / branch削除の失敗） |
 
-クエリは`run::check_ready_for_wrapper(&run)`（`starting`でworkspaceあり）、`run::check_resumable(&run)`（`needs_session`）、`run::check_triageable(&run)`（`failed` / `interrupted`）。
+クエリは`run::check_ready_for_wrapper(&run)`（`starting`でworkspaceあり）、`run::check_resumable(&run)`（`needs_session`）、`run::check_reopenable(&run)`（`running`。開き直したsessionのwrapperの登録も`check_resumable`と並べて許す）、`run::check_triageable(&run)`（`failed` / `interrupted`）。
 
 ```text
 claimed ──start_provisioning──▶ starting ──mark_running──▶ running

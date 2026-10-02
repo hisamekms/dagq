@@ -5,6 +5,9 @@
 use crate::common;
 use dagq::infrastructure::git_binary::git_executable;
 pub mod headless;
+mod reviewer;
+pub use headless::{CODEX_HOME, set_codex_model};
+pub use reviewer::*;
 mod thread_stacks;
 pub use crate::common::{Bounded, WithoutActor};
 pub use anyhow::{Result, bail, ensure};
@@ -38,6 +41,7 @@ pub use dagq::{
 };
 use dagq::{application::ProcessControl, infrastructure::adapters::SystemProcesses};
 pub use rusqlite::Connection;
+use rusqlite::OptionalExtension;
 pub use serde_json::{Value, json};
 pub use std::{
     collections::HashMap,
@@ -668,9 +672,15 @@ pub struct TestWorkspace {
     pub scripts: Mutex<HashMap<TaskId, String>>,
     pub exit_timeout: Duration,
     pub registration_timeout: Duration,
+    /// How long after an attempt to reopen a headless run's lost session
+    /// the supervisor makes the next one (task 1372).
+    pub reopen_interval: Duration,
     /// `create` opens the workspace but starts no session, so its wrapper
     /// never registers.
     pub no_session: bool,
+    /// `create_resume` opens the workspace but starts no session, so its
+    /// wrapper never registers (a reopen whose wrapper does not start).
+    pub resume_no_session: bool,
     pub resume_timeout: Duration,
     /// `send_exit` returns only after the wrapper recorded its exit, as a
     /// slow `cmux send` does when the session exits on the first keystroke.
@@ -721,6 +731,9 @@ pub struct TestWorkspace {
     /// `send_text` records the call and then fails, as a `cmux send` to a
     /// workspace that went away does.
     pub text_fails: bool,
+    /// This many `send_text` calls (after `/model` and `/effort`) record
+    /// the call and then fail, the later ones going through.
+    pub text_failures: AtomicUsize,
     /// A `send_text` of an answer to an ask returns only in a later second
     /// than the session's turn on it ended: once the session wrote
     /// `answered` next to its receipt, and past the next second, as a
@@ -795,7 +808,9 @@ impl TestWorkspace {
             scripts: Mutex::new(HashMap::new()),
             exit_timeout: Duration::from_secs(120),
             registration_timeout: Duration::from_secs(45),
+            reopen_interval: Duration::from_secs(60),
             no_session: false,
+            resume_no_session: false,
             resume_timeout: Duration::from_secs(120),
             exit_returns_after_session: false,
             prompt_wait: Duration::from_secs(90),
@@ -821,6 +836,7 @@ impl TestWorkspace {
             switch_fails: false,
             switch_stuck: false,
             text_fails: false,
+            text_failures: AtomicUsize::new(0),
             exists_fails: false,
             listed: Mutex::new(Vec::new()),
             hidden: Mutex::new(Vec::new()),
@@ -1087,6 +1103,15 @@ impl WorkspaceBackend for TestWorkspace {
         let id = run.id().clone();
         let mut sessions = self.sessions.lock().unwrap();
         let workspace = workspace_id(sessions.len());
+        if self.resume_no_session {
+            let session = TestSession {
+                run_id: id,
+                run_dir,
+                worker: None,
+            };
+            sessions.push((workspace.clone(), session));
+            return Ok(workspace);
+        }
         let ready = self.headless_ready.clone();
         let worker = thread::spawn(move || {
             let spawner = StubSpawner { db: db.clone() };
@@ -1145,7 +1170,11 @@ impl WorkspaceBackend for TestWorkspace {
             .lock()
             .unwrap()
             .push((workspace_id.into(), text.into()));
-        if self.text_fails {
+        let failing = self
+            .text_failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok();
+        if self.text_fails || failing {
             bail!("injected cmux send failure");
         }
         if self.swallowed_enters.load(Ordering::SeqCst) > 0 {
@@ -1273,12 +1302,15 @@ impl WorkspaceBackend for TestWorkspace {
             }
         }
         if let Some(run_id) = &run_id {
-            let (exited, pid): (bool, u32) = connection.query_row(
-                "SELECT exited_at IS NOT NULL, pid FROM run_processes WHERE run_id=?1 AND role='wrapper'",
-                [run_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?;
-            assert!(exited || !pid_alive(pid));
+            // A reopen's workspace whose wrapper never registered has no row.
+            let row: Option<(bool, u32)> = connection
+                .query_row(
+                    "SELECT exited_at IS NOT NULL, pid FROM run_processes WHERE run_id=?1 AND role='wrapper'",
+                    [run_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            assert!(row.is_none_or(|(exited, pid)| exited || !pid_alive(pid)));
         } else {
             let live: Vec<u32> = connection
                 .prepare(
@@ -1354,6 +1386,9 @@ impl WorkspaceBackend for TestWorkspace {
     }
     fn registration_timeout(&self) -> Duration {
         self.registration_timeout
+    }
+    fn reopen_interval(&self) -> Duration {
+        self.reopen_interval
     }
     fn prompt_wait(&self) -> Duration {
         self.prompt_wait
@@ -1569,16 +1604,6 @@ printf '{{"type":"system","subtype":"init","session_id":"%s","model":"stub","per
 
     set_turns(dir, "say working");
     stub
-}
-
-/// The home of the stub `codex` of [`headless_codex`], next to it: its
-/// rollouts are under `sessions`.
-pub const CODEX_HOME: &str = "codex-home";
-
-/// Have the stub `codex` in `dir` write each turn's `model` to its
-/// thread's rollout, as Codex does, from now on.
-pub fn set_codex_model(dir: &Path, model: &str) {
-    fs::write(dir.join("codex-model"), model).unwrap();
 }
 
 /// A stub `codex` for headless turns (ADR-t813-1, ADR-t813-3), in `dir`: it
@@ -2748,133 +2773,6 @@ pub fn run_attention_of<'a>(status: &'a Value, run_id: &RunId) -> Option<&'a Val
         .unwrap()
         .iter()
         .find(|a| a["run_id"] == run_id.as_str() && a["ask_id"].is_null())
-}
-
-/// Stands in for the headless reviewer (ADR-0027): each review runs the
-/// next script with `/bin/sh -c` in the worktree (the last one repeats) and
-/// records its prompt; `timeout` is the review timeout.
-pub struct TestReviewer {
-    pub scripts: Mutex<Vec<String>>,
-    pub prompts: Mutex<Vec<String>>,
-    pub timeout: Duration,
-    /// Scripts of the headless recovery jobs, one per job in order; without
-    /// one left, a job cannot start.
-    pub triages: Mutex<Vec<String>>,
-    /// The recovery job prompts and the directories they ran in.
-    pub triage_prompts: Mutex<Vec<(String, PathBuf)>>,
-    /// The model and effort each job was given (ADR-0079 decision 7), in
-    /// order; a job started as before gives none.
-    pub models: Mutex<Vec<(String, String)>>,
-}
-
-impl TestReviewer {
-    pub fn new(scripts: &[String]) -> Self {
-        Self {
-            scripts: Mutex::new(scripts.to_vec()),
-            prompts: Mutex::new(Vec::new()),
-            timeout: Duration::from_secs(60),
-            triages: Mutex::new(Vec::new()),
-            triage_prompts: Mutex::new(Vec::new()),
-            models: Mutex::new(Vec::new()),
-        }
-    }
-    pub fn models(&self) -> Vec<(String, String)> {
-        self.models.lock().unwrap().clone()
-    }
-    pub fn prompts(&self) -> Vec<String> {
-        self.prompts.lock().unwrap().clone()
-    }
-    pub fn with_triages(self, scripts: &[String]) -> Self {
-        *self.triages.lock().unwrap() = scripts.to_vec();
-        self
-    }
-    pub fn triage_prompts(&self) -> Vec<(String, PathBuf)> {
-        self.triage_prompts.lock().unwrap().clone()
-    }
-}
-
-impl AgentProvider for TestReviewer {
-    fn preflight(&self) -> Result<()> {
-        Ok(())
-    }
-    fn command(&self, _: &TaskRun, _: &str) -> Result<CommandSpec> {
-        unreachable!("the reviewer starts no session")
-    }
-    fn resume_command(&self, _: &TaskRun) -> Result<CommandSpec> {
-        unreachable!("the reviewer starts no session")
-    }
-    // A run that fails under these tests is recovered by this provider too:
-    // with no script left, a live session's recovery job escalates, and one
-    // for a run that ended cannot start (it waits to be recovered by hand).
-    // A goal whose tasks all landed is not reviewed by this provider: its
-    // goal review cannot start, and the goal stays open (tests/it/goal_review.rs
-    // plays the goal review).
-    fn headless_command(&self, cwd: &Path, prompt: &str, access: JobAccess) -> Result<CommandSpec> {
-        ensure!(
-            !prompt.starts_with("You are the goal review"),
-            "the test reviewer runs no goal review"
-        );
-        assert_eq!(access, runtime::TRIAGE_ACCESS);
-        let mut triages = self.triages.lock().unwrap();
-        if triages.is_empty() && prompt.contains(LIVE_RECOVERY) {
-            triages.push(format!("printf '%s\\n' '{ESCALATE}'"));
-        }
-        ensure!(
-            !triages.is_empty(),
-            "the test reviewer has no recovery job left"
-        );
-        self.triage_prompts
-            .lock()
-            .unwrap()
-            .push((prompt.into(), cwd.into()));
-        let mut command = CommandSpec::new("/bin/sh");
-        command.current_dir(cwd).arg("-c").arg(triages.remove(0));
-        Ok(command)
-    }
-    fn review_command(
-        &self,
-        run: &TaskRun,
-        prompt: &str,
-        access: JobAccess,
-    ) -> Result<CommandSpec> {
-        assert_eq!(access, runtime::REVIEW_ACCESS);
-        self.prompts.lock().unwrap().push(prompt.into());
-        let mut scripts = self.scripts.lock().unwrap();
-        let script = if scripts.len() > 1 {
-            scripts.remove(0)
-        } else {
-            scripts[0].clone()
-        };
-        ensure!(
-            script != UNSTARTABLE_REVIEW,
-            "the test reviewer cannot start this review"
-        );
-        let mut command = CommandSpec::new("/bin/sh");
-        command
-            .current_dir(run.worktree_path().unwrap())
-            .arg("-c")
-            .arg(script);
-        Ok(command)
-    }
-    fn review_timeout(&self) -> Duration {
-        self.timeout
-    }
-    fn select_model(&self, _: &mut CommandSpec, model: &str, effort: &str) {
-        self.models
-            .lock()
-            .unwrap()
-            .push((model.into(), effort.into()));
-    }
-}
-
-/// A reviewer script whose review cannot start: `review_command` fails, so
-/// no job runs and writes `review-N.out` / `.err`.
-pub const UNSTARTABLE_REVIEW: &str = "<unstartable review>";
-
-/// A reviewer script that prints the verdict JSON.
-pub fn verdict(decision: &str, reasons: &[&str], summary: &str) -> String {
-    let json = json!({"verdict": decision, "reasons": reasons, "summary": summary});
-    format!("printf '%s\\n' '{json}'")
 }
 
 pub fn supervise_reviewed(
