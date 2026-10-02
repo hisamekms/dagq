@@ -1954,6 +1954,15 @@ pub trait RunLog {
     /// (3)), in one write transaction: `false` when another supervisor
     /// recorded it first. Only the claimer nudges the inbox.
     fn claim_inbox_nudge(&self, payload: serde_json::Value) -> Result<bool>;
+    /// Record `kind` (`inbox_watcher_absent` or `inbox_watcher_returned`)
+    /// with `payload` unless the latest of the two is already `kind`, in
+    /// one write transaction (task 1021): `false` when the state did not
+    /// change or another supervisor recorded the change first.
+    fn record_inbox_watcher_change(
+        &self,
+        kind: EventKind,
+        payload: serde_json::Value,
+    ) -> Result<bool>;
     /// The newest event of `kind`, on whatever task, goal or run.
     fn latest_event_of(&self, kind: &str) -> Result<Option<RunEvent>>;
     /// The newest `limit` events of `kind`, on whatever task, goal or run,

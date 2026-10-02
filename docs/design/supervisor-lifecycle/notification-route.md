@@ -4,8 +4,8 @@ type: design
 title: "人への通知経路（ADR-0016で決定、ADR-0022とADR-0024で改めた）"
 status: current
 created: 2026-09-26
-updated: 2026-09-29
-last_verified: 2026-09-29
+updated: 2026-10-02
+last_verified: 2026-10-02
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -27,7 +27,7 @@ ADR-0016で次を決めた。`status`のattentionとcursor、`events --after`、
 
 ## supervisorによるinboxへの知らせ（ADR-t906-1）
 
-[ADR-t906-1](../../adr/2026-09-28-t906-1-guarantee-the-inbox-watch.md)の決定1の(3)。supervisorは毎pass（drain中も。drainはaskの答えを待つため）、`src/application/supervise/inbox_nudge.rs`で次を行う。
+[ADR-t906-1](../../adr/2026-09-28-t906-1-guarantee-the-inbox-watch.md)の決定1の(3)。supervisorは毎pass（drain中も。drainはaskの答えを待つため）、`src/application/supervise/inbox_nudge.rs`で次を行う（`--no-claude`のsupervisorは知らせない）。判定の後、知らせるかどうかの前に、watcherの状態の変わり目を`inbox_watcher_absent` / `inbox_watcher_returned`に記録する（`--no-claude`でも。[`events` / `watch`](events-watch.md#watcherの変わり目の記録)）。
 
 - **判定**: inboxのwatcherを`application::inbox_watcher::judge_with`（supervisorの`ProcessControl`で記録のpidのprocessも見る。[`events` / `watch`](events-watch.md#inboxのwatcherの記録adr-t906-1)。記録は`RunFiles`で`inbox-watchers/`から読む）で見て、`absent`のときだけ進む。居ない区間（absence）は`last_seen_at`（一度も記録が無ければ0）で識別する。区間のあいだ記録は変わらないのでこの値は一定で、watchが張られれば`alive`になって区間が閉じ、次に居なくなれば新しい`last_seen_at`の区間になる。
 - **閾値**: inbox宛て（`waits_for`がinbox）のopenなaskのうち、`max(created_at, last_seen_at)`から`NUDGE_AFTER_SECS`（300秒）以上たったものが1件でもあれば知らせる。watcherが見ていたあいだの時間は数えない。

@@ -737,6 +737,7 @@ fn unit(kpi: &str) -> Unit {
                 | "cpu_per_landing"
                 | "ask_wait"
                 | "ask_apply_wait"
+                | "ask_seen_wait"
                 | "finding_resolve_time"
                 | "forecast.p50_error"
                 | "forecast.p50_abs_error"

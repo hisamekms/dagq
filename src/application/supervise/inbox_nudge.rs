@@ -8,6 +8,12 @@
 //! claimed as `inbox_nudged` before it is made, keyed by the absence (the
 //! watcher's last sighting) and the attempt, so no second supervisor and no
 //! process after an exec makes it again.
+//!
+//! Every pass also records the watcher's state when it changed (task
+//! 1021): `inbox_watcher_absent` when it went from alive to absent,
+//! `inbox_watcher_returned` the other way, the first state judged on a
+//! queue without either. The KPI of how long an ask waits to be seen
+//! (`ask_seen_wait`) reads them, as the watchers' records do not last.
 
 use super::*;
 use crate::application::{
@@ -15,7 +21,7 @@ use crate::application::{
     naming::repository_name,
     screen_idle::{self, MarkerState, ScreenIdle, ScreenProbe},
 };
-use crate::domain::event_kind::INBOX_NUDGED;
+use crate::domain::event_kind::{EventKind as Kind, INBOX_NUDGED};
 
 /// Seconds an ask waits for the inbox without a watcher before the first
 /// nudge: from the later of its opening and the watcher's last sighting.
@@ -124,22 +130,47 @@ impl Supervisor<'_> {
     /// logged and looked at again on a later pass; a nudge claimed and not
     /// delivered is recorded as failed and counts as made. Neither holds up
     /// anything else.
-    pub(super) fn inbox_nudge_pass(&mut self) {
-        if let Err(error) = self.nudge_inbox() {
-            warn!(error = %format_args!("{error:#}"), "the inbox without a watcher could not be nudged: {error:#}");
-        }
-    }
-
-    fn nudge_inbox(&mut self) -> Result<()> {
+    /// Records a change of the inbox's watcher, then nudges the inbox
+    /// when `nudge` and it is due.
+    pub(super) fn inbox_nudge_pass(&mut self, nudge: bool) {
         let now = self.generators.clock.now();
         let watcher = inbox_watcher::judge_with(
             &inbox_watcher::read(&*self.files, &inbox_watcher::dir(&self.layout.db)),
             &*self.processes,
             now,
         );
-        if watcher.state == WatcherState::Alive {
-            return Ok(());
+        if let Err(error) = self.record_watcher_change(&watcher, now) {
+            warn!(error = %format_args!("{error:#}"), "the change of the inbox's watcher could not be recorded: {error:#}");
         }
+        if !nudge || watcher.state == WatcherState::Alive {
+            return;
+        }
+        if let Err(error) = self.nudge_inbox(&watcher, now) {
+            warn!(error = %format_args!("{error:#}"), "the inbox without a watcher could not be nudged: {error:#}");
+        }
+    }
+
+    /// Record the watcher's state unless the latest record holds it: the
+    /// queue's write transaction compares, so a second supervisor and the
+    /// process after an exec do not record the same change again.
+    fn record_watcher_change(&self, watcher: &InboxWatcher, now: i64) -> Result<()> {
+        let kind = match watcher.state {
+            WatcherState::Alive => Kind::InboxWatcherReturned,
+            WatcherState::Absent => Kind::InboxWatcherAbsent,
+        };
+        let payload = json!({
+            "at": now,
+            "watching": watcher.watching,
+            "last_seen_at": watcher.last_seen_at,
+            "absent_secs": watcher.absent_secs,
+        });
+        if self.queue.record_inbox_watcher_change(kind, payload)? {
+            info!("the inbox's watcher is now {}", kind.as_str());
+        }
+        Ok(())
+    }
+
+    fn nudge_inbox(&mut self, watcher: &InboxWatcher, now: i64) -> Result<()> {
         let asks = self.queue.asks(AskQuery {
             all: false,
             open: true,
@@ -150,7 +181,7 @@ impl Supervisor<'_> {
             .filter(|ask| ask.is_open())
             .map(|ask| ask.created_at)
             .collect();
-        let absent_since = absence(&watcher);
+        let absent_since = absence(watcher);
         let made: Vec<(i64, i64)> = self
             .queue
             .latest_events_of(INBOX_NUDGED, NUDGES_READ)?
@@ -163,7 +194,7 @@ impl Supervisor<'_> {
                 ))
             })
             .collect();
-        let Some(nudge) = next_nudge(&watcher, &opened, &made, now) else {
+        let Some(nudge) = next_nudge(watcher, &opened, &made, now) else {
             return Ok(());
         };
         // A workspace not recorded or closed gets nothing.

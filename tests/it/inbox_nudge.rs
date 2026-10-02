@@ -2,14 +2,20 @@
 //! decision 1 (3)): while no watch watches and an ask waited past the
 //! threshold, one line is typed into the inbox's workspace when its screen
 //! looks idle with nothing typed, once more later, then a `cmux notify`,
-//! each recorded as `inbox_nudged`.
+//! each recorded as `inbox_nudged`. The watcher's changes are recorded as
+//! `inbox_watcher_absent` / `inbox_watcher_returned`, and `kpi` derives
+//! from them how long an ask waited to be seen (`ask_seen_wait`, task
+//! 1021).
 
 use crate::plan_review::{Fixture, PlanWorkspace, StubReviewer, fixture, options};
 use dagq::{
     application::{Clock, Generators, inbox_watcher::WatcherRecord},
     domain::{
-        AskKind, AskReason, NewAsk, SessionRole, TaskId,
-        event_kind::{INBOX_NUDGE_FAILED, INBOX_NUDGED},
+        AskKind, AskReason, EventKind, NewAsk, SessionRole, TaskId,
+        event_kind::{
+            ASK_OPENED, INBOX_NUDGE_FAILED, INBOX_NUDGED, INBOX_WATCHER_ABSENT,
+            INBOX_WATCHER_RETURNED,
+        },
         stall::StallConfig,
     },
     infrastructure::sqlite::SqliteQueue,
@@ -89,19 +95,7 @@ impl Inbox {
             .register_session_workspace(SessionRole::Inbox, INBOX)
             .unwrap();
         if ask {
-            queue
-                .ask(NewAsk {
-                    topics: Vec::new(),
-                    kind: AskKind::Blocked,
-                    task_id: Some(TaskId::new(1)),
-                    run_id: None,
-                    question: "which way?".into(),
-                    options: vec![],
-                    asked_by: "planner".into(),
-                    reason_category: AskReason::Scope,
-                    finding_id: None,
-                })
-                .unwrap();
+            open_ask(&mut queue);
         }
         let backend = PlanWorkspace::listing(&[INBOX]);
         *backend.screen.lock().unwrap() = Some(Ok(screen.to_owned()));
@@ -189,6 +183,25 @@ impl Inbox {
         };
         fs::write(dir.join("1-1.json"), serde_json::to_vec(&record).unwrap()).unwrap();
     }
+}
+
+/// One open ask for the inbox on task 1.
+fn open_ask(queue: &mut SqliteQueue) -> dagq::domain::AskId {
+    queue
+        .ask(NewAsk {
+            topics: Vec::new(),
+            kind: AskKind::Blocked,
+            task_id: Some(TaskId::new(1)),
+            run_id: None,
+            question: "which way?".into(),
+            options: vec![],
+            asked_by: "planner".into(),
+            reason_category: AskReason::Scope,
+            finding_id: None,
+        })
+        .unwrap()
+        .ask
+        .id
 }
 
 fn now() -> i64 {
@@ -385,4 +398,173 @@ fn a_nudge_of_an_absence_is_claimed_once_across_supervisors() {
             .unwrap()
     );
     assert_eq!(first.latest_events_of(INBOX_NUDGED, 10).unwrap().len(), 3);
+}
+
+/// The watcher's state is recorded at each change only, whatever the
+/// passes in between; `kpi` counts an ask opened while it was alive as
+/// seen at once, one opened while it was absent as seen at its return, and
+/// neither one opened before the first record nor one not seen yet.
+#[test]
+fn the_watchers_changes_are_recorded_once_and_give_how_long_an_ask_waited_to_be_seen() {
+    let inbox = Inbox::new(READY, false);
+    let mut queue = SqliteQueue::open(&inbox.fx.db).unwrap();
+    // One ask open at a time on the task: each closed before the next.
+    let mut open = open_ask(&mut queue);
+    let mut reopen = |queue: &mut SqliteQueue| {
+        queue.answer(open, "withdrawn").unwrap();
+        queue.close_ask(open).unwrap();
+        open = open_ask(queue);
+    };
+    // No watch ever: absent, recorded once over the passes.
+    inbox.supervise(0);
+    inbox.supervise(10);
+    reopen(&mut queue);
+    // A watch: back, once.
+    inbox.watching(100);
+    inbox.supervise(100);
+    inbox.supervise(105);
+    reopen(&mut queue);
+    // Its heartbeat stale: absent again.
+    inbox.supervise(400);
+    inbox.supervise(410);
+    reopen(&mut queue);
+    let kinds = [ASK_OPENED, INBOX_WATCHER_ABSENT, INBOX_WATCHER_RETURNED];
+    let conn = rusqlite::Connection::open(&inbox.fx.db).unwrap();
+    let events: Vec<(i64, String)> = conn
+        .prepare("SELECT id, kind FROM run_events WHERE kind IN (?1, ?2, ?3) ORDER BY id")
+        .unwrap()
+        .query_map(rusqlite::params![kinds[0], kinds[1], kinds[2]], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let names: Vec<&str> = events.iter().map(|(_, kind)| kind.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            ASK_OPENED,
+            INBOX_WATCHER_ABSENT,
+            ASK_OPENED,
+            INBOX_WATCHER_RETURNED,
+            ASK_OPENED,
+            INBOX_WATCHER_ABSENT,
+            ASK_OPENED,
+        ]
+    );
+    let changes = inbox.nudges(INBOX_WATCHER_RETURNED);
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0]["watching"], 1);
+    assert_eq!(
+        inbox.nudges(INBOX_WATCHER_ABSENT)[0]["last_seen_at"],
+        Value::Null
+    );
+
+    // The times `kpi` reads, seconds before now: the ask opened while the
+    // watch was away waits 60 s, the one opened while it watched none.
+    for ((id, _), ago) in events.iter().zip([600, 590, 500, 440, 430, 100, 50]) {
+        conn.execute(
+            "UPDATE run_events SET created_at=strftime('%Y-%m-%dT%H:%M:%fZ','now',?1) WHERE id=?2",
+            rusqlite::params![format!("-{ago} seconds"), id],
+        )
+        .unwrap();
+    }
+    let report = crate::common::cli::ok(&inbox.fx.db, &["kpi", "--last", "2"]);
+    let waits: Vec<&Value> = report["periods"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|period| &period["kpis"]["ask_seen_wait"]["all"])
+        .filter(|wait| wait["n"].as_u64().unwrap_or(0) > 0)
+        .collect();
+    let n: u64 = waits.iter().map(|wait| wait["n"].as_u64().unwrap()).sum();
+    assert_eq!(n, 2, "{report}");
+    let min = waits
+        .iter()
+        .map(|w| w["min"].as_f64().unwrap())
+        .reduce(f64::min);
+    let max = waits
+        .iter()
+        .map(|w| w["max"].as_f64().unwrap())
+        .reduce(f64::max);
+    assert_eq!((min, max), (Some(0.0), Some(60.0)), "{report}");
+}
+
+#[test]
+fn a_change_of_the_watcher_is_recorded_once_across_supervisors() {
+    let fx = fixture();
+    let first = SqliteQueue::open(&fx.db).unwrap();
+    let second = SqliteQueue::open(&fx.db).unwrap();
+    let absent = |at: i64| json!({"at": at, "watching": 0});
+    assert!(
+        first
+            .record_inbox_watcher_change(EventKind::InboxWatcherAbsent, absent(100))
+            .unwrap()
+    );
+    assert!(
+        !second
+            .record_inbox_watcher_change(EventKind::InboxWatcherAbsent, absent(100))
+            .unwrap()
+    );
+    assert!(
+        second
+            .record_inbox_watcher_change(EventKind::InboxWatcherReturned, json!({"at": 200}))
+            .unwrap()
+    );
+    assert!(
+        !first
+            .record_inbox_watcher_change(EventKind::InboxWatcherReturned, json!({"at": 210}))
+            .unwrap()
+    );
+    assert!(
+        first
+            .record_inbox_watcher_change(EventKind::InboxWatcherAbsent, absent(300))
+            .unwrap()
+    );
+    // A slow supervisor's judgment older than the latest record is not
+    // written, though its state differs: returned at 250 after absent at
+    // 300, nor absent at 150 after a return at 400.
+    assert!(
+        !second
+            .record_inbox_watcher_change(EventKind::InboxWatcherReturned, json!({"at": 250}))
+            .unwrap()
+    );
+    assert!(
+        second
+            .record_inbox_watcher_change(EventKind::InboxWatcherReturned, json!({"at": 400}))
+            .unwrap()
+    );
+    assert!(
+        !first
+            .record_inbox_watcher_change(EventKind::InboxWatcherAbsent, absent(150))
+            .unwrap()
+    );
+    let latest = first
+        .latest_queue_event(&[INBOX_WATCHER_ABSENT, INBOX_WATCHER_RETURNED])
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (latest.kind.as_str(), latest.payload["at"].as_i64()),
+        (INBOX_WATCHER_RETURNED, Some(400))
+    );
+    assert_eq!(
+        first
+            .latest_events_of(INBOX_WATCHER_ABSENT, 10)
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        first
+            .latest_events_of(INBOX_WATCHER_RETURNED, 10)
+            .unwrap()
+            .len(),
+        2
+    );
+    // Only the watcher's two kinds.
+    assert!(
+        first
+            .record_inbox_watcher_change(EventKind::InboxNudged, json!({}))
+            .is_err()
+    );
 }

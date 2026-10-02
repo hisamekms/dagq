@@ -14,6 +14,7 @@ use super::{
     stall::{BackgroundTask, StallConfig},
 };
 
+pub mod ask_seen;
 pub mod asks;
 pub mod auto_repairs;
 pub mod cargo;

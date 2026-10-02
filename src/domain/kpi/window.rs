@@ -18,8 +18,8 @@ use crate::domain::{
     marks::{self, Mark},
     plan_quality::plan_quality,
     stats::{
-        self, Cursor, LiveSnapshot, RunStats, SlotSnapshot, StatsQuery, asks::human_waits,
-        landing::PHASES, landing_utilization::landing_utilization,
+        self, Cursor, LiveSnapshot, RunStats, SlotSnapshot, StatsQuery, ask_seen::seen_waits,
+        asks::human_waits, landing::PHASES, landing_utilization::landing_utilization,
         measures::verification_durations, timestamp_millis,
     },
     waiting::{RUN_SLOT_REGAINED, RUN_WAITING_STARTED},
@@ -640,6 +640,12 @@ impl<'a> Context<'a> {
         let (to_answer, to_apply) = human_waits(events, after, upto, |task| self.counts(task));
         put("ask_wait", ALL, Measure::secs(to_answer));
         put("ask_apply_wait", ALL, Measure::secs(to_apply));
+        // How long the asks waited for the inbox's watcher (task 1021).
+        put(
+            "ask_seen_wait",
+            ALL,
+            Measure::secs(seen_waits(events, after, upto, |task| self.counts(task))),
+        );
 
         // Infrastructure.
         put(

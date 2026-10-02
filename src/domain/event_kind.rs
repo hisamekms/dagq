@@ -105,6 +105,8 @@ event_kinds! {
     IdleInferred => "idle_inferred",
     InboxNudgeFailed => "inbox_nudge_failed",
     InboxNudged => "inbox_nudged",
+    InboxWatcherAbsent => "inbox_watcher_absent",
+    InboxWatcherReturned => "inbox_watcher_returned",
     InputNotReady => "input_not_ready",
     IntegrationApproved => "integration_approved",
     IntegrationDeferred => "integration_deferred",
@@ -337,6 +339,10 @@ impl EventKind {
                 // (ADR-t906-1 decision 1 (3)).
                 | InboxNudged
                 | InboxNudgeFailed
+                // The inbox's watcher gone and back, for the KPI of how long
+                // an ask waits to be seen (task 1021).
+                | InboxWatcherAbsent
+                | InboxWatcherReturned
                 // An idle planner of the runtime's asked to exit so that a
                 // revise with no planner, waiting past the planner timeout,
                 // gets its place (task 884).
@@ -520,6 +526,12 @@ pub const IDLE_INFERRED: &str = EventKind::IdleInferred.as_str();
 pub const INBOX_NUDGED: &str = EventKind::InboxNudged.as_str();
 /// A nudge of the inbox the supervisor could not deliver.
 pub const INBOX_NUDGE_FAILED: &str = EventKind::InboxNudgeFailed.as_str();
+/// The supervisor judged the inbox's watcher absent after it was alive, or
+/// first (task 1021): once per change of its state.
+pub const INBOX_WATCHER_ABSENT: &str = EventKind::InboxWatcherAbsent.as_str();
+/// The supervisor judged the inbox's watcher alive after it was absent, or
+/// first (task 1021): once per change of its state.
+pub const INBOX_WATCHER_RETURNED: &str = EventKind::InboxWatcherReturned.as_str();
 pub const INPUT_NOT_READY: &str = EventKind::InputNotReady.as_str();
 pub const INTEGRATION_APPROVED: &str = EventKind::IntegrationApproved.as_str();
 pub const INTEGRATION_DEFERRED: &str = EventKind::IntegrationDeferred.as_str();
@@ -796,6 +808,8 @@ mod tests {
             (EventKind::IdleInferred, "idle_inferred"),
             (EventKind::InboxNudgeFailed, "inbox_nudge_failed"),
             (EventKind::InboxNudged, "inbox_nudged"),
+            (EventKind::InboxWatcherAbsent, "inbox_watcher_absent"),
+            (EventKind::InboxWatcherReturned, "inbox_watcher_returned"),
             (EventKind::InputNotReady, "input_not_ready"),
             (EventKind::IntegrationApproved, "integration_approved"),
             (EventKind::IntegrationDeferred, "integration_deferred"),

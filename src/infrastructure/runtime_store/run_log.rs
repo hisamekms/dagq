@@ -165,6 +165,55 @@ impl SqliteQueue {
         Ok(true)
     }
 
+    /// Record `kind` (`inbox_watcher_absent` or `inbox_watcher_returned`)
+    /// with `payload` unless the latest of the two on the queue is already
+    /// `kind`, in one write transaction (task 1021): `false` when the
+    /// state did not change, another supervisor recorded the change first
+    /// (each change is recorded once), or the latest record's `at` is
+    /// later than `payload`'s (a judgment older than the recorded one).
+    pub fn record_inbox_watcher_change(
+        &self,
+        kind: EventKind,
+        payload: serde_json::Value,
+    ) -> Result<bool> {
+        anyhow::ensure!(
+            matches!(
+                kind,
+                EventKind::InboxWatcherAbsent | EventKind::InboxWatcherReturned
+            ),
+            "{} is not a change of the inbox's watcher",
+            kind.as_str()
+        );
+        crate::domain::check_event_target(kind, None, None)?;
+        let _read = read_before(&self.conn, Closing::Queue(kind.as_str(), &payload))?;
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let latest: Option<(String, Option<i64>)> = tx
+            .query_row(
+                "SELECT kind, json_extract(payload,'$.at') FROM run_events
+                 WHERE kind IN (?1, ?2) AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
+                 ORDER BY id DESC LIMIT 1",
+                params![
+                    EventKind::InboxWatcherAbsent.as_str(),
+                    EventKind::InboxWatcherReturned.as_str()
+                ],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        // The same state, or a judgment older than the one recorded (a
+        // supervisor slower to write than another that judged later).
+        if let Some((latest, at)) = latest
+            && (latest == kind.as_str()
+                || at
+                    .zip(payload["at"].as_i64())
+                    .is_some_and(|(at, now)| now < at))
+        {
+            return Ok(false);
+        }
+        queue_event(&tx, kind, &payload)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// The events of one of `kinds` with `after < id <= upto`, oldest
     /// first, at most `limit`.
     pub fn events_of_between(
@@ -760,6 +809,13 @@ impl RunLog for SqliteQueue {
     }
     fn claim_inbox_nudge(&self, payload: serde_json::Value) -> Result<bool> {
         SqliteQueue::claim_inbox_nudge(self, payload)
+    }
+    fn record_inbox_watcher_change(
+        &self,
+        kind: EventKind,
+        payload: serde_json::Value,
+    ) -> Result<bool> {
+        SqliteQueue::record_inbox_watcher_change(self, kind, payload)
     }
     fn latest_event_of(&self, kind: &str) -> Result<Option<RunEvent>> {
         SqliteQueue::latest_event_of(self, kind)

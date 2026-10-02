@@ -4,8 +4,8 @@ type: design
 title: "`kpi`"
 status: current
 created: 2026-09-26
-updated: 2026-09-30 # task 1202: --cross
-last_verified: 2026-09-30 # task 1202: --cross
+updated: 2026-10-02 # task 1021: ask_seen_wait
+last_verified: 2026-10-02 # task 1021: ask_seen_wait
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -100,6 +100,7 @@ dagq kpi --compare <mark> --area runtime --change fix --by provider --by route -
 | `asks_per_landing` | 期間の`ask_opened` ÷ `landings`。taskのあるaskはchangeでも分ける（askはrunの着地commitを持たないので`area=`では分けない）。理由ごとは`details.asks_by_reason_category` | `all`と`change=` |
 | `attentions_per_landing` | 期間の`event_attention`がattentionと判定するevent ÷ `landings` | `all` |
 | `ask_wait` / `ask_apply_wait` | 人が答えたaskの`ask_opened`→最初の`ask_answered` / →答えを適用したevent（task 468）。`stats`の`asks.times`と同じく、答え（適用）の時刻でその期間に入れる（ADR-0051の決定1の「askは`ask_opened`の時刻」は数（`asks_per_landing`）に当て、待ちは終わった時点で数える） | `all` |
+| `ask_seen_wait` | askを開いてからinboxのwatcherが見るまでの秒（task 1021）。各`ask_opened`の時点のwatcherの状態を、それより前（event idの順）の最後の`inbox_watcher_absent` / `inbox_watcher_returned`（[`events` / `watch`](events-watch.md#watcherの変わり目の記録)）で決め、`alive`なら0秒でその`ask_opened`の時刻の期間に、`absent`なら次の`inbox_watcher_returned`までの秒でその時刻の期間に入れる（`ask_wait`と同じく、見た時点で数える）。期間の終わりまでにwatcherが戻っていないaskはまだ標本にしない。どちらのeventも記録される前（記録を足したtask 1021より前の期間と、supervisorが一度も動いていないqueue）に開いたaskは標本にしない（watcherの記録のファイルは7日で消えるので、過去を導き直せない）。答えたか閉じたかは問わず、`ask_opened`の全て（askは全てinbox宛て）を数え、`--goal`はそのgoalのtaskのaskだけを数える。状態の変わり目はsupervisorのpassごとの判定なので、watcherが居なくなってから記録されるまで（heartbeatの閾値、既定16秒とpassの間隔）に開いたaskは0秒に数え、supervisorが止まっているあいだの変化は次に動いたときに記録される。分布（`n`・`median`・`p90`・`min`・`max`）を出し、目標は置かない。良い向きは小さい。`stats`には出さない（`stats`の`asks.times`は種類と尋ね手ごとの答えの待ちで、watcherの在否はaskの種類によらないinboxの性質なので、期間の前後で比べる`kpi`だけに置く） | `all` |
 | `backend_failures_per_run` | 期間の`backend_call_failed` ÷ 終わったrun（retryで吸収した試行も使い切った失敗も数える）。`op`ごとは`details.backend_failures_by_op`。[stats](stats.md)の`backend_failures`と同じ読み分けで、retryの後の試行（`retry_after_ms`がnullでない）は`details.backend_failures_retried`、使い切った失敗（`retry_after_ms`がnullか無い）は`details.backend_failures_exhausted`に、それぞれ`{"count", "by_op"}`（statsの`retried` / `retried_by_op`と`exhausted` / `exhausted_by_op`）で出る。2つの`count`の和は`backend_failures_per_run`の分子 | `all` |
 | `max_load_avg` | 期間のclaim時のload averageと`backend_call_failed`の`load_avg`の最大（`value`）と、claim時の分布 | `all` |
 | `auto_repairs` | 期間の`auto_repaired`の数。`layer`ごとは`details.auto_repairs_by_layer` | `all` |

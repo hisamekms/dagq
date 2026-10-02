@@ -4,8 +4,8 @@ type: design
 title: "`events` / `watch`"
 status: current
 created: 2026-09-26
-updated: 2026-09-30
-last_verified: 2026-09-30
+updated: 2026-10-02
+last_verified: 2026-10-02
 scope: runtime
 related:
   - design-supervisor-lifecycle-throughput-review
@@ -36,3 +36,7 @@ task 293（ADR-0044の決定22）で、`events`に`--full`と絞り込みを足�
 - **processが終わっている記録**: 上の条件を満たしても、記録の`pid`のprocessが居ない（`Gone`）か、居てもその開始が記録の`started_at`の`PROCESS_START_LEAD_SECS`（60秒）前から`PROCESS_START_LAG_SECS`（5秒）後までに入らない（pidの再利用）ときはwatchingに数えない。Claude Codeの`/clear`やKillShellがwatchをSIGKILLするとdropが走らず`ended_at`が書かれないので、これが無いとheartbeatの閾値（既定16秒）のあいだwatchingに数えられ、Stop hookが居ると誤ってturnの終わりを通しうる。許容の幅: 前の60秒は、processの起動から記録を書くまで（queueを開く。古いschemaをメモリの複製で読むときは時間がかかる）の分、後の5秒は、`etime`が秒単位で切り捨てられる分（引く時刻は`ps`の前に読むので、`ps`の起動が遅い分は前側にずれる）。記録を消さずにSIGKILLされ、親がまだ回収していないzombieは居ると数えるが、親（Claude Codeのshell）がすぐ回収する。pidを再利用したprocessは元のwatchが終わった後（`started_at`より後）に始まるので、後ろ側の幅を狭くする。終わった時刻は分からないので猶予の起点にせず、`last_seen_at`は最後の`heartbeat_at`のまま（猶予の中の他の記録が無ければ`absent`）。processが居て開始が合うとき、居るが開始を読めないとき（`Unknown`。`ProcessControl::started_at`の既定、`ps`が失敗したとき）は、heartbeatだけの判定と同じ。processが居ることはwatchingに数える理由にならない（heartbeatの新しさが要る）。
 - **state**: watchingのwatchが1つでもあるか、返ってから`END_GRACE_SECS`（120秒）以内のwatchがあれば`alive`、それ以外は`absent`。猶予は、watchが返ってからinboxが報告して次のwatchを張るまでの切れ目を居ないと数えないため。
 - 出力は`{state, watching, last_seen_at, absent_secs, grace_secs}`。`watching`は猶予を含まない今watchingの数（Stop hookはこれが0のときturnを止める）、`last_seen_at`はwatchingがあれば今、無ければ記録の`ended_at`（無ければ`heartbeat_at`）の最大、`absent_secs`は`absent`のときの`now - last_seen_at`（`alive`か記録が一度も無ければnull）。
+
+### watcherの変わり目の記録
+
+記録のファイルは7日で消え、`kpi`はrun_eventsだけから導くので、supervisorがwatcherの状態の変わり目をqueueのeventに残す（task 1021。`src/application/supervise/inbox_nudge.rs`の`record_watcher_change`）。supervisorは毎pass（drain中も、`--no-claude`でも）、知らせ（[通知経路](notification-route.md#supervisorによるinboxへの知らせadr-t906-1)）と同じ`judge_with`の判定で、`alive`なら`inbox_watcher_returned`、`absent`なら`inbox_watcher_absent`をqueueのevent（task・goal・runを持たない）として`record_inbox_watcher_change`で書く。この2つのkindのうち最新のeventが同じkindなら書かずに`false`を返す（1つのwrite transaction。`claim_inbox_nudge`と同じ排他）ので、watcherが居続ける・居ないままのpassでは書かず、同じqueueの複数のsupervisorとexecの引き継ぎの後のprocessも同じ変わり目を二度書かない。最新のeventの`at`より古い判定（遅れて書こうとしたsupervisorの、別のsupervisorより前の判定）も書かない。どちらも記録の無いqueueでは、最初のpassの判定をそのまま書く（`inbox_watcher_returned`は最初の`alive`も表す）。payloadは`{at（判定のunix秒）, watching, last_seen_at, absent_secs}`（判定の値。`absent_secs`は`absent`のときだけ数値）。書けなくてもwarnを出すだけで、次のpassで書き直す。どちらもattentionではない。`watch`と`status`はqueue DBを読み取り専用のまま。`kpi`の`ask_seen_wait`（[kpi](kpi.md)）がこれを読む。

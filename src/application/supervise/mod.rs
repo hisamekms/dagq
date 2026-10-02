@@ -1346,10 +1346,9 @@ impl Supervisor<'_> {
             self.push_pass(!stopping);
             // An inbox without a watcher is woken while asks wait for it
             // (ADR-t906-1 decision 1 (3)), draining or not: a drain waits
-            // for their answers.
-            if !self.no_claude {
-                self.inbox_nudge_pass();
-            }
+            // for their answers. The watcher's changes are recorded either
+            // way (task 1021).
+            self.inbox_nudge_pass(!self.no_claude);
             // Reaped on every pass, started only by a supervisor at work that
             // no login or usage limit holds.
             self.throughput_review_pass(
