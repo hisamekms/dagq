@@ -274,7 +274,7 @@ fn a_goal_review_on_codex_runs_read_only_and_records_its_thread_and_model() {
         .collect();
     assert!(profile.contains(r#"permissions.dagq_job.extends=":read-only""#));
     let expected = format!(
-        "exec|--json|-C|{}|-m|gpt-6-astra|-c|model_reasoning_effort=\"high\"|{profile}--|",
+        "exec|--json|--skip-git-repo-check|-C|{}|-m|gpt-6-astra|-c|model_reasoning_effort=\"high\"|{profile}--|",
         repo.display()
     );
     assert!(calls[0].starts_with(&expected), "{}", calls[0]);

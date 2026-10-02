@@ -25,7 +25,11 @@ const CODEX_MODEL: &str = "gpt-6-astra";
 /// The review the stub replies with: a conclusion, details and a next move.
 const REPLY: &str = "## Conclusion\n- landings held on Codex\n\n## Details\nthe numbers\n\n```next_move\n{\"summary\": \"split the e2e\", \"why\": \"verify is the constraint\"}\n```";
 
-/// A stub `codex` next to the queue: `--version` answers, and `exec`
+/// A stub `codex` next to the queue: `--version` answers; as codex-cli
+/// does, `exec` in a directory outside any Git work tree without
+/// `--skip-git-repo-check` says so on stderr and exits 1 (task 1378),
+/// recording either way whether its directory was inside one in
+/// `codex-cwd.txt`; otherwise `exec`
 /// appends its arguments (each ended by `|`) to `codex-args.txt` and its
 /// role and actor to `codex-actors.txt`, prints `thread.started` (thread
 /// `codex-thread-<call>`) and `turn.started`, then, as `codex-mode` says,
@@ -42,6 +46,18 @@ fn stub_codex(db: &Path, mode: &str) -> PathBuf {
         r#"#!/bin/sh
 DIR="${{0%/*}}"
 [ "$1" = --version ] && {{ echo "codex-cli 0.155.1"; exit 0; }}
+if git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+  echo "inside $PWD" >> "$DIR/codex-cwd.txt"
+else
+  echo "outside $PWD" >> "$DIR/codex-cwd.txt"
+  SKIP=
+  for arg in "$@"; do [ "$arg" = --skip-git-repo-check ] && SKIP=1; done
+  if [ -z "$SKIP" ]; then
+    echo "Reading additional input from stdin..." >&2
+    echo "Not inside a trusted directory and --skip-git-repo-check was not specified." >&2
+    exit 1
+  fi
+fi
 for arg in "$@"; do printf '%s|' "$arg" | tr '\n' ' '; done >> "$DIR/codex-args.txt"
 printf '\n' >> "$DIR/codex-args.txt"
 printf '%s %s\n' "$DAGQ_ROLE" "$DAGQ_ACTOR_ID" >> "$DIR/codex-actors.txt"
@@ -138,6 +154,14 @@ fn a_throughput_review_on_codex_reads_its_last_message_like_claude_s_output() {
 
     let calls = stub_lines(&db, "codex-args.txt");
     assert_eq!(calls.len(), 3, "{calls:?}");
+    // Each started in its job directory, outside any Git work tree, which
+    // codex-cli refuses without `--skip-git-repo-check` (task 1378).
+    let cwds = stub_lines(&db, "codex-cwd.txt");
+    assert_eq!(cwds.len(), 3, "{cwds:?}");
+    for cwd in &cwds {
+        assert!(cwd.starts_with("outside "), "{cwd}");
+        assert!(cwd.contains("/reports/reviews/"), "{cwd}");
+    }
     let socket = dagq::infrastructure::queue_service::socket_path(
         db.canonicalize().unwrap().parent().unwrap(),
     );
@@ -148,7 +172,10 @@ fn a_throughput_review_on_codex_reads_its_last_message_like_claude_s_output() {
         .collect();
     assert!(profile.contains(r#"permissions.dagq_job.extends=":read-only""#));
     for call in &calls {
-        assert!(call.starts_with("exec|--json|-C|"), "{call}");
+        assert!(
+            call.starts_with("exec|--json|--skip-git-repo-check|-C|"),
+            "{call}"
+        );
         assert!(
             call.contains(&format!(
                 "|-m|{CODEX_MODEL}|-c|model_reasoning_effort=\"high\"|{profile}--|"

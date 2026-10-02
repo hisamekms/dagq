@@ -405,10 +405,14 @@ impl AgentProvider for Codex {
     fn turn_reader(&self) -> Result<Box<dyn TurnReader>> {
         Ok(Box::new(CodexTurnReader::reading(self.sessions_dir())))
     }
-    /// `codex exec --json --sandbox read-only -C <cwd> -- <prompt>` in
-    /// `cwd` (ADR-t1063-1 decision 2, spike 1.): the job's intent is read
-    /// in [`JOB_SANDBOX`], its environment (role, queue) is the caller's,
-    /// and nothing of the person's Codex settings is changed. No
+    /// `codex exec --json --skip-git-repo-check --sandbox read-only -C <cwd>
+    /// -- <prompt>` in `cwd` (ADR-t1063-1 decision 2, spike 1.): the job's
+    /// intent is read in [`JOB_SANDBOX`], its environment (role, queue) is
+    /// the caller's, and nothing of the person's Codex settings is changed.
+    /// `--skip-git-repo-check` because the cwd of the throughput review,
+    /// the observer and the recovery job is a job or run directory outside
+    /// any Git repository, which `codex exec` refuses without it (task
+    /// 1378); it only skips that check. No
     /// [`trust_config`]: in the read-only sandbox Codex neither trusts nor
     /// persists the project, and a trust would change the job's default
     /// approval and load the project's `.codex` config. Codex names its
@@ -420,6 +424,7 @@ impl AgentProvider for Codex {
             .current_dir(cwd)
             .arg("exec")
             .arg("--json")
+            .arg("--skip-git-repo-check")
             .arg("--sandbox")
             .arg(JOB_SANDBOX)
             .arg("-C")
@@ -659,6 +664,7 @@ mod tests {
             [
                 "exec",
                 "--json",
+                "--skip-git-repo-check",
                 "--sandbox",
                 "read-only",
                 "-C",
@@ -670,7 +676,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            args(&chosen)[6..],
+            args(&chosen)[7..],
             [
                 "-m",
                 "gpt-6-astra",
@@ -699,6 +705,7 @@ mod tests {
         let mut expected = vec![
             "exec".to_owned(),
             "--json".to_owned(),
+            "--skip-git-repo-check".to_owned(),
             "-C".to_owned(),
             "/repo".to_owned(),
             "-c".to_owned(),
@@ -908,6 +915,7 @@ mod tests {
             [
                 "exec",
                 "--json",
+                "--skip-git-repo-check",
                 "--sandbox",
                 "read-only",
                 "-C",
