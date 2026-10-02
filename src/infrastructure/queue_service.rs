@@ -965,10 +965,12 @@ fn signal(pid: u32, signal: libc::c_int) {
 /// from a record, not from the service's own answer, is signalled only
 /// then, never a process that took it later.
 fn serves(pid: u32, db: &Path) -> bool {
-    let Ok(output) = Command::new("ps")
-        .args(["-o", "command=", "-p", &pid.to_string()])
-        .output()
-    else {
+    let Ok(output) = crate::infrastructure::adapters::unpiped_output(Command::new("ps").args([
+        "-o",
+        "command=",
+        "-p",
+        &pid.to_string(),
+    ])) else {
         return false;
     };
     let command = String::from_utf8_lossy(&output.stdout);

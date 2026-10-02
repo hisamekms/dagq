@@ -181,8 +181,7 @@ impl ReleaseIndex for CurlIndex {
             command.arg("-H").arg(format!("If-None-Match: {etag}"));
         }
         command.arg(&self.url);
-        let output = command
-            .output()
+        let output = crate::infrastructure::adapters::unpiped_output(&mut command)
             .with_context(|| format!("run {}", self.program.display()))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

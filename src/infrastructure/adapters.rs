@@ -25,10 +25,10 @@ use std::{
     env,
     ffi::OsString,
     fs,
-    io::{BufRead, BufReader, Read, Seek, SeekFrom},
+    io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
-    process::{Child, Command, ExitStatus, Stdio},
+    process::{Child, Command, ExitStatus, Output, Stdio},
     sync::mpsc::{self, RecvTimeoutError},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -68,6 +68,12 @@ pub fn executable(path: &Path) -> Result<PathBuf> {
 /// process wrote after the pid line and to stderr once it is gone (its exit
 /// closes the pipes). The orphan is not this process's child, so a deadline
 /// is kept by hand and the pid is killed when it passes.
+///
+/// It reads pipes to their end by design (the end is the orphan's exit),
+/// so it shares the race [`output_file`] avoids: a process another thread
+/// spawns while the pipes are being made can inherit their write ends, and
+/// then the read waits for that process too, here up to `timeout`, which
+/// then fails the call though the orphan had answered (task 1273).
 fn orphan_output(command: &mut Command, timeout: Duration) -> Result<(String, String)> {
     let label = format!("{:?}", command.get_program());
     let mut child = command
@@ -456,23 +462,72 @@ pub(crate) fn capture_bytes(
 /// long-lived one (a session, an agent) held the supervisor in such a read
 /// forever after the command itself had exited (task 1022). A file is
 /// complete once the command exits, whoever else holds it.
-fn output_file() -> Result<fs::File> {
+///
+/// The standard library opens it close-on-exec (`O_CLOEXEC`) in the one
+/// `open`, so only the child it is handed to as a stream holds it.
+pub(crate) fn output_file() -> io::Result<fs::File> {
     let path = env::temp_dir().join(format!("dagq-output-{}", uuid::Uuid::new_v4()));
     let file = fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create_new(true)
         .open(&path)
-        .with_context(|| format!("create {}", path.display()))?;
-    fs::remove_file(&path).with_context(|| format!("unlink {}", path.display()))?;
+        .map_err(|error| {
+            io::Error::new(error.kind(), format!("create {}: {error}", path.display()))
+        })?;
+    fs::remove_file(&path).map_err(|error| {
+        io::Error::new(error.kind(), format!("unlink {}: {error}", path.display()))
+    })?;
     Ok(file)
 }
 
-fn read_back(mut file: fs::File) -> Result<Vec<u8>> {
+pub(crate) fn read_back(mut file: fs::File) -> io::Result<Vec<u8>> {
     file.seek(SeekFrom::Start(0))?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
     Ok(bytes)
+}
+
+/// [`Command::output`] with stdout and stderr taken in [`output_file`]s,
+/// not pipes, so another process holding them open (one spawned on another
+/// thread at the same moment) does not hold the call past the command's
+/// own exit. Like `output`, stdin is null and there is no time limit.
+pub(crate) fn unpiped_output(command: &mut Command) -> io::Result<Output> {
+    let (mut child, stdout, stderr) = spawn_unpiped(command)?;
+    let status = child.wait()?;
+    Ok(Output {
+        status,
+        stdout: read_back(stdout)?,
+        stderr: read_back(stderr)?,
+    })
+}
+
+/// [`unpiped_output`] within `timeout`; `None` when the command ran past it
+/// and was killed.
+pub(crate) fn unpiped_output_within(
+    command: &mut Command,
+    timeout: Duration,
+) -> io::Result<Option<Output>> {
+    let (mut child, stdout, stderr) = spawn_unpiped(command)?;
+    let Some(status) = wait_until(&mut child, timeout).map_err(io::Error::other)? else {
+        return Ok(None);
+    };
+    Ok(Some(Output {
+        status,
+        stdout: read_back(stdout)?,
+        stderr: read_back(stderr)?,
+    }))
+}
+
+fn spawn_unpiped(command: &mut Command) -> io::Result<(Child, fs::File, fs::File)> {
+    let stdout = output_file()?;
+    let stderr = output_file()?;
+    let child = command
+        .stdout(stdout.try_clone()?)
+        .stderr(stderr.try_clone()?)
+        .stdin(Stdio::null())
+        .spawn()?;
+    Ok((child, stdout, stderr))
 }
 
 /// Deadline of the Git commands that gather a review: a large diff takes far
@@ -3728,6 +3783,29 @@ mod tests {
         assert!(status.success());
         assert_eq!(stderr, "err\n");
         assert!(held < Duration::from_secs(30), "held for {held:?}");
+    }
+
+    /// [`unpiped_output`] returns its command's output and exit at the
+    /// command's exit, while another process still holds the output open.
+    #[test]
+    fn unpiped_output_returns_at_the_exit_though_another_process_holds_the_output() {
+        let started = Instant::now();
+        let output = unpiped_output(
+            Command::new("/bin/sh").args(["-c", "/bin/sleep 60 & echo $!; echo err >&2; exit 3"]),
+        )
+        .unwrap();
+        let held = started.elapsed();
+        let holder: libc::pid_t = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .unwrap();
+        // SAFETY: kill(2) on the pid of the sleep the shell reported.
+        unsafe { libc::kill(holder, libc::SIGKILL) };
+        assert_eq!(output.status.code(), Some(3));
+        assert_eq!(output.stderr, b"err\n");
+        assert!(held < Duration::from_secs(30), "held for {held:?}");
+        let missing = unpiped_output(&mut Command::new("/nonexistent/dagq-none")).unwrap_err();
+        assert_eq!(missing.kind(), io::ErrorKind::NotFound);
     }
 
     fn git_in(dir: &Path, args: &[&str]) -> std::process::Output {

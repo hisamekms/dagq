@@ -51,11 +51,13 @@ pub fn listening(port: u16) -> bool {
 /// The pid of the process listening on TCP `port`, as `lsof` lists it, or
 /// why it could not be read.
 fn listener_pid(port: u16) -> ServerPid {
-    let output = Command::new("lsof")
-        .args(["-nP", "-t", &format!("-iTCP:{port}"), "-sTCP:LISTEN"])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|error| format!("lsof could not be run: {error}"))?;
+    let output = crate::infrastructure::adapters::unpiped_output(Command::new("lsof").args([
+        "-nP",
+        "-t",
+        &format!("-iTCP:{port}"),
+        "-sTCP:LISTEN",
+    ]))
+    .map_err(|error| format!("lsof could not be run: {error}"))?;
     String::from_utf8_lossy(&output.stdout)
         .lines()
         .find_map(|line| line.trim().parse().ok())

@@ -13,26 +13,23 @@
 //! max_breach_per_day = 3
 //! ```
 use std::{
-    fs,
-    io::{Read, Write},
+    fs::{self, File},
+    io::{Read, Seek, SeekFrom, Write},
     os::unix::process::{CommandExt, ExitStatusExt},
     path::Path,
     process::{Command, Stdio},
-    sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail, ensure};
 
+use super::adapters::output_file;
 use super::kpi_config::HOST_FILE_NAME;
 use super::run_env::{parse_positive, parse_string, strip_comment};
 use crate::application::push::{PushOutcome, PushRequest};
 use crate::domain::kpi::push::PushConfig;
 
-/// How long the command's stderr is read after it exits: a child it left
-/// behind may hold the pipe open.
-const STDERR_GRACE: Duration = Duration::from_millis(500);
 /// The bytes of stderr kept, from the end.
 const STDERR_KEPT: usize = 64 * 1024;
 
@@ -198,10 +195,21 @@ pub fn load_host_push(queue_dir: &Path, host_wide: Option<&Path>) -> Result<Opti
 
 /// Run `request`'s command once: its message on stdin, its stdout
 /// dropped, the tail of its stderr kept; past the timeout its process
-/// group is killed.
+/// group is killed. Its stderr goes to an unlinked file, not a pipe: a
+/// child it left behind, or a process the supervisor spawned meanwhile
+/// that inherited the pipe, would hold a read to the pipe's end (task
+/// 1273), and the file is complete once the command exits.
 pub fn run_push(request: &PushRequest) -> PushOutcome {
     let Some((program, args)) = request.command.split_first() else {
         return PushOutcome::error("the push command is empty");
+    };
+    let stderr = match output_file().and_then(|file| Ok((file.try_clone()?, file))) {
+        Ok(files) => files,
+        Err(error) => {
+            return PushOutcome::error(&format!(
+                "could not take the push command's stderr: {error}"
+            ));
+        }
     };
     let mut command = Command::new(program);
     command
@@ -209,7 +217,7 @@ pub fn run_push(request: &PushRequest) -> PushOutcome {
         .envs(request.env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(stderr.0)
         .process_group(0);
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -224,24 +232,6 @@ pub fn run_push(request: &PushRequest) -> PushOutcome {
         let bytes = request.stdin.clone();
         thread::spawn(move || {
             let _ = stdin.write_all(&bytes);
-        });
-    }
-    let stderr = Arc::new(Mutex::new(Vec::new()));
-    let (done, finished) = mpsc::channel();
-    if let Some(mut pipe) = child.stderr.take() {
-        let stderr = Arc::clone(&stderr);
-        thread::spawn(move || {
-            let mut chunk = [0u8; 4096];
-            while let Ok(read) = pipe.read(&mut chunk) {
-                if read == 0 {
-                    break;
-                }
-                let mut kept = stderr.lock().unwrap_or_else(|e| e.into_inner());
-                kept.extend_from_slice(&chunk[..read]);
-                let excess = kept.len().saturating_sub(STDERR_KEPT);
-                kept.drain(..excess);
-            }
-            let _ = done.send(());
         });
     }
     let deadline = Instant::now() + request.timeout;
@@ -263,9 +253,7 @@ pub fn run_push(request: &PushRequest) -> PushOutcome {
             Err(_) => break None,
         }
     };
-    let _ = finished.recv_timeout(STDERR_GRACE);
-    let stderr =
-        String::from_utf8_lossy(&stderr.lock().unwrap_or_else(|e| e.into_inner())).into_owned();
+    let stderr = String::from_utf8_lossy(&stderr_tail(stderr.1)).into_owned();
     PushOutcome {
         success: !timed_out && status.is_some_and(|status| status.success()),
         exit_code: status.and_then(|status| status.code()),
@@ -276,6 +264,19 @@ pub fn run_push(request: &PushRequest) -> PushOutcome {
             .is_none()
             .then(|| "the push command could not be waited for".to_owned()),
     }
+}
+
+/// The last [`STDERR_KEPT`] bytes of `file` (empty when it cannot be read).
+fn stderr_tail(mut file: File) -> Vec<u8> {
+    let mut kept = Vec::new();
+    let from = file
+        .metadata()
+        .map(|metadata| metadata.len().saturating_sub(STDERR_KEPT as u64))
+        .unwrap_or(0);
+    if file.seek(SeekFrom::Start(from)).is_ok() {
+        let _ = file.take(STDERR_KEPT as u64).read_to_end(&mut kept);
+    }
+    kept
 }
 
 #[cfg(test)]
@@ -407,6 +408,26 @@ mod tests {
             ..request("", Duration::from_secs(1))
         });
         assert!(!empty.success);
+    }
+
+    /// Only the end of a long stderr is kept, and a child the command left
+    /// behind holding stderr does not hold the call.
+    #[test]
+    fn the_tail_of_stderr_is_kept_without_waiting_for_a_holder() {
+        let script = format!(
+            "(sleep 30) & head -c {} /dev/zero | tr '\\0' a >&2; echo end >&2; exit 1",
+            STDERR_KEPT
+        );
+        let started = Instant::now();
+        let outcome = run_push(&request(&script, Duration::from_secs(20)));
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(outcome.exit_code, Some(1));
+        assert_eq!(outcome.stderr.len(), STDERR_KEPT);
+        assert!(
+            outcome.stderr.ends_with("aend\n"),
+            "{:?}",
+            &outcome.stderr[STDERR_KEPT - 8..]
+        );
     }
 
     #[test]

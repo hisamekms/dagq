@@ -4,8 +4,8 @@ type: design
 title: "KPIのpush（目標割れの記録とホストのコマンドへの通知）"
 status: current
 created: 2026-09-27
-updated: 2026-10-01
-last_verified: 2026-10-01
+updated: 2026-10-02
+last_verified: 2026-10-02
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -60,7 +60,7 @@ stdinは1つのJSONオブジェクト（UTF-8、最後に改行）。受け取�
 
 ## 実行・再試行・失敗
 
-- supervisorはレポートのjobが作ったメッセージをプロセスのメモリの列に積み、周回ごとに期日の来た1通をjob threadで送る（`application::supervise::push`）。コマンドは`infrastructure::push::run_push`がshellを通さずに、自分のprocess groupで起動し、stdinにメッセージを書き、stdoutは捨て、stderrの末尾を読む。`timeout_secs`を過ぎたらprocess groupごとSIGKILLで止める。
+- supervisorはレポートのjobが作ったメッセージをプロセスのメモリの列に積み、周回ごとに期日の来た1通をjob threadで送る（`application::supervise::push`）。コマンドは`infrastructure::push::run_push`がshellを通さずに、自分のprocess groupで起動し、stdinにメッセージを書き、stdoutは捨て、stderrの末尾を読む。stderrはpipeではなくunlinkした一時ファイル（`O_CLOEXEC`）で受け、コマンドが終わってから末尾（64 KiB）を読む。macOSではpipeの作成とclose-on-execの設定が2段で、その間に別のthreadがspawnしたプロセス（sessionやagent）がpipeの書き口を受け継ぐと、pipeを終わりまで読む待ちがそのプロセスが終わるまで続くため（task 1273。同じ理由でsupervisorの他の子の出力も`adapters::unpiped_output`で受ける）。`timeout_secs`を過ぎたらprocess groupごとSIGKILLで止める。
 - 終了コード0なら`kpi_push_sent`（`push_kind`・`period`・`attempt`）。0でない・signalで終わった・timeout・起動できなかったら`kpi_push_failed`（`push_kind`・`period`・`attempt`・`exit_code`・`signal`・`timed_out`・`error`・`stderr_tail`・`gave_up`）。同じメッセージを1分後と5分後（`RETRY_DELAYS_SECS`）にもう一度送り、3回とも失敗したら捨てて`gave_up: true`にし、`kpi_push_abandoned`（`push_kind`・`period`・`attempts`・`reason_category: recovery_failed`・`message`）を記録する。`kpi_push_abandoned`は最新の`kpi_push_sent`より後にまだ無いときだけ記録する（`SqliteQueue::record_kpi_push_abandoned`）ので、失敗が続いても人への通知は1件。
 - `kpi_push_abandoned`はinbox宛てのattention `fix the push command`（`AttentionNext::FixPush`、`reason_category: recovery_failed`）になり、`status`の`attention`と`watch`に出る。次に`kpi_push_sent`が記録されると消える。人はpushのコマンドかその先のサービスを直す。直した後も、次のメッセージ（多くは翌日の日次のまとめ）が送れるまでattentionは残る（手で消す操作は無い）。
 - 記録（`kpi_push_failed`など）が書けなかったときも、失敗したメッセージは同じ規則で再試行する。

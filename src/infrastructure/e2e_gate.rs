@@ -18,7 +18,6 @@ use std::{
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Output, Stdio},
-    sync::mpsc,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -28,6 +27,7 @@ use crate::application::install::{
     E2eOutcome, E2eRerun, E2eSettings, E2eSkip, PODMAN_E2E, PodmanCheck,
 };
 use crate::domain::e2e_quarantine::{self, QuarantineFile};
+use crate::infrastructure::adapters::unpiped_output_within;
 use crate::infrastructure::broker_podman::{FileLock, PodmanCli};
 
 /// How long one cmux call of the gate (`ping`, a group's listing or
@@ -435,22 +435,16 @@ fn ping(cmux: &Path) -> Result<()> {
 /// Run `command` to its end within [`CALL_LIMIT`], its output captured;
 /// past it the command is killed and it is an error.
 fn bounded(command: &mut Command) -> Result<Output> {
-    let child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let pid = child.id();
-    let (sent, received) = mpsc::channel();
-    thread::spawn(move || {
-        let _ = sent.send(child.wait_with_output());
-    });
-    match received.recv_timeout(CALL_LIMIT) {
-        Ok(output) => Ok(output?),
-        Err(_) => {
-            signal(pid, libc::SIGKILL);
-            bail!("it did not end within {}s", CALL_LIMIT.as_secs())
-        }
+    bounded_within(command, CALL_LIMIT)
+}
+
+/// [`bounded`] with `limit`. The output is taken in unlinked files, not
+/// pipes: a pipe's write end inherited by a process the supervisor spawns
+/// meanwhile would hold a read to its end up to the limit (task 1273).
+fn bounded_within(command: &mut Command, limit: Duration) -> Result<Output> {
+    match unpiped_output_within(command, limit)? {
+        Some(output) => Ok(output),
+        None => bail!("it did not end within {}s", limit.as_secs()),
     }
 }
 
@@ -763,6 +757,41 @@ fn delete_groups(cmux: &Path, hashes: &[String]) -> Result<Vec<String>> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    /// A process holding the command's output open (as one the supervisor
+    /// spawns at the same moment can inherit a pipe's write end, task
+    /// 1273) does not hold the call past the command's own exit; with
+    /// pipes it waited for the holder up to the limit and failed.
+    #[test]
+    fn bounded_returns_at_the_exit_though_another_process_holds_the_output() {
+        let started = Instant::now();
+        let output = bounded_within(
+            Command::new("/bin/sh").args(["-c", "/bin/sleep 60 & echo $!; echo err >&2"]),
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        let held = started.elapsed();
+        let holder: u32 = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .unwrap();
+        signal(holder, libc::SIGKILL);
+        assert!(output.status.success());
+        assert_eq!(output.stderr, b"err\n");
+        assert!(held < Duration::from_secs(30), "held for {held:?}");
+    }
+
+    #[test]
+    fn bounded_kills_a_command_past_its_limit() {
+        let started = Instant::now();
+        let error = bounded_within(
+            Command::new("/bin/sh").args(["-c", "exec /bin/sleep 60"]),
+            Duration::from_millis(300),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "it did not end within 0s");
+        assert!(started.elapsed() < Duration::from_secs(30));
+    }
 
     #[test]
     fn the_failed_tests_are_read_from_the_output_once_each() {

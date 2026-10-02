@@ -221,12 +221,13 @@ fn remove_if_there(path: &Path) -> Result<()> {
 /// of the repository at `dir` (the container has no `~/.gitconfig`).
 pub fn git_committer(dir: &Path) -> Result<Committer> {
     let read = |key: &str| -> Result<String> {
-        let output = std::process::Command::new(git_executable()?)
-            .arg("-C")
-            .arg(dir)
-            .args(["config", "--get", key])
-            .output()
-            .with_context(|| format!("run git config {key}"))?;
+        let output = crate::infrastructure::adapters::unpiped_output(
+            std::process::Command::new(git_executable()?)
+                .arg("-C")
+                .arg(dir)
+                .args(["config", "--get", key]),
+        )
+        .with_context(|| format!("run git config {key}"))?;
         let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
         if !output.status.success() || value.is_empty() {
             bail!(

@@ -6,6 +6,7 @@
 //! and the replacement of a file by a rename in its directory (ADR-0045
 //! decisions 11, 12).
 
+use crate::infrastructure::adapters::unpiped_output;
 use crate::infrastructure::git_binary::git_executable;
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
@@ -49,11 +50,9 @@ fn output_with(binary: &Path, arguments: &[&str], envs: &[(&str, &str)]) -> Resu
     for name in crate::domain::queue_service::CLIENT_ENV {
         command.env_remove(name);
     }
-    let output = command
-        .args(arguments)
-        .envs(envs.iter().copied())
-        .stdin(Stdio::null())
-        .output()
+    // Not `output()`: its pipes can be inherited by what the supervisor
+    // spawns meanwhile and then not end (task 1273).
+    let output = unpiped_output(command.args(arguments).envs(envs.iter().copied()))
         .with_context(|| format!("run {}", binary.display()))?;
     ensure!(
         output.status.success(),
@@ -211,13 +210,13 @@ impl Binaries for LocalBinaries {
 
     fn checkout(&self, repository: &Path, checkout: &Path, commit: &str) -> Result<()> {
         let git = |dir: &Path, arguments: &[&str]| -> Result<()> {
-            let output = Command::new(git_executable()?)
-                .arg("-C")
-                .arg(dir)
-                .args(arguments)
-                .stdin(Stdio::null())
-                .output()
-                .context("run git")?;
+            let output = unpiped_output(
+                Command::new(git_executable()?)
+                    .arg("-C")
+                    .arg(dir)
+                    .args(arguments),
+            )
+            .context("run git")?;
             ensure!(
                 output.status.success(),
                 "git {} in {} exited with {}: {}",

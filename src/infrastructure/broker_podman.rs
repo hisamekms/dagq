@@ -13,7 +13,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -24,6 +24,7 @@ use crate::application::broker::{
     BrokerFailure, BrokerResult, FailureCode, HealthProbe, HostLock, Podman, PodmanOutput,
     broker_dir,
 };
+use crate::infrastructure::adapters::unpiped_output;
 
 /// The machine's lock file under dagq's data dir.
 pub const MACHINE_LOCK_FILE: &str = "podman-machine.lock";
@@ -56,11 +57,8 @@ impl PodmanCli {
 
 impl Podman for PodmanCli {
     fn run(&self, args: &[String]) -> BrokerResult<PodmanOutput> {
-        let output = Command::new(&self.executable)
-            .args(args)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|error| {
+        let output =
+            unpiped_output(Command::new(&self.executable).args(args)).map_err(|error| {
                 let code = if error.kind() == ErrorKind::NotFound {
                     FailureCode::PodmanMissing
                 } else {
@@ -270,11 +268,8 @@ pub fn client_version(client: &Path) -> Result<String, String> {
     {
         return Ok(version);
     }
-    let output = Command::new(client)
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
+    // Its stderr is taken and dropped.
+    let output = unpiped_output(Command::new(client).arg("--version"))
         .map_err(|error| format!("run {}: {error}", client.display()))?;
     if !output.status.success() {
         return Err(format!(
