@@ -37,9 +37,9 @@ related:
 
 本番 queue と固定バイナリ `~/.local/bin/dagq` を汚さないため、すべてを scratch directory に閉じる。
 
-このスモークは人か inbox が行う。worker（dagq の run の session）は使い捨ての queue を作れず操作もできない（authorization の policy は worker に `queue.admin` を与えず、worker の状態を変えるコマンドは自分の run と task にしか効かない。[Authorization](authorization.md)、ADR-t728-1。task 983 で `dagq init` が `authorization_denied` になり、ask 195 で人が policy を変えないと決めた）。worker は env を外して迂回せず、実バイナリでの確認は integration test（`tests/it` の fixture）か e2e（`tests/e2e.rs`）に書き（e2e は worker が流さず、要る run には review の pass の後に runtime が host で流す。[ADR-t1233-2](../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)、[Review](supervisor-lifecycle/review.md#着地の前のe2e)）、実 queue での手の確認が要るものは receipt の `follow_ups` にして人か inbox に任せる。
+このスモークは人か inbox が行う。worker が使い捨ての queue を操作できない理由と、worker が代わりにすることは[運用の開発文書](../development/operations.md)の「workerがhostと実queueでできないこと」、そう決めた経緯は[運用の規則の経緯](../plans/operation-rules-history.md)が持つ。
 
-- **バイナリ**: 確かめたい commit で `cargo build --locked` したものを scratch にコピーして使う。`target/` のバイナリで本番 queue を開かない（開いただけでは migrate しなくなった（ADR-0045 決定 5）が、状態を変えるコマンドで未着地の遷移を本番に持ち込まない。緩める範囲は ADR-0045 決定 18）。
+- **バイナリ**: 確かめたい commit で `cargo build --locked` したものを scratch にコピーして使う（本番 queue と開発中のバイナリの境界は AGENTS.md の「作業中」）。
 - **repository**: `git init` した使い捨て repository。ディレクトリ名は `dagq-smoke` にする（task 710）。runtime は queue の cmux の workspace group を `[<repository のディレクトリ名>]`（例 `[dagq-smoke]`）、workspace の title を `[<ディレクトリ名>]worker#...` などと名付けるので、残った group がどのスモークのものか名前で分かる（`tests/e2e.rs` の fixture は `dagq-e2e` で、group は `[dagq-e2e]`）。`repo` のような汎用の名前にしない。`seed.txt`（検証コマンドが見る）、3 行の `shared.txt`（衝突用）、`CLAUDE.md`、`.claude/settings.json`（`permissions.defaultMode: auto`）を commit しておく。scratch に置いた bare repository を `origin` にする（supervisor の着地は push まで行い、`origin` が無いと `push_failed` の attention になる。手で `integrate` するときは `--no-push` でもよい）。
 - **queue**: 全コマンドを `XDG_DATA_HOME=<scratch>/xdg` で、repository を cwd にして打つ（queue は `<scratch>/xdg/dagq/<hash>/queue.db` に解決される）。これを 1 行の wrapper script（例 `tq`）にしておく。
 - **supervisor**: 専用の cmux workspace で `supervise --parallel 2 --claude <agent>` を起動し、`--log-dir` か `tee` で log を残す。`up` は使わない（inbox / planner の workspace と launchd agent を作るため）。`--once` は付けない。
@@ -74,7 +74,7 @@ task 1236 から worker の `dagq` はクライアントモードで動く（[Qu
 ### stub と実 Claude の使い分け
 
 - **stub**（`tests/e2e.rs` の `STUB` を拡張した shell script）で runtime の状態遷移を見るシナリオ（2〜5）を流す。token を使わず、時間を制御できる。拡張の例: title の `[break]` で `seed.txt` を消して commit し検証を壊す、`[hang]` で commit も receipt も書かずに待つ、`delay=N` で N 秒待ってから commit する。
-- **実 Claude**（`--claude` に実体の path）で、Claude 自身の終了と resume が絡むシナリオ（1、6）を流す。cmux の terminal の PATH では session ごとの shim が先に解決されるので、`--claude ~/.local/bin/claude` のように実体を渡す（AGENTS.md の「起動と停止」と同じ理由）。
+- **実 Claude**（`--claude` に実体の path）で、Claude 自身の終了と resume が絡むシナリオ（1、6）を流す。cmux の terminal の PATH では session ごとの shim が先に解決されるので、`--claude ~/.local/bin/claude` のように実体を渡す（理由は plugin の `dagq-recover` skill の `reference/up-down.md` の「up」）。
 - stub は headless の review / triage（`claude -p`）にも使われる。`tests/e2e.rs` の stub は本文に `E2E-REVIEW-PASS` を含む task の review だけを pass にし、それ以外は失敗するので、stub のシナリオでは review が `review by hand`、triage が失敗の attention になるのが期待どおり。review と triage の verdict まで見たいシナリオは実 Claude で流す。検証は `integrate` の 1 回だけなので、review で止まった run は検証まで進まない。stub で着地まで流すシナリオ（2〜5）は task の description に `E2E-REVIEW-PASS` を入れて review を pass させるか、`review by hand` になった run に人が `integrate ID` を打つ。
 - e2e: worker（stub も実 Claude も実 Codex も）は e2e を流さず、receipt の `e2e` は理由つきの `not_applicable` になる。e2e が要る run（`validation_finished` の `e2e_requirement.required` が true）には、review の pass の後、着地の前に supervisor が host で e2e を流す（[Review](supervisor-lifecycle/review.md#着地の前のe2e)）。使い捨て repository は dagq のソースでないので runtime の知る e2e が無く、要る run は `run_e2e_finished`（`outcome: not_configured`）を記録して着地へ進む。`dagq.toml` を置かない使い捨て repository では `[e2e] paths` が無く、`--evidence e2e` を付けない task は e2e が要らない。この工程そのもの（host での実行・1 本ずつの lock・落ちたときの `needs_session` と resume・流せないときの流し直しと `check the e2e host`）は `tests/it/runtime_e2e.rs` が stub のコマンドで確かめる。本番の固定バイナリの入れ替えの前には、自動更新と `install` の関門が全部の e2e を流す（[Auto-update](supervisor-lifecycle/auto-update.md)・[install](supervisor-lifecycle/install.md)）。
 
@@ -109,9 +109,9 @@ task 1236 から worker の `dagq` はクライアントモードで動く（[Qu
 
 この repository の本番 queue で、依存の無い小さな task（docs の誤りの修正など）を 1 件流し、登録から着地まで DB を手で直さずに通ることを確かめる。本番 queue の操作は固定バイナリ `~/.local/bin/dagq` だけで行う。
 
-1. `which dagq` が `~/.local/bin/dagq` に解決し、`dagq --version` が確かめたい版であることを見る。固定バイナリの入れ替えが要るなら、AGENTS.md の「作業中」の手順で人に報告してから行う。
+1. `which dagq` が `~/.local/bin/dagq` に解決し、`dagq --version` が確かめたい版であることを見る。固定バイナリの入れ替えが要るなら、[運用の開発文書](../development/operations.md)の「本番queueと固定バイナリ」のとおり人に報告してから行う。
 2. planner の session で task を 1 件登録する（`dagq add` に title・description・acceptance・`--verify`、docs だけなら `--paths`）。返った ID だけに `dagq ready` を打つ。
-3. supervisor が居なければ inbox か planner の session から `dagq up --in-cmux ...`（AGENTS.md の「起動と停止」）。
+3. supervisor が居なければ inbox か planner の session から `dagq up --in-cmux ...`（[運用の開発文書](../development/operations.md)の「`up`のコマンド」）。
 4. 経過は `dagq show ID` と inbox の `watch` で見る。期待する流れ: claim → `[<repo>]worker#<task-id> - <title>` の workspace で worker が作業 → commit と receipt → validating → headless の review → pass なら `/exit`・workspace の close → `integrate`（rebase・検証・squash）→ push → task `completed`、run `integrated`。
 5. 人の操作が要るのは、worker が止まったダイアログ（`answer_prompt` の ask）、review の `concern`（`approve_landing` の ask）、`review by hand`、`push_failed` だけで、どれも inbox に届く。それ以外で止まったら詰まりとして記録する。
 6. 着地した commit（`Dagq-Task` / `Dagq-Run` trailer）、`refs/dagq/runs/<run-id>`、worktree と branch の削除、`origin/main` への push を確かめ、所要時間と詰まりを残す。
