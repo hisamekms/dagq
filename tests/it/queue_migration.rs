@@ -1,5 +1,6 @@
 //! Queue tests: what each migration does to the rows of an older queue.
 use crate::common;
+use dagq::application::HeartbeatWrite;
 use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
 
@@ -282,7 +283,13 @@ fn migration_to_v7_adds_the_supervisor_registry_and_keeps_leases() {
     // Registration: one row per token, a parallel limit of at least one,
     // heartbeat refreshed with the leases, removed only by deregistration.
     let before = queue.heartbeat(&LeaseToken::new("tok")).unwrap();
-    assert_eq!(before, 1);
+    assert_eq!(
+        before,
+        HeartbeatWrite {
+            registered: false,
+            leases: 1
+        }
+    );
     let registered = queue
         .register_supervisor(&LeaseToken::new("sv"), 4243, 2, VERSION)
         .unwrap();
@@ -308,12 +315,26 @@ fn migration_to_v7_adds_the_supervisor_registry_and_keeps_leases() {
     raw.execute("UPDATE supervisors SET heartbeat_at=0 WHERE token='sv'", [])
         .unwrap();
     drop(raw);
-    assert_eq!(queue.heartbeat(&LeaseToken::new("sv")).unwrap(), 0); // No lease, still refreshed.
+    let write = queue.heartbeat(&LeaseToken::new("sv")).unwrap();
+    assert_eq!(
+        write,
+        HeartbeatWrite {
+            registered: true,
+            leases: 0
+        }
+    ); // No lease, still refreshed.
     let listed = queue.supervisors().unwrap();
     assert_eq!(listed.len(), 1);
     assert!(listed[0].heartbeat_at >= registered.started_at);
     assert_eq!(listed[0].binary_version.as_deref(), Some(VERSION));
-    assert_eq!(queue.heartbeat(&LeaseToken::new("nobody")).unwrap(), 0);
+    let write = queue.heartbeat(&LeaseToken::new("nobody")).unwrap();
+    assert_eq!(
+        write,
+        HeartbeatWrite {
+            registered: false,
+            leases: 0
+        }
+    );
 
     // The mode is `up`'s to record once the process has registered; a
     // supervisor started by hand keeps none, and only the two modes fit.

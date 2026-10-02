@@ -10,7 +10,7 @@ use std::{
     fmt, io,
     path::{Path, PathBuf},
     sync::Arc,
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use super::{GraphInput, TaskPage, TaskQuery, timestamp, unix_seconds};
@@ -425,6 +425,37 @@ pub trait AgentDirHandle: Send {
 /// landings).
 pub trait QueueOpener: Send + Sync {
     fn open(&self) -> Result<Box<dyn Queue + Send>>;
+}
+
+/// How long a connection to the queue waits for another connection's
+/// write lock before its statement fails as busy.
+pub const QUEUE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The context of an error a write met because another connection held the
+/// queue's lock past [`QUEUE_BUSY_TIMEOUT`] (SQLite's busy or locked): a
+/// passing condition, which the same write may try again (task 1119).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueBusy;
+
+impl fmt::Display for QueueBusy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("the queue database is locked by another writer")
+    }
+}
+
+impl QueueBusy {
+    /// Whether `error` is one the queue met as busy.
+    pub fn is(error: &anyhow::Error) -> bool {
+        error.downcast_ref::<QueueBusy>().is_some()
+    }
+}
+
+/// What one heartbeat wrote: whether the process's supervisor registration
+/// was there to refresh, and how many run leases it refreshed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeartbeatWrite {
+    pub registered: bool,
+    pub leases: usize,
 }
 
 /// Whether an agent's sessions load a plugin (ADR-t617-2 decision 4), as
@@ -1795,7 +1826,7 @@ pub trait RunCoordination {
     fn assert_repository(&self, common_dir: &str) -> Result<()>;
     /// One heartbeat of the process `token`: its registration and every
     /// lease it holds; how many leases there were.
-    fn heartbeat(&mut self, token: &LeaseToken) -> Result<usize>;
+    fn heartbeat(&mut self, token: &LeaseToken) -> Result<HeartbeatWrite>;
     /// The processes registered for the run (its wrapper and agent).
     fn processes(&self, id: &RunId) -> Result<Vec<RunProcess>>;
     /// Record how `up` started the supervisor `token`.

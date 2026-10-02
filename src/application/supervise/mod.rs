@@ -441,34 +441,85 @@ pub fn spawn_traced<T: Send + 'static>(
 /// shorten it (`supervise --heartbeat-interval-ms`, task 1048).
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 
+/// How a [`Heartbeat`] writes and when it gives up (task 1119).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeartbeatPolicy {
+    /// The time between two writes.
+    pub interval: Duration,
+    /// The age at which the leases the heartbeat keeps go stale, so another
+    /// supervisor may take its runs over (`HEARTBEAT_TIMEOUT_SECS`).
+    pub stale_after: Duration,
+    /// How long one write may wait for another connection's lock
+    /// ([`super::QUEUE_BUSY_TIMEOUT`]).
+    pub attempt: Duration,
+    /// Whether the token is a resident supervisor's registration, whose row
+    /// must be there at every write.
+    pub registered: bool,
+}
+
+impl HeartbeatPolicy {
+    /// A resident supervisor's: its registration and its leases.
+    pub fn supervisor(interval: Duration) -> Self {
+        Self {
+            interval,
+            stale_after: Duration::from_secs(HEARTBEAT_TIMEOUT_SECS.unsigned_abs()),
+            attempt: super::QUEUE_BUSY_TIMEOUT,
+            registered: true,
+        }
+    }
+
+    /// A process with leases and no registration (`integrate`).
+    pub fn leases(interval: Duration) -> Self {
+        Self {
+            registered: false,
+            ..Self::supervisor(interval)
+        }
+    }
+
+    /// Whether a write that failed as busy, `since` the last one written
+    /// (the failed write's wait included), is tried again: only while the
+    /// next write, waiting out the interval and the lock, still lands before
+    /// the leases go stale.
+    pub fn retries(&self, busy: bool, since: Duration) -> bool {
+        busy && since + self.interval + self.attempt < self.stale_after
+    }
+
+    /// Why a write that went through shows the process no longer holds what
+    /// it heartbeats, if it does: its registration is gone (removed as
+    /// stale by `up` or `down --force`, so its runs are another's to take).
+    pub fn lost(&self, write: &super::HeartbeatWrite) -> Option<&'static str> {
+        (self.registered && !write.registered)
+            .then_some("the supervisor's registration is gone from the queue")
+    }
+}
+
+/// Writes that failed as busy since the last one written.
+struct BusyStreak {
+    failures: u32,
+    since: Instant,
+    error: String,
+}
+
 /// One process heartbeats its registration (a resident supervisor) and every
-/// lease it holds with a single token, every `interval`.
+/// lease it holds with a single token, every `interval`. A write that meets
+/// another connection's lock is tried again at the next interval, and only a
+/// lost registration, a failure that does not pass or busy writes that would
+/// let the leases go stale stop it (task 1119).
 pub struct Heartbeat {
     stop: mpsc::Sender<()>,
     worker: Option<thread::JoinHandle<()>>,
-    failed: Arc<AtomicBool>,
+    failed: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl Heartbeat {
-    pub fn start(queues: Arc<dyn QueueOpener>, token: LeaseToken, interval: Duration) -> Self {
+    pub fn start(queues: Arc<dyn QueueOpener>, token: LeaseToken, policy: HeartbeatPolicy) -> Self {
         let (stop, recv) = mpsc::channel();
-        let failed = Arc::new(AtomicBool::new(false));
+        let failed = Arc::new(std::sync::Mutex::new(None));
         let flag = failed.clone();
         let worker = spawn_traced(move || {
-            let result = (|| -> Result<()> {
-                let mut queue = queues.open()?;
-                loop {
-                    queue.heartbeat(&token)?;
-                    match recv.recv_timeout(interval) {
-                        Err(mpsc::RecvTimeoutError::Timeout) => (),
-                        _ => break,
-                    }
-                }
-                Ok(())
-            })();
-            if let Err(error) = result {
+            if let Err(error) = beat(&*queues, &token, policy, &recv) {
                 error!(error = %format_args!("{error:#}"), "supervisor heartbeat failed: {error:#}");
-                flag.store(true, Ordering::SeqCst);
+                *flag.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!("{error:#}"));
             }
         });
         Self {
@@ -478,21 +529,106 @@ impl Heartbeat {
         }
     }
 
+    /// Stop writing, before the process removes its registration: a beat
+    /// after it would find the row gone and report a lost lease.
+    pub fn stop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+
     pub fn check(&self) -> Result<()> {
-        ensure!(
-            !self.failed.load(Ordering::SeqCst),
-            "supervisor heartbeat failed; preserving runs for inspection"
-        );
-        Ok(())
+        match &*self.failed.lock().unwrap_or_else(|e| e.into_inner()) {
+            Some(error) => {
+                bail!("supervisor heartbeat failed; preserving runs for inspection: {error}")
+            }
+            None => Ok(()),
+        }
+    }
+}
+
+/// The heartbeat's loop: a write every interval until `stop` says so, or an
+/// error once the process can no longer keep what it holds.
+fn beat(
+    queues: &dyn QueueOpener,
+    token: &LeaseToken,
+    policy: HeartbeatPolicy,
+    stop: &mpsc::Receiver<()>,
+) -> Result<()> {
+    let mut queue: Option<Box<dyn Queue + Send>> = None;
+    let mut written = Instant::now();
+    let mut streak: Option<BusyStreak> = None;
+    loop {
+        let started = Instant::now();
+        let attempt = match &mut queue {
+            Some(queue) => queue.heartbeat(token),
+            None => queues
+                .open()
+                .and_then(|opened| queue.insert(opened).heartbeat(token)),
+        };
+        match attempt {
+            Ok(write) => {
+                if let Some(lost) = policy.lost(&write) {
+                    bail!("{lost}");
+                }
+                written = started;
+                if let Some(streak) = streak.take() {
+                    let secs = streak.since.elapsed().as_secs_f64();
+                    info!(
+                        "supervisor heartbeat written again after {} busy failures over {secs:.1}s",
+                        streak.failures
+                    );
+                    let payload = json!({
+                        "token": token,
+                        "failures": streak.failures,
+                        "secs": (secs * 10.0).round() / 10.0,
+                        "error": streak.error,
+                    });
+                    if let Some(queue) = &queue
+                        && let Err(error) =
+                            queue.record_queue_event(EventKind::SupervisorHeartbeatRetried, payload)
+                    {
+                        warn!(error = %format_args!("{error:#}"), "the heartbeat's retries could not be recorded: {error:#}");
+                    }
+                }
+            }
+            Err(error) => {
+                // From the last write to this failure, the attempt's wait
+                // for the lock included.
+                let since = written.elapsed();
+                let streak = streak.get_or_insert_with(|| BusyStreak {
+                    failures: 0,
+                    since: started,
+                    error: String::new(),
+                });
+                streak.failures += 1;
+                streak.error = format!("{error:#}");
+                if !policy.retries(super::QueueBusy::is(&error), since) {
+                    return Err(error.context(format!(
+                        "{} heartbeat writes failed over {:.1}s since the last one written",
+                        streak.failures,
+                        since.as_secs_f64()
+                    )));
+                }
+                warn!(
+                    error = %format_args!("{error:#}"),
+                    "supervisor heartbeat busy ({} failures, {:.1}s since the last write); trying again: {error:#}",
+                    streak.failures,
+                    since.as_secs_f64()
+                );
+            }
+        }
+        match stop.recv_timeout(policy.interval) {
+            Err(mpsc::RecvTimeoutError::Timeout) => (),
+            _ => return Ok(()),
+        }
     }
 }
 
 impl Drop for Heartbeat {
     fn drop(&mut self) {
-        let _ = self.stop.send(());
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
+        self.stop();
     }
 }
 
@@ -634,7 +770,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
     let heartbeat = Heartbeat::start(
         ports.queues.clone(),
         token.clone(),
-        settings.heartbeat_interval,
+        HeartbeatPolicy::supervisor(settings.heartbeat_interval),
     );
     let cmux = RecordingBackend::over(
         ports.cmux,
@@ -1162,6 +1298,7 @@ impl Supervisor<'_> {
             {
                 warn!(error = %format_args!("{error:#}"), "the supervisor's stop could not be recorded: {error:#}");
             }
+            self.heartbeat.stop();
             if let Err(error) = self.queue.deregister_supervisor(&self.token) {
                 warn!(error = %format_args!("{error:#}"), "supervisor registration could not be removed: {error:#}");
             }

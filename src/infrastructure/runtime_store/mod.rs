@@ -21,8 +21,8 @@ use super::{
     },
 };
 use crate::application::{
-    AskStore, Generators, QueueRecords, RunCoordination, RunLog, RunRecovery, RunTransitions,
-    SessionRegistry, timestamp, unix_seconds,
+    AskStore, Generators, HeartbeatWrite, QueueRecords, RunCoordination, RunLog, RunRecovery,
+    RunTransitions, SessionRegistry, timestamp, unix_seconds,
 };
 use crate::domain::slot_limits::{SettingSource, SlotLimits};
 use crate::domain::worker_model::{self, WorkerTrial};
@@ -477,7 +477,9 @@ pub struct SqliteOpener {
 
 impl crate::application::QueueOpener for SqliteOpener {
     fn open(&self) -> Result<Box<dyn crate::application::Queue + Send>> {
-        let mut queue = SqliteQueue::open(&self.db)?.with_generators(self.generators.clone());
+        let mut queue = SqliteQueue::open(&self.db)
+            .map_err(super::sqlite::tag_busy)?
+            .with_generators(self.generators.clone());
         if let Some(actor) = &self.actor {
             queue = queue.with_actor(actor.clone());
         }

@@ -557,7 +557,10 @@ fn an_injected_clock_decides_lease_staleness_and_injected_ids_name_the_run() {
     // The store stamps heartbeats by the same clock, both the process
     // heartbeat and the renewal of a lease-guarded write.
     clock.set(T + HEARTBEAT_TIMEOUT_SECS + 1);
-    assert_eq!(queue.heartbeat(&LeaseToken::new("first")).unwrap(), 1);
+    assert_eq!(
+        queue.heartbeat(&LeaseToken::new("first")).unwrap().leases,
+        1
+    );
     let lease = queue.run_lease(run.id()).unwrap().unwrap();
     assert_eq!(lease.heartbeat_at, T + HEARTBEAT_TIMEOUT_SECS + 1);
     assert_eq!(

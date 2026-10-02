@@ -15,23 +15,28 @@ impl SqliteQueue {
 
     /// One heartbeat of a process identified by `token`: its registration
     /// (if it is a resident supervisor) and every run lease it holds, in one
-    /// transaction so `status` never sees them disagree. Returns the number
-    /// of leases refreshed.
-    pub fn heartbeat(&mut self, token: &LeaseToken) -> Result<usize> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+    /// transaction so `status` never sees them disagree. Returns whether the
+    /// registration was there and the number of leases refreshed; a write
+    /// that met another connection's lock fails with
+    /// [`crate::application::QueueBusy`] (task 1119).
+    pub fn heartbeat(&mut self, token: &LeaseToken) -> Result<HeartbeatWrite> {
         let now = self.generators.clock.now();
-        tx.execute(
-            "UPDATE supervisors SET heartbeat_at=?2 WHERE token=?1",
-            params![token, now],
-        )?;
-        let leases = tx.execute(
-            "UPDATE run_leases SET heartbeat_at=?2 WHERE token=?1",
-            params![token, now],
-        )?;
-        tx.commit()?;
-        Ok(leases)
+        let mut write = || -> Result<HeartbeatWrite> {
+            let tx = self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let registered = tx.execute(
+                "UPDATE supervisors SET heartbeat_at=?2 WHERE token=?1",
+                params![token, now],
+            )? > 0;
+            let leases = tx.execute(
+                "UPDATE run_leases SET heartbeat_at=?2 WHERE token=?1",
+                params![token, now],
+            )?;
+            tx.commit()?;
+            Ok(HeartbeatWrite { registered, leases })
+        };
+        write().map_err(crate::infrastructure::sqlite::tag_busy)
     }
 
     /// Register a resident `supervise` process before it claims anything,
@@ -685,7 +690,7 @@ impl RunCoordination for SqliteQueue {
     fn assert_repository(&self, common_dir: &str) -> Result<()> {
         SqliteQueue::assert_repository(self, common_dir)
     }
-    fn heartbeat(&mut self, token: &LeaseToken) -> Result<usize> {
+    fn heartbeat(&mut self, token: &LeaseToken) -> Result<HeartbeatWrite> {
         SqliteQueue::heartbeat(self, token)
     }
     fn processes(&self, id: &RunId) -> Result<Vec<RunProcess>> {

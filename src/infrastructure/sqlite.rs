@@ -308,10 +308,16 @@ impl SqliteQueue {
         Self::connect_with(path, flags)
     }
 
+    /// Wait `timeout` for another connection's write lock instead of
+    /// [`crate::application::QUEUE_BUSY_TIMEOUT`].
+    pub fn set_busy_timeout(&self, timeout: Duration) -> Result<()> {
+        Ok(self.conn.busy_timeout(timeout)?)
+    }
+
     fn connect_with(path: &Path, flags: OpenFlags) -> Result<Self> {
         let conn = Connection::open_with_flags(path, flags)
             .with_context(|| format!("open queue at {} (use init to create it)", path.display()))?;
-        conn.busy_timeout(Duration::from_secs(5))?;
+        conn.busy_timeout(crate::application::QUEUE_BUSY_TIMEOUT)?;
         conn.pragma_update(None, "foreign_keys", true)?;
         // Canonical, like the paths `supervise` plans under, so a relative or
         // symlinked `--db` still names the queue's real `runs/`.
@@ -1413,6 +1419,29 @@ const EDITABLE_TASK_FIELDS: [&str; 10] = [
     "provider",
     "worker_mode",
 ];
+
+/// `error` with [`crate::application::QueueBusy`] as its context when a
+/// statement in its chain failed because another connection held the lock
+/// (SQLite's busy or locked), so the application can tell it from a failure
+/// that does not pass (task 1119).
+pub(crate) fn tag_busy(error: anyhow::Error) -> anyhow::Error {
+    let busy = error.chain().any(|cause| {
+        cause
+            .downcast_ref::<rusqlite::Error>()
+            .and_then(rusqlite::Error::sqlite_error_code)
+            .is_some_and(|code| {
+                matches!(
+                    code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                )
+            })
+    });
+    if busy {
+        error.context(crate::application::QueueBusy)
+    } else {
+        error
+    }
+}
 
 /// Register `new` inside the caller's write transaction with
 /// `task_created` and its dependencies: what `add` does, and what a

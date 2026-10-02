@@ -235,6 +235,7 @@ event_kinds! {
     SupervisionFinished => "supervision_finished",
     SupervisorConfigChanged => "supervisor_config_changed",
     SupervisorHandedOff => "supervisor_handed_off",
+    SupervisorHeartbeatRetried => "supervisor_heartbeat_retried",
     SupervisorStarted => "supervisor_started",
     SupervisorStopped => "supervisor_stopped",
     TaskCreated => "task_created",
@@ -350,6 +351,8 @@ impl EventKind {
                 | SessionTurns
                 | SupervisorStarted
                 | SupervisorStopped
+                // A heartbeat written again after busy failures (task 1119).
+                | SupervisorHeartbeatRetried
                 | RunEnvChanged
                 | MarkRecorded
                 | MarkRetracted
@@ -953,6 +956,10 @@ mod tests {
                 "supervisor_config_changed",
             ),
             (EventKind::SupervisorHandedOff, "supervisor_handed_off"),
+            (
+                EventKind::SupervisorHeartbeatRetried,
+                "supervisor_heartbeat_retried",
+            ),
             (EventKind::SupervisorStarted, "supervisor_started"),
             (EventKind::SupervisorStopped, "supervisor_stopped"),
             (EventKind::TaskCreated, "task_created"),

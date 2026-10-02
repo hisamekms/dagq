@@ -1306,7 +1306,7 @@ impl OneShot {
                 actor: None,
             }),
             request.token.clone(),
-            supervisor::HEARTBEAT_INTERVAL,
+            supervisor::HeartbeatPolicy::leases(supervisor::HEARTBEAT_INTERVAL),
         );
         let outcome = integrator.land(&mut integration, &request)?;
         drop(heartbeat); // Stops the lease heartbeat before this process reports.

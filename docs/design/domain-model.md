@@ -385,7 +385,7 @@ domainの関数は業務上の拒否を`DomainError`（`src/domain/error.rs`）�
 | `exit_timeout` | `/exit`の後、exit timeout内にsessionが終わらなかった | （`timeout_secs`は既存） |
 | `heartbeat_lost` | wrapperのheartbeatが途絶え、processは生きている | （`heartbeat_age_secs`は既存） |
 | `wrapper_failed` | session wrapperがagentを動かせなかった | |
-| `lease_lost` | supervisorのheartbeatが失敗し、leaseを保てなかった | |
+| `lease_lost` | supervisorのheartbeatが失敗し、leaseを保てなかった（busyの書き直しがleaseのstaleに届く、busyでない失敗、登録の行が消えていた。task 1119） | |
 | `receipt_missing` | receiptが書かれていない | |
 | `receipt_invalid` | receiptが読めない・別のrunのもの・checkの説明が無い・commitの形式やfollow_upsが不正 | |
 | `worker_failed` | receiptがrunを`failed`と報告した | |
