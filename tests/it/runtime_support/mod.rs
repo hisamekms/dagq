@@ -1950,12 +1950,23 @@ pub fn wait_until(
     let started = Instant::now();
     let mut queue = SqliteQueue::open(db).unwrap();
     while !condition(&mut queue) {
-        assert!(
-            started.elapsed() < timeout,
-            "condition not met within {timeout:?}"
-        );
+        if started.elapsed() >= timeout {
+            print_wait_diagnostics(db);
+            panic!("condition not met within {timeout:?}");
+        }
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// Print the queue's events and the test process's thread stacks before a
+/// wait gives up, as a supervise past its limit does: a supervisor held in
+/// a call (as one in a read of a pipe another process inherited was, task
+/// 1017) shows where, which the timeout alone does not. The stacks come
+/// first, as in [`supervise_diagnostics`]: a stuck read or stub lock must
+/// not keep the supervisor from being sampled.
+pub fn print_wait_diagnostics(db: &Path) {
+    thread_stacks::print();
+    print_queue_events(db);
 }
 
 /// Run one fake agent script through supervise and return the task detail.

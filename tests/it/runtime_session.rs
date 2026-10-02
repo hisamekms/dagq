@@ -1441,7 +1441,10 @@ fn answer_over(
     let marker = run.idle_marker_path().unwrap();
     let started = Instant::now();
     while !marker.exists() {
-        assert!(started.elapsed() < Duration::from_secs(30));
+        if started.elapsed() >= Duration::from_secs(30) {
+            print_wait_diagnostics(&db);
+            panic!("the worker's idle marker did not appear within 30s");
+        }
         thread::sleep(Duration::from_millis(20));
     }
     queue.answer(ask.id, "use blue").unwrap();
