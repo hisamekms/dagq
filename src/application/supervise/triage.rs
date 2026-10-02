@@ -9,10 +9,12 @@ use super::*;
 use crate::domain::EventKind;
 use crate::domain::RecoveredLanding;
 use crate::domain::actor_model::{ActorLaunch, ModelRole};
+use crate::domain::landing_release;
 use crate::domain::language::with_instruction;
 use crate::domain::recovery::{
-    ENDED_ACTIONS, MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, RecoveryAction, VERIFY_FIX_OPTION,
-    attempts, current_alert, pending_request, run_processes, verification_failed, verify_fix_round,
+    ENDED_ACTIONS, MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, ProcessInfo, RecoveryAction,
+    VERIFY_FIX_OPTION, attempts, current_alert, pending_request, run_processes,
+    verification_failed, verify_fix_round,
 };
 
 impl Supervisor<'_> {
@@ -82,7 +84,8 @@ impl Supervisor<'_> {
     /// and `recover`'s own check passes (no registered process of the run
     /// alive, the lease's heartbeat older than the limit), and no process
     /// works in its worktree (a verification command the dead landing left
-    /// running). The run goes back to `awaiting_integration` unleased with
+    /// running; past their grace the runtime stops them by pid,
+    /// [`Self::stop_landing_processes`], task 1129). The run goes back to `awaiting_integration` unleased with
     /// `run_recovered` (`by: supervisor`), and `auto_repaired` (`repair:
     /// landing_released`) says what follows from its history
     /// ([`RunHistory::recovered_landing`]): an approved or passed run waits
@@ -110,20 +113,28 @@ impl Supervisor<'_> {
         let Some(worktree) = run.worktree_path().map(Path::new) else {
             return Ok(());
         };
-        let working = match self.processes.list() {
-            Ok(all) => run_processes(&all, worktree, None, None, std::process::id())
+        let listed = self.processes.list().map(|all| {
+            run_processes(&all, worktree, None, None, std::process::id())
                 .into_iter()
-                .map(|p| p.pid)
-                .collect::<Vec<_>>(),
+                .cloned()
+                .collect::<Vec<_>>()
+        });
+        let working = match listed {
+            Ok(working) => working,
             Err(error) => {
                 warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {} is integrating under a dead supervisor, but the processes in its worktree could not be listed: {error:#}; it is left integrating for a later pass", run.id());
+                self.landing_unlisted(run, now, &error)?;
                 return Ok(());
             }
         };
-        if !working.is_empty() {
-            info!(run_id = %run.id(), "run {} is integrating under a dead supervisor, but processes {working:?} still work in its worktree; it is released once they end", run.id());
-            return Ok(());
-        }
+        let stopped = if working.is_empty() {
+            None
+        } else {
+            match self.stop_landing_processes(run, worktree, &working, now)? {
+                Some(stopped) => Some(stopped),
+                None => return Ok(()),
+            }
+        };
         let report = json!({"run": health, "by": "supervisor"});
         let recovered = match self.queue.recover_run(run.id(), processes.len(), report) {
             Ok(recovered) => recovered,
@@ -157,6 +168,7 @@ impl Supervisor<'_> {
                         "lease": if leased.is_some() { "stale" } else { "none" },
                         "supervisor_pid": leased,
                         "worktree_processes": 0,
+                        "stopped_processes": stopped.unwrap_or(0),
                         "review_passed": history
                             .last(event_kind::REVIEW_FINISHED)
                             .is_some_and(|review| review.payload["verdict"] == "pass"),
@@ -180,6 +192,160 @@ impl Supervisor<'_> {
         }
         info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {} gave back the integration slot: its landing's supervisor is gone; it goes to {then} again", run.id(), run.task_id());
         Ok(())
+    }
+    /// The processes `working` left by the dead landing of `run` in its
+    /// worktree (task 1129): the first pass that finds them records
+    /// `landing_release_waiting`, from whose `seen_at` the grace
+    /// ([`landing_release::GRACE_SECS`]) counts across supervisors; past
+    /// it they are stopped by pid (SIGTERM, then SIGKILL after
+    /// [`super::recovery::STOP_GRACE`]) and `auto_repaired` (`repair:
+    /// landing_processes_stopped`) is recorded. Returns how many were
+    /// stopped once none is left, `None` while the run waits: within the
+    /// grace, or when one outlived its SIGKILL (`landing_release_stuck`,
+    /// the inbox's attention, recorded once for the landing), or a new one
+    /// started meanwhile.
+    fn stop_landing_processes(
+        &mut self,
+        run: &TaskRun,
+        worktree: &Path,
+        working: &[ProcessInfo],
+        now: i64,
+    ) -> Result<Option<usize>> {
+        let pids: Vec<u32> = working.iter().map(|p| p.pid).collect();
+        let events = self.queue.run_events(run.id())?;
+        let Some(since) = landing_release::waiting_since(&events) else {
+            self.note_landing(
+                run,
+                EventKind::LandingReleaseWaiting,
+                json!({"pids": pids, "seen_at": now, "grace_secs": landing_release::GRACE_SECS}),
+            );
+            info!(run_id = %run.id(), "run {} is integrating under a dead supervisor, but processes {pids:?} still work in its worktree; it is released once they end, or they are stopped after {}s", run.id(), landing_release::GRACE_SECS);
+            return Ok(None);
+        };
+        let waited = now - since;
+        if waited < landing_release::GRACE_SECS {
+            info!(run_id = %run.id(), "run {} is integrating under a dead supervisor, but processes {pids:?} still work in its worktree; waited {waited}s of {}s before they are stopped", run.id(), landing_release::GRACE_SECS);
+            return Ok(None);
+        }
+        // A process that outlived its SIGKILL is a person's now.
+        if landing_release::stuck(&events)
+            .is_some_and(|e| e.payload["cause"] == landing_release::SURVIVED_STOP)
+        {
+            return Ok(None);
+        }
+        for pid in &pids {
+            if let Err(error) = self.processes.terminate(*pid) {
+                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: SIGTERM to pid {pid} failed: {error:#}", run.id());
+            }
+        }
+        let alive = |sv: &Self| -> Vec<u32> {
+            pids.iter()
+                .copied()
+                .filter(|pid| {
+                    sv.processes.reap(*pid);
+                    sv.processes.alive(*pid)
+                })
+                .collect()
+        };
+        let started = Instant::now();
+        while started.elapsed() < super::recovery::STOP_GRACE && !alive(self).is_empty() {
+            thread::sleep(Duration::from_millis(50));
+        }
+        let killed = alive(self);
+        for pid in &killed {
+            if let Err(error) = self.processes.kill(*pid) {
+                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: SIGKILL to pid {pid} failed: {error:#}", run.id());
+            }
+        }
+        let started = Instant::now();
+        while started.elapsed() < super::recovery::STOP_GRACE && !alive(self).is_empty() {
+            thread::sleep(Duration::from_millis(50));
+        }
+        let left = alive(self);
+        if !left.is_empty() {
+            let processes: Vec<&ProcessInfo> =
+                working.iter().filter(|p| left.contains(&p.pid)).collect();
+            self.note_landing(
+                run,
+                EventKind::LandingReleaseStuck,
+                json!({
+                    "cause": landing_release::SURVIVED_STOP,
+                    "pids": left,
+                    "processes": processes,
+                    "waited_secs": waited,
+                    "error": format!("processes {left:?} in the worktree of the dead landing outlived SIGKILL; stop them by pid"),
+                }),
+            );
+            warn!(run_id = %run.id(), "run {} is integrating under a dead supervisor, and processes {left:?} in its worktree outlived SIGKILL; the inbox is told", run.id());
+            return Ok(None);
+        }
+        self.note_landing(
+            run,
+            EventKind::AutoRepaired,
+            json!({
+                "layer": "runtime",
+                "repair": "landing_processes_stopped",
+                "conditions": {
+                    "pids": pids,
+                    "waited_secs": waited,
+                    "grace_secs": landing_release::GRACE_SECS,
+                },
+                "detail": {
+                    "stopped": working.iter().map(|p| json!({
+                        "pid": p.pid,
+                        "ppid": p.ppid,
+                        "command": p.command,
+                        "cwd": p.cwd,
+                        "killed": killed.contains(&p.pid),
+                    })).collect::<Vec<_>>(),
+                },
+            }),
+        );
+        info!(run_id = %run.id(), "run {}: stopped processes {pids:?} the dead landing left in its worktree after {waited}s", run.id());
+        // One that started meanwhile waits for the next pass.
+        let again = self
+            .processes
+            .list()
+            .map(|all| !run_processes(&all, worktree, None, None, std::process::id()).is_empty());
+        Ok((!matches!(again, Ok(true) | Err(_))).then_some(pids.len()))
+    }
+    /// The processes of the worktree of `run`'s dead landing could not be
+    /// listed (`error`): the first time records `landing_release_waiting`
+    /// without `pids`, and past [`landing_release::UNLISTED_SECS`] from it
+    /// `landing_release_stuck` (`cause: unlisted`) is the inbox's, once.
+    fn landing_unlisted(&mut self, run: &TaskRun, now: i64, error: &anyhow::Error) -> Result<()> {
+        let events = self.queue.run_events(run.id())?;
+        match landing_release::waiting_since(&events) {
+            None => self.note_landing(
+                run,
+                EventKind::LandingReleaseWaiting,
+                json!({"pids": null, "seen_at": now, "error": format!("{error:#}")}),
+            ),
+            Some(since)
+                if now - since >= landing_release::UNLISTED_SECS
+                    && landing_release::stuck(&events).is_none() =>
+            {
+                self.note_landing(
+                    run,
+                    EventKind::LandingReleaseStuck,
+                    json!({
+                        "cause": landing_release::UNLISTED,
+                        "pids": [],
+                        "waited_secs": now - since,
+                        "error": format!("the processes in the worktree of the dead landing could not be listed: {error:#}"),
+                    }),
+                )
+            }
+            Some(_) => {}
+        }
+        Ok(())
+    }
+    /// Record `payload` as `kind` on `run`; a failure is only logged, as
+    /// the release goes on from the run's state at the next pass.
+    fn note_landing(&mut self, run: &TaskRun, kind: EventKind, payload: Value) {
+        if let Err(error) = self.queue.record_runtime_event(run.id(), kind, payload) {
+            warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: {kind} could not be recorded: {error:#}", run.id());
+        }
     }
     /// Apply the answered `decide` asks of the recovery job (an option the
     /// ask offered) to their `failed` / `interrupted` run nobody leases:

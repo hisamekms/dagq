@@ -712,6 +712,7 @@ pub mod ids;
 mod input;
 pub mod kpi;
 pub mod landing_branch;
+pub mod landing_release;
 pub mod language;
 pub mod lint;
 pub mod marks;
@@ -1592,6 +1593,11 @@ pub enum AttentionNext {
     /// its workspace. Once it exited (`session_exited`), the run's own
     /// attention (`review and integrate`, `recover run`) comes back.
     ExitSession,
+    /// The release of a run's dead landing could not stop the processes
+    /// left in its worktree, or list them (`landing_release_stuck`, task
+    /// 1129): a person stops the named processes by pid (or makes the host
+    /// list processes again). It ends once the supervisor released the run.
+    StopLandingProcesses,
 }
 
 /// How many times the supervisor resumes one `needs_session` run (one
@@ -1644,6 +1650,7 @@ impl fmt::Display for AttentionNext {
             Self::QueueServiceStatus => f.write_str("dagq service status"),
             Self::CheckE2e => f.write_str("check the e2e host"),
             Self::ExitSession => f.write_str("exit the session"),
+            Self::StopLandingProcesses => f.write_str("stop the dead landing's processes"),
         }
     }
 }
@@ -1664,6 +1671,7 @@ pub const ATTENTION_KINDS: &[&str] = &[
     "integration_failed",
     "integration_error",
     event_kind::INTEGRATION_HELD,
+    event_kind::LANDING_RELEASE_STUCK,
     "push_failed",
     "runtime_error",
     "resume_finished",
@@ -1859,6 +1867,9 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         // A verification command failed on the host again after its retry
         // (task 639): the run waits for a person, not a resume.
         (event_kind::INTEGRATION_HELD, _) => Some(AttentionNext::ReviewAndIntegrate),
+        // The release of a dead landing could not stop what its worktree
+        // still runs (task 1129).
+        (event_kind::LANDING_RELEASE_STUCK, _) => Some(AttentionNext::StopLandingProcesses),
         (run_env::RUN_ENV_PROGRAM_MISSING, _) => Some(AttentionNext::InstallTool),
         // The failure and the breaking build of the automatic update reach
         // the inbox as their asks; only the replaced binary is a notice.
@@ -2743,6 +2754,11 @@ mod attention_tests {
                 Some(RecoverRun),
             ),
             (
+                "landing_release_stuck",
+                json!({"cause": "survived_stop", "pids": [7], "waited_secs": 1801}),
+                Some(StopLandingProcesses),
+            ),
+            (
                 "prompt_waiting",
                 json!({"workspace_id": "w", "excerpt": "x", "screen_hash": "h"}),
                 None,
@@ -2931,6 +2947,10 @@ mod attention_tests {
         assert_eq!(QueuedToLand.to_string(), "queued to land (runtime)");
         assert_eq!(RecoverRun.to_string(), "recover run");
         assert_eq!(ExitSession.to_string(), "exit the session");
+        assert_eq!(
+            StopLandingProcesses.to_string(),
+            "stop the dead landing's processes"
+        );
         assert_eq!(PushMain.to_string(), "push main");
         assert_eq!(InstallTool.to_string(), "install tool");
         assert_eq!(CheckE2e.to_string(), "check the e2e host");

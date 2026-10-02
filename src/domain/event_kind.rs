@@ -128,6 +128,8 @@ event_kinds! {
     LandingDecided => "landing_decided",
     LandingHeld => "landing_held",
     LandingQueued => "landing_queued",
+    LandingReleaseStuck => "landing_release_stuck",
+    LandingReleaseWaiting => "landing_release_waiting",
     LandingRecheckFailed => "landing_recheck_failed",
     LandingRecheckFinished => "landing_recheck_finished",
     LandingResumed => "landing_resumed",
@@ -550,6 +552,14 @@ pub const JOB_RESTARTED: &str = EventKind::JobRestarted.as_str();
 pub const KNOWN_DIALOG_UNANSWERED: &str = EventKind::KnownDialogUnanswered.as_str();
 pub const LANDING_DECIDED: &str = EventKind::LandingDecided.as_str();
 pub const LANDING_QUEUED: &str = EventKind::LandingQueued.as_str();
+/// The release of a dead landing could not stop the processes left in its
+/// worktree, or list them (task 1129: `cause`, `pids`, `waited_secs`): the
+/// inbox's attention while the run stays `integrating`.
+pub const LANDING_RELEASE_STUCK: &str = EventKind::LandingReleaseStuck.as_str();
+/// The release of a dead landing first found processes left in its
+/// worktree, or could not list them (task 1129: `pids`, `seen_at`); its
+/// grace counts from `seen_at`.
+pub const LANDING_RELEASE_WAITING: &str = EventKind::LandingReleaseWaiting.as_str();
 pub const LANDING_RECHECK_FAILED: &str = EventKind::LandingRecheckFailed.as_str();
 pub const LEASE_ACQUIRED: &str = EventKind::LeaseAcquired.as_str();
 pub const LEASE_RELEASED: &str = EventKind::LeaseReleased.as_str();
@@ -837,6 +847,8 @@ mod tests {
             (EventKind::LandingDecided, "landing_decided"),
             (EventKind::LandingHeld, "landing_held"),
             (EventKind::LandingQueued, "landing_queued"),
+            (EventKind::LandingReleaseStuck, "landing_release_stuck"),
+            (EventKind::LandingReleaseWaiting, "landing_release_waiting"),
             (EventKind::LandingRecheckFailed, "landing_recheck_failed"),
             (
                 EventKind::LandingRecheckFinished,

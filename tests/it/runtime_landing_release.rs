@@ -2,10 +2,16 @@
 //! the integration slot back on the next supervisor's pass, lands again
 //! without a person when it was approved or passed, is reviewed again when
 //! not, lands once a person's `recover` put it back, and is never landed
-//! twice when its landing already moved main (task 1118).
+//! twice when its landing already moved main (task 1118). Processes the
+//! dead landing left in its worktree are waited for, stopped by pid past
+//! their grace, and the inbox's once when they cannot be (task 1129).
 use crate::runtime_support;
+use dagq::application::ProcessControl;
+use dagq::domain::landing_release::{GRACE_SECS, UNLISTED_SECS};
 use dagq::domain::{EventKind, LeaseToken};
-use std::time::Instant;
+use dagq::infrastructure::adapters::SystemProcesses;
+use std::sync::atomic::Ordering;
+use std::time::{Instant, UNIX_EPOCH};
 
 use runtime_support::*;
 
@@ -168,6 +174,7 @@ fn a_dead_landing_is_not_released_while_a_process_works_in_its_worktree() {
         .unwrap()
         .trim()
         .to_owned();
+    let pid: u32 = verifying.parse().unwrap();
     // Task 2 cannot land either while task 1 holds the slot; its review
     // does not come.
     let reviewer = TestReviewer::new(&[verdict_json("pass"), verdict_json("pass")]);
@@ -204,9 +211,194 @@ fn a_dead_landing_is_not_released_while_a_process_works_in_its_worktree() {
         let detail = queue.show(TaskId::new(task)).unwrap();
         assert_eq!(detail.runs[0].status(), RunStatus::Integrated, "{task}");
     }
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(repairs(&detail, "landing_released").len(), 1);
+    // Within its grace the process is only waited for (task 1129): the
+    // wait is recorded once, from the first pass that saw it, and nothing
+    // was stopped (the test's own kill above succeeded).
+    let waiting = payloads(&detail, "landing_release_waiting");
+    assert_eq!(waiting.len(), 1, "{:?}", event_kinds(&detail));
+    assert_eq!(waiting[0]["pids"], json!([pid]));
+    assert!(repairs(&detail, "landing_processes_stopped").is_empty());
+    assert!(payloads(&detail, "landing_release_stuck").is_empty());
+}
+
+/// A process started in `dir` that outlives its parent (as a dead
+/// landing's verification command does): not a child of the test process,
+/// which is the supervisor's.
+fn orphan_in(dir: &Path) -> u32 {
+    let out = Command::new("sh")
+        .args(["-c", "sleep 120 >/dev/null 2>&1 & echo $!"])
+        .current_dir(dir)
+        .bounded_output()
+        .unwrap();
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+/// What a previous supervisor recorded when it first found `pids` in the
+/// worktree of `run`'s dead landing, `ago` seconds back.
+fn waited_since(db: &Path, run: &TaskRun, pids: &[u32], ago: i64) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    SqliteQueue::open(db)
+        .unwrap()
+        .record_runtime_event(
+            run.id(),
+            EventKind::LandingReleaseWaiting,
+            json!({"pids": pids, "seen_at": now - ago}),
+        )
+        .unwrap();
+}
+
+/// Stops a pid the test started, if it still runs.
+struct Reaped(u32);
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        if SystemProcesses.alive(self.0) {
+            let _ = SystemProcesses.kill(self.0);
+        }
+    }
+}
+
+/// A process the dead landing left in its worktree past its grace, counted
+/// from what an earlier supervisor saw (the supervisor that replaced it
+/// does not count again), is stopped by pid on the next pass: the run is
+/// released and lands, and the other task's landing follows. A process
+/// outside the worktree is left alone.
+#[test]
+fn a_process_past_its_grace_is_stopped_and_the_dead_landing_released() {
+    let (_dir, repo, db, run, backend) = dead_landing(Some("pass"));
+    let worktree = PathBuf::from(run.worktree_path().unwrap());
+    let hung = orphan_in(&worktree);
+    let _hung = Reaped(hung);
+    let outside = orphan_in(&repo);
+    let _outside = Reaped(outside);
+    waited_since(&db, &run, &[hung], GRACE_SECS + 5);
+    let reviewer = TestReviewer::new(&[verdict_json("pass")]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert!(!SystemProcesses.alive(hung));
+    assert!(SystemProcesses.alive(outside));
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
+    let stopped = repairs(&detail, "landing_processes_stopped");
+    assert_eq!(stopped.len(), 1, "{:?}", event_kinds(&detail));
+    assert_eq!(stopped[0]["layer"], "runtime");
+    assert_eq!(stopped[0]["conditions"]["pids"], json!([hung]));
+    assert!(stopped[0]["conditions"]["waited_secs"].as_i64().unwrap() >= GRACE_SECS);
+    assert_eq!(stopped[0]["detail"]["stopped"][0]["pid"], hung);
+    let released = repairs(&detail, "landing_released");
+    assert_eq!(released.len(), 1);
+    assert_eq!(released[0]["conditions"]["stopped_processes"], 1);
+    assert_eq!(released[0]["detail"]["then"], "land");
+    // The wait of the earlier supervisor is the only one.
+    assert_eq!(payloads(&detail, "landing_release_waiting").len(), 1);
+    assert!(payloads(&detail, "landing_release_stuck").is_empty());
     assert_eq!(
-        repairs(&queue.show(TaskId::new(1)).unwrap(), "landing_released").len(),
-        1
+        queue.show(TaskId::new(2)).unwrap().runs[0].status(),
+        RunStatus::Integrated
+    );
+}
+
+/// The host's processes, whose signals reach none of them: a process that
+/// outlives its SIGKILL.
+struct Unstoppable;
+
+impl ProcessControl for Unstoppable {
+    fn alive(&self, pid: u32) -> bool {
+        SystemProcesses.alive(pid)
+    }
+    fn terminate(&self, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn interrupt(&self, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn kill(&self, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn list(&self) -> Result<Vec<dagq::domain::recovery::ProcessInfo>> {
+        SystemProcesses.list()
+    }
+}
+
+/// A process that outlives its stop leaves the run integrating and is the
+/// inbox's attention, once however many passes go by; once a person
+/// stopped it, the next pass releases the run and both tasks land.
+#[test]
+fn a_process_that_outlives_its_stop_is_the_inboxs_once() {
+    let (_dir, repo, db, run, backend) = dead_landing(Some("pass"));
+    let worktree = PathBuf::from(run.worktree_path().unwrap());
+    let hung = orphan_in(&worktree);
+    let _hung = Reaped(hung);
+    waited_since(&db, &run, &[hung], GRACE_SECS + 5);
+    let options = SuperviseOptions {
+        processes: Some(runtime::ProcessesPort(Arc::new(Unstoppable))),
+        ..supervise_options(4, true)
+    };
+    let passes = options.passes.clone();
+    let person = {
+        let (db, run) = (db.clone(), run.clone());
+        thread::spawn(move || {
+            let mut queue = SqliteQueue::open(&db).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(60);
+            let seen = loop {
+                let detail = queue.show(TaskId::new(1)).unwrap();
+                if !payloads(&detail, "landing_release_stuck").is_empty() {
+                    break passes.load(Ordering::SeqCst);
+                }
+                assert!(Instant::now() < deadline, "the stop was never given up");
+                thread::sleep(TEST_TICK);
+            };
+            // Passes go by without another attention.
+            while passes.load(Ordering::SeqCst) < seen + 3 {
+                assert!(Instant::now() < deadline, "no pass went by");
+                thread::sleep(TEST_TICK);
+            }
+            let status = runtime::status(&db).unwrap();
+            let still = queue.run(run.id()).unwrap().status();
+            let killed = SystemProcesses.kill(hung);
+            (status, still, killed.is_ok())
+        })
+    };
+    let reviewer = TestReviewer::new(&[verdict_json("pass")]);
+    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let (status, still, killed) = person.join().unwrap();
+    assert!(killed);
+    assert_eq!(still, RunStatus::Integrating);
+    let entry = status["attention"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["task_id"] == 1)
+        .unwrap_or_else(|| panic!("{status}"));
+    assert_eq!(entry["kind"], "landing_release_stuck", "{status}");
+    assert_eq!(
+        entry["next"], "stop the dead landing's processes",
+        "{status}"
+    );
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let stuck = payloads(&detail, "landing_release_stuck");
+    assert_eq!(stuck.len(), 1, "{:?}", event_kinds(&detail));
+    assert_eq!(stuck[0]["cause"], "survived_stop");
+    assert_eq!(stuck[0]["pids"], json!([hung]));
+    assert!(repairs(&detail, "landing_processes_stopped").is_empty());
+    assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
+    assert_eq!(repairs(&detail, "landing_released").len(), 1);
+    assert_eq!(
+        queue.show(TaskId::new(2)).unwrap().runs[0].status(),
+        RunStatus::Integrated
     );
 }
 
@@ -352,4 +544,197 @@ fn a_draining_supervisor_releases_a_dead_landing_and_leaves_it_queued() {
         .find(|a| a["task_id"] == 1)
         .unwrap_or_else(|| panic!("{status}"));
     assert_eq!(entry["next"], "queued to land (runtime)", "{status}");
+}
+
+/// The host's processes, which cannot be listed while `failing` holds.
+struct Unlisted {
+    failing: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ProcessControl for Unlisted {
+    fn alive(&self, pid: u32) -> bool {
+        SystemProcesses.alive(pid)
+    }
+    fn terminate(&self, pid: u32) -> Result<()> {
+        SystemProcesses.terminate(pid)
+    }
+    fn interrupt(&self, pid: u32) -> Result<()> {
+        SystemProcesses.interrupt(pid)
+    }
+    fn kill(&self, pid: u32) -> Result<()> {
+        SystemProcesses.kill(pid)
+    }
+    fn list(&self) -> Result<Vec<dagq::domain::recovery::ProcessInfo>> {
+        if self.failing.load(Ordering::SeqCst) {
+            bail!("ps failed");
+        }
+        SystemProcesses.list()
+    }
+}
+
+/// Processes that cannot be listed for twice the grace since the first
+/// pass that could not list them leave the run integrating and are the
+/// inbox's attention, once however many passes go by; once they can be
+/// listed again (and none is left), the run is released and both tasks
+/// land.
+#[test]
+fn processes_unlisted_past_twice_the_grace_are_the_inboxs_once() {
+    let (_dir, repo, db, run, backend) = dead_landing(Some("pass"));
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    // What an earlier supervisor recorded when it first could not list.
+    SqliteQueue::open(&db)
+        .unwrap()
+        .record_runtime_event(
+            run.id(),
+            EventKind::LandingReleaseWaiting,
+            json!({"pids": null, "seen_at": now - UNLISTED_SECS - 5, "error": "ps failed"}),
+        )
+        .unwrap();
+    let failing = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let options = SuperviseOptions {
+        processes: Some(runtime::ProcessesPort(Arc::new(Unlisted {
+            failing: failing.clone(),
+        }))),
+        ..supervise_options(4, true)
+    };
+    let passes = options.passes.clone();
+    let person = {
+        let (db, run) = (db.clone(), run.clone());
+        thread::spawn(move || {
+            let mut queue = SqliteQueue::open(&db).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(60);
+            let seen = loop {
+                let detail = queue.show(TaskId::new(1)).unwrap();
+                if !payloads(&detail, "landing_release_stuck").is_empty() {
+                    break passes.load(Ordering::SeqCst);
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "the unlisted wait was never given up"
+                );
+                thread::sleep(TEST_TICK);
+            };
+            while passes.load(Ordering::SeqCst) < seen + 3 {
+                assert!(Instant::now() < deadline, "no pass went by");
+                thread::sleep(TEST_TICK);
+            }
+            let status = runtime::status(&db).unwrap();
+            let still = queue.run(run.id()).unwrap().status();
+            let stuck = payloads(
+                &queue.show(TaskId::new(1)).unwrap(),
+                "landing_release_stuck",
+            )
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+            failing.store(false, Ordering::SeqCst);
+            (status, still, stuck)
+        })
+    };
+    let reviewer = TestReviewer::new(&[verdict_json("pass")]);
+    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let (status, still, stuck) = person.join().unwrap();
+    assert_eq!(still, RunStatus::Integrating);
+    assert_eq!(stuck.len(), 1, "{stuck:?}");
+    assert_eq!(stuck[0]["cause"], "unlisted");
+    assert!(stuck[0]["waited_secs"].as_i64().unwrap() >= UNLISTED_SECS);
+    let entry = status["attention"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["task_id"] == 1)
+        .unwrap_or_else(|| panic!("{status}"));
+    assert_eq!(entry["kind"], "landing_release_stuck", "{status}");
+    assert_eq!(
+        entry["next"], "stop the dead landing's processes",
+        "{status}"
+    );
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(payloads(&detail, "landing_release_stuck").len(), 1);
+    // The earlier supervisor's wait is the only one.
+    assert_eq!(payloads(&detail, "landing_release_waiting").len(), 1);
+    assert!(repairs(&detail, "landing_processes_stopped").is_empty());
+    assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
+    assert_eq!(repairs(&detail, "landing_released").len(), 1);
+    assert_eq!(
+        queue.show(TaskId::new(2)).unwrap().runs[0].status(),
+        RunStatus::Integrated
+    );
+}
+
+/// An `integrating` run whose landing's supervisor lives (its pid alive,
+/// its heartbeat fresh) is not the release's: a process in its worktree,
+/// even one seen past the grace, is neither stopped nor waited for, and
+/// the run is not released. Once that supervisor is gone (and its process
+/// with it), the run is released and lands.
+#[test]
+fn a_live_supervisors_landing_and_its_processes_are_left_alone() {
+    let (_dir, repo, db, run, backend) = dead_landing(Some("pass"));
+    let worktree = PathBuf::from(run.worktree_path().unwrap());
+    let hung = orphan_in(&worktree);
+    let _hung = Reaped(hung);
+    waited_since(&db, &run, &[hung], GRACE_SECS + 5);
+    // The landing's supervisor: a live process of the test's.
+    let mut landing = Command::new("sleep").arg("120").spawn().unwrap();
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE run_leases SET heartbeat_at=unixepoch(), pid=?1",
+            [landing.id()],
+        )
+        .unwrap();
+    let options = supervise_options(4, true);
+    let passes = options.passes.clone();
+    let person = {
+        let (db, run) = (db.clone(), run.clone());
+        thread::spawn(move || {
+            let mut queue = SqliteQueue::open(&db).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(60);
+            let start = passes.load(Ordering::SeqCst);
+            while passes.load(Ordering::SeqCst) < start + 5 {
+                assert!(Instant::now() < deadline, "no pass went by");
+                Connection::open(&db)
+                    .unwrap()
+                    .execute("UPDATE run_leases SET heartbeat_at=unixepoch()", [])
+                    .unwrap();
+                thread::sleep(TEST_TICK);
+            }
+            let still = queue.run(run.id()).unwrap().status();
+            let alive = SystemProcesses.alive(hung);
+            let detail = queue.show(TaskId::new(1)).unwrap();
+            let records = [
+                payloads(&detail, "landing_release_waiting").len(),
+                repairs(&detail, "landing_processes_stopped").len(),
+                repairs(&detail, "landing_released").len(),
+                payloads(&detail, "landing_release_stuck").len(),
+            ];
+            // The landing's supervisor dies, and its process with it.
+            SystemProcesses.kill(hung).unwrap();
+            landing.kill().unwrap();
+            landing.wait().unwrap();
+            Connection::open(&db)
+                .unwrap()
+                .execute("UPDATE run_leases SET heartbeat_at=0", [])
+                .unwrap();
+            (still, alive, records)
+        })
+    };
+    let reviewer = TestReviewer::new(&[verdict_json("pass")]);
+    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let (still, alive, records) = person.join().unwrap();
+    assert_eq!(still, RunStatus::Integrating);
+    assert!(alive, "the live landing's process was stopped");
+    // Only the wait the test recorded; nothing stopped, released or stuck.
+    assert_eq!(records, [1, 0, 0, 0]);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
+    assert!(repairs(&detail, "landing_processes_stopped").is_empty());
+    assert_eq!(repairs(&detail, "landing_released").len(), 1);
 }

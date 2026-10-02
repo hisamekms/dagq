@@ -50,7 +50,7 @@ pub(super) const STUCK_EXIT_HELD_ACTIONS: [&str; 3] =
     ["answer_known_dialog", "stop_processes", "wait"];
 
 /// How long a stopped process gets between SIGTERM and SIGKILL.
-const STOP_GRACE: Duration = Duration::from_secs(3);
+pub(super) const STOP_GRACE: Duration = Duration::from_secs(3);
 
 /// What a recovery job printed: its verdict, or why there is none.
 type JobOutcome = std::result::Result<RecoveryVerdict, String>;

@@ -920,6 +920,26 @@ pub fn attention(
             });
             continue;
         }
+        // A dead landing whose worktree's processes the runtime could not
+        // stop holds the integration slot until a person stops them (task
+        // 1129).
+        if run.status() == RunStatus::Integrating
+            && let Some(event) = crate::domain::landing_release::stuck(&events)
+        {
+            attention.push(Attention {
+                run_id: Some(run.id().clone()),
+                task_id: Some(run.task_id()),
+                pid: None,
+                ask_id: None,
+                reason_category: None,
+                status: run.status().as_str().into(),
+                kind: event.kind.clone(),
+                last_error: event.payload["error"].as_str().map(truncate_reason),
+                last_error_code: None,
+                next: AttentionNext::StopLandingProcesses,
+            });
+            continue;
+        }
         // A live session whose recovery job failed under a runtime from
         // before ADR-t609-1 waits for a person to recover it by hand
         // (ADR-0047 decision 40), whatever its status; a failed job opens
