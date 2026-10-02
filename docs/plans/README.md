@@ -37,4 +37,5 @@ tags:
 - [非対話の worker の ask と待ちをゼロベースの形へ移す時期を判断する計測の項目・基準値・条件の案](zero-based-headless-readiness.md)（goal 86、task 1369）
 - [非対話の worker の workspace のコスト（cmux の呼び出しの失敗・残った workspace・startup・待ちの間の workspace）の基準値と、background の wrapper に切り替えた後の評価のコマンドと戻す基準の案](headless-background-evaluation.md)（goal 89、task 1407）
 - [runtime の planner の対話の期間の基準値と、非対話に切り替えた後の評価のコマンドと、対話に戻す基準の案](headless-planner-evaluation.md)（goal 87、task 1401）
+- [スパイク：run の review job の中で review の subagent を Claude と Codex の非対話の呼び出しで動かせるか](review-subagents-spike.md)（goal 94、task 1453）
 - [2026-09-26以降の本番のaskのkindごとの件数と、answerが推奨・見立てどおりだった割合](ask-outcomes-2026-09-26.md)（goal 42、task 451）

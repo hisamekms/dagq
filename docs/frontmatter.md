@@ -4,8 +4,8 @@ type: design
 title: Documentation frontmatter specification
 status: current
 created: 2026-09-21
-updated: 2026-09-30
-last_verified: 2026-09-30
+updated: 2026-10-03
+last_verified: 2026-10-03
 tags:
   - documentation
   - conventions
@@ -43,8 +43,9 @@ related:
 | `adr` | `proposed`, `accepted`, `rejected`, `superseded`, `deprecated` | `accepted_on`, `superseded_by`, `superseded_on`, `deprecated_on`, `supersedes`, `amends`, `amended_by` (see [ADR fields](#adr-fields)) |
 | `design` | `draft`, `current`, `deprecated`, `superseded` | `last_verified`, optional `scope` |
 | `plan` | `proposed`, `active`, `blocked`, `completed`, `archived` | optional `milestone`, `target`, `depends_on` |
+| `development` | `current`, `deprecated` | optional `last_verified` |
 
-Design documents describe the current state and may be edited. Plans describe intended work and may be edited while active. The progress and state of individual tasks live in the dagq queue, not in documents.
+Design documents describe the current state and may be edited. Development documents (`docs/development/`) hold this repository's current development rules (how a planner chooses verify, paths, evidence and change, what tests a worker runs, the test and documentation rules) and may be edited, with IDs `development-<slug>`; the reasons and history stay in ADRs and plans ([ADR-t1453-2](adr/2026-10-03-t1453-2-ownership-of-agents-md-plugin-development-docs-and-config.md)). Plans describe intended work and may be edited while active. The progress and state of individual tasks live in the dagq queue, not in documents.
 
 ## ADR fields
 
