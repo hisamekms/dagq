@@ -1445,6 +1445,9 @@ enum Afterwards {
     Hang,
     /// Die while asked, before taking the handoff.
     DieBeforeTaking,
+    /// Record its stop request (`supervisor_draining`, task 1277) while
+    /// asked and drain on under the old build, heartbeating.
+    Stop,
 }
 
 /// A row of `pid` under the new build that an earlier process of a reused
@@ -1495,6 +1498,15 @@ fn take_as(fixture: &Fixture, processes: &FakeProcesses, token: &str, pid: u32, 
         }
         Afterwards::DieBeforeTaking => {
             processes.dead.lock().unwrap().insert(pid);
+            return;
+        }
+        Afterwards::Stop => {
+            queue
+                .record_queue_event(
+                    dagq::domain::EventKind::SupervisorDraining,
+                    json!({"supervisor": token, "pid": pid, "reason": "stop_requested"}),
+                )
+                .unwrap();
             return;
         }
         _ => {}
@@ -1549,6 +1561,16 @@ fn take_as(fixture: &Fixture, processes: &FakeProcesses, token: &str, pid: u32, 
 /// `other` afterwards: the report, the binaries' calls and the tokens
 /// started again.
 fn update_two(auto: Afterwards, other: Afterwards) -> (Value, Vec<String>, Vec<String>, PathBuf) {
+    let (report, calls, restarted, target, _) = update_two_steps(auto, other);
+    (report, calls, restarted, target)
+}
+
+/// [`update_two`], with the payload of the `update_failed` the job
+/// recorded, if any.
+fn update_two_steps(
+    auto: Afterwards,
+    other: Afterwards,
+) -> (Value, Vec<String>, Vec<String>, PathBuf, Option<Value>) {
     let fixture = fixture();
     let mut queue = auto_supervisor(&fixture);
     queue
@@ -1585,7 +1607,66 @@ fn update_two(auto: Afterwards, other: Afterwards) -> (Value, Vec<String>, Vec<S
         run_update_job(&fixture, &binaries, &processes, &restarted)
     });
     let restarted = restarted.lock().unwrap().clone();
-    (report, binaries.calls(), restarted, target)
+    let failed = queue
+        .update_events(20)
+        .unwrap()
+        .into_iter()
+        .find(|u| u.kind == "update_failed")
+        .map(|u| u.payload);
+    (report, binaries.calls(), restarted, target, failed)
+}
+
+/// A supervisor that drains for a stop request does not take the handoff
+/// and fails at once as stopping (task 1277): `update_failed`'s
+/// `supervisors[]` marks it `stopping: true`, both when another one took
+/// the handoff and the binary stays (a), and when every one failed and it
+/// went back (b).
+#[test]
+fn the_update_job_marks_a_supervisor_that_stops_as_stopping() {
+    let is_stopping = |supervisors: &Value, token: &str| {
+        let one = supervisors
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["token"] == token)
+            .unwrap()
+            .clone();
+        assert!(
+            one["error"]
+                .as_str()
+                .unwrap()
+                .contains("is stopping (a stop request wins over the handoff)"),
+            "{one}"
+        );
+        one["stopping"] == true
+    };
+    let (report, _, restarted, _, failed) =
+        update_two_steps(Afterwards::Heartbeat, Afterwards::Stop);
+    assert_eq!(report["stage"], "handoff", "{report}");
+    assert_eq!(report["kept"], true, "{report}");
+    assert!(restarted.is_empty(), "{restarted:?}");
+    let failed = failed.unwrap();
+    assert!(is_stopping(&failed["supervisors"], "other"), "{failed}");
+    let auto = failed["supervisors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["token"] == "auto")
+        .unwrap();
+    assert_eq!(auto.get("stopping"), None, "{failed}");
+
+    let (report, calls, restarted, target, failed) =
+        update_two_steps(Afterwards::Stop, Afterwards::Stop);
+    assert_eq!(report["stage"], "install", "{report}");
+    assert_eq!(report["kept"], false, "{report}");
+    assert!(
+        calls.contains(&format!("restore {}", target.display())),
+        "{calls:?}"
+    );
+    assert!(restarted.is_empty(), "{restarted:?}");
+    let failed = failed.unwrap();
+    assert!(is_stopping(&failed["supervisors"], "auto"), "{failed}");
+    assert!(is_stopping(&failed["supervisors"], "other"), "{failed}");
 }
 
 /// The watch follows every supervisor the install handed over (task 497):

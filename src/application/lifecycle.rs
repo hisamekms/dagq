@@ -1186,6 +1186,9 @@ pub struct Handed {
     /// pid registered under again.
     pub now: Option<LeaseToken>,
     pub error: Option<String>,
+    /// It did not take the handoff because it drains for a stop request
+    /// (its `supervisor_draining`, task 1277): a stop wins over the handoff.
+    pub stopping: bool,
 }
 
 impl Handed {
@@ -1204,6 +1207,9 @@ impl Handed {
         match &self.error {
             Some(error) => value["error"] = json!(error),
             None => value["previous_token"] = json!(registration.token),
+        }
+        if self.stopping {
+            value["stopping"] = json!(true);
         }
         value
     }
@@ -1333,21 +1339,25 @@ run `up`",
                 registration: registration.clone(),
                 now: None,
                 error,
+                stopping: false,
             },
             false,
         ));
     }
     let deadline = Instant::now() + timeout;
     loop {
-        let now = clock.now();
-        let registrations = queue.supervisors()?;
+        let stops = Stops::around(queue, || {
+            let now = clock.now();
+            Ok((now, queue.supervisors()?))
+        })?;
+        let (now, registrations) = (stops.now, &stops.registrations);
         let expired = Instant::now() >= deadline;
         for (handed, timed_out) in handed
             .iter_mut()
             .filter(|(h, _)| h.now.is_none() && h.error.is_none())
         {
             match look_at_handoff(
-                &registrations,
+                registrations,
                 &handed.registration,
                 processes,
                 now,
@@ -1356,6 +1366,14 @@ run `up`",
                 version,
             ) {
                 Ok(Some(token)) => handed.now = Some(token),
+                // A stop wins over the handoff, also when its drain ended
+                // (deregistered) before this look.
+                Ok(None) if stops.before.contains(&handed.registration.token) => {
+                    stopped_instead(handed, binary_text);
+                }
+                Err(_) if stops.after.contains(&handed.registration.token) => {
+                    stopped_instead(handed, binary_text);
+                }
                 Ok(None) if expired => {
                     handed.error = Some(format!(
                         "supervisor {} (pid {}) did not take the handoff to {binary_text} within \
@@ -1380,6 +1398,66 @@ run `up`",
     }
 }
 
+/// How many of the latest `supervisor_draining` events the handoff reads
+/// each look: more than the supervisors of one queue ever drain at once.
+const DRAINING_LOOKED_AT: usize = 64;
+
+/// The tokens of the supervisors that recorded a stop request
+/// (`supervisor_draining`, task 1277). A stop wins over a handoff and a
+/// draining supervisor ends without exec'ing, so one that recorded it,
+/// before or after it was asked, never takes the handoff.
+fn stopping_supervisors(queue: &dyn Queue) -> Result<HashSet<LeaseToken>> {
+    Ok(queue
+        .latest_events_of(EventKind::SupervisorDraining.as_str(), DRAINING_LOOKED_AT)?
+        .iter()
+        .filter_map(|event| event.payload["supervisor"].as_str())
+        .map(LeaseToken::new)
+        .collect())
+}
+
+/// One look's registrations, read between two reads of the stop requests
+/// (task 1277). A supervisor still asked in the registrations is stopping
+/// only by the stops read `before` them: one that registered again under
+/// the new build and was stopped after that read took the handoff. One
+/// that failed (deregistered, no longer heartbeating) is stopping by the
+/// stops read `after` them too: a supervisor records its stop before its
+/// drain ends and it deregisters, so one gone from the registrations
+/// after a stop the first read missed shows it in the second.
+struct Stops {
+    before: HashSet<LeaseToken>,
+    now: i64,
+    registrations: Vec<SupervisorRegistration>,
+    after: HashSet<LeaseToken>,
+}
+
+impl Stops {
+    fn around(
+        queue: &dyn Queue,
+        read: impl FnOnce() -> Result<(i64, Vec<SupervisorRegistration>)>,
+    ) -> Result<Self> {
+        let before = stopping_supervisors(queue)?;
+        let (now, registrations) = read()?;
+        let after = stopping_supervisors(queue)?;
+        Ok(Self {
+            before,
+            now,
+            registrations,
+            after,
+        })
+    }
+}
+
+/// Fail `handed`'s handoff for the stop request its supervisor drains for.
+fn stopped_instead(handed: &mut Handed, binary_text: &str) {
+    handed.error = Some(format!(
+        "supervisor {} (pid {}) is stopping (a stop request wins over the handoff) and was not \
+handed off to {binary_text}; it drains its runs in progress under its old binary and \
+deregisters, then `up` starts it with the binary in place",
+        handed.registration.token, handed.registration.pid
+    ));
+    handed.stopping = true;
+}
+
 /// Look again, for up to `grace`, at the supervisors of `handed` at
 /// `pending` that took their request just as the wait ran out: one that
 /// registers again under `version` (its token, or its pid's successor)
@@ -1401,8 +1479,11 @@ fn look_again(
 ) -> Result<()> {
     let deadline = Instant::now() + grace;
     while !pending.is_empty() {
-        let now = clock.now();
-        let registrations = queue.supervisors()?;
+        let stops = Stops::around(queue, || {
+            let now = clock.now();
+            Ok((now, queue.supervisors()?))
+        })?;
+        let (now, registrations) = (stops.now, &stops.registrations);
         let expired = Instant::now() >= deadline;
         pending.retain(|&index| {
             let one = &mut handed[index];
@@ -1414,7 +1495,7 @@ fn look_again(
             // While it execs, its row can be gone before its pid registers
             // again: only a row it serves under settles it early.
             let found = successor(
-                &registrations,
+                registrations,
                 &registration.token,
                 registration.pid,
                 version,
@@ -1422,7 +1503,7 @@ fn look_again(
             )
             .is_some();
             let error = match look_at_handoff(
-                &registrations,
+                registrations,
                 registration,
                 processes,
                 now,
@@ -1433,6 +1514,16 @@ fn look_again(
                 Ok(Some(token)) => {
                     one.now = Some(token);
                     one.error = None;
+                    return false;
+                }
+                // A stop wins over the handoff: it drains under its old
+                // binary and will not come back under this one.
+                Ok(None) if stops.before.contains(&registration.token) => {
+                    stopped_instead(one, binary_text);
+                    return false;
+                }
+                Err(_) if stops.after.contains(&registration.token) => {
+                    stopped_instead(one, binary_text);
                     return false;
                 }
                 Err(error) if found => format!("{error:#}"),

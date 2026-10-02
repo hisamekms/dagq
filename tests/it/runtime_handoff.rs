@@ -177,6 +177,112 @@ fn canceling_a_handoff_during_a_landing_resumes_claims_without_exec() {
     assert_ne!(outcome["outcome"], "handoff", "{outcome}");
 }
 
+/// Task 1277: a supervisor asked to hand off while a landing holds it, and
+/// then asked to stop, records `supervisor_draining` once; `hand_off`
+/// fails it as stopping at once instead of at its timeout and withdraws
+/// the request, and the stop still wins: the drain lands the run and the
+/// supervisor ends without exec'ing.
+#[test]
+fn a_handoff_does_not_wait_for_a_supervisor_that_drains_for_a_stop() {
+    let (_dir, repo, db) = fixture();
+    let release = db.with_extension("release");
+    let verification = json!([format!(
+        "while [ ! -f {} ]; do sleep 0.05; done",
+        shell_quote(release.to_str().unwrap())
+    )]);
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE tasks SET verification_commands=?1 WHERE id=1",
+            [verification.to_string()],
+        )
+        .unwrap();
+    let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "ready to land")]);
+    let options = supervise_options(1, false);
+    let passes = options.passes.clone();
+    let stop = options.stop.clone();
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options))
+    };
+    wait_until(&db, crate::common::STEP_LIMIT, |queue| {
+        event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"integration_started")
+    });
+    let registration = only_registration(&db);
+    let token = registration.token.clone();
+    // Far longer than the test may take: only the stop ends the wait.
+    let timeout = Duration::from_secs(600);
+    let handing = {
+        let db = db.clone();
+        thread::spawn(move || {
+            let queue = SqliteQueue::open(&db).unwrap();
+            let started = Instant::now();
+            let handed = dagq::lifecycle::hand_off(
+                &queue,
+                &dagq::infrastructure::adapters::SystemProcesses,
+                &dagq::infrastructure::clock::SystemClock,
+                std::slice::from_ref(&registration),
+                Path::new("/next/dagq"),
+                "9.9.9-dev+next",
+                timeout,
+                Duration::from_millis(20),
+            )
+            .unwrap();
+            (handed, started.elapsed())
+        })
+    };
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    wait_until(&db, crate::common::STEP_LIMIT, |queue| {
+        queue.handoff_request(&token).unwrap().is_some()
+    });
+    // It has read the request and drains for the landing.
+    await_passes(&passes, SOME_PASSES);
+    stop.store(true, Ordering::SeqCst);
+    let (handed, waited) = joined(handing, "the handoff to a stopping supervisor");
+    assert!(waited < timeout, "{waited:?}");
+    let handed = handed.into_iter().next().unwrap();
+    assert!(handed.stopping, "{handed:?}");
+    assert_eq!(handed.now, None);
+    let error = handed.error.as_deref().unwrap();
+    assert!(
+        error.contains(&format!(
+            "supervisor {token} (pid {}) is stopping (a stop request wins over the handoff) and \
+was not handed off to /next/dagq",
+            std::process::id()
+        )),
+        "{error}"
+    );
+    assert!(!error.contains("still finishes"), "{error}");
+    let report = handed.report();
+    assert_eq!(report["stopping"], true, "{report}");
+    assert_eq!(report["error"], error);
+    // The request was withdrawn.
+    assert_eq!(queue.handoff_request(&token).unwrap(), None);
+    // Recorded once, however many passes the drain takes.
+    await_passes(&passes, SOME_PASSES);
+    std::fs::write(&release, "go").unwrap();
+    let outcome = joined(supervisor, "the supervisor draining for the stop");
+    assert_ne!(outcome["outcome"], "handoff", "{outcome}");
+    let drained = queue
+        .latest_events_of(EventKind::SupervisorDraining.as_str(), 10)
+        .unwrap();
+    assert_eq!(drained.len(), 1, "{drained:?}");
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].id().clone();
+    let payload = &drained[0].payload;
+    assert_eq!(payload["supervisor"], json!(token));
+    assert_eq!(payload["pid"], std::process::id());
+    assert_eq!(payload["reason"], "stop_requested");
+    assert_eq!(payload["handoff_binary"], "/next/dagq");
+    assert_eq!(payload["runs"], json!([run]));
+    assert!(payload["build"].is_string(), "{payload}");
+    // The stop won: the drain landed the run in progress.
+    assert_eq!(
+        queue.show(TaskId::new(1)).unwrap().task.status(),
+        TaskStatus::Completed
+    );
+}
+
 /// The supervisor the exec'd binary runs: the same token, continued.
 fn supervise_after_handoff(
     db: &Path,

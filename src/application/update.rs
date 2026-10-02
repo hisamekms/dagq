@@ -809,12 +809,16 @@ fn put_in_place(
                             continue;
                         };
                         let before = registered_before(&registered, &token, pid);
-                        supervisors.push(json!({
+                        let mut entry = json!({
                             "token": token,
                             "pid": pid,
                             "error": failed["error"],
                             "supervisor": bring_back(ports, &*queue, before, Some(&token))?,
-                        }));
+                        });
+                        if stopping(failed) {
+                            entry["stopping"] = json!(true);
+                        }
+                        supervisors.push(entry);
                     }
                     let mut details = json!({
                         "restored": handoff.restored.clone(),
@@ -883,6 +887,9 @@ fn put_in_place(
                 "now": watched.now,
                 "error": watched.error,
             });
+            if watched.stopping {
+                entry["stopping"] = json!(true);
+            }
             if watched.error.is_some() {
                 let before = registered_before(&registered, &watched.token, watched.pid);
                 entry["supervisor"] = bring_back(ports, &*queue, before, Some(&watched.now))?;
@@ -1075,6 +1082,7 @@ fn refused(report: &Value) -> Vec<Watched> {
                 first: None,
                 done: false,
                 error: Some(error.to_owned()),
+                stopping: stopping(supervisor),
             })
         })
         .collect()
@@ -1091,6 +1099,15 @@ struct Watched {
     first: Option<i64>,
     done: bool,
     error: Option<String>,
+    /// It did not take the handoff for the stop request it drains for
+    /// (task 1277).
+    stopping: bool,
+}
+
+/// Whether a supervisor of `install`'s report did not take the handoff for
+/// its stop request (`stopping: true`, task 1277).
+fn stopping(supervisor: &Value) -> bool {
+    supervisor["stopping"] == true
 }
 
 /// Wait for each supervisor in `handed` to heartbeat on under `version`
@@ -1118,6 +1135,7 @@ fn watch(
             first: None,
             done: false,
             error: None,
+            stopping: false,
         })
         .collect();
     loop {

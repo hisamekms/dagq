@@ -244,6 +244,7 @@ event_kinds! {
     SubmitUnconfirmed => "submit_unconfirmed",
     SupervisionFinished => "supervision_finished",
     SupervisorConfigChanged => "supervisor_config_changed",
+    SupervisorDraining => "supervisor_draining",
     SupervisorHandedOff => "supervisor_handed_off",
     SupervisorHeartbeatRetried => "supervisor_heartbeat_retried",
     SupervisorStarted => "supervisor_started",
@@ -363,6 +364,9 @@ impl EventKind {
                 | PlannerClosed
                 | SessionTurns
                 | SupervisorStarted
+                // A supervisor's stop request, recorded when its drain
+                // begins (task 1277).
+                | SupervisorDraining
                 | SupervisorStopped
                 // A heartbeat written again after busy failures (task 1119).
                 | SupervisorHeartbeatRetried
@@ -1006,6 +1010,7 @@ mod tests {
                 EventKind::SupervisorConfigChanged,
                 "supervisor_config_changed",
             ),
+            (EventKind::SupervisorDraining, "supervisor_draining"),
             (EventKind::SupervisorHandedOff, "supervisor_handed_off"),
             (
                 EventKind::SupervisorHeartbeatRetried,

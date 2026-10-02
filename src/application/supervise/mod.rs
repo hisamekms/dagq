@@ -859,6 +859,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         reopens: HashMap::new(),
         notice_failures: HashMap::new(),
         draining: false,
+        stop_recorded: false,
         service_up: true,
         update: update::UpdateWatch::default(),
         utc_offset: settings.utc_offset,
@@ -1073,6 +1074,9 @@ struct Supervisor<'a> {
     /// This pass drains (a stop, a handoff, or claiming stopped after a
     /// provisioning failure): nothing may wait for the program to appear.
     draining: bool,
+    /// Whether this process recorded `supervisor_draining` for its stop
+    /// request (task 1277): once, on the first pass that saw it.
+    stop_recorded: bool,
     /// Whether the queue service ran at the last look, or no service is
     /// kept (ADR-t1233-4 decision 2): new claims and jobs wait for it.
     service_up: bool,
@@ -1345,6 +1349,42 @@ impl Supervisor<'_> {
         }
         result
     }
+    /// Record, once, that this process drains for a stop request (SIGINT /
+    /// SIGTERM, from `down`, the drain of `up` or `install
+    /// --allow-breaking`, or launchd's bootout) (task 1277): a handoff
+    /// waiting for it fails at once instead of at its timeout, and the
+    /// observer reads the stop behind the claims and resumes it holds.
+    /// A failed write is only logged and tried again on the next pass.
+    fn record_stop_request(&mut self) {
+        let handoff = match &self.handoff {
+            Some(binary) => Some(binary.clone()),
+            None => self.queue.handoff_request(&self.token).ok().flatten(),
+        };
+        let runs: Vec<&RunId> = self.slots.iter().map(|slot| slot.run.id()).collect();
+        let payload = json!({
+            "supervisor": self.token,
+            "pid": std::process::id(),
+            "build": self.layout.version,
+            "reason": "stop_requested",
+            "handoff_binary": handoff,
+            "runs": runs,
+        });
+        match self
+            .queue
+            .record_queue_event(EventKind::SupervisorDraining, payload)
+        {
+            Ok(_) => {
+                self.stop_recorded = true;
+                info!(
+                    "supervisor {} asked to stop: it drains the runs in progress; a stop wins over any handoff",
+                    self.token
+                );
+            }
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the supervisor's stop request could not be recorded: {error:#}");
+            }
+        }
+    }
     fn drive(&mut self, options: &LoopSettings) -> Result<Value> {
         loop {
             options.passes.fetch_add(1, Ordering::SeqCst);
@@ -1362,6 +1402,9 @@ impl Supervisor<'_> {
                 return Err(error);
             }
             let stopping = options.stop.load(Ordering::SeqCst);
+            if stopping && !self.stop_recorded {
+                self.record_stop_request();
+            }
             // Every pass, draining or handing off too (task 516).
             self.host_metrics_pass();
             // Before any job starts: none runs twice (task 443).
