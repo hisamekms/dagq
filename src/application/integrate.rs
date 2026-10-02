@@ -37,7 +37,9 @@ use crate::domain::{
     TaskId, TaskRun,
     disk::{DiskConfig, gib},
     event_kind, evidence_missing_reason, heartbeat_stale,
-    landing_branch::{DEFAULT_REMOTE, LandingBranch, RemoteSource, missing_remote},
+    landing_branch::{
+        DEFAULT_REMOTE, LandingBranch, RemoteSource, RepositoryConfig, missing_remote,
+    },
     measure::{LoadSummary, LoadWindow},
     required_of,
     scope::{out_of_scope, scope_violation_reason},
@@ -718,11 +720,8 @@ fn land_integrating(
 /// `push_finished`, `push_skipped` or `push_failed` on the landed run.
 /// `onto` is the landing branch resolved when the landing began, not
 /// resolved again from the dagq.toml the landing may have rewritten.
-/// `push = false` and a missing default remote skip the push; a configured
-/// remote that is missing fails it. `--no-push` (no `remote`) skips it and
-/// records the remote `[repository]` names, `origin` when it cannot be
-/// read, without looking at the remote. A failure to record is only
-/// reported: the landing stands either way.
+/// What is pushed and recorded is [`decide_push`]'s; a failure to record is
+/// only reported: the landing stands either way.
 fn push_main(
     queue: &dyn Queue,
     repository: &dyn Repository,
@@ -732,6 +731,73 @@ fn push_main(
     run_id: &RunId,
     commit: &CommitSha,
 ) -> PushReport {
+    let PushDecision {
+        report,
+        kind,
+        payload,
+        check_error,
+    } = decide_push(
+        remote,
+        || repository.repository_config().unwrap_or_default(),
+        grant,
+        onto,
+        commit,
+    );
+    if let Some(check_error) = check_error {
+        warn!(op = "push", run_id = %run_id, error = %check_error, "could not check remote after failed push");
+    }
+    let remote = report.remote.as_str();
+    match &report.error {
+        Some(error) => warn!(
+            op = "push",
+            run_id = %run_id,
+            remote,
+            error = %error,
+            "run {run_id}: push of the landing branch failed: {error}"
+        ),
+        None => info!(
+            op = "push",
+            run_id = %run_id,
+            remote,
+            outcome = %kind,
+            "run {run_id}: {kind} ({remote})"
+        ),
+    }
+    if let Err(error) = queue.record_runtime_event(run_id, kind, payload) {
+        warn!(
+            op = "push",
+            run_id = %run_id,
+            error = %format_args!("{error:#}"),
+            "run {run_id}: could not record {kind}: {error:#}"
+        );
+    }
+    report
+}
+
+/// What [`decide_push`] did: the report, the event recording it, and why
+/// the remote could not be checked after a failed push.
+#[derive(Debug)]
+struct PushDecision {
+    report: PushReport,
+    kind: EventKind,
+    payload: Value,
+    check_error: Option<String>,
+}
+
+/// Push `onto` through `remote` as `[repository]` says and tell what became
+/// of it. `push = false` and a missing default remote skip the push; a
+/// configured remote that is missing fails it. `--no-push` (no `remote`)
+/// skips it and records the remote `[repository]` names (`no_push_config`),
+/// `origin` when it cannot be read, without looking at the remote. A failed
+/// push whose landed `commit` the remote branch already contains is
+/// `pushed`, `already_delivered`.
+fn decide_push(
+    remote: Option<&dyn MainRemote>,
+    no_push_config: impl FnOnce() -> RepositoryConfig,
+    grant: &PushGrant,
+    onto: &LandingBranch,
+    commit: &CommitSha,
+) -> PushDecision {
     let branch = Some(onto.name.clone());
     let report = |outcome, remote: &str, error: Option<String>, reason: Option<&str>| PushReport {
         outcome,
@@ -744,9 +810,10 @@ fn push_main(
         report(PushResult::Failed, remote, Some(format!("{error:#}")), None)
     };
     let mut already_delivered = false;
+    let mut check_error = None;
     let report = match remote {
         None => {
-            let config = repository.repository_config().unwrap_or_default();
+            let config = no_push_config();
             report(
                 PushResult::Skipped,
                 config.remote(),
@@ -781,8 +848,8 @@ fn push_main(
                                     report(PushResult::Pushed, name, None, None)
                                 }
                                 Ok(false) => failed(name, &error),
-                                Err(check_error) => {
-                                    warn!(op = "push", run_id = %run_id, error = %format_args!("{check_error:#}"), "could not check remote after failed push");
+                                Err(error_of_check) => {
+                                    check_error = Some(format!("{error_of_check:#}"));
                                     failed(name, &error)
                                 }
                             }
@@ -807,32 +874,12 @@ fn push_main(
             json!({"code": ReasonCode::PushFailed, "remote": report.remote, "branch": report.branch, "commit": commit, "error": report.error}),
         ),
     };
-    let remote = report.remote.as_str();
-    match &report.error {
-        Some(error) => warn!(
-            op = "push",
-            run_id = %run_id,
-            remote,
-            error = %error,
-            "run {run_id}: push of the landing branch failed: {error}"
-        ),
-        None => info!(
-            op = "push",
-            run_id = %run_id,
-            remote,
-            outcome = %kind,
-            "run {run_id}: {kind} ({remote})"
-        ),
+    PushDecision {
+        report,
+        kind,
+        payload,
+        check_error,
     }
-    if let Err(error) = queue.record_runtime_event(run_id, kind, payload) {
-        warn!(
-            op = "push",
-            run_id = %run_id,
-            error = %format_args!("{error:#}"),
-            "run {run_id}: could not record {kind}: {error:#}"
-        );
-    }
-    report
 }
 
 /// Register the landed receipt's `follow_ups` of `task`'s run `run_id` as
@@ -1330,27 +1377,9 @@ fn land(
                 run_env.push(("NEXTEST_FLAKY_RESULT".into(), "pass".into()));
                 continue 'verify;
             }
-            return defer(
-                Reason::new(ReasonCode::VerificationFailed).with("index", index),
-                format!(
-                    "verification command {command:?} exited with {} after the rebase onto {main} ({}: {}); see {}",
-                    last.exit_code,
-                    failure.class.as_str(),
-                    failure.evidence,
-                    last.log.display()
-                ),
-                json!({
-                    "main": main,
-                    "head": rebased,
-                    "command": command,
-                    "exit_code": last.exit_code,
-                    "signal": last.signal,
-                    "failure": failure.to_json(),
-                    "failed_tests": last.tests_json(),
-                    "failed_tests_omitted": last.omitted_json(),
-                    "flaky_tests": last.flaky_tests,
-                }),
-            );
+            return Ok(verification_failed(
+                main, &rebased, command, index, &last, failure,
+            ));
         }
         break;
     }
@@ -1491,7 +1520,6 @@ impl VerifyStep<'_> {
                 None => return Err(error),
             },
         };
-        let exit_code = code.unwrap_or(128);
         // Lossy: a log cut off by a kill or a full disk may end mid-character,
         // and its marks still count.
         let output = self
@@ -1499,53 +1527,8 @@ impl VerifyStep<'_> {
             .read(log)
             .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
             .unwrap_or_default();
-        // Why it failed, from its exit and its log (task 467), or its limit.
-        let failure = match timed_out {
-            Some(timed_out) => Some(timed_out.failure()),
-            None => {
-                (exit_code != 0).then(|| verify_failure::classify(command, code, signal, &output))
-            }
-        };
-        // The tests it names as failed, when tests failed or ran out of
-        // time (task 515).
-        let mut failed_tests = failure
-            .as_ref()
-            .filter(|failure| {
-                matches!(
-                    failure.class,
-                    verify_failure::FailureClass::TestFailure
-                        | verify_failure::FailureClass::Timeout
-                        | verify_failure::FailureClass::Flaky
-                )
-            })
-            .map(|_| verify_failure::failed_tests(&output));
-        // A successful retry still records FLAKY tests, including nextest's
-        // summary-only output. Keep the same name limit as failed commands.
-        if failure.is_none() {
-            let mut names = verify_failure::flaky_tests(&output);
-            if !names.is_empty() {
-                let omitted = names.len().saturating_sub(verify_failure::MAX_FAILED_TESTS);
-                names.truncate(verify_failure::MAX_FAILED_TESTS);
-                failed_tests = Some(verify_failure::FailedTests { names, omitted });
-            }
-        }
-        // The failed tests that passed on nextest's retry: the mark `stats`
-        // counts them flaky by (task 768).
-        let flaky_tests = match &failed_tests {
-            Some(failed) => verify_failure::flaky_tests(&output)
-                .into_iter()
-                .filter(|name| failed.names.contains(name))
-                .collect(),
-            None => Vec::new(),
-        };
-        let checked = Checked {
-            exit_code,
-            signal,
-            failure,
-            failed_tests,
-            flaky_tests,
-            log: log.to_path_buf(),
-        };
+        let checked = judge_command(command, code, signal, timed_out, &output, log);
+        let exit_code = checked.exit_code;
         let mut payload = json!({
             "phase": "integration",
             "attempt": self.attempt,
@@ -1572,6 +1555,100 @@ impl VerifyStep<'_> {
         }
         queue.record_runtime_event(self.run.id(), EventKind::VerificationCommand, payload)?;
         Ok(checked)
+    }
+}
+
+/// What a run of `command` that ended with `code` or `signal` (or was
+/// killed at its limit, `timed_out`) and wrote `output` to `log` says: its
+/// exit (128 without a code), why it failed from its exit and its log (task
+/// 467) or its limit, the tests it names as failed when tests failed or ran
+/// out of time (task 515), and those nextest ran again and saw pass (task
+/// 768). A command that passed still names its FLAKY tests.
+fn judge_command(
+    command: &str,
+    code: Option<i32>,
+    signal: Option<i32>,
+    timed_out: Option<verify_failure::CommandTimedOut>,
+    output: &str,
+    log: &Path,
+) -> Checked {
+    let exit_code = code.unwrap_or(128);
+    let failure = match timed_out {
+        Some(timed_out) => Some(timed_out.failure()),
+        None => (exit_code != 0).then(|| verify_failure::classify(command, code, signal, output)),
+    };
+    let mut failed_tests = failure
+        .as_ref()
+        .filter(|failure| {
+            matches!(
+                failure.class,
+                verify_failure::FailureClass::TestFailure
+                    | verify_failure::FailureClass::Timeout
+                    | verify_failure::FailureClass::Flaky
+            )
+        })
+        .map(|_| verify_failure::failed_tests(output));
+    // A successful retry still records FLAKY tests, including nextest's
+    // summary-only output. Keep the same name limit as failed commands.
+    if failure.is_none() {
+        let mut names = verify_failure::flaky_tests(output);
+        if !names.is_empty() {
+            let omitted = names.len().saturating_sub(verify_failure::MAX_FAILED_TESTS);
+            names.truncate(verify_failure::MAX_FAILED_TESTS);
+            failed_tests = Some(verify_failure::FailedTests { names, omitted });
+        }
+    }
+    // The failed tests that passed on nextest's retry: the mark `stats`
+    // counts them flaky by (task 768).
+    let flaky_tests = match &failed_tests {
+        Some(failed) => verify_failure::flaky_tests(output)
+            .into_iter()
+            .filter(|name| failed.names.contains(name))
+            .collect(),
+        None => Vec::new(),
+    };
+    Checked {
+        exit_code,
+        signal,
+        failure,
+        failed_tests,
+        flaky_tests,
+        log: log.to_path_buf(),
+    }
+}
+
+/// The verdict on the `index`th verification command `command`, which
+/// failed as `last` (why: `failure`) on `head`, rebased onto `main`: the
+/// worker's to fix, so the run waits for a session.
+fn verification_failed(
+    main: &CommitSha,
+    head: &CommitSha,
+    command: &str,
+    index: usize,
+    last: &Checked,
+    failure: &verify_failure::VerifyFailure,
+) -> Verdict {
+    Verdict::Deferred {
+        reason: format!(
+            "verification command {command:?} exited with {} after the rebase onto {main} ({}: {}); see {}",
+            last.exit_code,
+            failure.class.as_str(),
+            failure.evidence,
+            last.log.display()
+        ),
+        detail: Reason::new(ReasonCode::VerificationFailed)
+            .with("index", index)
+            .on(json!({
+                "main": main,
+                "head": head,
+                "command": command,
+                "exit_code": last.exit_code,
+                "signal": last.signal,
+                "failure": failure.to_json(),
+                "failed_tests": last.tests_json(),
+                "failed_tests_omitted": last.omitted_json(),
+                "flaky_tests": last.flaky_tests,
+            })),
     }
 }
 
@@ -1635,6 +1712,7 @@ fn held(
 }
 
 /// What [`renumber_migration`] did to a rebased run.
+#[derive(Debug)]
 enum Renumbering {
     /// No migration the run adds has a number `main` has.
     Unchanged,
@@ -1646,16 +1724,9 @@ enum Renumbering {
 }
 
 /// Renumber the migration the rebased run adds when `main` already has its
-/// number (ADR-0067 decision 3), that is when another file of the rebased
-/// tree, one the run did not add, has it: moved with `git mv` to the next number
-/// free on `main` and committed on the run branch, recorded as
-/// `migration_renumbered`. Only a run that adds exactly one migration, whose
-/// number none of the run's other changed files mentions, is moved; any
-/// other collision is left to a session with the next free number.
-///
-/// Only in dagq's source repository (ADR-t614-1): the numbers are those of
-/// dagq's own queue schema, and another repository's `migrations/` is its
-/// own, left as any other file.
+/// number (ADR-0067 decision 3), as [`plan_renumber`] decides: moved with
+/// `git mv` to the next number free on `main` and committed on the run
+/// branch, recorded as `migration_renumbered`.
 fn renumber_migration(
     queue: &mut dyn Queue,
     repository: &dyn Repository,
@@ -1664,94 +1735,17 @@ fn renumber_migration(
     main: &CommitSha,
     rebased: &CommitSha,
 ) -> Result<Renumbering> {
-    if !repository.is_dagq_source() {
-        return Ok(Renumbering::Unchanged);
-    }
-    let in_directory = |path: &str| {
-        path.strip_prefix(migration_numbers::DIRECTORY)
-            .and_then(|rest| rest.strip_prefix('/'))
-            .filter(|name| migration_numbers::number(name).is_some())
-            .map(str::to_owned)
+    let (collision, old, new, old_digits) = match plan_renumber(repository, main, rebased)? {
+        RenumberPlan::Unchanged => return Ok(Renumbering::Unchanged),
+        RenumberPlan::Blocked(blocked) => return Ok(blocked),
+        RenumberPlan::Move {
+            collision,
+            old,
+            new,
+            old_digits,
+        } => (collision, old, new, old_digits),
     };
-    let added: Vec<String> = repository
-        .added_paths(main.as_str(), rebased.as_str())?
-        .iter()
-        .filter_map(|path| in_directory(path))
-        .collect();
-    if added.is_empty() {
-        return Ok(Renumbering::Unchanged);
-    }
-    // Judged on the rebased tree, not on main's: a migration the run renames
-    // or replaces keeps its number without a collision. What else the
-    // rebased tree has came from main.
-    let kept: Vec<u32> = repository
-        .paths_in(rebased.as_str(), migration_numbers::DIRECTORY)?
-        .iter()
-        .filter_map(|path| in_directory(path))
-        .filter(|name| !added.contains(name))
-        .filter_map(|name| migration_numbers::number(&name))
-        .collect();
-    let taken: Vec<&String> = added
-        .iter()
-        .filter(|name| kept.contains(&migration_numbers::number(name).unwrap_or(0)))
-        .collect();
-    if taken.is_empty() {
-        return Ok(Renumbering::Unchanged);
-    }
-    let next = kept.iter().copied().max().unwrap_or(0) + 1;
-    let next_digits = migration_numbers::digits(next);
-    let path = |name: &str| format!("{}/{name}", migration_numbers::DIRECTORY);
-    let blocked = |why: String, extra: Value| {
-        let mut detail = json!({
-            "main": main,
-            "head": rebased,
-            "migrations": added.iter().map(|name| path(name)).collect::<Vec<_>>(),
-            "taken": taken.iter().map(|name| path(name)).collect::<Vec<_>>(),
-            "next_number": next_digits,
-        });
-        if let (Some(detail), Value::Object(extra)) = (detail.as_object_mut(), extra) {
-            detail.extend(extra);
-        }
-        Ok(Renumbering::Blocked {
-            reason: format!(
-                "{why}; main {main} already has the number of {}, and the next free number is {next_digits}: renumber the run's migrations from {next_digits} (git mv), update what refers to their numbers, rerun the verification commands, and rewrite the receipt with the new head",
-                taken
-                    .iter()
-                    .map(|name| path(name))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            detail,
-        })
-    };
-    if added.len() > 1 {
-        return blocked(
-            format!(
-                "the run adds {} migrations, which are not renumbered mechanically",
-                added.len()
-            ),
-            json!({}),
-        );
-    }
-    let name = &added[0];
-    let old = path(name);
-    let old_digits = migration_numbers::digits(migration_numbers::number(name).unwrap_or(0));
-    let others: Vec<String> = repository
-        .changed_paths(main.as_str(), rebased.as_str())?
-        .into_iter()
-        .filter(|changed| *changed != old)
-        .collect();
-    let referring = repository.paths_containing(rebased.as_str(), &old_digits, &others)?;
-    if !referring.is_empty() {
-        return blocked(
-            format!(
-                "the run's other changes mention {old_digits} ({})",
-                referring.join(", ")
-            ),
-            json!({"referring": referring}),
-        );
-    }
-    let new = path(&migration_numbers::renumbered(name, next));
+    let next_digits = &collision.next_digits;
     let head = match repository.rename_and_commit(
         worktree,
         &old,
@@ -1766,13 +1760,7 @@ fn renumber_migration(
         Ok(head) => head,
         // The rename is undone and the worktree is back at the rebased head,
         // so the session can move the migration itself.
-        Err(refused) => {
-            let gist = commit_error_gist(&refused);
-            return blocked(
-                format!("git refused the commit moving {old} to {new} ({gist})"),
-                json!({"commit_error": gist}),
-            );
-        }
+        Err(refused) => return Ok(collision.refused(&old, &new, &refused)),
     };
     queue.record_runtime_event(
         run.id(),
@@ -1794,6 +1782,170 @@ fn renumber_migration(
         run.id()
     );
     Ok(Renumbering::Renumbered(head))
+}
+/// What [`plan_renumber`] decided for a rebased run.
+#[derive(Debug)]
+enum RenumberPlan {
+    /// No migration the run adds has a number `main` has.
+    Unchanged,
+    /// A number is taken but cannot be moved mechanically:
+    /// [`Renumbering::Blocked`].
+    Blocked(Renumbering),
+    /// Move the run's one migration `old` to `new`, from number
+    /// `old_digits` to the collision's next free number.
+    Move {
+        collision: Collision,
+        old: String,
+        new: String,
+        old_digits: String,
+    },
+}
+
+/// A migration the run adds whose number `main` already has: the paths and
+/// numbers the reason for a session names.
+#[derive(Debug)]
+struct Collision {
+    main: CommitSha,
+    head: CommitSha,
+    /// The migrations the run adds, as paths.
+    migrations: Vec<String>,
+    /// Those of them whose number the rebased tree has otherwise.
+    taken: Vec<String>,
+    next_digits: String,
+}
+
+impl Collision {
+    /// Left to a session because of `why`, with `extra` in its detail.
+    fn blocked(&self, why: String, extra: Value) -> Renumbering {
+        let Self {
+            main,
+            head,
+            migrations,
+            taken,
+            next_digits,
+        } = self;
+        let mut detail = json!({
+            "main": main,
+            "head": head,
+            "migrations": migrations,
+            "taken": taken,
+            "next_number": next_digits,
+        });
+        if let (Some(detail), Value::Object(extra)) = (detail.as_object_mut(), extra) {
+            detail.extend(extra);
+        }
+        Renumbering::Blocked {
+            reason: format!(
+                "{why}; main {main} already has the number of {}, and the next free number is {next_digits}: renumber the run's migrations from {next_digits} (git mv), update what refers to their numbers, rerun the verification commands, and rewrite the receipt with the new head",
+                taken.join(", ")
+            ),
+            detail,
+        }
+    }
+
+    /// Left to a session because Git refused the commit moving `old` to
+    /// `new` with `refused`.
+    fn refused(&self, old: &str, new: &str, refused: &str) -> Renumbering {
+        let gist = commit_error_gist(refused);
+        self.blocked(
+            format!("git refused the commit moving {old} to {new} ({gist})"),
+            json!({"commit_error": gist}),
+        )
+    }
+}
+
+/// Whether and how to renumber the migration the rebased run adds, read
+/// through `repository` alone: a collision is a migration the run added
+/// whose number another file of the rebased tree, one the run did not add,
+/// has. Only a run that adds exactly one migration, whose number none of
+/// the run's other changed files mentions, is moved, to the next number
+/// free on `main`; any other collision is left to a session with the next
+/// free number.
+///
+/// Only in dagq's source repository (ADR-t614-1): the numbers are those of
+/// dagq's own queue schema, and another repository's `migrations/` is its
+/// own, left as any other file.
+fn plan_renumber(
+    repository: &dyn Repository,
+    main: &CommitSha,
+    rebased: &CommitSha,
+) -> Result<RenumberPlan> {
+    if !repository.is_dagq_source() {
+        return Ok(RenumberPlan::Unchanged);
+    }
+    let in_directory = |path: &str| {
+        path.strip_prefix(migration_numbers::DIRECTORY)
+            .and_then(|rest| rest.strip_prefix('/'))
+            .filter(|name| migration_numbers::number(name).is_some())
+            .map(str::to_owned)
+    };
+    let added: Vec<String> = repository
+        .added_paths(main.as_str(), rebased.as_str())?
+        .iter()
+        .filter_map(|path| in_directory(path))
+        .collect();
+    if added.is_empty() {
+        return Ok(RenumberPlan::Unchanged);
+    }
+    // Judged on the rebased tree, not on main's: a migration the run renames
+    // or replaces keeps its number without a collision. What else the
+    // rebased tree has came from main.
+    let kept: Vec<u32> = repository
+        .paths_in(rebased.as_str(), migration_numbers::DIRECTORY)?
+        .iter()
+        .filter_map(|path| in_directory(path))
+        .filter(|name| !added.contains(name))
+        .filter_map(|name| migration_numbers::number(&name))
+        .collect();
+    let taken: Vec<&String> = added
+        .iter()
+        .filter(|name| kept.contains(&migration_numbers::number(name).unwrap_or(0)))
+        .collect();
+    if taken.is_empty() {
+        return Ok(RenumberPlan::Unchanged);
+    }
+    let next = kept.iter().copied().max().unwrap_or(0) + 1;
+    let path = |name: &str| format!("{}/{name}", migration_numbers::DIRECTORY);
+    let collision = Collision {
+        main: main.clone(),
+        head: rebased.clone(),
+        migrations: added.iter().map(|name| path(name)).collect(),
+        taken: taken.iter().map(|name| path(name)).collect(),
+        next_digits: migration_numbers::digits(next),
+    };
+    if added.len() > 1 {
+        return Ok(RenumberPlan::Blocked(collision.blocked(
+            format!(
+                "the run adds {} migrations, which are not renumbered mechanically",
+                added.len()
+            ),
+            json!({}),
+        )));
+    }
+    let name = &added[0];
+    let old = path(name);
+    let old_digits = migration_numbers::digits(migration_numbers::number(name).unwrap_or(0));
+    let others: Vec<String> = repository
+        .changed_paths(main.as_str(), rebased.as_str())?
+        .into_iter()
+        .filter(|changed| *changed != old)
+        .collect();
+    let referring = repository.paths_containing(rebased.as_str(), &old_digits, &others)?;
+    if !referring.is_empty() {
+        return Ok(RenumberPlan::Blocked(collision.blocked(
+            format!(
+                "the run's other changes mention {old_digits} ({})",
+                referring.join(", ")
+            ),
+            json!({"referring": referring}),
+        )));
+    }
+    Ok(RenumberPlan::Move {
+        new: path(&migration_numbers::renumbered(name, next)),
+        old,
+        old_digits,
+        collision,
+    })
 }
 
 /// The lines of what Git said when it refused a commit, joined and cut to
@@ -2023,11 +2175,19 @@ mod tests {
     const RUN: &str = "00000000-0000-4000-8000-000000000001";
 
     /// A repository whose worktree is on `branch` at `head`, with `status`.
+    /// For the migration renumbering: whether it is dagq's source, the paths
+    /// the run added and changed, the rebased tree's paths, and the contents
+    /// [`Repository::paths_containing`] searches.
     struct FakeRepository {
         branch: Option<String>,
         head: CommitSha,
         status: String,
         calls: RefCell<Vec<String>>,
+        dagq_source: bool,
+        added: Vec<String>,
+        changed: Vec<String>,
+        tree: Vec<String>,
+        contents: Vec<(String, String)>,
     }
 
     impl FakeRepository {
@@ -2037,13 +2197,18 @@ mod tests {
                 head: sha(HEAD),
                 status: String::new(),
                 calls: RefCell::default(),
+                dagq_source: true,
+                added: Vec::new(),
+                changed: vec!["src/lib.rs".to_owned()],
+                tree: Vec::new(),
+                contents: Vec::new(),
             }
         }
     }
 
     impl Repository for FakeRepository {
         fn is_dagq_source(&self) -> bool {
-            true
+            self.dagq_source
         }
         fn main_head(&self) -> Result<CommitSha> {
             Ok(sha(BASE))
@@ -2079,16 +2244,26 @@ mod tests {
             unimplemented!()
         }
         fn changed_paths(&self, _: &str, _: &str) -> Result<Vec<String>> {
-            Ok(vec!["src/lib.rs".to_owned()])
+            Ok(self.changed.clone())
         }
         fn added_paths(&self, _: &str, _: &str) -> Result<Vec<String>> {
-            unimplemented!()
+            Ok(self.added.clone())
         }
-        fn paths_in(&self, _: &str, _: &str) -> Result<Vec<String>> {
-            unimplemented!()
+        fn paths_in(&self, _: &str, dir: &str) -> Result<Vec<String>> {
+            Ok(self
+                .tree
+                .iter()
+                .filter(|path| path.starts_with(&format!("{dir}/")))
+                .cloned()
+                .collect())
         }
-        fn paths_containing(&self, _: &str, _: &str, _: &[String]) -> Result<Vec<String>> {
-            unimplemented!()
+        fn paths_containing(&self, _: &str, needle: &str, paths: &[String]) -> Result<Vec<String>> {
+            Ok(self
+                .contents
+                .iter()
+                .filter(|(path, text)| paths.contains(path) && text.contains(needle))
+                .map(|(path, _)| path.clone())
+                .collect())
         }
         fn rename_and_commit(
             &self,
@@ -2621,5 +2796,828 @@ mod tests {
         assert!(refusal.contains("integration slot"), "{refusal}");
         let awaiting = run(Path::new("/tmp/run"));
         assert!(landing_refusal(&supervisor, &awaiting, true, &[pass]).is_some());
+    }
+
+    /// A Git remote double: `[repository]` is `config` (or fails to read
+    /// with its error), the repository has the `remotes`, a push fails with
+    /// `push_error` when set, and the check after a failed push answers
+    /// `contains`. Every push and check is counted.
+    struct FakeRemote {
+        config: std::result::Result<RepositoryConfig, String>,
+        remotes: Vec<&'static str>,
+        remote_error: Option<String>,
+        push_error: Option<String>,
+        contains: std::result::Result<bool, String>,
+        pushes: RefCell<Vec<String>>,
+        checks: RefCell<Vec<String>>,
+    }
+
+    impl Default for FakeRemote {
+        fn default() -> Self {
+            Self {
+                config: Ok(RepositoryConfig::default()),
+                remotes: vec!["origin"],
+                remote_error: None,
+                push_error: None,
+                contains: Ok(false),
+                pushes: RefCell::default(),
+                checks: RefCell::default(),
+            }
+        }
+    }
+
+    impl MainRemote for FakeRemote {
+        fn push_config(&self) -> Result<RepositoryConfig> {
+            self.config.clone().map_err(|error| anyhow::anyhow!(error))
+        }
+        fn has_remote(&self, remote: &str) -> Result<bool> {
+            if let Some(error) = &self.remote_error {
+                bail!("{error}");
+            }
+            Ok(self.remotes.contains(&remote))
+        }
+        fn push_main(&self, _: &PushGrant, remote: &str, branch: &LandingBranch) -> Result<()> {
+            self.pushes
+                .borrow_mut()
+                .push(format!("{remote} {}", branch.name));
+            match &self.push_error {
+                Some(error) => bail!("{error}"),
+                None => Ok(()),
+            }
+        }
+        fn contains_landed_commit(
+            &self,
+            remote: &str,
+            branch: &LandingBranch,
+            commit: &CommitSha,
+        ) -> Result<bool> {
+            self.checks
+                .borrow_mut()
+                .push(format!("{remote} {} {commit}", branch.name));
+            self.contains
+                .clone()
+                .map_err(|error| anyhow::anyhow!(error))
+        }
+    }
+
+    fn configured(remote: Option<&str>, push: Option<bool>) -> RepositoryConfig {
+        RepositoryConfig {
+            branch: None,
+            remote: remote.map(str::to_owned),
+            push,
+        }
+    }
+
+    /// What [`decide_push`] makes of `remote` onto `main`, `--no-push`
+    /// reading the default `[repository]`.
+    fn pushed_through(remote: Option<&dyn MainRemote>) -> PushDecision {
+        decide_push(
+            remote,
+            RepositoryConfig::default,
+            &PushGrant(()),
+            &LandingBranch::main(),
+            &sha(HEAD),
+        )
+    }
+
+    fn report(
+        outcome: PushResult,
+        remote: &str,
+        error: Option<&str>,
+        reason: Option<&str>,
+    ) -> PushReport {
+        PushReport {
+            outcome,
+            remote: remote.to_owned(),
+            branch: Some("main".to_owned()),
+            error: error.map(str::to_owned),
+            reason: reason.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn the_landing_is_pushed_to_origin_and_recorded_as_push_finished() {
+        let remote = FakeRemote::default();
+        let decision = pushed_through(Some(&remote));
+        assert_eq!(
+            decision.report,
+            report(PushResult::Pushed, "origin", None, None)
+        );
+        assert_eq!(decision.kind, EventKind::PushFinished);
+        assert_eq!(
+            decision.payload,
+            json!({"remote": "origin", "branch": "main", "commit": HEAD, "already_delivered": false})
+        );
+        assert_eq!(decision.check_error, None);
+        assert_eq!(*remote.pushes.borrow(), ["origin main"]);
+        assert!(remote.checks.borrow().is_empty());
+        // The report as integrate's outcome shows it.
+        assert_eq!(
+            serde_json::to_value(&decision.report).unwrap(),
+            json!({"outcome": "pushed", "remote": "origin", "branch": "main", "error": null})
+        );
+    }
+
+    #[test]
+    fn a_rejected_push_the_remote_already_has_is_pushed_and_already_delivered() {
+        let remote = FakeRemote {
+            push_error: Some("cannot lock ref: is at newer but expected older".into()),
+            contains: Ok(true),
+            ..FakeRemote::default()
+        };
+        let decision = pushed_through(Some(&remote));
+        assert_eq!(
+            decision.report,
+            report(PushResult::Pushed, "origin", None, None)
+        );
+        assert_eq!(decision.kind, EventKind::PushFinished);
+        assert_eq!(
+            decision.payload,
+            json!({"remote": "origin", "branch": "main", "commit": HEAD, "already_delivered": true})
+        );
+        assert_eq!(*remote.checks.borrow(), [format!("origin main {HEAD}")]);
+    }
+
+    #[test]
+    fn a_rejected_push_the_remote_does_not_have_fails_with_gits_message() {
+        let remote = FakeRemote {
+            push_error: Some("rejected: fetch first".into()),
+            ..FakeRemote::default()
+        };
+        let decision = pushed_through(Some(&remote));
+        assert_eq!(
+            decision.report,
+            report(
+                PushResult::Failed,
+                "origin",
+                Some("rejected: fetch first"),
+                None
+            )
+        );
+        assert_eq!(decision.kind, EventKind::PushFailed);
+        assert_eq!(
+            decision.payload,
+            json!({"code": "push_failed", "remote": "origin", "branch": "main", "commit": HEAD, "error": "rejected: fetch first"})
+        );
+        assert_eq!(decision.check_error, None);
+    }
+
+    #[test]
+    fn a_failed_remote_check_keeps_the_original_push_failure() {
+        let remote = FakeRemote {
+            push_error: Some("authentication failed".into()),
+            contains: Err("remote unavailable".into()),
+            ..FakeRemote::default()
+        };
+        let decision = pushed_through(Some(&remote));
+        assert_eq!(
+            decision.report,
+            report(
+                PushResult::Failed,
+                "origin",
+                Some("authentication failed"),
+                None
+            )
+        );
+        assert_eq!(decision.kind, EventKind::PushFailed);
+        assert_eq!(decision.payload["error"], "authentication failed");
+        assert_eq!(decision.check_error.as_deref(), Some("remote unavailable"));
+    }
+
+    #[test]
+    fn no_push_skips_without_looking_at_the_remote_and_names_the_configured_remote() {
+        let decision = pushed_through(None);
+        assert_eq!(
+            decision.report,
+            report(PushResult::Skipped, "origin", None, Some("--no-push"))
+        );
+        assert_eq!(decision.kind, EventKind::PushSkipped);
+        assert_eq!(
+            decision.payload,
+            json!({"remote": "origin", "branch": "main", "commit": HEAD, "reason": "--no-push"})
+        );
+        assert_eq!(
+            serde_json::to_value(&decision.report).unwrap(),
+            json!({"outcome": "skipped", "remote": "origin", "branch": "main", "error": null, "reason": "--no-push"})
+        );
+        // `--no-push` names the remote `[repository]` names.
+        let upstream = decide_push(
+            None,
+            || configured(Some("upstream"), None),
+            &PushGrant(()),
+            &LandingBranch::main(),
+            &sha(HEAD),
+        );
+        assert_eq!(upstream.report.remote, "upstream");
+        assert_eq!(upstream.report.reason.as_deref(), Some("--no-push"));
+    }
+
+    #[test]
+    fn a_missing_default_origin_skips_the_push() {
+        let remote = FakeRemote {
+            remotes: Vec::new(),
+            ..FakeRemote::default()
+        };
+        let decision = pushed_through(Some(&remote));
+        assert_eq!(
+            decision.report,
+            report(
+                PushResult::Skipped,
+                "origin",
+                None,
+                Some("the repository has no remote origin")
+            )
+        );
+        assert_eq!(decision.kind, EventKind::PushSkipped);
+        assert!(remote.pushes.borrow().is_empty());
+    }
+
+    #[test]
+    fn the_push_follows_the_repository_table() {
+        // remote = "upstream": pushed there, not to origin.
+        let remote = FakeRemote {
+            config: Ok(configured(Some("upstream"), None)),
+            remotes: vec!["origin", "upstream"],
+            ..FakeRemote::default()
+        };
+        let decision = pushed_through(Some(&remote));
+        assert_eq!(
+            decision.report,
+            report(PushResult::Pushed, "upstream", None, None)
+        );
+        assert_eq!(decision.payload["remote"], "upstream");
+        assert_eq!(*remote.pushes.borrow(), ["upstream main"]);
+
+        // push = false: skipped with its own reason, the remote untouched.
+        let remote = FakeRemote {
+            config: Ok(configured(None, Some(false))),
+            ..FakeRemote::default()
+        };
+        let decision = pushed_through(Some(&remote));
+        assert_eq!(
+            decision.report,
+            report(
+                PushResult::Skipped,
+                "origin",
+                None,
+                Some("push = false in dagq.toml")
+            )
+        );
+        assert_eq!(
+            decision.payload,
+            json!({"remote": "origin", "branch": "main", "commit": HEAD, "reason": "push = false in dagq.toml"})
+        );
+        assert!(remote.pushes.borrow().is_empty());
+
+        // A configured remote that is missing fails the push (unlike a
+        // missing default origin, which skips it).
+        let remote = FakeRemote {
+            config: Ok(configured(Some("upstream"), None)),
+            ..FakeRemote::default()
+        };
+        let decision = pushed_through(Some(&remote));
+        assert_eq!(decision.report.outcome, PushResult::Failed);
+        assert_eq!(decision.report.remote, "upstream");
+        let error = decision.report.error.clone().unwrap();
+        assert_eq!(error, missing_remote("upstream"));
+        assert!(
+            error.contains("the remote upstream") && error.contains("[repository]"),
+            "{error}"
+        );
+        assert_eq!(decision.kind, EventKind::PushFailed);
+        assert_eq!(decision.payload["code"], "push_failed");
+        assert_eq!(decision.payload["branch"], "main");
+        assert!(remote.pushes.borrow().is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_repository_table_or_remote_list_fails_the_push() {
+        let remote = FakeRemote {
+            config: Err("dagq.toml:2: value of remote".into()),
+            ..FakeRemote::default()
+        };
+        let decision = pushed_through(Some(&remote));
+        assert_eq!(
+            decision.report,
+            report(
+                PushResult::Failed,
+                "origin",
+                Some("dagq.toml:2: value of remote"),
+                None
+            )
+        );
+        assert_eq!(decision.kind, EventKind::PushFailed);
+        assert!(remote.pushes.borrow().is_empty());
+
+        let remote = FakeRemote {
+            remote_error: Some("git remote failed".into()),
+            ..FakeRemote::default()
+        };
+        let decision = pushed_through(Some(&remote));
+        assert_eq!(
+            decision.report,
+            report(
+                PushResult::Failed,
+                "origin",
+                Some("git remote failed"),
+                None
+            )
+        );
+        assert!(remote.pushes.borrow().is_empty());
+    }
+
+    #[test]
+    fn the_push_goes_to_the_landing_branch_the_landing_began_on() {
+        let remote = FakeRemote::default();
+        let trunk = LandingBranch {
+            name: "trunk".to_owned(),
+            ..LandingBranch::main()
+        };
+        let decision = decide_push(
+            Some(&remote),
+            RepositoryConfig::default,
+            &PushGrant(()),
+            &trunk,
+            &sha(HEAD),
+        );
+        assert_eq!(decision.report.branch.as_deref(), Some("trunk"));
+        assert_eq!(decision.payload["branch"], "trunk");
+        assert_eq!(*remote.pushes.borrow(), ["origin trunk"]);
+    }
+
+    const MIGRATION_MAIN: &str = "3333333333333333333333333333333333333333";
+
+    /// A run of dagq's source that added `added` and changed `changed`,
+    /// whose rebased tree has `tree`.
+    fn renumbering(added: &[&str], changed: &[&str], tree: &[&str]) -> FakeRepository {
+        let owned = |paths: &[&str]| paths.iter().map(|path| (*path).to_owned()).collect();
+        FakeRepository {
+            added: owned(added),
+            changed: owned(changed),
+            tree: owned(tree),
+            ..FakeRepository::sound()
+        }
+    }
+
+    fn plan_of(repository: &FakeRepository) -> RenumberPlan {
+        plan_renumber(repository, &sha(MIGRATION_MAIN), &sha(HEAD)).unwrap()
+    }
+
+    fn blocked(plan: RenumberPlan) -> (String, Value) {
+        match plan {
+            RenumberPlan::Blocked(Renumbering::Blocked { reason, detail }) => (reason, detail),
+            other => panic!("not blocked: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_migration_whose_number_main_took_moves_to_the_next_free_number() {
+        let repository = renumbering(
+            &["migrations/0002_asks.sql", "asks.txt"],
+            &["migrations/0002_asks.sql", "asks.txt"],
+            &[
+                "migrations/0001_first.sql",
+                "migrations/0002_goals.sql",
+                "migrations/0002_asks.sql",
+            ],
+        );
+        let RenumberPlan::Move {
+            collision,
+            old,
+            new,
+            old_digits,
+        } = plan_of(&repository)
+        else {
+            panic!("not moved");
+        };
+        assert_eq!(old, "migrations/0002_asks.sql");
+        assert_eq!(new, "migrations/0003_asks.sql");
+        assert_eq!(old_digits, "0002");
+        assert_eq!(collision.next_digits, "0003");
+        assert_eq!(collision.taken, ["migrations/0002_asks.sql"]);
+    }
+
+    #[test]
+    fn migrations_without_a_collision_are_left_alone() {
+        // Nothing added under migrations/, or a file that is not a migration.
+        let none = renumbering(&["src/lib.rs", "migrations/README.md"], &[], &[]);
+        assert!(matches!(plan_of(&none), RenumberPlan::Unchanged));
+        // A free number.
+        let free = renumbering(
+            &["migrations/0002_goals.sql"],
+            &["migrations/0002_goals.sql"],
+            &["migrations/0001_first.sql", "migrations/0002_goals.sql"],
+        );
+        assert!(matches!(plan_of(&free), RenumberPlan::Unchanged));
+        // A run that renames a migration main had keeps its number: judged on
+        // the rebased tree, where no other file has it.
+        let renamed = renumbering(
+            &["migrations/0001_initial.sql"],
+            &["migrations/0001_first.sql", "migrations/0001_initial.sql"],
+            &["migrations/0001_initial.sql", "migrations/0002_goals.sql"],
+        );
+        assert!(matches!(plan_of(&renamed), RenumberPlan::Unchanged));
+        // Outside dagq's source (ADR-t614-1) the repository's own
+        // migrations are not looked at, a taken number or not.
+        let elsewhere = FakeRepository {
+            dagq_source: false,
+            ..renumbering(
+                &["migrations/0002_asks.sql"],
+                &["migrations/0002_asks.sql"],
+                &["migrations/0002_goals.sql", "migrations/0002_asks.sql"],
+            )
+        };
+        assert!(matches!(plan_of(&elsewhere), RenumberPlan::Unchanged));
+    }
+
+    #[test]
+    fn a_migration_mentioned_by_the_runs_other_changes_is_left_to_a_session() {
+        let repository = FakeRepository {
+            contents: vec![
+                ("notes.md".into(), "migration 0002 adds asks\n".into()),
+                // Not a file the run changed.
+                ("old.md".into(), "0002\n".into()),
+            ],
+            ..renumbering(
+                &["migrations/0002_asks.sql", "notes.md"],
+                &["migrations/0002_asks.sql", "notes.md"],
+                &[
+                    "migrations/0001_first.sql",
+                    "migrations/0002_goals.sql",
+                    "migrations/0002_asks.sql",
+                ],
+            )
+        };
+        let (reason, detail) = blocked(plan_of(&repository));
+        assert_eq!(
+            reason,
+            format!(
+                "the run's other changes mention 0002 (notes.md); main {MIGRATION_MAIN} already has the number of migrations/0002_asks.sql, and the next free number is 0003: renumber the run's migrations from 0003 (git mv), update what refers to their numbers, rerun the verification commands, and rewrite the receipt with the new head"
+            )
+        );
+        assert_eq!(
+            detail,
+            json!({
+                "main": MIGRATION_MAIN,
+                "head": HEAD,
+                "migrations": ["migrations/0002_asks.sql"],
+                "taken": ["migrations/0002_asks.sql"],
+                "next_number": "0003",
+                "referring": ["notes.md"],
+            })
+        );
+    }
+
+    #[test]
+    fn a_run_adding_two_migrations_is_left_to_a_session() {
+        let repository = renumbering(
+            &["migrations/0002_a.sql", "migrations/0003_b.sql"],
+            &["migrations/0002_a.sql", "migrations/0003_b.sql"],
+            &[
+                "migrations/0001_first.sql",
+                "migrations/0002_goals.sql",
+                "migrations/0002_a.sql",
+                "migrations/0003_b.sql",
+            ],
+        );
+        let (reason, detail) = blocked(plan_of(&repository));
+        assert!(
+            reason.starts_with(
+                "the run adds 2 migrations, which are not renumbered mechanically; main "
+            ),
+            "{reason}"
+        );
+        assert!(
+            reason.contains(
+                "already has the number of migrations/0002_a.sql, and the next free number is 0003"
+            ),
+            "{reason}"
+        );
+        assert_eq!(
+            detail,
+            json!({
+                "main": MIGRATION_MAIN,
+                "head": HEAD,
+                "migrations": ["migrations/0002_a.sql", "migrations/0003_b.sql"],
+                "taken": ["migrations/0002_a.sql"],
+                "next_number": "0003",
+            })
+        );
+    }
+
+    #[test]
+    fn a_refused_renumbering_commit_names_what_git_said() {
+        let repository = renumbering(
+            &["migrations/0002_asks.sql"],
+            &["migrations/0002_asks.sql"],
+            &["migrations/0002_goals.sql", "migrations/0002_asks.sql"],
+        );
+        let RenumberPlan::Move {
+            collision,
+            old,
+            new,
+            ..
+        } = plan_of(&repository)
+        else {
+            panic!("not moved");
+        };
+        let Renumbering::Blocked { reason, detail } = collision.refused(
+            &old,
+            &new,
+            "error: gpg failed to sign the data\n\nfatal: failed to write commit object\n",
+        ) else {
+            panic!("not blocked");
+        };
+        let gist = "error: gpg failed to sign the data; fatal: failed to write commit object";
+        assert!(
+            reason.starts_with(&format!(
+                "git refused the commit moving migrations/0002_asks.sql to migrations/0003_asks.sql ({gist}); "
+            )) && reason.contains("the next free number is 0003"),
+            "{reason}"
+        );
+        assert_eq!(detail["commit_error"], gist);
+        assert_eq!(detail["next_number"], "0003");
+    }
+
+    fn checked(code: Option<i32>, signal: Option<i32>, output: &str) -> Checked {
+        judge_command(
+            "cargo test",
+            code,
+            signal,
+            None,
+            output,
+            Path::new("/runs/run/integrate-1-verify-2.log"),
+        )
+    }
+
+    #[test]
+    fn a_failed_verification_command_is_classified_from_its_exit_and_log() {
+        // Passed: no failure, no tests.
+        let passed = checked(Some(0), None, "test result: ok\n");
+        assert_eq!((passed.exit_code, passed.failure.is_none()), (0, true));
+        assert_eq!(passed.tests_json(), Value::Null);
+        // A build error, named by its first error line and where it is.
+        let build = checked(
+            Some(101),
+            None,
+            "   Compiling dagq\nerror[E0063]: missing field `finding_id` in initializer of `NewAsk`\n  --> src/recovery.rs:12:5\nerror: could not compile `dagq`\n",
+        );
+        let evidence = "error[E0063]: missing field `finding_id` in initializer of `NewAsk` --> src/recovery.rs:12:5";
+        assert_eq!(
+            build.failure.as_ref().unwrap().to_json(),
+            json!({"class": "build_error", "evidence": evidence})
+        );
+        assert_eq!(build.tests_json(), Value::Null);
+        // A kill has no exit code: 128, and the signal says why.
+        let killed = checked(None, Some(15), "");
+        assert_eq!((killed.exit_code, killed.signal), (128, Some(15)));
+        assert_eq!(
+            killed.failure.as_ref().unwrap().to_json(),
+            json!({"class": "killed", "evidence": "killed by signal 15 (SIGTERM)"})
+        );
+        // Nothing in the log: unknown.
+        let unknown = checked(Some(1), None, "");
+        assert_eq!(
+            unknown.failure.as_ref().unwrap().to_json(),
+            json!({"class": "unknown", "evidence": "exit 1 with an empty log"})
+        );
+        // Killed at its limit: a timeout, whatever the log says.
+        let timed_out = judge_command(
+            "cargo test",
+            None,
+            Some(9),
+            Some(verify_failure::CommandTimedOut { limit_secs: 60 }),
+            "",
+            Path::new("/log"),
+        );
+        assert_eq!(
+            timed_out.failure.as_ref().unwrap().class,
+            verify_failure::FailureClass::Timeout
+        );
+        assert_eq!(timed_out.tests_json(), json!([]));
+    }
+
+    #[test]
+    fn a_failed_test_is_named_and_the_verdict_carries_it() {
+        let failed = checked(
+            Some(101),
+            None,
+            "test a::passes ... ok\ntest runtime_claim::waits ... FAILED\ntest b::breaks ... FAILED\n\nfailures:\n    runtime_claim::waits\n    b::breaks\n\ntest result: FAILED. 1 passed; 2 failed\n",
+        );
+        let failure = failed.failure.clone().unwrap();
+        assert_eq!(failure.class, verify_failure::FailureClass::TestFailure);
+        assert_eq!(
+            failed.tests_json(),
+            json!(["runtime_claim::waits", "b::breaks"])
+        );
+        assert_eq!(failed.omitted_json(), json!(0));
+        let Verdict::Deferred { reason, detail } =
+            verification_failed(&sha(BASE), &sha(HEAD), "cargo test", 2, &failed, &failure)
+        else {
+            panic!("not deferred");
+        };
+        assert_eq!(
+            reason,
+            format!(
+                "verification command \"cargo test\" exited with 101 after the rebase onto {BASE} (test_failure: {}); see /runs/run/integrate-1-verify-2.log",
+                failure.evidence
+            )
+        );
+        assert_eq!(
+            detail,
+            json!({
+                "code": "verification_failed",
+                "index": 2,
+                "main": BASE,
+                "head": HEAD,
+                "command": "cargo test",
+                "exit_code": 101,
+                "signal": null,
+                "failure": failure.to_json(),
+                "failed_tests": ["runtime_claim::waits", "b::breaks"],
+                "failed_tests_omitted": 0,
+                "flaky_tests": [],
+            })
+        );
+    }
+
+    #[test]
+    fn a_command_failing_on_the_host_again_holds_the_run_for_a_person() {
+        let first = checked(None, Some(15), "");
+        let last = judge_command(
+            "cargo test",
+            None,
+            Some(15),
+            None,
+            "",
+            Path::new("/runs/run/integrate-1-verify-2-retry.log"),
+        );
+        let task_run = run(Path::new(DIR));
+        let Verdict::Held { reason, detail } = held(
+            &task_run,
+            &sha(BASE),
+            &sha(HEAD),
+            "cargo test",
+            2,
+            &last,
+            Some(&first),
+            None,
+        ) else {
+            panic!("not held");
+        };
+        assert_eq!(
+            reason,
+            format!(
+                "verification command \"cargo test\" failed on the host after the rebase onto {BASE} (killed: killed by signal 15 (SIGTERM)); see /runs/run/integrate-1-verify-2.log and /runs/run/integrate-1-verify-2-retry.log. it failed so again when retried once; fix the host (free disk space, a lighter load), then land it with dagq integrate 7; no session is resumed"
+            )
+        );
+        let killed = json!({"class": "killed", "evidence": "killed by signal 15 (SIGTERM)"});
+        assert_eq!(
+            detail,
+            json!({
+                "code": "verification_environment",
+                "index": 2,
+                "main": BASE,
+                "head": HEAD,
+                "command": "cargo test",
+                "exit_code": 128,
+                "signal": 15,
+                "failure": killed,
+                "log_path": "/runs/run/integrate-1-verify-2-retry.log",
+                "retried": true,
+                "first_failure": killed,
+                "first_log_path": "/runs/run/integrate-1-verify-2.log",
+                "disk": null,
+            })
+        );
+    }
+
+    #[test]
+    fn a_command_failing_on_a_full_disk_is_held_without_a_retry() {
+        let last = checked(Some(101), None, "No space left on device (os error 28)\n");
+        let short = DiskShort {
+            free: 1 << 30,
+            need: 10 << 30,
+            largest_build: None,
+        };
+        let Verdict::Held { reason, detail } = held(
+            &run(Path::new(DIR)),
+            &sha(BASE),
+            &sha(HEAD),
+            "cargo test",
+            1,
+            &last,
+            None,
+            Some(short),
+        ) else {
+            panic!("not held");
+        };
+        assert!(
+            reason.contains("; see /runs/run/integrate-1-verify-2.log. it was not retried: 1.0 GiB free, below the 10.0 GiB a landing's verification needs; free disk space (dagq doctor lists the runs and their worktrees), then land it with dagq integrate 7"),
+            "{reason}"
+        );
+        assert_eq!(detail["retried"], false);
+        assert_eq!(detail["first_failure"], Value::Null);
+        assert_eq!(detail["first_log_path"], Value::Null);
+        assert_eq!(detail["disk"], short.to_json());
+        assert_eq!(detail["code"], "verification_environment");
+        // Without a classified failure, the class is unknown.
+        let passed = checked(Some(0), None, "");
+        let Verdict::Held { detail, .. } = held(
+            &run(Path::new(DIR)),
+            &sha(BASE),
+            &sha(HEAD),
+            "cargo test",
+            1,
+            &passed,
+            None,
+            None,
+        ) else {
+            panic!("not held");
+        };
+        assert_eq!(
+            detail["failure"],
+            json!({"class": "unknown", "evidence": ""})
+        );
+    }
+
+    /// Integrate's verification logs are numbered per attempt; a run
+    /// directory with the name used before (`integrate-verify-N.log`) is
+    /// still read, as the attempt before the numbered ones, and the review
+    /// names the latest attempt's.
+    #[test]
+    fn integrate_logs_are_kept_per_attempt_and_old_names_are_read() {
+        use crate::application::review::review_logs_hint;
+        let (files, run_dir) = (MemoryFiles::default(), Path::new(DIR));
+        assert_eq!(next_integrate_attempt(&files, run_dir), 1);
+        assert_eq!(integrate_logs(&files, run_dir), (vec![], vec![]));
+        assert_eq!(
+            review_logs_hint(&files, Some(DIR)),
+            format!(
+                "{DIR}/integrate-<attempt>-verify-N.log (one set per integrate attempt, written when integrate runs the verification commands after its rebase); none yet"
+            )
+        );
+        assert_eq!(review_logs_hint(&files, None), "(no run directory)");
+        for name in [
+            "integrate-verify-1.log",
+            "integrate-verify-2.log",
+            "verify-1.log",
+            "integrate-x-verify-1.log",
+            "integrate-verify-y.log",
+            "notes.txt",
+        ] {
+            files.write(&run_dir.join(name), name.as_bytes()).unwrap();
+        }
+        assert_eq!(
+            integrate_logs(&files, run_dir),
+            (
+                vec![
+                    run_dir.join("integrate-verify-1.log"),
+                    run_dir.join("integrate-verify-2.log")
+                ],
+                vec![]
+            )
+        );
+        assert_eq!(next_integrate_attempt(&files, run_dir), 1);
+        assert_eq!(
+            integrate_verify_log(run_dir, 1, 2),
+            run_dir.join("integrate-1-verify-2.log")
+        );
+        assert_eq!(
+            integrate_retry_log(run_dir, 1, 2),
+            run_dir.join("integrate-1-verify-2-retry.log")
+        );
+        for name in [
+            "integrate-1-verify-1.log",
+            "integrate-10-verify-2.log",
+            "integrate-10-verify-10.log",
+            "integrate-2-verify-1.log",
+        ] {
+            files.write(&run_dir.join(name), name.as_bytes()).unwrap();
+        }
+        let (latest, earlier) = integrate_logs(&files, run_dir);
+        assert_eq!(
+            latest,
+            vec![
+                run_dir.join("integrate-10-verify-2.log"),
+                run_dir.join("integrate-10-verify-10.log")
+            ]
+        );
+        assert_eq!(
+            earlier,
+            vec![
+                run_dir.join("integrate-verify-1.log"),
+                run_dir.join("integrate-verify-2.log"),
+                run_dir.join("integrate-1-verify-1.log"),
+                run_dir.join("integrate-2-verify-1.log")
+            ]
+        );
+        assert_eq!(next_integrate_attempt(&files, run_dir), 11);
+        assert!(review_logs_hint(&files, Some(DIR)).ends_with(&format!(
+            "latest attempt: {}, {}",
+            run_dir.join("integrate-10-verify-2.log").display(),
+            run_dir.join("integrate-10-verify-10.log").display()
+        )));
+        assert_eq!(next_integrate_attempt(&files, &run_dir.join("missing")), 1);
     }
 }

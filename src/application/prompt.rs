@@ -3584,4 +3584,210 @@ mod tests {
         assert!(!prompt.contains("rules above do not settle"), "{prompt}");
         assert!(!prompt.contains("ADR"), "{prompt}");
     }
+
+    /// A task in progress with `goal` and `context`.
+    fn grouped_task(id: i64, title: &str, goal: Option<i64>, context: &str) -> Task {
+        Task::restore(TaskRecord {
+            id: TaskId::new(id),
+            title: title.into(),
+            description: "small change".into(),
+            acceptance: "works".into(),
+            verification_commands: vec!["test -f seed.txt".into()],
+            required_evidence: Vec::new(),
+            paths: Vec::new(),
+            priority: Default::default(),
+            change: None,
+            status: TaskStatus::InProgress,
+            goal_id: goal.map(GoalId::new),
+            context: context.into(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
+            named_mode: None,
+        })
+        .unwrap()
+    }
+
+    /// The Sibling section of a task with a goal lists only the in-progress
+    /// tasks of that goal; a task without a goal sees every task in
+    /// progress; neither lists itself.
+    #[test]
+    fn siblings_are_the_tasks_in_progress_of_the_same_goal() {
+        let in_progress = || {
+            vec![
+                grouped_task(1, "test task", None, ""),
+                grouped_task(2, "a first", Some(1), ""),
+                grouped_task(3, "b only", Some(2), ""),
+                grouped_task(4, "a second", Some(1), ""),
+                grouped_task(5, "alone", None, ""),
+            ]
+        };
+        let ids = |task: &Task| -> Vec<i64> {
+            siblings_in_progress(task, in_progress())
+                .iter()
+                .map(|task| task.id().as_i64())
+                .collect()
+        };
+        // Goal a: its other task only, not task 1 without a goal.
+        assert_eq!(ids(&grouped_task(4, "a second", Some(1), "")), [2]);
+        assert_eq!(ids(&grouped_task(2, "a first", Some(1), "")), [4]);
+        // Goal b: nothing else of it is in progress.
+        assert!(ids(&grouped_task(3, "b only", Some(2), "")).is_empty());
+        // No goal: every task in progress but itself, in the given order.
+        assert_eq!(ids(&grouped_task(5, "alone", None, "")), [1, 2, 3, 4]);
+        assert!(siblings_in_progress(&grouped_task(9, "x", None, ""), Vec::new()).is_empty());
+    }
+
+    /// A task's prompt carries its goal as a Goal section (ID, title,
+    /// description, acceptance, constraints and the doc path, unread), its
+    /// context as a Context section, its predecessors and its siblings; a
+    /// task without them says so in the same place, so both prompts have
+    /// the same sequence of sections.
+    #[test]
+    fn prompt_describes_the_goal_the_context_and_its_company_and_keeps_one_shape_without_them() {
+        let goal = Goal::restore(GoalRecord {
+            id: GoalId::new(3),
+            title: "goal title".into(),
+            description: "goal description\nsecond line".into(),
+            acceptance: "goal acceptance".into(),
+            constraints: "goal constraints".into(),
+            doc: Some("docs/plans/goal.md".into()),
+            status: GoalStatus::Open,
+            closed_at: None,
+            verdict: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .unwrap();
+        let own_run = run(2, RunStatus::Claimed, None);
+        let grouped_task = grouped_task(
+            2,
+            "grouped",
+            Some(3),
+            "why this task exists\nread docs/design/x.md first",
+        );
+        let landed = PredecessorSummary {
+            task_id: TaskId::new(1),
+            title: "test task".into(),
+            result_commit: SHA.into(),
+            summary: "done".into(),
+        };
+        let sibling = task(4, "a second", TaskStatus::InProgress);
+        let grouped = prompt(
+            &grouped_task,
+            &own_run,
+            Some(&goal),
+            &[landed],
+            &[],
+            &[sibling],
+            None,
+            &[],
+        )
+        .unwrap();
+        let alone_task = task(2, "alone", TaskStatus::InProgress);
+        let alone = prompt(&alone_task, &own_run, None, &[], &[], &[], None, &[]).unwrap();
+
+        assert!(
+            grouped.contains(
+                "Goal (the higher-level problem this task and its sibling tasks solve together):\n\
+                 Goal ID: 3\nGoal title: goal title\nGoal description:\ngoal description\nsecond line\n\
+                 Goal acceptance:\ngoal acceptance\nGoal constraints:\ngoal constraints\n\
+                 Goal doc: docs/plans/goal.md (a path in the repository; read it for the full picture)\n"
+            ),
+            "{grouped}"
+        );
+        assert!(
+            grouped.contains(
+                "Context (why this task exists and what to read first):\n\
+                 why this task exists\nread docs/design/x.md first\n"
+            ),
+            "{grouped}"
+        );
+        assert!(
+            grouped.contains(&format!(
+                "Predecessor tasks (their changes are already in your base commit):\n\
+                 - task 1: test task; result commit {SHA}; summary: done\n"
+            )),
+            "{grouped}"
+        );
+        assert!(
+            grouped.contains(
+                "Sibling tasks in progress (other tasks executing now, each owning its own scope):\n\
+                 - task 4: a second\n"
+            ),
+            "{grouped}"
+        );
+        for absent in [
+            "Goal: none",
+            "Context: none",
+            "Predecessor tasks: none",
+            "Sibling tasks in progress: none",
+        ] {
+            assert!(!grouped.contains(absent), "{absent}: {grouped}");
+        }
+        for none in [
+            "Goal: none, this task stands alone\n",
+            "Context: none\n",
+            "Predecessor tasks: none\n",
+            "Sibling tasks in progress: none\n",
+        ] {
+            assert!(alone.contains(none), "{none}: {alone}");
+        }
+        assert!(!alone.contains("goal title"), "{alone}");
+        // Both prompts have the same sections in the same order, between the
+        // verification commands and the receipt contract.
+        let order = |text: &str| -> Vec<usize> {
+            [
+                "Task title:",
+                "Verification commands",
+                "Goal",
+                "Context",
+                "Predecessor tasks",
+                "Sibling tasks in progress",
+                "Your assignment is this task only.",
+                "Write a completion receipt",
+            ]
+            .iter()
+            .map(|heading| {
+                text.find(heading)
+                    .unwrap_or_else(|| panic!("{heading}: {text}"))
+            })
+            .collect()
+        };
+        for text in [&grouped, &alone] {
+            assert!(
+                order(text).windows(2).all(|pair| pair[0] < pair[1]),
+                "{text}"
+            );
+            // The receipt example shows the optional follow_ups, and the scope rule names it.
+            assert!(
+                text.contains(
+                    "\"summary\":\"...\",\"follow_ups\":[{\"title\":\"...\",\"description\":\"...\",\"category\":\"...\"}]}\n"
+                ),
+                "{text}"
+            );
+            assert!(
+                text.contains(
+                    "Your assignment is this task only. Do not change what a sibling task owns; \
+                     if you find work outside this task, record it in the receipt as follow_ups instead of doing it.\n"
+                ),
+                "{text}"
+            );
+            assert!(text.contains("follow_ups is optional"), "{text}");
+            // Each follow_up carries a category (ADR-t947-3), a worker_question a topic (ADR-t947-2).
+            assert!(text.contains(&follow_up_categories_line()), "{text}");
+            assert!(text.contains("flaky_test ("), "{text}");
+            assert!(text.contains(&worker_question_topics_line()), "{text}");
+            assert!(text.contains("--topic <code>"), "{text}");
+            assert!(text.contains("task_overlap ("), "{text}");
+            // The worker reads only what its run needs, never the queue.
+            assert!(text.contains(WORKER_READING), "{text}");
+            assert!(
+                text.contains("the worker section of the repository instructions"),
+                "{text}"
+            );
+            assert!(text.contains("Do not run `dagq list`"), "{text}");
+            assert!(!text.contains("Read its repository instructions"), "{text}");
+        }
+    }
 }

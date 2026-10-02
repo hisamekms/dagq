@@ -7,38 +7,25 @@ use dagq::infrastructure::git_binary::git_executable;
 
 use runtime_support::*;
 
-/// A Git remote double: `origin` exists unless `missing`, `[repository]`
-/// is the default unless reading it fails with `config_error`, and a push
-/// fails with `failure` when set. Every push is counted.
+/// A Git remote double: `origin` exists, `[repository]` is the default,
+/// and a push fails with `failure` when set. The decisions on what the
+/// remote answers are `decide_push`'s unit tests (src/application/integrate.rs).
 #[derive(Default)]
 struct TestRemote {
-    missing: bool,
-    config_error: Option<String>,
     failure: Option<String>,
-    contains: bool,
-    check_error: Option<String>,
-    pushes: Mutex<Vec<String>>,
 }
 
 impl MainRemote for TestRemote {
-    fn push_config(&self) -> Result<dagq::domain::landing_branch::RepositoryConfig> {
-        match &self.config_error {
-            Some(error) => bail!("{error}"),
-            None => Ok(Default::default()),
-        }
-    }
-
     fn has_remote(&self, remote: &str) -> Result<bool> {
-        Ok(!self.missing && remote == "origin")
+        Ok(remote == "origin")
     }
 
     fn push_main(
         &self,
         _: &dagq::application::integrate::PushGrant,
-        remote: &str,
+        _: &str,
         _: &dagq::domain::landing_branch::LandingBranch,
     ) -> Result<()> {
-        self.pushes.lock().unwrap().push(remote.to_owned());
         match &self.failure {
             Some(failure) => bail!("{failure}"),
             None => Ok(()),
@@ -51,77 +38,12 @@ impl MainRemote for TestRemote {
         _: &dagq::domain::landing_branch::LandingBranch,
         _: &dagq::domain::CommitSha,
     ) -> Result<bool> {
-        if let Some(error) = &self.check_error {
-            bail!("{error}");
-        }
-        Ok(self.contains)
+        Ok(false)
     }
 }
 
 fn integrate_with(db: &Path, repo: &Path, remote: Option<&dyn MainRemote>) -> Value {
     runtime::integrate(db, IntegrateTarget::Task(TaskId::new(1)), repo, remote).unwrap()
-}
-
-#[test]
-fn integrate_pushes_the_landed_main_to_origin() {
-    let (_dir, repo, db, run) = awaiting_run();
-    let remote = TestRemote::default();
-    let outcome = integrate_with(&db, &repo, Some(&remote));
-    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
-    assert_eq!(
-        outcome["push"],
-        json!({"outcome": "pushed", "remote": "origin", "branch": "main", "error": null})
-    );
-    assert_eq!(*remote.pushes.lock().unwrap(), ["origin"]);
-    let landed = git_out(&repo, &["rev-parse", "main"]);
-    assert_eq!(
-        events_of(&db, run.id(), "push_finished"),
-        [
-            json!({"remote": "origin", "branch": "main", "commit": landed, "already_delivered": false})
-        ]
-    );
-    let status = runtime::status(&db).unwrap();
-    assert!(run_attention_of(&status, run.id()).is_none(), "{status}");
-    // The landing's message is searchable with its task and run (ADR-0046).
-    let subject = git_out(&repo, &["log", "-1", "--format=%s", "main"]);
-    let page = SqliteQueue::open(&db)
-        .unwrap()
-        .search(&SearchQuery {
-            terms: subject.clone(),
-            kinds: vec![SearchKind::Commit],
-            limit: 5,
-            ..SearchQuery::default()
-        })
-        .unwrap();
-    assert_eq!(page.total, 1, "{subject}");
-    let hit = &page.hits[0];
-    assert_eq!(hit.id, SearchRef::Commit(landed));
-    assert_eq!(hit.title, subject.trim());
-    assert_eq!(
-        (hit.task_id, hit.run_id.as_deref(), hit.status.as_deref()),
-        (Some(1), Some(run.id().as_str()), Some("completed"))
-    );
-}
-
-#[test]
-fn a_rejected_push_already_on_the_remote_does_not_raise_attention() {
-    let (_dir, repo, db, run) = awaiting_run();
-    let remote = TestRemote {
-        failure: Some("cannot lock ref: is at newer but expected older".into()),
-        contains: true,
-        ..TestRemote::default()
-    };
-    let outcome = integrate_with(&db, &repo, Some(&remote));
-    assert_eq!(outcome["push"]["outcome"], "pushed");
-    let landed = git_out(&repo, &["rev-parse", "main"]);
-    assert_eq!(
-        events_of(&db, run.id(), "push_finished"),
-        [
-            json!({"remote": "origin", "branch": "main", "commit": landed, "already_delivered": true})
-        ]
-    );
-    assert!(events_of(&db, run.id(), "push_failed").is_empty());
-    assert!(run_attention_of(&runtime::status(&db).unwrap(), run.id()).is_none());
 }
 
 /// While the first landing is pushing, land and push the next run. The
@@ -236,29 +158,10 @@ fn a_later_landing_pushes_both_commits_before_the_first_push_finishes() {
 }
 
 #[test]
-fn a_failed_remote_check_keeps_the_original_push_failure() {
-    let (_dir, repo, db, run) = awaiting_run();
-    let remote = TestRemote {
-        failure: Some("authentication failed".into()),
-        check_error: Some("remote unavailable".into()),
-        ..TestRemote::default()
-    };
-    let outcome = integrate_with(&db, &repo, Some(&remote));
-    assert_eq!(outcome["push"]["outcome"], "failed");
-    assert_eq!(outcome["push"]["error"], "authentication failed");
-    assert_eq!(events_of(&db, run.id(), "push_failed").len(), 1);
-    assert_eq!(
-        run_attention_of(&runtime::status(&db).unwrap(), run.id()).unwrap()["kind"],
-        "push_failed"
-    );
-}
-
-#[test]
 fn a_failed_push_keeps_the_landing_and_waits_as_attention() {
     let (_dir, repo, db, run) = awaiting_run();
     let remote = TestRemote {
         failure: Some("rejected: fetch first".into()),
-        ..TestRemote::default()
     };
     let outcome = integrate_with(&db, &repo, Some(&remote));
     assert_eq!(outcome["outcome"], "integrated", "{outcome}");
@@ -313,36 +216,6 @@ fn a_failed_push_keeps_the_landing_and_waits_as_attention() {
         .unwrap();
     let status = runtime::status(&db).unwrap();
     assert!(run_attention_of(&status, run.id()).is_none(), "{status}");
-}
-
-#[test]
-fn no_push_and_a_missing_origin_skip_the_push() {
-    let (_dir, repo, db, run) = awaiting_run();
-    let remote = TestRemote::default();
-    let outcome = integrate_with(&db, &repo, None);
-    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
-    assert_eq!(
-        outcome["push"],
-        json!({"outcome": "skipped", "remote": "origin", "branch": "main", "error": null, "reason": "--no-push"})
-    );
-    assert!(remote.pushes.lock().unwrap().is_empty());
-    let skipped = events_of(&db, run.id(), "push_skipped");
-    assert_eq!(skipped.len(), 1);
-    assert_eq!(skipped[0]["reason"], "--no-push");
-
-    let (_dir, repo, db, run) = awaiting_run();
-    let remote = TestRemote {
-        missing: true,
-        ..TestRemote::default()
-    };
-    let outcome = integrate_with(&db, &repo, Some(&remote));
-    assert_eq!(outcome["push"]["outcome"], "skipped", "{outcome}");
-    assert_eq!(
-        outcome["push"]["reason"],
-        "the repository has no remote origin"
-    );
-    assert!(remote.pushes.lock().unwrap().is_empty());
-    assert_eq!(events_of(&db, run.id(), "push_skipped").len(), 1);
 }
 
 /// The real Git adapter pushes main to a bare origin, and reports Git's
@@ -428,13 +301,13 @@ fn git_adapter_checks_whether_a_later_remote_head_contains_the_landing() {
     );
 }
 
-/// `[repository]` of dagq.toml steers the real adapter's push
-/// (ADR-t615-1): `remote` pushes to that remote, `push = false` skips the
-/// push without looking at the remote, and a `remote` the repository does
-/// not have fails the push (unlike a missing default origin, which skips
-/// it) while the landing stands.
+/// `[repository] remote` of dagq.toml steers the real adapter's push
+/// (ADR-t615-1): the landing goes to that remote, not to origin, is
+/// recorded as `push_finished` without an attention, and its message is
+/// searchable with its task and run (ADR-0046). `push = false`, a missing
+/// remote and an unreadable table are `decide_push`'s unit tests.
 #[test]
-fn the_push_follows_the_repository_table_of_dagq_toml() {
+fn the_landing_is_pushed_to_the_remote_dagq_toml_names() {
     let bare = |dir: &Path, name: &str| {
         let path = dir.join(name);
         let made = Command::new(git_executable().expect("git executable"))
@@ -445,8 +318,6 @@ fn the_push_follows_the_repository_table_of_dagq_toml() {
         assert!(made.status.success());
         path
     };
-
-    // remote = "upstream": pushed there, not to origin.
     let (dir, repo, db, run) = awaiting_run();
     let upstream = bare(dir.path(), "upstream.git");
     let origin = bare(dir.path(), "origin.git");
@@ -464,6 +335,7 @@ fn the_push_follows_the_repository_table_of_dagq_toml() {
     )
     .unwrap();
     let outcome = integrate(&db, 1, &repo).unwrap();
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
     assert_eq!(
         outcome["push"],
         json!({"outcome": "pushed", "remote": "upstream", "branch": "main", "error": null}),
@@ -481,79 +353,27 @@ fn the_push_follows_the_repository_table_of_dagq_toml() {
             json!({"remote": "upstream", "branch": "main", "commit": landed, "already_delivered": false})
         ]
     );
-
-    // push = false: skipped with its own reason, origin untouched.
-    let (dir, repo, db, run) = awaiting_run();
-    let origin = bare(dir.path(), "origin.git");
-    git(
-        &repo,
-        &["remote", "add", "origin", origin.to_str().unwrap()],
-    );
-    fs::write(repo.join("dagq.toml"), "[repository]\npush = false\n").unwrap();
-    let outcome = integrate(&db, 1, &repo).unwrap();
-    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
-    assert_eq!(
-        outcome["push"],
-        json!({"outcome": "skipped", "remote": "origin", "branch": "main", "error": null, "reason": "push = false in dagq.toml"}),
-        "{outcome}"
-    );
-    assert!(!git_ok(
-        &origin,
-        &["rev-parse", "--verify", "--quiet", "main"]
-    ));
-    let landed = git_out(&repo, &["rev-parse", "main"]);
-    assert_eq!(
-        events_of(&db, run.id(), "push_skipped"),
-        [
-            json!({"remote": "origin", "branch": "main", "commit": landed, "reason": "push = false in dagq.toml"})
-        ]
-    );
-
-    // A configured remote that is missing fails the push.
-    let (_dir, repo, db, run) = awaiting_run();
-    fs::write(
-        repo.join("dagq.toml"),
-        "[repository]\nremote = \"upstream\"\n",
-    )
-    .unwrap();
-    let outcome = integrate(&db, 1, &repo).unwrap();
-    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
-    assert_eq!(outcome["task"]["status"], "completed");
-    assert_eq!(outcome["push"]["outcome"], "failed", "{outcome}");
-    assert_eq!(outcome["push"]["remote"], "upstream");
-    let error = outcome["push"]["error"].as_str().unwrap();
-    assert!(
-        error.contains("the remote upstream") && error.contains("[repository]"),
-        "{error}"
-    );
-    let failed = events_of(&db, run.id(), "push_failed");
-    assert_eq!(failed.len(), 1);
-    assert_eq!(failed[0]["code"], "push_failed");
-    assert_eq!(failed[0]["branch"], "main");
     let status = runtime::status(&db).unwrap();
+    assert!(run_attention_of(&status, run.id()).is_none(), "{status}");
+    // The landing's message is searchable with its task and run (ADR-0046).
+    let subject = git_out(&repo, &["log", "-1", "--format=%s", "main"]);
+    let page = SqliteQueue::open(&db)
+        .unwrap()
+        .search(&SearchQuery {
+            terms: subject.clone(),
+            kinds: vec![SearchKind::Commit],
+            limit: 5,
+            ..SearchQuery::default()
+        })
+        .unwrap();
+    assert_eq!(page.total, 1, "{subject}");
+    let hit = &page.hits[0];
+    assert_eq!(hit.id, SearchRef::Commit(landed));
+    assert_eq!(hit.title, subject.trim());
     assert_eq!(
-        run_attention_of(&status, run.id()).unwrap()["kind"],
-        "push_failed"
+        (hit.task_id, hit.run_id.as_deref(), hit.status.as_deref()),
+        (Some(1), Some(run.id().as_str()), Some("completed"))
     );
-}
-
-/// A `[repository]` that cannot be read when the push starts fails the
-/// push, to the default remote, after the landing.
-#[test]
-fn an_unreadable_repository_table_fails_the_push() {
-    let (_dir, repo, db, run) = awaiting_run();
-    let remote = TestRemote {
-        config_error: Some("dagq.toml:2: value of remote".into()),
-        ..TestRemote::default()
-    };
-    let outcome = integrate_with(&db, &repo, Some(&remote));
-    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
-    assert_eq!(
-        outcome["push"],
-        json!({"outcome": "failed", "remote": "origin", "branch": "main", "error": "dagq.toml:2: value of remote"})
-    );
-    assert!(remote.pushes.lock().unwrap().is_empty());
-    assert_eq!(events_of(&db, run.id(), "push_failed").len(), 1);
 }
 
 fn git_ok(repo: &Path, args: &[&str]) -> bool {
@@ -772,6 +592,14 @@ fn conflict_free_run_lands_as_one_squash_commit_and_releases_dependents() {
     assert_eq!(detail.task.status(), TaskStatus::Completed);
     let landed = detail.runs[0].clone();
     assert_landed(&repo, &landed, "test task", &seed);
+    // Outside dagq's source (ADR-t614-1) the claim records no toolchain.
+    let claimed = &detail
+        .events
+        .iter()
+        .find(|e| e.kind == "run_claimed")
+        .unwrap()
+        .payload;
+    assert!(claimed.get("rustc_release").is_none(), "{claimed}");
     assert!(landed.last_error().is_none());
     // No rebase was needed: the landed tree is the validated tree, and the
     // history ref points at the validated commit.
@@ -1128,226 +956,6 @@ fn add_ready_task_in(
         .transition(task.id(), TaskAction::BypassReview)
         .unwrap();
     task.id()
-}
-
-/// The section headings of a prompt in order of appearance, so tests can
-/// compare the shape of prompts with and without a goal.
-fn section_order(prompt: &str) -> Vec<usize> {
-    [
-        "Task title:",
-        "Verification commands",
-        "Goal",
-        "Context",
-        "Predecessor tasks",
-        "Sibling tasks in progress",
-        "Your assignment is this task only.",
-        "Write a completion receipt",
-    ]
-    .iter()
-    .map(|heading| {
-        prompt
-            .find(heading)
-            .unwrap_or_else(|| panic!("{heading}: {prompt}"))
-    })
-    .collect()
-}
-
-/// A task's prompt carries its goal as a Goal section (ID, title,
-/// description, acceptance, constraints and the doc path, unread) and its
-/// context as a Context section; a task without either says so in the same
-/// place, so both prompts have the same sequence of sections.
-#[test]
-fn prompt_describes_the_goal_and_the_context_and_keeps_one_shape_without_them() {
-    let (_dir, repo, db) = fixture();
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let goal = queue
-        .add_goal(NewGoal {
-            title: "goal title".into(),
-            description: "goal description\nsecond line".into(),
-            acceptance: "goal acceptance".into(),
-            constraints: "goal constraints".into(),
-            doc: Some("docs/plans/goal.md".into()),
-            draft: false,
-        })
-        .unwrap();
-    fs::write(repo.join("unrelated.md"), "not read\n").unwrap();
-    add_ready_task_in(
-        &mut queue,
-        "grouped",
-        Some(goal.id()),
-        "why this task exists\nread docs/design/x.md first",
-    );
-    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    let outcome = supervise(&db, &repo, &backend).unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]));
-    assert_eq!(outcome["runs"].as_array().unwrap().len(), 2);
-
-    let alone = read_prompt(&queue.show(TaskId::new(1)).unwrap().runs[0]);
-    assert!(
-        alone.contains("Goal: none, this task stands alone\n"),
-        "{alone}"
-    );
-    assert!(alone.contains("Context: none\n"), "{alone}");
-    assert!(!alone.contains("goal title"), "{alone}");
-
-    let grouped = read_prompt(&queue.show(TaskId::new(2)).unwrap().runs[0]);
-    assert!(
-        grouped.contains(&format!(
-            "Goal (the higher-level problem this task and its sibling tasks solve together):\n\
-             Goal ID: {}\nGoal title: goal title\nGoal description:\ngoal description\nsecond line\n\
-             Goal acceptance:\ngoal acceptance\nGoal constraints:\ngoal constraints\n\
-             Goal doc: docs/plans/goal.md (a path in the repository; read it for the full picture)\n",
-            goal.id()
-        )),
-        "{grouped}"
-    );
-    // The doc is named by path only; the prompt never embeds its content.
-    assert!(!grouped.contains("not read"), "{grouped}");
-    assert!(
-        grouped.contains(
-            "Context (why this task exists and what to read first):\n\
-             why this task exists\nread docs/design/x.md first\n"
-        ),
-        "{grouped}"
-    );
-    assert!(!grouped.contains("Goal: none"), "{grouped}");
-    assert!(!grouped.contains("Context: none"), "{grouped}");
-    // Both prompts have the same sections in the same order.
-    let order = section_order(&grouped);
-    assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{grouped}");
-    let order = section_order(&alone);
-    assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{alone}");
-    // The receipt example shows the optional follow_ups, and the scope rule names it.
-    for prompt in [&alone, &grouped] {
-        assert!(
-            prompt.contains(
-                "\"summary\":\"...\",\"follow_ups\":[{\"title\":\"...\",\"description\":\"...\",\"category\":\"...\"}]}\n"
-            ),
-            "{prompt}"
-        );
-        assert!(
-            prompt.contains(
-                "Your assignment is this task only. Do not change what a sibling task owns; \
-                 if you find work outside this task, record it in the receipt as follow_ups instead of doing it.\n"
-            ),
-            "{prompt}"
-        );
-        assert!(prompt.contains("follow_ups is optional"), "{prompt}");
-        // Each follow_up carries a category from the runtime's list (ADR-t947-3).
-        assert!(
-            prompt.contains(&runtime::follow_up_categories_line()),
-            "{prompt}"
-        );
-        assert!(prompt.contains("flaky_test ("), "{prompt}");
-        // A worker_question carries a topic from the runtime's list (ADR-t947-2).
-        assert!(
-            prompt.contains(&runtime::worker_question_topics_line()),
-            "{prompt}"
-        );
-        assert!(prompt.contains("--topic <code>"), "{prompt}");
-        assert!(prompt.contains("task_overlap ("), "{prompt}");
-        // The worker reads only what its run needs, never the queue.
-        assert!(prompt.contains(runtime::WORKER_READING), "{prompt}");
-        assert!(
-            prompt.contains("the worker section of the repository instructions"),
-            "{prompt}"
-        );
-        assert!(prompt.contains("Do not run `dagq list`"), "{prompt}");
-        assert!(
-            !prompt.contains("Read its repository instructions"),
-            "{prompt}"
-        );
-    }
-}
-
-/// The Sibling section of a task with a goal lists only the in-progress
-/// tasks of that goal; a task without a goal still sees every task in
-/// progress. Claims in one pass go in ID order, so a prompt lists the
-/// siblings claimed before it.
-#[test]
-fn prompt_lists_only_the_siblings_of_the_same_goal_in_progress() {
-    let (_dir, repo, db) = fixture();
-    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    // Task 1 (no goal) is in progress before the grouped tasks are claimed.
-    assert_eq!(
-        supervise(&db, &repo, &backend).unwrap()["errors"],
-        json!([])
-    );
-    backend.join();
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    assert_eq!(
-        queue.show(TaskId::new(1)).unwrap().task.status(),
-        TaskStatus::InProgress
-    );
-    let a = queue
-        .add_goal(NewGoal {
-            title: "goal a".into(),
-            ..NewGoal::default()
-        })
-        .unwrap();
-    let b = queue
-        .add_goal(NewGoal {
-            title: "goal b".into(),
-            ..NewGoal::default()
-        })
-        .unwrap();
-    assert_eq!(
-        add_ready_task_in(&mut queue, "a first", Some(a.id()), ""),
-        TaskId::new(2)
-    );
-    assert_eq!(
-        add_ready_task_in(&mut queue, "b only", Some(b.id()), ""),
-        TaskId::new(3)
-    );
-    assert_eq!(
-        add_ready_task_in(&mut queue, "a second", Some(a.id()), ""),
-        TaskId::new(4)
-    );
-    assert_eq!(
-        add_ready_task_in(&mut queue, "alone", None, ""),
-        TaskId::new(5)
-    );
-    let outcome = supervise(&db, &repo, &backend).unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]));
-    assert_eq!(outcome["runs"].as_array().unwrap().len(), 4);
-
-    let mut prompt_of =
-        |task_id: i64| read_prompt(&queue.show(TaskId::new(task_id)).unwrap().runs[0]);
-    // Task 2: task 1 is in progress but belongs to no goal, so it is not a sibling.
-    let first = prompt_of(2);
-    assert!(
-        first.contains("Sibling tasks in progress: none\n"),
-        "{first}"
-    );
-    assert!(!first.contains("- task 1: test task"), "{first}");
-    // Task 3: nothing of goal b is in progress; goal a's task 2 is not listed.
-    let only = prompt_of(3);
-    assert!(only.contains("Sibling tasks in progress: none\n"), "{only}");
-    assert!(!only.contains("- task 2: a first"), "{only}");
-    // Task 4: its sibling task 2 is listed, task 3 of goal b and task 1 are not.
-    let second = prompt_of(4);
-    assert!(
-        second.contains(
-            "Sibling tasks in progress (other tasks executing now, each owning its own scope):\n\
-             - task 2: a first\n"
-        ),
-        "{second}"
-    );
-    assert!(!second.contains("- task 3: b only"), "{second}");
-    assert!(!second.contains("- task 1: test task"), "{second}");
-    assert!(!second.contains("- task 4: a second"), "{second}");
-    // Task 5 has no goal and sees every task in progress except itself.
-    let alone = prompt_of(5);
-    assert!(
-        alone.contains(
-            "Sibling tasks in progress (other tasks executing now, each owning its own scope):\n\
-             - task 1: test task\n- task 2: a first\n- task 3: b only\n- task 4: a second\n"
-        ),
-        "{alone}"
-    );
-    assert!(!alone.contains("- task 5: alone"), "{alone}");
 }
 
 /// `prompt.txt` is a snapshot taken at claim time: a run claimed before a
@@ -2122,6 +1730,9 @@ fn failing_verification_command_passes_validation_and_needs_a_session_at_integra
     assert_eq!(verifications[0]["exit_code"], 1);
     assert_eq!(verifications[0]["failure"], unknown);
     assert_eq!(verifications[0]["attempt"], 1);
+    // The duration and load of task 197 are there, next to it.
+    assert!(verifications[0]["duration_secs"].is_number());
+    assert_load(verifications[0]);
     // Nothing landed.
     assert_eq!(git_out(&repo, &["rev-parse", "main"]), main);
 
@@ -2194,184 +1805,6 @@ fn failing_verification_command_passes_validation_and_needs_a_session_at_integra
     );
 }
 
-/// A failed verification command is put down to a class from its exit and
-/// its log, recorded on the command's event and the deferral, and named in
-/// the reason (task 467): here a build error, then a kill.
-#[test]
-fn a_failed_verification_is_classified_in_its_events() {
-    let (_dir, db, detail) = run_agent(
-        "echo a > a.txt && git add a.txt && git commit -q -m a; receipt \"$(git rev-parse HEAD)\"",
-    );
-    assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
-    let repo = Path::new(&db).parent().unwrap().join("repo's directory");
-    let build_error = r#"echo '   Compiling dagq'; echo 'error[E0063]: missing field `finding_id` in initializer of `NewAsk`'; echo '  --> src/recovery.rs:12:5'; echo 'error: could not compile `dagq`'; exit 101"#;
-    let set_commands = |commands: Value| {
-        Connection::open(&db)
-            .unwrap()
-            .execute(
-                "UPDATE tasks SET verification_commands=?1 WHERE id=1",
-                [commands.to_string()],
-            )
-            .unwrap();
-    };
-    set_commands(json!(["true", build_error]));
-    let outcome = integrate(&db, 1, &repo).unwrap();
-    assert_eq!(outcome["outcome"], "needs_session", "{outcome}");
-    let evidence = "error[E0063]: missing field `finding_id` in initializer of `NewAsk` --> src/recovery.rs:12:5";
-    assert!(
-        outcome["reason"]
-            .as_str()
-            .unwrap()
-            .contains(&format!("(build_error: {evidence})")),
-        "{outcome}"
-    );
-    let detail = SqliteQueue::open(&db)
-        .unwrap()
-        .show(TaskId::new(1))
-        .unwrap();
-    let failure = json!({"class": "build_error", "evidence": evidence});
-    let deferred = payloads(&detail, "integration_deferred");
-    assert_eq!(deferred[0]["code"], "verification_failed");
-    assert_eq!(deferred[0]["index"], 2);
-    assert_eq!(deferred[0]["failure"], failure);
-    let verifications = integration_verifications(&detail);
-    assert_eq!(verifications[0]["failure"], Value::Null);
-    assert_eq!(verifications[1]["exit_code"], 101);
-    assert_eq!(verifications[1]["failure"], failure);
-    // The duration and load of task 197 are still there, next to it.
-    assert!(verifications[1]["duration_secs"].is_number());
-    assert!(verifications[1].get("load_avg_mean").is_some());
-
-    // A shell killed by a signal has no exit code: the signal says why. A
-    // kill is the host's, retried and then held for a person (task 639).
-    set_commands(json!(["kill -TERM $$"]));
-    let outcome = integrate(&db, 1, &repo).unwrap();
-    assert_eq!(outcome["outcome"], "held", "{outcome}");
-    let detail = SqliteQueue::open(&db)
-        .unwrap()
-        .show(TaskId::new(1))
-        .unwrap();
-    let killed = json!({"class": "killed", "evidence": "killed by signal 15 (SIGTERM)"});
-    let held = payloads(&detail, "integration_held");
-    assert_eq!(held[0]["failure"], killed);
-    assert_eq!(held[0]["signal"], 15);
-    assert_eq!(held[0]["exit_code"], 128);
-    let verifications = integration_verifications(&detail);
-    assert_eq!(verifications[2]["failure"], killed);
-    assert_eq!(verifications[2]["signal"], 15);
-}
-
-/// A verification command whose tests failed names them on its event and
-/// the deferral (task 515); one that failed otherwise names none.
-#[test]
-fn a_failed_test_is_named_in_the_verification_events() {
-    let (_dir, db, detail) = run_agent(
-        "echo a > a.txt && git add a.txt && git commit -q -m a; receipt \"$(git rev-parse HEAD)\"",
-    );
-    assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
-    let repo = Path::new(&db).parent().unwrap().join("repo's directory");
-    let failing_tests = r#"echo 'test a::passes ... ok'; echo 'test runtime_claim::waits ... FAILED'; echo 'test b::breaks ... FAILED'; echo; echo 'failures:'; echo '    runtime_claim::waits'; echo '    b::breaks'; echo; echo 'test result: FAILED. 1 passed; 2 failed'; exit 101"#;
-    Connection::open(&db)
-        .unwrap()
-        .execute(
-            "UPDATE tasks SET verification_commands=?1 WHERE id=1",
-            [json!(["true", failing_tests]).to_string()],
-        )
-        .unwrap();
-    let outcome = integrate(&db, 1, &repo).unwrap();
-    assert_eq!(outcome["outcome"], "needs_session", "{outcome}");
-    let detail = SqliteQueue::open(&db)
-        .unwrap()
-        .show(TaskId::new(1))
-        .unwrap();
-    let names = json!(["runtime_claim::waits", "b::breaks"]);
-    let deferred = payloads(&detail, "integration_deferred");
-    assert_eq!(deferred[0]["failure"]["class"], "test_failure");
-    assert_eq!(deferred[0]["failed_tests"], names);
-    assert_eq!(deferred[0]["failed_tests_omitted"], 0);
-    let verifications = integration_verifications(&detail);
-    assert_eq!(verifications[0]["failed_tests"], Value::Null);
-    assert_eq!(verifications[1]["failed_tests"], names);
-}
-
-/// Integrate's verification logs are numbered per attempt; a run directory
-/// with the name used before (`integrate-verify-N.log`) is still read, as
-/// the attempt before the numbered ones.
-#[test]
-fn integrate_logs_are_kept_per_attempt_and_old_names_are_read() {
-    let dir = TempDir::new().unwrap();
-    let run_dir = dir.path();
-    assert_eq!(runtime::next_integrate_attempt(run_dir), 1);
-    assert_eq!(runtime::integrate_logs(run_dir), (vec![], vec![]));
-    assert_eq!(
-        runtime::review_logs_hint(Some(run_dir.to_str().unwrap())),
-        format!(
-            "{}/integrate-<attempt>-verify-N.log (one set per integrate attempt, written when integrate runs the verification commands after its rebase); none yet",
-            run_dir.display()
-        )
-    );
-    assert_eq!(runtime::review_logs_hint(None), "(no run directory)");
-    for name in [
-        "integrate-verify-1.log",
-        "integrate-verify-2.log",
-        "verify-1.log",
-        "integrate-x-verify-1.log",
-        "integrate-verify-y.log",
-        "notes.txt",
-    ] {
-        fs::write(run_dir.join(name), name).unwrap();
-    }
-    assert_eq!(
-        runtime::integrate_logs(run_dir),
-        (
-            vec![
-                run_dir.join("integrate-verify-1.log"),
-                run_dir.join("integrate-verify-2.log")
-            ],
-            vec![]
-        )
-    );
-    assert_eq!(runtime::next_integrate_attempt(run_dir), 1);
-    assert_eq!(
-        runtime::integrate_verify_log(run_dir, 1, 2),
-        run_dir.join("integrate-1-verify-2.log")
-    );
-    for name in [
-        "integrate-1-verify-1.log",
-        "integrate-10-verify-2.log",
-        "integrate-10-verify-10.log",
-        "integrate-2-verify-1.log",
-    ] {
-        fs::write(run_dir.join(name), name).unwrap();
-    }
-    let (latest, earlier) = runtime::integrate_logs(run_dir);
-    assert_eq!(
-        latest,
-        vec![
-            run_dir.join("integrate-10-verify-2.log"),
-            run_dir.join("integrate-10-verify-10.log")
-        ]
-    );
-    assert_eq!(
-        earlier,
-        vec![
-            run_dir.join("integrate-verify-1.log"),
-            run_dir.join("integrate-verify-2.log"),
-            run_dir.join("integrate-1-verify-1.log"),
-            run_dir.join("integrate-2-verify-1.log")
-        ]
-    );
-    assert_eq!(runtime::next_integrate_attempt(run_dir), 11);
-    assert!(
-        runtime::review_logs_hint(Some(run_dir.to_str().unwrap())).ends_with(&format!(
-            "latest attempt: {}, {}",
-            run_dir.join("integrate-10-verify-2.log").display(),
-            run_dir.join("integrate-10-verify-10.log").display()
-        ))
-    );
-    assert_eq!(runtime::next_integrate_attempt(&run_dir.join("missing")), 1);
-}
-
 /// A task that runs `script` in its worktree before committing everything
 /// and writing its receipt, verified by `verify`.
 fn add_script_task(
@@ -2417,18 +1850,8 @@ const NO_SHARED_NUMBER: &str = "test -z \"$(ls migrations | cut -c1-4 | sort | u
 /// dagq's source repository (ADR-t614-1) whose main has
 /// `migrations/0001_first.sql`.
 fn migration_fixture() -> (Fixture, PathBuf, PathBuf) {
-    migration_fixture_named("dagq")
-}
-
-/// A repository whose main has `migrations/0001_first.sql` and a
-/// `Cargo.toml` of the package `package`.
-fn migration_fixture_named(package: &str) -> (Fixture, PathBuf, PathBuf) {
     let (dir, repo, db) = fixture();
-    fs::write(
-        repo.join("Cargo.toml"),
-        format!("[package]\nname = \"{package}\"\n"),
-    )
-    .unwrap();
+    fs::write(repo.join("Cargo.toml"), "[package]\nname = \"dagq\"\n").unwrap();
     fs::create_dir(repo.join("migrations")).unwrap();
     fs::write(repo.join("migrations/0001_first.sql"), "-- first\n").unwrap();
     git(&repo, &["add", "."]);
@@ -2556,68 +1979,12 @@ fn integrate_renumbers_a_migration_whose_number_main_took() {
     );
 }
 
-/// Outside dagq's source repository (ADR-t614-1) integrate leaves the
-/// repository's own migrations alone: a run whose migration has a number
-/// main took meanwhile lands as it is, neither renumbered nor held as
-/// `migration_number_taken`.
-#[test]
-fn integrate_does_not_renumber_migrations_outside_dagqs_source() {
-    let (_dir, repo, db) = migration_fixture_named("myapp");
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    let first = add_script_task(
-        &mut queue,
-        &backend,
-        "add goals",
-        "printf -- '-- goals\\n' > migrations/0002_goals.sql",
-        &["true"],
-    );
-    let second = add_script_task(
-        &mut queue,
-        &backend,
-        "add asks",
-        "printf -- '-- asks\\n' > migrations/0002_asks.sql && printf 'migration 0002 adds asks\\n' > notes.md",
-        &["true"],
-    );
-    supervise(&db, &repo, &backend).unwrap();
-    backend.join();
-    for task in [first, second] {
-        let outcome = integrate(&db, task.as_i64(), &repo).unwrap();
-        assert_eq!(outcome["outcome"], "integrated", "{outcome}");
-        let detail = queue.show(task).unwrap();
-        assert!(!event_kinds(&detail).contains(&"migration_renumbered"));
-        // Nor is the host's toolchain recorded at the claim.
-        let claimed = &detail
-            .events
-            .iter()
-            .find(|e| e.kind == "run_claimed")
-            .unwrap()
-            .payload;
-        assert!(claimed.get("rustc_release").is_none(), "{claimed}");
-    }
-    assert!(
-        !queue
-            .show(second)
-            .unwrap()
-            .events
-            .iter()
-            .any(|e| e.payload["code"] == "migration_number_taken")
-    );
-    assert_eq!(
-        migrations_on(&repo, "main"),
-        [
-            "migrations/0001_first.sql",
-            "migrations/0002_asks.sql",
-            "migrations/0002_goals.sql"
-        ]
-    );
-}
-
 /// Git refuses the commit that would renumber the run's migration (here a
 /// signing program that does not exist; the hooks are skipped). The rename
 /// is undone, the worktree is clean at the rebased head, and the run waits
 /// for a session as `migration_number_taken` with the next free number and
-/// what Git said, instead of the integrate failing.
+/// what Git said, instead of the integrate failing. Once the session
+/// renumbers it and rewrites the receipt, the same run lands.
 #[test]
 fn a_refused_renumbering_commit_is_undone_and_needs_a_session() {
     let (dir, repo, db) = migration_fixture();
@@ -2690,108 +2057,24 @@ fn a_refused_renumbering_commit_is_undone_and_needs_a_session() {
     assert!(worktree.join("migrations/0002_asks.sql").exists());
     assert!(!worktree.join("migrations/0003_asks.sql").exists());
     assert_eq!(git_out(&repo, &["rev-parse", "main"]), main);
-}
 
-/// A migration integrate cannot move by itself: its number is mentioned by
-/// another file the run changes, or the run adds more than one migration.
-/// The run waits for a session with the next free number and the reason
-/// (`migration_number_taken`), main and the run's tree stay as they were,
-/// and once the session renumbers it, it lands.
-#[test]
-fn a_migration_that_cannot_be_renumbered_mechanically_needs_a_session() {
-    let (_dir, repo, db) = migration_fixture();
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    let first = add_script_task(
-        &mut queue,
-        &backend,
-        "add goals",
-        "printf -- '-- goals\\n' > migrations/0002_goals.sql",
-        &[NO_SHARED_NUMBER],
-    );
-    let referred = add_script_task(
-        &mut queue,
-        &backend,
-        "add asks",
-        "printf -- '-- asks\\n' > migrations/0002_asks.sql && printf 'migration 0002 adds asks\\n' > notes.md",
-        &[NO_SHARED_NUMBER],
-    );
-    let two = add_script_task(
-        &mut queue,
-        &backend,
-        "add two",
-        "printf -- '-- a\\n' > migrations/0002_a.sql && printf -- '-- b\\n' > migrations/0003_b.sql",
-        &[NO_SHARED_NUMBER],
-    );
-    supervise(&db, &repo, &backend).unwrap();
-    backend.join();
-    assert_eq!(
-        integrate(&db, first.as_i64(), &repo).unwrap()["outcome"],
-        "integrated"
-    );
-    let main = git_out(&repo, &["rev-parse", "main"]);
-
-    for (task, why) in [
-        (referred, "the run's other changes mention 0002 (notes.md)"),
-        (
-            two,
-            "the run adds 2 migrations, which are not renumbered mechanically",
-        ),
-    ] {
-        let run = queue.show(task).unwrap().runs[0].clone();
-        let outcome = integrate(&db, task.as_i64(), &repo).unwrap();
-        assert_eq!(outcome["outcome"], "needs_session", "{outcome}");
-        let reason = outcome["reason"].as_str().unwrap();
-        assert!(reason.contains(why), "{reason}");
-        assert!(
-            reason.contains("migrations/0002_") && reason.contains("the next free number is 0003"),
-            "{reason}"
-        );
-        let detail = queue.show(task).unwrap();
-        assert!(!event_kinds(&detail).contains(&"migration_renumbered"));
-        let deferred = detail
-            .events
-            .iter()
-            .rfind(|e| e.kind == "integration_deferred")
-            .unwrap();
-        assert_eq!(deferred.payload["code"], "migration_number_taken");
-        assert_eq!(deferred.payload["next_number"], "0003");
-        assert_eq!(
-            queue.show(task).unwrap().runs[0].status(),
-            RunStatus::NeedsSession
-        );
-        // The rebased run is left for the session, without a rename.
-        let worktree = PathBuf::from(run.worktree_path().unwrap());
-        assert_eq!(git_out(&worktree, &["rev-parse", "HEAD^"]), main);
-        assert_eq!(git_out(&worktree, &["status", "--porcelain"]), "");
-        assert_eq!(git_out(&repo, &["rev-parse", "main"]), main);
-    }
-    let deferred = queue
-        .show(referred)
-        .unwrap()
-        .events
-        .into_iter()
-        .rfind(|e| e.kind == "integration_deferred")
-        .unwrap();
-    assert_eq!(deferred.payload["referring"], json!(["notes.md"]));
-
-    // The session renumbers the migration and what mentions it.
-    let parked = queue.show(referred).unwrap().runs[0].clone();
-    let worktree = PathBuf::from(parked.worktree_path().unwrap());
+    // The session renumbers the migration itself and rewrites the receipt;
+    // the same run then lands with main's migrations in order.
+    git(&repo, &["config", "--unset", "commit.gpgsign"]);
     git(
         &worktree,
         &["mv", "migrations/0002_asks.sql", "migrations/0003_asks.sql"],
     );
-    fs::write(worktree.join("notes.md"), "migration 0003 adds asks\n").unwrap();
-    git(&worktree, &["commit", "-q", "-a", "-m", "renumber"]);
+    git(&worktree, &["commit", "-q", "-m", "renumber"]);
     write_receipt(
-        &parked,
+        &run,
         &git_out(&worktree, &["rev-parse", "HEAD"]),
         "succeeded",
         "renumbered to 0003",
     );
-    let outcome = integrate(&db, referred.as_i64(), &repo).unwrap();
+    let outcome = integrate(&db, second.as_i64(), &repo).unwrap();
     assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+    assert_eq!(outcome["run"]["id"], json!(run.id()));
     assert_eq!(
         migrations_on(&repo, "main"),
         [
@@ -2802,37 +2085,52 @@ fn a_migration_that_cannot_be_renumbered_mechanically_needs_a_session() {
     );
 }
 
-/// A run that renames a migration main already had keeps its number: the
-/// collision is judged on the rebased tree, where no other file has it.
+/// What `plan_renumber` reads through the real Git adapter (its decisions
+/// are unit tests in src/application/integrate.rs): a renamed migration is
+/// an added path under its new name only (`--no-renames`), and
+/// `paths_containing` names the given files of a commit that hold the
+/// number, not the others.
 #[test]
-fn a_renamed_migration_is_not_renumbered() {
-    let (_dir, repo, db) = migration_fixture();
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    let first = add_script_task(
-        &mut queue,
-        &backend,
-        "add goals",
-        "printf -- '-- goals\\n' > migrations/0002_goals.sql",
-        &[NO_SHARED_NUMBER],
+fn git_adapter_reads_what_the_renumbering_plan_needs() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    crate::common::template::repository(&repo, "renumbering\n");
+    fs::create_dir(repo.join("migrations")).unwrap();
+    fs::write(repo.join("migrations/0001_first.sql"), "-- first\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "first migration"]);
+    let base = git_out(&repo, &["rev-parse", "HEAD"]);
+    git(
+        &repo,
+        &[
+            "mv",
+            "migrations/0001_first.sql",
+            "migrations/0001_initial.sql",
+        ],
     );
-    let renamer = add_script_task(
-        &mut queue,
-        &backend,
-        "rename first",
-        "git mv migrations/0001_first.sql migrations/0001_initial.sql",
-        &[NO_SHARED_NUMBER],
-    );
-    supervise(&db, &repo, &backend).unwrap();
-    backend.join();
-    for task in [first, renamer] {
-        let outcome = integrate(&db, task.as_i64(), &repo).unwrap();
-        assert_eq!(outcome["outcome"], "integrated", "{outcome}");
-    }
-    assert!(!event_kinds(&queue.show(renamer).unwrap()).contains(&"migration_renumbered"));
+    fs::write(repo.join("notes.md"), "migration 0001 is renamed\n").unwrap();
+    fs::write(repo.join("other.md"), "nothing here\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "rename"]);
+    let head = git_out(&repo, &["rev-parse", "HEAD"]);
+    let adapter = GitRepository::inspect(&repo).unwrap();
+    let mut added = adapter.added_paths(&base, &head).unwrap();
+    added.sort();
     assert_eq!(
-        migrations_on(&repo, "main"),
-        ["migrations/0001_initial.sql", "migrations/0002_goals.sql"]
+        added,
+        ["migrations/0001_initial.sql", "notes.md", "other.md"]
+    );
+    let files = ["notes.md".to_owned(), "other.md".to_owned()];
+    assert_eq!(
+        adapter.paths_containing(&head, "0001", &files).unwrap(),
+        ["notes.md"]
+    );
+    assert!(
+        adapter
+            .paths_containing(&head, "0002", &files)
+            .unwrap()
+            .is_empty()
     );
 }
 

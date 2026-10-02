@@ -4,8 +4,8 @@ type: design
 title: "Landing branch"
 status: current
 created: 2026-09-27
-updated: 2026-10-01
-last_verified: 2026-10-01
+updated: 2026-10-03
+last_verified: 2026-10-03
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -23,7 +23,7 @@ related:
 
 着地先のbranch、着地後のpushのremote、pushするかは、repositoryの`dagq.toml`の`[repository]`で指定でき、指定が無ければruntimeが決める（[ADR-t615-1](../../adr/2026-09-27-t615-1-landing-branch-and-push-remote-per-repository.md)。ADR-0008決定3・4・6・7・8、ADR-0047決定26、ADR-0054決定7をamends）。
 
-**実装状況**: すべて実装済み（branchはtask 619、remoteとpushはtask 620）。`src/domain/landing_branch.rs`の`resolve`が下の順で決め、`GitRepository::landing_branch`（`src/infrastructure/adapters.rs`）がmain checkoutの`dagq.toml`の`[repository]`（`run_env.rs`の`load_repository_config`。`GitRepository::repository_config`が`branch`と`remote`をGitの名前として検査する）・pushのremoteのHEAD・ローカルのbranchを読んで呼ぶ。`main_head`・`main_history`・`main_checkout`は使うたびに解決したbranchを読み、`advance_main`（`Repository`）と`push_main`（`MainRemote`）は解決せず、`integrate`の`land_integrating`が着地ごとに1度解決した`LandingBranch`を受け取る（task 667。下の「着地ごとに1度解決する」）。`GitRepository::inspect`はbranchを読まない（`rebind`・`review`・`plan`は着地先が無くても動く）。pushは`integrate`の`push_main`（`src/application/integrate.rs`）が`MainRemote::push_config`で`[repository]`を読んで下の表のとおりに決め、既定のremoteは`landing_branch::DEFAULT_REMOTE`（`origin`）。`up`のpreflightと`doctor`は`GitRepository::repository_settings`（branchの解決と`PushTarget`。明示した`remote`が無くpushするならerror）を出す。
+**実装状況**: すべて実装済み（branchはtask 619、remoteとpushはtask 620）。`src/domain/landing_branch.rs`の`resolve`が下の順で決め、`GitRepository::landing_branch`（`src/infrastructure/adapters.rs`）がmain checkoutの`dagq.toml`の`[repository]`（`run_env.rs`の`load_repository_config`。`GitRepository::repository_config`が`branch`と`remote`をGitの名前として検査する）・pushのremoteのHEAD・ローカルのbranchを読んで呼ぶ。`main_head`・`main_history`・`main_checkout`は使うたびに解決したbranchを読み、`advance_main`（`Repository`）と`push_main`（`MainRemote`）は解決せず、`integrate`の`land_integrating`が着地ごとに1度解決した`LandingBranch`を受け取る（task 667。下の「着地ごとに1度解決する」）。`GitRepository::inspect`はbranchを読まない（`rebind`・`review`・`plan`は着地先が無くても動く）。pushは`integrate`の`decide_push`（`src/application/integrate.rs`。`push_main`がその結果をlogに出して記録する）が`MainRemote::push_config`で`[repository]`を読んで下の表のとおりに決め、既定のremoteは`landing_branch::DEFAULT_REMOTE`（`origin`）。`up`のpreflightと`doctor`は`GitRepository::repository_settings`（branchの解決と`PushTarget`。明示した`remote`が無くpushするならerror）を出す。
 
 ## `[repository]`の欄
 
