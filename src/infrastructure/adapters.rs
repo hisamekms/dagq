@@ -550,9 +550,27 @@ fn wait_until(child: &mut Child, timeout: Duration) -> Result<Option<ExitStatus>
 /// in the run directory, not in the event payload.
 pub const VERIFICATION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
-/// Run `script` with `/bin/sh -c` in `cwd`, its output in `log`, killed
-/// once it runs past `timeout` (the whole command, [`VERIFICATION_TIMEOUT`]
-/// for the verifier). A kill at the limit is the error
+/// How long a verification command's process group has, after SIGTERM at
+/// its limit, before the group gets SIGKILL.
+const VERIFICATION_STOP_GRACE: Duration = Duration::from_secs(15);
+
+/// How often [`stop_verification_group`] looks for what is left during the
+/// grace (each look lists the processes).
+const VERIFICATION_STOP_POLL: Duration = Duration::from_millis(100);
+
+/// How long [`stop_verification_group`] waits for the group to be empty
+/// once it was killed: the descendants are reaped by `init` once they die.
+const VERIFICATION_GONE_WITHIN: Duration = Duration::from_secs(10);
+
+/// Run `script` with `/bin/sh -c` in `cwd`, its output in `log`, in a
+/// process group of its own, stopped once it runs past `timeout` (the whole
+/// command, [`VERIFICATION_TIMEOUT`] for the verifier). At the limit the
+/// whole group (the shell and what it started, `cargo` and the tests, and
+/// the groups nextest's tests run in) gets SIGTERM, then SIGKILL after
+/// [`VERIFICATION_STOP_GRACE`] unless it ended, and the call returns once
+/// no process of them is left, or [`VERIFICATION_GONE_WITHIN`] after the
+/// SIGKILL (task 1098): a retry in the same worktree must not race the
+/// previous attempt's descendants. A stop at the limit is the error
 /// [`CommandTimedOut`](crate::domain::verify_failure::CommandTimedOut),
 /// which integrate records as a `timeout` failure of the command (task 639).
 pub fn run_shell_to_log(
@@ -572,14 +590,120 @@ pub fn run_shell_to_log(
         .stdin(Stdio::null())
         .stdout(Stdio::from(file.try_clone()?))
         .stderr(Stdio::from(file))
+        .process_group(0)
         .spawn()
         .with_context(|| format!("start verification command {script:?}"))?;
-    wait_until(&mut child, timeout)?.ok_or_else(|| {
-        anyhow::Error::new(crate::domain::verify_failure::CommandTimedOut {
-            limit_secs: timeout.as_secs(),
-        })
-        .context(format!("verification command {script:?} timed out"))
-    })
+    let started = Instant::now();
+    let deadline = started + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            stop_verification_group(&mut child, VERIFICATION_STOP_GRACE);
+            return Err(
+                anyhow::Error::new(crate::domain::verify_failure::CommandTimedOut {
+                    limit_secs: timeout.as_secs(),
+                })
+                .context(format!("verification command {script:?} timed out")),
+            );
+        }
+        thread::sleep(if started.elapsed() < EXIT_POLL_FAST_FOR {
+            EXIT_POLL_FAST
+        } else {
+            EXIT_POLL
+        });
+    }
+}
+
+/// Send `signal` to the process group `leader` leads; `false` when no
+/// process of the group is left.
+fn signal_group(leader: u32, signal: i32) -> bool {
+    let Ok(group) = libc::pid_t::try_from(leader) else {
+        return false;
+    };
+    signal_target(-group, signal)
+}
+
+/// Send `signal` to `target` (a pid, or a process group when negative);
+/// `false` when it is gone.
+fn signal_target(target: libc::pid_t, signal: i32) -> bool {
+    // SAFETY: kill(2) takes no pointer.
+    let sent = unsafe { libc::kill(target, signal) } == 0;
+    sent || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+/// Add to `groups` the process groups of `leader`'s descendants that left
+/// its group: cargo-nextest runs each test in a group of its own, and the
+/// processes a test starts join it.
+fn note_escaped_groups(leader: u32, groups: &mut std::collections::BTreeSet<libc::pid_t>) {
+    let Ok(own) = libc::pid_t::try_from(leader) else {
+        return;
+    };
+    for pid in SystemProcesses.descendants(leader) {
+        let Ok(pid) = libc::pid_t::try_from(pid) else {
+            continue;
+        };
+        // SAFETY: getpgid(2) takes no pointer.
+        let group = unsafe { libc::getpgid(pid) };
+        if group > 0 && group != own {
+            groups.insert(group);
+        }
+    }
+}
+
+/// Stop the process group `leader` leads, and the groups its descendants
+/// moved to (nextest's tests): SIGTERM to all of them, then SIGKILL once
+/// none is left or `grace` has passed, then wait (within
+/// [`VERIFICATION_GONE_WITHIN`], killing again) until no process of them
+/// is left. The descendants are listed again while the grace runs, so the
+/// groups started before the SIGTERM landed are found while their parents
+/// still live. The leader is reaped as it is watched, so a zombie leader
+/// does not keep the group alive. The grace is longer than the one nextest
+/// gives its tests on SIGTERM (10 seconds), so nextest stops them itself.
+fn stop_verification_group(leader: &mut Child, grace: Duration) {
+    let id = leader.id();
+    let mut escaped = std::collections::BTreeSet::new();
+    note_escaped_groups(id, &mut escaped);
+    signal_group(id, libc::SIGTERM);
+    for group in &escaped {
+        signal_target(-group, libc::SIGTERM);
+    }
+    let mut reaped = false;
+    let left = |escaped: &std::collections::BTreeSet<libc::pid_t>| {
+        signal_group(id, 0) || escaped.iter().any(|group| signal_target(-group, 0))
+    };
+    let deadline = Instant::now() + grace;
+    while Instant::now() < deadline {
+        if !reaped {
+            let mut found = escaped.clone();
+            note_escaped_groups(id, &mut found);
+            for group in found.difference(&escaped) {
+                signal_target(-group, libc::SIGTERM);
+            }
+            escaped = found;
+            reaped = !matches!(leader.try_wait(), Ok(None));
+        }
+        if reaped && !left(&escaped) {
+            return;
+        }
+        thread::sleep(VERIFICATION_STOP_POLL);
+    }
+    let kill_all = |escaped: &std::collections::BTreeSet<libc::pid_t>| {
+        let mut any = signal_group(id, libc::SIGKILL);
+        for group in escaped {
+            any |= signal_target(-group, libc::SIGKILL);
+        }
+        any
+    };
+    kill_all(&escaped);
+    if !reaped {
+        let _ = leader.wait();
+    }
+    let deadline = Instant::now() + VERIFICATION_GONE_WITHIN;
+    while kill_all(&escaped) && Instant::now() < deadline {
+        thread::sleep(EXIT_POLL);
+    }
 }
 
 /// `path`'s [`FileStamp`], `None` when it is not there (or not readable).
@@ -3300,6 +3424,135 @@ mod tests {
     use crate::domain::{
         PlannerId, PlannerOrigin, ProposalId, Provider, RunId, RunStatus, SessionRole,
     };
+
+    /// The pids a verification command wrote to `dir`, once it wrote them
+    /// all (within a bound).
+    fn written_pids(dir: &Path, names: &[&str]) -> Vec<u32> {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let pids: Vec<Option<u32>> = names
+                .iter()
+                .map(|name| {
+                    fs::read_to_string(dir.join(name))
+                        .ok()
+                        .and_then(|text| text.trim().parse().ok())
+                })
+                .collect();
+            if pids.iter().all(Option::is_some) {
+                return pids.into_iter().flatten().collect();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the pids {names:?} were not written"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// A verification command past its limit is stopped with all it
+    /// started: when the call returns, neither its child nor its grandchild
+    /// is alive, and the error is the timeout (task 1098).
+    #[test]
+    fn a_verification_command_past_its_limit_leaves_no_descendant() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let script = "sleep 60 & echo $! > child; \
+             sh -c 'sleep 60 & echo $! > grandchild; wait' & echo $! > middle; \
+             wait";
+        let started = Instant::now();
+        let error = run_shell_to_log(
+            script,
+            dir,
+            &[],
+            &dir.join("verify.log"),
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(40));
+        assert_eq!(
+            error.downcast_ref::<crate::domain::verify_failure::CommandTimedOut>(),
+            Some(&crate::domain::verify_failure::CommandTimedOut { limit_secs: 5 })
+        );
+        for pid in written_pids(dir, &["child", "middle", "grandchild"]) {
+            assert!(!process_alive(pid), "{pid} outlived the timeout");
+        }
+    }
+
+    /// A descendant that moved to a process group of its own (as
+    /// cargo-nextest runs each test) is stopped with the command.
+    #[test]
+    fn a_descendant_in_a_group_of_its_own_is_stopped_with_the_command() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let script = "perl -e 'setpgrp(0, 0); open my $f, \">\", \"escaped\"; \
+             print $f \"$$\\n\"; close $f; sleep 60' & wait";
+        let error = run_shell_to_log(
+            script,
+            dir,
+            &[],
+            &dir.join("verify.log"),
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<crate::domain::verify_failure::CommandTimedOut>()
+                .is_some()
+        );
+        let pid = written_pids(dir, &["escaped"])[0];
+        assert!(!process_alive(pid), "{pid} outlived the timeout");
+    }
+
+    /// A group that ignores SIGTERM gets SIGKILL after the grace, and the
+    /// stop returns once none of it is left.
+    #[test]
+    fn a_group_that_ignores_sigterm_is_killed_after_the_grace() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("trap '' TERM; sh -c 'sleep 60 & echo $! > grandchild; wait' & echo $! > middle; wait")
+            .current_dir(dir)
+            .stdin(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pids = written_pids(dir, &["middle", "grandchild"]);
+        let leader = child.id();
+        stop_verification_group(&mut child, Duration::from_millis(300));
+        assert!(!process_alive(leader));
+        for pid in pids {
+            assert!(!process_alive(pid), "{pid} outlived the stop");
+        }
+        assert!(!signal_group(leader, 0));
+    }
+
+    /// A verification command within its limit returns its exit as before,
+    /// its output in the log.
+    #[test]
+    fn a_verification_command_within_its_limit_returns_its_exit() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("verify.log");
+        let status = run_shell_to_log(
+            "echo out; echo err >&2; exit 3",
+            temp.path(),
+            &[("GREETING".to_owned(), "hi".to_owned())],
+            &log,
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        assert_eq!(status.code(), Some(3));
+        assert_eq!(fs::read_to_string(&log).unwrap(), "out\nerr\n");
+        let status = run_shell_to_log(
+            "test \"$GREETING\" = hi",
+            temp.path(),
+            &[("GREETING".to_owned(), "hi".to_owned())],
+            &log,
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        assert!(status.success());
+    }
 
     /// Claude Code gets the broker client's server and the permission to
     /// use its tools among its options, before the prompt; nothing else of
