@@ -1301,6 +1301,16 @@ impl Supervisor<'_> {
         })
     }
 
+    /// The handoff request this process drains for was replaced by one for
+    /// `now`: the drain goes on for the new binary (task 1286).
+    fn replace_handoff(&mut self, binary: &str, now: String) {
+        info!(
+            "supervisor {} handoff to {binary} was replaced by a handoff to {now}: no new work starts; it execs {now} once the validations and landings in progress are done",
+            self.token
+        );
+        self.handoff = Some(now);
+    }
+
     /// Drive the loop, then remove this process's registration: it is about
     /// to exit, whether it drained its runs, ran out of work, or failed on
     /// a claim or provisioning. Only a heartbeat failure keeps the row (the
@@ -1439,21 +1449,25 @@ impl Supervisor<'_> {
             // 437), and Codex's hold ends once its time is up (ADR-t813-2).
             self.check_queue_hold(true)?;
             self.check_provider_holds()?;
-            // A request may have been withdrawn while this process drained.
-            // Return to claims on this pass, without waiting for the slots
-            // that had kept the handoff pending.
-            let handoff_withdrawn = if let Some(binary) = &self.handoff {
-                self.queue.handoff_request(&self.token)?.as_deref() != Some(binary)
-            } else {
-                false
-            };
-            if handoff_withdrawn {
-                info!(
-                    "supervisor {} handoff to {} was withdrawn or replaced; resuming normal work",
-                    self.token,
-                    self.handoff.as_deref().unwrap_or_default()
-                );
-                self.handoff = None;
+            // A request may have been withdrawn while this process drained:
+            // return to claims on this pass, without waiting for the slots
+            // that had kept the handoff pending. One replaced by another
+            // binary goes on draining for the new one, with no claim
+            // between (task 1286).
+            let mut handoff_withdrawn = false;
+            if let Some(binary) = self.handoff.clone() {
+                match self.queue.handoff_request(&self.token)? {
+                    Some(now) if now == binary => {}
+                    Some(now) => self.replace_handoff(&binary, now),
+                    None => {
+                        info!(
+                            "supervisor {} handoff to {binary} was withdrawn; resuming normal work",
+                            self.token
+                        );
+                        self.handoff = None;
+                        handoff_withdrawn = true;
+                    }
+                }
             }
             self.draining = stopping || !self.claiming || self.handoff.is_some();
             // Before any new work, draining or not: a drain waits for them
@@ -1504,12 +1518,22 @@ impl Supervisor<'_> {
                                 "triaged": self.triaged,
                             }));
                         }
-                        info!(
-                            "supervisor {} handoff to {binary} was withdrawn or replaced before exec; resuming normal work",
-                            self.token
-                        );
-                        self.handoff = None;
-                        self.draining = !self.claiming;
+                        // Not taken: withdrawn, or replaced by another
+                        // binary, which the next pass execs (task 1286).
+                        match self.queue.handoff_request(&self.token)? {
+                            Some(now) if now != binary => self.replace_handoff(&binary, now),
+                            // The same binary asked again meanwhile: taken
+                            // on the next pass.
+                            Some(_) => {}
+                            None => {
+                                info!(
+                                    "supervisor {} handoff to {binary} was withdrawn before exec; resuming normal work",
+                                    self.token
+                                );
+                                self.handoff = None;
+                                self.draining = !self.claiming;
+                            }
+                        }
                     }
                     if self.handoff.is_some() {
                         self.draining = true;

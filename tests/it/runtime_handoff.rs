@@ -177,6 +177,108 @@ fn canceling_a_handoff_during_a_landing_resumes_claims_without_exec() {
     assert_ne!(outcome["outcome"], "handoff", "{outcome}");
 }
 
+/// A supervisor draining a landing for a handoff, with a second slot free
+/// for a claim. Returns the thread, the release file, its pass counter and
+/// its token once it has read the request for `/next/dagq`.
+fn draining_for_a_handoff(
+    db: &Path,
+    repo: &Path,
+) -> (thread::JoinHandle<Value>, PathBuf, Arc<AtomicU64>, String) {
+    let release = db.with_extension("release");
+    let verification = json!([format!(
+        "while [ ! -f {} ]; do sleep 0.05; done",
+        shell_quote(release.to_str().unwrap())
+    )]);
+    Connection::open(db)
+        .unwrap()
+        .execute(
+            "UPDATE tasks SET verification_commands=?1 WHERE id=1",
+            [verification.to_string()],
+        )
+        .unwrap();
+    let backend = Arc::new(TestWorkspace::new(db, false, VALID_AGENT));
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "ready to land")]);
+    let options = supervise_options(2, false);
+    let passes = options.passes.clone();
+    let supervisor = {
+        let (db, repo, backend) = (db.to_owned(), repo.to_owned(), backend.clone());
+        thread::spawn(move || supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options))
+    };
+    wait_until(db, crate::common::STEP_LIMIT, |queue| {
+        event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"integration_started")
+    });
+    let token = only_registration(db).token;
+    let mut queue = SqliteQueue::open(db).unwrap();
+    assert!(queue.request_handoff(&token, "/next/dagq").unwrap());
+    await_passes(&passes, SOME_PASSES);
+    // Draining: a task made ready now is not claimed.
+    add_ready_task(&mut queue, "while draining", &[]);
+    (supervisor, release, passes, token.into_string())
+}
+
+/// The supervisor execs `/replacement/dagq` and task 2, ready all along,
+/// was never claimed.
+fn execs_the_replacement_without_a_claim(db: &Path, supervisor: thread::JoinHandle<Value>) {
+    let outcome = joined(supervisor, "the supervisor whose handoff was replaced");
+    assert_eq!(outcome["outcome"], "handoff", "{outcome}");
+    assert_eq!(outcome["binary"], "/replacement/dagq", "{outcome}");
+    let mut queue = SqliteQueue::open(db).unwrap();
+    assert!(queue.show(TaskId::new(2)).unwrap().runs.is_empty());
+    assert_eq!(
+        queue.show(TaskId::new(1)).unwrap().task.status(),
+        TaskStatus::Completed
+    );
+}
+
+/// Task 1286: a request replaced by another binary while the supervisor
+/// drains goes on draining for the new binary: no pass claims between, and
+/// the exec is of the replacement.
+#[test]
+fn a_handoff_replaced_while_draining_execs_the_new_binary_without_a_claim() {
+    let (_dir, repo, db) = fixture();
+    let (supervisor, release, passes, token) = draining_for_a_handoff(&db, &repo);
+    let token = LeaseToken::new(token);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    assert!(queue.request_handoff(&token, "/replacement/dagq").unwrap());
+    await_passes(&passes, SOME_PASSES);
+    assert!(queue.show(TaskId::new(2)).unwrap().runs.is_empty());
+    std::fs::write(&release, "go").unwrap();
+    execs_the_replacement_without_a_claim(&db, supervisor);
+}
+
+/// Task 1286: a request replaced just before the supervisor takes it (the
+/// take finds another binary) is read again: the supervisor goes on
+/// draining and execs the replacement on its next pass, with no claim.
+#[test]
+fn a_handoff_replaced_at_the_take_execs_the_new_binary_without_a_claim() {
+    let (_dir, repo, db) = fixture();
+    // The take of `/next/dagq` meets the replacement: the trigger swaps the
+    // binary and skips the take's own update, so the take changes no row.
+    Connection::open(&db)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER replace_at_take BEFORE UPDATE OF handoff_accepted ON supervisors
+             WHEN NEW.handoff_accepted = 0 AND OLD.handoff_binary = '/next/dagq'
+             BEGIN
+                 UPDATE supervisors SET handoff_binary = '/replacement/dagq'
+                 WHERE token = OLD.token;
+                 SELECT RAISE(IGNORE);
+             END;",
+        )
+        .unwrap();
+    let (supervisor, release, _passes, token) = draining_for_a_handoff(&db, &repo);
+    std::fs::write(&release, "go").unwrap();
+    execs_the_replacement_without_a_claim(&db, supervisor);
+    // The replacement was taken: no request is left.
+    assert_eq!(
+        SqliteQueue::open(&db)
+            .unwrap()
+            .handoff_request(&LeaseToken::new(token))
+            .unwrap(),
+        None
+    );
+}
+
 /// Task 1277: a supervisor asked to hand off while a landing holds it, and
 /// then asked to stop, records `supervisor_draining` once; `hand_off`
 /// fails it as stopping at once instead of at its timeout and withdraws
