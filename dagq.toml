@@ -72,8 +72,9 @@ changes = ["feature", "fix", "refactor", "test", "measure", "docs", "config"]
 # provider・model で並べて比べる（goal 73、ADR-t1063-1、task 1067。書式と振る舞いは
 # docs/design/supervisor-lifecycle/actor-model.md の provider）。model と effort は書かず、
 # Codex の既定の model と medium に任せる。Codex が使えないときは Claude に切り替えて起動する。
-# codex を受け付けるのは goal_review・review（ADR-t1207-1）・plan_review（task 1218）で、この repository は
-# goal_review と review と plan_review を codex にしている（plan_review は固定バイナリが task 1218 を含んでから task 1219 が足した）。
+# codex を受け付けるのは goal_review・review（ADR-t1207-1）・plan_review（task 1218）・throughput_review（task 1220）で、
+# この repository は goal_review と review と plan_review と throughput_review を codex にしている（plan_review は固定バイナリが
+# task 1218 を含んでから task 1219 が、throughput_review は task 1220 を含んでから task 1221 が足した）。
 # 他の役割は provider を書かず、今までどおり Claude で動く。
 # [roles.<role>] の provider を知らない旧バイナリは dagq.toml を読めなくなるので、
 # 固定バイナリが task 1065 を含んでから足した。
@@ -95,6 +96,15 @@ provider = "codex"
 # model と effort は書かず、Codex の既定の model と medium に任せる。Codex が使えないときは Claude に切り替えて起動する
 # （--no-claude では切り替えず plan review by hand に渡す）。plan_review の codex を知らない旧バイナリ
 # （CODEX_ROLES に plan_review が無い）は設定の誤りとして拒むので、固定バイナリが task 1218 を含んでから足した。
+provider = "codex"
+
+[roles.throughput_review]
+# スループットの見直し（毎時・日次・週次）の job を Codex（codex exec の読み取りだけの job）で動かす（人の 2026-10-01 の決定
+# 「inbox と worker は Claude、それ以外の actor は Codex」のスループットの見直しの分。goal 80、task 1220・1221。
+# 書式と振る舞いは docs/design/supervisor-lifecycle/throughput-review.md の「Codexで動かす」と actor-model.md の provider）。
+# model と effort は書かず、Codex の既定の model と medium に任せる。Codex が使えないときは Claude に切り替えて起動する
+# （--no-claude では切り替えず、throughput_review_finished の error に理由を残す）。throughput_review の codex を知らない旧バイナリ
+# （CODEX_ROLES に throughput_review が無い）は設定の誤りとして拒むので、固定バイナリが task 1220 を含んでから足した。
 provider = "codex"
 
 [areas]
