@@ -346,7 +346,7 @@ impl Supervisor<'_> {
             // Not ready as far as this supervisor knows: a broker recorded
             // as running dagq's build that answers now is used.
             _ => match port.control.running_port() {
-                Some(number) => {
+                Ok(number) => {
                     return match &port.client {
                         Ok(client) => Ok(Grant {
                             client: client.clone(),
@@ -357,12 +357,7 @@ impl Supervisor<'_> {
                         }
                     };
                 }
-                None => {
-                    return Err((
-                        "not_ready".to_owned(),
-                        "the queue's broker is not ready yet".to_owned(),
-                    ));
-                }
+                Err(why) => return Err(("not_ready".to_owned(), why)),
             },
         };
         if !self.broker.build_matches {

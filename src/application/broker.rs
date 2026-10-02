@@ -1636,8 +1636,9 @@ pub trait BrokerControl: Send + Sync {
     /// its health now with that build, without any podman command: what a
     /// claim uses before this supervisor's own start of it came back (a
     /// supervisor just started, or `dagq broker start` made it ready).
-    fn running_port(&self) -> Option<u16> {
-        None
+    /// Else why not, for the run's `broker_unavailable`.
+    fn running_port(&self) -> Result<u16, String> {
+        Err("the queue's broker is not ready yet".to_owned())
     }
 }
 

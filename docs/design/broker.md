@@ -4,8 +4,8 @@ type: design
 title: Resource broker
 status: draft
 created: 2026-09-28
-updated: 2026-10-02T00:00:00Z
-last_verified: 2026-10-02T00:00:00Z
+updated: 2026-10-02T09:00:00Z
+last_verified: 2026-10-02T09:00:00Z
 scope: runtime
 tags:
   - security
@@ -388,7 +388,7 @@ ADR-t827-3の決定2・3。modeが`disabled`（既定。`[broker]`の無いqueue
 - **ensure**: 最初のpassと、brokerが用意できていない間は各passのclaimの前に、`QueueBroker::start`（上の「用意の手順」）をjobのthreadで1本ずつ走らせる（`Supervisor::broker_pass`）。loopは待たず、後のpassで結果を刈り取る。imageのbuildの間`state.json`は`building`で、claimは止まらない。成功で`broker_started`（buildしたなら先に`broker_image_built`）。失敗（`machine_busy`・`podman_missing`・`image_build_failed`など）は`broker_unhealthy`（`reason`はそのcode）で、`BROKER_HEALTH_INTERVAL`（30秒）ごとにやり直す
 - **health**: 用意できた後は`BROKER_HEALTH_INTERVAL`ごとに`state.json`のportの`/v1/health`を1回見る（これもjob）。`BROKER_FAILURES`（3）回続けて失敗したら、containerを1回起動し直す（`application::broker::restart`: host全体のlockの中で、machineが動いていればcontainerを消して作り直し、healthを待つ。machineが動いていなければ起動し直さずに`machine_failed`か`machine_busy`）。直れば`auto_repaired`（`repair: broker_restart`、`layer: runtime`、`conditions.failures`。ADR-0047の1層目）。起動し直しが失敗したら`broker_unhealthy`（`reason`はそのcode）を残し、用意できていないものとして次の間隔から`ensure`（machineから）をやり直す。起動し直した後にまた3回続けて失敗したら`broker_unhealthy`（`reason: unhealthy`）。healthが答えれば数えるのをやめ、attentionが立っていれば`broker_healthy`を残す（起動し直しもまた1回できる）
 - **attention**: `broker_unhealthy`はinbox宛てのattention（`next: dagq broker status`、`status`は`reason`）で、最新の`broker_unhealthy` / `broker_healthy` / `broker_started` / `broker_stopped`が`broker_unhealthy`の間出る。立っている間は`reason`が変わっても書き直さない（1つの不調で1回知らせる）
-- **claim**: `preferred`ではbrokerの状態でclaimを止めない。使えるbrokerならworkerにtokenとMCPの道具を渡し、使えなければ`broker_unavailable`を残して道具なしで動かす（上の「token」の発行）
+- **claim**: `preferred`ではbrokerの状態でclaimを止めない。使えるbrokerならworkerにtokenとMCPの道具を渡し、使えなければ`broker_unavailable`を残して道具なしで動かす（上の「token」の発行）。このsupervisorの`ensure`がまだ返っていない間（起動の直後と`--once`）は、`state.json`が`running`でdagqのbuildを名指すbrokerのhealthを見て、答えればそのportを使う（`BrokerControl::running_port`）。負荷の高いhostで1回答えそこねただけでrun全体が道具なしにならないよう、healthが答えないときは`RUNNING_PORT_PROBES`（3）回まで`health_interval`（500ミリ秒）をあけて見直し、答えたがstatus・protocol・buildの合わない答えは見直さない。使えないときの`broker_unavailable`（`reason: not_ready`）の`message`は、stateの食い違いか、各回のhealthの失敗の理由を持つ（task 1255。e2eの`broker::a_preferred_worker_does_its_task_through_the_broker_and_lands`の1回の失敗は、着地したcommitにexec.txtだけが無くworktreeがcleanだったことから、stubがbrokerを使わない経路でcommitした、つまりclaimが道具を渡さなかったと消去法で推定した。当時のmessageは理由を持たず、このhealthの取りこぼしと確かめきれていない。stubは今、`E2E-BROKER`のtaskで道具が無ければその理由で止まる）
 - **sweep**: 各passのclaimの前と止まる直前に、終わったrunのtokenを失効させ、期限の近いtokenを発行し直す（上の「token」の失効と期限）。`disabled`では残った全てのtokenを`mode_disabled`で失効させる
 - **停止**: supervisorがbrokerを止めるのは、`down`が頼んだdrain（最新の`broker_stop_requested`が自分のtokenを挙げる）を終えたときだけで、自分の登録を消した後に、queueのほかのsupervisor（heartbeatの新しい登録）が残っていなければ、走っているjobの終わりを待ってから`QueueBroker::stop`（containerの停止と`release_machine`）を呼び、`broker_stopped`（`by: supervisor`）を残す（`Supervisor::stop_broker_after_down`。ほかのsupervisorが残れば、最後に終わるものに任せる）。`up`の入れ替えのdrainは頼まないので止めず、execの引き継ぎ（`install`と自動更新）はdrainしないので止めない。execの引き継ぎは走っているjobの終わりを待ち（execでpodmanのコマンドが孤児にならないように。その間新しいjobは始めない）、それ以外でloopが終わるときに走っているjobは待たずに放す。新しいsupervisorの`ensure`はimageのtag（build識別子から作る）が違えば作り直し、有効なtokenのrunが残る間は古いcontainerを残す（上の`kept_stale`）
 - **`down`**: 生きているsupervisorにsignalを送る前に（launchdのunloadより前に）、modeが`disabled`でなければ`broker_stop_requested`を残して、drainの終わりにbrokerを止めるよう頼む（`lifecycle::BrokerLifecycle::request_stop`。`--force`は頼まない）。drainを待たない既定の`down`（`draining`）は自分では止めず、出力の`broker`に`stopped: false`と、supervisorがdrainの終わりに止めることを載せる。drainを見届けた`not_running`・`stopped`（`--wait`）・`killed`（`--force`）の後には、`dagq broker stop`と同じ`QueueBroker::stop`を自分でも呼ぶ（supervisorが止め損ねた・落ちていた・killされたときのため。何か止めたときだけ`broker_stopped`（`by: down`）を残す。`lifecycle::BrokerLifecycle::after_drain`）。止め損ないは`down`を失敗にせず`broker.error`に載せる

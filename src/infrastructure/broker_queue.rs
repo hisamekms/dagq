@@ -20,6 +20,10 @@ use crate::application::broker::{
 
 use super::broker_podman::{BrokerState, FileLock, free_port, tokens_active};
 
+/// How many times a claim looks at the health of a broker recorded as
+/// running before it gives the worker no tools.
+const RUNNING_PORT_PROBES: usize = 3;
+
 /// A podman that is not there: every command fails with the failure it
 /// was resolved with (`podman_missing`), so the supervisor reports it as
 /// the broker's state rather than failing to start.
@@ -321,16 +325,49 @@ impl BrokerControl for QueueBroker {
         QueueBroker::stop(self)
     }
 
-    fn running_port(&self) -> Option<u16> {
+    fn running_port(&self) -> Result<u16, String> {
         let state = BrokerState::read(&self.queue_dir);
-        let port = state.port?;
+        let not_ready = "the queue's broker is not ready yet";
+        let port = state
+            .port
+            .ok_or_else(|| format!("{not_ready}: its state names no port"))?;
         if state.state.as_deref() != Some("running") || state.build.as_deref() != Some(&self.build)
         {
-            return None;
+            return Err(format!(
+                "{not_ready}: its state is {} of build {}",
+                state.state.as_deref().unwrap_or("unknown"),
+                state.build.as_deref().unwrap_or("unknown")
+            ));
         }
-        let health = self.ports.health.probe(port).ok()?;
-        (health.status == "ok" && health.protocol == PROTOCOL_VERSION && health.build == self.build)
-            .then_some(port)
+        // A broker recorded as running is looked at more than once: one
+        // missed answer on a loaded host would leave the whole run without
+        // the tools (task 1255).
+        let mut missed = Vec::new();
+        for probe in 0..RUNNING_PORT_PROBES {
+            if probe > 0 {
+                std::thread::sleep(self.health_interval);
+            }
+            match self.ports.health.probe(port) {
+                Ok(health)
+                    if health.status == "ok"
+                        && health.protocol == PROTOCOL_VERSION
+                        && health.build == self.build =>
+                {
+                    return Ok(port);
+                }
+                Ok(health) => {
+                    return Err(format!(
+                        "the broker on port {port} answered status {} in protocol {} of build {}",
+                        health.status, health.protocol, health.build
+                    ));
+                }
+                Err(error) => missed.push(error),
+            }
+        }
+        Err(format!(
+            "the broker recorded as running on port {port} did not answer its health {RUNNING_PORT_PROBES} times: {}",
+            missed.join("; ")
+        ))
     }
 }
 
@@ -464,12 +501,13 @@ mod tests {
         assert!(state.started_at.is_some());
         assert!(broker.health().is_ok());
         // Recorded as running this build and answering it: its port.
-        assert_eq!(broker.running_port(), Some(40000));
+        assert_eq!(broker.running_port(), Ok(40000));
         let other = QueueBroker {
             build: "0.0.0-other".into(),
             ..queue_broker(dir.path(), Arc::new(Fake::default()))
         };
-        assert_eq!(other.running_port(), None);
+        let refused = other.running_port().unwrap_err();
+        assert!(refused.contains("not ready yet"), "{refused}");
         assert!(broker.restart().is_ok());
         // The restart made the container again.
         let runs = podman
@@ -483,7 +521,8 @@ mod tests {
         broker.stop().unwrap();
         let state = BrokerState::read(&broker.queue_dir);
         assert_eq!(state.state.as_deref(), Some("stopped"));
-        assert_eq!(broker.running_port(), None);
+        let stopped = broker.running_port().unwrap_err();
+        assert!(stopped.contains("its state is stopped"), "{stopped}");
 
         // Without a repository there is no container to make.
         let unknown = QueueBroker {
@@ -500,5 +539,62 @@ mod tests {
             missing.run(&[]).unwrap_err().code,
             FailureCode::PodmanMissing
         );
+    }
+
+    /// A health that misses `misses` looks, then answers with `build`.
+    struct Missing {
+        misses: Mutex<usize>,
+        build: String,
+        looks: Mutex<usize>,
+    }
+
+    impl HealthProbe for Missing {
+        fn probe(&self, _port: u16) -> Result<HealthResponse, String> {
+            *self.looks.lock().unwrap() += 1;
+            let mut misses = self.misses.lock().unwrap();
+            if *misses > 0 {
+                *misses -= 1;
+                return Err("timed out".into());
+            }
+            Ok(HealthResponse {
+                status: "ok".into(),
+                build: self.build.clone(),
+                protocol: PROTOCOL_VERSION,
+            })
+        }
+    }
+
+    #[test]
+    fn a_running_broker_is_looked_at_again_before_the_claim_gives_up_on_it() {
+        let dir = tempfile::tempdir().unwrap();
+        queue_broker(dir.path(), Arc::new(Fake::default()))
+            .ensure()
+            .unwrap();
+        let with = |misses: usize, build: &str| {
+            let health = Arc::new(Missing {
+                misses: Mutex::new(misses),
+                build: build.into(),
+                looks: Mutex::new(0),
+            });
+            let mut broker = queue_broker(dir.path(), Arc::new(Fake::default()));
+            broker.health_interval = Duration::ZERO;
+            broker.ports.health = health.clone();
+            (broker.running_port(), *health.looks.lock().unwrap())
+        };
+        // Two missed looks on a loaded host: the third answers.
+        assert_eq!(with(2, crate::VERSION), (Ok(40000), 3));
+        // Never answering: why, with each miss.
+        let (port, looks) = with(5, crate::VERSION);
+        let why = port.unwrap_err();
+        assert_eq!(looks, 3);
+        assert!(
+            why.contains("did not answer its health 3 times: timed out; timed out; timed out"),
+            "{why}"
+        );
+        // An answer of another build is not looked at again.
+        let (port, looks) = with(0, "0.0.0-other");
+        let why = port.unwrap_err();
+        assert_eq!(looks, 1);
+        assert!(why.contains("of build 0.0.0-other"), "{why}");
     }
 }

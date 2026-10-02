@@ -320,6 +320,13 @@ case "$prompt" in
     git add migrations/0001_e2e.sql
     ;;
 esac
+case "$prompt" in
+  *E2E-BROKER*)
+    # Without the tools the plain path below would commit e2e.txt alone and
+    # the run would fail only at the landing's verification (task 1255).
+    [ -n "$mcp" ] || { printf 'stub: the task asks for the broker, but the worker was given no broker tools (see the run'"'"'s broker_unavailable)\n' >&2; exit 66; }
+    ;;
+esac
 if [ -n "$mcp" ]; then
   # The resource broker's tools (`[broker] mode = "preferred"`): the stub
   # drives the client of its MCP configuration from the shell, with the URL
@@ -332,8 +339,12 @@ if [ -n "$mcp" ]; then
   "$client" fs write e2e.txt --content "written through the broker for $session_id" > "$add_dir/broker-fs.json" 2>> "$add_dir/broker.err"
   "$client" exec -- sh -c 'printf "run by the broker\n" > exec.txt' > "$add_dir/broker-exec.json" 2>> "$add_dir/broker.err"
   grep -q '"exit_code":0' "$add_dir/broker-exec.json" || { printf 'stub: the broker exec failed\n' >&2; exit 66; }
-  "$client" git add e2e.txt exec.txt > "$add_dir/broker-add.json" 2>> "$add_dir/broker.err"
-  "$client" git commit --message 'feat: e2e stub change through the broker' > "$add_dir/broker-commit.json" 2>> "$add_dir/broker.err"
+  # What the host sees before the broker stages it, for a failure to show.
+  git --no-optional-locks status --porcelain --untracked-files=all > "$add_dir/broker-status-before-add.txt" 2>&1 || true
+  "$client" git add e2e.txt exec.txt > "$add_dir/broker-add.json" 2>> "$add_dir/broker.err" \
+    || { printf 'stub: the broker git add failed\n' >&2; exit 66; }
+  "$client" git commit --message 'feat: e2e stub change through the broker' > "$add_dir/broker-commit.json" 2>> "$add_dir/broker.err" \
+    || { printf 'stub: the broker git commit failed\n' >&2; exit 66; }
 else
   printf 'written by the stub agent for %s\n' "$session_id" > e2e.txt
   git add e2e.txt

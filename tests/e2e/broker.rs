@@ -101,7 +101,7 @@ fn a_preferred_worker_does_its_task_through_the_broker_and_lands() {
     let task_id = add_ready_task_described(
         env,
         "e2e broker task",
-        "Add e2e.txt and exec.txt through the broker. E2E-REVIEW-PASS",
+        "Add e2e.txt and exec.txt through the broker. E2E-BROKER E2E-REVIEW-PASS",
         &[],
         &["test -f exec.txt"],
     );
@@ -122,10 +122,25 @@ fn a_preferred_worker_does_its_task_through_the_broker_and_lands() {
         }
         eprintln!("{}", pass.stderr);
     }
+    // A worker given no tools (the claim found the broker unusable) is the
+    // first thing a failure names, before what it led to (task 1255).
+    let detail = dagq(env, &["show", &task_id, "--full"]);
+    let events = detail["events"].as_array().unwrap();
+    let of = |kind: &str| -> Vec<&Value> {
+        events
+            .iter()
+            .filter(|event| event["kind"] == kind)
+            .map(|event| &event["payload"])
+            .collect()
+    };
+    assert!(
+        of("broker_unavailable").is_empty(),
+        "the worker was given no broker tools: {:?}; {outcome}",
+        of("broker_unavailable")
+    );
     assert_eq!(outcome["errors"], Value::Array(vec![]), "{outcome}");
     assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
 
-    let detail = dagq(env, &["show", &task_id, "--full"]);
     assert_eq!(detail["task"]["status"], "completed");
     let run = &detail["runs"][0];
     let run_id = run["id"].as_str().unwrap();
@@ -139,14 +154,6 @@ fn a_preferred_worker_does_its_task_through_the_broker_and_lands() {
     );
     assert!(git(repo, &["log", "-1", "--format=%s", "main"]).contains("e2e broker task"));
     // The token was issued with the claim and revoked with the landing.
-    let events = detail["events"].as_array().unwrap();
-    let of = |kind: &str| -> Vec<&Value> {
-        events
-            .iter()
-            .filter(|event| event["kind"] == kind)
-            .map(|event| &event["payload"])
-            .collect()
-    };
     let issued = of("broker_token_issued");
     assert_eq!(issued.len(), 1, "{events:?}");
     let jti = issued[0]["jti"].as_str().unwrap();
@@ -154,7 +161,6 @@ fn a_preferred_worker_does_its_task_through_the_broker_and_lands() {
         of("broker_token_revoked"),
         [&json!({"jti": jti, "reason": "integrated"})]
     );
-    assert!(of("broker_unavailable").is_empty(), "{events:?}");
 
     // The broker's audit holds the run's operations, each with its result.
     let audit = dagq(env, &["broker", "audit", "--run", run_id]);
