@@ -521,6 +521,84 @@ fn a_handoff_during_a_resume_goes_on_watching_the_resumed_session() {
     );
 }
 
+/// Task 1161: a handoff asked after the resumed session started but before
+/// its resolution request went out (its input box not ready yet) is taken
+/// at the next pass: the wait for the box holds no pass. `handoff.json`
+/// carries the resume without a send, and the next process sends the
+/// request once the box is ready, without resuming the run again, and the
+/// run lands.
+#[test]
+fn a_handoff_before_the_resume_request_lets_the_next_supervisor_send_it() {
+    let (_dir, repo, db) = fixture();
+    let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
+    let (run, first_landed) = parked_conflict(&repo, &db, &backend);
+    // The resumed session boots and draws no input box until the test
+    // says so.
+    *backend.screen.lock().unwrap() = BOOT_SCREEN.into();
+    backend.resume_script_for(
+        2,
+        "await_message; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+    );
+    // Once the resumed session's agent registered, the first supervisor
+    // waits only for the box.
+    let (outcome, token) = hand_off_when(&db, &repo, &backend, |queue| {
+        let detail = queue.show(TaskId::new(2)).unwrap();
+        let kinds = event_kinds(&detail);
+        kinds
+            .iter()
+            .rposition(|k| *k == "resume_started")
+            .is_some_and(|started| kinds[started..].contains(&"agent_started"))
+    });
+    assert_eq!(outcome["handed_over"], 1, "{outcome}");
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(2))
+        .unwrap();
+    let kinds = event_kinds(&detail);
+    assert!(!kinds.contains(&"resume_request_sent"), "{kinds:?}");
+    assert!(backend.texts().is_empty());
+    let snapshot = Path::new(run.run_dir().unwrap()).join("handoff.json");
+    let written: Value = serde_json::from_slice(&fs::read(&snapshot).unwrap()).unwrap();
+    assert_eq!(written["phase"], "resume");
+    assert_eq!(written["message_sent_at"], Value::Null, "{written}");
+
+    let next = {
+        let (db, repo, backend, token) = (db.clone(), repo.clone(), backend.clone(), token.clone());
+        thread::spawn(move || supervise_after_handoff(&db, &repo, &backend, &token))
+    };
+    wait_until(&db, crate::common::STEP_LIMIT, |_| !snapshot.exists());
+    assert!(backend.texts().is_empty());
+    *backend.screen.lock().unwrap() = READY_SCREEN.into();
+    let outcome = joined(next, "the supervisor after the handoff").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(2))
+        .unwrap();
+    assert_landed(&repo, &detail.runs[0], "second", &first_landed);
+    let kinds = event_kinds(&detail);
+    assert_eq!(kinds.iter().filter(|k| **k == "resume_started").count(), 1);
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|k| **k == "resume_request_sent")
+            .count(),
+        1,
+        "{kinds:?}"
+    );
+    // The request went once, from the next process, into the same session.
+    let texts = backend.texts();
+    assert_eq!(texts.len(), 1, "{texts:?}");
+    assert_eq!(texts[0].0, written["workspace"].as_str().unwrap());
+    let adopted: Vec<&Value> = payloads(&detail, "auto_repaired")
+        .into_iter()
+        .filter(|p| p["repair"] == "resume_adopted")
+        .collect();
+    assert_eq!(adopted.len(), 1, "{kinds:?}");
+    assert_eq!(adopted[0]["conditions"]["handoff"], true);
+}
+
 /// Task 640: a handoff during a resume whose `handoff.json` could not be
 /// written (here: is gone) still goes on watching the resumed session: the
 /// next process finds the `needs_session` run under its token with a live

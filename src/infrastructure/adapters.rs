@@ -617,6 +617,25 @@ const VERIFICATION_STOP_POLL: Duration = Duration::from_millis(100);
 /// once it was killed: the descendants are reaped by `init` once they die.
 const VERIFICATION_GONE_WITHIN: Duration = Duration::from_secs(10);
 
+/// The variable that sets how nextest counts a test that passed on its
+/// retry. integrate passes it only for its flaky retry (task 1039).
+const NEXTEST_FLAKY_RESULT: &str = "NEXTEST_FLAKY_RESULT";
+
+/// `script` under `/bin/sh -c` in `cwd` with `env`. The first verification
+/// takes nextest's flaky result from `.config/nextest.toml`, so a value the
+/// process inherited (a supervisor or test started inside a flaky retry's
+/// verification) is not passed on unless `env` names one (task 1161).
+fn verification_command(script: &str, cwd: &Path, env: &[(String, String)]) -> Command {
+    let mut command = Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg(script)
+        .current_dir(cwd)
+        .env_remove(NEXTEST_FLAKY_RESULT)
+        .envs(env.iter().map(|(key, value)| (key, value)));
+    command
+}
+
 /// Run `script` with `/bin/sh -c` in `cwd`, its output in `log`, in a
 /// process group of its own, stopped once it runs past `timeout` (the whole
 /// command, [`VERIFICATION_TIMEOUT`] for the verifier). At the limit the
@@ -637,11 +656,7 @@ pub fn run_shell_to_log(
 ) -> Result<ExitStatus> {
     let file =
         super::agent_dir::create_file(log).with_context(|| format!("create {}", log.display()))?;
-    let mut child = Command::new("/bin/sh")
-        .arg("-c")
-        .arg(script)
-        .current_dir(cwd)
-        .envs(env.iter().map(|(key, value)| (key, value)))
+    let mut child = verification_command(script, cwd, env)
         .stdin(Stdio::null())
         .stdout(Stdio::from(file.try_clone()?))
         .stderr(Stdio::from(file))
@@ -3607,6 +3622,24 @@ mod tests {
         )
         .unwrap();
         assert!(status.success());
+    }
+
+    /// A verification command drops an inherited `NEXTEST_FLAKY_RESULT`
+    /// and gets the one the runtime passes (task 1161).
+    #[test]
+    fn a_verification_command_takes_its_flaky_result_only_from_the_runtime() {
+        let flaky_result = |env: &[(String, String)]| {
+            let command = verification_command("true", Path::new("/"), env);
+            command
+                .get_envs()
+                .find(|(key, _)| *key == NEXTEST_FLAKY_RESULT)
+                .map(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()))
+        };
+        assert_eq!(flaky_result(&[]), Some(None));
+        assert_eq!(
+            flaky_result(&[(NEXTEST_FLAKY_RESULT.to_owned(), "pass".to_owned())]),
+            Some(Some("pass".to_owned()))
+        );
     }
 
     /// Claude Code gets the broker client's server and the permission to
