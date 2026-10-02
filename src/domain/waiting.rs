@@ -7,6 +7,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
+use super::event_kind::{PROVIDER_SWITCHED, RUN_CLAIMED};
 use super::{AskId, AskKind, EventId, RunEvent, TaskId, stats::timestamp_millis};
 
 /// The run entered a wait (decision 5).
@@ -310,11 +311,26 @@ pub struct WaitingStats {
     pub waited_by_topic: BTreeMap<String, Durations>,
     /// `slot_wait_secs` of the runs back in a slot.
     pub slot_wait: Durations,
+    /// `started` and `waited` (all the kinds) by the worker's route
+    /// (`interactive` / `headless`) the run was on when its wait started:
+    /// its latest `run_claimed` or `provider_switched`'s `worker_mode`,
+    /// `unknown` for a run claimed before it was recorded (task 1370).
+    pub by_route: BTreeMap<String, RouteWaits>,
     /// Runs that went back past `--parallel` (decision 10).
     pub over_parallel: i64,
     /// `run_waiting_deferred`: how often the limit was reached.
     pub deferred: i64,
 }
+
+/// The waits of one route in [`WaitingStats::by_route`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct RouteWaits {
+    pub started: i64,
+    pub waited: Durations,
+}
+
+/// The route of a run claimed before its claim recorded `worker_mode`.
+pub const UNKNOWN_ROUTE: &str = "unknown";
 
 /// Aggregate the waits with `after < id <= upto` whose task `counts`
 /// accepts.
@@ -338,11 +354,22 @@ pub fn waiting_stats(
             .get("ask_id")
             .map(|id| id.as_str().map_or_else(|| id.to_string(), str::to_owned))
     };
+    // Each run's route now, and the route its latest wait started on.
+    let mut routes: HashMap<&str, String> = HashMap::new();
+    let mut started_route: BTreeMap<&str, String> = BTreeMap::new();
+    let mut by_route: BTreeMap<String, (i64, Vec<i64>)> = BTreeMap::new();
     let mut slot_wait = Vec::new();
     for event in events {
         let run = event.run_id.as_ref().map_or("", |id| id.as_str());
         let inside = event.id > after && event.id <= upto && counts(event.task_id);
         match event.kind.as_str() {
+            RUN_CLAIMED | PROVIDER_SWITCHED => {
+                if let Some(mode) = event.payload["worker_mode"].as_str() {
+                    routes.insert(run, mode.to_owned());
+                } else if event.kind == RUN_CLAIMED {
+                    routes.remove(run);
+                }
+            }
             "ask_opened" if event.payload["kind"].as_str() == Some("worker_question") => {
                 if let Some(id) = ask_id(&event.payload) {
                     let primary = super::stats::worker_question_topics::topics_of(&event.payload)
@@ -352,9 +379,15 @@ pub fn waiting_stats(
             }
             RUN_WAITING_STARTED => {
                 let kind = text(&event.payload, "ask_kind");
+                let route = routes
+                    .get(run)
+                    .cloned()
+                    .unwrap_or_else(|| UNKNOWN_ROUTE.to_owned());
                 if inside {
                     *stats.started.entry(kind.clone()).or_default() += 1;
+                    by_route.entry(route.clone()).or_default().0 += 1;
                 }
+                started_route.insert(run, route);
                 let topic = (kind == "worker_question").then(|| {
                     ask_id(&event.payload)
                         .and_then(|id| topics.get(&id).cloned())
@@ -370,6 +403,11 @@ pub fn waiting_stats(
                     waited_by_topic.entry(topic.clone()).or_default().push(secs);
                 }
                 waited.entry(kind).or_default().push(secs);
+                let route = started_route
+                    .get(run)
+                    .cloned()
+                    .unwrap_or_else(|| UNKNOWN_ROUTE.to_owned());
+                by_route.entry(route).or_default().1.push(secs);
             }
             RUN_SLOT_REGAINED if inside => {
                 slot_wait.push(event.payload["slot_wait_secs"].as_i64().unwrap_or(0));
@@ -388,6 +426,13 @@ pub fn waiting_stats(
     stats.waited_by_topic = waited_by_topic
         .into_iter()
         .map(|(topic, secs)| (topic, Durations::of(secs)))
+        .collect();
+    stats.by_route = by_route
+        .into_iter()
+        .map(|(route, (started, secs))| {
+            let waited = Durations::of(secs);
+            (route, RouteWaits { started, waited })
+        })
         .collect();
     stats.slot_wait = Durations::of(slot_wait);
     stats
@@ -578,6 +623,67 @@ mod tests {
         assert!(WaitCause::DialogCleared.returns_at_once());
         assert!(WaitCause::LeaseLost.leaves_the_run());
         assert!(!WaitCause::QueueHold.leaves_the_run());
+    }
+
+    /// Task 1370: the waits by the route the run was on when each wait
+    /// started; a run claimed before `worker_mode` was kept is `unknown`.
+    #[test]
+    fn the_waits_are_split_by_route() {
+        let on = |id, run: &str, kind: &str, payload: Value| {
+            event(id, run, kind, payload, "2026-09-26T04:10:00.000Z")
+        };
+        let wait = |id, run: &str, secs: i64| {
+            [
+                on(
+                    id,
+                    run,
+                    RUN_WAITING_STARTED,
+                    json!({"ask_id": id, "ask_kind": "stalled"}),
+                ),
+                on(
+                    id + 1,
+                    run,
+                    RUN_WAITING_ENDED,
+                    json!({"cause": "answered", "waited_secs": secs}),
+                ),
+            ]
+        };
+        let mut events = vec![on(1, "r1", RUN_CLAIMED, json!({"worker_mode": "headless"}))];
+        events.extend(wait(2, "r1", 10));
+        events.push(on(4, "r2", RUN_CLAIMED, json!({})));
+        events.extend(wait(5, "r2", 20));
+        // The run moved to Claude's interactive route; a wait already
+        // started keeps the route it started on.
+        events.push(on(
+            7,
+            "r1",
+            RUN_WAITING_STARTED,
+            json!({"ask_id": 7, "ask_kind": "stalled"}),
+        ));
+        events.push(on(
+            8,
+            "r1",
+            PROVIDER_SWITCHED,
+            json!({"worker_mode": "interactive"}),
+        ));
+        events.push(on(9, "r1", RUN_WAITING_ENDED, json!({"waited_secs": 30})));
+        events.extend(wait(10, "r1", 40));
+        let all = waiting_stats(&events, EventId::new(0), EventId::new(11), |_| true);
+        let route = |name: &str| {
+            let waits = &all.by_route[name];
+            (waits.started, waits.waited.count, waits.waited.total_secs)
+        };
+        assert_eq!(route("headless"), (2, 2, 40));
+        assert_eq!(route(UNKNOWN_ROUTE), (1, 1, 20));
+        assert_eq!(route("interactive"), (1, 1, 40));
+        // A wait started before the window counts its end on its route.
+        let window = waiting_stats(&events, EventId::new(7), EventId::new(9), |_| true);
+        assert_eq!(window.by_route["headless"].started, 0);
+        assert_eq!(window.by_route["headless"].waited.total_secs, 30);
+        assert_eq!(
+            serde_json::to_value(&window.by_route).unwrap(),
+            json!({"headless": {"started": 0, "waited": {"count": 1, "total_secs": 30, "median_secs": 30, "max_secs": 30}}})
+        );
     }
 
     #[test]

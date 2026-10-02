@@ -1083,7 +1083,10 @@ pub fn stats(
     let verification_failures =
         measures::verification_failures(events, window_start, next_cursor, counts);
     let failed_tests = failed_tests::failed_tests(events, window_start, next_cursor, counts);
-    let waiting = super::waiting::waiting_stats(events, window_start, next_cursor, counts);
+    // The waits span the whole window asked for, not the page of runs:
+    // with `--since` past more than a page of finished runs, `next_cursor`
+    // stops at the page's last run and left the later waits out (task 1370).
+    let waiting = super::waiting::waiting_stats(events, window_start, latest, counts);
     let stall_thresholds = thresholds::thresholds(
         &thresholds::detections(events, now * 1000),
         &thresholds::preemptions(events),
@@ -3411,5 +3414,95 @@ mod tests {
         assert_eq!(since.sessions.by_kind["worker"].count, 1);
         assert_eq!(since.sessions.by_kind["revise"].count, 0);
         assert_eq!(since.sessions.by_kind["observer"].count, 1);
+    }
+
+    /// Task 1370: `--since` past more than a page of finished runs pages
+    /// the runs, but `waiting` still counts every wait up to the window's
+    /// end, by the kind of ask and by the route.
+    #[test]
+    fn waiting_spans_the_window_past_the_page_of_runs() {
+        let runs = DEFAULT_RUNS + 10;
+        let run = |n: usize| format!("{n:08x}-1111-4111-8111-111111111111");
+        let mut events = Vec::new();
+        let mut id = 0;
+        let mut push = |events: &mut Vec<RunEvent>, run: &str, kind: &str, payload: Value| {
+            id += 1;
+            events.push(run_event(id, run, kind, payload, T + id));
+        };
+        for n in 0..runs {
+            let mode = if n % 2 == 0 {
+                "headless"
+            } else {
+                "interactive"
+            };
+            push(
+                &mut events,
+                &run(n),
+                "run_claimed",
+                json!({"worker_mode": mode}),
+            );
+            push(&mut events, &run(n), "run_integrated", json!({}));
+        }
+        // Waits after the first page's last run.
+        let late = run(runs - 1);
+        let waiter = run(runs);
+        push(
+            &mut events,
+            &waiter,
+            "run_claimed",
+            json!({"worker_mode": "headless"}),
+        );
+        for (secs, mode) in [(40, "headless"), (60, "interactive")] {
+            if mode == "interactive" {
+                push(
+                    &mut events,
+                    &waiter,
+                    "provider_switched",
+                    json!({"worker_mode": mode}),
+                );
+            }
+            push(
+                &mut events,
+                &waiter,
+                "run_waiting_started",
+                json!({"ask_id": secs, "ask_kind": "stalled"}),
+            );
+            push(
+                &mut events,
+                &waiter,
+                "run_waiting_ended",
+                json!({"cause": "answered", "waited_secs": secs}),
+            );
+        }
+        push(
+            &mut events,
+            &late,
+            "run_waiting_started",
+            json!({"ask_id": 1, "ask_kind": "worker_question"}),
+        );
+        let stats = stats(
+            &events,
+            &HashMap::new(),
+            T + 10_000,
+            SlotSnapshot::default(),
+            &StatsQuery {
+                since: Some(EventId::new(0).into()),
+                ..StatsQuery::default()
+            },
+            &LiveSnapshot::default(),
+        );
+        assert_eq!(stats.runs.len(), DEFAULT_RUNS);
+        assert!(stats.next_cursor.as_i64() < events[events.len() - 1].id.as_i64());
+        let waiting = &stats.waiting;
+        assert_eq!(waiting.started["stalled"], 2);
+        assert_eq!(waiting.started["worker_question"], 1);
+        assert_eq!(waiting.waited["stalled"].total_secs, 100);
+        let headless = &waiting.by_route["headless"];
+        assert_eq!((headless.started, headless.waited.total_secs), (1, 40));
+        let interactive = &waiting.by_route["interactive"];
+        assert_eq!(
+            (interactive.started, interactive.waited.total_secs),
+            (2, 60)
+        );
     }
 }

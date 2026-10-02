@@ -135,6 +135,16 @@ fn a_run_waiting_for_its_answer_leaves_the_slot_to_another_task() {
     assert_eq!(stats["waiting"]["started"]["worker_question"], 1, "{stats}");
     assert_eq!(stats["waiting"]["waited"]["worker_question"]["count"], 1);
     assert_eq!(stats["waiting"]["slot_wait"]["count"], 1);
+    // The wait counts under the route its run was claimed on (task 1370).
+    let routes = stats["waiting"]["by_route"].as_object().unwrap();
+    assert_eq!(routes.len(), 1, "{stats}");
+    let (route, waits) = routes.iter().next().unwrap();
+    assert!(
+        ["interactive", "headless"].contains(&route.as_str()),
+        "{stats}"
+    );
+    assert_eq!(waits["started"], 1);
+    assert_eq!(waits["waited"]["count"], 1);
     assert_eq!(stats["waiting"]["over_parallel"], 0);
     assert_eq!(stats["waiting"]["deferred"], 0);
 }
