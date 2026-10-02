@@ -11,6 +11,7 @@ supersedes:
 amended_by:
   - adr-t791-1
   - adr-t1215-1
+  - adr-t1404-1
 owners:
   - hisamekms
 tags:

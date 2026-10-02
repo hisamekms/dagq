@@ -21,6 +21,7 @@ amends:
   - adr-0047 decision 40
 amended_by:
   - adr-t1340-1
+  - adr-t1404-1
 owners:
   - hisamekms
 tags:

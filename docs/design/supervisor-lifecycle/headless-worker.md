@@ -4,11 +4,12 @@ type: design
 title: "非対話のworker"
 status: current
 created: 2026-09-28
-updated: 2026-10-02
+updated: 2026-10-03
 last_verified: 2026-10-02
 scope: runtime
 related:
   - adr-t1340-1
+  - adr-t1404-1
   - design-supervisor-lifecycle
   - design-provider-lifecycle
   - adr-t1233-2
@@ -136,3 +137,16 @@ task 1372（goal 86の暫定の対応）。2026-09-30T08:42にtask 681・695の�
 ## 対話の経路との違い
 
 対話のrunの経路（画面の判定・idleの印・`/exit`・打ち込み・Enterの送り直し・既知のダイアログ・`prompt_waiting`・`stuck_exit`）はそのまま（決定7）。Claudeの既定は非対話で、対話の経路は`add` / `edit`の`--interactive`で選んだtaskだけが使う（ADR-t1340-1。保存の形と、既定の`interactive`をNULLに戻したmigration 0057は[provider-lifecycle](../provider-lifecycle.md#workerのproviderと経路)）。`headless`のrunだけが上の経路を通り、分岐はsupervisorの`headless(run)`とwrapperの`worker_mode`で行う。
+
+## 予定: workspaceなしのbackgroundのwrapper
+
+[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)（goal 89）の予定で、**まだ実装していない**。今は上のとおりwrapperはrunのcmuxのworkspaceの中で動く。下の欄名・event・file名・CLIの綴りは実装のtaskが決める仮のもので、実装したらこの節を今の姿に書き直す。
+
+- **設定**: `dagq.toml`の`[headless] wrapper = "workspace" | "background"`（仮）。既定は`workspace`。supervisorはsessionのwrapperを起動する時点（最初のsession・`needs_session`のresume・下の開き直し）で読み、動いているwrapperは動かさない。reviseは生きているsessionへの依頼なので関係しない。古い固定バイナリは知らない欄で起動できないので、この repositoryの`dagq.toml`に足すのは固定バイナリが対応してから（[ADR-0073](../../adr/0073-kind-additions-are-compatible.md)）。非対話のruntimeのplanner（goal 87、ADR-t1394-2）も同じ設定に従う。対話のworker・inbox・人が開くplannerは対象外。
+- **起動**: `background`ではsupervisorはworkspaceを作らず、wrapper（`session`。`--resume`を含む）を自分の子でない切り離したprocessとして起動する（`setsid`で新しいsessionとprocess groupを持ち、supervisorはwaitせず、親は1になる）。stdinは`/dev/null`、stdout・stderrはrun dirのlog。wrapperはTTYを確かめず（今はTTYを要る）、`workspace_id`の保存を待つ代わりに、supervisorが起動を記録する（`wrapper_launched`（仮）: `pid`・`started_at`（OSの起動時刻）・`pgid`・`log`）のを待ってから登録する。supervisorは起動の直後に、その記録から`run_processes`のwrapperの行（`pid`と起動時刻）を作り、wrapperの登録より前でも下の識別でadoptと停止ができるようにする。launchd modeではLaunchAgentの停止がwrapperを巻き込まないこと（plistの`AbandonProcessGroup`）、in-cmux modeではsupervisorのworkspaceのcloseのhangupが届かないことを実装が確かめる。起動できなければ（processを作れない）provisioningの失敗として扱う（[ADR-0054](../../adr/0054-run-lease-ownership-parallel-supervisors-and-recover.md)決定9の読み替え）。
+- **env**: 今workspaceの`--env`で渡す`DAGQ_ROLE`・`DAGQ_QUEUE`と`[run.env]`（[Run environment](run-environment.md)）を、wrapperのprocessのenvで渡す。agentのenvの組み立て（queue serviceのsocketとtoken、`DAGQ_QUEUE`を外す。[session wrapper](session-wrapper.md)）は変えない。
+- **識別と生死**: `run_processes`のwrapperの行に`pid`に加えて起動時刻を持ち、生きているとは「そのpidのprocessが記録した起動時刻のまま居る」こと。heartbeatは今の[wrapperが黙ったsession](silent-wrapper.md)の判定に使う。adopt・引き継ぎ（[Handoff](handoff.md)）・開き直し・掃除はworkspaceのUUIDでなくこの組で行い、起動時刻の合わないpidには何も送らない。
+- **停止**: 今workspaceのclose（hangup）で止める経路（reviewの後、`stalled`の`stop`、cancel、復旧jobの`stop_processes`、後始末と掃除、開き直しの前）は、まず`turns/exit`の終了の依頼で終わらせ、`exit_timeout`のうちに終わらなければ、識別したwrapperのpidにSIGTERMを送り、猶予の後も残っていればwrapperのprocess groupと、wrapperが`turn_started`の`pid`で記録したturnのprocess group（turnはwrapperと別のgroupで走る）にSIGKILLを送る（`wrapper_stopped`（仮）: `pid`・`signal`・`reason`）。wrapperはSIGTERMで今の`stop_groups_on_exit_signals`のとおり自分が起動したturnのgroupを止める。ADR-t813-1決定5の「最後のturnの終わりにworkspaceをcloseする」は「wrapperが終了の依頼で終わったことを確かめ、残っていれば止める」になる。
+- **出力**: wrapperが今terminalに出す`[dagq]`の要約（turnの開始、agentの文、tool、turnの結果）を、run dirの`session.log`（仮。resumeは試行ごと）に書く。人は`dagq run log RUN [--follow]`（仮）で読み・追う。turnの生の出力は今の`turns/`、時間の流れは`dagq timeline RUN`。runtimeは見るためのworkspaceを開かない。画面で見たい人は自分のterminalでこのCLIを打つか、taskに`--interactive`を選ぶ。
+- **workspaceを前提にした記録と判定**（ADR-t1404-1決定10）: backgroundのsessionでは、workspaceのUUIDで行っていた識別・生死の判定をwrapperの識別の組に置き換える。実装が直す箇所の目安: proposalの持ち主のplannerの結び付けと生死（[Plan planners](plan-planners.md)）、`stats`の`running_alerts`の`workspace_mismatch`（backgroundのrunはcmuxの一覧でなくwrapperの生死で見る。[Stats](stats.md)）、`runtime_planner`の区間を推定で閉じる判定（cmuxの一覧でなくwrapperの生死）、`DAGQ_SESSION_KIND`などworkspaceの`--env`で渡していた変数（processのenv）。answerはどれも次のturnの依頼として送る。
+- **評価**: 切り替えの前後で、cmuxの呼び出しの失敗（`backend_call_failed`・captureの時間切れ）、閉じた記録の無いworkspace（[zero-based-headless-readiness](../../plans/zero-based-headless-readiness.md)のE1・E3）、startupを比べ、既定を変えるかは別のADRで決める。

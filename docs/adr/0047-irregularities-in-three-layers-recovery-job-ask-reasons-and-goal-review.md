@@ -23,6 +23,7 @@ amended_by:
   - adr-t946-1
   - adr-t883-1
   - adr-t451-1
+  - adr-t1404-1
 owners:
   - hisamekms
 tags:

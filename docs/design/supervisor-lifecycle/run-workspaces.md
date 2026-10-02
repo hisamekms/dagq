@@ -4,10 +4,11 @@ type: design
 title: "Run workspaces"
 status: current
 created: 2026-09-26
-updated: 2026-10-02
+updated: 2026-10-03
 last_verified: 2026-10-02
 scope: runtime
 related:
+  - adr-t1404-1
   - design-supervisor-lifecycle
   - adr-t1228-1
   - design-authorization
@@ -41,3 +42,5 @@ runが終わる経路ごとの close（task 180）:
 - **権限**: capability `workspace.cleanup`をuserとinboxだけが持つ（supervisorは上の自分の掃除を使い、このCLIを使わない）。ほかのroleは`authorization_denied`になる（[Authorization](../authorization.md)）。状態を変えるコマンドなので、dry-runもqueueを書き込みで開き、本番queueでは固定バイナリで打つ
 - **関係**: supervisorが居れば上の掃除が同じものを閉じるので、このCLIはsupervisorが居ないあいだの残りと、掃除が除くtriageの対象のrunを人が閉じるためのもの。supervisorと同時に走っても、先に閉じた側の後はcmuxの一覧に居ないので二重には記録しない（閉じる途中で消えたものは`cleanup_failed`になる）。goal 54の片付け（plannerの行の`close_abandoned_planners`と`runner`の削除、[Plan planners](plan-planners.md)、[Run worktrees](run-worktrees.md)）はworkspaceを閉じず、runのworkspaceは扱わない。使い捨てqueueのスモークのworkspace groupの削除（`cmux workspace-group delete`）は本番queueのIDで指せないので、ADR-t1228-1の決定1のとおり人自身のterminalに残し、このCLIに含めない
 - test: `tests/it/runtime_workspace_cleanup.rs`の`ended_runs_workspaces_are_listed_then_closed_by_run_task_or_all`（stubのcmuxで、dry-run・一括・task・runの指定、生きているrunとinboxのworkspaceを閉じないこと、eventのactor、拒むrole）、`src/application/commands/operations.rs`の`only_the_user_and_the_inbox_close_ended_runs_workspaces`
+
+**予定（未実装）**: [ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)（goal 89）で、`dagq.toml`の設定で`background`を選んだ非対話のrunは、最初のsession・resume・開き直しのどれでもworkspaceを作らない。そのrunには上の記録・close・掃除・`run close-workspaces`の対象が無く、代わりに後始末と掃除は終わったrunに残ったwrapperのprocessを、pidと起動時刻で識別して終了の依頼とsignalで止める。workspaceを選んだrunと対話のrunは上のまま。詳細は[非対話のworker](headless-worker.md#予定-workspaceなしのbackgroundのwrapper)。

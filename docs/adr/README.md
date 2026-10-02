@@ -4,7 +4,7 @@ type: design
 title: Architecture decision records
 status: current
 created: 2026-09-21
-updated: 2026-10-02
+updated: 2026-10-03
 last_verified: 2026-09-30
 tags:
   - architecture
@@ -138,6 +138,8 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-t451-1](2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md) | 推奨が出せる判断はAI（planner・job）が確信度つきで決めて進め、inboxに上げるのは人が要る理由に当たりAIの材料で決めきれないものと低い確信度のものだけにする。observerのleave itはfindingに残し、reviewとplan reviewのconcernはjobの推奨と確信度でruntimeが進め（AIのlandも着地の前のe2eを通る）、planner_questionは推奨が出せればplannerが決める（ADR-0047決定4・11・13・16・17・20・23・37とADR-0027決定1・2をamends） | 2026-10-02 |
 | [ADR-t1215-1](2026-10-02-t1215-1-supervisor-owns-the-sccache-server.md) | `[run.env]`の`RUSTC_WRAPPER`がsccacheのとき、serverはsupervisorがsandboxの外で`SCCACHE_IDLE_TIMEOUT=0`で起動して持ち、起動をeventに残す。直前にserverを確かめられなかったsandboxの中のturnとjobは`RUSTC_WRAPPER`を外して起動し、そのこともeventに残す。supervisorが起動したのではないserverと壊れたserverは検知して起動し直す（ADR-0049決定3をamends） | 2026-10-02 |
 | [ADR-t1300-1](2026-10-02-t1300-1-runtime-closes-exited-person-planners-after-a-grace.md) | 人が開いたplannerも、agentの終了が記録された（`exited`）後に猶予を置いてruntimeがworkspaceと行を閉じ（`lost`と生きているplannerは閉じない）、runtimeがplannerを閉じたことをoriginに依らずeventに残す。2026-09-27の人の決定（runtimeは人のplannerを勝手には閉じない）を置き換える | 2026-10-02 |
+| [ADR-t1340-1](2026-10-02-t1340-1-claude-worker-defaults-to-headless.md) | Claudeのworkerの既定の経路を非対話にし、対話の経路はtaskごとに選んだ（`--interactive`）ときだけ使う。既定はdagq.tomlの欄にせずruntimeの既定として変え、既定と明示した経路を保存の上で区別し、まだclaimされていない既定のtaskも新しい既定に従わせる（ADR-t813-1決定7をamends） | 2026-10-02 |
+| [ADR-t1404-1](2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md) | 非対話のworkerとruntimeのplannerのsession wrapperを、`dagq.toml`の設定で選べばcmuxのworkspaceなしでsupervisorから切り離したbackgroundのprocess（新しいsessionとprocess group、親は1）として起動し、pidと起動時刻とheartbeatで識別・adoptし、終了の依頼とpid・process groupへのsignalで止め、envはprocessのenvで渡し、`[dagq]`の要約をrun dirのlogに書いてCLIで読む。既定は評価までworkspace。worker・plannerのworkspaceを前提にした他の決定（識別・生死・answerの送り先・close・env・terminal）はbackgroundのsessionではwrapperに読み替える（ADR-t813-1決定3・4・5、ADR-0052決定3、ADR-0054決定1・9、ADR-0049決定2・3・6、ADR-0047決定1・6・7・12・13・16・34、ADR-0026決定2、ADR-0048決定6・7、ADR-0022決定2をamends） | 2026-10-03 |
 
 goal 82（goal 38の段(1)〜(3)）のADRはtask 1233が書いた5本で、決定の置き場所は次のとおり。制御側と実行側の分け方・queue service・ユースケース単位のAPIとservice側の認可・unix socket・broker・クライアントモード・段の順と置き場所はADR-t1233-1、serviceの起動・停止の責任・落ちたときの知らせ方・brokerより前のprincipalの認証（token）はADR-t1233-4、読み取りのユースケースとroleごとの読める範囲・workerの読める範囲・Codexのsandboxからの到達はADR-t1233-5、e2eをreviewのpassの後のhostの工程に移すことはADR-t1233-2、このrepositoryを先にLinuxで通すことはADR-t1233-3にある。
 
@@ -174,4 +176,3 @@ goal 82（goal 38の段(1)〜(3)）のADRはtask 1233が書いた5本で、決�
 | [ADR-0062](0062-runs-waiting-for-a-person-leave-the-slot.md) | superseded | [ADR-0071](0071-runs-waiting-in-revise-and-resume-leave-the-slot.md) | 2026-09-26 |
 | [ADR-0069](0069-do-not-claim-tasks-overlapping-hot-files.md) | superseded | [ADR-0080](0080-supervisor-rereads-conflicts-config.md) | 2026-09-27 |
 | [ADR-t624-1](2026-09-27-t624-1-task-kind-is-a-free-label.md) | superseded | [ADR-t980-1](2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md) | 2026-09-29 |
-| [ADR-t1340-1](2026-10-02-t1340-1-claude-worker-defaults-to-headless.md) | Claudeのworkerの既定の経路を非対話にし、対話の経路はtaskごとに選んだ（`--interactive`）ときだけ使う。既定はdagq.tomlの欄にせずruntimeの既定として変え、既定と明示した経路を保存の上で区別し、まだclaimされていない既定のtaskも新しい既定に従わせる（ADR-t813-1決定7をamends） | 2026-10-02 |
