@@ -110,6 +110,8 @@ pub trait RunTokens: Send + Sync {
     fn retire(&self, jti: &str) -> Result<()>;
     /// The tokens held now.
     fn held(&self) -> Result<Vec<HeldToken>>;
+    /// The runs with a token file, whether a mark names it or not.
+    fn token_files(&self) -> Result<Vec<String>>;
 }
 
 #[cfg(test)]

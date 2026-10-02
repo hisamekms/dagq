@@ -31,7 +31,9 @@
 //! before it stops) revokes every active mark's run, live or ended, with
 //! the reason `mode_disabled`, and a run it starts or resumes loses any
 //! MCP configuration left in its dir, so no worker is handed the tools of
-//! a broker that no longer serves it (task 1125).
+//! a broker that no longer serves it (task 1125). The sweep finds a run by
+//! its token file too, and a headless run loses what is left before each
+//! turn it requests (task 1141).
 //!
 //! [Broker]: ../../../docs/design/broker.md
 
@@ -429,6 +431,19 @@ impl Supervisor<'_> {
         }
     }
 
+    /// Before a headless turn of `run` is requested: with `disabled`, what
+    /// an earlier mode left of the run goes (`mode_disabled`), so the turn
+    /// (an answer, a revise, a resume) gets no `--mcp-config` of a broker
+    /// that no longer serves it, marked or not (task 1141). With another
+    /// mode the run keeps the tools its grant gave.
+    pub(super) fn broker_before_turn(&mut self, run: &TaskRun) {
+        if self.broker_port.is_none()
+            && let Some(tokens) = self.broker_leftovers.clone()
+        {
+            self.broker_revoke(&*tokens, run, MODE_DISABLED);
+        }
+    }
+
     /// Revoke every token of `run` (`reason` in `broker_token_revoked`).
     fn broker_revoke(&mut self, tokens: &dyn RunTokens, run: &TaskRun, reason: &str) {
         match tokens.revoke(run.id(), run.run_dir().map(Path::new)) {
@@ -544,7 +559,9 @@ impl Supervisor<'_> {
     /// the live runs' too, since no broker serves them now: each run's
     /// marks, token file and `<run dir>/broker` go, one
     /// `broker_token_revoked` (`mode_disabled`) per mark. Only files: no
-    /// podman. A mark naming no run of the queue goes with its token file.
+    /// podman. A run is found by its marks and by its token file, marked
+    /// or not (task 1141); one the queue does not know loses its marks and
+    /// token file.
     fn broker_sweep_disabled(&mut self, tokens: &dyn RunTokens) {
         let held = match tokens.held() {
             Ok(held) => held,
@@ -554,6 +571,14 @@ impl Supervisor<'_> {
             }
         };
         let mut runs: Vec<String> = held.into_iter().map(|token| token.run_id).collect();
+        // A token file no mark names (a revoke that failed partway, a
+        // retire of a run the queue does not know) goes too (task 1141).
+        match tokens.token_files() {
+            Ok(files) => runs.extend(files),
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the broker's token files left by an earlier mode could not be read: {error:#}");
+            }
+        }
         runs.sort();
         runs.dedup();
         for run_id in runs {

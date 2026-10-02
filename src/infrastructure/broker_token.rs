@@ -351,6 +351,30 @@ impl RunTokens for QueueRunTokens {
         held.sort_by(|a, b| a.jti.cmp(&b.jti));
         Ok(held)
     }
+
+    fn token_files(&self) -> Result<Vec<String>> {
+        let dir = self.queue_dir.join(BROKER_DIR).join(TOKENS_DIR);
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error).with_context(|| format!("read {}", dir.display())),
+        };
+        let mut runs = Vec::new();
+        for entry in entries {
+            let entry = entry.with_context(|| format!("read {}", dir.display()))?;
+            // Only files are tokens.
+            if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                continue;
+            }
+            match entry.file_name().to_str() {
+                // A temporary file of a token being put.
+                Some(name) if !name.starts_with('.') => runs.push(name.to_owned()),
+                _ => {}
+            }
+        }
+        runs.sort();
+        Ok(runs)
+    }
 }
 
 #[cfg(test)]

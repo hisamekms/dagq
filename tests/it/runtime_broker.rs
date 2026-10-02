@@ -1314,3 +1314,140 @@ fn a_preferred_sweep_retries_a_failed_run_read() {
 fn a_disabled_sweep_retries_a_failed_run_read() {
     sweep_retries_a_failed_run_read("disabled");
 }
+
+/// A headless run waiting on its `worker_question` that an earlier
+/// `preferred` left `<run dir>/broker/mcp.json` (and, with `token_file`,
+/// its token file) but no active mark (task 1141): the `disabled`
+/// supervisor removes them before it requests the answer's turn, so the
+/// turn starts without `--mcp-config` and `--allowedTools
+/// mcp__dagq-broker`. Without a mark nothing is recorded, and no podman is
+/// called.
+fn a_disabled_answer_turn_gets_no_tools_left_unmarked(token_file: bool) {
+    use dagq::application::broker_run::{mcp_config, mcp_config_path, worker_mcp_config};
+    use runtime_support::headless::*;
+    let (dir, repo, db, backend) = headless_fixture(&[]);
+    set_turns(
+        dir.path(),
+        &format!(
+            r#"[ -e "$RUN_DIR/broker" ] && : > "$RUN_DIR/broker-seen-$TURN"
+case "$TURN" in
+1) ask "which file"; say asked ;;
+*) case "$PROMPT" in "answer to ask "*) {FINISH} ;; *) say lost ;; esac ;;
+esac"#
+        ),
+    );
+    let podman = FakePodman::new(RUNNING);
+    let backend = Arc::new(backend);
+    let reviewer = Arc::new(TestReviewer::new(&[verdict("pass", &[], "fine")]));
+    let options = SuperviseOptions {
+        stall: Some(Default::default()),
+        ..options_with(&podman, dir.path(), true)
+    };
+    let supervisor = {
+        let (db, repo, backend, reviewer) =
+            (db.clone(), repo.clone(), backend.clone(), reviewer.clone());
+        thread::spawn(move || {
+            runtime::supervise_with_reviewer(
+                &db,
+                &repo,
+                &*backend,
+                &claude_stub(&db),
+                &*reviewer,
+                Path::new(env!("CARGO_BIN_EXE_dagq")),
+                &options,
+            )
+        })
+    };
+    wait_until(&db, crate::common::STEP_LIMIT, |queue| {
+        queue
+            .show(TASK)
+            .unwrap()
+            .events
+            .iter()
+            .any(|e| e.kind == "run_waiting_started")
+    });
+    let run = detail(&db).runs[0].clone();
+    // Put in place as an issue would, without its mark: the supervisor's
+    // passes run meanwhile, and the token file last, since a disabled
+    // sweep may remove the run's leftovers as soon as it finds it.
+    let queue = queue_dir(&db);
+    let token = queue.join("broker/tokens").join(run.id().as_str());
+    let run_dir = PathBuf::from(run.run_dir().unwrap());
+    let config = mcp_config_path(&run_dir);
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(
+        &config,
+        mcp_config(&dir.path().join("dagq-broker-client"), 8750, &token).to_string(),
+    )
+    .unwrap();
+    assert_eq!(worker_mcp_config(&run), Some(config));
+    if token_file {
+        fs::create_dir_all(token.parent().unwrap()).unwrap();
+        fs::write(&token, "old token\n").unwrap();
+    }
+
+    let ask = SqliteQueue::open(&db)
+        .unwrap()
+        .asks(AskQuery::default())
+        .unwrap()
+        .into_iter()
+        .find(|ask| ask.kind == AskKind::WorkerQuestion)
+        .unwrap();
+    SqliteQueue::open(&db)
+        .unwrap()
+        .answer(ask.id, "change.txt")
+        .unwrap();
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let run = detail(&db).runs[0].clone();
+    assert_eq!(run.status(), RunStatus::Integrated);
+    let calls = stub_calls(&run);
+    assert_eq!(
+        calls[1],
+        format!("resume {} answer to ask {}: change.txt", run.id(), ask.id)
+    );
+    let args = stub_args(&run);
+    assert_eq!(args.len(), 2, "{args:?}");
+    for args in &args {
+        assert!(!args.contains("--mcp-config"), "{args}");
+        assert!(!args.contains("mcp__dagq-broker"), "{args}");
+    }
+    assert!(!run_dir.join("broker-seen-1").exists());
+    assert!(!run_dir.join("broker-seen-2").exists());
+    assert!(!run_dir.join("broker").exists());
+    assert!(!token.exists());
+    assert!(podman.calls().is_empty(), "{:?}", podman.calls());
+    assert_eq!(kinds(&db, "broker_%"), []);
+}
+
+#[test]
+fn a_disabled_answer_turn_gets_no_unmarked_tools_and_token_file() {
+    a_disabled_answer_turn_gets_no_tools_left_unmarked(true);
+}
+
+#[test]
+fn a_disabled_answer_turn_gets_no_unmarked_tools() {
+    a_disabled_answer_turn_gets_no_tools_left_unmarked(false);
+}
+
+/// A token file no mark names, of a run the queue does not know, goes with
+/// the first pass of a `disabled` supervisor (task 1141); the token files of
+/// no other run are touched, and no podman is called.
+#[test]
+fn a_disabled_supervisor_removes_an_unmarked_token_file_of_no_run() {
+    let (_fixture, repo, db) = fixture();
+    let podman = FakePodman::new(RUNNING);
+    let tokens = queue_dir(&db).join("broker/tokens");
+    fs::create_dir_all(&tokens).unwrap();
+    let orphan = tokens.join("orphan-run");
+    fs::write(&orphan, "old token").unwrap();
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let outcome =
+        supervise_with(&db, &repo, &backend, &options_with(&podman, &repo, true)).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert!(!orphan.exists());
+    assert!(podman.calls().is_empty(), "{:?}", podman.calls());
+    assert_eq!(kinds(&db, "broker_%"), []);
+}
