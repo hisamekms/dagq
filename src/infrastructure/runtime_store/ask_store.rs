@@ -32,20 +32,6 @@ impl AskStore for SqliteQueue {
     fn ask(&mut self, ask: crate::domain::NewAsk) -> Result<crate::domain::AskOutcome> {
         SqliteQueue::ask(self, ask)
     }
-    fn ask_on_request(
-        &mut self,
-        owner: &RunId,
-        request: &str,
-        ask: crate::domain::NewAsk,
-    ) -> Result<Option<crate::domain::AskOutcome>> {
-        SqliteQueue::ask_on_request(self, owner, request, ask)
-    }
-    fn refuse_ask_request(&mut self, owner: &RunId, request: &str, reason: &str) -> Result<bool> {
-        SqliteQueue::refuse_ask_request(self, owner, request, reason)
-    }
-    fn ask_request_taken(&self, owner: &RunId, request: &str) -> Result<bool> {
-        SqliteQueue::ask_request_taken(self, owner, request)
-    }
     fn hold(&mut self, hold: crate::domain::NewHold) -> Result<crate::domain::HoldOutcome> {
         SqliteQueue::hold(self, hold)
     }

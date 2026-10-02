@@ -565,9 +565,6 @@ impl SessionWatch {
         sv: &mut Supervisor<'_>,
         run: &TaskRun,
     ) -> Result<Option<TaskRun>> {
-        // A headless worker's asks wait in its run directory (ADR-t813-3
-        // decision 3): opened before its turn's end is read.
-        take_ask_requests(sv, run);
         let processes = sv.queue.processes(run.id())?;
         self.watch_first_commit(sv, run)?;
         if !self.receipt_seen && sv.files.is_file(&self.receipt_path) {

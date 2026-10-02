@@ -1307,10 +1307,8 @@ impl StallWatch {
         if elapsed(from, now) < threshold {
             return Ok(None);
         }
-        // A dialog or an ask the session waits at is not a stall, nor a
-        // headless turn's ask the next pass takes.
+        // A dialog or an ask the session waits at is not a stall.
         if dialog
-            || ask_requests_pending(sv, run)
             || sv.queue.has_unclosed_worker_question(run.id())?
             || sv.queue.has_unclosed_ask(run.id(), AskKind::AnswerPrompt)?
         {

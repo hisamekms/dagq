@@ -265,9 +265,6 @@ impl ReviseWatch {
     }
 
     fn observe(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun) -> Result<Option<ReviseOutcome>> {
-        // A headless worker's asks wait in its run directory (ADR-t813-3
-        // decision 3): opened before its turn's end is read.
-        take_ask_requests(sv, run);
         let processes = sv.queue.processes(run.id())?;
         let Some(wrapper) = processes
             .iter()
@@ -403,11 +400,6 @@ impl ReviseWatch {
         // revise (task 672).
         let input = InputMarker::read(&*sv.files, sv.signals, &idle_marker)?;
         let idle = idle.filter(|idle| idle_ends_turn(idle, input_at, input.as_ref()));
-        // A headless turn's ask not taken yet is taken at the next pass,
-        // which judges the idle with it.
-        if idle.is_some() && ask_requests_pending(sv, run) {
-            return Ok(None);
-        }
         let rewritten = self.rewritten(sv, receipt);
         let idle_after_receipt = match &idle {
             Some(idle) if rewritten => idle.idle_after_receipt(&*sv.files, receipt)?.is_some(),

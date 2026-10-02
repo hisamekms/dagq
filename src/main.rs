@@ -21,11 +21,11 @@ use dagq::domain::queue_service::UseCase;
 use dagq::{
     application::TaskStore,
     domain::{
-        ActorContext, ActorRole, AskId, AskKind, AskReason, AuthorizationError, Authorizer,
-        Capability, EventId, FindingId, FindingTarget, GoalEdit, GoalId, GoalVerdict, LeaseToken,
-        NewAsk, NewFinding, NewGoal, NewNote, NewTask, NoteTarget, PlannerId, PlannerOrigin,
-        PlannerOwner, ProposalId, Resource, RunId, SessionRole, StaticPolicy, Submission, TaskEdit,
-        TaskId, TaskStatus, worker::WorkerMode,
+        ActorContext, ActorRole, AskId, AskKind, AskReason, AuthorizationError, Capability,
+        EventId, FindingId, FindingTarget, GoalEdit, GoalId, GoalVerdict, LeaseToken, NewAsk,
+        NewFinding, NewGoal, NewNote, NewTask, NoteTarget, PlannerId, PlannerOrigin, PlannerOwner,
+        ProposalId, Resource, RunId, SessionRole, StaticPolicy, Submission, TaskEdit, TaskId,
+        TaskStatus, worker::WorkerMode,
     },
     infrastructure::{adapters::path_text, location::QueueLocation, sqlite::SqliteQueue},
 };
@@ -2143,80 +2143,6 @@ fn event_actor(actor: &ActorContext, command: &Command) -> ActorContext {
     }
 }
 
-/// The `dagq ask` of a worker whose turn names a directory for its ask
-/// requests (`DAGQ_ASK_REQUESTS`, a Codex worker's, ADR-t813-3 decision 3),
-/// written there as a request with an id of its own; `None` for any other
-/// command or caller, which opens its ask on the queue as before. What the
-/// command can check without the queue it checks first, and refuses at
-/// once as the queue's path would (the ask's options, the reason, the
-/// policy for the worker's run and task; a refusal is not recorded, the
-/// queue being out of reach). The supervisor checks the request again
-/// before it opens it, and the answer comes as the request of the worker's
-/// next turn.
-fn requested_ask(
-    actor: &ActorContext,
-    command: &Command,
-    env: impl Fn(&str) -> Option<String>,
-) -> Result<Option<Value>> {
-    use dagq::domain::ask_request::{ASK_REQUESTS_ENV, AskRequest};
-    let Command::Ask {
-        command: None,
-        kind,
-        question,
-        options,
-        because,
-        topics,
-        recommend,
-        confidence,
-        task_id,
-        run,
-        finding,
-        ..
-    } = command
-    else {
-        return Ok(None);
-    };
-    if actor.role() != ActorRole::Worker {
-        return Ok(None);
-    }
-    let Some(dir) = env(ASK_REQUESTS_ENV).filter(|dir| !dir.is_empty()) else {
-        return Ok(None);
-    };
-    let request = AskRequest {
-        id: uuid::Uuid::new_v4().simple().to_string(),
-        kind: kind.clone().unwrap_or_default(),
-        because: because.clone().unwrap_or_default(),
-        question: question.clone().unwrap_or_default(),
-        options: options.clone(),
-        topics: topics.clone(),
-        recommend: recommend.clone(),
-        confidence: confidence.clone(),
-        run_id: run.clone(),
-        task_id: *task_id,
-        finding_id: *finding,
-    };
-    let ask = request
-        .worker_ask(actor, actor.task_id())
-        .map_err(anyhow::Error::msg)?;
-    StaticPolicy.authorize(
-        actor,
-        Capability::AskOpen,
-        &Resource::NewAsk {
-            kind: ask.kind,
-            run: ask.run_id,
-            task: ask.task_id,
-        },
-    )?;
-    let path = dagq::infrastructure::ask_requests::write(std::path::Path::new(&dir), &request)?;
-    Ok(Some(json!({
-        "requested": true,
-        "request": request.id,
-        "path": path,
-        "message": "The ask is requested: the supervisor opens it for a person. \
-            End this turn now; the answer comes as the request of your next turn.",
-    })))
-}
-
 /// The read of the queue `command` is, as the queue service answers it too
 /// (ADR-t1233-5 decision 1): `None` for any other command.
 fn queue_read(command: &Command) -> Option<QueueRead> {
@@ -2545,12 +2471,6 @@ fn execute(cli: Cli) -> Result<Value> {
     // user, and a value that is no role stops it before anything is read.
     let actor = ActorContext::from_env(|name| env::var(name).ok())?;
     check_access(&actor, &cli.command, cli.db.as_deref())?;
-    // A Codex worker's ask is a request in its run directory, which its
-    // supervisor opens: its sandbox does not let it write the queue's
-    // directory (ADR-t813-3 decision 3), so no queue is opened.
-    if let Some(requested) = requested_ask(&actor, &cli.command, |name| env::var(name).ok())? {
-        return Ok(requested);
-    }
     dagq::infrastructure::event_actor::set_process_actor(event_actor(&actor, &cli.command));
     let cwd = env::current_dir().context("working directory is unavailable")?;
     let location = QueueLocation::resolve(cli.db.as_deref(), &cwd)?;

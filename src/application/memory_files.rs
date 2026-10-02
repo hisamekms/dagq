@@ -107,8 +107,4 @@ impl RunFiles for MemoryFiles {
     fn now(&self) -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(1_000_000)
     }
-    /// It holds no directories.
-    fn open_agent_dir(&self, _: &Path) -> io::Result<super::AgentDir> {
-        Ok(super::AgentDir::Missing)
-    }
 }

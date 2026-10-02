@@ -366,24 +366,6 @@ pub trait RunFiles: Send + Sync {
     /// The wall clock that stamps the files: a time compared with a
     /// file's modification time is read here, not from the [`Clock`].
     fn now(&self) -> SystemTime;
-    /// Open `dir`, a directory an agent writes in a directory it writes as
-    /// well (a Codex worker's ask requests in its run directory), without
-    /// following a link at either: every later look at its entries goes
-    /// through the handle, never through a path the agent can point
-    /// elsewhere meanwhile. The parent's own parent is not the agent's.
-    fn open_agent_dir(&self, dir: &Path) -> io::Result<AgentDir>;
-}
-
-/// A directory an agent writes, as [`RunFiles::open_agent_dir`] found it.
-pub enum AgentDir {
-    /// Nothing is there (or no parent).
-    Missing,
-    /// Something that is no directory is there (a link, a file), named as
-    /// the [`EntryKind`] says; nothing is read through it.
-    Not(EntryKind),
-    /// The same of its parent.
-    ParentNot(EntryKind),
-    Open(Box<dyn AgentDirHandle>),
 }
 
 /// What an entry of an agent's directory is, without following a link.
@@ -405,24 +387,6 @@ impl EntryKind {
             Self::Other => "a special file",
         }
     }
-}
-
-/// An open directory an agent writes. Names are of its own entries (no
-/// `/`); no operation follows a link at one, so none of them reaches
-/// outside the directory.
-pub trait AgentDirHandle: Send {
-    /// The names of its entries, but those that are not UTF-8.
-    fn names(&self) -> io::Result<Vec<String>>;
-    /// What the entry `name` is, without following a link; `None` when it
-    /// is gone.
-    fn kind(&self, name: &str) -> io::Result<Option<EntryKind>>;
-    /// The bytes of the regular file `name`, at most `limit` of them (an
-    /// error for a larger one, a link or anything but a regular file).
-    fn read(&self, name: &str, limit: usize) -> io::Result<Vec<u8>>;
-    /// Rename the entry `from` to `to`, in this directory.
-    fn rename(&self, from: &str, to: &str) -> io::Result<()>;
-    /// Remove the file (or link) `name`, in this directory.
-    fn remove(&self, name: &str) -> io::Result<()>;
 }
 
 /// Opens connections to the queue: the supervisor's own, and one for each
@@ -2225,21 +2189,6 @@ pub trait AskStore {
     fn has_unclosed_ask(&self, run_id: &RunId, kind: AskKind) -> Result<bool>;
     /// Register an ask, or return the open one it repeats.
     fn ask(&mut self, ask: NewAsk) -> Result<AskOutcome>;
-    /// Open the ask of the ask request `request` of run `owner` and record
-    /// it taken in one transaction (ADR-t813-3 decision 3); a request
-    /// already taken returns its ask (`created: false`), or `None` when it
-    /// was refused.
-    fn ask_on_request(
-        &mut self,
-        owner: &RunId,
-        request: &str,
-        ask: NewAsk,
-    ) -> Result<Option<AskOutcome>>;
-    /// Record the ask request `request` of run `owner` refused with
-    /// `reason`, unless it was taken already; whether it was recorded.
-    fn refuse_ask_request(&mut self, owner: &RunId, request: &str, reason: &str) -> Result<bool>;
-    /// Whether the ask request `request` of run `owner` was taken.
-    fn ask_request_taken(&self, owner: &RunId, request: &str) -> Result<bool>;
     /// Open the authentication or cost ask of the hold with its run, or add
     /// the run to the open one (ADR-0047 decision 42).
     fn hold(&mut self, hold: crate::domain::NewHold) -> Result<crate::domain::HoldOutcome>;

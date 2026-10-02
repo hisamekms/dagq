@@ -57,16 +57,11 @@ fn the_actor_env_is_dropped_unless_the_command_sets_it() {
     for name in &ACTOR_ENV[2..] {
         assert_eq!(env[*name], None, "{name}");
     }
-    // A Codex worker's turn's ask directory goes too (ADR-t813-3 decision
-    // 3), and so do the queue service's socket and token file of a
-    // client-mode dagq (goal 82's stage (3)).
+    // So do the queue service's socket and token file of a client-mode
+    // dagq (goal 82's stage (3)).
     assert_eq!(
         TURN_ENV,
-        [
-            dagq::domain::ask_request::ASK_REQUESTS_ENV,
-            "DAGQ_SERVICE_SOCKET",
-            "DAGQ_SERVICE_CREDENTIAL_FILE"
-        ]
+        ["DAGQ_SERVICE_SOCKET", "DAGQ_SERVICE_CREDENTIAL_FILE"]
     );
     for name in TURN_ENV {
         assert_eq!(env[name], None, "{name}");

@@ -19,7 +19,7 @@ A task's worker has a **provider** (`claude` or `codex`) and a **route** (`worke
 ### Which to choose (planner)
 
 - No reason given: give neither flag. The worker runs Claude headless, the default since ADR-t1340-1.
-- The person wants the task done on Codex: `--provider codex`. Codex does no subagent review: its run needs no `subagent_review` evidence (the supervisor's review job still reviews it before landing). A Codex worker asks as any worker does: its `dagq ask` inside the sandbox runs in client mode and goes to the queue service, which opens the `worker_question` at once for the run's worker (no `ask_request_taken`; `queue-service.md`, client mode). Only a turn started before the queue service writes a request to the run dir (`ask-requests/`) for the supervisor to open.
+- The person wants the task done on Codex: `--provider codex`. Codex does no subagent review: its run needs no `subagent_review` evidence (the supervisor's review job still reviews it before landing). A Codex worker asks as any worker does: its `dagq ask` inside the sandbox runs in client mode and goes to the queue service, which opens the `worker_question` at once for the run's worker (no `ask_request_taken`; `queue-service.md`, client mode).
 - Claude interactive (`--interactive`): only when the person asks to watch the worker's session or step into it, or when a headless run keeps failing on a task (until the fix lands). `--headless` names the default; it is not needed.
 - Never pick a provider to route around a login or a usage limit: the runtime falls back by itself (below).
 

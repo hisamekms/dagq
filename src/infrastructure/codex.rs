@@ -999,15 +999,10 @@ mod tests {
         fs::write(&tmp, "x").unwrap();
         assert_eq!(run_tmp_dir(&run_dir).unwrap(), tmp);
         assert!(tmp.is_dir());
-        // Neither names a directory for ask requests: the worker's `dagq
-        // ask` goes to the queue service (ADR-t1233-5 decision 5), which
-        // the open network of its sandbox reaches as it is.
+        // The worker's `dagq ask` goes to the queue service (ADR-t1233-5
+        // decision 5), which the open network of its sandbox reaches as it
+        // is.
         for command in [&first, &resumed] {
-            assert!(
-                !command
-                    .get_envs()
-                    .any(|(key, _)| key == crate::domain::ask_request::ASK_REQUESTS_ENV)
-            );
             let mut reaching = command.clone();
             codex.reach_queue_service(&mut reaching, Path::new("/q/service/queue.sock"));
             assert_eq!(reaching, *command);

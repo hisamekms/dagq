@@ -4,8 +4,8 @@ type: design
 title: Queue service
 status: current
 created: 2026-10-02
-updated: 2026-10-02
-last_verified: 2026-10-02
+updated: 2026-10-03
+last_verified: 2026-10-03
 scope: runtime
 tags:
   - security
@@ -161,7 +161,7 @@ ADR-t1233-1決定7、ADR-t1233-5決定1・2・5、task 1236。`dagq`（`src/main
 - workerのturn（workspace-write、networkを開ける。ADR-t813-3決定4）: そのままsocketに届く。`codex sandbox`（0.159.2）で、workspace-writeで`sandbox_workspace_write.network_access=true`ならunix socketにつなげ、networkを閉じると断られることを確かめた
 - 読み取りだけのjob（goal reviewなど）: `--sandbox read-only`の代わりに、`:read-only`を継いでnetworkをCodexのnetwork proxy経由で開き、serviceのsocket（実path）だけを許すpermission profile `dagq_job`で動かす（`AgentProvider::reach_queue_service`、`codex::job_service_config`。`-c features.network_proxy=true`・`default_permissions="dagq_job"`・`permissions.dagq_job.extends=":read-only"`・`permissions.dagq_job.network.enabled=true`・`permissions.dagq_job.network.unix_sockets={"<socket>"="allow"}`）。`codex sandbox`（0.159.2）で、この設定でsocketに答えが返り、TCPの接続とfileの書き込みは断られ、socketの項を外すとsocketも断られることを確かめた。`codex exec`で同じ設定を確かめたのはstubのCodexまでで、実Codexでのjobの確認は手動スモークに任せる
 - Claude Codeのagentはsandboxを持たないので何も足さない
-- Codexのworkerの`dagq ask`はserviceのユースケースとして送る（ADR-t1233-5決定5）。turnには`DAGQ_ASK_REQUESTS`を渡さなくなった。supervisorがrun dirの`ask-requests/`の要求を取り込む経路（[provider-lifecycle](provider-lifecycle.md#codexの非対話のworker)）は、この変更より前に起動したturnの要求のために残す
+- Codexのworkerの`dagq ask`はserviceのユースケースとして送る（ADR-t1233-5決定5）。以前のrun dirの`ask-requests/`への要求とsupervisorによる取り込み（ADR-t813-3決定3）はtask 1323で撤去した。過去のevent `ask_request_taken`は読めるように`EventKind`に残し、新しくは書かない
 
 ## 起動と停止（ADR-t1233-4決定1・2）
 
@@ -207,5 +207,4 @@ queueのevent（`EventKind::is_queue`）: `queue_service_started`（`by`（`up`�
 
 - runの終わりでのworkerのtokenのfileの片付け（serviceはrunの終わったtokenを断るので使えないが、fileは次のresumeの発行し直しか手の片付けまで残る）
 - 実Codexでの読み取りだけのjobのsocketへの到達の確認（`codex sandbox`とstubのCodexまで。上の「Codexのsandboxからの到達」）
-- run dirの`ask-requests/`の取り込みの撤去（この変更より前に起動したturnが残らなくなった後）
 - 段(4)〜(6)（goal 38）: queueのbroker、supervisor・wrapper・hook・CLIのservice経由化、integrateのverificationの隔離

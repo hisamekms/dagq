@@ -174,10 +174,10 @@ pub(super) fn last_turn(sv: &Supervisor<'_>, idle_marker: &Path) -> Option<TurnM
 
 /// Whether the headless session is between turns: its idle marker names
 /// the last turn that started (`events` are the run's). What is sent then
-/// is the next turn's request, however long ago the turn ended: a Codex
-/// worker's ask opens only at its supervisor's next pass after the turn
-/// that asked it ended (ADR-t813-3 decision 3), so an idle marker older
-/// than the ask does not mean the session went on past it.
+/// is the next turn's request, however long ago the turn ended: an idle
+/// marker older than the ask the turn opened (its clock and the queue's
+/// need not agree to the second) does not mean the session went on past
+/// it.
 pub(super) fn between_turns(sv: &Supervisor<'_>, idle_marker: &Path, events: &[RunEvent]) -> bool {
     let Some(mark) = last_turn(sv, idle_marker) else {
         return false;

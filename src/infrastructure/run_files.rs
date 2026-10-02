@@ -341,9 +341,6 @@ impl RunFiles for LocalRunFiles {
     fn now(&self) -> SystemTime {
         SystemTime::now()
     }
-    fn open_agent_dir(&self, dir: &Path) -> io::Result<crate::application::AgentDir> {
-        super::agent_dir::open(dir)
-    }
 }
 
 /// Scan the bounded snapshot through the same file descriptor used for

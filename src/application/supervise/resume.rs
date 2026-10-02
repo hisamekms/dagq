@@ -1477,9 +1477,6 @@ impl ResumeWatch {
         sv: &mut Supervisor<'_>,
         run: &TaskRun,
     ) -> Result<Option<ResumeVerdict>> {
-        // A headless worker's asks wait in its run directory (ADR-t813-3
-        // decision 3): opened before its turn's end is read.
-        take_ask_requests(sv, run);
         let processes = sv.queue.processes(run.id())?;
         let Some(wrapper) = processes.iter().find(|p| p.role == "wrapper") else {
             let timeout = sv.cmux.registration_timeout();
@@ -1740,11 +1737,6 @@ impl ResumeWatch {
         // it, and no /exit is sent before (task 672).
         let input = InputMarker::read(&*sv.files, sv.signals, &self.idle_marker)?;
         let idle = idle.filter(|idle| !idle.turn_open_after(input.as_ref()));
-        // A headless turn's ask not taken yet is taken at the next pass,
-        // which judges the idle with it.
-        if idle.is_some() && ask_requests_pending(sv, run) {
-            return Ok(None);
-        }
         let head = sv.repository.head(worktree)?;
         let clean = sv.repository.status(worktree)?.trim().is_empty();
         // Resolved (or failed) and idle after the receipt; or idle

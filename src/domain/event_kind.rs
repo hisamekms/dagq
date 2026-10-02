@@ -486,7 +486,9 @@ pub const ASK_DELIVERY_FAILED: &str = EventKind::AskDeliveryFailed.as_str();
 pub const ASK_OPENED: &str = EventKind::AskOpened.as_str();
 /// A Codex worker's ask request its supervisor took from the run directory
 /// (ADR-t813-3 decision 3): `request`, `outcome` (`opened` or `refused`),
-/// and the `ask_id` it opened or the `reason` it was refused.
+/// and the `ask_id` it opened or the `reason` it was refused. No longer
+/// written since the path was removed (ADR-t1233-5 decision 5): kept so
+/// that the events of a queue that has them are still read.
 pub const ASK_REQUEST_TAKEN: &str = EventKind::AskRequestTaken.as_str();
 pub const ASK_UPDATED: &str = EventKind::AskUpdated.as_str();
 pub const AUTH_REQUIRED: &str = EventKind::AuthRequired.as_str();

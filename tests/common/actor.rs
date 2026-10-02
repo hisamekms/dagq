@@ -17,12 +17,9 @@ pub use dagq::domain::actor::ACTOR_ENV;
 /// do not inherit either: the queue service's socket and token file of a
 /// client-mode `dagq` (goal 82's stage (3)), with which tests run by a
 /// worker would have every `dagq` they start go to that worker's queue
-/// service, and an older Codex turn's `DAGQ_ASK_REQUESTS` (ADR-t813-3
-/// decision 3), with which a worker's `dagq ask` would write to that turn's
-/// run directory. They name no actor, so they are not in the runtime's
+/// service. They name no actor, so they are not in the runtime's
 /// [`ACTOR_ENV`].
-pub const TURN_ENV: [&str; 3] = [
-    dagq::domain::ask_request::ASK_REQUESTS_ENV,
+pub const TURN_ENV: [&str; 2] = [
     dagq::domain::queue_service::SOCKET_ENV,
     dagq::domain::queue_service::CREDENTIAL_FILE_ENV,
 ];

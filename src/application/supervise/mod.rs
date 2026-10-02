@@ -100,7 +100,6 @@ use crate::domain::{
 };
 
 mod adopt;
-mod ask_requests;
 mod broker;
 mod claim_defer;
 mod cleanup;
@@ -161,9 +160,8 @@ pub use self::report::ReportPort;
 pub use self::sccache::SccachePort;
 pub use self::update::{UPDATE_INTERVAL, UpdateSettings};
 use self::{
-    ask_requests::*, deliver::*, dialog::*, exit::*, exit_retry::*, headless::*, idle::*, jobs::*,
-    provider::*, recovery::*, resume::*, revise::*, session::*, stale::*, stall::*, sweep::*,
-    waiting::*,
+    deliver::*, dialog::*, exit::*, exit_retry::*, headless::*, idle::*, jobs::*, provider::*,
+    recovery::*, resume::*, revise::*, session::*, stale::*, stall::*, sweep::*, waiting::*,
 };
 
 /// How often the supervisor records the finished transcript turns of the

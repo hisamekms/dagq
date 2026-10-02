@@ -5,7 +5,7 @@ title: "非対話のworker"
 status: current
 created: 2026-09-28
 updated: 2026-10-03
-last_verified: 2026-10-02
+last_verified: 2026-10-03
 scope: runtime
 related:
   - adr-t1340-1
@@ -36,7 +36,7 @@ related:
 
 ## run dirの`turns/`
 
-`src/domain/turn.rs`が名前を決める。supervisorとwrapperはrun dirと`turns/`をlinkを辿らずに開いた記述子でfileを扱う（task 1184）。通常のfileだけを上限付きで読み、書き込みは新規の一時fileからrenameし、turnの出力は新しいinodeの記述子へ渡す。link・FIFOの指す先を読み書きせず、FIFOのopenで待たない。idle markerとreceiptも同じ境界で扱う（[provider-lifecycle](../provider-lifecycle.md#codexの非対話のworker)の「run dirの他のfile」）。
+`src/domain/turn.rs`が名前を決める。supervisorとwrapperはrun dirと`turns/`をlinkを辿らずに開いた記述子でfileを扱う（task 1184）。通常のfileだけを上限付きで読み、書き込みは新規の一時fileからrenameし、turnの出力は新しいinodeの記述子へ渡す。link・FIFOの指す先を読み書きせず、FIFOのopenで待たない。idle markerとreceiptも同じ境界で扱う（[provider-lifecycle](../provider-lifecycle.md#codexの非対話のworker)の「run dirのfile」）。
 
 | file | 書く側 | 中身 |
 | --- | --- | --- |
@@ -46,7 +46,6 @@ related:
 | `exit` | supervisor | 終了の依頼 |
 | `limits.json` | supervisor | turnの上限（`silence_secs`・`limit_secs`。testが秒未満で入れたときは`silence_ms`・`limit_ms`も持ち、秒の代わりに使う。[Stall thresholds](stall-thresholds.md)）。`[stall]`から |
 | `turn-NNNNNN.jsonl` / `.err` | agent | turnのstdout（providerのJSONL）とstderr |
-| `../ask-requests/<id>.json` / `.taken` | この変更より前に起動したCodexのturnの`dagq ask` / supervisor | askの要求と、取り込んだ印（run dirの直下の`ask-requests/`。[provider-lifecycle](../provider-lifecycle.md#codexの非対話のworker)） |
 
 supervisorは最初のsessionのworkspaceを開く前（`provision`）とresumeのworkspaceを開く前（`start_resume`）に`prepare_turns`を行い、`limits.json`を書き、前のsessionの終了の依頼と取られていない依頼を捨てる。turnの設定は`claude-headless-settings.json`（`permissions.deny`だけ。`SIGNAL_BY_NAME_DENIED`とworkerのroleの拒否、`autoMode`）で、`turn_command`がturnのたびに書く。
 
@@ -61,7 +60,7 @@ task 1184でrun dirのI/Oを洗い出し、次の呼び出しを`agent_dir`の�
 | `runtime_store::Refusals`・`sessions::work_breakdown` | 診断logへの追加。通常のfileを上限付きで読み、新しいinodeで置き換える。読めなければlogだけを欠く |
 | `broker_token`・`LocalRunFiles`のtree操作 | runのbroker設定と後始末。dirの列挙・子dirのopen・削除・大きさの集計も記述子に対して行い、linkを辿らない |
 
-queueのdirなどworkerが書けない場所と、workerが書くrun dir（直下の`turns/`・`broker/`など）を区別する。pathにqueueの`runs/`の下の部分（run dirとその中）があるときだけ（`agent_dir::in_run_dir`）、`LocalRunFiles`と`agent_dir`の`create_file`・`append`は記述子の操作を使う: ディレクトリの初回openが指定したdirとその親の2段をlinkとして拒み、最後の要素のfileもlinkを辿らず（`O_NOFOLLOW`と`AT_SYMLINK_NOFOLLOW`）、通常のfileだけを64MiBまで読み、書きはlinkを置き換える。それ以外のpath（queueのdirとDB、installしたバイナリやbrokerのclient、macOSの`/tmp`、linkにしたdata dir、scratchpad）はhostのもので、`std::fs`と同じくlinkを辿り、上限も当てない。`in_run_dir`はpathだけで決め、最初の`runs`という名前の要素の下を run dir とみなすので、queueより上に`runs`というdirがあるhostのpath（`/Users/x/runs/project/...`）もrun dirの扱い（linkを拒むだけで、辿る範囲は広がらない）になる。任意の深さのpathを安全にするAPIではない。`LocalRunFiles::copy`の元（runtimeのバイナリ）はruntimeのもので、linkを辿って読み、64MiBの上限を当てない。Claudeのdebug logのhookの失敗は`RunFiles::read_tail`で末尾だけを読むので、64MiBを超えるlogでも見つかる。treeの走査は開いたdirから`openat`で子へ進む。`ask-requests/`は既存の`open_agent_dir`と専用の上限・拒否のeventを使う。
+queueのdirなどworkerが書けない場所と、workerが書くrun dir（直下の`turns/`・`broker/`など）を区別する。pathにqueueの`runs/`の下の部分（run dirとその中）があるときだけ（`agent_dir::in_run_dir`）、`LocalRunFiles`と`agent_dir`の`create_file`・`append`は記述子の操作を使う: ディレクトリの初回openが指定したdirとその親の2段をlinkとして拒み、最後の要素のfileもlinkを辿らず（`O_NOFOLLOW`と`AT_SYMLINK_NOFOLLOW`）、通常のfileだけを64MiBまで読み、書きはlinkを置き換える。それ以外のpath（queueのdirとDB、installしたバイナリやbrokerのclient、macOSの`/tmp`、linkにしたdata dir、scratchpad）はhostのもので、`std::fs`と同じくlinkを辿り、上限も当てない。`in_run_dir`はpathだけで決め、最初の`runs`という名前の要素の下を run dir とみなすので、queueより上に`runs`というdirがあるhostのpath（`/Users/x/runs/project/...`）もrun dirの扱い（linkを拒むだけで、辿る範囲は広がらない）になる。任意の深さのpathを安全にするAPIではない。`LocalRunFiles::copy`の元（runtimeのバイナリ）はruntimeのもので、linkを辿って読み、64MiBの上限を当てない。Claudeのdebug logのhookの失敗は`RunFiles::read_tail`で末尾だけを読むので、64MiBを超えるlogでも見つかる。treeの走査は開いたdirから`openat`で子へ進む。
 
 ## turnの記録
 
@@ -99,7 +98,7 @@ wrapper自身がturnの途中で終わるとき（エラー）は、上と同じ
 
 ## turnの後の扱い
 
-- **Codexのworkerのask**: turnのagentは（Claudeのturnと同じく）queue serviceのsocketとtokenのfileを持ち、queue DBのpathは持たないので、sandboxの中の`dagq ask`はクライアントモードでserviceに送られ、その場で開く（ADR-t1233-5決定4・5、[Queue service](../queue-service.md#クライアントモード)）。この変更より前に起動したturnの`dagq ask`は、run dirの`ask-requests/`への要求になり、supervisorが見張りのpassの最初に検査して開く（dirはlinkを辿らずに開いた記述子に対してだけ扱う。取り込まれていない通常のfileの要求があるうちはidle markerでturnの終わりを判じない）（[provider-lifecycle](../provider-lifecycle.md#codexの非対話のworker)、ADR-t813-3の決定3）。開いたaskは下のaskと同じに扱う。
+- **Codexのworkerのask**: turnのagentは（Claudeのturnと同じく）queue serviceのsocketとtokenのfileを持ち、queue DBのpathは持たないので、sandboxの中の`dagq ask`はクライアントモードでserviceに送られ、その場で開く（ADR-t1233-5決定4・5、[Queue service](../queue-service.md#クライアントモード)）。開いたaskは下のaskと同じに扱う。
 - **成功**（receiptかaskが残ったturnを含む）: wrapperは次の依頼を待つ。supervisorはidle markerを読み、receiptがあれば今のvalidatingへ（[receipt and session exit](receipt-and-session-exit.md)）、`worker_question`が開いていれば答えを待つ（runはslotを空けて待ちになる。ADR-0071の読み替え、決定6）。答えは`answer to ask N: ...`を依頼にして送る（[workerの質問への回答の送信](worker-question-answer.md)）。
 - **receiptもaskも無いturnの終わり**（`StallWatch::observe_turn`）: 対話の`idle_without_receipt_secs`は待たず（閾値0）、決まった文の促し（`stall_nudged`）を依頼で送る。促しは1 phaseに`HEADLESS_NUDGES`（2）回まで（対話は1回。ADR-0047決定30の読み替え）。前の促しの`stall_resolved`は`nudged_again`になる。使い切った後のturnも同じなら復旧jobの`stalled`（理由`turn_without_receipt`）にする。
 - **permissionの拒否が続いて進まない**: receiptもaskも無く終わったturnの`permission_denials`が`PERMISSION_DENIAL_LIMIT`（3）件以上なら、促さずにすぐ復旧jobの`stalled`（理由`permission_denied`）にする。

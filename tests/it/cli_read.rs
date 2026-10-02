@@ -856,3 +856,44 @@ fn status_and_doctor_show_the_codex_worker_confined() {
         }
     }
 }
+
+/// `ask_request_taken` is no longer written (ADR-t1233-5 decision 5), but
+/// a queue that has such events from the run directory's ask requests of
+/// earlier Codex turns is still read by `events`, `show` and `stats`.
+#[test]
+fn past_ask_request_taken_events_are_still_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("queue.db");
+    let run = run_with_events(
+        &db,
+        &[
+            (
+                "ask_request_taken",
+                serde_json::json!({"request": "r1", "outcome": "refused", "reason": "malformed"}),
+                "00:00:05",
+            ),
+            (
+                "ask_request_taken",
+                serde_json::json!({"request": "r2", "outcome": "opened", "ask_id": 7, "created": true}),
+                "00:00:06",
+            ),
+        ],
+    );
+    let events = ok(&db, &["events", "--after", "0", "--all", "--run", &run]);
+    let taken: Vec<&Value> = events["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "ask_request_taken")
+        .collect();
+    assert_eq!(taken.len(), 2, "{events}");
+    let show = ok(&db, &["show", "1", "--full"]);
+    let shown = show["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "ask_request_taken")
+        .count();
+    assert_eq!(shown, 2, "{show}");
+    ok(&db, &["stats", "--full"]);
+}

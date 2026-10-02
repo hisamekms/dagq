@@ -181,9 +181,6 @@ impl RunFiles for GatedFiles {
     fn now(&self) -> SystemTime {
         LocalRunFiles.now()
     }
-    fn open_agent_dir(&self, dir: &Path) -> io::Result<dagq::application::AgentDir> {
-        LocalRunFiles.open_agent_dir(dir)
-    }
 }
 
 /// Task 405: the build outputs of an ended run are measured and removed
@@ -477,9 +474,6 @@ impl RunFiles for RacyFiles {
     }
     fn now(&self) -> SystemTime {
         LocalRunFiles.now()
-    }
-    fn open_agent_dir(&self, dir: &Path) -> io::Result<dagq::application::AgentDir> {
-        LocalRunFiles.open_agent_dir(dir)
     }
 }
 
