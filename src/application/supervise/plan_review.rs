@@ -9,9 +9,9 @@
 //! pass.
 
 use super::*;
-use crate::domain::ActorContext;
 use crate::domain::EventKind;
 use crate::domain::language::with_instruction;
+use crate::domain::{ActorContext, AskConfidence};
 use crate::{
     application::{
         PlanReviewApply, PlanReviewFailure, PlanReviewJob, PlannerHold, RevisingProposal,
@@ -33,6 +33,7 @@ use crate::{
         actor_model::{ActorLaunch, JobRoute, ModelRole, job_route},
         claim_defer::expected_files,
         next_to_review,
+        plan_review::{PlanConcernDecision, PlanConcernEscalation, PlanRecommendation},
         search::{SearchKind, SearchQuery, SearchRef, any_word_query},
         stats::{LiveSnapshot, SlotSnapshot, StatsQuery, conflicts::ConflictHotspot},
     },
@@ -591,6 +592,9 @@ impl Supervisor<'_> {
         session: Option<crate::domain::headless_job::JobSession>,
     ) -> Result<()> {
         let proposal = job.proposal_id;
+        // A sure concern is applied as its recommendation; the rest wait
+        // for a person (ADR-t451-1 decision 4).
+        let concern = verdict.decide_concern(revise_count);
         let (decision, overridden) = match verdict.verdict {
             PlanReviewDecision::Revise if revise_count >= MAX_PLAN_REVISES => (
                 PlanReviewDecision::Concern,
@@ -598,6 +602,10 @@ impl Supervisor<'_> {
                     "proposal {proposal} was sent back {revise_count} times already (at most {MAX_PLAN_REVISES})"
                 )),
             ),
+            PlanReviewDecision::Concern => match concern.and_then(|decided| decided.applied) {
+                Some(applied) => (applied, None),
+                None => (PlanReviewDecision::Concern, None),
+            },
             decision => (decision, None),
         };
         let answered = self.queue.answered_asks(usize::MAX >> 1)?;
@@ -610,15 +618,23 @@ impl Supervisor<'_> {
         let mut revise_reasons = verdict.reasons.clone();
         revise_reasons.extend(precedents.iter().cloned());
         let ask = (decision == PlanReviewDecision::Concern).then(|| NewAsk {
-            recommendation: None,
-            confidence: None,
+            recommendation: concern
+                .and_then(|decided| decided.recommendation)
+                .map(|recommended| recommended.as_str().to_owned()),
+            confidence: concern.and_then(|decided| decided.confidence),
             kind: AskKind::ApprovePlan,
             task_id: Some(job.anchor),
             run_id: None,
-            question: plan_question(job, &verdict, overridden.as_deref(), &precedents),
+            question: plan_question(
+                job,
+                &verdict,
+                overridden.as_deref(),
+                concern.as_ref(),
+                &precedents,
+            ),
             options: PLAN_OPTIONS.iter().map(|o| (*o).to_owned()).collect(),
             asked_by: PLAN_REVIEW_ASKER.to_owned(),
-            reason_category: AskReason::Scope,
+            reason_category: concern.map_or(AskReason::Scope, |decided| decided.ask_reason()),
             topics: Vec::new(),
             finding_id: None,
         });
@@ -631,6 +647,7 @@ impl Supervisor<'_> {
                 overridden,
                 revise_reasons,
                 ask,
+                concern,
                 duration_secs,
                 session,
             },
@@ -1414,6 +1431,7 @@ fn plan_question(
     job: &PlanReviewJob,
     verdict: &PlanReviewVerdict,
     overridden: Option<&str>,
+    concern: Option<&PlanConcernDecision>,
     precedents: &[String],
 ) -> String {
     let mut question = format!(
@@ -1426,6 +1444,19 @@ fn plan_question(
         question.push_str(&format!(
             "\nIt answered {}, but {why}.",
             verdict.verdict.as_str()
+        ));
+    }
+    if let Some(decided) = concern {
+        let recommended = decided
+            .recommendation
+            .map_or("nothing", PlanRecommendation::as_str);
+        let confidence = decided.confidence.map_or("none", AskConfidence::as_str);
+        let because = decided
+            .escalated_because
+            .map_or("", PlanConcernEscalation::as_str);
+        question.push_str(&format!(
+            "
+It recommends {recommended} (confidence {confidence}); left to a person: {because}."
         ));
     }
     if !verdict.reasons.is_empty() {

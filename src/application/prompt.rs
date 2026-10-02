@@ -2252,9 +2252,14 @@ pub fn plan_review_prompt(material: &PlanReviewMaterial<'_>) -> Result<String> {
          Decide one verdict:\n\
          - pass: the tasks may run as written, after the actions below.\n\
          - revise: findings the planner can fix without a person's judgment (wording, acceptance, verification, paths, a split, a scope that partly overlaps another task, a missing task or dependency). Each reason says what to change.\n\
-         - concern: findings that need a person's judgment: a doubtful duplicate, a change that looks already done, a contradiction with a decision the repository records or with the goal's constraints, a change of the plan's intent.\n\
+         - concern: findings that need a judgment beyond a planner's fix: a doubtful duplicate, a change that looks already done, a contradiction with a decision the repository records or with the goal's constraints, a change of the plan's intent. A concern is not only for a person: you judge it too, with a recommendation and a confidence, and the runtime applies what you are sure of.\n\
+         With a concern, give what you recommend and how sure you are; the runtime applies a sure recommendation itself and asks a person only what the record cannot settle. \
+         recommendation is ready (the tasks may run as written, after the actions below), send_back (the planner fixes it, as a revise; it counts toward the revises above) or cancel. \
+         confidence is high when the queue's records, the repository's documents and decisions and the answered asks settle it, low when they do not or you are unsure. \
+         reason_category is scope when your recommendation would let a task through against a decision the repository records, the goal's constraints or a person's precedent; discard when you recommend cancel; null otherwise. \
+         A high ready or send_back with reason_category null is applied without a person (a ready as a pass, its actions included); a low confidence, scope, discard, or a send_back past the revises above goes to a person with your recommendation.\n\
          When a finding is of the same kind as an answered ask above, put that ask's id in precedents and say in the reason how the person answered then.\n\n\
-         actions are the only changes you make yourself, and only with pass: add_dependency (a task of the proposal waits for another task), lower_priority (never raise one), cancel_duplicate (only an obvious duplicate; a doubtful one, or a change that looks already made, is a concern). Everything else is the planner's. A proposal that remedies a finding (an improvement) keeps its tasks at normal or low: lower a high or urgent one to normal with lower_priority and pass, never revise for it (a pass lowers any you miss).\n\n\
+         actions are the only changes you make yourself, and only with pass (or a concern whose high ready is applied): add_dependency (a task of the proposal waits for another task), lower_priority (never raise one), cancel_duplicate (only an obvious duplicate; a doubtful one, or a change that looks already made, is a concern). Everything else is the planner's. A proposal that remedies a finding (an improvement) keeps its tasks at normal or low: lower a high or urgent one to normal with lower_priority and pass, never revise for it (a pass lowers any you miss).\n\n\
          Whatever the verdict, also estimate the weight of each submitted task of the proposal (tasks {predicted}), one entry per task in predictions, from what you read: \
          a worker (one Claude Opus session in its own Git worktree) implements the task, runs the checks the repository's instructions ask of a worker (formatting, lint, the tests of the change, ...), commits and writes a receipt; \
          then a headless review (pass / revise / concern) and `integrate`'s verification after the rebase onto main follow, and a failure, a conflict or missing evidence resumes the run. \
@@ -2266,8 +2271,9 @@ pub fn plan_review_prompt(material: &PlanReviewMaterial<'_>) -> Result<String> {
          {{\"verdict\": \"pass\" | \"revise\" | \"concern\", \"reasons\": [{{\"text\": string, \"codes\": [string]}}], \"summary\": string, \
          \"actions\": [{{\"action\": \"add_dependency\", \"task_id\": int, \"depends_on\": int}} | {{\"action\": \"lower_priority\", \"task_id\": int, \"priority\": \"low\" | \"normal\" | \"high\" | \"urgent\"}} | {{\"action\": \"cancel_duplicate\", \"task_id\": int, \"duplicate_of\": int}}], \
          \"reopen\": [{{\"task_id\": int, \"reason\": string}}], \"precedents\": [int], \
+         \"recommendation\": \"ready\" | \"send_back\" | \"cancel\", \"confidence\": \"high\" | \"low\", \"reason_category\": \"scope\" | \"discard\" | null, \
          \"predictions\": [{{\"task_id\": int, \"size\": \"S\" | \"M\" | \"L\", \"nature\": \"mechanical\" | \"implementation\" | \"design_judgment\" | \"investigation\", \"uncertainty\": number, \"expected_output_tokens\": int, \"rework_probability\": number, \"reason\": string}}]}}\n\
-         reasons lists each finding (empty for pass); summary is one or two sentences; actions, reopen and precedents may be empty; predictions has one entry for each submitted task and no other.\n",
+         reasons lists each finding (empty for pass); summary is one or two sentences; actions, reopen and precedents may be empty; recommendation, confidence and reason_category go with a concern only; predictions has one entry for each submitted task and no other.\n",
         id = proposal.id(),
         repo = material.repo_root.display(),
         submitted = proposal.submitted_at(),
@@ -2861,6 +2867,18 @@ mod tests {
         assert!(plan_review.contains(
             "the documents and rules they name (the plan review's part of them above all)"
         ));
+        // A concern carries its recommendation and confidence, and what is
+        // left to a person (ADR-t451-1 decisions 1 and 4).
+        assert!(plan_review.contains("recommendation is ready"));
+        assert!(
+            plan_review.contains("- concern: findings that need a judgment beyond a planner's fix")
+        );
+        assert!(
+            !plan_review.contains("- concern: findings that need a person's judgment: a doubtful")
+        );
+        assert!(plan_review.contains("confidence is high when"));
+        assert!(plan_review.contains("reason_category is scope when"));
+        assert!(plan_review.contains("\"reason_category\": \"scope\" | \"discard\" | null"));
         assert!(review.contains("findings of the repository's formatter, linter or other checks"));
         for text in [
             &plan_review,

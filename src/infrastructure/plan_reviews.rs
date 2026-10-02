@@ -763,6 +763,27 @@ impl PlanReviewStore for SqliteQueue {
             EventKind::PlanReviewFinished,
             finished,
         )?;
+        if let Some(decided) = &apply.concern {
+            // What became of the concern (ADR-t451-1 decision 4): applied
+            // as its recommendation, or left to a person and why.
+            event(
+                &tx,
+                job.anchor,
+                None,
+                EventKind::PlanConcernDecided,
+                json!({
+                    "proposal_id": job.proposal_id,
+                    "plan_review_id": job.id,
+                    "recommendation": decided.recommendation,
+                    "confidence": decided.confidence,
+                    "reason_category": decided.reason_category,
+                    "applied": decided.applied.is_some(),
+                    "decision": decided.applied,
+                    "escalated_because": decided.escalated_because,
+                    "ask_id": applied.ask.as_ref().map(|outcome| outcome.ask.id),
+                }),
+            )?;
+        }
         if let Ok(predictions) = &predictions {
             record_predictions(&tx, job, apply.session.as_ref(), predictions)?;
         }

@@ -48,13 +48,23 @@ pub struct DecidedWithoutAsk {
 /// implementations of ADR-t451-1 add theirs here (the review's
 /// `concern_decided`, the plan review's `plan_concern_decided`, the
 /// observer's findings without an ask).
-pub const DECIDED_WITHOUT_ASK: &[DecidedWithoutAsk] = &[DecidedWithoutAsk {
-    // A follow_up draft a planner of the runtime's adopted on its own,
-    // with no planner_question answered: not a person's submission.
-    event: "follow_up_adopted",
-    ask_kind: "planner_question",
-    applies: |payload| payload["by"].as_str() == Some("planner") && payload["ask_id"].is_null(),
-}];
+pub const DECIDED_WITHOUT_ASK: &[DecidedWithoutAsk] = &[
+    DecidedWithoutAsk {
+        // A follow_up draft a planner of the runtime's adopted on its own,
+        // with no planner_question answered: not a person's submission.
+        event: "follow_up_adopted",
+        ask_kind: "planner_question",
+        applies: |payload| payload["by"].as_str() == Some("planner") && payload["ask_id"].is_null(),
+    },
+    DecidedWithoutAsk {
+        // A plan review's sure concern the runtime applied as its
+        // `ready` or `send_back` (ADR-t451-1 decision 4), not one it left
+        // to a person in an approve_plan ask.
+        event: crate::domain::event_kind::PLAN_CONCERN_DECIDED,
+        ask_kind: "approve_plan",
+        applies: |payload| payload["applied"].as_bool() == Some(true),
+    },
+];
 
 /// Count the asks answered and the decisions recorded with `after < id <=
 /// upto` whose task `counts` accepts. The recommendation of an ask opened
@@ -227,6 +237,20 @@ mod tests {
         assert_eq!(
             stats.decided_without_ask,
             BTreeMap::from([("planner_question".to_owned(), 1)])
+        );
+    }
+
+    #[test]
+    fn a_plan_concern_the_runtime_applied_counts_as_decided_without_an_approve_plan() {
+        let events = vec![
+            event(1, "plan_concern_decided", json!({"applied": true})),
+            event(2, "plan_concern_decided", json!({"applied": false})),
+            event(3, "plan_concern_decided", json!({"applied": true})),
+        ];
+        let stats = recommendations(&events, EventId::new(0), EventId::new(3), |_| true);
+        assert_eq!(
+            stats.decided_without_ask,
+            BTreeMap::from([("approve_plan".to_owned(), 2)])
         );
     }
 }

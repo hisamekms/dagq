@@ -5,7 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{AskId, DomainError, Priority, ProposalId, TaskId, parse_json_object};
+use super::{
+    AskConfidence, AskId, AskReason, DomainError, Priority, ProposalId, TaskId, parse_json_object,
+};
 
 // What plan review decided (ADR-0041 decision 11): `pass` makes the
 // proposal's tasks ready, `revise` sends it back to its planner, `concern`
@@ -44,6 +46,63 @@ string_enum!(ReviewHold {
     Failed => "failed",
     Concern => "concern",
 });
+
+// What a plan review's `concern` recommends (ADR-t451-1 decision 4): make
+// the tasks ready, send the proposal back to its planner, or cancel it (a
+// `discard`, which a person always decides).
+string_enum!(PlanRecommendation {
+    Ready => "ready",
+    SendBack => "send_back",
+    Cancel => "cancel",
+});
+
+// Why a `concern` needs a person whatever its confidence (ADR-t451-1
+// decision 4, ADR-0047 decision 41): `scope` lets a task through against a
+// recorded decision, a goal's constraints or a person's precedent;
+// `discard` cancels it.
+string_enum!(PlanConcernReason {
+    Scope => "scope",
+    Discard => "discard",
+});
+
+// Why the runtime left a `concern` to a person in an `approve_plan` ask
+// instead of applying its recommendation (`plan_concern_decided`'s
+// `escalated_because`).
+string_enum!(PlanConcernEscalation {
+    NoRecommendation => "no_recommendation",
+    Discard => "discard",
+    Scope => "scope",
+    LowConfidence => "low_confidence",
+    ReviseLimit => "revise_limit",
+});
+
+/// What the runtime makes of a `concern` (ADR-t451-1 decision 4): the
+/// decision it applies itself, or why a person decides it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlanConcernDecision {
+    pub recommendation: Option<PlanRecommendation>,
+    pub confidence: Option<AskConfidence>,
+    pub reason_category: Option<PlanConcernReason>,
+    /// `pass` for a sure `ready`, `revise` for a sure `send_back`; `None`
+    /// when it opens the `approve_plan` ask.
+    pub applied: Option<PlanReviewDecision>,
+    pub escalated_because: Option<PlanConcernEscalation>,
+}
+
+impl PlanConcernDecision {
+    /// The reason the `approve_plan` ask carries: `discard` for a
+    /// cancel (even in a concern missing its confidence), `scope`
+    /// otherwise (as every `approve_plan` ask did).
+    pub fn ask_reason(&self) -> AskReason {
+        if self.recommendation == Some(PlanRecommendation::Cancel)
+            || self.reason_category == Some(PlanConcernReason::Discard)
+        {
+            AskReason::Discard
+        } else {
+            AskReason::Scope
+        }
+    }
+}
 
 /// A fix plan review makes itself (ADR-0041 decision 11). Nothing else is
 /// the job's to change: rewriting a task, splitting it, removing a
@@ -115,6 +174,14 @@ pub struct PlanReviewVerdict {
     /// predictions, to record the estimates.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub predictions: Option<serde_json::Value>,
+    /// A `concern`'s recommendation, confidence and reason a person is
+    /// needed (ADR-t451-1 decision 4); read on a `concern` only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommendation: Option<PlanRecommendation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<AskConfidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_category: Option<PlanConcernReason>,
 }
 
 #[derive(Deserialize)]
@@ -131,6 +198,12 @@ struct PrintedPlanReviewVerdict {
     precedents: Vec<AskId>,
     #[serde(default)]
     predictions: Option<serde_json::Value>,
+    #[serde(default)]
+    recommendation: Option<PlanRecommendation>,
+    #[serde(default)]
+    confidence: Option<AskConfidence>,
+    #[serde(default)]
+    reason_category: Option<PlanConcernReason>,
 }
 
 impl From<PrintedPlanReviewVerdict> for PlanReviewVerdict {
@@ -145,6 +218,9 @@ impl From<PrintedPlanReviewVerdict> for PlanReviewVerdict {
             reopen: printed.reopen,
             precedents: printed.precedents,
             predictions: printed.predictions,
+            recommendation: printed.recommendation,
+            confidence: printed.confidence,
+            reason_category: printed.reason_category,
         }
     }
 }
@@ -154,6 +230,49 @@ impl PlanReviewVerdict {
     /// `unlabeled` for one without them.
     pub fn recorded_codes(&self) -> Vec<Vec<String>> {
         super::review_reason::recorded(&self.reason_codes, self.reasons.len())
+    }
+
+    /// What the runtime makes of a `concern` after `revise_count` revises
+    /// (ADR-t451-1 decision 4); `None` for any other verdict. A sure
+    /// (`high`) `ready` or `send_back` with no reason a person is needed
+    /// is applied as a `pass` or a `revise`; a `send_back` past
+    /// [`MAX_PLAN_REVISES`], a `low` confidence, a `scope` or a `discard`
+    /// (a `cancel`), and a concern without both a recommendation and a
+    /// confidence (the shape before ADR-t451-1) open the `approve_plan`
+    /// ask.
+    pub fn decide_concern(&self, revise_count: u32) -> Option<PlanConcernDecision> {
+        if self.verdict != PlanReviewDecision::Concern {
+            return None;
+        }
+        let escalated_because = if self.recommendation.is_none() || self.confidence.is_none() {
+            Some(PlanConcernEscalation::NoRecommendation)
+        } else if self.recommendation == Some(PlanRecommendation::Cancel)
+            || self.reason_category == Some(PlanConcernReason::Discard)
+        {
+            Some(PlanConcernEscalation::Discard)
+        } else if self.reason_category == Some(PlanConcernReason::Scope) {
+            Some(PlanConcernEscalation::Scope)
+        } else if self.confidence == Some(AskConfidence::Low) {
+            Some(PlanConcernEscalation::LowConfidence)
+        } else if self.recommendation == Some(PlanRecommendation::SendBack)
+            && revise_count >= MAX_PLAN_REVISES
+        {
+            Some(PlanConcernEscalation::ReviseLimit)
+        } else {
+            None
+        };
+        let applied = match (escalated_because, self.recommendation) {
+            (None, Some(PlanRecommendation::Ready)) => Some(PlanReviewDecision::Pass),
+            (None, Some(PlanRecommendation::SendBack)) => Some(PlanReviewDecision::Revise),
+            _ => None,
+        };
+        Some(PlanConcernDecision {
+            recommendation: self.recommendation,
+            confidence: self.confidence,
+            reason_category: self.reason_category,
+            applied,
+            escalated_because,
+        })
     }
 
     /// The verdict in the job's stdout, found the way the run review's is.
@@ -313,6 +432,97 @@ mod tests {
         .unwrap();
         assert_eq!(verdict.verdict, PlanReviewDecision::Pass);
         assert_eq!(verdict.predictions, Some(serde_json::json!("S")));
+    }
+
+    #[test]
+    fn a_sure_concern_is_applied_and_the_rest_wait_for_a_person() {
+        let concern = |extra: &str| {
+            PlanReviewVerdict::parse(&format!(
+                r#"{{"verdict":"concern","reasons":["x"],"summary":"s"{extra}}}"#
+            ))
+            .unwrap()
+        };
+        let decide = |extra: &str, revises: u32| {
+            let decided = concern(extra).decide_concern(revises).unwrap();
+            (decided.applied, decided.escalated_because)
+        };
+        use PlanConcernEscalation as E;
+        use PlanReviewDecision as D;
+        let sure = r#","confidence":"high","reason_category":null"#;
+        assert_eq!(
+            decide(&format!(r#","recommendation":"ready"{sure}"#), 0),
+            (Some(D::Pass), None)
+        );
+        assert_eq!(
+            decide(&format!(r#","recommendation":"send_back"{sure}"#), 1),
+            (Some(D::Revise), None)
+        );
+        assert_eq!(
+            decide(
+                &format!(r#","recommendation":"send_back"{sure}"#),
+                MAX_PLAN_REVISES
+            ),
+            (None, Some(E::ReviseLimit))
+        );
+        // The shape before ADR-t451-1, or half of it.
+        assert_eq!(decide("", 0), (None, Some(E::NoRecommendation)));
+        assert_eq!(
+            decide(r#","recommendation":"ready""#, 0),
+            (None, Some(E::NoRecommendation))
+        );
+        assert_eq!(
+            decide(r#","confidence":"high""#, 0),
+            (None, Some(E::NoRecommendation))
+        );
+        assert_eq!(
+            decide(r#","recommendation":"ready","confidence":"low""#, 0),
+            (None, Some(E::LowConfidence))
+        );
+        assert_eq!(
+            decide(
+                r#","recommendation":"ready","confidence":"high","reason_category":"scope""#,
+                0
+            ),
+            (None, Some(E::Scope))
+        );
+        assert_eq!(
+            decide(
+                r#","recommendation":"send_back","confidence":"high","reason_category":"discard""#,
+                0
+            ),
+            (None, Some(E::Discard))
+        );
+        let cancel = concern(r#","recommendation":"cancel","confidence":"high""#)
+            .decide_concern(0)
+            .unwrap();
+        assert_eq!(cancel.escalated_because, Some(E::Discard));
+        assert_eq!(cancel.ask_reason(), AskReason::Discard);
+        let low = concern(r#","recommendation":"ready","confidence":"low""#)
+            .decide_concern(0)
+            .unwrap();
+        assert_eq!(low.ask_reason(), AskReason::Scope);
+        assert_eq!(low.recommendation, Some(PlanRecommendation::Ready));
+        assert_eq!(low.confidence, Some(AskConfidence::Low));
+        let half = concern(r#","reason_category":"discard""#)
+            .decide_concern(0)
+            .unwrap();
+        assert_eq!(half.escalated_because, Some(E::NoRecommendation));
+        assert_eq!(half.ask_reason(), AskReason::Discard);
+        // Only a concern is decided; an unknown value is refused.
+        assert_eq!(
+            PlanReviewVerdict::parse(
+                r#"{"verdict":"pass","reasons":[],"summary":"s","recommendation":"ready","confidence":"high"}"#
+            )
+            .unwrap()
+            .decide_concern(0),
+            None
+        );
+        assert!(
+            PlanReviewVerdict::parse(
+                r#"{"verdict":"concern","reasons":[],"summary":"s","recommendation":"land"}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]

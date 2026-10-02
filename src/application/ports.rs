@@ -2471,6 +2471,9 @@ pub struct PlanReviewApply {
     pub overridden: Option<String>,
     pub revise_reasons: Vec<String>,
     pub ask: Option<NewAsk>,
+    /// What the runtime made of a `concern` verdict (ADR-t451-1 decision
+    /// 4), recorded as `plan_concern_decided`; `None` for any other.
+    pub concern: Option<crate::domain::plan_review::PlanConcernDecision>,
     pub duration_secs: u64,
     /// The session the job's output names (Codex's thread and model,
     /// ADR-t1063-1 decision 6); `None` for a Claude job.

@@ -141,6 +141,7 @@ event_kinds! {
     Observation => "observation",
     ObserveFinished => "observe_finished",
     ObserveStarted => "observe_started",
+    PlanConcernDecided => "plan_concern_decided",
     PlanDecided => "plan_decided",
     PlanReviewDiscarded => "plan_review_discarded",
     PlanReviewFailed => "plan_review_failed",
@@ -583,6 +584,7 @@ pub const PLANNER_ANSWER_CLOSED: &str = EventKind::PlannerAnswerClosed.as_str();
 pub const PLANNER_CLOSED: &str = EventKind::PlannerClosed.as_str();
 pub const PLANNER_RELEASED: &str = EventKind::PlannerReleased.as_str();
 pub const PLANNER_UNRESPONSIVE: &str = EventKind::PlannerUnresponsive.as_str();
+pub const PLAN_CONCERN_DECIDED: &str = EventKind::PlanConcernDecided.as_str();
 pub const PLAN_DECIDED: &str = EventKind::PlanDecided.as_str();
 pub const PLAN_REVIEW_DISCARDED: &str = EventKind::PlanReviewDiscarded.as_str();
 pub const PLAN_REVIEW_FAILED: &str = EventKind::PlanReviewFailed.as_str();
@@ -875,6 +877,7 @@ mod tests {
             (EventKind::Observation, "observation"),
             (EventKind::ObserveFinished, "observe_finished"),
             (EventKind::ObserveStarted, "observe_started"),
+            (EventKind::PlanConcernDecided, "plan_concern_decided"),
             (EventKind::PlanDecided, "plan_decided"),
             (EventKind::PlanReviewDiscarded, "plan_review_discarded"),
             (EventKind::PlanReviewFailed, "plan_review_failed"),
