@@ -4,8 +4,8 @@ type: design
 title: "Plan review (supervisor)"
 status: current
 created: 2026-09-26
-updated: 2026-10-02
-last_verified: 2026-10-02
+updated: 2026-10-03
+last_verified: 2026-10-03
 scope: runtime
 related:
   - adr-t451-1
@@ -20,7 +20,7 @@ related:
 
 # Plan review (supervisor)
 
-execの[引き継ぎ](handoff.md)で止めたjobは、引き継いだsupervisorが最初のpassに入る前に自分のtokenの未完了行を`interrupted`（error: `stopped for the supervisor handoff`）で閉じる。候補が無くても閉じ、transcriptをtransactionの前に`read_before`で読んで既存のclose経路で区間の`session_closed`（`reason: job_finished`、model / effortを含む）を記録する。他のtokenの行は触らない。候補が残れば以後のpassでreviewをやり直し、interruptedはattemptに数えない（task 1087）。
+execの[引き継ぎ](handoff.md)を待つあいだに終わったjobと、`prepare_handoff`の時点で終わっていたjobは、捨てずに回収してverdictを適用する（task 1425。新しいjobは始めず、verdictでreadyになったtaskも待ちのあいだはclaimしない）。走っていて止めたjobは、引き継いだsupervisorが最初のpassに入る前に自分のtokenの未完了行を`interrupted`（error: `stopped for the supervisor handoff`）で閉じる。候補が無くても閉じ、transcriptをtransactionの前に`read_before`で読んで既存のclose経路で区間の`session_closed`（`reason: job_finished`、model / effortを含む）を記録する。他のtokenの行は触らない。候補が残れば以後のpassでreviewをやり直し、interruptedはattemptに数えない（task 1087）。
 
 [ADR-0044](../../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定10〜15・17（task 281）。submitされたproposalを、supervisorが起動するheadlessのplan review jobが検査し、そのverdictと人のanswerをruntimeが適用する。use caseは`src/application/supervise/plan_review.rs`、storeは`src/infrastructure/plan_reviews.rs`（port `PlanReviewStore`）、verdictの型と順序は`src/domain/plan_review.rs`。run slotは使わず、observerと同じくloopの各passで進める（`--once`のloopは走っているplan reviewを待ち、passでverdictかanswerを適用したらもう1 pass回ってreadyになったtaskをclaimしてから終わる。`--once`で立てたplannerは終わらせない）。drain中（`stop`、provisioningの失敗）は新しいplan reviewを始めず、reviseの配送もしない（走っているjobとanswerの適用は続ける）。
 

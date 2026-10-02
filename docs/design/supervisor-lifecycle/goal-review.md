@@ -4,8 +4,8 @@ type: design
 title: "Goal review (supervisor)"
 status: current
 created: 2026-09-27
-updated: 2026-10-02
-last_verified: 2026-10-02
+updated: 2026-10-03
+last_verified: 2026-10-03
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -19,9 +19,9 @@ related:
 
 # Goal review (supervisor)
 
-execの[引き継ぎ](handoff.md)で止めたjobは、引き継いだsupervisorが最初のpassに入る前に自分のtokenの未完了行を`interrupted`（error: `stopped for the supervisor handoff`）で閉じる。候補が無くても閉じ、transcriptをtransactionの前に`read_before`で読んで既存のclose経路で区間の`session_closed`（`reason: job_finished`、model / effortを含む）を記録する。他のtokenの行は触らない。候補が残れば以後のpassでreviewをやり直し、interruptedはattemptに数えない（task 1087）。
+execの[引き継ぎ](handoff.md)を待つあいだに終わったjobと、`prepare_handoff`の時点で終わっていたjobは、捨てずに回収してverdictを適用する（task 1425。新しいjobは始めない）。走っていて止めたjobは、引き継いだsupervisorが最初のpassに入る前に自分のtokenの未完了行を`interrupted`（error: `stopped for the supervisor handoff`）で閉じる。候補が無くても閉じ、transcriptをtransactionの前に`read_before`で読んで既存のclose経路で区間の`session_closed`（`reason: job_finished`、model / effortを含む）を記録する。他のtokenの行は触らない。候補が残れば以後のpassでreviewをやり直し、interruptedはattemptに数えない（task 1087）。
 
-[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定43（task 375）。所属taskがすべて終わったopenのgoalを、supervisorが起動するheadlessのgoal review jobがacceptanceと照合し、そのverdictと人のanswerをruntimeが適用する。use caseは`src/application/supervise/goal_review.rs`、storeは`src/infrastructure/goal_reviews.rs`（port `GoalReviewStore`）、verdict・answer・起動の条件の型は`src/domain/goal_review.rs`、promptは`prompt::goal_review_prompt`。plan reviewと同じくrun slotは使わず、loopの各passで進める（`goal_review_pass`。`--once`のloopは走っているgoal reviewを待つ）。drain中（`stop`、provisioningの失敗）は新しいgoal reviewを始めない（走っているjobとanswerの適用は続ける）。exec の引き継ぎ（`prepare_handoff`）はjobを止め、未完了の行は次のプロセスが`interrupted`で閉じて取り直す。
+[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定43（task 375）。所属taskがすべて終わったopenのgoalを、supervisorが起動するheadlessのgoal review jobがacceptanceと照合し、そのverdictと人のanswerをruntimeが適用する。use caseは`src/application/supervise/goal_review.rs`、storeは`src/infrastructure/goal_reviews.rs`（port `GoalReviewStore`）、verdict・answer・起動の条件の型は`src/domain/goal_review.rs`、promptは`prompt::goal_review_prompt`。plan reviewと同じくrun slotは使わず、loopの各passで進める（`goal_review_pass`。`--once`のloopは走っているgoal reviewを待つ）。drain中（`stop`、provisioningの失敗）は新しいgoal reviewを始めない（走っているjobとanswerの適用は続ける）。exec の引き継ぎを待つあいだも`goal_review_pass(false)`で終わったjobを回収して適用し、`prepare_handoff`は終わったjobを先に回収してから走っているjobだけを止め、その未完了の行は次のプロセスが`interrupted`で閉じて取り直す（task 1425）。
 
 1. **記録**（schema v42、`migrations/0042_goal_reviews.sql`、compatible）: jobは`goal_reviews`の1行（`goal_id`、`attempt`、`supervisor_token`、`fingerprint`、`dir`、`started_at`、`finished_at`、`outcome` = `achieved` / `gaps` / `ask` / `failed` / `interrupted`、`verdict`のJSON、`error`、`ask_id`、`rearmed_at`）。互換のmigrationは外部キーとunique indexを持てないので、同時に1つは`begin_goal_review`が`BEGIN IMMEDIATE`の中で生きているsupervisorの未完了の行が無いことを確かめてから行を書くことで守る（queue全体で1つ。plan reviewとは別に数える）。行の無いsupervisorの未完了の行は`interrupted`で閉じる。eventはgoalに記録する（`run_events.goal_id`）。askのkindに`approve_goal`を足した（kindにmigrationは要らない）。jobのpromptと出力はqueueの`goal-reviews/<行のID>/`（`prompt.txt`、`review.out`、`review.err`）。
 2. **起動の条件**（`goal_review_candidates`、ID順の先頭を取る）: goalが`open`で閉じておらず、所属taskが1件以上あり、すべて`completed`か`canceled`で`completed`が1件以上（`goal_review::tasks_done`。`draft` / `submitted`のtask、つまりruntimeのplannerの待ち・`keep_draft`で残ったdraft・閉じていない`planner_question`の対象は、これで除かれる）、goalのreviewが開いた`approve_goal`のaskで閉じていないものが無く、前回のgoal review（`interrupted`を除く最新の行）の後に所属taskの状態が変わっている。状態は`fingerprint`（taskのIDとstatusをID順に並べた文字列）で比べ、同じなら起動しない。人の`goal review ID`（`rearm_goal_review`）は最新の行に`rearmed_at`を書き、状態が同じでも起動させる（`goal_review_rearmed`）。openでないgoalには打てない。

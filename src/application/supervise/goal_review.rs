@@ -354,7 +354,7 @@ impl Supervisor<'_> {
 
     /// Reap the job once it ended and apply its verdict, or record its
     /// failure.
-    fn poll_goal_review(&mut self) -> Result<bool> {
+    pub(super) fn poll_goal_review(&mut self) -> Result<bool> {
         let Some(provider) = self.goal_review.as_ref().map(|w| w.headless.provider) else {
             return Ok(false);
         };

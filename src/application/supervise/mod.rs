@@ -1472,6 +1472,13 @@ impl Supervisor<'_> {
                         self.forecast_pass(false);
                         self.release_pass(false);
                         self.push_pass(false);
+                        // A plan or goal review that ended meanwhile is
+                        // reaped and its verdict applied, none started: a
+                        // verdict left to the exec would be thrown away
+                        // (task 1425). A task it readies waits for the
+                        // next process's claim.
+                        self.plan_review_pass(options, false);
+                        self.goal_review_pass(false);
                         self.tick(true);
                         thread::sleep(options.tick);
                         continue;

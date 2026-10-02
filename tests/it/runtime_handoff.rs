@@ -1162,3 +1162,283 @@ fn resumed_background_dialog_is_not_answered(snapshot: bool, unsent: bool) {
     release_held_session(run.run_dir().unwrap());
     backend.join();
 }
+
+/// The plan and goal reviews a handoff meets (task 1425): a verdict that
+/// was written before the exec is applied, not thrown away, and only a job
+/// still running is stopped and runs again in the next process.
+mod review_verdicts {
+    use crate::goal_review::{goal_done, goal_events};
+    use crate::plan_review::{
+        Fixture, PlanWorkspace, StubReviewer, add, events, fixture, options, status, submit,
+        supervise_with,
+    };
+    use crate::runtime_support::{joined, wait_until};
+    use dagq::{
+        compose::HostMetricsSettings,
+        domain::{
+            GoalId, LeaseToken, Priority, ProposalId, TaskId, TaskStatus, host_metrics::HostSample,
+        },
+        infrastructure::sqlite::SqliteQueue,
+        runtime::{self, SuperviseOptions},
+    };
+    use rusqlite::Connection;
+    use serde_json::{Value, json};
+    use std::{
+        path::{Path, PathBuf},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        thread,
+        time::{Duration, Instant},
+    };
+
+    /// Whether [`held_host`] keeps its sample from ending, which keeps the
+    /// handoff waiting (it waits for a sample in progress).
+    static HOLD_SAMPLE: AtomicBool = AtomicBool::new(true);
+
+    fn held_host(now: i64) -> HostSample {
+        let started = Instant::now();
+        while HOLD_SAMPLE.load(Ordering::SeqCst) && started.elapsed() < crate::common::STEP_LIMIT {
+            thread::sleep(Duration::from_millis(10));
+        }
+        HostSample::new(now)
+    }
+
+    /// A finished goal and a submitted proposal, each a review candidate.
+    fn candidates(fx: &Fixture) -> (GoalId, TaskId, ProposalId) {
+        let (goal, _) = goal_done(fx);
+        let mut queue = SqliteQueue::open(&fx.db).unwrap();
+        let task = add(
+            &mut queue,
+            "review this plan",
+            &[TaskId::new(1)],
+            Priority::Normal,
+        );
+        let proposal = submit(&mut queue, &[task], None);
+        (goal, task, proposal)
+    }
+
+    /// A reviewer whose jobs wait for `gate`: each plan review (started
+    /// first) passes, each goal review finds the goal achieved, `rounds`
+    /// times.
+    fn reviewer(gate: &Path, rounds: usize) -> Arc<StubReviewer> {
+        let round = [
+            json!({"verdict": "pass", "reasons": [], "summary": "sound", "actions": []}),
+            json!({"verdict": "achieved", "criteria": [], "summary": "done"}),
+        ];
+        let verdicts: Vec<Value> = (0..rounds).flat_map(|_| round.clone()).collect();
+        Arc::new(StubReviewer::new(&verdicts).gated(gate))
+    }
+
+    /// The supervisor on its own thread until it hands off.
+    fn spawn(
+        fx: &Fixture,
+        reviewer: &Arc<StubReviewer>,
+        options: SuperviseOptions,
+    ) -> thread::JoinHandle<Value> {
+        let (db, repo, claude) = (fx.db.clone(), fx.repo.clone(), fx.claude.clone());
+        let reviewer = reviewer.clone();
+        thread::spawn(move || {
+            runtime::supervise_with_reviewer(
+                &db,
+                &repo,
+                &PlanWorkspace::default(),
+                &claude,
+                &*reviewer,
+                Path::new(env!("CARGO_BIN_EXE_dagq")),
+                &options,
+            )
+            .unwrap()
+        })
+    }
+
+    fn both_started(queue: &mut SqliteQueue, goal: GoalId, task: TaskId) -> bool {
+        !goal_events(queue, goal, "goal_review_started").is_empty()
+            && !events(queue, task, "plan_review_started").is_empty()
+    }
+
+    fn request_handoff(db: &Path) -> LeaseToken {
+        let queue = SqliteQueue::open(db).unwrap();
+        let token = queue.supervisors().unwrap().remove(0).token;
+        assert!(queue.request_handoff(&token, "/next/dagq").unwrap());
+        token
+    }
+
+    /// The outcome and error of every row of `table`, in order.
+    fn rows(db: &Path, table: &str) -> Vec<(Option<String>, Option<String>)> {
+        Connection::open(db)
+            .unwrap()
+            .prepare(&format!("SELECT outcome, error FROM {table} ORDER BY id"))
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    /// The next process under `token`, once, then what each review table
+    /// holds.
+    fn continue_after(fx: &Fixture, reviewer: &StubReviewer, token: LeaseToken) {
+        let mut next = options(0, Duration::from_secs(3600));
+        next.handoff_token = Some(token);
+        supervise_with(fx, &PlanWorkspace::default(), reviewer, &next);
+    }
+
+    /// Both verdicts applied once, and neither review started again.
+    fn applied_once(fx: &Fixture, reviewer: &StubReviewer, goal: GoalId, task: TaskId) {
+        let mut queue = SqliteQueue::open(&fx.db).unwrap();
+        let finished = events(&mut queue, task, "plan_review_finished");
+        assert_eq!(finished.len(), 1, "{finished:?}");
+        assert_eq!(finished[0]["decision"], "pass");
+        assert_eq!(status(&mut queue, task), TaskStatus::Ready);
+        assert_eq!(
+            goal_events(&mut queue, goal, "goal_review_finished").len(),
+            1
+        );
+        for table in ["plan_reviews", "goal_reviews"] {
+            let rows = rows(&fx.db, table);
+            assert_eq!(rows.len(), 1, "{table}: {rows:?}");
+            assert_ne!(
+                rows[0].0.as_deref(),
+                Some("interrupted"),
+                "{table}: {rows:?}"
+            );
+        }
+        assert_eq!(reviewer.prompts().len(), 2);
+        assert_eq!(events(&mut queue, task, "plan_review_started").len(), 1);
+        assert_eq!(
+            goal_events(&mut queue, goal, "goal_review_started").len(),
+            1
+        );
+    }
+
+    /// A plan and a goal review that end while the handoff waits (here for
+    /// a host sample in progress) are reaped and applied in the wait; none
+    /// starts again there nor in the next process.
+    #[test]
+    fn reviews_that_end_while_a_handoff_waits_are_applied_in_the_wait() {
+        let fx = fixture();
+        let (goal, task, _) = candidates(&fx);
+        let gate = fx.db.with_extension("gate");
+        let reviewer = reviewer(&gate, 1);
+        let mut first = options(0, Duration::from_secs(3600));
+        first.once = false;
+        first.host_metrics = Some(HostMetricsSettings {
+            sample: held_host,
+            disk: |_| None,
+            ..HostMetricsSettings::new(Duration::from_secs(3600), 30)
+        });
+        let passes = first.passes.clone();
+        let supervisor = spawn(&fx, &reviewer, first);
+        wait_until(&fx.db, crate::common::STEP_LIMIT, |queue| {
+            both_started(queue, goal, task)
+        });
+        let token = request_handoff(&fx.db);
+        crate::runtime_support::await_passes(&passes, crate::runtime_support::SOME_PASSES);
+        std::fs::write(&gate, "go").unwrap();
+        wait_until(&fx.db, crate::common::STEP_LIMIT, |queue| {
+            !events(queue, task, "plan_review_finished").is_empty()
+                && !goal_events(queue, goal, "goal_review_finished").is_empty()
+        });
+        // Applied while the handoff still waits for the sample: the
+        // request is taken only at the exec.
+        assert!(!supervisor.is_finished());
+        assert_eq!(
+            SqliteQueue::open(&fx.db)
+                .unwrap()
+                .handoff_request(&token)
+                .unwrap()
+                .as_deref(),
+            Some("/next/dagq")
+        );
+        HOLD_SAMPLE.store(false, Ordering::SeqCst);
+        let outcome = joined(supervisor, "the supervisor handing off");
+        assert_eq!(outcome["outcome"], "handoff", "{outcome}");
+        continue_after(&fx, &reviewer, token);
+        applied_once(&fx, &reviewer, goal, task);
+    }
+
+    /// A plan and a goal review that ended just before the exec (the
+    /// supervisor sleeps between its passes) are applied by the exec's
+    /// preparation, not stopped and run again by the next process.
+    #[test]
+    fn reviews_that_ended_before_the_exec_are_applied_not_run_again() {
+        let fx = fixture();
+        let (goal, task, _) = candidates(&fx);
+        let gate = fx.db.with_extension("gate");
+        let reviewer = reviewer(&gate, 1);
+        let mut first = options(0, Duration::from_secs(3600));
+        first.once = false;
+        // Long enough for both jobs to end between two passes.
+        first.tick = Duration::from_secs(5);
+        let supervisor = spawn(&fx, &reviewer, first);
+        wait_until(&fx.db, crate::common::STEP_LIMIT, |queue| {
+            both_started(queue, goal, task)
+        });
+        let token = request_handoff(&fx.db);
+        std::fs::write(&gate, "go").unwrap();
+        let done = PathBuf::from(format!("{}.done", gate.display()));
+        let started = Instant::now();
+        // Each job appends a line once its verdict is printed, just before
+        // it exits.
+        while std::fs::read_to_string(&done).map_or(0, |text| text.lines().count()) < 2 {
+            assert!(
+                started.elapsed() < crate::common::STEP_LIMIT,
+                "the jobs never ended"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        thread::sleep(Duration::from_millis(300));
+        let outcome = joined(supervisor, "the supervisor handing off");
+        assert_eq!(outcome["outcome"], "handoff", "{outcome}");
+        continue_after(&fx, &reviewer, token);
+        applied_once(&fx, &reviewer, goal, task);
+    }
+
+    /// A review still running at the exec is stopped and runs again in the
+    /// next process, its first attempt interrupted.
+    #[test]
+    fn reviews_still_running_at_the_exec_are_stopped_and_run_again() {
+        let fx = fixture();
+        let (goal, task, _) = candidates(&fx);
+        let gate = fx.db.with_extension("gate");
+        let reviewer = reviewer(&gate, 2);
+        let mut first = options(0, Duration::from_secs(3600));
+        first.once = false;
+        let supervisor = spawn(&fx, &reviewer, first);
+        wait_until(&fx.db, crate::common::STEP_LIMIT, |queue| {
+            both_started(queue, goal, task)
+        });
+        let token = request_handoff(&fx.db);
+        let outcome = joined(supervisor, "the supervisor handing off");
+        assert_eq!(outcome["outcome"], "handoff", "{outcome}");
+        std::fs::write(&gate, "go").unwrap();
+        continue_after(&fx, &reviewer, token);
+        let mut queue = SqliteQueue::open(&fx.db).unwrap();
+        for table in ["plan_reviews", "goal_reviews"] {
+            let rows = rows(&fx.db, table);
+            assert_eq!(rows.len(), 2, "{table}: {rows:?}");
+            assert_eq!(
+                rows[0].0.as_deref(),
+                Some("interrupted"),
+                "{table}: {rows:?}"
+            );
+            assert_eq!(
+                rows[0].1.as_deref(),
+                Some("stopped for the supervisor handoff")
+            );
+            assert_ne!(
+                rows[1].0.as_deref(),
+                Some("interrupted"),
+                "{table}: {rows:?}"
+            );
+        }
+        assert_eq!(reviewer.prompts().len(), 4);
+        assert_eq!(status(&mut queue, task), TaskStatus::Ready);
+        assert_eq!(
+            goal_events(&mut queue, goal, "goal_review_finished").len(),
+            1
+        );
+    }
+}

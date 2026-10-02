@@ -87,7 +87,8 @@ fn time(seconds: f64) -> SystemTime {
 
 impl Supervisor<'_> {
     /// The last step before the exec: stop the observer and every headless
-    /// job (their runs start them again), give a triaged run's lease back
+    /// job (their runs start them again) but a plan or goal review that
+    /// already ended, whose verdict is applied, give a triaged run's lease back
     /// (the next process triages it again), and write what a resumed
     /// session or a rejected run's `/exit` needs. Returns how many runs the
     /// next process takes over.
@@ -97,8 +98,19 @@ impl Supervisor<'_> {
         // own finish; its start keeps the next process from starting it
         // again (a weekly review may take longer than the time between two
         // updates).
-        // Plan and goal review rows stay unfinished under this token; the
-        // next startup interrupts them even without another candidate.
+        // A plan or goal review that already ended is reaped and its
+        // verdict applied, not thrown away (task 1425); only one still
+        // running is stopped. Its row stays unfinished under this token,
+        // and the next startup interrupts it even without another
+        // candidate.
+        for (what, reaped) in [
+            ("plan review", self.poll_plan_review()),
+            ("goal review", self.poll_goal_review()),
+        ] {
+            if let Err(error) = reaped {
+                warn!(error = %format_args!("{error:#}"), "{what}: could not reap it before the handoff: {error:#}");
+            }
+        }
         if let Some(mut watch) = self.plan_review.take() {
             watch.headless.stop();
             info!(

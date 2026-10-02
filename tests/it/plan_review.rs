@@ -5,6 +5,7 @@
 //! for a draft blocker.
 
 use crate::common;
+use dagq::infrastructure::adapters::shell_quote;
 use dagq::infrastructure::git_binary::git_executable;
 
 use common::Bounded;
@@ -144,6 +145,9 @@ pub(crate) struct StubReviewer {
     edit: Mutex<Option<(PathBuf, TaskId)>>,
     /// The model and effort each job was given (ADR-0079 decision 7).
     models: Mutex<Vec<(String, String)>>,
+    /// A file each job waits for before it prints its verdict; it touches
+    /// a line to `<gate>.done` once printed.
+    gate: Mutex<Option<PathBuf>>,
 }
 
 impl StubReviewer {
@@ -153,11 +157,18 @@ impl StubReviewer {
             prompts: Mutex::new(Vec::new()),
             edit: Mutex::new(None),
             models: Mutex::new(Vec::new()),
+            gate: Mutex::new(None),
         }
     }
     /// The first job edits `task` of the queue at `db` while it runs.
     fn editing(self, db: &Path, task: TaskId) -> Self {
         *self.edit.lock().unwrap() = Some((db.to_owned(), task));
+        self
+    }
+    /// Each job waits for the file `gate` before it prints its verdict,
+    /// and appends a line to `<gate>.done` after.
+    pub(crate) fn gated(self, gate: &Path) -> Self {
+        *self.gate.lock().unwrap() = Some(gate.to_owned());
         self
     }
     /// A job that fails: it exits non-zero.
@@ -167,6 +178,7 @@ impl StubReviewer {
             prompts: Mutex::new(Vec::new()),
             edit: Mutex::new(None),
             models: Mutex::new(Vec::new()),
+            gate: Mutex::new(None),
         }
     }
     /// A first job that stops at Claude Code's usage limit (it prints the
@@ -230,6 +242,14 @@ impl AgentProvider for StubReviewer {
             "printf 'Claude AI usage limit reached|1759000000\\n'; exit 1".to_owned()
         } else {
             format!("printf '%s\\n' '{verdict}'")
+        };
+        let script = match &*self.gate.lock().unwrap() {
+            Some(gate) => {
+                let done = shell_quote(&format!("{}.done", gate.display()));
+                let gate = shell_quote(gate.to_str().unwrap());
+                format!("while [ ! -f {gate} ]; do sleep 0.02; done; {script}; echo >> {done}")
+            }
+            None => script,
         };
         // The job's actor (ADR-t728-1 decision 4), for [`job_actors`],
         // beside the queue, which the job is not named: its token's file is
