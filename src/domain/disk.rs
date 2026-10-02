@@ -5,7 +5,9 @@
 //! recent runs built: the largest `bytes` of the latest
 //! `build_outputs_removed` (the `target/` an ended run left, task 376) and
 //! of the latest `scratchpad_removed` (the Claude Code scratchpad a run's
-//! session wrote to, task 1100) together ([`run_size`]), times a
+//! session wrote to, task 1100) and `run_tmp_removed` (the `TMPDIR` the
+//! runtime gave a Codex worker's turns, task 1290) together
+//! ([`run_size`]), times a
 //! factor per step, never below `min_free_bytes`. The `[disk]` table of
 //! `dagq.toml` sets them.
 
@@ -18,8 +20,11 @@ pub const BUILD_OUTPUTS_REMOVED: &str = super::event_kind::BUILD_OUTPUTS_REMOVED
 /// The run event whose `bytes` measure what a run's session left in its
 /// Claude Code scratchpad (task 1100).
 pub const SCRATCHPAD_REMOVED: &str = super::event_kind::SCRATCHPAD_REMOVED;
+/// The run event whose `bytes` measure what a run's turns left in the
+/// `TMPDIR` the runtime gave them (task 1290).
+pub const RUN_TMP_REMOVED: &str = super::event_kind::RUN_TMP_REMOVED;
 /// The kinds of the events a run's size is read from.
-pub const RUN_SIZE_EVENTS: [&str; 2] = [BUILD_OUTPUTS_REMOVED, SCRATCHPAD_REMOVED];
+pub const RUN_SIZE_EVENTS: [&str; 3] = [BUILD_OUTPUTS_REMOVED, SCRATCHPAD_REMOVED, RUN_TMP_REMOVED];
 /// The `subject` of the `cost` ask about the disk (ADR-0047 decision 42).
 pub const DISK_SUBJECT: &str = "disk";
 /// The options of the disk ask (ADR-0047 decision 44): `done` once a
@@ -31,7 +36,7 @@ pub const DISK_CLEANUP: &str = "disk_cleanup";
 /// Default number of the latest `build_outputs_removed` read.
 pub const DEFAULT_SAMPLE_RUNS: i64 = 20;
 /// Default factor of the recent run size (the largest build outputs plus
-/// the largest scratchpad) a claim needs free.
+/// the largest scratchpad and run `TMPDIR`) a claim needs free.
 pub const DEFAULT_CLAIM_FACTOR: f64 = 2.0;
 /// Default factor of the recent run size a landing's verification needs
 /// free.
@@ -40,11 +45,12 @@ pub const DEFAULT_INTEGRATE_FACTOR: f64 = 1.5;
 /// The `[disk]` table of `dagq.toml`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct DiskConfig {
-    /// How many of the latest `build_outputs_removed` and of the latest
-    /// `scratchpad_removed` the runs' sizes are read from.
+    /// How many of the latest `build_outputs_removed`, of the latest
+    /// `scratchpad_removed` and of the latest `run_tmp_removed` the runs'
+    /// sizes are read from.
     pub sample_runs: i64,
     /// A claim needs the recent run size (the largest build outputs plus
-    /// the largest scratchpad) times this free.
+    /// the largest scratchpad and run `TMPDIR`) times this free.
     pub claim_factor: f64,
     /// A landing's verification needs the recent run size times this free.
     pub integrate_factor: f64,
@@ -119,7 +125,7 @@ impl DiskConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct DiskNeeds {
     /// The recent run size they follow from: the largest build outputs
-    /// plus the largest Claude Code scratchpad of the recent runs (the name
+    /// plus the largest Claude Code scratchpad and run `TMPDIR` of the recent runs (the name
     /// is kept from before scratchpads were counted).
     pub largest_build: Option<u64>,
     pub claim: Option<u64>,
@@ -127,16 +133,17 @@ pub struct DiskNeeds {
 }
 
 /// The size of a recent run the thresholds follow, from `events` (the
-/// latest `build_outputs_removed` and `scratchpad_removed`), for
-/// [`DiskConfig::needs`]: the largest build outputs and the largest
-/// scratchpad together, as a run keeps both on the disk at once. They are
+/// latest `build_outputs_removed`, `scratchpad_removed` and
+/// `run_tmp_removed`), for [`DiskConfig::needs`]: the largest build
+/// outputs, the largest scratchpad and the largest run `TMPDIR` together,
+/// as a run keeps them on the disk at once. They are
 /// taken over the runs apart, not per run: a run whose task goes on
 /// records its build outputs, and its scratchpad only once the task is
 /// over (a landed run's build goes with its whole worktree), so the two
 /// seldom fall on the same run. `None` without either; events of other
 /// kinds or without `bytes` are left out.
 pub fn run_size(events: &[RunEvent]) -> Option<u64> {
-    let mut largest: [Option<u64>; 2] = [None, None];
+    let mut largest: [Option<u64>; RUN_SIZE_EVENTS.len()] = [None; RUN_SIZE_EVENTS.len()];
     for event in events {
         let Some(kind) = RUN_SIZE_EVENTS.iter().position(|kind| *kind == event.kind) else {
             continue;
@@ -150,10 +157,10 @@ pub fn run_size(events: &[RunEvent]) -> Option<u64> {
         };
         largest[kind] = Some(largest[kind].map_or(bytes, |seen| seen.max(bytes)));
     }
-    match largest {
-        [None, None] => None,
-        [built, scratch] => Some(built.unwrap_or(0) + scratch.unwrap_or(0)),
-    }
+    largest
+        .iter()
+        .any(Option::is_some)
+        .then(|| largest.iter().flatten().sum())
 }
 
 /// `bytes` in GiB with one decimal, for messages.
@@ -232,6 +239,20 @@ mod tests {
             Some(9)
         );
         assert_eq!(run_size(&[]), None);
+        // A run's `TMPDIR` (task 1290) adds its largest too.
+        assert_eq!(
+            run_size(&[
+                event(BUILD_OUTPUTS_REMOVED, Some(A), Some(500)),
+                event(SCRATCHPAD_REMOVED, Some(B), Some(1_000)),
+                event(RUN_TMP_REMOVED, Some(A), Some(20)),
+                event(RUN_TMP_REMOVED, Some(B), Some(70)),
+            ]),
+            Some(1_570)
+        );
+        assert_eq!(
+            run_size(&[event(RUN_TMP_REMOVED, Some(A), Some(3))]),
+            Some(3)
+        );
     }
 
     #[test]

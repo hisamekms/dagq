@@ -114,6 +114,11 @@ pub trait TaskStore {
     fn notes(&self, query: &NoteQuery) -> Result<NotePage>;
 }
 
+/// The directory under a run's directory the runtime gives a Codex
+/// worker's turns as their `TMPDIR` (task 1290), and removes with the
+/// run's leftovers once its task is over.
+pub const RUN_TMP_DIR: &str = "tmp";
+
 /// A process to start: its program, arguments, environment changes and
 /// working directory, built like a command and started by a [`Spawner`],
 /// which also decides where its standard streams go.

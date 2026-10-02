@@ -504,7 +504,7 @@ fn check_disk_room(queue: &dyn Queue, room: &DiskRoom, run: &RunId) -> Result<()
         let largest =
             largest_build.map_or_else(|| "none measured".into(), |bytes| gib(bytes as f64));
         bail!(
-            "not enough free disk space to land run {run}: {} free in the queue's directory, below the {} a landing's verification needs (the size of a recent run, the largest build outputs plus the largest Claude Code scratchpad of the recent runs, {largest}, times [disk] integrate_factor of dagq.toml, at least min_free_bytes); the run was not approved and is unchanged. Free disk space (dagq doctor lists the runs and their worktrees; the worktrees of ended runs nobody looks at any more, or other files on that disk) and run integrate again",
+            "not enough free disk space to land run {run}: {} free in the queue's directory, below the {} a landing's verification needs (the size of a recent run, the largest build outputs plus the largest Claude Code scratchpad and the largest run TMPDIR of the recent runs, {largest}, times [disk] integrate_factor of dagq.toml, at least min_free_bytes); the run was not approved and is unchanged. Free disk space (dagq doctor lists the runs and their worktrees; the worktrees of ended runs nobody looks at any more, or other files on that disk) and run integrate again",
             gib(free as f64),
             gib(need as f64),
         );
@@ -514,7 +514,7 @@ fn check_disk_room(queue: &dyn Queue, room: &DiskRoom, run: &RunId) -> Result<()
 
 /// The free disk space below a landing's threshold (task 377): what is
 /// free, what is needed, and the recent run size it follows (the largest
-/// build outputs plus the largest scratchpad).
+/// build outputs plus the largest scratchpad and run `TMPDIR`).
 #[derive(Debug, Clone, Copy)]
 struct DiskShort {
     free: u64,
@@ -533,9 +533,9 @@ impl DiskShort {
 }
 
 /// Whether `free` is short of the landing threshold `config` sets over the
-/// sizes of the recent runs (`build_outputs_removed` and
-/// `scratchpad_removed`): `None` with room, no threshold or no
-/// reading.
+/// sizes of the recent runs (`build_outputs_removed`,
+/// `scratchpad_removed` and `run_tmp_removed`): `None` with room, no
+/// threshold or no reading.
 fn disk_short(
     queue: &dyn Queue,
     config: &DiskConfig,

@@ -19,7 +19,9 @@
 //!
 //! The job also removes what an ended run whose task is over left outside
 //! its worktree: the Claude Code scratchpad of its session (task 1100,
-//! [`scratchpad_dir_name`]).
+//! [`scratchpad_dir_name`]), and the temporary files directory the runtime
+//! gave its Codex turns as their `TMPDIR` (task 1290, [`RUN_TMP_DIR`] in
+//! its run directory). The rest of the run directory stays.
 //!
 //! Beside the ended runs, it removes the build outputs of the runs left in
 //! the middle with no lease and no live session (task 1289,
@@ -28,7 +30,7 @@
 //! such a run reserved by the job before it lands, reviews or resumes it.
 
 use super::*;
-use crate::application::{EndedRunWorktree, WorktreeCleanup};
+use crate::application::{EndedRunWorktree, RUN_TMP_DIR, WorktreeCleanup};
 use crate::domain::EventKind;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -160,9 +162,17 @@ enum Outcome {
         paths: Vec<String>,
         bytes: u64,
     },
+    /// The temporary files directory of a run whose task is over (task
+    /// 1290).
+    RunTmp {
+        run_id: RunId,
+        task_status: TaskStatus,
+        path: String,
+        bytes: u64,
+    },
     Failed {
         run_id: RunId,
-        /// `worktree` or `scratchpad`.
+        /// `worktree`, `scratchpad` or `run tmp`.
         what: &'static str,
         path: String,
         error: anyhow::Error,
@@ -389,6 +399,20 @@ impl Supervisor<'_> {
                         json!({"paths": paths, "bytes": bytes, "by": "supervisor", "reason": format!("task_{}", task_status.as_str())}),
                     )
                 }
+                Outcome::RunTmp {
+                    run_id,
+                    task_status,
+                    path,
+                    bytes,
+                } => {
+                    info!(run_id = %run_id, "run {run_id}'s task is {}; removed its temporary files {path} ({bytes} bytes)", task_status.as_str());
+                    cleaned.add(&run_id, bytes);
+                    self.queue.record_runtime_event(
+                        &run_id,
+                        EventKind::RunTmpRemoved,
+                        json!({"paths": [path], "bytes": bytes, "by": "supervisor", "reason": format!("task_{}", task_status.as_str())}),
+                    )
+                }
                 Outcome::Failed {
                     run_id,
                     what,
@@ -462,6 +486,7 @@ fn run_job(ports: &JobPorts, candidates: Vec<EndedRunWorktree>) -> Vec<Outcome> 
                 }),
             }
             remove_scratchpads(ports, &candidate, &mut outcomes);
+            remove_run_tmp(ports, &candidate, &mut outcomes);
         }
         lock_cleaning(&ports.cleaning).retain(|run| *run != candidate.run_id);
     }
@@ -557,6 +582,58 @@ fn remove_scratchpads(ports: &JobPorts, candidate: &EndedRunWorktree, outcomes: 
             paths,
             bytes,
         });
+    }
+}
+
+/// Remove the temporary files directory ([`RUN_TMP_DIR`]) of a run whose
+/// task is over (task 1290): the `TMPDIR` the runtime gave its Codex
+/// turns, in its run directory. A run whose task goes on keeps it, as a
+/// resume may go on in it. Only that directory goes, without following a
+/// link (one there is left alone) and nothing else of the run directory;
+/// one not there, or gone before its removal, is no failure.
+fn remove_run_tmp(ports: &JobPorts, candidate: &EndedRunWorktree, outcomes: &mut Vec<Outcome>) {
+    if !matches!(
+        candidate.task_status,
+        TaskStatus::Completed | TaskStatus::Canceled
+    ) {
+        return;
+    }
+    let dir = ports
+        .runs_dir
+        .join(candidate.run_id.as_str())
+        .join(RUN_TMP_DIR);
+    let removed = ports
+        .files
+        .tree_size(&dir)
+        .with_context(|| format!("measure {}", dir.display()))
+        .and_then(|size| {
+            // `None` for no directory there, and for a link.
+            let Some(size) = size else {
+                return Ok(None);
+            };
+            match ports.files.remove_dir_all(&dir) {
+                Ok(()) => Ok(Some(size)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => {
+                    Err(anyhow::Error::new(error).context(format!("remove {}", dir.display())))
+                }
+            }
+        });
+    let path = dir.to_string_lossy().into_owned();
+    match removed {
+        Ok(Some(bytes)) => outcomes.push(Outcome::RunTmp {
+            run_id: candidate.run_id.clone(),
+            task_status: candidate.task_status,
+            path,
+            bytes,
+        }),
+        Ok(None) => {}
+        Err(error) => outcomes.push(Outcome::Failed {
+            run_id: candidate.run_id.clone(),
+            what: "run tmp",
+            path,
+            error,
+        }),
     }
 }
 

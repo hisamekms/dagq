@@ -325,14 +325,18 @@ impl Route {
 /// What a headless worker on `provider` is told of its provider (the
 /// spike's measures): Claude Code stops a turn's background shells when
 /// the turn ends, and Codex stops a command still running when the model
-/// answers.
+/// answers. A Codex worker is also told to keep its temporary files under
+/// the `TMPDIR` the runtime gives its turns (task 1290): Claude Code's own
+/// scratchpad is cleaned after the run (task 1100), what a Codex worker
+/// made in `/tmp` was not.
 fn headless_provider_line(provider: Provider) -> &'static str {
     match provider {
         Provider::Claude => {
             "Claude Code stops the background shells of a turn when the turn ends: do not start a build, a test or a wait with run_in_background and end the turn to wait for it.\n"
         }
         Provider::Codex => {
-            "Wait for each command to finish before you answer: a command still running when you answer is stopped with the turn.\n"
+            "Wait for each command to finish before you answer: a command still running when you answer is stopped with the turn.\n\
+             Put temporary files, throwaway repositories and any other CARGO_TARGET_DIR under $TMPDIR (a directory the runtime made for this run and removes after it), never directly in /tmp or /private/tmp; build in the worktree's own target/ (cargo's default).\n"
         }
     }
 }
@@ -3180,6 +3184,13 @@ mod tests {
         let claude = session_texts(&task, &run_on(Provider::Claude, WorkerMode::Headless));
         assert!(claude[0].contains("and subagent review."));
         assert!(claude[0].contains("Required evidence: subagent_review (each"));
+        // Only a Codex worker is told where its temporary files go (task
+        // 1290): Claude Code's scratchpad is cleaned by task 1100's sweep.
+        let tmp = "under $TMPDIR (a directory the runtime made for this run";
+        assert!(codex[0].contains(tmp), "{}", codex[0]);
+        assert!(codex[0].contains("never directly in /tmp or /private/tmp"));
+        assert!(codex[0].contains("worktree's own target/"));
+        assert!(!claude[0].contains("$TMPDIR"), "{}", claude[0]);
     }
 
     /// Task 978: a task that needs a path outside its declared paths ends

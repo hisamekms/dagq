@@ -157,12 +157,13 @@ if [ "$mode" = resume ]; then thread=$1; prompt=$2; else thread="e2e-thread-$DAG
 [ -n "$json" ] && [ -n "$sandbox" ] && [ -n "$approval" ] && [ -n "$network" ] && [ -n "$roots" ] && [ -n "$effort" ] \
   || { printf 'stub: the sandbox is not given\n' >&2; exit 64; }
 [ "$mode" = resume ] || [ "$(cd "$cd_dir" && pwd -P)" = "$(pwd -P)" ] || { printf 'stub: -C is not the worktree\n' >&2; exit 64; }
-case "$roots" in *'/refs/heads/dagq"'*'/registry"]') ;; *) printf 'stub: writable roots %s\n' "$roots" >&2; exit 64 ;; esac
+case "$roots" in *'/refs/heads/dagq"'*'/registry"'*']') ;; *) printf 'stub: writable roots %s\n' "$roots" >&2; exit 64 ;; esac
 [ -f .codex/rules/dagq-deny.rules ] || { printf 'stub: no rules in the worktree\n' >&2; exit 64; }
 printf '{"type":"thread.started","thread_id":"%s"}\n{"type":"turn.started"}\n' "$thread"
 receipt=$(printf '%s\n' "$prompt" | sed -n 's/^Write a completion receipt to \(.*\) using a temporary file in the same directory.*/\1/p')
 [ -n "$receipt" ] || { printf 'stub: prompt does not name the receipt path\n' >&2; exit 65; }
 printf 'codex turn argv: %s %s %s\n' "$mode" "$thread" "$roots" > "$(dirname "$receipt")/codex-argv.log"
+printf 'codex turn tmpdir: %s\n' "${TMPDIR:-}" >> "$(dirname "$receipt")/codex-argv.log"
 printf 'written by the codex stub agent for %s\n' "$thread" > e2e.txt
 git add e2e.txt
 git commit -q -m 'feat: e2e codex stub change'
@@ -243,7 +244,8 @@ fn a_codex_worker_runs_its_turn_through_cmux_and_lands_on_main() {
     );
     assert_eq!(run["result_commit"], main.as_str());
     assert_eq!(run["actual_provider"], "codex", "{run}");
-    // The sandbox's writable roots name the run directory.
+    // The sandbox's writable roots name the run directory, and the turn's
+    // `TMPDIR` is the run directory's `tmp` (task 1290).
     let argv = fs::read_to_string(run_dir.join("codex-argv.log")).unwrap();
     assert!(
         argv.starts_with(&format!("codex turn argv: start {thread} ")),
@@ -251,6 +253,13 @@ fn a_codex_worker_runs_its_turn_through_cmux_and_lands_on_main() {
     );
     assert!(
         argv.contains(&format!("\"{}\"", run_dir.display())),
+        "{argv}"
+    );
+    assert!(
+        argv.contains(&format!(
+            "\ncodex turn tmpdir: {}\n",
+            run_dir.join("tmp").display()
+        )),
         "{argv}"
     );
     // The rules stay out of Git.

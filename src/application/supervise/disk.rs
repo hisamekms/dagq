@@ -29,7 +29,7 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 const DISK_ENOUGH_CLOSED: &str = "the free disk space is enough again; closed by the runtime";
 
 /// The question of the disk ask; the runs whose landing waits follow it.
-const DISK_QUESTION: &str = "The free disk space of the queue's directory stays below what the runs need, and cleaning what the ended runs left (their build outputs and those of the runs nobody works on that wait for an answer, a landing or a resume, the worktrees and the Claude Code scratchpads of completed and canceled tasks' runs, `git worktree prune`) did not free enough: {free} free, a new run needs {claim} and a landing's verification {landing} (the size of a recent run, the largest build outputs plus the largest Claude Code scratchpad of the recent runs, times [disk] claim_factor / integrate_factor of dagq.toml). No new run is claimed and no run lands until there is room; the runs in flight go on. Free disk space (for example the worktrees of failed runs nobody looks at any more, or other files on that disk) and answer `done`, or answer `wait` to leave the queue waiting: the supervisor resumes by itself once there is room.";
+const DISK_QUESTION: &str = "The free disk space of the queue's directory stays below what the runs need, and cleaning what the ended runs left (their build outputs and those of the runs nobody works on that wait for an answer, a landing or a resume, the worktrees, the Claude Code scratchpads and the run TMPDIRs of completed and canceled tasks' runs, `git worktree prune`) did not free enough: {free} free, a new run needs {claim} and a landing's verification {landing} (the size of a recent run, the largest build outputs plus the largest Claude Code scratchpad and the largest run TMPDIR of the recent runs, times [disk] claim_factor / integrate_factor of dagq.toml). No new run is claimed and no run lands until there is room; the runs in flight go on. Free disk space (for example the worktrees of failed runs nobody looks at any more, or other files on that disk) and answer `done`, or answer `wait` to leave the queue waiting: the supervisor resumes by itself once there is room.";
 
 /// What the supervisor knows of the disk between passes.
 #[derive(Debug, Default)]
@@ -126,8 +126,8 @@ impl Supervisor<'_> {
             .or_else(|| self.layout.db.parent().and_then(self.free_space))
     }
     /// What a claim and a landing need, read again every
-    /// [`NEEDS_INTERVAL`] from the latest `build_outputs_removed` and
-    /// `scratchpad_removed`.
+    /// [`NEEDS_INTERVAL`] from the latest `build_outputs_removed`,
+    /// `scratchpad_removed` and `run_tmp_removed`.
     pub(super) fn disk_needs(&mut self) -> Result<DiskNeeds> {
         if let Some((at, needs)) = self.disk.needs
             && at.elapsed() < NEEDS_INTERVAL

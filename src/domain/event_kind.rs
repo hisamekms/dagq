@@ -211,6 +211,7 @@ event_kinds! {
     RunPlanned => "run_planned",
     RunRecovered => "run_recovered",
     RunSlotRegained => "run_slot_regained",
+    RunTmpRemoved => "run_tmp_removed",
     RunWaitingAskAdded => "run_waiting_ask_added",
     RunWaitingDeferred => "run_waiting_deferred",
     RunWaitingEnded => "run_waiting_ended",
@@ -676,6 +677,10 @@ pub const RUN_INHERITED: &str = EventKind::RunInherited.as_str();
 pub const RUN_INTEGRATED: &str = EventKind::RunIntegrated.as_str();
 pub const RUN_PLANNED: &str = EventKind::RunPlanned.as_str();
 pub const RUN_RECOVERED: &str = EventKind::RunRecovered.as_str();
+/// The supervisor removed the temporary files directory (`TMPDIR`) the
+/// runtime gave an ended run whose task is over (`paths`, `bytes`, `by`,
+/// `reason`, as `scratchpad_removed`; task 1290).
+pub const RUN_TMP_REMOVED: &str = EventKind::RunTmpRemoved.as_str();
 pub const SCOPE_VIOLATION: &str = EventKind::ScopeViolation.as_str();
 /// The supervisor removed the Claude Code scratchpads of an ended run
 /// whose task is over (`paths`, `bytes`, `by`, `reason`; task 1100).
@@ -962,6 +967,7 @@ mod tests {
             (EventKind::RunPlanned, "run_planned"),
             (EventKind::RunRecovered, "run_recovered"),
             (EventKind::RunSlotRegained, "run_slot_regained"),
+            (EventKind::RunTmpRemoved, "run_tmp_removed"),
             (EventKind::RunWaitingAskAdded, "run_waiting_ask_added"),
             (EventKind::RunWaitingDeferred, "run_waiting_deferred"),
             (EventKind::RunWaitingEnded, "run_waiting_ended"),

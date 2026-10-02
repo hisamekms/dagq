@@ -109,7 +109,7 @@ fn no_run_is_claimed_while_the_disk_is_short_and_the_inbox_is_told_once() {
     // the size of a run the needs follow.
     assert!(
         ask.question.contains(
-            "the worktrees and the Claude Code scratchpads of completed and canceled tasks' runs"
+            "the worktrees, the Claude Code scratchpads and the run TMPDIRs of completed and canceled tasks' runs"
         ),
         "{}",
         ask.question
@@ -502,6 +502,12 @@ fn a_cleanup_for_room_removes_the_scratchpads_and_the_needs_count_them() {
     )
     .unwrap();
     *SCRATCHPAD.lock().unwrap() = Some(scratchpad.clone());
+    // Task 1290: the temporary files directory of its Codex turns, in its
+    // run directory, goes with them and counts.
+    let run_dir = PathBuf::from(first.run_dir().unwrap());
+    let tmp = run_dir.join("tmp");
+    fs::create_dir_all(tmp.join("t")).unwrap();
+    fs::write(tmp.join("t/big"), vec![0u8; SCRATCH / 4]).unwrap();
     let options = SuperviseOptions {
         free_space: short_while_scratchpad,
         scratchpad_roots: Some(vec![root.clone()]),
@@ -514,6 +520,12 @@ fn a_cleanup_for_room_removes_the_scratchpads_and_the_needs_count_them() {
     assert_eq!(removed.len(), 1, "{removed:?}");
     let scratched = removed[0]["bytes"].as_u64().unwrap();
     assert!(scratched >= SCRATCH as u64, "{scratched}");
+    assert!(!tmp.exists());
+    assert!(run_dir.join("receipt.json").is_file());
+    let tmps = queue_events(&db, "run_tmp_removed");
+    assert_eq!(tmps.len(), 1, "{tmps:?}");
+    let tmp_bytes = tmps[0]["bytes"].as_u64().unwrap();
+    assert!(tmp_bytes >= (SCRATCH / 4) as u64, "{tmp_bytes}");
     let worktree = queue_events(&db, "worktree_removed");
     assert_eq!(worktree.len(), 1, "{worktree:?}");
     let repaired = queue_events(&db, "auto_repaired");
@@ -521,19 +533,20 @@ fn a_cleanup_for_room_removes_the_scratchpads_and_the_needs_count_them() {
     assert_eq!(repaired[0]["repair"], "disk_cleanup");
     assert_eq!(
         repaired[0]["bytes"].as_u64().unwrap(),
-        worktree[0]["bytes"].as_u64().unwrap() + scratched
+        worktree[0]["bytes"].as_u64().unwrap() + scratched + tmp_bytes
     );
     assert_eq!(repaired[0]["detail"]["runs"], json!([first.id().as_str()]));
     assert!(queue_events(&db, "claim_held").is_empty());
 
-    // A run's size is the largest build and the largest scratchpad: a
-    // claim needs twice that, more than any build alone.
+    // A run's size is the largest build, the largest scratchpad and the
+    // largest run `TMPDIR`: a claim needs twice that, more than any build
+    // alone.
     let built = queue_events(&db, "build_outputs_removed")
         .iter()
         .map(|event| event["bytes"].as_u64().unwrap())
         .max()
         .unwrap();
-    let largest = built + scratched;
+    let largest = built + scratched + tmp_bytes;
     SqliteQueue::open(&db)
         .unwrap()
         .transition(TaskId::new(2), TaskAction::Cancel)
@@ -549,7 +562,8 @@ fn a_cleanup_for_room_removes_the_scratchpads_and_the_needs_count_them() {
 }
 
 /// Task 1100: a person's `integrate` follows the same run size: the
-/// largest `scratchpad_removed` adds to the largest `build_outputs_removed`.
+/// largest `scratchpad_removed` (and, task 1290, `run_tmp_removed`) adds
+/// to the largest `build_outputs_removed`.
 #[test]
 fn a_persons_integrate_counts_the_scratchpads_in_a_runs_size() {
     let (_dir, repo, db, run) = awaiting_run();
@@ -565,7 +579,14 @@ fn a_persons_integrate_counts_the_scratchpads_in_a_runs_size() {
         .record_runtime_event(
             run.id(),
             EventKind::ScratchpadRemoved,
-            json!({"bytes": GIB * 3 / 8}),
+            json!({"bytes": GIB / 4}),
+        )
+        .unwrap();
+    queue
+        .record_runtime_event(
+            run.id(),
+            EventKind::RunTmpRemoved,
+            json!({"bytes": GIB / 8}),
         )
         .unwrap();
     // 0.625 GiB times 1.5 is above the half a gibibyte free; the build
@@ -577,7 +598,7 @@ fn a_persons_integrate_counts_the_scratchpads_in_a_runs_size() {
     assert!(error.contains("below the 0.9 GiB"), "{error}");
     assert!(error.contains("0.6 GiB, times"), "{error}");
     assert!(
-        error.contains("the largest build outputs plus the largest Claude Code scratchpad"),
+        error.contains("the largest build outputs plus the largest Claude Code scratchpad and the largest run TMPDIR"),
         "{error}"
     );
     let outcome = integrate_on(&db, &repo, Some(DiskConfig::default()), two_gibibytes).unwrap();

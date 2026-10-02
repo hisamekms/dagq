@@ -419,7 +419,9 @@ fn build_outputs_that_cannot_be_removed_are_retried_by_the_sweep() {
 /// Task 396: an ended run whose supervisor died before releasing its
 /// lease is swept as if nobody leased it: its workspace closes and its
 /// worktree is a cleanup candidate. A lease a live supervisor holds still
-/// keeps the sweep away.
+/// keeps the sweep away, from its Claude Code scratchpad (task 1100) and
+/// its run's `tmp` (task 1290) too, which go once the lease is stale as
+/// its task is completed.
 #[test]
 fn an_ended_run_with_a_stale_lease_is_swept_but_not_one_with_a_live_lease() {
     let (_dir, repo, db) = fixture();
@@ -450,6 +452,13 @@ fn an_ended_run_with_a_stale_lease_is_swept_but_not_one_with_a_live_lease() {
     let scratchpad = scratchpad_of(&root, run.worktree_path().unwrap());
     fs::create_dir_all(scratchpad.join("session/scratchpad")).unwrap();
     fs::write(scratchpad.join("session/scratchpad/notes"), "x").unwrap();
+    // Task 1290: nor the temporary files directory its Codex turns had as
+    // their `TMPDIR`, in its run directory.
+    let run_dir = PathBuf::from(run.run_dir().unwrap());
+    let tmp = run_dir.join("tmp");
+    fs::create_dir_all(tmp.join("target/debug")).unwrap();
+    fs::write(tmp.join("target/debug/big"), vec![0u8; 16384]).unwrap();
+    fs::write(run_dir.join("kept.log"), "log").unwrap();
     let sweeping = SuperviseOptions {
         scratchpad_roots: Some(vec![root.clone()]),
         ..sweeping_options()
@@ -475,6 +484,8 @@ fn an_ended_run_with_a_stale_lease_is_swept_but_not_one_with_a_live_lease() {
     assert!(!backend.closed().contains(&"left-ws".to_owned()));
     assert!(scratchpad.join("session/scratchpad/notes").is_file());
     assert!(payloads_of(&queue, &run, "scratchpad_removed").is_empty());
+    assert!(tmp.join("target/debug/big").is_file());
+    assert!(payloads_of(&queue, &run, "run_tmp_removed").is_empty());
 
     // Its holder dies before releasing it: the lease is stale.
     raw.execute("UPDATE run_leases SET pid=?1", [dead_pid()])
@@ -485,6 +496,20 @@ fn an_ended_run_with_a_stale_lease_is_swept_but_not_one_with_a_live_lease() {
     let removed = payloads_of(&queue, &run, "scratchpad_removed");
     assert_eq!(removed.len(), 1, "{removed:?}");
     assert_eq!(removed[0]["reason"], "task_completed");
+    // The run's `tmp` goes with the completed task, the rest of its run
+    // directory stays.
+    assert!(!tmp.exists());
+    let removed = payloads_of(&queue, &run, "run_tmp_removed");
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    assert_eq!(removed[0]["paths"], json!([tmp.to_string_lossy()]));
+    assert!(
+        removed[0]["bytes"].as_u64().unwrap() >= 16384,
+        "{removed:?}"
+    );
+    assert_eq!(removed[0]["by"], "supervisor");
+    assert_eq!(removed[0]["reason"], "task_completed");
+    assert!(run_dir.join("receipt.json").is_file());
+    assert!(run_dir.join("kept.log").is_file());
     let closed = closes_of(&queue, &run);
     assert_eq!(
         closed[before..],

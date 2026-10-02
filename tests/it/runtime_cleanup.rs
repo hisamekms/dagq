@@ -1,8 +1,9 @@
 //! Runtime tests: the cleanup of ended runs' worktrees off the supervisor's
 //! loop, the branches of worktrees already gone, and worktrees a rebind
 //! left pointing at an old repository (task 405), the runners of ended
-//! runs (task 696), and the build outputs of the runs left waiting for an
-//! answer, a landing or a resume (task 1289).
+//! runs (task 696), the build outputs of the runs left waiting for an
+//! answer, a landing or a resume (task 1289), and the temporary files
+//! directories of the runs whose task is over (task 1290).
 use crate::{common, runtime_support};
 use dagq::infrastructure::git_binary::git_executable;
 
@@ -788,4 +789,52 @@ fn the_build_outputs_of_an_idle_run_go_only_for_disk_space() {
         queue.run(run.id()).unwrap().status(),
         RunStatus::AwaitingIntegration
     );
+}
+
+/// Task 1290: the temporary files directory a run's Codex turns got as
+/// their `TMPDIR` (`tmp` in its run directory) stays while its task goes
+/// on, a resume may go on in it, and goes once the task is canceled,
+/// recorded as `run_tmp_removed` with its bytes; the rest of the run
+/// directory (the receipt, the logs) stays.
+#[test]
+fn a_runs_tmp_dir_goes_only_once_its_task_is_over() {
+    let (_dir, repo, db) = fixture();
+    let agent = "mkdir -p ../tmp/target/debug; head -c 32768 /dev/zero > ../tmp/target/debug/big; \
+         echo log > ../kept.log; "
+        .to_owned()
+        + BUILDING_AGENT;
+    let backend = TestWorkspace::new(&db, false, &agent);
+    supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    let run_dir = PathBuf::from(run.run_dir().unwrap());
+    let tmp = run_dir.join("tmp");
+    // The run failed and its task goes on: its build outputs went, its
+    // temporary files stay.
+    assert_eq!(payloads_of(&queue, &run, "build_outputs_removed").len(), 1);
+    assert!(tmp.join("target/debug/big").is_file());
+    assert!(payloads_of(&queue, &run, "run_tmp_removed").is_empty());
+
+    queue
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
+    backend.join();
+    assert!(!tmp.exists());
+    let removed = payloads_of(&queue, &run, "run_tmp_removed");
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    assert_eq!(removed[0]["paths"], json!([tmp.to_string_lossy()]));
+    assert!(
+        removed[0]["bytes"].as_u64().unwrap() >= 32768,
+        "{removed:?}"
+    );
+    assert_eq!(removed[0]["by"], "supervisor");
+    assert_eq!(removed[0]["reason"], "task_canceled");
+    assert!(run_dir.join("receipt.json").is_file());
+    assert!(run_dir.join("kept.log").is_file());
+    // Not recorded again on a later sweep.
+    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
+    backend.join();
+    assert_eq!(payloads_of(&queue, &run, "run_tmp_removed").len(), 1);
 }

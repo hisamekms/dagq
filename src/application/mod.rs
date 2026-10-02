@@ -896,8 +896,8 @@ pub fn or_none(text: &str) -> &str {
 /// The size of a recent run a disk threshold follows from
 /// ([`crate::domain::disk::run_size`]), as the sizes
 /// [`crate::domain::disk::DiskConfig::needs`] takes: read from the latest
-/// `sample_runs` of each of `build_outputs_removed` and
-/// `scratchpad_removed` (task 1100).
+/// `sample_runs` of each of `build_outputs_removed`,
+/// `scratchpad_removed` (task 1100) and `run_tmp_removed` (task 1290).
 pub fn recent_run_sizes<L: RunLog + ?Sized>(log: &L, sample_runs: i64) -> anyhow::Result<Vec<u64>> {
     let limit = usize::try_from(sample_runs).unwrap_or(0);
     let mut events = Vec::new();

@@ -20,7 +20,7 @@ use std::{
     process::Command,
 };
 
-use crate::application::{AgentProvider, CommandSpec, TurnReader};
+use crate::application::{AgentProvider, CommandSpec, RUN_TMP_DIR, TurnReader};
 use crate::domain::{
     TaskRun,
     actor_model::ActorLaunch,
@@ -165,6 +165,46 @@ fn common_dir(admin: &Path) -> Result<PathBuf> {
     common
         .canonicalize()
         .with_context(|| format!("resolve {}", common.display()))
+}
+
+/// The `$TMPDIR` the turn would have had (the session wrapper's, `value`)
+/// as a writable root, since the turn's own `TMPDIR` is the run
+/// directory's [`RUN_TMP_DIR`] (task 1290): workspace-write lets the
+/// sandbox write the `$TMPDIR` of Codex's own environment, which is no
+/// longer that one, and ADR-t813-3 decision 2 keeps it writable. `None`
+/// when unset, empty or relative; resolved when it can be (the sandbox
+/// matches real paths: `/var` is `/private/var` on macOS).
+pub fn starter_tmpdir(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let dir = PathBuf::from(value.filter(|value| !value.is_empty())?);
+    if !dir.is_absolute() {
+        return None;
+    }
+    Some(dir.canonicalize().unwrap_or(dir))
+}
+
+/// The run directory's [`RUN_TMP_DIR`], made a real directory for a turn's
+/// `TMPDIR` (task 1290). What the worker may have put there in its place
+/// (a link, a file: the run directory is a writable root) is removed, not
+/// followed, so that the `TMPDIR` the sandbox lets the turn write is never
+/// a directory outside the run directory.
+pub fn run_tmp_dir(run_dir: &Path) -> Result<PathBuf> {
+    let tmp = run_dir.join(RUN_TMP_DIR);
+    match fs::symlink_metadata(&tmp) {
+        Ok(metadata) if metadata.is_dir() => return Ok(tmp),
+        Ok(_) => fs::remove_file(&tmp).with_context(|| format!("remove {}", tmp.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).with_context(|| format!("read {}", tmp.display())),
+    }
+    fs::create_dir_all(run_dir).with_context(|| format!("create {}", run_dir.display()))?;
+    match fs::create_dir(&tmp) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error).with_context(|| format!("create {}", tmp.display())),
+    }
+    if !fs::symlink_metadata(&tmp).is_ok_and(|metadata| metadata.is_dir()) {
+        bail!("{} is not a directory", tmp.display());
+    }
+    Ok(tmp)
 }
 
 /// Cargo's home: `$CARGO_HOME`, else `~/.cargo`.
@@ -359,7 +399,9 @@ impl AgentProvider for Codex {
     /// resume --json … <thread id>` after it (`resume` has no `-C`, so the
     /// worktree is its working directory either way), with
     /// [`SANDBOX_CONFIG`], the run's [`writable_roots`] and the worktree's
-    /// [`trust_config`] as `-c` on each, the prompt after `--`. It leads a session of its own, but Codex runs
+    /// [`trust_config`] as `-c` on each, the prompt after `--`, and
+    /// `TMPDIR` set to the run directory's [`RUN_TMP_DIR`] (made if
+    /// missing). It leads a session of its own, but Codex runs
     /// each command in a process group of the command's own, which a
     /// signal to the turn's group does not reach (task 1061): the wrapper
     /// stops a turn with its descendants by pid as well (task 1085).
@@ -373,9 +415,16 @@ impl AgentProvider for Codex {
         let resume = session.resumed();
         let worktree = Path::new(run.worktree_path().context("missing worktree")?);
         let run_dir = Path::new(run.run_dir().context("missing run directory")?);
-        let roots = writable_roots(worktree, run_dir, &cargo_home()?)?;
+        let mut roots = writable_roots(worktree, run_dir, &cargo_home()?)?;
+        roots.extend(starter_tmpdir(std::env::var_os("TMPDIR")));
         write_rules(worktree)?;
+        // The turn's temporary files go under the run directory, a writable
+        // root, where the cleanup finds them once the task is over (task
+        // 1290); `/tmp` and the starter's `$TMPDIR` stay writable as the
+        // sandbox has them.
+        let tmp = run_tmp_dir(run_dir)?;
         let mut command = CommandSpec::new(&self.executable);
+        command.env("TMPDIR", &tmp);
         // Its `dagq ask` goes to the queue service in client mode, whose
         // socket the open network of the sandbox reaches (ADR-t1233-5
         // decisions 4 and 5): no request in the run directory.
@@ -829,6 +878,23 @@ mod tests {
     }
 
     #[test]
+    fn the_starters_tmpdir_is_a_writable_root_when_absolute() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            starter_tmpdir(Some(dir.path().into())),
+            Some(dir.path().canonicalize().unwrap())
+        );
+        // One that is not there yet is kept as given.
+        assert_eq!(
+            starter_tmpdir(Some("/nonexistent/t".into())),
+            Some(PathBuf::from("/nonexistent/t"))
+        );
+        assert_eq!(starter_tmpdir(None), None);
+        assert_eq!(starter_tmpdir(Some("".into())), None);
+        assert_eq!(starter_tmpdir(Some("rel/t".into())), None);
+    }
+
+    #[test]
     fn a_turn_starts_or_resumes_the_thread_with_the_same_sandbox() {
         let dir = tempfile::tempdir().unwrap();
         let (common, worktree) = layout(dir.path());
@@ -841,10 +907,19 @@ mod tests {
                 .map(|arg| arg.to_string_lossy().into_owned())
                 .collect()
         };
-        let roots = writable_roots_config(
-            &writable_roots(&worktree, &run_dir, &cargo_home().unwrap()).unwrap(),
-        )
-        .unwrap();
+        let starter = starter_tmpdir(std::env::var_os("TMPDIR"));
+        let mut expected_roots =
+            writable_roots(&worktree, &run_dir, &cargo_home().unwrap()).unwrap();
+        expected_roots.extend(starter.clone());
+        let roots = writable_roots_config(&expected_roots).unwrap();
+        // The starter's `$TMPDIR` stays writable though the turn's
+        // `TMPDIR` is the run directory's (task 1290).
+        if let Some(starter) = &starter {
+            assert!(
+                roots.ends_with(&format!(",\"{}\"]", starter.display())),
+                "{roots}"
+            );
+        }
         let trust = trust_config(&worktree).unwrap();
         assert_eq!(
             trust,
@@ -884,6 +959,39 @@ mod tests {
         expected.extend(sandbox);
         expected.extend(["--", "th-1", "answer"]);
         assert_eq!(args(&resumed), expected);
+        // Both keep their temporary files in the run directory's `tmp`,
+        // made for them inside a writable root (task 1290).
+        let tmp = run_dir.join(RUN_TMP_DIR);
+        assert!(tmp.is_dir());
+        assert!(roots.contains(&format!("\"{}\"", run_dir.display())));
+        for command in [&first, &resumed] {
+            let tmpdirs: Vec<_> = command
+                .get_envs()
+                .filter(|(key, _)| *key == "TMPDIR")
+                .collect();
+            assert_eq!(tmpdirs, [("TMPDIR".as_ref(), Some(tmp.as_os_str()))]);
+        }
+        // The sandbox is workspace-write as before, which lets `/tmp` be
+        // written too; the starter's `$TMPDIR` is a writable root above
+        // (ADR-t813-3 decision 2).
+        assert_eq!(SANDBOX_CONFIG[0], r#"sandbox_mode="workspace-write""#);
+        // A link the worker put in its place is not followed: the next turn
+        // gets a real directory again, and what the link named is kept.
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("keep"), "x").unwrap();
+        fs::remove_dir_all(&tmp).unwrap();
+        std::os::unix::fs::symlink(&outside, &tmp).unwrap();
+        codex
+            .turn_command(&run, "again", TurnSession::Resume("th-1"))
+            .unwrap();
+        assert!(!tmp.is_symlink() && tmp.is_dir());
+        assert!(outside.join("keep").is_file());
+        // So is a file.
+        fs::remove_dir(&tmp).unwrap();
+        fs::write(&tmp, "x").unwrap();
+        assert_eq!(run_tmp_dir(&run_dir).unwrap(), tmp);
+        assert!(tmp.is_dir());
         // Neither names a directory for ask requests: the worker's `dagq
         // ask` goes to the queue service (ADR-t1233-5 decision 5), which
         // the open network of its sandbox reaches as it is.
