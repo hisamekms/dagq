@@ -85,7 +85,7 @@ impl Supervisor<'_> {
                 Some(run_dir) => self.verifier.run_env(Path::new(run_dir))?,
                 None => Vec::new(),
             };
-            let (reason, kind) = resume_reason(&*self.queue, &run)?;
+            let (reason, kind) = resume_reason(&self.queue.run_events(run.id())?, run.last_error());
             // Not while the cleanup job clears the run's worktree (task 405).
             let cleaning = self.cleanup.cleaning();
             let guard = cleanup::lock_cleaning(&cleaning);
@@ -155,7 +155,11 @@ impl Supervisor<'_> {
         run: &TaskRun,
         main: &CommitSha,
     ) -> Result<Option<CommitSha>> {
-        if !RunHistory::from_events(&self.queue.run_events(run.id())?).unresolved_since_park() {
+        let unresolved_since_park =
+            RunHistory::from_events(&self.queue.run_events(run.id())?).unresolved_since_park();
+        // A run no session ran on since its park is resumed: nothing else
+        // is read for it.
+        if !unresolved_since_park {
             return Ok(None);
         }
         let (Some(worktree), Some(receipt_path)) = (&run.worktree_path(), &run.receipt_path())
@@ -171,29 +175,29 @@ impl Supervisor<'_> {
             return Ok(None);
         };
         let task = self.queue.show(run.task_id())?.task;
-        if receipt.run_id() != run.id().as_str()
-            || receipt.result() != ReceiptResult::Succeeded
-            || !receipt
-                .missing_evidence(&resume_required(&task, run))
-                .is_empty()
-        {
-            return Ok(None);
-        }
         let worktree = Path::new(worktree);
         let Ok(head) = self.repository.head(worktree) else {
             return Ok(None);
         };
-        let resolved = receipt.names_commit(head.as_str())
-            && head != *main
-            && self
-                .repository
-                .status(worktree)
-                .is_ok_and(|status| status.trim().is_empty())
-            && self
-                .repository
-                .is_ancestor(main.as_str(), head.as_str())
-                .unwrap_or(false);
-        Ok(resolved.then_some(head))
+        let clean = self
+            .repository
+            .status(worktree)
+            .is_ok_and(|status| status.trim().is_empty());
+        let main_is_ancestor = self
+            .repository
+            .is_ancestor(main.as_str(), head.as_str())
+            .unwrap_or(false);
+        let skips = skips_resume(&SkipFacts {
+            unresolved_since_park,
+            run_id: run.id(),
+            receipt: &receipt,
+            required: &resume_required(&task, run),
+            head: &head,
+            main,
+            clean,
+            main_is_ancestor,
+        });
+        Ok(skips.then_some(head))
     }
     /// Move a run [`Self::resolved_head`] found resolved on without opening
     /// a session or using an attempt: record `resume_skipped` and, under
@@ -769,6 +773,44 @@ impl Supervisor<'_> {
     }
 }
 
+/// What [`Supervisor::resolved_head`] read of a `needs_session` run to
+/// judge whether an earlier resume already resolved it.
+pub(super) struct SkipFacts<'a> {
+    /// [`RunHistory::unresolved_since_park`]: last parked by the landing,
+    /// its recheck or validation, and a session ran since, judged
+    /// `unresolved`.
+    pub(super) unresolved_since_park: bool,
+    pub(super) run_id: &'a RunId,
+    /// The run's receipt as it parses now.
+    pub(super) receipt: &'a Receipt,
+    /// The checks its receipt must back ([`resume_required`]).
+    pub(super) required: &'a [EvidenceCheck],
+    /// The head of its worktree.
+    pub(super) head: &'a CommitSha,
+    pub(super) main: &'a CommitSha,
+    /// The worktree has no change left.
+    pub(super) clean: bool,
+    /// `main` is an ancestor of `head`.
+    pub(super) main_is_ancestor: bool,
+}
+
+/// Whether the run is moved on without a resume
+/// ([`Supervisor::skip_resume`]): a session ran since its park, its receipt
+/// is this run's, `succeeded`, backs the required checks and names the
+/// head of its clean worktree, and that head has `main` as a proper
+/// ancestor.
+pub(super) fn skips_resume(facts: &SkipFacts<'_>) -> bool {
+    let receipt = facts.receipt;
+    facts.unresolved_since_park
+        && receipt.run_id() == facts.run_id.as_str()
+        && receipt.result() == ReceiptResult::Succeeded
+        && receipt.missing_evidence(facts.required).is_empty()
+        && receipt.names_commit(facts.head.as_str())
+        && facts.head != facts.main
+        && facts.clean
+        && facts.main_is_ancestor
+}
+
 /// How often the run was resumed, for its used-up reason and ask: the
 /// counted resumes against [`MAX_RESUME_ATTEMPTS`], and the conflict-only
 /// ones against `config`'s limit (ADR-0047 decision 24) when there were any, with the conflict
@@ -816,7 +858,8 @@ fn resumed_text(resumes: ResumeCount, config: ResumeConfig) -> String {
 /// Why the run waits for a session: the reason of its latest
 /// `integration_deferred` / `integration_error` / `evidence_missing` /
 /// `scope_violation` / `landing_decided` event (a runtime error since, such
-/// as a failed resume, may have replaced `last_error`), else `last_error`;
+/// as a failed resume, may have replaced `last_error`) in `events`, else
+/// the run's `last_error`;
 /// and what kind of request that makes: `evidence_missing` (or a landing
 /// deferred for missing evidence, whose payload names the `checks`),
 /// `scope_violation` (or a landing deferred for it, whose payload names the
@@ -824,15 +867,14 @@ fn resumed_text(resumes: ResumeCount, config: ResumeConfig) -> String {
 /// whose `instruction` is the reason, or a person's `triage_decided`), or a
 /// landing.
 pub(super) fn resume_reason(
-    queue: &dyn Queue,
-    run: &TaskRun,
-) -> Result<(Option<String>, ResumeKind)> {
-    let events = queue.run_events(run.id())?;
-    let parked = RunHistory::from_events(&events).last_park();
+    events: &[RunEvent],
+    last_error: Option<&str>,
+) -> (Option<String>, ResumeKind) {
+    let parked = RunHistory::from_events(events).last_park();
     let reason = parked
         .and_then(|park| park.reason)
         .map(str::to_owned)
-        .or_else(|| run.last_error().map(str::to_owned));
+        .or_else(|| last_error.map(str::to_owned));
     let kind = match parked.map(|park| park.cause) {
         Some(ParkCause::EvidenceMissing) => ResumeKind::EvidenceMissing,
         Some(ParkCause::ScopeViolation) => ResumeKind::ScopeViolation,
@@ -843,7 +885,7 @@ pub(super) fn resume_reason(
         Some(ParkCause::E2e) => ResumeKind::E2e,
         Some(ParkCause::Landing) | None => ResumeKind::Landing,
     };
-    Ok((reason, kind))
+    (reason, kind)
 }
 
 /// The tasks landed on `main` since the run's base, oldest first, from the
@@ -1006,6 +1048,7 @@ pub(super) struct ResumeState {
 }
 
 /// What a resumed session left behind when it exited.
+#[derive(Debug, PartialEq, Eq)]
 pub(super) enum ResumeOutcome {
     /// A rewritten `succeeded` receipt names the worktree head.
     Resolved,
@@ -1013,6 +1056,47 @@ pub(super) enum ResumeOutcome {
     Failed(String),
     /// Anything else: no rewritten receipt, or one for another commit.
     Unresolved,
+}
+
+/// The receipt at `path` the session rewrote during the resume that
+/// started at `started_at`, if any: one no newer than that is the one from
+/// before the resume.
+pub(super) fn rewritten_receipt(
+    files: &dyn RunFiles,
+    path: &Path,
+    started_at: SystemTime,
+) -> Option<Receipt> {
+    let modified = files.modified(path).ok()?;
+    if modified <= started_at {
+        return None;
+    }
+    Receipt::parse(&files.read_to_string(path).ok()?).ok()
+}
+
+/// What the `receipt` a resumed session of run `run_id` rewrote says, with
+/// `head` the worktree's HEAD when the worktree is clean: resolved when it
+/// is this run's, `succeeded` (not `failed`), names `head` and backs the
+/// `required` checks; failed when it reports `failed`; unresolved
+/// otherwise, or without one.
+pub(super) fn resume_outcome(
+    receipt: Option<&Receipt>,
+    run_id: &RunId,
+    required: &[EvidenceCheck],
+    head: Option<&CommitSha>,
+) -> ResumeOutcome {
+    match receipt {
+        Some(receipt) if receipt.run_id() != run_id.as_str() => ResumeOutcome::Unresolved,
+        Some(receipt) if receipt.result() == ReceiptResult::Failed => ResumeOutcome::Failed(
+            format!("session reported the run as failed: {}", receipt.summary()),
+        ),
+        Some(receipt)
+            if head.is_some_and(|head| receipt.names_commit(head.as_str()))
+                && receipt.missing_evidence(required).is_empty() =>
+        {
+            ResumeOutcome::Resolved
+        }
+        _ => ResumeOutcome::Unresolved,
+    }
 }
 
 pub(super) struct ResumeVerdict {
@@ -1258,15 +1342,6 @@ impl ResumeWatch {
         nudge.settle(sv, run, RESUME_PHASE, Some(self.attempt), outcome)
     }
 
-    /// The receipt the session rewrote during this resume, if any.
-    pub(super) fn rewritten_receipt(&self, files: &dyn RunFiles) -> Option<Receipt> {
-        let modified = files.modified(&self.receipt_path).ok()?;
-        if modified <= self.started_at {
-            return None;
-        }
-        Receipt::parse(&files.read_to_string(&self.receipt_path).ok()?).ok()
-    }
-
     /// `head` is the worktree's HEAD when the worktree is clean, `None`
     /// otherwise: a resolved receipt must name a clean head.
     pub(super) fn verdict(
@@ -1275,19 +1350,12 @@ impl ResumeWatch {
         run: &TaskRun,
         head: Option<&CommitSha>,
     ) -> ResumeOutcome {
-        match self.rewritten_receipt(files) {
-            Some(receipt) if receipt.run_id() != run.id().as_str() => ResumeOutcome::Unresolved,
-            Some(receipt) if receipt.result() == ReceiptResult::Failed => ResumeOutcome::Failed(
-                format!("session reported the run as failed: {}", receipt.summary()),
-            ),
-            Some(receipt)
-                if head.is_some_and(|head| receipt.names_commit(head.as_str()))
-                    && receipt.missing_evidence(&self.required_evidence).is_empty() =>
-            {
-                ResumeOutcome::Resolved
-            }
-            _ => ResumeOutcome::Unresolved,
-        }
+        resume_outcome(
+            rewritten_receipt(files, &self.receipt_path, self.started_at).as_ref(),
+            run.id(),
+            &self.required_evidence,
+            head,
+        )
     }
 
     /// Send the resolution request once the agent's input box has shown
@@ -1779,6 +1847,321 @@ mod tests {
             created_at: format!("t{id}"),
             actor: None,
         }
+    }
+
+    fn sha(c: char) -> CommitSha {
+        CommitSha::parse(c.to_string().repeat(40), "commit").unwrap()
+    }
+
+    /// A receipt of `run_id` with `result` for `commit`, whose subagent
+    /// review is passed with evidence when `reviewed`.
+    fn receipt(run_id: &str, result: &str, commit: &CommitSha, reviewed: bool) -> Receipt {
+        Receipt::parse(&receipt_text(run_id, result, commit, reviewed)).unwrap()
+    }
+
+    fn receipt_text(run_id: &str, result: &str, commit: &CommitSha, reviewed: bool) -> String {
+        let check = |status: &str| json!({"status": status, "evidence_or_reason": "why"});
+        json!({
+                "run_id": run_id,
+                "result": result,
+                "commit": commit,
+                "tests": check("passed"),
+                "e2e": check("not_applicable"),
+                "subagent_review": check(if reviewed { "passed" } else { "not_applicable" }),
+                "summary": "gave up",
+        })
+        .to_string()
+    }
+
+    /// Task 122: a run an earlier resume already resolved is moved on
+    /// without a session only when every condition holds; each one missing
+    /// has it resumed as before (the integration test of the skip covers
+    /// the wiring: `runtime_resume::a_run_with_a_dirty_worktree_is_resumed`).
+    #[test]
+    fn a_run_is_skipped_only_when_every_condition_of_the_skip_holds() {
+        let run = RunId::new("r").unwrap();
+        let other = RunId::new("another-run").unwrap();
+        let (head, main, old) = (sha('b'), sha('a'), sha('c'));
+        let resolved = receipt("r", "succeeded", &head, false);
+        let base = SkipFacts {
+            unresolved_since_park: true,
+            run_id: &run,
+            receipt: &resolved,
+            required: &[],
+            head: &head,
+            main: &main,
+            clean: true,
+            main_is_ancestor: true,
+        };
+        assert!(skips_resume(&base));
+        let failed = receipt("r", "failed", &head, false);
+        let stale = receipt("r", "succeeded", &old, false);
+        let at_main = receipt("r", "succeeded", &main, false);
+        let cases: [(&str, SkipFacts<'_>); 9] = [
+            // Not resumed since it was parked, or a person sent it back
+            // (`RunHistory::unresolved_since_park`'s own unit test).
+            (
+                "no unresolved resume since a system park",
+                SkipFacts {
+                    unresolved_since_park: false,
+                    ..base
+                },
+            ),
+            (
+                "the receipt is another run's",
+                SkipFacts {
+                    run_id: &other,
+                    ..base
+                },
+            ),
+            (
+                "the receipt reports failed",
+                SkipFacts {
+                    receipt: &failed,
+                    ..base
+                },
+            ),
+            (
+                "the required evidence is missing",
+                SkipFacts {
+                    required: &[EvidenceCheck::SubagentReview],
+                    ..base
+                },
+            ),
+            (
+                "the receipt names the old head",
+                SkipFacts {
+                    receipt: &stale,
+                    ..base
+                },
+            ),
+            (
+                "the head is main itself",
+                SkipFacts {
+                    receipt: &at_main,
+                    head: &main,
+                    ..base
+                },
+            ),
+            (
+                "the worktree is dirty",
+                SkipFacts {
+                    clean: false,
+                    ..base
+                },
+            ),
+            (
+                "main moved past the head",
+                SkipFacts {
+                    main_is_ancestor: false,
+                    ..base
+                },
+            ),
+            (
+                "unresolved and dirty",
+                SkipFacts {
+                    unresolved_since_park: false,
+                    clean: false,
+                    ..base
+                },
+            ),
+        ];
+        for (case, facts) in cases {
+            assert!(!skips_resume(&facts), "{case}");
+        }
+        // The required evidence backed by the receipt does not stop it.
+        let reviewed = receipt("r", "succeeded", &head, true);
+        assert!(skips_resume(&SkipFacts {
+            receipt: &reviewed,
+            required: &[EvidenceCheck::SubagentReview],
+            ..base
+        }));
+    }
+
+    /// The used-up reason and ask say how the run was resumed: the counted
+    /// resumes alone, or with the kill-only ones, the conflict-only ones
+    /// and the conflict precheck's requests that share their limit.
+    #[test]
+    fn resumed_text_counts_every_kind_of_resume() {
+        let text = |counted, conflict_only, kill_only, conflict_requests| {
+            resumed_text(
+                ResumeCount {
+                    counted,
+                    conflict_only,
+                    kill_only,
+                    conflict_requests,
+                    parked_for_conflict: false,
+                },
+                ResumeConfig::default(),
+            )
+        };
+        assert_eq!(text(3, 0, 0, 0), "resumed 3 times (at most 3)");
+        assert_eq!(
+            text(1, 0, 3, 0),
+            "resumed 4 times (1 of at most 3 counted, 3 of at most 3 after a signal from outside killed its session)"
+        );
+        assert_eq!(
+            text(0, 5, 0, 0),
+            "resumed 5 times (0 of at most 3 counted, and 5 of at most 5 for conflicts only after its review passed)"
+        );
+        assert_eq!(
+            text(1, 2, 1, 0),
+            "resumed 4 times (1 of at most 3 counted, 1 of at most 3 after a signal from outside killed its session, and 2 of at most 5 for conflicts only after its review passed)"
+        );
+        assert_eq!(
+            text(0, 2, 0, 3),
+            "resumed 2 times (0 of at most 3 counted) and asked 3 times by the conflict precheck (5 of at most 5 attempts for conflicts only after its review passed)"
+        );
+        assert_eq!(
+            resumed_text(
+                ResumeCount {
+                    conflict_only: 8,
+                    ..ResumeCount::default()
+                },
+                ResumeConfig {
+                    conflict_only_limit: 8
+                }
+            ),
+            "resumed 8 times (0 of at most 3 counted, and 8 of at most 8 for conflicts only after its review passed)"
+        );
+    }
+
+    /// The resolution request asks for what parked the run, with the
+    /// reason of the latest parking event or, without one, `last_error`.
+    #[test]
+    fn resume_reason_is_the_latest_park_or_the_last_error() {
+        let of =
+            |kind: &str, payload: Value| resume_reason(&[event(1, kind, payload)], Some("last"));
+        assert_eq!(
+            resume_reason(&[], Some("last")),
+            (Some("last".to_owned()), ResumeKind::Landing)
+        );
+        assert_eq!(resume_reason(&[], None), (None, ResumeKind::Landing));
+        assert_eq!(
+            of("integration_deferred", json!({"reason": "conflict"})),
+            (Some("conflict".to_owned()), ResumeKind::Landing)
+        );
+        // A parking event without a reason falls back to `last_error`.
+        assert_eq!(
+            of("evidence_missing", json!({})),
+            (Some("last".to_owned()), ResumeKind::EvidenceMissing)
+        );
+        for (kind, payload, expected) in [
+            (
+                "scope_violation",
+                json!({"reason": "r"}),
+                ResumeKind::ScopeViolation,
+            ),
+            (
+                "landing_decided",
+                json!({"reason": "r"}),
+                ResumeKind::SentBack,
+            ),
+            (
+                "triage_finished",
+                json!({"instruction": "r"}),
+                ResumeKind::Triage,
+            ),
+            ("triage_decided", json!({"reason": "r"}), ResumeKind::Triage),
+            (
+                "landing_recheck_failed",
+                json!({"action": "resumed", "reason": "r"}),
+                ResumeKind::Recheck,
+            ),
+            (
+                "session_gone_parked",
+                json!({"reason": "r"}),
+                ResumeKind::SessionGone,
+            ),
+            ("run_e2e_failed", json!({"reason": "r"}), ResumeKind::E2e),
+        ] {
+            assert_eq!(
+                of(kind, payload),
+                (Some("r".to_owned()), expected),
+                "{kind}"
+            );
+        }
+        // The latest park decides, not a later event that parks nothing.
+        let events = [
+            event(1, "evidence_missing", json!({"reason": "first"})),
+            event(2, "integration_deferred", json!({"reason": "second"})),
+            event(3, "resume_finished", json!({"outcome": "error"})),
+        ];
+        assert_eq!(
+            resume_reason(&events, Some("resume failed")),
+            (Some("second".to_owned()), ResumeKind::Landing)
+        );
+    }
+
+    /// Only a receipt rewritten after the resume started is judged: one of
+    /// this run, `failed`, ends the run with its summary; one that names the
+    /// clean head with the required evidence resolves it; anything else
+    /// (another run's, another commit, a dirty worktree, missing evidence,
+    /// none or unreadable) leaves it unresolved.
+    #[test]
+    fn a_resumed_session_is_judged_by_the_receipt_it_rewrote() {
+        use crate::application::memory_files::MemoryFiles;
+        let files = MemoryFiles::default();
+        let path = Path::new("/run/receipt.json");
+        let started = files.now();
+        let later = started + Duration::from_secs(1);
+        let run = RunId::new("r").unwrap();
+        let head = sha('b');
+        let judge =
+            |text: String, at: SystemTime, head: Option<&CommitSha>, required: &[EvidenceCheck]| {
+                files.put(path, at, &text);
+                resume_outcome(
+                    rewritten_receipt(&files, path, started).as_ref(),
+                    &run,
+                    required,
+                    head,
+                )
+            };
+        let text = |run_id: &str, result: &str, commit: &CommitSha| {
+            receipt_text(run_id, result, commit, false)
+        };
+        let resolved = text("r", "succeeded", &head);
+        assert_eq!(
+            judge(resolved.clone(), later, Some(&head), &[]),
+            ResumeOutcome::Resolved
+        );
+        // The receipt from before the resume, however good.
+        assert_eq!(
+            judge(resolved.clone(), started, Some(&head), &[]),
+            ResumeOutcome::Unresolved
+        );
+        assert_eq!(
+            judge(resolved.clone(), later, None, &[]),
+            ResumeOutcome::Unresolved
+        );
+        assert_eq!(
+            judge(
+                resolved,
+                later,
+                Some(&head),
+                &[EvidenceCheck::SubagentReview]
+            ),
+            ResumeOutcome::Unresolved
+        );
+        assert_eq!(
+            judge(text("r", "succeeded", &sha('c')), later, Some(&head), &[]),
+            ResumeOutcome::Unresolved
+        );
+        assert_eq!(
+            judge(text("r", "failed", &head), later, None, &[]),
+            ResumeOutcome::Failed("session reported the run as failed: gave up".to_owned())
+        );
+        // Another run's failed receipt is not this run's failure.
+        assert_eq!(
+            judge(text("other", "failed", &head), later, Some(&head), &[]),
+            ResumeOutcome::Unresolved
+        );
+        assert_eq!(
+            judge("{not json".to_owned(), later, Some(&head), &[]),
+            ResumeOutcome::Unresolved
+        );
+        files.remove_file(path).unwrap();
+        assert!(rewritten_receipt(&files, path, started).is_none());
     }
 
     #[test]

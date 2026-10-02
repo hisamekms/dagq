@@ -330,16 +330,14 @@ impl SqliteQueue {
             return Ok(None);
         }
         // A resume of a run parked only by a conflict after its review
-        // passed is not one of the counted attempts.
-        let basis = resume::conflict_only_basis(&events);
-        // Nor is one the recovery job (or a person) decided after a signal
-        // from outside killed the session (ADR-t946-1).
-        let killed = basis.is_none() && resume::parked_for_kill_only(&events);
-        let counted = basis.is_none() && !killed;
+        // passed is not one of the counted attempts, nor one the recovery
+        // job (or a person) decided after a signal from outside killed the
+        // session (ADR-t946-1).
+        let plan = resume::resume_start_plan(&events, main);
         let Some(previous) = lease_parked_run(&tx, id, token, now, true)? else {
             return Ok(None);
         };
-        let attempt = resumes.total() + 1;
+        let attempt = plan.attempt;
         run_event(
             &tx,
             id,
@@ -350,47 +348,13 @@ impl SqliteQueue {
         // raised a step after a failure the task caused (ADR-0079 decisions
         // 3 and 5).
         let (session, raise) = worker_model::for_resume(&events);
-        let mut started = json!({"attempt": attempt, "counted": counted, "reason": reason.or(run.last_error()), "main": main});
+        let mut started = json!({"attempt": attempt, "counted": plan.counted, "reason": reason.or(run.last_error()), "main": main});
         if let Some(started) = started.as_object_mut() {
             started.extend(session.fields_raised(run.actual_provider(), raise.as_ref()));
         }
         run_event(&tx, id, EventKind::ResumeStarted, started)?;
-        if let Some(basis) = basis {
-            run_event(
-                &tx,
-                id,
-                EventKind::AutoRepaired,
-                json!({
-                    "layer": "runtime",
-                    "repair": "conflict_resume_uncounted",
-                    "conditions": {
-                        "review_passed": basis.passed,
-                        "landing_approved": basis.approved,
-                        "rechecked": basis.rechecked,
-                        "parked": ReasonCode::RebaseConflict,
-                        "counted_resumes": resumes.counted,
-                        "conflict_only_resumes": resumes.conflict_only + 1,
-                    },
-                    "detail": {"attempt": attempt, "main": main},
-                }),
-            )?;
-        }
-        if killed {
-            run_event(
-                &tx,
-                id,
-                EventKind::AutoRepaired,
-                json!({
-                    "layer": "runtime",
-                    "repair": "kill_resume_uncounted",
-                    "conditions": {
-                        "parked": ReasonCode::SessionKilled,
-                        "counted_resumes": resumes.counted,
-                        "kill_only_resumes": resumes.kill_only + 1,
-                    },
-                    "detail": {"attempt": attempt, "main": main},
-                }),
-            )?;
+        if let Some(repair) = plan.repair {
+            run_event(&tx, id, EventKind::AutoRepaired, repair)?;
         }
         tx.commit()?;
         Ok(Some((run.relocated(&self.runs_dir), attempt)))

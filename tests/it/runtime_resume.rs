@@ -874,172 +874,92 @@ fn a_skipped_run_whose_supervisor_died_is_adopted() {
     assert!(queue.run_leases().unwrap().is_empty());
 }
 
-/// Takes one condition of the skip away from a resolved run (the repo, the
-/// queue, the run and its resolved head).
-type Spoil = fn(&Path, &Path, &TaskRun, &str);
-
-/// A parked run lacking any one condition of the skip is resumed as
-/// before: the resume uses an attempt (and fails here, the backend having
-/// no resume script) and no `resume_skipped` is recorded. `resumed` says
-/// whether an unresolved resume came before. One test per condition, so
-/// the conditions run in parallel (task 324: the eight in one test took
-/// over a minute).
-fn a_run_missing_a_condition_of_the_skip_is_resumed(case: &str, resumed: bool, spoil: Spoil) {
+/// A parked run lacking a condition of the skip is resumed as before: the
+/// resume uses an attempt and no `resume_skipped` is recorded. Which
+/// conditions the skip needs is the unit test
+/// `supervise::resume::tests::a_run_is_skipped_only_when_every_condition_of_the_skip_holds`;
+/// this one reads them from the real worktree, its dirty status here. The
+/// backend has no resume script, so the resume cannot start: it ends as an
+/// `error` with the failed cmux call recorded on the run (task 109), and
+/// `last_error` keeps why the run was parked.
+#[test]
+fn a_run_with_a_dirty_worktree_is_resumed() {
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (run, first_landed) = parked_conflict(&repo, &db, &backend);
-    if case == "a person sent it back" {
-        SqliteQueue::open(&db)
-            .unwrap()
-            .record_runtime_event(
-                run.id(),
-                EventKind::LandingDecided,
-                json!({"status": "needs_session", "reason": "findings sent back"}),
-            )
-            .unwrap();
-    }
-    if resumed {
-        unresolved_attempt(&db, &run, &first_landed);
-    }
+    let reason = run.last_error().unwrap().to_owned();
+    unresolved_attempt(&db, &run, &first_landed);
     let resolved = resolve_in_worktree(&run, &first_landed);
     write_receipt(&run, &resolved, "succeeded", "resolved");
-    spoil(&repo, &db, &run, &resolved);
+    let worktree = Path::new(run.worktree_path().unwrap());
+    fs::write(worktree.join("stray.txt"), "left over\n").unwrap();
 
     let outcome = supervise(&db, &repo, &backend).unwrap();
-    assert_eq!(
-        outcome["errors"].as_array().unwrap().len(),
-        1,
-        "{case}: {outcome}"
-    );
+    assert_eq!(outcome["errors"].as_array().unwrap().len(), 1, "{outcome}");
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(2)).unwrap();
     assert!(
         payloads(&detail, "resume_skipped").is_empty(),
-        "{case}: {:?}",
+        "{:?}",
         event_kinds(&detail)
     );
-    let started = payloads(&detail, "resume_started");
-    assert_eq!(started.len(), usize::from(resumed) + 1, "{case}");
+    assert_eq!(payloads(&detail, "resume_started").len(), 2);
     let finished = payloads(&detail, "resume_finished");
-    assert_eq!(finished.last().unwrap()["outcome"], "error", "{case}");
-    assert_eq!(detail.runs[0].status(), RunStatus::NeedsSession, "{case}");
+    let last = finished.last().unwrap();
+    assert_eq!(last["outcome"], "error");
+    assert_eq!(last["exhausted"], false);
+    assert!(last["error"].as_str().unwrap().contains("no resume script"));
+    let failures = backend_failures(&detail);
+    assert_eq!(failures.len(), 1, "{:?}", event_kinds(&detail));
+    assert_eq!(failures[0].run_id.as_ref(), Some(run.id()));
+    assert_eq!(failures[0].payload["op"], "create_resume");
+    assert_eq!(detail.runs[0].status(), RunStatus::NeedsSession);
+    assert_eq!(detail.runs[0].last_error(), Some(reason.as_str()));
+    assert!(queue.run_leases().unwrap().is_empty());
 }
 
-#[test]
-fn a_run_not_resumed_since_it_was_parked_is_resumed() {
-    a_run_missing_a_condition_of_the_skip_is_resumed(
-        "no resume since it was parked",
-        false,
-        |_, _, _, _| {},
-    );
-}
-
-#[test]
-fn a_run_a_person_sent_back_is_resumed() {
-    // Recorded before the unresolved attempt.
-    a_run_missing_a_condition_of_the_skip_is_resumed(
-        "a person sent it back",
-        true,
-        |_, _, _, _| {},
-    );
-}
-
-#[test]
-fn a_run_whose_receipt_names_the_old_head_is_resumed() {
-    a_run_missing_a_condition_of_the_skip_is_resumed(
-        "the receipt names the old head",
-        true,
-        |_, _, run, _| {
-            write_receipt(
-                run,
-                run.result_commit().unwrap().as_str(),
-                "succeeded",
-                "stale",
-            );
-        },
-    );
-}
-
-#[test]
-fn a_run_with_a_dirty_worktree_is_resumed() {
-    a_run_missing_a_condition_of_the_skip_is_resumed(
-        "the worktree is dirty",
-        true,
-        |_, _, run, _| {
-            let worktree = Path::new(run.worktree_path().unwrap());
-            fs::write(worktree.join("stray.txt"), "left over\n").unwrap();
-        },
-    );
-}
-
-#[test]
-fn a_run_main_moved_past_is_resumed() {
-    a_run_missing_a_condition_of_the_skip_is_resumed(
-        "main moved past the head",
-        true,
-        |repo, _, _, _| {
-            git(repo, &["commit", "-q", "--allow-empty", "-m", "moved on"]);
-        },
-    );
-}
-
-#[test]
-fn a_run_with_another_runs_receipt_is_resumed() {
-    a_run_missing_a_condition_of_the_skip_is_resumed(
-        "the receipt is another run's",
-        true,
-        |_, _, run, resolved| {
-            let mut receipt = session_receipt(run, resolved, "succeeded", "resolved");
-            receipt["run_id"] = json!("another-run");
-            write_receipt_json(run, receipt);
-        },
-    );
-}
-
-#[test]
-fn a_run_whose_receipt_reports_failed_is_resumed() {
-    a_run_missing_a_condition_of_the_skip_is_resumed(
-        "the receipt reports failed",
-        true,
-        |_, _, run, resolved| {
-            write_receipt(run, resolved, "failed", "gave up");
-        },
-    );
-}
-
-#[test]
-fn a_run_missing_the_required_evidence_is_resumed() {
-    a_run_missing_a_condition_of_the_skip_is_resumed(
-        "the required evidence is missing",
-        true,
-        |_, db, run, _| {
-            Connection::open(db)
-                .unwrap()
-                .execute(
-                    "UPDATE tasks SET required_evidence='[\"subagent_review\"]' WHERE id=?1",
-                    [run.task_id()],
-                )
-                .unwrap();
-        },
-    );
+/// Record `resumes` resumes of the run that started and ended
+/// `unresolved` as a supervisor records them, without their sessions: the
+/// attempts a test of the last one starts from.
+fn earlier_resumes(queue: &mut SqliteQueue, run: &TaskRun, resumes: usize) {
+    for attempt in 1..=resumes {
+        queue
+            .record_runtime_event(
+                run.id(),
+                EventKind::ResumeStarted,
+                json!({"attempt": attempt}),
+            )
+            .unwrap();
+        queue
+            .record_runtime_event(
+                run.id(),
+                EventKind::ResumeFinished,
+                json!({"attempt": attempt, "outcome": "unresolved", "status": "needs_session"}),
+            )
+            .unwrap();
+    }
 }
 
 /// ADR-0047 decision 24: a run whose landing was approved and that waits
 /// only because its rebase conflicts with main is resumed without using up
-/// one of the three attempts, up to the conflict-only limit. Past it, the
-/// run is not handed to a person: it fails, its head is kept under
-/// `refs/dagq/runs/<run-id>`, the task is ready again, and the next run's
-/// prompt asks to bring that commit onto the current main.
+/// one of the three attempts, up to the conflict-only limit (how each is
+/// counted and recorded is the unit test
+/// `domain::resume::tests::a_conflict_only_resume_is_an_uncounted_repair`).
+/// Past it, the run is not handed to a person: it fails, its head is kept
+/// under `refs/dagq/runs/<run-id>`, the task is ready again, and the next
+/// run's prompt asks to bring that commit onto the current main. The
+/// resumes before the last are recorded without their sessions.
 #[test]
-fn conflict_only_resumes_are_not_counted_and_a_used_up_run_is_retried_with_its_branch() {
+fn a_run_whose_conflict_only_resumes_are_used_up_is_retried_with_its_branch() {
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
     backend.resume_timeout = Duration::from_secs(1);
     let (run, first_landed) = parked_conflict(&repo, &db, &backend);
     let source = run.result_commit().cloned().unwrap();
     let mut queue = SqliteQueue::open(&db).unwrap();
-    // No session resolves it: each never goes idle and exits at the /exit
-    // of the resume timeout.
+    earlier_resumes(&mut queue, &run, CONFLICT_ONLY_RESUME_LIMIT - 1);
+    // The last session does not resolve it: it never goes idle and exits
+    // at the /exit of the resume timeout.
     backend.resume_script_for(2, "await_exit");
     let outcome = supervise(&db, &repo, &backend).unwrap();
     backend.join();
@@ -1060,15 +980,14 @@ fn conflict_only_resumes_are_not_counted_and_a_used_up_run_is_retried_with_its_b
         "{:?}",
         event_kinds(&detail)
     );
-    assert!(started.iter().all(|p| p["counted"] == false), "{started:?}");
+    assert_eq!(started.last().unwrap()["counted"], false, "{started:?}");
     assert_eq!(
-        started
-            .iter()
-            .map(|p| p["attempt"].clone())
-            .collect::<Vec<_>>(),
-        (1..=CONFLICT_ONLY_RESUME_LIMIT)
-            .map(|n| json!(n))
-            .collect::<Vec<_>>()
+        started.last().unwrap()["attempt"],
+        CONFLICT_ONLY_RESUME_LIMIT
+    );
+    assert_eq!(
+        payloads(&detail, "resume_finished").last().unwrap()["exhausted"],
+        true
     );
     assert_eq!(first.status(), RunStatus::Failed);
     let last_error = first.last_error().unwrap();
@@ -1092,17 +1011,24 @@ fn conflict_only_resumes_are_not_counted_and_a_used_up_run_is_retried_with_its_b
         json!(format!("dagq/{}", run.id()))
     );
     assert!(finished[0].get("ask_id").is_none());
-    // Each conflict-only resume was left out of the count, then the
-    // retry carried the branch over: all repairs (ADR-0047 decision 38).
+    // The last conflict-only resume was left out of the count, then the
+    // retry carried the branch over: both repairs (ADR-0047 decision 38).
     let repaired = payloads(&detail, "auto_repaired");
     let repairs: Vec<&str> = repaired
         .iter()
         .map(|p| p["repair"].as_str().unwrap())
         .collect();
-    let mut expected = vec!["conflict_resume_uncounted"; CONFLICT_ONLY_RESUME_LIMIT];
-    expected.push("inherit_retry");
-    assert_eq!(repairs, expected, "{repaired:?}");
-    let repaired = &repaired[CONFLICT_ONLY_RESUME_LIMIT..];
+    assert_eq!(
+        repairs,
+        ["conflict_resume_uncounted", "inherit_retry"],
+        "{repaired:?}"
+    );
+    assert_eq!(
+        repaired[0]["conditions"]["conflict_only_resumes"],
+        CONFLICT_ONLY_RESUME_LIMIT
+    );
+    assert_eq!(repaired[0]["detail"]["main"], json!(first_landed));
+    let repaired = &repaired[1..];
     assert_eq!(repaired[0]["layer"], "runtime");
     assert_eq!(repaired[0]["conditions"]["review"], "pass");
     assert_eq!(repaired[0]["conditions"]["parked"], "rebase_conflict");
@@ -1165,55 +1091,32 @@ fn conflict_only_resumes_are_not_counted_and_a_used_up_run_is_retried_with_its_b
     assert_eq!(next.base_commit().as_str(), first_landed);
 }
 
-/// A resume that cannot start, or a session that cannot resolve the run,
-/// uses up an attempt; after the third the supervisor stops resuming it:
-/// the run becomes `failed` with its `resume_exhausted` alert recorded
-/// (`recovery_requested`, ADR-0047 decision 39), and the recovery job
-/// takes it. Its escalation is a `decide` ask for the inbox (`retry` or
-/// `cancel` and the job's options: resuming is no longer one), and the
-/// answer is applied like any other of the job's asks. The sessions behave like Claude: they
-/// never exit by themselves, so the supervisor sends `/exit` once when one
-/// goes idle without a resolving receipt, or when one never goes idle within
-/// the resume timeout. The conflict that parked the run is made to count
-/// (a conflict-only resume does not; see the test above).
+/// A session that cannot resolve the run uses up an attempt; after the
+/// third the supervisor stops resuming it: the run becomes `failed` with
+/// its `resume_exhausted` alert recorded (`recovery_requested`, ADR-0047
+/// decision 39), and the recovery job takes it. Its escalation is a
+/// `decide` ask for the inbox (`retry` or `cancel` and the job's options:
+/// resuming is no longer one), and the answer is applied like any other of
+/// the job's asks. The session behaves like Claude: it never exits by
+/// itself, so the supervisor sends `/exit` once it goes idle without a
+/// resolving receipt. The conflict that parked the run is made to count (a
+/// conflict-only resume does not; see the test above). The first two
+/// attempts are recorded without their sessions (a resume that cannot
+/// start is `a_run_with_a_dirty_worktree_is_resumed`, the used-up reason
+/// the unit test `supervise::resume::tests::resumed_text_counts_every_kind_of_resume`).
 #[test]
 fn resuming_stops_after_three_attempts() {
     let (_dir, repo, db) = fixture();
-    let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    backend.resume_timeout = Duration::from_secs(1);
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (run, _) = parked_conflict(&repo, &db, &backend);
     count_resumes_of_parked(&db);
     let mut queue = SqliteQueue::open(&db).unwrap();
     let reason = run.last_error().unwrap().to_owned();
+    earlier_resumes(&mut queue, &run, MAX_RESUME_ATTEMPTS - 1);
 
-    // No resume script: the workspace cannot be opened.
-    let outcome = supervise(&db, &repo, &backend).unwrap();
-    assert_eq!(outcome["errors"].as_array().unwrap().len(), 1, "{outcome}");
-    let detail = queue.show(TaskId::new(2)).unwrap();
-    let finished = payloads(&detail, "resume_finished");
-    assert_eq!(finished.len(), 1);
-    assert_eq!(finished[0]["outcome"], "error");
-    assert_eq!(finished[0]["exhausted"], false);
-    // The failed cmux call itself is recorded on the run (task 109).
-    let failures = backend_failures(&detail);
-    assert_eq!(failures.len(), 1, "{:?}", event_kinds(&detail));
-    assert_eq!(failures[0].run_id.as_ref(), Some(run.id()));
-    assert_eq!(failures[0].payload["op"], "create_resume");
-    assert!(
-        finished[0]["error"]
-            .as_str()
-            .unwrap()
-            .contains("no resume script")
-    );
-    assert_eq!(detail.runs[0].last_error(), Some(reason.as_str()));
-    assert!(queue.run_leases().unwrap().is_empty());
-
-    // The second attempt answers without resolving and goes idle; the third
-    // never goes idle. Neither exits until it is asked to.
-    backend.resume_script_for(
-        2,
-        "await_message; mark=\"$(dirname \"$RECEIPT\")/went-idle\"; if [ ! -f \"$mark\" ]; then : > \"$mark\"; idle; fi; await_exit",
-    );
+    // The last attempt answers without resolving and goes idle; it does
+    // not exit until it is asked to.
+    backend.resume_script_for(2, "await_message; idle; await_exit");
     let cursor = queue.latest_event_id().unwrap().as_i64();
     let reviewer =
         TestReviewer::new(&[verdict("pass", &[], "unused")]).with_triages(&[recovery(json!({
@@ -1238,17 +1141,16 @@ fn resuming_stops_after_three_attempts() {
             .collect::<Vec<_>>(),
         [json!(1), json!(2), json!(3)]
     );
-    assert!(started.iter().all(|p| p["reason"] == json!(reason)));
+    assert_eq!(started[2]["reason"], json!(reason));
+    assert_eq!(started[2]["counted"], true);
     let finished = payloads(&detail, "resume_finished");
     assert_eq!(finished.len(), 3);
-    assert_eq!(finished[1]["outcome"], "unresolved");
-    assert_eq!(finished[1]["exhausted"], false);
     assert_eq!(finished[2]["outcome"], "unresolved");
     assert_eq!(finished[2]["exhausted"], true);
     assert_eq!(finished[2]["status"], "needs_session");
     assert!(queue.run_leases().unwrap().is_empty());
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 2);
-    assert_eq!(backend.closed().len(), 2 + 2); // two workers, two resumes
+    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
+    assert_eq!(backend.closed().len(), 2 + 1); // two workers, one resume
     // The used-up run is the recovery job's (`resume_exhausted`), which
     // escalates it as a `decide` ask.
     let requested = payloads(&detail, "recovery_requested");
@@ -1341,22 +1243,20 @@ fn a_used_up_run_is_retried_with_its_branch_by_its_recovery_job() {
     let (run, _) = parked_conflict(&repo, &db, &backend);
     count_resumes_of_parked(&db);
     let mut queue = SqliteQueue::open(&db).unwrap();
-    for attempt in 1..=3 {
+    earlier_resumes(&mut queue, &run, MAX_RESUME_ATTEMPTS);
+    // Its attempts used up, no resume begins.
+    assert!(
         queue
-            .record_runtime_event(
+            .begin_resume(
                 run.id(),
-                EventKind::ResumeStarted,
-                json!({"attempt": attempt}),
+                &LeaseToken::new("t"),
+                run.base_commit(),
+                None,
+                Default::default()
             )
-            .unwrap();
-        queue
-            .record_runtime_event(
-                run.id(),
-                EventKind::ResumeFinished,
-                json!({"attempt": attempt, "outcome": "unresolved", "status": "needs_session"}),
-            )
-            .unwrap();
-    }
+            .unwrap()
+            .is_none()
+    );
     // The next run of the task fails at once and is left to a person.
     backend.script_for(2, "exit 7");
     let reviewer = TestReviewer::new(&[verdict("pass", &[], "unused")]).with_triages(&[repair(
@@ -1608,43 +1508,14 @@ fn a_request_stuck_in_the_input_box_is_asked_to_the_inbox() {
 }
 
 /// Task 285: a request the session never got (typed into a box that lost
-/// it) shows no sign of work within `[stall].send_confirm_secs` (here set
-/// to one second in the main checkout's `dagq.toml`, task 409); with the
-/// input box empty it is sent once more, and the run goes on without
-/// waiting out the resume timeout.
-#[test]
-fn a_lost_request_is_sent_again_after_no_sign_of_work() {
-    let (_dir, repo, db) = fixture();
-    fs::write(repo.join("dagq.toml"), "[stall]\nsend_confirm_secs = 1\n").unwrap();
-    git(&repo, &["add", "dagq.toml"]);
-    git(&repo, &["commit", "-m", "stall"]);
-    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    let (_run, first_landed) = parked_conflict(&repo, &db, &backend);
-    backend.dropped_texts.store(1, Ordering::SeqCst);
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    backend.resume_script_for(
-        2,
-        "await_message; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
-    );
-    let outcome = supervise(&db, &repo, &backend).unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let detail = queue.show(TaskId::new(2)).unwrap();
-    assert_landed(&repo, &detail.runs[0], "second", &first_landed);
-    let texts = backend.texts();
-    assert_eq!(texts.len(), 2);
-    assert_eq!(texts[0], texts[1]);
-    let resent = payloads(&detail, "submit_resent");
-    assert_eq!(resent.len(), 1, "{:?}", event_kinds(&detail));
-    assert_eq!(resent[0]["what"], "resolution request");
-    assert_eq!(resent[0]["waited_secs"], 1);
-    assert!(payloads(&detail, "submit_not_started").is_empty());
-    assert!(other_asks(&mut queue, true).is_empty());
-}
-
-/// Task 285: a request lost twice is not sent a third time: the run
-/// records `submit_not_started`, and (task 442) its recovery job escalates
-/// it to the `stalled` ask.
+/// it) shows no sign of work within `[stall].send_confirm_secs`; with the
+/// input box empty it is sent once more (`submit_resent`), and a request
+/// lost twice is not sent a third time: the run records
+/// `submit_not_started`, and (task 442) its recovery job escalates it to
+/// the `stalled` ask. Which sign leads to which step is the unit test
+/// `supervise::deliver::tests::a_lost_text_is_sent_again_only_once`; the
+/// first two attempts are recorded without their sessions, so the last
+/// one is the only session.
 #[test]
 fn a_request_lost_twice_is_asked_to_the_inbox() {
     let (_dir, repo, db) = fixture();
@@ -1653,6 +1524,7 @@ fn a_request_lost_twice_is_asked_to_the_inbox() {
     count_resumes_of_parked(&db);
     backend.dropped_texts.store(usize::MAX, Ordering::SeqCst);
     let mut queue = SqliteQueue::open(&db).unwrap();
+    earlier_resumes(&mut queue, &run, MAX_RESUME_ATTEMPTS - 1);
     // It never gets the request, and exits by itself once the ask is open
     // (or at an /exit, so that it never outlives the test). The fixture's
     // resume timeout does not end the resume first: a timeout short enough
@@ -1672,14 +1544,24 @@ fn a_request_lost_twice_is_asked_to_the_inbox() {
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let detail = queue.show(TaskId::new(2)).unwrap();
-    // Each resume (three, all unresolved) sends it twice and asks once.
-    let resumes = payloads(&detail, "resume_started").len();
-    assert_eq!(resumes, 3, "{:?}", event_kinds(&detail));
-    assert_eq!(backend.texts().len(), 2 * resumes);
+    // The last resume (unresolved) sends it twice and asks once.
+    assert_eq!(
+        payloads(&detail, "resume_started").len(),
+        MAX_RESUME_ATTEMPTS,
+        "{:?}",
+        event_kinds(&detail)
+    );
+    let resumes = 1;
+    let texts = backend.texts();
+    assert_eq!(texts.len(), 2 * resumes);
+    assert_eq!(texts[0], texts[1]);
     let not_started = payloads(&detail, "submit_not_started");
     assert_eq!(not_started.len(), resumes, "{:?}", event_kinds(&detail));
     assert!(not_started.iter().all(|p| p["resent"] == true));
-    assert_eq!(payloads(&detail, "submit_resent").len(), resumes);
+    let resent = payloads(&detail, "submit_resent");
+    assert_eq!(resent.len(), resumes);
+    assert_eq!(resent[0]["what"], "resolution request");
+    assert_eq!(resent[0]["waited_secs"], 1);
     let asks = queue
         .asks(AskQuery {
             all: true,
@@ -1695,7 +1577,7 @@ fn a_request_lost_twice_is_asked_to_the_inbox() {
             .iter()
             .any(|a| a.kind == AskKind::AnswerPrompt)
     );
-    // One job per resume, the three of the alert.
+    // One job for the resume's alert.
     let requested: Vec<&Value> = payloads(&detail, "recovery_requested")
         .into_iter()
         .filter(|p| p["alert"] == "stalled")
@@ -2144,72 +2026,6 @@ fn stats_ties_a_deferred_landing_to_the_landing_that_broke_it() {
         ids(&query(Some(landed_at), None)),
         [json!(run.id().as_str())]
     );
-}
-
-/// A signal from outside killed the session (`session_killed`) and the
-/// recovery job resumed the run (ADR-t946-1): the resume is not one of the
-/// three counted attempts but a kill-only one, recorded as a repair, and
-/// the kill-only resumes stop at their own limit.
-#[test]
-fn resumes_after_kills_from_outside_are_not_counted_and_stop_at_their_own_limit() {
-    use dagq::domain::resume::{KILL_ONLY_RESUME_LIMIT, ResumeCount};
-    let (_dir, repo, db) = fixture();
-    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    let (run, first_landed) = parked_conflict(&repo, &db, &backend);
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let kill_and_resume = |queue: &mut SqliteQueue| {
-        queue
-            .record_runtime_event(
-                run.id(),
-                EventKind::SupervisionFinished,
-                json!({"status": "failed", "exit_code": 143, "code": "session_killed", "signal": 15}),
-            )
-            .unwrap();
-        queue
-            .record_runtime_event(
-                run.id(),
-                EventKind::TriageFinished,
-                json!({"status": "needs_session", "action": "resume", "reason": "killed", "code": "triage_resume"}),
-            )
-            .unwrap();
-        queue.begin_resume(
-            run.id(),
-            &LeaseToken::new("t"),
-            &sha(&first_landed),
-            None,
-            Default::default(),
-        )
-    };
-    for attempt in 1..=KILL_ONLY_RESUME_LIMIT {
-        let (_, started) = kill_and_resume(&mut queue).unwrap().unwrap();
-        assert_eq!(started, attempt);
-        // The session of the resume is gone: its lease with it.
-        Connection::open(&db)
-            .unwrap()
-            .execute("DELETE FROM run_leases", [])
-            .unwrap();
-    }
-    let detail = queue.show(TaskId::new(2)).unwrap();
-    let started = payloads(&detail, "resume_started");
-    assert_eq!(started.len(), KILL_ONLY_RESUME_LIMIT);
-    for payload in &started {
-        assert_eq!(payload["counted"], false, "{payload}");
-    }
-    let uncounted: Vec<&Value> = payloads(&detail, "auto_repaired")
-        .into_iter()
-        .filter(|p| p["repair"] == "kill_resume_uncounted")
-        .collect();
-    assert_eq!(uncounted.len(), KILL_ONLY_RESUME_LIMIT);
-    assert_eq!(uncounted[0]["conditions"]["parked"], "session_killed");
-    assert_eq!(uncounted[0]["conditions"]["counted_resumes"], 0);
-    assert_eq!(uncounted[2]["conditions"]["kill_only_resumes"], 3);
-    let count = ResumeCount::of(&queue.run_events(run.id()).unwrap());
-    assert_eq!(
-        (count.counted, count.kill_only),
-        (0, KILL_ONLY_RESUME_LIMIT)
-    );
-    // The next kill finds the kill-only resumes used up.
-    assert!(kill_and_resume(&mut queue).unwrap().is_none());
 }
 
 #[test]

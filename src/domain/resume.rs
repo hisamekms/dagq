@@ -8,6 +8,7 @@ use super::{
     reason::{event_code, explains_last_error},
     recheck,
 };
+use serde_json::{Value, json};
 
 /// How many conflict-only attempts of one run the supervisor makes: the
 /// resumes it starts while the run was parked only by a rebase conflict
@@ -280,6 +281,66 @@ impl ResumeCount {
             || self.kill_only >= KILL_ONLY_RESUME_LIMIT
             || self.conflict_only >= limit
             || (self.parked_for_conflict && self.conflict_attempts() >= limit)
+    }
+}
+
+/// How the next resume of a run starts, from its events so far
+/// ([`resume_start_plan`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResumeStart {
+    /// The number of the resume: every resume so far and this one.
+    pub attempt: usize,
+    /// Whether it counts toward [`MAX_RESUME_ATTEMPTS`] (`resume_started`'s
+    /// `counted`).
+    pub counted: bool,
+    /// The payload of the `auto_repaired` that records an uncounted resume:
+    /// `conflict_resume_uncounted` for a run parked only by a conflict
+    /// after its review passed (ADR-0047 decision 24), or
+    /// `kill_resume_uncounted` for one a signal from outside killed
+    /// (ADR-t946-1). `None` for a counted resume.
+    pub repair: Option<Value>,
+}
+
+/// How the next resume of a run with `events` starts on `main`: its
+/// attempt, whether it is counted, and the repair that records it when it
+/// is not. A conflict-only park wins over a kill-only one.
+pub fn resume_start_plan(events: &[RunEvent], main: &CommitSha) -> ResumeStart {
+    let resumes = ResumeCount::of(events);
+    let attempt = resumes.total() + 1;
+    let basis = conflict_only_basis(events);
+    let killed = basis.is_none() && parked_for_kill_only(events);
+    let repair = if let Some(basis) = basis {
+        Some(json!({
+            "layer": "runtime",
+            "repair": "conflict_resume_uncounted",
+            "conditions": {
+                "review_passed": basis.passed,
+                "landing_approved": basis.approved,
+                "rechecked": basis.rechecked,
+                "parked": ReasonCode::RebaseConflict,
+                "counted_resumes": resumes.counted,
+                "conflict_only_resumes": resumes.conflict_only + 1,
+            },
+            "detail": {"attempt": attempt, "main": main},
+        }))
+    } else if killed {
+        Some(json!({
+            "layer": "runtime",
+            "repair": "kill_resume_uncounted",
+            "conditions": {
+                "parked": ReasonCode::SessionKilled,
+                "counted_resumes": resumes.counted,
+                "kill_only_resumes": resumes.kill_only + 1,
+            },
+            "detail": {"attempt": attempt, "main": main},
+        }))
+    } else {
+        None
+    };
+    ResumeStart {
+        attempt,
+        counted: repair.is_none(),
+        repair,
     }
 }
 
@@ -605,6 +666,110 @@ mod tests {
             "triage_finished",
             json!({"action": "resume", "code": "triage_resume"}),
         )
+    }
+
+    fn main() -> CommitSha {
+        CommitSha::parse("a".repeat(40), "main").unwrap()
+    }
+
+    /// A resume of a run with no uncounted park is counted and recorded
+    /// by `resume_started` alone.
+    #[test]
+    fn a_counted_resume_starts_with_no_repair() {
+        let plan = resume_start_plan(&[conflict()], &main());
+        assert_eq!(
+            plan,
+            ResumeStart {
+                attempt: 1,
+                counted: true,
+                repair: None,
+            }
+        );
+        // The attempt numbers every resume so far, counted or not.
+        let events = [
+            pass(),
+            conflict(),
+            resume(),
+            killed(),
+            triage_resume(),
+            resume(),
+            event(
+                "integration_deferred",
+                json!({"code": "verification_failed"}),
+            ),
+        ];
+        let plan = resume_start_plan(&events, &main());
+        assert_eq!((plan.attempt, plan.counted, plan.repair), (3, true, None));
+    }
+
+    /// ADR-0047 decision 24: each resume of a run parked only by a conflict
+    /// after its review passed is left out of the count, recorded as the
+    /// repair `conflict_resume_uncounted` with what made it so and the
+    /// conflict-only resumes with this one.
+    #[test]
+    fn a_conflict_only_resume_is_an_uncounted_repair() {
+        let mut events = vec![event("integration_approved", json!({})), conflict()];
+        for attempt in 1..=CONFLICT_ONLY_RESUME_LIMIT {
+            let plan = resume_start_plan(&events, &main());
+            assert_eq!(plan.attempt, attempt);
+            assert!(!plan.counted);
+            assert_eq!(
+                plan.repair,
+                Some(json!({
+                    "layer": "runtime",
+                    "repair": "conflict_resume_uncounted",
+                    "conditions": {
+                        "review_passed": false,
+                        "landing_approved": true,
+                        "rechecked": false,
+                        "parked": "rebase_conflict",
+                        "counted_resumes": 0,
+                        "conflict_only_resumes": attempt,
+                    },
+                    "detail": {"attempt": attempt, "main": main()},
+                }))
+            );
+            events.extend([resume(), conflict()]);
+        }
+        assert!(ResumeCount::of(&events).exhausted(ResumeConfig::default()));
+        // Found by the landing recheck, whatever the review said.
+        let plan = resume_start_plan(&[recheck("rebase_conflict", recheck::RESUMED)], &main());
+        assert!(!plan.counted);
+        assert_eq!(plan.repair.unwrap()["conditions"]["rechecked"], true);
+    }
+
+    /// ADR-t946-1: a resume decided after a signal from outside killed the
+    /// session is left out of the count, recorded as the repair
+    /// `kill_resume_uncounted`, up to its own limit.
+    #[test]
+    fn a_kill_only_resume_is_an_uncounted_repair() {
+        let mut events = vec![conflict(), resume()];
+        for kills in 1..=KILL_ONLY_RESUME_LIMIT {
+            events.extend([killed(), triage_resume()]);
+            let plan = resume_start_plan(&events, &main());
+            assert_eq!(plan.attempt, kills + 1);
+            assert!(!plan.counted);
+            assert_eq!(
+                plan.repair,
+                Some(json!({
+                    "layer": "runtime",
+                    "repair": "kill_resume_uncounted",
+                    "conditions": {
+                        "parked": "session_killed",
+                        "counted_resumes": 1,
+                        "kill_only_resumes": kills,
+                    },
+                    "detail": {"attempt": kills + 1, "main": main()},
+                }))
+            );
+            events.push(resume());
+        }
+        let count = ResumeCount::of(&events);
+        assert_eq!(
+            (count.counted, count.kill_only),
+            (1, KILL_ONLY_RESUME_LIMIT)
+        );
+        assert!(count.exhausted(ResumeConfig::default()));
     }
 
     #[test]

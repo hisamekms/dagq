@@ -359,6 +359,28 @@ pub(super) enum StartSign {
     Held,
 }
 
+/// What a [`StartCheck`] does with the [`StartSign`] of its screen read:
+/// the text is taken, a dialog holds the session, the lost text is sent
+/// once more, or (lost again, or still held) `submit_not_started`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SignStep {
+    Taken,
+    Dialog(&'static str),
+    Resend,
+    NotStarted,
+}
+
+/// The step of a [`StartCheck`] that read `sign`, its text sent once more
+/// already when `resent`: a lost text goes once more, and only once.
+pub(super) const fn on_sign(sign: StartSign, resent: bool) -> SignStep {
+    match sign {
+        StartSign::Started => SignStep::Taken,
+        StartSign::Dialog(kind) => SignStep::Dialog(kind),
+        StartSign::Lost if !resent => SignStep::Resend,
+        StartSign::Lost | StartSign::Held => SignStep::NotStarted,
+    }
+}
+
 /// Judge `screen`, read a while after `text` was submitted, against
 /// `submitted` (the screen read right after the submit, if any). Only a
 /// change of the transcript ([`AgentSignals::transcript`]) is a sign of
@@ -531,12 +553,12 @@ impl StartCheck {
         }
         let sign = start_sign(sv.signals, &screen, self.submitted.as_deref(), &self.text);
         let excerpt = sv.signals.screen_excerpt(&screen);
-        match sign {
-            StartSign::Started => self.done = true,
-            StartSign::Dialog(kind) => {
+        match on_sign(sign, self.resent) {
+            SignStep::Taken => self.done = true,
+            SignStep::Dialog(kind) => {
                 return self.not_started_at_dialog(sv, run, workspace, kind, &excerpt);
             }
-            StartSign::Lost if !self.resent => {
+            SignStep::Resend => {
                 sv.queue.record_runtime_event(
                     run.id(),
                     EventKind::SubmitResent,
@@ -554,7 +576,7 @@ impl StartCheck {
                 *self = Self::new(&what, &text, sent_at, &submission);
                 self.resent = true;
             }
-            StartSign::Lost | StartSign::Held => {
+            SignStep::NotStarted => {
                 self.done = true;
                 sv.queue.record_runtime_event(
                     run.id(),
@@ -1004,6 +1026,23 @@ mod tests {
             start_sign(&Signals, "ready|12:05", Some("boot|12:04"), TEXT),
             StartSign::Started
         );
+    }
+
+    /// Task 285: a lost text is sent once more, and a text lost again (or
+    /// still in the box) is `submit_not_started`; work or a dialog ends the
+    /// check whether or not it was sent again.
+    #[test]
+    fn a_lost_text_is_sent_again_only_once() {
+        for resent in [false, true] {
+            assert_eq!(on_sign(StartSign::Started, resent), SignStep::Taken);
+            assert_eq!(
+                on_sign(StartSign::Dialog("choice"), resent),
+                SignStep::Dialog("choice")
+            );
+            assert_eq!(on_sign(StartSign::Held, resent), SignStep::NotStarted);
+        }
+        assert_eq!(on_sign(StartSign::Lost, false), SignStep::Resend);
+        assert_eq!(on_sign(StartSign::Lost, true), SignStep::NotStarted);
     }
 
     #[test]
