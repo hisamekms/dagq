@@ -14,6 +14,10 @@ use runtime_support::*;
 /// How long a screen must look idle in these tests, in milliseconds.
 const SCREEN_IDLE_MS: u64 = 200;
 
+/// The screen's threshold: a check that nothing happens past it waits it
+/// out and then some passes of the supervisor (task 1075).
+const SCREEN_IDLE: Duration = Duration::from_millis(SCREEN_IDLE_MS);
+
 /// The thresholds of these tests: a screen at rest for [`SCREEN_IDLE_MS`].
 fn stall() -> dagq::domain::stall::StallConfig {
     dagq::domain::stall::StallConfig::default().with_millis("screen_idle_secs", SCREEN_IDLE_MS)
@@ -193,16 +197,26 @@ fn a_markerless_session_is_held_by(screen: Option<&str>) {
         None => backend.capture_timeouts.store(usize::MAX, Ordering::SeqCst),
     }
     let backend = Arc::new(backend);
+    let options = options();
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise_with(&db, &repo, &backend, &options()))
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
     };
     wait_until(&db, Duration::from_secs(30), |queue| {
         event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"receipt_observed")
     });
-    // Well past the threshold, with captures on the way.
+    // Past the threshold, and passes after it, with captures on the way.
+    // A screen that cannot be read makes each pass take about 250 ms (its
+    // captures fail), so there the fixed 2.5 thresholds stays: shorter
+    // than the passes, and as before (task 1075).
     let captured = backend.captures.load(Ordering::SeqCst);
-    thread::sleep(Duration::from_millis(SCREEN_IDLE_MS * 5 / 2));
+    if screen.is_some() {
+        thread::sleep(SCREEN_IDLE);
+        await_passes(&passes, SOME_PASSES);
+    } else {
+        thread::sleep(SCREEN_IDLE * 5 / 2);
+    }
     assert!(backend.captures.load(Ordering::SeqCst) >= captured + 2);
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(1)).unwrap();
@@ -260,9 +274,11 @@ fn a_markerless_session_that_shows_background_work_is_not_idle() {
     let backend = TestWorkspace::new(&db, false, &markerless_agent());
     *backend.screen.lock().unwrap() = BACKGROUND_SCREEN.into();
     let backend = Arc::new(backend);
+    let options = options();
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise_with(&db, &repo, &backend, &options()))
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
     };
     wait_until(&db, Duration::from_secs(30), |queue| {
         !inferred(&queue.show(TaskId::new(1)).unwrap()).is_empty()
@@ -270,9 +286,10 @@ fn a_markerless_session_that_shows_background_work_is_not_idle() {
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(1)).unwrap();
     assert_eq!(inferred(&detail)[0]["background_running"], true);
-    // Well past the threshold, with captures on the way.
+    // Past the threshold, and passes after it, with captures on the way.
     let captured = backend.captures.load(Ordering::SeqCst);
-    thread::sleep(Duration::from_millis(SCREEN_IDLE_MS * 5 / 2));
+    thread::sleep(SCREEN_IDLE);
+    await_passes(&passes, SOME_PASSES);
     assert!(backend.captures.load(Ordering::SeqCst) >= captured + 2);
     let detail = queue.show(TaskId::new(1)).unwrap();
     let kinds = event_kinds(&detail);

@@ -31,9 +31,29 @@ fn supervise_stalled(
     Arc<TestReviewer>,
     thread::JoinHandle<Result<Value>>,
 ) {
+    supervise_stalled_counted(db, repo, agent, stall, recoveries).0
+}
+
+/// [`supervise_stalled`], and the count of the supervisor's passes.
+#[allow(clippy::type_complexity)]
+fn supervise_stalled_counted(
+    db: &Path,
+    repo: &Path,
+    agent: &str,
+    stall: dagq::domain::stall::StallConfig,
+    recoveries: &[String],
+) -> (
+    (
+        Arc<TestWorkspace>,
+        Arc<TestReviewer>,
+        thread::JoinHandle<Result<Value>>,
+    ),
+    Arc<AtomicU64>,
+) {
     let backend = Arc::new(TestWorkspace::new(db, false, agent));
-    let (reviewer, supervisor) = supervise_backend(db, repo, backend.clone(), stall, recoveries);
-    (backend, reviewer, supervisor)
+    let (reviewer, supervisor, passes) =
+        supervise_backend_counted(db, repo, backend.clone(), stall, recoveries);
+    ((backend, reviewer, supervisor), passes)
 }
 
 /// [`supervise_stalled`] with a backend the test set up.
@@ -44,12 +64,29 @@ fn supervise_backend(
     stall: dagq::domain::stall::StallConfig,
     recoveries: &[String],
 ) -> (Arc<TestReviewer>, thread::JoinHandle<Result<Value>>) {
+    let (reviewer, supervisor, _) = supervise_backend_counted(db, repo, backend, stall, recoveries);
+    (reviewer, supervisor)
+}
+
+/// [`supervise_backend`], and the count of the supervisor's passes.
+fn supervise_backend_counted(
+    db: &Path,
+    repo: &Path,
+    backend: Arc<TestWorkspace>,
+    stall: dagq::domain::stall::StallConfig,
+    recoveries: &[String],
+) -> (
+    Arc<TestReviewer>,
+    thread::JoinHandle<Result<Value>>,
+    Arc<AtomicU64>,
+) {
     let reviewer =
         Arc::new(TestReviewer::new(&[verdict("pass", &[], "fine")]).with_triages(recoveries));
     let options = SuperviseOptions {
         stall: Some(stall),
         ..supervise_options(4, true)
     };
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend, reviewer) = (
             db.to_owned(),
@@ -69,14 +106,15 @@ fn supervise_backend(
             )
         })
     };
-    (reviewer, supervisor)
+    (reviewer, supervisor, passes)
 }
 
 /// The receipt-less idle threshold of these tests, in milliseconds.
 const IDLE_MS: u64 = 200;
 
-/// Well past the threshold: one and a half of it.
-const WELL_PAST_IDLE: Duration = Duration::from_millis(IDLE_MS * 3 / 2);
+/// The threshold: a check that nothing happens past it waits it out and
+/// then some passes of the supervisor (task 1075).
+const IDLE: Duration = Duration::from_millis(IDLE_MS);
 
 /// A receipt-less idle threshold of [`IDLE_MS`].
 fn idle_short() -> dagq::domain::stall::StallConfig {
@@ -212,7 +250,7 @@ fn an_idle_after_the_nudge_is_repaired_by_the_recovery_job_without_an_ask() {
 #[test]
 fn a_recovery_job_of_low_confidence_raises_one_stalled_ask_that_closes_when_the_session_moves() {
     let (_dir, repo, db) = fixture();
-    let (backend, _reviewer, supervisor) = supervise_stalled(
+    let ((backend, _reviewer, supervisor), passes) = supervise_stalled_counted(
         &db,
         &repo,
         STALLED_AGENT,
@@ -245,7 +283,8 @@ fn a_recovery_job_of_low_confidence_raises_one_stalled_ask_that_closes_when_the_
         assert!(ask.question.contains(part), "{part}: {}", ask.question);
     }
     // Asked once, with no other job.
-    thread::sleep(WELL_PAST_IDLE);
+    thread::sleep(IDLE);
+    await_passes(&passes, SOME_PASSES);
     assert_eq!(stalled_asks(&queue).len(), 1);
     release(&db, &backend, supervisor);
     let closed = queue.read_ask(ask.id).unwrap();
@@ -323,7 +362,7 @@ fn a_stall_past_its_three_recovery_jobs_is_asked_without_a_fourth() {
 #[test]
 fn a_failed_stalled_job_raises_the_stalled_ask() {
     let (_dir, repo, db) = fixture();
-    let (backend, reviewer, supervisor) = supervise_stalled(
+    let ((backend, reviewer, supervisor), passes) = supervise_stalled_counted(
         &db,
         &repo,
         STALLED_AGENT,
@@ -344,7 +383,8 @@ fn a_failed_stalled_job_raises_the_stalled_ask() {
     ] {
         assert!(ask.question.contains(part), "{part}: {}", ask.question);
     }
-    thread::sleep(WELL_PAST_IDLE);
+    thread::sleep(IDLE);
+    await_passes(&passes, SOME_PASSES);
     assert_eq!(stalled_asks(&queue).len(), 1);
     assert_eq!(reviewer.triage_prompts().len(), 1);
     release(&db, &backend, supervisor);
@@ -563,6 +603,7 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
         stall: Some(idle_short()),
         ..supervise_options(4, true)
     };
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
         thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
@@ -570,7 +611,9 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
     wait_until(&db, Duration::from_secs(30), |queue| {
         !adoption_events(&queue.show(TaskId::new(1)).unwrap()).is_empty()
     });
-    thread::sleep(Duration::from_millis(IDLE_MS * 5 / 2));
+    // The idle was past the threshold before the adopter started: its
+    // passes since are what would nudge, start a job or ask.
+    await_passes(&passes, SOME_PASSES);
     assert!(backend.texts().is_empty(), "{:?}", backend.texts());
     assert!(stalled_asks(&queue).is_empty());
     let detail = queue.show(TaskId::new(1)).unwrap();

@@ -196,6 +196,10 @@ fn a_dead_landing_is_not_released_while_a_process_works_in_its_worktree() {
                 assert!(Instant::now() < deadline, "task 2 never waited to land");
                 thread::sleep(TEST_TICK);
             }
+            // A fixed pause, not supervisor passes: while the landing's
+            // process lives, each pass looks for processes in the worktree
+            // and takes 0.35-0.6 s, so five passes took 1.7-2.9 s against
+            // this 0.3 s (task 1075).
             thread::sleep(Duration::from_millis(300));
             let still = queue.run(run.id()).unwrap().status();
             let killed = Command::new("kill").arg(&verifying).bounded_output();

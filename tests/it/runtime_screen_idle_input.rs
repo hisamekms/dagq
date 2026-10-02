@@ -14,6 +14,10 @@ use runtime_support::*;
 /// How long a screen must look idle in these tests, in milliseconds.
 const SCREEN_IDLE_MS: u64 = 200;
 
+/// The screen's threshold: a check that nothing happens past it waits it
+/// out and then some passes of the supervisor (task 1075).
+const SCREEN_IDLE: Duration = Duration::from_millis(SCREEN_IDLE_MS);
+
 /// The agent's `Stop` hook failed to write the marker (task 475: the disk
 /// was full), as Claude Code's debug log says.
 const HOOK_FAILED: &str = "printf '2026-09-27T01:02:00Z [DEBUG] Hook Stop (Stop) error: No space left on device\\n' >> \"$LOG\"";
@@ -53,21 +57,23 @@ fn opened_ms(detail: &dagq::domain::TaskDetail, ask: &dagq::domain::Ask) -> i64 
         .unwrap()
 }
 
-/// Supervise with `backend` on a thread, with `reviewer` when given.
+/// Supervise with `backend` on a thread, with `reviewer` when given; and
+/// the count of the supervisor's passes.
 fn supervise_in_thread(
     db: &Path,
     repo: &Path,
     backend: &Arc<TestWorkspace>,
     reviewer: Option<&Arc<TestReviewer>>,
     stall: dagq::domain::stall::StallConfig,
-) -> thread::JoinHandle<Result<Value>> {
+) -> (thread::JoinHandle<Result<Value>>, Arc<AtomicU64>) {
     let (db, repo, backend) = (db.to_owned(), repo.to_owned(), backend.clone());
     let reviewer = reviewer.cloned();
     let options = SuperviseOptions {
         stall: Some(stall),
         ..supervise_options(4, true)
     };
-    thread::spawn(move || {
+    let passes = options.passes.clone();
+    let supervisor = thread::spawn(move || {
         let _waiting = common::within(common::STEP_LIMIT, "supervise to return");
         match reviewer {
             Some(reviewer) => runtime::supervise_with_reviewer(
@@ -81,7 +87,8 @@ fn supervise_in_thread(
             ),
             None => supervise_with(&db, &repo, &backend, &options),
         }
-    })
+    });
+    (supervisor, passes)
 }
 
 /// The open `worker_question` of task `task`, once it is asked.
@@ -129,7 +136,7 @@ fn a_markerless_question_is_answered_once_the_screen_rests(screen: Option<&str>)
     let backend = TestWorkspace::new(&db, false, &markerless_asking_agent());
     *backend.screen.lock().unwrap() = WORKING_SCREEN.into();
     let backend = Arc::new(backend);
-    let supervisor = supervise_in_thread(&db, &repo, &backend, None, stall(600_000));
+    let (supervisor, passes) = supervise_in_thread(&db, &repo, &backend, None, stall(600_000));
     let ask = question_of(&db, 1);
     match screen {
         Some(screen) => *backend.screen.lock().unwrap() = screen.into(),
@@ -137,9 +144,17 @@ fn a_markerless_question_is_answered_once_the_screen_rests(screen: Option<&str>)
     }
     let mut queue = SqliteQueue::open(&db).unwrap();
     queue.answer(ask.id, "use blue").unwrap();
-    // Well past the threshold, with captures on the way.
+    // Past the threshold, and passes after it, with captures on the way.
+    // A screen that cannot be read makes each pass take about 250 ms (its
+    // captures fail), so there the fixed 2.5 thresholds stays: shorter
+    // than the passes, and as before (task 1075).
     let captured = backend.captures.load(Ordering::SeqCst);
-    thread::sleep(Duration::from_millis(SCREEN_IDLE_MS * 5 / 2));
+    if screen.is_some() {
+        thread::sleep(SCREEN_IDLE);
+        await_passes(&passes, SOME_PASSES);
+    } else {
+        thread::sleep(SCREEN_IDLE * 5 / 2);
+    }
     assert!(backend.captures.load(Ordering::SeqCst) >= captured + 2);
     assert!(backend.texts().is_empty(), "{:?}", backend.texts());
     assert!(!delivered(&db, 1));
@@ -233,12 +248,13 @@ while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
 receipt "$(git rev-parse HEAD)"; await_exit"#,
     );
     let backend = Arc::new(backend);
-    let supervisor = supervise_in_thread(&db, &repo, &backend, None, stall(600_000));
+    let (supervisor, passes) = supervise_in_thread(&db, &repo, &backend, None, stall(600_000));
     // The request put the screen at work, and keeps it there while the
     // question is asked and answered.
     let ask = question_of(&db, 2);
     queue.answer(ask.id, "theirs").unwrap();
-    thread::sleep(Duration::from_millis(SCREEN_IDLE_MS * 5 / 2));
+    thread::sleep(SCREEN_IDLE);
+    await_passes(&passes, SOME_PASSES);
     assert!(!delivered(&db, 2));
     *backend.screen.lock().unwrap() = READY_SCREEN.into();
     wait_until(&db, Duration::from_secs(30), |_| delivered(&db, 2));
@@ -294,11 +310,13 @@ receipt "$(git rev-parse HEAD)"; await_exit"#,
         verdict("revise", &["add a line"], "one gap"),
         verdict("pass", &[], "fixed"),
     ]));
-    let supervisor = supervise_in_thread(&db, &repo, &backend, Some(&reviewer), stall(600_000));
+    let (supervisor, passes) =
+        supervise_in_thread(&db, &repo, &backend, Some(&reviewer), stall(600_000));
     let ask = question_of(&db, 1);
     let mut queue = SqliteQueue::open(&db).unwrap();
     queue.answer(ask.id, "the last").unwrap();
-    thread::sleep(Duration::from_millis(SCREEN_IDLE_MS * 5 / 2));
+    thread::sleep(SCREEN_IDLE);
+    await_passes(&passes, SOME_PASSES);
     assert!(!delivered(&db, 1));
     *backend.screen.lock().unwrap() = READY_SCREEN.into();
     wait_until(&db, Duration::from_secs(30), |_| delivered(&db, 1));
@@ -365,21 +383,22 @@ fn instruction_job(gate: &Path) -> String {
 }
 
 /// Supervise a markerless stalled worker whose recovery job answers once
-/// `gate` exists; returns once its job was requested, the screen at rest.
+/// `gate` exists; returns once its job was requested, the screen at rest,
+/// with the count of the supervisor's passes.
 fn markerless_stall(
     db: &Path,
     repo: &Path,
     gate: &Path,
 ) -> (
     Arc<TestWorkspace>,
-    Arc<TestReviewer>,
     thread::JoinHandle<Result<Value>>,
+    Arc<AtomicU64>,
 ) {
     let backend = Arc::new(TestWorkspace::new(db, false, &markerless_stalled_agent()));
     let reviewer = Arc::new(
         TestReviewer::new(&[verdict("pass", &[], "fine")]).with_triages(&[instruction_job(gate)]),
     );
-    let supervisor =
+    let (supervisor, passes) =
         supervise_in_thread(db, repo, &backend, Some(&reviewer), stall(SCREEN_IDLE_MS));
     // The nudge put the screen at work; the session stopped again.
     typed(&backend, 1);
@@ -387,7 +406,7 @@ fn markerless_stall(
     wait_until(db, Duration::from_secs(60), |queue| {
         !payloads(&queue.show(TaskId::new(1)).unwrap(), "recovery_requested").is_empty()
     });
-    (backend, reviewer, supervisor)
+    (backend, supervisor, passes)
 }
 
 /// Acceptance: a markerless session whose screen is at rest is at its
@@ -397,7 +416,7 @@ fn markerless_stall(
 fn an_instruction_reaches_a_markerless_session_whose_screen_rests() {
     let (dir, repo, db) = fixture();
     let gate = dir.path().join("gate");
-    let (backend, _reviewer, supervisor) = markerless_stall(&db, &repo, &gate);
+    let (backend, supervisor, _) = markerless_stall(&db, &repo, &gate);
     fs::write(&gate, "").unwrap();
     wait_until(&db, Duration::from_secs(60), |queue| {
         !payloads(&queue.show(TaskId::new(1)).unwrap(), "recovery_finished").is_empty()
@@ -436,7 +455,7 @@ fn an_instruction_reaches_a_markerless_session_whose_screen_rests() {
 fn an_instruction_does_not_reach_a_markerless_session_at_work() {
     let (dir, repo, db) = fixture();
     let gate = dir.path().join("gate");
-    let (backend, _reviewer, supervisor) = markerless_stall(&db, &repo, &gate);
+    let (backend, supervisor, passes) = markerless_stall(&db, &repo, &gate);
     *backend.screen.lock().unwrap() = WORKING_SCREEN.into();
     // Past a capture of the screen at work.
     let captured = backend.captures.load(Ordering::SeqCst);
@@ -449,8 +468,8 @@ fn an_instruction_does_not_reach_a_markerless_session_at_work() {
     wait_until(&db, Duration::from_secs(60), |queue| {
         !payloads(&queue.show(TaskId::new(1)).unwrap(), "recovery_finished").is_empty()
     });
-    // Time for a verdict to be applied, were it.
-    thread::sleep(Duration::from_millis(500));
+    // Passes for a verdict to be applied, were it.
+    await_passes(&passes, SOME_PASSES);
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(1)).unwrap();
     let finished = payloads(&detail, "recovery_finished");
@@ -490,7 +509,7 @@ receipt "$(git rev-parse HEAD)"; await_exit"#
     backend.prompt_wait = Duration::from_millis(300);
     *backend.screen.lock().unwrap() = DIALOG_SCREEN.into();
     let backend = Arc::new(backend);
-    let supervisor = supervise_in_thread(&db, &repo, &backend, None, stall(600_000));
+    let (supervisor, _) = supervise_in_thread(&db, &repo, &backend, None, stall(600_000));
     let count = |queue: &mut SqliteQueue, kind: &str| {
         event_kinds(&queue.show(TaskId::new(1)).unwrap())
             .iter()

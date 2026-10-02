@@ -30,11 +30,9 @@ fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
         .collect()
 }
 
-/// Past the threshold: two and a half of it.
-const PAST_IDLE: Duration = Duration::from_millis(IDLE_MS * 5 / 2);
-
-/// Well past the threshold: one and a half of it.
-const WELL_PAST_IDLE: Duration = Duration::from_millis(IDLE_MS * 3 / 2);
+/// The threshold: a check that nothing happens past it waits it out and
+/// then some passes of the supervisor (task 1075).
+const IDLE: Duration = Duration::from_millis(IDLE_MS);
 
 /// The payloads of the task-less `stall_config_loaded` events.
 fn stall_configs(db: &Path) -> Vec<Value> {
@@ -140,16 +138,19 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
     );
     *backend.screen.lock().unwrap() = LOGIN_SCREEN.into();
     let backend = Arc::new(backend);
+    let options = stall_options();
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise_with(&db, &repo, &backend, &stall_options()))
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
     };
     wait_until(&db, Duration::from_secs(30), |queue| {
         event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"auth_required")
     });
     let mut queue = SqliteQueue::open(&db).unwrap();
     // Well past the threshold, still no nudge and no stalled ask.
-    thread::sleep(WELL_PAST_IDLE);
+    thread::sleep(IDLE);
+    await_passes(&passes, SOME_PASSES);
     assert!(backend.texts().is_empty());
     assert!(stalled_asks(&queue).is_empty());
     let hold = queue
@@ -227,9 +228,11 @@ while [ ! -f "$EXIT.go" ]; do sleep 0.05; done
 receipt "$(git rev-parse HEAD)"; idle; await_exit
 "#,
     ));
+    let options = stall_options();
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise_with(&db, &repo, &backend, &stall_options()))
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
     };
     let mut queue = SqliteQueue::open(&db).unwrap();
     wait_until(&db, Duration::from_secs(30), |queue| {
@@ -256,7 +259,8 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
     }
     assert_eq!(backend.notifications.lock().unwrap().len(), 1);
     // Not asked twice, nor nudged again.
-    thread::sleep(WELL_PAST_IDLE);
+    thread::sleep(IDLE);
+    await_passes(&passes, SOME_PASSES);
     assert_eq!(stalled_asks(&queue).len(), 1);
     assert_eq!(backend.texts().len(), 1);
 
@@ -273,7 +277,8 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
     wait_until(&db, Duration::from_secs(30), |queue| {
         payloads(&queue.show(TaskId::new(1)).unwrap(), "stall_resolved").len() == 3
     });
-    thread::sleep(WELL_PAST_IDLE);
+    thread::sleep(IDLE);
+    await_passes(&passes, SOME_PASSES);
     assert_eq!(stalled_asks(&queue).len(), 2);
     assert!(queue.read_ask(second.id).unwrap().closed_at.is_none());
     assert_eq!(
@@ -342,16 +347,25 @@ while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
 commit work; receipt "$(git rev-parse HEAD)"; idle; await_exit
 "#,
     ));
+    let options = stall_options();
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise_with(&db, &repo, &backend, &stall_options()))
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
     };
     let mut queue = SqliteQueue::open(&db).unwrap();
     wait_until(&db, Duration::from_secs(30), |queue| {
         !queue.asks(Default::default()).unwrap().is_empty()
     });
     let ask = queue.asks(Default::default()).unwrap().remove(0);
-    thread::sleep(PAST_IDLE);
+    // Past the threshold from the session's idle after its question.
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    await_written_after(
+        &detail.runs[0].idle_marker_path().unwrap(),
+        first_event_millis(&detail, "ask_opened"),
+    );
+    thread::sleep(IDLE);
+    await_passes(&passes, SOME_PASSES);
     assert!(backend.texts().is_empty(), "{:?}", backend.texts());
     queue.answer(ask.id, "blue").unwrap();
     let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
@@ -413,14 +427,17 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
         .unwrap()
         .ask;
     age_lease(&db, &run, 31);
+    let options = stall_options();
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise_with(&db, &repo, &backend, &stall_options()))
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
     };
     wait_until(&db, Duration::from_secs(30), |queue| {
         !adoption_events(&queue.show(TaskId::new(1)).unwrap()).is_empty()
     });
-    thread::sleep(PAST_IDLE);
+    thread::sleep(IDLE);
+    await_passes(&passes, SOME_PASSES);
     assert!(backend.texts().is_empty(), "{:?}", backend.texts());
     assert_eq!(stalled_asks(&queue).len(), 1);
     assert!(queue.read_ask(asked.id).unwrap().is_open());

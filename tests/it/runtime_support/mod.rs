@@ -1787,6 +1787,69 @@ pub fn await_passes(passes: &AtomicU64, n: u64) {
     }
 }
 
+/// The wall clock's unix second, as the queue's times and the markers'
+/// seconds count it.
+pub fn unix_second_now() -> i64 {
+    unix_second(SystemTime::now())
+}
+
+/// The unix second of `at`.
+pub fn unix_second(at: SystemTime) -> i64 {
+    i64::try_from(at.duration_since(UNIX_EPOCH).unwrap().as_secs()).unwrap()
+}
+
+/// The unix second `path` was last written in.
+pub fn modified_second(path: &Path) -> i64 {
+    unix_second(fs::metadata(path).unwrap().modified().unwrap())
+}
+
+/// The unix time in milliseconds `path` was last written at.
+pub fn modified_millis(path: &Path) -> i64 {
+    let modified = fs::metadata(path).unwrap().modified().unwrap();
+    i64::try_from(modified.duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap()
+}
+
+/// Wait until `path` is written after `at_ms` (unix milliseconds), e.g. a
+/// session's idle marker after its question: a check that nothing happens
+/// while it is idle starts from that idle (task 1075).
+pub fn await_written_after(path: &Path, at_ms: i64) {
+    let started = Instant::now();
+    while fs::metadata(path).is_err() || modified_millis(path) <= at_ms {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "{} was not written after {at_ms} in 30 seconds",
+            path.display()
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// When the first `kind` event of `detail` was recorded, in unix
+/// milliseconds.
+pub fn first_event_millis(detail: &dagq::domain::TaskDetail, kind: &str) -> i64 {
+    detail
+        .events
+        .iter()
+        .find(|event| event.kind == kind)
+        .and_then(|event| dagq::domain::stats::timestamp_millis(&event.created_at))
+        .unwrap_or_else(|| panic!("no {kind} event"))
+}
+
+/// Wait until the wall clock is past unix second `second`, so what follows
+/// falls in a later second than it: instead of a fixed 1.1 s sleep, which
+/// waits a whole second also when the boundary is a few ms away (task
+/// 1075).
+pub fn await_second_after(second: i64) {
+    let started = Instant::now();
+    while unix_second_now() <= second {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the clock did not pass unix second {second} in 5 seconds"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Supervisor options with the test tick and the [`SteadyClock`].
 pub fn supervise_options(parallel: usize, once: bool) -> SuperviseOptions {
     let base = SuperviseOptions::new(parallel, once);

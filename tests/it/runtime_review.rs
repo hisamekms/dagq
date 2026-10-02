@@ -2,7 +2,6 @@
 //! landing asks it opens.
 use crate::runtime_support;
 
-use crate::runtime_review_background::HOLD_PERIOD;
 use runtime_support::*;
 
 /// The worker goes idle after its receipt and never exits by itself; each
@@ -1135,10 +1134,12 @@ fn a_worker_question_asked_while_revising_is_answered_and_the_run_lands() {
         verdict("revise", &["say which line"], "one gap"),
         verdict("pass", &[], "fixed"),
     ]));
+    let options = supervise_options(4, true);
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend, reviewer) =
             (db.clone(), repo.clone(), backend.clone(), reviewer.clone());
-        thread::spawn(move || supervise_reviewed(&db, &repo, &backend, &reviewer))
+        thread::spawn(move || supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options))
     };
     wait_until(&db, Duration::from_secs(30), |queue| {
         !queue.asks(AskQuery::default()).unwrap().is_empty()
@@ -1147,7 +1148,14 @@ fn a_worker_question_asked_while_revising_is_answered_and_the_run_lands() {
     let ask = queue.asks(AskQuery::default()).unwrap().remove(0);
     assert_eq!(ask.kind, AskKind::WorkerQuestion);
     // Idle at its question for a while: the revise waits for the answer.
-    thread::sleep(HOLD_PERIOD);
+    // The session goes idle after its question, and the supervisor passes
+    // over that idle some times.
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    await_written_after(
+        &detail.runs[0].idle_marker_path().unwrap(),
+        first_event_millis(&detail, "ask_opened"),
+    );
+    await_passes(&passes, SOME_PASSES);
     let detail = queue.show(TaskId::new(1)).unwrap();
     let kinds = event_kinds(&detail);
     assert!(kinds.contains(&"revise_requested"), "{kinds:?}");

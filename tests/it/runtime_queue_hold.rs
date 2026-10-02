@@ -64,6 +64,7 @@ fn an_open_usage_limit_ask_holds_claims_and_reviews_until_done() {
         stop: stop.clone(),
         ..supervise_options(2, false)
     };
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
         thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
@@ -91,7 +92,7 @@ fn an_open_usage_limit_ask_holds_claims_and_reviews_until_done() {
     wait_until(&db, Duration::from_secs(30), |queue| {
         queue.run(first.id()).unwrap().status() == RunStatus::AwaitingIntegration
     });
-    thread::sleep(TEST_TICK * 10);
+    await_passes(&passes, SOME_PASSES);
     assert!(
         !kinds_of(&db, 1).iter().any(|kind| kind == "review_started"),
         "{:?}",

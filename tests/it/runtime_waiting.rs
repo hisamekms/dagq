@@ -414,12 +414,13 @@ fn no_wait_without_a_limit() {
         max_waiting: Some(0),
         ..supervise_options(1, true)
     };
+    let passes = options.passes.clone();
     let supervisor = supervise_in_thread(&db, &repo, &backend, options);
     wait_until(&db, Duration::from_secs(60), |queue| {
         run_of(queue, 1)
             .is_some_and(|run| open_ask_of(queue, &run, AskKind::WorkerQuestion).is_some())
     });
-    thread::sleep(Duration::from_millis(300));
+    await_passes(&passes, SOME_PASSES);
     let mut queue = SqliteQueue::open(&db).unwrap();
     let run = run_of(&mut queue, 1).unwrap();
     assert!(events_of(&db, run.id(), "run_waiting_started").is_empty());

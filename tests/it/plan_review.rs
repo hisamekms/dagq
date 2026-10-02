@@ -668,8 +668,13 @@ fn a_revise_goes_to_the_live_planner_with_the_precedents_and_times_out_to_the_in
     );
 
     // Past the planner timeout without a resubmission, the inbox is told
-    // once, and it shows as the planner's attention.
-    std::thread::sleep(Duration::from_millis(1100));
+    // once, and it shows as the planner's attention: the timeout of 0 is
+    // past from the second after the revise was sent.
+    crate::runtime_support::await_second_after(
+        proposal_column(&fx.db, proposal, "revise_sent_at")
+            .as_i64()
+            .unwrap(),
+    );
     let quick = options(1, Duration::ZERO);
     supervise_with(&fx, &backend, &reviewer, &quick);
     supervise_with(&fx, &backend, &reviewer, &quick);
@@ -798,8 +803,11 @@ fn a_revise_without_a_live_planner_opens_planners_within_the_limit() {
     assert!(events(&mut queue, second, "plan_revise_sent").is_empty());
 
     // The revise still waiting for a planner past the timeout is told to
-    // the inbox, once.
-    std::thread::sleep(Duration::from_millis(1100));
+    // the inbox, once: the timeout of 0 is past from the second after its
+    // revise.
+    crate::runtime_support::await_second_after(
+        proposal_column(&fx.db, two, "revised_at").as_i64().unwrap(),
+    );
     let quick = options(1, Duration::ZERO);
     supervise_with(&fx, &backend, &reviewer, &quick);
     supervise_with(&fx, &backend, &reviewer, &quick);

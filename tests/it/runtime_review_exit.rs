@@ -343,9 +343,26 @@ pub(crate) fn supervise_recovering(
     backend: &Arc<TestWorkspace>,
     recovery: String,
 ) -> (Arc<TestReviewer>, thread::JoinHandle<Result<Value>>) {
+    let (reviewer, supervisor, _) = supervise_recovering_counted(db, repo, backend, recovery);
+    (reviewer, supervisor)
+}
+
+/// [`supervise_recovering`], and the count of the supervisor's passes.
+fn supervise_recovering_counted(
+    db: &Path,
+    repo: &Path,
+    backend: &Arc<TestWorkspace>,
+    recovery: String,
+) -> (
+    Arc<TestReviewer>,
+    thread::JoinHandle<Result<Value>>,
+    Arc<AtomicU64>,
+) {
     let reviewer = Arc::new(
         TestReviewer::new(&[verdict("concern", &["x"], "never")]).with_triages(&[recovery]),
     );
+    let options = supervise_options(4, true);
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend, reviewer) = (
             db.to_owned(),
@@ -361,11 +378,11 @@ pub(crate) fn supervise_recovering(
                 &claude_stub(&db),
                 &*reviewer,
                 Path::new(env!("CARGO_BIN_EXE_dagq")),
-                &supervise_options(4, true),
+                &options,
             )
         })
     };
-    (reviewer, supervisor)
+    (reviewer, supervisor, passes)
 }
 
 /// ADR-0047 decisions 39 and 40: a session that holds the `/exit` after a
@@ -492,8 +509,8 @@ fn a_failed_stuck_exit_job_opens_the_stuck_exit_ask_answered_exit() {
     let base = git_out(&repo, &["rev-parse", "main"]);
     let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
     let run = stuck_exit_after_a_pass(&repo, &db, &backend);
-    let (reviewer, supervisor) =
-        supervise_recovering(&db, &repo, &backend, "echo broken >&2; exit 3".to_owned());
+    let (reviewer, supervisor, passes) =
+        supervise_recovering_counted(&db, &repo, &backend, "echo broken >&2; exit 3".to_owned());
     let ask = failed_stuck_exit_job_ask(&db, &run, "broken");
     let mut queue = SqliteQueue::open(&db).unwrap();
     queue.answer(ask.id, "exit").unwrap();
@@ -506,7 +523,7 @@ fn a_failed_stuck_exit_job_opens_the_stuck_exit_ask_answered_exit() {
         "{status}"
     );
     // No other job while the ask is open.
-    thread::sleep(Duration::from_millis(500));
+    await_passes(&passes, SOME_PASSES);
     assert_eq!(reviewer.triage_prompts().len(), 1);
     // The person carries out `exit`: the session exits and the run lands.
     fs::write(exit_request_path(run.run_dir().unwrap()), "").unwrap();
@@ -532,13 +549,14 @@ fn a_failed_stuck_exit_job_opens_the_stuck_exit_ask_answered_wait() {
     let base = git_out(&repo, &["rev-parse", "main"]);
     let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
     let run = stuck_exit_after_a_pass(&repo, &db, &backend);
-    let (reviewer, supervisor) =
-        supervise_recovering(&db, &repo, &backend, "echo broken >&2; exit 3".to_owned());
+    let (reviewer, supervisor, passes) =
+        supervise_recovering_counted(&db, &repo, &backend, "echo broken >&2; exit 3".to_owned());
     let ask = failed_stuck_exit_job_ask(&db, &run, "broken");
     let mut queue = SqliteQueue::open(&db).unwrap();
     queue.answer(ask.id, "wait").unwrap();
     queue.close_ask(ask.id).unwrap();
-    thread::sleep(Duration::from_millis(500));
+    // No other job for the alert in the passes after the close.
+    await_passes(&passes, SOME_PASSES);
     assert_eq!(reviewer.triage_prompts().len(), 1);
     assert!(queue.asks(AskQuery::default()).unwrap().is_empty());
     assert_eq!(

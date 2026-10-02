@@ -68,6 +68,7 @@ fn no_run_is_claimed_while_the_load_is_above_the_threshold() {
         stop: stop.clone(),
         ..supervise_options(2, false)
     };
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
         thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
@@ -77,7 +78,7 @@ fn no_run_is_claimed_while_the_load_is_above_the_threshold() {
     });
     // Several more passes: still nothing claimed, and the hold is not
     // recorded again.
-    thread::sleep(TEST_TICK * 6);
+    await_passes(&passes, SOME_PASSES);
     let mut held = queue_events(&db, "claim_held");
     assert_eq!(held.len(), 2, "{held:?}");
     assert_ne!(held[0]["supervisor"], held[1]["supervisor"]);

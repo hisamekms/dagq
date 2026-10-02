@@ -185,8 +185,17 @@ fn a_task_meeting_a_run_on_a_hotspot_waits_and_the_next_one_is_claimed() {
     assert_eq!(events(&db, "claim_deferred").len(), 1);
     assert!(events(&db, "claim_deferral_ended").is_empty());
 
-    // Past the limit, counted from the first deferral, the task is claimed.
-    thread::sleep(Duration::from_millis(1100));
+    // Past the limit, counted from the first deferral, the task is claimed:
+    // the limit of 1 is past from the second after the deferral's.
+    let deferred_at = SqliteQueue::open(&db)
+        .unwrap()
+        .all_events()
+        .unwrap()
+        .into_iter()
+        .find(|event| event.kind == "claim_deferred")
+        .and_then(|event| dagq::domain::stats::timestamp_millis(&event.created_at))
+        .unwrap();
+    await_second_after(deferred_at.div_euclid(1000));
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let outcome = supervise_with(&db, &repo, &backend, &options(1)).unwrap();
     backend.join();
@@ -238,6 +247,7 @@ fn a_changed_conflicts_table_is_read_again_without_a_restart() {
         stop: stop.clone(),
         ..supervise_options(8, false)
     };
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
         thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
@@ -280,7 +290,7 @@ fn a_changed_conflicts_table_is_read_again_without_a_restart() {
             .iter()
             .any(|(_, sample)| sample["candidates"] == 2)
     });
-    thread::sleep(TEST_TICK * 10);
+    await_passes(&passes, SOME_PASSES);
     assert_eq!(runs_of(&db, last), 0);
     assert_eq!(events(&db, "conflicts_config_changed").len(), 1);
     // Valid again with the values in use: no change, and the task waits

@@ -362,6 +362,7 @@ fn three_failed_looks_restart_the_container_and_then_tell_the_inbox() {
         stop: stop.clone(),
         ..options_with(&podman, &repo, false)
     };
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
         thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
@@ -394,7 +395,9 @@ fn three_failed_looks_restart_the_container_and_then_tell_the_inbox() {
     let attention = broker_attention(&db).expect("the attention");
     assert_eq!(attention["next"], "dagq broker status", "{attention}");
     assert_eq!(attention["status"], "unhealthy", "{attention}");
-    thread::sleep(Duration::from_millis(200));
+    // Passes after it: each reaps the last look (or start) and, past the
+    // 20 ms interval, begins the next, and none records it again.
+    await_passes(&passes, SOME_PASSES);
     assert_eq!(kinds(&db, "broker_unhealthy").len(), 1);
 
     // The broker answers again: the attention ends. A failed restart is

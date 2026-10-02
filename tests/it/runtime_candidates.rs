@@ -59,13 +59,14 @@ fn the_supervisor_samples_the_candidates_when_they_change() {
         stop: stop.clone(),
         ..supervise_options(2, false)
     };
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
         thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
     };
     wait_until(&db, Duration::from_secs(30), |_| samples(&db).len() == 2);
     // Several more passes with nothing changed record nothing.
-    thread::sleep(TEST_TICK * 6);
+    await_passes(&passes, SOME_PASSES);
     let restarted = samples(&db);
     assert_eq!(restarted.len(), 2, "{restarted:?}");
     assert_eq!(counts(&restarted[1]), (1, 2, 1));
@@ -77,7 +78,7 @@ fn the_supervisor_samples_the_candidates_when_they_change() {
         add_ready_task(&mut queue, "follower", &[TaskId::new(1)]);
     }
     wait_until(&db, Duration::from_secs(30), |_| samples(&db).len() == 3);
-    thread::sleep(TEST_TICK * 4);
+    await_passes(&passes, SOME_PASSES);
     stop.store(true, Ordering::SeqCst);
     let outcome = joined(supervisor, "the supervisor to stop").unwrap();
     backend.join();

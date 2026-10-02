@@ -217,11 +217,8 @@ fn adopt_pending_request(
         .unwrap();
     // The request is sent a second after the session's idle marker, which
     // then predates it.
-    thread::sleep(Duration::from_millis(1100));
-    let sent_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
+    await_second_after(modified_second(&idle));
+    let sent_at = unix_second_now();
     let mut queue = SqliteQueue::open(db).unwrap();
     let events = events(&head, sent_at);
     let file = events.iter().rev().find_map(|(kind, _)| match *kind {

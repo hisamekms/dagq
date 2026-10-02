@@ -53,8 +53,8 @@ fn an_intervene_answer_closes_the_headless_stalled_ask_and_opens_another() {
     let (dir, repo, db, backend) = headless_fixture(&[]);
     set_turns(dir.path(), &refused_until_answered());
     let backend = Arc::new(backend);
-    let (_reviewer, supervisor) =
-        supervise_thread(&db, &repo, backend.clone(), Default::default(), &[]);
+    let (_reviewer, supervisor, passes) =
+        supervise_thread_counted(&db, &repo, backend.clone(), Default::default(), &[]);
     wait_until(&db, common::STEP_LIMIT, |queue| {
         !stalled_asks(queue).is_empty()
     });
@@ -92,7 +92,7 @@ fn an_intervene_answer_closes_the_headless_stalled_ask_and_opens_another() {
         second.question
     );
     // Not asked a third time.
-    thread::sleep(Duration::from_millis(500));
+    await_passes(&passes, SOME_PASSES);
     assert_eq!(stalled_asks(&queue).len(), 2);
     let asked = detail(&db);
     let ends = resolved_of(&asked, first.id);
@@ -255,8 +255,8 @@ esac"#
     }
     age_lease(&db, &run, 31);
     let base = git_out(&repo, &["rev-parse", "main"]);
-    let (_reviewer, supervisor) =
-        supervise_thread(&db, &repo, backend.clone(), Default::default(), &[]);
+    let (_reviewer, supervisor, passes) =
+        supervise_thread_counted(&db, &repo, backend.clone(), Default::default(), &[]);
     wait_until(&db, common::STEP_LIMIT, |queue| {
         stalled_asks(queue).len() == 2
     });
@@ -287,7 +287,7 @@ esac"#
             .contains("`stop` to have the supervisor end the session")
     );
     // Opened once.
-    thread::sleep(Duration::from_millis(500));
+    await_passes(&passes, SOME_PASSES);
     assert_eq!(stalled_asks(&queue).len(), 2);
     SqliteQueue::open(&db)
         .unwrap()

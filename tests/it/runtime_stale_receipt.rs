@@ -213,7 +213,7 @@ if [ -f "$mark" ]; then receipt "$(git rev-parse HEAD)"; idle; await_exit; exit 
 {AWAIT_NUDGE}
 rm "$MESSAGE"
 "$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Rewrite it?' --cmux /usr/bin/true > /dev/null || exit 70
-{during_wait}; idle
+{during_wait}; idle; : > "$(dirname "$RECEIPT")/waiting"
 while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
 idle; await_exit"#
         ),
@@ -230,8 +230,11 @@ idle; await_exit"#
         !events_of(&db, run.id(), "run_waiting_started").is_empty()
     });
     // Past the second of the request and of the rewrite: the return from
-    // the wait restarts the request's clock later than both.
-    thread::sleep(Duration::from_millis(1100));
+    // the wait restarts the request's clock later than both. The session
+    // marks `waiting` after the rewrite (or not) and its idle.
+    let waiting = Path::new(run.receipt_path().unwrap()).with_file_name("waiting");
+    wait_until(&db, Duration::from_secs(60), |_| waiting.is_file());
+    await_second_after(modified_second(&waiting));
     let mut queue = SqliteQueue::open(&db).unwrap();
     let ask = queue
         .asks(AskQuery::default())

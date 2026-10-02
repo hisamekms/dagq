@@ -41,6 +41,9 @@ struct TwoHeld {
     backend: Arc<TestWorkspace>,
     stop: Arc<AtomicBool>,
     supervisors: Vec<thread::JoinHandle<Result<Value>>>,
+    /// The count of each supervisor's passes, in the order of
+    /// `supervisors`.
+    passes: Vec<Arc<AtomicU64>>,
     runs: Vec<TaskRun>,
     ask: dagq::domain::Ask,
 }
@@ -62,7 +65,9 @@ fn two_held(script: &str) -> TwoHeld {
     let start = || {
         let (db, repo, backend, options) =
             (db.clone(), repo.clone(), backend.clone(), one_slot(&stop));
-        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
+        let passes = options.passes.clone();
+        let supervisor = thread::spawn(move || supervise_with(&db, &repo, &backend, &options));
+        (supervisor, passes)
     };
     // The second starts once the first run has its worktree: two `git
     // worktree add` at once in one repository can collide.
@@ -70,7 +75,7 @@ fn two_held(script: &str) -> TwoHeld {
     wait_until(&db, Duration::from_secs(30), |queue| {
         event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"worktree_created")
     });
-    let supervisors = vec![first, start()];
+    let (supervisors, passes): (Vec<_>, Vec<_>) = [first, start()].into_iter().unzip();
     wait_until(&db, Duration::from_secs(30), |queue| {
         [1, 2].iter().all(|task| {
             event_kinds(&queue.show(TaskId::new(*task)).unwrap()).contains(&"agent_started")
@@ -105,6 +110,7 @@ fn two_held(script: &str) -> TwoHeld {
         backend,
         stop,
         supervisors,
+        passes,
         runs,
         ask,
     }
@@ -221,8 +227,10 @@ while [ ! -f "$EXIT.go" ]; do sleep 0.05; done
             event_kinds(&queue.show(run.task_id()).unwrap()).contains(&"hold_continue_sent")
         }) && queue.read_ask(held.ask.id).unwrap().closed_at.is_some()
     });
-    // A few more passes: nothing is applied twice.
-    thread::sleep(TEST_TICK * 10);
+    // A few more passes of each supervisor: nothing is applied twice.
+    for passes in &held.passes {
+        await_passes(passes, SOME_PASSES);
+    }
     held.stop.store(true, Ordering::SeqCst);
     for run in runs {
         fs::write(
@@ -304,9 +312,10 @@ while [ ! -f "$EXIT.go" ]; do sleep 0.05; done
     *backend.screen.lock().unwrap() = LOGIN_SCREEN.into();
     let backend = Arc::new(backend);
     let stop = Arc::new(AtomicBool::new(false));
+    let options = one_slot(&stop);
+    let passes = options.passes.clone();
     let supervisor = {
-        let (db, repo, backend, options) =
-            (db.clone(), repo.clone(), backend.clone(), one_slot(&stop));
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
         thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
     };
     wait_until(&db, Duration::from_secs(30), |queue| {
@@ -333,8 +342,9 @@ while [ ! -f "$EXIT.go" ]; do sleep 0.05; done
     wait_until(&db, Duration::from_secs(30), |queue| {
         queue.run_lease(own.id()).unwrap().is_none()
     });
-    // `other` has not applied it: the ask stays open for it.
-    thread::sleep(TEST_TICK * 10);
+    // `other` has not applied it: the ask stays open for it, past some
+    // passes of this supervisor.
+    await_passes(&passes, SOME_PASSES);
     assert!(queue.read_ask(ask.id).unwrap().closed_at.is_none());
     assert!(queue_events(&db, "queue_hold_applied").is_empty());
     // `other` lets its run go: nothing waits any more.

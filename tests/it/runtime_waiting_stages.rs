@@ -430,11 +430,8 @@ fn an_adopted_revise_keeps_waiting_outside_the_slot() {
         )
         .unwrap();
     // The request is sent a second after the session's idle marker.
-    thread::sleep(Duration::from_millis(1100));
-    let sent_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
+    await_second_after(modified_second(&idle));
+    let sent_at = unix_second_now();
     let mut queue = SqliteQueue::open(&db).unwrap();
     for (kind, payload) in [
         (

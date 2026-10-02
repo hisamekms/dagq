@@ -72,12 +72,46 @@ pub fn supervise_thread_in(
     recoveries: &[String],
     parallel: usize,
 ) -> (Arc<TestReviewer>, thread::JoinHandle<Result<Value>>) {
+    let (reviewer, supervisor, _) =
+        supervise_thread_counted_in(db, repo, backend, stall, recoveries, parallel);
+    (reviewer, supervisor)
+}
+
+/// [`supervise_thread`], and the count of the supervisor's passes.
+pub fn supervise_thread_counted(
+    db: &Path,
+    repo: &Path,
+    backend: Arc<TestWorkspace>,
+    stall: dagq::domain::stall::StallConfig,
+    recoveries: &[String],
+) -> (
+    Arc<TestReviewer>,
+    thread::JoinHandle<Result<Value>>,
+    Arc<AtomicU64>,
+) {
+    supervise_thread_counted_in(db, repo, backend, stall, recoveries, 4)
+}
+
+/// [`supervise_thread_counted`] with `parallel` slots.
+fn supervise_thread_counted_in(
+    db: &Path,
+    repo: &Path,
+    backend: Arc<TestWorkspace>,
+    stall: dagq::domain::stall::StallConfig,
+    recoveries: &[String],
+    parallel: usize,
+) -> (
+    Arc<TestReviewer>,
+    thread::JoinHandle<Result<Value>>,
+    Arc<AtomicU64>,
+) {
     let reviewer =
         Arc::new(TestReviewer::new(&[verdict("pass", &[], "fine")]).with_triages(recoveries));
     let options = SuperviseOptions {
         stall: Some(stall),
         ..supervise_options(parallel, true)
     };
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend, reviewer) = (
             db.to_owned(),
@@ -97,7 +131,7 @@ pub fn supervise_thread_in(
             )
         })
     };
-    (reviewer, supervisor)
+    (reviewer, supervisor, passes)
 }
 
 /// Keep startup scheduling out of tests of a running turn's time limits.

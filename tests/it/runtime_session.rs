@@ -1105,9 +1105,11 @@ fn a_failed_answer_delivery_is_left_to_the_inbox() {
     );
     backend.text_fails = true;
     let backend = Arc::new(backend);
+    let options = supervise_options(4, true);
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise(&db, &repo, &backend))
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
     };
     wait_until(&db, Duration::from_secs(30), |queue| {
         !queue.asks(Default::default()).unwrap().is_empty()
@@ -1119,7 +1121,7 @@ fn a_failed_answer_delivery_is_left_to_the_inbox() {
         !payloads(&queue.show(TaskId::new(1)).unwrap(), "ask_delivery_failed").is_empty()
     });
     // Several passes later the send was not retried.
-    thread::sleep(Duration::from_millis(500));
+    await_passes(&passes, SOME_PASSES);
     assert_eq!(backend.texts().len(), 1);
     let detail = queue.show(TaskId::new(1)).unwrap();
     let failed = payloads(&detail, "ask_delivery_failed");
@@ -1668,9 +1670,11 @@ fn unanswered_exit_request_times_out_and_keeps_the_run() {
         .unwrap()
         .register_session_workspace(SessionRole::Inbox, "inbox-ws")
         .unwrap();
+    let options = supervise_options(4, true);
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise_retrying(&db, &repo, &backend))
+        thread::spawn(move || supervise_retrying_with(&db, &repo, &backend, &options))
     };
     // The stuck_exit ask follows the timeout through its recovery job on a
     // later pass: it is opened (and notified), then the job's
@@ -1688,9 +1692,9 @@ fn unanswered_exit_request_times_out_and_keeps_the_run() {
                         .any(|p| p["ask_id"] == json!(ask.id))
             })
     });
-    // Let a few more polls pass: the timeout is not recorded again and the
+    // Let a few more passes go: the timeout is not recorded again and the
     // run is not given up.
-    thread::sleep(Duration::from_millis(500));
+    await_passes(&passes, SOME_PASSES);
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(1)).unwrap();
     let run = detail.runs[0].clone();

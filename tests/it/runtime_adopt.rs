@@ -44,6 +44,7 @@ fn independent_tasks_run_concurrently_and_a_dependent_starts_after_integration()
             (db.clone(), repo.clone(), backend.clone(), options.clone());
         thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
     };
+    let passes = options.passes.clone();
 
     // Both independent sessions start; the dependent has no run. Each
     // session is held until the test finishes it, so this state, once
@@ -89,7 +90,7 @@ fn independent_tasks_run_concurrently_and_a_dependent_starts_after_integration()
         }) && queue.run_leases().unwrap().is_empty()
     });
     // Awaiting integration does not satisfy the dependency; the loop idles.
-    thread::sleep(Duration::from_millis(500));
+    await_passes(&passes, SOME_PASSES);
     assert!(queue.show(TaskId::new(3)).unwrap().runs.is_empty());
     assert!(queue.candidates().unwrap().is_empty());
     let first = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
@@ -748,15 +749,17 @@ fn adopter_does_not_repeat_an_exit_request_the_previous_supervisor_sent() {
         )
         .unwrap();
     age_lease(&db, &run, 31);
+    let options = supervise_options(4, true);
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise(&db, &repo, &backend))
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
     };
     wait_until(&db, Duration::from_secs(30), |queue| {
         !adoption_events(&queue.show(TaskId::new(1)).unwrap()).is_empty()
     });
     // Several passes over the idle session send nothing.
-    thread::sleep(Duration::from_millis(500));
+    await_passes(&passes, SOME_PASSES);
     release_held_session(run.run_dir().unwrap());
     let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
     backend.join();

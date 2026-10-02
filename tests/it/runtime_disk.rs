@@ -76,12 +76,13 @@ fn no_run_is_claimed_while_the_disk_is_short_and_the_inbox_is_told_once() {
         stop: stop.clone(),
         ..supervise_options(2, false)
     };
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
         thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
     };
     wait_until(&db, Duration::from_secs(30), |_| disk_asks(&db).len() == 1);
-    thread::sleep(TEST_TICK * 6);
+    await_passes(&passes, SOME_PASSES);
     let held = queue_events(&db, "claim_held");
     assert_eq!(held.len(), 1, "{held:?}");
     assert_eq!(held[0]["reason"], "disk_space");
@@ -152,7 +153,7 @@ fn no_run_is_claimed_while_the_disk_is_short_and_the_inbox_is_told_once() {
     wait_until(&db, Duration::from_secs(30), |_| {
         disk_asks(&db).iter().all(|ask| ask.closed_at.is_some())
     });
-    thread::sleep(TEST_TICK * 6);
+    await_passes(&passes, SOME_PASSES);
     assert_eq!(disk_asks(&db).len(), 2);
     assert_eq!(queue_events(&db, "claim_held").len(), 1);
 
@@ -292,6 +293,7 @@ fn a_landing_waits_for_room_before_its_verification() {
         free_space: short_at_landing,
         ..supervise_options(1, true)
     };
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend, reviewer) =
             (db.clone(), repo.clone(), backend.clone(), reviewer.clone());
@@ -312,7 +314,7 @@ fn a_landing_waits_for_room_before_its_verification() {
         !queue_events(&db, "landing_held").is_empty()
             && disk_asks(&db).iter().any(|ask| !ask.affected.is_empty())
     });
-    thread::sleep(TEST_TICK * 6);
+    await_passes(&passes, SOME_PASSES);
     let run = SqliteQueue::open(&db)
         .unwrap()
         .show(TaskId::new(1))

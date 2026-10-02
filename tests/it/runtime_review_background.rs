@@ -34,9 +34,6 @@ fn write_idle_marker(run: &TaskRun, background_tasks: Value) {
     fs::rename(&tmp, &marker).unwrap();
 }
 
-/// Lets the supervisor poll a while: what it did not do by then it holds.
-pub(crate) const HOLD_PERIOD: Duration = Duration::from_millis(600);
-
 /// The session goes idle after its receipt with background work still
 /// running (task 147): the supervisor does not take it for idle, so neither
 /// validation nor `/exit` starts, until the work ended and the Stop hook
@@ -50,9 +47,11 @@ fn background_work_holds_the_first_session_until_it_ends() {
         "commit work; receipt \"$(git rev-parse HEAD)\"; idle_bg; \
          while [ ! -f \"$EXIT.go\" ]; do sleep 0.05; done; idle_bg_done; await_exit",
     ));
+    let options = supervise_options(4, true);
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise(&db, &repo, &backend))
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
     };
     wait_until(&db, Duration::from_secs(30), |queue| {
         event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"receipt_observed")
@@ -60,7 +59,8 @@ fn background_work_holds_the_first_session_until_it_ends() {
     let mut queue = SqliteQueue::open(&db).unwrap();
     let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
     wait_for_background(&run);
-    thread::sleep(HOLD_PERIOD);
+    // Passes after it: what the supervisor did not do by then it holds.
+    await_passes(&passes, SOME_PASSES);
     let detail = queue.show(TaskId::new(1)).unwrap();
     assert_eq!(detail.runs[0].status(), RunStatus::Running);
     let kinds = event_kinds(&detail);
@@ -121,10 +121,12 @@ fn background_work_holds_the_exit_after_the_review() {
         shell_join(&[gate.to_string_lossy().into_owned()]),
         verdict("pass", &[], "meets the acceptance")
     )]));
+    let options = supervise_options(4, true);
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend, reviewer) =
             (db.clone(), repo.clone(), backend.clone(), reviewer.clone());
-        thread::spawn(move || supervise_reviewed(&db, &repo, &backend, &reviewer))
+        thread::spawn(move || supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options))
     };
     wait_until(&db, Duration::from_secs(30), |queue| {
         event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"review_started")
@@ -139,7 +141,8 @@ fn background_work_holds_the_exit_after_the_review() {
     wait_until(&db, Duration::from_secs(30), |queue| {
         event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"review_finished")
     });
-    thread::sleep(HOLD_PERIOD);
+    // Passes after it: what the supervisor did not do by then it holds.
+    await_passes(&passes, SOME_PASSES);
     let detail = queue.show(TaskId::new(1)).unwrap();
     let kinds = event_kinds(&detail);
     assert!(!kinds.contains(&"exit_requested"), "{kinds:?}");
@@ -172,12 +175,15 @@ fn background_work_holds_the_resumed_session_until_it_ends() {
          while [ ! -f \"$EXIT.go\" ]; do sleep 0.05; done; idle_bg_done; await_exit",
     );
     let backend = Arc::new(backend);
+    let options = supervise_options(4, true);
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise(&db, &repo, &backend))
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
     };
     wait_for_background(&run);
-    thread::sleep(HOLD_PERIOD);
+    // Passes after it: what the supervisor did not do by then it holds.
+    await_passes(&passes, SOME_PASSES);
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(2)).unwrap();
     assert!(payloads(&detail, "resume_finished").is_empty());
@@ -219,10 +225,12 @@ fn background_work_holds_the_revise_until_it_ends() {
         verdict("revise", &["add a line"], "one gap"),
         verdict("pass", &[], "fixed"),
     ]));
+    let options = supervise_options(4, true);
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend, reviewer) =
             (db.clone(), repo.clone(), backend.clone(), reviewer.clone());
-        thread::spawn(move || supervise_reviewed(&db, &repo, &backend, &reviewer))
+        thread::spawn(move || supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options))
     };
     // The revise follows the claim, worker session, receipt, validation and
     // review job, so reaching it grows with the host's load without testing
@@ -241,7 +249,8 @@ fn background_work_holds_the_revise_until_it_ends() {
     );
     let run = detail.runs[0].clone();
     wait_for_background(&run);
-    thread::sleep(HOLD_PERIOD);
+    // Passes after it: what the supervisor did not do by then it holds.
+    await_passes(&passes, SOME_PASSES);
     let detail = queue.show(TaskId::new(1)).unwrap();
     let kinds = event_kinds(&detail);
     assert!(!kinds.contains(&"revise_finished"), "{kinds:?}");
@@ -284,10 +293,12 @@ fn a_revise_session_that_holds_exit_back_raises_a_stuck_exit_ask() {
         &["add a line"],
         "one gap",
     )]));
+    let options = supervise_options(4, true);
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend, reviewer) =
             (db.clone(), repo.clone(), backend.clone(), reviewer.clone());
-        thread::spawn(move || supervise_reviewed(&db, &repo, &backend, &reviewer))
+        thread::spawn(move || supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options))
     };
     // The ask comes after the claim, the review job, the revise, the
     // /exit's timeout and the recovery job, each with processes of its
@@ -298,7 +309,11 @@ fn a_revise_session_that_holds_exit_back_raises_a_stuck_exit_ask() {
     wait_until(&db, common::STEP_LIMIT, |queue| {
         !queue.asks(AskQuery::default()).unwrap().is_empty() || supervisor.is_finished()
     });
-    thread::sleep(HOLD_PERIOD);
+    // Passes after it: no second ask follows. A supervisor that returned
+    // makes no more passes, and the asks below say what it left.
+    if !supervisor.is_finished() {
+        await_passes(&passes, SOME_PASSES);
+    }
     let mut queue = SqliteQueue::open(&db).unwrap();
     let asks = queue.asks(AskQuery::default()).unwrap();
     assert_eq!(asks.len(), 1, "{asks:?}");

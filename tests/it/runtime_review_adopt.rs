@@ -97,11 +97,8 @@ fn revise_under_dead_supervisor(
     // The request is sent a second after the session's idle marker, which
     // then predates it. No `revise-1.txt` is written, so the adopter does
     // not check whether the session took it.
-    thread::sleep(Duration::from_millis(1100));
-    let sent_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
+    await_second_after(modified_second(&idle));
+    let sent_at = unix_second_now();
     let queue = SqliteQueue::open(&db).unwrap();
     let events = [(
         "validation_finished",

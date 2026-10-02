@@ -45,7 +45,7 @@ fn registered(db: &Path) -> (u32, &'static str, Option<u32>, &'static str) {
 }
 
 /// Supervise in the background with `parallel` and `max_waiting` as the
-/// flags; the stop switch and the thread.
+/// flags; the stop switch, the thread and the count of its passes.
 fn start(
     db: &Path,
     repo: &Path,
@@ -55,6 +55,7 @@ fn start(
     Arc<AtomicBool>,
     Arc<TestWorkspace>,
     thread::JoinHandle<Result<Value>>,
+    Arc<AtomicU64>,
 ) {
     let backend = Arc::new(TestWorkspace::new(db, false, VALID_AGENT));
     let stop = Arc::new(AtomicBool::new(false));
@@ -64,6 +65,7 @@ fn start(
         max_waiting,
         ..supervise_options(4, false)
     };
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend) = (db.to_path_buf(), repo.to_path_buf(), backend.clone());
         thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
@@ -71,7 +73,7 @@ fn start(
     wait_until(db, Duration::from_secs(30), |queue| {
         queue.supervisors().unwrap().len() == 1
     });
-    (stop, backend, supervisor)
+    (stop, backend, supervisor, passes)
 }
 
 fn finish(
@@ -94,7 +96,7 @@ fn finish(
 fn the_supervisor_table_sets_parallel_and_max_waiting_and_is_read_again() {
     let (_dir, repo, db) = fixture();
     write_config(&repo, "[supervisor]\nparallel = 1\nmax_waiting = 0\n");
-    let (stop, backend, supervisor) = start(&db, &repo, None, None);
+    let (stop, backend, supervisor, passes) = start(&db, &repo, None, None);
     assert_eq!(registered(&db), (1, "dagq.toml", Some(0), "dagq.toml"));
     for report in [
         runtime::status(&db).unwrap(),
@@ -136,7 +138,7 @@ fn the_supervisor_table_sets_parallel_and_max_waiting_and_is_read_again() {
 
     // Invalid: the values in use stay, nothing is recorded.
     write_config(&repo, "[supervisor]\nparallel = 0\n");
-    thread::sleep(TEST_TICK * 10);
+    await_passes(&passes, SOME_PASSES);
     assert_eq!(registered(&db), (2, "dagq.toml", Some(3), "dagq.toml"));
     assert_eq!(events(&db, "supervisor_config_changed").len(), 1);
 
@@ -155,16 +157,16 @@ fn the_supervisor_table_sets_parallel_and_max_waiting_and_is_read_again() {
 fn a_flag_wins_over_the_table_and_the_default_is_four() {
     let (_dir, repo, db) = fixture();
     write_config(&repo, "[supervisor]\nparallel = 1\nmax_waiting = 2\n");
-    let (stop, backend, supervisor) = start(&db, &repo, Some(3), None);
+    let (stop, backend, supervisor, passes) = start(&db, &repo, Some(3), None);
     assert_eq!(registered(&db), (3, "flag", Some(2), "dagq.toml"));
     write_config(&repo, "[supervisor]\nparallel = 2\nmax_waiting = 2\n");
-    thread::sleep(TEST_TICK * 10);
+    await_passes(&passes, SOME_PASSES);
     assert_eq!(registered(&db), (3, "flag", Some(2), "dagq.toml"));
     assert!(events(&db, "supervisor_config_changed").is_empty());
     finish(&stop, &backend, supervisor);
 
     // Both flags: the table is not used.
-    let (stop, backend, supervisor) = start(&db, &repo, Some(2), Some(1));
+    let (stop, backend, supervisor, _) = start(&db, &repo, Some(2), Some(1));
     assert_eq!(registered(&db), (2, "flag", Some(1), "flag"));
     let doctor = runtime::doctor(&db, false).unwrap();
     assert_eq!(doctor["supervisors"][0]["parallel_source"], "flag");
@@ -173,7 +175,7 @@ fn a_flag_wins_over_the_table_and_the_default_is_four() {
 
     // Neither flag nor file.
     fs::remove_file(repo.join("dagq.toml")).unwrap();
-    let (stop, backend, supervisor) = start(&db, &repo, None, None);
+    let (stop, backend, supervisor, _) = start(&db, &repo, None, None);
     assert_eq!(registered(&db), (4, "default", Some(4), "default"));
     finish(&stop, &backend, supervisor);
 }
@@ -202,7 +204,7 @@ fn registered_planners(db: &Path) -> (Option<u32>, &'static str) {
 fn the_supervisor_table_sets_runtime_planners_and_is_read_again() {
     let (_dir, repo, db) = fixture();
     write_config(&repo, "[supervisor]\nruntime_planners = 2\n");
-    let (stop, backend, supervisor) = start(&db, &repo, Some(1), Some(0));
+    let (stop, backend, supervisor, passes) = start(&db, &repo, Some(1), Some(0));
     assert_eq!(registered_planners(&db), (Some(2), "dagq.toml"));
     for report in [
         runtime::status(&db).unwrap(),
@@ -229,7 +231,7 @@ fn the_supervisor_table_sets_runtime_planners_and_is_read_again() {
     assert_eq!(registered(&db), (1, "flag", Some(0), "flag"));
 
     write_config(&repo, "[supervisor]\nruntime_planners = 0\n");
-    thread::sleep(TEST_TICK * 10);
+    await_passes(&passes, SOME_PASSES);
     assert_eq!(registered_planners(&db), (Some(3), "dagq.toml"));
     assert_eq!(events(&db, "supervisor_config_changed").len(), 1);
 
