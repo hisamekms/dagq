@@ -214,14 +214,25 @@ fn a_revise_verdict_is_fixed_by_the_live_session_and_reviewed_again() {
 }
 
 /// Revise is sent at most twice; a third review that does not pass becomes
-/// an `approve_landing` ask after `/exit` and the close. `land` then lands
-/// the run as an approved one.
+/// an `approve_landing` ask after `/exit` and the close. Here the third is
+/// a `concern` whose job recommends `send_back` with high confidence: past
+/// the round's two revises it is not applied but asked, with the job's
+/// recommendation (ADR-t451-1 decision 3). `land` then lands the run as an
+/// approved one. A third `revise` asks the same way
+/// (`runtime_job_verdicts::a_revise_past_its_limit_is_asked_at_the_review_jobs_request`,
+/// its text `landing::tests::a_revise_past_its_limit_asks_with_the_count_of_revises`).
 #[test]
 fn a_third_review_that_does_not_pass_asks_a_person_and_land_lands_it() {
     let (_dir, repo, db) = fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
     let backend = TestWorkspace::new(&db, false, &revising_agent(2));
-    let reviewer = TestReviewer::new(&[verdict("revise", &["still short"], "not yet")]);
+    let send_back = json!({"verdict": "concern", "reasons": ["still short"], "summary": "not yet",
+                           "recommendation": "send_back", "confidence": "high", "reason_category": null});
+    let reviewer = TestReviewer::new(&[
+        verdict("revise", &["still short"], "not yet"),
+        verdict("revise", &["still short"], "not yet"),
+        format!("printf '%s\\n' '{send_back}'"),
+    ]);
     let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
@@ -244,9 +255,18 @@ fn a_third_review_that_does_not_pass_asks_a_person_and_land_lands_it() {
     assert_eq!(ask.run_id.as_ref(), Some(run.id()));
     assert_eq!(ask.options, ["land", "send_back", "cancel"]);
     assert_eq!(ask.asked_by, "supervisor");
+    assert_eq!(
+        payloads(&detail, "concern_decided"),
+        [
+            &json!({"attempt": 3, "recommendation": "send_back", "confidence": "high",
+                 "reason_category": null, "applied": false, "escalated_because": "revise_limit"})
+        ]
+    );
+    assert_eq!(ask.recommendation.as_deref(), Some("send_back"));
+    assert_eq!(ask.confidence, Some(dagq::domain::AskConfidence::High));
     assert!(
         ask.question.contains(
-            "returned revise (the review still asks for changes after 2 revises): not yet"
+            "returned concern (the review recommends send_back after 2 revises): not yet"
         ),
         "{}",
         ask.question
@@ -418,28 +438,6 @@ fn a_concern_sent_back_is_resumed_reviewed_again_and_landed() {
     assert_eq!(reviewer.prompts().len(), 2);
 }
 
-/// `cancel` fails the run and cancels its task.
-#[test]
-fn a_concern_canceled_fails_the_run_and_cancels_the_task() {
-    let (_dir, repo, db) = fixture();
-    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
-    let reviewer = TestReviewer::new(&[verdict("concern", &["not wanted"], "drop it")]);
-    supervise_reviewed(&db, &repo, &backend, &reviewer);
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let ask = queue.asks(Default::default()).unwrap()[0].clone();
-    queue.answer(ask.id, "cancel").unwrap();
-    supervise_reviewed(&db, &repo, &backend, &reviewer);
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    assert_eq!(detail.task.status(), TaskStatus::Canceled);
-    assert_eq!(detail.runs[0].status(), RunStatus::Failed);
-    assert_eq!(
-        detail.runs[0].last_error(),
-        Some(format!("canceled by ask {}", ask.id).as_str())
-    );
-    assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
-    assert_eq!(reviewer.prompts().len(), 1);
-}
-
 /// A run whose review returned `concern` and opened ask A, then sent back
 /// without the ask (as by hand) so that A stays open; with `answered`, A is
 /// answered `land` but not applied (the run no longer awaits integration).
@@ -523,98 +521,99 @@ fn assert_closed_by_runtime(
 }
 
 /// A later review of a run that does not pass closes the run's earlier
-/// `approve_landing` ask, open or answered but not applied, as the
-/// runtime, and opens a new one with the new review's reasons, rather
-/// than being folded into the earlier one (task 425).
+/// `approve_landing` ask as the runtime, and opens a new one with the new
+/// review's reasons, rather than being folded into the earlier one (task
+/// 425). Here the earlier ask is open; one answered but not applied is
+/// closed the same way (`SqliteQueue::close_approve_landing_asks`), as
+/// [`a_run_the_supervisor_lands_closes_its_landing_ask`] shows.
 #[test]
 fn a_later_concern_closes_the_earlier_landing_ask_and_asks_again() {
-    for answered in [false, true] {
-        let (_dir, repo, db) = fixture();
-        let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
-        let reviewer = TestReviewer::new(&[
-            verdict("concern", &["the first finding"], "first"),
-            verdict("concern", &["the second finding"], "second"),
-        ]);
-        let (run, stale) = sent_back_past_its_ask(&db, &repo, &backend, &reviewer, answered);
-        let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
-        assert_eq!(outcome["errors"], json!([]), "{outcome}");
-        let mut queue = SqliteQueue::open(&db).unwrap();
-        let detail = queue.show(TaskId::new(1)).unwrap();
-        assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
-        assert_eq!(reviewer.prompts().len(), 2);
-        assert_closed_by_runtime(
-            &mut queue,
-            &run,
-            &stale,
-            "a later review of the run asks again; closed by the runtime",
-        );
-        let asks = queue.asks(Default::default()).unwrap();
-        assert_eq!(asks.len(), 1, "{asks:?}");
-        let fresh = &asks[0];
-        assert_ne!(fresh.id, stale.id);
-        assert_eq!(fresh.kind, dagq::domain::AskKind::ApproveLanding);
-        assert_eq!(fresh.run_id.as_ref(), Some(run.id()));
-        assert!(fresh.answer.is_none());
-        assert!(
-            fresh.question.contains("returned concern: second"),
-            "{}",
-            fresh.question
-        );
-        assert!(
-            fresh.question.contains("\n- the second finding"),
-            "{}",
-            fresh.question
-        );
-        // The earlier answer was not applied to the later review.
-        assert!(payloads(&detail, "integration_approved").is_empty());
-    }
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let reviewer = TestReviewer::new(&[
+        verdict("concern", &["the first finding"], "first"),
+        verdict("concern", &["the second finding"], "second"),
+    ]);
+    let (run, stale) = sent_back_past_its_ask(&db, &repo, &backend, &reviewer, false);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
+    assert_eq!(reviewer.prompts().len(), 2);
+    assert_closed_by_runtime(
+        &mut queue,
+        &run,
+        &stale,
+        "a later review of the run asks again; closed by the runtime",
+    );
+    let asks = queue.asks(Default::default()).unwrap();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    let fresh = &asks[0];
+    assert_ne!(fresh.id, stale.id);
+    assert_eq!(fresh.kind, dagq::domain::AskKind::ApproveLanding);
+    assert_eq!(fresh.run_id.as_ref(), Some(run.id()));
+    assert!(fresh.answer.is_none());
+    assert!(
+        fresh.question.contains("returned concern: second"),
+        "{}",
+        fresh.question
+    );
+    assert!(
+        fresh.question.contains("\n- the second finding"),
+        "{}",
+        fresh.question
+    );
+    assert!(payloads(&detail, "integration_approved").is_empty());
 }
 
 /// A run the supervisor lands closes its `approve_landing` ask nobody
-/// closed, open or answered but not applied (task 425).
+/// closed (task 425): here one answered but not applied, whose answer the
+/// landing does not apply. An open one is closed the same way, as
+/// [`a_later_concern_closes_the_earlier_landing_ask_and_asks_again`] and
+/// [`integrate_by_hand_closes_the_landing_and_blocked_asks_of_the_run`] show.
 #[test]
 fn a_run_the_supervisor_lands_closes_its_landing_ask() {
-    for answered in [false, true] {
-        let (_dir, repo, db) = fixture();
-        let base = git_out(&repo, &["rev-parse", "main"]);
-        let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
-        let reviewer = TestReviewer::new(&[
-            verdict("concern", &["the first finding"], "first"),
-            verdict("pass", &[], "fixed"),
-        ]);
-        let (run, stale) = sent_back_past_its_ask(&db, &repo, &backend, &reviewer, answered);
-        let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
-        assert_eq!(outcome["errors"], json!([]), "{outcome}");
-        let mut queue = SqliteQueue::open(&db).unwrap();
-        let detail = queue.show(TaskId::new(1)).unwrap();
-        assert_landed_run(&detail.runs[0], &repo, &base);
-        assert_closed_by_runtime(
-            &mut queue,
-            &run,
-            &stale,
-            "the run was integrated; closed by the runtime",
-        );
-        assert!(queue.asks(Default::default()).unwrap().is_empty());
-        // Closed by the landing, after the run was integrated.
-        let kinds = event_kinds(&detail);
-        let closing = if answered {
-            "ask_closed"
-        } else {
-            "ask_answered"
-        };
-        let closed_at = kinds
-            .iter()
-            .rposition(|k| *k == closing)
-            .expect("the ask was closed");
-        assert!(position(&kinds, "run_integrated") < closed_at, "{kinds:?}");
-    }
+    let (_dir, repo, db) = fixture();
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let reviewer = TestReviewer::new(&[
+        verdict("concern", &["the first finding"], "first"),
+        verdict("pass", &[], "fixed"),
+    ]);
+    let (run, stale) = sent_back_past_its_ask(&db, &repo, &backend, &reviewer, true);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_landed_run(&detail.runs[0], &repo, &base);
+    assert_closed_by_runtime(
+        &mut queue,
+        &run,
+        &stale,
+        "the run was integrated; closed by the runtime",
+    );
+    assert!(queue.asks(Default::default()).unwrap().is_empty());
+    // Closed by the landing, after the run was integrated.
+    let kinds = event_kinds(&detail);
+    let closed_at = kinds
+        .iter()
+        .rposition(|k| *k == "ask_closed")
+        .expect("the ask was closed");
+    assert!(position(&kinds, "run_integrated") < closed_at, "{kinds:?}");
+    // The earlier answer was not applied: the review's pass landed it.
+    assert!(payloads(&detail, "integration_approved").is_empty());
 }
 
 /// `integrate` by hand of a run whose review asked a person closes the
 /// run's `approve_landing` ask: nobody needs to answer it any more
-/// (task 425).
+/// (task 425). Landing it also closes the `blocked` asks the observer
+/// opened on the run or on its task, as the runtime, so they no longer
+/// raise `ask_unanswered`; a blocked ask about no task stays open (task
+/// 329).
 #[test]
-fn integrate_by_hand_closes_the_landing_ask_of_the_run() {
+fn integrate_by_hand_closes_the_landing_and_blocked_asks_of_the_run() {
+    use dagq::domain::{AskReason, NewAsk};
     let (_dir, repo, db) = fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
     let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
@@ -625,32 +624,6 @@ fn integrate_by_hand_closes_the_landing_ask_of_the_run() {
     let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
     let stale = queue.asks(Default::default()).unwrap()[0].clone();
     assert!(stale.closed_at.is_none());
-    let outcome = integrate(&db, 1, &repo).unwrap();
-    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    assert_landed_run(&detail.runs[0], &repo, &base);
-    assert_closed_by_runtime(
-        &mut queue,
-        &run,
-        &stale,
-        "the run was integrated; closed by the runtime",
-    );
-    assert!(queue.asks(Default::default()).unwrap().is_empty());
-}
-
-/// Landing a run closes the `blocked` asks the observer opened on the run
-/// or on its task, as the runtime, so they no longer raise
-/// `ask_unanswered`; a blocked ask about no task stays open (task 329).
-#[test]
-fn integrate_closes_the_blocked_asks_of_the_run_and_its_task() {
-    use dagq::domain::{AskKind, AskReason, NewAsk};
-    let (_dir, repo, db) = fixture();
-    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
-    let reviewer = TestReviewer::new(&[verdict("concern", &["a finding"], "first")]);
-    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
     let mut blocked = |task_id: Option<TaskId>, run_id: Option<RunId>| {
         queue
             .ask(NewAsk {
@@ -674,7 +647,9 @@ fn integrate_closes_the_blocked_asks_of_the_run_and_its_task() {
     let of_queue = blocked(None, None);
     let outcome = integrate(&db, 1, &repo).unwrap();
     assert_eq!(outcome["outcome"], "integrated", "{outcome}");
-    for stale in [&of_run, &of_task] {
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_landed_run(&detail.runs[0], &repo, &base);
+    for stale in [&stale, &of_run, &of_task] {
         assert_closed_by_runtime(
             &mut queue,
             &run,
@@ -700,298 +675,144 @@ fn integrate_closes_the_blocked_asks_of_the_run_and_its_task() {
     assert!(closed_of_task.run_id.is_none());
 }
 
-/// A headless review that fails (a non-zero exit, stdout without a verdict,
-/// or the timeout) exits and closes the session, and in the step that
-/// records `review_failed` opens an `approve_landing` ask with the failure
-/// and where the review material is (task 328). Stdout without a readable
-/// verdict (here an unescaped quote, or prose) is reviewed
-/// once more first; a job that failed is not. The ask, not the failure, is
-/// the attention, and its answer is applied by the supervisor: `land`
-/// lands the run, `cancel` fails it and cancels the task.
+/// A headless review whose job fails (here a non-zero exit) exits and
+/// closes the session, is not reviewed again, and in the step that records
+/// `review_failed` opens an `approve_landing` ask with the failure and where
+/// the review material and output are (task 328). The ask carries no
+/// recommendation and no `concern_decided` is recorded (ADR-t451-1). The
+/// ask, not the failure, is the attention, and its answer is applied by the
+/// supervisor: here `cancel` fails the run and cancels the task. Which ends
+/// are reviewed again and the ask's text for each are
+/// `landing::tests::only_an_unreadable_verdict_is_reviewed_again_once` and
+/// `landing::tests::a_failed_review_that_ran_names_its_own_output`; the
+/// timeout is `runtime_headless_jobs::a_timed_out_review_stops_the_processes_it_started`.
 #[test]
 fn a_failed_review_closes_the_session_and_asks_a_person_in_the_same_step() {
-    let unquoted = r#"printf '%s\n' '{"verdict":"pass","reasons":[],"summary":"says "fine""}'"#;
-    for (script, timeout, expected, reviews, answer) in [
-        (
-            "echo broken >&2; exit 3",
-            60,
-            "exited with exit status: 3: broken",
-            1,
-            "land",
-        ),
-        (
-            "echo 'no verdict here'",
-            60,
-            "the review printed no verdict JSON",
-            2,
-            "cancel",
-        ),
-        (
-            unquoted,
-            60,
-            "the review printed no verdict JSON",
-            2,
-            "land",
-        ),
-        ("sleep 30", 1, "did not finish within 1 seconds", 1, "land"),
+    let expected = "exited with exit status: 3: broken";
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let reviewer = TestReviewer::new(&["echo broken >&2; exit 3".to_owned()]);
+    let cursor = SqliteQueue::open(&db)
+        .unwrap()
+        .latest_event_id()
+        .unwrap()
+        .as_i64();
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let run = detail.runs[0].clone();
+    assert!(queue.run_leases().unwrap().is_empty());
+    assert_eq!(backend.closed(), vec![WORKSPACE_ID.to_owned()]);
+    let kinds = event_kinds(&detail);
+    assert!(!kinds.contains(&"review_finished"), "{kinds:?}");
+    assert!(!kinds.contains(&"concern_decided"), "{kinds:?}");
+    // A job that failed is not reviewed again.
+    assert_eq!(reviewer.prompts().len(), 1);
+    assert_eq!(payloads(&detail, "review_started").len(), 1);
+    assert!(payloads(&detail, "review_retried").is_empty(), "{kinds:?}");
+    assert!(position(&kinds, "workspace_closed") < position(&kinds, "ask_opened"));
+    assert!(position(&kinds, "ask_opened") < position(&kinds, "review_failed"));
+    let failed = payloads(&detail, "review_failed");
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0]["attempt"], 1);
+    assert_eq!(failed[0]["code"], "job_failed");
+    assert_eq!(failed[0]["status"], "awaiting_integration");
+    let error = failed[0]["error"].as_str().unwrap();
+    assert!(error.contains(expected), "{error}");
+    // The ask carries the failure and the material.
+    let asks = queue.asks(Default::default()).unwrap();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    let ask = &asks[0];
+    assert_eq!(failed[0]["ask_id"], ask.id.as_i64());
+    assert_eq!(ask.kind, dagq::domain::AskKind::ApproveLanding);
+    assert_eq!(ask.run_id.as_ref(), Some(run.id()));
+    assert_eq!(ask.options, ["land", "send_back", "cancel"]);
+    assert_eq!(ask.asked_by, "supervisor");
+    assert_eq!(ask.recommendation, None);
+    assert_eq!(ask.confidence, None);
+    let run_dir = run.run_dir().unwrap();
+    for part in [
+        "failed and gave no verdict (review 1): ".to_owned(),
+        expected.to_owned(),
+        format!("Review material: {run_dir}/review.md"),
+        format!("Review output: {run_dir}/review-1.out, {run_dir}/review-1.err"),
     ] {
-        let (_dir, repo, db) = fixture();
-        let base = git_out(&repo, &["rev-parse", "main"]);
-        let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
-        let mut reviewer = TestReviewer::new(&[script.to_owned()]);
-        reviewer.timeout = Duration::from_secs(timeout);
-        let cursor = SqliteQueue::open(&db)
-            .unwrap()
-            .latest_event_id()
-            .unwrap()
-            .as_i64();
-        let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
-        assert_eq!(outcome["errors"], json!([]), "{outcome}");
-        assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
-        let mut queue = SqliteQueue::open(&db).unwrap();
-        let detail = queue.show(TaskId::new(1)).unwrap();
-        let run = detail.runs[0].clone();
-        assert!(queue.run_leases().unwrap().is_empty());
-        assert_eq!(backend.closed(), vec![WORKSPACE_ID.to_owned()]);
-        let kinds = event_kinds(&detail);
-        assert!(!kinds.contains(&"review_finished"), "{kinds:?}");
-        assert_eq!(reviewer.prompts().len(), reviews, "{script}");
-        assert_eq!(payloads(&detail, "review_started").len(), reviews);
-        let retried = payloads(&detail, "review_retried");
-        assert_eq!(retried.len(), reviews - 1, "{kinds:?}");
-        if let Some(retried) = retried.first() {
-            assert_eq!(retried["attempt"], 1);
-            assert!(retried["error"].as_str().unwrap().contains(expected));
-        }
-        assert!(position(&kinds, "workspace_closed") < position(&kinds, "ask_opened"));
-        assert!(position(&kinds, "ask_opened") < position(&kinds, "review_failed"));
-        let failed = payloads(&detail, "review_failed");
-        assert_eq!(failed.len(), 1);
-        assert_eq!(failed[0]["attempt"], reviews);
-        assert_eq!(failed[0]["status"], "awaiting_integration");
-        let error = failed[0]["error"].as_str().unwrap();
-        assert!(error.contains(expected), "{error}");
-        // The ask carries the failure and the material.
-        let asks = queue.asks(Default::default()).unwrap();
-        assert_eq!(asks.len(), 1, "{asks:?}");
-        let ask = &asks[0];
-        assert_eq!(failed[0]["ask_id"], ask.id.as_i64());
-        assert_eq!(ask.kind, dagq::domain::AskKind::ApproveLanding);
-        assert_eq!(ask.run_id.as_ref(), Some(run.id()));
-        assert_eq!(ask.options, ["land", "send_back", "cancel"]);
-        assert_eq!(ask.asked_by, "supervisor");
-        let run_dir = run.run_dir().unwrap();
-        for part in [
-            format!("failed and gave no verdict (review {reviews}): "),
-            expected.to_owned(),
-            format!("Review material: {run_dir}/review.md"),
-            format!(
-                "Review output: {run_dir}/review-{reviews}.out, {run_dir}/review-{reviews}.err"
-            ),
-        ] {
-            assert!(ask.question.contains(&part), "{part} in {}", ask.question);
-        }
-        {
-            let notifications = backend.notifications.lock().unwrap();
-            assert_eq!(notifications.len(), 1, "{notifications:?}");
-            assert!(notifications[0].0.ends_with("approve_landing"));
-        }
-        // The ask is the attention, and the only event that wakes the inbox.
-        let status = runtime::status(&db).unwrap();
-        assert!(run_attention_of(&status, run.id()).is_none(), "{status}");
-        assert!(
-            status["attention"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|a| a["ask_id"] == json!(ask.id)
-                    && a["next"] == format!("answer ask {}", ask.id)),
-            "{status}"
-        );
-        let events = dagq::watch::events(&db, EventId::new(cursor), 100, false).unwrap();
-        let events = events["events"].as_array().unwrap();
-        assert_eq!(events.len(), 1, "{events:?}");
-        assert_eq!(events[0]["kind"], "ask_opened");
-        // The supervisor applies the answer.
-        queue.answer(ask.id, answer).unwrap();
-        let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
-        assert_eq!(outcome["errors"], json!([]), "{outcome}");
-        let detail = queue.show(TaskId::new(1)).unwrap();
-        assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
-        if answer == "land" {
-            assert_landed_run(&detail.runs[0], &repo, &base);
-            assert_eq!(detail.task.status(), TaskStatus::Completed);
-            assert_eq!(
-                payloads(&detail, "integration_approved")[0]["ask_id"],
-                ask.id.as_i64()
-            );
-        } else {
-            assert_eq!(detail.runs[0].status(), RunStatus::Failed);
-            assert_eq!(detail.task.status(), TaskStatus::Canceled);
-        }
-        // No review after the answer.
-        assert_eq!(reviewer.prompts().len(), reviews);
+        assert!(ask.question.contains(&part), "{part} in {}", ask.question);
     }
+    {
+        let notifications = backend.notifications.lock().unwrap();
+        assert_eq!(notifications.len(), 1, "{notifications:?}");
+        assert!(notifications[0].0.ends_with("approve_landing"));
+    }
+    // The ask is the attention, and the only event that wakes the inbox.
+    let status = runtime::status(&db).unwrap();
+    assert!(run_attention_of(&status, run.id()).is_none(), "{status}");
+    assert!(
+        status["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["ask_id"] == json!(ask.id) && a["next"] == format!("answer ask {}", ask.id)),
+        "{status}"
+    );
+    let events = dagq::watch::events(&db, EventId::new(cursor), 100, false).unwrap();
+    let events = events["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["kind"], "ask_opened");
+    // The supervisor applies the answer.
+    queue.answer(ask.id, "cancel").unwrap();
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
+    assert_eq!(detail.runs[0].status(), RunStatus::Failed);
+    assert_eq!(
+        detail.runs[0].last_error(),
+        Some(format!("canceled by ask {}", ask.id).as_str())
+    );
+    assert_eq!(detail.task.status(), TaskStatus::Canceled);
+    // No review after the answer.
+    assert_eq!(reviewer.prompts().len(), 1);
 }
 
-/// A review that could not start wrote no output, so its `approve_landing`
-/// ask names no `review-N.out` / `.err` of its own (task 426): only the
-/// failure and `review.md`, and, when it was the retry of a review that ran
-/// and printed an unreadable verdict, that earlier review's output.
-#[test]
-fn a_review_that_could_not_start_names_no_output_of_its_own() {
-    let unreadable = "echo 'no verdict here'".to_owned();
-    for (scripts, reviews, earlier) in [
-        (vec![UNSTARTABLE_REVIEW.to_owned()], 1, None),
-        (vec![unreadable, UNSTARTABLE_REVIEW.to_owned()], 2, Some(1)),
-    ] {
-        let (_dir, repo, db) = fixture();
-        let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
-        let reviewer = TestReviewer::new(&scripts);
-        let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
-        assert_eq!(outcome["errors"], json!([]), "{outcome}");
-        assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
-        let mut queue = SqliteQueue::open(&db).unwrap();
-        let detail = queue.show(TaskId::new(1)).unwrap();
-        let run = detail.runs[0].clone();
-        let run_dir = run.run_dir().unwrap();
-        let failed = payloads(&detail, "review_failed");
-        assert_eq!(failed.len(), 1);
-        assert_eq!(failed[0]["attempt"], reviews);
-        let asks = queue.asks(Default::default()).unwrap();
-        assert_eq!(asks.len(), 1, "{asks:?}");
-        let question = &asks[0].question;
-        assert_eq!(failed[0]["ask_id"], asks[0].id.as_i64());
-        for part in [
-            format!("failed and gave no verdict (review {reviews}): "),
-            "the headless review could not start".to_owned(),
-            "the test reviewer cannot start this review".to_owned(),
-            format!("Review material: {run_dir}/review.md"),
-        ] {
-            assert!(question.contains(&part), "{part} in {question}");
-        }
-        // The review that could not start wrote nothing and is not named.
-        assert!(!Path::new(&format!("{run_dir}/review-{reviews}.out")).exists());
-        assert!(
-            !question.contains(&format!("review-{reviews}.out")),
-            "{question}"
-        );
-        assert!(
-            !question.contains(&format!("review-{reviews}.err")),
-            "{question}"
-        );
-        match earlier {
-            Some(ran) => {
-                assert!(Path::new(&format!("{run_dir}/review-{ran}.out")).exists());
-                let part = format!(
-                    "Review output of the earlier review {ran}: {run_dir}/review-{ran}.out, {run_dir}/review-{ran}.err"
-                );
-                assert!(question.contains(&part), "{part} in {question}");
-            }
-            None => assert!(!question.contains("Review output"), "{question}"),
-        }
-    }
-}
-
-/// A failed review's span ends with its job (task 541): the job that
-/// failed, timed out, printed no readable verdict twice, or could not start
-/// closes the review span as `job_finished` when it ends, before the
+/// A failed review's span ends with its job (task 541), before the
 /// session's `/exit`, which here takes half a second more; `review_failed`
-/// and its ask still follow the exit.
+/// and its ask still follow the exit. Here review 1 prints no readable
+/// verdict, so it is reviewed once more with the same input (task 328),
+/// and that review cannot start: both spans are closed as `job_finished`,
+/// and the ask names only the output of review 1, the one that ran (task
+/// 426). Which ends are reviewed again and the ask's text for each are
+/// `landing::tests::only_an_unreadable_verdict_is_reviewed_again_once` and
+/// `landing::tests::a_review_that_could_not_start_names_no_output_of_its_own`.
 #[test]
 fn a_failed_review_span_ends_with_its_job_not_with_the_exit() {
     use dagq::domain::stats::rfc3339_millis;
     let slow_exit = "commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit; sleep 0.5";
-    for (scripts, timeout, reviews) in [
-        (vec!["echo broken >&2; exit 3".to_owned()], 60, 1),
-        (vec!["sleep 30".to_owned()], 1, 1),
-        (vec!["echo 'no verdict here'".to_owned()], 60, 2),
-        (vec![UNSTARTABLE_REVIEW.to_owned()], 60, 1),
-    ] {
-        let (_dir, repo, db) = fixture();
-        let backend = TestWorkspace::new(&db, false, slow_exit);
-        let mut reviewer = TestReviewer::new(&scripts);
-        reviewer.timeout = Duration::from_secs(timeout);
-        let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
-        assert_eq!(outcome["errors"], json!([]), "{outcome}");
-        assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
-        let mut queue = SqliteQueue::open(&db).unwrap();
-        let detail = queue.show(TaskId::new(1)).unwrap();
-        let event = |kind: &str| {
-            detail
-                .events
-                .iter()
-                .rev()
-                .find(|e| e.kind == kind)
-                .unwrap_or_else(|| panic!("no {kind} in {:?}", event_kinds(&detail)))
-        };
-        let reviews_closed: Vec<_> = detail
-            .events
-            .iter()
-            .filter(|e| e.kind == "session_closed" && e.payload["kind"] == "review")
-            .collect();
-        assert_eq!(reviews_closed.len(), reviews, "{scripts:?}");
-        assert!(
-            reviews_closed
-                .iter()
-                .all(|e| e.payload["reason"] == "job_finished"),
-            "{reviews_closed:?}"
-        );
-        // Every review span is closed; none is left open.
-        assert_eq!(
-            payloads(&detail, "session_opened")
-                .iter()
-                .filter(|p| p["kind"] == "review")
-                .count(),
-            reviews
-        );
-        let closed = reviews_closed.last().unwrap();
-        let failed = event("review_failed");
-        // Closed before the /exit was even asked, and half a second or
-        // more before the session exited and `review_failed` was recorded.
-        assert!(closed.id < event("exit_requested").id, "{scripts:?}");
-        let at = |e: &dagq::domain::RunEvent| rfc3339_millis(&e.created_at).unwrap();
-        assert!(
-            at(event("session_exited")) - at(closed) >= 500,
-            "{} then {}",
-            closed.created_at,
-            event("session_exited").created_at
-        );
-        assert!(at(failed) >= at(event("session_exited")));
-        // The ask goes with the failure as before.
-        let asks = queue.asks(Default::default()).unwrap();
-        assert_eq!(asks.len(), 1, "{asks:?}");
-        assert_eq!(failed.payload["ask_id"], asks[0].id.as_i64());
-        assert_eq!(failed.payload["attempt"], reviews);
-        let kinds = event_kinds(&detail);
-        assert!(position(&kinds, "ask_opened") < position(&kinds, "review_failed"));
-    }
-}
-
-/// A review whose stdout holds no readable verdict is reviewed once more
-/// with the same input (task 328); a verdict from the retry goes on as
-/// usual, here a pass that lands without anyone asked.
-#[test]
-fn an_unreadable_verdict_is_reviewed_again_and_a_readable_one_lands() {
     let (_dir, repo, db) = fixture();
-    let base = git_out(&repo, &["rev-parse", "main"]);
-    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let backend = TestWorkspace::new(&db, false, slow_exit);
     let reviewer = TestReviewer::new(&[
-        r#"printf '%s\n' '{"verdict":"pass","reasons":[],"summary":"says "fine""}'"#.to_owned(),
-        verdict("pass", &[], "meets the acceptance"),
+        "echo 'no verdict here'".to_owned(),
+        UNSTARTABLE_REVIEW.to_owned(),
     ]);
     let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(1)).unwrap();
-    assert_landed_run(&detail.runs[0], &repo, &base);
-    assert_eq!(detail.task.status(), TaskStatus::Completed);
+    let event = |kind: &str| {
+        detail
+            .events
+            .iter()
+            .rev()
+            .find(|e| e.kind == kind)
+            .unwrap_or_else(|| panic!("no {kind} in {:?}", event_kinds(&detail)))
+    };
+    // Reviewed once more with the same input, so the same prompt.
     let prompts = reviewer.prompts();
     assert_eq!(prompts.len(), 2);
-    // The same input, so the same prompt.
     assert_eq!(prompts[0], prompts[1]);
-    let kinds = event_kinds(&detail);
-    assert!(!kinds.contains(&"review_failed"), "{kinds:?}");
     let retried = payloads(&detail, "review_retried");
     assert_eq!(retried.len(), 1);
     assert_eq!(retried[0]["attempt"], 1);
@@ -999,23 +820,67 @@ fn an_unreadable_verdict_is_reviewed_again_and_a_readable_one_lands() {
         retried[0]["error"]
             .as_str()
             .unwrap()
-            .contains("the review printed no verdict JSON")
+            .contains("the review printed no verdict JSON"),
+        "{retried:?}"
     );
-    let finished = payloads(&detail, "review_finished");
-    assert_eq!(finished.len(), 1);
-    assert_eq!(finished[0]["attempt"], 2);
-    assert_eq!(finished[0]["verdict"], "pass");
-    assert!(position(&kinds, "review_retried") < position(&kinds, "review_finished"));
+    let reviews_closed: Vec<_> = detail
+        .events
+        .iter()
+        .filter(|e| e.kind == "session_closed" && e.payload["kind"] == "review")
+        .collect();
+    assert_eq!(reviews_closed.len(), 2);
     assert!(
-        queue
-            .asks(AskQuery {
-                all: true,
-                ..Default::default()
-            })
-            .unwrap()
-            .is_empty()
+        reviews_closed
+            .iter()
+            .all(|e| e.payload["reason"] == "job_finished"),
+        "{reviews_closed:?}"
     );
-    assert!(backend.notifications.lock().unwrap().is_empty());
+    // Every review span is closed; none is left open.
+    assert_eq!(
+        payloads(&detail, "session_opened")
+            .iter()
+            .filter(|p| p["kind"] == "review")
+            .count(),
+        2
+    );
+    let closed = reviews_closed.last().unwrap();
+    let failed = event("review_failed");
+    // Closed before the /exit was even asked, and half a second or
+    // more before the session exited and `review_failed` was recorded.
+    assert!(closed.id < event("exit_requested").id);
+    let at = |e: &dagq::domain::RunEvent| rfc3339_millis(&e.created_at).unwrap();
+    assert!(
+        at(event("session_exited")) - at(closed) >= 500,
+        "{} then {}",
+        closed.created_at,
+        event("session_exited").created_at
+    );
+    assert!(at(failed) >= at(event("session_exited")));
+    // The ask goes with the failure as before.
+    let asks = queue.asks(Default::default()).unwrap();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    assert_eq!(failed.payload["ask_id"], asks[0].id.as_i64());
+    assert_eq!(failed.payload["attempt"], 2);
+    let kinds = event_kinds(&detail);
+    assert!(position(&kinds, "ask_opened") < position(&kinds, "review_failed"));
+    // The review that could not start wrote nothing and is not named; the
+    // one before it ran and is.
+    let run_dir = detail.runs[0].run_dir().unwrap();
+    let question = &asks[0].question;
+    for part in [
+        "failed and gave no verdict (review 2): ".to_owned(),
+        "the headless review could not start".to_owned(),
+        "the test reviewer cannot start this review".to_owned(),
+        format!("Review material: {run_dir}/review.md"),
+        format!(
+            "Review output of the earlier review 1: {run_dir}/review-1.out, {run_dir}/review-1.err"
+        ),
+    ] {
+        assert!(question.contains(&part), "{part} in {question}");
+    }
+    assert!(Path::new(&format!("{run_dir}/review-1.out")).exists());
+    assert!(!Path::new(&format!("{run_dir}/review-2.out")).exists());
+    assert!(!question.contains("review-2."), "{question}");
 }
 
 /// A session that writes its receipt and goes idle before its wrapper has

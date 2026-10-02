@@ -42,31 +42,56 @@ fn landing_ask(queue: &SqliteQueue, run: &TaskRun) -> dagq::domain::Ask {
 
 /// A `land` of high confidence and no reason lands like a pass: the
 /// session exits right before the landing, no ask opens, and stats counts
-/// it among the judgements made without an `approve_landing`.
+/// it among the judgements made without an `approve_landing`. Here the
+/// first review prints no readable verdict (an unescaped quote), so the run
+/// is reviewed once more with the same input (task 328) and the verdict of
+/// that retry is acted on as any other.
 #[test]
 fn a_high_land_lands_the_run_without_an_ask() {
     let (_dir, repo, db) = fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
     let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
-    let reviewer = TestReviewer::new(&[concern("land", "high", None)]);
+    let reviewer = TestReviewer::new(&[
+        r#"printf '%s\n' '{"verdict":"pass","reasons":[],"summary":"says "fine""}'"#.to_owned(),
+        concern("land", "high", None),
+    ]);
     let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(1)).unwrap();
     assert_landed_run(&detail.runs[0], &repo, &base);
     assert!(queue.asks(Default::default()).unwrap().is_empty());
+    assert!(backend.notifications.lock().unwrap().is_empty());
+    // Reviewed once more with the same input after the unreadable verdict.
+    let prompts = reviewer.prompts();
+    assert_eq!(prompts.len(), 2);
+    assert_eq!(prompts[0], prompts[1]);
+    let retried = payloads(&detail, "review_retried");
+    assert_eq!(retried.len(), 1);
+    assert_eq!(retried[0]["attempt"], 1);
+    assert!(
+        retried[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("the review printed no verdict JSON"),
+        "{retried:?}"
+    );
+    assert!(payloads(&detail, "review_failed").is_empty());
     assert_eq!(
         concern_decided(&detail),
         [
-            json!({"attempt": 1, "recommendation": "land", "confidence": "high",
+            json!({"attempt": 2, "recommendation": "land", "confidence": "high",
                 "reason_category": null, "applied": true, "escalated_because": null})
         ]
     );
     let finished = payloads(&detail, "review_finished");
+    assert_eq!(finished.len(), 1);
+    assert_eq!(finished[0]["attempt"], 2);
     assert_eq!(finished[0]["recommendation"], "land");
     assert_eq!(finished[0]["confidence"], "high");
     let kinds = event_kinds(&detail);
     for (earlier, later) in [
+        ("review_retried", "review_finished"),
         ("review_finished", "concern_decided"),
         ("concern_decided", "exit_requested"),
         ("exit_requested", "workspace_closed"),
@@ -168,155 +193,51 @@ fn a_high_send_back_revises_the_live_session() {
     assert_eq!(reviewer.prompts().len(), 2);
 }
 
-/// A `send_back` after the round's two revises asks a person instead, with
-/// the job's recommendation on the ask.
+/// A concern the runtime does not apply asks a person with the job's
+/// recommendation, confidence and reason; the session exits and its
+/// workspace closes before the ask. Here a `discard` of high confidence,
+/// asked for that reason. Which concerns are asked and why
+/// (`concern::tests::only_a_high_confidence_without_a_reason_is_applied`),
+/// the ask's text and reason for each
+/// (`landing::tests::a_concern_asks_with_its_recommendation_and_why`,
+/// `landing::tests::a_send_back_past_the_revise_limit_asks_with_the_count_of_revises`,
+/// `landing::tests::a_concern_without_a_recommendation_asks_as_before`) and
+/// `concern_decided` (`concern::tests::the_payload_says_whether_it_was_applied`)
+/// are unit tests.
 #[test]
-fn a_send_back_past_the_revise_limit_asks_a_person() {
+fn a_discard_concern_asks_a_person_with_the_recommendation() {
     let (_dir, repo, db) = fixture();
-    let backend = TestWorkspace::new(&db, false, &revising_agent(2));
-    let reviewer = TestReviewer::new(&[
-        verdict("revise", &["still short"], "not yet"),
-        verdict("revise", &["still short"], "not yet"),
-        concern("send_back", "high", None),
-    ]);
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let reviewer = TestReviewer::new(&[concern("send_back", "high", Some("discard"))]);
     let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(1)).unwrap();
     let run = detail.runs[0].clone();
-    assert_eq!(payloads(&detail, "revise_requested").len(), 2);
     assert_eq!(
         concern_decided(&detail),
         [
-            json!({"attempt": 3, "recommendation": "send_back", "confidence": "high",
-                "reason_category": null, "applied": false, "escalated_because": "revise_limit"})
+            json!({"attempt": 1, "recommendation": "send_back", "confidence": "high",
+                "reason_category": "discard", "applied": false, "escalated_because": "discard"})
         ]
     );
     let ask = landing_ask(&queue, &run);
     assert_eq!(ask.recommendation.as_deref(), Some("send_back"));
     assert_eq!(ask.confidence, Some(AskConfidence::High));
-    assert!(
-        ask.question
-            .contains("returned concern (the review recommends send_back after 2 revises)"),
-        "{}",
-        ask.question
-    );
+    // A person is needed for the reason the job gave.
+    assert_eq!(ask.reason_category, AskReason::Discard);
+    for part in [
+        "returned concern (the review recommends send_back, but the judgement is whether to throw the work away (discard)): judged",
+        "\n- a finding",
+        "The review recommends send_back (high confidence).",
+    ] {
+        assert!(ask.question.contains(part), "{part} in {}", ask.question);
+    }
+    assert!(payloads(&detail, "revise_requested").is_empty());
+    assert!(backend.texts().is_empty());
     let kinds = event_kinds(&detail);
     assert!(position(&kinds, "workspace_closed") < position(&kinds, "ask_opened"));
-}
-
-/// A low confidence, and a `scope` or `discard` whatever the confidence,
-/// ask a person with the job's recommendation; the session exits and its
-/// workspace closes before the ask.
-#[test]
-fn a_low_scope_or_discard_concern_asks_a_person_with_the_recommendation() {
-    for (script, escalated, recommendation, confidence) in [
-        (
-            concern("land", "low", None),
-            "low_confidence",
-            "land",
-            AskConfidence::Low,
-        ),
-        (
-            concern("land", "high", Some("scope")),
-            "scope",
-            "land",
-            AskConfidence::High,
-        ),
-        (
-            concern("send_back", "high", Some("discard")),
-            "discard",
-            "send_back",
-            AskConfidence::High,
-        ),
-    ] {
-        let (_dir, repo, db) = fixture();
-        let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
-        let reviewer = TestReviewer::new(&[script]);
-        let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
-        assert_eq!(outcome["errors"], json!([]), "{escalated}: {outcome}");
-        assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
-        let mut queue = SqliteQueue::open(&db).unwrap();
-        let detail = queue.show(TaskId::new(1)).unwrap();
-        let run = detail.runs[0].clone();
-        let decided = concern_decided(&detail);
-        assert_eq!(decided.len(), 1, "{escalated}: {decided:?}");
-        assert_eq!(decided[0]["applied"], false);
-        assert_eq!(decided[0]["escalated_because"], escalated);
-        let ask = landing_ask(&queue, &run);
-        assert_eq!(ask.recommendation.as_deref(), Some(recommendation));
-        assert_eq!(ask.confidence, Some(confidence));
-        // A person is needed for the reason the job gave: `discard` for a
-        // discard, `scope` for the others.
-        assert_eq!(
-            ask.reason_category,
-            if escalated == "discard" {
-                AskReason::Discard
-            } else {
-                AskReason::Scope
-            }
-        );
-        assert!(
-            ask.question.contains(&format!(
-                "The review recommends {recommendation} ({} confidence).",
-                confidence.as_str()
-            )),
-            "{}",
-            ask.question
-        );
-        assert!(payloads(&detail, "revise_requested").is_empty());
-        assert!(backend.texts().is_empty());
-        let kinds = event_kinds(&detail);
-        assert!(position(&kinds, "workspace_closed") < position(&kinds, "ask_opened"));
-    }
-}
-
-/// A concern without a recommendation (the form before ADR-t451-1) asks a
-/// person as it always did, the ask carrying none.
-#[test]
-fn a_concern_without_a_recommendation_asks_as_before() {
-    let (_dir, repo, db) = fixture();
-    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
-    let reviewer = TestReviewer::new(&[verdict("concern", &["x"], "ask")]);
-    supervise_reviewed(&db, &repo, &backend, &reviewer);
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    let run = detail.runs[0].clone();
-    assert_eq!(
-        concern_decided(&detail),
-        [
-            json!({"attempt": 1, "recommendation": null, "confidence": null,
-                "reason_category": null, "applied": false, "escalated_because": "no_recommendation"})
-        ]
-    );
-    let ask = landing_ask(&queue, &run);
-    assert_eq!(ask.recommendation, None);
-    assert_eq!(ask.confidence, None);
-    assert!(
-        ask.question.contains("returned concern: ask"),
-        "{}",
-        ask.question
-    );
-    assert!(!ask.question.contains("recommends"), "{}", ask.question);
-}
-
-/// A review whose job failed gave no recommendation: it asks a person as
-/// before, and records no `concern_decided`.
-#[test]
-fn a_failed_review_asks_without_a_recommendation() {
-    let (_dir, repo, db) = fixture();
-    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
-    let reviewer = TestReviewer::new(&["exit 3".to_owned()]);
-    supervise_reviewed(&db, &repo, &backend, &reviewer);
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    let run = detail.runs[0].clone();
-    assert_eq!(payloads(&detail, "review_failed")[0]["code"], "job_failed");
-    assert!(concern_decided(&detail).is_empty());
-    let ask = landing_ask(&queue, &run);
-    assert_eq!(ask.recommendation, None);
-    assert_eq!(ask.confidence, None);
 }
 
 /// A run of `backend` past its validation whose supervisor recorded
@@ -378,48 +299,45 @@ fn adopt(db: &Path, repo: &Path, backend: &Arc<TestWorkspace>, verdicts: Vec<Str
 
 /// A run whose supervisor recorded a `concern` verdict and died before it
 /// acted on it: its adopter decides the concern from the verdict as the
-/// supervisor would have, and records `concern_decided` once.
+/// supervisor would have, and records `concern_decided` once. Here a `land`
+/// of high confidence, which lands; one the adopter asks a person about is
+/// [`an_adopter_records_a_send_back_left_unrecorded_by_a_dead_supervisor`],
+/// and which concerns are asked is
+/// `concern::tests::only_a_high_confidence_without_a_reason_is_applied`.
 #[test]
 fn an_adopter_decides_a_concern_left_by_a_dead_supervisor() {
-    for (confidence, landed) in [("high", true), ("low", false)] {
-        let (_dir, repo, db) = fixture();
-        let base = git_out(&repo, &["rev-parse", "main"]);
-        let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
-        left_by_a_dead_supervisor(
-            &repo,
-            &db,
-            &backend,
-            vec![
-                (EventKind::ReviewStarted, json!({"attempt": 1})),
-                (
-                    EventKind::ReviewFinished,
-                    json!({"verdict": "concern", "reasons": ["a finding"], "summary": "judged",
-                           "attempt": 1, "recommendation": "land", "confidence": confidence,
-                           "reason_category": null}),
-                ),
-            ],
-        );
-        let outcome = adopt(&db, &repo, &backend, Vec::new());
-        assert_eq!(outcome["errors"], json!([]), "{confidence}: {outcome}");
-        let mut queue = SqliteQueue::open(&db).unwrap();
-        let detail = queue.show(TaskId::new(1)).unwrap();
-        let decided = concern_decided(&detail);
-        assert_eq!(decided.len(), 1, "{confidence}: {decided:?}");
-        assert_eq!(decided[0]["applied"], landed);
-        // Not reviewed again.
-        assert_eq!(payloads(&detail, "review_started").len(), 1);
-        let asks = queue.asks(Default::default()).unwrap();
-        if landed {
-            assert_landed_run(&detail.runs[0], &repo, &base);
-            assert!(asks.is_empty(), "{asks:?}");
-        } else {
-            assert_eq!(decided[0]["escalated_because"], "low_confidence");
-            assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
-            assert_eq!(asks.len(), 1, "{asks:?}");
-            assert_eq!(asks[0].recommendation.as_deref(), Some("land"));
-            assert_eq!(asks[0].confidence, Some(AskConfidence::Low));
-        }
-    }
+    let (_dir, repo, db) = fixture();
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
+    left_by_a_dead_supervisor(
+        &repo,
+        &db,
+        &backend,
+        vec![
+            (EventKind::ReviewStarted, json!({"attempt": 1})),
+            (
+                EventKind::ReviewFinished,
+                json!({"verdict": "concern", "reasons": ["a finding"], "summary": "judged",
+                       "attempt": 1, "recommendation": "land", "confidence": "high",
+                       "reason_category": null}),
+            ),
+        ],
+    );
+    let outcome = adopt(&db, &repo, &backend, Vec::new());
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(
+        concern_decided(&detail),
+        [
+            json!({"attempt": 1, "recommendation": "land", "confidence": "high",
+                "reason_category": null, "applied": true, "escalated_because": null})
+        ]
+    );
+    // Not reviewed again.
+    assert_eq!(payloads(&detail, "review_started").len(), 1);
+    assert_landed_run(&detail.runs[0], &repo, &base);
+    assert!(queue.asks(Default::default()).unwrap().is_empty());
 }
 
 /// A supervisor that died after it sent a concern back on the job's

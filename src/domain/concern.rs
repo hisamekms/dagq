@@ -208,6 +208,29 @@ mod tests {
             json!({"attempt": 1, "recommendation": "send_back", "confidence": "high",
                    "reason_category": "scope", "applied": false, "escalated_because": "scope"})
         );
+        assert_eq!(
+            decided_payload(
+                3,
+                Some(SendBack),
+                Some(High),
+                None,
+                Some(EscalatedBecause::ReviseLimit)
+            ),
+            json!({"attempt": 3, "recommendation": "send_back", "confidence": "high",
+                   "reason_category": null, "applied": false, "escalated_because": "revise_limit"})
+        );
+        // A concern without a recommendation (the form before ADR-t451-1).
+        assert_eq!(
+            decided_payload(
+                1,
+                None,
+                None,
+                None,
+                Some(EscalatedBecause::NoRecommendation)
+            ),
+            json!({"attempt": 1, "recommendation": null, "confidence": null,
+                   "reason_category": null, "applied": false, "escalated_because": "no_recommendation"})
+        );
     }
 
     #[test]

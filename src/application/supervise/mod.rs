@@ -2731,9 +2731,12 @@ impl Supervisor<'_> {
                 }
                 // With no provider left to review it again (`--no-claude`),
                 // an unreadable verdict fails as it is, its output named.
-                let retry_unreadable = self.retry_unreadable_review
-                    && !retried
-                    && !matches!(self.review_route(), landing::ReviewRoute::Manual(_));
+                let retry_unreadable = landing::retries_review(
+                    &outcome,
+                    self.retry_unreadable_review,
+                    retried,
+                    matches!(self.review_route(), landing::ReviewRoute::Manual(_)),
+                );
                 slot.phase = match outcome {
                     ReviewEnd::Verdict(verdict) => {
                         let job = ActorContext::review_job(run.id(), attempt);

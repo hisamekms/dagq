@@ -361,7 +361,7 @@ impl Supervisor<'_> {
                 // No job ran, so this attempt wrote no output; a retry
                 // follows a job that ran and printed an unreadable verdict
                 // (task 426).
-                output: retried.then(|| attempt - 1),
+                output: unstarted_review_output(retried, attempt),
             },
         )))
     }
@@ -544,10 +544,7 @@ impl Supervisor<'_> {
         let events = self.queue.run_events(run.id())?;
         let history = RunHistory::from_events(&events);
         let ReviseDecision::Request { attempt, round } = decide_revise(&history) else {
-            let why = format!(
-                "the review still asks for changes after {} revises",
-                history.round_revise_attempts()
-            );
+            let why = revise_limit_why(history.round_revise_attempts());
             return Ok(ask(why, verdict, session));
         };
         let Some(live) = session
@@ -943,38 +940,20 @@ impl Supervisor<'_> {
             Option<ConcernReason>,
         ),
     ) -> Result<AskId> {
-        let mut question = format!(
-            "The supervisor's review of run {} (task {}) returned {}{}: {summary}",
-            run.id(),
-            run.task_id(),
-            decision.as_str(),
-            why.map(|why| format!(" ({why})")).unwrap_or_default()
-        );
-        for reason in reasons {
-            question.push_str(&format!("\n- {reason}"));
-        }
-        if let Some(run_dir) = &run.run_dir() {
-            question.push_str(&format!("\nReview material: {run_dir}/review.md"));
-        }
-        if let Some(recommendation) = recommendation {
-            question.push_str(&format!(
-                "\nThe review recommends {} ({} confidence).",
-                recommendation.as_str(),
-                confidence.map_or("no", AskConfidence::as_str)
-            ));
-        }
-        question.push_str(
-            "\nland: land it as it is. send_back: resume the session with these reasons. cancel: fail the run and cancel the task.",
+        let question = landing_question(
+            run,
+            decision,
+            reasons,
+            summary,
+            why,
+            (recommendation, confidence),
         );
         self.ask_approve_landing(
             run,
             question,
             recommendation.map(|r| r.as_str().to_owned()),
             confidence,
-            match reason_category {
-                Some(ConcernReason::Discard) => AskReason::Discard,
-                _ => AskReason::Scope,
-            },
+            landing_ask_reason(reason_category),
         )
     }
     /// Open the `approve_landing` ask of a run whose headless review failed
@@ -990,33 +969,7 @@ impl Supervisor<'_> {
         output: Option<usize>,
         error: &str,
     ) -> Result<AskId> {
-        let mut question = format!(
-            "The supervisor's headless review of run {} (task {}) failed and gave no verdict (review {attempt}): {error}",
-            run.id(),
-            run.task_id(),
-        );
-        if error.starts_with(REVIEW_PROVIDER_DISABLED) {
-            question = format!(
-                "{error}. No review agent ran for run {} (task {}); review it manually.",
-                run.id(),
-                run.task_id()
-            );
-        }
-        if let Some(run_dir) = &run.run_dir() {
-            question.push_str(&format!("\nReview material: {run_dir}/review.md"));
-            match output {
-                Some(ran) if ran == attempt => question.push_str(&format!(
-                    "\nReview output: {run_dir}/review-{ran}.out, {run_dir}/review-{ran}.err"
-                )),
-                Some(ran) => question.push_str(&format!(
-                    "\nReview output of the earlier review {ran}: {run_dir}/review-{ran}.out, {run_dir}/review-{ran}.err"
-                )),
-                None => {}
-            }
-        }
-        question.push_str(
-            "\nReview the material by hand, then answer. land: land it as it is. send_back: resume the session with this failure as the reason. cancel: fail the run and cancel the task.",
-        );
+        let question = failed_review_question(run, attempt, output, error);
         self.ask_approve_landing(run, question, None, None, AskReason::Scope)
     }
     /// Open an `approve_landing` ask of `run` carrying the review job's
@@ -1079,13 +1032,15 @@ impl Supervisor<'_> {
             };
             let answer = ask.answer.as_deref().unwrap_or_default().trim().to_owned();
             let run = self.queue.run(&run_id)?;
+            let Some(action) = landing_action(&answer) else {
+                continue;
+            };
             if run.status() != RunStatus::AwaitingIntegration
-                || !LANDING_OPTIONS.contains(&answer.as_str())
                 || self.queue.run_lease(&run_id)?.is_some()
             {
                 continue;
             }
-            if let Err(error) = self.apply_landing_answer(&run, ask.id, &answer) {
+            if let Err(error) = self.apply_landing_answer(&run, ask.id, &answer, action) {
                 warn!(run_id = %run.id(), ask_id = %ask.id, error = %format_args!("{error:#}"), "run {}: the answer {answer:?} of ask {} could not be applied: {error:#}", run.id(), ask.id);
             }
         }
@@ -1215,16 +1170,19 @@ impl Supervisor<'_> {
         }
         Ok(())
     }
+    /// Apply `answer`, an answer to the `approve_landing` ask `ask_id` of
+    /// `run` read as `action` ([`landing_action`]).
     pub(super) fn apply_landing_answer(
         &mut self,
         run: &TaskRun,
         ask_id: AskId,
         answer: &str,
+        action: LandingAction,
     ) -> Result<()> {
         self.record_review_outcome(run, ask_id, answer)?;
         let payload = json!({"ask_id": ask_id, "answer": answer});
-        match answer {
-            "land" => {
+        match action {
+            LandingAction::Land => {
                 // Each step is recorded once for the ask, so an answer
                 // applied in part is finished on a later pass.
                 let events = self.queue.run_events(run.id())?;
@@ -1243,16 +1201,9 @@ impl Supervisor<'_> {
                 self.queue.close_ask(ask_id)?;
                 info!(run_id = %run.id(), "run {} is approved by ask {ask_id} and waits to land", run.id());
             }
-            "send_back" => {
+            LandingAction::SendBack => {
                 let reasons = latest_review_reasons(&*self.queue, run.id())?;
-                let reason = format!(
-                    "the review's findings were sent back by ask {ask_id}: {}",
-                    if reasons.is_empty() {
-                        "(no reasons recorded)".to_owned()
-                    } else {
-                        reasons.join("; ")
-                    }
-                );
+                let reason = sent_back_reason(ask_id, &reasons);
                 self.queue.decide_landing(
                     run.id(),
                     RunStatus::NeedsSession,
@@ -1262,8 +1213,8 @@ impl Supervisor<'_> {
                 self.queue.close_ask(ask_id)?;
                 info!(run_id = %run.id(), "run {} was sent back by ask {ask_id}; it waits for a resume", run.id());
             }
-            _ => {
-                let reason = format!("canceled by ask {ask_id}");
+            LandingAction::Cancel => {
+                let reason = canceled_reason(ask_id);
                 self.queue.decide_landing(
                     run.id(),
                     RunStatus::Failed,
@@ -1365,6 +1316,162 @@ fn landing_ask(
     ))
 }
 
+/// What an answer to an `approve_landing` ask does to its run (ADR-0027).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LandingAction {
+    /// Record the approval and queue the run to land.
+    Land,
+    /// Make the run `needs_session` for a resume naming the review's reasons.
+    SendBack,
+    /// Fail the run and cancel its task.
+    Cancel,
+}
+
+/// The action an answer (trimmed) to an `approve_landing` ask names, one of
+/// [`LANDING_OPTIONS`]; `None` for any other answer, left to the inbox.
+pub(super) fn landing_action(answer: &str) -> Option<LandingAction> {
+    match answer {
+        "land" => Some(LandingAction::Land),
+        "send_back" => Some(LandingAction::SendBack),
+        "cancel" => Some(LandingAction::Cancel),
+        _ => None,
+    }
+}
+
+/// The reason a `send_back` answer to ask `ask_id` parks the run with: the
+/// latest review's `reasons`, which its resume names.
+fn sent_back_reason(ask_id: AskId, reasons: &[String]) -> String {
+    format!(
+        "the review's findings were sent back by ask {ask_id}: {}",
+        if reasons.is_empty() {
+            "(no reasons recorded)".to_owned()
+        } else {
+            reasons.join("; ")
+        }
+    )
+}
+
+/// The reason a `cancel` answer to ask `ask_id` fails the run with.
+fn canceled_reason(ask_id: AskId) -> String {
+    format!("canceled by ask {ask_id}")
+}
+
+/// Why a verdict that would send the run back asks a person instead: the
+/// round's `revises` were already sent (`MAX_REVISE_ATTEMPTS`).
+fn revise_limit_why(revises: usize) -> String {
+    format!("the review still asks for changes after {revises} revises")
+}
+
+/// Whether a review that ended as `outcome` is reviewed once more with the
+/// same input (task 328): only stdout without a readable verdict, while the
+/// retry is on (`retry_unreadable`), when the review was not itself the
+/// retry (`retried`) and a provider is left to review it (`manual`: the
+/// `--no-claude` route that gives it to a person). A job that failed (a
+/// non-zero exit, the timeout) is not reviewed again.
+pub(super) fn retries_review(
+    outcome: &ReviewEnd,
+    retry_unreadable: bool,
+    retried: bool,
+    manual: bool,
+) -> bool {
+    matches!(outcome, ReviewEnd::Unreadable(_)) && retry_unreadable && !retried && !manual
+}
+
+/// The attempt whose output the ask of review `attempt` names when that
+/// review could not start, so wrote none (task 426): the review before,
+/// when this one was its retry after an unreadable verdict; else none.
+fn unstarted_review_output(retried: bool, attempt: usize) -> Option<usize> {
+    retried.then(|| attempt - 1)
+}
+
+/// The question of the `approve_landing` ask of `run` whose review returned
+/// `decision` that did not pass: why a person decides, the reasons, where
+/// the review material is, and the job's recommendation when it carries one
+/// (ADR-t451-1 decision 3).
+fn landing_question(
+    run: &TaskRun,
+    decision: ReviewDecision,
+    reasons: &[String],
+    summary: &str,
+    why: Option<&str>,
+    (recommendation, confidence): (Option<LandingRecommendation>, Option<AskConfidence>),
+) -> String {
+    let mut question = format!(
+        "The supervisor's review of run {} (task {}) returned {}{}: {summary}",
+        run.id(),
+        run.task_id(),
+        decision.as_str(),
+        why.map(|why| format!(" ({why})")).unwrap_or_default()
+    );
+    for reason in reasons {
+        question.push_str(&format!("\n- {reason}"));
+    }
+    if let Some(run_dir) = &run.run_dir() {
+        question.push_str(&format!("\nReview material: {run_dir}/review.md"));
+    }
+    if let Some(recommendation) = recommendation {
+        question.push_str(&format!(
+            "\nThe review recommends {} ({} confidence).",
+            recommendation.as_str(),
+            confidence.map_or("no", AskConfidence::as_str)
+        ));
+    }
+    question.push_str(
+        "\nland: land it as it is. send_back: resume the session with these reasons. cancel: fail the run and cancel the task.",
+    );
+    question
+}
+
+/// Why a person is needed for the `approve_landing` ask of a review whose
+/// job gave `reason_category`: `discard` for a discard, `scope` otherwise.
+fn landing_ask_reason(reason_category: Option<ConcernReason>) -> AskReason {
+    match reason_category {
+        Some(ConcernReason::Discard) => AskReason::Discard,
+        _ => AskReason::Scope,
+    }
+}
+
+/// The question of the `approve_landing` ask of `run` whose headless review
+/// `attempt` failed with `error` (task 328): why, and where the review's
+/// material and output are. `output` is the attempt whose job ran and wrote
+/// its output: a review that could not start names no output of its own
+/// (task 426). A review no agent ran under `--no-claude` says so.
+fn failed_review_question(
+    run: &TaskRun,
+    attempt: usize,
+    output: Option<usize>,
+    error: &str,
+) -> String {
+    let mut question = format!(
+        "The supervisor's headless review of run {} (task {}) failed and gave no verdict (review {attempt}): {error}",
+        run.id(),
+        run.task_id(),
+    );
+    if error.starts_with(REVIEW_PROVIDER_DISABLED) {
+        question = format!(
+            "{error}. No review agent ran for run {} (task {}); review it manually.",
+            run.id(),
+            run.task_id()
+        );
+    }
+    if let Some(run_dir) = &run.run_dir() {
+        question.push_str(&format!("\nReview material: {run_dir}/review.md"));
+        match output {
+            Some(ran) if ran == attempt => question.push_str(&format!(
+                "\nReview output: {run_dir}/review-{ran}.out, {run_dir}/review-{ran}.err"
+            )),
+            Some(ran) => question.push_str(&format!(
+                "\nReview output of the earlier review {ran}: {run_dir}/review-{ran}.out, {run_dir}/review-{ran}.err"
+            )),
+            None => {}
+        }
+    }
+    question.push_str(
+        "\nReview the material by hand, then answer. land: land it as it is. send_back: resume the session with this failure as the reason. cancel: fail the run and cancel the task.",
+    );
+    question
+}
+
 /// Why a `concern` goes to a person (`escalated`), for its ask; `None` for
 /// a verdict with no recommendation, which asks as it always did.
 pub(super) fn concern_escalation(
@@ -1393,5 +1500,337 @@ pub(super) fn concern_escalation(
         EscalatedBecause::Unsent => Some(format!(
             "the review recommends {recommends}, but it could not be applied"
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{EventId, RunRecord};
+
+    const RUN: &str = "r1";
+    const DIR: &str = "/runs/r1";
+
+    fn run() -> TaskRun {
+        TaskRun::restore(RunRecord {
+            id: RunId::new(RUN).unwrap(),
+            task_id: TaskId::new(1),
+            status: RunStatus::AwaitingIntegration,
+            requested_provider: Provider::Claude,
+            actual_provider: Provider::Claude,
+            worker_mode: crate::domain::worker::Worker::default_mode(Provider::Claude),
+            base_commit: CommitSha::parse("a".repeat(40), "commit").unwrap(),
+            branch: Some(format!("dagq/{RUN}")),
+            worktree_path: Some(format!("{DIR}/worktree")),
+            workspace_id: None,
+            receipt_path: Some(format!("{DIR}/receipt.json")),
+            log_path: None,
+            result_commit: None,
+            repo_path: None,
+            run_dir: Some(DIR.to_owned()),
+            last_error: None,
+            workspace_closed_at: None,
+            created_at: String::new(),
+        })
+        .unwrap()
+    }
+
+    fn verdict(json: Value) -> ReviewVerdict {
+        ReviewVerdict::parse(&json.to_string()).unwrap()
+    }
+
+    fn concern(recommendation: Option<&str>, confidence: Option<&str>) -> ReviewVerdict {
+        verdict(
+            json!({"verdict": "concern", "reasons": ["a finding"], "summary": "judged",
+                       "recommendation": recommendation, "confidence": confidence,
+                       "reason_category": null}),
+        )
+    }
+
+    fn events(kinds: &[&str]) -> Vec<RunEvent> {
+        kinds
+            .iter()
+            .enumerate()
+            .map(|(i, kind)| RunEvent {
+                id: EventId::new(i as i64 + 1),
+                task_id: None,
+                goal_id: None,
+                run_id: None,
+                kind: (*kind).into(),
+                payload: json!({"attempt": i + 1}),
+                created_at: String::new(),
+                actor: None,
+            })
+            .collect()
+    }
+
+    /// The tail every failed review's ask ends with.
+    const FAILED_TAIL: &str = "\nReview the material by hand, then answer. land: land it as it is. send_back: resume the session with this failure as the reason. cancel: fail the run and cancel the task.";
+
+    /// The ask of a review whose job ran and failed names this review's
+    /// output (a non-zero exit, the timeout, an unreadable verdict twice;
+    /// task 328).
+    #[test]
+    fn a_failed_review_that_ran_names_its_own_output() {
+        let error = "the headless review exited with exit status: 3: broken";
+        assert_eq!(
+            failed_review_question(&run(), 1, Some(1), error),
+            format!(
+                "The supervisor's headless review of run r1 (task 1) failed and gave no verdict (review 1): {error}\
+                 \nReview material: {DIR}/review.md\
+                 \nReview output: {DIR}/review-1.out, {DIR}/review-1.err{FAILED_TAIL}"
+            )
+        );
+    }
+
+    /// A review that could not start wrote no output, so its ask names none
+    /// of its own (task 426): none at all for a first review, the earlier
+    /// review's when it was the retry of an unreadable verdict.
+    #[test]
+    fn a_review_that_could_not_start_names_no_output_of_its_own() {
+        let error =
+            "the headless review could not start: the test reviewer cannot start this review";
+        assert_eq!(unstarted_review_output(false, 1), None);
+        assert_eq!(unstarted_review_output(true, 2), Some(1));
+        let first = failed_review_question(&run(), 1, unstarted_review_output(false, 1), error);
+        assert_eq!(
+            first,
+            format!(
+                "The supervisor's headless review of run r1 (task 1) failed and gave no verdict (review 1): {error}\
+                 \nReview material: {DIR}/review.md{FAILED_TAIL}"
+            )
+        );
+        assert!(!first.contains("Review output"), "{first}");
+        let retry = failed_review_question(&run(), 2, unstarted_review_output(true, 2), error);
+        assert_eq!(
+            retry,
+            format!(
+                "The supervisor's headless review of run r1 (task 1) failed and gave no verdict (review 2): {error}\
+                 \nReview material: {DIR}/review.md\
+                 \nReview output of the earlier review 1: {DIR}/review-1.out, {DIR}/review-1.err{FAILED_TAIL}"
+            )
+        );
+        assert!(!retry.contains("review-2."), "{retry}");
+    }
+
+    /// A review no agent ran under `--no-claude` says so instead.
+    #[test]
+    fn a_review_no_agent_ran_says_to_review_it_manually() {
+        let error = format!("{REVIEW_PROVIDER_DISABLED}; no provider is left");
+        assert_eq!(
+            failed_review_question(&run(), 1, None, &error),
+            format!(
+                "{error}. No review agent ran for run r1 (task 1); review it manually.\
+                 \nReview material: {DIR}/review.md{FAILED_TAIL}"
+            )
+        );
+    }
+
+    /// Only stdout without a readable verdict is reviewed once more: not a
+    /// job that failed, not the retry itself, not with the retry off, and
+    /// not when no provider is left to review it (`--no-claude`). A verdict
+    /// is acted on, retried or not.
+    #[test]
+    fn only_an_unreadable_verdict_is_reviewed_again_once() {
+        let unreadable = || ReviewEnd::Unreadable("the review printed no verdict JSON".into());
+        let failed =
+            || ReviewEnd::Failed("the headless review did not finish within 1 seconds".into());
+        let pass = || {
+            ReviewEnd::Verdict(verdict(
+                json!({"verdict": "pass", "reasons": [], "summary": "ok"}),
+            ))
+        };
+        assert!(retries_review(&unreadable(), true, false, false));
+        assert!(!retries_review(&unreadable(), true, true, false));
+        assert!(!retries_review(&unreadable(), false, false, false));
+        assert!(!retries_review(&unreadable(), true, false, true));
+        for retried in [false, true] {
+            assert!(!retries_review(&failed(), true, retried, false));
+            assert!(!retries_review(&pass(), true, retried, false));
+        }
+    }
+
+    /// The answers of an `approve_landing` ask the supervisor applies, and
+    /// the reasons a `send_back` and a `cancel` record; any other answer is
+    /// left to the inbox.
+    #[test]
+    fn an_answer_names_its_landing_action() {
+        assert_eq!(landing_action("land"), Some(LandingAction::Land));
+        assert_eq!(landing_action("send_back"), Some(LandingAction::SendBack));
+        assert_eq!(landing_action("cancel"), Some(LandingAction::Cancel));
+        for other in ["", "Land", "drop it", "send back"] {
+            assert_eq!(landing_action(other), None, "{other}");
+        }
+        assert!(
+            LANDING_OPTIONS
+                .iter()
+                .all(|option| landing_action(option).is_some())
+        );
+        assert_eq!(
+            sent_back_reason(AskId::new(7), &["a".into(), "b".into()]),
+            "the review's findings were sent back by ask 7: a; b"
+        );
+        assert_eq!(
+            sent_back_reason(AskId::new(7), &[]),
+            "the review's findings were sent back by ask 7: (no reasons recorded)"
+        );
+        assert_eq!(canceled_reason(AskId::new(7)), "canceled by ask 7");
+    }
+
+    /// The tail every landing ask of a review that did not pass ends with.
+    const LANDING_TAIL: &str = "\nland: land it as it is. send_back: resume the session with these reasons. cancel: fail the run and cancel the task.";
+
+    /// A `revise` past the round's limit asks a person why, with the
+    /// findings and the material (ADR-0027 decision 2).
+    #[test]
+    fn a_revise_past_its_limit_asks_with_the_count_of_revises() {
+        let why = revise_limit_why(MAX_REVISE_ATTEMPTS);
+        assert_eq!(why, "the review still asks for changes after 2 revises");
+        assert_eq!(
+            landing_question(
+                &run(),
+                ReviewDecision::Revise,
+                &["still short".into()],
+                "not yet",
+                Some(&why),
+                (None, None),
+            ),
+            format!(
+                "The supervisor's review of run r1 (task 1) returned revise (the review still asks for changes after 2 revises): not yet\
+                 \n- still short\nReview material: {DIR}/review.md{LANDING_TAIL}"
+            )
+        );
+    }
+
+    /// A concern the runtime did not apply asks with the job's
+    /// recommendation and confidence, and why (ADR-t451-1 decision 3); a
+    /// discard is asked for that reason, anything else for `scope`.
+    #[test]
+    fn a_concern_asks_with_its_recommendation_and_why() {
+        let history_events = events(&[]);
+        let history = RunHistory::from_events(&history_events);
+        for (recommendation, confidence, escalated, why) in [
+            (
+                LandingRecommendation::Land,
+                AskConfidence::Low,
+                EscalatedBecause::LowConfidence,
+                "the review recommends land without high confidence",
+            ),
+            (
+                LandingRecommendation::Land,
+                AskConfidence::High,
+                EscalatedBecause::Scope,
+                "the review recommends land, but landing it would accept a departure from the acceptance, an ADR or the goal (scope)",
+            ),
+            (
+                LandingRecommendation::SendBack,
+                AskConfidence::High,
+                EscalatedBecause::Discard,
+                "the review recommends send_back, but the judgement is whether to throw the work away (discard)",
+            ),
+            (
+                LandingRecommendation::SendBack,
+                AskConfidence::High,
+                EscalatedBecause::Unsent,
+                "the review recommends send_back, but it could not be applied",
+            ),
+        ] {
+            let verdict = concern(Some(recommendation.as_str()), Some(confidence.as_str()));
+            let got = concern_escalation(&verdict, escalated, &history);
+            assert_eq!(got.as_deref(), Some(why));
+            assert_eq!(
+                landing_question(
+                    &run(),
+                    ReviewDecision::Concern,
+                    &verdict.reasons,
+                    &verdict.summary,
+                    got.as_deref(),
+                    (verdict.recommendation, verdict.confidence),
+                ),
+                format!(
+                    "The supervisor's review of run r1 (task 1) returned concern ({why}): judged\
+                     \n- a finding\nReview material: {DIR}/review.md\
+                     \nThe review recommends {} ({} confidence).{LANDING_TAIL}",
+                    recommendation.as_str(),
+                    confidence.as_str()
+                )
+            );
+        }
+        assert_eq!(
+            landing_ask_reason(Some(ConcernReason::Discard)),
+            AskReason::Discard
+        );
+        assert_eq!(
+            landing_ask_reason(Some(ConcernReason::Scope)),
+            AskReason::Scope
+        );
+        assert_eq!(landing_ask_reason(None), AskReason::Scope);
+    }
+
+    /// A send_back the runtime would apply past the round's two revises asks
+    /// with the count of the round's revises.
+    #[test]
+    fn a_send_back_past_the_revise_limit_asks_with_the_count_of_revises() {
+        let round = events(&[
+            event_kind::REVIEW_STARTED,
+            event_kind::REVISE_REQUESTED,
+            event_kind::REVISE_FINISHED,
+            event_kind::REVIEW_STARTED,
+            event_kind::REVISE_REQUESTED,
+            event_kind::REVISE_FINISHED,
+            event_kind::REVIEW_STARTED,
+        ]);
+        let history = RunHistory::from_events(&round);
+        assert_eq!(decide_revise(&history), ReviseDecision::Ask);
+        let verdict = concern(Some("send_back"), Some("high"));
+        let why = concern_escalation(&verdict, EscalatedBecause::ReviseLimit, &history);
+        assert_eq!(
+            why.as_deref(),
+            Some("the review recommends send_back after 2 revises")
+        );
+        let question = landing_question(
+            &run(),
+            ReviewDecision::Concern,
+            &verdict.reasons,
+            &verdict.summary,
+            why.as_deref(),
+            (verdict.recommendation, verdict.confidence),
+        );
+        assert!(
+            question.starts_with(
+                "The supervisor's review of run r1 (task 1) returned concern (the review recommends send_back after 2 revises): judged"
+            ),
+            "{question}"
+        );
+    }
+
+    /// A concern without a recommendation (the form before ADR-t451-1)
+    /// asks as it always did: no why, no recommendation.
+    #[test]
+    fn a_concern_without_a_recommendation_asks_as_before() {
+        let verdict = concern(None, None);
+        let none = events(&[]);
+        let why = concern_escalation(
+            &verdict,
+            EscalatedBecause::NoRecommendation,
+            &RunHistory::from_events(&none),
+        );
+        assert_eq!(why, None);
+        let question = landing_question(
+            &run(),
+            ReviewDecision::Concern,
+            &verdict.reasons,
+            &verdict.summary,
+            why.as_deref(),
+            (verdict.recommendation, verdict.confidence),
+        );
+        assert_eq!(
+            question,
+            format!(
+                "The supervisor's review of run r1 (task 1) returned concern: judged\
+                 \n- a finding\nReview material: {DIR}/review.md{LANDING_TAIL}"
+            )
+        );
+        assert!(!question.contains("recommends"), "{question}");
     }
 }
