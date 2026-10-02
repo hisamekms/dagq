@@ -1,4 +1,8 @@
-"""Read-only log measurement for slow-test-waits.md chapter 8; Python stdlib."""
+"""Log measurement for slow-test-waits.md chapter 8; Python stdlib.
+
+Leaves the queue and the original logs unchanged (it only reads the logs,
+metrics.csv and git) and writes logs.csv next to this script.
+"""
 import csv
 import re
 import statistics as st

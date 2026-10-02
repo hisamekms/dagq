@@ -4,7 +4,7 @@ type: plan
 title: 遅いintegration testの時間が使われている待ちの内訳と、修正の候補の見積もり
 status: active
 created: 2026-09-29
-updated: 2026-09-30
+updated: 2026-10-03
 owners:
   - hisamekms
 tags:
@@ -26,7 +26,7 @@ goal 68（testの実時間の待ちを減らし、着地の検証のtest段とwo
 - (c) fixture: git init、seedのcommit、`SqliteQueue::init`
 - (d) 処理: 上のどれでもない残り。supervisorのpass、stubのsession、git、review stubなど
 
-この文書はsrc/とtests/を変えない。修正はfollow-upのtaskが行う（5章と7章）。7章はtask 1049（F6）が(d)処理の内訳を足したものである。productionのtimeoutと閾値の値も変えない（goal 68の制約）。
+この文書はsrc/とtests/を変えない。修正はfollow-upのtaskが行う（5章と7章）。7章はtask 1049（F6）が(d)処理の内訳を足したものである。8章はtask 1059が、F1〜F5とtask 1060の着地の前後で、本番のintegrateの関門のlogのtestの時間の合計とtest段を比べたものである。productionのtimeoutと閾値の値も変えない（goal 68の制約）。
 
 ## 要点
 
@@ -46,6 +46,7 @@ goal 68（testの実時間の待ちを減らし、着地の検証のtest段とwo
 
   合わせて約64〜132秒で、6並列のtest段の約460秒（2,780÷6）の13〜28%にあたる。
 - **testの時間の約半分はtest processが起動する`git`の待ちである（7章、F6。wrapperありの回で312秒のうち158秒）。** `/usr/bin/git`のxcrunのshimが1回の起動を約2倍にし、supervisorは毎passで着地のbranchを`git`2本で確かめる。supervisorの起動の大半は、testが書いたばかりの`claude-stub`の最初のexec（macOSが新しい実行fileに0.2〜1.3秒かける）である。候補G1〜G3で、test段は合わせて約53〜99秒（G4を足すとさらに10〜22秒）縮む見込み。
+- **F1〜F5・task 1060の着地の前後で、testの時間の合計とtest段はともに約2割縮んだ（8章、task 1059）。** 本番のintegrateの関門のlogを前32本・後32本で比べ、logごとのtestの時間の合計の中央値は2,779.9→2,235.8秒（−19.6%）、並列数を6に揃えたtest段（Summary×並列数÷6）の中央値は489.7→389.1秒（−20.5%）だった。test段のload1の平均の中央値は20.22→13.74で後の方が低く、減った秒の全てを修正の効果とはしない。
 
 ## 1. 遅いtestの上位30本とmoduleごとの合計
 
@@ -550,6 +551,14 @@ load1は前後とも6〜19（`uptime`、各回の前後）。passあたりの`gi
 
 ## 8. F1〜F5・task 1060 の着地の前後（task 1059、2026-09-30）
 
+### 要点
+
+- **前32本・後32本の本番のintegrateの関門のlogで比べた。** 前は09-28 22:53〜09-29 08:40（8並列25本・6並列7本）、後は09-30 01:48〜07:28（全て6並列）。
+- **logごとのtestの時間の合計の中央値は2,779.9→2,235.8秒（−544.2秒、−19.6%）。** 両区間に共通の1,941本のtestごとの中央値の合計は2,749.0→1,982.0秒（−27.9%）。
+- **並列数を6に揃えたtest段（Summary×並列数÷6）の中央値は489.7→389.1秒（−100.6秒、−20.5%）。** 生のSummaryは388.0→389.1秒で横ばいだが、前は8並列が25本ある。
+- **loadは後の方が低い。** test段のload1の平均の中央値は20.22→13.74、最大の中央値は32.00→20.28。load1の平均が10〜20のlogだけ（前15本・後17本）でも合計の中央値は2,573.9→2,272.9秒と縮む。
+- **goal 68の受け入れ条件(2)を満たすと判断する。** ただしloadの低下と別の着地が重なるので、減った秒の全てをF1〜F5の因果効果とはしない。
+
 **主な比較は前32本・後32本で、暫定の本数不足ではない。** logごとのtestの時間の合計の中央値は2,779.9→2,235.8秒（−544.2秒、−19.6%）、6並列に換算したtest段の中央値は489.7→389.1秒（−100.6秒、−20.5%）になった。生のSummaryは388.0→389.1秒で横ばいだが、前は8並列25本・6並列7本、後は全て6並列である。6並列かつ近いloadだけでも412.1→389.4秒（前3本・後17本）と縮んでいる。**並列数を揃えた観測としてgoal 68の受け入れ条件(2)を満たす**と判断する。ただし、loadの低下と別の着地が重なるため、減った544秒全てをF1〜F5の因果効果とはしない。個別の効果は各workerのA/Bと合わせて読む。
 
 ### 手順と区間
@@ -568,7 +577,7 @@ load1は前後とも6〜19（`uptime`、各回の前後）。passあたりの`gi
 | F5 | 1048 | `202bc6ec` | 09-30 04:14:21 |
 | G2（別の修正） | 1078 | `0889e120` | 09-30 07:10:58 |
 
-集計の再現用に[measure.py](slow-test-waits-1059/measure.py)と、選択したlogの相対path・更新時刻・並列数・秒・loadの[logs.csv](slow-test-waits-1059/logs.csv)を置いた。repository rootで`python3 docs/plans/slow-test-waits-1059/measure.py`を実行する（元のhostのlogとmetrics.csvが必要。queueは読まず、変更もしない）。
+集計の再現用に[measure.py](slow-test-waits-1059/measure.py)と、選択したlogの相対path・更新時刻・並列数・秒・loadの[logs.csv](slow-test-waits-1059/logs.csv)を置いた。repository rootで`python3 docs/plans/slow-test-waits-1059/measure.py`を実行する（元のhostのlogとmetrics.csvが必要。queueは読まず、queueと元のlogを変えない。隣のlogs.csvは書き出し直す）。
 
 - `PASS`と`FLAKY n/m`の最終結果の秒をtestの鍵（binary, test名）ごとに採る。`SLOW`の途中経過、`FAIL`、retryの途中の行は足さない。1章の掲載regexはSLOWも含むが、この集計は1章の手順2どおりPASS/FLAKYだけに限定する。失敗した関門もSummaryがあれば含めるため、全試行の経過時間の合計ではない。採った123本すべてでPASS/FLAKYの鍵の重複がないことと、件数がSummaryのpassedと一致することを確かめた（FLAKYの最終結果は今回0件）。FAIL件数は`TRY n FAIL`の行の重複を避けてSummaryから採る。
 - logごとの合計の中央値と、testごとにlog間の中央値を取ってから足す値は別々に計算する。testの追加・削除の影響を見るため、後者は共通testだけでも計算する。
