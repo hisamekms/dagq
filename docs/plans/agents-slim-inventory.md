@@ -1,0 +1,594 @@
+---
+id: plan-agents-slim-inventory
+type: plan
+title: AGENTS.mdとpluginのdagq repository固有の記述の棚卸しの表と、整理の前の役割ごとの読む量
+status: active
+created: 2026-10-03
+updated: 2026-10-03
+owners:
+  - hisamekms
+tags:
+  - documentation
+  - planning
+depends_on:
+  - adr-t1453-2
+related:
+  - adr-t1453-1
+  - plan-review-subagents-spike
+---
+
+# AGENTS.mdとpluginのdagq repository固有の記述の棚卸しの表と、整理の前の役割ごとの読む量
+
+goal 94の受け入れ条件(6)の「移動の前」の側（task 1456）。AGENTS.mdの全節と、`plugins/claude-dagq`のdagq repository固有の記述を項目に分け、項目ごとに種類と[ADR-t1453-2](../adr/2026-10-03-t1453-2-ownership-of-agents-md-plugin-development-docs-and-config.md)の受け持ちの表による移し先を決める。中身は移さない。後続の移すtask（1457・1458・1459・1462）は項目ごとに「移した後の場所」の欄を埋め、照合のtask 1463はこの表で欠け・重複・読む量を確かめる。
+
+## 1. 数えた時点と作り方
+
+- **時点（固定）**: main の commit `7fea2d6bedaec2032cee9173022cc133622d8497`（task 1456の着手の時点のmain。以下`C`）。全ての数と項目は作業ファイルでなく`git show C:<path>`の内容から作った。
+- **AGENTS.mdの節**: `git show C:AGENTS.md | grep -n '^#'`で見出しを出し、節ごとに箇条（`^- `・`^  - `・番号付き）と段落を読んで、規則・値・経緯が混ざる箇条は意味の単位に分けた。1つの項目は1つの種類にし、禁止と例外を含む箇条は禁止・例外を別の項目に切り出した。
+- **pluginの固有の記述**: 次のgrepで候補を出し、各行を読んで固有のもの（このrepositoryの規則・値・経緯）と汎用のもの（dagqの製品の振る舞い）に分けた。
+
+```sh
+cd plugins/claude-dagq
+grep -rnoE "(task|goal|ask|proposal|finding|note) [0-9]{1,4}|20[0-9]{2}-[0-9]{2}-[0-9]{2}|cargo[ a-z-]*|llvm-cov|nextest|tests/it|tests/e2e|this repository|dagq repository|80 ?%|sccache|AGENTS\.md|mise |hisamekms" . | sort | uniq -c
+grep -rnoE "src/[a-z_/]+\.rs|tests/[a-z_/]+(\.rs)?|docs/[a-zA-Z_/.-]+|\.config/[a-z.-]+|scripts/[a-z.-]+|parallel = [0-9]|CARGO_[A-Z_]+|RUST_TEST_THREADS|Rust|rust-toolchain" . | sort | uniq -c
+grep -rn "dagq repository\|dagq's source\|of the dagq" .
+grep -rnoE "ADR-[0-9t-]+" . | wc -l     # 109（下の「固有でないと判断したもの」）
+```
+
+最初の版は番号を`[0-9]{2,4}`に限って1桁の番号（`goal 8`）を落としたので、review（revise 1）の後に`[0-9]{1,4}`で数え直してP-20を足した。固定のcommitで同じ結果を出すには、作業ファイルでなく次のように`git grep`で数える。
+
+```sh
+git grep -noE "(task|goal|ask|proposal|finding|note|run|mark)s? [0-9]{1,4}" 7fea2d6bedaec2032cee9173022cc133622d8497 -- plugins/claude-dagq | sort | uniq -c
+```
+
+- **goal 94のtask**: 移すtaskはgoal 94のtaskの一覧（2026-10-03に`dagq goal show 94`で読んだtitle）から選んだ。
+
+| task | 略 | 受け持ち（title の要旨） |
+| --- | --- | --- |
+| 1457 | 1457 | 「変更後に必ず通す」「テストの制約」とplan reviewのverifyの選び方を開発文書へ移す |
+| 1458 | 1458 | 「作業中」「起動と停止」「着地と人の判断」を受け持ちごとに正本へ移す |
+| 1459 | 1459 | 役割の節（worker・inboxとplanner・observer・権限と記録）と「文書のルール」「plan review」「コミット」「タスクを閉じるとき」「セッション開始時に読む」を正本へ移す |
+| 1460 | 1460 | reviewのsubagentの定義を置き、dagq.tomlでpathごとに有効にする（「検査」の列の受け手） |
+| 1461 | 1461 | AGENTS.mdを概要・読む案内・境界・短い制約・参照に組み直し、byteの上限を検査する |
+| 1462 | 1462 | pluginのskillから固有の規則・値・経緯をrepository側へ移し、汎用の手順にする |
+| 1463 | 1463 | 前後の照合（欠け・重複・読む量） |
+
+## 2. 表の読み方
+
+- **種類**: 禁止＝禁止事項、例外＝必要な例外、手順、値＝今の設定値、経緯＝経緯や理由、汎用＝dagqの汎用の操作、設計＝実装の設計。
+- **印**: 禁止事項と必要な例外を含む項目は、種類の列に依らず`★`。禁止事項は「〜しない」「〜だけ」「〜を除く」「〜を求めない」「〜してから」のように行為を止めるか限る規則で、人・session・jobへの規則と、runtimeやCLIの振る舞いとして決まっている止め方・限り方（「拒む」「実行しない」「入れ替えない」）の両方を含める。例外はそれらの規則の外し方。次は`★`にしない: 第三者のツールの振る舞いの説明（sccache・nextest・cargo-llvm-covが何を読むか）、設定の値そのもの（並列度・上限の数。値を変える規則は`★`）、やめた慣行の経緯（ジャーナルの削除、旧い番号の規則、退役した役割）、scriptが何を検出するかの説明、pluginの行のうち番号や例だけを消して周りの汎用の規則をpluginにそのまま残すもの（P-10・P-13・P-14・P-17・P-18。周りの規則は移さないので照合の対象でない）。照合（task 1463）は`★`の全項目が移した後の正本で見つかることを確かめる。§5に`★`の項目だけを並べ直した。
+- **既存の重複**: 移す前から同じ内容がある場所。plugin＝`plugins/claude-dagq/skills/`の下（`dagq/`・`dagq-planner/`・`dagq-inbox/`・`dagq-recover/`を略して書く）、design＝`docs/design/`の下（`sl/`は`supervisor-lifecycle/`）、plans＝`docs/plans/`の下。
+- **移し先**: ADR-t1453-2決定1の受け持ちの表で決めた、fileと節。新しい開発文書（`docs/development/`、type `development`、決定2）は予定のpathで、節の名前も予定。移すtaskが分け方を変えたら、この表の移し先を同じ変更で直す。
+  - `dev/task-registration.md`＝`docs/development/task-registration.md`（plannerのverify・paths・evidence・changeの選び方、plan reviewが当てはめる規則）
+  - `dev/local-checks.md`＝`docs/development/local-checks.md`（人とworkerの手元の検証、testの範囲、stress、e2eを流さないこと）
+  - `dev/testing.md`＝`docs/development/testing.md`（testの制約: coverage・置き場所・行数・e2e・待ちの上限）
+  - `dev/migrations.md`＝`docs/development/migrations.md`（migrationの足し方と不変）
+  - `dev/operations.md`＝`docs/development/operations.md`（本番queueと使い捨てのqueue、固定バイナリ、hostのツール、`dagq.toml`の運用、`up`のコマンド、KPIの読み方）
+  - `dev/documents.md`＝`docs/development/documents.md`（文書・ADR・commitの規則）
+  - `AGENTS.md「境界」`＝組み直した後のAGENTS.mdの「本番queueと開発環境の境界」、`「短い制約」`＝「開始時の短い制約」、`「読む案内」`＝「役割と変更の範囲ごとの読む案内」、`「概要」`（task 1461）。
+  - 経緯の行き先: 同じ経緯を持つADRかplansがあればそれ（そこにあれば元の場所は消すだけ）。無ければ、移すtaskがそのtaskのIDのADR（`ADR-t<ID>-<N>`「AGENTS.mdから移した開発の規則の経緯」）か測定のplanに書く。表では下の予定のpathと節で書く。
+  - 「削除（重複）」は、正本がすでに別の場所にあり、元の場所は消して必要なら参照の1行にするもの。残す正本のfileと節を「正本は」の後に書く。見出しの無いdesignの文書は「冒頭（`#`の節）」と書く。
+  - 新しいADRの予定のpathは、task 1457が`docs/adr/<accepted_on>-t1457-1-history-of-local-checks-and-test-rules.md`、task 1458が`docs/adr/<accepted_on>-t1458-1-history-of-operation-rules.md`で、どちらも「## Context」に経緯を書く（IDとslugは移すtaskが決めてよく、変えたら表を直す）。
+- **検査**: reviewのsubagentで機械的でない意味の検査ができる規則か。agentの名前は候補で、task 1460が決める。
+  - `design-consistency`（`src/**`・`docs/design/**`: 実装の変更とdesignの対応、`updated`・`last_verified`）
+  - `test-rules`（`tests/**`・`crates/*/tests/**`・`.config/e2e-quarantine.toml`: 置き場所・helper・processの状態・待ちの上限・e2eの印）
+  - `migration-rules`（`migrations/**`・`build.rs`・`src/infrastructure/schema.rs`）
+  - `adr-rules`（`docs/adr/**`・`docs/**`のfrontmatter）
+  - `config-rules`（`dagq.toml`・`.config/**`）
+  - `runtime-boundary`（`src/**`: このrepository固有の規則をruntimeに入れない、ADR-t1453-2決定5）
+  - `plugin-generic`（`plugins/**`: 固有の規則・値・経緯の戻り。plugin testと分担）
+  - `receipt-evidence`（全path: workerのreceiptの`tests`のevidenceが手元の検証の規則に合うか。差分でなくreceiptを見るので、置くかは1460が決める）
+  - 「plan review」はsubagentでなくplan review jobが見るもの、「script」は既存のscriptとCIが見るもの、「—」は検査しない（sessionの振る舞い・人の手順・設計の説明）。
+- **移した後の場所**: 後続のtaskが書き込む空の欄。
+
+## 3. AGENTS.mdの項目
+
+### 3.1 冒頭（`# AGENTS.md`の見出しから最初の`##`の前まで）
+
+| ID | 元の場所 | 要旨 | 種類 | 印 | 既存の重複 | 移し先 | 検査 | 移すtask | 移した後の場所 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A-001 | AGENTS.md 冒頭 | dagqはcmuxとworktreeで依存付きのtaskを実行するRustのruntime、文書の分類はdocs/README.md、このrepositoryの開発もdagqで流す | 手順 |  | docs/README.md、design overview.md | AGENTS.md「概要」（残す） | — | 1461 |  |
+| A-002 | AGENTS.md 冒頭 | CLIの使い方はpluginのskillが持ち、この文書はこのrepositoryだけの注意を書く | 手順 | ★ | — | AGENTS.md「概要」（残す） | — | 1461 |  |
+
+### 3.2 `## セッション開始時に読む`
+
+| ID | 元の場所 | 要旨 | 種類 | 印 | 既存の重複 | 移し先 | 検査 | 移すtask | 移した後の場所 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A-003 | セッション開始時に読む 1 | `dagq list`と担当taskの`dagq show ID`を読む（task・状態・依存・run履歴はキューだけが持つ） | 手順 | ★ | plugin dagq/SKILL.md §3（runtimeのworkerのpromptは逆に`list`/`show`を打たせない） | AGENTS.md「読む案内」（役割ごと。workerには載せない） | — | 1459 |  |
+| A-004 | セッション開始時に読む 2 | docs/plans/current.mdの現在のステップと完了条件を読む | 手順 |  | — | AGENTS.md「読む案内」（planner） | — | 1459 |  |
+| A-005 | セッション開始時に読む 3 | 触る範囲の`docs/design/*.md`を読む | 手順 |  | — | AGENTS.md「読む案内」（変更の範囲ごと） | — | 1459 |  |
+
+### 3.3 `## 作業中`
+
+| ID | 元の場所 | 要旨 | 種類 | 印 | 既存の重複 | 移し先 | 検査 | 移すtask | 移した後の場所 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A-006 | 作業中 箇条1 | taskはplannerが`add`し`submit`でplan reviewへ。`ready`にするのはplan review jobだけ（例外: 人が明示した`ready --bypass-review`、復旧job、runtimeのretry） | 汎用 | ★ | plugin dagq/SKILL.md §2、dagq-planner/SKILL.md、design plan-review.md | 削除（重複）。正本はplugin dagq/SKILL.md「## 2. Register a goal and decompose it into tasks」（plan reviewだけが`ready`にする、`--bypass-review`は人の明示）、dagq-recover/SKILL.md「## 8. Bypass plan review; a failed plan or goal review」、復旧jobとretryはdesign sl/background-recovery-job.md「## 適用」 | — | 1458 |  |
+| A-007 | 作業中 箇条2 | 本番queueの状態を変えるコマンド・`migrate`・`up`/`down`/`install`は、どのsessionでも固定バイナリ`~/.local/bin/dagq`で行う | 禁止 | ★ | — | AGENTS.md「境界」（残す。本文はdev/operations.md「本番queueと固定バイナリ」） | — | 1458 |  |
+| A-008 | 作業中 箇条2 | `target/debug`・`target/release`の開発中のバイナリで本番queueを変えない（未commitの変更・未着地のmigrationを持ち込む） | 禁止 | ★ | — | AGENTS.md「境界」（残す） | — | 1458 |  |
+| A-009 | 作業中 箇条2 | 状態を変えないコマンドは読み取り専用で開きmigrateしないので、開発中のバイナリで本番queueを読むのはよい（ADR-0073決定5・7・18） | 例外 | ★ | design persistence.md、ADR-0073 | AGENTS.md「境界」（1行で残す。仕組みはdesign persistence.md「## Database setup and migrations」） | — | 1458 |  |
+| A-010 | 作業中 箇条2 | session開始時に`which dagq`が`~/.local/bin/dagq`に解決することを確かめる | 手順 |  | — | AGENTS.md「短い制約」 | — | 1458 |  |
+| A-011 | 作業中 箇条3 | 新しいビルドの確認とworktree・cmuxのスモークは使い捨てのrepositoryのqueueで行う | 手順 | ★ | design manual-smoke.md | dev/operations.md「使い捨てのqueue」（AGENTS.md「境界」から参照） | — | 1458 |  |
+| A-012 | 作業中 箇条3 | このrepositoryのqueue DBと実行中の`~/.local/bin/dagq`を作業成果で置き換えない（入れ替えは`install`か自動更新だけ） | 禁止 | ★ | — | AGENTS.md「境界」（残す） | — | 1458 |  |
+| A-013 | 作業中 箇条3 | 使い捨てのqueueを作って操作するのは人かinboxだけ。workerは`queue.admin`を持たず`init`・`add`・`up`を使えない | 禁止 | ★ | design authorization.md、plugin dagq/reference/authority.md | dev/operations.md「使い捨てのqueue」 | — | 1458 |  |
+| A-014 | 作業中 箇条3 | 上の決定の経緯（task 983、2026-09-29のask 195で人がpolicyを変えないと決めた） | 経緯 | ★ | ADR-t728-1 | 新ADR `docs/adr/<accepted_on>-t1458-1-history-of-operation-rules.md`（予定）「## Context」 | — | 1458 |  |
+| A-015 | 作業中 箇条3 | workerの`dagq`はクライアントモードで、serviceに無いコマンドは`no_use_case`、`--db`でも`queue_named`で拒まれ、eventは残らない | 設計 | ★ | design queue-service.md「クライアントモード」 | 削除（重複）。正本はdesign queue-service.md「## クライアントモード」 | — | 1458 |  |
+| A-016 | 作業中 箇条3 | workerは`DAGQ_ROLE`などのenvを外して迂回しない | 禁止 | ★ | plugin dagq/SKILL.md、dagq/reference/authority.md、design security.md | 削除（重複）。正本はplugin dagq/reference/authority.md「## Client mode: a worker's and a job's dagq」 | — | 1458 |  |
+| A-017 | 作業中 箇条3 | workerが実バイナリの振る舞いを確かめたいときは`tests/it`のfixtureかe2eに書き、実queueの手の確認は`follow_ups`（`ops`）にする | 手順 | ★ | — | dev/local-checks.md「実バイナリの確認」 | — | 1458 |  |
+| A-018 | 作業中 箇条3 | 使い捨てのrepositoryのディレクトリ名は`dagq-smoke`（e2eは`dagq-e2e`）。groupが`[<ディレクトリ名>]`になり出どころが分かる（task 710） | 値 |  | design manual-smoke.md | dev/operations.md「使い捨てのqueue」 | — | 1458 |  |
+| A-019 | 作業中 箇条3 | スモークの後は`cmux workspace-group delete <group> --close-workspaces`で消す（anchorのworkspaceが残るため） | 手順 |  | design manual-smoke.md | 削除（重複）。正本はdesign manual-smoke.md「### シナリオ」（「## 故障経路のスモーク」の下） | — | 1458 |  |
+| A-020 | 作業中 箇条4 | 固定バイナリの更新は`dagq install`か`up --auto-update`の自動更新だけで行う（ADR-0073決定10〜17） | 禁止 | ★ | plugin dagq-recover/reference/update.md、design install.md・auto-update.md | AGENTS.md「境界」（1行で残す） | — | 1458 |  |
+| A-021 | 作業中 箇条4 | `install`の流れ（main checkoutのbuild、全部のe2eの関門、確認、互換のmigration、renameと`.previous`、drainしない引き継ぎ、build識別子での判定） | 設計 | ★ | design sl/install.md、plugin dagq-recover/reference/update.md | 削除（重複）。正本はdesign sl/install.md 冒頭（`#`の節）とplugin dagq-recover/reference/update.md「## install」 | — | 1458 |  |
+| A-022 | 作業中 箇条4 | e2eの関門を飛ばす`--skip-e2e`は急ぐときだけ人が明示して使う（ADR-t963-1決定1） | 例外 | ★ | plugin dagq-recover/reference/update.md | 削除（重複）。正本はplugin dagq-recover/reference/update.md「## install」 | — | 1458 |  |
+| A-023 | 作業中 箇条4 | `cp`で上書きしない（macOSで走行中のプロセスがkillされうる、`.previous`が残らない） | 禁止 | ★ | plugin dagq-recover/reference/update.md | 削除（重複）。正本はplugin dagq-recover/reference/update.md「## install」 | — | 1458 |  |
+| A-024 | 作業中 箇条4 | 前のバイナリに戻すのは`install --rollback` | 汎用 |  | plugin dagq-recover/reference/update.md | 削除（重複）。正本はplugin dagq-recover/reference/update.md「## install」 | — | 1458 |  |
+| A-025 | 作業中 箇条4 | 人が打つ`install`はユーザーに報告してから行う | 禁止 | ★ | plugin dagq-planner/SKILL.md §6 | dev/operations.md「本番queueと固定バイナリ」 | — | 1458 |  |
+| A-026 | 作業中 箇条4 | 非互換のmigrationを含むビルドは`install`が止まり、`--allow-breaking`はdrain・`backups/`への退避・migrate。開いたaskを人に見せ了承を得てから打つ | 禁止 | ★ | plugin dagq-recover/reference/update.md、design install.md | 削除（重複）。正本はplugin dagq-recover/reference/update.md「## install」と「## The update asks」 | — | 1458 |  |
+| A-027 | 作業中 箇条5 | `dagq.toml`の`[run.env]`がworker・`integrate`・reviewにenvとして渡る（ADR-0049決定3） | 設計 |  | design sl/run-environment.md | 削除（重複）。正本はdesign sl/run-environment.md 冒頭（`#`の節） | — | 1458 |  |
+| A-028 | 作業中 箇条5 | このrepositoryは`RUSTC_WRAPPER = "sccache"`と`SCCACHE_IGNORE_SERVER_IO_ERROR = "1"`を渡す | 値 |  | dagq.toml `[run.env]`のコメント | 削除（重複）。正本はdagq.toml `[run.env]`（値とコメント） | config-rules | 1458 |  |
+| A-029 | 作業中 箇条5 | `CARGO_TARGET_DIR`と`CARGO_INCREMENTAL`を`[run.env]`に置かない（run間のtargetを共有しない） | 禁止 | ★ | dagq.toml `[run.env]`のコメント | dev/operations.md「`[run.env]`に置かないもの」 | config-rules | 1458 |  |
+| A-030 | 作業中 箇条5 | 共有しない理由（a）`CARGO_BIN_EXE_dagq`の上書き、（b）llvm-covのprofrawの消し合い。2026-09-23のユーザー決定、ADR-0049決定6。理由(a)(b)はenvで並列度を絞ることには当たらない | 経緯 | ★ | ADR-0049、dagq.tomlのコメント | 理由はADR-0049「## Context」「## Decision」決定6（削除のみ）。「envで並列度を絞ることには当たらない」の例外はdev/operations.md「`[run.env]`に置かないもの」 | config-rules | 1458 |  |
+| A-031 | 作業中 箇条5 | sccacheは人が`mise use -g sccache`で入れ、`~/.local/bin/sccache`にmiseのshimへのlinkを置く（ADR-0049決定7） | 手順 |  | dagq.tomlのコメント | dev/operations.md「hostのツール」 | — | 1458 |  |
+| A-032 | 作業中 箇条5 | workerはhostにツールを入れない | 禁止 | ★ | AGENTS.md 箇条6（A-044）・worker（A-222） | dev/local-checks.md「hostに触らない」 | — | 1458 |  |
+| A-033 | 作業中 箇条5 | ツールが無ければ`up`・claim・`integrate`が止まりinboxに`install tool`、`doctor`の`run_env`（決定8・9） | 設計 | ★ | design sl/run-environment.md、doctor.md | 削除（重複）。正本はdesign sl/run-environment.md「## `[run.env]`が名指すプログラムの検査」とsl/doctor.md 冒頭（`#`の節） | — | 1458 |  |
+| A-034 | 作業中 箇条5 | `CARGO_BUILD_JOBS = "4"`と決め方（`parallel` 3、worker 3本と`integrate` 1本で合計16並列） | 値 |  | dagq.toml `[run.env]`のコメント | 削除（重複）。正本はdagq.toml `[run.env]`（値とコメント） | config-rules | 1458 |  |
+| A-035 | 作業中 箇条5 | 上の経緯（2026-09-26、task 427、hostは8コア/16GB、load average 151〜204、captureのtimeout 400件超、startup中央値約1100秒、goal 36のnote 8718） | 経緯 |  | dagq.tomlのコメント | 新ADR `docs/adr/<accepted_on>-t1458-1-history-of-operation-rules.md`（予定）「## Context」。dagq.toml `[run.env]`のコメントからこのADRを指す | — | 1458 |  |
+| A-036 | 作業中 箇条5 | `RUST_TEST_THREADS = "6"`と`NEXTEST_TEST_THREADS = "6"`（nextestは前者を読まない、ADR-0076決定2） | 値 |  | dagq.toml `[run.env]`のコメント | 削除（重複）。正本はdagq.toml `[run.env]`（値とコメント） | config-rules | 1458 |  |
+| A-037 | 作業中 箇条5 | testの並列度の経緯 4→8→6（task 427・566・537・930・563、測定値） | 経緯 |  | plans nextest-test-threads.md・nextest-measurement.md、dagq.tomlのコメント | plans nextest-test-threads.md「## 7. 変更後（8）」「## 8. 6に下げた（task 930）」（元の場所は削除のみ） | — | 1458 |  |
+| A-038 | 作業中 箇条5 | 着地後にplannerがstatsで前後を見て、6でも悪化が戻らなければ4に戻す前にhostのほかのloadを見る | 手順 | ★ | plans nextest-test-threads.md、dagq.tomlのコメント | plans nextest-test-threads.md「### 8.3 6でも戻らないとき」 | — | 1458 |  |
+| A-039 | 作業中 箇条5 | `.config/nextest.toml`には並列度を書かず、`slow-timeout`だけを置く | 禁止 | ★ | dagq.tomlのコメント | dev/testing.md「nextestの設定」 | config-rules | 1458 |  |
+| A-040 | 作業中 箇条5 | testの打ち切りは`tests/common/mod.rs`の`within`が持つ | 設計 |  | AGENTS.md テストの制約（A-137） | dev/testing.md「待ちの上限」 | — | 1458 |  |
+| A-041 | 作業中 箇条5 | needs_sessionのresumeのworkspaceにも`[run.env]`が渡る（task 303）。CIとdagqを通さない`cargo`は読まない | 設計 | ★ | design sl/run-environment.md | 削除（重複）。正本はdesign sl/run-environment.md 冒頭（`#`の節） | — | 1458 |  |
+| A-042 | 作業中 箇条5 | runtimeが読むのはmain checkoutの`dagq.toml`で、着地してから効く。壊すとqueue全体が止まる | 手順 | ★ | design sl/run-environment.md、dagq.toml 冒頭のコメント | dev/operations.md「`dagq.toml`を変えるとき」 | config-rules | 1458 |  |
+| A-043 | 作業中 箇条6 | 依存図の`d2`とTALAは人が`mise use -g d2 github:terrastruct/TALA`で入れlinkを置く。入れた後はsupervisorを起動し直す | 手順 |  | design sl/dependency-diagram.md | dev/operations.md「hostのツール」 | — | 1458 |  |
+| A-044 | 作業中 箇条6 | workerはhostにツールを入れない（A-032の繰り返し） | 禁止 | ★ | A-032 | dev/local-checks.md「hostに触らない」（A-032と1つに） | — | 1458 |  |
+| A-045 | 作業中 箇条6 | 無ければ`graph --format svg`が理由付きで失敗し、`doctor`の`d2`欄で見られる | 設計 | ★ | design sl/dependency-diagram.md・doctor.md | 削除（重複）。正本はdesign sl/dependency-diagram.md「## コマンド」とsl/doctor.md 冒頭（`#`の節） | — | 1458 |  |
+| A-046 | 作業中 箇条7 | KPI・印・日次レポート・pushの仕組みと使い方への参照（ADR-0051） | 汎用 |  | plugin dagq/reference/kpi.md、design sl/kpi.md ほか | 削除（重複）。正本はplugin dagq/reference/kpi.md 冒頭（`#`の節。ファイル全体）とdesign sl/kpi.md 冒頭（`#`の節） | — | 1458 |  |
+| A-047 | 作業中 箇条7 | このrepositoryの作業時間の前後比較は`--area runtime`の層で読む（`kind`はtask 984で消した。areaは`[areas]`で着地の差分から求める） | 手順 | ★ | plugin dagq/reference/kpi.md（P-15・P-16） | dev/operations.md「KPIの読み方」 | — | 1458 |  |
+| A-048 | 作業中 箇条7 | 設定・運用・hostを変えたら効いた時点で固定バイナリの`dagq mark`を打ち（build・`--parallel`・Claude・`[run.env]`は除く）、`kpi --compare`で確かめる | 手順 | ★ | plugin dagq/reference/kpi.md §5、dagq-planner/SKILL.md §4 | dev/operations.md「KPIの読み方」（このrepositoryで印を打つときだけ）。汎用の部分の正本はplugin dagq/reference/kpi.md「## Before and after a change: `mark`, `marks`, `kpi --compare`」 | — | 1458 |  |
+| A-049 | 作業中 箇条7 | 目標は`dagq.toml`の`[kpi.targets]`とhost.toml、`max_improvement_proposals`は`dagq.toml`だけ | 設計 | ★ | design sl/kpi.md | 削除（重複）。正本はdesign sl/kpi.md「## 目標（`targets`）」とsl/observer.md「## KPIの目標割れと改善の上限」 | — | 1458 |  |
+| A-050 | 作業中 箇条7 | `dagq.toml`の新しいtable（`[kpi]`など）は、知らない古いバイナリが起動できないので固定バイナリが対応してから足す | 禁止 | ★ | dagq.tomlの各tableのコメント、ADR-t1453-1決定10 | dev/operations.md「`dagq.toml`を変えるとき」 | config-rules | 1458 |  |
+| A-051 | 作業中 箇条7-1 | レポートはsupervisorが日に1回queue dirの`reports/`に書き、人は`index.html`を開く。手では`dagq report` | 設計 | ★ | design sl/report.md、plugin dagq/reference/kpi.md | 削除（重複）。正本はdesign sl/report.md「## 場所と保持」「## supervisorの日次」「## `dagq report`」 | — | 1458 |  |
+| A-052 | 作業中 箇条7-1 | レポートは外部に送らない | 禁止 | ★ | design sl/report.md | dev/operations.md「secretと外部送信」 | — | 1458 |  |
+| A-053 | 作業中 箇条7-2 | pushはhost.tomlの`[push]`の`command`のstdinにJSON。`[push]`はcommitされる`dagq.toml`に置かない | 禁止 | ★ | design sl/push.md | dev/operations.md「secretと外部送信」 | config-rules | 1458 |  |
+| A-054 | 作業中 箇条7-2 | ntfyのtopic・webhook URL・tokenなどのsecretはrepositoryの外に置き、commitしない | 禁止 | ★ | design sl/push.md | dev/operations.md「secretと外部送信」 | config-rules | 1458 |  |
+| A-055 | 作業中 箇条7-2 | 3回続けて送れなかったら`fix the push command`（`kpi_push_abandoned`）で人が直す | 設計 | ★ | design sl/push.md、plugin dagq-inbox/SKILL.md §4 | 削除（重複）。正本はdesign sl/push.md「## 実行・再試行・失敗」 | — | 1458 |  |
+
+### 3.4 `## 変更後に必ず通す`
+
+| ID | 元の場所 | 要旨 | 種類 | 印 | 既存の重複 | 移し先 | 検査 | 移すtask | 移した後の場所 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A-056 | 変更後に必ず通す 冒頭 | dagqを通さない手元の作業（人がcheckoutで直接変える）は`cargo fmt --all --check`・`cargo test --locked`・`cargo clippy --locked --all-targets -- -D warnings`の3本を通す | 手順 |  | — | dev/local-checks.md「人の手元の検証」 | — | 1457 |  |
+| A-057 | 変更後に必ず通す 冒頭 | workerは全体の`cargo test --locked`を流さない | 禁止 | ★ | plugin dagq/reference/scope.md（P-04） | dev/local-checks.md「workerの手元の検証」 | receipt-evidence | 1457 |  |
+| A-058 | 変更後に必ず通す 箇条1 | workerは`cargo fmt --all --check`と`cargo clippy --locked --all-targets -- -D warnings`を流す | 手順 |  | plugin scope.md（P-04） | dev/local-checks.md「workerの手元の検証」 | receipt-evidence | 1457 |  |
+| A-059 | 変更後に必ず通す 箇条2 | 関係するtestだけ: `--test it <module>::`・`--lib <module>`、ファイル名がmodule名（ADR-0078）、選び方の目安 | 手順 | ★ | plugin scope.md（P-04） | dev/local-checks.md「testの範囲」 | receipt-evidence | 1457 |  |
+| A-060 | 変更後に必ず通す 箇条2 | `--test it`をfilterなしで流さない、`runtime_`のような接頭辞だけのfilterや多数のmoduleの列挙で`it`の大半を流さない、`--test it --test plugin`で全体を流さない | 禁止 | ★ | — | dev/local-checks.md「testの範囲」 | receipt-evidence | 1457 |  |
+| A-061 | 変更後に必ず通す 箇条2 | `tests/common`・`tests/it/runtime_support`のhelperを変えて使うmoduleが多いときは代表のmoduleに絞り、残りは`integrate`に任せたとevidenceに書く | 例外 | ★ | plugin scope.md（P-04） | dev/local-checks.md「testの範囲」 | receipt-evidence | 1457 |  |
+| A-062 | 変更後に必ず通す 箇条2 | `crates/`のbrokerのcrateを変えたら`cargo test --locked -p <crate>`。`default-members`で`--test it`と`--lib`も通る（ADR-t827-1） | 手順 |  | — | dev/local-checks.md「testの範囲」 | receipt-evidence | 1457 |  |
+| A-063 | 変更後に必ず通す 箇条2 | 全体を比べる既存のtestも流す: migration→`queue_migration::`・`queue_schema::`・`lifecycle_replace::`・`cli_version::`、`doctor`/`status`の出力→`cli_tasks::`・`cli_read::`、pluginの文書→`--test plugin` | 手順 | ★ | — | dev/local-checks.md「全体を比べるtest」 | receipt-evidence | 1457 |  |
+| A-064 | 変更後に必ず通す 箇条2 | 上の経緯（`integrate`の関門で初めて落ちてresumeを使ってきた、goal 67・finding 18） | 経緯 |  | — | 新ADR `docs/adr/<accepted_on>-t1457-1-history-of-local-checks-and-test-rules.md`（予定）「## Context」 | — | 1457 |  |
+| A-065 | 変更後に必ず通す 箇条2 | 範囲の選び方は手がかりで、全体の`cargo test`と`cargo llvm-cov`をworkerが流さない規則は変わらない。evidenceに範囲（コマンドと件数）を書く | 手順 | ★ | — | dev/local-checks.md「testの範囲」 | receipt-evidence | 1457 |  |
+| A-066 | 変更後に必ず通す 箇条3 | taskのverifyのうちcoverageの関門（`cargo llvm-cov nextest`、旧`cargo llvm-cov`）と全体の`cargo test --locked`以外（`--test plugin`など）は流す | 手順 | ★ | runtimeのprompt（`local_checks`）、plugin scope.md | dev/local-checks.md「workerの手元の検証」 | receipt-evidence | 1457 |  |
+| A-067 | 変更後に必ず通す 箇条4 | e2e（`tests/e2e.rs`）はworkerが流さず、receiptの`e2e`を理由つきの`not_applicable`にする（ADR-t1233-2） | 禁止 | ★ | runtimeのprompt、plugin scope.md「E2E」 | dev/local-checks.md「e2eを流さない」 | receipt-evidence | 1457 |  |
+| A-068 | 変更後に必ず通す 箇条4 | 例外: runtimeのe2eが落ちて`e2e_failed`でresumeされたrunは、落ちたtestを名前で絞って1本ずつ（`--exact`）流してよい。全体は流さない | 例外 | ★ | plugin scope.md「E2E」、runtimeのresumeのprompt | dev/local-checks.md「e2eを流さない」 | receipt-evidence | 1457 |  |
+| A-069 | 変更後に必ず通す 箇条4 | 差分が`[e2e] paths`に触れるrunと`--evidence e2e`のtaskのrunはreviewのpassの後に着地の前にruntimeがhostで全部のe2eを流す。e2eはstressの対象外、全部のe2eは自動更新と`install`の関門も流す | 設計 | ★ | design sl/review.md「着地の前のe2e」・auto-update.md | 削除（重複）。正本はdesign sl/review.md「## 着地の前のe2e」とsl/auto-update.md 冒頭（`#`の節） | — | 1457 |  |
+| A-070 | 変更後に必ず通す 箇条5 | stressは明らかに不安定なtestを止める軽い見張りで、重い繰り返しはGitHub Actionsの定時実行（`stress.yml`・`scripts/stress-recent-tests.sh` 20周・`flaky-test`のissue、ADR-t920-1） | 設計 |  | design stress-ci.md、ADR-t920-1 | 削除（重複）。正本はdesign stress-ci.md 冒頭（`#`の節）と「## 繰り返し方」「## 落ちたとき」。dev/local-checks.md「stress」から指す | — | 1457 |  |
+| A-071 | 変更後に必ず通す 箇条5 | stressの対象: runのdiffで足した・変えた`#[test]`（`tests/it/**`・`src/`の`#[cfg(test)]`・`crates/`）。e2eとpluginは対象外 | 手順 | ★ | — | dev/local-checks.md「stress」 | receipt-evidence | 1457 |  |
+| A-072 | 変更後に必ず通す 箇条5 | コマンド`cargo nextest run --locked --test it --stress-count 5 -E 'test(=<module>::<name>) \| ...'`（unitは`--lib`、crateは`-p`、種類ごとに分ける） | 値 |  | — | dev/local-checks.md「stress」 | receipt-evidence | 1457 |  |
+| A-073 | 変更後に必ず通す 箇条5 | 1周が15秒を超えるtestを含むときは`--stress-duration 60s` | 値 | ★ | — | dev/local-checks.md「stress」 | receipt-evidence | 1457 |  |
+| A-074 | 変更後に必ず通す 箇条5 | 負荷が下がるのを待ってから流さない | 禁止 | ★ | — | dev/local-checks.md「stress」 | — | 1457 |  |
+| A-075 | 変更後に必ず通す 箇条5 | 1回でも落ちたら流し直して通ったことで済ませず、原因を直してから同じstressを通す | 禁止 | ★ | — | dev/local-checks.md「stress」 | receipt-evidence | 1457 |  |
+| A-076 | 変更後に必ず通す 箇条5 | evidenceにtestの名前・周回数か時間・結果を書く | 手順 |  | — | dev/local-checks.md「stress」 | receipt-evidence | 1457 |  |
+| A-077 | 変更後に必ず通す 箇条5 | 変えたtestが無いrunはstressせず、しないことと理由を書く | 例外 | ★ | — | dev/local-checks.md「stress」 | receipt-evidence | 1457 |  |
+| A-078 | 変更後に必ず通す 箇条5 | cargo-nextestが無ければworkerは入れず、stressをしなかったことと理由を書く（ADR-0076決定3） | 例外 | ★ | — | dev/local-checks.md「stress」 | receipt-evidence | 1457 |  |
+| A-079 | 変更後に必ず通す 段落1 | 全部のtestは`integrate`の検証（runtimeのtaskは`cargo llvm-cov nextest`）がrebase後に1回だけ流す | 設計 | ★ | design sl/integrate.md・validation.md、plugin scope.md | dev/local-checks.md「workerの手元の検証」の理由として1行（本文はdesign sl/integrate.md 冒頭（`#`の節）とsl/validation.md 冒頭（`#`の節）） | — | 1457 |  |
+| A-080 | 変更後に必ず通す 段落1 | 例外は`integrate`の検証が落ちてresumeされたrunがその落ちたコマンドを再現するときだけ | 例外 | ★ | plugin scope.md（P-04） | dev/local-checks.md「resumeでの再現」 | receipt-evidence | 1457 |  |
+| A-081 | 変更後に必ず通す 段落1 | rebaseの衝突・migrationの番号・receiptの催促によるresumeとreviewの差し戻し（revise）はその例外に当たらない | 禁止 | ★ | — | dev/local-checks.md「resumeでの再現」 | receipt-evidence | 1457 |  |
+| A-082 | 変更後に必ず通す 段落1 | workerのpromptはverification_commandsを`integrate`が流すものとして見せ、手元の検証はこの文書に従わせる（task 510） | 設計 |  | design sl/prompt.md、src/application/prompt.rs `local_checks` | 削除（重複）。正本はdesign sl/prompt.md「## repositoryの規則を読む順」 | — | 1457 |  |
+| A-083 | 変更後に必ず通す 段落2 | 手元のtestを関係する範囲に絞った経緯（2026-09-26、task 528、変更前の基準値 work中央値1439秒など）と、前後を見る方法（task 514） | 経緯 |  | plugin scope.md（P-05） | 新ADR `docs/adr/<accepted_on>-t1457-1-history-of-local-checks-and-test-rules.md`（予定）「## Context」 | — | 1457 |  |
+| A-084 | 変更後に必ず通す 段落3 | stressを導入した経緯（task 767、2026-09-27、20周）と縮めた経緯（goal 62、2026-09-28、ADR-t920-1・ADR-t768-1、`work_breakdown.secs.test`の中央値150→442秒） | 経緯 | ★ | ADR-t920-1 | ADR-t920-1「## Context」。足りない値（task 767の20周、中央値150→442秒）は新ADR `docs/adr/<accepted_on>-t1457-1-history-of-local-checks-and-test-rules.md`（予定）「## Context」 | — | 1457 |  |
+| A-085 | 変更後に必ず通す 段落3 | 効果は`work_breakdown.secs.test`と`integrate`のflaky・resumeの件数で見て、flakyによる着地の失敗が増えたら周回を戻す | 手順 |  | ADR-t920-1決定3 | 削除（重複）。正本はADR-t920-1「## Decision」決定3 | — | 1457 |  |
+| A-086 | 変更後に必ず通す 段落4 | `<module>::`で名指しし、手元のllvm-covと全体のtestを再現だけに限り、e2eを最後に1回にすると書き直した経緯（task 1030、2026-09-27の負荷の山、task 418・314） | 経緯 | ★ | plans load-spike-2026-09-27.md | 新ADR `docs/adr/<accepted_on>-t1457-1-history-of-local-checks-and-test-rules.md`（予定）「## Context」。測定の正本はplans load-spike-2026-09-27.md「## 4. 見立て」「## 5. 打ち手の候補」 | — | 1457 |  |
+| A-087 | 変更後に必ず通す 段落4 | 並列度を分ける案と重いtestを待たせる案は、数え直し（task 1034）で山が残るかを見てから決める | 経緯 | ★ | plans load-spike-2026-09-27.md | plans load-spike-2026-09-27.md「### 6.4 見立てと次の判断」（元の場所は削除のみ） | — | 1457 |  |
+| A-088 | 変更後に必ず通す 段落4 | e2eは2026-10-01の人の決定（ADR-t1233-2、task 1239・1240）でworkerの手元から外れた | 経緯 |  | ADR-t1233-2 | ADR-t1233-2「## Context」（元の場所は削除のみ） | — | 1457 |  |
+
+### 3.5 `## テストの制約`
+
+| ID | 元の場所 | 要旨 | 種類 | 印 | 既存の重複 | 移し先 | 検査 | 移すtask | 移した後の場所 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A-089 | テストの制約 箇条1 | 行カバレッジの合計を80%以上に保ち、下回る変更は着地しない | 禁止 | ★ | plugin scope.md（P-01） | dev/testing.md「coverage」 | script（関門とCI） | 1457 |  |
+| A-090 | テストの制約 箇条1 | 関門のコマンド`cargo llvm-cov nextest --locked --workspace --fail-under-lines 80`（nextestで1件ずつ別process、ADR-0076）と`--workspace`の理由（ADR-t828-1） | 値 |  | plugin scope.md（P-01） | dev/testing.md「coverage」 | plan review | 1457 |  |
+| A-091 | テストの制約 箇条1 | 登録済みのtaskの`--workspace`なしの`cargo llvm-cov nextest`と旧`cargo llvm-cov`は書き換えず同じ関門として有効 | 例外 | ★ | plugin scope.md（P-04の一部） | dev/task-registration.md「coverageの関門」 | plan review | 1457 |  |
+| A-092 | テストの制約 箇条1 | testは1件ずつ別processになるので、binaryの中の他のtestとprocessの状態（staticや一度だけの初期化）を共有することに頼るtestを書かない | 禁止 | ★ | — | dev/testing.md「testの書き方」 | test-rules | 1457 |  |
+| A-093 | テストの制約 箇条1 | 門番はtaskの`verification_commands`（`integrate`がrebase後に1回）とCI。workerは手元で`cargo llvm-cov`も全体の`cargo test`も回さない（A-057の繰り返しと流すものの列挙） | 禁止 | ★ | A-057〜A-066 | dev/local-checks.md「workerの手元の検証」（A-057と1つに） | receipt-evidence | 1457 |  |
+| A-094 | テストの制約 箇条1 | runtime（`src/`）を触るtaskは`add`のverificationに`cargo llvm-cov nextest --locked --workspace --fail-under-lines 80`を含める | 手順 |  | plugin scope.md（P-01） | dev/task-registration.md「推奨の組み合わせ」 | plan review | 1457 |  |
+| A-095 | テストの制約 箇条1 | runtimeのtaskに`--evidence e2e`を付けない。e2eの要否はvalidatingが差分と`[e2e] paths`から決め`e2e_requirement`に記録する | 禁止 | ★ | plugin scope.md「E2E」、dagq-planner/SKILL.md §1 | dev/task-registration.md「e2e」 | plan review | 1457 |  |
+| A-096 | テストの制約 箇条1 | receiptの`e2e`のevidenceは求めない | 設計 | ★ | design sl/validation.md、plugin scope.md | 削除（重複）。正本はdesign sl/validation.md「## runtimeが流すe2e」 | — | 1457 |  |
+| A-097 | テストの制約 箇条1 | `--evidence e2e`は`[e2e] paths`の外でも実cmuxで確かめる必要があるとplannerが判断したときだけ付ける | 例外 | ★ | plugin scope.md「E2E」 | dev/task-registration.md「e2e」 | plan review | 1457 |  |
+| A-098 | テストの制約 箇条1 | llvm-covをverificationに含めるtaskでは`cargo test --locked`を重ねない（同じtestが2回、約100秒で検出力は増えない） | 禁止 | ★ | plugin scope.md（P-01） | dev/task-registration.md「推奨の組み合わせ」 | plan review | 1457 |  |
+| A-099 | テストの制約 箇条1 | llvm-covと`cargo test`が流すtest binary群（unit・`tests/it`・`tests/e2e.rs`・`tests/plugin.rs`・`crates/`）、`default-members`、doctestが無いこと | 設計 | ★ | — | dev/testing.md「test binary」 | — | 1457 |  |
+| A-100 | テストの制約 箇条1 | llvm-covを含めないtask（docs・pluginの文書など）は必要なら`cargo test --locked`をverificationに残す | 例外 | ★ | — | dev/task-registration.md「推奨の組み合わせ」 | plan review | 1457 |  |
+| A-101 | テストの制約 箇条2 | `--paths`を宣言すれば変更の対象でverificationを軽くしてよい。宣言外は`scope_violation`でvalidatingと`integrate`が止める（ADR-0029） | 手順 | ★ | plugin scope.md「What happens outside the paths」 | dev/task-registration.md「pathsと軽い検証」（仕組みはplugin dagq/reference/scope.md「## What happens outside the paths」を指す） | plan review | 1457 |  |
+| A-102 | テストの制約 箇条2-1 | 推奨: docsだけ`--paths 'docs/**' --paths '*.md' --verify 'cargo fmt --all --check'`（fmtも要らなければなし） | 値 | ★ | plugin scope.md（P-01） | dev/task-registration.md「推奨の組み合わせ」 | plan review | 1457 |  |
+| A-103 | テストの制約 箇条2-2 | 推奨: ADRを書く→上に`--verify 'sh scripts/check-adr-numbers.sh'` | 値 |  | — | dev/task-registration.md「推奨の組み合わせ」 | plan review | 1457 |  |
+| A-104 | テストの制約 箇条2-3 | 推奨: pluginの文書・skill→`--paths 'plugins/**' --paths 'docs/**' --paths '*.md' --verify 'cargo test --locked --test plugin'` | 値 |  | plugin scope.md（P-01） | dev/task-registration.md「推奨の組み合わせ」 | plan review | 1457 |  |
+| A-105 | テストの制約 箇条2-4 | 推奨: runtime（`src/`・`tests/`・`migrations/`・`crates/`）→`--paths`なしでfmt/clippy/llvm-cov、`--evidence e2e`なし | 値 | ★ | plugin scope.md（P-01） | dev/task-registration.md「推奨の組み合わせ」 | plan review | 1457 |  |
+| A-106 | テストの制約 箇条2-5 | 推奨: migrationを足す→上に`--verify 'sh scripts/check-migration-numbers.sh'` | 値 |  | — | dev/task-registration.md「推奨の組み合わせ」 | plan review | 1457 |  |
+| A-107 | テストの制約 箇条2-6 | 対象が混ざるtaskは重い方の検証 | 手順 |  | plugin scope.md（P-02） | dev/task-registration.md「推奨の組み合わせ」 | plan review | 1457 |  |
+| A-108 | テストの制約 箇条2-6 | 宣言外のpathが本当に要るならworkerは`failed`のreceiptに必要なpathを書き、plannerが広げて登録し直す（draft/readyなら`set-paths`） | 手順 | ★ | plugin scope.md「What happens outside the paths」「Change the paths」 | 削除（重複）。正本はplugin dagq/reference/scope.md「## What happens outside the paths」「## Change the paths」 | — | 1457 |  |
+| A-109 | テストの制約 箇条3 | `--change`はこのrepositoryの`[tasks] changes`の7値（feature・fix・refactor・test・measure・docs・config）とそれぞれの意味。`add`のたびに付ける（ADR-t980-1） | 値 | ★ | dagq.toml `[tasks]`（値の集合だけ） | dev/task-registration.md「change」 | plan review | 1457 |  |
+| A-110 | テストの制約 箇条3 | 集合の外の値とchangeの無いtaskは`add`/`edit`・`lint`・`submit`が拒む | 設計 | ★ | plugin scope.md、design sl/run-environment.md | 削除（重複）。正本はplugin dagq/reference/scope.md「## Recommended combinations」（`--change`の段落）とdesign sl/run-environment.md 冒頭（`#`の節） | — | 1457 |  |
+| A-111 | テストの制約 箇条3 | 混ざるときは主な目的を1つ選ぶ（例: 不具合の修正にtestを足すなら`fix`） | 手順 |  | — | dev/task-registration.md「change」 | plan review | 1457 |  |
+| A-112 | テストの制約 箇条3 | changeは検証を決めない。areaは宣言せず`[areas]`の対応表（runtime・migrations・broker・tests・plugin・ci・docs・config）で着地の差分から求める | 汎用 | ★ | plugin scope.md、kpi.md | 削除（重複）。正本はplugin dagq/reference/scope.md「## Recommended combinations」（areaの段落）、areaの一覧はdagq.toml `[areas]` | — | 1457 |  |
+| A-113 | テストの制約 箇条3 | taskのkindはtask 984で消した（`--kind`は無い） | 経緯 | ★ | ADR-t980-1、plugin scope.md | ADR-t980-1「## Decision」決定1（元の場所は削除のみ） | — | 1457 |  |
+| A-114 | テストの制約 箇条3 | 作業時間の前後比較は`kpi --compare`を`--area runtime`か`--change`で読み、`all`で読まない | 禁止 | ★ | plugin dagq/reference/kpi.md §5 | dev/operations.md「KPIの読み方」（A-047と1つに） | — | 1457 |  |
+| A-115 | テストの制約 箇条4 | e2eとplugin以外のintegration testは1つのbinary `it`にまとめ、`tests/it/<機能>.rs`に足し`tests/it/main.rs`に`mod`を足す。`autotests = false`で`[[test]]`は3本（ADR-0078） | 手順 | ★ | — | dev/testing.md「testの置き場所」 | test-rules | 1457 |  |
+| A-116 | テストの制約 箇条4 | 複数のファイルで使うhelperは`tests/common`、runtimeのtestだけのfixtureとhelperは`tests/it/runtime_support` | 手順 |  | — | dev/testing.md「testの置き場所」 | test-rules | 1457 |  |
+| A-117 | テストの制約 箇条4 | 同じprocessのthreadで走るので、process全体の状態（env・cwd）を変えるtestを書かない | 禁止 | ★ | — | dev/testing.md「testの書き方」 | test-rules | 1457 |  |
+| A-118 | テストの制約 箇条4 | `crates/`のcrateのtestは各crateの`src/`と`crates/<crate>/tests/`に置き、podmanを要るtestは`#[ignore]`（関門とCIに数えない） | 手順 | ★ | — | dev/testing.md「testの置き場所」 | test-rules | 1457 |  |
+| A-119 | テストの制約 箇条5 | `tests/`の下と`crates/*/tests/`の`.rs`はどれも3,000行以下（goal 47）。`scripts/check-test-file-lines.sh`とCIが検査する | 禁止 | ★ | scripts/check-test-file-lines.sh | dev/testing.md「testファイルの行数」 | script | 1457 |  |
+| A-120 | テストの制約 箇条5 | 理由（末尾への追記が衝突する）と、超えそうなら機能ごとのファイルに分けhelperを寄せる手順 | 手順 | ★ | — | dev/testing.md「testファイルの行数」 | test-rules | 1457 |  |
+| A-121 | テストの制約 箇条5 | `src/`はまだ行数の対象外 | 例外 | ★ | scripts/check-test-file-lines.sh | dev/testing.md「testファイルの行数」 | — | 1457 |  |
+| A-122 | テストの制約 箇条6 | e2eはハッピーパスを`tests/e2e.rs`に置き、実バイナリ・実Git・実cmuxとstubのproviderで、`#[ignore]`。integrateでは流さない（ADR-t963-1決定4） | 手順 | ★ | — | dev/testing.md「e2e」 | test-rules | 1457 |  |
+| A-123 | テストの制約 箇条6 | 着地の前のe2eの工程（validatingの`e2e_requirement`、reviewのpassの後、hostで1本のlock、`run_e2e_waiting`、log、flakyの流し直し、`e2e_failed`、`unavailable`の3回で`check the e2e host`） | 設計 | ★ | design sl/review.md「着地の前のe2e」・validation.md、plugin scope.md「E2E」 | 削除（重複）。正本はdesign sl/review.md「## 着地の前のe2e」とsl/validation.md「## runtimeが流すe2e」 | — | 1457 |  |
+| A-124 | テストの制約 箇条6 | 着地の前のe2eはworkerに流させず、Codex workerのe2eの除外の規則も無い（ADR-t1233-2決定6） | 禁止 | ★ | plugin scope.md「E2E」、A-067 | dev/local-checks.md「e2eを流さない」（A-067と1つに） | — | 1457 |  |
+| A-125 | テストの制約 箇条6 | 自動更新と`install`が固定バイナリを入れ替える前に全部のe2eを流し、落ちれば入れ替えない（`update_failed`の`stage: e2e`、`install`のerror） | 設計 | ★ | design sl/auto-update.md・install.md、plugin update.md | 削除（重複）。正本はdesign sl/auto-update.md 冒頭（`#`の節）、sl/install.md 冒頭（`#`の節）、plugin dagq-recover/reference/update.md「## install」 | — | 1457 |  |
+| A-126 | テストの制約 箇条6 | `[e2e] paths`の外の変更が壊したら関門が守り、落ちたらplannerが直すtaskを作る | 手順 |  | — | dev/testing.md「e2e」 | — | 1457 |  |
+| A-127 | テストの制約 箇条6 | `[e2e] paths`を変えるのは実物の境目のファイルが増えた・分かれたとき（着地してから効く） | 手順 | ★ | dagq.toml `[e2e]`のコメント | dev/testing.md「`[e2e] paths`」 | config-rules | 1457 |  |
+| A-128 | テストの制約 箇条6 | inboxもplannerもe2eを自分では再実行しない | 禁止 | ★ | plugin dagq-recover/reference/review-by-hand.md | dev/testing.md「e2e」（汎用の部分はplugin dagq-recover/reference/review-by-hand.md「## Steps」を指す） | — | 1457 |  |
+| A-129 | テストの制約 箇条6-1 | 関門の印（ADR-t1165-1）: 落ちたe2eを1回流し直し、`.config/e2e-quarantine.toml`の印が効けば記録だけで進める。書式はdesign auto-update.md | 設計 | ★ | design sl/auto-update.md | 削除（重複）。正本はdesign sl/auto-update.md 冒頭（`# Auto-update`の節） | — | 1457 |  |
+| A-130 | テストの制約 箇条6-1 | 印は`dagq.toml`に置かない | 禁止 | ★ | — | dev/testing.md「e2eの印」 | config-rules | 1457 |  |
+| A-131 | テストの制約 箇条6-1 | 印を付けるのは、直すtaskのIDと期限を持ちplan reviewを通ったtaskだけ。inboxやplannerが手で付けない | 禁止 | ★ | — | dev/testing.md「e2eの印」 | test-rules | 1457 |  |
+| A-132 | テストの制約 箇条6-1 | 印は上限3本、期限切れと3回続けて落ちたtestの印は効かない | 値 | ★ | design sl/auto-update.md | 削除（重複）。正本はdesign sl/auto-update.md 冒頭（`# Auto-update`の節） | — | 1457 |  |
+| A-133 | テストの制約 箇条6-1 | 印の付いたtestを直すtaskは同じ変更で自分の印を外す | 手順 |  | — | dev/testing.md「e2eの印」 | test-rules | 1457 |  |
+| A-134 | テストの制約 箇条6-1 | 印を変えるtaskのverifyに`sh scripts/check-e2e-quarantine.sh`を付ける | 値 | ★ | — | dev/task-registration.md「推奨の組み合わせ」 | plan review | 1457 |  |
+| A-135 | テストの制約 箇条6-1 | 印で通した回数とflakyの回数は`stats`（task 1166）で見て、直すtaskの優先と印の期限を決める | 手順 |  | design sl/stats.md | dev/testing.md「e2eの印」 | — | 1457 |  |
+| A-136 | テストの制約 箇条6-1 | 着地の前のe2eにも同じ印が効き、landing branchの着地したcommitから読み、差分がそのtestのファイルを変える印と直すtaskの印は外す（ADR-t1233-2決定5、task 1198） | 設計 | ★ | design sl/review.md | 削除（重複）。正本はdesign sl/review.md「## 着地の前のe2e」 | — | 1457 |  |
+| A-137 | テストの制約 箇条7 | testの待ちに上限を付ける。pollのloopはdeadlineを持ち、上限の無い待ちは`tests/common/mod.rs`の`within`（`common::test()`・`STEP_LIMIT`）で包む | 禁止 | ★ | — | dev/testing.md「待ちの上限」 | test-rules | 1457 |  |
+| A-138 | テストの制約 箇条7 | 上限を過ぎるとtest binaryが名前と条件をstderrに出しexit 101で失敗する（task 324） | 設計 | ★ | design slow-tests.md | dev/testing.md「待ちの上限」 | — | 1457 |  |
+| A-139 | テストの制約 箇条8 | migrationは`migrations/NNNN_<name>.sql`を置くだけで足す。`src/infrastructure/schema.rs`は編集しない | 禁止 | ★ | design persistence.md | dev/migrations.md「足し方」 | migration-rules | 1457 |  |
+| A-140 | テストの制約 箇条8 | testは最新のschemaの番号を数字で書かず`SqliteQueue::SCHEMA_VERSION`と`MIGRATIONS`から組み立てる | 禁止 | ★ | — | dev/migrations.md「足し方」 | migration-rules | 1457 |  |
+| A-141 | テストの制約 箇条8 | 番号はmainの次の空き。重なれば`integrate`が振り直し、振り直せなければ`migration_number_taken`でresumeされ次の空きへ（ADR-0067） | 手順 | ★ | design sl/integrate.md・persistence.md | dev/migrations.md「番号」（仕組みはdesign sl/integrate.md 冒頭（`#`の節）とpersistence.md「## Database setup and migrations」） | migration-rules | 1457 |  |
+| A-142 | テストの制約 箇条9 | cargo-nextestは人が`mise use -g cargo:cargo-nextest`で入れlinkを置く（ADR-0076決定3）。runtimeは事前に検査しない | 手順 | ★ | — | dev/operations.md「hostのツール」 | — | 1457 |  |
+| A-143 | テストの制約 箇条9 | cargo-nextestが無いhostではplannerは旧コマンド`cargo llvm-cov --locked --fail-under-lines 80`で登録する | 例外 | ★ | — | dev/task-registration.md「coverageの関門」 | plan review | 1457 |  |
+| A-144 | テストの制約 箇条10 | リリース済みのmigrationは変えない（ADR-t614-2）。`check-migration-numbers.sh`が最新の`v<X.Y.Z>`のtagと比べる（tagの無いcloneでは検査しない） | 禁止 | ★ | design persistence.md、scripts/check-migration-numbers.sh | dev/migrations.md「リリース済みは不変」 | migration-rules・script | 1457 |  |
+| A-145 | テストの制約 箇条10 | schemaを直すときは次の番号のmigrationを足す | 手順 |  | design persistence.md | dev/migrations.md「リリース済みは不変」 | migration-rules | 1457 |  |
+| A-146 | テストの制約 箇条10 | pluginとバイナリのversionは`check-plugin-version.sh`が検査（ADR-t617-1）、CIと`release.yml`が実行 | 設計 |  | design plugin-integration.md | 削除（重複）。正本はdesign plugin-integration.md「### tagとversionの一致規則」 | script | 1457 |  |
+| A-147 | テストの制約 箇条10 | versionを変えるtaskのverifyに`sh scripts/check-plugin-version.sh`を付ける | 値 |  | — | dev/task-registration.md「推奨の組み合わせ」 | plan review | 1457 |  |
+| A-148 | テストの制約 箇条11 | 実Claudeを含む経路は自動化せず手動スモーク（design manual-smoke.md）で確かめる | 手順 | ★ | design manual-smoke.md | dev/testing.md「手動スモーク」 | — | 1457 |  |
+
+### 3.6 `## 文書のルール`
+
+| ID | 元の場所 | 要旨 | 種類 | 印 | 既存の重複 | 移し先 | 検査 | 移すtask | 移した後の場所 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A-149 | 文書のルール 箇条1 | 人の判断はADR・Goal・`Task.context`・receiptの`summary`に残す（ジャーナルはADR-0036で削除） | 手順 |  | ADR-0036 | dev/documents.md「判断の記録」 | — | 1459 |  |
+| A-150 | 文書のルール 箇条2 | 決定は`docs/adr/`に追加する。既存のADRは書き換えない | 禁止 | ★ | docs/README.md | dev/documents.md「ADR」 | adr-rules | 1459 |  |
+| A-151 | 文書のルール 箇条3 | `accepted`だけが今の決定、`superseded`は`superseded_by`を辿る、`deprecated`は`deprecated_on` | 手順 | ★ | docs/README.md、docs/frontmatter.md、docs/adr/README.md | 削除（重複）。正本はdocs/README.md「## 文書の種類」（`adr/`の箇条）とdocs/frontmatter.md「## ADR fields」 | adr-rules | 1459 |  |
+| A-152 | 文書のルール 箇条3 | 決定が1つか大半を変えるなら丸ごと置き換え、複数の決定の一部ならamends（ADR-t1091-1・ADR-t598-1） | 手順 | ★ | docs/README.md | dev/documents.md「ADR」（docs/frontmatter.md「## ADR fields」の同じ規則と1つにし、どちらかを参照にする） | adr-rules | 1459 |  |
+| A-153 | 文書のルール 箇条4 | 実装を変えたら`docs/design/`の該当文書と`updated`/`last_verified`を更新する | 手順 |  | — | dev/documents.md「design」 | design-consistency | 1459 |  |
+| A-154 | 文書のルール 箇条5 | ステップの状態が変わったら`docs/plans/current.md`を更新する | 手順 |  | — | dev/documents.md「plans」 | — | 1459 |  |
+| A-155 | 文書のルール 箇条6 | frontmatterは`docs/frontmatter.md`に従う | 手順 |  | docs/frontmatter.md | dev/documents.md「frontmatter」（正本docs/frontmatter.md 冒頭（`#`の節。ファイル全体）への参照の1行） | adr-rules | 1459 |  |
+| A-156 | 文書のルール 箇条7 | ADRのIDは`adr-t<task ID>-<N>`、ファイル名`docs/adr/<YYYY-MM-DD>-t<task ID>-<N>-<slug>.md`、日付は`accepted_on`（ADR-t598-1決定1） | 値 |  | docs/README.md、scripts/check-adr-numbers.sh | dev/documents.md「ADRのID」 | adr-rules・script | 1459 |  |
+| A-157 | 文書のルール 箇条7 | 以前の「plannerがmainの次の空き番号を選ぶ」規則は計画時の衝突でやめた | 経緯 |  | ADR-t598-1 | ADR-t598-1「## Context」（元の場所は削除のみ） | — | 1459 |  |
+| A-158 | 文書のルール 箇条7-1 | ADRを書くtaskはplannerがdescriptionに本数と各IDの中身を書き、`--verify 'sh scripts/check-adr-numbers.sh'`を付ける。番号の棚卸しはしない | 手順 | ★ | — | dev/task-registration.md「ADRを書くtask」 | plan review | 1459 |  |
+| A-159 | 文書のルール 箇条7-2 | 後続taskはADRを`ADR-t<ID>-<N>`で参照。今の姿はdesign、理由はADRを指す（決定4） | 手順 |  | ADR-t598-1 | dev/documents.md「ADRのID」 | adr-rules | 1459 |  |
+| A-160 | 文書のルール 箇条7-3 | 既存の4桁のADRと登録済みのtaskが予約した4桁の番号はそのまま使い振り直さない。新しく登録するADRのtaskは新しい形 | 禁止 | ★ | — | dev/documents.md「ADRのID」 | adr-rules | 1459 |  |
+| A-161 | 文書のルール 箇条7-3 | 予約した4桁の番号がmainで埋まっていたら、workerは`dagq ask`にせず自分のtaskのIDの新しい形に書き直し、元の番号と新しいIDをsummaryに書く | 例外 | ★ | — | dev/documents.md「ADRのID」 | adr-rules | 1459 |  |
+| A-162 | 文書のルール 箇条7-4 | 1つのADRに決定1つ（密に結びついた数個まで）、本文はおおむね100行以内。ADRには人の判断が要るものを書き、event名・flag・既定値・関数名・migrationの番号・testの名前はdesignに書く（決定2・3） | 手順 | ★ | ADR-t598-1 | dev/documents.md「ADRに書くもの」 | adr-rules | 1459 |  |
+| A-163 | 文書のルール 箇条7-4 | amendsの手順（小さな新しいADRの`amends`、元に`amended_by`、designを直す）と、どちらにするかはplannerがdescriptionに書きplan reviewが見る（ADR-t1091-1） | 手順 | ★ | docs/README.md | dev/documents.md「ADR」（A-152と1つに） | adr-rules | 1459 |  |
+| A-164 | 文書のルール 箇条7-4 | 決定と実装が明らかなものはADRと実装を1 taskにする（決定12） | 手順 |  | ADR-t598-1 | dev/task-registration.md「ADRを書くtask」 | plan review | 1459 |  |
+| A-165 | 文書のルール 箇条7-5 | `scripts/check-adr-numbers.sh`の名前は登録済みのtaskのverifyが使うので変えない | 禁止 | ★ | — | dev/documents.md「ADRのID」 | — | 1459 |  |
+| A-166 | 文書のルール 箇条7-5 | `check-adr-numbers.sh`が検出するもの（4桁の重複、`id`の食い違い、枝番の欠け、`t<ID>-<N>`の重複、日付と`accepted_on`の食い違い）。CIも実行 | 設計 |  | scripts/check-adr-numbers.sh | dev/documents.md「ADRのID」（正本はscripts/check-adr-numbers.sh（ファイル全体）。それを指す1行） | script | 1459 |  |
+
+### 3.7 `## タスクを閉じるとき`・`## plan review`・`## コミット`
+
+| ID | 元の場所 | 要旨 | 種類 | 印 | 既存の重複 | 移し先 | 検査 | 移すtask | 移した後の場所 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A-167 | タスクを閉じるとき | taskの完了はキューが持ち、`integrate`がrunを`integrated`、taskを`completed`にする | 汎用 |  | plugin dagq/SKILL.md §4、design sl/integrate.md | 削除（重複）。正本はplugin dagq/SKILL.md「## 4. Report results」とdesign sl/integrate.md 冒頭（`#`の節） | — | 1459 |  |
+| A-168 | plan review 冒頭 | runtimeのplan reviewのpromptはrepositoryの規則を持たず、この文書と名指す文書を読ませる（task 625） | 設計 | ★ | design sl/plan-review.md、src/application/prompt.rs | 削除（重複）。正本はdesign sl/prompt.md「## repositoryの規則を読む順」とsl/plan-review.md 冒頭（`#`の節）。読む文書はAGENTS.md「読む案内」が名指す | — | 1459 |  |
+| A-169 | plan review 箇条1 | `docs/adr/README.md`と、taskが名指すADRとdesignを読み、`accepted`のADRと矛盾するtaskは`concern`（`superseded`は`superseded_by`を辿る） | 手順 | ★ | — | dev/task-registration.md「plan reviewが当てはめる規則」（読む文書はAGENTS.md「読む案内」） | plan review | 1459 |  |
+| A-170 | plan review 箇条2 | ADRを書くtaskはIDの形に従い`check-adr-numbers.sh`を持つこと。足りなければ`revise`。番号の棚卸しはしない | 手順 | ★ | A-156・A-158 | dev/task-registration.md「plan reviewが当てはめる規則」 | plan review | 1459 |  |
+| A-171 | plan review 箇条3 | verify・paths・evidenceは推奨の組み合わせに合い、changeは7値の主な目的の1つ。runtimeはllvm-cov、`cargo test`を重ねない、migrationならscript。一律の`--evidence e2e`は求めず、付いていれば理由を見る | 手順 | ★ | A-094〜A-111 | dev/task-registration.md「plan reviewが当てはめる規則」 | plan review | 1457 |  |
+| A-172 | コミット 箇条1 | run sessionは自分のrun branchにcommitし、mainへの着地は`dagq integrate`だけ（1 task 1 squash）、pushは`integrate` | 禁止 | ★ | runtimeのworkerのprompt、design sl/integrate.md | 削除（重複）。正本はdesign sl/integrate.md 冒頭（`#`の節）とruntimeのworkerのprompt（src/application/prompt.rs、design sl/prompt.md「## 経路とproviderごとの文面」） | — | 1459 |  |
+| A-173 | コミット 箇条1 | `push_failed`のattentionが出たら人の指示で原因を直して`git push origin main` | 例外 | ★ | plugin dagq-recover/reference/review-by-hand.md、dagq-inbox/SKILL.md §4 | 削除（重複）。正本はplugin dagq-recover/reference/review-by-hand.md「## A failed push」 | — | 1459 |  |
+| A-174 | コミット 箇条2 | メッセージは`feat:`/`fix:`/`docs:`/`test:`の接頭辞、本文は何をなぜ変えたか | 手順 |  | — | dev/documents.md「commit」 | — | 1459 |  |
+| A-175 | コミット 箇条2 | 着地のcommitメッセージはtaskのtitleとreceiptのsummaryからruntimeが作る | 設計 |  | design sl/integrate.md | 削除（重複）。正本はdesign sl/integrate.md 冒頭（`#`の節） | — | 1459 |  |
+
+### 3.8 `## 役割: supervisor と worker と planner と inbox と observer`（節の冒頭）
+
+| ID | 元の場所 | 要旨 | 種類 | 印 | 既存の重複 | 移し先 | 検査 | 移すtask | 移した後の場所 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A-176 | 役割 冒頭 段落1 | 役割は5つ（supervisor・worker・planner・inbox・observer）とそれぞれの定義（ADR-0044決定1） | 設計 |  | design overview.md（用語集）、plugin 各SKILL.md | 削除（重複）。正本はdesign overview.md「## 用語集」。AGENTS.md「概要」から指す | — | 1459 |  |
+| A-177 | 役割 冒頭 段落1 | 常駐のplannerとgoal 22のfollow-up triage job（ADR-0037）はADR-0041で廃止、英字の役割名はADR-0024で退役し用語集で読み替える | 経緯 |  | ADR-0041・ADR-0044・ADR-0024、design overview.md | ADR-0024・ADR-0041・ADR-0044の「## Decision」とdesign overview.md「## 用語集」（元の場所は削除のみ） | — | 1459 |  |
+| A-178 | 役割 冒頭 段落2 | 同じcommitのverificationは`integrate`の1回が正で、validatingは実行しない。`integrate`はrebase後に必ず実行し、失敗でneeds_session（ADR-0049決定1） | 設計 | ★ | design sl/validation.md・integrate.md | 削除（重複）。正本はdesign sl/validation.md 冒頭（`#`の節）とsl/integrate.md 冒頭（`#`の節） | — | 1459 |  |
+
+### 3.9 起動と停止（`up` / `down`）
+
+| ID | 元の場所 | 要旨 | 種類 | 印 | 既存の重複 | 移し先 | 検査 | 移すtask | 移した後の場所 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A-179 | 起動と停止 冒頭 | `up`はsupervisorとinboxだけを開き、plannerは人が`dagq plan --plugin-dir ...`で開く（ADR-0044決定6）。`dagq planners`で一覧 | 汎用 | ★ | plugin dagq-recover/reference/up-down.md、design sl/up-down.md | 削除（重複）。正本はplugin dagq-recover/reference/up-down.md「## up」とdesign sl/up-down.md 冒頭（`#`の節） | — | 1458 |  |
+| A-180 | 起動と停止 冒頭 | 当面はin-cmux modeで運用する（socket passwordが無くlaunchd modeはpreflightで止まる、ADR-0011） | 値 | ★ | — | dev/operations.md「`up`のコマンド」 | — | 1458 |  |
+| A-181 | 起動と停止 冒頭 | `up`/`down`/`plan`/固定バイナリの更新は人がinboxかplannerのsessionから打つ（dagq-recover section 5） | 手順 | ★ | plugin dagq-recover/SKILL.md §5 | dev/operations.md「`up`のコマンド」 | — | 1458 |  |
+| A-182 | 起動と停止 コード | `dagq up --in-cmux --claude ~/.local/bin/claude --codex ~/.local/bin/codex --plugin-dir <repo>/plugins/claude-dagq --auto-update` | 値 |  | — | dev/operations.md「`up`のコマンド」 | — | 1458 |  |
+| A-183 | 起動と停止 箇条1 | 並列数は`dagq.toml`の`[supervisor] parallel = 3`（task 699）。`up`の既定は4で、`[run.env]`の値が並列3を前提にしている | 値 |  | dagq.toml `[supervisor]`のコメント | 削除（重複）。正本はdagq.toml `[supervisor]`（値とコメント） | config-rules | 1458 |  |
+| A-184 | 起動と停止 箇条1 | `up`に`--parallel`を付けない（flagが登録に焼き込まれ`[supervisor]`を読まなくなり、引き継ぎのexecも元のargvのまま。直すには`down --wait`の後にflagなしの`up`） | 禁止 | ★ | dagq.tomlのコメント、design sl/run-environment.md | dev/operations.md「`up`のコマンド」 | — | 1458 |  |
+| A-185 | 起動と停止 箇条1 | 並列数を変えるときは`[run.env]`の値と合わせて見直し、着地すれば`up`し直さずに効く。`status`の`supervisors[].parallel`と`slots.source`で確かめる | 手順 |  | dagq.tomlのコメント | dev/operations.md「`dagq.toml`を変えるとき」 | config-rules | 1458 |  |
+| A-186 | 起動と停止 箇条1・2 | 待ちの上限`max_waiting`は既定の4のままなので書かない | 値 | ★ | dagq.toml `[supervisor]`のコメント | 削除（重複）。正本はdagq.toml `[supervisor]`のコメント | — | 1458 |  |
+| A-187 | 起動と停止 箇条2 | runtimeが立てるplannerの上限は`[supervisor] runtime_planners = 2`（既定1、goal 63、task 942、2026-09-28の詰まりへの当面の緩和） | 値 |  | dagq.toml `[supervisor]`のコメント | 削除（重複）。正本はdagq.toml `[supervisor]`（値とコメント。経緯もそのコメント） | — | 1458 |  |
+| A-188 | 起動と停止 箇条2 | `up`に`--runtime-planners`を付けない（flagが優先する） | 禁止 | ★ | — | dev/operations.md「`up`のコマンド」 | — | 1458 |  |
+| A-189 | 起動と停止 箇条3 | `--claude`を明示する理由（cmuxのterminalのsessionごとのshimが先に解決される）。Claude Codeを更新したら`down --wait`→同じ`up` | 手順 |  | plugin dagq-recover/reference/up-down.md | dev/operations.md「`up`のコマンド」 | — | 1458 |  |
+| A-190 | 起動と停止 箇条4 | `--codex`を明示する理由と更新後の`down --wait`→`up`、`codex`が無くても止まらず`provider_switched`、`status`の`supervisors[].providers`、drainの`up`にも`--codex`（ADR-t813-2） | 手順 | ★ | plugin dagq/reference/provider.md、design provider-lifecycle.md | dev/operations.md「`up`のコマンド」（仕組みはdesign provider-lifecycle.md「## 使えないproviderからの切り替え」） | — | 1458 |  |
+| A-191 | 起動と停止 箇条5 | `--auto-update`の流れ（runtimeを変える着地ごとにbuild・e2e・確認・差し替え・引き継ぎ、`update_installed`・`update_failed`・`approve_update`、`install --allow-breaking`の手順） | 設計 | ★ | design sl/auto-update.md、plugin dagq-recover/reference/update.md | 削除（重複）。正本はdesign sl/auto-update.md 冒頭（`#`の節）とplugin dagq-recover/reference/update.md「## Automatic updates (`up --auto-update`)」「## The update asks」 | — | 1458 |  |
+| A-192 | 起動と停止 箇条5 | `--auto-update`を付けない`up`は同じsupervisorの自動更新を切るので、打ち直すときも必ず付ける | 禁止 | ★ | plugin update.md | dev/operations.md「`up`のコマンド」 | — | 1458 |  |
+| A-193 | 起動と停止 箇条5 | `approve_update`に`install`と答えたら、inboxが人の指示で問いのコマンドを打ち（drainするので開いたaskを先に見せる）askを閉じる | 手順 | ★ | plugin dagq-recover/reference/update.md、dagq-inbox | 削除（重複）。正本はplugin dagq-recover/reference/update.md「## The update asks」 | — | 1458 |  |
+| A-194 | 起動と停止 箇条6 | 本番のsupervisorを`--auto-update`に切り替える1回だけの手順（1）〜（4） | 手順 | ★ | plugin dagq-recover/reference/update.md（汎用の部分） | 新ADR `docs/adr/<accepted_on>-t1458-1-history-of-operation-rules.md`（予定）「## Context」（2026-09-27に済んだ1回の切り替えの記録） | — | 1458 |  |
+| A-195 | 起動と停止 箇条7 | in-cmux modeに自動再起動は無く、`restart supervisor`で人が画面を読んで閉じ、同じ`up`を打ち直す | 汎用 | ★ | plugin dagq-recover/reference/up-down.md、dagq-inbox/SKILL.md §4 | 削除（重複）。正本はplugin dagq-recover/reference/up-down.md「## up」とdagq-inbox/SKILL.md「## 4. Report the other attention, act only on the person's word」 | — | 1458 |  |
+| A-196 | 起動と停止 箇条8 | `up`が開くworkspaceと`skipped`/`reused`、`down`はinboxもplannerも閉じない、旧`[dagq]planner`は人がunpinして閉じる | 汎用 | ★ | plugin up-down.md、design sl/up-down.md | 削除（重複）。正本はplugin dagq-recover/reference/up-down.md「## up」「## down」とdesign sl/up-down.md 冒頭（`#`の節） | — | 1458 |  |
+| A-197 | 起動と停止 箇条9 | workspaceのtitleは表示専用で、UUID（`session_workspaces`）とenvで識別しgroupにまとまる（ADR-0026） | 設計 | ★ | design sl/run-workspaces.md・up-down.md | 削除（重複）。正本はdesign sl/run-workspaces.md 冒頭（`#`の節）とsl/up-down.md 冒頭（`#`の節） | — | 1458 |  |
+| A-198 | 起動と停止 箇条10 | workspace名（ADR-0028、ADR-0044決定6） | 設計 |  | design sl/naming.md | 削除（重複）。正本はdesign sl/naming.md 冒頭（`#`の節） | — | 1458 |  |
+| A-199 | 起動と停止 箇条11 | バイナリは固定した`~/.local/bin/dagq`だけを使い、キューはcwdから解決するのでrepositoryの中で打つ | 禁止 | ★ | A-007 | AGENTS.md「境界」（A-007と1つに） | — | 1458 |  |
+| A-200 | 起動と停止 箇条11 | CLIの外で状態を持たず、DBは手で直さない（例外は無い。移動の付け替えも`rebind`、ADR-0020） | 禁止 | ★ | plugin dagq/SKILL.md 冒頭、dagq/reference/locate.md | AGENTS.md「境界」（1行で残す。手順はplugin dagq/reference/locate.md 冒頭（`# Locating the binary and the queue`の節）） | — | 1458 |  |
+
+### 3.10 `### 着地と人の判断`
+
+| ID | 元の場所 | 要旨 | 種類 | 印 | 既存の重複 | 移し先 | 検査 | 移すtask | 移した後の場所 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A-201 | 着地と人の判断 箇条1 | 着地はsupervisorが行い、reviewのpass/revise/concern（`approve_landing`）、failed/interrupted/`resume_exhausted`は復旧job（ADR-0027） | 設計 | ★ | design sl/review.md・triage.md | 削除（重複）。正本はdesign sl/review.md 冒頭（`#`の節）とsl/triage.md 冒頭（`#`の節） | — | 1458 |  |
+| A-202 | 着地と人の判断 箇条2 | イレギュラーの3つの層（runtimeの自動修復、復旧jobのactions、人へのask）の詳細（ADR-0047決定37〜41、ADR-t609-1） | 設計 | ★ | design sl/background-recovery-job.md・triage.md、plugin dagq-inbox/SKILL.md | 削除（重複）。正本はdesign sl/background-recovery-job.md「## alert」「## 適用」「## escalate」「## jobの失敗」 | — | 1458 |  |
+| A-203 | 着地と人の判断 箇条2 | askは必ず人が要る理由（`reason_category`）を持ち、当てはまらないものはaskにしない | 禁止 | ★ | plugin dagq-inbox/SKILL.md、design sl/ask.md | 削除（重複）。正本はdesign sl/ask.md 冒頭（`#`の節） | — | 1458 |  |
+| A-204 | 着地と人の判断 箇条3 | verifyが壊れて終わったrunは`edit ID --verify`（か`--no-verify`）で直し`task_edited`を確かめ、`decide`のoption「edit the task's --verify, then retry_inherit」で答える（ADR-t883-1） | 汎用 | ★ | plugin dagq-recover/reference/triage-by-hand.md | 削除（重複）。正本はplugin dagq-recover/reference/triage-by-hand.md「## Broken verification command with committed work」 | — | 1458 |  |
+| A-205 | 着地と人の判断 箇条3 | `in_progress`のtaskに許すのは、最新のrunが終わり生きているrunが無いときのverifyだけ。他の欄とplanner・worker・jobのeditは拒む | 例外 | ★ | plugin triage-by-hand.md、design | 削除（重複）。正本はplugin dagq-recover/reference/triage-by-hand.md「## Broken verification command with committed work」 | — | 1458 |  |
+| A-206 | 着地と人の判断 箇条3 | 成果を捨てる`retry`で済ませない | 禁止 | ★ | plugin triage-by-hand.md | 削除（重複）。正本はplugin dagq-recover/reference/triage-by-hand.md「## Broken verification command with committed work」 | — | 1458 |  |
+| A-207 | 着地と人の判断 箇条4 | 人の答えを待つrunは`--parallel`のslotから外れる（待ち・戻り待ち・`max_waiting`・`status`と`stats`の欄、ADR-0071） | 設計 | ★ | design sl/waiting.md、plugin dagq-inbox/reference/status.md | 削除（重複）。正本はdesign sl/waiting.md「## 待ちの出入り」「## 登録と見せ方」とplugin dagq-inbox/reference/status.md「## Runs waiting for a person (outside the slots)」 | — | 1458 |  |
+| A-208 | 着地と人の判断 箇条4 | drainは待ちのrunの答えか終了まで終わらないので、先にinboxが開いたaskを人に見せる | 手順 | ★ | plugin dagq-recover/reference/up-down.md | 削除（重複）。正本はplugin dagq-recover/reference/up-down.md「## down」 | — | 1458 |  |
+| A-209 | 着地と人の判断 箇条5 | 人が手で行うものの一覧（review by hand、`push_failed`、triage by hand、plan review by hand、goal review by hand、`recover`、キー送信、`install --allow-breaking`）。どれも人の指示で`dagq-recover`に従う | 汎用 | ★ | plugin dagq-recover/SKILL.md、dagq-inbox/SKILL.md §4 | 削除（重複）。正本はplugin dagq-recover/SKILL.md「## 4.」〜「## 8.」とdagq-inbox/SKILL.md「## 4. Report the other attention, act only on the person's word」 | — | 1458 |  |
+| A-210 | 着地と人の判断 箇条5 | runtimeと復旧jobが直すもの（送信の再試行、既知のダイアログ、`/exit`の時間切れ、resume）を人が手で行わない | 禁止 | ★ | plugin dagq-inbox/SKILL.md 冒頭 | 削除（重複）。正本はplugin dagq-inbox/SKILL.md 冒頭（`#`の節の「Only what needs a person comes here」の段落） | — | 1458 |  |
+| A-211 | 着地と人の判断 箇条5 | 人が手で打つ`integrate`は着地の前のe2eを通らないので、`e2e_requirement.required`のrunは`run_e2e_finished`の`passed`とlogを確かめる。e2eは自分では再実行しない | 禁止 | ★ | plugin dagq/reference/scope.md「E2E」、dagq-recover/reference/review-by-hand.md | 削除（重複）。正本はplugin dagq-recover/reference/review-by-hand.md「## Steps」 | — | 1458 |  |
+| A-212 | 着地と人の判断 箇条6 | workerのproviderと経路（既定はClaudeの非対話、指定した経路は変わらない。ADR-t813-1・t1340-1・t813-2） | 汎用 | ★ | plugin dagq/reference/provider.md、design provider-lifecycle.md・sl/headless-worker.md | 削除（重複）。正本はplugin dagq/reference/provider.md「## Provider and route」とdesign provider-lifecycle.md「## workerのproviderと経路」 | — | 1458 |  |
+| A-213 | 着地と人の判断 箇条6 | plannerは人が言ったときだけ`--provider codex`・`--interactive`を付ける。ログインや利用上限を避けるためにproviderを選ばない | 禁止 | ★ | plugin dagq-planner/SKILL.md §1、provider.md | 削除（重複）。正本はplugin dagq-planner/SKILL.md「## 1. Plan with the person and submit」とdagq/reference/provider.md「### Which to choose (planner)」 | — | 1458 |  |
+| A-214 | 着地と人の判断 箇条6 | review系jobの`[roles.*] provider = "codex"`と切り替え、`--no-claude`での行き先（ADR-t1063-1・t1207-1、task 1218・1220） | 設計 | ★ | plugin provider.md（P-24）、design sl/actor-model.md | 削除（重複）。正本はplugin dagq/reference/provider.md「## Provider and route」とdesign sl/actor-model.md「## provider」 | — | 1458 |  |
+| A-215 | 着地と人の判断 箇条6-1〜6-4 | 見え方（`show`・`timeline`・`stats`・`kpi --by`）、フォールバック、人に届くもの（`queue_hold`）、非対話のrunのworkspace | 汎用 | ★ | plugin provider.md、design provider-lifecycle.md・sl/queue-hold.md | 削除（重複）。正本はplugin dagq/reference/provider.md「## Reading which ran」「## When a provider cannot be used」、design provider-lifecycle.md「## 使えないproviderからの切り替え」、sl/queue-hold.md「## providerごとの控え（ADR-t813-2）」、sl/headless-worker.md「## 対話の経路との違い」 | — | 1458 |  |
+| A-216 | 着地と人の判断 箇条7 | 着手と着地は人に報告する。人の判断が要るとき（受け入れ条件の変更、固定バイナリの更新、DBに触らずに解消できない詰まり）はaskにして待つ | 手順 | ★ | — | dev/operations.md「人への報告」 | — | 1458 |  |
+
+### 3.11 `### worker`
+
+| ID | 元の場所 | 要旨 | 種類 | 印 | 既存の重複 | 移し先 | 検査 | 移すtask | 移した後の場所 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A-217 | worker 箇条1 | runtimeのpromptに従い、割り当てられたworktreeの中だけで作業し、main・queue DB・`runs/`・他のrunのworktreeに触らない。merge・push・workspaceのcloseをしない | 禁止 | ★ | runtimeのworkerのprompt | 削除（重複）。正本はruntimeのworkerのprompt（src/application/prompt.rs、design sl/prompt.md「## 経路とproviderごとの文面」） | — | 1459 |  |
+| A-218 | worker 箇条2 | e2eはworkerが流さない（providerに依らず、除外の規則も無い、ADR-t1233-2決定6） | 禁止 | ★ | A-067・A-124 | dev/local-checks.md「e2eを流さない」（A-067と1つに） | receipt-evidence | 1459 |  |
+| A-219 | worker 箇条3 | 変更後の検証の繰り返し（fmt・clippy・`<module>::`の`cargo test`・llvm-covと全体の`cargo test`以外のverify、evidenceに範囲） | 手順 | ★ | A-056〜A-066 | dev/local-checks.md「workerの手元の検証」「testの範囲」（A-058〜A-066と1つに） | receipt-evidence | 1459 |  |
+| A-220 | worker 箇条3 | 接頭辞だけのfilter・多数のmodule・`--test it --test plugin`で流さない、helperは代表のmoduleに絞る（繰り返し） | 禁止 | ★ | A-060・A-061 | dev/local-checks.md「testの範囲」（A-060と1つに） | receipt-evidence | 1459 |  |
+| A-221 | worker 箇条3 | 全部のtestを手元で流さず、例外は`integrate`の検証が落ちたresumeの再現だけ（繰り返し） | 例外 | ★ | A-080・A-081 | dev/local-checks.md「resumeでの再現」（A-080と1つに） | receipt-evidence | 1459 |  |
+| A-222 | worker 箇条3 | resumeで`cargo llvm-cov nextest`がcargo-nextestが無く落ちていたら直そうとせず`failed`のreceiptに理由を書く。`dagq ask`にしない（ADR-0076決定3、ADR-0047決定41） | 例外 | ★ | — | dev/local-checks.md「hostに触らない」 | — | 1459 |  |
+| A-223 | worker 箇条3 | 足した・変えた`#[test]`のstress（繰り返し）と、落ちたら直してから、しないときの理由 | 手順 | ★ | A-070〜A-078 | dev/local-checks.md「stress」（A-071〜A-078と1つに） | receipt-evidence | 1459 |  |
+| A-224 | worker 箇条3 | subagent reviewは該当するときに実行し、しないときは理由をreceiptに書く | 手順 | ★ | runtimeのworkerのprompt | dev/local-checks.md「subagent review」 | — | 1459 |  |
+| A-225 | worker 箇条3 | e2eを流さず`not_applicable`にする。`e2e_failed`のresumeはlogを読み、落ちたtestを名前で1本ずつだけ流す（繰り返し） | 例外 | ★ | A-067・A-068、runtimeのprompt | dev/local-checks.md「e2eを流さない」（A-068と1つに） | receipt-evidence | 1459 |  |
+| A-226 | worker 箇条4 | commitしてからreceiptを書き、receiptのcommitはrun branchのclean headでbase commitの上 | 汎用 | ★ | runtimeのworkerのprompt、design sl/receipt-and-session-exit.md | 削除（重複）。正本はdesign sl/receipt-and-session-exit.md 冒頭（`#`の節）とruntimeのworkerのprompt（src/application/prompt.rs、design sl/prompt.md「## 経路とproviderごとの文面」） | — | 1459 |  |
+| A-227 | worker 箇条5 | 判断が要るときはterminalに書いて待たず`dagq ask --kind worker_question --because <scope\|discard>`を打つ | 汎用 | ★ | runtimeのworkerのprompt、design sl/ask.md | 削除（重複）。正本はdesign sl/ask.md 冒頭（`#`の節）とruntimeのworkerのprompt（src/application/prompt.rs、design sl/prompt.md「## 経路とproviderごとの文面」） | — | 1459 |  |
+| A-228 | worker 箇条5 | askにしてよいのは人が要る理由に当たるときだけ。当たらないもの（実装の選び方、ADRやmigrationの番号の衝突）は自分で決めsummaryに書き、範囲の外なら`failed`のreceipt | 禁止 | ★ | runtimeのworkerのprompt | dev/local-checks.md「askにしないもの」（このrepositoryの例: ADRとmigrationの番号） | — | 1459 |  |
+| A-229 | worker 箇条6 | `worker_question`の`--topic`の分類コードと付け方（ADR-t947-2） | 設計 | ★ | design sl/ask.md「worker_questionの分類コード」、runtimeのprompt、`dagq ask --help` | 削除（重複）。正本はdesign sl/ask.md「## worker_questionの分類コード」 | — | 1459 |  |
+| A-230 | worker 箇条7 | receiptの`follow_ups`の`category`と選び方（ADR-t947-3） | 設計 | ★ | design sl/receipt-and-session-exit.md、runtimeのprompt | 削除（重複）。正本はdesign sl/receipt-and-session-exit.md「## follow_upsの分類コード」 | — | 1459 |  |
+| A-231 | worker 箇条8 | receiptを書く前に自分が起動したbackgroundの処理をすべて止める（`exit_request_timed_out`を防ぐ） | 禁止 | ★ | runtimeのworkerのprompt | 削除（重複）。正本はruntimeのworkerのprompt（src/application/prompt.rs、design sl/prompt.md「## 経路とproviderごとの文面」） | — | 1459 |  |
+| A-232 | worker 箇条9 | workerの`dagq`はクライアントモードで、serviceに無いコマンドは`no_use_case`、許されないものは`authorization_denied` | 設計 | ★ | design queue-service.md・security.md | 削除（重複）。正本はdesign queue-service.md「## クライアントモード」とsecurity.md「## actor × capability」 | — | 1459 |  |
+| A-233 | worker 箇条9 | 拒否をそのまま答えとし、envの書き換え・pathやscriptから打つ・DBに触るといった迂回をしない。範囲外の操作はreceiptか`worker_question` | 禁止 | ★ | plugin dagq/SKILL.md、authority.md、design security.md | 削除（重複）。正本はplugin dagq/reference/authority.md「## Client mode: a worker's and a job's dagq」「## Advisory, not a sandbox」 | — | 1459 |  |
+| A-234 | worker 箇条10 | signalは自分が起動したプロセスだけにpidかtaskで送り、`pkill`/`killall`/`kill $(pgrep ...)`で選ばない（task 359、`permissions.deny`） | 禁止 | ★ | runtimeのworkerのprompt、runのsettings | 削除（重複）。正本はruntimeのworkerのprompt（design sl/prompt.md「## 経路とproviderごとの文面」）とdesign authorization.md「## Claudeのpermissions.deny（guardrail）」 | — | 1459 |  |
+| A-235 | worker 箇条11 | receiptを書いたら短く報告して止まり、`/exit`を自分で打たない | 禁止 | ★ | runtimeのworkerのprompt | 削除（重複）。正本はruntimeのworkerのprompt（design sl/prompt.md「## 経路とproviderごとの文面」） | — | 1459 |  |
+
+### 3.12 `### inbox と planner`
+
+| ID | 元の場所 | 要旨 | 種類 | 印 | 既存の重複 | 移し先 | 検査 | 移すtask | 移した後の場所 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A-236 | inboxとplanner 箇条1 | inboxは`up`が開く唯一の常駐session、plannerは人の`dagq plan`とsupervisorが立てるもの。`--env`の`DAGQ_ROLE`/`DAGQ_QUEUE`とSessionStart hook | 設計 |  | design sl/session-prompts.md・plan-planners.md・draft-planners.md、plugin | 削除（重複）。正本はdesign sl/session-prompts.md 冒頭（`#`の節）とplugin dagq-inbox/SKILL.md・dagq-planner/SKILL.md 冒頭（`#`の節） | — | 1459 |  |
+| A-237 | inboxとplanner 箇条2 | inboxは`dagq-inbox`に従い`status`→`watch`→askを見せ`answer`、attentionの一覧を人に知らせ、人の指示でだけ`dagq-recover`。supervisorが適用するanswerの一覧 | 汎用 | ★ | plugin dagq-inbox/SKILL.md・reference/asks.md・status.md | 削除（重複）。正本はplugin dagq-inbox/SKILL.md「## 3. Show an ask and write the answer」「## 4. Report the other attention, act only on the person's word」とdagq-inbox/reference/asks.md 冒頭（`#`の節。ファイル全体） | — | 1459 |  |
+| A-238 | inboxとplanner 箇条2 | inboxは自分では判断しない | 禁止 | ★ | plugin dagq-inbox/SKILL.md | 削除（重複）。正本はplugin dagq-inbox/SKILL.md「## Where your authority ends」 | — | 1459 |  |
+| A-239 | inboxとplanner 箇条2 | inboxの権限は人と同じで、記録で人自身と区別される（actor `inbox`、`authority: delegated`、`requested_by`）。`!`のコマンドもinboxの代行、人自身の操作は`DAGQ_ROLE`の無いterminalで（ADR-t728-3） | 汎用 | ★ | plugin dagq-inbox/SKILL.md、authority.md、design authorization.md | 削除（重複）。正本はplugin dagq-inbox/SKILL.md「## Where your authority ends」、dagq/reference/authority.md「## The inbox acts on the person's behalf, and the record says so」、design security.md「## answerと代行の記録」 | — | 1459 |  |
+| A-240 | inboxとplanner 箇条3 | plannerは`dagq-planner`に従いgoalとdraftを書き`lint`→`submit`、reviseは直して`submit --proposal` | 汎用 |  | plugin dagq-planner/SKILL.md | 削除（重複）。正本はplugin dagq-planner/SKILL.md「## 1. Plan with the person and submit」「## 2. When plan review sends it back (revise)」 | — | 1459 |  |
+| A-241 | inboxとplanner 箇条3 | plannerは自分では`ready`にしない | 禁止 | ★ | plugin dagq-planner/SKILL.md | 削除（重複）。正本はplugin dagq-planner/SKILL.md「## Where your authority ends」 | — | 1459 |  |
+| A-242 | inboxとplanner 箇条3 | 推奨が出せる判断は人に聞かず決め理由をnoteかcontextに残し、人に上げるのは決めきれないものだけ（ADR-t451-1決定1・5） | 汎用 | ★ | plugin dagq-planner/SKILL.md Basic policy | 削除（重複）。正本はplugin dagq-planner/SKILL.md「## Basic policy (ADR-t451-1)」 | — | 1459 |  |
+| A-243 | inboxとplanner 箇条3 | ADR-t808-1の上限（深さ3以上、goalが無いか閉じたgoalのfollow_up）は人のadoptを経る | 例外 | ★ | plugin dagq-planner/SKILL.md Basic policy | 削除（重複）。正本はplugin dagq-planner/SKILL.md「## Basic policy (ADR-t451-1)」 | — | 1459 |  |
+| A-244 | inboxとplanner 箇条3 | 交通整理（棚卸し・重複・ADR番号の衝突・依存の付け替え・退避）はplan review jobに任せる | 汎用 | ★ | plugin dagq-planner/SKILL.md §1 | 削除（重複）。正本はplugin dagq-planner/SKILL.md「## 1. Plan with the person and submit」 | — | 1459 |  |
+| A-245 | inboxとplanner 箇条3 | goalの達成の判断とcloseはplannerの役ではなく、goal review jobが行う。plannerの`goal close`は採らないdraftのgoalの`abandoned`と人の言葉によるときだけ（ADR-0047決定16・43） | 例外 | ★ | plugin dagq-planner/SKILL.md §5、goal-close.md、design sl/goal-review.md | 削除（重複）。正本はplugin dagq-planner/SKILL.md「## 5. A finished goal」とdesign sl/goal-review.md 冒頭（`#`の節） | — | 1459 |  |
+| A-246 | inboxとplanner 箇条3 | plannerの権限の一覧と拒まれるコマンド（ADR-t728-1決定7）。表はsecurity・authorizationとskillのWhere your authority endsと一致させる | 汎用 | ★ | plugin dagq-planner/SKILL.md「Where your authority ends」、authority.md、design security.md・authorization.md | 削除（重複）。正本はplugin dagq-planner/SKILL.md「## Where your authority ends」、dagq/reference/authority.md「## What each role is refused」、design security.md「## actor × capability」、authorization.md「## Policy」 | — | 1459 |  |
+| A-247 | inboxとplanner 箇条4 | 人に届くものはすべてinbox宛てで、plannerに返るのは自分のproposalへのreviseと自分のaskのanswerだけ | 汎用 | ★ | plugin dagq-planner/SKILL.md、dagq-inbox/SKILL.md | 削除（重複）。正本はplugin dagq-planner/SKILL.md 冒頭（Rolesの段落）とdagq-inbox/SKILL.md 冒頭（`#`の節） | — | 1459 |  |
+
+### 3.13 `### observer`・`### 権限と記録（goal 55）`
+
+| ID | 元の場所 | 要旨 | 種類 | 印 | 既存の重複 | 移し先 | 検査 | 移すtask | 移した後の場所 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A-248 | observer 箇条1 | supervisorが`--observe-interval`（既定3600秒）と1日1回`dagq observe`を起動。workspaceを持たず`claude -p`、手では`dagq observe`（`--dry-run`） | 設計 | ★ | design sl/observer.md、plugin dagq/reference/observer.md | 削除（重複）。正本はdesign sl/observer.md 冒頭（`#`の節）とplugin dagq/reference/observer.md「## Read」 | — | 1459 |  |
+| A-249 | observer 箇条2 | 自分以外のeventが無ければ起動せず`skipped`、MCPを読み込まない | 設計 | ★ | design sl/observer.md | 削除（重複）。正本はdesign sl/observer.md 冒頭（`#`の節） | — | 1459 |  |
+| A-250 | observer 箇条3 | 入力と書けるもの（findingと`blocked`のaskだけ）、状態を変えるコマンドはCLIが拒否、同じ問題は既存のfindingを更新 | 設計 | ★ | design sl/observer.md、design security.md | 削除（重複）。正本はdesign sl/observer.md 冒頭（`#`の節）とsecurity.md「## actor × capability」 | — | 1459 |  |
+| A-251 | observer 箇条4 | findingの行き先（runtimeのplanner、`propose`/`dismiss`、ADR-0044決定18〜20） | 設計 | ★ | design sl/finding-planners.md | 削除（重複）。正本はdesign sl/finding-planners.md 冒頭（`#`の節）とplugin dagq/reference/observer.md「## Where a finding goes」 | — | 1459 |  |
+| A-252 | observer 箇条5 | 読むCLI（`findings`・`events`・`timeline`・`observe --history`） | 汎用 |  | plugin dagq/reference/observer.md・inspect.md | 削除（重複）。正本はplugin dagq/reference/observer.md「## Read」 | — | 1459 |  |
+| A-253 | observer 箇条6 | KPIの目標割れのfindingと`max_improvement_proposals`の上限（ADR-0051決定24〜26） | 設計 | ★ | design sl/observer.md・kpi.md、plugin kpi.md | 削除（重複）。正本はdesign sl/observer.md「## KPIの目標割れと改善の上限」とplugin dagq/reference/observer.md「## KPI findings: kind `kpi` and the improvement limit」 | — | 1459 |  |
+| A-254 | observer 箇条7 | 詳細はdesignのObserver | 手順 |  | — | 削除（参照の1行）。参照先はdesign sl/observer.md 冒頭（`#`の節） | — | 1459 |  |
+| A-255 | 権限と記録 箇条1 | 状態を変える全てのコマンドはactorをdefault denyのpolicyに通し、eventにactorを記録。headless jobは状態を変えられず、着地とpushは信頼するIntegratorだけ（ADR-t728-2） | 設計 | ★ | design security.md・authorization.md | 削除（重複）。正本はdesign security.md「## actor × capability」「## reviewのpassとIntegrator」 | — | 1459 |  |
+| A-256 | 権限と記録 箇条2 | hostの判定はadvisoryでsandboxではない。どのsessionも拒否を迂回しない | 禁止 | ★ | design security.md、plugin dagq/SKILL.md・authority.md | 削除（重複）。正本はdesign security.md「## host実行は助言的（advisory）」とplugin dagq/reference/authority.md「## Advisory, not a sandbox」 | — | 1459 |  |
+
+## 4. pluginの固有の記述の項目
+
+| ID | 元の場所 | 要旨 | 種類 | 印 | 既存の重複 | 移し先 | 検査 | 移すtask | 移した後の場所 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| P-01 | dagq/reference/scope.md「Recommended combinations」 | 「for this repository」の推奨表（docs・plugin・runtime（fmt・clippy・`cargo llvm-cov nextest --locked --workspace --fail-under-lines 80`、`cargo test`を重ねない）・scripts） | 値 | ★ | A-098・A-102〜A-106 | dev/task-registration.md「推奨の組み合わせ」（A-102〜A-106と1つに）。plugin dagq/reference/scope.md「## Recommended combinations」はrepositoryの規則を参照する汎用の説明に | plugin-generic | 1462 |  |
+| P-02 | dagq/reference/scope.md「Recommended combinations」 | 対象が混ざるtaskは最も重い行の検証、行はchangeでなく変える対象で選ぶ | 手順 | ★ | A-107 | plugin dagq/reference/scope.md「## Recommended combinations」に汎用の原則として残す（このrepositoryの表はdev/task-registration.md「推奨の組み合わせ」） | — | 1462 |  |
+| P-03 | dagq/reference/scope.md `--change`の段落 | 値と選び方の例として「this repository's AGENTS.md」 | 手順 |  | A-109 | plugin dagq/reference/scope.md「## Recommended combinations」（`--change`の段落）は「repositoryの規則」とだけ書く。このrepositoryの値はdev/task-registration.md「change」 | plugin-generic | 1462 |  |
+| P-04 | dagq/reference/scope.md `--verify`の段落 | 「In this repository a worker runs fmt, clippy, `cargo test --locked --test it <file>::`・`--lib`…」、coverageの関門と旧`cargo llvm-cov`、全体の`cargo test --locked`を流さない、resumeの再現は例外 | 手順 | ★ | A-057〜A-066・A-080・A-091 | dev/local-checks.md「workerの手元の検証」「testの範囲」「resumeでの再現」。plugin dagq/reference/scope.md「## Recommended combinations」（`--verify`の段落）は「verifyは`integrate`の関門で、workerはrepositoryの指示に従う」の汎用の部分だけ残す | plugin-generic | 1462 |  |
+| P-05 | dagq/reference/scope.md `--verify`の段落 | 「Decided by a person with the planner on 2026-09-26 (task 528)…（median 1439 s）」 | 経緯 |  | A-083 | 新ADR `docs/adr/<accepted_on>-t1457-1-history-of-local-checks-and-test-rules.md`（予定）「## Context」（A-083と1つに）。pluginの元の場所は削除 | plugin-generic | 1462 |  |
+| P-06 | dagq/reference/scope.md「E2E」 | 「In this repository the paths are the cmux adapter, process and sessions, launchd, lifecycle, integrate, install, update and the actors' start, plus `tests/e2e.rs`」 | 値 |  | dagq.toml `[e2e]`のコメント | 削除（重複）。正本はdagq.toml `[e2e]`（pathsとコメント） | plugin-generic | 1462 |  |
+| P-07 | dagq/reference/scope.md「Name the files a runtime task mainly touches」 | 「A runtime task (`src/`, `tests/`, `migrations/`) registers no `--paths`」と例`src/application/supervise/plan_review.rs`・`tests/it/plan_review.rs`、「the repository gives runtime tasks no `--paths`」 | 手順 | ★ | A-105 | dev/task-registration.md「runtimeのtaskの主なファイル」。plugin dagq/reference/scope.md「## Name the files a runtime task mainly touches」は「`--paths`を宣言しないtask」の汎用の例に | plugin-generic | 1462 |  |
+| P-08 | dagq/SKILL.md §2 コード例 | `--verify "cargo fmt --all --check" --verify "cargo test --locked"` | 値 |  | — | plugin dagq/SKILL.md「### Register the tasks」の同じ例を汎用の置き字に置き換える（このrepositoryの値はdev/task-registration.md「推奨の組み合わせ」） | plugin-generic | 1462 |  |
+| P-09 | dagq/SKILL.md §2 コード例 | `--doc docs/adr/NNNN-name.md`（このrepositoryの旧い4桁のADRの形） | 値 |  | A-156 | plugin dagq/SKILL.md「### Register the goal」の同じ例を汎用の形に置き換える（このrepositoryのADRの形はdev/documents.md「ADRのID」） | plugin-generic | 1462 |  |
+| P-10 | dagq/reference/inspect.md 優先度の表 | `interrupt`の例「goal 28, which added priorities」 | 経緯 |  | — | 削除。plugin dagq/reference/inspect.md「## Priority and claim order」の例を番号の無い汎用の文に | plugin-generic | 1462 |  |
+| P-11 | dagq/reference/inspect.md `edit`の例 | `--verify 'cargo fmt --all --check' --verify 'cargo test --locked --test plugin'` | 値 |  | A-104 | plugin dagq/reference/inspect.md「## Edit a draft or submitted task」の同じ例を汎用の置き字に置き換える（このrepositoryの値はdev/task-registration.md「推奨の組み合わせ」） | plugin-generic | 1462 |  |
+| P-12 | dagq-planner/SKILL.md §1 | 「`--paths`, `--evidence`, `--change` per AGENTS.md; `e2e` comes from the diff …, not a blanket `--evidence e2e`; no throwaway-queue hand steps in a worker's acceptance」 | 手順 | ★ | A-094〜A-111、A-017 | plugin dagq-planner/SKILL.md「## 1. Plan with the person and submit」の同じ文を「per the repository's rules」に置き換える。このrepositoryの規則の正本はdev/task-registration.md「推奨の組み合わせ」「change」「e2e」 | plugin-generic | 1462 |  |
+| P-13 | dagq-inbox/reference/watch.md `check the failed review` | 「task 1099」「(task 1220)」 | 経緯 |  | design sl/throughput-review.md | 削除（番号を消す）。経緯の正本はdesign sl/throughput-review.md「## promptの入力（task 1099）」「## Codexで動かす（task 1220）」 | plugin-generic | 1462 |  |
+| P-14 | dagq-recover/reference/stuck-exit.md 冒頭 | 「(task 147)」「task 170」 | 経緯 |  | design sl/receipt-and-session-exit.md・session-wrapper.md | 削除（番号を消す）。経緯の正本はdesign sl/receipt-and-session-exit.md「### `/exit`の再試行」とsl/session-wrapper.md 冒頭（`#`の節） | plugin-generic | 1462 |  |
+| P-15 | dagq/reference/kpi.md `kpis`の箇条 | 「(in this repository `area=runtime` for runtime work)」 | 手順 | ★ | A-047 | dev/operations.md「KPIの読み方」（A-047と1つに）。plugin dagq/reference/kpi.md「## `dagq kpi`: periods, strata, targets」は「1つの層の中で比べる」だけ | plugin-generic | 1462 |  |
+| P-16 | dagq/reference/kpi.md「## Raising throughput: the weekly review」の箇条5「One change, one mark」 | 「(in this repository `--area runtime` for runtime work)」 | 手順 | ★ | A-047・A-114 | dev/operations.md「KPIの読み方」（A-047と1つに）。plugin dagq/reference/kpi.md「## Raising throughput: the weekly review」の箇条5は「1つの層の中で比べる」だけ | plugin-generic | 1462 |  |
+| P-17 | dagq-recover/reference/triage-by-hand.md 箇条 | 「For the task 572 / ask 154, 159, 160 case」「(where ask 160 stood)」とhostの`python3`に`tomllib`が無い例 | 経緯 |  | ADR-t883-1 | 削除（番号を消す）。経緯の正本はADR-t883-1「## Context」。pluginの「## Broken verification command with committed work」は汎用の文に | plugin-generic | 1462 |  |
+| P-18 | dagq/reference/provider.md 箇条 | 「(task 1218)」「(task 1220)」 | 経緯 |  | ADR-t1207-1、design sl/actor-model.md | 削除（番号を消す）。経緯の正本はADR-t1207-1「## Context」とdesign sl/actor-model.md「## provider」 | plugin-generic | 1462 |  |
+| P-19a | dagq-inbox/reference/status.md 「## status」（sl/plan-review.md・sl/review.md・sl/supervise.md）と「## A text or a request the session did not take」（sl/session-send.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq-inbox/reference/status.md 「## status」（sl/plan-review.md・sl/review.md・sl/supervise.md）と「## A text or a request the session did not take」（sl/session-send.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 |  |
+| P-19b | dagq-recover/reference/review-by-hand.md 「## The supervisor reviews first」（sl/review.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq-recover/reference/review-by-hand.md 「## The supervisor reviews first」（sl/review.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 |  |
+| P-19c | dagq-recover/reference/session.md 「## An ask about a text the session did not take (`input_not_ready`, `send_unconfirmed`)」（sl/session-send.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq-recover/reference/session.md 「## An ask about a text the session did not take (`input_not_ready`, `send_unconfirmed`)」（sl/session-send.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 |  |
+| P-19d | dagq-recover/reference/stalled.md 冒頭（`# A stalled ask: …`の節。sl/idle-without-receipt.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq-recover/reference/stalled.md 冒頭（`# A stalled ask: …`の節。sl/idle-without-receipt.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 |  |
+| P-19e | dagq/reference/authority.md 冒頭（`# Who may run what, and how it is recorded`の節。security.md・authorization.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq/reference/authority.md 冒頭（`# Who may run what, and how it is recorded`の節。security.md・authorization.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 |  |
+| P-19f | dagq/reference/goal-close.md 冒頭（`# Closing a goal`の節。sl/goal-review.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq/reference/goal-close.md 冒頭（`# Closing a goal`の節。sl/goal-review.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 |  |
+| P-19g | dagq/reference/inspect.md 冒頭（`# Inspect commands and their fields`の節。sl/stats.md）と「## Decide what to run first with `graph`」（sl/dependency-diagram.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq/reference/inspect.md 冒頭（`# Inspect commands and their fields`の節。sl/stats.md）と「## Decide what to run first with `graph`」（sl/dependency-diagram.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 |  |
+| P-19h | dagq/reference/kpi.md 冒頭（`# KPIs, change marks, …`の節。sl/kpi.md・marks.md・stats.md・report.md・push.md、「of the dagq repository」）、「## Raising throughput: the weekly review」（sl/kpi.md）、「## Reports」（sl/report.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq/reference/kpi.md 冒頭（`# KPIs, change marks, …`の節。sl/kpi.md・marks.md・stats.md・report.md・push.md、「of the dagq repository」）、「## Raising throughput: the weekly review」（sl/kpi.md）、「## Reports」（sl/report.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 |  |
+| P-19i | dagq/reference/observer.md 「## Threshold findings: reading `stall_thresholds` and `running_alerts`」（sl/stall-thresholds.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq/reference/observer.md 「## Threshold findings: reading `stall_thresholds` and `running_alerts`」（sl/stall-thresholds.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 |  |
+| P-19j | dagq/reference/provider.md 冒頭（`# A worker's provider and route, and falling back`の節。provider-lifecycle.md・sl/headless-worker.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq/reference/provider.md 冒頭（`# A worker's provider and route, and falling back`の節。provider-lifecycle.md・sl/headless-worker.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 |  |
+| P-20 | dagq/reference/inspect.md「## Decide what to run first with `graph`」 | 「When one task blocks many (goal 8 had five tasks waiting on one)」 | 経緯 |  | — | 削除（番号を消す）。plugin dagq/reference/inspect.md「## Decide what to run first with `graph`」の文を番号の無い汎用の文に | plugin-generic | 1462 |  |
+
+### 4.1 固有でないと判断したもの（grepに当たったが項目にしない）
+
+| 場所 | 当たった語 | 理由 |
+| --- | --- | --- |
+| bin/dagq、dagq/reference/locate.md、dagq-recover/reference/up-down.md | `cargo install --locked dagq` | dagqのバイナリの導入の案内（製品の汎用の手順） |
+| dagq/reference/locate.md | 「this repository」 | 利用者のrepositoryを指す汎用の文 |
+| dagq/reference/kpi.md | `cpu_per_landing`の`.<cargo\|rustc\|…>`、`toolchain=`（dagqのsourceのqueueだけ） | 製品のKPIの定義 |
+| dagq-recover/reference/update.md | `cargo test --locked --test e2e -- --ignored`、「dagq's source」 | dagqのsourceから`install`するときの製品の関門（design sl/install.md） |
+| dagq/reference/scope.md「E2E」 | 「A repository that is not dagq's source has no e2e the runtime knows (`not_configured`)」 | 製品の振る舞い |
+| dagq-planner/SKILL.md §1 | 「`e2e` comes from the diff and `dagq.toml`'s `[e2e] paths`」 | 製品の振る舞い（`[e2e] paths`は利用者が書く設定） |
+| dagq/SKILL.md §2、dagq/reference/inspect.md（`graph`と`Priority and claim order`の節のコード例） | `--goal 1`、`--goal 2`、`--depends-on-goal 1` | コマンドの書き方を示す置き字のIDで、このrepositoryの逸話ではない |
+| .claude-plugin/plugin.json | `hisamekms` | 作者のmetadata |
+| plugin全体 | `ADR-…`の参照109か所 | dagqの製品の決定への参照で、このrepositoryの開発の規則ではない。残すかはtask 627・1462が配布の前提として扱う |
+
+## 5. 禁止事項と例外（`★`）の一覧
+
+照合（task 1463）の基準。移した後の正本の場所は、§3・§4の各行の「移した後の場所」に書く。
+
+- 禁止（64）: A-007, A-008, A-012, A-013, A-016, A-020, A-023, A-025, A-026, A-029, A-032, A-039, A-044, A-050, A-052, A-053, A-054, A-057, A-060, A-067, A-074, A-075, A-081, A-089, A-092, A-093, A-095, A-098, A-114, A-117, A-119, A-124, A-128, A-130, A-131, A-137, A-139, A-140, A-144, A-150, A-160, A-165, A-172, A-184, A-188, A-192, A-199, A-200, A-203, A-206, A-210, A-211, A-213, A-217, A-218, A-220, A-228, A-231, A-233, A-234, A-235, A-238, A-241, A-256
+- 例外（20）: A-009, A-022, A-061, A-068, A-077, A-078, A-080, A-091, A-097, A-100, A-121, A-143, A-161, A-173, A-205, A-221, A-222, A-225, A-243, A-245
+- 種類は別で、人・session・jobへの禁止か例外を含む（revise 1までの22）: A-006（汎用。`ready`はplan review jobだけという禁止と、`ready --bypass-review`・復旧job・retryの例外）、A-193（手順。drainの前に開いたaskを人に見せる）、P-01（pluginの値。「`cargo test`を重ねない」の禁止を含む）、P-04（pluginの手順。全体の`cargo test --locked`を流さない禁止と、resumeの再現の例外）、P-07（pluginの手順。「`--paths`として書かない」の禁止を含む）、A-048（`mark`を打たない例外（build・`--parallel`・Claude・`[run.env]`はruntimeが印にする））、A-049（`max_improvement_proposals`は`dagq.toml`だけで決める（host.tomlに書かない））、A-122（e2eは`integrate`では流さず、着地のrebaseの後にも流し直さない）、A-123（e2eは着地のrebaseの後に流し直さない（工程の設計の一部））、A-148（実Claudeを含む経路は自動化しない）、A-158（番号の割り当ての棚卸しをしない）、A-162（ADRにevent名・flag・既定値・関数名・migrationの番号・testの名前を書かない）、A-170（番号の割り当ての棚卸しをしない）、A-181（`up`/`down`/`plan`/固定バイナリの更新はinboxかplannerのsessionからだけ打つ）、A-186（`max_waiting`を`dagq.toml`に書かない）、A-215（非対話のrunでは`answer_prompt`と`stuck_exit`のaskが開かず、workspaceへのキー送信の手順が当たらない）、A-226（commitしてからreceiptを書く（順序の制約））、A-237（inboxは人の指示があるときだけ`dagq-recover`の手順を実行する）、A-244（plannerは交通整理を抱えない）、A-247（plannerに返るのは自分のproposalへのreviseと自分のaskのanswerだけ）、A-250（observerはnote・goal・taskを書かず、個々の詰まりを解消しない）、A-253（observerはKPIの数字を作らず、KPIのfindingを`blocked`のaskにしない）
+- 種類は別で、人・session・jobへの禁止か例外を含む（revise 2で足した35）: A-002（AGENTS.mdにはこのrepositoryだけの注意を書く）、A-003（taskの一覧・状態・依存・run履歴はキューだけが持つ（文書に写さない））、A-011（スモークは使い捨てのqueueだけで行う）、A-017（workerは実queueの手の確認をせず、testかfollow_upsにする）、A-038（4に戻す前にhostのほかのloadを見る）、A-047（作業時間の前後比較は`--area runtime`の層だけで読む）、A-059（関係するtestだけを流す）、A-065（全体の`cargo test`と`cargo llvm-cov`をworkerが流さない）、A-066（coverageの関門と全体の`cargo test`はverifyにあっても手元で流さない）、A-069（e2eはstressの対象外）、A-071（stressの対象からe2eとpluginを除く）、A-101（`--paths`を宣言したときだけverificationを軽くしてよい）、A-102（docsだけのtaskはfmtも要らなければverifyなし）、A-105（runtimeのtaskに`--paths`と`--evidence e2e`を付けない）、A-108（宣言外のpathは変えず、`failed`のreceiptに書く）、A-109（`--change`は7値だけを使う）、A-112（areaは宣言しない）、A-115（integration testのbinaryは`it`・`e2e`・`plugin`の3本だけ）、A-118（podmanを要るtestは`#[ignore]`で関門とCIに数えない）、A-127（`[e2e] paths`は境目のファイルが増えた・分かれたときだけ変える）、A-151（`accepted`だけが今の決定）、A-171（llvm-covと`cargo test`を重ねない、一律の`--evidence e2e`を求めない）、A-194（人に報告してから、非互換は了承を得てから打つ）、A-208（drainの前に開いたaskを人に見せる）、A-209（人が手で行うものは人の指示があるときだけ）、A-219（llvm-covと全体の`cargo test`を手元で流さない）、A-223（stressで落ちたら直してからreceiptを書く）、A-224（subagent reviewをしないときは理由を書く）、A-227（terminalに質問を書いて待たない）、A-239（人自身の操作は`DAGQ_ROLE`の無いterminalで打つ）、A-242（人に上げるのは決めきれないものだけ）、A-246（plannerに拒まれるコマンドの一覧）、P-02（検証の行はchangeでなく変える対象で選ぶ）、P-15（作業時間は1つの層の中だけで比べる（このrepositoryは`area=runtime`））、P-16（`all`で比べない（このrepositoryは`--area runtime`））
+- 種類は別で、runtimeやCLIの振る舞いとしての禁止か例外を含む（revise 2で足した33）: A-015（serviceに無いコマンドを拒み、eventを残さない）、A-021（`install`はdrainしない）、A-033（ツールが無ければ`up`・claim・着地・`integrate`の検証を止める）、A-041（dagqを通さない`cargo`は`[run.env]`を読まない）、A-045（`d2`が無ければSVGを作らない）、A-079（全部のtestは`integrate`が1回だけ流す）、A-096（validatingはreceiptの`e2e`のevidenceを求めない）、A-110（集合の外の`--change`とchangeの無いtaskを拒む）、A-113（`--kind`は無い）、A-125（e2eが落ちれば固定バイナリを入れ替えない）、A-129（印が効けば記録だけで進める）、A-132（上限・期限切れ・3回続けての失敗の印は効かない）、A-136（差分がtestのファイルを変える印と直すtaskの印は外す）、A-138（nextestでは止まるのはそのtestだけ）、A-142（runtimeはcargo-nextestを事前に検査しない）、A-168（plan reviewのpromptはrepositoryの規則を持たない）、A-178（validatingはverificationを実行しない）、A-179（`up`はplannerを開かない）、A-191（非互換のmigrationを含むビルドは自動で入れ替えない）、A-195（in-cmux modeに自動再起動は無い）、A-196（`down`はinboxもplannerも閉じない）、A-197（runtimeはtitleでworkspaceを探さない）、A-202（runtimeと復旧jobが直さなかったものだけがaskになり、ask は人が要る理由のあるものだけ）、A-207（待ちのrunはslotを持たず、drainは待ちの終わりまで終わらない）、A-212（指定した経路は既定が変わっても変わらない）、A-214（`--no-claude`では切り替え先の無いreviewを待たせない）、A-229（`--topic`は集計にだけ使う）、A-230（`category`が欠けてもreceiptは拒まれない）、A-232（許されないコマンドは`authorization_denied`で拒まれる）、A-248（supervisorが居ないときobserverは動かない）、A-249（自分以外のeventが無ければobserverを起動せず、MCPを読み込まない）、A-251（人の承認は一律には求めない）、A-255（headless jobは状態を変えられず、着地とpushはIntegratorだけ）
+- 種類は別で、禁止か例外を含む（revise 2の再点検で足した23）: A-014（人がpolicyを変えないと決めた（workerに`queue.admin`を与えない））、A-030（共有しない理由(a)(b)は、envで並列度を絞ることには当たらない（例外））、A-042（worktreeで変えた`dagq.toml`は着地するまで効かない。壊すとqueue全体が止まる）、A-051（`dagq report`はqueueの状態を変えない）、A-055（3回続けて送れなかったメッセージは送り直さず人に渡す）、A-063（`--test plugin`が`SKILL.md`の8 KiBの上限を検査する）、A-073（長いtestのstressには時間の上限を付ける）、A-084（着地の検証で落ちたtestが全てFLAKYならresumeせずに着地を1回やり直す（ADR-t768-1））、A-086（手元のllvm-covと全体のtestを再現だけに限る、runtimeは変えない）、A-087（数え直しを見てから決める（それまで決めない））、A-099（1件でも落ちれば失敗、nextestはdoctestを流さない）、A-120（超えそうならtestを足す前に分ける）、A-134（`check-e2e-quarantine.sh`は期限切れを警告だけにする）、A-141（振り直せるのはmigrationが1つでその番号を他の変更が含まないときだけ）、A-152（IDの形でなく決定の数と変える範囲で決める）、A-163（丸ごと置き換えずに`amends`にする）、A-169（`accepted`のADRと矛盾するtaskは`concern`にする）、A-180（launchd modeはpreflightで止まる（使わない））、A-190（`codex`が無くても`up`とsupervisorは止まらない）、A-201（`concern`は`approve_landing`のaskにする、衝突だけのresume_exhaustedは引き継ぐretry）、A-204（`task_edited`を確かめてから答える、optionは`integrate`の検証が落ちたrunのaskにだけ、verifyを直した後は3回の後ももう1回jobにかかる）、A-216（人の判断が要るときはaskにして待つ）、P-12（worker の acceptance に使い捨てのqueueの手作業を入れない、一律の`--evidence e2e`にしない）
+
+項目は全部で285（AGENTS.md 256、plugin 29。P-19はfileごとにP-19a〜P-19jに分けた）、`★`は197。
+
+## 6. AGENTS.mdの節ごとのbyte数（`C`）
+
+節は、見出しの行から、同じかより上のlevelの次の見出しの直前の行まで（fenceの中の`#`は見出しにしない）。コマンドは§7。
+
+| 節の見出し | byte |
+| --- | ---: |
+| `# AGENTS.md`（ファイル全体） | 105,197 |
+| 冒頭（1〜6行、`#`の見出しから最初の`##`の前まで。全体から`##`の節を引いた値） | 449 |
+| `## セッション開始時に読む` | 301 |
+| `## 作業中` | 15,324 |
+| `## 変更後に必ず通す` | 13,570 |
+| `## テストの制約` | 20,441 |
+| `## 文書のルール` | 5,078 |
+| `## タスクを閉じるとき` | 151 |
+| `## plan review` | 1,534 |
+| `## コミット` | 544 |
+| `## 役割: supervisor と worker と planner と inbox と observer`（下の`###`を含む） | 47,805 |
+| 　役割の冒頭（`##`の見出しから最初の`###`の前まで。`##`の値から`###`の節を引いた値） | 1,886 |
+| 　`` ### 起動と停止（`up` / `down`） `` | 10,576 |
+| 　`### 着地と人の判断` | 13,817 |
+| 　`### worker` | 9,568 |
+| 　`### inbox と planner` | 6,657 |
+| 　`### observer` | 3,981 |
+| 　`### 権限と記録（goal 55）` | 1,320 |
+
+`##`の節の合計は104,748で、冒頭の449と合わせて105,197になる。
+
+## 7. 節を切り出して数えるコマンド
+
+bashで次の関数を定義する（zshでは`$C:A`が修飾子として読まれるので`"${C}:${path}"`と書く）。
+
+```sh
+section() {   # section <commit> <path> '<見出しの行そのまま>'
+  git show "${1}:${2}" | awk -v want="$3" '
+    /^(```|~~~)/ { fence = !fence }
+    !fence && match($0, /^#+ /) {
+      l = RLENGTH - 1
+      if (on && l <= lv) exit
+      if (!on && $0 == want) { on = 1; lv = l }
+    }
+    on { print }'
+}
+C=7fea2d6bedaec2032cee9173022cc133622d8497
+section "$C" AGENTS.md '### worker' | wc -c                 # 9568
+git show "${C}:AGENTS.md" | wc -c                            # 105197（ファイル全体）
+git show "${C}:AGENTS.md" | grep '^#' | while IFS= read -r h; do
+  printf '%s\t%s\n' "$(section "$C" AGENTS.md "$h" | wc -c | tr -d ' ')" "$h"
+done                                                          # §6の表
+```
+
+同じファイルに同じ見出しが2つあるときは最初のものを数える（AGENTS.mdには無い）。
+
+## 8. 整理の前の読む量（`C`）
+
+### 8.1 数え方の条件
+
+task 1456の説明の測定の条件に従う。task 1463は同じ条件で整理の後を数える。
+
+- **時点**: 整理の前は`C`（`7fea2d6b`）。整理の後はtask 1463の着手の時点のmainのcommit。どちらも`git show <commit>:<path>`の内容で数える。
+- **組**: worker×変更の範囲（runtime＝`src/**`・`build.rs`・Cargoの設定、tests、migrations、docs、plugin、config）、planner、plan review、runの reviewの親job、reviewのsubagent（整理の後だけ。agentごと）、inbox。
+- **数える資料**: (a) 自動: `CLAUDE.md`と、それが`@`で読み込むAGENTS.mdの全体（どの役割も）。(b) 必読: AGENTS.mdの「セッション開始時に読む」とruntimeのprompt（`src/application/prompt.rs`）がその役割に名指す部分。辿るのは直接名指された節の1段と、その節の中で条件なしに「読む」と明示された参照のもう1段だけ。(c) skill: その役割のpromptか起動の手順が読ませるSKILL.mdの全体と、そのSKILL.mdが先に読めと名指すSKILL.md。referenceはSKILL.mdが条件なしに必読と名指すものだけ。(d) reviewのsubagentの定義（整理の後だけ）。
+- **数えないもの**: taskごとに変わるもの（taskが名指す文書、「触る範囲の`docs/design`」、`docs/plans/current.md`の「現在のステップ」、runのreviewの資料（review material））は前後とも数えない。AGENTS.mdの「セッション開始時に読む」が名指すのはこの3つと`dagq list`/`show`（文書でない）だけなので、(b)としてAGENTS.mdの外に足すものは無い。
+- **重複**: 同じ組の中で同じファイルの同じ節は1回だけ、外側の節（ファイル全体）に含まれる節は外側だけを数える。
+
+### 8.2 役割ごとに辿った経路（`C`）
+
+| 役割 | promptが名指すもの（`src/application/prompt.rs`） | 辿った先 | 数えたか |
+| --- | --- | --- | --- |
+| worker | `WORKER_READING`: 「the worker section of the repository instructions (AGENTS.md or CLAUDE.md)」、`local_checks`: 「the checks the repository's instructions ask a worker to run」 | AGENTS.md `### worker`（9,568）。その中の参照は「『変更後に必ず通す』の項目を実行する」など実行の指示で、条件なしに「読む」と明示したAGENTS.mdの外の文書は無い | (a)のAGENTS.md全体に含まれるので数えない。skillは名指さない |
+| planner | `planner_prompt`・runtimeのplannerのprompt: 「Follow the dagq-planner skill」、`repository_rules`: AGENTS.mdと「the documents and rules they name」（節を名指さない） | `dagq-planner/SKILL.md`が「Read `skills/dagq/SKILL.md` first」。`dagq/SKILL.md`のreferenceは「read only when needed」、dagq-plannerのreferenceはどれも条件付き | (c) 2ファイル |
+| plan review | `plan_review_prompt`: 「its instructions (AGENTS.md and CLAUDE.md), the documents and rules they name (the plan review's part of them above all), and the documents the tasks name」 | AGENTS.md `## plan review`（1,534、(a)に含む）。その中の「`docs/adr/README.md`（ADRの索引）と、taskが名指すADRと`docs/design/`の文書を読む」のうち、条件なしの`docs/adr/README.md`を2段目として数える（taskが名指すものは数えない） | (b) docs/adr/README.md。skillは名指さない |
+| runのreviewの親job | `review_prompt`: review materialとworktreeだけ（AGENTS.mdの節もskillも名指さない） | — | (a)だけ |
+| inbox | `inbox_prompt`: 「follow the dagq-inbox skill」 | `dagq-inbox/SKILL.md`は`dagq`のskillを「先に読め」とは名指さず（「resolved as in the `dagq` skill」）、referenceはどれも条件付き（「Before showing an ask … you are unsure of, read」など） | (c) 1ファイル |
+| reviewのsubagent | 整理の前は無い | — | — |
+
+### 8.3 明細の表
+
+| 時点のcommit | 役割 | 変更の範囲 | 種類 | file | 節の見出し | byte |
+| --- | --- | --- | --- | --- | --- | ---: |
+| 7fea2d6b | worker | runtime | 自動 | CLAUDE.md | （全体） | 11 |
+| 7fea2d6b | worker | runtime | 自動 | AGENTS.md | （全体） | 105,197 |
+| 7fea2d6b | worker | tests | 自動 | CLAUDE.md | （全体） | 11 |
+| 7fea2d6b | worker | tests | 自動 | AGENTS.md | （全体） | 105,197 |
+| 7fea2d6b | worker | migrations | 自動 | CLAUDE.md | （全体） | 11 |
+| 7fea2d6b | worker | migrations | 自動 | AGENTS.md | （全体） | 105,197 |
+| 7fea2d6b | worker | docs | 自動 | CLAUDE.md | （全体） | 11 |
+| 7fea2d6b | worker | docs | 自動 | AGENTS.md | （全体） | 105,197 |
+| 7fea2d6b | worker | plugin | 自動 | CLAUDE.md | （全体） | 11 |
+| 7fea2d6b | worker | plugin | 自動 | AGENTS.md | （全体） | 105,197 |
+| 7fea2d6b | worker | config | 自動 | CLAUDE.md | （全体） | 11 |
+| 7fea2d6b | worker | config | 自動 | AGENTS.md | （全体） | 105,197 |
+| 7fea2d6b | planner | — | 自動 | CLAUDE.md | （全体） | 11 |
+| 7fea2d6b | planner | — | 自動 | AGENTS.md | （全体） | 105,197 |
+| 7fea2d6b | planner | — | skill | plugins/claude-dagq/skills/dagq-planner/SKILL.md | （全体） | 8,189 |
+| 7fea2d6b | planner | — | skill | plugins/claude-dagq/skills/dagq/SKILL.md | （全体） | 8,186 |
+| 7fea2d6b | plan review | — | 自動 | CLAUDE.md | （全体） | 11 |
+| 7fea2d6b | plan review | — | 自動 | AGENTS.md | （全体） | 105,197 |
+| 7fea2d6b | plan review | — | 必読 | docs/adr/README.md | （全体） | 47,836 |
+| 7fea2d6b | runのreviewの親job | — | 自動 | CLAUDE.md | （全体） | 11 |
+| 7fea2d6b | runのreviewの親job | — | 自動 | AGENTS.md | （全体） | 105,197 |
+| 7fea2d6b | inbox | — | 自動 | CLAUDE.md | （全体） | 11 |
+| 7fea2d6b | inbox | — | 自動 | AGENTS.md | （全体） | 105,197 |
+| 7fea2d6b | inbox | — | skill | plugins/claude-dagq/skills/dagq-inbox/SKILL.md | （全体） | 7,417 |
+
+外側に含まれるので数えなかった節（どれもAGENTS.mdの全体に含まれる）: workerの`### worker`（9,568）、plan reviewの`## plan review`（1,534）、全ての役割の`## セッション開始時に読む`（301）。
+
+明細のファイル全体のbyteは`git show 7fea2d6bedaec2032cee9173022cc133622d8497:<file> | wc -c`で出る。
+
+### 8.4 まとめの表
+
+前のbyteは明細の同じ組の行の合計。後の列はtask 1463が埋める。
+
+| 役割 | 変更の範囲 | 前のcommit | 前のbyte | 後のcommit | 後のbyte | 差 | 差の率 |
+| --- | --- | --- | ---: | --- | ---: | ---: | ---: |
+| worker | runtime | 7fea2d6b | 105,208 |  |  |  |  |
+| worker | tests | 7fea2d6b | 105,208 |  |  |  |  |
+| worker | migrations | 7fea2d6b | 105,208 |  |  |  |  |
+| worker | docs | 7fea2d6b | 105,208 |  |  |  |  |
+| worker | plugin | 7fea2d6b | 105,208 |  |  |  |  |
+| worker | config | 7fea2d6b | 105,208 |  |  |  |  |
+| planner | — | 7fea2d6b | 121,583 |  |  |  |  |
+| plan review | — | 7fea2d6b | 153,044 |  |  |  |  |
+| runのreviewの親job | — | 7fea2d6b | 105,208 |  |  |  |  |
+| reviewのsubagent（agentごと） | — | （無い） | — |  |  |  |  |
+| inbox | — | 7fea2d6b | 112,625 |  |  |  |  |
+
+整理の前は、workerの読む量が変更の範囲で変わらない（AGENTS.mdの全体を自動で読み込み、workerに名指す節もその中にあるため）。
