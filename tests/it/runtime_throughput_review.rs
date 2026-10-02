@@ -241,6 +241,7 @@ fn an_hour_a_rule_meets_is_reviewed_saved_and_told_to_the_inbox_and_the_job_only
         "asks",
         "timelines",
         "hourly",
+        "health",
     ] {
         assert!(!input[key].is_null(), "{key}: {input}");
     }
@@ -520,6 +521,12 @@ fn the_daily_and_weekly_reviews_of_inputs_of_mbs_start_their_agent_with_a_small_
             "throughput-review-job"
         );
         let input = fs::read_to_string(dir.join("input.json")).unwrap();
+        // The workers' health and the disk of the reviewed period, in the
+        // prompt too (task 1371).
+        let health = &serde_json::from_str::<Value>(&input).unwrap()["health"];
+        assert!(health["routes"].is_object(), "{}: {health}", mode.as_str());
+        assert!(health.get("disk").is_some(), "{}: {health}", mode.as_str());
+        assert!(health["period"].is_string(), "{}: {health}", mode.as_str());
         assert!(
             input.len() > 1024 * 1024,
             "{}: {}",
@@ -534,6 +541,7 @@ fn the_daily_and_weekly_reviews_of_inputs_of_mbs_start_their_agent_with_a_small_
             prompt.len()
         );
         assert!(prompt.contains(&dir.join("input.json").display().to_string()));
+        assert!(prompt.contains("\"health\""), "{}", mode.as_str());
     }
     assert_eq!(queue_events(&db, "throughput_review_reported").len(), 2);
 }

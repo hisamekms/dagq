@@ -106,6 +106,7 @@ pub fn render_html(report: &Report) -> String {
         forecast(&mut page, latest, &report.kpi.targets);
         landing(&mut page, latest);
         host_cpu(&mut page, latest);
+        health(&mut page, latest);
         jobs(&mut page, latest);
         kpis(&mut page, latest);
     }
@@ -445,6 +446,77 @@ fn host_cpu(page: &mut String, period: &PeriodKpis) {
         );
     }
     page.push_str("</p>");
+}
+
+/// How the workers got on per route and the least free space of the runs'
+/// filesystem in the period (task 1371): the turns by outcome and failure,
+/// the nudges, the `stalled` alerts by reason, the moves to the other
+/// provider, Claude's cost per turn and the waits for a person.
+fn health(page: &mut String, period: &PeriodKpis) {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    let health = &period.health;
+    page.push_str("<h2>Worker health</h2><p class=\"meta\">");
+    match &health.disk {
+        Some(disk) => {
+            let share =
+                |pct: Option<f64>| pct.map_or_else(String::new, |pct| format!(" ({pct:.1}%)"));
+            let _ = write!(
+                page,
+                "Free space of the runs' filesystem: least {:.1} GiB{}, median {:.1} GiB{}, over {} sample(s).",
+                disk.min_free_bytes / GIB,
+                share(disk.min_free_pct),
+                disk.median_free_bytes / GIB,
+                share(disk.median_free_pct),
+                disk.samples,
+            );
+        }
+        None => page.push_str("No free space of the runs' filesystem was recorded in the period."),
+    }
+    page.push_str("</p>");
+    if health.routes.is_empty() {
+        page.push_str(
+            "<p class=\"meta\">No worker turn, nudge, stall, switch or wait in the period.</p>",
+        );
+        return;
+    }
+    let counts = |counts: &std::collections::BTreeMap<String, i64>| {
+        if counts.is_empty() {
+            return "—".to_owned();
+        }
+        counts
+            .iter()
+            .map(|(name, count)| format!("{} {count}", esc(name)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    page.push_str("<div class=\"scroll\"><table><tr><th>route</th><th class=\"num\">turns</th><th>outcomes</th><th>failures</th><th class=\"num\">nudges</th><th>stalled</th><th>provider switches</th><th class=\"num\">Claude cost</th><th class=\"num\">per turn (median)</th><th class=\"num\">waits</th><th class=\"num\">waited</th></tr>");
+    for (route, route_health) in &health.routes {
+        let cost = &route_health.claude_cost_usd;
+        let waited = &route_health.waiting.waited;
+        #[allow(clippy::cast_precision_loss)]
+        let waited_secs = waited.total_secs as f64;
+        let _ = write!(
+            page,
+            "<tr><td><code>{}</code></td><td class=\"num\">{}</td><td>{}</td><td>{}</td><td class=\"num\">{}</td><td>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td></tr>",
+            esc(route),
+            route_health.turns,
+            counts(&route_health.turn_outcomes),
+            counts(&route_health.turn_failures),
+            route_health.stall_nudged,
+            counts(&route_health.stalled),
+            counts(&route_health.provider_switches),
+            if cost.turns > 0 {
+                format!("${:.2}", cost.total)
+            } else {
+                "—".to_owned()
+            },
+            cost.median
+                .map_or_else(|| "—".to_owned(), |median| format!("${median:.3}")),
+            route_health.waiting.started,
+            secs(waited_secs),
+        );
+    }
+    page.push_str("</table></div>");
 }
 
 /// The headless jobs of the period (goal 73), per kind and per provider

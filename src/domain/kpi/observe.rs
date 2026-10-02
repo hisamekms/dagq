@@ -279,6 +279,7 @@ mod tests {
                 kpis: BTreeMap::new(),
                 details: BTreeMap::new(),
                 unavailable: BTreeMap::new(),
+                routes: BTreeMap::new(),
             },
             marks: marks
                 .iter()
@@ -294,6 +295,7 @@ mod tests {
                 .collect(),
             comparison,
             host: None,
+            health: crate::domain::kpi::Health::default(),
         }
     }
 

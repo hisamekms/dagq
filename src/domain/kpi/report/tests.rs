@@ -697,3 +697,88 @@ fn a_report_shows_the_headless_jobs_per_provider() {
     assert!(!html[jobs..kpis].contains("model="));
     assert!(!html[jobs..kpis].contains("mode=weekly"));
 }
+
+/// The page shows the workers' health per route and the least free space
+/// of the runs' filesystem (task 1371), and says so when the period has
+/// neither; the JSON carries the same under the period's `health`.
+#[test]
+fn a_report_shows_the_worker_health_and_the_disk_free() {
+    use crate::domain::{
+        host_metrics::{DiskSpace, HostSample, summarize},
+        stats::routes::{Cost, RouteHealth},
+        waiting::{Durations, RouteWaits},
+    };
+    let thursday = MONDAY + 3 * DAY;
+    let samples: Vec<HostSample> = [(30, 4), (60, 40)]
+        .into_iter()
+        .map(|(secs, free)| {
+            HostSample::new(thursday + secs).with_disk(Some(DiskSpace {
+                free_bytes: free << 30,
+                total_bytes: 80 << 30,
+            }))
+        })
+        .collect();
+    let read = |from, until| summarize(&samples, from, until);
+    let now = MONDAY + 4 * DAY + 12 * HOUR;
+    let mut report = report_with_host(
+        now,
+        thursday + 12 * HOUR,
+        Period::Day,
+        Some(crate::domain::kpi::HostReader(&read)),
+    );
+    let latest = report.kpi.periods.last_mut().unwrap();
+    latest.health.routes.insert(
+        "headless".to_owned(),
+        RouteHealth {
+            turns: 3,
+            turn_outcomes: [("succeeded".to_owned(), 2), ("failed".to_owned(), 1)].into(),
+            turn_failures: [("usage_limit".to_owned(), 1)].into(),
+            stall_nudged: 2,
+            stalled: [("permission_denied".to_owned(), 1)].into(),
+            provider_switches: [("usage_limit".to_owned(), 1)].into(),
+            claude_cost_usd: Cost {
+                turns: 2,
+                total: 1.5,
+                median: Some(0.75),
+                max: Some(1.0),
+            },
+            waiting: RouteWaits {
+                started: 1,
+                waited: Durations {
+                    count: 1,
+                    total_secs: 600,
+                    median_secs: Some(600),
+                    max_secs: Some(600),
+                },
+            },
+        },
+    );
+    let json = serde_json::to_value(&report).unwrap();
+    let health = &json["periods"][6]["health"];
+    assert_eq!(
+        health["disk"]["min_free_bytes"], 4_294_967_296.0,
+        "{health}"
+    );
+    assert_eq!(health["disk"]["min_free_pct"], 5.0, "{health}");
+    assert_eq!(health["routes"]["headless"]["stall_nudged"], 2, "{health}");
+    let html = render_html(&report);
+    assert!(html.contains("<h2>Worker health</h2>"), "{html}");
+    // The median by nearest rank of two samples is the lower.
+    assert!(
+        html.contains("least 4.0 GiB (5.0%), median 4.0 GiB (5.0%), over 2 sample(s)"),
+        "{html}"
+    );
+    assert!(html.contains(
+        "<tr><td><code>headless</code></td><td class=\"num\">3</td><td>failed 1, succeeded 2</td><td>usage_limit 1</td><td class=\"num\">2</td><td>permission_denied 1</td><td>usage_limit 1</td><td class=\"num\">$1.50</td><td class=\"num\">$0.750</td><td class=\"num\">1</td><td class=\"num\">10m 00s</td></tr>"
+    ), "{html}");
+    // Wednesday had neither.
+    let wednesday = report_with_host(
+        now,
+        thursday - 12 * HOUR,
+        Period::Day,
+        Some(crate::domain::kpi::HostReader(&read)),
+    );
+    let html = render_html(&wednesday);
+    assert!(html.contains("No free space of the runs' filesystem was recorded in the period."));
+    assert!(html.contains("No worker turn, nudge, stall, switch or wait in the period."));
+}

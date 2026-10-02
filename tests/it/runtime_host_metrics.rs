@@ -2,7 +2,10 @@
 //! under the queue's `host/` (task 516).
 use crate::runtime_support;
 
-use dagq::{compose::HostMetricsSettings, domain::host_metrics::HostSample};
+use dagq::{
+    compose::HostMetricsSettings,
+    domain::host_metrics::{DiskSpace, HostSample},
+};
 use runtime_support::*;
 use std::sync::atomic::AtomicBool;
 
@@ -20,6 +23,13 @@ fn broken_host(_now: i64) -> HostSample {
 fn settings(interval: Duration, sample: fn(i64) -> HostSample) -> Option<HostMetricsSettings> {
     Some(HostMetricsSettings {
         sample,
+        // 10 GiB free of 100.
+        disk: |_| {
+            Some(DiskSpace {
+                free_bytes: 10 << 30,
+                total_bytes: 100 << 30,
+            })
+        },
         ..HostMetricsSettings::new(interval, 30)
     })
 }
@@ -55,7 +65,7 @@ fn rows(host: &Path) -> Vec<String> {
 /// retention go and any other file stays.
 #[test]
 fn supervisor_records_the_host_load_while_it_runs_and_prunes_old_files() {
-    let (_dir, repo, db) = fixture();
+    let (dir, repo, db) = fixture();
     SqliteQueue::open(&db)
         .unwrap()
         .transition(TaskId::new(1), TaskAction::Cancel)
@@ -101,6 +111,37 @@ fn supervisor_records_the_host_load_while_it_runs_and_prunes_old_files() {
     let stats = runtime::stats(&db, &Default::default()).unwrap();
     assert!(stats["host"]["samples"].as_u64().unwrap() >= 3, "{stats}");
     assert_eq!(stats["host"]["metrics"]["mem_used_mb"]["max"], 8192.0);
+    // The free space of the runs' filesystem, its least and median too
+    // (task 1371).
+    let disk = &stats["host"]["metrics"]["disk_free_bytes"];
+    assert_eq!(
+        (&disk["min"], &disk["median"]),
+        (&json!(10737418240.0), &json!(10737418240.0)),
+        "{stats}"
+    );
+    assert_eq!(stats["host"]["metrics"]["disk_free_pct"]["min"], 10.0);
+    let config = dir.path().join("config");
+    fs::create_dir_all(&config).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dagq"))
+        .without_actor_env()
+        .env("XDG_CONFIG_HOME", &config)
+        .arg("--db")
+        .arg(&db)
+        .args(["kpi", "--last", "1"])
+        .bounded_output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let kpi: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let today = &kpi["periods"][0];
+    assert_eq!(
+        today["health"]["disk"]["min_free_bytes"], 10737418240.0,
+        "{today}"
+    );
+    assert_eq!(today["health"]["disk"]["median_free_pct"], 10.0, "{today}");
     // Without the setting, nothing is recorded.
     fs::remove_dir_all(&host).unwrap();
     supervise_with(&db, &repo, &backend, &supervise_options(1, true)).unwrap();

@@ -3037,3 +3037,95 @@ fn a_comparison_s_text_reads_back_as_the_same_comparison() {
         assert_eq!(spec.text().parse::<CompareSpec>(), Ok(spec), "{text}");
     }
 }
+
+/// Each period carries its health (task 1371): the workers' turns, nudges,
+/// stalls and Claude's cost per route from that period's events only, and
+/// the least and the median free space of the runs' filesystem when the
+/// host's records are read; nothing is judged on it.
+#[test]
+fn periods_carry_the_health_per_route_and_the_disk_free() {
+    use crate::domain::host_metrics::{DiskSpace, HostSample, summarize};
+    let mut queue = Queue::default();
+    queue.run(&Run::new(1, None, MONDAY + HOUR, 300));
+    queue.run(&Run {
+        provider: "codex",
+        ..Run::new(2, None, MONDAY + DAY + HOUR, 300)
+    });
+    let run = |task: i64, claimed: i64| format!("{task:08x}-0000-4000-8000-{claimed:012x}");
+    let (first, second) = (run(1, MONDAY + HOUR), run(2, MONDAY + DAY + HOUR));
+    queue.push(
+        Some(1),
+        Some(&first),
+        "stall_nudged",
+        json!({"phase": "session"}),
+        MONDAY + HOUR + 60,
+    );
+    queue.push(
+        Some(2),
+        Some(&second),
+        "turn_finished",
+        json!({"outcome": "failed", "failure": "usage_limit", "provider": "claude", "cost_usd": 0.5}),
+        MONDAY + DAY + HOUR + 60,
+    );
+    queue.push(
+        Some(2),
+        Some(&second),
+        "recovery_requested",
+        json!({"alert": "stalled", "reason": "turn_without_receipt"}),
+        MONDAY + DAY + HOUR + 120,
+    );
+    let gib = 1 << 30;
+    let samples: Vec<HostSample> = [(MONDAY + 10, 50), (MONDAY + 20, 5), (MONDAY + 30, 20)]
+        .into_iter()
+        .map(|(unix, free)| {
+            HostSample::new(unix).with_disk(Some(DiskSpace {
+                free_bytes: free * gib,
+                total_bytes: 100 * gib,
+            }))
+        })
+        .collect();
+    let read = |from, until| summarize(&samples, from, until);
+    let config = KpiConfig::merge(None, None);
+    let now = MONDAY + DAY + 2 * HOUR;
+    let query = KpiQuery {
+        period: Period::Day,
+        last: 2,
+        ..KpiQuery::default()
+    };
+    let kpi = queue.kpi_with_host(now, &config, &query, Some(HostReader(&read)));
+    let [monday, tuesday] = [&kpi.periods[0], &kpi.periods[1]];
+    assert_eq!(monday.health.routes["interactive"].stall_nudged, 1);
+    assert!(!monday.health.routes.contains_key("headless"));
+    let disk = monday.health.disk.unwrap();
+    assert_eq!(
+        (disk.samples, disk.min_free_bytes, disk.median_free_bytes),
+        (3, 5_368_709_120.0, 21_474_836_480.0)
+    );
+    assert_eq!(
+        (disk.min_free_pct, disk.median_free_pct),
+        (Some(5.0), Some(20.0))
+    );
+    let headless = &tuesday.health.routes["headless"];
+    assert_eq!(
+        (headless.turns, headless.turn_failures["usage_limit"]),
+        (1, 1)
+    );
+    assert_eq!(headless.stalled["turn_without_receipt"], 1);
+    assert_eq!(headless.claude_cost_usd.total, 0.5);
+    // A period without the host's records has no disk.
+    assert_eq!(tuesday.health.disk, None);
+    let json = serde_json::to_value(&kpi).unwrap();
+    assert_eq!(
+        json["periods"][0]["health"]["disk"]["min_free_bytes"],
+        5_368_709_120.0
+    );
+    assert_eq!(
+        json["periods"][1]["health"]["routes"]["headless"]["turn_outcomes"]["failed"],
+        1
+    );
+    // Without the host's load, the routes stay and the disk is null.
+    let without = queue.kpi(now, &config, &query);
+    assert_eq!(without.periods[1].health.routes, tuesday.health.routes);
+    assert_eq!(without.periods[0].health.disk, None);
+    assert_eq!(kpi.targets, without.targets);
+}

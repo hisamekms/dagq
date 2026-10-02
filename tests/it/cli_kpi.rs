@@ -509,7 +509,7 @@ fn kpi_summarizes_the_host_load_of_each_span() {
     assert_eq!(summary["samples"], 2, "{summary}");
     assert_eq!(
         summary["metrics"]["load1"],
-        json!({"samples": 2, "mean": 3.0, "median": 2.0, "max": 4.0, "p90": 4.0})
+        json!({"samples": 2, "min": 2.0, "mean": 3.0, "median": 2.0, "max": 4.0, "p90": 4.0})
     );
     // 60 s at 2 and 4 cores: 360 CPU s, and no landing to divide by.
     let cpu = &window["periods"][0]["details"]["cpu_per_landing"];

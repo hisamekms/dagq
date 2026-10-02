@@ -467,6 +467,9 @@ pub struct HostMetricsSettings {
     pub retention_days: u32,
     /// Takes one sample at a unix second; tests set it.
     pub sample: fn(i64) -> crate::domain::host_metrics::HostSample,
+    /// Reads the space of the filesystem of a path, put in each sample for
+    /// the queue's `runs/` (task 1371); tests set it.
+    pub disk: fn(&Path) -> Option<crate::domain::host_metrics::DiskSpace>,
 }
 
 impl HostMetricsSettings {
@@ -476,6 +479,7 @@ impl HostMetricsSettings {
             interval,
             retention_days,
             sample: crate::infrastructure::host_metrics::sample,
+            disk: crate::infrastructure::adapters::disk_space,
         }
     }
 }
@@ -927,10 +931,15 @@ pub fn supervise_with_reviewer(
             .unwrap_or(Path::new("."))
             .join(crate::domain::host_metrics::HOST_DIR);
         let interval = settings.interval;
+        // The filesystem of the run worktrees and their builds, the one
+        // the disk checks read (task 1371): `runs/`, else the queue's dir.
+        let runs = runs_dir(&db);
+        let queue_dir = db.parent().unwrap_or(Path::new(".")).to_path_buf();
         crate::application::supervise::HostMetricsPort {
             interval,
             record: Arc::new(move |now| {
-                let sample = (settings.sample)(now);
+                let disk = (settings.disk)(&runs).or_else(|| (settings.disk)(&queue_dir));
+                let sample = (settings.sample)(now).with_disk(disk);
                 crate::infrastructure::host_metrics::record(
                     &dir,
                     &sample,

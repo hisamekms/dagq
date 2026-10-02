@@ -97,6 +97,7 @@ const DROP_ORDER: &[&[&str]] = &[
     &["kpi", "targets"],
     &["kpi", "periods"],
     &["asks"],
+    &["health"],
     &["claim_deferred"],
     &["landings"],
     // A `kpi` of a shape not known passes whole: it goes last.
@@ -527,9 +528,9 @@ fn landings(queue: &SqliteQueue, period: &Window) -> Result<Vec<(i64, RunEvent)>
         .collect())
 }
 
-/// The review's input: the landings, the rules' judgment, `kpi`, `stats`,
-/// the claim deferrals, the asks and the timelines of the longest runs
-/// that landed. A part that does not read is its `{"error": ...}`.
+/// The review's input: the landings, the rules' judgment, the workers'
+/// health and the disk's free space, `kpi`, `stats`, the claim deferrals,
+/// the asks and the timelines of the longest runs that landed. A part that does not read is its `{"error": ...}`.
 fn gather(
     queue: &SqliteQueue,
     db: &Path,
@@ -600,12 +601,38 @@ fn gather(
             "events": events,
         },
         "hourly": judgment,
+        "health": health(&kpi),
         "kpi": kpi,
         "stats": stats,
         "claim_deferred": or_error(counted(queue, &[crate::domain::claim_defer::CLAIM_DEFERRED], stats_from, period.end_ms, "reason")),
         "asks": or_error(asks(queue, stats_from, period.end_ms)),
         "timelines": or_error(timelines(queue, &in_period)),
     }))
+}
+
+/// The health of the workers per route and the disk's least free space
+/// (task 1371): the `health` of `kpi`'s last period, the one the review's
+/// period ends in (the reviewed day for the daily review, the week for the
+/// weekly, the day so far for the hourly), with its label. `kpi`'s error
+/// passes as it is.
+fn health(kpi: &Value) -> Value {
+    if kpi.get("error").is_some() {
+        return kpi.clone();
+    }
+    let latest = kpi
+        .get("periods")
+        .and_then(Value::as_array)
+        .and_then(|periods| periods.last());
+    latest.map_or_else(
+        || json!({"error": "kpi listed no period"}),
+        |period| {
+            let mut health = period["health"].clone();
+            if let Value::Object(health) = &mut health {
+                health.insert("period".to_owned(), period["label"].clone());
+            }
+            health
+        },
+    )
 }
 
 /// Where the inputs' `stats`, claims deferred and asks begin: the hourly
@@ -793,7 +820,8 @@ pub fn review_prompt(
 }
 
 /// The part of the review's `input` the prompt carries (task 1099): the
-/// period, the landings without their events, the hourly judgment, `kpi`
+/// period, the landings without their events, the hourly judgment, the
+/// workers' health, `kpi`
 /// cut to each period's runs, the period under review's `all` stratum and
 /// the targets' states, [`PROMPT_STATS`] of `stats`, the claims deferred,
 /// the asks, and the longest runs without their timelines. While it passes
@@ -804,6 +832,7 @@ pub fn prompt_input(input: &Value) -> Value {
         "period": input["period"],
         "landings": without(&input["landings"], &["events"]),
         "hourly": input["hourly"],
+        "health": input["health"],
         "kpi": kpi_summary(&input["kpi"]),
         "stats": stats_summary(&input["stats"]),
         "claim_deferred": input["claim_deferred"],
@@ -1065,6 +1094,29 @@ mod tests {
                "comparison": comparison, "marks": marks, "unavailable": {}})
     }
 
+    /// The input's `health` is that of `kpi`'s last period, the one the
+    /// review's period ends in, named by its label (task 1371).
+    #[test]
+    fn the_health_is_that_of_the_last_kpi_period() {
+        let kpi = json!({"periods": [
+            {"label": "2026-10-01", "health": {"routes": {}, "disk": null}},
+            {"label": "2026-10-02", "health": {"routes": {"headless": {"turns": 7}},
+                                               "disk": {"min_free_bytes": 900.0, "median_free_bytes": 9000.0}}},
+        ]});
+        let health = health(&kpi);
+        assert_eq!(health["period"], "2026-10-02");
+        assert_eq!(health["routes"]["headless"]["turns"], 7);
+        assert_eq!(health["disk"]["min_free_bytes"], 900.0);
+        assert_eq!(
+            super::health(&json!({"error": "no"})),
+            json!({"error": "no"})
+        );
+        assert_eq!(
+            super::health(&json!({"periods": []})),
+            json!({"error": "kpi listed no period"})
+        );
+    }
+
     #[test]
     fn the_prompt_carries_a_summary_of_the_inputs_within_its_limit() {
         let periods: Vec<Value> = (21..=28)
@@ -1085,6 +1137,8 @@ mod tests {
             "period": {"mode": "daily", "label": "2026-09-28"},
             "landings": {"total": 109, "previous_period_total": 158, "by_hour": vec![4; 24], "events": events},
             "hourly": null,
+            "health": {"period": "2026-09-28", "disk": {"min_free_bytes": 2048.0},
+                       "routes": {"headless": {"turns": 40, "stall_nudged": 3}}},
             "kpi": {"cores": 8, "periods": periods, "targets": targets},
             "stats": {"overall": {"landed": 109}, "landing_utilization": {"utilization": 0.481},
                       "runs": runs, "versions": "v".repeat(100_000)},
@@ -1101,6 +1155,8 @@ mod tests {
         );
         assert_eq!(summary["landings"]["total"], 109);
         assert!(summary["landings"].get("events").is_none());
+        // The workers' health and the disk pass whole (task 1371).
+        assert_eq!(summary["health"], input["health"]);
         assert_eq!(summary["kpi"]["periods"].as_array().unwrap().len(), 8);
         assert_eq!(summary["kpi"]["periods"][7]["runs"], 111);
         let latest = &summary["kpi"]["latest"];

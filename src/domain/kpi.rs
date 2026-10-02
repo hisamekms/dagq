@@ -17,7 +17,7 @@ use serde::ser::SerializeMap;
 use super::{
     DraftOrigin, GoalId, RunEvent, TaskChange, TaskId,
     areas::RunAreas,
-    host_metrics::HostSummary,
+    host_metrics::{DiskFree, HostSummary},
     marks::{self, Mark},
     stats::{Cursor, landing::p90, median, median_f64, timestamp_millis},
 };
@@ -677,6 +677,19 @@ pub struct PeriodKpis {
     /// reference, not a KPI.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host: Option<HostSummary>,
+    /// How the workers got on per route and the disk's free space in the
+    /// period (task 1371): a reference next to the KPIs, like `host`.
+    pub health: Health,
+}
+
+/// A period's health (task 1371): `stats`' `worker_routes` of the
+/// period's window, and the least and the median free space of the
+/// filesystem of the run worktrees from the host's records (null without
+/// them, or when the host's load is not read).
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct Health {
+    pub routes: BTreeMap<String, crate::domain::stats::routes::RouteHealth>,
+    pub disk: Option<DiskFree>,
 }
 
 /// The settings the KPIs were judged by, and where each came from.
@@ -830,6 +843,7 @@ pub fn kpi(input: &KpiInput<'_>, query: &KpiQuery) -> Result<Kpi, String> {
                     .insert(stratum.clone(), change);
             }
         }
+        let host = input.host.map(|host| host.between(span.start, span.end));
         periods.push(PeriodKpis {
             label: label.clone(),
             start: marks::utc_text(span.start),
@@ -842,7 +856,11 @@ pub fn kpi(input: &KpiInput<'_>, query: &KpiQuery) -> Result<Kpi, String> {
                 Some(Cursor::Time(span.end)),
             ),
             comparison,
-            host: input.host.map(|host| host.between(span.start, span.end)),
+            health: Health {
+                routes: current.routes.clone(),
+                disk: host.as_ref().and_then(DiskFree::of),
+            },
+            host,
         });
     }
     let judged: Vec<config::JudgedPeriod<'_>> = spans

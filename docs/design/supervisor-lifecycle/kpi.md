@@ -4,8 +4,8 @@ type: design
 title: "`kpi`"
 status: current
 created: 2026-09-26
-updated: 2026-10-02 # task 1021: ask_seen_wait
-last_verified: 2026-10-02 # task 1021: ask_seen_wait
+updated: 2026-10-02 # task 1371: health
+last_verified: 2026-10-02 # task 1371: health
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -38,7 +38,7 @@ related:
 
 ## 期間と比較
 
-- 既定は日で、`--at`（無ければ今）を含む期間を最後に`--last`（既定7）期間を古い順に並べる（`periods`）。各期間は`label`（`YYYY-MM-DD`か`YYYY-Www`）、`start` / `end`（UTC）、`partial`（まだ終わっていない。値は途中までで、目標の判定に使わない）、`runs`（その期間に終わったrun）、`kpis`、`details`、`unavailable`、`marks`（その期間に効いた印。[変更の印](marks.md)の`marks`と同じ形）、`comparison`、`host`（下の[hostの負荷](#hostの負荷)）を持つ。
+- 既定は日で、`--at`（無ければ今）を含む期間を最後に`--last`（既定7）期間を古い順に並べる（`periods`）。各期間は`label`（`YYYY-MM-DD`か`YYYY-Www`）、`start` / `end`（UTC）、`partial`（まだ終わっていない。値は途中までで、目標の判定に使わない）、`runs`（その期間に終わったrun）、`kpis`、`details`、`unavailable`、`marks`（その期間に効いた印。[変更の印](marks.md)の`marks`と同じ形）、`comparison`、`host`（下の[hostの負荷](#hostの負荷)）、`health`（下の[期間の健全性](#期間の健全性)）を持つ。
 - `comparison`はKPIと層ごとに、前の同じ長さの期間の値（`previous`）、差（`delta`）、比（`ratio`。前が0ならnull）、日なら直前7日の日ごとの値の中央値（`baseline_7d`）、判定できたか（`judged`）とその理由（`reason`: `no_value` / `small_sample` / `partial`。まだ終わっていない期間は値と差を出すが判定しない）、良い向きのあるKPIの`verdict`（`improved` / `worsened` / `unchanged`）。比べる値は、値（`value`）を持つKPIはその値、分布だけのKPIは中央値。どちらかの`n`が`min_samples`に満たなければ判定しない（数えるKPI（`landings`など）は`n`によらず判定する）。
 - `--since` / `--until`は1つの窓（`label: window`、`period: window`）を出し、同じ長さの直前の窓と比べる。`--at`とは併用できない。
 - `--since` / `--until`の窓も`host`を持つ（直前の比べる窓は並べないので出ない）。
@@ -64,6 +64,14 @@ task 872。各期間（`periods[]`。`--since` / `--until`の窓を含む）と`
 - **読み方**: `infrastructure::host_metrics::summary(<queue dir>/host, from, until)`（`domain::host_metrics::summarize`）。`src/compose.rs`の`report_setup`が`ReportSetup::host_metrics`に読み手を入れ、`kpi_of`（`dagq kpi`）と日次・週次のレポート（`application::report`。JSONは`kpi`の出力をそのまま載せるので同じ`host`を持つ。HTMLには節を足していない）がそれを`application::kpi::kpi`に渡す。記録の無い期間は`samples: 0`、ファイルが読めなければ`error`を入れ、`kpi`は失敗させない。
 - **参考の値**: `host`そのものはKPIではない。`kpis`・`comparison`・`targets`の判定・`breach`・push・observerのfindingの対象にしない（目標割れの検査（`application::push`）とobserverの入力（`observer_kpi`）は読み手を渡さないので`host`を持たない）。ADR-0051の決定3の`max_load_avg`（claim時の記録から導く）の定義も変えない。
 - **KPIにしたもの**: 同じ区間の要約から`cpu_per_landing`（`.<kind>`を含む）と`load_per_core`を`kpis`に出す（goal 72、task 992。下の表）。読み手のある`kpi`・`--compare`とレポートだけが出し、読み手を渡さない目標割れの検査とobserverの入力にはこれらのKPIが無い（目標を置いても判定されない）。
+
+### 期間の健全性
+
+task 1371（goal 86）。各期間（`periods[]`。`--since` / `--until`の窓を含む）の`health`に、非対話を既定にしたworkerの様子とdiskの空きを並べる。形は`{routes, disk}`（`domain::kpi::Health`）。
+
+- **`routes`**: その期間の窓の`stats`の`worker_routes`（[stats](stats.md)。経路ごとの`turn_finished`の`outcome` / `failure`・`stall_nudged`・`stalled`の理由ごと・`provider_switched`の理由ごと・Claudeのturnごとの`cost_usd`・待ちの回数と時間）。期間の窓の`stats`をそのまま使う（`WindowKpis::routes`、JSONには出さない）ので、`--goal`ではそのgoalのrunだけ。何も無ければ`{}`
+- **`disk`**: その期間の`host`の要約の`disk_free_bytes`・`disk_free_pct`から`{samples, min_free_bytes, median_free_bytes, min_free_pct, median_free_pct}`（`domain::host_metrics::DiskFree`）。日の期間で日の、`--period week`で週の最小値と中央値になる。hostの記録を読まないとき（目標割れの検査とobserverの入力）と、期間に空きを記録した行が無いときはnull
+- **参考の値**: `host`と同じくKPIではない。`kpis`・`comparison`・目標の判定・`breach`・push・observerのfindingの対象にしない
 
 ## KPIと層
 

@@ -365,6 +365,32 @@ pub fn free_disk_bytes(path: &Path) -> Option<u64> {
     available.checked_mul(fragment)
 }
 
+/// The space of the filesystem `path` is on (statvfs(3)): free for a
+/// process that is not root (`f_bavail`) and the total (`f_blocks`), in
+/// bytes; `None` when it cannot be read (task 1371).
+pub fn disk_space(path: &Path) -> Option<crate::domain::host_metrics::DiskSpace> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `path` is a NUL-terminated string and statvfs fills `stat`
+    // when it returns 0.
+    if unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: statvfs returned 0, so it initialized `stat`.
+    let stat = unsafe { stat.assume_init() };
+    #[allow(clippy::useless_conversion)]
+    let (available, blocks, fragment) = (
+        u64::from(stat.f_bavail),
+        u64::from(stat.f_blocks),
+        u64::from(stat.f_frsize),
+    );
+    Some(crate::domain::host_metrics::DiskSpace {
+        free_bytes: available.checked_mul(fragment)?,
+        total_bytes: blocks.checked_mul(fragment)?,
+    })
+}
+
 /// How long [`host_versions`] lets `rustc -vV` run.
 const RUSTC_VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 

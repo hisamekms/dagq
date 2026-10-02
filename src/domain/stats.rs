@@ -32,6 +32,7 @@ pub mod providers;
 pub mod recommendations;
 pub mod retries;
 pub mod review_reasons;
+pub mod routes;
 pub mod sessions;
 pub mod thresholds;
 pub mod tokens;
@@ -533,6 +534,11 @@ pub struct Stats {
     /// The runs that waited for a person outside the slots (ADR-0062
     /// decision 13) in the same window as `backend_failures`.
     pub waiting: super::waiting::WaitingStats,
+    /// How the workers got on per route (`interactive` / `headless`) in
+    /// the window of `waiting` (task 1371): the turns' outcomes and
+    /// failures, the nudges, the `stalled` alerts by reason, the moves to
+    /// the other provider, Claude's cost per turn and `waiting.by_route`.
+    pub worker_routes: BTreeMap<String, routes::RouteHealth>,
     /// The asks opened and answered in the same window as
     /// `backend_failures` (task 325): by kind, by asker, by answerer and
     /// the option each answer chose.
@@ -1095,6 +1101,8 @@ pub fn stats(
     // with `--since` past more than a page of finished runs, `next_cursor`
     // stops at the page's last run and left the later waits out (task 1370).
     let waiting = super::waiting::waiting_stats(events, window_start, latest, counts);
+    let worker_routes =
+        routes::route_health(events, window_start, latest, counts, &waiting.by_route);
     let stall_thresholds = thresholds::thresholds(
         &thresholds::detections(events, now * 1000),
         &thresholds::preemptions(events),
@@ -1213,6 +1221,7 @@ pub fn stats(
         failed_tests,
         sessions,
         waiting,
+        worker_routes,
         asks: ask_stats,
         claim_holds,
         landing_holds,

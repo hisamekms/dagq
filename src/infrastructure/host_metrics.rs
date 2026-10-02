@@ -124,19 +124,39 @@ pub fn record(
         .with_context(|| format!("open {}", path.display()))?;
     let length = file.metadata()?.len();
     let half = i64::try_from(interval.as_secs() / 2).unwrap_or(i64::MAX);
-    let recent = length > 0 && {
+    let (recent, needs_header) = if length == 0 {
+        (false, true)
+    } else {
         // The last row is in the file's tail.
         file.seek(SeekFrom::Start(length.saturating_sub(4096)))?;
         let mut tail = String::new();
         file.read_to_string(&mut tail)
             .with_context(|| format!("read {}", path.display()))?;
-        host_metrics::last_unix(&tail).is_some_and(|last| (sample.unix - last).abs() < half)
+        let recent =
+            host_metrics::last_unix(&tail).is_some_and(|last| (sample.unix - last).abs() < half);
+        // The header in force: the first line, unless another binary began
+        // the file (task 1371). Only then is the file read whole, for the
+        // last header in it, however far back it is.
+        file.seek(SeekFrom::Start(0))?;
+        let mut first = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(&file), &mut first)
+            .with_context(|| format!("read {}", path.display()))?;
+        let needs_header = first.trim() != header() && {
+            file.seek(SeekFrom::Start(0))?;
+            let mut whole = String::new();
+            file.read_to_string(&mut whole)
+                .with_context(|| format!("read {}", path.display()))?;
+            host_metrics::needs_header(&whole)
+        };
+        (recent, needs_header)
     };
     let written = if recent {
         None
     } else {
         let mut text = String::new();
-        if length == 0 {
+        // A new file, or one an older binary began with other columns
+        // (task 1371): the rows after this header are read by it.
+        if needs_header {
             text.push_str(&header());
             text.push('\n');
         }
@@ -266,5 +286,56 @@ mod tests {
         let failed = super::summary(&host, 1_790_000_000, 1_790_000_100);
         assert!(failed.error.is_some());
         assert_eq!(failed.samples, 0);
+    }
+
+    /// A day's file an older binary began with fewer columns gets this
+    /// binary's header before its first row, once (task 1371), and the
+    /// disk columns read back.
+    #[test]
+    fn a_file_of_older_columns_gets_this_header_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = dir.path().join("host");
+        fs::create_dir_all(&host).unwrap();
+        let path = host.join("metrics-20260921.csv");
+        fs::write(&path, "time,unix,load1\nx,1790000000,1.5\n").unwrap();
+        let disk = |unix: i64| {
+            HostSample::new(unix).with_disk(Some(host_metrics::DiskSpace {
+                free_bytes: 3 * 1024 * 1024,
+                total_bytes: 12 * 1024 * 1024,
+            }))
+        };
+        let interval = Duration::from_secs(30);
+        // More rows than the tail read for the last row: the header stays
+        // the one written first.
+        for index in 1..=100 {
+            record(&host, &disk(1_790_000_000 + 30 * index), 0, interval, 0).unwrap();
+        }
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.len() > 4096, "{}", text.len());
+        assert_eq!(
+            text.lines().filter(|line| *line == header()).count(),
+            1,
+            "{text}"
+        );
+        let summary = summary(&host, 1_790_000_000, 1_790_003_100);
+        assert_eq!(summary.samples, 101);
+        assert_eq!(summary.metrics["load1"].unwrap().max, 1.5);
+        let disk = host_metrics::DiskFree::of(&summary).unwrap();
+        assert_eq!((disk.samples, disk.min_free_bytes), (100, 3_145_728.0));
+        assert_eq!(disk.min_free_pct, Some(25.0));
+    }
+
+    #[test]
+    fn the_disk_space_of_a_directory_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = crate::infrastructure::adapters::disk_space(dir.path()).unwrap();
+        assert!(
+            disk.total_bytes > 0 && disk.free_bytes <= disk.total_bytes,
+            "{disk:?}"
+        );
+        assert_eq!(
+            crate::infrastructure::adapters::disk_space(&dir.path().join("none")),
+            None
+        );
     }
 }

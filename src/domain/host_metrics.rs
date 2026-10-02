@@ -32,8 +32,11 @@ pub const PROCESS_KINDS: [&str; 5] = ["cargo", "rustc", "claude", "dagq", "other
 /// `unix` (seconds); `cpu_*` are percents of one core (`ps`'s `%cpu`,
 /// summed per kind), `rss_*_mb` the resident memory per kind;
 /// `mem_used_mb` is wired + active + the compressor's pages; `pageouts`
-/// counts since the host booted (the summary reads it per minute).
-pub const COLUMNS: [&str; 22] = [
+/// counts since the host booted (the summary reads it per minute);
+/// `disk_*` are the space of the filesystem the run worktrees are on
+/// (task 1371): free for a process that is not root and the total, in
+/// bytes, and the share free in percent.
+pub const COLUMNS: [&str; 25] = [
     "time",
     "unix",
     "load1",
@@ -56,6 +59,9 @@ pub const COLUMNS: [&str; 22] = [
     "swap_total_mb",
     "swap_used_mb",
     "pageouts",
+    "disk_free_bytes",
+    "disk_total_bytes",
+    "disk_free_pct",
 ];
 
 /// The cumulative column the summary reads as a rate.
@@ -121,6 +127,24 @@ impl HostSample {
         self
     }
 
+    /// The space of the filesystem the run worktrees are on ([`DiskSpace`]).
+    pub fn with_disk(mut self, disk: Option<DiskSpace>) -> Self {
+        let Some(disk) = disk else {
+            return self;
+        };
+        // Bytes as they are: an f64 holds them exactly up to 8 PiB, and a
+        // filesystem nearly full reads apart from one empty.
+        #[allow(clippy::cast_precision_loss)]
+        let bytes = |bytes: u64| bytes as f64;
+        self.set("disk_free_bytes", Some(bytes(disk.free_bytes)));
+        self.set("disk_total_bytes", Some(bytes(disk.total_bytes)));
+        #[allow(clippy::cast_precision_loss)]
+        let share = (disk.total_bytes > 0)
+            .then(|| round2(disk.free_bytes as f64 * 100.0 / disk.total_bytes as f64));
+        self.set("disk_free_pct", share);
+        self
+    }
+
     /// The row of a file: the host's local time at `utc_offset_secs`, then
     /// each column, empty when the sample has no value.
     pub fn row(&self, utc_offset_secs: i64) -> String {
@@ -160,14 +184,22 @@ pub fn header() -> String {
     COLUMNS.join(",")
 }
 
-/// The samples of a file's text, read by its header (so a file with other
-/// or more columns is read too); rows without a unix second are skipped.
-pub fn parse_file(text: &str) -> Vec<HostSample> {
-    let mut lines = text.lines();
-    let Some(header) = lines.next() else {
-        return Vec::new();
-    };
-    let names: Vec<Option<&'static str>> = header
+/// The space of a filesystem in bytes: free for a process that is not
+/// root, and the total.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiskSpace {
+    pub free_bytes: u64,
+    pub total_bytes: u64,
+}
+
+/// Whether `line` is a header: its first cell is `time`.
+fn is_header(line: &str) -> bool {
+    line.split(',').next().map(str::trim) == Some("time")
+}
+
+/// The columns a header names, `None` for a name not known.
+fn header_names(header: &str) -> Vec<Option<&'static str>> {
+    header
         .split(',')
         .map(|name| {
             COLUMNS
@@ -175,9 +207,37 @@ pub fn parse_file(text: &str) -> Vec<HostSample> {
                 .find(|column| **column == name.trim())
                 .copied()
         })
-        .collect();
+        .collect()
+}
+
+/// Whether a row appended to a file of `text` needs a header first: the
+/// file's header in force (its last header) is not this binary's, or it
+/// has none. A binary that added columns (task 1371) starts its rows under
+/// its own header in the day's file an older one began, once, and
+/// [`parse_file`] reads each row by the header above it.
+pub fn needs_header(text: &str) -> bool {
+    text.lines()
+        .rev()
+        .find(|line| is_header(line))
+        .is_none_or(|current| current.trim() != header())
+}
+
+/// The samples of a file's text, each row read by the header above it (so
+/// a file with other or more columns is read too, and a header in the
+/// middle of the file names the rows after it); rows without a unix second
+/// are skipped.
+pub fn parse_file(text: &str) -> Vec<HostSample> {
+    let mut lines = text.lines();
+    let Some(header) = lines.next() else {
+        return Vec::new();
+    };
+    let mut names = header_names(header);
     let mut samples = Vec::new();
     for line in lines {
+        if is_header(line) {
+            names = header_names(line);
+            continue;
+        }
         let cells: Vec<&str> = line.split(',').collect();
         let unix = names
             .iter()
@@ -436,11 +496,12 @@ pub fn file_may_hold(day: i64, from: i64, until: i64) -> bool {
     day >= from.div_euclid(86_400) - 1 && day <= until.div_euclid(86_400) + 1
 }
 
-/// The mean, the median, the maximum and the p90 (the median and the p90
-/// by nearest rank) of a column's values.
+/// The minimum, the mean, the median, the maximum and the p90 (the median
+/// and the p90 by nearest rank) of a column's values.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Summary {
     pub samples: usize,
+    pub min: f64,
     pub mean: f64,
     pub median: f64,
     pub max: f64,
@@ -465,6 +526,7 @@ impl Summary {
         let mean = values.iter().sum::<f64>() / count as f64;
         Some(Self {
             samples: count,
+            min: round2(values[0]),
             mean: round2(mean),
             median: at(0.5),
             max: round2(values[count - 1]),
@@ -531,6 +593,37 @@ pub fn summarize(samples: &[HostSample], from: i64, until: i64) -> HostSummary {
         metrics,
         cpu_secs: cpu_secs(&inside, from),
         error: None,
+    }
+}
+
+/// The free space of the filesystem the run worktrees are on over a
+/// window (task 1371), from the summary's `disk_free_bytes` and
+/// `disk_free_pct`: the least and the median, so that a night the space
+/// ran short reads apart from a day it was only low.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct DiskFree {
+    /// The samples with `disk_free_bytes`.
+    pub samples: usize,
+    pub min_free_bytes: f64,
+    pub median_free_bytes: f64,
+    /// Null when no sample had the total.
+    pub min_free_pct: Option<f64>,
+    pub median_free_pct: Option<f64>,
+}
+
+impl DiskFree {
+    /// `None` when no sample of the window had the free space.
+    pub fn of(summary: &HostSummary) -> Option<Self> {
+        let column = |name: &str| summary.metrics.get(name).copied().flatten();
+        let free = column("disk_free_bytes")?;
+        let share = column("disk_free_pct");
+        Some(Self {
+            samples: free.samples,
+            min_free_bytes: free.min,
+            median_free_bytes: free.median,
+            min_free_pct: share.map(|share| share.min),
+            median_free_pct: share.map(|share| share.median),
+        })
     }
 }
 
@@ -789,6 +882,83 @@ garbage line
     }
 
     #[test]
+    fn the_disk_space_is_recorded_and_its_least_and_median_read() {
+        let gib = 1024 * 1024 * 1024;
+        let sample = |unix: i64, free: u64| {
+            HostSample::new(unix).with_disk(Some(DiskSpace {
+                free_bytes: free * gib,
+                total_bytes: 100 * gib,
+            }))
+        };
+        let first = sample(1000, 40);
+        assert_eq!(first.values["disk_free_bytes"], 42_949_672_960.0);
+        assert_eq!(first.values["disk_total_bytes"], 107_374_182_400.0);
+        // Less than a MiB free is kept to the byte, in the row too.
+        let nearly_full = HostSample::new(2).with_disk(Some(DiskSpace {
+            free_bytes: 300_000,
+            total_bytes: 100 * gib,
+        }));
+        assert_eq!(nearly_full.values["disk_free_bytes"], 300_000.0);
+        assert_eq!(nearly_full.values["disk_free_pct"], 0.0);
+        let row = nearly_full.row(0);
+        assert!(row.ends_with(",300000,107374182400,0"), "{row}");
+        assert_eq!(
+            parse_file(&format!("{}\n{row}\n", header()))[0],
+            nearly_full
+        );
+        assert_eq!(first.values["disk_free_pct"], 40.0);
+        // A filesystem of no size gives no share; none read gives nothing.
+        let empty = HostSample::new(0).with_disk(Some(DiskSpace {
+            free_bytes: 0,
+            total_bytes: 0,
+        }));
+        assert_eq!(empty.values.get("disk_free_pct"), None);
+        assert_eq!(HostSample::new(0).with_disk(None), HostSample::new(0));
+        let samples = [first, sample(1030, 2), sample(1060, 30)];
+        let disk = DiskFree::of(&summarize(&samples, 0, 2000)).unwrap();
+        assert_eq!(
+            disk,
+            DiskFree {
+                samples: 3,
+                min_free_bytes: 2_147_483_648.0,
+                median_free_bytes: 32_212_254_720.0,
+                min_free_pct: Some(2.0),
+                median_free_pct: Some(30.0),
+            }
+        );
+        // A window without the column has no disk.
+        assert_eq!(DiskFree::of(&summarize(&[HostSample::new(5)], 0, 10)), None);
+    }
+
+    #[test]
+    fn a_header_in_the_middle_of_a_file_names_the_rows_after_it() {
+        // An older binary began the day's file without the disk columns.
+        let old = "time,unix,load1";
+        assert!(needs_header(&format!("{old}\nx,5,1.0\n")));
+        assert!(!needs_header(&format!("{}\nx,5,1.0\n", header())));
+        assert!(needs_header(""));
+        // Once this binary's header follows, however far back, no other
+        // is written.
+        let rows = "x,6\n".repeat(2000);
+        assert!(!needs_header(&format!(
+            "{old}\nx,5,1.0\n{}\n{rows}",
+            header()
+        )));
+        let row = HostSample::new(6)
+            .with_disk(Some(DiskSpace {
+                free_bytes: 1024 * 1024,
+                total_bytes: 4 * 1024 * 1024,
+            }))
+            .row(0);
+        let read = parse_file(&format!("{old}\nx,5,1.5\n{}\n{row}\n", header()));
+        assert_eq!(read.len(), 2);
+        assert_eq!(read[0].values.get("load1"), Some(&1.5));
+        assert_eq!(read[1].unix, 6);
+        assert_eq!(read[1].values.get("disk_free_bytes"), Some(&1_048_576.0));
+        assert_eq!(read[1].values.get("disk_free_pct"), Some(&25.0));
+    }
+
+    #[test]
     fn the_summary_reads_mean_max_p90_and_the_pageout_rate() {
         let samples: Vec<HostSample> = (0..10_i32)
             .map(|index| {
@@ -806,8 +976,15 @@ garbage line
         assert_eq!((summary.first, summary.last), (Some(1000), Some(1270)));
         let load = summary.metrics["load1"].unwrap();
         assert_eq!(
-            (load.samples, load.mean, load.median, load.max, load.p90),
-            (10, 5.5, 5.0, 10.0, 9.0)
+            (
+                load.samples,
+                load.min,
+                load.mean,
+                load.median,
+                load.max,
+                load.p90
+            ),
+            (10, 1.0, 5.5, 5.0, 10.0, 9.0)
         );
         // No sample had the CPU: no CPU seconds.
         assert_eq!(summary.cpu_secs, None);

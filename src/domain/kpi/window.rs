@@ -54,6 +54,10 @@ pub struct WindowKpis {
     pub details: BTreeMap<&'static str, Value>,
     /// The KPIs whose records do not exist, and why.
     pub unavailable: BTreeMap<&'static str, &'static str>,
+    /// `stats`' `worker_routes` of the window, for the period's `health`
+    /// (task 1371); not a KPI.
+    #[serde(skip)]
+    pub routes: BTreeMap<String, crate::domain::stats::routes::RouteHealth>,
 }
 
 /// A run's hold on a slot: from its claim to its end, without the waits
@@ -1079,6 +1083,7 @@ impl<'a> Context<'a> {
             kpis,
             details,
             unavailable,
+            routes: stats.worker_routes.clone(),
         }
     }
 

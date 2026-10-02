@@ -4,8 +4,8 @@ type: design
 title: "空き容量を確かめる（claimと着地の検証の前）"
 status: current
 created: 2026-09-27
-updated: 2026-09-29
-last_verified: 2026-09-29
+updated: 2026-10-02 # task 1371: the free space is recorded
+last_verified: 2026-10-02 # task 1371
 scope: runtime
 related:
   - adr-t639-1
@@ -16,6 +16,7 @@ related:
   - design-supervisor-lifecycle-run-environment
   - design-supervisor-lifecycle-status
   - design-supervisor-lifecycle-stats
+  - design-supervisor-lifecycle-host-metrics
 ---
 
 # 空き容量を確かめる（claimと着地の検証の前）
@@ -80,4 +81,5 @@ supervisorを起動し直すと、覚えていた「開いた」は消えるの�
 ## `status`と`stats`
 
 - `status`: claimを控えているsupervisorの項目の`claim_hold`（理由`disk_space`を含む）と同じ形で、着地を控えているsupervisorは`landing_hold`（最新の`landing_held`のpayloadと`since`）を持つ（[`status`](status.md)）
+- 空きの推移: supervisorはhostの負荷の記録と同じ行に`runs/`のファイルシステムの空きを30秒ごとに記録し（task 1371、[hostの負荷の連続の記録](host-metrics.md#ディスクの空き)）、`stats`の`host.metrics.disk_free_bytes`・`disk_free_pct`と`kpi`の各期間の`health.disk`が最小値と中央値を出す
 - `stats`: `claim_holds.by_reason.disk_space`がclaimの控え、`landing_holds`（`claim_holds`と同じ`{count, secs, by_reason, held}`）が着地の控え。load averageの控え（`load_average`）とは理由で区別できる。掃除は`auto_repairs`の`by_layer.runtime.by_repair.disk_cleanup`に数える（[`stats`](stats.md)）
