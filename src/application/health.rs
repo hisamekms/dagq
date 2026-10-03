@@ -450,6 +450,9 @@ fn slots_and_waits(
             crate::domain::event_kind::PROVIDER_RELEASED,
         ])?
         .filter(|event| event.kind == crate::domain::event_kind::PROVIDER_HELD);
+    // The queue's latest claim, which the claim spacing counts from
+    // (ADR-t1479-1).
+    let last_claim = queue.latest_event_of(crate::domain::event_kind::RUN_CLAIMED)?;
     let holds = [
         ("claim_hold", held(crate::domain::claim_hold::CLAIMS)?),
         ("landing_hold", held(crate::domain::claim_hold::LANDINGS)?),
@@ -476,6 +479,9 @@ fn slots_and_waits(
                     "limit": registration.max_waiting,
                     "source": registration.max_waiting_source,
                 });
+                if let Some(spacing) = claim_spacing(registration, last_claim.as_ref(), now) {
+                    value["claim_spacing"] = spacing;
+                }
                 for (key, hold) in &holds {
                     if let Some(event) = hold.as_ref().filter(|event| {
                         event.payload.get("supervisor").and_then(Value::as_str)
@@ -491,6 +497,40 @@ fn slots_and_waits(
         })
         .collect::<Result<Vec<_>>>()?;
     Ok((supervisors, waiting))
+}
+
+/// A supervisor's `claim_spacing` in `status` (ADR-t1479-1): the seconds
+/// and where they come from, its `--max-load`, whether the spacing is in
+/// effect (the load hold on and the seconds above 0), the queue's latest
+/// claim and, while the spacing is in effect, when the next claim may be
+/// made (`next_claim_at`, with `waiting` while it is ahead of `now`).
+/// `None` for a registration of an older binary, which records no spacing.
+fn claim_spacing(
+    registration: &SupervisorRegistration,
+    last_claim: Option<&RunEvent>,
+    now: i64,
+) -> Option<Value> {
+    use crate::domain::claim_spacing::{in_effect, next_claim_ms, waits};
+    let secs = registration.claim_spacing?;
+    let spacing = in_effect(registration.max_load, usize::try_from(secs).ok()?);
+    let last_ms =
+        last_claim.and_then(|event| crate::domain::stats::timestamp_millis(&event.created_at));
+    let next = next_claim_ms(spacing, last_ms);
+    let at = |ms: i64| {
+        super::timestamp(
+            std::time::UNIX_EPOCH
+                + std::time::Duration::from_millis(u64::try_from(ms).unwrap_or(0)),
+        )
+    };
+    Some(json!({
+        "secs": secs,
+        "source": registration.claim_spacing_source,
+        "max_load": registration.max_load,
+        "in_effect": spacing.is_some(),
+        "last_claim_at": last_claim.map(|event| event.created_at.clone()),
+        "next_claim_at": next.map(at),
+        "waiting": waits(next, now.saturating_mul(1000)),
+    }))
 }
 
 /// `doctor`: with `full`, every registered supervisor and every unfinished
@@ -1475,6 +1515,9 @@ mod tests {
             max_waiting_source: None,
             runtime_planners: None,
             runtime_planners_source: None,
+            claim_spacing: None,
+            claim_spacing_source: None,
+            max_load: None,
             providers: None,
             binary_version: Some("1.0.0".into()),
         }

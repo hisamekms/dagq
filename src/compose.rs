@@ -307,6 +307,11 @@ pub struct SuperviseOptions {
     /// 1-minute load average is above it; `None` (the default here) holds
     /// for no load.
     pub max_load: Option<f64>,
+    /// The seconds between new claims while `max_load` holds
+    /// (ADR-t1479-1); 0 spaces none. `None` follows `[supervisor]
+    /// claim_spacing` as `parallel` does, else 180. The CLI has no flag
+    /// for it.
+    pub claim_spacing: Option<usize>,
     /// Reads the 1-minute load average; tests set it.
     pub load_average: fn() -> Option<f64>,
     /// How much free disk space a claim and a landing need (task 377);
@@ -536,6 +541,7 @@ impl SuperviseOptions {
             stall: None,
             conflicts: None,
             runtime_planners: None,
+            claim_spacing: None,
             planner_timeout: PLANNER_TIMEOUT,
             plugin_dir: None,
             handoff_token: None,
@@ -572,13 +578,14 @@ impl SuperviseOptions {
         }
     }
 
-    /// The flags `parallel`, `max_waiting` and `runtime_planners` stand
-    /// for.
+    /// The flags `parallel`, `max_waiting`, `runtime_planners` and
+    /// `claim_spacing` stand for.
     fn slot_flags(&self) -> SlotFlags {
         SlotFlags {
             parallel: self.parallel,
             max_waiting: self.max_waiting,
             runtime_planners: self.runtime_planners,
+            claim_spacing: self.claim_spacing,
         }
     }
 
@@ -733,8 +740,8 @@ pub fn supervise_with_reviewer(
             })
             .unwrap_or_default()
     });
-    // `parallel`, `max_waiting` and `runtime_planners` the flags did not
-    // give (task 698, task 941): a
+    // `parallel`, `max_waiting`, `runtime_planners` and `claim_spacing`
+    // the flags did not give (task 698, task 941, ADR-t1479-1): a
     // `[supervisor]` that cannot be read at the start leaves the defaults,
     // as `[disk]` does; later reads keep the values in use.
     let slot_flags = options.slot_flags();

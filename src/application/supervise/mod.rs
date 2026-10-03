@@ -83,10 +83,10 @@ use crate::domain::{
     RunStatus, SessionRole, TRIAGE_OPTIONS, TRIAGE_RETRY_FAILURES, TaskAction, TaskId, TaskRun,
     TaskStatus, TriageState, after_validation,
     claim_hold::{self, ClaimHold, HoldInputs},
-    decide_conflict, decide_revise, event_kind, headless_job, heartbeat_stale,
+    claim_spacing, decide_conflict, decide_revise, event_kind, headless_job, heartbeat_stale,
     kpi::CandidatesSample,
     marks::{RUN_ENV_CHANGED, run_env_digest},
-    measure::{ClaimAttributes, HostVersions, LoadSummary, LoadWindow},
+    measure::{ClaimAttributes, ClaimSpacing, HostVersions, LoadSummary, LoadWindow},
     queue_hold::{HoldJob, Wall},
     recovery::{RecoveryAlert, RecoveryDecision, RecoveryVerdict, STUCK_EXIT_ACTIONS},
     resume::{
@@ -756,6 +756,8 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
     // decision 7), with where each comes from (task 698); written again by
     // the process an exec continues.
     queue.set_slot_limits(&token, settings.limits)?;
+    // For the time of the next claim `status` shows (ADR-t1479-1).
+    queue.set_max_load(&token, settings.max_load)?;
     queue.set_supervisor_providers(&token, &layout.providers)?;
     let mut config = serde_json::to_value(settings.stall)?;
     config["supervisor"] = json!(token);
@@ -869,6 +871,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         utc_offset: settings.utc_offset,
         rechecks: recheck::Rechecks::default(),
         max_load: settings.max_load,
+        spaced_since: None,
         load_average: ports.load_average,
         host_versions: ports.host_versions,
         reports: ports.reports.clone(),
@@ -1090,6 +1093,10 @@ struct Supervisor<'a> {
     rechecks: recheck::Rechecks,
     /// `--max-load` (task 327).
     max_load: Option<f64>,
+    /// Since when, in Unix milliseconds, a claim this process would make
+    /// waits for the spacing after the queue's latest claim (ADR-t1479-1);
+    /// `None` while none waits.
+    spaced_since: Option<i64>,
     /// The 1-minute load average, and the host's versions a claim records.
     load_average: fn() -> Option<f64>,
     host_versions: fn(&Path, Option<&Path>, Option<&Path>) -> HostVersions,
@@ -1728,6 +1735,10 @@ impl Supervisor<'_> {
         if let Err(error) = self.sweep_ended_runs(sweep_interval) {
             warn!(error = %format_args!("{error:#}"), "the workspaces and worktrees of ended runs could not all be swept: {error:#}");
         }
+        // A wait for the claim spacing goes on only from one claim pass to
+        // the next that reaches the spacing again (ADR-t1479-1): a hold or
+        // a pass with no free slot or candidate ends it.
+        let mut spaced_since = self.spaced_since.take();
         // A run claimed now would fail every cargo command (ADR-0049
         // decision 9; checked at the top of the pass); the runs in flight
         // and their reviews go on (resumes wait above).
@@ -1767,6 +1778,35 @@ impl Supervisor<'_> {
             if order.is_empty() {
                 break;
             }
+            // While the load hold is on, a claim waits for the spacing
+            // after the queue's latest claim, and the next pass judges the
+            // load again before it (ADR-t1479-1).
+            let spacing = claim_spacing::in_effect(self.max_load, self.limits.claim_spacing.value);
+            let now_ms = crate::application::unix_millis(self.generators.clock.system_time());
+            if spacing.is_some() {
+                let last = self
+                    .queue
+                    .latest_event_of(crate::domain::event_kind::RUN_CLAIMED)?
+                    .and_then(|event| crate::domain::stats::timestamp_millis(&event.created_at));
+                let next = claim_spacing::next_claim_ms(spacing, last);
+                if claim_spacing::waits(next, now_ms) {
+                    if spaced_since.is_none() {
+                        info!(
+                            event = "claim_spaced",
+                            "the next claim waits for the claim spacing of {}s after the latest claim",
+                            self.limits.claim_spacing.value
+                        );
+                    }
+                    self.spaced_since = Some(spaced_since.unwrap_or(now_ms));
+                    break;
+                }
+            }
+            let spacing = spacing.map(|secs| ClaimSpacing {
+                claim_spacing: secs,
+                claim_spacing_wait_secs: spaced_since
+                    .take()
+                    .map_or(0, |since| claim_spacing::waited_secs(since, now_ms)),
+            });
             // The landing branch was read at the top of the pass; one that
             // stopped resolving since holds the claims as it would have then
             // (ADR-t615-1), and any other error ends the loop as before.
@@ -1799,7 +1839,10 @@ impl Supervisor<'_> {
                     .then_some(self.layout.repo_root.as_path());
                 (self.host_versions)(&self.layout.claude, codex, rustc_in)
             });
-            let attributes = self.claim_attributes(parallel, host.clone());
+            let attributes = ClaimAttributes {
+                spacing,
+                ..self.claim_attributes(parallel, host.clone())
+            };
             let run = match self.queue.claim_for_supervisor_in_order(
                 &base,
                 &self.token,
@@ -2011,6 +2054,7 @@ impl Supervisor<'_> {
             parallel,
             slots: self.used_slots(),
             load_avg: (self.load_average)(),
+            spacing: None,
         }
     }
     /// Sample the load average once for every slot's current interval

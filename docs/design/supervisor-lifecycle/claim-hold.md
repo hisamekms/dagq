@@ -4,10 +4,11 @@ type: design
 title: "claimを控える（load average）"
 status: current
 created: 2026-09-26
-updated: 2026-09-28
-last_verified: 2026-09-28
+updated: 2026-10-04
+last_verified: 2026-10-04
 scope: runtime
 related:
+  - adr-t1479-1
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-supervise
   - design-supervisor-lifecycle-status
@@ -16,6 +17,7 @@ related:
   - design-supervisor-lifecycle-backend-call-failures
   - design-supervisor-lifecycle-disk-space
   - design-supervisor-lifecycle-queue-hold
+  - design-supervisor-lifecycle-run-environment
 ---
 
 # claimを控える（load average）
@@ -39,6 +41,19 @@ task 437は`HoldReason`に`authentication` / `usage_limit`、`HoldInputs`に`que
 `fill_slots`の中で、放置されたrunのadopt・answerの適用・parkしたrunのresume・triage・sweepの後、`[run.env]`のprogramが無いときの打ち切り（ADR-0049の決定9）の次、claimのloopの前に判定する（`Supervisor::hold_claims`）。控えるときはそのpassのclaimをしない。空きslotの有無に関わらず、claimするpassごとに1回判定する。drainやhandoffの途中（claimしないpass）では判定しない。
 
 `--once`のsupervisorは、runが無く控えているpassで終わる（claimできるtaskが無いのと同じ扱い）。
+
+## claimの間隔
+
+loadの保留が有効なsupervisorは、新しいclaimの間を空ける（[ADR-t1479-1](../../adr/2026-10-04-t1479-1-space-new-claims-while-the-load-hold-is-on.md)、task 1479）。1分のload averageはclaimしたばかりのrunのbuildをまだ含まないので、loadの低い瞬間に空いたslotを続けて埋めると、数分後に`--max-load`を大きく越える（finding 36）。
+
+- **判定**: `fill_slots`のclaimのloopで、claimできる候補があるとき、claimの前に`domain::claim_spacing`で判定する。間隔が効いている（`in_effect`: `--max-load`が有効で、`claim_spacing`が0より大きい）なら、queueの最新の`run_claimed`（どのsupervisorのものでも。`latest_event_of`）の時刻 + `claim_spacing`秒（`next_claim_ms`）より前はclaimせずにloopを抜ける。claimした直後のloopの次の周も同じ判定で抜けるので、1つのpassで新しくclaimするのは1本になる。間隔が過ぎた後のpassは、claimの前の`hold_claims`でloadを判定し直し、`--max-load`を越えていれば控える（`claim_held`）。queueの記録から測るので、supervisorの起動し直し・execの引き継ぎ・同じqueueの別のsupervisorのclaimで数え直しにならない。
+- **対象**: 新しいclaimだけ。parkしたrunのresume・待ちからの戻り・着地・triage・headless jobは間隔を見ない。
+- **間を空けないとき**: `--max-load 0`（0以下）と、libraryの`SuperviseOptions::new`の既定（`max_load: None`）と、`claim_spacing = 0`。今までどおり1つのpassで空いたslotを埋める。e2eはすべての`supervise`に`--max-load 0`を渡すので、間隔は効かない。
+- **設定**: `dagq.toml`の`[supervisor] claim_spacing`（0以上の整数の秒、既定180。`domain::claim_spacing::DEFAULT_CLAIM_SPACING_SECS`）。`parallel`と同じく起動時に読み、各passで読み直す（`reread_slot_limits`、[Run environment](run-environment.md)の`[supervisor]`）。CLIのflagは無い。この repositoryの`dagq.toml`には置かない（既定が効き、`claim_spacing`を知らない固定バイナリは置くと`dagq.toml`を読めなくなる）。
+- **既定180秒の根拠**: 固定バイナリの読み取り専用のeventsとqueueのdirの`host/metrics-*.csv`で、2026-10-01〜02の`run_claimed`を「10秒以内に続いたclaimの組」で分けると、1本だけのclaim（91組）はclaim時のloadの中央値9.8・その後6分のload1の最大の中央値17.7（16を越えたのは48組）、2本続けたclaim（10組）はclaim時7.35・6分の最大の中央値26.9（16を越えたのは9組）。2026-09-30 00:57:32にtask 1165・1050・1058をload 5.8で1秒以内に、02:08:12に1166・1167・1110を2秒以内にclaimし、load1は01:10までに48に達した。claimの後2分でcargoとrustcのCPUが300〜600%に上がり、load1は2分後にはもう上がっている（10-01 16:43:12の2本は2分後に59、10-02 14:51:18の2本はload 15.3でclaimして2分後に33）。claimから約2分でload1に出るので、それに1分の余裕を足した。
+- **記録**: 間隔のための待ちは`claim_held` / `claim_resumed`にしない（observerと`stats`の`claim_holds`の控えの数え方に混ぜない）。待ち始めたときにlogにinfo（`claim_spaced`）を出す。間隔が効いているsupervisorの`run_claimed`のpayloadには、`claim_spacing`（秒）と`claim_spacing_wait_secs`（このprocessが間隔のためにそのclaimを待った秒。待たなければ0）が付く（`domain::measure::ClaimSpacing`）。待ちは、claimできる候補と空きslotがあるのに間隔で抜けた最初のpassから、claimしたpassまで。控え・空きslotが無い・候補が無いpassを挟むとそこで終わる。間隔の効いていないclaimには2つの欄が無い。
+- **登録と`status`**: supervisorは登録に`claim_spacing`と出どころ（`claim_spacing_source`）を`parallel`と一緒に書き、`--max-load`（無効ならNULL）を起動時に書く（migration 0063）。`status`のsupervisorの項目の`claim_spacing`がそれと次にclaimできる時刻を出す（[`status`](status.md)）。
+- `--once`のsupervisorは、runが無く次のclaimが間隔を待つpassで終わる（控えと同じ扱い）。
 
 ## 記録
 

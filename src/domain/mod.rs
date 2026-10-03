@@ -846,6 +846,7 @@ pub mod broker;
 pub mod change;
 pub mod claim_defer;
 pub mod claim_hold;
+pub mod claim_spacing;
 pub mod concern;
 pub mod disk;
 pub mod e2e_quarantine;
@@ -3801,6 +3802,9 @@ mod attention_tests {
             max_waiting_source: None,
             runtime_planners: None,
             runtime_planners_source: None,
+            claim_spacing: None,
+            claim_spacing_source: None,
+            max_load: None,
             providers: None,
             binary_version: None,
         };

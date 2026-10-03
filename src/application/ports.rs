@@ -1982,13 +1982,17 @@ pub trait RunCoordination {
     /// Turn the automatic update of the supervisor `token` on or off
     /// (ADR-0045 decision 17).
     fn set_auto_update(&self, token: &LeaseToken, enabled: bool) -> Result<()>;
-    /// Record the supervisor `token`'s `parallel` and `max_waiting` in use
-    /// (ADR-0062 decision 7) and where each comes from (task 698).
+    /// Record the supervisor `token`'s `parallel`, `max_waiting`,
+    /// `runtime_planners` and `claim_spacing` in use (ADR-0062 decision 7,
+    /// ADR-t1479-1) and where each comes from (task 698).
     fn set_slot_limits(
         &self,
         token: &LeaseToken,
         limits: crate::domain::slot_limits::SlotLimits,
     ) -> Result<()>;
+    /// Record the supervisor `token`'s `--max-load`, `None` when its load
+    /// hold is off (ADR-t1479-1: `status` reads it for the claim spacing).
+    fn set_max_load(&self, token: &LeaseToken, max_load: Option<f64>) -> Result<()>;
     /// Record the executables of the supervisor `token`'s providers as it
     /// resolved them at its start (ADR-t813-2).
     fn set_supervisor_providers(

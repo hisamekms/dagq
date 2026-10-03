@@ -58,7 +58,11 @@ impl HostVersions {
 /// The attributes `run_claimed` carries for a run the supervisor claimed:
 /// the build identifier of the claiming binary (ADR-0045 decision 2), the
 /// host's versions, the supervisor's `parallel`, the slots it held before
-/// this claim and the 1-minute load average (null when unavailable).
+/// this claim and the 1-minute load average (null when unavailable). A
+/// claim spaced from the one before it (ADR-t1479-1) adds the spacing in
+/// effect (`claim_spacing`, seconds) and how long the claim waited for it
+/// (`claim_spacing_wait_secs`, 0 when it did not wait); a claim without a
+/// spacing in effect has neither.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ClaimAttributes {
     pub dagq_version: String,
@@ -67,6 +71,15 @@ pub struct ClaimAttributes {
     pub parallel: usize,
     pub slots: usize,
     pub load_avg: Option<f64>,
+    #[serde(flatten)]
+    pub spacing: Option<ClaimSpacing>,
+}
+
+/// The spacing a claim was made under (ADR-t1479-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ClaimSpacing {
+    pub claim_spacing: usize,
+    pub claim_spacing_wait_secs: u64,
 }
 
 /// The load average over an interval: its mean and maximum, null when no
@@ -238,9 +251,10 @@ mod tests {
             parallel: 3,
             slots: 1,
             load_avg: Some(7.5),
+            spacing: None,
         };
         assert_eq!(
-            serde_json::to_value(attributes).unwrap(),
+            serde_json::to_value(&attributes).unwrap(),
             json!({
                 "dagq_version": "0.5.0-dev+abc",
                 "claude_version": null,
@@ -251,5 +265,15 @@ mod tests {
                 "load_avg": 7.5,
             })
         );
+        let spaced = ClaimAttributes {
+            spacing: Some(ClaimSpacing {
+                claim_spacing: 180,
+                claim_spacing_wait_secs: 42,
+            }),
+            ..attributes
+        };
+        let value = serde_json::to_value(spaced).unwrap();
+        assert_eq!(value["claim_spacing"], 180);
+        assert_eq!(value["claim_spacing_wait_secs"], 42);
     }
 }

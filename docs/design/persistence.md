@@ -4,8 +4,8 @@ type: design
 title: SQLite persistence
 status: current
 created: 2026-09-21
-updated: 2026-10-04 # task 1424: approve_landing applies send_back: <reason>
-last_verified: 2026-10-04 # task 1424
+updated: 2026-10-04 # task 1479: supervisors.claim_spacing, claim_spacing_source and max_load (0063)
+last_verified: 2026-10-04 # task 1479
 scope: persistence
 related:
   - adr-t1394-1
@@ -73,6 +73,7 @@ supervisors          -- 0007: 常駐superviseプロセスの登録（token主キ
                      -- 0045: parallel_sourceとmax_waiting_source（'flag' | 'dagq.toml' | 'default' | null。task 698）
                      -- 0048: providers（JSON。providerごとの実行ファイルの解決先・見つかったか・経路。null = 古いbinaryの登録。ADR-t813-2）
                      -- 0051: runtime_plannersとruntime_planners_source（runtimeのplannerの上限と出どころ。null = 古いbinaryの登録。task 941）
+                     -- 0063: claim_spacingとclaim_spacing_source（loadの保留が有効なときの新しいclaimの間隔の秒と出どころ）とmax_load（--max-load、無効ならnull）。null = 古いbinaryの登録。ADR-t1479-1
 goals                -- 0008: 複数taskが解く課題（title、description、acceptance、constraints、doc、closed_at、verdict）
                      -- 0013: status（'draft' | 'open'、既定'open'）
                      -- 0021: proposal_id（所属するproposal、null可）

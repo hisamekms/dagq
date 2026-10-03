@@ -278,6 +278,17 @@ pub struct SupervisorRegistration {
     /// Where `runtime_planners` comes from; `None` as for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_planners_source: Option<super::slot_limits::SettingSource>,
+    /// The seconds it spaces new claims while its load hold is on
+    /// (ADR-t1479-1) and where they come from; `None` for a supervisor of
+    /// an older binary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_spacing: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_spacing_source: Option<super::slot_limits::SettingSource>,
+    /// Its `--max-load` (task 327); `None` when its load hold is off, or
+    /// for a supervisor of an older binary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_load: Option<f64>,
     /// Each provider's executable as the supervisor resolved it at its
     /// start (ADR-t813-2), and the worker modes it runs it in; `None` for
     /// a supervisor of an older binary.

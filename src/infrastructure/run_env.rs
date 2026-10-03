@@ -14,8 +14,9 @@
 //! (ADR-0079 decision 4). `[roles.<role>]` holds the provider, model and effort
 //! of a session other than the worker's (ADR-0079 decision 7, ADR-t1063-1
 //! decision 1). `[supervisor]`
-//! holds `parallel`, `max_waiting` and `runtime_planners` of a supervisor
-//! started without the flags (task 698, task 941). `[areas]` maps the
+//! holds `parallel`, `max_waiting`, `runtime_planners` and `claim_spacing`
+//! of a supervisor started without the flags (task 698, task 941,
+//! ADR-t1479-1). `[areas]` maps the
 //! areas `stats` and `kpi` split the landed runs by to globs (ADR-t980-1),
 //! and `[tasks] changes` names the set of changes a task declares one of.
 //! `[e2e] paths` names, as globs, the paths whose change requires `e2e` of
@@ -89,8 +90,8 @@ const ROLES_TABLE: &str = "roles";
 /// [`super::language`] reads and checks it, so a mistake in it never stops
 /// a claim or a landing.
 const LANGUAGE_TABLE: &str = "language";
-/// `[supervisor]`: `parallel` and `max_waiting` (task 698), and
-/// `runtime_planners` (task 941).
+/// `[supervisor]`: `parallel` and `max_waiting` (task 698),
+/// `runtime_planners` (task 941) and `claim_spacing` (ADR-t1479-1).
 const SUPERVISOR_TABLE: &str = "supervisor";
 /// `[areas]`: each area's name and its globs (ADR-t980-1).
 const AREAS_TABLE: &str = "areas";
@@ -618,6 +619,10 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     let planners = parse_positive(rest.trim(), "number").with_context(with)?;
                     config.supervisor.runtime_planners =
                         Some(u16::try_from(planners).with_context(with)?.into());
+                } else if key == "claim_spacing" {
+                    let secs = parse_whole(rest.trim()).with_context(with)?;
+                    let secs = u32::try_from(secs).with_context(with)?;
+                    config.supervisor.claim_spacing = Some(usize::try_from(secs)?);
                 } else {
                     let limit = parse_whole(rest.trim()).with_context(with)?;
                     config.supervisor.max_waiting =
@@ -2289,7 +2294,7 @@ LITERAL = 'no \n escapes # here'
     #[test]
     fn parses_and_loads_the_supervisor_table() {
         let config =
-            parse_config("[supervisor] # slots\nparallel = 3 # build is heavy\nmax_waiting = 0\nruntime_planners = 2\n")
+            parse_config("[supervisor] # slots\nparallel = 3 # build is heavy\nmax_waiting = 0\nruntime_planners = 2\nclaim_spacing = 120 # secs\n")
                 .unwrap();
         assert_eq!(
             config.supervisor,
@@ -2297,7 +2302,15 @@ LITERAL = 'no \n escapes # here'
                 parallel: Some(3),
                 max_waiting: Some(0),
                 runtime_planners: Some(2),
+                claim_spacing: Some(120),
             }
+        );
+        assert_eq!(
+            parse_config("[supervisor]\nclaim_spacing = 0\n")
+                .unwrap()
+                .supervisor
+                .claim_spacing,
+            Some(0)
         );
         assert_eq!(
             parse_config("[supervisor]\nmax_waiting = 2\n")
@@ -2307,6 +2320,7 @@ LITERAL = 'no \n escapes # here'
                 parallel: None,
                 max_waiting: Some(2),
                 runtime_planners: None,
+                claim_spacing: None,
             }
         );
         assert_eq!(
@@ -2353,7 +2367,27 @@ LITERAL = 'no \n escapes # here'
             ),
             (
                 "[supervisor]\nslots = 2\n",
-                "unknown key slots in [supervisor]; the keys are parallel, max_waiting, runtime_planners",
+                "unknown key slots in [supervisor]; the keys are parallel, max_waiting, runtime_planners, claim_spacing",
+            ),
+            (
+                "[supervisor]\nclaim_spacing = -1\n",
+                "dagq.toml:2: value of claim_spacing: must be 0 or more",
+            ),
+            (
+                "[supervisor]\n\nclaim_spacing = 3m\n",
+                "dagq.toml:3: value of claim_spacing: expected a whole number",
+            ),
+            (
+                "[supervisor]\nclaim_spacing = 1.5\n",
+                "dagq.toml:2: value of claim_spacing",
+            ),
+            (
+                "[supervisor]\nclaim_spacing = 5000000000\n",
+                "dagq.toml:2: value of claim_spacing",
+            ),
+            (
+                "[supervisor]\nclaim_spacing =\n",
+                "dagq.toml:2: value of claim_spacing: missing value",
             ),
             (
                 "[supervisor]\n[supervisor]\n",
@@ -2376,6 +2410,7 @@ LITERAL = 'no \n escapes # here'
                 parallel: Some(2),
                 max_waiting: None,
                 runtime_planners: None,
+                claim_spacing: None,
             })
         );
         fs::write(dir.path().join(CONFIG_FILE_NAME), "[supervisors]\n").unwrap();

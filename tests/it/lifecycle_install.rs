@@ -584,8 +584,8 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
     assert!(dagq::application::install::parse_version("").is_err());
 }
 
-/// `parallel` 4, `max_waiting` `max_waiting` and `runtime_planners` 3, all
-/// from `source`.
+/// `parallel` 4, `max_waiting` `max_waiting`, `runtime_planners` 3 and
+/// `claim_spacing` 180, all from `source`.
 fn slot_limits(source: SettingSource, max_waiting: usize) -> SlotLimits {
     SlotLimits {
         parallel: Setting { value: 4, source },
@@ -594,6 +594,7 @@ fn slot_limits(source: SettingSource, max_waiting: usize) -> SlotLimits {
             source,
         },
         runtime_planners: Setting { value: 3, source },
+        claim_spacing: Setting { value: 180, source },
     }
 }
 

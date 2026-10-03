@@ -4,8 +4,8 @@ type: design
 title: "`stats`"
 status: current
 created: 2026-09-26
-updated: 2026-10-04 # task 1519: the forecast's runs in flight include awaiting_integration and needs_session (after task 1424)
-last_verified: 2026-10-04 # task 1519
+updated: 2026-10-04 # task 1479: claim_holds does not count the claim spacing's waits
+last_verified: 2026-10-04 # task 1479
 scope: runtime
 related:
   - adr-t639-1
@@ -81,7 +81,7 @@ related:
   - `claim_deferred`: `claim_held`が出ていないときに、空きslotがあり、衝突の多いファイルでclaimを控えているtask（`claim_deferrals.deferred`）がある。`value`は控えているtaskの数、`task_id` / `run_id`はnull。これが出るときは`idle_slots`を出さない（[claimを控える（衝突の多いファイル）](claim-defer.md)。ADR-0080）
   - `backend_failures`: 同じwindowの`backend_call_failed`が2件以上。`value`は件数、`task_id` / `run_id`はnull
   - `conflict_hotspot`: `conflict_hotspots`の`alert`が立ったファイルごとに1件。`value`はそのファイルの衝突の回数、`threshold`は`[conflicts].hotspot_conflicts`、`path`にファイル（このalertだけが持つ）、`task_id` / `run_id`はnull
-- **`claim_holds`**: `{count, secs, by_reason, held}`。windowの中で始まったclaimの控え（`claim_held`）の件数と合計秒、理由ごとの`{count, secs}`、今の控え`held`（無ければnull）。理由は`load_average`と`disk_space`（空き容量の不足。[空き容量を確かめる](disk-space.md)）。集計は`domain::claim_hold::claim_holds`（[claimを控える](claim-hold.md)）
+- **`claim_holds`**: `{count, secs, by_reason, held}`。windowの中で始まったclaimの控え（`claim_held`）の件数と合計秒、理由ごとの`{count, secs}`、今の控え`held`（無ければnull）。理由は`load_average`と`disk_space`（空き容量の不足。[空き容量を確かめる](disk-space.md)）。集計は`domain::claim_hold::claim_holds`（[claimを控える](claim-hold.md)）。loadの保留が有効なときのclaimの間隔のための待ち（ADR-t1479-1）は控えではないので数えない。間隔のために待った秒は`run_claimed`のpayloadの`claim_spacing_wait_secs`が持つ（[claimを控える](claim-hold.md#claimの間隔)）
 - **`landing_holds`**: `claim_holds`と同じ形で、空き容量の不足による着地の検証の控え（`landing_held` / `landing_resumed`）。集計は`domain::claim_hold::holds_of`（[空き容量を確かめる](disk-space.md)、task 377）
 - **`claim_deferrals`**: `{count, secs, by_end, by_file, deferred}`。windowの中で始まった、衝突の多いファイルでのtaskのclaimの控え（`claim_deferred`）の件数と合計秒、終わり方ごとの`{count, secs}`（`cleared` / `expired` / `not_candidate` / `claimed` / `superseded` / `open`）、hotspotごとの控えた回数、今控えているtaskの`[{task_id, reason, since, files, runs, supervisor}]`。`--goal`はそのgoalのtaskの控えだけを数えるが、`deferred`はqueueの今を出す。集計は`domain::claim_defer::claim_deferrals`（[claimを控える（衝突の多いファイル）](claim-defer.md)）
 - **`backend_failures`**: `{count, by_op, retried, exhausted, retried_by_op, exhausted_by_op, max_load_avg, max_slots, by_load_band}`。`backend_call_failed`の件数、`op`ごとの件数、そのうちretryした試行（`retry_after_ms`が非null）の`retried`と使い切った失敗（`retry_after_ms`がnullか無い。task 326より前のイベントも最後の失敗として数える）の`exhausted`とそれぞれの`op`ごとの件数（`retried + exhausted = count`。task 397。alertは今までどおり`count`で判定する）、記録された`load_avg`の最大（無ければnull）、`slots`の最大（無ければnull）、`load_avg`の帯ごとの件数`[{band, count}]`（軽い帯から。`load_avg`の無い失敗は数えない。task 197）。windowは上の期間集計の窓。`--goal`はそのgoalのrunの失敗だけを数える（runの無い失敗は数えない）

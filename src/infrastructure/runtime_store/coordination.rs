@@ -239,6 +239,19 @@ impl SqliteQueue {
         Ok(())
     }
 
+    /// Record the supervisor `token`'s `--max-load`, NULL when its load
+    /// hold is off (ADR-t1479-1).
+    pub fn set_max_load(&self, token: &LeaseToken, max_load: Option<f64>) -> Result<()> {
+        ensure!(
+            self.conn.execute(
+                "UPDATE supervisors SET max_load=?2 WHERE token=?1",
+                params![token, max_load],
+            )? == 1,
+            "supervisor {token} is no longer registered"
+        );
+        Ok(())
+    }
+
     /// Record the executables of the supervisor `token`'s providers as it
     /// resolved them at its start (ADR-t813-2).
     pub fn set_supervisor_providers(
@@ -256,9 +269,9 @@ impl SqliteQueue {
         Ok(())
     }
 
-    /// Record the supervisor `token`'s `parallel`, `max_waiting` and
-    /// `runtime_planners` in use (ADR-0062 decision 7, task 941) and where
-    /// each comes from (task 698).
+    /// Record the supervisor `token`'s `parallel`, `max_waiting`,
+    /// `runtime_planners` and `claim_spacing` in use (ADR-0062 decision 7,
+    /// task 941, ADR-t1479-1) and where each comes from (task 698).
     pub fn set_slot_limits(&self, token: &LeaseToken, limits: SlotLimits) -> Result<()> {
         let parallel = u32::try_from(limits.parallel.value)?;
         ensure!(parallel >= 1, "parallel must be at least 1");
@@ -266,9 +279,10 @@ impl SqliteQueue {
         // Not held to 1 or more here: the flag and `[supervisor]` refuse 0,
         // and a caller of the library may open no planner of the runtime's.
         let runtime_planners = u32::try_from(limits.runtime_planners.value)?;
+        let claim_spacing = u32::try_from(limits.claim_spacing.value)?;
         ensure!(
             self.conn.execute(
-                "UPDATE supervisors SET parallel=?2, parallel_source=?3, max_waiting=?4, max_waiting_source=?5, runtime_planners=?6, runtime_planners_source=?7 WHERE token=?1",
+                "UPDATE supervisors SET parallel=?2, parallel_source=?3, max_waiting=?4, max_waiting_source=?5, runtime_planners=?6, runtime_planners_source=?7, claim_spacing=?8, claim_spacing_source=?9 WHERE token=?1",
                 params![
                     token,
                     parallel,
@@ -276,7 +290,9 @@ impl SqliteQueue {
                     max_waiting,
                     limits.max_waiting.source.as_str(),
                     runtime_planners,
-                    limits.runtime_planners.source.as_str()
+                    limits.runtime_planners.source.as_str(),
+                    claim_spacing,
+                    limits.claim_spacing.source.as_str()
                 ],
             )? == 1,
             "supervisor {token} is no longer registered"
@@ -733,6 +749,9 @@ impl RunCoordination for SqliteQueue {
     fn set_auto_update(&self, token: &LeaseToken, enabled: bool) -> Result<()> {
         SqliteQueue::set_auto_update(self, token, enabled)
     }
+    fn set_max_load(&self, token: &LeaseToken, max_load: Option<f64>) -> Result<()> {
+        SqliteQueue::set_max_load(self, token, max_load)
+    }
     fn set_slot_limits(&self, token: &LeaseToken, limits: SlotLimits) -> Result<()> {
         SqliteQueue::set_slot_limits(self, token, limits)
     }
@@ -880,6 +899,7 @@ mod tests {
                     parallel: setting(0),
                     max_waiting: setting(2),
                     runtime_planners: setting(1),
+                    claim_spacing: setting(180),
                 },
             )
             .unwrap_err();
@@ -889,6 +909,44 @@ mod tests {
             .query_row("SELECT parallel FROM supervisors", [], |r| r.get(0))
             .unwrap();
         assert_eq!(parallel, 3);
+    }
+
+    /// `claim_spacing` and its source are written with the slot limits, and
+    /// `--max-load` on its own; NULL reads as none (ADR-t1479-1).
+    #[test]
+    fn the_claim_spacing_and_max_load_are_written_on_the_registration() {
+        use crate::domain::slot_limits::{Setting, SettingSource, SlotLimits};
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let token = LeaseToken::new("me");
+        queue.register_supervisor(&token, 1, 2, "0.0.1").unwrap();
+        let registration = &queue.supervisors().unwrap()[0];
+        assert_eq!(registration.claim_spacing, None);
+        assert_eq!(registration.max_load, None);
+        let setting = |value, source| Setting { value, source };
+        queue
+            .set_slot_limits(
+                &token,
+                SlotLimits {
+                    parallel: setting(2, SettingSource::Flag),
+                    max_waiting: setting(2, SettingSource::Default),
+                    runtime_planners: setting(1, SettingSource::Default),
+                    claim_spacing: setting(60, SettingSource::File),
+                },
+            )
+            .unwrap();
+        queue.set_max_load(&token, Some(16.0)).unwrap();
+        let registration = &queue.supervisors().unwrap()[0];
+        assert_eq!(registration.claim_spacing, Some(60));
+        assert_eq!(registration.claim_spacing_source, Some(SettingSource::File));
+        assert_eq!(registration.max_load, Some(16.0));
+        queue.set_max_load(&token, None).unwrap();
+        assert_eq!(queue.supervisors().unwrap()[0].max_load, None);
+        assert!(
+            queue
+                .set_max_load(&LeaseToken::new("gone"), Some(1.0))
+                .is_err()
+        );
     }
 
     #[test]

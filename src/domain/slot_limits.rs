@@ -1,14 +1,16 @@
 //! How many runs a supervisor executes at once (`parallel`), keeps
 //! waiting for a person outside its slots (`max_waiting`, ADR-0062
 //! decision 7) and how many planners its runtime opens at once
-//! (`runtime_planners`, ADR-0041 decision 12, task 941), and where each
-//! value comes from (task 698): the flag (`supervise --parallel` /
+//! (`runtime_planners`, ADR-0041 decision 12, task 941), how long it
+//! spaces new claims while the load hold is on (`claim_spacing`,
+//! ADR-t1479-1), and where each value comes from (task 698): the flag (`supervise --parallel` /
 //! `--max-waiting` / `--runtime-planners`), else `[supervisor]` of the
 //! main checkout's `dagq.toml`, else the default.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::claim_spacing::DEFAULT_CLAIM_SPACING_SECS;
 use super::waiting::DEFAULT_MAX_WAITING;
 
 /// The default of `parallel`.
@@ -62,25 +64,37 @@ pub struct SupervisorConfig {
     pub max_waiting: Option<usize>,
     /// At least 1.
     pub runtime_planners: Option<usize>,
+    /// Seconds; 0 spaces no claim.
+    pub claim_spacing: Option<usize>,
 }
 
 impl SupervisorConfig {
     /// The keys `[supervisor]` may set.
-    pub const KEYS: [&'static str; 3] = ["parallel", "max_waiting", "runtime_planners"];
+    pub const KEYS: [&'static str; 4] = [
+        "parallel",
+        "max_waiting",
+        "runtime_planners",
+        "claim_spacing",
+    ];
 }
 
-/// The flags given to `supervise`; `None` is not given.
+/// The flags given to `supervise`; `None` is not given. `claim_spacing`
+/// has no flag of the CLI: only a caller of the library gives it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SlotFlags {
     pub parallel: Option<usize>,
     pub max_waiting: Option<usize>,
     pub runtime_planners: Option<usize>,
+    pub claim_spacing: Option<usize>,
 }
 
 impl SlotFlags {
     /// All given: the file is never read for them.
     pub const fn complete(self) -> bool {
-        self.parallel.is_some() && self.max_waiting.is_some() && self.runtime_planners.is_some()
+        self.parallel.is_some()
+            && self.max_waiting.is_some()
+            && self.runtime_planners.is_some()
+            && self.claim_spacing.is_some()
     }
 }
 
@@ -111,12 +125,14 @@ impl Setting {
     }
 }
 
-/// `parallel`, `max_waiting` and `runtime_planners` in use.
+/// `parallel`, `max_waiting`, `runtime_planners` and `claim_spacing` (in
+/// seconds) in use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct SlotLimits {
     pub parallel: Setting,
     pub max_waiting: Setting,
     pub runtime_planners: Setting,
+    pub claim_spacing: Setting,
 }
 
 impl SlotLimits {
@@ -131,6 +147,11 @@ impl SlotLimits {
                 file.runtime_planners,
                 DEFAULT_RUNTIME_PLANNERS,
             ),
+            claim_spacing: Setting::resolve(
+                flags.claim_spacing,
+                file.claim_spacing,
+                DEFAULT_CLAIM_SPACING_SECS,
+            ),
         }
     }
 
@@ -142,6 +163,8 @@ impl SlotLimits {
             "max_waiting_source": self.max_waiting.source,
             "runtime_planners": self.runtime_planners.value,
             "runtime_planners_source": self.runtime_planners.source,
+            "claim_spacing": self.claim_spacing.value,
+            "claim_spacing_source": self.claim_spacing.source,
         })
     }
 }
@@ -162,11 +185,13 @@ mod tests {
             parallel: Some(3),
             max_waiting: Some(0),
             runtime_planners: Some(2),
+            claim_spacing: Some(60),
         };
         let all = SlotFlags {
             parallel: Some(2),
             max_waiting: Some(1),
             runtime_planners: Some(3),
+            claim_spacing: Some(0),
         };
         let limits = SlotLimits::resolve(all, file);
         assert_eq!(limits.parallel.value, 2);
@@ -179,10 +204,22 @@ mod tests {
             ),
             (3, SettingSource::Flag)
         );
+        assert_eq!(
+            (limits.claim_spacing.value, limits.claim_spacing.source),
+            (0, SettingSource::Flag)
+        );
         assert!(all.complete());
         assert!(
             !SlotFlags {
                 runtime_planners: None,
+                ..all
+            }
+            .complete()
+        );
+        // The CLI never gives `claim_spacing`: the file is read for it.
+        assert!(
+            !SlotFlags {
+                claim_spacing: None,
                 ..all
             }
             .complete()
@@ -204,6 +241,10 @@ mod tests {
             ),
             (2, SettingSource::File)
         );
+        assert_eq!(
+            (limits.claim_spacing.value, limits.claim_spacing.source),
+            (60, SettingSource::File)
+        );
 
         let limits = SlotLimits::resolve(SlotFlags::default(), SupervisorConfig::default());
         assert_eq!(
@@ -220,6 +261,10 @@ mod tests {
                 limits.runtime_planners.source
             ),
             (DEFAULT_RUNTIME_PLANNERS, SettingSource::Default)
+        );
+        assert_eq!(
+            (limits.claim_spacing.value, limits.claim_spacing.source),
+            (180, SettingSource::Default)
         );
         assert!(!SlotFlags::default().complete());
     }
@@ -246,6 +291,7 @@ mod tests {
                 parallel: Some(2),
                 max_waiting: None,
                 runtime_planners: Some(2),
+                claim_spacing: Some(0),
             },
         );
         let payload = slot_limits_change(from, to).unwrap();
@@ -256,6 +302,10 @@ mod tests {
         assert_eq!(payload["from"]["runtime_planners"], json!(1));
         assert_eq!(payload["to"]["runtime_planners"], json!(2));
         assert_eq!(payload["to"]["runtime_planners_source"], json!("dagq.toml"));
+        assert_eq!(payload["from"]["claim_spacing"], json!(180));
+        assert_eq!(payload["from"]["claim_spacing_source"], json!("default"));
+        assert_eq!(payload["to"]["claim_spacing"], json!(0));
+        assert_eq!(payload["to"]["claim_spacing_source"], json!("dagq.toml"));
     }
 }
 
@@ -284,6 +334,9 @@ mod registration_tests {
                 max_waiting_source,
                 runtime_planners: None,
                 runtime_planners_source: None,
+                claim_spacing: None,
+                claim_spacing_source: None,
+                max_load: None,
                 providers: None,
             };
         assert_eq!(
