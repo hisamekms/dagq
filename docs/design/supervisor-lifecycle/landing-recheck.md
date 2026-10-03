@@ -18,6 +18,8 @@ related:
 
 # Landing recheck
 
+> **予定（goal 92）**: [ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)決定3で、resumeの後の「sessionを`/exit`してworkspaceを閉じ」は、終了の依頼でbackgroundのwrapperを終わらせ、終わったことを確かめ、残っていれば止めてからleaseを手放すことになる（ADR-0068決定4をamends）。`/exit`の待ちと`stuck_exit`のaskの記述は、後続のtaskが実装するまでの今の姿である。
+
 supervisorが着地させたrunが`run_integrated`で終わるたびと、mainが最後にrecheckを終えたmainと違うとき（直接の`integrate`、handoffや再起動の間の着地、dagqを通さないpush）に、着地待ちのrunをそのmainに対して先回りして確かめる（[ADR-0068](../../adr/0068-recheck-waiting-runs-after-each-landing.md)、きっかけは[ADR-t1310-1](../../adr/2026-10-03-t1310-1-recheck-whenever-main-moves-past-the-last-recheck.md)が広げた）。着地しなくなったrunは、askの答えや`integrate`の順番を待たずにresumeへ回る。実装は`src/application/supervise/recheck.rs`（supervisor側）と`src/domain/recheck.rs`（記録の形）。
 
 ## 対象と起動

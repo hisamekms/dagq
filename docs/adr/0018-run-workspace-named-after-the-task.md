@@ -2,10 +2,12 @@
 id: adr-0018
 type: adr
 title: runのcmux workspace名はtaskのtitleにし、run IDはdescriptionに置く
-status: accepted
+status: superseded
 created: 2026-09-23
 updated: 2026-09-23
 accepted_on: 2026-09-23
+superseded_by: adr-t1433-3
+superseded_on: 2026-10-03
 owners:
   - hisamekms
 tags:
@@ -21,6 +23,8 @@ related:
 ---
 
 # ADR-0018: runのcmux workspace名はtaskのtitleにし、run IDはdescriptionに置く
+
+> **置き換え済み（2026-10-03）**: このADRの決定は現在有効ではない。現行の決定は[ADR-t1433-3](2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)を読む。
 
 ## Context
 

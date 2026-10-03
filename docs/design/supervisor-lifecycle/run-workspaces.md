@@ -16,6 +16,8 @@ related:
 
 # Run workspaces
 
+> **予定（goal 92）**: [ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)で非対話のwrapperはbackgroundだけになり、supervisorはrunとplannerのworkspaceを作らない。この文書の終わったrunのworkspaceのsweep・`run close-workspaces`・queueのworkspace group・runのworkspaceのdescriptionはやめ、後始末は残ったwrapperの停止だけになる。過去に残ったworkspaceは人が自分のterminalで閉じる。実装は後続のtask。
+
 runが開いたworkspaceは、最初のsession（`task_runs.workspace_id`と`workspace_created`）と、resumeごとのworkspace（`start_resume`がcreateの直後に記録する`workspace_created`（`workspace_id`、`resume_attempt`）。これより前のresumeは`resume_finished`の`workspace_id`）で、すべてrun_eventsに残る。閉じたかどうかはworkspaceごとで、`workspace_closed`がそのworkspace_idを名指すか、resumeの`resume_finished`が`workspace_closed: true`か、最初のsessionなら`workspace_closed_at`がnullでないとき閉じている（`domain::run::run_workspaces`）。`workspace_closed_at`は最初のsessionの分だけを表す。reviseは生きているsessionに送るので新しいworkspaceを開かない。
 
 **記録の無いworkspace**（task 806）: cmuxのcreateが失敗を返しても（createの時間切れなど）workspaceが実際には作られていることがあり、そのUUIDはどこにも記録されないので、下の経路のどれも閉じない。次の3つで残さない。

@@ -2,10 +2,12 @@
 id: adr-t803-1
 type: adr
 title: idle の印（Stop hook）を主な信号のまま残し、印が無いか最後の入力より古いときだけ画面から idle を推定する
-status: accepted
+status: superseded
 created: 2026-09-27
 updated: 2026-09-27
 accepted_on: 2026-09-27
+superseded_by: adr-t1433-2
+superseded_on: 2026-10-03
 owners:
   - hisamekms
 tags:
@@ -25,6 +27,8 @@ related:
 ---
 
 # ADR-t803-1: idle の印を主な信号のまま残し、印が無いか最後の入力より古いときだけ画面から idle を推定する
+
+> **置き換え済み（2026-10-03）**: このADRの決定は現在有効ではない。現行の決定は[ADR-t1433-2](2026-10-03-t1433-2-abolish-the-interactive-route.md)を読む。
 
 ## Context
 

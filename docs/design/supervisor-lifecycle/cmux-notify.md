@@ -4,7 +4,7 @@ type: design
 title: "人への通知（`cmux notify`）"
 status: current
 created: 2026-09-26
-updated: 2026-09-29
+updated: 2026-10-03
 last_verified: 2026-09-29
 scope: runtime
 related:
@@ -14,6 +14,8 @@ related:
 ---
 
 # 人への通知（`cmux notify`）
+
+> **予定（goal 92）**: [ADR-t1433-1](../../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)決定2で、supervisorとqueue serviceは`cmux notify`を呼ばなくなり、`ask_opened`の通知はinboxのsessionの中で動く`watch --role inbox`が出す（cmuxのterminalの子なのでsocket passwordが要らない）。この文書のsupervisorとqueue serviceからの通知は、後続のtaskが実装するまでの今の姿である。
 
 `WorkspaceBackend::notify(title, body, workspace)`は人への通知の操作で、cmux adapterは`cmux notify --title <title> --body <body> [--workspace <id>]`を実行する（`workspace`が`None`なら`--workspace`を付けない。失敗はcmuxの非0終了をエラーにして返す）。terminalへの打ち込みではないのでinboxやworkerのUI状態に干渉しない。
 

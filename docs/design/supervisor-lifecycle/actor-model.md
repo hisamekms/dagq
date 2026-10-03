@@ -100,6 +100,8 @@ plan reviewの`revise`（と`reopen`）の指摘を配るとき、持ち主のpl
 
 [ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)の決定1（goal 87、task 1396）。
 
+> **予定（goal 92）**: [ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定3で対話の経路を廃止するので、この節の経路の選択は無くなり、runtimeのplannerは非対話だけで動く。新しいバイナリは`route`が書いてあっても拒まずに無視し（値に関わらず`headless`）、後で`dagq.toml`から消す（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)決定2の切り替えの欄と同じ扱い）。`planners.route`と`doctor`の`route`は過去の対話のplannerを読むために残る。下の記述は、goal 92の後続のtaskが実装するまでの今の姿である。
+
 ```toml
 [roles.runtime_planner]
 route = "headless"   # 省けばinteractive（評価まで）

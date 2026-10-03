@@ -4,7 +4,7 @@ type: design
 title: "receiptの無いidleの検知"
 status: current
 created: 2026-09-26
-updated: 2026-10-02
+updated: 2026-10-03
 last_verified: 2026-10-02
 scope: runtime
 related:
@@ -14,6 +14,8 @@ related:
 ---
 
 # receiptの無いidleの検知
+
+> **予定（goal 92）**: 対話の経路の廃止（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）で、画面とidleの印による検知と画面からのidleの推定（ADR-t803-1。置き換え済み）は対象が無くなり、非対話のturnの終わりの催促（ADR-t813-1決定9）だけが残る。この文書の対話のsessionの記述は、後続のtaskが実装するまでの今の姿である。
 
 [ADR-0043](../../adr/0043-detect-stalled-worker-sessions-nudge-once-then-ask.md)の決定1（task 288、`application::supervise::stall`の`StallWatch`）。task 182のworkerはbackgroundの`cargo test`の通知を待ってturnを終え（`Stop` hookのidle markerは書かれた）、receiptの無いまま10.5時間eventが0件だった。[ダイアログ待ちの検知](prompt-waiting.md#ダイアログ待ちの検知)はidle markerのあるrunを見ないので、この型は別に検知する。
 

@@ -4,7 +4,7 @@ type: design
 title: "人への通知経路（ADR-0016で決定、ADR-0022とADR-0024で改めた）"
 status: current
 created: 2026-09-26
-updated: 2026-10-03 # task 1418: notices that do not wake the inbox watch
+updated: 2026-10-03
 last_verified: 2026-10-03 # task 1418
 scope: runtime
 related:
@@ -26,6 +26,8 @@ ADR-0016で次を決めた。`status`のattentionとcursor、`events --after`、
 - 人の経路のコマンドは既定で圧縮し（既存キー名を変えずに省く・切り詰める）、全文は`--full`。`show`・`goal show`・`doctor`は実装済み（`doctor`は上、`show`と`goal show`は[domain-model](../domain-model.md)）。手でのレビューは`review ID`が`<run_dir>/review.md`を書き、subagentにpathを渡す（`review`は実装済み。下記「`review`」）。
 
 ## supervisorによるinboxへの知らせ（ADR-t906-1）
+
+> **予定（goal 92）**: ADR-t906-1は[ADR-t1433-5](../../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)に置き換えられた。supervisorはinboxの画面を読まず、inboxのterminalに打ち込まない。watcherが居ないまま閾値を超えてaskが開いているときは、eventに残し、`host.toml`の`[push]`があればそれで1回送る。この節の画面のidleの推定と打ち込みは、後続のtaskが実装するまでの今の姿である。askの`cmux notify`はinboxのwatchが出す形に移る（[ADR-t1433-1](../../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)決定2）。
 
 [ADR-t906-1](../../adr/2026-09-28-t906-1-guarantee-the-inbox-watch.md)の決定1の(3)。supervisorは毎pass（drain中も。drainはaskの答えを待つため）、`src/application/supervise/inbox_nudge.rs`で次を行う（`--no-claude`のsupervisorは知らせない）。判定の後、知らせるかどうかの前に、watcherの状態の変わり目を`inbox_watcher_absent` / `inbox_watcher_returned`に記録する（`--no-claude`でも。[`events` / `watch`](events-watch.md#watcherの変わり目の記録)）。
 

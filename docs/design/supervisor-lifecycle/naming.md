@@ -4,7 +4,7 @@ type: design
 title: "Naming"
 status: current
 created: 2026-09-26
-updated: 2026-10-02
+updated: 2026-10-03
 last_verified: 2026-10-02
 scope: runtime
 related:
@@ -18,6 +18,8 @@ related:
 ---
 
 # Naming
+
+> **予定（goal 92）**: cmuxはinboxだけが使う（[ADR-t1433-1](../../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)）。in-cmux modeのsupervisor（ADR-0011。置き換え済み、[ADR-t1433-4](../../adr/2026-10-03-t1433-4-supervisor-resides-without-cmux.md)）とrunのworkspace（ADR-0018。置き換え済み、[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）の名前は対象が無くなり、workspaceの名前はinboxの`[<repo>]inbox`だけが残る。後続のtaskが実装するまでの今の姿である。
 
 cmux workspaceの名前は複数repositoryで同じcmuxを使うためrepository名を含み、`[<repo>]<role>`の形をとる（[ADR-0028](../../adr/0028-workspace-titles-are-repo-and-role.md)。[ADR-0018](../../adr/0018-run-workspace-named-after-the-task.md)とADR-0021の`dagq`入りの書式を上書き）。`<repo>`はrepository rootのbasename（basenameが空ならpath自体）で、`]`の直後に空白を入れない。名前の組み立ては`infrastructure::adapters`の純粋関数:
 

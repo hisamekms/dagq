@@ -4,7 +4,7 @@ type: design
 title: "`events` / `watch`"
 status: current
 created: 2026-09-26
-updated: 2026-10-03 # task 1418: notices that do not wake the inbox watch
+updated: 2026-10-03
 last_verified: 2026-10-03 # task 1418
 scope: runtime
 related:
@@ -29,6 +29,8 @@ task 293（ADR-0044の決定22）で、`events`に`--full`と絞り込みを足�
 `--role inbox`のwatchは、inbox宛てのattentionのうち`domain::wakes_inbox(kind, payload)`が偽のもの（`update_installed`と、`mode`が`hourly`の`throughput_review_reported`）だけでは起きない（[ADR-t1418-1](../../adr/2026-10-03-t1418-1-quiet-notices-do-not-wake-the-inbox-watch.md)。常駐のinboxが起きるたびにcontextの全体を読み直すtokenを減らす）。cursorより後に起こすattentionが1件以上あるか、supervisorの健全性が変わったときだけ返り（`--timeout`も`--until-attention`も同じ）、そのときの`events`には起こさなかった知らせも含めてcursorより後のinbox宛てのattentionを古い順に全部入れ（inboxのwatchは件数の上限を持たない。roleなしと`--role planner`のwatchは今までどおり100件まで。`cursor`は返した最新）、知らせを取りこぼさない。起こすeventの前にも後にも知らせが何件あっても、健全性の変化で起きたときも、1回のwatchで全部返るので、残った知らせが次の起床まで待つことは無い。`--timeout`で返るときは今までどおり`events`が空で`cursor`は渡したままで、起こさなかった知らせは次に返るときに載る。日次・週次の`throughput_review_reported`、modeを問わない失敗の`throughput_review_finished`（`check the failed review`）、`ask_opened`ほか全てのattentionは今までどおり起こす。何がattentionかの判定（`event_attention`）・`next`・`events`・`status`・`--role planner`のwatch・roleなしのwatch（全てのattentionで起きる）・KPI（`attentions_per_landing`・`ask_seen_wait`）は変えていない。watchはqueue serviceのユースケースに無いので、クライアントモードのclientは`no_use_case`で断ってDBを開かない（[Queue service](../queue-service.md#クライアントモード)）。この判定はqueueを読み取り専用で開くwatch（inboxのもの）だけが行う。testは`src/domain/mod.rs`の`only_update_installed_and_the_hourly_review_leave_the_inbox_asleep`と`tests/it/inbox_watch_wake.rs`。
 
 ## inboxのwatcherの記録（ADR-t906-1）
+
+> **予定（goal 92）**: ADR-t906-1は[ADR-t1433-5](../../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)に置き換えられた。この節の記録と判定（ADR-t906-1決定1の(1)）とhook（(2)）はADR-t1433-5が引き継ぐ。supervisorのinboxへの打ち込みはやめ、後ろ盾は`[push]`とeventになる。`watch --role inbox`は`ask_opened`を見たときに`cmux notify`を出すようになる（[ADR-t1433-1](../../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)決定2）。実装は後続のtask。
 
 `watch --role inbox`は実行中、自分の記録を queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）の`inbox-watchers/<開始のミリ秒>-<pid>.json`に書く（`src/infrastructure/inbox_watchers.rs`）。queue DBには書かず、`watch`はqueueを読むだけのまま。記録は`{pid, started_at, heartbeat_at, ended_at, timeout_secs, interval_secs}`（時刻はunix秒。`timeout_secs`は`--until-attention`のwatchでは`null`で、`--until-attention`より前の記録は数値を持ち、欄が無い記録も`null`として読む）で、開始時に書き、queueを読むたび（`--interval`ごと。読みが無くても同じ間隔でloopが回る）に`heartbeat_at`を更新し、返るときに`ended_at`を書く（errorで抜けたときもdropで書く）。書き込みは一時ファイルとrenameで、書けなくてもwatchは止まらない（tracingのwarnだけ）。ファイル名が開始時刻とpidを持つので、pidが再利用されても別の記録になり、各watchは自分のファイルだけを書き換える。複数のwatchが同時に走ってよい。開始時に、最後に見えた時刻が7日（`PRUNE_AFTER_SECS`）より前の記録を消す。`--role inbox`以外のwatchは記録を書かない。
 

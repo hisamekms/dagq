@@ -195,6 +195,8 @@ runのsessionの区間（`worker` / `resume` / `revise`）は、閉じるとき�
 
 ## workerのproviderと経路
 
+> **予定（goal 92）**: [ADR-t1433-2](../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)で対話の経路を廃止する。Claudeのworkerとruntimeのplannerは非対話だけで動き、`add` / `edit`の`--interactive`は理由付きで拒み、`interactive`で登録済みのまだclaimされていないtaskは保存を書き換えずにclaimのときに非対話で動かして頼んだ経路と実際の経路を記録する。過去の対話のrunは`kpi --by route`・`stats`で経路`interactive`のまま読める。対話の経路からの切り替え（下の「使えないproviderからの切り替え」の対話の行）は対象が無くなる。実装は後続のtask。
+
 workerのproviderと経路はtaskが選ぶ（[ADR-t813-2](../adr/2026-09-28-t813-2-provider-per-task-and-mutual-fallback.md)の決定1、[ADR-t813-1](../adr/2026-09-28-t813-1-headless-worker-path.md)の決定7と、それをamendsした[ADR-t1340-1](../adr/2026-10-02-t1340-1-claude-worker-defaults-to-headless.md)。型は[domain-model](domain-model.md)の`Worker`）。経路を指定しないtaskはClaudeの非対話の経路（既定。`Worker::DEFAULT`＝`Worker::CLAUDE_HEADLESS`、`Worker::default_mode`）で、Claudeの対話の経路は`add` / `edit`の`--interactive`で選んだtaskだけが使う。Codexは非対話の経路だけ（`--provider codex`と`--interactive`は`add`も`edit`も拒む）。
 
 - **保存の形**（ADR-t1340-1）: `tasks.worker_mode`は、taskが経路を指定したときだけ値（`interactive` / `headless`）を持ち、指定しないときはNULL（providerの既定）。`add`は`--interactive` / `--headless`の無いときNULLを書き、`edit`は`--interactive` / `--headless`で値を書き、`--provider`だけを変えるとNULLに戻す（新しいproviderの既定）。Codexのtaskは今までどおり`headless`を書く。読み出しはNULLをproviderの既定に解く（`Worker::resolve`）。domainの`Task`は解いた`worker`と、保存する値の`named_mode`（`Task::stored_worker_mode`）を持つ。`show`・`list`・`search`の`worker_mode`は解いた値で、明示か既定かの欄は足さない（明示したかは`task_edited`の記録とDBの値で分かる。表示の形を変えずに済ませるため）。`edit --headless`のように表示の値が変わらず保存の値だけが変わるedit（既定のtaskにその既定を明示する）も、`task_edited`の`from` / `to`の`worker_mode`に保存の値（既定はnull）で記録する。runの`worker_mode`はclaimの時点の解いた値で、過去のrunの記録は既定が変わっても変わらない。古い固定バイナリはNULLを対話のClaudeとして読む

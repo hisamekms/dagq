@@ -24,6 +24,8 @@ related:
 
 # 非対話のworker
 
+> **予定（goal 92）**: 対話の経路は廃止し（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）、非対話のsession wrapperは下の「workspaceなしのbackgroundのwrapper」の形だけで動く（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）。`dagq.toml`の切り替えの欄（`[headless] wrapper`）は受け付けて無視し（値に関わらずbackground）、後で消す。workspaceの中のwrapper、「対話の経路との違い」、runのworkspaceのterminalに出力を見せることの記述は、goal 92の後続のtaskが実装するまでの今の姿である。人がrunの出力を見るのはturnのlogのCLIになる。
+
 [ADR-t813-1](../../adr/2026-09-28-t813-1-headless-worker-path.md)の実装（task 815）。taskの`worker_mode`が`headless`（経路を指定しないClaudeのtask（既定、[ADR-t1340-1](../../adr/2026-10-02-t1340-1-claude-worker-defaults-to-headless.md)）と`add --headless`、Codexのtask。[provider-lifecycle](../provider-lifecycle.md#workerのproviderと経路)）のrunは、workerの1 turnを1回の非対話の呼び出しにする。動くのはClaude（`claude -p --output-format stream-json --verbose`）とCodex（`codex exec --json`と`codex exec resume --json`、task 816。[provider-lifecycle](../provider-lifecycle.md#codexの非対話のworker)）。providerの違いは`AgentProvider`の`turn_command`（呼び出しのargv）と`turn_reader`（出力を読む`TurnReader`）と`turn_permission_mode`に閉じ込め、supervisorとsession wrapperの流れはproviderを知らない。
 
 ## 経路の全体

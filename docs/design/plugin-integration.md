@@ -4,7 +4,7 @@ type: design
 title: Claude Code and Codex plugin integration
 status: current
 created: 2026-09-21
-updated: 2026-09-29
+updated: 2026-10-03
 last_verified: 2026-09-29
 scope: distribution
 related:
@@ -25,6 +25,8 @@ related:
 ---
 
 # Claude Code and Codex plugin integration
+
+> **予定（goal 92）**: inboxのwatchの生存はADR-t906-1を置き換えた[ADR-t1433-5](../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)が決める。SessionStart / Stop hookは引き継ぎ、supervisorのinboxへの打ち込みはやめる。askの`cmux notify`はinboxの`watch --role inbox`が出す（[ADR-t1433-1](../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)決定2）。後続のtaskが実装するまでの今の姿である。
 
 runtimeとpluginを分離する。pluginはskill、hook、provider設定を配布し、SQLite・supervisor・cmux操作は`dagq`バイナリが担当する。
 

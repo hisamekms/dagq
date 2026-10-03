@@ -2,10 +2,12 @@
 id: adr-t1340-1
 type: adr
 title: Claude の worker の既定の経路を非対話にし、対話の経路は task ごとに選んだときだけ使う（ADR-t813-1 決定 7 を amends）
-status: accepted
+status: superseded
 created: 2026-10-02
 updated: 2026-10-02
 accepted_on: 2026-10-02
+superseded_by: adr-t1433-2
+superseded_on: 2026-10-03
 amends:
   - adr-t813-1 decision 7
 owners:
@@ -23,6 +25,8 @@ related:
 ---
 
 # ADR-t1340-1: Claude の worker の既定の経路を非対話にし、対話の経路は task ごとに選んだときだけ使う（ADR-t813-1 決定 7 を amends）
+
+> **置き換え済み（2026-10-03）**: このADRの決定は現在有効ではない。現行の決定は[ADR-t1433-2](2026-10-03-t1433-2-abolish-the-interactive-route.md)を読む。
 
 ## Context
 

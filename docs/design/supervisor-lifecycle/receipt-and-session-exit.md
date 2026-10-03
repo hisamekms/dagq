@@ -4,7 +4,7 @@ type: design
 title: "Receipt and session exit"
 status: current
 created: 2026-09-26
-updated: 2026-10-02
+updated: 2026-10-03
 last_verified: 2026-10-02
 scope: runtime
 related:
@@ -16,6 +16,8 @@ related:
 ---
 
 # Receipt and session exit
+
+> **予定（goal 92）**: 対話の経路の廃止（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）で、`/exit`・ダイアログ・画面からのidleの推定（ADR-t803-1。置き換え済み）は対象が無くなり、sessionの終わりは最後のturnの終わりとbackgroundのwrapperの終了（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）になる。この文書の対話のsessionの記述は、後続のtaskが実装するまでの今の姿である。
 
 receiptの受領とセッション終了は別の事象である。agentはreceiptを`<run-dir>/receipt.json`へ一時ファイルからrenameして公開し、応答完了後もセッションを維持する。セッション終了はwrapperが記録する終了コード（`session_exited`）だけで確認し、画面文言は使わない。
 

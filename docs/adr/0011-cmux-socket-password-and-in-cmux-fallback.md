@@ -2,10 +2,12 @@
 id: adr-0011
 type: adr
 title: launchd常駐のsupervisorにはcmuxのsocket passwordを前提とし、up --in-cmuxをlaunchdなしのfallbackにする
-status: accepted
+status: superseded
 created: 2026-09-22
 updated: 2026-09-22
 accepted_on: 2026-09-22
+superseded_by: adr-t1433-4
+superseded_on: 2026-10-03
 owners:
   - hisamekms
 tags:
@@ -20,6 +22,8 @@ related:
 ---
 
 # ADR-0011: launchd常駐のsupervisorにはcmuxのsocket passwordを前提とし、up --in-cmuxをlaunchdなしのfallbackにする
+
+> **置き換え済み（2026-10-03）**: このADRの決定は現在有効ではない。現行の決定は[ADR-t1433-4](2026-10-03-t1433-4-supervisor-resides-without-cmux.md)を読む。
 
 ## Context
 

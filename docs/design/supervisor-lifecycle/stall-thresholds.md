@@ -4,7 +4,7 @@ type: design
 title: "Stall thresholds"
 status: current
 created: 2026-09-26
-updated: 2026-09-29
+updated: 2026-10-03
 last_verified: 2026-09-29
 scope: runtime
 related:
@@ -14,6 +14,8 @@ related:
 ---
 
 # Stall thresholds
+
+> **予定（goal 92）**: 対話の経路の廃止（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）で、画面・idleの印・送った文の確認・`/exit`に当たる閾値は対象が無くなり、非対話のturnの閾値（ADR-t813-1決定9）だけが残る。後続のtaskが実装するまでの今の姿である。
 
 `dagq.toml`の`[stall]`（[ADR-0043](../../adr/0043-detect-stalled-worker-sessions-nudge-once-then-ask.md)の決定4）が、止まったworkerのsessionの検知の閾値を秒で持つ。読み込みは`[run.env]`と同じ`src/infrastructure/run_env.rs`（`parse_config`と、fileを読む`load_stall_config`）で、型と既定値は`src/domain/stall.rs`の`StallConfig`。
 

@@ -2,10 +2,12 @@
 id: adr-t906-1
 type: adr
 title: inboxのwatchの生存を、watcherの記録と可視化・pluginのSessionStart / Stop hook・supervisorによるidleのinboxへの知らせの3層で保証する（ADR-0016決定3とADR-0022決定2をamends）
-status: accepted
+status: superseded
 created: 2026-09-28
 updated: 2026-09-28
 accepted_on: 2026-09-28
+superseded_by: adr-t1433-5
+superseded_on: 2026-10-03
 amends:
   - adr-0016 decision 3
   - adr-0022 decision 2
@@ -30,6 +32,8 @@ related:
 ---
 
 # ADR-t906-1: inboxのwatchの生存を3層で保証する（ADR-0016決定3とADR-0022決定2をamends）
+
+> **置き換え済み（2026-10-03）**: このADRの決定は現在有効ではない。現行の決定は[ADR-t1433-5](2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)を読む。
 
 ## Context
 

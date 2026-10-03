@@ -14,6 +14,8 @@ related:
 
 # `session` wrapper
 
+> **予定（goal 92）**: [ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)で対話の経路を廃止し、[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)でsession wrapperは非対話で、supervisorから切り離したbackgroundのprocess（下の「backgroundのwrapper」）だけで動く。cmux workspaceの中でTTYを持って起動する経路、`workspace_id`の保存を待つこと、対話の`agent`の起動（2と3）は無くなる。`dagq.toml`の`[headless] wrapper`は受け付けて無視し（値に関わらずbackground）、後で`dagq.toml`から消す。この文書の記述は、goal 92の後続のtaskが実装するまでの今の姿である。
+
 cmux workspaceが起動する隠しコマンド。TTYが必要で、パイプからは起動しない（`--background`で起動されたものを除く。下の「backgroundのwrapper」）。ユースケースは`src/application/session.rs`の`run_session`で、queue（`Queue`）、agentのコマンド（`AgentProvider`）、その起動（`Spawner`、標準入出力は端末を継承）、`prompt.txt`の読み取り（`RunFiles`）とwrapperのpidを`Session`として受け取る。`runtime::session`はTTYを確かめ、`SqliteQueue`、`ClaudeCode`、`LocalSpawner`、`LocalRunFiles`を渡す入口だけ。
 
 1. `workspace_id`が保存されるまで待ち（45秒以内）、wrapperのPIDを一度だけ登録する。leaseが無効なら登録できない。

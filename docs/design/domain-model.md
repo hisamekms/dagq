@@ -36,6 +36,8 @@ related:
 
 # Domain model
 
+> **予定（goal 92）**: workerの経路はADR-t1340-1を置き換えた[ADR-t1433-2](../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)で非対話だけになる。`WorkerMode::Interactive`は登録済みのtaskと過去のrunの記録として読めるまま残り、新しいtaskには選べない。後続のtaskが実装するまでの今の姿である。
+
 ## Implementation status
 
 ステップ2で`Task`、`TaskDependency`、`TaskRun`、`RunEvent`、ステップ3で`RunProcess`と`SupervisorLease`、ステップ4で`Receipt`を実装した。ステップ6（[ADR-0007](../adr/0007-run-level-leases-parallel-execution.md)）で`SupervisorLease`を`RunLease`に置き換え、ステップ7（[ADR-0008](../adr/0008-merge-queue-squash-landing.md)）でrunの`integrating`と`needs_session`、`IntegrationOutcome`の`needs_session` / `failed` / `no_run_awaiting`を加えた。[plan](../plans/current.md#after-first-dogfooding)のステップ9の後に`Goal`と`Task.goal_id` / `Task.context`、receiptの`follow_ups`を加えた（[ADR-0009](../adr/0009-goal-groups-tasks.md)）。goal 12でgoalのdraft状態（`GoalStatus`）と、run_eventsのkind `observation`で表すnote（`NewNote`）を加えた（ADR-0024の決定4、5）。goal 8のtask 73で`Task.required_evidence`（`EvidenceCheck`）と`Receipt::missing_evidence`を加えた（ADR-0019の決定5）。goal 21のtask 195で失敗・保留・中断の理由の分類コード`ReasonCode`（`src/domain/reason.rs`）を加えた（[ADR-0034](../adr/0034-domain-events-carry-reason-codes-actor-and-configuration-changes.md)の決定1。[理由の分類コード](#理由の分類コードcode)）。goal 20のtask 178でtaskからgoalへの依存（`TaskGoalDependency`）を加えた（[ADR-0038](../adr/0038-task-depends-on-a-goal-until-it-is-achieved.md)）。Rustの型と手動遷移規則は`src/domain/`（構成は[集約: TaskとGoal](#集約-taskとgoal)）、ストレージとprovider/workspaceの契約は`src/application.rs`、永続化は`src/infrastructure/sqlite.rs`と`src/infrastructure/runtime_store/`（runのportごとのmodule）にある。`AgentSession`と`Workspace`は独立エンティティにせず、TaskRunの`id`（Claude session ID）と`workspace_id`で表す。

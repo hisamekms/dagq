@@ -6,6 +6,8 @@ status: accepted
 created: 2026-09-25
 updated: 2026-09-25
 accepted_on: 2026-09-25
+amended_by:
+  - adr-t1433-3
 supersedes:
   - adr-0012
 owners:
