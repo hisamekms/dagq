@@ -220,6 +220,7 @@ impl Setup {
 
 #[test]
 fn a_release_build_records_the_latest_release_and_asks_about_it() {
+    headless_workers();
     let s = setup("", "0.3.0", false);
     s.supervise();
 
@@ -266,6 +267,7 @@ fn a_release_build_records_the_latest_release_and_asks_about_it() {
 
 #[test]
 fn a_development_build_and_release_off_do_not_look() {
+    headless_workers();
     let dev = setup("", "0.4.0-dev+abc", false);
     dev.supervise();
     let off = setup("[update]\nrelease = \"off\"\n", "0.3.0", false);
@@ -282,6 +284,7 @@ fn a_development_build_and_release_off_do_not_look() {
 
 #[test]
 fn a_look_by_another_supervisor_within_the_interval_is_not_repeated() {
+    headless_workers();
     let s = setup("[update]\ncheck_interval_secs = 3600\n", "0.3.0", false);
     s.record(
         EventKind::ReleaseChecked,
@@ -303,6 +306,7 @@ fn a_look_by_another_supervisor_within_the_interval_is_not_repeated() {
 
 #[test]
 fn past_the_interval_the_etag_is_sent_and_a_304_keeps_the_last_result() {
+    headless_workers();
     let s = setup("[update]\ncheck_interval_secs = 60\n", "0.3.0", false);
     s.record(
         EventKind::ReleaseChecked,
@@ -324,6 +328,7 @@ fn past_the_interval_the_etag_is_sent_and_a_304_keeps_the_last_result() {
 
 #[test]
 fn an_index_that_cannot_be_read_is_recorded_and_asks_nothing() {
+    headless_workers();
     let s = setup("", "0.3.0", true);
     s.supervise();
     assert_eq!(s.calls().len(), 1);
@@ -341,6 +346,7 @@ fn an_index_that_cannot_be_read_is_recorded_and_asks_nothing() {
 
 #[test]
 fn doctor_warns_of_a_wrong_update_value_taken_as_its_default() {
+    headless_workers();
     let s = setup(
         "[update]\nrelease = \"sometimes\"\ncheck_interval_secs = 0\n",
         "0.3.0",
@@ -382,6 +388,7 @@ fn record_latest(s: &Setup, latest: &str) {
 /// it as `superseded` and asks about itself.
 #[test]
 fn a_new_release_opens_one_approve_release_and_a_newer_one_supersedes_it() {
+    headless_workers();
     let s = setup("", "0.3.0", false);
     s.supervise();
     let asks = s.release_asks();
@@ -424,6 +431,7 @@ fn a_new_release_opens_one_approve_release_and_a_newer_one_supersedes_it() {
 /// `skip` leaves the release, which is not asked about again.
 #[test]
 fn the_install_answer_starts_the_job_and_retry_and_skip_follow_its_failure() {
+    headless_workers();
     let s = setup("", "0.3.0", false);
     s.supervise();
     let ask = s.release_asks().remove(0);
@@ -497,6 +505,7 @@ fn the_install_answer_starts_the_job_and_retry_and_skip_follow_its_failure() {
 /// A skipped release is not asked about again; the next one is.
 #[test]
 fn a_skipped_release_is_not_asked_about_again() {
+    headless_workers();
     let s = setup("", "0.3.0", false);
     s.supervise();
     let ask = s.release_asks().remove(0);
@@ -514,6 +523,7 @@ fn a_skipped_release_is_not_asked_about_again() {
 /// `release = "auto"` starts the job without an ask, once per release.
 #[test]
 fn release_auto_installs_without_asking() {
+    headless_workers();
     let s = setup("[update]\nrelease = \"auto\"\n", "0.3.0", false);
     s.supervise();
     assert!(s.release_asks().is_empty());
@@ -529,6 +539,7 @@ fn release_auto_installs_without_asking() {
 /// person.
 #[test]
 fn a_development_build_applies_no_release_answer() {
+    headless_workers();
     let s = setup("", "0.4.0-dev+abc", false);
     let mut queue = SqliteQueue::open(&s.db).unwrap();
     let ask = queue
@@ -555,6 +566,7 @@ fn a_development_build_applies_no_release_answer() {
 /// its own.
 #[test]
 fn an_interrupted_release_job_is_reported_not_retried() {
+    headless_workers();
     let s = setup("", "0.3.0", false);
     record_latest(&s, "0.4.0");
     s.record(
@@ -605,6 +617,7 @@ fn plugin_claude(s: &Setup, version: &str) -> PathBuf {
 /// two update commands with the supervisor's `claude` and nothing else.
 #[test]
 fn a_plugin_older_than_the_latest_binary_is_asked_about_and_updated_alone() {
+    headless_workers();
     let s = setup("", "0.4.0", false);
     let claude = plugin_claude(&s, "0.3.0");
     s.supervise_with_claude(&claude);
@@ -663,6 +676,7 @@ fn a_plugin_older_than_the_latest_binary_is_asked_about_and_updated_alone() {
 /// installed plugin (ADR-t618-2 decision 3).
 #[test]
 fn a_plugin_dir_supervisor_leaves_the_installed_plugin() {
+    headless_workers();
     let mut s = setup("", "0.4.0", false);
     s.options.plugin_dir = Some(s.repo.clone());
     let claude = plugin_claude(&s, "0.3.0");
@@ -709,6 +723,7 @@ fn answered_release_ask(s: &Setup, release: &str, plugin_only: Option<bool>, ans
 /// of the binary, nor is it dropped (its release is the latest).
 #[test]
 fn a_plugin_answer_applied_by_another_build_stays_about_the_plugin() {
+    headless_workers();
     let s = setup("", "0.3.0", false);
     record_look(&s, "0.3.0", "0.4.0");
     answered_release_ask(&s, "0.4.0", Some(true), "install");
@@ -724,6 +739,7 @@ fn a_plugin_answer_applied_by_another_build_stays_about_the_plugin() {
 /// already of its release applies it: not `plugin_only`, and no plugin job.
 #[test]
 fn a_binary_answer_applied_by_its_own_build_is_not_about_the_plugin() {
+    headless_workers();
     let s = setup("", "0.4.0", false);
     record_look(&s, "0.4.0", "0.4.0");
     answered_release_ask(&s, "0.4.0", Some(false), "install");
@@ -738,6 +754,7 @@ fn a_binary_answer_applied_by_its_own_build_is_not_about_the_plugin() {
 /// its release is the build that applies the answer, else the binary's.
 #[test]
 fn an_ask_without_its_purpose_is_about_the_plugin_only_on_its_own_build() {
+    headless_workers();
     for (current, plugin_only) in [("0.4.0", true), ("0.3.0", false)] {
         let s = setup("", current, false);
         record_look(&s, current, "0.4.0");
@@ -754,6 +771,7 @@ fn an_ask_without_its_purpose_is_about_the_plugin_only_on_its_own_build() {
 /// it, and the newer release is asked about.
 #[test]
 fn a_plugin_install_behind_a_newer_release_is_dropped_with_its_reason() {
+    headless_workers();
     let s = setup("", "0.4.0", false);
     record_look(&s, "0.4.0", "0.5.0");
     answered_release_ask(&s, "0.4.0", Some(true), "install");

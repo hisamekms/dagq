@@ -65,6 +65,7 @@ fn rows(host: &Path) -> Vec<String> {
 /// retention go and any other file stays.
 #[test]
 fn supervisor_records_the_host_load_while_it_runs_and_prunes_old_files() {
+    headless_workers();
     let (dir, repo, db) = fixture();
     SqliteQueue::open(&db)
         .unwrap()
@@ -152,6 +153,7 @@ fn supervisor_records_the_host_load_while_it_runs_and_prunes_old_files() {
 /// claim nor landing: the run lands as without the recording.
 #[test]
 fn a_failed_sample_stops_nothing() {
+    headless_workers();
     let (_dir, repo, db) = fixture();
     let host = host_dir(&db);
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);

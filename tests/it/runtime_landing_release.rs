@@ -80,6 +80,7 @@ fn repairs<'a>(detail: &'a dagq::domain::TaskDetail, repair: &str) -> Vec<&'a Va
 /// without a review or a person, and the other task's landing follows.
 #[test]
 fn a_passed_run_whose_landing_died_is_released_and_lands_again() {
+    headless_workers();
     let (_dir, repo, db, run, backend) = dead_landing(Some("pass"));
     let mut queue = SqliteQueue::open(&db).unwrap();
     // Only task 2 is reviewed.
@@ -126,6 +127,7 @@ fn a_passed_run_whose_landing_died_is_released_and_lands_again() {
 /// again, as one just validated, and lands on the review's pass.
 #[test]
 fn a_run_neither_approved_nor_passed_is_reviewed_again_once_its_landing_died() {
+    headless_workers();
     let (_dir, repo, db, _run, backend) = dead_landing(None);
     let mut queue = SqliteQueue::open(&db).unwrap();
     let reviewer = TestReviewer::new(&[verdict_json("pass"), verdict_json("pass")]);
@@ -161,6 +163,7 @@ fn a_run_neither_approved_nor_passed_is_reviewed_again_once_its_landing_died() {
 /// integrating, and the next pass after it ends releases it.
 #[test]
 fn a_dead_landing_is_not_released_while_a_process_works_in_its_worktree() {
+    headless_workers();
     let (_dir, repo, db, run, backend) = dead_landing(Some("pass"));
     let mut queue = SqliteQueue::open(&db).unwrap();
     // Not a child of this process, which is the supervisor's: the dead
@@ -278,6 +281,7 @@ impl Drop for Reaped {
 /// outside the worktree is left alone.
 #[test]
 fn a_process_past_its_grace_is_stopped_and_the_dead_landing_released() {
+    headless_workers();
     let (_dir, repo, db, run, backend) = dead_landing(Some("pass"));
     let worktree = PathBuf::from(run.worktree_path().unwrap());
     let hung = orphan_in(&worktree);
@@ -340,6 +344,7 @@ impl ProcessControl for Unstoppable {
 /// stopped it, the next pass releases the run and both tasks land.
 #[test]
 fn a_process_that_outlives_its_stop_is_the_inboxs_once() {
+    headless_workers();
     let (_dir, repo, db, run, backend) = dead_landing(Some("pass"));
     let worktree = PathBuf::from(run.worktree_path().unwrap());
     let hung = orphan_in(&worktree);
@@ -411,6 +416,7 @@ fn a_process_that_outlives_its_stop_is_the_inboxs_once() {
 /// and integrate`) and the supervisor lands it without reviewing it again.
 #[test]
 fn a_passed_run_a_person_recovered_from_its_landing_is_queued_to_land() {
+    headless_workers();
     let (_dir, repo, db, run, backend) = dead_landing(Some("pass"));
     let recovered = runtime::recover(&db, run.id()).unwrap();
     assert_eq!(recovered["run"]["status"], "awaiting_integration");
@@ -439,6 +445,7 @@ fn a_passed_run_a_person_recovered_from_its_landing_is_queued_to_land() {
 /// second time: the run is integrated with the commit already on main.
 #[test]
 fn a_landing_that_reached_main_before_its_supervisor_died_is_not_landed_twice() {
+    headless_workers();
     let (_dir, repo, db, run, backend) = dead_landing(Some("pass"));
     // What the dead landing did: the squash of the run on main, with its
     // trailers, before it recorded anything.
@@ -486,6 +493,7 @@ fn a_landing_that_reached_main_before_its_supervisor_died_is_not_landed_twice() 
 /// commit and lands it, instead of parking the run for a session.
 #[test]
 fn a_landing_that_died_after_its_rebase_lands_the_rebased_head() {
+    headless_workers();
     let (_dir, repo, db, run, backend) = dead_landing(Some("pass"));
     fs::write(repo.join("other.txt"), "moved\n").unwrap();
     git(&repo, &["add", "other.txt"]);
@@ -523,6 +531,7 @@ fn a_landing_that_died_after_its_rebase_lands_the_rebased_head() {
 /// for the next supervisor.
 #[test]
 fn a_draining_supervisor_releases_a_dead_landing_and_leaves_it_queued() {
+    headless_workers();
     let (_dir, repo, db, run, backend) = dead_landing(Some("pass"));
     let options = supervise_options(4, true);
     options
@@ -583,6 +592,7 @@ impl ProcessControl for Unlisted {
 /// land.
 #[test]
 fn processes_unlisted_past_twice_the_grace_are_the_inboxs_once() {
+    headless_workers();
     let (_dir, repo, db, run, backend) = dead_landing(Some("pass"));
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -678,6 +688,7 @@ fn processes_unlisted_past_twice_the_grace_are_the_inboxs_once() {
 /// with it), the run is released and lands.
 #[test]
 fn a_live_supervisors_landing_and_its_processes_are_left_alone() {
+    headless_workers();
     let (_dir, repo, db, run, backend) = dead_landing(Some("pass"));
     let worktree = PathBuf::from(run.worktree_path().unwrap());
     let hung = orphan_in(&worktree);

@@ -51,6 +51,7 @@ fn opus() -> (Value, Value, Value) {
 /// explicitly, and its claim records them without a group.
 #[test]
 fn workers_start_at_opus_medium_by_default() {
+    headless_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     supervise(&db, &repo, &backend).unwrap();
@@ -59,7 +60,7 @@ fn workers_start_at_opus_medium_by_default() {
     assert_eq!(session_of(&claimed(&mut queue, 1)), opus());
     let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
     assert_eq!(
-        session_models(&db),
+        turn_models(&db),
         [
             json!({"run_id": run.id(), "resume": false, "model": "claude-opus-5-5", "effort": "medium"})
         ]
@@ -71,6 +72,7 @@ fn workers_start_at_opus_medium_by_default() {
 /// stay at the default outside any group.
 #[test]
 fn the_trial_alternates_the_mechanical_tasks_of_the_lower_third() {
+    headless_workers();
     let (_dir, repo, db) = fixture();
     fs::write(
         repo.join("dagq.toml"),
@@ -117,7 +119,7 @@ fn the_trial_alternates_the_mechanical_tasks_of_the_lower_third() {
             .as_str()
             .to_owned()
     };
-    let started: HashMap<String, Value> = session_models(&db)
+    let started: HashMap<String, Value> = turn_models(&db)
         .into_iter()
         .map(|line| (line["run_id"].as_str().unwrap().to_owned(), line))
         .collect();
@@ -133,6 +135,7 @@ fn the_trial_alternates_the_mechanical_tasks_of_the_lower_third() {
 /// trial off leaves every claim at the default.
 #[test]
 fn claims_choose_the_session_in_their_transaction() {
+    headless_workers();
     let (_dir, _repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     for title in ["b", "c", "d"] {
@@ -185,6 +188,7 @@ fn claims_choose_the_session_in_their_transaction() {
 /// speed and their task-caused rework.
 #[test]
 fn stats_compare_the_groups() {
+    headless_workers();
     let (_dir, _repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     add_ready_task(&mut queue, "b", &[]);
@@ -272,6 +276,7 @@ fn stats_compare_the_groups() {
 /// groups and of the host's Claude version.
 #[test]
 fn a_codex_run_is_outside_the_trial() {
+    headless_workers();
     let (_dir, _repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let codex = queue

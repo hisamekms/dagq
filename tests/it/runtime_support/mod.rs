@@ -378,7 +378,7 @@ pub fn add_ready_task(queue: &mut SqliteQueue, title: &str, dependencies: &[Task
             goal_id: None,
             context: String::new(),
             provider: None,
-            worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
+            worker_mode: Some(worker_mode()),
         })
         .unwrap();
     queue
@@ -387,75 +387,41 @@ pub fn add_ready_task(queue: &mut SqliteQueue, title: &str, dependencies: &[Task
     task.id()
 }
 
-/// Shell prelude for the fake agent: `receipt COMMIT [RUN_ID]` writes an
-/// atomically renamed receipt claiming success with evidence on every check,
-/// `idle` mimics Claude's Stop hook (`idle_bg` with background work still
-/// running, `idle_bg_done` once it ended, as Claude Code 2.1.281 writes
-/// `background_tasks`), and `await_exit` blocks until the test
-/// workspace delivers the supervisor's exit request.
-pub const AGENT_PRELUDE: &str = concat!(
-    watchdog!(),
-    r#"
+/// The fake worker's own helpers, the same in an interactive session and in
+/// a headless turn ([`TURN_PRELUDE`], goal 92): `receipt COMMIT [RUN_ID]`
+/// writes an atomically renamed receipt claiming success with evidence on
+/// every check, and `commit MESSAGE` rewrites `change.txt` and commits it.
+macro_rules! worker_helpers {
+    () => {
+        r#"
 test -f seed.txt || exit 99
-printf 'fixture log\n' > "$LOG"
 receipt() {
   printf '{"run_id":"%s","result":"succeeded","commit":"%s","tests":{"status":"passed","evidence_or_reason":"ran"},"e2e":{"status":"not_applicable","evidence_or_reason":"no e2e surface"},"subagent_review":{"status":"passed","evidence_or_reason":"reviewed"},"summary":"done"}' "${2:-$RUN_ID}" "$1" > "$RECEIPT.tmp"
   mv "$RECEIPT.tmp" "$RECEIPT"
 }
-idle() {
-  printf '{"session_id":"%s","hook_event_name":"Stop","stop_hook_active":false}' "$RUN_ID" > "$IDLE.tmp"
-  mv "$IDLE.tmp" "$IDLE"
-}
-idle_bg() {
-  printf '{"session_id":"%s","hook_event_name":"Stop","stop_hook_active":false,"background_tasks":[{"id":"b1","type":"shell","status":"running","description":"cargo test","command":"cargo test"}]}' "$RUN_ID" > "$IDLE.tmp"
-  mv "$IDLE.tmp" "$IDLE"
-}
-idle_bg_done() {
-  printf '{"session_id":"%s","hook_event_name":"Stop","stop_hook_active":false,"background_tasks":[]}' "$RUN_ID" > "$IDLE.tmp"
-  mv "$IDLE.tmp" "$IDLE"
-}
-await_exit() { while [ ! -f "$EXIT" ]; do sleep 0.05; done; }
 commit() { printf 'change by %s\n' "$RUN_ID" > change.txt && git add change.txt && git commit -q -m "$1"; }
 "#
-);
-
-pub const VALID_AGENT: &str = "commit work; receipt \"$(git rev-parse HEAD)\"";
-
-/// The first workspace the test backend hands out; see `workspace_id`.
-pub const WORKSPACE_ID: &str = "01234567-89ab-4def-8123-000000000000";
-
-pub fn workspace_id(n: usize) -> String {
-    format!("01234567-89ab-4def-8123-{n:012x}")
+    };
 }
 
-/// Shell prelude for a resumed session: `await_message` blocks until the
-/// supervisor's resolution request arrived (the test backend writes it to
-/// `$MESSAGE`) and sets `$MAIN` to the main it names; `receipt` / `idle` /
-/// `await_exit` are the worker's.
-pub const RESUME_PRELUDE: &str = concat!(
-    watchdog!(),
-    r#"
+/// The resumed worker's `receipt COMMIT [RESULT] [SUMMARY]`, the same in an
+/// interactive resumed session and a headless resume turn.
+macro_rules! resume_receipt {
+    () => {
+        r#"
 receipt() {
   printf '{"run_id":"%s","result":"%s","commit":"%s","tests":{"status":"passed","evidence_or_reason":"reran after the rebase"},"e2e":{"status":"not_applicable","evidence_or_reason":"no e2e surface"},"subagent_review":{"status":"not_applicable","evidence_or_reason":"resumed session"},"summary":"%s"}' "$RUN_ID" "${2:-succeeded}" "$1" "${3:-resolved}" > "$RECEIPT.tmp"
   mv "$RECEIPT.tmp" "$RECEIPT"
 }
-idle() {
-  printf '{"session_id":"%s","hook_event_name":"Stop","stop_hook_active":false}' "$RUN_ID" > "$IDLE.tmp"
-  mv "$IDLE.tmp" "$IDLE"
+"#
+    };
 }
-idle_bg() {
-  printf '{"session_id":"%s","hook_event_name":"Stop","stop_hook_active":false,"background_tasks":[{"id":"b1","type":"shell","status":"running","description":"cargo test","command":"cargo test"}]}' "$RUN_ID" > "$IDLE.tmp"
-  mv "$IDLE.tmp" "$IDLE"
-}
-idle_bg_done() {
-  printf '{"session_id":"%s","hook_event_name":"Stop","stop_hook_active":false,"background_tasks":[]}' "$RUN_ID" > "$IDLE.tmp"
-  mv "$IDLE.tmp" "$IDLE"
-}
-await_exit() { while [ ! -f "$EXIT" ]; do sleep 0.05; done; }
-await_message() {
-  while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
-  MAIN=$(sed -n 's/.*main is now \([0-9a-f]*\) .*/\1/p' "$MESSAGE" | head -n 1)
-}
+
+/// The resumed worker's `resolve`, which rebases onto `$MAIN` (see
+/// [`RESUME_PRELUDE`]).
+macro_rules! resolve_helpers {
+    () => {
+        r#"
 # The supervisor polls `git status` in the worktree. It runs with
 # GIT_OPTIONAL_LOCKS=0 now, but a git that took index.lock for a moment
 # there made a session's `git add` or `git commit` fail (and failed tests
@@ -489,7 +455,75 @@ resolve() {
   done
 }
 "#
+    };
+}
+
+/// Shell prelude for the fake agent: the [`worker_helpers`] (`receipt`,
+/// `commit`), `idle` mimics Claude's Stop hook (`idle_bg` with background
+/// work still running, `idle_bg_done` once it ended, as Claude Code
+/// 2.1.281 writes `background_tasks`), and `await_exit` blocks until the
+/// test workspace delivers the supervisor's exit request.
+pub const AGENT_PRELUDE: &str = concat!(
+    watchdog!(),
+    worker_helpers!(),
+    r#"
+printf 'fixture log\n' > "$LOG"
+idle() {
+  printf '{"session_id":"%s","hook_event_name":"Stop","stop_hook_active":false}' "$RUN_ID" > "$IDLE.tmp"
+  mv "$IDLE.tmp" "$IDLE"
+}
+idle_bg() {
+  printf '{"session_id":"%s","hook_event_name":"Stop","stop_hook_active":false,"background_tasks":[{"id":"b1","type":"shell","status":"running","description":"cargo test","command":"cargo test"}]}' "$RUN_ID" > "$IDLE.tmp"
+  mv "$IDLE.tmp" "$IDLE"
+}
+idle_bg_done() {
+  printf '{"session_id":"%s","hook_event_name":"Stop","stop_hook_active":false,"background_tasks":[]}' "$RUN_ID" > "$IDLE.tmp"
+  mv "$IDLE.tmp" "$IDLE"
+}
+await_exit() { while [ ! -f "$EXIT" ]; do sleep 0.05; done; }
+"#
 );
+
+pub const VALID_AGENT: &str = "commit work; receipt \"$(git rev-parse HEAD)\"";
+
+/// The first workspace the test backend hands out; see `workspace_id`.
+pub const WORKSPACE_ID: &str = "01234567-89ab-4def-8123-000000000000";
+
+pub fn workspace_id(n: usize) -> String {
+    format!("01234567-89ab-4def-8123-{n:012x}")
+}
+
+/// Shell prelude for a resumed session: `await_message` blocks until the
+/// supervisor's resolution request arrived (the test backend writes it to
+/// `$MESSAGE`) and sets `$MAIN` to the main it names; `receipt` / `idle` /
+/// `await_exit` are the worker's.
+pub const RESUME_PRELUDE: &str = concat!(
+    watchdog!(),
+    resume_receipt!(),
+    r#"
+idle() {
+  printf '{"session_id":"%s","hook_event_name":"Stop","stop_hook_active":false}' "$RUN_ID" > "$IDLE.tmp"
+  mv "$IDLE.tmp" "$IDLE"
+}
+idle_bg() {
+  printf '{"session_id":"%s","hook_event_name":"Stop","stop_hook_active":false,"background_tasks":[{"id":"b1","type":"shell","status":"running","description":"cargo test","command":"cargo test"}]}' "$RUN_ID" > "$IDLE.tmp"
+  mv "$IDLE.tmp" "$IDLE"
+}
+idle_bg_done() {
+  printf '{"session_id":"%s","hook_event_name":"Stop","stop_hook_active":false,"background_tasks":[]}' "$RUN_ID" > "$IDLE.tmp"
+  mv "$IDLE.tmp" "$IDLE"
+}
+await_exit() { while [ ! -f "$EXIT" ]; do sleep 0.05; done; }
+await_message() {
+  while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
+  MAIN=$(sed -n 's/.*main is now \([0-9a-f]*\) .*/\1/p' "$MESSAGE" | head -n 1)
+}
+"#,
+    resolve_helpers!()
+);
+
+mod turns;
+pub use turns::*;
 
 pub struct TestProvider {
     pub script: String,
@@ -800,6 +834,9 @@ pub struct TestWorkspace {
     /// ([`LateAgentSpawner`]), as a wrapper slowed by load does (task 1274).
     /// A headless session ignores it.
     pub agent_registers_late: bool,
+    /// Made after [`headless_workers`]: a headless run with no
+    /// [`Self::headless`] runs its script as its turns ([`Self::claude_for`]).
+    pub turn_scripts: bool,
 }
 
 impl TestWorkspace {
@@ -860,6 +897,7 @@ impl TestWorkspace {
             sccache: None,
             inherited_env: Vec::new(),
             agent_registers_late: false,
+            turn_scripts: worker_mode() == dagq::domain::worker::WorkerMode::Headless,
         }
     }
     /// Let cmux list `workspace` as if an earlier supervisor opened it.
@@ -974,7 +1012,8 @@ impl WorkspaceBackend for TestWorkspace {
             ));
             return Ok(workspace);
         }
-        let headless = headless_provider(run, self.headless.as_deref(), self.codex.as_deref());
+        let claude = self.claude_for(run, false)?;
+        let headless = headless_provider(run, claude.as_deref(), self.codex.as_deref());
         let ready = self.headless_ready.clone();
         let sccache = self.sccache.clone();
         let inherited_env = self.inherited_env.clone();
@@ -1078,7 +1117,8 @@ impl WorkspaceBackend for TestWorkspace {
             tags.description.as_deref(),
             Some(format!("run {} resume", run.id()).as_str())
         );
-        let headless = headless_provider(run, self.headless.as_deref(), self.codex.as_deref());
+        let claude = self.claude_for(run, true)?;
+        let headless = headless_provider(run, claude.as_deref(), self.codex.as_deref());
         let script = match &headless {
             Some(_) => String::new(),
             None => self
@@ -2212,6 +2252,8 @@ fn run_agent_with_review_retry(
     let detail = queue.show(TaskId::new(1)).unwrap();
     assert_eq!(detail.task.status(), TaskStatus::InProgress);
     let run = &detail.runs[0];
+    // The worker the test chose ([`headless_workers`]).
+    assert_eq!(run.worker_mode(), worker_mode());
     assert_eq!(outcome["runs"][0]["id"], json!(run.id()));
     // Runs live in `runs/` next to the (canonicalized) database, worktree inside.
     let run_dir = db
@@ -2638,7 +2680,7 @@ fn awaiting_run_with_review_retry(retry: bool) -> (Fixture, PathBuf, PathBuf, Ta
             goal_id: None,
             context: String::new(),
             provider: None,
-            worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
+            worker_mode: Some(worker_mode()),
         })
         .unwrap();
     queue

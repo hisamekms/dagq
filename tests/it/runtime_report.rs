@@ -33,6 +33,7 @@ fn report_events(db: &Path) -> Vec<Value> {
 
 #[test]
 fn supervisor_writes_the_reports_it_owes_once_and_prunes_old_ones() {
+    headless_workers();
     let (_dir, repo, db) = fixture();
     SqliteQueue::open(&db)
         .unwrap()
@@ -122,6 +123,7 @@ fn supervisor_writes_the_reports_it_owes_once_and_prunes_old_ones() {
 /// Of two writers of the same report, one records it.
 #[test]
 fn a_report_is_recorded_once() {
+    headless_workers();
     let (_dir, _repo, db) = fixture();
     let queue = SqliteQueue::open(&db).unwrap();
     let payload = json!({"period": "day", "label": "2026-09-26", "supervisor": "a"});
@@ -146,6 +148,7 @@ fn a_report_is_recorded_once() {
 /// a temporary file an ended writer left is removed once it is old.
 #[test]
 fn the_backfill_stops_at_the_retention_and_old_temporary_files_go() {
+    headless_workers();
     let (_dir, repo, db) = fixture();
     SqliteQueue::open(&db)
         .unwrap()
@@ -197,6 +200,7 @@ fn stub(bin: &Path, name: &str, body: &str) {
 /// of the report is written.
 #[test]
 fn the_reports_carry_the_dependency_diagram_or_why_not() {
+    headless_workers();
     let (dir, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     queue
@@ -218,7 +222,7 @@ fn the_reports_carry_the_dependency_diagram_or_why_not() {
                 goal_id: None,
                 context: String::new(),
                 provider: None,
-                worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
+                worker_mode: Some(worker_mode()),
             })
             .unwrap()
             .id()

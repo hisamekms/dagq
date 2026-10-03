@@ -49,6 +49,7 @@ fn lines(path: &Path) -> Vec<String> {
 /// and its receipt backs none.
 #[test]
 fn a_passed_run_that_needs_the_e2e_runs_it_on_the_host_and_lands() {
+    headless_workers();
     let (dir, repo, db) = fixture();
     with_e2e_paths(&repo, "[\"change.txt\"]");
     let ran = dir.path().join("ran");
@@ -129,6 +130,7 @@ fn a_passed_run_that_needs_the_e2e_runs_it_on_the_host_and_lands() {
 /// run that needs one, recording that none ran.
 #[test]
 fn a_run_that_needs_no_e2e_or_has_none_lands_without_running_one() {
+    headless_workers();
     let (dir, repo, db) = fixture();
     with_e2e_paths(&repo, "[\"src/**\"]");
     let ran = dir.path().join("ran");
@@ -174,6 +176,7 @@ fn a_run_that_needs_no_e2e_or_has_none_lands_without_running_one() {
 /// reviewed and its e2e run again, and the run lands once it passes.
 #[test]
 fn a_failed_e2e_parks_the_run_for_a_resume_and_its_fix_lands() {
+    headless_workers();
     let (dir, repo, db) = fixture();
     with_e2e_paths(&repo, "[\"change.txt\"]");
     let ran = dir.path().join("ran");
@@ -229,7 +232,7 @@ fn a_failed_e2e_parks_the_run_for_a_resume_and_its_fix_lands() {
         assert!(reason.contains(part), "{part}: {reason}");
     }
     // The resume asked to fix the failed tests.
-    let text = &backend.texts()[0].1;
+    let text = &session_texts(&backend, run)[0];
     assert!(
         text.contains("the e2e the runtime ran on the host before landing it failed"),
         "{text}"
@@ -257,6 +260,7 @@ fn a_failed_e2e_parks_the_run_for_a_resume_and_its_fix_lands() {
 /// lands, and the event names it quarantined.
 #[test]
 fn a_mark_committed_on_main_passes_a_test_that_fails_its_rerun() {
+    headless_workers();
     let (dir, repo, db) = fixture();
     fs::create_dir_all(repo.join(".config")).unwrap();
     fs::write(
@@ -294,6 +298,7 @@ fn a_mark_committed_on_main_passes_a_test_that_fails_its_rerun() {
 /// and both land.
 #[test]
 fn the_runs_of_a_supervisor_run_their_e2e_one_at_a_time() {
+    headless_workers();
     let (dir, repo, db) = fixture();
     with_e2e_paths(&repo, "[\"change-*.txt\"]");
     {
@@ -336,6 +341,7 @@ fn the_runs_of_a_supervisor_run_their_e2e_one_at_a_time() {
 /// its e2e passes.
 #[test]
 fn an_e2e_past_its_timeout_is_run_again_instead_of_sending_the_run_back() {
+    headless_workers();
     let (dir, repo, db) = fixture();
     with_e2e_paths(&repo, "[\"change.txt\"]");
     let count = shell_join(&[dir.path().join("count").display().to_string()]);

@@ -66,6 +66,7 @@ fn short_disk(_: &Path) -> Option<u64> {
 /// claimed and `claim_resumed` recorded.
 #[test]
 fn no_run_is_claimed_while_the_disk_is_short_and_the_inbox_is_told_once() {
+    headless_workers();
     let (_dir, repo, db) = fixture();
     SHORT.store(true, Ordering::SeqCst);
     let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
@@ -206,6 +207,7 @@ fn short_while_left(_: &Path) -> Option<u64> {
 /// next task without holding or asking.
 #[test]
 fn a_cleanup_that_makes_room_claims_without_holding() {
+    headless_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, BUILDING_AGENT);
     supervise(&db, &repo, &backend).unwrap();
@@ -279,6 +281,7 @@ fn short_at_landing(_: &Path) -> Option<u64> {
 /// `landing_resumed` is recorded and the runtime closes the ask.
 #[test]
 fn a_landing_waits_for_room_before_its_verification() {
+    headless_workers();
     let (_dir, repo, db) = fixture();
     FREED.store(false, Ordering::SeqCst);
     *LANDING_DB.lock().unwrap() = Some(db.clone());
@@ -411,6 +414,7 @@ fn integrate_on(
 /// `build_outputs_removed` as the supervisor's does; with room it lands.
 #[test]
 fn a_persons_integrate_refuses_to_land_while_the_disk_is_short() {
+    headless_workers();
     let (_dir, repo, db, run) = awaiting_run();
     let refused = |disk: Option<DiskConfig>| {
         let error = format!(
@@ -451,6 +455,7 @@ fn a_persons_integrate_refuses_to_land_while_the_disk_is_short() {
 /// space unread, a person's `integrate` checks nothing and lands.
 #[test]
 fn a_persons_integrate_without_a_threshold_or_a_reading_lands() {
+    headless_workers();
     let (_dir, repo, db, _run) = awaiting_run();
     let outcome = integrate_on(&db, &repo, Some(DiskConfig::default()), half_a_gibibyte).unwrap();
     assert_eq!(outcome["outcome"], "integrated", "{outcome}");
@@ -479,6 +484,7 @@ fn short_while_scratchpad(_: &Path) -> Option<u64> {
 /// is then the largest build outputs and the largest scratchpad together.
 #[test]
 fn a_cleanup_for_room_removes_the_scratchpads_and_the_needs_count_them() {
+    headless_workers();
     const SCRATCH: usize = 1 << 20;
     let (dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, BUILDING_AGENT);
@@ -566,6 +572,7 @@ fn a_cleanup_for_room_removes_the_scratchpads_and_the_needs_count_them() {
 /// to the largest `build_outputs_removed`.
 #[test]
 fn a_persons_integrate_counts_the_scratchpads_in_a_runs_size() {
+    headless_workers();
     let (_dir, repo, db, run) = awaiting_run();
     let queue = SqliteQueue::open(&db).unwrap();
     queue

@@ -70,6 +70,7 @@ fn names_no_queue(db: &Path, dir: &Path, name: &str) {
 /// through the service as the run's worker.
 #[test]
 fn the_worker_and_its_resume_reach_the_queue_only_through_the_service() {
+    headless_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let worker = format!(
@@ -150,6 +151,7 @@ await_message; resolve; receipt "$(git rev-parse HEAD)"; idle; await_exit"#,
 /// each job's token ends with it.
 #[test]
 fn the_review_and_the_recovery_job_are_given_the_service_not_the_queue() {
+    headless_workers();
     let (_dir, repo, db) = fixture();
     let dir = db.parent().unwrap().to_owned();
     let mark = dir.join("failed-once");

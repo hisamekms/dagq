@@ -109,7 +109,8 @@ pub(crate) fn add(
             goal_id: None,
             context: String::new(),
             provider: None,
-            worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
+            // Interactive unless the test chose headless workers.
+            worker_mode: Some(crate::runtime_support::worker_mode()),
         })
         .unwrap()
         .id()

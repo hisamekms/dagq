@@ -38,6 +38,7 @@ fn counts(sample: &Value) -> (i64, i64, i64) {
 /// samples: the candidates have a value and are no longer unavailable.
 #[test]
 fn the_supervisor_samples_the_candidates_when_they_change() {
+    headless_workers();
     let (dir, repo, db) = fixture();
     let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
     let once = SuperviseOptions {

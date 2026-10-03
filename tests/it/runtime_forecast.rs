@@ -69,6 +69,7 @@ fn common_within() -> crate::common::Waiting {
 /// nothing and is not. The next supervisor's start is a change mark.
 #[test]
 fn snapshots_are_recorded_at_the_day_a_moving_landing_and_a_start() {
+    headless_workers();
     let (dir, repo, db) = fixture();
     let host = dir.path().join("no host-wide file.toml");
     let goal = {
@@ -186,6 +187,7 @@ fn snapshots_are_recorded_at_the_day_a_moving_landing_and_a_start() {
 /// setting nothing is recorded.
 #[test]
 fn a_failed_snapshot_stops_no_landing_and_off_records_nothing() {
+    headless_workers();
     let (dir, repo, db) = fixture();
     let broken = dir.path().join("host.toml");
     fs::write(&broken, "[kpi\nnot toml").unwrap();

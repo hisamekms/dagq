@@ -267,9 +267,9 @@ pub fn launch_background(
         let _ = fs::remove_file(exit_request_path(&run_dir));
         let _ = fs::remove_file(resume_message_path(&run_dir));
     }
-    let (provider, other) =
-        headless_provider(&run, backend.headless.as_deref(), backend.codex.as_deref())
-            .expect("only a headless session starts in the background");
+    let claude = backend.claude_for(&run, resume)?;
+    let (provider, other) = headless_provider(&run, claude.as_deref(), backend.codex.as_deref())
+        .expect("only a headless session starts in the background");
     let (db, ready) = (backend.db.clone(), backend.headless_ready.clone());
     let worker = thread::spawn(move || {
         let spawner = ReadySpawner {

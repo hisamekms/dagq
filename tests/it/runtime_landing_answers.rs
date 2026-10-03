@@ -66,6 +66,7 @@ fn wait_until(what: &str, mut check: impl FnMut() -> bool) {
 /// is claimed.
 #[test]
 fn a_land_answer_is_applied_while_the_slot_is_taken_and_lands_before_a_new_claim() {
+    headless_workers();
     let (fixture, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     backend.script_for(1, &own_change(1));
@@ -172,6 +173,7 @@ fn a_land_answer_is_applied_while_the_slot_is_taken_and_lands_before_a_new_claim
 /// one that applied the answers, without asking again or reviewing again.
 #[test]
 fn approved_runs_wait_for_the_landing_and_land_oldest_approval_first_once() {
+    headless_workers();
     let (fixture, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     add_ready_task(&mut queue, "second", &[]);
@@ -254,6 +256,7 @@ fn approved_runs_wait_for_the_landing_and_land_oldest_approval_first_once() {
 /// task is canceled while the other session still holds the slot.
 #[test]
 fn a_cancel_answer_is_applied_while_the_slot_is_taken() {
+    headless_workers();
     let (fixture, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     backend.script_for(1, &own_change(1));
@@ -318,6 +321,7 @@ fn a_cancel_answer_is_applied_while_the_slot_is_taken() {
 /// starts its own landing only after that one ended.
 #[test]
 fn a_land_answer_is_applied_while_another_run_integrates() {
+    headless_workers();
     let (fixture, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     backend.script_for(1, &own_change(1));
@@ -351,7 +355,7 @@ fn a_land_answer_is_applied_while_another_run_integrates() {
             goal_id: None,
             context: String::new(),
             provider: None,
-            worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
+            worker_mode: Some(worker_mode()),
         })
         .unwrap()
         .id();

@@ -64,6 +64,7 @@ fn reported(db: &Path, config_home: &Path) -> (Value, Value) {
 
 #[test]
 fn nothing_set_adds_no_instruction() {
+    headless_workers();
     let (dir, repo, db) = fixture();
     let config_home = dir.path().join("config home");
     let (worker, review) = prompts(&db, &repo, &config_home.join("dagq/config.toml"));
@@ -82,6 +83,7 @@ fn nothing_set_adds_no_instruction() {
 
 #[test]
 fn the_users_language_is_in_every_prompt() {
+    headless_workers();
     let (dir, repo, db) = fixture();
     let config_home = dir.path().join("config home");
     let user_config = config_home.join("dagq/config.toml");
@@ -100,6 +102,7 @@ fn the_users_language_is_in_every_prompt() {
 
 #[test]
 fn the_repositorys_language_is_over_the_users() {
+    headless_workers();
     let (dir, repo, db) = fixture();
     let config_home = dir.path().join("config home");
     let user_config = config_home.join("dagq/config.toml");

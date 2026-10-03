@@ -38,6 +38,7 @@ fn has_branch(repo: &Path, name: &str) -> bool {
 /// `doctor` reports the branch and where its name came from.
 #[test]
 fn a_master_repository_without_origin_lands_on_master() {
+    headless_workers();
     let (_dir, repo, db) = renamed("master");
     let seed = git_out(&repo, &["rev-parse", "master"]);
     let mut queue = SqliteQueue::open(&db).unwrap();
@@ -94,6 +95,7 @@ fn a_master_repository_without_origin_lands_on_master() {
 /// and the run lands on it.
 #[test]
 fn a_branch_named_in_dagq_toml_is_where_runs_land() {
+    headless_workers();
     let (_dir, repo, db) = renamed("trunk");
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let error = format!("{:#}", supervise(&db, &repo, &backend).unwrap_err());
@@ -156,6 +158,7 @@ fn a_branch_named_in_dagq_toml_is_where_runs_land() {
 /// before starting a supervisor, one that resolves none.
 #[test]
 fn up_checks_the_landing_branch_on_master() {
+    headless_workers();
     use common::lifecycle::{FakeCmux, FakeLaunchd, FakeProcesses, fixture, try_up, up};
     let fixture = fixture();
     git(&fixture.repo, &["branch", "-m", "main", "master"]);
@@ -201,6 +204,7 @@ fn up_checks_the_landing_branch_on_master() {
 /// it exists, whose HEAD names the guessed landing branch.
 #[test]
 fn up_and_doctor_check_the_configured_push_remote() {
+    headless_workers();
     use common::lifecycle::{FakeCmux, FakeLaunchd, FakeProcesses, fixture, try_up, up};
     let fixture = fixture();
     let config = fixture.repo.join("dagq.toml");
@@ -272,6 +276,7 @@ fn up_and_doctor_check_the_configured_push_remote() {
 /// branch the landing began on, not the one the landed commit names.
 #[test]
 fn a_landing_that_renames_the_branch_still_lands_and_pushes_on_its_branch() {
+    headless_workers();
     let (dir, repo, db) = renamed("trunk");
     fs::write(repo.join("dagq.toml"), "[repository]\nbranch = \"trunk\"\n").unwrap();
     git(&repo, &["add", "dagq.toml"]);
@@ -322,6 +327,7 @@ fn a_landing_that_renames_the_branch_still_lands_and_pushes_on_its_branch() {
 /// the landing records `origin` and the landing stands.
 #[test]
 fn no_push_records_the_configured_remote() {
+    headless_workers();
     let no_push = |db: &Path, repo: &Path| {
         runtime::integrate(db, IntegrateTarget::Task(TaskId::new(1)), repo, None).unwrap()
     };
@@ -407,6 +413,7 @@ fn no_push_records_the_configured_remote() {
 /// itself; a branch that does not resolve is resolved again every pass.
 #[test]
 fn a_running_supervisor_follows_each_change_of_the_landing_branch() {
+    headless_workers();
     let (_dir, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     queue.transition(TaskId::new(1), TaskAction::Draft).unwrap();

@@ -103,6 +103,7 @@ fn trust_only(fixture: &common::lifecycle::Fixture, root: &Path) {
 /// from a linked worktree and from the Git directory, as before.
 #[test]
 fn the_parent_of_a_dot_git_is_the_main_checkout_from_anywhere() {
+    headless_workers();
     let (_dir, repo, _db) = fixture();
     let repo = repo.canonicalize().unwrap();
     let linked = _dir.path().join("linked");
@@ -140,6 +141,7 @@ fn the_parent_of_a_dot_git_is_the_main_checkout_from_anywhere() {
 /// why; the Git directory names the repository in a notification.
 #[test]
 fn a_separate_git_dir_repository_reads_only_its_main_worktree() {
+    headless_workers();
     let _test = common::test();
     let dir = tempfile::tempdir().unwrap();
     let (main, run) = separate_git_dir(dir.path());
@@ -173,6 +175,7 @@ fn a_separate_git_dir_repository_reads_only_its_main_worktree() {
 /// stops before starting anything.
 #[test]
 fn up_in_a_separate_git_dir_repository_trusts_the_main_worktree() {
+    headless_workers();
     use common::lifecycle::{FakeCmux, FakeLaunchd, FakeProcesses, fixture, try_up, up};
     let mut fixture = fixture();
     let (main, run) = separate_git_dir(fixture._dir.path());
@@ -203,6 +206,7 @@ fn up_in_a_separate_git_dir_repository_trusts_the_main_worktree() {
 /// `dagq.toml`.
 #[test]
 fn a_bare_repository_stops_up_supervise_integrate_and_doctor() {
+    headless_workers();
     use common::lifecycle::{FakeCmux, FakeLaunchd, FakeProcesses, fixture, try_up};
     let mut fixture = fixture();
     let (bare, worktree) = bare_with_worktree(fixture._dir.path(), &fixture.repo.clone());

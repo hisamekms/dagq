@@ -189,6 +189,7 @@ impl RunFiles for GatedFiles {
 /// it is done, with the payload of task 376, and once only.
 #[test]
 fn a_slow_cleanup_does_not_hold_up_the_loop() {
+    headless_workers();
     let (_dir, repo, db) = fixture();
     {
         let mut queue = SqliteQueue::open(&db).unwrap();
@@ -252,6 +253,7 @@ fn a_slow_cleanup_does_not_hold_up_the_loop() {
 /// claim of it) is left alone when the cleanup reaches it.
 #[test]
 fn a_run_leased_during_the_cleanup_keeps_its_worktree() {
+    headless_workers();
     let (_dir, repo, db) = fixture();
     {
         let mut queue = SqliteQueue::open(&db).unwrap();
@@ -325,6 +327,7 @@ fn a_run_leased_during_the_cleanup_keeps_its_worktree() {
 /// `worktree_removed` with no bytes.
 #[test]
 fn a_canceled_task_loses_the_branch_of_a_worktree_already_gone() {
+    headless_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, BUILDING_AGENT);
     supervise(&db, &repo, &backend).unwrap();
@@ -364,6 +367,7 @@ fn a_canceled_task_loses_the_branch_of_a_worktree_already_gone() {
 /// removed with its branch.
 #[test]
 fn a_worktree_left_pointing_at_an_old_repository_is_repaired_and_removed() {
+    headless_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, BUILDING_AGENT);
     supervise(&db, &repo, &backend).unwrap();
@@ -483,6 +487,7 @@ impl RunFiles for RacyFiles {
 /// recorded as `scratchpad_removed`; a later sweep tries it again.
 #[test]
 fn a_scratchpad_gone_meanwhile_is_no_failure_and_one_failing_root_keeps_the_others() {
+    headless_workers();
     let (dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, BUILDING_AGENT);
     supervise(&db, &repo, &backend).unwrap();
@@ -598,6 +603,7 @@ fn assert_kept_but_the_build_outputs(repo: &Path, run: &TaskRun) {
 /// no `auto_repaired` is recorded.
 #[test]
 fn the_build_outputs_of_a_run_waiting_for_an_answer_go_on_the_sweep() {
+    headless_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     let (run, ask) = run_awaiting_an_answer(&db, &repo, &backend, true);
@@ -668,6 +674,7 @@ fn the_build_outputs_of_a_run_waiting_for_an_answer_go_on_the_sweep() {
 /// passed the run; then the run lands.
 #[test]
 fn a_landing_waits_for_the_cleanup_of_its_build_outputs() {
+    headless_workers();
     let (_dir, repo, db) = fixture();
     let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
     // Nothing uncommitted: the landing would defer a dirty worktree.
@@ -744,6 +751,7 @@ fn short_while_idle_target(_: &Path) -> Option<u64> {
 /// reason `disk_space`, counted in `auto_repaired` (`disk_cleanup`).
 #[test]
 fn the_build_outputs_of_an_idle_run_go_only_for_disk_space() {
+    headless_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     let (run, ask) = run_awaiting_an_answer(&db, &repo, &backend, true);
@@ -840,6 +848,7 @@ fn moved_on_counts(queue: &SqliteQueue, run: &TaskRun) -> Vec<usize> {
 /// guard met is the skip's, not the resume's.
 #[test]
 fn a_skipped_resume_waits_for_the_cleanup_of_its_build_outputs() {
+    headless_workers();
     let (_dir, repo, db) = fixture();
     let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
     let (run, first_landed) = parked_conflict(&repo, &db, &backend);
@@ -960,6 +969,7 @@ fn short_while_counted_target(_: &Path) -> Option<u64> {
 /// uncommitted source and the run directory stay.
 #[test]
 fn the_rest_of_a_cleanup_for_room_clears_and_counts_the_idle_runs() {
+    headless_workers();
     let (_dir, repo, db) = fixture();
     let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
     let (idle, ask) = run_awaiting_an_answer(&db, &repo, &backend, true);
@@ -1071,6 +1081,7 @@ fn the_rest_of_a_cleanup_for_room_clears_and_counts_the_idle_runs() {
 /// directory (the receipt, the logs) stays.
 #[test]
 fn a_runs_tmp_dir_goes_only_once_its_task_is_over() {
+    headless_workers();
     let (_dir, repo, db) = fixture();
     let agent = "mkdir -p ../tmp/target/debug; head -c 32768 /dev/zero > ../tmp/target/debug/big; \
          echo log > ../kept.log; "
@@ -1154,6 +1165,7 @@ fn drain_free_space(_: &Path) -> Option<u64> {
 /// cleanup still stops at the current worktree.
 #[test]
 fn draining_finishes_disk_cleanup_before_deciding_a_landing() {
+    headless_workers();
     for handoff in [false, true] {
         for disk in [None, Some(false), Some(true)] {
             let (_dir, repo, db) = fixture();
@@ -1396,6 +1408,7 @@ fn rest_passes(db: &Path, count: usize) {
 /// the landing is decided on the next pass's reading, not the one before.
 #[test]
 fn draining_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing() {
+    headless_workers();
     for drain in [
         Drain::Stop,
         Drain::Handoff,

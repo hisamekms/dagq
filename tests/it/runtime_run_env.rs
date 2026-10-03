@@ -5,6 +5,7 @@ use runtime_support::*;
 
 #[test]
 fn dagq_toml_run_env_reaches_the_workspace_and_the_verification_commands() {
+    headless_workers();
     let (_dir, repo, db) = fixture();
     fs::write(
         repo.join("dagq.toml"),
@@ -31,7 +32,7 @@ fn dagq_toml_run_env_reaches_the_workspace_and_the_verification_commands() {
             goal_id: None,
             context: String::new(),
             provider: None,
-            worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
+            worker_mode: Some(worker_mode()),
         })
         .unwrap();
     queue
@@ -89,6 +90,7 @@ fn dagq_toml_run_env_reaches_the_workspace_and_the_verification_commands() {
 /// `[run.env]` as the worker's, after the runtime's own names.
 #[test]
 fn a_resumed_session_gets_the_run_env_too() {
+    headless_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (run, first_landed) = parked_conflict(&repo, &db, &backend);
@@ -133,6 +135,7 @@ fn a_resumed_session_gets_the_run_env_too() {
 /// program that is missing, so it waits with the claims until it is found.
 #[test]
 fn a_missing_run_env_program_holds_resumes_until_it_is_found() {
+    headless_workers();
     let (fixture, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (_run, first_landed) = parked_conflict(&repo, &db, &backend);
@@ -180,6 +183,7 @@ fn a_missing_run_env_program_holds_resumes_until_it_is_found() {
 
 #[test]
 fn a_broken_dagq_toml_stops_provisioning_before_the_workspace() {
+    headless_workers();
     let (_dir, repo, db) = fixture();
     fs::write(repo.join("dagq.toml"), "[build]\n").unwrap();
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
@@ -191,6 +195,7 @@ fn a_broken_dagq_toml_stops_provisioning_before_the_workspace() {
 
 #[test]
 fn a_missing_run_env_program_stops_claims_and_landings_until_it_is_found() {
+    headless_workers();
     let (fixture, repo, db) = fixture();
     let tool = fixture.dir.path().join("bin").join("sccache");
     fs::write(
@@ -303,6 +308,7 @@ fn a_missing_run_env_program_stops_claims_and_landings_until_it_is_found() {
 
 #[test]
 fn a_repository_without_dagq_toml_checks_no_program() {
+    headless_workers();
     // An unbound queue has no repository to read, and a bound one without
     // dagq.toml has nothing to check: doctor adds nothing either way.
     let (_fixture, repo, db) = fixture();
@@ -320,6 +326,7 @@ fn a_repository_without_dagq_toml_checks_no_program() {
 
 #[test]
 fn supervisor_starts_and_run_env_changes_are_recorded_as_marks_once() {
+    headless_workers();
     use dagq::domain::marks::{RUN_ENV_CHANGED, SUPERVISOR_STARTED, SUPERVISOR_STOPPED, marks};
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);

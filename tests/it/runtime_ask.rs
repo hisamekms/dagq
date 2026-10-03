@@ -7,6 +7,7 @@ use runtime_support::*;
 
 #[test]
 fn receipt_follow_ups_appear_as_one_atomic_planner_bundle() {
+    headless_workers();
     use dagq::{
         application::{TaskStore, integrate::register_follow_ups},
         domain::{ClaimOutcome, DraftOrigin, NewTask, TaskAction},
@@ -29,7 +30,7 @@ fn receipt_follow_ups_appear_as_one_atomic_planner_bundle() {
             goal_id: None,
             context: String::new(),
             provider: None,
-            worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
+            worker_mode: Some(worker_mode()),
         })
         .unwrap();
     queue
@@ -125,6 +126,7 @@ fn watch_role(
 /// workspace `up` recorded, and a repeated ask none.
 #[test]
 fn only_a_new_ask_notifies_and_it_goes_to_the_inbox() {
+    headless_workers();
     use dagq::domain::{AskKind, NewAsk, SessionRole};
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, "commit work; receipt \"$(git rev-parse HEAD)\"");
@@ -252,6 +254,7 @@ fn only_a_new_ask_notifies_and_it_goes_to_the_inbox() {
 
 #[test]
 fn asks_of_a_run_are_attention_for_the_inbox_until_closed() {
+    headless_workers();
     use dagq::domain::{AskKind, NewAsk, SessionRole};
     let (_dir, _repo, db, run) = awaiting_run_retrying();
     let mut queue = SqliteQueue::open(&db).unwrap();
@@ -427,6 +430,7 @@ fn spawn_watch(db: &Path, after: Option<i64>) -> thread::JoinHandle<Value> {
 
 #[test]
 fn attention_events_are_read_past_a_cursor_and_wake_watch() {
+    headless_workers();
     let (_dir, repo, db, run) = awaiting_run_retrying();
     let queue = SqliteQueue::open(&db).unwrap();
     let latest = queue.latest_event_id().unwrap().as_i64();
@@ -693,6 +697,7 @@ fn status_reports_failed_runs_and_unanswered_exit_requests() {
 
 #[test]
 fn watch_returns_when_supervisor_registrations_or_health_change() {
+    headless_workers();
     let (_dir, _repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let cursor = queue.latest_event_id().unwrap().as_i64();
@@ -757,6 +762,7 @@ fn watch_returns_when_supervisor_registrations_or_health_change() {
 
 #[test]
 fn a_follow_up_draft_records_its_origin_and_its_planner_question_is_delivered_by_the_runtime() {
+    headless_workers();
     use dagq::{
         application::{PlannerAnswerRoute, integrate::register_follow_ups},
         domain::{
@@ -781,7 +787,7 @@ fn a_follow_up_draft_records_its_origin_and_its_planner_question_is_delivered_by
             goal_id: None,
             context: String::new(),
             provider: None,
-            worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
+            worker_mode: Some(worker_mode()),
         })
         .unwrap();
     queue
@@ -924,6 +930,7 @@ fn a_follow_up_draft_records_its_origin_and_its_planner_question_is_delivered_by
 /// releases no lease is only a note.
 #[test]
 fn an_abandoned_run_is_recovered_and_triaged_by_the_supervisor() {
+    headless_workers();
     let (_dir, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let cursor = queue.latest_event_id().unwrap().as_i64();

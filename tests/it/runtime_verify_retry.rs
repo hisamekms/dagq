@@ -49,6 +49,7 @@ fn full_disk_once(marker: &Path) -> String {
 /// under the class it retried.
 #[test]
 fn a_command_that_failed_on_the_host_is_retried_and_lands_when_it_passes() {
+    headless_workers();
     let (dir, db, repo) = awaiting();
     let marker = dir.path().join("full once");
     set_commands(&db, json!(["true", full_disk_once(&marker)]));
@@ -96,6 +97,7 @@ fn a_command_that_failed_on_the_host_is_retried_and_lands_when_it_passes() {
 /// it once the host is fixed.
 #[test]
 fn a_command_that_fails_on_the_host_again_waits_for_a_person_without_a_resume() {
+    headless_workers();
     let (_dir, repo, db) = fixture();
     set_commands(&db, json!(["kill -TERM $$"]));
     let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
@@ -163,6 +165,7 @@ fn a_command_that_fails_on_the_host_again_waits_for_a_person_without_a_resume() 
 /// before; so does a retry that fails in the code after a kill.
 #[test]
 fn a_failure_of_the_code_is_resumed_as_before() {
+    headless_workers();
     let (dir, db, repo) = awaiting();
     set_commands(
         &db,
@@ -215,6 +218,7 @@ fn a_failure_of_the_code_is_resumed_as_before() {
 /// is retried, and held for a person when it runs out of time again.
 #[test]
 fn a_command_past_its_whole_limit_is_a_timeout_failure() {
+    headless_workers();
     let (_dir, db, repo) = awaiting();
     set_commands(&db, json!(["sleep 30"]));
     let outcome = runtime::OneShot {
@@ -257,6 +261,7 @@ fn room_then_short(_: &Path) -> Option<u64> {
 /// what is free and what is needed.
 #[test]
 fn a_full_disk_without_room_is_held_without_a_retry() {
+    headless_workers();
     let (dir, db, repo) = awaiting();
     READS.store(0, Ordering::SeqCst);
     set_commands(&db, json!([full_disk_once(&dir.path().join("full once"))]));
