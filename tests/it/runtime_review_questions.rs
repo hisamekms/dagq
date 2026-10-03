@@ -22,8 +22,8 @@ fn on_revise(revise: &str) -> String {
 /// an earlier second than the revise request.
 fn slow_revise(db: &std::path::Path) -> String {
     format!(
-        "while [ ! -f {} ]; do sleep 0.05; done; {}",
-        shell_path(review_go(db)),
+        "{}; {}",
+        crate::common::await_path(review_go(db)),
         verdict("revise", &["add a line"], "one gap")
     )
 }
@@ -144,7 +144,7 @@ fn an_answer_to_a_question_from_before_the_revise_is_left_to_the_inbox() {
         &db,
         false,
         &on_revise(
-            "while [ ! -f \"$EXIT.go\" ]; do sleep 0.05; done\n\
+            "await_file \"$EXIT.go\"\n\
              printf 'fix\\n' >> change.txt; git commit -q -am fix\n\
              receipt \"$(git rev-parse HEAD)\"",
         ),
@@ -432,9 +432,9 @@ fn an_answer_whose_send_outlasts_the_turn_settles_the_revise_at_its_idle() {
         false,
         &format!(
             "commit work; receipt \"$(git rev-parse HEAD)\"; idle\n\
-             while [ ! -f \"$MESSAGE\" ]; do sleep 0.05; done; rm \"$MESSAGE\"\n\
+             await_file \"$MESSAGE\"; rm \"$MESSAGE\"\n\
              {ASKS}\nidle\n\
-             while [ ! -f \"$MESSAGE\" ]; do sleep 0.05; done; rm \"$MESSAGE\"\n\
+             await_file \"$MESSAGE\"; rm \"$MESSAGE\"\n\
              printf 'fix\\n' >> change.txt; git commit -q -am fix\n\
              receipt \"$(git rev-parse HEAD)\"; idle\n\
              : > \"$(dirname \"$RECEIPT\")/answered\"; await_exit\n"

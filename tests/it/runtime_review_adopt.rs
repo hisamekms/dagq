@@ -76,7 +76,7 @@ fn revise_under_dead_supervisor(
         &db,
         false,
         "commit work; receipt \"$(git rev-parse HEAD)\"; idle; \
-         while [ ! -f \"$EXIT.go\" ]; do sleep 0.05; done; \
+         await_file \"$EXIT.go\"; \
          printf 'fix\\n' >> change.txt; git commit -q -am fix; \
          receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
     );

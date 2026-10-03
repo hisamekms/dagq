@@ -32,7 +32,7 @@ fn markerless_asking_agent() -> String {
     format!(
         r#"{HOOK_FAILED}
 "$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
-while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
+await_file "$MESSAGE"
 cp "$MESSAGE" answer.txt; git add answer.txt; git commit -q -m answer
 receipt "$(git rev-parse HEAD)"; await_exit
 "#
@@ -249,7 +249,7 @@ fn a_markerless_resumed_session_gets_its_answer_once_its_screen_rests() {
         2,
         r#"await_message; rm "$MESSAGE"; sleep 1.1
 "$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which side?' --cmux /usr/bin/true > /dev/null || exit 70
-while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
+await_file "$MESSAGE"
 receipt "$(git rev-parse HEAD)"; await_exit"#,
     );
     let backend = Arc::new(backend);
@@ -302,9 +302,9 @@ fn a_markerless_revised_session_gets_its_answer_once_its_screen_rests() {
         &db,
         false,
         r#"commit work; receipt "$(git rev-parse HEAD)"; idle
-while [ ! -f "$MESSAGE" ]; do sleep 0.05; done; rm "$MESSAGE"; sleep 1.1
+await_file "$MESSAGE"; rm "$MESSAGE"; sleep 1.1
 "$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which line?' --cmux /usr/bin/true > /dev/null || exit 70
-while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
+await_file "$MESSAGE"
 cp "$MESSAGE" answer.txt; git add answer.txt; git commit -q -m answer
 receipt "$(git rev-parse HEAD)"; await_exit"#,
     ));
@@ -368,7 +368,7 @@ receipt "$(git rev-parse HEAD)"; await_exit"#,
 fn markerless_stalled_agent() -> String {
     format!(
         r#"{HOOK_FAILED}; commit work
-while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
+await_file "$MESSAGE"
 rm -f "$MESSAGE"
 until grep -q "recovery job" "$MESSAGE" 2>/dev/null || [ -f "$EXIT.go" ]; do sleep 0.05; done
 receipt "$(git rev-parse HEAD)"; await_exit
@@ -379,8 +379,8 @@ receipt "$(git rev-parse HEAD)"; await_exit
 /// The recovery job's `send_instruction`, once `gate` exists.
 fn instruction_job(gate: &Path) -> String {
     format!(
-        "while [ ! -f {} ]; do sleep 0.05; done; {}",
-        shell_path(gate),
+        "{}; {}",
+        crate::common::await_path(gate),
         repair(
             json!({"action": "send_instruction", "instruction": "write the receipt"}),
             "the session stopped at its prompt",
@@ -511,7 +511,7 @@ fn a_markerless_session_has_its_dialog_cleared_once_its_screen_rests() {
         false,
         &format!(
             r#"{HOOK_FAILED}; commit work
-while [ ! -f "$EXIT.go" ]; do sleep 0.05; done
+await_file "$EXIT.go"
 receipt "$(git rev-parse HEAD)"; await_exit"#
         ),
     );

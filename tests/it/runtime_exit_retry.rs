@@ -15,7 +15,7 @@ use runtime_support::*;
 /// that ate it would) and exits on the next one, or when its workspace is
 /// closed.
 const IGNORES_FIRST_EXIT: &str = "commit work; receipt \"$(git rev-parse HEAD)\"; idle; \
-     while [ ! -f \"$EXIT\" ]; do sleep 0.05; done; rm \"$EXIT\"; await_exit";
+     await_file \"$EXIT\"; rm \"$EXIT\"; await_exit";
 
 /// An unknown dialog: nothing is sent over it.
 const DIALOG_SCREEN: &str = "\

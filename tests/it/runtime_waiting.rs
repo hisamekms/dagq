@@ -246,10 +246,7 @@ fn a_returning_run_counts_toward_the_limit() {
     add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "second", &[]);
     let backend = TestWorkspace::new(&db, false, ASKING_AGENT);
     // The second worker asks only once the test lets it.
-    backend.script_for(
-        2,
-        &format!("while [ ! -f \"$EXIT.gate\" ]; do sleep 0.05; done\n{ASKING_AGENT}"),
-    );
+    backend.script_for(2, &format!("await_file \"$EXIT.gate\"\n{ASKING_AGENT}"));
     let backend = Arc::new(backend);
     let options = SuperviseOptions {
         max_waiting: Some(1),
@@ -717,7 +714,7 @@ fn a_wrapper_heartbeat_that_comes_back_lets_the_run_wait_again() {
         r#"
 "$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
 idle
-while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
+await_file "$MESSAGE"
 rm "$MESSAGE"
 "$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which colour?' --cmux /usr/bin/true > /dev/null || exit 70
 idle

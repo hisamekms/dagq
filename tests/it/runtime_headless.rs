@@ -646,7 +646,7 @@ fn a_stop_answer_to_a_run_out_of_its_slot_waits_for_the_slot() {
         dir.path(),
         &format!(
             "case \"$PROMPT\" in\n\
-             *'dagq task 3,'*) while [ ! -f {} ]; do sleep 0.05; done; {VALID_AGENT} ;;\n\
+             *'dagq task 3,'*) await_file {}; {VALID_AGENT} ;;\n\
              *) denied; say refused ;;\n\
              esac",
             shell_path(&gate)
@@ -978,7 +978,7 @@ open(my $pid, ">", "$ARGV[0]/outside.pid") or die $!;
 print $pid "$$\n"; close($pid) or die $!;
 rename "$ARGV[0]/outside.pid", "$ARGV[0]/outside-ready.pid" or die $!;
 exec "sleep", "600"' "$RUN_DIR" >/dev/null 2>&1 &
-while [ ! -f "$RUN_DIR/outside-ready.pid" ]; do sleep 0.01; done
+await_file "$RUN_DIR/outside-ready.pid"
 {ready}
 i=0; while [ $i -lt 300 ]; do say tick; sleep 0.1; i=$((i + 1)); done"#
         ),
@@ -1226,7 +1226,7 @@ fn adopted_stalled_answer(written: bool) {
         dir.path(),
         &format!(
             r#"case "$PROMPT" in
-"answer to ask "*) while [ ! -f "$RUN_DIR/go" ]; do sleep 0.05; done; {FINISH} ;;
+"answer to ask "*) await_file "$RUN_DIR/go"; {FINISH} ;;
 *) say working ;;
 esac"#
         ),

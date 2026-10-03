@@ -156,7 +156,7 @@ fn a_first_session_without_its_marker_is_nudged_when_idle_without_a_receipt() {
         false,
         &format!(
             "{HOOK_FAILED}; commit work
-while [ ! -f \"$MESSAGE\" ]; do sleep 0.05; done
+await_file \"$MESSAGE\"
 receipt \"$(git rev-parse HEAD)\"; idle; await_exit"
         ),
     );
@@ -403,7 +403,7 @@ fn a_revised_session_without_its_marker_ends_its_revise_by_its_screen() {
         &db,
         false,
         "commit work; receipt \"$(git rev-parse HEAD)\"; idle
-while [ ! -f \"$MESSAGE\" ]; do sleep 0.05; done
+await_file \"$MESSAGE\"
 printf 'fix\\n' >> change.txt; git commit -q -am fix
 receipt \"$(git rev-parse HEAD)\"; await_exit",
     ));

@@ -15,7 +15,7 @@ use runtime_support::*;
 /// the recovery job's instruction arrives or `$EXIT.go` is written.
 const STALLED_AGENT: &str = r#"
 commit work; idle_bg
-while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
+await_file "$MESSAGE"
 rm -f "$MESSAGE"; idle_bg
 until grep -q "recovery job" "$MESSAGE" 2>/dev/null || [ -f "$EXIT.go" ]; do sleep 0.05; done
 receipt "$(git rev-parse HEAD)"; idle; await_exit
@@ -580,7 +580,7 @@ fn an_adopted_stall_whose_job_waits_gets_no_second_nudge_job_or_ask() {
         false,
         r#"
 commit work; idle_bg
-while [ ! -f "$EXIT.go" ]; do sleep 0.05; done
+await_file "$EXIT.go"
 receipt "$(git rev-parse HEAD)"; idle; await_exit
 "#,
     ));
@@ -654,7 +654,7 @@ fn a_send_the_job_cannot_repair_becomes_the_stalled_ask_in_the_first_session() {
 commit work
 "$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
 idle
-while [ ! -f "$EXIT.go" ]; do sleep 0.05; done
+await_file "$EXIT.go"
 receipt "$(git rev-parse HEAD)"; idle; await_exit
 "#,
         dagq::domain::stall::StallConfig::default().with_millis("send_confirm_secs", IDLE_MS),
@@ -732,7 +732,7 @@ fn a_stalled_session_the_job_resumes_is_parked_resumed_and_lands() {
         false,
         r#"
 commit work; idle_bg
-while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
+await_file "$MESSAGE"
 rm -f "$MESSAGE"; idle
 await_exit
 "#,
@@ -806,7 +806,7 @@ fn an_instruction_reaches_a_session_whose_interrupted_turn_left_no_idle_marker()
         &repo,
         r#"
 commit work; idle_bg
-while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
+await_file "$MESSAGE"
 rm -f "$MESSAGE"; idle_bg
 sleep 0.3
 INPUT="$(dirname "$IDLE")/prompt-submit.json"

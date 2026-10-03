@@ -42,7 +42,7 @@ const LOGIN_RAN_OUT: &str = r#"printf '%s\n' '{"type":"assistant","error":"authe
 /// login that ran out, and whose later turns commit and write the receipt.
 fn held_at_login(gate: Option<&Path>) -> String {
     let wait = gate.map_or(String::new(), |gate| {
-        format!("while [ ! -f {} ]; do sleep 0.05; done; ", shell_path(gate))
+        format!("await_file {}; ", shell_path(gate))
     });
     format!(
         "case \"$TURN\" in\n1) {wait}{LOGIN_RAN_OUT} ;;\n*) commit work; receipt \"$(git rev-parse HEAD)\" ;;\nesac"

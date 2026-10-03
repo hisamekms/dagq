@@ -48,7 +48,7 @@ fn background_work_holds_the_first_session_until_it_ends() {
         &db,
         false,
         "commit work; receipt \"$(git rev-parse HEAD)\"; idle_bg; \
-         while [ ! -f \"$EXIT.go\" ]; do sleep 0.05; done; idle_bg_done; await_exit",
+         await_file \"$EXIT.go\"; idle_bg_done; await_exit",
     ));
     let options = supervise_options(4, true);
     let passes = options.passes.clone();
@@ -122,8 +122,8 @@ fn background_work_holds_the_exit_after_the_review() {
     let gate = dir.path().join("review-gate");
     let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
     let reviewer = Arc::new(TestReviewer::new(&[format!(
-        "while [ ! -f {} ]; do sleep 0.05; done; {}",
-        shell_join(&[gate.to_string_lossy().into_owned()]),
+        "{}; {}",
+        crate::common::await_path(&gate),
         verdict("pass", &[], "meets the acceptance")
     )]));
     let options = supervise_options(4, true);
@@ -178,7 +178,7 @@ fn background_work_holds_the_resumed_session_until_it_ends() {
     backend.resume_script_for(
         2,
         "await_message; resolve; receipt \"$(git rev-parse HEAD)\"; idle_bg; \
-         while [ ! -f \"$EXIT.go\" ]; do sleep 0.05; done; idle_bg_done; await_exit",
+         await_file \"$EXIT.go\"; idle_bg_done; await_exit",
     );
     let backend = Arc::new(backend);
     let options = supervise_options(4, true);
@@ -223,10 +223,10 @@ fn background_work_holds_the_revise_until_it_ends() {
         &db,
         false,
         "commit work; receipt \"$(git rev-parse HEAD)\"; idle; \
-         while [ ! -f \"$MESSAGE\" ]; do sleep 0.05; done; rm \"$MESSAGE\"; \
+         await_file \"$MESSAGE\"; rm \"$MESSAGE\"; \
          printf 'fix\\n' >> change.txt; git commit -q -am fix; \
          receipt \"$(git rev-parse HEAD)\"; idle_bg; \
-         while [ ! -f \"$EXIT.go\" ]; do sleep 0.05; done; idle_bg_done; await_exit",
+         await_file \"$EXIT.go\"; idle_bg_done; await_exit",
     ));
     let reviewer = Arc::new(TestReviewer::new(&[
         verdict("revise", &["add a line"], "one gap"),
@@ -291,7 +291,7 @@ fn a_revise_session_that_holds_exit_back_raises_a_stuck_exit_ask() {
         false,
         &format!(
             "commit work; receipt \"$(git rev-parse HEAD)\"; idle; \
-             while [ ! -f \"$MESSAGE\" ]; do sleep 0.05; done; idle; {HOLD}"
+             await_file \"$MESSAGE\"; idle; {HOLD}"
         ),
     );
     backend.exit_timeout = Duration::from_millis(500);

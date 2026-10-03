@@ -451,7 +451,7 @@ fn missing_or_stale_idle_marker_does_not_request_exit() {
     // No marker at all, then a marker older than the receipt (an earlier turn).
     // Both sessions end by themselves, as with a person's /exit, once the
     // supervisor made some passes past their receipt.
-    const ENDS: &str = "while [ ! -f \"$EXIT.go\" ]; do sleep 0.05; done";
+    const ENDS: &str = "await_file \"$EXIT.go\"";
     for script in [
         format!("commit work; receipt \"$(git rev-parse HEAD)\"; {ENDS}"),
         format!(
@@ -531,7 +531,7 @@ const SETTINGS_SCREEN: &str = "\
 ";
 
 /// Commits once, waits for `$EXIT.go` before a second commit and the receipt.
-const TWO_COMMIT_AGENT: &str = "commit first; while [ ! -f \"$EXIT.go\" ]; do sleep 0.05; done; printf 'more\\n' >> change.txt; git commit -q -am second; receipt \"$(git rev-parse HEAD)\"";
+const TWO_COMMIT_AGENT: &str = "commit first; await_file \"$EXIT.go\"; printf 'more\\n' >> change.txt; git commit -q -am second; receipt \"$(git rev-parse HEAD)\"";
 
 /// The supervisor records `first_commit_observed` once, while the session
 /// still works, when the worktree's HEAD first leaves the base commit; a
@@ -976,9 +976,9 @@ fn sessions_stopped_at_the_same_login_share_one_authentication_ask() {
 /// test backend's terminal); it commits the answer it got.
 const ASKING_AGENT: &str = r#"
 "$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
-while [ ! -f "$EXIT.idle" ]; do sleep 0.05; done
+await_file "$EXIT.idle"
 idle
-while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
+await_file "$MESSAGE"
 cp "$MESSAGE" answer.txt
 git add answer.txt
 git commit -q -m answer
@@ -1287,7 +1287,7 @@ fn a_background_work_dialog_over_a_dirty_worktree_is_left_to_the_ask() {
     let mut backend = TestWorkspace::new(
         &db,
         false,
-        "commit work; receipt \"$(git rev-parse HEAD)\"; idle; while [ ! -f \"$EXIT\" ]; do sleep 0.05; done; echo more > untracked.txt; while [ ! -f \"$EXIT.held\" ]; do sleep 0.05; done",
+        "commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_file \"$EXIT\"; echo more > untracked.txt; await_file \"$EXIT.held\"",
     );
     backend.exit_timeout = Duration::from_millis(500);
     *backend.screen.lock().unwrap() = BACKGROUND_WORK_SCREEN.into();
@@ -1397,10 +1397,10 @@ fn a_settings_panel_is_closed_with_escape() {
 /// [`ASKING_AGENT`] that holds after taking its answer until `$EXIT.go`.
 const HOLDING_ASKING_AGENT: &str = r#"
 "$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
-while [ ! -f "$EXIT.idle" ]; do sleep 0.05; done
+await_file "$EXIT.idle"
 idle
-while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
-while [ ! -f "$EXIT.go" ]; do sleep 0.05; done
+await_file "$MESSAGE"
+await_file "$EXIT.go"
 cp "$MESSAGE" answer.txt
 git add answer.txt
 git commit -q -m answer
@@ -1601,13 +1601,13 @@ fn an_unknown_dialog_over_a_typed_answer_gets_no_key() {
 /// and marks that with `$EXIT.took`.
 const IDLE_AFTER_ANSWER_AGENT: &str = r#"
 "$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
-while [ ! -f "$EXIT.idle" ]; do sleep 0.05; done
+await_file "$EXIT.idle"
 idle
-while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
+await_file "$MESSAGE"
 sleep 0.2
 idle
 : > "$EXIT.took"
-while [ ! -f "$EXIT.go" ]; do sleep 0.05; done
+await_file "$EXIT.go"
 cp "$MESSAGE" answer.txt
 git add answer.txt
 git commit -q -m answer

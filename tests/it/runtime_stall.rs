@@ -60,7 +60,7 @@ fn a_receiptless_idle_is_nudged_once_and_the_receipt_resolves_it() {
         false,
         r#"
 commit work; idle_bg
-while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
+await_file "$MESSAGE"
 cp "$MESSAGE" "$MESSAGE.seen"; cp -p "$IDLE" "$MESSAGE.idle"
 receipt "$(git rev-parse HEAD)"; idle; await_exit
 "#,
@@ -134,7 +134,7 @@ fn an_idle_session_at_a_login_that_ran_out_waits_in_the_authentication_ask() {
         false,
         r#"
 commit work; idle
-while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
+await_file "$MESSAGE"
 receipt "$(git rev-parse HEAD)"; idle; await_exit
 "#,
     );
@@ -225,9 +225,9 @@ fn a_session_idle_after_its_nudge_gets_one_stalled_ask_and_its_answers_are_appli
         false,
         r#"
 commit work; idle_bg
-while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
+await_file "$MESSAGE"
 idle_bg
-while [ ! -f "$EXIT.go" ]; do sleep 0.05; done
+await_file "$EXIT.go"
 receipt "$(git rev-parse HEAD)"; idle; await_exit
 "#,
     ));
@@ -396,7 +396,7 @@ fn an_adopted_stalled_session_is_neither_nudged_nor_asked_again() {
         false,
         r#"
 commit work; idle_bg
-while [ ! -f "$EXIT.go" ]; do sleep 0.05; done
+await_file "$EXIT.go"
 receipt "$(git rev-parse HEAD)"; idle; await_exit
 "#,
     ));
@@ -488,9 +488,9 @@ fn a_stalled_ask_closed_after_wait_is_asked_again() {
         false,
         r#"
 commit work; idle_bg
-while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
+await_file "$MESSAGE"
 idle_bg
-while [ ! -f "$EXIT.go" ]; do sleep 0.05; done
+await_file "$EXIT.go"
 receipt "$(git rev-parse HEAD)"; idle; await_exit
 "#,
     ));
@@ -621,7 +621,7 @@ sleep 0.1
 INPUT="$(dirname "$IDLE")/prompt-submit.json"
 printf '{"hook_event_name":"UserPromptSubmit","prompt":"wait"}' > "$INPUT.tmp"
 mv "$INPUT.tmp" "$INPUT"
-while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
+await_file "$MESSAGE"
 receipt "$(git rev-parse HEAD)"; idle; await_exit
 "#,
     );

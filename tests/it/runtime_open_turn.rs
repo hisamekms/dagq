@@ -21,7 +21,7 @@ sleep 0.05
 INPUT="$(dirname "$IDLE")/prompt-submit.json"
 printf '{"hook_event_name":"UserPromptSubmit","prompt":"<task-notification>\\n<status>completed</status>\\n</task-notification>"}' > "$INPUT.tmp"
 mv "$INPUT.tmp" "$INPUT"; mv "$IDLE.tmp" "$IDLE"
-while [ ! -f "$EXIT.go" ]; do sleep 0.05; done
+await_file "$EXIT.go"
 sleep 0.05; idle
 "#;
 
@@ -124,7 +124,7 @@ fn a_revised_session_at_work_on_a_notice_after_its_idle_is_not_ended() {
         false,
         &format!(
             "commit work; receipt \"$(git rev-parse HEAD)\"; idle
-while [ ! -f \"$MESSAGE\" ]; do sleep 0.05; done
+await_file \"$MESSAGE\"
 printf 'fix\\n' >> change.txt; git commit -q -am fix
 receipt \"$(git rev-parse HEAD)\"
 {IDLE_THEN_NOTICE}

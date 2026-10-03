@@ -471,6 +471,9 @@ say "turn $TURN""#,
             .into_iter()
             .map(|pid| (pid, processes.start_identity(pid))),
     );
+    // A descendant that ended between the listing and the read of its start
+    // (a `sleep` of the stub's watchdog, task 1580) is none to stop.
+    seen.retain(|(_, start)| start.is_some());
     assert!(seen.len() > 1, "the turn runs its sleep: {seen:?}");
     let _guard = TurnGuard(seen.clone());
     let planner = queue.planner(dagq::domain::PlannerId::new(1)).unwrap();

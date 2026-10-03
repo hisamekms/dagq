@@ -19,7 +19,7 @@ use runtime_support::*;
 /// first `/exit` (its request file is taken away, as a dialog that ate it
 /// would) and exits on the next one, or when its workspace is closed.
 const IGNORES_FIRST_EXIT: &str = "await_message; resolve; receipt \"$(git rev-parse HEAD)\"; idle; \
-     while [ ! -f \"$EXIT\" ]; do sleep 0.05; done; rm \"$EXIT\"; await_exit";
+     await_file \"$EXIT\"; rm \"$EXIT\"; await_exit";
 
 /// Supervisor options that retry a held `/exit` `retries` times, `interval`
 /// apart.
@@ -331,7 +331,7 @@ fn resume_taken_over_after_a_retry(handoff: bool, answered: bool) {
     let (run, first_landed) = parked_conflict(&repo, &db, &backend);
     backend.resume_script_for(
         2,
-        "await_message; while [ ! -f \"$EXIT.go\" ]; do sleep 0.05; done; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+        "await_message; await_file \"$EXIT.go\"; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
     );
     let (_, token) = hand_off_when(&db, &repo, &backend, |queue| {
         event_kinds(&queue.show(TaskId::new(2)).unwrap()).contains(&"resume_request_sent")

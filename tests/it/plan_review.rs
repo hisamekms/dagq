@@ -250,7 +250,10 @@ impl AgentProvider for StubReviewer {
             Some(gate) => {
                 let done = shell_quote(&format!("{}.done", gate.display()));
                 let gate = shell_quote(gate.to_str().unwrap());
-                format!("while [ ! -f {gate} ]; do sleep 0.02; done; {script}; echo >> {done}")
+                format!(
+                    "{}; {script}; echo >> {done}",
+                    crate::common::await_file(&gate)
+                )
             }
             None => script,
         };

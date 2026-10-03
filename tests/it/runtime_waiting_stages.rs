@@ -69,10 +69,10 @@ esac
 /// revise request and the answer in `$MESSAGE`.
 const REVISE_ASKING_SESSION: &str = r#"
 commit work; receipt "$(git rev-parse HEAD)"; idle
-while [ ! -f "$MESSAGE" ]; do sleep 0.05; done; rm "$MESSAGE"
+await_file "$MESSAGE"; rm "$MESSAGE"
 "$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which line?' --cmux /usr/bin/true > /dev/null || exit 70
 idle
-while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
+await_file "$MESSAGE"
 cp "$MESSAGE" answer.txt; rm "$MESSAGE"
 git add answer.txt; git commit -q -m answer
 receipt "$(git rev-parse HEAD)"; idle; await_exit
@@ -102,7 +102,7 @@ esac
 /// and resolves the conflict in the turn of the answer.
 fn resume_asking(gated: bool) -> String {
     let gate = if gated {
-        "while [ ! -f \"$EXIT.gate\" ]; do sleep 0.05; done"
+        "await_file \"$EXIT.gate\""
     } else {
         ":"
     };

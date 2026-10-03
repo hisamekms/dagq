@@ -25,7 +25,7 @@ fn markers_do_not_hold_passes(fifos: bool) {
             r#"
 {install}
 touch "$RUN_DIR/installed"
-while [ ! -f "$RUN_DIR/release" ]; do sleep 0.02; done
+await_file "$RUN_DIR/release"
 rm "$RUN_DIR/idle.json" "$RUN_DIR/receipt.json"
 {FINISH}
 "#

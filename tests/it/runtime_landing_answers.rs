@@ -85,11 +85,7 @@ fn a_land_answer_is_applied_while_the_slot_is_taken_and_lands_before_a_new_claim
     add_ready_task(&mut queue, "third", &[]);
     backend.script_for(
         2,
-        &format!(
-            "while [ ! -f {} ]; do sleep 0.05; done; {}",
-            shell_path(&marker),
-            own_change(2)
-        ),
+        &format!("await_file {}; {}", shell_path(&marker), own_change(2)),
     );
     backend.script_for(3, &own_change(3));
     let answerer = {
@@ -269,11 +265,7 @@ fn a_cancel_answer_is_applied_while_the_slot_is_taken() {
     add_ready_task(&mut queue, "second", &[]);
     backend.script_for(
         2,
-        &format!(
-            "while [ ! -f {} ]; do sleep 0.05; done; {}",
-            shell_path(&marker),
-            own_change(2)
-        ),
+        &format!("await_file {}; {}", shell_path(&marker), own_change(2)),
     );
     let answerer = {
         let db = db.clone();
@@ -338,10 +330,7 @@ fn a_land_answer_is_applied_while_another_run_integrates() {
             title: "second".into(),
             description: "small change".into(),
             acceptance: "works".into(),
-            verification_commands: vec![format!(
-                "while [ ! -f {} ]; do sleep 0.05; done",
-                shell_path(&marker)
-            )],
+            verification_commands: vec![crate::common::await_path(&marker)],
             required_evidence: Vec::new(),
             paths: Vec::new(),
             priority: Default::default(),

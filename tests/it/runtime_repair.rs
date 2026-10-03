@@ -201,11 +201,13 @@ fn a_long_background_alert_is_repaired_by_stopping_the_orphan_of_the_worktree() 
 /// run directory), writes its receipt and goes idle with that background
 /// work running. It goes idle without it once the loop is gone, or after a
 /// bounded wait so that a runtime that never stops the loop fails the test
-/// instead of hanging it.
+/// instead of hanging it. The loop is nobody's child, so neither the
+/// fixture nor the watchdog stops it: it ends by itself with the worktree
+/// (the test's directory) or after the test's limit (task 1580).
 const LEFTOVER_LOOP_AGENT: &str = r#"
 commit work
 bg="$(dirname "$RECEIPT")/bg.pid"
-( sh -c 'while :; do sleep 1; done' >/dev/null 2>&1 & echo $! > "$bg.tmp"; mv "$bg.tmp" "$bg" )
+( sh -c 'n=0; while [ -d "$1" ] && [ $n -lt 600 ]; do sleep 1; n=$((n + 1)); done' sh "$PWD" >/dev/null 2>&1 & echo $! > "$bg.tmp"; mv "$bg.tmp" "$bg" )
 receipt "$(git rev-parse HEAD)"; idle_bg
 pid=$(cat "$bg")
 i=0; while kill -0 "$pid" 2>/dev/null && [ $i -lt 1200 ]; do sleep 0.05; i=$((i + 1)); done

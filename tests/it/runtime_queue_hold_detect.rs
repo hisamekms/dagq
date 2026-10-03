@@ -56,7 +56,7 @@ fn an_idle_session_at_the_usage_limit_joins_the_cost_ask() {
         false,
         r#"
 commit work; idle
-while [ ! -f "$EXIT.go" ]; do sleep 0.05; done
+await_file "$EXIT.go"
 "#,
     );
     *backend.screen.lock().unwrap() = LIMIT_SCREEN.into();
@@ -139,8 +139,8 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit"#,
     ));
     let gate = dir.db.parent().unwrap().join("logged-out");
     let logged_out = format!(
-        "while [ ! -f {} ]; do sleep 0.05; done; printf 'Invalid API key · Please run /login\\n'; exit 1",
-        shell_path(&gate)
+        "{}; printf 'Invalid API key · Please run /login\\n'; exit 1",
+        crate::common::await_path(&gate)
     );
     let reviewer = Arc::new(TestReviewer::new(&[
         logged_out.clone(),

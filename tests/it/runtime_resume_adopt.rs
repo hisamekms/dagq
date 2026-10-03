@@ -60,7 +60,7 @@ fn resume_taken_over_at_dialog(handoff: bool, max_waiting: usize) {
     let (run, _) = parked_conflict(&repo, &db, &backend);
     backend.resume_script_for(
         2,
-        "await_message; while [ ! -f \"$EXIT.go\" ]; do sleep 0.05; done; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+        "await_message; await_file \"$EXIT.go\"; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
     );
     let (_, token) = hand_off_when(&db, &repo, &backend, |queue| {
         event_kinds(&queue.show(TaskId::new(2)).unwrap()).contains(&"resume_request_sent")
@@ -220,7 +220,7 @@ fn resume_taken_over_after_its_exit(handoff: bool) {
     let (run, _) = parked_conflict(&repo, &db, &backend);
     backend.resume_script_for(
         2,
-        "await_message; while [ ! -f \"$EXIT.go\" ]; do sleep 0.05; done; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+        "await_message; await_file \"$EXIT.go\"; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
     );
     let (_, token) = hand_off_when(&db, &repo, &backend, |queue| {
         event_kinds(&queue.show(TaskId::new(2)).unwrap()).contains(&"resume_request_sent")

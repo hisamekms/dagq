@@ -66,6 +66,8 @@ testを書く・置く・直すときの今の規則。読むのは、`tests/`�
 
 - testの待ちには上限を付ける。pollのloopはdeadlineを持ち、上限の無い待ち（threadのjoin、stubのsessionの終了、`dagq`の子プロセスの`output()`）は`tests/common/mod.rs`の`within`（fixtureが持つtest全体の`common::test()`と、1つの待ちの`STEP_LIMIT`）で包む。
 - 上限を過ぎるとtest binaryがtestの名前と待っていた条件をstderrに出してexit 101で失敗する（`cargo test --test it`では同じbinaryの残りのtestもそこで止まる。関門のnextestはtestごとのprocessなので止まるのはそのtestだけ）。`cargo test | tail`が戻らなくなることはない。
+- testが起動するシェルの待ち・ループ・stub（taskのverification、stubのagentやturnのscript、reviewerやjobのscript、wrapperのscript、`#[cfg(test)]`の子プロセス）は、testが成功・失敗・panic・時間切れのどれで終わっても終わる形にする。testが書くファイルを待つときは`while [ ! -f ... ]`を直接書かず、`tests/common`の`await_file`（シェルの単語を待つ）か`await_path`（pathを引用して待つ）を使う。stubの前置き（`AGENT_PRELUDE`・`RESUME_PRELUDE`・`headless_claude`と`headless_codex`のstub）は同じシェル関数`await_file`を定義しているので、その中では`await_file "$EXIT.go"`と書く。この待ちは、待つファイルのディレクトリ（testの`TempDir`）が無くなるか、testのprocess（headlessのstubでは`STUB_TEST_PID`、それ以外はシェルの親）が居なくなると抜ける。
+- 無限ループ（`while :`）や長い`sleep`を持つ子は、親を失ったら（`kill -0 "$PPID"`が失敗したら）終わる条件か、`Drop`で子かそのprocess groupをkillするguardの下に置く。`Drop`のguardだけでは足りない: 時間切れの`process::exit`は`Drop`を通らないので、同じkillを`tests/common`の`on_timeout`に登録する（`KillOnDrop`と`runtime_support`の`Fixture`の形）か、子に親の死で終わる条件を持たせて組にする。headlessのstubは`HEADLESS_WATCHDOG`が、testのprocess（`STUB_TEST_PID`）かstubのディレクトリが無くなったら、interactiveのstubは`watchdog!`が親を失ったら、自分のprocess groupをkillする（headlessのstubが親でなくtestを見るのは、testがbackgroundのwrapperをkillして、それが残したturnをruntimeが止めることを確かめるため）。親から切り離して起動する子（testが孤児にするもの）は、ディレクトリの消滅か上限の回数で終わる条件を持たせる。
 
 ## e2e
 

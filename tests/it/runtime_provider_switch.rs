@@ -757,7 +757,7 @@ fn a_run_out_of_switches_waits_on_codexs_hold_and_retries_at_its_reset() {
             r#"case "$TURN" in
 1) error "unexpected status 429 Too Many Requests: You have hit your usage limit. Try again in 0 seconds."; sleep 30 ;;
 2) {CLAUDE_LIMIT} ;;
-3) while [ ! -f {gate} ]; do sleep 0.05; done; error "unexpected status 429 Too Many Requests: You have hit your usage limit. Try again in 2 seconds."; sleep 30 ;;
+3) await_file {gate}; error "unexpected status 429 Too Many Requests: You have hit your usage limit. Try again in 2 seconds."; sleep 30 ;;
 *) {FINISH} ;;
 esac"#,
             gate = gate.display()

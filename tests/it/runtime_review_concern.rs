@@ -590,7 +590,7 @@ fn adopt_an_unfixed_send_back(recorded: bool) {
         &db,
         false,
         "commit work; receipt \"$(git rev-parse HEAD)\"; idle; \
-         while [ ! -f \"$EXIT.go\" ]; do sleep 0.05; done",
+         await_file \"$EXIT.go\"",
     ));
     let run = left_by_a_dead_supervisor(
         &repo,

@@ -155,6 +155,7 @@ mod runtime_verify_retry;
 mod runtime_waiting;
 mod runtime_waiting_stages;
 mod runtime_workspace_cleanup;
+mod shell_leftovers;
 mod source_repository;
 mod test_actor_env;
 mod throughput_review_codex;

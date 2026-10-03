@@ -92,11 +92,15 @@ macro_rules! watchdog {
 /// A test's directory with its repository and queue. Dropping it, when the
 /// test returns or panics, kills every stub agent started on its queue with
 /// all their children, so none outlives the test (task 317). The test is
-/// timed while it is held (task 324).
+/// timed while it is held (task 324), and a timeout, whose `process::exit`
+/// skips the drop, kills them and removes the directory through
+/// [`common::on_timeout`] (task 1580), which ends the shells' waits of
+/// [`common::await_file`] whose parent is not the test.
 pub struct Fixture {
     pub db: PathBuf,
     pub dir: TempDir,
     pub _test: common::Waiting,
+    pub _on_timeout: common::Cleanup,
 }
 
 impl Fixture {
@@ -352,11 +356,23 @@ pub fn fixture() -> (Fixture, PathBuf, PathBuf) {
     let db = dir.path().join("queue's data.db");
     let mut queue = common::template::queue(&db);
     add_ready_task(&mut queue, "test task", &[]);
+    let on_timeout = {
+        let (db, path) = (db.clone(), dir.path().to_owned());
+        common::on_timeout(
+            Duration::from_secs(20),
+            format!("kill the stub agents of {} and remove it", db.display()),
+            move || {
+                kill_stubs(&db);
+                let _ = fs::remove_dir_all(path);
+            },
+        )
+    };
     (
         Fixture {
             db: db.clone(),
             dir,
             _test: common::test(),
+            _on_timeout: on_timeout,
         },
         repo,
         db,
@@ -466,6 +482,7 @@ resolve() {
 /// test workspace delivers the supervisor's exit request.
 pub const AGENT_PRELUDE: &str = concat!(
     watchdog!(),
+    crate::await_file_fn!(),
     worker_helpers!(),
     r#"
 printf 'fixture log\n' > "$LOG"
@@ -481,7 +498,7 @@ idle_bg_done() {
   printf '{"session_id":"%s","hook_event_name":"Stop","stop_hook_active":false,"background_tasks":[]}' "$RUN_ID" > "$IDLE.tmp"
   mv "$IDLE.tmp" "$IDLE"
 }
-await_exit() { while [ ! -f "$EXIT" ]; do sleep 0.05; done; }
+await_exit() { await_file "$EXIT"; }
 "#
 );
 
@@ -500,6 +517,7 @@ pub fn workspace_id(n: usize) -> String {
 /// `await_exit` are the worker's.
 pub const RESUME_PRELUDE: &str = concat!(
     watchdog!(),
+    crate::await_file_fn!(),
     resume_receipt!(),
     r#"
 idle() {
@@ -514,9 +532,9 @@ idle_bg_done() {
   printf '{"session_id":"%s","hook_event_name":"Stop","stop_hook_active":false,"background_tasks":[]}' "$RUN_ID" > "$IDLE.tmp"
   mv "$IDLE.tmp" "$IDLE"
 }
-await_exit() { while [ ! -f "$EXIT" ]; do sleep 0.05; done; }
+await_exit() { await_file "$EXIT"; }
 await_message() {
-  while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
+  await_file "$MESSAGE"
   MAIN=$(sed -n 's/.*main is now \([0-9a-f]*\) .*/\1/p' "$MESSAGE" | head -n 1)
 }
 "#,
@@ -525,6 +543,8 @@ await_message() {
 
 mod turns;
 pub use turns::*;
+mod headless_stubs;
+pub use headless_stubs::*;
 
 pub struct TestProvider {
     pub script: String,
@@ -1590,210 +1610,6 @@ impl AgentProvider for HeadlessProvider {
     }
 }
 
-/// A stub `claude` for headless turns (ADR-t813-1), in `dir`: it takes
-/// `claude -p`'s arguments and first prints `system/init` in stream-json
-/// with the permission mode it was given (or `$PERMISSION_SAID`), before
-/// it forks, so the shell's start and the log writes below fall on either
-/// side of an output line instead of in one silence of a short
-/// `turn_silence_secs` before the turn's output. Then it appends
-/// `<start|resume> <session> <prompt's first line>` to `stub-calls.log` in
-/// the run directory (`--add-dir`) and its arguments to `stub-args.log`,
-/// sources `turn.sh` next to it (see [`set_turns`]) and prints a result
-/// unless the turn did; a turn stopped at its `system/init` (a permission
-/// mode mismatch) may end before the logs. `$TURN` is the turn's number
-/// in the run, `$PROMPT` its prompt, `$MODE` `start` or `resume`,
-/// `$SESSION` the session id. The turn's helpers: `say TEXT`,
-/// `result [TEXT]` (with `$DENIALS` as its `permission_denials` and
-/// `$COST`, 0.01 unless the turn sets it, as its `total_cost_usd`),
-/// `denied` (three refusals), `fail TEXT` (an error result, exit 1),
-/// `commit MESSAGE`, `receipt COMMIT [RESULT] [EVIDENCE]`, `ask QUESTION`
-/// (its notification goes to `true`, not the host's cmux: a real `cmux
-/// notify` that is slow under load would be a quiet process of the turn
-/// for the `idle_process` watch).
-pub fn headless_claude(dir: &Path, db: &Path) -> PathBuf {
-    let stub = dir.join("claude-headless");
-    let script = format!(
-        r#"#!/bin/sh
-MODE=; SESSION=; RUN_DIR=; PERMISSION=; PROMPT=
-ARGS="$*"
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --session-id) MODE=start; SESSION=$2; shift 2 ;;
-    --resume) MODE=resume; SESSION=$2; shift 2 ;;
-    --add-dir) RUN_DIR=$2; shift 2 ;;
-    --permission-mode) PERMISSION=$2; shift 2 ;;
-    --output-format|--debug-file|--settings|--model|--effort) shift 2 ;;
-    --) PROMPT=$2; shift 2 ;;
-    *) shift ;;
-  esac
-done
-printf '{{"type":"system","subtype":"init","session_id":"%s","model":"stub","permissionMode":"%s"}}\n' "$SESSION" "${{PERMISSION_SAID:-$PERMISSION}}"
-DAGQ={dagq}
-DB={db}
-RECEIPT="$RUN_DIR/receipt.json"
-printf '%s %s %s\n' "$MODE" "$SESSION" "$(printf '%s\n' "$PROMPT" | head -n 1 | cut -c1-80)" >> "$RUN_DIR/stub-calls.log"
-printf '%s\n' "$ARGS" | head -n 1 >> "$RUN_DIR/stub-args.log"
-TURN=$(wc -l < "$RUN_DIR/stub-calls.log" | tr -d ' ')
-DENIALS=
-RESULTED=
-COST=0.01
-say() {{ printf '{{"type":"assistant","message":{{"model":"stub","content":[{{"type":"text","text":"%s"}}]}}}}\n' "$1"; }}
-result() {{
-  printf '{{"type":"result","subtype":"success","is_error":false,"num_turns":2,"duration_ms":5,"total_cost_usd":%s,"session_id":"%s","result":"%s","usage":{{"input_tokens":7,"output_tokens":3}},"permission_denials":[%s]}}\n' "$COST" "$SESSION" "${{1:-done}}" "$DENIALS"
-  RESULTED=1
-}}
-denied() {{ DENIALS='{{"tool_name":"Bash","tool_use_id":"t1","tool_input":{{}}}},{{"tool_name":"Bash","tool_use_id":"t2","tool_input":{{}}}},{{"tool_name":"Edit","tool_use_id":"t3","tool_input":{{}}}}'; }}
-fail() {{
-  printf '{{"type":"result","subtype":"success","is_error":true,"api_error_status":null,"session_id":"%s","result":"%s"}}\n' "$SESSION" "$1"
-  exit 1
-}}
-commit() {{ printf 'change by %s turn %s\n' "$SESSION" "$TURN" >> change.txt && git add change.txt && git commit -q -m "$1"; }}
-receipt() {{
-  printf '{{"run_id":"%s","result":"%s","commit":"%s","tests":{{"status":"passed","evidence_or_reason":"ran"}},"e2e":{{"status":"%s","evidence_or_reason":"stub e2e"}},"subagent_review":{{"status":"passed","evidence_or_reason":"reviewed"}},"summary":"turn %s"}}' "${{DAGQ_RUN_ID:-$SESSION}}" "${{2:-succeeded}}" "$1" "${{3:-not_applicable}}" "$TURN" > "$RECEIPT.tmp"
-  mv "$RECEIPT.tmp" "$RECEIPT"
-}}
-ask() {{ "$DAGQ" ask --run "${{DAGQ_RUN_ID:-$SESSION}}" --kind worker_question --because scope --topic acceptance_conflict --question "$1" --cmux true >/dev/null; }}
-. {turns}
-[ -n "$RESULTED" ] || result
-"#,
-        dagq = shell_join(&[env!("CARGO_BIN_EXE_dagq").to_owned()]),
-        db = "\"$STUB_DB\"",
-        turns = "\"${0%/*}/turn.sh\"",
-    );
-    crate::common::template::script_env(&stub, script, &[("STUB_DB", db.to_str().unwrap())]);
-
-    set_turns(dir, "say working");
-    stub
-}
-
-/// A stub `codex` for headless turns (ADR-t813-1, ADR-t813-3), in `dir`: it
-/// takes `codex exec --json -C <worktree> -c … -- <prompt>` and `codex exec
-/// resume --json -c … -- <thread> <prompt>`, finds the run directory among
-/// the `-c` writable roots, appends `<start|resume> <thread> <prompt's
-/// first line>` to `stub-calls.log` there and the arguments of the call
-/// (one line each) to `stub-args.log`, prints `thread.started` (a new
-/// thread `codex-thread-<turn>` when it starts, the one it resumes
-/// otherwise) and `turn.started`, then sources `turn.sh` next to it (see
-/// [`set_turns`]) and prints `turn.completed` unless the turn ended. `$TURN`
-/// is the turn's number in the run, `$PROMPT` its prompt, `$MODE` `start`
-/// or `resume`, `$THREAD` the thread. The turn's helpers: `say TEXT`,
-/// `result` (`turn.completed` with its usage), `error TEXT` (an `error`
-/// event), `fail TEXT` (`turn.failed`, exit 1), `refused COMMAND` (a
-/// command the sandbox refused), `commit MESSAGE`, `receipt COMMIT
-/// [RESULT] [EVIDENCE]`, `ask QUESTION`. A read-only job (the run's
-/// review: its job permission profile, or `--sandbox read-only`) logs its
-/// arguments and actor and prints the review's reply instead.
-pub fn headless_codex(dir: &Path, db: &Path) -> PathBuf {
-    let stub = dir.join("codex-headless");
-    let script = format!(
-        r#"#!/bin/sh
-MODE=start; THREAD=; PROMPT=; ROOTS=; REVIEW=
-ARGS=
-for arg in "$@"; do ARGS="$ARGS $arg|"; done
-[ "$1" = --version ] && {{ echo "codex-cli 0.46.0"; exit 0; }}
-[ "$1" = exec ] || {{ echo "not exec: $*" >&2; exit 2; }}
-shift
-if [ "$1" = resume ]; then MODE=resume; shift; fi
-while [ $# -gt 0 ]; do
-  case "$1" in
-    -c) case "$2" in sandbox_workspace_write.writable_roots=*) ROOTS=$2 ;; default_permissions=*) REVIEW=1 ;; esac; shift 2 ;;
-    --sandbox) [ "$2" = read-only ] && REVIEW=1; shift 2 ;;
-    -C|-m) shift 2 ;;
-    --) shift; break ;;
-    *) shift ;;
-  esac
-done
-if [ "$MODE" = resume ]; then THREAD=$1; PROMPT=$2; else PROMPT=$1; fi
-if [ -n "$REVIEW" ]; then
-  printf '%s\n' "$ARGS" >> {dir}/codex-review-args.log
-  printf '%s %s\n' "$DAGQ_ROLE" "$DAGQ_ACTOR_ID" >> {dir}/codex-review-actors.log
-  printf '%s\n' "${{RUSTC_WRAPPER-unset}}" >> {dir}/codex-review-wrapper.log
-  REVIEW_CALL=$(wc -l < {dir}/codex-review-actors.log | tr -d ' ')
-  printf '{{"type":"thread.started","thread_id":"codex-review-thread"}}\n{{"type":"turn.started"}}\n'
-  if [ -f {dir}/codex-review-failure.jsonl ]; then
-    cat {dir}/codex-review-failure.jsonl
-    exit 1
-  fi
-  if [ -f {dir}/codex-review-$REVIEW_CALL.jsonl ]; then
-    cat {dir}/codex-review-$REVIEW_CALL.jsonl
-  else
-    printf '{{"type":"item.completed","item":{{"id":"review","type":"agent_message","text":"{{\\"verdict\\":\\"pass\\",\\"reasons\\":[],\\"summary\\":\\"codex passed\\"}}"}}}}\n'
-  fi
-  printf '{{"type":"turn.completed","usage":{{"input_tokens":10,"output_tokens":2}}}}\n'
-  exit 0
-fi
-RUN_DIR=$(printf '%s' "${{ROOTS#*=}}" | tr -d '[]' | tr ',' '
-' | sed -n 5p | tr -d '"')
-DAGQ={dagq}
-DB={db}
-RECEIPT="$RUN_DIR/receipt.json"
-TURN=$(( $(cat "$RUN_DIR/stub-calls.log" 2>/dev/null | wc -l) + 1 ))
-[ -n "$THREAD" ] || THREAD="codex-thread-$TURN"
-printf '%s %s %s
-' "$MODE" "$THREAD" "$(printf '%s
-' "$PROMPT" | head -n 1 | cut -c1-80)" >> "$RUN_DIR/stub-calls.log"
-printf '%s
-' "$ARGS" >> "$RUN_DIR/stub-args.log"
-printf '%s
-' "${{RUSTC_WRAPPER-unset}}" >> "$RUN_DIR/stub-wrapper.log"
-ENDED=
-say() {{ printf '{{"type":"item.completed","item":{{"id":"m%s","type":"agent_message","text":"%s"}}}}
-' "$TURN" "$1"; }}
-result() {{
-  printf '{{"type":"turn.completed","usage":{{"input_tokens":%s,"cached_input_tokens":%s,"output_tokens":%s,"reasoning_output_tokens":%s}}}}
-' $((11 * TURN)) $((4 * TURN)) $((5 * TURN)) $((2 * TURN))
-  ENDED=1
-}}
-error() {{ printf '{{"type":"error","message":"%s"}}
-' "$1"; }}
-fail() {{
-  printf '{{"type":"error","message":"%s"}}
-{{"type":"turn.failed","error":{{"message":"%s"}}}}
-' "$1" "$1"
-  exit 1
-}}
-refused() {{ printf '{{"type":"item.completed","item":{{"id":"c%s","type":"command_execution","command":"%s","exit_code":1,"aggregated_output":"%s: Operation not permitted","status":"failed"}}}}
-' "$TURN" "$1" "$1"; }}
-commit() {{ printf 'change by %s turn %s
-' "$THREAD" "$TURN" >> change.txt && git add change.txt && git commit -q -m "$1"; }}
-receipt() {{
-  printf '{{"run_id":"%s","result":"%s","commit":"%s","tests":{{"status":"passed","evidence_or_reason":"ran"}},"e2e":{{"status":"%s","evidence_or_reason":"stub e2e"}},"subagent_review":{{"status":"passed","evidence_or_reason":"reviewed"}},"summary":"turn %s"}}' "$DAGQ_RUN_ID" "${{2:-succeeded}}" "$1" "${{3:-not_applicable}}" "$TURN" > "$RECEIPT.tmp"
-  mv "$RECEIPT.tmp" "$RECEIPT"
-}}
-ask() {{ "$DAGQ" ask --run "$DAGQ_RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question "$1" --cmux true >/dev/null; }}
-echo "Reading additional input from stdin..." >&2
-printf '{{"type":"thread.started","thread_id":"%s"}}
-{{"type":"turn.started"}}
-' "$THREAD"
-# The model goes to the thread's rollout only, as Codex writes it.
-if [ -f {model} ]; then
-  SESSIONS={home}/sessions
-  ROLLOUT=$(ls "$SESSIONS"/*/*/*/rollout-*-"$THREAD".jsonl 2>/dev/null | head -n 1)
-  if [ -z "$ROLLOUT" ]; then
-    mkdir -p "$SESSIONS/$(date +%Y/%m/%d)"
-    ROLLOUT="$SESSIONS/$(date +%Y/%m/%d)/rollout-2026-09-29T00-00-00-$THREAD.jsonl"
-    printf '{{"type":"session_meta","payload":{{"id":"%s"}}}}
-' "$THREAD" > "$ROLLOUT"
-  fi
-  printf '{{"timestamp":"%s","type":"turn_context","payload":{{"model":"%s","effort":"medium"}}}}
-' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$(cat {model})" >> "$ROLLOUT"
-fi
-. {turns}
-[ -n "$ENDED" ] || result
-"#,
-        dagq = shell_join(&[env!("CARGO_BIN_EXE_dagq").to_owned()]),
-        db = "\"$STUB_DB\"",
-        turns = "\"${0%/*}/turn.sh\"",
-        model = "\"${0%/*}/codex-model\"",
-        home = "\"${0%/*}/codex-home\"",
-        dir = "\"${0%/*}\"",
-    );
-    crate::common::template::script_env(&stub, script, &[("STUB_DB", db.to_str().unwrap())]);
-
-    set_turns(dir, "say working");
-    stub
-}
-
 /// The arguments of each call the stub of [`headless_codex`] got for `run`,
 /// each ended by `|`.
 pub fn stub_args(run: &TaskRun) -> Vec<String> {
@@ -2365,9 +2181,10 @@ pub fn event_kinds(detail: &dagq::domain::TaskDetail) -> Vec<&str> {
 /// it back) and ends only once the test writes `$EXIT.held`, the way a person
 /// would answer the dialog and exit.
 /// Blocks a fake session until the test calls `release_held_session`.
-pub const HOLD: &str = "while [ ! -f \"$EXIT.held\" ]; do sleep 0.05; done";
+pub const HOLD: &str = "await_file \"$EXIT.held\"";
 
-pub const HELD_AGENT: &str = "commit work; receipt \"$(git rev-parse HEAD)\"; idle; while [ ! -f \"$EXIT.held\" ]; do sleep 0.05; done";
+pub const HELD_AGENT: &str =
+    "commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_file \"$EXIT.held\"";
 
 pub fn release_held_session(run_dir: &str) {
     fs::write(Path::new(run_dir).join("exit-requested.held"), "").unwrap();
@@ -2379,7 +2196,8 @@ pub const WORK_SCREEN: &str =
 
 /// Fake agent that works (no receipt, no idle marker) until the test writes
 /// `$EXIT.go`, then finishes like `VALID_AGENT` and waits for `/exit`.
-pub const PROMPTED_AGENT: &str = "while [ ! -f \"$EXIT.go\" ]; do sleep 0.05; done; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit";
+pub const PROMPTED_AGENT: &str =
+    "await_file \"$EXIT.go\"; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit";
 
 /// A session stopped at a login that ran out (task 266).
 pub const LOGIN_SCREEN: &str = "\

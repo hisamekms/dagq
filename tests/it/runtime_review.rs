@@ -23,7 +23,7 @@ pub(crate) fn revising_agent(revises: usize) -> String {
     format!(
         "commit work; receipt \"$(git rev-parse HEAD)\"; idle; \
          for n in $(seq 1 {revises}); do \
-           while [ ! -f \"$MESSAGE\" ]; do sleep 0.1; done; rm \"$MESSAGE\"; \
+           await_file \"$MESSAGE\"; rm \"$MESSAGE\"; \
            printf 'fix %s\\n' \"$n\" >> change.txt; git commit -q -am \"fix $n\"; \
            receipt \"$(git rev-parse HEAD)\"; idle; \
          done; await_exit"
@@ -1121,8 +1121,8 @@ fn a_dialog_while_revising_is_recorded_as_prompt_waiting() {
         &db,
         false,
         "commit work; receipt \"$(git rev-parse HEAD)\"; idle; \
-         while [ ! -f \"$MESSAGE\" ]; do sleep 0.05; done; rm \"$MESSAGE\"; \
-         while [ ! -f \"$EXIT.go\" ]; do sleep 0.05; done; \
+         await_file \"$MESSAGE\"; rm \"$MESSAGE\"; \
+         await_file \"$EXIT.go\"; \
          printf 'fix\\n' >> change.txt; git commit -q -am fix; \
          receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
     );

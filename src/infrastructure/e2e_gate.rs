@@ -937,14 +937,52 @@ test b ... FAILED\nfailures:\n    a::two\ntest a::two ... FAILED\n";
     }
 
     /// A `sh -c script` in a process group of its own, as the gate starts
-    /// the e2e.
-    fn group_leader(script: &str) -> Child {
-        Command::new("sh")
+    /// the e2e, until [`Group::stop`] stops it as the gate does. A test that
+    /// ends before (an assert, a panic) kills the group as it drops the
+    /// guard (task 1580).
+    fn group_leader(script: &str) -> Group {
+        let leader = Command::new("sh")
             .args(["-c", script])
             .stdin(Stdio::null())
             .process_group(0)
             .spawn()
-            .unwrap()
+            .unwrap();
+        Group {
+            leader,
+            stopped: false,
+        }
+    }
+
+    /// The loop of a [`group_leader`]'s script: it runs while the test
+    /// process does, so that it ends by itself after a test process that
+    /// ended without the drops (killed, or exiting on a timeout).
+    fn while_the_test_runs() -> String {
+        format!(
+            "while kill -0 {} 2>/dev/null; do sleep 1; done",
+            std::process::id()
+        )
+    }
+
+    struct Group {
+        leader: Child,
+        stopped: bool,
+    }
+
+    impl Group {
+        fn stop(&mut self, grace: Duration) -> Option<ExitStatus> {
+            self.stopped = true;
+            stop_group(&mut self.leader, grace)
+        }
+    }
+
+    impl Drop for Group {
+        fn drop(&mut self) {
+            // Not reaped yet, so the group's id is still the leader's.
+            if !self.stopped {
+                signal_group(self.leader.id(), libc::SIGKILL);
+                let _ = self.leader.wait();
+            }
+        }
     }
 
     /// Wait (with a limit) until `path` holds a pid.
@@ -967,12 +1005,13 @@ test b ... FAILED\nfailures:\n    a::two\ntest a::two ... FAILED\n";
         let dir = tempfile::tempdir().unwrap();
         let ready = dir.path().join("ready");
         let mut leader = group_leader(&format!(
-            "echo $$ > '{}'; while :; do sleep 1; done",
-            ready.display()
+            "echo $$ > '{}'; {}",
+            ready.display(),
+            while_the_test_runs()
         ));
         pid_in(&ready);
         let started = Instant::now();
-        let status = stop_group(&mut leader, STOP_GRACE);
+        let status = leader.stop(STOP_GRACE);
         let took = started.elapsed();
         // The leader ended on the SIGTERM and was reaped; a zombie leader
         // read as alive would hold this for the whole grace.
@@ -988,13 +1027,14 @@ test b ... FAILED\nfailures:\n    a::two\ntest a::two ... FAILED\n";
         let dir = tempfile::tempdir().unwrap();
         let ready = dir.path().join("ready");
         let mut leader = group_leader(&format!(
-            "trap '' TERM; echo $$ > '{}'; while :; do sleep 1; done",
-            ready.display()
+            "trap '' TERM; echo $$ > '{}'; {}",
+            ready.display(),
+            while_the_test_runs()
         ));
         pid_in(&ready);
         let grace = Duration::from_secs(1);
         let started = Instant::now();
-        let status = stop_group(&mut leader, grace);
+        let status = leader.stop(grace);
         assert!(started.elapsed() >= grace);
         assert_eq!(
             std::os::unix::process::ExitStatusExt::signal(&status.unwrap()),
@@ -1009,12 +1049,13 @@ test b ... FAILED\nfailures:\n    a::two\ntest a::two ... FAILED\n";
         // The leader ends on SIGTERM; the child it leaves in the group
         // ignores it.
         let mut leader = group_leader(&format!(
-            "sh -c 'trap \"\" TERM; echo $$ > \"{}\"; while :; do sleep 1; done' & wait",
-            left.display()
+            "sh -c 'trap \"\" TERM; echo $$ > \"{}\"; {}' & wait",
+            left.display(),
+            while_the_test_runs()
         ));
         let child = pid_in(&left);
         let started = Instant::now();
-        stop_group(&mut leader, STOP_GRACE);
+        leader.stop(STOP_GRACE);
         assert!(started.elapsed() < STOP_GRACE / 2);
         let deadline = Instant::now() + Duration::from_secs(20);
         while alive(child) {

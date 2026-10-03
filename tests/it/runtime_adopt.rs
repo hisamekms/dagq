@@ -29,7 +29,7 @@ fn independent_tasks_run_concurrently_and_a_dependent_starts_after_integration()
     // landing (ADR-t1310-1), and nothing resumes it.
     backend.script_for(
         2,
-        "while [ ! -f \"$EXIT.go\" ]; do sleep 0.05; done; printf 'independent\\n' > independent.txt && git add independent.txt && git commit -q -m independent; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+        "await_file \"$EXIT.go\"; printf 'independent\\n' > independent.txt && git add independent.txt && git commit -q -m independent; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
     );
     let backend = Arc::new(backend);
     let options = SuperviseOptions {

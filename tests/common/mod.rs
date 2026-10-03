@@ -309,3 +309,36 @@ impl Drop for KillOnDrop {
 pub fn shell_path(path: impl AsRef<std::path::Path>) -> String {
     dagq::infrastructure::adapters::shell_quote(path.as_ref().to_str().unwrap())
 }
+
+/// The shell function `await_file PATH`, for a shell the test starts (a
+/// stub's script, a task's verification, a reviewer's or job's script) to
+/// wait for the file at the absolute `PATH` the test writes: it waits while
+/// the test is there to write it, and exits the shell with 1 once the
+/// file's directory is gone (the test's `TempDir` was dropped) or the
+/// test process is (a timeout's `process::exit` skips the drops): the one
+/// a headless stub's `STUB_TEST_PID` names, or else the shell's parent. A
+/// bare `while [ ! -f PATH ]` left the shell looping after a test that
+/// failed before writing the file (task 1580). A literal, for the stubs'
+/// preludes to `concat!`.
+#[macro_export]
+macro_rules! await_file_fn {
+    () => {
+        r#"await_file() { while [ ! -f "$1" ]; do [ -d "${1%/*}" ] && kill -0 "${STUB_TEST_PID:-$PPID}" 2>/dev/null || exit 1; sleep 0.05; done; }"#
+    };
+}
+
+/// [`await_file_fn`]'s function.
+pub const AWAIT_FILE: &str = await_file_fn!();
+
+/// A shell's wait for the file `word` names (a shell word: a quoted path,
+/// [`shell_path`], or one of the script's variables, `"$EXIT.go"`) that
+/// stops with the test: [`AWAIT_FILE`] defined and called, for a script
+/// without a prelude that defines it.
+pub fn await_file(word: &str) -> String {
+    format!("{AWAIT_FILE}; await_file {word}")
+}
+
+/// [`await_file`] for `path`.
+pub fn await_path(path: impl AsRef<std::path::Path>) -> String {
+    await_file(&shell_path(path))
+}

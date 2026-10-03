@@ -199,7 +199,7 @@ fn cancel_affected_gives_the_held_runs_up() {
         false,
         r#"
 commit work; idle
-while [ ! -f "$EXIT.go" ]; do sleep 0.05; done
+await_file "$EXIT.go"
 "#,
     );
     *backend.screen.lock().unwrap() = LOGIN_SCREEN.into();

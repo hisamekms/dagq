@@ -3,7 +3,6 @@ use crate::runtime_adopt::backdate_event;
 use crate::runtime_support;
 use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
-use dagq::infrastructure::adapters::shell_quote;
 use dagq::infrastructure::git_binary::git_executable;
 
 use runtime_support::*;
@@ -131,10 +130,7 @@ fn canceling_a_handoff_during_a_landing_resumes_claims_without_exec() {
     let release = db.with_extension("release");
     // The fixture's directory has an apostrophe (`queue's data`): quoted
     // whole, or the shell fails at once and the landing ends early.
-    let verification = json!([format!(
-        "while [ ! -f {} ]; do sleep 0.05; done",
-        shell_quote(release.to_str().unwrap())
-    )]);
+    let verification = json!([crate::common::await_path(&release)]);
     Connection::open(&db)
         .unwrap()
         .execute(
@@ -185,10 +181,7 @@ fn draining_for_a_handoff(
     repo: &Path,
 ) -> (thread::JoinHandle<Value>, PathBuf, Arc<AtomicU64>, String) {
     let release = db.with_extension("release");
-    let verification = json!([format!(
-        "while [ ! -f {} ]; do sleep 0.05; done",
-        shell_quote(release.to_str().unwrap())
-    )]);
+    let verification = json!([crate::common::await_path(&release)]);
     Connection::open(db)
         .unwrap()
         .execute(
@@ -288,10 +281,7 @@ fn a_handoff_replaced_at_the_take_execs_the_new_binary_without_a_claim() {
 fn a_handoff_does_not_wait_for_a_supervisor_that_drains_for_a_stop() {
     let (_dir, repo, db) = fixture();
     let release = db.with_extension("release");
-    let verification = json!([format!(
-        "while [ ! -f {} ]; do sleep 0.05; done",
-        shell_quote(release.to_str().unwrap())
-    )]);
+    let verification = json!([crate::common::await_path(&release)]);
     Connection::open(&db)
         .unwrap()
         .execute(
@@ -715,7 +705,7 @@ fn a_handoff_during_a_resume_goes_on_watching_the_resumed_session() {
     let (run, _) = parked_conflict(&repo, &db, &backend);
     backend.resume_script_for(
         2,
-        "await_message; while [ ! -f \"$EXIT.go\" ]; do sleep 0.05; done; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+        "await_message; await_file \"$EXIT.go\"; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
     );
     let (outcome, token) = hand_off_when(&db, &repo, &backend, |queue| {
         event_kinds(&queue.show(TaskId::new(2)).unwrap()).contains(&"resume_started")
@@ -855,7 +845,7 @@ fn a_handoff_without_its_state_during_a_resume_still_watches_the_session() {
     let (run, _) = parked_conflict(&repo, &db, &backend);
     backend.resume_script_for(
         2,
-        "await_message; while [ ! -f \"$EXIT.go\" ]; do sleep 0.05; done; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+        "await_message; await_file \"$EXIT.go\"; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
     );
     let (_, token) = hand_off_when(&db, &repo, &backend, |queue| {
         event_kinds(&queue.show(TaskId::new(2)).unwrap()).contains(&"resume_request_sent")
@@ -930,10 +920,7 @@ fn a_handoff_without_its_state_after_the_resumed_session_ended_gives_the_lease_b
     let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
     let (run, _) = parked_conflict(&repo, &db, &backend);
     // The first resumed session ends without resolving anything.
-    backend.resume_script_for(
-        2,
-        "await_message; while [ ! -f \"$EXIT.go\" ]; do sleep 0.05; done",
-    );
+    backend.resume_script_for(2, "await_message; await_file \"$EXIT.go\"");
     let (_, token) = hand_off_when(&db, &repo, &backend, |queue| {
         event_kinds(&queue.show(TaskId::new(2)).unwrap()).contains(&"resume_request_sent")
     });
@@ -985,7 +972,7 @@ fn a_supervisor_that_stops_during_a_resume_leaves_the_session_to_its_adopter() {
     let (run, _) = parked_conflict(&repo, &db, &backend);
     backend.resume_script_for(
         2,
-        "await_message; while [ ! -f \"$EXIT.go\" ]; do sleep 0.05; done; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+        "await_message; await_file \"$EXIT.go\"; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
     );
     // The first supervisor stops once the request is typed; the handoff
     // only ends its loop, and dropping its state and its pid makes it one
