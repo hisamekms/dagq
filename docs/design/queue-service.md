@@ -135,7 +135,7 @@ promptとskillが打たせるdagqのコマンドと、行き先のユースケ�
 | review job・復旧job（`ReadFiles`） | `prompt::review_prompt`・`prompt::recovery_prompt` | なし（Bashを持たず、dagqを打たない） |
 | runtimeが立てるplanner | `RECORD_READING` | `events --full`・`timeline RUN`（plannerは今もDBを直接開く） |
 | worker | runtimeのprompt（`WORKER_READING`） | `ask`（書き込み）。`list`・`show`は作業の初めに打たないよう言う（権限の範囲ではない。ADR-t1233-5決定3） |
-| worker（`measure`のtask） | AGENTS.mdの「テストの制約」のchangeの`measure`、measureのtaskのdescription（commit 2ae2c673のtask、task 1205・1114・1034・1026・601・1200） | `stats --full`・`events --full`・`timeline RUN`・`kpi`（`--compare`・`--area`・`--change`・`--by`）・`marks`・`forecast` |
+| worker（`measure`のtask） | [taskの登録](../development/task-registration.md)の「change」の`measure`、measureのtaskのdescription（commit 2ae2c673のtask、task 1205・1114・1034・1026・601・1200） | `stats --full`・`events --full`・`timeline RUN`・`kpi`（`--compare`・`--area`・`--change`・`--by`）・`marks`・`forecast` |
 | worker・job | dagq skillの`SKILL.md`と`reference/`（`inspect.md`・`kpi.md`・`register.md`・`scope.md`・`provider.md`・`goal-close.md`・`observer.md`） | `list`・`show`・`graph`・`candidates`・`status`・`asks`・`events`・`timeline`・`stats`・`kpi`・`forecast`・`notes`・`marks`・`findings`・`search`・`related`・`proposal list`・`proposal show`・`goal list`・`goal show`・`lint`・`observe --history` |
 
 ユースケースの無いコマンド（クライアントモードではserviceに届かない）:

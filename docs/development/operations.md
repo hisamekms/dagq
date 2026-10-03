@@ -45,6 +45,7 @@ AGENTS.mdの「作業中」の固定バイナリ・開発中のバイナリ・�
 hostのツールは人が入れ、miseのshimへのlinkを`~/.local/bin`に置く（ツールを更新しても同じpathで解決できるように）。
 
 - sccache: 入れ方は`dagq.toml`の`[run.env]`のコメント（[ADR-0049](../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)決定7）、見つからないときの止まり方は[Run environment](../design/supervisor-lifecycle/run-environment.md)の「`[run.env]`が名指すプログラムの検査」と`dagq doctor`の`run_env`が持つ。
+- cargo-nextest: 人が`mise use -g cargo:cargo-nextest`で入れ、`ln -s ~/.local/share/mise/shims/cargo-nextest ~/.local/bin/cargo-nextest`でmiseのshimへのlinkを置く（[ADR-0076](../adr/0076-run-the-coverage-gate-tests-with-nextest.md)決定3）。runtimeは事前に検査しないので、無いhostでは`cargo llvm-cov nextest`が`integrate`の検証の失敗として`needs_session`になる（そのhostでのtaskの登録は[taskの登録](task-registration.md)の「coverageの関門」、workerの扱いは[手元の検証](local-checks.md)の「stress」と「hostに触らない」）。
 - 当面の依存図の`d2`とTALA（`d2plugin-tala`）: `mise use -g d2 github:terrastruct/TALA`で入れ、`ln -s ~/.local/share/mise/shims/d2 ~/.local/bin/d2`と`ln -s ~/.local/share/mise/shims/d2plugin-tala ~/.local/bin/d2plugin-tala`。supervisorのPATHは`up`の時点で固定されるので、入れた後はsupervisorを起動し直す。無いときの振る舞いは[当面の依存図](../design/supervisor-lifecycle/dependency-diagram.md)と[doctor](../design/supervisor-lifecycle/doctor.md)の`d2`欄。
 
 ## `[run.env]`とtestの並列度の置き場
@@ -73,7 +74,7 @@ dagq up --in-cmux --claude ~/.local/bin/claude --codex ~/.local/bin/codex --plug
 
 ## KPIの読み方と印
 
-KPI・印・レポートの使い方（設定・運用・hostを変えたときの印の打ち方と`kpi --compare`、runtimeが自分で印にするもの）はpluginの`dagq`の`reference/kpi.md`、仕組みは[kpi](../design/supervisor-lifecycle/kpi.md)・[marks](../design/supervisor-lifecycle/marks.md)・[report](../design/supervisor-lifecycle/report.md)が持つ。このrepositoryの作業時間の前後比較で読む層（`kpi --compare`の`--area`か`--change`）は、AGENTS.mdの「テストの制約」の`--change`の項と、pluginの`dagq`の`reference/kpi.md`の「Raising throughput: the weekly review」が持つ。
+KPI・印・レポートの使い方（設定・運用・hostを変えたときの印の打ち方と`kpi --compare`、runtimeが自分で印にするもの）はpluginの`dagq`の`reference/kpi.md`、仕組みは[kpi](../design/supervisor-lifecycle/kpi.md)・[marks](../design/supervisor-lifecycle/marks.md)・[report](../design/supervisor-lifecycle/report.md)が持つ。このrepositoryの作業時間の前後比較は`kpi --compare`を`--area runtime`（か`--change <値>`）で読み、`all`で読まない（層で読む汎用の理由はpluginの`dagq`の`reference/kpi.md`の「Raising throughput: the weekly review」。changeの値は[taskの登録](task-registration.md)の「change」）。
 
 ## secretと外部送信
 

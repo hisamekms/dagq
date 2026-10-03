@@ -41,4 +41,5 @@ tags:
 - [スパイク：run の review job の中で review の subagent を Claude と Codex の非対話の呼び出しで動かせるか](review-subagents-spike.md)（goal 94、task 1453）
 - [AGENTS.md と plugin の dagq repository 固有の記述の棚卸しの表と、整理の前の役割ごとの読む量](agents-slim-inventory.md)（goal 94、task 1456）
 - [AGENTS.md の「作業中」「起動と停止」「着地と人の判断」から移した運用の規則の経緯](operation-rules-history.md)（goal 94、task 1458）
+- [AGENTS.md の「変更後に必ず通す」「テストの制約」から移した手元の検証と test の規則の経緯](local-checks-history.md)（goal 94、task 1457）
 - [2026-09-26以降の本番のaskのkindごとの件数と、answerが推奨・見立てどおりだった割合](ask-outcomes-2026-09-26.md)（goal 42、task 451）

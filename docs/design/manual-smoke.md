@@ -19,7 +19,7 @@ related:
 
 # Manual smoke of the paths that include real Claude and Codex
 
-実 Claude Code と実 Codex CLI を含む経路は自動 test にしない（AGENTS.md の「テストの制約」）。`tests/e2e.rs` のハッピーパスは stub を provider にするので、実 Claude の起動・ダイアログ・resume と、異常系の組み合わせはこの手順で人（または人に頼まれた session）が確かめる。runtime の振る舞いを大きく変えたとき、Claude Code か cmux の版を上げたときに流す。結果は task の receipt の `summary`（または `note`）に、版・シナリオごとの結果・見つけた問題を残す。
+実 Claude Code と実 Codex CLI を含む経路は自動 test にしない（[testの制約](../development/testing.md)の「手動スモーク」）。`tests/e2e.rs` のハッピーパスは stub を provider にするので、実 Claude の起動・ダイアログ・resume と、異常系の組み合わせはこの手順で人（または人に頼まれた session）が確かめる。runtime の振る舞いを大きく変えたとき、Claude Code か cmux の版を上げたときに流す。結果は task の receipt の `summary`（または `note`）に、版・シナリオごとの結果・見つけた問題を残す。
 
 手順は 6 つある。
 

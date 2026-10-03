@@ -4,7 +4,7 @@ type: design
 title: Scheduled stress of recently changed tests in GitHub Actions
 status: current
 created: 2026-09-28
-updated: 2026-10-02
+updated: 2026-10-03
 last_verified: 2026-10-02
 scope: operations
 tags:
@@ -18,7 +18,7 @@ related:
 
 # Scheduled stress of recently changed tests
 
-main に直近で足した・変えた test を GitHub Actions で 1 日 1 回、多い周回と高い並列度で繰り返し、落ちた test を GitHub の issue で人に知らせる。worker の手元の stress（AGENTS.md の「変更後に必ず通す」の stress の項。5 周の軽い見張り）が止めきれない、稀にしか落ちない不安定な test を着地の後に見つけるためのもので、host の load も queue の slot も使わない（なぜそうしたかは [ADR-t920-1](../adr/2026-09-28-t920-1-light-worker-stress-and-heavy-repetition-in-scheduled-ci.md) 決定 2）。
+main に直近で足した・変えた test を GitHub Actions で 1 日 1 回、多い周回と高い並列度で繰り返し、落ちた test を GitHub の issue で人に知らせる。worker の手元の stress（[手元の検証](../development/local-checks.md)の「stress」。5 周の軽い見張り）が止めきれない、稀にしか落ちない不安定な test を着地の後に見つけるためのもので、host の load も queue の slot も使わない（なぜそうしたかは [ADR-t920-1](../adr/2026-09-28-t920-1-light-worker-stress-and-heavy-repetition-in-scheduled-ci.md) 決定 2）。
 
 dagq の finding は observer しか書けないので、結果は queue ではなく issue に残り、planner が issue から直す task を登録する。
 
