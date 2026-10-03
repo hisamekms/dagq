@@ -4,10 +4,11 @@ type: design
 title: "Prompt"
 status: current
 created: 2026-09-26
-updated: 2026-10-03 # task 1470: the run's review is told to read the repository's instructions
-last_verified: 2026-10-03 # task 1470
+updated: 2026-10-03 # task 1566: the common rules of the headless jobs' prompts
+last_verified: 2026-10-03 # task 1566
 scope: runtime
 related:
+  - adr-t1566-1
   - adr-t1428-1
   - adr-t1420-1
   - adr-t963-1
@@ -101,3 +102,26 @@ runtimeはrepositoryの規則（検証のコマンド、宣言するpaths、要�
 - **review**: `review_prompt`の`REVIEW_RULES`の一文が、providerに依らず、worktreeのrootのrepositoryの指示（AGENTS.md・CLAUDE.mdのあるもの）とそれが名指す文書を読み、変更に当たる規則で差分を判定させる。資料の行の後、`REVIEW_DOCS_CHECK`（文書の照合）の前に置く。Claudeのreviewは`--setting-sources ""`で起動して`CLAUDE.md`をmemoryとして読まないので、promptで名指す（[ADR-t1470-1](../../adr/2026-10-03-t1470-1-all-claude-run-reviews-load-no-setting-sources.md)決定2、[Review](review.md)の「headless実行」）。`revise`の例は「repositoryのformatter・linter・その他の検査の指摘」で、特定の言語のツールを名指さない。
 
 follow_up・goal gap・findingのdraftの`context`の見出しは英語（`follow-up draft (proposed by the receipt of run <run> of task <id>)`、`goal gap draft (proposed by the judgment of goal <id>)`、`from finding <id> (<kind>)`。[Language](language.md#日本語が残っていた固定の文字列)）。testは`src/application/prompt.rs`の`prompts_take_the_rules_from_the_repository_in_order`と`the_review_prompt_names_the_repositorys_instructions`（reviewの`REVIEW_RULES`の位置と中身）、`tests/it/plan_review.rs`。
+
+## headlessのjobのprompt
+
+[ADR-t1566-1](../../adr/2026-10-03-t1566-1-headless-job-prompts-carry-decision-material-within-limits.md)（task 1566）。supervisorが起動するheadlessのjobとruntimeのplannerのpromptの共通の方針で、この節がjobごとの今の姿の正本。各jobの文書（[Headless job processes](headless-job-processes.md)、[Plan review](plan-review.md)、[Observer](observer.md)、[Goal review](goal-review.md)、[スループットの見直し](throughput-review.md)、[Review](review.md)、[復旧job](background-recovery-job.md)、[Session prompts](session-prompts.md)）はpromptの大きさと渡し方についてここを指す。
+
+- **渡し方**（決定1）: 大きさに関係なくファイルかstdinで渡し、引数で渡さない。今はどのjobも引数（Claudeは`claude -p … -- <prompt>`、Codexは`codex exec --json … -- <prompt>`の位置引数。[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)）で渡し、引数とenvの合計がhostの`ARG_MAX`（macOSで1MiB）を超えると`Argument list too long (os error 7)`で起動できない（2026-10-03のplan review、2026-10-01T13:54Zからのobserver）。ファイルかstdinへの切り替えはtask 1560が行い、決まった形はそのtaskがここと[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)に書く。
+- **載せるもの**（決定2）: 判断の材料だけ。一覧・全文の大量のデータはIDと要約にし、中身は下の表の「取りに行く経路」で必要なものだけ読ませる。
+- **取りに行く経路**（決定3）: jobの権限の意図（`JobAccess`、[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)）と許す道具で実際に読める経路だけを読む方法として書く。`queue_cli`のjob（observer・スループットの見直し）はファイルを読めないので、jobのdirの`input.json`は読む方法にしない（人が読むためのもの）。`read_files`のjob（runのreview・復旧job）は意図として`dagq`を打てないので（Codexのreviewはsandboxの都合で読むコマンドを打てても、promptはそれを読む方法にしない）、省いてよいのはそのjobが読めるファイル（worktreeとrun directory）にあるものだけ。
+- **上限と選ぶ順**（決定4）: 節ごとの件数かbyteの上限と全体の上限を持ち、超えたときに残す順（関連の強さ、新しさ）は決まった規則で決める。
+- **省いたことの明示**（決定5）: 節ごとに省いた件数と読む方法をpromptに書く。
+- **記録とtest**（決定6）: jobごとにpromptのbyte数をeventに記録し、上限をtestで確かめる。今はどのjobもbyte数を記録していない。eventと欄の名前は、各jobの上限を入れるtaskがここに書く。
+
+| job | 今の渡し方 | 権限の意図 | 今の節（材料） | 今の上限 | 取りに行く経路 |
+| --- | --- | --- | --- | --- | --- |
+| plan review（[Plan review](plan-review.md)の4） | 引数（Claude・Codex。task 1560が替える） | `read_files_and_queue_cli`（読むだけの`dagq`とファイルの読み取り） | proposalのtaskの全field、関係するgoal、`lint`、他の`submitted` / `revising`のproposal、`ready` / `in_progress`のtaskの要約と一部の全文、予想するファイル、人が答えたask、衝突の多いファイル、重複と実装済みの候補（2026-10-03に約1.1MB。`ready` / `in_progress`のtaskの全文が72%、要約が12%、人が答えたaskが8%） | 節の件数だけ（要約200件（`QUEUED_TASKS`、超えた件数を書く）、人が答えたask 30件、hotspot 15件、重複の候補はtaskごとに5件、要約の行の`expected_files`は10件（`SUMMARY_EXPECTED_FILES`））。全文の節・byteの上限と全体の上限は無い。task 1561が決めてここに書く | `dagq show`・`proposal show`・`search`・`related`・`findings`・`stats`・`events --full`・`timeline`、repositoryのファイル |
+| observer（[Observer](observer.md)） | 引数（`prompt.md`はjobのdirに書くが、渡すのは引数。task 1560が替える） | `queue_cli`（`Bash(dagq:*)`だけ） | 入力のJSON（`stats`・`kpi`・`findings`・`improvements`・`notes`・`open_asks`・`graph`）と読み方の指示（2026-10-01T13:54Zから約1.2MB） | 節の件数の一部だけ（noteは直近20件、cursorが無いときの`stats`は直近50件）。byteの上限と全体の上限は無い。observerのpromptの上限のtaskが決めてここに書く | `stats`・`kpi`・`findings`・`notes`・`asks`・`graph`・`forecast`・`events --full`・`timeline`・`observe --history` |
+| goal review（[Goal review](goal-review.md)の4） | 引数（task 1560が替える） | `read_files_and_queue_cli` | goal、所属taskのdescription・acceptance、着地したrunのreceipt、goalのevent、前回までのgoal review（150〜220KB） | 無い。上限を入れるtaskが決めてここに書く（まだ登録されていない） | `dagq show`・`goal show --full`・`findings`・`events --goal`・`search`、repositoryのファイル |
+| スループットの見直し（[スループットの見直し](throughput-review.md#promptの入力task-1099)） | 引数（上限で`ARG_MAX`に当たらない。task 1560が替える） | `queue_cli` | 指示・手順（pluginの`reference/kpi.md`の節）と入力の要約 | prompt全体が`PROMPT_LIMIT`（128KiB）、入力が`PROMPT_INPUT_LIMIT`（96KiB）。超えたら`DROP_ORDER`で落として`omitted_to_fit`に名を残し、promptが細部を読むコマンドを示す（task 1099）。byte数の記録は無い | `kpi`・`stats --full`・`timeline`・`events --full` |
+| runのreview（[Review](review.md)） | 引数（task 1560が替える） | `read_files`（worktreeとrun directoryのファイルだけ） | taskの記述・context、`review.md`の資料（約10KB） | 無い。上限を入れるtaskが決めてここに書く（まだ登録されていない） | worktreeとrun directoryのファイル |
+| 復旧job（[復旧job](background-recovery-job.md)） | 引数（task 1560が替える） | `read_files` | taskのdescription・acceptance・verification_commandsと`task_edited`、alertの意味と事実、`capture`した画面の末尾、runのプロセスの一覧、worktreeのHEADとreceiptの`commit`と`git status`、そのrunの過去の自動修正とverdict（[復旧job](background-recovery-job.md)の`recovery_prompt`） | 無い。上限を入れるtaskが決めてここに書く（まだ登録されていない） | run directoryのファイル |
+| runtimeのplanner（[Session prompts](session-prompts.md)、[非対話のworker](headless-worker.md)） | 非対話のturnの`claude -p … -- <prompt>`の引数（[非対話のworker](headless-worker.md)。task 1560が替えるかは同taskが決める） | plannerのrole（読むコマンドと計画のコマンド。[Authorization](../authorization.md)） | `runtime_planner_prompt`・`draft_planner_prompt`・`finding_planner_prompt`の指摘とtaskの行 | 無い。上限を入れるtaskが決めてここに書く（まだ登録されていない） | `dagq show`・`proposal show`・`search`・`related`・`findings`・`events --full`、repositoryのファイル |
+
+workerの`prompt.txt`（この文書の上の節）はADR-t1566-1の範囲に含めない。

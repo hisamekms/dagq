@@ -4,10 +4,12 @@ type: design
 title: "スループットの見直し（`throughput-review`）"
 status: current
 created: 2026-09-29
-updated: 2026-10-03 # task 1418: notices that do not wake the inbox watch
-last_verified: 2026-10-03 # task 1418
+updated: 2026-10-03 # task 1566: the common rules of the headless jobs' prompts
+last_verified: 2026-10-03 # task 1566
 scope: runtime
 related:
+  - adr-t1566-1
+  - design-supervisor-lifecycle-prompt
   - design-supervisor-lifecycle
   - adr-t996-1
   - adr-0047
@@ -78,6 +80,7 @@ Claudeのheadlessのjobは、promptを`claude -p`の位置引数で受ける（C
 - 切り詰め: 要約がなお`PROMPT_INPUT_LIMIT`を超えるときは、`stats` → `kpi.latest` → `timelines` → `kpi.targets` → `kpi.periods` → `asks` → `claim_deferred` → `landings` → `kpi`（形の分からない`kpi`は丸ごと載るので最後）の順（`DROP_ORDER`。大きく、コマンドで読み直しやすいものから）に、収まるまで丸ごと落とし、落としたものを`omitted_to_fit`に名前で残す。`period`と`hourly`は落とさない
 - promptは要約だと明かし、入力の全体が見直しのdirの`input.json`にあること（人が読むためのもの）と、細部は`kpi`（他の期間・層・host）・`stats --since <入力のstatsの始め（毎時は期間の終わりの6時間前、日次・週次は期間の始め）> --until <期間の終わり> --full`（run）・`timeline RUN`（長いrun）・`events --full`（着地は`--kind run_integrated`）で取りに行くことを指示する。dry runはdirを作らず、作るはずのdirの`input.json`を名指す
 - jobの権限（`ACCESS`の`queue_cli`）は広げない。`input.json`を読ませるにはClaude Codeの`Read`を許すことになり、queueの外のファイルも読めるようになる。要約から外したものはどれも読むコマンドで同じものが得られるので、ファイルを読む必要はない。Codexの見直し（task 1220）は読み取りだけのsandboxがファイルの読み取りを許すが、promptはClaudeと同じで、細部は同じ読むコマンドで取りに行かせる
+- この節の上限・要約・省いたものを読むコマンドの示し方は、headlessのjobに共通の方針（[ADR-t1566-1](../../adr/2026-10-03-t1566-1-headless-job-prompts-carry-decision-material-within-limits.md)）の先行の例で、全jobの渡し方と上限は[Prompt](prompt.md#headlessのjobのprompt)の「headlessのjobのprompt」の節の表が持つ。promptのbyte数のeventの記録はまだ無い。
 
 ## Codexで動かす（task 1220）
 

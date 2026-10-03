@@ -4,10 +4,12 @@ type: design
 title: "Headless job processes"
 status: current
 created: 2026-09-27
-updated: 2026-10-02
-last_verified: 2026-10-02
+updated: 2026-10-03 # task 1566: the prompt is passed and limited by the common rules
+last_verified: 2026-10-03 # task 1566
 scope: runtime
 related:
+  - adr-t1566-1
+  - design-supervisor-lifecycle-prompt
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-supervise
   - design-supervisor-lifecycle-handoff
@@ -32,6 +34,10 @@ task 443。supervisorが起動するheadlessのjob（runのreview、終わった
 ## 起動と終わりのinterface
 
 jobは[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)のinterfaceでproviderにつながる（task 1064）: 権限は意図（`JobAccess`）で渡し、`HeadlessJob::poll`はjobを起動したprovider（`HeadlessJob::provider`の`Supervisor::job_agent`: Claudeはsupervisorの`reviewer`、Codexは`codex_jobs`。task 1065）の`job_reply`でstdoutから取り出した最終の返答を返し（失敗なら理由の文）、失敗したjobの分類は`Supervisor::job_failure`（Claudeは`AgentSignals::job_failure`、Codexは`AgentProvider::job_failure`。共通の`JobFailure`）で読む。時間の上限の止め方（子孫をpidで集めてから止める）はproviderによらず同じ。
+
+## promptの渡し方と大きさ
+
+jobのpromptの渡し方（大きさに関係なくファイルかstdin）、載せる材料、節ごとと全体の上限、省いたことの明示、byte数の記録は、[Prompt](prompt.md#headlessのjobのprompt)の「headlessのjobのprompt」の節が正本で、jobごとの今の渡し方・節・上限をその表が持つ（[ADR-t1566-1](../../adr/2026-10-03-t1566-1-headless-job-prompts-carry-decision-material-within-limits.md)）。今はどのjobもpromptを引数で渡し、hostの`ARG_MAX`を超えると起動できない。ファイルかstdinへの切り替えはtask 1560が行う。
 
 ## 引き継ぎ
 
