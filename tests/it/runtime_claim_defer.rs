@@ -214,6 +214,85 @@ fn a_task_meeting_a_run_on_a_hotspot_waits_and_the_next_one_is_claimed() {
     assert_eq!(stats["claim_deferrals"]["deferred"], json!([]));
 }
 
+/// A run in the way that only waits for a person's answer (an open
+/// `approve_landing` and no lease) holds the task back within
+/// `waiting_owner_grace_secs`, as any run in flight; past it, the task is
+/// claimed before `defer_max_secs` and the deferral ends as
+/// `owner_waiting` (ADR-t1484-1).
+#[test]
+fn a_run_waiting_for_its_owner_past_the_grace_lets_the_deferred_task_go() {
+    let (_dir, repo, db) = hot_fixture();
+    let (hot, near) = {
+        let mut queue = SqliteQueue::open(&db).unwrap();
+        let hot = add_task(&mut queue, "edits the hot file", &[HOT], Priority::Normal);
+        let near = add_task(&mut queue, "edits the docs", &["docs/**"], Priority::Normal);
+        (hot, near)
+    };
+    let with_grace = |grace: i64| SuperviseOptions {
+        conflicts: Some(ConflictConfig {
+            defer_max_secs: 3600,
+            waiting_owner_grace_secs: grace,
+            ..ConflictConfig::default()
+        }),
+        ..supervise_options(3, true)
+    };
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let outcome = supervise_with(&db, &repo, &backend, &with_grace(600)).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(runs_of(&db, hot), 1);
+    assert_eq!(runs_of(&db, near), 0, "the task meeting the hot run waits");
+
+    // The run in the way rests on a person's answer.
+    let asked = {
+        let mut queue = SqliteQueue::open(&db).unwrap();
+        let run = queue.show(hot).unwrap().runs[0].id().clone();
+        assert!(queue.run_lease(&run).unwrap().is_none());
+        queue
+            .ask(NewAsk {
+                recommendation: None,
+                confidence: None,
+                topics: Vec::new(),
+                kind: AskKind::ApproveLanding,
+                task_id: None,
+                run_id: Some(run),
+                question: "land it?".into(),
+                options: vec!["land".into(), "send_back".into(), "cancel".into()],
+                asked_by: "supervisor".into(),
+                reason_category: dagq::domain::AskReason::Scope,
+                finding_id: None,
+                request_id: None,
+            })
+            .unwrap()
+            .ask
+    };
+    // Within the grace, the task still waits.
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let outcome = supervise_with(&db, &repo, &backend, &with_grace(600)).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(runs_of(&db, near), 0, "within the grace the task waits");
+    assert!(events(&db, "claim_deferral_ended").is_empty());
+
+    // Past the grace, it is claimed long before the limit.
+    await_second_after(asked.created_at);
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let outcome = supervise_with(&db, &repo, &backend, &with_grace(1)).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(runs_of(&db, near), 1, "the owner's wait no longer holds it");
+    let ended = events(&db, "claim_deferral_ended");
+    assert_eq!(ended.len(), 1, "{ended:?}");
+    assert_eq!(ended[0].0, Some(near));
+    assert_eq!(ended[0].1["why"], "owner_waiting");
+    assert_eq!(events(&db, "claim_deferred").len(), 1);
+    let stats = runtime::stats(&db, &Default::default()).unwrap();
+    assert_eq!(
+        stats["claim_deferrals"]["by_end"]["owner_waiting"]["count"], 1,
+        "{stats}"
+    );
+}
+
 /// A supervisor reads `[conflicts]` of the main checkout's `dagq.toml`
 /// again every pass (ADR-0080): a lower `hotspot_conflicts` makes the hot
 /// file a hotspot and a task over it waits, with the file's limit; an

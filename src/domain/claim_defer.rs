@@ -9,7 +9,9 @@
 //!
 //! A task of interrupt priority is never deferred, and a deferral ends
 //! once it has lasted `[conflicts] defer_max_secs`: the task is claimed
-//! then even if the files still meet.
+//! then even if the files still meet. A run in flight that only waits for
+//! a person's answer stops counting once it has waited
+//! `[conflicts] waiting_owner_grace_secs` (ADR-t1484-1).
 
 use super::EventKind;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -17,16 +19,23 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use super::{EventId, LeaseToken, RunEvent, TaskId, scope::glob_matches, stats::timestamp_millis};
+use super::{
+    Ask, AskKind, EventId, LeaseToken, RunEvent, TaskId,
+    event_kind::{LEASE_ACQUIRED, LEASE_RELEASED},
+    scope::glob_matches,
+    stats::timestamp_millis,
+    waiting::WaitState,
+};
 
 /// Recorded on the task when its claim is first deferred (`reason`,
 /// `files`, `runs`, `max_secs`, `message`, `supervisor`).
 pub const CLAIM_DEFERRED: &str = crate::domain::event_kind::EventKind::ClaimDeferred.as_str();
 /// Recorded on the task when its deferral ends (`reason`, `why`,
 /// `deferred_secs`, `supervisor`): `cleared` (the files no longer meet or
-/// the task became an interrupt), `expired` (it lasted the limit) or
-/// `not_candidate` (it left the candidates: claimed elsewhere, canceled,
-/// blocked again).
+/// the task became an interrupt), `owner_waiting` (they meet only runs
+/// that wait for a person's answer past the grace, ADR-t1484-1),
+/// `expired` (it lasted the limit) or `not_candidate` (it left the
+/// candidates: claimed elsewhere, canceled, blocked again).
 pub const CLAIM_DEFERRAL_ENDED: &str =
     crate::domain::event_kind::EventKind::ClaimDeferralEnded.as_str();
 /// The kinds that say where a task's deferral stands; a claim of the task
@@ -45,6 +54,16 @@ pub const HOT_FILES: &str = "hot_files";
 /// two of them.
 pub const DEFAULT_DEFER_MAX_SECS: i64 = 3600;
 
+/// The default of `[conflicts] waiting_owner_grace_secs` (ADR-t1484-1): a
+/// run that waits for a person's answer stops holding the claims back ten
+/// minutes into its wait. An answer that comes at once (the inbox looks)
+/// keeps the deferral; one that does not lets the tasks behind go.
+pub const DEFAULT_WAITING_OWNER_GRACE_SECS: i64 = 600;
+
+/// How a deferral ends when the files meet only runs that wait for a
+/// person past the grace.
+pub const OWNER_WAITING: &str = "owner_waiting";
+
 /// How many related landed tasks give the files of a task that declares no
 /// paths.
 pub const RELATED_TASKS: usize = 3;
@@ -56,6 +75,64 @@ pub struct InFlight {
     pub run_id: String,
     pub task_id: TaskId,
     pub files: Vec<String>,
+    /// Since when (unix seconds) the run only waits for a person's answer
+    /// ([`owner_waiting_since`]); `None` while it moves.
+    pub owner_waiting_since: Option<i64>,
+}
+
+/// Whether a run's open ask of `kind` stops it on a person: the run does
+/// nothing until it is answered (ADR-t1484-1).
+pub fn waits_for_owner(kind: &AskKind) -> bool {
+    matches!(
+        kind,
+        AskKind::WorkerQuestion
+            | AskKind::ApproveLanding
+            | AskKind::StuckExit
+            | AskKind::AnswerPrompt
+            | AskKind::Stalled
+            | AskKind::Decide
+    )
+}
+
+/// Since when (unix seconds) a run in flight only waits for a person
+/// (ADR-t1484-1): it has an ask of [`waits_for_owner`] that is neither
+/// answered nor closed among `asks` (its unclosed asks), and it is either
+/// out of its slot in a wait (ADR-0071, [`WaitState`] not ended; a
+/// returning run moves) or `leased` by no supervisor (resting on the ask,
+/// not on a resume). The wait counts from its start, the lease's absence
+/// from the run's last lease event, neither before the oldest such ask.
+/// `None` while the run moves: no such ask, or it is worked on.
+pub fn owner_waiting_since(asks: &[Ask], leased: bool, events: &[RunEvent]) -> Option<i64> {
+    let asked = asks
+        .iter()
+        .filter(|ask| ask.answered_at.is_none() && ask.closed_at.is_none())
+        .filter(|ask| waits_for_owner(&ask.kind))
+        .map(|ask| ask.created_at)
+        .min()?;
+    let seconds = |event: &RunEvent| timestamp_millis(&event.created_at).map(|ms| ms / 1000);
+    let since = match WaitState::of(events) {
+        Some(wait) if wait.ended.is_none() => Some(wait.since_ms / 1000),
+        _ if leased => return None,
+        _ => events
+            .iter()
+            .rev()
+            .find(|event| event.kind == LEASE_ACQUIRED || event.kind == LEASE_RELEASED)
+            .and_then(seconds),
+    };
+    Some(since.map_or(asked, |since| since.max(asked)))
+}
+
+/// The runs of `in_flight` that hold the claims back at `now`: all but
+/// those that have only waited for a person for `grace_secs` or longer.
+pub fn counted(in_flight: &[InFlight], now: i64, grace_secs: i64) -> Vec<InFlight> {
+    in_flight
+        .iter()
+        .filter(|run| {
+            run.owner_waiting_since
+                .is_none_or(|since| now - since < grace_secs)
+        })
+        .cloned()
+        .collect()
 }
 
 /// Where a candidate's expected files meet the runs in flight on hotspots.
@@ -172,11 +249,13 @@ pub enum Decision {
 }
 
 /// Judge one candidate: `interrupt` for a task of interrupt priority,
-/// `overlap` of its files, `deferral` the one in place (updated here),
-/// `now` in unix seconds.
+/// `overlap` of its files with the runs [`counted`], `owner_waiting` when
+/// they meet only runs left out as waiting for a person, `deferral` the
+/// one in place (updated here), `now` in unix seconds.
 pub fn decide(
     interrupt: bool,
     overlap: Option<Overlap>,
+    owner_waiting: bool,
     deferral: &mut Option<Deferral>,
     now: i64,
     max_secs: i64,
@@ -232,8 +311,13 @@ pub fn decide(
         (None, Some(open)) if open.expired => Decision::Claim { event: None },
         (None, Some(open)) => {
             *deferral = None;
+            let why = if owner_waiting && !interrupt {
+                OWNER_WAITING
+            } else {
+                "cleared"
+            };
             Decision::Claim {
-                event: ended("cleared", open.since),
+                event: ended(why, open.since),
             }
         }
         (None, None) => Decision::Claim { event: None },
@@ -475,6 +559,7 @@ mod tests {
             run_id: id.to_owned(),
             task_id: TaskId::new(task),
             files: files.iter().map(|file| (*file).to_owned()).collect(),
+            owner_waiting_since: None,
         }
     }
 
@@ -536,7 +621,15 @@ mod tests {
         let mut deferral = None;
         let Decision::Defer {
             event: Some((kind, payload)),
-        } = decide(false, hot(), &mut deferral, 100, 60, &LeaseToken::new("s"))
+        } = decide(
+            false,
+            hot(),
+            false,
+            &mut deferral,
+            100,
+            60,
+            &LeaseToken::new("s"),
+        )
         else {
             panic!("deferred with its event")
         };
@@ -555,13 +648,29 @@ mod tests {
         );
         // Still meeting: deferred again, not recorded again.
         assert_eq!(
-            decide(false, hot(), &mut deferral, 130, 60, &LeaseToken::new("s")),
+            decide(
+                false,
+                hot(),
+                false,
+                &mut deferral,
+                130,
+                60,
+                &LeaseToken::new("s")
+            ),
             Decision::Defer { event: None }
         );
         // The files no longer meet: claimed, and the deferral ends.
         let Decision::Claim {
             event: Some((kind, payload)),
-        } = decide(false, None, &mut deferral, 150, 60, &LeaseToken::new("s"))
+        } = decide(
+            false,
+            None,
+            false,
+            &mut deferral,
+            150,
+            60,
+            &LeaseToken::new("s"),
+        )
         else {
             panic!("claimed with the end")
         };
@@ -570,7 +679,15 @@ mod tests {
         assert_eq!(payload["deferred_secs"], 50);
         assert_eq!(deferral, None);
         assert_eq!(
-            decide(false, None, &mut deferral, 160, 60, &LeaseToken::new("s")),
+            decide(
+                false,
+                None,
+                false,
+                &mut deferral,
+                160,
+                60,
+                &LeaseToken::new("s")
+            ),
             Decision::Claim { event: None }
         );
     }
@@ -579,7 +696,15 @@ mod tests {
     fn an_interrupt_is_never_deferred_and_ends_a_deferral() {
         let mut deferral = None;
         assert_eq!(
-            decide(true, hot(), &mut deferral, 100, 60, &LeaseToken::new("s")),
+            decide(
+                true,
+                hot(),
+                false,
+                &mut deferral,
+                100,
+                60,
+                &LeaseToken::new("s")
+            ),
             Decision::Claim { event: None }
         );
         let mut deferral = Some(Deferral {
@@ -588,7 +713,15 @@ mod tests {
         });
         let Decision::Claim {
             event: Some((_, payload)),
-        } = decide(true, hot(), &mut deferral, 110, 60, &LeaseToken::new("s"))
+        } = decide(
+            true,
+            hot(),
+            false,
+            &mut deferral,
+            110,
+            60,
+            &LeaseToken::new("s"),
+        )
         else {
             panic!("an interrupt is claimed")
         };
@@ -603,7 +736,15 @@ mod tests {
         });
         let Decision::Claim {
             event: Some((kind, payload)),
-        } = decide(false, hot(), &mut deferral, 160, 60, &LeaseToken::new("s"))
+        } = decide(
+            false,
+            hot(),
+            false,
+            &mut deferral,
+            160,
+            60,
+            &LeaseToken::new("s"),
+        )
         else {
             panic!("expired")
         };
@@ -614,27 +755,224 @@ mod tests {
         // Not claimed in that pass (no slot): the next one claims it, and
         // records nothing more.
         assert_eq!(
-            decide(false, hot(), &mut deferral, 170, 60, &LeaseToken::new("s")),
+            decide(
+                false,
+                hot(),
+                false,
+                &mut deferral,
+                170,
+                60,
+                &LeaseToken::new("s")
+            ),
             Decision::Claim { event: None }
         );
         // The files stop meeting and meet again: still expired, not
         // deferred anew until the task is claimed.
         assert_eq!(
-            decide(false, None, &mut deferral, 180, 60, &LeaseToken::new("s")),
+            decide(
+                false,
+                None,
+                false,
+                &mut deferral,
+                180,
+                60,
+                &LeaseToken::new("s")
+            ),
             Decision::Claim { event: None }
         );
         assert!(deferral.unwrap().expired);
         assert_eq!(
-            decide(false, hot(), &mut deferral, 190, 60, &LeaseToken::new("s")),
+            decide(
+                false,
+                hot(),
+                false,
+                &mut deferral,
+                190,
+                60,
+                &LeaseToken::new("s")
+            ),
             Decision::Claim { event: None }
         );
         // A limit of 0 defers nothing.
         let mut none = None;
         assert_eq!(
-            decide(false, hot(), &mut none, 100, 0, &LeaseToken::new("s")),
+            decide(
+                false,
+                hot(),
+                false,
+                &mut none,
+                100,
+                0,
+                &LeaseToken::new("s")
+            ),
             Decision::Claim { event: None }
         );
         assert_eq!(none, None);
+    }
+
+    fn ask(kind: AskKind, created_at: i64) -> Ask {
+        Ask {
+            recommendation: None,
+            confidence: None,
+            topics: Vec::new(),
+            id: super::super::AskId::new(7),
+            kind,
+            task_id: None,
+            run_id: None,
+            question: "q".into(),
+            options: Vec::new(),
+            answer: None,
+            asked_by: "worker".into(),
+            reason_category: super::super::AskReason::Scope,
+            subject: None,
+            affected: Vec::new(),
+            created_at,
+            answered_at: None,
+            closed_at: None,
+            finding_id: None,
+            request_id: None,
+            answered_by: None,
+            option_index: None,
+            answer_authority: None,
+            answer_approval: None,
+        }
+    }
+
+    fn second(at: &str) -> i64 {
+        timestamp_millis(&format!("2026-09-26T01:{at}.000Z")).unwrap() / 1000
+    }
+
+    #[test]
+    fn a_run_waits_for_its_owner_on_an_open_ask_in_a_wait_or_without_a_lease() {
+        let asked = second("00:10");
+        let question = [ask(AskKind::WorkerQuestion, asked)];
+        let waiting = event(
+            1,
+            1,
+            "run_waiting_started",
+            json!({"ask_id": 7, "ask_kind": "worker_question", "phase": "session", "status": "running"}),
+            "00:20",
+        );
+        // In a wait (ADR-0071): from its start, even with the lease.
+        assert_eq!(
+            owner_waiting_since(&question, true, std::slice::from_ref(&waiting)),
+            Some(second("00:20"))
+        );
+        // Returning to a slot, the run moves.
+        let ended = event(
+            2,
+            1,
+            "run_waiting_ended",
+            json!({"cause": "answered"}),
+            "00:30",
+        );
+        assert_eq!(
+            owner_waiting_since(&question, true, &[waiting.clone(), ended.clone()]),
+            None
+        );
+        // Leased and out of a wait: worked on (validating, review, resume).
+        assert_eq!(owner_waiting_since(&question, true, &[]), None);
+        // No lease: from the ask, or from the lease's end after it.
+        assert_eq!(owner_waiting_since(&question, false, &[]), Some(asked));
+        let released = event(3, 1, "lease_released", json!({}), "00:40");
+        assert_eq!(
+            owner_waiting_since(&question, false, &[waiting, ended, released]),
+            Some(second("00:40"))
+        );
+        let before = event(4, 1, "lease_released", json!({}), "00:05");
+        assert_eq!(
+            owner_waiting_since(&question, false, &[before]),
+            Some(asked)
+        );
+        // An answered or closed ask, or one of a kind that does not stop
+        // the run on a person, waits for nobody.
+        let mut answered = ask(AskKind::ApproveLanding, asked);
+        answered.answered_at = Some(asked + 1);
+        let mut closed = ask(AskKind::StuckExit, asked);
+        closed.closed_at = Some(asked + 1);
+        let held = ask(AskKind::QueueHold, asked);
+        assert_eq!(
+            owner_waiting_since(&[answered, closed, held], false, &[]),
+            None
+        );
+        for kind in [
+            AskKind::WorkerQuestion,
+            AskKind::ApproveLanding,
+            AskKind::StuckExit,
+            AskKind::AnswerPrompt,
+            AskKind::Stalled,
+            AskKind::Decide,
+        ] {
+            assert!(waits_for_owner(&kind), "{kind}");
+        }
+        assert!(!waits_for_owner(&AskKind::Blocked));
+    }
+
+    #[test]
+    fn a_run_waiting_for_its_owner_past_the_grace_holds_no_claim_back() {
+        let hot_files = strings(&["x.md"]);
+        let waiting = InFlight {
+            owner_waiting_since: Some(100),
+            ..run("r1", 1, &["x.md"])
+        };
+        let working = run("r2", 2, &["x.md"]);
+        // Within the grace, the waiting run still counts.
+        assert_eq!(counted(std::slice::from_ref(&waiting), 699, 600).len(), 1);
+        assert!(counted(std::slice::from_ref(&waiting), 700, 600).is_empty());
+        let both = [waiting.clone(), working.clone()];
+        let left = counted(&both, 700, 600);
+        assert_eq!(left, [working]);
+        assert!(overlap(&hot_files, &hot_files, &left).is_some());
+        // Only the waiting run in the way: the deferral ends as
+        // owner_waiting and the task is claimed before the limit.
+        let mut deferral = Some(Deferral {
+            since: 100,
+            expired: false,
+        });
+        let Decision::Claim {
+            event: Some((kind, payload)),
+        } = decide(
+            false,
+            None,
+            true,
+            &mut deferral,
+            700,
+            3600,
+            &LeaseToken::new("s"),
+        )
+        else {
+            panic!("claimed past the grace")
+        };
+        assert_eq!(kind, EventKind::ClaimDeferralEnded);
+        assert_eq!(payload["why"], OWNER_WAITING);
+        assert_eq!(payload["deferred_secs"], 600);
+        assert_eq!(deferral, None);
+        // A new deferral is not started on such a run alone.
+        assert_eq!(
+            decide(
+                false,
+                None,
+                true,
+                &mut deferral,
+                710,
+                3600,
+                &LeaseToken::new("s")
+            ),
+            Decision::Claim { event: None }
+        );
+        // Moving again, the run defers anew.
+        assert!(matches!(
+            decide(
+                false,
+                hot(),
+                false,
+                &mut deferral,
+                720,
+                3600,
+                &LeaseToken::new("s")
+            ),
+            Decision::Defer { event: Some(_) }
+        ));
     }
 
     #[test]

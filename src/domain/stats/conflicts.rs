@@ -34,6 +34,9 @@ pub struct ConflictConfig {
     /// How long a claim deferred on the alerted files lasts at most
     /// (ADR-0069).
     pub defer_max_secs: i64,
+    /// How long a run in flight that only waits for a person's answer
+    /// still holds the claims back (ADR-t1484-1).
+    pub waiting_owner_grace_secs: i64,
 }
 
 impl Default for ConflictConfig {
@@ -42,16 +45,18 @@ impl Default for ConflictConfig {
             hotspot_conflicts: DEFAULT_HOTSPOT_CONFLICTS,
             hotspot_ratio_percent: DEFAULT_HOTSPOT_RATIO_PERCENT,
             defer_max_secs: crate::domain::claim_defer::DEFAULT_DEFER_MAX_SECS,
+            waiting_owner_grace_secs: crate::domain::claim_defer::DEFAULT_WAITING_OWNER_GRACE_SECS,
         }
     }
 }
 
 impl ConflictConfig {
     /// The setting names of the `[conflicts]` table.
-    pub const KEYS: [&str; 3] = [
+    pub const KEYS: [&str; 4] = [
         "hotspot_conflicts",
         "hotspot_ratio_percent",
         "defer_max_secs",
+        "waiting_owner_grace_secs",
     ];
 
     /// The setting `key` set to `value`; `None` for a key the table does
@@ -61,6 +66,7 @@ impl ConflictConfig {
             "hotspot_conflicts" => &mut self.hotspot_conflicts,
             "hotspot_ratio_percent" => &mut self.hotspot_ratio_percent,
             "defer_max_secs" => &mut self.defer_max_secs,
+            "waiting_owner_grace_secs" => &mut self.waiting_owner_grace_secs,
             _ => return None,
         };
         *field = value;
@@ -629,6 +635,7 @@ mod tests {
         assert_eq!(config.set("hotspot_conflicts", 5), Some(()));
         assert_eq!(config.set("hotspot_ratio_percent", 50), Some(()));
         assert_eq!(config.set("defer_max_secs", 900), Some(()));
+        assert_eq!(config.set("waiting_owner_grace_secs", 120), Some(()));
         assert_eq!(config.set("other", 1), None);
         assert_eq!(
             config,
@@ -636,6 +643,7 @@ mod tests {
                 hotspot_conflicts: 5,
                 hotspot_ratio_percent: 50,
                 defer_max_secs: 900,
+                waiting_owner_grace_secs: 120,
             }
         );
     }
