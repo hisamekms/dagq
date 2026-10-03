@@ -723,6 +723,8 @@ pub struct TestSession {
 pub struct TestWorkspace {
     pub db: PathBuf,
     pub fail: bool,
+    /// The tasks whose `create` fails as with `fail` (task 1482).
+    pub fail_tasks: Mutex<Vec<TaskId>>,
     pub close_fail: bool,
     pub script: String,
     pub scripts: Mutex<HashMap<TaskId, String>>,
@@ -865,6 +867,7 @@ impl TestWorkspace {
         Self {
             db: db.into(),
             fail,
+            fail_tasks: Mutex::new(Vec::new()),
             close_fail: false,
             script: script.into(),
             scripts: Mutex::new(HashMap::new()),
@@ -1003,7 +1006,7 @@ impl WorkspaceBackend for TestWorkspace {
                 .exists()
         );
         assert!(command.contains("'\"'\"'")); // Database path contains an apostrophe.
-        if self.fail {
+        if self.fail || self.fail_tasks.lock().unwrap().contains(&task.id()) {
             bail!("injected workspace creation failure");
         }
         let token: String = Connection::open(&self.db)?.query_row(

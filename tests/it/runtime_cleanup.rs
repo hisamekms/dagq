@@ -2168,3 +2168,194 @@ fn the_rest_of_a_cleanup_for_room_holds_and_asks_nothing_until_it_is_done() {
         assert_eq!(outcome["errors"], json!([]), "{outcome}");
     }
 }
+
+/// State of the test below of a drain on a provisioning failure.
+struct Unprovisioned {
+    db: PathBuf,
+    idle_target: PathBuf,
+    enough: bool,
+}
+
+static UNPROVISIONED: Mutex<Option<Unprovisioned>> = Mutex::new(None);
+static UNPROVISIONED_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Room until a run waits to land; then room for a claim but short of what
+/// a landing needs, until the idle run's build outputs go (with `enough`;
+/// for ever without).
+fn unprovisioned_free_space(_: &Path) -> Option<u64> {
+    UNPROVISIONED_READS.fetch_add(1, Ordering::SeqCst);
+    let state = UNPROVISIONED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let state = state.as_ref()?;
+    let queued = SqliteQueue::open(&state.db)
+        .unwrap()
+        .latest_event_of("landing_queued")
+        .unwrap()
+        .is_some();
+    Some(if queued && (!state.enough || state.idle_target.exists()) {
+        4 * GIB
+    } else {
+        1 << 40
+    })
+}
+
+/// Wait for `count` more readings of the free space: whole passes.
+fn unprovisioned_passes(db: &Path, count: usize) {
+    let reads = UNPROVISIONED_READS.load(Ordering::SeqCst);
+    wait_until(db, common::STEP_LIMIT, |_| {
+        UNPROVISIONED_READS.load(Ordering::SeqCst) >= reads + count
+    });
+}
+
+/// Task 1482: an ordinary cleanup job takes on a cleanup for room, and its
+/// rest (`Request::counted`) runs after it. A supervisor whose claiming
+/// stops on a provisioning failure while that rest runs drains, neither
+/// stopping nor handing off: the run short of room to land keeps its lease
+/// until the rest is done, then lands on the reading after it, or, still
+/// short, gives the lease back and stays awaiting integration; the drain
+/// ends with the provisioning error.
+#[test]
+fn a_drain_on_a_provisioning_failure_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing()
+{
+    for enough in [true, false] {
+        let (_dir, repo, db) = fixture();
+        let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
+        let (idle, ask) = run_awaiting_an_answer(&db, &repo, &backend, true);
+        let mut queue = SqliteQueue::open(&db).unwrap();
+        queue.answer(ask.id, "withdrawn").unwrap();
+        queue.close_ask(ask.id).unwrap();
+        // An ended run whose task goes on: the ordinary sweep's.
+        add_ready_task(&mut queue, "ended", &[]);
+        let building = TestWorkspace::new(&db, false, BUILDING_AGENT);
+        supervise(&db, &repo, &building).unwrap();
+        building.join();
+        let ended = queue.show(TaskId::new(2)).unwrap().runs[0].clone();
+        assert_eq!(ended.status(), RunStatus::Failed);
+        let ended_target = Path::new(ended.worktree_path().unwrap()).join("target");
+        fs::create_dir_all(ended_target.join("debug")).unwrap();
+        fs::write(ended_target.join("debug/again"), vec![0u8; 4096]).unwrap();
+        let idle_target = Path::new(idle.worktree_path().unwrap()).join("target");
+        assert!(idle_target.join("debug/big").is_file());
+        // The landing's change does not meet the idle run's: no landing
+        // recheck resumes it.
+        backend.script_for(
+            3,
+            "printf 'landing\\n' > landing.txt && git add landing.txt && \
+             git commit -q -m landing; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+        );
+        add_ready_task(&mut queue, "landing", &[]);
+        *UNPROVISIONED.lock().unwrap() = Some(Unprovisioned {
+            db: db.clone(),
+            idle_target: idle_target.clone(),
+            enough,
+        });
+        let rest = GatedFiles {
+            only: Some(idle_target.clone()),
+            ..GatedFiles::default()
+        };
+        let files = GatedFiles {
+            then: Some(Box::new(rest.clone())),
+            ..GatedFiles::default()
+        };
+        // A claim needs the least (a gibibyte), a landing far more than
+        // the free space once a run waits to land: a claim still goes on
+        // and meets the provisioning failure.
+        let options = files.options(SuperviseOptions {
+            disk: Some(DiskConfig {
+                min_free_bytes: Some(GIB),
+                claim_factor: 1.0,
+                integrate_factor: 1_000_000.0,
+                ..DiskConfig::default()
+            }),
+            free_space: unprovisioned_free_space,
+            ..supervise_options(2, false)
+        });
+        let supervisor = {
+            let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+            thread::spawn(move || {
+                let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets acceptance")]);
+                runtime::supervise_with_reviewer(
+                    &db,
+                    &repo,
+                    &*backend,
+                    &claude_stub(&db),
+                    &reviewer,
+                    Path::new(env!("CARGO_BIN_EXE_dagq")),
+                    &options,
+                )
+            })
+        };
+        // The sweep's job, with room: the ended run only.
+        assert_eq!(files.held(), ended_target, "enough={enough}");
+        wait_until(&db, common::STEP_LIMIT, |q| {
+            q.latest_event_of("landing_queued").unwrap().is_some()
+        });
+        let landing = queue.show(TaskId::new(3)).unwrap().runs[0].clone();
+        // Short of a landing now: the held job takes on the cleanup for
+        // room; once it ends, its rest starts and is held on the idle run.
+        unprovisioned_passes(&db, 3);
+        files.open();
+        assert_eq!(rest.held(), idle_target, "enough={enough}");
+        // The next claim fails to provision: claiming stops, and the
+        // supervisor drains while the rest is held.
+        backend.fail_tasks.lock().unwrap().push(TaskId::new(4));
+        add_ready_task(&mut queue, "unprovisioned", &[]);
+        wait_until(&db, common::STEP_LIMIT, |q| {
+            q.show(TaskId::new(4))
+                .unwrap()
+                .runs
+                .first()
+                .is_some_and(|run| run.last_error().is_some())
+        });
+        // The landing waits for the rest.
+        unprovisioned_passes(&db, 4);
+        assert!(!supervisor.is_finished(), "enough={enough}");
+        assert!(queue.run_lease(landing.id()).unwrap().is_some());
+        assert_eq!(
+            queue.run(landing.id()).unwrap().status(),
+            RunStatus::AwaitingIntegration
+        );
+        assert!(payloads_of(&queue, &landing, "integration_started").is_empty());
+        assert!(idle_target.join("debug/big").is_file());
+
+        rest.open();
+        let error = format!(
+            "{:#}",
+            joined(supervisor, "the rest of the cleanup and the drain").unwrap_err()
+        );
+        backend.join();
+        assert!(error.contains("injected workspace"), "{error}");
+        assert!(error.contains("claiming stopped"), "{error}");
+        assert_kept_but_the_build_outputs(&repo, &idle);
+        let removed = payloads_of(&queue, &idle, "build_outputs_removed");
+        assert_eq!(removed.len(), 1, "{removed:?}");
+        assert_eq!(removed[0]["reason"], "disk_space");
+        let repaired: Vec<Value> = queue
+            .all_events()
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == "auto_repaired")
+            .map(|event| event.payload)
+            .collect();
+        assert_eq!(repaired.len(), 2, "{repaired:?}");
+        assert_eq!(repaired[0]["detail"]["runs"], json!([ended.id().as_str()]));
+        assert_eq!(repaired[1]["repair"], "disk_cleanup");
+        assert_eq!(repaired[1]["bytes"], removed[0]["bytes"]);
+        assert_eq!(repaired[1]["detail"]["runs"], json!([idle.id().as_str()]));
+        assert!(queue.run_lease(landing.id()).unwrap().is_none());
+        assert_eq!(
+            queue.run(landing.id()).unwrap().status(),
+            if enough {
+                RunStatus::Integrated
+            } else {
+                RunStatus::AwaitingIntegration
+            },
+            "enough={enough}"
+        );
+        assert_eq!(
+            payloads_of(&queue, &landing, "integration_started").is_empty(),
+            !enough
+        );
+    }
+}
