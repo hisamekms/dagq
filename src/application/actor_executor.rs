@@ -148,7 +148,10 @@ pub enum HeadlessProgram<'a> {
 pub enum ActorProgram<'a> {
     /// The workspace of a run's worker (or of its resume), running the
     /// session wrapper `wrapper`, with the repository's `[run.env]` after
-    /// the runtime's own names.
+    /// the runtime's own names. With `background` (the log the wrapper
+    /// writes to), the wrapper is started without a workspace, as a
+    /// process detached from the supervisor with that environment
+    /// (ADR-t1404-1 decisions 1 and 5); its handle is the workspace's ID.
     RunWorkspace {
         task: &'a Task,
         run: &'a TaskRun,
@@ -157,6 +160,7 @@ pub enum ActorProgram<'a> {
         description: String,
         group: Option<String>,
         run_env: Vec<(String, String)>,
+        background: Option<&'a Path>,
     },
     /// A workspace of its own: the inbox, a planner. `planner` names the
     /// planner and its origin, `launch` the model its agent starts with.
@@ -627,7 +631,12 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 self.backend().as_str()
             );
         }
-        let ActorExecutionSpec { actor, program, .. } = spec;
+        let ActorExecutionSpec {
+            actor,
+            program,
+            workspace,
+            ..
+        } = spec;
         match program {
             ActorProgram::RunWorkspace {
                 task,
@@ -637,6 +646,7 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 description,
                 group,
                 run_env,
+                background,
             } => {
                 let cmux = self.workspaces()?;
                 // The worker's token, issued at the claim and the resume
@@ -649,6 +659,15 @@ impl ActorExecutor for HostActorExecutor<'_> {
                     .context("issue the worker's token for the queue service")?;
                 let mut env = actor_env(self.queue, &actor, None, None)?;
                 env.extend(run_env);
+                // In the run's worktree, which the worker writes.
+                if let Some(log) = background {
+                    return Ok(ActorHandle::Workspace(cmux.launch_background(
+                        workspace.path(),
+                        &wrapper,
+                        &env,
+                        log,
+                    )?));
+                }
                 let tags = WorkspaceTags {
                     env,
                     description: Some(description.clone()),
@@ -1055,6 +1074,23 @@ mod tests {
             ));
             self.made("w-resume", tags)
         }
+        fn launch_background(
+            &self,
+            cwd: &Path,
+            command: &str,
+            env: &[(String, String)],
+            log: &Path,
+        ) -> Result<String> {
+            self.workspaces.lock().unwrap().push((
+                format!("background {} {}", cwd.display(), log.display()),
+                command.to_owned(),
+                WorkspaceTags {
+                    env: env.to_vec(),
+                    ..WorkspaceTags::default()
+                },
+            ));
+            Ok("background:7:start".into())
+        }
         fn send_text(&self, _: &str, _: &str) -> Result<()> {
             unreachable!()
         }
@@ -1356,6 +1392,7 @@ mod tests {
                     description: "d".into(),
                     group: None,
                     run_env: Vec::new(),
+                    background: None,
                 },
             ),
             ActorExecutionSpec::new(
@@ -1394,6 +1431,7 @@ mod tests {
                 description: "d".into(),
                 group: None,
                 run_env: Vec::new(),
+                background: None,
             },
         );
         assert_eq!(spec.run_id(), Some(run.id()));
@@ -1444,6 +1482,7 @@ mod tests {
                         description: "d".into(),
                         group: Some("g".into()),
                         run_env: pairs(&[("SHARED", "x")]),
+                        background: None,
                     },
                 ))
                 .unwrap();
@@ -1473,6 +1512,50 @@ mod tests {
         }
         // The claim and the resume each issue the worker's token.
         assert_eq!(*fake.issued.lock().unwrap(), ["worker:r1", "worker:r1"]);
+    }
+
+    /// A run's session started in the background (ADR-t1404-1) opens no
+    /// workspace: its wrapper starts in the run's worktree with the same
+    /// environment, the worker's token issued as for a workspace.
+    #[test]
+    fn a_background_session_starts_its_wrapper_with_the_workspace_env() {
+        let (task, run) = claimed_run("r1");
+        let fake = Fake::default();
+        let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
+            .with_workspaces(&fake)
+            .with_queue_service(&fake);
+        let handle = executor
+            .spawn(ActorExecutionSpec::new(
+                ActorContext::worker(run.id(), run.task_id()),
+                WorkspaceAccess::Write("/w".into()),
+                ActorProgram::RunWorkspace {
+                    task: &task,
+                    run: &run,
+                    wrapper: "wrapper --background".into(),
+                    resume: false,
+                    description: "d".into(),
+                    group: None,
+                    run_env: pairs(&[("SHARED", "x")]),
+                    background: Some(Path::new("/r/session.log")),
+                },
+            ))
+            .unwrap();
+        assert_eq!(handle.workspace().unwrap(), "background:7:start");
+        let made = fake.workspaces.lock().unwrap();
+        assert_eq!(made.len(), 1);
+        assert_eq!(made[0].0, "background /w /r/session.log");
+        assert_eq!(made[0].1, "wrapper --background");
+        assert_eq!(
+            made[0].2.env,
+            pairs(&[
+                ("DAGQ_ROLE", "worker"),
+                ("DAGQ_ACTOR_ID", "worker:r1"),
+                ("DAGQ_RUN_ID", "r1"),
+                ("DAGQ_TASK_ID", "3"),
+                ("SHARED", "x"),
+            ])
+        );
+        assert_eq!(*fake.issued.lock().unwrap(), ["worker:r1"]);
     }
 
     /// Task 806: a create that reports failing although cmux made the
@@ -1508,6 +1591,7 @@ mod tests {
                         description: "dagq role=worker run=r1".into(),
                         group: None,
                         run_env: Vec::new(),
+                        background: None,
                     },
                 ))
                 .err()

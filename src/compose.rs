@@ -38,7 +38,7 @@ use crate::{
         rebind::{self as rebinding, Rebind, RebindTarget},
         recording::RecordingBackend,
         review::{self as reviewing, Review},
-        session::{self as wrapper, OwnWorkspace, Session},
+        session::{self as wrapper, OwnWorkspace, Session, WrapperStart},
         stats::{self as statistics, StatsSources, WorkspaceListing},
         supervise::{self as supervisor, Heartbeat, Layout, LoopSettings, Ports, UpdateSettings},
         update,
@@ -2848,7 +2848,10 @@ pub fn ended_run_material(
 /// `resume` reopens the session of a `needs_session` run the supervisor is
 /// resuming (ADR-0019) instead of starting the worker. A wrapper the run
 /// refuses closes its own workspace (`CMUX_WORKSPACE_ID`) through `cmux`
-/// when the run records no such workspace (task 806).
+/// when the run records no such workspace (task 806). Started in the
+/// background (`background`, ADR-t1404-1), it needs no terminal and has no
+/// workspace of its own ([`wrapper_entry`]).
+#[allow(clippy::too_many_arguments)]
 pub fn session(
     db: &Path,
     id: &RunId,
@@ -2857,11 +2860,9 @@ pub fn session(
     codex: &Path,
     resume: bool,
     cmux: &Path,
+    background: bool,
 ) -> Result<Value> {
-    ensure!(
-        std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
-        "interactive Claude wrapper requires a terminal"
-    );
+    let start = wrapper_entry(background)?;
     let provider = ClaudeCode {
         executable: claude.into(),
     };
@@ -2890,8 +2891,9 @@ pub fn session(
     let cmux = Cmux {
         executable: cmux.into(),
     };
-    // A headless turn outlives a wrapper killed with its workspace unless
-    // the wrapper stops it (ADR-t813-1 decision 3).
+    // A headless turn outlives a wrapper killed with its workspace, or sent
+    // SIGTERM in the background, unless the wrapper stops it (ADR-t813-1
+    // decision 3, ADR-t1404-1 decision 3).
     crate::infrastructure::process::stop_groups_on_exit_signals();
     run_session(
         db,
@@ -2901,7 +2903,11 @@ pub fn session(
         other,
         &LocalSpawner,
         resume,
-        own_workspace(&cmux),
+        match start {
+            WrapperStart::Workspace => own_workspace(&cmux),
+            WrapperStart::Background => None,
+        },
+        start,
         // The workspace's [run.env] is this process's environment, which
         // each turn inherits (ADR-t1215-1).
         crate::domain::sccache::SccacheTarget::of_pairs(
@@ -2912,6 +2918,29 @@ pub fn session(
                 .collect::<Vec<_>>(),
         ),
     )
+}
+
+/// The entry of a session wrapper: one started in a workspace needs its
+/// terminal (stdin and stdout), which the agent of an interactive session
+/// takes. One started in the background (ADR-t1404-1) has none: it reads
+/// nothing, its output goes to its log, and it leads a session and a
+/// process group of its own, which the supervisor's signals stop (a wrapper
+/// that leads one already keeps it). A planner's wrapper is entered the
+/// same way.
+pub fn wrapper_entry(background: bool) -> Result<WrapperStart> {
+    let start = WrapperStart::of_flag(background);
+    match start {
+        WrapperStart::Workspace => ensure!(
+            std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
+            "interactive Claude wrapper requires a terminal"
+        ),
+        // SAFETY: setsid(2) touches no memory; it fails only for a process
+        // that leads its group already.
+        WrapperStart::Background => {
+            unsafe { libc::setsid() };
+        }
+    }
+    Ok(start)
 }
 
 /// The workspace this wrapper runs in, from cmux's `CMUX_WORKSPACE_ID`,
@@ -2931,7 +2960,18 @@ pub fn session_with_provider(
     provider: &dyn AgentProvider,
     spawner: &dyn Spawner,
 ) -> Result<Value> {
-    run_session(db, id, token, provider, None, spawner, false, None, None)
+    run_session(
+        db,
+        id,
+        token,
+        provider,
+        None,
+        spawner,
+        false,
+        None,
+        WrapperStart::Workspace,
+        None,
+    )
 }
 
 /// The wrapper (`resume` for `session --resume`) with `provider`'s agent
@@ -2946,7 +2986,45 @@ pub fn session_with_providers(
     spawner: &dyn Spawner,
     resume: bool,
 ) -> Result<Value> {
-    run_session(db, id, token, provider, other, spawner, resume, None, None)
+    run_session(
+        db,
+        id,
+        token,
+        provider,
+        other,
+        spawner,
+        resume,
+        None,
+        WrapperStart::Workspace,
+        None,
+    )
+}
+
+/// [`session_with_providers`] started in the background (ADR-t1404-1):
+/// without a terminal or a workspace of its own, it registers once the
+/// supervisor recorded its start (`wrapper_launched`) with this process's
+/// pid.
+pub fn session_in_background(
+    db: &Path,
+    id: &RunId,
+    token: &LeaseToken,
+    provider: &dyn AgentProvider,
+    other: Option<&dyn AgentProvider>,
+    spawner: &dyn Spawner,
+    resume: bool,
+) -> Result<Value> {
+    run_session(
+        db,
+        id,
+        token,
+        provider,
+        other,
+        spawner,
+        resume,
+        None,
+        WrapperStart::Background,
+        None,
+    )
 }
 
 /// [`session_with_providers`] whose environment names `sccache` as
@@ -2972,6 +3050,7 @@ pub fn session_with_sccache(
         spawner,
         resume,
         None,
+        WrapperStart::Workspace,
         Some(sccache),
     )
 }
@@ -2984,7 +3063,18 @@ pub fn resume_session_with_provider(
     provider: &dyn AgentProvider,
     spawner: &dyn Spawner,
 ) -> Result<Value> {
-    run_session(db, id, token, provider, None, spawner, true, None, None)
+    run_session(
+        db,
+        id,
+        token,
+        provider,
+        None,
+        spawner,
+        true,
+        None,
+        WrapperStart::Workspace,
+        None,
+    )
 }
 
 /// The wrapper (`resume` for `session --resume`) running in the workspace
@@ -3008,6 +3098,7 @@ pub fn session_in_workspace(
         spawner,
         resume,
         Some(own),
+        WrapperStart::Workspace,
         None,
     )
 }
@@ -3022,6 +3113,7 @@ fn run_session(
     spawner: &dyn Spawner,
     resume: bool,
     own_workspace: Option<OwnWorkspace<'_>>,
+    start: WrapperStart,
     sccache: Option<crate::domain::sccache::SccacheTarget>,
 ) -> Result<Value> {
     // The wrapper's events are its own, not the worker's (ADR-t728-1).
@@ -3045,6 +3137,7 @@ fn run_session(
             files: &LocalRunFiles,
             pid: std::process::id(),
             own_workspace,
+            start,
             sccache: sccache
                 .map(|target| (target, &looker as &dyn crate::application::SccacheServer)),
         },

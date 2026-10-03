@@ -183,7 +183,9 @@ pub fn stats(
     let all_runs = queue.all_runs()?;
     let mut runs = Vec::new();
     for run in all_runs.iter().filter(|run| !finished(run.status())) {
-        runs.push(live_run(run, sources)?);
+        let mut live = live_run(run, sources)?;
+        live.background_alive = background_alive(&events, run.id(), run.workspace_id(), processes);
+        runs.push(live);
     }
     let mut session_workspaces = Vec::new();
     for role in [
@@ -263,6 +265,25 @@ fn millis(time: SystemTime) -> i64 {
 /// The unfinished `run` with the write times of its idle marker, receipt
 /// and prompt-submit marker. A file that is not there, or a run without a
 /// directory, has none.
+/// Whether the wrapper of the session the run `run` opened last runs, when
+/// that session is a background wrapper's (ADR-t1404-1): its handle's pid
+/// shows the start the handle recorded, so a pid another process took is
+/// not taken for it. `first` is the run's record of its first session.
+/// `None` for a session in a workspace.
+fn background_alive(
+    events: &[crate::domain::RunEvent],
+    run: &RunId,
+    first: Option<&str>,
+    processes: &dyn ProcessControl,
+) -> Option<bool> {
+    use crate::domain::background_wrapper::{BackgroundHandle, last_session};
+    let run_events = events
+        .iter()
+        .filter(|event| event.run_id.as_ref() == Some(run));
+    let handle = BackgroundHandle::parse(last_session(run_events, first)?)?;
+    Some(handle.is(handle.pid, processes.start_identity(handle.pid).as_deref()))
+}
+
 fn live_run(run: &TaskRun, sources: &StatsSources<'_>) -> Result<LiveRun> {
     let modified = |path: &Path| {
         sources
@@ -307,6 +328,7 @@ fn live_run(run: &TaskRun, sources: &StatsSources<'_>) -> Result<LiveRun> {
             .and_then(|path| modified(Path::new(path))),
         input,
         background_since,
+        background_alive: None,
     })
 }
 
@@ -366,6 +388,83 @@ mod tests {
             created_at: at.to_owned(),
             actor: None,
         }
+    }
+
+    /// The process control of [`background_alive`]'s test: the starts of
+    /// the processes running now, by pid.
+    struct Starts(Vec<(u32, &'static str)>);
+
+    impl ProcessControl for Starts {
+        fn alive(&self, pid: u32) -> bool {
+            self.0.iter().any(|(p, _)| *p == pid)
+        }
+        fn terminate(&self, _: u32) -> Result<()> {
+            unreachable!()
+        }
+        fn interrupt(&self, _: u32) -> Result<()> {
+            unreachable!()
+        }
+        fn kill(&self, _: u32) -> Result<()> {
+            unreachable!()
+        }
+        fn start_identity(&self, pid: u32) -> Option<String> {
+            self.0
+                .iter()
+                .find(|(p, _)| *p == pid)
+                .map(|(_, start)| (*start).to_owned())
+        }
+    }
+
+    /// A run's last session in the background is alive while its handle's
+    /// pid shows the start the handle recorded: dead when the pid runs
+    /// nothing, and dead when another process took the pid. A session in a
+    /// workspace has no such judgment, and only the run's own events count.
+    #[test]
+    fn a_background_wrapper_is_alive_only_with_its_recorded_start() {
+        let run = RunId::new("3aa21145-c873-4cec-aee3-ee7f07f52e4a").unwrap();
+        let other = RunId::new("4bb21145-c873-4cec-aee3-ee7f07f52e4a").unwrap();
+        let started = "Sat Oct  3 10:00:01 2026";
+        let handle =
+            crate::domain::background_wrapper::BackgroundHandle::new(4242, started).to_string();
+        let of = |run: &RunId, id: i64, workspace: &str| RunEvent {
+            run_id: Some(run.clone()),
+            ..event(
+                id,
+                "workspace_created",
+                json!({"workspace_id": workspace}),
+                "1970-01-01T00:01:40.000Z",
+            )
+        };
+        let events = [of(&run, 1, "WS-FIRST"), of(&run, 2, &handle)];
+        let alive =
+            |processes: &Starts| background_alive(&events, &run, Some("WS-FIRST"), processes);
+        assert_eq!(alive(&Starts(vec![(4242, started)])), Some(true));
+        assert_eq!(alive(&Starts(Vec::new())), Some(false));
+        assert_eq!(
+            alive(&Starts(vec![(4242, "Sat Oct  3 11:30:00 2026")])),
+            Some(false),
+            "a pid another process took"
+        );
+        // A session in a workspace, the run's first (no event read), or
+        // another run's handle: nothing to judge.
+        let processes = Starts(vec![(4242, started)]);
+        assert_eq!(
+            background_alive(&events[..1], &run, Some("WS-FIRST"), &processes),
+            None
+        );
+        assert_eq!(
+            background_alive(&[], &run, Some(&handle), &processes),
+            Some(true)
+        );
+        assert_eq!(
+            background_alive(
+                &[of(&other, 3, &handle)],
+                &run,
+                Some("WS-FIRST"),
+                &processes
+            ),
+            None
+        );
     }
 
     /// The history is read from the earliest event, not the earliest

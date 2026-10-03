@@ -21,6 +21,8 @@
 //! `[e2e] paths` names, as globs, the paths whose change requires `e2e` of
 //! a run (ADR-t963-1 decision 2). `[broker]` holds the resource broker's
 //! mode and the limits of its server (ADR-t827-4 decision 4).
+//! `[headless] wrapper` chooses where a headless session's wrapper runs:
+//! in a cmux workspace or as a background process (ADR-t1404-1).
 //! The file is parsed by
 //! hand: the format is these tables of `KEY = value` lines, a subset of
 //! TOML that needs no parser crate.
@@ -39,6 +41,7 @@ use crate::{
         ChangeSet, TaskChange,
         actor_model::{ModelRole, RoleModel, RoleModels, check_effort},
         areas::AreaMap,
+        background_wrapper::HeadlessWrapper,
         broker::{BrokerConfig, BrokerMode},
         disk::DiskConfig,
         exit::ExitConfig,
@@ -111,7 +114,12 @@ const REVIEW_SUBAGENTS_PREFIX: &str = "review.subagents.";
 const REVIEW_SUBAGENTS_TABLE: &str = "review.subagents";
 /// The one key of `[review.subagents.<agent>]`.
 const REVIEW_SUBAGENT_PATHS: &str = "paths";
-const TABLES: [&str; 15] = [
+/// `[headless]`: `wrapper`, where a headless session's wrapper runs
+/// (ADR-t1404-1 decision 7).
+const HEADLESS_TABLE: &str = "headless";
+/// The one key of `[headless]`.
+const HEADLESS_WRAPPER: &str = "wrapper";
+const TABLES: [&str; 16] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
@@ -127,6 +135,7 @@ const TABLES: [&str; 15] = [
     TASKS_TABLE,
     E2E_TABLE,
     BROKER_TABLE,
+    HEADLESS_TABLE,
 ];
 /// The one key of `[recheck]`.
 const RECHECK_COMMAND: &str = "command";
@@ -199,6 +208,9 @@ pub struct Config {
     /// `[review.subagents.<agent>]` in file order (ADR-t1453-1 decision
     /// 1); empty without any.
     pub review_subagents: Vec<ReviewSubagent>,
+    /// `[headless] wrapper` (ADR-t1404-1 decision 7); `None` without it,
+    /// which is the default, a workspace.
+    pub headless_wrapper: Option<HeadlessWrapper>,
 }
 
 /// Parse the whole file.
@@ -296,7 +308,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{E2E_TABLE}], [{BROKER_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{E2E_TABLE}], [{BROKER_TABLE}], [{HEADLESS_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -447,6 +459,24 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 let value = parse_string(rest.trim())
                     .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: value of {key}"))?;
                 config.run_env.push((key.to_owned(), value));
+            }
+            Some(HEADLESS_TABLE) => {
+                ensure!(
+                    key == HEADLESS_WRAPPER,
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{HEADLESS_TABLE}]; the key is {HEADLESS_WRAPPER}"
+                );
+                ensure!(
+                    config.headless_wrapper.is_none(),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                let text = parse_string(rest.trim()).with_context(with)?;
+                let wrapper = HeadlessWrapper::parse(&text)
+                    .with_context(|| {
+                        format!("expected \"workspace\" or \"background\", not {text:?}")
+                    })
+                    .with_context(with)?;
+                config.headless_wrapper = Some(wrapper);
             }
             Some(RECHECK_TABLE) => {
                 ensure!(
@@ -673,7 +703,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 stall_keys.push(key.to_owned());
             }
             None => bail!(
-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{BROKER_TABLE}] or [{KPI_TABLE}]"
+                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{BROKER_TABLE}], [{HEADLESS_TABLE}] or [{KPI_TABLE}]"
             ),
         }
     }
@@ -1007,6 +1037,19 @@ pub fn load_e2e_paths(root: &Path) -> Result<Vec<String>> {
         .e2e_paths)
 }
 
+/// `[headless] wrapper` of the `dagq.toml` in `root` (ADR-t1404-1
+/// decision 7); no file, no table or no key is the default, a workspace.
+pub fn load_headless_wrapper(root: &Path) -> Result<HeadlessWrapper> {
+    let path = root.join(CONFIG_FILE_NAME);
+    let Some(text) = read_config(&path)? else {
+        return Ok(HeadlessWrapper::default());
+    };
+    Ok(parse_config(&text)
+        .with_context(|| format!("parse {}", path.display()))?
+        .headless_wrapper
+        .unwrap_or_default())
+}
+
 /// `[roles.<role>]` of the `dagq.toml` in `root` (ADR-0079 decision 7);
 /// no file is no role's.
 pub fn load_role_models(root: &Path) -> Result<RoleModels> {
@@ -1317,6 +1360,9 @@ impl Verifier for ShellVerifier {
     fn review_subagents_in(&self, text: &str) -> Result<Vec<ReviewSubagent>> {
         Ok(parse_config(text)?.review_subagents)
     }
+    fn headless_wrapper(&self) -> Result<HeadlessWrapper> {
+        load_headless_wrapper(&self.checkout)
+    }
     fn role_models(&self) -> Result<RoleModels> {
         load_role_models(&self.checkout)
     }
@@ -1576,6 +1622,53 @@ mod tests {
         assert_eq!(load_e2e_paths(dir.path()).unwrap(), ["tests/e2e.rs"]);
         fs::write(dir.path().join(CONFIG_FILE_NAME), "[e2e]\npaths = 1\n").unwrap();
         assert!(load_e2e_paths(dir.path()).is_err());
+    }
+
+    /// `[headless] wrapper` chooses where a headless session's wrapper
+    /// runs (ADR-t1404-1 decision 7); a workspace without it.
+    #[test]
+    fn parses_the_wrapper_of_the_headless_table() {
+        let config = parse_config("[headless]\nwrapper = \"background\" # goal 89\n").unwrap();
+        assert_eq!(config.headless_wrapper, Some(HeadlessWrapper::Background));
+        assert_eq!(parse_config("").unwrap().headless_wrapper, None);
+        for (text, expected) in [
+            (
+                "[headless]\nmode = \"a\"\n",
+                "dagq.toml:2: unknown key mode",
+            ),
+            (
+                "[headless]\nwrapper = \"workspace\"\nwrapper = \"background\"\n",
+                "dagq.toml:3: wrapper is defined twice",
+            ),
+            (
+                "[headless]\nwrapper = \"cmux\"\n",
+                "dagq.toml:2: value of wrapper",
+            ),
+            ("[headless]\nwrapper = 1\n", "dagq.toml:2: value of wrapper"),
+        ] {
+            let error = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(error.contains(expected), "{text:?}: {error}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            load_headless_wrapper(dir.path()).unwrap(),
+            HeadlessWrapper::Workspace
+        );
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[headless]\nwrapper = 'background'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            load_headless_wrapper(dir.path()).unwrap(),
+            HeadlessWrapper::Background
+        );
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[headless]\nwrapper = 2\n",
+        )
+        .unwrap();
+        assert!(load_headless_wrapper(dir.path()).is_err());
     }
 
     /// `[tasks] changes` names the repository's set of changes (ADR-t980-1).
@@ -2224,7 +2317,7 @@ LITERAL = 'no \n escapes # here'
         fs::write(dir.path().join(CONFIG_FILE_NAME), "[supervisors]\n").unwrap();
         let error = format!("{:#}", load_supervisor_config(dir.path()).unwrap_err());
         assert!(
-            error.contains("[supervisor], [areas], [tasks], [e2e], [broker] and [kpi]"),
+            error.contains("[supervisor], [areas], [tasks], [e2e], [broker], [headless] and [kpi]"),
             "{error}"
         );
     }

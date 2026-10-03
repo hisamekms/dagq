@@ -194,6 +194,9 @@ pub struct RecordingBackend<'a> {
     token: Option<LeaseToken>,
     /// The 1-minute load average, `None` where it cannot be read.
     load_average: fn() -> Option<f64>,
+    /// Stops the turns background wrappers that died left running
+    /// ([`Self::stopping_left_turns`]); `None` leaves them.
+    left_turns: Option<Arc<dyn super::ProcessControl + Send + Sync>>,
 }
 
 impl<'a> RecordingBackend<'a> {
@@ -210,7 +213,40 @@ impl<'a> RecordingBackend<'a> {
             queues,
             token,
             load_average,
+            left_turns: None,
         }
+    }
+
+    /// `self`, telling and stopping through `processes` the turn a
+    /// background session (ADR-t1404-1) left when its wrapper died: such a
+    /// session `exists` while its recorded turn runs, and its `close`
+    /// stops that turn after the wrapper (decision 3).
+    pub fn stopping_left_turns(
+        mut self,
+        processes: Arc<dyn super::ProcessControl + Send + Sync>,
+    ) -> Self {
+        self.left_turns = Some(processes);
+        self
+    }
+
+    /// The turn the background session `workspace_id` left running, with
+    /// the process control that stops it; `None` for a workspace, without
+    /// [`Self::stopping_left_turns`], or when none runs.
+    fn left_turn(
+        &self,
+        workspace_id: &str,
+    ) -> Option<(
+        &dyn super::ProcessControl,
+        crate::domain::background_wrapper::BackgroundHandle,
+    )> {
+        if !crate::domain::background_wrapper::is_background(workspace_id) {
+            return None;
+        }
+        let processes = self.left_turns.as_deref()?;
+        let queue = self.queues.open().ok()?;
+        let run = queue.run_in_workspace(workspace_id).ok()??;
+        let turn = super::supervise::left_turn(&*queue, processes, &run, workspace_id)?;
+        Some((processes as &dyn super::ProcessControl, turn))
     }
 
     /// A call that is made once.
@@ -335,6 +371,15 @@ impl WorkspaceBackend for RecordingBackend<'_> {
         let result = self.inner.create_resume(task, run, command, tags);
         self.recorded("create_resume", None, Some(run.id()), result)
     }
+    fn launch_background(
+        &self,
+        cwd: &std::path::Path,
+        command: &str,
+        env: &[(String, String)],
+        log: &std::path::Path,
+    ) -> Result<String> {
+        self.inner.launch_background(cwd, command, env, log)
+    }
     /// A text that timed out is typed again only while the screen shows no
     /// trace of it: one that got there is left to the submit check (task
     /// 285), and one whose screen cannot be read is not guessed at.
@@ -370,7 +415,14 @@ impl WorkspaceBackend for RecordingBackend<'_> {
     }
     fn close(&self, workspace_id: &str) -> Result<()> {
         let result = self.inner.close(workspace_id);
-        self.recorded("close", Some(workspace_id), None, result)
+        self.recorded("close", Some(workspace_id), None, result)?;
+        match self.left_turn(workspace_id) {
+            Some((processes, turn)) => {
+                let result = super::supervise::stop_left_turn(processes, &turn);
+                self.recorded("close", Some(workspace_id), None, result)
+            }
+            None => Ok(()),
+        }
     }
     fn set_color(&self, workspace_id: &str, color: &str) -> Result<()> {
         let result = self.inner.set_color(workspace_id, color);
@@ -406,13 +458,16 @@ impl WorkspaceBackend for RecordingBackend<'_> {
             },
         )
     }
+    /// A background session whose wrapper is gone still exists while the
+    /// turn it left runs, so that whatever closes it stops that turn.
     fn exists(&self, workspace_id: &str) -> Result<bool> {
-        self.retried(
+        let exists = self.retried(
             "exists",
             workspace_id,
             || self.inner.exists(workspace_id),
             || true,
-        )
+        )?;
+        Ok(exists || self.left_turn(workspace_id).is_some())
     }
     fn listed_workspace_ids(&self) -> Result<Vec<String>> {
         let result = self.inner.listed_workspace_ids();

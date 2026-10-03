@@ -85,8 +85,11 @@ extern "C" fn stop_groups(signal: libc::c_int) {
 /// Stop the groups this process started ([`CommandSpec::new_session`])
 /// when it is hung up, terminated or interrupted: a headless turn of the
 /// session wrapper leads a session of its own with no terminal, and would
-/// outlive a wrapper whose workspace was closed (ADR-t813-1 decision 3).
-/// Only the wrapper installs it. It stops the groups alone: listing a
+/// outlive a wrapper whose workspace was closed (ADR-t813-1 decision 3),
+/// or a wrapper started in the background that the supervisor stops with
+/// SIGTERM (ADR-t1404-1 decision 3; the supervisor kills what is left with
+/// SIGKILL after a grace, the turns' groups included, which this handler
+/// cannot see). Only the wrapper installs it. It stops the groups alone: listing a
 /// turn's descendants (`ps`) is not async-signal-safe, so a command the
 /// turn runs in a group of its own is left to `stop_processes`.
 pub fn stop_groups_on_exit_signals() {

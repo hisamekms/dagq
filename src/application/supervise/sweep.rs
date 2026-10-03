@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::domain::EventKind;
+use crate::domain::background_wrapper::is_background;
 use crate::{
     application::{EndedRunWorkspace, planner},
     domain::run::{RunWorkspace, run_workspaces},
@@ -197,19 +198,24 @@ impl Supervisor<'_> {
         if candidates.is_empty() {
             return Ok(());
         }
-        let listed = match self.cmux.listed_workspace_ids() {
-            Ok(listed) => listed,
-            Err(error) => {
-                warn!(error = %format_args!("{error:#}"), "the workspaces of ended runs could not be swept: {error:#}");
-                return Ok(());
+        // Only a workspace's ID is looked for in cmux's list: a background
+        // wrapper's handle is judged by its process (ADR-t1404-1), so a
+        // listing that fails skips the workspaces only and the background
+        // sessions are still swept.
+        let listed = if candidates.iter().all(|w| is_background(&w.workspace_id)) {
+            Some(Vec::new())
+        } else {
+            match self.cmux.listed_workspace_ids() {
+                Ok(listed) => Some(listed),
+                Err(error) => {
+                    warn!(error = %format_args!("{error:#}"), "the workspaces of ended runs could not be swept: {error:#}");
+                    None
+                }
             }
         };
         let mut closed_runs: Vec<RunId> = Vec::new();
         for candidate in candidates {
-            if !listed
-                .iter()
-                .any(|id| id.eq_ignore_ascii_case(&candidate.workspace_id))
-            {
+            if !still_open(self.cmux, listed.as_deref(), &candidate.workspace_id) {
                 continue;
             }
             let workspace = &candidate.workspace_id;

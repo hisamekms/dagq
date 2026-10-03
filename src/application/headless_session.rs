@@ -595,6 +595,12 @@ impl<'a> Turns<'a> {
                 "request": request.map(|r| r.seq),
                 "what": what,
                 "pid": pid,
+                // The process's start, which tells it from another that
+                // takes its pid: a background session's stop finds a turn
+                // its dead wrapper left by it (ADR-t1404-1 decision 3).
+                "start": pid
+                    .and_then(|pid| self.processes.start_identity(pid))
+                    .map(|start| crate::domain::background_wrapper::start_token(&start)),
                 "provider": on.provider,
                 // An agent that names its own session names a new one in
                 // its output.

@@ -483,10 +483,25 @@ impl SqliteQueue {
 
     /// The latest run whose session opened in `workspace_id`, if any.
     pub fn run_in_workspace(&self, workspace_id: &str) -> Result<Option<RunId>> {
-        Ok(self
+        let current = self
             .conn
             .query_row(
                 "SELECT id FROM task_runs WHERE workspace_id=?1 ORDER BY rowid DESC LIMIT 1",
+                [workspace_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if current.is_some() {
+            return Ok(current);
+        }
+        // A resume's workspace (or a background wrapper's handle,
+        // ADR-t1404-1) is recorded in the run's events only.
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT run_id FROM run_events WHERE kind='workspace_created'
+                 AND run_id IS NOT NULL AND json_extract(payload,'$.workspace_id')=?1
+                 ORDER BY id DESC LIMIT 1",
                 [workspace_id],
                 |r| r.get(0),
             )

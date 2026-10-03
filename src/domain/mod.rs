@@ -790,6 +790,7 @@ pub mod actor;
 pub mod actor_model;
 pub mod areas;
 pub mod authorization;
+pub mod background_wrapper;
 pub mod broker;
 pub mod change;
 pub mod claim_defer;

@@ -4,7 +4,10 @@
 //! run-workspaces.md`), by a run's ID, a task's ID or all at once, without
 //! a supervisor. Without `apply` it only lists what it would close (a dry
 //! run, the default). The workspaces are found by what the queue recorded,
-//! never by their title, and only the ones cmux still lists are closed.
+//! never by their title, and only the ones cmux still lists are closed. A
+//! background session's handle (ADR-t1404-1) is judged by its wrapper's
+//! process instead, so a listing that fails still closes those and then
+//! fails the command.
 //!
 //! - **All** (no ID): the sweep's set ([`RunLog::ended_run_workspaces`]):
 //!   the ended runs no live supervisor leases, but the triage's (the
@@ -29,6 +32,9 @@ use serde_json::json;
 
 use super::health::lease_health;
 use super::{Clock, ProcessControl, Queue, WorkspaceBackend, reason_of_error};
+use crate::domain::background_wrapper::{
+    background_turn, is_background, launch_of, wrapper_is_recorded,
+};
 use crate::domain::run::run_workspaces;
 use crate::domain::{
     ActorContext, EventKind, ReasonCode, RunId, RunStatus, SessionRole, TaskId, TaskRun,
@@ -76,7 +82,11 @@ pub struct CleanupReport {
 
 /// Why nothing may close the workspaces of `run` now: it has not ended, a
 /// live supervisor leases it, or its wrapper or agent is alive; `None`
-/// when they may be closed.
+/// when they may be closed. A background session's wrapper (ADR-t1404-1)
+/// is alive only with the start recorded at its launch, and its agent, a
+/// turn the session recorded, is judged by the start recorded with it: a
+/// turn whose wrapper is gone does not hold the cleanup back, since the
+/// close stops it ([`super::supervise::left_turn`]).
 fn blocker(
     queue: &dyn Queue,
     control: &dyn ProcessControl,
@@ -103,8 +113,29 @@ fn blocker(
             )));
         }
     }
-    for process in queue.processes(run.id())? {
-        if process.exited_at.is_none() && control.alive(process.pid) {
+    let live: Vec<_> = queue
+        .processes(run.id())?
+        .into_iter()
+        .filter(|process| process.exited_at.is_none() && control.alive(process.pid))
+        .collect();
+    if live.is_empty() {
+        return Ok(None);
+    }
+    let events = queue.run_events(run.id())?;
+    for process in &live {
+        // A turn a background session recorded is the close's to stop
+        // when its wrapper is gone (and, with another start, another
+        // process); its wrapper, checked here, holds the cleanup back.
+        if process.role == "agent" && background_turn(&events, process.pid).is_some() {
+            continue;
+        }
+        let alive = launch_of(&events, process.pid).is_none()
+            || wrapper_is_recorded(
+                &events,
+                process.pid,
+                control.start_identity(process.pid).as_deref(),
+            );
+        if alive {
             return Ok(Some(format!(
                 "the {} of run {} (pid {}) is alive",
                 process.role,
@@ -202,11 +233,27 @@ pub fn close_ended_workspaces(
             skipped,
         });
     }
-    // cmux's list decides, not the recorded closes.
-    let listed = cmux.listed_workspace_ids()?;
+    // cmux's list decides, not the recorded closes; a background
+    // wrapper's process for its handle (ADR-t1404-1), so a listing that
+    // fails leaves the background sessions to close and fails the command
+    // after them, as it failed before any.
+    let listed = if candidates
+        .iter()
+        .all(|(_, workspace)| is_background(workspace))
+    {
+        Ok(Vec::new())
+    } else {
+        cmux.listed_workspace_ids()
+    };
     let mut closed_runs: Vec<RunId> = Vec::new();
     for (run, workspace) in candidates {
-        if !listed.iter().any(|id| id.eq_ignore_ascii_case(&workspace)) {
+        // A background session whose wrapper died is open while the turn
+        // it left runs, and its close stops that turn (ADR-t1404-1).
+        let left = is_background(&workspace)
+            .then(|| super::supervise::left_turn(&*queue, control, run.id(), &workspace))
+            .flatten();
+        let open = super::supervise::still_open(cmux, listed.as_deref().ok(), &workspace);
+        if !open && left.is_none() {
             continue;
         }
         let mut entry = CleanupWorkspace {
@@ -218,7 +265,11 @@ pub fn close_ended_workspaces(
             error: None,
         };
         if apply {
-            match cmux.close(&workspace) {
+            let closed = cmux.close(&workspace).and_then(|()| match &left {
+                Some(turn) => super::supervise::stop_left_turn(control, turn),
+                None => Ok(()),
+            });
+            match closed {
                 Ok(()) => {
                     queue.record_workspace_closed(
                         run.id(),
@@ -252,6 +303,12 @@ pub fn close_ended_workspaces(
         queue.close_stuck_exit_asks(&run_id, ASK_ANSWER)?;
         queue.close_answer_prompt_asks(&run_id, ASK_ANSWER)?;
         queue.end_stalled_detections(&run_id, ASK_ANSWER)?;
+    }
+    if let Err(error) = listed {
+        let background = if apply { "closed" } else { "listed" };
+        return Err(error.context(format!(
+            "cmux could not list the workspaces of the ended runs; only their background sessions were {background}"
+        )));
     }
     Ok(CleanupReport {
         dry_run: !apply,

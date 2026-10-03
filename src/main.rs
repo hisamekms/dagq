@@ -1293,6 +1293,10 @@ enum Command {
         /// with (task 806).
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
+        /// Started by the supervisor in the background, without a
+        /// workspace or a terminal (ADR-t1404-1).
+        #[arg(long)]
+        background: bool,
     },
     /// Record a SessionStart (`open`) or SessionEnd (`close`) of an inbox or planner session:
     /// the plugin's hook passes its stdin, and the session's environment names its kind
@@ -3776,6 +3780,7 @@ fn execute(cli: Cli) -> Result<Value> {
             codex,
             resume,
             cmux,
+            background,
         } => dagq::compose::session(
             &db,
             &RunId::new(run)?,
@@ -3784,6 +3789,7 @@ fn execute(cli: Cli) -> Result<Value> {
             &codex,
             resume,
             &cmux,
+            background,
         )?,
         Command::SessionEvent { event, .. } => {
             use dagq::{application::SessionRegistry, domain::sessions::SessionHook};

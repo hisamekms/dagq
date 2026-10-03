@@ -5,7 +5,7 @@ title: "wrapperが黙ったsession"
 status: current
 created: 2026-09-26
 updated: 2026-10-03
-last_verified: 2026-09-27
+last_verified: 2026-10-03
 scope: runtime
 related:
   - adr-t1404-1
@@ -25,4 +25,4 @@ task 170。wrapperのheartbeatが`HEARTBEAT_TIMEOUT_SECS`（30秒）より古く
 - **wrapperの側**: heartbeatの書き込みが失敗しても、wrapperは子を待ち続け、理由をqueueのlog（`logs/session-*.jsonl`）に`wrapper heartbeat failed`として書く。終了の記録（`wrapper_exited`→`session_exited`）はSQLITE_BUSYなどの一時的な失敗で失わないよう、`application::session`の`record_exit`が上限付きで再試行する（`EXIT_RECORD_ATTEMPTS`は3回、間の待ちは200ミリ秒から倍々。applicationの層は一時的な失敗を見分けないのでerrorはすべて再試行する。1回ごとにbusy timeoutの5秒まで待ちうるので合計は最大約15.6秒で、supervisorがwrapperを黙ったとみなす30秒に収める。task 243）。失敗のたびに`recording wrapper exit failed, retrying`を、使い切ったら`wrapper exit not recorded after N attempts`を理由つきでlogに書き、wrapperはそのerrorで終わる（その後は上の「記録できないままプロセスが死んでいれば」のとおり）。
 - supervisorはsessionをkillしない。heartbeatが止まった原因（DB書き込みの失敗など）はここでは扱わない。
 
-**予定（未実装）**: [ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)（goal 89）で`background`を選んだ非対話のsessionでは、wrapperが生きているかを`pid`だけでなく記録した起動時刻と合わせて判定する（pidの再利用で別のprocessを生きているwrapperと見誤らない）。heartbeatの古さで黙ったとみなす判定と`wrapper_heartbeat_expired`、`/exit`が終了の依頼になることは今の非対話のrunと同じで、黙っただけではsupervisorはwrapperをkillしない（上の最後の項）。signalで止めるのは、cancel・`stop`・`stop_processes`・後始末など止める経路に入ったときだけ。詳細は[非対話のworker](headless-worker.md#予定-workspaceなしのbackgroundのwrapper)。
+**backgroundのwrapper**: [ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)（goal 89）で`background`を選んだ非対話のsessionでは、wrapperが生きているかを`pid`だけでなく記録した起動時刻と合わせて判定する（`Supervisor::wrapper_lives`がそのpidの`wrapper_launched`の起動時刻と比べる。pidの再利用で別のprocessを生きているwrapperと見誤らず、死んだwrapperを黙ったwrapperとしない）。heartbeatの古さで黙ったとみなす判定と`wrapper_heartbeat_expired`、`/exit`が終了の依頼になることは今の非対話のrunと同じで、黙っただけではsupervisorはwrapperをkillしない（上の最後の項）。signalで止めるのは、cancel・`stop`・`stop_processes`・後始末など止める経路でhandleをcloseしたときだけ。詳細は[非対話のworker](headless-worker.md#workspaceなしのbackgroundのwrapper)。

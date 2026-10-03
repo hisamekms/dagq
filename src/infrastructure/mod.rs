@@ -1,6 +1,7 @@
 pub mod adapters;
 pub mod agent_dir;
 pub mod asks;
+pub mod background;
 pub mod binaries;
 pub mod broker_config;
 pub mod broker_image;

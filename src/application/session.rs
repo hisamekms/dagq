@@ -5,6 +5,8 @@
 //! records its exit (ADR-0007). `resume` reopens the session of a
 //! `needs_session` run instead (ADR-0019). A headless worker's wrapper
 //! runs its turns instead of one agent (ADR-t813-1, `headless_session`).
+//! A wrapper the supervisor started in the background (ADR-t1404-1) has no
+//! workspace: it waits for the supervisor's record of its start instead.
 
 use crate::domain::LeaseToken;
 use anyhow::{Context, Result, ensure};
@@ -30,8 +32,52 @@ use crate::domain::{
 use tracing::warn;
 
 /// How long the wrapper waits for the supervisor to record the workspace
-/// cmux started it in.
+/// cmux started it in, or its own start in the background.
 const WORKSPACE_REGISTRATION: Duration = Duration::from_secs(45);
+
+/// Where a session wrapper was started: in a cmux workspace, which the
+/// run records before the wrapper registers, or in the background without
+/// one (ADR-t1404-1), where the supervisor records the wrapper's start
+/// (`wrapper_launched`) instead. The supervisor tells a background wrapper
+/// so with [`BACKGROUND_FLAG`](crate::domain::background_wrapper::BACKGROUND_FLAG).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WrapperStart {
+    #[default]
+    Workspace,
+    Background,
+}
+
+impl WrapperStart {
+    /// The start the wrapper's `--background` flag names.
+    pub const fn of_flag(background: bool) -> Self {
+        if background {
+            Self::Background
+        } else {
+            Self::Workspace
+        }
+    }
+
+    /// Wait, checking every 100 ms up to [`WORKSPACE_REGISTRATION`], until
+    /// `ready` (which reads the queue) says what the wrapper waits for is
+    /// recorded: a workspace, or its own start in the background.
+    pub fn wait(self, mut ready: impl FnMut() -> Result<bool>) -> Result<()> {
+        let started = Instant::now();
+        loop {
+            if ready()? {
+                return Ok(());
+            }
+            ensure!(
+                started.elapsed() < WORKSPACE_REGISTRATION,
+                match self {
+                    Self::Workspace => "workspace registration timed out",
+                    Self::Background =>
+                        "the supervisor recorded no start of this background wrapper in time",
+                }
+            );
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
 
 /// How many times the wrapper tries to record its exit, and the pause
 /// before the first retry (doubled before each later one): a transient
@@ -117,8 +163,11 @@ pub struct Session<'a> {
     pub files: &'a dyn RunFiles,
     pub pid: u32,
     /// Closed when the run refuses this wrapper and records no such
-    /// workspace ([`wrapper_refused`]); `None` outside cmux.
+    /// workspace ([`wrapper_refused`]); `None` outside cmux and in the
+    /// background.
     pub own_workspace: Option<OwnWorkspace<'a>>,
+    /// Where the supervisor started this wrapper.
+    pub start: WrapperStart,
     /// The sccache the wrapper's environment names as `RUSTC_WRAPPER` and
     /// how its server is looked at before a Codex turn (ADR-t1215-1);
     /// `None` names none.
@@ -148,9 +197,16 @@ pub fn run_session(
         files,
         pid,
         own_workspace,
+        start,
         sccache,
     } = ctx;
-    let run = match register(queue, id, token, pid, resume) {
+    // A background wrapper finds its start among the run's records by its
+    // pid and the start the system shows for it (ADR-t1404-1 decision 2).
+    let own_start = match start {
+        WrapperStart::Background => processes.start_identity(pid),
+        WrapperStart::Workspace => None,
+    };
+    let run = match register(queue, id, token, pid, resume, start, own_start.as_deref()) {
         Ok(run) => run,
         Err(error) => {
             let recorded = |workspace: &str| -> Result<bool> {
@@ -219,29 +275,31 @@ pub fn run_session(
     }
 }
 
-/// Wait for the supervisor to record the run's workspace and register
-/// this wrapper under the run's lease; the run.
+/// Wait for the supervisor to record the run's workspace (or, in the
+/// background, this wrapper's start) and register this wrapper under the
+/// run's lease; the run.
 fn register(
     queue: &mut dyn Queue,
     id: &RunId,
     token: &LeaseToken,
     pid: u32,
     resume: bool,
+    start: WrapperStart,
+    own_start: Option<&str>,
 ) -> Result<TaskRun> {
-    let started = Instant::now();
     // cmux may start this command before its create response reaches
     // supervisor. A resumed run keeps the workspace of its first session.
-    let run = loop {
-        let run = queue.run(id)?;
-        if run.workspace_id().is_some() {
-            break run;
-        }
-        ensure!(
-            started.elapsed() < WORKSPACE_REGISTRATION,
-            "workspace registration timed out"
-        );
-        thread::sleep(Duration::from_millis(100));
-    };
+    // A background wrapper's start is recorded after the run records its
+    // handle, for each session anew.
+    start.wait(|| match start {
+        WrapperStart::Workspace => Ok(queue.run(id)?.workspace_id().is_some()),
+        WrapperStart::Background => Ok(crate::domain::background_wrapper::launched_as(
+            &queue.run_events(id)?,
+            pid,
+            own_start,
+        )),
+    })?;
+    let run = queue.run(id)?;
     if resume {
         queue.register_resume_wrapper(id, token, pid)?;
     } else {
@@ -400,6 +458,25 @@ mod tests {
         let result = tracing::subscriber::with_default(subscriber, work);
         let lines = messages.0.lock().unwrap().clone();
         (result, lines)
+    }
+
+    #[test]
+    fn a_wrapper_waits_until_what_it_waits_for_is_recorded() {
+        let mut reads = 0;
+        WrapperStart::Background
+            .wait(|| {
+                reads += 1;
+                Ok(reads == 3)
+            })
+            .unwrap();
+        assert_eq!(reads, 3);
+        assert!(
+            WrapperStart::Workspace
+                .wait(|| Err(anyhow!("queue gone")))
+                .is_err()
+        );
+        assert_eq!(WrapperStart::of_flag(true), WrapperStart::Background);
+        assert_eq!(WrapperStart::of_flag(false), WrapperStart::Workspace);
     }
 
     fn run_id() -> RunId {

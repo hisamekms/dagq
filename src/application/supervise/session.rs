@@ -216,20 +216,24 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
         if granted {
             self.write_prompt(&task, &run, &run_dir)?;
         }
-        let command = shell_join(&[
-            path_text(&run_dir.join(RUN_RUNNER_FILE))?,
-            "--db".into(),
-            path_text(&self.layout.db)?,
-            "session".into(),
-            "--run".into(),
-            run.id().to_string(),
-            "--lease".into(),
-            self.token.to_string(),
-            "--claude".into(),
-            path_text(&self.layout.claude)?,
-            "--codex".into(),
-            path_text(&self.layout.codex)?,
-        ]);
+        let background = self.background_log(&run, &run_dir, None, false);
+        let command = background::wrapper_command(
+            vec![
+                path_text(&run_dir.join(RUN_RUNNER_FILE))?,
+                "--db".into(),
+                path_text(&self.layout.db)?,
+                "session".into(),
+                "--run".into(),
+                run.id().to_string(),
+                "--lease".into(),
+                self.token.to_string(),
+                "--claude".into(),
+                path_text(&self.layout.claude)?,
+                "--codex".into(),
+                path_text(&self.layout.codex)?,
+            ],
+            background.as_deref(),
+        );
         let workspace = self
             .actors()
             .spawn(ActorExecutionSpec::new(
@@ -246,8 +250,9 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
                         Some(run.id()),
                         Some(run.task_id()),
                     ),
-                    group: self.workspace_group(),
+                    group: self.session_group(background.as_deref()),
                     run_env,
+                    background: background.as_deref(),
                 },
             ))?
             .workspace()?;
@@ -268,6 +273,7 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
                 )),
             });
         }
+        self.record_launch(&run, &workspace, background.as_deref())?;
         info!(task_id = %run.task_id(), run_id = %run.id(), "task {} running in workspace {}; run {}", run.task_id(), workspace, run.id());
         Ok(SessionWatch {
             workspace,
@@ -818,7 +824,9 @@ impl SessionWatch {
     /// dialog asks closed, its stall and sends settled and its recovery
     /// job stopped.
     fn end_exited(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun, capture: bool) -> Result<()> {
-        if capture {
+        // A background wrapper has no screen: its log is its output
+        // (ADR-t1404-1 decision 6).
+        if capture && !crate::domain::background_wrapper::is_background(&self.workspace) {
             match sv.cmux.capture(&self.workspace) {
                 Ok(screen) => sv
                     .files

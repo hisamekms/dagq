@@ -105,7 +105,11 @@ impl ExitWatch {
         // ask (task 236): the run goes on as if it had exited.
         let Some(wrapper) = wrapper.filter(|w| w.exited_at.is_none() && !wrapper_dead(sv, w, now))
         else {
-            if self.requested.is_some() {
+            // A background wrapper has no screen; its log is its output
+            // (ADR-t1404-1 decision 6).
+            if self.requested.is_some()
+                && !crate::domain::background_wrapper::is_background(&session.workspace)
+            {
                 let name = match session.resume {
                     Some(attempt) => format!("terminal-resume-{attempt}.txt"),
                     None => "terminal-final.txt".to_owned(),
@@ -884,7 +888,7 @@ pub(super) fn wrapper_pulse(
     if age <= HEARTBEAT_TIMEOUT_SECS {
         return Ok(WrapperPulse::Fresh);
     }
-    if !sv.processes.alive(wrapper.pid) {
+    if !sv.wrapper_lives(wrapper) {
         let exited = sv
             .queue
             .processes(run.id())?

@@ -288,6 +288,7 @@ event_kinds! {
     WorktreeCreated => "worktree_created",
     WorktreeRemoved => "worktree_removed",
     WrapperHeartbeatExpired => "wrapper_heartbeat_expired",
+    WrapperLaunched => "wrapper_launched",
     WrapperStarted => "wrapper_started",
 }
 
@@ -769,6 +770,9 @@ pub const WORKSPACE_CREATED: &str = EventKind::WorkspaceCreated.as_str();
 pub const WORKTREE_CREATED: &str = EventKind::WorktreeCreated.as_str();
 pub const WORKTREE_REMOVED: &str = EventKind::WorktreeRemoved.as_str();
 pub const WRAPPER_HEARTBEAT_EXPIRED: &str = EventKind::WrapperHeartbeatExpired.as_str();
+/// The supervisor started a session's wrapper in the background, without a
+/// workspace (ADR-t1404-1): its `pid`, `start`, `handle` and `log`.
+pub const WRAPPER_LAUNCHED: &str = EventKind::WrapperLaunched.as_str();
 pub const WRAPPER_STARTED: &str = EventKind::WrapperStarted.as_str();
 
 #[cfg(test)]
@@ -1083,6 +1087,7 @@ mod tests {
                 EventKind::WrapperHeartbeatExpired,
                 "wrapper_heartbeat_expired",
             ),
+            (EventKind::WrapperLaunched, "wrapper_launched"),
             (EventKind::WrapperStarted, "wrapper_started"),
         ];
         assert_eq!(table.len(), EventKind::ALL.len());

@@ -1184,6 +1184,25 @@ pub trait WorkspaceBackend {
         command: &str,
         tags: &WorkspaceTags,
     ) -> Result<String>;
+    /// Start the session wrapper `command` (a shell command line) in `cwd`
+    /// without a workspace, as a process detached from this one with `env`
+    /// in its environment and its output in `log` (ADR-t1404-1 decision
+    /// 1); the [`BackgroundHandle`](crate::domain::background_wrapper::BackgroundHandle)
+    /// the run records in place of a workspace ID. Every other call of the
+    /// backend takes that handle as a workspace: `exists` says whether the
+    /// wrapper runs, `close` stops it and what it started, and the screen
+    /// and the keys are refused. A backend without background processes
+    /// refuses.
+    fn launch_background(
+        &self,
+        cwd: &std::path::Path,
+        command: &str,
+        env: &[(String, String)],
+        log: &std::path::Path,
+    ) -> Result<String> {
+        let _ = (cwd, command, env, log);
+        anyhow::bail!("this workspace backend starts no background wrapper")
+    }
     /// The handle of the workspace group whose external ID is
     /// `external_id`, created under `name` when there is none yet; asking
     /// again returns the same group.
@@ -1298,6 +1317,13 @@ pub trait ProcessControl {
     fn interrupt(&self, pid: u32) -> Result<()>;
     /// End the process immediately (SIGKILL).
     fn kill(&self, pid: u32) -> Result<()>;
+    /// End the process group `leader` leads at once (SIGKILL to the
+    /// group); a group that is gone is no error. A process control that
+    /// signals no groups refuses.
+    fn kill_group(&self, leader: u32) -> Result<()> {
+        let _ = leader;
+        anyhow::bail!("this process control signals no process groups")
+    }
     /// Collect the exit of `pid` if it is an ended child of this process,
     /// so it no longer counts as alive: a child the process started before
     /// it exec'd another binary (the automatic update's job, ADR-0045
@@ -3159,6 +3185,11 @@ pub trait Verifier {
     ) -> Result<Vec<crate::domain::review_subagents::ReviewSubagent>> {
         let _ = text;
         Ok(Vec::new())
+    }
+    /// Where a headless session's wrapper runs (`[headless] wrapper` of
+    /// `dagq.toml`, ADR-t1404-1 decision 7); a workspace by default.
+    fn headless_wrapper(&self) -> Result<crate::domain::background_wrapper::HeadlessWrapper> {
+        Ok(crate::domain::background_wrapper::HeadlessWrapper::default())
     }
     /// The model and effort of the roles other than the worker
     /// (`[roles.<role>]` of `dagq.toml`, ADR-0079 decision 7); none by

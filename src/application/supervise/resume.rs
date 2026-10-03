@@ -29,7 +29,7 @@ impl Supervisor<'_> {
             let alive = candidate
                 .wrapper
                 .as_ref()
-                .is_some_and(|w| w.exited_at.is_none() && self.processes.alive(w.pid));
+                .is_some_and(|w| w.exited_at.is_none() && self.wrapper_lives(w));
             if !alive {
                 for ask in self
                     .queue
@@ -53,7 +53,7 @@ impl Supervisor<'_> {
             let now = self.generators.clock.now();
             let session_alive = wrapper
                 .as_ref()
-                .is_some_and(|w| w.exited_at.is_none() && self.processes.alive(w.pid));
+                .is_some_and(|w| w.exited_at.is_none() && self.wrapper_lives(w));
             // A previous session whose wrapper process lives on, however
             // silent, is never joined by a second one on the same worktree.
             if lease.is_some_and(|lease| !self.lease_stale(&lease, now)) || session_alive {
@@ -404,21 +404,25 @@ impl Supervisor<'_> {
         self.prepare_turns(run, &run_dir)?;
         // The resumed worker's broker token is issued again (`preferred`).
         self.broker_grant(run);
-        let command = shell_join(&[
-            path_text(&run_dir.join(RUN_RUNNER_FILE))?,
-            "--db".into(),
-            path_text(&self.layout.db)?,
-            "session".into(),
-            "--run".into(),
-            run.id().to_string(),
-            "--lease".into(),
-            self.token.to_string(),
-            "--claude".into(),
-            path_text(&self.layout.claude)?,
-            "--codex".into(),
-            path_text(&self.layout.codex)?,
-            "--resume".into(),
-        ]);
+        let background = self.background_log(run, &run_dir, Some(attempt), false);
+        let command = background::wrapper_command(
+            vec![
+                path_text(&run_dir.join(RUN_RUNNER_FILE))?,
+                "--db".into(),
+                path_text(&self.layout.db)?,
+                "session".into(),
+                "--run".into(),
+                run.id().to_string(),
+                "--lease".into(),
+                self.token.to_string(),
+                "--claude".into(),
+                path_text(&self.layout.claude)?,
+                "--codex".into(),
+                path_text(&self.layout.codex)?,
+                "--resume".into(),
+            ],
+            background.as_deref(),
+        );
         // The worker's env and group (the same session of the run) and the
         // description `run <run-id> resume` (ADR-0028), then `[run.env]`
         // after the runtime's own names, as in the worker's workspace.
@@ -435,8 +439,9 @@ impl Supervisor<'_> {
                     wrapper: command,
                     resume: true,
                     description: resume_workspace_description(run),
-                    group: self.workspace_group(),
+                    group: self.session_group(background.as_deref()),
                     run_env,
+                    background: background.as_deref(),
                 },
             ))?
             .workspace()?;
@@ -459,6 +464,7 @@ impl Supervisor<'_> {
                 )),
             });
         }
+        self.record_launch(run, &workspace, background.as_deref())?;
         Ok(ResumeWatch {
             workspace: workspace.clone(),
             attempt,
@@ -1199,7 +1205,9 @@ impl ResumeWatch {
         run: &TaskRun,
     ) -> Result<Option<ResumeVerdict>> {
         let workspace = self.workspace.clone();
-        let screen = sv.cmux.capture(&workspace).ok();
+        let screen = (!crate::domain::background_wrapper::is_background(&workspace))
+            .then(|| sv.cmux.capture(&workspace).ok())
+            .flatten();
         let mut held = resumed_closable_without_exit(sv, run, &self.receipt_path);
         if held.is_none()
             && let Err(error) = close_unless_gone(sv.cmux, &workspace)
@@ -1502,14 +1510,18 @@ impl ResumeWatch {
             if let Some(nudge) = &mut self.stale {
                 nudge.settle(sv, run, RESUME_PHASE, Some(self.attempt), "run_ended")?;
             }
-            match sv.cmux.capture(&self.workspace) {
-                Ok(screen) => sv.files.write(
+            // A background wrapper has no screen (ADR-t1404-1).
+            let screen = (!crate::domain::background_wrapper::is_background(&self.workspace))
+                .then(|| sv.cmux.capture(&self.workspace));
+            match screen {
+                None => {}
+                Some(Ok(screen)) => sv.files.write(
                     &self
                         .run_dir
                         .join(format!("terminal-resume-{}.txt", self.attempt)),
                     screen.as_bytes(),
                 )?,
-                Err(error) => sv.queue.record_runtime_event(
+                Some(Err(error)) => sv.queue.record_runtime_event(
                     run.id(),
                     EventKind::ScreenCaptureFailed,
                     reason_of_error(&error, ReasonCode::BackendFailed)

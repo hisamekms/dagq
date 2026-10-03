@@ -134,7 +134,7 @@ impl Supervisor<'_> {
         wrapper: Option<&RunProcess>,
     ) -> Result<bool> {
         Ok(
-            wrapper.is_some_and(|w| w.exited_at.is_none() && self.processes.alive(w.pid))
+            wrapper.is_some_and(|w| w.exited_at.is_none() && self.wrapper_lives(w))
                 && resume_in_progress(&self.queue.run_events(run.id())?).is_some(),
         )
     }
@@ -179,8 +179,7 @@ impl Supervisor<'_> {
     fn wrapper_alive(&self, wrapper: Option<&RunProcess>, now: i64) -> Option<bool> {
         wrapper.and_then(|wrapper| {
             wrapper.exited_at.is_none().then(|| {
-                self.processes.alive(wrapper.pid)
-                    && now - wrapper.heartbeat_at <= HEARTBEAT_TIMEOUT_SECS
+                self.wrapper_lives(wrapper) && now - wrapper.heartbeat_at <= HEARTBEAT_TIMEOUT_SECS
             })
         })
     }

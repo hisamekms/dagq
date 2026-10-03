@@ -336,21 +336,25 @@ impl Supervisor<'_> {
         self.broker_grant(run);
         let run_env = self.verifier.run_env(&run_dir)?;
         let task = self.queue.show(run.task_id())?.task;
-        let command = shell_join(&[
-            path_text(&run_dir.join(RUN_RUNNER_FILE))?,
-            "--db".into(),
-            path_text(&self.layout.db)?,
-            "session".into(),
-            "--run".into(),
-            run.id().to_string(),
-            "--lease".into(),
-            self.token.to_string(),
-            "--claude".into(),
-            path_text(&self.layout.claude)?,
-            "--codex".into(),
-            path_text(&self.layout.codex)?,
-            "--resume".into(),
-        ]);
+        let background = self.background_log(run, &run_dir, Some(lost.attempt), true);
+        let command = background::wrapper_command(
+            vec![
+                path_text(&run_dir.join(RUN_RUNNER_FILE))?,
+                "--db".into(),
+                path_text(&self.layout.db)?,
+                "session".into(),
+                "--run".into(),
+                run.id().to_string(),
+                "--lease".into(),
+                self.token.to_string(),
+                "--claude".into(),
+                path_text(&self.layout.claude)?,
+                "--codex".into(),
+                path_text(&self.layout.codex)?,
+                "--resume".into(),
+            ],
+            background.as_deref(),
+        );
         let workspace = self
             .actors()
             .spawn(ActorExecutionSpec::new(
@@ -364,8 +368,9 @@ impl Supervisor<'_> {
                     wrapper: command,
                     resume: true,
                     description: resume_workspace_description(run),
-                    group: self.workspace_group(),
+                    group: self.session_group(background.as_deref()),
                     run_env,
+                    background: background.as_deref(),
                 },
             ))?
             .workspace()?;
@@ -405,6 +410,7 @@ impl Supervisor<'_> {
                 )),
             });
         }
+        self.record_launch(run, &workspace, background.as_deref())?;
         Ok(workspace)
     }
 

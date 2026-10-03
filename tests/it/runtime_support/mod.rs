@@ -718,6 +718,9 @@ pub struct TestWorkspace {
     pub resumes: Mutex<Vec<(String, String)>>,
     /// The tags of every `create_resume` call.
     pub resume_tags: Mutex<Vec<WorkspaceTags>>,
+    /// `launch_background` calls (ADR-t1404-1): the directory, the command
+    /// and the environment of each ([`headless::launch_background`]).
+    pub launched: Mutex<Vec<headless::Launch>>,
     /// `send_text` calls: the workspace and the text.
     pub texts: Mutex<Vec<(String, String)>>,
     /// The inputs that switched a live session's model or effort
@@ -831,6 +834,7 @@ impl TestWorkspace {
             resume_scripts: Mutex::new(HashMap::new()),
             resumes: Mutex::new(Vec::new()),
             resume_tags: Mutex::new(Vec::new()),
+            launched: Mutex::new(Vec::new()),
             texts: Mutex::new(Vec::new()),
             switches: Mutex::new(Vec::new()),
             switch_fails: false,
@@ -1152,6 +1156,15 @@ impl WorkspaceBackend for TestWorkspace {
         ));
         Ok(workspace)
     }
+    fn launch_background(
+        &self,
+        cwd: &Path,
+        command: &str,
+        env: &[(String, String)],
+        log: &Path,
+    ) -> Result<String> {
+        headless::launch_background(self, cwd, command, env, log)
+    }
     fn send_text(&self, workspace_id: &str, text: &str) -> Result<()> {
         if text.starts_with("/model ") || text.starts_with("/effort ") {
             self.switches
@@ -1445,7 +1458,7 @@ impl WorkspaceBackend for TestWorkspace {
 /// at `claude`, Codex's the stub `codex` at `codex`), with the test tick,
 /// and the other provider's, which the run's turns go to once the
 /// supervisor moves it there (ADR-t813-2). `None` for an interactive run.
-fn headless_provider(
+pub(crate) fn headless_provider(
     run: &TaskRun,
     claude: Option<&Path>,
     codex: Option<&Path>,
@@ -2690,6 +2703,31 @@ pub fn start_run_under_dead_supervisor(
     backend: &TestWorkspace,
     token: &str,
 ) -> TaskRun {
+    use dagq::infrastructure::adapters::path_text;
+    let mut queue = SqliteQueue::open(db).unwrap();
+    let run = provision_under(repo, db, token);
+    let task = queue.show(run.task_id()).unwrap().task;
+    let command = shell_join(&[
+        "runner".into(),
+        "--db".into(),
+        path_text(db).unwrap(),
+        "session".into(),
+    ]);
+    let workspace = backend
+        .create(&task, &run, &command, &WorkspaceTags::default())
+        .unwrap();
+    queue
+        .workspace_created(run.id(), &LeaseToken::new(token), &workspace)
+        .unwrap();
+    wait_until(db, Duration::from_secs(10), |queue| {
+        queue.run(run.id()).unwrap().status() == RunStatus::Running
+    });
+    queue.run(run.id()).unwrap()
+}
+
+/// Claim the next task under `token` and provision its run as `supervise`
+/// does but for its session: plan, run directory, prompt and worktree.
+pub fn provision_under(repo: &Path, db: &Path, token: &str) -> TaskRun {
     use dagq::{
         domain::ClaimOutcome,
         infrastructure::{
@@ -2742,22 +2780,7 @@ pub fn start_run_under_dead_supervisor(
     )
     .unwrap();
     repository.create_worktree(&run).unwrap();
-    let command = shell_join(&[
-        "runner".into(),
-        "--db".into(),
-        path_text(db).unwrap(),
-        "session".into(),
-    ]);
-    let workspace = backend
-        .create(&task, &run, &command, &WorkspaceTags::default())
-        .unwrap();
-    queue
-        .workspace_created(run.id(), &LeaseToken::new(token), &workspace)
-        .unwrap();
-    wait_until(db, Duration::from_secs(10), |queue| {
-        queue.run(run.id()).unwrap().status() == RunStatus::Running
-    });
-    queue.run(run.id()).unwrap()
+    run
 }
 
 /// Age the lease of `run` so it is stale by heartbeat while its pid (this

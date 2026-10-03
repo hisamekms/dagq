@@ -100,6 +100,7 @@ use crate::domain::{
 };
 
 mod adopt;
+mod background;
 mod broker;
 mod claim_defer;
 mod cleanup;
@@ -145,6 +146,7 @@ mod triage;
 mod update;
 mod waiting;
 
+pub(crate) use self::background::{left_turn, still_open, stop_left_turn};
 pub use self::broker::{BROKER_FAILURES, BROKER_HEALTH_INTERVAL, BrokerPort};
 pub(crate) use self::deliver::{Input, Submission, submit_input};
 pub use self::e2e::RunE2ePort;
@@ -787,7 +789,8 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         ports.queues.clone(),
         Some(token.clone()),
         ports.load_average,
-    );
+    )
+    .stopping_left_turns(ports.processes.clone());
     let mut supervisor = Supervisor {
         no_claude: settings.no_claude,
         queue,
@@ -3128,9 +3131,10 @@ fn session_alive(sv: &Supervisor<'_>, run_id: &RunId) -> Result<bool> {
 }
 
 /// Whether a wrapper that has not recorded its exit died: its heartbeat is
-/// older than `HEARTBEAT_TIMEOUT_SECS` and its process is gone.
+/// older than `HEARTBEAT_TIMEOUT_SECS` and its process is gone (for a
+/// background wrapper, no process shows its pid with its recorded start).
 fn wrapper_dead(sv: &Supervisor<'_>, wrapper: &RunProcess, now: i64) -> bool {
-    now - wrapper.heartbeat_at > HEARTBEAT_TIMEOUT_SECS && !sv.processes.alive(wrapper.pid)
+    now - wrapper.heartbeat_at > HEARTBEAT_TIMEOUT_SECS && !sv.wrapper_lives(wrapper)
 }
 
 /// The `reasons` of the run's latest review: those of a `review_finished`,

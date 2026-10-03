@@ -218,3 +218,101 @@ pub const CODEX_HOME: &str = "codex-home";
 pub fn set_codex_model(dir: &Path, model: &str) {
     fs::write(dir.join("codex-model"), model).unwrap();
 }
+
+/// One `launch_background` of [`TestWorkspace`]: the directory, the
+/// command line and the environment the supervisor started a background
+/// wrapper with.
+#[derive(Debug, Clone)]
+pub struct Launch {
+    pub cwd: PathBuf,
+    pub command: String,
+    pub env: Vec<(String, String)>,
+    pub log: PathBuf,
+}
+
+/// [`TestWorkspace`]'s background start (ADR-t1404-1): the wrapper of the
+/// run the command names runs on a thread, entered as a background one
+/// (no terminal, no workspace of its own), with the stub headless agents.
+/// Its handle carries this process's pid, which is the wrapper's, so that
+/// the wrapper finds the supervisor's record of its start; the backend
+/// tells and closes it like a workspace and sends it no signal.
+pub fn launch_background(
+    backend: &TestWorkspace,
+    cwd: &Path,
+    command: &str,
+    env: &[(String, String)],
+    log: &Path,
+) -> Result<String> {
+    assert!(command.ends_with(" '--background'"), "{command}");
+    backend.launched.lock().unwrap().push(Launch {
+        cwd: cwd.to_owned(),
+        command: command.to_owned(),
+        env: env.to_vec(),
+        log: log.to_owned(),
+    });
+    let words: Vec<&str> = command.split(' ').map(|w| w.trim_matches('\'')).collect();
+    let after = |flag: &str| {
+        words
+            .iter()
+            .position(|w| *w == flag)
+            .map(|at| words[at + 1].to_owned())
+            .unwrap()
+    };
+    let id = RunId::new(after("--run"))?;
+    let token = LeaseToken::new(after("--lease"));
+    let resume = words.contains(&"--resume");
+    let run = SqliteQueue::open(&backend.db)?.run(&id)?;
+    let run_dir = run.run_dir().unwrap().to_owned();
+    if resume {
+        let _ = fs::remove_file(exit_request_path(&run_dir));
+        let _ = fs::remove_file(resume_message_path(&run_dir));
+    }
+    let (provider, other) =
+        headless_provider(&run, backend.headless.as_deref(), backend.codex.as_deref())
+            .expect("only a headless session starts in the background");
+    let (db, ready) = (backend.db.clone(), backend.headless_ready.clone());
+    let worker = thread::spawn(move || {
+        let spawner = ReadySpawner {
+            inner: StubSpawner { db: db.clone() },
+            ready,
+        };
+        runtime::session_in_background(&db, &id, &token, &provider, Some(&other), &spawner, resume)
+    });
+    // The wrapper's real pid and start, which it and the supervisor check
+    // (ADR-t1404-1 decision 2). Every session of this process has the same
+    // one: a later session's opens it again.
+    let pid = std::process::id();
+    let start = SystemProcesses.start_identity(pid).unwrap();
+    let handle = dagq::domain::background_wrapper::BackgroundHandle::new(pid, &start).to_string();
+    backend
+        .closed
+        .lock()
+        .unwrap()
+        .retain(|closed| *closed != handle);
+    let mut sessions = backend.sessions.lock().unwrap();
+    sessions.push((
+        handle.clone(),
+        TestSession {
+            run_id: run.id().clone(),
+            run_dir,
+            worker: Some(worker),
+        },
+    ));
+    Ok(handle)
+}
+
+/// Put `[headless] wrapper = "background"` in the main checkout's
+/// `dagq.toml`, committed, so that the supervisor starts every headless
+/// session in the background (ADR-t1404-1 decision 7).
+pub fn wrappers_in_background(repo: &Path) {
+    fs::write(
+        repo.join("dagq.toml"),
+        "[headless]\nwrapper = \"background\"\n",
+    )
+    .unwrap();
+    git(repo, &["add", "dagq.toml"]);
+    git(
+        repo,
+        &["commit", "-qm", "headless wrappers in the background"],
+    );
+}
