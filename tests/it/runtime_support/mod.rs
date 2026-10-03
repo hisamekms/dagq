@@ -1591,13 +1591,18 @@ impl AgentProvider for HeadlessProvider {
 }
 
 /// A stub `claude` for headless turns (ADR-t813-1), in `dir`: it takes
-/// `claude -p`'s arguments, appends `<start|resume> <session> <prompt's
-/// first line>` to `stub-calls.log` in the run directory (`--add-dir`),
-/// prints `system/init` in stream-json with the permission mode it was
-/// given (or `$PERMISSION_SAID`), then sources `turn.sh` next to it (see
-/// [`set_turns`]) and prints a result unless the turn did. `$TURN` is the
-/// turn's number in the run, `$PROMPT` its prompt, `$MODE` `start` or
-/// `resume`, `$SESSION` the session id. The turn's helpers: `say TEXT`,
+/// `claude -p`'s arguments and first prints `system/init` in stream-json
+/// with the permission mode it was given (or `$PERMISSION_SAID`), before
+/// it forks, so the shell's start and the log writes below fall on either
+/// side of an output line instead of in one silence of a short
+/// `turn_silence_secs` before the turn's output. Then it appends
+/// `<start|resume> <session> <prompt's first line>` to `stub-calls.log` in
+/// the run directory (`--add-dir`) and its arguments to `stub-args.log`,
+/// sources `turn.sh` next to it (see [`set_turns`]) and prints a result
+/// unless the turn did; a turn stopped at its `system/init` (a permission
+/// mode mismatch) may end before the logs. `$TURN` is the turn's number
+/// in the run, `$PROMPT` its prompt, `$MODE` `start` or `resume`,
+/// `$SESSION` the session id. The turn's helpers: `say TEXT`,
 /// `result [TEXT]` (with `$DENIALS` as its `permission_denials` and
 /// `$COST`, 0.01 unless the turn sets it, as its `total_cost_usd`),
 /// `denied` (three refusals), `fail TEXT` (an error result, exit 1),
@@ -1622,6 +1627,7 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+printf '{{"type":"system","subtype":"init","session_id":"%s","model":"stub","permissionMode":"%s"}}\n' "$SESSION" "${{PERMISSION_SAID:-$PERMISSION}}"
 DAGQ={dagq}
 DB={db}
 RECEIPT="$RUN_DIR/receipt.json"
@@ -1647,7 +1653,6 @@ receipt() {{
   mv "$RECEIPT.tmp" "$RECEIPT"
 }}
 ask() {{ "$DAGQ" ask --run "${{DAGQ_RUN_ID:-$SESSION}}" --kind worker_question --because scope --topic acceptance_conflict --question "$1" --cmux true >/dev/null; }}
-printf '{{"type":"system","subtype":"init","session_id":"%s","model":"stub","permissionMode":"%s"}}\n' "$SESSION" "${{PERMISSION_SAID:-$PERMISSION}}"
 . {turns}
 [ -n "$RESULTED" ] || result
 "#,
