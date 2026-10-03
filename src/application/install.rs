@@ -573,13 +573,19 @@ pub fn install(ports: &Ports, db: Option<&Path>, options: &InstallOptions) -> Re
                 E2eGate::NotApplicable => json!({"status": "not_applicable"}),
                 E2eGate::Skip => json!({"status": "skipped"}),
                 E2eGate::Run(settings) => {
-                    let outcome = binaries.e2e(checkout, None, settings).with_context(|| {
-                        format!(
-                            "the e2e of {} could not start, so nothing was replaced (a person \
+                    // The build's own target (`<target>/release/dagq`): the
+                    // e2e is not given the shell's `CARGO_TARGET_DIR`, so it
+                    // is named for it to build no second time.
+                    let target_dir = built.parent().and_then(Path::parent);
+                    let outcome = binaries.e2e(checkout, target_dir, settings).with_context(
+                        || {
+                            format!(
+                                "the e2e of {} could not start, so nothing was replaced (a person \
 may pass --skip-e2e to install without it)",
-                            checkout.display()
-                        )
-                    })?;
+                                checkout.display()
+                            )
+                        },
+                    )?;
                     // The automatic update's gates before this one, for a
                     // marked test failing in a row (ADR-t1165-1); a queue
                     // that cannot be read has none.

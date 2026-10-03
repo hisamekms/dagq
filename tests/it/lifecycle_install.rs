@@ -168,7 +168,11 @@ impl dagq::application::install::Binaries for FakeBinaries {
         target: Option<&Path>,
         _: &dagq::application::install::E2eSettings,
     ) -> Result<E2eOutcome> {
-        assert_eq!(target, None, "install's e2e uses the build's own target");
+        assert_eq!(
+            target,
+            Some(checkout.join("target").as_path()),
+            "install's e2e uses the build's own target"
+        );
         self.note(format!("e2e {}", checkout.display()));
         Ok(self.e2e.lock().unwrap().clone().unwrap_or(e2e_passed(3)))
     }

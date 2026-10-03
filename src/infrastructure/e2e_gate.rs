@@ -9,10 +9,20 @@
 //! hash, the directory under `<fixture>/data/dagq/`), and the directory
 //! itself. Groups are chosen by those hashes, never by the `[dagq-e2e]`
 //! name a worker's e2e gives its groups too.
+//!
+//! The e2e runs code a worker wrote (`build.rs`, proc-macros, tests) on the
+//! host, so it is not given the environment of the process that starts it
+//! (the supervisor, or the shell of `install`): its environment is cleared
+//! and only [`PASSED_ENV`] and [`PASSED_PREFIXES`] of it are given back,
+//! never a credential ([`credential`]), with the `[run.env]` and the gate's
+//! own over them (ADR-t1233-2's Consequences). The log names what was
+//! passed, never the values.
 
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
+    ffi::OsString,
     fs,
     io::{Read, Seek, SeekFrom, Write},
     os::unix::process::CommandExt,
@@ -38,6 +48,80 @@ const CALL_LIMIT: Duration = Duration::from_secs(20);
 /// SIGTERM before SIGKILL.
 const STOP_GRACE: Duration = Duration::from_secs(10);
 
+/// The variables of the starting process's environment the e2e is given
+/// by name: what cargo, rustup, Git and a shell need to find their tools,
+/// home and locale, the directory cmux's CLI reads its saved socket
+/// password from (`XDG_CONFIG_HOME`), and the e2e's own opt-ins (`DAGQ_E2E_LAUNCHD`,
+/// `DAGQ_E2E_WINDOWS`). `TMPDIR`, `CARGO_TARGET_DIR`, `DAGQ_E2E_CMUX`,
+/// `DAGQ_E2E_SKIP` and `DAGQ_E2E_RERUN` are the gate's own.
+pub const PASSED_ENV: &[&str] = &[
+    "PATH",
+    "HOME",
+    "XDG_CONFIG_HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "TERM",
+    "TZ",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "RUSTUP_TOOLCHAIN",
+    "SDKROOT",
+    "DEVELOPER_DIR",
+    "DAGQ_E2E_LAUNCHD",
+    "DAGQ_E2E_WINDOWS",
+];
+
+/// The prefixes of the variables given too: the locale (`LC_*`) and
+/// cmux's (`CMUX_*`, the socket the e2e's real cmux calls reach).
+pub const PASSED_PREFIXES: &[&str] = &["LC_", "CMUX_"];
+
+/// The one credential given: the password of cmux's socket, without which
+/// a cmux whose socket asks for it refuses every call of the e2e (the
+/// supervisor's launchd job is given it for the same reason).
+pub const CMUX_SOCKET_PASSWORD: &str = "CMUX_SOCKET_PASSWORD";
+
+/// The words that make a variable's name a credential's.
+const CREDENTIAL_WORDS: &[&str] = &["TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "KEY"];
+
+/// The credentials named without one of [`CREDENTIAL_WORDS`].
+const CREDENTIAL_NAMES: &[&str] = &[
+    "SSH_AUTH_SOCK",
+    "SSH_ASKPASS",
+    "GIT_ASKPASS",
+    "SUDO_ASKPASS",
+];
+
+/// Whether `name` names a credential, which the e2e is never given from
+/// the starting process, though it be passed by name or prefix.
+pub fn credential(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    CREDENTIAL_NAMES.contains(&upper.as_str())
+        || CREDENTIAL_WORDS.iter().any(|word| upper.contains(word))
+}
+
+/// Whether the starting process's `name` is given to the e2e.
+pub fn passed(name: &str) -> bool {
+    name == CMUX_SOCKET_PASSWORD
+        || ((PASSED_ENV.contains(&name)
+            || PASSED_PREFIXES
+                .iter()
+                .any(|prefix| name.starts_with(prefix)))
+            && !credential(name))
+}
+
+/// What of `inherited` the e2e is given, as [`passed`] says; a name that is
+/// not UTF-8 is not.
+fn passed_env(
+    inherited: impl IntoIterator<Item = (OsString, OsString)>,
+) -> BTreeMap<OsString, OsString> {
+    inherited
+        .into_iter()
+        .filter(|(name, _)| name.to_str().is_some_and(passed))
+        .collect()
+}
+
 /// Run the e2e of `checkout` as the module says; an error is an e2e that
 /// could not start.
 pub fn run(
@@ -45,6 +129,17 @@ pub fn run(
     target_dir: Option<&Path>,
     settings: &E2eSettings,
 ) -> Result<E2eOutcome> {
+    run_inheriting(checkout, target_dir, settings, std::env::vars_os())
+}
+
+/// [`run`], with `inherited` as the starting process's environment.
+fn run_inheriting(
+    checkout: &Path,
+    target_dir: Option<&Path>,
+    settings: &E2eSettings,
+    inherited: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Result<E2eOutcome> {
+    let inherited = passed_env(inherited);
     let env = match &settings.run_env_root {
         Some(root) => super::run_env::load_run_env(
             root,
@@ -82,6 +177,7 @@ pub fn run(
         checkout,
         target_dir,
         settings,
+        &inherited,
         &env,
         &Pass {
             log: &settings.log,
@@ -106,6 +202,7 @@ pub fn run(
             checkout,
             target_dir,
             settings,
+            &inherited,
             &env,
             &Pass {
                 log: &rerun_log,
@@ -208,6 +305,7 @@ fn pass(
     checkout: &Path,
     target_dir: Option<&Path>,
     settings: &E2eSettings,
+    inherited: &BTreeMap<OsString, OsString>,
     env: &[(String, String)],
     how: &Pass,
 ) -> Result<Ran> {
@@ -250,14 +348,40 @@ fn pass(
             );
         }
     }
-    if let Some(skipped) = how.skipped {
-        let _ = writeln!(log, "== {}", skipped.sentence());
-    }
     let skip_filters: Vec<&str> = how
         .skipped
         .iter()
         .flat_map(|skipped| skipped.tests.iter().map(String::as_str))
         .collect();
+    // What the e2e is given: the passed of the starting process's, the
+    // `[run.env]` over them and the gate's own over both.
+    let mut given = inherited.clone();
+    given.extend(env.iter().map(|(key, value)| (key.into(), value.into())));
+    given.insert("TMPDIR".into(), root.clone().into());
+    if let Some(dir) = target_dir {
+        given.insert("CARGO_TARGET_DIR".into(), dir.into());
+    }
+    if let Some(cmux) = &settings.cmux {
+        given.insert("DAGQ_E2E_CMUX".into(), cmux.into());
+    }
+    if !skip_filters.is_empty() {
+        given.insert(SKIP_ENV.into(), skip_filters.join(" ").into());
+    }
+    if let Some(tests) = how.rerun {
+        given.insert(RERUN_ENV.into(), tests.join(" ").into());
+    }
+    let _ = writeln!(
+        log,
+        "== the env passed (names only): {}",
+        given
+            .keys()
+            .map(|name| name.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    if let Some(skipped) = how.skipped {
+        let _ = writeln!(log, "== {}", skipped.sentence());
+    }
     let mut command = match &settings.command {
         Some(command) => {
             let mut shell = Command::new("/bin/sh");
@@ -284,26 +408,14 @@ fn pass(
             cargo
         }
     };
-    if !skip_filters.is_empty() {
-        command.env(SKIP_ENV, skip_filters.join(" "));
-    }
-    if let Some(tests) = how.rerun {
-        command.env(RERUN_ENV, tests.join(" "));
-    }
     command
         .current_dir(checkout)
-        .envs(env.iter().map(|(key, value)| (key, value)))
-        .env("TMPDIR", &root)
+        .env_clear()
+        .envs(&given)
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log.try_clone()?)
         .process_group(0);
-    if let Some(dir) = target_dir {
-        command.env("CARGO_TARGET_DIR", dir);
-    }
-    if let Some(cmux) = &settings.cmux {
-        command.env("DAGQ_E2E_CMUX", cmux);
-    }
     let started = Instant::now();
     let spawned = command.spawn();
     let mut child = match spawned {
@@ -1096,6 +1208,149 @@ exit 125"
         let calls = fs::read_to_string(dir.join("cmux-calls")).unwrap();
         assert!(calls.contains("workspace-group delete G-1 --close-workspaces"));
         assert!(!calls.contains("G-2"), "{calls}");
+    }
+
+    /// Which names of the starting process's environment the e2e is given:
+    /// those passed by name or prefix, but never a credential, but cmux's
+    /// socket password.
+    #[test]
+    fn only_the_passed_names_and_no_credential_are_given() {
+        for name in [
+            "PATH",
+            "HOME",
+            "LC_ALL",
+            "CMUX_SOCKET_PATH",
+            "CMUX_WORKSPACE_ID",
+            "CMUX_SOCKET_PASSWORD",
+            "RUSTUP_TOOLCHAIN",
+            "DAGQ_E2E_LAUNCHD",
+        ] {
+            assert!(passed(name), "{name}");
+        }
+        for name in [
+            "GITHUB_TOKEN",
+            "GH_TOKEN",
+            "SSH_AUTH_SOCK",
+            "GIT_ASKPASS",
+            "AWS_SECRET_ACCESS_KEY",
+            "CMUX_API_TOKEN",
+            "CMUX_SIGNING_KEY",
+            "LC_SECRET",
+            "DAGQ_QUEUE",
+            "DAGQ_BROKER_TOKEN_FILE",
+            "ANY_NAME",
+            "path",
+        ] {
+            assert!(!passed(name), "{name}");
+        }
+        assert!(credential("gh_token") && credential("SSH_AUTH_SOCK"));
+        assert!(!credential("PATH"));
+    }
+
+    /// The e2e and its rerun are given the passed of the starting process's
+    /// environment, the `[run.env]` and the gate's own, and nothing else;
+    /// the log names them without their values.
+    #[test]
+    fn the_e2e_and_its_rerun_are_given_only_the_passed_env_and_the_run_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        fs::create_dir_all(dir.join("repo")).unwrap();
+        fs::write(
+            dir.join("repo").join("dagq.toml"),
+            "[run.env]\nGATE_ENV = 'run-env-value'\n",
+        )
+        .unwrap();
+        let received = dir.join("received");
+        let received_arg = crate::application::naming::shell_quote(&received.display().to_string());
+        let settings = settings(
+            dir,
+            &format!(
+                "/usr/bin/env >> {received_arg}; echo ---- >> {received_arg}; \
+                 if [ -n \"${{DAGQ_E2E_RERUN:-}}\" ]; then echo 'test e2e::a ... ok'; exit 0; fi; \
+                 echo 'test e2e::a ... FAILED'; echo 'test result: FAILED. 0 passed; 1 failed'; exit 101"
+            ),
+            Duration::from_secs(30),
+        );
+        let inherited = [
+            ("PATH", "/usr/bin:/bin"),
+            ("HOME", "/home/someone"),
+            ("LC_ALL", "C"),
+            ("CMUX_SOCKET_PATH", "/tmp/cmux.sock"),
+            ("CMUX_SOCKET_PASSWORD", "socket-password-value"),
+            ("CMUX_API_TOKEN", "cmux-token-value"),
+            ("GITHUB_TOKEN", "github-token-value"),
+            ("SSH_AUTH_SOCK", "/tmp/agent.sock"),
+            ("GIT_ASKPASS", "/usr/bin/askpass"),
+            ("AWS_SECRET_ACCESS_KEY", "aws-value"),
+            ("ANY_NAME", "any-value"),
+            ("DAGQ_QUEUE", "/q/queue.db"),
+            ("DAGQ_E2E_WINDOWS", "1"),
+        ]
+        .map(|(name, value)| (OsString::from(name), OsString::from(value)));
+        let outcome = run_inheriting(dir, Some(&dir.join("target")), &settings, inherited).unwrap();
+        let rerun = outcome.rerun.as_ref().expect("the failed test is rerun");
+        assert!(rerun.failed.is_empty(), "{outcome:?}");
+        let received = fs::read_to_string(&received).unwrap();
+        let passes: Vec<&str> = received.split("----\n").filter(|p| !p.is_empty()).collect();
+        assert_eq!(passes.len(), 2, "{received}");
+        for given in passes {
+            for line in [
+                "PATH=/usr/bin:/bin",
+                "HOME=/home/someone",
+                "LC_ALL=C",
+                "CMUX_SOCKET_PATH=/tmp/cmux.sock",
+                "CMUX_SOCKET_PASSWORD=socket-password-value",
+                "DAGQ_E2E_WINDOWS=1",
+                "GATE_ENV=run-env-value",
+            ] {
+                assert!(given.lines().any(|l| l == line), "{line}: {given}");
+            }
+            for name in [
+                "CMUX_API_TOKEN",
+                "GITHUB_TOKEN",
+                "SSH_AUTH_SOCK",
+                "GIT_ASKPASS",
+                "AWS_SECRET_ACCESS_KEY",
+                "ANY_NAME",
+                "DAGQ_QUEUE",
+            ] {
+                assert!(
+                    !given.lines().any(|l| l.starts_with(&format!("{name}="))),
+                    "{name}: {given}"
+                );
+            }
+            // The test process's own environment is not given either.
+            assert!(
+                !given.lines().any(|l| l.starts_with("CARGO_MANIFEST_DIR=")),
+                "{given}"
+            );
+        }
+        for log in [settings.log.clone(), settings.rerun_log()] {
+            let log = fs::read_to_string(log).unwrap();
+            let names = log
+                .lines()
+                .find_map(|line| line.strip_prefix("== the env passed (names only): "))
+                .unwrap_or_else(|| panic!("{log}"));
+            let names: Vec<&str> = names.split(' ').collect();
+            for name in [
+                "CARGO_TARGET_DIR",
+                "CMUX_SOCKET_PASSWORD",
+                "DAGQ_E2E_CMUX",
+                "GATE_ENV",
+                "PATH",
+                "TMPDIR",
+            ] {
+                assert!(names.contains(&name), "{name}: {log}");
+            }
+            assert!(!names.contains(&"GITHUB_TOKEN"), "{log}");
+            for value in [
+                "socket-password-value",
+                "run-env-value",
+                "github-token-value",
+            ] {
+                assert!(!log.contains(value), "{value}: {log}");
+            }
+        }
     }
 
     /// A failing e2e names its failed tests; one past its timeout is
