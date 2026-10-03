@@ -348,9 +348,17 @@ fn headless_provider_line(provider: Provider) -> &'static str {
 /// no new command: the mapping reads the diff and the receipt.
 pub const ACCEPTANCE_MAP: &str = "Before the receipt, map each acceptance criterion to what meets it (a changed file, a test's name, the receipt's evidence, a document's section or a command that measures it) and fix on the spot any criterion nothing meets yet. Do not write succeeded with a criterion you cannot meet moved into follow_ups: when meeting it needs a person's decision (the acceptance or the scope changes), ask a worker_question with --because scope; when it needs work outside the task, write a failed receipt saying why. In summary, give each criterion's mapping in a short phrase.\n";
 
+/// The worker's check of the documents (ADR-t1428-1), right after
+/// [`ACCEPTANCE_MAP`] and part of the same step: the documents that
+/// describe the changed behavior, named by the task or not, are read
+/// against the diff, and summary says what was updated or why nothing was.
+/// It asks for no command and no document change only to show the check.
+pub const DOCS_CHECK: &str = "Then check the documents on the behavior you changed (named by the task or found as you work) against your diff: fix stale ones in the task's paths, put each one outside them in a docs_drift follow_up with its path and section (one the acceptance names is a criterion above), and in summary name each path and section you updated or why none needed it. Do not touch a document only to show it.\n";
+
 /// What a resumed or revised session adds before it rewrites the receipt
-/// (ADR-t1420-1): the mapping of the criteria its fix touched, again.
-pub const ACCEPTANCE_REMAP: &str = "Before you rewrite it, map each acceptance criterion your fix touched to what meets it again and rewrite its phrase in summary; a criterion the task cannot meet is a worker_question (--because scope) or a failed receipt, not a follow_up.";
+/// (ADR-t1420-1): the mapping of the criteria its fix touched, again, with
+/// the documents checked against the diff (ADR-t1428-1).
+pub const ACCEPTANCE_REMAP: &str = "Before you rewrite it, map each acceptance criterion your fix touched to what meets it again and rewrite its phrase in summary, with the documents you checked against the diff; a criterion the task cannot meet is a worker_question (--because scope) or a failed receipt, not a follow_up.";
 
 /// What the worker is told of the subagent review. A Codex worker has no
 /// subagent (and a nested `codex exec review` could not write its session
@@ -578,7 +586,7 @@ pub fn prompt(
          {local_checks}\n\
          {evidence}{paths}{goal}{context}{predecessors}{siblings}{inherited}\
          Your assignment is this task only. Do not change what a sibling task owns; if you find work outside this task, record it in the receipt as follow_ups instead of doing it.\n\
-         {acceptance_map}\
+         {acceptance_map}{docs_check}\
          Write a completion receipt to {receipt} using a temporary file in the same directory and atomic rename.\n\
          Receipt JSON: {{\"run_id\":\"{run_id}\",\"result\":\"succeeded or failed\",\"commit\":\"full Git SHA of the branch head\",\"tests\":{{\"status\":\"passed, failed or not_applicable\",\"evidence_or_reason\":\"...\"}},\"e2e\":{{\"status\":\"...\",\"evidence_or_reason\":\"...\"}},\"subagent_review\":{{\"status\":\"...\",\"evidence_or_reason\":\"...\"}},\"summary\":\"...\",\"follow_ups\":[{{\"title\":\"...\",\"description\":\"...\",\"category\":\"...\"}}]}}\n\
          Each of tests, e2e and subagent_review needs evidence when passed and a reason when not_applicable.\n\
@@ -595,6 +603,7 @@ pub fn prompt(
         stop_background = route.stop(),
         review = review_line(route),
         acceptance_map = ACCEPTANCE_MAP,
+        docs_check = DOCS_CHECK,
         title = task.title(),
         description = task.description(),
         acceptance = task.acceptance(),
@@ -3233,7 +3242,9 @@ mod tests {
             let first = &texts[0];
             assert_eq!(first.matches(ACCEPTANCE_MAP).count(), 1, "{first}");
             assert!(
-                first.contains(&format!("{ACCEPTANCE_MAP}Write a completion receipt to")),
+                first.contains(&format!(
+                    "{ACCEPTANCE_MAP}{DOCS_CHECK}Write a completion receipt to"
+                )),
                 "{first}"
             );
             assert_eq!(
@@ -3265,6 +3276,59 @@ mod tests {
         }
         let review = review_prompt(&task, &run_on(Provider::Claude, WorkerMode::Headless), "r");
         assert!(!review.contains(ACCEPTANCE_MAP) && !review.contains(ACCEPTANCE_REMAP));
+    }
+
+    /// Task 1428 (ADR-t1428-1): every worker's prompt, interactive or
+    /// headless, on Claude or Codex, checks the documents against the diff
+    /// once, right after the acceptance map and as part of it, not as a
+    /// second map; the Codex review line does not say it again; every
+    /// resume and revise request keeps the record of the check inside the
+    /// remap's phrase, not as another sentence; the run's review prompt is
+    /// untouched.
+    #[test]
+    fn every_worker_text_that_writes_a_receipt_checks_the_documents_once() {
+        let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
+        for (provider, mode) in [
+            (Provider::Claude, WorkerMode::Interactive),
+            (Provider::Claude, WorkerMode::Headless),
+            (Provider::Codex, WorkerMode::Headless),
+        ] {
+            let run = run_on(provider, mode);
+            let texts = session_texts(&task, &run);
+            let first = &texts[0];
+            assert_eq!(first.matches(DOCS_CHECK).count(), 1, "{first}");
+            assert!(first.contains(&format!("{ACCEPTANCE_MAP}{DOCS_CHECK}")));
+            assert_eq!(
+                first.matches("check the documents").count(),
+                1,
+                "{provider:?} {mode:?}: {first}"
+            );
+            for request in &texts[1..11] {
+                assert!(!request.contains(DOCS_CHECK), "{request}");
+                assert_eq!(
+                    request
+                        .matches("the documents you checked against the diff")
+                        .count(),
+                    1,
+                    "{provider:?} {mode:?}: {request}"
+                );
+            }
+        }
+        // The check names neither a criterion map nor the own-diff reading.
+        assert!(!DOCS_CHECK.contains("map each acceptance criterion"));
+        assert!(ACCEPTANCE_REMAP.contains("rewrite its phrase in summary, with the documents"));
+        // The Codex review line reads the own diff; the check of the
+        // documents is said once, in DOCS_CHECK, not again there.
+        let codex = review_line(Route::Headless(Provider::Codex));
+        assert!(codex.contains("read your own diff"), "{codex}");
+        assert!(!codex.contains("documents") && !codex.contains("docs_drift"));
+        assert!(!DOCS_CHECK.contains("own diff"));
+        // No new command, and short (ADR-t1428-1; goal 91's constraints).
+        assert!(DOCS_CHECK.len() <= 400, "{}", DOCS_CHECK.len());
+        assert!(!DOCS_CHECK.contains("cargo") && !DOCS_CHECK.contains('`'));
+        let review = review_prompt(&task, &run_on(Provider::Claude, WorkerMode::Headless), "r");
+        assert!(!review.contains(DOCS_CHECK));
+        assert!(!review.contains("the documents you checked against the diff"));
     }
 
     /// Task 978: a task that needs a path outside its declared paths ends

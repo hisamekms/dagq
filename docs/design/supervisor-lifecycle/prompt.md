@@ -4,10 +4,11 @@ type: design
 title: "Prompt"
 status: current
 created: 2026-09-26
-updated: 2026-10-03 # task 1420: the acceptance map before the receipt
-last_verified: 2026-10-03 # task 1420
+updated: 2026-10-03 # task 1428: the documents checked against the diff
+last_verified: 2026-10-03 # task 1428
 scope: runtime
 related:
+  - adr-t1428-1
   - adr-t1420-1
   - adr-t963-1
   - adr-t1165-1
@@ -52,9 +53,15 @@ schemaとCLIは変えない。`tests/e2e.rs`のstubはpromptの1行目とreceipt
 
 [ADR-t1420-1](../../adr/2026-10-03-t1420-1-worker-maps-each-acceptance-criterion-before-the-receipt.md)（goal 90、task 1420）。workerのpromptは、receiptの書き方（`Write a completion receipt to ...`の行）の直前に`ACCEPTANCE_MAP`の1段落（英語で564文字）を置く: receiptの前に受け入れ条件の各項目を満たすもの（変えたファイル・testの名前・receiptのevidence・文書の節や測るコマンド）へ対応づけ、まだ何も満たしていない項目はその場で直す。満たせない項目を`follow_ups`に回して`succeeded`を書かず、人の判断が要れば`worker_question`（`--because scope`）、範囲の外ならfailedのreceiptにする。対応は`summary`に項目ごとの短い句で書く。対話・非対話、Claude・Codexのどのworkerのpromptも同じ文で、新しいtestの実行や検査のコマンドは求めない。
 
-resumeの解消依頼（`resume_request`。全ての`ResumeKind`）とreviseの依頼（`revise_request`）は、receiptを書き直す手順5の末尾に`ACCEPTANCE_REMAP`（英語で237文字）を足す: 直した項目の対応を改めて満たすものへ対応づけて`summary`の句を書き直し、taskの中で満たせない項目は`worker_question`（`--because scope`）かfailedのreceiptにしてfollow_upにしない。
+resumeの解消依頼（`resume_request`。全ての`ResumeKind`）とreviseの依頼（`revise_request`）は、receiptを書き直す手順5の末尾に`ACCEPTANCE_REMAP`（英語で237文字。task 1428で文書の照合の記録を含めて286文字）を足す: 直した項目の対応を改めて満たすものへ対応づけて`summary`の句を（照合した文書とともに。下の[文書の照合](#文書の照合)）書き直し、taskの中で満たせない項目は`worker_question`（`--because scope`）かfailedのreceiptにしてfollow_upにしない。
 
 Codexのworkerの`review_line`（下の[subagent review](#subagent-review)）は自分のdiffを読む見直しをこの対応づけの手順に寄せ、受け入れ条件との照合を2度言わない。runのreviewのprompt（`review_prompt`）と判定の基準は変えない。testは`src/application/prompt.rs`の`every_worker_text_that_writes_a_receipt_maps_the_acceptance_once`。
+
+## 文書の照合
+
+[ADR-t1428-1](../../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)（goal 91、task 1428）。workerのpromptは`ACCEPTANCE_MAP`の直後（`Write a completion receipt to ...`の行の前）に`DOCS_CHECK`の1段落（英語で394文字）を置く: 変えた挙動を説明する文書（taskが名指すものと作業中に見つけたもの）を差分と照合し、taskのpathsの中の古いものを直し、pathsの外のものは`docs_drift`のfollow_upにpathと節を書く（受け入れ条件が求める文書は上の対応づけの項目として扱い、直せなければ`worker_question`かfailedのreceipt）。`summary`に更新したpathと節か、更新が要らない理由を書き、示すためだけに文書を触らない。対応づけの手順の続き（`Then ...`）で、受け入れ条件の対応づけを2度言わない。対話・非対話、Claude・Codexのどのworkerのpromptも同じ文で、Codexの`review_line`（自分のdiffを読む文）は文書に触れない。新しい検査のコマンドやtestの実行は求めない。
+
+resumeとreviseの依頼は別の文を足さず、`ACCEPTANCE_REMAP`の「`summary`の句を書き直す」に`, with the documents you checked against the diff`（英語で49文字。`ACCEPTANCE_REMAP`は286文字）を含める。runのreviewのprompt（`review_prompt`）と資料は変えない（reviewの側はgoal 90のcloseの後のtask 1429）。testは`src/application/prompt.rs`の`every_worker_text_that_writes_a_receipt_checks_the_documents_once`。
 
 ## 経路とproviderごとの文面
 
