@@ -16,7 +16,7 @@ use super::{AskQuery, Clock, PlannerAnswerRoute, ProcessControl, Queue, RunFiles
 use crate::domain::worker::ProviderCheck;
 use crate::domain::{
     APPROVE_RELEASE_OPTIONS, AskId, AskKind, Attention, AttentionNext, HEARTBEAT_TIMEOUT_SECS,
-    LANDING_OPTIONS, ReasonCode, RunEvent, RunHistory, RunId, RunLease, RunProcess, RunStatus,
+    LandingAnswer, ReasonCode, RunEvent, RunHistory, RunId, RunLease, RunProcess, RunStatus,
     SessionRole, SupervisorMode, SupervisorPulse, SupervisorRegistration, TaskId, TaskRun,
     UPDATE_FAILED_OPTIONS, broker, event_attention, event_kind, heartbeat_stale,
     kpi::push::{KPI_PUSH_ABANDONED, KPI_PUSH_ATTENTION_KINDS},
@@ -1404,7 +1404,7 @@ pub fn attention(
             && ask
                 .answer
                 .as_deref()
-                .is_some_and(|answer| LANDING_OPTIONS.contains(&answer.trim()))
+                .is_some_and(|answer| LandingAnswer::parse(answer).is_some())
         {
             // The supervisor lands, sends back or cancels the run itself.
             (

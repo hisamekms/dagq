@@ -318,6 +318,20 @@ fn a_discard_concern_asks_a_person_with_the_recommendation() {
     assert!(session_texts(&backend, &run).is_empty());
     let kinds = event_kinds(&detail);
     assert!(position(&kinds, "workspace_closed") < position(&kinds, "ask_opened"));
+
+    // An answer not read as an option (`land: x`, task 1424) is the inbox's:
+    // the supervisor leaves the run and the ask as they are.
+    queue.answer(ask.id, "land: x").unwrap();
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
+    let answered = payloads(&detail, "ask_answered");
+    assert_eq!(answered[0]["runtime_delivers"], false, "{}", answered[0]);
+    assert!(queue.read_ask(ask.id).unwrap().closed_at.is_none());
+    for kind in ["landing_decided", "integration_approved", "review_outcome"] {
+        assert!(payloads(&detail, kind).is_empty(), "{kind}");
+    }
 }
 
 /// A run of `backend` past its validation whose supervisor recorded

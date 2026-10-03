@@ -336,7 +336,9 @@ fn a_third_review_that_does_not_pass_asks_a_person_and_land_lands_it() {
 }
 
 /// A `concern` exits and closes the session and asks a person; `send_back`
-/// parks the run for a resume whose request names the findings, and the
+/// with the person's reason (`send_back: <reason>`, task 1424) is the
+/// runtime's to apply and parks the run for a resume whose request names
+/// that reason before the findings, and the
 /// resumed session goes through validation and review like the worker's
 /// (ADR-0027 decision 3): the review passes and the supervisor lands it.
 #[test]
@@ -377,7 +379,23 @@ fn a_concern_sent_back_is_resumed_reviewed_again_and_landed() {
         "{notified:?}"
     );
 
-    queue.answer(ask.id, "send_back").unwrap();
+    queue
+        .answer(ask.id, "send_back:  keep the change to the named file ")
+        .unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let answered = payloads(&detail, "ask_answered");
+    assert_eq!(answered[0]["runtime_delivers"], true, "{}", answered[0]);
+    let status = runtime::status(&db).unwrap();
+    let entry = status["attention"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["ask_id"] == json!(ask.id))
+        .unwrap();
+    assert_eq!(
+        entry["next"],
+        format!("applying the answer of ask {} (runtime)", ask.id)
+    );
     backend.resume_script_for(
         1,
         "await_message; printf 'narrowed\\n' > change.txt; unlocked git commit -q -am narrowed; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
@@ -395,16 +413,27 @@ fn a_concern_sent_back_is_resumed_reviewed_again_and_landed() {
     let decided = payloads(&detail, "landing_decided");
     assert_eq!(decided.len(), 1);
     assert_eq!(decided[0]["answer"], "send_back");
+    assert_eq!(
+        decided[0]["person_reason"],
+        "keep the change to the named file"
+    );
     assert_eq!(decided[0]["status"], "needs_session");
+    assert_eq!(decided[0]["code"], "sent_back");
+    let reason = format!(
+        "a person sent the run back in ask {}: keep the change to the named file; the review's findings: changes a file the task did not name",
+        ask.id
+    );
+    assert_eq!(decided[0]["reason"], reason);
+    let outcomes = payloads(&detail, "review_outcome");
+    assert_eq!(outcomes.len(), 1, "{outcomes:?}");
+    assert_eq!(outcomes[0]["outcome"], "deviation_rejected");
+    assert_eq!(outcomes[0]["ask_id"], ask.id.as_i64());
     let text = &session_texts(&backend, &landed)[0];
     assert!(
         text.contains("raised findings a person sent back to you"),
         "{text}"
     );
-    assert!(
-        text.contains("changes a file the task did not name"),
-        "{text}"
-    );
+    assert!(text.contains(&reason), "{text}");
     assert!(text.contains("Fix the findings in the reason"), "{text}");
     // The resumed session stayed open through the review: validation,
     // review, then /exit and the close of its workspace, then the landing.

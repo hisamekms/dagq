@@ -4,8 +4,8 @@ type: design
 title: "`stats`"
 status: current
 created: 2026-09-26
-updated: 2026-10-03 # task 1398: sessions.by_route and planner_routes (after task 1379's window to the end)
-last_verified: 2026-10-03 # task 1398
+updated: 2026-10-04 # task 1424: runtime_delivers of approve_landing follows LandingAnswer::parse (after task 1398)
+last_verified: 2026-10-04 # task 1424
 scope: runtime
 related:
   - adr-t639-1
@@ -142,7 +142,7 @@ related:
 | `verify` | `integration_rebased` | `integrate`の範囲の検査、`verification_commands`、mainへのcommit |
 
 - **`needs_session`は他の規則より先**に見る（`integration_deferred`は`resume`になる）。時計を始める最初の`validation_finished`にも同じ規則を当てるので、最初のvalidationが`evidence_missing` / `scope_violation`でrunを止めたときは`resume`から始まる。
-- **askの後**: `approve_landing`の`ask_answered`（payloadの`kind`、無ければ対の`ask_opened`の`kind`）は`landing_queue`に移る（`land`はslotを待ち、`send_back` / `cancel`はすぐ次のイベントでstatusを記録する）。`runtime_delivers: false`（3つのoptionの外の答えで、inboxが読む）なら`ask`のまま。それ以外のaskは、そのrunで開いているaskがすべて答えられたら、askの前の工程に戻る（reviseの途中の`worker_question`は`revise`に戻る）。askは`ask_id`（無ければ`id`）で対にする。askの間に他の工程のイベントが来たら、開いているaskは忘れる（closeはイベントを書かないので）。
+- **askの後**: `approve_landing`の`ask_answered`（payloadの`kind`、無ければ対の`ask_opened`の`kind`）は`landing_queue`に移る（`land`はslotを待ち、`send_back` / `cancel`はすぐ次のイベントでstatusを記録する）。`runtime_delivers: false`（`LandingAnswer::parse`が読まない答え（`land: x`など。`send_back: <理由>`は読む）で、inboxが読む）なら`ask`のまま。それ以外のaskは、そのrunで開いているaskがすべて答えられたら、askの前の工程に戻る（reviseの途中の`worker_question`は`revise`に戻る）。askは`ask_id`（無ければ`id`）で対にする。askの間に他の工程のイベントが来たら、開いているaskは忘れる（closeはイベントを書かないので）。
 - **`landing_queued`**（`via`: `exit`か`resume`）は、supervisorが着地slotを待つ`Phase::AwaitingSlot`に入るときに記録する（[Review](review.md#review-supervisor)の5のpass、[`needs_session`](needs-session.md#needs_session)の5）。`land`の答えを適用したときは`via: approve`（と`ask_id`）で記録する（[Review](review.md#review-supervisor)の6。task 949）。持ち主の死んだ`integrating`のrunをsupervisorが解放して着地の列に並べたときは`via: recover`で記録する（[supervise](supervise.md#supervise)の12。task 1118）。このイベントが入る前のrunでは、slotの待ちは`exit`に入る。人の`integrate`はslotが空いていなければ拒否されるので待ちが無い。
 - **`landing_queue`の`via`別の内訳**（task 949）: `land_phases`の`landing_queue_via`に、`landing_queue`の工程を何がrunを列に入れたかで分けて`{via, secs}`の配列で載せる（runごと。集計の`land_phases`では`via`ごとの`{via, count, total, median, p90, max, tail_total}`で、`verify_commands`と同じ形）。`via`は`landing_queued`の`via`（`exit` / `resume` / `approve` / `recover`、無ければ`unknown`）で、runtimeが適用する`approve_landing`の`ask_answered`から入った`landing_queue`は`approve`（`landing_queued`を記録する前のruntimeのrunも含む）。承認から`integration_started`までの待ちは`approve`に入る。`via`ごとにミリ秒を秒に切り捨てるので、合計は`landing_queue`を超えない。
 - **`push`**: `run_integrated`から最初の`push_finished` / `push_failed` / `push_skipped`まで（`push_main`は着地の後に走るので`wait_to_land`の外）。記録が無ければnull。

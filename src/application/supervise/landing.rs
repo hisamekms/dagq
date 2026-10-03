@@ -11,6 +11,7 @@ use crate::application::review::{
 use crate::domain::ActorContext;
 use crate::domain::AskConfidence;
 use crate::domain::EventKind;
+use crate::domain::LandingAnswer;
 use crate::domain::RecoveredLanding;
 use crate::domain::actor_model::{ActorLaunch, JobRoute, ModelRole, job_route};
 use crate::domain::concern::{
@@ -1234,9 +1235,10 @@ impl Supervisor<'_> {
     /// slots and the integration slot (task 949): `land` records the
     /// approval and queues the run to land ([`Self::start_approved_landings`]
     /// lands it), `send_back` makes it `needs_session` for a resume that
-    /// names the review's reasons, and `cancel` fails the run and cancels
-    /// its task. The ask is closed once applied; any other answer is left
-    /// to the inbox. An error is noted and the ask is tried again on a
+    /// names the review's reasons (after the person's, `send_back:
+    /// <reason>`, task 1424), and `cancel` fails the run and cancels its
+    /// task ([`LandingAnswer`]). The ask is closed once applied; any other
+    /// answer is left to the inbox. An error is noted and the ask is tried again on a
     /// later pass.
     pub(super) fn apply_landing_answers(&mut self) -> Result<()> {
         for ask in self.queue.landing_answers()? {
@@ -1245,7 +1247,7 @@ impl Supervisor<'_> {
             };
             let answer = ask.answer.as_deref().unwrap_or_default().trim().to_owned();
             let run = self.queue.run(&run_id)?;
-            let Some(action) = landing_action(&answer) else {
+            let Some(action) = LandingAnswer::parse(&answer) else {
                 continue;
             };
             if run.status() != RunStatus::AwaitingIntegration
@@ -1384,18 +1386,21 @@ impl Supervisor<'_> {
         Ok(())
     }
     /// Apply `answer`, an answer to the `approve_landing` ask `ask_id` of
-    /// `run` read as `action` ([`landing_action`]).
+    /// `run` read as `action` ([`LandingAnswer::parse`]). The
+    /// `landing_decided` of a `send_back` records the answer as
+    /// `send_back` and the person's reason, when given, as
+    /// `person_reason`.
     pub(super) fn apply_landing_answer(
         &mut self,
         run: &TaskRun,
         ask_id: AskId,
         answer: &str,
-        action: LandingAction,
+        action: LandingAnswer,
     ) -> Result<()> {
         self.record_review_outcome(run, ask_id, answer)?;
         let payload = json!({"ask_id": ask_id, "answer": answer});
         match action {
-            LandingAction::Land => {
+            LandingAnswer::Land => {
                 // Each step is recorded once for the ask, so an answer
                 // applied in part is finished on a later pass.
                 let events = self.queue.run_events(run.id())?;
@@ -1414,9 +1419,13 @@ impl Supervisor<'_> {
                 self.queue.close_ask(ask_id)?;
                 info!(run_id = %run.id(), "run {} is approved by ask {ask_id} and waits to land", run.id());
             }
-            LandingAction::SendBack => {
+            LandingAnswer::SendBack(person_reason) => {
                 let reasons = latest_review_reasons(&*self.queue, run.id())?;
-                let reason = sent_back_reason(ask_id, &reasons);
+                let reason = sent_back_reason(ask_id, person_reason.as_deref(), &reasons);
+                let mut payload = json!({"ask_id": ask_id, "answer": "send_back"});
+                if let Some(person_reason) = person_reason {
+                    payload["person_reason"] = json!(person_reason);
+                }
                 self.queue.decide_landing(
                     run.id(),
                     RunStatus::NeedsSession,
@@ -1426,7 +1435,7 @@ impl Supervisor<'_> {
                 self.queue.close_ask(ask_id)?;
                 info!(run_id = %run.id(), "run {} was sent back by ask {ask_id}; it waits for a resume", run.id());
             }
-            LandingAction::Cancel => {
+            LandingAnswer::Cancel => {
                 let reason = canceled_reason(ask_id);
                 self.queue.decide_landing(
                     run.id(),
@@ -1530,39 +1539,22 @@ fn landing_ask(
     ))
 }
 
-/// What an answer to an `approve_landing` ask does to its run (ADR-0027).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum LandingAction {
-    /// Record the approval and queue the run to land.
-    Land,
-    /// Make the run `needs_session` for a resume naming the review's reasons.
-    SendBack,
-    /// Fail the run and cancel its task.
-    Cancel,
-}
-
-/// The action an answer (trimmed) to an `approve_landing` ask names, one of
-/// [`LANDING_OPTIONS`]; `None` for any other answer, left to the inbox.
-pub(super) fn landing_action(answer: &str) -> Option<LandingAction> {
-    match answer {
-        "land" => Some(LandingAction::Land),
-        "send_back" => Some(LandingAction::SendBack),
-        "cancel" => Some(LandingAction::Cancel),
-        _ => None,
+/// The reason a `send_back` answer to ask `ask_id` parks the run with,
+/// which its resume names: the person's reason first when the answer gave
+/// one (`send_back: <reason>`, task 1424), then the latest review's
+/// `reasons`.
+fn sent_back_reason(ask_id: AskId, person_reason: Option<&str>, reasons: &[String]) -> String {
+    let findings = if reasons.is_empty() {
+        "(no reasons recorded)".to_owned()
+    } else {
+        reasons.join("; ")
+    };
+    match person_reason {
+        Some(person_reason) => format!(
+            "a person sent the run back in ask {ask_id}: {person_reason}; the review's findings: {findings}"
+        ),
+        None => format!("the review's findings were sent back by ask {ask_id}: {findings}"),
     }
-}
-
-/// The reason a `send_back` answer to ask `ask_id` parks the run with: the
-/// latest review's `reasons`, which its resume names.
-fn sent_back_reason(ask_id: AskId, reasons: &[String]) -> String {
-    format!(
-        "the review's findings were sent back by ask {ask_id}: {}",
-        if reasons.is_empty() {
-            "(no reasons recorded)".to_owned()
-        } else {
-            reasons.join("; ")
-        }
-    )
 }
 
 /// The reason a `cancel` answer to ask `ask_id` fails the run with.
@@ -1631,7 +1623,7 @@ fn landing_question(
         ));
     }
     question.push_str(
-        "\nland: land it as it is. send_back: resume the session with these reasons. cancel: fail the run and cancel the task.",
+        "\nland: land it as it is. send_back: resume the session with these reasons (answer `send_back: <your reason>` to add yours). cancel: fail the run and cancel the task.",
     );
     question
 }
@@ -1681,7 +1673,7 @@ fn failed_review_question(
         }
     }
     question.push_str(
-        "\nReview the material by hand, then answer. land: land it as it is. send_back: resume the session with this failure as the reason. cancel: fail the run and cancel the task.",
+        "\nReview the material by hand, then answer. land: land it as it is. send_back: resume the session with this failure as the reason (answer `send_back: <your reason>` to add yours). cancel: fail the run and cancel the task.",
     );
     question
 }
@@ -1903,7 +1895,7 @@ mod tests {
     }
 
     /// The tail every failed review's ask ends with.
-    const FAILED_TAIL: &str = "\nReview the material by hand, then answer. land: land it as it is. send_back: resume the session with this failure as the reason. cancel: fail the run and cancel the task.";
+    const FAILED_TAIL: &str = "\nReview the material by hand, then answer. land: land it as it is. send_back: resume the session with this failure as the reason (answer `send_back: <your reason>` to add yours). cancel: fail the run and cancel the task.";
 
     /// The ask of a review whose job ran and failed names this review's
     /// output (a non-zero exit, the timeout, an unreadable verdict twice;
@@ -1988,35 +1980,32 @@ mod tests {
         }
     }
 
-    /// The answers of an `approve_landing` ask the supervisor applies, and
-    /// the reasons a `send_back` and a `cancel` record; any other answer is
-    /// left to the inbox.
+    /// The reasons a `send_back` (with and without the person's reason)
+    /// and a `cancel` record; which answers apply is
+    /// `LandingAnswer::parse`'s.
     #[test]
-    fn an_answer_names_its_landing_action() {
-        assert_eq!(landing_action("land"), Some(LandingAction::Land));
-        assert_eq!(landing_action("send_back"), Some(LandingAction::SendBack));
-        assert_eq!(landing_action("cancel"), Some(LandingAction::Cancel));
-        for other in ["", "Land", "drop it", "send back"] {
-            assert_eq!(landing_action(other), None, "{other}");
-        }
-        assert!(
-            LANDING_OPTIONS
-                .iter()
-                .all(|option| landing_action(option).is_some())
-        );
+    fn a_send_back_and_a_cancel_record_their_reasons() {
         assert_eq!(
-            sent_back_reason(AskId::new(7), &["a".into(), "b".into()]),
+            sent_back_reason(AskId::new(7), None, &["a".into(), "b".into()]),
             "the review's findings were sent back by ask 7: a; b"
         );
         assert_eq!(
-            sent_back_reason(AskId::new(7), &[]),
+            sent_back_reason(AskId::new(7), None, &[]),
             "the review's findings were sent back by ask 7: (no reasons recorded)"
+        );
+        assert_eq!(
+            sent_back_reason(
+                AskId::new(7),
+                Some("keep the flag"),
+                &["a".into(), "b".into()]
+            ),
+            "a person sent the run back in ask 7: keep the flag; the review's findings: a; b"
         );
         assert_eq!(canceled_reason(AskId::new(7)), "canceled by ask 7");
     }
 
     /// The tail every landing ask of a review that did not pass ends with.
-    const LANDING_TAIL: &str = "\nland: land it as it is. send_back: resume the session with these reasons. cancel: fail the run and cancel the task.";
+    const LANDING_TAIL: &str = "\nland: land it as it is. send_back: resume the session with these reasons (answer `send_back: <your reason>` to add yours). cancel: fail the run and cancel the task.";
 
     /// A `revise` past the round's limit asks a person why, with the
     /// findings and the material (ADR-0027 decision 2).

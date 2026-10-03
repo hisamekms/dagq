@@ -310,18 +310,11 @@ impl PlanAnswer {
     /// One of [`PLAN_OPTIONS`], `send_back` optionally followed by `:` and
     /// the person's reason; anything else is a person's to read.
     pub fn parse(answer: &str) -> Option<Self> {
-        let answer = answer.trim();
-        match answer {
-            "ready" => return Some(Self::Ready),
-            "cancel" => return Some(Self::Cancel),
-            "send_back" => return Some(Self::SendBack(None)),
-            _ => {}
+        match answer.trim() {
+            "ready" => Some(Self::Ready),
+            "cancel" => Some(Self::Cancel),
+            answer => super::send_back_reason(answer).map(Self::SendBack),
         }
-        let reason = answer.strip_prefix("send_back")?.trim_start();
-        let reason = reason.strip_prefix(':')?.trim();
-        Some(Self::SendBack(
-            (!reason.is_empty()).then(|| reason.to_owned()),
-        ))
     }
 }
 

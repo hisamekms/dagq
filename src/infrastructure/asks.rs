@@ -12,7 +12,7 @@ use crate::domain::Ask;
 use crate::domain::write_rules::check_run_has_task;
 use crate::domain::{
     APPROVE_RELEASE_OPTIONS, AnswerAuthority, Answerer, AskId, AskKind, AskOutcome, AskReason,
-    HoldOutcome, LANDING_OPTIONS, NewAsk, NewHold, RunId, RunStatus, TaskId, UPDATE_FAILED_OPTIONS,
+    HoldOutcome, LandingAnswer, NewAsk, NewHold, RunId, RunStatus, TaskId, UPDATE_FAILED_OPTIONS,
     answer_approves, check_ask_kind, check_event_target, option_index, reasoned_option,
     session_takes_answers,
 };
@@ -265,8 +265,9 @@ impl SqliteQueue {
         if ask.kind == AskKind::ApproveLanding
             && let Some(run_id) = ask.run_id.as_ref()
         {
-            // The supervisor lands, sends back or cancels a run awaiting
-            // integration as answered (ADR-0027); any other answer, or one
+            // The supervisor lands, sends back (with the person's reason,
+            // `send_back: <reason>`) or cancels a run awaiting integration
+            // as answered (ADR-0027, task 1424); any other answer, or one
             // for a run that moved on, is the inbox's to read.
             let status: String =
                 tx.query_row("SELECT status FROM task_runs WHERE id=?1", [run_id], |r| {
@@ -274,7 +275,7 @@ impl SqliteQueue {
                 })?;
             payload["runtime_delivers"] = json!(
                 status == RunStatus::AwaitingIntegration.as_str()
-                    && LANDING_OPTIONS.contains(&text.trim())
+                    && LandingAnswer::parse(text).is_some()
             );
         }
         if ask.kind == AskKind::Decide

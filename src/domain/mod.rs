@@ -261,8 +261,9 @@ impl AskKind {
     /// `<option>: <reason>` (`send_back: <reason>`), which `stats` counts
     /// as choosing the option (task 1389): the `approve_plan`, whose
     /// `send_back: <reason>` the supervisor applies with `PlanAnswer`, and
-    /// the `approve_landing`, whose reasoned answer the supervisor leaves
-    /// to the inbox and `review_reason::answer_outcome` reads.
+    /// the `approve_landing`, whose `send_back: <reason>` the supervisor
+    /// applies with `LandingAnswer` and `review_reason::answer_outcome`
+    /// reads.
     pub fn takes_reasoned_answers(&self) -> bool {
         matches!(self, Self::ApprovePlan | Self::ApproveLanding)
     }
@@ -527,6 +528,44 @@ pub const MAX_REVISE_ATTEMPTS: usize = 2;
 /// The options of the `approve_landing` ask a `concern` opens, which the
 /// supervisor acts on once answered (ADR-0027, ADR-0022 decision 3).
 pub const LANDING_OPTIONS: &[&str] = &["land", "send_back", "cancel"];
+
+/// A person's answer to an `approve_landing` ask the supervisor applies,
+/// read like [`PlanAnswer`] (task 1424).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LandingAnswer {
+    /// Record the approval and queue the run to land.
+    Land,
+    /// Make the run `needs_session` for a resume naming the review's
+    /// reasons, after the person's reason when they gave one
+    /// (`send_back: <reason>`).
+    SendBack(Option<String>),
+    /// Fail the run and cancel its task.
+    Cancel,
+}
+
+impl LandingAnswer {
+    /// One of [`LANDING_OPTIONS`], `send_back` optionally followed by `:`
+    /// and the person's reason; anything else is the inbox's to read.
+    pub fn parse(answer: &str) -> Option<Self> {
+        match answer.trim() {
+            "land" => Some(Self::Land),
+            "cancel" => Some(Self::Cancel),
+            answer => send_back_reason(answer).map(Self::SendBack),
+        }
+    }
+}
+
+/// The reason of a `send_back` answer (trimmed): `Some(None)` for a bare
+/// `send_back` or an empty reason after `send_back:`, `Some(Some(reason))`
+/// for `send_back: <reason>`, `None` for any other answer.
+pub(crate) fn send_back_reason(answer: &str) -> Option<Option<String>> {
+    if answer == "send_back" {
+        return Some(None);
+    }
+    let reason = answer.strip_prefix("send_back")?.trim_start();
+    let reason = reason.strip_prefix(':')?.trim();
+    Some((!reason.is_empty()).then(|| reason.to_owned()))
+}
 
 /// The whole text as one JSON object of `T`, or else the outermost `{...}`
 /// in it (a model may wrap the object in a fence or a sentence).
@@ -1521,6 +1560,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_landing_answer_is_one_of_the_options_and_send_back_may_carry_a_reason() {
+        assert_eq!(LandingAnswer::parse(" land "), Some(LandingAnswer::Land));
+        assert_eq!(LandingAnswer::parse("cancel"), Some(LandingAnswer::Cancel));
+        assert_eq!(
+            LandingAnswer::parse("send_back"),
+            Some(LandingAnswer::SendBack(None))
+        );
+        assert_eq!(
+            LandingAnswer::parse(" send_back :  keep the old flag "),
+            Some(LandingAnswer::SendBack(Some("keep the old flag".into())))
+        );
+        assert_eq!(
+            LandingAnswer::parse("send_back:  "),
+            Some(LandingAnswer::SendBack(None))
+        );
+        for other in [
+            "",
+            "ready",
+            "Land",
+            "send back",
+            "send_backwards",
+            "send_back reason",
+            "land: x",
+            "cancel: x",
+        ] {
+            assert_eq!(LandingAnswer::parse(other), None, "{other}");
+        }
+        assert!(
+            LANDING_OPTIONS
+                .iter()
+                .all(|option| LandingAnswer::parse(option).is_some())
+        );
+    }
+
+    #[test]
     fn a_priority_is_a_name_ordered_low_to_interrupt_and_stored_as_0_to_4() {
         let names = ["low", "normal", "high", "urgent", "interrupt"];
         let levels: Vec<Priority> = names.iter().map(|name| name.parse().unwrap()).collect();
@@ -2063,8 +2137,8 @@ pub fn abandon_left_session_open(kind: &str, payload: &serde_json::Value) -> boo
 /// the worker's terminal itself (`runtime_delivers: true`); its answer to a
 /// run no longer running and its `ask_delivery_failed` are the inbox's.
 /// The answer of an `approve_landing` ask the supervisor applies
-/// (`runtime_delivers: true`: one of [`LANDING_OPTIONS`] for a run awaiting
-/// integration) is not one either, nor that of the recovery job's `decide`
+/// (`runtime_delivers: true`: one of [`LANDING_OPTIONS`] or `send_back:
+/// <reason>`, [`LandingAnswer`], for a run awaiting integration) is not one either, nor that of the recovery job's `decide`
 /// ask (`runtime_delivers: true`: one of the ask's options, [`TRIAGE_OPTIONS`]
 /// or the job's own, for a `failed` or `interrupted` run).
 pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<AttentionNext> {

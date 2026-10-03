@@ -4,8 +4,8 @@ type: design
 title: "`status`"
 status: current
 created: 2026-09-26
-updated: 2026-10-04
-last_verified: 2026-10-04
+updated: 2026-10-04 # task 1424: approve_landing applies send_back: <reason>
+last_verified: 2026-10-04 # task 1424
 scope: runtime
 related:
   - adr-t1228-2
@@ -43,7 +43,7 @@ related:
 - queue service: queueの最新の`queue_service_down` / `queue_service_running` / `queue_service_started` / `queue_service_stopped`が`queue_service_down`なら、`kind: queue_service_down`、`status`にその`reason`（`start_failed`・`restart_limit`）、`next: dagq service status`、`last_error`にその`message`（`run_id` / `task_id`はnull）。serviceがまた動けば消える（[Queue service](../queue-service.md#落ちたときの知らせadr-t1233-4決定3)）。
 - broker: queueの最新の`broker_unhealthy` / `broker_healthy` / `broker_started` / `broker_stopped`が`broker_unhealthy`なら、`kind: broker_unhealthy`、`status`にその`reason`（`unhealthy`・`machine_busy`・`podman_missing`など）、`next: dagq broker status`、`last_error`にその`message`（`run_id` / `task_id`はnull）。brokerが動けば（`broker_started`・`broker_healthy`）消える（[Broker](../broker.md#supervisorの統合)）。
 - KPIのpush: queueの最新の`kpi_push_sent` / `kpi_push_abandoned`が`kpi_push_abandoned`なら、`kind: kpi_push_abandoned`、`status: failed`、`reason_category: recovery_failed`、`next: fix the push command`、`last_error`にその`message`（`run_id` / `task_id`はnull）。次のpushが成功すると消える（[push](push.md#実行再試行失敗)）。
-- ask（[ADR-0022](../../adr/0022-ask-answer-inbox-planner-and-landing-on-doubt.md)、[ask / answer](ask.md#ask--answer--asks)）: closeされていないaskを`asks`表の順に並べる。未回答のものは`kind: ask_opened`、`status: open`、`next: answer ask <id>`、回答済みのものは`kind: ask_answered`、`status: answered`、`next: read the answer of ask <id> and close it`。ただし回答済みの`worker_question`は`delivering the answer of ask <id> (runtime)`か`send the answer of ask <id> to the worker and close it`（[workerの質問への回答の送信](worker-question-answer.md#workerの質問への回答の送信)）。回答済みの`approve_landing`で、runが`awaiting_integration`で回答が`land` / `send_back` / `cancel`のどれかなら`applying the answer of ask <id> (runtime)`（supervisorが適用する。[Review](review.md#review-supervisor)の6）。項目は`ask_id`を持ち、`run_id`はaskのrun（taskだけのaskはnull）、`last_error`はnull。
+- ask（[ADR-0022](../../adr/0022-ask-answer-inbox-planner-and-landing-on-doubt.md)、[ask / answer](ask.md#ask--answer--asks)）: closeされていないaskを`asks`表の順に並べる。未回答のものは`kind: ask_opened`、`status: open`、`next: answer ask <id>`、回答済みのものは`kind: ask_answered`、`status: answered`、`next: read the answer of ask <id> and close it`。ただし回答済みの`worker_question`は`delivering the answer of ask <id> (runtime)`か`send the answer of ask <id> to the worker and close it`（[workerの質問への回答の送信](worker-question-answer.md#workerの質問への回答の送信)）。回答済みの`approve_landing`で、runが`awaiting_integration`で回答が`land` / `send_back` / `cancel`か`send_back: <理由>`のどれか（`LandingAnswer::parse`、task 1424）なら`applying the answer of ask <id> (runtime)`（supervisorが適用する。[Review](review.md#review-supervisor)の6）。項目は`ask_id`を持ち、`run_id`はaskのrun（taskだけのaskはnull）、`last_error`はnull。
 
 `status --role <inbox|planner>`は`attention`をそのroleに宛てたものだけにする（省略時は全部）。attentionはすべてinbox宛て（`domain::ATTENTION_ROLE`、ADR-0044の決定17）で、`--role inbox`は全部、`--role planner`は空になる。`asks`はroleに関わらずopenなask（未回答でcloseされていないもの）の一覧で、各項目は`id`、`kind`、`question`（先頭200文字。切ったときは末尾に`…`）、`task_id`、`run_id`、`asked_by`、`reason_category`、`affected`、`age_secs`（登録からの秒数）、AIの推奨と確信度の`recommendation`と`confidence`（無ければnull。[ask](ask.md#aiの推奨と確信度未実装)、ADR-t451-1）と、分類コードのある`worker_question`なら`topics`（先頭が主。[ask](ask.md#worker_questionの分類コード)、ADR-t947-2。無いaskは欄ごと省く）。
 
