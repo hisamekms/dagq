@@ -27,7 +27,9 @@ pub trait PlanningStore {
     fn record_denial(&self, payload: Value) -> Result<()>;
 
     fn add(&mut self, task: NewTask) -> Result<Task>;
-    fn edit_task(&mut self, task: TaskId, edit: TaskEdit) -> Result<Task>;
+    /// `authorized` is the status the edit was authorized with; the store
+    /// refuses the edit when the task has another one in its transaction.
+    fn edit_task(&mut self, task: TaskId, edit: TaskEdit, authorized: TaskStatus) -> Result<Task>;
     fn set_goal(&mut self, task: TaskId, goal: Option<GoalId>) -> Result<Task>;
     fn set_paths(&mut self, task: TaskId, paths: Vec<String>) -> Result<Task>;
     fn set_priority(&mut self, task: TaskId, priority: Priority) -> Result<Task>;
@@ -83,8 +85,17 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
         } else {
             Capability::TaskWrite
         };
-        self.authorize_task(capability, task)?;
-        self.store.edit_task(task, edit)
+        // Authorized with the status the capability was chosen from, the
+        // one the store checks again in its transaction (ADR-t883-1).
+        self.refuse_ungranted(capability, &Resource::task(task))?;
+        self.authorize(
+            capability,
+            Resource::Task {
+                id: task,
+                status: Some(status),
+            },
+        )?;
+        self.store.edit_task(task, edit, status)
     }
 
     pub fn set_goal(&mut self, task: TaskId, goal: Option<GoalId>) -> Result<Task> {
@@ -270,6 +281,8 @@ mod tests {
         owner: Option<String>,
         denials: RefCell<Vec<Value>>,
         record_fails: bool,
+        /// The status `edit_task` was handed as the authorized one.
+        edited_as: Option<TaskStatus>,
     }
 
     fn reached(what: &str) -> anyhow::Error {
@@ -293,7 +306,8 @@ mod tests {
         fn add(&mut self, _: NewTask) -> Result<Task> {
             Err(reached("add"))
         }
-        fn edit_task(&mut self, _: TaskId, _: TaskEdit) -> Result<Task> {
+        fn edit_task(&mut self, _: TaskId, _: TaskEdit, authorized: TaskStatus) -> Result<Task> {
+            self.edited_as = Some(authorized);
             Err(reached("edit"))
         }
         fn set_goal(&mut self, _: TaskId, _: Option<GoalId>) -> Result<Task> {
@@ -629,6 +643,35 @@ mod tests {
                                  "owner": owner.filter(|o| o.contains(':'))},
                 })]
             );
+        }
+    }
+
+    /// ADR-t883-1: the store gets the status the edit was authorized
+    /// with, so it can refuse a task that moved on before its transaction.
+    #[test]
+    fn an_edit_hands_the_store_the_status_it_was_authorized_with() {
+        let verify = || TaskEdit {
+            verification_commands: Some(vec!["true".into()]),
+            ..TaskEdit::default()
+        };
+        for (actor, status) in [
+            (planner(7), TaskStatus::Ready),
+            (planner(7), TaskStatus::Draft),
+            (ActorContext::user(), TaskStatus::InProgress),
+            (
+                ActorContext::instance(ActorRole::Inbox, 1),
+                TaskStatus::InProgress,
+            ),
+        ] {
+            let mut store = Store {
+                status: Some(status),
+                ..Store::default()
+            };
+            let error = Planning::new(&mut store, &actor, &StaticPolicy)
+                .edit(TASK, verify())
+                .unwrap_err();
+            assert_eq!(error.to_string(), "store: edit", "{actor:?} {status:?}");
+            assert_eq!(store.edited_as, Some(status), "{actor:?}");
         }
     }
 

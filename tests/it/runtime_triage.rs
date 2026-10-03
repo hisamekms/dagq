@@ -225,6 +225,7 @@ fn a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited() 
                 verification_commands: Some(vec!["test -f seed.txt".into()]),
                 ..Default::default()
             },
+            dagq::domain::TaskStatus::InProgress,
         )
         .unwrap();
     queue.answer(ask.id, option).unwrap();

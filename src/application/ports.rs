@@ -75,8 +75,15 @@ pub trait TaskStore {
     fn set_paths(&mut self, task_id: TaskId, paths: Vec<String>) -> Result<Task>;
     /// Replace the given fields of a draft task (ADR-0041 decision 9),
     /// recording `task_edited` with the fields that changed; running runs
-    /// keep their prompt snapshot.
-    fn edit_task(&mut self, task_id: TaskId, edit: TaskEdit) -> Result<Task>;
+    /// keep their prompt snapshot. `authorized` is the status the caller
+    /// authorized the edit with; a task whose status differs in the
+    /// transaction is refused unchanged (ADR-t883-1).
+    fn edit_task(
+        &mut self,
+        task_id: TaskId,
+        edit: TaskEdit,
+        authorized: TaskStatus,
+    ) -> Result<Task>;
     /// Give a draft or ready task another priority (ADR-0040 decision 4);
     /// it takes effect at the next claim.
     fn set_priority(&mut self, task_id: TaskId, priority: Priority) -> Result<Task>;

@@ -230,6 +230,7 @@ impl AgentProvider for StubReviewer {
                     description: Some("edited while its review ran".into()),
                     ..TaskEdit::default()
                 },
+                dagq::domain::TaskStatus::Submitted,
             )?;
         }
         let mut verdicts = self.verdicts.lock().unwrap();
@@ -2121,6 +2122,7 @@ fn edits_before_a_review_or_to_another_proposal_leave_its_verdict_applied() {
                 description: Some("edited before its review".into()),
                 ..TaskEdit::default()
             },
+            dagq::domain::TaskStatus::Submitted,
         )
         .unwrap();
     // The first job (of `reviewed`) edits the task of `later`.
@@ -2226,6 +2228,7 @@ fn a_job_failing_after_edits_before_it_or_to_another_proposal_is_held() {
                 description: Some("edited before its review".into()),
                 ..TaskEdit::default()
             },
+            dagq::domain::TaskStatus::Submitted,
         )
         .unwrap();
     // The first job (of `reviewed`) edits the task of `later`; every job

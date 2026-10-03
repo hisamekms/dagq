@@ -1301,7 +1301,12 @@ impl TaskStore for SqliteQueue {
         Ok(result)
     }
 
-    fn edit_task(&mut self, task_id: TaskId, edit: TaskEdit) -> Result<Task> {
+    fn edit_task(
+        &mut self,
+        task_id: TaskId,
+        edit: TaskEdit,
+        authorized: TaskStatus,
+    ) -> Result<Task> {
         ensure!(!edit.is_empty(), "task edit changes nothing");
         // Checked before the task is read, so a bad value is reported first.
         edit.validate()?;
@@ -1312,6 +1317,7 @@ impl TaskStore for SqliteQueue {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let old = read_task(&tx, task_id)?;
+        task::check_status_authorized(&old, authorized)?;
         // The event keeps the fields before the edit, which consumes the task.
         let old_json = serde_json::to_value(&old)?;
         let old_mode = old.stored_worker_mode();

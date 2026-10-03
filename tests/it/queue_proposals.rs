@@ -152,6 +152,7 @@ fn submitted_tasks_wait_for_plan_review_which_readies_or_sends_them_back() {
                 acceptance: Some("sharper".into()),
                 ..TaskEdit::default()
             },
+            TaskStatus::Submitted,
         )
         .unwrap();
 

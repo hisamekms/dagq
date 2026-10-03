@@ -51,6 +51,14 @@ pub enum DomainError {
         task_id: TaskId,
         status: TaskStatus,
     },
+    /// `dagq edit` of a task whose status changed between the
+    /// authorization and the store's transaction: what the edit was allowed
+    /// to do was decided from the status it had then (ADR-t883-1).
+    TaskStatusChangedSinceAuthorized {
+        task_id: TaskId,
+        authorized: TaskStatus,
+        status: TaskStatus,
+    },
     /// A dependency of a task on itself.
     SelfDependency,
     /// The predecessor already depends on the task, directly or not, where
@@ -341,6 +349,16 @@ impl fmt::Display for DomainError {
                 f,
                 "task {task_id} is {}; only a draft or submitted task can be edited freely; an in_progress task permits only user or inbox --verify/--no-verify after its latest run ended and no live run remains",
                 status.as_str()
+            ),
+            Self::TaskStatusChangedSinceAuthorized {
+                task_id,
+                authorized,
+                status,
+            } => write!(
+                f,
+                "task {task_id} is {} now, not {} as when this edit was authorized; nothing was edited, run it again",
+                status.as_str(),
+                authorized.as_str()
             ),
             Self::SelfDependency => f.write_str("a task cannot depend on itself"),
             Self::DependencyCycle {

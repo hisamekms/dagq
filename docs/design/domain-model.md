@@ -4,8 +4,8 @@ type: design
 title: Domain model
 status: current
 created: 2026-09-21
-updated: 2026-10-03
-last_verified: 2026-10-03
+updated: 2026-10-04 # task 1247
+last_verified: 2026-10-04 # task 1247
 scope: domain
 related:
   - adr-t1394-1
@@ -293,6 +293,7 @@ domainの関数は業務上の拒否を`DomainError`（`src/domain/error.rs`）�
 | `GoalClosed` | `goal::check_accepts_tasks`（`add --goal`と`set-goal`） | goal ID、記録済みのverdict | `goal <id> is closed as <verdict>; create a new goal for further work` |
 | `GoalCloseInconsistent` | `Goal::restore` | goal ID | `goal <id> has a close time without a verdict or a verdict without a close time` |
 | `TaskNotEditable` | `task::set_goal`、`task::set_paths`、`task::set_priority`、`task::check_dependencies_editable` | 変える対象（`the goal`、`the paths`、`the priority`、`dependencies`） | `<what> can only be changed for draft, submitted or ready tasks` |
+| `TaskStatusChangedSinceAuthorized` | `task::check_status_authorized` | task ID、認可の時の status、今の status | `task <id> is <status> now, not <authorized> as when this edit was authorized; nothing was edited, run it again` |
 | `TaskContentNotEditable` | `task::edit`、`task::edit_ended_verify` | task ID、status | `task <id> is <status>; only a draft or submitted task can be edited freely; an in_progress task permits only user or inbox --verify/--no-verify after its latest run ended and no live run remains` |
 | `ReadyNeedsPlanReview` | `TaskStatus::transition`（`Ready`をdraft / submittedに） | status | `a <status> task becomes ready through plan review (submit it); pass --bypass-review to skip the review` |
 | `EmptyProposal` | `Proposal::submit`、`proposal::resubmit`、storeの`submit` | なし | `a proposal needs at least one draft task` |

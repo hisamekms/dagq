@@ -393,6 +393,20 @@ pub fn edit_ended_verify(mut task: Task, edit: TaskEdit) -> Result<Task, DomainE
     Ok(task)
 }
 
+/// `dagq edit` goes on only while `task` has the status the edit was
+/// authorized with: the capability (`task.write`, or `task.verify_edit` on
+/// an `in_progress` task) was chosen from that status, and the store reads
+/// it again in its transaction.
+pub fn check_status_authorized(task: &Task, authorized: TaskStatus) -> Result<(), DomainError> {
+    require(task.status == authorized, || {
+        DomainError::TaskStatusChangedSinceAuthorized {
+            task_id: task.id,
+            authorized,
+            status: task.status,
+        }
+    })
+}
+
 /// A task never depends on itself; checked before either task is read.
 pub fn check_not_self(task_id: TaskId, predecessor_id: TaskId) -> Result<(), DomainError> {
     require(task_id != predecessor_id, || DomainError::SelfDependency)
@@ -984,5 +998,23 @@ mod tests {
             own.validate().unwrap_err().to_string(),
             "goal dependency IDs must be positive"
         );
+    }
+
+    /// ADR-t883-1: an edit authorized on a `ready` task with `task.write`
+    /// is refused once the task is `in_progress`, where only `task.verify_edit`
+    /// lets it through; the same status goes on.
+    #[test]
+    fn an_edit_goes_on_only_with_the_status_it_was_authorized_with() {
+        let task = Task::restore(record(TaskStatus::InProgress)).unwrap();
+        assert_eq!(
+            check_status_authorized(&task, TaskStatus::Ready)
+                .unwrap_err()
+                .to_string(),
+            "task 5 is in_progress now, not ready as when this edit was authorized; nothing was edited, run it again"
+        );
+        check_status_authorized(&task, TaskStatus::InProgress).unwrap();
+        let ready = Task::restore(record(TaskStatus::Ready)).unwrap();
+        check_status_authorized(&ready, TaskStatus::Ready).unwrap();
+        assert!(check_status_authorized(&ready, TaskStatus::InProgress).is_err());
     }
 }

@@ -95,7 +95,7 @@ fn edit_task_replaces_draft_fields_and_records_the_change() {
     let task = queue.add(new_task("first title")).unwrap();
     assert_eq!(
         queue
-            .edit_task(task.id(), TaskEdit::default())
+            .edit_task(task.id(), TaskEdit::default(), TaskStatus::Draft)
             .unwrap_err()
             .to_string(),
         "task edit changes nothing"
@@ -111,6 +111,7 @@ fn edit_task_replaces_draft_fields_and_records_the_change() {
                 context: Some("why".into()),
                 ..TaskEdit::default()
             },
+            TaskStatus::Draft,
         )
         .unwrap();
     assert_eq!(edited.title(), "second title");
@@ -128,6 +129,7 @@ fn edit_task_replaces_draft_fields_and_records_the_change() {
                 title: Some("second title".into()),
                 ..TaskEdit::default()
             },
+            TaskStatus::Draft,
         )
         .unwrap();
     let edits: Vec<_> = queue
@@ -168,7 +170,8 @@ fn edit_task_replaces_draft_fields_and_records_the_change() {
                 TaskEdit {
                     paths: Some(vec!["../x".into()]),
                     ..TaskEdit::default()
-                }
+                },
+                TaskStatus::Draft
             )
             .unwrap_err()
             .to_string()
@@ -178,13 +181,17 @@ fn edit_task_replaces_draft_fields_and_records_the_change() {
         description: Some("late".into()),
         ..TaskEdit::default()
     };
-    assert!(queue.edit_task(TaskId::new(99), change()).is_err());
+    assert!(
+        queue
+            .edit_task(TaskId::new(99), change(), TaskStatus::Draft)
+            .is_err()
+    );
     queue
         .transition(task.id(), TaskAction::BypassReview)
         .unwrap();
     assert_eq!(
         queue
-            .edit_task(task.id(), change())
+            .edit_task(task.id(), change(), TaskStatus::Ready)
             .unwrap_err()
             .to_string(),
         format!(
@@ -195,7 +202,7 @@ fn edit_task_replaces_draft_fields_and_records_the_change() {
     queue.claim(&base()).unwrap();
     assert_eq!(
         queue
-            .edit_task(task.id(), change())
+            .edit_task(task.id(), change(), TaskStatus::InProgress)
             .unwrap_err()
             .to_string(),
         format!(
@@ -226,7 +233,7 @@ fn ended_run_allows_only_verify_correction_before_inherited_retry() {
     };
     assert!(
         queue
-            .edit_task(task.id(), edit())
+            .edit_task(task.id(), edit(), TaskStatus::InProgress)
             .unwrap_err()
             .to_string()
             .contains("no live run remains")
@@ -243,7 +250,9 @@ fn ended_run_allows_only_verify_correction_before_inherited_retry() {
     )
     .unwrap();
     assert!(
-        queue.edit_task(task.id(), edit()).is_err(),
+        queue
+            .edit_task(task.id(), edit(), TaskStatus::InProgress)
+            .is_err(),
         "the ended run still has a lease"
     );
     conn.execute(
@@ -262,7 +271,12 @@ fn ended_run_allows_only_verify_correction_before_inherited_retry() {
             rusqlite::params![status, run.id().as_str()],
         )
         .unwrap();
-        assert!(queue.edit_task(task.id(), edit()).is_err(), "{status}");
+        assert!(
+            queue
+                .edit_task(task.id(), edit(), TaskStatus::InProgress)
+                .is_err(),
+            "{status}"
+        );
     }
     conn.execute(
         "UPDATE task_runs SET status='failed' WHERE id=?1",
@@ -276,11 +290,14 @@ fn ended_run_allows_only_verify_correction_before_inherited_retry() {
                 TaskEdit {
                     paths: Some(vec!["src/**".into()]),
                     ..TaskEdit::default()
-                }
+                },
+                TaskStatus::InProgress
             )
             .is_err()
     );
-    let edited = queue.edit_task(task.id(), edit()).unwrap();
+    let edited = queue
+        .edit_task(task.id(), edit(), TaskStatus::InProgress)
+        .unwrap();
     assert_eq!(edited.verification_commands(), ["python3.11 check.py"]);
     let event = queue
         .show(task.id())
@@ -304,6 +321,7 @@ fn ended_run_allows_only_verify_correction_before_inherited_retry() {
                 verification_commands: Some(vec![]),
                 ..TaskEdit::default()
             },
+            TaskStatus::InProgress,
         )
         .unwrap();
     assert!(
@@ -314,6 +332,63 @@ fn ended_run_allows_only_verify_correction_before_inherited_retry() {
             .verification_commands()
             .is_empty()
     );
+}
+
+/// ADR-t883-1: an edit authorized while the task was `ready` (`task.write`)
+/// is refused when the store finds it `in_progress` with a failed run, where
+/// only `task.verify_edit` would let it through; the task and its events stay
+/// as they were. Authorized with the status it has, the same edit goes on.
+#[test]
+fn an_edit_authorized_on_another_status_changes_nothing() {
+    let (dir, mut queue) = fixture();
+    let task = queue.add(new_task("claimed in between")).unwrap();
+    queue
+        .transition(task.id(), TaskAction::BypassReview)
+        .unwrap();
+    let run = match queue.claim(&base()).unwrap() {
+        ClaimOutcome::Claimed { run } => run,
+        other => panic!("unexpected claim: {other:?}"),
+    };
+    Connection::open(dir.path().join("queue.db"))
+        .unwrap()
+        .execute(
+            "UPDATE task_runs SET status='failed' WHERE id=?1",
+            [run.id().as_str()],
+        )
+        .unwrap();
+    let edit = || TaskEdit {
+        verification_commands: Some(vec!["python3.11 check.py".into()]),
+        ..TaskEdit::default()
+    };
+    assert_eq!(
+        queue
+            .edit_task(task.id(), edit(), TaskStatus::Ready)
+            .unwrap_err()
+            .to_string(),
+        format!(
+            "task {} is in_progress now, not ready as when this edit was authorized; nothing was edited, run it again",
+            task.id()
+        )
+    );
+    let edited_events = |queue: &mut dagq::infrastructure::sqlite::SqliteQueue| {
+        queue
+            .show(task.id())
+            .unwrap()
+            .events
+            .into_iter()
+            .filter(|e| e.kind == "task_edited")
+            .count()
+    };
+    assert_eq!(edited_events(&mut queue), 0);
+    assert_eq!(
+        queue.show(task.id()).unwrap().task.verification_commands(),
+        ["cargo test"]
+    );
+    let edited = queue
+        .edit_task(task.id(), edit(), TaskStatus::InProgress)
+        .unwrap();
+    assert_eq!(edited.verification_commands(), ["python3.11 check.py"]);
+    assert_eq!(edited_events(&mut queue), 1);
 }
 
 /// `add` stores the priority and `set_priority` changes it on a draft or

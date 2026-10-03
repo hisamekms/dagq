@@ -31,8 +31,8 @@ impl PlanningStore for SqliteQueue {
         TaskStore::add(self, task)
     }
 
-    fn edit_task(&mut self, task: TaskId, edit: TaskEdit) -> Result<Task> {
-        TaskStore::edit_task(self, task, edit)
+    fn edit_task(&mut self, task: TaskId, edit: TaskEdit, authorized: TaskStatus) -> Result<Task> {
+        TaskStore::edit_task(self, task, edit, authorized)
     }
 
     fn set_goal(&mut self, task: TaskId, goal: Option<GoalId>) -> Result<Task> {

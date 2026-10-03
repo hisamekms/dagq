@@ -114,6 +114,7 @@ fn search_finds_every_kind_in_every_status_and_follows_edits() {
                 description: Some("SQLite の索引を使う".into()),
                 ..TaskEdit::default()
             },
+            dagq::domain::TaskStatus::Draft,
         )
         .unwrap();
     assert!(search(&queue, "trigram", |_| {}).is_empty());
