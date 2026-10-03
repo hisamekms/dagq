@@ -281,6 +281,7 @@ pub const DAGQ_COMMANDS: &[(&str, &[Capability])] = &[
     ("run send", &[C::ScreenSend]),
     ("planner screen", &[C::ScreenRead]),
     ("planner send", &[C::ScreenSend]),
+    ("planner request", &[C::PlannerRequest]),
     ("add", &[C::TaskWrite]),
     ("draft", &[C::TaskWrite]),
     ("edit", &[C::TaskWrite]),

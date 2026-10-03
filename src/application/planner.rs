@@ -694,6 +694,14 @@ pub fn planner_view(probes: &PlannerProbes<'_>, planner: PlannerSession) -> Resu
         probe.wrapper_alive = planner
             .wrapper_pid
             .is_some_and(|pid| probes.processes.alive(pid));
+        let waiting = planner.route == PlannerRoute::Headless
+            && match probes.files.read_dir(&turns_dir(&dir)) {
+                Ok(paths) => {
+                    !turn::pending(paths.iter().filter_map(|path| path.file_name()?.to_str()))
+                        .is_empty()
+                }
+                Err(_) => false,
+            };
         let marker_path = planner_idle_marker(&dir);
         let opened = UNIX_EPOCH + Duration::from_secs(u64::try_from(planner.created_at)?);
         let last_input = screen_idle::last_input(probes.files, &marker_path, opened);
@@ -708,9 +716,14 @@ pub fn planner_view(probes: &PlannerProbes<'_>, planner: PlannerSession) -> Resu
         if planner.route == PlannerRoute::Headless {
             // A headless planner has no screen (ADR-t1394-2 decision 3):
             // it is idle once the marker its wrapper wrote at the end of a
-            // turn is newer than the last request written to it, and at
-            // work until then. Its wrapper ends what a turn left running.
-            probe.idle = marker.ok().map(|idle| IdleProbe {
+            // turn is newer than the last input stamped for it and no
+            // request waits in its `turns/`, and at work until then (a
+            // request written while a turn ran, such as `planner request`'s,
+            // waits for the next turn; the wrapper stamps the input as it
+            // takes one, before it leaves `turns/`, which is why `turns/` is
+            // read before the marker). Its wrapper ends what a turn left
+            // running.
+            probe.idle = marker.ok().filter(|_| !waiting).map(|idle| IdleProbe {
                 background_running: false,
                 ..idle
             });

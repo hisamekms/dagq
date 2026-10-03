@@ -962,7 +962,9 @@ enum Command {
     },
     /// A planner's session, named by its planner id: read its screen, or
     /// send it a key of a fixed set or the answer of an answered
-    /// `planner_question` (ADR-t1228-1). Each is recorded with its actor.
+    /// `planner_question` (ADR-t1228-1); or hand a headless planner of the
+    /// runtime's a follow-up request as its next turn (ADR-t1533-1). Each
+    /// is recorded with its actor.
     Planner {
         #[command(subcommand)]
         command: PlannerCommand,
@@ -1606,7 +1608,8 @@ enum RunCommand {
 #[derive(Subcommand, Clone)]
 enum PlannerCommand {
     /// Print the last lines of the screen of the planner's session (at
-    /// most 200), recorded as `screen_read` without its text.
+    /// most 200), recorded as `screen_read` without its text. A headless
+    /// planner has none: where its turns are is printed instead.
     Screen {
         planner: i64,
         /// How many lines, from the bottom; more than 200 is cut to 200.
@@ -1619,7 +1622,8 @@ enum PlannerCommand {
     /// Type into the planner's session one or more keys of the set (enter,
     /// escape, up, down, 1-9, or exit alone for `/exit`), or the answer of
     /// an answered `planner_question` that goes to this planner; no other
-    /// text. Recorded as `screen_input_sent`.
+    /// text. Recorded as `screen_input_sent`. A headless planner is
+    /// refused: the supervisor delivers its answers as turns.
     Send {
         planner: i64,
         /// A key to send; repeat for several, sent in order.
@@ -1629,6 +1633,26 @@ enum PlannerCommand {
         #[arg(long)]
         answer: Option<i64>,
         /// cmux executable.
+        #[arg(long, default_value = "cmux")]
+        cmux: PathBuf,
+    },
+    /// Hand a follow-up request to an open headless planner of the
+    /// runtime's (only the inbox, at a person's word, and a person at a
+    /// plain terminal): the words are written under the planner's
+    /// directory and the fixed sentence pointing at them becomes its next
+    /// turn, taken after a turn at work. Refused for an interactive or a
+    /// person's planner, and one closed, lost, exited or asked to exit.
+    /// Recorded as `planner_request_handed`. A new plan is `request add`.
+    #[command(group = clap::ArgGroup::new("words").required(true))]
+    Request {
+        planner: i64,
+        /// The person's own words, not a summary.
+        #[arg(long, group = "words")]
+        text: Option<String>,
+        /// A file holding the person's own words.
+        #[arg(long, group = "words")]
+        file: Option<PathBuf>,
+        /// cmux executable, used to judge whether the planner is alive.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
     },
@@ -2028,6 +2052,9 @@ fn operation(command: &Command, env: impl Fn(&str) -> Option<String>) -> Option<
             }
             PlannerCommand::Send { planner, .. } => {
                 Operation::SendToScreen(Resource::Planner(PlannerId::new(*planner)))
+            }
+            PlannerCommand::Request { planner, .. } => {
+                Operation::RequestPlanner(PlannerId::new(*planner))
             }
         },
         // The span the hook would record decides; a session with none is
@@ -3713,6 +3740,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     &Cmux {
                         executable: executable(&cmux)?,
                     },
+                    &dagq::infrastructure::location::planners_dir(&db),
                     PlannerId::new(planner),
                     lines,
                 )?,
@@ -3735,6 +3763,31 @@ fn execute(cli: Cli) -> Result<Value> {
                         },
                         PlannerId::new(planner),
                         &sending,
+                    )?
+                }
+                PlannerCommand::Request {
+                    planner,
+                    text,
+                    file,
+                    cmux,
+                } => {
+                    let words = match (text, file) {
+                        (Some(text), _) => text,
+                        (None, Some(file)) => {
+                            let file = cwd.join(file);
+                            std::fs::read_to_string(&file)
+                                .with_context(|| format!("read {}", file.display()))?
+                        }
+                        (None, None) => unreachable!("clap requires --text or --file"),
+                    };
+                    one_shot.request_planner(
+                        &mut queue,
+                        &db,
+                        &Cmux {
+                            executable: executable(&cmux)?,
+                        },
+                        PlannerId::new(planner),
+                        &words,
                     )?
                 }
             }
@@ -4313,6 +4366,7 @@ mod tests {
             ("run send", &["1", "--key", "enter"]),
             ("planner screen", &["1"]),
             ("planner send", &["1", "--answer", "2"]),
+            ("planner request", &["1", "--text", "t"]),
             ("add", &["t"]),
             ("draft", &["1"]),
             ("edit", &["1", "--title", "t"]),

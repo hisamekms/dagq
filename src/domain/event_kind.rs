@@ -156,6 +156,7 @@ event_kinds! {
     PlannerAnswerClosed => "planner_answer_closed",
     PlannerClosed => "planner_closed",
     PlannerReleased => "planner_released",
+    PlannerRequestHanded => "planner_request_handed",
     PlannerUnresponsive => "planner_unresponsive",
     PromptCleared => "prompt_cleared",
     PromptWaiting => "prompt_waiting",
@@ -357,6 +358,9 @@ impl EventKind {
                 // (ADR-t1228-1 decisions 4 and 5).
                 | ScreenRead
                 | ScreenInputSent
+                // A follow-up request a person or the inbox handed to a
+                // headless planner of the runtime's (ADR-t1533-1).
+                | PlannerRequestHanded
                 // A planner of the runtime's nothing was seen of within the
                 // planner timeout (task 805); the revise's is on its
                 // proposal's task.
@@ -963,6 +967,7 @@ mod tests {
             (EventKind::PlannerAnswerClosed, "planner_answer_closed"),
             (EventKind::PlannerClosed, "planner_closed"),
             (EventKind::PlannerReleased, "planner_released"),
+            (EventKind::PlannerRequestHanded, "planner_request_handed"),
             (EventKind::PlannerUnresponsive, "planner_unresponsive"),
             (EventKind::PromptCleared, "prompt_cleared"),
             (EventKind::PromptWaiting, "prompt_waiting"),

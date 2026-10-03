@@ -29,6 +29,7 @@ mod memory_files;
 pub mod naming;
 pub mod planner;
 pub mod planner_handoff;
+pub mod planner_request;
 mod ports;
 pub mod prompt;
 pub mod push;

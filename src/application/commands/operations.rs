@@ -9,7 +9,8 @@
 //! queue at a person's word, the supervisor what it starts for itself; the
 //! workers, the four jobs and the observer none of them but a worker's
 //! own session; `run screen` / `send` and `planner screen` / `send`
-//! (ADR-t1228-1) are the user's and the inbox's alone. The operations themselves stay where they are; this is
+//! (ADR-t1228-1) and `planner request` (ADR-t1533-1) are the user's and
+//! the inbox's alone. The operations themselves stay where they are; this is
 //! their entry. The policy is the [`crate::domain::StaticPolicy`]'s
 //! (`docs/design/authorization.md`).
 
@@ -74,6 +75,9 @@ pub enum Operation {
     /// `run send` and `planner send` (ADR-t1228-1 decision 5), on what it
     /// names as for [`Self::ReadScreen`].
     SendToScreen(Resource),
+    /// `planner request`: a follow-up request handed to the headless
+    /// planner it names as its next turn (ADR-t1533-1).
+    RequestPlanner(PlannerId),
 }
 
 /// What `run close-workspaces` names.
@@ -119,6 +123,7 @@ impl Operation {
             Self::PlannerSession(planner) => (C::SessionRun, Resource::Planner(*planner)),
             Self::ReadScreen(resource) => (C::ScreenRead, resource.clone()),
             Self::SendToScreen(resource) => (C::ScreenSend, resource.clone()),
+            Self::RequestPlanner(planner) => (C::PlannerRequest, Resource::Planner(*planner)),
             Self::SessionEvent(session) => (
                 C::SessionRecord,
                 match session {
@@ -192,7 +197,8 @@ mod tests {
         ]
     }
 
-    /// A session's screen read and sent to, by its run, task or planner.
+    /// A session's screen read and sent to, by its run, task or planner,
+    /// and a follow-up request handed to a planner.
     fn screen_operations() -> Vec<Operation> {
         let mut all = Vec::new();
         for resource in [
@@ -204,11 +210,12 @@ mod tests {
             all.push(Operation::ReadScreen(resource.clone()));
             all.push(Operation::SendToScreen(resource));
         }
+        all.push(Operation::RequestPlanner(PlannerId::new(7)));
         all
     }
 
     #[test]
-    fn only_the_user_and_the_inbox_read_and_send_to_a_sessions_screen() {
+    fn only_the_user_and_the_inbox_read_and_send_to_a_session_or_hand_a_planner_a_request() {
         for actor in [
             ActorContext::user(),
             ActorContext::instance(ActorRole::Inbox, "inbox"),
@@ -240,6 +247,13 @@ mod tests {
         assert_eq!(
             Operation::SendToScreen(Resource::Planner(PlannerId::new(7))).request(),
             (Capability::ScreenSend, Resource::Planner(PlannerId::new(7)))
+        );
+        assert_eq!(
+            Operation::RequestPlanner(PlannerId::new(7)).request(),
+            (
+                Capability::PlannerRequest,
+                Resource::Planner(PlannerId::new(7))
+            )
         );
     }
 

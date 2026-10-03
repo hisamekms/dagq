@@ -484,6 +484,19 @@ impl<'a> Turns<'a> {
                 let path = request_path(run_dir, seq);
                 let request: TurnRequest = serde_json::from_str(&self.files.read_to_string(&path)?)
                     .with_context(|| format!("read request {}", path.display()))?;
+                // Stamped before it is taken: a planner's idle marker of the
+                // turn before is no idle with this one (a request written
+                // while that turn ran), not even between the two.
+                if matches!(self.owner, TurnOwner::Planner { .. })
+                    && let Err(error) = super::screen_idle::record_supervisor_input(
+                        self.files,
+                        &super::planner_idle_marker(run_dir),
+                    )
+                {
+                    tracing::warn!(
+                        "the input stamp of request {seq} could not be written: {error}"
+                    );
+                }
                 self.files.rename(&path, &taken_path(run_dir, seq))?;
                 return Ok(Some(request));
             }

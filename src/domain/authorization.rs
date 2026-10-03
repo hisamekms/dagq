@@ -64,6 +64,9 @@ string_enum!(Capability {
     // its run or planner id (ADR-t1228-1 decisions 4 and 5).
     ScreenRead => "screen.read",
     ScreenSend => "screen.send",
+    // A follow-up request handed to a headless planner of the runtime's
+    // as its next turn, by its planner id (ADR-t1533-1).
+    PlannerRequest => "planner.request",
     // Scheduler transitions and the service.
     Supervise => "scheduler.supervise",
     RunRecover => "run.recover",
@@ -84,7 +87,7 @@ string_enum!(Capability {
 });
 
 impl Capability {
-    pub const ALL: [Self; 47] = [
+    pub const ALL: [Self; 48] = [
         Self::QueueRead,
         Self::QueueWatch,
         Self::ExportFile,
@@ -119,6 +122,7 @@ impl Capability {
         Self::RequestDecline,
         Self::ScreenRead,
         Self::ScreenSend,
+        Self::PlannerRequest,
         Self::Supervise,
         Self::RunRecover,
         Self::WorkspaceCleanup,
@@ -358,6 +362,7 @@ const USER: &[Capability] = &[
     C::RequestRecord,
     C::ScreenRead,
     C::ScreenSend,
+    C::PlannerRequest,
     C::Supervise,
     C::RunRecover,
     C::WorkspaceCleanup,

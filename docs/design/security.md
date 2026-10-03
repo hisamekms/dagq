@@ -11,6 +11,7 @@ tags:
   - security
 related:
   - adr-t728-1
+  - adr-t1533-1
   - adr-t1394-1
   - adr-t728-2
   - adr-t728-3
@@ -66,6 +67,7 @@ AI actorの出力は全てデータで、制御側が決定的に遷移へ写す
 - user・inboxの計画権限には、最新runが終了し生きているrunの無い`in_progress` taskの`--verify` / `--no-verify`だけを直す`task.verify_edit`も含む（ADR-t883-1）。planner・worker・jobは持たない。
 - plannerの行は[ADR-t728-1](../adr/2026-09-27-t728-1-trust-domains-actors-and-default-deny-capability-authorization.md)の決定7のとおり、この段で運用の権限を変えていない（`dagq-planner` skillの「Where your authority ends」はこの行と一致させる。規則は[文書の規則](../development/documents.md)の「権限の表を写す文書」）
 - sessionの画面を読む・送る`screen.read`・`screen.send`（`run screen` / `run send`、`planner screen` / `planner send`。[ADR-t1228-1](../adr/2026-10-02-t1228-1-inbox-and-planner-reach-sessions-through-the-dagq-cli.md)の決定7）はuserとinboxだけが持つ。表のsessionの列のplannerの△とsupervisorの○はこれを含まない（plannerは自分のplannerのものも拒まれ、supervisorは自分の送信の経路を使う）
+- 開いている非対話のruntimeのplannerへの続きの依頼の`planner.request`（`planner request`。[ADR-t1533-1](../adr/2026-10-03-t1533-1-follow-up-requests-go-to-headless-planners-by-planner-id-and-no-planner-close.md)）はuserとinboxだけが持つ。表のsessionの列はこれも含まない（plannerは自分のplannerへのものも拒まれる）。plannerを閉じるCLIは無い
 - 計画の依頼の`request.record`（`request add`）はuserとinboxだけが持ち（inboxの記録は人の言葉の代行、[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)の決定3）、`request.decline`（`request decline`）はplannerだけが、自分が立てられた依頼にだけ持つ（決定6）。拒否は`authorization_denied`に残る
 - 予約のcapability（`reserved.filesystem_read`・`reserved.filesystem_write`・`reserved.network`・`reserved.secret_read`）は誰にも与えない。sandboxのbackendが強制するときの名前
 
@@ -84,7 +86,7 @@ AI actorの出力は全てデータで、制御側が決定的に遷移へ写す
 roleごとに拒まれる主なコマンド（skillとAGENTS.mdはこれを説明する）:
 
 - worker: `integrate`・`answer`・`ask close`・`ready`・`cancel`・計画系の全て・`request add`・`request decline`・`recover`・`review`・`supervise`・`observe`・`plan`・`up`・`down`・`install`・`auto-update`・`init`・`migrate`・`rebind`・`finding`・`mark`、自分のrun以外への`ask`・`note`・`session`・`session-event`
-- planner: `ready`（`--bypass-review`を含む）・`goal ready`・`goal review`・`request add`・他の依頼の`request decline`・`integrate`・`review`・`recover`・`supervise`・`observe`・`answer`・`ask close`・`finding record`・`run screen`・`run send`・`planner screen`・`planner send`、runの`session`・`session-event`、runに紐づく`ask`、in_progress以降のtaskの変更、他のplannerのproposalの取り下げ
+- planner: `ready`（`--bypass-review`を含む）・`goal ready`・`goal review`・`request add`・他の依頼の`request decline`・`integrate`・`review`・`recover`・`supervise`・`observe`・`answer`・`ask close`・`finding record`・`run screen`・`run send`・`planner screen`・`planner send`・`planner request`、runの`session`・`session-event`、runに紐づく`ask`、in_progress以降のtaskの変更、他のplannerのproposalの取り下げ
 - 4つのjob: 状態を変える全て（`reviewer may not change queue state`）
 - observer: `finding record`・`finding resolve`・findingに紐づく`blocked`のask以外の全て（`observer may not change queue state`）
 - inbox: 人（user）と同じで、拒まれるのは誰にも与えない着地の実行・pushと予約だけ

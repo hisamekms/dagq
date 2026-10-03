@@ -6,18 +6,23 @@
 //! of an answered ask about that session, never free text. The target is
 //! named by its run (or task) or planner id and its workspace is looked up
 //! in the queue. Each read and each send is recorded with its actor
-//! (`screen_read`, `screen_input_sent`), without the screen's text. The
+//! (`screen_read`, `screen_input_sent`), without the screen's text. A
+//! headless run or planner has no screen: a read says where its turns are
+//! and a send is refused (ADR-t1228-1 decision 4, ADR-t1533-1). The
 //! caller authorizes the command first (`screen.read`, `screen.send`;
 //! `docs/design/authorization.md`).
+
+use std::path::Path;
 
 use anyhow::{Result, bail, ensure};
 use serde_json::{Value, json};
 
+use super::planner::planner_dir;
 use super::supervise::{Input, Submission, submit_input};
 use super::{AgentSignals, PlannerAnswerRoute, Queue, WorkspaceBackend};
 use crate::domain::{
-    AskId, AskKind, EventKind, PlannerId, PlannerSession, Resource, RunId, TaskId, TaskRun,
-    worker::WorkerMode,
+    AskId, AskKind, EventKind, PlannerId, PlannerRoute, PlannerSession, Resource, RunId, TaskId,
+    TaskRun, turn::turns_dir, worker::WorkerMode,
 };
 
 /// The lines a read returns when the caller names no number.
@@ -252,14 +257,26 @@ pub fn run_screen(
     Ok(output)
 }
 
-/// `planner screen`: the screen of `planner`'s session.
+/// `planner screen`: the screen of `planner`'s session. A headless planner
+/// has none; the reply says where its turns are instead (`turns/` of its
+/// directory under `planners_dir`), and nothing is read or recorded.
 pub fn planner_screen(
     queue: &mut dyn Queue,
     cmux: &dyn WorkspaceBackend,
+    planners_dir: &Path,
     planner: PlannerId,
     lines: usize,
 ) -> Result<Value> {
     let session = queue.planner(planner)?;
+    if session.route == PlannerRoute::Headless {
+        return Ok(json!({
+            "planner_id": planner,
+            "route": session.route,
+            "screen": null,
+            "reason": "a headless planner has no screen",
+            "turns": turns_dir(&planner_dir(planners_dir, planner)).display().to_string(),
+        }));
+    }
     let workspace = planner_workspace(&session)?;
     let (mut output, mut record) = read(cmux, &workspace, lines)?;
     record["target"] = json!("planner");
@@ -368,7 +385,7 @@ pub fn run_send(
 
 /// `planner send`: type `sending` into `planner`'s session. An answer must
 /// be of an answered `planner_question` whose answer goes to that planner,
-/// typed as the supervisor types it.
+/// typed as the supervisor types it. A headless planner takes nothing.
 pub fn planner_send(
     queue: &mut dyn Queue,
     ports: &ScreenPorts<'_>,
@@ -376,6 +393,10 @@ pub fn planner_send(
     sending: &Sending,
 ) -> Result<Value> {
     let session = queue.planner(planner)?;
+    ensure!(
+        session.route != PlannerRoute::Headless,
+        "planner {planner} is headless: its session has no screen and takes no keys (the supervisor delivers the answer of its question as its next turn; hand it a follow-up with `planner request`)"
+    );
     let workspace = planner_workspace(&session)?;
     let sent = match sending {
         Sending::Keys(keys) => send_keys(ports, &workspace, keys)?,

@@ -23,6 +23,7 @@ mod cli_graph;
 mod cli_install_release;
 mod cli_kpi;
 mod cli_operations;
+mod cli_planner_request;
 mod cli_proposals;
 mod cli_read;
 mod cli_roles;

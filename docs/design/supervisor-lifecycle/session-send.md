@@ -11,6 +11,7 @@ related:
   - design-supervisor-lifecycle
   - design-authorization
   - adr-t1228-1
+  - adr-t1533-1
 ---
 
 # sessionへの送信と確認
@@ -40,4 +41,4 @@ task 285。supervisorが生きているsessionに打つもの（resumeの解消�
 - 記録: 読むと`screen_read`、送ると`screen_input_sent`を残す。runはそのrunのevent、plannerはqueueのevent（`planner_id`）で、どちらもeventのactor（呼び出し元のroleとid）を持つ。payloadは`target`（`run` / `planner`）・`workspace_id`と、読み取りは行数、送信は`input`（`keys` / `answer`）・`keys`か`ask_id`・`outcome`（キーは`sent`、打った文と`/exit`は`submitted` / `dialog` / `stuck` / `unsent`）・`retries`。画面の中身はeventに載せない。どちらもattentionにはしない
 - 判定: capabilityは`screen.read`・`screen.send`で、userとinboxだけが持つ（[Authorization](../authorization.md)）。`Operation`の入口で判定し、拒めば`authorization_denied`を残す。読むこともeventを残すので、どちらも状態を変えるコマンドとしてqueueを書き込みで開く（本番queueでは固定バイナリで打つ）
 - 送信の判定（`AgentSignals`）はClaude Codeの画面のもの（`ClaudeCode`）を使う。画面を持つsessionはClaude Codeだけのため
-- 非対話のruntimeのplanner（`route: headless`）には、supervisorはこの文書の送信と確認を使わない。reviseの指摘・`planner_question`のanswer・Claudeが使えなかったturnの続き（`provider retry`）・終了は、`Supervisor::send_to_planner`が次のturnの依頼と終了の依頼としてplannerのディレクトリの`turns/`に置く（[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)、ADR-t1394-2決定2）。`planner screen` / `planner send`の非対話の扱い（画面が無いことを返す・送信を拒む）はtask 1533が足す
+- 非対話のruntimeのplanner（`route: headless`）には、supervisorはこの文書の送信と確認を使わない。reviseの指摘・`planner_question`のanswer・Claudeが使えなかったturnの続き（`provider retry`）・終了は、`Supervisor::send_to_planner`が次のturnの依頼と終了の依頼としてplannerのディレクトリの`turns/`に置く（[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)、ADR-t1394-2決定2）。非対話のplannerには`planner screen`が画面を読まず`screen: null`とplannerのディレクトリの`turns/`の場所を返し（`screen_read`は残さない）、`planner send`は`--key`も`--answer`も拒む（[ADR-t1533-1](../../adr/2026-10-03-t1533-1-follow-up-requests-go-to-headless-planners-by-planner-id-and-no-planner-close.md)）。人の言葉を足す続きの依頼は、cmuxでの送信でなく`planner request`が次のturnの依頼として置き、対話のplannerには拒む（[続きの依頼と非対話のplannerのCLI](plan-planners.md#続きの依頼と非対話のplannerのcli)）

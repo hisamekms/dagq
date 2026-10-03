@@ -2139,6 +2139,38 @@ same in one step",
         Ok(serde_json::json!({ "planners": views }))
     }
 
+    /// `planner request ID`: hand `words` to the headless planner `planner`
+    /// of `queue` (at `db`) as its next turn, the planner judged as
+    /// [`Self::planners_of`] judges it ([`planner_request::request_planner`]).
+    pub fn request_planner(
+        &self,
+        queue: &mut SqliteQueue,
+        db: &Path,
+        cmux: &dyn WorkspaceBackend,
+        planner: PlannerId,
+        words: &str,
+    ) -> Result<Value> {
+        let signals = ClaudeCode {
+            executable: PathBuf::from("claude"),
+        };
+        let stall = match bound_checkout(queue) {
+            Ok(Some(checkout)) => load_stall_config(&checkout).ok().flatten(),
+            _ => None,
+        }
+        .unwrap_or_default();
+        let probes = PlannerProbes {
+            cmux,
+            processes: &SystemProcesses,
+            files: &LocalRunFiles,
+            signals: &signals,
+            clock: &*self.generators.clock,
+            planners_dir: &planners_dir(db),
+            screen_idle_threshold: stall.screen_idle(),
+            screen_idle: crate::application::screen_idle::ScreenIdle::Peek,
+        };
+        crate::application::planner_request::request_planner(queue, &probes, planner, words)
+    }
+
     /// The queue at a path, as `up` and `down` open it, writing through
     /// these generators.
     fn queues(&self, db: &Path) -> Arc<dyn QueueOpener> {

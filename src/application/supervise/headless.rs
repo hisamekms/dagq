@@ -62,11 +62,50 @@ pub(super) fn request_turn(
     Ok(Submission::Queued)
 }
 
+/// The lock next to a headless session's `turns/` that the writers of its
+/// requests take: the supervisor and `planner request` (ADR-t1533-1) may
+/// write one at the same time, and each must get its own number.
+const REQUESTS_LOCK: &str = "turns.lock";
+
+/// How many times, a few milliseconds apart, a writer tries for the lock
+/// another writer holds.
+const REQUESTS_LOCK_TRIES: u32 = 200;
+
+/// Take the lock `path` ([`RunFiles::try_lock`]), trying again a few
+/// milliseconds apart while another writer holds it, for at most about two
+/// seconds.
+pub(crate) fn lock_waiting(
+    files: &dyn RunFiles,
+    path: &Path,
+) -> Result<Box<dyn std::any::Any + Send>> {
+    let mut tries = 0;
+    loop {
+        if let Some(guard) = files.try_lock(path)? {
+            return Ok(guard);
+        }
+        tries += 1;
+        ensure!(
+            tries < REQUESTS_LOCK_TRIES,
+            "another writer holds {} too long",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Write `text` as the next request (`what`) of the headless session whose
 /// directory is `dir` (its `turns/` made); the request's sequence number.
-fn write_request(files: &dyn RunFiles, dir: &Path, text: &str, what: &str) -> Result<u64> {
+/// Requests are taken in the order of their numbers, so one written while
+/// a turn runs is taken after it.
+pub(crate) fn write_request(
+    files: &dyn RunFiles,
+    dir: &Path,
+    text: &str,
+    what: &str,
+) -> Result<u64> {
     let turns = turns_dir(dir);
     files.create_dir_all(&turns)?;
+    let _guard = lock_waiting(files, &dir.join(REQUESTS_LOCK))?;
     let names: Vec<String> = files
         .read_dir(&turns)?
         .iter()
@@ -300,7 +339,7 @@ pub(super) fn alert_at_once(mark: Option<TurnMark>) -> Option<&'static str> {
 /// usage limit was hit, or its agent did not start): the failure, which
 /// moves the run to the other provider or holds it for a person rather
 /// than a nudge (ADR-t813-2).
-pub(super) fn provider_failure(mark: Option<TurnMark>) -> Option<TurnFailure> {
+pub(crate) fn provider_failure(mark: Option<TurnMark>) -> Option<TurnFailure> {
     mark.filter(|mark| mark.outcome == TurnOutcome::Failed)
         .and_then(|mark| mark.failure)
         .filter(|failure| {

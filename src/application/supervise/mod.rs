@@ -154,6 +154,7 @@ pub(crate) use self::deliver::{Input, Submission, submit_input};
 pub use self::e2e::RunE2ePort;
 pub use self::forecast::{FORECAST_CHECK, ForecastPort};
 pub use self::handoff::SUPERVISOR_HANDED_OFF;
+pub(crate) use self::headless::{lock_waiting, provider_failure, write_request};
 pub use self::host_metrics::HostMetricsPort;
 pub use self::queue_service::{
     QUEUE_SERVICE_INTERVAL, QUEUE_SERVICE_RESTART_WINDOW, QUEUE_SERVICE_RESTARTS,
