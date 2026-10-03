@@ -11,10 +11,11 @@ use anyhow::Result;
 use dagq::{
     VERSION,
     application::{ProcessControl, WorkspaceBackend, WorkspaceTags},
-    domain::{SessionRole, SupervisorMode},
+    domain::{SessionRole, SupervisorMode, recovery::ProcessInfo},
     infrastructure::sqlite::SqliteQueue,
     lifecycle::{self, DownOptions},
 };
+use rusqlite::Connection;
 use serde_json::json;
 use std::{
     sync::atomic::{AtomicUsize, Ordering},
@@ -254,6 +255,136 @@ fn down_reports_not_running_without_a_live_registration_and_still_unloads_the_ag
     assert_eq!(stops[0].payload["supervisor"], "dead");
     assert_eq!(stops[0].payload["outcome"], "pruned");
     assert!(stops[0].payload["last_heartbeat_at"].is_i64(), "{stops:?}");
+}
+
+/// A stale row with a reused pid is removed without signalling that pid,
+/// including under --force. A silent real supervisor and a recently
+/// heartbeating one are still stopped.
+#[test]
+fn down_prunes_reused_pids_without_signalling_them() {
+    for force in [false, true] {
+        let fixture = fixture();
+        let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
+        let (foreign, younger, silent, fresh) = (4_100_001, 4_100_002, 4_100_003, 4_100_004);
+        for (token, pid) in [
+            ("foreign", foreign),
+            ("younger", younger),
+            ("silent", silent),
+            ("fresh", fresh),
+        ] {
+            queue
+                .register_supervisor(&LeaseToken::new(token), pid, 1, VERSION)
+                .unwrap();
+        }
+        let cmux = FakeCmux::default();
+        let workspace = cmux
+            .create_named(
+                "[my repo]supervisor",
+                &fixture.repo,
+                "supervise",
+                &WorkspaceTags::default(),
+            )
+            .unwrap();
+        queue
+            .set_supervisor_mode(
+                &LeaseToken::new("foreign"),
+                SupervisorMode::InCmux,
+                Some(&workspace),
+            )
+            .unwrap();
+        let registered_at = 1_700_000_000;
+        Connection::open(&fixture.location.db)
+            .unwrap()
+            .execute(
+                "UPDATE supervisors SET started_at=?1, heartbeat_at=?1 WHERE token!='fresh'",
+                [registered_at],
+            )
+            .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let listed = |pid, elapsed_secs| ProcessInfo {
+            pid,
+            ppid: 1,
+            elapsed_secs,
+            command: "dagq supervise".into(),
+            cwd: None,
+            cpu_ms: None,
+        };
+        let processes = FakeProcesses::default();
+        *processes.listed.lock().unwrap() = Some(vec![
+            listed(younger, 60),
+            listed(silent, now - registered_at as u64 + 60),
+        ]);
+        let launchd = FakeLaunchd::new(&fixture.location.db);
+        let report = down(&fixture, &cmux, &launchd, &processes, false, force);
+        assert_eq!(
+            report["outcome"],
+            if force { "killed" } else { "draining" },
+            "{report}"
+        );
+        assert_eq!(report["pids"], json!([silent, fresh]), "{report}");
+        assert_eq!(
+            report["pruned_supervisors"],
+            json!([
+                {"token": "foreign", "pid": foreign, "reason": "pid_reused"},
+                {"token": "younger", "pid": younger, "reason": "pid_reused"},
+            ]),
+            "{report}"
+        );
+        assert_eq!(
+            processes.terminated.lock().unwrap().as_slice(),
+            &[silent, fresh]
+        );
+        assert!(processes.interrupted.lock().unwrap().is_empty());
+        let expected_kills = if force { vec![silent, fresh] } else { vec![] };
+        assert_eq!(*processes.killed.lock().unwrap(), expected_kills);
+        assert_eq!(
+            report["supervisor_workspaces"],
+            json!([{"workspace_id": workspace, "outcome": "closed"}])
+        );
+        let tokens: Vec<_> = queue
+            .supervisors()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.token.into_string())
+            .collect();
+        assert_eq!(
+            tokens,
+            if force {
+                vec![]
+            } else {
+                vec!["silent", "fresh"]
+            }
+        );
+    }
+}
+
+#[test]
+fn down_signals_a_silent_supervisor_when_process_listing_fails() {
+    let fixture = fixture();
+    let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
+    let pid = 4_100_005;
+    queue
+        .register_supervisor(&LeaseToken::new("silent"), pid, 1, VERSION)
+        .unwrap();
+    Connection::open(&fixture.location.db)
+        .unwrap()
+        .execute("UPDATE supervisors SET heartbeat_at=1700000000", [])
+        .unwrap();
+    let processes = FakeProcesses::default(); // list() fails
+    let report = down(
+        &fixture,
+        &FakeCmux::default(),
+        &FakeLaunchd::new(&fixture.location.db),
+        &processes,
+        false,
+        false,
+    );
+    assert_eq!(report["outcome"], "draining", "{report}");
+    assert_eq!(processes.terminated.lock().unwrap().as_slice(), &[pid]);
+    assert_eq!(queue.supervisors().unwrap().len(), 1);
 }
 
 /// A queue can hold supervisors of both modes at once: the launchd one is

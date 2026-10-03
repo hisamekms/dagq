@@ -1065,7 +1065,7 @@ once `status` shows it gone",
     // The drain is over, so every workspace of a replaced supervisor is
     // ours to close; one left open would stop the next in-cmux supervisor
     // from opening its own.
-    let closed = close_supervisor_workspaces(queue, cmux, processes, live, Stop::SeenThrough);
+    let closed = close_supervisor_workspaces(queue, cmux, live, live, Stop::SeenThrough);
     // Whatever survived the drain (an alive-but-silent supervisor `up`
     // neither reuses nor kills) belongs to another process, not to the one
     // started below.
@@ -2146,10 +2146,25 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
     // path this `down` takes: the rule is the same for all of them, and a
     // queue can hold supervisors of both modes at once.
     let registrations = queue.supervisors()?;
-    let (live, dead): (Vec<SupervisorRegistration>, Vec<SupervisorRegistration>) = registrations
-        .iter()
-        .cloned()
-        .partition(|registration| processes.alive(registration.pid));
+    let mut live = Vec::new();
+    let mut dead = Vec::new();
+    let mut pruned = Vec::new();
+    let now = ports.clock.now();
+    let mut listing = None;
+    for registration in &registrations {
+        if !processes.alive(registration.pid) {
+            dead.push(registration.clone());
+        } else if pid_taken_over(registration, processes, now, &mut listing) {
+            prune_supervisor(queue, registration)?;
+            pruned.push(json!({
+                "token": registration.token,
+                "pid": registration.pid,
+                "reason": "pid_reused",
+            }));
+        } else {
+            live.push(registration.clone());
+        }
+    }
     // The supervisors about to drain stop the broker when their drain ends
     // (ADR-t827-3 decision 2); asked before any signal, the unload's
     // included. A `--force` kill stops it below instead.
@@ -2211,7 +2226,6 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
         }
     };
     if live.is_empty() {
-        let mut pruned = Vec::new();
         if options.force {
             for registration in &dead {
                 prune_supervisor(queue, registration)?;
@@ -2225,8 +2239,8 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
             "supervisor_workspaces": close_supervisor_workspaces(
                 queue,
                 cmux,
-                processes,
                 &registrations,
+                &live,
                 // Nothing is alive to drain, so every workspace is ours.
                 Stop::SeenThrough,
             ),
@@ -2259,7 +2273,6 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
         }
         // The dead ones go too, so no row is left pointing at a workspace
         // this call has just closed.
-        let mut pruned = Vec::new();
         for registration in &dead {
             prune_supervisor(queue, registration)?;
             pruned.push(json!({"token": registration.token, "pid": registration.pid}));
@@ -2273,8 +2286,8 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
             "supervisor_workspaces": close_supervisor_workspaces(
                 queue,
                 cmux,
-                processes,
                 &registrations,
+                &live,
                 Stop::SeenThrough,
             ),
         });
@@ -2309,11 +2322,14 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
             "supervisor_workspaces": close_supervisor_workspaces(
                 queue,
                 cmux,
-                processes,
                 &registrations,
+                &live,
                 Stop::SeenThrough,
             ),
         });
+        if !pruned.is_empty() {
+            report["pruned_supervisors"] = json!(pruned);
+        }
         if let Some(broker) = broker(true) {
             report["broker"] = broker;
         }
@@ -2330,11 +2346,14 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
         "supervisor_workspaces": close_supervisor_workspaces(
             queue,
             cmux,
-            processes,
             &registrations,
+            &live,
             Stop::Pending,
         ),
     });
+    if !pruned.is_empty() {
+        report["pruned_supervisors"] = json!(pruned);
+    }
     if let Some(broker) = broker(false) {
         report["broker"] = broker;
     }
@@ -2363,15 +2382,15 @@ enum Stop {
 /// cmux refuses is reported, not raised: the supervisor is already
 /// stopped, which is what `down` was asked to do.
 ///
-/// Liveness is only consulted in the `Pending` case, and there it is read
-/// before anything was signalled. After a SIGKILL it would be useless:
+/// The `Pending` case uses the registrations classified as live before
+/// anything was signalled. After a SIGKILL a PID check would be useless:
 /// `kill(2)` returns before the target is reaped, so `kill(pid, 0)` still
 /// succeeds for a process that is already dying.
 fn close_supervisor_workspaces(
     queue: &dyn Queue,
     cmux: &dyn WorkspaceBackend,
-    processes: &dyn ProcessControl,
     registrations: &[SupervisorRegistration],
+    live: &[SupervisorRegistration],
     stop: Stop,
 ) -> Vec<Value> {
     registrations
@@ -2379,7 +2398,7 @@ fn close_supervisor_workspaces(
         .filter(|registration| registration.mode == Some(SupervisorMode::InCmux))
         .filter_map(|registration| {
             let id = registration.workspace_id.as_deref()?;
-            if stop == Stop::Pending && processes.alive(registration.pid) {
+            if stop == Stop::Pending && live.iter().any(|r| r.token == registration.token) {
                 return Some(json!({
                     "workspace_id": id,
                     "outcome": "left_open",
