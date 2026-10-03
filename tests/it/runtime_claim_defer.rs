@@ -223,8 +223,7 @@ fn a_task_meeting_a_run_on_a_hotspot_waits_and_the_next_one_is_claimed() {
 fn a_changed_conflicts_table_is_read_again_without_a_restart() {
     let (_dir, repo, db) = hot_fixture();
     let config = repo.join("dagq.toml");
-    // Written whole by a rename: the supervisor reads it every pass, and a
-    // file caught half written would read as the defaults.
+    // Written whole by a rename; changes take effect after two reads.
     let conflicts = |table: &str| {
         let staged = repo.join("dagq.toml.new");
         fs::write(&staged, format!("[conflicts]\n{table}")).unwrap();
@@ -326,4 +325,98 @@ fn a_changed_conflicts_table_is_read_again_without_a_restart() {
     let ended = events(&db, "claim_deferral_ended");
     assert_eq!(ended.len(), 2, "{ended:?}");
     assert!(ended.iter().all(|(_, payload)| payload["why"] == "expired"));
+}
+
+/// Drive file writes at the claim-load check, after this pass read conflicts
+/// and before the next pass. No sleeps or races with the config reader: the
+/// callback runs on the supervisor thread, and this queue has no ready task.
+#[test]
+fn transient_conflicts_tables_are_ignored_and_stable_changes_are_confirmed() {
+    use std::cell::RefCell;
+
+    struct Script {
+        config: PathBuf,
+        db: PathBuf,
+        stop: Arc<AtomicBool>,
+        step: usize,
+    }
+    thread_local! {
+        static SCRIPT: RefCell<Option<Script>> = const { RefCell::new(None) };
+    }
+    const ORIGINAL: &str = "[conflicts]\nhotspot_conflicts = 4\ndefer_max_secs = 7200\n";
+    const PARTIAL: &str = "[conflicts]\nhotspot_conflicts = 4\n";
+    const CHANGED: &str = "[conflicts]\nhotspot_conflicts = 5\ndefer_max_secs = 8000\n";
+    fn after_read() -> Option<f64> {
+        SCRIPT.with(|script| {
+            let mut script = script.borrow_mut();
+            let script = script.as_mut().unwrap();
+            // Each pair is the number of applied changes *this* pass and
+            // the file the next pass will read. Empty files, missing tables,
+            // and a parseable partial table all go through the real loader.
+            let steps = [
+                (0, ""),
+                (0, ORIGINAL),
+                (0, PARTIAL),
+                (0, ORIGINAL),
+                (0, "[run.env]\n"),
+                (0, "[run.env]\n"),
+                (1, "[run.env]\n"),
+                (1, CHANGED),
+                (1, CHANGED),
+                (2, CHANGED),
+                (2, CHANGED),
+            ];
+            let (count, next) = steps[script.step];
+            let changed = events(&script.db, "conflicts_config_changed");
+            assert_eq!(
+                changed.len(),
+                count,
+                "pass {}: {changed:?}",
+                script.step + 1
+            );
+            if count >= 1 {
+                assert_eq!(changed[0].1["from"]["defer_max_secs"], 7200);
+                assert_eq!(changed[0].1["to"], json!(ConflictConfig::default()));
+            }
+            if count == 2 {
+                assert_eq!(changed[1].1["from"], json!(ConflictConfig::default()));
+                assert_eq!(changed[1].1["to"]["hotspot_conflicts"], 5);
+                assert_eq!(changed[1].1["to"]["defer_max_secs"], 8000);
+            }
+            fs::write(&script.config, next).unwrap();
+            script.step += 1;
+            if script.step == steps.len() {
+                script.stop.store(true, Ordering::SeqCst);
+            }
+        });
+        Some(0.0)
+    }
+
+    let (_dir, repo, db) = fixture();
+    SqliteQueue::open(&db)
+        .unwrap()
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+    let config = repo.join("dagq.toml");
+    fs::write(&config, ORIGINAL).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    SCRIPT.with(|script| {
+        *script.borrow_mut() = Some(Script {
+            config,
+            db: db.clone(),
+            stop: stop.clone(),
+            step: 0,
+        });
+    });
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let options = SuperviseOptions {
+        stop,
+        load_average: after_read,
+        ..supervise_options(1, false)
+    };
+    let outcome = supervise_with(&db, &repo, &backend, &options).unwrap();
+    backend.join();
+    SCRIPT.with(|script| assert_eq!(script.borrow_mut().take().unwrap().step, 11));
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(events(&db, "conflicts_config_changed").len(), 2);
 }

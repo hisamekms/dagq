@@ -22,7 +22,7 @@ use crate::domain::{
     },
     provider_switch::route_of,
     stats::{
-        ConflictConfigReport,
+        ConflictConfig, ConflictConfigReport,
         conflicts::{CONFLICTS_CONFIG_CHANGED, conflicts_change},
     },
     worker::{PROVIDER_UNAVAILABLE, Worker, unavailable},
@@ -37,6 +37,8 @@ const IN_FLIGHT_REFRESH_SECS: i64 = 60;
 /// What the supervisor keeps between passes.
 #[derive(Default)]
 pub(super) struct DeferWatch {
+    /// A changed value read on the preceding pass, awaiting confirmation.
+    pending_conflicts: Option<ConflictConfig>,
     /// The alerted hotspots, and when they were read.
     hot: Option<(i64, Vec<String>)>,
     /// The expected files of each task read since the hotspots were.
@@ -51,6 +53,26 @@ pub(super) struct DeferWatch {
 }
 
 impl DeferWatch {
+    /// Confirm a change only after two consecutive reads (ADR-t774-1).
+    /// Missing or invalid input breaks the streak without touching the cache.
+    fn confirm_conflicts(
+        &mut self,
+        config: Option<ConflictConfig>,
+        current: ConflictConfig,
+    ) -> bool {
+        let Some(config) = config.filter(|config| *config != current) else {
+            self.pending_conflicts = None;
+            return false;
+        };
+        if self.pending_conflicts != Some(config) {
+            self.pending_conflicts = Some(config);
+            return false;
+        }
+        self.pending_conflicts = None;
+        self.hot = None;
+        true
+    }
+
     /// A claim just made: the next judgement reads the runs in flight
     /// again, with the claimed one.
     pub(super) fn claimed(&mut self) {
@@ -60,7 +82,8 @@ impl DeferWatch {
 
 impl Supervisor<'_> {
     /// Read `[conflicts]` of the main checkout's `dagq.toml` again
-    /// (ADR-0080). Values that differ from those in use replace them, drop
+    /// (ADR-0080, amended by ADR-t774-1). Two consecutive reads of the
+    /// same changed values replace those in use, drop
     /// the cached hotspots and are recorded as `conflicts_config_changed`,
     /// once for the queue. A file that cannot be read or holds invalid
     /// values keeps those in use, warned of once per error; so does a
@@ -74,10 +97,14 @@ impl Supervisor<'_> {
                 self.conflicts_error = None;
                 match config {
                     Some(config) => config,
-                    None => return Ok(()),
+                    None => {
+                        self.defer.confirm_conflicts(None, self.conflicts.config);
+                        return Ok(());
+                    }
                 }
             }
             Err(error) => {
+                self.defer.confirm_conflicts(None, self.conflicts.config);
                 let message = format!("{error:#}");
                 if self.conflicts_error.as_ref() != Some(&message) {
                     warn!(error = %message, "[conflicts] of dagq.toml not read: {message}; keeping the values in use");
@@ -87,14 +114,17 @@ impl Supervisor<'_> {
             }
         };
         let from = self.conflicts.config;
+        let confirmed = self.defer.confirm_conflicts(Some(config), from);
+        if from == config {
+            self.conflicts.source = "file";
+        }
+        if !confirmed {
+            return Ok(());
+        }
         self.conflicts = ConflictConfigReport {
             config,
             source: "file",
         };
-        if from == config {
-            return Ok(());
-        }
-        self.defer.hot = None;
         let last = self.queue.latest_queue_event(&[CONFLICTS_CONFIG_CHANGED])?;
         if let Some(mut payload) =
             conflicts_change(from, config, last.as_ref().map(|event| &event.payload))
@@ -369,5 +399,43 @@ impl Supervisor<'_> {
         let files = expected_files(&declared, &changed);
         self.defer.expected.insert(task, files.clone());
         Ok(files)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_consecutive_changed_values_invalidate_the_hotspot_cache() {
+        let current = ConflictConfig {
+            defer_max_secs: 7200,
+            ..ConflictConfig::default()
+        };
+        let changed = ConflictConfig::default();
+        let partial = ConflictConfig {
+            hotspot_conflicts: 4,
+            ..changed
+        };
+        let cached = Some((123, vec!["cached.md".to_owned()]));
+        let mut watch = DeferWatch {
+            hot: cached.clone(),
+            ..DeferWatch::default()
+        };
+        // A restored file, a missing/invalid file, or a different partial
+        // table breaks confirmation. None may discard the cached hotspots.
+        for interruption in [Some(current), None, Some(partial)] {
+            assert!(!watch.confirm_conflicts(Some(changed), current));
+            assert!(!watch.confirm_conflicts(interruption, current));
+            assert!(!watch.confirm_conflicts(Some(changed), current));
+            assert_eq!(watch.hot, cached);
+            assert!(!watch.confirm_conflicts(Some(current), current));
+        }
+        assert!(!watch.confirm_conflicts(Some(changed), current));
+        assert!(watch.confirm_conflicts(Some(changed), current));
+        assert!(watch.hot.is_none());
+        watch.hot = cached.clone();
+        assert!(!watch.confirm_conflicts(Some(changed), changed));
+        assert_eq!(watch.hot, cached);
     }
 }

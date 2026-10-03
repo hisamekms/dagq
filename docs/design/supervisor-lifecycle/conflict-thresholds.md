@@ -4,13 +4,14 @@ type: design
 title: "Conflict thresholds"
 status: current
 created: 2026-09-26
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-10-04
+last_verified: 2026-10-04
 scope: runtime
 related:
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-claim-defer
   - adr-0080
+  - adr-t774-1
 ---
 
 # Conflict thresholds
@@ -28,9 +29,9 @@ related:
 
 ## 読み直し
 
-supervisorはloopのpassごとに、`[run.env]`の変更の印（`run_env_changed`）に続けてclaimの前に、main checkoutの`dagq.toml`の`[conflicts]`を読み直す（`Supervisor::reread_conflicts`、`src/application/supervise/claim_defer.rs`。読むのは`Ports::conflicts_file`で、`src/compose.rs`が`load_conflict_config`を渡す。ADR-0080）。`SuperviseOptions.conflicts`で値を与えたとき（test）は`conflicts_file`が`None`で、読み直さない。
+supervisorはloopのpassごとに、`[run.env]`の変更の印（`run_env_changed`）に続けてclaimの前に、main checkoutの`dagq.toml`の`[conflicts]`を読み直す（`Supervisor::reread_conflicts`、`src/application/supervise/claim_defer.rs`。読むのは`Ports::conflicts_file`で、`src/compose.rs`が`load_conflict_config`を渡す。ADR-0080、ADR-t774-1）。`SuperviseOptions.conflicts`で値を与えたとき（test）は`conflicts_file`が`None`で、読み直さない。
 
-- **変わったとき**: 3つの値のどれかが使っている値と違えば、新しい値（`source: file`）に替え、cacheしたhotspot（[claimを控える](claim-defer.md#判定の入力)の10分のcache）を捨てる。次のclaimの判定から、新しい閾値のhotspot・新しい`defer_max_secs`（進行中の控えにも効き、数え始めは最初の`claim_deferred`のまま）・plan reviewのpromptの`alert`がその値を使う。queue event `conflicts_config_changed`（`from`・`to`（どちらも`hotspot_conflicts`・`hotspot_ratio_percent`・`defer_max_secs`）・`source`・`supervisor`）を1回記録し、supervisorのlogにinfoで出す。queueの最新の`conflicts_config_changed`の`to`が新しい値と同じなら（同じqueueの別のsupervisorが記録した）記録しない（`domain::stats::conflicts::conflicts_change`）。起動時に読んだ値は記録しない
-- **読めない・不正なとき**: 使っている値を保ち（起動の後は既定値に戻さない）、warn `[conflicts] of dagq.toml not read: ...; keeping the values in use`を出す。同じエラーのwarnは、読めるようになるかエラーが変わるまで繰り返さない。直して前と同じ値に戻したときは変更ではないので記録しない。なお`dagq.toml`の書式は1つのparserが全体を検査するので、不正な`[conflicts]`の間は着地先のbranch（[Landing branch](landing-branch.md)）も解決できず、claimと着地、headlessのreviewの起動も止まる
-- **`dagq.toml`が無いとき**: checkoutの書き換えの途中でありうるので、使っている値を保つ（`[run.env]`の印と同じ）
-- **`[conflicts]`の表やkeyを消したとき**: 消したkeyは既定値として読み（`source: file`）、既定値への変更として記録する。空のファイルや書きかけのファイルも同じく既定値に読めるので、main checkoutの`dagq.toml`はgitの着地（checkout）か、別のファイルに書いてrenameで置き換える
+- **変わったとき**: 3つの値のどれかが使っている値と違えば、その組を候補として保持する。続くpassでも同じ3つの値を読んだときだけ、新しい値（`source: file`）に替え、cacheしたhotspot（[claimを控える](claim-defer.md#判定の入力)の10分のcache）を捨てる。次のclaimの判定から、新しい閾値のhotspot・新しい`defer_max_secs`（進行中の控えにも効き、数え始めは最初の`claim_deferred`のまま）・plan reviewのpromptの`alert`がその値を使う。queue event `conflicts_config_changed`（`from`・`to`（どちらも`hotspot_conflicts`・`hotspot_ratio_percent`・`defer_max_secs`）・`source`・`supervisor`）を1回記録し、supervisorのlogにinfoで出す。queueの最新の`conflicts_config_changed`の`to`が新しい値と同じなら（同じqueueの別のsupervisorが記録した）記録しない（`domain::stats::conflicts::conflicts_change`）。候補を保持するだけのpassでは、使用中の値・hotspotのcache・eventを変えない。使用中の値に戻れば候補を捨て、別の値なら候補を入れ替えてそこから2回を数える。起動時は即時に適用し、読んだ値は記録しない
+- **読めない・不正なとき**: 候補を捨て、使っている値を保ち（起動の後は既定値に戻さない）、warn `[conflicts] of dagq.toml not read: ...; keeping the values in use`を出す。同じエラーのwarnは、読めるようになるかエラーが変わるまで繰り返さない。直して前と同じ値に戻したときは変更ではないので記録しない。なお`dagq.toml`の書式は1つのparserが全体を検査するので、不正な`[conflicts]`の間は着地先のbranch（[Landing branch](landing-branch.md)）も解決できず、claimと着地、headlessのreviewの起動も止まる
+- **`dagq.toml`が無いとき**: checkoutの書き換えの途中でありうるので、候補を捨て、使っている値を保つ（`[run.env]`の印と同じ）。欠落やエラーを挟んだ読みは連続とは数えない
+- **`[conflicts]`の表やkeyを消したとき**: 消したkeyは既定値として読み（`source: file`）、同じ値を2回続けて読んだときに既定値への変更として適用・記録する。空のファイルやparseできる書きかけも同じ扱いなので、1 passだけの一時的な値は適用しない。ただし2 pass以上同じ書きかけが残れば適用されるため、書き込みは別のファイルからrenameで置き換えるのが確実。この確認待ちは変更の反映を1 pass遅らせる（[ADR-t774-1](../../adr/2026-10-04-t774-1-confirm-conflicts-config-on-consecutive-passes.md)）
