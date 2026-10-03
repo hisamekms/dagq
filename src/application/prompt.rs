@@ -341,6 +341,17 @@ fn headless_provider_line(provider: Provider) -> &'static str {
     }
 }
 
+/// The worker's step before the receipt (ADR-t1420-1): each acceptance
+/// criterion is mapped to what meets it, a criterion nothing meets is
+/// fixed on the spot, and one the task cannot meet is an ask or a failed
+/// receipt rather than a follow_up beside a succeeded receipt. It asks for
+/// no new command: the mapping reads the diff and the receipt.
+pub const ACCEPTANCE_MAP: &str = "Before the receipt, map each acceptance criterion to what meets it (a changed file, a test's name, the receipt's evidence, a document's section or a command that measures it) and fix on the spot any criterion nothing meets yet. Do not write succeeded with a criterion you cannot meet moved into follow_ups: when meeting it needs a person's decision (the acceptance or the scope changes), ask a worker_question with --because scope; when it needs work outside the task, write a failed receipt saying why. In summary, give each criterion's mapping in a short phrase.\n";
+
+/// What a resumed or revised session adds before it rewrites the receipt
+/// (ADR-t1420-1): the mapping of the criteria its fix touched, again.
+pub const ACCEPTANCE_REMAP: &str = "Before you rewrite it, map each acceptance criterion your fix touched to what meets it again and rewrite its phrase in summary; a criterion the task cannot meet is a worker_question (--because scope) or a failed receipt, not a follow_up.";
+
 /// What the worker is told of the subagent review. A Codex worker has no
 /// subagent (and a nested `codex exec review` could not write its session
 /// under the sandbox), so it reviews its own diff and reports the check
@@ -350,7 +361,7 @@ fn headless_provider_line(provider: Provider) -> &'static str {
 fn review_line(route: Route) -> &'static str {
     match route {
         Route::Headless(Provider::Codex) => {
-            "Perform applicable unit tests. You have no subagent to review your change: before the receipt, read your own diff (git diff <base commit>..HEAD) against the acceptance criteria and fix what you find, then write subagent_review as not_applicable with the reason `codex worker: no subagent review; self-reviewed the diff, the supervisor's review job reviews the commit` and what the self-review found. Record evidence or an explicit reason when not applicable.\n"
+            "Perform applicable unit tests. You have no subagent to review your change: before the receipt, read your own diff (git diff <base commit>..HEAD) as you map the acceptance criteria to it (the step below) and fix what you find, then write subagent_review as not_applicable with the reason `codex worker: no subagent review; self-reviewed the diff, the supervisor's review job reviews the commit` and what the self-review found. Record evidence or an explicit reason when not applicable.\n"
         }
         _ => {
             "Perform applicable unit tests and subagent review. Record evidence or an explicit reason when not applicable.\n"
@@ -567,6 +578,7 @@ pub fn prompt(
          {local_checks}\n\
          {evidence}{paths}{goal}{context}{predecessors}{siblings}{inherited}\
          Your assignment is this task only. Do not change what a sibling task owns; if you find work outside this task, record it in the receipt as follow_ups instead of doing it.\n\
+         {acceptance_map}\
          Write a completion receipt to {receipt} using a temporary file in the same directory and atomic rename.\n\
          Receipt JSON: {{\"run_id\":\"{run_id}\",\"result\":\"succeeded or failed\",\"commit\":\"full Git SHA of the branch head\",\"tests\":{{\"status\":\"passed, failed or not_applicable\",\"evidence_or_reason\":\"...\"}},\"e2e\":{{\"status\":\"...\",\"evidence_or_reason\":\"...\"}},\"subagent_review\":{{\"status\":\"...\",\"evidence_or_reason\":\"...\"}},\"summary\":\"...\",\"follow_ups\":[{{\"title\":\"...\",\"description\":\"...\",\"category\":\"...\"}}]}}\n\
          Each of tests, e2e and subagent_review needs evidence when passed and a reason when not_applicable.\n\
@@ -582,6 +594,7 @@ pub fn prompt(
         reading = WORKER_READING,
         stop_background = route.stop(),
         review = review_line(route),
+        acceptance_map = ACCEPTANCE_MAP,
         title = task.title(),
         description = task.description(),
         acceptance = task.acceptance(),
@@ -1352,7 +1365,7 @@ pub(crate) fn resume_request(
     lines.push("3. Keep the worktree clean.".to_owned());
     lines.push(format!("4. {}", route.stop()));
     lines.push(format!(
-        "5. Rewrite the receipt at {receipt} with the new head commit, writing a temporary file in the same directory and renaming it."
+        "5. Rewrite the receipt at {receipt} with the new head commit, writing a temporary file in the same directory and renaming it. {ACCEPTANCE_REMAP}"
     ));
     lines.push(
         "6. If the change is no longer needed, write the receipt with result failed and the reason in summary."
@@ -2004,7 +2017,7 @@ pub(crate) fn revise_request(
     lines.push("3. Keep the worktree clean.".to_owned());
     lines.push(format!("4. {}", route.stop()));
     lines.push(format!(
-        "5. Rewrite the receipt at {receipt} with the new head commit, writing a temporary file in the same directory and renaming it."
+        "5. Rewrite the receipt at {receipt} with the new head commit, writing a temporary file in the same directory and renaming it. {ACCEPTANCE_REMAP}"
     ));
     lines.push(format!("6. {}", route.done(run)));
     Ok(lines.join("\n"))
@@ -3199,6 +3212,59 @@ mod tests {
         assert!(codex[0].contains("never directly in /tmp or /private/tmp"));
         assert!(codex[0].contains("worktree's own target/"));
         assert!(!claude[0].contains("$TMPDIR"), "{}", claude[0]);
+    }
+
+    /// Task 1420 (ADR-t1420-1): every worker's prompt, interactive or
+    /// headless, on Claude or Codex, maps the acceptance criteria before
+    /// the receipt once, right before the receipt's instructions; every
+    /// resume and revise request maps them again before it rewrites the
+    /// receipt; the Codex review line leaves the comparison with the
+    /// criteria to that step, and the run's review prompt is untouched.
+    #[test]
+    fn every_worker_text_that_writes_a_receipt_maps_the_acceptance_once() {
+        let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
+        for (provider, mode) in [
+            (Provider::Claude, WorkerMode::Interactive),
+            (Provider::Claude, WorkerMode::Headless),
+            (Provider::Codex, WorkerMode::Headless),
+        ] {
+            let run = run_on(provider, mode);
+            let texts = session_texts(&task, &run);
+            let first = &texts[0];
+            assert_eq!(first.matches(ACCEPTANCE_MAP).count(), 1, "{first}");
+            assert!(
+                first.contains(&format!("{ACCEPTANCE_MAP}Write a completion receipt to")),
+                "{first}"
+            );
+            assert_eq!(
+                first.matches("map each acceptance criterion").count(),
+                1,
+                "{first}"
+            );
+            assert!(!first.contains(ACCEPTANCE_REMAP), "{first}");
+            // The nine resume requests and the revise request.
+            for request in &texts[1..11] {
+                assert!(
+                    request.contains(&format!("renaming it. {ACCEPTANCE_REMAP}")),
+                    "{provider:?} {mode:?}: {request}"
+                );
+                assert!(!request.contains(ACCEPTANCE_MAP), "{request}");
+            }
+        }
+        let codex = review_line(Route::Headless(Provider::Codex));
+        assert!(
+            !codex.contains("against the acceptance criteria"),
+            "{codex}"
+        );
+        assert!(!codex.contains("map each acceptance criterion"), "{codex}");
+        assert!(codex.contains("as you map the acceptance criteria to it"));
+        // The steps ask for no new command, and stay short.
+        for text in [ACCEPTANCE_MAP, ACCEPTANCE_REMAP] {
+            assert!(text.len() <= 600, "{}", text.len());
+            assert!(!text.contains("cargo") && !text.contains('`'), "{text}");
+        }
+        let review = review_prompt(&task, &run_on(Provider::Claude, WorkerMode::Headless), "r");
+        assert!(!review.contains(ACCEPTANCE_MAP) && !review.contains(ACCEPTANCE_REMAP));
     }
 
     /// Task 978: a task that needs a path outside its declared paths ends

@@ -4,10 +4,11 @@ type: design
 title: "Prompt"
 status: current
 created: 2026-09-26
-updated: 2026-10-03
-last_verified: 2026-10-03
+updated: 2026-10-03 # task 1420: the acceptance map before the receipt
+last_verified: 2026-10-03 # task 1420
 scope: runtime
 related:
+  - adr-t1420-1
   - adr-t963-1
   - adr-t1165-1
   - adr-t1233-2
@@ -47,6 +48,14 @@ schemaとCLIは変えない。`tests/e2e.rs`のstubはpromptの1行目とreceipt
 
 言語の設定（`[language]`）が解決できるときは、promptの末尾に言語の指示の段落を足す。resumeとreviseの依頼文も同じ（[Language](language.md#promptへの渡し方)、ADR-t616-2）。
 
+## 受け入れ条件の対応づけ
+
+[ADR-t1420-1](../../adr/2026-10-03-t1420-1-worker-maps-each-acceptance-criterion-before-the-receipt.md)（goal 90、task 1420）。workerのpromptは、receiptの書き方（`Write a completion receipt to ...`の行）の直前に`ACCEPTANCE_MAP`の1段落（英語で564文字）を置く: receiptの前に受け入れ条件の各項目を満たすもの（変えたファイル・testの名前・receiptのevidence・文書の節や測るコマンド）へ対応づけ、まだ何も満たしていない項目はその場で直す。満たせない項目を`follow_ups`に回して`succeeded`を書かず、人の判断が要れば`worker_question`（`--because scope`）、範囲の外ならfailedのreceiptにする。対応は`summary`に項目ごとの短い句で書く。対話・非対話、Claude・Codexのどのworkerのpromptも同じ文で、新しいtestの実行や検査のコマンドは求めない。
+
+resumeの解消依頼（`resume_request`。全ての`ResumeKind`）とreviseの依頼（`revise_request`）は、receiptを書き直す手順5の末尾に`ACCEPTANCE_REMAP`（英語で237文字）を足す: 直した項目の対応を改めて満たすものへ対応づけて`summary`の句を書き直し、taskの中で満たせない項目は`worker_question`（`--because scope`）かfailedのreceiptにしてfollow_upにしない。
+
+Codexのworkerの`review_line`（下の[subagent review](#subagent-review)）は自分のdiffを読む見直しをこの対応づけの手順に寄せ、受け入れ条件との照合を2度言わない。runのreviewのprompt（`review_prompt`）と判定の基準は変えない。testは`src/application/prompt.rs`の`every_worker_text_that_writes_a_receipt_maps_the_acceptance_once`。
+
 ## 経路とproviderごとの文面
 
 workerに送る文（`prompt.txt`・resumeの解消依頼・revise・receiptの食い違い・古いreceiptの促し・receiptの無い促し・askの答え・復旧jobの`send_instruction`・queueのholdの後の「続けて」）は、runの経路とprovider（`Route::of(run)`: `worker_mode`が`interactive`なら`Interactive`、`headless`なら`actual_provider`の`Headless(provider)`）で分ける（task 817）。対話のrunの文面は前と同じで、上の説明はすべて対話のrunのもの。非対話のrun（[非対話のworker](headless-worker.md)、[ADR-t813-1](../../adr/2026-09-28-t813-1-headless-worker-path.md)）は1 turnが1回の呼び出しで、`/exit`も画面への打ち込みも無いので、次のように替える。
@@ -68,7 +77,7 @@ WORKER_READINGの「AGENTS.mdかCLAUDE.md」の指示は両方の経路で同じ
 providerごとに決める（task 817）。
 
 - **Claude（対話・非対話）**: 今までどおり、該当すればsubagent（Claude Codeのsubagent）でreviewし、receiptの`subagent_review`にevidenceか該当しない理由を書く。非対話でもsubagentは同じturnの中で動くので変えない。
-- **Codex**: `codex exec`の中にsubagentは無く、`codex exec review`を入れ子で起動すると、workspace-writeのsandboxでは`$CODEX_HOME`（`~/.codex`）のsessionを書けず、呼び出しと費用も倍になる（[spike](../../plans/headless-worker-spike.md)の1.と4.）。そこでCodexのworkerはsubagent reviewをしない。promptは代わりに、receiptの前に自分のdiff（`git diff <base commit>..HEAD`）をacceptanceと突き合わせて見直して直し、`subagent_review`を`not_applicable`にして理由（`codex worker: no subagent review; self-reviewed the diff, the supervisor's review job reviews the commit`）と見直しで見つけたことを書くよう指示する。着地の前には全runと同じくsupervisorのheadlessのreview job（Claude）がcommitをreviewする。
+- **Codex**: `codex exec`の中にsubagentは無く、`codex exec review`を入れ子で起動すると、workspace-writeのsandboxでは`$CODEX_HOME`（`~/.codex`）のsessionを書けず、呼び出しと費用も倍になる（[spike](../../plans/headless-worker-spike.md)の1.と4.）。そこでCodexのworkerはsubagent reviewをしない。promptは代わりに、receiptの前の受け入れ条件の対応づけ（[受け入れ条件の対応づけ](#受け入れ条件の対応づけ)）のときに自分のdiff（`git diff <base commit>..HEAD`）を読んで見直して直し、`subagent_review`を`not_applicable`にして理由（`codex worker: no subagent review; self-reviewed the diff, the supervisor's review job reviews the commit`）と見直しで見つけたことを書くよう指示する。着地の前には全runと同じくsupervisorのheadlessのreview job（Claude）がcommitをreviewする。
 - **taskの`required_evidence`に`subagent_review`があるとき**: `domain::required_of(required, provider)`が、runの`actual_provider`がCodexなら`subagent_review`を要るevidenceから外す。validating（`check_receipt`）・`integrate`のreceiptの検査・resumeの解決の判定・promptの`Required evidence:`の行は、どれもこれで絞った一覧を使う。Codexのrunのreceiptの`subagent_review`は要らないcheckと同じ扱いになり、`failed`でなく理由のあることだけを見る（`not_applicable`と理由で通る）。runが途中でClaudeに切り替わった（ADR-t813-2のフォールバック）後は`actual_provider`がClaudeなので、要るevidenceに戻る。testは`src/domain/receipt.rs`の`a_codex_run_does_not_back_a_required_subagent_review`と`src/application/integrate.rs`の`a_codex_receipt_passes_without_a_subagent_review_the_task_requires`。
 
 ### 復旧jobのprompt
