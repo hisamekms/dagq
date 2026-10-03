@@ -605,13 +605,16 @@ fn the_build_outputs_of_a_run_waiting_for_an_answer_go_on_the_sweep() {
     let (run, ask) = run_awaiting_an_answer(&db, &repo, &backend, true);
     let queue = SqliteQueue::open(&db).unwrap();
     let raw = Connection::open(&db).unwrap();
+    // Task 1586: the cleanup job's check of the run alone reads it as the
+    // list does, through every case below.
     let candidate = |queue: &SqliteQueue| {
-        queue
+        let listed = queue
             .ended_run_worktrees()
             .unwrap()
             .into_iter()
-            .find(|w| w.run_id == *run.id())
-            .map(|w| w.cleanup)
+            .find(|w| w.run_id == *run.id());
+        assert_eq!(queue.ended_run_worktree(run.id()).unwrap(), listed);
+        listed.map(|w| w.cleanup)
     };
     assert_eq!(
         candidate(&queue),

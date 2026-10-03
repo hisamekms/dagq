@@ -2156,6 +2156,9 @@ pub trait RunLog {
     /// The worktrees of the runs nobody leases that ended or whose task is
     /// `completed` / `canceled`, for the supervisor's clean-up of the disk.
     fn ended_run_worktrees(&self) -> Result<Vec<EndedRunWorktree>>;
+    /// Run `id` as [`Self::ended_run_worktrees`] would list it, read alone
+    /// (task 1586); `None` when it would not be listed.
+    fn ended_run_worktree(&self, id: &RunId) -> Result<Option<EndedRunWorktree>>;
     /// When an observation of `mode` last started or finished.
     fn last_observe(&self, mode: &str) -> Result<Option<i64>>;
     /// The newest `run_events` id, 0 for an empty queue.

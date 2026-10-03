@@ -17,7 +17,13 @@
 //! another supervisor) is left alone. A stop or handoff finishes a job for
 //! disk space, and the rest of a cleanup for room another job took on
 //! (task 1426); ordinary cleanup ends after its current worktree and the
-//! next sweep picks up the rest.
+//! next sweep picks up the rest. That check reads the run alone
+//! ([`RunLog::ended_run_worktree`], task 1586), not every ended run again.
+//!
+//! A run the job found nothing left of ([`nothing_left`]) is settled
+//! ([`Cleaning::settled`]): the next sweeps leave it out of their
+//! candidates, without Git or the filesystem, until the queue lists it
+//! otherwise, a slot holds it or the loop leases it (task 1586).
 //!
 //! The job also removes what an ended run whose task is over left outside
 //! its worktree: the Claude Code scratchpad of its session (task 1100,
@@ -34,6 +40,7 @@
 use super::*;
 use crate::application::{EndedRunWorktree, RUN_TMP_DIR, WorktreeCleanup};
 use crate::domain::EventKind;
+use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use super::{disk::Cleaned, sweep::BUILD_OUTPUT_DIRS};
@@ -94,9 +101,9 @@ impl Request {
 pub(super) struct CleanupWatch {
     job: Option<Job>,
     pending: Request,
-    /// The runs the job picked and has not passed yet. The loop holds the
-    /// lock while it leases an ended run and skips the runs listed.
-    cleaning: Arc<Mutex<Vec<RunId>>>,
+    /// The runs the job picked and has not passed yet, and the runs
+    /// settled. The loop holds the lock while it leases an ended run.
+    cleaning: Arc<Mutex<Cleaning>>,
     /// Stop ordinary cleanup after its current worktree; disk cleanup finishes.
     stop: Arc<AtomicBool>,
     /// Stop accepting requests without interrupting a job for disk space.
@@ -130,14 +137,88 @@ impl CleanupWatch {
     }
     /// The lock the loop holds while it leases an ended run, and the runs
     /// the job has yet to pass, which the loop leaves for a later pass.
-    pub(super) fn cleaning(&self) -> Arc<Mutex<Vec<RunId>>> {
+    pub(super) fn cleaning(&self) -> Arc<Mutex<Cleaning>> {
         self.cleaning.clone()
     }
 }
 
+/// What the loop and the job share under one lock.
+#[derive(Default)]
+pub(super) struct Cleaning {
+    /// The runs the job picked and has not passed yet.
+    reserved: Vec<RunId>,
+    /// The runs a job found nothing left to clean of ([`nothing_left`]),
+    /// as the queue listed them then (task 1586). A sweep leaves them out
+    /// of its candidates while the queue lists them the same, no slot
+    /// holds them and the loop has not leased them since.
+    settled: HashMap<RunId, EndedRunWorktree>,
+}
+
+impl Cleaning {
+    /// The loop is about to lease `run`: `false` while the job has it
+    /// reserved, which the loop leaves for a later pass. Otherwise the run
+    /// is no longer settled, as it may get a worktree again.
+    pub(super) fn may_lease(&mut self, run: &RunId) -> bool {
+        if self.reserved.contains(run) {
+            return false;
+        }
+        self.settled.remove(run);
+        true
+    }
+}
+
 /// Lock `cleaning`, whatever a panicking holder left.
-pub(super) fn lock_cleaning(cleaning: &Mutex<Vec<RunId>>) -> MutexGuard<'_, Vec<RunId>> {
+pub(super) fn lock_cleaning(cleaning: &Mutex<Cleaning>) -> MutexGuard<'_, Cleaning> {
     cleaning.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// What the job saw of a candidate's run once it passed it (task 1586).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Left {
+    /// The worktree's directory is there.
+    worktree: bool,
+    /// The run's branch is still listed; `None` when the job did not read
+    /// the list.
+    branch: Option<bool>,
+    /// Something of the run could not be cleaned: its worktree or branch,
+    /// its runner, a scratchpad or its temporary files directory.
+    failed: bool,
+}
+
+/// Nothing is left of `candidate` that a cleanup would remove (task 1586):
+/// no worktree directory, nothing that failed, and once its task is over
+/// no branch either. A run whose task goes on keeps its branch, its
+/// scratchpads and its temporary files directory on purpose, and a run
+/// that has not ended its runner (a `needs_session` run waiting for a
+/// resume): the job leaves them, and they count once the queue lists the
+/// run otherwise. A branch the job did not see the list of may be left.
+fn nothing_left(candidate: &EndedRunWorktree, left: Left) -> bool {
+    let over = matches!(
+        candidate.task_status,
+        TaskStatus::Completed | TaskStatus::Canceled
+    );
+    let branch = over && candidate.branch.is_some() && left.branch != Some(false);
+    !left.worktree && !left.failed && !branch
+}
+
+/// The candidates of a job: the runs `listed` that `request` wants, less
+/// those a slot holds and those settled (task 1586). A settled run the
+/// queue no longer lists the same (it was leased, it or its task moved
+/// on), or that a slot holds, is no longer settled.
+fn pick_candidates(
+    listed: Vec<EndedRunWorktree>,
+    request: &Request,
+    in_slot: impl Fn(&RunId) -> bool,
+    settled: &mut HashMap<RunId, EndedRunWorktree>,
+) -> Vec<EndedRunWorktree> {
+    let now: HashMap<&RunId, &EndedRunWorktree> = listed.iter().map(|w| (&w.run_id, w)).collect();
+    settled.retain(|run, then| now.get(run).is_some_and(|now| *now == then) && !in_slot(run));
+    listed
+        .into_iter()
+        .filter(|w| request.wants(w))
+        .filter(|w| !in_slot(&w.run_id))
+        .filter(|w| !settled.contains_key(&w.run_id))
+        .collect()
 }
 
 /// What the job did to one worktree.
@@ -224,7 +305,7 @@ struct JobPorts {
     queues: Arc<dyn QueueOpener>,
     runs_dir: PathBuf,
     repo_root: PathBuf,
-    cleaning: Arc<Mutex<Vec<RunId>>>,
+    cleaning: Arc<Mutex<Cleaning>>,
     stop: Arc<AtomicBool>,
     prune: bool,
     /// Where Claude Code keeps the sessions' scratchpads (task 1100).
@@ -277,7 +358,7 @@ impl Supervisor<'_> {
         });
         // Whatever the job left reserved (it could not open the queue, or
         // panicked) is free again.
-        lock_cleaning(&self.cleanup.cleaning).clear();
+        lock_cleaning(&self.cleanup.cleaning).reserved.clear();
         self.cleanup.deferred = false;
         let cleaned = self.record_cleanup(outcomes);
         if let Some(disk) = job.disk.or(job.counted) {
@@ -329,22 +410,25 @@ impl Supervisor<'_> {
             return;
         }
         let request = std::mem::take(&mut self.cleanup.pending);
-        let candidates: Vec<EndedRunWorktree> = match self.queue.ended_run_worktrees() {
-            Ok(all) => all
-                .into_iter()
-                .filter(|w| request.wants(w))
-                .filter(|w| !self.slots.iter().any(|slot| *slot.run.id() == w.run_id))
-                .collect(),
+        let listed = match self.queue.ended_run_worktrees() {
+            Ok(listed) => listed,
             Err(error) => {
                 warn!(error = %format_args!("{error:#}"), "the worktrees of ended runs could not be listed for their cleanup: {error:#}");
                 return;
             }
         };
+        let mut cleaning = lock_cleaning(&self.cleanup.cleaning);
+        let candidates = pick_candidates(
+            listed,
+            &request,
+            |run| self.slots.iter().any(|slot| slot.run.id() == run),
+            &mut cleaning.settled,
+        );
         if candidates.is_empty() && !request.prune {
             return;
         }
-        *lock_cleaning(&self.cleanup.cleaning) =
-            candidates.iter().map(|w| w.run_id.clone()).collect();
+        cleaning.reserved = candidates.iter().map(|w| w.run_id.clone()).collect();
+        drop(cleaning);
         let ports = JobPorts {
             files: self.files.clone(),
             repository: self.repository.clone(),
@@ -488,52 +572,24 @@ impl Supervisor<'_> {
 /// Clean each candidate in turn (see the module), then `git worktree
 /// prune` for disk space.
 fn run_job(ports: &JobPorts, candidates: Vec<EndedRunWorktree>) -> Vec<Outcome> {
-    let mut outcomes = Vec::new();
     let queue = match ports.queues.open() {
         Ok(queue) => queue,
         Err(error) => {
             warn!(error = %format_args!("{error:#}"), "the cleanup of ended runs' worktrees could not open the queue: {error:#}");
-            return outcomes;
+            return Vec::new();
         }
     };
     let mut branches: Option<Vec<String>> = None;
     let mut pruned = false;
-    for candidate in candidates {
-        if ports.stop.load(Ordering::SeqCst) {
-            break;
-        }
-        let still = {
-            let _cleaning = lock_cleaning(&ports.cleaning);
-            match queue.ended_run_worktrees() {
-                // Still to clean as it was picked: nobody leased it since,
-                // and neither it nor its task moved on.
-                Ok(now) => now.contains(&candidate),
-                Err(error) => {
-                    warn!(run_id = %candidate.run_id, error = %format_args!("{error:#}"), "run {}: its worktree was not cleaned, the queue could not be read: {error:#}", candidate.run_id);
-                    false
-                }
-            }
-        };
-        if still {
-            if candidate.cleanup == WorktreeCleanup::Ended {
-                remove_run_runner(ports, &candidate);
-            }
-            match clean_worktree(ports, &candidate, &mut branches, &mut pruned) {
-                Ok(Some(outcome)) => outcomes.push(outcome),
-                Ok(None) => {}
-                Err(error) => outcomes.push(Outcome::Failed {
-                    run_id: candidate.run_id.clone(),
-                    what: "worktree",
-                    path: candidate.worktree.clone(),
-                    error,
-                }),
-            }
-            remove_scratchpads(ports, &candidate, &mut outcomes);
-            remove_run_tmp(ports, &candidate, &mut outcomes);
-        }
-        lock_cleaning(&ports.cleaning).retain(|run| *run != candidate.run_id);
-    }
-    lock_cleaning(&ports.cleaning).clear();
+    let outcomes = pass_candidates(
+        &ports.cleaning,
+        &ports.stop,
+        candidates,
+        |run| queue.ended_run_worktree(run),
+        |candidate, outcomes| {
+            clean_candidate(ports, candidate, &mut branches, &mut pruned, outcomes)
+        },
+    );
     if ports.prune
         && !pruned
         && let Err(error) = ports.repository.prune_worktrees()
@@ -543,12 +599,96 @@ fn run_job(ports: &JobPorts, candidates: Vec<EndedRunWorktree>) -> Vec<Outcome> 
     outcomes
 }
 
+/// Pass each candidate in turn: under the lock, read it again
+/// (`recheck`, that run alone) and clean it (`clean`, whether nothing is
+/// left of it) only while the queue lists it as it was picked: nobody
+/// leased it since, and neither it nor its task moved on. A run passed
+/// with nothing left is settled under the same lock it is released in,
+/// so a lease the loop takes after it unsettles it.
+fn pass_candidates(
+    cleaning: &Mutex<Cleaning>,
+    stop: &AtomicBool,
+    candidates: Vec<EndedRunWorktree>,
+    mut recheck: impl FnMut(&RunId) -> Result<Option<EndedRunWorktree>>,
+    mut clean: impl FnMut(&EndedRunWorktree, &mut Vec<Outcome>) -> bool,
+) -> Vec<Outcome> {
+    let mut outcomes = Vec::new();
+    for candidate in candidates {
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
+        let still = {
+            let _cleaning = lock_cleaning(cleaning);
+            match recheck(&candidate.run_id) {
+                Ok(now) => now.as_ref() == Some(&candidate),
+                Err(error) => {
+                    warn!(run_id = %candidate.run_id, error = %format_args!("{error:#}"), "run {}: its worktree was not cleaned, the queue could not be read: {error:#}", candidate.run_id);
+                    false
+                }
+            }
+        };
+        let settled = still && clean(&candidate, &mut outcomes);
+        let mut cleaning = lock_cleaning(cleaning);
+        cleaning.reserved.retain(|run| *run != candidate.run_id);
+        if settled {
+            cleaning.settled.insert(candidate.run_id.clone(), candidate);
+        }
+    }
+    lock_cleaning(cleaning).reserved.clear();
+    outcomes
+}
+
+/// Clean one candidate: its runner, worktree or build outputs, scratchpads
+/// and temporary files directory; whether nothing is left of it
+/// ([`nothing_left`]).
+fn clean_candidate(
+    ports: &JobPorts,
+    candidate: &EndedRunWorktree,
+    branches: &mut Option<Vec<String>>,
+    pruned: &mut bool,
+    outcomes: &mut Vec<Outcome>,
+) -> bool {
+    let first = outcomes.len();
+    let runner = candidate.cleanup != WorktreeCleanup::Ended || remove_run_runner(ports, candidate);
+    match clean_worktree(ports, candidate, branches, pruned) {
+        Ok(Some(outcome)) => outcomes.push(outcome),
+        Ok(None) => {}
+        Err(error) => outcomes.push(Outcome::Failed {
+            run_id: candidate.run_id.clone(),
+            what: "worktree",
+            path: candidate.worktree.clone(),
+            error,
+        }),
+    }
+    remove_scratchpads(ports, candidate, outcomes);
+    remove_run_tmp(ports, candidate, outcomes);
+    let mine = &outcomes[first..];
+    let branch = if mine.iter().any(|o| matches!(o, Outcome::Worktree { .. })) {
+        Some(false)
+    } else {
+        candidate.branch.as_deref().and_then(|branch| {
+            let short = branch.trim_start_matches("refs/heads/");
+            branches
+                .as_ref()
+                .map(|listed| listed.iter().any(|listed| listed == short))
+        })
+    };
+    nothing_left(
+        candidate,
+        Left {
+            worktree: ports.files.is_dir(Path::new(&candidate.worktree)),
+            branch,
+            failed: !runner || mine.iter().any(|o| matches!(o, Outcome::Failed { .. })),
+        },
+    )
+}
+
 /// Remove the runner (the binary snapshot its session wrapper ran from)
 /// of an ended run nobody leases: no session of it runs, and a resume,
 /// which needs the lease, copies it again. The run stays reserved while
 /// this runs, so the loop cannot lease it and copy one in between. A
-/// failure is logged and retried on the next cleanup.
-fn remove_run_runner(ports: &JobPorts, candidate: &EndedRunWorktree) {
+/// failure is logged and retried on the next cleanup; `false` for one.
+fn remove_run_runner(ports: &JobPorts, candidate: &EndedRunWorktree) -> bool {
     let runner = ports
         .runs_dir
         .join(candidate.run_id.as_str())
@@ -556,10 +696,12 @@ fn remove_run_runner(ports: &JobPorts, candidate: &EndedRunWorktree) {
     match crate::application::planner::remove_runner(&*ports.files, &runner) {
         Ok(true) => {
             info!(run_id = %candidate.run_id, "run {} is {}; removed its runner", candidate.run_id, candidate.status.as_str());
+            true
         }
-        Ok(false) => {}
+        Ok(false) => true,
         Err(error) => {
             warn!(run_id = %candidate.run_id, error = %format_args!("{error:#}"), "run {}: its runner could not be removed: {error:#}", candidate.run_id);
+            false
         }
     }
 }
@@ -811,5 +953,257 @@ mod tests {
         let long = format!("/{}", "a".repeat(SCRATCHPAD_NAME_MAX));
         assert_eq!(scratchpad_dir_name(&long), None);
         assert!(scratchpad_dir_name(&long[..SCRATCHPAD_NAME_MAX]).is_some());
+    }
+
+    /// An ended run of task `task` whose task is `task_status`.
+    fn candidate(run: &str, task_status: TaskStatus) -> EndedRunWorktree {
+        EndedRunWorktree {
+            run_id: RunId::new(run.to_owned()).unwrap(),
+            task_id: TaskId::new(1),
+            status: RunStatus::Failed,
+            task_status,
+            worktree: format!("/runs/{run}/worktree"),
+            branch: Some(format!("refs/heads/dagq/{run}")),
+            cleanup: WorktreeCleanup::Ended,
+        }
+    }
+
+    const GONE: Left = Left {
+        worktree: false,
+        branch: Some(false),
+        failed: false,
+    };
+
+    /// Task 1586: what has to be left of a run for it to stay a
+    /// candidate.
+    #[test]
+    fn a_run_stays_a_candidate_while_something_of_it_is_left() {
+        let over = candidate("r", TaskStatus::Completed);
+        assert!(nothing_left(&over, GONE));
+        assert!(nothing_left(&candidate("r", TaskStatus::Canceled), GONE));
+        // The worktree's directory, a failure, or the branch of a task
+        // that is over.
+        for left in [
+            Left {
+                worktree: true,
+                ..GONE
+            },
+            Left {
+                failed: true,
+                ..GONE
+            },
+            Left {
+                branch: Some(true),
+                ..GONE
+            },
+            // The list was not read: the branch may be there.
+            Left {
+                branch: None,
+                ..GONE
+            },
+        ] {
+            assert!(!nothing_left(&over, left), "{left:?}");
+        }
+        // A run with no branch has none to be left.
+        let no_branch = EndedRunWorktree {
+            branch: None,
+            ..over.clone()
+        };
+        assert!(nothing_left(
+            &no_branch,
+            Left {
+                branch: None,
+                ..GONE
+            }
+        ));
+        // A task that goes on keeps the branch on purpose; the worktree
+        // and a failure still count.
+        let goes_on = candidate("r", TaskStatus::InProgress);
+        assert!(nothing_left(
+            &goes_on,
+            Left {
+                branch: Some(true),
+                ..GONE
+            }
+        ));
+        assert!(nothing_left(
+            &goes_on,
+            Left {
+                branch: None,
+                ..GONE
+            }
+        ));
+        assert!(!nothing_left(
+            &goes_on,
+            Left {
+                worktree: true,
+                ..GONE
+            }
+        ));
+        assert!(!nothing_left(
+            &goes_on,
+            Left {
+                failed: true,
+                ..GONE
+            }
+        ));
+        let waiting = EndedRunWorktree {
+            status: RunStatus::NeedsSession,
+            cleanup: WorktreeCleanup::Idle,
+            ..goes_on
+        };
+        assert!(nothing_left(&waiting, GONE));
+        assert!(!nothing_left(
+            &waiting,
+            Left {
+                worktree: true,
+                ..GONE
+            }
+        ));
+    }
+
+    /// Task 1586, the comparison of the receipt: N = 10 ended runs of
+    /// tasks that are over, M = 6 of them with nothing left once the job
+    /// passed them (the job cleaned them, or there was nothing). The job
+    /// reads each candidate alone (10 reads) and never lists every run;
+    /// the loop lists once per sweep. The second sweep's candidates are
+    /// the 4 runs something is left of.
+    #[test]
+    fn a_job_reads_each_candidate_alone_and_the_next_sweep_leaves_the_settled_out() {
+        const N: usize = 10;
+        const M: usize = 6;
+        let runs: Vec<EndedRunWorktree> = (0..N)
+            .map(|i| candidate(&format!("run-{i}"), TaskStatus::Completed))
+            .collect();
+        let cleaning = Mutex::new(Cleaning::default());
+        let stop = AtomicBool::new(false);
+        let all = Request {
+            all: true,
+            ..Request::default()
+        };
+        let mut lists = 0;
+        let mut sweep = |cleaning: &Mutex<Cleaning>| {
+            lists += 1;
+            let mut guard = lock_cleaning(cleaning);
+            let picked = pick_candidates(runs.clone(), &all, |_| false, &mut guard.settled);
+            guard.reserved = picked.iter().map(|w| w.run_id.clone()).collect();
+            drop(guard);
+            let picked_count = picked.len();
+            let mut reads = Vec::new();
+            pass_candidates(
+                cleaning,
+                &stop,
+                picked,
+                |run| {
+                    reads.push(run.clone());
+                    Ok(runs.iter().find(|w| w.run_id == *run).cloned())
+                },
+                // The first M have nothing left once passed.
+                |candidate, _| runs[..M].contains(candidate),
+            );
+            (picked_count, reads.len())
+        };
+        assert_eq!(sweep(&cleaning), (N, N));
+        assert_eq!(sweep(&cleaning), (N - M, N - M));
+        assert_eq!(lists, 2);
+        let guard = lock_cleaning(&cleaning);
+        assert!(guard.reserved.is_empty());
+        assert_eq!(guard.settled.len(), M);
+    }
+
+    /// Task 1586: the job skips a candidate leased, or moved on, since it
+    /// was picked, and settles none of them; a run it could not read
+    /// again is skipped too; a stop ends the pass with the rest unread.
+    #[test]
+    fn a_job_skips_a_candidate_that_moved_on_since_it_was_picked() {
+        let picked: Vec<EndedRunWorktree> = ["same", "leased", "moved", "unread", "after"]
+            .map(|run| candidate(run, TaskStatus::Completed))
+            .to_vec();
+        let cleaning = Mutex::new(Cleaning {
+            reserved: picked.iter().map(|w| w.run_id.clone()).collect(),
+            ..Cleaning::default()
+        });
+        let stop = AtomicBool::new(false);
+        let mut cleaned = Vec::new();
+        pass_candidates(
+            &cleaning,
+            &stop,
+            picked.clone(),
+            |run| match run.as_str() {
+                "leased" => Ok(None),
+                "moved" => Ok(Some(EndedRunWorktree {
+                    task_status: TaskStatus::Canceled,
+                    ..candidate("moved", TaskStatus::Completed)
+                })),
+                "unread" => {
+                    stop.store(true, Ordering::SeqCst);
+                    Err(anyhow::anyhow!("busy"))
+                }
+                _ => Ok(picked.iter().find(|w| w.run_id == *run).cloned()),
+            },
+            |candidate, _| {
+                cleaned.push(candidate.run_id.as_str().to_owned());
+                true
+            },
+        );
+        assert_eq!(cleaned, ["same"]);
+        let guard = lock_cleaning(&cleaning);
+        assert!(guard.reserved.is_empty());
+        assert_eq!(
+            guard.settled.keys().map(RunId::as_str).collect::<Vec<_>>(),
+            ["same"]
+        );
+    }
+
+    /// Task 1586: a settled run is a candidate again once the queue lists
+    /// it otherwise (its task moved on, or a lease hid it), once a slot
+    /// holds it, or once the loop leases it (a resume makes its worktree
+    /// again); while the job reserves a run, the loop may not lease it.
+    #[test]
+    fn a_settled_run_is_a_candidate_again_once_it_may_have_a_worktree_again() {
+        let run = candidate("r", TaskStatus::InProgress);
+        let all = Request {
+            all: true,
+            ..Request::default()
+        };
+        let settled_with =
+            |then: &EndedRunWorktree| HashMap::from([(then.run_id.clone(), then.clone())]);
+        // Listed the same: left out, and still settled.
+        let mut settled = settled_with(&run);
+        assert!(pick_candidates(vec![run.clone()], &all, |_| false, &mut settled).is_empty());
+        assert_eq!(settled.len(), 1);
+        // Its task is over now: its branch goes.
+        let over = EndedRunWorktree {
+            task_status: TaskStatus::Completed,
+            ..run.clone()
+        };
+        assert_eq!(
+            pick_candidates(vec![over.clone()], &all, |_| false, &mut settled),
+            [over]
+        );
+        assert!(settled.is_empty());
+        // Not listed (leased by another supervisor meanwhile), then listed
+        // the same again.
+        let mut settled = settled_with(&run);
+        assert!(pick_candidates(Vec::new(), &all, |_| false, &mut settled).is_empty());
+        assert_eq!(
+            pick_candidates(vec![run.clone()], &all, |_| false, &mut settled),
+            std::slice::from_ref(&run)
+        );
+        // A slot holds it: no candidate, and no longer settled.
+        let mut settled = settled_with(&run);
+        assert!(pick_candidates(vec![run.clone()], &all, |_| true, &mut settled).is_empty());
+        assert!(settled.is_empty());
+        // The loop leases it.
+        let mut cleaning = Cleaning {
+            settled: settled_with(&run),
+            ..Cleaning::default()
+        };
+        assert!(cleaning.may_lease(&run.run_id));
+        assert!(cleaning.settled.is_empty());
+        cleaning.reserved.push(run.run_id.clone());
+        cleaning.settled = settled_with(&run);
+        assert!(!cleaning.may_lease(&run.run_id));
+        assert_eq!(cleaning.settled.len(), 1);
     }
 }

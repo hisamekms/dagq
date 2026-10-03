@@ -1308,8 +1308,8 @@ impl Supervisor<'_> {
         // Not while the cleanup job clears the run's build outputs (task
         // 1289): the landing builds them again once it has passed.
         let cleaning = self.cleanup.cleaning();
-        let guard = cleanup::lock_cleaning(&cleaning);
-        if guard.contains(run.id()) {
+        let mut guard = cleanup::lock_cleaning(&cleaning);
+        if !guard.may_lease(run.id()) {
             self.cleanup.deferred = true;
             return Ok(());
         }
@@ -1360,8 +1360,8 @@ impl Supervisor<'_> {
             // Not while the cleanup job clears the run's build outputs
             // (task 1289).
             let cleaning = self.cleanup.cleaning();
-            let guard = cleanup::lock_cleaning(&cleaning);
-            if guard.contains(run.id()) {
+            let mut guard = cleanup::lock_cleaning(&cleaning);
+            if !guard.may_lease(run.id()) {
                 self.cleanup.deferred = true;
                 continue;
             }

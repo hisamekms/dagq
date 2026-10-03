@@ -2643,6 +2643,9 @@ mod tests {
         fn ended_run_worktrees(&self) -> Result<Vec<EndedRunWorktree>> {
             unreachable!("resumes_left reads only the run's events")
         }
+        fn ended_run_worktree(&self, _: &RunId) -> Result<Option<EndedRunWorktree>> {
+            unreachable!("resumes_left reads only the run's events")
+        }
         fn last_observe(&self, mode: &str) -> Result<Option<i64>> {
             unreachable!("resumes_left reads only the run's events")
         }

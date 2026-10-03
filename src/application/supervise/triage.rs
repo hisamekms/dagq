@@ -487,8 +487,8 @@ impl Supervisor<'_> {
             // Not while the cleanup job is to clear the run's worktree (task
             // 405).
             let cleaning = self.cleanup.cleaning();
-            let guard = cleanup::lock_cleaning(&cleaning);
-            if guard.contains(run.id()) {
+            let mut guard = cleanup::lock_cleaning(&cleaning);
+            if !guard.may_lease(run.id()) {
                 self.cleanup.deferred = true;
                 continue;
             }

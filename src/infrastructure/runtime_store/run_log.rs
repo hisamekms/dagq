@@ -713,48 +713,13 @@ impl SqliteQueue {
     /// an ask of the run is open and unanswered, else
     /// [`WorktreeCleanup::Idle`].
     pub fn ended_run_worktrees(&self) -> Result<Vec<EndedRunWorktree>> {
-        let mut statement = self.conn.prepare(
-            "SELECT r.id, r.task_id, r.status AS run_status, t.status AS task_status, r.branch,
-                    (r.status IN ('integrated','succeeded','failed','interrupted')
-                     OR t.status IN ('completed','canceled')) AS ended,
-                    (SELECT min(a.id) FROM asks a
-                     WHERE a.run_id=r.id AND a.answered_at IS NULL AND a.closed_at IS NULL) AS ask_id
-             FROM task_runs r
-             JOIN tasks t ON t.id=r.task_id
-             WHERE r.worktree_path IS NOT NULL
-             AND (((r.status IN ('integrated','succeeded','failed','interrupted')
-                    OR t.status IN ('completed','canceled'))
-                   AND (r.status IN ('integrated','succeeded','failed','interrupted')
-                        OR NOT EXISTS (SELECT 1 FROM run_leases l WHERE l.run_id=r.id)))
-                  OR (r.status IN ('awaiting_integration','needs_session')
-                      AND t.status NOT IN ('completed','canceled')
-                      AND NOT EXISTS (SELECT 1 FROM run_leases l WHERE l.run_id=r.id)
-                      AND NOT EXISTS (SELECT 1 FROM run_processes p WHERE p.run_id=r.id
-                                      AND p.exited_at IS NULL AND p.heartbeat_at >= ?1-?2)))
-             ORDER BY r.rowid",
-        )?;
+        let mut statement = self
+            .conn
+            .prepare(&format!("{ENDED_RUN_WORKTREES} ORDER BY r.rowid"))?;
         let live = self.live_leased_runs()?;
         let now = self.generators.clock.now();
         let rows = statement.query_map(params![now, HEARTBEAT_TIMEOUT_SECS], |row| {
-            let run_id: RunId = row.get(0)?;
-            let ended: bool = row.get(5)?;
-            let ask: Option<i64> = row.get(6)?;
-            Ok(EndedRunWorktree {
-                worktree: RunPaths::new(&self.runs_dir, &run_id)
-                    .worktree
-                    .to_string_lossy()
-                    .into_owned(),
-                run_id,
-                task_id: row.get(1)?,
-                status: enum_col(row, "run_status")?,
-                task_status: enum_col(row, "task_status")?,
-                branch: row.get(4)?,
-                cleanup: match (ended, ask) {
-                    (true, _) => WorktreeCleanup::Ended,
-                    (false, Some(ask)) => WorktreeCleanup::AwaitingAnswer(AskId::new(ask)),
-                    (false, None) => WorktreeCleanup::Idle,
-                },
-            })
+            self.ended_run_worktree_row(row)
         })?;
         let mut worktrees = Vec::new();
         for row in rows {
@@ -764,6 +729,56 @@ impl SqliteQueue {
             }
         }
         Ok(worktrees)
+    }
+
+    /// Run `id` as [`Self::ended_run_worktrees`] would list it, or `None`
+    /// when it would not: the cleanup job's check of a run it picked
+    /// before it cleans it (task 1586), which reads that run alone by its
+    /// key and its lease, not every run again.
+    pub fn ended_run_worktree(&self, id: &RunId) -> Result<Option<EndedRunWorktree>> {
+        let now = self.generators.clock.now();
+        let lease = self
+            .conn
+            .query_row(
+                "SELECT run_id,token,pid,heartbeat_at FROM run_leases WHERE run_id=?1",
+                [id],
+                lease_row,
+            )
+            .optional()?;
+        if lease.is_some_and(|lease| !lease_is_stale(&lease, now)) {
+            return Ok(None);
+        }
+        Ok(self
+            .conn
+            .query_row(
+                &ended_run_worktree_sql(),
+                params![now, HEARTBEAT_TIMEOUT_SECS, id],
+                |row| self.ended_run_worktree_row(row),
+            )
+            .optional()?)
+    }
+
+    /// A row of [`ENDED_RUN_WORKTREES`].
+    fn ended_run_worktree_row(&self, row: &Row<'_>) -> rusqlite::Result<EndedRunWorktree> {
+        let run_id: RunId = row.get(0)?;
+        let ended: bool = row.get(5)?;
+        let ask: Option<i64> = row.get(6)?;
+        Ok(EndedRunWorktree {
+            worktree: RunPaths::new(&self.runs_dir, &run_id)
+                .worktree
+                .to_string_lossy()
+                .into_owned(),
+            run_id,
+            task_id: row.get(1)?,
+            status: enum_col(row, "run_status")?,
+            task_status: enum_col(row, "task_status")?,
+            branch: row.get(4)?,
+            cleanup: match (ended, ask) {
+                (true, _) => WorktreeCleanup::Ended,
+                (false, Some(ask)) => WorktreeCleanup::AwaitingAnswer(AskId::new(ask)),
+                (false, None) => WorktreeCleanup::Idle,
+            },
+        })
     }
 
     /// The runs whose lease is not stale ([`lease_is_stale`]): a live
@@ -787,6 +802,33 @@ impl SqliteQueue {
         }
         Ok(live)
     }
+}
+
+/// The runs of [`SqliteQueue::ended_run_worktrees`] but for their live
+/// leases, which the caller leaves out; `?1` is now and `?2`
+/// [`HEARTBEAT_TIMEOUT_SECS`].
+const ENDED_RUN_WORKTREES: &str =
+    "SELECT r.id, r.task_id, r.status AS run_status, t.status AS task_status, r.branch,
+            (r.status IN ('integrated','succeeded','failed','interrupted')
+             OR t.status IN ('completed','canceled')) AS ended,
+            (SELECT min(a.id) FROM asks a
+             WHERE a.run_id=r.id AND a.answered_at IS NULL AND a.closed_at IS NULL) AS ask_id
+     FROM task_runs r
+     JOIN tasks t ON t.id=r.task_id
+     WHERE r.worktree_path IS NOT NULL
+     AND (((r.status IN ('integrated','succeeded','failed','interrupted')
+            OR t.status IN ('completed','canceled'))
+           AND (r.status IN ('integrated','succeeded','failed','interrupted')
+                OR NOT EXISTS (SELECT 1 FROM run_leases l WHERE l.run_id=r.id)))
+          OR (r.status IN ('awaiting_integration','needs_session')
+              AND t.status NOT IN ('completed','canceled')
+              AND NOT EXISTS (SELECT 1 FROM run_leases l WHERE l.run_id=r.id)
+              AND NOT EXISTS (SELECT 1 FROM run_processes p WHERE p.run_id=r.id
+                              AND p.exited_at IS NULL AND p.heartbeat_at >= ?1-?2)))";
+
+/// [`ENDED_RUN_WORKTREES`] for the run `?3` alone, by its key.
+fn ended_run_worktree_sql() -> String {
+    format!("{ENDED_RUN_WORKTREES} AND r.id=?3")
 }
 
 /// The [`RunLog`] port over the inherent methods above, which callers
@@ -838,6 +880,9 @@ impl RunLog for SqliteQueue {
     }
     fn ended_run_worktrees(&self) -> Result<Vec<EndedRunWorktree>> {
         SqliteQueue::ended_run_worktrees(self)
+    }
+    fn ended_run_worktree(&self, id: &RunId) -> Result<Option<EndedRunWorktree>> {
+        SqliteQueue::ended_run_worktree(self, id)
     }
     fn last_observe(&self, mode: &str) -> Result<Option<i64>> {
         SqliteQueue::last_observe(self, mode)
@@ -921,4 +966,49 @@ pub(super) fn queue_event(tx: &Connection, kind: EventKind, payload: &Value) -> 
     // The observer's session span (ADR-0048).
     crate::infrastructure::sessions::follow(tx, id, None, None, kind, payload)?;
     Ok(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The plan of `sql`, one line per step, its parameters NULL.
+    fn plan(conn: &Connection, sql: &str) -> Vec<String> {
+        let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let nulls = vec![rusqlite::types::Null; statement.parameter_count()];
+        statement
+            .query_map(rusqlite::params_from_iter(nulls), |r| {
+                r.get::<_, String>("detail")
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    /// The cleanup job's check of one run (task 1586) finds the run by its
+    /// key and its task by its own, and walks no table.
+    #[test]
+    fn the_check_of_one_run_searches_it_by_its_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let steps = plan(&queue.conn, &ended_run_worktree_sql());
+        let has = |step: &str| steps.iter().any(|line| line.starts_with(step));
+        assert!(
+            has("SEARCH r USING INDEX sqlite_autoindex_task_runs_1 (id=?)"),
+            "{steps:#?}"
+        );
+        assert!(
+            has("SEARCH t USING INTEGER PRIMARY KEY (rowid=?)"),
+            "{steps:#?}"
+        );
+        assert!(!has("SCAN"), "{steps:#?}");
+        let lease = plan(
+            &queue.conn,
+            "SELECT run_id,token,pid,heartbeat_at FROM run_leases WHERE run_id=?1",
+        );
+        assert!(
+            lease.iter().all(|line| line.starts_with("SEARCH")),
+            "{lease:#?}"
+        );
+    }
 }
