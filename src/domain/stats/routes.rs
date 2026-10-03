@@ -96,7 +96,9 @@ pub fn route_health(
         let inside = event.id > after && event.id <= upto && counts(event.task_id);
         let payload = &event.payload;
         match event.kind.as_str() {
-            TURN_FINISHED if inside => {
+            // A headless planner's turns are the queue's, not a run's
+            // (ADR-t1394-2).
+            TURN_FINISHED if inside && event.run_id.is_some() => {
                 let health = routes.entry(route.clone()).or_default();
                 health.turns += 1;
                 *health

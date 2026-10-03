@@ -6,7 +6,9 @@ use anyhow::{Result, ensure};
 use rusqlite::{OptionalExtension, Row, params};
 
 use super::sqlite::{SqliteQueue, enum_col};
-use crate::domain::{PlannerId, PlannerOrigin, PlannerSession, ProposalId};
+use crate::domain::{
+    PlannerId, PlannerOrigin, PlannerRoute, PlannerSession, ProposalId, RunEvent, event_kind,
+};
 
 impl SqliteQueue {
     /// Record a new planner before its workspace exists; the caller opens
@@ -71,6 +73,40 @@ impl SqliteQueue {
             .conn
             .prepare("SELECT * FROM planners WHERE ?1 OR closed_at IS NULL ORDER BY id")?
             .query_map([all], planner_row)?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Record the route the planner's agent runs on (ADR-t1394-2), before
+    /// its session starts; interactive is left as the column's NULL.
+    pub fn set_planner_route(&self, id: PlannerId, route: PlannerRoute) -> Result<()> {
+        ensure!(
+            self.conn.execute(
+                "UPDATE planners SET route=?2 WHERE id=?1 AND wrapper_pid IS NULL",
+                params![
+                    id,
+                    (route != PlannerRoute::Interactive).then_some(route.as_str())
+                ],
+            )? == 1,
+            "planner {id} has a session already or does not exist"
+        );
+        Ok(())
+    }
+
+    /// The turns of headless planner `id` (ADR-t1394-2 decision 2): the
+    /// queue's `turn_*` events that name it, oldest first.
+    pub fn planner_turn_events(&self, id: PlannerId) -> Result<Vec<RunEvent>> {
+        Ok(self
+            .conn
+            .prepare(&format!(
+                "SELECT * FROM run_events WHERE run_id IS NULL
+                   AND kind IN ('{}','{}','{}','{}')
+                   AND json_extract(payload, '$.planner_id')=?1 ORDER BY id",
+                event_kind::TURN_REQUESTED,
+                event_kind::TURN_STARTED,
+                event_kind::TURN_FINISHED,
+                event_kind::TURN_SESSION_IDENTIFIED,
+            ))?
+            .query_map([id], super::sqlite::event_row)?
             .collect::<rusqlite::Result<_>>()?)
     }
 
@@ -146,6 +182,16 @@ pub(super) fn planner_row(r: &Row<'_>) -> rusqlite::Result<PlannerSession> {
         closed_at: r.get("closed_at")?,
         error: r.get("error")?,
         created_at: r.get("created_at")?,
+        route: match r.get::<_, Option<String>>("route")? {
+            Some(route) => route.parse().map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+            None => PlannerRoute::Interactive,
+        },
     })
 }
 

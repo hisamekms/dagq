@@ -5,6 +5,7 @@
 //! for a draft blocker.
 
 use crate::common;
+use crate::runtime_support::background_wrappers::BackgroundWrappers;
 use dagq::infrastructure::adapters::shell_quote;
 use dagq::infrastructure::git_binary::git_executable;
 
@@ -308,6 +309,10 @@ pub(crate) struct PlanWorkspace {
     pub(crate) screen: Mutex<Option<Result<String, String>>>,
     /// Fail text submission after recording the attempted call.
     pub(crate) send_text_error: Option<String>,
+    /// The command line each workspace opened by name runs.
+    pub(crate) commands: Mutex<Vec<String>>,
+    /// The wrappers started in the background (ADR-t1404-1 decision 8).
+    pub(crate) background: BackgroundWrappers,
 }
 
 impl PlanWorkspace {
@@ -362,6 +367,7 @@ impl WorkspaceBackend for PlanWorkspace {
             .map_err(anyhow::Error::msg)
     }
     fn close(&self, workspace_id: &str) -> Result<()> {
+        self.background.stop(workspace_id);
         self.closed.lock().unwrap().push(workspace_id.into());
         self.listed.lock().unwrap().retain(|w| w != workspace_id);
         Ok(())
@@ -383,6 +389,9 @@ impl WorkspaceBackend for PlanWorkspace {
         Ok(self.listed.lock().unwrap().clone())
     }
     fn exists(&self, workspace_id: &str) -> Result<bool> {
+        if dagq::domain::background_wrapper::is_background(workspace_id) {
+            return Ok(self.background.runs(workspace_id));
+        }
         Ok(self
             .listed
             .lock()
@@ -390,7 +399,23 @@ impl WorkspaceBackend for PlanWorkspace {
             .iter()
             .any(|w| w == workspace_id))
     }
-    fn create_named(&self, name: &str, _: &Path, _: &str, _: &WorkspaceTags) -> Result<String> {
+    fn launch_background(
+        &self,
+        cwd: &Path,
+        command: &str,
+        env: &[(String, String)],
+        log: &Path,
+    ) -> Result<String> {
+        self.background.launch(cwd, command, env, log)
+    }
+    fn create_named(
+        &self,
+        name: &str,
+        _: &Path,
+        command: &str,
+        _: &WorkspaceTags,
+    ) -> Result<String> {
+        self.commands.lock().unwrap().push(command.to_owned());
         let mut opened = self.opened.lock().unwrap();
         let id = format!("RT{}", opened.len() + 1);
         opened.push((id.clone(), name.into()));

@@ -159,6 +159,12 @@ impl SessionRegistry for SqliteQueue {
     fn planners(&self, all: bool) -> Result<Vec<PlannerSession>> {
         SqliteQueue::planners(self, all)
     }
+    fn set_planner_route(&self, id: PlannerId, route: crate::domain::PlannerRoute) -> Result<()> {
+        SqliteQueue::set_planner_route(self, id, route)
+    }
+    fn planner_turn_events(&self, id: PlannerId) -> Result<Vec<RunEvent>> {
+        SqliteQueue::planner_turn_events(self, id)
+    }
     fn register_planner_wrapper(&self, id: PlannerId, pid: u32) -> Result<()> {
         SqliteQueue::register_planner_wrapper(self, id, pid)
     }

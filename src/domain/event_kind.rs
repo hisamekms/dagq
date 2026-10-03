@@ -341,6 +341,13 @@ impl EventKind {
                 // A planner's screen inferred idle without its idle marker
                 // (ADR-t803-1).
                 | IdleInferred
+                // The turns of a headless planner of the runtime's, which
+                // name it by `planner_id` (ADR-t1394-2 decision 2); a
+                // run's are on the run.
+                | TurnRequested
+                | TurnStarted
+                | TurnFinished
+                | TurnSessionIdentified
                 // A person's read of and send to a planner's session
                 // (ADR-t1228-1 decisions 4 and 5).
                 | ScreenRead

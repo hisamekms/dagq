@@ -40,9 +40,9 @@ related:
 
 [ADR-t451-1](../../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)の決定5（task 1320）。findingのplannerも、[Draft planners](draft-planners.md#推奨が出せればplannerが決める未実装)と同じく、dagq-planner skillの「Basic policy」に従う（`finding_planner_prompt`の「What to do」、`prompt::DECIDE_YOURSELF`）。推奨が出せる判断（既存のgoalへのtask、新しいgoal、`finding dismiss`）は自分で決め、理由をproposalのtaskの`--context`（`from finding N (kind)`に続けて、その手当てを選んだ理由）かfindingの`--reason`に書く。`planner_question`は、ADR-0047決定41の`scope`・`discard`に当たりqueue・repository・ADR・人の先例で決めきれないものと確信度が`low`のものだけにし（repositoryの規則でverify・paths・evidenceが決まらないこと自体は理由にしない。`prompt::RUNTIME_PLANNER_ASK`）、推奨（`--recommend <propose|dismiss>`）と確信度（`--confidence <high|low>`）を載せる。findingから作るproposalはfollow_upの上限の対象にならない（ADR-0047決定20）。unit testは`application::prompt`の`the_finding_planner_decides_what_it_can_recommend`。
 
-## 予定: 人のplannerの廃止と非対話の経路（未実装、ADR-t1394-1・ADR-t1394-2）<a id="予定-人のplannerの廃止と非対話の経路"></a>
+## 予定: 人のplannerの廃止と非対話の経路（ADR-t1394-1は未実装、ADR-t1394-2の経路は実装済み）<a id="予定-人のplannerの廃止と非対話の経路"></a>
 
-[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)と[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)（goal 87）の予定で、**まだ実装していない**。流れの全体は[予定: inboxからの依頼と非対話のplanner](plan-planners.md#予定-inboxからの依頼と非対話のplanner)にある。
+[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)と[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)（goal 87）。人のplannerの廃止（ADR-t1394-1）は予定で**まだ実装していない**。非対話の経路（ADR-t1394-2の決定1・2）は実装した。流れの全体は[予定: inboxからの依頼と非対話のplanner](plan-planners.md#予定-inboxからの依頼と非対話のplanner)にある。
 
 - 8の`finding_planner_exhausted`のattention（`decide the finding in a planner`）と、9の「runtimeのplannerが一度も立っていないfindingのanswerは人（人が開いたplannerの質問）」は、人が開くplannerの廃止の後、inboxがそのfindingを参照（`--ref finding:N`）にした計画の依頼を記録し、依頼のplannerが`submit --finding`か`finding dismiss`で決める経路に変わる。人が`DAGQ_ROLE`の無いterminalで打つ`submit --finding` / `finding dismiss`は残る。依頼のplannerがsubmitしたproposalは、依頼とfindingの両方に結ばれる。
-- findingのplannerも`[roles.runtime_planner]`の経路に従う。非対話では、9の答えの打ち込みと10の`/exit`が次のturnの依頼と終了の依頼になり、idleはturnの終わりで判断する。11の改善の上限は変えない（依頼のplannerはfindingを持たないかぎり改善に数えない）。
+- findingのplannerも`[roles.runtime_planner]`の経路に従う（実装済み、task 1396。[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)）。非対話では、9の答えの打ち込みと10の`/exit`が次のturnの依頼と終了の依頼になり（`Supervisor::send_to_planner`）、idleはturnの終わりで判断する。11の改善の上限は変えない（依頼のplannerはfindingを持たないかぎり改善に数えない）。

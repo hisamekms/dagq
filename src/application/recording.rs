@@ -244,8 +244,11 @@ impl<'a> RecordingBackend<'a> {
         }
         let processes = self.left_turns.as_deref()?;
         let queue = self.queues.open().ok()?;
-        let run = queue.run_in_workspace(workspace_id).ok()??;
-        let turn = super::supervise::left_turn(&*queue, processes, &run, workspace_id)?;
+        // A run's session, else a headless planner's (ADR-t1394-2).
+        let turn = match queue.run_in_workspace(workspace_id).ok()? {
+            Some(run) => super::supervise::left_turn(&*queue, processes, &run, workspace_id)?,
+            None => super::supervise::left_planner_turn(&*queue, processes, workspace_id)?,
+        };
         Some((processes as &dyn super::ProcessControl, turn))
     }
 

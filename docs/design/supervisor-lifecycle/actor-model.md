@@ -41,7 +41,7 @@ worker以外のアクターのsessionのmodelとeffortの設定と、provider・
 | `runtime_planner` | runtimeが立てるplanner（reviseのplanner、draftのplanner、findingのplanner） | plannerを開くpassごと |
 | `planner` | 人が`dagq plan`で開くplanner（main checkoutの`dagq.toml`） | `dagq plan`ごと |
 
-`runtime_planner`は人のplannerの廃止の後、計画の依頼のplannerも含む。`planner`は人が開くplannerの廃止（[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)、未実装）の後は新しいplannerに使われない（下の[予定](#予定-runtimeのplannerの経路)）。
+`runtime_planner`は人のplannerの廃止の後、計画の依頼のplannerも含む。`planner`は人が開くplannerの廃止（[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)、未実装）の後は新しいplannerに使われない。`runtime_planner`はplannerの経路（`route`）も持つ（下の[runtimeのplannerの経路](#runtimeのplannerの経路)）。
 
 - **無いとき**: 役割の表が無い（keyの無い表も同じ）ときは今までと同じ起動で、`--model` / `--effort`を渡さない（Claude Codeの既定。今はOpus 5.5・medium）。この task を入れただけでは挙動は変わらない
 - **あるとき**: 表の`model`と`effort`を`AgentProvider::apply_launch`が`AgentProvider::select_model`（task 576の仕組み。Claude Codeでは`--model <model> --effort <effort>`をoptionの末尾、`--`の前）で渡す。片方だけ書いたときは、もう片方は既定（`claude-opus-5-5` / `medium`）を明示して渡す
@@ -96,24 +96,28 @@ plan reviewの`revise`（と`reopen`）の指摘を配るとき、持ち主のpl
 - **Codexのjobの実際のmodelとthread**（task 1065）: Codexはsessionのidをrunを始める前に受け取らず（threadを自分で名付ける）、transcriptも無いので、Codexのgoal reviewは`goal_review_started`の`session_id`をnullにし（plan reviewも同じく`plan_review_started`の`session_id`をnullにし、`plan_review_finished` / `plan_review_failed`に同じ値を写す。task 1218。スループットの見直しも`throughput_review_started`の`session_id`をnullにし、`throughput_review_finished`に同じ値を写す。task 1220）、終わりのevent（`goal_review_finished` / `goal_review_failed`）に`session_id`（threadのid）・`model`（rolloutから読んだ実際のmodel）・`model_unknown`（読めなかった理由。読めたときは無い）を写す（`domain::headless_job::JobSession::record`）。区間の`session_closed`も同じ値を持つ（[Agent provider lifecycle](../provider-lifecycle.md#claude-sessionの区間)）。上の「写さない」はClaudeのjobの話で、Codexのjobは終わりのeventしか値の出どころが無いので写す。`stats`のjobの`by_model`は、開始の`session_id`の`session_closed`が無ければ終わりのeventの`model`を読む
 - **`headless_jobs.provider`**（schema v55、`migrations/0055_headless_job_provider.sql`）: supervisorが起動するheadlessのjob（review・復旧・plan review・goal review）のプロセスの行に、起動したprovider（`JobSubject::provider`。goal review・runのreview（ADR-t1207-1）・plan review（task 1218）は行き先で実際に起動したprovider（launchの`provider`。切り替えた後ならその先）、他（復旧）は`ROLE_PROVIDER`）を書く。`NOT NULL DEFAULT 'claude'`なので、migrationより前の行と、列を知らない古いバイナリが書く行は`claude`と読める（[Headless job processes](headless-job-processes.md)）
 
-## 予定: runtimeのplannerの経路<a id="予定-runtimeのplannerの経路"></a>
+## runtimeのplannerの経路<a id="runtimeのplannerの経路"></a>
 
-[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)（goal 87）の予定で、**まだ実装していない**。欄名と値は仮。
+[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)の決定1（goal 87、task 1396）。
 
 ```toml
 [roles.runtime_planner]
 route = "headless"   # 省けばinteractive（評価まで）
 ```
 
-- `route`は`[roles.runtime_planner]`だけが持ち、他の役割に書けば`RoleModels::check`がエラーにする。`provider`は`claude`のまま（Codexのplannerは別のgoal。`CODEX_ROLES`に`runtime_planner`は入らない）。
-- `launch`に`route`を足し、plannerの区間の`session_opened`の`launch`と`planners`の行に残す。非対話のplannerの区間はhookでなくturnから記録する（[`plan` / `planners`](plan-planners.md#予定-inboxからの依頼と非対話のplanner)）。
+- `route`（`interactive` / `headless`、`domain::PlannerRoute`）は`[roles.runtime_planner]`だけが持ち、他の役割に書けば`RoleModel::check`が「route is a key of [roles.runtime_planner] only」でエラーにし、知らない値は「is not a route」で拒む。`provider`は`claude`のまま（Codexのplannerは別のgoal。`CODEX_ROLES`に`runtime_planner`は入らない）。
+- `route`だけを書いた表は起動に何も渡さない（`RoleModels::launch`は`provider` / `model` / `effort`のどれも無い表を表の無い役割と同じに扱い、`default`の起動のまま）。
+- 経路と出どころは`RoleModels::planner_route`（`dagq.toml`か`default`）。supervisorはplannerを開くたびに`[roles]`を読み（`PlannerLaunch::roles`）、開くplannerの`planners.route`に残す（下の[`plan` / `planners`](plan-planners.md#runtimeのplannerの経路)）。動いているplannerの経路は変えない。人が開くplannerは`[roles.runtime_planner]`に依らず対話。
+- `dagq doctor`の`roles.runtime_planner`は`route`と`route_source`（`dagq.toml` / `default`）を持つ（`compose::doctor_roles`）。読めない`dagq.toml`では他の役割と同じく`error`を出し、経路は既定の`interactive`。
 - reviseで開き直すplannerの段上げは経路に依らず同じ。非対話の生きているplannerへの配送も新しく起動しないので上げない（`effort_not_raised`）。
-- `dagq doctor`の`roles`に`runtime_planner`の`route`と出どころを出す。
-- `[roles.planner]`は人のplannerの廃止の後は読まれない。書いてあっても拒まず、`doctor`に使われないことを出す（仮）。
+
+まだ実装していないもの（goal 87の後続task）: `launch`への`route`の記録、非対話のplannerの区間をturnから開いて閉じることと`stats` / `kpi`の経路ごとの集計（ADR-t1394-2決定4）、`[roles.planner]`が人のplannerの廃止の後に読まれないことの`doctor`への表示。
 
 ## テスト
 
 - `domain::actor_model`の単体テスト（表が無い役割、表の値と既定、段上げと上限、記録の読み戻し、effortの検査、全ての役割の`launch`の`provider`と`provider`の無い過去の記録を`claude`と読むこと（`every_launch_records_its_provider_and_an_older_one_reads_as_claude`））
+- `infrastructure::run_env`の`parses_the_route_of_the_runtimes_planners`（`route`の既定と`dagq.toml`、`route`だけの表が起動に何も渡さないこと、`[roles.runtime_planner]`の外の`route`と知らない値と重複のエラー）
+- `tests/it/planner_headless.rs`: `doctor`の`roles.runtime_planner`の`route`と`route_source`（`headless` / `dagq.toml`、`interactive` / `default`と`dagq.toml`）
 - `infrastructure::run_env`の`parses_the_role_tables`（`provider`の値、`CODEX_ROLES`以外の`codex`とCodexの表のClaudeのmodelのエラー、`plan_review`と`throughput_review`の`codex`を受け付けること）
 - `domain::actor_model`の`a_role_table_names_its_provider`と`a_job_moves_to_the_other_provider_or_waits`（task 1065）
 - `tests/it/goal_review_codex.rs`（task 1065）: `provider = "codex"`でgoal reviewがstubの`codex exec --json`（`:read-only`を継ぐjobのpermission profile `dagq_job`。goal 82の段(3)）で動き、jobの`dagq`がqueue service経由で読み、verdict・thread・modelを読んで適用し、`doctor`の`roles`とgoal review以外の`codex`のエラー、Codexの認証の失敗からClaudeへの切り替え、Codexが無いときのClaude、両方控えられたときの待ち

@@ -230,11 +230,11 @@ pub fn run_session(
         Turns {
             queue: &mut *queue,
             db,
-            run: &run,
+            owner: super::headless_session::TurnOwner::Run(&run),
             provider,
             other,
             spawner,
-            queue_service,
+            queue_service: Some(queue_service),
             processes,
             files,
             pid,

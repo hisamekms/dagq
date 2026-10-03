@@ -190,15 +190,18 @@ fn reads_do_not_create_a_queue_and_unknown_tasks_fail() {
             // No claim is deferred on a conflict hotspot (ADR-0069).
             expected["claim_deferrals"] = serde_json::json!([]);
         } else {
-            // Every role on Claude with nothing given (ADR-t1063-1).
+            // Every role on Claude with nothing given (ADR-t1063-1), the
+            // runtime's planners interactive (ADR-t1394-2 decision 1).
             expected["roles"] = dagq::domain::actor_model::ModelRole::ALL
                 .iter()
                 .map(|role| {
-                    (
-                        role.as_str().to_owned(),
-                        serde_json::json!({"provider": "claude", "source": "default",
-                                           "model": null, "effort": null}),
-                    )
+                    let mut entry = serde_json::json!({"provider": "claude", "source": "default",
+                                                       "model": null, "effort": null});
+                    if *role == dagq::domain::actor_model::ModelRole::RuntimePlanner {
+                        entry["route"] = "interactive".into();
+                        entry["route_source"] = "default".into();
+                    }
+                    (role.as_str().to_owned(), entry)
                 })
                 .collect::<serde_json::Map<_, _>>()
                 .into();

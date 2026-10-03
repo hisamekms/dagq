@@ -257,6 +257,23 @@ pub fn last_turn_of(events: &[super::RunEvent], handle: &str) -> Option<Backgrou
         })
 }
 
+/// The last turn a headless planner recorded starting (ADR-t1394-2), from
+/// its `turn_*` events (`events`, the queue's that name it): a planner has
+/// one session, so its last turn is its session's, as [`last_turn_of`]
+/// finds a run's session's.
+pub fn last_planner_turn(events: &[super::RunEvent]) -> Option<BackgroundHandle> {
+    events
+        .iter()
+        .rfind(|event| event.kind == super::event_kind::TURN_STARTED)
+        .and_then(|event| {
+            let pid = u32::try_from(event.payload["pid"].as_u64()?).ok()?;
+            Some(BackgroundHandle {
+                pid,
+                start: event.payload["start"].as_str()?.to_owned(),
+            })
+        })
+}
+
 /// The log in the run dir the background wrapper of a session writes its
 /// output to: `session.log` for the worker's session, one per resume and
 /// per reopening (`resume` is the attempt).
@@ -520,5 +537,35 @@ mod tests {
         assert_eq!(session_log_name(None, false), "session.log");
         assert_eq!(session_log_name(Some(2), false), "session-resume-2.log");
         assert_eq!(session_log_name(Some(1), true), "session-reopen-1.log");
+    }
+
+    #[test]
+    fn a_planners_last_turn_is_its_last_turn_started() {
+        assert_eq!(last_planner_turn(&[]), None);
+        let started = |pid: u32, start: &str| {
+            event(
+                "turn_started",
+                serde_json::json!({"planner_id": 1, "pid": pid, "start": start_token(start)}),
+            )
+        };
+        let events = [
+            started(70, START),
+            event("turn_finished", serde_json::json!({"planner_id": 1})),
+            started(71, OTHER),
+            event("turn_finished", serde_json::json!({"planner_id": 1})),
+        ];
+        assert_eq!(
+            last_planner_turn(&events),
+            Some(BackgroundHandle::new(71, OTHER))
+        );
+        // A turn whose agent did not start records no pid.
+        let events = [
+            started(70, START),
+            event(
+                "turn_started",
+                serde_json::json!({"planner_id": 1, "pid": null}),
+            ),
+        ];
+        assert_eq!(last_planner_turn(&events), None);
     }
 }

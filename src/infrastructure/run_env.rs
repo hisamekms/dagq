@@ -559,6 +559,18 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     table.provider = Some(provider);
                 } else if key == "model" {
                     table.model = Some(value);
+                } else if key == crate::domain::actor_model::ROUTE_KEY {
+                    // Only [roles.runtime_planner] takes it, which the
+                    // check of the tables says (ADR-t1394-2 decision 1).
+                    let route = value
+                        .parse::<crate::domain::PlannerRoute>()
+                        .map_err(|_| {
+                            anyhow::anyhow!(
+                                "{value} is not a route; the routes are interactive and headless"
+                            )
+                        })
+                        .with_context(with)?;
+                    table.route = Some(route);
                 } else {
                     check_effort(&value)
                         .map_err(|error| anyhow::anyhow!("{error}"))
@@ -1752,7 +1764,8 @@ LITERAL = 'no \n escapes # here'
             Some(&RoleModel {
                 provider: None,
                 model: None,
-                effort: Some("high".into())
+                effort: Some("high".into()),
+                route: None,
             })
         );
         assert_eq!(
@@ -1760,7 +1773,8 @@ LITERAL = 'no \n escapes # here'
             Some(&RoleModel {
                 provider: None,
                 model: Some("claude-sonnet-5".into()),
-                effort: None
+                effort: None,
+                route: None,
             })
         );
         // A table without a key is none.
@@ -1803,7 +1817,8 @@ LITERAL = 'no \n escapes # here'
             Some(&RoleModel {
                 provider: Some(crate::domain::Provider::Codex),
                 model: Some("gpt-6-astra".into()),
-                effort: None
+                effort: None,
+                route: None,
             })
         );
         assert_eq!(
@@ -1836,6 +1851,55 @@ LITERAL = 'no \n escapes # here'
                 .arguments(),
             Some(("claude-opus-5-5", "xhigh"))
         );
+    }
+
+    #[test]
+    fn parses_the_route_of_the_runtimes_planners() {
+        use crate::domain::actor_model::LaunchSource;
+        use crate::domain::{PlannerRoute, actor_model::ModelRole};
+        // Interactive until the table names it (ADR-t1394-2 decision 1).
+        assert_eq!(
+            parse_config("").unwrap().roles.planner_route(),
+            (PlannerRoute::Interactive, LaunchSource::Default)
+        );
+        let config = parse_config("[roles.runtime_planner]\nroute = \"headless\"\n").unwrap();
+        assert_eq!(
+            config.roles.planner_route(),
+            (PlannerRoute::Headless, LaunchSource::Config)
+        );
+        // The route alone gives the planner's agent no model or effort.
+        assert_eq!(
+            config.roles.launch(ModelRole::RuntimePlanner).arguments(),
+            None
+        );
+        let config =
+            parse_config("[roles.runtime_planner]\nroute = 'interactive'\neffort = 'high'\n")
+                .unwrap();
+        assert_eq!(
+            config.roles.planner_route(),
+            (PlannerRoute::Interactive, LaunchSource::Config)
+        );
+        assert_eq!(
+            config.roles.launch(ModelRole::RuntimePlanner).arguments(),
+            Some(("claude-opus-5-5", "high"))
+        );
+        for (text, expected) in [
+            (
+                "[roles.runtime_planner]\nroute = 'screen'",
+                "is not a route",
+            ),
+            (
+                "[roles.planner]\nroute = 'headless'",
+                "route is a key of [roles.runtime_planner] only",
+            ),
+            (
+                "[roles.runtime_planner]\nroute = 'headless'\nroute = 'headless'",
+                "is defined twice",
+            ),
+        ] {
+            let error = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(error.contains(expected), "{text:?}: {error}");
+        }
     }
 
     #[test]

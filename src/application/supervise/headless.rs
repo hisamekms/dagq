@@ -9,7 +9,9 @@
 //! idle marker ([`TurnMark`]) and the `turn_finished` events.
 
 use super::*;
+use crate::application::planner::PlannerView;
 use crate::domain::EventKind;
+use crate::domain::PlannerRoute;
 use crate::domain::recovery::PERMISSION_DENIED;
 use crate::domain::turn::{
     self, LIMITS_FILE, TurnFailure, TurnMark, TurnOutcome, TurnRequest, exit_path, next_seq,
@@ -47,23 +49,7 @@ pub(super) fn request_turn(
     // No turn of a `disabled` queue starts with the tools an earlier mode
     // left (task 1141).
     sv.broker_before_turn(run);
-    let names: Vec<String> = sv
-        .files
-        .read_dir(&dir)?
-        .iter()
-        .filter_map(|path| path.file_name()?.to_str().map(str::to_owned))
-        .collect();
-    let seq = next_seq(names.iter().map(String::as_str));
-    let request = TurnRequest {
-        seq,
-        what: what.to_owned(),
-        prompt: text.to_owned(),
-    };
-    let path = request_path(run_dir, seq);
-    let tmp = path.with_extension("json.tmp");
-    sv.files
-        .write(&tmp, serde_json::to_string(&request)?.as_bytes())?;
-    sv.files.rename(&tmp, &path)?;
+    let seq = write_request(&*sv.files, run_dir, text, what)?;
     // Written: a record that fails is only noted, as for a typed text.
     if let Err(error) = sv.queue.record_runtime_event(
         run.id(),
@@ -74,6 +60,69 @@ pub(super) fn request_turn(
     }
     info!(run_id = %run.id(), "{what} requested of the headless session of {} (request {seq})", run.id());
     Ok(Submission::Queued)
+}
+
+/// Write `text` as the next request (`what`) of the headless session whose
+/// directory is `dir` (its `turns/` made); the request's sequence number.
+fn write_request(files: &dyn RunFiles, dir: &Path, text: &str, what: &str) -> Result<u64> {
+    let turns = turns_dir(dir);
+    files.create_dir_all(&turns)?;
+    let names: Vec<String> = files
+        .read_dir(&turns)?
+        .iter()
+        .filter_map(|path| path.file_name()?.to_str().map(str::to_owned))
+        .collect();
+    let seq = next_seq(names.iter().map(String::as_str));
+    let request = TurnRequest {
+        seq,
+        what: what.to_owned(),
+        prompt: text.to_owned(),
+    };
+    let path = request_path(dir, seq);
+    let tmp = path.with_extension("json.tmp");
+    files.write(&tmp, serde_json::to_string(&request)?.as_bytes())?;
+    files.rename(&tmp, &path)?;
+    Ok(seq)
+}
+
+impl Supervisor<'_> {
+    /// Send `input` (`what` names it) to the planner of `view` in
+    /// `workspace`: typed into its terminal, or, for a headless planner
+    /// (ADR-t1394-2 decision 2), written as its next request in its
+    /// directory's `turns/` and recorded as `turn_requested` naming it,
+    /// and `/exit` as its exit request.
+    pub(super) fn send_to_planner(
+        &mut self,
+        view: &PlannerView,
+        workspace: &str,
+        input: Input<'_>,
+        what: &str,
+    ) -> Result<()> {
+        if view.planner.route != PlannerRoute::Headless {
+            submit_input(self.cmux, self.signals, workspace, input)?;
+            return Ok(());
+        }
+        let id = view.planner.id;
+        let text = match input {
+            Input::Exit => {
+                self.files.create_dir_all(&turns_dir(&view.dir))?;
+                self.files.write(&exit_path(&view.dir), b"")?;
+                info!("exit requested of the headless planner {id}");
+                return Ok(());
+            }
+            Input::Text(text) => text,
+        };
+        let seq = write_request(&*self.files, &view.dir, text, what)?;
+        // Written: a record that fails is only noted, as for a typed text.
+        if let Err(error) = self.queue.record_queue_event(
+            EventKind::TurnRequested,
+            json!({"planner_id": id, "seq": seq, "what": what, "workspace_id": workspace}),
+        ) {
+            warn!(error = %format_args!("{error:#}"), "turn_requested of planner {id} could not be recorded: {error:#}");
+        }
+        info!("{what} requested of the headless planner {id} (request {seq})");
+        Ok(())
+    }
 }
 
 /// What the request carrying the answer of the `stalled` ask `ask` is: it

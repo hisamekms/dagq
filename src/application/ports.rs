@@ -2,7 +2,7 @@
 //! service manager, processes, time and IDs through. The infrastructure
 //! implements them and the entry points inject the implementations.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Serialize;
 use std::{
     collections::HashMap,
@@ -667,13 +667,17 @@ pub trait AgentProvider {
     /// [`AgentProvider::turn_reader`]. The caller closes stdin, says where
     /// the output goes and starts it in a process group of its own. A
     /// provider without one refuses.
+    ///
+    /// `target` says where the turn runs: a run's worktree and directory,
+    /// or a headless planner's checkout and directory (ADR-t1394-2
+    /// decision 6: the provider has no branch of the planner's own).
     fn turn_command(
         &self,
-        run: &crate::domain::TaskRun,
+        target: &TurnTarget<'_>,
         prompt: &str,
         session: crate::domain::turn::TurnSession<'_>,
     ) -> Result<CommandSpec> {
-        let _ = (run, prompt, session);
+        let _ = (target, prompt, session);
         anyhow::bail!("this provider has no headless worker")
     }
     /// Whether the agent names a new session itself, in the turn's output
@@ -683,12 +687,13 @@ pub trait AgentProvider {
     fn turn_session_from_output(&self) -> bool {
         false
     }
-    /// Whether the agent keeps a session named `name` in `run`'s worktree
-    /// already (its transcript exists), so that the next turn resumes it
-    /// rather than starting one of that name again: a turn that failed
-    /// before its model answered (a login that ran out) may have left one.
-    fn turn_session_exists(&self, run: &crate::domain::TaskRun, name: &str) -> bool {
-        let _ = (run, name);
+    /// Whether the agent keeps a session named `name` in `cwd` (the
+    /// turn's working directory) already (its transcript exists), so that
+    /// the next turn resumes it rather than starting one of that name
+    /// again: a turn that failed before its model answered (a login that
+    /// ran out) may have left one.
+    fn turn_session_exists(&self, cwd: &std::path::Path, name: &str) -> bool {
+        let _ = (cwd, name);
         false
     }
     /// The reader of a headless turn's output, one per turn.
@@ -812,6 +817,35 @@ impl<'a> WorkerAdapters<'a> {
             .filter(|(worker, _)| worker.provider == provider)
             .map(|(worker, _)| worker.mode)
             .collect()
+    }
+}
+
+/// Where a headless turn runs (ADR-t813-1, ADR-t1394-2): the actor it
+/// runs for (a worker, or a planner of the runtime's), the directory of its
+/// requests, settings and turns (the run's or the planner's), the directory
+/// it works in (the run's worktree, or the repository's checkout), its
+/// agent's debug log (a provider that writes one refuses a target without
+/// it), and the plugin directory it loads (a planner's).
+#[derive(Debug, Clone, Copy)]
+pub struct TurnTarget<'a> {
+    pub role: crate::domain::ActorRole,
+    pub dir: &'a std::path::Path,
+    pub cwd: &'a std::path::Path,
+    pub debug_log: Option<&'a std::path::Path>,
+    pub plugin_dir: Option<&'a std::path::Path>,
+}
+
+impl<'a> TurnTarget<'a> {
+    /// The turn of `run`'s worker: in its worktree, with its run directory
+    /// and log.
+    pub fn of_run(run: &'a crate::domain::TaskRun) -> Result<Self> {
+        Ok(Self {
+            role: crate::domain::ActorRole::Worker,
+            dir: std::path::Path::new(run.run_dir().context("missing run directory")?),
+            cwd: std::path::Path::new(run.worktree_path().context("missing worktree")?),
+            debug_log: run.log_path().map(std::path::Path::new),
+            plugin_dir: None,
+        })
     }
 }
 
@@ -1974,6 +2008,11 @@ pub trait SessionRegistry {
     fn planner(&self, id: PlannerId) -> Result<PlannerSession>;
     /// The planners not closed, oldest first; with `all`, every planner.
     fn planners(&self, all: bool) -> Result<Vec<PlannerSession>>;
+    /// Record the route the planner's agent runs on (ADR-t1394-2), before
+    /// its session starts.
+    fn set_planner_route(&self, id: PlannerId, route: crate::domain::PlannerRoute) -> Result<()>;
+    /// The `turn_*` events of headless planner `id`, oldest first.
+    fn planner_turn_events(&self, id: PlannerId) -> Result<Vec<RunEvent>>;
     /// The planner's session wrapper registers itself, once.
     fn register_planner_wrapper(&self, id: PlannerId, pid: u32) -> Result<()>;
     fn register_planner_agent(&self, id: PlannerId, wrapper_pid: u32, agent: u32) -> Result<()>;

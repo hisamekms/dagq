@@ -78,7 +78,8 @@ impl Supervisor<'_> {
                         ask.answer.as_deref().unwrap_or_default()
                     );
                     self.stamp_planner_input(view);
-                    match submit_input(self.cmux, self.signals, &workspace, Input::Text(&text)) {
+                    let what = format!("answer of ask {}", ask.id);
+                    match self.send_to_planner(view, &workspace, Input::Text(&text), &what) {
                         Ok(_) => {
                             self.queue.ask_delivered(ask.id, &workspace)?;
                             info!(task_id = %task, ask_id = %ask.id, "answer of ask {} sent to planner {} in workspace {workspace}", ask.id, planner.id);

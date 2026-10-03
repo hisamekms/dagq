@@ -814,7 +814,7 @@ impl Supervisor<'_> {
                     );
                     self.stamp_planner_input(view);
                     if let Err(error) =
-                        submit_input(self.cmux, self.signals, &workspace, Input::Text(&text))
+                        self.send_to_planner(view, &workspace, Input::Text(&text), "revise")
                     {
                         warn!(error = %format_args!("{error:#}"), "proposal {}: the revise could not be typed into workspace {workspace}: {error:#}", proposal.id());
                         self.queue
@@ -964,7 +964,7 @@ impl Supervisor<'_> {
                 now - last,
                 reasons.join(", ")
             );
-            submit_input(self.cmux, self.signals, &workspace, Input::Exit)?;
+            self.send_to_planner(view, &workspace, Input::Exit, "exit")?;
             self.planner_exits.push((id, Instant::now()));
             self.queue.record_queue_event(
                 EventKind::PlannerReleased,
@@ -1199,6 +1199,11 @@ impl Supervisor<'_> {
                 warn!(error = %format_args!("{error:#}"), "[roles] could not be read; the planner starts as before: {error:#}");
                 Default::default()
             }),
+            headless_wrapper: self.verifier.headless_wrapper().unwrap_or_else(|error| {
+                warn!(error = %format_args!("{error:#}"), "[headless] could not be read; a headless planner's wrapper opens in a workspace: {error:#}");
+                Default::default()
+            }),
+            turn_limits: self.stall.turn_limits(),
         }
     }
 
@@ -1271,10 +1276,23 @@ impl Supervisor<'_> {
                         ),
                     )
                 } else {
+                    // A wrapper in the background is its handle: once it
+                    // ended on its agent's exit, the handle is gone too
+                    // (ADR-t1404-1 decision 10).
+                    let background_exited = view.planner.exited_at.is_some()
+                        && workspace
+                            .as_deref()
+                            .is_some_and(crate::domain::background_wrapper::is_background);
                     match view.state {
                         PlannerState::Exited => (
                             PlannerCloseCode::RuntimeExited,
                             format!("planner {id} of the runtime: its agent exited"),
+                        ),
+                        PlannerState::Closed if background_exited => (
+                            PlannerCloseCode::RuntimeExited,
+                            format!(
+                                "planner {id} of the runtime: its agent exited and its background wrapper ended"
+                            ),
                         ),
                         PlannerState::Lost => (
                             PlannerCloseCode::RuntimeLost,
@@ -1309,7 +1327,7 @@ impl Supervisor<'_> {
             if self.busy_reasons(view, &revising)?.is_empty()
                 && let Some(workspace) = &workspace
             {
-                submit_input(self.cmux, self.signals, workspace, Input::Exit)?;
+                self.send_to_planner(view, workspace, Input::Exit, "exit")?;
                 self.planner_exits.push((id, Instant::now()));
                 info!("planner {id} of the runtime is done; asked it to exit");
             }

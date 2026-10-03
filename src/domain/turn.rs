@@ -192,11 +192,24 @@ impl<'a> TurnSession<'a> {
 /// for each, since Claude Code refuses a session id in use and the session
 /// after a switch is a new one.
 pub fn session_name(run_id: &str, switches: usize) -> String {
-    use sha2::{Digest, Sha256};
     if switches == 0 {
         return run_id.to_owned();
     }
-    let digest = Sha256::digest(format!("{run_id}/{switches}").as_bytes());
+    uuid_of(&format!("{run_id}/{switches}"))
+}
+
+/// The name of the session of the headless planner opened at `created_at`
+/// (Unix seconds) whose directory is `dir` (ADR-t1394-2 decision 2): a
+/// UUID of its own, which a planner of the same ID in a queue made again
+/// does not share.
+pub fn planner_session_name(dir: &str, created_at: i64) -> String {
+    uuid_of(&format!("planner/{dir}/{created_at}"))
+}
+
+/// A version-4 shaped UUID made from `seed`.
+fn uuid_of(seed: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(seed.as_bytes());
     let mut bytes = [0u8; 16];
     bytes.copy_from_slice(&digest[..16]);
     // A version-4 shaped UUID (the variant and version bits set).

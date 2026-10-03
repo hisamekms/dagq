@@ -2183,6 +2183,8 @@ same in one step",
                 options.user_config.as_deref(),
             ),
             roles: roles.clone().unwrap_or_default(),
+            headless_wrapper: Default::default(),
+            turn_limits: crate::domain::stall::StallConfig::default().turn_limits(),
         })?;
         if let Err(error) = &roles {
             opened.warnings.push(format!(
@@ -2610,15 +2612,20 @@ fn doctor_roles(queue: &SqliteQueue) -> serde_json::Value {
     for role in ModelRole::ALL {
         let (provider, source) = models.provider(role);
         let launch = models.launch(role);
-        roles.insert(
-            role.as_str().to_owned(),
-            serde_json::json!({
-                "provider": provider,
-                "source": source,
-                "model": launch.model,
-                "effort": launch.effort,
-            }),
-        );
+        let mut entry = serde_json::json!({
+            "provider": provider,
+            "source": source,
+            "model": launch.model,
+            "effort": launch.effort,
+        });
+        // The route the runtime's planners open on, and where it comes
+        // from (ADR-t1394-2 decision 1).
+        if role == ModelRole::RuntimePlanner {
+            let (route, route_source) = models.planner_route();
+            entry["route"] = serde_json::json!(route);
+            entry["route_source"] = serde_json::json!(route_source);
+        }
+        roles.insert(role.as_str().to_owned(), entry);
     }
     if let Some(error) = error {
         roles.insert("error".to_owned(), error.into());
@@ -3215,16 +3222,28 @@ pub fn planner_session(
     plugin_dir: Option<&Path>,
     model: Option<(&str, &str)>,
     cmux: &Path,
+    entry: PlannerEntry,
 ) -> Result<Value> {
-    ensure!(
-        std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
-        "interactive Claude wrapper requires a terminal"
-    );
+    // A headless planner's agent has no terminal (ADR-t1394-2); one started
+    // in the background leads a session of its own (ADR-t1404-1).
+    if entry.headless {
+        wrapper_entry(entry.background)?;
+    } else {
+        ensure!(
+            std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
+            "interactive Claude wrapper requires a terminal"
+        );
+    }
     let provider = ClaudeCode {
         executable: claude.into(),
     };
     let cmux = Cmux {
         executable: cmux.into(),
+    };
+    let own = if entry.background {
+        None
+    } else {
+        own_workspace(&cmux)
     };
     planner_session_with_provider(
         db,
@@ -3232,9 +3251,18 @@ pub fn planner_session(
         &provider,
         plugin_dir,
         model,
-        own_workspace(&cmux),
+        own,
         &mut std::io::stderr(),
     )
+}
+
+/// How a planner's wrapper was started: for a headless planner
+/// (`--headless`, ADR-t1394-2), and then in the background
+/// (`--background`, ADR-t1404-1 decision 8).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PlannerEntry {
+    pub headless: bool,
+    pub background: bool,
 }
 
 /// [`planner_session`] with any provider, in the working directory, in the
@@ -3249,18 +3277,20 @@ pub fn planner_session_with_provider(
     own: Option<OwnWorkspace<'_>>,
     terminal: &mut dyn std::io::Write,
 ) -> Result<Value> {
-    let queue = SqliteQueue::open(db)?.with_actor(crate::domain::actor::ActorContext::instance(
-        crate::domain::actor::ActorRole::Wrapper,
-        format_args!("planner:{id}"),
-    ));
+    let mut queue =
+        SqliteQueue::open(db)?.with_actor(crate::domain::actor::ActorContext::instance(
+            crate::domain::actor::ActorRole::Wrapper,
+            format_args!("planner:{id}"),
+        ));
     let cwd = std::env::current_dir().context("working directory is unavailable")?;
     planner::run_planner_session(
         PlannerWrapper {
-            queue: &queue,
+            queue: &mut queue,
             db,
             provider,
             spawner: &LocalSpawner,
             files: &LocalRunFiles,
+            processes: &SystemProcesses,
             pid: std::process::id(),
             own_workspace: own,
             terminal,

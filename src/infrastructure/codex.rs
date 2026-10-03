@@ -20,7 +20,7 @@ use std::{
     process::Command,
 };
 
-use crate::application::{AgentProvider, CommandSpec, RUN_TMP_DIR, TurnReader};
+use crate::application::{AgentProvider, CommandSpec, RUN_TMP_DIR, TurnReader, TurnTarget};
 use crate::domain::{
     TaskRun,
     actor_model::ActorLaunch,
@@ -414,14 +414,13 @@ impl AgentProvider for Codex {
     /// stops a turn with its descendants by pid as well (task 1085).
     fn turn_command(
         &self,
-        run: &TaskRun,
+        target: &TurnTarget<'_>,
         prompt: &str,
         session: TurnSession<'_>,
     ) -> Result<CommandSpec> {
         // Codex names a new thread itself.
         let resume = session.resumed();
-        let worktree = Path::new(run.worktree_path().context("missing worktree")?);
-        let run_dir = Path::new(run.run_dir().context("missing run directory")?);
+        let (worktree, run_dir) = (target.cwd, target.dir);
         let mut roots = writable_roots(worktree, run_dir, &cargo_home()?)?;
         roots.extend(starter_tmpdir(std::env::var_os("TMPDIR")));
         write_rules(worktree)?;
@@ -936,7 +935,11 @@ mod tests {
             )
         );
         let first = codex
-            .turn_command(&run, "-do it", TurnSession::New("ignored"))
+            .turn_command(
+                &TurnTarget::of_run(&run).unwrap(),
+                "-do it",
+                TurnSession::New("ignored"),
+            )
             .unwrap();
         assert_eq!(first.get_program(), "/bin/codex");
         assert_eq!(first.get_current_dir(), Some(worktree.as_path()));
@@ -959,7 +962,11 @@ mod tests {
         expected.extend(["--", "-do it"]);
         assert_eq!(args(&first), expected);
         let resumed = codex
-            .turn_command(&run, "answer", TurnSession::Resume("th-1"))
+            .turn_command(
+                &TurnTarget::of_run(&run).unwrap(),
+                "answer",
+                TurnSession::Resume("th-1"),
+            )
             .unwrap();
         assert_eq!(resumed.get_current_dir(), Some(worktree.as_path()));
         let mut expected = vec!["exec", "resume", "--json"];
@@ -990,7 +997,11 @@ mod tests {
         fs::remove_dir_all(&tmp).unwrap();
         std::os::unix::fs::symlink(&outside, &tmp).unwrap();
         codex
-            .turn_command(&run, "again", TurnSession::Resume("th-1"))
+            .turn_command(
+                &TurnTarget::of_run(&run).unwrap(),
+                "again",
+                TurnSession::Resume("th-1"),
+            )
             .unwrap();
         assert!(!tmp.is_symlink() && tmp.is_dir());
         assert!(outside.join("keep").is_file());

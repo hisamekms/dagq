@@ -18,6 +18,12 @@
 //! and the wrapper runs the next request as the first turn of a new session
 //! of that provider in the same worktree (the run's `actual_provider` says
 //! which, read before every turn).
+//!
+//! A headless planner of the runtime's (ADR-t1394-2 decision 2) runs on
+//! the same turns in its planner directory: its initial prompt is the
+//! first turn, and the revise, the answer of its `planner_question` and the
+//! exit come as requests; its turns are events of the queue that name it
+//! by `planner_id`, and it stays on Claude ([`TurnOwner::Planner`]).
 
 use crate::domain::EventKind;
 use anyhow::{Context, Result};
@@ -31,13 +37,14 @@ use std::{
 
 use super::{
     AgentProvider, ProcessControl, Queue, RunFiles, SccacheServer, Spawned, Spawner, TurnReader,
+    TurnTarget,
     actor_executor::{
         ActorExecutionSpec, ActorExecutor, ActorProgram, HostActorExecutor, SessionAgent,
         WorkspaceAccess,
     },
 };
 use crate::domain::{
-    ActorContext, Provider, TaskRun, event_kind,
+    ActorContext, ActorRole, PlannerId, Provider, RunEvent, TaskRun, event_kind,
     provider_switch::{since_switch, switches},
     sccache::{SccacheTarget, WRAPPER_VAR},
     stall::StallConfig,
@@ -50,11 +57,29 @@ use crate::domain::{
     worker_model::WorkerSession,
 };
 
-/// What the wrapper of a headless worker works with.
+/// Whose turns [`Turns`] drives.
+pub(super) enum TurnOwner<'a> {
+    /// A headless worker's run.
+    Run(&'a TaskRun),
+    /// A headless planner of the runtime's (ADR-t1394-2 decision 2): its
+    /// directory (prompt, requests, turns, idle marker), the checkout it
+    /// works in, the plugin directory it loads, the model and effort its
+    /// opener chose, and the name of its session.
+    Planner {
+        id: PlannerId,
+        dir: &'a Path,
+        cwd: &'a Path,
+        plugin_dir: Option<&'a Path>,
+        model: Option<(&'a str, &'a str)>,
+        session: String,
+    },
+}
+
+/// What the wrapper of a headless session works with.
 pub(super) struct Turns<'a> {
     pub(super) queue: &'a mut dyn Queue,
     pub(super) db: &'a Path,
-    pub(super) run: &'a TaskRun,
+    pub(super) owner: TurnOwner<'a>,
     /// The agent of the run's provider when the wrapper started.
     pub(super) provider: &'a dyn AgentProvider,
     /// The headless agent of the other provider, which the run's turns go
@@ -64,7 +89,8 @@ pub(super) struct Turns<'a> {
     pub(super) spawner: &'a dyn Spawner,
     /// The queue service's socket and the worker's token, which each turn
     /// is given instead of the queue's path (goal 82's stage (3)).
-    pub(super) queue_service: &'a dyn super::queue_service::ServiceAccess,
+    /// `None` for a planner, whose `dagq` opens the queue itself.
+    pub(super) queue_service: Option<&'a dyn super::queue_service::ServiceAccess>,
     /// Lists the turn's descendants and signals them ([`stop_turn`]).
     pub(super) processes: &'a dyn ProcessControl,
     pub(super) files: &'a dyn RunFiles,
@@ -95,7 +121,7 @@ struct Agent {
 }
 
 impl Agent {
-    fn new(run: &TaskRun, provider: Provider, events: &[crate::domain::RunEvent]) -> Self {
+    fn new(name: String, provider: Provider, events: &[RunEvent]) -> Self {
         let current = since_switch(events);
         Self {
             provider,
@@ -106,7 +132,7 @@ impl Agent {
                 .iter()
                 .rfind(|e| e.kind == event_kind::TURN_SESSION_IDENTIFIED)
                 .and_then(|e| e.payload["session_id"].as_str().map(str::to_owned)),
-            name: session_name(run.id().as_str(), switches(events)),
+            name,
         }
     }
 }
@@ -200,24 +226,136 @@ fn say(text: &str) {
     }
 }
 
+/// What the turns of [`Turns`]' owner are read and recorded through.
+impl<'a> Turns<'a> {
+    /// The directory of its prompt, requests and turns: the run's, or the
+    /// planner's.
+    fn dir(&self) -> Result<PathBuf> {
+        match &self.owner {
+            TurnOwner::Run(run) => Ok(PathBuf::from(
+                run.run_dir().context("missing run directory")?,
+            )),
+            TurnOwner::Planner { dir, .. } => Ok(dir.to_path_buf()),
+        }
+    }
+
+    /// Where its turns work: the run's worktree, or the planner's checkout.
+    fn cwd(&self) -> Result<PathBuf> {
+        match &self.owner {
+            TurnOwner::Run(run) => Ok(PathBuf::from(
+                run.worktree_path().context("missing worktree")?,
+            )),
+            TurnOwner::Planner { cwd, .. } => Ok(cwd.to_path_buf()),
+        }
+    }
+
+    /// Its events: the run's, or the planner's turns.
+    fn events(&self) -> Result<Vec<RunEvent>> {
+        match &self.owner {
+            TurnOwner::Run(run) => self.queue.run_events(run.id()),
+            TurnOwner::Planner { id, .. } => self.queue.planner_turn_events(*id),
+        }
+    }
+
+    /// The provider it started on: the run's, or Claude for a planner,
+    /// which never moves (ADR-t1394-2 decision 5).
+    fn start_provider(&self) -> Provider {
+        match &self.owner {
+            TurnOwner::Run(run) => run.actual_provider(),
+            TurnOwner::Planner { .. } => Provider::Claude,
+        }
+    }
+
+    /// The provider it is on now: the run's, read again (the supervisor
+    /// may have moved it, ADR-t813-2).
+    fn provider_now(&self) -> Result<Provider> {
+        match &self.owner {
+            TurnOwner::Run(run) => Ok(self.queue.run(run.id())?.actual_provider()),
+            TurnOwner::Planner { .. } => Ok(Provider::Claude),
+        }
+    }
+
+    /// The name of its session for a provider that takes one: the run's
+    /// ([`session_name`]), or the planner's own.
+    fn session_name(&self, events: &[RunEvent]) -> String {
+        match &self.owner {
+            TurnOwner::Run(run) => session_name(run.id().as_str(), switches(events)),
+            TurnOwner::Planner { session, .. } => session.clone(),
+        }
+    }
+
+    /// How the owner is named in the logs.
+    fn label(&self) -> String {
+        match &self.owner {
+            TurnOwner::Run(run) => format!("run {}", run.id()),
+            TurnOwner::Planner { id, .. } => format!("planner {id}"),
+        }
+    }
+
+    /// Record `kind` with `payload`: on the run, or as an event of the
+    /// queue that names the planner (`planner_id`).
+    fn record(&mut self, kind: EventKind, mut payload: serde_json::Value) -> Result<()> {
+        match &self.owner {
+            TurnOwner::Run(run) => self.queue.record_runtime_event(run.id(), kind, payload),
+            TurnOwner::Planner { id, .. } => {
+                payload["planner_id"] = json!(id);
+                self.queue.record_queue_event(kind, payload).map(|_| ())
+            }
+        }
+    }
+
+    /// The idle marker the supervisor's watches read: the run's, or the
+    /// planner's.
+    fn idle_marker_path(&self) -> Result<PathBuf> {
+        match &self.owner {
+            TurnOwner::Run(run) => Ok(run.idle_marker_path()?),
+            TurnOwner::Planner { dir, .. } => Ok(super::planner_idle_marker(dir)),
+        }
+    }
+
+    /// The session the idle marker names.
+    fn marker_session(&self) -> String {
+        match &self.owner {
+            TurnOwner::Run(run) => run.id().to_string(),
+            TurnOwner::Planner { session, .. } => session.clone(),
+        }
+    }
+
+    /// The model and effort turn's agent starts with: the session the run
+    /// recorded last (the claim's, a resume's or a revise's, raised after a
+    /// failure the task caused; ADR-0079 decisions 3 and 5), or the
+    /// planner's opener's.
+    fn model(&self) -> Result<Option<(String, String)>> {
+        match &self.owner {
+            TurnOwner::Run(_) => {
+                let session = WorkerSession::current(&self.events()?);
+                Ok(Some((session.model, session.effort)))
+            }
+            TurnOwner::Planner { model, .. } => {
+                Ok(model.map(|(model, effort)| (model.to_owned(), effort.to_owned())))
+            }
+        }
+    }
+}
+
 impl<'a> Turns<'a> {
     /// Run the session's turns until the exit request or a turn that ends
     /// it; the wrapper's exit code: 0 after the exit request, 1 after a
     /// turn that failed or was stopped. `child_may_be_alive` is set while a
     /// turn's process may run.
     pub(super) fn drive(mut self, child_may_be_alive: &mut bool) -> Result<i32> {
-        let run_dir = PathBuf::from(self.run.run_dir().context("missing run directory")?);
+        let run_dir = self.dir()?;
         // The supervisor cleared what an earlier session left (its exit
         // request, its untaken requests) before it opened this workspace.
         self.files.create_dir_all(&turns_dir(&run_dir))?;
-        let events = self.queue.run_events(self.run.id())?;
+        let events = self.events()?;
         let mut turn = events
             .iter()
             .filter(|e| e.kind == event_kind::TURN_STARTED)
             .count() as u64;
         // The session of the provider the run is on: what it did since the
         // run last moved to it (ADR-t813-2).
-        let mut on = Agent::new(self.run, self.run.actual_provider(), &events);
+        let mut on = Agent::new(self.session_name(&events), self.start_provider(), &events);
         let mut task_prompt = self.files.read_to_string(&run_dir.join("prompt.txt"))?;
         let mut first = (!self.resume).then(|| task_prompt.clone());
         let mut registered = false;
@@ -237,9 +375,10 @@ impl<'a> Turns<'a> {
             };
             // The supervisor moved the run to the other provider: this turn
             // is the first of a new session there, in the same worktree.
-            let provider = self.queue.run(self.run.id())?.actual_provider();
+            let provider = self.provider_now()?;
             if provider != on.provider {
-                on = Agent::new(self.run, provider, &self.queue.run_events(self.run.id())?);
+                let events = self.events()?;
+                on = Agent::new(self.session_name(&events), provider, &events);
                 // The supervisor wrote the task's prompt again for this
                 // provider's worker.
                 task_prompt = self.files.read_to_string(&run_dir.join("prompt.txt"))?;
@@ -258,7 +397,7 @@ impl<'a> Turns<'a> {
             let resume = if from_output {
                 on.identified.clone()
             } else {
-                (on.created || agent.turn_session_exists(self.run, &on.name))
+                (on.created || agent.turn_session_exists(&self.cwd()?, &on.name))
                     .then(|| on.name.clone())
             };
             let asked = prompt.clone();
@@ -267,10 +406,9 @@ impl<'a> Turns<'a> {
                 _ => prompt,
             };
             turn += 1;
-            // Each turn is a process of its own: it starts with the session
-            // recorded last (the claim's, a resume's or a revise's, raised
-            // after a failure the task caused; ADR-0079 decisions 3 and 5).
-            let session = WorkerSession::current(&self.queue.run_events(self.run.id())?);
+            // Each turn is a process of its own, started with the model
+            // recorded last ([`Self::model`]).
+            let session = self.model()?;
             let ended = self.turn(
                 &run_dir,
                 turn,
@@ -278,7 +416,7 @@ impl<'a> Turns<'a> {
                 resume.as_deref(),
                 &mut on,
                 request.as_ref(),
-                &session,
+                session,
                 &mut registered,
                 child_may_be_alive,
             )?;
@@ -286,8 +424,7 @@ impl<'a> Turns<'a> {
             if let Some(missing) = resume.filter(|_| from_output && ended.result.session_missing) {
                 // The agent kept no thread of that id (the turn that named
                 // it ended before it was saved): forget it and start anew.
-                self.queue.record_runtime_event(
-                    self.run.id(),
+                self.record(
                     EventKind::TurnSessionIdentified,
                     json!({
                         "turn": turn,
@@ -318,13 +455,13 @@ impl<'a> Turns<'a> {
     /// The agent of `provider`: the one the wrapper started with, or the
     /// other provider's.
     fn agent(&self, provider: Provider) -> Result<&'a dyn AgentProvider> {
-        if provider == self.run.actual_provider() {
+        if provider == self.start_provider() {
             return Ok(self.provider);
         }
         self.other.with_context(|| {
             format!(
-                "run {} moved to {}, which this wrapper has no headless agent of",
-                self.run.id(),
+                "{} moved to {}, which this wrapper has no headless agent of",
+                self.label(),
                 provider.as_str()
             )
         })
@@ -366,6 +503,9 @@ impl<'a> Turns<'a> {
         let Some((target, server)) = self.sccache else {
             return &[];
         };
+        let TurnOwner::Run(run) = self.owner else {
+            return &[];
+        };
         if provider != Provider::Codex {
             return &[];
         }
@@ -374,12 +514,12 @@ impl<'a> Turns<'a> {
             Ok(false) => format!("no sccache server listens on port {}", target.port),
             Err(error) => format!("the sccache server could not be looked at: {error:#}"),
         };
-        tracing::warn!(run_id = %self.run.id(), "run {}: turn {turn} runs without {WRAPPER_VAR}: {why}", self.run.id());
+        tracing::warn!(run_id = %run.id(), "run {}: turn {turn} runs without {WRAPPER_VAR}: {why}", run.id());
         let at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |since| since.as_secs());
         if let Err(error) = self.queue.record_runtime_event(
-            self.run.id(),
+            run.id(),
             EventKind::SccacheWrapperRemoved,
             json!({
                 "at": at,
@@ -389,7 +529,7 @@ impl<'a> Turns<'a> {
                 "reason": why,
             }),
         ) {
-            tracing::warn!(run_id = %self.run.id(), error = %format_args!("{error:#}"), "sccache_wrapper_removed could not be recorded: {error:#}");
+            tracing::warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "sccache_wrapper_removed could not be recorded: {error:#}");
         }
         &[WRAPPER_VAR]
     }
@@ -397,9 +537,13 @@ impl<'a> Turns<'a> {
     /// Heartbeat the wrapper; a failure (the queue busy) is only logged,
     /// as the interactive wrapper does.
     fn heartbeat(&mut self) {
-        if let Err(error) = self.queue.heartbeat_wrapper(self.run.id(), self.pid) {
+        let beat = match &self.owner {
+            TurnOwner::Run(run) => self.queue.heartbeat_wrapper(run.id(), self.pid),
+            TurnOwner::Planner { id, .. } => self.queue.heartbeat_planner(*id, self.pid),
+        };
+        if let Err(error) = beat {
             tracing::warn!(
-                run_id = %self.run.id(),
+                owner = %self.label(),
                 error = %format_args!("{error:#}"),
                 "wrapper heartbeat failed: {error:#}"
             );
@@ -420,11 +564,10 @@ impl<'a> Turns<'a> {
         resume: Option<&str>,
         on: &mut Agent,
         request: Option<&TurnRequest>,
-        session: &WorkerSession,
+        model: Option<(String, String)>,
         registered: &mut bool,
         child_may_be_alive: &mut bool,
     ) -> Result<Turn> {
-        let run = self.run;
         let limits = TurnLimits::parse_or(
             self.files
                 .read_to_string(&turns_dir(run_dir).join(LIMITS_FILE))
@@ -436,28 +579,57 @@ impl<'a> Turns<'a> {
         let stderr = output_path(run_dir, turn, "err");
         let agent = self.agent(on.provider)?;
         let mut reader = agent.turn_reader()?;
-        let worktree = PathBuf::from(run.worktree_path().context("missing worktree")?);
+        let cwd = self.cwd()?;
         let without_env = self.sccache_turn(turn, on.provider);
-        let spawned = HostActorExecutor::new(self.db)
-            .with_provider(agent)
-            .with_spawner(self.spawner)
-            .with_queue_service(self.queue_service)
-            .spawn(ActorExecutionSpec::new(
+        let session = match resume {
+            Some(id) => TurnSession::Resume(id),
+            None => TurnSession::New(&on.name),
+        };
+        let debug_log = run_dir.join(super::planner::PLANNER_DEBUG_LOG);
+        let (actor, agent_program) = match &self.owner {
+            TurnOwner::Run(run) => (
                 ActorContext::worker(run.id(), run.task_id()),
-                WorkspaceAccess::Write(worktree),
-                ActorProgram::SessionAgent {
-                    agent: SessionAgent::Turn {
-                        run,
-                        prompt,
-                        session: match resume {
-                            Some(id) => TurnSession::Resume(id),
-                            None => TurnSession::New(&on.name),
-                        },
-                        stdout: &stdout,
-                        stderr: &stderr,
-                        without_env,
+                SessionAgent::Turn {
+                    run,
+                    prompt,
+                    session,
+                    stdout: &stdout,
+                    stderr: &stderr,
+                    without_env,
+                },
+            ),
+            TurnOwner::Planner { id, plugin_dir, .. } => (
+                ActorContext::instance(ActorRole::Planner, *id),
+                SessionAgent::PlannerTurn {
+                    target: TurnTarget {
+                        role: ActorRole::Planner,
+                        dir: run_dir,
+                        cwd: &cwd,
+                        debug_log: Some(&debug_log),
+                        plugin_dir: *plugin_dir,
                     },
-                    model: Some((&session.model, &session.effort)),
+                    prompt,
+                    session,
+                    stdout: &stdout,
+                    stderr: &stderr,
+                },
+            ),
+        };
+        let mut executor = HostActorExecutor::new(self.db)
+            .with_provider(agent)
+            .with_spawner(self.spawner);
+        if let Some(service) = self.queue_service {
+            executor = executor.with_queue_service(service);
+        }
+        let spawned = executor
+            .spawn(ActorExecutionSpec::new(
+                actor,
+                WorkspaceAccess::Write(cwd.clone()),
+                ActorProgram::SessionAgent {
+                    agent: agent_program,
+                    model: model
+                        .as_ref()
+                        .map(|(model, effort)| (model.as_str(), effort.as_str())),
                 },
             ))
             .and_then(|handle| handle.process());
@@ -515,22 +687,32 @@ impl<'a> Turns<'a> {
         (stdout, stderr): (&Path, &Path),
         limits: TurnLimits,
     ) -> Result<Turn> {
-        let run = self.run;
-        if !*registered {
-            let registration = if self.resume {
+        match &self.owner {
+            TurnOwner::Run(run) => {
+                if !*registered {
+                    let registration = if self.resume {
+                        self.queue
+                            .register_resume_agent(run.id(), self.pid, child.id())
+                    } else {
+                        self.queue.register_agent(run.id(), self.pid, child.id())
+                    };
+                    registration?;
+                    *registered = true;
+                } else {
+                    // Every later turn is a process of its own: it is the
+                    // run's agent while it runs, so the supervisor's process
+                    // watches see it and its helpers, not the turn that
+                    // ended.
+                    self.queue
+                        .register_turn_agent(run.id(), self.pid, child.id())?;
+                }
+            }
+            // A planner's agent is its turn while it runs.
+            TurnOwner::Planner { id, .. } => {
                 self.queue
-                    .register_resume_agent(run.id(), self.pid, child.id())
-            } else {
-                self.queue.register_agent(run.id(), self.pid, child.id())
-            };
-            registration?;
-            *registered = true;
-        } else {
-            // Every later turn is a process of its own: it is the run's
-            // agent while it runs, so the supervisor's process watches see
-            // it and its helpers, not the turn that ended.
-            self.queue
-                .register_turn_agent(run.id(), self.pid, child.id())?;
+                    .register_planner_agent(*id, self.pid, child.id())?;
+                *registered = true;
+            }
         }
         self.started(turn, resume, on, request, Some(child.id()), limits)?;
         let (exit, stop, mut tail) =
@@ -586,8 +768,10 @@ impl<'a> Turns<'a> {
     ) -> Result<()> {
         let what = request.map_or("the task's prompt", |r| r.what.as_str());
         let from_output = self.agent(on.provider)?.turn_session_from_output();
-        self.queue.record_runtime_event(
-            self.run.id(),
+        let start = pid
+            .and_then(|pid| self.processes.start_identity(pid))
+            .map(|start| crate::domain::background_wrapper::start_token(&start));
+        self.record(
             EventKind::TurnStarted,
             json!({
                 "turn": turn,
@@ -598,9 +782,7 @@ impl<'a> Turns<'a> {
                 // The process's start, which tells it from another that
                 // takes its pid: a background session's stop finds a turn
                 // its dead wrapper left by it (ADR-t1404-1 decision 3).
-                "start": pid
-                    .and_then(|pid| self.processes.start_identity(pid))
-                    .map(|start| crate::domain::background_wrapper::start_token(&start)),
+                "start": start,
                 "provider": on.provider,
                 // An agent that names its own session names a new one in
                 // its output.
@@ -663,7 +845,6 @@ impl<'a> Turns<'a> {
         exit_code: Option<i32>,
         mut result: TurnResult,
     ) -> Result<Turn> {
-        let run = self.run;
         let (cost, session_cost) = self.turn_cost(turn, &result)?;
         result.cost_usd = cost;
         if let Some(tokens) = result.tokens.as_mut().filter(|_| session_cost.is_some()) {
@@ -672,7 +853,7 @@ impl<'a> Turns<'a> {
         let (tokens, tokens_total) = self.turn_tokens(&result)?;
         // The provider the turn ran on: the wrapper's copy of the run may
         // predate a switch (ADR-t813-2).
-        let provider = self.queue.run(run.id())?.actual_provider();
+        let provider = self.provider_now()?;
         let mut payload = json!({
             "turn": turn,
             "outcome": outcome,
@@ -704,15 +885,14 @@ impl<'a> Turns<'a> {
         if let Some(total) = session_cost {
             payload["session_cost_usd"] = json!(total);
         }
-        self.queue
-            .record_runtime_event(run.id(), EventKind::TurnFinished, payload)?;
+        self.record(EventKind::TurnFinished, payload)?;
         // The idle marker the supervisor's watches read, written only once
         // the turn is recorded.
-        let marker = run.idle_marker_path()?;
+        let marker = self.idle_marker_path()?;
         let tmp = marker.with_extension("json.tmp");
         self.files.write(
             &tmp,
-            idle_marker(run.id().as_str(), turn, outcome, &result)
+            idle_marker(&self.marker_session(), turn, outcome, &result)
                 .to_string()
                 .as_bytes(),
         )?;
@@ -744,7 +924,7 @@ impl<'a> Turns<'a> {
         let Some(session) = result.session_id.as_deref() else {
             return Ok((Some(total), Some(total)));
         };
-        let events = self.queue.run_events(self.run.id())?;
+        let events = self.events()?;
         Ok((
             Some(turn_own_cost(&events, turn, session, total)),
             Some(total),
@@ -762,7 +942,7 @@ impl<'a> Turns<'a> {
         let Some(total) = result.tokens.clone().filter(|_| result.tokens_cumulative) else {
             return Ok((result.tokens.clone(), None));
         };
-        let events = self.queue.run_events(self.run.id())?;
+        let events = self.events()?;
         let earlier = events
             .iter()
             .rev()
@@ -791,8 +971,7 @@ impl<'a> Turns<'a> {
         {
             return Ok(());
         }
-        self.queue.record_runtime_event(
-            self.run.id(),
+        self.record(
             EventKind::TurnSessionIdentified,
             json!({
                 "turn": turn,

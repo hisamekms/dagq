@@ -34,8 +34,8 @@ use tracing::warn;
 
 use super::queue_service::ServiceAccess;
 use super::{
-    AgentProvider, CommandSpec, PlannerCommand, Spawned, Spawner, Streams, WorkspaceBackend,
-    WorkspaceTags,
+    AgentProvider, CommandSpec, PlannerCommand, Spawned, Spawner, Streams, TurnTarget,
+    WorkspaceBackend, WorkspaceTags,
     lifecycle::{PLANNER_ID_ENV, PLANNER_ORIGIN_ENV, QUEUE_ENV, SESSION_KIND_ENV},
     naming::shell_join,
     path_text,
@@ -105,6 +105,16 @@ pub enum SessionAgent<'a> {
     },
     /// A planner (ADR-0041).
     Planner(PlannerCommand<'a>),
+    /// One turn of a headless planner of the runtime's (ADR-t1394-2
+    /// decision 2), in `target` (the planner's directory and checkout), as
+    /// a worker's [`SessionAgent::Turn`] is in its run.
+    PlannerTurn {
+        target: TurnTarget<'a>,
+        prompt: &'a str,
+        session: crate::domain::turn::TurnSession<'a>,
+        stdout: &'a Path,
+        stderr: &'a Path,
+    },
 }
 
 /// What a workspace not tied to a run runs.
@@ -172,6 +182,11 @@ pub enum ActorProgram<'a> {
         launch: Option<&'a ActorLaunch>,
         description: Option<String>,
         group: Option<String>,
+        /// The log a headless planner's wrapper writes to when it is
+        /// started without a workspace (ADR-t1404-1 decision 8): a process
+        /// detached from the supervisor with the workspace's environment,
+        /// whose handle is the workspace's ID.
+        background: Option<&'a Path>,
     },
     /// The agent of a session wrapper, with the terminal of its workspace,
     /// and the model and effort it was opened with.
@@ -205,7 +220,7 @@ impl ActorProgram<'_> {
                 SessionAgent::Worker { run, .. }
                 | SessionAgent::Resume { run }
                 | SessionAgent::Turn { run, .. } => run.actual_provider(),
-                SessionAgent::Planner(_) => Provider::Claude,
+                SessionAgent::Planner(_) | SessionAgent::PlannerTurn { .. } => Provider::Claude,
             },
             Self::NamedWorkspace { launch, .. } | Self::Headless { launch, .. } => {
                 launch.map_or(Provider::Claude, |launch| launch.provider)
@@ -225,7 +240,7 @@ impl ActorProgram<'_> {
                 ..
             } => &[ActorRole::Worker],
             Self::SessionAgent {
-                agent: SessionAgent::Planner(_),
+                agent: SessionAgent::Planner(_) | SessionAgent::PlannerTurn { .. },
                 ..
             }
             | Self::NamedWorkspace {
@@ -689,6 +704,7 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 launch,
                 description,
                 group,
+                background,
             } => {
                 let command = match command {
                     WorkspaceCommand::Wrapper(command) => command,
@@ -696,12 +712,18 @@ impl ActorExecutor for HostActorExecutor<'_> {
                         command_line(&self.provider()?.inbox_command(&prompt, plugin_dir)?)?
                     }
                 };
+                let env = actor_env(self.queue, &actor, planner, launch)?;
+                let cmux = self.workspaces()?;
+                if let Some(log) = background {
+                    return Ok(ActorHandle::Workspace(
+                        cmux.launch_background(cwd, &command, &env, log)?,
+                    ));
+                }
                 let tags = WorkspaceTags {
-                    env: actor_env(self.queue, &actor, planner, launch)?,
+                    env,
                     description,
                     group,
                 };
-                let cmux = self.workspaces()?;
                 let id = cmux
                     .create_named(name, cwd, &command, &tags)
                     .map_err(|error| match (planner, &tags.description) {
@@ -731,9 +753,22 @@ impl ActorExecutor for HostActorExecutor<'_> {
                     } => {
                         streams = Streams::Files { stdout, stderr };
                         without = without_env;
-                        (provider.turn_command(run, prompt, session)?, Some(run))
+                        (
+                            provider.turn_command(&TurnTarget::of_run(run)?, prompt, session)?,
+                            Some(run),
+                        )
                     }
                     SessionAgent::Planner(planner) => (provider.planner_command(&planner)?, None),
+                    SessionAgent::PlannerTurn {
+                        target,
+                        prompt,
+                        session,
+                        stdout,
+                        stderr,
+                    } => {
+                        streams = Streams::Files { stdout, stderr };
+                        (provider.turn_command(&target, prompt, session)?, None)
+                    }
                 };
                 // The resource broker's tools, when the supervisor issued
                 // the run's token (`preferred`, ADR-t827-4 decision 1); a
@@ -1624,6 +1659,7 @@ mod tests {
                     launch: None,
                     description: Some(description.into()),
                     group: None,
+                    background: None,
                 },
             ))
         };
@@ -1670,6 +1706,7 @@ mod tests {
                     launch: None,
                     description: Some("d".into()),
                     group: None,
+                    background: None,
                 },
             ))
             .unwrap()

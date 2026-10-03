@@ -8,7 +8,8 @@
 use serde::Serialize;
 
 use super::{
-    FindingId, PlannerId, PlannerOrigin, PlannerState, ProposalId, TaskId, heartbeat_stale,
+    FindingId, PlannerId, PlannerOrigin, PlannerRoute, PlannerState, ProposalId, TaskId,
+    heartbeat_stale,
 };
 
 /// One planner as the queue records it. Times are Unix seconds.
@@ -39,6 +40,9 @@ pub struct PlannerSession {
     pub closed_at: Option<i64>,
     pub error: Option<String>,
     pub created_at: i64,
+    /// How its agent runs (ADR-t1394-2): interactive in a terminal, or one
+    /// call per turn.
+    pub route: PlannerRoute,
 }
 
 /// How long a planner may take from its record to its wrapper's
@@ -218,6 +222,7 @@ mod tests {
             closed_at: None,
             error: None,
             created_at: 90,
+            route: PlannerRoute::Interactive,
         }
     }
 

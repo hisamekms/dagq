@@ -146,7 +146,7 @@ mod triage;
 mod update;
 mod waiting;
 
-pub(crate) use self::background::{left_turn, still_open, stop_left_turn};
+pub(crate) use self::background::{left_planner_turn, left_turn, still_open, stop_left_turn};
 pub use self::broker::{BROKER_FAILURES, BROKER_HEALTH_INTERVAL, BrokerPort};
 pub(crate) use self::deliver::{Input, Submission, submit_input};
 pub use self::e2e::RunE2ePort;

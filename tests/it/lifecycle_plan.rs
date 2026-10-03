@@ -392,6 +392,8 @@ fn the_runtime_opens_a_planner_for_a_proposal_with_its_reasons() {
             source: dagq::domain::language::LanguageSource::User,
         }),
         roles: Default::default(),
+        headless_wrapper: Default::default(),
+        turn_limits: dagq::domain::stall::StallConfig::default().turn_limits(),
     };
     let reasons = vec!["the acceptance is not testable".to_owned()];
     let opened = open_runtime_planner(

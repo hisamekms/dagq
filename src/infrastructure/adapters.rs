@@ -3,7 +3,8 @@ use crate::{
     application::{
         AgentProvider, CommandSpec, DetachedRefusal, FileStamp, LandingBranchStamp, MainRemote,
         PlannerCommand, PluginState, ProcessControl, Repository, SupervisorEnvironment, TurnReader,
-        WorkspaceBackend, WorkspaceTags, execution::permission_deny, stats::WorkspaceListing,
+        TurnTarget, WorkspaceBackend, WorkspaceTags, execution::permission_deny,
+        stats::WorkspaceListing,
     },
     domain::{
         ActorRole, CommitSha, PlannerOrigin, Task, TaskId, TaskRun,
@@ -3275,31 +3276,31 @@ impl AgentProvider for ClaudeCode {
             .option_args(["--allowedTools", crate::application::broker_run::MCP_TOOLS]);
         true
     }
-    /// `claude -p --output-format stream-json --verbose` in the worktree,
-    /// `--session-id <run-id>` for the first turn and `--resume <run-id>`
-    /// after it, in [`HEADLESS_PERMISSION_MODE`] with
-    /// `claude-headless-settings.json` of the run directory (the worker's
-    /// `permissions.deny`, no hook: the wrapper writes the idle marker when
-    /// the turn's process ends), its debug file and the run directory
-    /// added. It leads a session of its own, so that stopping it stops what
-    /// it runs.
+    /// `claude -p --output-format stream-json --verbose` in the target's
+    /// working directory (a run's worktree, a planner's checkout),
+    /// `--session-id <name>` for the first turn and `--resume <name>` after
+    /// it, in [`HEADLESS_PERMISSION_MODE`] with
+    /// `claude-headless-settings.json` of the target's directory (its
+    /// actor's `permissions.deny`, no hook: the wrapper writes the idle
+    /// marker when the turn's process ends), its debug file, the directory
+    /// added and the plugin directory a planner loads. It leads a session
+    /// of its own, so that stopping it stops what it runs.
     fn turn_command(
         &self,
-        run: &TaskRun,
+        target: &TurnTarget<'_>,
         prompt: &str,
         session: TurnSession<'_>,
     ) -> Result<CommandSpec> {
-        let run_dir = Path::new(run.run_dir().context("missing run directory")?);
-        let settings = run_dir.join(HEADLESS_SETTINGS);
+        let settings = target.dir.join(HEADLESS_SETTINGS);
         crate::application::RunFiles::write(
             &super::run_files::LocalRunFiles,
             &settings,
-            headless_worker_settings(&permission_deny(ActorRole::Worker))?.as_bytes(),
+            headless_worker_settings(&permission_deny(target.role))?.as_bytes(),
         )
         .with_context(|| format!("write {}", settings.display()))?;
         let mut command = CommandSpec::new(&self.executable);
         command
-            .current_dir(run.worktree_path().context("missing worktree")?)
+            .current_dir(target.cwd)
             .args(["-p", "--output-format", "stream-json", "--verbose"])
             .args(match session {
                 TurnSession::Resume(id) => ["--resume", id],
@@ -3308,14 +3309,15 @@ impl AgentProvider for ClaudeCode {
             .arg("--permission-mode")
             .arg(HEADLESS_PERMISSION_MODE)
             .arg("--debug-file")
-            .arg(run.log_path().context("missing log path")?)
+            .arg(target.debug_log.context("missing log path")?)
             .arg("--add-dir")
-            .arg(run_dir)
+            .arg(target.dir)
             .arg("--settings")
-            .arg(&settings)
-            .arg("--")
-            .arg(prompt)
-            .new_session();
+            .arg(&settings);
+        if let Some(dir) = target.plugin_dir {
+            command.arg("--plugin-dir").arg(dir);
+        }
+        command.arg("--").arg(prompt).new_session();
         Ok(command)
     }
     fn turn_reader(&self) -> Result<Box<dyn TurnReader>> {
@@ -3323,8 +3325,8 @@ impl AgentProvider for ClaudeCode {
     }
     /// Its transcript under `$CLAUDE_CONFIG_DIR` (or `~/.claude`): Claude
     /// Code refuses a `--session-id` in use.
-    fn turn_session_exists(&self, run: &TaskRun, name: &str) -> bool {
-        run.worktree_path().is_some_and(|cwd| {
+    fn turn_session_exists(&self, cwd: &Path, name: &str) -> bool {
+        cwd.to_str().is_some_and(|cwd| {
             crate::infrastructure::transcripts::ClaudeTranscripts::from_env().exists(cwd, name)
         })
     }

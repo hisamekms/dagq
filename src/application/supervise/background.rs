@@ -131,6 +131,27 @@ pub(crate) fn left_turn(
         .then_some(turn)
 }
 
+/// The turn the headless planner whose background handle is `handle`
+/// recorded starting that still runs (ADR-t1404-1 decisions 3 and 8): its
+/// pid shows the start recorded with it. Its turns are the queue's events
+/// that name it (ADR-t1394-2), not a run's; a planner whose row closed is
+/// found too, so a close after it still stops the turn.
+pub(crate) fn left_planner_turn(
+    queue: &dyn Queue,
+    processes: &dyn ProcessControl,
+    handle: &str,
+) -> Option<BackgroundHandle> {
+    let planner = queue
+        .planners(true)
+        .ok()?
+        .into_iter()
+        .find(|planner| planner.workspace_id.as_deref() == Some(handle))?;
+    let events = queue.planner_turn_events(planner.id).ok()?;
+    let turn = crate::domain::background_wrapper::last_planner_turn(&events)?;
+    turn.is(turn.pid, processes.start_identity(turn.pid).as_deref())
+        .then_some(turn)
+}
+
 /// Stop the turn `turn` left by a background wrapper that is gone: what it
 /// started (listed first, since they are init's once it dies, and each
 /// killed only while its pid shows the start it was listed with), then its

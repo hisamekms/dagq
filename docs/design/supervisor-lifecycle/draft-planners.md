@@ -52,9 +52,9 @@ related:
 - **集計**: [follow_upの種類と判断の集計](#follow_upの種類と判断の集計未実装)の結末で、plannerが自分で決めたものと`planner_question`を経たものは`follow_up_adopted`の`by`と、draftの`planner_question`の有無で分かる。
 - **test**: `application::prompt`のunit test（`the_draft_planner_decides_what_it_can_recommend`）がpromptの方針・理由の書き場所・askの3つの条件・`--recommend`と`--confidence`を確かめる。
 
-## 予定: 人のplannerの廃止と非対話の経路（未実装、ADR-t1394-1・ADR-t1394-2）<a id="予定-人のplannerの廃止と非対話の経路"></a>
+## 予定: 人のplannerの廃止と非対話の経路（ADR-t1394-1は未実装、ADR-t1394-2の経路は実装済み）<a id="予定-人のplannerの廃止と非対話の経路"></a>
 
-[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)と[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)（goal 87）の予定で、**まだ実装していない**。綴りは仮で、流れの全体は[予定: inboxからの依頼と非対話のplanner](plan-planners.md#予定-inboxからの依頼と非対話のplanner)にある。
+[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)と[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)（goal 87）。人のplannerの廃止（ADR-t1394-1）は予定で**まだ実装していない**。非対話の経路（ADR-t1394-2の決定1・2）は実装した。綴りは仮で、流れの全体は[予定: inboxからの依頼と非対話のplanner](plan-planners.md#予定-inboxからの依頼と非対話のplanner)にある。
 
 - **人が開いたplannerで決める、の行き先**: 4の`draft_planner_exhausted`のattention（`decide the draft in a planner`）、5の`keep_draft`で残したdraft、6の「人が開いたplannerからのsubmit」は、人が開くplannerの廃止の後、inboxがそのdraftを参照（`--ref task:N`）にした計画の依頼を記録し、依頼のruntimeのplannerが決めるか、人が`DAGQ_ROLE`の無い自分のterminalで`submit`する経路に変わる。依頼のplannerはruntimeのplannerなので、6の自動で採用しない上限は効き、上限のdraftは`planner_question`の`adopt`を経る。人のterminalからのsubmitは今の「人が開いたplanner」と同じく人の判断を経たものとして扱う（`by: "person"`、深さを0に戻す）。
-- **非対話の経路**: draftのplannerも`[roles.runtime_planner]`の経路に従う。非対話のplannerでは、5の答えの打ち込みと7の`/exit`が次のturnの依頼と終了の依頼になり、7のidleはStop hookのmarkerと画面からの推定でなくturnの終わりで判断する。束・3回の上限・結末の記録（8）は変えない。
+- **非対話の経路**（実装済み、task 1396）: draftのplannerも`[roles.runtime_planner]`の経路に従う。非対話のplannerでは、5の答えの打ち込みと7の`/exit`が次のturnの依頼と終了の依頼になり（`Supervisor::send_to_planner`）、7のidleはStop hookのmarkerと画面からの推定でなくturnの終わりのidle markerで判断する。束・3回の上限・結末の記録（8）は変えない（[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)）。

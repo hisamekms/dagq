@@ -1330,6 +1330,14 @@ enum Command {
         /// with (task 806).
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
+        /// The planner's agent runs one call per turn (ADR-t1394-2): the
+        /// wrapper needs no terminal for it.
+        #[arg(long)]
+        headless: bool,
+        /// The supervisor started this wrapper in the background, without
+        /// a workspace (ADR-t1404-1 decision 8).
+        #[arg(long, requires = "headless")]
+        background: bool,
     },
 }
 
@@ -2902,27 +2910,40 @@ fn execute(cli: Cli) -> Result<Value> {
             proposal,
             findings,
         } => {
-            use dagq::application::lifecycle::{CMUX_WORKSPACE_ENV, PLANNER_ORIGIN_ENV};
+            use dagq::application::lifecycle::{
+                CMUX_WORKSPACE_ENV, PLANNER_ID_ENV, PLANNER_ORIGIN_ENV,
+            };
             let origin = match env::var(PLANNER_ORIGIN_ENV) {
                 Ok(origin) if !origin.is_empty() => origin.parse()?,
                 _ => PlannerOrigin::Person,
             };
-            serde_json::to_value(
-                planning!().submit(
-                    Submission {
-                        tasks: tasks.into_iter().map(TaskId::new).collect(),
-                        goals: goals.into_iter().map(GoalId::new).collect(),
-                        proposal: proposal.map(ProposalId::new),
-                        owner: PlannerOwner {
-                            origin,
-                            workspace_id: env::var(CMUX_WORKSPACE_ENV)
-                                .ok()
-                                .filter(|id| !id.trim().is_empty()),
-                        },
+            // A planner of the runtime's whose wrapper runs in the
+            // background has no workspace of cmux's: its handle, which its
+            // record keeps in place of one (ADR-t1404-1 decision 10),
+            // makes it the proposal's owner.
+            let workspace_id = env::var(CMUX_WORKSPACE_ENV)
+                .ok()
+                .filter(|id| !id.trim().is_empty())
+                .or_else(|| {
+                    let planner = env::var(PLANNER_ID_ENV).ok()?.trim().parse().ok()?;
+                    queue
+                        .planner(PlannerId::new(planner))
+                        .ok()?
+                        .workspace_id
+                        .filter(|id| dagq::domain::background_wrapper::is_background(id))
+                });
+            serde_json::to_value(planning!().submit(
+                Submission {
+                    tasks: tasks.into_iter().map(TaskId::new).collect(),
+                    goals: goals.into_iter().map(GoalId::new).collect(),
+                    proposal: proposal.map(ProposalId::new),
+                    owner: PlannerOwner {
+                        origin,
+                        workspace_id,
                     },
-                    &findings.into_iter().map(FindingId::new).collect::<Vec<_>>(),
-                )?,
-            )?
+                },
+                &findings.into_iter().map(FindingId::new).collect::<Vec<_>>(),
+            )?)?
         }
         Command::Proposal { command } => match command {
             ProposalCommand::List { all } => json!({"proposals": queue.proposals(all)?}),
@@ -3811,6 +3832,8 @@ fn execute(cli: Cli) -> Result<Value> {
             model,
             effort,
             cmux,
+            headless,
+            background,
         } => dagq::compose::planner_session(
             &db,
             dagq::domain::PlannerId::new(planner),
@@ -3818,6 +3841,10 @@ fn execute(cli: Cli) -> Result<Value> {
             plugin_dir.as_deref(),
             model.as_deref().zip(effort.as_deref()),
             &cmux,
+            dagq::compose::PlannerEntry {
+                headless,
+                background,
+            },
         )?,
     })
 }

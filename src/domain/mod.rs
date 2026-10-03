@@ -348,6 +348,16 @@ string_enum!(PlannerOrigin {
     Runtime => "runtime",
 });
 
+// How a planner's agent runs (ADR-t1394-2): `interactive`, one agent in a
+// cmux terminal typed into, or `headless`, one non-interactive call per
+// turn the way a headless worker's does (ADR-t813-1). A planner of the
+// runtime's takes `[roles.runtime_planner] route` when it opens; a
+// person's planner is interactive.
+string_enum!(PlannerRoute {
+    Interactive => "interactive",
+    Headless => "headless",
+});
+
 // Why the runtime closed a planner (ADR-t1300-1), the `code` of its
 // `planner_closed`: a person's planner whose agent exited and whose grace
 // passed, a planner of the runtime's whose agent exited, whose wrapper was

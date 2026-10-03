@@ -4,6 +4,7 @@
 
 use crate::common;
 use dagq::infrastructure::git_binary::git_executable;
+pub mod background_wrappers;
 pub mod headless;
 mod reviewer;
 pub use headless::{CODEX_HOME, set_codex_model};
@@ -1531,11 +1532,11 @@ impl AgentProvider for HeadlessProvider {
     }
     fn turn_command(
         &self,
-        run: &TaskRun,
+        target: &dagq::application::TurnTarget<'_>,
         prompt: &str,
         session: dagq::domain::turn::TurnSession<'_>,
     ) -> Result<CommandSpec> {
-        self.agent.turn_command(run, prompt, session)
+        self.agent.turn_command(target, prompt, session)
     }
     fn turn_reader(&self) -> Result<Box<dyn dagq::application::TurnReader>> {
         self.agent.turn_reader()

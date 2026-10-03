@@ -756,6 +756,7 @@ impl Sessions<'_> {
                     launch: None,
                     description: self.workspaces.description(role),
                     group: self.workspaces.group(),
+                    background: None,
                 },
             ))?
             .workspace()?;
