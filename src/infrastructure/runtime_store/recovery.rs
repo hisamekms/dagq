@@ -443,14 +443,7 @@ impl SqliteQueue {
         let finished = run::resume_finished(status, payload);
         let mut payload = finished.payload;
         // The work of the resumed session, closed when it exited (task 514).
-        let resumed: i64 = tx.query_row(
-            &format!(
-                "SELECT coalesce(max(id),0) FROM run_events WHERE run_id=?1 AND kind='{}'",
-                event_kind::RESUME_STARTED
-            ),
-            [id],
-            |r| r.get(0),
-        )?;
+        let resumed: i64 = tx.query_row(&last_resume_started_sql(), [id], |r| r.get(0))?;
         if let Some(work) = crate::infrastructure::sessions::closed_work(
             &tx,
             id,
@@ -534,10 +527,7 @@ impl SqliteQueue {
         let Some(run) = run else {
             return Ok(None);
         };
-        let events: Vec<RunEvent> = tx
-            .prepare("SELECT * FROM run_events WHERE run_id=?1 ORDER BY id")?
-            .query_map([id], event_row)?
-            .collect::<rusqlite::Result<_>>()?;
+        let events = run_events_of(&tx, id)?;
         match crate::domain::triage_state(&events) {
             crate::domain::TriageState::Pending => {}
             crate::domain::TriageState::Waiting { until } if until <= now => {}

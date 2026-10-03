@@ -441,9 +441,25 @@ fn lease_parked_run(
     Ok(Some(lease.map(|l| l.token)))
 }
 
+/// The events of run `?1`, oldest first, by `events_by_run` (goal 103).
+pub(crate) const RUN_EVENTS_SQL: &str = "SELECT * FROM run_events WHERE run_id=?1 ORDER BY id";
+
+/// Whether run `?1` has an event of kind `?2`, by `events_by_run`.
+pub(crate) const HAS_RUN_EVENT_SQL: &str =
+    "SELECT EXISTS(SELECT 1 FROM run_events WHERE run_id=?1 AND kind=?2)";
+
+/// The id of the latest `resume_started` of run `?1`, or 0, by
+/// `events_by_run`.
+pub(crate) fn last_resume_started_sql() -> String {
+    format!(
+        "SELECT coalesce(max(id),0) FROM run_events WHERE run_id=?1 AND kind='{}'",
+        crate::domain::event_kind::RESUME_STARTED
+    )
+}
+
 pub(super) fn run_events_of(conn: &Connection, id: &RunId) -> Result<Vec<RunEvent>> {
     Ok(conn
-        .prepare("SELECT * FROM run_events WHERE run_id=?1 ORDER BY id")?
+        .prepare(RUN_EVENTS_SQL)?
         .query_map([id], event_row)?
         .collect::<rusqlite::Result<_>>()?)
 }

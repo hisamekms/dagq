@@ -900,7 +900,7 @@ fn closed_value(
 }
 
 /// The query of [`closed_value`]: the run's `session_closed` by
-/// `events_by_kind`, each joined to its `session_opened` by the key.
+/// `events_by_run`, each joined to its `session_opened` by the key.
 fn closed_value_sql() -> String {
     format!(
         "SELECT c.payload, o.payload FROM run_events c
@@ -1229,28 +1229,49 @@ impl<'a> TurnEvents<'a> {
     /// Its `turn_started` and `turn_finished` after the event `opened`,
     /// oldest first.
     fn events(self, conn: &Connection, opened: EventId) -> Result<Vec<RunEvent>> {
-        let kinds = format!(
-            "kind IN ('{}','{}')",
-            event_kind::TURN_STARTED,
-            event_kind::TURN_FINISHED
-        );
         Ok(match self {
             Self::Run(run_id) => conn
-                .prepare(&format!(
-                    "SELECT * FROM run_events WHERE run_id=?1 AND id>?2 AND {kinds} ORDER BY id"
-                ))?
+                .prepare(&run_turns_sql())?
                 .query_map(params![run_id, opened], event_row)?
                 .collect::<rusqlite::Result<_>>()?,
             Self::Planner(planner) => conn
-                .prepare(&format!(
-                    "SELECT * FROM run_events WHERE run_id IS NULL AND id>?2 AND {kinds}
-                       AND json_extract(payload,'$.planner_id')=?1 ORDER BY id"
-                ))?
+                .prepare(&planner_turns_sql())?
                 .query_map(params![planner, opened], event_row)?
                 .collect::<rusqlite::Result<_>>()?,
         })
     }
 }
+
+/// The kinds of a turn, as the condition of a query on `run_events`.
+fn turn_kinds() -> String {
+    format!(
+        "kind IN ('{}','{}')",
+        event_kind::TURN_STARTED,
+        event_kind::TURN_FINISHED
+    )
+}
+
+/// The turns of run `?1` after the event `?2`, by `events_by_run`
+/// (goal 103).
+fn run_turns_sql() -> String {
+    format!(
+        "SELECT * FROM run_events WHERE run_id=?1 AND id>?2 AND {} ORDER BY id",
+        turn_kinds()
+    )
+}
+
+/// The turns of planner `?1` after the event `?2`, by their kind: `+run_id`
+/// keeps `events_by_run` from walking every event that has no run.
+fn planner_turns_sql() -> String {
+    format!(
+        "SELECT * FROM run_events WHERE +run_id IS NULL AND id>?2 AND {}
+           AND json_extract(payload,'$.planner_id')=?1 ORDER BY id",
+        turn_kinds()
+    )
+}
+
+/// The number of events of kind `?2` of run `?1`, by `events_by_run`.
+const RUN_EVENT_COUNT_SQL: &str = "SELECT count(*) FROM run_events WHERE run_id=?1 AND kind=?2";
 
 /// The work `breakdown` of `span`, made with `inputs`: the aggregate for
 /// the events, and the lines of its commands for the run directory's
@@ -1889,11 +1910,7 @@ fn run_context(conn: &Connection, run_id: &RunId) -> Result<SpanContext> {
     let (worktree, run_dir, workspace_id, route, provider) =
         run.unwrap_or((None, None, None, None, None));
     let count = |kind: &str| -> Result<i64> {
-        Ok(conn.query_row(
-            "SELECT count(*) FROM run_events WHERE run_id=?1 AND kind=?2",
-            params![run_id, kind],
-            |r| r.get(0),
-        )?)
+        Ok(conn.query_row(RUN_EVENT_COUNT_SQL, params![run_id, kind], |r| r.get(0))?)
     };
     Ok(SpanContext {
         worktree,
@@ -2071,6 +2088,50 @@ mod tests {
             !plan.iter().any(|step| step.starts_with("SCAN")),
             "{plan:#?}"
         );
+    }
+
+    /// Every search of `run_events` by its `run_id` (the SQL in `src` that
+    /// says `FROM run_events WHERE run_id`) is a search of an index, never a
+    /// walk of the whole table; those by a run use `events_by_run` (goal 103).
+    #[test]
+    fn the_searches_by_the_run_use_an_index() {
+        use crate::infrastructure::{planners, runtime_store};
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let conn = &queue.conn;
+        let searches = |sql: &str| {
+            let plan = plan(conn, sql);
+            assert!(
+                plan.iter()
+                    .any(|step| step.starts_with("SEARCH run_events"))
+                    && !plan.iter().any(|step| step.starts_with("SCAN run_events")),
+                "{sql}\n{plan:#?}"
+            );
+            plan
+        };
+        for sql in [
+            runtime_store::RUN_EVENTS_SQL.to_owned(),
+            runtime_store::HAS_RUN_EVENT_SQL.to_owned(),
+            runtime_store::last_resume_started_sql(),
+            run_turns_sql(),
+            RUN_EVENT_COUNT_SQL.to_owned(),
+        ] {
+            let plan = searches(&sql);
+            assert!(
+                plan.iter()
+                    .any(|step| step.contains("INDEX events_by_run (run_id=?")),
+                "{sql}\n{plan:#?}"
+            );
+        }
+        // The planners' events have no run: they are found by their kind,
+        // not by `events_by_run` among every event that has no run.
+        for sql in [planner_turns_sql(), planners::planner_turn_events_sql()] {
+            let plan = searches(&sql);
+            assert!(
+                !plan.iter().any(|step| step.contains("events_by_run")),
+                "{sql}\n{plan:#?}"
+            );
+        }
     }
 
     /// The events of a run, a plan review and the observer write their

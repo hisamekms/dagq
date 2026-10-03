@@ -55,11 +55,9 @@ impl SqliteQueue {
     /// Whether the run has recorded at least one event of `kind`; an
     /// adopter rebuilds what the previous supervisor already did from these.
     pub fn has_run_event(&self, id: &RunId, kind: &str) -> Result<bool> {
-        Ok(self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM run_events WHERE run_id=?1 AND kind=?2)",
-            params![id, kind],
-            |r| r.get(0),
-        )?)
+        Ok(self
+            .conn
+            .query_row(HAS_RUN_EVENT_SQL, params![id, kind], |r| r.get(0))?)
     }
 
     /// Every run of the queue, oldest first.
@@ -583,11 +581,7 @@ impl SqliteQueue {
 
     /// Every event of one run, oldest first.
     pub fn run_events(&self, id: &RunId) -> Result<Vec<RunEvent>> {
-        Ok(self
-            .conn
-            .prepare("SELECT * FROM run_events WHERE run_id=?1 ORDER BY id")?
-            .query_map([id], event_row)?
-            .collect::<rusqlite::Result<_>>()?)
+        run_events_of(&self.conn, id)
     }
 
     /// The latest run of every `in_progress` task, oldest first: the runs

@@ -101,16 +101,7 @@ impl SqliteQueue {
     pub fn planner_turn_events(&self, id: PlannerId) -> Result<Vec<RunEvent>> {
         Ok(self
             .conn
-            .prepare(&format!(
-                "SELECT * FROM run_events WHERE run_id IS NULL
-                   AND kind IN ('{}','{}','{}','{}','{}')
-                   AND json_extract(payload, '$.planner_id')=?1 ORDER BY id",
-                event_kind::TURN_REQUESTED,
-                event_kind::TURN_STARTED,
-                event_kind::TURN_FINISHED,
-                event_kind::TURN_SESSION_IDENTIFIED,
-                event_kind::PROVIDER_WAITING,
-            ))?
+            .prepare(&planner_turn_events_sql())?
             .query_map([id], super::sqlite::event_row)?
             .collect::<rusqlite::Result<_>>()?)
     }
@@ -169,6 +160,22 @@ impl SqliteQueue {
         );
         Ok(())
     }
+}
+
+/// The `turn_*` and `provider_waiting` events of planner `?1`, oldest
+/// first, by their kind: `+run_id` keeps `events_by_run` from walking every
+/// event that has no run.
+pub(super) fn planner_turn_events_sql() -> String {
+    format!(
+        "SELECT * FROM run_events WHERE +run_id IS NULL
+           AND kind IN ('{}','{}','{}','{}','{}')
+           AND json_extract(payload, '$.planner_id')=?1 ORDER BY id",
+        event_kind::TURN_REQUESTED,
+        event_kind::TURN_STARTED,
+        event_kind::TURN_FINISHED,
+        event_kind::TURN_SESSION_IDENTIFIED,
+        event_kind::PROVIDER_WAITING,
+    )
 }
 
 pub(super) fn planner_row(r: &Row<'_>) -> rusqlite::Result<PlannerSession> {
