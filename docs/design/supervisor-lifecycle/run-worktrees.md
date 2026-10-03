@@ -4,8 +4,8 @@ type: design
 title: "Run worktrees"
 status: current
 created: 2026-09-26
-updated: 2026-10-04 # task 1587
-last_verified: 2026-10-04 # task 1587
+updated: 2026-10-04 # task 1427
+last_verified: 2026-10-04 # task 1427
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -63,7 +63,7 @@ related:
   - 残る隙: 別のsupervisorがこのプロセスの2回の掃除の間にleaseを取ってworktreeを作り直し、同じ状態で返したrunは、このプロセスが入れ替わるまで候補に戻らない。このrepositoryの運用ではqueueごとに常駐するsupervisorは1つで（入れ替えのhandoffの間だけ重なる）、新しいプロセスは覚えていないので、この隙は受け入れる
 - eventはloopが記録する。loopは周回の最初にjobが終わっていればjoinし、jobが返した結果から`build_outputs_removed`・`worktree_removed`・`scratchpad_removed`・`run_tmp_removed`・`cleanup_failed`をtask 376（scratchpadはtask 1100、runの一時ファイルのdirはtask 1290）と同じpayloadで記録する（`cleanup_failed`はプロセスごとにworktreeあたり1回）
 - 空き容量のための掃除（[空き容量を確かめる](disk-space.md)）も同じjobに乗る。そのjobは最後に`git worktree prune`を行い、終わった周回で空きを読み直して`auto_repaired`を記録する。空きが足りずにそのjobを待つあいだ、claimと着地は控えるが`claim_held` / `landing_held`もaskも記録せず、終わった後の周回で読み直した空きで判定する。loopはこのjobだけはrunと同じく待つ（`supervise --once`がそのjobの後の周回でclaimできるように）。空き容量のための掃除を頼んだときに別のjobが走っていれば、そのjobを空き容量のための掃除として扱い（claimと着地はそのjobだけを待ち、消した分を`auto_repaired`に数える）、残り（そのjobが選ばなかったrunと`git worktree prune`。走っていたjobが選ばない`Idle`のrunのビルド成果物もここで消す）は控えずに次のjobで行い、その残りのjobが消した分も（claimと着地はそれを待たないが）`auto_repaired`に数える
-- stopかhandoffでは、空き容量のためのjobは選んだ最後のworktreeまで処理し、通常のjobは今のworktreeを終えたところで止まる。溜めた頼みは捨て、新しいjobは始めない（残りは次のsupervisorの最初の掃除が拾う）。ただし、空き容量のための掃除を別のjobに乗せた残り（`Request::counted`）だけは捨てず、走っているjobの後に1回だけjobとして始め、停止の印（`cleanup.stop`）で止めずに選んだ最後のworktreeまで処理する（task 1426）。stopかhandoffの後に来た新しい頼みは受けない。handoffのexecはjobの終わりを、残りのjobがあればその終わりも待つ。loopが終わるときは、走っているjobと溜めた頼みのjobを待ってeventを記録する（errorで終わったときも同じ規則でjobを待って記録する）
+- stopかhandoffでは、空き容量のためのjobは選んだ最後のworktreeまで処理し、通常のjobは今のworktreeを終えたところで止まる。溜めた頼みは捨て、新しいjobは始めない（残りは次のsupervisorの最初の掃除が拾う）。ただし、空き容量のための掃除を別のjobに乗せた残り（`Request::counted`）だけは捨てず、走っているjobの後に1回だけjobとして始め、停止の印（`cleanup.stop`）で止めずに選んだ最後のworktreeまで処理する（task 1426）。stopかhandoffの後に来た新しい頼みは受けない。handoffのexecはjobの終わりを、残りのjobがあればその終わりも待つ。loopが終わるときは、走っているjobと溜めた頼みのjobを待ってeventを記録する（errorで終わったときも同じ規則でjobを待って記録する）。handoffの要求がdrain中に取り消されて通常のclaimに戻ると、掃除も通常に戻る（task 1427）: 頼みを再び受け、停止の印を下ろし（走っている通常のjobがまだ見ていなければ最後まで進む）、終わったrun全部の掃除をすぐ頼み直して、drainのあいだ捨てた頼みと、今のworktreeの後に止まったjobの残りを拾う。drainのあいだ受けなかった空き容量の掃除の頼みは掃除の間隔に数えない。要求が別のbinaryに置き換わったとき（task 1286）とstopでは戻さない
 
 消す契機は、supervisorのslotが終わったとき（`integrated`・`failed`・`interrupted`）、triageが終わったとき、triageの`decide` askとlandingの`approve_landing` askのanswer（`cancel`を含む）を適用したとき（そのtaskのrunだけ）と、上の掃除と同じ回（`sweep_ended_runs`、workspaceを閉じた後、全runを見直す）。手での`integrate`は着地したrunのworktreeを自分で消し、手での`recover`・人の`ready` / `cancel`・supervisorの外で終わったrunは次の掃除が拾う。失敗は`cleanup_failed`（`path`、`message`、`by: supervisor`）にして残りを続け、次の掃除で再び試す（supervisorのプロセスごとにworktreeあたり1回だけ記録する）。
 

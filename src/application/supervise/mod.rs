@@ -1470,6 +1470,11 @@ impl Supervisor<'_> {
                         );
                         self.handoff = None;
                         handoff_withdrawn = true;
+                        // The cleanup goes back to normal with the claims;
+                        // a stop keeps it ending (task 1427).
+                        if !stopping {
+                            self.resume_cleanup();
+                        }
                     }
                 }
             }
@@ -1540,6 +1545,7 @@ impl Supervisor<'_> {
                                 );
                                 self.handoff = None;
                                 self.draining = !self.claiming;
+                                self.resume_cleanup();
                             }
                         }
                     }

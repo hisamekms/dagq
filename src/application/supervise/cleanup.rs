@@ -319,10 +319,15 @@ impl Supervisor<'_> {
     /// Ask for the worktrees of ended runs to be cleaned, every such run's
     /// or only `task`'s (see [`Self::clean_ended_worktrees`] for what is
     /// removed), for disk space when `disk` is given. It starts at once
-    /// unless a job runs; then it waits for the next one.
-    pub(super) fn request_cleanup(&mut self, task: Option<TaskId>, disk: Option<DiskRequest>) {
+    /// unless a job runs; then it waits for the next one. Whether it was
+    /// taken: none is once ending (a stop or a handoff).
+    pub(super) fn request_cleanup(
+        &mut self,
+        task: Option<TaskId>,
+        disk: Option<DiskRequest>,
+    ) -> bool {
         if self.cleanup.ending {
-            return;
+            return false;
         }
         // For room while another job runs: that job counts for it, so the
         // claims wait only for it, and the rest (the runs it did not pick,
@@ -338,10 +343,11 @@ impl Supervisor<'_> {
             self.cleanup.pending.prune = true;
             self.cleanup.pending.idle = true;
             self.cleanup.pending.counted = self.cleanup.pending.counted.or(Some(request));
-            return;
+            return true;
         }
         self.cleanup.pending.add(task, disk);
         self.start_cleanup();
+        true
     }
     /// Join a finished job and record what it did, then start what waits;
     /// with `ending` (a stop or a handoff), let the job end after its
@@ -393,6 +399,19 @@ impl Supervisor<'_> {
                 ..Request::default()
             };
         }
+    }
+    /// A handoff withdrawn while this process drained, which goes back to
+    /// claims (task 1427): requests are taken again, an ordinary job that
+    /// has not seen the stop yet goes on, and every ended run is asked for
+    /// at once, which picks up what the drain dropped. A job that stopped
+    /// after its current worktree leaves the rest to that request.
+    pub(super) fn resume_cleanup(&mut self) {
+        if !self.cleanup.ending {
+            return;
+        }
+        self.cleanup.ending = false;
+        self.cleanup.stop.store(false, Ordering::SeqCst);
+        self.request_cleanup(None, None);
     }
     /// Once the loop ended: wait for the job and whatever waits for the
     /// next one, and record what they did. After a stop, only the running

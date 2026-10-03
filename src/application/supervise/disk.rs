@@ -164,8 +164,11 @@ impl Supervisor<'_> {
         {
             return;
         }
-        self.disk.cleaned = Some(Instant::now());
-        self.request_cleanup(None, Some(DiskRequest { free, needed }));
+        // A request a drain does not take is not a cleanup: the next one
+        // after the drain ends is not kept waiting for it (task 1427).
+        if self.request_cleanup(None, Some(DiskRequest { free, needed })) {
+            self.disk.cleaned = Some(Instant::now());
+        }
     }
     /// Once a cleanup for room is done: record `auto_repaired` when it
     /// freed something, with the free bytes read again.

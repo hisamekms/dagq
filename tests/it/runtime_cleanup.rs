@@ -1623,3 +1623,259 @@ fn draining_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing() {
         }
     }
 }
+
+/// State of the test below of a handoff withdrawn while draining.
+struct Withdrawn {
+    db: PathBuf,
+    idle_target: PathBuf,
+    /// The test made the disk short once a run waits to land.
+    short: bool,
+    enough: bool,
+}
+
+static WITHDRAWN: Mutex<Option<Withdrawn>> = Mutex::new(None);
+static WITHDRAWN_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Room until the test makes the disk short: then short once a run waits
+/// to land, until the idle run's build outputs go (with `enough`; for ever
+/// without).
+fn withdrawn_free_space(_: &Path) -> Option<u64> {
+    WITHDRAWN_READS.fetch_add(1, Ordering::SeqCst);
+    let state = WITHDRAWN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let state = state.as_ref()?;
+    let queued = SqliteQueue::open(&state.db)
+        .unwrap()
+        .latest_event_of("landing_queued")
+        .unwrap()
+        .is_some();
+    let short = state.short && queued && (!state.enough || state.idle_target.exists());
+    Some(if short { 1 } else { 1 << 40 })
+}
+
+/// Wait for `count` more readings of the free space: whole passes.
+fn withdrawn_passes(db: &Path, count: usize) {
+    let reads = WITHDRAWN_READS.load(Ordering::SeqCst);
+    wait_until(db, common::STEP_LIMIT, |_| {
+        WITHDRAWN_READS.load(Ordering::SeqCst) >= reads + count
+    });
+}
+
+/// How the handoff of the test below ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Withdrawal {
+    /// Withdrawn while the ordinary job is held on its first worktree.
+    WhileHeld,
+    /// Withdrawn as the supervisor takes it, once the job stopped after its
+    /// first worktree.
+    AtTake,
+    /// Replaced by another binary while the job is held (task 1286).
+    Replaced,
+}
+
+/// Task 1427: a handoff withdrawn while the supervisor drains brings the
+/// cleanup back to normal with the claims. An ordinary job held when the
+/// handoff came, whether it went on or stopped after its current worktree,
+/// is followed to its last candidate (`build_outputs_removed`,
+/// `worktree_removed`). A shortage of room after that runs a cleanup for
+/// room before any disk ask: with enough, no ask is opened and the run
+/// lands; still short, the ask is opened as before. A handoff replaced by
+/// another binary goes on draining: the job stops after its current
+/// worktree and nothing more is cleaned before the exec.
+#[test]
+fn a_withdrawn_handoff_resumes_the_cleanup() {
+    for (withdrawal, enough) in [
+        (Withdrawal::WhileHeld, true),
+        (Withdrawal::WhileHeld, false),
+        (Withdrawal::AtTake, true),
+        (Withdrawal::AtTake, false),
+        (Withdrawal::Replaced, true),
+    ] {
+        let case = format!("{withdrawal:?}, enough={enough}");
+        let (_dir, repo, db) = fixture();
+        let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
+        // A run nobody works on that waits for no answer: only a cleanup
+        // for room removes its build outputs.
+        let (idle, ask) = run_awaiting_an_answer(&db, &repo, &backend, true);
+        let mut queue = SqliteQueue::open(&db).unwrap();
+        queue.answer(ask.id, "withdrawn").unwrap();
+        queue.close_ask(ask.id).unwrap();
+        // Ended runs of the ordinary sweep: one whose task goes on, one
+        // whose task is canceled.
+        add_ready_task(&mut queue, "ended", &[]);
+        add_ready_task(&mut queue, "canceled", &[]);
+        let building = TestWorkspace::new(&db, false, BUILDING_AGENT);
+        supervise(&db, &repo, &building).unwrap();
+        building.join();
+        let ended = queue.show(TaskId::new(2)).unwrap().runs[0].clone();
+        let canceled = queue.show(TaskId::new(3)).unwrap().runs[0].clone();
+        let targets: Vec<PathBuf> = [&ended, &canceled]
+            .iter()
+            .map(|run| {
+                assert_eq!(run.status(), RunStatus::Failed);
+                let target = Path::new(run.worktree_path().unwrap()).join("target");
+                fs::create_dir_all(target.join("debug")).unwrap();
+                fs::write(target.join("debug/again"), vec![0u8; 4096]).unwrap();
+                target
+            })
+            .collect();
+        queue
+            .transition(TaskId::new(3), TaskAction::Cancel)
+            .unwrap();
+        let canceled_worktree = PathBuf::from(canceled.worktree_path().unwrap());
+        let idle_target = Path::new(idle.worktree_path().unwrap()).join("target");
+        assert!(idle_target.join("debug/big").is_file());
+        if withdrawal == Withdrawal::AtTake {
+            // The take of `/next/dagq` meets its withdrawal: the trigger
+            // withdraws the request and skips the take's own update.
+            Connection::open(&db)
+                .unwrap()
+                .execute_batch(
+                    "CREATE TRIGGER withdraw_at_take BEFORE UPDATE OF handoff_accepted ON supervisors
+                     WHEN NEW.handoff_accepted = 0 AND OLD.handoff_binary = '/next/dagq'
+                     BEGIN
+                         UPDATE supervisors SET handoff_binary = NULL, handoff_requested_at = NULL
+                         WHERE token = OLD.token;
+                         SELECT RAISE(IGNORE);
+                     END;",
+                )
+                .unwrap();
+        }
+        *WITHDRAWN.lock().unwrap() = Some(Withdrawn {
+            db: db.clone(),
+            idle_target: idle_target.clone(),
+            short: false,
+            enough,
+        });
+        let files = GatedFiles::default();
+        let stop = Arc::new(AtomicBool::new(false));
+        let options = files.options(SuperviseOptions {
+            stop: stop.clone(),
+            disk: Some(DiskConfig {
+                min_free_bytes: Some(GIB),
+                ..DiskConfig::default()
+            }),
+            free_space: withdrawn_free_space,
+            ..supervise_options(1, false)
+        });
+        let supervisor = {
+            let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+            thread::spawn(move || {
+                let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets acceptance")]);
+                runtime::supervise_with_reviewer(
+                    &db,
+                    &repo,
+                    &*backend,
+                    &claude_stub(&db),
+                    &reviewer,
+                    Path::new(env!("CARGO_BIN_EXE_dagq")),
+                    &options,
+                )
+            })
+        };
+        // The first sweep's ordinary job, held on its first worktree.
+        assert_eq!(files.held(), targets[0], "{case}");
+        let token = queue.supervisors().unwrap().pop().unwrap().token;
+        assert!(queue.request_handoff(&token, "/next/dagq").unwrap());
+        // The drain stops the job after its current worktree.
+        withdrawn_passes(&db, 4);
+        match withdrawal {
+            Withdrawal::WhileHeld => {
+                assert!(queue.cancel_handoff(&token, "/next/dagq").unwrap());
+                withdrawn_passes(&db, 4);
+            }
+            Withdrawal::Replaced => {
+                assert!(queue.request_handoff(&token, "/other/dagq").unwrap());
+                withdrawn_passes(&db, 4);
+            }
+            Withdrawal::AtTake => {}
+        }
+        assert!(!supervisor.is_finished(), "{case}");
+        files.open();
+
+        if withdrawal == Withdrawal::Replaced {
+            let outcome = joined(supervisor, "the drain of the replaced handoff").unwrap();
+            backend.join();
+            assert_eq!(outcome["errors"], json!([]), "{outcome}");
+            assert_eq!(outcome["outcome"], "handoff", "{outcome}");
+            assert_eq!(outcome["binary"], "/other/dagq", "{outcome}");
+            // Still ending: the job stopped after its current worktree and
+            // nothing cleaned the rest before the exec.
+            assert!(!targets[0].exists());
+            assert!(targets[1].is_dir());
+            assert!(canceled_worktree.is_dir());
+            assert!(payloads_of(&queue, &canceled, "worktree_removed").is_empty());
+            assert!(idle_target.join("debug/big").is_file());
+            continue;
+        }
+
+        // Back to normal: the rest of the ended runs is cleaned.
+        wait_until(&db, common::STEP_LIMIT, |queue| {
+            payloads_of(queue, &ended, "build_outputs_removed").len() == 2
+                && payloads_of(queue, &canceled, "worktree_removed").len() == 1
+        });
+        assert!(!targets[0].exists(), "{case}");
+        assert!(!canceled_worktree.exists(), "{case}");
+        assert!(queue.handoff_request(&token).unwrap().is_none(), "{case}");
+        assert!(idle_target.join("debug/big").is_file(), "{case}");
+        // The job the withdrawal asked for, which finds nothing left, ends
+        // before the disk runs short: a cleanup for room asked while an
+        // ordinary job runs would ride on it instead.
+        withdrawn_passes(&db, 4);
+
+        // Short of room once a run waits to land, after the withdrawal.
+        WITHDRAWN.lock().unwrap().as_mut().unwrap().short = true;
+        add_ready_task(&mut queue, "landing", &[]);
+        let disk_asks = |queue: &SqliteQueue| -> Vec<dagq::domain::Ask> {
+            queue
+                .asks(dagq::application::AskQuery {
+                    all: true,
+                    ..Default::default()
+                })
+                .unwrap()
+                .into_iter()
+                .filter(|ask| ask.subject.as_deref() == Some("disk"))
+                .collect()
+        };
+        if enough {
+            // The claims resumed, and the cleanup for room made room for
+            // the landing: no disk ask.
+            wait_until(&db, common::STEP_LIMIT, |queue| {
+                queue
+                    .show(TaskId::new(4))
+                    .unwrap()
+                    .runs
+                    .first()
+                    .is_some_and(|run| run.status() == RunStatus::Integrated)
+            });
+            assert!(disk_asks(&queue).is_empty(), "{case}");
+        } else {
+            wait_until(&db, common::STEP_LIMIT, |queue| {
+                !disk_asks(queue).is_empty()
+            });
+            let landing = queue.show(TaskId::new(4)).unwrap().runs[0].clone();
+            assert_eq!(
+                queue.run(landing.id()).unwrap().status(),
+                RunStatus::AwaitingIntegration,
+                "{case}"
+            );
+        }
+        // Either way the cleanup for room ran first.
+        assert_kept_but_the_build_outputs(&repo, &idle);
+        let removed = payloads_of(&queue, &idle, "build_outputs_removed");
+        assert_eq!(removed.len(), 1, "{case}: {removed:?}");
+        assert_eq!(removed[0]["reason"], "disk_space");
+        let repair = queue.latest_event_of("auto_repaired").unwrap().unwrap();
+        assert_eq!(repair.payload["repair"], "disk_cleanup", "{case}");
+        assert_eq!(
+            repair.payload["detail"]["runs"],
+            json!([idle.id().as_str()]),
+            "{case}"
+        );
+        stop.store(true, Ordering::SeqCst);
+        let outcome = joined(supervisor, "the supervisor to stop").unwrap();
+        backend.join();
+        assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    }
+}
