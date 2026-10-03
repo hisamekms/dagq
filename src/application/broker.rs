@@ -5,7 +5,9 @@
 //! queue's container runs, and that it answers health on `127.0.0.1`;
 //! [`stop`] stops the container and then the machine when no container
 //! runs on it ([`release_machine`]); [`status`] reads all of it without
-//! changing anything.
+//! changing anything. Around the machine's stops and starts, the gvproxy
+//! podman left behind for a stopped machine is put away ([`clean_gvproxy`]
+//! through the [`HostProcesses`] port, task 1579).
 //!
 //! Podman is behind the [`Podman`] port, so the decisions here (which
 //! podman command comes next from the state podman reports) and the
@@ -609,6 +611,10 @@ pub struct MachineOutcome {
     /// Why it was restarted: podman's words for the failed start or the
     /// connection that did not answer.
     pub restart_reason: Option<String>,
+    /// The cleanups of the machine's orphaned gvproxy on the way
+    /// ([`ensure_machine_with`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub gvproxy: Vec<GvproxyCleanup>,
 }
 
 /// Make dagq's machine exist, run and answer on its connection, under the
@@ -624,13 +630,58 @@ pub fn ensure_machine(
     lock: &dyn HostLock,
     spec: &MachineSpec,
 ) -> BrokerResult<MachineOutcome> {
-    let _held = lock.hold()?;
-    ensure_machine_held(podman, spec)
+    ensure_machine_with(podman, lock, None, spec)
 }
 
-/// [`ensure_machine`] for a caller that holds the host lock.
-fn ensure_machine_held(podman: &dyn Podman, spec: &MachineSpec) -> BrokerResult<MachineOutcome> {
+/// [`ensure_machine`] that also puts away the machine's orphaned gvproxy
+/// through `processes` ([`clean_gvproxy`], task 1579): before a start of
+/// the stopped machine, between the stop and the start of its restart,
+/// and at every failure's exit, whose failure keeps its code and gets the
+/// cleanup's [`GvproxyCleanup::summary`] added to its message. `None`
+/// touches no process, as [`ensure_machine`].
+pub fn ensure_machine_with(
+    podman: &dyn Podman,
+    lock: &dyn HostLock,
+    processes: Option<&dyn HostProcesses>,
+    spec: &MachineSpec,
+) -> BrokerResult<MachineOutcome> {
+    let _held = lock.hold()?;
+    ensure_machine_held(podman, processes, spec)
+}
+
+/// [`ensure_machine_with`] for a caller that holds the host lock.
+fn ensure_machine_held(
+    podman: &dyn Podman,
+    processes: Option<&dyn HostProcesses>,
+    spec: &MachineSpec,
+) -> BrokerResult<MachineOutcome> {
     let mut outcome = MachineOutcome::default();
+    match ensure_machine_steps(podman, processes, spec, &mut outcome) {
+        Ok(()) => Ok(outcome),
+        Err(mut failure) => {
+            if let Some(processes) = processes {
+                outcome.gvproxy.push(clean_gvproxy(
+                    podman,
+                    processes,
+                    &spec.name,
+                    GvproxyAfter::Failure,
+                ));
+            }
+            for cleanup in &outcome.gvproxy {
+                failure.message.push_str("; ");
+                failure.message.push_str(&cleanup.summary());
+            }
+            Err(failure)
+        }
+    }
+}
+
+fn ensure_machine_steps(
+    podman: &dyn Podman,
+    processes: Option<&dyn HostProcesses>,
+    spec: &MachineSpec,
+    outcome: &mut MachineOutcome,
+) -> BrokerResult<()> {
     let mut status = machine_status(podman, &spec.name)?;
     if status.state == MachineState::Missing {
         checked(
@@ -664,6 +715,15 @@ fn ensure_machine_held(podman: &dyn Podman, spec: &MachineSpec) -> BrokerResult<
             ));
         }
         MachineState::Stopped => {
+            // The machine was just listed as stopped: a gvproxy left on its
+            // socket is an orphan, put away before the start adds another.
+            if let Some(processes) = processes {
+                outcome.gvproxy.push(sweep_gvproxy(
+                    processes,
+                    &spec.name,
+                    GvproxyAfter::BeforeStart,
+                ));
+            }
             outcome.started = true;
             let start = podman.run(&spec.start_args())?;
             if start.success {
@@ -678,12 +738,12 @@ fn ensure_machine_held(podman: &dyn Podman, spec: &MachineSpec) -> BrokerResult<
         }
     };
     if let Some(reason) = trouble {
-        restart_machine(podman, spec, &reason)?;
         outcome.started = true;
         outcome.restarted = true;
-        outcome.restart_reason = Some(reason);
+        outcome.restart_reason = Some(reason.clone());
+        restart_machine(podman, processes, spec, &reason, outcome)?;
     }
-    Ok(outcome)
+    Ok(())
 }
 
 /// Why dagq's machine's connection does not answer, or `None` when it
@@ -702,7 +762,13 @@ fn unanswered(podman: &dyn Podman, name: &str) -> BrokerResult<Option<String>> {
 /// connection must answer afterwards, else `machine_failed`. A failed stop
 /// (the machine may not have come up at all) does not keep it from the
 /// start, and is named when the start fails too.
-fn restart_machine(podman: &dyn Podman, spec: &MachineSpec, reason: &str) -> BrokerResult<()> {
+fn restart_machine(
+    podman: &dyn Podman,
+    processes: Option<&dyn HostProcesses>,
+    spec: &MachineSpec,
+    reason: &str,
+    outcome: &mut MachineOutcome,
+) -> BrokerResult<()> {
     let name = &spec.name;
     let stop = podman.run(&args(["machine", "stop", name]))?;
     let stopped = if stop.success {
@@ -710,6 +776,16 @@ fn restart_machine(podman: &dyn Podman, spec: &MachineSpec, reason: &str) -> Bro
     } else {
         format!(" (podman machine stop {name} failed: {})", stop.words())
     };
+    // Between the stop and the start: the stopped machine's gvproxy, if
+    // the stop left it, would otherwise outlive the new one's.
+    if let Some(processes) = processes {
+        outcome.gvproxy.push(clean_gvproxy(
+            podman,
+            processes,
+            name,
+            GvproxyAfter::RestartStop,
+        ));
+    }
     let start = podman.run(&spec.start_args())?;
     let again = if start.success {
         unanswered(podman, name)?
@@ -732,7 +808,45 @@ fn restart_machine(podman: &dyn Podman, spec: &MachineSpec, reason: &str) -> Bro
 /// (ADR-t827-3 decision 5). `true` when it stopped it; a missing or
 /// stopped machine, or one with a running container, is left alone.
 pub fn release_machine(podman: &dyn Podman, lock: &dyn HostLock, name: &str) -> BrokerResult<bool> {
+    release_machine_with(podman, lock, None, name).map(|release| release.stopped)
+}
+
+/// What [`release_machine_with`] did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Release {
+    pub stopped: bool,
+    /// The cleanup after it, when it was given the processes.
+    pub gvproxy: Option<GvproxyCleanup>,
+}
+
+/// [`release_machine`] that then puts away the machine's orphaned
+/// gvproxy through `processes` ([`clean_gvproxy`], task 1579), still
+/// under the host lock: whether it stopped the machine, found it stopped,
+/// or failed to stop it (whose failure keeps its code and gets the
+/// cleanup's summary added to its message).
+pub fn release_machine_with(
+    podman: &dyn Podman,
+    lock: &dyn HostLock,
+    processes: Option<&dyn HostProcesses>,
+    name: &str,
+) -> BrokerResult<Release> {
     let _held = lock.hold()?;
+    let released = release_machine_held(podman, name);
+    let gvproxy =
+        processes.map(|processes| clean_gvproxy(podman, processes, name, GvproxyAfter::Stop));
+    match released {
+        Ok(stopped) => Ok(Release { stopped, gvproxy }),
+        Err(mut failure) => {
+            if let Some(cleanup) = gvproxy {
+                failure.message.push_str("; ");
+                failure.message.push_str(&cleanup.summary());
+            }
+            Err(failure)
+        }
+    }
+}
+
+fn release_machine_held(podman: &dyn Podman, name: &str) -> BrokerResult<bool> {
     if machine_status(podman, name)?.state != MachineState::Running {
         return Ok(false);
     }
@@ -752,6 +866,268 @@ pub fn release_machine(podman: &dyn Podman, lock: &dyn HostLock, name: &str) -> 
         &format!("podman machine stop {name}"),
     )?;
     Ok(true)
+}
+
+// ---------------------------------------------------------------------------
+// The machine's orphaned gvproxy (task 1579).
+
+/// The file name of the socket a machine's gvproxy listens on for vfkit
+/// (`-listen-vfkit unixgram://<podman's runtime dir>/podman/<machine>-gvproxy.sock`).
+pub fn gvproxy_socket(machine: &str) -> String {
+    format!("{machine}-gvproxy.sock")
+}
+
+/// How long a gvproxy is given to exit after each signal.
+pub const GVPROXY_EXIT_WAIT: Duration = Duration::from_secs(5);
+
+/// A process on the host: its pid and its arguments, the executable first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostProcess {
+    pub pid: u32,
+    pub args: Vec<String>,
+}
+
+/// The signal [`HostProcesses::signal`] sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Signal {
+    Terminate,
+    Kill,
+}
+
+/// The host's processes, which [`clean_gvproxy`] lists and ends.
+pub trait HostProcesses {
+    /// Every process with its arguments.
+    fn list(&self) -> Result<Vec<HostProcess>, String>;
+    /// Send `signal` to `pid`; a process already gone is not an error.
+    fn signal(&self, pid: u32, signal: Signal) -> Result<(), String>;
+    /// Whether `pid` still runs.
+    fn alive(&self, pid: u32) -> bool;
+    /// How long a process is given to exit after each signal.
+    fn exit_wait(&self) -> Duration {
+        GVPROXY_EXIT_WAIT
+    }
+}
+
+/// Whether `process` is the gvproxy of the machine `machine`: its
+/// executable is `gvproxy` and an argument is the path (bare or as a
+/// `unix://` or `unixgram://` URL) of `podman/<machine>-gvproxy.sock`. A
+/// gvproxy of another machine (a person's `podman-machine-default`), and
+/// any other process that names the socket, is not.
+pub fn is_gvproxy_of(process: &HostProcess, machine: &str) -> bool {
+    let Some(executable) = process.args.first() else {
+        return false;
+    };
+    if Path::new(executable)
+        .file_name()
+        .and_then(|name| name.to_str())
+        != Some("gvproxy")
+    {
+        return false;
+    }
+    let socket = gvproxy_socket(machine);
+    process.args[1..].iter().any(|arg| {
+        let path = arg
+            .strip_prefix("unixgram://")
+            .or_else(|| arg.strip_prefix("unix://"))
+            .unwrap_or(arg);
+        let path = Path::new(path);
+        path.file_name().and_then(|name| name.to_str()) == Some(socket.as_str())
+            && path
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                == Some("podman")
+    })
+}
+
+/// When a [`GvproxyCleanup`] ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GvproxyAfter {
+    /// After `release_machine`'s stop (`dagq broker stop`, `down`, the
+    /// supervisor's drain).
+    Stop,
+    /// Before the start of a machine listed as stopped.
+    BeforeStart,
+    /// After the stop of a restart, before its start.
+    RestartStop,
+    /// At a failure's exit of `ensure_machine` (a start that failed or was
+    /// killed, a connection that did not answer, podman that failed).
+    Failure,
+}
+
+impl GvproxyAfter {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::BeforeStart => "before_start",
+            Self::RestartStop => "restart_stop",
+            Self::Failure => "failure",
+        }
+    }
+}
+
+/// Why a [`GvproxyCleanup`] touched no process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GvproxySkip {
+    /// The machine runs: its gvproxy is in use.
+    Running,
+    /// The machine is not there.
+    Missing,
+    /// `podman machine list` failed: not known to be stopped.
+    StateUnknown,
+}
+
+/// What [`clean_gvproxy`] did: how many of the machine's gvproxy it ended
+/// (0 included), why it touched none, and what failed (listing the
+/// processes, a signal, a process that did not exit).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GvproxyCleanup {
+    pub machine: String,
+    pub after: GvproxyAfter,
+    pub cleaned: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<GvproxySkip>,
+    /// Why the machine's state could not be read, with `state_unknown`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_error: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<String>,
+}
+
+impl GvproxyCleanup {
+    fn new(machine: &str, after: GvproxyAfter) -> Self {
+        Self {
+            machine: machine.to_owned(),
+            after,
+            cleaned: 0,
+            skipped: None,
+            state_error: None,
+            failures: Vec::new(),
+        }
+    }
+
+    /// Whether it ended a gvproxy or failed to: worth an event.
+    pub fn acted(&self) -> bool {
+        self.cleaned > 0 || !self.failures.is_empty()
+    }
+
+    /// One line for a failure's message or a log.
+    pub fn summary(&self) -> String {
+        let mut line = format!(
+            "gvproxy of {} after {}: ",
+            self.machine,
+            self.after.as_str()
+        );
+        match self.skipped {
+            Some(GvproxySkip::Running) => line.push_str("left, the machine runs"),
+            Some(GvproxySkip::Missing) => line.push_str("left, the machine is missing"),
+            Some(GvproxySkip::StateUnknown) => line.push_str(&format!(
+                "left, the machine's state is unknown ({})",
+                self.state_error.as_deref().unwrap_or("")
+            )),
+            None => line.push_str(&format!("ended {}", self.cleaned)),
+        }
+        if !self.failures.is_empty() {
+            line.push_str(&format!(", failed: {}", self.failures.join("; ")));
+        }
+        line
+    }
+}
+
+/// Put away the orphaned gvproxy of dagq's machine `machine` (task 1579):
+/// only once `podman machine list` shows the machine stopped are the
+/// processes whose executable is gvproxy and whose argument is the
+/// machine's own socket ([`is_gvproxy_of`]) ended and seen to exit. A
+/// machine that runs, is missing, or whose state cannot be read is left
+/// alone, as are other machines' gvproxy and every other process. It
+/// never fails: what it could not do is in the report.
+pub fn clean_gvproxy(
+    podman: &dyn Podman,
+    processes: &dyn HostProcesses,
+    machine: &str,
+    after: GvproxyAfter,
+) -> GvproxyCleanup {
+    let skipped = match machine_status(podman, machine) {
+        Ok(status) => match status.state {
+            MachineState::Stopped => None,
+            MachineState::Running => Some((GvproxySkip::Running, None)),
+            MachineState::Missing => Some((GvproxySkip::Missing, None)),
+        },
+        Err(failure) => Some((GvproxySkip::StateUnknown, Some(failure.to_string()))),
+    };
+    match skipped {
+        None => sweep_gvproxy(processes, machine, after),
+        Some((skip, state_error)) => GvproxyCleanup {
+            skipped: Some(skip),
+            state_error,
+            ..GvproxyCleanup::new(machine, after)
+        },
+    }
+}
+
+/// End the gvproxy of `machine`, which the caller has just seen stopped:
+/// all of them get `SIGTERM` at once, those that do not exit within the
+/// wait get `SIGKILL`, and those that outlive it too are failures, so many
+/// orphans take one wait or two rather than one each under the host lock.
+fn sweep_gvproxy(
+    processes: &dyn HostProcesses,
+    machine: &str,
+    after: GvproxyAfter,
+) -> GvproxyCleanup {
+    let mut cleanup = GvproxyCleanup::new(machine, after);
+    let listed = match processes.list() {
+        Ok(listed) => listed,
+        Err(error) => {
+            cleanup
+                .failures
+                .push(format!("list the processes: {error}"));
+            return cleanup;
+        }
+    };
+    let mut running: Vec<u32> = listed
+        .iter()
+        .filter(|process| is_gvproxy_of(process, machine))
+        .map(|process| process.pid)
+        .collect();
+    let wait = processes.exit_wait();
+    for signal in [Signal::Terminate, Signal::Kill] {
+        running.retain(|&pid| match processes.signal(pid, signal) {
+            Ok(()) => true,
+            Err(error) => {
+                cleanup
+                    .failures
+                    .push(format!("signal {signal:?} to gvproxy {pid}: {error}"));
+                false
+            }
+        });
+        let before = running.len();
+        running = still_running(processes, running, wait);
+        cleanup.cleaned += u32::try_from(before - running.len()).unwrap_or(u32::MAX);
+    }
+    for pid in running {
+        cleanup.failures.push(format!(
+            "gvproxy {pid} still runs {}s after SIGTERM and again after SIGKILL",
+            wait.as_secs()
+        ));
+    }
+    cleanup
+}
+
+/// The pids of `pids` that still run once `wait` is over (or as soon as
+/// none does).
+fn still_running(processes: &dyn HostProcesses, pids: Vec<u32>, wait: Duration) -> Vec<u32> {
+    let deadline = Instant::now() + wait;
+    let mut pids = pids;
+    loop {
+        pids.retain(|&pid| processes.alive(pid));
+        let now = Instant::now();
+        if pids.is_empty() || now >= deadline {
+            return pids;
+        }
+        std::thread::sleep((deadline - now).min(Duration::from_millis(100)));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1439,6 +1815,8 @@ pub struct Ports<'a> {
     pub podman: &'a dyn Podman,
     pub host_lock: &'a dyn HostLock,
     pub health: &'a dyn HealthProbe,
+    /// The host's processes, for the machine's orphaned gvproxy.
+    pub processes: &'a dyn HostProcesses,
 }
 
 /// What `dagq broker start` does, for one queue.
@@ -1500,7 +1878,7 @@ pub fn start(ports: &Ports, request: &StartRequest) -> BrokerResult<StartReport>
     // `release_machine` cannot stop the machine under the build or the run
     // (ADR-t827-3 decision 5).
     let _held = ports.host_lock.hold()?;
-    let machine = ensure_machine_held(ports.podman, request.machine)?;
+    let machine = ensure_machine_held(ports.podman, Some(ports.processes), request.machine)?;
     // The image, built when missing: the supervisor is told before the
     // build starts (`building`), and the build is timed.
     let mut build_ms = None;
@@ -1643,23 +2021,45 @@ pub trait BrokerControl: Send + Sync {
 }
 
 /// What [`stop`] did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StopReport {
     pub container_stopped: bool,
     pub machine_stopped: bool,
+    /// The cleanup of the machine's orphaned gvproxy after the stop.
+    pub gvproxy: Option<GvproxyCleanup>,
 }
 
 /// Stop the queue's container, then dagq's machine when no other
-/// container runs on it. A missing or stopped machine is left as it is.
+/// container runs on it, then put away the stopped machine's orphaned
+/// gvproxy ([`release_machine_with`]). A missing or stopped machine is
+/// left as it is.
 pub fn stop(ports: &Ports, machine: &str, container: &str) -> BrokerResult<StopReport> {
-    let container_stopped = match machine_status(ports.podman, machine)?.state {
+    let state = machine_status(ports.podman, machine).map_err(|mut failure| {
+        // Not known to be stopped, and outside the host lock: nothing is
+        // touched, and the report says why.
+        let cleanup = GvproxyCleanup {
+            skipped: Some(GvproxySkip::StateUnknown),
+            state_error: Some(failure.to_string()),
+            ..GvproxyCleanup::new(machine, GvproxyAfter::Stop)
+        };
+        failure.message.push_str("; ");
+        failure.message.push_str(&cleanup.summary());
+        failure
+    })?;
+    let container_stopped = match state.state {
         MachineState::Running => stop_container(ports.podman, machine, container)?,
         MachineState::Missing | MachineState::Stopped => false,
     };
-    let machine_stopped = release_machine(ports.podman, ports.host_lock, machine)?;
+    let release = release_machine_with(
+        ports.podman,
+        ports.host_lock,
+        Some(ports.processes),
+        machine,
+    )?;
     Ok(StopReport {
         container_stopped,
-        machine_stopped,
+        machine_stopped: release.stopped,
+        gvproxy: release.gvproxy,
     })
 }
 
@@ -1772,6 +2172,8 @@ mod tests {
         calls: RefCell<Vec<Vec<String>>>,
         answers: RefCell<Vec<(Vec<String>, VecDeque<PodmanOutput>)>>,
         missing: bool,
+        /// Commands starting with this cannot be run at all.
+        error_on: Vec<String>,
     }
 
     fn ok(stdout: &str) -> PodmanOutput {
@@ -1828,6 +2230,12 @@ mod tests {
                 ));
             }
             self.calls.borrow_mut().push(args.to_vec());
+            if !self.error_on.is_empty() && args.starts_with(&self.error_on) {
+                return Err(BrokerFailure::new(
+                    FailureCode::PodmanFailed,
+                    "run podman: Resource temporarily unavailable",
+                ));
+            }
             let mut answers = self.answers.borrow_mut();
             let Some((_, outputs)) = answers
                 .iter_mut()
@@ -1857,6 +2265,138 @@ mod tests {
             }
             self.held.set(self.held.get() + 1);
             Ok(Box::new(()))
+        }
+    }
+
+    /// A host with no process to end.
+    struct NoProcesses;
+
+    impl HostProcesses for NoProcesses {
+        fn list(&self) -> Result<Vec<HostProcess>, String> {
+            Ok(Vec::new())
+        }
+
+        fn signal(&self, pid: u32, _signal: Signal) -> Result<(), String> {
+            panic!("no process to signal, yet {pid} was");
+        }
+
+        fn alive(&self, _pid: u32) -> bool {
+            false
+        }
+    }
+
+    /// A host's process list: a process ends at its first signal unless it
+    /// ignores `SIGTERM`, ignores both, or refuses them; every signal is
+    /// recorded.
+    #[derive(Default)]
+    struct Procs {
+        listed: Vec<HostProcess>,
+        list_fails: bool,
+        ignores_term: Vec<u32>,
+        immortal: Vec<u32>,
+        refuses: Vec<u32>,
+        signals: RefCell<Vec<(u32, Signal)>>,
+        dead: RefCell<Vec<u32>>,
+    }
+
+    impl HostProcesses for Procs {
+        fn list(&self) -> Result<Vec<HostProcess>, String> {
+            if self.list_fails {
+                return Err("ps exited 1".to_owned());
+            }
+            let dead = self.dead.borrow();
+            Ok(self
+                .listed
+                .iter()
+                .filter(|process| !dead.contains(&process.pid))
+                .cloned()
+                .collect())
+        }
+
+        fn signal(&self, pid: u32, signal: Signal) -> Result<(), String> {
+            self.signals.borrow_mut().push((pid, signal));
+            if self.refuses.contains(&pid) {
+                return Err("Operation not permitted".to_owned());
+            }
+            let ignored = self.immortal.contains(&pid)
+                || (signal == Signal::Terminate && self.ignores_term.contains(&pid));
+            if !ignored {
+                self.dead.borrow_mut().push(pid);
+            }
+            Ok(())
+        }
+
+        fn alive(&self, pid: u32) -> bool {
+            !self.dead.borrow().contains(&pid)
+        }
+
+        fn exit_wait(&self) -> Duration {
+            Duration::ZERO
+        }
+    }
+
+    impl Procs {
+        fn signalled(&self) -> Vec<u32> {
+            let mut pids: Vec<u32> = self.signals.borrow().iter().map(|(pid, _)| *pid).collect();
+            pids.dedup();
+            pids
+        }
+    }
+
+    fn process(pid: u32, args: &[&str]) -> HostProcess {
+        HostProcess {
+            pid,
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+        }
+    }
+
+    const GVPROXY: &str = "/opt/homebrew/Cellar/podman/6.1.2/libexec/podman/gvproxy";
+    const RUNTIME: &str = "/var/folders/xy/T/podman";
+
+    /// The gvproxy of the machine `machine`, as podman 6.1.2 starts it.
+    fn gvproxy(pid: u32, machine: &str) -> HostProcess {
+        let listen = format!("unixgram://{RUNTIME}/{machine}-gvproxy.sock");
+        let pid_file = format!("{RUNTIME}/gvproxy.pid");
+        process(
+            pid,
+            &[
+                GVPROXY,
+                "-mtu",
+                "1500",
+                "-ssh-port",
+                "65003",
+                "-listen-vfkit",
+                &listen,
+                "-pid-file",
+                &pid_file,
+            ],
+        )
+    }
+
+    /// Two orphans of dagq's machine, and what is not dagq's: a person's
+    /// machine's gvproxy, machines whose names only contain dagq, a
+    /// person's podman and a process that names the socket.
+    fn procs() -> Procs {
+        let socket = format!("{RUNTIME}/dagq-gvproxy.sock");
+        Procs {
+            listed: vec![
+                gvproxy(101, "dagq"),
+                gvproxy(102, "dagq"),
+                gvproxy(201, "podman-machine-default"),
+                gvproxy(202, "dagq2"),
+                gvproxy(203, "my-dagq"),
+                process(301, &["podman", "machine", "ssh", "dagq"]),
+                process(302, &["/usr/bin/tail", "-f", &socket]),
+                process(
+                    303,
+                    &[
+                        "/tmp/gvproxy",
+                        "-listen-vfkit",
+                        "unixgram:///tmp/dagq-gvproxy.sock",
+                    ],
+                ),
+            ],
+            ..Procs::default()
         }
     }
 
@@ -2120,6 +2660,7 @@ mod tests {
             podman: &podman,
             host_lock: &lock,
             health: &health,
+            processes: &NoProcesses,
         };
         let report = status(&ports, &spec(), None, "b");
         assert_eq!(report.state, "podman_missing");
@@ -2773,6 +3314,7 @@ mod tests {
             podman: &podman,
             host_lock: &lock,
             health: &health,
+            processes: &NoProcesses,
         };
         let report = start(&ports, &request).unwrap();
         assert!(report.machine.initialized && report.machine.started);
@@ -2804,6 +3346,7 @@ mod tests {
             podman: &podman,
             host_lock: &lock,
             health: &health,
+            processes: &NoProcesses,
         };
         let report = start(&ports, &request).unwrap();
         assert_eq!(report.machine, MachineOutcome::default());
@@ -2819,6 +3362,7 @@ mod tests {
             podman: &podman,
             host_lock: &lock,
             health: &silent,
+            processes: &NoProcesses,
         };
         assert_eq!(
             start(&ports, &request).unwrap_err().code,
@@ -2882,6 +3426,7 @@ mod tests {
             podman: &podman,
             host_lock: &lock,
             health: &health,
+            processes: &NoProcesses,
         };
         let report = start(&ports, &request(false)).unwrap();
         assert!(report.rebuilt && report.build_matches, "{report:?}");
@@ -2908,6 +3453,7 @@ mod tests {
             podman: &podman,
             host_lock: &lock,
             health: &health,
+            processes: &NoProcesses,
         };
         let error = start(&ports, &request(false)).unwrap_err();
         assert_eq!(error.code, FailureCode::VersionMismatch);
@@ -2930,6 +3476,7 @@ mod tests {
             podman: &podman,
             host_lock: &lock,
             health: &health,
+            processes: &NoProcesses,
         };
         let report = start(&ports, &request(true)).unwrap();
         assert!(report.container_outcome.kept_stale);
@@ -2944,6 +3491,7 @@ mod tests {
             podman: &podman,
             host_lock: &lock,
             health: &health,
+            processes: &NoProcesses,
         };
         let report = start(&ports, &request(true)).unwrap();
         assert!(!report.build_matches && !report.rebuilt);
@@ -3098,6 +3646,7 @@ mod tests {
             podman: &podman,
             host_lock: &lock,
             health: &health,
+            processes: &NoProcesses,
         };
         let report = start(&ports, &request).unwrap();
         assert_eq!(
@@ -3165,6 +3714,7 @@ mod tests {
             podman: &podman,
             host_lock: &lock,
             health: &health,
+            processes: &NoProcesses,
         };
         let report = start(&ports, &request).unwrap();
         assert_eq!(report.images.removed, ["localhost/dagq-broker:oldest"]);
@@ -3256,6 +3806,7 @@ mod tests {
             podman: &podman,
             host_lock: &lock,
             health: &health,
+            processes: &NoProcesses,
         };
         let report = start(&ports, &request).unwrap();
         let calls = podman.calls();
@@ -3285,6 +3836,7 @@ mod tests {
             podman: &podman,
             host_lock: &lock,
             health: &health,
+            processes: &NoProcesses,
         };
         let report = start(&ports, &request).unwrap();
         assert!(report.images.dangling_removed.is_empty());
@@ -3296,6 +3848,7 @@ mod tests {
             podman: &podman,
             host_lock: &lock,
             health: &health,
+            processes: &NoProcesses,
         };
         let report = start(&ports, &request).unwrap();
         assert!(report.images.dangling_removed.is_empty());
@@ -3339,6 +3892,7 @@ mod tests {
             podman: &podman,
             host_lock: &lock,
             health: &health,
+            processes: &NoProcesses,
         };
         let report = start(&ports, &request).unwrap();
         assert!(report.image_built && report.build_ms.is_some());
@@ -3350,6 +3904,7 @@ mod tests {
             podman: &podman,
             host_lock: &lock,
             health: &health,
+            processes: &NoProcesses,
         };
         let report = start(&ports, &request).unwrap();
         assert!(!report.image_built && report.build_ms.is_none());
@@ -3376,6 +3931,7 @@ mod tests {
             podman: &podman,
             host_lock: &lock,
             health: &health,
+            processes: &NoProcesses,
         };
         restart(&ports, &spec, Duration::ZERO, Duration::ZERO).unwrap();
         assert_eq!(
@@ -3390,6 +3946,7 @@ mod tests {
             podman: &podman,
             host_lock: &lock,
             health: &silent,
+            processes: &NoProcesses,
         };
         assert_eq!(
             restart(&ports, &spec, Duration::ZERO, Duration::ZERO)
@@ -3408,6 +3965,7 @@ mod tests {
                 podman: &podman,
                 host_lock: &lock,
                 health: &health,
+                processes: &NoProcesses,
             };
             assert_eq!(
                 restart(&ports, &spec, Duration::ZERO, Duration::ZERO)
@@ -3434,6 +3992,7 @@ mod tests {
             podman: &podman,
             host_lock: &lock,
             health: &health,
+            processes: &NoProcesses,
         };
         let report = stop(&ports, MACHINE, "dagq-broker-abc123").unwrap();
         assert!(report.container_stopped && report.machine_stopped);
@@ -3447,7 +4006,8 @@ mod tests {
             report,
             StopReport {
                 container_stopped: false,
-                machine_stopped: false
+                machine_stopped: false,
+                gvproxy: Some(GvproxyCleanup::new(MACHINE, GvproxyAfter::Stop)),
             }
         );
         assert_eq!(podman.called("machine stop"), 1);
@@ -3458,6 +4018,7 @@ mod tests {
             podman: &podman,
             host_lock: &lock,
             health: &health,
+            processes: &NoProcesses,
         };
         let report = stop(&ports, MACHINE, "c").unwrap();
         assert!(!report.container_stopped && !report.machine_stopped);
@@ -3518,6 +4079,7 @@ mod tests {
                 podman: &podman,
                 host_lock: &lock,
                 health,
+                processes: &NoProcesses,
             };
             let report = status(&ports, &spec, port, "b");
             assert_eq!(report.state, expected);
@@ -3534,5 +4096,355 @@ mod tests {
             assert_eq!(podman.called("--connection dagq build"), 0);
         }
         assert_eq!(lock.held.get(), 0);
+    }
+
+    #[test]
+    fn only_the_gvproxy_on_the_machines_own_socket_is_its() {
+        let host = procs();
+        let ours: Vec<u32> = host
+            .listed
+            .iter()
+            .filter(|process| is_gvproxy_of(process, MACHINE))
+            .map(|process| process.pid)
+            .collect();
+        assert_eq!(ours, [101, 102]);
+        assert!(is_gvproxy_of(
+            &gvproxy(201, "podman-machine-default"),
+            "podman-machine-default"
+        ));
+        // A bare path and a unix:// URL name the socket too.
+        assert!(is_gvproxy_of(
+            &process(1, &["gvproxy", "-listen", "/x/podman/dagq-gvproxy.sock"]),
+            MACHINE
+        ));
+        assert!(is_gvproxy_of(
+            &process(1, &["gvproxy", "unix:///x/podman/dagq-gvproxy.sock"]),
+            MACHINE
+        ));
+        // The executable alone, or nothing, is not.
+        assert!(!is_gvproxy_of(
+            &process(1, &["/x/podman/dagq-gvproxy.sock"]),
+            MACHINE
+        ));
+        assert!(!is_gvproxy_of(&process(1, &[]), MACHINE));
+    }
+
+    #[test]
+    fn a_stopped_machines_gvproxy_is_ended_and_seen_to_exit() {
+        let podman = Script::default().on(&list(), vec![ok(STOPPED)]);
+        let host = procs();
+        let cleanup = clean_gvproxy(&podman, &host, MACHINE, GvproxyAfter::Stop);
+        assert_eq!(cleanup.cleaned, 2, "{cleanup:?}");
+        assert_eq!(cleanup.skipped, None);
+        assert!(cleanup.failures.is_empty(), "{cleanup:?}");
+        assert!(cleanup.acted());
+        assert_eq!(
+            *host.signals.borrow(),
+            [(101, Signal::Terminate), (102, Signal::Terminate)]
+        );
+        assert_eq!(cleanup.summary(), "gvproxy of dagq after stop: ended 2");
+        let json = serde_json::to_value(&cleanup).unwrap();
+        assert_eq!(json["cleaned"], 2);
+        assert_eq!(json["after"], "stop");
+        // Again: none left, 0 ended, still reported.
+        let again = clean_gvproxy(&podman, &host, MACHINE, GvproxyAfter::Stop);
+        assert_eq!(again.cleaned, 0);
+        assert!(!again.acted());
+        assert_eq!(serde_json::to_value(&again).unwrap()["cleaned"], 0);
+    }
+
+    #[test]
+    fn a_machine_not_known_to_be_stopped_keeps_its_gvproxy() {
+        let cases = [
+            (
+                Script::default().on(&list(), vec![ok(RUNNING)]),
+                GvproxySkip::Running,
+                "the machine runs",
+            ),
+            (
+                Script::default().on(&list(), vec![ok(MISSING)]),
+                GvproxySkip::Missing,
+                "missing",
+            ),
+            (
+                Script::default().on(&list(), vec![fail("boom")]),
+                GvproxySkip::StateUnknown,
+                "boom",
+            ),
+            (
+                Script {
+                    missing: true,
+                    ..Script::default()
+                },
+                GvproxySkip::StateUnknown,
+                "podman_missing",
+            ),
+        ];
+        for (podman, skip, words) in cases {
+            let host = procs();
+            let cleanup = clean_gvproxy(&podman, &host, MACHINE, GvproxyAfter::Failure);
+            assert_eq!(cleanup.skipped, Some(skip), "{cleanup:?}");
+            assert_eq!(cleanup.cleaned, 0);
+            assert!(cleanup.summary().contains(words), "{}", cleanup.summary());
+            assert!(host.signals.borrow().is_empty());
+            assert_eq!(
+                serde_json::to_value(&cleanup).unwrap()["skipped"],
+                serde_json::to_value(skip).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn what_the_cleanup_could_not_do_is_reported() {
+        let podman = Script::default().on(&list(), vec![ok(STOPPED)]);
+        // The process list cannot be read.
+        let host = Procs {
+            list_fails: true,
+            ..procs()
+        };
+        let cleanup = clean_gvproxy(&podman, &host, MACHINE, GvproxyAfter::Stop);
+        assert_eq!(cleanup.cleaned, 0);
+        assert!(cleanup.failures[0].contains("ps exited 1"), "{cleanup:?}");
+        assert!(cleanup.acted());
+        // One ignores SIGTERM and ends at SIGKILL; one refuses signals;
+        // one outlives both.
+        let mut host = procs();
+        host.listed.push(gvproxy(103, "dagq"));
+        host.ignores_term = vec![101];
+        host.refuses = vec![102];
+        host.immortal = vec![103];
+        let cleanup = clean_gvproxy(&podman, &host, MACHINE, GvproxyAfter::Stop);
+        assert_eq!(cleanup.cleaned, 1, "{cleanup:?}");
+        assert_eq!(cleanup.failures.len(), 2, "{cleanup:?}");
+        assert!(
+            cleanup.failures[0].contains("102") && cleanup.failures[0].contains("not permitted")
+        );
+        assert!(cleanup.failures[1].contains("103") && cleanup.failures[1].contains("still runs"));
+        assert!(host.signals.borrow().contains(&(101, Signal::Kill)));
+        assert!(
+            cleanup.summary().contains("ended 1, failed: "),
+            "{}",
+            cleanup.summary()
+        );
+    }
+
+    #[test]
+    fn a_stopped_machine_is_cleaned_before_its_start() {
+        let podman = Script::default()
+            .on(&list(), vec![ok(STOPPED), ok(RUNNING)])
+            .on(&info(), vec![ok("6.1.2")]);
+        let host = procs();
+        let outcome = ensure_machine_with(
+            &podman,
+            &CountingLock::default(),
+            Some(&host),
+            &MachineSpec::default(),
+        )
+        .unwrap();
+        assert!(outcome.started && !outcome.restarted);
+        assert_eq!(outcome.gvproxy.len(), 1);
+        assert_eq!(outcome.gvproxy[0].after, GvproxyAfter::BeforeStart);
+        assert_eq!(outcome.gvproxy[0].cleaned, 2);
+        assert_eq!(host.signalled(), [101, 102]);
+        // Ended before the start.
+        assert_eq!(podman.called("machine start"), 1);
+        // A running machine is not cleaned.
+        let host = procs();
+        let outcome = ensure_machine_with(
+            &podman,
+            &CountingLock::default(),
+            Some(&host),
+            &MachineSpec::default(),
+        )
+        .unwrap();
+        assert!(outcome.gvproxy.is_empty());
+        assert!(host.signals.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_restart_cleans_between_its_stop_and_its_start() {
+        let podman = Script::default()
+            .on(&list(), vec![ok(STOPPED)])
+            .on(&["machine", "start"], vec![fail("Error: EOF"), ok("")])
+            .on(&info(), vec![ok("6.1.2")]);
+        let host = procs();
+        let outcome = ensure_machine_with(
+            &podman,
+            &CountingLock::default(),
+            Some(&host),
+            &MachineSpec::default(),
+        )
+        .unwrap();
+        assert!(outcome.restarted);
+        let after: Vec<GvproxyAfter> = outcome
+            .gvproxy
+            .iter()
+            .map(|cleanup| cleanup.after)
+            .collect();
+        assert_eq!(
+            after,
+            [GvproxyAfter::BeforeStart, GvproxyAfter::RestartStop]
+        );
+        // The restart's stop was listed as stopped before the cleanup.
+        let calls = podman.calls();
+        let stop = calls
+            .iter()
+            .position(|call| call == "machine stop dagq")
+            .unwrap();
+        assert!(calls[stop + 1].starts_with("machine list"), "{calls:?}");
+        assert!(calls[stop + 2].starts_with("machine start"), "{calls:?}");
+    }
+
+    #[test]
+    fn every_failure_of_ensure_machine_cleans_and_keeps_its_failure() {
+        let spec = MachineSpec::default();
+        let lock = CountingLock::default();
+        let killed = PodmanOutput {
+            success: false,
+            code: None,
+            ..PodmanOutput::default()
+        };
+        // The last start fails; a start killed (no exit code, its deadline);
+        // the connection never answers after a stopped machine's start.
+        for podman in [
+            Script::default()
+                .on(&list(), vec![ok(STOPPED)])
+                .on(&["machine", "start"], vec![fail("Error: EOF")]),
+            Script::default()
+                .on(&list(), vec![ok(STOPPED)])
+                .on(&["machine", "start"], vec![killed.clone()]),
+            Script::default()
+                .on(&list(), vec![ok(STOPPED)])
+                .on(&info(), vec![fail("connection refused")]),
+        ] {
+            let host = procs();
+            let error = ensure_machine_with(&podman, &lock, Some(&host), &spec).unwrap_err();
+            assert_eq!(error.code, FailureCode::MachineFailed, "{error}");
+            assert!(error.message.contains("once more"), "{error}");
+            for after in [
+                "before_start: ended 2",
+                "restart_stop: ended 0",
+                "failure: ended 0",
+            ] {
+                assert!(error.message.contains(after), "{after}: {error}");
+            }
+        }
+        // The connection check of a running machine fails: it runs, so
+        // nothing is touched.
+        let podman = Script::default()
+            .on(&list(), vec![ok(RUNNING)])
+            .on(&info(), vec![fail("connection refused")]);
+        let host = procs();
+        let error = ensure_machine_with(&podman, &lock, Some(&host), &spec).unwrap_err();
+        assert_eq!(error.code, FailureCode::MachineFailed);
+        assert!(
+            error
+                .message
+                .contains("after failure: left, the machine runs"),
+            "{error}"
+        );
+        assert!(host.signals.borrow().is_empty());
+        // Podman cannot be run for the start: its error, and the cleanup.
+        let podman = Script {
+            error_on: args(["machine", "start"]),
+            ..Script::default()
+        }
+        .on(&list(), vec![ok(STOPPED)]);
+        let host = procs();
+        let error = ensure_machine_with(&podman, &lock, Some(&host), &spec).unwrap_err();
+        assert_eq!(error.code, FailureCode::PodmanFailed);
+        assert!(
+            error.message.contains("Resource temporarily unavailable"),
+            "{error}"
+        );
+        assert!(error.message.contains("after failure: ended 0"), "{error}");
+        assert_eq!(host.signalled(), [101, 102]);
+        // The machine's state cannot be read: nothing is touched.
+        let podman = Script::default().on(&list(), vec![fail("boom")]);
+        let host = procs();
+        let error = ensure_machine_with(&podman, &lock, Some(&host), &spec).unwrap_err();
+        assert_eq!(error.code, FailureCode::PodmanFailed);
+        assert!(error.message.contains("state is unknown"), "{error}");
+        assert!(host.signals.borrow().is_empty());
+        // Without the processes, as before: no cleanup in the message.
+        let podman = Script::default()
+            .on(&list(), vec![ok(STOPPED)])
+            .on(&["machine", "start"], vec![fail("Error: EOF")]);
+        let error = ensure_machine(&podman, &lock, &spec).unwrap_err();
+        assert!(!error.message.contains("gvproxy"), "{error}");
+    }
+
+    #[test]
+    fn release_and_stop_clean_after_the_machine_stops() {
+        let lock = CountingLock::default();
+        let podman = Script::default()
+            .on(&list(), vec![ok(RUNNING), ok(STOPPED)])
+            .on(&["--connection", "dagq", "ps"], vec![ok("")]);
+        let host = procs();
+        let release = release_machine_with(&podman, &lock, Some(&host), MACHINE).unwrap();
+        assert!(release.stopped);
+        let cleanup = release.gvproxy.unwrap();
+        assert_eq!((cleanup.after, cleanup.cleaned), (GvproxyAfter::Stop, 2));
+        assert_eq!(host.signalled(), [101, 102]);
+        // A container runs, so the machine runs: left.
+        let podman = Script::default()
+            .on(&list(), vec![ok(RUNNING)])
+            .on(&["--connection", "dagq", "ps"], vec![ok("abc\n")]);
+        let host = procs();
+        let release = release_machine_with(&podman, &lock, Some(&host), MACHINE).unwrap();
+        assert!(!release.stopped);
+        assert_eq!(release.gvproxy.unwrap().skipped, Some(GvproxySkip::Running));
+        assert!(host.signals.borrow().is_empty());
+        // The stop fails, the machine is stopped anyway: its failure, cleaned.
+        let podman = Script::default()
+            .on(&list(), vec![ok(RUNNING), ok(STOPPED)])
+            .on(&["machine", "stop"], vec![fail("timed out")]);
+        let host = procs();
+        let error = release_machine_with(&podman, &lock, Some(&host), MACHINE).unwrap_err();
+        assert_eq!(error.code, FailureCode::MachineFailed);
+        assert!(error.message.contains("timed out"), "{error}");
+        assert!(error.message.contains("after stop: ended 2"), "{error}");
+
+        // `stop` reports it, and a cleanup's failure does not fail the stop.
+        let health = Healthy(Err("x".to_owned()));
+        let podman = start_script(
+            vec![ok(RUNNING), ok(RUNNING), ok(STOPPED)],
+            true,
+            inspect(true, "img"),
+        )
+        .on(&["--connection", "dagq", "ps"], vec![ok("")]);
+        let host = Procs {
+            refuses: vec![102],
+            ..procs()
+        };
+        let ports = Ports {
+            podman: &podman,
+            host_lock: &lock,
+            health: &health,
+            processes: &host,
+        };
+        let report = stop(&ports, MACHINE, "dagq-broker-abc123").unwrap();
+        assert!(report.machine_stopped);
+        let cleanup = report.gvproxy.as_ref().unwrap();
+        assert_eq!(cleanup.cleaned, 1);
+        assert_eq!(cleanup.failures.len(), 1);
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["gvproxy"]["cleaned"], 1);
+        // No podman: the stop's failure says the state is unknown.
+        let podman = Script {
+            missing: true,
+            ..Script::default()
+        };
+        let host = procs();
+        let ports = Ports {
+            podman: &podman,
+            host_lock: &lock,
+            health: &health,
+            processes: &host,
+        };
+        let error = stop(&ports, MACHINE, "c").unwrap_err();
+        assert_eq!(error.code, FailureCode::PodmanMissing);
+        assert!(error.message.contains("state is unknown"), "{error}");
+        assert!(host.signals.borrow().is_empty());
     }
 }

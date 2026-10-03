@@ -2291,13 +2291,18 @@ a person installs it (brew install podman), or sets [broker] mode = \"disabled\"
         );
         let report = broker.stop()?;
         // The supervisor may have stopped it at the end of its drain.
-        if report.container_stopped || report.machine_stopped {
+        let gvproxy_acted = report
+            .gvproxy
+            .as_ref()
+            .is_some_and(crate::application::broker::GvproxyCleanup::acted);
+        if report.container_stopped || report.machine_stopped || gvproxy_acted {
             self.open(db)?.record_queue_event(
                 EventKind::BrokerStopped,
                 json!({
                     "container": broker.container(),
                     "container_stopped": report.container_stopped,
                     "machine_stopped": report.machine_stopped,
+                    "gvproxy": report.gvproxy,
                     "by": "down",
                 }),
             )?;

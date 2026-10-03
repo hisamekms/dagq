@@ -4,8 +4,8 @@ type: design
 title: Resource broker
 status: draft
 created: 2026-09-28
-updated: 2026-10-04 # task 1582
-last_verified: 2026-10-04 # task 1582
+updated: 2026-10-04 # task 1579
+last_verified: 2026-10-04 # task 1579
 scope: runtime
 tags:
   - security
@@ -370,7 +370,7 @@ Podman machineは既定でhostの`$HOME`をVMにmountするので、containerか
 - 調べた原因（task 1162、2026-09-30の関門の05:12と06:45の失敗）: どちらも同じ時刻にworkerのe2eのbrokerのtestが同じ`dagq`のmachineを使っていた（run 03ebc442・9e78e1ea・ab21fc74などのreceiptのe2eの時刻と、run 8f573833のe2eのbrokerのtestも同じ`server probably quit: unexpected EOF`で落ちていたこと）。lockが`XDG_DATA_HOME`の下にあり、fixtureごとに別のlockだったので、一方の後始末の`release_machine`が他方のbuildの途中（containerがまだ無い）でmachineを止め、他方のbuildは`unexpected EOF`、次のコマンドは止まりかけのmachineのsshに`handshake failed ... connection reset by peer`になった。machineは1 CPU・1GiB（`MachineSpec`の既定）で、VMの`dagq.log`（`$TMPDIR/podman/dagq.log`）はstartごとに書き直されるので当時のconsoleは残っていない
 - `image exists`・`container exists`はexit 0を有る、1を無いとし、それ以外（machineが答えないなど）は`podman_failed`にする（無いと取り違えてbuildやrunに進まない）
 - portは`--port`、無ければ`state.json`の前のport、無ければ`127.0.0.1`の空いているport
-- `dagq broker stop`: machineが動いていればcontainerを`podman --connection dagq rm --force --time 10`で止めて消し（状態は全てmountにあり、`start`は止まったcontainerを作り直すので残さない）、host全体のlockの中でmachineに動いているcontainerが無ければ`podman machine stop dagq`（`release_machine`）。2回目は何もしない
+- `dagq broker stop`: machineが動いていればcontainerを`podman --connection dagq rm --force --time 10`で止めて消し（状態は全てmountにあり、`start`は止まったcontainerを作り直すので残さない）、host全体のlockの中でmachineに動いているcontainerが無ければ`podman machine stop dagq`（`release_machine_with`）。続けて同じlockの中でmachineの孤児のgvproxyを片付け（下の「machineのgvproxyの後片付け」）、`StopReport`の`gvproxy`に載せる。2回目は何も止めない（片付けは0件として報告する）
 - `dagq broker status`: 状態を変えない。`state`は`running`・`stopped`（containerが無いか止まっている）・`unhealthy`・`machine_missing`・`machine_stopped`・`machine_busy`か、errorのcode（`podman_missing`など）。`machine`・`image`（このdagqのbuildのimage）・`image_present`・`container_status`・`health`・`build`（dagqのbuild識別子）・`build_matches`（healthの`build`が一致するか。healthが無ければ`null`）・`client`（下の「status と doctor」）・`recorded`（`state.json`）を添える
 - errorは構造化する: `BrokerFailure {code, message}`。codeは`podman_missing`・`podman_failed`・`machine_busy`・`machine_failed`・`image_source_missing`・`image_build_failed`・`container_failed`・`unhealthy`・`repository_unknown`・`client_missing`・`version_mismatch`と、読むだけのコマンド（`dagq broker logs`）だけが使う`machine_missing`・`machine_stopped`・`container_missing`（machineやcontainerを用意せず、無い・止まっていることをerrorにする。`start`・`stop`はこの3つを返さず、`broker status`の`state`の`machine_missing`・`machine_stopped`は同じ名前の状態でerrorではない）。CLIのerrorのJSONは`{"error": "...", "broker": {"code", "message"}}`で、`start`は失敗のcodeを`state.json`の`state`に残す。黙って続けない
 - 権限: `broker start`・`broker stop`は`up`・`down`と同じ`service.lifecycle`（`Operation::Broker`）、`broker status`・`broker logs`・`broker audit`は`queue.read`（workerを含む全てのroleが打てる）。以前の案の新しいcapability `broker.manage`は足さなかった（同じroleの組（user・inbox・planner・supervisor）で足り、`service.lifecycle`がサービスの起動と停止を名指すため）
@@ -379,7 +379,37 @@ Podman machineは既定でhostの`$HOME`をVMにmountするので、containerか
 - `<queue dir>/broker/state.json`: `port`・`container`・`image`・`state`（`building`・`running`・`stopped`か、`start`が失敗したcode）・`build`（containerを作ったdagqのbuild識別子）・`started_at`（healthが答えたunix秒）
 - 管理のコマンド: `dagq broker status`・`dagq broker start`・`dagq broker stop`（task 836。上の「用意の手順」）。`status`は`mode`（下の「mode と設定」）も出す。`start`と`stop`はmodeに依らず動かす（人とtestとスモークが頼むため）。podmanは`--podman`、無ければ`host.toml`の`podman`、無ければPATH。`dagq broker logs`と`dagq broker audit`（下の「audit」。task 925。`src/application/broker_admin.rs`）
 - `dagq broker logs [--tail N] [--podman PATH]`: queueのcontainer（`dagq-broker-<queue hash>`）の`podman --connection dagq logs --tail N <container>`（既定のNは200、`DEFAULT_LOG_TAIL`）を`{container, tail, stdout, stderr}`で出す（containerのstdoutとstderrを分けたまま）。読むだけで、machineを起動せずcontainerを作らない。先に`machine list`でdagqのmachineが動いていること、`container exists`でcontainerがあること（止まっていてもよい）を確かめ、podmanが無ければ`podman_missing`、machineが無ければ`machine_missing`、止まっていれば`machine_stopped`、containerが無ければ`container_missing`、`podman logs`の失敗は`podman_failed`の`BrokerFailure`（`{"error", "broker": {"code","message"}}`）で終わる。権限は`queue.read`で、queueのDBを開かない
-- event（queueのevent）: `broker_started`（`mode`・`port`・`build`・`image`・`container`・`container_outcome`・`machine`（`initialized`・`started`・`restarted`・`restart_reason`）・`images`（上の「配布と版」の古いimageとdanglingのimageの掃除の`ImagePrune`: `removed`・`in_use`・`failed`・`error`・`dangling_removed`・`dangling_error`））・`broker_image_built`（`build`・`image`・`duration_ms`）・`broker_unhealthy`（attention。`reason`・`message`・`failures`・`restarted`）・`broker_healthy`（healthがまた答えた）・`broker_stop_requested`（`down`がsignalの前に、drainの終わりにbrokerを止めるよう頼んだsupervisor。`supervisors`（token）・`by: down`。`disabled`では書かない）・`broker_stopped`（`container`・`container_stopped`・`machine_stopped`と、止めたのが頼まれたsupervisorなら`by: supervisor`、`down`自身なら`by: down`。`down`は何も止まらなかったとき（supervisorが先に止めた）は書かない）。supervisorが書くものは`supervisor`（token）を添える
+- event（queueのevent）: `broker_started`（`mode`・`port`・`build`・`image`・`container`・`container_outcome`・`machine`（`initialized`・`started`・`restarted`・`restart_reason`と、片付けがあれば`gvproxy`（`GvproxyCleanup`の列））・`images`（上の「配布と版」の古いimageとdanglingのimageの掃除の`ImagePrune`: `removed`・`in_use`・`failed`・`error`・`dangling_removed`・`dangling_error`））・`broker_image_built`（`build`・`image`・`duration_ms`）・`broker_unhealthy`（attention。`reason`・`message`・`failures`・`restarted`）・`broker_healthy`（healthがまた答えた）・`broker_stop_requested`（`down`がsignalの前に、drainの終わりにbrokerを止めるよう頼んだsupervisor。`supervisors`（token）・`by: down`。`disabled`では書かない）・`broker_stopped`（`container`・`container_stopped`・`machine_stopped`・`gvproxy`（下の「machineのgvproxyの後片付け」の`GvproxyCleanup`）と、止めたのが頼まれたsupervisorなら`by: supervisor`、`down`自身なら`by: down`。`down`は何も止まらず、gvproxyも片付けず片付けの失敗も無かったとき（supervisorが先に止めた）は書かない）。supervisorが書くものは`supervisor`（token）を添える
+
+### machineのgvproxyの後片付け（task 1579）
+
+podmanのmachine（applehv・vfkit）は、startのたびにnetworkの`gvproxy`（`<podman>/libexec/podman/gvproxy`）をhostで起動する。引数に`-listen-vfkit unixgram://<podmanのruntime dir>/podman/<machine>-gvproxy.sock`と`-pid-file <podmanのruntime dir>/podman/gvproxy.pid`を持ち、親はlaunchdになる。
+
+**記録とソースで確かめた事実**:
+
+- 2026-10-03 19:37 JSTに、親launchdのgvproxyが128個（RSS合計約1.4GB、最古は3日超）残っていた。全てmachine `dagq`のsocketと`gvproxy.pid`を指し、machineは`stopped`でvfkitは無かった。人の指示でinboxが止めた。同じ時刻にload 82・空きメモリ150MBで自動更新のe2eが13本落ちた（ask 372）
+- dagqがmachine `dagq`を止め、起動する経路は`src/application/broker.rs`の`ensure_machine`（`init`・`start`、startの失敗か接続の失敗の後の`restart_machine`の`stop`と`start`）と`release_machine`（`dagq broker stop`・`down`・supervisorのdrainの終わりの`stop`、`tests/it/broker_podman.rs`とe2eの後始末）だけ。task 1579の前は、どの経路もmachineの`stop`の後と、startの失敗・接続の失敗・podmanの呼び出しのerrorの出口でhostのprocessを見ず、gvproxyを片付けなかった
+- `PodmanCli`（`src/infrastructure/broker_podman.rs`）はpodmanに期限を付けない。時間切れで殺されたstart（exit codeの無い失敗の出力）は、外から殺されたpodmanのstartとしてstartの失敗と同じ出口を通る。dagq自身がstartの途中で殺されたときは出口の片付けが走らないので、次の`start`の前の片付けが拾う
+- e2eの関門は`broker::connect`（`ensure_machine`）でmachineを起動し、e2eのbrokerのtest（`tests/e2e/broker.rs`の`BrokerGuard`）と`tests/it/broker_podman.rs`は終わりに`release_machine`で止める。1日に何十回もstartとstopが繰り返される
+
+**実podmanでしか確定できない仮説**（podman 6.1.2。workerは実podman・実machineで確かめない）:
+
+- H1: `podman machine stop`がvfkitを止めてもgvproxyを終わらせない（または終了を待たない）ことがある
+- H2: startが同じ`gvproxy.pid`を上書きするので、前のgvproxyをpodmanが見失い、後のstopやstartが前のものを片付けない
+- H3: 失敗したstart（`Error: EOF`など）や殺されたstartが、起動済みのgvproxyを残す
+- H4: 128個の多くは、e2e・`broker_podman`のtest・関門の`connect`の繰り返しと、`restart_machine`のstop→startで積み上がった
+
+これらは、runtimeのe2e（`broker`のe2eの前後でmachine `dagq`のsocketを持つgvproxyの数を数える）か、人・inboxのopsで確かめる（machineを`start`・`stop`し、`ps -A -ww -o pid= -o args=`で同じsocketのgvproxyの数と`gvproxy.pid`を見る）。
+
+**後片付けの規則**（`clean_gvproxy`、portは`HostProcesses`、本物は`SystemProcesses`の`/bin/ps -A -ww -o pid= -o args=`とkill(2)）:
+
+- `podman machine list`でmachineが`stopped`と確かめられたときだけ片付ける。`running`（`skipped: running`）・machineが無い（`missing`）・listが失敗した（`state_unknown`と`state_error`）ときはどのprocessにも触れない
+- 片付けるのは、実行ファイルの名前が`gvproxy`で、引数のどれかが`podman/<machine>-gvproxy.sock`（裸のpathか`unixgram://`・`unix://`のURL）のprocessだけ（`is_gvproxy_of`）。他の名前のmachine（`podman-machine-default`・`dagq2`など）のgvproxy、socketを名指すだけの別のprocess、人のpodmanには触れない（ADR-t827-3の人のmachineに触れない規則）。pidの0・1・dagq自身にはsignalを送らない
+- 見つけた全てに`SIGTERM`をまとめて送って終わったことを確かめ（`GVPROXY_EXIT_WAIT`、5秒）、終わらなかったものにまとめて`SIGKILL`を送ってもう一度確かめる（何個あってもhost全体のlockを握る時間は待ち2回分まで）。既に居ないprocessは終わったものとする
+- 呼ぶ場所: `release_machine_with`の後（stopした・止まっていた・stopが失敗した、のどれでも。`dagq broker stop`・`down`・supervisorのdrainの終わりの`QueueBroker::stop`）、止まっているmachineの`start`の前（`before_start`。以前の孤児を積み上げない）、`restart_machine`のstopの後でstartの前（`restart_stop`）、`ensure_machine_with`の失敗の出口（`failure`。最後のstartの失敗、接続の確かめの失敗、podmanの呼び出しのerrorでの早期return、時間切れで殺されたstart、`machine_busy`）。`stop`の最初のmachineの状態の読み取りが失敗したときは、host全体のlockの外なので片付けず、`state_unknown`として失敗のmessageに添える。片付けは全てhost全体のlockの中で行う（別のqueueの`start`が起動した直後のgvproxyを殺さない）
+- 結果は`GvproxyCleanup`（`machine`・`after`（`stop`・`before_start`・`restart_stop`・`failure`）・`cleaned`（0を含む）・`skipped`・`state_error`・`failures`（processの列挙・signalの失敗・期限内に終わらないこと））。`StopReport::gvproxy`（`dagq broker stop`・`down`の出力と`broker_stopped`の`gvproxy`）、`MachineOutcome::gvproxy`（`broker_started`の`machine`）に載る。失敗の出口では元の`BrokerFailure`のcode（`machine_failed`など）を変えず、messageに`gvproxy of dagq after <after>: ...`を添える。片付けの失敗はstopやstartの成否を変えない。supervisorは片付けの失敗をwarnのlogにも出す
+- 片付けるのは`Ports`に`processes`を持つ`start`・`stop`（`QueueBroker`）だけ。`ensure_machine`・`release_machine`・`connect`（e2eの関門と`tests/it/broker_podman.rs`が呼ぶ）は`None`のままprocessに触れない。e2eの関門が自分で起動したmachineを止める変更と、そこでの片付けの呼び出しはtask 1189か後続が持つ
+- test: `src/application/broker.rs`のunit test（fakeのpodmanとfakeのprocess一覧）が、自分のsocketのgvproxyだけを見分けること（`only_the_gvproxy_on_the_machines_own_socket_is_its`）、stoppedでの片付けと終了の確認（`a_stopped_machines_gvproxy_is_ended_and_seen_to_exit`）、running・missing・状態を確かめられないときに触れないこと（`a_machine_not_known_to_be_stopped_keeps_its_gvproxy`）、列挙・signal・終了の確認の失敗の報告（`what_the_cleanup_could_not_do_is_reported`）、startの前（`a_stopped_machine_is_cleaned_before_its_start`）、restartのstopとstartの間（`a_restart_cleans_between_its_stop_and_its_start`）、各失敗の出口（`every_failure_of_ensure_machine_cleans_and_keeps_its_failure`）、`release_machine_with`と`stop`（`release_and_stop_clean_after_the_machine_stops`）を見る。`src/infrastructure/broker_podman.rs`の`ps_lines_are_pids_and_their_arguments`と`an_orphan_is_listed_ended_and_seen_gone`が`SystemProcesses`を、`tests/it/runtime_broker.rs`の`down`の2本が`broker_stopped`の`gvproxy`を見る
 
 ### supervisorの統合
 

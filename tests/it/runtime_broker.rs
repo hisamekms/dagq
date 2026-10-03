@@ -8,7 +8,10 @@ use crate::common::lifecycle::{FakeCmux, FakeLaunchd, FakeProcesses};
 use crate::runtime_support;
 
 use dagq::{
-    application::broker::{BrokerResult, HealthProbe, HostLock, ImageSource, Podman, PodmanOutput},
+    application::broker::{
+        BrokerResult, HealthProbe, HostLock, HostProcess, HostProcesses, ImageSource, Podman,
+        PodmanOutput, Signal,
+    },
     compose::{BrokerOptions, OneShot},
     infrastructure::{broker_podman::BrokerState, broker_queue::BrokerPorts},
     lifecycle::DownOptions,
@@ -18,6 +21,7 @@ use runtime_support::*;
 use std::sync::atomic::AtomicBool;
 
 const RUNNING: &str = r#"[{"Name":"dagq","Running":true}]"#;
+const STOPPED: &str = r#"[{"Name":"dagq","Running":false}]"#;
 const BUSY: &str =
     r#"[{"Name":"dagq","Running":false},{"Name":"podman-machine-default","Running":true}]"#;
 
@@ -74,6 +78,14 @@ impl Podman for FakePodman {
         };
         Ok(match rest {
             ["machine", "list", ..] => answer(true, &self.machines.lock().unwrap()),
+            ["machine", "stop", ..] => {
+                *self.machines.lock().unwrap() = STOPPED.to_owned();
+                answer(true, "")
+            }
+            ["machine", "start", ..] => {
+                *self.machines.lock().unwrap() = RUNNING.to_owned();
+                answer(true, "")
+            }
             ["image", "exists", ..] => answer(self.image.load(Ordering::SeqCst), ""),
             ["build", ..] => {
                 let deadline = Instant::now() + Duration::from_secs(60);
@@ -101,6 +113,44 @@ impl Podman for FakePodman {
             }
             _ => answer(true, ""),
         })
+    }
+}
+
+/// The host's processes: one gvproxy left on dagq's machine's socket and
+/// one of a person's machine, until a signal ends them.
+#[derive(Default)]
+struct FakeGvproxy {
+    signalled: Mutex<Vec<u32>>,
+}
+
+impl HostProcesses for FakeGvproxy {
+    fn list(&self) -> Result<Vec<HostProcess>, String> {
+        let signalled = self.signalled.lock().unwrap();
+        Ok([(4101, "dagq"), (4201, "podman-machine-default")]
+            .into_iter()
+            .filter(|(pid, _)| !signalled.contains(pid))
+            .map(|(pid, machine)| HostProcess {
+                pid,
+                args: vec![
+                    "/opt/podman/libexec/podman/gvproxy".to_owned(),
+                    "-listen-vfkit".to_owned(),
+                    format!("unixgram:///var/folders/t/podman/{machine}-gvproxy.sock"),
+                ],
+            })
+            .collect())
+    }
+
+    fn signal(&self, pid: u32, _signal: Signal) -> Result<(), String> {
+        self.signalled.lock().unwrap().push(pid);
+        Ok(())
+    }
+
+    fn alive(&self, pid: u32) -> bool {
+        !self.signalled.lock().unwrap().contains(&pid)
+    }
+
+    fn exit_wait(&self) -> Duration {
+        Duration::ZERO
     }
 }
 
@@ -140,6 +190,7 @@ fn broker_options(podman: &Arc<FakePodman>) -> BrokerOptions {
             host_lock: Arc::new(NoLock),
             health: Arc::new(FakeHealth(podman.broken.clone())),
             source: Arc::new(FakeSource),
+            processes: Arc::new(FakeGvproxy::default()),
         },
         health_interval: Duration::from_millis(20),
         health_timeout: Duration::ZERO,
@@ -568,6 +619,13 @@ fn down_stops_the_broker_after_the_drain() {
     let stopped = kinds(&db, "broker_stopped");
     assert_eq!(stopped.len(), 1);
     assert_eq!(stopped[0].1["container_stopped"], true);
+    // The stopped machine's gvproxy is put away, not the person's.
+    assert_eq!(stopped[0].1["gvproxy"]["cleaned"], 1, "{:?}", stopped[0].1);
+    assert_eq!(stopped[0].1["gvproxy"]["after"], "stop");
+    assert_eq!(
+        report["broker"]["stop"]["gvproxy"]["cleaned"], 1,
+        "{report}"
+    );
     assert_eq!(
         BrokerState::read(&queue_dir(&db)).state.as_deref(),
         Some("stopped")
@@ -652,6 +710,7 @@ fn the_default_down_has_the_supervisor_stop_the_broker_after_its_drain() {
     assert_eq!(stopped.len(), 1, "{stopped:?}");
     assert_eq!(stopped[0].1["by"], "supervisor");
     assert_eq!(stopped[0].1["machine_stopped"], true);
+    assert_eq!(stopped[0].1["gvproxy"]["cleaned"], 1, "{:?}", stopped[0].1);
     assert_eq!(
         BrokerState::read(&queue_dir(&db)).state.as_deref(),
         Some("stopped")

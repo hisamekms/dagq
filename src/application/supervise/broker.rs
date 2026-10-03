@@ -297,12 +297,20 @@ impl Supervisor<'_> {
                     machine_stopped = report.machine_stopped,
                     "the drain `down` asked for is over: the queue's broker is stopped"
                 );
+                if let Some(cleanup) = report
+                    .gvproxy
+                    .as_ref()
+                    .filter(|cleanup| !cleanup.failures.is_empty())
+                {
+                    warn!("{}", cleanup.summary());
+                }
                 self.record_broker(
                     EventKind::BrokerStopped,
                     json!({
                         "container": crate::application::broker::container_name(&self.layout.queue_hash),
                         "container_stopped": report.container_stopped,
                         "machine_stopped": report.machine_stopped,
+                        "gvproxy": report.gvproxy,
                         "by": "supervisor",
                     }),
                 );

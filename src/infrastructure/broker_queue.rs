@@ -14,8 +14,8 @@ use dagq_broker_protocol::PROTOCOL_VERSION;
 
 use crate::application::broker::{
     self as broker, BrokerControl, BrokerFailure, BrokerResult, ContainerLimits, ContainerSpec,
-    FailureCode, HEALTH_TIMEOUT, HealthProbe, HostLock, ImageSource, MachineSpec, Podman,
-    PodmanOutput, Reconnecting, StartReport, StopReport, container_name,
+    FailureCode, HEALTH_TIMEOUT, HealthProbe, HostLock, HostProcesses, ImageSource, MachineSpec,
+    Podman, PodmanOutput, Reconnecting, StartReport, StopReport, container_name,
 };
 
 use super::broker_podman::{BrokerState, FileLock, free_port, tokens_active};
@@ -42,6 +42,8 @@ pub struct BrokerPorts {
     pub host_lock: Arc<dyn HostLock + Send + Sync>,
     pub health: Arc<dyn HealthProbe + Send + Sync>,
     pub source: Arc<dyn ImageSource + Send + Sync>,
+    /// The host's processes, for the machine's orphaned gvproxy.
+    pub processes: Arc<dyn HostProcesses + Send + Sync>,
 }
 
 /// The queue's broker.
@@ -123,6 +125,7 @@ impl QueueBroker {
             podman: &*self.ports.podman,
             host_lock: &*self.ports.host_lock,
             health: &*self.ports.health,
+            processes: &*self.ports.processes,
         }
     }
 
@@ -378,7 +381,7 @@ impl BrokerControl for QueueBroker {
 /// binary embeds (never a checkout's files).
 pub fn system_ports(podman: Option<&Path>, lock_home: &Path) -> BrokerPorts {
     use super::broker_image::EmbeddedSource;
-    use super::broker_podman::{HttpHealth, PodmanCli};
+    use super::broker_podman::{HttpHealth, PodmanCli, SystemProcesses};
     let source: Arc<dyn ImageSource + Send + Sync> = Arc::new(EmbeddedSource::of_this_build());
     let podman: Arc<dyn Podman + Send + Sync> = match PodmanCli::resolve(podman) {
         Ok(podman) => Arc::new(Reconnecting::new(podman)),
@@ -389,6 +392,7 @@ pub fn system_ports(podman: Option<&Path>, lock_home: &Path) -> BrokerPorts {
         host_lock: Arc::new(FileLock::machine(lock_home)),
         health: Arc::new(HttpHealth::default()),
         source,
+        processes: Arc::new(SystemProcesses),
     }
 }
 
@@ -448,6 +452,22 @@ mod tests {
         }
     }
 
+    struct NoProcesses;
+
+    impl HostProcesses for NoProcesses {
+        fn list(&self) -> Result<Vec<broker::HostProcess>, String> {
+            Ok(Vec::new())
+        }
+
+        fn signal(&self, _pid: u32, _signal: broker::Signal) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn alive(&self, _pid: u32) -> bool {
+            false
+        }
+    }
+
     struct Healthy;
 
     impl HealthProbe for Healthy {
@@ -479,6 +499,7 @@ mod tests {
                 host_lock: Arc::new(Lock),
                 health: Arc::new(Healthy),
                 source: Arc::new(Source),
+                processes: Arc::new(NoProcesses),
             },
         );
         broker.port = Some(40000);

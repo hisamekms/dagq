@@ -4,7 +4,9 @@
 //! `$XDG_CONFIG_HOME/dagq/podman-machine.lock`), [`HttpHealth`] asks
 //! `GET /v1/health` on `127.0.0.1` with a hand-written HTTP/1.1 request
 //! (dagq has no HTTP dependency, ADR-t827-1 decision 2), and
-//! [`BrokerState`] is `<queue dir>/broker/state.json`. The image's build
+//! [`BrokerState`] is `<queue dir>/broker/state.json`, and
+//! [`SystemProcesses`] lists and signals the host's processes (the
+//! machine's orphaned gvproxy, task 1579). The image's build
 //! context comes from the material this binary embeds
 //! ([`super::broker_image`]).
 
@@ -21,8 +23,8 @@ use dagq_broker_protocol::HealthResponse;
 use serde::{Deserialize, Serialize};
 
 use crate::application::broker::{
-    BrokerFailure, BrokerResult, FailureCode, HealthProbe, HostLock, Podman, PodmanOutput,
-    broker_dir,
+    BrokerFailure, BrokerResult, FailureCode, HealthProbe, HostLock, HostProcess, HostProcesses,
+    Podman, PodmanOutput, Signal, broker_dir,
 };
 use crate::infrastructure::adapters::unpiped_output;
 
@@ -153,6 +155,83 @@ impl HostLock for FileLock {
                 )
             })
     }
+}
+
+/// The host's processes through `ps` and `kill(2)`.
+#[derive(Debug, Clone, Default)]
+pub struct SystemProcesses;
+
+/// `ps`, which lists every process with its full arguments on macOS and
+/// Linux alike.
+const PS: &str = "/bin/ps";
+
+impl HostProcesses for SystemProcesses {
+    fn list(&self) -> Result<Vec<HostProcess>, String> {
+        let output =
+            unpiped_output(Command::new(PS).args(["-A", "-ww", "-o", "pid=", "-o", "args="]))
+                .map_err(|error| format!("run {PS}: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "{PS} exited {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(parse_processes(&String::from_utf8_lossy(&output.stdout)))
+    }
+
+    fn signal(&self, pid: u32, signal: Signal) -> Result<(), String> {
+        let pid = signalled_pid(pid)?;
+        let signal = match signal {
+            Signal::Terminate => libc::SIGTERM,
+            Signal::Kill => libc::SIGKILL,
+        };
+        // SAFETY: kill(2) on one positive pid that is not dagq's own.
+        if unsafe { libc::kill(pid, signal) } == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            Ok(())
+        } else {
+            Err(error.to_string())
+        }
+    }
+
+    fn alive(&self, pid: u32) -> bool {
+        let Ok(pid) = signalled_pid(pid) else {
+            return false;
+        };
+        // SAFETY: kill(2) with signal 0 only asks whether the pid exists.
+        if unsafe { libc::kill(pid, 0) } == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+}
+
+/// `pid` as kill(2) takes it, never 0, 1, a negative (a process group) or
+/// dagq itself.
+fn signalled_pid(pid: u32) -> Result<libc::pid_t, String> {
+    match libc::pid_t::try_from(pid) {
+        Ok(pid) if pid > 1 && pid != std::process::id() as libc::pid_t => Ok(pid),
+        _ => Err(format!("pid {pid} is not one dagq signals")),
+    }
+}
+
+/// `ps -o pid= -o args=`'s lines: the pid, then the arguments split on
+/// white space (a path with a space in it splits too; the gvproxy's socket
+/// is under podman's runtime dir, whose path has none).
+fn parse_processes(stdout: &str) -> Vec<HostProcess> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let pid = words.next()?.parse().ok()?;
+            let args: Vec<String> = words.map(str::to_owned).collect();
+            (pid > 0 && !args.is_empty()).then_some(HostProcess { pid, args })
+        })
+        .collect()
 }
 
 /// `GET /v1/health` on `127.0.0.1:<port>`.
@@ -472,5 +551,47 @@ mod tests {
         fs::write(&client, "#!/bin/sh\nexit 3\n").unwrap();
         assert!(client_version(&client).unwrap_err().contains("exited"));
         assert!(client_version(&dir.path().join("missing")).is_err());
+    }
+
+    #[test]
+    fn ps_lines_are_pids_and_their_arguments() {
+        let listed = parse_processes(
+            "    1 /sbin/launchd\n  4242 /opt/podman/libexec/podman/gvproxy -listen-vfkit unixgram:///t/podman/dagq-gvproxy.sock\n\n  0 kernel\nbad line\n  7\n",
+        );
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[1].pid, 4242);
+        assert_eq!(listed[1].args[2], "unixgram:///t/podman/dagq-gvproxy.sock");
+    }
+
+    #[test]
+    fn an_orphan_is_listed_ended_and_seen_gone() {
+        // A sleep whose shell has exited, so it is not dagq's child (as a
+        // gvproxy's parent is launchd) and its exit is reaped elsewhere.
+        let output =
+            unpiped_output(Command::new("/bin/sh").args(["-c", "/bin/sleep 60 & echo $!"]))
+                .unwrap();
+        let pid: u32 = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .unwrap();
+        let processes = SystemProcesses;
+        let listed = processes.list().unwrap();
+        let sleep = listed.iter().find(|process| process.pid == pid).unwrap();
+        assert!(sleep.args[0].ends_with("sleep"), "{sleep:?}");
+        assert_eq!(sleep.args[1], "60");
+        assert!(processes.alive(pid));
+        processes.signal(pid, Signal::Terminate).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while processes.alive(pid) && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!processes.alive(pid));
+        // A process already gone is not an error.
+        processes.signal(pid, Signal::Kill).unwrap();
+        // dagq itself, init and process groups are never signalled.
+        for pid in [0, 1, std::process::id(), u32::MAX] {
+            assert!(processes.signal(pid, Signal::Kill).is_err(), "{pid}");
+            assert!(!processes.alive(pid) || pid == std::process::id() || pid == 1);
+        }
     }
 }
