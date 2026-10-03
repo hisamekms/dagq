@@ -1645,7 +1645,8 @@ impl Supervisor<'_> {
             progressed |= self.goal_review_pass(starting);
             if self.slots.is_empty() {
                 // A running observer, KPI report job, plan review, landing recheck or
-                // cleanup for disk space or one a triage or resume waits
+                // cleanup for disk space (with the rest of one another job
+                // took on) or one a triage or resume waits
                 // for is waited for like a run: it is
                 // bounded by its own timeout, its command or its worktrees.
                 // A recheck just applied is followed by one more pass, which

@@ -6,8 +6,9 @@
 //!
 //! One job runs at a time; what is asked for meanwhile waits for the next
 //! one, so no worktree is cleaned twice at once. The loop does not wait
-//! for a job, but for a cleanup for disk space, which the claims and
-//! landings wait for, and for the last job once it ends.
+//! for a job, but for a cleanup for disk space and the rest of one another
+//! job took on, which the claims and landings short of room wait for, and
+//! for the last job once it ends.
 //!
 //! The runs a job picked are reserved until it has passed them
 //! ([`CleanupWatch::cleaning`]): the loop takes the lock before it leases
@@ -66,9 +67,11 @@ struct Request {
     /// The build outputs of the runs nobody works on that wait for no
     /// answer ([`WorktreeCleanup::Idle`]) go too (for disk space).
     idle: bool,
-    /// What is removed counts for room as `auto_repaired`, though the
-    /// claims and landings do not wait for it: the rest of a cleanup for
-    /// room that another job took on.
+    /// What is removed counts for room as `auto_repaired`: the rest of a
+    /// cleanup for room that another job took on. While the disk is short,
+    /// nothing is held or asked for until it is done, but a claim or a
+    /// landing there is room for does not wait for it (task 1289, task
+    /// 1478).
     counted: Option<DiskRequest>,
 }
 
@@ -125,15 +128,16 @@ impl CleanupWatch {
     pub(super) const fn running(&self) -> bool {
         self.job.is_some()
     }
-    /// A cleanup for disk space runs or waits to. Once ending (a stop or a
-    /// handoff), so does the rest of one another job took on: a drain
-    /// decides its landings on the reading after it (task 1426).
+    /// A cleanup for disk space runs or waits to, or the rest of one
+    /// another job took on: the disk is judged on the reading after it, so
+    /// nothing is held or asked for while it may still free room (task
+    /// 1478), and a drain decides its landings on that reading (task 1426).
     pub(super) fn for_disk(&self) -> bool {
         self.job
             .as_ref()
-            .is_some_and(|job| job.disk.is_some() || (self.ending && job.counted.is_some()))
+            .is_some_and(|job| job.disk.is_some() || job.counted.is_some())
             || self.pending.disk.is_some()
-            || (self.ending && self.pending.counted.is_some())
+            || self.pending.counted.is_some()
     }
     /// The lock the loop holds while it leases an ended run, and the runs
     /// the job has yet to pass, which the loop leaves for a later pass.
@@ -329,12 +333,12 @@ impl Supervisor<'_> {
         if self.cleanup.ending {
             return false;
         }
-        // For room while another job runs: that job counts for it, so the
-        // claims wait only for it, and the rest (the runs it did not pick,
-        // and the prune) follows without holding them. The build outputs
-        // of the runs nobody works on that wait for no answer (task 1289),
-        // which only a cleanup for room removes, go in that rest, which
-        // counts what it removes for room too.
+        // For room while another job runs: that job counts for it, and the
+        // rest (the runs it did not pick, and the prune) follows. The build
+        // outputs of the runs nobody works on that wait for no answer (task
+        // 1289), which only a cleanup for room removes, go in that rest,
+        // which counts what it removes for room too; while the disk is
+        // short, nothing is held or asked for until it is done (task 1478).
         if let (Some(request), Some(job)) = (disk, self.cleanup.job.as_mut())
             && job.disk.is_none()
         {

@@ -5,7 +5,8 @@
 //! left ([`Supervisor::clean_ended_worktrees`] and `git worktree prune`,
 //! off the loop: task 405) and reads again once that is done, recording
 //! `auto_repaired` (`repair: disk_cleanup`) when it freed something; the
-//! claims and landings wait for it without a hold. Still short, it opens
+//! claims and landings wait for it without a hold, and for the rest of it
+//! when another job took it on (task 1478). Still short, it opens
 //! the queue's one `cost` ask about the disk (`subject: disk`) once, and
 //! the runs whose landing waits for the disk join it. The claims are held through
 //! [`Supervisor::hold_claims`] (`claim_held`, reason `disk_space`), the
@@ -73,7 +74,8 @@ impl Supervisor<'_> {
             self.clean_for_disk(free, most);
         }
         self.free = free;
-        // Short while the cleanup for room runs: the claims and landings
+        // Short while the cleanup for room runs, or the rest of one another
+        // job took on (task 1478): the claims and landings short of room
         // wait for it, and nothing is held or asked for yet.
         self.disk.short = short(free, most);
         let cleaning = self.disk.short && self.cleanup.for_disk();
