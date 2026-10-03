@@ -2253,6 +2253,57 @@ pub trait RunLog {
     }
 }
 
+/// The events `events`, `timeline` and `watch` read past a cursor.
+pub trait EventReads {
+    /// Events with `after < id <= upto` that `filter` keeps, oldest first,
+    /// at most `limit`. A pure read.
+    fn events_between(
+        &self,
+        after: EventId,
+        upto: EventId,
+        filter: &crate::domain::EventFilter,
+        limit: usize,
+    ) -> Result<Vec<RunEvent>>;
+}
+
+/// What one role wrote in a window ([`ObserverLog::written_by`]): finding
+/// ids it recorded, updated and closed (resolved or dismissed), its
+/// asks' ids, and the findings it left without an ask.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WrittenBy {
+    pub recorded: Vec<i64>,
+    pub updated: Vec<i64>,
+    pub closed: Vec<i64>,
+    pub asks: Vec<i64>,
+    /// The findings it recorded or updated and did not close that have
+    /// no `blocked` ask: none it opened in the window and none open now
+    /// (ADR-t451-1 decision 2, the reading it kept to the finding).
+    pub without_ask: Vec<i64>,
+}
+
+/// What the observer reads of the queue's record of its observations and
+/// of what it wrote (ADR-0044).
+pub trait ObserverLog {
+    /// The id of the last event recorded before `unix` (seconds), 0 when
+    /// there is none: a cursor that reads everything from that time on.
+    fn event_id_before(&self, unix: i64) -> Result<EventId>;
+    /// The newest ask's ID: the mark [`Self::written_by`] counts past.
+    fn ask_high_water(&self) -> Result<AskId>;
+    /// What `role` wrote after the marks: the findings it recorded,
+    /// updated and closed after `event_id` and its asks after `ask_id`.
+    fn written_by(&self, role: &str, event_id: EventId, ask_id: AskId) -> Result<WrittenBy>;
+    /// The last observation of `mode` that ran its agent: the id and the
+    /// payload of its `observe_finished` (a skipped one is not).
+    fn last_observation(&self, mode: &str) -> Result<Option<(EventId, serde_json::Value)>>;
+    /// How many events after `after` the observer did not write itself
+    /// (ADR-0044), its own spans (`span_kind`) excluded.
+    fn events_besides(&self, role: &str, span_kind: &str, after: EventId) -> Result<i64>;
+    /// The newest `limit` observations, newest first: each
+    /// `observe_finished` with the `observe_started` of the same directory
+    /// when there is one (a skipped observation has none).
+    fn observations(&self, limit: usize) -> Result<Vec<(RunEvent, Option<RunEvent>)>>;
+}
+
 /// What reports read and record of the queue as a whole: the written
 /// reports, KPI breaches, forecasts and the lookups `stats` joins runs with.
 pub trait QueueRecords {

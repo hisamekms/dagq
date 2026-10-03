@@ -47,20 +47,7 @@ pub use crate::application::{
 };
 pub use crate::domain::{HEARTBEAT_TIMEOUT_SECS, RunPlan};
 
-/// What one role wrote in a window ([`SqliteQueue::written_by`]): finding
-/// ids it recorded, updated and closed (resolved or dismissed), its
-/// asks' ids, and the findings it left without an ask.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct WrittenBy {
-    pub recorded: Vec<i64>,
-    pub updated: Vec<i64>,
-    pub closed: Vec<i64>,
-    pub asks: Vec<i64>,
-    /// The findings it recorded or updated and did not close that have
-    /// no `blocked` ask: none it opened in the window and none open now
-    /// (ADR-t451-1 decision 2, the reading it kept to the finding).
-    pub without_ask: Vec<i64>,
-}
+pub use crate::application::WrittenBy;
 
 /// Whether a lease no longer has a working process behind it: its pid is
 /// dead or its heartbeat is older than `HEARTBEAT_TIMEOUT_SECS`. The rule

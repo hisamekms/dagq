@@ -681,7 +681,7 @@ fn a_dialog_on_the_screen_is_asked_once_and_cleared() {
             .iter()
             .any(|a| a["kind"] == "ask_opened" && a["ask_id"] == ask.id.as_i64())
     );
-    let events = dagq::watch::events(&db, EventId::new(0), 100, false).unwrap();
+    let events = dagq::compose::events(&db, EventId::new(0), 100, false).unwrap();
     assert!(
         events["events"]
             .as_array()
@@ -933,7 +933,7 @@ fn sessions_stopped_at_the_same_login_share_one_authentication_ask() {
     let attention = ask_attention(&status, ask.id);
     assert_eq!(attention.len(), 1, "{status}");
     assert_eq!(attention[0]["reason_category"], "authentication");
-    let events = dagq::watch::events(&db, EventId::new(0), 100, false).unwrap();
+    let events = dagq::compose::events(&db, EventId::new(0), 100, false).unwrap();
     let opened: Vec<&Value> = events["events"]
         .as_array()
         .unwrap()
@@ -1053,7 +1053,7 @@ fn an_answered_worker_question_is_typed_into_the_idle_worker_and_closed() {
         format!("delivering the answer of ask {} (runtime)", ask.id)
     );
     // The answer of a worker_question does not wake the inbox.
-    let events = dagq::watch::events(&db, EventId::new(0), 100, false).unwrap();
+    let events = dagq::compose::events(&db, EventId::new(0), 100, false).unwrap();
     assert!(
         events["events"]
             .as_array()
@@ -1156,7 +1156,7 @@ fn a_failed_answer_delivery_is_left_to_the_inbox() {
             ask.id
         )
     );
-    let events = dagq::watch::events(&db, EventId::new(0), 100, false).unwrap();
+    let events = dagq::compose::events(&db, EventId::new(0), 100, false).unwrap();
     assert!(
         events["events"]
             .as_array()
@@ -1205,7 +1205,7 @@ fn a_failed_answer_delivery_is_left_to_the_inbox() {
         .unwrap()
         .ask;
     queue.answer(late.id, "yes").unwrap();
-    let events = dagq::watch::events(&db, EventId::new(cursor), 100, false).unwrap();
+    let events = dagq::compose::events(&db, EventId::new(cursor), 100, false).unwrap();
     let answered: Vec<&Value> = events["events"]
         .as_array()
         .unwrap()
@@ -1807,7 +1807,7 @@ fn unanswered_exit_request_times_out_and_keeps_the_run() {
             .any(|a| a["kind"] == "ask_opened" && a["next"] == format!("answer ask {}", ask.id)),
         "{status}"
     );
-    let events = dagq::watch::events(&db, EventId::new(0), 100, false).unwrap();
+    let events = dagq::compose::events(&db, EventId::new(0), 100, false).unwrap();
     let events = events["events"].as_array().unwrap();
     assert!(events.iter().all(|e| e["next"] != "send /exit"));
     assert!(runtime::recover(&db, run.id()).is_err());
@@ -1856,7 +1856,7 @@ fn unanswered_exit_request_times_out_and_keeps_the_run() {
     assert_eq!(open[0].kind, AskKind::ApproveLanding);
     assert!(position("review_retried") < position("review_failed"));
     assert_eq!(backend.notifications.lock().unwrap().len(), 2);
-    let events = dagq::watch::events(&db, EventId::new(0), 100, false).unwrap();
+    let events = dagq::compose::events(&db, EventId::new(0), 100, false).unwrap();
     assert!(
         events["events"]
             .as_array()

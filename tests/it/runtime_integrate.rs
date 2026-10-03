@@ -195,7 +195,7 @@ fn a_failed_push_keeps_the_landing_and_waits_as_attention() {
             "last_error_code": "push_failed", "next": "push main",
         })
     );
-    let events = dagq::watch::events(&db, EventId::new(0), 100, false).unwrap();
+    let events = dagq::compose::events(&db, EventId::new(0), 100, false).unwrap();
     let failed = events["events"]
         .as_array()
         .unwrap()

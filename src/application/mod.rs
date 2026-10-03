@@ -28,6 +28,7 @@ pub mod lifecycle;
 #[cfg(test)]
 mod memory_files;
 pub mod naming;
+pub mod observer;
 pub mod planner;
 pub mod planner_handoff;
 pub mod planner_request;
@@ -47,6 +48,7 @@ pub mod session;
 pub mod stats;
 pub mod supervise;
 pub mod update;
+pub mod watch;
 pub mod workspace_cleanup;
 
 pub use crate::domain::ClaimRank;

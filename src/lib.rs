@@ -10,10 +10,12 @@
 //!   injects them into the use cases; `main` resolves the queue location,
 //!   parses the CLI and prints what it returns.
 //!
-//! Outside the layers: [`view`] and [`watch`] shape the CLI's compact
-//! output and the inbox's event reads, [`observer`] is the periodic
-//! observation job, and [`runtime`] and [`lifecycle`] only re-export the
-//! names the tests use from before the move.
+//! Outside the layers: [`view`] shapes the CLI's compact output;
+//! [`throughput_review`] is the throughput review job, a use case not yet
+//! moved into [`application`] that still takes the `SqliteQueue` and the
+//! infrastructure directly; [`broker_material`] and [`migration_numbers`]
+//! are shared with `build.rs`; and [`runtime`] and [`lifecycle`] only
+//! re-export the names the tests use from before the move.
 pub mod application;
 pub mod broker_material;
 /// The build identifier's rule, shared with the broker's binaries.
@@ -23,11 +25,9 @@ pub mod domain;
 pub mod infrastructure;
 pub mod lifecycle;
 pub mod migration_numbers;
-pub mod observer;
 pub mod runtime;
 pub mod throughput_review;
 pub mod view;
-pub mod watch;
 
 /// The build identifier of this binary (ADR-0045 decision 2): `X.Y.Z` for a
 /// release, `X.Y.Z-dev+<commit>[.dirty]` for a development build. `dagq

@@ -617,7 +617,7 @@ fn a_planner_question_about_a_finding_is_typed_to_its_planner_and_undecided_plan
         .collect();
     assert_eq!(attention.len(), 1, "{status_now}");
     assert_eq!(attention[0]["next"], "request a plan for the finding");
-    let watched = dagq::watch::events(&fx.db, dagq::domain::EventId::new(0), 100, false).unwrap();
+    let watched = dagq::compose::events(&fx.db, dagq::domain::EventId::new(0), 100, false).unwrap();
     assert!(
         watched["events"].as_array().unwrap().iter().any(|e| {
             e["kind"] == "finding_planner_exhausted"

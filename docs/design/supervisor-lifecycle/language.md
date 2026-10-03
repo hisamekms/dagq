@@ -4,8 +4,8 @@ type: design
 title: "Language"
 status: current
 created: 2026-09-27
-updated: 2026-10-03
-last_verified: 2026-10-03
+updated: 2026-10-04 # task 251
+last_verified: 2026-10-04 # task 251
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -75,7 +75,7 @@ tag = "ja"
 - review job（`review_prompt`）、復旧job（`recovery_prompt`）、plan review job（`plan_review_prompt`）とそのreviseの依頼（`plan_revise_request`）、goal review job（`goal_review_prompt`。goalの判定の理由も人が読む）
 - planner: runtimeが立てる`runtime_planner_prompt`・`draft_planner_prompt`・`finding_planner_prompt`・`request_planner_prompt`（どれも`PlannerLaunch`の`language`を`launch_planner`が足す。人が開くplannerの`planner_prompt`は`dagq plan`の廃止（ADR-t1394-1、task 1399）で消した）
 - inbox: `inbox_prompt`（`up`の`inbox_session_prompt`）
-- observer: `observer_prompt`（`src/observer.rs`）
+- observer: `observer_prompt`（`src/application/observer/mod.rs`）
 
 supervisorは`Verifier::language`（`ShellVerifier`がmain checkoutの`dagq.toml`と`user_config`を読む）で、promptを組み立てるたびに解決する。停滞の催促やaskの答えの配送など、立ったsessionに送る短い定型文には足さない（最初のpromptが指示を持つ）。
 

@@ -127,6 +127,15 @@ fn prune(dir: &Path, now: i64) {
     }
 }
 
+impl crate::application::watch::WatchRecord for WatcherFile {
+    fn heartbeat(&mut self, now: i64) -> Result<()> {
+        WatcherFile::heartbeat(self, now)
+    }
+    fn end(&mut self, now: i64) -> Result<()> {
+        WatcherFile::end(self, now)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

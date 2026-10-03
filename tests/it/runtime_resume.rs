@@ -437,7 +437,7 @@ fn approved_needs_session_run_is_resumed_until_the_runtime_lands_it() {
     );
     // Nothing waits for a person: the watch sees no attention.
     assert_eq!(
-        dagq::watch::events(&db, EventId::new(cursor), 100, false).unwrap()["events"],
+        dagq::compose::events(&db, EventId::new(cursor), 100, false).unwrap()["events"],
         json!([])
     );
     assert!(run_attention_of(&runtime::status(&db).unwrap(), run.id()).is_none());
@@ -551,7 +551,7 @@ fn unapproved_resumed_run_is_validated_and_reviewed_with_its_session_open() {
         "{text}"
     );
     // The inbox is woken only by the ask of the failed review (task 328).
-    let events = dagq::watch::events(&db, EventId::new(cursor), 100, false).unwrap();
+    let events = dagq::compose::events(&db, EventId::new(cursor), 100, false).unwrap();
     assert_eq!(events["events"].as_array().unwrap().len(), 1, "{events}");
     assert_eq!(events["events"][0]["kind"], "ask_opened", "{events}");
     let status = runtime::status(&db).unwrap();
@@ -677,7 +677,7 @@ fn an_approved_run_resolved_by_an_earlier_resume_lands_without_a_session() {
     );
     assert!(queue.run_leases().unwrap().is_empty());
     assert_eq!(
-        dagq::watch::events(&db, EventId::new(cursor), 100, false).unwrap()["events"],
+        dagq::compose::events(&db, EventId::new(cursor), 100, false).unwrap()["events"],
         json!([])
     );
 }
@@ -1222,7 +1222,7 @@ fn resuming_stops_after_three_attempts() {
     assert_eq!(finished[0]["ask_id"], json!(ask.id));
     assert_eq!(finished[0]["status"], "failed");
     // The ask is the one attention; the exhausted resume is none.
-    let events = dagq::watch::events(&db, EventId::new(cursor), 100, false).unwrap();
+    let events = dagq::compose::events(&db, EventId::new(cursor), 100, false).unwrap();
     let listed = events["events"].as_array().unwrap();
     assert_eq!(listed.len(), 1, "{events}");
     assert_eq!(listed[0]["kind"], "ask_opened");

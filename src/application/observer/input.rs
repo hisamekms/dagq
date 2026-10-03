@@ -10,8 +10,6 @@
 //! others share what is left, each within its own limits. The instructions
 //! (the role, the window and cursor, what the observer may write, how to
 //! read) are never cut.
-use std::path::Path;
-
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -574,22 +572,21 @@ fn check_observation(observation: &str) -> Result<()> {
 
 /// `observe --input OBSERVATION [--section PATH] [--offset N] [--limit N]`:
 /// the observation's whole input (its `input.json`) as the observer's
-/// `dagq` reads it. Without a section, the paths of the input (two levels
-/// deep) with their bytes and items; a list, from `offset` up to `limit`
-/// items within [`INPUT_READ_BYTES`] (at least one) with the next offset;
-/// an object over [`INPUT_READ_BYTES`], its keys with their bytes; any
-/// other value, as it is.
+/// `dagq` reads it, the observation's name checked before `text` (what
+/// `read` gives of the file) is read. Without a section, the paths of the
+/// input (two levels deep) with their bytes and items; a list, from
+/// `offset` up to `limit` items within [`INPUT_READ_BYTES`] (at least one)
+/// with the next offset; an object over [`INPUT_READ_BYTES`], its keys
+/// with their bytes; any other value, as it is.
 pub fn read_input(
-    db: &Path,
     observation: &str,
+    read: impl FnOnce() -> Result<String>,
     section: Option<&str>,
     offset: usize,
     limit: usize,
 ) -> Result<Value> {
     check_observation(observation)?;
-    let path = super::observer_dir(db).join(observation).join("input.json");
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("observation {observation} has no input to read"))?;
+    let text = read().with_context(|| format!("observation {observation} has no input to read"))?;
     let input: Value = serde_json::from_str(&text)
         .with_context(|| format!("read the input of observation {observation}"))?;
     let Some(section) = section else {

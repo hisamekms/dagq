@@ -4,8 +4,8 @@ type: design
 title: "Observer"
 status: current
 created: 2026-09-26
-updated: 2026-10-03 # task 1560: the observer gets its prompt on stdin (after task 1379)
-last_verified: 2026-10-03 # task 1560
+updated: 2026-10-04 # task 251: the observer's use case moved to application
+last_verified: 2026-10-04 # task 251
 scope: runtime
 related:
   - adr-t1566-1
@@ -24,7 +24,7 @@ related:
 
 # Observer
 
-[ADR-0044](../../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定4・18・23（task 292）。observerはnoteとdraft goalを書かず、findingを記録・更新し、見立てが人を要るfindingにだけ`blocked`のaskを上げる（`--because`は`scope` / `discard` / `recovery_failed`から選び、見立てを`--recommend`と`--confidence`で載せる。下の「人が要る見立てだけをblockedにする」）。前回から自分以外のeventが無ければagentを起動しないこと、MCPを読まないこと、`observe --history`はtask 294が実装した。同じADRの決定19〜22のうち、既定の間隔を3時間にすること、proposalを求める印からplannerを立てることはgoal 31の他のtaskが持つ。`events --full` / `timeline`はtask 293が足し、promptに示すのはtask 420。dagqが回っているかを観察して継続的改善の材料を残すjobで、個々の詰まりは解消しない。cmux workspaceを持たず、`AgentProvider::headless_command`に`assign_session_id`と`without_mcp`を足して起動する（Claudeでは`claude -p --allowedTools 'Bash(dagq:*)' --session-id <id> --strict-mcp-config`でpromptはstdin（task 1560）。`--mcp-config`を渡さない`--strict-mcp-config`で、user・project・plugin・claude.aiのどのMCP serverも読み込まない）。実装は`src/observer.rs`。
+[ADR-0044](../../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定4・18・23（task 292）。observerはnoteとdraft goalを書かず、findingを記録・更新し、見立てが人を要るfindingにだけ`blocked`のaskを上げる（`--because`は`scope` / `discard` / `recovery_failed`から選び、見立てを`--recommend`と`--confidence`で載せる。下の「人が要る見立てだけをblockedにする」）。前回から自分以外のeventが無ければagentを起動しないこと、MCPを読まないこと、`observe --history`はtask 294が実装した。同じADRの決定19〜22のうち、既定の間隔を3時間にすること、proposalを求める印からplannerを立てることはgoal 31の他のtaskが持つ。`events --full` / `timeline`はtask 293が足し、promptに示すのはtask 420。dagqが回っているかを観察して継続的改善の材料を残すjobで、個々の詰まりは解消しない。cmux workspaceを持たず、`AgentProvider::headless_command`に`assign_session_id`と`without_mcp`を足して起動する（Claudeでは`claude -p --allowedTools 'Bash(dagq:*)' --session-id <id> --strict-mcp-config`でpromptはstdin（task 1560）。`--mcp-config`を渡さない`--strict-mcp-config`で、user・project・plugin・claude.aiのどのMCP serverも読み込まない）。実装は`src/application/observer/`（ユースケース。`compose::observe`がqueueと`ObserverSources`・`ObserverHost`を組み立てて注入する）と`src/infrastructure/observer.rs`（cursorと観察のdir、`[roles.observer]`、headlessのagentのprocess）。
 
 Codexのobserverは、jobのdagqをクライアントモードにしてqueue service経由でfindingとfindingに紐づく`blocked`のaskを書き、Claudeのobserverも同じ経路にする（[ADR-t1222-1](../../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）。serviceの側のユースケース（`finding_record`・`finding_resolve`、findingに紐づく`blocked`の`ask`、読み取りの`proposal_list`・`proposal_show`など）はtask 1235が足した（[Queue service](../queue-service.md#ユースケース)）。serviceはobserverのprincipal（tokenのrole `observer`とjobのactor id）をactorにしてCLIと同じ`Dialogue`で書くので、`finding_recorded` / `finding_updated` / `finding_status_changed`の`by`と`ask_opened`の`asked_by`は`observer`、eventのactorはjobのactor idになり、拒否の`authorization_denied`もactorのroleが`observer`で残る。そのため下の0の「observer自身のeventを数えない」判定（`SqliteQueue::events_besides`）はCLIで書いたときと同じに成り立つ（ADR-t1222-1決定4）。jobのdagqのクライアントモードはまだ無く、今のobserverはClaudeだけで動き、agentのdagqがqueueのDBに直接書く。jobへのtokenの渡し方・sandboxに足す設定はtask 1223がここに書く。
 
@@ -46,7 +46,7 @@ Codexのobserverは、jobのdagqをクライアントモードにしてqueue ser
 
 ## promptの入力の上限と選ぶ順
 
-[ADR-t1566-1](../../adr/2026-10-03-t1566-1-headless-job-prompts-carry-decision-material-within-limits.md)の決定2〜6（task 1567）。`observer::observer_prompt`が指示の後に入力を節ごとに載せる。実装は`src/observer/input.rs`の`fit`、値はその定数。
+[ADR-t1566-1](../../adr/2026-10-03-t1566-1-headless-job-prompts-carry-decision-material-within-limits.md)の決定2〜6（task 1567）。`observer::observer_prompt`が指示の後に入力を節ごとに載せる。実装は`src/application/observer/input.rs`の`fit`（`observe --input`のファイルの読み取りは`infrastructure::observer::read_input`）、値はその定数。
 
 - **上限を決めた内訳**: 本番の`<queue dir>/observer/1791005872/prompt.md`（started_at 2026-10-03T05:37:52Z）は1,226,750 byteで、入力を整形したJSONで丸ごと載せていた。`stats` 624,452 byte（50.9%。うち`runs` 193,135・`goals` 108,125・`versions` 99,396）、`kpi` 383,233（31.2%。うち`trend` 190,486・`forecast` 118,562・`breaches` 36,058（1件の`marks`が154件））、`findings` 104,120（8.5%、52件）、`notes` 14,692（20件）、指示 10,912、`open_asks` 3,796（3件）、`graph` 1,398、`improvements` 802。
 - **全体の上限**: `PROMPT_LIMIT` 160,000 byte（言語の指示を含み、そのために`LANGUAGE_RESERVE` 1,000 byteを取っておく）。hostの`ARG_MAX`（macOSで1 MiB）の約15%で、上の入力を下の規則で載せた推定（約127KB）が全体の上限では切られずに収まる値。渡し方がstdinになった今（task 1560）も同じ上限を持つ（上限はagentの文脈のため）。
@@ -68,7 +68,7 @@ Codexのobserverは、jobのdagqをクライアントモードにしてqueue ser
 - **項目の縮め方**: 一覧の1件はcompactなJSONの1行。文字列は300文字（`TEXT_CHARS`）で切って残りの文字数を書き、項目の中の一覧（根拠のid・印・期間の値）は最後の10件（`NESTED_ITEMS`。queueの一覧は古い順なので新しいもの）にして`<key>_omitted`に残りの件数を書く。keyの節の値は縮めず、入れるか省くか（`kpi`の`trend`・`forecast`は上の要約）。
 - **省いたことの明示**: 節ごとに見出し`### <節>[ (required)]: <残した数> of <全体の数> items|keys`を書き、省いたら`Left out N items (from offset K): read them with`に続けて`dagq observe --input <observation> --section <節> --offset K`と表の今の読み方を（keyの節は省いたkeyの名前と`--section <節>.<key>`を）書き、要約したkeyには`--section kpi.<key>`を、縮めた項目があれば`--section <節> --offset I --limit 1`（Iは一覧の中の0からの位置）を書く。`observe --input`はobservationの時点の入力をそのまま返し、表の今の読み方は今の状態を返す。
 - **記録**: `observe_started`の`prompt_bytes`（言語の指示を含むpromptのbyte数）、`prompt_limit`、`prompt_sections`（`instructions`から節の順に、各節の`name`・`bytes`（見出しと注記を含む）・`total`・`kept`・`omitted`。`bytes`の合計は言語の指示の無いpromptのbyte数）。`observe --history`と`--dry-run`も同じ名前で返す。起動に失敗したobservation（引数の大きさなど）も`observe_started`に残る。
-- **test**: `observer`のunit test `a_big_input_stays_within_the_limits_and_names_what_it_left_out`（多数のfinding・note・ask・alertと大きな`stats`で全体と節の上限、省いた件数と読む方法）、`the_sections_keep_their_items_in_the_fixed_order`、`required_sections_past_the_limit_say_how_to_read_the_rest`（必須の資料だけで超えるとき）、`the_input_of_an_observation_reads_by_section_and_page`、`the_history_gives_the_prompt_bytes_of_an_observation`と`observer::input`のunit test、`tests/it/runtime_observer.rs`の`the_observer_reads_what_its_prompt_left_out_and_the_prompt_bytes_are_recorded`（必須の`open_asks`を省いたpromptの読む方法を、stubのagentが`DAGQ_ROLE=observer`とqueue serviceのobserverのtoken（`JobAccess::QueueCli`、Claudeでは`Bash(dagq:*)`）で打って省いたaskの全文を読み、`observe_started`と`observe --history`のbyte数がpromptと合う）、`tests/it/queue_service_reads.rs`の`the_read_roles_read_what_their_prompts_name_as_the_command_line_prints_it`（`observe_input`がserviceでもCLIと同じJSONで、observerを含む全ての読み取りのroleに通る）。
+- **test**: `observer`のunit test `a_big_input_stays_within_the_limits_and_names_what_it_left_out`（多数のfinding・note・ask・alertと大きな`stats`で全体と節の上限、省いた件数と読む方法）、`the_sections_keep_their_items_in_the_fixed_order`、`required_sections_past_the_limit_say_how_to_read_the_rest`（必須の資料だけで超えるとき）、`the_input_of_an_observation_reads_by_section_and_page`、`the_history_gives_the_prompt_bytes_of_an_observation`、`the_history_lists_the_observations_the_store_gives`と`observer::input`のunit test、`tests/it/runtime_observer.rs`の`the_observer_reads_what_its_prompt_left_out_and_the_prompt_bytes_are_recorded`（必須の`open_asks`を省いたpromptの読む方法を、stubのagentが`DAGQ_ROLE=observer`とqueue serviceのobserverのtoken（`JobAccess::QueueCli`、Claudeでは`Bash(dagq:*)`）で打って省いたaskの全文を読み、`observe_started`と`observe --history`のbyte数がpromptと合う）、`tests/it/queue_service_reads.rs`の`the_read_roles_read_what_their_prompts_name_as_the_command_line_prints_it`（`observe_input`がserviceでもCLIと同じJSONで、observerを含む全ての読み取りのroleに通る）。
 
 ## KPIの目標割れと改善の上限
 

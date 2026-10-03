@@ -4850,8 +4850,8 @@ mod tests {
         });
         // With every section cut, so the prompt names each read of what it
         // left out.
-        let observer = crate::observer::observer_prompt(
-            crate::observer::ObserveMode::Hourly,
+        let observer = crate::application::observer::observer_prompt(
+            crate::application::observer::ObserveMode::Hourly,
             "dagq",
             Some(crate::domain::EventId::new(12)),
             "1791005872",

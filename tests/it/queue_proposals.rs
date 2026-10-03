@@ -410,7 +410,7 @@ fn abandoning_a_goal_tells_the_inbox_of_the_tasks_waiting_on_its_task() {
             "task {a} of goal {goal} (closed abandoned) will not complete; tasks {b}, {c} wait on it"
         )
     );
-    let events = dagq::watch::events(&db, dagq::domain::EventId::new(0), 100, false).unwrap();
+    let events = dagq::compose::events(&db, dagq::domain::EventId::new(0), 100, false).unwrap();
     assert!(
         events["events"].as_array().unwrap().iter().any(|e| {
             e["kind"] == "dependency_stranded"

@@ -47,12 +47,12 @@ impl AgentProvider for ObserverProvider {
 fn observe(
     db: &Path,
     provider: &dyn AgentProvider,
-    options: &dagq::observer::ObserveOptions,
+    options: &dagq::application::observer::ObserveOptions,
 ) -> Result<Value> {
     // The job's `dagq` goes to the queue's service (goal 82's stage (3)),
     // which the fixture stops.
     common::service::serve(db);
-    dagq::observer::observe(
+    dagq::compose::observe(
         db,
         provider,
         &ClaudeCode {
@@ -62,8 +62,10 @@ fn observe(
     )
 }
 
-fn observe_options(mode: dagq::observer::ObserveMode) -> dagq::observer::ObserveOptions {
-    dagq::observer::ObserveOptions {
+fn observe_options(
+    mode: dagq::application::observer::ObserveMode,
+) -> dagq::application::observer::ObserveOptions {
+    dagq::application::observer::ObserveOptions {
         mode,
         cmux: None,
         since: None,
@@ -71,7 +73,7 @@ fn observe_options(mode: dagq::observer::ObserveMode) -> dagq::observer::Observe
         timeout: Duration::from_secs(60),
         dagq: PathBuf::from(env!("CARGO_BIN_EXE_dagq")),
         user_config: None,
-        prompt_limit: dagq::observer::PROMPT_LIMIT,
+        prompt_limit: dagq::application::observer::PROMPT_LIMIT,
     }
 }
 
@@ -92,7 +94,7 @@ fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
 /// 7).
 #[test]
 fn the_observer_takes_its_role_table_and_records_what_it_started_with() {
-    use dagq::observer::ObserveMode;
+    use dagq::application::observer::ObserveMode;
     let (_dir, repo, db) = fixture();
     let provider = ObserverProvider {
         script: r#"printf '%s' "${MODEL-none}" > model.txt"#.into(),
@@ -138,7 +140,7 @@ fn the_observer_takes_its_role_table_and_records_what_it_started_with() {
 
 #[test]
 fn observe_records_findings_and_a_blocked_ask_and_advances_the_cursor() {
-    use dagq::observer::{ObserveMode, read_cursor};
+    use dagq::{application::observer::ObserveMode, infrastructure::observer::read_cursor};
     let (_dir, _repo, db) = fixture();
     // `dagq` is first on PATH and goes to the queue's service with the
     // observer's token; the state changes the prompt forbids are refused,
@@ -307,7 +309,7 @@ echo 'observer diagnostic' >&2
     let dry = observe(
         &db,
         &failing,
-        &dagq::observer::ObserveOptions {
+        &dagq::application::observer::ObserveOptions {
             dry_run: true,
             since: Some(EventId::new(0)),
             ..observe_options(ObserveMode::Daily)
@@ -338,7 +340,7 @@ echo 'observer diagnostic' >&2
     let dry = observe(
         &db,
         &failing,
-        &dagq::observer::ObserveOptions {
+        &dagq::application::observer::ObserveOptions {
             dry_run: true,
             since: Some(EventId::new(0)),
             user_config: Some(config),
@@ -483,7 +485,7 @@ fn gone(pid: u32) -> bool {
 /// one changes nothing.
 #[test]
 fn an_observer_at_a_login_that_ran_out_joins_the_authentication_ask() {
-    use dagq::observer::ObserveMode;
+    use dagq::application::observer::ObserveMode;
     let (_dir, _repo, db) = fixture();
     let logged_out = ObserverProvider {
         script: "printf 'Invalid API key \u{b7} Please run /login\\n'; exit 1".into(),
@@ -527,7 +529,7 @@ fn an_observer_at_a_login_that_ran_out_joins_the_authentication_ask() {
 /// child does not outlive the observation (task 245).
 #[test]
 fn observe_kills_an_agent_past_its_timeout_with_its_children() {
-    use dagq::observer::ObserveMode;
+    use dagq::application::observer::ObserveMode;
     let (_dir, _repo, db) = fixture();
     let child_pid = db.parent().unwrap().join("child.pid");
     let slow = ObserverProvider {
@@ -541,7 +543,7 @@ fn observe_kills_an_agent_past_its_timeout_with_its_children() {
     let outcome = observe(
         &db,
         &slow,
-        &dagq::observer::ObserveOptions {
+        &dagq::application::observer::ObserveOptions {
             timeout: Duration::from_secs(5),
             ..observe_options(ObserveMode::Hourly)
         },
@@ -671,7 +673,11 @@ fn supervisor_starts_the_observer_on_its_interval_without_a_run_slot() {
             ("hourly", "observed by observer")
         ]
     );
-    assert!(dagq::observer::read_cursor(&db).unwrap().is_some());
+    assert!(
+        dagq::infrastructure::observer::read_cursor(&db)
+            .unwrap()
+            .is_some()
+    );
     // Within the interval nothing is due again, even for another supervisor.
     supervise_observed();
     assert_eq!(queue_events(&db, "observe_started").len(), 2);
@@ -705,7 +711,7 @@ fn supervisor_starts_the_observer_on_its_interval_without_a_run_slot() {
 
 #[test]
 fn observe_reads_again_what_others_wrote_while_its_agent_ran() {
-    use dagq::observer::ObserveMode;
+    use dagq::application::observer::ObserveMode;
     let (_dir, _repo, db) = fixture();
     // Someone else's note lands after the input was read, before the finish.
     let noting = ObserverProvider {
@@ -729,7 +735,7 @@ fn observe_reads_again_what_others_wrote_while_its_agent_ran() {
     let forced = observe(
         &db,
         &quiet,
-        &dagq::observer::ObserveOptions {
+        &dagq::application::observer::ObserveOptions {
             since: Some(EventId::new(0)),
             ..observe_options(ObserveMode::Hourly)
         },
@@ -745,8 +751,8 @@ fn observe_reads_again_what_others_wrote_while_its_agent_ran() {
 /// kept no alerts, any alert starts it.
 #[test]
 fn observe_starts_again_for_an_alert_that_time_alone_raised() {
+    use dagq::application::observer::ObserveMode;
     use dagq::domain::{AskKind, AskReason, NewAsk};
-    use dagq::observer::ObserveMode;
     let (_dir, _repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let ask = queue
@@ -833,7 +839,7 @@ fn observe_starts_again_for_an_alert_that_time_alone_raised() {
 /// stays one `kpi` finding.
 #[test]
 fn observe_reads_the_kpis_and_the_improvements_and_keeps_one_kpi_finding_per_subject() {
-    use dagq::observer::ObserveMode;
+    use dagq::application::observer::ObserveMode;
     let (_dir, repo, db) = fixture();
     fs::write(
         repo.join("dagq.toml"),
@@ -850,7 +856,7 @@ fn observe_reads_the_kpis_and_the_improvements_and_keeps_one_kpi_finding_per_sub
         &ObserverProvider {
             script: "exit 1".into(),
         },
-        &dagq::observer::ObserveOptions {
+        &dagq::application::observer::ObserveOptions {
             dry_run: true,
             ..observe_options(ObserveMode::Hourly)
         },
@@ -969,7 +975,7 @@ impl AgentProvider for BreachRecorder {
 /// finding, not a `kpi` one.
 #[test]
 fn observe_reads_the_forecast_errors_and_a_forecast_breach_becomes_a_forecast_finding() {
-    use dagq::observer::ObserveMode;
+    use dagq::application::observer::ObserveMode;
     let (_dir, repo, db) = fixture();
     SqliteQueue::open(&db)
         .unwrap()
@@ -1068,8 +1074,8 @@ fn observe_reads_the_forecast_errors_and_a_forecast_breach_becomes_a_forecast_fi
 
 #[test]
 fn observe_counts_the_findings_the_observer_closed_and_no_other_close() {
+    use dagq::application::observer::ObserveMode;
     use dagq::domain::{FindingStatus, FindingTarget, NewFinding};
-    use dagq::observer::ObserveMode;
     let (_dir, _repo, db) = fixture();
     let record = |queue: &mut SqliteQueue, subject: &str| {
         queue
@@ -1257,7 +1263,7 @@ fn a_handoff_leaves_no_observer_process() {
 
 #[test]
 fn observe_uses_only_the_selected_cmux_for_workspace_listing() {
-    use dagq::observer::ObserveMode;
+    use dagq::application::observer::ObserveMode;
     let (_dir, _repo, db) = fixture();
     let cmux = db.parent().unwrap().join("selected-cmux");
     let calls = db.parent().unwrap().join("cmux-calls");
@@ -1324,7 +1330,7 @@ esac
 
 #[test]
 fn observer_walls_read_both_streams_and_ignore_successful_output() {
-    use dagq::observer::ObserveMode;
+    use dagq::application::observer::ObserveMode;
     for (diagnostic, wall) in [
         ("Invalid API key · Please run /login", "authentication"),
         ("You've hit your limit · resets 5pm", "usage_limit"),
@@ -1380,11 +1386,11 @@ fn observer_uses_the_supplied_providers_failure_signals() {
     let provider = ObserverProvider {
         script: "printf 'provider stdout'; printf 'provider stderr' >&2; exit 1".into(),
     };
-    let done = dagq::observer::observe(
+    let done = dagq::compose::observe(
         &db,
         &provider,
         &Signals,
-        &observe_options(dagq::observer::ObserveMode::Daily),
+        &observe_options(dagq::application::observer::ObserveMode::Daily),
     )
     .unwrap();
     assert_eq!(done["wall"], "usage_limit", "{done}");
@@ -1399,7 +1405,7 @@ fn observer_uses_the_supplied_providers_failure_signals() {
 /// `observe --history` record the prompt's bytes per section.
 #[test]
 fn the_observer_reads_what_its_prompt_left_out_and_the_prompt_bytes_are_recorded() {
-    use dagq::observer::ObserveMode;
+    use dagq::application::observer::ObserveMode;
     let (_dir, _repo, db) = fixture();
     let question = "q".repeat(2_000);
     // One open ask per task.
@@ -1435,7 +1441,7 @@ fn the_observer_reads_what_its_prompt_left_out_and_the_prompt_bytes_are_recorded
             &ObserverProvider {
                 script: String::new(),
             },
-            &dagq::observer::ObserveOptions {
+            &dagq::application::observer::ObserveOptions {
                 dry_run: true,
                 prompt_limit,
                 ..observe_options(ObserveMode::Hourly)
@@ -1443,7 +1449,7 @@ fn the_observer_reads_what_its_prompt_left_out_and_the_prompt_bytes_are_recorded
         )
         .unwrap()
     };
-    let dry = dry_run(dagq::observer::PROMPT_LIMIT);
+    let dry = dry_run(dagq::application::observer::PROMPT_LIMIT);
     let least = dry_run(1)["prompt_bytes"].as_u64().unwrap() as usize;
     let section = |sections: &Value, name: &str| {
         sections
@@ -1464,7 +1470,7 @@ fn the_observer_reads_what_its_prompt_left_out_and_the_prompt_bytes_are_recorded
         .unwrap() as usize;
     // Room for about half the asks: the required section is cut too, and
     // every other section left out.
-    let limit = least + asks_bytes / 2 + dagq::observer::LANGUAGE_RESERVE;
+    let limit = least + asks_bytes / 2 + dagq::application::observer::LANGUAGE_RESERVE;
     let provider = ObserverProvider {
         script: r#"
 set -e
@@ -1477,7 +1483,7 @@ $read > left_out.json
     let report = observe(
         &db,
         &provider,
-        &dagq::observer::ObserveOptions {
+        &dagq::application::observer::ObserveOptions {
             prompt_limit: limit,
             ..observe_options(ObserveMode::Hourly)
         },
@@ -1493,7 +1499,7 @@ $read > left_out.json
     let claude = ClaudeCode {
         executable: "claude".into(),
     }
-    .headless_command(&dir, "observe", dagq::observer::ACCESS)
+    .headless_command(&dir, "observe", dagq::application::observer::ACCESS)
     .unwrap();
     let args: Vec<_> = claude.get_args().collect();
     assert!(args.iter().any(|arg| *arg == "Bash(dagq:*)"), "{args:?}");
@@ -1516,7 +1522,10 @@ $read > left_out.json
     assert_eq!(left_out["total"], 12, "{left_out}");
     assert_eq!(left_out["offset"], kept, "{left_out}");
     let items = left_out["items"].as_array().unwrap();
-    assert_eq!(items.len(), omitted.min(dagq::observer::INPUT_PAGE));
+    assert_eq!(
+        items.len(),
+        omitted.min(dagq::application::observer::INPUT_PAGE)
+    );
     // Newest first, so the left-out ones are the oldest asks.
     assert_eq!(items[0]["id"], 12 - kept as i64, "{left_out}");
     assert!(items.iter().all(|ask| ask["question"] == question.as_str()));
@@ -1531,7 +1540,8 @@ $read > left_out.json
         .map(|section| section["bytes"].as_u64().unwrap())
         .sum();
     assert_eq!(sum as usize, prompt.len());
-    let history = dagq::observer::history(&SqliteQueue::open(&db).unwrap(), 1).unwrap();
+    let history =
+        dagq::application::observer::history(&SqliteQueue::open(&db).unwrap(), 1).unwrap();
     let latest = &history["observations"][0];
     assert_eq!(latest["prompt_bytes"], prompt.len(), "{history}");
     assert_eq!(latest["prompt_sections"], started["prompt_sections"]);

@@ -216,7 +216,7 @@ fn a_silent_runtime_planner_is_told_to_the_inbox_once() {
     assert_eq!(attention.len(), 1, "{status}");
     assert_eq!(attention[0]["next"], "check the planner");
     assert_eq!(attention[0]["task_id"], json!(draft));
-    let watched = dagq::watch::events(&fx.db, EventId::new(0), 100, false).unwrap();
+    let watched = dagq::compose::events(&fx.db, EventId::new(0), 100, false).unwrap();
     assert!(
         watched["events"]
             .as_array()

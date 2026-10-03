@@ -27,7 +27,7 @@ use dagq::{
         ProposalId, RequestId, Resource, RunId, SessionRole, StaticPolicy, Submission, TaskEdit,
         TaskId, TaskStatus, worker::WorkerMode,
     },
-    infrastructure::{adapters::path_text, location::QueueLocation, sqlite::SqliteQueue},
+    infrastructure::{adapters::path_text, location::QueueLocation},
 };
 
 #[derive(Parser)]
@@ -2431,7 +2431,7 @@ fn queue_read(command: &Command) -> Option<QueueRead> {
             limit,
             ..
         } => QueueRead::ObserveHistory(reads::ObserveHistoryRead {
-            limit: limit.unwrap_or(dagq::observer::HISTORY_LIMIT),
+            limit: limit.unwrap_or(dagq::application::observer::HISTORY_LIMIT),
         }),
         Command::Observe {
             input: Some(observation),
@@ -2443,7 +2443,7 @@ fn queue_read(command: &Command) -> Option<QueueRead> {
             observation,
             section,
             offset,
-            limit: limit.unwrap_or(dagq::observer::INPUT_PAGE),
+            limit: limit.unwrap_or(dagq::application::observer::INPUT_PAGE),
         }),
         _ => return None,
     })
@@ -2635,7 +2635,7 @@ fn execute(cli: Cli) -> Result<Value> {
     }
     if matches!(cli.command, Command::Init) {
         location.prepare()?;
-        let mut queue = SqliteQueue::init(&db)?.with_generators(generators);
+        let mut queue = dagq::compose::init_queue(&db)?.with_generators(generators);
         if let Some(common_dir) = &common_dir {
             queue.bind_repository(common_dir)?;
         }
@@ -2648,16 +2648,12 @@ fn execute(cli: Cli) -> Result<Value> {
     }
     if let Command::Migrate { check } = cli.command {
         if check {
-            return Ok(serde_json::to_value(SqliteQueue::schema(&db)?)?);
+            return Ok(serde_json::to_value(dagq::compose::queue_schema(&db)?)?);
         }
-        let report = SqliteQueue::migrate(
-            &db,
-            Some(&dagq::infrastructure::adapters::process_alive),
-            generators.clock.now(),
-        )?;
+        let report = dagq::compose::migrate_queue(&db, generators.clock.now())?;
         let mut value = serde_json::to_value(report)?;
         // A landing recorded without its message (ADR-0046 decision 3).
-        if let Ok(mut queue) = SqliteQueue::open(&db) {
+        if let Ok(mut queue) = dagq::compose::open_queue(&db) {
             let fallback = common_dir.clone();
             value["commit_messages_filled"] =
                 json!(queue.fill_commit_messages(|dir, commit| {
@@ -2854,7 +2850,7 @@ fn execute(cli: Cli) -> Result<Value> {
             } => {
                 let millis = |text: Option<String>| -> Result<Option<i64>> {
                     text.map(|text| {
-                        let time = dagq::watch::event_time(&text)?;
+                        let time = dagq::application::watch::event_time(&text)?;
                         dagq::domain::stats::rfc3339_millis(&time)
                             .with_context(|| format!("not a UTC time: {text}"))
                     })
@@ -2877,9 +2873,9 @@ fn execute(cli: Cli) -> Result<Value> {
     let mut queue = if reads_only(&cli.command)
         || matches!(cli.command, Command::Report { .. } | Command::Graph { .. })
     {
-        SqliteQueue::open_read_only(&db)?
+        dagq::compose::open_queue_read_only(&db)?
     } else {
-        SqliteQueue::open(&db)?
+        dagq::compose::open_queue(&db)?
     }
     .with_generators(generators.clone());
     if let Some(common_dir) = &common_dir {
@@ -3375,9 +3371,9 @@ fn execute(cli: Cli) -> Result<Value> {
             until_attention,
             interval,
             role: r,
-        } => dagq::watch::watch(
+        } => dagq::compose::watch(
             &db,
-            &dagq::watch::WatchOptions {
+            &dagq::application::watch::WatchOptions {
                 after: after.map(EventId::new),
                 timeout: (!until_attention)
                     .then(|| Duration::from_secs(timeout.unwrap_or(DEFAULT_WATCH_TIMEOUT_SECS))),
@@ -3869,8 +3865,8 @@ fn execute(cli: Cli) -> Result<Value> {
             cmux,
             ..
         } => {
+            use dagq::application::observer::{ObserveMode, ObserveOptions};
             use dagq::infrastructure::adapters::{ClaudeCode, executable};
-            use dagq::observer::{ObserveMode, ObserveOptions};
             // A dry run starts nothing, so it needs no Claude Code.
             let executable = if dry_run {
                 claude
@@ -3878,7 +3874,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 executable(&claude)?
             };
             let provider = ClaudeCode { executable };
-            dagq::observer::observe(
+            dagq::compose::observe(
                 &db,
                 &provider,
                 &provider,
@@ -3894,7 +3890,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     timeout: Duration::from_secs(timeout),
                     dagq: env::current_exe()?,
                     user_config: dagq::infrastructure::language::user_config_file(),
-                    prompt_limit: dagq::observer::PROMPT_LIMIT,
+                    prompt_limit: dagq::application::observer::PROMPT_LIMIT,
                 },
             )?
         }

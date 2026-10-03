@@ -804,7 +804,7 @@ fn a_failed_review_closes_the_session_and_asks_a_person_in_the_same_step() {
             .any(|a| a["ask_id"] == json!(ask.id) && a["next"] == format!("answer ask {}", ask.id)),
         "{status}"
     );
-    let events = dagq::watch::events(&db, EventId::new(cursor), 100, false).unwrap();
+    let events = dagq::compose::events(&db, EventId::new(cursor), 100, false).unwrap();
     let events = events["events"].as_array().unwrap();
     assert_eq!(events.len(), 1, "{events:?}");
     assert_eq!(events[0]["kind"], "ask_opened");

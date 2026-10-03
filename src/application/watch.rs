@@ -9,18 +9,17 @@
 pub use crate::application::health::compact_event;
 use crate::{
     application::health::{for_role, pulses, supervisors},
+    application::{Clock, EventReads, ProcessControl, RunCoordination, RunLog},
     domain::{
         ATTENTION_KINDS, EventFilter, EventId, RunEvent, RunId, SessionRole, UPDATE_EVENT_KINDS,
         event_attention,
         timeline::{self, Gap},
         wakes_inbox,
     },
-    infrastructure::{adapters::SystemProcesses, inbox_watchers, sqlite::SqliteQueue},
 };
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
 use std::{
-    path::Path,
     thread,
     time::{Duration, Instant},
 };
@@ -69,7 +68,7 @@ struct Read {
 /// `all` and without kinds in the filter, only the attention events for
 /// `role`.
 fn read_events(
-    queue: &SqliteQueue,
+    queue: &dyn EventReads,
     query: &EventsQuery,
     upto: EventId,
     role: Option<SessionRole>,
@@ -136,30 +135,9 @@ pub struct EventsQuery {
     pub filter: EventFilter,
 }
 
-/// `events --after`: the events after `after`, oldest first, in compact
-/// form with no filter.
-pub fn events(db: &Path, after: EventId, limit: usize, all: bool) -> Result<Value> {
-    events_matching(
-        db,
-        &EventsQuery {
-            after,
-            limit,
-            all,
-            full: false,
-            filter: EventFilter::default(),
-        },
-    )
-}
-
 /// `events` with its filters and `--full`: the events after `query.after`
-/// that the query keeps, oldest first.
-pub fn events_matching(db: &Path, query: &EventsQuery) -> Result<Value> {
-    events_in(&SqliteQueue::open_read_only(db)?, query)
-}
-
-/// [`events_matching`] on a queue the caller already opened, so a command
-/// opens it once.
-pub fn events_in(queue: &SqliteQueue, query: &EventsQuery) -> Result<Value> {
+/// that the query keeps, oldest first, and the cursor to continue from.
+pub fn events_in(queue: &(impl RunLog + EventReads), query: &EventsQuery) -> Result<Value> {
     let upto = queue.latest_event_id()?;
     let Read { events, cursor, .. } = read_events(queue, query, upto, None)?;
     Ok(json!({"events": events, "cursor": cursor}))
@@ -213,14 +191,15 @@ fn well_formed(time: &str) -> bool {
 }
 
 /// `timeline RUN`: the run's events oldest first and its gaps of at least
-/// `gap_secs` with their reasons (`domain::timeline`).
-pub fn timeline(db: &Path, run: &RunId, gap_secs: i64, full: bool) -> Result<Value> {
-    timeline_in(&SqliteQueue::open_read_only(db)?, run, gap_secs, full)
-}
-
-/// [`timeline`] on a queue the caller already opened, so a command opens
-/// it once.
-pub fn timeline_in(queue: &SqliteQueue, run: &RunId, gap_secs: i64, full: bool) -> Result<Value> {
+/// `gap_secs` with their reasons (`domain::timeline`), the time since the
+/// last event of a run that still moves on read from `clock`.
+pub fn timeline_in(
+    queue: &(impl RunLog + EventReads),
+    run: &RunId,
+    gap_secs: i64,
+    full: bool,
+    clock: &dyn Clock,
+) -> Result<Value> {
     let task_run = queue.run(run)?;
     let events = queue.run_events(run)?;
     // The latest run of an unfinished task still moves on, even `failed` or
@@ -230,7 +209,7 @@ pub fn timeline_in(queue: &SqliteQueue, run: &RunId, gap_secs: i64, full: bool) 
         .latest_runs_in_progress()?
         .iter()
         .any(|latest| latest.id() == run);
-    let now_ms = moving.then(|| queue.generators().clock.now() * 1000);
+    let now_ms = moving.then(|| clock.now() * 1000);
     let gaps: Vec<Gap> = timeline::gaps(&events, gap_secs, now_ms);
     let waited: i64 = gaps.iter().map(|gap| gap.secs).sum();
     // The steps of the automatic update from the run's first event to its
@@ -301,42 +280,22 @@ pub struct WatchOptions {
 /// integrates.
 ///
 /// A `watch --role inbox` also leaves the record of itself that says the
-/// inbox has a watcher (ADR-t906-1): written when it starts, its heartbeat
-/// renewed at every read of the queue, its end written when it returns, in
-/// a file under the queue's directory, never in the queue. A record that
-/// cannot be written does not stop the watch.
-pub fn watch(db: &Path, options: &WatchOptions) -> Result<Value> {
-    let queue = SqliteQueue::open(db)?;
-    let clock = queue.generators().clock.clone();
-    let mut record = (options.role == Some(SessionRole::Inbox))
-        .then(|| {
-            let now = clock.system_time();
-            inbox_watchers::WatcherFile::start(
-                &inbox_watchers::dir(db),
-                std::process::id(),
-                clock.now(),
-                now.duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_millis() as i64),
-                options
-                    .timeout
-                    .map(|timeout| i64::try_from(timeout.as_secs()).unwrap_or(i64::MAX / 4)),
-                i64::try_from(options.interval.as_secs()).unwrap_or(i64::MAX / 4),
-            )
-            .inspect_err(|error| {
-                tracing::warn!(error = %format_args!("{error:#}"), "the inbox watcher's record could not be written: {error:#}");
-            })
-            .ok()
-        })
-        .flatten();
+/// inbox has a watcher (ADR-t906-1): `record`, started by the caller,
+/// whose heartbeat is renewed at every read of the queue and whose end is
+/// written when it returns. A record that cannot be written does not stop
+/// the watch.
+pub fn watch(
+    queue: &(impl RunLog + RunCoordination + EventReads),
+    clock: &dyn Clock,
+    control: &dyn ProcessControl,
+    mut record: Option<&mut dyn WatchRecord>,
+    options: &WatchOptions,
+) -> Result<Value> {
     let after = match options.after {
         Some(after) => after,
         None => queue.latest_event_id()?,
     };
-    let baseline = pulses(
-        &queue.supervisors()?,
-        queue.generators().clock.now(),
-        &SystemProcesses,
-    );
+    let baseline = pulses(&queue.supervisors()?, clock.now(), control);
     let query = EventsQuery {
         after,
         limit: if options.role == Some(SessionRole::Inbox) {
@@ -355,14 +314,13 @@ pub fn watch(db: &Path, options: &WatchOptions) -> Result<Value> {
             events,
             cursor,
             woken,
-        } = read_events(&queue, &query, upto, options.role)?;
+        } = read_events(queue, &query, upto, options.role)?;
         let registrations = queue.supervisors()?;
-        let now = queue.generators().clock.now();
-        if let Some(record) = record.as_mut() {
+        let now = clock.now();
+        if let Some(record) = record.as_deref_mut() {
             let _ = record.heartbeat(now);
         }
-        let changed =
-            for_role(options.role) && pulses(&registrations, now, &SystemProcesses) != baseline;
+        let changed = for_role(options.role) && pulses(&registrations, now, control) != baseline;
         let remaining = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
         if woken || changed || remaining.is_some_and(|r| r.is_zero()) {
             // A timeout with nothing that woke it keeps the notices for the
@@ -372,16 +330,128 @@ pub fn watch(db: &Path, options: &WatchOptions) -> Result<Value> {
             } else {
                 (Vec::new(), after)
             };
-            if let Some(record) = record.as_mut() {
+            if let Some(record) = record.as_deref_mut() {
                 let _ = record.end(now);
             }
             return Ok(json!({
                 "events": events,
                 "supervisors_changed": changed,
-                "supervisors": supervisors(&registrations, &queue.run_leases()?, now, &SystemProcesses),
+                "supervisors": supervisors(&registrations, &queue.run_leases()?, now, control),
                 "cursor": cursor,
             }));
         }
         thread::sleep(remaining.map_or(options.interval, |r| options.interval.min(r)));
+    }
+}
+
+/// The record a `watch --role inbox` keeps of itself (ADR-t906-1).
+pub trait WatchRecord {
+    /// Renew the heartbeat at `now` (unix seconds).
+    fn heartbeat(&mut self, now: i64) -> Result<()>;
+    /// Write the end at `now` (unix seconds).
+    fn end(&mut self, now: i64) -> Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Events in memory, read as the queue reads them: in the range, of
+    /// the filter's kinds, at most `limit`.
+    struct Events(Vec<RunEvent>);
+
+    impl EventReads for Events {
+        fn events_between(
+            &self,
+            after: EventId,
+            upto: EventId,
+            filter: &EventFilter,
+            limit: usize,
+        ) -> Result<Vec<RunEvent>> {
+            Ok(self
+                .0
+                .iter()
+                .filter(|event| event.id > after && event.id <= upto)
+                .filter(|event| {
+                    filter
+                        .kinds
+                        .as_ref()
+                        .is_none_or(|kinds| kinds.contains(&event.kind))
+                })
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+    }
+
+    fn event(id: i64, kind: &str, payload: Value) -> RunEvent {
+        RunEvent {
+            id: EventId::new(id),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.to_owned(),
+            payload,
+            created_at: "2026-10-04T00:00:00Z".to_owned(),
+            actor: None,
+        }
+    }
+
+    fn query(after: i64, limit: usize, all: bool) -> EventsQuery {
+        EventsQuery {
+            after: EventId::new(after),
+            limit,
+            all,
+            full: false,
+            filter: EventFilter::default(),
+        }
+    }
+
+    fn ids(read: &Read) -> Vec<i64> {
+        read.events
+            .iter()
+            .map(|event| event["id"].as_i64().unwrap())
+            .collect()
+    }
+
+    /// Without `all`, only the attention events: an attention kind its
+    /// payload drops (a failed review with its ask) and another kind are
+    /// read past, and the cursor stops at the last one kept when the limit
+    /// is reached, at `upto` otherwise.
+    #[test]
+    fn the_attention_events_are_read_past_what_the_payload_drops() {
+        let events = Events(vec![
+            event(1, "triage_failed", json!({})),
+            event(2, "review_failed", json!({"ask_id": 9})),
+            event(3, "note_added", json!({})),
+            event(4, "triage_failed", json!({})),
+            event(5, "triage_failed", json!({})),
+        ]);
+        let upto = EventId::new(5);
+        let read = read_events(&events, &query(0, 2, false), upto, None).unwrap();
+        assert_eq!(ids(&read), [1, 4]);
+        assert_eq!(read.cursor, EventId::new(4));
+        assert!(read.woken);
+        let read = read_events(&events, &query(0, 10, false), upto, None).unwrap();
+        assert_eq!(ids(&read), [1, 4, 5]);
+        assert_eq!(read.cursor, upto);
+        let read = read_events(&events, &query(0, 2, true), upto, None).unwrap();
+        assert_eq!(ids(&read), [1, 2]);
+        assert_eq!(read.cursor, EventId::new(2));
+        let read = read_events(&events, &query(5, 2, false), upto, None).unwrap();
+        assert!(ids(&read).is_empty());
+        assert_eq!(read.cursor, upto);
+        assert!(!read.woken);
+    }
+
+    #[test]
+    fn an_event_time_is_a_utc_timestamp_or_an_error() {
+        assert_eq!(event_time("2026-10-04").unwrap(), "2026-10-04T00:00:00Z");
+        assert_eq!(
+            event_time("2026-10-04T01:02:03").unwrap(),
+            "2026-10-04T01:02:03Z"
+        );
+        assert!(event_time("2026-13-04").is_err());
+        assert!(event_time("yesterday").is_err());
     }
 }

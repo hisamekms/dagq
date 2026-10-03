@@ -31,6 +31,7 @@ use serde_json::{Value, json};
 
 use crate::{
     application::AgentProvider,
+    application::observer::HeadlessAgent,
     domain::{
         ActorContext, EventFilter, EventId, EventKind, FindingTarget, NewFinding, Provider,
         RunEvent, RunId,
@@ -45,8 +46,7 @@ use crate::{
         },
         transcript::millis_text,
     },
-    infrastructure::{asks::AskQuery, sqlite::SqliteQueue},
-    observer::{HeadlessAgent, run_agent},
+    infrastructure::{asks::AskQuery, observer::run_agent, sqlite::SqliteQueue},
 };
 
 /// How long one review may take before it is killed.
@@ -170,7 +170,7 @@ pub fn procedure() -> &'static str {
 /// `[roles.throughput_review]` of the queue's bound checkout's `dagq.toml`
 /// (the provider's default without one).
 pub fn configured_launch(db: &Path) -> Result<ActorLaunch> {
-    let queue = SqliteQueue::open(
+    let queue = crate::compose::open_queue(
         &db.canonicalize()
             .context("queue must already be initialized")?,
     )?;
@@ -185,7 +185,7 @@ pub fn review(db: &Path, provider: &dyn AgentProvider, options: &ReviewOptions) 
     let db = db
         .canonicalize()
         .context("queue must already be initialized")?;
-    let mut queue = SqliteQueue::open(&db)?;
+    let mut queue = crate::compose::open_queue(&db)?;
     let now = options.at.unwrap_or_else(|| queue.generators().clock.now());
     let offset_ms = options
         .utc_offset
@@ -703,7 +703,7 @@ fn timelines(queue: &SqliteQueue, landed: &[&(i64, RunEvent)]) -> Result<Value> 
             Ok(json!({
                 "run_id": run,
                 "secs": span / 1000,
-                "timeline": crate::watch::timeline_in(queue, &run, TIMELINE_GAP_SECS, false)?,
+                "timeline": crate::compose::timeline_in(queue, &run, TIMELINE_GAP_SECS, false)?,
             }))
         })
         .collect::<Result<Vec<_>>>()

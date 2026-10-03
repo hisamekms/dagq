@@ -756,7 +756,7 @@ fn a_revise_goes_to_the_live_planner_with_the_precedents_and_times_out_to_the_in
         .unwrap_or_else(|| panic!("{status_now}"));
     assert_eq!(attention["next"], "check the planner");
     assert_eq!(attention["task_id"], json!(task));
-    let watched = dagq::watch::events(&fx.db, dagq::domain::EventId::new(0), 100, false).unwrap();
+    let watched = dagq::compose::events(&fx.db, dagq::domain::EventId::new(0), 100, false).unwrap();
     assert!(
         watched["events"]
             .as_array()
@@ -1800,7 +1800,7 @@ fn drafts_of_the_runtime_get_planners_within_the_limit_and_a_persons_draft_none(
     assert_eq!(attention.len(), 1, "{status}");
     assert_eq!(attention[0]["next"], "request a plan for the draft");
     assert_eq!(attention[0]["kind"], "draft_planner_exhausted");
-    let watched = dagq::watch::events(&fx.db, dagq::domain::EventId::new(0), 100, false).unwrap();
+    let watched = dagq::compose::events(&fx.db, dagq::domain::EventId::new(0), 100, false).unwrap();
     assert!(
         watched["events"].as_array().unwrap().iter().any(|e| {
             e["kind"] == "draft_planner_exhausted" && e["next"] == "request a plan for the draft"

@@ -256,7 +256,7 @@ fn a_codex_that_cannot_log_in_moves_the_plan_review_to_claude() {
         !inbox.to_string().contains("plan review by hand"),
         "{inbox}"
     );
-    let watched = dagq::watch::events(&fx.db, dagq::domain::EventId::new(0), 100, false).unwrap();
+    let watched = dagq::compose::events(&fx.db, dagq::domain::EventId::new(0), 100, false).unwrap();
     assert!(
         !watched.to_string().contains("plan review by hand"),
         "{watched}"

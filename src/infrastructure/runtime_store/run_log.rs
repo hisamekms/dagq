@@ -961,6 +961,39 @@ pub(super) fn queue_event(tx: &Connection, kind: EventKind, payload: &Value) -> 
     Ok(id)
 }
 
+impl crate::application::EventReads for SqliteQueue {
+    fn events_between(
+        &self,
+        after: EventId,
+        upto: EventId,
+        filter: &EventFilter,
+        limit: usize,
+    ) -> Result<Vec<RunEvent>> {
+        SqliteQueue::events_between(self, after, upto, filter, limit)
+    }
+}
+
+impl crate::application::ObserverLog for SqliteQueue {
+    fn event_id_before(&self, unix: i64) -> Result<EventId> {
+        SqliteQueue::event_id_before(self, unix)
+    }
+    fn ask_high_water(&self) -> Result<AskId> {
+        SqliteQueue::ask_high_water(self)
+    }
+    fn written_by(&self, role: &str, event_id: EventId, ask_id: AskId) -> Result<WrittenBy> {
+        SqliteQueue::written_by(self, role, event_id, ask_id)
+    }
+    fn last_observation(&self, mode: &str) -> Result<Option<(EventId, Value)>> {
+        SqliteQueue::last_observation(self, mode)
+    }
+    fn events_besides(&self, role: &str, span_kind: &str, after: EventId) -> Result<i64> {
+        SqliteQueue::events_besides(self, role, span_kind, after)
+    }
+    fn observations(&self, limit: usize) -> Result<Vec<(RunEvent, Option<RunEvent>)>> {
+        SqliteQueue::observations(self, limit)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -107,7 +107,7 @@ fn watch_role(
     timeout: Duration,
     role: dagq::domain::SessionRole,
 ) -> Value {
-    use dagq::watch::{WatchOptions, watch};
+    use dagq::{application::watch::WatchOptions, compose::watch};
     watch(
         db,
         &WatchOptions {
@@ -404,7 +404,7 @@ fn asks_of_a_run_are_attention_for_the_inbox_until_closed() {
 }
 
 fn watch_for(db: &Path, after: Option<i64>, timeout: Duration) -> Value {
-    use dagq::watch::{WatchOptions, watch};
+    use dagq::{application::watch::WatchOptions, compose::watch};
     watch(
         db,
         &WatchOptions {
@@ -453,7 +453,7 @@ fn attention_events_are_read_past_a_cursor_and_wake_watch() {
     assert_eq!(status["attention"][0]["next"], "restart supervisor");
 
     // `events` defaults to attention, compact and without paths.
-    let events = dagq::watch::events(&db, EventId::new(0), 100, false).unwrap();
+    let events = dagq::compose::events(&db, EventId::new(0), 100, false).unwrap();
     assert_eq!(events["cursor"], json!(latest));
     let listed = events["events"].as_array().unwrap();
     assert_eq!(listed.len(), 1, "{events}");
@@ -461,7 +461,7 @@ fn attention_events_are_read_past_a_cursor_and_wake_watch() {
     assert_eq!(listed[0]["ask_id"], json!(ask));
     assert_eq!(listed[0]["next"], format!("answer ask {ask}"));
     assert_eq!(listed[0]["run_id"], json!(run.id()));
-    let all = dagq::watch::events(&db, EventId::new(0), 1000, true).unwrap();
+    let all = dagq::compose::events(&db, EventId::new(0), 1000, true).unwrap();
     let all_events = all["events"].as_array().unwrap();
     assert_eq!(all_events.len() as i64, latest);
     assert_eq!(all["cursor"], json!(latest));
@@ -474,13 +474,13 @@ fn attention_events_are_read_past_a_cursor_and_wake_watch() {
     assert!(!text.contains(run.worktree_path().unwrap()), "{text}");
     assert!(!text.contains("\"receipt\""), "{text}");
     // A limit leaves the cursor on the last event returned.
-    let page = dagq::watch::events(&db, EventId::new(0), 2, true).unwrap();
+    let page = dagq::compose::events(&db, EventId::new(0), 2, true).unwrap();
     assert_eq!(page["events"].as_array().unwrap().len(), 2);
     assert_eq!(page["cursor"], json!(ids[1]));
-    let rest = dagq::watch::events(&db, EventId::new(ids[1]), 1000, true).unwrap();
+    let rest = dagq::compose::events(&db, EventId::new(ids[1]), 1000, true).unwrap();
     assert_eq!(rest["events"][0]["id"], json!(ids[2]));
     assert_eq!(
-        dagq::watch::events(&db, EventId::new(latest), 100, false).unwrap(),
+        dagq::compose::events(&db, EventId::new(latest), 100, false).unwrap(),
         json!({"events": [], "cursor": latest})
     );
 
@@ -510,7 +510,7 @@ fn attention_events_are_read_past_a_cursor_and_wake_watch() {
         "needs_session"
     );
     assert_eq!(
-        dagq::watch::events(&db, EventId::new(before), 100, false).unwrap()["events"],
+        dagq::compose::events(&db, EventId::new(before), 100, false).unwrap()["events"],
         json!([])
     );
     // ... and neither does one whose resumes are used up: the supervisor
@@ -537,7 +537,7 @@ fn attention_events_are_read_past_a_cursor_and_wake_watch() {
         integrate(&db, 1, &repo).unwrap()["outcome"],
         "needs_session"
     );
-    let deferred = dagq::watch::events(&db, EventId::new(before), 100, true).unwrap();
+    let deferred = dagq::compose::events(&db, EventId::new(before), 100, true).unwrap();
     let deferred = deferred["events"]
         .as_array()
         .unwrap()
@@ -548,7 +548,7 @@ fn attention_events_are_read_past_a_cursor_and_wake_watch() {
     assert_eq!(deferred["status"], "needs_session");
     assert_eq!(deferred.get("next"), None, "{deferred}");
     assert_eq!(
-        dagq::watch::events(&db, EventId::new(before), 100, false).unwrap()["events"],
+        dagq::compose::events(&db, EventId::new(before), 100, false).unwrap()["events"],
         json!([])
     );
     let latest = queue.latest_event_id().unwrap().as_i64();
@@ -614,7 +614,7 @@ fn a_session_killed_by_a_signal_is_classified_in_status_show_and_stats() {
         json!({"session_killed": 1})
     );
     // `watch` / `events` keep the code in their compact form.
-    let events = dagq::watch::events(&db, EventId::new(0), 1000, true).unwrap();
+    let events = dagq::compose::events(&db, EventId::new(0), 1000, true).unwrap();
     assert!(
         events["events"]
             .as_array()
@@ -639,7 +639,7 @@ fn status_reports_failed_runs_and_unanswered_exit_requests() {
     assert_eq!(failed["last_error"], "session exited with code 7");
     assert_eq!(failed["last_error_code"], "session_exit_code");
     assert_eq!(failed["next"], "triage by hand");
-    let events = dagq::watch::events(&db, EventId::new(0), 100, false).unwrap();
+    let events = dagq::compose::events(&db, EventId::new(0), 100, false).unwrap();
     assert_eq!(events["events"].as_array().unwrap().len(), 1, "{events}");
     assert_eq!(events["events"][0]["kind"], "triage_failed");
     assert_eq!(events["events"][0]["next"], "triage by hand");
@@ -881,7 +881,7 @@ fn a_follow_up_draft_records_its_origin_and_its_planner_question_is_delivered_by
         attention["next"],
         format!("delivering the answer of ask {} (runtime)", asked.id)
     );
-    let events = dagq::watch::events(&db, dagq::domain::EventId::new(0), 100, false).unwrap();
+    let events = dagq::compose::events(&db, dagq::domain::EventId::new(0), 100, false).unwrap();
     assert!(
         !events["events"]
             .as_array()
@@ -1015,7 +1015,7 @@ fn an_abandoned_run_is_recovered_and_triaged_by_the_supervisor() {
         .unwrap();
     assert!(run_attention_of(&runtime::status(&db).unwrap(), noted.id()).is_none());
     assert_eq!(
-        dagq::watch::events(&db, EventId::new(cursor), 100, false).unwrap()["events"],
+        dagq::compose::events(&db, EventId::new(cursor), 100, false).unwrap()["events"],
         json!([])
     );
     let quiet = watch_for(&db, Some(cursor), Duration::from_millis(300));

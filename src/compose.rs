@@ -8,8 +8,8 @@
 //! return; `runtime` and `lifecycle` re-export them under the names the
 //! tests use.
 
-use crate::domain::EventKind;
 use crate::domain::LeaseToken;
+use crate::domain::{EventFilter, EventId, EventKind};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::{
@@ -3412,9 +3412,9 @@ pub fn read_queue(
             open: read.open,
             role: role(&read.role)?,
         })?}),
-        QueueRead::Events(read) => crate::watch::events_in(
+        QueueRead::Events(read) => crate::application::watch::events_in(
             queue,
-            &crate::watch::EventsQuery {
+            &crate::application::watch::EventsQuery {
                 after: EventId::new(read.after),
                 limit: read.limit as usize,
                 all: read.all,
@@ -3427,18 +3427,18 @@ pub fn read_queue(
                     since: read
                         .since
                         .as_deref()
-                        .map(crate::watch::event_time)
+                        .map(crate::application::watch::event_time)
                         .transpose()?,
                     until: read
                         .until
                         .as_deref()
-                        .map(crate::watch::event_time)
+                        .map(crate::application::watch::event_time)
                         .transpose()?,
                 },
             },
         )?,
         QueueRead::Timeline(read) => {
-            crate::watch::timeline_in(queue, &RunId::new(read.run.clone())?, read.gap, read.full)?
+            timeline_in(queue, &RunId::new(read.run.clone())?, read.gap, read.full)?
         }
         QueueRead::Stats(read) => one_shot.stats_of(
             queue,
@@ -3568,8 +3568,10 @@ pub fn read_queue(
             input.changes = task_changes(queue)?;
             json!({"tasks": targets, "violations": crate::domain::lint::lint(&input)})
         }
-        QueueRead::ObserveHistory(read) => crate::observer::history(queue, read.limit)?,
-        QueueRead::ObserveInput(read) => crate::observer::read_input(
+        QueueRead::ObserveHistory(read) => {
+            crate::application::observer::history(queue, read.limit)?
+        }
+        QueueRead::ObserveInput(read) => crate::infrastructure::observer::read_input(
             db,
             &read.observation,
             read.section.as_deref(),
@@ -3989,4 +3991,181 @@ fn broker_client_report() -> Value {
         &crate::infrastructure::broker_podman::client_version,
     ))
     .unwrap_or(Value::Null)
+}
+
+/// `init`: create the queue at `db`, or open the one there.
+pub fn init_queue(db: &Path) -> Result<SqliteQueue> {
+    SqliteQueue::init(db)
+}
+
+/// `migrate --check`: the schema of the queue at `db`, read-only.
+pub fn queue_schema(db: &Path) -> Result<crate::infrastructure::sqlite::SchemaState> {
+    SqliteQueue::schema(db)
+}
+
+/// `migrate`: bring the queue at `db` to this binary's schema, with the
+/// live processes judged on this host.
+pub fn migrate_queue(
+    db: &Path,
+    now: i64,
+) -> Result<crate::infrastructure::sqlite::MigrationReport> {
+    SqliteQueue::migrate(
+        db,
+        Some(&crate::infrastructure::adapters::process_alive),
+        now,
+    )
+}
+
+/// Open the queue at `db` for the CLI's commands.
+pub fn open_queue(db: &Path) -> Result<SqliteQueue> {
+    SqliteQueue::open(db)
+}
+
+/// Open the queue at `db` read-only for the CLI's reads.
+pub fn open_queue_read_only(db: &Path) -> Result<SqliteQueue> {
+    SqliteQueue::open_read_only(db)
+}
+
+/// `observe`: one observation of the queue at `db`
+/// ([`crate::application::observer::observe`]) with the repository's reads,
+/// the configured cmux and the local host. `signals` must belong to the
+/// provider that starts it.
+pub fn observe(
+    db: &Path,
+    provider: &dyn AgentProvider,
+    signals: &dyn crate::application::AgentSignals,
+    options: &crate::application::observer::ObserveOptions,
+) -> Result<Value> {
+    let db = db
+        .canonicalize()
+        .context("queue must already be initialized")?;
+    let mut queue = SqliteQueue::open(&db)?;
+    let generators = queue.generators().clone();
+    // The configured cmux lists the workspaces for `workspace_mismatch`;
+    // without one, only that alert is left unjudged.
+    let cmux = options
+        .cmux
+        .as_deref()
+        .and_then(|path| executable(path).ok())
+        .map(|executable| Cmux { executable });
+    let sources = ObserverReads {
+        one_shot: OneShot::new(generators.clone()),
+        cmux: cmux.as_ref(),
+    };
+    crate::application::observer::observe(
+        &mut queue,
+        &db,
+        provider,
+        signals,
+        options,
+        &crate::application::observer::ObserverEnvironment {
+            sources: &sources,
+            host: &crate::infrastructure::observer::LocalObserver,
+            generators: &generators,
+        },
+    )
+}
+
+/// The observer's reads that [`OneShot`] gives on the opened queue.
+struct ObserverReads<'a> {
+    one_shot: OneShot,
+    cmux: Option<&'a Cmux>,
+}
+
+impl crate::application::observer::ObserverSources<SqliteQueue> for ObserverReads<'_> {
+    fn stats(&self, queue: &SqliteQueue, db: &Path, query: &StatsQuery) -> Result<Value> {
+        self.one_shot.stats_of(
+            queue,
+            db,
+            query,
+            self.cmux.map(|cmux| cmux as &dyn WorkspaceListing),
+        )
+    }
+    fn kpi(&self, queue: &SqliteQueue, db: &Path) -> Result<Value> {
+        self.one_shot.observer_kpi(queue, db)
+    }
+    fn improvements(&self, queue: &SqliteQueue) -> Result<Value> {
+        self.one_shot.improvements_of(queue)
+    }
+    fn checkout(&self, queue: &SqliteQueue) -> Result<Option<PathBuf>> {
+        bound_checkout(queue)
+    }
+    fn cmux(&self) -> Option<&dyn WorkspaceBackend> {
+        self.cmux.map(|cmux| cmux as &dyn WorkspaceBackend)
+    }
+}
+
+/// `events --after`: the events after `after`, oldest first, in compact
+/// form with no filter.
+pub fn events(db: &Path, after: EventId, limit: usize, all: bool) -> Result<Value> {
+    events_matching(
+        db,
+        &crate::application::watch::EventsQuery {
+            after,
+            limit,
+            all,
+            full: false,
+            filter: EventFilter::default(),
+        },
+    )
+}
+
+/// `events` with its filters and `--full` on the queue at `db`.
+pub fn events_matching(db: &Path, query: &crate::application::watch::EventsQuery) -> Result<Value> {
+    crate::application::watch::events_in(&SqliteQueue::open_read_only(db)?, query)
+}
+
+/// `timeline RUN` on the queue at `db`.
+pub fn timeline(db: &Path, run: &RunId, gap_secs: i64, full: bool) -> Result<Value> {
+    timeline_in(&SqliteQueue::open_read_only(db)?, run, gap_secs, full)
+}
+
+/// [`timeline`] on a queue the caller already opened, so a command opens
+/// it once.
+pub fn timeline_in(queue: &SqliteQueue, run: &RunId, gap_secs: i64, full: bool) -> Result<Value> {
+    crate::application::watch::timeline_in(
+        queue,
+        run,
+        gap_secs,
+        full,
+        queue.generators().clock.as_ref(),
+    )
+}
+
+/// `watch` on the queue at `db` ([`crate::application::watch::watch`]); a
+/// `watch --role inbox` keeps its record in a file under the queue's
+/// directory, never in the queue (ADR-t906-1).
+pub fn watch(db: &Path, options: &crate::application::watch::WatchOptions) -> Result<Value> {
+    use crate::infrastructure::inbox_watchers;
+    let queue = SqliteQueue::open(db)?;
+    let clock = queue.generators().clock.clone();
+    let mut record = (options.role == Some(SessionRole::Inbox))
+        .then(|| {
+            let now = clock.system_time();
+            inbox_watchers::WatcherFile::start(
+                &inbox_watchers::dir(db),
+                std::process::id(),
+                clock.now(),
+                now.duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis() as i64),
+                options
+                    .timeout
+                    .map(|timeout| i64::try_from(timeout.as_secs()).unwrap_or(i64::MAX / 4)),
+                i64::try_from(options.interval.as_secs()).unwrap_or(i64::MAX / 4),
+            )
+            .inspect_err(|error| {
+                tracing::warn!(error = %format_args!("{error:#}"), "the inbox watcher's record could not be written: {error:#}");
+            })
+            .ok()
+        })
+        .flatten();
+    crate::application::watch::watch(
+        &queue,
+        clock.as_ref(),
+        &SystemProcesses,
+        record
+            .as_mut()
+            .map(|record| record as &mut dyn crate::application::watch::WatchRecord),
+        options,
+    )
 }

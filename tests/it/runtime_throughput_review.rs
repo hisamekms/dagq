@@ -304,7 +304,7 @@ fn an_hour_a_rule_meets_is_reviewed_saved_and_told_to_the_inbox_and_the_job_only
             .is_empty()
     );
     // The inbox's watch gets the notice with its conclusion.
-    let attention = dagq::watch::events(&db, EventId::new(0), 100, false).unwrap();
+    let attention = dagq::compose::events(&db, EventId::new(0), 100, false).unwrap();
     let notice = attention["events"]
         .as_array()
         .unwrap()
@@ -362,7 +362,7 @@ fn the_weekly_review_records_its_next_move_as_a_finding_marked_for_a_proposal() 
 
 /// The inbox's attention events: the compact form `watch` reads.
 pub(crate) fn attentions(db: &Path) -> Vec<Value> {
-    dagq::watch::events(db, EventId::new(0), 100, false).unwrap()["events"]
+    dagq::compose::events(db, EventId::new(0), 100, false).unwrap()["events"]
         .as_array()
         .unwrap()
         .clone()

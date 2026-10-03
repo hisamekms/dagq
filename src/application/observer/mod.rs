@@ -18,35 +18,26 @@ pub use input::{
 
 use crate::domain::EventKind;
 use std::{
-    fs,
     path::{Path, PathBuf},
-    thread,
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::{Value, json};
 
 use crate::{
     application::{
-        AgentProvider, AgentSignals, ProcessControl, Streams, TaskStore,
-        actor_executor::{
-            ActorExecutionSpec, ActorExecutor, ActorProgram, HeadlessProgram, HostActorExecutor,
-            WorkspaceAccess,
-        },
-        dependency_graph,
+        AgentProvider, AgentSignals, AskQuery, Generators, ObserverLog, Queue, WorkspaceBackend,
+        dependency_graph, lifecycle::OBSERVER_ROLE,
     },
     domain::{
         ActorContext, ActorRole, AskId, EventId, FindingQuery, NewHold, NoteQuery, RunEvent,
-        actor_model::{ActorLaunch, ModelRole},
+        actor_model::ActorLaunch,
         headless_job::JobAccess,
+        language::Language,
         queue_hold::{HoldJob, Wall},
         stats::StatsQuery,
     },
-    infrastructure::{
-        adapters::SystemProcesses, asks::AskQuery, process::LocalSpawner, sqlite::SqliteQueue,
-    },
-    lifecycle::OBSERVER_ROLE,
 };
 
 /// Observations `observe --history` lists by default.
@@ -84,75 +75,92 @@ pub struct ObserveOptions {
     pub prompt_limit: usize,
 }
 
-/// `<queue dir>/observer`: one directory per observation and the cursor.
-pub fn observer_dir(db: &Path) -> PathBuf {
-    db.parent().unwrap_or(Path::new(".")).join("observer")
+/// The reads of the queue the observer's input takes that the composition
+/// root assembles (`stats`, the KPIs, the improvements and the bound
+/// checkout), and the cmux the hold ask notifies the inbox through.
+pub trait ObserverSources<Q: ?Sized> {
+    fn stats(&self, queue: &Q, db: &Path, query: &StatsQuery) -> Result<Value>;
+    fn kpi(&self, queue: &Q, db: &Path) -> Result<Value>;
+    fn improvements(&self, queue: &Q) -> Result<Value>;
+    /// The checkout the queue is bound to, if any.
+    fn checkout(&self, queue: &Q) -> Result<Option<PathBuf>>;
+    /// The configured cmux, when there is one and it was found.
+    fn cmux(&self) -> Option<&dyn WorkspaceBackend>;
 }
 
-/// The hourly observation's cursor, if one was saved.
-pub fn read_cursor(db: &Path) -> Result<Option<EventId>> {
-    let path = observer_dir(db).join("cursor");
-    match fs::read_to_string(&path) {
-        Ok(text) => Ok(Some(EventId::new(text.trim().parse().with_context(
-            || format!("parse the observer cursor in {}", path.display()),
-        )?))),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
-    }
+/// The host the observation runs on: its files under `<queue
+/// dir>/observer`, the configuration its agent starts with and the agent's
+/// process.
+pub trait ObserverHost {
+    /// The hourly observation's cursor, if one was saved.
+    fn read_cursor(&self, db: &Path) -> Result<Option<EventId>>;
+    fn write_cursor(&self, db: &Path, cursor: EventId) -> Result<()>;
+    /// A new directory for the observation started at `started`.
+    fn observation_dir(&self, db: &Path, started: i64) -> Result<PathBuf>;
+    fn write(&self, path: &Path, contents: &str) -> Result<()>;
+    /// What the agent printed in `dir`, stdout then stderr on a line of
+    /// their own; empty for a stream it did not leave.
+    fn output(&self, dir: &Path) -> String;
+    /// What the observer's agent starts with (ADR-0079 decision 7).
+    fn launch(&self, checkout: Option<&Path>) -> ActorLaunch;
+    /// The language of the prompt (ADR-t616-2).
+    fn language(&self, checkout: Option<&Path>, user_config: Option<&Path>) -> Option<Language>;
+    /// Start the agent in `dir` and wait for it up to its timeout: the
+    /// exit code, or `None` when a signal ended it.
+    fn run(
+        &self,
+        provider: &dyn AgentProvider,
+        db: &Path,
+        dir: &Path,
+        prompt: &str,
+        agent: &HeadlessAgent<'_>,
+    ) -> Result<Option<i32>>;
 }
 
-fn write_cursor(db: &Path, cursor: EventId) -> Result<()> {
-    let dir = observer_dir(db);
-    fs::create_dir_all(&dir)?;
-    let temporary = dir.join(format!(".cursor.{}.tmp", std::process::id()));
-    fs::write(&temporary, format!("{cursor}\n"))?;
-    fs::rename(&temporary, dir.join("cursor"))?;
-    Ok(())
+/// What [`observe`] reaches outside the queue through.
+pub struct ObserverEnvironment<'a, Q: ?Sized> {
+    pub sources: &'a dyn ObserverSources<Q>,
+    pub host: &'a dyn ObserverHost,
+    pub generators: &'a Generators,
 }
 
 /// Run one observation: gather the inputs, start the agent headless with
 /// `DAGQ_ROLE=observer`, wait for it, then record `observe_finished` with
 /// what it wrote and, for a succeeded hourly one, save the new cursor.
 /// `signals` must belong to the provider that starts this observation.
-pub fn observe(
+/// `db` is the queue's canonical path, which names its directory.
+pub fn observe<Q: Queue + ObserverLog>(
+    queue: &mut Q,
     db: &Path,
     provider: &dyn AgentProvider,
     signals: &dyn AgentSignals,
     options: &ObserveOptions,
+    environment: &ObserverEnvironment<'_, Q>,
 ) -> Result<Value> {
-    let db = db
-        .canonicalize()
-        .context("queue must already be initialized")?;
-    let mut queue = SqliteQueue::open(&db)?;
-    let started = queue.generators().clock.now();
+    let ObserverEnvironment {
+        sources,
+        host,
+        generators,
+    } = *environment;
+    let started = generators.clock.now();
     let since = match (options.since, options.mode) {
         (Some(since), _) => Some(since),
-        (None, ObserveMode::Hourly) => read_cursor(&db)?,
+        (None, ObserveMode::Hourly) => host.read_cursor(db)?,
         (None, ObserveMode::Daily) => Some(queue.event_id_before(started - DAILY_WINDOW_SECS)?),
     };
-    // The configured cmux lists the workspaces for `workspace_mismatch`;
-    // without one, only that alert is left unjudged.
-    let cmux = options
-        .cmux
-        .as_deref()
-        .and_then(|path| crate::infrastructure::adapters::executable(path).ok())
-        .map(|executable| crate::infrastructure::adapters::Cmux { executable });
-    let one_shot = crate::compose::OneShot::new(queue.generators().clone());
-    let stats = one_shot.stats_of(
-        &queue,
-        &db,
+    let stats = sources.stats(
+        queue,
+        db,
         &StatsQuery {
             since: since.map(Into::into),
             ..StatsQuery::default()
         },
-        cmux.as_ref()
-            .map(|cmux| cmux as &dyn crate::application::stats::WorkspaceListing),
     )?;
     let alerts = alert_keys(&stats);
     // A cursor given by hand asks to read past it whatever happened since.
     if options.since.is_none()
         && !options.dry_run
-        && let Some(payload) = skip(&queue, options.mode, since, &alerts)?
+        && let Some(payload) = skip(queue, options.mode, since, &alerts)?
     {
         return Ok(payload);
     }
@@ -170,11 +178,11 @@ pub fn observe(
     let findings = queue.findings(&FindingQuery::default())?;
     let graph = dependency_graph(queue.graph_input()?, None);
     // A KPI that does not read leaves the rest of the observation to run.
-    let kpi = one_shot
-        .observer_kpi(&queue, &db)
+    let kpi = sources
+        .kpi(queue, db)
         .unwrap_or_else(|error| json!({"error": format!("{error:#}")}));
-    let improvements = one_shot
-        .improvements_of(&queue)
+    let improvements = sources
+        .improvements(queue)
         .unwrap_or_else(|error| json!({"error": format!("{error:#}")}));
     let input = observer_input(ObserverInput {
         stats,
@@ -189,17 +197,14 @@ pub fn observe(
     // prompt, an argument of the agent, names no queue path (goal 82's
     // stage (3)).
     let command = "dagq";
-    let checkout = crate::compose::bound_checkout(&queue)?;
-    let language = crate::infrastructure::language::language_for_prompt(
-        checkout.as_deref(),
-        options.user_config.as_deref(),
-    );
+    let checkout = sources.checkout(queue)?;
+    let language = host.language(checkout.as_deref(), options.user_config.as_deref());
     // The prompt names the observation's directory, whose `input.json`
     // `observe --input` reads what the prompt left out from.
     let dir = if options.dry_run {
         None
     } else {
-        Some(observation_dir(&db, started)?)
+        Some(host.observation_dir(db, started)?)
     };
     let observation = dir.as_deref().and_then(Path::file_name).map_or_else(
         || "DRY-RUN".to_owned(),
@@ -230,15 +235,15 @@ pub fn observe(
         merge(&mut payload, &prompt_record);
         return Ok(payload);
     };
-    fs::write(dir.join("prompt.md"), &prompt)?;
-    fs::write(
-        dir.join("input.json"),
-        serde_json::to_string_pretty(&input)?,
+    host.write(&dir.join("prompt.md"), &prompt)?;
+    host.write(
+        &dir.join("input.json"),
+        &serde_json::to_string_pretty(&input)?,
     )?;
     let ask_mark = queue.ask_high_water()?;
     // The job's Claude session id (ADR-0048 decision 4).
-    let session_id = uuid::Uuid::new_v4().to_string();
-    let launch = observer_launch(checkout.as_deref());
+    let session_id = generators.ids.uuid();
+    let launch = host.launch(checkout.as_deref());
     let mut started_payload = json!({"mode": options.mode.as_str(), "since": since, "dir": dir, "session_id": session_id, "launch": launch.to_value()});
     merge(&mut started_payload, &prompt_record);
     let event_mark = queue.record_queue_event(EventKind::ObserveStarted, started_payload)?;
@@ -251,9 +256,9 @@ pub fn observe(
     let clock = Instant::now();
     // `failed`: the agent exited non-zero or by a signal; `error`: it could
     // not start or ran past the timeout.
-    let (outcome, exit_code, error) = match run_agent(
+    let (outcome, exit_code, error) = match host.run(
         provider,
-        &db,
+        db,
         &dir,
         &prompt,
         &HeadlessAgent {
@@ -278,14 +283,12 @@ pub fn observe(
     } else {
         // Read both streams as before, with a line boundary so stderr
         // diagnostics cannot be joined onto a partial stdout line.
-        let stdout = fs::read_to_string(dir.join("output.out")).unwrap_or_default();
-        let stderr = fs::read_to_string(dir.join("output.err")).unwrap_or_default();
-        signals.job_failure(&format!("{stdout}\n{stderr}")).wall()
+        signals.job_failure(&host.output(&dir)).wall()
     };
     // A hold that could not be written is logged: the observation's
     // finish is recorded either way.
     let hold = wall.and_then(|wall| {
-        hold_wall(&mut queue, wall, checkout.as_deref(), cmux.as_ref())
+        hold_wall(queue, wall, checkout.as_deref(), sources.cmux())
             .inspect_err(|error| {
                 tracing::warn!(error = %format_args!("{error:#}"), "the observer stopped at the {} wall, and its hold ask could not be written: {error:#}", wall.as_str());
             })
@@ -301,7 +304,7 @@ pub fn observe(
     );
     let saved = outcome == "succeeded" && options.mode == ObserveMode::Hourly;
     if saved {
-        write_cursor(&db, cursor)?;
+        host.write_cursor(db, cursor)?;
     }
     let payload = json!({
         "mode": options.mode.as_str(),
@@ -355,10 +358,10 @@ fn merge(payload: &mut Value, extra: &Value) {
 /// inbox through `cmux` when there is one), and record `auth_required` or
 /// `usage_limited` on the queue when it joined. Returns the ask's ID.
 fn hold_wall(
-    queue: &mut SqliteQueue,
+    queue: &mut dyn Queue,
     wall: Wall,
     checkout: Option<&Path>,
-    cmux: Option<&crate::infrastructure::adapters::Cmux>,
+    cmux: Option<&dyn WorkspaceBackend>,
 ) -> Result<AskId> {
     let hold = NewHold::wall(wall, None, Some(HoldJob::Observer));
     let outcome = match (checkout, cmux) {
@@ -389,10 +392,10 @@ fn hold_wall(
 /// What one observation reads, each part as JSON.
 pub struct ObserverInput {
     pub stats: Value,
-    /// [`crate::compose::OneShot::observer_kpi`], or `{"error": ...}`.
+    /// [`ObserverSources::kpi`], or `{"error": ...}`.
     pub kpi: Value,
     pub findings: Value,
-    /// [`crate::compose::OneShot::improvements_of`], or `{"error": ...}`.
+    /// [`ObserverSources::improvements`], or `{"error": ...}`.
     pub improvements: Value,
     pub notes: Value,
     pub open_asks: Value,
@@ -489,7 +492,7 @@ fn new_alerts(last: &Value, alerts: &[Value]) -> bool {
 /// threshold with time alone records no event), record a skipped
 /// `observe_finished` without starting anything, and return its payload.
 fn skip(
-    queue: &SqliteQueue,
+    queue: &(impl Queue + ObserverLog),
     mode: ObserveMode,
     since: Option<EventId>,
     alerts: &[Value],
@@ -543,7 +546,7 @@ fn skip(
 /// it recorded, updated and closed and the asks it wrote, how long it took
 /// and whether it was skipped.
 /// Observations recorded before the ids were kept give the counts only.
-pub fn history(queue: &SqliteQueue, limit: usize) -> Result<Value> {
+pub fn history(queue: &dyn ObserverLog, limit: usize) -> Result<Value> {
     let observations = queue
         .observations(limit)?
         .into_iter()
@@ -587,43 +590,6 @@ fn history_entry(finished: &RunEvent, started: Option<&RunEvent>) -> Value {
     })
 }
 
-/// `<queue dir>/observer/<started_at>/`, suffixed when one already exists
-/// for that second.
-fn observation_dir(db: &Path, started: i64) -> Result<PathBuf> {
-    let root = observer_dir(db);
-    fs::create_dir_all(&root).with_context(|| format!("create {}", root.display()))?;
-    for n in 0.. {
-        let name = if n == 0 {
-            started.to_string()
-        } else {
-            format!("{started}-{n}")
-        };
-        let dir = root.join(name);
-        match fs::create_dir(&dir) {
-            Ok(()) => return Ok(dir),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error).with_context(|| format!("create {}", dir.display())),
-        }
-    }
-    unreachable!("the suffixes do not run out")
-}
-
-/// What the observer's agent starts with (ADR-0079 decision 7):
-/// `[roles.observer]` of the bound checkout's `dagq.toml`; none, no
-/// checkout, or a file that cannot be read starts it as before.
-fn observer_launch(checkout: Option<&Path>) -> ActorLaunch {
-    let Some(checkout) = checkout else {
-        return ActorLaunch::default_of(ModelRole::Observer);
-    };
-    match crate::infrastructure::run_env::load_role_models(checkout) {
-        Ok(models) => models.launch(ModelRole::Observer),
-        Err(error) => {
-            tracing::warn!(error = %format_args!("{error:#}"), "[roles.observer] could not be read; starting it as before: {error:#}");
-            ActorLaunch::default_of(ModelRole::Observer)
-        }
-    }
-}
-
 /// The actor the observer's agent runs as (ADR-t728-1 decision 4):
 /// `observer`, one actor per session.
 fn observer_actor(session_id: &str) -> ActorContext {
@@ -632,7 +598,7 @@ fn observer_actor(session_id: &str) -> ActorContext {
 
 /// Who a headless job of the queue's (the observer, the throughput review)
 /// runs as and how.
-pub(crate) struct HeadlessAgent<'a> {
+pub struct HeadlessAgent<'a> {
     pub actor: ActorContext,
     /// The session id the runtime gives the job (Claude Code's, ADR-0048
     /// decision 4); `None` for a provider that names its session itself
@@ -647,82 +613,6 @@ pub(crate) struct HeadlessAgent<'a> {
     /// What the agent may do, as an intent its provider turns into its
     /// own mechanism.
     pub access: JobAccess,
-}
-
-/// Start the agent in `dir` with stdout in `output.out` and stderr in
-/// `output.err`, and wait for it up to the timeout (then kill it and what
-/// it started, so no Bash child of the agent outlives it: an error).
-/// The exit code, or `None`
-/// when a signal ended it.
-pub(crate) fn run_agent(
-    provider: &dyn AgentProvider,
-    db: &Path,
-    dir: &Path,
-    prompt: &str,
-    agent: &HeadlessAgent<'_>,
-) -> Result<Option<i32>> {
-    let stdout = dir.join("output.out");
-    let stderr = dir.join("output.err");
-    let mut path = std::env::var_os("PATH").unwrap_or_default();
-    if let Some(bin) = agent.dagq.parent() {
-        let mut paths = vec![bin.to_path_buf()];
-        paths.extend(std::env::split_paths(&path));
-        path = std::env::join_paths(paths)?;
-    }
-    let path = path
-        .into_string()
-        .map_err(|_| anyhow::anyhow!("PATH is not UTF-8"))?;
-    let mut child = HostActorExecutor::new(db)
-        .with_provider(provider)
-        .with_spawner(&LocalSpawner)
-        .with_queue_service(&crate::infrastructure::queue_service::SystemServiceAccess)
-        .spawn(
-            ActorExecutionSpec::new(
-                agent.actor.clone(),
-                WorkspaceAccess::Scratch(dir.to_path_buf()),
-                ActorProgram::Headless {
-                    program: HeadlessProgram::Job {
-                        cwd: dir,
-                        prompt,
-                        access: agent.access,
-                    },
-                    session_id: agent.session_id,
-                    launch: Some(agent.launch),
-                    without_mcp: true,
-                    without_env: &[],
-                    env: vec![("PATH".to_owned(), path)],
-                    streams: Streams::Files {
-                        stdout: &stdout,
-                        stderr: &stderr,
-                    },
-                },
-            )
-            .with_timeout(agent.timeout),
-        )
-        .with_context(|| format!("start {}'s agent", agent.what))?
-        .process()?;
-    let deadline = Instant::now() + agent.timeout;
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(status.code);
-        }
-        if Instant::now() >= deadline {
-            // Listed before the kill: once the agent is gone, its children
-            // are no longer its descendants.
-            let descendants = SystemProcesses.descendants(child.id());
-            let _ = child.kill();
-            let _ = child.wait();
-            for pid in descendants {
-                let _ = SystemProcesses.kill(pid);
-            }
-            anyhow::bail!(
-                "{} did not finish within {}s",
-                agent.what,
-                agent.timeout.as_secs()
-            );
-        }
-        thread::sleep(Duration::from_millis(200));
-    }
 }
 
 /// The observer's instructions and its input within `limit` bytes
@@ -1263,16 +1153,22 @@ mod tests {
     /// too big as its keys.
     #[test]
     fn the_input_of_an_observation_reads_by_section_and_page() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = dir.path().join("queue.db");
-        let observation = observer_dir(&db).join("1791005872");
-        fs::create_dir_all(&observation).unwrap();
-        fs::write(
-            observation.join("input.json"),
-            serde_json::to_string(&big_input()).unwrap(),
-        )
-        .unwrap();
-        let index = read_input(&db, "1791005872", None, 0, INPUT_PAGE).unwrap();
+        let text = serde_json::to_string(&big_input()).unwrap();
+        // Only observation 1791005872 has an input; a name that leaves the
+        // observer's directory is refused before anything is read.
+        let read_input = |observation: &str, section, offset, limit| {
+            read_input(
+                observation,
+                || match observation {
+                    "1791005872" | "../1791005872" => Ok(text.clone()),
+                    _ => anyhow::bail!("no such file"),
+                },
+                section,
+                offset,
+                limit,
+            )
+        };
+        let index = read_input("1791005872", None, 0, INPUT_PAGE).unwrap();
         assert!(
             index["sections"]
                 .as_array()
@@ -1281,7 +1177,7 @@ mod tests {
                 .any(|section| section["section"] == "stats.runs" && section["items"] == 500),
             "{index}"
         );
-        let page = read_input(&db, "1791005872", Some("findings"), 398, INPUT_PAGE).unwrap();
+        let page = read_input("1791005872", Some("findings"), 398, INPUT_PAGE).unwrap();
         assert_eq!(
             (
                 page["total"].clone(),
@@ -1290,11 +1186,11 @@ mod tests {
             (json!(400), 2)
         );
         assert_eq!(page["next_offset"], Value::Null);
-        let page = read_input(&db, "1791005872", Some("notes"), 0, 100).unwrap();
+        let page = read_input("1791005872", Some("notes"), 0, 100).unwrap();
         assert!(page["items"].as_array().unwrap().len() < 100);
         assert!(serde_json::to_string(&page["items"]).unwrap().len() <= input::INPUT_READ_BYTES);
         assert_eq!(page["next_offset"], page["items"].as_array().unwrap().len());
-        let stats = read_input(&db, "1791005872", Some("stats"), 0, INPUT_PAGE).unwrap();
+        let stats = read_input("1791005872", Some("stats"), 0, INPUT_PAGE).unwrap();
         assert!(
             stats["keys"]
                 .as_array()
@@ -1302,12 +1198,11 @@ mod tests {
                 .iter()
                 .any(|key| key["section"] == "stats.runs")
         );
-        let cursor =
-            read_input(&db, "1791005872", Some("stats.next_cursor"), 0, INPUT_PAGE).unwrap();
+        let cursor = read_input("1791005872", Some("stats.next_cursor"), 0, INPUT_PAGE).unwrap();
         assert_eq!(cursor["value"], 99);
-        assert!(read_input(&db, "1791005872", Some("stats.nothing"), 0, 1).is_err());
-        assert!(read_input(&db, "1791005873", None, 0, 1).is_err());
-        assert!(read_input(&db, "../1791005872", None, 0, 1).is_err());
+        assert!(read_input("1791005872", Some("stats.nothing"), 0, 1).is_err());
+        assert!(read_input("1791005873", None, 0, 1).is_err());
+        assert!(read_input("../1791005872", None, 0, 1).is_err());
     }
 
     /// `observe --history` gives what each observation's prompt came to,
@@ -1338,5 +1233,79 @@ mod tests {
         assert_eq!(entry["prompt_limit"], PROMPT_LIMIT);
         assert_eq!(entry["prompt_sections"][0]["name"], "instructions");
         assert_eq!(history_entry(&finished, None)["prompt_bytes"], Value::Null);
+    }
+
+    /// Observations in memory, for `observe --history`.
+    struct Observations(Vec<(RunEvent, Option<RunEvent>)>);
+
+    impl ObserverLog for Observations {
+        fn event_id_before(&self, _unix: i64) -> Result<EventId> {
+            unreachable!()
+        }
+        fn ask_high_water(&self) -> Result<AskId> {
+            unreachable!()
+        }
+        fn written_by(
+            &self,
+            _role: &str,
+            _event: EventId,
+            _ask: AskId,
+        ) -> Result<crate::application::WrittenBy> {
+            unreachable!()
+        }
+        fn last_observation(&self, _mode: &str) -> Result<Option<(EventId, Value)>> {
+            unreachable!()
+        }
+        fn events_besides(&self, _role: &str, _span: &str, _after: EventId) -> Result<i64> {
+            unreachable!()
+        }
+        fn observations(&self, limit: usize) -> Result<Vec<(RunEvent, Option<RunEvent>)>> {
+            Ok(self.0.iter().take(limit).cloned().collect())
+        }
+    }
+
+    /// `observe --history` lists what the store gives, a skipped one
+    /// marked so with its start at its finish.
+    #[test]
+    fn the_history_lists_the_observations_the_store_gives() {
+        let event = |id: i64, kind: EventKind, payload: Value| RunEvent {
+            id: EventId::new(id),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.as_str().to_owned(),
+            payload,
+            created_at: format!("2026-10-04T00:00:0{id}Z"),
+            actor: None,
+        };
+        let store = Observations(vec![
+            (
+                event(
+                    3,
+                    EventKind::ObserveFinished,
+                    json!({"outcome": "skipped", "mode": "hourly", "since": 1, "cursor": 1}),
+                ),
+                None,
+            ),
+            (
+                event(
+                    2,
+                    EventKind::ObserveFinished,
+                    json!({"outcome": "succeeded", "ask_ids": [7], "asks": 1}),
+                ),
+                Some(event(1, EventKind::ObserveStarted, json!({}))),
+            ),
+        ]);
+        let newest = history(&store, 1).unwrap();
+        let observations = newest["observations"].as_array().unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0]["skipped"], true);
+        assert_eq!(observations[0]["started_at"], "2026-10-04T00:00:03Z");
+        assert_eq!(observations[0]["input"], json!({"since": 1, "through": 1}));
+        let all = history(&store, 10).unwrap();
+        let second = &all["observations"][1];
+        assert_eq!(second["skipped"], false);
+        assert_eq!(second["started_at"], "2026-10-04T00:00:01Z");
+        assert_eq!(second["asks"], json!({"count": 1, "ids": [7]}));
     }
 }

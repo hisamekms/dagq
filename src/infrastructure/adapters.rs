@@ -4557,7 +4557,11 @@ mod tests {
                 crate::application::prompt::GOAL_REVIEW_ACCESS,
                 &["Read", "Grep", "Glob", "Bash(dagq:*)"][..],
             ),
-            ("observer", crate::observer::ACCESS, &["Bash(dagq:*)"][..]),
+            (
+                "observer",
+                crate::application::observer::ACCESS,
+                &["Bash(dagq:*)"][..],
+            ),
             (
                 "throughput review",
                 crate::throughput_review::ACCESS,

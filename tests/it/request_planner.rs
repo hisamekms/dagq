@@ -48,7 +48,7 @@ fn request_events(db: &Path, id: RequestId, kind: &str) -> Vec<(Value, Option<St
 
 /// The attention events `watch` and `events` show the inbox, by kind.
 fn attention(db: &Path, kind: &str) -> Vec<Value> {
-    dagq::watch::events(db, EventId::new(0), 500, false).unwrap()["events"]
+    dagq::compose::events(db, EventId::new(0), 500, false).unwrap()["events"]
         .as_array()
         .unwrap()
         .iter()

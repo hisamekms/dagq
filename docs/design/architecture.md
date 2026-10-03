@@ -4,8 +4,8 @@ type: design
 title: レイヤーとコンテキストの境界（contextごとの所有・判断・操作・公開するport・依存の向き・境界をまたぐtransaction・検査できる規則・今の違反）
 status: current
 created: 2026-10-04
-updated: 2026-10-04 # task 1545
-last_verified: 2026-10-04 # task 1545
+updated: 2026-10-04 # task 251
+last_verified: 2026-10-04 # task 251
 scope: system
 related:
   - adr-t1545-1
@@ -133,14 +133,15 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 
 **操作**
 
-- application: `application::stats`・`application::areas`・`application::kpi`・`application::forecast`・`application::report`・`application::push`、`application::supervise`の`forecast`・`report`・`push`・`throughput_review`。レイヤーの外の`src/observer.rs`・`src/observer/input.rs`・`src/watch.rs`・`src/throughput_review.rs`・`src/view.rs`（task 251がapplicationへ移す）。
+- application: `application::stats`・`application::areas`・`application::kpi`・`application::forecast`・`application::report`・`application::push`、`application::supervise`の`forecast`・`report`・`push`・`throughput_review`。`application::observer`（observerのjob）・`application::watch`（`events`・`timeline`・`watch`。task 251がレイヤーの外から移した）。レイヤーの外の`src/throughput_review.rs`・`src/view.rs`。
 - CLI: `events`・`watch`・`stats`・`kpi`・`report`・`forecast`・`mark`・`marks`・`timeline`・`finding`・`findings`・`observe`・`throughput-review`・`note`・`notes`、`status`の読み取り。
-- infrastructure: `findings`・`runtime_store::queue_records`・`kpi_config`・`kpi_push`・`report_config`・`d2`・`transcripts`・`claude_turns`・`codex_turns`。
+- infrastructure: `findings`・`observer`（observerのファイル・設定・headlessのagentのprocess）・`runtime_store::queue_records`・`kpi_config`・`kpi_push`・`report_config`・`d2`・`transcripts`・`claude_turns`・`codex_turns`。
 
 **公開するport**
 
 - `QueueRecords`の読み取り（`findings`・`reports_written`・`kpi_breaches_open`）を全てのcontextに公開する。`task_changes`・`task_goals`・`task_titles`・`draft_origins`・`related_landed_commits`・`related_tasks`・`search_documents`は計画管理の表（`tasks`・`draft_origins`・`landed_commits`・`search_index`）を読むmethodで、task 1554でportを分けるときに計画管理へ移す。`record_*`（report・KPIの目標割れ・push・forecast）は内部。
 - findingのIDと`finding_*`のeventを値として公開する（計画管理のfindingのplannerが読む）。
+- `ObserverLog`（observerの観察の記録と書いたものの読み取り）と`EventReads`（cursorより後のeventの読み取り）は`application::ports`のportで、observerと`events`・`timeline`・`watch`のユースケースが内部で使う（task 251）。
 
 **許す依存の向き**
 
@@ -217,14 +218,14 @@ contextを1つに決められず、分ける先のtaskを持つもの。
 
 ### レイヤーの規則
 
-- **L1** `src/domain`のコードは`crate::application`・`crate::infrastructure`・`crate::compose`と、レイヤーの外のmodule（`crate::observer`・`crate::watch`・`crate::view`・`crate::throughput_review`・`crate::runtime`・`crate::lifecycle`）を参照しない。`#[cfg(test)]`の中も同じ（domainのtestはdomainの値と関数だけで組む）。検査: script。
+- **L1** `src/domain`のコードは`crate::application`・`crate::infrastructure`・`crate::compose`と、レイヤーの外のmodule（`crate::view`・`crate::throughput_review`・`crate::runtime`・`crate::lifecycle`）を参照しない。`#[cfg(test)]`の中も同じ（domainのtestはdomainの値と関数だけで組む）。検査: script。
 - **L2** `src/domain`の本番のコード（`#[cfg(test)]`の外）は`rusqlite`・`std::fs`・`std::process`・`std::net`・`SystemTime::now`・`Instant::now`・`Uuid::new_v4`・`anyhow`を参照しない（ADR-0013のAlternativesの検査の機械化）。検査: script。
 - **L3** `src/application`のコードは`crate::infrastructure`・`crate::compose`とレイヤーの外のmoduleを参照しない。`#[cfg(test)]`の中も同じ（testはapplicationのtest double、たとえば`application::memory_files`を使う）。例外は共有の部品の`crate::migration_numbers`だけ。検査: script。
 - **L4** `src/application`の本番のコードは`rusqlite`・`std::fs`・`std::process::Command`・`SystemTime::now`・`Uuid::new_v4`を直接使わず、portを通す。`#[cfg(test)]`の中でfixtureを作る`std::fs`と`tempfile`はよい。検査: script。
 - **L5** `src/application`の状態の判断（遷移・回数と上限・送るかどうか・待つかどうかを決めるもの）は、時刻を`Clock`か値の引数で受け、`Instant::now`・`SystemTime::now`を判断の中で読まない（[ADR-t1410-1](../adr/2026-10-03-t1410-1-decisions-in-unit-tests-boundaries-in-integration-tests.md)）。検査: review（今の`Instant::now`は数が多く、task 1557・1558が減らすまでscriptには入れない）。
 - **L6** `src/infrastructure`のコードは`crate::compose`とレイヤーの外のmoduleを参照しない。検査: script。
 - **L7** 起動部分（`src/compose.rs`と、task 1556が作るその下のmodule）はadapterを作ってuse caseに注入する配線だけを持ち、判断・時刻の読み取り・eventのpayloadの組み立てを持たない。検査: review（task 1556の後にscript）。
-- **L8** レイヤーの外のmodule（`observer`・`watch`・`view`・`throughput_review`）は起動部分と同じ外側に置き、domain・applicationを使ってよいが、domain・application・infrastructureから参照されない（L1・L3・L6）。新しいmoduleをレイヤーの外に足さない。検査: script（L1・L3・L6として）とreview。
+- **L8** レイヤーの外のmodule（`view`・`throughput_review`。`observer`と`watch`はtask 251がapplicationへ移した）は起動部分と同じ外側に置き、domain・applicationを使ってよいが、domain・application・infrastructureから参照されない（L1・L3・L6）。新しいmoduleをレイヤーの外に足さない。検査: script（L1・L3・L6として）とreview。
 
 ### コンテキストの規則
 
@@ -255,8 +256,6 @@ contextを1つに決められず、分ける先のtaskを持つもの。
 
 | 規則 | 場所 | 違反 | 行き先 |
 | --- | --- | --- | --- |
-| L3 | `src/application/queue_reads.rs`（`crate::observer::INPUT_PAGE`・`crate::observer::HISTORY_LIMIT`・`crate::observer::check_read`） | applicationからレイヤーの外のobserverを参照する | task 251（observerをapplicationへ）、task 1549 |
-| L3 | `src/application/prompt.rs`（`crate::observer::observer_prompt`・`crate::observer::ObserveMode`） | 同上 | task 251、残ればtask 1549 |
 | L3 | `src/application/prompt.rs`（`crate::throughput_review::review_prompt`） | applicationからレイヤーの外のthroughput_reviewを参照する | 未登録（follow_up） |
 | L3 | `src/application/planner_handoff.rs`の`#[cfg(test)]`（`crate::infrastructure::run_files::LocalRunFiles`） | applicationのtestがinfrastructureのadapterを使う | 未登録（follow_up。`application::memory_files`に替える） |
 | L1 | `src/domain/stats.rs`・`src/domain/stats/thresholds.rs`・`src/domain/stats/conflicts.rs`の`#[cfg(test)]`（`crate::application::timestamp`） | domainのtestがapplicationの関数を使う | 未登録（follow_up） |
@@ -266,7 +265,7 @@ contextを1つに決められず、分ける先のtaskを持つもの。
 | L5 | `src/application`の`Instant::now`（2026-10-04で109箇所。多いのは`supervise/resume.rs`・`lifecycle.rs`・`supervise/session.rs`・`supervise/revise.rs`・`supervise/reopen.rs`・`supervise/adopt.rs`） | 判断が実時間を読む | task 1557（revise・reopen・resume・session）、task 1558（stall・stall_recovery・adopt）。残りは計測（task 1559）の後に判断 |
 | L6 | `src/infrastructure/dialogue.rs`（`crate::compose::record_mark`・`crate::compose::retract_mark`） | infrastructureが起動部分のuse caseを呼ぶ | task 1548 |
 | L6 | `src/infrastructure/queue_service.rs`（`crate::compose::OneShot`・`crate::compose::read_queue`・`crate::view::task_detail`） | infrastructureが起動部分とレイヤーの外を呼ぶ | task 1549（`read_queue`）、task 1556（`OneShot`）、`view`は未登録（follow_up） |
-| L6 | `src/infrastructure/adapters.rs`（`crate::observer::ACCESS`・`crate::throughput_review::ACCESS`） | infrastructureがレイヤーの外の定数を読む | task 251（observer）、throughput_reviewは未登録（follow_up） |
+| L6 | `src/infrastructure/adapters.rs`（`crate::throughput_review::ACCESS`） | infrastructureがレイヤーの外の定数を読む | 未登録（follow_up） |
 | L7 | `src/compose.rs`の`record_mark`・`retract_mark`・`marks`（`SystemTime::now`とpayloadの組み立て） | 起動部分にuse caseと時刻の読み取りがある | task 1548 |
 | L7 | `src/compose.rs`の`read_queue` | 起動部分に読み取りの解釈と整形がある | task 1549 |
 | C3 | `src/application/supervise/mod.rs`の`Supervisor`と、`impl Supervisor`を持つ`supervise/`の39のsubmodule（2026-10-04） | 全てのcontextの欄を1つのstructで共有し、submoduleが互いの欄を変える | task 1552・1553 |

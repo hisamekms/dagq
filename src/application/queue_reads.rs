@@ -312,7 +312,7 @@ pub struct ObserveInputRead {
 }
 
 const fn input_page() -> usize {
-    crate::observer::INPUT_PAGE
+    crate::application::observer::INPUT_PAGE
 }
 
 const fn ten() -> u32 {
@@ -344,7 +344,7 @@ const fn default_trials() -> u32 {
     crate::domain::forecast::DEFAULT_TRIALS as u32
 }
 const fn history_limit() -> usize {
-    crate::observer::HISTORY_LIMIT
+    crate::application::observer::HISTORY_LIMIT
 }
 
 /// A cursor written as the command line takes it: an event id, `@<unix
@@ -638,7 +638,7 @@ impl QueueRead {
                 }
             }
             Self::ObserveInput(read) => {
-                crate::observer::check_read(&read.observation, read.limit)
+                crate::application::observer::check_read(&read.observation, read.limit)
                     .map_err(|error| bad(format!("{error:#}")))?;
             }
             Self::Candidates
@@ -790,7 +790,7 @@ mod tests {
         assert_eq!(
             QueueRead::parse(UseCase::ObserveHistory, &Value::Null).unwrap(),
             Some(QueueRead::ObserveHistory(ObserveHistoryRead {
-                limit: crate::observer::HISTORY_LIMIT
+                limit: crate::application::observer::HISTORY_LIMIT
             }))
         );
         let related = QueueRead::parse(UseCase::Related, &json!({"task": 4})).unwrap();

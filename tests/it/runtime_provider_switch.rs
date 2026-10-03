@@ -200,7 +200,7 @@ fn a_codex_task_without_codex_starts_on_claude_and_lands() {
     );
     assert!(queue_events(&db, "claim_deferred").is_empty());
     // `timeline` lists the switch next to the providers.
-    let timeline = dagq::watch::timeline(&db, run.id(), 300, false).unwrap();
+    let timeline = dagq::compose::timeline(&db, run.id(), 300, false).unwrap();
     assert_eq!(timeline["requested_provider"], "codex");
     assert_eq!(timeline["actual_provider"], "claude");
     assert_eq!(
