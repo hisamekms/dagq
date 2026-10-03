@@ -137,7 +137,7 @@ if [ "${1:-}" = plugin ] && [ "${2:-}" = list ]; then
   printf '[{"id":"claude-dagq@dagq","version":"0.0.0","scope":"user","enabled":true}]\n'
   exit 0
 fi
-session_id= debug_file= add_dir= settings= prompt= resume= headless= tools= denied= plugin_dir= model= effort= output= permission= mcp=
+session_id= debug_file= add_dir= settings= prompt= resume= headless= tools= denied= plugin_dir= model= effort= output= permission= mcp= sources=unset
 while [ $# -gt 0 ]; do
   case "$1" in
     -p) headless=1; shift ;;
@@ -155,6 +155,7 @@ while [ $# -gt 0 ]; do
     --mcp-config) mcp=$2; shift 2 ;;
     --model) model=$2; shift 2 ;;
     --effort) effort=$2; shift 2 ;;
+    --setting-sources) sources=$2; shift 2 ;;
     --) shift; prompt=$1; shift; break ;;
     *) printf 'stub: unexpected argument %s\n' "$1" >&2; exit 64 ;;
   esac
@@ -216,9 +217,11 @@ if [ -n "$headless" ]; then
   # The supervisor's headless review (ADR-0027): read review.md, print the
   # verdict JSON on stdout. Only a task that says E2E-REVIEW-PASS passes;
   # any other review fails, and its run waits in an approve_landing ask.
-  # The runtime names the review's own session (ADR-0048 decision 4).
+  # The runtime names the review's own session (ADR-0048 decision 4), and
+  # the review loads no setting sources (ADR-t1470-1).
   [ -n "$session_id" ] && [ -n "$debug_file" ] && [ -n "$add_dir" ] && [ -n "$settings" ] && [ -n "$prompt" ] \
-    && [ "$tools" = "Read,Grep,Glob" ] && [ "$denied" = "Bash,Edit,Write,NotebookEdit" ] || { printf 'stub: bad review arguments\n' >&2; exit 64; }
+    && [ "$tools" = "Read,Grep,Glob" ] && [ "$denied" = "Bash,Edit,Write,NotebookEdit" ] \
+    && [ -z "$sources" ] || { printf 'stub: bad review arguments\n' >&2; exit 64; }
   ! grep -q '"Stop"' "$settings" || { printf 'stub: review settings would write the idle marker\n' >&2; exit 64; }
   review=$(printf '%s\n' "$prompt" | sed -n 's/^Read the review material at \(.*\): the task.*/\1/p')
   [ -f "$review" ] || { printf 'stub: no review material at %s\n' "$review" >&2; exit 65; }

@@ -467,11 +467,16 @@ impl AgentProvider for Codex {
     /// `--skip-git-repo-check` because the cwd of the throughput review,
     /// the observer and the recovery job is a job or run directory outside
     /// any Git repository, which `codex exec` refuses without it (task
-    /// 1378); it only skips that check. No
-    /// [`trust_config`]: in the read-only sandbox Codex neither trusts nor
-    /// persists the project, and a trust would change the job's default
-    /// approval and load the project's `.codex` config. Codex names its
-    /// thread itself, so no session id is given.
+    /// 1378); it only skips that check. No [`trust_config`]: the
+    /// read-only sandbox cannot write the cwd, so Codex persists no trust
+    /// for the project, and a trust given here would change the job's
+    /// default approval. The job still takes the trust the person's
+    /// `~/.codex/config.toml` gives the project: a Git worktree of a
+    /// trusted main checkout is trusted, and Codex then loads the
+    /// worktree's `.codex/config.toml` (seen with codex-cli 0.160.0 for a
+    /// run's review; a project without a trust does not load it.
+    /// ADR-t1470-1 decision 3 leaves closing that to a later task). Codex
+    /// names its thread itself, so no session id is given.
     fn headless_command(&self, cwd: &Path, prompt: &str, access: JobAccess) -> Result<CommandSpec> {
         let _ = access;
         let mut command = CommandSpec::new(&self.executable);

@@ -894,16 +894,18 @@ fn an_agents_send_back_under_a_pass_sends_the_run_back() {
     assert!(payloads(&detail, "concern_decided").is_empty());
 }
 
-/// The argv dagq gives a review with required subagents, run on the real
-/// Claude Code (ADR-t1453-1 decision 8). Real Claude is not run by the
+/// The argv dagq gives a review with required subagents, and without
+/// them, run on the real Claude Code (ADR-t1453-1 decision 8,
+/// ADR-t1470-1). Real Claude is not run by the
 /// automated tests (AGENTS.md: manual smoke), so this is ignored and runs
 /// only when a person names the executable:
 /// `DAGQ_REAL_CLAUDE=~/.local/bin/claude cargo test --locked --test it -- --ignored --exact review_subagents::the_real_claude_review_runs_its_subagents_without_the_worktrees_settings`.
 /// It builds the command with `ClaudeCode::review_command` and
 /// `review_subagents` as the supervisor does, then checks with Haiku:
-/// (1) the worktree's `.claude/settings.json` is not loaded (its
-/// `SessionStart` hook writes no marker, which it does for the same review
-/// without subagents, the control); (2) the worktree's `.claude/agents`
+/// (1) the worktree's `.claude/settings.json` is not loaded, with or
+/// without subagents (its `SessionStart` hook writes no marker, which it
+/// does for the same review with the default setting sources, the
+/// control); (2) the worktree's `.claude/agents`
 /// is not offered and the handed agent is; (3) the review's `--settings`
 /// still applies: a deny added to that file refuses the parent and the
 /// subagent alike; (4) the second `--allowedTools` (`Agent`) adds to the
@@ -991,6 +993,13 @@ fn the_real_claude_review_runs_its_subagents_without_the_worktrees_settings() {
         }
         claude.select_model(&mut command, "claude-haiku-4-5-20251001", "low");
         let mut args: Vec<std::ffi::OsString> = command.get_args().map(Into::into).collect();
+        // The control is the review as it was before ADR-t1470-1: with
+        // the default setting sources.
+        if name == "control" {
+            let at = args.iter().position(|a| a == "--setting-sources").unwrap();
+            assert_eq!(args[at + 1], "");
+            args.drain(at..=at + 1);
+        }
         if !first_allowed {
             let at = args.iter().position(|a| a == "Read,Grep,Glob").unwrap();
             assert_eq!(args[at - 1], "--allowedTools");
@@ -1031,7 +1040,13 @@ fn the_real_claude_review_runs_its_subagents_without_the_worktrees_settings() {
     );
     assert!(
         marker.is_file(),
-        "without subagents the worktree's settings load (the control): {control}"
+        "with the default setting sources the worktree's settings load (the control): {control}"
+    );
+    // A review without subagents loads them no more (ADR-t1470-1).
+    let (plain, marker) = review("plain", false, "Reply with the single word OK.", true, true);
+    assert!(
+        !marker.is_file(),
+        "the worktree's settings were loaded without subagents: {plain}"
     );
 
     let prompt = format!(

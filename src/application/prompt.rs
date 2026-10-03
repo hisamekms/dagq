@@ -1779,6 +1779,7 @@ pub fn review_prompt(task: &Task, run: &TaskRun, review_path: &str) -> String {
     format!(
         "You review run {run_id} of dagq task {task_id} ({title}) before it lands.\n\
          Read the review material at {review_path}: the task, its goal, the receipt, the commits and the full diff. Read the worktree if you need more. Do not change any file.\n\
+         {rules}\n\
          {docs}\n\
          Acceptance criteria of the task:\n{acceptance}\n\n\
          Decide one verdict:\n\
@@ -1797,6 +1798,7 @@ pub fn review_prompt(task: &Task, run: &TaskRun, review_path: &str) -> String {
         docs = REVIEW_DOCS_CHECK,
         concern = CONCERN_RECOMMENDATION,
         codes = reason_codes_section(review_reason::REVIEW_CODES),
+        rules = REVIEW_RULES,
     )
 }
 
@@ -1804,6 +1806,11 @@ pub fn review_prompt(task: &Task, run: &TaskRun, review_path: &str) -> String {
 /// (ADR-t1428-1 decision 5): against the diff and the summary, never taking
 /// a document's diff alone as proof, and naming stale ones as before.
 pub const REVIEW_DOCS_CHECK: &str = "Read the documents on the behavior the diff changes (named by the task's description or context or by the summary, or found as you read) against the diff and the summary. A document's diff alone does not show the change is right; check the summary's reason for leaving a document as it is like any other claim. Report a stale document as docs_drift whether or not the task named it.\n";
+
+/// Where the review finds the repository's rules: its instructions in the
+/// worktree, which a Claude review that loads no setting sources no longer
+/// gets as its memory (ADR-t1470-1 decision 2).
+const REVIEW_RULES: &str = "The repository's rules are in its instructions at the root of the worktree (AGENTS.md and CLAUDE.md, whichever it has) and the documents they name: read the instructions, and of what they name the rules that bear on this change, and judge the diff by them.";
 
 /// How a review recommends what to do with its `concern`, and which
 /// judgements it leaves to a person (ADR-t451-1 decisions 1 and 3).
@@ -3561,7 +3568,7 @@ mod tests {
         let review = review_prompt(&task, &run_on(Provider::Codex, WorkerMode::Headless), "r");
         assert_eq!(review.matches(REVIEW_DOCS_CHECK).count(), 1, "{review}");
         assert!(review.contains(&format!(
-            "Do not change any file.\n{REVIEW_DOCS_CHECK}\nAcceptance criteria of the task:"
+            "Do not change any file.\n{REVIEW_RULES}\n{REVIEW_DOCS_CHECK}\nAcceptance criteria of the task:"
         )));
         for part in [
             "named by the task's description or context or by the summary",
@@ -3597,6 +3604,24 @@ mod tests {
         ));
         assert!(!CONCERN_RECOMMENDATION.contains("document"));
         assert!(!reason_codes_section(review_reason::REVIEW_CODES).contains(REVIEW_DOCS_CHECK));
+    }
+
+    /// ADR-t1470-1 decision 2: a Claude review loads no setting sources,
+    /// so the worktree's CLAUDE.md is not its memory; the review prompt
+    /// names the repository's instructions to read instead, right after
+    /// the material and before the check of the documents (task 1429),
+    /// and says nothing else of a provider's settings.
+    #[test]
+    fn the_review_prompt_names_the_repositorys_instructions() {
+        let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
+        let review = review_prompt(&task, &run_on(Provider::Claude, WorkerMode::Headless), "r");
+        let material = "Read the worktree if you need more. Do not change any file.\n";
+        assert!(
+            review.contains(&format!("{material}{REVIEW_RULES}\n{REVIEW_DOCS_CHECK}")),
+            "{review}"
+        );
+        assert!(REVIEW_RULES.contains("AGENTS.md and CLAUDE.md"));
+        assert!(!REVIEW_RULES.contains(".claude") && !REVIEW_RULES.contains('`'));
     }
 
     /// Task 978: a task that needs a path outside its declared paths ends

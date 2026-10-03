@@ -4,8 +4,8 @@ type: design
 title: Manual smoke of the paths that include real Claude and Codex
 status: current
 created: 2026-09-25
-updated: 2026-10-03
-last_verified: 2026-10-03
+updated: 2026-10-03 # task 1470: the review subagents smoke also covers a review without subagents
+last_verified: 2026-10-03 # task 1470
 scope: operations
 related:
   - adr-0036
@@ -456,14 +456,14 @@ file は Python の `pathlib.Path.read_text()` と `json.loads()` で JSONL を�
 
 ## review の subagent の実 CLI の確認<a id="reviewのsubagentの実cliの確認"></a>
 
-必須の review の subagent を Claude に渡す argv（[Review](supervisor-lifecycle/review.md#reviewのsubagent)、[ADR-t1453-1](../adr/2026-10-03-t1453-1-review-subagents-named-by-path-run-inside-the-review-job.md) 決定 8）を実 Claude Code で確かめる。queue も cmux も使わず、test が一時 directory の使い捨ての Git repository で `ClaudeCode::review_command` と `review_subagents` の argv をそのまま実行する（model は Haiku、1 回 4 呼び出しで約 1 分）。worker が流してもよい。Claude Code を更新したときと、review の argv・settings を変えたときに流す。
+必須の review の subagent を Claude に渡す argv（[Review](supervisor-lifecycle/review.md#reviewのsubagent)、[ADR-t1453-1](../adr/2026-10-03-t1453-1-review-subagents-named-by-path-run-inside-the-review-job.md) 決定 8）を実 Claude Code で確かめる。queue も cmux も使わず、test が一時 directory の使い捨ての Git repository で `ClaudeCode::review_command` と `review_subagents` の argv をそのまま実行する（model は Haiku、1 回 5 呼び出しで約 1 分）。worker が流してもよい。Claude Code を更新したときと、review の argv・settings を変えたときに流す。
 
 ```sh
 DAGQ_REAL_CLAUDE=~/.local/bin/claude cargo test --locked --test it -- --ignored --exact \
   review_subagents::the_real_claude_review_runs_its_subagents_without_the_worktrees_settings --nocapture
 ```
 
-確かめること（test が assert する）: worktree の `.claude/settings.json` の `SessionStart` の hook が subagent の無い review（対照）では動き、subagent のある review では動かないこと。Agent の tool が渡した `checker` だけを受け、worktree の `.claude/agents` を受けないこと。review の `--settings` の deny が親と subagent の両方に効くこと（deny を外すと読める）。2 つ目の `--allowedTools Agent` が 1 つ目の `Read,Grep,Glob` を置き換えないこと（1 つ目を外すと worktree の外の file が拒まれる）。答えは model の出力の行なので、まれに model が subagent の返事を要約して落ちる。そのときは流し直し、出力の行を見て判断する。
+確かめること（test が assert する）: worktree の `.claude/settings.json` の `SessionStart` の hook が、既定の setting sources の review（対照。argv から `--setting-sources ""` を除いたもの）では動き、dagq の argv の review では subagent の有無に依らず動かないこと（ADR-t1470-1）。Agent の tool が渡した `checker` だけを受け、worktree の `.claude/agents` を受けないこと。review の `--settings` の deny が親と subagent の両方に効くこと（deny を外すと読める）。2 つ目の `--allowedTools Agent` が 1 つ目の `Read,Grep,Glob` を置き換えないこと（1 つ目を外すと worktree の外の file が拒まれる）。答えは model の出力の行なので、まれに model が subagent の返事を要約して落ちる。そのときは流し直し、出力の行を見て判断する。
 
 2026-10-03 の結果: Claude Code 2.1.288 で通った（task 1455）。出力は `TYPES: checker, claude, Explore, general-purpose, Plan, statusline-setup`、`SECRET: DENIED`、`OUTSIDE: far away`、`CHECKER: A=hello S=DENIED O=far away`。deny を外すと `S=classified`、1 つ目の `--allowedTools` を外すと `O=DENIED` になった。最初の 1 回は model が CHECKER を `hello` に要約して落ち、prompt を直してから通った。
 
