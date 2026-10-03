@@ -29,6 +29,7 @@ tags:
 - [夜の人の答え待ちが着地を遅らせた量](night-human-wait-measurement.md)（goal 62、task 919）
 - [スパイク：過去の run の再現で task の重さと手戻りの予測の担い手を比べる](spike-predictor-replay.md)
 - [review と plan review の revise と concern で差し戻された理由の分類と、ラベルの定義案](review-sendback-reasons.md)（goal 64、task 945）
+- [worker が受け入れ条件を根拠と照合する変更の前の、run の review の差し戻しの基準値と、前後比較の script](acceptance-check.md)（goal 90、task 1422）
 - [worker の問い（worker_question）の中身の分類と、ラベルの定義案](worker-question-topics.md)（goal 64、task 950）
 - [receipt の follow_up の種類と runtime の planner の判断の分類と、ラベルの定義案](follow-up-kinds.md)（goal 64、task 951）
 - [task の cancel の理由の分類と、ラベルの定義案](cancel-reasons.md)（goal 64、task 952）

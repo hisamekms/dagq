@@ -1,0 +1,10 @@
+# main commit: 523ae7ff5e6eaa85879c01de9311dcc244556f35 (git rev-list -1 --before=2026-10-03T00:15:00Z main)
+[areas]
+runtime = ["src/**", "build.rs", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+migrations = ["migrations/**"]
+broker = ["crates/**"]
+tests = ["tests/**"]
+plugin = ["plugins/**", ".claude-plugin/**"]
+ci = ["scripts/**", ".github/**", ".config/**"]
+docs = ["docs/**", "*.md"]
+config = ["dagq.toml"]
