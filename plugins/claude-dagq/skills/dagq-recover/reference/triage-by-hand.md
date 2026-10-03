@@ -4,7 +4,7 @@ Read this when the attention `triage by hand` or `recover by hand` reaches the p
 
 ## `triage by hand`
 
-Attention `triage by hand` (`kind` `triage_failed`): the recovery job of a `failed` / `interrupted` (or `resume_exhausted`) run could not start, timed out, printed no verdict, or its verdict could not be applied; the run stays as it is and is not tried again. Read `last_error` and the run directory's `recovery-<alert>-<attempt>.prompt.txt`, `.out`, `.err`, and bring the choice to the person. On their answer: `"$DAGQ" ready ID` runs the task again as a new run (unchanged: no plan review; to change it, use a planner), `cancel ID` drops it. Its workspaces stay open until then, so read the screen first; close one by hand only while no supervisor runs.
+Attention `triage by hand` (`kind` `triage_failed`): the recovery job of a `failed` / `interrupted` (or `resume_exhausted`) run could not start, timed out, printed no verdict, or its verdict could not be applied; the run stays as it is and is not tried again. Read `last_error` and the run directory's `recovery-<alert>-<attempt>.prompt.txt`, `.out`, `.err`, and bring the choice to the person. On their answer: `"$DAGQ" ready ID` runs the task again as a new run (unchanged: no plan review; to change it, use a planner), `cancel ID` drops it. Its workspaces stay open until then, so read the screen first (`"$DAGQ" run screen RUN`); `"$DAGQ" run close-workspaces RUN --apply` closes its workspace once nothing lives behind it (never `cmux` itself).
 
 ## `recover by hand`
 

@@ -630,15 +630,28 @@ pub trait AgentProvider {
     }
     /// The agent of the inbox (ADR-0022): an interactive agent with
     /// `prompt` as its first message that loads `plugin_dir`, run as the
-    /// command of its workspace, with no settings of dagq's (a person works
-    /// in it). A provider without one refuses.
+    /// command of its workspace. Its settings, if the provider has a way
+    /// to give them, are only the inbox's denials (ADR-t1228-2 decision 3),
+    /// written under `queue_dir`: no hook, no idle marker, the prompt
+    /// suggestions as they are (a person works in it). A provider without
+    /// one refuses.
     fn inbox_command(
         &self,
         prompt: &str,
         plugin_dir: Option<&std::path::Path>,
+        queue_dir: &std::path::Path,
     ) -> Result<CommandSpec> {
-        let _ = (prompt, plugin_dir);
+        let _ = (prompt, plugin_dir, queue_dir);
         anyhow::bail!("this provider has no inbox session")
+    }
+    /// The settings file [`AgentProvider::inbox_command`] writes under
+    /// `queue_dir` and starts the inbox with, which refuse raw `cmux`
+    /// (ADR-t1228-2 decisions 3 and 6); `None` for a provider whose inbox
+    /// has no such guardrail. `up` records whether there is one, and
+    /// `status` and `doctor` show it.
+    fn inbox_settings(&self, queue_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+        let _ = queue_dir;
+        None
     }
     /// Start the worker session `command` (from [`AgentProvider::command`]
     /// or [`AgentProvider::resume_command`]) with `model` at `effort`

@@ -4,13 +4,14 @@ type: design
 title: Security
 status: current
 created: 2026-09-28
-updated: 2026-10-03
-last_verified: 2026-10-03
+updated: 2026-10-04
+last_verified: 2026-10-04
 scope: runtime
 tags:
   - security
 related:
   - adr-t728-1
+  - adr-t1228-2
   - adr-t1533-1
   - adr-t1394-1
   - adr-t728-2
@@ -81,7 +82,9 @@ AI actorの出力は全てデータで、制御側が決定的に遷移へ写す
 - 着地とpushは`Integrator`がもう一度判定する（下の「reviewのpassとIntegrator」）
 - queue service（[Queue service](queue-service.md)）は、`ask`・`show`・`note`・findingと読み取りのユースケースを、tokenから決めたprincipalのactorで同じ`Dialogue`・`Gate`と`StaticPolicy`に通す（service側の判定。`DAGQ_ROLE`は使わない）。拒否は同じ`authorization_denied`に、principalの無い要求は`queue_service_unauthenticated`に残す。worker（resumeを含む）・headlessのjob・observerのプロセスにはqueue DBのpathを渡さず、socketとtokenのfileを渡すので、その`dagq`はクライアントモードでserviceだけを使い、serviceのユースケースでないコマンドと`--db`は拒まれ、serviceに届かなくてもDBを開かない（goal 82の段(3)、[クライアントモード](queue-service.md#クライアントモード)）。閉じたのはCLIを通る経路で、同じユーザーのプロセスはDBのファイルもtokenのファイルも探して読めるので、host構成では助言的なまま（ADR-t1233-1のConsequences）
 - 状態を変えないコマンド（読み取り・`watch`・`graph --out`・`report`）は、roleを問わず`check_access`が`StaticPolicy`に通す（default deny、task 859）。拒否は同じ`denied`のJSONを返し、queueがあれば拒まれた呼び出し元をactorにした`authorization_denied`に記録する（task 1151。queueが無いときは記録せずに拒む）。通った読み取りはqueueに書かない
-- runtimeがClaudeの設定を書くactor（worker・planner・review job）の`permissions.deny`には、roleが持たないcommand（状態を変えるものと`watch`・`report`。`graph`は`--out`なしが読み取りなので除く）の`Bash(dagq <command>:*)`と、`DAGQ_ROLE`などactorを名指す変数の書き換えを入れる（`permission_deny(role)`）。これは誤りを早く止めるguardrailで、pathやscriptからの呼び出しは通るので、拒むのはCLIの判定
+- runtimeがClaudeの設定を書くactor（worker・planner・review job・inbox）の`permissions.deny`には、roleが持たないcommand（状態を変えるものと`watch`・`report`。`graph`は`--out`なしが読み取りなので除く）の`Bash(dagq <command>:*)`と、`DAGQ_ROLE`などactorを名指す変数の書き換えを入れる（`permission_deny(role)`）。これは誤りを早く止めるguardrailで、pathやscriptからの呼び出しは通るので、拒むのはCLIの判定
+- inboxとplannerの`permissions.deny`には`Bash(cmux:*)`も入れる（`execution::RAW_CMUX_DENIED`、[ADR-t1228-2](../adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)）。sessionへの操作（画面を読む・決めたキーと答えを送る・終わったrunのworkspaceの片付け・plannerへの続きの依頼）は判定と記録を通る`run` / `planner`のCLIで行い、記録の残らない生のcmuxにふだん流れないようにする。plannerはruntimeが書くsettings（非対話のturnの`claude-headless-settings.json`と、対話のsessionの`claude-settings.json`）に、inboxは`up`が開くときにqueueのディレクトリに書く`claude-inbox-settings.json`（`permissions.deny`だけ。[`up` / `down`](supervisor-lifecycle/up-down.md)）に持つ。これは**guardrailであってenforcementではない**: denyはClaude Codeのtoolの呼び出しの綴りで照合する助言的な抑止で、絶対pathの`cmux`・scriptの中の呼び出し・別のshellからの実行を止めず、`up`が`reused`で使い続けるinboxと、workspaceで`claude`を打ち直したsessionには効かない（前者は`status` / `doctor`の`inbox_guardrail`が見せる）。hostの判定は助言的なまま（ADR-t728-1決定6）。workerとjobの`cmux`は拒まず、隔離（goal 38・goal 82）に任せる（決定7）。人自身のterminal（`DAGQ_ROLE`なし）はsettingsを持たず、ADR-t1228-1が人に残したcmuxの操作をそこで打つ
+- Codexのinbox（goal 77）は、同じ趣旨（`cmux`で始まるコマンドを拒み、dagqのCLIを使わせる）をCodexの手段で持たせる（ADR-t1228-2決定6）。今のproviderの口（`AgentProvider::inbox_command`）でinboxを持つのはClaudeだけで（`up`は`--claude`でinboxを開く）、Codexはinboxを持たない（`inbox_command`は拒み、`inbox_settings`の既定は`None`。settingsを持たないproviderのinboxが入れば`inbox_opened`の`guardrail`は`false`で記録され、`inbox_guardrail`が見せる）。Codexのinboxを作るtaskが手段を持たせるか、手段が無ければこのguardrailが無いことをここに書き、skillの手順をCLIだけにすることで足りるとする
 
 roleごとに拒まれる主なコマンド（skillとAGENTS.mdはこれを説明する）:
 
@@ -97,7 +100,7 @@ roleごとに拒まれる主なコマンド（skillとAGENTS.mdはこれを説�
 
 同じhostの敵対的なプロセスは次で迂回できる:
 
-- envの偽装: `DAGQ_ROLE`を外せばuser、`DAGQ_ROLE=inbox`にすればinboxとして判定される。`DAGQ_RUN_ID`も書き換えられる。`permissions.deny`はClaude Codeのコマンドの先頭の形しか見ないので、pathや`sh -c`やscriptからは通る
+- envの偽装: `DAGQ_ROLE`を外せばuser、`DAGQ_ROLE=inbox`にすればinboxとして判定される。`DAGQ_RUN_ID`も書き換えられる。`permissions.deny`はClaude Codeのコマンドの先頭の形しか見ないので、pathや`sh -c`やscriptからは通る（inboxとplannerの`Bash(cmux:*)`も同じ）
 - DBの直接操作: queueのSQLiteファイルはこのユーザーが読み書きでき、CLIを通らずに状態とeventを書き換えられる
 - Gitとファイル: worktree・main checkout・`runs/`・固定バイナリを直接書き換えられ、pushの資格情報もこのユーザーのもの
 - プロセス: 他のactorのプロセスにsignalを送れる（`pkill`・`killall`を拒むのもguardrail）

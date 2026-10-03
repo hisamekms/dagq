@@ -361,7 +361,7 @@ fn up_starts_the_agent_and_the_sessions_once_and_reuses_them_after() {
         assert_eq!(cwd, &root);
         assert_eq!(
             first[key],
-            json!({"outcome": "created", "workspace_id": id, "name": name})
+            json!({"outcome": "created", "workspace_id": id, "name": name, "guardrail": true})
         );
         assert!(
             command.starts_with(&format!("'{}'", fixture.options.claude.display())),
@@ -406,6 +406,7 @@ fn up_starts_the_agent_and_the_sessions_once_and_reuses_them_after() {
         first["inbox"]["workspace_id"]
     );
     assert_eq!(second["inbox"]["name"], first["inbox"]["name"]);
+    assert_eq!(second["inbox"]["guardrail"], true, "{second}");
     assert_eq!(second["pruned_supervisors"], json!([]));
     assert_eq!(launchd.installs.lock().unwrap().len(), 1);
     assert!(launchd.uninstalls.lock().unwrap().is_empty());
@@ -421,6 +422,114 @@ fn up_starts_the_agent_and_the_sessions_once_and_reuses_them_after() {
             .unwrap()
             .len(),
         1
+    );
+}
+
+/// `up` opens the inbox with settings of `permissions.deny` only, which
+/// refuse raw cmux, under the queue's directory, records that it did, and
+/// `status` and `doctor` say whether the recorded inbox has them: an inbox
+/// with no record of its open (one from before) has none, with the way to
+/// open it again (ADR-t1228-2 decisions 3 and 4).
+#[test]
+fn up_opens_the_inbox_with_the_cmux_guardrail_and_status_shows_whether_it_has_it() {
+    let fixture = fixture();
+    let cmux = FakeCmux::default();
+    let launchd = FakeLaunchd::new(&fixture.location.db);
+    let processes = FakeProcesses::default();
+    let report = up(&fixture, &cmux, &launchd, &processes);
+    assert_eq!(report["inbox"]["outcome"], "created", "{report}");
+    assert_eq!(report["inbox"]["guardrail"], true, "{report}");
+    let id = report["inbox"]["workspace_id"].as_str().unwrap().to_owned();
+
+    // Under the queue's directory, as `up` names it (canonical).
+    let settings = fixture
+        .location
+        .db
+        .canonicalize()
+        .unwrap()
+        .with_file_name("claude-inbox-settings.json");
+    let command = cmux.workspaces.lock().unwrap()[0].3.clone();
+    assert!(
+        command.contains(&format!("'--settings' {}", common::shell_path(&settings))),
+        "{command}"
+    );
+    assert!(command.contains("'--plugin-dir'"), "{command}");
+    let written: Value = serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
+    // Only `permissions.deny`: no hook, no idle marker, no suggestion
+    // setting, no autoMode.
+    assert_eq!(
+        written.as_object().unwrap().keys().collect::<Vec<_>>(),
+        ["permissions"]
+    );
+    assert_eq!(
+        written["permissions"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        ["deny"]
+    );
+    let deny: Vec<&str> = written["permissions"]["deny"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|rule| rule.as_str().unwrap())
+        .collect();
+    for rule in [
+        "Bash(cmux:*)",
+        "Bash(DAGQ_ROLE=*)",
+        "Bash(unset DAGQ_ACTOR_ID*)",
+        // The inbox's role is refused what its policy does not grant.
+        "Bash(dagq request decline:*)",
+    ] {
+        assert!(deny.contains(&rule), "{rule}: {deny:?}");
+    }
+    assert!(!deny.contains(&"Bash(dagq answer:*)"), "{deny:?}");
+
+    let queue = SqliteQueue::open(&fixture.location.db).unwrap();
+    let opened = queue.latest_event_of("inbox_opened").unwrap().unwrap();
+    assert_eq!(opened.payload["workspace_id"], id.as_str());
+    assert_eq!(opened.payload["guardrail"], true);
+    assert_eq!(opened.payload["settings"], settings.to_str().unwrap());
+    let status = dagq::compose::status_for(&fixture.location.db, Some(SessionRole::Inbox)).unwrap();
+    assert_eq!(
+        status["inbox_guardrail"]["workspace_id"],
+        id.as_str(),
+        "{status}"
+    );
+    assert_eq!(status["inbox_guardrail"]["guardrail"], true, "{status}");
+    let doctor = dagq::compose::doctor(&fixture.location.db, false).unwrap();
+    assert_eq!(doctor["inbox_guardrail"]["guardrail"], true, "{doctor}");
+
+    // An inbox recorded with no record of its open: opened before the
+    // guardrail, so it has none and says how to open it again.
+    queue
+        .register_session_workspace(SessionRole::Inbox, "older-inbox")
+        .unwrap();
+    let status = dagq::compose::status_for(&fixture.location.db, Some(SessionRole::Inbox)).unwrap();
+    let guardrail = &status["inbox_guardrail"];
+    assert_eq!(guardrail["guardrail"], false, "{status}");
+    assert_eq!(guardrail["reason"], "no_record", "{status}");
+    assert!(
+        guardrail["next"].as_str().unwrap().contains("dagq up"),
+        "{status}"
+    );
+
+    // `up` keeps such an inbox, still listed, as it is (its conversation
+    // stays) and reports that it has no guardrail, with the way to reopen.
+    cmux.workspaces.lock().unwrap().push((
+        "[my repo]inbox".into(),
+        fixture.repo.clone(),
+        "older-inbox".into(),
+        "claude".into(),
+    ));
+    let again = up(&fixture, &cmux, &launchd, &processes);
+    assert_eq!(again["inbox"]["outcome"], "reused", "{again}");
+    assert_eq!(again["inbox"]["workspace_id"], "older-inbox", "{again}");
+    assert_eq!(again["inbox"]["guardrail"], false, "{again}");
+    assert!(
+        again["inbox"]["next"].as_str().unwrap().contains("dagq up"),
+        "{again}"
     );
 }
 

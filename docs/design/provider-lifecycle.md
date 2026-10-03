@@ -4,10 +4,11 @@ type: design
 title: Agent provider lifecycle
 status: current
 created: 2026-09-21
-updated: 2026-10-03 # task 1397: a headless planner's provider_waiting is the queue's (after task 1560's job prompts on stdin)
-last_verified: 2026-10-03 # task 1397
+updated: 2026-10-04 # task 1232: the inbox's settings (permissions.deny only) through inbox_command
+last_verified: 2026-10-04 # task 1232
 scope: provider
 related:
+  - adr-t1228-2
   - adr-t1340-1
   - adr-0004
   - adr-t813-1
@@ -37,7 +38,8 @@ AgentProvider
   job_reply(stdout)        -- 実装済み: jobの出力から取り出した最終の返答のtext（既定とClaude Codeはstdoutそのまま）
   review_timeout()         -- 実装済み: headless reviewの上限（既定600秒）
   assign_session_id(command, session_id) -- 実装済み: headless jobのsessionにruntimeが決めたsession_idを付ける（既定は何もしない）
-  inbox_command(prompt, plugin_dir) -- 実装済み: inboxのworkspaceが動かすagent（settingsなし）
+  inbox_command(prompt, plugin_dir, queue_dir) -- 実装済み: inboxのworkspaceが動かすagent（settingsはqueue_dirに書くpermissions.denyだけ。ADR-t1228-2）
+  inbox_settings(queue_dir) -- 実装済み: そのsettingsのpath（Claudeは`claude-inbox-settings.json`、既定はNone＝guardrailなし）
   inspect / interrupt / collect_result  -- 後続
 
 AgentSignals
@@ -61,7 +63,7 @@ Claude Code adapter（`src/infrastructure/adapters.rs`）はworktreeをcwdにし
 
 加えて`command()`は`<run-dir>/claude-settings.json`を書いて`--settings`で渡す。内容は`Stop` hook 1件で、hookのstdin（イベントJSON）を`<run-dir>/idle.json`（`TaskRun::idle_marker_path`）へ一時ファイル + renameで書く。supervisorはこのmarkerをidle判定に使う（[supervisor-lifecycle](supervisor-lifecycle.md)）。`SessionEnd` hookは使わず、セッション終了はwrapperの終了コードで確認する。他のproviderは同じmarkerを自分の仕組みで書けばよく、書かなければ手動終了待ちになる（plannerはmarkerが無くても画面から推定したidleで判断する。markerが書けなかったことは`AgentSignals::idle_hook_failure`がdebug logから読み、`idle_inferred`の`hook_error`に入る。[画面からのidleの推定](supervisor-lifecycle/receipt-and-session-exit.md#画面からのidleの推定)、ADR-t803-1）。同じ設定に`autoMode.environment: ["$defaults"]`も入れ、auto modeの初回案内（Teach auto mode）を抑止する（[起動時のダイアログ](#起動時のダイアログ)）。さらに`permissions.deny`に`Bash(pkill:*)`と`Bash(killall:*)`（`SIGNAL_BY_NAME_DENIED`）を入れ、sessionが名前やパターンでプロセスを選んでsignalを送るのを拒む（Claude Codeは`;`や`&&`でつないだ各コマンドにdenyを当てる。2026-09-27に`claude -p --settings`で確認。同じ設定を書く`resume_command()`と`planner_command()`のsessionも拒む。拒めるのはコマンドの先頭が`pkill` / `killall`のものだけで、`/usr/bin/pkill`・`sh -c 'pkill ...'`・`kill $(pgrep ...)`・`pgrep ... | xargs kill`は通るので、それはpromptの規則に頼る。`pgrep`は診断に使うので拒まない）。その後にroleのpolicyが拒む`dagq`のコマンドとactorの変数の書き換えの規則（`permission_deny`。guardrailでありenforcementではない。[Authorization](authorization.md#claudeのpermissionsdenyguardrail)）が続き、reviewの設定（`claude-review-settings.json`）もreview jobの分を持つ（reviewは`--disallowedTools`で`Bash`を持たないので、今は効く場面が無い）。理由: どのrunのsessionもpromptを位置引数で持つので、そのcommand lineは検証コマンドの名前（`cargo test`、`cargo llvm-cov`）を含む。2026-09-23〜26に、workerが自分の検証を止めるつもりで打った`pkill -f llvm-cov` / `pkill -f "cargo test"`が、他のrunのClaude（exit 143、`session_killed`）と`integrate`・validatingの検証の`cargo`をSIGTERMで止めた（task 359。打った本人のClaudeは`pkill`が祖先を除くので残った。`--resume`のsessionはpromptを引数に持たないので当たらなかった）。止めてよいのは自分が起動したものをpidかtaskで、という規則は`STOP_BACKGROUND`の一文（[Prompt](supervisor-lifecycle/prompt.md)）でもworkerに伝える。
 
-workerの`command()`と`resume_command()`、runtimeが立てるplanner（`PlannerCommand::origin`が`runtime`）の`planner_command()`は、この設定に`"promptSuggestionEnabled": false`を足したもの（`runtime_session_settings`）を書き、Claude Codeの入力欄のサジェスト（次に打ちそうな文の灰色の表示）を止める（goal 48、task 499）。理由: 誰も打たないsessionで、サジェストが画面上は打ちかけの文と見分けにくく、inboxが取り違えた。環境変数`CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION`ではなくsettingsで出し分けるのは、役割ごとに分けられてtestで確かめやすいため。人が触るsession、つまり`up`が開くinbox（`--settings`を渡さない）と、廃止前に人が`dagq plan`で開いたplanner（origin `person`。`stop_hook_settings`のまま。`dagq plan`はADR-t1394-1で何も開かずに拒むようになったので、新しくは開かない）には入れない。
+workerの`command()`と`resume_command()`、runtimeが立てるplanner（`PlannerCommand::origin`が`runtime`）の`planner_command()`は、この設定に`"promptSuggestionEnabled": false`を足したもの（`runtime_session_settings`）を書き、Claude Codeの入力欄のサジェスト（次に打ちそうな文の灰色の表示）を止める（goal 48、task 499）。理由: 誰も打たないsessionで、サジェストが画面上は打ちかけの文と見分けにくく、inboxが取り違えた。環境変数`CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION`ではなくsettingsで出し分けるのは、役割ごとに分けられてtestで確かめやすいため。人が触るsession、つまり`up`が開くinbox（`--settings`は`permissions.deny`だけの`claude-inbox-settings.json`で、サジェストの設定を含まない。[`up` / `down`](supervisor-lifecycle/up-down.md)）と、廃止前に人が`dagq plan`で開いたplanner（origin `person`。`stop_hook_settings`のまま。`dagq plan`はADR-t1394-1で何も開かずに拒むようになったので、新しくは開かない）には入れない。
 
 `review_command()`（[ADR-0040](../adr/0040-verify-once-review-run-env-graph-stats-and-task-priority-in-claim-order.md)の決定2、[ADR-0027](../adr/0027-keep-worker-session-through-review-revise-verdict-and-merge-tree-precheck.md)）はsupervisorが受理したrunをreviewさせる非対話のコマンドを返す。Claude Code adapterは`claude -p --debug-file <run-dir>/claude-review.log --add-dir <run-dir> --settings <run-dir>/claude-review-settings.json --allowedTools Read,Grep,Glob --disallowedTools Bash,Edit,Write,NotebookEdit --setting-sources ""`をworktreeで起動し、promptはargvでなくstdinで渡す（worktreeは生きているworkerのsessionのものなので、reviewは読むだけ。渡し方は[headless jobのinterface](#headless-jobのinterface)の「promptの渡し方」）。`--setting-sources ""`でworkerが変えられるworktreeの`.claude`の設定・agent・skill、`.mcp.json`、`CLAUDE.md`とuserの設定を読まない（[ADR-t1470-1](../adr/2026-10-03-t1470-1-all-claude-run-reviews-load-no-setting-sources.md)。repositoryの規則はpromptが名指して読ませる）。`claude-review-settings.json`はroleの`permissions.deny`・`autoMode.environment`・`autoMemoryEnabled: false`（cwdのauto memoryは`--setting-sources ""`でも読まれるため）で、`Stop` hookを持たない: reviewの間もworkerのsessionは開いたままなので、reviewがidle markerを書くとsupervisorのidle判定（reviseの往復）を誤らせる。cmux workspaceは作らず、stdin / stdout / stderrはruntimeが繋ぐ（stdinはprompt、stdoutとstderrは`<run-dir>/review-<attempt>.out` / `.err`）。runtimeは`review_timeout()`を過ぎたらkillし、stdoutの`{"verdict": "pass" | "revise" | "concern", "reasons": [..], "summary": ".."}`を読む（[supervisor-lifecycle](supervisor-lifecycle/review.md#review-supervisor)）。`headless_command()`と1つのportにしないのは、reviewがrunに属し、そのrun directoryの設定・debug file・`--add-dir`と禁止するtoolを要るのに対し、observerのjobにはrunが無いため。reviewの子プロセスにはruntimeが`DAGQ_ROLE=review-job`・`DAGQ_ACTOR_ID`と、queue serviceのsocket（`DAGQ_SERVICE_SOCKET`）とjobのtokenのfile（`DAGQ_SERVICE_CREDENTIAL_FILE`）を渡し、`DAGQ_QUEUE`は渡さない。その`dagq`はクライアントモードで動き、serviceがreview jobのprincipalに読むコマンドだけを許す（[Roles](supervisor-lifecycle/roles.md#actors)、[Queue service](queue-service.md#クライアントモード)）。print mode（`-p`）はfolder trustの判定を飛ばす（[binary から読める判定](#binary-から読める判定)の1）ので、reviewはtrust dialogで止まらない。
 

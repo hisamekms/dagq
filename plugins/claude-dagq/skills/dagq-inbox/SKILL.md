@@ -19,7 +19,7 @@ This session holds no state of its own. After a restart, compaction or `/clear`,
 "$DAGQ" status --role inbox
 ```
 
-`asks` lists the open asks; `attention` has everything that waits, each with a fixed `next`; `cursor` is where the next `watch` starts. Handle open asks first (step 3), then the rest (step 4). `${CLAUDE_PLUGIN_ROOT}/skills/dagq-inbox/reference/status.md` lists every field and `next`.
+`asks` lists the open asks; `attention` has everything that waits, each with a fixed `next`; `cursor` is where the next `watch` starts. Handle open asks first (step 3), then the rest (step 4). `${CLAUDE_PLUGIN_ROOT}/skills/dagq-inbox/reference/status.md` lists every field and `next`. If `inbox_guardrail.guardrail` is `false`, this inbox was opened without the settings that refuse `cmux`: tell the person, write your handoff, and have them close this inbox and open it again with `up` (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/up-down.md`, "Open the inbox again").
 
 ## 2. Watch in the background
 
@@ -54,6 +54,7 @@ Report each in a short list (task, status, `next`, gist of `last_error`); act wi
 - `triage by hand` (`triage_failed`), `recover by hand` (`recovery_failed`): `dagq-recover` section 4.
 - `goal review by hand` (`goal_review_failed`): on the person's word, `goal review ID` reruns it, or the person closes the goal (`dagq-recover` section 8).
 - `request a plan for the draft`, `request a plan for the finding`, `request a plan for the waiting tasks`: a request on the person's word (`reference/status.md`).
+- A new plan the person asks for: `"$DAGQ" request add --text '<the person's words>'` records it and a runtime planner takes it (the full steps come with a later task). More words for an open runtime planner: `"$DAGQ" planner request <planner id> --text '<the person's words>'`, its next turn.
 - `check the planner`, `plan review by hand`: the person, in a planner (`dagq-recover` section 8).
 - `report the update` (`update_installed`), `report the review`, `check the failed review`: tell the person (`reference/watch.md`).
 - `install tool` (`run_env_program_missing`), `fix the push command` (`kpi_push_abandoned`), `check the e2e host` (`run_e2e_finished`): the person fixes it.
@@ -66,6 +67,6 @@ Report each in a short list (task, status, `next`, gist of `last_error`); act wi
 
 ## Where your authority ends
 
-Yourself: `status`, `watch`, `asks`, `show`, `answer` with the person's own words, and `ask close` after an answer was carried out. Only when the person says so: what `dagq-recover` describes (`up` / `down` / `install`, `integrate` after a review by hand, `recover`, a retry `ready`, `ready --bypass-review`, `cancel`, keys and `/exit` in a run's workspace). Never answer on the person's behalf, never pick a default, and never `add` or `goal add`: registering work is the planner's; `goal close` only on the person's word (a finished goal is its goal review's).
+Yourself: `status`, `watch`, `asks`, `show`, `answer` with the person's own words, and `ask close` after an answer was carried out. Only when the person says so: what `dagq-recover` describes (`up` / `down` / `install`, `integrate` after a review by hand, `recover`, a retry `ready`, `ready --bypass-review`, `cancel`, `run send` keys and `/exit`). Reach sessions only with `run screen` / `run send` / `planner request`, never `cmux` (your settings refuse it, ADR-t1228-2). Never answer on the person's behalf, never pick a default, and never `add` or `goal add`: registering work is the planner's; `goal close` only on the person's word (a finished goal is its goal review's).
 
 What you do is recorded as the inbox's, apart from the person's own: events carry actor `inbox`, answers `authority: delegated` (the person's own are `user`). A `!` command in this terminal counts as yours; if the person wants it recorded as theirs, they type it in a terminal without `DAGQ_ROLE`. `skills/dagq/reference/authority.md`.

@@ -738,7 +738,24 @@ impl Sessions<'_> {
         }
         if let Some(id) = recorded_workspace(self.queue, cmux, role)? {
             self.mark(role, &id);
-            return Ok(json!({"outcome": "reused", "workspace_id": id, "name": name}));
+            let mut report = json!({"outcome": "reused", "workspace_id": id, "name": name});
+            if role == SessionRole::Inbox {
+                // `up` does not start a reused inbox again (its
+                // conversation stays): it keeps the guardrail it was opened
+                // with, or none (ADR-t1228-2 decision 4).
+                let opened = self
+                    .queue
+                    .latest_event_of(EventKind::InboxOpened.as_str())?;
+                let view = super::inbox_guardrail::judge(
+                    Some(&id),
+                    opened.as_ref().map(|event| &event.payload),
+                );
+                report["guardrail"] = view["guardrail"].clone();
+                if let Some(next) = view.get("next") {
+                    report["next"] = next.clone();
+                }
+            }
+            return Ok(report);
         }
         let id = HostActorExecutor::new(self.db)
             .with_workspaces(cmux)
@@ -762,8 +779,22 @@ impl Sessions<'_> {
             ))?
             .workspace()?;
         self.queue.register_session_workspace(role, &id)?;
+        let mut report = json!({"outcome": "created", "workspace_id": id, "name": name});
+        if role == SessionRole::Inbox {
+            // Whether this inbox refuses raw cmux (ADR-t1228-2 decision 4):
+            // `status` and `doctor` judge the recorded inbox by it.
+            let settings = self
+                .agent
+                .inbox_settings(self.db.parent().unwrap_or(Path::new(".")));
+            let guardrail = settings.is_some();
+            self.queue.record_queue_event(
+                EventKind::InboxOpened,
+                json!({"workspace_id": id, "guardrail": guardrail, "settings": settings}),
+            )?;
+            report["guardrail"] = json!(guardrail);
+        }
         self.mark(role, &id);
-        Ok(json!({"outcome": "created", "workspace_id": id, "name": name}))
+        Ok(report)
     }
 
     /// Color the workspace, put the role's status pill on it and pin it

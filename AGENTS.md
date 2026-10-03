@@ -60,6 +60,7 @@ commit メッセージの規則は [docs/development/documents.md](docs/developm
 ### 起動と停止（`up` / `down`）
 
 - 人・inbox・planner が `up` / `down` / `install` を打つ前に、[docs/development/operations.md](docs/development/operations.md) の「`up`のコマンド」を読む（この repository の `up` のコマンドと、付ける flag・付けない flag の規則とその正本への案内）
+- inbox を閉じて `up` で開き直す手順（`status` / `doctor` の `inbox_guardrail` が false のとき。引き継ぎを先に書き、pin された inbox の unpin と close は人が `DAGQ_ROLE` の無い terminal で打つ）の正本は plugin の `dagq-recover` skill の `reference/up-down.md` の「Open the inbox again」。inbox と planner は cmux を直接打たない（settings の `permissions.deny` の `Bash(cmux:*)`、[ADR-t1228-2](docs/adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)）
 - `up` / `down` の汎用の操作と出力は plugin の `dagq-recover` skill の `reference/up-down.md`、自動更新とその ask は同じ skill の `reference/update.md`、仕組みは [up / down](docs/design/supervisor-lifecycle/up-down.md) と [Auto-update](docs/design/supervisor-lifecycle/auto-update.md)、workspace の識別と名前は [run-workspaces](docs/design/supervisor-lifecycle/run-workspaces.md) と [naming](docs/design/supervisor-lifecycle/naming.md) が持つ。並列数と `runtime_planners` は `dagq.toml` の `[supervisor]`（値と理由はそのコメント）
 
 ### 着地と人の判断

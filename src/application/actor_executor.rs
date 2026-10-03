@@ -709,7 +709,11 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 let command = match command {
                     WorkspaceCommand::Wrapper(command) => command,
                     WorkspaceCommand::Agent { prompt, plugin_dir } => {
-                        command_line(&self.provider()?.inbox_command(&prompt, plugin_dir)?)?
+                        command_line(&self.provider()?.inbox_command(
+                            &prompt,
+                            plugin_dir,
+                            self.queue.parent().unwrap_or(Path::new(".")),
+                        )?)?
                     }
                 };
                 let env = actor_env(self.queue, &actor, planner, launch)?;
@@ -1027,7 +1031,12 @@ mod tests {
             command.current_dir(cwd).arg(access.as_str()).arg(prompt);
             Ok(command)
         }
-        fn inbox_command(&self, prompt: &str, plugin_dir: Option<&Path>) -> Result<CommandSpec> {
+        fn inbox_command(
+            &self,
+            prompt: &str,
+            plugin_dir: Option<&Path>,
+            _queue_dir: &Path,
+        ) -> Result<CommandSpec> {
             let mut command = CommandSpec::new("/opt/claude");
             if let Some(dir) = plugin_dir {
                 command.arg("--plugin-dir").arg(dir);

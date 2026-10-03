@@ -4,10 +4,11 @@ type: design
 title: "`doctor`"
 status: current
 created: 2026-09-26
-updated: 2026-10-03
-last_verified: 2026-10-02
+updated: 2026-10-04
+last_verified: 2026-10-04
 scope: runtime
 related:
+  - adr-t1228-2
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-landing-branch
   - design-supervisor-lifecycle-language
@@ -33,6 +34,7 @@ related:
 - `providers`（既定の出力にも出す）: workerのprovider（`claude` / `codex`）を、`doctor`を打ったプロセスのPATHで解決した結果（`provider`・`executable`（見つからなければ名前のまま）・`found`・見つからない理由`error`・このbinaryが動かせる経路`modes`）。supervisorが実際に使うのは登録の`supervisors[].providers`（`up`が固定したpath）で、こちらはその場のPATHの目安。queueの状態に関わらず出す（[Provider lifecycle](../provider-lifecycle.md#workerのproviderと経路)、ADR-t813-2）。
 - `roles`（既定の出力にも出す）: worker以外の役割ごとに設定されたproviderと出どころ（ADR-t1063-1の決定1・6、task 1065）。queueが束縛されたmain checkoutの`dagq.toml`の`[roles.<role>]`を読み、役割（`plan_review`・`review`・`recovery`・`goal_review`・`observer`・`throughput_review`・`runtime_planner`・`planner`）ごとに`{"provider", "source", "model", "effort"}`（`source`は`provider`の出どころで`dagq.toml`か`default`、`model` / `effort`は起動に渡す値で、渡さなければnull）を出す（`compose::doctor_roles`）。読めない（`provider = "codex"`を`CODEX_ROLES`（`goal_review`・`review`・`plan_review`・`throughput_review`）以外の役割に書いたなど）ときは`error`に理由を足し、役割は既定（Claude）で出す。queueがcheckoutに束縛されていなければ全て既定。読めるqueueのときだけ出す（[Actor model](actor-model.md#provider)）。
 - `inbox_watcher`（既定の出力にも出す）: inboxのwatcherの有無（`state`（`alive` / `absent`）・`watching`・`last_seen_at`・`absent_secs`・`grace_secs`）。`status`の`inbox_watcher`と同じ判定（`application::inbox_watcher::judge`。heartbeatの新しさで決まり、pidのprocessが居ない・開始時刻が合わない記録は数えない。閾値と猶予と開始時刻の許容の幅は[`events` / `watch`](events-watch.md#inboxのwatcherの記録adr-t906-1)）で、queueのディレクトリのファイルだけを読むので、queueの状態（schemaが拒むときも）に関わらず出す（[ADR-t906-1](../../adr/2026-09-28-t906-1-guarantee-the-inbox-watch.md)）。
+- `inbox_guardrail`（既定の出力にも出す）: 記録したinboxがcmuxを拒むsettingsで開かれたか。`status`の`inbox_guardrail`と同じ判定（`application::inbox_guardrail::judge`、[ADR-t1228-2](../../adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)決定4）で、queueが読めるときだけ出す。
 - `queue_service`（既定の出力にも出す）: queue serviceの状態。`status`の`queue_service`と同じ（`state`・`socket`・`pid`・`build`・`api_version`・`min_api_version`・`build_matches`・`started_at`・`client_api_version`・`attention`。queueが読めなければ`attention`はnull）。queueのディレクトリのファイルとsocketだけを見るので、queueの状態に関わらず出す（[Queue service](../queue-service.md#statusとdoctor)）。
 - `schema`: `migrate --check`と同じqueueのschemaの状態（`schema_version`、`binary_schema_version`、`floor`、`migrate`が適用する`pending`とその`compatible`、このバイナリがそのまま開けるかの`opens`）。既定の出力にも含める。`migrate`が要るqueueでも、floorがこのバイナリを拒むqueueでも報告する（ADR-0045の決定5）。前者のrunとsupervisorはread-onlyのコピーを`migrate`した上で読む。後者は`supervisors`と`runs`を省き、拒む理由を`error`に書く。どちらでもrepositoryの束縛は先に検査する（`SqliteQueue::inspect_read_only`がschemaの状態と、読めるqueueか、floorが拒むときは束縛だけを読む接続と拒む理由を、1つの接続から返す）。
 

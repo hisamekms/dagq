@@ -1388,6 +1388,7 @@ impl OneShot {
             status["language"] = serde_json::to_value(self.language_report(queue)?)?;
         }
         if matches!(role, None | Some(SessionRole::Inbox)) {
+            status["inbox_guardrail"] = inbox_guardrail(queue)?;
             status["inbox_watcher"] = self.inbox_watcher(db);
             status["broker"] = status_broker(db, queue);
             status["queue_service"] = queue_service_view(db, Some(queue));
@@ -1462,6 +1463,9 @@ impl OneShot {
                     report["repository"] = repository;
                 }
                 report["roles"] = doctor_roles(&queue);
+                // Whether the recorded inbox refuses raw cmux (ADR-t1228-2
+                // decision 4).
+                report["inbox_guardrail"] = inbox_guardrail(&queue)?;
                 report["language"] = serde_json::to_value(self.language_report(&queue)?)?;
                 report
             }
@@ -2319,8 +2323,10 @@ a person installs it (brew install podman), or sets [broker] mode = \"disabled\"
 }
 
 /// The inbox workspace's command as `up` opens it: `claude` with the
-/// inbox's prompt (see [`lifecycle::inbox_session_prompt`]) and the plugin
-/// directory, made by the provider the executor starts the inbox with.
+/// inbox's settings (written under the queue's directory, ADR-t1228-2
+/// decision 3), its prompt (see [`lifecycle::inbox_session_prompt`]) and
+/// the plugin directory, made by the provider the executor starts the
+/// inbox with.
 pub fn inbox_command(
     db: &Path,
     claude: &Path,
@@ -2331,8 +2337,20 @@ pub fn inbox_command(
     let command = ClaudeCode {
         executable: claude.to_owned(),
     }
-    .inbox_command(&prompt, plugin_dir)?;
+    .inbox_command(&prompt, plugin_dir, db.parent().unwrap_or(Path::new(".")))?;
     crate::application::actor_executor::command_line(&command)
+}
+
+/// Whether the inbox `up` recorded was opened with the guardrail that
+/// refuses raw `cmux` ([`crate::application::inbox_guardrail::judge`]), by
+/// its newest `inbox_opened`.
+fn inbox_guardrail(queue: &SqliteQueue) -> Result<Value> {
+    let recorded = queue.session_workspace(SessionRole::Inbox)?;
+    let opened = queue.latest_event_of(EventKind::InboxOpened.as_str())?;
+    Ok(crate::application::inbox_guardrail::judge(
+        recorded.as_deref(),
+        opened.as_ref().map(|event| &event.payload),
+    ))
 }
 
 /// `integrate` on the system clock and IDs: see [`OneShot::integrate`].

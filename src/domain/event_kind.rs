@@ -107,6 +107,7 @@ event_kinds! {
     IdleInferred => "idle_inferred",
     InboxNudgeFailed => "inbox_nudge_failed",
     InboxNudged => "inbox_nudged",
+    InboxOpened => "inbox_opened",
     InboxWatcherAbsent => "inbox_watcher_absent",
     InboxWatcherReturned => "inbox_watcher_returned",
     InputNotReady => "input_not_ready",
@@ -369,6 +370,9 @@ impl EventKind {
                 // (ADR-t906-1 decision 1 (3)).
                 | InboxNudged
                 | InboxNudgeFailed
+                // The inbox `up` opened, with whether its settings deny raw
+                // cmux (ADR-t1228-2 decision 4).
+                | InboxOpened
                 // The inbox's watcher gone and back, for the KPI of how long
                 // an ask waits to be seen (task 1021).
                 | InboxWatcherAbsent
@@ -587,6 +591,9 @@ pub const IDLE_INFERRED: &str = EventKind::IdleInferred.as_str();
 /// person by `cmux notify` (ADR-t906-1 decision 1 (3)): its claim, once per
 /// absence and attempt.
 pub const INBOX_NUDGED: &str = EventKind::InboxNudged.as_str();
+/// `up` opened the inbox's workspace, with whether it started the inbox
+/// with the settings that deny raw cmux (ADR-t1228-2 decision 4).
+pub const INBOX_OPENED: &str = EventKind::InboxOpened.as_str();
 /// A nudge of the inbox the supervisor could not deliver.
 pub const INBOX_NUDGE_FAILED: &str = EventKind::InboxNudgeFailed.as_str();
 /// The supervisor judged the inbox's watcher absent after it was alive, or
@@ -912,6 +919,7 @@ mod tests {
             (EventKind::IdleInferred, "idle_inferred"),
             (EventKind::InboxNudgeFailed, "inbox_nudge_failed"),
             (EventKind::InboxNudged, "inbox_nudged"),
+            (EventKind::InboxOpened, "inbox_opened"),
             (EventKind::InboxWatcherAbsent, "inbox_watcher_absent"),
             (EventKind::InboxWatcherReturned, "inbox_watcher_returned"),
             (EventKind::InputNotReady, "input_not_ready"),

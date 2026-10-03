@@ -4,10 +4,11 @@ type: design
 title: "`status`"
 status: current
 created: 2026-09-26
-updated: 2026-10-03
-last_verified: 2026-10-02
+updated: 2026-10-04
+last_verified: 2026-10-04
 scope: runtime
 related:
+  - adr-t1228-2
   - design-supervisor-lifecycle
   - adr-0014
   - adr-0017
@@ -47,6 +48,8 @@ related:
 `status --role <inbox|planner>`は`attention`をそのroleに宛てたものだけにする（省略時は全部）。attentionはすべてinbox宛て（`domain::ATTENTION_ROLE`、ADR-0044の決定17）で、`--role inbox`は全部、`--role planner`は空になる。`asks`はroleに関わらずopenなask（未回答でcloseされていないもの）の一覧で、各項目は`id`、`kind`、`question`（先頭200文字。切ったときは末尾に`…`）、`task_id`、`run_id`、`asked_by`、`reason_category`、`affected`、`age_secs`（登録からの秒数）、AIの推奨と確信度の`recommendation`と`confidence`（無ければnull。[ask](ask.md#aiの推奨と確信度未実装)、ADR-t451-1）と、分類コードのある`worker_question`なら`topics`（先頭が主。[ask](ask.md#worker_questionの分類コード)、ADR-t947-2。無いaskは欄ごと省く）。
 
 `status`（`--role`なし）と`status --role inbox`は`inbox_watcher`も返す（[ADR-t906-1](../../adr/2026-09-28-t906-1-guarantee-the-inbox-watch.md)）: `{state（alive / absent）, watching, last_seen_at, absent_secs, grace_secs}`。`watch --role inbox`がqueueのディレクトリの`inbox-watchers/`に残した記録を`application::inbox_watcher::judge`で判定したもので、heartbeatの新しさで決まり、記録のpidのprocessが居ない・開始時刻が合わない記録はheartbeatが新しくても数えない（task 927。`--until-attention`のtimeoutの無いwatchはheartbeatだけで判定する。閾値と猶予は[`events` / `watch`](events-watch.md#inboxのwatcherの記録adr-t906-1)）。`--role planner`は返さない。入口は`OneShot::status_of`で、時刻は`OneShot`の`Clock`（testはfakeのclockを渡す）。pluginのStop hookは`watching`が0のinboxのturnの終わりを止める（[plugin integration](../plugin-integration.md)）。
+
+`status`（`--role`なし）と`status --role inbox`は`inbox_guardrail`も返す（[ADR-t1228-2](../../adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)決定4）: `up`が記録したinbox（`session_workspaces`の`inbox`行）が`permissions.deny`に`Bash(cmux:*)`を持つsettingsで開かれたか。最新の`inbox_opened`と比べる`application::inbox_guardrail::judge`の結果で、`{workspace_id, guardrail: true, settings}`、`{workspace_id, guardrail: false, reason（no_record / opened_without_guardrail）, next}`、行が無ければ`{workspace_id: null, guardrail: null}`。`next`は引き継ぎの後にinboxを閉じて`up`で開き直すこと。`--role planner`は返さない。欄の意味と限界は[`up` / `down`](up-down.md)。
 
 `status`（`--role`なし）と`status --role inbox`は、resource brokerの`broker`も返す（`compose::status_broker`。`doctor`の`broker`も同じ`mode`・`health`・`active_tokens`を持つ。欄の全体は[Broker](../broker.md#status-と-doctor)）: `mode`は、queueがbindしたcheckoutの`dagq.toml`の`[broker]`を`host.toml`で落としたもの（`disabled`・`preferred`・`required`。読めなければ`{"error"}`）。`health`は`{state, reason, at}`で、queueの最新の`broker_started` / `broker_healthy` / `broker_unhealthy` / `broker_stopped`から`healthy`・`unhealthy`（`reason`はそのeventの`reason`）・`stopped`を、どれも無ければ`unknown`を出す（`domain::broker::health_report`。記録を読むだけで、podmanもbrokerへの要求も打たない）。`active_tokens`は、runが今持つbrokerのtokenの数（`<queue dir>/broker/active`の有効な印の数）。actorの`backend: host`・`enforcement: advisory`はbrokerの有無で変わらない。
 

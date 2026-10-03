@@ -54,13 +54,24 @@ fn the_inbox_prompt_names_the_queue_and_its_one_job() {
     assert!(!inbox.contains("/exit"));
     assert!(inbox.contains("Never open the queue database directly"));
 
+    // The inbox's command writes its settings in the queue's directory.
+    let temp = tempfile::tempdir().unwrap();
+    let db = &temp.path().join("queue.db");
     let command = inbox_command(db, Path::new("/opt/claude"), Some(Path::new("/p")), None).unwrap();
     assert!(command.starts_with("'/opt/claude' '"), "{command}");
     assert!(command.contains("'--' 'You are the inbox of"), "{command}");
-    // A person works in the inbox: it has no settings of the runtime's, so
-    // Claude Code's prompt suggestions stay on (goal 48).
-    assert!(!command.contains("--settings"), "{command}");
-    assert!(!command.contains("promptSuggestion"), "{command}");
+    // A person works in the inbox: its settings are only the denials
+    // (ADR-t1228-2 decision 3), so Claude Code's prompt suggestions stay on
+    // (goal 48).
+    let settings = db.parent().unwrap().join("claude-inbox-settings.json");
+    assert!(
+        command.contains(&format!("'--settings' {}", common::shell_path(&settings))),
+        "{command}"
+    );
+    let written = fs::read_to_string(&settings).unwrap();
+    assert!(written.contains("Bash(cmux:*)"), "{written}");
+    assert!(!written.contains("promptSuggestion"), "{written}");
+    assert!(!written.contains("hooks"), "{written}");
     assert_eq!(ROLE_ENV, "DAGQ_ROLE");
     assert_eq!(QUEUE_ENV, "DAGQ_QUEUE");
     assert!(

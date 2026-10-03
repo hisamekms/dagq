@@ -4,8 +4,8 @@ type: design
 title: Authorization
 status: current
 created: 2026-09-27
-updated: 2026-10-03
-last_verified: 2026-10-03
+updated: 2026-10-04
+last_verified: 2026-10-04
 scope: runtime
 related:
   - adr-t1394-1
@@ -14,6 +14,7 @@ related:
   - adr-t728-2
   - adr-t728-3
   - adr-t1228-1
+  - adr-t1228-2
   - design-supervisor-lifecycle-roles
   - design-security
 ---
@@ -194,6 +195,7 @@ runtimeの操作系のコマンドは、`src/application/commands/operations.rs`
 - plannerは人に頼まれた`up`・`down`・`install`と、`init`・`migrate`・`rebind`・`plan`、自分のplannerの`planner-session`と`session-event`を打てる（ADR-t728-1の決定7のとおり今の権限のまま）。`integrate`・`recover`・`review`・`supervise`・`observe`・`session`は拒む
 - worker・4つのjob・observerは`integrate`・`recover`・`install`・`auto-update`・`up`・`down`・`init`・`migrate`・`rebind`・`plan`・`supervise`・`observe`・`review`を拒む。workerは自分のrunの`session`と`session-event`だけを打てる。別のrunのもの、inboxやplannerのspanを名乗るもの（`DAGQ_SESSION_KIND`）、`planner-session`は拒む
 - 拒否は`authorization_denied`として、拒まれた呼び出し元をactorにしてqueueに記録する（`src/infrastructure/denials.rs`の`QueueDenials`が、判定の後でだけqueueを開く）。queueが無い・このバイナリが開けない（`init`の前、`migrate`の前）ときは記録できず、拒否は拒否のまま返す。errorの形は計画系と同じ
+- 生の`cmux`はこのpolicyの外にある（dagqのCLIを通らない）。inboxとplannerには、Claudeのsettingsの`permissions.deny`の`Bash(cmux:*)`（`permission_deny(Inbox|Planner)`の最後の規則）を置き、上の`run` / `planner`のCLIを使わせる（[ADR-t1228-2](../adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)）。これは**guardrailであってenforcementではない**: hostの判定は助言的なまま（ADR-t728-1決定6）で、絶対pathやscriptからの`cmux`は通り、`up`が`reused`で使い続けるinboxと`claude`を打ち直したsessionには効かない。拒むのはあくまでCLIの判定で、cmuxを拒んだことでCLIの権限は変わらない。workerとjobの`cmux`は拒まない（隔離が扱う）。Codexのinboxは同じ趣旨をCodexの手段で持たせ、無ければguardrailが無いと[Security](security.md#判定の場所)に書く（決定6。今のinboxはClaudeだけ）。settingsの場所・中身と`status` / `doctor`の`inbox_guardrail`は[`up` / `down`](supervisor-lifecycle/up-down.md)と[Security](security.md)が持つ
 
 #### 制御側の起動としての`supervise`と`auto-update`
 
@@ -225,11 +227,12 @@ queue service（[Queue service](queue-service.md)、ADR-t1233-1決定4）は、�
 
 ## Claudeのpermissions.deny（guardrail）
 
-多層防御の1枚として、runtimeがClaude Codeの設定を書くactor（worker・planner・review job。[Roles](supervisor-lifecycle/roles.md#actorの起動actorexecutor)）の`permissions.deny`に、roleのpolicyから作った規則を入れる（task 738。`src/application/execution.rs`の`permission_deny(role)`）。
+多層防御の1枚として、runtimeがClaude Codeの設定を書くactor（worker・planner・review job・inbox。[Roles](supervisor-lifecycle/roles.md#actorの起動actorexecutor)）の`permissions.deny`に、roleのpolicyから作った規則を入れる（task 738。`src/application/execution.rs`の`permission_deny(role)`）。
 
 - `DAGQ_COMMANDS`はroleによって拒まれうる`dagq`のsubcommand（状態を変えるものと`watch`（`queue.watch`）・`report`（`queue.export`））と、その形のどれかが要るcapabilityの表（`ready`は`task.ready`と`task.ready_bypass_review`、`ask`は`ask.open`・`finding.ask`・`ask.close`など）。roleの`grants`がどれも持たないcommandを`Bash(dagq <command>:*)`で拒む（例: workerは`Bash(dagq integrate:*)`・`Bash(dagq answer:*)`・`Bash(dagq ready:*)`・`Bash(dagq ask close:*)`、plannerは`integrate`・`answer`・`ready`・`recover`・`supervise`・`run screen`・`run send`・`planner screen`・`planner send`）。読み取りの形を持つcommand（`observe`は`--history`が読み取りなので`observe`ごと、`graph`）は表に入れない。表と`src/main.rs`の`requests`が食い違わないことはunit test（`the_denied_commands_need_what_the_table_says`）が確かめる。clapの全subcommand（`goal close`のような入れ子を含む。`DAGQ_COMMANDS`の親の項目（`dependency`）はその下を覆い、subcommandを必ず取る親（`goal`・`finding`・`proposal`）は自分の項目が要らない。自分の形を持つ親（`ask`）は自分の項目が要る）が`DAGQ_COMMANDS`か、`src/main.rs`のtestの`LEFT_OUT_COMMANDS`（読み取り（`broker status`・`broker logs`・`broker audit`を含む）、読み取りの形を持つ`graph`・`observe`）のどちらかにあることもunit test（`every_subcommand_is_denied_or_left_out_on_purpose`、task 851）が確かめ、どちらにも無いsubcommandを足すと落ちる。roleによって拒まれうるsubcommandを足したら、読み取りの形を持つものを除いて表に入れる（task 851の列挙で、隠しcommandの`release-update`（`service.install`）を足した）。
 - actorを名指す変数（`DAGQ_ROLE`・`DAGQ_ACTOR_ID`・`DAGQ_RUN_ID`・`DAGQ_TASK_ID`）の書き換え（`<名前>=...`・`export`・`env <名前>=`・`env -u`・`unset`）も全roleで拒む。
-- 順は`SIGNAL_BY_NAME_DENIED`（`pkill`・`killall`）の後。
+- inboxとplannerには最後に`Bash(cmux:*)`（`RAW_CMUX_DENIED`、`RAW_CMUX_DENIED_ROLES`）も足す（[ADR-t1228-2](../adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)）。workerとjobには足さない（決定7）。
+- workerとplannerのsession・turnの設定とreview jobの設定では、`SIGNAL_BY_NAME_DENIED`（`pkill`・`killall`）の後に置く（review jobの設定はroleの規則だけ）。inboxの設定（`up`が書く`claude-inbox-settings.json`、[`up` / `down`](supervisor-lifecycle/up-down.md)）は`permissions.deny`だけで、roleの規則だけを持ち、`SIGNAL_BY_NAME_DENIED`は入れない。
 
 これはguardrailでenforcementではない。Claude Codeの規則はコマンドの先頭の形しか見ないので、pathで打つ`~/.local/bin/dagq integrate`、pluginのskillが使う`"$DAGQ" ...`や`${CLAUDE_PLUGIN_ROOT}/bin/dagq ...`、subcommandの前にglobalのflagを置く`dagq --db X integrate`、`sh -c`、scriptの中からの呼び出しは通る。拒む判定はCLIの`Authorizer`（上の「適用の範囲」）がする。どちらもhostではadvisoryで、隔離は将来のsandboxのbackend（[Roles](supervisor-lifecycle/roles.md#実行のbackendとenforcement)）が担う。
 

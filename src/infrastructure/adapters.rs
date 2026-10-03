@@ -3277,16 +3277,35 @@ impl AgentProvider for ClaudeCode {
         ]);
         Ok(())
     }
-    /// `claude [--plugin-dir <dir>] -- <prompt>`: the inbox's workspace
-    /// keeps its role and queue in its own environment (ADR-0026), so a
-    /// `claude` started again there still has them.
-    fn inbox_command(&self, prompt: &str, plugin_dir: Option<&Path>) -> Result<CommandSpec> {
+    /// `claude --settings <queue dir>/claude-inbox-settings.json
+    /// [--plugin-dir <dir>] -- <prompt>`: the settings are only the
+    /// inbox's `permissions.deny` ([`inbox_settings`], ADR-t1228-2 decision
+    /// 3), written again at each open. The inbox's workspace keeps its role
+    /// and queue in its own environment (ADR-0026), so a `claude` started
+    /// again there still has them, though not the settings (decision 4).
+    fn inbox_command(
+        &self,
+        prompt: &str,
+        plugin_dir: Option<&Path>,
+        queue_dir: &Path,
+    ) -> Result<CommandSpec> {
+        let settings = queue_dir.join(INBOX_SETTINGS);
+        crate::application::RunFiles::write(
+            &super::run_files::LocalRunFiles,
+            &settings,
+            inbox_settings(&permission_deny(ActorRole::Inbox))?.as_bytes(),
+        )
+        .with_context(|| format!("write {}", settings.display()))?;
         let mut command = CommandSpec::new(&self.executable);
+        command.arg("--settings").arg(&settings);
         if let Some(dir) = plugin_dir {
             command.arg("--plugin-dir").arg(dir);
         }
         command.arg("--").arg(prompt);
         Ok(command)
+    }
+    fn inbox_settings(&self, queue_dir: &Path) -> Option<PathBuf> {
+        Some(queue_dir.join(INBOX_SETTINGS))
     }
     /// `--model <model> --effort <effort>` among the options, before the
     /// prompt.
@@ -3371,6 +3390,24 @@ impl AgentProvider for ClaudeCode {
     }
 }
 
+/// The settings file of the inbox `up` opens, in the queue's directory
+/// (ADR-t1228-2 decision 3).
+pub const INBOX_SETTINGS: &str = "claude-inbox-settings.json";
+
+/// Settings of the inbox (ADR-t1228-2 decision 3): `permissions.deny`
+/// only, `deny` being the inbox's ([`permission_deny`]: the `dagq`
+/// commands its role may not run, the variables naming the actor and
+/// `Bash(cmux:*)`). No hook and no idle marker (the inbox is not judged
+/// idle), no suggestion setting (a person types in it), no `autoMode`.
+/// A guardrail, not enforcement (decision 5).
+pub fn inbox_settings(deny: &[String]) -> Result<String> {
+    Ok(serde_json::to_string_pretty(&serde_json::json!({
+        "permissions": {
+            "deny": deny
+        }
+    }))?)
+}
+
 /// The settings file of a headless worker's turns, in the run directory.
 pub const HEADLESS_SETTINGS: &str = "claude-headless-settings.json";
 
@@ -3400,8 +3437,10 @@ pub fn headless_worker_settings(deny: &[String]) -> Result<String> {
 /// mechanism or none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentSettings {
-    /// None of dagq's: the inbox, and the headless jobs other than the
-    /// review, which their allowed tools ([`claude_tools`]) restrict.
+    /// None of these: the inbox, whose settings are its denials alone
+    /// ([`inbox_settings`], written when `up` opens it), and the headless
+    /// jobs other than the review, which their allowed tools
+    /// ([`claude_tools`]) restrict.
     None,
     /// The review's: no hooks, so it never writes the live worker session's
     /// idle marker.
@@ -4692,6 +4731,89 @@ mod tests {
         };
         let stdout = "Looked at it.\n{\"verdict\":\"pass\",\"summary\":\"ok\"}\n";
         assert_eq!(claude.job_reply(stdout), stdout);
+    }
+
+    /// The planners' settings (a planner session's and a headless
+    /// planner's turns) and the inbox's refuse raw cmux beside their role's
+    /// denials and the identity variables; a worker's, its turns' and the
+    /// review's do not (ADR-t1228-2 decisions 2, 3 and 7).
+    #[test]
+    fn raw_cmux_is_denied_to_the_planners_and_the_inbox_only() {
+        let claude = ClaudeCode {
+            executable: "/bin/claude".into(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let deny_of = |path: &Path| -> Vec<String> {
+            let settings: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+            serde_json::from_value(settings["permissions"]["deny"].clone()).unwrap()
+        };
+        let cmux = crate::application::execution::RAW_CMUX_DENIED.to_owned();
+        let identity = "Bash(export DAGQ_ROLE*)".to_owned();
+        let turn = |role: ActorRole, sub: &str| {
+            let target_dir = dir.path().join(sub);
+            fs::create_dir_all(&target_dir).unwrap();
+            let log = target_dir.join("turn.log");
+            claude
+                .turn_command(
+                    &TurnTarget {
+                        role,
+                        dir: &target_dir,
+                        cwd: &target_dir,
+                        debug_log: Some(&log),
+                        plugin_dir: None,
+                    },
+                    "go",
+                    crate::domain::turn::TurnSession::New("s"),
+                )
+                .unwrap();
+            deny_of(&target_dir.join(HEADLESS_SETTINGS))
+        };
+        let planner_turn = turn(ActorRole::Planner, "planner");
+        assert!(planner_turn.contains(&cmux), "{planner_turn:?}");
+        assert!(planner_turn.contains(&identity));
+        assert!(planner_turn.contains(&"Bash(dagq integrate:*)".to_owned()));
+        let worker_turn = turn(ActorRole::Worker, "worker");
+        assert!(!worker_turn.contains(&cmux), "{worker_turn:?}");
+        assert!(worker_turn.contains(&identity));
+
+        let planner_dir = dir.path().join("session");
+        fs::create_dir_all(&planner_dir).unwrap();
+        let planner = PlannerCommand {
+            origin: PlannerOrigin::Runtime,
+            dir: &planner_dir,
+            cwd: &planner_dir,
+            prompt: "plan",
+            plugin_dir: None,
+        };
+        claude.planner_command(&planner).unwrap();
+        let session = deny_of(&planner_dir.join("claude-settings.json"));
+        assert!(session.contains(&cmux) && session.contains(&identity));
+
+        let run = run_in(dir.path());
+        fs::create_dir_all(run.run_dir().unwrap()).unwrap();
+        claude
+            .review_command(&run, "review", crate::application::prompt::REVIEW_ACCESS)
+            .unwrap();
+        let review =
+            deny_of(&Path::new(run.run_dir().unwrap()).join("claude-review-settings.json"));
+        assert!(!review.contains(&cmux) && review.contains(&identity));
+
+        let queue_dir = dir.path().join("queue");
+        fs::create_dir_all(&queue_dir).unwrap();
+        let command = claude.inbox_command("inbox", None, &queue_dir).unwrap();
+        let path = queue_dir.join(INBOX_SETTINGS);
+        assert_eq!(claude.inbox_settings(&queue_dir), Some(path.clone()));
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(
+            args[..2],
+            [std::ffi::OsStr::new("--settings"), path.as_os_str()]
+        );
+        let settings: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            settings,
+            serde_json::json!({"permissions": {"deny": permission_deny(ActorRole::Inbox)}})
+        );
+        assert!(deny_of(&path).contains(&cmux));
     }
 
     #[test]

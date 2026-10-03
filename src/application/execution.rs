@@ -314,10 +314,21 @@ pub const DAGQ_COMMANDS: &[(&str, &[Capability])] = &[
 /// run the CLI as another role.
 const IDENTITY_ENV: [&str; 4] = [ROLE_ENV, ACTOR_ID_ENV, RUN_ID_ENV, TASK_ID_ENV];
 
+/// The rule that refuses `cmux` to the inbox and the planners
+/// ([`RAW_CMUX_DENIED_ROLES`]): they reach sessions through the dagq CLI,
+/// which judges and records (ADR-t1228-2 decisions 2 and 3).
+pub const RAW_CMUX_DENIED: &str = "Bash(cmux:*)";
+
+/// The roles refused raw `cmux` (ADR-t1228-2): the inbox and the planners.
+/// The worker's and the jobs' `cmux` is left to their isolation (decision
+/// 7).
+pub const RAW_CMUX_DENIED_ROLES: [ActorRole; 2] = [ActorRole::Inbox, ActorRole::Planner];
+
 /// The Claude Code `permissions.deny` rules of `role`, made from its
 /// policy ([`grants`]): each [`DAGQ_COMMANDS`] entry it has no capability
-/// for (`Bash(dagq integrate:*)`), and setting, exporting or unsetting the
-/// variables that name the actor. A guardrail against a mistake, not
+/// for (`Bash(dagq integrate:*)`), setting, exporting or unsetting the
+/// variables that name the actor, and for the inbox and the planners
+/// [`RAW_CMUX_DENIED`]. A guardrail against a mistake, not
 /// enforcement: the same command by a path, through another shell or a
 /// script is not matched, and the CLI's own check stays the one that
 /// refuses (ADR-t728-1 decision 6).
@@ -336,6 +347,9 @@ pub fn permission_deny(role: ActorRole) -> Vec<String> {
             format!("Bash(env -u {name}*)"),
             format!("Bash(unset {name}*)"),
         ]);
+    }
+    if RAW_CMUX_DENIED_ROLES.contains(&role) {
+        rules.push(RAW_CMUX_DENIED.to_owned());
     }
     rules
 }
@@ -581,6 +595,16 @@ mod tests {
         for role in ActorRole::ALL {
             assert!(permission_deny(role).contains(&"Bash(DAGQ_ROLE=*)".to_owned()));
         }
+        // Raw cmux is the inbox's and the planners' alone to be refused
+        // (ADR-t1228-2): the worker's and the jobs' stay as they were.
+        for role in ActorRole::ALL {
+            assert_eq!(
+                permission_deny(role).contains(&RAW_CMUX_DENIED.to_owned()),
+                matches!(role, ActorRole::Inbox | ActorRole::Planner),
+                "{role:?}"
+            );
+        }
+        assert_eq!(RAW_CMUX_DENIED, "Bash(cmux:*)");
         // Every rule a role gets is one the policy refuses.
         for role in ActorRole::ALL {
             for (command, needs) in DAGQ_COMMANDS {

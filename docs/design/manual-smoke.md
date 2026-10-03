@@ -4,8 +4,8 @@ type: design
 title: Manual smoke of the paths that include real Claude and Codex
 status: current
 created: 2026-09-25
-updated: 2026-10-03 # task 1560: the Codex goal review smoke expects no prompt on the command line (after task 1399)
-last_verified: 2026-10-03 # task 1560
+updated: 2026-10-04 # task 1232: the cmux steps are the person's, in a terminal without DAGQ_ROLE
+last_verified: 2026-10-04 # task 1232
 scope: operations
 related:
   - adr-0036
@@ -15,6 +15,8 @@ related:
   - adr-t813-2
   - adr-t813-3
   - adr-t1233-2
+  - adr-t1228-1
+  - adr-t1228-2
 ---
 
 # Manual smoke of the paths that include real Claude and Codex
@@ -37,7 +39,7 @@ related:
 
 本番 queue と固定バイナリ `~/.local/bin/dagq` を汚さないため、すべてを scratch directory に閉じる。
 
-このスモークは人か inbox が行う。worker が使い捨ての queue を操作できない理由と、worker が代わりにすることは[運用の開発文書](../development/operations.md)の「workerがhostと実queueでできないこと」、そう決めた経緯は[運用の規則の経緯](../plans/operation-rules-history.md)が持つ。
+このスモークは人か inbox が行う。ただしこの文書の `cmux` のコマンド（`cmux workspace close`・`cmux workspace-group delete`・`send-key` など）は、人が `DAGQ_ROLE` の無い自分の terminal で打つ。inbox の settings は `Bash(cmux:*)` を拒み、使い捨ての queue の workspace は本番 queue の ID で指せないので dagq の CLI にも移していない（[ADR-t1228-1](../adr/2026-10-02-t1228-1-inbox-and-planner-reach-sessions-through-the-dagq-cli.md) 決定 1、[ADR-t1228-2](../adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)）。worker が使い捨ての queue を操作できない理由と、worker が代わりにすることは[運用の開発文書](../development/operations.md)の「workerがhostと実queueでできないこと」、そう決めた経緯は[運用の規則の経緯](../plans/operation-rules-history.md)が持つ。
 
 - **バイナリ**: 確かめたい commit で `cargo build --locked` したものを scratch にコピーして使う（本番 queue と開発中のバイナリの境界は AGENTS.md の「作業中」）。
 - **repository**: `git init` した使い捨て repository。ディレクトリ名は `dagq-smoke` にする（task 710）。runtime は queue の cmux の workspace group を `[<repository のディレクトリ名>]`（例 `[dagq-smoke]`）、workspace の title を `[<ディレクトリ名>]worker#...` などと名付けるので、残った group がどのスモークのものか名前で分かる（`tests/e2e.rs` の fixture は `dagq-e2e` で、group は `[dagq-e2e]`）。`repo` のような汎用の名前にしない。`seed.txt`（検証コマンドが見る）、3 行の `shared.txt`（衝突用）、`CLAUDE.md`、`.claude/settings.json`（`permissions.defaultMode: auto`）を commit しておく。scratch に置いた bare repository を `origin` にする（supervisor の着地は push まで行い、`origin` が無いと `push_failed` の attention になる。手で `integrate` するときは `--no-push` でもよい）。
@@ -87,7 +89,7 @@ task 1236 から worker の `dagq` はクライアントモードで動く（[Qu
 | 1 | Claude の異常終了: commit した直後・receipt の前に、`doctor` の agent pid を `kill -KILL` | 実 Claude | wrapper が `session_exited`（signal 終了は exit 128）を記録し run は `failed`。worktree・branch・run dir が残る。復旧 job が retry / retry_inherit / resume / wait か escalate（`decide` の ask）を決める。並行する run と、空いた slot の次の claim に影響しない |
 | 2 | supervisor の再起動: 2 run が `running` の間に supervisor を `kill -KILL` し、同じ workspace で新しい supervisor を起動 | stub | 新しい supervisor は wrapper が生きている run の stale lease を引き継ぎ（[ADR-0012](../adr/0012-adopt-stale-lease-of-live-wrapper.md)）、run は receipt → 検証 → review まで進む。同じ task に 2 本目の run が立たない |
 | 3 | 検証の失敗: `[break]` の task に `--verify 'test -f seed.txt'` | stub | 検証は `integrate` の 1 回だけで、失敗すると run は `needs_session` になり、supervisor が resume する（[`needs_session`](supervisor-lifecycle/needs-session.md#needs_session)）。3 回で解消しなければ `failed` と `decide` の ask。`main` は進まない。`tests/e2e.rs` の stub の resume は `set -eu` の下で `test -f seed.txt` を実行して非0で終わるので、拡張した stub の resume では `[break]` のときに `seed.txt` を戻す（解消を見る）か、壊したまま receipt を書き直す（回数上限を見る）かを決めておく |
-| 4 | cleanup の失敗: review が pass して session が終わった（`session_exited`）後、supervisor が workspace を閉じる前に `cmux workspace close <uuid>` で閉じる | stub | supervisor の close は `not_found` で `cleanup_failed` イベントと `last_error` になり、run の状態は変わらず、着地も通る。supervisor は落ちない。worker の session は review の後まで開いたままなので（[ADR-0027](../adr/0027-keep-worker-session-through-review-revise-verdict-and-merge-tree-precheck.md)）、それより前に閉じると wrapper が死んでシナリオ 5 と同じ abandon の経路になる。窓は短いので、コマンド終了後に cmux が workspace を自動で閉じる環境（[観測済みの環境依存](#観測済みの環境依存)）ではこれが自然に起きる |
+| 4 | cleanup の失敗: review が pass して session が終わった（`session_exited`）後、supervisor が workspace を閉じる前に、人が `DAGQ_ROLE` の無い terminal で `cmux workspace close <uuid>` で閉じる | stub | supervisor の close は `not_found` で `cleanup_failed` イベントと `last_error` になり、run の状態は変わらず、着地も通る。supervisor は落ちない。worker の session は review の後まで開いたままなので（[ADR-0027](../adr/0027-keep-worker-session-through-review-revise-verdict-and-merge-tree-precheck.md)）、それより前に閉じると wrapper が死んでシナリオ 5 と同じ abandon の経路になる。窓は短いので、コマンド終了後に cmux が workspace を自動で閉じる環境（[観測済みの環境依存](#観測済みの環境依存)）ではこれが自然に起きる |
 | 5 | 並列中の 1 run の異常: `[hang]` と `delay=60` の 2 task を同時に流し、`[hang]` の wrapper を `kill -KILL` | stub | heartbeat 切れ（30 秒）で `[hang]` の run だけが手放され（`runtime_error`、lease 削除）、`recover run` の attention になる。孤児になった agent が生きている間は `recover` が拒否し、agent を止めると supervisor が `interrupted` にして triage に回す。もう一方の run は影響なく review（`E2E-REVIEW-PASS` が無ければ `review by hand`）まで進む |
 | 6 | merge queue の衝突: 2 task が `shared.txt` の同じ行を変える | 実 Claude | 先に着地した run の後、もう一方は着地前の `merge-tree` の事前判定か `integrate` の rebase で衝突を検出し、生きている（または resume した）session に解消を依頼する。session が rebase・解消・receipt の書き直しをして着地し、`main` は 1 task 1 commit の直線になる。review が `concern` を返したら `approve_landing` の ask に答える |
 
@@ -96,8 +98,8 @@ task 1236 から worker の `dagq` はクライアントモードで動く（[Qu
 - 二重起動が無い（同じ task に同時に 2 本の未完了 run が無い）。
 - 成果が失われていない（commit した run の branch か `refs/dagq/runs/<run-id>` が残る）。
 - `doctor` の `unfinished_runs` と `run_leases` が空になり、`pgrep` で Claude・stub・wrapper が残っていない。
-- 作った cmux workspace（supervisor と、閉じられずに残った run のもの）を `cmux workspace close <uuid>` で閉じる。
-- 使い捨て queue の workspace group を `cmux workspace-group delete <group> --close-workspaces` で消す（`<group>` は `cmux --json workspace-group list` で name が `[<repository のディレクトリ名>]`、external ID が queue hash（queue の DB のあるディレクトリの名前）の group の id）。cmux は group を作るときに anchor の workspace を一緒に作るので、worker や supervisor の workspace を閉じるだけでは anchor が残って group が消えない。
+- 作った cmux workspace（supervisor と、閉じられずに残った run のもの）を、人が `DAGQ_ROLE` の無い terminal で `cmux workspace close <uuid>` で閉じる。
+- 使い捨て queue の workspace group を、人が `DAGQ_ROLE` の無い terminal で `cmux workspace-group delete <group> --close-workspaces` で消す（`<group>` は `cmux --json workspace-group list` で name が `[<repository のディレクトリ名>]`、external ID が queue hash（queue の DB のあるディレクトリの名前）の group の id）。cmux は group を作るときに anchor の workspace を一緒に作るので、worker や supervisor の workspace を閉じるだけでは anchor が残って group が消えない。
 
 ### 観測済みの環境依存
 
@@ -450,7 +452,7 @@ file は Python の `pathlib.Path.read_text()` と `json.loads()` で JSONL を�
 1. [非対話の worker のスモーク](#非対話の-worker-のスモーク)の隔離に従い、`dagq-smoke` と bare の `origin`、開発中のバイナリのコピー、専用 queue を作る。`dagq.toml` に `[roles.review] provider = "codex"` を書いて commit する。
 2. Codex の headless task を 1 件、簡単なファイルの追加とその存在を確認する verify で登録し、使い捨て queue だけで `ready --bypass-review` にする。`supervise --no-claude --parallel 1 --once --codex <実体の path>` で流す。
 3. `events --run RUN --full` の `review_started.launch.provider` が `codex`、`review_finished.verdict` が `pass` で、`show ID` の task が `completed`、run が `integrated`、`origin/main` が進んだことを確かめる。run の dir の `review-<N>.out` は `codex exec --json` の JSONL で、起動引数は `--sandbox read-only` を含む。実 Codex が使えない権限環境では `review_failed` と `approve_landing` ask を確認し、権限を直して別 task で再試験する。
-4. supervisor の終了と試験用 group の削除を確認する。group は `cmux workspace-group delete <group> --close-workspaces` で anchor ごと消す。
+4. supervisor の終了と試験用 group の削除を確認する。group は人が `DAGQ_ROLE` の無い terminal で `cmux workspace-group delete <group> --close-workspaces` で anchor ごと消す。
 
 2026-10-01 の結果: 別 queue で実 Codex 0.159.2 の worker と review を実行し、task 2 の review が `pass`、run `ca586e69-4833-43c2-a269-f7d90fa2152f` が `908060719bbc3f599cbb061fe1e130827472595e` として main に着地・push した。最初の task 1 は実行側のホスト権限制約で Codex review の app-server 初期化が拒まれ、`review_failed` と ask になった。権限付きでの再試験は成功し、試験用の cmux group は削除した。
 
@@ -485,7 +487,7 @@ dagq のソースでない repository で使えること（goal 52）は、stub 
    - `tq events --run RUN --full`: `push_skipped`（`remote: origin`・`branch: master`・`reason: the repository has no remote origin`）があり、`push_failed` の attention が inbox に出ていない。`migration_renumbered` と `migration_number_taken` が無い。
    - `tq stats` と `tq kpi` が止まらずに出て、cargo 専用の計測（`work_breakdown` の `llvm_cov` など、`kpi --by toolchain`）が無い。
    - worker・review・plan review の prompt（run dir と proposal の dir）に、dagq の repository に固有の規則（cargo・llvm-cov・e2e の推奨、ADR の番号、`AGENTS.md` を名指すこと）が載っていない。`[e2e] paths` が無く task が `e2e` を要らないので、worker の prompt に e2e の行（「E2E: do not run the e2e」）が無く、run に `run_e2e_*` の event が無い。
-8. [故障経路のスモーク](#シナリオ)の後始末と同じく `tq down --wait` で supervisor を止め、inbox と planner の workspace を閉じ、`cmux workspace-group delete '[dagq-smoke]' --close-workspaces` で group を消す。`claude plugin uninstall claude-dagq@dagq --scope local` で入れた plugin を外す。
+8. [故障経路のスモーク](#シナリオ)の後始末と同じく `tq down --wait` で supervisor を止め、人が `DAGQ_ROLE` の無い terminal で inbox と planner の workspace を閉じ（inbox は unpin してから）、`cmux workspace-group delete '[dagq-smoke]' --close-workspaces` で group を消す。`claude plugin uninstall claude-dagq@dagq --scope local` で入れた plugin を外す。
 
 ### 結果
 
