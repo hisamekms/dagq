@@ -1743,11 +1743,15 @@ pub enum AttentionNext {
     CheckPlanner,
     /// The runtime opened its planners for a draft the runtime or a job
     /// registered, and none decided it (`draft_planner_exhausted`,
-    /// ADR-0041 decision 16): a person decides it in a planner of theirs.
+    /// ADR-0041 decision 16): the inbox records a planning request that
+    /// names it (`request add --ref task:N`, ADR-t1394-1 decision 8), or a
+    /// person decides it in their own terminal.
     DecideDraft,
     /// The runtime opened its planners for a finding marked for a proposal,
     /// and none decided it (`finding_planner_exhausted`, ADR-0044 decision
-    /// 19): a person decides it in a planner of theirs.
+    /// 19): the inbox records a planning request that names it (`request
+    /// add --ref finding:N`, ADR-t1394-1 decision 8), or a person decides it
+    /// in their own terminal.
     DecideFinding,
     /// A planning request's planner submitted a proposal of it
     /// (`request_proposed`, ADR-t1394-1 decision 6): a notice the inbox
@@ -1759,9 +1763,11 @@ pub enum AttentionNext {
     /// tells the person, who words it again (a new request) or drops it.
     RephraseRequest,
     /// A task of a closed goal will not complete while other tasks wait on
-    /// it (`dependency_stranded`, task 421): a person decides in a planner
-    /// whether to remove the dependency, cancel the waiting tasks or take
-    /// the task up again. It ends once nothing waits on such a task.
+    /// it (`dependency_stranded`, task 421): the inbox records a planning
+    /// request that names the task (`request add --ref task:N`), whose
+    /// planner decides whether to remove the dependency, cancel the waiting
+    /// tasks or take the task up again, or a person decides it in their own
+    /// terminal. It ends once nothing waits on such a task.
     DecideWaiting,
     /// A program `[run.env]` names is not found on the supervisor's PATH
     /// (`run_env_program_missing`, ADR-0049 decision 9): a person installs
@@ -1860,11 +1866,11 @@ impl fmt::Display for AttentionNext {
             Self::PlanReviewByHand => f.write_str("plan review by hand"),
             Self::GoalReviewByHand => f.write_str("goal review by hand"),
             Self::CheckPlanner => f.write_str("check the planner"),
-            Self::DecideDraft => f.write_str("decide the draft in a planner"),
-            Self::DecideFinding => f.write_str("decide the finding in a planner"),
+            Self::DecideDraft => f.write_str("request a plan for the draft"),
+            Self::DecideFinding => f.write_str("request a plan for the finding"),
             Self::ReportRequest => f.write_str("report the request's proposal"),
             Self::RephraseRequest => f.write_str("rephrase or drop the request"),
-            Self::DecideWaiting => f.write_str("decide the waiting tasks in a planner"),
+            Self::DecideWaiting => f.write_str("request a plan for the waiting tasks"),
             Self::InstallTool => f.write_str("install tool"),
             Self::ReportUpdate => f.write_str("report the update"),
             Self::ReportReview => f.write_str("report the review"),
@@ -1906,6 +1912,7 @@ pub const ATTENTION_KINDS: &[&str] = &[
     "goal_review_failed",
     "planner_unresponsive",
     "draft_planner_exhausted",
+    "finding_planner_exhausted",
     event_kind::REQUEST_PROPOSED,
     event_kind::REQUEST_DECLINED,
     event_kind::REQUEST_PLANNER_EXHAUSTED,
@@ -3286,6 +3293,16 @@ mod attention_tests {
             ),
             ("update_started", json!({"commit": "abc"}), None),
             (
+                "draft_planner_exhausted",
+                json!({"planners": 3}),
+                Some(DecideDraft),
+            ),
+            (
+                "finding_planner_exhausted",
+                json!({"finding_id": 2, "planners": 3}),
+                Some(DecideFinding),
+            ),
+            (
                 "dependency_stranded",
                 json!({"goal_id": 2, "verdict": "abandoned", "waiting": [5]}),
                 Some(DecideWaiting),
@@ -3376,9 +3393,11 @@ mod attention_tests {
         assert_eq!(FixPush.to_string(), "fix the push command");
         assert_eq!(BrokerStatus.to_string(), "dagq broker status");
         assert_eq!(QueueServiceStatus.to_string(), "dagq service status");
+        assert_eq!(DecideDraft.to_string(), "request a plan for the draft");
+        assert_eq!(DecideFinding.to_string(), "request a plan for the finding");
         assert_eq!(
             DecideWaiting.to_string(),
-            "decide the waiting tasks in a planner"
+            "request a plan for the waiting tasks"
         );
         assert_eq!(
             DeliveringAnswer {

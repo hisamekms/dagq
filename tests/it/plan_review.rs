@@ -1783,8 +1783,15 @@ fn drafts_of_the_runtime_get_planners_within_the_limit_and_a_persons_draft_none(
         .filter(|a| a["task_id"] == gap.as_i64())
         .collect();
     assert_eq!(attention.len(), 1, "{status}");
-    assert_eq!(attention[0]["next"], "decide the draft in a planner");
+    assert_eq!(attention[0]["next"], "request a plan for the draft");
     assert_eq!(attention[0]["kind"], "draft_planner_exhausted");
+    let watched = dagq::watch::events(&fx.db, dagq::domain::EventId::new(0), 100, false).unwrap();
+    assert!(
+        watched["events"].as_array().unwrap().iter().any(|e| {
+            e["kind"] == "draft_planner_exhausted" && e["next"] == "request a plan for the draft"
+        }),
+        "{watched}"
+    );
     // Nothing of this took a plan review.
     assert!(reviewer.prompts().is_empty());
 }
@@ -1900,8 +1907,8 @@ fn a_planner_question_answer_is_typed_into_its_planner_or_carried_by_a_new_one()
     );
     assert!(queue.asks(Default::default()).unwrap().is_empty());
 
-    // keep_draft leaves the draft to a person's planner: no runtime
-    // planner is opened for it again.
+    // keep_draft leaves the draft as it is until the inbox records a
+    // planning request for it: no runtime planner is opened for it again.
     let asked = queue
         .ask(NewAsk {
             recommendation: None,

@@ -402,10 +402,7 @@ fn abandoning_a_goal_tells_the_inbox_of_the_tasks_waiting_on_its_task() {
     let attention = stranded_attention(&db);
     assert_eq!(attention.len(), 1, "{attention:?}");
     assert_eq!(attention[0]["task_id"], a.as_i64());
-    assert_eq!(
-        attention[0]["next"],
-        "decide the waiting tasks in a planner"
-    );
+    assert_eq!(attention[0]["next"], "request a plan for the waiting tasks");
     assert_eq!(
         attention[0]["last_error"],
         format!(
@@ -416,7 +413,7 @@ fn abandoning_a_goal_tells_the_inbox_of_the_tasks_waiting_on_its_task() {
     assert!(
         events["events"].as_array().unwrap().iter().any(|e| {
             e["kind"] == "dependency_stranded"
-                && e["next"] == "decide the waiting tasks in a planner"
+                && e["next"] == "request a plan for the waiting tasks"
         }),
         "{events}"
     );

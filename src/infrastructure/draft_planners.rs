@@ -947,7 +947,8 @@ fn planners_opened(conn: &Connection, draft: TaskId) -> Result<usize> {
 /// Where the answer of `ask` goes: the planner of the runtime's not closed
 /// that works on its task (opened for its bundle of drafts, or for its
 /// proposal);
-/// else closed by the supervisor for `keep_draft` (nothing to apply) or a
+/// else closed by the supervisor for `keep_draft` (nothing to apply: the
+/// draft waits as it is for a planning request the inbox records) or a
 /// draft that moved on; else a new planner for a draft that still waits
 /// (unless its planners are used up); else a person's.
 pub(super) fn route_of(conn: &Connection, ask: &Ask) -> Result<PlannerAnswerRoute> {
@@ -984,7 +985,8 @@ pub(super) fn route_of(conn: &Connection, ask: &Ask) -> Result<PlannerAnswerRout
             PlannerId::new(id),
         )?)));
     }
-    // A draft kept for a person's planner needs nothing more of the
+    // A draft kept by the answer waits as it is for a planning request the
+    // inbox records (ADR-t1394-1 decision 8) and needs nothing more of the
     // runtime's: nobody is left to tell.
     if ask.answer.as_deref().map(str::trim) == Some("keep_draft") {
         return Ok(PlannerAnswerRoute::Close);

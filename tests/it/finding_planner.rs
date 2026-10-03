@@ -616,7 +616,15 @@ fn a_planner_question_about_a_finding_is_typed_to_its_planner_and_undecided_plan
         .filter(|a| a["kind"] == "finding_planner_exhausted")
         .collect();
     assert_eq!(attention.len(), 1, "{status_now}");
-    assert_eq!(attention[0]["next"], "decide the finding in a planner");
+    assert_eq!(attention[0]["next"], "request a plan for the finding");
+    let watched = dagq::watch::events(&fx.db, dagq::domain::EventId::new(0), 100, false).unwrap();
+    assert!(
+        watched["events"].as_array().unwrap().iter().any(|e| {
+            e["kind"] == "finding_planner_exhausted"
+                && e["next"] == "request a plan for the finding"
+        }),
+        "{watched}"
+    );
 
     // A person's planner submits the remedy naming the finding.
     let goal = open_goal(&mut queue);

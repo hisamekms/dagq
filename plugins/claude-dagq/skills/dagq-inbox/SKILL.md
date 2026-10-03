@@ -53,7 +53,8 @@ Report each in a short list (task, status, `next`, gist of `last_error`); act wi
 - `read the answer of ask <id> and close it` (`ask_answered`), `send the answer of ask <id> to the worker and close it`: carry it out (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/session.md`), then `"$DAGQ" ask close <id>`.
 - `triage by hand` (`triage_failed`), `recover by hand` (`recovery_failed`): `dagq-recover` section 4.
 - `goal review by hand` (`goal_review_failed`): on the person's word, `goal review ID` reruns it, or the person closes the goal (`dagq-recover` section 8).
-- `decide the draft in a planner`, `decide the finding in a planner`, `decide the waiting tasks in a planner`, `check the planner`, `plan review by hand`: the person, in a planner (`dagq-recover` section 8).
+- `request a plan for the draft`, `request a plan for the finding`, `request a plan for the waiting tasks`: a request on the person's word (`reference/status.md`).
+- `check the planner`, `plan review by hand`: the person, in a planner (`dagq-recover` section 8).
 - `report the update` (`update_installed`), `report the review`, `check the failed review`: tell the person (`reference/watch.md`).
 - `install tool` (`run_env_program_missing`), `fix the push command` (`kpi_push_abandoned`), `check the e2e host` (`run_e2e_finished`): the person fixes it.
 - `stop the dead landing's processes` (`landing_release_stuck`): the person stops its pids.

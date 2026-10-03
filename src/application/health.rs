@@ -1111,8 +1111,9 @@ pub fn attention(
     // A proposal whose plan review failed, or whose planner did not answer
     // a revise, waits for a person outside any ask (ADR-0041 decisions 13,
     // 17); it is shown on the proposal's first task.
-    // A draft the runtime's planners left undecided waits for a person's
-    // planner (ADR-0041 decision 16).
+    // A draft the runtime's planners left undecided waits for a planning
+    // request the inbox records (ADR-0041 decision 16, ADR-t1394-1 decision
+    // 8).
     for draft in queue.exhausted_drafts()? {
         attention.push(Attention {
             run_id: None,
@@ -1127,8 +1128,9 @@ pub fn attention(
             next: AttentionNext::DecideDraft,
         });
     }
-    // A finding the runtime's planners left undecided waits for a
-    // person's planner (ADR-0044 decision 19); it is shown on its task,
+    // A finding the runtime's planners left undecided waits for a planning
+    // request the inbox records (ADR-0044 decision 19, ADR-t1394-1 decision
+    // 8); it is shown on its task,
     // or on none for a finding on the queue or a goal.
     for finding in queue.exhausted_findings()? {
         attention.push(Attention {
@@ -1148,7 +1150,8 @@ pub fn attention(
         });
     }
     // A task of a closed goal that will not complete strands the tasks
-    // waiting on it until a person's planner decides them (task 421); it is
+    // waiting on it until a planning request's planner or a person decides
+    // them (task 421); it is
     // shown on that task, once however many wait.
     for stranded in queue.stranded_dependencies()? {
         attention.push(Attention {
