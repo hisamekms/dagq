@@ -470,7 +470,7 @@ pub struct Stats {
     pub e2e: Vec<E2eStats>,
     pub overall: Intervals,
     pub alerts: Vec<Alert>,
-    /// Failed backend calls after `--since` (up to `next_cursor`); without
+    /// Failed backend calls after `--since` (up to the window's end); without
     /// it, those since the earliest first event of the runs returned, or all of
     /// them with `--full` or when no run is returned. With `--goal`, only
     /// the failures of that goal's runs.
@@ -1005,19 +1005,24 @@ pub fn stats(
             .map_or(EventId::new(0), |id| EventId::new(id.as_i64() - 1)),
     };
     let counts = |task_id: Option<TaskId>| query.goal_id.is_none() || task_id.is_some_and(in_goal);
-    let backend_failures = backend_failures(events, window_start, next_cursor, counts);
-    let reason_codes = reason_codes(events, window_start, next_cursor, counts);
-    let duplicate_cancels = duplicate_cancels(events, window_start, next_cursor, counts);
-    let review_reasons = review_reasons::review_reasons(events, window_start, next_cursor, counts);
-    let landing_rechecks = landing_rechecks(events, window_start, next_cursor, counts);
+    // The period aggregates span the whole window asked for, up to
+    // `--until` or else the latest event, not the page of runs: with
+    // `--since` past more than a page of finished runs, `next_cursor` stops
+    // at the page's last run and cut them short (tasks 1370 and 1379).
+    let window_last = latest;
+    let backend_failures = backend_failures(events, window_start, window_last, counts);
+    let reason_codes = reason_codes(events, window_start, window_last, counts);
+    let duplicate_cancels = duplicate_cancels(events, window_start, window_last, counts);
+    let review_reasons = review_reasons::review_reasons(events, window_start, window_last, counts);
+    let landing_rechecks = landing_rechecks(events, window_start, window_last, counts);
     // The window ends now unless it stops at an earlier event.
-    let window_end = match events.iter().find(|event| event.id == next_cursor) {
-        Some(event) if until.is_some() || next_cursor < latest_event => {
+    let window_end = match events.iter().find(|event| event.id == window_last) {
+        Some(event) if until.is_some() || window_last < latest_event => {
             timestamp_millis(&event.created_at).unwrap_or(now * 1000)
         }
         _ => now * 1000,
     };
-    let ask_stats = asks::asks(events, window_start, next_cursor, window_end, counts);
+    let ask_stats = asks::asks(events, window_start, window_last, window_end, counts);
     // The host's load is read over this window in time: from `--since`'s
     // time, else the window's first event; to `--until`'s time, else the
     // window's end.
@@ -1037,7 +1042,7 @@ pub fn stats(
         .or_else(|| {
             events
                 .iter()
-                .filter(|event| event.id > window_start && event.id <= next_cursor)
+                .filter(|event| event.id > window_start && event.id <= window_last)
                 .filter_map(|event| timestamp_millis(&event.created_at))
                 .min()
         })
@@ -1050,74 +1055,71 @@ pub fn stats(
         now * 1000,
         counts,
     );
-    let auto_repairs = auto_repairs::auto_repairs(events, window_start, next_cursor, counts);
-    let provider_switches = providers::provider_switches(events, window_start, next_cursor, counts);
+    let auto_repairs = auto_repairs::auto_repairs(events, window_start, window_last, counts);
+    let provider_switches = providers::provider_switches(events, window_start, window_last, counts);
     // A goal review is the goal's event, with no task.
-    let jobs = jobs::jobs(events, window_start, next_cursor, |event| {
+    let jobs = jobs::jobs(events, window_start, window_last, |event| {
         match (event.task_id, event.goal_id) {
             (None, Some(goal)) => query.goal_id.is_none_or(|only| only == goal),
             (task_id, _) => counts(task_id),
         }
     });
-    let updates = updates::updates(events, window_start, next_cursor, counts);
+    let updates = updates::updates(events, window_start, window_last, counts);
     let draft_flow = drafts::draft_flow(
         events,
         &live.draft_origins,
         window_start,
-        next_cursor,
+        window_last,
         window_end,
         counts,
     );
     let follow_up_categories = follow_up_categories::follow_up_categories(
         events,
         window_start,
-        next_cursor,
+        window_last,
         window_end,
         counts,
     );
     let worker_question_topics = worker_question_topics::worker_question_topics(
         events,
         window_start,
-        next_cursor,
+        window_last,
         live.utc_offset_secs,
         counts,
     );
     let recommendations =
-        recommendations::recommendations(events, window_start, next_cursor, counts);
+        recommendations::recommendations(events, window_start, window_last, counts);
     let claim_holds =
-        super::claim_hold::claim_holds(events, window_start, next_cursor, window_end, counts);
+        super::claim_hold::claim_holds(events, window_start, window_last, window_end, counts);
     let landing_holds = super::claim_hold::holds_of(
         super::claim_hold::LANDINGS,
         events,
         window_start,
-        next_cursor,
+        window_last,
         window_end,
         counts,
     );
     let claim_deferrals =
-        super::claim_defer::claim_deferrals(events, window_start, next_cursor, window_end, counts);
+        super::claim_defer::claim_deferrals(events, window_start, window_last, window_end, counts);
     let verification_commands =
-        measures::verification_commands(events, window_start, next_cursor, counts);
+        measures::verification_commands(events, window_start, window_last, counts);
     let verification_failures =
-        measures::verification_failures(events, window_start, next_cursor, counts);
-    let failed_tests = failed_tests::failed_tests(events, window_start, next_cursor, counts);
-    // The waits span the whole window asked for, not the page of runs:
-    // with `--since` past more than a page of finished runs, `next_cursor`
-    // stops at the page's last run and left the later waits out (task 1370).
-    let waiting = super::waiting::waiting_stats(events, window_start, latest, counts);
+        measures::verification_failures(events, window_start, window_last, counts);
+    let failed_tests = failed_tests::failed_tests(events, window_start, window_last, counts);
+    let waiting = super::waiting::waiting_stats(events, window_start, window_last, counts);
     let worker_routes =
-        routes::route_health(events, window_start, latest, counts, &waiting.by_route);
+        routes::route_health(events, window_start, window_last, counts, &waiting.by_route);
     let stall_thresholds = thresholds::thresholds(
         &thresholds::detections(events, now * 1000),
         &thresholds::preemptions(events),
-        |id, task_id| id > window_start && id <= next_cursor && counts(task_id),
+        |id, task_id| id > window_start && id <= window_last && counts(task_id),
         &running_alerts,
         &live.config.config,
     );
     let conflict_hotspots = conflicts::conflict_hotspots(
         events,
         window_start,
-        next_cursor,
+        window_last,
         counts,
         &live.history,
         live.conflicts,
@@ -1127,7 +1129,7 @@ pub fn stats(
         events,
         SessionWindow {
             after: window_start,
-            upto: next_cursor,
+            upto: window_last,
         },
         window_end,
         |span| match query.goal_id {
@@ -3714,5 +3716,119 @@ mod tests {
             (interactive.started, interactive.waited.total_secs),
             (2, 60)
         );
+    }
+
+    /// Task 1379: `--since` past more than a page of finished runs pages
+    /// the runs and `next_cursor`, but every period aggregate counts up to
+    /// the window's end (`--until`, else the latest event), the same as
+    /// `--full` reads it.
+    #[test]
+    fn period_aggregates_span_the_window_past_the_page_of_runs() {
+        let runs = DEFAULT_RUNS + 10;
+        let run = |n: usize| format!("{n:08x}-1111-4111-8111-111111111111");
+        let mut events = Vec::new();
+        let mut id = 0;
+        let mut push = |events: &mut Vec<RunEvent>, run: &str, kind: &str, payload: Value| {
+            id += 1;
+            events.push(run_event(id, run, kind, payload, T + id));
+        };
+        for n in 0..runs {
+            push(&mut events, &run(n), "run_claimed", json!({}));
+            push(&mut events, &run(n), "run_integrated", json!({}));
+        }
+        // Events after the first page's last run.
+        let late = run(runs);
+        push(&mut events, &late, "run_claimed", json!({}));
+        for _ in 0..2 {
+            push(
+                &mut events,
+                &late,
+                "backend_call_failed",
+                json!({"op": "capture", "attempt": 1, "max_attempts": 3}),
+            );
+            push(
+                &mut events,
+                &late,
+                "provider_switched",
+                json!({"reason": "usage_limit", "from": "claude", "to": "codex"}),
+            );
+        }
+        push(
+            &mut events,
+            &late,
+            "ask_opened",
+            json!({"ask_id": 7, "kind": "worker_question", "asked_by": "worker",
+                "reason_category": "scope", "topics": ["task_overlap"]}),
+        );
+        push(&mut events, &late, "ask_answered", json!({"ask_id": 7}));
+        push(&mut events, &late, "observe_started", json!({}));
+        push(
+            &mut events,
+            &late,
+            "observe_finished",
+            json!({"outcome": "succeeded"}),
+        );
+        let until = events[events.len() - 1].id;
+        push(
+            &mut events,
+            &late,
+            "backend_call_failed",
+            json!({"op": "close"}),
+        );
+        let read = |full: bool, until: Option<EventId>| {
+            stats(
+                &events,
+                &HashMap::new(),
+                T + 10_000,
+                SlotSnapshot::default(),
+                &StatsQuery {
+                    since: Some(EventId::new(0).into()),
+                    until: until.map(Into::into),
+                    full,
+                    ..StatsQuery::default()
+                },
+                &LiveSnapshot::default(),
+            )
+        };
+        // What follows the page of runs: the runs, what is derived from
+        // them and the cursor.
+        let periods = |stats: &Stats| {
+            let mut value = serde_json::to_value(stats).unwrap();
+            let object = value.as_object_mut().unwrap();
+            for key in [
+                "runs",
+                "goals",
+                "changes",
+                "areas",
+                "e2e",
+                "overall",
+                "alerts",
+                "versions",
+                "load_bands",
+                "trial_groups",
+                "escalations",
+                "next_cursor",
+            ] {
+                object.remove(key);
+            }
+            (value, stats.window_ms)
+        };
+        for until in [None, Some(until)] {
+            let paged = read(false, until);
+            let full = read(true, until);
+            assert_eq!(paged.runs.len(), DEFAULT_RUNS);
+            assert_eq!(full.runs.len(), runs);
+            assert!(paged.next_cursor < full.next_cursor);
+            assert_eq!(periods(&paged), periods(&full));
+            let late = if until.is_some() { 2 } else { 3 };
+            assert_eq!(paged.backend_failures.count, late);
+            assert_eq!(paged.provider_switches.count, 2);
+            assert_eq!(paged.asks.opened.by_kind["worker_question"], 1);
+            assert_eq!(
+                paged.worker_question_topics.by_topic["task_overlap"].asks,
+                1
+            );
+            assert_eq!(paged.jobs["observer"].all.count, 1);
+        }
     }
 }
