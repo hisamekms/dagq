@@ -4,8 +4,8 @@ type: design
 title: "Prompt"
 status: current
 created: 2026-09-26
-updated: 2026-10-03 # task 1566: the common rules of the headless jobs' prompts
-last_verified: 2026-10-03 # task 1566
+updated: 2026-10-03 # task 1561: the plan review's limits and prompt_bytes
+last_verified: 2026-10-03 # task 1561
 scope: runtime
 related:
   - adr-t1566-1
@@ -112,16 +112,34 @@ follow_up・goal gap・findingのdraftの`context`の見出しは英語（`follo
 - **取りに行く経路**（決定3）: jobの権限の意図（`JobAccess`、[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)）と許す道具で実際に読める経路だけを読む方法として書く。`queue_cli`のjob（observer・スループットの見直し）はファイルを読めないので、jobのdirの`input.json`は読む方法にしない（人が読むためのもの）。`read_files`のjob（runのreview・復旧job）は意図として`dagq`を打てないので（Codexのreviewはsandboxの都合で読むコマンドを打てても、promptはそれを読む方法にしない）、省いてよいのはそのjobが読めるファイル（worktreeとrun directory）にあるものだけ。
 - **上限と選ぶ順**（決定4）: 節ごとの件数かbyteの上限と全体の上限を持ち、超えたときに残す順（関連の強さ、新しさ）は決まった規則で決める。
 - **省いたことの明示**（決定5）: 節ごとに省いた件数と読む方法をpromptに書く。
-- **記録とtest**（決定6）: jobごとにpromptのbyte数をeventに記録し、上限をtestで確かめる。今はどのjobもbyte数を記録していない。eventと欄の名前は、各jobの上限を入れるtaskがここに書く。
+- **記録とtest**（決定6）: jobごとにpromptのbyte数をeventに記録し、上限をtestで確かめる。記録するのは今はplan reviewだけ（`plan_review_finished`と`plan_review_failed`の`prompt_bytes`。下の「plan reviewの上限」）。ほかのjobのeventと欄の名前は、各jobの上限を入れるtaskがここに書く。
 
 | job | 今の渡し方 | 権限の意図 | 今の節（材料） | 今の上限 | 取りに行く経路 |
 | --- | --- | --- | --- | --- | --- |
-| plan review（[Plan review](plan-review.md)の4） | 引数（Claude・Codex。task 1560が替える） | `read_files_and_queue_cli`（読むだけの`dagq`とファイルの読み取り） | proposalのtaskの全field、関係するgoal、`lint`、他の`submitted` / `revising`のproposal、`ready` / `in_progress`のtaskの要約と一部の全文、予想するファイル、人が答えたask、衝突の多いファイル、重複と実装済みの候補（2026-10-03に約1.1MB。`ready` / `in_progress`のtaskの全文が72%、要約が12%、人が答えたaskが8%） | 節の件数だけ（要約200件（`QUEUED_TASKS`、超えた件数を書く）、人が答えたask 30件、hotspot 15件、重複の候補はtaskごとに5件、要約の行の`expected_files`は10件（`SUMMARY_EXPECTED_FILES`））。全文の節・byteの上限と全体の上限は無い。task 1561が決めてここに書く | `dagq show`・`proposal show`・`search`・`related`・`findings`・`stats`・`events --full`・`timeline`、repositoryのファイル |
+| plan review（[Plan review](plan-review.md)の4） | 引数（Claude・Codex。task 1560が替える） | `read_files_and_queue_cli`（読むだけの`dagq`とファイルの読み取り） | proposalのtaskの全field、関係するgoal、`lint`、他の`submitted` / `revising`のproposal、`ready` / `in_progress`のtaskの要約と一部の全文、予想するファイル、人が答えたask、衝突の多いファイル、重複と実装済みの候補（2026-10-03のplan review 724で1,148,345 byte。`ready` / `in_progress`のtaskの全文が72%、要約が12%、人が答えたask・hotspot・重複の候補が合わせて8%（人が答えたaskだけでは20,712 byte、約2%）。内訳は下の「plan reviewの上限」） | 全体400,000 byte（`PLAN_REVIEW_PROMPT_LIMIT`）、必須の節200,000 byte、全文20件・100,000 byte、要約64,000 byte、人が答えたask 20件・16,000 byte、hotspot 16,000 byte、重複の候補48,000 byte、他のproposal 48,000 byte（task 1561。値・理由・選ぶ順・必須の節は下の「plan reviewの上限」）。読む件数は要約200件（`QUEUED_TASKS`）、hotspot 15件、重複の候補はtaskごとに5件、要約の行の`expected_files`は10件（`SUMMARY_EXPECTED_FILES`）。byte数は`plan_review_finished` / `plan_review_failed`の`prompt_bytes` | `dagq show`・`proposal show`・`search`・`related`・`findings`・`stats`・`events --full`・`timeline`、上限で省いたものを読む方法として`dagq show ID --full`・`goal show ID --full`・`proposal show ID`・`lint --proposal ID`・`related ID`・`search`・`asks --all`・`stats`・`list --status ready,in_progress --limit 200`（`prompt::PLAN_REVIEW_READS`。task 1561）、repositoryのファイル |
 | observer（[Observer](observer.md)） | 引数（`prompt.md`はjobのdirに書くが、渡すのは引数。task 1560が替える） | `queue_cli`（`Bash(dagq:*)`だけ） | 入力のJSON（`stats`・`kpi`・`findings`・`improvements`・`notes`・`open_asks`・`graph`）と読み方の指示（2026-10-01T13:54Zから約1.2MB） | 節の件数の一部だけ（noteは直近20件、cursorが無いときの`stats`は直近50件）。byteの上限と全体の上限は無い。observerのpromptの上限のtaskが決めてここに書く | `stats`・`kpi`・`findings`・`notes`・`asks`・`graph`・`forecast`・`events --full`・`timeline`・`observe --history` |
 | goal review（[Goal review](goal-review.md)の4） | 引数（task 1560が替える） | `read_files_and_queue_cli` | goal、所属taskのdescription・acceptance、着地したrunのreceipt、goalのevent、前回までのgoal review（150〜220KB） | 無い。上限を入れるtaskが決めてここに書く（まだ登録されていない） | `dagq show`・`goal show --full`・`findings`・`events --goal`・`search`、repositoryのファイル |
 | スループットの見直し（[スループットの見直し](throughput-review.md#promptの入力task-1099)） | 引数（上限で`ARG_MAX`に当たらない。task 1560が替える） | `queue_cli` | 指示・手順（pluginの`reference/kpi.md`の節）と入力の要約 | prompt全体が`PROMPT_LIMIT`（128KiB）、入力が`PROMPT_INPUT_LIMIT`（96KiB）。超えたら`DROP_ORDER`で落として`omitted_to_fit`に名を残し、promptが細部を読むコマンドを示す（task 1099）。byte数の記録は無い | `kpi`・`stats --full`・`timeline`・`events --full` |
 | runのreview（[Review](review.md)） | 引数（task 1560が替える） | `read_files`（worktreeとrun directoryのファイルだけ） | taskの記述・context、`review.md`の資料（約10KB） | 無い。上限を入れるtaskが決めてここに書く（まだ登録されていない） | worktreeとrun directoryのファイル |
 | 復旧job（[復旧job](background-recovery-job.md)） | 引数（task 1560が替える） | `read_files` | taskのdescription・acceptance・verification_commandsと`task_edited`、alertの意味と事実、`capture`した画面の末尾、runのプロセスの一覧、worktreeのHEADとreceiptの`commit`と`git status`、そのrunの過去の自動修正とverdict（[復旧job](background-recovery-job.md)の`recovery_prompt`） | 無い。上限を入れるtaskが決めてここに書く（まだ登録されていない） | run directoryのファイル |
 | runtimeのplanner（[Session prompts](session-prompts.md)、[非対話のworker](headless-worker.md)） | 非対話のturnの`claude -p … -- <prompt>`の引数（[非対話のworker](headless-worker.md)。task 1560が替えるかは同taskが決める） | plannerのrole（読むコマンドと計画のコマンド。[Authorization](../authorization.md)） | `runtime_planner_prompt`・`draft_planner_prompt`・`finding_planner_prompt`の指摘とtaskの行 | 無い。上限を入れるtaskが決めてここに書く（まだ登録されていない） | `dagq show`・`proposal show`・`search`・`related`・`findings`・`events --full`、repositoryのファイル |
+
+### plan reviewの上限
+
+task 1561。仕組み（必須の節の替え方、選ぶ順、省いたことの書き方、`prompt_bytes`の欄）は[Plan review](plan-review.md)の4の「上限と選ぶ順」が持ち、ここは値と理由を持つ。値は`src/application/prompt.rs`の定数。基にしたのは2026-10-03のplan review 724（proposal 559、15 task）の`prompt.txt`（1,148,345 byte）を節の見出しで分けて数えた内訳: `ready` / `in_progress`のtaskの全文821,084 byte（179件、1件平均4,587 byte）、要約132,986 byte（200件、平均665 byte）、人が答えたask 20,712 byte（30件、平均690 byte）、重複の候補62,000 byte（15行、平均4,107 byte）、hotspot 4,815 byte、proposalのtask 60,828 byte、goal・予想するファイル・lint・他のproposal・指示など45,920 byte。
+
+| 定数 | 値 | 理由 |
+| --- | --- | --- |
+| `PLAN_REVIEW_PROMPT_LIMIT`（全体、言語の指示を含む） | 400,000 byte | macOSの`ARG_MAX`（1,048,576 byte）の4割未満で、引数で渡す今（task 1560の前）もenvを足して余裕がある。724の必須の節（約107KB）と省いてよい節の上限の和に近く、724は全体の上限に当たらずに約335KBに収まる |
+| `PLAN_REVIEW_REQUIRED_LIMIT`（必須の節） | 200,000 byte | 全体の半分。724の必須の節（約107KB）の2倍弱で、普通のproposalでは替えが起きず、超えても省いてよい節に半分が残る |
+| `QUEUED_FULL_TASKS` / `QUEUED_FULL_BYTES`（全文） | 20件 / 100,000 byte | 全文が724の72%を占めた。重なりの強い上位20件（平均4.6KBで約92KB）を読めば依存の判断に足り、残りは`dagq show ID --full`で読める。byteの上限は1件の巨大なtaskが節を塞がないため |
+| `QUEUED_SUMMARY_BYTES`（要約） | 64,000 byte | 724の要約（約133KB）の半分弱で、平均の行で約96件。重なるものから載せ、残りは`dagq list`で読める |
+| `PRECEDENT_ASKS` / `PRECEDENT_BYTES`（人が答えたask） | 20件 / 16,000 byte | 1件の問いと答えはそれぞれ400文字まで（`PRECEDENT_CHARS`）で日本語なら2KBを超えうる。新しい20件で先例の候補に足り、古いものは`dagq asks --all`で読める |
+| `HOTSPOT_BYTES`（衝突の多いファイル） | 16,000 byte | 15件（`HOTSPOT_FILES`）で約5KB。依存の判断の要なので最初に残し、上限は`queued_tasks`の並びが長いときだけに当たる |
+| `CANDIDATE_BYTES`（重複と実装済みの候補） | 48,000 byte | 724で約62KB（taskごと約4KB）。15 taskのうち11 task分に当たり、残りは`dagq related` / `dagq search`で引ける |
+| `OTHER_PROPOSAL_BYTES`（他のproposal） | 48,000 byte | 他のproposalのtaskのdescription・acceptanceを丸ごと載せるので、待つproposalが多いと伸びる。前に出されたものとの食い違いの検査に要るので重複の候補の次に残し、残りは`dagq proposal show ID`で読める |
+| `OMISSION_NOTE_BYTES`（節ごとの注記の空き） | 2,000 byte | 注記は省いた件数・読むコマンド・IDの並び（40件まで）で収まる |
+
+省いてよい節は、全体の上限の残りを衝突の多いファイル → 重複の候補 → 他のproposal → 人が答えたask → 全文 → 要約の順に取る（依存と重複の判断に直接効くものを先に、CLIの一覧で代えやすい要約を最後にする）。必須の節（指示と検査とverdictの形、proposalのtaskの全文、予想するファイル、goal、`lint`、最後の言語の指示）は省かず、必須の節だけで200,000 byteを超えるときだけ大きいものから読むコマンドの案内に替える（jobの今の権限で打てる読むだけの`dagq`。jobのdirのファイルには退避しない）。
 
 workerの`prompt.txt`（この文書の上の節）はADR-t1566-1の範囲に含めない。

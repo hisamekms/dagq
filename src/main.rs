@@ -4381,6 +4381,47 @@ mod tests {
         }
     }
 
+    /// Task 1561 (ADR-t1566-1 decision 3): every command the plan review
+    /// prompt names to read what its limits left out is a read the plan
+    /// review job's role may run, on the command line and as a client of
+    /// the queue service, which authorizes it as a read.
+    #[test]
+    fn the_plan_review_job_may_run_each_read_its_prompt_names() {
+        // Clap's parser needs more than a test thread's stack, as `main`
+        // gives it.
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(plan_review_job_may_run_each_read_its_prompt_names)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn plan_review_job_may_run_each_read_its_prompt_names() {
+        assert!(dagq::runtime::PLAN_REVIEW_ACCESS.runs_queue_cli());
+        let actor = ActorContext::plan_review_job(3, 1);
+        for form in dagq::application::prompt::PLAN_REVIEW_READS {
+            let line = form
+                .replace("--limit ID", "--limit 200")
+                .replace("'<words of its title>'", "words")
+                .replace("ID", "3");
+            let argv: Vec<&str> = line.split(' ').collect();
+            let cli =
+                Cli::try_parse_from(&argv).unwrap_or_else(|error| panic!("{argv:?}: {error}"));
+            let requested = requests(&cli.command);
+            assert!(!requested.is_empty(), "{argv:?}");
+            for (capability, _) in requested {
+                assert_eq!(capability, Capability::QueueRead, "{argv:?}");
+            }
+            check_access(&actor, &cli.command, None)
+                .unwrap_or_else(|error| panic!("{argv:?}: {error:#}"));
+            assert!(
+                client_request(&cli.command).unwrap().is_some(),
+                "{argv:?} has no use case of the queue service"
+            );
+        }
+    }
+
     /// The subcommands `DAGQ_COMMANDS` leaves out, each for a reason: the
     /// ones that only read, and the ones with a form that reads, which a
     /// rule on the name would deny as well (the CLI refuses the other

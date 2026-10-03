@@ -4,8 +4,8 @@ type: design
 title: Queue service
 status: current
 created: 2026-10-02
-updated: 2026-10-03
-last_verified: 2026-10-03
+updated: 2026-10-03 # task 1561: the plan review job's reads of what its prompt's limits left out
+last_verified: 2026-10-03 # task 1561
 scope: runtime
 tags:
   - security
@@ -128,7 +128,7 @@ promptとskillが打たせるdagqのコマンドと、行き先のユースケ�
 
 | 呼び出し元 | どこが言うか | コマンド |
 | --- | --- | --- |
-| plan review job（`ReadFilesAndQueueCli`） | `prompt::plan_review_prompt`と`RECORD_READING`、AGENTS.mdのplan reviewの節 | `show ID`・`proposal show ID`・`search`・`related`・`findings`・`stats`・`lint`・`events --full`・`timeline RUN` |
+| plan review job（`ReadFilesAndQueueCli`） | `prompt::plan_review_prompt`と`RECORD_READING`、上限で省いたものを読む方法の`prompt::PLAN_REVIEW_READS`（task 1561。[Plan review](supervisor-lifecycle/plan-review.md)の4）、AGENTS.mdのplan reviewの節 | `show ID`・`show ID --full`・`proposal show ID`・`goal show ID --full`・`search`・`related`・`findings`・`stats`・`lint`・`lint --proposal ID`・`asks --all`・`list --status ready,in_progress --limit 200`・`events --full`・`timeline RUN` |
 | goal review job（`ReadFilesAndQueueCli`） | `prompt::goal_review_prompt` | `show ID`・`goal show ID --full`・`findings`・`events --goal ID --full`・`search` |
 | observer（`QueueCli`） | `observer::observer_prompt` | 読み取り: `findings [ID] [--full]`・`stats`・`kpi`・`marks`・`notes`・`show ID`・`asks`・`graph`・`forecast`・`goal show ID`・`events --full`・`timeline RUN`・`observe --history`。書き込み: `finding record`・`finding resolve`・`ask --kind blocked --finding ID` |
 | スループットの見直しのjob（`QueueCli`） | `throughput_review::review_prompt`と、それが載せるdagq skillの`reference/kpi.md`の手順 | `kpi [--period] [--last] [--area] [--change]`・`stats [--since] [--until] [--full]`・`timeline RUN`・`events --full --kind --since --until`・`asks`・`marks`・`findings`・`show ID`・`forecast` |

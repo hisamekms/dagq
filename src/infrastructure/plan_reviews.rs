@@ -754,6 +754,7 @@ impl PlanReviewStore for SqliteQueue {
                 "ask_id": applied.ask.as_ref().map(|outcome| outcome.ask.id),
                 "duration_secs": apply.duration_secs,
                 "prediction_error": predictions.as_ref().err(),
+                "prompt_bytes": apply.prompt_bytes,
         });
         if let Some(session) = &apply.session {
             session.record(&mut finished);
@@ -878,6 +879,7 @@ impl PlanReviewStore for SqliteQueue {
             "error": error,
             "duration_secs": duration_secs,
             "status": TaskStatus::Submitted.as_str(),
+            "prompt_bytes": failure.prompt_bytes,
         });
         if let Some(session) = &failure.session {
             session.record(&mut failed);

@@ -2626,6 +2626,8 @@ pub struct PlanReviewApply {
     /// The session the job's output names (Codex's thread and model,
     /// ADR-t1063-1 decision 6); `None` for a Claude job.
     pub session: Option<crate::domain::headless_job::JobSession>,
+    /// What the job's prompt took, recorded as `prompt_bytes` (task 1561).
+    pub prompt_bytes: Option<crate::application::prompt::PromptBytes>,
 }
 
 /// Why a plan review job failed (`plan_review_failed`).
@@ -2643,6 +2645,9 @@ pub struct PlanReviewFailure {
         crate::domain::Provider,
         crate::domain::provider_switch::SwitchReason,
     )>,
+    /// What the job's prompt took, recorded as `prompt_bytes`; `None` when
+    /// no prompt was written (task 1561).
+    pub prompt_bytes: Option<crate::application::prompt::PromptBytes>,
 }
 
 /// A ready task a verdict took back to submitted, with the proposal of its

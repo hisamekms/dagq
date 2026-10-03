@@ -22,8 +22,9 @@ use crate::{
         },
         planner_idle_marker,
         prompt::{
-            DUPLICATE_CANDIDATES, DuplicateCandidates, PLAN_REVIEW_ACCESS, PlanReviewMaterial,
-            plan_review_prompt, plan_revise_request, precedent_line,
+            DUPLICATE_CANDIDATES, DuplicateCandidates, PLAN_REVIEW_ACCESS, PRECEDENT_ASKS,
+            PlanReviewMaterial, PlanReviewPrompt, PromptBytes, plan_review_prompt,
+            plan_revise_request, precedent_line,
         },
         screen_idle::{self, Inference, ScreenIdle},
     },
@@ -39,10 +40,6 @@ use crate::{
     },
 };
 use std::collections::BTreeMap;
-
-/// Asks a person answered that the plan review prompt offers as
-/// precedents, newest first.
-const PRECEDENT_ASKS: usize = 30;
 
 /// Files that conflict often the plan review prompt lists at most.
 const HOTSPOT_FILES: usize = 15;
@@ -65,6 +62,8 @@ pub(super) struct PlanReviewWatch {
     /// Whether its role names its provider, so that a provider that cannot
     /// be used moves it (ADR-t1063-1 decision 4).
     pub(super) switchable: bool,
+    /// What its prompt took, recorded when it ends (task 1561).
+    pub(super) prompt_bytes: PromptBytes,
 }
 
 /// Where the next plan review goes (ADR-t1063-1 decisions 1, 4 and 5,
@@ -213,13 +212,14 @@ impl Supervisor<'_> {
         }
         let proposal = self.queue.show_proposal(proposal_id)?;
         match self.spawn_plan_review(&job, &proposal, &launch) {
-            Ok(Ok(headless)) => {
-                info!(task_id = %job.anchor, "proposal {proposal_id} plan review {} started on {}", job.attempt, launch.provider.as_str());
+            Ok((prompt_bytes, Ok(headless))) => {
+                info!(task_id = %job.anchor, "proposal {proposal_id} plan review {} started on {} with a prompt of {} bytes", job.attempt, launch.provider.as_str(), prompt_bytes.total);
                 self.plan_review = Some(PlanReviewWatch {
                     job,
                     headless,
                     revise_count: proposal.revise_count(),
                     switchable,
+                    prompt_bytes,
                 });
             }
             // Its own preparation failed: no provider was tried.
@@ -233,7 +233,7 @@ impl Supervisor<'_> {
                     },
                 );
             }
-            Ok(Err(failed)) => {
+            Ok((prompt_bytes, Err(failed))) => {
                 let error = format!("the headless plan review could not start: {failed:#}");
                 let unusable = self.job_provider_failed(
                     launch.provider,
@@ -247,6 +247,7 @@ impl Supervisor<'_> {
                     &PlanReviewFailure {
                         error,
                         unusable,
+                        prompt_bytes: Some(prompt_bytes),
                         ..PlanReviewFailure::default()
                     },
                 );
@@ -265,16 +266,17 @@ impl Supervisor<'_> {
         job: &PlanReviewJob,
         proposal: &Proposal,
         launch: &ActorLaunch,
-    ) -> Result<Result<HeadlessJob>> {
+    ) -> Result<(PromptBytes, Result<HeadlessJob>)> {
         self.files
             .create_dir_all(&job.dir)
             .with_context(|| format!("create {}", job.dir.display()))?;
         let prompt = self.plan_review_material(proposal)?;
         self.files
-            .write(&job.dir.join("prompt.txt"), prompt.as_bytes())?;
+            .write(&job.dir.join("prompt.txt"), prompt.text.as_bytes())?;
         let stdout = job.dir.join("review.out");
         let stderr = job.dir.join("review.err");
-        Ok(self.start_plan_review_job(job, launch, &prompt, stdout, stderr))
+        let started = self.start_plan_review_job(job, launch, &prompt.text, stdout, stderr);
+        Ok((prompt.bytes, started))
     }
 
     /// Start the provider's process of the plan review: Claude's `claude
@@ -332,8 +334,9 @@ impl Supervisor<'_> {
         ))
     }
 
-    /// The plan review prompt of `proposal` from the queue as it is now.
-    fn plan_review_material(&mut self, proposal: &Proposal) -> Result<String> {
+    /// The plan review prompt of `proposal` from the queue as it is now,
+    /// within its limits (task 1561).
+    fn plan_review_material(&mut self, proposal: &Proposal) -> Result<PlanReviewPrompt> {
         let tasks = proposal
             .task_ids()
             .iter()
@@ -378,7 +381,8 @@ impl Supervisor<'_> {
             .iter()
             .map(|detail| self.duplicate_candidates(proposal, &detail.task))
             .collect::<Result<Vec<_>>>()?;
-        let prompt = plan_review_prompt(&PlanReviewMaterial {
+        let language = self.verifier.language();
+        plan_review_prompt(&PlanReviewMaterial {
             proposal,
             tasks: &tasks,
             goals: &goals,
@@ -391,8 +395,8 @@ impl Supervisor<'_> {
             hotspots: &hotspots,
             candidates: &candidates,
             repo_root: &self.layout.repo_root,
-        })?;
-        Ok(with_instruction(prompt, self.verifier.language().as_ref()))
+            language: language.as_ref(),
+        })
     }
 
     /// The files each task of the proposal and each ready or in-progress
@@ -545,6 +549,7 @@ impl Supervisor<'_> {
                     verdict,
                     duration_secs,
                     session.clone(),
+                    &watch.prompt_bytes,
                 )
             })
         });
@@ -573,6 +578,7 @@ impl Supervisor<'_> {
                     duration_secs,
                     session,
                     unusable,
+                    prompt_bytes: Some(watch.prompt_bytes.clone()),
                 },
             );
         }
@@ -590,6 +596,7 @@ impl Supervisor<'_> {
         verdict: PlanReviewVerdict,
         duration_secs: u64,
         session: Option<crate::domain::headless_job::JobSession>,
+        prompt_bytes: &PromptBytes,
     ) -> Result<()> {
         let proposal = job.proposal_id;
         // A sure concern is applied as its recommendation; the rest wait
@@ -651,6 +658,7 @@ impl Supervisor<'_> {
                 concern,
                 duration_secs,
                 session,
+                prompt_bytes: Some(prompt_bytes.clone()),
             },
         )?;
         if applied.stale {

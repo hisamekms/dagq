@@ -2317,7 +2317,8 @@ pub struct PlanReviewMaterial<'a> {
     /// The files each task of the proposal and of `queued` is expected to
     /// touch (ADR-0069 decisions 1, 2).
     pub expected: &'a BTreeMap<TaskId, Vec<String>>,
-    /// Asks a person answered, newest first.
+    /// Asks a person answered, newest first ([`PRECEDENT_ASKS`] of them
+    /// are fetched).
     pub precedents: &'a [Ask],
     /// The files the landings conflicted in most (`stats`
     /// `conflict_hotspots`), that main still has.
@@ -2325,6 +2326,9 @@ pub struct PlanReviewMaterial<'a> {
     /// One entry per task of the proposal, in the order of `tasks`.
     pub candidates: &'a [DuplicateCandidates],
     pub repo_root: &'a Path,
+    /// The language whose instruction ends the prompt (ADR-t616-2
+    /// decision 3); counted within its limit.
+    pub language: Option<&'a crate::domain::language::Language>,
 }
 
 /// One line quoting an answered ask as a precedent.
@@ -2345,27 +2349,226 @@ pub fn precedent_line(ask: &Ask) -> String {
     )
 }
 
+/// The bytes the whole plan review prompt takes at most, the language's
+/// instruction included (task 1561, ADR-t1566-1 decision 4): about two
+/// fifths of macOS's `ARG_MAX`, and about a third of the prompt of plan
+/// review 724 that could not start.
+pub const PLAN_REVIEW_PROMPT_LIMIT: usize = 400_000;
+
+/// The bytes the sections the plan review cannot do without (the
+/// instructions and the verdict's schema, the proposal's tasks and their
+/// expected files, the goals, `lint`, the language's instruction) take at
+/// most; past it their largest material is replaced by how to read it with
+/// the read-only dagq commands (ADR-t1566-1 decisions 2, 3).
+pub const PLAN_REVIEW_REQUIRED_LIMIT: usize = 200_000;
+
+/// Ready and in-progress tasks the plan review prompt gives in full at
+/// most, and the bytes of their full text.
+pub const QUEUED_FULL_TASKS: usize = 20;
+pub const QUEUED_FULL_BYTES: usize = 100_000;
+
+/// The bytes of the summaries of the ready and in-progress tasks.
+pub const QUEUED_SUMMARY_BYTES: usize = 64_000;
+
+/// Asks a person answered the plan review prompt quotes at most, newest
+/// first, and the bytes they take.
+pub const PRECEDENT_ASKS: usize = 20;
+pub const PRECEDENT_BYTES: usize = 16_000;
+
+/// The bytes of the conflict hotspots, of the duplicate candidates and of
+/// the other proposals.
+pub const HOTSPOT_BYTES: usize = 16_000;
+pub const CANDIDATE_BYTES: usize = 48_000;
+pub const OTHER_PROPOSAL_BYTES: usize = 48_000;
+
+/// The read-only dagq commands the plan review prompt names to read what
+/// its limits left out, as it writes them (`ID` for a number): each is one
+/// the plan review job's role may run (task 1561, ADR-t1566-1 decision 3).
+pub const PLAN_REVIEW_READS: &[&str] = &[
+    "dagq show ID --full",
+    "dagq goal show ID --full",
+    "dagq proposal show ID",
+    "dagq lint --proposal ID",
+    "dagq related ID",
+    "dagq search '<words of its title>'",
+    "dagq asks --all",
+    "dagq stats",
+    "dagq list --status ready,in_progress --limit ID",
+];
+
+/// What the note of each section that left something out may take at most;
+/// the overall limit keeps it free.
+const OMISSION_NOTE_BYTES: usize = 2_000;
+
+/// IDs a note of what was left out names at most.
+const NOTE_IDS: usize = 40;
+
+/// The note heading the proposal's tasks when the required sections were
+/// over [`PLAN_REVIEW_REQUIRED_LIMIT`] may take at most.
+const OVER_LIMIT_NOTE_BYTES: usize = 1_000;
+
+/// Characters of a title a stub of left-out material keeps.
+const STUB_TITLE_CHARS: usize = 200;
+
+/// The bytes a stub takes at most (its title of [`STUB_TITLE_CHARS`] in
+/// up to 4 bytes each, and its fields): a smaller piece is not replaced,
+/// as its stub would not be smaller.
+const STUB_BYTES: usize = 1_000;
+
+/// The optional sections of the plan review prompt, each of which keeps
+/// [`OMISSION_NOTE_BYTES`] free for its note.
+const OPTIONAL_SECTIONS: usize = 6;
+
+/// What the plan review prompt takes, in bytes, section by section, and
+/// what its limits left out (task 1561, ADR-t1566-1 decision 6): recorded
+/// as `prompt_bytes` on `plan_review_finished` and `plan_review_failed`.
+/// The sections add up to `total`; `omitted` counts, by section, the items
+/// left out or replaced by how to read them; `over_limit` says why the
+/// required sections were cut, when they were.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct PromptBytes {
+    pub total: usize,
+    pub limit: usize,
+    pub sections: BTreeMap<&'static str, usize>,
+    pub omitted: BTreeMap<&'static str, usize>,
+    pub over_limit: Option<String>,
+}
+
+/// The plan review prompt and what it takes.
+#[derive(Debug, Clone)]
+pub struct PlanReviewPrompt {
+    pub text: String,
+    pub bytes: PromptBytes,
+}
+
+/// The variable sections of the plan review prompt, each as it is
+/// written into it.
+#[derive(Default)]
+struct PlanSections {
+    tasks: String,
+    own_expected: String,
+    goals: String,
+    lint: String,
+    others: String,
+    queued: String,
+    queued_full: String,
+    precedents: String,
+    hotspots: String,
+    candidates: String,
+    predicted: String,
+}
+
+/// The lines of a section to keep, in the order given: within `count`
+/// lines and `bytes` (each line with its newline). A line that does not
+/// fit is skipped and the next one tried, so one huge line does not hide
+/// the rest.
+fn fit_lines(lines: &[String], count: usize, bytes: usize) -> Vec<bool> {
+    let mut kept = vec![false; lines.len()];
+    let (mut taken, mut used) = (0, 0);
+    for (index, line) in lines.iter().enumerate() {
+        if taken == count {
+            break;
+        }
+        let size = line.len() + 1;
+        if used + size <= bytes {
+            kept[index] = true;
+            taken += 1;
+            used += size;
+        }
+    }
+    kept
+}
+
+/// What a fenced block adds to its lines at most.
+fn fence_overhead(lines: &[String]) -> usize {
+    let longest = lines
+        .iter()
+        .flat_map(|line| line.split(|c| c != '`').map(str::len))
+        .max()
+        .unwrap_or(0);
+    2 * (longest.max(2) + 1) + 16
+}
+
+/// `lines` as one fenced JSON block, or `(none)`.
+fn json_block(lines: &[String]) -> String {
+    if lines.is_empty() {
+        "(none)".to_owned()
+    } else {
+        fenced("json", &lines.join("\n"))
+    }
+}
+
+/// At most [`NOTE_IDS`] of `ids`, with how many more there are.
+fn id_list(ids: &[i64]) -> String {
+    let mut text = ids
+        .iter()
+        .take(NOTE_IDS)
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if ids.len() > NOTE_IDS {
+        text.push_str(&format!(" and {} more", ids.len() - NOTE_IDS));
+    }
+    text
+}
+
+/// The lines of an optional section kept within `limit` and what is left
+/// of the prompt's room, with the indices left out.
+struct Fitted {
+    kept: Vec<bool>,
+}
+
+impl Fitted {
+    fn new(lines: &[String], count: usize, limit: usize, room: usize) -> Self {
+        let budget = limit
+            .min(room.saturating_sub(OMISSION_NOTE_BYTES))
+            .saturating_sub(fence_overhead(lines));
+        Self {
+            kept: fit_lines(lines, count, budget),
+        }
+    }
+
+    fn left_out(&self) -> impl Iterator<Item = usize> + '_ {
+        self.kept
+            .iter()
+            .enumerate()
+            .filter(|(_, kept)| !**kept)
+            .map(|(index, _)| index)
+    }
+
+    fn keep<T: Clone>(&self, items: &[T]) -> Vec<T> {
+        items
+            .iter()
+            .zip(&self.kept)
+            .filter(|(_, kept)| **kept)
+            .map(|(item, _)| item.clone())
+            .collect()
+    }
+}
+
+/// The JSON line of a piece of required material left out of the prompt:
+/// what it is and how to read it.
+fn stub(id: i64, title: Option<&str>, bytes: usize, read: String) -> String {
+    let mut stub = serde_json::json!({"id": id, "left_out_bytes": bytes, "read_with": read});
+    if let Some(title) = title {
+        stub["title"] = super::health::truncate(title, STUB_TITLE_CHARS)
+            .unwrap_or_else(|| title.to_owned())
+            .into();
+    }
+    stub.to_string()
+}
+
 /// What the headless plan review is asked: the material, the checks, the
 /// fixes it may make itself and the verdict schema (ADR-0041 decisions 10,
 /// 11, 14, 15). The repository's own rules are not in the runtime: the job
-/// reads them from the repository's documents.
-pub fn plan_review_prompt(material: &PlanReviewMaterial<'_>) -> Result<String> {
+/// reads them from the repository's documents. Each section is held to its
+/// limit and the whole to [`PLAN_REVIEW_PROMPT_LIMIT`]; what is left out is
+/// counted and named with the read-only dagq command that reads it (task
+/// 1561, ADR-t1566-1).
+pub fn plan_review_prompt(material: &PlanReviewMaterial<'_>) -> Result<PlanReviewPrompt> {
     let proposal = material.proposal;
-    let json_lines = |values: Vec<Value>| {
-        if values.is_empty() {
-            "(none)".to_owned()
-        } else {
-            fenced(
-                "json",
-                &values
-                    .iter()
-                    .map(Value::to_string)
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            )
-        }
-    };
-    let tasks = json_lines(
+    let to_lines = |values: Vec<Value>| values.iter().map(Value::to_string).collect::<Vec<_>>();
+    let mut task_lines = to_lines(
         material
             .tasks
             .iter()
@@ -2377,95 +2580,458 @@ pub fn plan_review_prompt(material: &PlanReviewMaterial<'_>) -> Result<String> {
             })
             .collect::<Result<_>>()?,
     );
-    let goals = json_lines(
+    let mut goal_lines = to_lines(
         material
             .goals
             .iter()
             .map(serde_json::to_value)
             .collect::<serde_json::Result<_>>()?,
     );
-    let lint = json_lines(
+    let lint_lines = to_lines(
         material
             .lint
             .iter()
             .map(serde_json::to_value)
             .collect::<serde_json::Result<_>>()?,
     );
-    let others = if material.others.is_empty() {
-        "(none)".to_owned()
-    } else {
-        material
-            .others
-            .iter()
-            .map(|(other, tasks)| {
-                let earlier =
-                    (other.submitted_at(), other.id()) < (proposal.submitted_at(), proposal.id());
-                let tasks = tasks
-                    .iter()
-                    .map(|task| {
-                        serde_json::json!({
-                            "id": task.id(), "status": task.status(), "title": task.title(),
-                            "description": task.description(), "acceptance": task.acceptance(),
-                            "paths": task.paths(),
-                        })
-                        .to_string()
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                format!(
-                    "Proposal {} ({}, submitted {}, {} this one):\n{}",
-                    other.id(),
-                    other.status().as_str(),
-                    other.submitted_at(),
-                    if earlier { "before" } else { "after" },
-                    fenced("json", &tasks)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
     let no_files = Vec::new();
     let expected = |id: TaskId| material.expected.get(&id).unwrap_or(&no_files);
+    let mut expected_lines = to_lines(
+        material
+            .tasks
+            .iter()
+            .map(|detail| {
+                serde_json::json!({
+                    "task_id": detail.task.id(),
+                    "expected_files": expected(detail.task.id()),
+                })
+            })
+            .collect(),
+    );
+    let predicted = material
+        .tasks
+        .iter()
+        .filter(|detail| detail.task.status() == crate::domain::TaskStatus::Submitted)
+        .map(|detail| detail.task.id().to_string())
+        .collect::<Vec<_>>();
+    let mut sections = PlanSections {
+        predicted: if predicted.is_empty() {
+            "(none)".to_owned()
+        } else {
+            predicted.join(", ")
+        },
+        ..PlanSections::default()
+    };
+    let language = material
+        .language
+        .map_or(0, |language| language.instruction().len() + 2);
+    let fixed = plan_review_text(material, &PlanSections::default()).len() + language;
+    let mut omitted: BTreeMap<&'static str, usize> = BTreeMap::new();
+
+    // The required sections, cut to their limit by replacing their largest
+    // pieces with how to read them.
+    let mut lint = json_block(&lint_lines);
+    let before = fixed
+        + json_block(&task_lines).len()
+        + json_block(&expected_lines).len()
+        + json_block(&goal_lines).len()
+        + lint.len()
+        + sections.predicted.len();
+    let mut over_limit = None;
+    let mut over_note = String::new();
+    if before > PLAN_REVIEW_REQUIRED_LIMIT {
+        let room = PLAN_REVIEW_REQUIRED_LIMIT - OVER_LIMIT_NOTE_BYTES;
+        // What the required sections take at most, kept as pieces are
+        // replaced: each line with its newline and each block's fences.
+        let lines_bytes = |lines: &[String]| {
+            lines.iter().map(|line| line.len() + 1).sum::<usize>() + fence_overhead(lines)
+        };
+        let mut estimate = fixed
+            + lines_bytes(&task_lines)
+            + lines_bytes(&expected_lines)
+            + lines_bytes(&goal_lines)
+            + lint.len()
+            + sections.predicted.len();
+        // (bytes, section, index): the largest first, then the section's
+        // order, then the piece's.
+        let mut pieces: Vec<(usize, usize, usize)> = Vec::new();
+        pieces.extend(task_lines.iter().enumerate().map(|(i, l)| (l.len(), 0, i)));
+        pieces.extend(
+            expected_lines
+                .iter()
+                .enumerate()
+                .map(|(i, l)| (l.len(), 1, i)),
+        );
+        pieces.extend(goal_lines.iter().enumerate().map(|(i, l)| (l.len(), 2, i)));
+        if !lint_lines.is_empty() {
+            pieces.push((lint.len(), 3, 0));
+        }
+        pieces.retain(|&(bytes, _, _)| bytes > STUB_BYTES);
+        pieces.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+        for (bytes, section, index) in pieces {
+            if estimate <= room {
+                break;
+            }
+            let replaced = match section {
+                0 => {
+                    let task = &material.tasks[index].task;
+                    let id = task.id().as_i64();
+                    *omitted.entry("tasks").or_default() += 1;
+                    let line = &mut task_lines[index];
+                    *line = stub(
+                        id,
+                        Some(task.title()),
+                        bytes,
+                        format!("dagq show {id} --full"),
+                    );
+                    line.len()
+                }
+                1 => {
+                    let id = material.tasks[index].task.id().as_i64();
+                    *omitted.entry("expected_files").or_default() += 1;
+                    let line = &mut expected_lines[index];
+                    *line = stub(
+                        id,
+                        None,
+                        bytes,
+                        format!(
+                            "dagq show {id} --full (its declared paths; without them, dagq related {id})"
+                        ),
+                    );
+                    line.len()
+                }
+                2 => {
+                    let goal = &material.goals[index];
+                    let id = goal.id().as_i64();
+                    *omitted.entry("goals").or_default() += 1;
+                    let line = &mut goal_lines[index];
+                    *line = stub(
+                        id,
+                        Some(goal.title()),
+                        bytes,
+                        format!("dagq goal show {id} --full"),
+                    );
+                    line.len()
+                }
+                _ => {
+                    *omitted.entry("lint").or_default() += lint_lines.len();
+                    lint = format!(
+                        "({} findings, {bytes} bytes, left out: read them with `dagq lint --proposal {}`)",
+                        lint_lines.len(),
+                        proposal.id()
+                    );
+                    lint.len()
+                }
+            };
+            estimate = (estimate + replaced).saturating_sub(bytes);
+        }
+        // Too many pieces for even their stubs: each list becomes one note.
+        let proposal_id = proposal.id();
+        if estimate > room {
+            for (section, count) in [
+                ("tasks", task_lines.len()),
+                ("expected_files", expected_lines.len()),
+                ("goals", goal_lines.len()),
+            ] {
+                if count > 0 {
+                    omitted.insert(section, count);
+                }
+            }
+            task_lines.clear();
+            expected_lines.clear();
+            goal_lines.clear();
+            sections.predicted = format!(
+                "every submitted task of the proposal ({} of them; `dagq proposal show {proposal_id}` lists them)",
+                predicted.len()
+            );
+        }
+        let reason = format!(
+            "the required sections took {before} bytes, over their limit of {PLAN_REVIEW_REQUIRED_LIMIT}: their largest pieces are replaced by how to read them"
+        );
+        over_note = format!(
+            "({reason}, with the read-only dagq commands each names (`dagq proposal show {proposal_id}` lists the proposal's tasks and goals); read them before you decide.)\n"
+        );
+        over_limit = Some(reason);
+    }
+    sections.tasks = if task_lines.is_empty() && omitted.contains_key("tasks") {
+        format!(
+            "{over_note}({} tasks, left out: list them with `dagq proposal show {}` and read each with `dagq show ID --full`)",
+            material.tasks.len(),
+            proposal.id()
+        )
+    } else {
+        format!("{over_note}{}", json_block(&task_lines))
+    };
+    sections.own_expected = if expected_lines.is_empty() && omitted.contains_key("expected_files") {
+        "(left out: read each task's declared paths with `dagq show ID --full`; without them, `dagq related ID`)".to_owned()
+    } else {
+        json_block(&expected_lines)
+    };
+    sections.goals = if goal_lines.is_empty() && omitted.contains_key("goals") {
+        format!(
+            "({} goals, left out: read each with `dagq goal show ID --full`)",
+            material.goals.len()
+        )
+    } else {
+        json_block(&goal_lines)
+    };
+    sections.lint = lint;
+    // A note's bytes are kept free for each optional section, which still
+    // writes `(none)` or its note past the room's end.
+    let mut room = PLAN_REVIEW_PROMPT_LIMIT.saturating_sub(
+        OPTIONAL_SECTIONS * OMISSION_NOTE_BYTES
+            + fixed
+            + sections.tasks.len()
+            + sections.own_expected.len()
+            + sections.goals.len()
+            + sections.lint.len()
+            + sections.predicted.len(),
+    );
+
+    // The optional sections, in the order they keep their room: the
+    // hotspots, the duplicate candidates, the other proposals, the asks a
+    // person answered, the full text, the summaries.
     let touching = |path: &str, ids: &mut dyn Iterator<Item = TaskId>| {
         ids.filter(|&id| crate::domain::claim_defer::touches(expected(id), path))
             .collect::<Vec<_>>()
     };
     // Each hotspot with the tasks expected to touch it; a queued task on
-    // the same hotspot as a task of the proposal is given in full.
-    let mut full = BTreeSet::new();
-    let mut hotspots = Vec::new();
+    // the same hotspot as a task of the proposal may be given in full.
+    let mut eligible = BTreeSet::new();
+    let mut shared_hotspots: BTreeMap<TaskId, usize> = BTreeMap::new();
+    let mut hotspot_lines = Vec::new();
     for file in material.hotspots {
         let path = file.renamed_to.as_deref().unwrap_or(&file.path);
         let own = touching(path, &mut material.tasks.iter().map(|d| d.task.id()));
         let queued = touching(path, &mut material.queued.iter().map(|item| item.id));
         if !own.is_empty() {
-            full.extend(queued.iter().copied());
+            eligible.extend(queued.iter().copied());
+            for &id in &queued {
+                *shared_hotspots.entry(id).or_default() += 1;
+            }
         }
-        hotspots.push(serde_json::json!({
-            "path": path,
-            "conflicts": file.conflicts, "tasks": file.tasks,
-            "landings": file.landings, "ratio": file.ratio,
-            "last_conflict_at": file.last_conflict_at, "alert": file.alert,
-            "proposal_tasks": own, "queued_tasks": queued,
-        }));
-    }
-    let hotspots = json_lines(hotspots);
-    for candidates in material.candidates {
-        full.extend(candidates.related.iter().map(|task| TaskId::new(task.id)));
-        full.extend(
-            candidates
-                .search
-                .iter()
-                .filter_map(|hit| match (hit.kind, &hit.id) {
-                    (
-                        crate::domain::search::SearchKind::Task,
-                        crate::domain::search::SearchRef::Id(id),
-                    ) => Some(TaskId::new(*id)),
-                    _ => hit.task_id.map(TaskId::new),
-                }),
+        hotspot_lines.push(
+            serde_json::json!({
+                "path": path,
+                "conflicts": file.conflicts, "tasks": file.tasks,
+                "landings": file.landings, "ratio": file.ratio,
+                "last_conflict_at": file.last_conflict_at, "alert": file.alert,
+                "proposal_tasks": own, "queued_tasks": queued,
+            })
+            .to_string(),
         );
     }
-    let summaries = material
+    let fitted = Fitted::new(&hotspot_lines, usize::MAX, HOTSPOT_BYTES, room);
+    let left_out = fitted.left_out().count();
+    sections.hotspots = json_block(&fitted.keep(&hotspot_lines));
+    if left_out > 0 {
+        omitted.insert("hotspots", left_out);
+        sections.hotspots.push_str(&format!(
+            "\n({left_out} more files are left out by the limit of {HOTSPOT_BYTES} bytes; read them with `dagq stats` (conflict_hotspots))"
+        ));
+    }
+    room = room.saturating_sub(sections.hotspots.len());
+
+    // The best place of each queued task among the candidates.
+    let mut candidate_rank: BTreeMap<TaskId, usize> = BTreeMap::new();
+    for candidates in material.candidates {
+        let related = candidates
+            .related
+            .iter()
+            .map(|task| TaskId::new(task.id))
+            .enumerate();
+        let search = candidates
+            .search
+            .iter()
+            .filter_map(|hit| match (hit.kind, &hit.id) {
+                (
+                    crate::domain::search::SearchKind::Task,
+                    crate::domain::search::SearchRef::Id(id),
+                ) => Some(TaskId::new(*id)),
+                _ => hit.task_id.map(TaskId::new),
+            })
+            .enumerate();
+        for (place, id) in related.chain(search) {
+            eligible.insert(id);
+            let best = candidate_rank.entry(id).or_insert(place);
+            *best = (*best).min(place);
+        }
+    }
+    let candidate_lines = to_lines(
+        material
+            .candidates
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<serde_json::Result<_>>()?,
+    );
+    let fitted = Fitted::new(&candidate_lines, usize::MAX, CANDIDATE_BYTES, room);
+    let left_out: Vec<i64> = fitted
+        .left_out()
+        .map(|index| material.candidates[index].task_id.as_i64())
+        .collect();
+    sections.candidates = json_block(&fitted.keep(&candidate_lines));
+    if !left_out.is_empty() {
+        omitted.insert("candidates", left_out.len());
+        sections.candidates.push_str(&format!(
+            "\n(the candidates of {} tasks of the proposal are left out by the limit of {CANDIDATE_BYTES} bytes: {}; look for them with `dagq related ID` and `dagq search '<words of its title>'`)",
+            left_out.len(),
+            id_list(&left_out)
+        ));
+    }
+    room = room.saturating_sub(sections.candidates.len());
+
+    let other_blocks: Vec<String> = material
+        .others
+        .iter()
+        .map(|(other, tasks)| {
+            let earlier =
+                (other.submitted_at(), other.id()) < (proposal.submitted_at(), proposal.id());
+            let tasks = tasks
+                .iter()
+                .map(|task| {
+                    serde_json::json!({
+                        "id": task.id(), "status": task.status(), "title": task.title(),
+                        "description": task.description(), "acceptance": task.acceptance(),
+                        "paths": task.paths(),
+                    })
+                    .to_string()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                "Proposal {} ({}, submitted {}, {} this one):\n{}",
+                other.id(),
+                other.status().as_str(),
+                other.submitted_at(),
+                if earlier { "before" } else { "after" },
+                fenced("json", &tasks)
+            )
+        })
+        .collect();
+    let fitted = Fitted::new(&other_blocks, usize::MAX, OTHER_PROPOSAL_BYTES, room);
+    let left_out: Vec<i64> = fitted
+        .left_out()
+        .map(|index| material.others[index].0.id().as_i64())
+        .collect();
+    let kept = fitted.keep(&other_blocks);
+    sections.others = if kept.is_empty() && left_out.is_empty() {
+        "(none)".to_owned()
+    } else {
+        kept.join("\n")
+    };
+    if !left_out.is_empty() {
+        omitted.insert("other_proposals", left_out.len());
+        sections.others.push_str(&format!(
+            "\n({} more proposals are left out by the limit of {OTHER_PROPOSAL_BYTES} bytes: {}; read one with `dagq proposal show ID` and its tasks with `dagq show ID --full`)",
+            left_out.len(),
+            id_list(&left_out)
+        ));
+    }
+    room = room.saturating_sub(sections.others.len());
+
+    let precedent_lines: Vec<String> = material
+        .precedents
+        .iter()
+        .map(|ask| format!("- {}", precedent_line(ask)))
+        .collect();
+    let fitted = Fitted::new(&precedent_lines, PRECEDENT_ASKS, PRECEDENT_BYTES, room);
+    let left_out = fitted.left_out().count();
+    let kept = fitted.keep(&precedent_lines);
+    sections.precedents = if kept.is_empty() && left_out == 0 {
+        "(none)".to_owned()
+    } else {
+        kept.join("\n")
+    };
+    if left_out > 0 {
+        omitted.insert("precedents", left_out);
+        sections.precedents.push_str(&format!(
+            "\n({left_out} more of the newest asks a person answered are left out by the limit of {PRECEDENT_ASKS} asks and {PRECEDENT_BYTES} bytes; read them with `dagq asks --all`)"
+        ));
+    }
+    if material.precedents.len() >= PRECEDENT_ASKS {
+        sections.precedents.push_str(
+            "\n(older asks a person answered are not listed: read them with `dagq asks --all`)",
+        );
+    }
+    room = room.saturating_sub(sections.precedents.len());
+
+    // The full text: the eligible tasks, the most related to the proposal
+    // first: one a task of the proposal depends on, then the most hotspots
+    // shared with the proposal, the most of its expected files shared, the
+    // best place among the candidates, the newest.
+    let own_files: Vec<&String> = material
+        .tasks
+        .iter()
+        .flat_map(|detail| expected(detail.task.id()))
+        .collect();
+    let depended: BTreeSet<TaskId> = material
+        .tasks
+        .iter()
+        .flat_map(|detail| detail.dependencies.iter().copied())
+        .collect();
+    let shared_files = |id: TaskId| {
+        let files = expected(id);
+        own_files
+            .iter()
+            .filter(|own| {
+                crate::domain::claim_defer::touches(files, own)
+                    || files.iter().any(|file| {
+                        crate::domain::claim_defer::touches(std::slice::from_ref(own), file)
+                    })
+            })
+            .count()
+    };
+    // (a task of the proposal depends on it, hotspots shared, expected
+    // files shared, best place among the candidates)
+    type Relation = (bool, usize, usize, usize);
+    let mut ranked: Vec<(&TaskListItem, Relation)> = material
+        .queued
+        .iter()
+        .filter(|item| eligible.contains(&item.id))
+        .map(|item| {
+            (
+                item,
+                (
+                    depended.contains(&item.id),
+                    shared_hotspots.get(&item.id).copied().unwrap_or(0),
+                    shared_files(item.id),
+                    candidate_rank.get(&item.id).copied().unwrap_or(usize::MAX),
+                ),
+            )
+        })
+        .collect();
+    ranked.sort_by(|(a, ka), (b, kb)| {
+        kb.0.cmp(&ka.0)
+            .then(kb.1.cmp(&ka.1))
+            .then(kb.2.cmp(&ka.2))
+            .then(ka.3.cmp(&kb.3))
+            .then(b.id.cmp(&a.id))
+    });
+    let ranked: Vec<&TaskListItem> = ranked.into_iter().map(|(item, _)| item).collect();
+    let full_lines = ranked
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<serde_json::Result<Vec<_>>>()?;
+    let fitted = Fitted::new(&full_lines, QUEUED_FULL_TASKS, QUEUED_FULL_BYTES, room);
+    let full: BTreeSet<TaskId> = fitted.keep(&ranked).iter().map(|item| item.id).collect();
+    let left_out: Vec<i64> = fitted
+        .left_out()
+        .map(|index| ranked[index].id.as_i64())
+        .collect();
+    sections.queued_full = json_block(&fitted.keep(&full_lines));
+    if !left_out.is_empty() {
+        omitted.insert("full_text", left_out.len());
+        sections.queued_full.push_str(&format!(
+            "\n({} more ready or in-progress tasks that meet this rule are left out by its limit of {QUEUED_FULL_TASKS} tasks and {QUEUED_FULL_BYTES} bytes, the most related to the proposal first: {}; read one in full with `dagq show ID --full`)",
+            left_out.len(),
+            id_list(&left_out)
+        ));
+    }
+    room = room.saturating_sub(sections.queued_full.len());
+
+    // The summaries: the eligible tasks in the order above, then the rest,
+    // newest first; written newest first.
+    let summary_lines: Vec<String> = material
         .queued
         .iter()
         .map(|item| {
@@ -2483,68 +3049,111 @@ pub fn plan_review_prompt(material: &PlanReviewMaterial<'_>) -> Result<String> {
             if full.contains(&item.id) {
                 summary["full_text_below"] = true.into();
             }
-            summary
+            summary.to_string()
         })
         .collect();
-    let mut queued = json_lines(summaries);
+    let place: BTreeMap<TaskId, usize> = material
+        .queued
+        .iter()
+        .enumerate()
+        .map(|(index, item)| (item.id, index))
+        .collect();
+    let order: Vec<usize> = ranked
+        .iter()
+        .map(|item| place[&item.id])
+        .chain(
+            material
+                .queued
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| !eligible.contains(&item.id))
+                .map(|(index, _)| index),
+        )
+        .collect();
+    let ordered: Vec<String> = order.iter().map(|&i| summary_lines[i].clone()).collect();
+    let fitted = Fitted::new(&ordered, usize::MAX, QUEUED_SUMMARY_BYTES, room);
+    let mut kept = vec![false; summary_lines.len()];
+    for (&index, &keep) in order.iter().zip(&fitted.kept) {
+        kept[index] = keep;
+    }
+    let cut = fitted.left_out().count();
+    let shown: Vec<String> = summary_lines
+        .iter()
+        .zip(&kept)
+        .filter(|(_, keep)| **keep)
+        .map(|(line, _)| line.clone())
+        .collect();
+    sections.queued = json_block(&shown);
     if material.queued_left_out > 0 {
-        queued.push_str(&format!(
+        sections.queued.push_str(&format!(
             "\n({} more ready or in-progress tasks, those of the lowest IDs, are left out of this list)",
             material.queued_left_out
         ));
     }
-    let queued_full = json_lines(
-        material
-            .queued
-            .iter()
-            .filter(|item| full.contains(&item.id))
-            .map(serde_json::to_value)
-            .collect::<serde_json::Result<_>>()?,
-    );
-    let own_expected = json_lines(
-        material
-            .tasks
-            .iter()
-            .map(|detail| {
-                serde_json::json!({
-                    "task_id": detail.task.id(),
-                    "expected_files": expected(detail.task.id()),
-                })
-            })
-            .collect(),
-    );
-    let precedents = if material.precedents.is_empty() {
-        "(none)".to_owned()
-    } else {
-        material
-            .precedents
-            .iter()
-            .map(|ask| format!("- {}", precedent_line(ask)))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    let candidates = json_lines(
-        material
-            .candidates
-            .iter()
-            .map(serde_json::to_value)
-            .collect::<serde_json::Result<_>>()?,
-    );
-    let predicted = material
-        .tasks
-        .iter()
-        .filter(|detail| detail.task.status() == crate::domain::TaskStatus::Submitted)
-        .map(|detail| detail.task.id().to_string())
-        .collect::<Vec<_>>();
-    let predicted = if predicted.is_empty() {
-        "(none)".to_owned()
-    } else {
-        predicted.join(", ")
-    };
-    Ok(format!(
+    if cut > 0 {
+        sections.queued.push_str(&format!(
+            "\n({cut} more ready or in-progress tasks, the least related to the proposal, are left out of this list by its limit of {QUEUED_SUMMARY_BYTES} bytes; list them with `dagq list --status ready,in_progress --limit 200` and read one with `dagq show ID --full`)"
+        ));
+    }
+    if cut + material.queued_left_out > 0 {
+        omitted.insert("summaries", cut + material.queued_left_out);
+    }
+
+    let body = plan_review_text(material, &sections);
+    let body_len = body.trim_end().len();
+    let text = crate::domain::language::with_instruction(body, material.language);
+    let mut bytes = BTreeMap::from([
+        ("tasks", sections.tasks.len()),
+        ("expected_files", sections.own_expected.len()),
+        ("goals", sections.goals.len()),
+        ("lint", sections.lint.len()),
+        ("other_proposals", sections.others.len()),
+        ("summaries", sections.queued.len()),
+        ("full_text", sections.queued_full.len()),
+        ("precedents", sections.precedents.len()),
+        ("hotspots", sections.hotspots.len()),
+        ("candidates", sections.candidates.len()),
+        (
+            "language",
+            material.language.map_or(0, |_| text.len() - body_len),
+        ),
+    ]);
+    let counted: usize = bytes.values().sum();
+    bytes.insert("instructions", text.len() - counted);
+    debug_assert!(text.len() <= PLAN_REVIEW_PROMPT_LIMIT, "{}", text.len());
+    Ok(PlanReviewPrompt {
+        bytes: PromptBytes {
+            total: text.len(),
+            limit: PLAN_REVIEW_PROMPT_LIMIT,
+            sections: bytes,
+            omitted,
+            over_limit,
+        },
+        text,
+    })
+}
+
+/// The plan review prompt with its variable sections written in.
+fn plan_review_text(material: &PlanReviewMaterial<'_>, sections: &PlanSections) -> String {
+    let proposal = material.proposal;
+    let PlanSections {
+        tasks,
+        own_expected,
+        goals,
+        lint,
+        others,
+        queued,
+        queued_full,
+        precedents,
+        hotspots,
+        candidates,
+        predicted,
+    } = sections;
+    format!(
         "You are the plan review of dagq proposal {id}: decide whether the queue may run its tasks as written, before they become ready.\n\
          Read only. Do not change any file and do not run dagq commands that write: the runtime lets you run the dagq commands that read (`dagq show ID`, `dagq proposal show ID`, `dagq search`, `dagq related`, `dagq findings`, `dagq stats`, ...) and refuses the rest.\n\
-         {RECORD_READING}\n\n\
+         {RECORD_READING}\n\
+         The material below is held to limits: a list cut to fit says how many it left out and which read-only dagq command reads them; read what you need with it.\n\n\
          First read the repository's own rules in {repo}: its instructions (AGENTS.md and CLAUDE.md), the documents and rules they name (the plan review's part of them above all), and the documents the tasks name. \
          Apply what they say (the verification each kind of change needs, the declared paths, the required evidence, the rules for the records they keep, ...); the runtime has no such rules of its own. \
          Where the repository has no AGENTS.md, judge a task's verification, paths and evidence in this order: CLAUDE.md; then what the README, the CI configuration and the build configuration show; when none of them settles it, it needs a person: a concern.\n\n\
@@ -2554,8 +3163,8 @@ pub fn plan_review_prompt(material: &PlanReviewMaterial<'_>) -> Result<String> {
          Goals they belong to (description, acceptance, constraints; constraints win over a task's description):\n{goals}\n\n\
          The mechanical checks (`dagq lint`) found:\n{lint}\n\n\
          Other proposals not ready yet:\n{others}\n\n\
-         Ready and in-progress tasks, in summary, newest first (expected_files as for the proposal's tasks, and for an in-progress task also what its run changed so far; full_text_below marks a task given in full below):\n{queued}\n\n\
-         In full, the ready and in-progress tasks among the candidates below or expected to touch a hotspot a task of the proposal is expected to touch:\n{queued_full}\n\n\
+         Ready and in-progress tasks, in summary, newest first (expected_files as for the proposal's tasks, and for an in-progress task also what its run changed so far; full_text_below marks a task given in full below; `dagq show ID --full` reads any of them in full):\n{queued}\n\n\
+         In full, the ready and in-progress tasks among the candidates below or expected to touch a hotspot a task of the proposal is expected to touch, the most related to the proposal first:\n{queued_full}\n\n\
          Asks a person answered before (newest first):\n{precedents}\n\n\
          Files the landings conflicted in most lately (`dagq stats` conflict_hotspots: conflicts, tasks, landings that changed the file, their ratio; alert when over the thresholds), each with the tasks of the proposal (proposal_tasks) and the ready and in-progress tasks (queued_tasks) expected to touch it:\n{hotspots}\n\n\
          Candidates of duplicates and of changes already made, one line per task of the proposal (related: the tasks `dagq related` ranks highest, in any status, with the clues that relate them; search: the tasks and landed commits `dagq search` finds for the words of the task's title, with their status; at most {most} of each, none of the proposal's own tasks; an empty list means none was found):\n{candidates}\n\n\
@@ -2601,7 +3210,7 @@ pub fn plan_review_prompt(material: &PlanReviewMaterial<'_>) -> Result<String> {
         max = MAX_PLAN_REVISES,
         most = DUPLICATE_CANDIDATES,
         codes = reason_codes_section(review_reason::PLAN_REVIEW_CODES),
-    ))
+    )
 }
 
 /// What the goal review job is shown about one goal (ADR-0047 decision
@@ -2998,30 +3607,61 @@ mod tests {
         .unwrap()
     }
 
-    /// The plan review prompt with `queued` ready tasks: the proposal's
-    /// task 1000 touches `src/hot.rs`, and so does the ready task 5.
-    fn plan_prompt(queued: i64, left_out: usize) -> (String, usize) {
-        use crate::domain::{
-            PlannerOrigin, PlannerOwner, ProposalRecord, ProposalStatus, related::RelatedTask,
-        };
-        let proposal = Proposal::restore(ProposalRecord {
-            id: ProposalId::new(1),
-            status: ProposalStatus::Submitted,
-            owner: PlannerOwner {
-                origin: PlannerOrigin::Person,
-                workspace_id: None,
-            },
-            submitted_at: "now".into(),
-            revise_count: 0,
-            task_ids: vec![TaskId::new(1000)],
-            goal_ids: Vec::new(),
-            created_at: String::new(),
-            updated_at: String::new(),
-        })
-        .unwrap();
-        let tasks = [TaskDetail {
-            task: long_task(1000, TaskStatus::Submitted, &["src/hot.rs"]),
-            dependencies: Vec::new(),
+    /// The material of a plan review prompt, as the tests vary it.
+    struct PlanCase {
+        tasks: Vec<TaskDetail>,
+        goals: Vec<Goal>,
+        queued: Vec<TaskListItem>,
+        left_out: usize,
+        expected: BTreeMap<TaskId, Vec<String>>,
+        precedents: Vec<Ask>,
+        hotspots: Vec<ConflictHotspot>,
+        candidates: Vec<DuplicateCandidates>,
+        language: Option<crate::domain::language::Language>,
+    }
+
+    impl PlanCase {
+        fn prompt(&self) -> PlanReviewPrompt {
+            use crate::domain::{PlannerOrigin, PlannerOwner, ProposalRecord, ProposalStatus};
+            let proposal = Proposal::restore(ProposalRecord {
+                id: ProposalId::new(1),
+                status: ProposalStatus::Submitted,
+                owner: PlannerOwner {
+                    origin: PlannerOrigin::Person,
+                    workspace_id: None,
+                },
+                submitted_at: "now".into(),
+                revise_count: 0,
+                task_ids: self.tasks.iter().map(|detail| detail.task.id()).collect(),
+                goal_ids: Vec::new(),
+                created_at: String::new(),
+                updated_at: String::new(),
+            })
+            .unwrap();
+            plan_review_prompt(&PlanReviewMaterial {
+                proposal: &proposal,
+                tasks: &self.tasks,
+                goals: &self.goals,
+                lint: &[],
+                others: &[],
+                queued: &self.queued,
+                queued_left_out: self.left_out,
+                expected: &self.expected,
+                precedents: &self.precedents,
+                hotspots: &self.hotspots,
+                candidates: &self.candidates,
+                repo_root: Path::new("/repo"),
+                language: self.language.as_ref(),
+            })
+            .unwrap()
+        }
+    }
+
+    /// A task of the proposal as plan review reads it.
+    fn proposal_task(task: Task, dependencies: Vec<TaskId>) -> TaskDetail {
+        TaskDetail {
+            task,
+            dependencies,
             goal_dependencies: Vec::new(),
             duplicate_of: None,
             duplicates: Vec::new(),
@@ -3030,18 +3670,42 @@ mod tests {
             processes: Vec::new(),
             origin: None,
             follow_up_drafts: Vec::new(),
-        }];
+        }
+    }
+
+    /// A ready task as the queue lists it.
+    fn queued_task(task: Task) -> TaskListItem {
+        TaskListItem::new(task, vec![TaskId::new(1)], Vec::new(), None, None, true)
+    }
+
+    /// A file the landings conflicted in.
+    fn hotspot(path: &str) -> ConflictHotspot {
+        ConflictHotspot {
+            path: path.into(),
+            conflicts: 3,
+            tasks: 2,
+            task_ids: Vec::new(),
+            landings: Some(4),
+            ratio: Some(0.75),
+            last_conflict_at: "then".into(),
+            state: "present",
+            renamed_to: None,
+            alert: true,
+        }
+    }
+
+    /// The plan review material with `queued` ready tasks: the proposal's
+    /// task 1000 touches `src/hot.rs`, and so does the ready task 5.
+    fn plan_case(queued: i64, left_out: usize) -> PlanCase {
+        use crate::domain::related::RelatedTask;
+        let tasks = vec![proposal_task(
+            long_task(1000, TaskStatus::Submitted, &["src/hot.rs"]),
+            Vec::new(),
+        )];
         let items: Vec<TaskListItem> = (1..=queued)
             .map(|id| {
                 let paths: &[&str] = if id == 5 { &["src/*.rs"] } else { &[] };
-                TaskListItem::new(
-                    long_task(id, TaskStatus::Ready, paths),
-                    vec![TaskId::new(1)],
-                    Vec::new(),
-                    None,
-                    None,
-                    true,
-                )
+                queued_task(long_task(id, TaskStatus::Ready, paths))
             })
             .collect();
         let mut expected = BTreeMap::new();
@@ -3054,19 +3718,7 @@ mod tests {
             };
             expected.insert(item.id, files);
         }
-        let hotspot = |path: &str| ConflictHotspot {
-            path: path.into(),
-            conflicts: 3,
-            tasks: 2,
-            task_ids: Vec::new(),
-            landings: Some(4),
-            ratio: Some(0.75),
-            last_conflict_at: "then".into(),
-            state: "present",
-            renamed_to: None,
-            alert: true,
-        };
-        let candidates = [DuplicateCandidates {
+        let candidates = vec![DuplicateCandidates {
             task_id: TaskId::new(1000),
             related: vec![RelatedTask {
                 id: 7,
@@ -3078,26 +3730,29 @@ mod tests {
             }],
             search: Vec::new(),
         }];
-        let old_size = items
+        PlanCase {
+            tasks,
+            goals: Vec::new(),
+            queued: items,
+            left_out,
+            expected,
+            precedents: Vec::new(),
+            hotspots: vec![hotspot("src/hot.rs"), hotspot("src/cold.rs")],
+            candidates,
+            language: None,
+        }
+    }
+
+    /// The plan review prompt of [`plan_case`], and the full text of its
+    /// queue.
+    fn plan_prompt(queued: i64, left_out: usize) -> (String, usize) {
+        let case = plan_case(queued, left_out);
+        let old_size = case
+            .queued
             .iter()
             .map(|item| serde_json::to_string(item).unwrap().len())
             .sum();
-        let prompt = plan_review_prompt(&PlanReviewMaterial {
-            proposal: &proposal,
-            tasks: &tasks,
-            goals: &[],
-            lint: &[],
-            others: &[],
-            queued: &items,
-            queued_left_out: left_out,
-            expected: &expected,
-            precedents: &[],
-            hotspots: &[hotspot("src/hot.rs"), hotspot("src/cold.rs")],
-            candidates: &candidates,
-            repo_root: Path::new("/repo"),
-        })
-        .unwrap();
-        (prompt, old_size)
+        (case.prompt().text, old_size)
     }
 
     #[test]
@@ -3240,6 +3895,400 @@ mod tests {
             prompt.len() * 8 < full_text,
             "{} bytes against {full_text}",
             prompt.len()
+        );
+    }
+
+    /// A task whose description takes about `bytes`.
+    fn sized_task(id: i64, status: TaskStatus, bytes: usize) -> Task {
+        Task::restore(TaskRecord {
+            id: TaskId::new(id),
+            title: format!("task {id}"),
+            description: "d".repeat(bytes),
+            acceptance: "acceptance".into(),
+            verification_commands: vec!["cargo test".into()],
+            required_evidence: Vec::new(),
+            paths: Vec::new(),
+            priority: Default::default(),
+            change: None,
+            status,
+            goal_id: None,
+            context: String::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
+            named_mode: None,
+        })
+        .unwrap()
+    }
+
+    /// The `dagq ...` commands a prompt names in backticks, each number
+    /// written `ID`.
+    fn named_commands(text: &str) -> BTreeSet<String> {
+        let mut commands = BTreeSet::new();
+        for part in text.split('`').skip(1).step_by(2) {
+            if let Some(command) = part.strip_prefix("dagq ") {
+                let mut normal = String::new();
+                let mut in_number = false;
+                for c in format!("dagq {command}").chars() {
+                    if c.is_ascii_digit() {
+                        if !in_number {
+                            normal.push_str("ID");
+                        }
+                        in_number = true;
+                    } else {
+                        in_number = false;
+                        normal.push(c);
+                    }
+                }
+                commands.insert(normal);
+            }
+        }
+        commands
+    }
+
+    /// What a prompt's notes name to read beyond the commands any plan
+    /// review prompt names is one of [`PLAN_REVIEW_READS`].
+    fn assert_reads_are_the_jobs(prompt: &str) {
+        let base = named_commands(&plan_prompt(4, 0).0);
+        for command in named_commands(prompt) {
+            assert!(
+                base.contains(&command) || PLAN_REVIEW_READS.contains(&command.as_str()),
+                "{command} is not a read of the plan review job"
+            );
+        }
+    }
+
+    /// The prompt's sections add up to its bytes, which keep to the limit.
+    fn assert_within_limit(prompt: &PlanReviewPrompt) {
+        assert_eq!(prompt.bytes.total, prompt.text.len());
+        assert_eq!(
+            prompt.bytes.sections.values().sum::<usize>(),
+            prompt.bytes.total
+        );
+        assert_eq!(prompt.bytes.limit, PLAN_REVIEW_PROMPT_LIMIT);
+        assert!(
+            prompt.bytes.total <= PLAN_REVIEW_PROMPT_LIMIT,
+            "{:?}",
+            prompt.bytes
+        );
+    }
+
+    /// The JSON lines of `prompt` carrying `field`, by id.
+    fn lines_with(prompt: &str, field: &str) -> BTreeMap<i64, Value> {
+        prompt
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|line| line.get(field).is_some())
+            .filter_map(|line| Some((line["id"].as_i64()?, line)))
+            .collect()
+    }
+
+    /// Task 1561: the full text keeps to its limit of tasks, and takes the
+    /// most related first: one a task of the proposal depends on, then the
+    /// most hotspots shared, the best place among the candidates, the
+    /// newest; the rest are named with how to read them in full.
+    #[test]
+    fn plan_review_gives_in_full_the_most_related_tasks_first_within_its_limit() {
+        use crate::domain::related::RelatedTask;
+        let mut case = plan_case(0, 0);
+        case.tasks = vec![proposal_task(
+            long_task(1000, TaskStatus::Submitted, &[]),
+            vec![TaskId::new(30)],
+        )];
+        case.expected.insert(
+            TaskId::new(1000),
+            vec!["src/hot.rs".to_owned(), "src/hot2.rs".to_owned()],
+        );
+        case.hotspots = vec![hotspot("src/hot.rs"), hotspot("src/hot2.rs")];
+        case.candidates[0].related = vec![RelatedTask {
+            id: 3,
+            status: "ready".into(),
+            title: "task 3".into(),
+            score: 1.0,
+            clues: Vec::new(),
+            duplicate_of: None,
+        }];
+        case.queued = (1..=60)
+            .rev()
+            .map(|id| queued_task(long_task(id, TaskStatus::Ready, &[])))
+            .collect();
+        for id in 1..=60 {
+            let files = if id == 10 || id == 11 {
+                vec!["src/hot.rs".to_owned(), "src/hot2.rs".to_owned()]
+            } else {
+                vec!["src/hot.rs".to_owned()]
+            };
+            case.expected.insert(TaskId::new(id), files);
+        }
+        let prompt = case.prompt();
+        assert_within_limit(&prompt);
+        let full: Vec<i64> = prompt
+            .text
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|line| line.get("description").is_some() && line["id"] != 1000)
+            .map(|line| line["id"].as_i64().unwrap())
+            .collect();
+        let mut expected = vec![30, 11, 10, 3];
+        expected.extend((45..=60).rev());
+        assert_eq!(full, expected);
+        assert_eq!(full.len(), QUEUED_FULL_TASKS);
+        let summaries = lines_with(&prompt.text, "expected_files");
+        assert_eq!(summaries[&45]["full_text_below"], true);
+        assert_eq!(summaries[&44].get("full_text_below"), None);
+        assert_eq!(prompt.bytes.omitted["full_text"], 40);
+        assert!(
+            prompt.text.contains(&format!(
+                "(40 more ready or in-progress tasks that meet this rule are left out by its limit of {QUEUED_FULL_TASKS} tasks and {QUEUED_FULL_BYTES} bytes, the most related to the proposal first: 44, 43, 42,"
+            )),
+            "{}",
+            prompt.text
+        );
+        assert!(
+            prompt
+                .text
+                .contains("read one in full with `dagq show ID --full`)")
+        );
+        assert!(prompt.text.contains("The material below is held to limits"));
+        assert_reads_are_the_jobs(&prompt.text);
+    }
+
+    /// Task 1561: one huge task does not take the full text's room: it is
+    /// skipped and named, and the next ones fill the bytes left.
+    #[test]
+    fn a_huge_task_is_left_out_of_the_full_text_and_the_next_ones_fill_its_bytes() {
+        let mut case = plan_case(0, 0);
+        case.candidates.clear();
+        case.queued = (1..=40)
+            .rev()
+            .map(|id| {
+                let bytes = if id == 40 { 2_000_000 } else { 9_000 };
+                queued_task(sized_task(id, TaskStatus::Ready, bytes))
+            })
+            .collect();
+        for id in 1..=40 {
+            case.expected
+                .insert(TaskId::new(id), vec!["src/hot.rs".to_owned()]);
+        }
+        let prompt = case.prompt();
+        assert_within_limit(&prompt);
+        let full = lines_with(&prompt.text, "description");
+        assert!(!full.contains_key(&40), "the huge task is not in full");
+        let queued_full: usize = full
+            .iter()
+            .filter(|(id, _)| **id != 1000)
+            .map(|(_, line)| line.to_string().len() + 1)
+            .sum();
+        assert!(queued_full <= QUEUED_FULL_BYTES, "{queued_full}");
+        assert!(
+            full.contains_key(&39) && full.len() > 5,
+            "{:?}",
+            full.keys()
+        );
+        assert!(prompt.bytes.sections["full_text"] <= QUEUED_FULL_BYTES + OMISSION_NOTE_BYTES);
+        let summaries = lines_with(&prompt.text, "expected_files");
+        assert_eq!(summaries[&40].get("full_text_below"), None);
+        assert!(
+            prompt
+                .text
+                .contains("the most related to the proposal first: 40, "),
+            "{}",
+            prompt.text
+        );
+    }
+
+    /// Task 1561: a queue of hundreds of ready tasks that all touch the
+    /// proposal's hotspot, with long precedents, many hotspots and the
+    /// language's instruction, keeps to the overall limit: the summaries,
+    /// the precedents and the full text are cut, each saying how many and
+    /// how to read them.
+    #[test]
+    fn plan_review_prompt_of_hundreds_of_ready_tasks_on_a_shared_hotspot_keeps_to_its_limit() {
+        let mut case = plan_case(600, 0);
+        for id in 1..=600 {
+            case.expected
+                .insert(TaskId::new(id), vec!["src/hot.rs".to_owned()]);
+        }
+        case.hotspots = (0..15)
+            .map(|n| hotspot(&format!("src/hot{n}.rs")))
+            .collect();
+        case.hotspots[0] = hotspot("src/hot.rs");
+        case.precedents = (1..=30)
+            .map(|id| {
+                serde_json::from_value(json!({
+                    "id": id, "kind": "decide", "task_id": 5, "run_id": null,
+                    "question": "長い質問".repeat(200), "options": [],
+                    "answer": "長い答え".repeat(200), "asked_by": "worker",
+                    "reason_category": "scope", "created_at": 0,
+                    "answered_at": 1, "closed_at": null,
+                }))
+                .unwrap()
+            })
+            .collect();
+        case.language = Some(crate::domain::language::Language {
+            tag: "ja".into(),
+            source: crate::domain::language::LanguageSource::Repository,
+        });
+        let prompt = case.prompt();
+        assert_within_limit(&prompt);
+        let instruction = crate::domain::language::instruction("ja");
+        assert!(prompt.text.ends_with(&instruction));
+        assert_eq!(prompt.bytes.sections["language"], instruction.len() + 2);
+        assert_eq!(prompt.bytes.omitted["full_text"], 600 - QUEUED_FULL_TASKS);
+        let shown = lines_with(&prompt.text, "expected_files").len();
+        assert!(shown < 600);
+        assert_eq!(prompt.bytes.omitted["summaries"], 600 - shown);
+        assert!(prompt.bytes.sections["summaries"] <= QUEUED_SUMMARY_BYTES + OMISSION_NOTE_BYTES);
+        assert!(prompt.text.contains(&format!(
+            "({} more ready or in-progress tasks, the least related to the proposal, are left out of this list by its limit of {QUEUED_SUMMARY_BYTES} bytes; list them with `dagq list --status ready,in_progress --limit 200` and read one with `dagq show ID --full`)",
+            600 - shown
+        )));
+        let quoted = prompt.text.matches("\n- precedent: ask ").count();
+        assert!(quoted <= PRECEDENT_ASKS, "{quoted}");
+        assert_eq!(prompt.bytes.omitted["precedents"], 30 - quoted);
+        assert!(prompt.bytes.sections["precedents"] <= PRECEDENT_BYTES + OMISSION_NOTE_BYTES);
+        assert!(prompt.text.contains("read them with `dagq asks --all`)"));
+        assert!(prompt.text.contains("\"path\":\"src/hot14.rs\""));
+        assert_reads_are_the_jobs(&prompt.text);
+    }
+
+    /// Task 1561: required sections over their limit (a huge task of the
+    /// proposal, a huge goal) are not cut silently: their largest pieces
+    /// are replaced by the command that reads them, which the job's role
+    /// may run, the prompt and `over_limit` say why, and the whole keeps to
+    /// its limit; a proposal of thousands of tasks becomes one note.
+    #[test]
+    fn required_sections_over_their_limit_are_read_with_the_commands_the_job_may_run() {
+        let mut case = plan_case(10, 0);
+        case.tasks = vec![
+            proposal_task(
+                sized_task(1000, TaskStatus::Submitted, 1_000_000),
+                Vec::new(),
+            ),
+            proposal_task(long_task(1001, TaskStatus::Submitted, &[]), Vec::new()),
+        ];
+        case.goals = vec![
+            Goal::restore(GoalRecord {
+                id: GoalId::new(4),
+                title: "a huge goal".into(),
+                description: "g".repeat(300_000),
+                acceptance: String::new(),
+                constraints: String::new(),
+                doc: None,
+                status: GoalStatus::Open,
+                closed_at: None,
+                verdict: None,
+                created_at: String::new(),
+                updated_at: String::new(),
+            })
+            .unwrap(),
+        ];
+        let prompt = case.prompt();
+        assert_within_limit(&prompt);
+        let reason = prompt.bytes.over_limit.as_deref().unwrap();
+        assert!(
+            reason.contains(&format!("over their limit of {PLAN_REVIEW_REQUIRED_LIMIT}")),
+            "{reason}"
+        );
+        assert!(prompt.text.contains(reason));
+        assert_eq!(prompt.bytes.omitted["tasks"], 1);
+        assert_eq!(prompt.bytes.omitted["goals"], 1);
+        let stubs = lines_with(&prompt.text, "read_with");
+        assert_eq!(stubs[&1000]["read_with"], "dagq show 1000 --full");
+        assert_eq!(stubs[&1000]["title"], "task 1000");
+        assert_eq!(stubs[&4]["read_with"], "dagq goal show 4 --full");
+        for stub in stubs.values() {
+            let read = named_commands(&format!("`{}`", stub["read_with"].as_str().unwrap()));
+            assert!(PLAN_REVIEW_READS.contains(&read.first().unwrap().as_str()));
+        }
+        // The smaller task of the proposal stays whole.
+        assert!(prompt.text.contains("description of 1001"));
+        assert!(
+            prompt.bytes.sections["tasks"] + prompt.bytes.sections["goals"]
+                < PLAN_REVIEW_REQUIRED_LIMIT
+        );
+        assert_reads_are_the_jobs(&prompt.text);
+
+        case.tasks = (1000..4000)
+            .map(|id| proposal_task(long_task(id, TaskStatus::Submitted, &[]), Vec::new()))
+            .collect();
+        let prompt = case.prompt();
+        assert_within_limit(&prompt);
+        assert_eq!(prompt.bytes.omitted["tasks"], 3000);
+        assert!(prompt.text.contains(
+            "(3000 tasks, left out: list them with `dagq proposal show 1` and read each with `dagq show ID --full`)"
+        ));
+        assert!(prompt.text.contains(
+            "every submitted task of the proposal (3000 of them; `dagq proposal show 1` lists them)"
+        ));
+        assert_reads_are_the_jobs(&prompt.text);
+    }
+
+    /// Task 1561: with the required sections near their limit, the optional
+    /// ones share what is left of the overall limit in their order: the
+    /// summaries, last, get what the others left, and the whole keeps to
+    /// the limit.
+    #[test]
+    fn the_optional_sections_share_the_room_the_required_ones_leave() {
+        use crate::domain::related::RelatedTask;
+        let mut case = plan_case(0, 0);
+        case.tasks = vec![proposal_task(
+            sized_task(1000, TaskStatus::Submitted, 185_000),
+            Vec::new(),
+        )];
+        case.queued = (1..=600)
+            .rev()
+            .map(|id| queued_task(sized_task(id, TaskStatus::Ready, 9_000)))
+            .collect();
+        for id in 1..=600 {
+            case.expected
+                .insert(TaskId::new(id), vec!["src/hot.rs".to_owned()]);
+        }
+        case.candidates[0].related = (1..=5)
+            .map(|id| RelatedTask {
+                id,
+                status: "ready".into(),
+                title: "t".repeat(9_000),
+                score: 1.0,
+                clues: Vec::new(),
+                duplicate_of: None,
+            })
+            .collect();
+        case.precedents = (1..=20)
+            .map(|id| {
+                serde_json::from_value(json!({
+                    "id": id, "kind": "decide", "task_id": 5, "run_id": null,
+                    "question": "q".repeat(400), "options": [],
+                    "answer": "a".repeat(400), "asked_by": "worker",
+                    "reason_category": "scope", "created_at": 0,
+                    "answered_at": 1, "closed_at": null,
+                }))
+                .unwrap()
+            })
+            .collect();
+        let prompt = case.prompt();
+        assert_within_limit(&prompt);
+        assert_eq!(prompt.bytes.over_limit, None);
+        assert!(prompt.bytes.sections["tasks"] > 185_000);
+        assert!(
+            prompt.bytes.sections["full_text"] > 90_000,
+            "{:?}",
+            prompt.bytes
+        );
+        assert!(
+            prompt.bytes.sections["summaries"] < QUEUED_SUMMARY_BYTES,
+            "{:?}",
+            prompt.bytes
+        );
+        assert!(
+            prompt.bytes.total > PLAN_REVIEW_PROMPT_LIMIT - 20_000,
+            "{:?}",
+            prompt.bytes
+        );
+        assert!(
+            prompt
+                .text
+                .contains("are left out of this list by its limit of")
         );
     }
 
