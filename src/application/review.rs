@@ -351,7 +351,8 @@ pub fn review_logs_hint(files: &dyn RunFiles, run_dir: Option<&str>) -> String {
     format!("{pattern}; latest attempt: {}", latest.join(", "))
 }
 
-/// The Markdown before the diff: the task, its goal, the receipt, the
+/// The Markdown before the diff: the task (its context too, where a
+/// planner names the related documents: ADR-t1428-1), its goal, the receipt, the
 /// commits and the diffstat. Fences are longer than any backtick run in
 /// what they hold, so a diff of Markdown cannot close them early.
 #[allow(clippy::too_many_arguments)]
@@ -376,6 +377,7 @@ fn review_markdown(
          - verification logs: {logs}\n\n\
          ## Task\n\n\
          ### Description\n\n{description}\n\n\
+         ### Context\n\n{context}\n\n\
          ### Acceptance\n\n{acceptance}\n\n\
          ### Verification commands\n\n{verify}\n",
         id = task.id(),
@@ -387,6 +389,7 @@ fn review_markdown(
         worktree = run.worktree_path().unwrap_or("(none)"),
         logs = review_logs_hint(files, run.run_dir()),
         description = or_none(task.description()),
+        context = or_none(task.context()),
         acceptance = or_none(task.acceptance()),
         verify = fenced("sh", &task.verification_commands().join("\n")),
     );
@@ -439,4 +442,110 @@ fn review_markdown(
         stat = fenced("", stat),
     ));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::memory_files::MemoryFiles;
+    use crate::domain::{Provider, RunId, RunRecord, TaskRecord, TaskStatus};
+    use serde_json::json;
+
+    const SHA: &str = "1111111111111111111111111111111111111111";
+    const RUN: &str = "00000000-0000-4000-8000-000000000001";
+
+    fn task(context: &str) -> Task {
+        Task::restore(TaskRecord {
+            id: TaskId::new(7),
+            title: "work".into(),
+            description: "change the behavior".into(),
+            acceptance: "the behavior changes".into(),
+            verification_commands: vec!["make gate".into()],
+            required_evidence: Vec::new(),
+            paths: Vec::new(),
+            priority: Default::default(),
+            change: None,
+            status: TaskStatus::InProgress,
+            goal_id: None,
+            context: context.into(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
+            named_mode: None,
+        })
+        .unwrap()
+    }
+
+    fn run() -> TaskRun {
+        TaskRun::restore(RunRecord {
+            id: RunId::new(RUN).unwrap(),
+            task_id: TaskId::new(7),
+            status: RunStatus::AwaitingIntegration,
+            requested_provider: Provider::Claude,
+            actual_provider: Provider::Claude,
+            worker_mode: crate::domain::worker::WorkerMode::Headless,
+            base_commit: CommitSha::try_from(SHA).unwrap(),
+            branch: None,
+            worktree_path: None,
+            workspace_id: None,
+            receipt_path: None,
+            log_path: None,
+            result_commit: None,
+            repo_path: None,
+            run_dir: None,
+            last_error: None,
+            workspace_closed_at: None,
+            created_at: String::new(),
+        })
+        .unwrap()
+    }
+
+    fn material(task: &Task) -> String {
+        let receipt = Receipt::parse(
+            &json!({
+                "run_id": RUN,
+                "result": "succeeded",
+                "commit": SHA,
+                "tests": {"status": "passed", "evidence_or_reason": "unit"},
+                "e2e": {"status": "not_applicable", "evidence_or_reason": "none"},
+                "subagent_review": {"status": "not_applicable", "evidence_or_reason": "small"},
+                "summary": "done",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        review_markdown(
+            &MemoryFiles::default(),
+            task,
+            &run(),
+            None,
+            &receipt,
+            SHA,
+            SHA,
+            "",
+            "",
+        )
+    }
+
+    /// Task 1429 (ADR-t1428-1): the material carries the task's context,
+    /// where a planner names the related documents, between its
+    /// description and its acceptance; `(none)` when it is empty.
+    #[test]
+    fn the_review_material_carries_the_task_context_or_none() {
+        let named = material(&task("Read docs/design/review.md, section Material."));
+        assert!(
+            named.contains(
+                "### Description\n\nchange the behavior\n\n\
+                 ### Context\n\nRead docs/design/review.md, section Material.\n\n\
+                 ### Acceptance\n\nthe behavior changes\n"
+            ),
+            "{named}"
+        );
+        let empty = material(&task("  "));
+        assert!(
+            empty.contains("### Context\n\n(none)\n\n### Acceptance"),
+            "{empty}"
+        );
+        assert_eq!(empty.matches("### Context").count(), 1);
+    }
 }

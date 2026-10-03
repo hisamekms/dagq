@@ -1565,7 +1565,8 @@ pub(crate) fn closed_question_notice(
 pub fn review_prompt(task: &Task, run: &TaskRun, review_path: &str) -> String {
     format!(
         "You review run {run_id} of dagq task {task_id} ({title}) before it lands.\n\
-         Read the review material at {review_path}: the task, its goal, the receipt, the commits and the full diff. Read the worktree if you need more. Do not change any file.\n\n\
+         Read the review material at {review_path}: the task, its goal, the receipt, the commits and the full diff. Read the worktree if you need more. Do not change any file.\n\
+         {docs}\n\
          Acceptance criteria of the task:\n{acceptance}\n\n\
          Decide one verdict:\n\
          - pass: the diff meets the acceptance criteria and the task's instructions and nothing needs fixing.\n\
@@ -1580,10 +1581,16 @@ pub fn review_prompt(task: &Task, run: &TaskRun, review_path: &str) -> String {
         task_id = task.id(),
         title = task.title(),
         acceptance = or_none(task.acceptance()),
+        docs = REVIEW_DOCS_CHECK,
         concern = CONCERN_RECOMMENDATION,
         codes = reason_codes_section(review_reason::REVIEW_CODES),
     )
 }
+
+/// How a review checks the documents on the changed behavior
+/// (ADR-t1428-1 decision 5): against the diff and the summary, never taking
+/// a document's diff alone as proof, and naming stale ones as before.
+pub const REVIEW_DOCS_CHECK: &str = "Read the documents on the behavior the diff changes (named by the task's description or context or by the summary, or found as you read) against the diff and the summary. A document's diff alone does not show the change is right; check the summary's reason for leaving a document as it is like any other claim. Report a stale document as docs_drift whether or not the task named it.\n";
 
 /// How a review recommends what to do with its `concern`, and which
 /// judgements it leaves to a person (ADR-t451-1 decisions 1 and 3).
@@ -3329,6 +3336,54 @@ mod tests {
         let review = review_prompt(&task, &run_on(Provider::Claude, WorkerMode::Headless), "r");
         assert!(!review.contains(DOCS_CHECK));
         assert!(!review.contains("the documents you checked against the diff"));
+    }
+
+    /// Task 1429 (ADR-t1428-1 decision 5): the run's review reads the
+    /// documents on the changed behavior against the diff and the summary,
+    /// once, before the acceptance; the verdict's JSON, the concern's
+    /// recommendation and the reason codes stay as they were.
+    #[test]
+    fn the_review_prompt_checks_the_documents_and_keeps_its_verdict() {
+        let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
+        let review = review_prompt(&task, &run_on(Provider::Codex, WorkerMode::Headless), "r");
+        assert_eq!(review.matches(REVIEW_DOCS_CHECK).count(), 1, "{review}");
+        assert!(review.contains(&format!(
+            "Do not change any file.\n{REVIEW_DOCS_CHECK}\nAcceptance criteria of the task:"
+        )));
+        for part in [
+            "named by the task's description or context or by the summary",
+            "A document's diff alone does not show the change is right",
+            "check the summary's reason for leaving a document as it is",
+            "as docs_drift whether or not the task named it",
+        ] {
+            assert!(REVIEW_DOCS_CHECK.contains(part), "{part}");
+        }
+        assert!(
+            REVIEW_DOCS_CHECK.len() <= 400,
+            "{}",
+            REVIEW_DOCS_CHECK.len()
+        );
+        assert!(!REVIEW_DOCS_CHECK.contains("cargo") && !REVIEW_DOCS_CHECK.contains('`'));
+        // Unchanged: the verdict's shape, the concern's recommendation and
+        // the reason codes with their definitions.
+        assert!(review.contains(
+            "Answer with one JSON object and nothing else, matching this schema:\n\
+             {\"verdict\": \"pass\" | \"revise\" | \"concern\", \"reasons\": [{\"text\": string, \"codes\": [string]}], \"summary\": string, \"recommendation\": \"land\" | \"send_back\" | null, \"confidence\": \"high\" | \"low\" | null, \"reason_category\": \"scope\" | \"discard\" | null}\n\
+             reasons lists each finding (empty for pass); summary is one or two sentences; recommendation, confidence and reason_category are for a concern only (null for pass and revise).\n"
+        ));
+        assert!(review.contains(&format!(
+            "{CONCERN_RECOMMENDATION}{}Answer with one JSON object",
+            reason_codes_section(review_reason::REVIEW_CODES)
+        )));
+        assert!(
+            CONCERN_RECOMMENDATION
+                .starts_with("For a concern, also recommend what to do, and how sure you are:\n")
+        );
+        assert!(CONCERN_RECOMMENDATION.ends_with(
+            "Leave scope and discard to the person rather than deciding them; when in doubt, say low.\n\n"
+        ));
+        assert!(!CONCERN_RECOMMENDATION.contains("document"));
+        assert!(!reason_codes_section(review_reason::REVIEW_CODES).contains(REVIEW_DOCS_CHECK));
     }
 
     /// Task 978: a task that needs a path outside its declared paths ends
