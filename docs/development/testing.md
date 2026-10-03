@@ -1,7 +1,7 @@
 ---
 id: development-testing
 type: development
-title: このrepositoryのtestの制約（coverageの関門・test binary・置き場所・書き方・ファイルの行数・待ちの上限・e2eとその印・手動スモーク）
+title: このrepositoryのtestの制約（coverageの関門・test binary・置き場所・書き方・判断と境界のtest・ファイルの行数・待ちの上限・e2eとその印・手動スモーク）
 status: current
 created: 2026-10-03
 updated: 2026-10-04
@@ -13,6 +13,7 @@ tags:
 related:
   - adr-t1453-2
   - adr-t1582-1
+  - adr-t1410-1
   - development-local-checks
   - development-task-registration
   - development-migrations
@@ -43,6 +44,16 @@ testを書く・置く・直すときの今の規則。読むのは、`tests/`�
 
 - 関門ではtestは1件ずつ別processになるので、binaryの中の他のtestとprocessの状態（staticや一度だけの初期化）を共有することに頼るtestを書かない。
 - `cargo test`では同じprocessのthreadで走るので、process全体の状態（env・cwd）を変えるtestを書かない。
+- testのshellに渡る文字列（stubのagent・reviewerのscript、taskの`verification_commands`、wrapperのscriptなど）にfilesystemのpathを埋めるときは、`'{}'`と単引用符で直接囲まず、`tests/common`の`shell_path`（`dagq::infrastructure::adapters::shell_quote`を包む）で引用する。runtimeのtestのfixtureはqueueとrepositoryを`queue's data.db`・`repo's directory`とapostropheを含む名前で作るので、その下のpathを単引用符で直接埋めると引用が途中で閉じてshellがsyntax errorで終わり、testが意図を確かめないまま通るか不安定に落ちる。SQL・TOMLの文字列リテラルとpathでない文字列は対象外。
+
+## 判断と境界のtest
+
+[ADR-t1410-1](../adr/2026-10-03-t1410-1-decisions-in-unit-tests-boundaries-in-integration-tests.md)。runtimeのtaskのworkerとplannerが守る。
+
+- 状態の判断（状態の遷移・回数と上限・時刻を値で受けた時間の判定・verdictやanswerから操作への対応・askやerrorの文面・次の一手の選び方）は`src/`の副作用のない関数にして`#[cfg(test)]`のunit testで確かめる。unit testは外部プロセス・git・SQLiteのファイル・sleep・実時間の時計を使わない（時刻は値で渡す）。
+- `tests/it`はSQLite・Git・プロセス・supervisorの配線・復旧とadopt・cmuxの境界を代表の1 caseで確かめ、判断のcaseごとにfixtureとsupervisorを起動し直さない。
+- e2eは実バイナリ・実Git・実cmuxのハッピーパスと境界だけにする（流し方は下の「e2e」）。
+- integration testを減らすときは、確かめていた中身をunit testか残すintegration testに対応づけ、行き先の無いまま消さない。
 
 ## testファイルの行数
 

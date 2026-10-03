@@ -4,7 +4,7 @@ type: design
 title: Manual smoke of the paths that include real Claude and Codex
 status: current
 created: 2026-09-25
-updated: 2026-10-04 # task 1232: the cmux steps are the person's, in a terminal without DAGQ_ROLE
+updated: 2026-10-04 # task 1461: the AGENTS.md section on the production queue's boundary is renamed (after task 1232)
 last_verified: 2026-10-04 # task 1232
 scope: operations
 related:
@@ -41,7 +41,7 @@ related:
 
 このスモークは人か inbox が行う。ただしこの文書の `cmux` のコマンド（`cmux workspace close`・`cmux workspace-group delete`・`send-key` など）は、人が `DAGQ_ROLE` の無い自分の terminal で打つ。inbox の settings は `Bash(cmux:*)` を拒み、使い捨ての queue の workspace は本番 queue の ID で指せないので dagq の CLI にも移していない（[ADR-t1228-1](../adr/2026-10-02-t1228-1-inbox-and-planner-reach-sessions-through-the-dagq-cli.md) 決定 1、[ADR-t1228-2](../adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)）。worker が使い捨ての queue を操作できない理由と、worker が代わりにすることは[運用の開発文書](../development/operations.md)の「workerがhostと実queueでできないこと」、そう決めた経緯は[運用の規則の経緯](../plans/operation-rules-history.md)が持つ。
 
-- **バイナリ**: 確かめたい commit で `cargo build --locked` したものを scratch にコピーして使う（本番 queue と開発中のバイナリの境界は AGENTS.md の「作業中」）。
+- **バイナリ**: 確かめたい commit で `cargo build --locked` したものを scratch にコピーして使う（本番 queue と開発中のバイナリの境界は AGENTS.md の「本番 queue と開発環境の境界」）。
 - **repository**: `git init` した使い捨て repository。ディレクトリ名は `dagq-smoke` にする（task 710）。runtime は queue の cmux の workspace group を `[<repository のディレクトリ名>]`（例 `[dagq-smoke]`）、workspace の title を `[<ディレクトリ名>]worker#...` などと名付けるので、残った group がどのスモークのものか名前で分かる（`tests/e2e.rs` の fixture は `dagq-e2e` で、group は `[dagq-e2e]`）。`repo` のような汎用の名前にしない。`seed.txt`（検証コマンドが見る）、3 行の `shared.txt`（衝突用）、`CLAUDE.md`、`.claude/settings.json`（`permissions.defaultMode: auto`）を commit しておく。scratch に置いた bare repository を `origin` にする（supervisor の着地は push まで行い、`origin` が無いと `push_failed` の attention になる。手で `integrate` するときは `--no-push` でもよい）。
 - **queue**: 全コマンドを `XDG_DATA_HOME=<scratch>/xdg` で、repository を cwd にして打つ（queue は `<scratch>/xdg/dagq/<hash>/queue.db` に解決される）。これを 1 行の wrapper script（例 `tq`）にしておく。
 - **supervisor**: 専用の cmux workspace で `supervise --parallel 2 --claude <agent>` を起動し、`--log-dir` か `tee` で log を残す。`up` は使わない（inbox / planner の workspace と launchd agent を作るため）。`--once` は付けない。

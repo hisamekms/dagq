@@ -1,10 +1,10 @@
 ---
 id: development-documents
 type: development
-title: このrepositoryの文書の規則（判断の記録・ADR・design・plans・frontmatter・workerの文書の照合・commit）
+title: このrepositoryの文書の規則（判断の記録・ADR・design・plans・frontmatter・workerの文書の照合・AGENTS.md・commit）
 status: current
 created: 2026-10-03
-updated: 2026-10-03
+updated: 2026-10-04
 owners:
   - hisamekms
 tags:
@@ -70,6 +70,13 @@ pluginとrepositoryの規則・値・経緯の受け持ちは[ADR-t1453-2](../ad
 ## workerの文書の照合
 
 workerはreceiptの前に、受け入れ条件の対応づけ（[手元の検証](local-checks.md)の「受け入れ条件の対応づけ」）に続けて、workerのpromptが指示する文書の照合（仕組みは[prompt](../design/supervisor-lifecycle/prompt.md)の「文書の照合」、[ADR-t1428-1](../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)）を行う。このrepositoryで差分と照合する文書は、taskが名指す文書と、変えた挙動を説明する`docs/design/`・pluginのskillとreference・AGENTS.md・`docs/development/`・ADRの索引で、`summary`に更新したpath・節か不要の理由を書く。taskのpathsの外のずれは`docs_drift`のfollow_upにする。
+
+## AGENTS.md
+
+- AGENTS.mdは概要・役割と変更の範囲ごとの読む案内・本番queueと開発環境の境界・開始時の短い制約・検証と文書の規則への参照だけを持つ（[ADR-t1453-2](../adr/2026-10-03-t1453-2-ownership-of-agents-md-plugin-development-docs-and-config.md)決定1・3）。規則の本文はAGENTS.mdに足さず、その正本（`docs/development/`の該当の文書、実装は`docs/design/`、経緯はADRと`docs/plans/`、設定値は`dagq.toml`）に書き、AGENTS.mdには読む案内が要るときだけ参照の1行を足す。
+- 上限は9,216 byte（9 KiB）。`scripts/check-agents-md-size.sh`がAGENTS.mdのbyte数（`wc -c`）を測り、上限を超えればbyte数と上限を出してexit 1にし、CIも実行する。行数では測らない（日本語の1行は長く、行数が大きさを表さない。ADR-t1453-2決定6）。
+- 決め方: 組み直した後（task 1461、2026-10-04）のAGENTS.mdは8,340 byte。余裕は876 byte（約10%）で、案内の参照の行を2〜3行足せるが、規則の本文の節を足せば超える大きさにした。候補の4〜8 KiBは、どれも今の案内（役割と変更の範囲ごとに読む文書の名指し）が入らない（8 KiB＝8,192 byteでも148 byte足りない）。
+- 上限を上げるのは、案内（読む文書の名指し）が増えて規則の本文を正本へ移してもなお超えるときだけで、同じ変更でこの節の値と決め方、scriptの`limit`を直す。
 
 ## commit
 

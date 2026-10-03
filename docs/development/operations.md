@@ -20,11 +20,11 @@ related:
 
 このrepository（dagq自身）の本番queueを動かし、固定バイナリ・`dagq.toml`・hostのツールに触るときの今の規則。読むのは、人・inbox・plannerが`up` / `down` / `install`、`dagq.toml`、hostのツール、KPIの印、pushに触る前と、workerが実バイナリや実queueでの確認が要ると思ったとき（[workerがhostと実queueでできないこと](#workerがhostと実queueでできないこと)だけ）。
 
-本番queueと開発環境の境界の短い規則はAGENTS.mdの「作業中」だけが持ち、この文書は繰り返さない。この文書が持つのは、その規則が当たるsession・理由・実装への参照と、AGENTS.mdに無いこのrepositoryの運用の規則。dagqの汎用の操作（どのrepositoryにも当たる手順と、その理由）はpluginのskillとreference、実装の姿は`docs/design/`、経緯は[運用の規則の経緯](../plans/operation-rules-history.md)とADR、今の設定値は`dagq.toml`（値の理由はそのコメント）が持ち、ここではそれを指すだけにする。
+本番queueと開発環境の境界の短い規則はAGENTS.mdの「本番 queue と開発環境の境界」だけが持ち、この文書は繰り返さない。この文書が持つのは、その規則が当たるsession・理由・実装への参照と、AGENTS.mdに無いこのrepositoryの運用の規則。dagqの汎用の操作（どのrepositoryにも当たる手順と、その理由）はpluginのskillとreference、実装の姿は`docs/design/`、経緯は[運用の規則の経緯](../plans/operation-rules-history.md)とADR、今の設定値は`dagq.toml`（値の理由はそのコメント）が持ち、ここではそれを指すだけにする。
 
 ## 本番queueと固定バイナリ
 
-AGENTS.mdの「作業中」の固定バイナリ・開発中のバイナリ・入れ替え・DBの規則について:
+AGENTS.mdの「本番 queue と開発環境の境界」と「開始時の短い制約」の固定バイナリ・開発中のバイナリ・入れ替え・DB・repositoryの中で打つ規則について:
 
 - 当たるsession: supervisor・inbox・planner（人が開いたものもruntimeが立てたものも）のどれにも当たる。開発中のバイナリ（`target/debug`・`target/release`）を本番に使わない理由は、commitされていない変更や未着地のmigrationを含みうるため。
 - 開発中のバイナリで本番を読める理由（実装）は[ADR-0073](../adr/0073-kind-additions-are-compatible.md)決定5・7・18と[Persistence](../design/persistence.md)の「Database setup and migrations」、queueがどのdirectoryから解決されるか（repositoryの中で打つ理由）はpluginの`dagq`の`reference/locate.md`が持つ。
@@ -72,6 +72,7 @@ dagq up --in-cmux --claude ~/.local/bin/claude --codex ~/.local/bin/codex --plug
 - `--parallel`を付けない規則とその理由は`dagq.toml`の`[supervisor]`の`parallel`のコメントが持つ。`--runtime-planners`も同じ理由で付けない（`runtime_planners`は`[supervisor]`で決める）。flagが`[supervisor]`より優先して残る仕組みと、付けて起動したsupervisorを`[supervisor]`に従わせる手順は[Run environment](../design/supervisor-lifecycle/run-environment.md)の`[supervisor]`の項（「優先順」と「起動し直すときの引き継ぎ」）。
 - このrepositoryは自動更新を使う（上のコマンドの`--auto-update`）。打ち直す`up`にも付け続けることとその理由はpluginの`dagq-recover`の`reference/update.md`の「Automatic updates (`up --auto-update`)」が持つ。
 - `--claude`と`--codex`の値は上のコマンドのpath。pathで渡す理由、Claude CodeやCodexを更新したときの解決し直し、`codex`が無いときの振る舞いはpluginの`dagq-recover`の`reference/up-down.md`の「up」、`install --allow-breaking`のdrainが起動し直す`up`に渡すものは同じskillの`reference/update.md`の「install」が持つ。
+- `up` / `down`の仕組みは[up / down](../design/supervisor-lifecycle/up-down.md)と[Auto-update](../design/supervisor-lifecycle/auto-update.md)、workspaceの識別と名前は[run-workspaces](../design/supervisor-lifecycle/run-workspaces.md)と[naming](../design/supervisor-lifecycle/naming.md)が持つ。
 
 ## KPIの読み方と印
 

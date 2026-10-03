@@ -4,7 +4,7 @@ type: development
 title: このrepositoryのtaskの登録（verify・paths・evidence・changeの選び方、ADRを書くtask、plan reviewが当てはめる規則）
 status: current
 created: 2026-10-03
-updated: 2026-10-03
+updated: 2026-10-04
 owners:
   - hisamekms
 tags:
@@ -34,6 +34,7 @@ related:
 - migrationを足す（runtime）: 上のruntimeの組み合わせに`--verify 'sh scripts/check-migration-numbers.sh'`を足す
 - e2eの印（`.config/e2e-quarantine.toml`）を変える: verifyに`sh scripts/check-e2e-quarantine.sh`を付ける（書式・重複・testの実在・上限を検査し、期限切れは警告だけ。CIも実行する。印の規則は[testの制約](testing.md)の「e2eの印」）
 - pluginとバイナリのversionを変える: verifyに`sh scripts/check-plugin-version.sh`を付ける（検査の中身は[plugin integration](../design/plugin-integration.md)の「tagとversionの一致規則」）
+- AGENTS.mdを変える: verifyに`sh scripts/check-agents-md-size.sh`を付ける（byteの上限を検査する。CIも実行する。上限と、規則の本文をAGENTS.mdに足さないことは[文書の規則](documents.md)の「AGENTS.md」）
 - 対象が混ざるtaskは重い方の検証にする。
 
 llvm-covとcargo testの重ね方:

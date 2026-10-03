@@ -63,6 +63,9 @@ jobs:
       - name: E2E quarantine marks
         run: sh scripts/check-e2e-quarantine.sh
 
+      - name: AGENTS.md size
+        run: sh scripts/check-agents-md-size.sh
+
       - name: cargo clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 

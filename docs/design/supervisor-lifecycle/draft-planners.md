@@ -4,7 +4,7 @@ type: design
 title: "Draft planners (supervisor)"
 status: current
 created: 2026-09-26
-updated: 2026-10-03
+updated: 2026-10-04 # task 1461: the AGENTS.md section that points at the dagq-planner skill is renamed
 last_verified: 2026-10-03
 scope: runtime
 related:
@@ -45,7 +45,7 @@ related:
 
 ## 推奨が出せればplannerが決める（ADR-t451-1）<a id="推奨が出せればplannerが決める未実装"></a>
 
-[ADR-t451-1](../../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)の決定5（ADR-0047決定13・16・20をamends、task 1320）。基本方針の文言はdagq-planner skillの「Basic policy (ADR-t451-1)」に揃え（task 450。AGENTS.mdの「inboxとplanner」は今はそのskillを指すだけ）、promptは`prompt::DECIDE_YOURSELF`でその要約を持つ。
+[ADR-t451-1](../../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)の決定5（ADR-0047決定13・16・20をamends、task 1320）。基本方針の文言はdagq-planner skillの「Basic policy (ADR-t451-1)」に揃え（task 450。AGENTS.mdの「### planner」は今はそのskillを指すだけ）、promptは`prompt::DECIDE_YOURSELF`でその要約を持つ。
 
 - **prompt**（`draft_planner_prompt`の「What to do」）: runtimeのplannerは、推奨が出せるdraftの採否を自分で決める（採用はsubmit、不採用はcancel）。理由は、採用ならtaskの`--context`に、不採用（`--duplicate-of`を含む）・`keep_draft`ならdraftの`note`に書く。`planner_question`にするのは、(a) ADR-0047決定41の`scope`・`discard`に当たりqueue・repository・ADR・人の先例で決めきれないもの、(b) 確信度が`low`のもの、(c) [ADR-t808-1](../../adr/2026-09-28-t808-1-runtime-planners-submit-follow-ups-up-to-depth-two.md)の自動で採用しない上限（深さ`FOLLOW_UP_ASK_DEPTH`（3）以上と、goalが無いか閉じたgoalのfollow_up）に当たるdraftだけで（repositoryの規則でverify・paths・evidenceが決まらないこと自体は理由にならず、source・ADR・人の先例から決め、それでも(a)か(b)に当たるときだけ聞く。`prompt::RUNTIME_PLANNER_ASK`）、問いには推奨（`--recommend <adopt|cancel|keep_draft>`）と確信度（`--confidence <high|low>`）を載せる（[ask](ask.md#aiの推奨と確信度未実装)）。`--because`は`scope`（成果を捨てるかどうかの問いは`discard`）。
 - **上限**: CLIの`submit`が上限のdraftを人の`adopt`なしに拒む規則（6）は変えない。
