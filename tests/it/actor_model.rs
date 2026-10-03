@@ -12,8 +12,8 @@ use runtime_support::*;
 fn fails_once(dir: &Path) -> String {
     let mark = dir.join("failed-once");
     format!(
-        "if [ ! -f '{mark}' ]; then : > '{mark}'; exit 7; fi; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
-        mark = mark.display()
+        "if [ ! -f {mark} ]; then : > {mark}; exit 7; fi; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+        mark = shell_path(&mark)
     )
 }
 

@@ -300,3 +300,12 @@ impl Drop for KillOnDrop {
         }
     }
 }
+
+/// `path` quoted for a string a shell runs (a stub's script, a task's
+/// verification command, a wrapper): the runtime fixtures name their queue
+/// and repository with an apostrophe (`queue's data.db`, `repo's
+/// directory`), so a path from them put in as `'{}'` closes the quote early
+/// and the shell stops at a syntax error (task 1364).
+pub fn shell_path(path: impl AsRef<std::path::Path>) -> String {
+    dagq::infrastructure::adapters::shell_quote(path.as_ref().to_str().unwrap())
+}

@@ -9,8 +9,8 @@ use runtime_support::*;
 /// `script`.
 fn logging(log: &Path, script: &str) -> String {
     format!(
-        "printf '%s %s\\n' \"$DAGQ_ROLE\" \"$DAGQ_ACTOR_ID\" >> '{}'; {script}",
-        log.display()
+        "printf '%s %s\\n' \"$DAGQ_ROLE\" \"$DAGQ_ACTOR_ID\" >> {}; {script}",
+        shell_path(log)
     )
 }
 
@@ -21,8 +21,8 @@ fn the_review_and_the_recovery_job_run_as_their_own_actors() {
     let log = db.parent().unwrap().join("job-env.txt");
     let mark = db.parent().unwrap().join("failed-once");
     let worker = format!(
-        "if [ ! -f '{mark}' ]; then : > '{mark}'; exit 7; fi; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
-        mark = mark.display()
+        "if [ ! -f {mark} ]; then : > {mark}; exit 7; fi; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+        mark = shell_path(&mark)
     );
     let backend = TestWorkspace::new(&db, false, &worker);
     let reviewer =

@@ -218,8 +218,8 @@ fn a_timed_out_review_stops_the_processes_it_started() {
     // Beside the queue, whose own name has a quote.
     let pid_file = db.parent().unwrap().join("review-child.pid");
     let mut reviewer = TestReviewer::new(&[format!(
-        "sleep 120 & echo $! > '{}'; wait",
-        pid_file.display()
+        "sleep 120 & echo $! > {}; wait",
+        shell_path(&pid_file)
     )]);
     reviewer.timeout = Duration::from_secs(1);
     let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);

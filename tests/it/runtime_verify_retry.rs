@@ -38,8 +38,8 @@ fn show(db: &Path) -> dagq::domain::TaskDetail {
 /// next: its marker file lives outside the worktree.
 fn full_disk_once(marker: &Path) -> String {
     format!(
-        "if [ -f '{0}' ]; then exit 0; fi; touch '{0}'; echo 'error: failed to write: No space left on device (os error 28)'; exit 1",
-        marker.display()
+        "if [ -f {0} ]; then exit 0; fi; touch {0}; echo 'error: failed to write: No space left on device (os error 28)'; exit 1",
+        shell_path(marker)
     )
 }
 
@@ -188,8 +188,8 @@ fn a_failure_of_the_code_is_resumed_as_before() {
     set_commands(
         &db,
         json!([format!(
-            "if [ -f '{0}' ]; then echo 'test a::b ... FAILED'; echo 'test result: FAILED. 0 passed; 1 failed'; exit 101; fi; touch '{0}'; kill -KILL $$",
-            marker.display()
+            "if [ -f {0} ]; then echo 'test a::b ... FAILED'; echo 'test result: FAILED. 0 passed; 1 failed'; exit 101; fi; touch {0}; kill -KILL $$",
+            shell_path(&marker)
         )]),
     );
     let outcome = integrate(&db, 1, &repo).unwrap();

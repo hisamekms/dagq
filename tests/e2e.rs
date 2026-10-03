@@ -2584,7 +2584,8 @@ fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands
     fs::create_dir_all(fixed.parent().unwrap()).unwrap();
     fs::copy(BIN, &fixed).unwrap();
     let build = format!(
-        "mkdir -p \"$CARGO_TARGET_DIR/release\" && cp '{BIN}' \"$CARGO_TARGET_DIR/release/dagq\""
+        "mkdir -p \"$CARGO_TARGET_DIR/release\" && cp {} \"$CARGO_TARGET_DIR/release/dagq\"",
+        common::shell_path(BIN)
     );
     let mut supervisor = ChildGuard::new(
         Command::new(&fixed)

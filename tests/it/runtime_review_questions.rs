@@ -18,8 +18,8 @@ while [ ! -f "$MESSAGE" ]; do sleep 0.05; done; rm "$MESSAGE"
 /// an earlier second than the revise request.
 fn slow_revise(db: &std::path::Path) -> String {
     format!(
-        "while [ ! -f '{}' ]; do sleep 0.05; done; {}",
-        review_go(db).display(),
+        "while [ ! -f {} ]; do sleep 0.05; done; {}",
+        shell_path(review_go(db)),
         verdict("revise", &["add a line"], "one gap")
     )
 }

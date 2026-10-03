@@ -18,8 +18,8 @@ fn stub_cargo(dir: &Path, fails: bool) -> std::path::PathBuf {
         "echo 'error: toolchain 1.95 is required' >&2; exit 101".to_owned()
     } else {
         format!(
-            "root=''\nwhile [ $# -gt 0 ]; do [ \"$1\" = --root ] && root=\"$2\"; shift; done\nmkdir -p \"$root/bin\" && cp '{}' \"$root/bin/dagq\"",
-            env!("CARGO_BIN_EXE_dagq")
+            "root=''\nwhile [ $# -gt 0 ]; do [ \"$1\" = --root ] && root=\"$2\"; shift; done\nmkdir -p \"$root/bin\" && cp {} \"$root/bin/dagq\"",
+            crate::common::shell_path(env!("CARGO_BIN_EXE_dagq"))
         )
     };
     crate::common::template::script(

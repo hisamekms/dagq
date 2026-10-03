@@ -72,14 +72,14 @@ if [ "$(cat "$DIR/codex-mode")" = limit ]; then
   exit 1
 fi
 env > "$DIR/codex-env.txt"
-'{dagq}' kpi > "$DIR/codex-kpi.json" 2> "$DIR/codex-kpi.err"
+{dagq} kpi > "$DIR/codex-kpi.json" 2> "$DIR/codex-kpi.err"
 SESSIONS="$DIR/codex-home/sessions/2026/09/29"
 mkdir -p "$SESSIONS"
 printf '{{"timestamp":"%s","type":"turn_context","payload":{{"model":"{CODEX_MODEL}","effort":"high"}}}}\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" >> "$SESSIONS/rollout-2026-09-29T00-00-00-$THREAD.jsonl"
 cat "$DIR/codex-reply.jsonl"
 printf '{{"type":"turn.completed","usage":{{"input_tokens":10,"output_tokens":2}}}}\n'
 "#,
-        dagq = env!("CARGO_BIN_EXE_dagq"),
+        dagq = crate::common::shell_path(env!("CARGO_BIN_EXE_dagq")),
     );
     crate::common::template::script(&stub, script);
     stub

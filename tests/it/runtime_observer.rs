@@ -532,8 +532,9 @@ fn observe_kills_an_agent_past_its_timeout_with_its_children() {
     let child_pid = db.parent().unwrap().join("child.pid");
     let slow = ObserverProvider {
         script: format!(
-            "sleep 60 & echo $! > '{}.tmp' && mv '{0}.tmp' '{0}'; wait",
-            child_pid.display()
+            "sleep 60 & echo $! > {tmp} && mv {tmp} {pid}; wait",
+            tmp = shell_path(child_pid.with_extension("pid.tmp")),
+            pid = shell_path(&child_pid)
         ),
     };
     let started = Instant::now();
@@ -619,8 +620,8 @@ fn supervisor_starts_the_observer_on_its_interval_without_a_run_slot() {
     crate::common::template::script(
         &runner,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"${{0%/*}}/observer-arguments\"\nexec '{}' \"$@\"\n",
-            env!("CARGO_BIN_EXE_dagq")
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"${{0%/*}}/observer-arguments\"\nexec {} \"$@\"\n",
+            shell_path(env!("CARGO_BIN_EXE_dagq"))
         ),
     );
     let supervise_observed = || {

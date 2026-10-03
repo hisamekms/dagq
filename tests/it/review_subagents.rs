@@ -947,7 +947,7 @@ fn the_real_claude_review_runs_its_subagents_without_the_worktrees_settings() {
         fs::write(
             worktree.join(".claude/settings.json"),
             json!({"hooks": {"SessionStart": [{"hooks": [
-                {"type": "command", "command": format!("touch '{}'", marker.display())}
+                {"type": "command", "command": format!("touch {}", shell_path(&marker))}
             ]}]}})
             .to_string(),
         )

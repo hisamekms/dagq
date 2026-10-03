@@ -643,8 +643,8 @@ fn a_stop_answer_to_a_run_out_of_its_slot_waits_for_the_slot() {
     backend.script_for(
         3,
         &format!(
-            "while [ ! -f '{}' ]; do sleep 0.05; done\n{VALID_AGENT}",
-            gate.display()
+            "while [ ! -f {} ]; do sleep 0.05; done\n{VALID_AGENT}",
+            shell_path(&gate)
         ),
     );
     let backend = Arc::new(backend);

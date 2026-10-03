@@ -138,8 +138,8 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit"#,
     ));
     let gate = dir.db.parent().unwrap().join("logged-out");
     let logged_out = format!(
-        "while [ ! -f '{}' ]; do sleep 0.05; done; printf 'Invalid API key · Please run /login\\n'; exit 1",
-        gate.display()
+        "while [ ! -f {} ]; do sleep 0.05; done; printf 'Invalid API key · Please run /login\\n'; exit 1",
+        shell_path(&gate)
     );
     let reviewer = Arc::new(TestReviewer::new(&[
         logged_out.clone(),

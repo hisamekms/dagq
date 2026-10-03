@@ -373,8 +373,8 @@ receipt "$(git rev-parse HEAD)"; await_exit
 /// The recovery job's `send_instruction`, once `gate` exists.
 fn instruction_job(gate: &Path) -> String {
     format!(
-        "while [ ! -f '{}' ]; do sleep 0.05; done; {}",
-        gate.display(),
+        "while [ ! -f {} ]; do sleep 0.05; done; {}",
+        shell_path(gate),
         repair(
             json!({"action": "send_instruction", "instruction": "write the receipt"}),
             "the session stopped at its prompt",

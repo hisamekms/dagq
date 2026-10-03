@@ -14,9 +14,9 @@ fn markers_do_not_hold_passes(fifos: bool) {
         r#"mkfifo "$RUN_DIR/idle.json" "$RUN_DIR/receipt.json""#.to_owned()
     } else {
         format!(
-            r#"ln -s '{}' "$RUN_DIR/idle.json"; ln -s '{}' "$RUN_DIR/receipt.json""#,
-            outside.display(),
-            outside.display()
+            r#"ln -s {} "$RUN_DIR/idle.json"; ln -s {} "$RUN_DIR/receipt.json""#,
+            shell_path(&outside),
+            shell_path(&outside)
         )
     };
     set_turns(
@@ -98,12 +98,12 @@ fn linked_exit_and_temporary_files_leave_the_target_untouched() {
             r#"case "$TURN" in
 1)
     for name in idle.json idle.json.tmp turns/exit turns/request-000001.json.tmp; do
-        ln -s '{}' "$RUN_DIR/$name"
+        ln -s {} "$RUN_DIR/$name"
     done
     say working ;;
 *) {FINISH} ;;
 esac"#,
-            outside.display()
+            shell_path(&outside)
         ),
     );
     let backend = Arc::new(backend);

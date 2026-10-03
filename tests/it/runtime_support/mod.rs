@@ -10,7 +10,7 @@ mod reviewer;
 pub use headless::{CODEX_HOME, set_codex_model};
 pub use reviewer::*;
 mod thread_stacks;
-pub use crate::common::{Bounded, WithoutActor};
+pub use crate::common::{Bounded, WithoutActor, shell_path};
 pub use anyhow::{Result, bail, ensure};
 use dagq::domain::LeaseToken;
 pub use dagq::domain::headless_job::JobAccess;

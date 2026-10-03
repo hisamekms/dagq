@@ -11,8 +11,8 @@ use runtime_support::*;
 fn fails_once(dir: &Path) -> String {
     let mark = dir.join("failed-once");
     format!(
-        "if [ ! -f '{mark}' ]; then : > '{mark}'; exit 7; fi; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
-        mark = mark.display()
+        "if [ ! -f {mark} ]; then : > {mark}; exit 7; fi; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+        mark = shell_path(&mark)
     )
 }
 
@@ -120,8 +120,8 @@ fn a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited() 
         .unwrap();
     let marker = db.parent().unwrap().join("first-run-done");
     let script = format!(
-        "if [ ! -f '{marker}' ]; then : > '{marker}'; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit; exit 0; fi; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
-        marker = marker.display()
+        "if [ ! -f {marker} ]; then : > {marker}; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit; exit 0; fi; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+        marker = shell_path(&marker)
     );
     let backend = TestWorkspace::new(&db, false, &script);
     backend.resume_script_for(

@@ -562,20 +562,21 @@ fn auto_update_installs_each_runtime_landing_and_puts_a_broken_build_back() {
     let cmux = stub("cmux", "#!/bin/sh\nprintf 'PONG\\n'\n");
     let claude = stub("claude", "#!/bin/sh\nprintf 'stub 1.0\\n'\n");
     let bin = env!("CARGO_BIN_EXE_dagq");
+    let quoted_bin = crate::common::shell_path(bin);
     // Like the real binary for every check `install` makes, but a
     // supervisor it runs dies at once.
     let broken = stub(
         "broken-dagq",
         &format!(
-            "#!/bin/sh\ncase \" $* \" in *\" --handoff-token probe \"*) exec '{bin}' \"$@\";; esac\n\
+            "#!/bin/sh\ncase \" $* \" in *\" --handoff-token probe \"*) exec {quoted_bin} \"$@\";; esac\n\
 for a in \"$@\"; do if [ \"$a\" = supervise ]; then echo 'broken build' >&2; exit 3; fi; done\n\
-exec '{bin}' \"$@\"\n"
+exec {quoted_bin} \"$@\"\n"
         ),
     );
     let build = format!(
-        "mkdir -p \"$CARGO_TARGET_DIR/release\" && if [ -f src/broken ]; then cp '{}' \
-\"$CARGO_TARGET_DIR/release/dagq\"; else cp '{bin}' \"$CARGO_TARGET_DIR/release/dagq\"; fi",
-        broken.display()
+        "mkdir -p \"$CARGO_TARGET_DIR/release\" && if [ -f src/broken ]; then cp {} \
+\"$CARGO_TARGET_DIR/release/dagq\"; else cp {quoted_bin} \"$CARGO_TARGET_DIR/release/dagq\"; fi",
+        crate::common::shell_path(&broken)
     );
     let fixed = dir.path().join("bin").join("dagq");
     std::fs::create_dir_all(fixed.parent().unwrap()).unwrap();

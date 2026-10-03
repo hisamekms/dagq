@@ -156,8 +156,8 @@ fn the_review_and_the_recovery_job_are_given_the_service_not_the_queue() {
     let dir = db.parent().unwrap().to_owned();
     let mark = dir.join("failed-once");
     let worker = format!(
-        "if [ ! -f '{mark}' ]; then : > '{mark}'; exit 7; fi; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
-        mark = mark.display()
+        "if [ ! -f {mark} ]; then : > {mark}; exit 7; fi; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+        mark = shell_path(&mark)
     );
     let backend = TestWorkspace::new(&db, false, &worker);
     let dir_text = dir.to_str().unwrap().replace('\'', "'\\''");

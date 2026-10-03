@@ -71,14 +71,14 @@ case "$(cat "$DIR/codex-mode")" in
 esac
 # The job's `dagq` reads through the queue service (goal 82's stage (3)).
 env > "$DIR/codex-env.txt"
-'{dagq}' goal show 1 > "$DIR/codex-goal.json" 2> "$DIR/codex-goal.err"
+{dagq} goal show 1 > "$DIR/codex-goal.json" 2> "$DIR/codex-goal.err"
 SESSIONS="$DIR/codex-home/sessions/2026/09/29"
 mkdir -p "$SESSIONS"
 printf '{{"timestamp":"%s","type":"turn_context","payload":{{"model":"{CODEX_MODEL}","effort":"high"}}}}\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" >> "$SESSIONS/rollout-2026-09-29T00-00-00-$THREAD.jsonl"
 cat "$DIR/codex-reply.jsonl"
 printf '{{"type":"turn.completed","usage":{{"input_tokens":10,"output_tokens":2}}}}\n'
 "#,
-        dagq = env!("CARGO_BIN_EXE_dagq"),
+        dagq = crate::common::shell_path(env!("CARGO_BIN_EXE_dagq")),
     );
     crate::common::template::script(&stub, script);
 

@@ -64,11 +64,11 @@ fn nextest_command(dir: &Path, name: &str, log: &str, pass_after: bool) -> Strin
     fs::write(&output, log).unwrap();
     if pass_after {
         format!(
-            "if [ \"$NEXTEST_FLAKY_RESULT\" = pass ]; then echo ' FLAKY 2/2 [ 0.007s] dagq::it runtime_x::retry_flaky'; exit 0; fi; cat '{}'; exit 100",
-            output.display()
+            "if [ \"$NEXTEST_FLAKY_RESULT\" = pass ]; then echo ' FLAKY 2/2 [ 0.007s] dagq::it runtime_x::retry_flaky'; exit 0; fi; cat {}; exit 100",
+            shell_path(&output)
         )
     } else {
-        format!("cat '{}'; exit 100", output.display())
+        format!("cat {}; exit 100", shell_path(&output))
     }
 }
 

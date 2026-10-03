@@ -87,8 +87,8 @@ fn a_land_answer_is_applied_while_the_slot_is_taken_and_lands_before_a_new_claim
     backend.script_for(
         2,
         &format!(
-            "while [ ! -f '{}' ]; do sleep 0.05; done; {}",
-            marker.display(),
+            "while [ ! -f {} ]; do sleep 0.05; done; {}",
+            shell_path(&marker),
             own_change(2)
         ),
     );
@@ -273,8 +273,8 @@ fn a_cancel_answer_is_applied_while_the_slot_is_taken() {
     backend.script_for(
         2,
         &format!(
-            "while [ ! -f '{}' ]; do sleep 0.05; done; {}",
-            marker.display(),
+            "while [ ! -f {} ]; do sleep 0.05; done; {}",
+            shell_path(&marker),
             own_change(2)
         ),
     );
@@ -343,8 +343,8 @@ fn a_land_answer_is_applied_while_another_run_integrates() {
             description: "small change".into(),
             acceptance: "works".into(),
             verification_commands: vec![format!(
-                "while [ ! -f '{}' ]; do sleep 0.05; done",
-                marker.display()
+                "while [ ! -f {} ]; do sleep 0.05; done",
+                shell_path(&marker)
             )],
             required_evidence: Vec::new(),
             paths: Vec::new(),
