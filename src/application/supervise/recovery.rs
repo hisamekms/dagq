@@ -1379,22 +1379,24 @@ impl SessionWatch {
         {
             return self.act_on_background(sv, run, &job, verdict);
         }
-        if self.recovery.running()
-            || sv.queue.has_unclosed_ask(run.id(), AskKind::Stalled)?
-            || failed_live(
-                &sv.queue.run_events(run.id())?,
-                Some(RecoveryAlert::LongBackground),
-            )
-            .is_some()
-        {
+        if self.recovery.running() {
             return Ok(());
         }
-        let Some(idle) = IdleMarker::read(&*sv.files, sv.signals, &self.idle_marker)? else {
+        let Some(idle) = running_background(
+            || IdleMarker::read(&*sv.files, sv.signals, &self.idle_marker),
+            IdleMarker::background_running,
+            || sv.queue.has_unclosed_ask(run.id(), AskKind::Stalled),
+            || {
+                Ok(failed_live(
+                    &sv.queue.run_events(run.id())?,
+                    Some(RecoveryAlert::LongBackground),
+                )
+                .is_some())
+            },
+        )?
+        else {
             return Ok(());
         };
-        if !idle.background_running() {
-            return Ok(());
-        }
         let now = sv.files.now();
         let marker = idle.modified();
         // Timed from when the running tasks were first listed, as `stats`
@@ -1923,6 +1925,28 @@ fn stop_processes(sv: &Supervisor<'_>, run: &TaskRun, pids: &[u32]) -> Result<Ve
     Ok(stopped)
 }
 
+/// The idle marker whose background work the `long_background` alert
+/// judges: `None` without a marker, when it lists no background work
+/// running, when a `stalled` ask of the run is open, or when the alert's
+/// last job failed and nothing cleared it. The marker is read first and
+/// the queue only for one with background work running, so a session
+/// without it (most of them) does not read all of its run's events on
+/// every look (task 1589).
+fn running_background<M>(
+    marker: impl FnOnce() -> Result<Option<M>>,
+    background_running: impl FnOnce(&M) -> bool,
+    stalled_ask: impl FnOnce() -> Result<bool>,
+    failed_job: impl FnOnce() -> Result<bool>,
+) -> Result<Option<M>> {
+    let Some(marker) = marker()? else {
+        return Ok(None);
+    };
+    if !background_running(&marker) || stalled_ask()? || failed_job()? {
+        return Ok(None);
+    }
+    Ok(Some(marker))
+}
+
 /// A run of task 1 in `/runs/r1` with `status` and `last_error`, for the
 /// unit tests of an escalation's ask here and in `triage.rs`.
 #[cfg(test)]
@@ -2148,6 +2172,48 @@ mod tests {
             sample_interval(Duration::from_millis(300)),
             Duration::from_millis(300)
         );
+    }
+
+    /// Task 1589: the `long_background` alert reads its run's events (for
+    /// a failed job) and its `stalled` ask only for a marker with
+    /// background work running, so a session without it reads neither on
+    /// any look; with it running, an open `stalled` ask or a failed job
+    /// still starts no job, as before.
+    #[test]
+    fn only_running_background_work_reads_the_runs_events() {
+        use std::cell::Cell;
+        let asks = Cell::new(0);
+        let events = Cell::new(0);
+        let look = |marker: Option<bool>, ask_open: bool, failed: bool| {
+            running_background(
+                || Ok(marker),
+                |running: &bool| *running,
+                || {
+                    asks.set(asks.get() + 1);
+                    Ok(ask_open)
+                },
+                || {
+                    events.set(events.get() + 1);
+                    Ok(failed)
+                },
+            )
+            .unwrap()
+        };
+        let count = |marker, ask_open, failed| {
+            asks.set(0);
+            events.set(0);
+            let judged = look(marker, ask_open, failed);
+            (judged, asks.get(), events.get())
+        };
+        // No marker, or one with no background work: neither is read.
+        assert_eq!(count(None, false, false), (None, 0, 0));
+        assert_eq!(count(Some(false), false, false), (None, 0, 0));
+        assert_eq!(count(Some(false), true, true), (None, 0, 0));
+        // Background work running: judged unless an ask is open or the
+        // last job failed (the events are not read under an open ask).
+        assert_eq!(count(Some(true), false, false), (Some(true), 1, 1));
+        assert_eq!(count(Some(true), true, false), (None, 1, 0));
+        assert_eq!(count(Some(true), false, true), (None, 1, 1));
     }
 
     use super::super::file_time::at_ns;
