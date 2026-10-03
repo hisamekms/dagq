@@ -18,7 +18,7 @@ related:
 
 # このrepositoryの本番queueの運用
 
-このrepository（dagq自身）の本番queueを動かし、固定バイナリ・`dagq.toml`・hostのツールに触るときの今の規則。読むのは、人・inbox・plannerが`up` / `down` / `install`、`dagq.toml`、hostのツール、KPIの印、pushに触る前と、workerが実バイナリや実queueでの確認が要ると思ったとき（[workerがhostと実queueでできないこと](#workerがhostと実queueでできないこと)だけ）。
+このrepository（dagq自身）の本番queueを動かし、固定バイナリ・`dagq.toml`・hostのツールに触るときの今の規則。読むのは、人・inboxが`up` / `down` / `install`、hostのツール、pushに、人・inbox・plannerが`dagq.toml`、KPIの印に触る前と、workerが実バイナリや実queueでの確認が要ると思ったとき（[workerがhostと実queueでできないこと](#workerがhostと実queueでできないこと)だけ）。
 
 本番queueと開発環境の境界の短い規則はAGENTS.mdの「本番 queue と開発環境の境界」だけが持ち、この文書は繰り返さない。この文書が持つのは、その規則が当たるsession・理由・実装への参照と、AGENTS.mdに無いこのrepositoryの運用の規則。dagqの汎用の操作（どのrepositoryにも当たる手順と、その理由）はpluginのskillとreference、実装の姿は`docs/design/`、経緯は[運用の規則の経緯](../plans/operation-rules-history.md)とADR、今の設定値は`dagq.toml`（値の理由はそのコメント）が持ち、ここではそれを指すだけにする。
 
@@ -26,7 +26,7 @@ related:
 
 AGENTS.mdの「本番 queue と開発環境の境界」と「開始時の短い制約」の固定バイナリ・開発中のバイナリ・入れ替え・DB・repositoryの中で打つ規則について:
 
-- 当たるsession: supervisor・inbox・planner（人が開いたものもruntimeが立てたものも）のどれにも当たる。開発中のバイナリ（`target/debug`・`target/release`）を本番に使わない理由は、commitされていない変更や未着地のmigrationを含みうるため。
+- 当たるsession: supervisor・inbox・planner（runtimeが立てたもの。人が開くplannerは[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)で廃止した）・人の`DAGQ_ROLE`の無いterminalのどれにも当たる。開発中のバイナリ（`target/debug`・`target/release`）を本番に使わない理由は、commitされていない変更や未着地のmigrationを含みうるため。
 - 開発中のバイナリで本番を読める理由（実装）は[ADR-0073](../adr/0073-kind-additions-are-compatible.md)決定5・7・18と[Persistence](../design/persistence.md)の「Database setup and migrations」、queueがどのdirectoryから解決されるか（repositoryの中で打つ理由）はpluginの`dagq`の`reference/locate.md`が持つ。
 - 入れ替えの決定は[ADR-0073](../adr/0073-kind-additions-are-compatible.md)決定10〜17。手順と、人に伝えてから入れ替えること（`--skip-e2e`・`--rollback`・`--allow-breaking`・`cp`で上書きしないことを含む）はpluginの`dagq-recover`の`reference/update.md`、仕組みは[install](../design/supervisor-lifecycle/install.md)と[Auto-update](../design/supervisor-lifecycle/auto-update.md)が持つ。
 - repositoryを移動したときの束縛の付け替えは`rebind`で行う（[ADR-0020](../adr/0020-rebind-queue-to-a-moved-repository.md)。手順はpluginの`dagq`の`reference/locate.md`）。

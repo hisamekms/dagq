@@ -1,6 +1,6 @@
 # Updating the dagq binary: install, auto-update and the update asks
 
-Read this when the person wants to update or roll back the `dagq` binary the queue runs on, turn on automatic updates, or answer an `update_failed` / `approve_update` ask (ADR-0073). Everything here is typed from the inbox or a planner session, on the person's word; tell the person before a binary is replaced.
+Read this when the person wants to update or roll back the `dagq` binary the queue runs on, turn on automatic updates, or answer an `update_failed` / `approve_update` ask (ADR-0073). Everything here is typed from the inbox (or by the person in a terminal without `DAGQ_ROLE`), on the person's word; tell the person before a binary is replaced.
 
 A binary names itself by its build identifier (`dagq --version`). A supervisor is replaced whenever that identifier differs, not only when the version is higher.
 

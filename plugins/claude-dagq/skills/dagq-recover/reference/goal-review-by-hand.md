@@ -17,6 +17,6 @@ Read `last_error`, the job's files under `<queue dir>/goal-reviews/<goal review 
 
   The same command rearms a goal whose `approve_goal` ask was answered `keep_open`, when the person wants it looked at again before its tasks change. A planner is refused it; it is the inbox's (on the person's word) or the person's. It is refused for a goal that is not open.
 - **Close it**: the person decides it themselves: `goal close ID --verdict achieved` or `abandoned` (the rules, refusals and released `dependents` are in `skills/dagq/reference/goal-close.md`).
-- **Add work**: the person has a planner (`dagq plan`) add and submit the missing tasks on the goal; once they finish, its tasks have changed and the review starts again by itself.
+- **Add work**: on the person's word the inbox records a planning request that names the goal (`"$DAGQ" request add --text '<their words>' --ref goal:N`, `skills/dagq-inbox/reference/requests.md`), whose runtime planner adds and submits the missing tasks on it; once they finish, its tasks have changed and the review starts again by itself.
 
 The `approve_goal` ask (the job's question, or a fourth `gaps` in a row) is no attention of its own: the inbox shows it as an ask (`skills/dagq-inbox/reference/asks.md`).

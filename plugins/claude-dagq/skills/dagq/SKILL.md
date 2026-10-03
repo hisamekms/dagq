@@ -1,15 +1,15 @@
 ---
 name: dagq
-description: Register and inspect dagq goals and tasks through the locally built dagq binary. Use when the user brings a development problem to queue for dagq (register it as a goal, decompose it into tasks with title, description, acceptance criteria, verification commands, dependencies and context), lint and submit them for plan review, edit a draft or submitted task, list goals or tasks, check a goal's progress or a task's status or run result, follow a finished goal's goal review, adopt or reject a draft goal, decide findings, read events, run timelines, KPIs and completion forecasts, mark a change, record or read notes, or find the dagq binary and queue database.
+description: Register and inspect dagq goals and tasks through the locally built dagq binary. Use when a planner queues a problem (register a goal, decompose it into tasks with title, description, acceptance, verification, dependencies and context; a person asks the inbox instead), lint and submit them for plan review, edit a draft or submitted task, list goals or tasks, check a goal's progress or a task's status or run result, follow a finished goal's goal review, adopt or reject a draft goal, decide findings, read events, run timelines, KPIs and completion forecasts, mark a change, record or read notes, or find the dagq binary and queue database.
 ---
 
 # dagq: register and inspect tasks
 
-dagq runs development tasks in cmux workspaces and isolated Git worktrees. This skill drives the `dagq` binary; every command prints JSON on stdout, and a runtime error prints `{"error": ...}` on stderr with exit status 1. Never read or modify the SQLite queue file directly (no `sqlite3`, no editing); the binary is the only interface.
+dagq runs development tasks in cmux workspaces and isolated Git worktrees. This skill drives the `dagq` binary; every command prints JSON on stdout, and a runtime error prints `{"error": ...}` on stderr with exit status 1. Never read or modify the SQLite queue file (no `sqlite3`); the binary is the only interface.
 
-A goal is the problem several tasks solve together; a task is one unit of work a session executes in its own worktree. Registering and submitting belong to a planner session (`dagq-planner`); the supervisor runs a headless plan review of each submitted proposal, runs and lands the queue, and has a goal review close a finished goal; its asks and attention go to the inbox (`dagq-inbox`); what a person does by hand (up / down, recovery, a review by hand) is `dagq-recover`.
+A goal is the problem several tasks solve together; a task is one unit of work a session executes in its own worktree. Registering and submitting belong to a planner the runtime opens (`dagq-planner`); a person asks for a plan through the inbox (`request add`; `plan` is refused). The supervisor runs plan review of each proposal, runs and lands the queue, and has a goal review close a finished goal; its asks and attention go to the inbox (`dagq-inbox`); what a person does by hand (up / down, recovery, a review by hand) is `dagq-recover`.
 
-Reference files, read only when needed, all in `${CLAUDE_PLUGIN_ROOT}/skills/dagq/`: `reference/locate.md` (install, version warnings, missing or moved queue), `reference/inspect.md` (inspect commands, fields, statuses, priority, editing), `reference/register.md` (registering in detail), `reference/goal-close.md` (goal review, closing a goal), `reference/kpi.md` (KPIs, change marks, the weekly throughput review, forecasts, reports, push), `reference/provider.md` (a worker's provider and route, fallbacks, turns) and `reference/authority.md` (what each role is refused, the inbox's delegated record).
+Reference files, read when needed, in `${CLAUDE_PLUGIN_ROOT}/skills/dagq/`: `reference/locate.md` (install, version warnings, missing or moved queue), `reference/inspect.md` (inspect commands, fields, statuses, priority, editing), `reference/register.md` (registering in detail), `reference/goal-close.md` (goal review, closing a goal), `reference/kpi.md` (KPIs, change marks, the weekly throughput review, forecasts, reports, push), `reference/provider.md` (a worker's provider and route, fallbacks, turns) and `reference/authority.md` (what each role is refused, the inbox's delegated record).
 
 Every state change is checked against your role (`DAGQ_ROLE`) by a default-deny policy; a refusal (`<role> may not ...`, or a `queue_service` code in client mode) changes nothing. Take it as the answer and never work around it; the check is advisory on the host, not a sandbox (`reference/authority.md`).
 
@@ -30,7 +30,7 @@ The queue is per repository, resolved from the current directory: run dagq in th
 
 ## 2. Register a goal and decompose it into tasks
 
-Hear the problem → `goal add` → decompose it into tasks, each registered with `add --goal` → `lint` and `submit` them for plan review, which makes them `ready`. Look for duplicates and done work with `search` before `add` and `related ID` before `submit`; cancel one with `--duplicate-of X` (`reference/inspect.md`). A task's prompt shows its goal, its dependencies' receipts and siblings in progress, so siblings agree on names.
+`goal add` → decompose it into tasks, each registered with `add --goal` → `lint` and `submit` them for plan review, which makes them `ready`. Look for duplicates and done work with `search` before `add` and `related ID` before `submit`; cancel one with `--duplicate-of X` (`reference/inspect.md`). A task's prompt shows its goal, its dependencies' receipts and siblings in progress, so siblings agree on names.
 
 Skip the goal only for a one-shot task that finishes the problem by itself; when a second task will exist, a later one needs this one's decisions, or unsure, register a goal.
 

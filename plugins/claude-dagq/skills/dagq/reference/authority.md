@@ -23,15 +23,17 @@ The runtime gives the worker (and its resume), the review, recovery, plan review
 
 ## What each role is refused
 
-- **worker**: `integrate`, `answer`, `ask close`, `ready`, `cancel`, `add` / `edit` / `submit` and every other planning command, `goal ...` (but `goal list` / `goal show`), `recover`, `review`, `supervise`, `observe`, `plan`, `up` / `down` / `install` / `auto-update`, `init` / `migrate` / `rebind`, `mark`, `session` (in client mode: `no_use_case`); `finding ...`, and `ask` and `note` on any run or task but its own (`authorization_denied`). It opens only `worker_question` asks.
-- **planner**: `ready` (with or without `--bypass-review`), `goal ready`, `goal review`, `integrate`, `review`, `recover`, `supervise`, `observe`, `answer`, `ask close`, `finding record`, `session` / `session-event` of a run; any ask on a run (it opens only `planner_question`); changing or canceling a task once it is `in_progress`; withdrawing another planner's proposal. On a run it may only write a `note`.
+- **worker**: `integrate`, `answer`, `ask close`, `ready`, `cancel`, `add` / `edit` / `submit` and every other planning command, `goal ...` (but `goal list` / `goal show`), `request add` / `request decline`, `recover`, `review`, `supervise`, `observe`, `plan`, `up` / `down` / `install` / `auto-update`, `init` / `migrate` / `rebind`, `mark`, `session` (in client mode: `no_use_case`); `finding ...`, and `ask` and `note` on any run or task but its own (`authorization_denied`). It opens only `worker_question` asks.
+- **planner**: `ready` (with or without `--bypass-review`), `goal ready`, `goal review`, `integrate`, `review`, `recover`, `supervise`, `observe`, `answer`, `ask close`, `finding record`, `request add` (the inbox's and the person's), `request decline` of a request it was not opened for, `session` / `session-event` of a run; any ask on a run (it opens only `planner_question`, on a task, a finding or its request); changing or canceling a task once it is `in_progress`; withdrawing another planner's proposal. On a run it may only write a `note`.
 - **review, recovery, plan review, goal review and throughput review jobs**: every command that changes state (in client mode: `no_use_case`, and `authorization_denied` for `note`, `ask` and finding writes). Their verdict is data the supervisor applies.
 - **observer**: every state change but `finding record`, `finding resolve` and `ask --kind blocked --finding ID` (in client mode: `finding dismiss`, `note` and other asks are `authorization_denied`, the rest `no_use_case`).
-- **inbox**: nothing a person may do (it acts on the person's word); landing and pushing themselves are the integrator's, reached through `integrate`.
+- **inbox**: nothing a person may do (it acts on the person's word); landing and pushing themselves are the integrator's, reached through `integrate`. It registers no work itself: a plan the person asks for goes to a runtime planner as a request (`request add`, `skills/dagq-inbox/reference/requests.md`).
+
+`plan` opens no planner for anyone: people no longer open planners (ADR-t1394-1), and it fails with a pointer to the inbox's request. A person at a terminal without `DAGQ_ROLE` may still `request add` and run the planning commands directly.
 
 ## The inbox acts on the person's behalf, and the record says so
 
-The inbox may answer every ask and carry out `dagq-recover` (`integrate`, `recover`, `review`, `ready --bypass-review`, `cancel`, `up` / `down` / `install`, ...) on the person's word. The record keeps it apart from the person's own action:
+The inbox may answer every ask, record a planning request (`request add`), hand an open planner a follow-up (`planner request`) and carry out `dagq-recover` (`integrate`, `recover`, `review`, `ready --bypass-review`, `cancel`, `up` / `down` / `install`, ...) on the person's word. The record keeps it apart from the person's own action:
 
 - each event's `actor` (`events --full`, `show --full`) has role `inbox` for what the inbox did and `user` for what the person typed; a landing it asked for has `requested_by: inbox`
 - an answer's `authority` (`ask_answered`) is `delegated` from the inbox, `user` from the person, `runtime` when the runtime closed it; `approval: true` marks an answer that approves (landing, plan, goal, update, a `decide`, a finding's `propose` / `dismiss`)
