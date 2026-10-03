@@ -901,7 +901,8 @@ enum Command {
         #[arg(long)]
         in_cmux: bool,
         /// Do not wait for a supervisor that cannot take a handoff to drain:
-        /// stop with an error instead when any run is still in flight.
+        /// stop with an error instead while it still leases a run, at any
+        /// stage (review, revise, resume, e2e, landing).
         #[arg(long)]
         no_wait: bool,
         /// Seconds a supervisor asked to hand off may take to come back

@@ -339,6 +339,181 @@ fn up_no_wait_refuses_to_replace_while_runs_are_in_flight() {
     assert_eq!(report["supervisor"]["previous_version"], "0.0.1");
 }
 
+/// A run `token` claimed and then moved to `status` with its lease kept
+/// (`lease` names who holds it now; `None` releases it), standing in for a
+/// run at a later stage than the claim.
+fn run_at(fixture: &Fixture, queue: &mut SqliteQueue, status: &str, lease: Option<&str>) -> String {
+    let run_id = claim_a_run(fixture, queue, "old");
+    let lease = match lease {
+        Some(token) => format!("UPDATE run_leases SET token='{token}' WHERE run_id='{run_id}';"),
+        None => format!("DELETE FROM run_leases WHERE run_id='{run_id}';"),
+    };
+    Connection::open(&fixture.location.db)
+        .unwrap()
+        .execute_batch(&format!(
+            "UPDATE task_runs SET status='{status}' WHERE id='{run_id}'; {lease}"
+        ))
+        .unwrap();
+    run_id
+}
+
+/// The rows `up --no-wait` must leave as they were when it refuses.
+fn queue_rows(db: &Path) -> Vec<String> {
+    let connection = Connection::open(db).unwrap();
+    let mut rows = Vec::new();
+    for sql in [
+        "SELECT token||' '||pid||' '||heartbeat_at||' '||COALESCE(binary_version,'') FROM supervisors ORDER BY token",
+        "SELECT id||' '||status||' '||COALESCE(supervisor_token,'') FROM task_runs ORDER BY id",
+        "SELECT run_id||' '||token||' '||pid||' '||heartbeat_at FROM run_leases ORDER BY run_id",
+    ] {
+        let mut statement = connection.prepare(sql).unwrap();
+        rows.extend(
+            statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .map(Result::unwrap),
+        );
+    }
+    rows
+}
+
+/// On the drain path `--no-wait` refuses while a supervisor it replaces
+/// leases a run at any stage, not only the five of `active_runs`: a run
+/// keeps its lease through the review or a revise and the e2e
+/// (`awaiting_integration`), a resume leases one `needs_session`, and the
+/// session's exit and the landing hold it too. It names each such run of
+/// either replaced supervisor and touches nothing. What the drain does not
+/// wait for does not refuse it: a run nobody leases (its history still
+/// names `old`), a supervisor `up` does not replace (alive but silent) and
+/// a `dagq integrate` by hand, whose token no supervisor registered. Once
+/// the replaced supervisors lease nothing, the same `up` replaces them.
+#[test]
+fn up_no_wait_refuses_while_a_replaced_supervisor_leases_a_run_at_any_stage() {
+    let mut fixture = fixture();
+    fixture.options.no_wait = true;
+    let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
+    let pid = std::process::id();
+    for token in ["old", "old2", "silent"] {
+        queue
+            .register_supervisor(&LeaseToken::new(token), pid, 16, VERSION)
+            .unwrap();
+        queue
+            .set_supervisor_mode(&LeaseToken::new(token), SupervisorMode::Launchd, None)
+            .unwrap();
+        set_binary_version(&fixture.location.db, token, Some("0.0.1"));
+    }
+    let held = [
+        ("awaiting_integration", "old"), // review, revise or the landing
+        ("needs_session", "old"),        // resumed
+        ("running", "old2"),             // the session's exit
+        ("validating", "old"),           // the receipt, before the landing
+    ];
+    let mut held_ids: Vec<String> = held
+        .iter()
+        .map(|(status, token)| run_at(&fixture, &mut queue, status, Some(token)))
+        .collect();
+    // The e2e leases the run queued to land the way the supervisor does.
+    let e2e = run_at(&fixture, &mut queue, "awaiting_integration", None);
+    assert!(
+        queue
+            .lease_for_e2e(
+                &dagq::domain::RunId::new(e2e.clone()).unwrap(),
+                &LeaseToken::new("old2"),
+            )
+            .unwrap()
+            .is_some()
+    );
+    held_ids.push(e2e);
+    let unheld = [
+        run_at(&fixture, &mut queue, "awaiting_integration", None),
+        run_at(&fixture, &mut queue, "needs_session", None),
+        run_at(&fixture, &mut queue, "running", Some("silent")),
+        run_at(
+            &fixture,
+            &mut queue,
+            "integrating",
+            Some("manual-integrate"),
+        ),
+    ];
+    Connection::open(&fixture.location.db)
+        .unwrap()
+        .execute(
+            "UPDATE supervisors SET heartbeat_at=unixepoch()-60 WHERE token='silent'",
+            [],
+        )
+        .unwrap();
+    let cmux = FakeCmux::default();
+    let launchd = FakeLaunchd::new(&fixture.location.db);
+    launchd.load(Some(pid));
+    let processes = FakeProcesses::default();
+    let before = queue_rows(&fixture.location.db);
+
+    let error = format!(
+        "{:#}",
+        try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
+    );
+    assert!(error.contains("5 run(s) are still in flight"), "{error}");
+    for id in &held_ids {
+        assert!(error.contains(id.as_str()), "{error}");
+    }
+    for id in &unheld {
+        assert!(!error.contains(id.as_str()), "{error}");
+    }
+    assert!(error.contains("needs_session"), "{error}");
+    assert_eq!(queue_rows(&fixture.location.db), before);
+    assert!(launchd.uninstalls.lock().unwrap().is_empty());
+    assert!(launchd.installs.lock().unwrap().is_empty());
+    assert!(processes.terminated.lock().unwrap().is_empty());
+    assert!(processes.interrupted.lock().unwrap().is_empty());
+    assert!(processes.killed.lock().unwrap().is_empty());
+    assert!(cmux.workspaces.lock().unwrap().is_empty());
+    assert!(cmux.closed.lock().unwrap().is_empty());
+
+    // The held runs come to rest and give their leases back; the rest stay
+    // as they were and do not stop the replacement.
+    let ids = held_ids
+        .iter()
+        .map(|id| format!("'{id}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    Connection::open(&fixture.location.db)
+        .unwrap()
+        .execute_batch(&format!(
+            "UPDATE task_runs SET status='integrated' WHERE id IN ({ids});
+             DELETE FROM run_leases WHERE run_id IN ({ids});"
+        ))
+        .unwrap();
+    let report = thread::scope(|scope| {
+        scope.spawn(|| {
+            wait_until(&processes, pid, || {
+                !launchd.uninstalls.lock().unwrap().is_empty()
+            });
+            let queue = SqliteQueue::open(&fixture.location.db).unwrap();
+            for token in ["old", "old2"] {
+                queue
+                    .deregister_supervisor(&LeaseToken::new(token))
+                    .unwrap();
+            }
+        });
+        up(&fixture, &cmux, &launchd, &processes)
+    });
+    assert_eq!(report["supervisor"]["outcome"], "restarted", "{report}");
+    let replaced: Vec<&str> = report["supervisor"]["replaced"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|registration| registration["token"].as_str().unwrap())
+        .collect();
+    assert_eq!(replaced, ["old", "old2"], "{report}");
+    let leases: Vec<String> = queue
+        .run_leases()
+        .unwrap()
+        .into_iter()
+        .map(|lease| lease.token.to_string())
+        .collect();
+    assert_eq!(leases, ["silent", "manual-integrate"]);
+}
+
 /// The version is what decides: a live supervisor of this binary's own
 /// build is reused, with nothing stopped, signalled or written.
 #[test]
@@ -586,7 +761,8 @@ fn take_the_handoff(fixture: &Fixture, processes: &FakeProcesses, token: &str, v
 /// this binary instead of draining it (ADR-0045 decision 15): nothing is
 /// signalled, no agent or workspace is touched, the run in flight keeps
 /// its lease, and the report names the supervisor that is now this build
-/// under the same token and pid. `--no-wait` changes nothing here.
+/// under the same token and pid. `--no-wait` changes nothing here, runs
+/// past their session included (ADR-0073 decision 15).
 #[test]
 fn up_hands_a_supervisor_of_another_build_over_without_draining_it() {
     for no_wait in [false, true] {
@@ -595,6 +771,9 @@ fn up_hands_a_supervisor_of_another_build_over_without_draining_it() {
         fixture.options.no_wait = no_wait;
         let mut queue = handoff_supervisor(&fixture, "old", SupervisorMode::InCmux);
         let run_id = claim_a_run(&fixture, &mut queue, "old");
+        // A run in review or waiting to land, which `--no-wait` refuses
+        // on the drain path, does not stop the handoff either.
+        let review = run_at(&fixture, &mut queue, "awaiting_integration", Some("old"));
         let cmux = FakeCmux::default();
         let launchd = FakeLaunchd::new(&fixture.location.db);
         let processes = FakeProcesses::default();
@@ -628,10 +807,16 @@ fn up_hands_a_supervisor_of_another_build_over_without_draining_it() {
         assert_eq!(registrations.len(), 1);
         assert_eq!(registrations[0].binary_version.as_deref(), Some(VERSION));
         assert_eq!(registrations[0].handoff_binary, None);
-        let leases = queue.run_leases().unwrap();
-        assert_eq!(leases.len(), 1);
-        assert_eq!(leases[0].run_id.as_str(), run_id);
-        assert_eq!(leases[0].token, "old");
+        let leases: Vec<(String, String)> = queue
+            .run_leases()
+            .unwrap()
+            .into_iter()
+            .map(|lease| (lease.run_id.to_string(), lease.token.to_string()))
+            .collect();
+        assert_eq!(
+            leases,
+            [(run_id, "old".to_string()), (review, "old".to_string())]
+        );
     }
 }
 

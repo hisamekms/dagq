@@ -996,21 +996,23 @@ fn replace_supervisors(up: &Up, live: &[SupervisorRegistration]) -> Result<Value
         .and_then(|registration| registration.binary_version.clone());
     if options.no_wait {
         // Read before anything is signalled, so a refusal leaves the old
-        // supervisor serving the queue exactly as it was.
-        let in_flight = queue.active_runs()?;
-        ensure!(
-            in_flight.is_empty(),
-            "refusing to replace the supervisor of version {} with {VERSION} without waiting: \
-{} run(s) are still in flight ({}); run `up` without --no-wait to drain them, or wait for them \
-to finish",
-            previous_version.as_deref().unwrap_or("(unrecorded)"),
-            in_flight.len(),
-            in_flight
-                .iter()
-                .map(|run| run.id().as_str())
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
+        // supervisor serving the queue exactly as it was. What the drain
+        // waits for is what the replaced supervisors lease: a run keeps its
+        // lease through the review, a revise, the e2e and the landing
+        // (ADR-0054 decision 6), and a resume or a recovery round takes it
+        // again, so `active_runs` alone would miss most of it.
+        let mut held = Vec::new();
+        for registration in live {
+            held.extend(
+                queue
+                    .runs_leased_by(&registration.token)?
+                    .into_iter()
+                    .map(|run| (run.id().to_string(), run.status())),
+            );
+        }
+        if let Some(refusal) = no_wait_refusal(previous_version.as_deref(), &held) {
+            bail!(refusal);
+        }
     }
     // Settle what can refuse the new supervisor before the old one is
     // touched: draining a working supervisor and then failing to start its
@@ -1115,6 +1117,29 @@ once `status` shows it gone",
     object.insert("replaced".into(), json!(replaced));
     object.insert("supervisor_workspaces".into(), json!(closed));
     Ok(started)
+}
+
+/// Why `up --no-wait` refuses to drain the supervisors it replaces: the
+/// runs they still lease (`held`, id and status), whatever stage each is
+/// at. `None` when they lease none. A run nobody leases (its history keeps
+/// the `supervisor_token` of whoever drove it last) or one another process
+/// leases (a supervisor `up` does not replace, a `dagq integrate` by hand)
+/// is not waited for by the drain, so it does not refuse it either.
+fn no_wait_refusal(previous_version: Option<&str>, held: &[(String, RunStatus)]) -> Option<String> {
+    if held.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "refusing to replace the supervisor of version {} with {VERSION} without waiting: {} \
+run(s) are still in flight on the supervisors being replaced ({}); run `up` without --no-wait \
+to drain them, or wait for them to finish",
+        previous_version.unwrap_or("(unrecorded)"),
+        held.len(),
+        held.iter()
+            .map(|(id, status)| format!("{id} {}", status.as_str()))
+            .collect::<Vec<_>>()
+            .join(", "),
+    ))
 }
 
 /// Whether every live supervisor can be handed over to this binary rather
@@ -2544,4 +2569,34 @@ fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_wait_refuses_only_while_a_replaced_supervisor_leases_a_run() {
+        assert_eq!(no_wait_refusal(Some("0.0.1"), &[]), None);
+        let held = [
+            ("r1".to_string(), RunStatus::AwaitingIntegration),
+            ("r2".to_string(), RunStatus::NeedsSession),
+        ];
+        let refusal = no_wait_refusal(Some("0.0.1"), &held).unwrap();
+        assert!(
+            refusal.contains("2 run(s) are still in flight"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains("r1 awaiting_integration, r2 needs_session"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains("0.0.1") && refusal.contains(VERSION),
+            "{refusal}"
+        );
+        let unrecorded = no_wait_refusal(None, &held[..1]).unwrap();
+        assert!(unrecorded.contains("version (unrecorded)"), "{unrecorded}");
+        assert!(unrecorded.contains("1 run(s)"), "{unrecorded}");
+    }
 }
