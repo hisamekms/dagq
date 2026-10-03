@@ -4230,13 +4230,17 @@ mod tests {
         EditsVerification,
     }
 
-    /// The worker's span closed by a `session_exited` in a write
-    /// transaction after `read_before`, with `between` done by another
-    /// process (a thread on its own connection) in between (or after the
-    /// transaction, for [`Between::RolledBackThenCloses`]): the closes,
-    /// the turns recorded, the lines of `worktime.jsonl`, and the
-    /// transcripts analysed under the write lock.
-    fn close_after(between: Between) -> (Vec<Value>, Vec<Value>, Vec<Value>, usize) {
+    /// A queue whose run's worker span is open, with a transcript of two
+    /// turns and a command in each, and the run's directory for its
+    /// `worktime.jsonl`; and the time the span opened.
+    fn closing_worker() -> (
+        tempfile::TempDir,
+        SqliteQueue,
+        TaskId,
+        RunId,
+        std::path::PathBuf,
+        i64,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let (queue, task_id, run) = run_queue(dir.path());
         let run_dir = dir.path().join("run");
@@ -4282,7 +4286,18 @@ mod tests {
             line("assistant", 45, json!([{"type": "text"}])),
         ];
         std::fs::write(project.join(format!("{RUN}.jsonl")), lines.join("\n")).unwrap();
+        (dir, queue, task_id, run, run_dir, start)
+    }
 
+    /// The worker's span closed by a `session_exited` in a write
+    /// transaction after `read_before`, with `between` done by another
+    /// process (a thread on its own connection) in between (or after the
+    /// transaction, for [`Between::RolledBackThenCloses`]): the closes,
+    /// the turns recorded, the lines of `worktime.jsonl`, and the
+    /// transcripts analysed under the write lock.
+    fn close_after(between: Between) -> (Vec<Value>, Vec<Value>, Vec<Value>, usize) {
+        let (dir, queue, task_id, run, run_dir, start) = closing_worker();
+        let conn = &queue.conn;
         let read = read_before(conn, Closing::Run(&run, &["session_exited"])).unwrap();
         let before = analysed();
         if between == Between::EditsVerification {
@@ -4462,6 +4477,40 @@ mod tests {
         // lines.
         let later = close_after(Between::CommittedThenAnotherRolledBack);
         assert_eq!((&later.0, &later.1, &later.2), (&closed, &turns, &worktime));
+    }
+
+    /// A runtime event whose COMMIT fails (task 1500) is rolled back: the
+    /// connection is out of the transaction, the close it made is gone and
+    /// its `worktime.jsonl` lines are not written, and the next close of
+    /// the span writes them once.
+    #[test]
+    fn a_runtime_event_whose_commit_fails_is_rolled_back_without_its_worktime() {
+        let (_dir, queue, _, run, run_dir, _) = closing_worker();
+        let conn = &queue.conn;
+        // A foreign key checked at COMMIT fails it and, unlike a failed
+        // statement, leaves the transaction open.
+        conn.execute_batch(
+            "CREATE TABLE commit_parent(id INTEGER PRIMARY KEY);
+             CREATE TABLE commit_child(parent INTEGER
+                 REFERENCES commit_parent(id) DEFERRABLE INITIALLY DEFERRED);
+             CREATE TRIGGER fail_commit AFTER INSERT ON run_events
+             BEGIN INSERT INTO commit_child VALUES (1); END;",
+        )
+        .unwrap();
+        let exited =
+            || queue.record_runtime_event(&run, EventKind::SessionExited, json!({"exit_code": 0}));
+        let error = exited().unwrap_err();
+        assert!(error.to_string().contains("FOREIGN KEY"), "{error:#}");
+        assert!(conn.is_autocommit());
+        assert!(of_kind(&queue, SESSION_CLOSED).is_empty());
+        assert!(!run_dir.join(WORKTIME_FILE).exists());
+        assert!(WORKTIME_AFTER.with_borrow(Vec::is_empty));
+
+        conn.execute_batch("DROP TRIGGER fail_commit").unwrap();
+        exited().unwrap();
+        assert_eq!(of_kind(&queue, SESSION_CLOSED).len(), 1);
+        let worktime = std::fs::read_to_string(run_dir.join(WORKTIME_FILE)).unwrap();
+        assert_eq!(worktime.lines().count(), 2);
     }
 
     /// The worker's span closed by a `session_exited` at a fixed time, 100 s

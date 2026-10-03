@@ -89,16 +89,15 @@ impl SqliteQueue {
         // The event and the session spans it opens or closes (ADR-0048),
         // in one write transaction taken up front so it waits for other
         // writers rather than failing to upgrade a read. The transcripts of
-        // the spans it closes are read before (task 543).
+        // the spans it closes are read before (task 543). A failed event
+        // or COMMIT rolls back as the transaction drops (task 1500), so the
+        // connection leaves no transaction open and the closes' lines are
+        // known rolled back.
         let _read = read_before(&self.conn, Closing::Event(id, kind.as_str(), &payload))?;
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        match run_event(&self.conn, id, kind, payload) {
-            Ok(()) => Ok(self.conn.execute_batch("COMMIT")?),
-            Err(error) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(error)
-            }
-        }
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        run_event(&tx, id, kind, payload)?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Record `backend_call_failed`: on `run` (its id) when the call was for
