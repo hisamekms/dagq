@@ -50,7 +50,7 @@ hostのツールは人が入れ、miseのshimへのlinkを`~/.local/bin`に置�
 
 ## `[run.env]`とtestの並列度の置き場
 
-`[run.env]`の今の値とその理由、`[run.env]`に置かないもの（targetを共有しない）とその理由は`dagq.toml`の`[run.env]`のコメント（[ADR-0049](../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)決定6）、testの並列度を書かない場所は`.config/nextest.toml`の冒頭のコメント、渡し先は[Run environment](../design/supervisor-lifecycle/run-environment.md)、並列度の測定は[nextest-test-threads](../plans/nextest-test-threads.md)が持つ。
+`[run.env]`の今の値とその理由、`[run.env]`に置かないもの（targetを共有しない）とその理由は`dagq.toml`の`[run.env]`のコメント（[ADR-0049](../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)決定6）、testの並列度を書かない場所は`.config/nextest.toml`の冒頭のコメント、渡し先は[Run environment](../design/supervisor-lifecycle/run-environment.md)、並列度の経緯と測定は[運用の規則の経緯](../plans/operation-rules-history.md)（`CARGO_BUILD_JOBS`）と[nextest-test-threads](../plans/nextest-test-threads.md)（testの並列度）が持つ。
 
 - targetを共有しない理由（並行するrunの`target/debug/dagq`の上書きと、llvm-covのprofrawの消し合い）は、envでbuildとtestの並列度を絞ることには当たらない。
 - CIとdagqを通さない`cargo`は`dagq.toml`を読まないので、`[run.env]`の値の影響を受けない。

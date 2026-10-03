@@ -18,7 +18,7 @@ related:
 
 # AGENTS.mdの「作業中」「起動と停止」「着地と人の判断」から移した運用の規則の経緯
 
-goal 94のtask 1458が、AGENTS.mdの3節の規則を[運用の開発文書](../development/operations.md)などの正本へ移したとき、既存のADR・plansに無かった経緯をここに残す（[ADR-t1453-2](../adr/2026-10-03-t1453-2-ownership-of-agents-md-plugin-development-docs-and-config.md)決定1・4）。今の規則は開発文書、今の値は`dagq.toml`が持ち、ここは書き換えない記録。項目のIDは[棚卸しの表](agents-slim-inventory.md)のもの。
+goal 94のtask 1458が、AGENTS.mdの3節の規則を[運用の開発文書](../development/operations.md)などの正本へ移したとき、既存のADR・plansに無かった経緯をここに残す（[ADR-t1453-2](../adr/2026-10-03-t1453-2-ownership-of-agents-md-plugin-development-docs-and-config.md)決定1・4）。task 1503が`dagq.toml`のコメントから除いた経緯のうち、ほかのADR・plansに無かったものもここに足した。今の規則は開発文書、今の値は`dagq.toml`が持ち、ここは書き換えない記録。項目のIDは[棚卸しの表](agents-slim-inventory.md)のもの。
 
 ## 使い捨てのqueueをworkerに使わせない（A-014）
 
@@ -26,7 +26,15 @@ workerが使い捨てのqueueで`init`・`add`・`up`を使えないのは、aut
 
 ## `[run.env]`の`CARGO_BUILD_JOBS`を4にした（A-035）
 
-2026-09-26に人がplannerと決めた（task 427）。hostは8コア / 16GBで、並列4の運用でload averageが最大151〜204に達し、cmuxのcaptureのtimeoutが400件を超え、runのstartupの中央値が約1100秒になった（goal 36のnote 8718の基準値）。supervisorの並列数を3に下げ、worker 3本と`integrate` 1本が同時にcargoを回しても合計16並列（コア数の2倍）程度に収まるように4にした。同じ経緯は`dagq.toml`の`[run.env]`のコメントにもある。testの並列度の4→8→6の経緯と測定は[nextest-test-threads](nextest-test-threads.md)の7章・8章が持つ。
+2026-09-26に人がplannerと決めた（task 427）。hostは8コア / 16GBで、並列4の運用でload averageが最大151〜204に達し、cmuxのcaptureのtimeoutが400件を超え、runのstartupの中央値が約1100秒になった（goal 36のnote 8718の基準値）。supervisorの並列数を3に下げ、worker 3本と`integrate` 1本が同時にcargoを回しても合計16並列（コア数の2倍）程度に収まるように4にした。`dagq.toml`の`[run.env]`のコメントは今の値の理由の要点とこの節への参照だけを持つ（task 1503でコメントから経緯を除いた）。testの並列度の4→8→6の経緯と測定は[nextest-test-threads](nextest-test-threads.md)の7章・8章が持つ。
+
+## `[supervisor]`の`runtime_planners`を2にした（A-187）
+
+task 1503が`dagq.toml`の`[supervisor]`のコメントから除いた経緯。2026-09-28に、`planner_question`（ask 176）の答えを待つplannerがruntimeのplannerの1枠を約5.5時間ふさぎ、follow_upなどのdraft約20件が決まらず、proposal 283のreviseも届かずに`planner_unresponsive`になった。答えを待つplannerが枠を空ける根本の対応は人が別途行うことにし、当面の緩和として上限を2にした（goal 63、task 941が`runtime_planners`を足し、固定バイナリがtask 941を含んでからtask 942が`dagq.toml`に足した）。同じ詰まりの時間の分け方は[follow-upの種類](follow-up-kinds.md)にもある。
+
+## `[supervisor]`の`parallel`を`dagq.toml`に移した
+
+task 1503が`dagq.toml`の`[supervisor]`のコメントから除いた経緯。以前はAGENTS.mdの`up`のコマンドが`--parallel 3`で並列数を渡していた。固定バイナリがtask 698を含んでから、task 699が`[supervisor]`に`parallel = 3`を足し、`up`のコマンドから`--parallel 3`を外した。3は`[run.env]`の`CARGO_BUILD_JOBS`を決めたとき（task 427、上の節）の並列数で、`[run.env]`の並列度はこれを前提にする。
 
 ## 本番のsupervisorを`--auto-update`に切り替えた1回だけの手順（A-194）
 

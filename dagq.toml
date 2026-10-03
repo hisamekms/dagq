@@ -12,25 +12,19 @@
 RUSTC_WRAPPER = "sccache"
 # server と話せないときは rustc を直接実行し、cache が効かないだけで build を失敗させない。
 SCCACHE_IGNORE_SERVER_IO_ERROR = "1"
-# run ごとの cargo の並列度を絞る（2026-09-26 に人が planner と決めた。task 427）。
-# host は 8 コア / 16GB で、並列 4 の運用で load average が最大 151〜204 に達し、cmux の capture の
-# timeout が 400 件を超え、run の startup の中央値が約 1100 秒になった（goal 36 の note 8718）。
-# 値の決め方: supervisor の並列数（下の [supervisor] の parallel）を 3 に下げ、worker 3 本と integrate 1 本が同時に cargo を回しても
-# 合計 16 並列（コア数 8 の 2 倍）程度に収まるようにする。並列数や host を変えたら合わせて見直す。
-# CARGO_BUILD_JOBS は build の job 数で、この値で絞る。
+# run ごとの cargo の並列度（CARGO_BUILD_JOBS・RUST_TEST_THREADS・NEXTEST_TEST_THREADS）は、
+# 8 コア / 16GB の host と下の [supervisor] の parallel = 3 を前提に、worker 3 本と integrate 1 本が
+# 同時に cargo を回しても load が上がりすぎないように決めた。並列数や host を変えたら合わせて見直す。
+# 経緯と測定は docs/plans/operation-rules-history.md（CARGO_BUILD_JOBS）と docs/plans/nextest-test-threads.md（test の並列度）。
+# CARGO_BUILD_JOBS は build の job 数。4 本の cargo の合計が 16 並列（コア数の 2 倍）程度に収まる値にする。
 CARGO_BUILD_JOBS = "4"
-# test の並列度は build と分けて考え、6 にする（task 427 で 4、task 566 で 8、task 930 で 6）。
-# test は待ちが中心で CPU をあまり使わず（task 537 の測定。docs/plans/nextest-measurement.md）、
-# 関門の test 段は per-test の時間の合計 ÷ 並列数で律速するので、566 で 8 に上げて test 段を縮めた。
-# task 563 が 8 の期間を測ると test 段は縮んだが、capture の時間切れ（17 件）・llvm-cov の段の load1 の
-# 平均の中央値 13.5（目安 12 前後）・時間の上限による verification_failed（5 件）と、戻す目安の悪化の印が
-# そろって当たったので 6 に下げた（docs/plans/nextest-test-threads.md の 7 章・8 章）。
-# 6 でも load と capture の時間切れが戻らなければ、4 に戻す前に host のほかの load を先に見る。
-# RUST_TEST_THREADS は 1 つの test binary の中の並列 thread 数。
+# RUST_TEST_THREADS は 1 つの test binary の中の並列 thread 数。test は待ちが中心で CPU をあまり使わないので
+# build と分けて決める（docs/plans/nextest-measurement.md）。上げると関門の test 段が縮み、load と capture の
+# 時間切れが増える。上げ下げの目安は docs/plans/nextest-test-threads.md の 6 章と 8.3 節。
 RUST_TEST_THREADS = "6"
 # coverage の関門（cargo llvm-cov nextest）で同時に走らせる test の process 数（ADR-0076 の決定 2）。
 # nextest は RUST_TEST_THREADS を読まず既定で CPU 数だけ走らせるので、RUST_TEST_THREADS と同じ値にする。
-# .config/nextest.toml には書かない（CI と人の手元の nextest まで絞られるため）。
+# .config/nextest.toml には書かない（理由はその冒頭のコメント）。
 NEXTEST_TEST_THREADS = "6"
 
 [recheck]
@@ -44,20 +38,18 @@ NEXTEST_TEST_THREADS = "6"
 command = "cargo check --locked --all-targets"
 
 [supervisor]
-# runtime が同時に立てる planner の上限（draft・finding・revise の planner で共有。既定 1。task 941・942、goal 63）。
-# 2026-09-28、planner_question（ask 176）の答えを待つ planner が 1 枠を約 5.5 時間ふさぎ、follow_up などの
-# draft 約 20 件が決まらず、proposal 283 の revise も届かずに planner_unresponsive になった。
-# 答えを待つ planner が枠を空ける根本の対応は人が別途行い、これは当面の緩和として 2 にする。
+# runtime が同時に立てる planner の上限（draft・finding・revise の planner で共有。既定 1）。
+# 人の答えを待つ planner が枠をふさいでも draft と revise が進むように、当面の緩和として 2 にする
+# （枠を空ける根本の対応は別。経緯は docs/plans/operation-rules-history.md）。
 # supervisor が各 pass で読み直すので、着地して main checkout に反映されれば up し直さずに効く。
-# [supervisor] の runtime_planners を知らない旧バイナリは dagq.toml を読めなくなるので、
-# 固定バイナリが task 941 を含んでから足した。
+# [supervisor] の key を知らない旧バイナリは dagq.toml を読めなくなるので、key は固定バイナリを対応したものへ
+# 入れ替えてから足す（規則は docs/design/supervisor-lifecycle/run-environment.md の [supervisor] の項、
+# runtime_planners と parallel を足した順序は docs/plans/operation-rules-history.md）。
 runtime_planners = 2
 # 同時に走らせる run の数（既定 4）。上の [run.env] の CARGO_BUILD_JOBS・RUST_TEST_THREADS・
-# NEXTEST_TEST_THREADS は並列 3 を前提に決めたので、変えるときはそれらと合わせて見直す（task 427）。
-# 以前は AGENTS.md の up のコマンドが --parallel 3 で渡していた（task 699 でここに移した）。
+# NEXTEST_TEST_THREADS は並列 3 を前提に決めたので、変えるときはそれらと合わせて見直す。
 # up に --parallel を付けるとその値がここより優先して登録に焼き込まれ、この parallel を読まなくなる（優先は key ごと）ので付けない。
 # 待ちの上限 max_waiting は既定の 4 のままなので書かない。
-# parallel を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 698 を含んでから足した。
 parallel = 3
 
 [tasks]
