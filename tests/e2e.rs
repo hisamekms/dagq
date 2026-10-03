@@ -252,7 +252,9 @@ if [ -n "$resume" ]; then
   main=$(printf '%s\n' "$request" | sed -n 's/.*main is now \([0-9a-f]*\) .*/\1/p')
   [ -n "$main" ] || { printf 'stub: the request names no main\n' >&2; exit 65; }
   if ! git rebase -q "$main" >/dev/null 2>&1; then
-    printf 'resolved by the session\n' > e2e.txt
+    # Names the run: two resumed runs resolve to different files, so the
+    # later one's rebase on the earlier's landing is not empty.
+    printf 'resolved by the session for %s\n' "$resume" > e2e.txt
     git add e2e.txt
     GIT_EDITOR=true git rebase --continue >/dev/null
   fi
@@ -1379,20 +1381,72 @@ fn two_independent_tasks_run_concurrently_and_a_dependent_follows_integration() 
     assert_eq!(git(repo, &["rev-parse", "main^"]), base.as_str());
     assert_eq!(dagq(env, &["candidates"])[0]["id"].to_string(), third);
     let pass = supervise_once(&fixture, &["--parallel", "2"], &[&third], &mut guard);
-    assert_eq!(pass.outcome["runs"].as_array().unwrap().len(), 1);
+    // The same pass rechecks the second task's waiting run against the main
+    // the direct integrate moved (ADR-t1310-1): it rewrote the same file as
+    // the first, so the recheck resumes its session without waiting for its
+    // approve_landing ask, and the stub resolves the conflict on top of main.
+    let outcome = &pass.outcome;
+    assert_eq!(outcome["errors"], Value::Array(vec![]), "{outcome}");
+    assert_eq!(outcome["runs"].as_array().unwrap().len(), 2, "{outcome}");
     let run = dagq(env, &["show", &third, "--full"])["runs"][0].clone();
     assert_eq!(run["status"], "awaiting_integration", "{run}");
     assert_eq!(run["base_commit"], first_landed.as_str());
     assert_eq!(git(repo, &["rev-parse", "main"]), first_landed);
     assert_eq!(dagq(env, &["status"])["supervisors"], Value::Array(vec![]));
+    let detail = dagq(env, &["show", &second, "--full"]);
+    let run = &detail["runs"][0];
+    assert_eq!(run["status"], "awaiting_integration", "{detail}");
+    let recheck = detail["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "landing_recheck_failed")
+        .unwrap();
+    assert_eq!(recheck["payload"]["code"], "rebase_conflict", "{recheck}");
+    assert_eq!(recheck["payload"]["action"], "resumed", "{recheck}");
+    assert_eq!(
+        recheck["payload"]["main"],
+        first_landed.as_str(),
+        "{recheck}"
+    );
+    let worktree = Path::new(run["worktree_path"].as_str().unwrap());
+    assert_eq!(
+        git(worktree, &["rev-parse", "HEAD^"]),
+        first_landed,
+        "the resumed session rebased onto the landed main"
+    );
+    let run_dir = Path::new(run["run_dir"].as_str().unwrap());
+    let seen = fs::read_to_string(run_dir.join("resume-request-seen.txt")).unwrap();
+    assert!(seen.contains("landing recheck"), "{seen}");
+    assert!(
+        seen.contains(&format!("main is now {first_landed} ")),
+        "{seen}"
+    );
+    assert!(seen.contains("task 1: e2e first"), "{seen}");
+    let resumed = detail["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "resume_finished")
+        .unwrap();
+    if let Some(id) = resumed["payload"]["workspace_id"].as_str() {
+        guard.record(id);
+    }
+    assert_eq!(resumed["payload"]["outcome"], "resolved", "{resumed}");
 
     // The merge queue is FIFO by validation time: --next takes the second
-    // task first. It rewrote the same file as the first, so the runtime
-    // cannot rebase it and parks it for a session; the next --next lands the
-    // dependent, which sits on the first landing.
+    // task first, which the recheck's resume already put on the first
+    // landing. The next --next takes the dependent: it rewrote the same
+    // file on the first landing, so the runtime cannot rebase it and parks
+    // it for a session.
+    let next = dagq(env, &["integrate", "--next"]);
+    assert_eq!(next["outcome"], "integrated", "{next}");
+    assert_eq!(next["task"]["id"].to_string(), second);
+    let second_landed = git(repo, &["rev-parse", "main"]);
+    assert_eq!(git(repo, &["rev-parse", "main^"]), first_landed);
     let parked = dagq(env, &["integrate", "--next"]);
     assert_eq!(parked["outcome"], "needs_session", "{parked}");
-    assert_eq!(parked["run"]["task_id"].to_string(), second);
+    assert_eq!(parked["run"]["task_id"].to_string(), third);
     assert!(
         parked["reason"]
             .as_str()
@@ -1400,16 +1454,11 @@ fn two_independent_tasks_run_concurrently_and_a_dependent_follows_integration() 
             .contains("conflicted in e2e.txt"),
         "{parked}"
     );
-    let next = dagq(env, &["integrate", "--next"]);
-    assert_eq!(next["outcome"], "integrated", "{next}");
-    assert_eq!(next["task"]["id"].to_string(), third);
-    let third_landed = git(repo, &["rev-parse", "main"]);
-    assert_eq!(git(repo, &["rev-parse", "main^"]), first_landed);
 
     // The integrate call approved it, so the next supervisor pass resumes
     // its session (the stub plays Claude), which resolves the conflict on
     // top of main and rewrites the receipt; the runtime then lands it.
-    let run = dagq(env, &["show", &second, "--full"])["runs"][0].clone();
+    let run = dagq(env, &["show", &third, "--full"])["runs"][0].clone();
     assert_eq!(run["status"], "needs_session");
     let worktree = Path::new(run["worktree_path"].as_str().unwrap());
     assert_eq!(
@@ -1437,17 +1486,16 @@ fn two_independent_tasks_run_concurrently_and_a_dependent_follows_integration() 
         "{}",
         pass.stderr
     );
-    let detail = dagq(env, &["show", &second, "--full"]);
+    let detail = dagq(env, &["show", &third, "--full"]);
     let run = &detail["runs"][0];
     assert_eq!(run["status"], "integrated", "{detail}");
     let run_dir = Path::new(run["run_dir"].as_str().unwrap());
     let seen = fs::read_to_string(run_dir.join("resume-request-seen.txt")).unwrap();
     assert!(
-        seen.contains(&format!("main is now {third_landed} ")),
+        seen.contains(&format!("main is now {second_landed} ")),
         "{seen}"
     );
-    assert!(seen.contains("task 1: e2e first"), "{seen}");
-    assert!(seen.contains("task 3: e2e dependent"), "{seen}");
+    assert!(seen.contains("task 2: e2e second"), "{seen}");
     let kinds: Vec<&str> = detail["events"]
         .as_array()
         .unwrap()
@@ -1475,14 +1523,17 @@ fn two_independent_tasks_run_concurrently_and_a_dependent_follows_integration() 
     assert_eq!(finished["payload"]["workspace_closed"], true, "{finished}");
     let resume_workspace = finished["payload"]["workspace_id"].as_str().unwrap();
     wait_until_not_listed(cmux, resume_workspace);
-    assert_eq!(git(repo, &["rev-parse", "main^"]), third_landed);
+    assert_eq!(git(repo, &["rev-parse", "main^"]), second_landed);
     assert_eq!(
         git(repo, &["rev-list", "--count", &format!("{base}..main")]),
         "3"
     );
     assert_eq!(
         fs::read_to_string(repo.join("e2e.txt")).unwrap(),
-        "resolved by the session\n"
+        format!(
+            "resolved by the session for {}\n",
+            run["id"].as_str().unwrap()
+        )
     );
     for task in [&first, &second, &third] {
         let detail = dagq(env, &["show", task, "--full"]);
