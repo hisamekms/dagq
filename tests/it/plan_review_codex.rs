@@ -138,7 +138,7 @@ fn a_plan_review_on_codex_runs_read_only_and_applies_its_verdicts() {
         .collect();
     assert!(profile.contains(r#"permissions.dagq_job.extends=":read-only""#));
     let expected = format!(
-        "exec|--json|--skip-git-repo-check|-C|{}|-m|gpt-6-astra|-c|model_reasoning_effort=\"high\"|{profile}--|",
+        "exec|--json|--skip-git-repo-check|-C|{}|-m|gpt-6-astra|-c|model_reasoning_effort=\"high\"|{profile}<stdin>|",
         repo.display()
     );
     for call in &calls {

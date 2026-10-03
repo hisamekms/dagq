@@ -3159,7 +3159,10 @@ impl AgentProvider for ClaudeCode {
     /// `claude -p` (print mode): no terminal, no trust dialog, no settings
     /// of dagq's ([`AgentSettings::None`]); a tool that needs permission
     /// and is not among the tools of `access` ([`claude_tools`]) is
-    /// refused.
+    /// refused. The prompt is its standard input, never an argument: `-p`
+    /// with no prompt reads it there, and a prompt of any size starts
+    /// (task 1560; on the command line one past the system's limit on the
+    /// arguments fails with `E2BIG`).
     fn headless_command(&self, cwd: &Path, prompt: &str, access: JobAccess) -> Result<CommandSpec> {
         let mut command = CommandSpec::new(&self.executable);
         command.current_dir(cwd).arg("-p");
@@ -3167,7 +3170,7 @@ impl AgentProvider for ClaudeCode {
         if !tools.is_empty() {
             command.arg("--allowedTools").args(tools);
         }
-        command.arg("--").arg(prompt);
+        command.stdin(prompt);
         Ok(command)
     }
     /// `claude -p` prints the final reply of the job only (its default
@@ -3187,7 +3190,8 @@ impl AgentProvider for ClaudeCode {
     /// `.mcp.json` and `CLAUDE.md`, which the worker may change, and the
     /// user's settings do not shape the review (ADR-t1470-1 decision 1);
     /// the prompt names the repository's instructions to read instead
-    /// (decision 2).
+    /// (decision 2). The prompt is its standard input, as a headless job's
+    /// ([`AgentProvider::headless_command`], task 1560).
     fn review_command(
         &self,
         run: &TaskRun,
@@ -3221,8 +3225,7 @@ impl AgentProvider for ClaudeCode {
             .arg(review_disallowed_tools(access).join(","))
             .arg("--setting-sources")
             .arg("")
-            .arg("--")
-            .arg(prompt);
+            .stdin(prompt);
         Ok(command)
     }
     fn runs_review_subagents(&self) -> bool {
@@ -4379,8 +4382,10 @@ mod tests {
         assert_eq!(command.get_current_dir(), Some(Path::new("/tmp/obs")));
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
-            ["-p", "--allowedTools", "Bash(dagq:*)", "--", "observe"]
+            ["-p", "--allowedTools", "Bash(dagq:*)"]
         );
+        // The prompt is its standard input, never an argument (task 1560).
+        assert_eq!(command.get_stdin(), Some("observe"));
         // A job's session id goes among the options (ADR-0048 decision 4).
         let mut named = claude
             .headless_command(Path::new("/tmp"), "p", JobAccess::QueueCli)
@@ -4394,8 +4399,6 @@ mod tests {
                 "Bash(dagq:*)",
                 "--session-id",
                 "s-1",
-                "--",
-                "p"
             ]
         );
         // The observer loads no MCP server (ADR-0044).
@@ -4409,8 +4412,6 @@ mod tests {
                 "--session-id",
                 "s-1",
                 "--strict-mcp-config",
-                "--",
-                "p"
             ]
         );
         let mut plain = CommandSpec::new("x");
@@ -4456,8 +4457,8 @@ mod tests {
                 .unwrap();
             let mut expected = vec!["-p", "--allowedTools"];
             expected.extend(tools);
-            expected.extend(["--", "p"]);
             assert_eq!(command.get_args().collect::<Vec<_>>(), expected, "{job}");
+            assert_eq!(command.get_stdin(), Some("p"), "{job}");
         }
     }
 
@@ -4493,10 +4494,10 @@ mod tests {
                 "Bash,Edit,Write,NotebookEdit",
                 "--setting-sources",
                 "",
-                "--",
-                "review it",
             ]
         );
+        // The prompt is its standard input, never an argument (task 1560).
+        assert_eq!(command.get_stdin(), Some("review it"));
         // The review's settings carry no hook (it never writes the live
         // session's idle marker).
         let settings: Value = serde_json::from_str(
@@ -4551,10 +4552,9 @@ mod tests {
         };
         let before = args(&plain);
         let after = args(&command);
-        let prompt_at = before.len() - 2;
-        assert_eq!(after[..prompt_at], before[..prompt_at]);
-        assert_eq!(after[after.len() - 2..], ["--", "review it"]);
-        let added = &after[prompt_at..after.len() - 2];
+        assert_eq!(after[..before.len()], before[..]);
+        assert_eq!(command.get_stdin(), Some("review it"));
+        let added = &after[before.len()..];
         assert_eq!(added[0], "--agents");
         assert_eq!(added[2..], ["--allowedTools", "Agent"]);
         let handed: Value = serde_json::from_str(&added[1]).unwrap();
@@ -4582,6 +4582,33 @@ mod tests {
         // Without subagents nothing of them is in the command.
         for absent in ["--agents", "Agent"] {
             assert!(!before.iter().any(|arg| arg == absent), "{absent}");
+        }
+    }
+
+    /// A prompt past the system's limit on the arguments (about 1 MB on
+    /// macOS) starts a headless job and a review: the stub `claude` reads it
+    /// whole on its standard input, and its arguments do not carry it (task
+    /// 1560).
+    #[test]
+    fn a_claude_job_starts_with_a_prompt_past_the_argument_limit() {
+        use crate::infrastructure::process::stub_agent;
+        let dir = tempfile::tempdir().unwrap();
+        let run = run_in(dir.path());
+        fs::create_dir_all(dir.path().join("worktree")).unwrap();
+        let claude = ClaudeCode {
+            executable: stub_agent::write(dir.path()),
+        };
+        let prompt = "p".repeat(2 << 20);
+        let job = claude
+            .headless_command(dir.path(), &prompt, JobAccess::ReadFilesAndQueueCli)
+            .unwrap();
+        let review = claude
+            .review_command(&run, &prompt, crate::application::prompt::REVIEW_ACCESS)
+            .unwrap();
+        for command in [job, review] {
+            let (args, stdin) = stub_agent::run(&command, dir.path());
+            assert_eq!(stdin, prompt.len());
+            assert!(args < 4096, "{args} bytes of arguments");
         }
     }
 

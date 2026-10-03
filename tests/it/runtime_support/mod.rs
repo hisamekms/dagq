@@ -167,7 +167,8 @@ impl Spawner for StubSpawner {
                 std::iter::once(fake_cmux_dir(&self.db)).chain(std::env::split_paths(&path)),
             )?,
         );
-        command.stdin(Stdio::null());
+        // A headless job's prompt, or nothing (task 1560).
+        command.stdin(process::stdin(spec)?);
         match streams {
             // The agent's terminal.
             Streams::Inherit => {
@@ -1817,12 +1818,13 @@ pub fn stub_calls(run: &TaskRun) -> Vec<String> {
 /// /bin/sh --version is not portable; a tiny standalone provider preflight stub.
 pub fn claude_stub(db: &Path) -> PathBuf {
     let stub = db.parent().unwrap().join("claude-stub");
-    // A live session's recovery job escalates (so the alert's ask opens);
-    // anything else prints no verdict.
+    // A live session's recovery job (its prompt on stdin in print mode)
+    // escalates (so the alert's ask opens); anything else prints no
+    // verdict.
     crate::common::template::script(
         &stub,
         format!(
-            "#!/bin/sh\ncase \"$*\" in *\"{LIVE_RECOVERY}\"*) printf '%s\\n' '{ESCALATE}' ;; *) printf 'test provider\\n' ;; esac\n"
+            "#!/bin/sh\nPROMPT=\"$*\"; [ \"$1\" = -p ] && PROMPT=$(cat)\ncase \"$PROMPT\" in *\"{LIVE_RECOVERY}\"*) printf '%s\\n' '{ESCALATE}' ;; *) printf 'test provider\\n' ;; esac\n"
         ),
     );
 

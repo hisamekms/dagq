@@ -197,6 +197,9 @@ impl<S: Spawner> Spawner for InheritingSpawner<S> {
         if spec.get_new_session() {
             inherited.new_session();
         }
+        if let Some(text) = spec.get_stdin() {
+            inherited.stdin(text);
+        }
         self.inner.spawn(&inherited, streams)
     }
 }

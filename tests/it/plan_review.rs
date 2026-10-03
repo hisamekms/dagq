@@ -259,8 +259,16 @@ impl AgentProvider for StubReviewer {
         let script = format!(
             "printf '%s %s\\n' \"$DAGQ_ROLE\" \"$DAGQ_ACTOR_ID\" >> \"$(dirname \"$(dirname \"$(dirname \"$DAGQ_SERVICE_CREDENTIAL_FILE\")\")\")/{JOB_ACTORS}\"; {script}"
         );
-        let mut command = CommandSpec::new("/bin/sh");
+        let missing = verdict.trim_matches('"') == MISSING;
+        let mut command = CommandSpec::new(if missing {
+            "/nonexistent/sh"
+        } else {
+            "/bin/sh"
+        });
         command.current_dir(cwd).arg("-c").arg(script);
+        if verdict.trim_matches('"') == TOO_LONG {
+            command.arg("x".repeat(2 << 20));
+        }
         Ok(command)
     }
     fn review_command(&self, _: &TaskRun, _: &str, _: JobAccess) -> Result<CommandSpec> {
@@ -279,6 +287,11 @@ impl AgentProvider for StubReviewer {
 
 /// The verdict of a [`StubReviewer`] job that stops at the usage limit.
 const LIMIT: &str = "LIMIT";
+/// The verdict of a [`StubReviewer`] job whose arguments pass the
+/// system's limit, so it fails to start with `E2BIG` (task 1560).
+pub(crate) const TOO_LONG: &str = "TOO_LONG";
+/// The verdict of a [`StubReviewer`] job whose executable is not there.
+pub(crate) const MISSING: &str = "MISSING";
 
 /// Where [`StubReviewer`]'s jobs append their role and actor id, next to
 /// the queue.

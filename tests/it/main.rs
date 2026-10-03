@@ -54,6 +54,7 @@ mod main_checkout;
 mod plan_review;
 mod plan_review_codex;
 mod plan_review_concern;
+mod plan_review_launch;
 mod plan_review_prompt_bytes;
 mod plan_review_reasons;
 mod planner_close;

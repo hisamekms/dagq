@@ -460,8 +460,10 @@ impl AgentProvider for Codex {
     fn turn_reader(&self) -> Result<Box<dyn TurnReader>> {
         Ok(Box::new(CodexTurnReader::reading(self.sessions_dir())))
     }
-    /// `codex exec --json --skip-git-repo-check --sandbox read-only -C <cwd>
-    /// -- <prompt>` in `cwd` (ADR-t1063-1 decision 2, spike 1.): the job's
+    /// `codex exec --json --skip-git-repo-check --sandbox read-only -C <cwd>`
+    /// in `cwd` with the prompt as its standard input, never an argument
+    /// (`exec` with no prompt reads it there, so a prompt of any size
+    /// starts, task 1560) (ADR-t1063-1 decision 2, spike 1.): the job's
     /// intent is read in [`JOB_SANDBOX`], its environment (role, queue) is
     /// the caller's, and nothing of the person's Codex settings is changed.
     /// `--skip-git-repo-check` because the cwd of the throughput review,
@@ -489,8 +491,7 @@ impl AgentProvider for Codex {
             .arg(JOB_SANDBOX)
             .arg("-C")
             .arg(cwd)
-            .arg("--")
-            .arg(prompt);
+            .stdin(prompt);
         Ok(command)
     }
     /// A job's model only when it is Codex's (`-m`), and its effort as
@@ -690,6 +691,32 @@ mod tests {
         );
     }
 
+    /// A prompt past the system's limit on the arguments (about 1 MB on
+    /// macOS) starts a headless job and a review: the stub `codex` reads it
+    /// whole on its standard input, and its arguments do not carry it (task
+    /// 1560).
+    #[test]
+    fn a_codex_job_starts_with_a_prompt_past_the_argument_limit() {
+        use crate::infrastructure::process::stub_agent;
+        let dir = tempfile::tempdir().unwrap();
+        let (worktree, run_dir) = (dir.path().join("worktree"), dir.path().join("run"));
+        fs::create_dir_all(&worktree).unwrap();
+        fs::create_dir_all(&run_dir).unwrap();
+        let codex = Codex::new(stub_agent::write(dir.path()));
+        let prompt = "p".repeat(2 << 20);
+        let job = codex
+            .headless_command(dir.path(), &prompt, JobAccess::ReadFilesAndQueueCli)
+            .unwrap();
+        let review = codex
+            .review_command(&run(&worktree, &run_dir), &prompt, JobAccess::ReadFiles)
+            .unwrap();
+        for command in [job, review] {
+            let (args, stdin) = stub_agent::run(&command, dir.path());
+            assert_eq!(stdin, prompt.len());
+            assert!(args < 4096, "{args} bytes of arguments");
+        }
+    }
+
     /// A headless job (ADR-t1063-1): `codex exec --json` in the read-only
     /// sandbox in its directory, no bypass flag, no session id, its model
     /// only when Codex's and its effort as `-c`.
@@ -731,10 +758,10 @@ mod tests {
                 "/repo",
                 "-c",
                 r#"model_reasoning_effort="medium""#,
-                "--",
-                "review it"
             ]
         );
+        // The prompt is its standard input, never an argument (task 1560).
+        assert_eq!(command.get_stdin(), Some("review it"));
         assert_eq!(
             args(&chosen)[7..],
             [
@@ -742,8 +769,6 @@ mod tests {
                 "gpt-6-astra",
                 "-c",
                 r#"model_reasoning_effort="xhigh""#,
-                "--",
-                "review it"
             ]
         );
         // Reaching the queue service, the job runs in the profile that
@@ -774,8 +799,8 @@ mod tests {
         for config in &profile {
             expected.extend(["-c".to_owned(), config.clone()]);
         }
-        expected.extend(["--".to_owned(), "review it".to_owned()]);
         assert_eq!(args(&reaching), expected);
+        assert_eq!(reaching.get_stdin(), Some("review it"));
         assert!(profile.contains(&r#"permissions.dagq_job.extends=":read-only""#.to_owned()));
         assert!(profile.contains(&"features.network_proxy=true".to_owned()));
         // A command without the read-only sandbox (a worker's turn) is left
@@ -1046,10 +1071,9 @@ mod tests {
                 "read-only",
                 "-C",
                 worktree_text.as_str(),
-                "--",
-                "p"
             ]
         );
+        assert_eq!(review.get_stdin(), Some("p"));
         // Codex runs no review subagents (ADR-t1453-1 decision 8): it says
         // so, refuses them, and its review command is as before.
         assert!(!codex.runs_review_subagents());

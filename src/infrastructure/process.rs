@@ -2,13 +2,14 @@
 //! `Command`, started with the streams the caller asked for.
 
 use std::{
+    io::{Seek, SeekFrom, Write},
     process::{Child, Command, ExitStatus, Stdio},
     sync::atomic::{AtomicI32, Ordering::SeqCst},
 };
 
 use anyhow::Result;
 
-use crate::application::{CommandSpec, Exit, Spawned, Spawner, Streams};
+use crate::application::{CommandSpec, Exit, Spawned, Spawner, StdinUnprepared, Streams};
 
 /// The `Command` that starts `spec`, its streams left to the caller.
 pub fn command(spec: &CommandSpec) -> Command {
@@ -36,6 +37,90 @@ pub fn command(spec: &CommandSpec) -> Command {
         }
     }
     command
+}
+
+/// The standard input of `spec`: its own text
+/// ([`CommandSpec::get_stdin`]) from a file of its own, which is unlinked
+/// at once and so goes with the process, or nothing. A file and not a pipe,
+/// so a text of any size is handed over without a writer waiting on the
+/// process to read it. Readable by this user only, as the prompt may say
+/// what others should not read. Its errors are [`StdinUnprepared`], so that
+/// a start that fails here is not taken for its program's
+/// ([`crate::application::job_start_failure`]).
+pub fn stdin(spec: &CommandSpec) -> Result<Stdio> {
+    stdin_in(spec, &std::env::temp_dir())
+}
+
+/// [`stdin`] with its file in `dir`.
+fn stdin_in(spec: &CommandSpec, dir: &std::path::Path) -> Result<Stdio> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let Some(text) = spec.get_stdin() else {
+        return Ok(Stdio::null());
+    };
+    let path = dir.join(format!("dagq-stdin-{}", uuid::Uuid::new_v4()));
+    let failed = |what: &str, source: std::io::Error| {
+        anyhow::Error::new(StdinUnprepared {
+            what: format!("{what} the standard input {}", path.display()),
+            source,
+        })
+    };
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|error| failed("create", error))?;
+    let written = file
+        .write_all(text.as_bytes())
+        .and_then(|()| file.seek(SeekFrom::Start(0)));
+    std::fs::remove_file(&path).map_err(|error| failed("remove", error))?;
+    written.map_err(|error| failed("write", error))?;
+    Ok(Stdio::from(file))
+}
+
+/// A stub agent for the tests of a provider's command (task 1560): it
+/// writes how many bytes its arguments and its standard input had to
+/// `args` and `stdin` in the directory `OUT` names.
+#[cfg(test)]
+pub(crate) mod stub_agent {
+    use super::*;
+    use std::{fs, os::unix::fs::PermissionsExt, path::Path, path::PathBuf};
+
+    /// The stub's executable, written in `dir`.
+    pub(crate) fn write(dir: &Path) -> PathBuf {
+        let stub = dir.join("agent");
+        fs::write(
+            &stub,
+            "#!/bin/sh\nprintf '%s' \"$*\" | wc -c | tr -d ' ' > \"$OUT/args\"\nwc -c | tr -d ' ' > \"$OUT/stdin\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        stub
+    }
+
+    /// Start `command` (whose program is the stub) as a headless job is
+    /// started, wait for it, and read the bytes of its arguments and its
+    /// standard input from `dir`.
+    pub(crate) fn run(command: &CommandSpec, dir: &Path) -> (usize, usize) {
+        let mut command = command.clone();
+        command.env("OUT", dir);
+        let (out, err) = (dir.join("out"), dir.join("err"));
+        let streams = Streams::Files {
+            stdout: &out,
+            stderr: &err,
+        };
+        let mut child = LocalSpawner.spawn(&command, streams).unwrap();
+        assert!(child.wait().unwrap().success);
+        let read = |name: &str| {
+            fs::read_to_string(dir.join(name))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap()
+        };
+        (read("args"), read("stdin"))
+    }
 }
 
 /// How the process ended, in the port's terms.
@@ -109,24 +194,20 @@ impl Spawner for LocalSpawner {
         match streams {
             Streams::Inherit => {}
             Streams::Null => {
-                command
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null());
+                command.stdout(Stdio::null()).stderr(Stdio::null());
             }
             Streams::Files { stdout, stderr } => {
                 command
-                    .stdin(Stdio::null())
                     .stdout(super::agent_dir::create_file(stdout)?)
                     .stderr(super::agent_dir::create_file(stderr)?);
             }
             Streams::Log(log) => {
                 let log = super::agent_dir::create_file(log)?;
-                command
-                    .stdin(Stdio::null())
-                    .stdout(log.try_clone()?)
-                    .stderr(log);
+                command.stdout(log.try_clone()?).stderr(log);
             }
+        }
+        if spec.get_stdin().is_some() || !matches!(streams, Streams::Inherit) {
+            command.stdin(stdin(spec)?);
         }
         let child = command.spawn()?;
         if spec.get_new_session() {
@@ -256,6 +337,56 @@ mod tests {
             format!("yes unset {name}")
         );
         assert_eq!(fs::read_to_string(&err).unwrap(), "oops\n");
+    }
+
+    /// A text past the system's limit on the arguments (about 1 MB on
+    /// macOS, task 1560) reaches the process on its standard input whole,
+    /// where on its command line it fails to start with `E2BIG`.
+    #[test]
+    fn a_text_past_the_argument_limit_reaches_stdin_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let (out, err) = (dir.path().join("out"), dir.path().join("err"));
+        let text = "x".repeat(2 * 1024 * 1024);
+        let streams = || Streams::Files {
+            stdout: &out,
+            stderr: &err,
+        };
+        let mut spec = CommandSpec::new("/bin/sh");
+        spec.args(["-c", "wc -c | tr -d ' '"]).stdin(text.as_str());
+        let mut child = LocalSpawner.spawn(&spec, streams()).unwrap();
+        assert!(child.wait().unwrap().success);
+        assert_eq!(fs::read_to_string(&out).unwrap().trim(), "2097152");
+        let mut on_the_line = CommandSpec::new("/bin/echo");
+        on_the_line.arg(&text);
+        let error = LocalSpawner.spawn(&on_the_line, streams()).err().unwrap();
+        let error = error.downcast_ref::<std::io::Error>().unwrap();
+        assert_eq!(error.raw_os_error(), Some(libc::E2BIG), "{error}");
+        // Without a text of its own, the process reads nothing.
+        let mut empty = CommandSpec::new("/bin/sh");
+        empty.args(["-c", "wc -c | tr -d ' '"]);
+        let mut child = LocalSpawner.spawn(&empty, streams()).unwrap();
+        assert!(child.wait().unwrap().success);
+        assert_eq!(fs::read_to_string(&out).unwrap().trim(), "0");
+    }
+
+    /// A standard input whose file cannot be made (its directory gone, as
+    /// a `TMPDIR` that was removed) fails the start as the starter's
+    /// environment, which holds no provider (task 1560).
+    #[test]
+    fn a_stdin_that_cannot_be_prepared_is_no_providers_failure() {
+        use crate::{application::job_start_failure, domain::headless_job::JobFailure};
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("gone");
+        let mut spec = CommandSpec::new("/bin/cat");
+        spec.stdin("the prompt");
+        let error = stdin_in(&spec, &gone).err().unwrap();
+        assert!(
+            format!("{error:#}").contains("create the standard input"),
+            "{error:#}"
+        );
+        assert_eq!(job_start_failure(&error), JobFailure::Other);
+        // Without a text of its own there is nothing to prepare.
+        assert!(stdin_in(&CommandSpec::new("/bin/cat"), &gone).is_ok());
     }
 
     #[test]

@@ -133,6 +133,10 @@ pub struct CommandSpec {
     /// signal to the starter's group nor the close of its terminal reaches
     /// it (the automatic update's job, ADR-0045 decision 13).
     new_session: bool,
+    /// What the process reads on its standard input, whatever the
+    /// [`Streams`] say: a headless job's prompt, which on the command line
+    /// could pass the system's limit on the arguments (`E2BIG`, task 1560).
+    stdin: Option<String>,
 }
 
 impl CommandSpec {
@@ -231,6 +235,18 @@ impl CommandSpec {
         self.new_session
     }
 
+    /// See [`Self::get_stdin`].
+    pub fn stdin(&mut self, text: impl Into<String>) -> &mut Self {
+        self.stdin = Some(text.into());
+        self
+    }
+
+    /// What the process reads on its standard input instead of the input
+    /// its [`Streams`] give; `None` leaves it to them.
+    pub fn get_stdin(&self) -> Option<&str> {
+        self.stdin.as_deref()
+    }
+
     pub fn get_program(&self) -> &OsStr {
         &self.program
     }
@@ -251,6 +267,29 @@ impl CommandSpec {
     }
 }
 
+/// The standard input of a process ([`CommandSpec::get_stdin`]) could not
+/// be prepared (its file not made, written or removed): the starter's
+/// environment (its `TMPDIR` missing, unwritable or full), not the program,
+/// so [`job_start_failure`] takes it for no provider's (task 1560). `what`
+/// says which step and file, `source` why.
+#[derive(Debug)]
+pub struct StdinUnprepared {
+    pub what: String,
+    pub source: io::Error,
+}
+
+impl fmt::Display for StdinUnprepared {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.what)
+    }
+}
+
+impl std::error::Error for StdinUnprepared {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
 /// Where the standard streams of a started process go.
 #[derive(Debug, Clone, Copy)]
 pub enum Streams<'a> {
@@ -258,7 +297,9 @@ pub enum Streams<'a> {
     Inherit,
     /// Nowhere.
     Null,
-    /// No input; stdout and stderr to these files, created or truncated.
+    /// No input (unless the command has its own,
+    /// [`CommandSpec::get_stdin`]); stdout and stderr to these files,
+    /// created or truncated.
     Files { stdout: &'a Path, stderr: &'a Path },
     /// No input; stdout and stderr both to this one file, created or
     /// truncated.
@@ -711,16 +752,30 @@ pub trait AgentProvider {
 /// Why a headless job's process could not be started, in the classes
 /// shared by every provider (ADR-t1063-1 decision 4): an executable that is
 /// not there is `executable_missing`, any other refusal of the start
-/// `launch_failed`.
+/// `launch_failed`, except arguments or an environment past the system's
+/// limit (`E2BIG`, os error 7), or a standard input that could not be
+/// prepared ([`StdinUnprepared`], whatever its io error): that is the job's
+/// own input or the starter's environment, not its provider, so it is
+/// `other`, a failure of the job alone that holds no provider (task 1560).
 pub fn job_start_failure(error: &anyhow::Error) -> crate::domain::headless_job::JobFailure {
     use crate::domain::headless_job::JobFailure;
-    let missing = error.chain().any(|cause| {
-        cause
-            .downcast_ref::<io::Error>()
-            .is_some_and(|io| io.kind() == io::ErrorKind::NotFound)
-    });
-    if missing {
+    if error
+        .chain()
+        .any(|cause| cause.downcast_ref::<StdinUnprepared>().is_some())
+    {
+        return JobFailure::Other;
+    }
+    let kind = |kind: io::ErrorKind| {
+        error.chain().any(|cause| {
+            cause
+                .downcast_ref::<io::Error>()
+                .is_some_and(|io| io.kind() == kind)
+        })
+    };
+    if kind(io::ErrorKind::NotFound) {
         JobFailure::ExecutableMissing
+    } else if kind(io::ErrorKind::ArgumentListTooLong) {
+        JobFailure::Other
     } else {
         JobFailure::LaunchFailed
     }
@@ -3325,5 +3380,27 @@ mod tests {
             job_start_failure(&anyhow::anyhow!("no provider")),
             JobFailure::LaunchFailed
         );
+        // Arguments past the system's limit are the job's input: a failure
+        // of the job alone, which names no reason to hold its provider.
+        let too_long =
+            anyhow::Error::new(io::Error::from_raw_os_error(libc::E2BIG)).context("launch agent");
+        assert_eq!(job_start_failure(&too_long), JobFailure::Other);
+        assert_eq!(JobFailure::Other.switch_reason(), None);
+        // A standard input that could not be prepared is the starter's
+        // environment, even when its io error says `NotFound` (a `TMPDIR`
+        // that is gone) or anything else (a full disk).
+        for kind in [io::ErrorKind::NotFound, io::ErrorKind::StorageFull] {
+            let unprepared = anyhow::Error::new(StdinUnprepared {
+                what: "create the standard input /gone/dagq-stdin-1".into(),
+                source: io::Error::from(kind),
+            })
+            .context("launch agent");
+            assert_eq!(
+                job_start_failure(&unprepared),
+                JobFailure::Other,
+                "{kind:?}"
+            );
+            assert!(format!("{unprepared:#}").contains("/gone/dagq-stdin-1"));
+        }
     }
 }

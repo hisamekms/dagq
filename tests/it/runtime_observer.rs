@@ -572,7 +572,8 @@ fn observer_claude_stub(db: &Path) -> PathBuf {
         r#"#!/bin/sh
 if [ "$1" = "-p" ]; then
   mode=hourly
-  case "$*" in *"daily observation"*) mode=daily ;; esac
+  # The prompt comes on stdin (task 1560).
+  case "$(cat)" in *"daily observation"*) mode=daily ;; esac
   exec dagq finding record --goal 1 --kind observed --subject "$mode" --summary "observed by $DAGQ_ROLE"
 fi
 printf 'test provider\n'

@@ -4,8 +4,8 @@ type: design
 title: "Headless job processes"
 status: current
 created: 2026-09-27
-updated: 2026-10-03 # task 1566: the prompt is passed and limited by the common rules
-last_verified: 2026-10-03 # task 1566
+updated: 2026-10-03 # task 1560: the jobs get their prompt on stdin (after task 1566)
+last_verified: 2026-10-03 # task 1560
 scope: runtime
 related:
   - adr-t1566-1
@@ -37,7 +37,7 @@ jobは[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterfa
 
 ## promptの渡し方と大きさ
 
-jobのpromptの渡し方（大きさに関係なくファイルかstdin）、載せる材料、節ごとと全体の上限、省いたことの明示、byte数の記録は、[Prompt](prompt.md#headlessのjobのprompt)の「headlessのjobのprompt」の節が正本で、jobごとの今の渡し方・節・上限をその表が持つ（[ADR-t1566-1](../../adr/2026-10-03-t1566-1-headless-job-prompts-carry-decision-material-within-limits.md)）。今はどのjobもpromptを引数で渡し、hostの`ARG_MAX`を超えると起動できない。ファイルかstdinへの切り替えはtask 1560が行う。
+jobのpromptの渡し方（大きさに関係なくファイルかstdin）、載せる材料、節ごとと全体の上限、省いたことの明示、byte数の記録は、[Prompt](prompt.md#headlessのjobのprompt)の「headlessのjobのprompt」の節が正本で、jobごとの今の渡し方・節・上限をその表が持つ（[ADR-t1566-1](../../adr/2026-10-03-t1566-1-headless-job-prompts-carry-decision-material-within-limits.md)）。今はどのjobもpromptをstdinで渡し（task 1560。[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)の「promptの渡し方」）、promptの大きさで起動が`ARG_MAX`に当たらない。前は引数で渡し、hostの`ARG_MAX`を超えると起動できなかった。引数・envの大きさによる起動の失敗（`E2BIG`）とstdinの一時ファイルを用意できない失敗（`StdinUnprepared`）は、そのjobの失敗にだけ数えてproviderを控えない。
 
 ## 引き継ぎ
 

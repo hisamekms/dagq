@@ -553,8 +553,8 @@ fn the_daily_and_weekly_reviews_of_inputs_of_mbs_start_their_agent_with_a_small_
 }
 
 /// A Claude Code stand-in for the supervisor's review: `--version` for the
-/// preflight, and in print mode (`-p`) the review, or a failure when
-/// `fail` is set.
+/// preflight, and in print mode (`-p`, its prompt on stdin) the review, or
+/// a failure when `fail` is set.
 pub(crate) fn review_claude_stub(db: &Path, fail: bool) -> PathBuf {
     let stub = db.parent().unwrap().join("claude-review-stub");
     let review = if fail {
@@ -565,7 +565,7 @@ pub(crate) fn review_claude_stub(db: &Path, fail: bool) -> PathBuf {
     crate::common::template::script(
         &stub,
         format!(
-            "#!/bin/sh\ncase \"$*\" in *\"You are the throughput review job\"*) {review} ;; esac\nprintf 'test provider\\n'\n"
+            "#!/bin/sh\n[ \"$1\" = -p ] && case \"$(cat)\" in *\"You are the throughput review job\"*) {review} ;; esac\nprintf 'test provider\\n'\n"
         ),
     );
 

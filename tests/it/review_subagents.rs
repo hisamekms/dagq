@@ -1016,12 +1016,15 @@ fn the_real_claude_review_runs_its_subagents_without_the_worktrees_settings() {
                 .push(json!("Read(./secret.txt)"));
         }
         fs::write(&settings, written.to_string()).unwrap();
+        // The prompt is the review's standard input (task 1560).
+        let input = run_dir.join(format!("{name}-prompt.txt"));
+        fs::write(&input, command.get_stdin().unwrap()).unwrap();
         let mut process = std::process::Command::new(command.get_program());
         process
             .args(&args)
             .current_dir(command.get_current_dir().unwrap())
             .env_remove("CLAUDECODE")
-            .stdin(std::process::Stdio::null());
+            .stdin(fs::File::open(&input).unwrap());
         let output = {
             let _waiting =
                 crate::common::within(Duration::from_secs(300), "the real Claude review");

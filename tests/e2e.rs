@@ -192,7 +192,10 @@ if [ -n "$headless" ] && [ "$output" != stream-json ]; then
   # verdict JSON on stdout. Only a task that says E2E-REVIEW-PASS passes;
   # any other review fails, and its run waits in an approve_landing ask.
   # The runtime names the review's own session (ADR-0048 decision 4), and
-  # the review loads no setting sources (ADR-t1470-1).
+  # the review loads no setting sources (ADR-t1470-1). Its prompt comes on
+  # stdin, never as an argument (task 1560).
+  [ -z "$prompt" ] || { printf 'stub: the review prompt is an argument\n' >&2; exit 64; }
+  prompt=$(cat)
   [ -n "$session_id" ] && [ -n "$debug_file" ] && [ -n "$add_dir" ] && [ -n "$settings" ] && [ -n "$prompt" ] \
     && [ "$tools" = "Read,Grep,Glob" ] && [ "$denied" = "Bash,Edit,Write,NotebookEdit" ] \
     && [ -z "$sources" ] || { printf 'stub: bad review arguments\n' >&2; exit 64; }

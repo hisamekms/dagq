@@ -59,6 +59,9 @@ else
   fi
 fi
 for arg in "$@"; do printf '%s|' "$arg" | tr '\n' ' '; done >> "$DIR/codex-args.txt"
+# The prompt comes on stdin, never as an argument (task 1560).
+printf '<stdin>|' >> "$DIR/codex-args.txt"
+tr '\n' ' ' >> "$DIR/codex-args.txt"
 printf '\n' >> "$DIR/codex-args.txt"
 printf '%s %s\n' "$DAGQ_ROLE" "$DAGQ_ACTOR_ID" >> "$DIR/codex-actors.txt"
 THREAD="codex-thread-$(wc -l < "$DIR/codex-actors.txt" | tr -d ' ')"
@@ -178,7 +181,7 @@ fn a_throughput_review_on_codex_reads_its_last_message_like_claude_s_output() {
         );
         assert!(
             call.contains(&format!(
-                "|-m|{CODEX_MODEL}|-c|model_reasoning_effort=\"high\"|{profile}--|"
+                "|-m|{CODEX_MODEL}|-c|model_reasoning_effort=\"high\"|{profile}<stdin>|"
             )),
             "{call}"
         );

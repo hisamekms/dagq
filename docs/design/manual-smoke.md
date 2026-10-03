@@ -4,8 +4,8 @@ type: design
 title: Manual smoke of the paths that include real Claude and Codex
 status: current
 created: 2026-09-25
-updated: 2026-10-03 # task 1399: dagq plan opens nothing (ADR-t1394-1)
-last_verified: 2026-10-03 # task 1399
+updated: 2026-10-03 # task 1560: the Codex goal review smoke expects no prompt on the command line (after task 1399)
+last_verified: 2026-10-03 # task 1560
 scope: operations
 related:
   - adr-0036
@@ -383,7 +383,7 @@ env -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR=<scratch>/cfg-empty \
 5. 確かめる。
    - `tq events --goal GOAL --full`: `goal_review_started` の `launch` が `{"role": "goal_review", "provider": "codex", "model": null, "effort": "low", "source": "dagq.toml"}` で `session_id` が null。`goal_review_finished` の `decision`（`achieved` のはず）、`session_id`（Codex の thread の id）、`model`（Codex が実際に使った model。読めなければ `model_unknown` の理由）。
    - goal の `goal-reviews/<id>/review.out` が `codex exec --json` の JSONL（`thread.started` … `turn.completed`）で、`command_execution` に `dagq show` などの読み取りがあり、書き込みのコマンドがあれば sandbox に拒まれている。`review.err` に `--dangerously` の類の警告が無い。
-   - `ps` で見た job の process（`codex exec --json -C <checkout> -c model_reasoning_effort="low" -c features.network_proxy=true -c default_permissions="dagq_job" -c permissions.dagq_job.extends=":read-only" ... -- ...`。task 1236 から `--sandbox read-only` の代わりに queue service の socket だけを許す profile）に bypass の flag が無く、job の `dagq show` などが `queue_service` の `unreachable` で失敗していない（job が短ければ `review.out` の `thread.started` と `tq status` の時刻で代える）。
+   - `ps` で見た job の process（`codex exec --json --skip-git-repo-check -C <checkout> -c model_reasoning_effort="low" -c features.network_proxy=true -c default_permissions="dagq_job" -c permissions.dagq_job.extends=":read-only" ...`。`--` も prompt も無く、prompt は stdin で渡る（task 1560）。task 1236 から `--sandbox read-only` の代わりに queue service の socket だけを許す profile）に bypass の flag が無く、job の `dagq show` などが `queue_service` の `unreachable` で失敗していない（job が短ければ `review.out` の `thread.started` と `tq status` の時刻で代える）。
    - `~/.codex/sessions/YYYY/MM/DD/rollout-*-<thread>.jsonl` の `turn_context` の `model` が `goal_review_finished` の `model` と同じ。
    - `tq stats --full` の `jobs.goal_review.by_provider.codex` と `by_model.<model>` に 1 件。
    - `~/.codex/config.toml` の更新時刻が変わっていない。

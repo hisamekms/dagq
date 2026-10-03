@@ -4,8 +4,8 @@ type: design
 title: "Observer"
 status: current
 created: 2026-09-26
-updated: 2026-10-03 # task 1379: the hourly cursor stays next_cursor while stats' period aggregates span the window
-last_verified: 2026-10-03 # task 1379
+updated: 2026-10-03 # task 1560: the observer gets its prompt on stdin (after task 1379)
+last_verified: 2026-10-03 # task 1560
 scope: runtime
 related:
   - adr-t1566-1
@@ -24,7 +24,7 @@ related:
 
 # Observer
 
-[ADR-0044](../../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定4・18・23（task 292）。observerはnoteとdraft goalを書かず、findingを記録・更新し、見立てが人を要るfindingにだけ`blocked`のaskを上げる（`--because`は`scope` / `discard` / `recovery_failed`から選び、見立てを`--recommend`と`--confidence`で載せる。下の「人が要る見立てだけをblockedにする」）。前回から自分以外のeventが無ければagentを起動しないこと、MCPを読まないこと、`observe --history`はtask 294が実装した。同じADRの決定19〜22のうち、既定の間隔を3時間にすること、proposalを求める印からplannerを立てることはgoal 31の他のtaskが持つ。`events --full` / `timeline`はtask 293が足し、promptに示すのはtask 420。dagqが回っているかを観察して継続的改善の材料を残すjobで、個々の詰まりは解消しない。cmux workspaceを持たず、`AgentProvider::headless_command`に`assign_session_id`と`without_mcp`を足して起動する（Claudeでは`claude -p --allowedTools 'Bash(dagq:*)' --session-id <id> --strict-mcp-config -- <prompt>`。`--mcp-config`を渡さない`--strict-mcp-config`で、user・project・plugin・claude.aiのどのMCP serverも読み込まない）。実装は`src/observer.rs`。
+[ADR-0044](../../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定4・18・23（task 292）。observerはnoteとdraft goalを書かず、findingを記録・更新し、見立てが人を要るfindingにだけ`blocked`のaskを上げる（`--because`は`scope` / `discard` / `recovery_failed`から選び、見立てを`--recommend`と`--confidence`で載せる。下の「人が要る見立てだけをblockedにする」）。前回から自分以外のeventが無ければagentを起動しないこと、MCPを読まないこと、`observe --history`はtask 294が実装した。同じADRの決定19〜22のうち、既定の間隔を3時間にすること、proposalを求める印からplannerを立てることはgoal 31の他のtaskが持つ。`events --full` / `timeline`はtask 293が足し、promptに示すのはtask 420。dagqが回っているかを観察して継続的改善の材料を残すjobで、個々の詰まりは解消しない。cmux workspaceを持たず、`AgentProvider::headless_command`に`assign_session_id`と`without_mcp`を足して起動する（Claudeでは`claude -p --allowedTools 'Bash(dagq:*)' --session-id <id> --strict-mcp-config`でpromptはstdin（task 1560）。`--mcp-config`を渡さない`--strict-mcp-config`で、user・project・plugin・claude.aiのどのMCP serverも読み込まない）。実装は`src/observer.rs`。
 
 Codexのobserverは、jobのdagqをクライアントモードにしてqueue service経由でfindingとfindingに紐づく`blocked`のaskを書き、Claudeのobserverも同じ経路にする（[ADR-t1222-1](../../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）。serviceの側のユースケース（`finding_record`・`finding_resolve`、findingに紐づく`blocked`の`ask`、読み取りの`proposal_list`・`proposal_show`など）はtask 1235が足した（[Queue service](../queue-service.md#ユースケース)）。serviceはobserverのprincipal（tokenのrole `observer`とjobのactor id）をactorにしてCLIと同じ`Dialogue`で書くので、`finding_recorded` / `finding_updated` / `finding_status_changed`の`by`と`ask_opened`の`asked_by`は`observer`、eventのactorはjobのactor idになり、拒否の`authorization_denied`もactorのroleが`observer`で残る。そのため下の0の「observer自身のeventを数えない」判定（`SqliteQueue::events_besides`）はCLIで書いたときと同じに成り立つ（ADR-t1222-1決定4）。jobのdagqのクライアントモードはまだ無く、今のobserverはClaudeだけで動き、agentのdagqがqueueのDBに直接書く。jobへのtokenの渡し方・sandboxに足す設定はtask 1223がここに書く。
 
@@ -49,7 +49,7 @@ Codexのobserverは、jobのdagqをクライアントモードにしてqueue ser
 [ADR-t1566-1](../../adr/2026-10-03-t1566-1-headless-job-prompts-carry-decision-material-within-limits.md)の決定2〜6（task 1567）。`observer::observer_prompt`が指示の後に入力を節ごとに載せる。実装は`src/observer/input.rs`の`fit`、値はその定数。
 
 - **上限を決めた内訳**: 本番の`<queue dir>/observer/1791005872/prompt.md`（started_at 2026-10-03T05:37:52Z）は1,226,750 byteで、入力を整形したJSONで丸ごと載せていた。`stats` 624,452 byte（50.9%。うち`runs` 193,135・`goals` 108,125・`versions` 99,396）、`kpi` 383,233（31.2%。うち`trend` 190,486・`forecast` 118,562・`breaches` 36,058（1件の`marks`が154件））、`findings` 104,120（8.5%、52件）、`notes` 14,692（20件）、指示 10,912、`open_asks` 3,796（3件）、`graph` 1,398、`improvements` 802。
-- **全体の上限**: `PROMPT_LIMIT` 160,000 byte（言語の指示を含み、そのために`LANGUAGE_RESERVE` 1,000 byteを取っておく）。hostの`ARG_MAX`（macOSで1 MiB）の約15%で、上の入力を下の規則で載せた推定（約127KB）が全体の上限では切られずに収まる値。渡し方がファイルかstdinになっても（task 1560）同じ上限を持つ。
+- **全体の上限**: `PROMPT_LIMIT` 160,000 byte（言語の指示を含み、そのために`LANGUAGE_RESERVE` 1,000 byteを取っておく）。hostの`ARG_MAX`（macOSで1 MiB）の約15%で、上の入力を下の規則で載せた推定（約127KB）が全体の上限では切られずに収まる値。渡し方がstdinになった今（task 1560）も同じ上限を持つ（上限はagentの文脈のため）。
 - **必須の節**（切らない）: 指示（役割・windowとcursor・書けるものと禁止・読み方・読むコマンド）と、`observe --input`の読む先のobservationの名前。指示と節の見出し・省いた注記だけで上限を超えるときも指示と見出しは切らず、全ての資料を省いてそれぞれの読む方法を書く（このときだけpromptは上限を超える。2026-10-03の指示は約11KBで、見出しと注記を足しても上限の1割に満たない）。
 - **必須の資料**（自分の上限を持たず、全体の上限だけで切られる。他の節より先に場所を取る）: 順に`kpi.breaches`（findingにする目標割れ）、`open_asks`（同じfindingにaskを重ねない）、`stats.alerts`と`stats.running_alerts`（observationを起こしたalert）。これだけで全体を超えるときも黙って切らず、他の節と同じく省いた件数と読む方法を書く。
 - **省いてよい節**（必須の資料の残りを順に分け合い、それぞれの上限の中）:
