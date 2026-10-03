@@ -142,13 +142,29 @@ fn the_observer_writes_findings_through_the_service_as_the_command_line_does() {
     let listed = ok(&queue.db, &["findings", &id.to_string(), "--full"]);
     assert_eq!(listed["findings"][0]["occurrences"], 2, "{listed}");
 
-    // A blocked ask on the finding.
-    let asked = succeeded(&call(
+    // A blocked ask on the finding carries the observer's reading as its
+    // recommendation (ADR-t451-1 decision 2): without one the service
+    // refuses it with the reason, as the command line does.
+    let without = call(
         &queue,
         Some(&observer),
         UseCase::Ask,
         json!({"kind": "blocked", "because": "scope", "question": "stuck: what now?",
                "finding_id": id}),
+    );
+    assert_ne!(without["ok"], true, "{without}");
+    assert!(
+        without["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("a blocked ask needs --recommend")),
+        "{without}"
+    );
+    let asked = succeeded(&call(
+        &queue,
+        Some(&observer),
+        UseCase::Ask,
+        json!({"kind": "blocked", "because": "scope", "question": "stuck: what now?",
+               "finding_id": id, "recommend": "propose", "confidence": "high"}),
     ));
     let asks = ok(&queue.db, &["asks", "--all"])["asks"].clone();
     assert_eq!(asks[0]["asked_by"], "observer", "{asks} {asked}");

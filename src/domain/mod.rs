@@ -1129,6 +1129,17 @@ impl NewAsk {
             .map(str::to_owned)
     }
 
+    /// What `dagq ask` asks of the asker beyond [`Self::validate`]: a
+    /// `blocked` ask carries the observer's reading as its recommendation
+    /// (ADR-t451-1 decision 2). Whether that reading is "wait" or "leave
+    /// it", which is no ask, is the prompt's rule, not checked here.
+    pub fn check_asker(&self) -> Result<(), DomainError> {
+        require(
+            self.kind != AskKind::Blocked || self.recommended_option().is_some(),
+            || DomainError::BlockedAskWithoutRecommendation,
+        )
+    }
+
     pub fn validate(&self) -> Result<(), DomainError> {
         require(!self.question.trim().is_empty(), || DomainError::Blank {
             field: "question",

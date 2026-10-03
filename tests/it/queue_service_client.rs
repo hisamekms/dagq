@@ -365,6 +365,8 @@ fn the_observer_s_dagq_writes_its_findings_through_the_service() {
         &id,
         "--question",
         "slots idle",
+        "--recommend",
+        "propose",
     ]));
     assert_eq!(asked["kind"], "blocked", "{asked}");
     assert_eq!(asked["asked_by"], "observer", "{asked}");

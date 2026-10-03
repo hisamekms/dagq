@@ -4,8 +4,8 @@ type: design
 title: "`stats`"
 status: current
 created: 2026-09-26
-updated: 2026-10-03 # task 1392: an applied send_back that reached an ask is not counted
-last_verified: 2026-10-03 # task 1392
+updated: 2026-10-03 # task 1319: the observer's findings without an ask next to the blocked asks
+last_verified: 2026-10-03 # task 1319
 scope: runtime
 related:
   - adr-t639-1
@@ -344,10 +344,11 @@ goal 73（task 1066、スループットの見直しはtask 1173）。**`jobs`**
 
 [ADR-t451-1](../../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)の決定1（task 1318で実装。`domain::stats::recommendations`）。askの欄と表示は[ask](ask.md#aiの推奨と確信度未実装)。`asks`と同じwindowと`--goal`の絞り込みで数え、askの推奨はwindowより前の`ask_opened`からも読む。新しい表もeventも持たない。
 
-- `recommendations`: `{by_kind, decided_without_ask}`。
+- `recommendations`: `{by_kind, decided_without_ask, observer}`。
 - **`by_kind`**: askのkindごとに`{answered, matched, rate}`。`answered`はwindowの中の`ask_answered`のうち、そのaskの`ask_opened`が`recommendation`を持つものの数。runtimeが自分で書いた答え（`answered_by: runtime`か`runtime_closed`）は誰の選択でもないので除く。`matched`はそのうち答えが選んだoptionが推奨と（前後の空白を除いて）一致した数。選んだoptionは`ask_answered`の`option`（選択肢との完全一致）で、それが無い`approve_plan`と`approve_landing`の答えでは`reasoned_option`（`<option>: <理由>`の形の答えの`:`の前。`send_back: split it`なら`send_back`。[ask](ask.md)）を読む（task 1389）。ほかのkindの自由文の答えは`<推奨>: 理由`の形でも一致に数えない。`rate`は`matched ÷ answered`（小数3桁）。推奨を持つ答えが無いkindは出さない。
-- **`decided_without_ask`**: AIが自分で決めてaskにしなかった判断の、それが代わったaskのkindごとの件数。数える記録の一覧は`DECIDED_WITHOUT_ASK`（eventのkind、askのkind、payloadの条件）が持つ。今は`follow_up_adopted`のうち`by: planner`で`ask_id`がnull（runtimeのplannerが`planner_question`を経ずに採用したfollow_up）を`planner_question`に、plan reviewの`plan_concern_decided`のうち`applied: true`（runtimeが`concern`の推奨を適用したもの。[Plan review](plan-review.md#aiが決めるconcern未実装)）を`approve_plan`に、reviewの`concern_decided`のうち`applied: true`（jobの推奨を適用したconcern。[Review](review.md#aiが決めるconcern未実装)）を`approve_landing`に数える。ただし適用した`send_back`をsessionが直さずに結局`approve_landing`のaskになったもの（同じrunで同じreviewの`attempt`の`concern_send_back_escalated`があるもの。`DECIDED_WITHOUT_ASK`の`escalated_by`）は人に届いた判断なので数えない（task 1392）。この照合はwindowに依らず渡されたeventの全体で行うので、windowの後でaskに至った`send_back`も数えない。適用した`land`とaskに至らなかった`send_back`は今までどおり数える。observerのaskの無いfinding（`blocked`）は、その実装task（1319）がこの一覧に足す。記録の無いkindは出さない。
-- `src/domain/stats/recommendations.rs`のunit testが一致の数え方（`send_back: <理由>`の答えを含む）・windowより前のask・runtimeの答えの除外・`decided_without_ask`の条件（askに至った`send_back`の除外を含む）を、`tests/it/cli_dialogue.rs`の`a_recommendation_reaches_the_ask_status_and_stats`がCLIの`ask --recommend`から`stats`までを、`a_send_back_with_a_reason_matches_the_recommendation_in_stats`が`send_back: <理由>`の答えから`ask_answered`の`reasoned_option`を経て`stats`までを確かめる。
+- **`decided_without_ask`**: AIが自分で決めてaskにしなかった判断の、それが代わったaskのkindごとの件数。数える記録の一覧は`DECIDED_WITHOUT_ASK`（eventのkind、askのkind、payloadの条件）が持つ。今は`follow_up_adopted`のうち`by: planner`で`ask_id`がnull（runtimeのplannerが`planner_question`を経ずに採用したfollow_up）を`planner_question`に、plan reviewの`plan_concern_decided`のうち`applied: true`（runtimeが`concern`の推奨を適用したもの。[Plan review](plan-review.md#aiが決めるconcern未実装)）を`approve_plan`に、reviewの`concern_decided`のうち`applied: true`（jobの推奨を適用したconcern。[Review](review.md#aiが決めるconcern未実装)）を`approve_landing`に数える。ただし適用した`send_back`をsessionが直さずに結局`approve_landing`のaskになったもの（同じrunで同じreviewの`attempt`の`concern_send_back_escalated`があるもの。`DECIDED_WITHOUT_ASK`の`escalated_by`）は人に届いた判断なので数えない（task 1392）。この照合はwindowに依らず渡されたeventの全体で行うので、windowの後でaskに至った`send_back`も数えない。適用した`land`とaskに至らなかった`send_back`は今までどおり数える。observerの`observe_finished`の`findings_without_ask`（askにせずfindingだけにした件数。[Observer](observer.md#人が要る見立てだけをblockedにする未実装)）を`blocked`に足す（1件のeventが件数ぶん数える。`DECIDED_WITHOUT_ASK`の`decisions`。件数の無い古い`observe_finished`は0）。記録の無いkindは出さない。
+- **`observer`**: `{findings_without_ask, blocked_asks}`。windowのobservationがaskにせずfindingだけにした件数（`findings_without_ask`の合計）と、windowに開いた`blocked`のask（`ask_opened`）の件数を並べる（ADR-t451-1決定2、task 1319）。observationはtaskの無いeventなので、`--goal`で絞ると`findings_without_ask`は0になり、`blocked_asks`はgoalのtaskに紐づくaskだけを数える（taskの無い`blocked`のaskは数えない）ので、goalで絞った2つは比べられない。
+- `src/domain/stats/recommendations.rs`のunit testが一致の数え方（`send_back: <理由>`の答えを含む）・windowより前のask・runtimeの答えの除外・`decided_without_ask`の条件（askに至った`send_back`の除外を含む）と`observer`の件数（`the_observers_findings_without_an_ask_stand_next_to_the_blocked_asks`）を、`tests/it/cli_dialogue.rs`の`a_recommendation_reaches_the_ask_status_and_stats`がCLIの`ask --recommend`から`stats`までを、`a_send_back_with_a_reason_matches_the_recommendation_in_stats`が`send_back: <理由>`の答えから`ask_answered`の`reasoned_option`を経て`stats`までを確かめる。
 
 ## KPIからの読み口
 

@@ -1022,7 +1022,8 @@ enum Command {
         topics: Vec<String>,
         /// The option you recommend (ADR-t451-1 decision 1): one of the ask's --option texts (or
         /// `propose` / `dismiss`, which the runtime adds to a blocked ask about a finding).
-        /// Optional on every kind; the inbox shows it to the person next to the options.
+        /// Required on a blocked ask (ADR-t451-1 decision 2), optional on every other kind; the
+        /// inbox shows it to the person next to the options.
         #[arg(long = "recommend")]
         recommend: Option<String>,
         /// How sure you are of the judgement behind the ask: high or low (ADR-t451-1 decision 1).

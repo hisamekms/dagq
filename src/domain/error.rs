@@ -215,6 +215,9 @@ pub enum DomainError {
         recommendation: String,
         options: Vec<String>,
     },
+    /// A `blocked` ask without a recommendation (ADR-t451-1 decision 2):
+    /// the observer raises only what needs a person, with its reading.
+    BlockedAskWithoutRecommendation,
     /// An ask of `kind` names neither a task nor a run; only `blocked` may.
     AskWithoutTarget {
         kind: AskKind,
@@ -542,6 +545,12 @@ impl fmt::Display for DomainError {
                         .collect::<Vec<_>>()
                         .join(", ")
                 }
+            ),
+            Self::BlockedAskWithoutRecommendation => f.write_str(
+                "a blocked ask needs --recommend (ADR-t451-1 decision 2): raise a finding to a person only when your reading needs one \
+                 (--because scope or discard, or recovery_failed for what the runtime and the recovery job cannot do), \
+                 and recommend one of its options with --confidence; a stall that waiting clears or that is best left alone is no ask: \
+                 write that reading in its finding's --detail instead",
             ),
             Self::AskFindingNotBlocked { kind } => write!(
                 f,

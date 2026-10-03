@@ -4,8 +4,8 @@ type: design
 title: "`ask` / `answer` / `asks`"
 status: current
 created: 2026-09-26
-updated: 2026-10-03 # task 1323: run dir の ask-requests の経路を撤去
-last_verified: 2026-10-03 # task 1323
+updated: 2026-10-03 # task 1319: blocked needs --recommend; the observer's findings without an ask (after task 1323)
+last_verified: 2026-10-03 # task 1319
 scope: runtime
 related:
   - adr-t451-1
@@ -55,7 +55,7 @@ related:
 [ADR-t451-1](../../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)の決定1（task 1318で欄・CLI・表示・集計を実装）。AIが作るask（`planner_question`・`blocked`・`approve_landing`・`approve_plan`）に推奨と確信度を載せる。それぞれのaskに推奨を載せるのはreview・plan review・observer・plannerの実装task（1316・1317・1319・1320）が行い、この節の欄と集計を使う。
 
 - **欄**: askの行の`recommendation`（推奨のoptionの文）と`confidence`（`high` / `low`）。schema v59（`0059_ask_recommendation.sql`、compatible）で足し、無いaskと既存のaskは両方NULL。`domain::AskConfidence`が値を持ち、行を読むときは知らない値をnullとして読む。
-- **CLI**: `dagq ask ... [--recommend <option>] [--confidence <high|low>]`。どちらも全kindで任意で（`worker_question`にも求めない。`blocked`での必須化はtask 1319）、片方だけでもよい。`--recommend`は前後の空白を除いて比べ、空なら無しとして扱い、askのoptions（`--option`と、findingの`blocked`と`stalled`にruntimeが足す`propose` / `dismiss`。`NewAsk::offered_options`）のどれでもなければ`NewAsk::validate`が理由（推奨とoptionsの一覧）つきで拒む。queue serviceのクライアントモードの`ask`と、queue serviceより前のCodexのturnのrun dirの要求も同じ欄を運ぶ。同じ（task、run、kind、finding）のopenなaskを返すとき（`created: false`）は、既存のaskの推奨を書き換えない。
+- **CLI**: `dagq ask ... [--recommend <option>] [--confidence <high|low>]`。`blocked`では`--recommend`が必須で（下）、ほかのkindではどちらも任意で（`worker_question`にも求めない）、片方だけでもよい。`--recommend`は前後の空白を除いて比べ、空なら無しとして扱い、askのoptions（`--option`と、findingの`blocked`と`stalled`にruntimeが足す`propose` / `dismiss`。`NewAsk::offered_options`）のどれでもなければ`NewAsk::validate`が理由（推奨とoptionsの一覧）つきで拒む。queue serviceのクライアントモードの`ask`も同じ欄を運ぶ。同じ（task、run、kind、finding）のopenなaskを返すとき（`created: false`）は、既存のaskの推奨を書き換えない。`blocked`のaskは`--recommend`が無い（空白だけを含む）と、`Dialogue::ask`（CLIとqueue serviceの`ask`が通る）が`NewAsk::check_asker`で理由（`a blocked ask needs --recommend (ADR-t451-1 decision 2)`と、人が要る見立てだけをaskにし、待てば解ける・leave itの見立てはfindingの`--detail`に書くこと）つきで拒み、askを書かない（拒否は権限の判定の後で、`authorization_denied`には記録しない）。推奨がleave it / waitに当たるかはCLIでは判定しない（[Observer](observer.md#人が要る見立てだけをblockedにする未実装)のpromptの規則。ADR-t451-1決定2）。
 - **表示**: `ask_opened`のpayloadと、`Ask`（`ask`・`asks`・`show`の`asks`の出力）、`status`の`asks`と`watch`の`ask_opened`の行に`recommendation`と`confidence`を載せる（無ければnull）。inboxは人にaskを見せるとき、推奨と確信度があれば尋ねたAIのものとして添え、自分の推奨は足さない（`dagq-inbox` skill）。
-- **AIが決めたものの記録**: AIが推奨を適用してaskを作らなかった判断は、kindごとの記録に残す。今数えるのはruntimeのplannerが`planner_question`を経ずに採用したfollow_up（`follow_up_adopted`の`by: planner`で`ask_id`がnull。[Draft planners](draft-planners.md)）、runtimeが適用したplan reviewの`concern`（[Plan review](plan-review.md#aiが決めるconcern未実装)の`plan_concern_decided`の`applied: true`）、[Review](review.md#aiが決めるconcern未実装)がjobの推奨を適用したconcern（`concern_decided`の`applied: true`を`approve_landing`に。適用した`send_back`をsessionが直さずに`approve_landing`のaskになったものは`concern_send_back_escalated`を記録して数えない。task 1392）。[Observer](observer.md#人が要る見立てだけをblockedにする未実装)のaskの無いfindingは、その実装taskが`domain::stats::recommendations::DECIDED_WITHOUT_ASK`に足す。
+- **AIが決めたものの記録**: AIが推奨を適用してaskを作らなかった判断は、kindごとの記録に残す。今数えるのはruntimeのplannerが`planner_question`を経ずに採用したfollow_up（`follow_up_adopted`の`by: planner`で`ask_id`がnull。[Draft planners](draft-planners.md)）、runtimeが適用したplan reviewの`concern`（[Plan review](plan-review.md#aiが決めるconcern未実装)の`plan_concern_decided`の`applied: true`）、[Review](review.md#aiが決めるconcern未実装)がjobの推奨を適用したconcern（`concern_decided`の`applied: true`を`approve_landing`に。適用した`send_back`をsessionが直さずに`approve_landing`のaskになったものは`concern_send_back_escalated`を記録して数えない。task 1392）。[Observer](observer.md#人が要る見立てだけをblockedにする未実装)がaskにせずfindingだけにした件数（`observe_finished`の`findings_without_ask`を`blocked`に。task 1319）。
 - **集計**: [Stats](stats.md#aiの推奨と確信度の集計)の`recommendations`。askのkindごとの「推奨を持つaskの答えのうち、answerが`recommendation`と一致した割合」と、AIが決めてaskにしなかった件数を並べる（ADR-t451-1のContextの数え方を、question・optionsの文でなく欄から再導出する）。

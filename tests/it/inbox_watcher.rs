@@ -73,6 +73,10 @@ fn open_ask(db: &Path) {
             "scope",
             "--question",
             "stuck?",
+            "--option",
+            "wait",
+            "--recommend",
+            "wait",
         ],
     );
 }

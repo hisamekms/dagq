@@ -151,8 +151,9 @@ q() { dagq "$@" > /dev/null; }
 q finding record --kind stall --task 1 --summary 'task 1 waits for a slot' --evidence 1
 q finding record --kind stall --task 1 --summary 'task 1 waits for a slot' --evidence 1 --evidence 2
 q finding record --kind capacity --queue --subject idle_slots --summary 'slots idle'
-q ask --kind blocked --because recovery_failed --finding 2 --question 'slots idle while task 1 is ready' --option 'leave it' --cmux /usr/bin/true
-q ask --kind blocked --because recovery_failed --finding 2 --question 'the same alert again' --cmux /usr/bin/true
+q ask --kind blocked --because recovery_failed --finding 2 --question 'slots idle while task 1 is ready' --option 'restart the supervisor' --recommend 'restart the supervisor' --confidence high --cmux /usr/bin/true
+q ask --kind blocked --because recovery_failed --finding 2 --question 'the same alert again' --recommend propose --cmux /usr/bin/true
+if q ask --kind blocked --because scope --finding 1 --question 'wait for a slot?' --option wait --cmux /usr/bin/true 2> blocked.err; then exit 8; fi
 if q ready 1 2> ready.err; then exit 3; fi
 if q ask --kind decide --because recovery_failed --task 1 --question 'decide?' --cmux /usr/bin/true 2> ask.err; then exit 4; fi
 if q goal ready 1 2> goal.err; then exit 5; fi
@@ -174,6 +175,10 @@ echo 'observer diagnostic' >&2
         ),
         (&json!(2), &json!(1), &json!(1))
     );
+    // The stall's reading stayed on its finding: a finding without an ask
+    // (ADR-t451-1 decision 2); the capacity finding has its blocked ask.
+    assert_eq!(first["findings_without_ask"], 1, "{first}");
+    assert_eq!(first["without_ask_finding_ids"], json!([1]), "{first}");
     assert_eq!(first["since"], Value::Null);
     let cursor = first["cursor"].as_i64().unwrap();
     assert!(cursor >= 0);
@@ -206,6 +211,13 @@ echo 'observer diagnostic' >&2
             serde_json::from_str(&fs::read_to_string(dir.join(denied)).unwrap()).unwrap();
         assert_eq!(error["queue_service"]["code"], code, "{denied}: {error}");
     }
+    // A blocked ask without --recommend is refused with the reason, not
+    // as a denial.
+    let blocked = fs::read_to_string(dir.join("blocked.err")).unwrap();
+    assert!(
+        blocked.contains("a blocked ask needs --recommend"),
+        "{blocked}"
+    );
     let refusals = queue_events(&db, "authorization_denied");
     assert_eq!(refusals.len(), 2, "{refusals:?}");
     assert!(
@@ -238,6 +250,10 @@ echo 'observer diagnostic' >&2
     assert_eq!(asks[0].task_id, None);
     assert_eq!(asks[0].asked_by, "observer");
     assert_eq!(asks[0].finding_id, Some(dagq::domain::FindingId::new(2)));
+    assert_eq!(
+        asks[0].recommendation.as_deref(),
+        Some("restart the supervisor")
+    );
     let findings = queue
         .findings(&dagq::domain::FindingQuery::default())
         .unwrap();

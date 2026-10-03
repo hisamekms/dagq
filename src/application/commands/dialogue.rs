@@ -68,6 +68,8 @@ impl<'a, S: DialogueStore> Dialogue<'a, S> {
     /// `ask`: a `blocked` ask on a finding raises that finding
     /// ([`Capability::FindingAsk`], the observer's); any other opens an ask
     /// of its kind on the run or task it names. `asked_by` is the actor's.
+    /// A `blocked` ask without a recommendation is refused
+    /// ([`NewAsk::check_asker`], ADR-t451-1 decision 2).
     pub fn ask(&mut self, mut ask: NewAsk) -> Result<Value> {
         let (capability, resource) = match ask.finding_id {
             Some(finding) if ask.kind == AskKind::Blocked => {
@@ -83,6 +85,7 @@ impl<'a, S: DialogueStore> Dialogue<'a, S> {
             ),
         };
         self.gate.authorize(&*self.store, capability, &resource)?;
+        ask.check_asker()?;
         ask.asked_by = self.gate.actor.written_by().to_owned();
         self.store.open_ask(ask)
     }
@@ -348,6 +351,7 @@ mod tests {
             ("ask blocked --finding", |d| {
                 let mut ask = new_ask(AskKind::Blocked, None, None);
                 ask.finding_id = Some(FindingId::new(1));
+                ask.recommendation = Some("propose".into());
                 d.ask(ask).map(drop)
             }),
             ("answer", |d| d.answer(ASK, "yes").map(drop)),
@@ -571,6 +575,35 @@ mod tests {
             let denied = store.denials.into_inner();
             assert_eq!(denied[0]["resource"]["kind"], "new_ask");
         }
+    }
+
+    /// ADR-t451-1 decision 2: the observer's blocked ask carries its
+    /// reading as the recommendation, or it reaches no store.
+    #[test]
+    fn a_blocked_ask_without_a_recommendation_is_refused_before_the_store() {
+        let observer = ActorContext::instance(ActorRole::Observer, 1);
+        for recommendation in [None, Some("  ")] {
+            let mut ask = new_ask(AskKind::Blocked, None, None);
+            ask.finding_id = Some(FindingId::new(1));
+            ask.recommendation = recommendation.map(str::to_owned);
+            let mut store = Store::default();
+            let error = Dialogue::new(&mut store, &observer, &StaticPolicy)
+                .ask(ask)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.starts_with("a blocked ask needs --recommend (ADR-t451-1 decision 2)"),
+                "{error}"
+            );
+            assert!(error.contains("finding's --detail"), "{error}");
+            assert!(store.writer.is_none(), "reached the store");
+        }
+        // Another kind still opens without one.
+        let mut store = Store::default();
+        let error = Dialogue::new(&mut store, &ActorContext::user(), &StaticPolicy)
+            .ask(new_ask(AskKind::Decide, None, Some(1)))
+            .unwrap_err();
+        assert!(error.to_string().starts_with("store: "), "{error:#}");
     }
 
     #[test]

@@ -339,6 +339,8 @@ impl SqliteQueue {
     /// and `finding_status_changed` to `resolved` or `dismissed`, after
     /// `event_id`, each id once, oldest first) and of its asks after
     /// `ask_id`. A reopening by a record (`to: open`) is not a close.
+    /// `without_ask` is the recorded and updated ones it did not close
+    /// with no `blocked` ask opened after `ask_id` or open now.
     pub fn written_by(&self, role: &str, event_id: EventId, ask_id: AskId) -> Result<WrittenBy> {
         let findings = |kind: &str, to: &[&str]| -> Result<Vec<i64>> {
             Ok(self
@@ -361,7 +363,7 @@ impl SqliteQueue {
                 )?
                 .collect::<rusqlite::Result<_>>()?)
         };
-        Ok(WrittenBy {
+        let mut written = WrittenBy {
             recorded: findings(event_kind::FINDING_RECORDED, &[])?,
             updated: findings(event_kind::FINDING_UPDATED, &[])?,
             closed: findings(
@@ -376,7 +378,25 @@ impl SqliteQueue {
                 .prepare("SELECT id FROM asks WHERE id>?2 AND asked_by=?1 ORDER BY id")?
                 .query_map(params![role, ask_id], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?,
-        })
+            without_ask: Vec::new(),
+        };
+        let mut asked = self.conn.prepare(
+            "SELECT EXISTS(SELECT 1 FROM asks WHERE kind=?1 AND finding_id=?2
+               AND (id>?3 OR (answered_at IS NULL AND closed_at IS NULL)))",
+        )?;
+        for &finding in written.recorded.iter().chain(&written.updated) {
+            if written.without_ask.contains(&finding) || written.closed.contains(&finding) {
+                continue;
+            }
+            if !asked.query_row(
+                params![crate::domain::AskKind::Blocked.as_str(), finding, ask_id],
+                |r| r.get::<_, bool>(0),
+            )? {
+                written.without_ask.push(finding);
+            }
+        }
+        drop(asked);
+        Ok(written)
     }
 
     /// The last observation of `mode` that ran its agent: the id and the

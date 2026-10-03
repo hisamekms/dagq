@@ -262,11 +262,12 @@ pub fn observe(
             .ok()
     });
     let written = queue.written_by(OBSERVER_ROLE, event_mark, ask_mark)?;
-    let (recorded, updated, closed, asks) = (
+    let (recorded, updated, closed, asks, without_ask) = (
         written.recorded.len(),
         written.updated.len(),
         written.closed.len(),
         written.asks.len(),
+        written.without_ask.len(),
     );
     let saved = outcome == "succeeded" && options.mode == ObserveMode::Hourly;
     if saved {
@@ -284,10 +285,12 @@ pub fn observe(
         "findings_updated": updated,
         "findings_closed": closed,
         "asks": asks,
+        "findings_without_ask": without_ask,
         "recorded_finding_ids": written.recorded,
         "updated_finding_ids": written.updated,
         "closed_finding_ids": written.closed,
         "ask_ids": written.asks,
+        "without_ask_finding_ids": written.without_ask,
         "duration_secs": clock.elapsed().as_secs(),
         "dir": dir,
         "wall": wall.map(Wall::as_str),
@@ -304,6 +307,7 @@ pub fn observe(
         findings_updated = updated,
         findings_closed = closed,
         asks,
+        findings_without_ask = without_ask,
         "observer ({}) finished: {outcome}",
         options.mode.as_str()
     );
@@ -444,10 +448,12 @@ fn skip(
         "findings_updated": 0,
         "findings_closed": 0,
         "asks": 0,
+        "findings_without_ask": 0,
         "recorded_finding_ids": [],
         "updated_finding_ids": [],
         "closed_finding_ids": [],
         "ask_ids": [],
+        "without_ask_finding_ids": [],
         "duration_secs": 0,
         "dir": null,
         "alerts": alerts,
@@ -499,6 +505,7 @@ fn history_entry(finished: &RunEvent, started: Option<&RunEvent>) -> Value {
             "closed_ids": field("closed_finding_ids"),
         },
         "asks": {"count": field("asks"), "ids": field("ask_ids")},
+        "without_ask": {"count": field("findings_without_ask"), "ids": field("without_ask_finding_ids")},
         "exit_code": field("exit_code"),
         "error": field("error"),
         "dir": field("dir"),
@@ -676,7 +683,15 @@ pub fn observer_prompt(
            Recording the same kind, target and subject again updates the existing finding: only new evidence adds an occurrence, so record a finding below again only when there are events it does not hold yet or your reading of it changed.\n\
          - When a finding recurs or weighs enough that a planned change should remedy it (a refactoring of a file that keeps conflicting, a threshold to revisit), add `--propose '<why>'` to its record. A planner the runtime opens makes the proposal; you do not write goals or tasks.\n\
          - When the problem no longer occurs, resolve its finding with the evidence in the reason: `{dagq} finding resolve ID --reason '...'`.\n\
-         - Raise what needs a person now (an alert past its threshold that waiting does not clear) to the inbox as a blocked ask on its finding: `{dagq} ask --kind blocked --because <scope|discard|recovery_failed> --finding ID --question '...' --option '...' [--task ID | --run ID]`, with your reading of it and the next moves a person can choose as options. \
+         - Read each problem to a recommendation: what should happen next, and whether a person must do it. \
+           When your reading is that waiting clears it or that it is best left alone (leave it, wait), open no ask: record or update its finding only, with that reading in its `--detail`. \
+           People read those findings with `{dagq} findings`, not in the inbox.\n\
+         - Raise a finding to the inbox as a blocked ask only when your reading needs a person: a person's decision (`--because scope`: the acceptance, the scope, an ADR or a goal's decision; `--because discard`: whether to throw work away), \
+           or something a person must do by hand that the runtime and the recovery job cannot (`--because recovery_failed`). \
+           Authentication and cost are no blocked ask: the queue's hold ask has them. \
+           Write the next moves a person can choose as options, and your reading as the recommended option with how sure you are: \
+           `{dagq} ask --kind blocked --because <scope|discard|recovery_failed> --finding ID --question '...' --option '...' --recommend '<one of the options, or propose / dismiss>' --confidence <high|low> [--task ID | --run ID]` \
+           (the queue refuses a blocked ask without `--recommend`). \
            One ask per finding stays open: do not ask again when an open ask below already covers it.\n\
          - Read more when needed: `{dagq} findings [ID] [--full]`, `{dagq} stats`, `{dagq} kpi`, `{dagq} marks`, `{dagq} notes`, `{dagq} show ID`, `{dagq} asks`, `{dagq} graph`, `{dagq} forecast`, `{dagq} goal show ID`.\n\
          - Read the record, not prose, for the evidence: `{dagq} events --full` gives each event with its run_id and whole payload, narrowed by `--run ID`, `--task ID`, `--goal ID`, `--kind KIND` (repeatable), `--since TIME` and `--until TIME` (UTC, YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ); \
@@ -733,7 +748,7 @@ pub fn observer_prompt(
          - Write notes, goals or tasks, resolve individual stalls, answer asks, dismiss findings, or change the state of runs, tasks or goals (ready, cancel, integrate, recover, goal ready/close); the queue refuses those from your environment.\n\
          - Edit files or run anything but the queue commands above.\n\
          \n\
-         When you are done, print one line saying how many findings you recorded or updated and how many asks you wrote.\n\
+         When you are done, print one line saying how many findings you recorded or updated, how many of them you left as findings without an ask, and how many asks you wrote.\n\
          \n\
          Inputs (JSON: stats, the KPIs, the open and proposed findings, the improvements running, the latest {PROMPT_NOTES} notes, the open asks, and the graph's candidates and critical chain):\n\
          ```json\n{}\n```\n",
@@ -859,6 +874,30 @@ mod tests {
         ] {
             assert!(prompt.contains(text), "the prompt lacks {text:?}");
         }
+    }
+
+    /// ADR-t451-1 decision 2: a wait or leave-it reading stays on the
+    /// finding; a blocked ask only for a person's decision or hands, with
+    /// the reading as its recommendation and confidence.
+    #[test]
+    fn prompt_keeps_a_wait_or_leave_it_reading_to_the_finding() {
+        let prompt =
+            observer_prompt(ObserveMode::Hourly, "dagq", None, &json!({"stats": {}})).unwrap();
+        for text in [
+            "When your reading is that waiting clears it or that it is best left alone (leave it, wait), open no ask: record or update its finding only, with that reading in its `--detail`.",
+            "Raise a finding to the inbox as a blocked ask only when your reading needs a person",
+            "`--because scope`",
+            "`--because discard`",
+            "the runtime and the recovery job cannot (`--because recovery_failed`)",
+            "Authentication and cost are no blocked ask",
+            "--recommend '<one of the options, or propose / dismiss>' --confidence <high|low>",
+            "the queue refuses a blocked ask without `--recommend`",
+            "One ask per finding stays open",
+            "how many of them you left as findings without an ask",
+        ] {
+            assert!(prompt.contains(text), "the prompt lacks {text:?}");
+        }
+        assert!(!prompt.contains("that waiting does not clear) to the inbox"));
     }
 
     #[test]

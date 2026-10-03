@@ -25,6 +25,20 @@ pub struct Recommendations {
     /// Per ask kind, the judgements of the window an AI made itself
     /// instead of opening that kind of ask.
     pub decided_without_ask: BTreeMap<String, i64>,
+    /// The observer's findings of the window kept to the finding next to
+    /// the `blocked` asks opened (ADR-t451-1 decision 2).
+    pub observer: ObserverReadings,
+}
+
+/// What the observations of a window did with the findings they wrote
+/// (ADR-t451-1 decision 2): left as findings only, their reading being
+/// to wait or leave it, or raised to a person as `blocked` asks.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ObserverReadings {
+    /// The sum of `observe_finished`'s `findings_without_ask`.
+    pub findings_without_ask: i64,
+    /// The `blocked` asks opened (`ask_opened`).
+    pub blocked_asks: i64,
 }
 
 /// The answered asks of one kind that carried a recommendation.
@@ -43,16 +57,18 @@ pub struct DecidedWithoutAsk {
     pub event: &'static str,
     pub ask_kind: &'static str,
     pub applies: fn(&Value) -> bool,
+    /// How many decisions one such event records.
+    pub decisions: fn(&Value) -> i64,
     /// The event that records a decision of `event` going to a person
     /// after all, matched by the run and the payload's `attempt`: a
     /// decision it names is not counted, wherever it falls.
     pub escalated_by: Option<&'static str>,
 }
 
-/// The records of the AI's own decisions, per ask kind. The later
-/// implementations of ADR-t451-1 add theirs here (the review's
-/// `concern_decided`, the plan review's `plan_concern_decided`, the
-/// observer's findings without an ask).
+/// The records of the AI's own decisions, per ask kind (ADR-t451-1): a
+/// runtime planner's follow_up adoption, the review's `concern_decided`,
+/// the plan review's `plan_concern_decided` and the observer's findings
+/// without an ask.
 pub const DECIDED_WITHOUT_ASK: &[DecidedWithoutAsk] = &[
     DecidedWithoutAsk {
         // A follow_up draft a planner of the runtime's adopted on its own,
@@ -60,6 +76,7 @@ pub const DECIDED_WITHOUT_ASK: &[DecidedWithoutAsk] = &[
         event: "follow_up_adopted",
         ask_kind: "planner_question",
         applies: |payload| payload["by"].as_str() == Some("planner") && payload["ask_id"].is_null(),
+        decisions: one,
         escalated_by: None,
     },
     DecidedWithoutAsk {
@@ -69,6 +86,7 @@ pub const DECIDED_WITHOUT_ASK: &[DecidedWithoutAsk] = &[
         event: crate::domain::event_kind::PLAN_CONCERN_DECIDED,
         ask_kind: "approve_plan",
         applies: |payload| payload["applied"].as_bool() == Some(true),
+        decisions: one,
         escalated_by: None,
     },
     DecidedWithoutAsk {
@@ -80,9 +98,29 @@ pub const DECIDED_WITHOUT_ASK: &[DecidedWithoutAsk] = &[
         event: crate::domain::event_kind::CONCERN_DECIDED,
         ask_kind: "approve_landing",
         applies: |payload| payload["applied"].as_bool() == Some(true),
+        decisions: one,
         escalated_by: Some(crate::domain::event_kind::CONCERN_SEND_BACK_ESCALATED),
     },
+    DecidedWithoutAsk {
+        // The findings an observation recorded or updated and kept to the
+        // finding, its reading being to wait or leave it, instead of a
+        // blocked ask (ADR-t451-1 decision 2). An observation recorded
+        // before the count reads as none.
+        event: crate::domain::event_kind::OBSERVE_FINISHED,
+        ask_kind: "blocked",
+        applies: |payload| findings_without_ask(payload) > 0,
+        decisions: findings_without_ask,
+        escalated_by: None,
+    },
 ];
+
+fn one(_: &Value) -> i64 {
+    1
+}
+
+fn findings_without_ask(payload: &Value) -> i64 {
+    payload["findings_without_ask"].as_i64().unwrap_or(0)
+}
 
 /// Count the asks answered and the decisions recorded with `after < id <=
 /// upto` whose task `counts` accepts. The recommendation of an ask opened
@@ -114,6 +152,12 @@ pub fn recommendations(
         let payload = &event.payload;
         match event.kind.as_str() {
             "ask_opened" => {
+                if event.id > after
+                    && counts(event.task_id)
+                    && payload["kind"].as_str() == Some("blocked")
+                {
+                    stats.observer.blocked_asks += 1;
+                }
                 if let (Some(id), Some(option)) =
                     (ask_id(payload), payload["recommendation"].as_str())
                 {
@@ -150,10 +194,14 @@ pub fn recommendations(
                         })
                     })
                 {
+                    let decisions = (decided.decisions)(payload);
                     *stats
                         .decided_without_ask
                         .entry(decided.ask_kind.to_owned())
-                        .or_default() += 1;
+                        .or_default() += decisions;
+                    if decided.event == crate::domain::event_kind::OBSERVE_FINISHED {
+                        stats.observer.findings_without_ask += decisions;
+                    }
                 }
             }
             _ => {}
@@ -376,6 +424,54 @@ mod tests {
             stats.decided_without_ask,
             BTreeMap::from([("approve_landing".to_owned(), 2)])
         );
+    }
+
+    /// ADR-t451-1 decision 2: an observation's findings kept to the
+    /// finding count as blocked asks decided without one, next to the
+    /// blocked asks opened; a skipped or older observation adds none.
+    #[test]
+    fn the_observers_findings_without_an_ask_stand_next_to_the_blocked_asks() {
+        let finished = |id, payload: Value| RunEvent {
+            task_id: None,
+            ..event(id, "observe_finished", payload)
+        };
+        let events = vec![
+            finished(
+                1,
+                json!({"outcome": "succeeded", "findings_without_ask": 2}),
+            ),
+            finished(2, json!({"outcome": "skipped", "findings_without_ask": 0})),
+            finished(3, json!({"outcome": "succeeded"})),
+            RunEvent {
+                task_id: None,
+                ..opened(4, 20, "blocked", Some("propose"))
+            },
+            opened(5, 21, "decide", Some("retry")),
+            finished(
+                6,
+                json!({"outcome": "succeeded", "findings_without_ask": 1}),
+            ),
+        ];
+        let stats = recommendations(&events, EventId::new(0), EventId::new(6), |_| true);
+        assert_eq!(
+            stats.decided_without_ask,
+            BTreeMap::from([("blocked".to_owned(), 3)])
+        );
+        assert_eq!(
+            stats.observer,
+            ObserverReadings {
+                findings_without_ask: 3,
+                blocked_asks: 1
+            }
+        );
+        // Past the window's start only, and not under a goal's filter.
+        let later = recommendations(&events, EventId::new(4), EventId::new(6), |_| true);
+        assert_eq!(later.observer.findings_without_ask, 1);
+        assert_eq!(later.observer.blocked_asks, 0);
+        let goal = recommendations(&events, EventId::new(0), EventId::new(6), |task| {
+            task.is_some()
+        });
+        assert_eq!(goal.observer, ObserverReadings::default());
     }
 
     fn of_run(run: &str, mut event: RunEvent) -> RunEvent {

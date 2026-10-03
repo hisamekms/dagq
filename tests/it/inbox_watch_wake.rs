@@ -95,6 +95,10 @@ fn the_inbox_watch_sleeps_through_notices_and_brings_them_with_the_next_ask() {
             "scope",
             "--question",
             "stuck?",
+            "--option",
+            "wait",
+            "--recommend",
+            "wait",
         ],
     );
     let woken = watch(&db, &["--role", "inbox", "--after", &after]);
@@ -153,6 +157,10 @@ fn open_ask(db: &Path) {
             "scope",
             "--question",
             "stuck?",
+            "--option",
+            "wait",
+            "--recommend",
+            "wait",
         ],
     );
 }

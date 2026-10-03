@@ -3,7 +3,8 @@
 //! ADR-t728-3, task 733): a worker asks on its own run only, only the user
 //! and the inbox answer, the answer records whose authority it carries
 //! (the user's own or the inbox's delegated one) and whether it approves,
-//! and the observer still records findings and raises blocked asks.
+//! and the observer still records findings and raises blocked asks, each
+//! with its recommendation (ADR-t451-1 decision 2).
 
 use crate::common;
 
@@ -238,8 +239,34 @@ fn the_observer_still_records_findings_and_raises_blocked_asks() {
     );
     assert_eq!(finding["recorded_by"], "observer");
     let id = finding["id"].to_string();
-    let blocked = allowed_as(&observer, &db, &strs(&ask("blocked", &["--finding", &id])));
+    // A blocked ask carries the observer's reading as its recommendation
+    // (ADR-t451-1 decision 2): without one it is refused with the reason,
+    // and none is written.
+    let without = denied_as(&observer, &db, &strs(&ask("blocked", &["--finding", &id])));
+    let reason = without["error"].as_str().unwrap();
+    assert!(
+        reason.starts_with("a blocked ask needs --recommend (ADR-t451-1 decision 2)"),
+        "{without}"
+    );
+    assert!(reason.contains("finding's --detail"), "{without}");
+    assert!(events(&db, "ask_opened").is_empty());
+    let blocked = allowed_as(
+        &observer,
+        &db,
+        &strs(&ask(
+            "blocked",
+            &[
+                "--finding",
+                &id,
+                "--recommend",
+                "retry",
+                "--confidence",
+                "low",
+            ],
+        )),
+    );
     assert_eq!(blocked["asked_by"], "observer");
+    assert_eq!(blocked["recommendation"], "retry");
     assert_eq!(blocked["created"], true);
     allowed_as(
         &observer,
