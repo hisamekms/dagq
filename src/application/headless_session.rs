@@ -771,28 +771,37 @@ impl<'a> Turns<'a> {
         let start = pid
             .and_then(|pid| self.processes.start_identity(pid))
             .map(|start| crate::domain::background_wrapper::start_token(&start));
-        self.record(
-            EventKind::TurnStarted,
-            json!({
-                "turn": turn,
-                "resume": resume.is_some(),
-                "request": request.map(|r| r.seq),
-                "what": what,
-                "pid": pid,
-                // The process's start, which tells it from another that
-                // takes its pid: a background session's stop finds a turn
-                // its dead wrapper left by it (ADR-t1404-1 decision 3).
-                "start": start,
-                "provider": on.provider,
-                // An agent that names its own session names a new one in
-                // its output.
-                "session_id": resume
-                    .map(str::to_owned)
-                    .or_else(|| (!from_output).then(|| on.name.clone())),
-                "silence_secs": limits.silence_secs,
-                "limit_secs": limits.limit_secs,
-            }),
-        )?;
+        // A planner's turn names the model and effort its opener started
+        // it with, which its session span keeps (ADR-t1394-2 decision 4).
+        let launch = match &self.owner {
+            TurnOwner::Planner { .. } => self
+                .model()?
+                .map(|(model, effort)| json!({"model": model, "effort": effort})),
+            TurnOwner::Run(_) => None,
+        };
+        let mut payload = json!({
+            "turn": turn,
+            "resume": resume.is_some(),
+            "request": request.map(|r| r.seq),
+            "what": what,
+            "pid": pid,
+            // The process's start, which tells it from another that
+            // takes its pid: a background session's stop finds a turn
+            // its dead wrapper left by it (ADR-t1404-1 decision 3).
+            "start": start,
+            "provider": on.provider,
+            // An agent that names its own session names a new one in
+            // its output.
+            "session_id": resume
+                .map(str::to_owned)
+                .or_else(|| (!from_output).then(|| on.name.clone())),
+            "silence_secs": limits.silence_secs,
+            "limit_secs": limits.limit_secs,
+        });
+        if let Some(launch) = launch {
+            payload["launch"] = launch;
+        }
+        self.record(EventKind::TurnStarted, payload)?;
         say(&format!("turn {turn} started: {what}"));
         Ok(())
     }

@@ -4,8 +4,8 @@ type: design
 title: Agent provider lifecycle
 status: current
 created: 2026-09-21
-updated: 2026-10-03 # task 1399: dagq plan opens nothing (ADR-t1394-1)
-last_verified: 2026-10-03 # task 1399
+updated: 2026-10-03 # task 1398: a headless runtime planner's span from its turns
+last_verified: 2026-10-03 # task 1398
 scope: provider
 related:
   - adr-t1340-1
@@ -115,6 +115,7 @@ runtimeが起動するClaude sessionは、kindごとの区間（`session_opened`
 | `plan_review` | `plan_review_started`（proposalの最初のtaskのevent） | 同じ`plan_review_id`の`plan_review_finished` / `plan_review_failed`（`job_finished`） | `plan_review_started`の`session_id`（Codexのjobはnullで、閉じるときに終わりのeventの`session_id`＝threadのid。task 1218） |
 | `goal_review` | `goal_review_started`（goalのevent。区間はgoalの最初のtaskに書く） | 同じ`goal_review_id`の`goal_review_finished` / `goal_review_failed`（`job_finished`） | `goal_review_started`の`session_id`（Codexのjobはnullで、閉じるときに終わりのeventの`session_id`＝threadのid） |
 | `observer` | `observe_started`（taskの無いevent） | 同じ`dir`の`observe_finished`（`job_finished`） | `observe_started`の`session_id` |
+| `runtime_planner`（非対話。`route: headless`） | そのplannerの最初の`turn_started`（runの無いqueueのevent。区間はproposalの最初のtask、proposalの無いplannerはtaskの無いevent） | そのplannerの`planner_closed`（`code`が`runtime_lost` / `runtime_session_gone` / `abandoned`なら`inferred`、ほかは`exited`）、`planner_closed`の無いまま行が閉じたとき（`close_planner`。`inferred`） | `turn_started`の`session_id` |
 | `inbox` / `planner` / `runtime_planner` | pluginの`SessionStart` hook（`dagq session-event open`。taskの無いevent、`runtime_planner`はproposalの最初のtaskのevent） | `SessionEnd` hook（`exited` / `clear` / `logout`）、同じworkspaceの別のsession_idの`SessionStart`（`next_span`）、workspaceが消えたとき（`inferred`） | hookのstdinの`session_id` |
 
 - **推定で閉じる（`inferred`）**: runのsessionの区間（`worker` / `resume` / `revise`）は、`session_exited`の無いまま次の`agent_started`が来たとき、`workspace_closed`・`run_recovered`・`triage_started`で閉じる（`run_recovered`と`triage_started`は開いている`review`も閉じる）。`record_runtime_event`はeventと区間を1つの書き込みトランザクション（`BEGIN IMMEDIATE`）で書く。jobの区間は、終わりのeventの無いまま同じkindの次の開始（別のsupervisorが引き継いだreviewの`review_started`、triageの`triage_started`、次の`observe_started`）で閉じ、plan reviewは行を`interrupted`で閉じたとき（supervisorが居ない行は`inferred`、proposalが動いたときは`job_finished`）に、goal reviewも行を`interrupted`で閉じたとき（supervisorが居ない行は`inferred`、goalかtaskが変わったときは`job_finished`）に閉じる。時刻は、transcriptが読めればその最後のレコードの時刻（区間の開始と閉じたeventの時刻の間に収める）、読めなければ閉じたeventの時刻。
@@ -149,6 +150,8 @@ requested providerとactual providerと経路をTaskRunに保存する（下の[
 - **開いている間**: supervisorはループの各passで、前回から`SESSION_TURNS_INTERVAL`（10分）経っていれば、またobserverを起動する前に、`SessionRegistry::record_session_turns`で開いている全区間の完了したturn（次の入力が来たもの）を`session_turns`として区間と同じtask・runに書く。transcriptは書き込みのロックの外で読み、区間ごとに`BEGIN IMMEDIATE`の中で、まだ開いているかと記録済みのturnを確かめ直してから書く（同時に区間を閉じたwrapperと同じturnを二重に書かない）。進行中のturnは書かない。読めない・書けないときはtracingにだけ書き、次の回に読み直す。
 - **headlessのjob**: runtimeが`--session-id`を付けるので、reviewとtriageとplan reviewとobserverのtranscriptも同じ規則で読む。
 - **非対話のworker**（`route: headless`の区間。ADR-t813-2の決定7）: 稼働時間とトークン数はtranscriptではなくrunのturnから取る（下の[非対話のworkerの区間](#非対話のworkerの区間)）。`provider`がClaude以外の区間はClaude Codeのtranscriptを読まない（`read`が`transcript_not_claude`を返し、ファイルを探さない）。
+- **非対話のruntimeのplanner**（[ADR-t1394-2](../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)の決定4、task 1398）: pluginのhookは非対話のplannerに走らないので、区間はそのplannerのturn（`planner_id`を持つqueueの`turn_started` / `turn_finished`）から記録する（`domain::sessions::changes`の`turn_started` / `planner_closed`、`Scope::Planner`）。`session_opened`は`kind: runtime_planner`・`route: headless`・`planner_id`・`session_id`・`provider`・`cwd: null`と、wrapperが`turn_started`に書いた起動の`launch`（`{model, effort}`）、proposalがあれば`proposal_id`・`goal_ids`。稼働時間・token・`session_turns`は[非対話のworkerの区間](#非対話のworkerの区間)と同じくturnから取る（`infrastructure::sessions`の`TurnEvents::Planner`）。worktreeが無くtranscriptを探さないので、`model`は`turn_finished`の`model`の最も多いもの、`effort`は`launch.effort`（無ければ`unknown`）。turnの`claude -p`がpluginのhookを走らせても、`record_hook`はplannerの行の`route`が`headless`なら何も書かず（`skipped: headless_planner`）、hookの開いている区間（`open_hook_spans`）は`route: headless`の区間を含まないので、hookが2つ目の区間を開くこともturnごとに区間を閉じることも無い。
+
 ### 作業の内訳
 
 runのsessionの区間（`worker` / `resume` / `revise`）は、閉じるときに稼働時間と同じtranscriptから作業の内訳を記録する（task 514）。分類の規則は`domain::worktime`（純粋関数。spikeの`worktime.py`を移した）、transcriptの読み取りは上と同じ`domain::transcript`（`TranscriptRecord`の`tool_uses`・`tool_results`・`notification`）。hook（PreToolUse / PostToolUse）は使わない（backgroundのコマンドの終わりが取れないため）。
@@ -162,7 +165,7 @@ runのsessionの区間（`worker` / `resume` / `revise`）は、閉じるとき�
 
 ### トークン数とコスト
 
-どのkindの区間も、閉じるときに稼働時間と同じtranscriptから、区間で使ったトークン数を記録する（task 199）。runのsession（`worker` / `resume` / `revise`）もheadlessのjob（`review` / `triage` / `plan_review` / `goal_review` / `observer`）も同じ規則で読むので、jobの出力形式（`-p`の出力）は変えず、出力の読み取りにも手を入れない。集計の規則は`domain::tokens`（純粋関数）、transcriptの読み取りは上と同じ`domain::transcript`（`TranscriptRecord`の`usage`・`message_id`・`cost_usd`）だけが知る。
+どのkindの区間も、閉じるときに稼働時間と同じtranscriptから、区間で使ったトークン数を記録する（task 199。`route: headless`の区間（非対話のworkerと非対話のruntimeのplanner。task 1398）はtranscriptでなくturnの`turn_finished`の`tokens`から取る。下の[非対話のworkerの区間](#非対話のworkerの区間)）。runのsession（`worker` / `resume` / `revise`）もheadlessのjob（`review` / `triage` / `plan_review` / `goal_review` / `observer`）も同じ規則で読むので、jobの出力形式（`-p`の出力）は変えず、出力の読み取りにも手を入れない。集計の規則は`domain::tokens`（純粋関数）、transcriptの読み取りは上と同じ`domain::transcript`（`TranscriptRecord`の`usage`・`message_id`・`cost_usd`）だけが知る。
 
 - **数え方**: 区間の開始から終わりまで（`[開始, 終わり)`）の`assistant`のレコードの`message.usage`の`input_tokens`・`output_tokens`・`cache_read_input_tokens`・`cache_creation_input_tokens`を足す。Claude Codeは1つのmessageの内容のblockごとにレコードを書き、どれにも同じmessageの`usage`を載せるので、`message.id`が同じレコードは1つのmessageとして1回だけ数え、種類ごとにそのレコードの値の最大（最後のblockが最終の`output_tokens`を持つ）を取る。`message.id`の無いレコードはそれぞれ1つのmessageにする。sidechain（subagent）のレコードも数える。同じsession_idを続けるresumeとreviseは時刻で分かれるので、前の区間のmessageを取らない
 - **コスト**: Claude Codeがレコードに書いた`costUSD`がある版だけ、数えたmessageのすべてに`costUSD`があるときにその合計を記録する。単価表からは計算しない（2.1系のtranscriptは`costUSD`を書かないので、今は記録されない）
@@ -184,11 +187,11 @@ runのsessionの区間（`worker` / `resume` / `revise`）は、閉じるとき�
 
 ### modelとeffort
 
-どのkindの区間も、閉じるときにトークン数と同じtranscriptから、区間のmessageを書いたmodelとeffortを記録する（task 579、[ADR-0079](../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定7の(a)。worker以外のアクターの今の既定（medium）の基準値をためるため）。起動の引数は変えず、Claude Codeが応答ごとに書いた値を読むだけ。規則は`domain::tokens::span_models`（純粋関数）、読み取りは`domain::transcript`（`TranscriptRecord`の`model`・`effort`）。
+どのkindの区間も、閉じるときにトークン数と同じtranscriptから、区間のmessageを書いたmodelとeffortを記録する（非対話のruntimeのplannerの区間だけは例外で、transcriptを読まず、`model`はturnの`turn_finished`の`model`の最も多いもの（`domain::turn::turns_model`）、`effort`は`session_opened`の`launch.effort`（無ければ`unknown`）。どのturnも`model`を言わなければ`model`も`effort`も書かない。`models`は書かない。上の[Claude sessionの区間](#claude-sessionの区間)の「非対話のruntimeのplanner」、task 1398）（task 579、[ADR-0079](../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定7の(a)。worker以外のアクターの今の既定（medium）の基準値をためるため）。起動の引数は変えず、Claude Codeが応答ごとに書いた値を読むだけ。規則は`domain::tokens::span_models`（純粋関数）、読み取りは`domain::transcript`（`TranscriptRecord`の`model`・`effort`）。
 
 - **読むもの**: 区間（`[開始, 終わり)`、推定で閉じたときは最後のレコードを含む。トークン数と同じ範囲）の`assistant`のレコードの`message.model`と、レコードの`effort`（`low` / `medium` / `high` / `xhigh`など）。sidechain（subagent）のレコードと、`<synthetic>`（Claude Codeが自分で書いたmessage）は数えない。`message.id`が同じレコードは1つのmessageとして最初のものだけを数える
 - **eventのpayload**: `session_closed`の`model`と`effort`は、最も多くのmessageを書いた組（同数なら後に使った組）。区間の中で組が変わったら、組ごとの`{model, effort, messages}`を多い順に`models`に並べる（1組なら書かない）。`effort`を書かない版のtranscriptでは`effort`はnull
-- **対象**: `worker` / `resume` / `revise`と、headlessのjobの`review` / `triage` / `plan_review` / `goal_review` / `observer` / `throughput_review`（task 1086。区間の閉じ方は[スループットの見直し](supervisor-lifecycle/throughput-review.md#sessionの区間task-1086)）、hookが記録する`inbox` / `planner` / `runtime_planner`（task 387）。復旧（`recover`）のjobは区間を持たない
+- **対象**: `worker` / `resume` / `revise`と、headlessのjobの`review` / `triage` / `plan_review` / `goal_review` / `observer` / `throughput_review`（task 1086。区間の閉じ方は[スループットの見直し](supervisor-lifecycle/throughput-review.md#sessionの区間task-1086)）、hookが記録する`inbox` / `planner` / `runtime_planner`（task 387）、turnから記録する非対話の`runtime_planner`（上の例外のとおりtranscriptを読まない。task 1398）。復旧（`recover`）のjobは区間を持たない
 - **起動の意図**: worker以外のアクターのjobとplannerの区間の`session_opened`は、起動したmodel / effortと出どころ（`dagq.toml`の`[roles.<role>]`・既定・差し戻しの段上げ）の`launch`を持つ（task 580、[Actor model](supervisor-lifecycle/actor-model.md)）。既定（`source: default`）では何も渡していないので`model` / `effort`はnullで、実際の値はここで読む`session_closed`のもの
 - **読めないとき**: transcriptが読めない、またはどのmessageもmodelを持たなければ何も書かない。区間を閉じたevent・run・jobの結果は変わらず、区間は失敗にならない
 - 読み口: `stats`の`sessions.by_kind[kind].models`（[stats](supervisor-lifecycle/stats.md#claude-session)）と、plan reviewのsessionを判断したsessionとして並べる`kpi`の計画の品質（[kpi](supervisor-lifecycle/kpi.md#計画の品質)）

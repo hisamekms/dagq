@@ -167,8 +167,8 @@ active の割合が 0.09 と低いのは、閉じるのが遅れた少数の区�
 
 ```sh
 B=<TM − 7 日>..<TM>; A=<TM>..<TM + 7 日>
-# 区間と plan.* を経路で（task 1398 が kpi --by route を planner の区間にも効かせる。層の名前は実装に合わせる）
-dagq kpi --compare "$B,$A" --by route > kpi-route.json
+# 区間と plan.* を経路で（session_* の route=interactive / route=headless の層は --by によらず常に出る。task 1398）
+dagq kpi --compare "$B,$A" > kpi-route.json
 dagq kpi --compare M > kpi-mark.json                      # separable と overlapping、confounders を確かめる
 for k in session_open.runtime_planner session_active.runtime_planner session_active_ratio.runtime_planner \
          plan.revise_rate plan.task_rework_rate plan.follow_up_draft_secs plan.follow_up_adoption_rate \
@@ -176,15 +176,15 @@ for k in session_open.runtime_planner session_active.runtime_planner session_act
   jq -c --arg k "$k" '{k: $k, s: .compare.strata[$k]}' kpi-route.json
 done
 jq -c '.compare.confounders[] | select(.kind == "mark_recorded") | {at, label, position}' kpi-mark.json
-# 区間の経路ごとの値（task 1398 の後の stats。欄名は実装に合わせる）
-dagq stats --full --since <A の始まり> --until <A の終わり> | jq -c '.sessions.by_kind.runtime_planner'
+# 区間の経路ごとの値と planner の経路ごとの様子（task 1398 の stats）
+dagq stats --full --since <A の始まり> --until <A の終わり> | jq -c '{sessions: .sessions.by_route.runtime_planner, planners: .planner_routes}'
 ```
 
 `kpi` の自動更新の引き継ぎは着地ごとに起きるので、印での比較は重なった変更にまとまりうる（[headless-default-evaluation](headless-default-evaluation.md) の 3）。数字は時刻で明示した `"$B,$A"` を主にする。
 
 ### planner ごとの集計（1 の表の全ての値）
 
-上の event の集め方で後の窓の `ev.json` を作り、次を `planner.py` として保存して流す。経路は `session_opened` の `route`（ADR-t1394-2 決定 4 で区間が経路を持つ。欄名は task 1398 の実装に合わせて直す）で、無ければ対話に数える。非対話の planner の turn は `turn_finished` の `planner_id` で数える（[plan-planners](../design/supervisor-lifecycle/plan-planners.md) の予定の節。仮）。
+上の event の集め方で後の窓の `ev.json` を作り、次を `planner.py` として保存して流す。経路は `session_opened` の `route`（ADR-t1394-2 決定 4、task 1398。非対話の planner の区間は最初の turn が `route: headless` で開く）で、無ければ対話に数える。非対話の planner の turn は run の無い `turn_finished` の `planner_id` で数える（[plan-planners](../design/supervisor-lifecycle/plan-planners.md) の「runtimeのplannerの経路」の「区間」。同じ数え方を `stats` の `planner_routes` が持つ）。
 
 ```python
 # 使い方: python3 planner.py ev.json   （ev.json は窓の event の配列）
@@ -203,7 +203,7 @@ for e in ev:
     elif e['kind'] == 'finding_planner_opened': kind.setdefault(p['planner_id'], 'finding')
     elif e['kind'] == 'plan_revise_sent' and p.get('opened'): kind.setdefault(p['planner_id'], 'revise')
     if e['kind'] == 'session_opened' and p.get('kind') == 'runtime_planner':
-        route[p.get('planner_id')] = p.get('route') or 'interactive'   # 経路の欄名は task 1398 の実装に合わせる
+        route[p.get('planner_id')] = p.get('route') or 'interactive'   # 非対話は route: headless（task 1398）
 person = {P(e).get('planner_id') for e in ev if e['kind'] == 'session_opened' and P(e).get('kind') == 'planner'}
 print('planners', dict(C.Counter(kind.values())), 'person', len(person), 'route', dict(C.Counter(route.values())))
 # planner_question（開いた→答え。人の答え待ち）

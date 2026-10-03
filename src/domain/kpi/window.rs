@@ -58,6 +58,10 @@ pub struct WindowKpis {
     /// (task 1371); not a KPI.
     #[serde(skip)]
     pub routes: BTreeMap<String, crate::domain::stats::routes::RouteHealth>,
+    /// `stats`' `planner_routes` of the window, for the period's `health`
+    /// (ADR-t1394-2 decision 4); not a KPI.
+    #[serde(skip)]
+    pub planner_routes: BTreeMap<String, crate::domain::stats::planner_routes::PlannerRouteHealth>,
 }
 
 /// A run's hold on a slot: from its claim to its end, without the waits
@@ -811,12 +815,23 @@ impl<'a> Context<'a> {
         );
 
         // Sessions of the kinds no run is measured by one of (decision 1):
-        // their totals over the window.
-        for (kind, sessions) in &stats.sessions.by_kind {
-            if *kind != "worker" {
+        // their totals over the window, over all of them and per route
+        // (ADR-t1394-2 decision 4), so that the routes compare side by side.
+        let groups = stats
+            .sessions
+            .by_kind
+            .iter()
+            .map(|(kind, sessions)| (*kind, ALL.to_owned(), sessions))
+            .chain(stats.sessions.by_route.iter().flat_map(|(kind, routes)| {
+                routes
+                    .iter()
+                    .map(|(route, sessions)| (*kind, format!("route={route}"), sessions))
+            }));
+        for (kind, stratum, sessions) in groups {
+            if kind != "worker" {
                 put(
                     &format!("session_open.{kind}"),
-                    ALL,
+                    &stratum,
                     Measure::total(
                         Some(float(sessions.open.summary.total)),
                         sessions.open.summary.count,
@@ -824,7 +839,7 @@ impl<'a> Context<'a> {
                 );
                 put(
                     &format!("session_active.{kind}"),
-                    ALL,
+                    &stratum,
                     Measure::total(
                         (sessions.active.summary.count > 0)
                             .then(|| float(sessions.active.summary.total)),
@@ -834,7 +849,7 @@ impl<'a> Context<'a> {
             }
             put(
                 &format!("session_active_ratio.{kind}"),
-                ALL,
+                &stratum,
                 Measure::total(
                     sessions
                         .active_ratio
@@ -1084,6 +1099,7 @@ impl<'a> Context<'a> {
             details,
             unavailable,
             routes: stats.worker_routes.clone(),
+            planner_routes: stats.planner_routes.clone(),
         }
     }
 

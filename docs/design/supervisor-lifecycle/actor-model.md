@@ -113,7 +113,9 @@ route = "headless"   # 省けばinteractive（評価まで）
 - `dagq doctor`の`roles.runtime_planner`は`route`と`route_source`（`dagq.toml` / `default`）を持つ（`compose::doctor_roles`）。読めない`dagq.toml`では他の役割と同じく`error`を出し、経路は既定の`interactive`。
 - reviseで開き直すplannerの段上げは経路に依らず同じ。非対話の生きているplannerへの配送も新しく起動しないので上げない（`effort_not_raised`）。
 
-まだ実装していないもの（goal 87の後続task）: `launch`への`route`の記録、非対話のplannerの区間をturnから開いて閉じることと`stats` / `kpi`の経路ごとの集計（ADR-t1394-2決定4）、`[roles.planner]`が人のplannerの廃止の後に読まれないことの`doctor`への表示。
+非対話のplannerの区間はturnから開いて閉じ、`route: headless`を持ち、`stats` / `kpi`で経路ごとに読む（ADR-t1394-2決定4、task 1398。[`plan` / `planners`](plan-planners.md#runtimeのplannerの経路)、[provider-lifecycle](../provider-lifecycle.md#claude-sessionの区間)）。wrapperはplannerのturnの`turn_started`に起動の`model`と`effort`を`launch`として書き、区間はそれを持つ。
+
+まだ実装していないもの（goal 87の後続task）: `launch`への`route`の記録（経路は区間の`route`とplannerの行の`route`にある）、`[roles.planner]`が人のplannerの廃止の後に読まれないことの`doctor`への表示。
 
 ## テスト
 

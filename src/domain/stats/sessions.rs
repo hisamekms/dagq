@@ -14,9 +14,12 @@ use serde_json::Value;
 use super::{Summary, landing::p90, median, rfc3339_millis, timestamp_millis, tokens::TokenTotals};
 use crate::domain::{
     EventId, GoalId, RunEvent, RunId, TaskId,
-    sessions::{INFERRED, KINDS, SESSION_CLOSED, SESSION_OPENED, SESSION_TURNS},
+    sessions::{HOOK_KINDS, INFERRED, KINDS, SESSION_CLOSED, SESSION_OPENED, SESSION_TURNS},
     transcript::Turn,
 };
+
+/// The route of a session a person can type into.
+pub const INTERACTIVE: &str = "interactive";
 
 /// One span as its events recorded it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +49,13 @@ pub struct Span {
     /// The model and effort its messages mostly used, `model effort`,
     /// recorded when it closed (task 579).
     pub model: Option<String>,
+    /// The route of its session (`interactive` / `headless`, ADR-t813-2
+    /// decision 7 and ADR-t1394-2 decision 4): the one it recorded, else
+    /// `interactive` for a kind the plugin's hook records; `None` for one
+    /// of another kind that recorded none.
+    pub route: Option<String>,
+    /// The planner of the runtime's whose session it is.
+    pub planner_id: Option<i64>,
 }
 
 impl Span {
@@ -104,6 +114,14 @@ pub fn spans(events: &[RunEvent]) -> Vec<Span> {
                     work: None,
                     tokens: None,
                     model: None,
+                    route: event.payload["route"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .or_else(|| {
+                            let kind = event.payload["kind"].as_str()?;
+                            HOOK_KINDS.contains(&kind).then(|| INTERACTIVE.to_owned())
+                        }),
+                    planner_id: event.payload["planner_id"].as_i64(),
                 });
             }
             SESSION_TURNS => {
@@ -166,7 +184,7 @@ pub struct TimeSummary {
 }
 
 impl TimeSummary {
-    fn of(mut values: Vec<i64>) -> Self {
+    pub(super) fn of(mut values: Vec<i64>) -> Self {
         Self {
             summary: Summary {
                 count: values.len(),
@@ -238,6 +256,10 @@ pub struct SessionWindow {
 pub struct Sessions {
     pub window: SessionWindow,
     pub by_kind: BTreeMap<&'static str, KindSessions>,
+    /// The same per kind and per route of the spans that have one
+    /// ([`Span::route`], ADR-t1394-2 decision 4); kinds and routes without
+    /// a span are not listed.
+    pub by_route: BTreeMap<&'static str, BTreeMap<String, KindSessions>>,
 }
 
 /// One kind's spans of a run: how many, and their seconds open and active
@@ -355,22 +377,65 @@ pub fn by_kind(
                 .and_then(|event| timestamp_millis(&event.created_at))
         })
         .flatten();
-    // Per kind: its sessions, the open and active seconds of its spans, and
-    // the open seconds of the spans that have their active time.
-    type Tally = (KindSessions, Vec<i64>, Vec<i64>, i64);
-    let mut by_kind: BTreeMap<&'static str, Tally> = KINDS
-        .iter()
-        .map(|&kind| (kind, Default::default()))
-        .collect();
+    let mut by_kind: BTreeMap<&'static str, Tally> =
+        KINDS.iter().map(|&kind| (kind, Tally::default())).collect();
+    let mut by_route: BTreeMap<&'static str, BTreeMap<String, Tally>> = BTreeMap::new();
     for span in spans.iter().filter(|span| {
         span.opened <= window.upto
             && span.closed.is_none_or(|closed| closed > window.after)
             && counts(span)
     }) {
-        let Some((sessions, open, active, open_of_active)) = by_kind.get_mut(span.kind.as_str())
-        else {
+        let Some(kind) = KINDS.into_iter().find(|kind| *kind == span.kind) else {
             continue;
         };
+        by_kind
+            .entry(kind)
+            .or_default()
+            .add(span, window, from, end);
+        if let Some(route) = &span.route {
+            by_route
+                .entry(kind)
+                .or_default()
+                .entry(route.clone())
+                .or_default()
+                .add(span, window, from, end);
+        }
+    }
+    Sessions {
+        window,
+        by_kind: by_kind
+            .into_iter()
+            .map(|(kind, tally)| (kind, tally.finish()))
+            .collect(),
+        by_route: by_route
+            .into_iter()
+            .map(|(kind, routes)| {
+                let routes = routes
+                    .into_iter()
+                    .map(|(route, tally)| (route, tally.finish()))
+                    .collect();
+                (kind, routes)
+            })
+            .collect(),
+    }
+}
+
+/// One group's sessions in a window as they are added: its sessions, the
+/// open and active seconds of its spans, and the open seconds of the spans
+/// that have their active time.
+#[derive(Default)]
+struct Tally {
+    sessions: KindSessions,
+    open: Vec<i64>,
+    active: Vec<i64>,
+    open_of_active: i64,
+}
+
+impl Tally {
+    /// Add `span`, its time cut to the window `window` from `from` to
+    /// `end` (unix milliseconds).
+    fn add(&mut self, span: &Span, window: SessionWindow, from: Option<i64>, end: i64) {
+        let sessions = &mut self.sessions;
         sessions.count += 1;
         let closed_in_window = span.closed.is_some_and(|closed| closed <= window.upto);
         if !closed_in_window {
@@ -386,7 +451,7 @@ pub fn by_kind(
             ..span.clone()
         };
         let open_secs = clipped.open_secs(from, end);
-        open.push(open_secs);
+        self.open.push(open_secs);
         if inferred {
             sessions.inferred += 1;
         }
@@ -412,21 +477,17 @@ pub fn by_kind(
                 .iter()
                 .map(|turn| turn.overlap(from.unwrap_or(i64::MIN), end))
                 .sum();
-            active.push(millis / 1000);
-            *open_of_active += open_secs;
+            self.active.push(millis / 1000);
+            self.open_of_active += open_secs;
         }
     }
-    Sessions {
-        window,
-        by_kind: by_kind
-            .into_iter()
-            .map(|(kind, (mut sessions, open, active, open_of_active))| {
-                sessions.open = TimeSummary::of(open);
-                sessions.active = TimeSummary::of(active);
-                sessions.active_ratio = Ratio::of(sessions.active.summary.total, open_of_active);
-                (kind, sessions)
-            })
-            .collect(),
+
+    fn finish(self) -> KindSessions {
+        let mut sessions = self.sessions;
+        sessions.open = TimeSummary::of(self.open);
+        sessions.active = TimeSummary::of(self.active);
+        sessions.active_ratio = Ratio::of(sessions.active.summary.total, self.open_of_active);
+        sessions
     }
 }
 
@@ -700,5 +761,55 @@ mod tests {
             serde_json::to_value(none.window).unwrap(),
             json!({"after": 0, "upto": 4})
         );
+    }
+
+    /// The spans with a route are counted per kind and route too: the
+    /// route they recorded, a hook's kind without one interactive, and
+    /// another kind without one in no route.
+    #[test]
+    fn spans_are_counted_per_route() {
+        let events = vec![
+            event(
+                1,
+                None,
+                SESSION_OPENED,
+                json!({"kind": "runtime_planner", "route": "headless", "planner_id": 3}),
+                0,
+            ),
+            event(
+                2,
+                None,
+                SESSION_OPENED,
+                json!({"kind": "runtime_planner", "planner_id": 4}),
+                10,
+            ),
+            opened(3, Some("r1"), "worker", 20),
+            event(
+                4,
+                Some("r2"),
+                SESSION_OPENED,
+                json!({"kind": "worker", "route": "headless"}),
+                30,
+            ),
+            closed(5, None, 1, "exited", 100),
+        ];
+        let spans = spans(&events);
+        assert_eq!(spans[0].planner_id, Some(3));
+        assert_eq!(spans[1].route.as_deref(), Some(INTERACTIVE));
+        assert_eq!(spans[2].route, None);
+        let window = SessionWindow {
+            after: EventId::new(0),
+            upto: EventId::new(5),
+        };
+        let sessions = by_kind(&spans, &events, window, 200_000, |_| true);
+        assert_eq!(sessions.by_kind["runtime_planner"].count, 2);
+        let planners = &sessions.by_route["runtime_planner"];
+        assert_eq!(planners["headless"].count, 1);
+        assert_eq!(planners["headless"].open.summary.total, 100);
+        assert_eq!(planners[INTERACTIVE].open_now, 1);
+        assert_eq!(sessions.by_kind["worker"].count, 2);
+        assert_eq!(sessions.by_route["worker"].len(), 1);
+        assert_eq!(sessions.by_route["worker"]["headless"].count, 1);
+        assert!(!sessions.by_route.contains_key("observer"));
     }
 }

@@ -55,6 +55,9 @@ impl SqliteQueue {
         )?;
         if closed == 1 {
             super::draft_planners::settle_bundle(&tx, id, now)?;
+            // A headless session that had started ends with the row
+            // (ADR-t1394-2 decision 4).
+            super::sessions::close_planner_spans(&tx, id.as_i64())?;
         }
         tx.commit()?;
         self.planner(id)

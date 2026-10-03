@@ -72,6 +72,10 @@ pub enum Scope {
     /// An event of a goal's goal review (on the goal): the spans of that
     /// goal's reviews.
     Goal,
+    /// An event of the queue that names a planner of the runtime's
+    /// (`planner_id`): the spans of that planner's headless session
+    /// (ADR-t1394-2 decision 4).
+    Planner,
 }
 
 /// The scope of an event of `kind`, when it may open or close a span.
@@ -89,6 +93,9 @@ pub fn scope(kind: &str) -> Option<Scope> {
         | "throughput_review_started"
         | "throughput_review_finished" => Some(Scope::Queue),
         "goal_review_started" | "goal_review_finished" | "goal_review_failed" => Some(Scope::Goal),
+        // A headless planner's turns and its close (a run's turns are its
+        // span's by `route`, not by these events).
+        "turn_started" | "planner_closed" => Some(Scope::Planner),
         _ => None,
     }
 }
@@ -156,6 +163,9 @@ pub struct SpanContext {
     /// When the event happened (unix milliseconds): what a span left open
     /// past its time is measured against (a throughput review's).
     pub at_ms: Option<i64>,
+    /// The proposal a planner of the runtime's was opened for, which its
+    /// headless span names as the hook's span does.
+    pub proposal_id: Option<i64>,
 }
 
 /// The `route` of a headless run's session span.
@@ -423,6 +433,44 @@ pub fn changes(
                 changes.push(opened);
             }
             changes
+        }
+        // A headless planner's first turn opens its span (ADR-t1394-2
+        // decision 4), in the shape of the hook's span of an interactive
+        // one with the route of a headless worker's; its later turns go on
+        // in it.
+        "turn_started" => {
+            let Some(planner) = payload["planner_id"].as_i64() else {
+                return Vec::new();
+            };
+            if open.iter().any(|span| span.kind() == RUNTIME_PLANNER) {
+                return Vec::new();
+            }
+            let mut opened = json!({
+                "kind": RUNTIME_PLANNER,
+                "session_id": text("session_id"),
+                "cwd": null,
+                "transcript_path": null,
+                "planner_id": planner,
+                "route": HEADLESS_ROUTE,
+                "provider": text("provider"),
+            });
+            if let Some(launch) = payload.get("launch").filter(|launch| launch.is_object()) {
+                opened["launch"] = launch.clone();
+            }
+            if let Some(proposal) = context.proposal_id {
+                opened["proposal_id"] = json!(proposal);
+                opened["goal_ids"] = json!(context.goal_ids);
+            }
+            vec![SpanChange::Open(opened)]
+        }
+        // The planner's session ended with its close: an exit the runtime
+        // saw, or a session found gone (its running turn's end unknown).
+        "planner_closed" => {
+            let reason = match text("code") {
+                Some("runtime_lost" | "runtime_session_gone" | "abandoned") => INFERRED,
+                _ => EXITED,
+            };
+            close(&[RUNTIME_PLANNER], reason)
         }
         _ => Vec::new(),
     }
@@ -1239,5 +1287,52 @@ mod tests {
         assert_eq!(ended.len(), 1);
         assert_eq!(closed(&ended[0]), (1, "clear"));
         assert!(hook_changes(&end("s-4"), &open, &Value::Null).is_empty());
+    }
+
+    /// A headless planner's first turn opens its span with its route,
+    /// launch and proposal; a later turn goes on in it, a turn of no
+    /// planner opens none; its close ends it, as inferred when its session
+    /// was found gone.
+    #[test]
+    fn a_headless_planners_turns_open_its_span_and_its_close_ends_it() {
+        assert_eq!(scope("turn_started"), Some(Scope::Planner));
+        assert_eq!(scope("planner_closed"), Some(Scope::Planner));
+        let context = SpanContext {
+            proposal_id: Some(4),
+            goal_ids: vec![9],
+            ..SpanContext::default()
+        };
+        let turn = json!({"planner_id": 2, "session_id": "s-p", "provider": "claude",
+                          "launch": {"model": "opus", "effort": "high"}});
+        let first = changes("turn_started", &turn, &[], &context);
+        assert_eq!(first.len(), 1);
+        let payload = opened(&first[0]);
+        assert_eq!(payload["kind"], RUNTIME_PLANNER);
+        assert_eq!(payload["route"], HEADLESS_ROUTE);
+        assert_eq!(payload["planner_id"], 2);
+        assert_eq!(payload["session_id"], "s-p");
+        assert_eq!(payload["launch"]["effort"], "high");
+        assert_eq!(payload["proposal_id"], 4);
+        assert_eq!(payload["goal_ids"], json!([9]));
+        let open = [span(5, payload.clone())];
+        assert!(changes("turn_started", &turn, &open, &context).is_empty());
+        assert!(changes("turn_started", &json!({"turn": 1}), &[], &context).is_empty());
+        let without = changes(
+            "turn_started",
+            &json!({"planner_id": 3}),
+            &[],
+            &SpanContext::default(),
+        );
+        assert!(opened(&without[0]).get("proposal_id").is_none());
+        for (code, reason) in [
+            ("runtime_exited", EXITED),
+            ("runtime_exit_timed_out", EXITED),
+            ("runtime_lost", INFERRED),
+            ("runtime_session_gone", INFERRED),
+            ("abandoned", INFERRED),
+        ] {
+            let ended = changes("planner_closed", &json!({"code": code}), &open, &context);
+            assert_eq!(closed(&ended[0]), (5, reason), "{code}");
+        }
     }
 }

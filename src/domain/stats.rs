@@ -27,6 +27,7 @@ pub mod jobs;
 pub mod landing;
 pub mod landing_utilization;
 pub mod measures;
+pub mod planner_routes;
 pub mod predictions;
 pub mod providers;
 pub mod recommendations;
@@ -539,6 +540,14 @@ pub struct Stats {
     /// failures, the nudges, the `stalled` alerts by reason, the moves to
     /// the other provider, Claude's cost per turn and `waiting.by_route`.
     pub worker_routes: BTreeMap<String, routes::RouteHealth>,
+    /// How the runtime's planners got on per route (`interactive` /
+    /// `headless`, ADR-t1394-2 decision 4) in the window of
+    /// `worker_routes`: the planners opened by what for, the times from a
+    /// revise to the next plan review and from a planner's opening to what
+    /// became of its draft, finding or request, the `planner_question`
+    /// asks, the headless turns' outcomes and failures, and the tokens of
+    /// `sessions.by_route.runtime_planner`.
+    pub planner_routes: BTreeMap<String, planner_routes::PlannerRouteHealth>,
     /// The asks opened and answered in the same window as
     /// `backend_failures` (task 325): by kind, by asker, by answerer and
     /// the option each answer chose.
@@ -1138,6 +1147,16 @@ pub fn stats(
             Some(goal) => span.goal_ids.contains(&goal),
         },
     );
+    // The planners' tokens are those of `sessions`, whose window is theirs.
+    let planner_routes = planner_routes::planner_routes(
+        events,
+        window_start,
+        window_last,
+        counts,
+        sessions
+            .by_route
+            .get(crate::domain::sessions::RUNTIME_PLANNER),
+    );
     for file in conflict_hotspots.files.iter().filter(|file| file.alert) {
         alerts.push(Alert {
             kind: "conflict_hotspot",
@@ -1228,6 +1247,7 @@ pub fn stats(
         sessions,
         waiting,
         worker_routes,
+        planner_routes,
         asks: ask_stats,
         claim_holds,
         landing_holds,
@@ -3692,6 +3712,33 @@ mod tests {
             "run_waiting_started",
             json!({"ask_id": 1, "ask_kind": "worker_question"}),
         );
+        // A headless planner's span after the page: `planner_routes` counts
+        // its turn and its tokens in the same window.
+        let queue_event = |id: i64, kind: &str, payload: Value| RunEvent {
+            task_id: None,
+            run_id: None,
+            created_at: at(T + id),
+            ..event(id, 1, kind, payload)
+        };
+        let next = events.len() as i64;
+        events.extend([
+            queue_event(
+                next + 1,
+                "session_opened",
+                json!({"kind": "runtime_planner", "route": "headless", "planner_id": 1}),
+            ),
+            queue_event(
+                next + 2,
+                "turn_finished",
+                json!({"planner_id": 1, "outcome": "succeeded"}),
+            ),
+            queue_event(
+                next + 3,
+                "session_closed",
+                json!({"opened_event_id": next + 1, "reason": "exited",
+                       "tokens": {"input": 7, "output": 3, "cache_read": 0, "cache_creation": 0, "messages": 1}}),
+            ),
+        ]);
         let stats = stats(
             &events,
             &HashMap::new(),
@@ -3716,6 +3763,12 @@ mod tests {
             (interactive.started, interactive.waited.total_secs),
             (2, 60)
         );
+        // The sessions and the planners' turns and tokens span the window
+        // past the page too.
+        assert_eq!(stats.sessions.by_kind["runtime_planner"].count, 1);
+        let planners = &stats.planner_routes["headless"];
+        assert_eq!(planners.turns, 1);
+        assert_eq!(planners.tokens.input, 7);
     }
 
     /// Task 1379: `--since` past more than a page of finished runs pages

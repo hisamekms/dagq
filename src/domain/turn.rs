@@ -509,6 +509,27 @@ impl HeadlessSpan {
     }
 }
 
+/// The model most of the `turn_finished` among `events` said they ran on
+/// (the earliest of those tied); `None` when none said one.
+pub fn turns_model(events: &[RunEvent]) -> Option<String> {
+    let mut counts: Vec<(&str, usize)> = Vec::new();
+    for model in events
+        .iter()
+        .filter(|event| event.kind == TURN_FINISHED)
+        .filter_map(|event| event.payload["model"].as_str())
+    {
+        match counts.iter_mut().find(|(seen, _)| *seen == model) {
+            Some((_, count)) => *count += 1,
+            None => counts.push((model, 1)),
+        }
+    }
+    let most = counts.iter().map(|(_, count)| *count).max()?;
+    counts
+        .into_iter()
+        .find(|(_, count)| *count == most)
+        .map(|(model, _)| model.to_owned())
+}
+
 /// `text` cut to at most `max` characters, with `…` when cut.
 pub fn shortened(text: &str, max: usize) -> String {
     let text = text.trim();
@@ -833,5 +854,30 @@ mod tests {
         assert_eq!(shortened("héllo world", 5), "héllo…");
         assert_eq!("model".parse::<TurnFailure>().unwrap(), TurnFailure::Model);
         assert!("x".parse::<TurnFailure>().is_err());
+    }
+
+    /// A planner's span takes the model most of its turns ran on.
+    #[test]
+    fn the_model_of_turns_is_the_one_most_said() {
+        let finished = |id: i64, model: Value| RunEvent {
+            id: super::super::EventId::new(id),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: TURN_FINISHED.to_owned(),
+            payload: json!({"model": model}),
+            created_at: String::new(),
+            actor: None,
+        };
+        assert_eq!(turns_model(&[]), None);
+        assert_eq!(turns_model(&[finished(1, Value::Null)]), None);
+        let events = [
+            finished(1, json!("a")),
+            finished(2, json!("b")),
+            finished(3, json!("b")),
+            finished(4, Value::Null),
+        ];
+        assert_eq!(turns_model(&events).as_deref(), Some("b"));
+        assert_eq!(turns_model(&events[..2]).as_deref(), Some("a"));
     }
 }

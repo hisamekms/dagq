@@ -280,6 +280,7 @@ mod tests {
                 details: BTreeMap::new(),
                 unavailable: BTreeMap::new(),
                 routes: BTreeMap::new(),
+                planner_routes: BTreeMap::new(),
             },
             marks: marks
                 .iter()

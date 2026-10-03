@@ -682,13 +682,16 @@ pub struct PeriodKpis {
     pub health: Health,
 }
 
-/// A period's health (task 1371): `stats`' `worker_routes` of the
-/// period's window, and the least and the median free space of the
+/// A period's health (task 1371): `stats`' `worker_routes` and
+/// `planner_routes` of the period's window, and the least and the median free space of the
 /// filesystem of the run worktrees from the host's records (null without
 /// them, or when the host's load is not read).
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Health {
     pub routes: BTreeMap<String, crate::domain::stats::routes::RouteHealth>,
+    /// `stats`' `planner_routes` of the period's window (ADR-t1394-2
+    /// decision 4): the runtime's planners per route.
+    pub planner_routes: BTreeMap<String, crate::domain::stats::planner_routes::PlannerRouteHealth>,
     pub disk: Option<DiskFree>,
 }
 
@@ -858,6 +861,7 @@ pub fn kpi(input: &KpiInput<'_>, query: &KpiQuery) -> Result<Kpi, String> {
             comparison,
             health: Health {
                 routes: current.routes.clone(),
+                planner_routes: current.planner_routes.clone(),
                 disk: host.as_ref().and_then(DiskFree::of),
             },
             host,

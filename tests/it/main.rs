@@ -58,6 +58,7 @@ mod plan_review_prompt_bytes;
 mod plan_review_reasons;
 mod planner_close;
 mod planner_headless;
+mod planner_headless_stats;
 mod planner_screen_idle;
 mod planner_slots;
 mod planner_timeout;

@@ -347,9 +347,15 @@ fn a_resumed_session_without_its_marker_ends_its_stage_by_its_screen() {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
         thread::spawn(move || supervise_with(&db, &repo, &backend, &options()))
     };
-    // The request put the screen at work; the session is done with it.
+    // The request put the screen at work; the session is done with it
+    // once it rewrote its receipt. A screen at rest before that (a slow
+    // stub under load) would be inferred idle before the receipt and
+    // again after it, the receipt being a later input of the stage.
+    let receipt = PathBuf::from(run.receipt_path().unwrap());
     let started = Instant::now();
-    while backend.texts().is_empty() {
+    while backend.texts().is_empty()
+        || !fs::read_to_string(&receipt).is_ok_and(|text| text.contains("\"resolved\""))
+    {
         assert!(started.elapsed() < Duration::from_secs(30));
         thread::sleep(Duration::from_millis(20));
     }

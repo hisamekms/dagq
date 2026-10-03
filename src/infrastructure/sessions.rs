@@ -30,9 +30,10 @@ use crate::{
     domain::{
         EventId, GoalId, RunEvent, RunId, TaskId,
         sessions::{
-            GOAL_REVIEW, HOOK_KINDS, INFERRED, JOB_FINISHED, OpenSpan, PLAN_REVIEW, REVIEW,
-            RUN_SESSION, RUNTIME_PLANNER, SESSION_CLOSED, SESSION_OPENED, SESSION_TURNS, Scope,
-            SessionHook, SpanChange, SpanContext, changes, hook_changes, queue_span_kind, scope,
+            GOAL_REVIEW, HEADLESS_ROUTE, HOOK_KINDS, INFERRED, JOB_FINISHED, OpenSpan, PLAN_REVIEW,
+            REVIEW, RUN_SESSION, RUNTIME_PLANNER, SESSION_CLOSED, SESSION_OPENED, SESSION_TURNS,
+            Scope, SessionHook, SpanChange, SpanContext, changes, hook_changes, queue_span_kind,
+            scope,
         },
         stats::rfc3339_millis,
         tokens::{self, ModelUse, SpanTokens, TokenUsage},
@@ -668,6 +669,25 @@ pub(super) fn follow(
                 },
             )
         }
+        (Scope::Planner, None, None) => {
+            let Some(planner) = payload["planner_id"].as_i64() else {
+                return Ok(());
+            };
+            let open = open_planner_spans(conn, planner)?;
+            // On the task its span opened on, else where a new one opens:
+            // the first task of the planner's proposal, as the hook's.
+            let (anchor, proposal, goal_ids) = planner_anchor(conn, planner)?;
+            let task = match open.first() {
+                Some(span) => span_task(conn, span)?,
+                None => anchor,
+            };
+            let context = SpanContext {
+                goal_ids,
+                proposal_id: proposal,
+                ..SpanContext::default()
+            };
+            return write_changes(conn, event_id, (task, None), kind, payload, &open, &context);
+        }
         _ => return Ok(()),
     };
     write_changes(
@@ -679,6 +699,34 @@ pub(super) fn follow(
         &open,
         &context,
     )
+}
+
+/// The open spans of the headless session of planner `planner`
+/// (ADR-t1394-2 decision 4), oldest first.
+fn open_planner_spans(conn: &Connection, planner: i64) -> Result<Vec<OpenSpan>> {
+    open_spans(
+        conn,
+        &format!(
+            "o.run_id IS NULL AND json_extract(o.payload,'$.kind')='{RUNTIME_PLANNER}'
+             AND json_extract(o.payload,'$.route')='{HEADLESS_ROUTE}'
+             AND json_extract(o.payload,'$.planner_id')=?1"
+        ),
+        "c.run_id IS NULL",
+        params![planner],
+    )
+}
+
+/// Close the spans of planner `planner`'s headless session still open, as
+/// `inferred`: its row closed without a `planner_closed` (its session could
+/// not be opened or recorded). Returns how many it closed.
+pub(super) fn close_planner_spans(conn: &Connection, planner: i64) -> Result<usize> {
+    let open = open_planner_spans(conn, planner)?;
+    let now = now(conn)?;
+    for span in &open {
+        let task = span_task(conn, span)?;
+        close(conn, &now, task, None, span, INFERRED)?;
+    }
+    Ok(open.len())
 }
 
 /// Write the spans the event `event_id` (of `kind`, with `payload`, just
@@ -1085,12 +1133,14 @@ fn close_headless(
     closed: &mut RunSessionClosed,
 ) -> Result<Option<WorktimeLines>> {
     let transcript = transcript_for_close(conn, span);
-    let (Some(run_id), Some((start, now_ms))) = (run_id, times(conn, span, now)?) else {
+    let owner = TurnEvents::of(run_id, span);
+    let (Some(owner), Some((start, now_ms))) = (owner, times(conn, span, now)?) else {
         payload["active"] = json!("unavailable");
         payload["active_unavailable"] = json!("span_time_unparsable");
         return Ok(None);
     };
-    let headless = HeadlessSpan::of(&turn_events(conn, run_id, span.opened_event_id)?, start);
+    let events = owner.events(conn, span.opened_event_id)?;
+    let headless = HeadlessSpan::of(&events, start);
     let recorded = recorded_turns(conn, span.opened_event_id)?;
     // A span closed as inferred (its session gone unseen) does not know
     // when a turn still running ended.
@@ -1099,7 +1149,7 @@ fn close_headless(
         insert_at(
             conn,
             task_id,
-            Some(run_id),
+            run_id,
             EventKind::SessionTurns,
             &turns_payload(span, &new),
             now,
@@ -1112,6 +1162,19 @@ fn close_headless(
         payload["tokens"] = tokens.payload();
         closed.tokens = Some(tokens.payload());
     }
+    // A planner's session has no worktree to find its transcript in: its
+    // model is the one its turns said they ran on, its effort its opener's.
+    let TurnEvents::Run(run_id) = owner else {
+        if let Some(model) = crate::domain::turn::turns_model(&events) {
+            payload["model"] = json!(model);
+            payload["effort"] = json!(
+                span.payload["launch"]["effort"]
+                    .as_str()
+                    .unwrap_or("unknown")
+            );
+        }
+        return Ok(None);
+    };
     match transcript {
         Ok(mut read) => {
             let want = Want {
@@ -1146,18 +1209,47 @@ fn close_headless(
     }
 }
 
-/// The `turn_started` and `turn_finished` of `run_id` after the event
-/// `opened`, oldest first.
-fn turn_events(conn: &Connection, run_id: &RunId, opened: EventId) -> Result<Vec<RunEvent>> {
-    Ok(conn
-        .prepare(&format!(
-            "SELECT * FROM run_events WHERE run_id=?1 AND id>?2
-               AND kind IN ('{}','{}') ORDER BY id",
+/// Whose turns a headless span's are: its run's (a worker's, ADR-t813-2
+/// decision 7), or the queue's of its planner (ADR-t1394-2 decision 4).
+#[derive(Clone, Copy)]
+enum TurnEvents<'a> {
+    Run(&'a RunId),
+    Planner(i64),
+}
+
+impl<'a> TurnEvents<'a> {
+    /// The owner of `span`'s turns, on `run_id` when it has one.
+    fn of(run_id: Option<&'a RunId>, span: &OpenSpan) -> Option<Self> {
+        match run_id {
+            Some(run_id) => Some(Self::Run(run_id)),
+            None => span.payload["planner_id"].as_i64().map(Self::Planner),
+        }
+    }
+
+    /// Its `turn_started` and `turn_finished` after the event `opened`,
+    /// oldest first.
+    fn events(self, conn: &Connection, opened: EventId) -> Result<Vec<RunEvent>> {
+        let kinds = format!(
+            "kind IN ('{}','{}')",
             event_kind::TURN_STARTED,
             event_kind::TURN_FINISHED
-        ))?
-        .query_map(params![run_id, opened], event_row)?
-        .collect::<rusqlite::Result<_>>()?)
+        );
+        Ok(match self {
+            Self::Run(run_id) => conn
+                .prepare(&format!(
+                    "SELECT * FROM run_events WHERE run_id=?1 AND id>?2 AND {kinds} ORDER BY id"
+                ))?
+                .query_map(params![run_id, opened], event_row)?
+                .collect::<rusqlite::Result<_>>()?,
+            Self::Planner(planner) => conn
+                .prepare(&format!(
+                    "SELECT * FROM run_events WHERE run_id IS NULL AND id>?2 AND {kinds}
+                       AND json_extract(payload,'$.planner_id')=?1 ORDER BY id"
+                ))?
+                .query_map(params![planner, opened], event_row)?
+                .collect::<rusqlite::Result<_>>()?,
+        })
+    }
 }
 
 /// The work `breakdown` of `span`, made with `inputs`: the aggregate for
@@ -1441,11 +1533,13 @@ pub(super) fn record_open_turns(conn: &Connection) -> Result<usize> {
             (Some(transcript), _) => {
                 span_turns(turns(&transcript.records).complete, start, None, through)
             }
-            (None, Some(run_id)) => {
-                HeadlessSpan::of(&turn_events(&tx, run_id, span.opened_event_id)?, start)
+            (None, run_id) => {
+                let Some(owner) = TurnEvents::of(run_id.as_ref(), &span) else {
+                    continue;
+                };
+                HeadlessSpan::of(&owner.events(&tx, span.opened_event_id)?, start)
                     .new_turns(&earlier, None)
             }
-            (None, None) => continue,
         };
         if new.is_empty() {
             continue;
@@ -1559,10 +1653,30 @@ fn open_hook_spans(conn: &Connection) -> Result<Vec<OpenSpan>> {
     let kinds = HOOK_KINDS.map(|kind| format!("'{kind}'")).join(",");
     open_spans(
         conn,
-        &format!("o.run_id IS NULL AND json_extract(o.payload,'$.kind') IN ({kinds})"),
+        &format!(
+            "o.run_id IS NULL AND json_extract(o.payload,'$.kind') IN ({kinds})
+             AND json_extract(o.payload,'$.route') IS NOT '{HEADLESS_ROUTE}'"
+        ),
         "c.run_id IS NULL",
         params![],
     )
+}
+
+/// Whether `hook` is of a headless planner's session, whose span its turns
+/// record (ADR-t1394-2 decision 4): the hook its `claude -p` turns may
+/// still run is left out, so that it neither opens a second span nor
+/// closes the planner's at each turn.
+fn headless_planner_hook(conn: &Connection, hook: &SessionHook) -> Result<bool> {
+    let Some(planner) = hook.planner_id.filter(|_| hook.kind == RUNTIME_PLANNER) else {
+        return Ok(false);
+    };
+    Ok(conn
+        .query_row("SELECT route FROM planners WHERE id=?1", [planner], |r| {
+            r.get::<_, Option<String>>(0)
+        })
+        .optional()?
+        .flatten()
+        .is_some_and(|route| route == HEADLESS_ROUTE))
 }
 
 /// The task the `session_opened` of `span` is on.
@@ -1582,6 +1696,15 @@ fn span_task(conn: &Connection, span: &OpenSpan) -> Result<Option<TaskId>> {
 /// its proposal, with the proposal and its goals; the others are on no
 /// task. Only the spans are written: no run, proposal or planner changes.
 pub(super) fn record_hook(conn: &Connection, hook: &SessionHook) -> Result<Value> {
+    if headless_planner_hook(conn, hook)? {
+        return Ok(json!({
+            "kind": hook.kind,
+            "session_id": hook.session_id,
+            "opened": null,
+            "closed": [],
+            "skipped": "headless_planner",
+        }));
+    }
     let closing: Vec<(OpenSpan, &'static str)> =
         hook_changes(hook, &open_hook_spans(conn)?, &Value::Null)
             .into_iter()
@@ -1626,6 +1749,20 @@ fn planner_context(conn: &Connection, hook: &SessionHook) -> Result<(Option<Task
     let Some(planner) = hook.planner_id.filter(|_| hook.kind == RUNTIME_PLANNER) else {
         return Ok((None, Value::Null));
     };
+    let (task, proposal, goal_ids) = planner_anchor(conn, planner)?;
+    let Some(proposal) = proposal else {
+        return Ok((None, Value::Null));
+    };
+    Ok((task, json!({"proposal_id": proposal, "goal_ids": goal_ids})))
+}
+
+/// Where a span of planner `planner` is recorded: the first task of the
+/// proposal it was opened for, with the proposal and its goals; nothing
+/// without a proposal.
+fn planner_anchor(
+    conn: &Connection,
+    planner: i64,
+) -> Result<(Option<TaskId>, Option<i64>, Vec<i64>)> {
     let proposal: Option<i64> = conn
         .query_row(
             "SELECT proposal_id FROM planners WHERE id=?1",
@@ -1635,17 +1772,14 @@ fn planner_context(conn: &Connection, hook: &SessionHook) -> Result<(Option<Task
         .optional()?
         .flatten();
     let Some(proposal) = proposal else {
-        return Ok((None, Value::Null));
+        return Ok((None, None, Vec::new()));
     };
     let task: Option<TaskId> = conn.query_row(
         "SELECT min(id) FROM tasks WHERE proposal_id=?1",
         [proposal],
         |r| r.get(0),
     )?;
-    Ok((
-        task,
-        json!({"proposal_id": proposal, "goal_ids": proposal_goals(conn, Some(proposal))?}),
-    ))
+    Ok((task, Some(proposal), proposal_goals(conn, Some(proposal))?))
 }
 
 /// The open spans the hook recorded that name their workspace, with it.
@@ -1771,6 +1905,7 @@ fn run_context(conn: &Connection, run_id: &RunId) -> Result<SpanContext> {
         route,
         provider,
         at_ms: None,
+        proposal_id: None,
     })
 }
 
@@ -2232,6 +2367,101 @@ mod tests {
             expected
         );
         assert_eq!(READS.with(std::cell::Cell::get), reads);
+    }
+
+    /// A headless planner's span (ADR-t1394-2 decision 4) opens on its
+    /// first turn, records its finished turns while open from the queue's
+    /// turn events that name it (not another planner's), and closes with
+    /// its row, as inferred when no `planner_closed` ended it: its turns'
+    /// active time and tokens, the model they ran on and its opener's
+    /// effort. No transcript is read for it.
+    #[test]
+    fn a_headless_planners_span_takes_its_turns_and_closes_with_its_row() {
+        let dir = tempfile::tempdir().unwrap();
+        ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let conn = &queue.conn;
+        conn.execute_batch(
+            "INSERT INTO planners(id,origin,route,created_at) VALUES (4,'runtime','headless',0);
+             INSERT INTO planners(id,origin,route,created_at) VALUES (5,'runtime','headless',0);",
+        )
+        .unwrap();
+        let reads = READS.with(std::cell::Cell::get);
+        let record = |kind: EventKind, payload: Value, millis: i64| {
+            crate::infrastructure::sqlite::record_queue_event_in(conn, kind, &payload).unwrap();
+            let id = latest(conn);
+            conn.execute(
+                "UPDATE run_events SET created_at=?1 WHERE id>=?2",
+                params![millis_text(millis), id],
+            )
+            .unwrap();
+        };
+        let now = rfc3339_millis(&now(conn).unwrap()).unwrap();
+        let base = now - 100_000;
+        let tokens =
+            json!({"input": 10, "output": 5, "cache_read": 0, "cache_creation": 0, "messages": 1});
+        record(
+            EventKind::TurnStarted,
+            json!({"planner_id": 4, "turn": 1, "session_id": "s-4", "provider": "claude",
+                   "launch": {"model": "opus", "effort": "high"}}),
+            base,
+        );
+        let opened = of_kind(&queue, SESSION_OPENED);
+        assert_eq!(opened.len(), 1, "{opened:?}");
+        assert_eq!(opened[0].task_id, None);
+        assert_eq!(opened[0].payload["route"], "headless");
+        record(
+            EventKind::TurnFinished,
+            json!({"planner_id": 4, "turn": 1, "outcome": "succeeded", "tokens": tokens,
+                   "model": "claude-opus"}),
+            base + 30_000,
+        );
+        // Another planner's turns are its own span's.
+        record(
+            EventKind::TurnStarted,
+            json!({"planner_id": 5, "turn": 1}),
+            base + 31_000,
+        );
+        record(
+            EventKind::TurnFinished,
+            json!({"planner_id": 5, "turn": 1, "outcome": "succeeded", "tokens": tokens}),
+            base + 35_000,
+        );
+        record(
+            EventKind::TurnStarted,
+            json!({"planner_id": 4, "turn": 2}),
+            base + 40_000,
+        );
+        assert_eq!(of_kind(&queue, SESSION_OPENED).len(), 2);
+        assert_eq!(record_open_turns(conn).unwrap(), 2);
+        assert_eq!(record_open_turns(conn).unwrap(), 0);
+        queue
+            .close_planner(crate::domain::PlannerId::new(4), Some("gone"))
+            .unwrap();
+        let closed = of_kind(&queue, SESSION_CLOSED);
+        assert_eq!(closed.len(), 1, "{closed:?}");
+        let closed = &closed[0].payload;
+        assert_eq!(closed["opened_event_id"], opened[0].id.as_i64());
+        assert_eq!(closed["reason"], INFERRED);
+        assert_eq!(closed["active"], "recorded");
+        // The running turn's end is not known.
+        assert_eq!(closed["active_secs"], 30);
+        assert_eq!(closed["tokens"], tokens);
+        assert_eq!(closed["model"], "claude-opus");
+        assert_eq!(closed["effort"], "high");
+        assert_eq!(READS.with(std::cell::Cell::get), reads);
+        // The plugin's hook, if its turns run it, records nothing for a
+        // headless planner and does not see its span.
+        let planner5 = |event| SessionHook {
+            planner_id: Some(5),
+            ..hook(dir.path(), event, RUNTIME_PLANNER, "s-5", "s-5")
+        };
+        let skipped = record_hook(conn, &planner5(Some("startup"))).unwrap();
+        assert_eq!(skipped["skipped"], "headless_planner");
+        record_hook(conn, &planner5(None)).unwrap();
+        assert_eq!(of_kind(&queue, SESSION_OPENED).len(), 2);
+        assert_eq!(of_kind(&queue, SESSION_CLOSED).len(), 1);
+        assert!(open_hook_spans(conn).unwrap().is_empty());
     }
 
     /// The finished turns of an open span are recorded as they come; the
