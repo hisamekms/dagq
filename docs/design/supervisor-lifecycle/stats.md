@@ -4,8 +4,8 @@ type: design
 title: "`stats`"
 status: current
 created: 2026-09-26
-updated: 2026-10-04 # task 1424: runtime_delivers of approve_landing follows LandingAnswer::parse (after task 1398)
-last_verified: 2026-10-04 # task 1424
+updated: 2026-10-04 # task 1519: the forecast's runs in flight include awaiting_integration and needs_session (after task 1424)
+last_verified: 2026-10-04 # task 1519
 scope: runtime
 related:
   - adr-t639-1
@@ -267,7 +267,7 @@ KPIの集計（[`kpi`](kpi.md)）は、この値を「改善」群のKPIの`draf
 - **見込み**（実装済み、`method` 2。1はtaskの種類（kind）ごとの分布で、kindと一緒に消した。2はtaskが宣言したchangeごとの分布。ADR-t980-1、task 982）: `domain::forecast::forecast`（純粋関数）が、open なtask（`ready` / `in_progress`。`draft`のgoalのtaskを除く）とopen なgoal（`draft`でなく閉じていない）の完了のp50 / p90をsimulationで出す。`application::forecast`がqueueを読んで入力を組み立てる。
   - **入力**: 依存は`graph`の`ready_after`（未完了の前のtaskと、achievedで閉じていないgoal）。見込みに入らないtask（`draft` / `submitted`）やgoal（`draft`、abandonedで閉じた）を待つtaskは終わらない。claimの順は`graph`と同じ`ClaimRank`（効く優先度、`unblocks`、ID。`domain`に移した）を今の時点で固定して使う。slotは生きているsupervisorの`parallel`の合計（`stats`の空きslotと同じ判定。`--parallel N`で置き換えられる）。
   - **分布**: `domain::forecast::history`が`stats`（`full`）の着地したrun（`integrated`で`work` / `validate` / `wait_to_land`がそろったもの）を1件の標本にし、3つの区間を同じrunから一緒に引く。resumeと着地の延期はその区間に含まれるので、別の確率として足さない（二重に数えないため）。taskが宣言したchange（nullは`unknown`）ごとに分け、そのchangeの標本が`[kpi]`の`min_samples`に満たなければ全体（`all`）を使い、出力の`assumptions.substituted`と各taskの`distribution`に書く。goalを閉じるまでの遅れは、achievedの`goal_closed`とそのgoalの最後の`run_integrated`の差。人の答えの待ちは`stats::asks::human_waits`（`ask_opened` → 最初の`ask_answered`）。遅れと待ちの標本が無ければ0とする。経過が0のときは0秒の標本も引く。
-  - **走っているrun**: そのrunのeventから`stats`と同じ段（最初の`validation_finished`の後は`wait_to_land`、最初の`receipt_observed`の後は`validate`、それより前は`work`）と段の経過秒を出し、その段が経過より長かった標本だけから残りを引く（無ければ段を丸ごと引き直す）。後の段は同じ標本の値を足す。`run_waiting_started`の後で終わっていない待ちのrunはslotを持たず、経過より長い`ask_wait`の残りを足す（標本の区間も待ちを含むので遅い側に寄りうる。ADR-0070の決定1どおり）。
+  - **走っているrun**: `in_progress`のtaskの最新のrun（`latest_runs_in_progress`）のうち、processが実行か着地をしているもの（`claimed`〜`validating`・`integrating`）と、その間のもの（review・e2e・exit・着地待ちの`awaiting_integration`、reviewの差し戻し（revise）やe2eの失敗で戻されてresumeを待つ・resume中の`needs_session`）を走っているrunとする（`domain::forecast::in_flight`、task 1519。共通の`active_runs`は使わない）。最新のrunが`failed` / `interrupted`のtaskはretryがslotを待つものとして扱い、過去のretryのrunは見ない。`dagq forecast`とsnapshotは同じ`application::forecast`の組み立てを使う。そのrunのeventから`stats`と同じ段（最初の`validation_finished`の後は`wait_to_land`、最初の`receipt_observed`の後は`validate`、それより前は`work`）と段の経過秒を出し、その段が経過より長かった標本だけから残りを引く（無ければ段を丸ごと引き直す）。後の段は同じ標本の値を足す。`run_waiting_started`の後で終わっていない待ちのrunはslotを持たず、経過より長い`ask_wait`の残りを足す（標本の区間も待ちを含むので遅い側に寄りうる。ADR-0070の決定1どおり）。
   - **計算**: 1回の試行で、時刻0からslotの空きにclaimの順で放たれたtaskを入れて標本の合計の後に終え、goalはそのopen なtaskがすべて終わった時刻に閉じるまでの遅れを足して閉じる（open なtaskが無いgoalは最後の着地からの経過より長い遅れの残り）。見込みに入らない`draft` / `submitted`のtaskを持つgoalと、taskを1つも持たないgoalは閉じない。goalに依存するtaskはそのgoalが閉じるまで待つ。これを試行の回数（既定1,000、`--trials`）繰り返し、各taskとgoalの完了の秒の最近順位のp50 / p90を出す。乱数は`SplitMix64`で、種は今の時刻とqueueの最新のevent IDから決める（`domain::forecast::seed`）ので、同じ時点の同じqueueからは同じ見込みになる。流入（新しいtask、follow_up、plan reviewの差し戻し）と失敗したrunのretryは含めない。
   - **終わらないもの**: どれかの試行で終わらなかったtask / goalはp50 / p90がnullで、`reason`が`no_samples`（着地したrunが1件も無い）、`no_slots`（`parallel`が0）、`blocked`（見込みに入らないtaskかgoal、閉じないgoalを直接か他を通して待つ）のどれかになる。理由はtask / goalごとに決め、`blocked`は`no_slots`より先に出す。
 - **`dagq forecast [--task ID] [--goal ID] [--parallel N] [--trials N]`**: read-onlyの接続で読み、何も記録しない。queue全体をsimulationしてから、`--task`はそのtaskとそのgoalに、`--goal`はそのgoalとそのtaskに出力を絞る。observerにも許す読み取りのコマンド。出力（JSON）:

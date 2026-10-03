@@ -208,3 +208,106 @@ fn a_failed_snapshot_stops_no_landing_and_off_records_nothing() {
     assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
     assert!(snapshots(&db).is_empty());
 }
+
+/// Task 1519: the snapshot reads the runs as `dagq forecast` does. A run
+/// sent back by its review (`awaiting_integration`) and one waiting for a
+/// session and a person (`needs_session`) are recorded in `wait_to_land`,
+/// the second waiting; a failed run's task waits for a slot.
+#[test]
+fn a_snapshot_records_runs_under_revise_and_resume_in_their_phase() {
+    use dagq::{
+        application::forecast::{SnapshotOutcome, pending, record_snapshot},
+        domain::{ClaimOutcome, EventKind, LeaseToken},
+        infrastructure::adapters::SystemProcesses,
+    };
+    let (_dir, _repo, db) = fixture();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    add_ready_task(&mut queue, "resumed", &[]);
+    add_ready_task(&mut queue, "failed", &[]);
+    let base = CommitSha::try_from("0123456789abcdef0123456789abcdef01234567").unwrap();
+    let mut claim = |status: &str, steps: &[(EventKind, Value)]| {
+        let ClaimOutcome::Claimed { run } = queue
+            .claim_for_supervisor(&base, &LeaseToken::new("t"))
+            .unwrap()
+        else {
+            panic!("nothing to claim");
+        };
+        for (kind, payload) in [
+            (EventKind::ReceiptObserved, json!({})),
+            (
+                EventKind::ValidationFinished,
+                json!({"status": "awaiting_integration"}),
+            ),
+        ]
+        .iter()
+        .chain(steps)
+        {
+            queue
+                .record_runtime_event(run.id(), *kind, payload.clone())
+                .unwrap();
+        }
+        Connection::open(&db)
+            .unwrap()
+            .execute(
+                "UPDATE task_runs SET status=?1 WHERE id=?2",
+                rusqlite::params![status, run.id().as_str()],
+            )
+            .unwrap();
+    };
+    claim(
+        "awaiting_integration",
+        &[
+            (EventKind::ReviewFinished, json!({"verdict": "revise"})),
+            (EventKind::ResumeStarted, json!({})),
+        ],
+    );
+    claim(
+        "needs_session",
+        &[(
+            EventKind::RunWaitingStarted,
+            json!({"phase": "resume", "status": "needs_session"}),
+        )],
+    );
+    claim("failed", &[]);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let found = pending(&queue, now, |_| 0, None).unwrap().unwrap();
+    let outcome = record_snapshot(
+        &queue,
+        &SystemProcesses,
+        &LeaseToken::new("t"),
+        now,
+        5,
+        &found,
+    )
+    .unwrap();
+    assert!(
+        matches!(outcome, SnapshotOutcome::Recorded { tasks: 3, .. }),
+        "{outcome:?}"
+    );
+    let recorded = snapshots(&db);
+    assert_eq!(recorded.len(), 1, "{recorded:#?}");
+    let rows: Vec<(i64, Value, Value)> = recorded[0]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row["id"].as_i64().unwrap(),
+                row["phase"].clone(),
+                row["waiting"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (1, json!("wait_to_land"), json!(false)),
+            (2, json!("wait_to_land"), json!(true)),
+            (3, Value::Null, json!(false)),
+        ]
+    );
+}

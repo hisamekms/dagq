@@ -15,7 +15,7 @@ use crate::domain::{
     ClaimRank, EventId, GoalId, GoalStatus, RunEvent, SupervisorPulse, TaskId, TaskStatus,
     forecast::{
         DEFAULT_TRIALS, Forecast, ForecastGoal, ForecastInput, ForecastTask, forecast as simulate,
-        history, running, seed,
+        history, in_flight, running, seed,
         snapshot::{
             FORECAST_RECORDED, Previous, Snapshot, TRIGGER_KINDS, Trigger, decide, trigger,
         },
@@ -71,10 +71,14 @@ fn forecast_through(
             .map(|registration| registration.parallel as usize)
             .sum(),
     };
-    let mut runs: HashMap<TaskId, _> = HashMap::new();
-    for run in queue.active_runs()? {
-        runs.insert(run.task_id(), run.id().clone());
-    }
+    // The latest run of each `in_progress` task, also through its review,
+    // revise and resume (task 1519); a failed one's retry waits for a slot.
+    let runs: HashMap<TaskId, _> = queue
+        .latest_runs_in_progress()?
+        .into_iter()
+        .filter(|run| in_flight(run.status()))
+        .map(|run| (run.task_id(), run.id().clone()))
+        .collect();
     let graph = dependency_graph(queue.graph_input()?, None);
     let mut tasks = Vec::new();
     for node in graph.tasks.iter().filter(|node| {

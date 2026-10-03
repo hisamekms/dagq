@@ -505,3 +505,118 @@ fn a_sample_measures_its_phases() {
     assert_eq!(s.phase(Phase::WaitToLand), 30);
     assert_eq!(s.phase(Phase::Work), 10);
 }
+
+#[test]
+fn the_latest_run_is_in_flight_through_its_review_revise_and_resume() {
+    use crate::domain::RunStatus;
+    for status in [
+        RunStatus::Claimed,
+        RunStatus::Starting,
+        RunStatus::Running,
+        RunStatus::Validating,
+        RunStatus::AwaitingIntegration,
+        RunStatus::Integrating,
+        RunStatus::NeedsSession,
+    ] {
+        assert!(in_flight(status), "{status:?}");
+    }
+    // A retry waits for a slot and starts over; a landed run is done.
+    for status in [
+        RunStatus::Failed,
+        RunStatus::Interrupted,
+        RunStatus::Integrated,
+        RunStatus::Succeeded,
+    ] {
+        assert!(!in_flight(status), "{status:?}");
+    }
+}
+
+/// A run sent back by its review (revise) or resumed after `needs_session`
+/// stays in `wait_to_land` from its first `validation_finished`: the
+/// samples' `wait_to_land` holds the review, the resumes and the landing.
+/// Its wait for a person holds no slot; once answered it is returning and
+/// holds one again.
+#[test]
+fn a_run_under_review_revise_or_resume_stays_waiting_to_land() {
+    let r = "33333333-3333-3333-3333-333333333333";
+    let ms = |text: &str| crate::domain::stats::timestamp_millis(text).unwrap();
+    let at = |minute: u32| format!("2026-09-20T00:{minute:02}:00.000Z");
+    let step = |id: i64, kind: &str, minute: u32, payload: Value| {
+        event(id, r, 5, kind, &at(minute), payload)
+    };
+    let mut events = vec![
+        step(1, "run_claimed", 0, json!({})),
+        step(2, "receipt_observed", 10, json!({})),
+        step(3, "validation_finished", 11, json!({})),
+        step(4, "review_started", 12, json!({})),
+        step(5, "review_finished", 14, json!({"verdict": "revise"})),
+        step(6, "resume_started", 15, json!({})),
+        step(7, "receipt_observed", 25, json!({})),
+        step(8, "validation_finished", 26, json!({})),
+        step(9, "run_e2e_started", 27, json!({})),
+    ];
+    let now = ms(&at(31));
+    let revised = running(&events, now);
+    assert_eq!(
+        (revised.phase, revised.elapsed, revised.waiting),
+        (Phase::WaitToLand, 20 * 60, None)
+    );
+    events.push(step(
+        10,
+        crate::domain::waiting::RUN_WAITING_STARTED,
+        28,
+        json!({"phase": "resume", "status": "needs_session"}),
+    ));
+    let asked = running(&events, now);
+    assert_eq!(
+        (asked.phase, asked.elapsed, asked.waiting),
+        (Phase::WaitToLand, 20 * 60, Some(3 * 60))
+    );
+    events.push(step(
+        11,
+        crate::domain::waiting::RUN_WAITING_ENDED,
+        30,
+        json!({"cause": "answered"}),
+    ));
+    let returning = running(&events, now);
+    assert_eq!(
+        (returning.phase, returning.waiting),
+        (Phase::WaitToLand, None)
+    );
+
+    // In the forecast: the rest of `wait_to_land` past 20 minutes from the
+    // longer sample only. The ready docs task (100 seconds) takes the one
+    // slot while the run waits for a person, and after it otherwise.
+    let docs = || "docs".parse::<TaskChange>().unwrap();
+    let h = History {
+        runs: vec![
+            (None, sample(600, 60, 600)),
+            (None, sample(600, 60, 3000)),
+            (Some(docs()), sample(100, 0, 0)),
+        ],
+        ask_waits: vec![60, 600],
+        ..History::default()
+    };
+    let with = |running: Running| {
+        let mut in_flight = task(1, Priority::High, &[]);
+        in_flight.running = Some(running);
+        let mut ready = task(2, Priority::Normal, &[]);
+        ready.change = Some(docs());
+        run(&[in_flight, ready], &[], 1, &h)
+    };
+    let forecast = with(revised);
+    assert_eq!(forecast.tasks[0].phase, Some(Phase::WaitToLand));
+    assert!(!forecast.tasks[0].waiting);
+    assert_eq!(p50(&forecast, 1), Some(3000 - 1200));
+    assert_eq!(p50(&forecast, 2), Some(1800 + 100));
+    let forecast = with(asked);
+    assert_eq!(forecast.tasks[0].phase, Some(Phase::WaitToLand));
+    assert!(forecast.tasks[0].waiting);
+    // The 600-second answer outlasted 180 seconds: 420 more, then the
+    // rest of `wait_to_land`.
+    assert_eq!(p50(&forecast, 1), Some(420 + 1800));
+    assert_eq!(p50(&forecast, 2), Some(100));
+    let forecast = with(returning);
+    assert!(!forecast.tasks[0].waiting);
+    assert_eq!(p50(&forecast, 2), Some(1800 + 100));
+}

@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use super::{Phase, Running};
 use crate::domain::{
-    EventId, GoalId, GoalVerdict, RunEvent, TaskChange, TaskId,
+    EventId, GoalId, GoalVerdict, RunEvent, RunStatus, TaskChange, TaskId,
     event_kind::{GOAL_CLOSED, RUN_INTEGRATED},
     stats::{self, LiveSnapshot, SlotSnapshot, StatsQuery, timestamp_millis},
     waiting::WaitState,
@@ -126,6 +126,28 @@ pub fn history(
         close_delays,
         ask_waits,
         last_landings,
+    }
+}
+
+/// Whether the latest run of an `in_progress` task in `status` is in
+/// flight for the forecast (task 1519): a run a process executes or
+/// lands, and one between them (`awaiting_integration` through its
+/// review, e2e, exit and the wait to land, `needs_session` sent back by
+/// its review or e2e and through its resume). A `failed` or `interrupted` run is not: its retry waits
+/// for a slot and starts over, as the forecast leaves retries out.
+pub fn in_flight(status: RunStatus) -> bool {
+    match status {
+        RunStatus::Claimed
+        | RunStatus::Starting
+        | RunStatus::Running
+        | RunStatus::Validating
+        | RunStatus::AwaitingIntegration
+        | RunStatus::Integrating
+        | RunStatus::NeedsSession => true,
+        RunStatus::Integrated
+        | RunStatus::Succeeded
+        | RunStatus::Failed
+        | RunStatus::Interrupted => false,
     }
 }
 

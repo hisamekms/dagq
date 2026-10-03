@@ -156,3 +156,131 @@ fn forecast_prints_the_open_tasks_and_goals_with_what_it_assumed() {
 
     assert_eq!(queue.all_events().unwrap().len(), events, "records nothing");
 }
+
+/// Set run `run`'s status as the runtime would have left it.
+fn set_run_status(db: &Path, run: &TaskRun, status: &str) {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .execute(
+            "UPDATE task_runs SET status=?1 WHERE id=?2",
+            rusqlite::params![status, run.id().as_str()],
+        )
+        .unwrap();
+}
+
+fn record(queue: &SqliteQueue, run: &TaskRun, steps: &[(EventKind, Value)]) {
+    for (kind, payload) in steps {
+        queue
+            .record_runtime_event(run.id(), *kind, payload.clone())
+            .unwrap();
+    }
+}
+
+/// Task 1519: the latest run of an `in_progress` task is in flight
+/// through its review and revise (`awaiting_integration`), its resume
+/// (`needs_session`) and its wait to land, in the phase its events put it
+/// in and waiting while it waits for a person; a failed run's retry and
+/// an earlier failed run of a task are not, and a ready task still waits
+/// for a slot.
+#[test]
+fn forecast_keeps_runs_under_review_revise_and_resume_in_flight() {
+    let (dir, db) = queue();
+    let config = dir.path().join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    for title in ["revised", "resumed", "retried", "landing", "ready"] {
+        ok(&db, &["add", title]);
+    }
+    for id in ["1", "2", "3"] {
+        ok(&db, &["ready", id, "--bypass-review"]);
+    }
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let validated = [
+        (EventKind::ReceiptObserved, json!({})),
+        (
+            EventKind::ValidationFinished,
+            json!({"status": "awaiting_integration"}),
+        ),
+    ];
+    // 1: sent back by its review, worked again and validated again.
+    let revised = claim(&mut queue);
+    assert_eq!(revised.task_id().as_i64(), 1);
+    record(&queue, &revised, &validated);
+    record(
+        &queue,
+        &revised,
+        &[
+            (EventKind::ReviewStarted, json!({})),
+            (EventKind::ReviewFinished, json!({"verdict": "revise"})),
+            (EventKind::ResumeStarted, json!({})),
+        ],
+    );
+    record(&queue, &revised, &validated);
+    set_run_status(&db, &revised, "awaiting_integration");
+    // 2: waits for a session to resume it, and for a person meanwhile.
+    let resumed = claim(&mut queue);
+    record(&queue, &resumed, &validated);
+    record(
+        &queue,
+        &resumed,
+        &[(
+            EventKind::RunWaitingStarted,
+            json!({"phase": "resume", "status": "needs_session"}),
+        )],
+    );
+    set_run_status(&db, &resumed, "needs_session");
+    // 3: an earlier run left in an in-flight status is not the latest;
+    // the latest failed, and the retry waits for a slot.
+    let older = claim(&mut queue);
+    record(&queue, &older, &validated);
+    set_run_status(&db, &older, "failed");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute("UPDATE tasks SET status='ready' WHERE id=3", [])
+        .unwrap();
+    let failed = claim(&mut queue);
+    assert_eq!(failed.task_id().as_i64(), 3);
+    record(&queue, &failed, &validated);
+    set_run_status(&db, &failed, "failed");
+    // Not a state the claim leaves, but one that tells the latest run
+    // from any run in flight.
+    set_run_status(&db, &older, "awaiting_integration");
+    ok(&db, &["ready", "4", "--bypass-review"]);
+    // 4: an earlier run failed in its work; the latest waits to land.
+    let earlier = claim(&mut queue);
+    set_run_status(&db, &earlier, "failed");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute("UPDATE tasks SET status='ready' WHERE id=4", [])
+        .unwrap();
+    let landing = claim(&mut queue);
+    assert_eq!(landing.task_id().as_i64(), 4);
+    record(&queue, &landing, &validated);
+    record(&queue, &landing, &[(EventKind::RunE2eStarted, json!({}))]);
+    set_run_status(&db, &landing, "awaiting_integration");
+    ok(&db, &["ready", "5", "--bypass-review"]);
+
+    let all = forecast(None, &db, &config, &["--parallel", "1", "--trials", "5"]);
+    let tasks = all["tasks"].as_array().unwrap();
+    let row = |id: i64| tasks.iter().find(|task| task["id"] == id).unwrap();
+    assert_eq!(ids(&all["tasks"]), [1, 2, 3, 4, 5]);
+    assert_eq!(
+        (&row(1)["phase"], &row(1)["waiting"]),
+        (&json!("wait_to_land"), &json!(false))
+    );
+    assert_eq!(
+        (&row(2)["phase"], &row(2)["waiting"]),
+        (&json!("wait_to_land"), &json!(true))
+    );
+    assert_eq!(
+        (&row(3)["phase"], &row(3)["waiting"]),
+        (&Value::Null, &json!(false))
+    );
+    assert_eq!(
+        (&row(4)["phase"], &row(4)["waiting"]),
+        (&json!("wait_to_land"), &json!(false))
+    );
+    assert_eq!(
+        (&row(5)["phase"], &row(5)["waiting"]),
+        (&Value::Null, &json!(false))
+    );
+}

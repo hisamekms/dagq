@@ -22,7 +22,7 @@ use serde::Serialize;
 
 use super::{ClaimRank, GoalId, TaskChange, TaskId, marks::utc_text};
 
-pub use history::{History, Sample, history, running};
+pub use history::{History, Sample, history, in_flight, running};
 
 /// The version of the method (ADR-0070 decision 1): raised whenever the
 /// calculation changes, so the scoring can be read per method: 2 draws
