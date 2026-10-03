@@ -1,124 +1,9 @@
-//! End-to-end happy paths of the headless worker (ADR-t813-1): a Claude
-//! worker's turn (`claude -p`) and a Codex worker's (`codex exec`, ADR-t813-3),
-//! each through the session wrapper in a real cmux workspace to the landing.
+//! End-to-end happy paths of the Codex worker's headless turns (`codex
+//! exec`, ADR-t813-1 and ADR-t813-3) through the session wrapper in a real
+//! cmux workspace to the landing. A Claude worker's turn (`claude -p`) is
+//! the stub of every other e2e test, and its happy path is
+//! `happy_path_runs_a_stub_agent_through_cmux_and_lands_on_main`.
 use super::*;
-
-/// A task for a headless Claude worker (ADR-t813-1) runs its turn as
-/// `claude -p --output-format stream-json` under the session wrapper in a
-/// real cmux workspace: the turn commits and writes its receipt, the
-/// wrapper records the turn and writes the idle marker, and the run is
-/// validated, reviewed and landed; its exit is the exit request in
-/// `turns/`, not a `/exit` typed into the terminal.
-#[test]
-#[ignore = "needs a running cmux; run with --ignored"]
-fn a_headless_worker_runs_its_turn_through_cmux_and_lands_on_main() {
-    let fixture = fixture();
-    let Fixture {
-        cmux,
-        repo,
-        base,
-        env,
-        ..
-    } = &fixture;
-    let task_id = dagq(
-        env,
-        &[
-            "add",
-            "e2e headless task",
-            "--description",
-            "Add e2e.txt to the worktree. E2E-REVIEW-PASS",
-            "--acceptance",
-            "e2e.txt is committed and seed.txt still exists",
-            "--verify",
-            "test -f seed.txt",
-            "--verify",
-            "test -f e2e.txt",
-            "--provider",
-            "claude",
-            "--headless",
-        ],
-    )["id"]
-        .to_string();
-    assert_eq!(
-        dagq(env, &["ready", &task_id, "--bypass-review"])["status"],
-        "ready"
-    );
-    let mut guard = WorkspaceGuard {
-        cmux: cmux.clone(),
-        ids: Vec::new(),
-    };
-    let pass = supervise_once(&fixture, &[], &[&task_id], &mut guard);
-    let outcome = &pass.outcome;
-    assert_eq!(outcome["errors"], Value::Array(vec![]), "{outcome}");
-    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
-    assert_eq!(outcome["runs"][0]["worker_mode"], "headless", "{outcome}");
-    let detail = dagq(env, &["show", &task_id, "--full"]);
-    assert_eq!(detail["task"]["status"], "completed");
-    let run = &detail["runs"][0];
-    let run_id = run["id"].as_str().unwrap();
-    let run_dir = Path::new(run["run_dir"].as_str().unwrap());
-    let main = git(repo, &["rev-parse", "main"]);
-    assert_eq!(git(repo, &["rev-parse", "main^"]), base.as_str());
-    assert_eq!(
-        fs::read_to_string(repo.join("e2e.txt")).unwrap(),
-        format!("written by the headless stub agent for {run_id}\n")
-    );
-    assert_eq!(run["result_commit"], main.as_str());
-    let log = fs::read_to_string(run["log_path"].as_str().unwrap()).unwrap();
-    assert!(
-        log.contains(&format!(
-            "turn argv: -p --output-format stream-json --session-id {run_id} --resume  --permission-mode auto --add-dir {run_dir} --settings {run_dir}/claude-headless-settings.json --model claude-opus-5-5",
-            run_dir = run_dir.display()
-        )),
-        "{log}"
-    );
-    // The turn's output is kept; the exit was the exit request.
-    let output = fs::read_to_string(run_dir.join("turns/turn-000001.jsonl")).unwrap();
-    assert!(output.contains("\"type\":\"result\""), "{output}");
-    assert!(run_dir.join("turns/exit").exists());
-    let events = detail["events"].as_array().unwrap();
-    let kinds: Vec<&str> = events.iter().map(|e| e["kind"].as_str().unwrap()).collect();
-    let position = |kind: &str| {
-        kinds
-            .iter()
-            .position(|k| *k == kind)
-            .unwrap_or_else(|| panic!("missing {kind} in {kinds:?}"))
-    };
-    let order = [
-        "workspace_created",
-        "wrapper_started",
-        "agent_started",
-        "turn_started",
-        "turn_finished",
-        "session_idle_observed",
-        "validation_finished",
-        "review_finished",
-        "exit_requested",
-        "session_exited",
-        "run_integrated",
-    ];
-    for pair in order.windows(2) {
-        assert!(
-            position(pair[0]) < position(pair[1]),
-            "{} before {}: {kinds:?}",
-            pair[0],
-            pair[1]
-        );
-    }
-    // The receipt is seen while the turn runs or right after it, but
-    // before its idle marker ends the session's watch.
-    assert!(position("receipt_observed") < position("session_idle_observed"));
-    let finished = &events[position("turn_finished")]["payload"];
-    assert_eq!(finished["outcome"], "succeeded", "{finished}");
-    assert_eq!(finished["session_id"], run_id);
-    assert_eq!(finished["usage"]["input_tokens"], 11);
-    assert_eq!(finished["cost_usd"], 0.02);
-    assert_eq!(
-        events[position("session_exited")]["payload"]["exit_code"],
-        0
-    );
-    wait_until_not_listed(cmux, &pass.workspaces[0].1);
-}
 
 /// Stand-in for Codex CLI's headless turns (ADR-t813-1, ADR-t813-3). It
 /// accepts `codex exec --json -C <worktree> -c … -- <prompt>` (and `codex
@@ -306,8 +191,8 @@ fn a_codex_worker_runs_its_turn_through_cmux_and_lands_on_main() {
 }
 
 /// The production CLI flag through real cmux: no Claude executable is
-/// present, an interactive Claude task runs on Codex, and its
-/// lease is released so a person's integration can land the receipt.
+/// present, a Claude task runs on Codex, and its lease is released so a
+/// person's integration can land the receipt.
 #[test]
 #[ignore = "needs a running cmux; run with --ignored"]
 fn no_claude_runs_codex_through_cmux_and_allows_manual_landing() {
@@ -325,7 +210,6 @@ fn no_claude_runs_codex_through_cmux_and_allows_manual_landing() {
         &[
             "add",
             "e2e manual landing",
-            "--interactive",
             "--description",
             "Add e2e.txt to the worktree.",
             "--acceptance",

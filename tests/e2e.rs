@@ -1,10 +1,10 @@
 //! End-to-end happy paths through the real binary, real Git, real cmux and
 //! real launchd, from `add` to the squash landing by `integrate`, from
 //! `up` to `down`, and from a killed supervisor to the adoption of its run.
-//! Claude is replaced by a stub script that does what the prompt asks:
-//! change, commit, write the receipt; resumed with `--resume` it reads the
-//! supervisor's resolution request from its terminal and resolves the
-//! conflict. Requires a running cmux, so it is ignored by
+//! Claude is replaced by a stub script whose worker turns do what the
+//! prompt asks: change, commit, write the receipt; a later turn of the
+//! session takes a person's answer or the supervisor's resolution request as
+//! its prompt and resolves the conflict. Requires a running cmux, so it is ignored by
 //! default: `cargo test --locked --test e2e -- --ignored --nocapture`.
 //!
 //! The launchd `up` / `down` test is temporarily off even under `--ignored`:
@@ -57,7 +57,7 @@ const BIN: &str = env!("CARGO_BIN_EXE_dagq");
 /// The version the binary under test records on its registration.
 const VERSION: &str = dagq::VERSION;
 /// How long a test waits for a supervisor to take a run through a pass
-/// (claim, workspace, session, receipt, review, `/exit`, landing). A pass
+/// (claim, workspace, session, receipt, review, exit request, landing). A pass
 /// took 26 to 90 s at load average 20 to 40 in the auto-update's e2e gate
 /// (2026-09-29 and 30, task 1008), and a `/exit` cmux lost takes the
 /// supervisor's 120 s exit-request timeout and a retry on top of that: the
@@ -82,11 +82,14 @@ const CLEANUP_LIMIT: Duration = Duration::from_secs(60);
 /// The poll ends as soon as the state holds.
 pub(crate) const WAIT_LIMIT: Duration = common::STEP_LIMIT;
 
-/// Stand-in for Claude Code. It accepts the argv the Claude adapter builds and
-/// follows the prompt: work in the cwd worktree, commit, publish the receipt by
-/// atomic rename. Then it behaves like an idle interactive session: it writes
-/// the idle marker the Stop hook would write and waits for `/exit` on its
-/// terminal, which the supervisor types through cmux.
+/// Stand-in for Claude Code. It accepts the argv the Claude adapter builds.
+/// A worker's turn (`claude -p --output-format stream-json`, ADR-t813-1)
+/// follows its prompt: work in the cwd worktree, commit, publish the receipt
+/// by atomic rename and print the turn's stream; the session wrapper writes
+/// the idle marker when the turn ends. A planner session behaves like an
+/// idle interactive session: it writes the idle marker the Stop hook would
+/// write and waits for `/exit` on its terminal, which the runtime types
+/// through cmux.
 const STUB: &str = r#"#!/bin/sh
 set -eu
 # An idle session waits for `/exit` the way Claude Code does: its input box
@@ -184,36 +187,7 @@ if [ "${DAGQ_ROLE:-}" = planner ]; then
   mv "$idle.tmp" "$idle"
   wait_for_exit
 fi
-if [ "$output" = stream-json ]; then
-  # A headless worker's turn (ADR-t813-1): `claude -p --output-format
-  # stream-json --verbose`, the session started by `--session-id` (or
-  # resumed), in the run's permission mode with hook-less settings. It does
-  # the task, commits, writes the receipt and prints the stream: init, a
-  # message, the result.
-  sid=${session_id:-$resume}
-  [ -n "$headless" ] && [ -n "$sid" ] && [ "$permission" = auto ] && [ -n "$debug_file" ] && [ -n "$add_dir" ] \
-    && [ -n "$settings" ] && [ -n "$prompt" ] && [ -n "$model" ] && [ -n "$effort" ] \
-    || { printf 'stub: bad headless turn arguments\n' >&2; exit 64; }
-  ! grep -q '"Stop"' "$settings" || { printf 'stub: headless settings have a hook\n' >&2; exit 64; }
-  grep -q 'Bash(pkill:\*)' "$settings" || { printf 'stub: headless settings deny no pkill\n' >&2; exit 64; }
-  printf 'turn argv: -p --output-format %s --session-id %s --resume %s --permission-mode %s --add-dir %s --settings %s --model %s\n' \
-    "$output" "$session_id" "$resume" "$permission" "$add_dir" "$settings" "$model" >> "$debug_file"
-  printf '{"type":"system","subtype":"init","session_id":"%s","model":"%s","permissionMode":"%s"}\n' "$sid" "$model" "$permission"
-  receipt=$(printf '%s\n' "$prompt" | sed -n 's/^Write a completion receipt to \(.*\) using a temporary file in the same directory.*/\1/p')
-  [ -n "$receipt" ] || { printf 'stub: prompt does not name the receipt path\n' >&2; exit 65; }
-  printf 'written by the headless stub agent for %s\n' "$sid" > e2e.txt
-  git add e2e.txt
-  git commit -q -m 'feat: e2e headless stub change'
-  sh -c 'test -f seed.txt'
-  commit=$(git rev-parse HEAD)
-  printf '{"run_id":"%s","result":"succeeded","commit":"%s","tests":{"status":"passed","evidence_or_reason":"test -f seed.txt exited 0"},"e2e":{"status":"not_applicable","evidence_or_reason":"stub agent"},"subagent_review":{"status":"not_applicable","evidence_or_reason":"stub agent"},"summary":"added e2e.txt headless"}\n' \
-    "$sid" "$commit" > "$receipt.tmp"
-  mv "$receipt.tmp" "$receipt"
-  printf '{"type":"assistant","message":{"model":"%s","content":[{"type":"text","text":"committed e2e.txt"}]}}\n' "$model"
-  printf '{"type":"result","subtype":"success","is_error":false,"num_turns":3,"duration_ms":40,"total_cost_usd":0.02,"session_id":"%s","result":"done","usage":{"input_tokens":11,"output_tokens":5},"permission_denials":[]}\n' "$sid"
-  exit 0
-fi
-if [ -n "$headless" ]; then
+if [ -n "$headless" ] && [ "$output" != stream-json ]; then
   # The supervisor's headless review (ADR-0027): read review.md, print the
   # verdict JSON on stdout. Only a task that says E2E-REVIEW-PASS passes;
   # any other review fails, and its run waits in an approve_landing ask.
@@ -233,87 +207,82 @@ if [ -n "$headless" ]; then
   printf 'stub: no verdict for this task\n' >&2
   exit 3
 fi
-if [ -n "$resume" ]; then
-  # A resumed needs_session run: wait for the supervisor's resolution
-  # request on the terminal, rebase onto the main it names, resolve the
-  # conflict, rewrite the receipt, go idle and wait for /exit. The request
-  # is one long line, longer than a canonical-mode tty line may be.
-  [ -z "$session_id" ] && [ -z "$prompt" ] && [ -n "$debug_file" ] && [ -n "$add_dir" ] && [ -n "$settings" ] \
-    || { printf 'stub: bad resume arguments\n' >&2; exit 64; }
-  grep -q '"Stop"' "$settings" || { printf 'stub: settings lack a Stop hook\n' >&2; exit 64; }
-  [ -n "$model" ] && [ -n "$effort" ] || { printf 'stub: the resume names no model\n' >&2; exit 64; }
-  printf 'argv: --resume %s --debug-file %s --add-dir %s --settings %s --model %s --effort %s\n' "$resume" "$debug_file" "$add_dir" "$settings" "$model" "$effort" > "$debug_file"
-  printf 'resumed %s; waiting for the resolution request\n' "$resume"
-  # Claude Code's input box: the supervisor types the request only once it
-  # is drawn (task 285).
-  rule=──────────────────────────────────────────────────
-  printf '%s\n\342\235\257 \n%s\n  ? for shortcuts\n' "$rule" "$rule"
-  stty -icanon min 1
-  IFS= read -r request
-  stty icanon
-  printf '%s\n' "$request" > "$add_dir/resume-request-seen.txt"
-  main=$(printf '%s\n' "$request" | sed -n 's/.*main is now \([0-9a-f]*\) .*/\1/p')
-  [ -n "$main" ] || { printf 'stub: the request names no main\n' >&2; exit 65; }
-  if ! git rebase -q "$main" >/dev/null 2>&1; then
-    # Names the run: two resumed runs resolve to different files, so the
-    # later one's rebase on the earlier's landing is not empty.
-    printf 'resolved by the session for %s\n' "$resume" > e2e.txt
-    git add e2e.txt
-    GIT_EDITOR=true git rebase --continue >/dev/null
-  fi
-  sh -c 'test -f seed.txt'
-  commit=$(git rev-parse HEAD)
-  receipt="$add_dir/receipt.json"
-  printf '{"run_id":"%s","result":"succeeded","commit":"%s","tests":{"status":"passed","evidence_or_reason":"test -f seed.txt exited 0 after the rebase"},"e2e":{"status":"not_applicable","evidence_or_reason":"stub agent"},"subagent_review":{"status":"not_applicable","evidence_or_reason":"stub agent"},"summary":"resolved e2e.txt"}\n' \
-    "$resume" "$commit" > "$receipt.tmp"
-  mv "$receipt.tmp" "$receipt"
-  printf 'receipt rewritten for %s\n' "$commit"
-  idle="$add_dir/idle.json"
-  printf '{"hook_event_name":"Stop","session_id":"%s","stop_hook_active":false}\n' "$resume" > "$idle.tmp"
-  mv "$idle.tmp" "$idle"
-  wait_for_exit
-fi
-[ -n "$session_id" ] && [ -n "$debug_file" ] && [ -n "$add_dir" ] && [ -n "$settings" ] && [ -n "$prompt" ] \
-  && [ -n "$model" ] && [ -n "$effort" ] \
-  || { printf 'stub: missing arguments\n' >&2; exit 64; }
-grep -q '"Stop"' "$settings" || { printf 'stub: settings lack a Stop hook\n' >&2; exit 64; }
+# A worker's turn (ADR-t813-1): `claude -p --output-format stream-json
+# --verbose`, the session started by `--session-id` (or resumed), in the
+# run's permission mode with hook-less settings. The turn's prompt is the
+# task's, a person's answer (`answer to ask <id>: ...`) or a resolution
+# request; it does what the prompt asks, commits, writes the receipt and
+# prints the stream: init, a message, the result.
+[ "$output" = stream-json ] || { printf 'stub: not a worker turn\n' >&2; exit 64; }
+sid=${session_id:-$resume}
+[ -n "$headless" ] && [ -n "$sid" ] && [ "$permission" = auto ] && [ -n "$debug_file" ] && [ -n "$add_dir" ] \
+  && [ -n "$settings" ] && [ -n "$prompt" ] \
+  || { printf 'stub: bad headless turn arguments\n' >&2; exit 64; }
+! grep -q '"Stop"' "$settings" || { printf 'stub: headless settings have a hook\n' >&2; exit 64; }
+grep -q 'Bash(pkill:\*)' "$settings" || { printf 'stub: headless settings deny no pkill\n' >&2; exit 64; }
 {
-  printf 'argv: --session-id %s --debug-file %s --add-dir %s --settings %s\n' "$session_id" "$debug_file" "$add_dir" "$settings"
+  printf 'turn argv: -p --output-format %s --session-id %s --resume %s --permission-mode %s --add-dir %s --settings %s --model %s\n' \
+    "$output" "$session_id" "$resume" "$permission" "$add_dir" "$settings" "$model"
   printf 'model: %s effort: %s\n' "$model" "$effort"
   printf 'cwd: %s\n' "$(pwd)"
   printf 'env: DAGQ_ROLE=%s DAGQ_QUEUE=%s DAGQ_SERVICE_SOCKET=%s\n' "${DAGQ_ROLE:-}" "${DAGQ_QUEUE:-}" "${DAGQ_SERVICE_SOCKET:-}"
   printf 'run env: E2E_SHARED=%s E2E_RUN_DIR=%s\n' "${E2E_SHARED:-}" "${E2E_RUN_DIR:-}"
-} > "$debug_file"
-run_id=$(printf '%s\n' "$prompt" | sed -n 's/^You are executing dagq task [0-9]*, run \(.*\)\.$/\1/p')
-[ "$run_id" = "$session_id" ] || { printf 'stub: prompt run %s != session %s\n' "$run_id" "$session_id" >&2; exit 65; }
+} >> "$debug_file"
+printf '{"type":"system","subtype":"init","session_id":"%s","model":"%s","permissionMode":"%s"}\n' "$sid" "$model" "$permission"
+# The first turn's prompt names the receipt; a later turn's does not, and
+# the receipt is the run directory's.
 receipt=$(printf '%s\n' "$prompt" | sed -n 's/^Write a completion receipt to \(.*\) using a temporary file in the same directory.*/\1/p')
-[ -n "$receipt" ] || { printf 'stub: prompt does not name the receipt path\n' >&2; exit 65; }
+[ -n "$receipt" ] || receipt="$add_dir/receipt.json"
+# Ends the turn: an assistant message and the result.
+end_turn() {
+  printf '{"type":"assistant","message":{"model":"%s","content":[{"type":"text","text":"%s"}]}}\n' "$model" "$1"
+  printf '{"type":"result","subtype":"success","is_error":false,"num_turns":3,"duration_ms":40,"total_cost_usd":0.02,"session_id":"%s","result":"done","usage":{"input_tokens":11,"output_tokens":5},"permission_denials":[]}\n' "$sid"
+  exit 0
+}
+# Writes the receipt for the branch head by atomic rename.
+write_receipt() {
+  sh -c 'test -f seed.txt'
+  commit=$(git rev-parse HEAD)
+  printf '{"run_id":"%s","result":"succeeded","commit":"%s","tests":{"status":"passed","evidence_or_reason":"%s"},"e2e":{"status":"not_applicable","evidence_or_reason":"stub agent"},"subagent_review":{"status":"not_applicable","evidence_or_reason":"stub agent"},"summary":"%s"}\n' \
+    "$sid" "$commit" "$1" "$2" > "$receipt.tmp"
+  mv "$receipt.tmp" "$receipt"
+}
+main=$(printf '%s\n' "$prompt" | sed -n 's/.*main is now \([0-9a-f]*\) .*/\1/p' | head -n 1)
+if [ -n "$main" ]; then
+  # A resolution request (a resume, a landing recheck): rebase onto the
+  # main it names, resolve the conflict and rewrite the receipt.
+  printf '%s\n' "$prompt" > "$add_dir/resume-request-seen.txt"
+  if ! git rebase -q "$main" >/dev/null 2>&1; then
+    # Names the run: two resumed runs resolve to different files, so the
+    # later one's rebase on the earlier's landing is not empty.
+    printf 'resolved by the session for %s\n' "$sid" > e2e.txt
+    git add e2e.txt
+    GIT_EDITOR=true git rebase --continue >/dev/null
+  fi
+  write_receipt 'test -f seed.txt exited 0 after the rebase' 'resolved e2e.txt'
+  end_turn "resolved e2e.txt on $main"
+fi
 case "$prompt" in
+  'answer to ask '*)
+    # A person's answer, the prompt of the turn after the ask: commit it
+    # with the task's change below.
+    printf '%s\n' "$prompt" | sed -n 1p > answer.txt
+    git add answer.txt
+    ;;
   *E2E-ASK*)
-    # A question: register it as a worker_question ask, go idle, and wait
-    # for the supervisor to type the answer into this terminal.
+    # A question: register it as a worker_question ask and end the turn;
+    # the answer is the prompt of the next one.
     # The worker's dagq goes to the queue service (goal 82's stage (3)).
-    "$add_dir/runner" ask --run "$session_id" --kind worker_question \
+    "$add_dir/runner" ask --run "$sid" --kind worker_question \
       --because scope --topic acceptance_conflict --question 'Which word goes into answer.txt?' > "$add_dir/ask.json"
     # The new ask notified a person through the real cmux.
     grep -Eq '"notified": *true' "$add_dir/ask.json" || { printf 'stub: ask did not notify\n' >&2; exit 66; }
-    idle="$add_dir/idle.json"
-    printf '{"hook_event_name":"Stop","session_id":"%s","stop_hook_active":false}\n' "$session_id" > "$idle.tmp"
-    mv "$idle.tmp" "$idle"
-    printf 'asked; waiting for the answer\n'
-    answer=
-    while IFS= read -r line; do
-      case "$line" in 'answer to ask '*) answer=$line; break ;; esac
-    done
-    [ -n "$answer" ] || { printf 'stub: no answer arrived\n' >&2; exit 66; }
-    printf '%s\n' "$answer" > answer.txt
-    git add answer.txt
+    end_turn 'asked which word goes into answer.txt'
     ;;
 esac
 case "$prompt" in
   *E2E-HOLD*)
     # Work until the test lets go: a supervisor handoff happens meanwhile.
-    printf 'holding until %s/go\n' "$add_dir"
     while [ ! -f "$add_dir/go" ]; do sleep 0.2; done
     ;;
 esac
@@ -341,7 +310,7 @@ if [ -n "$mcp" ]; then
   DAGQ_BROKER_URL=$(sed -n 's/^ *"DAGQ_BROKER_URL": "\(.*\)",*$/\1/p' "$mcp")
   DAGQ_BROKER_TOKEN_FILE=$(sed -n 's/^ *"DAGQ_BROKER_TOKEN_FILE": "\(.*\)",*$/\1/p' "$mcp")
   export DAGQ_BROKER_URL DAGQ_BROKER_TOKEN_FILE
-  "$client" fs write e2e.txt --content "written through the broker for $session_id" > "$add_dir/broker-fs.json" 2>> "$add_dir/broker.err"
+  "$client" fs write e2e.txt --content "written through the broker for $sid" > "$add_dir/broker-fs.json" 2>> "$add_dir/broker.err"
   "$client" exec -- sh -c 'printf "run by the broker\n" > exec.txt' > "$add_dir/broker-exec.json" 2>> "$add_dir/broker.err"
   grep -q '"exit_code":0' "$add_dir/broker-exec.json" || { printf 'stub: the broker exec failed\n' >&2; exit 66; }
   # What the host sees before the broker stages it, for a failure to show.
@@ -351,25 +320,17 @@ if [ -n "$mcp" ]; then
   "$client" git commit --message 'feat: e2e stub change through the broker' > "$add_dir/broker-commit.json" 2>> "$add_dir/broker.err" \
     || { printf 'stub: the broker git commit failed\n' >&2; exit 66; }
 else
-  printf 'written by the stub agent for %s\n' "$session_id" > e2e.txt
+  printf 'written by the stub agent for %s\n' "$sid" > e2e.txt
   git add e2e.txt
   git commit -q -m 'feat: e2e stub change'
 fi
-sh -c 'test -f seed.txt'
-commit=$(git rev-parse HEAD)
-printf '{"run_id":"%s","result":"succeeded","commit":"%s","tests":{"status":"passed","evidence_or_reason":"test -f seed.txt exited 0"},"e2e":{"status":"not_applicable","evidence_or_reason":"stub agent"},"subagent_review":{"status":"not_applicable","evidence_or_reason":"stub agent"},"summary":"added e2e.txt"}\n' \
-  "$session_id" "$commit" > "$receipt.tmp"
-mv "$receipt.tmp" "$receipt"
-printf 'receipt submitted\n'
-# While a test watches the pass (`supervise_once`), the session stays until
+write_receipt 'test -f seed.txt exited 0' 'added e2e.txt'
+# While a test watches the pass (`supervise_once`), the turn stays until
 # the test has seen its workspace listed (every task's at once), not for a
 # fixed time a loaded host may outlast (task 641).
 shared=${E2E_SHARED:-/nonexistent}
 while [ -f "$shared/watching" ] && [ ! -f "$shared/listed" ]; do sleep 0.2; done
-idle="$add_dir/idle.json"
-printf '{"hook_event_name":"Stop","session_id":"%s","stop_hook_active":false}\n' "$session_id" > "$idle.tmp"
-mv "$idle.tmp" "$idle"
-wait_for_exit
+end_turn 'committed e2e.txt'
 "#;
 
 const E2E_DAGQ_TOML: &str =
@@ -724,11 +685,10 @@ fn add_ready_task_described(
     dependencies: &[&str],
     verify: &[&str],
 ) -> String {
-    // The stub worker plays Claude's interactive session.
+    // The stub worker plays Claude's headless turns, the default worker.
     let mut args = vec![
         "add",
         title,
-        "--interactive",
         "--description",
         description,
         "--acceptance",
@@ -946,6 +906,7 @@ fn happy_path_runs_a_stub_agent_through_cmux_and_lands_on_main() {
     assert_eq!(outcome["errors"], Value::Array(vec![]), "{outcome}");
     // Accepted, reviewed and landed by the supervisor alone (ADR-0027).
     assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
+    assert_eq!(outcome["runs"][0]["worker_mode"], "headless", "{outcome}");
     let stderr = &pass.stderr;
     let base = base.as_str();
     let repo = repo.as_path();
@@ -981,6 +942,7 @@ fn happy_path_runs_a_stub_agent_through_cmux_and_lands_on_main() {
         "{listing}"
     );
     assert_eq!(run["branch"], format!("dagq/{run_id}"));
+    let run_dir = Path::new(run["run_dir"].as_str().unwrap());
     assert!(run["workspace_closed_at"].is_number(), "{run}");
     // cmux accepted the close; its list can lag behind it for a moment.
     wait_until_not_listed(cmux, &workspace);
@@ -988,7 +950,6 @@ fn happy_path_runs_a_stub_agent_through_cmux_and_lands_on_main() {
     assert!(stderr.contains("integrated"), "{stderr}");
 
     // The run lives next to the queue.
-    let run_dir = Path::new(run["run_dir"].as_str().unwrap());
     assert_eq!(
         run_dir,
         db.canonicalize()
@@ -1031,15 +992,22 @@ fn happy_path_runs_a_stub_agent_through_cmux_and_lands_on_main() {
             .unwrap();
     assert_eq!(receipt["run_id"], run_id);
     assert_eq!(receipt["commit"], head.as_str());
+    // The worker's turn is `claude -p --output-format stream-json` under
+    // the session wrapper (ADR-t813-1), with the run directory's hook-less
+    // settings.
     let log = fs::read_to_string(run["log_path"].as_str().unwrap()).unwrap();
     assert!(
         log.contains(&format!(
-            "argv: --session-id {run_id} --debug-file {} --add-dir {run_dir} --settings {run_dir}/claude-settings.json",
-            run["log_path"].as_str().unwrap(),
-            run_dir = run["run_dir"].as_str().unwrap()
+            "turn argv: -p --output-format stream-json --session-id {run_id} --resume  --permission-mode auto --add-dir {run_dir} --settings {run_dir}/claude-headless-settings.json --model claude-opus-5-5",
+            run_dir = run_dir.display()
         )),
         "{log}"
     );
+    // The turn's output is kept; the exit was the exit request in
+    // `turns/`, not a `/exit` typed into the terminal.
+    let output = fs::read_to_string(run_dir.join("turns/turn-000001.jsonl")).unwrap();
+    assert!(output.contains("\"type\":\"result\""), "{output}");
+    assert!(run_dir.join("turns/exit").exists());
     // The model and effort were given explicitly (ADR-0079 decision 3).
     assert!(
         log.contains("model: claude-opus-5-5 effort: medium"),
@@ -1112,15 +1080,17 @@ fn happy_path_runs_a_stub_agent_through_cmux_and_lands_on_main() {
             .position(|k| *k == kind)
             .unwrap_or_else(|| panic!("missing {kind} in {kinds:?}"))
     };
-    // The session stays open through validation and the review; /exit is
-    // sent on the passing verdict, and the landing follows the close.
+    // The session stays open through validation and the review; the exit
+    // is requested on the passing verdict, and the landing follows the
+    // close.
     let order = [
         "lease_acquired",
         "worktree_created",
         "workspace_created",
         "wrapper_started",
         "agent_started",
-        "receipt_observed",
+        "turn_started",
+        "turn_finished",
         "session_idle_observed",
         "supervision_finished",
         "validation_finished",
@@ -1144,7 +1114,15 @@ fn happy_path_runs_a_stub_agent_through_cmux_and_lands_on_main() {
             pair[1]
         );
     }
+    // The receipt is seen while the turn runs or right after it, but
+    // before its idle marker ends the session's watch.
+    assert!(position("receipt_observed") < position("session_idle_observed"));
     let event = |kind: &str| events.iter().find(|e| e["kind"] == kind).unwrap();
+    let turn = &event("turn_finished")["payload"];
+    assert_eq!(turn["outcome"], "succeeded", "{turn}");
+    assert_eq!(turn["session_id"], run_id);
+    assert_eq!(turn["usage"]["input_tokens"], 11);
+    assert_eq!(turn["cost_usd"], 0.02);
     assert_eq!(
         event("workspace_created")["payload"]["workspace_id"],
         workspace.as_str()
@@ -1217,21 +1195,24 @@ fn happy_path_runs_a_stub_agent_through_cmux_and_lands_on_main() {
 }
 
 /// The stub worker asks a `worker_question` (its task says `E2E-ASK`) and
-/// goes idle; once the ask is answered the supervisor types the answer into
-/// the worker's cmux terminal, closes the ask, and the worker commits it.
+/// ends its turn; the run waits out of its slot, and once the ask is
+/// answered the supervisor sends the answer to the same session as the
+/// prompt of its next turn (ADR-t813-1), closes the ask, and the worker
+/// commits it with its change, which is reviewed and lands.
 #[test]
 #[ignore = "needs a running cmux; run with --ignored"]
-fn a_worker_question_is_answered_through_the_worker_terminal() {
+fn a_worker_question_is_answered_as_the_next_turn_and_the_run_lands() {
     let fixture = fixture();
-    let Fixture { cmux, env, .. } = &fixture;
+    let Fixture {
+        cmux, repo, env, ..
+    } = &fixture;
     let task_id = dagq(
         env,
         &[
             "add",
             "e2e asking task",
-            "--interactive",
             "--description",
-            "E2E-ASK: ask which word goes into answer.txt, then add e2e.txt",
+            "E2E-ASK: ask which word goes into answer.txt, then add e2e.txt. E2E-REVIEW-PASS",
             "--acceptance",
             "answer.txt holds the answer and e2e.txt is committed",
             "--verify",
@@ -1249,21 +1230,34 @@ fn a_worker_question_is_answered_through_the_worker_terminal() {
         cmux: cmux.clone(),
         ids: Vec::new(),
     };
-    // Answers the ask as the inbox would, once the worker registered it.
+    // Answers the ask as the inbox would, once the worker registered it
+    // and the run waits for it out of its slot: a wait starts only from an
+    // open ask, so an answer before the supervisor's tick saw it would
+    // leave no wait to check.
     let answerer = {
         let env = Env {
             repo: env.repo.clone(),
             data_home: env.data_home.clone(),
         };
+        let task_id = task_id.clone();
         thread::spawn(move || {
             let started = Instant::now();
             loop {
                 assert!(
                     started.elapsed() < SUPERVISE_TIMEOUT,
-                    "the worker asked nothing"
+                    "the worker asked nothing, or its run never waited"
                 );
                 let asks = dagq(&env, &["asks", "--open"]);
-                if let Some(ask) = asks["asks"].as_array().unwrap().first() {
+                let waiting = || {
+                    dagq(&env, &["show", &task_id, "--full"])["events"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|e| e["kind"] == "run_waiting_started")
+                };
+                if let Some(ask) = asks["asks"].as_array().unwrap().first()
+                    && waiting()
+                {
                     assert_eq!(ask["kind"], "worker_question", "{ask}");
                     assert_eq!(ask["asked_by"], "worker", "{ask}");
                     let id = ask["id"].to_string();
@@ -1283,32 +1277,66 @@ fn a_worker_question_is_answered_through_the_worker_terminal() {
         pass.outcome
     );
     assert_eq!(
-        pass.outcome["runs"][0]["status"], "awaiting_integration",
+        pass.outcome["runs"][0]["status"], "integrated",
         "{}",
         pass.outcome
     );
     let detail = dagq(env, &["show", &task_id, "--full"]);
-    let run = &detail["runs"][0];
-    let worktree = Path::new(run["worktree_path"].as_str().unwrap());
+    assert_eq!(detail["task"]["status"], "completed", "{detail}");
+    // The answer landed on main with the change of the same run.
     assert_eq!(
-        fs::read_to_string(worktree.join("answer.txt")).unwrap(),
+        fs::read_to_string(repo.join("answer.txt")).unwrap(),
         format!("answer to ask {ask_id}: blue\n")
     );
-    let delivered: Vec<&Value> = detail["events"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|e| e["kind"] == "ask_delivered")
-        .collect();
+    assert!(repo.join("e2e.txt").is_file());
+    let events = detail["events"].as_array().unwrap();
+    let of = |kind: &str| -> Vec<&Value> { events.iter().filter(|e| e["kind"] == kind).collect() };
+    // Two turns of one session: the ask's, then the answer's.
+    let turns = of("turn_finished");
+    assert_eq!(turns.len(), 2, "{detail}");
+    let run_id = detail["runs"][0]["id"].as_str().unwrap();
+    assert!(
+        turns.iter().all(|t| t["payload"]["session_id"] == run_id),
+        "{turns:?}"
+    );
+    let requested = of("turn_requested");
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    assert_eq!(
+        requested[0]["payload"]["what"],
+        format!("answer of ask {ask_id}")
+    );
+    let delivered = of("ask_delivered");
     assert_eq!(delivered.len(), 1, "{detail}");
     assert_eq!(delivered[0]["payload"]["ask_id"], ask_id);
+    let kinds: Vec<&str> = events.iter().map(|e| e["kind"].as_str().unwrap()).collect();
+    let position = |kind: &str| {
+        kinds
+            .iter()
+            .position(|k| *k == kind)
+            .unwrap_or_else(|| panic!("missing {kind} in {kinds:?}"))
+    };
+    // The run waited out of its slot until the answer, which went to its
+    // turns, and was then reviewed and landed.
+    for pair in [
+        "run_waiting_started",
+        "run_waiting_ended",
+        "ask_delivered",
+        "review_finished",
+        "run_integrated",
+    ]
+    .windows(2)
+    {
+        assert!(
+            position(pair[0]) < position(pair[1]),
+            "{} before {}: {kinds:?}",
+            pair[0],
+            pair[1]
+        );
+    }
     let asks = dagq(env, &["asks", "--all"]);
     assert!(asks["asks"][0]["closed_at"].is_number(), "{asks}");
-    // The only open ask is the one of the failed stub review (task 328).
     let open = dagq(env, &["asks"]);
-    let open = open["asks"].as_array().unwrap();
-    assert_eq!(open.len(), 1, "{open:?}");
-    assert_eq!(open[0]["kind"], "approve_landing");
+    assert_eq!(open["asks"], json!([]), "{open}");
 }
 
 /// Two independent tasks run in two cmux workspaces at once; the task that
@@ -1558,8 +1586,8 @@ fn two_independent_tasks_run_concurrently_and_a_dependent_follows_integration() 
 /// incident: a binary update or a `kill` took the resident supervisor with
 /// it). The wrapper keeps heartbeating in its cmux workspace and the stub
 /// writes its receipt regardless. The next `supervise --once` adopts the
-/// run from the dead supervisor's stale lease (ADR-0012), sends `/exit`
-/// once, validates it, and `integrate` lands it: nothing is redone.
+/// run from the dead supervisor's stale lease (ADR-0012), requests the
+/// session's exit once, validates it, and `integrate` lands it: nothing is redone.
 #[test]
 #[ignore = "needs a running cmux; run with --ignored"]
 fn killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands() {
@@ -1727,7 +1755,7 @@ fn killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands() {
         position("run_adopted") < position("exit_requested"),
         "{kinds:?}"
     );
-    // `exit_requested` is recorded before `/exit` is sent, so a session that
+    // `exit_requested` is recorded before the exit request is sent, so a session that
     // exits before the send returns still lands after it.
     assert!(
         position("exit_requested") < position("session_exited"),
@@ -2341,7 +2369,7 @@ fn up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes
 /// still works (ADR-0045 decision 10): the supervisor process execs the
 /// installed file under its own pid and token, the session in its cmux
 /// workspace is not touched, and the continued supervisor watches the run
-/// through its receipt, `/exit`, review and landing on main. `--rollback`
+/// through its receipt, review, exit request and landing on main. `--rollback`
 /// hands it over again to the binary the install kept.
 #[test]
 #[ignore = "needs a running cmux; run with --ignored"]
