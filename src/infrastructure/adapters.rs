@@ -192,15 +192,7 @@ impl ProcessControl for SystemProcesses {
             "-o",
             "pid=,ppid=,etime=,time=,command=",
         ]))?;
-        let mut processes = parse_ps(&listing);
-        let cwds = working_directories(&uid, &processes);
-        for process in &mut processes {
-            process.cwd = cwds
-                .iter()
-                .find(|(pid, _)| *pid == process.pid)
-                .map(|(_, cwd)| cwd.clone());
-        }
-        Ok(processes)
+        Ok(with_working_directories(parse_ps(&listing), process_cwd))
     }
 
     fn start_identity(&self, pid: u32) -> Option<String> {
@@ -222,7 +214,7 @@ impl ProcessControl for SystemProcesses {
     }
 
     fn descendants(&self, pid: u32) -> Vec<u32> {
-        // Only the parents are needed: no `lsof` for the directories.
+        // Only the parents are needed: no working directories.
         // SAFETY: getuid(2) has no failure and no memory effects.
         let uid = unsafe { libc::getuid() }.to_string();
         output(Command::new("ps").args(["-U", &uid, "-o", "pid=,ppid=,etime=,time=,command="]))
@@ -297,42 +289,77 @@ fn parse_cpu_time(text: &str) -> Option<u64> {
     Some(secs * 1000 + millis)
 }
 
-/// The working directories of `processes`: `/proc/<pid>/cwd` where there is
-/// a `/proc`, else `lsof`'s `cwd` entries of the user. What cannot be read
-/// is left out.
-fn working_directories(uid: &str, processes: &[ProcessInfo]) -> Vec<(u32, String)> {
-    if Path::new("/proc/self/cwd").exists() {
-        return processes
-            .iter()
-            .filter_map(|p| {
-                let cwd = fs::read_link(format!("/proc/{}/cwd", p.pid)).ok()?;
-                Some((p.pid, cwd.to_string_lossy().into_owned()))
-            })
-            .collect();
+/// `processes` with the working directories `read_cwd` reads, one pid at
+/// a time; a process whose directory cannot be read stays listed, with no
+/// `cwd`.
+fn with_working_directories(
+    mut processes: Vec<ProcessInfo>,
+    read_cwd: impl FnMut(u32) -> Option<String>,
+) -> Vec<ProcessInfo> {
+    let mut cwds: HashMap<u32, String> = working_directories(&processes, read_cwd)
+        .into_iter()
+        .collect();
+    for process in &mut processes {
+        process.cwd = cwds.remove(&process.pid);
     }
-    // lsof exits non-zero when it could not read some process; what it
-    // printed still holds.
-    match capture(
-        Command::new("lsof").args(["-a", "-d", "cwd", "-u", uid, "-Fpn"]),
-        OUTPUT_TIMEOUT,
-    ) {
-        Ok((_, stdout, _)) => parse_lsof_cwd(&stdout),
-        Err(_) => Vec::new(),
-    }
+    processes
 }
 
-/// `lsof -Fpn` output: `p<pid>` starts a process, `n<path>` is its file.
-fn parse_lsof_cwd(stdout: &str) -> Vec<(u32, String)> {
-    let mut cwds = Vec::new();
-    let mut pid = None;
-    for line in stdout.lines() {
-        if let Some(value) = line.strip_prefix('p') {
-            pid = value.parse().ok();
-        } else if let (Some(value), Some(pid)) = (line.strip_prefix('n'), pid) {
-            cwds.push((pid, value.to_owned()));
-        }
+/// The working directories of `processes` that `read_cwd` can read; what
+/// cannot be read is left out.
+fn working_directories(
+    processes: &[ProcessInfo],
+    mut read_cwd: impl FnMut(u32) -> Option<String>,
+) -> Vec<(u32, String)> {
+    processes
+        .iter()
+        .filter_map(|p| Some((p.pid, read_cwd(p.pid)?)))
+        .collect()
+}
+
+/// The working directory of `pid` from `proc_pidinfo(PROC_PIDVNODEPATHINFO)`:
+/// one system call for the one process, no `lsof` and no walk of other
+/// processes' files (task 1581). `None` when the process is gone or not
+/// the user's.
+#[cfg(target_os = "macos")]
+fn process_cwd(pid: u32) -> Option<String> {
+    let pid = libc::c_int::try_from(pid).ok()?;
+    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_vnodepathinfo>()).ok()?;
+    let mut info = std::mem::MaybeUninit::<libc::proc_vnodepathinfo>::zeroed();
+    // SAFETY: the buffer is a zeroed proc_vnodepathinfo of `size` bytes,
+    // which proc_pidinfo(3) fills for this flavor and does not keep.
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if read != size {
+        return None;
     }
-    cwds
+    // SAFETY: proc_pidinfo filled all `size` bytes, and every bit pattern
+    // is a valid proc_vnodepathinfo (integers and arrays of them).
+    let info = unsafe { info.assume_init() };
+    let path: Vec<u8> = info
+        .pvi_cdir
+        .vip_path
+        .as_flattened()
+        .iter()
+        .take_while(|&&c| c != 0)
+        .map(|&c| c as u8)
+        .collect();
+    (!path.is_empty()).then(|| String::from_utf8_lossy(&path).into_owned())
+}
+
+/// The working directory of `pid` from `/proc/<pid>/cwd`; `None` where
+/// there is no `/proc` or the link cannot be read.
+#[cfg(not(target_os = "macos"))]
+fn process_cwd(pid: u32) -> Option<String> {
+    let cwd = fs::read_link(format!("/proc/{pid}/cwd")).ok()?;
+    Some(cwd.to_string_lossy().into_owned())
 }
 
 fn signal(pid: u32, signal: libc::c_int) -> Result<()> {
@@ -3836,7 +3863,7 @@ mod tests {
         );
     }
     #[test]
-    fn ps_and_lsof_listings_are_read() {
+    fn ps_listings_are_read() {
         assert_eq!(parse_etime("05"), Some(5));
         assert_eq!(parse_etime("01:05"), Some(65));
         assert_eq!(parse_etime("02:01:05"), Some(7265));
@@ -3861,10 +3888,56 @@ mod tests {
         assert_eq!(processes[1].elapsed_secs, 65);
         assert_eq!(processes[1].cpu_ms, None);
         assert_eq!(processes[1].command, "sleep 600 --x");
+    }
+
+    /// Task 1581: the directories are read one pid at a time, once for
+    /// each listed process and nothing more (no `lsof` of the user's every
+    /// process); a pid whose directory cannot be read is left out of what
+    /// was read, and its process stays listed with no `cwd`.
+    #[test]
+    fn each_listed_pid_is_read_once_and_one_unread_stays_listed_without_a_cwd() {
+        let processes =
+            parse_ps("  7  1 00:05 0:00.01 a\n  8  7 00:05 0:00.01 b\n  9  7 00:05 0:00.01 c\n");
+        let mut reads = Vec::new();
+        let read = |pid: u32| {
+            reads.push(pid);
+            (pid != 8).then(|| format!("/w/{pid}"))
+        };
         assert_eq!(
-            parse_lsof_cwd("p42\nfcwd\nn/tmp/a b\np43\nfcwd\nn/\n"),
-            [(42, "/tmp/a b".to_owned()), (43, "/".to_owned())]
+            working_directories(&processes, read),
+            [(7, "/w/7".to_owned()), (9, "/w/9".to_owned())]
         );
+        assert_eq!(reads, [7, 8, 9]);
+        let mut reads = 0;
+        let listed = with_working_directories(processes, |pid| {
+            reads += 1;
+            (pid != 8).then(|| format!("/w/{pid}"))
+        });
+        assert_eq!(reads, 3);
+        let cwds: Vec<_> = listed.iter().map(|p| (p.pid, p.cwd.as_deref())).collect();
+        assert_eq!(cwds, [(7, Some("/w/7")), (8, None), (9, Some("/w/9"))]);
+    }
+
+    /// Task 1581: macOS reads a process's directory with `proc_pidinfo`,
+    /// a child's as it was started in, and none for a pid that runs
+    /// nothing.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn proc_pidinfo_reads_a_childs_directory_and_none_for_a_pid_that_runs_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().canonicalize().unwrap();
+        let mut child = Command::new("/bin/sleep")
+            .arg("30")
+            .current_dir(&dir)
+            .spawn()
+            .unwrap();
+        let cwd = process_cwd(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+        let cwd = PathBuf::from(cwd.unwrap());
+        assert_eq!(cwd.canonicalize().unwrap(), dir);
+        assert_eq!(process_cwd(child.id()), None);
+        assert_eq!(process_cwd(u32::MAX), None);
     }
 
     #[test]

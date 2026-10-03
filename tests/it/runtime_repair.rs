@@ -3,6 +3,8 @@ use crate::runtime_support;
 
 use runtime_support::*;
 
+use dagq::{application::ProcessControl, infrastructure::adapters::SystemProcesses};
+
 /// The worker of the `long_background` tests: it commits, leaves an orphan
 /// `sleep` in its worktree (its pid in `bg.pid` of the run directory), goes
 /// idle with background work running, and writes its receipt once the
@@ -50,13 +52,36 @@ fn supervise_repair(
     Arc<TestReviewer>,
     thread::JoinHandle<Result<Value>>,
 ) {
+    supervise_repair_with(
+        db,
+        repo,
+        agent,
+        stall,
+        recoveries,
+        supervise_options(4, true),
+    )
+}
+
+/// [`supervise_repair`] from `options`.
+fn supervise_repair_with(
+    db: &Path,
+    repo: &Path,
+    agent: &str,
+    stall: dagq::domain::stall::StallConfig,
+    recoveries: &[&str],
+    options: SuperviseOptions,
+) -> (
+    Arc<TestWorkspace>,
+    Arc<TestReviewer>,
+    thread::JoinHandle<Result<Value>>,
+) {
     let backend = Arc::new(TestWorkspace::new(db, false, agent));
     let recoveries: Vec<String> = recoveries.iter().map(|r| (*r).to_owned()).collect();
     let reviewer =
         Arc::new(TestReviewer::new(&[verdict("pass", &[], "fine")]).with_triages(&recoveries));
     let options = SuperviseOptions {
         stall: Some(stall),
-        ..supervise_options(4, true)
+        ..options
     };
     let supervisor = {
         let (db, repo, backend, reviewer) = (
@@ -446,10 +471,18 @@ fn idle_process_stall() -> dagq::domain::stall::StallConfig {
 /// time is the `idle_process` alert, whose recovery job gets the idle
 /// processes with their CPU time and stops the orphan; the session then
 /// writes its receipt and the run lands without an ask.
+///
+/// Task 1581: `stop_processes` lists the host's processes once more after
+/// the job's verdict, right before it stops one, not from the sample the
+/// alert came from (no sample is taken while the job runs).
 #[test]
 fn a_process_without_cpu_progress_is_an_idle_process_alert_for_the_recovery_job() {
     let (_dir, repo, db) = fixture();
-    let (backend, reviewer, supervisor) = supervise_repair(
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let verdict_given = db.with_file_name("verdict given");
+    let options = supervise_options(4, true);
+    let passes = options.passes.clone();
+    let (backend, reviewer, supervisor) = supervise_repair_with(
         &db,
         &repo,
         &idle_agent(
@@ -457,14 +490,31 @@ fn a_process_without_cpu_progress_is_an_idle_process_alert_for_the_recovery_job(
             r#"while kill -0 "$pid" 2>/dev/null; do sleep 0.05; done"#,
         ),
         idle_process_stall(),
-        &[&recovery_verdict(&json!({
-            "verdict": "repair",
-            "confidence": "high",
-            "diagnosis": "an orphan sleep uses no CPU and holds the session",
-            "actions": [{"action": "stop_processes", "pids": ["PID"]}],
-        }))],
+        &[&format!(
+            "touch {}\n{}",
+            shell_path(&verdict_given),
+            recovery_verdict(&json!({
+                "verdict": "repair",
+                "confidence": "high",
+                "diagnosis": "an orphan sleep uses no CPU and holds the session",
+                "actions": [{"action": "stop_processes", "pids": ["PID"]}],
+            }))
+        )],
+        SuperviseOptions {
+            processes: Some(runtime::ProcessesPort(Arc::new(Counted {
+                calls: calls.clone(),
+                verdict_given,
+            }))),
+            ..options
+        },
     );
     finished(&db, &backend, supervisor);
+    let calls = calls.lock().unwrap().clone();
+    let lists = calls.iter().filter(|c| c.starts_with("list")).count();
+    let passes = passes.load(Ordering::SeqCst);
+    // The measure of task 1581's receipt; how many passes a sample serves
+    // depends on the host's load, so only the stop below is asserted.
+    eprintln!("task 1581: {lists} list() calls in {passes} supervisor passes");
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(1)).unwrap();
     assert_eq!(detail.task.status(), TaskStatus::Completed);
@@ -512,6 +562,58 @@ fn a_process_without_cpu_progress_is_an_idle_process_alert_for_the_recovery_job(
     assert_eq!(finished[0]["alert"], "idle_process");
     assert_eq!(finished[0]["applied"], json!(["stop_processes"]));
     assert!(stalled_asks(&queue).is_empty());
+    // The stop chose the orphan from a listing of its own, taken after the
+    // job gave its verdict, not from the sample.
+    let stop = calls
+        .iter()
+        .position(|c| *c == format!("terminate {pid}"))
+        .unwrap_or_else(|| panic!("{calls:?}"));
+    assert_eq!(calls[stop - 1], "list after the verdict", "{calls:?}");
+}
+
+/// The host's processes, with the supervisor's `list` and `terminate`
+/// calls recorded in order; a `list` once `verdict_given` exists is
+/// recorded as after the verdict.
+struct Counted {
+    calls: Arc<Mutex<Vec<String>>>,
+    verdict_given: PathBuf,
+}
+
+impl ProcessControl for Counted {
+    fn alive(&self, pid: u32) -> bool {
+        SystemProcesses.alive(pid)
+    }
+    fn terminate(&self, pid: u32) -> Result<()> {
+        self.calls.lock().unwrap().push(format!("terminate {pid}"));
+        SystemProcesses.terminate(pid)
+    }
+    fn interrupt(&self, pid: u32) -> Result<()> {
+        SystemProcesses.interrupt(pid)
+    }
+    fn kill(&self, pid: u32) -> Result<()> {
+        SystemProcesses.kill(pid)
+    }
+    fn reap(&self, pid: u32) {
+        SystemProcesses.reap(pid)
+    }
+    fn list(&self) -> Result<Vec<dagq::domain::recovery::ProcessInfo>> {
+        let call = if self.verdict_given.exists() {
+            "list after the verdict"
+        } else {
+            "list"
+        };
+        self.calls.lock().unwrap().push(call.to_owned());
+        SystemProcesses.list()
+    }
+    fn start_identity(&self, pid: u32) -> Option<String> {
+        SystemProcesses.start_identity(pid)
+    }
+    fn started_at(&self, pid: u32) -> Option<i64> {
+        SystemProcesses.started_at(pid)
+    }
+    fn descendants(&self, pid: u32) -> Vec<u32> {
+        SystemProcesses.descendants(pid)
+    }
 }
 
 /// A process that lives past the threshold but keeps using CPU time is
