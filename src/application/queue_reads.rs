@@ -45,6 +45,7 @@ pub enum QueueRead {
     GoalShow(GoalShowRead),
     Lint(LintRead),
     ObserveHistory(ObserveHistoryRead),
+    ObserveInput(ObserveInputRead),
 }
 
 /// `list`'s options.
@@ -296,6 +297,24 @@ pub struct ObserveHistoryRead {
     pub limit: usize,
 }
 
+/// `observe --input`'s options: the observation's directory name, the
+/// section's path, and the page of a list.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObserveInputRead {
+    pub observation: String,
+    #[serde(default)]
+    pub section: Option<String>,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default = "input_page")]
+    pub limit: usize,
+}
+
+const fn input_page() -> usize {
+    crate::observer::INPUT_PAGE
+}
+
 const fn ten() -> u32 {
     10
 }
@@ -504,6 +523,7 @@ impl QueueRead {
             UseCase::GoalShow => Self::GoalShow(read(use_case, params)?),
             UseCase::Lint => Self::Lint(read(use_case, params)?),
             UseCase::ObserveHistory => Self::ObserveHistory(read(use_case, params)?),
+            UseCase::ObserveInput => Self::ObserveInput(read(use_case, params)?),
             UseCase::Hello
             | UseCase::Ask
             | UseCase::Show
@@ -617,6 +637,10 @@ impl QueueRead {
                     return Err(bad("lint names a task or a proposal"));
                 }
             }
+            Self::ObserveInput(read) => {
+                crate::observer::check_read(&read.observation, read.limit)
+                    .map_err(|error| bad(format!("{error:#}")))?;
+            }
             Self::Candidates
             | Self::Stats(_)
             | Self::Marks(_)
@@ -714,6 +738,11 @@ impl QueueRead {
                 json!({"tasks": read.tasks, "proposals": read.proposals}),
             ),
             Self::ObserveHistory(read) => (UseCase::ObserveHistory, json!({"limit": read.limit})),
+            Self::ObserveInput(read) => (
+                UseCase::ObserveInput,
+                json!({"observation": read.observation, "section": read.section,
+                       "offset": read.offset, "limit": read.limit}),
+            ),
         }
     }
 }
@@ -820,6 +849,10 @@ mod tests {
             (UseCase::GoalShow, json!({"id": 2, "full": true})),
             (UseCase::Lint, json!({"tasks": [1], "proposals": [2]})),
             (UseCase::ObserveHistory, json!({"limit": 4})),
+            (
+                UseCase::ObserveInput,
+                json!({"observation": "1791005872-1", "section": "stats.runs", "offset": 3, "limit": 2}),
+            ),
         ] {
             let read = QueueRead::parse(use_case, &params).unwrap().unwrap();
             let (sent, again) = read.request();

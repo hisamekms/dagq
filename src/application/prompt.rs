@@ -4875,13 +4875,20 @@ mod tests {
             gaps_in_a_row: 0,
             repo_root: Path::new("/repo"),
         });
+        // With every section cut, so the prompt names each read of what it
+        // left out.
         let observer = crate::observer::observer_prompt(
             crate::observer::ObserveMode::Hourly,
             "dagq",
-            None,
-            &json!({}),
+            Some(crate::domain::EventId::new(12)),
+            "1791005872",
+            &json!({"kpi": {"breaches": [{}], "config": {}}, "open_asks": [{}], "findings": [{}], "notes": [{}],
+                    "stats": {"alerts": [{}], "running_alerts": [{}], "overall": {}},
+                    "improvements": {"running": 0}, "graph": {"candidates": [1], "critical": [1]}}),
+            1,
         )
-        .unwrap();
+        .unwrap()
+        .text;
         let throughput = [ReviewMode::Hourly, ReviewMode::Daily, ReviewMode::Weekly]
             .map(|mode| {
                 crate::throughput_review::review_prompt(
@@ -4931,6 +4938,7 @@ mod tests {
             "forecast",
             "lint",
             "observe_history",
+            "observe_input",
         ] {
             assert!(named.contains(read), "no prompt names {read}: {named:?}");
         }

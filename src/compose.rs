@@ -3642,6 +3642,13 @@ pub fn read_queue(
             json!({"tasks": targets, "violations": crate::domain::lint::lint(&input)})
         }
         QueueRead::ObserveHistory(read) => crate::observer::history(queue, read.limit)?,
+        QueueRead::ObserveInput(read) => crate::observer::read_input(
+            db,
+            &read.observation,
+            read.section.as_deref(),
+            read.offset,
+            read.limit,
+        )?,
     })
 }
 

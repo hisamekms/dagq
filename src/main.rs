@@ -777,12 +777,23 @@ enum Command {
     /// observe_finished with outcome skipped (unless --since is given). The agent loads no MCP server.
     Observe {
         /// List the past observations instead, newest first: the events each read, the findings and asks it
-        /// wrote, how long it took and whether it was skipped.
-        #[arg(long)]
+        /// wrote, how long it took, whether it was skipped and what its prompt came to.
+        #[arg(long, group = "observe_read")]
         history: bool,
-        /// With --history, how many observations to list.
-        #[arg(long, requires = "history", default_value_t = dagq::observer::HISTORY_LIMIT)]
-        limit: usize,
+        /// Read the whole input of the observation whose directory is named (`dir` of --history) instead:
+        /// what its prompt left out. Without --section, lists its sections with their bytes.
+        #[arg(long, group = "observe_read", value_name = "OBSERVATION")]
+        input: Option<String>,
+        /// With --input, the section to read: a path of keys joined by `.` (stats.runs, kpi.breaches).
+        #[arg(long, requires = "input")]
+        section: Option<String>,
+        /// With --input, the first item of a list section to read.
+        #[arg(long, requires = "input", default_value_t = 0)]
+        offset: usize,
+        /// With --history, how many observations to list; with --input, how many items of a list
+        /// section to read (at most 24000 bytes of them).
+        #[arg(long, requires = "observe_read")]
+        limit: Option<usize>,
         /// Event id to read stats past; defaults to the cursor the last observe saved
         /// (<queue dir>/observer/cursor), or with --daily the last event 24 hours ago.
         #[arg(long)]
@@ -1787,7 +1798,8 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
         | Command::Goal {
             command: GoalCommand::List | GoalCommand::Show { .. },
         }
-        | Command::Observe { history: true, .. } => queue(C::QueueRead),
+        | Command::Observe { history: true, .. }
+        | Command::Observe { input: Some(_), .. } => queue(C::QueueRead),
         Command::Watch { .. } => queue(C::QueueWatch),
         Command::Graph { out: Some(_), .. } | Command::Report { .. } => queue(C::ExportFile),
         // The runtime operations, as the application names them (task 734).
@@ -1983,9 +1995,12 @@ fn operation(command: &Command, env: impl Fn(&str) -> Option<String>) -> Option<
         Command::Plan { .. } => Operation::Plan,
         Command::Supervise { .. } => Operation::Supervise,
         // Starting a job of the supervisor's timer, as `observe` (ADR-t996-1).
-        Command::Observe { history: false, .. } | Command::ThroughputReview { .. } => {
-            Operation::Observe
+        Command::Observe {
+            history: false,
+            input: None,
+            ..
         }
+        | Command::ThroughputReview { .. } => Operation::Observe,
         Command::Integrate { id, next, .. } => {
             Operation::Integrate(id.filter(|_| !next).map(TaskId::new))
         }
@@ -2394,7 +2409,21 @@ fn queue_read(command: &Command) -> Option<QueueRead> {
             history: true,
             limit,
             ..
-        } => QueueRead::ObserveHistory(reads::ObserveHistoryRead { limit }),
+        } => QueueRead::ObserveHistory(reads::ObserveHistoryRead {
+            limit: limit.unwrap_or(dagq::observer::HISTORY_LIMIT),
+        }),
+        Command::Observe {
+            input: Some(observation),
+            section,
+            offset,
+            limit,
+            ..
+        } => QueueRead::ObserveInput(reads::ObserveInputRead {
+            observation,
+            section,
+            offset,
+            limit: limit.unwrap_or(dagq::observer::INPUT_PAGE),
+        }),
         _ => return None,
     })
 }
@@ -2914,7 +2943,8 @@ fn execute(cli: Cli) -> Result<Value> {
         | Command::Search { .. }
         | Command::Related { .. }
         | Command::Lint { .. }
-        | Command::Observe { history: true, .. } => unreachable!("a read is answered above"),
+        | Command::Observe { history: true, .. }
+        | Command::Observe { input: Some(_), .. } => unreachable!("a read is answered above"),
         Command::Add {
             title,
             description,
@@ -3803,6 +3833,7 @@ fn execute(cli: Cli) -> Result<Value> {
         )?,
         Command::Observe {
             history: false,
+            input: None,
             since,
             dry_run,
             daily,
@@ -3836,6 +3867,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     timeout: Duration::from_secs(timeout),
                     dagq: env::current_exe()?,
                     user_config: dagq::infrastructure::language::user_config_file(),
+                    prompt_limit: dagq::observer::PROMPT_LIMIT,
                 },
             )?
         }
@@ -3973,7 +4005,11 @@ fn install_telemetry(command: &Command, location: &QueueLocation) {
             log_dir.clone().unwrap_or_else(|| location.log_dir.clone()),
         )),
         Command::Integrate { .. } => Some(("integrate", location.log_dir.clone())),
-        Command::Observe { history: false, .. } => Some(("observe", location.log_dir.clone())),
+        Command::Observe {
+            history: false,
+            input: None,
+            ..
+        } => Some(("observe", location.log_dir.clone())),
         Command::ThroughputReview { .. } => Some(("throughput-review", location.log_dir.clone())),
         Command::Session { .. } => Some(("session", location.log_dir.clone())),
         Command::PlannerSession { .. } => Some(("planner-session", location.log_dir.clone())),
@@ -4457,7 +4493,8 @@ mod tests {
         "broker logs",
         "broker audit",
         "service status",
-        // Forms that read: `graph` without `--out` and `observe --history`.
+        // Forms that read: `graph` without `--out` and `observe --history` /
+        // `--input`.
         "graph",
         "observe",
     ];

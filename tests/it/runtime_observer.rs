@@ -71,6 +71,7 @@ fn observe_options(mode: dagq::observer::ObserveMode) -> dagq::observer::Observe
         timeout: Duration::from_secs(60),
         dagq: PathBuf::from(env!("CARGO_BIN_EXE_dagq")),
         user_config: None,
+        prompt_limit: dagq::observer::PROMPT_LIMIT,
     }
 }
 
@@ -228,7 +229,7 @@ echo 'observer diagnostic' >&2
     assert!(
         fs::read_to_string(dir.join("prompt.md"))
             .unwrap()
-            .contains("\"stats\"")
+            .contains("### stats: ")
     );
     assert_eq!(
         fs::read_to_string(dir.join("output.err")).unwrap(),
@@ -321,7 +322,7 @@ echo 'observer diagnostic' >&2
     assert!(prompt.contains("finding record --kind"), "{prompt}");
     assert!(prompt.contains("--finding ID"), "{prompt}");
     assert!(!prompt.contains("goal add --draft"), "{prompt}");
-    assert!(prompt.contains("\"findings\""), "{prompt}");
+    assert!(prompt.contains("### findings: "), "{prompt}");
     assert!(
         prompt.contains("slots idle while task 1 is ready"),
         "{prompt}"
@@ -926,9 +927,15 @@ impl AgentProvider for BreachRecorder {
         bail!("the observer has no run")
     }
     fn headless_command(&self, cwd: &Path, prompt: &str, _: JobAccess) -> Result<CommandSpec> {
-        let start = prompt.rfind("```json\n").unwrap() + "```json\n".len();
-        let end = prompt.rfind("\n```").unwrap();
-        let input: Value = serde_json::from_str(&prompt[start..end]).unwrap();
+        // The whole input is beside the prompt, which carries each breach.
+        let input: Value =
+            serde_json::from_str(&fs::read_to_string(cwd.join("input.json")).unwrap()).unwrap();
+        for breach in input["kpi"]["breaches"].as_array().unwrap() {
+            assert!(
+                prompt.contains(&format!("\"subject\":{}", breach["subject"])),
+                "{prompt}"
+            );
+        }
         fs::write(cwd.join("seen.json"), input["kpi"].to_string()).unwrap();
         let mut script = String::from("set -e\n");
         for breach in input["kpi"]["breaches"].as_array().unwrap() {
@@ -1380,4 +1387,150 @@ fn observer_uses_the_supplied_providers_failure_signals() {
     .unwrap();
     assert_eq!(done["wall"], "usage_limit", "{done}");
     assert!(done["hold_ask_id"].is_number());
+}
+
+/// Task 1567 (ADR-t1566-1): an input past the prompt's limit, its required
+/// open asks included, leaves the rest out with the command that reads
+/// it, which the observer's agent runs as the observer (`dagq` only,
+/// `JobAccess::QueueCli`, `DAGQ_ROLE=observer` through the queue's
+/// service) to get the whole of what was left out; `observe_started` and
+/// `observe --history` record the prompt's bytes per section.
+#[test]
+fn the_observer_reads_what_its_prompt_left_out_and_the_prompt_bytes_are_recorded() {
+    use dagq::observer::ObserveMode;
+    let (_dir, _repo, db) = fixture();
+    let question = "q".repeat(2_000);
+    // One open ask per task.
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    for n in 1..=12 {
+        if n > 1 {
+            add_ready_task(&mut queue, "asked", &[]);
+        }
+        crate::common::cli::ok(
+            &db,
+            &[
+                "ask",
+                "--kind",
+                "decide",
+                "--because",
+                "scope",
+                "--task",
+                &n.to_string(),
+                "--question",
+                &question,
+                "--option",
+                "a",
+                "--cmux",
+                "/usr/bin/true",
+            ],
+        );
+    }
+    // How big the asks are, and the prompt with everything left out, from
+    // dry runs.
+    let dry_run = |prompt_limit| {
+        observe(
+            &db,
+            &ObserverProvider {
+                script: String::new(),
+            },
+            &dagq::observer::ObserveOptions {
+                dry_run: true,
+                prompt_limit,
+                ..observe_options(ObserveMode::Hourly)
+            },
+        )
+        .unwrap()
+    };
+    let dry = dry_run(dagq::observer::PROMPT_LIMIT);
+    let least = dry_run(1)["prompt_bytes"].as_u64().unwrap() as usize;
+    let section = |sections: &Value, name: &str| {
+        sections
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|section| section["name"] == name)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(
+        section(&dry["prompt_sections"], "open_asks")["omitted"],
+        0,
+        "{dry}"
+    );
+    let asks_bytes = section(&dry["prompt_sections"], "open_asks")["bytes"]
+        .as_u64()
+        .unwrap() as usize;
+    // Room for about half the asks: the required section is cut too, and
+    // every other section left out.
+    let limit = least + asks_bytes / 2 + dagq::observer::LANGUAGE_RESERVE;
+    let provider = ObserverProvider {
+        script: r#"
+set -e
+read=$(grep -o 'dagq observe --input [0-9-]* --section open_asks --offset [0-9]*' prompt.md | head -n 1)
+printf '%s' "$read" > read.txt
+$read > left_out.json
+"#
+        .into(),
+    };
+    let report = observe(
+        &db,
+        &provider,
+        &dagq::observer::ObserveOptions {
+            prompt_limit: limit,
+            ..observe_options(ObserveMode::Hourly)
+        },
+    )
+    .unwrap();
+    assert_eq!(report["outcome"], "succeeded", "{report}");
+    let dir = PathBuf::from(report["dir"].as_str().unwrap());
+    let prompt = fs::read_to_string(dir.join("prompt.md")).unwrap();
+    assert!(prompt.len() <= limit, "{} > {limit}", prompt.len());
+    let read = fs::read_to_string(dir.join("read.txt")).unwrap();
+    // The read is a `dagq` command, the only tool Claude's observer has.
+    assert!(read.starts_with("dagq observe --input "), "{read}");
+    let claude = ClaudeCode {
+        executable: "claude".into(),
+    }
+    .headless_command(&dir, "observe", dagq::observer::ACCESS)
+    .unwrap();
+    let args: Vec<_> = claude.get_args().collect();
+    assert!(args.iter().any(|arg| *arg == "Bash(dagq:*)"), "{args:?}");
+    let started = queue_events(&db, "observe_started").pop().unwrap();
+    let asks = section(&started["prompt_sections"], "open_asks");
+    let (kept, omitted) = (
+        asks["kept"].as_u64().unwrap() as usize,
+        asks["omitted"].as_u64().unwrap() as usize,
+    );
+    assert!(omitted > 0 && kept + omitted == 12, "{asks}");
+    assert!(
+        prompt.contains(&format!(
+            "Left out {omitted} items (from offset {kept}): read them with `{read}`"
+        )),
+        "{prompt}"
+    );
+    // The agent read every ask left out, whole, as the observer.
+    let left_out: Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("left_out.json")).unwrap()).unwrap();
+    assert_eq!(left_out["total"], 12, "{left_out}");
+    assert_eq!(left_out["offset"], kept, "{left_out}");
+    let items = left_out["items"].as_array().unwrap();
+    assert_eq!(items.len(), omitted.min(dagq::observer::INPUT_PAGE));
+    // Newest first, so the left-out ones are the oldest asks.
+    assert_eq!(items[0]["id"], 12 - kept as i64, "{left_out}");
+    assert!(items.iter().all(|ask| ask["question"] == question.as_str()));
+    assert!(queue_events(&db, "authorization_denied").is_empty());
+    // The bytes recorded are the prompt's, section by section.
+    assert_eq!(started["prompt_bytes"], prompt.len());
+    assert_eq!(started["prompt_limit"], limit);
+    let sum: u64 = started["prompt_sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|section| section["bytes"].as_u64().unwrap())
+        .sum();
+    assert_eq!(sum as usize, prompt.len());
+    let history = dagq::observer::history(&SqliteQueue::open(&db).unwrap(), 1).unwrap();
+    let latest = &history["observations"][0];
+    assert_eq!(latest["prompt_bytes"], prompt.len(), "{history}");
+    assert_eq!(latest["prompt_sections"], started["prompt_sections"]);
 }

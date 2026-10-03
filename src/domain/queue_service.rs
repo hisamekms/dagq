@@ -92,6 +92,9 @@ string_enum!(UseCase {
     GoalShow => "goal_show",
     Lint => "lint",
     ObserveHistory => "observe_history",
+    // A section of an observation's whole input, as `dagq observe --input`
+    // prints it: what the observer's prompt left out (task 1567).
+    ObserveInput => "observe_input",
 });
 
 impl UseCase {
@@ -99,7 +102,7 @@ impl UseCase {
     /// `words` are its arguments after the global options, the subcommand
     /// first. `None` for a command the service does not answer (the
     /// control side's, `watch`, `report`, `graph --out`, `ask close`,
-    /// `observe` without `--history`, `locate`, `doctor`, the planning
+    /// `observe` without `--history` or `--input`, `locate`, `doctor`, the planning
     /// commands, ...).
     pub fn of_command(words: &[&str]) -> Option<Self> {
         let has = |flag: &str| {
@@ -139,6 +142,7 @@ impl UseCase {
             ("goal", Some("show")) => Self::GoalShow,
             ("lint", _) => Self::Lint,
             ("observe", _) if has("--history") => Self::ObserveHistory,
+            ("observe", _) if has("--input") => Self::ObserveInput,
             _ => return None,
         })
     }
@@ -480,6 +484,16 @@ mod tests {
             (&["finding", "record", "--kind", "x"], "finding_record"),
             (&["observe", "--history"], "observe_history"),
             (&["observe", "--limit", "5", "--history"], "observe_history"),
+            (
+                &[
+                    "observe",
+                    "--input",
+                    "1791005872",
+                    "--section",
+                    "stats.runs",
+                ],
+                "observe_input",
+            ),
             (&["ask", "--kind", "blocked"], "ask"),
             (&["graph", "--format", "d2"], "graph"),
             (&["stats"], "stats"),

@@ -361,7 +361,8 @@ fn run(
         | UseCase::GoalList
         | UseCase::GoalShow
         | UseCase::Lint
-        | UseCase::ObserveHistory => unreachable!("a read is answered above"),
+        | UseCase::ObserveHistory
+        | UseCase::ObserveInput => unreachable!("a read is answered above"),
         UseCase::Ask => {
             let p: AskParams = params(use_case, raw)?;
             let ask = NewAsk {

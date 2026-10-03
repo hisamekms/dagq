@@ -8,7 +8,14 @@
 //! own and no alert the last one did not see starts no agent and records a
 //! skipped `observe_finished`; the agent
 //! loads no MCP server; `observe --history` reads what each observation
-//! read and wrote.
+//! read and wrote. The prompt carries the input within limits and says
+//! how to read what it left out ([`input`], ADR-t1566-1).
+mod input;
+
+pub use input::{
+    INPUT_PAGE, LANGUAGE_RESERVE, PROMPT_LIMIT, Reading, SectionSize, check_read, read_input,
+};
+
 use crate::domain::EventKind;
 use std::{
     fs,
@@ -73,6 +80,8 @@ pub struct ObserveOptions {
     /// The user's `config.toml` the language comes from under the bound
     /// checkout's `dagq.toml` (ADR-t616-2); `None` reads none.
     pub user_config: Option<PathBuf>,
+    /// The prompt's bytes ([`PROMPT_LIMIT`] but in tests).
+    pub prompt_limit: usize,
 }
 
 /// `<queue dir>/observer`: one directory per observation and the cursor.
@@ -185,20 +194,42 @@ pub fn observe(
         checkout.as_deref(),
         options.user_config.as_deref(),
     );
-    let prompt = crate::domain::language::with_instruction(
-        observer_prompt(options.mode, command, since, &input)?,
-        language.as_ref(),
+    // The prompt names the observation's directory, whose `input.json`
+    // `observe --input` reads what the prompt left out from.
+    let dir = if options.dry_run {
+        None
+    } else {
+        Some(observation_dir(&db, started)?)
+    };
+    let observation = dir.as_deref().and_then(Path::file_name).map_or_else(
+        || "DRY-RUN".to_owned(),
+        |name| name.to_string_lossy().into_owned(),
     );
-    if options.dry_run {
-        return Ok(json!({
+    let fitted = observer_prompt(
+        options.mode,
+        command,
+        since,
+        &observation,
+        &input,
+        options.prompt_limit,
+    )?;
+    let prompt = crate::domain::language::with_instruction(fitted.text, language.as_ref());
+    let prompt_record = json!({
+        "prompt_bytes": prompt.len(),
+        "prompt_limit": options.prompt_limit,
+        "prompt_sections": fitted.sections,
+    });
+    let Some(dir) = dir else {
+        let mut payload = json!({
             "dry_run": true,
             "mode": options.mode.as_str(),
             "since": since,
             "cursor": cursor,
             "prompt": prompt,
-        }));
-    }
-    let dir = observation_dir(&db, started)?;
+        });
+        merge(&mut payload, &prompt_record);
+        return Ok(payload);
+    };
     fs::write(dir.join("prompt.md"), &prompt)?;
     fs::write(
         dir.join("input.json"),
@@ -208,10 +239,9 @@ pub fn observe(
     // The job's Claude session id (ADR-0048 decision 4).
     let session_id = uuid::Uuid::new_v4().to_string();
     let launch = observer_launch(checkout.as_deref());
-    let event_mark = queue.record_queue_event(
-        EventKind::ObserveStarted,
-        json!({"mode": options.mode.as_str(), "since": since, "dir": dir, "session_id": session_id, "launch": launch.to_value()}),
-    )?;
+    let mut started_payload = json!({"mode": options.mode.as_str(), "since": since, "dir": dir, "session_id": session_id, "launch": launch.to_value()});
+    merge(&mut started_payload, &prompt_record);
+    let event_mark = queue.record_queue_event(EventKind::ObserveStarted, started_payload)?;
     tracing::info!(
         mode = options.mode.as_str(),
         since = since.map(EventId::as_i64),
@@ -314,6 +344,13 @@ pub fn observe(
     Ok(payload)
 }
 
+/// `extra`'s keys set on the object `payload`.
+fn merge(payload: &mut Value, extra: &Value) {
+    if let (Some(payload), Some(extra)) = (payload.as_object_mut(), extra.as_object()) {
+        payload.extend(extra.clone());
+    }
+}
+
 /// Add the observer to the hold ask of `wall`, or open it (notifying the
 /// inbox through `cmux` when there is one), and record `auth_required` or
 /// `usage_limited` on the queue when it joined. Returns the ask's ID.
@@ -365,15 +402,48 @@ pub struct ObserverInput {
 /// The input the prompt carries and `input.json` keeps: `stats`, the KPIs
 /// (ADR-0051 decision 24), the unsettled findings with the improvements
 /// running and their limit (decision 25), the notes, the open asks and
-/// the graph.
+/// the graph. The lists the prompt may cut go in the order it keeps them
+/// (task 1567), so what it left out is the rest from an offset of
+/// `input.json`: the KPI breaches longest first (`streak`, then
+/// `subject`), the findings weightiest first (`impact` high, normal, low,
+/// then more `occurrences`, then the newest), the open asks newest first.
 pub fn observer_input(input: ObserverInput) -> Value {
+    let mut kpi = input.kpi;
+    if let Some(breaches) = kpi.get_mut("breaches").and_then(Value::as_array_mut) {
+        breaches.sort_by_key(|breach| {
+            (
+                std::cmp::Reverse(breach["streak"].as_i64().unwrap_or_default()),
+                breach["subject"].as_str().unwrap_or_default().to_owned(),
+            )
+        });
+    }
+    let mut findings = input.findings;
+    if let Some(findings) = findings.as_array_mut() {
+        findings.sort_by_key(|finding| {
+            let impact = match finding["impact"].as_str() {
+                Some("high") => 0,
+                Some("normal") => 1,
+                Some("low") => 2,
+                _ => 3,
+            };
+            (
+                impact,
+                std::cmp::Reverse(finding["occurrences"].as_i64().unwrap_or_default()),
+                std::cmp::Reverse(finding["id"].as_i64().unwrap_or_default()),
+            )
+        });
+    }
+    let mut open_asks = input.open_asks;
+    if let Some(asks) = open_asks.as_array_mut() {
+        asks.sort_by_key(|ask| std::cmp::Reverse(ask["id"].as_i64().unwrap_or_default()));
+    }
     json!({
         "stats": input.stats,
-        "kpi": input.kpi,
-        "findings": input.findings,
+        "kpi": kpi,
+        "findings": findings,
         "improvements": input.improvements,
         "notes": input.notes,
-        "open_asks": input.open_asks,
+        "open_asks": open_asks,
         "graph": input.graph,
     })
 }
@@ -509,6 +579,11 @@ fn history_entry(finished: &RunEvent, started: Option<&RunEvent>) -> Value {
         "exit_code": field("exit_code"),
         "error": field("error"),
         "dir": field("dir"),
+        // What the prompt came to (task 1567); none for a skipped one or
+        // one started before it was recorded.
+        "prompt_bytes": started.map_or(Value::Null, |started| started.payload.get("prompt_bytes").cloned().unwrap_or(Value::Null)),
+        "prompt_limit": started.map_or(Value::Null, |started| started.payload.get("prompt_limit").cloned().unwrap_or(Value::Null)),
+        "prompt_sections": started.map_or(Value::Null, |started| started.payload.get("prompt_sections").cloned().unwrap_or(Value::Null)),
     })
 }
 
@@ -650,13 +725,17 @@ pub(crate) fn run_agent(
     }
 }
 
-/// The observer's instructions and inputs.
+/// The observer's instructions and its input within `limit` bytes
+/// ([`input::fit`]): `observation` names the directory `observe --input`
+/// reads the whole input of.
 pub fn observer_prompt(
     mode: ObserveMode,
     dagq: &str,
     since: Option<EventId>,
+    observation: &str,
     input: &Value,
-) -> Result<String> {
+    limit: usize,
+) -> Result<input::Fitted> {
     let window = match (mode, since) {
         (ObserveMode::Daily, _) => {
             "This is the daily observation: the stats cover the runs that finished in the last 24 hours. \
@@ -671,7 +750,7 @@ pub fn observer_prompt(
             "This is the first hourly observation: the stats cover the latest finished runs.".to_owned()
         }
     };
-    Ok(format!(
+    let head = format!(
         "You are the observer of the dagq queue, started headless by the supervisor.\n\
          Your job is to observe whether dagq is running well, not to fix it.\n\
          {window}\n\
@@ -693,7 +772,8 @@ pub fn observer_prompt(
            `{dagq} ask --kind blocked --because <scope|discard|recovery_failed> --finding ID --question '...' --option '...' --recommend '<one of the options, or propose / dismiss>' --confidence <high|low> [--task ID | --run ID]` \
            (the queue refuses a blocked ask without `--recommend`). \
            One ask per finding stays open: do not ask again when an open ask below already covers it.\n\
-         - Read more when needed: `{dagq} findings [ID] [--full]`, `{dagq} stats`, `{dagq} kpi`, `{dagq} marks`, `{dagq} notes`, `{dagq} show ID`, `{dagq} asks`, `{dagq} graph`, `{dagq} forecast`, `{dagq} goal show ID`.\n\
+         - Read more when needed: `{dagq} findings [ID] [--full]`, `{dagq} stats`, `{dagq} kpi`, `{dagq} marks`, `{dagq} notes`, `{dagq} show ID`, `{dagq} asks`, `{dagq} graph`, `{dagq} forecast`, `{dagq} goal show ID`. \
+           `{dagq} observe --input {observation}` lists the sections of this observation's whole input with their bytes, and `--section PATH` reads one as the inputs below were taken (a list {INPUT_PAGE} items at a time from `--offset N`, `--limit N` for more or fewer).\n\
          - Read the record, not prose, for the evidence: `{dagq} events --full` gives each event with its run_id and whole payload, narrowed by `--run ID`, `--task ID`, `--goal ID`, `--kind KIND` (repeatable), `--since TIME` and `--until TIME` (UTC, YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ); \
            without `--kind` it lists attention events only, so add `--all` for every kind; it gives the oldest 100 first, so page on with `--after <cursor>` or narrow with `--since`. \
            `{dagq} timeline RUN` gives a run's events oldest first with each gap and its reason (idle, waiting_ask, background, after_receipt, ...). \
@@ -750,9 +830,21 @@ pub fn observer_prompt(
          \n\
          When you are done, print one line saying how many findings you recorded or updated, how many of them you left as findings without an ask, and how many asks you wrote.\n\
          \n\
-         Inputs (JSON: stats, the KPIs, the open and proposed findings, the improvements running, the latest {PROMPT_NOTES} notes, the open asks, and the graph's candidates and critical chain):\n\
-         ```json\n{}\n```\n",
-        serde_json::to_string_pretty(input)?
+         Inputs of observation {observation}: the KPI breaches, the open asks, stats' alerts and running alerts (the required sections, cut only by the whole prompt's limit), \
+         then stats, the KPIs, the open and proposed findings, the improvements running, the latest {PROMPT_NOTES} notes and the graph's critical chain and candidates, \
+         within {limit} bytes in all and each within its own limits. \
+         Each section is JSON, an item or a key a line, and says what it left out and how to read it; never judge on what a section left out without reading it.\n\
+         \n",
+    );
+    Ok(input::fit(
+        &head,
+        input,
+        &Reading {
+            observation,
+            dagq,
+            since: since.map(EventId::as_i64),
+        },
+        limit,
     ))
 }
 
@@ -801,14 +893,31 @@ mod tests {
         }
         assert_eq!(input["kpi"]["breaches"][0]["evidence_event_id"], 7);
         assert_eq!(input["improvements"]["reached"], true);
-        let prompt = observer_prompt(ObserveMode::Daily, "dagq", None, &input).unwrap();
+        let prompt = observer_prompt(
+            ObserveMode::Daily,
+            "dagq",
+            None,
+            "1791005872",
+            &input,
+            PROMPT_LIMIT,
+        )
+        .unwrap()
+        .text;
         assert!(prompt.contains("\"lead_time/all\""), "{prompt}");
     }
 
     #[test]
     fn prompt_explains_how_to_read_the_kpis() {
-        let prompt =
-            observer_prompt(ObserveMode::Hourly, "dagq", None, &json!({"kpi": {}})).unwrap();
+        let prompt = observer_prompt(
+            ObserveMode::Hourly,
+            "dagq",
+            None,
+            "1791005872",
+            &json!({"kpi": {}}),
+            PROMPT_LIMIT,
+        )
+        .unwrap()
+        .text;
         for text in [
             "`kpi.targets`",
             "`breach` (off target that many judged periods in a row",
@@ -831,8 +940,16 @@ mod tests {
 
     #[test]
     fn prompt_explains_how_to_read_the_stall_thresholds() {
-        let prompt =
-            observer_prompt(ObserveMode::Hourly, "dagq", None, &json!({"stats": {}})).unwrap();
+        let prompt = observer_prompt(
+            ObserveMode::Hourly,
+            "dagq",
+            None,
+            "1791005872",
+            &json!({"stats": {}}),
+            PROMPT_LIMIT,
+        )
+        .unwrap()
+        .text;
         for text in [
             "`stall_thresholds`",
             "`idle_without_receipt_secs`, `send_confirm_secs`, `background_alert_secs`, `idle_process_secs`",
@@ -854,8 +971,16 @@ mod tests {
 
     #[test]
     fn prompt_explains_how_to_record_the_flaky_tests() {
-        let prompt =
-            observer_prompt(ObserveMode::Hourly, "dagq", None, &json!({"stats": {}})).unwrap();
+        let prompt = observer_prompt(
+            ObserveMode::Hourly,
+            "dagq",
+            None,
+            "1791005872",
+            &json!({"stats": {}}),
+            PROMPT_LIMIT,
+        )
+        .unwrap()
+        .text;
         for text in [
             "`failed_tests.flaky_candidates`",
             "`integrate_event_ids`",
@@ -881,8 +1006,16 @@ mod tests {
     /// the reading as its recommendation and confidence.
     #[test]
     fn prompt_keeps_a_wait_or_leave_it_reading_to_the_finding() {
-        let prompt =
-            observer_prompt(ObserveMode::Hourly, "dagq", None, &json!({"stats": {}})).unwrap();
+        let prompt = observer_prompt(
+            ObserveMode::Hourly,
+            "dagq",
+            None,
+            "1791005872",
+            &json!({"stats": {}}),
+            PROMPT_LIMIT,
+        )
+        .unwrap()
+        .text;
         for text in [
             "When your reading is that waiting clears it or that it is best left alone (leave it, wait), open no ask: record or update its finding only, with that reading in its `--detail`.",
             "Raise a finding to the inbox as a blocked ask only when your reading needs a person",
@@ -902,8 +1035,16 @@ mod tests {
 
     #[test]
     fn prompt_names_the_cli_that_reads_the_record() {
-        let prompt =
-            observer_prompt(ObserveMode::Hourly, "dagq", None, &json!({"stats": {}})).unwrap();
+        let prompt = observer_prompt(
+            ObserveMode::Hourly,
+            "dagq",
+            None,
+            "1791005872",
+            &json!({"stats": {}}),
+            PROMPT_LIMIT,
+        )
+        .unwrap()
+        .text;
         assert!(!prompt.contains("events --all"), "{prompt}");
         for text in [
             "`dagq events --full`",
@@ -914,5 +1055,288 @@ mod tests {
         ] {
             assert!(prompt.contains(text), "the prompt lacks {text:?}");
         }
+    }
+
+    /// A big input: many findings, notes and asks, a large `stats` and
+    /// KPI breaches with long marks.
+    fn big_input() -> Value {
+        const IMPACTS: [&str; 3] = ["low", "normal", "high"];
+        let text = "x".repeat(2_000);
+        observer_input(ObserverInput {
+            stats: json!({
+                "next_cursor": 99,
+                "overall": {"runs": 50},
+                "alerts": (0..300).map(|n| json!({"kind": "ask_unanswered", "ask_id": n, "detail": text})).collect::<Vec<_>>(),
+                "running_alerts": [],
+                "runs": (0..500).map(|n| json!({"run_id": n, "summary": text})).collect::<Vec<_>>(),
+            }),
+            kpi: json!({
+                "config": {"breach_periods": 3},
+                "breaches": (0..40).map(|n| json!({"subject": format!("k{n:02}/all"), "streak": n % 4,
+                    "marks": (0..150).map(|m| json!({"label": format!("mark {m}")})).collect::<Vec<_>>()})).collect::<Vec<_>>(),
+                "trend": {"day": (0..7).map(|_| json!({"label": "d", "marks": (0..100).collect::<Vec<_>>(), "worsened": []})).collect::<Vec<_>>()},
+            }),
+            findings: Value::Array(
+                (0..400)
+                    .map(|n| {
+                        json!({"id": n, "impact": IMPACTS[n % 3], "occurrences": n % 5,
+                                    "summary": text, "evidence": (0..100).collect::<Vec<_>>()})
+                    })
+                    .collect(),
+            ),
+            improvements: json!({"running": 2, "limit": 2, "reached": true}),
+            notes: Value::Array(
+                (0..300)
+                    .map(|n| json!({"id": n, "payload": {"text": text}}))
+                    .collect(),
+            ),
+            open_asks: Value::Array(
+                (0..200)
+                    .map(|n| json!({"id": n, "question": text}))
+                    .collect(),
+            ),
+            graph: json!({"candidates": (0..5_000).collect::<Vec<_>>(), "critical": (0..100).collect::<Vec<_>>()}),
+        })
+    }
+
+    fn sections(fitted: &input::Fitted) -> std::collections::BTreeMap<&str, &SectionSize> {
+        fitted
+            .sections
+            .iter()
+            .map(|section| (section.name.as_str(), section))
+            .collect()
+    }
+
+    /// ADR-t1566-1 decisions 4 and 5: the whole stays within the limit
+    /// with the language instruction, each section within its own, and a
+    /// section that left something out says how many and how to read it.
+    #[test]
+    fn a_big_input_stays_within_the_limits_and_names_what_it_left_out() {
+        let input = big_input();
+        let fitted = observer_prompt(
+            ObserveMode::Hourly,
+            "dagq",
+            Some(EventId::new(12)),
+            "1791005872",
+            &input,
+            PROMPT_LIMIT,
+        )
+        .unwrap();
+        let language = crate::domain::language::instruction("ja");
+        assert!(language.len() + 2 <= LANGUAGE_RESERVE);
+        assert!(fitted.text.len() + language.len() + 2 <= PROMPT_LIMIT);
+        assert_eq!(
+            fitted
+                .sections
+                .iter()
+                .map(|section| section.bytes)
+                .sum::<usize>(),
+            fitted.text.len()
+        );
+        let sizes = sections(&fitted);
+        // Within each section's own limits (its bytes and the lines around
+        // them).
+        for (name, items, bytes) in [
+            ("stats", usize::MAX, 40_000),
+            ("findings", 100, 48_000),
+            ("notes", 20, 12_000),
+            ("graph.candidates", 200, 4_000),
+            ("graph.critical", 50, 2_000),
+        ] {
+            let size = sizes[name];
+            assert!(size.kept <= items, "{size:?}");
+            assert!(size.bytes <= bytes + 1_000, "{size:?}");
+        }
+        for (name, total) in [
+            ("findings", 400),
+            ("notes", 300),
+            ("graph.candidates", 5_000),
+            ("stats.alerts", 300),
+        ] {
+            let size = sizes[name];
+            assert_eq!(size.total, total, "{size:?}");
+            assert!(size.omitted > 0, "{size:?}");
+            assert!(
+                fitted.text.contains(&format!(
+                    "Left out {} items (from offset {}): read them with `dagq observe --input 1791005872 --section {name} --offset {}`",
+                    size.omitted, size.kept, size.kept
+                )),
+                "{name}: {}",
+                fitted.text
+            );
+        }
+        assert!(fitted.text.contains(
+            "Left out 1 key (runs): read each with `dagq observe --input 1791005872 --section stats.<key>`, or now with `dagq stats --since 12`."
+        ));
+        assert!(
+            fitted
+                .text
+                .contains("or now with `dagq findings` and `dagq findings ID --full`")
+        );
+        // An item keeps the start of its strings and the last of its lists.
+        assert!(fitted.text.contains("\"marks_omitted\":140"));
+        assert!(fitted.text.contains("… (1700 more characters)"));
+        assert!(fitted.text.contains("Strings are cut at 300 characters"));
+    }
+
+    /// ADR-t1566-1 decision 4: the order is fixed. The required sections
+    /// go first and take the whole's room before any other; the lists go
+    /// weightiest or newest first.
+    #[test]
+    fn the_sections_keep_their_items_in_the_fixed_order() {
+        let input = big_input();
+        let breaches = input["kpi"]["breaches"].as_array().unwrap();
+        assert_eq!(breaches[0]["streak"], 3);
+        assert_eq!(breaches[0]["subject"], "k03/all");
+        assert_eq!(breaches[39]["streak"], 0);
+        let findings = input["findings"].as_array().unwrap();
+        assert_eq!(findings[0]["impact"], "high");
+        assert_eq!(findings[0]["occurrences"], 4);
+        assert!(
+            findings[0]["id"].as_i64() > findings[1]["id"].as_i64()
+                || findings[0]["occurrences"] != findings[1]["occurrences"]
+        );
+        assert_eq!(findings[399]["impact"], "low");
+        assert_eq!(input["open_asks"][0]["id"], 199);
+        let fitted =
+            observer_prompt(ObserveMode::Hourly, "dagq", None, "1", &input, PROMPT_LIMIT).unwrap();
+        let sizes = sections(&fitted);
+        // The breaches and the asks fit whole; the alerts take what is
+        // left of the room before stats, which gets none.
+        assert_eq!(sizes["kpi.breaches"].omitted, 0);
+        assert_eq!(sizes["open_asks"].omitted, 0);
+        assert!(sizes["stats.alerts"].kept > 0);
+        let position = |text: &str| fitted.text.find(text).unwrap();
+        assert!(position("### kpi.breaches") < position("### open_asks"));
+        assert!(position("### open_asks") < position("### stats.alerts"));
+        assert!(position("### stats.running_alerts") < position("### stats:"));
+        assert!(position("### findings") < position("### notes"));
+    }
+
+    /// ADR-t1566-1 decisions 3 and 5: when the required sections alone
+    /// pass the limit, they are cut too, never silently: the prompt names
+    /// the read the observer's `dagq` takes, and the instructions stay
+    /// whole.
+    #[test]
+    fn required_sections_past_the_limit_say_how_to_read_the_rest() {
+        let input = big_input();
+        let least = observer_prompt(ObserveMode::Daily, "dagq", None, "1", &input, 1).unwrap();
+        assert!(
+            least
+                .sections
+                .iter()
+                .skip(1)
+                .all(|section| section.kept == 0)
+        );
+        assert!(least.text.starts_with("You are the observer"));
+        assert!(least.text.contains("Do not:"));
+        let limit = least.text.len() + LANGUAGE_RESERVE + 5_000;
+        let fitted = observer_prompt(ObserveMode::Daily, "dagq", None, "1", &input, limit).unwrap();
+        assert!(fitted.text.len() + LANGUAGE_RESERVE <= limit);
+        let sizes = sections(&fitted);
+        let breaches = sizes["kpi.breaches"];
+        assert!(breaches.kept > 0 && breaches.omitted > 0, "{breaches:?}");
+        assert!(fitted.text.contains(&format!(
+            "read them with `dagq observe --input 1 --section kpi.breaches --offset {}`, or now with `dagq kpi`.",
+            breaches.kept
+        )));
+        for name in ["open_asks", "stats.alerts", "findings", "notes"] {
+            assert_eq!(sizes[name].kept, 0, "{name}");
+            assert!(
+                fitted
+                    .text
+                    .contains(&format!("--section {name} --offset 0`")),
+                "{name}"
+            );
+        }
+        assert!(
+            fitted.text.contains(
+                "`dagq observe --input 1` lists the sections of this observation's whole input"
+            ),
+            "{}",
+            fitted.text
+        );
+    }
+
+    /// `observe --input` reads the whole input of an observation: its
+    /// sections, a list a page at a time within the bytes, and an object
+    /// too big as its keys.
+    #[test]
+    fn the_input_of_an_observation_reads_by_section_and_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("queue.db");
+        let observation = observer_dir(&db).join("1791005872");
+        fs::create_dir_all(&observation).unwrap();
+        fs::write(
+            observation.join("input.json"),
+            serde_json::to_string(&big_input()).unwrap(),
+        )
+        .unwrap();
+        let index = read_input(&db, "1791005872", None, 0, INPUT_PAGE).unwrap();
+        assert!(
+            index["sections"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|section| section["section"] == "stats.runs" && section["items"] == 500),
+            "{index}"
+        );
+        let page = read_input(&db, "1791005872", Some("findings"), 398, INPUT_PAGE).unwrap();
+        assert_eq!(
+            (
+                page["total"].clone(),
+                page["items"].as_array().unwrap().len()
+            ),
+            (json!(400), 2)
+        );
+        assert_eq!(page["next_offset"], Value::Null);
+        let page = read_input(&db, "1791005872", Some("notes"), 0, 100).unwrap();
+        assert!(page["items"].as_array().unwrap().len() < 100);
+        assert!(serde_json::to_string(&page["items"]).unwrap().len() <= input::INPUT_READ_BYTES);
+        assert_eq!(page["next_offset"], page["items"].as_array().unwrap().len());
+        let stats = read_input(&db, "1791005872", Some("stats"), 0, INPUT_PAGE).unwrap();
+        assert!(
+            stats["keys"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|key| key["section"] == "stats.runs")
+        );
+        let cursor =
+            read_input(&db, "1791005872", Some("stats.next_cursor"), 0, INPUT_PAGE).unwrap();
+        assert_eq!(cursor["value"], 99);
+        assert!(read_input(&db, "1791005872", Some("stats.nothing"), 0, 1).is_err());
+        assert!(read_input(&db, "1791005873", None, 0, 1).is_err());
+        assert!(read_input(&db, "../1791005872", None, 0, 1).is_err());
+    }
+
+    /// `observe --history` gives what each observation's prompt came to,
+    /// from its `observe_started` (task 1567).
+    #[test]
+    fn the_history_gives_the_prompt_bytes_of_an_observation() {
+        let event = |kind: EventKind, payload: Value| RunEvent {
+            id: EventId::new(1),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.as_str().to_owned(),
+            payload,
+            created_at: "2026-10-03T00:00:00Z".to_owned(),
+            actor: None,
+        };
+        let started = event(
+            EventKind::ObserveStarted,
+            json!({"dir": "/q/observer/1", "prompt_bytes": 120, "prompt_limit": PROMPT_LIMIT,
+                   "prompt_sections": [{"name": "instructions", "bytes": 120, "total": 0, "kept": 0, "omitted": 0}]}),
+        );
+        let finished = event(
+            EventKind::ObserveFinished,
+            json!({"outcome": "error", "dir": "/q/observer/1"}),
+        );
+        let entry = history_entry(&finished, Some(&started));
+        assert_eq!(entry["prompt_bytes"], 120);
+        assert_eq!(entry["prompt_limit"], PROMPT_LIMIT);
+        assert_eq!(entry["prompt_sections"][0]["name"], "instructions");
+        assert_eq!(history_entry(&finished, None)["prompt_bytes"], Value::Null);
     }
 }

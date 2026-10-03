@@ -166,6 +166,19 @@ fn the_read_roles_read_what_their_prompts_name_as_the_command_line_prints_it() {
     let run = queue.run.id().to_string();
     let (task_text, goal_text) = (task.to_string(), goal.to_string());
     let plan_review = token(&queue, &Principal::of(&ActorContext::plan_review_job(1, 1)));
+    // An observation's whole input, which `observe --input` reads.
+    let observation = queue
+        .db
+        .parent()
+        .unwrap()
+        .join("observer")
+        .join("1791005872");
+    std::fs::create_dir_all(&observation).unwrap();
+    std::fs::write(
+        observation.join("input.json"),
+        json!({"stats": {"next_cursor": 4}, "findings": [{"id": 1}, {"id": 2}]}).to_string(),
+    )
+    .unwrap();
     let reads: Vec<(UseCase, Value, Vec<&str>)> = vec![
         (UseCase::List, json!({}), vec!["list"]),
         (
@@ -266,6 +279,26 @@ fn the_read_roles_read_what_their_prompts_name_as_the_command_line_prints_it() {
             UseCase::ObserveHistory,
             json!({}),
             vec!["observe", "--history"],
+        ),
+        (
+            UseCase::ObserveInput,
+            json!({"observation": "1791005872"}),
+            vec!["observe", "--input", "1791005872"],
+        ),
+        (
+            UseCase::ObserveInput,
+            json!({"observation": "1791005872", "section": "findings", "offset": 1, "limit": 1}),
+            vec![
+                "observe",
+                "--input",
+                "1791005872",
+                "--section",
+                "findings",
+                "--offset",
+                "1",
+                "--limit",
+                "1",
+            ],
         ),
     ];
     for (use_case, params, args) in &reads {

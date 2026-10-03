@@ -35,7 +35,7 @@ host実行ではこの判定は助言的（advisory）で、sandboxでも隔離�
 
 | 群 | capability | 対応するCLI |
 | --- | --- | --- |
-| 読み取り | `queue.read` | `locate` `list` `show` `candidates` `graph`（`--out`なし） `status` `asks` `events` `timeline` `stats` `kpi` `forecast` `doctor` `broker status` `broker logs` `broker audit` `notes` `marks` `findings` `search` `related` `proposal list/show` `planners` `requests` `lint` `goal list/show` `observe --history` |
+| 読み取り | `queue.read` | `locate` `list` `show` `candidates` `graph`（`--out`なし） `status` `asks` `events` `timeline` `stats` `kpi` `forecast` `doctor` `broker status` `broker logs` `broker audit` `notes` `marks` `findings` `search` `related` `proposal list/show` `planners` `requests` `lint` `goal list/show` `observe --history` `observe --input` |
 | | `queue.watch` | `watch` |
 | | `queue.export` | `graph --out` `report`（ファイルを書く） |
 | 計画 | `goal.write` | `goal add` `goal edit` |
@@ -55,7 +55,7 @@ host実行ではこの判定は助言的（advisory）で、sandboxでも隔離�
 | | `review.prepare` | `review`（review.mdを書く） |
 | 観察 | `finding.record` / `finding.resolve` / `finding.dismiss` | `finding record` / `finding resolve` / `finding dismiss` |
 | | `finding.ask` | `ask --kind blocked --finding` |
-| | `observe.run` | `observe`（`--history`を除く） |
+| | `observe.run` | `observe`（`--history`・`--input`を除く） |
 | 人との対話 | `ask.answer` / `ask.close` | `answer` / `ask close` |
 | | `planner.open` | `plan` |
 | | `request.record` / `request.decline` | `request add` / `request decline`（計画の依頼。[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)の決定3・6、[`plan` / `planners`](supervisor-lifecycle/plan-planners.md#inboxからの計画の依頼)） |
@@ -171,7 +171,7 @@ runtimeの操作系のコマンドは、`src/application/commands/operations.rs`
 | `up` `down` `broker start` `broker stop` `service start` `service stop` `service serve` | `service.lifecycle` | queue |
 | `plan` | `planner.open` | queue |
 | `supervise` | `scheduler.supervise` | queue |
-| `observe`（`--history`を除く） | `observe.run` | queue |
+| `observe`（`--history`・`--input`を除く） | `observe.run` | queue |
 | `integrate ID` / `integrate --next` | `landing.request` | task / queue |
 | `recover RUN` | `run.recover` | run（読めないidは`Unresolved`） |
 | `run close-workspaces` / `run close-workspaces RUN` / `run close-workspaces --task ID` | `workspace.cleanup` | queue / run（読めないidは`Unresolved`） / task |
