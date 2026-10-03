@@ -33,7 +33,7 @@ use crate::{
             self, DownOptions, Ports as LifecyclePorts, QueuePaths, RepositoryPaths, UpEnvironment,
             UpOptions,
         },
-        planner::{self, PlannerLaunch, PlannerProbes, PlannerWrapper},
+        planner::{self, PlannerProbes, PlannerWrapper},
         prompt,
         rebind::{self as rebinding, Rebind, RebindTarget},
         recording::RecordingBackend,
@@ -2096,111 +2096,6 @@ same in one step",
         Ok(report)
     }
 
-    /// Open a planner a person talks with (`dagq plan`, ADR-0041 decision
-    /// 6): preflight cmux and `options.claude`, then open a new workspace
-    /// next to any planner still open (see
-    /// [`planner::open_person_planner`]). `repo` is the checkout the
-    /// planner works in.
-    pub fn plan(
-        &self,
-        location: &QueueLocation,
-        repo: &Path,
-        cmux: &dyn WorkspaceBackend,
-        options: &PlanOptions,
-    ) -> Result<Value> {
-        let db = location
-            .db
-            .canonicalize()
-            .context("queue must already be initialized")?;
-        let repository = GitRepository::inspect(repo)?;
-        cmux.preflight()?;
-        let claude = ClaudeCode {
-            executable: options.claude.clone(),
-        };
-        claude.preflight()?;
-        // Without --plugin-dir the planner loads the plugin the user
-        // installed (ADR-t617-2 decisions 1, 4).
-        if options.plugin_dir.is_none() {
-            lifecycle::require_installed_plugin(
-                &claude,
-                &options.claude,
-                &repository.root,
-                "planner",
-                "plan",
-            )
-            .map_err(|error| anyhow::anyhow!("{error:#}; no planner was opened"))?;
-        }
-        let plugin_dir = options
-            .plugin_dir
-            .as_deref()
-            .map(|dir| {
-                dir.canonicalize()
-                    .with_context(|| format!("plugin directory {}", dir.display()))
-            })
-            .transpose()?;
-        let queue = self.open(&db)?;
-        let recording = RecordingBackend::over(cmux, self.queues(&db), None, load_average);
-        // With no supervisor, the rows of planners whose workspace and
-        // wrapper are gone are closed here; a listing that fails is a warning.
-        let swept = planner::close_abandoned_planners(
-            &queue,
-            &recording,
-            &SystemProcesses,
-            &*self.generators.clock,
-        );
-        // And the person's planners whose agent exited past the grace are
-        // closed (ADR-t1300-1); a failure is a warning, retried next time.
-        let exited =
-            planner::close_exited_person_planners(&queue, &recording, &*self.generators.clock);
-        // And the runners of the planners nothing runs any more go.
-        let runners = planner::remove_unused_planner_runners(
-            &queue,
-            &SystemProcesses,
-            &LocalRunFiles,
-            &*self.generators.clock,
-            &planners_dir(&db),
-        );
-        // `dagq plan` reads `[roles.planner]` of the main checkout's
-        // `dagq.toml` (ADR-0079 decision 7); a file it cannot read starts
-        // the planner as before, with a warning.
-        let roles = repository
-            .checkout()
-            .and_then(crate::infrastructure::run_env::load_role_models)
-            .map_err(|error| format!("{error:#}"));
-        let mut opened = planner::open_person_planner(&PlannerLaunch {
-            queue: &queue,
-            cmux: &recording,
-            files: &LocalRunFiles,
-            db: &db,
-            queue_hash: &QueueLocation::explicit(&db).hash(),
-            planners_dir: &planners_dir(&db),
-            repo_root: &repository.root,
-            runner: &options.runner,
-            claude: &options.claude,
-            plugin_dir: plugin_dir.as_deref(),
-            language: crate::infrastructure::language::language_for_prompt(
-                repository.checkout().ok(),
-                options.user_config.as_deref(),
-            ),
-            roles: roles.clone().unwrap_or_default(),
-            headless_wrapper: Default::default(),
-            turn_limits: crate::domain::stall::StallConfig::default().turn_limits(),
-        })?;
-        if let Err(error) = &roles {
-            opened.warnings.push(format!(
-                "[roles.planner] could not be read; the planner starts as before: {error}"
-            ));
-        }
-        let exited = exited.map(|done| opened.warnings.extend(done.failures));
-        for error in [swept.err(), exited.err(), runners.err()]
-            .into_iter()
-            .flatten()
-        {
-            opened.warnings.push(format!("{error:#}"));
-        }
-        Ok(serde_json::to_value(opened)?)
-    }
-
     /// `planners`: every planner not closed (with `all`, every one), with
     /// its state judged by [`planner::planner_views`].
     pub fn planners(&self, db: &Path, cmux: &dyn WorkspaceBackend, all: bool) -> Result<Value> {
@@ -3181,29 +3076,6 @@ pub fn review_in(
         task_id,
         range,
     )
-}
-
-/// What `dagq plan` opens a planner with: the resolved Claude Code
-/// executable, the plugin directory its session loads, and the binary its
-/// workspace runs as the session wrapper (this one).
-#[derive(Debug, Clone)]
-pub struct PlanOptions {
-    pub claude: PathBuf,
-    pub plugin_dir: Option<PathBuf>,
-    pub runner: PathBuf,
-    /// The user's `config.toml` the planner's language comes from under
-    /// the repository's `dagq.toml` (ADR-t616-2); `None` reads none.
-    pub user_config: Option<PathBuf>,
-}
-
-/// `plan` on the system clock: see [`OneShot::plan`].
-pub fn plan(
-    location: &QueueLocation,
-    repo: &Path,
-    cmux: &dyn WorkspaceBackend,
-    options: &PlanOptions,
-) -> Result<Value> {
-    OneShot::system().plan(location, repo, cmux, options)
 }
 
 /// `planners` on the system clock: see [`OneShot::planners`].

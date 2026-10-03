@@ -1,6 +1,7 @@
 //! The runtime operations (task 734): `integrate`, `recover`, `review`,
 //! the service's `up` / `down` / `install` / `auto-update` / `supervise`,
-//! the queue's `init` / `migrate` / `rebind`, `plan`, `observe`, and the
+//! the queue's `init` / `migrate` / `rebind`, `plan` (which only refuses,
+//! ADR-t1394-1), `observe`, and the
 //! internal `session`, `session-event` and `planner-session` the runtime's
 //! wrappers and hooks run. Each is authorized as the caller before the
 //! command does anything: the user and the inbox (a person's word, told

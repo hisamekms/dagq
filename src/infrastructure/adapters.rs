@@ -3008,7 +3008,7 @@ pub fn plugin_version(listed: &str, name: &str) -> Result<Option<String>> {
 
 /// The dagq plugin of the Claude Code at `executable`, as sessions started
 /// in `cwd` see it (ADR-t618-2): its version from the same `claude plugin
-/// list --json` the check of `up` and `plan` reads, and its update by
+/// list --json` the check of `up` reads, and its update by
 /// [`lifecycle::PLUGIN_UPDATE_ARGUMENTS`](crate::application::lifecycle::PLUGIN_UPDATE_ARGUMENTS).
 pub struct ClaudePlugin {
     pub executable: PathBuf,

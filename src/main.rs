@@ -867,7 +867,7 @@ enum Command {
         #[arg(long, hide = true)]
         unavailable: Option<String>,
     },
-    /// Start the queue's runtime: a launchd-resident supervisor and the inbox's cmux workspace. Idempotent; a live supervisor of another build is handed over to this binary without waiting for its sessions (or drained when it cannot take a handoff), after the queue's compatible migrations. Opens no planner (`plan` does) and forgets the resident planner's record.
+    /// Start the queue's runtime: a launchd-resident supervisor and the inbox's cmux workspace. Idempotent; a live supervisor of another build is handed over to this binary without waiting for its sessions (or drained when it cannot take a handoff), after the queue's compatible migrations. Opens no planner (the runtime does) and forgets the resident planner's record.
     Up {
         /// Never start Claude. Run workers on Codex and handle unsupported roles manually.
         #[arg(long)]
@@ -933,21 +933,14 @@ enum Command {
         #[arg(long)]
         auto_update: bool,
     },
-    /// Open a new planner session in a cmux workspace `[<repo>]planner#<id>`, next to any planner
-    /// already open; every call opens another. Prints the planner, its workspace and directory.
+    /// Refused: planners a person opens were abolished (ADR-t1394-1). Ask the inbox for a plan
+    /// instead; it records a planning request (`request add`) the runtime opens a planner for.
+    /// Prints the guidance and opens nothing.
     Plan {
-        /// Claude Code plugin directory the planner session loads (`claude --plugin-dir`).
-        #[arg(long)]
-        plugin_dir: Option<PathBuf>,
-        /// Checkout the planner works in; defaults to the working directory.
-        #[arg(long)]
-        repo: Option<PathBuf>,
-        /// cmux executable; a bare name is resolved on PATH.
-        #[arg(long, default_value = "cmux")]
-        cmux: PathBuf,
-        /// Claude Code executable; a bare name is resolved on PATH.
-        #[arg(long, default_value = "claude")]
-        claude: PathBuf,
+        /// What an older `dagq plan` took (`--plugin-dir`, `--repo`, `--cmux`, `--claude`):
+        /// accepted and ignored, so the refusal shows its guidance.
+        #[arg(hide = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        ignored: Vec<String>,
     },
     /// List the planner sessions not closed, each with its state (opening, working, idle, exited,
     /// lost, closed), whether it is alive and since when it is idle. Reads only.
@@ -3632,27 +3625,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 },
             )?
         }
-        Command::Plan {
-            plugin_dir,
-            repo,
-            cmux,
-            claude,
-        } => {
-            use dagq::infrastructure::adapters::{Cmux, executable};
-            one_shot.plan(
-                &location,
-                &checkout(repo),
-                &Cmux {
-                    executable: executable(&cmux)?,
-                },
-                &dagq::compose::PlanOptions {
-                    claude: executable(&claude)?,
-                    plugin_dir,
-                    runner: env::current_exe()?,
-                    user_config: dagq::infrastructure::language::user_config_file(),
-                },
-            )?
-        }
+        Command::Plan { .. } => bail!(dagq::application::planner::PLAN_REFUSED),
         Command::Planners { all, cmux } => {
             use dagq::infrastructure::adapters::{Cmux, executable};
             one_shot.planners_of(

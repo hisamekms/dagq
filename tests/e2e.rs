@@ -132,8 +132,8 @@ if [ "${1:-}" = "--version" ]; then
   exit 0
 fi
 if [ "${1:-}" = plugin ] && [ "${2:-}" = list ]; then
-  # `up` and `plan` without --plugin-dir check the installed plugin
-  # (ADR-t617-2 decision 4).
+  # `up` without --plugin-dir checks the installed plugin (ADR-t617-2
+  # decision 4).
   printf '[{"id":"claude-dagq@dagq","version":"0.0.0","scope":"user","enabled":true}]\n'
   exit 0
 fi
@@ -162,13 +162,13 @@ while [ $# -gt 0 ]; do
 done
 [ $# -eq 0 ] || { printf 'stub: trailing arguments after the prompt\n' >&2; exit 64; }
 if [ "${DAGQ_ROLE:-}" = planner ]; then
-  # A planner session `plan` opened (ADR-0041 decision 6): register a task,
-  # submit it as this planner's proposal, go idle the way the Stop hook
-  # marks it, and wait for /exit on the terminal.
+  # A planner session the runtime opened for a planning request
+  # (ADR-t1394-1): register a task, submit it as this planner's proposal, go
+  # idle the way the Stop hook marks it, and wait for /exit on the terminal.
   [ -z "$session_id" ] && [ -n "$debug_file" ] && [ -n "$add_dir" ] && [ -n "$settings" ] && [ -n "$prompt" ] \
     || { printf 'stub: bad planner arguments\n' >&2; exit 64; }
   grep -q '"Stop"' "$settings" || { printf 'stub: planner settings lack a Stop hook\n' >&2; exit 64; }
-  case "$prompt" in 'You are a planner of the dagq queue at '*) ;; *) printf 'stub: not a planner prompt\n' >&2; exit 65 ;; esac
+  case "$prompt" in 'You are a planner the dagq runtime opened for planning request '*) ;; *) printf 'stub: not a planner prompt\n' >&2; exit 65 ;; esac
   {
     printf 'argv: --debug-file %s --add-dir %s --settings %s --plugin-dir %s\n' "$debug_file" "$add_dir" "$settings" "$plugin_dir"
     printf 'cwd: %s\n' "$(pwd)"
@@ -465,7 +465,7 @@ fn dagq_with(env: &Env, extra: &[(&str, &Path)], args: &[&str]) -> Value {
     checked(args, dagq_output(env, extra, args))
 }
 
-/// [`dagq_with`] for a command that opens workspaces (`up`, `plan`): every
+/// [`dagq_with`] for a command that opens workspaces (`up`): every
 /// workspace its output names goes into `guard` before anything about the
 /// output is checked, so a failing command or assertion still has them
 /// closed when the test ends.
@@ -2100,7 +2100,7 @@ fn up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes
     assert!(command.contains(" --max-load 0"), "{command}");
     assert_eq!(first["inbox"]["outcome"], "created", "{first}");
     let inbox = first["inbox"]["workspace_id"].as_str().unwrap().to_owned();
-    // `up` opens no planner (ADR-0041 decision 6); `plan` does.
+    // `up` opens no planner (ADR-0041 decision 6); the runtime does.
     assert_eq!(first.get("planner"), None, "{first}");
 
     // Every workspace carries its role and the queue in its own

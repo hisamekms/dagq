@@ -9,4 +9,4 @@ pub use crate::application::lifecycle::{
     handoff_failures, launch_agent_spec, session_look, supervise_command,
     untrusted_repository_hint,
 };
-pub use crate::compose::{COMMAND_TARGET, PlanOptions, down, inbox_command, plan, planners, up};
+pub use crate::compose::{COMMAND_TARGET, down, inbox_command, planners, up};

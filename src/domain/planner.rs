@@ -1,7 +1,8 @@
 //! A planner session (ADR-0041 decisions 1, 6, 12, 13): an on-demand cmux
 //! workspace where a planner writes goals and tasks and submits them as a
-//! proposal. A person opens one with `dagq plan`, the runtime opens one for
-//! a proposal it sends back or a follow_up draft. Each is recorded apart
+//! proposal. The runtime opens one for a proposal it sends back, a draft, a
+//! finding or a planning request; a person's planner (`dagq plan`, abolished
+//! by ADR-t1394-1) opened before stays until it ends. Each is recorded apart
 //! (`planners`), with the pids and heartbeat of its session wrapper, so its
 //! liveness and idleness are judged the way a worker's are.
 
@@ -16,7 +17,8 @@ use super::{
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PlannerSession {
     pub id: PlannerId,
-    /// Who opened it: `person` (`dagq plan`) or `runtime`.
+    /// Who opened it: `person` (`dagq plan`, before ADR-t1394-1) or
+    /// `runtime`.
     pub origin: PlannerOrigin,
     /// The proposal the runtime opened it for; a person's planner has none
     /// until it submits (the proposal then names its workspace).

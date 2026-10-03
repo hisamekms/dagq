@@ -1111,3 +1111,56 @@ fn reviewer_may_only_read_the_queue() {
         serde_json::json!({"planners": []})
     );
 }
+
+/// `dagq plan` opens no planner any more (ADR-t1394-1 decision 1): a person
+/// at a plain terminal and the inbox, who may run it, get the guidance to
+/// ask the inbox for a planning request instead, with or without the
+/// arguments an older `plan` took. No planner is recorded, cmux is not
+/// called, and nothing else changes; the roles that may not run it are
+/// still refused for that (above).
+#[test]
+fn plan_is_refused_with_the_way_to_ask_the_inbox_and_opens_nothing() {
+    use dagq::application::planner::PLAN_REFUSED;
+    let (_dir, db) = queue();
+    let before = ok(&db, &["events", "--all"]);
+    for (role, args) in [
+        (None, &["plan"][..]),
+        (
+            None,
+            &[
+                "plan",
+                "--plugin-dir",
+                "/plugins",
+                "--repo",
+                ".",
+                "--cmux",
+                "cmux",
+                "--claude",
+                "claude",
+            ],
+        ),
+        (Some("inbox"), &["plan"]),
+    ] {
+        let output = invoke_as(role, &db, args);
+        assert!(!output.status.success(), "{role:?} {args:?} was allowed");
+        let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(error["error"], PLAN_REFUSED, "{role:?} {args:?}");
+        assert_eq!(error.get("denied"), None, "{error}");
+    }
+    for words in [
+        "no longer opens a planner",
+        "Ask the inbox",
+        "`dagq request add --text '...'`",
+        "`dagq requests`",
+        "`dagq planners`",
+        "no planner was opened",
+    ] {
+        assert!(PLAN_REFUSED.contains(words), "{words}: {PLAN_REFUSED}");
+    }
+    assert_eq!(
+        ok(&db, &["planners", "--all"]),
+        serde_json::json!({"planners": []})
+    );
+    assert_eq!(notifications(&db), "");
+    assert_eq!(ok(&db, &["events", "--all"]), before);
+}

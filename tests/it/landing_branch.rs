@@ -153,10 +153,9 @@ fn a_branch_named_in_dagq_toml_is_where_runs_land() {
 }
 
 /// `up` reports the landing branch of a master repository and refuses,
-/// before starting a supervisor, one that resolves none; `plan` opens a
-/// planner in the master repository.
+/// before starting a supervisor, one that resolves none.
 #[test]
-fn up_checks_the_landing_branch_and_plan_opens_on_master() {
+fn up_checks_the_landing_branch_on_master() {
     use common::lifecycle::{FakeCmux, FakeLaunchd, FakeProcesses, fixture, try_up, up};
     let fixture = fixture();
     git(&fixture.repo, &["branch", "-m", "main", "master"]);
@@ -172,17 +171,6 @@ fn up_checks_the_landing_branch_and_plan_opens_on_master() {
             "remote_source": "default", "remote_exists": false, "push": true,
         })
     );
-
-    let runner = fixture._dir.path().join("dagq-binary");
-    fs::write(&runner, "#!/bin/sh\n").unwrap();
-    let options = dagq::lifecycle::PlanOptions {
-        claude: fixture.options.claude.clone(),
-        plugin_dir: fixture.options.plugin_dir.clone(),
-        runner,
-        user_config: None,
-    };
-    let planned = dagq::lifecycle::plan(&fixture.location, &fixture.repo, &cmux, &options).unwrap();
-    assert_eq!(planned["planner"]["id"], 1, "{planned}");
 
     let other = common::lifecycle::fixture();
     git(&other.repo, &["branch", "-m", "main", "feature"]);

@@ -4,8 +4,8 @@ type: design
 title: "Goal review (supervisor)"
 status: current
 created: 2026-09-27
-updated: 2026-10-03 # task 1566: the prompt follows the common limits
-last_verified: 2026-10-03 # task 1566
+updated: 2026-10-03 # task 1399: dagq plan opens nothing (ADR-t1394-1)
+last_verified: 2026-10-03 # task 1399
 scope: runtime
 related:
   - adr-t1566-1
@@ -39,6 +39,6 @@ execの[引き継ぎ](handoff.md)を待つあいだに終わったjobと、`prep
    - **使えないprovider**（ADR-t1063-1の決定4・5、task 1065）: `[roles.goal_review]`に`provider`を書いたときだけ。jobの起動の失敗（`job_start_failure`: `executable_missing` / `launch_failed`）か、verdictの無い失敗のjobの出力の分類（`Supervisor::job_failure`: `authentication` / `usage_limit` / `launch_failed`）がproviderを使えないと言えば、Claudeの認証・利用上限は今までどおり控えのaskを開いてjobを`affected`に足し、それ以外（Codexのどれも、Claudeの起動の失敗）は`hold_provider`で`ProviderHold`に控える（`provider_held`、`run_id`はnull）。その上で`goal_review_failed`に`provider_unusable`（`{"provider", "reason"}`）を足し、行を`failed`でなく`interrupted`で閉じる。`interrupted`の行は2の「前回のgoal review」に数えないので、goalはすぐ候補に戻り、次のpassで3の行き先（もう一方のprovider、両方控えられていれば起動しない）で起動し直す（新しい行、同じ`attempt`）。`goal review by hand`のattentionにもならない（`status`は`goal_review_holds`が`interrupted`の行を返さず、`watch` / `events`は`event_attention`が`provider_unusable`を持つ`goal_review_failed`をattentionにしない）。起動の失敗のうちjob自身の用意（directory、promptの組み立てと書き込み）の失敗はproviderの判定に使わず、一般の失敗にする。利用上限の控えの解ける時刻は、失敗の文とjobのstdout（Codexの`turn.failed`）から読む。一般の失敗（非0の終了、時間切れ、verdictが読めない、modelの誤り）は切り替えず、上のとおり`failed`で人を待つ。`provider`を書かないgoal reviewは今までどおりで、Claudeの壁ではaskに足され、`failed`で閉じる（askの`done`がrearmする）
    - Codexのjobの`goal_review_failed`も、読めれば`session_id`・`model`・`model_unknown`を持つ
 7. **answer**（`goal_answers` → `decide_goal`、1トランザクション）: `GoalAnswer::parse`で`achieved` / `abandoned` / `keep_open` / `gaps` / `gaps: <足りないもの>`を読む。適用できるのは、goalが閉じておらず、`achieved`は所属taskがすべて終わり、`abandoned`は`in_progress`が無く、`gaps`はreviewのverdictにgapがあるとき（`gaps: <text>`はtextの1行目（100文字まで）をtitle、全文をdescriptionにした1件のgap）。適用するとaskを閉じ、`goal_decided`（`ask_id`、`goal_review_id`、`answer`、`decision`、`verdict`（閉じたとき）、`gap_tasks`）を記録する。`achieved` / `abandoned`はgoalを閉じ（`goal_closed`に`by: "person"`、`ask_id`、`goal_review_id`）、`gaps`は5と同じ手順でdraftを登録し、`keep_open`は何もしない（2のfingerprintが同じなので、所属taskの状態が変わるまで起動しない）。goalが先に閉じていたらaskを閉じ、`ask_closed`（`ask_id`、`kind`。task 568）だけを記録する。適用できないanswer（verdictが足した独自のoption、書き足しの自由文、条件の崩れた`achieved`など）は閉じずに残し、inboxの人が読んで`ask close`する。`goal_answers`は答えた時点の`ask_answered`が`runtime_delivers: true`のaskだけを返すので、inboxに渡したanswerを後で条件がそろってからruntimeが適用することはない。`keep_open`はgoalの行の`rearmed_at`を消す（askの前に打たれた`goal review ID`で直ちに取り直さないため）。`ask_answered`の`runtime_delivers`と`status`のattention（`applying the answer of ask N (runtime)`）は同じ判定（`goal_answer_applies` / `applies_goal_answer`）で決まる。
-8. **plannerの役割**: plannerはgoalの完了を見てcloseする役を持たない（ADR-0047の決定16の最後の項）。`goal close`は人の判断（人が開いたplannerでの対話、askのanswer）のために残る。
+8. **plannerの役割**: plannerはgoalの完了を見てcloseする役を持たない（ADR-0047の決定16の最後の項）。`goal close`は人の判断（askのanswer、inboxに頼んだ計画の依頼のplanner、人が`DAGQ_ROLE`の無い自分のterminalで打つ`goal close`。人が開くplannerでの対話は[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)決定8で廃止した）のために残る。
 
 testは`tests/it/goal_review.rs`（plan reviewのstub providerがverdictを出す。achieved・gapsとその後の再起動・4回目のgapsのask・askのanswer（`gaps` / `keep_open` / `abandoned` / 適用しないoption）・失敗と`goal review ID`・起動しないgoal）、`tests/it/goal_review_codex.rs`（spikeのJSONLとrolloutを書くstubの`codex`。Codexで動いてverdict・thread・modelを読み適用する、認証の失敗からClaudeへ、Codexが無いときClaudeで、Claudeの利用上限からCodexへ移りCodexも利用上限なら待つ、Claudeの控えのaskが開いたままでもCodexで動く）と、`src/domain/goal_review.rs`・`src/application/supervise/goal_review.rs`のunit test。runtimeの他のtestが使う`TestReviewer`（`tests/it/runtime_support`）はgoal reviewを起動させず失敗にするので、goalのtaskを着地させるtestではgoalは開いたまま残る。

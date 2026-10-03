@@ -4,8 +4,8 @@ type: design
 title: Manual smoke of the paths that include real Claude and Codex
 status: current
 created: 2026-09-25
-updated: 2026-10-03 # task 1470: the review subagents smoke also covers a review without subagents
-last_verified: 2026-10-03 # task 1470
+updated: 2026-10-03 # task 1399: dagq plan opens nothing (ADR-t1394-1)
+last_verified: 2026-10-03 # task 1399
 scope: operations
 related:
   - adr-0036
@@ -29,7 +29,7 @@ related:
 - [非対話の worker のスモーク](#非対話の-worker-のスモーク): 使い捨て repository で実 Codex と実 Claude の非対話の worker を 1 本ずつ着地させ、turn の記録と provider・経路の記録を確かめる。
 - [Codex の goal review のスモーク](#codex-の-goal-review-のスモーク): 使い捨て repository で goal review を実 Codex で動かし、launch と sandbox と記録を確かめる。
 - [Codex の run review のスモーク](#codex-の-run-review-のスモーク): 使い捨て repository で通常 run の review を実 Codex で動かし、verdict から着地まで確かめる。
-- [他の repository のスモーク](#他の-repository-のスモーク): dagq のソースでない使い捨て repository（default branch が `master`、`origin` なし、`Cargo.toml` も `AGENTS.md` も無い）で、`cargo install` したバイナリと公式の手順で入れた plugin を使い、`up`・`plan` から着地までを通す。
+- [他の repository のスモーク](#他の-repository-のスモーク): dagq のソースでない使い捨て repository（default branch が `master`、`origin` なし、`Cargo.toml` も `AGENTS.md` も無い）で、`cargo install` したバイナリと公式の手順で入れた plugin を使い、`up`・計画の依頼から着地までを通す。
 
 ## 故障経路のスモーク
 
@@ -469,7 +469,7 @@ DAGQ_REAL_CLAUDE=~/.local/bin/claude cargo test --locked --test it -- --ignored 
 
 ## 他の repository のスモーク
 
-dagq のソースでない repository で使えること（goal 52）は、stub の provider の e2e（`tests/e2e/other_repository.rs` の `a_task_lands_on_master_of_a_repository_without_origin_cargo_toml_or_agents_md`。default branch が `master`・`origin` なし・`Cargo.toml` と `AGENTS.md` なしの repository で、`supervise --once` の task が着地し、main が取った番号の migration が振り直されない）でだけ自動 test される。e2e は `target/` のバイナリを `--claude` の stub と `supervise` で直接動かし、配布の経路（`cargo install`、marketplace から入れた plugin、plugin の launcher がバイナリを PATH から解決すること、`--plugin-dir` の無い `up` と `plan`）と実 Claude の planner・worker・review は通らない。それをこの手順で確かめる。リリースの前と、配布・`up`・`plan`・着地先の branch・push の解決を変えたときに流す。
+dagq のソースでない repository で使えること（goal 52）は、stub の provider の e2e（`tests/e2e/other_repository.rs` の `a_task_lands_on_master_of_a_repository_without_origin_cargo_toml_or_agents_md`。default branch が `master`・`origin` なし・`Cargo.toml` と `AGENTS.md` なしの repository で、`supervise --once` の task が着地し、main が取った番号の migration が振り直されない）でだけ自動 test される。e2e は `target/` のバイナリを `--claude` の stub と `supervise` で直接動かし、配布の経路（`cargo install`、marketplace から入れた plugin、plugin の launcher がバイナリを PATH から解決すること、`--plugin-dir` の無い `up`）と実 Claude の planner・worker・review は通らない。それをこの手順で確かめる。リリースの前と、配布・`up`・計画の依頼・着地先の branch・push の解決を変えたときに流す。
 
 ### 手順
 
@@ -478,7 +478,7 @@ dagq のソースでない repository で使えること（goal 52）は、stub 
 3. plugin を公式の手順で入れる: `claude plugin marketplace add hisamekms/dagq` と `claude plugin install claude-dagq@dagq --scope local`（使い捨て repository の中で打ち、その repository だけに入れる。user の scope の plugin を置き換えない）。`claude plugin list` に `claude-dagq@dagq` が入れた scope で出て、plugin の version がバイナリの version と major.minor で一致することを見る（食い違えば launcher が `{"warning": ...}` を stderr に出す。README の update の節）。
 4. repository の root で `claude` を一度起動して folder trust を承認し、`tq init` と `tq doctor` を打つ。`doctor` の `repository` が `branch: master`・`branch_source: master`・`remote: origin`・`remote_exists: false`・`push: true` で `error` が無いことを見る。
 5. 専用の cmux workspace で `tq up --in-cmux --claude ~/.local/bin/claude`（`--plugin-dir` も `--auto-update` も付けない。ソースでない repository の `--auto-update` は拒まれる）を打つ。`[dagq-smoke]supervisor` と `[dagq-smoke]inbox` が開き、出力の `repository` が 4 と同じで、preflight が installed の plugin を見つけて通ることを見る。
-6. `tq plan`（`--plugin-dir` なし）で planner を開き、「`smoke.txt` に 1 行足す task を 1 件、`--verify 'test -f seed.txt'` で」と頼む。planner が AGENTS.md の無い repository で verify・paths・evidence を決めて `submit` し、plan review が pass して task が ready になり、supervisor が claim することを見る（plan review が concern なら inbox の `approve_plan` に `ready` と答える）。
+6. inbox に「`smoke.txt` に 1 行足す task を 1 件、`--verify 'test -f seed.txt'` で」と頼み、inbox が計画の依頼を記録する（inbox を通さないなら `tq request add --text '...'`。`tq plan` は拒まれる）。supervisor が依頼に runtime の planner を立て、planner が AGENTS.md の無い repository で verify・paths・evidence を決めて `submit` し、plan review が pass して task が ready になり、supervisor が claim することを見る（plan review が concern なら inbox の `approve_plan` に `ready` と答える）。
 7. run が着地したら確かめる。
    - `tq show ID`: task `completed`、run `integrated`。
    - `master` に 1 つの squash commit が乗り、checkout が追従して clean。`main` の branch は作られていない。

@@ -671,8 +671,8 @@ pub fn inbox_prompt(db: &Path) -> Result<String> {
 /// and required evidence from. The runtime has no such rules of its own:
 /// they are the repository's, and a repository without an AGENTS.md still
 /// shows them in its CLAUDE.md, README, CI and build configuration. `ask`
-/// is the last step, when none of them settles it: the person in the
-/// session, or a `planner_question` ask for a planner the runtime opened.
+/// is the last step, when none of them settles it: for a planner the
+/// runtime opened, a `planner_question` ask.
 pub(crate) fn repository_rules(ask: &str) -> String {
     format!(
         "Take a task's verification commands (`--verify`), declared paths (`--paths`) and required evidence (`--evidence`) from the repository's instructions and the documents and rules they name, in this order: its AGENTS.md; without one, its CLAUDE.md; without either, what its README, CI configuration and build configuration show; when none of them settles it, {ask}."
@@ -684,22 +684,6 @@ pub(crate) fn repository_rules(ask: &str) -> String {
 /// (ADR-t451-1 decision 5), and asks the inbox, since no person watches
 /// it, only what that leaves to a person or to a low confidence.
 const RUNTIME_PLANNER_ASK: &str = "decide them yourself from the source, the decisions the repository records and a person's precedents, and ask a person with a `planner_question` ask as below only when that material cannot settle them and the decision is a person's (`scope` or `discard`) or your confidence in it is low";
-
-/// The initial prompt of a planner session a person opens with `dagq plan`
-/// (ADR-0041 decisions 1, 6): it turns the person's problems into goals and
-/// tasks, hands them over as the skill says (a proposal for plan review),
-/// and closes a goal once its tasks meet the acceptance.
-pub fn planner_prompt(db: &Path) -> Result<String> {
-    Ok(format!(
-        "You are a planner of the dagq queue at {db}: listen to the person's problems and turn them into goals and tasks.\n\
-         Follow the dagq-planner skill of the dagq plugin: register them and submit them for plan review as its dagq skill describes. You do not land runs or answer asks.\n\
-         {rules}\n\
-         When every task of a goal is completed, check their receipts against the goal's acceptance and close the goal (`dagq goal close ID --verdict achieved`).\n\
-         Never open the queue database directly; use the dagq CLI only.\n",
-        db = super::path_text(db)?,
-        rules = repository_rules("ask the person"),
-    ))
-}
 
 /// The CLI that reads the queue's record (ADR-0044 decision 22), named by
 /// the prompts of the planners the runtime opens and of the plan review so
@@ -3820,7 +3804,6 @@ mod tests {
     fn prompts_take_the_rules_from_the_repository_in_order() {
         let db = Path::new("/q/queue.db");
         let (plan_review, _) = plan_prompt(4, 0);
-        let planner = planner_prompt(db).unwrap();
         let revise = runtime_planner_prompt(db, ProposalId::new(3), &[], &["fix".into()]).unwrap();
         let review = review_prompt(
             &task(7, "work", TaskStatus::InProgress),
@@ -3828,10 +3811,6 @@ mod tests {
             "/r/review.md",
         );
         let order = "in this order: its AGENTS.md; without one, its CLAUDE.md; without either, what its README, CI configuration and build configuration show; when none of them settles it, ";
-        assert!(
-            planner.contains(&format!("{order}ask the person.")),
-            "{planner}"
-        );
         assert!(
             revise.contains(&format!(
                 "{order}decide them yourself from the source, the decisions the repository records and a person's precedents, and ask a person with a `planner_question` ask"
@@ -3868,13 +3847,7 @@ mod tests {
         ] {
             assert!(review.contains(part), "{part} in {review}");
         }
-        for text in [
-            &plan_review,
-            &planner,
-            &revise,
-            &review,
-            &inbox_prompt(db).unwrap(),
-        ] {
+        for text in [&plan_review, &revise, &review, &inbox_prompt(db).unwrap()] {
             for dagq_own in ["ADR", "docs/adr", "clippy"] {
                 assert!(!text.contains(dagq_own), "{dagq_own} in {text}");
             }

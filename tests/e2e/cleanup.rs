@@ -242,7 +242,7 @@ impl WorkspaceGuard {
         }
     }
 
-    /// Record every workspace the output of `up`, `plan` or another command
+    /// Record every workspace the output of `up` or another command
     /// that opens workspaces names: each string under a `workspace_id` key of
     /// its JSON, at any depth. When the output is not JSON (the command died
     /// halfway), every UUID in it is recorded instead: a UUID that names no
@@ -750,7 +750,7 @@ mod tests {
         assert!(!in_vanished_temp_dir("", &roots));
     }
 
-    /// Every `workspace_id` in the JSON of `up` or `plan` is recorded, at any
+    /// Every `workspace_id` in the JSON of `up` is recorded, at any
     /// depth and once; output that is not JSON gives up its UUIDs.
     #[test]
     fn the_guard_records_every_workspace_an_output_names() {

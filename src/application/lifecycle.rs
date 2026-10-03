@@ -2,8 +2,8 @@
 //! makes sure a supervisor is resident (as a launchd LaunchAgent, restarted
 //! after any exit) and that the inbox's Claude session has a cmux
 //! workspace, and reports the queue's open work. Planners are not resident:
-//! a person opens one with `dagq plan` ([`super::planner`], ADR-0041
-//! decision 6). `down` unloads the agent so the
+//! the runtime opens one when there is planning to do ([`super::planner`],
+//! ADR-t1394-1). `down` unloads the agent so the
 //! supervisor drains and is not restarted. Both are idempotent: a second
 //! `up` reuses what the first one started.
 //!
@@ -75,8 +75,9 @@ pub const QUEUE_ENV: &str = "DAGQ_QUEUE";
 /// `DAGQ_ROLE` of a run's workspace (and of the resume workspace of its run).
 pub const WORKER_ROLE: &str = ActorRole::Worker.as_str();
 /// `DAGQ_ROLE` of a planner session, which writes goals and tasks and
-/// submits them as a proposal. A person opens one with `dagq plan` in a
-/// workspace `[<repo>]planner#<id>`; `up` opens none (ADR-0041 decision 6).
+/// submits them as a proposal. The runtime opens one in a workspace
+/// `[<repo>]planner#<id>`; `up` opens none, and `dagq plan` no longer opens
+/// one a person talks with (ADR-t1394-1).
 pub const PLANNER_ROLE: &str = ActorRole::Planner.as_str();
 pub use crate::domain::actor::{PLANNER_ID_ENV, PLANNER_ORIGIN_ENV, SESSION_KIND_ENV};
 /// The cmux workspace a session runs in, set by cmux in every terminal:

@@ -1,16 +1,20 @@
-//! `up` and `plan` without `--plugin-dir` load the claude-dagq plugin the
-//! user installed, so they make sure `claude plugin list --json` shows it
-//! enabled before opening anything, and say how to install it otherwise
-//! (ADR-t617-2 decision 4). With `--plugin-dir` they do not ask.
+//! `up` without `--plugin-dir` loads the claude-dagq plugin the user
+//! installed, so it makes sure `claude plugin list --json` shows it enabled
+//! before opening anything, and says how to install it otherwise
+//! (ADR-t617-2 decision 4). With `--plugin-dir` it does not ask. `plan`
+//! opens nothing any more (ADR-t1394-1), so it asks nothing either.
 
 use crate::common;
 
 use common::lifecycle::*;
 
 use dagq::{
-    application::PluginState, infrastructure::adapters::plugin_state,
-    infrastructure::sqlite::SqliteQueue, lifecycle,
+    application::{PluginState, planner::PLAN_REFUSED},
+    infrastructure::adapters::plugin_state,
+    infrastructure::sqlite::SqliteQueue,
+    lifecycle,
 };
+use serde_json::Value;
 use std::{fs, path::PathBuf};
 
 const ENABLED: &str = r#"[{"id":"claude-dagq@dagq","version":"0.4.0","scope":"user","enabled":true,"installPath":"/x"}]"#;
@@ -186,67 +190,33 @@ fn up_with_a_plugin_dir_does_not_check_the_installed_plugin() {
     assert_eq!(plugin_call(&fixture), None);
 }
 
-/// `plan` without `--plugin-dir` opens a planner only when claude-dagq is
-/// enabled, and with it does not ask.
+/// `plan` opens no planner any more (ADR-t1394-1): without `--plugin-dir`,
+/// whatever the listing says, it asks nothing of the installed plugin and
+/// gives no install hint, only the guidance to ask the inbox, and no
+/// planner is recorded.
 #[test]
-fn plan_without_a_plugin_dir_needs_the_installed_plugin() {
+fn plan_refuses_without_asking_for_the_installed_plugin() {
     let fixture = fixture();
-    let runner = fixture._dir.path().join("dagq-binary");
-    fs::write(&runner, "#!/bin/sh\n").unwrap();
-    let options = lifecycle::PlanOptions {
-        claude: fixture.options.claude.clone(),
-        plugin_dir: None,
-        runner,
-        user_config: None,
-    };
     let queue = SqliteQueue::open(&fixture.location.db).unwrap();
-    for (listed, reason) in refusals() {
+    let claude = fixture.options.claude.to_str().unwrap();
+    for (listed, _) in refusals() {
         match listed {
             Some(listed) => list_plugins(&fixture, listed),
             None => remove_listing(&fixture),
         }
-        let cmux = FakeCmux::default();
-        let message = format!(
-            "{:#}",
-            lifecycle::plan(&fixture.location, &fixture.repo, &cmux, &options).unwrap_err()
+        let output = crate::common::cli::invoke_as(
+            None,
+            &fixture.location.db,
+            &["plan", "--claude", claude],
         );
-        assert!(message.starts_with(reason), "{listed:?}: {message}");
-        assert!(
-            message.contains("the planner session would start"),
-            "{message}"
-        );
-        assert_install_hint(&message, "plan");
-        assert!(message.ends_with("; no planner was opened"), "{message}");
-        assert!(cmux.workspaces.lock().unwrap().is_empty());
+        assert!(!output.status.success(), "{listed:?}: {output:?}");
+        let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+        let message = error["error"].as_str().unwrap();
+        assert_eq!(message, PLAN_REFUSED, "{listed:?}");
+        assert!(!message.contains("claude plugin install"), "{message}");
+        assert_eq!(plugin_call(&fixture), None);
         assert!(queue.planners(true).unwrap().is_empty());
     }
-
-    list_plugins(&fixture, ENABLED);
-    let cmux = FakeCmux::default();
-    let opened = lifecycle::plan(&fixture.location, &fixture.repo, &cmux, &options).unwrap();
-    assert_eq!(opened["planner"]["id"], 1, "{opened}");
-    assert!(
-        plugin_call(&fixture)
-            .unwrap()
-            .starts_with("plugin list --json\n")
-    );
-    assert!(
-        !cmux.workspaces.lock().unwrap()[0]
-            .3
-            .contains("--plugin-dir")
-    );
-
-    // With --plugin-dir, nothing is asked, even with nothing installed.
-    let mut stub = fixture.options.claude.clone().into_os_string();
-    stub.push(".plugin-args");
-    fs::remove_file(PathBuf::from(stub)).unwrap();
-    list_plugins(&fixture, "[]");
-    let with_dir = lifecycle::PlanOptions {
-        plugin_dir: fixture.options.plugin_dir.clone(),
-        ..options
-    };
-    lifecycle::plan(&fixture.location, &fixture.repo, &cmux, &with_dir).unwrap();
-    assert_eq!(plugin_call(&fixture), None);
 }
 
 /// The `up` the runtime runs to start a supervisor again (after an

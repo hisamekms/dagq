@@ -5,7 +5,7 @@ title: "Naming"
 status: current
 created: 2026-09-26
 updated: 2026-10-03
-last_verified: 2026-10-02
+last_verified: 2026-10-03
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -26,7 +26,7 @@ cmux workspaceの名前は複数repositoryで同じcmuxを使うためrepository
 - worker: `[<repo>]worker#<task-id> - <task title>`（`run_workspace_name`。`<repo>`はrunの`repo_path`のbasename、titleはtaskのtitleを切り詰めずにそのまま）
 - resume: `needs_session`のrunを`claude --resume <run-id>`で開き直すworkspaceは、workerと同じ`run_workspace_name`の名前でdescriptionを`run <run-id> resume`にする（supervisorの自動resumeが`create_resume`で開く。[`needs_session`](needs-session.md#needs_session)。人もinboxもplannerも開かない）
 - supervisor（in-cmux mode）: `[<repo>]supervisor`（`supervisor_workspace_name`。[ADR-0011](../../adr/0011-cmux-socket-password-and-in-cmux-fallback.md)の決定3）
-- planner: `[<repo>]planner#<planner-id>`、runtimeがproposalのために立てたものは`[<repo>]planner#<planner-id> - proposal <proposal-id>`（`planner_workspace_name`。同時に開いている複数のplannerを見分ける。[ADR-0044](../../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定6）。`plan`とruntimeが開く
+- planner: `[<repo>]planner#<planner-id>`、runtimeがproposalのために立てたものは`[<repo>]planner#<planner-id> - proposal <proposal-id>`、draft・finding・計画の依頼のために立てたものは末尾に` - draft task <id>` / ` - finding <id>` / ` - request <id>`（`planner_workspace_name`。同時に開いている複数のplannerを見分ける。[ADR-0044](../../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定6）。runtimeが開く
 - inbox: `[<repo>]inbox`（`inbox_workspace_name`）。`up`が開く
 
 `DAGQ_ROLE`の値は`application::lifecycle`の`WORKER_ROLE` / `PLANNER_ROLE` / `INBOX_ROLE` / `OBSERVER_ROLE` / `REVIEWER_ROLE`（`SessionRole`の文字列。supervisorは`SessionRole::Supervisor`）。

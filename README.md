@@ -32,7 +32,7 @@ claude plugin install claude-dagq@dagq
 
 The plugin holds the skills the inbox and planner sessions follow, the launcher `bin/dagq` the skills call, and hooks for the inbox and planner sessions (`SessionStart`, `Stop`, `SessionEnd`). It does not hold the binary. From release v0.4.0 the marketplace entry points at the latest release tag, so the plugin you install has the same `X.Y.Z` as the release on crates.io. Until then the marketplace serves the plugin on `main` ([ADR-t617-1](docs/adr/2026-09-27-t617-1-plugin-marketplace-pinned-to-release-tag.md)). When the skills resolve the binary (`bin/dagq --resolve`) and the plugin and binary differ in major.minor, the launcher writes one `{"warning": ...}` line to stderr and carries on. Update whichever is older ([Update](#update)).
 
-`up` and `plan` open their sessions with the installed plugin. Do not pass `--plugin-dir`, which is only for developing the plugin itself ([ADR-t617-2](docs/adr/2026-09-27-t617-2-installed-plugin-by-default-plugin-dir-for-development.md)). Without `--plugin-dir`, `up` and `plan` stop before opening a session if `claude plugin list --json` does not show `claude-dagq` installed and enabled, and they print the two commands above.
+`up` opens its sessions with the installed plugin. Do not pass `--plugin-dir`, which is only for developing the plugin itself ([ADR-t617-2](docs/adr/2026-09-27-t617-2-installed-plugin-by-default-plugin-dir-for-development.md)). Without `--plugin-dir`, `up` stops before opening a session if `claude plugin list --json` does not show `claude-dagq` installed and enabled, and it prints the two commands above.
 
 **3. Let cmux accept the supervisor.** By default `up` keeps the supervisor resident as a launchd LaunchAgent. cmux refuses a connection from outside its own terminals unless a socket password admits it. Save one in cmux's Settings (`automation.socketControlMode: "password"` and `automation.socketPassword` in `~/.config/cmux/cmux.json`, then `cmux reload-config`). If you skip this, `up` stops before starting the supervisor. Without a socket password, run the supervisor inside cmux with `up --in-cmux`. Nothing restarts it there if it stops.
 
@@ -58,11 +58,14 @@ Each Git repository has one queue, at `~/.local/share/dagq/<hash>/queue.db` (`$X
 
 `up` is idempotent. It checks cmux, Claude Code, the plugin, folder trust, the landing branch, `dagq.toml`, and the programs `[run.env]` names. Then it starts one supervisor (launchd, or `--in-cmux`) and opens the inbox session in the cmux workspace `[<repo>]inbox`. Run it again and it reuses what is already running. It hands a supervisor of another build over to its own binary without stopping the runs in flight. `dagq down` stops the supervisor after it drains (`--wait` waits for that); it leaves the inbox and planner sessions open.
 
-Open a planner whenever you have something to plan. Each call opens another session, `[<repo>]planner#<id>`:
+When you have something to plan, ask the inbox in your own words. It records them as a planning request, and the supervisor opens a planner for it, `[<repo>]planner#<id>`, which submits a proposal or declines the request with a reason. From a terminal without `DAGQ_ROLE` you can record one yourself:
 
 ```sh
-dagq plan
+dagq request add --text 'what you want planned'
+dagq requests   # follow it
 ```
+
+`dagq plan` no longer opens a planner; it refuses with this guidance ([ADR-t1394-1](docs/adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)).
 
 The number of runs at once comes from `[supervisor] parallel` in `dagq.toml` (default 4). Give `up` `--parallel` only to override it.
 
@@ -143,7 +146,7 @@ Every command prints JSON on stdout (except `graph --format d2|svg`); a runtime 
 
 | Area | Commands |
 | --- | --- |
-| Queue and runtime | `locate`, `init`, `migrate [--check]`, `up`, `down [--wait\|--force]`, `plan`, `planners`, `install`, `rebind` |
+| Queue and runtime | `locate`, `init`, `migrate [--check]`, `up`, `down [--wait\|--force]`, `request add`, `requests`, `planners`, `install`, `rebind` |
 | Goals | `goal add`, `goal list`, `goal show`, `goal edit`, `goal ready` (open a draft goal), `goal close --verdict achieved\|abandoned`, `goal review` |
 | Tasks | `add`, `edit`, `list`, `show`, `search`, `related`, `draft`, `cancel`, `dependency add\|remove`, `set-goal`, `set-paths`, `set-priority` |
 | Plans | `lint`, `submit`, `proposal list\|show\|withdraw`, `ready ID --bypass-review` (a person only) |
@@ -195,7 +198,7 @@ cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-To use the plugin from the checkout instead of the installed one, pass `--plugin-dir <repository>/plugins/claude-dagq` to `up` and `plan` (or `claude --plugin-dir`). It overrides an installed plugin of the same name. Releases are cut by a tag, following [`.claude/skills/release/SKILL.md`](.claude/skills/release/SKILL.md). [`.github/workflows/release.yml`](.github/workflows/release.yml) builds the GitHub Release and publishes the crate to crates.io.
+To use the plugin from the checkout instead of the installed one, pass `--plugin-dir <repository>/plugins/claude-dagq` to `up` (or `claude --plugin-dir`). It overrides an installed plugin of the same name. Releases are cut by a tag, following [`.claude/skills/release/SKILL.md`](.claude/skills/release/SKILL.md). [`.github/workflows/release.yml`](.github/workflows/release.yml) builds the GitHub Release and publishes the crate to crates.io.
 
 ## Documentation
 

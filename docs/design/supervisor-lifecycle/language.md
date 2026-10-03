@@ -4,8 +4,8 @@ type: design
 title: "Language"
 status: current
 created: 2026-09-27
-updated: 2026-09-30
-last_verified: 2026-09-30
+updated: 2026-10-03
+last_verified: 2026-10-03
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -49,8 +49,8 @@ pluginのskill（`dagq-recover`の`reference/review-by-hand.md`、`dagq`の`refe
 
 | 置き場所 | 読むもの | 優先 |
 | --- | --- | --- |
-| repositoryの`dagq.toml`（main checkoutの作業ファイル。[Run environment](run-environment.md)と同じ） | そのqueueのsupervisor・`up`・`plan`・`doctor`・`status` | 1 |
-| 利用者ごとの`$XDG_CONFIG_HOME/dagq/config.toml`（`XDG_CONFIG_HOME`が空か無ければ`~/.config/dagq/config.toml`） | その利用者の環境で動くdagq。supervisorは自分のprocessの`XDG_CONFIG_HOME` / `HOME`で読む。in-cmux modeでは`up`を打ったshellのenvを引き継ぎ、launchd modeでは`up`がshellの`XDG_CONFIG_HOME`（exportされていて空でなければ）をplistの環境に入れるので、どちらのmodeでも`up`のpreflightと同じファイルを読む（[up / down](up-down.md)のplist。`host.toml`も同じ）。pathはCLI（`main.rs`）が環境変数から決めて`SuperviseOptions`・`PlanOptions`・`ObserveOptions`・`UpEnvironment`・`OneShot`の`user_config`に渡し、そこが`None`なら読まない（testは明示したpathだけを読み、testを走らせる人の設定に左右されない） | 2 |
+| repositoryの`dagq.toml`（main checkoutの作業ファイル。[Run environment](run-environment.md)と同じ） | そのqueueのsupervisor・`up`・`doctor`・`status` | 1 |
+| 利用者ごとの`$XDG_CONFIG_HOME/dagq/config.toml`（`XDG_CONFIG_HOME`が空か無ければ`~/.config/dagq/config.toml`） | その利用者の環境で動くdagq。supervisorは自分のprocessの`XDG_CONFIG_HOME` / `HOME`で読む。in-cmux modeでは`up`を打ったshellのenvを引き継ぎ、launchd modeでは`up`がshellの`XDG_CONFIG_HOME`（exportされていて空でなければ）をplistの環境に入れるので、どちらのmodeでも`up`のpreflightと同じファイルを読む（[up / down](up-down.md)のplist。`host.toml`も同じ）。pathはCLI（`main.rs`）が環境変数から決めて`SuperviseOptions`・`ObserveOptions`・`UpEnvironment`・`OneShot`の`user_config`に渡し、そこが`None`なら読まない（testは明示したpathだけを読み、testを走らせる人の設定に左右されない） | 2 |
 
 | key | 型 | 既定 | 意味 |
 | --- | --- | --- | --- |
@@ -73,7 +73,7 @@ tag = "ja"
 
 - worker: claimの`prompt`、resumeの依頼（`resume_request`とその派生）、reviewの差し戻し（`revise_request`と、差し戻しの前提が崩れたときの`revise_mismatch_request`）
 - review job（`review_prompt`）、復旧job（`recovery_prompt`）、plan review job（`plan_review_prompt`）とそのreviseの依頼（`plan_revise_request`）、goal review job（`goal_review_prompt`。goalの判定の理由も人が読む）
-- planner: 人が開く`planner_prompt`、runtimeが立てる`runtime_planner_prompt`・`draft_planner_prompt`・`finding_planner_prompt`（どれも`PlannerLaunch`の`language`を`launch_planner`が足す）
+- planner: runtimeが立てる`runtime_planner_prompt`・`draft_planner_prompt`・`finding_planner_prompt`・`request_planner_prompt`（どれも`PlannerLaunch`の`language`を`launch_planner`が足す。人が開くplannerの`planner_prompt`は`dagq plan`の廃止（ADR-t1394-1、task 1399）で消した）
 - inbox: `inbox_prompt`（`up`の`inbox_session_prompt`）
 - observer: `observer_prompt`（`src/observer.rs`）
 
@@ -91,7 +91,7 @@ inboxとplannerの初期promptは5行以内（[Session prompts](session-prompts.
 
 - `up`のpreflight: `dagq.toml`の`[language]`と`config.toml`を読み、書式の誤りならsupervisorを起動せず、ファイルのpathと誤りを挙げたerrorで止まる（どちらかで決まっても両方を読むので、使われない側の誤りも止める）。`up`の出力に解決した`language`（`{"tag", "source"}`か、未設定ならnull）を付け、inboxの初期promptに指示を足す。
 - `dagq.toml`の他の表を読む処理（claimのprovisioningの`[run.env]`、`integrate`の検証、supervisorの`[stall]`・`[disk]`など）は、`[language]`を既知の表として受け付けるだけで、中のkeyと値も表の重複も検査しない。`[language]`の書式の誤りでprovisioningや着地を失敗させないためで、誤りを見せるのは`up`・`doctor`・promptの組み立てだけにする。
-- supervisorと`plan`: promptを組み立てる時点で`[language]`か`config.toml`が読めなければ指示を足さずに進み、`tracing`のwarnを出す。runもplannerも止めない。
+- supervisor: promptを組み立てる時点で`[language]`か`config.toml`が読めなければ指示を足さずに進み、`tracing`のwarnを出す。runもplannerも止めない。
 - `doctor`（既定の出力にも出す）: `language`の欄に`tag`（未設定ならnull）、`source`（`repository` / `user` / `unset`）、読んだ`user_config`のpath、promptに足す`instruction`、書式の誤りがあれば`error`を出す（誤りのときは`source`が`unset`）（[doctor](doctor.md)）。このbinaryが読めない（migrateが要る・拒まれる）queueの`doctor`には出ない。
 
 testは`src/domain/language.rs`と`src/infrastructure/language.rs`のunit test（タグの形・優先順・誤り）、`tests/it/language.rs`（設定なし・利用者ごと・`dagq.toml`の上書きの3通りでworkerとreviewのpromptと`doctor`・`status --role inbox`）、`tests/it/lifecycle_up.rs`（preflightの誤りとinboxのprompt）、`tests/it/lifecycle_plan.rs`（runtimeのplanner）、`tests/it/runtime_observer.rs`（observer）、`tests/plugin.rs`（hookの出力）。

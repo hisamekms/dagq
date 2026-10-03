@@ -169,7 +169,7 @@ runtimeの操作系のコマンドは、`src/application/commands/operations.rs`
 | `init` `migrate`（`--check`を含む） `rebind` | `queue.admin` | queue |
 | `install` / `auto-update` | `service.install` | queue |
 | `up` `down` `broker start` `broker stop` `service start` `service stop` `service serve` | `service.lifecycle` | queue |
-| `plan` | `planner.open` | queue |
+| `plan`（何も開かず、inboxへの依頼の案内を付けて拒む。ADR-t1394-1） | `planner.open` | queue |
 | `supervise` | `scheduler.supervise` | queue |
 | `observe`（`--history`・`--input`を除く） | `observe.run` | queue |
 | `integrate ID` / `integrate --next` | `landing.request` | task / queue |

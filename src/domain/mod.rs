@@ -124,8 +124,8 @@ string_enum!(SupervisorMode {
 // The part a cmux workspace plays for a queue, carried in its `DAGQ_ROLE`
 // environment variable and its description (ADR-0026): the actors of
 // [`actor::ActorRole`] that have a workspace or a `--role` view. `up` opens
-// the inbox's workspace, and planners open on demand (`dagq plan`, or the
-// runtime). `Observer` is the periodic job: it has no workspace, and the
+// the inbox's workspace, and the runtime opens planners on demand
+// (ADR-t1394-1). `Observer` is the periodic job: it has no workspace, and the
 // CLI refuses queue changes from its environment. The headless jobs are
 // actors without a workspace, so they are not session roles.
 string_enum!(SessionRole {
@@ -341,8 +341,10 @@ string_enum!(ProposalStatus {
 });
 
 // Who opened the planner that owns a proposal (ADR-0041 decisions 7, 13): a
-// person with `dagq plan`, or the runtime (a revise whose planner closed, a
-// follow_up). The two differ in where a question for a person goes.
+// person with `dagq plan` (abolished by ADR-t1394-1; only the rows opened
+// before remain), or the runtime (a revise whose planner closed, a draft, a
+// finding, a planning request). The two differ in where a question for a
+// person goes.
 string_enum!(PlannerOrigin {
     Person => "person",
     Runtime => "runtime",

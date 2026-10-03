@@ -1,9 +1,12 @@
 //! Planner sessions (ADR-0041 decisions 1, 6, 12, 13): on-demand cmux
 //! workspaces where a planner writes goals and tasks and submits them as a
-//! proposal. A person opens one with `dagq plan` (as many as they like at
-//! once); the runtime opens one for a proposal plan review sent back while
-//! its own planner was closed ([`open_runtime_planner`]) and for a draft
-//! the runtime or a job registered ([`open_draft_planner`]). Each is a
+//! proposal. Only the runtime opens one (ADR-t1394-1): for a proposal plan
+//! review sent back while its own planner was closed
+//! ([`open_runtime_planner`]), and for a draft, a finding or a planning
+//! request the inbox recorded ([`open_draft_planner`]). `dagq plan`, which
+//! opened a planner a person talked with, is refused with
+//! [`PLAN_REFUSED`]; a person's planner opened before stays a `planners`
+//! row until it ends ([`close_exited_person_planners`]). Each is a
 //! `planners` row with its own directory under the queue's `planners/`
 //! (its prompt, the wrapper binary, the agent's settings, log and idle
 //! marker).
@@ -43,7 +46,7 @@ use super::{
     lifecycle::{QueueWorkspaces, ROLE_STATUS_KEY, session_look},
     naming::{planner_workspace_name, shell_join},
     path_text, planner_idle_marker,
-    prompt::{planner_prompt, runtime_planner_prompt},
+    prompt::runtime_planner_prompt,
     screen_idle::{self, Inference, MarkerState, ScreenIdle, ScreenProbe},
     session::{OwnWorkspace, wrapper_refused},
 };
@@ -120,17 +123,16 @@ pub struct OpenedPlanner {
     pub launch: ActorLaunch,
 }
 
-/// Open a planner a person talks with (`dagq plan`): a new workspace every
-/// time, next to any planner already open.
-pub fn open_person_planner(launch: &PlannerLaunch<'_>) -> Result<OpenedPlanner> {
-    open_planner(
-        launch,
-        PlannerOrigin::Person,
-        None,
-        &planner_prompt(launch.db)?,
-        &launch.roles.launch(ModelRole::Planner),
-    )
-}
+/// Why `dagq plan` opens nothing (ADR-t1394-1 decision 1), and where a
+/// person goes instead: the inbox, which records a planning request the
+/// runtime opens a planner for.
+pub const PLAN_REFUSED: &str = "dagq plan no longer opens a planner: planners a person opens were \
+abolished (ADR-t1394-1), and planning goes through the inbox. Ask the inbox for the plan in your \
+own words; it records them as a planning request (`dagq request add --text '...'`, which a person \
+at a terminal without DAGQ_ROLE may run too), and the supervisor opens a planner of the runtime's \
+for it, which submits a proposal or declines the request with a reason (follow it with \
+`dagq requests`). A planner already open keeps running until it ends (`dagq planners`); no planner \
+was opened";
 
 /// The route a planner of `origin` opens on: a person's is interactive, one
 /// of the runtime's takes `[roles.runtime_planner] route` (ADR-t1394-2
