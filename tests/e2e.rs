@@ -10,8 +10,8 @@
 //! The launchd `up` / `down` test is temporarily off even under `--ignored`:
 //! no project runs the launchd mode now, and without a cmux socket password
 //! its preflight always stops `up`. It returns at once, printing why, unless
-//! `DAGQ_E2E_LAUNCHD=1` is set; the in-cmux `up` / `down` test runs
-//! outside the sandboxed Codex-worker exclusion described below.
+//! `DAGQ_E2E_LAUNCHD=1` is set; the in-cmux `up` / `down` test is out for
+//! now under ADR-t1582-1 (see the last paragraph).
 //!
 //! A sandboxed Codex worker excludes only these host-permission cases by
 //! full-name `--skip` (ADR-t963-1 decision 5):
@@ -24,6 +24,10 @@
 //! (signalling across the sandbox boundary). The install/auto-update gate
 //! does not skip them. Names and reasons used by the worker's receipt are in
 //! `CODEX_WORKER_E2E_EXCLUSIONS` in `src/domain/validation.rs`.
+//!
+//! ADR-t1582-1 keeps four cases, and the helpers only they use, out under `#[cfg(any())]`.
+// Out until task 1451 brings it back and runs it on real podman (ADR-t1582-1).
+#[cfg(any())]
 #[path = "e2e/broker.rs"]
 mod broker;
 #[path = "e2e/cleanup.rs"]
@@ -33,14 +37,17 @@ mod common;
 mod headless;
 #[path = "e2e/other_repository.rs"]
 mod other_repository;
+// Out until task 1441 deletes it or brings back a headless one (ADR-t1582-1).
+#[cfg(any())]
 #[path = "e2e/planner.rs"]
 mod planner;
 
 use cleanup::{
-    GroupGuard, WorkspaceGuard, all_workspaces, claim_fixture_dir, cmux_attempt, cmux_retrying,
-    listed_group, listed_workspace, sweep_abandoned_fixtures, try_listed_workspace,
-    wait_for_listed, wait_until_not_listed, workspace_listed,
+    GroupGuard, WorkspaceGuard, claim_fixture_dir, cmux_retrying, listed_group,
+    sweep_abandoned_fixtures, try_listed_workspace, wait_until_not_listed, workspace_listed,
 };
+#[cfg(any())] // Goes with tasks 1440, 1441, 1443 (ADR-t1582-1).
+use cleanup::{all_workspaces, cmux_attempt, listed_workspace, wait_for_listed};
 use common::{Bounded, Cleanup, Waiting, WithoutActor};
 use dagq::infrastructure::git_binary::git_executable;
 use serde_json::{Value, json};
@@ -475,6 +482,7 @@ fn checked(args: &[&str], output: std::process::Output) -> Value {
 /// right after an unpin is listed as `pinned: false` for up to ~0.5s (task
 /// 1120), so the look is waited for, not read once. A failed listing or
 /// `list-status` (cmux's `Command timed out` under load) is "not yet" too.
+#[cfg(any())] // Goes with task 1443 (ADR-t1582-1).
 fn assert_look(cmux: &Path, id: &str, color: &str, pill: &str) {
     let deadline = Instant::now() + WAIT_LIMIT;
     loop {
@@ -501,6 +509,7 @@ fn assert_look(cmux: &Path, id: &str, color: &str, pill: &str) {
 
 /// `cmux workspace env <id> --json`: the environment the workspace was
 /// created with.
+#[cfg(any())] // Goes with tasks 1441, 1443 (ADR-t1582-1).
 fn workspace_env(cmux: &Path, id: &str) -> Value {
     let output = Command::new(cmux)
         .args(["workspace", "env", id, "--json"])
@@ -2066,6 +2075,8 @@ fn up_starts_a_launchd_supervisor_that_status_lists_and_down_wait_stops_it() {
 /// other client. Nothing about launchd is touched, `status` reports the
 /// mode, and `down --wait` interrupts the supervisor and closes the
 /// workspace once it has drained.
+// Out until task 1443 deletes this case and this cfg (ADR-t1582-1).
+#[cfg(any())]
 #[test]
 #[ignore = "needs a running cmux; run with --ignored"]
 fn up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes() {
@@ -2729,6 +2740,7 @@ fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands
 }
 
 /// Run `cmux args`, which must succeed, and return what it printed.
+#[cfg(any())] // Goes with task 1440 (ADR-t1582-1).
 fn cmux_ok(cmux: &Path, args: &[&str]) -> String {
     let output = Command::new(cmux).args(args).bounded_output().unwrap();
     assert!(output.status.success(), "cmux {args:?}: {output:?}");
@@ -2737,6 +2749,7 @@ fn cmux_ok(cmux: &Path, args: &[&str]) -> String {
 
 /// A cmux window the test opened, closed with whatever is left in it when
 /// the test ends.
+#[cfg(any())] // Goes with task 1440 (ADR-t1582-1).
 struct WindowGuard {
     cmux: PathBuf,
     id: String,
@@ -2745,6 +2758,7 @@ struct WindowGuard {
     own: Vec<String>,
 }
 
+#[cfg(any())] // Goes with task 1440 (ADR-t1582-1).
 impl Drop for WindowGuard {
     fn drop(&mut self) {
         // Workspaces opened elsewhere without `--window` (another e2e, a
@@ -2782,6 +2796,7 @@ impl Drop for WindowGuard {
 
 /// Move `ids` to `window` and wait until its listing shows them: cmux
 /// confirms a move before its listing does.
+#[cfg(any())] // Goes with task 1440 (ADR-t1582-1).
 fn move_to_window(cmux: &Path, ids: &[&String], window: &str) {
     for id in ids {
         cmux_ok(
@@ -2836,6 +2851,7 @@ fn move_to_window(cmux: &Path, ids: &[&String], window: &str) {
 /// and the runtime's listing of every window (`planners`, `up`, the
 /// supervisor) fails on that, so a default e2e that opens a window would
 /// break the other e2e tests and runs on the host that list at that moment.
+#[cfg(any())] // Goes with task 1440 (ADR-t1582-1).
 fn window_e2e_enabled() -> bool {
     if env::var("DAGQ_E2E_WINDOWS").as_deref() == Ok("1") {
         return true;
@@ -2854,6 +2870,8 @@ fn window_e2e_enabled() -> bool {
 /// A workspace of a live fixture, whose directory exists, is left alone.
 /// With `DAGQ_E2E_WINDOWS=1` both sit in another window, where
 /// `listed_workspace` and the sweep still find them.
+// Out until task 1440 deletes this case and this cfg (ADR-t1582-1).
+#[cfg(any())]
 #[test]
 #[ignore = "needs a running cmux; run with --ignored"]
 fn the_sweep_closes_workspaces_left_in_any_window_after_their_fixture_dir_is_gone() {

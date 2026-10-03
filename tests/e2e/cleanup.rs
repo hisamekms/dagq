@@ -143,6 +143,8 @@ pub(crate) fn workspace_listed(cmux: &Path, id: &str) -> bool {
 /// return the entry. A failed listing or a workspace not listed yet is "not
 /// yet"; past [`crate::WAIT_LIMIT`] the test fails with `what` and the last
 /// entry or failure.
+// Used only by the e2e cases out under ADR-t1582-1; goes with tasks 1440, 1443.
+#[cfg(any())]
 pub(crate) fn wait_for_listed(
     cmux: &Path,
     id: &str,
@@ -168,7 +170,7 @@ pub(crate) fn wait_for_listed(
 
 /// cmux confirms a `workspace close` before the workspace leaves its
 /// listing, so "gone" is waited for rather than asserted on the first look.
-/// A failed listing is "not yet", like in [`wait_for_listed`].
+/// A failed listing is "not yet", like in `wait_for_listed`.
 pub(crate) fn wait_until_not_listed(cmux: &Path, id: &str) {
     let deadline = Instant::now() + crate::WAIT_LIMIT;
     loop {
@@ -189,6 +191,8 @@ pub(crate) fn wait_until_not_listed(cmux: &Path, id: &str) {
 /// Run `cmux args` once: what it printed when it succeeded, else the whole
 /// output (status, stdout, stderr) for a wait to retry on and show when its
 /// deadline passes. Under load cmux can fail a call with `Command timed out`.
+// Used only by the e2e cases out under ADR-t1582-1; goes with tasks 1440, 1443.
+#[cfg(any())]
 pub(crate) fn cmux_attempt(cmux: &Path, args: &[&str]) -> Result<String, String> {
     match Command::new(cmux).args(args).bounded_output() {
         Ok(output) if output.status.success() => {

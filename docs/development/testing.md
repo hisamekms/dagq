@@ -4,7 +4,7 @@ type: development
 title: このrepositoryのtestの制約（coverageの関門・test binary・置き場所・書き方・ファイルの行数・待ちの上限・e2eとその印・手動スモーク）
 status: current
 created: 2026-10-03
-updated: 2026-10-03
+updated: 2026-10-04
 owners:
   - hisamekms
 tags:
@@ -12,6 +12,7 @@ tags:
   - conventions
 related:
   - adr-t1453-2
+  - adr-t1582-1
   - development-local-checks
   - development-task-registration
   - development-migrations
@@ -61,6 +62,11 @@ testを書く・置く・直すときの今の規則。読むのは、`tests/`�
 - e2eを流すのはworkerでなくruntimeがhostで、2つの場所: (1) 差分が`dagq.toml`の`[e2e] paths`に触れるrunと`--evidence e2e`のtaskのrunで、reviewのpassの後・着地の前（[Review](../design/supervisor-lifecycle/review.md)の「着地の前のe2e」、要否は[Validation](../design/supervisor-lifecycle/validation.md)の「runtimeが流すe2e」）。(2) 自動更新とsourceのcheckoutからの`install`が固定バイナリを入れ替える前（[Auto-update](../design/supervisor-lifecycle/auto-update.md)・[install](../design/supervisor-lifecycle/install.md)）。workerが流さないことと`e2e_failed`のresumeでの再現は[手元の検証](local-checks.md)の「e2eを流さない」。
 - `[e2e] paths`の外の変更が実cmuxとの組み合わせを壊しても本番のバイナリは(2)の関門が守るので、落ちたらplannerが直すtaskを作る。
 - inboxもplannerもe2eを自分では再実行しない（落ちたときの汎用の手順はpluginの`dagq-recover`の`reference/review-by-hand.md`）。
+- 期間限定で登録から外したケース（[ADR-t1582-1](../adr/2026-10-04-t1582-1-temporarily-leave-broker-and-cmux-only-e2e-cases-out.md)）: 次の4ケースは本文を残したまま`#[cfg(any())]`で`tests/e2e.rs`の登録から外れ、`--ignored`でも、(1)の着地の前のe2eでも(2)の関門でも流れない（podmanに繋がらないときの`broker::`の省略とは別で、4ケースは結果の`skipped`には出ない。podmanの確認はこの間も動き、繋がらなければ`skipped`に`broker::`が書かれるが、省くtestは登録に無い）。外したケースだけが使うhelperにも同じcfgと、一緒に消す・戻すtaskのIDのcommentを付け、ケースを削除・復帰するtaskは同じ変更でそのhelperのcfgも削除するか外す。crate全体の`dead_code`の許可は付けない。早期returnで成功に見せたり、`#[ignore]`だけで外したりしない。この4ケースの外に広げない。
+  - `broker::a_preferred_worker_does_its_task_through_the_broker_and_lands`: task 1451が自分の変更でcfgと一時のcommentを外して復帰し、着地の前に実podmanでbrokerのe2eを流す。
+  - `the_sweep_closes_workspaces_left_in_any_window_after_their_fixture_dir_is_gone`: task 1440が旧ケースとcfgを削除する。
+  - `planner::the_runtime_opens_planners_side_by_side_that_submit_go_idle_and_exit`: task 1441が削除するか非対話のケースに置き換え、置き換えたらcfgを外して復帰する（先にtask 1399で置き換わっていればその実装に合わせる）。
+  - `up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes`: task 1443が旧ケースとcfgを削除する。
 
 ## `[e2e] paths`
 

@@ -4,13 +4,14 @@ type: design
 title: Resource broker
 status: draft
 created: 2026-09-28
-updated: 2026-10-02T09:00:00Z
-last_verified: 2026-10-02T09:00:00Z
+updated: 2026-10-04 # task 1582
+last_verified: 2026-10-04 # task 1582
 scope: runtime
 tags:
   - security
   - broker
 related:
+  - adr-t1582-1
   - adr-t827-1
   - adr-t827-2
   - adr-t827-3
@@ -72,7 +73,7 @@ rootの`Cargo.toml`のpackageは`dagq`のまま（ADR-t827-1決定1）。workspa
 - task 843: 配布と版（下の「配布と版」）。`install`とauto-updateがdagqとclientを同じbuildから確認して一緒に置き・戻し、`HostActorExecutor::broker_client`（`application::broker::resolve_client`）が版の一致するclientだけを返し、imageのbuildにdagqのbuild識別子を渡してhealthの`build`を比べ、`status`・`doctor`・`broker status`にclientとimageの版を出す
 - task 835: clientにsubcommand `mcp`（`crates/dagq-broker-client/src/mcp.rs`。stdioのMCP server。下の「workerの道具（MCP）」の道具・入力のschema・errorと切り詰め）。testは`crates/dagq-broker-client/tests/mcp.rs`が、testの中で起こしたbrokerに対してバイナリの`mcp`をstdioで動かし、initialize・tools/list・tools/callと各道具の写し・拒否のtool error・切り詰めを確かめる（fixtureは`tests/common/mod.rs`でclientのtestと共有）
 - task 915: `git.add`がfsのtmp（`.dagq-broker-<uuid>.tmp`）をpathspecのexcludeで除き、tmpを名指す要求を`invalid_request`にする（下の「git」の`add`）
-- task 837: host workerへのtokenとMCPの受け渡し（下の「token」の発行・更新・失効、「workerの道具（MCP）」、「status と doctor」）。`src/application/broker_run.rs`（`RunTokens` port・`mcp.json`の形・`worker_mcp_config`）、`src/infrastructure/broker_token.rs`の`QueueRunTokens`（token file・有効な印・`mcp.json`の書き込みと失効）、supervisorの`broker_grant`と`broker_sweep`（`src/application/supervise/broker.rs`）、`AgentProvider::broker_tools`（Claude Codeの`--mcp-config`と`--allowedTools`）、promptの`BROKER_TOOLS`。testは`tests/it/runtime_broker.rs`（testの中で起こしたbrokerがtokenを受け、失効の後に拒む。`integrated`・`failed`・`interrupted`・`succeeded`のどれで終わったrunもtokenを失う）と、podmanを要るe2eの`tests/e2e/broker.rs`（`#[ignore]`）
+- task 837: host workerへのtokenとMCPの受け渡し（下の「token」の発行・更新・失効、「workerの道具（MCP）」、「status と doctor」）。`src/application/broker_run.rs`（`RunTokens` port・`mcp.json`の形・`worker_mcp_config`）、`src/infrastructure/broker_token.rs`の`QueueRunTokens`（token file・有効な印・`mcp.json`の書き込みと失効）、supervisorの`broker_grant`と`broker_sweep`（`src/application/supervise/broker.rs`）、`AgentProvider::broker_tools`（Claude Codeの`--mcp-config`と`--allowedTools`）、promptの`BROKER_TOOLS`。testは`tests/it/runtime_broker.rs`（testの中で起こしたbrokerがtokenを受け、失効の後に拒む。`integrated`・`failed`・`interrupted`・`succeeded`のどれで終わったrunもtokenを失う）と、podmanを要るe2eの`tests/e2e/broker.rs`（`#[ignore]`。今は[ADR-t1582-1](../adr/2026-10-04-t1582-1-temporarily-leave-broker-and-cmux-only-e2e-cases-out.md)で本文を残したまま`#[cfg(any())]`で期間限定で登録から外れ、`--ignored`でも関門でも流れない。task 1451がcfgを外して復帰させ、着地の前に実podmanで流す）
 - task 925: dagqに`dagq broker logs`と`dagq broker audit`（`src/application/broker_admin.rs`。下の「containerとPodman machine」の管理のコマンドと「audit」）。どちらも`queue.read`で状態を変えない。`FailureCode`に読むだけのコマンドの`machine_missing`・`machine_stopped`・`container_missing`を足した
 - task 1089: 古いimageの掃除（下の「配布と版」。`application::broker::prune_images`を`start`の終わりに呼び、結果は`StartReport::images`と`broker_started`の`images`）
 - task 1131: dangling（`<none>`）のimageの掃除（下の「配布と版」。`prune_images`の後に`application::broker::prune_dangling`が`podman --connection dagq image prune --force`を1回呼び、結果は`ImagePrune`の`dangling_removed`・`dangling_error`）
