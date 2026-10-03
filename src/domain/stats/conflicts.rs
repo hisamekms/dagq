@@ -87,7 +87,9 @@ impl Default for ConflictConfigReport {
 
 /// The queue event a supervisor records when the `[conflicts]` it reads
 /// again from the main checkout's `dagq.toml` differs from the values it
-/// was using (ADR-0080): `from`, `to`, `source` and `supervisor`.
+/// was using (ADR-0080): `from`, `to`, `source` and `supervisor`; and when
+/// the values it started with differ from the latest such event's `to`
+/// (ADR-t775-1), with `source` [`CONFLICTS_AT_START`].
 pub const CONFLICTS_CONFIG_CHANGED: &str =
     crate::domain::event_kind::EventKind::ConflictsConfigChanged.as_str();
 
@@ -105,6 +107,24 @@ pub fn conflicts_change(
         return None;
     }
     Some(json!({"from": from, "to": to, "source": "file"}))
+}
+
+/// The `source` of a [`CONFLICTS_CONFIG_CHANGED`] a supervisor records for
+/// the values it started with (ADR-t775-1).
+pub const CONFLICTS_AT_START: &str = "start";
+
+/// The payload of [`CONFLICTS_CONFIG_CHANGED`] for `config`, the values a
+/// supervisor started with from `dagq.toml`, when `last`, the payload of
+/// the latest such event on the queue, moved to other values: `from` is
+/// that event's `to`, so the latest event's `to` is again the values in
+/// use (ADR-t775-1). `None` without such an event or when it moved to
+/// `config`. The `supervisor` is the caller's to add.
+pub fn conflicts_at_start(config: ConflictConfig, last: Option<&Value>) -> Option<Value> {
+    let last = last?;
+    if last["to"] == json!(config) {
+        return None;
+    }
+    Some(json!({"from": last["to"], "to": config, "source": CONFLICTS_AT_START}))
 }
 
 /// One path a commit on main touched.
@@ -638,5 +658,27 @@ mod tests {
         // Back to the old values: a change again.
         let back = conflicts_change(to, from, Some(&payload)).unwrap();
         assert_eq!(back["to"]["defer_max_secs"], 3600);
+    }
+
+    #[test]
+    fn values_started_with_are_recorded_when_the_latest_change_moved_elsewhere() {
+        let x = ConflictConfig::default();
+        let y = ConflictConfig {
+            defer_max_secs: 60,
+            ..x
+        };
+        // No change recorded yet: nothing to set right.
+        assert_eq!(conflicts_at_start(x, None), None);
+        let x_to_y = conflicts_change(x, y, None).unwrap();
+        // Started with the latest `to`: nothing new.
+        assert_eq!(conflicts_at_start(y, Some(&x_to_y)), None);
+        // Started with X again after X -> Y: Y -> X, from the start.
+        let start = conflicts_at_start(x, Some(&x_to_y)).unwrap();
+        assert_eq!(start["from"], json!(y));
+        assert_eq!(start["to"], json!(x));
+        assert_eq!(start["source"], CONFLICTS_AT_START);
+        // So a later change to Y is no longer taken for the recorded one.
+        let again = conflicts_change(x, y, Some(&start)).unwrap();
+        assert_eq!(again["to"], json!(y));
     }
 }

@@ -381,6 +381,22 @@ fn a_runtime_planner_whose_screen_shows_background_work_is_not_asked_to_exit() {
         .register_planner_agent(planner.id, std::process::id(), std::process::id())
         .unwrap();
     *backend.screen.lock().unwrap() = Some(Ok(BACKGROUND.into()));
+    // The wrapper heartbeats by the supervisor's clock before each pass, as
+    // a live one does: the real time the passes take under load does not
+    // age the heartbeat past its timeout and lose the planner.
+    let wrapper = SqliteQueue::open(&fx.db)
+        .unwrap()
+        .with_generators(Generators {
+            clock: clock.clone(),
+            ids: dagq::infrastructure::clock::system().ids,
+        });
+    let supervise = |fx: &Fixture, backend: &PlanWorkspace, clock: &Arc<Ahead>, at: i64| {
+        clock.by(at);
+        wrapper
+            .heartbeat_planner(planner.id, std::process::id())
+            .unwrap();
+        supervise(fx, backend, clock, at);
+    };
 
     for at in [2, 2 + SCREEN_IDLE_SECS, 3 + SCREEN_IDLE_SECS * 3] {
         supervise(&fx, &backend, &clock, at);

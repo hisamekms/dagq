@@ -420,3 +420,191 @@ fn transient_conflicts_tables_are_ignored_and_stable_changes_are_confirmed() {
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     assert_eq!(events(&db, "conflicts_config_changed").len(), 2);
 }
+
+type Step = Box<dyn FnOnce()>;
+
+thread_local! {
+    static STEPS: std::cell::RefCell<std::collections::VecDeque<Step>> =
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+    static STOP: std::cell::RefCell<Option<Arc<AtomicBool>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The claim-load check of each pass, after it read `[conflicts]`: runs
+/// the next step, and stops the supervisor after the last.
+fn next_step() -> Option<f64> {
+    if let Some(step) = STEPS.with(|steps| steps.borrow_mut().pop_front()) {
+        step();
+    }
+    if STEPS.with(|steps| steps.borrow().is_empty()) {
+        STOP.with(|stop| {
+            stop.borrow()
+                .as_ref()
+                .unwrap()
+                .store(true, Ordering::SeqCst)
+        });
+    }
+    Some(0.0)
+}
+
+/// Run a supervisor over the queue with no ready task, one step a pass.
+fn supervise_steps(db: &Path, repo: &Path, steps: Vec<Step>) {
+    supervise_steps_with(db, repo, steps, |options| options);
+}
+
+/// [`supervise_steps`] with the options `adjust` gives.
+fn supervise_steps_with(
+    db: &Path,
+    repo: &Path,
+    steps: Vec<Step>,
+    adjust: impl FnOnce(SuperviseOptions) -> SuperviseOptions,
+) {
+    let stop = Arc::new(AtomicBool::new(false));
+    STEPS.with(|queued| *queued.borrow_mut() = steps.into());
+    STOP.with(|held| *held.borrow_mut() = Some(stop.clone()));
+    let backend = TestWorkspace::new(db, false, VALID_AGENT);
+    let options = adjust(SuperviseOptions {
+        stop,
+        load_average: next_step,
+        ..supervise_options(1, false)
+    });
+    let outcome = supervise_with(db, repo, &backend, &options).unwrap();
+    backend.join();
+    assert!(STEPS.with(|steps| steps.borrow().is_empty()));
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+}
+
+/// A supervisor started with values other than the latest
+/// `conflicts_config_changed`'s `to` records them (ADR-t775-1): after X -> Y
+/// and a restart with X, the latest event moves to X, so a change to Y is
+/// recorded again. A restart with the latest `to` records nothing, and a
+/// change another supervisor recorded is not recorded twice.
+#[test]
+fn values_started_with_are_recorded_against_the_latest_change() {
+    const X: &str = "[conflicts]\nhotspot_conflicts = 4\n";
+    const Y: &str = "[conflicts]\nhotspot_conflicts = 5\n";
+    let (_dir, repo, db) = fixture();
+    SqliteQueue::open(&db)
+        .unwrap()
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+    let config = repo.join("dagq.toml");
+    // After this pass, `count` changes are recorded; then `next` is written.
+    let step = |count: usize, next: Option<&'static str>| -> Step {
+        let (db, config) = (db.clone(), config.clone());
+        Box::new(move || {
+            let changed = events(&db, "conflicts_config_changed");
+            assert_eq!(changed.len(), count, "{changed:?}");
+            if let Some(next) = next {
+                fs::write(&config, next).unwrap();
+            }
+        })
+    };
+    let hotspot_conflicts = |payload: &Value, key: &str| payload[key]["hotspot_conflicts"].clone();
+
+    // X -> Y, recorded; X written back while no supervisor runs.
+    fs::write(&config, X).unwrap();
+    supervise_steps(
+        &db,
+        &repo,
+        vec![step(0, Some(Y)), step(0, None), step(1, Some(X))],
+    );
+    // Started with X: Y -> X from the start, and Y is a change again.
+    supervise_steps(
+        &db,
+        &repo,
+        vec![step(2, Some(Y)), step(2, None), step(3, None)],
+    );
+    let changed = events(&db, "conflicts_config_changed");
+    assert_eq!(hotspot_conflicts(&changed[1].1, "from"), 5);
+    assert_eq!(hotspot_conflicts(&changed[1].1, "to"), 4);
+    assert_eq!(changed[1].1["source"], "start");
+    assert!(changed[1].1["supervisor"].is_string());
+    assert_eq!(hotspot_conflicts(&changed[2].1, "from"), 4);
+    assert_eq!(hotspot_conflicts(&changed[2].1, "to"), 5);
+    assert_eq!(changed[2].1["source"], "file");
+
+    // Started with Y, the latest `to`: nothing. Another supervisor records
+    // Y -> X; this one, reading X, does not record it again.
+    let other = {
+        let db = db.clone();
+        Box::new(move || {
+            SqliteQueue::open(&db)
+                .unwrap()
+                .record_queue_event(
+                    EventKind::ConflictsConfigChanged,
+                    json!({
+                        "from": ConflictConfig { hotspot_conflicts: 5, ..ConflictConfig::default() },
+                        "to": ConflictConfig { hotspot_conflicts: 4, ..ConflictConfig::default() },
+                        "source": "file",
+                        "supervisor": "another",
+                    }),
+                )
+                .unwrap();
+        }) as Step
+    };
+    supervise_steps(
+        &db,
+        &repo,
+        vec![
+            step(3, None),
+            other,
+            step(4, Some(X)),
+            step(4, None),
+            step(4, None),
+        ],
+    );
+    // Started with X, the latest `to` again: nothing.
+    supervise_steps(&db, &repo, vec![step(4, None)]);
+    assert_eq!(events(&db, "conflicts_config_changed").len(), 4);
+}
+
+/// An invalid `[conflicts]` at the start is warned of once (ADR-t775-1):
+/// the start's warn, and not again by the reads of each pass that meet the
+/// same error. The whole `dagq.toml` is parsed for the landing branch
+/// before `[conflicts]` is read, so a file invalid at both stops the start
+/// there; the reader stands in for a file that turned invalid in between.
+/// The defaults it leaves are not recorded as a change.
+#[test]
+fn an_invalid_conflicts_table_at_the_start_is_warned_of_once() {
+    use dagq::infrastructure::telemetry::Telemetry;
+    const NOT_READ: &str = "[conflicts] of dagq.toml not read";
+    fn invalid(_: &Path) -> Result<Option<ConflictConfig>> {
+        bail!("dagq.toml:2: value of hotspot_conflicts: must be a positive number, not 0")
+    }
+    let (_dir, repo, db) = fixture();
+    SqliteQueue::open(&db)
+        .unwrap()
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+    let (telemetry, captured) = Telemetry::capture();
+    // As in lifecycle_up: a second dispatcher makes every callsite ask the
+    // thread's default, whichever test reached it first.
+    let _second = tracing::Dispatch::new(tracing_subscriber::registry());
+    tracing::callsite::rebuild_interest_cache();
+    let steps: Vec<Step> = (0..3).map(|_| Box::new(|| ()) as Step).collect();
+    telemetry.in_scope(|| {
+        supervise_steps_with(&db, &repo, steps, |options| SuperviseOptions {
+            load_conflicts: invalid,
+            ..options
+        })
+    });
+    let warned: Vec<Value> = captured
+        .records()
+        .into_iter()
+        .filter(|record| {
+            record["message"]
+                .as_str()
+                .is_some_and(|message| message.starts_with(NOT_READ))
+        })
+        .collect();
+    assert_eq!(warned.len(), 1, "{warned:?}");
+    assert!(
+        warned[0]["message"]
+            .as_str()
+            .unwrap()
+            .ends_with("using the defaults"),
+        "{warned:?}"
+    );
+    assert!(events(&db, "conflicts_config_changed").is_empty());
+}

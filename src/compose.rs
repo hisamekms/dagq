@@ -314,6 +314,10 @@ pub struct SuperviseOptions {
     pub claim_spacing: Option<usize>,
     /// Reads the 1-minute load average; tests set it.
     pub load_average: fn() -> Option<f64>,
+    /// Reads `[conflicts]` of the `dagq.toml` in the main checkout, at the
+    /// start and again each pass when `conflicts` is `None` (ADR-0080);
+    /// tests set it to meet the same error at both (ADR-t775-1).
+    pub load_conflicts: fn(&Path) -> Result<Option<crate::domain::stats::ConflictConfig>>,
     /// How much free disk space a claim and a landing need (task 377);
     /// `None` reads `[disk]` of the main checkout's `dagq.toml`.
     pub disk: Option<crate::domain::disk::DiskConfig>,
@@ -552,6 +556,7 @@ impl SuperviseOptions {
             // (the tests) holds for no load unless it asks to.
             max_load: None,
             load_average,
+            load_conflicts: load_conflict_config,
             disk: None,
             resume: None,
             exit: None,
@@ -616,6 +621,7 @@ impl SuperviseOptions {
             sweep_interval: self.sweep_interval,
             stall,
             conflicts,
+            conflicts_error: None,
             planner_timeout: self.planner_timeout,
             handoff_token: self.handoff_token.clone(),
             mode: self.mode,
@@ -702,13 +708,12 @@ pub fn supervise_with_reviewer(
     // For the plan review's hotspots and the claims deferred on them
     // (ADR-0069): a `[conflicts]` that cannot be read at the start leaves
     // the defaults rather than stopping the supervisor; later reads keep
-    // the values in use (ADR-0080).
-    let conflicts = statistics::conflict_config(options.conflicts.or_else(|| {
-        load_conflict_config(&main_checkout).unwrap_or_else(|error| {
-            tracing::warn!(error = %format_args!("{error:#}"), "[conflicts] of dagq.toml not read: {error:#}; using the defaults");
-            None
-        })
-    }));
+    // the values in use (ADR-0080). The error warned of here is not warned
+    // of again by the first read again (ADR-t775-1).
+    let (conflicts, conflicts_error) =
+        crate::application::supervise::read_conflicts_at_start(options.conflicts, || {
+            (options.load_conflicts)(&main_checkout)
+        });
     // The free disk space a claim and a landing need (ADR-0047 decision
     // 44): a `[disk]` that cannot be read leaves the defaults, as
     // `[conflicts]` does.
@@ -877,8 +882,8 @@ pub fn supervise_with_reviewer(
     // thresholds.
     let conflicts_file = options.conflicts.is_none().then(|| {
         let checkout = main_checkout.clone();
-        Arc::new(move || load_conflict_config(&checkout))
-            as crate::application::supervise::ConflictsFile
+        let load = options.load_conflicts;
+        Arc::new(move || load(&checkout)) as crate::application::supervise::ConflictsFile
     });
     let limit_checkout = main_checkout.clone();
     let max_improvement_proposals = Arc::new(move || max_improvement_proposals(&limit_checkout));
@@ -1176,10 +1181,11 @@ pub fn supervise_with_reviewer(
         }),
         layout,
     };
-    supervisor::supervise(
-        &ports,
-        &options.settings(stall, conflicts, disk, resume, exit, limits),
-    )
+    let settings = LoopSettings {
+        conflicts_error,
+        ..options.settings(stall, conflicts, disk, resume, exit, limits)
+    };
+    supervisor::supervise(&ports, &settings)
 }
 
 /// The runtime's own constructor of the cmux wrapper `up`, `down` and the

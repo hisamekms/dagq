@@ -8,6 +8,7 @@ updated: 2026-09-27
 accepted_on: 2026-09-27
 amended_by:
   - adr-t774-1
+  - adr-t775-1
 supersedes:
   - adr-0069
 owners:

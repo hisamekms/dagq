@@ -23,7 +23,7 @@ use crate::domain::{
     provider_switch::route_of,
     stats::{
         ConflictConfig, ConflictConfigReport,
-        conflicts::{CONFLICTS_CONFIG_CHANGED, conflicts_change},
+        conflicts::{CONFLICTS_CONFIG_CHANGED, conflicts_at_start, conflicts_change},
     },
     worker::{PROVIDER_UNAVAILABLE, Worker, unavailable},
 };
@@ -39,6 +39,10 @@ const IN_FLIGHT_REFRESH_SECS: i64 = 60;
 pub(super) struct DeferWatch {
     /// A changed value read on the preceding pass, awaiting confirmation.
     pending_conflicts: Option<ConflictConfig>,
+    /// Whether `[conflicts]` was read again since the start, the read the
+    /// values started with are held against the latest
+    /// `conflicts_config_changed` on (ADR-t775-1).
+    start_checked: bool,
     /// The alerted hotspots, and when they were read.
     hot: Option<(i64, Vec<String>)>,
     /// The expected files of each task read since the hotspots were.
@@ -80,6 +84,37 @@ impl DeferWatch {
     }
 }
 
+/// The `[conflicts]` a supervisor starts with: `given` by the options, or
+/// read by `load` from `dagq.toml`, the defaults when there is none or it
+/// cannot be read (ADR-0080 decision 12). An error is warned of here and
+/// returned, so the first read again does not warn of it once more
+/// (ADR-t775-1).
+pub fn read_conflicts_at_start(
+    given: Option<ConflictConfig>,
+    load: impl FnOnce() -> Result<Option<ConflictConfig>>,
+) -> (ConflictConfigReport, Option<String>) {
+    let mut error = None;
+    let config = given.or_else(|| {
+        load().unwrap_or_else(|failure| {
+            let message = format!("{failure:#}");
+            warn!(error = %message, "[conflicts] of dagq.toml not read: {message}; using the defaults");
+            error = Some(message);
+            None
+        })
+    });
+    (crate::application::stats::conflict_config(config), error)
+}
+
+/// Whether `message` is an error other than `last`, the one warned of
+/// last, which it then becomes.
+fn new_error(last: &mut Option<String>, message: String) -> bool {
+    if last.as_ref() == Some(&message) {
+        return false;
+    }
+    *last = Some(message);
+    true
+}
+
 impl Supervisor<'_> {
     /// Read `[conflicts]` of the main checkout's `dagq.toml` again
     /// (ADR-0080, amended by ADR-t774-1). Two consecutive reads of the
@@ -87,11 +122,14 @@ impl Supervisor<'_> {
     /// the cached hotspots and are recorded as `conflicts_config_changed`,
     /// once for the queue. A file that cannot be read or holds invalid
     /// values keeps those in use, warned of once per error; so does a
-    /// missing file, which may only be a checkout rewriting it.
+    /// missing file, which may only be a checkout rewriting it. A first
+    /// read of the values started with records them when the latest change
+    /// on the queue moved elsewhere (ADR-t775-1).
     pub(super) fn reread_conflicts(&mut self) -> Result<()> {
         let Some(read) = self.conflicts_file.clone() else {
             return Ok(());
         };
+        let first = !std::mem::replace(&mut self.defer.start_checked, true);
         let config = match read() {
             Ok(config) => {
                 self.conflicts_error = None;
@@ -106,14 +144,18 @@ impl Supervisor<'_> {
             Err(error) => {
                 self.defer.confirm_conflicts(None, self.conflicts.config);
                 let message = format!("{error:#}");
-                if self.conflicts_error.as_ref() != Some(&message) {
+                if new_error(&mut self.conflicts_error, message.clone()) {
                     warn!(error = %message, "[conflicts] of dagq.toml not read: {message}; keeping the values in use");
-                    self.conflicts_error = Some(message);
                 }
                 return Ok(());
             }
         };
         let from = self.conflicts.config;
+        // Only while the file still holds them: values changed since the
+        // start may already be another supervisor's latest `to`.
+        if first && config == from {
+            self.record_conflicts_at_start()?;
+        }
         let confirmed = self.defer.confirm_conflicts(Some(config), from);
         if from == config {
             self.conflicts.source = "file";
@@ -132,6 +174,31 @@ impl Supervisor<'_> {
             info!(
                 "[conflicts] of dagq.toml changed ({} -> {}): the hotspots and the deferred claims are judged by the new values",
                 payload["from"], payload["to"]
+            );
+            payload["supervisor"] = serde_json::json!(self.token);
+            self.queue
+                .record_queue_event(EventKind::ConflictsConfigChanged, payload)?;
+        }
+        Ok(())
+    }
+
+    /// Record the values started with from `dagq.toml` as
+    /// `conflicts_config_changed` when the latest one on the queue moved to
+    /// others, so its `to` is the values in use and a later change back to
+    /// them is recorded (ADR-t775-1). The defaults started with for want
+    /// of a readable file are not recorded.
+    fn record_conflicts_at_start(&mut self) -> Result<()> {
+        if self.conflicts.source != "file" {
+            return Ok(());
+        }
+        let last = self.queue.latest_queue_event(&[CONFLICTS_CONFIG_CHANGED])?;
+        if let Some(mut payload) = conflicts_at_start(
+            self.conflicts.config,
+            last.as_ref().map(|event| &event.payload),
+        ) {
+            info!(
+                "[conflicts] of dagq.toml at the start ({}) differs from the latest change recorded ({}): recorded as a change",
+                payload["to"], payload["from"]
             );
             payload["supervisor"] = serde_json::json!(self.token);
             self.queue
@@ -437,5 +504,27 @@ mod tests {
         watch.hot = cached.clone();
         assert!(!watch.confirm_conflicts(Some(changed), changed));
         assert_eq!(watch.hot, cached);
+    }
+
+    #[test]
+    fn an_error_at_the_start_is_not_warned_of_again_by_the_first_read() {
+        let given = ConflictConfig {
+            defer_max_secs: 60,
+            ..ConflictConfig::default()
+        };
+        let (report, error) = read_conflicts_at_start(Some(given), || unreachable!());
+        assert_eq!((report.config, report.source, error), (given, "file", None));
+        let (report, error) = read_conflicts_at_start(None, || Ok(None));
+        assert_eq!((report, error), (ConflictConfigReport::default(), None));
+        let (report, mut last) =
+            read_conflicts_at_start(None, || Err(anyhow::anyhow!("dagq.toml:2: invalid")));
+        assert_eq!(report, ConflictConfigReport::default());
+        assert_eq!(last.as_deref(), Some("dagq.toml:2: invalid"));
+        // The first read again meets the same error: no second warn.
+        assert!(!new_error(&mut last, "dagq.toml:2: invalid".to_owned()));
+        assert!(new_error(&mut last, "dagq.toml:3: invalid".to_owned()));
+        assert!(!new_error(&mut last, "dagq.toml:3: invalid".to_owned()));
+        let mut none = None;
+        assert!(new_error(&mut none, "dagq.toml:2: invalid".to_owned()));
     }
 }

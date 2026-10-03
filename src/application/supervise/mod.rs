@@ -150,6 +150,7 @@ mod waiting;
 
 pub(crate) use self::background::{left_planner_turn, left_turn, still_open, stop_left_turn};
 pub use self::broker::{BROKER_FAILURES, BROKER_HEALTH_INTERVAL, BrokerPort};
+pub use self::claim_defer::read_conflicts_at_start;
 pub(crate) use self::deliver::{Input, Submission, submit_input};
 pub use self::e2e::RunE2ePort;
 pub use self::forecast::{FORECAST_CHECK, ForecastPort};
@@ -258,6 +259,10 @@ pub struct LoopSettings {
     /// The thresholds of the `conflict_hotspot` alert, for the files the
     /// plan review is told conflict often.
     pub conflicts: crate::domain::stats::ConflictConfigReport,
+    /// The error `[conflicts]` could not be read with at the start, warned
+    /// of then: the first read again does not warn of it once more
+    /// (ADR-t775-1).
+    pub conflicts_error: Option<String>,
     /// How long a planner a revise went to may take to submit its proposal
     /// again before the inbox is told (ADR-0041 decision 13).
     pub planner_timeout: Duration,
@@ -844,7 +849,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         stall: settings.stall,
         conflicts: settings.conflicts,
         conflicts_file: ports.conflicts_file.clone(),
-        conflicts_error: None,
+        conflicts_error: settings.conflicts_error.clone(),
         plan_review: None,
         goal_review: None,
         job_ends: JobEnds::default(),
