@@ -481,6 +481,29 @@ pub const RERUN_ENV: &str = "DAGQ_E2E_RERUN";
 /// (space separated), for a `command` in place of cargo's.
 pub const SKIP_ENV: &str = "DAGQ_E2E_SKIP";
 
+/// Match `tests/e2e/broker.rs`: its fresh queue has no host.toml and
+/// inherits the host-wide config, HOME and PATH. Never read the updating
+/// queue's host.toml, which the fixture's `dagq broker start` cannot see.
+pub fn podman_check() -> Result<PodmanCheck> {
+    Ok(podman_check_for_host(
+        super::kpi_config::host_wide_file().as_deref(),
+        super::broker_podman::machine_lock_home()?,
+    ))
+}
+
+fn podman_check_for_host(host_wide: Option<&Path>, lock_home: PathBuf) -> PodmanCheck {
+    let host = super::broker_config::load_host_broker_files(host_wide);
+    for warning in &host.warnings {
+        tracing::warn!("[broker] of host.toml: {warning}");
+    }
+    PodmanCheck {
+        executable: host.config.podman.as_ref().map(PathBuf::from),
+        machine: MachineSpec::with_host(&host.config),
+        lock_home,
+        reconnect: broker::RECONNECT,
+    }
+}
+
 /// Whether dagq's machine is ready and its connection answers, waiting
 /// for a lost connection within `check`'s bounds (ADR-t1162-1); why not.
 fn podman_answers(check: &PodmanCheck) -> std::result::Result<(), String> {
@@ -491,7 +514,7 @@ fn podman_answers(check: &PodmanCheck) -> std::result::Result<(), String> {
         reconnect: check.reconnect,
     };
     let lock = FileLock::machine(&check.lock_home);
-    broker::connect(&podman, &lock, &MachineSpec::default())
+    broker::connect(&podman, &lock, &check.machine)
         .map(|_| ())
         .map_err(|error| error.to_string())
 }
@@ -1062,12 +1085,77 @@ exit 125"
         fs::set_permissions(&podman, fs::Permissions::from_mode(0o755)).unwrap();
         PodmanCheck {
             executable: Some(podman),
+            machine: MachineSpec::default(),
             lock_home: dir.join("config"),
             reconnect: crate::application::broker::Reconnect {
                 reruns: 1,
                 probes: 2,
                 interval: Duration::ZERO,
             },
+        }
+    }
+
+    #[test]
+    fn the_gate_uses_the_fixtures_host_podman_and_machine_resources() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        let host = dir.join("host.toml");
+        let podman = dir.join("configured-podman");
+        // The fake starts with no machine. Record every argument, and
+        // make init observable by the next machine list.
+        fs::write(
+            &podman,
+            r#"#!/bin/sh
+cd "$(dirname "$0")" || exit 1
+echo "$*" >> calls
+case "$*" in
+  'machine list'*)
+    if [ -f initialized ]; then
+      echo '[{"Name":"dagq","Running":true}]'
+    else
+      echo '[]'
+    fi ;;
+  'machine init'*) touch initialized ;;
+  '--connection dagq info'*) echo 6.1.2 ;;
+  *) exit 1 ;;
+esac
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&podman, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(
+            &host,
+            format!(
+                "[broker]\npodman = {:?}\nmachine_cpus = 3\nmachine_memory_mib = 3072\nmachine_disk_gib = 24\n",
+                podman.to_str().unwrap()
+            ),
+        )
+        .unwrap();
+        let check = podman_check_for_host(Some(&host), dir.join("config"));
+        // This is what broker start reads in the fixture's fresh queue.
+        let fixture_host =
+            super::super::broker_config::load_host_broker(&dir.join("fixture-queue"), Some(&host));
+        assert_eq!(check.machine, MachineSpec::with_host(&fixture_host.config));
+        assert_eq!(check.executable.as_deref(), Some(podman.as_path()));
+        podman_answers(&check).unwrap();
+        let calls = fs::read_to_string(dir.join("calls")).unwrap();
+        assert!(
+            calls.contains(
+                "machine init --cpus 3 --memory 3072 --disk-size 24 --update-connection=false dagq"
+            ),
+            "{calls}"
+        );
+        assert!(calls.contains("--connection dagq info"), "{calls}");
+
+        for host in [None, Some(dir.join("missing.toml")), Some(host)] {
+            if let Some(path) = &host
+                && path.exists()
+            {
+                fs::write(path, "[update]\nrelease = \"off\"\n").unwrap();
+            }
+            let check = podman_check_for_host(host.as_deref(), dir.join("config"));
+            assert!(check.executable.is_none(), "falls back to PATH");
+            assert_eq!(check.machine, MachineSpec::default());
         }
     }
 

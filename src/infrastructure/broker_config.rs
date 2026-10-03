@@ -128,11 +128,20 @@ fn set(config: &mut HostBroker, key: &str, value: &str) -> Result<()> {
 /// host-wide file's, else the defaults. A file that cannot be read is a
 /// warning, and the next one is read.
 pub fn load_host_broker(queue_dir: &Path, host_wide: Option<&Path>) -> LoadedHostBroker {
+    load_host_broker_files(
+        [Some(queue_dir.join(HOST_FILE_NAME).as_path()), host_wide]
+            .into_iter()
+            .flatten(),
+    )
+}
+
+/// Read the first broker table in the supplied files, retaining the same
+/// warning and fallback rules for callers without a queue (the e2e gate).
+pub(crate) fn load_host_broker_files<'a>(
+    paths: impl IntoIterator<Item = &'a Path>,
+) -> LoadedHostBroker {
     let mut warnings = Vec::new();
-    for path in [Some(queue_dir.join(HOST_FILE_NAME).as_path()), host_wide]
-        .into_iter()
-        .flatten()
-    {
+    for path in paths {
         let text = match fs::read_to_string(path) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,

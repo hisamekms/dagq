@@ -2729,11 +2729,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 // (ADR-t1162-1).
                 let podman = match &e2e_command {
                     Some(_) => None,
-                    None => Some(dagq::application::install::PodmanCheck {
-                        executable: None,
-                        lock_home: dagq::infrastructure::broker_podman::machine_lock_home()?,
-                        reconnect: dagq::application::broker::RECONNECT,
-                    }),
+                    None => Some(dagq::infrastructure::e2e_gate::podman_check()?),
                 };
                 E2eGate::Run(E2eSettings {
                     command: e2e_command,

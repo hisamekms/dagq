@@ -184,6 +184,8 @@ pub const PODMAN_E2E: &[&str] = &["broker::"];
 pub struct PodmanCheck {
     /// The podman executable; `None` is `podman` on `PATH`.
     pub executable: Option<PathBuf>,
+    /// Resources used if dagq's machine needs to be initialized.
+    pub machine: crate::application::broker::MachineSpec,
     /// Where the host-wide lock of dagq's machine lives.
     pub lock_home: PathBuf,
     /// How long a lost connection is waited for.

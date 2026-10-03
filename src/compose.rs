@@ -1066,11 +1066,7 @@ pub fn supervise_with_reviewer(
                     podman: if stub {
                         None
                     } else {
-                        Some(installation::PodmanCheck {
-                            executable: None,
-                            lock_home: crate::infrastructure::broker_podman::machine_lock_home()?,
-                            reconnect: crate::application::broker::RECONNECT,
-                        })
+                        Some(crate::infrastructure::e2e_gate::podman_check()?)
                     },
                     utc_offset_secs: 0,
                     lock: options.run_e2e.lock.clone().or_else(|| {
@@ -1958,17 +1954,10 @@ same in one step",
             queue_dir: Some(location.queue_dir.clone()),
             scratch: paths.e2e.clone(),
             log: e2e_log(&job.log),
-            // The broker's e2e: podman on PATH with the default machine
-            // (host.toml's `podman` and resources are not read here,
-            // ADR-t1162-1). A command in place of the e2e (tests) has no
-            // broker's e2e, so the host's podman is not touched for it.
+            // A substitute command has no broker e2e and must not touch podman.
             podman: match job.e2e_command {
                 Some(_) => None,
-                None => Some(installation::PodmanCheck {
-                    executable: None,
-                    lock_home: crate::infrastructure::broker_podman::machine_lock_home()?,
-                    reconnect: crate::application::broker::RECONNECT,
-                }),
+                None => Some(crate::infrastructure::e2e_gate::podman_check()?),
             },
             utc_offset_secs: clock::local_utc_offset(self.generators.clock.now()),
             lock: installation::e2e_lock_path(&location.queue_dir),
