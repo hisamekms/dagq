@@ -110,7 +110,7 @@ tests = ["tests/**"]
 plugin = ["plugins/**", ".claude-plugin/**"]
 ci = ["scripts/**", ".github/**", ".config/**"]
 docs = ["docs/**", "*.md"]
-config = ["dagq.toml"]
+config = ["dagq.toml", ".dagq/review-agents/**"]
 
 # KPI の目標（ADR-0051 の決定 17・19。書式は docs/design/supervisor-lifecycle/kpi.md の「目標」）。
 # ここには host に依らない repository の方針だけを書く。phase.* や max_load_avg のように host の性能で
@@ -164,3 +164,27 @@ max = 0.6
 # task に --evidence e2e を付けたものは、差分に依らず流す。書式の都合で配列は 1 行に書く。
 # [e2e] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 965 を含んでから足した。
 paths = ["src/infrastructure/adapters.rs", "src/infrastructure/process.rs", "src/infrastructure/sessions.rs", "src/infrastructure/launchd.rs", "src/application/lifecycle.rs", "src/application/supervise/handoff.rs", "src/application/integrate.rs", "src/application/install.rs", "src/infrastructure/binaries.rs", "src/application/update.rs", "src/application/supervise/update.rs", "src/infrastructure/e2e_gate.rs", "src/application/actor_executor.rs", "src/application/session.rs", "src/application/headless_session.rs", "src/infrastructure/claude.rs", "src/infrastructure/codex.rs", "tests/e2e.rs", "tests/e2e/**"]
+
+# Review の検査項目と参照先は .dagq/review-agents/<agent>.md（ADR-t1453-1）。
+# 固定バイナリが task 1455 を含むことを着手時に確認し、着地の verify でも検査する。
+
+[review.subagents.design-consistency]
+paths = ["src/**", "crates/**", "migrations/**", "docs/design/**", "docs/development/**"]
+
+[review.subagents.test-rules]
+paths = ["tests/**", "src/**", "crates/**", "Cargo.toml", ".config/e2e-quarantine.toml"]
+
+[review.subagents.migration-rules]
+paths = ["migrations/**", "build.rs", "src/infrastructure/schema.rs", "src/infrastructure/schema/**", "tests/**", "crates/**"]
+
+[review.subagents.adr-rules]
+paths = ["docs/**"]
+
+[review.subagents.config-rules]
+paths = ["dagq.toml", ".config/**"]
+
+[review.subagents.receipt-evidence]
+paths = ["**"]
+
+[review.subagents.plugin-generic]
+paths = ["plugins/**"]

@@ -63,6 +63,10 @@ frontmatterは[frontmatter仕様](../frontmatter.md)に従う。
 
 pluginの`dagq-planner`の`SKILL.md`の「Where your authority ends」と`dagq`の`reference/authority.md`の「What each role is refused」は、[Security](../design/security.md)の「actor × capability」と[Authorization](../design/authorization.md)の「Policy」の表と一致させる。表を変える変更は同じ変更でこれらを直す。
 
+## pluginの汎用性
+
+pluginとrepositoryの規則・値・経緯の受け持ちは[ADR-t1453-2](../adr/2026-10-03-t1453-2-ownership-of-agents-md-plugin-development-docs-and-config.md)決定1の表、runtimeとの境界は決定5。検査する記述の一覧は[棚卸し](../plans/agents-slim-inventory.md)「4. pluginの固有の記述の項目」。
+
 ## workerの文書の照合
 
 workerはreceiptの前に、受け入れ条件の対応づけ（[手元の検証](local-checks.md)の「受け入れ条件の対応づけ」）に続けて、workerのpromptが指示する文書の照合（仕組みは[prompt](../design/supervisor-lifecycle/prompt.md)の「文書の照合」、[ADR-t1428-1](../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)）を行う。このrepositoryで差分と照合する文書は、taskが名指す文書と、変えた挙動を説明する`docs/design/`・pluginのskillとreference・AGENTS.md・`docs/development/`・ADRの索引で、`summary`に更新したpath・節か不要の理由を書く。taskのpathsの外のずれは`docs_drift`のfollow_upにする。

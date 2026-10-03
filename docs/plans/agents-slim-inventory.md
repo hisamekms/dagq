@@ -69,16 +69,16 @@ git grep -noE "(task|goal|ask|proposal|finding|note|run|mark)s? [0-9]{1,4}" 7fea
   - 経緯の行き先: 同じ経緯を持つADRかplansがあればそれ（そこにあれば元の場所は消すだけ）。無ければ、移すtaskがそのtaskのIDのADR（`ADR-t<ID>-<N>`「AGENTS.mdから移した開発の規則の経緯」）か測定のplanに書く。表では下の予定のpathと節で書く。
   - 「削除（重複）」は、正本がすでに別の場所にあり、元の場所は消して必要なら参照の1行にするもの。残す正本のfileと節を「正本は」の後に書く。見出しの無いdesignの文書は「冒頭（`#`の節）」と書く。
   - 新しいADRの予定のpathは、task 1457が`docs/adr/<accepted_on>-t1457-1-history-of-local-checks-and-test-rules.md`、task 1458が`docs/adr/<accepted_on>-t1458-1-history-of-operation-rules.md`で、どちらも「## Context」に経緯を書く（IDとslugは移すtaskが決めてよく、変えたら表を直す）。
-- **検査**: reviewのsubagentで機械的でない意味の検査ができる規則か。agentの名前は候補で、task 1460が決める。
-  - `design-consistency`（`src/**`・`docs/design/**`: 実装の変更とdesignの対応、`updated`・`last_verified`）
-  - `test-rules`（`tests/**`・`crates/*/tests/**`・`.config/e2e-quarantine.toml`: 置き場所・helper・processの状態・待ちの上限・e2eの印）
-  - `migration-rules`（`migrations/**`・`build.rs`・`src/infrastructure/schema.rs`）
-  - `adr-rules`（`docs/adr/**`・`docs/**`のfrontmatter）
+- **検査**: reviewのsubagentで機械的でない意味の検査ができる規則か。agentの名前はtask 1460で確定した。対応する検査項目は`.dagq/review-agents/<agent>.md`の各行のIDで辿る。1項目の意味の検査は1 agentだけが受け持つ（scriptの検査は別）。
+  - `design-consistency`（`src/**`・`crates/**`・`migrations/**`・`docs/design/**`・`docs/development/**`: 実装の変更とdesignの対応、`updated`・`last_verified`）
+  - `test-rules`（`tests/**`・`src/**`・`crates/**`・`Cargo.toml`・`.config/e2e-quarantine.toml`: 置き場所・helper・processの状態・待ちの上限・e2eの印）
+  - `migration-rules`（`migrations/**`・`build.rs`・`src/infrastructure/schema.rs`・`src/infrastructure/schema/**`・`tests/**`・`crates/**`）
+  - `adr-rules`（`docs/**`のADRとfrontmatter）
   - `config-rules`（`dagq.toml`・`.config/**`）
-  - `runtime-boundary`（`src/**`: このrepository固有の規則をruntimeに入れない、ADR-t1453-2決定5）
   - `plugin-generic`（`plugins/**`: 固有の規則・値・経緯の戻り。plugin testと分担）
-  - `receipt-evidence`（全path: workerのreceiptの`tests`のevidenceが手元の検証の規則に合うか。差分でなくreceiptを見るので、置くかは1460が決める）
+  - `receipt-evidence`（`**`: workerのreceiptのevidenceとこのrepositoryの手元の検証の規則との適合。全差分で選び、既存の重複した項目も同じ検査のIDとしてまとめる）
   - 「plan review」はsubagentでなくplan review jobが見るもの、「script」は既存のscriptとCIが見るもの、「—」は検査しない（sessionの振る舞い・人の手順・設計の説明）。
+- `runtime-boundary`は棚卸しの行に割り当てが無いため独立agentを置かない。runtimeの固有性の境界はdocs/development/documents.md「pluginの汎用性」から辿る。
 - **移した後の場所**: 後続のtaskが書き込む空の欄。
 
 ## 3. AGENTS.mdの項目
@@ -250,7 +250,7 @@ git grep -noE "(task|goal|ask|proposal|finding|note|run|mark)s? [0-9]{1,4}" 7fea
 | A-141 | テストの制約 箇条8 | 番号はmainの次の空き。重なれば`integrate`が振り直し、振り直せなければ`migration_number_taken`でresumeされ次の空きへ（ADR-0067） | 手順 | ★ | design sl/integrate.md・persistence.md | dev/migrations.md「番号」（仕組みはdesign sl/integrate.md 冒頭（`#`の節）とpersistence.md「## Database setup and migrations」） | migration-rules | 1457 | docs/development/migrations.md「## 番号」（仕組みはdesign sl/integrate.mdとpersistence.md「## Database setup and migrations」を指す） |
 | A-142 | テストの制約 箇条9 | cargo-nextestは人が`mise use -g cargo:cargo-nextest`で入れlinkを置く（ADR-0076決定3）。runtimeは事前に検査しない | 手順 | ★ | — | dev/operations.md「hostのツール」 | — | 1457 | docs/development/operations.md「## hostのツール」箇条1（cargo-nextest） |
 | A-143 | テストの制約 箇条9 | cargo-nextestが無いhostではplannerは旧コマンド`cargo llvm-cov --locked --fail-under-lines 80`で登録する | 例外 | ★ | — | dev/task-registration.md「coverageの関門」 | plan review | 1457 | docs/development/task-registration.md「## coverageの関門」箇条2 |
-| A-144 | テストの制約 箇条10 | リリース済みのmigrationは変えない（ADR-t614-2）。`check-migration-numbers.sh`が最新の`v<X.Y.Z>`のtagと比べる（tagの無いcloneでは検査しない） | 禁止 | ★ | design persistence.md、scripts/check-migration-numbers.sh | dev/migrations.md「リリース済みは不変」 | migration-rules・script | 1457 | docs/development/migrations.md「## リリース済みは不変」箇条1・2 |
+| A-144 | テストの制約 箇条10 | リリース済みのmigrationは変えない（ADR-t614-2）。`check-migration-numbers.sh`が最新の`v<X.Y.Z>`のtagと比べる（tagの無いcloneでは検査しない） | 禁止 | ★ | design persistence.md、scripts/check-migration-numbers.sh | dev/migrations.md「リリース済みは不変」 | migration-rules（scriptも検査） | 1457 | docs/development/migrations.md「## リリース済みは不変」箇条1・2 |
 | A-145 | テストの制約 箇条10 | schemaを直すときは次の番号のmigrationを足す | 手順 |  | design persistence.md | dev/migrations.md「リリース済みは不変」 | migration-rules | 1457 | docs/development/migrations.md「## リリース済みは不変」箇条1 |
 | A-146 | テストの制約 箇条10 | pluginとバイナリのversionは`check-plugin-version.sh`が検査（ADR-t617-1）、CIと`release.yml`が実行 | 設計 |  | design plugin-integration.md | 削除（重複）。正本はdesign plugin-integration.md「### tagとversionの一致規則」 | script | 1457 | 削除（重複）。正本はdesign plugin-integration.md「### tagとversionの一致規則」。docs/development/task-registration.md「## 推奨の組み合わせ」箇条7が指す |
 | A-147 | テストの制約 箇条10 | versionを変えるtaskのverifyに`sh scripts/check-plugin-version.sh`を付ける | 値 |  | — | dev/task-registration.md「推奨の組み合わせ」 | plan review | 1457 | docs/development/task-registration.md「## 推奨の組み合わせ」箇条7 |
@@ -267,7 +267,7 @@ git grep -noE "(task|goal|ask|proposal|finding|note|run|mark)s? [0-9]{1,4}" 7fea
 | A-153 | 文書のルール 箇条4 | 実装を変えたら`docs/design/`の該当文書と`updated`/`last_verified`を更新する | 手順 |  | — | dev/documents.md「design」 | design-consistency | 1459 | docs/development/documents.md「## design」（docs/README.md「## 更新ルール」の同じ規則は参照に置き換えた） |
 | A-154 | 文書のルール 箇条5 | ステップの状態が変わったら`docs/plans/current.md`を更新する | 手順 |  | — | dev/documents.md「plans」 | — | 1459 | docs/development/documents.md「## plans」箇条1（同じ節の箇条2・3に、docs/README.md「## 更新ルール」・「`plans/`」の箇条とdocs/plans/README.md 冒頭にあった計画の更新と状態の規則も移し、元は参照に置き換えた） |
 | A-155 | 文書のルール 箇条6 | frontmatterは`docs/frontmatter.md`に従う | 手順 |  | docs/frontmatter.md | dev/documents.md「frontmatter」（正本docs/frontmatter.md 冒頭（`#`の節。ファイル全体）への参照の1行） | adr-rules | 1459 | docs/development/documents.md「## frontmatter」（docs/frontmatter.mdへの参照の1行） |
-| A-156 | 文書のルール 箇条7 | ADRのIDは`adr-t<task ID>-<N>`、ファイル名`docs/adr/<YYYY-MM-DD>-t<task ID>-<N>-<slug>.md`、日付は`accepted_on`（ADR-t598-1決定1） | 値 |  | docs/README.md、scripts/check-adr-numbers.sh | dev/documents.md「ADRのID」 | adr-rules・script | 1459 | docs/development/documents.md「## ADRのID」箇条1（docs/frontmatter.md「## Common fields」とdocs/adr/README.mdの同じ規則は参照に置き換えた） |
+| A-156 | 文書のルール 箇条7 | ADRのIDは`adr-t<task ID>-<N>`、ファイル名`docs/adr/<YYYY-MM-DD>-t<task ID>-<N>-<slug>.md`、日付は`accepted_on`（ADR-t598-1決定1） | 値 |  | docs/README.md、scripts/check-adr-numbers.sh | dev/documents.md「ADRのID」 | adr-rules（scriptも検査） | 1459 | docs/development/documents.md「## ADRのID」箇条1（docs/frontmatter.md「## Common fields」とdocs/adr/README.mdの同じ規則は参照に置き換えた） |
 | A-157 | 文書のルール 箇条7 | 以前の「plannerがmainの次の空き番号を選ぶ」規則は計画時の衝突でやめた | 経緯 |  | ADR-t598-1 | ADR-t598-1「## Context」（元の場所は削除のみ） | — | 1459 | ADR-t598-1「## Context」と「## Alternatives」の「mainの次の空き番号」（元の場所は削除のみ） |
 | A-158 | 文書のルール 箇条7-1 | ADRを書くtaskはplannerがdescriptionに本数と各IDの中身を書き、`--verify 'sh scripts/check-adr-numbers.sh'`を付ける。番号の棚卸しはしない | 手順 | ★ | — | dev/task-registration.md「ADRを書くtask」 | plan review | 1459 | docs/development/task-registration.md「## ADRを書くtask」箇条1（verifyは同じ文書の「## 推奨の組み合わせ」の「ADRを書く」の行） |
 | A-159 | 文書のルール 箇条7-2 | 後続taskはADRを`ADR-t<ID>-<N>`で参照。今の姿はdesign、理由はADRを指す（決定4） | 手順 |  | ADR-t598-1 | dev/documents.md「ADRのID」 | adr-rules | 1459 | docs/development/documents.md「## ADRのID」箇条2 |
