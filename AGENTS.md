@@ -29,10 +29,11 @@ CLI の使い方（登録・起動・監視・レビューと着地・復旧）�
 
 ## テストの制約
 
-test と task の登録の規則は次の開発文書が持つ。役割と変更の範囲に合うものだけを読む。経緯は [docs/plans/local-checks-history.md](docs/plans/local-checks-history.md) と ADR が持つ。
+test と task の登録の規則は次の開発文書が持つ（判断と境界の test の分け方の方針だけはこの節の項が持つ）。役割と変更の範囲に合うものだけを読む。経緯は [docs/plans/local-checks-history.md](docs/plans/local-checks-history.md) と ADR が持つ。
 
 - [docs/development/task-registration.md](docs/development/task-registration.md): `--verify`・`--paths`・`--evidence`・`--change` の推奨の組み合わせと、plan review が当てはめる規則。task を登録・修正する planner と、plan review job が読む
 - [docs/development/testing.md](docs/development/testing.md): coverage の関門、test の置き場所・書き方・ファイルの行数・待ちの上限、e2e とその印、手動スモーク。test（`tests/`・`crates/*/tests/`・`#[cfg(test)]`）や `.config/e2e-quarantine.toml` を変える worker と、それを登録する planner が読む
+- 判断は unit test、境界は integration test（[ADR-t1410-1](docs/adr/2026-10-03-t1410-1-decisions-in-unit-tests-boundaries-in-integration-tests.md)）: runtime の task の worker と planner が守る。状態の判断（状態の遷移・回数と上限・時刻を値で受けた時間の判定・verdict や answer から操作への対応・ask や error の文面・次の一手の選び方）は `src/` の副作用のない関数にして `#[cfg(test)]` の unit test で確かめる。unit test は外部プロセス・git・SQLite のファイル・sleep・実時間の時計を使わない（時刻は値で渡す）。`tests/it` は SQLite・Git・プロセス・supervisor の配線・復旧と adopt・cmux の境界を代表の 1 case で確かめ、判断の case ごとに fixture と supervisor を起動し直さない。e2e は実バイナリ・実 Git・実 cmux のハッピーパスと境界だけにする（流し方は testing.md の「e2e」）。integration test を減らすときは確かめていた中身を unit test か残す integration test に対応づけ、行き先の無いまま消さない。test の置き場所・行数・待ちの上限は testing.md のまま
 - [docs/development/migrations.md](docs/development/migrations.md): migration の足し方・番号・リリース済みの migration の不変。migration を足す worker と planner が読む
 
 ## 文書のルール
