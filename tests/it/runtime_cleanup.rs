@@ -399,6 +399,45 @@ fn a_worktree_left_pointing_at_an_old_repository_is_repaired_and_removed() {
     assert!(payloads_of(&queue, &run, "cleanup_failed").is_empty());
 }
 
+/// Task 1587: a worktree Git takes for none (its record gone and its
+/// `.git` broken, as 5 were on 2026-10-03) stays while its task goes on;
+/// once the task is over, its directory and branch go, recorded as
+/// `worktree_removed` with `broken_git`, and no `cleanup_failed`.
+#[test]
+fn a_worktree_with_a_broken_git_goes_as_a_directory_once_its_task_is_over() {
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, BUILDING_AGENT);
+    supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    let worktree = Path::new(run.worktree_path().unwrap());
+    let gitfile = fs::read_to_string(worktree.join(".git")).unwrap();
+    let admin = gitfile.trim().strip_prefix("gitdir: ").unwrap();
+    fs::remove_dir_all(admin).unwrap();
+    fs::write(worktree.join(".git"), "broken\n").unwrap();
+    let branch = run.branch().unwrap();
+
+    // The task goes on: the worktree stays.
+    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
+    assert!(worktree.is_dir());
+    assert!(branch_exists(&repo, branch));
+    assert!(payloads_of(&queue, &run, "worktree_removed").is_empty());
+
+    queue
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
+    assert!(!worktree.exists());
+    assert!(!branch_exists(&repo, branch));
+    let removed = payloads_of(&queue, &run, "worktree_removed");
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    assert_eq!(removed[0]["reason"], "task_canceled");
+    assert_eq!(removed[0]["broken_git"], true);
+    assert_eq!(removed[0].get("repaired"), None);
+    assert!(payloads_of(&queue, &run, "cleanup_failed").is_empty());
+}
+
 /// Run files whose removal of a directory under a `raced` directory finds
 /// it gone (another cleanup removed it first), and under a `denied` one
 /// fails.

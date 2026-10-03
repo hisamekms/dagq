@@ -235,7 +235,9 @@ enum Outcome {
     /// The worktree and branch of a run whose task is over; `missing` when
     /// the directory was already gone and only the branch went, `repaired`
     /// when `git worktree repair` had to point the worktree at the
-    /// repository again first.
+    /// repository again first, `broken_git` when Git could not take it
+    /// for a worktree and its directory was removed instead (task 1587,
+    /// [`may_remove_broken`]).
     Worktree {
         run_id: RunId,
         task_id: TaskId,
@@ -245,6 +247,7 @@ enum Outcome {
         bytes: u64,
         missing: bool,
         repaired: bool,
+        broken_git: bool,
     },
     /// The Claude Code scratchpads of a run whose task is over.
     Scratchpads {
@@ -496,6 +499,7 @@ impl Supervisor<'_> {
                     bytes,
                     missing,
                     repaired,
+                    broken_git,
                 } => {
                     let reason = format!("task_{}", task_status.as_str());
                     let mut payload = json!({"path": path, "branch": branch, "bytes": bytes, "by": "supervisor", "reason": reason});
@@ -507,6 +511,10 @@ impl Supervisor<'_> {
                     }
                     if repaired {
                         payload["repaired"] = json!(true);
+                    }
+                    if broken_git {
+                        payload["broken_git"] = json!(true);
+                        info!(run_id = %run_id, "the worktree {path} of run {run_id} had a broken .git: removed its directory");
                     }
                     cleaned.add(&run_id, bytes);
                     self.queue
@@ -837,7 +845,7 @@ fn clean_worktree(
         candidate.task_status,
         TaskStatus::Completed | TaskStatus::Canceled
     );
-    let removed = |bytes, missing, repaired, branch: &str| Outcome::Worktree {
+    let removed = |bytes, missing, removal, branch: &str| Outcome::Worktree {
         run_id: candidate.run_id.clone(),
         task_id: candidate.task_id,
         task_status: candidate.task_status,
@@ -845,7 +853,8 @@ fn clean_worktree(
         branch: branch.to_owned(),
         bytes,
         missing,
-        repaired,
+        repaired: removal == Removal::Repaired,
+        broken_git: removal == Removal::BrokenGit,
     };
     if !ports.files.is_dir(worktree) {
         // The directory is gone, but the branch may be left: Git still
@@ -868,7 +877,7 @@ fn clean_worktree(
         }
         ports.repository.delete_branch(branch)?;
         listed.retain(|listed| listed != short);
-        return Ok(Some(removed(0, true, false, branch)));
+        return Ok(Some(removed(0, true, Removal::Removed, branch)));
     }
     if over {
         let Some(branch) = candidate.branch.as_deref() else {
@@ -879,8 +888,8 @@ fn clean_worktree(
             .tree_size(worktree)
             .with_context(|| format!("measure {}", worktree.display()))?
             .unwrap_or(0);
-        let repaired = remove_worktree(&*ports.repository, worktree, branch)?;
-        return Ok(Some(removed(bytes, false, repaired, branch)));
+        let removal = remove_worktree(ports, candidate, branch, pruned)?;
+        return Ok(Some(removed(bytes, false, removal, branch)));
     }
     let mut paths = Vec::new();
     let mut bytes = 0;
@@ -915,21 +924,103 @@ fn clean_worktree(
     }))
 }
 
+/// How [`remove_worktree`] removed a worktree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Removal {
+    /// `git worktree remove` at once.
+    Removed,
+    /// After `git worktree repair`.
+    Repaired,
+    /// Git took it for no worktree, so its directory was removed
+    /// ([`may_remove_broken`]).
+    BrokenGit,
+}
+
 /// Remove the worktree and its branch. When Git refuses (the worktree's
 /// `.git` points at a common directory the queue's rebind left behind),
 /// `git worktree repair` points it at the repository again and the removal
-/// is tried once more; whether it had to.
-fn remove_worktree(repository: &dyn Repository, worktree: &Path, branch: &str) -> Result<bool> {
+/// is tried once more. When the repair finds the `.git` broken and
+/// [`may_remove_broken`] allows it (task 1587), the directory is removed,
+/// the worktrees whose directory is gone are pruned and the branch is
+/// deleted.
+fn remove_worktree(
+    ports: &JobPorts,
+    candidate: &EndedRunWorktree,
+    branch: &str,
+    pruned: &mut bool,
+) -> Result<Removal> {
+    let repository = &*ports.repository;
+    let worktree = Path::new(&candidate.worktree);
     let Err(error) = repository.remove_worktree_and_branch(worktree, branch) else {
-        return Ok(false);
+        return Ok(Removal::Removed);
     };
-    repository
-        .repair_worktree(worktree)
-        .with_context(|| format!("{error:#}; and repairing the worktree failed"))?;
+    if let Err(failed) = repository.repair_worktree(worktree) {
+        let (removal, repair) = (format!("{error:#}"), format!("{failed:#}"));
+        if !may_remove_broken(
+            candidate,
+            &ports.runs_dir,
+            &ports.repo_root,
+            &removal,
+            &repair,
+        ) {
+            return Err(failed.context(format!("{removal}; and repairing the worktree failed")));
+        }
+        match ports.files.remove_dir_all(worktree) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(anyhow::Error::new(error).context(format!(
+                    "{removal}; its .git is broken ({repair}), and removing {} failed",
+                    worktree.display()
+                )));
+            }
+        }
+        let gone = || format!("removed {} as its .git is broken", worktree.display());
+        repository.prune_worktrees().with_context(gone)?;
+        *pruned = true;
+        repository.delete_branch(branch).with_context(gone)?;
+        return Ok(Removal::BrokenGit);
+    }
     repository
         .remove_worktree_and_branch(worktree, branch)
         .with_context(|| format!("{error:#}; repaired, and removing it again failed"))?;
-    Ok(true)
+    Ok(Removal::Repaired)
+}
+
+/// What `git worktree remove` says of a directory it takes for no
+/// worktree of the repository: not registered, its `.git` not a gitfile,
+/// or no `.git` at all.
+const NOT_A_WORKTREE: [&str; 3] = [
+    "is not a working tree",
+    "is not a .git file",
+    ".git' does not exist",
+];
+/// What `git worktree repair` says of a `.git` it cannot follow to a
+/// repository.
+const BROKEN_GIT: &str = ".git file broken";
+
+/// Whether the worktree whose removal failed with `removal` and whose
+/// repair failed with `repair` may be removed as a directory (task 1587):
+/// the run's task is over (its sources and commits are not needed, as for
+/// `git worktree remove --force`), the worktree is the run's own
+/// `<runs>/<run-id>/worktree` and holds no part of the repository's
+/// checkout, and Git failed on both because the `.git` is broken, so it
+/// can never take it for a worktree. Any other failure stays a failure.
+fn may_remove_broken(
+    candidate: &EndedRunWorktree,
+    runs_dir: &Path,
+    repo_root: &Path,
+    removal: &str,
+    repair: &str,
+) -> bool {
+    let worktree = Path::new(&candidate.worktree);
+    matches!(
+        candidate.task_status,
+        TaskStatus::Completed | TaskStatus::Canceled
+    ) && worktree == runs_dir.join(candidate.run_id.as_str()).join("worktree")
+        && !repo_root.starts_with(worktree)
+        && NOT_A_WORKTREE.iter().any(|said| removal.contains(said))
+        && repair.contains(BROKEN_GIT)
 }
 
 #[cfg(test)]
@@ -1205,5 +1296,77 @@ mod tests {
         cleaning.settled = settled_with(&run);
         assert!(!cleaning.may_lease(&run.run_id));
         assert_eq!(cleaning.settled.len(), 1);
+    }
+
+    /// Task 1587: a worktree is removed as a directory only when its task
+    /// is over, it is the run's own under the runs directory, and Git
+    /// failed on it because its `.git` is broken.
+    #[test]
+    fn only_a_broken_git_of_an_ended_task_under_the_runs_dir_lets_the_directory_go() {
+        let runs = Path::new("/runs");
+        let repo = Path::new("/repo");
+        // As Git said it of the worktrees of 2026-10-03.
+        let unregistered =
+            "\"git\" failed (exit status: 128): fatal: '/runs/r/worktree' is not a working tree";
+        let broken = "repair worktree /runs/r/worktree: \"git\" failed (exit status: 1): error: unable to locate repository; .git file broken: /runs/r/worktree/.git";
+        let over = candidate("r", TaskStatus::Completed);
+        assert!(may_remove_broken(&over, runs, repo, unregistered, broken));
+        assert!(may_remove_broken(
+            &candidate("r", TaskStatus::Canceled),
+            runs,
+            repo,
+            unregistered,
+            broken
+        ));
+        // Registered, with a `.git` that is no gitfile or none at all.
+        for removal in [
+            "fatal: validation failed, cannot remove working tree: '/runs/r/worktree/.git' is not a .git file, error code 5",
+            "fatal: validation failed, cannot remove working tree: '/runs/r/worktree/.git' does not exist",
+        ] {
+            assert!(
+                may_remove_broken(&over, runs, repo, removal, broken),
+                "{removal}"
+            );
+        }
+        // A task that goes on keeps its worktree.
+        for status in [TaskStatus::InProgress, TaskStatus::Ready] {
+            assert!(!may_remove_broken(
+                &candidate("r", status),
+                runs,
+                repo,
+                unregistered,
+                broken
+            ));
+        }
+        // Outside the runs directory, not the run's own, or holding the
+        // repository's checkout.
+        for worktree in [
+            "/elsewhere/r/worktree",
+            "/runs/other/worktree",
+            "/runs/r/worktree/sub",
+            "/runs/r",
+        ] {
+            let moved = EndedRunWorktree {
+                worktree: worktree.to_owned(),
+                ..over.clone()
+            };
+            assert!(
+                !may_remove_broken(&moved, runs, repo, unregistered, broken),
+                "{worktree}"
+            );
+        }
+        assert!(!may_remove_broken(
+            &over,
+            runs,
+            Path::new("/runs/r/worktree/repo"),
+            unregistered,
+            broken
+        ));
+        // Any other failure of Git.
+        let locked = "fatal: cannot remove a locked working tree";
+        let busy = "error: could not lock config file: File exists";
+        assert!(!may_remove_broken(&over, runs, repo, locked, broken));
+        assert!(!may_remove_broken(&over, runs, repo, unregistered, busy));
+        assert!(!may_remove_broken(&over, runs, repo, unregistered, ""));
     }
 }
