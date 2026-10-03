@@ -1,0 +1,10 @@
+layer,metric,values_used,before_runs_used,after_runs_used,before_left_out,after_left_out,before_rate,after_weighted,diff
+change,first_pass_rate,,0,0,config:3;docs:10;feature:22;fix:10;measure:8;refactor:9;test:10;unknown:4,,0.329,未取得,未取得
+change,sent_back_rate,,0,0,config:3;docs:10;feature:22;fix:10;measure:8;refactor:9;test:10;unknown:4,,0.684,未取得,未取得
+change,au_rate,,0,0,config:3;docs:10;feature:22;fix:10;measure:8;refactor:9;test:10;unknown:4,,0.513,未取得,未取得
+items,first_pass_rate,,0,0,1-3:31;4-6:36;7+:9,,0.329,未取得,未取得
+items,sent_back_rate,,0,0,1-3:31;4-6:36;7+:9,,0.684,未取得,未取得
+items,au_rate,,0,0,1-3:31;4-6:36;7+:9,,0.513,未取得,未取得
+lines,first_pass_rate,,0,0,179-458:24;<=178:26;>458:24;未着地:2,,0.329,未取得,未取得
+lines,sent_back_rate,,0,0,179-458:24;<=178:26;>458:24;未着地:2,,0.684,未取得,未取得
+lines,au_rate,,0,0,179-458:24;<=178:26;>458:24;未着地:2,,0.513,未取得,未取得

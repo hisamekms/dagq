@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Compute the acceptance-check baseline tables from a snapshot (task 1422).
+"""Compute the acceptance-check baseline tables from a snapshot (task 1422)
+and the after comparison (task 1423).
 
 Reads only SNAPSHOT/normalized/ (events.jsonl, tasks.jsonl, commits.jsonl,
 areas.toml). Never reads the queue, SNAPSHOT/reference/ or crosscheck.csv.
@@ -12,10 +13,20 @@ events created at or after CUT (only to repeat an earlier count). A reviewed run
 whose first `review_finished` with a verdict (pass, revise or concern) is
 created in it. Writes DIR/runs.csv (one row per interval and run) and
 DIR/table.csv (one row per interval and layer).
+
+Task 1423 adds: T (--t-task, --t-landed-task, --cutoff) written to
+DIR/t.json; the after interval (--after AFTER=BEFORE: the runs claimed at or
+after T whose first verdict is in [T, C), the first N by that verdict, N the
+number of runs of BEFORE); DIR/mapping.csv and DIR/mapping_items.csv
+(whether the receipt summary the first review read gives every numbered
+acceptance item its own evidence); and
+DIR/compare.csv (--compare BEFORE=AFTER: each layer's values before, after
+and after - before, and the rates weighted by the before mix of a layer).
 """
 
 import argparse
 import csv
+import itertools
 import json
 import math
 import os
@@ -27,6 +38,8 @@ UNLANDED = "未着地"
 IN_REVIEW = "review 中"
 MISSING = "未取得"
 UNFINISHED = "未完"
+NO_NUMBERS = "番号なし"
+UNDETERMINED = "未確定"
 
 
 def ms(text):
@@ -181,6 +194,78 @@ def overlap(spans, start, end):
     return total
 
 
+NUMBERED = re.compile(r"[(（]\s*(\d+)\s*[)）]")
+# What counts as a piece of evidence in an item's segment (task 1423): a path
+# or file name, a code name (`a::b`, `snake_case`, backticks), a commit sha,
+# a command, a test / section / event / ADR / commit word, or a measured value.
+EVIDENCE = (
+    ("path", re.compile(r"[\w.-]+/[\w./-]+|\b[\w-]+\.(?:md|rs|sql|py|sh|toml|json|jsonl|csv|yml|yaml)\b")),
+    ("code", re.compile(r"\w::\w|`[^`]+`|\b[a-z][a-z0-9]*_[a-z0-9_]+\b")),
+    ("sha", re.compile(r"\b[0-9a-f]{7,40}\b")),
+    ("command", re.compile(r"\b(?:cargo|dagq|git|python3|grep|sh)\b")),
+    ("word", re.compile(r"(?i)\b(?:tests?|events?|commits?|sections?|adr-?[\w-]*)\b|テスト|節|印")),
+    ("value", re.compile(r"\d+(?:\.\d+)?\s*(?:%|秒|分|時間|本|件|回|行|run|runs|s\b|lines?\b)")),
+)
+MIN_CHARS = 20
+
+
+def item_segments(summary):
+    """For each number, the text after its first `(k)` up to the next numbered
+    marker (of any number) or the end."""
+    marks = [(m.start(), m.end(), int(m.group(1))) for m in NUMBERED.finditer(summary)]
+    out = {}
+    for i, (_, after, n) in enumerate(marks):
+        if n in out:
+            continue
+        nxt = marks[i + 1][0] if i + 1 < len(marks) else len(summary)
+        out[n] = summary[after:nxt]
+    return out
+
+
+def evidence_of(segment):
+    """(non-blank characters, the kinds of evidence found) of one segment."""
+    chars = len(re.sub(r"\s", "", segment))
+    return chars, [name for name, rx in EVIDENCE if rx.search(segment)]
+
+
+def mapping(task, evs, verdicts):
+    """Whether the receipt summary the first review read gives each numbered
+    acceptance item its own evidence (task 1423): every number `(k)` or `（k）`
+    of the acceptance appears, and the text after it (to the next numbered
+    marker) has at least MIN_CHARS non-blank characters and one piece of
+    EVIDENCE. The receipt is the one of the last validation_finished before
+    the first verdict. Whether the evidence is right is not judged."""
+    numbers = task.get("item_numbers")
+    receipt = None
+    if verdicts:
+        for e in evs:
+            if e["id"] > verdicts[0]["id"]:
+                break
+            if e["kind"] == "validation_finished" and isinstance((e["payload"] or {}).get("receipt"), dict):
+                receipt = e["payload"]["receipt"]
+    summary = (receipt or {}).get("summary")
+    segments = item_segments(summary) if summary else {}
+    items = []
+    for n in numbers or []:
+        if n not in segments:
+            items.append({"number": n, "found": 0, "chars": "", "evidence": "", "evidenced": 0})
+            continue
+        chars, kinds = evidence_of(segments[n])
+        items.append({"number": n, "found": 1, "chars": chars, "evidence": ";".join(kinds),
+                      "evidenced": int(chars >= MIN_CHARS and bool(kinds))})
+    if numbers is None or summary is None:
+        mapped = MISSING
+    elif not numbers:
+        mapped = NO_NUMBERS
+    else:
+        mapped = int(all(i["evidenced"] for i in items))
+    return {"item_numbers": "" if numbers is None else ";".join(map(str, numbers)),
+            "summary_numbers": ";".join(map(str, sorted(segments))),
+            "numbers_with_evidence": ";".join(str(i["number"]) for i in items if i["evidenced"]),
+            "numbers_without_evidence": ";".join(str(i["number"]) for i in items if not i["evidenced"]),
+            "mapped": mapped, "mapping_items": items if summary is not None else []}
+
+
 def run_rows(events, tasks, commits, area_table, changed_from):
     by_run = {}
     for e in events:
@@ -221,6 +306,7 @@ def run_rows(events, tasks, commits, area_table, changed_from):
             waits.append((open_wait, None))
 
         row = {"run_id": run_id, "task_id": task_id}
+        row["claimed_at"] = claim["created_at"] if claim else ""
         row["change"] = task.get("change") or "unknown"
         row["items"] = task.get("items") if task.get("items") is not None else MISSING
         row["route"] = (claim["payload"].get("worker_mode") if claim else None) or MISSING
@@ -250,6 +336,7 @@ def run_rows(events, tasks, commits, area_table, changed_from):
                 code = flat[0] if flat else "unlabeled"
             primaries.append(code)
         row["primary_codes"] = ";".join(primaries)
+        row.update(mapping(task, evs, verdicts))
 
         # work: first run_claimed -> first receipt_observed.
         work = excl = None
@@ -365,7 +452,8 @@ def terciles(rows):
 def layers(r):
     out = [("all", "all"), ("change", r["change"]), ("items", r["items_bin"]),
            ("lines", r["lines_bin"]), ("review_provider", r["review_provider"]),
-           ("worker", "%s/%s" % (r["route"], r["actual_provider"]))]
+           ("worker", "%s/%s" % (r["route"], r["actual_provider"])),
+           ("review_worker", "%s|%s/%s" % (r["review_provider"], r["route"], r["actual_provider"]))]
     out += [("area", a) for a in (r["areas"].split(";") if r["areas"] else ["unknown"])]
     return out
 
@@ -403,6 +491,9 @@ def table_row(interval, layer, value, rows):
     landed = [r for r in rows if r["state"] == "landed"]
     kfp = sum(r["kpi_first_pass"] for r in landed)
     out.update(landed=len(landed), kpi_first_pass=kfp, kpi_first_pass_rate=rate(kfp, len(landed)))
+    judged = [r for r in rows if isinstance(r["mapped"], int)]
+    mapped = sum(r["mapped"] for r in judged)
+    out.update(mapped=mapped, mapped_judged=len(judged), mapped_rate=rate(mapped, len(judged)))
     return out
 
 
@@ -411,6 +502,171 @@ RUN_COLUMNS = ["interval", "run_id", "task_id", "change", "areas", "items", "ite
                "review_failed", "acceptance_unmet", "acceptance_unmet_verdicts", "acceptance_unmet_primary", "primary_codes", "state",
                "work", "work_excl_wait", "review", "review_excl_wait", "wait_to_land", "land_ask",
                "wait_to_land_excl_ask", "kpi_first_pass", "after_1420_1421"]
+MAPPING_COLUMNS = ["interval", "run_id", "task_id", "first_review_at", "item_numbers", "summary_numbers",
+                   "numbers_with_evidence", "numbers_without_evidence", "mapped"]
+MAPPING_ITEM_COLUMNS = ["interval", "run_id", "task_id", "number", "found", "chars", "evidence", "evidenced"]
+COMPARED = ["n", "first_pass", "first_pass_rate", "sent_back", "sent_back_rate", "verdicts_pass",
+            "verdicts_revise", "verdicts_concern", "au_runs", "au_verdicts", "au_primary", "au_primary_runs",
+            "reviews_per_run"] + ["%s_%s" % (c, q) for c in ("work", "work_excl_wait", "review", "review_excl_wait",
+                                                              "wait_to_land", "wait_to_land_excl_ask")
+                                  for q in ("median", "p90")] + [
+            "unlanded", "in_review", "missing", "landed", "kpi_first_pass", "mapped", "mapped_judged", "mapped_rate"]
+WEIGHTED = (("first_pass_rate", "first_pass"), ("sent_back_rate", "sent_back"), ("au_rate", "au_runs"))
+
+
+def first_of(events, kind, task_ids):
+    found = [e for e in events if e["kind"] == kind and e.get("task_id") in task_ids]
+    return min(found, key=lambda e: (ms(e["created_at"]), e["id"])) if found else None
+
+
+def find_t(events, versions, t_tasks, landed_tasks, cutoff):
+    """T: the later of the first supervisor_started / update_installed whose
+    version holds the landing commit of each --t-task, and the first
+    run_integrated of the --t-landed-task (task 1423). Never mark_recorded."""
+    brief = lambda e: {"id": e["id"], "kind": e["kind"], "created_at": e["created_at"]}
+    out = {"cutoff": cutoff, "t": None, "state": UNDETERMINED, "parts": [], "evidence": {}}
+    times = []
+    for task in t_tasks:
+        landed = first_of(events, "run_integrated", [task])
+        part = {"task": task, "role": "binary holds the landing"}
+        if landed is None:
+            part.update(state="not landed before C")
+            out["parts"].append(part)
+            continue
+        commit = landed["payload"].get("commit") or landed["payload"].get("result_commit")
+        part.update(landing=dict(brief(landed), commit=commit))
+        started = None
+        for e in sorted(events, key=lambda e: (ms(e["created_at"]), e["id"])):
+            p = e["payload"] or {}
+            v = p.get("dagq_version") if e["kind"] == "supervisor_started" else (
+                p.get("commit") if e["kind"] == "update_installed" else None)
+            if v and (versions.get(v) or {}).get("holds", {}).get(commit) is True:
+                started = dict(brief(e), version=v, handoff=p.get("handoff"))
+                break
+        part.update(first_binary=started)
+        if started:
+            times.append(started["created_at"])
+        out["parts"].append(part)
+        later = [e for e in events if ms(e["created_at"]) >= ms(landed["created_at"])]
+        out["evidence"]["after_landing_of_%d" % task] = [
+            dict(brief(e), version=(e["payload"] or {}).get("dagq_version") or (e["payload"] or {}).get("commit"),
+                 handoff=(e["payload"] or {}).get("handoff"), stage=(e["payload"] or {}).get("stage"),
+                 holds=(versions.get((e["payload"] or {}).get("dagq_version") or (e["payload"] or {}).get("commit"))
+                        or {}).get("holds", {}).get(commit))
+            for e in sorted(later, key=lambda e: e["id"])
+            if e["kind"] in ("supervisor_started", "update_installed", "update_failed")]
+    for task in landed_tasks:
+        landed = first_of(events, "run_integrated", [task])
+        part = {"task": task, "role": "landed"}
+        if landed is None:
+            part.update(state="not landed before C")
+        else:
+            part.update(landing=brief(landed))
+            times.append(landed["created_at"])
+        out["parts"].append(part)
+    starts = [e for e in events if e["kind"] == "supervisor_started"]
+    if starts:
+        last = max(starts, key=lambda e: (ms(e["created_at"]), e["id"]))
+        out["evidence"]["last_supervisor_started"] = dict(
+            brief(last), dagq_version=last["payload"].get("dagq_version"), handoff=last["payload"].get("handoff"))
+    out["evidence"]["update_asks"] = [
+        dict(brief(e), ask_kind=e["payload"].get("kind"), ask_id=e["payload"].get("ask_id"),
+             option=e["payload"].get("option"))
+        for e in sorted(events, key=lambda e: e["id"])
+        if e["kind"] in ("ask_opened", "ask_answered", "ask_closed")
+        and e["payload"].get("kind") in ("approve_update", "update_failed")
+        and (not out["parts"] or "landing" not in out["parts"][0]
+             or ms(e["created_at"]) >= ms(out["parts"][0]["landing"]["created_at"]))]
+    if len(times) == len(t_tasks) + len(landed_tasks) and times:
+        out["t"] = max(times, key=ms)
+        out["state"] = "determined"
+    return out
+
+
+def compare(table, before, after, after_state):
+    """One row per layer and value of BEFORE or AFTER, with before / after /
+    after - before for each compared column, then the weighted rates."""
+    get = {}
+    for row in table:
+        if row["interval"] in (before, after) and row["layer"] != "review_failed_only":
+            get[(row["interval"], row["layer"], row["value"])] = row
+    keys = sorted({(l, v) for (_, l, v) in get}, key=lambda k: (LAYER_ORDER.index(k[0]), str(k[1])))
+    rows = []
+    for layer, value in keys:
+        b, a = get.get((before, layer, value)), get.get((after, layer, value))
+        out = {"layer": layer, "value": value}
+        for col in COMPARED:
+            bv = "" if b is None else b[col]
+            av = (after_state if after_state else "") if a is None else a[col]
+            if a is None and not after_state:
+                av = 0 if col == "n" else ""
+            out[col + "_before"], out[col + "_after"] = bv, av
+            out[col + "_diff"] = difference(bv, av)
+        rows.append(out)
+    return rows
+
+
+def difference(b, a):
+    def num(x):
+        if isinstance(x, (int, float)):
+            return x
+        try:
+            return float(x) if "." in x else int(x)
+        except (TypeError, ValueError):
+            return None
+    nb, na = num(b), num(a)
+    if nb is None or na is None:
+        return a if a in (MISSING, UNDETERMINED) else ""
+    d = na - nb
+    return ("%.3f" % d) if isinstance(d, float) else d
+
+
+def weighted(before_rows, after_rows, after_state):
+    """For the change, items and lines layers: the before mix of the values
+    present in both intervals times each one's after rate (and before
+    rate), the shares renormalised over those values."""
+    out = []
+    for layer in ("change", "items", "lines"):
+        key = lambda r: r[layer if layer == "change" else layer + "_bin"]
+        groups_b = {k: list(g) for k, g in itertools.groupby(sorted(before_rows, key=key), key=key)}
+        groups_a = {k: list(g) for k, g in itertools.groupby(sorted(after_rows, key=key), key=key)}
+        # 『未着地』『未取得』 are not size classes: never weight by them.
+        common = sorted(k for k in set(groups_b) & set(groups_a) if k not in (UNLANDED, MISSING))
+        left_b = sorted(set(groups_b) - set(common))
+        left_a = sorted(set(groups_a) - set(common))
+        nb = sum(len(groups_b[k]) for k in common)
+        for name, count in WEIGHTED:
+            row = {"layer": layer, "metric": name, "values_used": ";".join(map(str, common)),
+                   "before_runs_used": nb, "after_runs_used": sum(len(groups_a[k]) for k in common),
+                   "before_left_out": ";".join("%s:%d" % (k, len(groups_b[k])) for k in left_b),
+                   "after_left_out": ";".join("%s:%d" % (k, len(groups_a[k])) for k in left_a)}
+            if not after_rows:
+                row.update(before_rate=rate(sum(count_of(r, count) for r in before_rows), len(before_rows)),
+                           after_weighted=after_state or "", diff=after_state or "")
+            else:
+                wb = sum(len(groups_b[k]) / nb * share(groups_b[k], count) for k in common) if nb else None
+                wa = sum(len(groups_b[k]) / nb * share(groups_a[k], count) for k in common) if nb else None
+                row.update(before_rate="" if wb is None else "%.3f" % wb,
+                           after_weighted="" if wa is None else "%.3f" % wa,
+                           diff="" if wa is None else "%.3f" % (wa - wb))
+            out.append(row)
+    return out
+
+
+def count_of(r, count):
+    v = r["verdicts"].split(">")
+    if count == "first_pass":
+        return int(v[0] == "pass")
+    if count == "sent_back":
+        return int(any(x in ("revise", "concern") for x in v))
+    return r["acceptance_unmet"]
+
+
+def share(rows, count):
+    return sum(count_of(r, count) for r in rows) / len(rows)
+
+
+LAYER_ORDER = ["all", "change", "area", "items", "lines", "review_provider", "worker", "review_worker"]
 
 
 def main():
@@ -423,6 +679,15 @@ def main():
                    help="LOW,HIGH: fixed line terciles (a baseline's meta.json) instead of --terciles-from")
     p.add_argument("--changed-task", action="append", type=int, default=[],
                    help="a task whose first landing marks the change (1420, 1421)")
+    p.add_argument("--cutoff", default=None, help="the observation cutoff C of the snapshot (for T and --after)")
+    p.add_argument("--t-task", action="append", type=int, default=[],
+                   help="T needs a supervisor binary holding this task's landing (1420)")
+    p.add_argument("--t-landed-task", action="append", type=int, default=[],
+                   help="T is not before this task's run_integrated (1421)")
+    p.add_argument("--after", default=None,
+                   help="AFTER=BEFORE: runs claimed at or after T with the first verdict in [T, C), "
+                        "the first N by it, N = the runs of BEFORE")
+    p.add_argument("--compare", default=None, help="BEFORE=AFTER: write compare.csv and weighted.csv")
     p.add_argument("--out", default=None)
     a = p.parse_args()
     norm = os.path.join(a.snapshot, "normalized")
@@ -433,6 +698,8 @@ def main():
     tasks = {t["task_id"]: t for t in load_jsonl(os.path.join(norm, "tasks.jsonl"))}
     commits = {c["commit"]: c for c in load_jsonl(os.path.join(norm, "commits.jsonl"))}
     area_table = load_areas(os.path.join(norm, "areas.toml"))
+    versions_path = os.path.join(norm, "versions.jsonl")
+    versions = {v["version"]: v for v in load_jsonl(versions_path)} if os.path.exists(versions_path) else {}
     landings = [ms(e["created_at"]) for e in events
                 if e["kind"] == "run_integrated" and e.get("task_id") in a.changed_task]
     changed_from = min(landings) if landings else None
@@ -450,6 +717,31 @@ def main():
             by_cut[cut] = run_rows(seen, tasks, commits, area_table, changed_from)
         member[name] = sorted((r for r in by_cut[cut] if r["first_review_at"]
                                and start <= ms(r["first_review_at"]) < end), key=lambda r: r["run_id"])
+    t_info = None
+    if a.t_task or a.t_landed_task:
+        t_info = find_t(events, versions, a.t_task, a.t_landed_task, a.cutoff)
+    after_state = None
+    if a.after:
+        after, before = a.after.split("=", 1)
+        n_before = len(member[before])
+        if t_info is None or t_info["t"] is None:
+            after_state = MISSING
+            member[after] = []
+            t_info = t_info or {}
+            t_info.update(after={"name": after, "n": n_before, "taken": 0, "state": UNDETERMINED})
+        else:
+            t, c = ms(t_info["t"]), ms(a.cutoff)
+            window = [r for r in by_cut[None] if r["first_review_at"] and t <= ms(r["first_review_at"]) < c]
+            claimed_before = [r for r in window if not r["claimed_at"] or ms(r["claimed_at"]) < t]
+            kept = sorted((r for r in window if r not in claimed_before),
+                          key=lambda r: (ms(r["first_review_at"]), r["run_id"]))[:n_before]
+            member[after] = sorted(kept, key=lambda r: r["run_id"])
+            end = ms(kept[-1]["first_review_at"]) + 1 if kept and len(kept) == n_before else c
+            intervals.append((after, t, end, None))
+            t_info.update(after={"name": after, "n": n_before, "taken": len(kept),
+                                 "claimed_before_t": len(claimed_before),
+                                 "claimed_before_t_runs": sorted(r["run_id"] for r in claimed_before),
+                                 "state": "full" if len(kept) == n_before else "short"})
     if a.line_terciles:
         bounds = tuple(int(x) for x in a.line_terciles.split(","))
     else:
@@ -459,19 +751,31 @@ def main():
     rows = by_cut[None] if None in by_cut else next(iter(by_cut.values()))
 
     with open(os.path.join(out, "runs.csv"), "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=RUN_COLUMNS, lineterminator="\n")
+        w = csv.DictWriter(f, fieldnames=RUN_COLUMNS, lineterminator="\n", extrasaction="ignore")
         w.writeheader()
         for name, _, _, _ in intervals:
             for r in member[name]:
                 w.writerow(dict(r, interval=name))
+    with open(os.path.join(out, "mapping.csv"), "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=MAPPING_COLUMNS, lineterminator="\n", extrasaction="ignore")
+        w.writeheader()
+        for name, _, _, _ in intervals:
+            for r in sorted(member[name], key=lambda r: (r["first_review_at"], r["run_id"])):
+                w.writerow(dict(r, interval=name))
+    with open(os.path.join(out, "mapping_items.csv"), "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=MAPPING_ITEM_COLUMNS, lineterminator="\n")
+        w.writeheader()
+        for name, _, _, _ in intervals:
+            for r in sorted(member[name], key=lambda r: (r["first_review_at"], r["run_id"])):
+                for item in r["mapping_items"]:
+                    w.writerow(dict(item, interval=name, run_id=r["run_id"], task_id=r["task_id"]))
     table = []
     for name, start, end, cut in intervals:
         groups = {}
         for r in member[name]:
             for layer in layers(r):
                 groups.setdefault(layer, []).append(r)
-        order = ["all", "change", "area", "items", "lines", "review_provider", "worker"]
-        for layer, value in sorted(groups, key=lambda k: (order.index(k[0]), str(k[1]))):
+        for layer, value in sorted(groups, key=lambda k: (LAYER_ORDER.index(k[0]), str(k[1]))):
             table.append(table_row(name, layer, value, groups[(layer, value)]))
         failed_only = sum(1 for r in by_cut[cut] if not r["verdicts"] and r["review_failed"] and any(
             start <= ms(e["created_at"]) < end and (cut is None or ms(e["created_at"]) < cut) for e in events
@@ -487,6 +791,23 @@ def main():
                    "first_landing_of_changed_tasks_ms": changed_from,
                    "intervals": [[n, s, e, c] for n, s, e, c in intervals]}, f, sort_keys=True, indent=1)
         f.write("\n")
+    if t_info is not None:
+        with open(os.path.join(out, "t.json"), "w", encoding="utf-8") as f:
+            json.dump(t_info, f, sort_keys=True, indent=1, ensure_ascii=False)
+            f.write("\n")
+    if a.compare:
+        before, after = a.compare.split("=", 1)
+        state = after_state if after not in [i[0] for i in intervals] else None
+        rows = compare(table, before, after, state)
+        with open(os.path.join(out, "compare.csv"), "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=list(rows[0].keys()), lineterminator="\n")
+            w.writeheader()
+            w.writerows(rows)
+        wrows = weighted(member[before], member.get(after, []), state)
+        with open(os.path.join(out, "weighted.csv"), "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=list(wrows[0].keys()), lineterminator="\n")
+            w.writeheader()
+            w.writerows(wrows)
     print("runs %d -> %s" % (sum(len(m) for m in member.values()), out))
 
 

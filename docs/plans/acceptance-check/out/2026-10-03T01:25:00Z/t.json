@@ -1,0 +1,79 @@
+{
+ "after": {
+  "n": 76,
+  "name": "after",
+  "state": "未確定",
+  "taken": 0
+ },
+ "cutoff": "2026-10-03T01:25:00Z",
+ "evidence": {
+  "after_landing_of_1420": [
+   {
+    "created_at": "2026-10-03T00:35:36.974Z",
+    "handoff": null,
+    "holds": true,
+    "id": 69933,
+    "kind": "update_failed",
+    "stage": "e2e",
+    "version": "23c4fefd9d31a1db7ddccc8d23cec94dacaae697"
+   }
+  ],
+  "last_supervisor_started": {
+   "created_at": "2026-10-02T23:54:59.754Z",
+   "dagq_version": "0.4.0-dev+e994a99f750b3f07aee1e3e4eb26d4dec3bc0afc",
+   "handoff": true,
+   "id": 69467,
+   "kind": "supervisor_started"
+  },
+  "update_asks": [
+   {
+    "ask_id": 352,
+    "ask_kind": "update_failed",
+    "created_at": "2026-10-03T00:35:36.974Z",
+    "id": 69932,
+    "kind": "ask_opened",
+    "option": null
+   },
+   {
+    "ask_id": 352,
+    "ask_kind": "update_failed",
+    "created_at": "2026-10-03T00:36:50.697Z",
+    "id": 69942,
+    "kind": "ask_answered",
+    "option": "skip"
+   },
+   {
+    "ask_id": 352,
+    "ask_kind": "update_failed",
+    "created_at": "2026-10-03T00:37:07.894Z",
+    "id": 69944,
+    "kind": "ask_closed",
+    "option": null
+   }
+  ]
+ },
+ "parts": [
+  {
+   "first_binary": null,
+   "landing": {
+    "commit": "23c4fefd9d31a1db7ddccc8d23cec94dacaae697",
+    "created_at": "2026-10-03T00:29:27.268Z",
+    "id": 69870,
+    "kind": "run_integrated"
+   },
+   "role": "binary holds the landing",
+   "task": 1420
+  },
+  {
+   "landing": {
+    "created_at": "2026-10-03T01:09:04.553Z",
+    "id": 70392,
+    "kind": "run_integrated"
+   },
+   "role": "landed",
+   "task": 1421
+  }
+ ],
+ "state": "未確定",
+ "t": null
+}

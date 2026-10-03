@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Snapshot the production queue for the acceptance-check baseline (task 1422).
+"""Snapshot the production queue for the acceptance-check baseline (task 1422)
+and the after comparison (task 1423).
 
 Reads only: `dagq events` / `dagq show` / `dagq stats` / `dagq marks` /
 `dagq status` (all read-only commands) and git. Never opens the queue DB.
@@ -9,7 +10,12 @@ Reads only: `dagq events` / `dagq show` / `dagq stats` / `dagq marks` /
 Runs: every run with a `review_finished` or `review_failed` created in
 [S, E) (the compute step decides which of them are reviewed runs: the run's
 first `review_finished` with a verdict falls in an interval). Everything a
-value is computed from is cut at C (created_at < C).
+value is computed from is cut at C (created_at < C). Also the queue-wide
+`supervisor_started` / `update_installed` / `update_failed` events and the
+`approve_update` / `update_failed` asks (to find when a supervisor first ran
+a binary holding a watched task's landing, task 1423), with
+normalized/versions.jsonl saying, from git, which of those versions hold
+each watched task's landing commit.
 
 Writes DIR/normalized/ (compared, read by compute) and DIR/reference/
 (raw outputs holding the current state; read only by crosscheck).
@@ -29,6 +35,13 @@ PAGE = 1000
 def run(cmd, cwd=None):
     out = subprocess.run(cmd, cwd=cwd, check=True, capture_output=True, text=True)
     return out.stdout
+
+
+def reference(cmd):
+    """A reference output; a failing read is written down, not fatal (task 1423)."""
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    return r.stdout if r.returncode == 0 else json.dumps(
+        {"command": cmd, "exit": r.returncode, "stdout": r.stdout, "stderr": r.stderr}, indent=1)
 
 
 def dagq_json(args):
@@ -78,6 +91,36 @@ def items(acceptance):
     return max(1, len(re.findall(r"\(\d+\)", acceptance)))
 
 
+def item_numbers(acceptance):
+    """The distinct numbers of the `(digits)` in the acceptance (task 1423)."""
+    if acceptance is None:
+        return None
+    return sorted({int(n) for n in re.findall(r"\((\d+)\)", acceptance)})
+
+
+UPDATE_ASKS = ("approve_update", "update_failed")
+
+
+def version_commit(repo, version):
+    """The commit of a dagq version: the sha after `+`, else the tag v<version>."""
+    if not version:
+        return None
+    if "+" in version:
+        return version.split("+", 1)[1]
+    try:
+        return run(["git", "-C", repo, "rev-parse", "v%s^{commit}" % version]).strip()
+    except subprocess.CalledProcessError:
+        return None
+
+
+def holds(repo, ancestor, commit):
+    """True when `ancestor` is an ancestor of (or is) `commit`; None when git
+    does not know one of them."""
+    r = subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", ancestor, commit],
+                       capture_output=True)
+    return {0: True, 1: False}.get(r.returncode)
+
+
 def task_at_claim(task_id, task_events):
     """The task's change and acceptance at its first run_claimed: the
     current `show --full` values with every task_edited created at or after
@@ -104,6 +147,7 @@ def task_at_claim(task_id, task_events):
         "task_id": task_id,
         "change": None if "change" in missing else values["change"],
         "items": None if "acceptance" in missing else items(values["acceptance"]),
+        "item_numbers": None if "acceptance" in missing else item_numbers(values["acceptance"]),
         "missing": sorted(set(missing)),
     }
     return row, shown
@@ -187,6 +231,13 @@ def main():
     for e in events(["--all", "--kind", "mark_recorded", "--kind", "mark_retracted",
                      "--until", a.cutoff]):
         by_id[e["id"]] = e
+    for e in events(["--all", "--kind", "supervisor_started", "--kind", "update_installed",
+                     "--kind", "update_failed", "--until", a.cutoff]):
+        by_id[e["id"]] = e
+    for e in events(["--all", "--kind", "ask_opened", "--kind", "ask_answered", "--kind", "ask_closed",
+                     "--until", a.cutoff]):
+        if (e["payload"] or {}).get("kind") in UPDATE_ASKS:
+            by_id[e["id"]] = e
     write_lines(os.path.join(norm, "events.jsonl"),
                 [normal(by_id[i]) for i in sorted(by_id)])
 
@@ -201,6 +252,23 @@ def main():
                       for i in by_id if by_id[i]["kind"] == "run_integrated"} - {None})
     write_lines(os.path.join(norm, "commits.jsonl"),
                 [json.dumps(landed_commit(a.repo, c), sort_keys=True) for c in commits])
+    landings = sorted({(e["payload"].get("commit") or e["payload"].get("result_commit"))
+                       for e in by_id.values() if e["kind"] == "run_integrated"
+                       and e.get("task_id") in a.watch_task} - {None})
+    versions = {}
+    for e in by_id.values():
+        p = e["payload"] or {}
+        if e["kind"] == "supervisor_started" and p.get("dagq_version"):
+            versions[p["dagq_version"]] = None
+        elif e["kind"] in ("update_installed", "update_failed") and p.get("commit"):
+            versions[p["commit"]] = p["commit"]
+    rows = []
+    for v in sorted(versions):
+        c = versions[v] or version_commit(a.repo, v)
+        rows.append(json.dumps({"version": v, "commit": c,
+                                "holds": {l: (None if c is None else holds(a.repo, l, c)) for l in landings}},
+                               sort_keys=True))
+    write_lines(os.path.join(norm, "versions.jsonl"), rows)
     if a.areas_from:
         with open(a.areas_from, encoding="utf-8") as f:
             areas = f.read()
@@ -215,9 +283,9 @@ def main():
     write_gz(os.path.join(ref, "show.json.gz"),
              json.dumps(shows, sort_keys=True, ensure_ascii=False, indent=1))
     with open(os.path.join(ref, "marks.json"), "w", encoding="utf-8") as f:
-        f.write(run(["dagq", "marks"]))
+        f.write(reference(["dagq", "marks"]))
     with open(os.path.join(ref, "status.json"), "w", encoding="utf-8") as f:
-        f.write(run(["dagq", "status"]))
+        f.write(reference(["dagq", "status"]))
     with open(os.path.join(ref, "args.json"), "w", encoding="utf-8") as f:
         json.dump(vars(a), f, sort_keys=True, indent=1)
     print("runs %d, tasks %d, events %d, commits %d -> %s"

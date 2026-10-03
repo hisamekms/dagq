@@ -21,6 +21,8 @@ related:
 
 goal 90 の受け入れ条件 (3)、task 1422。task 1420（worker・resume・revise の prompt に受け入れ条件の各項目を根拠へ対応づける手順を足す）と task 1421（AGENTS.md と planner の参照）の変更の前の、run の review の初回通過率・差し戻し・acceptance_unmet・work・review・wait_to_land を、change・area・複雑さ・review の provider・worker の経路の層で出した。後続の task（goal 90 の受け入れ条件 (4)）が同じ script に後の区間を足して比べる。数字は event log の 1 回の集計で、繰り返しの測定はしていない。率の差はどれも観測で、原因は確かめていない。
 
+**後の区間（task 1423）は暫定**: 観測の締切 C = 2026-10-03T01:25:00Z の時点で、task 1420 の着地 commit を含む binary の supervisor はまだ動いておらず（T は未確定）、後の区間の値は全て『未取得』。前の区間だけを C で出し直した（76 run）。goal 90 の受け入れ条件 (4) を満たすとは判定しない。[後の区間（task 1423、暫定）](#後の区間task-1423暫定)の章。
+
 ## 要点
 
 - **主の前の区間（2026-10-02T03:07:27.872Z〜2026-10-03T00:12:09.306Z、run の review が Codex）の reviewed run は 75。初回通過 24（32.0%）、差し戻し 52（69.3%）、acceptance_unmet を含む verdict のある run 39・verdict 59（主の理由が acceptance_unmet の verdict 49）、run あたりの review 2.08 回。**
@@ -328,3 +330,235 @@ python3 crosscheck.py snapshot/<新しい C>
 ```
 
 前の区間の値はこの文書の表と `out/2026-10-03T00:15:00Z/` のまま使い、出し直さない（対応表か境を変えるときだけ、前の区間も同じ引数で出し直す）。
+
+task 1423 は、前の区間の終わりを 1420・1421 の最初の `run_integrated` まで延ばし、前と後を同じ C の snapshot から求めることになったので、この手順の代わりに `after.sh` で前の区間も出し直す（次の章）。
+
+## 後の区間（task 1423、暫定）
+
+goal 90 の受け入れ条件 (4)、task 1423。**暫定の報告**: 観測の締切 C の時点で T（task 1420 の着地 commit を含む binary で supervisor が動き始めた時刻）が無く、後の区間の値は全て『未取得』。前の区間だけを同じ C の snapshot から出し直した。goal 90 の受け入れ条件 (4) を満たすとは判定しない。後の区間が前の区間の本数 N にそろってから、同じ手順で測り直す（receipt の follow_up、category measurement）。
+
+### 要点（暫定）
+
+- **T は未確定**。task 1420 の着地（`run_integrated` event 69870、2026-10-03T00:29:27.268Z、commit `23c4fefd9d31`）の後、C より前に 23c4fefd を祖先に持つ version の `supervisor_started` も `update_installed` も無い。23c4fefd の自動更新は e2e の関門で落ち（`update_failed` event 69933、00:35:36.974Z、stage `e2e`、落ちた test は `two_independent_tasks_run_concurrently_and_a_dependent_follows_integration`）、`update_failed` の ask 352 に `skip` が答えられた。C より前の最後の `supervisor_started` は event 69467（2026-10-02T23:54:59.754Z、`handoff: true`、`0.4.0-dev+e994a99f750b`。e994a99f は 23c4fefd を祖先に持たない）。
+- **前の区間の reviewed run は N = 76**（[S, E2)、E2 = 1420 の着地）。初回通過 25（32.9%）、差し戻し 52（68.4%）、acceptance_unmet を含む verdict のある run 39・verdict 60（主 50）、review/run 2.12、work 中央値 884 秒・p90 2228 秒、review 144・486 秒、wait_to_land 1179・8734 秒（ask 除く 1157・6047 秒）。人の答えの待ちは work と review に無く、待ち除く値は含む値と同じ。
+- **後の区間は 0 本（未取得）**。初回通過率・差し戻し・acceptance_unmet・work・review・wait_to_land の前後の差は出せない。構成比で重み付けした率、同じ review の provider と worker の経路どうしの行、対応が書かれた run の割合の後の値も『未取得』。
+- **前の区間で receipt の summary が受け入れ条件の番号ごとに根拠を挙げていた run** は、番号のある 46 run のうち 5（10.9%）。番号の無い task の run が 30。後の区間の同じ割合と比べる基準になる（判定の規則は[対応が書かれた run の割合](#対応が書かれた-run-の割合)）。
+- 参考（C の後、比べる値に使わない）: 01:28:15.711Z に 33cc0410（23c4fefd を祖先に持つ）の `supervisor_started`（event 70602、handoff）と `update_installed`（event 70612）が記録された。測り直すときの T はこの時刻と 1421 の着地（01:09:04.553Z）の遅い方になる見込みだが、測り直しの snapshot の normalized/ から同じ規則で求め直す。
+
+### T の求め方と値
+
+T = 次の 2 つの遅い方。どちらも normalized/events.jsonl（created_at < C）と normalized/versions.jsonl から compute が求め、`out/<C>/t.json` に根拠の event の ID と created_at を書く。
+
+1. `supervisor_started`（version は `payload.dagq_version`、`payload.handoff` が true の自動更新の引き継ぎも false の `up` などの起動も）か `update_installed`（version は `payload.commit`）のうち、version の commit が task 1420 の着地 commit を祖先に持つ（`git merge-base --is-ancestor`。fetch が versions.jsonl に書く）最初のもの
+2. task 1421 の最初の `run_integrated`
+
+`mark_recorded` は根拠にしない（人・planner の `dagq mark` の記録で、`dagq marks` の「supervisor handed off to …」の行は `supervisor_started` から作られる表示）。
+
+| 部分 | C の時点の値 | 根拠 |
+|---|---|---|
+| 1420 の着地 | 2026-10-03T00:29:27.268Z | `run_integrated` event 69870、commit 23c4fefd9d31a1db7ddccc8d23cec94dacaae697 |
+| 1420 を含む binary の最初の起動 | **無し** | 1420 の着地以後の `supervisor_started`・`update_installed`・`update_failed` は `update_failed` event 69933（00:35:36.974Z、commit 23c4fefd、stage e2e）だけ |
+| 1421 の着地 | 2026-10-03T01:09:04.553Z | `run_integrated` event 70392、commit 3189b7e1 |
+| T | **未確定** | 1 が無いため |
+
+未確定の根拠（normalized/ の C より前の event）:
+
+- C より前の最後の `supervisor_started`: event 69467、2026-10-02T23:54:59.754Z、`handoff: true`、`dagq_version` `0.4.0-dev+e994a99f750b3f07aee1e3e4eb26d4dec3bc0afc`（23c4fefd を祖先に持たない）。直後の `update_installed` は event 69479（23:55:02.125Z、e994a99f）
+- `update_failed`: event 69587（00:05:10.462Z、e850ad3a）、69788（00:19:51.844Z、523ae7ff）、69933（00:35:36.974Z、23c4fefd）。3 つとも stage `e2e` で、同じ e2e が名前での流し直しでも落ちた（task 1516 の 27b7af0c が 00:51Z に直した）
+- 自動更新の ask: `approve_update` の ask は C より前に 0 件。`update_failed` の ask は 350・351・352 で、どれも `skip` で答えられ閉じた（352 は ask_opened event 69932、ask_answered event 69942 の option `skip`、ask_closed event 69944）
+- 参考（reference/status.json、fetch の時刻 01:28 ごろの今の状態で、比べる値に使わない）: `supervisors[].binary_version` は `0.4.0-dev+33cc04102ae9`、`auto_update` の `at` は 01:28:17.742Z（event 70612）。C の後に入れ替わったことを示すだけで、T には使わない
+
+### 区間
+
+境界は task 1422 と同じく [始まり, 終わり) で、run は最初の verdict の `review_finished` の時刻で区間に入れる。
+
+| 名前 | 区間 | reviewed run | 決め方 |
+|---|---|---|---|
+| main（前の区間） | [S, E2)、S = 2026-10-02T03:07:27.872Z、E2 = 2026-10-03T00:29:27.268Z | **N = 76** | E2 は task 1420・1421 の最初の `run_integrated`（1420、event 69870）。task 1422 の E（00:12:09.306Z）が E2 より前なので、[E, E2) の分を同じ定義で足した |
+| main_1422 | [S, E)、C = 01:25:00Z | 75 | task 1422 の主の区間を新しい C で出し直したもの（差の確認用） |
+| main_before_0805 / main_after_0805 | [S, M) / [M, E2) | 11 / 65 | M は印 61916 |
+| reference | [R, S) | 49 | task 1422 と同じ（R は task 1422 の値のまま） |
+| audit | [S, A)、A より前の event | 35 | task 1422 と同じ（監査との照合用で、後の区間の本数には使わない） |
+| after（後の区間） | `run_claimed` が T 以後で、最初の verdict が [T, C) の run を早い順に N 本 | **0（未取得）** | T が未確定のため |
+
+- 後の区間から除いた run（T より前に claim され T の後に review された run）: T が無いので数えていない。
+- 参考に、E2 から C までに最初の verdict を受けた run は 8（task 1516・1422・1421 ×2・1428 ×2・1424・1457）。どれも T の前（1420 を含まない binary の supervisor が claim し prompt を作った）で、後の区間には入らない。
+- `review_failed` だけの run はどの区間も 0。
+- 区間の中の印（normalized/ の `mark_recorded` / `mark_retracted`、[R, C)）: task 1422 と同じ 2 件（60152、61916）だけ。後の区間は無いので、後の区間の中で review の provider や worker の既定を変える印は無い。
+
+### 観測の締切 C と snapshot
+
+C = **2026-10-03T01:25:00Z**（この task の run の claim 01:22:06Z の後で、snapshot を取った時刻 01:26 ごろの直前）。値は `created_at` が C より前の event と git の commit だけから求めた。snapshot は `docs/plans/acceptance-check/snapshot/2026-10-03T01:25:00Z/` に取ったが commit していない（`.gitignore` 済み、`git add -f` もしない。本番 queue の dump を公開の repository に出さないため）。出力は `docs/plans/acceptance-check/out/2026-10-03T01:25:00Z/`。area は task 1422 の対応表 `areas-2026-10-03T00:15:00Z.toml` を fetch の `--areas-from` に渡し、変更行数の 3 分位は task 1422 の境（178・458）を `--line-terciles` で固定した（どちらも変えていない）。
+
+### script の変更
+
+task 1422 の列・計算式・層・正規化・裏づけの規則は変えず、次を足した。足した列と層は前の区間にも同じに出る（task 1422 の `out/2026-10-03T00:15:00Z/` は作り直していない。前の区間はこの章の C で全て出し直した）。
+
+| ファイル | 足したもの |
+|---|---|
+| `fetch.py` | queue 全体の `supervisor_started`・`update_installed`・`update_failed`（`--until C`）と、ask の kind が `approve_update` か `update_failed` の `ask_opened`・`ask_answered`・`ask_closed` を、task 1422 と同じ正規化で `normalized/events.jsonl` に入れる。`normalized/versions.jsonl`（それらの version ごとの commit と、`--watch-task` の着地 commit を祖先に持つか。`+` の後の sha、無ければ tag `v<version>` を git で読む）。`tasks.jsonl` に受け入れ条件の番号の一覧 `item_numbers`。reference/ の `marks`・`status` は読み失敗でも止めずに失敗を書く（1 回目の fetch で `dagq status` が一度だけ exit 1 になったため） |
+| `compute.py` | `--cutoff`・`--t-task`・`--t-landed-task` で T（`t.json`）、`--after after=main` で後の区間（N は main の本数）、`mapping.csv` と `mapping_items.csv`（番号ごとの根拠の判定）、`--compare main=after` で `compare.csv`（層ごとの前・後・差）と `weighted.csv`（構成比で重み付けした率）。層に `review_worker`（review の provider と worker の経路の組）を足し、`table.csv` に `mapped`・`mapped_judged`・`mapped_rate` の列を足した |
+| `after.sh` | この章の引数で fetch → compute → crosscheck を流す |
+| `crosscheck.py` | 変えていない |
+
+### 層ごとの前後の表（前の区間 main と後の区間 after）
+
+`out/2026-10-03T01:25:00Z/table.csv`（前）と `compare.csv`（前・後・差の全ての列）の値を写した（秒）。列は task 1422 の表と同じで、「対応の記載」（summary が受け入れ条件の番号ごとに根拠を挙げた run / 番号のある run。[判定の規則](#対応が書かれた-run-の割合)）を足した。後の区間は 0 本なので、「後」と「差（後−前）」は全ての列で『未取得』（compare.csv の `*_after` と `*_diff` も同じ）。
+
+| 層 | n | 初回通過 | 差し戻し | verdict pass/revise/concern | acceptance_unmet の run / verdict / 主 | review/run | work 中央・p90 | work 待ち除く | review 中央・p90 | review 待ち除く | wait_to_land 中央・p90 | wait_to_land ask 除く | 未着地 / review 中 / 未取得 | kpi first_pass | 対応の記載 | 後 | 差（後−前） |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| all | 76 | 25（32.9%） | 52（68.4%） | 68/69/24 | 39 / 60 / 50 | 2.12 | 884・2228 | 884・2228 | 144・486 | 144・486 | 1179・8734 | 1157・6047 | 2 / 0 / 2 | 23/74 | 5/46 | 未取得 | 未取得 |
+| change=config | 3 | 0（0.0%） | 3（100.0%） | 3/3/0 | 0 / 0 / 0 | 2.00 | 211・373 | 211・373 | 77・92 | 77・92 | 207・395 | 207・395 | 0 / 0 / 0 | 0/3 | 0/0 | 未取得 | 未取得 |
+| change=docs | 10 | 1（10.0%） | 9（90.0%） | 9/13/3 | 6 / 10 / 8 | 2.50 | 352・854 | 352・854 | 171・340 | 171・340 | 652・1367 | 652・1367 | 0 / 0 / 0 | 1/10 | 0/7 | 未取得 | 未取得 |
+| change=feature | 22 | 4（18.2%） | 18（81.8%） | 20/25/14 | 15 / 22 / 16 | 2.68 | 1372・2326 | 1372・2326 | 252・704 | 252・704 | 1838・10080 | 1838・7339 | 1 / 0 / 1 | 4/21 | 2/16 | 未取得 | 未取得 |
+| change=fix | 10 | 6（60.0%） | 4（40.0%） | 9/3/2 | 4 / 5 / 4 | 1.40 | 730・1460 | 730・1460 | 103・247 | 103・247 | 2091・6642 | 1720・4447 | 0 / 0 / 0 | 6/10 | 0/5 | 未取得 | 未取得 |
+| change=measure | 8 | 2（25.0%） | 7（87.5%） | 7/10/1 | 7 / 11 / 11 | 2.25 | 690・10932 | 690・10932 | 253・583 | 253・583 | 655・7207 | 655・5692 | 0 / 0 / 0 | 2/8 | 2/4 | 未取得 | 未取得 |
+| change=refactor | 9 | 4（44.4%） | 5（55.6%） | 7/5/3 | 4 / 7 / 7 | 1.67 | 1220・2217 | 1220・2217 | 117・486 | 117・486 | 1133・25548 | 1133・10261 | 1 / 0 / 1 | 5/8 | 1/8 | 未取得 | 未取得 |
+| change=test | 10 | 6（60.0%） | 4（40.0%） | 10/5/1 | 3 / 5 / 4 | 1.60 | 925・2228 | 925・2228 | 73・141 | 73・141 | 1024・8494 | 1024・5458 | 0 / 0 / 0 | 5/10 | 0/5 | 未取得 | 未取得 |
+| change=unknown | 4 | 2（50.0%） | 2（50.0%） | 3/5/0 | 0 / 0 / 0 | 2.00 | 546・4333 | 546・4333 | 134・389 | 134・389 | 846・9380 | 846・1336 | 0 / 0 / 0 | 0/4 | 0/1 | 未取得 | 未取得 |
+| area=ci | 1 | 1（100.0%） | 0（0.0%） | 2/0/0 | 0 / 0 / 0 | 2.00 | 500・500 | 500・500 | 147・147 | 147・147 | 4447・4447 | 4447・4447 | 0 / 0 / 0 | 0/1 | 0/0 | 未取得 | 未取得 |
+| area=config | 4 | 0（0.0%） | 4（100.0%） | 4/4/0 | 0 / 0 / 0 | 2.00 | 241・373 | 241・373 | 84・133 | 84・133 | 211・395 | 211・395 | 0 / 0 / 0 | 0/4 | 0/1 | 未取得 | 未取得 |
+| area=docs | 60 | 17（28.3%） | 44（73.3%） | 51/56/18 | 35 / 51 / 42 | 2.08 | 914・2067 | 914・2067 | 181・457 | 181・457 | 1283・8734 | 1283・6047 | 0 / 0 / 1 | 16/60 | 5/36 | 未取得 | 未取得 |
+| area=migrations | 3 | 1（33.3%） | 2（66.7%） | 1/0/3 | 2 / 3 / 2 | 1.33 | 1718・2326 | 1718・2326 | 117・252 | 117・252 | 7280・13397 | 3372・6698 | 0 / 0 / 0 | 1/3 | 1/3 | 未取得 | 未取得 |
+| area=plugin | 13 | 3（23.1%） | 10（76.9%） | 12/12/5 | 5 / 9 / 6 | 2.23 | 820・1850 | 820・1850 | 199・620 | 199・620 | 1069・13397 | 1069・7339 | 0 / 0 / 0 | 3/13 | 0/11 | 未取得 | 未取得 |
+| area=runtime | 43 | 15（34.9%） | 28（65.1%） | 36/29/15 | 23 / 31 / 24 | 1.86 | 1108・1850 | 1108・1850 | 141・457 | 141・457 | 1659・8734 | 1577・6861 | 0 / 0 / 1 | 15/43 | 3/28 | 未取得 | 未取得 |
+| area=tests | 49 | 21（42.9%） | 28（57.1%） | 45/31/13 | 22 / 30 / 24 | 1.82 | 1087・2228 | 1087・2228 | 124・457 | 124・457 | 1494・8734 | 1438・6698 | 0 / 0 / 1 | 17/49 | 1/32 | 未取得 | 未取得 |
+| area=unknown | 2 | 0（0.0%） | 2（100.0%） | 3/6/5 | 2 / 5 / 4 | 7.00 | 2756・2756 | 2756・2756 | 1056・1816 | 1056・1816 | ・ | ・ | 2 / 0 / 1 | 0/0 | 0/1 | 未取得 | 未取得 |
+| items=1-3 | 31 | 11（35.5%） | 21（67.7%） | 30/30/9 | 16 / 22 / 16 | 2.23 | 681・2756 | 681・2756 | 129・279 | 129・279 | 1137・7207 | 1089・5458 | 1 / 0 / 0 | 8/30 | 1/1 | 未取得 | 未取得 |
+| items=4-6 | 36 | 12（33.3%） | 24（66.7%） | 31/34/8 | 17 / 30 / 28 | 2.03 | 984・2217 | 984・2217 | 160・620 | 160・620 | 1053・13105 | 1053・6050 | 1 / 0 / 2 | 13/35 | 4/36 | 未取得 | 未取得 |
+| items=7+ | 9 | 2（22.2%） | 7（77.8%） | 7/5/7 | 6 / 8 / 6 | 2.11 | 1126・1718 | 1126・1718 | 204・792 | 204・792 | 4274・7339 | 1994・7339 | 0 / 0 / 0 | 2/9 | 0/9 | 未取得 | 未取得 |
+| lines=179-458 | 24 | 10（41.7%） | 15（62.5%） | 23/21/7 | 14 / 22 / 18 | 2.12 | 690・1636 | 690・1636 | 149・389 | 149・389 | 1344・7339 | 1243・5692 | 0 / 0 / 0 | 9/24 | 2/13 | 未取得 | 未取得 |
+| lines=<=178 | 26 | 12（46.2%） | 14（53.8%） | 26/14/2 | 6 / 6 / 4 | 1.62 | 521・1920 | 521・1920 | 92・199 | 92・199 | 645・5458 | 645・4431 | 0 / 0 / 0 | 10/26 | 2/13 | 未取得 | 未取得 |
+| lines=>458 | 24 | 3（12.5%） | 21（87.5%） | 16/28/10 | 17 / 27 / 24 | 2.25 | 1444・2228 | 1444・2228 | 250・620 | 250・620 | 1988・13397 | 1864・7687 | 0 / 0 / 1 | 4/24 | 1/19 | 未取得 | 未取得 |
+| lines=未着地 | 2 | 0（0.0%） | 2（100.0%） | 3/6/5 | 2 / 5 / 4 | 7.00 | 2756・2756 | 2756・2756 | 1056・1816 | 1056・1816 | ・ | ・ | 2 / 0 / 1 | 0/0 | 0/1 | 未取得 | 未取得 |
+| review_provider=codex | 76 | 25（32.9%） | 52（68.4%） | 68/69/24 | 39 / 60 / 50 | 2.12 | 884・2228 | 884・2228 | 144・486 | 144・486 | 1179・8734 | 1157・6047 | 2 / 0 / 2 | 23/74 | 5/46 | 未取得 | 未取得 |
+| worker=headless/claude | 62 | 21（33.9%） | 41（66.1%） | 59/55/20 | 31 / 47 / 38 | 2.16 | 884・1658 | 884・1658 | 147・441 | 147・441 | 1157・6913 | 1130・4431 | 2 / 0 / 2 | 21/60 | 4/40 | 未取得 | 未取得 |
+| worker=interactive/claude | 14 | 4（28.6%） | 11（78.6%） | 9/14/4 | 8 / 13 / 12 | 1.93 | 1280・8402 | 1280・8402 | 100・620 | 100・620 | 6100・13397 | 4096・7687 | 0 / 0 / 0 | 2/14 | 1/6 | 未取得 | 未取得 |
+| review_worker=codex\|headless/claude | 62 | 21（33.9%） | 41（66.1%） | 59/55/20 | 31 / 47 / 38 | 2.16 | 884・1658 | 884・1658 | 147・441 | 147・441 | 1157・6913 | 1130・4431 | 2 / 0 / 2 | 21/60 | 4/40 | 未取得 | 未取得 |
+| review_worker=codex\|interactive/claude | 14 | 4（28.6%） | 11（78.6%） | 9/14/4 | 8 / 13 / 12 | 1.93 | 1280・8402 | 1280・8402 | 100・620 | 100・620 | 6100・13397 | 4096・7687 | 0 / 0 / 0 | 2/14 | 1/6 | 未取得 | 未取得 |
+
+#### 前の区間の値の task 1422 との差
+
+C が 00:15:00Z から 01:25:00Z に動き、区間の終わりが E から E2 に延びたため、次が変わった（`main_1422` と task 1422 の `out/2026-10-03T00:15:00Z/table.csv` の main を比べた）。
+
+- 同じ [S, E) でも、task 1405 の run 42637110 が、旧 C（00:15:00Z）の後から新しい C（01:25:00Z）までに review を 4 回追加で受けた（`review_finished` event 69789・69907・70018・70320。verdict は pass・pass・revise・pass で、verdict の列は 8 件から 12 件になった）。その後 `landing_decided`（event 70369）で `needs_session` になり、01:09:08Z の `recovery_requested`（event 70406）からは記録された status が `failed` で、C の時点で復旧の job にかかっていた（compute の状態は `ended`）。all の verdict pass/revise/concern が 64/68/24 → 67/69/24、acceptance_unmet の verdict 59 → 60（主 49 → 50）、review/run 2.08 → 2.13、review の中央値・p90 が 144・457 → 147・486、review 中 1 → 0。初回通過・差し戻し・acceptance_unmet の run の数は同じ。この run を含む層（change=feature、items=1-3、lines=未着地、area=unknown、worker=headless/claude）も同じ分だけ動いた。
+- [E, E2) に task 1420 の run d0e77030 が 1 本加わった（最初の verdict は 00:16:51.942Z の pass、change feature、area docs・runtime、項目数 6、151 行）。n 75 → 76、初回通過 24 → 25（32.0% → 32.9%）、差し戻し率 69.3% → 68.4%、work の中央値 854 → 884 秒。
+
+#### 構成比で重み付けした率
+
+`weighted.csv`。change・項目数・変更行数の層それぞれで、Σ（前の区間の層の構成比 × 後の区間の層の率）（両方の区間にある値だけで、『未着地』『未取得』の区分は大きさの区分ではないので使わない。構成比はその値の中で足して 1 に直す）を初回通過率・差し戻し率・acceptance_unmet の run の率について出す。比べる前の値は同じ値の集合で求めた Σ（構成比 × 前の率）。
+
+| 層 | 率 | 前（main 全体） | 後（重み付け） | 差 | 使った値 / 除いた値 |
+|---|---|---|---|---|---|
+| change | 初回通過率 | 0.329 | 未取得 | 未取得 | 後の区間が 0 本なので両方にある値が無く、前の全ての値（config 3・docs 10・feature 22・fix 10・measure 8・refactor 9・test 10・unknown 4）が除かれる |
+| change | 差し戻し率 | 0.684 | 未取得 | 未取得 | 同上 |
+| change | acceptance_unmet の run の率 | 0.513 | 未取得 | 未取得 | 同上 |
+| 項目数 | 3 つの率 | 0.329 / 0.684 / 0.513 | 未取得 | 未取得 | 前の 1-3 31・4-6 36・7+ 9 が除かれる |
+| 変更行数 | 3 つの率 | 0.329 / 0.684 / 0.513 | 未取得 | 未取得 | 前の <=178 26・179-458 24・>458 24・未着地 2 が除かれる |
+
+#### 同じ review の provider と worker の経路どうしの行
+
+層 `review_worker` の行（上の表の `review_worker=` の行と compare.csv）。前の区間は codex|headless/claude 62 run（初回通過 33.9%、差し戻し 66.1%）と codex|interactive/claude 14 run（28.6%、78.6%）。後の区間は未取得なので、同じ組どうしの差も未取得。
+
+#### 対応が書かれた run の割合
+
+判定の規則（`compute.py` の `mapping`・`item_segments`・`evidence_of`。run ごとの結果は `out/2026-10-03T01:25:00Z/mapping.csv`、番号ごとの裏づけは `mapping_items.csv`）:
+
+1. 読む summary: run の最初の verdict の前の最後の `validation_finished` の `payload.receipt.summary`（最初の review が読んだ receipt）。番号は task の最初の claim の時点の受け入れ条件の `(数字)`（`tasks.jsonl` の `item_numbers`）。
+2. 番号ごとの区切り: summary の中の `(k)` か `（k）` の最初の出現から、次の番号の印（どの番号でも）か summary の終わりまでを、その番号の記載とする。
+3. 番号ごとの根拠: その記載が、空白を除いて 20 字以上あり、次の根拠のどれか 1 つ以上を含めば、その番号に根拠がある（`evidenced` = 1）。path かファイル名（`a/b`、`.md`・`.rs`・`.sql`・`.py`・`.sh`・`.toml`・`.json`・`.jsonl`・`.csv`・`.yml` で終わる名前）、code の名前（`a::b`、backtick、`snake_case`）、commit の sha（16 進 7 字以上）、コマンド（cargo・dagq・git・python3・grep・sh）、test・event・commit・section・ADR・テスト・節・印の語、単位つきの測った値（`%`・秒・分・時間・本・件・回・行・run・s・lines）。どれが当たったかを `mapping_items.csv` の `evidence` に、記載の字数を `chars` に書く。
+4. run の判定: 受け入れ条件の全ての番号に根拠があれば 1、1 つでも欠けるか番号が summary に無ければ 0（`mapping.csv` の `numbers_with_evidence` と `numbers_without_evidence` に番号を並べる）。受け入れ条件に番号が無い task は『番号なし』、受け入れ条件か summary が読めなければ『未取得』で、どちらも分母から除く。
+
+根拠が正しいか（その path や test が本当に条件を満たすか）は判定しない。根拠の欄があるかと、その中に検査できる手がかりがあるかだけを見る。
+
+| 区間 | 判定した run | 番号ごとに根拠を挙げた run | 割合 | 番号なし |
+|---|---|---|---|---|
+| main（前） | 46 | 5 | 10.9% | 30 |
+| main_before_0805 | 5 | 1 | 20.0% | 6 |
+| main_after_0805 | 41 | 4 | 9.8% | 24 |
+| reference | 23 | 1 | 4.3% | 26 |
+| after（後） | 未取得 | 未取得 | 未取得 | 未取得 |
+
+前の区間で 1 だった run: task 961・1333・1368・1455・1420（mapping.csv の `mapped` が 1 の行）。番号を全て挙げたが根拠の無い番号があって 0 になった run は task 1161（`(4) See tests.` が 9 字）の 1 つ。番号の一部だけを挙げた run は 1200・1075・1369・1371・1372・1334・627・1391 などで、例えば 1200 は `(1) task 1179 landed and is met.` に根拠が無く `(2)` と `(4)` が無い。
+
+### stats との照合（crosscheck）
+
+`out/2026-10-03T01:25:00Z/crosscheck.csv`。runs.csv の 125 run（どれかの区間に入った run。後の区間は 0 本）の work・wait_to_land・land_phases の ask・route・actual_provider・areas を reference/ の `dagq stats --full --since 2026-09-30T00:00:00Z --until C` と比べ、**食い違いは 0**（前の区間 0、後の区間は run が無く 0）。task 1422 の 1 件（task 1405 の run が stats の runs に無い）は、その run が C までに終わった（`ended`）ので消えた。crosscheck.csv は表の値に使っていない。
+
+### 再現性
+
+- 同じ snapshot で compute を 2 回流し、`runs.csv`・`table.csv`・`meta.json`・`t.json`・`mapping.csv`・`mapping_items.csv`・`compare.csv`・`weighted.csv` が `cmp` で同じだった（review の差し戻しで判定の規則を変えた後にも流し直して確かめた）。
+- crosscheck を 2 回流し、`crosscheck.csv` が同じだった。
+- 同じ C で fetch し直し（`OUT=/tmp/refetch1423 sh after.sh fetch`）、`diff -r` で normalized/ の 5 ファイル（`events.jsonl`・`tasks.jsonl`・`commits.jsonl`・`areas.toml`・`versions.jsonl`）が同じだった（133 run、130 task、12,599 event、126 commit）。reference/ は今の状態を含むので比べていない。
+- `baseline.sh`（task 1422）を今の compute で流し直すと、足した列と層のため table.csv が task 1422 の out/ と同じにはならない（task 1422 の snapshot は手元に無く、流し直していない）。
+
+### 再実行のコマンド
+
+`docs/plans/acceptance-check/` で、固定バイナリ（`~/.local/bin/dagq`）を PATH に置いて、fetch → compute → crosscheck の順に流す。`sh after.sh` は 3 つを順に、`sh after.sh fetch` / `compute` / `crosscheck` は 1 つだけ流す（測り直すときは `C=<新しい C> sh after.sh`）。中身は次と同じ。
+
+```sh
+cd docs/plans/acceptance-check
+# 1. fetch（queue を読むだけ。始まり R・終わり C・締切 C）
+python3 fetch.py --since 2026-10-01T06:02:46.438Z --until 2026-10-03T01:25:00Z \
+  --cutoff 2026-10-03T01:25:00Z --stats-since 2026-09-30T00:00:00Z \
+  --watch-task 1420 --watch-task 1421 --areas-from areas-2026-10-03T00:15:00Z.toml \
+  --repo ../../.. --out snapshot/2026-10-03T01:25:00Z
+# 2. compute（normalized/ だけを読む）
+python3 compute.py snapshot/2026-10-03T01:25:00Z \
+  --interval main=2026-10-02T03:07:27.872Z,2026-10-03T00:29:27.268Z \
+  --interval main_1422=2026-10-02T03:07:27.872Z,2026-10-03T00:12:09.306Z \
+  --interval main_before_0805=2026-10-02T03:07:27.872Z,2026-10-02T08:05:36Z \
+  --interval main_after_0805=2026-10-02T08:05:36Z,2026-10-03T00:29:27.268Z \
+  --interval reference=2026-10-01T06:02:46.438Z,2026-10-02T03:07:27.872Z \
+  --interval audit=2026-10-02T03:07:27.872Z,2026-10-02T14:44:46.885Z,2026-10-02T14:44:46.885Z \
+  --line-terciles 178,458 --changed-task 1420 --changed-task 1421 \
+  --cutoff 2026-10-03T01:25:00Z --t-task 1420 --t-landed-task 1421 \
+  --after after=main --compare main=after
+# 3. crosscheck（runs.csv と reference/ の stats だけを読む）
+python3 crosscheck.py snapshot/2026-10-03T01:25:00Z
+```
+
+### 同じ期間に入った他の変更
+
+本数が少なく後の区間も無いので、差を因果と言い切らない。前の区間の中にも、run の review・worker の prompt・AGENTS.md を変えた着地が入っている。測り直すときは、後の区間にも同じ種類の変更が重なる。
+
+- 区間の中の印: [R, C) は 60152・61916 の 2 件だけ（上の区間の節）。
+- 着地の洗い出し方: normalized/ の `run_integrated` のうち `created_at` が [S, C) のもの（S は印 60152 の時刻で、task 1208 の着地と同じ時刻）について、着地 commit の変更ファイル（`git show --name-only`）を `prompt|review|AGENTS\.md|^dagq\.toml|plugins/.*/(dagq|dagq-planner)/` で選び、内容で分けた。`git log --first-parent main --since=S --until=C` の commit は全て normalized/ にその `run_integrated` があった。着地は main に入った時刻で、本番の supervisor がその commit を含む binary で動き始めるのは自動更新の `supervisor_started` の後になる（上の T の節と同じ）。前の区間の run は、claim の時点の binary によって次の変更のどれを受けたかが違う。
+
+| 種類 | 着地（`run_integrated` の event・時刻） | commit | task | 内容 |
+|---|---|---|---|---|
+| run の review | 60129・2026-10-02T03:07:27.872Z | 2cb08f4b | 1208 | `dagq.toml` の `[roles.review]` を codex に（S。印 60152） |
+| run の review | 63391・2026-10-02T13:29:42.276Z | 79d17986 | 1316 | review の prompt（`src/application/prompt.rs`）に concern の推奨・確信度・`reason_category` を足し、runtime が `high` の land / send_back を適用する（ADR-t451-1 決定 3）。`review.md` |
+| run の review | 66645・2026-10-02T17:53:53.080Z | 8a6d9ed1 | 1453 | review の subagent の ADR（文書だけ） |
+| run の review | 66880・2026-10-02T18:41:16.793Z | 91f1bc3f | 1454 | `dagq.toml` の review の subagent の設定を読み、必須の agent を選んで review job に渡す |
+| run の review | 67277・2026-10-02T19:43:54.379Z | acc7d12e | 1455 | 親の review job が必須の subagent を実行して 1 つの verdict にまとめ、必須の結果が欠けた verdict を supervisor が pass にしない。C の時点の main（523ae7ff・33cc0410）の `dagq.toml` に `[review.subagents.*]` は無く、選ばれる agent は無い |
+| run の review | 67733・2026-10-02T20:56:19.715Z | bfe4edf7 | 1392 | 適用した concern の send_back で開く `approve_landing` の ask に concern と推奨を書き、stats の数え方を直す（verdict の判定は変えない） |
+| worker の prompt | 61149・2026-10-02T08:00:54.475Z | c05e8644 | 1340 | Claude の worker の既定を非対話に（印 61916）。`prompt.rs` と `AGENTS.md`（1 行） |
+| worker の prompt | 64015・2026-10-02T14:15:24.217Z | 112aecdf | 1372 | 答えずに閉じた `worker_question` を worker に伝える文面を足す |
+| worker の prompt | 64165・2026-10-02T14:40:20.833Z | e8f05079 | 1290 | Codex の run と job に一時ファイルの置き場所（TMPDIR）を渡す |
+| worker の prompt | 69870・2026-10-03T00:29:27.268Z | 23c4fefd | 1420 | 受け入れ条件の対応づけ（この測定の対象。E2） |
+| worker の prompt | 70553・2026-10-03T01:21:58.486Z | 33cc0410 | 1428 | receipt の前に、変えた挙動を説明する文書を差分と照合する指示を対応づけに足す（ADR-t1428-1）。C の後に入った binary（33cc0410）はこれも含むので、測り直しの後の区間は 1420 と 1428 の両方の効果を含む |
+| AGENTS.md | 60830・2026-10-02T07:24:13.139Z | 051caaea | 1220 | スループットの見直しの job の記述（1 行） |
+| AGENTS.md | 66416・2026-10-02T17:34:53.976Z | 52cec2bf | 724 | goal の close を goal review job へ（3 行） |
+| AGENTS.md | 69314・2026-10-02T23:37:01.475Z | fd30c185 | 1458 | 「作業中」「起動と停止」「着地と人の判断」を受け持ちごとに正本へ移す（12 行追加・37 行削除） |
+| AGENTS.md | 70392・2026-10-03T01:09:04.553Z | 3189b7e1 | 1421 | 受け入れ条件の対応づけの根拠の書き方と、測定の task の規則（この測定の対象） |
+| AGENTS.md（C の後） | 2026-10-03T01:30:30Z（commit 時刻） | 2dc9638c | — | 「変更後に必ず通す」「テストの制約」を開発文書へ移す。後の区間の run の base に入りうる |
+
+選んだが上の表から外した着地（run の review・worker の prompt・AGENTS.md の振る舞いを変えないか、別の job のもの）:
+
+- plan review・goal review・スループットの見直し・runtime の planner の prompt や設定: fb8170a8（1219）、e11fff83（1221）、df10d058（1300）、e81fc18f（1317）、9d19e500（1338、`dagq.toml` のコメント）、eae988ff（1320、runtime の planner の prompt）、e994a99f（1334）、8081a8d1（1425）、49286517（1318）、42e70adc（1378）、c7b562d4（1371）、d006c3f2（1215）、433469e9（1418）
+- test と refactor だけ（振る舞いを変えない）: 9d74de58（1414、`review.md` の test の記述を含む）、ead1223c（1413、`prompt.rs` の判断を unit test に移す）、7fa18894（1075）、740adf14（1274）、cc50e670（1329）、471bb76b（1023）、8327e76a（1284）
+- ADR・文書・コメントだけ: 8ea16a73（1394）、dfdf4456（1404）、5870f5c0（1265、`dagq.toml` の `[e2e]` のコメント）
+- plugin の skill の文書: 46640f00（627）、baf6427a（1466）、59461a1d（1323）、523ae7ff（1319）
+- E から C の間の 27b7af0c（task 1516、e2e の test の修正）と 92967ea7（task 1422、docs だけ）は選ぶ規則に当たらない
+
+task 1420・1428 自体は、run の review の prompt と判定の基準を変えていない。23c4fefd と 33cc0410 の `review.md` の変更は、revise の依頼で worker が対応づけをやり直す手順の説明。両方の receipt に、`review_prompt` が変わっていないことを unit test で確かめたと書いてある（ADR-t1420-1・ADR-t1428-1）。一方、期間全体では上の表のとおり、run の review の prompt と判定に触れる着地（79d17986・91f1bc3f・acc7d12e・bfe4edf7）が前の区間の中にある。前の区間の中でも review の条件は一様ではない。goal 90 の制約（比べる間は run の review の prompt と判定を変えない）は後の区間を測る間に当てはまる。測り直すときは、T から C までに同じ種類の着地が無いかを同じ洗い出し方で確かめる。
+
+### 限界
+
+- **後の区間が無い**: この章の比べ方は前の区間だけで、goal 90 の受け入れ条件 (4) は満たしていない。
+- **N は C で動く**: 前の区間の本数 N はこの C で 76。測り直す C で前の区間を出し直すと、[S, E2) に最初の verdict を持つ run は増えないが、C の後に review が増えた run の verdict の数や review の時間は動く（1405 の例）。後の区間はその C で求めた N にそろえる。
+- **対応の判定**: 番号ごとの記載の長さと根拠の手がかりを見る機械的な規則で、根拠の中身の正しさは見ない。手がかりの語（test・節など）だけで根拠ありになる記載も、言い換えで根拠なしになる記載もありうるので、`mapping_items.csv` の番号ごとの `chars` と `evidence` を残した。受け入れ条件に番号の無い task（前の区間で 30 / 76）は判定できない。task 1420 より前の receipt でも、番号ごとに根拠を書く worker が居た（5 run）。
+- **後の区間の打ち切り**: 後の区間の run は C の直前に最初の verdict を受けうるので、C までに見える 2 回目以後の verdict と着地が前の区間より少ない。差し戻し率・acceptance_unmet の数・review/run・wait_to_land は後の区間で低く出る向きに偏り、未着地も多くなる（初回通過率は最初の verdict だけなので偏らない）。測り直すときは、後の区間の最後の run の最初の verdict から十分あと（前の区間の review と着地が済む程度）に C を置き、未着地と review 中の件数を両方の区間で並べる。
+- **後の区間の `review_failed_only`**: table.csv の後の区間の `review_failed_only` は [T, 終わり) の `review_failed` だけの run を claim の時刻で絞らずに数える（前の区間と同じ数え方）。
+- task 1422 の限界（area の重なり、review の provider の切り替わり、項目数の数え方、change の unknown）はそのまま当てはまる。
