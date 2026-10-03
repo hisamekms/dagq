@@ -4,7 +4,7 @@ type: design
 title: Architecture decision records
 status: current
 created: 2026-09-21
-updated: 2026-10-03
+updated: 2026-10-04
 last_verified: 2026-09-30
 tags:
   - architecture
@@ -140,6 +140,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-t1410-1](2026-10-03-t1410-1-decisions-in-unit-tests-boundaries-in-integration-tests.md) | 状態の判断（状態の遷移・回数と上限・値で受けた時刻の判定・verdictやanswerから操作への対応・askやerrorの文面・次の一手の選び方）はsrcの副作用のない関数の`#[cfg(test)]`のunit testで確かめ、tests/itのintegration testはSQLite・Git・プロセス・supervisorの配線・復旧とadopt・cmuxの境界を確かめる少数に、e2eは実バイナリ・実Git・実cmuxのハッピーパスと境界だけにする。判断のcaseごとにfixtureとsupervisorを起動し直さず、unit testは外部プロセス・git・SQLiteのファイル・sleep・実時間の時計を使わず、integration testを減らすときは確かめていた中身の行き先を対応づける。coverageの関門・integrateが全部のtestを流すこと・ADR-0078・ADR-0076・ADR-t920-1は変えない | 2026-10-03 |
 | [ADR-t1533-1](2026-10-03-t1533-1-follow-up-requests-go-to-headless-planners-by-planner-id-and-no-planner-close.md) | 開いているruntimeのplannerへの続きの依頼は、plannerのIDで生きている非対話のplannerだけに次のturnとして届け（作業中のturnの後に取られる）、対話・人の・閉じた・`lost`・`exited`・終了の依頼を置いたplannerには理由付きで拒んでcmuxで送らず、userとinboxだけに許してactor付きで記録する。plannerを閉じるCLI（`planner close`）は作らず、runtimeのplannerはsupervisorが閉じる（ADR-t1228-1決定2・3、ADR-t1394-2決定7をamends） | 2026-10-03 |
 | [ADR-t1582-1](2026-10-04-t1582-1-temporarily-leave-broker-and-cmux-only-e2e-cases-out.md) | brokerのe2e 1ケース（task 1451で復帰）とcmux固有のe2e 3ケース（sweepはtask 1440、plannerはtask 1441、`up --in-cmux`はtask 1443で削除か置換）を、本文を残したまま`#[cfg(any())]`で期間限定でe2eの登録から外し、着地の前のe2eと自動更新・`install`の関門の「全部のe2e」から除く（ADR-t963-1決定1・3、ADR-t1233-2決定2をamends） | 2026-10-04 |
+| [ADR-t1545-1](2026-10-04-t1545-1-split-the-runtime-by-layer-and-context.md) | runtimeの責務をレイヤーとコンテキスト（計画管理・実行と着地・観測と分析・host運用）の2軸で分け、contextの間を公開したportと値（ID・型付きのevent）だけでつなぎ、観測と分析は読むだけにし、境界をまたぐtransactionは設計文書の一覧で名指しした例外だけにし、規則の本文は設計文書の1か所に置いてreviewのsubagentと検査は参照と検査項目だけを持ち、crateやdirectoryを増やすことを目的にしない（ADR-0013決定1をamends） | 2026-10-04 |
 
 goal 82（goal 38の段(1)〜(3)）のADRはtask 1233が書いた5本で、決定の置き場所は次のとおり。制御側と実行側の分け方・queue service・ユースケース単位のAPIとservice側の認可・unix socket・broker・クライアントモード・段の順と置き場所はADR-t1233-1、serviceの起動・停止の責任・落ちたときの知らせ方・brokerより前のprincipalの認証（token）はADR-t1233-4、読み取りのユースケースとroleごとの読める範囲・workerの読める範囲・Codexのsandboxからの到達はADR-t1233-5、e2eをreviewのpassの後のhostの工程に移すことはADR-t1233-2、このrepositoryを先にLinuxで通すことはADR-t1233-3にある。
 

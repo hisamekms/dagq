@@ -4,8 +4,8 @@ type: design
 title: Current design documents
 status: current
 created: 2026-09-21
-updated: 2026-10-02
-last_verified: 2026-10-02
+updated: 2026-10-04
+last_verified: 2026-10-04
 tags:
   - architecture
 ---
@@ -15,6 +15,7 @@ tags:
 ここは現在の実装を説明する。決定の理由は [ADR](../adr/README.md)、実装順は [plans](../plans/current.md) を参照する。
 
 - [Overview](overview.md)
+- [Architecture](architecture.md)（レイヤーとコンテキスト（計画管理・実行と着地・観測と分析・host運用）の2軸の境界。contextごとの所有する状態・判断・操作・公開するport・依存の向き、境界をまたぐtransactionの一覧、検査できる規則と今の違反。ADR-t1545-1）
 - [Domain model](domain-model.md)
 - [Persistence](persistence.md)
 - [Authorization](authorization.md)
