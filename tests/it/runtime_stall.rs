@@ -425,6 +425,7 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
             asked_by: "supervisor".into(),
             reason_category: dagq::domain::AskReason::RecoveryFailed,
             finding_id: None,
+            request_id: None,
         })
         .unwrap()
         .ask;

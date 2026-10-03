@@ -1997,6 +1997,7 @@ fn status_and_doctor_measure_to_the_injected_clock() {
             asked_by: "planner".into(),
             reason_category: dagq::domain::AskReason::Scope,
             finding_id: None,
+            request_id: None,
         })
         .unwrap()
         .ask;

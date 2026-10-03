@@ -362,6 +362,7 @@ fn a_login_that_stops_several_runs_is_one_ask_that_lists_them() {
             asked_by: "worker".into(),
             reason_category: AskReason::Authentication,
             finding_id: None,
+            request_id: None,
         })
         .unwrap_err();
     assert!(

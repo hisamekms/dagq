@@ -830,6 +830,7 @@ pub mod lint;
 pub mod marks;
 pub mod measure;
 pub mod plan_quality;
+pub mod plan_request;
 pub mod plan_review;
 pub mod planner;
 pub mod prediction;
@@ -889,7 +890,8 @@ pub use follow_up::{
 };
 pub use goal::{Goal, StrandedDependency};
 pub use ids::{
-    AskId, CommitSha, EventId, FindingId, GoalId, LeaseToken, PlannerId, ProposalId, RunId, TaskId,
+    AskId, CommitSha, EventId, FindingId, GoalId, LeaseToken, PlannerId, ProposalId, RequestId,
+    RunId, TaskId,
 };
 pub use input::{GoalEdit, GoalRecord, NewGoal, NewTask, RunPlan, RunRecord, TaskEdit, TaskRecord};
 pub use lint::{LintCode, LintInput, LintNode, LintViolation};
@@ -958,6 +960,10 @@ pub struct Ask {
     /// The finding a `blocked` ask raises (ADR-0044 decision 23).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finding_id: Option<FindingId>,
+    /// The planning request a `planner_question` is about (ADR-t1394-1
+    /// decision 7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
     /// Who answered it (task 325): [`ANSWERED_BY_PERSON`], the `DAGQ_ROLE`
     /// of the session that ran `answer`, or [`ANSWERED_BY_RUNTIME`]. `None`
     /// while open, and for an answer recorded before it was kept.
@@ -1110,6 +1116,9 @@ pub struct NewAsk {
     /// finding its planner of the runtime's was opened for (ADR-0044
     /// decision 19).
     pub finding_id: Option<FindingId>,
+    /// The planning request a `planner_question` is about: the one its
+    /// planner of the runtime's was opened for (ADR-t1394-1 decision 7).
+    pub request_id: Option<RequestId>,
 }
 
 // How sure an AI is of the judgement behind an ask's recommendation
@@ -1198,10 +1207,21 @@ impl NewAsk {
             },
         )?;
         require(
+            self.request_id.is_none()
+                || (self.kind == AskKind::PlannerQuestion
+                    && self.task_id.is_none()
+                    && self.run_id.is_none()
+                    && self.finding_id.is_none()),
+            || DomainError::AskRequestNotPlannerQuestion {
+                kind: self.kind.clone(),
+            },
+        )?;
+        require(
             self.task_id.is_some()
                 || self.run_id.is_some()
                 || self.kind == AskKind::Blocked
-                || (self.kind == AskKind::PlannerQuestion && self.finding_id.is_some()),
+                || (self.kind == AskKind::PlannerQuestion
+                    && (self.finding_id.is_some() || self.request_id.is_some())),
             || DomainError::AskWithoutTarget {
                 kind: self.kind.clone(),
             },
@@ -1729,6 +1749,15 @@ pub enum AttentionNext {
     /// and none decided it (`finding_planner_exhausted`, ADR-0044 decision
     /// 19): a person decides it in a planner of theirs.
     DecideFinding,
+    /// A planning request's planner submitted a proposal of it
+    /// (`request_proposed`, ADR-t1394-1 decision 6): a notice the inbox
+    /// passes on to the person who asked, who acts on nothing.
+    ReportRequest,
+    /// A planning request's planner declined it (`request_declined`), or
+    /// its planners ended without deciding it up to the limit
+    /// (`request_planner_exhausted`, ADR-t1394-1 decision 6): the inbox
+    /// tells the person, who words it again (a new request) or drops it.
+    RephraseRequest,
     /// A task of a closed goal will not complete while other tasks wait on
     /// it (`dependency_stranded`, task 421): a person decides in a planner
     /// whether to remove the dependency, cancel the waiting tasks or take
@@ -1833,6 +1862,8 @@ impl fmt::Display for AttentionNext {
             Self::CheckPlanner => f.write_str("check the planner"),
             Self::DecideDraft => f.write_str("decide the draft in a planner"),
             Self::DecideFinding => f.write_str("decide the finding in a planner"),
+            Self::ReportRequest => f.write_str("report the request's proposal"),
+            Self::RephraseRequest => f.write_str("rephrase or drop the request"),
             Self::DecideWaiting => f.write_str("decide the waiting tasks in a planner"),
             Self::InstallTool => f.write_str("install tool"),
             Self::ReportUpdate => f.write_str("report the update"),
@@ -1875,6 +1906,9 @@ pub const ATTENTION_KINDS: &[&str] = &[
     "goal_review_failed",
     "planner_unresponsive",
     "draft_planner_exhausted",
+    event_kind::REQUEST_PROPOSED,
+    event_kind::REQUEST_DECLINED,
+    event_kind::REQUEST_PLANNER_EXHAUSTED,
     event_kind::DEPENDENCY_STRANDED,
     run_env::RUN_ENV_PROGRAM_MISSING,
     UPDATE_INSTALLED,
@@ -2056,6 +2090,10 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         ("planner_unresponsive", _) => Some(AttentionNext::CheckPlanner),
         ("draft_planner_exhausted", _) => Some(AttentionNext::DecideDraft),
         ("finding_planner_exhausted", _) => Some(AttentionNext::DecideFinding),
+        (event_kind::REQUEST_PROPOSED, _) => Some(AttentionNext::ReportRequest),
+        (event_kind::REQUEST_DECLINED | event_kind::REQUEST_PLANNER_EXHAUSTED, _) => {
+            Some(AttentionNext::RephraseRequest)
+        }
         (event_kind::DEPENDENCY_STRANDED, _) => Some(AttentionNext::DecideWaiting),
         ("push_failed", _) => Some(AttentionNext::PushMain),
         // A verification command failed on the host again after its retry
@@ -2347,6 +2385,7 @@ mod attention_tests {
             recommendation: Some(recommendation.into()),
             confidence: Some(AskConfidence::Low),
             finding_id: finding.map(FindingId::new),
+            request_id: None,
         };
         assert!(
             ask(AskKind::ApproveLanding, " land ", None)
@@ -2445,6 +2484,7 @@ mod attention_tests {
             answer_approval: None,
             closed_at: None,
             finding_id: None,
+            request_id: None,
         }
     }
 
@@ -2527,6 +2567,7 @@ mod attention_tests {
             answer_approval: None,
             closed_at: None,
             finding_id: None,
+            request_id: None,
         };
         assert!(ask.is_open());
         assert_eq!(ask.waits_for(), Some(SessionRole::Inbox));
@@ -2677,6 +2718,7 @@ mod attention_tests {
             asked_by: "worker".into(),
             reason_category: crate::domain::AskReason::Scope,
             finding_id: None,
+            request_id: None,
         };
         assert!(valid.validate().is_ok());
         for broken in [
@@ -3249,6 +3291,23 @@ mod attention_tests {
                 Some(DecideWaiting),
             ),
             (
+                "request_proposed",
+                json!({"request_id": 1, "proposal_id": 2}),
+                Some(ReportRequest),
+            ),
+            (
+                "request_declined",
+                json!({"request_id": 1, "reason": "done already"}),
+                Some(RephraseRequest),
+            ),
+            (
+                "request_planner_exhausted",
+                json!({"request_id": 1, "planners": 3}),
+                Some(RephraseRequest),
+            ),
+            ("request_recorded", json!({"request_id": 1}), None),
+            ("request_planner_opened", json!({"request_id": 1}), None),
+            (
                 "update_failed",
                 json!({"stage": "build", "ask_id": 3}),
                 None,
@@ -3311,6 +3370,8 @@ mod attention_tests {
         assert_eq!(CheckE2e.to_string(), "check the e2e host");
         assert_eq!(ReportUpdate.to_string(), "report the update");
         assert_eq!(ReportReview.to_string(), "report the review");
+        assert_eq!(ReportRequest.to_string(), "report the request's proposal");
+        assert_eq!(RephraseRequest.to_string(), "rephrase or drop the request");
         assert_eq!(CheckReview.to_string(), "check the failed review");
         assert_eq!(FixPush.to_string(), "fix the push command");
         assert_eq!(BrokerStatus.to_string(), "dagq broker status");

@@ -1189,6 +1189,7 @@ fn a_failed_answer_delivery_is_left_to_the_inbox() {
             asked_by: "worker".into(),
             reason_category: dagq::domain::AskReason::Scope,
             finding_id: None,
+            request_id: None,
         })
         .unwrap()
         .ask;

@@ -250,6 +250,7 @@ mod tests {
                 answered_at: None,
                 closed_at: None,
                 finding_id: None,
+                request_id: None,
                 answered_by: None,
                 option_index: None,
                 answer_authority: None,
@@ -312,6 +313,7 @@ mod tests {
             asked_by: "forged".into(),
             reason_category: AskReason::Scope,
             finding_id: None,
+            request_id: None,
         }
     }
 

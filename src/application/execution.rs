@@ -302,6 +302,8 @@ pub const DAGQ_COMMANDS: &[(&str, &[Capability])] = &[
     ("finding record", &[C::FindingRecord]),
     ("finding resolve", &[C::FindingResolve]),
     ("finding dismiss", &[C::FindingDismiss]),
+    ("request add", &[C::RequestRecord]),
+    ("request decline", &[C::RequestDecline]),
     ("ask", &[C::AskOpen, C::FindingAsk, C::AskClose]),
     ("ask close", &[C::AskClose]),
     ("answer", &[C::AskAnswer]),

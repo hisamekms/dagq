@@ -850,6 +850,7 @@ fn adopt_receipt_after_dialog(waited: bool) {
             asked_by: "supervisor".into(),
             reason_category: dagq::domain::AskReason::RecoveryFailed,
             finding_id: None,
+            request_id: None,
         })
         .unwrap()
         .ask;
@@ -1180,6 +1181,7 @@ fn adopted_run_does_not_ask_about_its_exit_twice() {
             asked_by: "supervisor".into(),
             reason_category: dagq::domain::AskReason::RecoveryFailed,
             finding_id: None,
+            request_id: None,
         })
         .unwrap()
         .ask;
@@ -1272,6 +1274,7 @@ fn adopted_run_asks_about_an_exit_that_timed_out_again() {
             asked_by: "supervisor".into(),
             reason_category: dagq::domain::AskReason::RecoveryFailed,
             finding_id: None,
+            request_id: None,
         })
         .unwrap()
         .ask;

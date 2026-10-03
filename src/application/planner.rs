@@ -236,6 +236,9 @@ fn launch_planner(
     if let Some(finding) = planner.finding_id {
         name.push_str(&format!(" - finding {finding}"));
     }
+    if let Some(request) = planner.request_id {
+        name.push_str(&format!(" - request {request}"));
+    }
     let prompt = with_instruction(prompt.to_owned(), launch.language.as_ref());
     let opened = create_workspace(launch, &workspaces, &planner, &dir, &name, &prompt, actor);
     let workspace_id = match opened {
@@ -903,6 +906,7 @@ pub fn planner_closed_payload(
         "proposal_id": planner.proposal_id,
         "draft_task_id": planner.draft_task_id,
         "finding_id": planner.finding_id,
+        "request_id": planner.request_id,
         "code": code.as_str(),
         "reason": reason,
         "exit_code": planner.exit_code,

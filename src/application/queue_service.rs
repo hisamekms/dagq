@@ -376,6 +376,7 @@ fn run(
                 reason_category: p.because.unwrap_or_default().parse::<AskReason>()?,
                 topics: p.topics,
                 finding_id: p.finding_id.map(FindingId::new),
+                request_id: None,
             };
             Dialogue::new(&mut store, actor, &StaticPolicy).ask(ask)
         }

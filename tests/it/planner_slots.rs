@@ -150,6 +150,7 @@ fn answered_draft_planner(
             asked_by: "planner".into(),
             reason_category: dagq::domain::AskReason::Scope,
             finding_id: None,
+            request_id: None,
         })
         .unwrap()
         .ask;
@@ -328,6 +329,7 @@ fn a_planner_waiting_on_a_person_keeps_its_place_past_the_timeout() {
             asked_by: "planner".into(),
             reason_category: dagq::domain::AskReason::Scope,
             finding_id: None,
+            request_id: None,
         })
         .unwrap();
     let dir = planners_dir(&fx.db).join(planner.id.to_string());

@@ -402,6 +402,7 @@ fn a_question_about_any_draft_of_the_bundle_goes_to_its_planner() {
             asked_by: "planner".into(),
             reason_category: dagq::domain::AskReason::Scope,
             finding_id: None,
+            request_id: None,
         })
         .unwrap()
         .ask;

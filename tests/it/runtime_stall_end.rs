@@ -58,6 +58,7 @@ fn stall(queue: &mut SqliteQueue, run: &TaskRun) -> AskId {
             asked_by: "supervisor".into(),
             reason_category: dagq::domain::AskReason::RecoveryFailed,
             finding_id: None,
+            request_id: None,
         })
         .unwrap()
         .ask;
@@ -166,6 +167,7 @@ fn an_abandoned_run_closes_its_answered_stalled_ask_and_ends_its_nudge() {
             asked_by: "supervisor".into(),
             reason_category: dagq::domain::AskReason::RecoveryFailed,
             finding_id: None,
+            request_id: None,
         })
         .unwrap()
         .ask;
@@ -219,6 +221,7 @@ fn an_abandoned_run_closes_its_answered_stalled_ask_and_ends_its_nudge() {
             asked_by: "supervisor".into(),
             reason_category: dagq::domain::AskReason::RecoveryFailed,
             finding_id: None,
+            request_id: None,
         })
         .unwrap()
         .ask;

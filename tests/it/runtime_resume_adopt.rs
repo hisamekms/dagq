@@ -117,6 +117,7 @@ fn resume_taken_over_at_dialog(handoff: bool, max_waiting: usize) {
             asked_by: "supervisor".into(),
             reason_category: AskReason::RecoveryFailed,
             finding_id: None,
+            request_id: None,
         })
         .unwrap()
         .ask;

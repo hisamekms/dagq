@@ -381,6 +381,7 @@ fn a_propose_answer_marks_the_finding_and_a_planner_takes_it() {
             asked_by: "observer".into(),
             reason_category: AskReason::Scope,
             finding_id: Some(found),
+            request_id: None,
         })
         .unwrap()
         .ask;
@@ -418,6 +419,7 @@ fn a_propose_answer_marks_the_finding_and_a_planner_takes_it() {
             asked_by: "observer".into(),
             reason_category: AskReason::Scope,
             finding_id: Some(other),
+            request_id: None,
         })
         .unwrap()
         .ask;
@@ -444,6 +446,7 @@ fn a_propose_answer_marks_the_finding_and_a_planner_takes_it() {
             asked_by: "planner".into(),
             reason_category: AskReason::Scope,
             finding_id: Some(other),
+            request_id: None,
         })
         .unwrap()
         .ask;
@@ -469,6 +472,7 @@ fn a_propose_answer_marks_the_finding_and_a_planner_takes_it() {
             asked_by: "supervisor".into(),
             reason_category: AskReason::RecoveryFailed,
             finding_id: None,
+            request_id: None,
         })
         .unwrap()
         .ask;
@@ -544,6 +548,7 @@ fn a_planner_question_about_a_finding_is_typed_to_its_planner_and_undecided_plan
             asked_by: "planner".into(),
             reason_category: AskReason::Scope,
             finding_id: Some(found),
+            request_id: None,
         })
         .unwrap()
         .ask;

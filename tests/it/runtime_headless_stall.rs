@@ -230,6 +230,7 @@ esac"#
             asked_by: "supervisor".into(),
             reason_category: AskReason::RecoveryFailed,
             finding_id: None,
+            request_id: None,
         })
         .unwrap()
         .ask;

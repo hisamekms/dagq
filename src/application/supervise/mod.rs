@@ -132,6 +132,7 @@ mod recovery;
 mod release;
 mod reopen;
 mod report;
+mod request_planner;
 mod resume;
 mod revise;
 mod sccache;

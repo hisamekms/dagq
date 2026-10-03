@@ -13,7 +13,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ActorContext, ActorRole, AskId, AskKind, FindingId, GoalId, PlannerId, ProposalId, RunId,
+    ActorContext, ActorRole, AskId, AskKind, FindingId, GoalId, PlannerId, ProposalId, RequestId,
+    RunId,
 };
 use super::{DomainError, TaskId, TaskStatus};
 
@@ -54,6 +55,11 @@ string_enum!(Capability {
     AskAnswer => "ask.answer",
     AskClose => "ask.close",
     PlannerOpen => "planner.open",
+    // A planning request for a planner of the runtime's, recorded at a
+    // person's word, and declined by its planner (ADR-t1394-1 decisions 3
+    // and 6).
+    RequestRecord => "request.record",
+    RequestDecline => "request.decline",
     // A session's screen read and keys or an answer typed into it, by
     // its run or planner id (ADR-t1228-1 decisions 4 and 5).
     ScreenRead => "screen.read",
@@ -78,7 +84,7 @@ string_enum!(Capability {
 });
 
 impl Capability {
-    pub const ALL: [Self; 45] = [
+    pub const ALL: [Self; 47] = [
         Self::QueueRead,
         Self::QueueWatch,
         Self::ExportFile,
@@ -109,6 +115,8 @@ impl Capability {
         Self::AskAnswer,
         Self::AskClose,
         Self::PlannerOpen,
+        Self::RequestRecord,
+        Self::RequestDecline,
         Self::ScreenRead,
         Self::ScreenSend,
         Self::Supervise,
@@ -175,6 +183,12 @@ pub enum Resource {
     },
     Finding(FindingId),
     Planner(PlannerId),
+    /// A planning request and the planner of the runtime's open for it,
+    /// the one that may decline it (ADR-t1394-1 decision 6).
+    Request {
+        id: RequestId,
+        planner: Option<PlannerId>,
+    },
     /// A resource the caller named but could not read (such as a malformed
     /// run id): no owner can match it.
     Unresolved,
@@ -205,6 +219,9 @@ impl Resource {
             Self::Proposal { id, owner } => json!({"kind": "proposal", "id": id, "owner": owner}),
             Self::Finding(id) => json!({"kind": "finding", "id": id}),
             Self::Planner(id) => json!({"kind": "planner", "id": id}),
+            Self::Request { id, planner } => {
+                json!({"kind": "request", "id": id, "planner": planner})
+            }
             Self::Unresolved => json!({"kind": "unresolved"}),
         }
     }
@@ -338,6 +355,7 @@ const USER: &[Capability] = &[
     C::AskAnswer,
     C::AskClose,
     C::PlannerOpen,
+    C::RequestRecord,
     C::ScreenRead,
     C::ScreenSend,
     C::Supervise,
@@ -372,6 +390,7 @@ const PLANNER: &[Capability] = &[
     C::FindingResolve,
     C::FindingDismiss,
     C::PlannerOpen,
+    C::RequestDecline,
     C::ServiceLifecycle,
     C::BinaryInstall,
     C::QueueAdmin,
@@ -530,6 +549,10 @@ fn planner_permits(actor: &ActorContext, capability: Capability, resource: &Reso
             owner.as_deref() == Some(actor.actor_id())
         }
         Resource::Planner(id) => actor.actor_id() == format!("planner:{id}"),
+        // Only the request's own planner declines it.
+        Resource::Request { planner, .. } => {
+            planner.is_some_and(|id| actor.actor_id() == format!("planner:{id}"))
+        }
         _ => true,
     }
 }
@@ -1126,6 +1149,39 @@ mod tests {
             assert_eq!(allowed(&actor, C::AskAnswer, &ask), answers, "{role_:?}");
             assert_eq!(allowed(&actor, C::AskClose, &ask), closes, "{role_:?}");
         }
+    }
+
+    #[test]
+    fn only_the_user_and_the_inbox_record_a_request_and_only_its_planner_declines_it() {
+        for role_ in ActorRole::ALL {
+            let records = matches!(role_, ActorRole::User | ActorRole::Inbox);
+            assert_eq!(
+                allowed(&role(role_), C::RequestRecord, &Resource::Queue),
+                records,
+                "{role_:?}"
+            );
+        }
+        let request = |planner: Option<i64>| Resource::Request {
+            id: RequestId::new(3),
+            planner: planner.map(PlannerId::new),
+        };
+        let planner = ActorContext::instance(ActorRole::Planner, 7);
+        assert!(allowed(&planner, C::RequestDecline, &request(Some(7))));
+        assert!(!allowed(&planner, C::RequestDecline, &request(Some(8))));
+        assert!(!allowed(&planner, C::RequestDecline, &request(None)));
+        for role_ in ActorRole::ALL
+            .into_iter()
+            .filter(|role_| *role_ != ActorRole::Planner)
+        {
+            assert!(
+                !allowed(&role(role_), C::RequestDecline, &request(Some(1))),
+                "{role_:?}"
+            );
+        }
+        assert_eq!(
+            request(Some(7)).record(),
+            serde_json::json!({"kind": "request", "id": 3, "planner": 7})
+        );
     }
 
     #[test]

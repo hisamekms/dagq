@@ -638,6 +638,7 @@ fn integrate_by_hand_closes_the_landing_and_blocked_asks_of_the_run() {
                 asked_by: "observer".into(),
                 reason_category: AskReason::Scope,
                 finding_id: None,
+                request_id: None,
             })
             .unwrap()
             .ask

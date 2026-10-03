@@ -50,6 +50,7 @@ fn ask_during_review(db: &std::path::Path) -> AskId {
             asked_by: "worker".into(),
             reason_category: AskReason::Scope,
             finding_id: None,
+            request_id: None,
         })
         .unwrap()
         .ask;

@@ -397,6 +397,7 @@ fn new_stalled_ask(
             reason_category,
             topics: Vec::new(),
             finding_id: None,
+            request_id: None,
         },
         sv.cmux,
     )?;

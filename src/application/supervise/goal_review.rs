@@ -440,6 +440,7 @@ impl Supervisor<'_> {
             },
             topics: Vec::new(),
             finding_id: None,
+            request_id: None,
         });
         let applied = self.queue.finish_goal_review(
             job,

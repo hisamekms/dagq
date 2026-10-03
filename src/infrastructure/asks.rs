@@ -891,6 +891,12 @@ pub(super) fn close_asks_in(
     Ok(closed)
 }
 
+/// The `subject` of a `planner_question` about planning request `id`:
+/// `request:<id>`.
+pub(super) fn request_ask_subject(id: crate::domain::RequestId) -> String {
+    format!("request:{id}")
+}
+
 /// Register `ask` inside the caller's write transaction, or return the open
 /// one of the same task, run and kind unchanged (see [`SqliteQueue::ask`]).
 pub(super) fn insert_ask(tx: &Connection, ask: &NewAsk) -> Result<AskOutcome> {
@@ -920,6 +926,9 @@ pub(super) fn insert_ask(tx: &Connection, ask: &NewAsk) -> Result<AskOutcome> {
     if let Some(finding_id) = ask.finding_id {
         super::findings::read_finding(tx, finding_id)?;
     }
+    if let Some(request_id) = ask.request_id {
+        super::plan_requests::read_request(tx, request_id)?;
+    }
     // An ask about a finding offers to make a proposal of it or dismiss
     // it, a `stalled` one to make a proposal of its cause (ADR-0044
     // decision 19); the runtime applies those answers.
@@ -928,8 +937,9 @@ pub(super) fn insert_ask(tx: &Connection, ask: &NewAsk) -> Result<AskOutcome> {
             .query_row(
                 "SELECT * FROM asks WHERE ifnull(task_id,0)=ifnull(?1,0) AND ifnull(run_id,'')=ifnull(?2,'')
                  AND kind=?3 AND ifnull(finding_id,0)=ifnull(?4,0)
+                 AND ifnull(request_id,0)=ifnull(?5,0)
                  AND answered_at IS NULL AND closed_at IS NULL",
-                params![task_id, ask.run_id, ask.kind.as_str(), ask.finding_id],
+                params![task_id, ask.run_id, ask.kind.as_str(), ask.finding_id, ask.request_id],
                 ask_row,
             )
             .optional()?
@@ -949,9 +959,14 @@ pub(super) fn insert_ask(tx: &Connection, ask: &NewAsk) -> Result<AskOutcome> {
     // 1); NULL without them.
     let recommendation = ask.recommended_option();
     let confidence = ask.confidence.map(|confidence| confidence.as_str());
+    // A question about a planning request names its request as its subject
+    // too: `asks_open`, which a compatible migration cannot rebuild, keeps
+    // one open ask per subject, so questions about two requests, both
+    // about no task, run or finding, do not collide (ADR-t1394-1).
+    let request_subject = ask.request_id.map(request_ask_subject);
     tx.execute(
-        "INSERT INTO asks(kind,task_id,run_id,question,options,asked_by,reason_category,finding_id,topics,recommendation,confidence)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+        "INSERT INTO asks(kind,task_id,run_id,question,options,asked_by,reason_category,finding_id,topics,recommendation,confidence,request_id,subject)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
         params![
             ask.kind.as_str(),
             task_id,
@@ -963,7 +978,9 @@ pub(super) fn insert_ask(tx: &Connection, ask: &NewAsk) -> Result<AskOutcome> {
             ask.finding_id,
             topics_column,
             recommendation,
-            confidence
+            confidence,
+            ask.request_id,
+            request_subject
         ],
     )?;
     let id = AskId::new(tx.last_insert_rowid());
@@ -977,6 +994,9 @@ pub(super) fn insert_ask(tx: &Connection, ask: &NewAsk) -> Result<AskOutcome> {
     });
     if !topics.is_empty() {
         payload["topics"] = json!(topics);
+    }
+    if let Some(request) = ask.request_id {
+        payload["request_id"] = json!(request);
     }
     ask_event(
         tx,
@@ -1112,6 +1132,7 @@ pub(super) fn ask_row(row: &Row<'_>) -> rusqlite::Result<Ask> {
         answered_at: row.get("answered_at")?,
         closed_at: row.get("closed_at")?,
         finding_id: row.get("finding_id")?,
+        request_id: row.get("request_id")?,
         answered_by: row.get("answered_by")?,
         option_index: row.get("option_index")?,
         // A newer binary's authority this one does not know reads as none.
@@ -1469,6 +1490,7 @@ mod tests {
                 asked_by: "worker".into(),
                 reason_category: AskReason::Scope,
                 finding_id: None,
+                request_id: None,
             })
             .unwrap()
             .ask;

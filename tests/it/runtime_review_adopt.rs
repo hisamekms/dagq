@@ -214,6 +214,7 @@ fn adopt_revise_at_dialog(max_waiting: usize) {
             asked_by: "supervisor".into(),
             reason_category: AskReason::RecoveryFailed,
             finding_id: None,
+            request_id: None,
         })
         .unwrap()
         .ask;
@@ -801,6 +802,7 @@ fn reviewed_run_asked_to_exit(
                 asked_by: "supervisor".into(),
                 reason_category: AskReason::Scope,
                 finding_id: None,
+                request_id: None,
             })
             .unwrap();
     }

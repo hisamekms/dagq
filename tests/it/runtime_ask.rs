@@ -158,6 +158,7 @@ fn only_a_new_ask_notifies_and_it_goes_to_the_inbox() {
         asked_by: "worker".into(),
         reason_category: dagq::domain::AskReason::Scope,
         finding_id: None,
+        request_id: None,
     };
     // Without an inbox the notification names no workspace; the bound
     // repository's main checkout names the queue.
@@ -200,6 +201,7 @@ fn only_a_new_ask_notifies_and_it_goes_to_the_inbox() {
             asked_by: "worker".into(),
             reason_category: dagq::domain::AskReason::RecoveryFailed,
             finding_id: None,
+            request_id: None,
         },
         &backend,
     )
@@ -230,6 +232,7 @@ fn only_a_new_ask_notifies_and_it_goes_to_the_inbox() {
             asked_by: "observer".into(),
             reason_category: dagq::domain::AskReason::Scope,
             finding_id: None,
+            request_id: None,
         },
         &backend,
     )
@@ -274,6 +277,7 @@ fn asks_of_a_run_are_attention_for_the_inbox_until_closed() {
         asked_by: "worker".into(),
         reason_category: dagq::domain::AskReason::RecoveryFailed,
         finding_id: None,
+        request_id: None,
     };
 
     // An inbox watch started before the ask wakes on ask_opened alone.
@@ -675,6 +679,7 @@ fn status_reports_failed_runs_and_unanswered_exit_requests() {
             asked_by: "supervisor".into(),
             reason_category: dagq::domain::AskReason::RecoveryFailed,
             finding_id: None,
+            request_id: None,
         })
         .unwrap();
     let woke = joined(watcher, "the watch thread to return");
@@ -851,6 +856,7 @@ fn a_follow_up_draft_records_its_origin_and_its_planner_question_is_delivered_by
             asked_by: "planner".into(),
             reason_category: dagq::domain::AskReason::Scope,
             finding_id: None,
+            request_id: None,
         })
         .unwrap()
         .ask;

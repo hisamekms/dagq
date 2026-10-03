@@ -1181,6 +1181,219 @@ pub fn finding_planner_prompt(material: &FindingPlannerMaterial<'_>) -> Result<S
     Ok(out)
 }
 
+/// What a planning request refers to, as its planner's prompt shows it
+/// (ADR-t1394-1 decision 5).
+#[derive(Debug, Clone)]
+pub enum RequestRefMaterial {
+    /// An ask: its question and answer.
+    Ask(Ask),
+    /// A task, with the receipt of its last landed run.
+    Task {
+        task: Box<Task>,
+        receipt: Option<Value>,
+    },
+    /// A run, with its task and its landed receipt.
+    Run {
+        run: RunId,
+        task: Option<TaskId>,
+        receipt: Option<Value>,
+    },
+    /// An event, payload and all.
+    Event(RunEvent),
+    /// A finding with its reading and evidence.
+    Finding(Box<FindingView>),
+    /// A goal: its section below shows it.
+    Goal(GoalId),
+    /// A reference that could not be read (gone, or not of this queue).
+    Unreadable {
+        reference: crate::domain::plan_request::RequestRef,
+        error: String,
+    },
+}
+
+/// What the initial prompt of a planner the runtime opens for a planning
+/// request is made of.
+pub struct RequestPlannerMaterial<'a> {
+    pub db: &'a Path,
+    pub request: &'a crate::domain::plan_request::PlanRequest,
+    /// The sentence that points at the file the request's words were
+    /// handed over in ([`super::planner_handoff`]).
+    pub handed: &'a str,
+    /// Which planner of the runtime's this is for the request (1-based).
+    pub attempt: usize,
+    pub refs: &'a [RequestRefMaterial],
+    /// The goals the references lead to: each with whether it is closed
+    /// and its tasks.
+    pub goals: &'a [(Goal, bool, Vec<GoalTask>)],
+    /// The earlier planners' questions about the request.
+    pub asks: &'a [Ask],
+    /// The answered `planner_question` of a planner that is gone.
+    pub answer: Option<&'a Ask>,
+}
+
+/// The initial prompt of a planner the runtime opens for a planning
+/// request (ADR-t1394-1 decision 5): the file the person's words were
+/// handed over in, the inbox's note apart from them, what the request
+/// refers to, the goals it leads to, how to look for what already covers
+/// it, the Basic policy of what to raise to a person, and what it may do:
+/// submit a proposal, decline the request with a reason, or ask a
+/// `planner_question` about it.
+pub fn request_planner_prompt(material: &RequestPlannerMaterial<'_>) -> Result<String> {
+    let request = material.request;
+    let id = request.id;
+    let mut out = format!(
+        "You are a planner the dagq runtime opened for planning request {id} of the queue at {db}; no person watches this session. A person asked the inbox for a plan, and the inbox recorded the request for you (planner {attempt} of at most {max} the runtime opens for it).\n",
+        db = super::path_text(material.db)?,
+        attempt = material.attempt,
+        max = crate::domain::plan_request::MAX_REQUEST_PLANNERS,
+    );
+    out.push_str(&format!(
+        "\n## Request {id}\n\n{handed} Those are the person's own words (recorded by the {by} at {at}, Unix seconds).\n",
+        handed = material.handed,
+        by = request.requested_by,
+        at = request.created_at,
+    ));
+    if let Some(note) = &request.note {
+        out.push_str(&format!(
+            "\nThe inbox added this, apart from the person's words:\n\n{note}\n"
+        ));
+    }
+    if !material.refs.is_empty() {
+        out.push_str("\n## What it refers to\n");
+    }
+    for reference in material.refs {
+        match reference {
+            RequestRefMaterial::Ask(ask) => out.push_str(&format!(
+                "\n### Ask {aid} ({kind})\n\n{question}\n\nanswer: {answer}\n",
+                aid = ask.id,
+                kind = ask.kind.as_str(),
+                question = ask.question,
+                answer = ask.answer.as_deref().unwrap_or("(none yet)"),
+            )),
+            RequestRefMaterial::Task { task, receipt } => {
+                out.push_str(&format!(
+                    "\n### Task {tid} ({status}): {title}\n\n{description}\n\nAcceptance:\n{acceptance}\n",
+                    tid = task.id(),
+                    status = task.status().as_str(),
+                    title = task.title(),
+                    description = or_none(task.description()),
+                    acceptance = or_none(task.acceptance()),
+                ));
+                push_receipt(&mut out, receipt.as_ref())?;
+            }
+            RequestRefMaterial::Run { run, task, receipt } => {
+                out.push_str(&format!(
+                    "\n### Run {run}{of}\n",
+                    of = task
+                        .map(|task| format!(" (task {task})"))
+                        .unwrap_or_default(),
+                ));
+                push_receipt(&mut out, receipt.as_ref())?;
+            }
+            RequestRefMaterial::Event(event) => {
+                out.push_str(&format!(
+                    "\n### Event {eid} ({kind})\n\n",
+                    eid = event.id,
+                    kind = event.kind,
+                ));
+                out.push_str(&fenced(
+                    "json",
+                    &serde_json::to_string_pretty(&event.payload)?,
+                ));
+            }
+            RequestRefMaterial::Finding(view) => {
+                let finding = &view.finding;
+                out.push_str(&format!(
+                    "\n### Finding {fid} ({kind}, {status}): {summary}\n\n{detail}\n\nRead its evidence with `dagq findings {fid} --full`.\n",
+                    fid = finding.id,
+                    kind = finding.kind,
+                    status = finding.status.as_str(),
+                    summary = finding.summary,
+                    detail = or_none(&finding.detail),
+                ));
+            }
+            RequestRefMaterial::Goal(goal) => {
+                out.push_str(&format!("\n### Goal {goal}\n\nSee the goals below.\n"));
+            }
+            RequestRefMaterial::Unreadable { reference, error } => out.push_str(&format!(
+                "\n### {reference}\n\nIt could not be read: {error}\n"
+            )),
+        }
+    }
+    if material.goals.is_empty() {
+        out.push_str("\n## Goals\n\nNothing it refers to belongs to a goal. `dagq goal list` shows the open goals.\n");
+    }
+    for (goal, closed, tasks) in material.goals {
+        out.push_str(&format!(
+            "\n## Goal {gid}: {title}{closed}\n\n{description}\n\nAcceptance:\n{acceptance}\n\nConstraints:\n{constraints}\n\nIts tasks:\n{tasks}\n",
+            gid = goal.id(),
+            title = goal.title(),
+            closed = if *closed { " (closed)" } else { "" },
+            description = or_none(goal.description()),
+            acceptance = or_none(goal.acceptance()),
+            constraints = or_none(goal.constraints()),
+            tasks = if tasks.is_empty() {
+                "(none)".to_owned()
+            } else {
+                tasks
+                    .iter()
+                    .map(|t| format!("- task {} ({}): {}", t.id, t.status.as_str(), t.title))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            },
+        ));
+    }
+    if !material.asks.is_empty() {
+        out.push_str("\n## Earlier questions about it\n\n");
+        for ask in material.asks {
+            out.push_str(&format!(
+                "- ask {aid}: {question}\n  answer: {answer}\n",
+                aid = ask.id,
+                question = ask.question.replace('\n', "\n  "),
+                answer = ask.answer.as_deref().unwrap_or("(none yet)"),
+            ));
+        }
+    }
+    out.push_str(&format!(
+        "\n## What to do\n\n\
+         Follow the dagq-planner skill of the dagq plugin, its Basic policy above all: {DECIDE_YOURSELF} Read the repository's AGENTS.md (or CLAUDE.md) first, and the documents it names for what you plan. {rules} Before you plan, look for tasks that already cover the request or code that already does it (`dagq search '<words>'`, `dagq related ID` for a task, `dagq show ID`, `dagq goal list`, the source). {RECORD_READING}\n\
+         Then do exactly one of these:\n\
+         1. Plan it: write the goal (`dagq goal add --draft ...`) or the tasks for an open goal (`dagq add --goal GOAL ...`) the request asks for, with `--context` beginning with `from request {id}` and saying why you planned it so, check them with `dagq lint`, and submit them with `dagq submit ...`. Your submission makes request {id} proposed with the proposal, and plan review checks it before it becomes ready; you need no person's approval for it, even for a new goal. You may submit more than one proposal for it.\n\
+         2. Decline: when nothing should be planned of it (it is done already: name the task or the code; it duplicates a task in flight: name it; or it cannot be planned as asked: say why), run `dagq request decline {id} --reason '<why>'`. The inbox tells the person, who may ask again in other words.\n\
+         3. Ask: only when you cannot decide it yourself: (a) it needs a person's judgement, `scope` (the plan's intent, an acceptance, a contradiction with a goal's constraints or a decision the repository records, a precedent a person answered otherwise) or `discard` (whether to throw work away), that the queue, the repository (its code and the decisions it records) and a person's precedents cannot settle; or (b) your confidence in the decision is low. Run `dagq ask --request {id} --kind planner_question --because scope --recommend <plan|decline> --confidence <high|low> --question '<everything the person needs, with your recommendation and why>' --option plan --option decline` (`--because discard` when the question is whether to throw work away), report briefly and stop. The answer arrives in this terminal as `answer to ask <id>: ...`: follow it (plan: do 1 as it says; decline: do 2).\n\
+         When you are done, report the outcome in one or two sentences and stop; the runtime ends this session. Do not work on anything but this request. Never open the queue database directly; use the dagq CLI only.\n",
+        rules = repository_rules(RUNTIME_PLANNER_ASK),
+    ));
+    if let Some(answer) = material.answer {
+        out.push_str(&format!(
+            "\nThe planner before you asked a person (ask {aid}) and is gone:\n{question}\n\nanswer to ask {aid}: {text}\n\nApply this answer as step 3 says.\n",
+            aid = answer.id,
+            question = answer.question,
+            text = answer.answer.as_deref().unwrap_or_default(),
+        ));
+    }
+    Ok(out)
+}
+
+/// The `summary` and `follow_ups` of a landed receipt, or that there is
+/// none.
+fn push_receipt(out: &mut String, receipt: Option<&Value>) -> Result<()> {
+    match receipt {
+        Some(receipt) => {
+            out.push_str(&format!(
+                "\nIts landed receipt's summary:\n\n{summary}\n\nIts follow_ups:\n\n",
+                summary = or_none(receipt["summary"].as_str().unwrap_or_default()),
+            ));
+            out.push_str(&fenced(
+                "json",
+                &serde_json::to_string_pretty(&receipt["follow_ups"])?,
+            ));
+        }
+        None => out.push_str("\nNo landed receipt.\n"),
+    }
+    Ok(())
+}
+
 fn list_or_none(items: &[String]) -> String {
     if items.is_empty() {
         "(none)".to_owned()

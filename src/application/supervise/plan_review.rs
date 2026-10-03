@@ -637,6 +637,7 @@ impl Supervisor<'_> {
             reason_category: concern.map_or(AskReason::Scope, |decided| decided.ask_reason()),
             topics: Vec::new(),
             finding_id: None,
+            request_id: None,
         });
         let applied = self.queue.finish_plan_review(
             job,
@@ -874,6 +875,10 @@ impl Supervisor<'_> {
         // Then the drafts the runtime or a job registered (ADR-0041
         // decision 16), within the same limit.
         self.deliver_planner_answers(&views, &mut runtime_open)?;
+        // The planning requests a person made through the inbox
+        // (ADR-t1394-1) come before the runtime's own drafts and findings:
+        // a person waits on them.
+        self.open_request_planners(&mut runtime_open)?;
         self.open_draft_planners(&mut runtime_open)?;
         // Then the findings marked for a proposal (ADR-0044 decision 19),
         // within the same limit, once those whose proposal ended are
@@ -908,6 +913,7 @@ impl Supervisor<'_> {
                     proposal_id: view.planner.proposal_id,
                     draft_task_id: view.planner.draft_task_id,
                     finding_id: view.planner.finding_id,
+                    request_id: view.planner.request_id,
                 })
             })
             .collect()
@@ -1053,6 +1059,7 @@ impl Supervisor<'_> {
                 "workspace_id": view.planner.workspace_id,
                 "draft_task_id": view.planner.draft_task_id,
                 "finding_id": view.planner.finding_id,
+                "request_id": view.planner.request_id,
                 "state": view.state.as_str(),
                 "last_activity": last,
                 "waited_secs": waited,
@@ -1383,8 +1390,12 @@ impl Supervisor<'_> {
     /// prompt is timed by the planner's opening. An ask closed without a
     /// typing holds nothing.
     fn question_wait(&mut self, view: &PlannerView) -> Result<Option<PlannerBusy>> {
-        let (draft, finding) = (view.planner.draft_task_id, view.planner.finding_id);
-        if draft.is_none() && finding.is_none() {
+        let (draft, finding, request) = (
+            view.planner.draft_task_id,
+            view.planner.finding_id,
+            view.planner.request_id,
+        );
+        if draft.is_none() && finding.is_none() && request.is_none() {
             return Ok(None);
         }
         // The drafts of its bundle (ADR-t807-1).
@@ -1392,8 +1403,8 @@ impl Supervisor<'_> {
             Some(_) => self.queue.planner_draft_tasks(view.planner.id)?,
             None => Vec::new(),
         };
-        // A finding's planner asks about the finding, a draft's about the
-        // drafts of its bundle.
+        // A request's planner asks about the request, a finding's about the
+        // finding, a draft's about the drafts of its bundle.
         let asks: Vec<_> = self
             .queue
             .asks(crate::application::AskQuery {
@@ -1403,9 +1414,10 @@ impl Supervisor<'_> {
             .into_iter()
             .filter(|ask| {
                 ask.kind == AskKind::PlannerQuestion
-                    && match finding {
-                        Some(finding) => ask.finding_id == Some(finding),
-                        None => {
+                    && match (finding, request) {
+                        (_, Some(request)) => ask.request_id == Some(request),
+                        (Some(finding), None) => ask.finding_id == Some(finding),
+                        (None, None) => {
                             ask.finding_id.is_none()
                                 && ask.task_id.is_some_and(|task| drafts.contains(&task))
                         }

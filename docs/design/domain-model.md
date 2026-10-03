@@ -8,6 +8,7 @@ updated: 2026-10-03
 last_verified: 2026-10-03
 scope: domain
 related:
+  - adr-t1394-1
   - adr-t1340-1
   - adr-t946-1
   - adr-t807-1
@@ -55,6 +56,7 @@ related:
 - `AgentSession`: providerが起動したセッション。プロセスとprovider固有識別子を持つ。
 - `Workspace`: cmux workspace。TaskRunと1対1で関連し、receipt検証を通った後にsupervisorが閉じる。閉じたことの確認は`TaskRun.workspace_closed_at`で持つ。
 - draft origin: runtimeやjobが作ったdraftの出どころ（`DraftOrigin`: `follow_up` | `goal_gap` | `reopened`）と、そのplannerに見せる材料（JSON object）。表`draft_origins`の行（`reopened`は表`draft_reopens`の行）で、人が`add`で作ったdraftには無い（[Draft planners](#draft-planners)）。
+- `PlanRequest`: 人がinboxに頼んだ計画の依頼（[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)の決定2、`src/domain/plan_request.rs`）。人の言葉`text`、inboxが補う文`note`（人の言葉と分ける）、参照`refs`（`RequestRef`: ask・task・run・event・finding・goalのID）、記録したactor（`requested_by`のroleとid）、状態（`RequestStatus`: `open` / `proposed` / `declined` / `exhausted`）とその理由、結び付いたproposalを持つ。表`plan_requests`の行で、supervisorが依頼ごとにruntimeのplannerを立てる（[Planning requests](#planning-requests)）。
 - `RunLease`: 1つのrunを所有するプロセス（実行中はsupervisor、着地中は`integrate`）のPIDとheartbeat。runごとに高々1つで、そのプロセスがrunを扱っている間だけ存在する。
 - `RunProcess`: runごとのsession wrapperとagentのPID、heartbeat、終了コード。
 - `RunEvent`: 実行中に発生した永続イベント。
@@ -330,6 +332,7 @@ domainの関数は業務上の拒否を`DomainError`（`src/domain/error.rs`）�
 - workspaceを閉じる前にTaskRunをcleanedにしない。閉じたことをcmuxの応答で確認して`workspace_closed_at`に記録するまでは開いている扱いで、close失敗はrun状態を変えない。
 - agentの異常終了だけでTaskを自動再実行しない。`failed` / `interrupted`のrunの次の一手はsupervisorの復旧jobのverdict（`repair`の`retry` / `retry_inherit` / `resume` / `wait`か`escalate`。ADR-0047の決定39・40）か人の操作で決まり、runtimeは操作の前提を適用の時点で再検査する: `retry`はbranchに自分のcommitが無く同じtaskの`failed` / `interrupted`のrunが2件未満（`TRIAGE_RETRY_FAILURES`）のときだけ、`retry_inherit`はcommitがありtaskで1回だけ、`resume`は試行が残っているときだけ。崩れたら`decide`のaskにする。leaseが無くsessionの止まった孤児runの`recover`はsupervisorが自動で行うが、taskを`ready`にはせず復旧jobに回す（[supervisor-lifecycle](supervisor-lifecycle/triage.md#triage-supervisor)）。復旧のラウンドは新しい状態を足さず`recovery_requested` / `triage_started` / `triage_finished` / `triage_failed` / `triage_decided` / `recovery_finished`で表し、`domain::triage_state`が最後の`resume_started`以降のそれらから`Pending` / `Waiting`（jobの`wait`、`recheck_at`まで）/ `Failed` / `Finished`を導く。
 - runtimeやjobが作ったdraftにruntimeのplannerを立てることは、storeが`BEGIN IMMEDIATE`で束のdraftを再検査してから記録するので、同じdraftに2つ立たない（[Draft planners](#draft-planners)）。
+- 計画の依頼にruntimeのplannerを立てることは、storeが`BEGIN IMMEDIATE`で依頼を再検査してから記録するので、同じ依頼に同時に2つ立たない。依頼の人の言葉と参照は記録の後に変わらず、`declined` / `exhausted`の依頼は`open`に戻らない（[Planning requests](#planning-requests)）。
 - 実装途中のprovider fallbackは行わず、起動不能など安全に判定できる場合だけfallbackする。
 - 1 runの失敗・中断・復旧は他のrunの状態、lease、プロセス、リソースを変えない。
 
@@ -345,6 +348,16 @@ domainの関数は業務上の拒否を`DomainError`（`src/domain/error.rs`）�
 - **ask**: `AskKind`は知っているkindに加えて`Other(String)`を持つ（[ADR-0073](../adr/0073-kind-additions-are-compatible.md)の決定21）。queueから読むとき（`AskKind::read`・serde）は知らないkindを`Other`にし、`status` / `watch` / `show`は人に見せるだけの汎用のaskとして出し、`answer`は記録するがruntimeは適用しない（attentionは`read the answer`）。CLIの`parse`と書き込み口（`check_ask_kind`）は知っているkindだけを受け付ける。
 - **ask**: `AskKind::PlannerQuestion`（`planner_question`）はruntimeのplannerが人に聞くask（options `PLANNER_QUESTION_OPTIONS` = `adopt` / `cancel` / `keep_draft`）。answerの行き先（`PlannerAnswerRoute`: `Planner` / `NewPlanner` / `Close` / `Person`）はstoreが決め、`Person`以外は`runtime_delivers: true`でattentionにしない。`AskKind::FollowUp`は退役したtriageのaskで、もう作られない。
 
+
+### Planning requests
+
+[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)の決定2〜7（task 1395）。人がinboxに頼んだ計画の依頼。規則と型は`src/domain/plan_request.rs`、storeは`src/infrastructure/plan_requests.rs`（port `PlanRequestStore`と`RequestStore`）、supervisorの流れは[supervisor-lifecycle](supervisor-lifecycle/plan-planners.md#inboxからの計画の依頼)。
+
+- **記録**: `NewPlanRequest { text, note, refs }`。`validate`は`text`が空でないこと、`note`は無いか空でないことを確かめる。`RequestRef::parse`は`ask:N` / `task:N` / `run:ID` / `event:N` / `finding:N` / `goal:N`を読み（それ以外と0以下のIDは`RequestRefInvalid`）、`Display`は同じ形に戻す。JSONは`{"kind", "id"}`。記録できるのは`inbox`と`user`だけ（`request.record`、[Authorization](authorization.md)）。
+- **状態と遷移**: `open`（plannerを待つか、plannerが作業中）→ `proposed`（依頼のplannerが最初のproposalをsubmitした。その後のproposalも結ぶ）、`open` → `declined`（依頼のplannerが理由を付けて手当てしないと決めた。`check_decline`が`open`であることと理由が空でないことを確かめ、外れれば`RequestNotOpen` / `Blank`）、`open` → `exhausted`（決めずに終わったplannerが`MAX_REQUEST_PLANNERS`（3）に達した）。`proposed` / `declined` / `exhausted`は終わりで、どこにも戻らない。`proposed`はproposalのその後の結末（plan review、cancel）で変えない。`RequestStatus::needs_a_person`は`declined`と`exhausted`（inboxのattentionで、人が言い直すか取り下げる）。
+- **上限**: plannerの数は依頼ごとに数え（その依頼の`planners`の行の数）、`MAX_REQUEST_PLANNERS`に達した依頼には（人のanswerを運ぶとき以外は）立てずに`exhausted`にする。runtimeのplannerの同時の数の上限は、revise・draft・findingのplannerと共有する。
+- **ask**: `planner_question`だけが依頼を名指せる（`NewAsk::request_id`、他のkindは`AskRequestNotPlannerQuestion`）。依頼を名指す`planner_question`はtask・run・findingを名指さない。answerの行き先（`PlannerAnswerRoute`）は依頼の生きているplanner、無く`open`なら`NewPlanner`、それ以外は`Close`で、`Person`にはならない。
+- **attention**: `request_proposed`は`AttentionNext::ReportRequest`（`report the request's proposal`。inboxが依頼した人に伝える知らせ）、`request_declined`と`request_planner_exhausted`は`AttentionNext::RephraseRequest`（`rephrase or drop the request`）。どれもqueueのeventで、`watch`のattentionに出る。
 
 ### `TaskRun.last_error`
 

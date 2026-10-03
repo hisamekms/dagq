@@ -931,6 +931,7 @@ impl Supervisor<'_> {
                 reason_category: note.category,
                 topics: Vec::new(),
                 finding_id: None,
+                request_id: None,
             },
             self.cmux,
         )?;

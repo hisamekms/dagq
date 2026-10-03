@@ -1250,6 +1250,7 @@ fn migration_adding_the_answerer_keeps_older_answers_unknown() {
             asked_by: "supervisor".into(),
             reason_category: dagq::domain::AskReason::RecoveryFailed,
             finding_id: None,
+            request_id: None,
         })
         .unwrap()
         .ask;
@@ -1386,6 +1387,7 @@ fn migration_opening_the_kinds_keeps_rows_and_moves_their_rules_to_the_write_por
         asked_by: "supervisor".into(),
         reason_category: AskReason::Scope,
         finding_id: None,
+        request_id: None,
     };
     let refused = [
         ask(AskKind::Other("later_kind".into()), Some(1), None),

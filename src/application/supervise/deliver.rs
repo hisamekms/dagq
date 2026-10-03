@@ -331,6 +331,7 @@ pub(super) fn ask_unsubmitted(
             reason_category: AskReason::RecoveryFailed,
             topics: Vec::new(),
             finding_id: None,
+            request_id: None,
         },
         sv.cmux,
     );

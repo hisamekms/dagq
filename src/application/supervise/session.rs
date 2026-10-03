@@ -1183,6 +1183,7 @@ pub(super) fn ask_answer_prompt(
             reason_category: note.map_or(AskReason::RecoveryFailed, |note| note.category),
             topics: Vec::new(),
             finding_id: None,
+            request_id: None,
         },
         sv.cmux,
     )?;

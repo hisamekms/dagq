@@ -401,7 +401,7 @@ impl SqliteQueue {
         let ask = read_ask(&tx, id)?;
         // A question about a finding may be about no task: its claim is on
         // the finding's target (ADR-0044 decision 19).
-        if ask.task_id.is_none() && ask.finding_id.is_none() {
+        if ask.task_id.is_none() && ask.finding_id.is_none() && ask.request_id.is_none() {
             return Ok(false);
         }
         if !matches!(route_of(&tx, &ask)?, PlannerAnswerRoute::Planner(to) if to.id == planner) {
@@ -423,6 +423,14 @@ impl SqliteQueue {
         }
         let payload = json!({"ask_id": id, "planner_id": planner, "workspace_id": workspace, "claimed_at": now});
         match (ask.finding_id, ask.task_id) {
+            // A question about a request is the queue's (ADR-t1394-1).
+            _ if ask.request_id.is_some() => {
+                super::sqlite::record_queue_event_in(
+                    &tx,
+                    EventKind::PlannerAnswerClaimed,
+                    &payload,
+                )?;
+            }
             (Some(finding), _) => {
                 let finding = super::findings::read_finding(&tx, finding)?;
                 super::findings::finding_event(
@@ -453,7 +461,9 @@ impl SqliteQueue {
             params![id, self.generators.clock.now()],
         )?;
         let payload = json!({"ask_id": id, "reason": why});
-        if let Some(finding) = ask.finding_id {
+        if ask.request_id.is_some() {
+            super::sqlite::record_queue_event_in(&tx, EventKind::PlannerAnswerClosed, &payload)?;
+        } else if let Some(finding) = ask.finding_id {
             let finding = super::findings::read_finding(&tx, finding)?;
             super::findings::finding_event(&tx, &finding, EventKind::PlannerAnswerClosed, payload)?;
         } else if let Some(task) = ask.task_id {
@@ -944,6 +954,11 @@ pub(super) fn route_of(conn: &Connection, ask: &Ask) -> Result<PlannerAnswerRout
     if ask.kind != AskKind::PlannerQuestion || ask.answer.is_none() || ask.closed_at.is_some() {
         return Ok(PlannerAnswerRoute::Person);
     }
+    // A question about a planning request goes the way of the request's
+    // planners (ADR-t1394-1 decision 7).
+    if let Some(request) = ask.request_id {
+        return super::plan_requests::route_of(conn, request);
+    }
     // A question about a finding goes the way of the finding's planners
     // (ADR-0044 decision 19).
     if let Some(finding) = ask.finding_id {
@@ -964,10 +979,10 @@ pub(super) fn route_of(conn: &Connection, ask: &Ask) -> Result<PlannerAnswerRout
         )
         .optional()?;
     if let Some(id) = planner {
-        return Ok(PlannerAnswerRoute::Planner(read_planner(
+        return Ok(PlannerAnswerRoute::Planner(Box::new(read_planner(
             conn,
             PlannerId::new(id),
-        )?));
+        )?)));
     }
     // A draft kept for a person's planner needs nothing more of the
     // runtime's: nobody is left to tell.
@@ -1223,6 +1238,7 @@ mod tests {
                 asked_by: "planner".into(),
                 reason_category: crate::domain::AskReason::Scope,
                 finding_id: None,
+                request_id: None,
             })
             .unwrap()
             .ask
@@ -1475,7 +1491,7 @@ mod tests {
         };
         assert_eq!(
             queue.planner_answer_route(&answered).unwrap(),
-            PlannerAnswerRoute::Planner(queue.planner(planner.id).unwrap())
+            PlannerAnswerRoute::Planner(Box::new(queue.planner(planner.id).unwrap()))
         );
         queue.close_planner_answer(open.id, "done").unwrap();
         // Closing twice keeps the first.

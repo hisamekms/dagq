@@ -184,6 +184,11 @@ event_kinds! {
     ReleaseCheckFailed => "release_check_failed",
     ReleaseChecked => "release_checked",
     ReportWritten => "report_written",
+    RequestDeclined => "request_declined",
+    RequestPlannerExhausted => "request_planner_exhausted",
+    RequestPlannerOpened => "request_planner_opened",
+    RequestProposed => "request_proposed",
+    RequestRecorded => "request_recorded",
     ResumeFinished => "resume_finished",
     ResumeRequestSent => "resume_request_sent",
     ResumeSkipped => "resume_skipped",
@@ -371,6 +376,13 @@ impl EventKind {
                 // A planner the runtime closed, a person's or its own
                 // (ADR-t1300-1).
                 | PlannerClosed
+                // A planning request and its planners (ADR-t1394-1), on the
+                // queue.
+                | RequestRecorded
+                | RequestPlannerOpened
+                | RequestProposed
+                | RequestDeclined
+                | RequestPlannerExhausted
                 | SessionTurns
                 | SupervisorStarted
                 // A supervisor's stop request, recorded when its drain
@@ -610,6 +622,21 @@ pub const PLANNER_ANSWER_CLOSED: &str = EventKind::PlannerAnswerClosed.as_str();
 pub const PLANNER_CLOSED: &str = EventKind::PlannerClosed.as_str();
 pub const PLANNER_RELEASED: &str = EventKind::PlannerReleased.as_str();
 pub const PLANNER_UNRESPONSIVE: &str = EventKind::PlannerUnresponsive.as_str();
+/// A planning request recorded (ADR-t1394-1 decision 2): `request_id`,
+/// `refs`, `requested_by`.
+pub const REQUEST_RECORDED: &str = EventKind::RequestRecorded.as_str();
+/// A planner of the runtime's opened for a request (`request_id`,
+/// `planner_id`, `attempt`, `ask_id`).
+pub const REQUEST_PLANNER_OPENED: &str = EventKind::RequestPlannerOpened.as_str();
+/// A request's planner submitted its first proposal (`request_id`,
+/// `proposal_id`, `planner_id`): a notice the inbox passes on.
+pub const REQUEST_PROPOSED: &str = EventKind::RequestProposed.as_str();
+/// A request's planner declined it (`request_id`, `planner_id`, `reason`):
+/// the inbox's attention.
+pub const REQUEST_DECLINED: &str = EventKind::RequestDeclined.as_str();
+/// A request's planners ended without deciding it, up to the limit
+/// (`request_id`, `planners`, `reason`): the inbox's attention.
+pub const REQUEST_PLANNER_EXHAUSTED: &str = EventKind::RequestPlannerExhausted.as_str();
 pub const PLAN_CONCERN_DECIDED: &str = EventKind::PlanConcernDecided.as_str();
 pub const PLAN_DECIDED: &str = EventKind::PlanDecided.as_str();
 pub const PLAN_REVIEW_DISCARDED: &str = EventKind::PlanReviewDiscarded.as_str();
@@ -966,6 +993,14 @@ mod tests {
             (EventKind::ReleaseCheckFailed, "release_check_failed"),
             (EventKind::ReleaseChecked, "release_checked"),
             (EventKind::ReportWritten, "report_written"),
+            (EventKind::RequestDeclined, "request_declined"),
+            (
+                EventKind::RequestPlannerExhausted,
+                "request_planner_exhausted",
+            ),
+            (EventKind::RequestPlannerOpened, "request_planner_opened"),
+            (EventKind::RequestProposed, "request_proposed"),
+            (EventKind::RequestRecorded, "request_recorded"),
             (EventKind::ResumeFinished, "resume_finished"),
             (EventKind::ResumeRequestSent, "resume_request_sent"),
             (EventKind::ResumeSkipped, "resume_skipped"),

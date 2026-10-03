@@ -390,6 +390,7 @@ fn the_rows_the_ports_write_keep_the_check_rules() {
             asked_by: "user".into(),
             reason_category: AskReason::Scope,
             finding_id: None,
+            request_id: None,
         })
         .unwrap()
         .ask;

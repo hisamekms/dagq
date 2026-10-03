@@ -221,6 +221,7 @@ mod tests {
             answered_at: None,
             closed_at: None,
             finding_id: None,
+            request_id: None,
             answered_by: None,
             option_index: None,
             answer_authority: None,

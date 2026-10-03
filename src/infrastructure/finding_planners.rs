@@ -68,6 +68,9 @@ impl SqliteQueue {
             &self.generators.clock.timestamp(),
         )?;
         link_findings(&tx, proposal.id(), workspace.as_deref(), findings, by, now)?;
+        // The request of a request's planner that submits (ADR-t1394-1
+        // decision 6).
+        super::plan_requests::link_requests(&tx, proposal.id(), workspace.as_deref(), now)?;
         let proposal = super::proposals::read(&tx, proposal.id())?;
         tx.commit()?;
         Ok(proposal)
@@ -168,7 +171,7 @@ impl SqliteQueue {
         )?;
         tx.commit()?;
         Ok(FindingPlannerStart::Opened {
-            planner: self.planner(planner)?,
+            planner: Box::new(self.planner(planner)?),
             finding: Box::new(current),
             attempt,
         })
@@ -413,11 +416,11 @@ pub(super) fn route_of(conn: &Connection, finding: FindingId) -> Result<PlannerA
         )
         .optional()?;
     if let Some(id) = planner {
-        return Ok(PlannerAnswerRoute::Planner(conn.query_row(
+        return Ok(PlannerAnswerRoute::Planner(Box::new(conn.query_row(
             "SELECT * FROM planners WHERE id=?1",
             [id],
             super::planners::planner_row,
-        )?));
+        )?)));
     }
     // A finding the runtime never opened a planner for is not the
     // runtime's to carry: a person's planner asked about it.

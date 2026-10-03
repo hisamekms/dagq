@@ -28,6 +28,7 @@ pub mod lifecycle;
 mod memory_files;
 pub mod naming;
 pub mod planner;
+pub mod planner_handoff;
 mod ports;
 pub mod prompt;
 pub mod push;

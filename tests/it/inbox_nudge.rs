@@ -200,6 +200,7 @@ fn open_ask(queue: &mut SqliteQueue) -> dagq::domain::AskId {
             asked_by: "planner".into(),
             reason_category: AskReason::Scope,
             finding_id: None,
+            request_id: None,
         })
         .unwrap()
         .ask

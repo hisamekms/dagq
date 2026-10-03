@@ -2222,6 +2222,29 @@ fn touch(conn: &Connection, task_id: TaskId, now: &str) -> Result<()> {
     Ok(())
 }
 
+/// Insert an event of the queue itself (one of [`EventKind::is_queue`]) in
+/// the open transaction `conn`, with the session span it opens or closes.
+pub(super) fn record_queue_event_in(
+    conn: &Connection,
+    kind: EventKind,
+    payload: &serde_json::Value,
+) -> Result<()> {
+    crate::domain::check_event_target(kind, None, None)?;
+    conn.execute(
+        "INSERT INTO run_events(kind,payload,actor_role,actor_id,requested_by)
+         VALUES (?1,?2,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
+        params![kind.as_str(), serde_json::to_string(payload)?],
+    )?;
+    super::sessions::follow(
+        conn,
+        EventId::new(conn.last_insert_rowid()),
+        None,
+        None,
+        kind,
+        payload,
+    )
+}
+
 pub(super) fn event(
     conn: &Connection,
     task_id: TaskId,

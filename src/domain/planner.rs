@@ -8,7 +8,7 @@
 use serde::Serialize;
 
 use super::{
-    FindingId, PlannerId, PlannerOrigin, PlannerRoute, PlannerState, ProposalId, TaskId,
+    FindingId, PlannerId, PlannerOrigin, PlannerRoute, PlannerState, ProposalId, RequestId, TaskId,
     heartbeat_stale,
 };
 
@@ -27,6 +27,9 @@ pub struct PlannerSession {
     /// The finding the runtime opened it for (ADR-0044 decision 19): one
     /// marked for a proposal.
     pub finding_id: Option<FindingId>,
+    /// The planning request the runtime opened it for (ADR-t1394-1
+    /// decision 4).
+    pub request_id: Option<RequestId>,
     /// The cmux workspace's UUID, once cmux created it (ADR-0026).
     pub workspace_id: Option<String>,
     pub wrapper_pid: Option<u32>,
@@ -213,6 +216,7 @@ mod tests {
             proposal_id: None,
             draft_task_id: None,
             finding_id: None,
+            request_id: None,
             workspace_id: Some("W".into()),
             wrapper_pid: Some(10),
             agent_pid: Some(11),

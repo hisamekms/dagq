@@ -9,6 +9,7 @@
 pub mod dialogue;
 pub mod operations;
 pub mod planning;
+pub mod requests;
 
 use anyhow::Result;
 use serde_json::{Value, json};

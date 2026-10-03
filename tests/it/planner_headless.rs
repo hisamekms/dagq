@@ -549,3 +549,80 @@ fn the_sweep_keeps_a_live_background_planner_and_closes_an_ended_one_as_exited()
     assert_eq!(events.len(), 1, "{events:?}");
     assert_eq!(events[0]["code"], "runtime_exited");
 }
+
+/// A planning request's planner (ADR-t1394-1) on the headless route: its
+/// `planner_question` about the request waits for the answer, which comes
+/// as its next turn, and its decline from that turn ends the request.
+#[test]
+fn a_headless_request_planner_takes_the_answer_as_its_next_turn_and_declines() {
+    let fx = headless_fixture(
+        r#"case "$TURN" in
+1) "$DAGQ" --db "$DB" ask --kind planner_question --because scope --request 1 --question "plan it?" --option plan --option decline --cmux true >> "$RUN_DIR/ask.log" 2>&1 ;;
+*) "$DAGQ" --db "$DB" request decline 1 --reason "done already" >> "$RUN_DIR/decline.log" 2>&1 ;;
+esac
+say "turn $TURN""#,
+    );
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let request = queue
+        .record_plan_request(
+            &dagq::domain::plan_request::NewPlanRequest {
+                text: "plan the landing rate back".into(),
+                note: None,
+                refs: Vec::new(),
+            },
+            "inbox",
+            "inbox",
+        )
+        .unwrap()
+        .id;
+    let reviewer = StubReviewer::new(&[]);
+    let backend = PlanWorkspace::default();
+    let open_question = || {
+        SqliteQueue::open(&fx.db)
+            .unwrap()
+            .asks(Default::default())
+            .unwrap()
+            .into_iter()
+            .find(|ask| ask.request_id == Some(request))
+    };
+    supervise_until(
+        &fx,
+        &backend,
+        &reviewer,
+        || open_question().is_some() && !queue_events(&fx.db, "turn_finished").is_empty(),
+        || diagnose_planner(&fx.db),
+    );
+    let planner = queue.planners(false).unwrap()[0].clone();
+    assert_eq!(planner.route, PlannerRoute::Headless);
+    assert_eq!(planner.request_id, Some(request));
+    let asked = open_question().unwrap();
+    queue.answer(asked.id, "decline").unwrap();
+    supervise_until(
+        &fx,
+        &backend,
+        &reviewer,
+        || !queue_events(&fx.db, "planner_closed").is_empty(),
+        || diagnose_planner(&fx.db),
+    );
+    assert!(backend.texts().is_empty(), "nothing typed");
+    let turns = planners_dir(&fx.db)
+        .join(planner.id.to_string())
+        .join("turns");
+    let taken: Value =
+        serde_json::from_str(&fs::read_to_string(turns.join("request-000001.taken.json")).unwrap())
+            .unwrap();
+    assert_eq!(taken["what"], format!("answer of ask {}", asked.id));
+    assert_eq!(
+        taken["prompt"],
+        format!("answer to ask {}: decline", asked.id)
+    );
+    use dagq::application::PlanRequestStore;
+    let declined = queue.plan_request(request).unwrap();
+    assert_eq!(
+        declined.status,
+        dagq::domain::plan_request::RequestStatus::Declined,
+        "{}",
+        diagnose_planner(&fx.db)
+    );
+    assert_eq!(declined.status_reason.as_deref(), Some("done already"));
+}

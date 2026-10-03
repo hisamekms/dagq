@@ -1220,6 +1220,7 @@ impl Supervisor<'_> {
                 reason_category,
                 topics: Vec::new(),
                 finding_id: None,
+                request_id: None,
             },
             self.cmux,
         )?;

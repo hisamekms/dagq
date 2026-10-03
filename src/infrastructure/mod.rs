@@ -31,6 +31,7 @@ mod kpi_push;
 pub mod language;
 pub mod launchd;
 pub mod location;
+mod plan_requests;
 mod plan_reviews;
 mod planners;
 mod planning;

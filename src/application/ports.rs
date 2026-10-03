@@ -2367,7 +2367,7 @@ pub enum FindingPlannerStart {
     /// `attempt`-th since the finding was marked; the caller opens its
     /// workspace.
     Opened {
-        planner: PlannerSession,
+        planner: Box<PlannerSession>,
         finding: Box<Finding>,
         attempt: usize,
     },
@@ -2382,12 +2382,60 @@ pub enum FindingPlannerStart {
     Skipped,
 }
 
+/// How [`PlanRequestStore::open_request_planner`] ended.
+#[derive(Debug, Clone)]
+pub enum RequestPlannerStart {
+    /// A planner of the runtime's is recorded for the request, its
+    /// `attempt`-th for it; the caller hands it the request and opens its
+    /// workspace.
+    Opened {
+        planner: Box<PlannerSession>,
+        request: Box<crate::domain::plan_request::PlanRequest>,
+        attempt: usize,
+    },
+    /// [`crate::domain::plan_request::MAX_REQUEST_PLANNERS`] planners ended
+    /// without deciding the request: it is `exhausted`, with
+    /// `request_planner_exhausted`, and the inbox decides.
+    Exhausted { attempts: usize },
+    /// Not now: the request moved on, or another planner took it.
+    Skipped,
+}
+
+/// The planning requests the inbox records for planners of the runtime's
+/// (ADR-t1394-1): the ones waiting for a planner, the planner opened for
+/// each, and what its prompt reads of what a request refers to.
+pub trait PlanRequestStore {
+    /// The `open` requests waiting for a planner of the runtime's, oldest
+    /// first: none open for it, no `planner_question` about it nobody
+    /// closed.
+    fn planner_requests(&self) -> Result<Vec<crate::domain::plan_request::PlanRequest>>;
+    /// Record a planner of the runtime's for `request` after re-checking it
+    /// in the same write transaction (`request_planner_opened`); with
+    /// `answer`, one that carries that answered `planner_question` about
+    /// it. Past [`crate::domain::plan_request::MAX_REQUEST_PLANNERS`]
+    /// planners (without `answer`), the request is made `exhausted`
+    /// instead.
+    fn open_request_planner(
+        &mut self,
+        request: crate::domain::RequestId,
+        answer: Option<AskId>,
+    ) -> Result<RequestPlannerStart>;
+    fn plan_request(
+        &self,
+        request: crate::domain::RequestId,
+    ) -> Result<crate::domain::plan_request::PlanRequest>;
+    /// The asks about `request`, oldest first: its planners' questions.
+    fn request_asks(&self, request: crate::domain::RequestId) -> Result<Vec<Ask>>;
+    /// The event `id`, when there is one: what a request refers to.
+    fn event_by_id(&self, id: EventId) -> Result<Option<RunEvent>>;
+}
+
 /// Where the answer of a `planner_question` goes (ADR-0041 decision 13).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlannerAnswerRoute {
     /// Typed into the workspace of this planner of the runtime's, which
     /// works on the ask's task (its draft, or its proposal).
-    Planner(PlannerSession),
+    Planner(Box<PlannerSession>),
     /// The draft's planner is gone: a new one is opened with the answer.
     NewPlanner,
     /// The draft moved on (submitted, canceled) with no planner left: the
@@ -2540,6 +2588,7 @@ pub struct PlannerHold {
     pub proposal_id: Option<ProposalId>,
     pub draft_task_id: Option<TaskId>,
     pub finding_id: Option<FindingId>,
+    pub request_id: Option<crate::domain::RequestId>,
 }
 
 /// A plan review job the queue recorded (ADR-0041 decision 11): the
@@ -2975,6 +3024,7 @@ pub trait Queue:
     + QueueRecords
     + AskStore
     + DraftPlannerStore
+    + PlanRequestStore
     + PlanReviewStore
     + GoalReviewStore
     + HeadlessJobStore
@@ -2991,6 +3041,7 @@ impl<
         + QueueRecords
         + AskStore
         + DraftPlannerStore
+        + PlanRequestStore
         + PlanReviewStore
         + GoalReviewStore
         + HeadlessJobStore

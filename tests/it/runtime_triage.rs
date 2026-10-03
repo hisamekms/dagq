@@ -664,6 +664,7 @@ fn triage_answers_resume_the_run_or_ready_the_task() {
                 asked_by: "supervisor".into(),
                 reason_category: dagq::domain::AskReason::RecoveryFailed,
                 finding_id: None,
+                request_id: None,
             })
             .unwrap()
             .ask
@@ -1015,6 +1016,7 @@ fn failed_review_asked_before_death_at(
             asked_by: "supervisor".into(),
             reason_category: dagq::domain::AskReason::Scope,
             finding_id: None,
+            request_id: None,
         })
         .unwrap()
         .ask
@@ -1224,6 +1226,7 @@ fn an_adopted_run_whose_concern_was_asked_waits_for_the_ask() {
                 asked_by: "supervisor".into(),
                 reason_category: dagq::domain::AskReason::Scope,
                 finding_id: None,
+                request_id: None,
             })
             .unwrap()
             .ask

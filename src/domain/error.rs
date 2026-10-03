@@ -2,7 +2,8 @@ use std::fmt;
 
 use super::{
     AskKind, AskReason, CheckStatus, FindingId, FindingStatus, GoalId, GoalVerdict, ProposalId,
-    ProposalStatus, ReceiptResult, RunId, RunStatus, TaskAction, TaskId, TaskStatus,
+    ProposalStatus, ReceiptResult, RequestId, RunId, RunStatus, TaskAction, TaskId, TaskStatus,
+    plan_request::RequestStatus,
 };
 
 /// A business rejection by the domain: an invalid value, a transition the
@@ -201,6 +202,22 @@ pub enum DomainError {
     /// (decision 19) may name a finding.
     AskFindingNotBlocked {
         kind: AskKind,
+    },
+    /// Only a `planner_question` may name a planning request (ADR-t1394-1
+    /// decision 7), and then nothing else: no task, run or finding.
+    AskRequestNotPlannerQuestion {
+        kind: AskKind,
+    },
+    /// A planning request that is not `open` is not declined (ADR-t1394-1
+    /// decision 6): its planner submitted, declined it, or ran out.
+    RequestNotOpen {
+        request_id: RequestId,
+        status: RequestStatus,
+    },
+    /// A reference of a planning request is not `<kind>:<id>` of a kind it
+    /// takes (ADR-t1394-1 decision 2).
+    RequestRefInvalid {
+        value: String,
     },
     /// A `worker_question` without a topic code (ADR-t947-2 decision 1).
     AskWithoutTopic,
@@ -556,6 +573,20 @@ impl fmt::Display for DomainError {
                 f,
                 "only a blocked ask or a planner_question may name a finding, not {}",
                 kind.as_str()
+            ),
+            Self::AskRequestNotPlannerQuestion { kind } => write!(
+                f,
+                "only a planner_question about nothing else (no task, run or finding) may name a planning request, not {}",
+                kind.as_str()
+            ),
+            Self::RequestNotOpen { request_id, status } => write!(
+                f,
+                "request {request_id} is {}, not open: only an open request is declined",
+                status.as_str()
+            ),
+            Self::RequestRefInvalid { value } => write!(
+                f,
+                "a request's --ref is ask:N, task:N, run:ID, event:N, finding:N or goal:N, not {value:?}"
             ),
         }
     }

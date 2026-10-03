@@ -759,6 +759,7 @@ fn observe_starts_again_for_an_alert_that_time_alone_raised() {
             asked_by: "observer".into(),
             reason_category: AskReason::Scope,
             finding_id: None,
+            request_id: None,
         })
         .unwrap()
         .ask;

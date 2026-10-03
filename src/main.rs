@@ -19,13 +19,13 @@ use dagq::application::commands::operations::{HookSession, Operation, WorkspaceS
 use dagq::application::queue_reads::{self as reads, QueueRead};
 use dagq::domain::queue_service::UseCase;
 use dagq::{
-    application::TaskStore,
+    application::{PlanRequestStore, TaskStore},
     domain::{
         ActorContext, ActorRole, AskId, AskKind, AskReason, AuthorizationError, Capability,
         EventId, FindingId, FindingTarget, GoalEdit, GoalId, GoalVerdict, LeaseToken, NewAsk,
         NewFinding, NewGoal, NewNote, NewTask, NoteTarget, PlannerId, PlannerOrigin, PlannerOwner,
-        ProposalId, Resource, RunId, SessionRole, StaticPolicy, Submission, TaskEdit, TaskId,
-        TaskStatus, worker::WorkerMode,
+        ProposalId, RequestId, Resource, RunId, SessionRole, StaticPolicy, Submission, TaskEdit,
+        TaskId, TaskStatus, worker::WorkerMode,
     },
     infrastructure::{adapters::path_text, location::QueueLocation, sqlite::SqliteQueue},
 };
@@ -430,6 +430,20 @@ enum Command {
         /// Event id, `@<unix seconds>` or an RFC 3339 time: only marks at or before it.
         #[arg(long)]
         until: Option<dagq::domain::stats::Cursor>,
+    },
+    /// Record a planning request for a planner of the runtime's (ADR-t1394-1), or decline one.
+    Request {
+        #[command(subcommand)]
+        command: RequestCommand,
+    },
+    /// List the planning requests, oldest first: the open ones unless --all, or the one ID names.
+    /// Prints {"requests"}.
+    Requests {
+        /// Only this request, whatever its status.
+        id: Option<i64>,
+        /// Include the proposed, declined and exhausted ones.
+        #[arg(long)]
+        all: bool,
     },
     /// Record a finding (ADR-0044 decision 18), or resolve or dismiss one.
     Finding {
@@ -1042,6 +1056,10 @@ enum Command {
         /// for (decision 19).
         #[arg(long)]
         finding: Option<i64>,
+        /// Planning request a planner_question is about: the one its planner was opened for
+        /// (ADR-t1394-1 decision 7).
+        #[arg(long, conflicts_with_all = ["task_id", "run", "finding"])]
+        request: Option<i64>,
         /// cmux executable, used to notify the inbox; a bare name is resolved on PATH.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
@@ -1414,6 +1432,35 @@ enum FindingCommand {
 }
 
 #[derive(Subcommand, Clone)]
+enum RequestCommand {
+    /// Record a person's words as a planning request (only the inbox, at a person's word, and a
+    /// person at a plain terminal): the supervisor opens a planner of the runtime's for it, which
+    /// submits a proposal (the request becomes proposed) or declines it. Prints the request.
+    #[command(group = clap::ArgGroup::new("words").required(true))]
+    Add {
+        /// The person's own words, not a summary.
+        #[arg(long, group = "words")]
+        text: Option<String>,
+        /// A file holding the person's own words.
+        #[arg(long, group = "words")]
+        file: Option<PathBuf>,
+        /// What the inbox adds, kept apart from the person's words.
+        #[arg(long)]
+        note: Option<String>,
+        /// What it refers to: ask:N, task:N, run:ID, event:N, finding:N or goal:N; repeatable.
+        #[arg(long = "ref")]
+        refs: Vec<String>,
+    },
+    /// Decline an open request with the reason (only the planner opened for it): nothing will be
+    /// planned of it. The inbox is told.
+    Decline {
+        id: i64,
+        #[arg(long)]
+        reason: String,
+    },
+}
+
+#[derive(Subcommand, Clone)]
 enum ServiceCommand {
     /// Report whether the queue service runs and answers, its pid, build, API version and
     /// socket, and its attention, without changing anything.
@@ -1729,6 +1776,7 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
         | Command::Notes { .. }
         | Command::Marks { .. }
         | Command::Findings { .. }
+        | Command::Requests { .. }
         | Command::Search { .. }
         | Command::Related { .. }
         | Command::Proposal {
@@ -1833,6 +1881,16 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
             },
         ),
         Command::Mark { .. } => queue(C::MarkWrite),
+        Command::Request { command } => match command {
+            RequestCommand::Add { .. } => queue(C::RequestRecord),
+            RequestCommand::Decline { id, .. } => one(
+                C::RequestDecline,
+                Resource::Request {
+                    id: RequestId::new(*id),
+                    planner: None,
+                },
+            ),
+        },
         Command::Finding { command } => match command {
             FindingCommand::Record {
                 task, run, goal, ..
@@ -2046,6 +2104,9 @@ fn authorized_in_application(command: &Command) -> bool {
         | Command::Note { .. }
         | Command::Mark { .. }
         | Command::Finding { .. } => true,
+        // The planning requests (ADR-t1394-1), with the planner a decline
+        // needs read from the queue.
+        Command::Request { .. } => true,
         // The runtime operations, authorized in `execute` before they run
         // (task 734).
         _ => operation(command, |_| None).is_some(),
@@ -2375,6 +2436,8 @@ fn client_request(command: &Command) -> Result<Option<(UseCase, Value)>> {
             task_id,
             run,
             finding,
+            // A request's planner runs on the host, never as a client.
+            request: None,
             cmux: _,
         } => {
             let mut params = json!({"kind": kind, "question": question, "options": options,
@@ -3149,6 +3212,51 @@ fn execute(cli: Cli) -> Result<Value> {
         } => {
             serde_json::to_value(dialogue!(&no_cmux).dismiss_finding(FindingId::new(id), &reason)?)?
         }
+        Command::Request {
+            command:
+                RequestCommand::Add {
+                    text,
+                    file,
+                    note,
+                    refs,
+                },
+        } => {
+            let text = match (text, file) {
+                (Some(text), _) => text,
+                (None, Some(file)) => {
+                    let file = cwd.join(file);
+                    std::fs::read_to_string(&file)
+                        .with_context(|| format!("read {}", file.display()))?
+                }
+                (None, None) => unreachable!("clap requires --text or --file"),
+            };
+            let request = dagq::domain::plan_request::NewPlanRequest {
+                text,
+                note,
+                refs: refs
+                    .iter()
+                    .map(|value| dagq::domain::plan_request::RequestRef::parse(value))
+                    .collect::<Result<_, _>>()?,
+            };
+            serde_json::to_value(
+                dagq::application::commands::requests::Requests::new(
+                    &mut queue,
+                    &actor,
+                    &StaticPolicy,
+                )
+                .record(&request)?,
+            )?
+        }
+        Command::Request {
+            command: RequestCommand::Decline { id, reason },
+        } => serde_json::to_value(
+            dagq::application::commands::requests::Requests::new(&mut queue, &actor, &StaticPolicy)
+                .decline(RequestId::new(id), &reason)?,
+        )?,
+        Command::Requests { id: Some(id), .. } => {
+            json!({"requests": [queue.plan_request(RequestId::new(id))?]})
+        }
+        Command::Requests { id: None, all } => json!({"requests": queue.plan_requests(all)?}),
         Command::Graph {
             goal_id,
             format,
@@ -3181,6 +3289,7 @@ fn execute(cli: Cli) -> Result<Value> {
             task_id,
             run,
             finding,
+            request,
             cmux,
         } => {
             use dagq::infrastructure::adapters::{Cmux, executable};
@@ -3201,6 +3310,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 reason_category: because.unwrap_or_default().parse::<AskReason>()?,
                 topics,
                 finding_id: finding.map(FindingId::new),
+                request_id: request.map(RequestId::new),
             })?
         }
         // The user's own answer or the inbox's delegated one, which the
@@ -4219,6 +4329,8 @@ mod tests {
             ),
             ("finding resolve", &["1", "--reason", "r"]),
             ("finding dismiss", &["1", "--reason", "r"]),
+            ("request add", &["--text", "plan it", "--ref", "task:1"]),
+            ("request decline", &["1", "--reason", "r"]),
             (
                 "ask",
                 &[
@@ -4287,6 +4399,7 @@ mod tests {
         "notes",
         "marks",
         "findings",
+        "requests",
         "search",
         "related",
         "candidates",

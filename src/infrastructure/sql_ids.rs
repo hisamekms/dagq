@@ -9,7 +9,8 @@ use rusqlite::{
 };
 
 use crate::domain::{
-    AskId, CommitSha, EventId, FindingId, GoalId, LeaseToken, PlannerId, ProposalId, RunId, TaskId,
+    AskId, CommitSha, EventId, FindingId, GoalId, LeaseToken, PlannerId, ProposalId, RequestId,
+    RunId, TaskId,
 };
 
 impl ToSql for TaskId {
@@ -57,6 +58,18 @@ impl ToSql for FindingId {
 impl FromSql for FindingId {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
         i64::column_result(value).map(FindingId::new)
+    }
+}
+
+impl ToSql for RequestId {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::from(self.as_i64()))
+    }
+}
+
+impl FromSql for RequestId {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        i64::column_result(value).map(RequestId::new)
     }
 }
 

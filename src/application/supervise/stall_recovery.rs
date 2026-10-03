@@ -612,6 +612,7 @@ impl SessionWatch {
                     reason_category: note.category,
                     topics: Vec::new(),
                     finding_id: None,
+                    request_id: None,
                 },
                 sv.cmux,
             )?;

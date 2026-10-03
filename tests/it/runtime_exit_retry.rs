@@ -587,6 +587,7 @@ fn used_up_retries_do_not_close_a_run_with_an_open_worker_question() {
                     asked_by: "worker".into(),
                     reason_category: dagq::domain::AskReason::Scope,
                     finding_id: None,
+                    request_id: None,
                 })
                 .unwrap();
         },
@@ -660,6 +661,7 @@ fn an_adopter_does_not_retry_after_a_stuck_exit_ask() {
                 asked_by: "supervisor".into(),
                 reason_category: dagq::domain::AskReason::RecoveryFailed,
                 finding_id: None,
+                request_id: None,
             })
             .unwrap();
     });
