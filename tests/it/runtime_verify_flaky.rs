@@ -80,7 +80,6 @@ fn nextest_command(dir: &Path, name: &str, log: &str, pass_after: bool) -> Strin
 /// `stats` from its first failure.
 #[test]
 fn only_flaky_tests_failing_lands_the_run_once_more_without_a_resume() {
-    headless_workers();
     let (dir, db, repo) = awaiting();
     fs::write(repo.join("b.txt"), "b\n").unwrap();
     git(&repo, &["add", "b.txt"]);
@@ -162,7 +161,6 @@ fn only_flaky_tests_failing_lands_the_run_once_more_without_a_resume() {
 /// landing gets its own retry even though this run has already used one.
 #[test]
 fn a_failed_retry_resumes_and_a_later_landing_can_retry_again() {
-    headless_workers();
     let (dir, db, repo) = awaiting();
     let flaky = nextest_command(dir.path(), "flaky", &nextest_log(false), false);
     let broken = nextest_command(dir.path(), "broken", &nextest_log(true), false);
@@ -237,7 +235,6 @@ fn a_failed_retry_resumes_and_a_later_landing_can_retry_again() {
 /// Permitting FLAKY does not bypass the coverage gate or host handling.
 #[test]
 fn a_flaky_retry_keeps_coverage_and_host_failures() {
-    headless_workers();
     for (log, class, outcome_name) in [
         ("TOTAL 70%", "coverage_below", "needs_session"),
         ("No space left on device", "disk_full", "held"),
@@ -266,7 +263,6 @@ fn a_flaky_retry_keeps_coverage_and_host_failures() {
 /// once, and the flaky test of the same command is still marked.
 #[test]
 fn a_failure_that_is_not_flaky_is_resumed_at_once() {
-    headless_workers();
     let (dir, db, repo) = awaiting();
     set_commands(
         &db,
@@ -299,7 +295,6 @@ fn a_failure_that_is_not_flaky_is_resumed_at_once() {
 /// run lands after its passed review without a resume.
 #[test]
 fn the_supervisor_lands_a_run_with_only_flaky_failures_once_more() {
-    headless_workers();
     let (dir, repo, db) = fixture();
     let flaky = nextest_command(dir.path(), "flaky", &nextest_log(false), true);
     set_commands(&db, json!([flaky]));

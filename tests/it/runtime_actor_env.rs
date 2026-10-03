@@ -16,7 +16,6 @@ fn logging(log: &Path, script: &str) -> String {
 
 #[test]
 fn the_review_and_the_recovery_job_run_as_their_own_actors() {
-    headless_workers();
     let (_dir, repo, db) = fixture();
     let log = db.parent().unwrap().join("job-env.txt");
     let mark = db.parent().unwrap().join("failed-once");

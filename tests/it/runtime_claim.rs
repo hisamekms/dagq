@@ -9,6 +9,7 @@ use runtime_support::*;
 
 #[test]
 fn failed_agent_retains_worktree_and_does_not_complete_task() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(
         &db,
@@ -52,7 +53,6 @@ fn failed_agent_retains_worktree_and_does_not_complete_task() {
 
 #[test]
 fn provisioning_failure_retains_the_run_and_stops_claiming_other_tasks() {
-    headless_workers();
     let (_dir, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     add_ready_task(&mut queue, "untouched", &[]);
@@ -112,6 +112,7 @@ fn assert_backend_failure(
 /// `cleanup_failed`; `stats` counts them and raises `backend_failures`.
 #[test]
 fn failed_backend_calls_are_recorded_with_the_load_and_counted_by_stats() {
+    interactive_workers();
     // create: the provisioning failure abandons the run.
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, true, VALID_AGENT);
@@ -284,7 +285,6 @@ fn failed_backend_calls_are_recorded_with_the_load_and_counted_by_stats() {
 /// log, and the run opens outside any group (ADR-0026).
 #[test]
 fn a_workspace_group_cmux_cannot_make_is_a_logged_warning() {
-    headless_workers();
     let (_dir, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     add_ready_task(&mut queue, "grouped", &[]);
@@ -334,7 +334,6 @@ fn a_workspace_group_cmux_cannot_make_is_a_logged_warning() {
 /// and records no event for the reordering.
 #[test]
 fn supervisor_claims_the_candidate_that_releases_the_most_tasks_first() {
-    headless_workers();
     let (_dir, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let root = add_ready_task(&mut queue, "root", &[]);
@@ -376,7 +375,6 @@ fn supervisor_claims_the_candidate_that_releases_the_most_tasks_first() {
 /// (ADR-0040 decision 4).
 #[test]
 fn supervisor_claims_by_effective_priority_like_candidates_and_graph() {
-    headless_workers();
     let (_dir, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let low = add_ready_task(&mut queue, "later", &[]);
@@ -406,7 +404,6 @@ fn supervisor_claims_by_effective_priority_like_candidates_and_graph() {
 
 #[test]
 fn claim_creates_a_lease_that_only_its_owner_can_use_or_release() {
-    headless_workers();
     use dagq::{domain::ClaimOutcome, infrastructure::runtime_store::RunPlan};
     let (_dir, _repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
@@ -516,7 +513,6 @@ impl IdGenerator for FixedIds {
 
 #[test]
 fn an_injected_clock_decides_lease_staleness_and_injected_ids_name_the_run() {
-    headless_workers();
     use dagq::{
         domain::{ClaimOutcome, HEARTBEAT_TIMEOUT_SECS},
         infrastructure::runtime_store::{RunPlan, lease_is_stale},
@@ -589,7 +585,6 @@ fn an_injected_clock_decides_lease_staleness_and_injected_ids_name_the_run() {
 /// dead supervisor's lease works as before) is refused and writes nothing.
 #[test]
 fn a_lease_of_its_own_token_is_renewed_after_a_host_sleep_until_another_supervisor_adopts_it() {
-    headless_workers();
     use dagq::{
         domain::ClaimOutcome,
         infrastructure::runtime_store::{RunPlan, lease_is_stale},
@@ -721,7 +716,6 @@ fn a_lease_of_its_own_token_is_renewed_after_a_host_sleep_until_another_supervis
 
 #[test]
 fn shell_arguments_round_trip_without_expansion_and_cmux_handles_are_strict() {
-    headless_workers();
     let value = "a'b $HOME $(echo injected) `echo injected`\nmore";
     let result = Command::new("/bin/sh")
         .arg("-c")
@@ -737,7 +731,6 @@ fn shell_arguments_round_trip_without_expansion_and_cmux_handles_are_strict() {
 
 #[test]
 fn migration_from_v1_preserves_task_and_initializes_runtime_tables() {
-    headless_workers();
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("old.db");
     let raw = Connection::open(&db).unwrap();
@@ -760,7 +753,6 @@ fn migration_from_v1_preserves_task_and_initializes_runtime_tables() {
 
 #[test]
 fn wrapper_registration_is_one_shot_and_rejects_other_owners() {
-    headless_workers();
     use dagq::{
         domain::ClaimOutcome,
         infrastructure::runtime_store::{RunPlan, Validation},
@@ -880,7 +872,6 @@ fn wrapper_registration_is_one_shot_and_rejects_other_owners() {
 
 #[test]
 fn workspace_close_is_recorded_once_and_only_for_accepted_runs() {
-    headless_workers();
     use dagq::{
         domain::ClaimOutcome,
         infrastructure::runtime_store::{RunPlan, Validation},
@@ -1007,7 +998,6 @@ fn workspace_close_is_recorded_once_and_only_for_accepted_runs() {
 
 #[test]
 fn no_ready_task_ends_a_once_pass_without_creating_a_run_or_lease() {
-    headless_workers();
     let (_dir, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     queue.transition(TaskId::new(1), TaskAction::Draft).unwrap();
@@ -1058,7 +1048,6 @@ fn wait_for_heartbeat(
 /// graceful stop removes.
 #[test]
 fn resident_supervisor_without_runs_is_listed_until_it_stops() {
-    headless_workers();
     let (_dir, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     queue.transition(TaskId::new(1), TaskAction::Draft).unwrap();
@@ -1192,7 +1181,6 @@ fn load_deleting_main() -> Option<f64> {
 /// `resident_supervisor_without_runs_is_listed_until_it_stops` (task 1018).
 #[test]
 fn main_vanishing_after_the_landing_branch_check_holds_the_claim() {
-    headless_workers();
     let (dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, true, VALID_AGENT);
     let options = SuperviseOptions {
@@ -1257,7 +1245,6 @@ fn main_vanishing_after_the_landing_branch_check_holds_the_claim() {
 /// fields, and the final result.
 #[test]
 fn supervise_records_its_progress_as_json_lines() {
-    headless_workers();
     let (dir, repo, db) = fixture();
     let log_dir = dir.path().join("logs").join("nested");
     let options = supervise_options(2, true);
@@ -1331,7 +1318,6 @@ fn supervise_records_its_progress_as_json_lines() {
 /// or orphaned lease holder is listed next to it without a registration.
 #[test]
 fn killed_supervisor_registration_is_reported_stale_and_never_deleted() {
-    headless_workers();
     let (_dir, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let dead = dead_pid();
@@ -1484,6 +1470,7 @@ impl dagq::application::stats::WorkspaceListing for Listing {
 /// `dagq.toml`, with the cmux workspaces that do not match the runs.
 #[test]
 fn stats_raise_running_alerts_for_a_worker_idle_without_a_receipt() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     fs::write(
         repo.join("dagq.toml"),
@@ -1617,6 +1604,7 @@ fn stats_raise_running_alerts_for_a_worker_idle_without_a_receipt() {
 /// that keeps taking turns does not restart the count.
 #[test]
 fn stats_time_background_work_from_its_first_marker() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let run = orphan_run(&repo, &db, "owner", dead_pid(), dead_pid());
     let run_dir = PathBuf::from(run.run_dir().unwrap());
@@ -1725,7 +1713,6 @@ fn stats_time_background_work_from_its_first_marker() {
 
 #[test]
 fn recover_requires_dead_processes_and_stale_lease_then_allows_a_new_run() {
-    headless_workers();
     let (_dir, repo, db) = fixture();
     let mut wrapper = sleeper();
     let mut agent = sleeper();
@@ -1834,7 +1821,6 @@ fn recover_requires_dead_processes_and_stale_lease_then_allows_a_new_run() {
 
 #[test]
 fn recover_ignores_exited_processes_and_tolerates_a_missing_lease() {
-    headless_workers();
     let (_dir, repo, db) = fixture();
     // The wrapper reported its exit before the supervisor died; its live PID
     // (this test process) must not block recovery.
@@ -1889,7 +1875,6 @@ fn recover_ignores_exited_processes_and_tolerates_a_missing_lease() {
 
 #[test]
 fn a_refused_run_transition_keeps_the_domain_reason_beside_the_old_error() {
-    headless_workers();
     use dagq::{domain::ClaimOutcome, infrastructure::runtime_store::REFUSALS_LOG};
     let (_dir, _repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
@@ -1941,7 +1926,6 @@ fn a_refused_run_transition_keeps_the_domain_reason_beside_the_old_error() {
 /// and only the injected token takes over a lease stored under it.
 #[test]
 fn integrate_takes_its_time_and_token_from_the_injected_generators() {
-    headless_workers();
     let (_dir, db, detail) = run_agent(
         "git rm -q seed.txt && git commit -q -m 'drop seed'; receipt \"$(git rev-parse HEAD)\"",
     );
@@ -2002,7 +1986,6 @@ fn integrate_takes_its_time_and_token_from_the_injected_generators() {
 /// read once per call.
 #[test]
 fn status_and_doctor_measure_to_the_injected_clock() {
-    headless_workers();
     let (_dir, _repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let ask = queue

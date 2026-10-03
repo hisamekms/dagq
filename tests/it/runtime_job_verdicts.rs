@@ -364,6 +364,7 @@ fn assert_failed_live_job(
 /// `recovery_failed`, and nothing is applied.
 #[test]
 fn a_broken_long_background_recovery_verdict_stops_nothing_and_opens_the_stalled_ask() {
+    interactive_workers();
     let stop = json!({"action": "stop_processes", "pids": ["PID"]});
     let (output, expected) = broken_live_verdict(stop);
     let script = crate::runtime_repair::recovery_verdict(&output);
@@ -371,7 +372,7 @@ fn a_broken_long_background_recovery_verdict_stops_nothing_and_opens_the_stalled
     let (backend, reviewer, supervisor) =
         crate::runtime_repair::supervise_long_background(&db, &repo, &script);
     // Checks that the orphan still runs when the ask is open.
-    let (ask, detail) = crate::runtime_repair::escalated_long_background(&db, &backend, supervisor);
+    let (ask, detail) = crate::runtime_repair::escalated_orphan(&db, &backend, supervisor);
     assert_eq!(ask.kind, AskKind::Stalled);
     assert_eq!(ask.options, ["wait", "intervene", "propose"]);
     assert!(
@@ -390,6 +391,7 @@ fn a_broken_long_background_recovery_verdict_stops_nothing_and_opens_the_stalled
 /// lands only once the session exits.
 #[test]
 fn a_broken_stuck_exit_recovery_verdict_closes_nothing_and_opens_the_stuck_exit_ask() {
+    interactive_workers();
     let (output, expected) = broken_live_verdict(json!({"action": "close_and_proceed"}));
     let (_dir, repo, db) = fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
@@ -434,6 +436,7 @@ fn a_broken_stuck_exit_recovery_verdict_closes_nothing_and_opens_the_stuck_exit_
 /// and closes once the dialog is gone.
 #[test]
 fn a_broken_prompt_waiting_recovery_verdict_answers_nothing_and_opens_the_answer_prompt_ask() {
+    interactive_workers();
     let answer = json!({"action": "answer_known_dialog", "dialog": "background_work"});
     let (output, expected) = broken_live_verdict(answer);
     let (_dir, repo, db) = fixture();

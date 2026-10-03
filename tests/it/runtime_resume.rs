@@ -378,9 +378,9 @@ fn approved_needs_session_run_is_resumed_until_the_runtime_lands_it() {
             "{command}"
         );
     }
-    let texts = backend.texts();
+    let texts = session_texts(&backend, &run);
     assert_eq!(texts.len(), 2);
-    let text = &texts[0].1;
+    let text = &texts[0];
     for expected in [
         format!(
             "dagq: integrate could not land run {} (task 2) and returned needs_session.",
@@ -399,8 +399,9 @@ fn approved_needs_session_run_is_resumed_until_the_runtime_lands_it() {
             run.receipt_path().unwrap()
         ),
         "result failed".to_owned(),
-        format!("4. {}", runtime::STOP_BACKGROUND),
-        "Do not merge or push. When done, report briefly and stop; do not run /exit.".to_owned(),
+        // The headless worker's own lines: its turn is its reply.
+        "4. Before you end the turn, stop every process you started".to_owned(),
+        "Do not merge or push. Follow the repository's instructions for a worker".to_owned(),
     ] {
         assert!(text.contains(&expected), "{expected:?} not in {text}");
     }
@@ -409,13 +410,30 @@ fn approved_needs_session_run_is_resumed_until_the_runtime_lands_it() {
         text
     );
     assert!(run_dir.join("terminal-resume-2.txt").is_file());
-    // /exit once per resumed session; both resume workspaces were closed.
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 2);
-    let closed = backend.closed();
-    assert!(
-        texts
+    // An exit request per resumed session; both resume workspaces were
+    // closed.
+    assert_exit_sent(&backend, &run, 2);
+    let kinds = event_kinds(&detail);
+    let resumed = position(&kinds, "resume_started");
+    assert_eq!(
+        kinds[resumed..]
             .iter()
-            .all(|(workspace, _)| closed.contains(workspace))
+            .filter(|k| **k == "exit_requested")
+            .count(),
+        2,
+        "{kinds:?}"
+    );
+    let closed = backend.closed();
+    let resumed: Vec<&Value> = payloads(&detail, "resume_finished")
+        .iter()
+        .map(|p| &p["workspace_id"])
+        .collect();
+    assert_eq!(resumed.len(), 2, "{resumed:?}");
+    assert!(
+        resumed
+            .iter()
+            .all(|workspace| closed.contains(&workspace.as_str().unwrap().to_owned())),
+        "{resumed:?} {closed:?}"
     );
     // Nothing waits for a person: the watch sees no attention.
     assert_eq!(
@@ -517,7 +535,7 @@ fn unapproved_resumed_run_is_validated_and_reviewed_with_its_session_open() {
             payloads(&detail, "integration_started").len() == 1
         }
     );
-    let text = &backend.texts()[0].1;
+    let text = &session_texts(&backend, &detail.runs[0])[0];
     assert!(
         text.contains("found required evidence missing from the receipt"),
         "{text}"
@@ -528,7 +546,10 @@ fn unapproved_resumed_run_is_validated_and_reviewed_with_its_session_open() {
         "{text}"
     );
     assert!(!text.contains("git rebase"), "{text}");
-    assert!(text.contains(runtime::STOP_BACKGROUND), "{text}");
+    assert!(
+        text.contains("Before you end the turn, stop every process you started"),
+        "{text}"
+    );
     // The inbox is woken only by the ask of the failed review (task 328).
     let events = dagq::watch::events(&db, EventId::new(cursor), 100, false).unwrap();
     assert_eq!(events["events"].as_array().unwrap().len(), 1, "{events}");
@@ -621,7 +642,7 @@ fn an_approved_run_resolved_by_an_earlier_resume_lands_without_a_session() {
     assert_landed(&repo, &detail.runs[0], "second", &first_landed);
     assert_eq!(detail.task.status(), TaskStatus::Completed);
     assert!(backend.resumes.lock().unwrap().is_empty());
-    assert!(backend.texts().is_empty());
+    assert!(session_texts(&backend, &detail.runs[0]).is_empty());
     assert_eq!(payloads(&detail, "resume_started").len(), 1);
     assert_eq!(
         payloads(&detail, "resume_skipped"),
@@ -1149,7 +1170,7 @@ fn resuming_stops_after_three_attempts() {
     assert_eq!(finished[2]["exhausted"], true);
     assert_eq!(finished[2]["status"], "needs_session");
     assert!(queue.run_leases().unwrap().is_empty());
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
+    assert_exit_sent(&backend, &detail.runs[0], 1);
     assert_eq!(backend.closed().len(), 2 + 1); // two workers, one resume
     // The used-up run is the recovery job's (`resume_exhausted`), which
     // escalates it as a `decide` ask.
@@ -1319,6 +1340,7 @@ fn a_used_up_run_is_retried_with_its_branch_by_its_recovery_job() {
 /// session exits.
 #[test]
 fn a_resumed_session_gets_its_request_only_once_its_input_box_is_ready() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (run, first_landed) = parked_conflict(&repo, &db, &backend);
@@ -1381,6 +1403,7 @@ fn a_resumed_session_gets_its_request_only_once_its_input_box_is_ready() {
 /// goes on as usual.
 #[test]
 fn a_request_left_in_the_input_box_gets_enter_again_not_the_text() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (_run, first_landed) = parked_conflict(&repo, &db, &backend);
@@ -1429,6 +1452,7 @@ fn a_request_left_in_the_input_box_gets_enter_again_not_the_text() {
 /// followed the ask after the idle marker was written.
 #[test]
 fn a_request_stuck_in_the_input_box_is_asked_to_the_inbox() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (run, _) = parked_conflict(&repo, &db, &backend);
@@ -1518,6 +1542,7 @@ fn a_request_stuck_in_the_input_box_is_asked_to_the_inbox() {
 /// one is the only session.
 #[test]
 fn a_request_lost_twice_is_asked_to_the_inbox() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (run, _) = parked_conflict(&repo, &db, &backend);
@@ -1602,6 +1627,7 @@ fn a_request_lost_twice_is_asked_to_the_inbox() {
 
 #[test]
 fn a_resumed_session_that_ignores_exit_is_let_go() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (run, first_landed) = parked_conflict(&repo, &db, &backend);

@@ -6,8 +6,20 @@ use runtime_support::*;
 
 /// The worker goes idle after its receipt and never exits by itself; each
 /// time a text arrives in its terminal it appends a line, commits, rewrites
-/// the receipt and goes idle again, `revises` times.
+/// the receipt and goes idle again, `revises` times. A headless worker
+/// (goal 92) does the same in its turns: its first commits, and each later
+/// one (a revise request) appends `fix <n>`, commits and rewrites the
+/// receipt, up to `revises`.
 pub(crate) fn revising_agent(revises: usize) -> String {
+    if worker_mode() == dagq::domain::worker::WorkerMode::Headless {
+        return format!(
+            "if [ \"$TURN\" -eq 1 ]; then commit work; \
+             elif [ \"$TURN\" -le {} ]; then n=$((TURN - 1)); \
+               printf 'fix %s\\n' \"$n\" >> change.txt; git commit -q -am \"fix $n\"; \
+             fi; receipt \"$(git rev-parse HEAD)\"",
+            revises + 1
+        );
+    }
     format!(
         "commit work; receipt \"$(git rev-parse HEAD)\"; idle; \
          for n in $(seq 1 {revises}); do \
@@ -57,7 +69,7 @@ fn a_passing_review_exits_the_live_session_and_lands_it() {
         );
     }
     assert!(!kinds.contains(&"integration_approved"), "{kinds:?}");
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
+    assert_exit_sent(&backend, &run, 1);
     assert_eq!(backend.closed(), vec![WORKSPACE_ID.to_owned()]);
     let supervised = payloads(&detail, "supervision_finished");
     assert_eq!(
@@ -93,9 +105,14 @@ fn a_passing_review_exits_the_live_session_and_lands_it() {
         .map(|p| (p["kind"].as_str().unwrap(), p["reason"].as_str().unwrap()))
         .collect();
     assert_eq!(closed, [("review", "job_finished"), ("worker", "exited")]);
-    // No transcript of either session exists: their active time is not
-    // recorded, and the run lands all the same (ADR-0048 decision 10).
+    // The review's session has no transcript: its active time is not
+    // recorded, and the run lands all the same (ADR-0048 decision 10). The
+    // headless worker's is its turns'.
     for closed in payloads(&detail, "session_closed") {
+        if closed["kind"] == "worker" {
+            assert_eq!(closed["active"], "recorded", "{closed}");
+            continue;
+        }
         assert_eq!(closed["active"], "unavailable", "{closed}");
         assert_eq!(
             closed["active_unavailable"], "transcript_missing",
@@ -184,12 +201,11 @@ fn a_revise_verdict_is_fixed_by_the_live_session_and_reviewed_again() {
     let kinds = event_kinds(&detail);
     assert!(position(&kinds, "revise_requested") < position(&kinds, "revise_finished"));
     assert!(position(&kinds, "revise_finished") < position(&kinds, "exit_requested"));
-    // One /exit, after the second review; the request named the findings.
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
-    let texts = backend.texts();
+    // One exit, after the second review; the request named the findings.
+    assert_exit_sent(&backend, &run, 1);
+    let texts = session_texts(&backend, &run);
     assert_eq!(texts.len(), 1);
-    assert_eq!(texts[0].0, WORKSPACE_ID);
-    let text = &texts[0].1;
+    let text = &texts[0];
     for expected in [
         format!(
             "dagq: the supervisor's review of run {} (task 1) asks for changes (revise 1 of 2).",
@@ -201,8 +217,9 @@ fn a_revise_verdict_is_fixed_by_the_live_session_and_reviewed_again() {
             "Rewrite the receipt at {} with the new head commit",
             run.receipt_path().unwrap()
         ),
-        runtime::STOP_BACKGROUND.to_owned(),
-        "Do not merge or push. When done, report briefly and stop; do not run /exit.".to_owned(),
+        // The headless worker's own lines: its turn is its reply.
+        "Before you end the turn, stop every process you started".to_owned(),
+        "Do not merge or push. Follow the repository's instructions for a worker".to_owned(),
     ] {
         assert!(text.contains(&expected), "{expected:?} not in {text}");
     }
@@ -243,7 +260,7 @@ fn a_third_review_that_does_not_pass_asks_a_person_and_land_lands_it() {
     crate::worker_escalation::assert_revises_raised(&detail, &backend);
     assert_eq!(payloads(&detail, "revise_finished").len(), 2);
     assert_eq!(payloads(&detail, "review_finished").len(), 3);
-    assert_eq!(backend.texts().len(), 2);
+    assert_eq!(session_texts(&backend, &run).len(), 2);
     assert_eq!(backend.closed(), vec![WORKSPACE_ID.to_owned()]);
     assert!(queue.run_leases().unwrap().is_empty());
     let kinds = event_kinds(&detail);
@@ -341,8 +358,8 @@ fn a_concern_sent_back_is_resumed_reviewed_again_and_landed() {
     let detail = queue.show(TaskId::new(1)).unwrap();
     let run = detail.runs[0].clone();
     assert_eq!(run.status(), RunStatus::AwaitingIntegration);
-    assert!(backend.texts().is_empty());
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
+    assert!(session_texts(&backend, &run).is_empty());
+    assert_exit_sent(&backend, &run, 1);
     let kinds = event_kinds(&detail);
     assert!(position(&kinds, "review_finished") < position(&kinds, "exit_requested"));
     assert!(position(&kinds, "workspace_closed") < position(&kinds, "ask_opened"));
@@ -379,7 +396,7 @@ fn a_concern_sent_back_is_resumed_reviewed_again_and_landed() {
     assert_eq!(decided.len(), 1);
     assert_eq!(decided[0]["answer"], "send_back");
     assert_eq!(decided[0]["status"], "needs_session");
-    let text = &backend.texts()[0].1;
+    let text = &session_texts(&backend, &landed)[0];
     assert!(
         text.contains("raised findings a person sent back to you"),
         "{text}"
@@ -779,8 +796,8 @@ fn a_failed_review_closes_the_session_and_asks_a_person_in_the_same_step() {
 }
 
 /// A failed review's span ends with its job (task 541), before the
-/// session's `/exit`, which here takes half a second more; `review_failed`
-/// and its ask still follow the exit. Here review 1 prints no readable
+/// session is asked to exit; `review_failed` and its ask still follow the
+/// exit. Here review 1 prints no readable
 /// verdict, so it is reviewed once more with the same input (task 328),
 /// and that review cannot start: both spans are closed as `job_finished`,
 /// and the ask names only the output of review 1, the one that ran (task
@@ -789,10 +806,8 @@ fn a_failed_review_closes_the_session_and_asks_a_person_in_the_same_step() {
 /// `landing::tests::a_review_that_could_not_start_names_no_output_of_its_own`.
 #[test]
 fn a_failed_review_span_ends_with_its_job_not_with_the_exit() {
-    use dagq::domain::stats::rfc3339_millis;
-    let slow_exit = "commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit; sleep 0.5";
     let (_dir, repo, db) = fixture();
-    let backend = TestWorkspace::new(&db, false, slow_exit);
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     let reviewer = TestReviewer::new(&[
         "echo 'no verdict here'".to_owned(),
         UNSTARTABLE_REVIEW.to_owned(),
@@ -846,17 +861,11 @@ fn a_failed_review_span_ends_with_its_job_not_with_the_exit() {
     );
     let closed = reviews_closed.last().unwrap();
     let failed = event("review_failed");
-    // Closed before the /exit was even asked, and half a second or
-    // more before the session exited and `review_failed` was recorded.
+    // Closed before the exit was even asked, and before the session
+    // exited and `review_failed` was recorded.
     assert!(closed.id < event("exit_requested").id);
-    let at = |e: &dagq::domain::RunEvent| rfc3339_millis(&e.created_at).unwrap();
-    assert!(
-        at(event("session_exited")) - at(closed) >= 500,
-        "{} then {}",
-        closed.created_at,
-        event("session_exited").created_at
-    );
-    assert!(at(failed) >= at(event("session_exited")));
+    assert!(event("exit_requested").id < event("session_exited").id);
+    assert!(event("session_exited").id < failed.id);
     // The ask goes with the failure as before.
     let asks = queue.asks(Default::default()).unwrap();
     assert_eq!(asks.len(), 1, "{asks:?}");
@@ -892,6 +901,7 @@ fn a_failed_review_span_ends_with_its_job_not_with_the_exit() {
 /// (task 1274).
 #[test]
 fn a_session_idle_before_its_agent_is_registered_waits_for_the_agent_and_lands() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
@@ -920,12 +930,14 @@ fn a_session_idle_before_its_agent_is_registered_waits_for_the_agent_and_lands()
 fn a_revise_receipt_for_another_commit_is_sent_back_to_the_session_until_it_names_head() {
     let (_dir, repo, db) = fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
-    let script = "commit work; receipt \"$(git rev-parse HEAD)\"; idle; \
-        while [ ! -f \"$MESSAGE\" ]; do sleep 0.1; done; rm \"$MESSAGE\"; \
-        before=$(git rev-parse HEAD); printf 'fix\\n' >> change.txt; git commit -q -am fix; \
-        receipt \"$before\"; idle; \
-        while [ ! -f \"$MESSAGE\" ]; do sleep 0.1; done; rm \"$MESSAGE\"; \
-        receipt \"$(git rev-parse HEAD)\"; idle; await_exit";
+    // Its turns: the work, the revise (a receipt for the commit before the
+    // fix), and the request to rewrite the receipt for HEAD.
+    let script = "case \"$TURN\" in \
+        1) commit work; receipt \"$(git rev-parse HEAD)\" ;; \
+        2) before=$(git rev-parse HEAD); printf 'fix\\n' >> change.txt; git commit -q -am fix; \
+           receipt \"$before\" ;; \
+        *) receipt \"$(git rev-parse HEAD)\" ;; \
+        esac";
     let backend = TestWorkspace::new(&db, false, script);
     let reviewer = TestReviewer::new(&[
         verdict("revise", &["add a line"], "one gap"),
@@ -961,32 +973,31 @@ fn a_revise_receipt_for_another_commit_is_sent_back_to_the_session_until_it_name
     assert_eq!(payloads(&detail, "revise_finished").len(), 1);
     let kinds = event_kinds(&detail);
     assert!(position(&kinds, "revise_receipt_rejected") < position(&kinds, "revise_finished"));
-    let texts = backend.texts();
+    let texts = session_texts(&backend, &run);
     assert_eq!(texts.len(), 2);
     assert!(
-        texts[1].1.contains(&format!(
+        texts[1].contains(&format!(
             "dagq: the receipt you rewrote for revise 1 of run {} cannot be accepted",
             run.id()
         )),
         "{}",
-        texts[1].1
+        texts[1]
     );
-    assert!(texts[1].1.contains("git rev-parse HEAD"), "{}", texts[1].1);
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
+    assert!(texts[1].contains("git rev-parse HEAD"), "{}", texts[1]);
+    assert_exit_sent(&backend, &run, 1);
 }
 
-/// A worker that asks a `worker_question` while it revises: once the revise
-/// request arrives it asks, goes idle, waits for the answer in `$MESSAGE`
-/// and commits it.
+/// A worker that asks a `worker_question` while it revises: its turn of the
+/// revise request asks and ends, and the turn of the answer commits the
+/// answer.
 const REVISE_ASKING_AGENT: &str = r#"
-commit work; receipt "$(git rev-parse HEAD)"; idle
-while [ ! -f "$MESSAGE" ]; do sleep 0.05; done; rm "$MESSAGE"
-"$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which line?' --cmux /usr/bin/true > /dev/null || exit 70
-idle
-while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
-cp "$MESSAGE" answer.txt; rm "$MESSAGE"
-git add answer.txt; git commit -q -m answer
-receipt "$(git rev-parse HEAD)"; idle; await_exit
+case "$TURN" in
+1) commit work; receipt "$(git rev-parse HEAD)" ;;
+2) "$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which line?' --cmux /usr/bin/true > /dev/null || exit 70 ;;
+*) printf '%s\n' "$PROMPT" | head -n 1 | tr -d '\n' > answer.txt
+   git add answer.txt; git commit -q -m answer
+   receipt "$(git rev-parse HEAD)" ;;
+esac
 "#;
 
 /// A session that stops at its own `worker_question` while it revises is not
@@ -1042,10 +1053,10 @@ fn a_worker_question_asked_while_revising_is_answered_and_the_run_lands() {
     assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
     let detail = queue.show(TaskId::new(1)).unwrap();
     assert_landed(&repo, &detail.runs[0], "test task", &base);
-    let texts = backend.texts();
+    let texts = session_texts(&backend, &detail.runs[0]);
     assert_eq!(texts.len(), 2, "{texts:?}");
     let answer = format!("answer to ask {}: the second", ask.id);
-    assert_eq!(texts[1], (WORKSPACE_ID.to_owned(), answer.clone()));
+    assert!(texts[1].starts_with(&answer), "{texts:?}");
     assert_eq!(fs::read_to_string(repo.join("answer.txt")).unwrap(), answer);
     assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
     assert_eq!(
@@ -1074,6 +1085,7 @@ const REVISE_DIALOG_SCREEN: &str = "\
 /// and the revise goes on (task 238).
 #[test]
 fn a_dialog_while_revising_is_recorded_as_prompt_waiting() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
     let mut backend = TestWorkspace::new(

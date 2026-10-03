@@ -79,7 +79,8 @@ fn a_failed_run_without_commits_is_retried_by_its_recovery_job_and_lands() {
     assert!(position(&kinds, "triage_finished") < position(&kinds, "workspace_closed"));
     assert!(other_asks(&mut queue, true).is_empty());
 
-    // The job read the run, the rules and the verdict schema.
+    // The job read the run, the rules and the verdict schema. The turn
+    // that exited 7 ended the headless session with code 1.
     let prompts = reviewer.triage_prompts();
     assert_eq!(prompts.len(), 1);
     let (prompt, dir) = &prompts[0];
@@ -88,7 +89,7 @@ fn a_failed_run_without_commits_is_retried_by_its_recovery_job_and_lands() {
         "which ended failed; its session is gone",
         "raised the alert failed",
         "Acceptance criteria:\nworks",
-        "Last error of the run:\nsession exited with code 7",
+        "Last error of the run:\nsession exited with code 1",
         "Final screen of the session",
         "Earlier runs of the task:\nnone",
         "retry_inherit",
@@ -118,12 +119,7 @@ fn a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited() 
             [],
         )
         .unwrap();
-    let marker = db.parent().unwrap().join("first-run-done");
-    let script = format!(
-        "if [ ! -f {marker} ]; then : > {marker}; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit; exit 0; fi; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
-        marker = shell_path(&marker)
-    );
-    let backend = TestWorkspace::new(&db, false, &script);
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     backend.resume_script_for(
         1,
         "await_message; receipt \"$(git rev-parse HEAD)\" failed 'the verify itself is broken'; idle; await_exit",
@@ -270,11 +266,7 @@ fn a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited() 
 #[test]
 fn a_retry_of_a_run_with_commits_is_refused_and_asked_with_the_jobs_options() {
     let (_dir, repo, db) = fixture();
-    let backend = TestWorkspace::new(
-        &db,
-        false,
-        "commit work; receipt \"$(git rev-parse HEAD)\"; exit 7",
-    );
+    let backend = TestWorkspace::new(&db, false, "commit work; exit 7");
     let reviewer =
         TestReviewer::new(&[verdict("pass", &[], "unused")]).with_triages(&[recovery(json!({
             "verdict": "repair",
@@ -316,7 +308,7 @@ fn a_retry_of_a_run_with_commits_is_refused_and_asked_with_the_jobs_options() {
         "Why a person: discard",
         "Diagnosis: flaky",
         "Recommended: [{\"action\":\"retry\"}]",
-        "Last error: session exited with code 7",
+        "Last error: session exited with code 1",
         "recovery-failed-1.prompt.txt",
     ] {
         assert!(ask.question.contains(part), "{part}: {}", ask.question);
@@ -392,14 +384,14 @@ fn a_failed_run_the_recovery_job_resumes_is_resumed_in_its_session_and_lands() {
         (&json!("claude-opus-5-5"), &json!("medium"), &Value::Null)
     );
     assert_eq!(
-        session_models(&db),
+        turn_models(&db),
         [
             json!({"run_id": detail.runs[0].id(), "resume": false, "model": "claude-opus-5-5", "effort": "medium"}),
             json!({"run_id": detail.runs[0].id(), "resume": true, "model": "claude-opus-5-5", "effort": "medium"}),
         ]
     );
     assert_eq!(backend.closed()[0], WORKSPACE_ID);
-    let text = &backend.texts()[0].1;
+    let text = &session_texts(&backend, &detail.runs[0])[0];
     for expected in [
         "the supervisor's triage sent it back to this session to finish",
         "Reason: write the receipt for your commit",
@@ -444,7 +436,7 @@ fn an_escalation_waits_for_a_person_and_the_supervisor_applies_the_answer() {
         "Why a person: recovery_failed",
         "Diagnosis: the acceptance cannot be met",
         "Question: Is task 1 still wanted?",
-        "Last error: session exited with code 7",
+        "Last error: session exited with code 1",
         "recovery-failed-1.prompt.txt",
     ] {
         assert!(ask.question.contains(part), "{part}: {}", ask.question);
@@ -462,7 +454,7 @@ fn an_escalation_waits_for_a_person_and_the_supervisor_applies_the_answer() {
     );
     assert!(run.workspace_closed_at().is_none());
     assert!(!event_kinds(&detail).contains(&"workspace_closed"));
-    assert_eq!(run.last_error(), Some("session exited with code 7"));
+    assert_eq!(run.last_error(), Some("session exited with code 1"));
     let status = runtime::status(&db).unwrap();
     assert!(run_attention_of(&status, run.id()).is_none(), "{status}");
 
@@ -501,11 +493,7 @@ fn an_escalation_waits_for_a_person_and_the_supervisor_applies_the_answer() {
 #[test]
 fn retry_inherit_carries_the_branch_over_once_and_a_failed_job_is_recovered_by_hand() {
     let (_dir, repo, db) = fixture();
-    let backend = TestWorkspace::new(
-        &db,
-        false,
-        "commit work; receipt \"$(git rev-parse HEAD)\"; exit 7",
-    );
+    let backend = TestWorkspace::new(&db, false, "commit work; exit 7");
     let reviewer = TestReviewer::new(&[verdict("pass", &[], "unused")]).with_triages(&[repair(
         json!({"action": "retry_inherit"}),
         "a flaky test killed the session after the work was done",
@@ -930,7 +918,7 @@ fn an_awaiting_run_whose_supervisor_and_wrapper_died_is_adopted_reviewed_and_lan
         payloads(&detail, "review_started")[0]["session_live"],
         false
     );
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 0);
+    assert_exit_sent(&backend, &detail.runs[0], 0);
     assert!(queue.run_leases().unwrap().is_empty());
 }
 
@@ -961,7 +949,7 @@ fn a_revise_for_an_adopted_run_whose_wrapper_died_asks_a_person() {
         "{}",
         asks[0].question
     );
-    assert!(backend.texts().is_empty());
+    assert!(session_texts(&backend, &run).is_empty());
     assert!(queue.run_leases().unwrap().is_empty());
 }
 
@@ -1067,7 +1055,7 @@ fn an_adopted_run_whose_failed_review_was_asked_waits_for_the_ask() {
     assert_eq!(asks[0].id, ask);
     assert!(asks[0].answer.is_none());
     assert!(queue.run_leases().unwrap().is_empty());
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 0);
+    assert_exit_sent(&backend, &detail.runs[0], 0);
 }
 
 /// Such an ask answered before the adoption has its answer applied, as for
@@ -1346,6 +1334,7 @@ impl Drop for StandIn {
 /// is closed and the run goes on to validating as usual.
 #[test]
 fn a_silent_wrapper_with_a_live_session_is_asked_to_exit_then_raised_to_the_inbox() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     // A receipt but no idle marker: nothing else would ask it to exit.
     let mut backend = TestWorkspace::new(
@@ -1430,6 +1419,7 @@ fn a_silent_wrapper_with_a_live_session_is_asked_to_exit_then_raised_to_the_inbo
 /// heartbeat error.
 #[test]
 fn a_silent_wrapper_whose_process_is_gone_is_given_up_as_before() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = Arc::new(TestWorkspace::new(
         &db,
@@ -1479,6 +1469,7 @@ fn a_silent_wrapper_whose_process_is_gone_is_given_up_as_before() {
 /// session that ignores `/exit` is.
 #[test]
 fn a_resumed_session_with_a_silent_wrapper_is_asked_to_exit_then_let_go() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
     backend.exit_timeout = Duration::from_millis(500);
@@ -1528,6 +1519,7 @@ fn a_resumed_session_with_a_silent_wrapper_is_asked_to_exit_then_let_go() {
 /// session exits.
 #[test]
 fn a_silent_wrapper_after_the_review_waits_for_the_exit_with_an_ask() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, HELD_AGENT);
     backend.exit_timeout = Duration::from_secs(3);
@@ -1579,6 +1571,7 @@ fn a_silent_wrapper_after_the_review_waits_for_the_exit_with_an_ask() {
 /// as before, and the `stuck_exit` ask the silence raised is closed.
 #[test]
 fn a_silent_wrapper_that_dies_after_the_exit_closes_its_ask() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(
         &db,

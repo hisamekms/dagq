@@ -203,7 +203,6 @@ fn broker_attention(db: &Path) -> Option<Value> {
 /// `disabled`, the supervisor calls no podman and runs as before.
 #[test]
 fn a_disabled_broker_calls_no_podman() {
-    headless_workers();
     let (_fixture, repo, db) = fixture();
     let podman = FakePodman::new(RUNNING);
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
@@ -256,7 +255,6 @@ fn a_disabled_broker_calls_no_podman() {
 /// as `preferred`.
 #[test]
 fn a_required_broker_does_not_start_the_supervisor() {
-    headless_workers();
     let (_fixture, repo, db) = fixture();
     broker_mode(&repo, "required");
     let podman = FakePodman::new(RUNNING);
@@ -275,7 +273,6 @@ fn a_required_broker_does_not_start_the_supervisor() {
 /// broker runs, recorded as `broker_image_built` and `broker_started`.
 #[test]
 fn the_image_builds_in_the_background_and_holds_no_claim() {
-    headless_workers();
     let (_fixture, repo, db) = fixture();
     broker_mode(&repo, "preferred");
     let podman = FakePodman::new(RUNNING);
@@ -351,7 +348,6 @@ fn the_image_builds_in_the_background_and_holds_no_claim() {
 /// again. Neither the drain nor anything else stops the container.
 #[test]
 fn three_failed_looks_restart_the_container_and_then_tell_the_inbox() {
-    headless_workers();
     let (_fixture, repo, db) = fixture();
     SqliteQueue::open(&db)
         .unwrap()
@@ -430,7 +426,6 @@ fn three_failed_looks_restart_the_container_and_then_tell_the_inbox() {
 /// task is claimed and runs without the broker.
 #[test]
 fn a_busy_machine_tells_the_inbox_and_claims_go_on() {
-    headless_workers();
     let (_fixture, repo, db) = fixture();
     broker_mode(&repo, "preferred");
     let podman = FakePodman::new(BUSY);
@@ -491,7 +486,6 @@ fn a_busy_machine_tells_the_inbox_and_claims_go_on() {
 /// container running.
 #[test]
 fn a_handoff_leaves_the_broker_running() {
-    headless_workers();
     let (_fixture, repo, db) = fixture();
     SqliteQueue::open(&db)
         .unwrap()
@@ -523,7 +517,6 @@ fn a_handoff_leaves_the_broker_running() {
 /// `broker_stopped`. With `disabled` it calls no podman.
 #[test]
 fn down_stops_the_broker_after_the_drain() {
-    headless_workers();
     let (_fixture, repo, db) = fixture();
     // A supervisor binds the queue to the repository.
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
@@ -590,7 +583,6 @@ fn down_stops_the_broker_after_the_drain() {
 /// which stops its supervisor without `down`.
 #[test]
 fn the_default_down_has_the_supervisor_stop_the_broker_after_its_drain() {
-    headless_workers();
     let (_fixture, repo, db) = fixture();
     SqliteQueue::open(&db)
         .unwrap()
@@ -751,7 +743,6 @@ fn list_workspace(url: &str, token_file: &Path) -> Result<Vec<String>, String> {
 /// file, its mark and the configuration go, and the broker refuses it.
 #[test]
 fn a_preferred_worker_gets_its_token_and_the_end_of_its_run_revokes_it() {
-    headless_workers();
     use std::os::unix::fs::PermissionsExt;
     let (fixture, repo, db) = fixture();
     SqliteQueue::open(&db)
@@ -942,7 +933,6 @@ fn a_preferred_worker_gets_its_token_and_the_end_of_its_run_revokes_it() {
 /// run's MCP configuration go each time, and no token is left held.
 #[test]
 fn a_run_that_fails_or_is_interrupted_loses_its_token() {
-    headless_workers();
     let (fixture, repo, db) = fixture();
     SqliteQueue::open(&db)
         .unwrap()
@@ -1064,7 +1054,6 @@ fn a_run_that_fails_or_is_interrupted_loses_its_token() {
 /// no podman for it.
 #[test]
 fn a_disabled_supervisor_revokes_the_tokens_an_earlier_mode_left() {
-    headless_workers();
     let (fixture, repo, db) = fixture();
     SqliteQueue::open(&db)
         .unwrap()
@@ -1185,7 +1174,6 @@ fn a_disabled_supervisor_revokes_the_tokens_an_earlier_mode_left() {
 /// again.
 #[test]
 fn a_disabled_supervisor_resumes_a_run_without_the_tools_left_to_it() {
-    headless_workers();
     use dagq::application::broker_run::{Grant, RunTokens, worker_mcp_config};
     let (fixture, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
@@ -1322,13 +1310,11 @@ fn sweep_retries_a_failed_run_read(mode: &str) {
 
 #[test]
 fn a_preferred_sweep_retries_a_failed_run_read() {
-    headless_workers();
     sweep_retries_a_failed_run_read("preferred");
 }
 
 #[test]
 fn a_disabled_sweep_retries_a_failed_run_read() {
-    headless_workers();
     sweep_retries_a_failed_run_read("disabled");
 }
 
@@ -1440,13 +1426,11 @@ esac"#
 
 #[test]
 fn a_disabled_answer_turn_gets_no_unmarked_tools_and_token_file() {
-    headless_workers();
     a_disabled_answer_turn_gets_no_tools_left_unmarked(true);
 }
 
 #[test]
 fn a_disabled_answer_turn_gets_no_unmarked_tools() {
-    headless_workers();
     a_disabled_answer_turn_gets_no_tools_left_unmarked(false);
 }
 
@@ -1455,7 +1439,6 @@ fn a_disabled_answer_turn_gets_no_unmarked_tools() {
 /// no other run are touched, and no podman is called.
 #[test]
 fn a_disabled_supervisor_removes_an_unmarked_token_file_of_no_run() {
-    headless_workers();
     let (_fixture, repo, db) = fixture();
     let podman = FakePodman::new(RUNNING);
     let tokens = queue_dir(&db).join("broker/tokens");

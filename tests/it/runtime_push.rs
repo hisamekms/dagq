@@ -116,7 +116,6 @@ fn pushed(inbox: &Path) -> Vec<(Value, Vec<String>)> {
 
 #[test]
 fn the_daily_summary_and_a_breach_reach_the_command_once() {
-    headless_workers();
     let s = setup("exit 0", true);
     let backend = TestWorkspace::new(&s.db, false, VALID_AGENT);
     let outcome = supervise_with(&s.db, &s.repo, &backend, &s.options).unwrap();
@@ -193,7 +192,6 @@ fn the_daily_summary_and_a_breach_reach_the_command_once() {
 
 #[test]
 fn without_push_nothing_is_called_nor_recorded() {
-    headless_workers();
     let s = setup("exit 0", false);
     let backend = TestWorkspace::new(&s.db, false, VALID_AGENT);
     supervise_with(&s.db, &s.repo, &backend, &s.options).unwrap();
@@ -231,7 +229,6 @@ fn without_push_nothing_is_called_nor_recorded() {
 
 #[test]
 fn a_failing_command_is_retried_then_told_once_and_cleared_by_a_success() {
-    headless_workers();
     let s = setup("echo \"boom: $1\" >&2; exit 7", true);
     let backend = TestWorkspace::new(&s.db, false, VALID_AGENT);
     let outcome = supervise_with(&s.db, &s.repo, &backend, &s.options).unwrap();
@@ -299,7 +296,6 @@ fn a_failing_command_is_retried_then_told_once_and_cleared_by_a_success() {
 /// an ended breach can start again.
 #[test]
 fn a_breach_is_recorded_once_per_start() {
-    headless_workers();
     let (_dir, _repo, db) = fixture();
     let queue = SqliteQueue::open(&db).unwrap();
     let breach = json!({"period": "day", "kpi": "landings", "stratum": "all"});

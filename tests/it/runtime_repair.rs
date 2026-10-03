@@ -80,6 +80,31 @@ fn supervise_repair(
     (backend, reviewer, supervisor)
 }
 
+/// Supervise the fixture's task with an orphan `sleep` its session waits
+/// for, the `idle_process` alert after [`IDLE_PROCESS_MS`] and `recovery`
+/// as the recovery job's script, on a thread: an alert of a headless
+/// worker's run too, unlike `long_background` (goal 92).
+fn supervise_idle_orphan(
+    db: &Path,
+    repo: &Path,
+    recovery: &str,
+) -> (
+    Arc<TestWorkspace>,
+    Arc<TestReviewer>,
+    thread::JoinHandle<Result<Value>>,
+) {
+    supervise_repair(
+        db,
+        repo,
+        &idle_agent(
+            "sleep 300",
+            r#"while kill -0 "$pid" 2>/dev/null; do sleep 0.05; done"#,
+        ),
+        idle_process_stall(),
+        &[recovery],
+    )
+}
+
 /// A recovery job's script that prints `verdict` with `PID` replaced by the
 /// orphan's pid.
 pub(crate) fn recovery_verdict(verdict: &Value) -> String {
@@ -93,6 +118,7 @@ pub(crate) fn recovery_verdict(verdict: &Value) -> String {
 /// `auto_repaired`, and the session goes on to its receipt without an ask.
 #[test]
 fn a_long_background_alert_is_repaired_by_stopping_the_orphan_of_the_worktree() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let (backend, reviewer, supervisor) = supervise_long_background(
         &db,
@@ -170,6 +196,7 @@ idle_bg_done; await_exit
 /// an ask, a person or the observer.
 #[test]
 fn background_work_left_after_the_receipt_is_a_long_background_alert_for_the_recovery_job() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let (backend, reviewer, supervisor) = supervise_repair(
         &db,
@@ -225,9 +252,9 @@ fn background_work_left_after_the_receipt_is_a_long_background_alert_for_the_rec
     assert!(stalled_asks(&queue).is_empty());
 }
 
-/// Wait for the `stalled` ask of a `long_background` test, check that the
-/// orphan still runs, then stop it as a person would and let the run end.
-pub(crate) fn escalated_long_background(
+/// Wait for the `stalled` ask of an orphan's alert, check that the orphan
+/// still runs, then stop it as a person would and let the run end.
+pub(crate) fn escalated_orphan(
     db: &Path,
     backend: &TestWorkspace,
     supervisor: thread::JoinHandle<Result<Value>>,
@@ -266,7 +293,7 @@ fn a_recovery_repair_of_a_process_outside_the_run_becomes_an_ask() {
         .current_dir(repo.parent().unwrap())
         .spawn()
         .unwrap();
-    let (backend, _reviewer, supervisor) = supervise_long_background(
+    let (backend, _reviewer, supervisor) = supervise_idle_orphan(
         &db,
         &repo,
         &recovery_verdict(&json!({
@@ -276,13 +303,13 @@ fn a_recovery_repair_of_a_process_outside_the_run_becomes_an_ask() {
             "actions": [{"action": "stop_processes", "pids": ["PID", outsider.id()]}],
         })),
     );
-    let (ask, detail) = escalated_long_background(&db, &backend, supervisor);
+    let (ask, detail) = escalated_orphan(&db, &backend, supervisor);
     assert!(pid_alive(outsider.id()));
     let _ = outsider.kill();
     let _ = outsider.wait();
-    assert_eq!(ask.options, ["wait", "intervene", "propose"]);
+    assert_eq!(ask.options, ["wait", "stop", "propose"]);
     for part in [
-        "alert: long_background",
+        "alert: idle_process",
         "Why a person: recovery_failed",
         &format!(
             "pid {} is not one of the run's own processes",
@@ -302,7 +329,7 @@ fn a_recovery_repair_of_a_process_outside_the_run_becomes_an_ask() {
     assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
     let resolved = payloads(&detail, "stall_resolved");
     assert_eq!(resolved.len(), 1, "{resolved:?}");
-    assert_eq!(resolved[0]["threshold"], "background_alert_secs");
+    assert_eq!(resolved[0]["threshold"], "idle_process_secs");
     assert_eq!(resolved[0]["outcome"], "resolved_by_itself");
 }
 
@@ -311,7 +338,7 @@ fn a_recovery_repair_of_a_process_outside_the_run_becomes_an_ask() {
 #[test]
 fn a_recovery_repair_of_low_confidence_becomes_an_ask() {
     let (_dir, repo, db) = fixture();
-    let (backend, _reviewer, supervisor) = supervise_long_background(
+    let (backend, _reviewer, supervisor) = supervise_idle_orphan(
         &db,
         &repo,
         &recovery_verdict(&json!({
@@ -322,8 +349,8 @@ fn a_recovery_repair_of_low_confidence_becomes_an_ask() {
             "options": ["stop it"],
         })),
     );
-    let (ask, detail) = escalated_long_background(&db, &backend, supervisor);
-    assert_eq!(ask.options, ["wait", "intervene", "stop it", "propose"]);
+    let (ask, detail) = escalated_orphan(&db, &backend, supervisor);
+    assert_eq!(ask.options, ["wait", "stop", "stop it", "propose"]);
     for part in [
         "confidence low",
         "Recommended: [{\"action\":\"stop_processes\"",
@@ -354,8 +381,8 @@ fn a_live_escalation_is_recorded_at_the_recovery_jobs_request_unless_the_job_fai
         ("echo broken >&2; exit 3", false),
     ] {
         let (_dir, repo, db) = fixture();
-        let (backend, _reviewer, supervisor) = supervise_long_background(&db, &repo, script);
-        let (ask, detail) = escalated_long_background(&db, &backend, supervisor);
+        let (backend, _reviewer, supervisor) = supervise_idle_orphan(&db, &repo, script);
+        let (ask, detail) = escalated_orphan(&db, &backend, supervisor);
         let run = &detail.runs[0];
         let finished = payloads(&detail, "recovery_finished");
         assert_eq!(finished.len(), 1, "{finished:?}");
@@ -368,7 +395,7 @@ fn a_live_escalation_is_recorded_at_the_recovery_jobs_request_unless_the_job_fai
         let expected = (
             "supervisor".to_owned(),
             format!("supervisor:{}", std::process::id()),
-            by_job.then(|| format!("recovery-job:{}:long_background:1", run.id())),
+            by_job.then(|| format!("recovery-job:{}:idle_process:1", run.id())),
         );
         for kind in ["recovery_finished", "ask_opened"] {
             let events: Vec<_> = detail

@@ -109,7 +109,7 @@ pub(crate) fn add(
             goal_id: None,
             context: String::new(),
             provider: None,
-            // Interactive unless the test chose headless workers.
+            // Headless unless the test chose interactive workers.
             worker_mode: Some(crate::runtime_support::worker_mode()),
         })
         .unwrap()

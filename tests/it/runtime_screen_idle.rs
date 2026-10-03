@@ -4,7 +4,8 @@
 //! idle without one, and a resumed or revised session ends its stage
 //! without waiting out the resume timeout. A screen at work, at a dialog or
 //! unreadable infers nothing, and a session with its marker is judged by
-//! the marker as before.
+//! the marker as before. The tests run interactive sessions because only
+//! an interactive session has a screen and an idle marker to judge (goal 92).
 use crate::common;
 use crate::runtime_support;
 use dagq::domain::EventKind;
@@ -72,6 +73,7 @@ fn inferred(detail: &dagq::domain::TaskDetail) -> Vec<&Value> {
 /// screen, and `idle_inferred` names the failed hook.
 #[test]
 fn a_first_session_whose_hook_could_not_write_its_marker_is_validated_by_its_screen() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, &markerless_agent());
     let outcome = supervise_with(&db, &repo, &backend, &options()).unwrap();
@@ -124,6 +126,7 @@ fn a_first_session_whose_hook_could_not_write_its_marker_is_validated_by_its_scr
 /// what these tests make short.)
 #[test]
 fn a_first_session_with_its_marker_is_judged_by_the_marker() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     *backend.screen.lock().unwrap() = WORKING_SCREEN.into();
@@ -146,6 +149,7 @@ fn a_first_session_with_its_marker_is_judged_by_the_marker() {
 /// with its receipt (and a marker, the disk freed).
 #[test]
 fn a_first_session_without_its_marker_is_nudged_when_idle_without_a_receipt() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(
         &db,
@@ -237,11 +241,13 @@ fn a_markerless_session_is_held_by(screen: Option<&str>) {
 
 #[test]
 fn a_markerless_session_at_work_is_not_idle() {
+    interactive_workers();
     a_markerless_session_is_held_by(Some(WORKING_SCREEN));
 }
 
 #[test]
 fn a_markerless_session_at_a_dialog_is_not_idle() {
+    interactive_workers();
     a_markerless_session_is_held_by(Some(
         " Auto mode is available\n\n ❯ 1. Yes, turn on auto mode\n   2. No, keep asking\n\n Esc to cancel\n",
     ));
@@ -249,6 +255,7 @@ fn a_markerless_session_at_a_dialog_is_not_idle() {
 
 #[test]
 fn a_markerless_session_whose_screen_cannot_be_read_is_not_idle() {
+    interactive_workers();
     a_markerless_session_is_held_by(None);
 }
 
@@ -270,6 +277,7 @@ const BACKGROUND_SCREEN: &str = "\
 /// and the run goes on to validation.
 #[test]
 fn a_markerless_session_that_shows_background_work_is_not_idle() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, &markerless_agent());
     *backend.screen.lock().unwrap() = BACKGROUND_SCREEN.into();
@@ -280,8 +288,11 @@ fn a_markerless_session_that_shows_background_work_is_not_idle() {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
         thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
     };
+    // The screen is read from the session's start: wait for its receipt
+    // too, which a loaded host may write after the first inference.
     wait_until(&db, Duration::from_secs(30), |queue| {
-        !inferred(&queue.show(TaskId::new(1)).unwrap()).is_empty()
+        let detail = queue.show(TaskId::new(1)).unwrap();
+        !inferred(&detail).is_empty() && event_kinds(&detail).contains(&"receipt_observed")
     });
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(1)).unwrap();
@@ -318,6 +329,7 @@ fn a_markerless_session_that_shows_background_work_is_not_idle() {
 /// goes on to validation with the session open.
 #[test]
 fn a_resumed_session_without_its_marker_ends_its_stage_by_its_screen() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (run, _) = parked_conflict(&repo, &db, &backend);
@@ -384,6 +396,7 @@ fn a_resumed_session_without_its_marker_ends_its_stage_by_its_screen() {
 /// resume timeout; the run is reviewed again and lands.
 #[test]
 fn a_revised_session_without_its_marker_ends_its_revise_by_its_screen() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
     let backend = Arc::new(TestWorkspace::new(

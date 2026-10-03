@@ -1,6 +1,8 @@
 //! Runtime tests: a resume the supervisor takes over (after a handoff, or
 //! adopted from a supervisor that died) carries over the dialog and the
-//! recovery job the previous process recorded during it (task 743).
+//! recovery job the previous process recorded during it (task 743). The
+//! tests run interactive sessions because the dialog and the `/exit` they
+//! carry over are a terminal session's (goal 92).
 use crate::runtime_adopt::backdate_event;
 use crate::runtime_handoff::hand_off_when;
 use crate::runtime_review_adopt::{DIALOG_SCREEN, screen_hash};
@@ -16,6 +18,7 @@ use runtime_support::*;
 /// resume once the session moves.
 #[test]
 fn a_resume_taken_over_after_a_handoff_keeps_its_dialog_and_clears_it_at_its_end() {
+    interactive_workers();
     resume_taken_over_at_dialog(true, dagq::domain::waiting::DEFAULT_MAX_WAITING);
 }
 
@@ -23,6 +26,7 @@ fn a_resume_taken_over_after_a_handoff_keeps_its_dialog_and_clears_it_at_its_end
 /// while the dialog stays up and finds the dialog it took over.
 #[test]
 fn a_resume_taken_over_after_a_handoff_in_its_slot_does_not_record_its_dialog_again() {
+    interactive_workers();
     resume_taken_over_at_dialog(true, 0);
 }
 
@@ -30,12 +34,14 @@ fn a_resume_taken_over_after_a_handoff_in_its_slot_does_not_record_its_dialog_ag
 /// the run's events.
 #[test]
 fn an_adopted_resume_keeps_its_dialog_and_clears_it_at_its_end() {
+    interactive_workers();
     resume_taken_over_at_dialog(false, dagq::domain::waiting::DEFAULT_MAX_WAITING);
 }
 
 /// An adopted resume with waits turned off.
 #[test]
 fn an_adopted_resume_in_its_slot_does_not_record_its_dialog_again() {
+    interactive_workers();
     resume_taken_over_at_dialog(false, 0);
 }
 
@@ -189,12 +195,14 @@ fn resume_taken_over_at_dialog(handoff: bool, max_waiting: usize) {
 /// timeout again (task 894).
 #[test]
 fn a_resume_taken_over_after_a_handoff_times_its_exit_from_the_recorded_request() {
+    interactive_workers();
     resume_taken_over_after_its_exit(true);
 }
 
 /// The same for a resume adopted from a supervisor that died.
 #[test]
 fn an_adopted_resume_times_its_exit_from_the_recorded_request() {
+    interactive_workers();
     resume_taken_over_after_its_exit(false);
 }
 

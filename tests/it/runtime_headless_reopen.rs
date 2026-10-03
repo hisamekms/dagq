@@ -267,6 +267,7 @@ esac"#
 /// the answer and the close.
 #[test]
 fn an_interactive_session_is_told_of_its_closed_question_in_place_of_the_nudge() {
+    interactive_workers();
     told_in_an_interactive_session(0);
 }
 
@@ -275,6 +276,7 @@ fn an_interactive_session_is_told_of_its_closed_question_in_place_of_the_nudge()
 /// 1372's revise).
 #[test]
 fn a_notice_whose_send_failed_is_sent_again() {
+    interactive_workers();
     told_in_an_interactive_session(1);
 }
 

@@ -113,11 +113,7 @@ fn ended_runs_workspaces_are_listed_then_closed_by_run_task_or_all() {
             add_ready_task(&mut queue, title, &[]);
         }
     }
-    let backend = TestWorkspace::new(
-        &db,
-        false,
-        "commit work; receipt \"$(git rev-parse HEAD)\"; exit 7",
-    );
+    let backend = TestWorkspace::new(&db, false, "commit work; exit 7");
     supervise(&db, &repo, &backend).unwrap();
     backend.join();
     let mut queue = SqliteQueue::open(&db).unwrap();

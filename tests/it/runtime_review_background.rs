@@ -1,5 +1,7 @@
 //! Runtime tests: background work a session runs holds its exit, revise
-//! and resume until it ends.
+//! and resume until it ends. Each runs an interactive session, whose Stop
+//! hook reports its background work; a headless turn's ends with the turn
+//! (goal 92).
 use crate::common;
 use crate::runtime_support;
 
@@ -40,6 +42,7 @@ fn write_idle_marker(run: &TaskRun, background_tasks: Value) {
 /// wrote a marker with empty `background_tasks`.
 #[test]
 fn background_work_holds_the_first_session_until_it_ends() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = Arc::new(TestWorkspace::new(
         &db,
@@ -88,6 +91,7 @@ fn background_work_holds_the_first_session_until_it_ends() {
 /// is idle as before.
 #[test]
 fn a_marker_without_running_background_work_is_idle() {
+    interactive_workers();
     for tasks in [
         json!([]),
         json!([{"id": "b1", "type": "shell", "status": "completed"}]),
@@ -112,6 +116,7 @@ fn a_marker_without_running_background_work_is_idle() {
 /// receipt), and goes once the work ended.
 #[test]
 fn background_work_holds_the_exit_after_the_review() {
+    interactive_workers();
     let (dir, repo, db) = fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
     let gate = dir.path().join("review-gate");
@@ -165,6 +170,7 @@ fn background_work_holds_the_exit_after_the_review() {
 /// work running is not asked to exit until the work ended.
 #[test]
 fn background_work_holds_the_resumed_session_until_it_ends() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (run, first_landed) = parked_conflict(&repo, &db, &backend);
@@ -210,6 +216,7 @@ fn background_work_holds_the_resumed_session_until_it_ends() {
 /// not taken for done: the revise waits until the work ended.
 #[test]
 fn background_work_holds_the_revise_until_it_ends() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
     let backend = Arc::new(TestWorkspace::new(
@@ -277,6 +284,7 @@ fn background_work_holds_the_revise_until_it_ends() {
 /// session exits, and the run then goes on to its `approve_landing` ask.
 #[test]
 fn a_revise_session_that_holds_exit_back_raises_a_stuck_exit_ask() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(
         &db,
@@ -367,6 +375,7 @@ fn a_revise_session_that_holds_exit_back_raises_a_stuck_exit_ask() {
 /// timeout after the receipt, not two.
 #[test]
 fn background_work_that_never_ends_is_waited_for_up_to_the_resume_timeout() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(
         &db,

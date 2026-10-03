@@ -8,17 +8,22 @@ use runtime_support::*;
 const COMMIT_AGAIN: &str =
     "printf 'more\\n' > more.txt && git add more.txt && git commit -q -m more";
 
-/// Wait for the request to rewrite the receipt to be typed.
-const AWAIT_NUDGE: &str = "while ! grep -q 'cannot accept a receipt for another commit' \"$MESSAGE\" 2>/dev/null; do sleep 0.05; done";
+/// The `case` pattern of the prompt of a turn that asks for the receipt's
+/// rewrite.
+const NUDGE: &str = "*'cannot accept a receipt for another commit'*";
 
-/// The texts typed into the sessions that ask for the receipt's rewrite.
-fn nudges(backend: &TestWorkspace) -> Vec<String> {
-    backend
-        .texts()
+/// The requests to rewrite its receipt that `run`'s worker got.
+fn nudges(backend: &TestWorkspace, run: &TaskRun) -> Vec<String> {
+    session_texts(backend, run)
         .into_iter()
-        .map(|(_, text)| text)
         .filter(|text| text.contains("cannot accept a receipt for another commit"))
         .collect()
+}
+
+/// The script of a worker whose turn that asks for the receipt's rewrite
+/// runs `nudged`, and whose other turns run `otherwise` (goal 92).
+fn on_nudge(nudged: &str, otherwise: &str) -> String {
+    format!("case \"$PROMPT\" in\n{NUDGE}) {nudged}\n;;\n*) {otherwise}\n;;\nesac")
 }
 
 /// Task 205's worker: it wrote its receipt, committed again and went idle.
@@ -30,8 +35,11 @@ fn a_session_idle_with_a_stale_receipt_is_asked_once_and_the_rewrite_goes_on() {
     let backend = TestWorkspace::new(
         &db,
         false,
-        &format!(
-            "commit work; old=\"$(git rev-parse HEAD)\"; receipt \"$old\"; {COMMIT_AGAIN}; idle\n{AWAIT_NUDGE}\nreceipt \"$(git rev-parse HEAD)\"; idle; await_exit"
+        &on_nudge(
+            "receipt \"$(git rev-parse HEAD)\"",
+            &format!(
+                "commit work; old=\"$(git rev-parse HEAD)\"; receipt \"$old\"; {COMMIT_AGAIN}"
+            ),
         ),
     );
     let outcome = supervise(&db, &repo, &backend).unwrap();
@@ -43,13 +51,13 @@ fn a_session_idle_with_a_stale_receipt_is_asked_once_and_the_rewrite_goes_on() {
     let run = &detail.runs[0];
     let head = run.result_commit().unwrap().to_string();
     let old = git_out(&repo, &["rev-parse", &format!("{head}~1")]);
-    let texts = nudges(&backend);
-    assert_eq!(texts.len(), 1, "{:?}", backend.texts());
+    let texts = nudges(&backend, run);
+    assert_eq!(texts.len(), 1, "{texts:?}");
     for expected in [
         run.id().to_string(),
         format!("names commit {old} while the clean worktree HEAD is {head}"),
         format!("rewrite the receipt at {}", run.receipt_path().unwrap()),
-        "do not run /exit".to_owned(),
+        "Do all of this in this turn.".to_owned(),
     ] {
         assert!(
             texts[0].contains(&expected),
@@ -85,8 +93,9 @@ fn a_stale_receipt_left_as_it_is_goes_on_as_before() {
     let backend = TestWorkspace::new(
         &db,
         false,
-        &format!(
-            "commit work; receipt \"$(git rev-parse HEAD)\"; {COMMIT_AGAIN}; idle\n{AWAIT_NUDGE}\nidle; await_exit"
+        &on_nudge(
+            ":",
+            &format!("commit work; receipt \"$(git rev-parse HEAD)\"; {COMMIT_AGAIN}"),
         ),
     );
     let outcome = supervise(&db, &repo, &backend).unwrap();
@@ -94,7 +103,7 @@ fn a_stale_receipt_left_as_it_is_goes_on_as_before() {
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(1)).unwrap();
-    assert_eq!(nudges(&backend).len(), 1, "{:?}", backend.texts());
+    assert_eq!(nudges(&backend, &detail.runs[0]).len(), 1);
     assert_eq!(
         payloads(&detail, "stale_receipt_resolved"),
         [&json!({"phase": "session", "outcome": "unchanged"})]
@@ -119,7 +128,7 @@ fn a_receipt_for_the_head_is_not_asked_to_be_rewritten() {
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(1)).unwrap();
-    assert!(nudges(&backend).is_empty());
+    assert!(nudges(&backend, &detail.runs[0]).is_empty());
     assert!(payloads(&detail, "stale_receipt_nudged").is_empty());
 }
 
@@ -134,7 +143,10 @@ fn a_resumed_session_idle_after_its_rebase_with_the_old_receipt_is_asked_once() 
     let (run, first_landed) = parked_conflict(&repo, &db, &backend);
     backend.resume_script_for(
         2,
-        &format!("await_message; resolve; idle\n{AWAIT_NUDGE}\nreceipt \"$(git rev-parse HEAD)\"; idle; await_exit"),
+        &on_nudge(
+            "receipt \"$(git rev-parse HEAD)\"",
+            "await_message; resolve",
+        ),
     );
     let outcome = supervise(&db, &repo, &backend).unwrap();
     backend.join();
@@ -144,7 +156,7 @@ fn a_resumed_session_idle_after_its_rebase_with_the_old_receipt_is_asked_once() 
     let landed = detail.runs[0].clone();
     assert_landed(&repo, &landed, "second", &first_landed);
     assert_eq!(detail.task.status(), TaskStatus::Completed);
-    assert_eq!(nudges(&backend).len(), 1, "{:?}", backend.texts());
+    assert_eq!(nudges(&backend, &landed).len(), 1);
     let nudged = payloads(&detail, "stale_receipt_nudged");
     assert_eq!(nudged.len(), 1, "{nudged:?}");
     assert_eq!(nudged[0]["phase"], "resume");
@@ -159,6 +171,12 @@ fn a_resumed_session_idle_after_its_rebase_with_the_old_receipt_is_asked_once() 
     assert_eq!(finished[0]["outcome"], "resolved");
 }
 
+/// A resumed session's turn of its request (`await_message`): the first
+/// attempt rebases and leaves the receipt for the old commit, a later one
+/// writes the receipt for HEAD.
+const RESOLVES_ON_THE_SECOND_ATTEMPT: &str = "await_message; mark=\"$(dirname \"$RECEIPT\")/attempted\"\n\
+    if [ -f \"$mark\" ]; then receipt \"$(git rev-parse HEAD)\"; else : > \"$mark\"; resolve; fi";
+
 /// A resumed session that answers the request without rewriting the receipt
 /// ends its attempt as before (unresolved); the next attempt is asked anew
 /// only if it leaves a stale receipt again, which this one does not.
@@ -167,19 +185,14 @@ fn a_resumed_session_that_leaves_the_old_receipt_ends_its_attempt_as_before() {
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (_run, first_landed) = parked_conflict(&repo, &db, &backend);
-    backend.resume_script_for(
-        2,
-        &format!(
-            "await_message; mark=\"$(dirname \"$RECEIPT\")/attempted\"\nif [ -f \"$mark\" ]; then receipt \"$(git rev-parse HEAD)\"; idle; await_exit; exit 0; fi\n: > \"$mark\"; resolve; idle\n{AWAIT_NUDGE}\nidle; await_exit"
-        ),
-    );
+    backend.resume_script_for(2, &on_nudge(":", RESOLVES_ON_THE_SECOND_ATTEMPT));
     let outcome = supervise(&db, &repo, &backend).unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(2)).unwrap();
     assert_landed(&repo, &detail.runs[0], "second", &first_landed);
-    assert_eq!(nudges(&backend).len(), 1, "{:?}", backend.texts());
+    assert_eq!(nudges(&backend, &detail.runs[0]).len(), 1);
     assert_eq!(
         payloads(&detail, "stale_receipt_resolved"),
         [&json!({"phase": "resume", "attempt": 1, "outcome": "unchanged"})]
@@ -204,18 +217,17 @@ fn stale_request_across_a_wait(rewrite: bool) -> Vec<Value> {
     } else {
         ":"
     };
+    // The turn of the request asks; the turn of the answer does nothing.
     backend.resume_script_for(
         2,
         &format!(
-            r#"await_message; mark="$(dirname "$RECEIPT")/attempted"
-if [ -f "$mark" ]; then receipt "$(git rev-parse HEAD)"; idle; await_exit; exit 0; fi
-: > "$mark"; resolve; idle
-{AWAIT_NUDGE}
-rm "$MESSAGE"
+            r#"case "$PROMPT" in
+{NUDGE})
 "$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Rewrite it?' --cmux /usr/bin/true > /dev/null || exit 70
-{during_wait}; idle; : > "$(dirname "$RECEIPT")/waiting"
-while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
-idle; await_exit"#
+{during_wait}; : > "$(dirname "$RECEIPT")/waiting" ;;
+"answer to ask "*) ;;
+*) {RESOLVES_ON_THE_SECOND_ATTEMPT} ;;
+esac"#
         ),
     );
     let backend = Arc::new(backend);
@@ -253,12 +265,12 @@ idle; await_exit"#
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let detail = queue.show(TaskId::new(2)).unwrap();
     assert_landed(&repo, &detail.runs[0], "second", &first_landed);
-    assert_eq!(nudges(&backend).len(), 1, "{:?}", backend.texts());
+    assert_eq!(nudges(&backend, &detail.runs[0]).len(), 1);
     let kinds = event_kinds(&detail);
     let regained = kinds.iter().position(|k| *k == "run_slot_regained");
     let resolved = kinds.iter().position(|k| *k == "stale_receipt_resolved");
     assert!(regained.is_some() && regained < resolved, "{kinds:?}");
-    // The session went idle right after the answer, so the request is
+    // The session ended its turn right after the answer, so the request is
     // settled by that idle, not by its 120-second timeout: a restart of
     // the request's clock after the answer's send left that idle unseen
     // (task 931).

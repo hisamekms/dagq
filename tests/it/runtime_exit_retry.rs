@@ -2,7 +2,9 @@
 //! timeout (ADR-0047 decision 25), what each one sends for the screen it
 //! reads, the close of a landing run's workspace once they are used up,
 //! the `stuck_exit` path of any other run, and an adopter that carries the
-//! retries on.
+//! retries on. The tests run interactive sessions because the retries
+//! read a terminal session's screen and type `/exit` or Enter into it,
+//! and a headless session gets none (goal 92).
 use crate::common;
 use crate::runtime_support;
 
@@ -82,6 +84,7 @@ fn show_after_exit(db: &Path, backend: &TestWorkspace, screen: &str) {
 /// exit_retry`), counted by `stats`, and the run lands without an ask.
 #[test]
 fn a_held_exit_is_typed_again_into_a_ready_input_box() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IGNORES_FIRST_EXIT);
     // Kept at a second: the session has to take the first /exit away (a
@@ -137,6 +140,7 @@ fn a_held_exit_is_typed_again_into_a_ready_input_box() {
 /// lands, recorded as `exit_forced_close` with `cause: exit_timeout`.
 #[test]
 fn used_up_retries_over_a_dialog_close_the_workspace_of_a_landing_run() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IGNORES_FIRST_EXIT);
     backend.exit_timeout = SHOW_AFTER_EXIT_TIMEOUT;
@@ -198,6 +202,7 @@ fn used_up_retries_over_a_dialog_close_the_workspace_of_a_landing_run() {
 /// is closed.
 #[test]
 fn used_up_retries_of_a_run_that_does_not_land_go_to_the_stuck_exit_ask() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, HELD_AGENT);
     backend.exit_timeout = SHOW_AFTER_EXIT_TIMEOUT;
@@ -255,6 +260,7 @@ fn used_up_retries_of_a_run_that_does_not_land_go_to_the_stuck_exit_ask() {
 /// its two attempts.
 #[test]
 fn an_adopter_carries_the_retries_of_the_exit_on() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     backend.exit_timeout = Duration::from_millis(500);
@@ -359,6 +365,7 @@ fn retried(attempt: usize) -> (&'static str, Value) {
 /// itself and retries, and the session exits on the first retry.
 #[test]
 fn the_running_sessions_exit_is_retried_after_its_timeout() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     backend.exit_timeout = Duration::from_millis(500);
@@ -401,6 +408,7 @@ fn the_running_sessions_exit_is_retried_after_its_timeout() {
 /// gets there and the session exits, repaired as `exit_retry`.
 #[test]
 fn an_unsent_exit_of_a_run_that_cannot_land_is_retried() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     // Every attempt of the first /exit times out without reaching it.
@@ -446,6 +454,7 @@ fn an_unsent_exit_of_a_run_that_cannot_land_is_retried() {
 /// run that does not land goes to the `stuck_exit` recovery job and ask.
 #[test]
 fn an_unsent_exit_whose_retries_never_get_there_goes_to_the_stuck_exit_ask() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     backend.exit_unsent.store(usize::MAX, Ordering::SeqCst);
@@ -556,6 +565,7 @@ fn used_up_retries_do_not_close_when(
 
 #[test]
 fn used_up_retries_do_not_close_a_run_with_a_rebase_in_progress() {
+    interactive_workers();
     let marker = |run: &TaskRun| {
         let worktree = Path::new(run.worktree_path().unwrap());
         worktree.join(git_out(
@@ -571,6 +581,7 @@ fn used_up_retries_do_not_close_a_run_with_a_rebase_in_progress() {
 
 #[test]
 fn used_up_retries_do_not_close_a_run_with_an_open_worker_question() {
+    interactive_workers();
     used_up_retries_do_not_close_when(
         |db, run| {
             SqliteQueue::open(db)
@@ -646,6 +657,7 @@ fn an_adopter_after_used_up_retries(mark: impl FnOnce(&Path, &TaskRun)) {
 
 #[test]
 fn an_adopter_does_not_retry_after_a_stuck_exit_ask() {
+    interactive_workers();
     an_adopter_after_used_up_retries(|db, run| {
         SqliteQueue::open(db)
             .unwrap()
@@ -669,6 +681,7 @@ fn an_adopter_does_not_retry_after_a_stuck_exit_ask() {
 
 #[test]
 fn an_adopter_does_not_retry_after_a_stuck_exit_recovery_job() {
+    interactive_workers();
     an_adopter_after_used_up_retries(|db, run| {
         record(
             db,

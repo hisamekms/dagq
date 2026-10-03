@@ -101,6 +101,8 @@ fn runs_of(db: &Path, task: TaskId) -> Vec<TaskRun> {
 /// runs only some workers passes over the tasks of the others.
 #[test]
 fn a_claim_writes_the_worker_of_its_task_on_the_run() {
+    // The fixture's task is the one of the interactive worker.
+    interactive_workers();
     let (_dir, _repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let codex = add_task(&mut queue, "codex", Some(Provider::Codex), None);

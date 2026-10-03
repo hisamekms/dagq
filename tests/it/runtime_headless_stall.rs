@@ -339,3 +339,71 @@ fn an_adopter_opens_the_next_ask_of_a_closed_intervene_once() {
 fn an_adopter_opens_the_next_ask_of_an_intervene_a_person_closed() {
     adopted_intervene(Died::ClosedByPerson);
 }
+
+/// A headless stall's recovery job whose verdict the runtime does not act
+/// on asks a person, as an interactive stall's does
+/// (`runtime_stall_recovery::a_failed_stalled_job_raises_the_stalled_ask`
+/// and `a_recovery_job_of_low_confidence_raises_one_stalled_ask_that_closes_when_the_session_moves`,
+/// interactive, goal 92): a job that failed escalates with
+/// `recovery_failed` and nothing applied, and a `repair` of low confidence
+/// is not applied but asked, with its actions as the recommendation and
+/// its options added. Nothing is sent to the session; `stop` ends the run.
+#[test]
+fn a_failed_or_unsure_recovery_job_of_a_headless_stall_asks_a_person() {
+    let unsure = recovery(json!({
+        "verdict": "repair",
+        "confidence": "low",
+        "diagnosis": "maybe a missing permission",
+        "actions": [{"action": "send_instruction", "instruction": "go on"}],
+        "options": ["go on"],
+    }));
+    for (job, failed) in [
+        ("echo broken >&2; exit 3".to_owned(), true),
+        (unsure, false),
+    ] {
+        let (dir, repo, db, backend) = headless_fixture(&[]);
+        set_turns(dir.path(), &refused_until_answered());
+        let backend = Arc::new(backend);
+        let (_reviewer, supervisor) =
+            supervise_thread(&db, &repo, backend.clone(), Default::default(), &[job]);
+        // The job's end is recorded after the ask it opened.
+        wait_until(&db, common::STEP_LIMIT, |queue| {
+            !stalled_asks(queue).is_empty()
+                && !payloads(&queue.show(TASK).unwrap(), "recovery_finished").is_empty()
+        });
+        let ask = stalled_asks(&SqliteQueue::open(&db).unwrap()).remove(0);
+        assert_eq!(ask.reason_category, AskReason::RecoveryFailed, "{ask:?}");
+        let asked = detail(&db);
+        let finished = payloads(&asked, "recovery_finished");
+        assert_eq!(finished.len(), 1, "{finished:?}");
+        assert_eq!(finished[0]["escalated"], true);
+        assert_eq!(finished[0]["ask_id"], json!(ask.id));
+        assert_eq!(
+            finished[0]["outcome"] == "job_failed",
+            failed,
+            "{finished:?}"
+        );
+        assert!(payloads(&asked, "auto_repaired").is_empty());
+        assert!(payloads(&asked, "turn_requested").is_empty());
+        if !failed {
+            assert!(ask.options.contains(&"go on".to_owned()), "{ask:?}");
+            for part in [
+                "confidence low",
+                "Recommended: [{\"action\":\"send_instruction\"",
+            ] {
+                assert!(ask.question.contains(part), "{part}: {}", ask.question);
+            }
+        }
+
+        SqliteQueue::open(&db)
+            .unwrap()
+            .answer(ask.id, "stop")
+            .unwrap();
+        let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+        backend.join();
+        assert_eq!(outcome["errors"], json!([]), "{outcome}");
+        let detail = detail(&db);
+        assert_eq!(detail.runs[0].status(), RunStatus::Failed);
+        assert_eq!(stub_calls(&detail.runs[0]).len(), 1);
+    }
+}

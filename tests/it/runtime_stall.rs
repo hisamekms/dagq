@@ -53,6 +53,7 @@ fn stall_configs(db: &Path) -> Vec<Value> {
 /// it. No ask opens.
 #[test]
 fn a_receiptless_idle_is_nudged_once_and_the_receipt_resolves_it() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(
         &db,
@@ -126,6 +127,7 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
 /// closes.
 #[test]
 fn an_idle_session_at_a_login_that_ran_out_waits_in_the_authentication_ask() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(
         &db,
@@ -216,6 +218,7 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
 /// third one follows. The receipt closes the answered ask.
 #[test]
 fn a_session_idle_after_its_nudge_gets_one_stalled_ask_and_its_answers_are_applied() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = Arc::new(TestWorkspace::new(
         &db,
@@ -332,8 +335,9 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
     );
 }
 
-/// A worker idle at its own `worker_question` waits for a person, not
-/// stalled: nothing is typed until the answer, and no nudge follows it.
+/// A worker whose turn ended at its own `worker_question` waits for a
+/// person, not stalled: nothing is sent to it until the answer, and no
+/// nudge follows it.
 #[test]
 fn a_worker_idle_at_its_question_is_not_nudged() {
     let (_dir, repo, db) = fixture();
@@ -341,10 +345,10 @@ fn a_worker_idle_at_its_question_is_not_nudged() {
         &db,
         false,
         r#"
-"$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
-idle
-while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
-commit work; receipt "$(git rev-parse HEAD)"; idle; await_exit
+case "$TURN" in
+1) "$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70 ;;
+*) commit work; receipt "$(git rev-parse HEAD)" ;;
+esac
 "#,
     ));
     let options = stall_options();
@@ -366,12 +370,14 @@ commit work; receipt "$(git rev-parse HEAD)"; idle; await_exit
     );
     thread::sleep(IDLE);
     await_passes(&passes, SOME_PASSES);
-    assert!(backend.texts().is_empty(), "{:?}", backend.texts());
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    let texts = session_texts(&backend, &run);
+    assert!(texts.is_empty(), "{texts:?}");
     queue.answer(ask.id, "blue").unwrap();
     let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(backend.texts().len(), 1);
+    assert_eq!(session_texts(&backend, &run).len(), 1);
     let detail = queue.show(TaskId::new(1)).unwrap();
     assert!(payloads(&detail, "stall_nudged").is_empty());
     assert!(payloads(&detail, "stall_resolved").is_empty());
@@ -383,6 +389,7 @@ commit work; receipt "$(git rev-parse HEAD)"; idle; await_exit
 /// ask itself once the session moves on with its receipt.
 #[test]
 fn an_adopted_stalled_session_is_neither_nudged_nor_asked_again() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = Arc::new(TestWorkspace::new(
         &db,
@@ -474,6 +481,7 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
 /// stays idle, rather than as a person stepping in.
 #[test]
 fn a_stalled_ask_closed_after_wait_is_asked_again() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = Arc::new(TestWorkspace::new(
         &db,
@@ -539,6 +547,7 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
 /// the nudge off the same way and is not counted.
 #[test]
 fn an_input_the_supervisor_did_not_send_holds_the_nudge_and_is_preempted() {
+    interactive_workers();
     for (prompt, preempted) in [
         ("please also update the docs", 1),
         (
@@ -601,6 +610,7 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
 /// agent not at work on the screen, the session is nudged as idle.
 #[test]
 fn an_input_whose_turn_never_ended_is_nudged_past_the_threshold() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(
         &db,

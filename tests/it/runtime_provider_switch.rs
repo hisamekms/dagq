@@ -609,6 +609,7 @@ const LIMIT_SCREEN: &str = "\
 /// review passes and the run lands.
 #[test]
 fn an_interactive_claude_session_at_its_limit_moves_to_headless_codex() {
+    interactive_workers();
     let (dir, repo, db) = fixture();
     let codex = headless_codex(dir.path(), &db);
     set_turns(dir.path(), FINISH);

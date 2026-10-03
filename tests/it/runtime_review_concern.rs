@@ -187,16 +187,16 @@ fn a_high_send_back_revises_the_live_session() {
                 "reason_category": null, "applied": true, "escalated_because": null})
         ]
     );
-    let texts = backend.texts();
+    let texts = session_texts(&backend, &detail.runs[0]);
     assert_eq!(texts.len(), 1);
-    assert!(texts[0].1.contains("(revise 1 of 2)"), "{}", texts[0].1);
+    assert!(texts[0].contains("(revise 1 of 2)"), "{}", texts[0]);
     assert_eq!(reviewer.prompts().len(), 2);
 }
 
-/// A worker that takes one revise request and ends without rewriting its
-/// receipt.
-const ENDS_ON_REVISE: &str = "commit work; receipt \"$(git rev-parse HEAD)\"; idle; \
-     while [ ! -f \"$MESSAGE\" ]; do sleep 0.1; done; rm \"$MESSAGE\"";
+/// A worker that takes one revise request and ends its turn without
+/// rewriting its receipt.
+const ENDS_ON_REVISE: &str =
+    "if [ \"$TURN\" -eq 1 ]; then commit work; receipt \"$(git rev-parse HEAD)\"; fi";
 
 /// The ask after a `send_back` the runtime applied that the session did
 /// not fix (task 1392): it says the review returned the concern and the
@@ -250,7 +250,7 @@ fn assert_asked_after_the_applied_send_back(db: &Path, run: &TaskRun, why: &str)
 }
 
 /// A `send_back` of high confidence the runtime applied, whose session
-/// ended without fixing it, asks a person as that concern
+/// ended its turn without fixing it, asks a person as that concern
 /// ([`assert_asked_after_the_applied_send_back`]).
 #[test]
 fn an_applied_send_back_the_session_did_not_fix_asks_as_the_concern() {
@@ -269,7 +269,7 @@ fn an_applied_send_back_the_session_did_not_fix_asks_as_the_concern() {
     assert_asked_after_the_applied_send_back(
         &db,
         &run,
-        "the session ended before it rewrote the receipt after revise 1",
+        "the session went idle without rewriting the receipt after revise 1",
     );
 }
 
@@ -315,7 +315,7 @@ fn a_discard_concern_asks_a_person_with_the_recommendation() {
         assert!(ask.question.contains(part), "{part} in {}", ask.question);
     }
     assert!(payloads(&detail, "revise_requested").is_empty());
-    assert!(backend.texts().is_empty());
+    assert!(session_texts(&backend, &run).is_empty());
     let kinds = event_kinds(&detail);
     assert!(position(&kinds, "workspace_closed") < position(&kinds, "ask_opened"));
 }
@@ -563,6 +563,7 @@ fn an_adopter_asks_with_the_reasons_of_the_subagent_that_sent_the_run_back() {
 /// ([`assert_asked_after_the_applied_send_back`]).
 #[test]
 fn an_adopter_asks_as_the_concern_when_the_session_does_not_fix_its_send_back() {
+    interactive_workers();
     for recorded in [true, false] {
         adopt_an_unfixed_send_back(recorded);
     }

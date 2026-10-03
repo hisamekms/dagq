@@ -1,7 +1,10 @@
 //! Runtime tests: the `stalled` alert's recovery job (task 442, ADR-0047
 //! decisions 30, 31, 39 and 40): a session idle without a receipt after its
 //! nudge, and a text the supervisor typed that the session did not take,
-//! go to the recovery job before any ask.
+//! go to the recovery job before any ask. The tests run interactive
+//! sessions because their stall is an interactive session's (an idle marker
+//! with background work, a typed nudge or text it did not take); a headless
+//! session's is in `runtime_headless` and `runtime_headless_stall` (goal 92).
 use crate::runtime_support;
 use dagq::domain::EventKind;
 
@@ -174,6 +177,7 @@ fn pair(detection: &str, outcome: &str) -> (String, String) {
 /// receipt, and no ask opens.
 #[test]
 fn an_idle_after_the_nudge_is_repaired_by_the_recovery_job_without_an_ask() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let (backend, reviewer, supervisor) = supervise_stalled(
         &db,
@@ -249,6 +253,7 @@ fn an_idle_after_the_nudge_is_repaired_by_the_recovery_job_without_an_ask() {
 /// watch closes it once the session moves on.
 #[test]
 fn a_recovery_job_of_low_confidence_raises_one_stalled_ask_that_closes_when_the_session_moves() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let ((backend, _reviewer, supervisor), passes) = supervise_stalled_counted(
         &db,
@@ -314,6 +319,7 @@ fn a_recovery_job_of_low_confidence_raises_one_stalled_ask_that_closes_when_the_
 /// alert's three jobs the next look asks the inbox without a fourth.
 #[test]
 fn a_stall_past_its_three_recovery_jobs_is_asked_without_a_fourth() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let wait = repair(json!({"action": "wait", "recheck_after_secs": 1}), "slow");
     let (backend, reviewer, supervisor) = supervise_stalled(
@@ -361,6 +367,7 @@ fn a_stall_past_its_three_recovery_jobs_is_asked_without_a_fourth() {
 /// closes once the session moves on.
 #[test]
 fn a_failed_stalled_job_raises_the_stalled_ask() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let ((backend, reviewer, supervisor), passes) = supervise_stalled_counted(
         &db,
@@ -410,6 +417,7 @@ fn a_failed_stalled_job_raises_the_stalled_ask() {
 /// job's options, question and reason category.
 #[test]
 fn an_escalated_recovery_job_raises_the_stalled_ask_with_its_category() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let (backend, _reviewer, supervisor) = supervise_stalled(
         &db,
@@ -452,6 +460,7 @@ fn an_escalated_recovery_job_raises_the_stalled_ask_with_its_category() {
 /// applied, and opens the `stalled` ask saying why.
 #[test]
 fn a_repair_whose_precondition_fails_raises_the_stalled_ask() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let (backend, _reviewer, supervisor) = supervise_stalled(
         &db,
@@ -504,6 +513,7 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
 /// ask; its `stop_processes` is applied and the session goes on.
 #[test]
 fn a_send_the_session_did_not_take_is_repaired_by_the_recovery_job() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let (backend, _reviewer, supervisor) = supervise_stalled(
         &db,
@@ -563,6 +573,7 @@ fn a_send_the_session_did_not_take_is_repaired_by_the_recovery_job() {
 /// job's detection.
 #[test]
 fn an_adopted_stall_whose_job_waits_gets_no_second_nudge_job_or_ask() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = Arc::new(TestWorkspace::new(
         &db,
@@ -634,6 +645,7 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
 /// ask; the ask closes once the session moves on.
 #[test]
 fn a_send_the_job_cannot_repair_becomes_the_stalled_ask_in_the_first_session() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let (backend, _reviewer, supervisor) = supervise_stalled(
         &db,
@@ -713,6 +725,7 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
 /// session resolves it and the run lands, with no ask.
 #[test]
 fn a_stalled_session_the_job_resumes_is_parked_resumed_and_lands() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = Arc::new(TestWorkspace::new(
         &db,
@@ -786,6 +799,7 @@ await_exit
 /// `send_instruction` is applied, not refused for a session not idle.
 #[test]
 fn an_instruction_reaches_a_session_whose_interrupted_turn_left_no_idle_marker() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let (backend, _reviewer, supervisor) = supervise_stalled(
         &db,

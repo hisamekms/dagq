@@ -118,7 +118,6 @@ fn hot_fixture() -> (Fixture, PathBuf, PathBuf) {
 /// `defer_max_secs`, which holds across supervisors.
 #[test]
 fn a_task_meeting_a_run_on_a_hotspot_waits_and_the_next_one_is_claimed() {
-    headless_workers();
     let (_dir, repo, db) = hot_fixture();
     let (hot, near, apart) = {
         let mut queue = SqliteQueue::open(&db).unwrap();
@@ -222,7 +221,6 @@ fn a_task_meeting_a_run_on_a_hotspot_waits_and_the_next_one_is_claimed() {
 /// the deferrals in place. Each change is recorded once.
 #[test]
 fn a_changed_conflicts_table_is_read_again_without_a_restart() {
-    headless_workers();
     let (_dir, repo, db) = hot_fixture();
     let config = repo.join("dagq.toml");
     // Written whole by a rename: the supervisor reads it every pass, and a

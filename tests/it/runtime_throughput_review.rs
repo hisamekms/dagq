@@ -153,7 +153,6 @@ printf '```next_move\n{"summary": "split the e2e", "why": "verify is the constra
 
 #[test]
 fn an_hour_no_rule_meets_starts_no_agent() {
-    headless_workers();
     let (_dir, _repo, db) = fixture();
     land(&db, &[4; 28]);
     let provider = ReviewProvider::new("exit 9");
@@ -192,7 +191,6 @@ fn an_hour_no_rule_meets_starts_no_agent() {
 
 #[test]
 fn an_hour_a_rule_meets_is_reviewed_saved_and_told_to_the_inbox_and_the_job_only_reads() {
-    headless_workers();
     let (_dir, _repo, db) = fixture();
     let mut hours = vec![4; 27];
     hours.push(10);
@@ -331,7 +329,6 @@ fn an_hour_a_rule_meets_is_reviewed_saved_and_told_to_the_inbox_and_the_job_only
 
 #[test]
 fn the_weekly_review_records_its_next_move_as_a_finding_marked_for_a_proposal() {
-    headless_workers();
     let (_dir, _repo, db) = fixture();
     let provider = ReviewProvider::new(REVIEWER);
     let done = review(&db, &provider, &options(ReviewMode::Weekly)).unwrap();
@@ -373,7 +370,6 @@ pub(crate) fn attentions(db: &Path) -> Vec<Value> {
 
 #[test]
 fn a_preparation_failure_is_finished_once_and_told_to_the_inbox() {
-    headless_workers();
     let (_dir, _repo, db) = fixture();
     let root = dagq::throughput_review::reviews_dir(&db.canonicalize().unwrap());
     fs::create_dir_all(root.parent().unwrap()).unwrap();
@@ -425,7 +421,6 @@ fn a_preparation_failure_is_finished_once_and_told_to_the_inbox() {
 
 #[test]
 fn a_failed_review_is_recorded_and_told_to_the_inbox_as_a_notice() {
-    headless_workers();
     let (_dir, _repo, db) = fixture();
     let provider = ReviewProvider::new("echo broken >&2; exit 2");
     let failed = review(&db, &provider, &options(ReviewMode::Daily)).unwrap();
@@ -513,7 +508,6 @@ fn mark_the_days(db: &Path, per_day: usize) {
 
 #[test]
 fn the_daily_and_weekly_reviews_of_inputs_of_mbs_start_their_agent_with_a_small_prompt() {
-    headless_workers();
     let (_dir, _repo, db) = fixture();
     mark_the_days(&db, 150);
     let provider = ReviewProvider::new(REVIEWER);
@@ -642,7 +636,6 @@ fn review_outcomes(db: &Path) -> Vec<(String, String)> {
 
 #[test]
 fn the_supervisor_starts_each_review_due_once_without_a_run_slot() {
-    headless_workers();
     let (_dir, repo, db) = fixture();
     SqliteQueue::open(&db)
         .unwrap()
@@ -727,7 +720,6 @@ fn the_supervisor_starts_each_review_due_once_without_a_run_slot() {
 
 #[test]
 fn a_failing_review_stops_no_claim_nor_landing() {
-    headless_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
@@ -788,7 +780,6 @@ fn a_failing_review_stops_no_claim_nor_landing() {
 
 #[test]
 fn the_reply_uses_only_stdout_for_text_and_structured_providers() {
-    headless_workers();
     let reply = "## Conclusion\n- unchanged\n\n## Details\nOnly the reply.";
     for output in [reply.to_owned(), json!({"reply": reply}).to_string()] {
         let (_dir, _repo, db) = fixture();

@@ -38,11 +38,7 @@ fn the_sweep_closes_the_workspaces_of_failed_runs_the_triage_does_not_take() {
         add_ready_task(&mut queue, "second task", &[]);
         add_ready_task(&mut queue, "third task", &[]);
     }
-    let backend = TestWorkspace::new(
-        &db,
-        false,
-        "commit work; receipt \"$(git rev-parse HEAD)\"; exit 7",
-    );
+    let backend = TestWorkspace::new(&db, false, "commit work; exit 7");
     supervise(&db, &repo, &backend).unwrap();
     backend.join();
     let mut queue = SqliteQueue::open(&db).unwrap();
@@ -194,7 +190,7 @@ fn the_sweep_closes_every_workspace_left_open_by_a_landed_run() {
 /// fails.
 const BUILDING_AGENT: &str = "commit work; mkdir -p target/debug/deps llvm-cov-target; \
      head -c 65536 /dev/zero > target/debug/deps/big; ln target/debug/deps/big target/debug/big; \
-     echo p > llvm-cov-target/profraw; receipt \"$(git rev-parse HEAD)\"; exit 7";
+     echo p > llvm-cov-target/profraw; exit 7";
 
 /// The payloads of a run's events of `kind`.
 fn payloads_of(queue: &SqliteQueue, run: &TaskRun, kind: &str) -> Vec<Value> {

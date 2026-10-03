@@ -3,7 +3,9 @@
 //! what each one sends for the screen it reads, the close of the workspace
 //! of a run whose review passed once they are used up, the `stuck_exit`
 //! path of any other run, and a supervisor taking the resume over that
-//! carries the retries on.
+//! carries the retries on. The tests run interactive sessions because the
+//! retries read a terminal session's screen and type `/exit` into it,
+//! which a headless session does not get (goal 92).
 use crate::common;
 use crate::runtime_adopt::backdate_event;
 use crate::runtime_handoff::hand_off_when;
@@ -81,6 +83,7 @@ fn stuck_exit_asks(queue: &mut SqliteQueue) -> usize {
 /// counted by `stats`, and the run lands without a recovery job or ask.
 #[test]
 fn a_resumed_sessions_held_exit_is_typed_again_into_a_ready_input_box() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (_, first_landed) = parked_conflict(&repo, &db, &backend);
@@ -136,6 +139,7 @@ fn a_resumed_sessions_held_exit_is_typed_again_into_a_ready_input_box() {
 /// a session that exited: resolved and approved, it lands, its lease kept.
 #[test]
 fn used_up_retries_over_a_dialog_close_a_reviewed_resume_and_judge_it() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (run, first_landed) = parked_conflict(&repo, &db, &backend);
@@ -202,6 +206,7 @@ fn used_up_retries_over_a_dialog_close_a_reviewed_resume_and_judge_it() {
 /// goes to the `stuck_exit` recovery job and ask, its workspace kept.
 #[test]
 fn used_up_retries_of_an_unreviewed_resume_go_to_the_stuck_exit_ask() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (run, _) = parked_conflict(&repo, &db, &backend);
@@ -255,6 +260,7 @@ fn used_up_retries_of_an_unreviewed_resume_go_to_the_stuck_exit_ask() {
 /// repaired as `exit_retry`.
 #[test]
 fn an_unsent_exit_of_a_resumed_session_is_retried() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (_, first_landed) = parked_conflict(&repo, &db, &backend);
@@ -293,12 +299,14 @@ fn an_unsent_exit_of_a_resumed_session_is_retried() {
 /// the second is repaired with its two attempts.
 #[test]
 fn a_resume_taken_over_after_a_handoff_carries_its_exit_retries_on() {
+    interactive_workers();
     resume_taken_over_after_a_retry(true, false);
 }
 
 /// The same for a resume adopted from a supervisor that died.
 #[test]
 fn an_adopted_resume_carries_its_exit_retries_on() {
+    interactive_workers();
     resume_taken_over_after_a_retry(false, false);
 }
 
@@ -308,6 +316,7 @@ fn an_adopted_resume_carries_its_exit_retries_on() {
 /// making all of them anew (ADR-0047 decision 38).
 #[test]
 fn a_resume_taken_over_after_a_retry_answered_a_dialog_does_not_retry_anew() {
+    interactive_workers();
     resume_taken_over_after_a_retry(true, true);
 }
 

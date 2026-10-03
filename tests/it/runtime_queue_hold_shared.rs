@@ -3,7 +3,8 @@
 //! answer to the held runs in its own slots, once each
 //! (`hold_answer_applied`), and the ask closes once every run in it was
 //! applied: `cancel_affected` gives up the run the other supervisor
-//! watches too, and `done` types the text to go on into its session.
+//! watches too, and `done` sends each session the text to go on. The
+//! sessions are headless, held by a turn that failed at the login.
 use crate::runtime_support;
 
 use dagq::domain::queue_hold::CONTINUE_TEXT;
@@ -33,6 +34,28 @@ fn one_slot(stop: &Arc<AtomicBool>) -> SuperviseOptions {
     }
 }
 
+/// A headless turn that fails at a login that ran out, as Claude Code's
+/// does (goal 92).
+const LOGIN_RAN_OUT: &str = r#"printf '%s\n' '{"type":"assistant","error":"authentication_failed","message":{"model":"<synthetic>","content":[{"type":"text","text":"Not logged in"}]}}'; fail "Not logged in""#;
+
+/// A worker whose first turn, once `gate` (when given) exists, fails at a
+/// login that ran out, and whose later turns commit and write the receipt.
+fn held_at_login(gate: Option<&Path>) -> String {
+    let wait = gate.map_or(String::new(), |gate| {
+        format!("while [ ! -f {} ]; do sleep 0.05; done; ", shell_path(gate))
+    });
+    format!(
+        "case \"$TURN\" in\n1) {wait}{LOGIN_RAN_OUT} ;;\n*) commit work; receipt \"$(git rev-parse HEAD)\" ;;\nesac"
+    )
+}
+
+/// Let `run`'s headless session end: its wrapper takes the exit request.
+fn end_session(run: &TaskRun) {
+    let exit = dagq::domain::turn::exit_path(Path::new(run.run_dir().unwrap()));
+    fs::create_dir_all(exit.parent().unwrap()).unwrap();
+    fs::write(&exit, "").unwrap();
+}
+
 /// Two supervisors with one slot each, a task each, and both sessions at
 /// a login that ran out: the two runs join one authentication ask.
 struct TwoHeld {
@@ -48,19 +71,13 @@ struct TwoHeld {
     ask: dagq::domain::Ask,
 }
 
-fn two_held(script: &str) -> TwoHeld {
+fn two_held() -> TwoHeld {
     let (dir, repo, db) = fixture();
     add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "second task", &[]);
-    // The sessions work (no idle, a working screen) until both runs are
-    // claimed: a login seen before would hold the second claim.
+    // The sessions work until both runs are claimed: a login seen before
+    // would hold the second claim.
     let gate = db.with_extension("gate");
-    let script = format!(
-        "while [ ! -f \"{}\" ]; do sleep 0.05; done\n{script}",
-        gate.display()
-    );
-    let backend = TestWorkspace::new(&db, false, &script);
-    *backend.screen.lock().unwrap() = WORK_SCREEN.into();
-    let backend = Arc::new(backend);
+    let backend = Arc::new(TestWorkspace::new(&db, false, &held_at_login(Some(&gate))));
     let stop = Arc::new(AtomicBool::new(false));
     let start = || {
         let (db, repo, backend, options) =
@@ -81,7 +98,6 @@ fn two_held(script: &str) -> TwoHeld {
             event_kinds(&queue.show(TaskId::new(*task)).unwrap()).contains(&"agent_started")
         })
     });
-    *backend.screen.lock().unwrap() = LOGIN_SCREEN.into();
     fs::write(&gate, "").unwrap();
     wait_until(&db, Duration::from_secs(30), |queue| {
         [1, 2].iter().all(|task| {
@@ -152,12 +168,7 @@ fn sorted_value(list: &Value) -> Value {
 /// both as released, and which supervisor released each.
 #[test]
 fn cancel_affected_gives_up_the_held_runs_of_every_supervisor() {
-    let held = two_held(
-        r#"
-commit work; idle
-while [ ! -f "$EXIT.go" ]; do sleep 0.05; done
-"#,
-    );
+    let held = two_held();
     let (db, runs) = (&held.db, &held.runs);
     SqliteQueue::open(db)
         .unwrap()
@@ -173,11 +184,7 @@ while [ ! -f "$EXIT.go" ]; do sleep 0.05; done
         joined(supervisor, "a supervisor to stop").unwrap();
     }
     for run in runs {
-        fs::write(
-            exit_request_path(run.run_dir().unwrap()).with_extension("go"),
-            "",
-        )
-        .unwrap();
+        end_session(run);
     }
     held.backend.join();
     let mut queue = SqliteQueue::open(db).unwrap();
@@ -210,13 +217,7 @@ while [ ! -f "$EXIT.go" ]; do sleep 0.05; done
 /// `queue_hold_applied` that lists both as continued.
 #[test]
 fn done_tells_the_held_sessions_of_every_supervisor_to_go_on() {
-    let held = two_held(
-        r#"
-commit work; idle
-while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
-while [ ! -f "$EXIT.go" ]; do sleep 0.05; done
-"#,
-    );
+    let held = two_held();
     let (db, runs) = (&held.db, &held.runs);
     SqliteQueue::open(db)
         .unwrap()
@@ -233,23 +234,21 @@ while [ ! -f "$EXIT.go" ]; do sleep 0.05; done
     }
     held.stop.store(true, Ordering::SeqCst);
     for run in runs {
-        fs::write(
-            exit_request_path(run.run_dir().unwrap()).with_extension("go"),
-            "",
-        )
-        .unwrap();
+        end_session(run);
     }
     for supervisor in held.supervisors {
         joined(supervisor, "a supervisor to stop").unwrap();
     }
     held.backend.join();
-    let texts = held.backend.texts();
-    let continues: Vec<_> = texts
-        .iter()
-        .filter(|(_, text)| text == CONTINUE_TEXT)
-        .collect();
-    assert_eq!(continues.len(), 2, "{texts:?}");
-    assert_ne!(continues[0].0, continues[1].0, "{texts:?}");
+    // Each session got the text to go on once, as its next turn.
+    for run in runs {
+        let texts = session_texts(&held.backend, run);
+        let continues = texts
+            .iter()
+            .filter(|text| text.starts_with(CONTINUE_TEXT))
+            .count();
+        assert_eq!(continues, 1, "{texts:?}");
+    }
     let mut queue = SqliteQueue::open(db).unwrap();
     for run in runs {
         let detail = queue.show(run.task_id()).unwrap();
@@ -301,16 +300,7 @@ fn the_answered_ask_waits_for_the_runs_another_live_supervisor_leases() {
         .unwrap()
         .execute("DELETE FROM run_leases WHERE run_id=?1", [gone.id()])
         .unwrap();
-    let backend = TestWorkspace::new(
-        &db,
-        false,
-        r#"
-commit work; idle
-while [ ! -f "$EXIT.go" ]; do sleep 0.05; done
-"#,
-    );
-    *backend.screen.lock().unwrap() = LOGIN_SCREEN.into();
-    let backend = Arc::new(backend);
+    let backend = Arc::new(TestWorkspace::new(&db, false, &held_at_login(None)));
     let stop = Arc::new(AtomicBool::new(false));
     let options = one_slot(&stop);
     let passes = options.passes.clone();
@@ -357,11 +347,7 @@ while [ ! -f "$EXIT.go" ]; do sleep 0.05; done
     });
     stop.store(true, Ordering::SeqCst);
     joined(supervisor, "the supervisor to stop").unwrap();
-    fs::write(
-        exit_request_path(own.run_dir().unwrap()).with_extension("go"),
-        "",
-    )
-    .unwrap();
+    end_session(&own);
     backend.join();
     let events = queue_events(&db, "queue_hold_applied");
     assert_eq!(events.len(), 1, "{events:?}");

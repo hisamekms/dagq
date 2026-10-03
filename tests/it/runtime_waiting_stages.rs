@@ -50,10 +50,24 @@ fn hold_past_the_stage_timeout(
     held
 }
 
-/// A worker that asks a `worker_question` while it revises: once the revise
-/// request arrives it asks, goes idle, waits for the answer in `$MESSAGE`
-/// and commits it.
-const REVISE_ASKING_AGENT: &str = r#"
+/// A worker that asks a `worker_question` while it revises: its turn of the
+/// revise request asks, and the turn of the answer commits the answer.
+const REVISE_ASKING_AGENT: &str = concat!(
+    r#"answer_to() { printf '%s\n' "$PROMPT" | head -n 1 | tr -d '\n' > "$1"; }"#,
+    r#"
+case "$PROMPT" in
+"answer to ask "*) answer_to answer.txt; git add answer.txt; git commit -q -m answer
+  receipt "$(git rev-parse HEAD)" ;;
+*) if [ "$TURN" -eq 1 ]; then commit work; receipt "$(git rev-parse HEAD)"
+   else "$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which line?' --cmux /usr/bin/true > /dev/null || exit 70
+   fi ;;
+esac
+"#
+);
+
+/// [`REVISE_ASKING_AGENT`] in an interactive session, which waits for the
+/// revise request and the answer in `$MESSAGE`.
+const REVISE_ASKING_SESSION: &str = r#"
 commit work; receipt "$(git rev-parse HEAD)"; idle
 while [ ! -f "$MESSAGE" ]; do sleep 0.05; done; rm "$MESSAGE"
 "$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which line?' --cmux /usr/bin/true > /dev/null || exit 70
@@ -70,18 +84,22 @@ printf 'two\n' > two.txt; git add two.txt; git commit -q -m two
 receipt "$(git rev-parse HEAD)"; idle; await_exit
 "#;
 
-/// A worker that asks at once and commits the answer it got (`first.txt`).
-const ASKING_AGENT: &str = r#"
-"$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
-idle
-while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
-cp "$MESSAGE" first.txt; git add first.txt; git commit -q -m answer
-receipt "$(git rev-parse HEAD)"; idle; await_exit
-"#;
+/// A worker that asks at once and commits the answer it got (`first.txt`)
+/// in the turn of the answer.
+const ASKING_AGENT: &str = concat!(
+    r#"answer_to() { printf '%s\n' "$PROMPT" | head -n 1 | tr -d '\n' > "$1"; }"#,
+    r#"
+case "$PROMPT" in
+"answer to ask "*) answer_to first.txt; git add first.txt; git commit -q -m answer
+  receipt "$(git rev-parse HEAD)" ;;
+*) "$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70 ;;
+esac
+"#
+);
 
 /// A resumed session that asks a `worker_question` once the resolution
-/// request arrived (after `$EXIT.gate` when `gated`), goes idle, and
-/// resolves the conflict once the answer came.
+/// request arrived (after `$EXIT.gate` when `gated`) and ends its turn,
+/// and resolves the conflict in the turn of the answer.
 fn resume_asking(gated: bool) -> String {
     let gate = if gated {
         "while [ ! -f \"$EXIT.gate\" ]; do sleep 0.05; done"
@@ -89,11 +107,12 @@ fn resume_asking(gated: bool) -> String {
         ":"
     };
     format!(
-        r#"await_message; rm "$MESSAGE"; {gate}
-"$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Keep which side?' --cmux /usr/bin/true > /dev/null || exit 70
-idle
-while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
-resolve; receipt "$(git rev-parse HEAD)"; idle; await_exit
+        r#"await_message
+case "$PROMPT" in
+"answer to ask "*) resolve; receipt "$(git rev-parse HEAD)" ;;
+*) {gate}
+"$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Keep which side?' --cmux /usr/bin/true > /dev/null || exit 70 ;;
+esac
 "#
     )
 }
@@ -313,12 +332,12 @@ fn a_question_while_resuming_waits_outside_the_slot_and_gets_its_answer() {
         ended[0]["waited_secs"].as_u64().unwrap() >= STAGE_TIMEOUT.as_secs(),
         "{ended:?}"
     );
+    let texts = session_texts(&backend, &detail.runs[0]);
     assert!(
-        backend
-            .texts()
-            .contains(&(workspace_id(2), format!("answer to ask {ask}: theirs"))),
-        "{:?}",
-        backend.texts()
+        texts
+            .iter()
+            .any(|text| text.starts_with(&format!("answer to ask {ask}: theirs"))),
+        "{texts:?}"
     );
     let kinds = kinds_of(&db, 2);
     let resumed = at(&kinds, "resume_started");
@@ -410,9 +429,10 @@ fn a_resume_question_past_the_limit_waits_in_its_slot_with_its_clock_stopped() {
 /// stays open; the answer then reaches the live session, and the run lands.
 #[test]
 fn an_adopted_revise_keeps_waiting_outside_the_slot() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "second", &[]);
-    let backend = TestWorkspace::new(&db, false, REVISE_ASKING_AGENT);
+    let backend = TestWorkspace::new(&db, false, REVISE_ASKING_SESSION);
     backend.script_for(2, BESIDE_AGENT);
     let backend = Arc::new(backend);
     let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");

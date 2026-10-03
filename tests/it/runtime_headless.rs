@@ -637,13 +637,16 @@ fn a_stop_answer_ends_the_headless_session_and_its_run_goes_to_recovery() {
 #[test]
 fn a_stop_answer_to_a_run_out_of_its_slot_waits_for_the_slot() {
     let (dir, repo, db, backend) = headless_fixture(&[]);
-    set_turns(dir.path(), "denied; say refused");
-    // The task that takes the slot meanwhile finishes once the test lets it.
+    // The task that takes the slot meanwhile (task 3, headless too)
+    // finishes once the test lets it; the task's turns are refused.
     let gate = dir.path().join("gate");
-    backend.script_for(
-        3,
+    set_turns(
+        dir.path(),
         &format!(
-            "while [ ! -f {} ]; do sleep 0.05; done\n{VALID_AGENT}",
+            "case \"$PROMPT\" in\n\
+             *'dagq task 3,'*) while [ ! -f {} ]; do sleep 0.05; done; {VALID_AGENT} ;;\n\
+             *) denied; say refused ;;\n\
+             esac",
             shell_path(&gate)
         ),
     );

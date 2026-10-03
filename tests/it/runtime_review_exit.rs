@@ -1,5 +1,8 @@
 //! Runtime tests: the `/exit` after a run's review, one that never got
-//! there, and a session that holds it back (`stuck_exit`).
+//! there, and a session that holds it back (`stuck_exit`). The tests run
+//! interactive sessions because their subject is the `/exit` typed into a
+//! terminal session (cmux timing it out, the session holding it back past
+//! its exit timeout), which a headless session does not get (goal 92).
 use crate::common;
 use crate::runtime_support;
 use dagq::domain::EventKind;
@@ -45,6 +48,7 @@ fn wait_for_stuck_exit(db: &Path) {
 /// and the run goes on without being given up (task 354).
 #[test]
 fn an_exit_that_timed_out_before_reaching_the_session_is_sent_again() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     backend.exit_unsent.store(1, Ordering::SeqCst);
@@ -72,6 +76,7 @@ fn an_exit_that_timed_out_before_reaching_the_session_is_sent_again() {
 /// asked, and `exit_unsent` records it (task 354).
 #[test]
 fn an_exit_that_never_got_there_closes_a_sound_passed_run_and_lands_it() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
@@ -143,6 +148,7 @@ fn an_exit_that_never_got_there_closes_a_sound_passed_run_and_lands_it() {
 /// 354).
 #[test]
 fn an_exit_that_never_got_there_asks_for_a_run_that_cannot_land() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     backend.exit_unsent.store(usize::MAX, Ordering::SeqCst);
@@ -199,6 +205,7 @@ fn an_exit_that_never_got_there_asks_for_a_run_that_cannot_land() {
 /// landed with its session alive: the `stuck_exit` ask says why (task 354).
 #[test]
 fn an_exit_that_never_got_there_asks_when_the_workspace_cannot_be_closed() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     backend.exit_unsent.store(usize::MAX, Ordering::SeqCst);
@@ -252,6 +259,7 @@ fn an_exit_that_never_got_there_asks_when_the_workspace_cannot_be_closed() {
 /// `stuck_exit` ask, saying why (task 354).
 #[test]
 fn an_exit_that_never_got_there_asks_for_a_passed_run_whose_worktree_changed() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     backend.exit_unsent.store(usize::MAX, Ordering::SeqCst);
@@ -392,6 +400,7 @@ fn supervise_recovering_counted(
 /// the workspace and lands the run, with no ask and no second `/exit`.
 #[test]
 fn a_stuck_exit_after_a_pass_is_closed_and_landed_by_its_recovery_job() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
@@ -505,6 +514,7 @@ pub(crate) fn failed_stuck_exit_job_ask(
 /// closed by the runtime and the run lands.
 #[test]
 fn a_failed_stuck_exit_job_opens_the_stuck_exit_ask_answered_exit() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
     let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
@@ -545,6 +555,7 @@ fn a_failed_stuck_exit_job_opens_the_stuck_exit_ask_answered_exit() {
 /// alert; the run lands once the session exits by itself later.
 #[test]
 fn a_failed_stuck_exit_job_opens_the_stuck_exit_ask_answered_wait() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
     let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
@@ -582,6 +593,7 @@ fn a_failed_stuck_exit_job_opens_the_stuck_exit_ask_answered_wait() {
 /// its reason category.
 #[test]
 fn a_stuck_exit_repair_that_does_not_hold_becomes_the_stuck_exit_ask() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
     let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
@@ -645,6 +657,7 @@ fn a_stuck_exit_repair_that_does_not_hold_becomes_the_stuck_exit_ask() {
 /// landing), closes that ask once the session exits, and lands the run.
 #[test]
 fn adopted_run_waiting_for_its_exit_after_a_pass_asks_once_and_lands() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
     let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));

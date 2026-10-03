@@ -445,7 +445,7 @@ fn supervise_after_handoff_with(
 /// supervisor ends its loop while the worker still works, keeping its
 /// registration and the run's lease, and the process that continues it
 /// under the same token takes the run over without an adoption and
-/// drives it to its receipt, one `/exit` and validation.
+/// drives it to its receipt, one exit request and validation.
 #[test]
 fn a_handoff_leaves_the_session_running_and_the_next_process_drives_it_on() {
     let (_dir, repo, db) = fixture();
@@ -465,6 +465,11 @@ fn a_handoff_leaves_the_session_running_and_the_next_process_drives_it_on() {
     assert_eq!(queue.run_lease(run.id()).unwrap().unwrap().token, token);
     // The session was not asked anything.
     assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 0);
+    assert!(
+        !Path::new(run.run_dir().unwrap())
+            .join("turns/exit")
+            .exists()
+    );
 
     let next = {
         let (db, repo, backend, token) = (db.clone(), repo.clone(), backend.clone(), token.clone());
@@ -492,7 +497,7 @@ fn a_handoff_leaves_the_session_running_and_the_next_process_drives_it_on() {
     assert_eq!(outcome["outcome"], "finished", "{outcome}");
     assert_eq!(outcome["errors"], json!([]));
     assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
+    assert_exit_sent(&backend, &run, 1);
 
     let detail = queue.show(TaskId::new(1)).unwrap();
     let kinds = event_kinds(&detail);
@@ -545,6 +550,7 @@ fn a_handoff_leaves_the_session_running_and_the_next_process_drives_it_on() {
 /// the run rest once the session exits.
 #[test]
 fn a_handoff_while_a_rejected_run_waits_for_its_exit_sends_no_second_exit() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = Arc::new(TestWorkspace::new(
         &db,
@@ -591,6 +597,7 @@ fn a_handoff_while_a_rejected_run_waits_for_its_exit_sends_no_second_exit() {
 /// no second `/exit`.
 #[test]
 fn a_handoff_while_a_run_waits_for_its_exit_times_it_from_the_recorded_request() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(
         &db,
@@ -651,6 +658,7 @@ fn a_handoff_while_a_run_waits_for_its_exit_times_it_from_the_recorded_request()
 /// once.
 #[test]
 fn a_handoff_after_a_recovery_repair_of_the_exit_times_it_from_the_repair() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(
         &db,
@@ -763,6 +771,7 @@ fn a_handoff_during_a_resume_goes_on_watching_the_resumed_session() {
 /// run lands.
 #[test]
 fn a_handoff_before_the_resume_request_lets_the_next_supervisor_send_it() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
     let (run, first_landed) = parked_conflict(&repo, &db, &backend);
@@ -916,6 +925,7 @@ fn a_handoff_without_its_state_during_a_resume_still_watches_the_session() {
 /// supervisor resumes it again.
 #[test]
 fn a_handoff_without_its_state_after_the_resumed_session_ended_gives_the_lease_back() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
     let (run, _) = parked_conflict(&repo, &db, &backend);
@@ -1024,14 +1034,20 @@ fn a_supervisor_that_stops_during_a_resume_leaves_the_session_to_its_adopter() {
             .count(),
         1
     );
-    assert_eq!(kinds.iter().filter(|k| **k == "exit_requested").count(), 1);
+    // One exit request for the resumed session.
+    let resumed = position(&kinds, "resume_started");
+    assert_eq!(
+        kinds[resumed..]
+            .iter()
+            .filter(|k| **k == "exit_requested")
+            .count(),
+        1,
+        "{kinds:?}"
+    );
     assert!(!kinds.contains(&"supervisor_handed_off"), "{kinds:?}");
-    let requests = backend
-        .texts
-        .lock()
-        .unwrap()
+    let requests = session_texts(&backend, &detail.runs[0])
         .iter()
-        .filter(|(_, text)| text.contains("main is now"))
+        .filter(|text| text.contains("main is now"))
         .count();
     assert_eq!(requests, 1);
     let adopted = adoption_events(&detail);
@@ -1076,6 +1092,10 @@ fn after_a_handoff_a_run_without_state_gives_its_lease_back() {
             .unwrap()
     );
     let run = start_run_under_dead_supervisor(&repo, &db, &backend, "gone-by");
+    // The session ends at the exit request its wrapper takes.
+    let exit = dagq::domain::turn::exit_path(Path::new(run.run_dir().unwrap()));
+    fs::create_dir_all(exit.parent().unwrap()).unwrap();
+    fs::write(&exit, "").unwrap();
     backend.join();
     Connection::open(&db)
         .unwrap()
@@ -1261,11 +1281,13 @@ fn auto_update_builds_runtime_landings_and_retries_on_the_answer() {
 
 #[test]
 fn a_resume_handoff_preserves_the_exit_for_its_background_dialog() {
+    interactive_workers();
     resumed_background_dialog(true);
 }
 
 #[test]
 fn a_resume_without_a_snapshot_recovers_the_exit_for_its_background_dialog() {
+    interactive_workers();
     resumed_background_dialog(false);
 }
 
@@ -1320,16 +1342,19 @@ fn resumed_background_dialog(snapshot: bool) {
 
 #[test]
 fn a_resume_handoff_before_exit_does_not_answer_background_work() {
+    interactive_workers();
     resumed_background_dialog_is_not_answered(true, false);
 }
 
 #[test]
 fn an_adopted_resume_before_exit_does_not_answer_background_work() {
+    interactive_workers();
     resumed_background_dialog_is_not_answered(false, false);
 }
 
 #[test]
 fn an_adopted_resume_with_an_unsent_exit_does_not_answer_background_work() {
+    interactive_workers();
     resumed_background_dialog_is_not_answered(false, true);
 }
 

@@ -51,7 +51,6 @@ fn opus() -> (Value, Value, Value) {
 /// explicitly, and its claim records them without a group.
 #[test]
 fn workers_start_at_opus_medium_by_default() {
-    headless_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     supervise(&db, &repo, &backend).unwrap();
@@ -72,7 +71,6 @@ fn workers_start_at_opus_medium_by_default() {
 /// stay at the default outside any group.
 #[test]
 fn the_trial_alternates_the_mechanical_tasks_of_the_lower_third() {
-    headless_workers();
     let (_dir, repo, db) = fixture();
     fs::write(
         repo.join("dagq.toml"),
@@ -135,7 +133,6 @@ fn the_trial_alternates_the_mechanical_tasks_of_the_lower_third() {
 /// trial off leaves every claim at the default.
 #[test]
 fn claims_choose_the_session_in_their_transaction() {
-    headless_workers();
     let (_dir, _repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     for title in ["b", "c", "d"] {
@@ -188,7 +185,6 @@ fn claims_choose_the_session_in_their_transaction() {
 /// speed and their task-caused rework.
 #[test]
 fn stats_compare_the_groups() {
-    headless_workers();
     let (_dir, _repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     add_ready_task(&mut queue, "b", &[]);
@@ -276,7 +272,6 @@ fn stats_compare_the_groups() {
 /// groups and of the host's Claude version.
 #[test]
 fn a_codex_run_is_outside_the_trial() {
-    headless_workers();
     let (_dir, _repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let codex = queue

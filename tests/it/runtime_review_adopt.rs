@@ -1,5 +1,8 @@
 //! Runtime tests: a revise the supervisor adopts carries over what the
-//! previous supervisor recorded for its live session (task 581).
+//! previous supervisor recorded for its live session (task 581). The
+//! tests run interactive sessions because what they carry over (a dialog
+//! on the screen, an `/exit` typed or not, its timeout) is a terminal
+//! session's (goal 92).
 use crate::{common, runtime_support};
 use dagq::domain::EventKind;
 
@@ -38,6 +41,7 @@ pub(crate) fn screen_hash(screen: &str) -> String {
 /// (ADR-0071), and goes back to its revise once the session moves.
 #[test]
 fn an_adopted_revise_keeps_the_dialog_recorded_before_and_clears_it_at_its_end() {
+    interactive_workers();
     adopt_revise_at_dialog(dagq::domain::waiting::DEFAULT_MAX_WAITING);
 }
 
@@ -45,6 +49,7 @@ fn an_adopted_revise_keeps_the_dialog_recorded_before_and_clears_it_at_its_end()
 /// while the dialog stays up and finds the dialog it adopted.
 #[test]
 fn an_adopted_revise_in_its_slot_does_not_record_its_dialog_again() {
+    interactive_workers();
     adopt_revise_at_dialog(0);
 }
 
@@ -255,6 +260,7 @@ fn adopt_revise_at_dialog(max_waiting: usize) {
 /// `prompt_cleared`, and the run lands (task 742).
 #[test]
 fn an_adopted_revise_leaves_a_dialog_recorded_before_its_request() {
+    interactive_workers();
     let (_dir, repo, db, base, backend, run) = revise_under_dead_supervisor(
         None,
         vec![(
@@ -377,6 +383,7 @@ fn supervise_adopter(
 /// without a second `/exit` or waiting out the exit timeout.
 #[test]
 fn an_adopter_closes_and_lands_a_run_whose_unsent_exit_was_to_land() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
@@ -436,6 +443,7 @@ fn an_adopter_closes_and_lands_a_run_whose_unsent_exit_was_to_land() {
 /// the session exit, the run lands.
 #[test]
 fn an_adopter_asks_when_an_unsent_exit_to_land_no_longer_holds() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     backend.exit_timeout = Duration::from_secs(3600);
@@ -499,6 +507,7 @@ fn an_adopter_asks_when_an_unsent_exit_to_land_no_longer_holds() {
 /// the run goes on to land, where integrate checks it again and parks it.
 #[test]
 fn an_adopter_takes_the_session_as_ended_when_the_workspace_of_an_unsent_exit_is_gone() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     backend.exit_timeout = Duration::from_secs(3600);
@@ -577,6 +586,7 @@ fn an_adopter_takes_the_session_as_ended_when_the_workspace_of_an_unsent_exit_is
 /// 960).
 #[test]
 fn an_adopter_parks_an_unreviewed_head_for_a_resume_when_the_workspace_is_gone() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
@@ -696,6 +706,7 @@ fn an_adopter_parks_an_unreviewed_head_for_a_resume_when_the_workspace_is_gone()
 /// why, and the run takes the `stuck_exit` path as before (task 960).
 #[test]
 fn an_adopter_keeps_an_unreviewed_head_on_the_stuck_exit_path_while_the_workspace_is_listed() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
@@ -817,6 +828,7 @@ fn reviewed_run_asked_to_exit(
 /// waiting the timeout again and types no second `/exit`.
 #[test]
 fn an_adopted_exit_after_a_passed_review_times_out_from_its_recorded_request() {
+    interactive_workers();
     adopted_exit_after_review_times_out(false);
 }
 
@@ -824,6 +836,7 @@ fn an_adopted_exit_after_a_passed_review_times_out_from_its_recorded_request() {
 /// `approve_landing` ask was opened before the supervisor died (task 959).
 #[test]
 fn an_adopted_exit_after_a_failed_review_ask_times_out_from_its_recorded_request() {
+    interactive_workers();
     adopted_exit_after_review_times_out(true);
 }
 

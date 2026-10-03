@@ -50,7 +50,6 @@ const RECEIPT_TESTS: &str = r#"receipt_tests() {
 /// receipt with the evidence brings the run to `awaiting_integration`.
 #[test]
 fn missing_required_evidence_parks_the_run_for_a_resumed_session() {
-    headless_workers();
     let (_dir, repo, db) = evidence_fixture(&[EvidenceCheck::Tests]);
     // The worker claims the tests passed but gives no evidence: without
     // the requirement that fails the receipt, with it the run waits.
@@ -119,7 +118,6 @@ fn missing_required_evidence_parks_the_run_for_a_resumed_session() {
 /// reruns the check brings it to `awaiting_integration`.
 #[test]
 fn a_required_check_reported_failed_parks_the_run_instead_of_failing_it() {
-    headless_workers();
     let (_dir, repo, db) = evidence_fixture(&[EvidenceCheck::Tests]);
     let backend = TestWorkspace::new(
         &db,
@@ -162,7 +160,6 @@ fn a_required_check_reported_failed_parks_the_run_instead_of_failing_it() {
 /// the receipt backs: the runtime runs it after the review (ADR-t1233-2).
 #[test]
 fn required_evidence_present_in_the_receipt_awaits_integration() {
-    headless_workers();
     let (_dir, repo, db) = evidence_fixture(&[EvidenceCheck::E2e, EvidenceCheck::Tests]);
     let backend = TestWorkspace::new(
         &db,
@@ -206,7 +203,6 @@ fn required_evidence_present_in_the_receipt_awaits_integration() {
 /// `checks`.
 #[test]
 fn a_resume_or_integrate_without_the_required_evidence_does_not_land() {
-    headless_workers();
     let (_dir, repo, db) = evidence_fixture(&[EvidenceCheck::Tests]);
     let backend = TestWorkspace::new(
         &db,
@@ -273,7 +269,6 @@ fn with_e2e_paths(repo: &Path, globs: &str) {
 /// told not to run it.
 #[test]
 fn the_e2e_a_run_needs_is_recorded_and_its_receipt_backs_none() {
-    headless_workers();
     for (paths, evidence, requirement) in [
         (
             "[\"change.txt\", 'tests/e2e.rs']",
@@ -356,7 +351,6 @@ fn scope_fixture(paths: &[&str]) -> (Fixture, PathBuf, PathBuf) {
 /// the path out, and the resolved run is validated again and lands.
 #[test]
 fn a_change_outside_the_declared_paths_parks_the_run_for_a_resumed_session() {
-    headless_workers();
     let (_dir, repo, db) = scope_fixture(&["docs/**", "*.md"]);
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     backend.resume_script_for(
@@ -423,7 +417,6 @@ fn a_change_outside_the_declared_paths_parks_the_run_for_a_resumed_session() {
 /// the task declared none.
 #[test]
 fn a_change_inside_the_declared_paths_awaits_integration_and_lands() {
-    headless_workers();
     let (_dir, repo, db) = scope_fixture(&["*.txt"]);
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let outcome = supervise(&db, &repo, &backend).unwrap();
@@ -444,7 +437,6 @@ fn a_change_inside_the_declared_paths_awaits_integration_and_lands() {
 /// `src/lib.rs` from another task changes only `change.txt` itself.
 #[test]
 fn a_branch_rebased_onto_a_moved_main_is_held_only_to_its_own_changes() {
-    headless_workers();
     let (_dir, repo, db) = scope_fixture(&["*.txt"]);
     // Another task lands src/lib.rs on main while the worker runs, and the
     // worker rebases onto it before its receipt.
@@ -477,7 +469,6 @@ fn a_branch_rebased_onto_a_moved_main_is_held_only_to_its_own_changes() {
 /// asks to take it out and then lands the approved run.
 #[test]
 fn integrate_refuses_a_rebased_diff_outside_the_declared_paths() {
-    headless_workers();
     let (_dir, repo, db) = scope_fixture(&["*.txt"]);
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     supervise(&db, &repo, &backend).unwrap();

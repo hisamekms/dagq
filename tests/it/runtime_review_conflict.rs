@@ -20,8 +20,19 @@ pub(crate) fn moving_main_then_pass() -> String {
 /// The worker goes idle after its receipt and never exits by itself; each
 /// time a conflict request arrives in its terminal it rebases onto the main
 /// the request names, resolves `change.txt`, rewrites the receipt and goes
-/// idle again, `requests` times.
+/// idle again, `requests` times. A headless worker (goal 92) does the same
+/// in its turns: its first commits, and each later one (a conflict request)
+/// rebases, resolves and rewrites the receipt, up to `requests`.
 pub(crate) fn rebasing_agent(requests: usize) -> String {
+    if worker_mode() == dagq::domain::worker::WorkerMode::Headless {
+        return format!(
+            "if [ \"$TURN\" -eq 1 ]; then commit work; receipt \"$(git rev-parse HEAD)\"\n\
+             elif [ \"$TURN\" -le {} ]; then\n{RESUME_TURN_PRELUDE}\n\
+             await_message; resolve || exit 1; receipt \"$(git rev-parse HEAD)\"\n\
+             fi",
+            requests + 1
+        );
+    }
     format!(
         "commit work; receipt \"$(git rev-parse HEAD)\"; idle; {RESUME_PRELUDE}\n\
          for n in $(seq 1 {requests}); do \
@@ -109,13 +120,12 @@ fn a_passed_run_that_conflicts_with_main_is_rebased_by_its_live_session_and_land
         assert!(!kinds.contains(&absent), "{absent} in {kinds:?}");
     }
     assert_eq!(payloads(&detail, "integration_started").len(), 1);
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
+    assert_exit_sent(&backend, &run, 1);
     assert_eq!(backend.closed(), vec![WORKSPACE_ID.to_owned()]);
     // The request is the resume's, for the live session.
-    let texts = backend.texts();
+    let texts = session_texts(&backend, &run);
     assert_eq!(texts.len(), 1);
-    assert_eq!(texts[0].0, WORKSPACE_ID);
-    let text = &texts[0].1;
+    let text = &texts[0];
     for expected in [
         format!(
             "dagq: the supervisor's review of run {} (task 1) passed, but integrate would conflict with main, so the run was not landed.",
@@ -129,12 +139,13 @@ fn a_passed_run_that_conflicts_with_main_is_rebased_by_its_live_session_and_land
         format!("1. In this worktree run git rebase {moved} and resolve the conflicts."),
         "[\"test -f seed.txt\"]".to_owned(),
         "3. Keep the worktree clean.".to_owned(),
-        runtime::STOP_BACKGROUND.to_owned(),
+        // The headless worker's own lines: its turn is its reply.
+        "Before you end the turn, stop every process you started".to_owned(),
         format!(
             "Rewrite the receipt at {} with the new head commit",
             run.receipt_path().unwrap()
         ),
-        "Do not merge or push. When done, report briefly and stop; do not run /exit.".to_owned(),
+        "Do not merge or push. Follow the repository's instructions for a worker".to_owned(),
     ] {
         assert!(text.contains(&expected), "{expected:?} not in {text}");
     }
@@ -148,7 +159,7 @@ fn a_passed_run_that_conflicts_with_main_is_rebased_by_its_live_session_and_land
 }
 
 /// A passed run that merges cleanly with main is not sent anything: no
-/// `conflict_precheck`, one `/exit`, and the landing, as before.
+/// `conflict_precheck`, one exit request, and the landing, as before.
 #[test]
 fn a_passed_run_that_merges_cleanly_with_main_lands_without_a_request() {
     let (_dir, repo, db) = fixture();
@@ -169,8 +180,8 @@ fn a_passed_run_that_merges_cleanly_with_main_lands_without_a_request() {
     assert_landed(&repo, &detail.runs[0], "test task", &moved);
     assert!(repo.join("other.txt").is_file());
     assert!(payloads(&detail, "conflict_precheck").is_empty());
-    assert!(backend.texts().is_empty());
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
+    assert!(session_texts(&backend, &detail.runs[0]).is_empty());
+    assert_exit_sent(&backend, &detail.runs[0], 1);
     assert_eq!(reviewer.prompts().len(), 1);
 }
 
@@ -254,6 +265,7 @@ fn adopt_pending_request(
 /// reviews, and lands the run.
 #[test]
 fn an_adopted_run_with_a_pending_conflict_request_waits_without_sending_it_again() {
+    interactive_workers();
     let (_dir, repo, db) = confirming_fixture();
     let seed = git_out(&repo, &["rev-parse", "main"]);
     let backend = TestWorkspace::new(&db, false, &rebasing_agent(1));
@@ -318,6 +330,7 @@ fn an_adopted_run_with_a_pending_conflict_request_waits_without_sending_it_again
 /// validated, reviewed, and landed.
 #[test]
 fn an_adopted_run_with_a_pending_revise_waits_without_sending_it_again() {
+    interactive_workers();
     let (_dir, repo, db) = confirming_fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
     let backend = TestWorkspace::new(&db, false, &revising_agent(1));
@@ -389,6 +402,7 @@ const REVISE_TEXT: &str = "dagq: the supervisor's review asks for changes (revis
 /// session's rewritten receipt is reviewed and landed.
 #[test]
 fn an_adopted_revise_the_session_never_got_is_sent_again_and_lands() {
+    interactive_workers();
     let (_dir, repo, db) = confirming_fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
     let backend = TestWorkspace::new(&db, false, &revising_agent(1));
@@ -428,6 +442,7 @@ fn an_adopted_revise_the_session_never_got_is_sent_again_and_lands() {
 /// rebases onto the main it names, and the run is reviewed and lands.
 #[test]
 fn an_adopted_conflict_request_the_session_never_got_is_sent_again_and_lands() {
+    interactive_workers();
     let (_dir, repo, db) = confirming_fixture();
     let seed = git_out(&repo, &["rev-parse", "main"]);
     let backend = TestWorkspace::new(&db, false, &rebasing_agent(1));
@@ -520,6 +535,7 @@ fn adopt_lost_revise(
 /// send it again: it records `submit_not_started` (task 546).
 #[test]
 fn an_adopted_request_already_sent_again_is_not_sent_a_third_time() {
+    interactive_workers();
     let (_dir, _db, backend, _reviewer, detail) = adopt_lost_revise(|sent_at| {
         let mut events = pending_revise(sent_at);
         events.push((
@@ -540,6 +556,7 @@ fn an_adopted_request_already_sent_again_is_not_sent_a_third_time() {
 /// The session here exits once that ask is open.
 #[test]
 fn an_adopted_request_lost_again_is_asked_to_the_inbox() {
+    interactive_workers();
     let (_dir, db, backend, reviewer, detail) = adopt_lost_revise(pending_revise);
     assert_eq!(backend.texts().len(), 1, "{:?}", backend.texts());
     assert_eq!(payloads(&detail, "submit_resent").len(), 1);
@@ -570,6 +587,7 @@ fn an_adopted_request_lost_again_is_asked_to_the_inbox() {
 /// `revise_unsent`, and a person is asked after the session's `/exit`.
 #[test]
 fn a_revise_that_cannot_be_sent_is_withdrawn_and_asks_a_person() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     backend.text_fails = true;
@@ -600,6 +618,7 @@ fn a_revise_that_cannot_be_sent_is_withdrawn_and_asks_a_person() {
 /// session to ask: the rebase conflicts and parks it for a resume.
 #[test]
 fn a_conflict_request_that_cannot_be_sent_is_withdrawn_and_the_run_lands() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     backend.text_fails = true;
@@ -666,9 +685,10 @@ fn an_adopted_run_with_a_withdrawn_revise_asks_a_person_without_sending_it() {
         String::new,
         false,
     );
-    assert!(backend.texts().is_empty(), "{:?}", backend.texts());
+    let texts = session_texts(&backend, &detail.runs[0]);
+    assert!(texts.is_empty(), "{texts:?}");
     assert!(reviewer.prompts().is_empty(), "reviewed again");
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
+    assert_exit_sent(&backend, &detail.runs[0], 1);
     let queue = SqliteQueue::open(&db).unwrap();
     let asks = queue.asks(Default::default()).unwrap();
     assert_eq!(asks.len(), 1);

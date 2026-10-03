@@ -7,7 +7,6 @@ use crate::common::WithoutActor;
 use crate::plan_review::{
     Fixture, PlanWorkspace, StubReviewer, add, fixture, git, job_actors, options, supervise_with,
 };
-use crate::runtime_support::headless_workers;
 
 use dagq::{
     application::{GoalReviewStore, TaskStore},
@@ -91,7 +90,6 @@ fn gaps_verdict(title: &str) -> Value {
 
 #[test]
 fn an_achieved_goal_is_closed_with_its_evidence() {
-    headless_workers();
     let fx = fixture();
     let (goal, done) = goal_done(&fx);
     let reviewer = StubReviewer::new(&[json!({
@@ -143,7 +141,6 @@ fn an_achieved_goal_is_closed_with_its_evidence() {
 /// 1062).
 #[test]
 fn a_goal_review_records_its_launch_and_session_and_takes_its_role_table() {
-    headless_workers();
     let achieved = json!({"verdict": "achieved", "criteria": [], "summary": "done"});
     let fx = fixture();
     let (goal, done) = goal_done(&fx);
@@ -216,7 +213,6 @@ fn a_goal_review_records_its_launch_and_session_and_takes_its_role_table() {
 
 #[test]
 fn gaps_become_drafts_of_the_open_goal_and_a_review_waits_for_them() {
-    headless_workers();
     let fx = fixture();
     let (goal, _) = goal_done(&fx);
     let reviewer = StubReviewer::new(&[gaps_verdict("document the cache")]);
@@ -262,7 +258,6 @@ fn gaps_become_drafts_of_the_open_goal_and_a_review_waits_for_them() {
 
 #[test]
 fn a_fourth_gaps_in_a_row_asks_a_person() {
-    headless_workers();
     let fx = fixture();
     let (goal, _) = goal_done(&fx);
     for round in 0..3 {
@@ -313,7 +308,6 @@ fn a_fourth_gaps_in_a_row_asks_a_person() {
 
 #[test]
 fn an_ask_waits_for_a_person_whose_answer_is_applied() {
-    headless_workers();
     let fx = fixture();
     let (goal, anchor) = goal_done(&fx);
     let reviewer = StubReviewer::new(&[json!({
@@ -363,7 +357,6 @@ fn an_ask_waits_for_a_person_whose_answer_is_applied() {
 
 #[test]
 fn abandoned_and_keep_open_answers_are_applied() {
-    headless_workers();
     let fx = fixture();
     let (goal, anchor) = goal_done(&fx);
     let ask_verdict = json!({"verdict": "ask", "summary": "split the goal?"});
@@ -408,7 +401,6 @@ fn abandoned_and_keep_open_answers_are_applied() {
 
 #[test]
 fn a_failed_goal_review_waits_for_a_person_until_rearmed() {
-    headless_workers();
     let fx = fixture();
     let (goal, anchor) = goal_done(&fx);
     let failing = StubReviewer::failing();
@@ -480,7 +472,6 @@ fn a_failed_goal_review_waits_for_a_person_until_rearmed() {
 
 #[test]
 fn only_goals_whose_tasks_ended_are_reviewed() {
-    headless_workers();
     let fx = fixture();
     let mut queue = SqliteQueue::open(&fx.db).unwrap();
     let new_goal = |queue: &mut SqliteQueue, title: &str| {
@@ -522,7 +513,6 @@ fn only_goals_whose_tasks_ended_are_reviewed() {
 /// unapplied and records `ask_closed` (task 568).
 #[test]
 fn an_answer_to_a_goal_closed_meanwhile_is_closed_with_ask_closed() {
-    headless_workers();
     let fx = fixture();
     let (goal, anchor) = goal_done(&fx);
     supervise(
@@ -562,7 +552,6 @@ fn goal_answered(queue: &mut SqliteQueue, task: TaskId) -> Value {
 /// registers nothing: the goal waits for a person (`goal review by hand`).
 #[test]
 fn a_goal_review_verdict_is_applied_at_its_jobs_request_and_a_broken_one_fails_closed() {
-    headless_workers();
     for (broken, expected) in [
         (json!("no verdict here"), "printed no verdict JSON"),
         (
@@ -641,13 +630,11 @@ fn a_goal_review_verdict_is_applied_at_its_jobs_request_and_a_broken_one_fails_c
 /// enters its first pass. Both review kinds must close without a candidate.
 #[test]
 fn handoff_closes_review_rows_and_spans_without_candidates() {
-    headless_workers();
     handoff_reviews(false);
 }
 
 #[test]
 fn handoff_reviews_candidates_again_without_counting_interrupted_attempts() {
-    headless_workers();
     handoff_reviews(true);
 }
 

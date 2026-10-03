@@ -170,7 +170,9 @@ fn independent_tasks_run_concurrently_and_a_dependent_starts_after_integration()
     assert_eq!(outcome["outcome"], "stopped");
     assert_eq!(outcome["runs"].as_array().unwrap().len(), 3);
     assert_eq!(outcome["errors"], json!([]));
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 3);
+    for task in [1, 2, 3] {
+        assert_exit_sent(&backend, &queue.show(TaskId::new(task)).unwrap().runs[0], 1);
+    }
     let mut closed = backend.closed();
     closed.sort();
     assert_eq!(closed, [workspace_id(0), workspace_id(1), workspace_id(2)]);
@@ -198,6 +200,7 @@ fn first_event(events: &[dagq::domain::RunEvent], task: i64, kinds: &[&str]) -> 
 /// disturbing the run next to it, and is validated once its session ends.
 #[test]
 fn a_timed_out_run_is_kept_while_the_other_run_is_accepted() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     add_ready_task(&mut queue, "healthy", &[]);
@@ -262,6 +265,7 @@ fn a_timed_out_run_is_kept_while_the_other_run_is_accepted() {
 /// accepted run untouched; every run releases its lease.
 #[test]
 fn failed_runs_in_the_same_pass_do_not_affect_the_accepted_run() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     add_ready_task(&mut queue, "crashes", &[]);
@@ -400,7 +404,7 @@ fn stale_lease_of_a_live_wrapper_is_adopted_and_driven_to_awaiting_integration()
     assert_eq!(outcome["errors"], json!([]));
     assert_eq!(outcome["runs"][0]["id"], json!(run.id()));
     assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
+    assert_exit_sent(&backend, &run, 1);
     assert_eq!(backend.closed(), vec![WORKSPACE_ID.to_owned()]);
 
     let detail = queue.show(TaskId::new(1)).unwrap();
@@ -483,7 +487,7 @@ fn dead_supervisor_pid_with_a_fresh_heartbeat_is_adopted() {
     assert_eq!(adopted[0]["previous_token"], "killed");
     assert_ne!(adopted[0]["previous_pid"], json!(std::process::id()));
     assert!(adopted[0]["previous_heartbeat_age_secs"].as_i64().unwrap() < 30);
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
+    assert_exit_sent(&backend, &run, 1);
 }
 
 /// Everything adoption must leave alone: a fresh lease; a stale lease whose
@@ -722,6 +726,7 @@ fn integrating_run_with_a_stale_lease_is_not_adopted() {
 /// again, and its receipt observation is not repeated either.
 #[test]
 fn adopter_does_not_repeat_an_exit_request_the_previous_supervisor_sent() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     // The session ends on its own once the adopter has watched it for a
     // while, as it would after the /exit that was already typed.
@@ -796,6 +801,7 @@ fn adopter_does_not_repeat_an_exit_request_the_previous_supervisor_sent() {
 /// closes it because of the receipt, before the session exits (task 239).
 #[test]
 fn adopter_closes_the_answer_prompt_ask_of_a_dialog_the_receipt_ended() {
+    interactive_workers();
     adopt_receipt_after_dialog(false);
 }
 
@@ -804,6 +810,7 @@ fn adopter_closes_the_answer_prompt_ask_of_a_dialog_the_receipt_ended() {
 /// ask from the slot.
 #[test]
 fn adopter_ends_the_wait_for_a_dialog_the_receipt_ended_and_closes_its_ask() {
+    interactive_workers();
     adopt_receipt_after_dialog(true);
 }
 
@@ -934,6 +941,7 @@ fn adopt_receipt_after_dialog(waited: bool) {
 /// still ran. Handovers more frequent than the timeout no longer hold it.
 #[test]
 fn adopted_wait_after_the_receipt_runs_from_the_recorded_receipt() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(
         &db,
@@ -1014,6 +1022,7 @@ pub(crate) fn between(queue: &mut SqliteQueue, from: &str, to: &str) -> Duration
 /// keeps the run until the session ends.
 #[test]
 fn adopted_exit_request_times_out_from_its_recorded_request() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     let exit_timeout = Duration::from_secs(60);
@@ -1073,6 +1082,7 @@ fn adopted_exit_request_times_out_from_its_recorded_request() {
 /// its session ends.
 #[test]
 fn adopted_run_does_not_record_an_exit_timeout_twice() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     backend.exit_timeout = Duration::from_millis(500);
@@ -1153,6 +1163,7 @@ fn adopted_run_does_not_record_an_exit_timeout_twice() {
 /// only closes the answered ask once the session exits.
 #[test]
 fn adopted_run_does_not_ask_about_its_exit_twice() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     backend.exit_timeout = Duration::from_millis(500);
@@ -1243,6 +1254,7 @@ fn adopted_run_does_not_ask_about_its_exit_twice() {
 /// adopter: only the ask about the latest request counts (task 240).
 #[test]
 fn adopted_run_asks_about_an_exit_that_timed_out_again() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     backend.exit_timeout = Duration::from_millis(500);
@@ -1323,6 +1335,7 @@ fn adopted_run_asks_about_an_exit_that_timed_out_again() {
 /// the second restarts validation from the receipt and worktree.
 #[test]
 fn exited_wrapper_and_validating_runs_are_adopted_and_validated() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     add_ready_task(&mut queue, "validating", &[]);
@@ -1433,7 +1446,7 @@ fn two_supervisors_racing_for_one_stale_lease_adopt_it_once() {
     assert_eq!(driven.len(), 1, "{outcomes:?}");
     assert_eq!(driven[0]["runs"][0]["status"], "awaiting_integration");
     assert!(outcomes.iter().all(|o| o["errors"] == json!([])));
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
+    assert_exit_sent(&backend, &run, 1);
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(1)).unwrap();
     let adopted = adoption_events(&detail);
@@ -1577,6 +1590,15 @@ fn a_supervisor_that_lost_its_lease_stops_touching_the_run() {
     // Draining: the original keeps driving its run but adopts and claims
     // nothing more, so it cannot take the lease back once it loses it.
     options.stop.store(true, Ordering::SeqCst);
+    // A pass already under way may still adopt: move the lease only once
+    // the original drains.
+    wait_until(&db, Duration::from_secs(20), |queue| {
+        queue
+            .all_events()
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "supervisor_draining")
+    });
     // The lease changes hands: another token, stale, as a killed
     // supervisor's would look to an adopter.
     Connection::open(&db)
@@ -1603,7 +1625,7 @@ fn a_supervisor_that_lost_its_lease_stops_touching_the_run() {
         adopter["runs"][0]["status"], "awaiting_integration",
         "{adopter}"
     );
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
+    assert_exit_sent(&backend, &run, 1);
     assert_eq!(outcome["outcome"], "stopped");
     assert_eq!(outcome["runs"], json!([]));
     assert_eq!(outcome["errors"][0]["run_id"], json!(run.id()));

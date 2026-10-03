@@ -835,7 +835,7 @@ pub struct TestWorkspace {
     /// ([`LateAgentSpawner`]), as a wrapper slowed by load does (task 1274).
     /// A headless session ignores it.
     pub agent_registers_late: bool,
-    /// Made after [`headless_workers`]: a headless run with no
+    /// Made without [`interactive_workers`]: a headless run with no
     /// [`Self::headless`] runs its script as its turns ([`Self::claude_for`]).
     pub turn_scripts: bool,
 }
@@ -2254,7 +2254,7 @@ fn run_agent_with_review_retry(
     let detail = queue.show(TaskId::new(1)).unwrap();
     assert_eq!(detail.task.status(), TaskStatus::InProgress);
     let run = &detail.runs[0];
-    // The worker the test chose ([`headless_workers`]).
+    // The worker the test chose (headless unless [`interactive_workers`]).
     assert_eq!(run.worker_mode(), worker_mode());
     assert_eq!(outcome["runs"][0]["id"], json!(run.id()));
     // Runs live in `runs/` next to the (canonicalized) database, worktree inside.

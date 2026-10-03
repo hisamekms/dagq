@@ -5,19 +5,27 @@ use dagq::domain::LeaseToken;
 
 use runtime_support::*;
 
-/// A worker that asks a `worker_question`, goes idle, and waits for the
-/// answer in its terminal (`$MESSAGE`); it commits the answer it got.
+/// A worker that asks a `worker_question` and ends its turn; the turn of
+/// the answer commits the answer it got (its first line).
 const ASKING_AGENT: &str = r#"
-"$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
-idle
-while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
-cp "$MESSAGE" answer.txt
-git add answer.txt
-git commit -q -m answer
-receipt "$(git rev-parse HEAD)"
-idle
-await_exit
+case "$PROMPT" in
+"answer to ask "*)
+  printf '%s\n' "$PROMPT" | head -n 1 | tr -d '\n' > answer.txt
+  git add answer.txt
+  git commit -q -m answer
+  receipt "$(git rev-parse HEAD)" ;;
+*) "$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70 ;;
+esac
 "#;
+
+/// What the supervisor sent `run`'s worker, without the headless turn's
+/// note after it: the first line of each text.
+fn sent(backend: &TestWorkspace, run: &TaskRun) -> Vec<String> {
+    session_texts(backend, run)
+        .into_iter()
+        .map(|text| text.lines().next().unwrap_or_default().to_owned())
+        .collect()
+}
 
 fn run_of(queue: &mut SqliteQueue, task: i64) -> Option<TaskRun> {
     queue.show(TaskId::new(task)).unwrap().runs.first().cloned()
@@ -101,8 +109,8 @@ fn a_run_waiting_for_its_answer_leaves_the_slot_to_another_task() {
         waiting["asks"],
         json!([{"id": ask, "kind": "worker_question"}])
     );
-    // Nothing was typed into the waiting session.
-    assert!(backend.texts().is_empty());
+    // Nothing was sent to the waiting session.
+    assert!(sent(&backend, &first).is_empty());
 
     queue.answer(ask, "blue").unwrap();
     let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
@@ -111,11 +119,8 @@ fn a_run_waiting_for_its_answer_leaves_the_slot_to_another_task() {
     let first = run_of(&mut queue, 1).unwrap();
     assert_eq!(first.status(), RunStatus::AwaitingIntegration);
     assert_eq!(
-        backend.texts(),
-        vec![(
-            WORKSPACE_ID.to_owned(),
-            format!("answer to ask {ask}: blue")
-        )]
+        sent(&backend, &first),
+        [format!("answer to ask {ask}: blue")]
     );
     let ended = events_of(&db, first.id(), "run_waiting_ended");
     assert_eq!(ended.len(), 1);
@@ -312,6 +317,7 @@ fn a_returning_run_counts_toward_the_limit() {
 /// back to a slot and on to what follows its exit (acceptance 3).
 #[test]
 fn a_stuck_exit_waits_outside_the_slot_until_its_session_exits() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "second", &[]);
     let mut backend = TestWorkspace::new(&db, false, HELD_AGENT);
@@ -406,13 +412,7 @@ fn a_wait_is_taken_over_after_a_handoff() {
     assert_eq!(events_of(&db, run.id(), "run_waiting_started").len(), 1);
     assert_eq!(events_of(&db, run.id(), "run_waiting_ended").len(), 1);
     assert_eq!(events_of(&db, run.id(), "run_slot_regained").len(), 1);
-    assert_eq!(
-        backend.texts(),
-        vec![(
-            WORKSPACE_ID.to_owned(),
-            format!("answer to ask {ask}: blue")
-        )]
-    );
+    assert_eq!(sent(&backend, &run), [format!("answer to ask {ask}: blue")]);
 }
 
 /// `--max-waiting 0` keeps the runs in their slots, as before.
@@ -463,6 +463,7 @@ const DIALOG_SCREEN: &str = "\
 /// the second past `--parallel` (decision 10), and finish.
 #[test]
 fn sessions_a_person_moved_go_back_at_once() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "second", &[]);
     let mut backend = TestWorkspace::new(&db, false, PROMPTED_AGENT);
@@ -592,6 +593,7 @@ fn stop_wrapper_heartbeat(db: &Path, run: &TaskRun, pid: u32) {
 /// the run goes on to what follows its exit.
 #[test]
 fn a_wrapper_that_dies_during_a_wait_ends_it_as_the_sessions_end() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, HELD_AGENT);
     backend.exit_timeout = Duration::from_millis(500);
@@ -705,6 +707,9 @@ fn restore_heartbeat_when_the_wait_ends(db: &Path, run: &TaskRun) {
 /// recorded as `wrapper_heartbeat_expired` again before the `/exit`.
 #[test]
 fn a_wrapper_heartbeat_that_comes_back_lets_the_run_wait_again() {
+    // The test silences the wrapper by giving its row another pid, which
+    // a headless wrapper that runs the answer's turn does not survive.
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = Arc::new(TestWorkspace::new(
         &db,

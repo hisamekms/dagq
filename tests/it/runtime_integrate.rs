@@ -83,7 +83,6 @@ impl MainRemote for OvertakenPush {
 
 #[test]
 fn a_later_landing_pushes_both_commits_before_the_first_push_finishes() {
-    headless_workers();
     let (dir, repo, db) = fixture();
     let origin = dir.path().join("origin.git");
     let made = Command::new(git_executable().expect("git executable"))
@@ -160,7 +159,6 @@ fn a_later_landing_pushes_both_commits_before_the_first_push_finishes() {
 
 #[test]
 fn a_failed_push_keeps_the_landing_and_waits_as_attention() {
-    headless_workers();
     let (_dir, repo, db, run) = awaiting_run();
     let remote = TestRemote {
         failure: Some("rejected: fetch first".into()),
@@ -224,7 +222,6 @@ fn a_failed_push_keeps_the_landing_and_waits_as_attention() {
 /// error when origin cannot take it.
 #[test]
 fn git_adapter_pushes_main_to_a_bare_origin() {
-    headless_workers();
     let (dir, repo, db, run) = awaiting_run();
     let origin = dir.path().join("origin.git");
     let made = Command::new(git_executable().expect("git executable"))
@@ -265,7 +262,6 @@ fn git_adapter_pushes_main_to_a_bare_origin() {
 
 #[test]
 fn git_adapter_checks_whether_a_later_remote_head_contains_the_landing() {
-    headless_workers();
     let (dir, repo, db, _run) = awaiting_run();
     let origin = dir.path().join("origin.git");
     let made = Command::new(git_executable().expect("git executable"))
@@ -312,7 +308,6 @@ fn git_adapter_checks_whether_a_later_remote_head_contains_the_landing() {
 /// remote and an unreadable table are `decide_push`'s unit tests.
 #[test]
 fn the_landing_is_pushed_to_the_remote_dagq_toml_names() {
-    headless_workers();
     let bare = |dir: &Path, name: &str| {
         let path = dir.join(name);
         let made = Command::new(git_executable().expect("git executable"))
@@ -434,7 +429,6 @@ fn add_file_task(
 
 #[test]
 fn review_writes_the_run_material_to_review_md_and_returns_only_its_size() {
-    headless_workers();
     let (_dir, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let goal = queue
@@ -532,7 +526,6 @@ fn review_writes_the_run_material_to_review_md_and_returns_only_its_size() {
 /// review.md under a longer fence, and the commit list is read lossily.
 #[test]
 fn review_writes_a_non_utf8_diff_as_raw_bytes() {
-    headless_workers();
     let (_dir, db, detail) = run_agent(
         r#"printf 'caf\351 ````\n' > latin1.txt && git add latin1.txt && git commit -q -m "$(printf 'caf\351')"; receipt "$(git rev-parse HEAD)""#,
     );
@@ -571,7 +564,6 @@ fn review_writes_a_non_utf8_diff_as_raw_bytes() {
 
 #[test]
 fn conflict_free_run_lands_as_one_squash_commit_and_releases_dependents() {
-    headless_workers();
     let (dir, repo, db, run) = awaiting_run();
     let seed = git_out(&repo, &["rev-parse", "main"]);
     assert_eq!(seed, *run.base_commit());
@@ -774,7 +766,6 @@ fn move_queue(db: &Path, repo: &Path, to: &Path) -> PathBuf {
 
 #[test]
 fn moved_queue_directory_resolves_run_paths_and_lands_awaiting_runs() {
-    headless_workers();
     let (dir, repo, db, run) = awaiting_run();
     let seed = git_out(&repo, &["rev-parse", "main"]);
     let old_runs = dagq::infrastructure::location::runs_dir(&db.canonicalize().unwrap());
@@ -863,7 +854,6 @@ fn moved_queue_directory_resolves_run_paths_and_lands_awaiting_runs() {
 /// progress at claim time without the task itself.
 #[test]
 fn prompt_describes_landed_predecessors_and_sibling_tasks_in_progress() {
-    headless_workers();
     let (_dir, repo, db, run) = awaiting_run();
     assert_eq!(integrate(&db, 1, &repo).unwrap()["outcome"], "integrated");
     let mut queue = SqliteQueue::open(&db).unwrap();
@@ -972,7 +962,6 @@ fn add_ready_task_in(
 /// goal edit keeps the old wording, and a run claimed after it gets the new.
 #[test]
 fn prompt_snapshots_the_goal_at_claim_time() {
-    headless_workers();
     let (_dir, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let goal = queue
@@ -1031,7 +1020,6 @@ fn prompt_snapshots_the_goal_at_claim_time() {
 /// named in the prompt; the successor's run starts and runs as usual.
 #[test]
 fn successor_starts_when_the_predecessor_receipt_is_unavailable() {
-    headless_workers();
     let (_dir, repo, db, run) = awaiting_run();
     assert_eq!(integrate(&db, 1, &repo).unwrap()["outcome"], "integrated");
     let receipt = Path::new(run.receipt_path().unwrap());
@@ -1088,7 +1076,6 @@ fn successor_starts_when_the_predecessor_receipt_is_unavailable() {
 /// commit per task, whether or not a checkout has main checked out.
 #[test]
 fn runs_land_fifo_by_validation_time_and_later_ones_are_rebased() {
-    headless_workers();
     let (_dir, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     queue.transition(TaskId::new(1), TaskAction::Draft).unwrap();
@@ -1207,7 +1194,6 @@ fn runs_land_fifo_by_validation_time_and_later_ones_are_rebased() {
 /// tree in place so a session can fix it on top of main.
 #[test]
 fn verification_failure_after_rebase_needs_a_session_and_keeps_the_rebased_tree() {
-    headless_workers();
     let (_dir, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     queue.transition(TaskId::new(1), TaskAction::Draft).unwrap();
@@ -1334,7 +1320,6 @@ fn verification_failure_after_rebase_needs_a_session_and_keeps_the_rebased_tree(
 /// that cannot fast-forward the main checkout gives the slot back too.
 #[test]
 fn integration_slot_is_exclusive_and_an_abandoned_landing_is_recoverable() {
-    headless_workers();
     let (_dir, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
@@ -1439,7 +1424,6 @@ fn integration_slot_is_exclusive_and_an_abandoned_landing_is_recoverable() {
 /// the awaiting run from the new checkout (ADR-0020).
 #[test]
 fn rebind_follows_a_moved_repository_and_the_awaiting_run_lands() {
-    headless_workers();
     use dagq::infrastructure::adapters::{GitRepository, path_text};
     let (dir, repo, db, run) = awaiting_run();
     let seed = git_out(&repo, &["rev-parse", "main"]);
@@ -1549,7 +1533,6 @@ fn rebind_follows_a_moved_repository_and_the_awaiting_run_lands() {
 /// An `integrate` in progress holds the old repository's paths as well.
 #[test]
 fn rebind_is_refused_while_a_run_is_integrating() {
-    headless_workers();
     let (dir, repo, db, run) = awaiting_run();
     let main = git_out(&repo, &["rev-parse", "main"]);
     let mut queue = SqliteQueue::open(&db).unwrap();
@@ -1565,7 +1548,6 @@ fn rebind_is_refused_while_a_run_is_integrating() {
 
 #[test]
 fn integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once() {
-    headless_workers();
     let (_dir, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let goal = queue
@@ -1713,7 +1695,6 @@ fn integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once() {
 /// integrate, whose run of the commands is the only one (ADR-0023).
 #[test]
 fn failing_verification_command_passes_validation_and_needs_a_session_at_integrate() {
-    headless_workers();
     let (_dir, db, detail) = run_agent(
         "git rm -q seed.txt && git commit -q -m 'drop seed'; receipt \"$(git rev-parse HEAD)\"",
     );
@@ -1899,7 +1880,6 @@ fn migrations_on(repo: &Path, commit: &str) -> Vec<String> {
 /// (ADR-0067 decision 3).
 #[test]
 fn integrate_renumbers_a_migration_whose_number_main_took() {
-    headless_workers();
     let (_dir, repo, db) = migration_fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
@@ -2007,7 +1987,6 @@ fn integrate_renumbers_a_migration_whose_number_main_took() {
 /// renumbers it and rewrites the receipt, the same run lands.
 #[test]
 fn a_refused_renumbering_commit_is_undone_and_needs_a_session() {
-    headless_workers();
     let (dir, repo, db) = migration_fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
@@ -2113,7 +2092,6 @@ fn a_refused_renumbering_commit_is_undone_and_needs_a_session() {
 /// number, not the others.
 #[test]
 fn git_adapter_reads_what_the_renumbering_plan_needs() {
-    headless_workers();
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -2172,7 +2150,6 @@ fn assert_load(payload: &Value) {
 /// Integrator's at the person's request.
 #[test]
 fn integrate_records_the_requester_and_the_integrator() {
-    headless_workers();
     let (_dir, repo, db, run) = awaiting_run();
     let remote = TestRemote::default();
     let outcome = integrate_with(&db, &repo, Some(&remote));

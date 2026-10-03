@@ -192,6 +192,7 @@ fn an_open_usage_limit_ask_holds_claims_and_reviews_until_done() {
 /// closes with `queue_hold_applied` naming the run.
 #[test]
 fn cancel_affected_gives_the_held_runs_up() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(
         &db,

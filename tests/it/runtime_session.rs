@@ -135,9 +135,11 @@ fn valid_receipt_is_verified_and_awaits_integration() {
         .bounded_output()
         .unwrap();
     assert_eq!(String::from_utf8(head.stdout).unwrap().trim(), commit);
-    assert_eq!(
-        fs::read_to_string(run.log_path().unwrap()).unwrap(),
-        "fixture log\n"
+    // The session's log is in the run directory.
+    assert!(
+        run.log_path().unwrap().starts_with(run.run_dir().unwrap()),
+        "{:?}",
+        run.log_path()
     );
     assert!(Path::new(run.run_dir().unwrap()).join("runner").exists());
     assert_eq!(detail.processes.len(), 2);
@@ -240,6 +242,7 @@ fn failed_workspace_close_is_recorded_without_changing_run_status() {
 
 #[test]
 fn missing_receipt_fails_validation() {
+    interactive_workers();
     let (_dir, _db, detail) = run_agent("commit work");
     assert!(rejection_reason(&detail).contains("receipt was not submitted"));
     assert!(detail.runs[0].result_commit().is_none());
@@ -365,6 +368,7 @@ fn receipt_structure_is_checked_before_git() {
 
 #[test]
 fn idle_marker_after_receipt_triggers_exit_request_and_run_finishes() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(
         &db,
@@ -417,6 +421,7 @@ fn idle_marker_after_receipt_triggers_exit_request_and_run_finishes() {
 /// still recorded first, so the events read in causal order.
 #[test]
 fn exit_requested_precedes_a_session_exit_that_beats_the_send() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(
         &db,
@@ -442,6 +447,7 @@ fn exit_requested_precedes_a_session_exit_that_beats_the_send() {
 
 #[test]
 fn missing_or_stale_idle_marker_does_not_request_exit() {
+    interactive_workers();
     // No marker at all, then a marker older than the receipt (an earlier turn).
     // Both sessions end by themselves, as with a person's /exit, once the
     // supervisor made some passes past their receipt.
@@ -587,6 +593,7 @@ fn the_first_commit_is_observed_once_while_the_session_works() {
 /// `prompt_cleared` and closes the ask. No key is sent.
 #[test]
 fn a_dialog_on_the_screen_is_asked_once_and_cleared() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, PROMPTED_AGENT);
     backend.prompt_wait = Duration::from_millis(300);
@@ -736,6 +743,7 @@ fn a_dialog_on_the_screen_is_asked_once_and_cleared() {
 /// is gone.
 #[test]
 fn a_dialog_goes_to_its_recovery_job_before_the_inbox() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, PROMPTED_AGENT);
     backend.prompt_wait = Duration::from_millis(300);
@@ -857,6 +865,7 @@ fn a_dialog_goes_to_its_recovery_job_before_the_inbox() {
 /// and `watch` show the reason.
 #[test]
 fn sessions_stopped_at_the_same_login_share_one_authentication_ask() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     {
         let mut queue = SqliteQueue::open(&db).unwrap();
@@ -985,6 +994,7 @@ await_exit
 /// closed, and `ask_delivered` is recorded.
 #[test]
 fn an_answered_worker_question_is_typed_into_the_idle_worker_and_closed() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, ASKING_AGENT);
     backend.prompt_wait = Duration::from_millis(300);
@@ -1095,6 +1105,7 @@ fn an_answered_worker_question_is_typed_into_the_idle_worker_and_closed() {
 /// once, the ask stays unclosed and surfaces for the inbox to deliver.
 #[test]
 fn a_failed_answer_delivery_is_left_to_the_inbox() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(
         &db,
@@ -1218,6 +1229,7 @@ fn a_failed_answer_delivery_is_left_to_the_inbox() {
 /// and the screen, and the session exits without a timeout or an ask.
 #[test]
 fn a_background_work_dialog_after_exit_is_answered_when_the_receipt_is_at_head() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, HELD_AGENT);
     backend.exit_timeout = Duration::from_millis(500);
@@ -1270,6 +1282,7 @@ fn a_background_work_dialog_after_exit_is_answered_when_the_receipt_is_at_head()
 /// and the exit timeout raises the `stuck_exit` ask as before.
 #[test]
 fn a_background_work_dialog_over_a_dirty_worktree_is_left_to_the_ask() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(
         &db,
@@ -1333,6 +1346,7 @@ fn a_background_work_dialog_over_a_dirty_worktree_is_left_to_the_ask() {
 /// without a `prompt_waiting` or an `answer_prompt` ask.
 #[test]
 fn a_settings_panel_is_closed_with_escape() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, PROMPTED_AGENT);
     backend.prompt_wait = Duration::from_millis(300);
@@ -1476,6 +1490,7 @@ fn has_event(queue: &mut SqliteQueue, kind: &str) -> bool {
 /// the answer goes to the session instead of the panel, typed once.
 #[test]
 fn an_answer_is_typed_after_the_settings_panel_over_the_box_is_closed() {
+    interactive_workers();
     let (backend, detail, outcome) = answer_over(
         ASKING_AGENT,
         Some(SETTINGS_SCREEN),
@@ -1503,6 +1518,7 @@ fn an_answer_is_typed_after_the_settings_panel_over_the_box_is_closed() {
 /// Escape and the answer is confirmed as delivered, with no ask.
 #[test]
 fn a_settings_panel_over_a_typed_answer_is_closed_with_escape() {
+    interactive_workers();
     let (backend, detail, outcome) = answer_over(
         ASKING_AGENT,
         None,
@@ -1527,6 +1543,7 @@ fn a_settings_panel_over_a_typed_answer_is_closed_with_escape() {
 /// `send_confirm_secs` ([`StartCheck`]), instead of `submit_not_started`.
 #[test]
 fn a_settings_panel_found_by_the_start_check_is_closed_with_escape() {
+    interactive_workers();
     let (backend, detail, outcome) = answer_over(
         HOLDING_ASKING_AGENT,
         None,
@@ -1552,6 +1569,7 @@ fn a_settings_panel_found_by_the_start_check_is_closed_with_escape() {
 /// (task 870).
 #[test]
 fn an_unknown_dialog_over_a_typed_answer_gets_no_key() {
+    interactive_workers();
     let (backend, detail, outcome) = answer_over(
         HOLDING_ASKING_AGENT,
         None,
@@ -1602,6 +1620,7 @@ await_exit
 /// before (task 870): a dialog-like screen then is not read or recorded.
 #[test]
 fn an_idle_marker_after_a_typed_answer_counts_for_idle() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IDLE_AFTER_ANSWER_AGENT);
     backend.prompt_wait = Duration::from_millis(300);
@@ -1659,6 +1678,7 @@ fn an_idle_marker_after_a_typed_answer_counts_for_idle() {
 /// already `awaiting_integration` and the question says what follows.
 #[test]
 fn unanswered_exit_request_times_out_and_keeps_the_run() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, HELD_AGENT);
     backend.exit_timeout = Duration::from_millis(500);

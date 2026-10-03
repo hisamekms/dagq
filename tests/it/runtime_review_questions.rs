@@ -6,12 +6,16 @@ use crate::runtime_support;
 use dagq::domain::{AskId, AskReason, NewAsk};
 use runtime_support::*;
 
-/// The start of a worker that waits for the revise request after its
-/// receipt.
-const WAITS_FOR_REVISE: &str = r#"
-commit work; receipt "$(git rev-parse HEAD)"; idle
-while [ ! -f "$MESSAGE" ]; do sleep 0.05; done; rm "$MESSAGE"
-"#;
+/// A worker whose first turn commits and writes its receipt, and whose
+/// turn of the revise request runs `revise` (goal 92).
+fn on_revise(revise: &str) -> String {
+    format!(
+        "case \"$TURN\" in\n\
+         1) commit work; receipt \"$(git rev-parse HEAD)\" ;;\n\
+         2) {revise}\n;;\n\
+         esac\n"
+    )
+}
 
 /// A `revise` verdict that waits for [`ask_during_review`] (its file next to
 /// the queue `db`), so that a question can be asked during the review, in
@@ -139,11 +143,10 @@ fn an_answer_to_a_question_from_before_the_revise_is_left_to_the_inbox() {
     let backend = Arc::new(TestWorkspace::new(
         &db,
         false,
-        &format!(
-            "{WAITS_FOR_REVISE}\
-             while [ ! -f \"$EXIT.go\" ]; do sleep 0.05; done\n\
+        &on_revise(
+            "while [ ! -f \"$EXIT.go\" ]; do sleep 0.05; done\n\
              printf 'fix\\n' >> change.txt; git commit -q -am fix\n\
-             receipt \"$(git rev-parse HEAD)\"; idle; await_exit\n"
+             receipt \"$(git rev-parse HEAD)\"",
         ),
     ));
     let reviewer = Arc::new(TestReviewer::new(&[
@@ -164,9 +167,10 @@ fn an_answer_to_a_question_from_before_the_revise_is_left_to_the_inbox() {
     await_passes(&passes, SOME_PASSES);
     let detail = queue.show(TaskId::new(1)).unwrap();
     assert!(payloads(&detail, "ask_delivered").is_empty());
-    assert_eq!(backend.texts().len(), 1, "{:?}", backend.texts());
-
     let run = detail.runs[0].clone();
+    let texts = session_texts(&backend, &run);
+    assert_eq!(texts.len(), 1, "{texts:?}");
+
     fs::write(
         exit_request_path(run.run_dir().unwrap()).with_extension("go"),
         "",
@@ -179,9 +183,9 @@ fn an_answer_to_a_question_from_before_the_revise_is_left_to_the_inbox() {
     assert_landed(&repo, &detail.runs[0], "test task", &base);
     assert_eq!(payloads(&detail, "revise_finished").len(), 1);
     assert!(payloads(&detail, "ask_delivered").is_empty());
-    let texts = backend.texts();
+    let texts = session_texts(&backend, &detail.runs[0]);
     assert_eq!(texts.len(), 1, "{texts:?}");
-    assert!(!texts[0].1.contains("answer to ask"), "{texts:?}");
+    assert!(!texts[0].contains("answer to ask"), "{texts:?}");
     assert!(queue.read_ask(ask).unwrap().closed_at.is_none());
 }
 
@@ -191,11 +195,7 @@ fn an_answer_to_a_question_from_before_the_revise_is_left_to_the_inbox() {
 #[test]
 fn a_question_open_from_before_the_revise_does_not_hold_an_idle_session() {
     let (_dir, repo, db) = fixture();
-    let backend = Arc::new(TestWorkspace::new(
-        &db,
-        false,
-        &format!("{WAITS_FOR_REVISE}idle; await_exit\n"),
-    ));
+    let backend = Arc::new(TestWorkspace::new(&db, false, &on_revise(":")));
     let reviewer = Arc::new(TestReviewer::new(&[slow_revise(&db)]));
     let (supervisor, _) = run_supervisor(&db, &repo, &backend, &reviewer);
     let ask = ask_during_review(&db);
@@ -213,7 +213,8 @@ fn a_question_open_from_before_the_revise_does_not_hold_an_idle_session() {
 #[test]
 fn a_question_open_from_before_the_revise_does_not_stop_its_resume_timeout() {
     let (_dir, repo, db) = fixture();
-    let mut backend = TestWorkspace::new(&db, false, &format!("{WAITS_FOR_REVISE}await_exit\n"));
+    // The turn of the revise runs on until it is stopped.
+    let mut backend = TestWorkspace::new(&db, false, &on_revise("while :; do sleep 0.05; done"));
     backend.resume_timeout = Duration::from_secs(2);
     let backend = Arc::new(backend);
     let reviewer = Arc::new(TestReviewer::new(&[slow_revise(&db)]));
@@ -226,13 +227,22 @@ fn a_question_open_from_before_the_revise_does_not_stop_its_resume_timeout() {
     assert_revise_ended(&mut queue, "did not rewrite the receipt within 2 seconds");
 }
 
-/// The start of a worker that, once the revise request arrives, asks a
+/// What a worker does first in its turn of the revise request: it asks a
 /// `worker_question` and does not stop at it.
-const ASKS_AFTER_REVISE: &str = r#"
-commit work; receipt "$(git rev-parse HEAD)"; idle
-while [ ! -f "$MESSAGE" ]; do sleep 0.05; done; rm "$MESSAGE"
-"$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which line?' --cmux /usr/bin/true > /dev/null || exit 70
-"#;
+const ASKS: &str = r#""$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which line?' --cmux /usr/bin/true > /dev/null || exit 70"#;
+
+/// A worker that asks in its turn of the revise request ([`ASKS`]) and then
+/// runs `revise`, and whose next turn (the answer, or the request to fix
+/// its receipt) runs `next` (goal 92).
+fn asks_after_revise(revise: &str, next: &str) -> String {
+    format!(
+        "case \"$TURN\" in\n\
+         1) commit work; receipt \"$(git rev-parse HEAD)\" ;;\n\
+         2) {ASKS}\n{revise}\n;;\n\
+         *) {next}\n;;\n\
+         esac\n"
+    )
+}
 
 /// The `worker_question` a worker asked during its revise, still open.
 fn open_question(queue: &mut SqliteQueue) -> AskId {
@@ -255,10 +265,10 @@ fn a_receipt_rewritten_after_an_open_question_is_judged() {
     let backend = Arc::new(TestWorkspace::new(
         &db,
         false,
-        &format!(
-            "{ASKS_AFTER_REVISE}\
-             printf 'fix\\n' >> change.txt; git commit -q -am fix\n\
-             receipt \"$(git rev-parse HEAD)\"; idle; await_exit\n"
+        &asks_after_revise(
+            "printf 'fix\\n' >> change.txt; git commit -q -am fix\n\
+             receipt \"$(git rev-parse HEAD)\"",
+            ":",
         ),
     ));
     let reviewer = Arc::new(TestReviewer::new(&[
@@ -291,12 +301,10 @@ fn a_mismatched_receipt_rewritten_after_an_open_question_is_judged() {
     let backend = Arc::new(TestWorkspace::new(
         &db,
         false,
-        &format!(
-            "{ASKS_AFTER_REVISE}\
-             printf 'fix\\n' >> change.txt; git commit -q -am fix\n\
-             receipt 0123456789012345678901234567890123456789; idle\n\
-             while [ ! -f \"$MESSAGE\" ]; do sleep 0.05; done; rm \"$MESSAGE\"\n\
-             receipt \"$(git rev-parse HEAD)\"; idle; await_exit\n"
+        &asks_after_revise(
+            "printf 'fix\\n' >> change.txt; git commit -q -am fix\n\
+             receipt 0123456789012345678901234567890123456789",
+            "receipt \"$(git rev-parse HEAD)\"",
         ),
     ));
     let reviewer = Arc::new(TestReviewer::new(&[
@@ -327,12 +335,7 @@ fn a_question_passed_by_a_rewritten_receipt_does_not_hold_its_fix() {
     let backend = Arc::new(TestWorkspace::new(
         &db,
         false,
-        &format!(
-            "{ASKS_AFTER_REVISE}\
-             receipt 0123456789012345678901234567890123456789; idle\n\
-             while [ ! -f \"$MESSAGE\" ]; do sleep 0.05; done; rm \"$MESSAGE\"\n\
-             idle; await_exit\n"
-        ),
+        &asks_after_revise("receipt 0123456789012345678901234567890123456789", ":"),
     ));
     let reviewer = Arc::new(TestReviewer::new(&[verdict(
         "revise",
@@ -370,11 +373,10 @@ fn an_open_question_without_a_rewritten_receipt_holds_past_the_resume_timeout() 
     let mut backend = TestWorkspace::new(
         &db,
         false,
-        &format!(
-            "{ASKS_AFTER_REVISE}idle\n\
-             while [ ! -f \"$MESSAGE\" ]; do sleep 0.05; done; rm \"$MESSAGE\"\n\
-             printf 'fix\\n' >> change.txt; git commit -q -am fix\n\
-             receipt \"$(git rev-parse HEAD)\"; idle; await_exit\n"
+        &asks_after_revise(
+            ":",
+            "printf 'fix\\n' >> change.txt; git commit -q -am fix\n\
+             receipt \"$(git rev-parse HEAD)\"",
         ),
     );
     backend.resume_timeout = Duration::from_secs(1);
@@ -422,13 +424,16 @@ fn an_open_question_without_a_rewritten_receipt_holds_past_the_resume_timeout() 
 /// input past that idle).
 #[test]
 fn an_answer_whose_send_outlasts_the_turn_settles_the_revise_at_its_idle() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
     let mut backend = TestWorkspace::new(
         &db,
         false,
         &format!(
-            "{ASKS_AFTER_REVISE}idle\n\
+            "commit work; receipt \"$(git rev-parse HEAD)\"; idle\n\
+             while [ ! -f \"$MESSAGE\" ]; do sleep 0.05; done; rm \"$MESSAGE\"\n\
+             {ASKS}\nidle\n\
              while [ ! -f \"$MESSAGE\" ]; do sleep 0.05; done; rm \"$MESSAGE\"\n\
              printf 'fix\\n' >> change.txt; git commit -q -am fix\n\
              receipt \"$(git rev-parse HEAD)\"; idle\n\

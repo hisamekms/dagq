@@ -20,6 +20,7 @@ fn unwritable_revise() -> TestReviewer {
 /// watching it, and the run waits for a person's review and integrate.
 #[test]
 fn a_run_given_up_in_its_review_asks_its_session_to_exit() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     let reviewer = unwritable_revise();
@@ -60,6 +61,7 @@ fn a_run_given_up_in_its_review_asks_its_session_to_exit() {
 /// until the session exits, when `review and integrate` comes back.
 #[test]
 fn a_session_that_cannot_be_asked_to_exit_is_a_persons_to_end() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     backend.exit_unsent.store(usize::MAX, Ordering::SeqCst);

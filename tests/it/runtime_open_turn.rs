@@ -3,6 +3,8 @@
 //! the idle marker, here a notice that its background work ended), is at
 //! work on the turn that input started: its stage does not end, and no
 //! `/exit` is sent, until the idle marker that ends that turn (task 672).
+//! The tests run interactive sessions because only an interactive session
+//! has idle and input markers and takes inputs between its turns (goal 92).
 use crate::runtime_support;
 use dagq::domain::EventKind;
 
@@ -57,6 +59,7 @@ fn while_the_notice_runs(
 /// the resume, which goes on to validation with the session open.
 #[test]
 fn a_resumed_session_at_work_on_a_notice_after_its_idle_is_not_ended() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (run, _) = parked_conflict(&repo, &db, &backend);
@@ -113,6 +116,7 @@ fn a_resumed_session_at_work_on_a_notice_after_its_idle_is_not_ended() {
 /// is reviewed again and lands.
 #[test]
 fn a_revised_session_at_work_on_a_notice_after_its_idle_is_not_ended() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
     let backend = Arc::new(TestWorkspace::new(

@@ -36,10 +36,13 @@ fn retried_with_its_branch_past(limit: usize, config: Option<&str>) {
         git(&repo, &["commit", "-q", "-m", "set the resume limit"]);
     }
     // The first run's session rebases at each request; the retry's run
-    // commits its work and waits for its /exit.
-    let second = "\"$(git rev-parse --path-format=absolute --git-common-dir)/second-run\"";
+    // commits its work.
+    // The first run writes its id to `first-run`; a run of another id is
+    // the retry's.
+    let first = "\"$(git rev-parse --path-format=absolute --git-common-dir)/first-run\"";
     let agent = format!(
-        "if [ -f {second} ]; then {IDLE_AGENT}; else touch {second}; {}; fi",
+        "[ -f {first} ] || printf '%s' \"$RUN_ID\" > {first}\n\
+         if [ \"$(cat {first})\" != \"$RUN_ID\" ]; then {IDLE_AGENT}; else {}\nfi",
         rebasing_agent(limit)
     );
     let backend = TestWorkspace::new(&db, false, &agent);
@@ -72,7 +75,7 @@ fn retried_with_its_branch_past(limit: usize, config: Option<&str>) {
     assert_eq!(last["attempt"], limit + 1);
     assert_eq!(last["exhausted"], true);
     assert!(last.get("asked").is_none(), "{last}");
-    assert_eq!(backend.texts().len(), limit);
+    assert_eq!(session_texts(&backend, &first).len(), limit);
     // Its landing conflicted and parked it; no resume started.
     let deferred = of_first("integration_deferred");
     assert_eq!(deferred.len(), 1, "{:?}", event_kinds(&detail));
@@ -184,8 +187,8 @@ fn a_precheck_conflict_after_the_counted_resumes_asks_a_person() {
         asked.ends_with("after 0 conflict requests and 3 counted resumes (at most 3)"),
         "{asked}"
     );
-    assert!(backend.texts().is_empty());
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
+    assert!(session_texts(&backend, &detail.runs[0]).is_empty());
+    assert_exit_sent(&backend, &detail.runs[0], 1);
     assert!(payloads(&detail, "triage_finished").is_empty());
     let asks = queue.asks(Default::default()).unwrap();
     assert_eq!(asks.len(), 1);

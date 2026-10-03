@@ -133,7 +133,7 @@ fn a_raised_resume_starts_the_session_higher_and_stats_reads_it() {
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(2)).unwrap();
     assert_landed(&repo, &detail.runs[0], "second", &first_landed);
-    let resumed: Vec<Value> = session_models(&db)
+    let resumed: Vec<Value> = turn_models(&db)
         .into_iter()
         .filter(|model| model["run_id"] == run.id().as_str() && model["resume"] == true)
         .collect();
@@ -234,25 +234,15 @@ fn a_retry_inherits_the_raised_step() {
     );
 }
 
-/// The worker goes idle after its receipt; when a text arrives in its
-/// terminal it appends a line, commits, rewrites the receipt and goes idle
-/// again, once (`runtime_review`'s agent for one revise).
-fn revising_agent() -> String {
-    "commit work; receipt \"$(git rev-parse HEAD)\"; idle; \
-     while [ ! -f \"$MESSAGE\" ]; do sleep 0.1; done; rm \"$MESSAGE\"; \
-     printf 'fix 1\\n' >> change.txt; git commit -q -am \"fix 1\"; \
-     receipt \"$(git rev-parse HEAD)\"; idle; await_exit"
-        .to_owned()
-}
-
 /// A live session that cannot be switched up before a revise goes on as it
 /// was: the revise is sent and records why it was not raised (ADR-0079
 /// decision 5).
 #[test]
 fn a_revise_whose_session_cannot_be_switched_goes_on_unraised() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
-    let mut backend = TestWorkspace::new(&db, false, &revising_agent());
+    let mut backend = TestWorkspace::new(&db, false, &crate::runtime_review::revising_agent(1));
     backend.switch_fails = true;
     let reviewer = TestReviewer::new(&[
         verdict("revise", &["add a line to change.txt"], "one gap"),
@@ -299,6 +289,7 @@ fn a_revise_whose_session_cannot_be_switched_goes_on_unraised() {
 /// could not be sent (ADR-0079 decision 5).
 #[test]
 fn a_switch_left_in_the_input_box_asks_a_person_without_typing_the_revise() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     backend.switch_stuck = true;
@@ -336,10 +327,7 @@ pub(crate) fn assert_raised_by_revise(requested: &Value, backend: &TestWorkspace
         json!({"model": "claude-opus-5-5", "effort": "medium"})
     );
     assert_eq!(requested["escalation_reason"], "revise");
-    assert_eq!(
-        backend.switches(),
-        [(WORKSPACE_ID.to_owned(), "/effort high".to_owned())]
-    );
+    assert_eq!(revise_efforts(backend), ["/effort high"]);
     let escalations = &stats_full(db)["escalations"];
     assert_eq!(escalations["count"], 1, "{escalations}");
     assert_eq!(escalations["revises"], 1);
@@ -353,6 +341,5 @@ pub(crate) fn assert_revises_raised(detail: &dagq::domain::TaskDetail, backend: 
         .map(|p| &p["effort"])
         .collect();
     assert_eq!(efforts, [&json!("high"), &json!("xhigh")]);
-    let switches: Vec<String> = backend.switches().into_iter().map(|(_, s)| s).collect();
-    assert_eq!(switches, ["/effort high", "/effort xhigh"]);
+    assert_eq!(revise_efforts(backend), ["/effort high", "/effort xhigh"]);
 }

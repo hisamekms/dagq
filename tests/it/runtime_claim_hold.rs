@@ -45,7 +45,6 @@ fn alert_kinds(stats: &Value) -> Vec<&str> {
 /// its own token, so `status` and `stats` keep showing it.
 #[test]
 fn no_run_is_claimed_while_the_load_is_above_the_threshold() {
-    headless_workers();
     let (_dir, repo, db) = fixture();
     set_load(40.0);
     let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
@@ -159,7 +158,6 @@ fn no_run_is_claimed_while_the_load_is_above_the_threshold() {
 /// Without `--max-load` (the library's default) no load holds claims.
 #[test]
 fn no_threshold_holds_nothing() {
-    headless_workers();
     let (_dir, repo, db) = fixture();
     fn very_high() -> Option<f64> {
         Some(1000.0)

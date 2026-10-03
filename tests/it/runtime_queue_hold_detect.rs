@@ -49,6 +49,7 @@ fn open_holds(db: &Path) -> Vec<dagq::domain::Ask> {
 /// ask of `subject: usage_limit`, which lists it as a run.
 #[test]
 fn an_idle_session_at_the_usage_limit_joins_the_cost_ask() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(
         &db,

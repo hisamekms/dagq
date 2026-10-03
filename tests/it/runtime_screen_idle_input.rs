@@ -4,7 +4,8 @@
 //! marker that never comes: the answer of a `worker_question` in its first
 //! session, a resumed one and a revised one, and a recovery job's
 //! `send_instruction`. A screen at work, at a dialog or unreadable types
-//! nothing.
+//! nothing. The tests run interactive sessions because only an interactive
+//! session has a screen and typed inputs to wait for (goal 92).
 use crate::common;
 use crate::runtime_support;
 use dagq::domain::EventKind;
@@ -201,16 +202,19 @@ fn a_markerless_question_is_answered_once_the_screen_rests(screen: Option<&str>)
 /// its screen is at rest, and not while it shows work.
 #[test]
 fn a_markerless_first_session_gets_its_answer_once_its_screen_rests() {
+    interactive_workers();
     a_markerless_question_is_answered_once_the_screen_rests(Some(WORKING_SCREEN));
 }
 
 #[test]
 fn a_markerless_first_session_at_a_dialog_gets_no_answer() {
+    interactive_workers();
     a_markerless_question_is_answered_once_the_screen_rests(Some(DIALOG_SCREEN));
 }
 
 #[test]
 fn a_markerless_first_session_whose_screen_cannot_be_read_gets_no_answer() {
+    interactive_workers();
     a_markerless_question_is_answered_once_the_screen_rests(None);
 }
 
@@ -219,6 +223,7 @@ fn a_markerless_first_session_whose_screen_cannot_be_read_gets_no_answer() {
 /// stage by its screen.
 #[test]
 fn a_markerless_resumed_session_gets_its_answer_once_its_screen_rests() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (run, _) = parked_conflict(&repo, &db, &backend);
@@ -290,6 +295,7 @@ receipt "$(git rev-parse HEAD)"; await_exit"#,
 /// once its screen is at rest, ends its revise by its screen, and lands.
 #[test]
 fn a_markerless_revised_session_gets_its_answer_once_its_screen_rests() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
     let backend = Arc::new(TestWorkspace::new(
@@ -414,6 +420,7 @@ fn markerless_stall(
 /// session takes it and lands.
 #[test]
 fn an_instruction_reaches_a_markerless_session_whose_screen_rests() {
+    interactive_workers();
     let (dir, repo, db) = fixture();
     let gate = dir.path().join("gate");
     let (backend, supervisor, _) = markerless_stall(&db, &repo, &gate);
@@ -453,6 +460,7 @@ fn an_instruction_reaches_a_markerless_session_whose_screen_rests() {
 /// typed.
 #[test]
 fn an_instruction_does_not_reach_a_markerless_session_at_work() {
+    interactive_workers();
     let (dir, repo, db) = fixture();
     let gate = dir.path().join("gate");
     let (backend, supervisor, passes) = markerless_stall(&db, &repo, &gate);
@@ -496,6 +504,7 @@ fn an_instruction_does_not_reach_a_markerless_session_at_work() {
 /// marker; the run goes on to validation.
 #[test]
 fn a_markerless_session_has_its_dialog_cleared_once_its_screen_rests() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(
         &db,

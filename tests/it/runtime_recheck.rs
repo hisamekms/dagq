@@ -112,7 +112,7 @@ fn a_waiting_run_that_a_landing_conflicts_with_is_resumed_before_its_answer() {
             "lease_released",
         ]
     );
-    let text = &backend.texts()[0].1;
+    let text = &session_texts(&backend, &run)[0];
     assert!(
         text.contains("the supervisor's landing recheck found that it no longer lands"),
         "{text}"
@@ -252,7 +252,7 @@ fn a_waiting_run_whose_check_fails_on_the_new_main_is_resumed() {
     let started = payloads(&detail, "resume_started");
     assert_eq!(started.len(), 1);
     assert_eq!(started[0]["counted"], true);
-    let text = &backend.texts()[0].1;
+    let text = &session_texts(&backend, &run)[0];
     assert!(
         text.contains("run that command in the worktree after the rebase"),
         "{text}"
@@ -308,6 +308,7 @@ fn a_waiting_run_that_still_lands_is_left_waiting() {
 /// no integration tried) and resumed with the recheck's request.
 #[test]
 fn a_run_held_in_its_slot_that_a_landing_conflicts_with_is_parked_before_it_lands() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "second", &[]);
     let backend = Arc::new(TestWorkspace::new(&db, false, HELD_AGENT));
@@ -836,6 +837,7 @@ fn another_live_supervisor_does_not_keep_a_moved_main_from_being_rechecked() {
 /// main: the conflict holds it, and it is parked instead of landing.
 #[test]
 fn another_supervisors_recheck_of_main_leaves_the_runs_this_one_holds_to_check() {
+    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = Arc::new(TestWorkspace::new(&db, false, HELD_AGENT));
     backend.resume_script_for(1, RESOLVING_RESUME);
