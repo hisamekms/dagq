@@ -4,8 +4,8 @@ type: design
 title: "非対話のworker"
 status: current
 created: 2026-09-28
-updated: 2026-10-03
-last_verified: 2026-10-03
+updated: 2026-10-04
+last_verified: 2026-10-04
 scope: runtime
 related:
   - adr-t1340-1
@@ -103,7 +103,7 @@ wrapper自身がturnの途中で終わるとき（エラー）は、上と同じ
 
 - **Codexのworkerのask**: turnのagentは（Claudeのturnと同じく）queue serviceのsocketとtokenのfileを持ち、queue DBのpathは持たないので、sandboxの中の`dagq ask`はクライアントモードでserviceに送られ、その場で開く（ADR-t1233-5決定4・5、[Queue service](../queue-service.md#クライアントモード)）。開いたaskは下のaskと同じに扱う。
 - **成功**（receiptかaskが残ったturnを含む）: wrapperは次の依頼を待つ。supervisorはidle markerを読み、receiptがあれば今のvalidatingへ（[receipt and session exit](receipt-and-session-exit.md)）、`worker_question`が開いていれば答えを待つ（runはslotを空けて待ちになる。ADR-0071の読み替え、決定6）。答えは`answer to ask N: ...`を依頼にして送る（[workerの質問への回答の送信](worker-question-answer.md)）。
-- **receiptもaskも無いturnの終わり**（`StallWatch::observe_turn`）: 対話の`idle_without_receipt_secs`は待たず（閾値0）、決まった文の促し（`stall_nudged`）を依頼で送る。促しは1 phaseに`HEADLESS_NUDGES`（2）回まで（対話は1回。ADR-0047決定30の読み替え）。前の促しの`stall_resolved`は`nudged_again`になる。使い切った後のturnも同じなら復旧jobの`stalled`（理由`turn_without_receipt`）にする。
+- **receiptもaskも無いturnの終わり**（`StallWatch::observe_turn`）: 対話の`idle_without_receipt_secs`は待たず（閾値0）、決まった文の促し（`stall_nudged`）を依頼で送る。促しは1 phaseに`HEADLESS_NUDGES`（2）回まで（対話は1回。ADR-0047決定30の読み替え）。前の促しの`stall_resolved`は`nudged_again`になる。使い切った後のturnも同じなら復旧jobの`stalled`（理由`turn_without_receipt`）にする。receiptが無いことは、idle markerを読んだ後にもう一度確かめる（`StallWatch::observe`）。passの初めにreceiptを探した後で、turnがreceiptを書いて終わると、そのturnは促されず次のpassでreceiptが読まれる。促しのturnが同じ受け入れの作業をもう一度すると、最初のreceiptのvalidationの最中にcommitが進み（`receipt commit … is not the head`・`worktree is not clean`）、runが失敗するため（task 1328。testは`runtime_headless::a_receipt_written_as_its_turn_ends_is_not_nudged`）。
 - **permissionの拒否が続いて進まない**: receiptもaskも無く終わったturnの`permission_denials`が`PERMISSION_DENIAL_LIMIT`（3）件以上なら、促さずにすぐ復旧jobの`stalled`（理由`permission_denied`）にする。
 - **providerが使えない**（`failure`が`authentication` / `usage_limit` / `launch`）: wrapperはsessionを終えずに次の依頼を待ち、supervisorは促しも復旧jobもせず、失敗したturnの呼び出しをもう一方のproviderの新しいsessionへの依頼にする（ADR-t813-2。[provider-lifecycle](../provider-lifecycle.md#使えないproviderからの切り替え)）。切り替えられない（もう一方も使えない、切り替えの上限）ときはrunを失敗にせず待たせ（`provider_waiting`）、自分のproviderの控えが解ければ同じsessionへもう一度送る（`provider retry`）。Claudeの認証と利用上限、および両方使えないときは、`authentication`ならqueueの認証のholdに、`usage_limit`なら利用上限のhold（`reason_category: cost`、subject `usage_limit`）に、対話のsessionの画面と同じ`raise_wall`で加わる（`auth_required` / `usage_limited`を記録する。task 438）。人が`done`と答えると、対話と同じくsupervisorが「続けて」（`continue`）を依頼で送る（[queue hold](queue-hold.md)）。reviseとresumeの段でも同じ（`SessionWatch::provider_wall`）。
 - **turnの失敗と、wrapperが止めたturn**（`other`・`model`の失敗、`silent`・`timed_out`・`launch_mismatch`）: wrapperはsessionを終える（exit code 1）。supervisorはそのturnを促さず、wrapperの終了を待つ。receiptの無いまま終わったrunは`failed`になり、今の[triage](triage.md)の復旧job（alert `failed`）にかかる（runが`worker_question`か`stalled`のaskの答えを待つ最中にwrapperが終わったときは、下の「待ちの最中に失ったsessionの開き直し」が先に開き直す）。復旧jobの材料（`ended_run_material`）には、最後の5つの`turn_finished`（`outcome`と`stopped`）が載る。

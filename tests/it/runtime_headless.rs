@@ -7,8 +7,10 @@ use crate::common;
 use crate::runtime_support;
 
 use dagq::domain::{AskReason, EventKind, worker::WorkerMode};
+use dagq::{application::RunFiles, runtime::RunFilesPort};
 use runtime_support::headless::*;
 use runtime_support::*;
+use std::io;
 
 /// Wait for the supervisor thread and its sessions; the run landed.
 fn landed(
@@ -1057,6 +1059,156 @@ fn a_turn_that_ends_by_itself_leaves_what_runs_outside_its_group() {
     let inside = Reaped(written_pid(run, "inside.pid"));
     assert!(!still_running(inside.0), "the turn's group outlived it");
     assert!(running(outside.0));
+}
+
+/// Run files that hide a receipt from the first look at it made once the
+/// turn that wrote it has ended (its idle marker is not older), and the
+/// idle marker until that look: the supervisor's pass looked for the
+/// receipt just before the turn wrote it and ended, and reads the idle
+/// after it, as a pass slowed by load does. Hiding the marker too keeps
+/// the end of the turn from falling later in a pass, where the hidden look
+/// would be the stall watch's own.
+#[derive(Default)]
+struct ReceiptSeenLate {
+    hidden: Mutex<bool>,
+}
+
+impl ReceiptSeenLate {
+    /// Whether `path` is the idle marker while it is hidden.
+    fn idle_hidden(&self, path: &Path) -> bool {
+        path.file_name().is_some_and(|name| name == "idle.json") && !*self.hidden.lock().unwrap()
+    }
+
+    fn turn_ended(receipt: &Path) -> bool {
+        let idle = receipt.with_file_name("idle.json");
+        match (
+            LocalRunFiles.modified(receipt),
+            LocalRunFiles.modified(&idle),
+        ) {
+            (Ok(written), Ok(ended)) => ended >= written,
+            _ => false,
+        }
+    }
+}
+
+impl RunFiles for ReceiptSeenLate {
+    fn create_dir_all(&self, dir: &Path) -> io::Result<()> {
+        LocalRunFiles.create_dir_all(dir)
+    }
+    fn create_new_dir(&self, dir: &Path) -> io::Result<()> {
+        LocalRunFiles.create_new_dir(dir)
+    }
+    fn write(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
+        LocalRunFiles.write(path, contents)
+    }
+    fn copy(&self, from: &Path, to: &Path) -> io::Result<()> {
+        LocalRunFiles.copy(from, to)
+    }
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        if self.idle_hidden(path) {
+            return Err(io::ErrorKind::NotFound.into());
+        }
+        LocalRunFiles.read(path)
+    }
+    fn read_to_string(&self, path: &Path) -> io::Result<String> {
+        if self.idle_hidden(path) {
+            return Err(io::ErrorKind::NotFound.into());
+        }
+        LocalRunFiles.read_to_string(path)
+    }
+    fn modified(&self, path: &Path) -> io::Result<SystemTime> {
+        if self.idle_hidden(path) {
+            return Err(io::ErrorKind::NotFound.into());
+        }
+        LocalRunFiles.modified(path)
+    }
+    fn read_stamped(&self, path: &Path) -> Result<Option<(SystemTime, Vec<u8>)>> {
+        if self.idle_hidden(path) {
+            return Ok(None);
+        }
+        LocalRunFiles.read_stamped(path)
+    }
+    fn is_file(&self, path: &Path) -> bool {
+        if self.idle_hidden(path) || !LocalRunFiles.is_file(path) {
+            return false;
+        }
+        if path.file_name().is_some_and(|name| name == "receipt.json") {
+            // Hidden while the turn runs, then from one more look.
+            if !Self::turn_ended(path) {
+                return false;
+            }
+            let mut hidden = self.hidden.lock().unwrap();
+            if !*hidden {
+                *hidden = true;
+                return false;
+            }
+        }
+        true
+    }
+    fn is_dir(&self, path: &Path) -> bool {
+        LocalRunFiles.is_dir(path)
+    }
+    fn exists(&self, path: &Path) -> bool {
+        !self.idle_hidden(path) && LocalRunFiles.exists(path)
+    }
+    fn read_dir(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
+        LocalRunFiles.read_dir(dir)
+    }
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        LocalRunFiles.rename(from, to)
+    }
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        LocalRunFiles.remove_file(path)
+    }
+    fn tree_size(&self, dir: &Path) -> io::Result<Option<u64>> {
+        LocalRunFiles.tree_size(dir)
+    }
+    fn remove_dir_all(&self, dir: &Path) -> io::Result<()> {
+        LocalRunFiles.remove_dir_all(dir)
+    }
+    fn append_line(&self, path: &Path, line: &str) -> io::Result<()> {
+        LocalRunFiles.append_line(path, line)
+    }
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        LocalRunFiles.canonicalize(path)
+    }
+    fn write_fenced(&self, path: &Path, text: &str, info: &str, body: &Path) -> Result<()> {
+        LocalRunFiles.write_fenced(path, text, info, body)
+    }
+    fn now(&self) -> SystemTime {
+        LocalRunFiles.now()
+    }
+}
+
+/// Task 1328: the pass looks for the receipt, the turn writes it and
+/// ends, and the stall watch of the same pass then reads the idle marker.
+/// The watch looks for the receipt again after the idle and sends no
+/// nudge: a nudge's turn would commit again under the receipt's
+/// validation (`receipt commit … is not the head`, `worktree is not
+/// clean`). The run lands after its one turn.
+#[test]
+fn a_receipt_written_as_its_turn_ends_is_not_nudged() {
+    let (dir, repo, db, backend) = headless_fixture(&[]);
+    set_turns(dir.path(), FINISH);
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
+    let options = SuperviseOptions {
+        files: Some(RunFilesPort(Arc::new(ReceiptSeenLate::default()))),
+        ..supervise_options(4, true)
+    };
+    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
+    let detail = detail(&db);
+    assert_landed_run(&detail.runs[0], &repo, &base);
+    assert!(
+        payloads(&detail, "stall_nudged").is_empty(),
+        "{:?}",
+        payloads(&detail, "stall_nudged")
+    );
+    let calls = stub_calls(&detail.runs[0]);
+    assert_eq!(calls.len(), 1, "{calls:?}");
 }
 
 /// The headless run's supervisor died with its first turn ended and its

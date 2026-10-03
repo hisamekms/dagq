@@ -1281,6 +1281,15 @@ impl StallWatch {
         let Some(idle) = idle else {
             return Ok(None);
         };
+        // The caller looked for the receipt before the idle was read: a
+        // turn that wrote its receipt and ended in between is not a stall,
+        // and a nudge would start another turn under the receipt's
+        // validation (task 1328). The next pass sees the receipt.
+        if let Some(receipt) = run.receipt_path()
+            && sv.files.is_file(Path::new(receipt))
+        {
+            return Ok(None);
+        }
         let modified = idle.modified();
         // The session has not ended a turn since the last text it was sent,
         // or since a person stepped in.
