@@ -46,7 +46,7 @@ related:
 | `task_overlap` | 並行する他のtaskや、直前に着地した変更と重なる・衝突する | task 209: 同じ番号とREADMEを書き換えたtaskが着地 | `scope` |
 | `precondition_missing` | 着手の前提（測る対象のデータ、先行のtaskの着地、必要な件数）がまだ揃っていない | task 460: 導入後の着地が10 runに満たない | `scope` |
 | `host_environment` | hostのツール・設定・版が作業か着地を妨げ、workerはhostに手を入れられない | task 486: globalのmiseのrustの設定 | `scope` |
-| `design_choice` | 条件・ADR・範囲に触れない実装の選び方。AGENTS.mdではaskにせずworkerが決めるもので、付いたaskはpromptの直しどころを示す（ADR-t947-2決定3） | この期間は無し | （人が要る理由が無い） |
+| `design_choice` | 条件・ADR・範囲に触れない実装の選び方。dagqのrepositoryでは`docs/development/local-checks.md`の「askにしないもの」のとおりaskにせずworkerが決めるもので、付いたaskはpromptの直しどころを示す（ADR-t947-2決定3） | この期間は無し | （人が要る理由が無い） |
 | `discard_work` | できた成果を捨てるか、やり直すか | この期間は無し | `discard` |
 | `other` | どれにも当たらない。問いの文で説明する | この期間は無し | — |
 

@@ -97,7 +97,7 @@ runtimeはrepositoryの規則（検証のコマンド、宣言するpaths、要�
 
 - **worker**: `WORKER_READING`と`local_checks`が「AGENTS.mdかCLAUDE.md」を名指す。
 - **planner**: `repository_rules(ask)`の一文が、taskの`--verify`・`--paths`・`--evidence`をrepositoryの指示とそれが名指す文書・規則から、AGENTS.md → （無ければ）CLAUDE.md → （どちらも無ければ）README・CIの設定・buildの設定の順で決め、どれでも決まらなければ`ask`する、と指示する。`ask`は人が開くplanner（`planner_prompt`）では`ask the person`、runtimeが立てるplanner（`runtime_planner_prompt`・`draft_planner_prompt`・`finding_planner_prompt`）では`RUNTIME_PLANNER_ASK`で、source・ADR・人の先例から自分で決め、その材料で決めきれず人の判断（`scope`・`discard`）に当たるか確信度が`low`のときだけ`planner_question`のaskにする（ADR-t451-1決定5、task 1320）。
-- **plan review**: repositoryの指示（AGENTS.md・CLAUDE.md）と、それが名指す文書・規則（とくにplan review向けの記述）を読んで当てはめさせ、AGENTS.mdが無いrepositoryではCLAUDE.md → README・CIの設定・buildの設定の順で判断し、どれでも決まらなければ`concern`にさせる。dagqのrepositoryでは、AGENTS.mdの「plan review」の節が`docs/adr/README.md`とADRのIDの規則を名指す。
+- **plan review**: repositoryの指示（AGENTS.md・CLAUDE.md）と、それが名指す文書・規則（とくにplan review向けの記述）を読んで当てはめさせ、AGENTS.mdが無いrepositoryではCLAUDE.md → README・CIの設定・buildの設定の順で判断し、どれでも決まらなければ`concern`にさせる。dagqのrepositoryでは、AGENTS.mdの「plan review」の節が`docs/development/task-registration.md`の「plan reviewが当てはめる規則」を名指し、そこが`docs/adr/README.md`とADRのIDの規則（`docs/development/documents.md`の「ADRのID」）を名指す。
 - **review**: `revise`の例は「repositoryのformatter・linter・その他の検査の指摘」で、特定の言語のツールを名指さない。
 
 follow_up・goal gap・findingのdraftの`context`の見出しは英語（`follow-up draft (proposed by the receipt of run <run> of task <id>)`、`goal gap draft (proposed by the judgment of goal <id>)`、`from finding <id> (<kind>)`。[Language](language.md#日本語が残っていた固定の文字列)）。testは`src/application/prompt.rs`の`prompts_take_the_rules_from_the_repository_in_order`と`tests/it/plan_review.rs`。

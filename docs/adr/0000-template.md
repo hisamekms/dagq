@@ -1,17 +1,18 @@
 ---
-id: adr-tTASK-N                # 書く task の ID と枝番（1 本でも -1）。ファイル名は YYYY-MM-DD-tTASK-N-<slug>.md（日付は accepted_on）
+id: adr-tTASK-N                # ID・ファイル名・日付の形は docs/development/documents.md の「ADRのID」
 type: adr
 title: Decision title
 status: proposed
 created: YYYY-MM-DD
 updated: YYYY-MM-DD
-# accepted_on: YYYY-MM-DD      # accepted にする変更で足す。updated は変えない
-# supersedes: [adr-tTASK-N]    # 置き換える ADR があれば。置き換えは丸ごと（ADR-t598-1。決定を複数持つ ADR の一部だけを変えるなら amends）。本文と一緒に書き、後から変えない
-# amends: [adr-0047 決定 24]    # 番号付きの決定を複数持つ ADR（4 桁でも新しい形でも）の一部の決定を変えるとき（ADR-t1091-1）。決定が 1 つか大半を変えるなら supersedes で丸ごと置き換える。元の ADR に amended_by を足し、design を今の姿に直す
-# amended_by: [adr-tTASK-N]     # この ADR の一部の決定を変えた ADR（決定を複数持つ ADR だけ）
-# superseded_by: adr-tTASK-N     # superseded にするとき、後継の ID を 1 つ
-# superseded_on: YYYY-MM-DD    # superseded にした日（後継の accepted_on と同じ）
-# deprecated_on: YYYY-MM-DD    # deprecated にした日
+# accepted_on: YYYY-MM-DD
+# supersedes: [adr-tTASK-N]
+# amends: [adr-0047 decision 24]
+# amended_by: [adr-tTASK-N]
+# superseded_by: adr-tTASK-N
+# superseded_on: YYYY-MM-DD
+# deprecated_on: YYYY-MM-DD
+# 欄の意味と状態ごとの組み合わせは docs/frontmatter.md の「ADR fields」、いつ足し・変えてよいか（append-only、置き換えか amends か）は docs/development/documents.md の「ADR」
 owners:
   - owner
 tags:
@@ -22,12 +23,7 @@ related: []
 # ADR-tTASK-N: Decision title
 
 <!--
-superseded / deprecated にするときだけ、H1 の直後にどちらか 1 行の注記を置く（置き換え済みの日付は superseded_on、廃止の日付は deprecated_on）。
-> **置き換え済み（YYYY-MM-DD）**: このADRの決定は現在有効ではない。現行の決定は[ADR-XXXX](XXXX-....md)を読む。
-> **廃止（YYYY-MM-DD）**: このADRの決定は現在有効ではない。理由: ...
-本文は append-only。後から変えてよいのは status・accepted_on・superseded_by・superseded_on・deprecated_on・amended_by とこの注記だけ。
-1 ADR に決定 1 つ（密に結びついた数個まで）、本文はおおむね 100 行以内。書くのは変えるのに人の判断が要るもの（問題と文脈、方針・原則・境界・不変条件、退けた案、結果）。
-event の kind や欄名、flag の綴り、JSON の形、既定値・閾値の数値、関数・ファイル名、migration の番号、test の名前は docs/design に書く。目安は「これを変えるとき人に聞くか」。
+ADRに書くもの・書かないもの（小さなADR）、append-only、置き換えと amends は docs/development/documents.md の「ADR」、superseded / deprecated の注記の書式は docs/frontmatter.md の「ADR fields」の Banner に従う。
 このコメントは ADR を作るときに消す。
 -->
 

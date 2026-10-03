@@ -1,7 +1,7 @@
 ---
 id: development-task-registration
 type: development
-title: このrepositoryのtaskの登録（verify・paths・evidence・changeの選び方と、plan reviewが当てはめる規則）
+title: このrepositoryのtaskの登録（verify・paths・evidence・changeの選び方、ADRを書くtask、plan reviewが当てはめる規則）
 status: current
 created: 2026-10-03
 updated: 2026-10-03
@@ -16,6 +16,7 @@ related:
   - development-testing
   - development-migrations
   - plan-local-checks-history
+  - development-documents
 ---
 
 # このrepositoryのtaskの登録
@@ -69,9 +70,18 @@ llvm-covとcargo testの重ね方:
 - 混ざるときは主な目的の1つを選ぶ（例: 不具合の修正にtestを足すなら`fix`、新しい機能のdocsを同じtaskで書くなら`feature`）。changeは検証を決めない（検証は上の推奨の組み合わせのとおり、変更の対象で選ぶ）。
 - 作業時間の前後比較で読む層は[運用](operations.md)の「KPIの読み方と印」。
 
+## ADRを書くtask
+
+- ADRを書くtaskを登録するときは、descriptionに本数と各IDの中身を書く（自分のIDは`add`が返すまで分からないので「このtaskのIDでADR-t<ID>-1を書く」と書くか、`add`の後にdraftを直す）。verifyは上の「推奨の組み合わせ」の「ADRを書く」の行。IDの形と、番号の割り当ての棚卸しをしないことは[文書の規則](documents.md)の「ADRのID」。
+- 番号付きの決定を複数持つADRの一部を変える（`amends`）か、丸ごと置き換えるかを、ADRを書くtaskのplannerがdescriptionに書き、plan reviewが見る（下の「plan reviewが当てはめる規則」）。選び方は[文書の規則](documents.md)の「ADR」。
+- 決定と実装が明らかなものは、ADRと実装を1 taskにする（[ADR-t598-1](../adr/2026-09-26-t598-1-adr-id-is-task-id-small-adrs-and-design-holds-current-state.md)決定12）。
+
 ## plan reviewが当てはめる規則
 
-この repository のplan review jobは、taskのverify・paths・evidence・changeと測定の書き方に次を当てはめる（読む文書の全体はAGENTS.mdの「plan review」）。
+この repository のplan review jobは、proposalのtaskに次を当てはめる（読む文書はAGENTS.mdの「plan review」が名指す）。
 
 - verify・paths・evidenceは上の推奨の組み合わせに合い、changeは`dagq.toml`の`[tasks] changes`の7値のうちtaskの主な目的に合う1つであること。runtimeのtaskは`cargo llvm-cov nextest --locked --workspace --fail-under-lines 80`を持ち、llvm-covと`cargo test --locked`を重ねず、migrationを足すなら`check-migration-numbers.sh`を持つ。e2eの要否は差分からruntimeが決めるので、runtimeのtaskに一律の`--evidence e2e`は求めない。付いていれば`[e2e] paths`の外でも実cmuxで確かめる理由がdescriptionにあるかを見る。
 - 測定のtask（changeが`measure`のtaskと、受け入れ条件に測定を含むtask）は、周回数（と交互に流すか）、表の列、値の計算式（何を何で割るか、待ちを引くときの区間）、証拠の所在（文書の節・CSV・script・コマンドと時刻の区切り）をacceptanceかdescriptionに書くこと（測定の形に当たらない項目、例えば1回だけ読む測定の周回数は、当たらない理由を書く）。条件の範囲を「同じ形のもの」で広げるtaskは、範囲を決めるgrepか一覧を書くこと。欠けていれば`revise`（workerはこれらを根拠に受け入れ条件の各項目を対応づける。[ADR-t1420-1](../adr/2026-10-03-t1420-1-worker-maps-each-acceptance-criterion-before-the-receipt.md)）。
+- [ADRの索引](../adr/README.md)と、taskが名指すADRと`docs/design/`の文書を読み、`accepted`のADRの決定と矛盾するtaskは`concern`にする（`superseded`なら`superseded_by`を辿る）。
+- ADRを書くtaskが上の「ADRを書くtask」を満たすこと（IDとファイル名の形、`check-adr-numbers.sh`のverify、置き換えか`amends`か）。足りなければ`revise`。
+- 挙動や仕様を変えるtaskは、関連文書（`docs/design/`・pluginのskillとreference・AGENTS.md・`docs/development/`・ADRの索引）のpath・節と更新が要る理由をdescriptionかcontextに書くこと。欠けていて関連する文書が明らかなら、見つけたpathを理由に書いて`revise`にする。文書の差分を求めるverifyやevidenceは求めない（[ADR-t1428-1](../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)）。

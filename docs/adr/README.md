@@ -13,26 +13,11 @@ tags:
 
 # Architecture decision records
 
-ADRは、将来の実装や運用に大きな影響を与える決定の理由を残す。規則は[ADR-t598-1](2026-09-26-t598-1-adr-id-is-task-id-small-adrs-and-design-holds-current-state.md)に従う。
-
-- IDは書くtaskのIDと枝番の`adr-t<task ID>-<N>`（1本でも`-1`）、ファイル名は`<YYYY-MM-DD>-t<task ID>-<N>-<slug>.md`で、日付は`accepted_on`。参照は`ADR-t<ID>-<N>`で日付を含めない。既存の4桁の番号（0001〜）と登録済みのtaskが予約した4桁の番号はそのまま使う。
-- 1 ADRに決定1つ（密に結びついた数個まで）、本文はおおむね100行以内。書くのは変えるのに人の判断が要るもの（問題と文脈、方針・原則・境界・不変条件、退けた案、結果）で、eventやflagの名前、既定値・閾値の数値、関数やファイルの名前は[docs/design/](../design/)に書く。今の姿はdesignが、なぜそうしたかはADRが持つ。
-- `accepted`のADRだけが現在の決定で、本文の決定はすべて有効（`amended_by`を持つものは、その決定だけ後のADRが変えている）。`superseded`のADRは`superseded_by`を辿り、`accepted`に着くまで読む。
-- amendsで直すか丸ごと置き換えるかは、IDの形（4桁か新しい形か）でなく、元のADRの決定の数と変える範囲で決める（[ADR-t1091-1](2026-09-30-t1091-1-amend-or-replace-by-number-of-decisions.md)）。番号付きの決定を複数持つADR（4桁でも新しい形でも。0047・0073・t813-2など）の一部の決定を変えるときは、小さな新しいADRの`amends`に変える決定を書き、元のADRに`amended_by`を足し、同じ変更でdesignを今の姿に直す。決定が1つのADRを変えるときと、決定の大半を変えるときは、新しいADRで丸ごと置き換える。どちらにするかはADRを書くtaskのplannerがdescriptionに書き、plan reviewが見る。
-- 置き換えは後継を`accepted`にする変更と同じ変更で行う。`proposed`の後継は何も置き換えない。
-- 本文はappend-onlyで、後から変えてよいのはstatus・`accepted_on`・`superseded_by`・`superseded_on`・`deprecated_on`・`amended_by`とH1直後の注記1行だけ（`supersedes`と`amends`は本文と一緒に書く）。`superseded_on`は`superseded`にした日（後継の`accepted_on`と同じ）、`deprecated_on`は`deprecated`にした日。欄と注記の書式は[frontmatter仕様](../frontmatter.md)と[template](0000-template.md)にある。
-- ADRのstatusを変える変更は、同じ変更でこの索引の2つの表も更新する。新しい形の行は4桁の行の後ろに`accepted_on`の順で並べる。
-- `sh scripts/check-adr-numbers.sh`が4桁の番号の重複とidの食い違い、新しい形のファイル名の形・idとの一致・IDの重複・日付と`accepted_on`の一致を検査する。
+ADRは、将来の実装や運用に大きな影響を与える決定の理由を残す。ADRの書き方・ID・置き換えとamends・append-only・この索引の更新の規則は[文書の規則](../development/documents.md)の「ADR」「ADRのID」、欄・状態・注記の書式は[frontmatter仕様](../frontmatter.md)の「ADR fields」が持つ。
 
 ## Status
 
-- `proposed`: 検討中。決定はまだ有効ではない
-- `accepted`: 採用済み。本文の決定がすべて現在有効
-- `rejected`: 不採用
-- `superseded`: 後継のADRに丸ごと置き換え済み（`superseded_by`が後継を指す）
-- `deprecated`: 後継なしで廃止済み（H1直後の注記が理由を示す）
-
-新しいADRは [template](0000-template.md) をコピーして作る。
+状態の意味は[frontmatter仕様](../frontmatter.md)の「ADR fields」の表。新しいADRの作り方は[文書の規則](../development/documents.md)の「ADR」。
 
 ## 有効なADR
 
