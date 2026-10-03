@@ -447,7 +447,7 @@ const HOLD_EVENTS_READ: usize = 20;
 
 /// The request that makes a failed call again on `provider` once its hold
 /// ended: the call it failed at (`undelivered`), or a request to go on.
-fn retry_text(
+pub(super) fn retry_text(
     provider: Provider,
     reason: SwitchReason,
     undelivered: Option<&TurnRequest>,

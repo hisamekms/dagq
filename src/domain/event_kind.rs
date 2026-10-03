@@ -462,6 +462,10 @@ impl EventKind {
                 // A provider's hold and its end (ADR-t813-2 decision 6).
                 | ProviderHeld
                 | ProviderReleased
+                // A headless planner of the runtime's that waits for its
+                // provider names it by `planner_id` (ADR-t1394-2 decision
+                // 5); a run's wait is on the run.
+                | ProviderWaiting
                 // The queue service (ADR-t1233-4) is the queue's.
                 | QueueServiceDown
                 | QueueServiceRunning

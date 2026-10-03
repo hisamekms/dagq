@@ -252,8 +252,15 @@ impl Spawned for LocalChild {
         let signaled = unsafe { libc::kill(-(self.0.id() as libc::pid_t), libc::SIGKILL) };
         if signaled == -1 {
             let error = std::io::Error::last_os_error();
-            // A group that is gone has nothing left to stop.
-            if error.raw_os_error() != Some(libc::ESRCH) {
+            // A group that is gone has nothing left to stop. On macOS a
+            // group left with only its leader that exited and is not reaped
+            // yet (a zombie) refuses the signal with EPERM: a headless turn
+            // that said its login ran out and ended before the wrapper
+            // stopped it (task 1397).
+            let gone = error.raw_os_error() == Some(libc::ESRCH)
+                || (error.raw_os_error() == Some(libc::EPERM)
+                    && matches!(self.0.try_wait(), Ok(Some(_))));
+            if !gone {
                 return Err(error.into());
             }
         }
@@ -484,6 +491,34 @@ mod tests {
             .unwrap();
         alone.kill_group().unwrap();
         assert!(!alone.wait().unwrap().success);
+    }
+
+    /// Task 1397: a group whose leader exited and is not reaped yet is
+    /// nothing left to stop, wherever the system refuses the signal to a
+    /// group of zombies (macOS: EPERM); the exit is read after.
+    #[test]
+    fn a_group_whose_leader_exited_unreaped_is_no_error_to_kill() {
+        let mut spec = CommandSpec::new("/bin/sh");
+        spec.args(["-c", "exit 3"]).new_session();
+        let mut child = LocalSpawner.spawn(&spec, Streams::Null).unwrap();
+        let pid = child.id().to_string();
+        let started = std::time::Instant::now();
+        loop {
+            let stat = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid])
+                .output()
+                .unwrap();
+            if String::from_utf8_lossy(&stat.stdout)
+                .trim()
+                .starts_with('Z')
+            {
+                break;
+            }
+            assert!(started.elapsed() < std::time::Duration::from_secs(10));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        child.kill_group().unwrap();
+        assert_eq!(child.wait().unwrap().code, Some(3));
     }
 
     #[test]

@@ -77,6 +77,9 @@ impl Supervisor<'_> {
                 // to be idle.
                 let asked_by_planner = ask.asked_by == SessionRole::Planner.as_str();
                 if view.state != PlannerState::Idle
+                    // One that waits for Claude gets it after its retry
+                    // (ADR-t1394-2 decision 5).
+                    || self.planner_at_wall(view).is_some()
                     || (asked_by_planner
                         && view.idle_since.is_none_or(|since| since < ask.created_at))
                 {

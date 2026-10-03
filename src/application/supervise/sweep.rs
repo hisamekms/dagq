@@ -181,6 +181,17 @@ impl Supervisor<'_> {
                 for id in closed {
                     self.planner_exits.retain(|(sent, _)| *sent != id);
                     info!("planner {id}: its workspace and wrapper are gone; closed its record");
+                    // A headless planner whose turn was stopped at its
+                    // limit, closed before a pass told of it (ADR-t1394-2
+                    // decision 3).
+                    let dir = planner::planner_dir(&self.layout.planners_dir, id);
+                    if let Err(error) = self
+                        .queue
+                        .planner(id)
+                        .and_then(|row| self.tell_of_stopped_planner_turn(&row, &dir, "closed"))
+                    {
+                        warn!(error = %format_args!("{error:#}"), "planner {id}: its stopped turn could not be told of: {error:#}");
+                    }
                 }
             }
             Err(error) => {

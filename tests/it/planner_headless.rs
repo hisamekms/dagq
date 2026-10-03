@@ -37,7 +37,7 @@ fn configure(repo: &Path, text: &str) {
 }
 
 /// The queue's events of `kind`, oldest first.
-fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
+pub(crate) fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
     let mut events: Vec<Value> = SqliteQueue::open(db)
         .unwrap()
         .latest_events_of(kind, 50)
@@ -79,7 +79,7 @@ fn diagnose(db: &Path, proposal: dagq::domain::ProposalId) -> String {
 }
 
 /// What planner 1 of a headless test that did not end left.
-fn diagnose_planner(db: &Path) -> String {
+pub(crate) fn diagnose_planner(db: &Path) -> String {
     let dir = planners_dir(db).join("1");
     let read = |name: &str| fs::read_to_string(dir.join(name)).unwrap_or_default();
     format!(
@@ -101,7 +101,7 @@ fn revise(reasons: &[&str]) -> Value {
 /// A fixture whose runtime's planners run headless in the background, and
 /// whose planner's agent is the stub of [`headless_claude`] running `turns`
 /// (with `$DB` naming the queue, which is not the checkout's).
-fn headless_fixture(turns: &str) -> crate::plan_review::Fixture {
+pub(crate) fn headless_fixture(turns: &str) -> crate::plan_review::Fixture {
     let mut fx = fixture();
     configure(
         &fx.repo,
@@ -123,7 +123,7 @@ fn headless_fixture(turns: &str) -> crate::plan_review::Fixture {
 
 /// Supervise, one pass at a time, until `done` holds; the diagnosis of
 /// planner 1 when it does not in time.
-fn supervise_until(
+pub(crate) fn supervise_until(
     fx: &crate::plan_review::Fixture,
     backend: &PlanWorkspace,
     reviewer: &StubReviewer,

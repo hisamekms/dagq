@@ -2066,7 +2066,8 @@ pub trait SessionRegistry {
     /// Record the route the planner's agent runs on (ADR-t1394-2), before
     /// its session starts.
     fn set_planner_route(&self, id: PlannerId, route: crate::domain::PlannerRoute) -> Result<()>;
-    /// The `turn_*` events of headless planner `id`, oldest first.
+    /// The `turn_*` events of headless planner `id` and its
+    /// `provider_waiting`, oldest first.
     fn planner_turn_events(&self, id: PlannerId) -> Result<Vec<RunEvent>>;
     /// The planner's session wrapper registers itself, once.
     fn register_planner_wrapper(&self, id: PlannerId, pid: u32) -> Result<()>;

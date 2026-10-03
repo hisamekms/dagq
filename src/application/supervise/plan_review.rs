@@ -811,7 +811,10 @@ impl Supervisor<'_> {
             match owner {
                 Some(view) if view.alive => {
                     // A planner at work gets the revise once it is idle.
+                    // One that waits for Claude gets it after its retry
+                    // (ADR-t1394-2 decision 5).
                     if view.state != PlannerState::Idle
+                        || self.planner_at_wall(view).is_some()
                         || !self.queue.claim_revise(proposal.id())?
                     {
                         continue;
@@ -893,6 +896,11 @@ impl Supervisor<'_> {
         // settled.
         self.settle_findings()?;
         self.open_finding_planners(&mut runtime_open)?;
+        // A headless planner's turn that failed at Claude waits for it, and
+        // one its wrapper stopped at its limit tells the inbox
+        // (ADR-t1394-2 decisions 3 and 5).
+        self.tend_planner_walls(&views)?;
+        self.tell_of_stopped_planner_turns(&views)?;
         self.tell_of_silent_planners(timeout, &views)?;
         self.end_runtime_planners(&views)?;
         if let Some(proposal) = starved {
@@ -961,9 +969,12 @@ impl Supervisor<'_> {
             let busy = self.busy_reasons(view, &revising)?;
             // An answer not typed yet may be left to the inbox (its typing
             // failed), which types it into this workspace by hand.
+            // One that waits for Claude is not done either (ADR-t1394-2
+            // decision 5).
             if busy.is_empty()
                 || busy.contains(&PlannerBusy::QuestionOpen)
                 || busy.contains(&PlannerBusy::AnswerUndelivered)
+                || busy.contains(&PlannerBusy::ProviderWall)
             {
                 continue;
             }
@@ -1025,6 +1036,9 @@ impl Supervisor<'_> {
         if let Some(wait) = self.question_wait(view)? {
             busy.push(wait);
         }
+        if self.planner_at_wall(view).is_some() {
+            busy.push(PlannerBusy::ProviderWall);
+        }
         if self.planner_exits.iter().any(|(sent, _)| *sent == id) {
             busy.push(PlannerBusy::Exiting);
         }
@@ -1039,12 +1053,15 @@ impl Supervisor<'_> {
     /// cmux cannot read, or reads in a state it does not know. It is not
     /// closed: a person looks at it. A planner a revise went to is timed by
     /// its revise, and one that waits on its `planner_question` waits on a
-    /// person; a person's planner is never timed.
+    /// person; a person's planner is never timed. A headless planner is
+    /// timed by its turn's limits instead
+    /// ([`Self::tell_of_stopped_planner_turns`], ADR-t1394-2 decision 3).
     fn tell_of_silent_planners(&mut self, timeout: i64, views: &[PlannerView]) -> Result<()> {
         let now = self.generators.clock.now();
         let revising = self.queue.revising_proposals()?;
         for view in views.iter().filter(|view| {
             view.planner.origin == PlannerOrigin::Runtime
+                && view.planner.route != crate::domain::PlannerRoute::Headless
                 && view.alive
                 && view.state != PlannerState::Idle
         }) {
@@ -1370,6 +1387,9 @@ enum PlannerBusy {
     AnswerTyped,
     /// It was asked to exit.
     Exiting,
+    /// Headless, its last turn failed at Claude's login, usage limit or
+    /// start, and it waits for Claude (ADR-t1394-2 decision 5).
+    ProviderWall,
 }
 
 impl PlannerBusy {
@@ -1382,6 +1402,7 @@ impl PlannerBusy {
             Self::AnswerUndelivered => "planner_answer_undelivered",
             Self::AnswerTyped => "planner_answer_typed",
             Self::Exiting => "exiting",
+            Self::ProviderWall => "provider_wall",
         }
     }
 }
@@ -1446,6 +1467,15 @@ impl Supervisor<'_> {
         };
         for ask in &asks {
             if !self.queue.ask_delivered_to(ask.id, workspace)? {
+                continue;
+            }
+            // A headless planner took the answer up once the turn of its
+            // request finished: its turns are recorded, and a stub's turn
+            // may end within the second the answer was claimed.
+            if let Some(taken) = self.headless_answer_taken(view, ask.id)? {
+                if !taken {
+                    return Ok(Some(PlannerBusy::AnswerTyped));
+                }
                 continue;
             }
             // An agent idle since before the typing has not taken the
