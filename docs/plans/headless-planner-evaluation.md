@@ -4,7 +4,7 @@ type: plan
 title: runtime の planner の対話の期間の基準値と、非対話に切り替えた後の評価のコマンドと、対話に戻す基準の案
 status: active
 created: 2026-10-03
-updated: 2026-10-03
+updated: 2026-10-04
 owners:
   - hisamekms
 tags:
@@ -337,5 +337,5 @@ print('turns', dict(C.Counter(f"{P(e).get('outcome')}/{P(e).get('failure')}" for
 
 ## 続け方
 
-- 切り替えの task が印を打ったら、その印の ID と時刻をこの文書に足す
+- 切り替えは task 1402 が `dagq.toml` の `[roles.runtime_planner]` に `route = "headless"` を書いて行う。worker は印を打てないので、着地して main checkout に反映された後に planner か inbox が固定バイナリで `dagq mark 'runtime planner headless' --at <効いた時刻>` を打つ。打ったら、その印の ID と時刻をこの文書に足す
 - 印から 7 日以上（min_samples を満たすまで）経ったら、2 のコマンドで後の窓と印の前 7 日を読み、1 の表に列を足し、3 の目安に当たったかを表にする（goal 87 の受け入れ条件 (4) の 1 週間後の評価）

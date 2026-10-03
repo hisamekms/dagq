@@ -98,6 +98,17 @@ provider = "codex"
 # （CODEX_ROLES に throughput_review が無い）は設定の誤りとして拒むので、固定バイナリが task 1220 を含んでから足した。
 provider = "codex"
 
+[roles.runtime_planner]
+# runtime の planner（revise・draft・finding・計画の依頼）を非対話（worker と同じ turn ごとの呼び出し）で動かす
+# （人の 2026-10-02 の決定「runtime の planner を非対話に切り替えて 1 週間測り、問題なければ非対話を続ける」。
+# goal 87、ADR-t1394-2 の決定 1、task 1396・1402。書式と振る舞いは docs/design/supervisor-lifecycle/actor-model.md の
+# 「runtimeのplannerの経路」と plan-planners.md の同じ節）。runtime の既定（書かなければ interactive）は変えず、この repository だけを切り替える。
+# supervisor が planner を開くたびに読むので、着地して main checkout に反映された後に開く planner から効き、動いている planner の経路は変えない。
+# 基準値・評価のコマンド・対話に戻す基準は docs/plans/headless-planner-evaluation.md（戻すときはこの節を消すか route = "interactive" にする）。
+# route を知らない旧バイナリは設定の誤りとして拒むので、固定バイナリが task 1396・1397・1398 を含んでから足した。
+# provider・model・effort は書かず、Claude の既定のまま（Codex の planner は別の goal）。
+route = "headless"
+
 [areas]
 # stats と kpi が着地 commit の差分から run の変更の対象（area）を求める対応表（ADR-t980-1、task 983。
 # 書式と求め方は docs/design/supervisor-lifecycle/kpi.md の「area」）。glob は --paths と同じ規則で重なってよく、
