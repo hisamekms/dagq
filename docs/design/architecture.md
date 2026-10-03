@@ -4,8 +4,8 @@ type: design
 title: レイヤーとコンテキストの境界（contextごとの所有・判断・操作・公開するport・依存の向き・境界をまたぐtransaction・検査できる規則・今の違反）
 status: current
 created: 2026-10-04
-updated: 2026-10-04 # task 251
-last_verified: 2026-10-04 # task 251
+updated: 2026-10-04 # task 1546
+last_verified: 2026-10-04 # task 1546
 scope: system
 related:
   - adr-t1545-1
@@ -248,24 +248,30 @@ contextを1つに決められず、分ける先のtaskを持つもの。
 - SQLのtrigger（migrationが作る`search_*`のtrigger）が書く`search_index`・`landed_commits`は、計画管理の検索の索引の書き込みで、C1の違反に数えない（trigger自体は計画管理が所有する）。
 - コメントの行（`//`・`//!`・`///`）とdocのlinkは数えない（docのlinkの`crate::application::...`は依存ではない）。
 - `#[cfg(test)]`の中は、L1・L3・L6（参照の向き）では数え、L2・L4（I/Oと時刻）では数えない。
-- 今ある違反は、理由と行き先のtaskを持つ許可の一覧にだけ置き、直したtaskが同じ変更で一覧から外す（ADR-t1545-1決定4）。一覧の置き場所・書式・scriptの名前はtask 1546がこの節に書く。
+- 今ある違反は、理由と行き先のtaskを持つ許可の一覧にだけ置き、直したtaskが同じ変更で一覧から外す（ADR-t1545-1決定4）。
+- scriptは`scripts/check-layer-deps.sh`で、L1・L2・L3・L4・L6を`src/domain`・`src/application`・`src/infrastructure`の`.rs`に当てる。CIが流し、`src/`を変えるtaskのverifyに付ける（[taskの登録](../development/task-registration.md)の「推奨の組み合わせ」）。`sh scripts/check-layer-deps.sh --self-test`は`target/`の下の一時directoryに小さなfixture（違反なし・一覧に無い違反・古い項目・task IDの無い項目・コメントと文字列だけの参照）を作って判定を確かめ、終わったら消す。
+- 数えるのはpath（`crate::application::timestamp`・`std::time::SystemTime::now`など）で、`use crate::{infrastructure::sqlite, ...}`のような組の`use`も展開して数える。コメント（`//`・`//!`・`///`・`/* */`）と文字列・文字のliteralの中は数えない。
+- `#[cfg(test)]`の中は、その属性が付いた項目（`mod tests { ... }`・関数・`use`など）の終わりまでと、`#[cfg(test)] mod name;`が宣言するファイル（`name.rs`と`name/`の下）。上のとおりL1・L3・L6では数え、L2・L4では数えない。
+- 許可の一覧は`.config/layer-deps-allow.txt`。1行が1項目で、`規則 | path | 参照 | 行き先のtask | 理由`の5つを`|`で区切る（`#`で始まる行と空行は読まない）。規則はL1・L2・L3・L4・L6のどれか、pathは`src/`からのファイル、参照はscriptが出す参照（`crate::application`・`std::fs`・`SystemTime::now`・`anyhow`など、規則が禁止する形の先頭）、行き先のtaskはtask IDか`,`で区切った複数のtask ID、理由は空でない。同じファイルの同じ参照は何箇所あっても1項目。一覧に無い参照（新しい違反）、一覧にあるのにもう無い参照（古い項目）、書式の誤りと重複はどれもexit 1。
+- 違反を直すtaskは、同じ変更で一覧の項目と下の「今の違反と行き先」の行を消す。
 
 ## 今の違反と行き先
 
-2026-10-04のmain（base `e465d467`）で`grep`して見つけたもの。行き先が「未登録」のものは、このtask（1545）のreceiptのfollow_upでplannerに渡した。行き先のtaskは着地したら同じ変更でこの表から行を消す。
+2026-10-04のmain（base `e465d467`）で`grep`して見つけたもの（task 1545）に、`scripts/check-layer-deps.sh`が見つけた行（`src/application/supervise/mod.rs`のL3。task 1546）を足した。scriptが検査する規則（L1・L2・L3・L4・L6）の行は、どれも行き先のtaskを持ち、許可の一覧`.config/layer-deps-allow.txt`の項目と一致する（一覧の書式は「[検査の範囲](#検査の範囲)」）。行き先が「未登録」のまま残っているのはreviewで見るX3・C1の行だけで、task 1545のreceiptのfollow_upでplannerに渡した。行き先のtaskは着地したら同じ変更でこの表の行と一覧の項目を消す。
 
 | 規則 | 場所 | 違反 | 行き先 |
 | --- | --- | --- | --- |
-| L3 | `src/application/prompt.rs`（`crate::throughput_review::review_prompt`） | applicationからレイヤーの外のthroughput_reviewを参照する | 未登録（follow_up） |
-| L3 | `src/application/planner_handoff.rs`の`#[cfg(test)]`（`crate::infrastructure::run_files::LocalRunFiles`） | applicationのtestがinfrastructureのadapterを使う | 未登録（follow_up。`application::memory_files`に替える） |
-| L1 | `src/domain/stats.rs`・`src/domain/stats/thresholds.rs`・`src/domain/stats/conflicts.rs`の`#[cfg(test)]`（`crate::application::timestamp`） | domainのtestがapplicationの関数を使う | 未登録（follow_up） |
-| L2 | `src/domain/landing_branch.rs`（`anyhow::Result`・`anyhow::ensure!`・`anyhow::bail!`） | domainが`anyhow`を返す（ADR-0013決定6） | 未登録（follow_up） |
+| L3 | `src/application/prompt.rs`（`crate::throughput_review::review_prompt`） | applicationからレイヤーの外のthroughput_reviewを参照する | task 1615 |
+| L3 | `src/application/supervise/mod.rs`の`#[cfg(test)]`（`use crate::{..., infrastructure::sqlite::SqliteQueue}`） | applicationのtestがinfrastructureのstoreを使う（組の`use`のため2026-10-04の`grep`では見落とし、task 1546のscriptが見つけた） | task 1631 |
+| L3 | `src/application/planner_handoff.rs`の`#[cfg(test)]`（`crate::infrastructure::run_files::LocalRunFiles`） | applicationのtestがinfrastructureのadapterを使う | task 1619（`application::memory_files`に替える） |
+| L1 | `src/domain/stats.rs`・`src/domain/stats/thresholds.rs`・`src/domain/stats/conflicts.rs`の`#[cfg(test)]`（`crate::application::timestamp`） | domainのtestがapplicationの関数を使う | task 1616 |
+| L2 | `src/domain/landing_branch.rs`（`anyhow::Result`・`anyhow::ensure!`・`anyhow::bail!`） | domainが`anyhow`を返す（ADR-0013決定6） | task 1617 |
 | L4 | `src/application/broker_admin.rs`の`audit`（`std::fs::read_dir`・`std::fs::read`） | applicationが直接ファイルを読む | task 1550 |
-| L4 | `src/application/supervise/jobs.rs`（`SystemTime::now`）・`src/application/headless_session.rs`（`SystemTime::now`） | applicationが注入した`Clock`ではなく壁時計を読む | 未登録（follow_up） |
+| L4 | `src/application/supervise/jobs.rs`（`SystemTime::now`）・`src/application/headless_session.rs`（`SystemTime::now`） | applicationが注入した`Clock`ではなく壁時計を読む | task 1618 |
 | L5 | `src/application`の`Instant::now`（2026-10-04で109箇所。多いのは`supervise/resume.rs`・`lifecycle.rs`・`supervise/session.rs`・`supervise/revise.rs`・`supervise/reopen.rs`・`supervise/adopt.rs`） | 判断が実時間を読む | task 1557（revise・reopen・resume・session）、task 1558（stall・stall_recovery・adopt）。残りは計測（task 1559）の後に判断 |
 | L6 | `src/infrastructure/dialogue.rs`（`crate::compose::record_mark`・`crate::compose::retract_mark`） | infrastructureが起動部分のuse caseを呼ぶ | task 1548 |
-| L6 | `src/infrastructure/queue_service.rs`（`crate::compose::OneShot`・`crate::compose::read_queue`・`crate::view::task_detail`） | infrastructureが起動部分とレイヤーの外を呼ぶ | task 1549（`read_queue`）、task 1556（`OneShot`）、`view`は未登録（follow_up） |
-| L6 | `src/infrastructure/adapters.rs`（`crate::throughput_review::ACCESS`） | infrastructureがレイヤーの外の定数を読む | 未登録（follow_up） |
+| L6 | `src/infrastructure/queue_service.rs`（`crate::compose::OneShot`・`crate::compose::read_queue`・`crate::view::task_detail`） | infrastructureが起動部分とレイヤーの外を呼ぶ | task 1549（`read_queue`）、task 1556（`OneShot`）、task 1620（`view`） |
+| L6 | `src/infrastructure/adapters.rs`（`crate::throughput_review::ACCESS`） | infrastructureがレイヤーの外の定数を読む | task 1615 |
 | L7 | `src/compose.rs`の`record_mark`・`retract_mark`・`marks`（`SystemTime::now`とpayloadの組み立て） | 起動部分にuse caseと時刻の読み取りがある | task 1548 |
 | L7 | `src/compose.rs`の`read_queue` | 起動部分に読み取りの解釈と整形がある | task 1549 |
 | C3 | `src/application/supervise/mod.rs`の`Supervisor`と、`impl Supervisor`を持つ`supervise/`の39のsubmodule（2026-10-04） | 全てのcontextの欄を1つのstructで共有し、submoduleが互いの欄を変える | task 1552・1553 |

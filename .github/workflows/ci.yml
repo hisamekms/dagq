@@ -66,6 +66,11 @@ jobs:
       - name: AGENTS.md size
         run: sh scripts/check-agents-md-size.sh
 
+      - name: Layer dependencies
+        run: |
+          sh scripts/check-layer-deps.sh
+          sh scripts/check-layer-deps.sh --self-test
+
       - name: cargo clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 

@@ -4,7 +4,7 @@ type: development
 title: このrepositoryのtaskの登録（verify・paths・evidence・changeの選び方、ADRを書くtask、plan reviewが当てはめる規則）
 status: current
 created: 2026-10-03
-updated: 2026-10-04
+updated: 2026-10-04 # task 1546
 owners:
   - hisamekms
 tags:
@@ -30,7 +30,7 @@ related:
 - docsだけ: `--paths 'docs/**' --paths '*.md' --verify 'cargo fmt --all --check'`（fmtも要らなければ検証なし）
 - ADRを書く（docsだけ）: 上に`--verify 'sh scripts/check-adr-numbers.sh'`を足す
 - pluginの文書・skill: `--paths 'plugins/**' --paths 'docs/**' --paths '*.md' --verify 'cargo test --locked --test plugin'`（`tests/plugin.rs`がskillの大きさと参照を検査するのでtestを残す。pluginの文書を読むtestはこれだけ）
-- runtime（`src/`・`tests/`・`migrations/`・`crates/`）: `--paths`なしで`cargo fmt --all --check`・`cargo clippy --locked --all-targets -- -D warnings`・`cargo llvm-cov nextest --locked --workspace --fail-under-lines 80`。`--evidence e2e`は付けない（下の「e2e」）
+- runtime（`src/`・`tests/`・`migrations/`・`crates/`）: `--paths`なしで`cargo fmt --all --check`・`cargo clippy --locked --all-targets -- -D warnings`・`cargo llvm-cov nextest --locked --workspace --fail-under-lines 80`。`src/`を変えるなら`sh scripts/check-layer-deps.sh`を足す（レイヤーの禁止依存と許可の一覧の古い項目を検査する。CIも実行する。規則と一覧の書式は[Architecture](../design/architecture.md)の「検査の範囲」）。`--evidence e2e`は付けない（下の「e2e」）
 - migrationを足す（runtime）: 上のruntimeの組み合わせに`--verify 'sh scripts/check-migration-numbers.sh'`を足す
 - e2eの印（`.config/e2e-quarantine.toml`）を変える: verifyに`sh scripts/check-e2e-quarantine.sh`を付ける（書式・重複・testの実在・上限を検査し、期限切れは警告だけ。CIも実行する。印の規則は[testの制約](testing.md)の「e2eの印」）
 - pluginとバイナリのversionを変える: verifyに`sh scripts/check-plugin-version.sh`を付ける（検査の中身は[plugin integration](../design/plugin-integration.md)の「tagとversionの一致規則」）
