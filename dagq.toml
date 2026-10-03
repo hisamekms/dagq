@@ -54,7 +54,7 @@ parallel = 3
 
 [tasks]
 # task が宣言する変更の種類（change）の値の集合（ADR-t980-1、task 983。書式は
-# docs/design/supervisor-lifecycle/run-environment.md、各値の意味と選び方は AGENTS.md の「テストの制約」）。
+# docs/design/supervisor-lifecycle/run-environment.md、各値の意味と選び方は docs/development/task-registration.md の「change」）。
 # 書いてあるので add と edit は集合の外の --change を拒み、lint と submit は change の無い task を止める。
 # [tasks] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 982 を含んでから足した。
 changes = ["feature", "fix", "refactor", "test", "measure", "docs", "config"]

@@ -3,7 +3,7 @@
 # cargo nextest's stress mode (ADR-t920-1 decision 2: the heavy repetition
 # the worker no longer does runs once a day in GitHub Actions).
 #
-# The tests are chosen as AGENTS.md's worker stress rule chooses them: the
+# The tests are chosen as docs/development/local-checks.md, section "stress", chooses them: the
 # #[test] functions whose lines the diff adds or changes in tests/it/** (the
 # `it` binary, named <module>::<name>), in src/ (the dagq lib and bin,
 # named <module path>::tests::<name>), and in crates/<crate>/src and
