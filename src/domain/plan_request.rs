@@ -10,8 +10,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    AskId, DomainError, EventId, FindingId, GoalId, ProposalId, RequestId, RunId, TaskId,
-    error::require,
+    AskId, DomainError, EventId, FindingId, GoalId, PlannerId, ProposalId, RequestId, RunId,
+    TaskId, error::require,
 };
 
 /// How many planners of the runtime's may end without deciding a request
@@ -151,6 +151,97 @@ pub fn check_decline(request: &PlanRequest, reason: &str) -> Result<(), DomainEr
     })
 }
 
+/// Where the answer of a `planner_question` about a request goes
+/// (ADR-t1394-1 decision 7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestAnswerRoute {
+    /// To the planner of the runtime's open for the request.
+    OwnPlanner,
+    /// To a new planner, which carries it: the request is still `open`.
+    NewPlanner,
+    /// Closed by the supervisor: the request moved on (proposed, declined
+    /// or out of planners).
+    Close,
+}
+
+/// [`RequestAnswerRoute`] of an answer about a request in `status`, with a
+/// planner of the runtime's open for it or not.
+pub fn request_answer_route(planner_open: bool, status: RequestStatus) -> RequestAnswerRoute {
+    if planner_open {
+        RequestAnswerRoute::OwnPlanner
+    } else if status == RequestStatus::Open {
+        RequestAnswerRoute::NewPlanner
+    } else {
+        RequestAnswerRoute::Close
+    }
+}
+
+/// What opening the next planner for a request does (ADR-t1394-1 decision
+/// 4), once the request is still waiting for one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NextRequestPlanner {
+    /// A planner is opened, the `attempt`-th for the request.
+    Open { attempt: usize },
+    /// [`MAX_REQUEST_PLANNERS`] planners ended without deciding it: it is
+    /// `exhausted` with `reason`, and the inbox decides.
+    Exhausted { attempts: usize, reason: String },
+}
+
+/// [`NextRequestPlanner`] after `opened` planners of the request: past the
+/// limit the request is exhausted, unless the planner carries a person's
+/// answer (`carries_answer`), which is carried past the limit as a draft's
+/// and a finding's is.
+pub fn next_request_planner(opened: usize, carries_answer: bool) -> NextRequestPlanner {
+    if opened >= MAX_REQUEST_PLANNERS && !carries_answer {
+        return NextRequestPlanner::Exhausted {
+            attempts: opened,
+            reason: format!(
+                "{opened} planners of the runtime's ended without deciding the request (at most {MAX_REQUEST_PLANNERS})"
+            ),
+        };
+    }
+    NextRequestPlanner::Open {
+        attempt: opened + 1,
+    }
+}
+
+/// What a proposal submitted from a request's planner does to the request
+/// (ADR-t1394-1 decision 6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProposalLink {
+    /// The request ended otherwise (declined, out of planners): left as it
+    /// is.
+    Skip,
+    /// Linked to the request already `proposed`; nobody is told again.
+    Link,
+    /// Linked, and the `open` request becomes `proposed` with
+    /// `request_proposed`.
+    Propose,
+}
+
+/// [`ProposalLink`] of a proposal of a request in `status`.
+pub const fn proposal_link(status: RequestStatus) -> ProposalLink {
+    match status {
+        RequestStatus::Open => ProposalLink::Propose,
+        RequestStatus::Proposed => ProposalLink::Link,
+        RequestStatus::Declined | RequestStatus::Exhausted => ProposalLink::Skip,
+    }
+}
+
+/// Why a decline of `request` authorized for planner `authorized` is
+/// refused in its own transaction, where `open` is the planner of the
+/// runtime's open for the request now: another opened since is not the
+/// decliner's.
+pub fn stale_decliner(
+    request: RequestId,
+    open: Option<PlannerId>,
+    authorized: Option<PlannerId>,
+) -> Option<String> {
+    (open != authorized).then(|| {
+        format!("request {request}: its planner changed while it was declined; decline it again")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,5 +336,92 @@ mod tests {
         assert!(RequestStatus::Exhausted.needs_a_person());
         assert!(!RequestStatus::Open.needs_a_person());
         assert!(!RequestStatus::Proposed.needs_a_person());
+    }
+
+    // Moved here by task 1711 from the tests/it cases it removed:
+    // planner_headless_turns::a_headless_request_planners_answer_reaches_a_new_one_and_undecided_ends_exhaust_the_request.
+    // The kept request_planner::a_planner_question_about_a_request_reaches_its_planner_or_a_new_one_and_three_exhaust_it
+    // checks the queue's transaction.
+    #[test]
+    fn an_answer_about_a_request_goes_to_its_planner_a_new_one_or_is_closed() {
+        for status in [
+            RequestStatus::Open,
+            RequestStatus::Proposed,
+            RequestStatus::Declined,
+            RequestStatus::Exhausted,
+        ] {
+            assert_eq!(
+                request_answer_route(true, status),
+                RequestAnswerRoute::OwnPlanner,
+                "{status:?}"
+            );
+        }
+        assert_eq!(
+            request_answer_route(false, RequestStatus::Open),
+            RequestAnswerRoute::NewPlanner
+        );
+        for status in [
+            RequestStatus::Proposed,
+            RequestStatus::Declined,
+            RequestStatus::Exhausted,
+        ] {
+            assert_eq!(
+                request_answer_route(false, status),
+                RequestAnswerRoute::Close,
+                "{status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn three_planners_exhaust_a_request_unless_the_next_carries_an_answer() {
+        for opened in 0..MAX_REQUEST_PLANNERS {
+            for carries in [false, true] {
+                assert_eq!(
+                    next_request_planner(opened, carries),
+                    NextRequestPlanner::Open {
+                        attempt: opened + 1
+                    }
+                );
+            }
+        }
+        assert_eq!(MAX_REQUEST_PLANNERS, 3);
+        assert_eq!(
+            next_request_planner(3, false),
+            NextRequestPlanner::Exhausted {
+                attempts: 3,
+                reason:
+                    "3 planners of the runtime's ended without deciding the request (at most 3)"
+                        .into(),
+            }
+        );
+        // A person's answer is carried past the limit.
+        assert_eq!(
+            next_request_planner(3, true),
+            NextRequestPlanner::Open { attempt: 4 }
+        );
+    }
+
+    #[test]
+    fn the_first_proposal_proposes_an_open_request_and_the_rest_are_linked() {
+        assert_eq!(proposal_link(RequestStatus::Open), ProposalLink::Propose);
+        assert_eq!(proposal_link(RequestStatus::Proposed), ProposalLink::Link);
+        assert_eq!(proposal_link(RequestStatus::Declined), ProposalLink::Skip);
+        assert_eq!(proposal_link(RequestStatus::Exhausted), ProposalLink::Skip);
+    }
+
+    #[test]
+    fn a_decline_for_a_planner_no_longer_open_is_refused() {
+        let id = RequestId::new(2);
+        let (own, other) = (Some(PlannerId::new(4)), Some(PlannerId::new(104)));
+        assert_eq!(stale_decliner(id, own, own), None);
+        assert_eq!(stale_decliner(id, None, None), None);
+        for (open, authorized) in [(own, other), (None, own), (own, None)] {
+            assert_eq!(
+                stale_decliner(id, open, authorized).as_deref(),
+                Some("request 2: its planner changed while it was declined; decline it again"),
+                "{open:?} {authorized:?}"
+            );
+        }
     }
 }

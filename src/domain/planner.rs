@@ -206,6 +206,26 @@ impl PlannerState {
     }
 }
 
+/// Whether the answer of a `planner_question` waits rather than going to
+/// the planner of the runtime's it is for now (ADR-0041 decision 13): it
+/// goes to one `idle` that does not wait for Claude after its turn failed
+/// at the provider's wall (`at_wall`; it gets it after its retry,
+/// ADR-t1394-2 decision 5), and, when the planner asked it
+/// (`asked_by_planner`), only once it stopped after asking (`idle_since`
+/// no earlier than `asked_at`); a question someone else opened waits only
+/// for it to be idle.
+pub fn answer_waits(
+    state: PlannerState,
+    at_wall: bool,
+    asked_by_planner: bool,
+    idle_since: Option<i64>,
+    asked_at: i64,
+) -> bool {
+    state != PlannerState::Idle
+        || at_wall
+        || (asked_by_planner && idle_since.is_none_or(|since| since < asked_at))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -545,5 +565,35 @@ mod tests {
         };
         assert_eq!(closed.state(&probe()), PlannerState::Closed);
         assert!(!PlannerState::Closed.alive());
+    }
+
+    // Moved here by task 1711 from the tests/it cases it removed:
+    // planner_headless_turns::a_headless_finding_planner_takes_the_answer_as_its_next_turn_and_closes_with_its_finding
+    // and a_headless_request_planners_answer_reaches_a_new_one_and_undecided_ends_exhaust_the_request.
+    #[test]
+    fn an_answer_goes_to_an_idle_planner_not_at_the_wall_once_it_stopped_after_asking() {
+        // Idle since after the question: it goes now.
+        assert!(!answer_waits(PlannerState::Idle, false, true, Some(20), 10));
+        assert!(!answer_waits(PlannerState::Idle, false, true, Some(10), 10));
+        // At work, opening or gone: it waits.
+        for state in [
+            PlannerState::Opening,
+            PlannerState::Working,
+            PlannerState::Exited,
+            PlannerState::Lost,
+            PlannerState::Closed,
+        ] {
+            assert!(answer_waits(state, false, true, Some(20), 10), "{state:?}");
+            assert!(answer_waits(state, false, false, Some(20), 10), "{state:?}");
+        }
+        // Waiting for Claude after its turn met the wall: after the retry.
+        assert!(answer_waits(PlannerState::Idle, true, true, Some(20), 10));
+        assert!(answer_waits(PlannerState::Idle, true, false, Some(20), 10));
+        // The planner that asked and has not stopped since asking waits.
+        assert!(answer_waits(PlannerState::Idle, false, true, Some(9), 10));
+        assert!(answer_waits(PlannerState::Idle, false, true, None, 10));
+        // A question someone else opened waits only for it to be idle.
+        assert!(!answer_waits(PlannerState::Idle, false, false, Some(9), 10));
+        assert!(!answer_waits(PlannerState::Idle, false, false, None, 10));
     }
 }

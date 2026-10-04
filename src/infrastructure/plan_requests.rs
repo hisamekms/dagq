@@ -18,7 +18,9 @@ use crate::application::{PlanRequestStore, PlannerAnswerRoute, RequestPlannerSta
 use crate::domain::{
     Ask, AskId, EventId, PlannerId, PlannerOrigin, PlannerSession, ProposalId, RequestId, RunEvent,
     plan_request::{
-        MAX_REQUEST_PLANNERS, NewPlanRequest, PlanRequest, RequestStatus, check_decline,
+        NewPlanRequest, NextRequestPlanner, PlanRequest, ProposalLink, RequestAnswerRoute,
+        RequestStatus, check_decline, next_request_planner, proposal_link, request_answer_route,
+        stale_decliner,
     },
 };
 
@@ -113,10 +115,9 @@ impl SqliteQueue {
         let planner = open_planner_of(&tx, request)?.map(|planner| planner.id);
         // The decline was authorized for the planner open then; another
         // opened since is not the decliner's.
-        anyhow::ensure!(
-            planner == authorized,
-            "request {request}: its planner changed while it was declined; decline it again"
-        );
+        if let Some(refused) = stale_decliner(request, planner, authorized) {
+            anyhow::bail!(refused);
+        }
         set_status(&tx, request, RequestStatus::Declined, reason, now)?;
         record_queue_event_in(
             &tx,
@@ -174,28 +175,26 @@ impl PlanRequestStore for SqliteQueue {
             return Ok(RequestPlannerStart::Skipped);
         }
         let current = read_request(&tx, request)?;
-        let opened = current.planners;
         // A person's answer is carried past the limit, as a draft's and a
         // finding's is: it is a person's decision.
-        if opened >= MAX_REQUEST_PLANNERS && answer.is_none() {
-            let reason = format!(
-                "{opened} planners of the runtime's ended without deciding the request (at most {MAX_REQUEST_PLANNERS})"
-            );
-            set_status(&tx, request, RequestStatus::Exhausted, &reason, now)?;
-            record_queue_event_in(
-                &tx,
-                EventKind::RequestPlannerExhausted,
-                &json!({"request_id": request, "planners": opened, "reason": reason}),
-            )?;
-            tx.commit()?;
-            return Ok(RequestPlannerStart::Exhausted { attempts: opened });
-        }
+        let attempt = match next_request_planner(current.planners, answer.is_some()) {
+            NextRequestPlanner::Open { attempt } => attempt,
+            NextRequestPlanner::Exhausted { attempts, reason } => {
+                set_status(&tx, request, RequestStatus::Exhausted, &reason, now)?;
+                record_queue_event_in(
+                    &tx,
+                    EventKind::RequestPlannerExhausted,
+                    &json!({"request_id": request, "planners": attempts, "reason": reason}),
+                )?;
+                tx.commit()?;
+                return Ok(RequestPlannerStart::Exhausted { attempts });
+            }
+        };
         tx.execute(
             "INSERT INTO planners(origin, request_id, created_at) VALUES (?1, ?2, ?3)",
             params![PlannerOrigin::Runtime.as_str(), request, now],
         )?;
         let planner = PlannerId::new(tx.last_insert_rowid());
-        let attempt = opened + 1;
         record_queue_event_in(
             &tx,
             EventKind::RequestPlannerOpened,
@@ -308,11 +307,11 @@ pub(super) fn route_of(conn: &Connection, request: RequestId) -> Result<PlannerA
     if let Some(planner) = open_planner_of(conn, request)? {
         return Ok(PlannerAnswerRoute::Planner(Box::new(planner)));
     }
+    // No planner open for it: the request is read only then.
     Ok(
-        if read_request(conn, request)?.status == RequestStatus::Open {
-            PlannerAnswerRoute::NewPlanner
-        } else {
-            PlannerAnswerRoute::Close
+        match request_answer_route(false, read_request(conn, request)?.status) {
+            RequestAnswerRoute::NewPlanner => PlannerAnswerRoute::NewPlanner,
+            RequestAnswerRoute::OwnPlanner | RequestAnswerRoute::Close => PlannerAnswerRoute::Close,
         },
     )
 }
@@ -341,11 +340,8 @@ pub(super) fn link_requests(
         .collect::<rusqlite::Result<_>>()?;
     let mut linked = Vec::new();
     for (planner, request) in own {
-        let current = read_request(conn, request)?;
-        if !matches!(
-            current.status,
-            RequestStatus::Open | RequestStatus::Proposed
-        ) {
+        let link = proposal_link(read_request(conn, request)?.status);
+        if link == ProposalLink::Skip {
             continue;
         }
         conn.execute(
@@ -353,7 +349,7 @@ pub(super) fn link_requests(
              VALUES (?1, ?2, ?3)",
             params![request, proposal, now],
         )?;
-        if current.status == RequestStatus::Open {
+        if link == ProposalLink::Propose {
             set_status(
                 conn,
                 request,

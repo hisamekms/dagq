@@ -1118,3 +1118,51 @@ pub fn remove_unused_planner_runners(
         None => Ok(removed),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{FindingId, PlannerRoute, RequestId};
+
+    // Moved here by task 1711 from the tests/it cases it removed:
+    // planner_headless_turns::a_headless_finding_planner_takes_the_answer_as_its_next_turn_and_closes_with_its_finding
+    // and a_headless_request_planners_answer_reaches_a_new_one_and_undecided_ends_exhaust_the_request.
+    #[test]
+    fn planner_closed_names_what_the_planner_was_opened_for_and_why_it_closed() {
+        let planner = PlannerSession {
+            id: PlannerId::new(3),
+            origin: PlannerOrigin::Runtime,
+            proposal_id: None,
+            draft_task_id: None,
+            finding_id: Some(FindingId::new(1)),
+            request_id: Some(RequestId::new(2)),
+            workspace_id: Some("background:1:x".to_owned()),
+            wrapper_pid: Some(1),
+            agent_pid: Some(2),
+            heartbeat_at: Some(0),
+            exit_code: Some(0),
+            exited_at: Some(40),
+            closed_at: None,
+            error: None,
+            created_at: 0,
+            route: PlannerRoute::Headless,
+        };
+        assert_eq!(
+            planner_closed_payload(&planner, PlannerCloseCode::RuntimeExited, false, "ended"),
+            json!({
+                "planner_id": 3,
+                "origin": "runtime",
+                "workspace_id": "background:1:x",
+                "proposal_id": null,
+                "draft_task_id": null,
+                "finding_id": 1,
+                "request_id": 2,
+                "code": "runtime_exited",
+                "reason": "ended",
+                "exit_code": 0,
+                "exited_at": 40,
+                "workspace_closed": false,
+            })
+        );
+    }
+}

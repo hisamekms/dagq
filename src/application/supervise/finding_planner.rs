@@ -21,8 +21,8 @@ use crate::{
         prompt::{FindingPlannerMaterial, FittedPrompt, finding_planner_prompt},
     },
     domain::{
-        Ask, FindingId, GoalId, ImprovementLimit, PlannerState,
-        kpi::config::DEFAULT_MAX_IMPROVEMENT_PROPOSALS,
+        Ask, FindingId, GoalId, ImprovementLimit, kpi::config::DEFAULT_MAX_IMPROVEMENT_PROPOSALS,
+        planner::answer_waits,
     },
 };
 
@@ -75,14 +75,15 @@ impl Supervisor<'_> {
                 // The planner that asked is typed to once it stopped after
                 // asking; a question someone else opened waits only for it
                 // to be idle.
-                let asked_by_planner = ask.asked_by == SessionRole::Planner.as_str();
-                if view.state != PlannerState::Idle
-                    // One that waits for Claude gets it after its retry
-                    // (ADR-t1394-2 decision 5).
-                    || self.planner_at_wall(view).is_some()
-                    || (asked_by_planner
-                        && view.idle_since.is_none_or(|since| since < ask.created_at))
-                {
+                // One that waits for Claude gets it after its retry
+                // (ADR-t1394-2 decision 5).
+                if answer_waits(
+                    view.state,
+                    self.planner_at_wall(view).is_some(),
+                    ask.asked_by == SessionRole::Planner.as_str(),
+                    view.idle_since,
+                    ask.created_at,
+                ) {
                     return Ok(());
                 }
                 let Some(workspace) = view.planner.workspace_id.clone() else {

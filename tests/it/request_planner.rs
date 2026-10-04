@@ -306,7 +306,10 @@ fn only_the_requests_own_planner_declines_it_and_the_inbox_is_told() {
     supervise(&fx, &backend, &reviewer);
     let planner = request_planner(&queue, RequestId::new(id)).unwrap();
 
-    // Another planner, the inbox and the person may not decline it.
+    // Another planner may not decline it: the request's planner is read
+    // from the queue. Which roles may decline at all is
+    // domain::authorization's unit test
+    // only_the_user_and_the_inbox_record_a_request_and_only_its_planner_declines_it.
     let decline = ["request", "decline", &id_text, "--reason", "done already"];
     let other = invoke_with(
         &[("DAGQ_ROLE", "planner"), ("DAGQ_ACTOR_ID", "planner:99")],
@@ -317,12 +320,6 @@ fn only_the_requests_own_planner_declines_it_and_the_inbox_is_told() {
     let error: Value = serde_json::from_slice(&other.stderr).unwrap();
     assert_eq!(error["denied"]["capability"], "request.decline");
     assert_eq!(error["denied"]["reason"], "not on this resource");
-    for role in [Some("inbox"), None] {
-        assert!(
-            !invoke_as(role, &fx.db, &decline).status.success(),
-            "{role:?}"
-        );
-    }
     let denied = Connection::open(&fx.db)
         .unwrap()
         .query_row(
@@ -332,7 +329,7 @@ fn only_the_requests_own_planner_declines_it_and_the_inbox_is_told() {
             |r| r.get::<_, i64>(0),
         )
         .unwrap();
-    assert_eq!(denied, 3);
+    assert_eq!(denied, 1);
     assert_eq!(
         queue.plan_request(RequestId::new(id)).unwrap().status,
         RequestStatus::Open
@@ -370,14 +367,9 @@ fn only_the_requests_own_planner_declines_it_and_the_inbox_is_told() {
     assert_eq!(told[0]["reason"], "done already");
     let events = request_events(&fx.db, RequestId::new(id), "request_declined");
     assert_eq!(events[0].0["planner_id"], planner.as_i64());
-    // Not twice, and no planner is opened for it again.
-    let again = invoke_with(
-        &[("DAGQ_ROLE", "planner"), ("DAGQ_ACTOR_ID", &own)],
-        &fx.db,
-        &decline,
-    );
-    assert!(!again.status.success());
-    assert!(String::from_utf8_lossy(&again.stderr).contains("not open"));
+    // No planner is opened for it again (that a declined request is not
+    // declined twice is domain::plan_request's unit test
+    // only_an_open_request_is_declined_and_with_a_reason).
     exit(&queue, planner);
     supervise(&fx, &backend, &reviewer);
     supervise(&fx, &backend, &reviewer);
@@ -549,25 +541,15 @@ fn requests_share_the_limit_of_the_runtimes_planners_and_come_first() {
 #[test]
 fn only_the_inbox_and_a_person_record_a_request() {
     let fx = fixture();
+    // A role other than the inbox and a person is refused and the refusal
+    // recorded with its role; which roles are refused is
+    // domain::authorization's unit test
+    // only_the_user_and_the_inbox_record_a_request_and_only_its_planner_declines_it.
     let add = ["request", "add", "--text", "plan it", "--ref", "task:1"];
-    for role in [
-        "planner",
-        "worker",
-        "observer",
-        "review-job",
-        "recovery-job",
-        "plan-review-job",
-        "goal-review-job",
-        "throughput-review-job",
-    ] {
-        let output = invoke_as(Some(role), &fx.db, &add);
-        assert!(!output.status.success(), "{role}");
-        let error: Value = serde_json::from_slice(&output.stderr).unwrap();
-        assert!(
-            error.to_string().contains("request.record") || role != "planner",
-            "{role}: {error}"
-        );
-    }
+    let output = invoke_as(Some("planner"), &fx.db, &add);
+    assert!(!output.status.success());
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert!(error.to_string().contains("request.record"), "{error}");
     let denied: Vec<String> = Connection::open(&fx.db)
         .unwrap()
         .prepare(
@@ -579,19 +561,7 @@ fn only_the_inbox_and_a_person_record_a_request() {
         .unwrap()
         .collect::<rusqlite::Result<_>>()
         .unwrap();
-    assert_eq!(
-        denied,
-        [
-            "planner",
-            "worker",
-            "observer",
-            "review-job",
-            "recovery-job",
-            "plan-review-job",
-            "goal-review-job",
-            "throughput-review-job"
-        ]
-    );
+    assert_eq!(denied, ["planner"]);
     let queue = SqliteQueue::open(&fx.db).unwrap();
     assert!(queue.plan_requests(true).unwrap().is_empty());
 
@@ -602,17 +572,14 @@ fn only_the_inbox_and_a_person_record_a_request() {
     assert!(by_person.status.success());
     let by_person: Value = serde_json::from_slice(&by_person.stdout).unwrap();
     assert_eq!(by_person["requested_by"], "user");
-    // Blank words and an unknown reference are refused.
-    for args in [
-        &["request", "add", "--text", " "][..],
-        &["request", "add", "--text", "x", "--ref", "proposal:1"][..],
-        &["request", "add"][..],
-    ] {
-        assert!(
-            !invoke_as(Some("inbox"), &fx.db, args).status.success(),
-            "{args:?}"
-        );
-    }
+    // No words are refused (blank words and an unknown reference are
+    // domain::plan_request's unit tests a_request_needs_words_and_a_note_is_not_blank
+    // and a_reference_reads_each_kind_and_refuses_the_rest).
+    assert!(
+        !invoke_as(Some("inbox"), &fx.db, &["request", "add"])
+            .status
+            .success()
+    );
     let all = ok_as("observer", &fx.db, &["requests", "--all"]);
     assert_eq!(all["requests"].as_array().unwrap().len(), 2);
     assert_eq!(

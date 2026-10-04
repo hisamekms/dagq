@@ -153,26 +153,8 @@ task = 1707
 # 10.009s, class R
 [[test]]
 name = "planner_headless_stats::a_headless_planners_session_and_route_are_read_by_stats_and_kpi"
-reason = "R 移し替えの予定（代表がある、goal 119 か 120）: headless planner wiring elsewhere; span/stat counts decision"
-task = 1707
-
-# 12.025s, class D
-[[test]]
-name = "planner_headless_turns::a_headless_finding_planner_takes_the_answer_as_its_next_turn_and_closes_with_its_finding"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: answer routing / close decision"
-task = 1707
-
-# 13.264s, class D
-[[test]]
-name = "planner_headless_turns::a_headless_planner_at_a_login_failure_waits_in_the_hold_and_goes_on"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: failure kind → authentication hold"
-task = 1707
-
-# 14.538s, class D
-[[test]]
-name = "planner_headless_turns::a_headless_planner_at_the_usage_limit_waits_in_the_hold_and_makes_the_same_call_again"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: failure kind → hold mapping"
-task = 1707
+reason = "B 境界（supervisor の配線）: 非対話の planner の turn から supervisor が記録する session の span を stats・kpi の CLI が SQLite から読む。数え方は stats の unit test（task 1711 が残すと決めた）"
+task = 1711
 
 # 7.108s, class B
 [[test]]
@@ -180,29 +162,23 @@ name = "planner_headless_turns::a_headless_planners_turn_stopped_at_its_limit_te
 reason = "B 境界（守る境界）: wrapper kills turn at time limit"
 task = 1707
 
-# 19.379s, class D
-[[test]]
-name = "planner_headless_turns::a_headless_request_planners_answer_reaches_a_new_one_and_undecided_ends_exhaust_the_request"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: exhaustion count, routing answer"
-task = 1707
-
 # 9.386s, class D
 [[test]]
 name = "planner_headless_turns::a_headless_request_planners_submission_proposes_the_request_and_its_end_closes_it"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: request state transition"
-task = 1707
+reason = "B 境界（プロセス・supervisor の配線）: 非対話の wrapper の turn の submit が request を proposed にし、終わりの exit の依頼で閉じる代表。状態の遷移は domain::plan_request の unit test（task 1711）"
+task = 1711
 
 # 8.499s, class D
 [[test]]
 name = "planner_headless_turns::a_live_headless_planner_takes_the_next_revise_of_its_proposal_as_its_next_turn"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: live planner vs new planner choice"
-task = 1707
+reason = "D 移し替えの予定（goal 100 の task 1557 の後）: 生きている planner に revise を次の turn として渡す判断は supervise の revise.rs にあり、goal 119 は revise.rs に触らない（task 1711）"
+task = 1711
 
 # 14.313s, class unknown
 [[test]]
 name = "planner_headless_turns::a_request_written_during_a_turn_at_the_usage_limit_waits_for_the_retry_of_that_turn"
-reason = "unknown: TSV と一意に対応しない（TSV に 0 行）。class と行き先は移し替えの goal（119・120）が決める"
-task = 1707
+reason = "B 境界（プロセス・supervisor の配線）: wrapper の turns/ と supervisor の hold・provider retry・answer を次の turn に届ける配線の代表。壁の判断は planner_turns と domain::turn の unit test（task 1711）"
+task = 1711
 
 # 14.781s, class B
 [[test]]
@@ -213,8 +189,8 @@ task = 1707
 # 6.099s, class D
 [[test]]
 name = "request_planner::a_planner_question_about_a_request_reaches_its_planner_or_a_new_one_and_three_exhaust_it"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: routing and three-attempt limit"
-task = 1707
+reason = "B 境界（SQLite・supervisor の配線）: answer の行き先と planner を開く・使い切る SQLite の transaction と、answer を planner に渡す配線の代表。判断は domain::plan_request の unit test（task 1711）"
+task = 1711
 
 # 6.696s, class D; not in tests/it at the base of task 1707
 [[test]]
