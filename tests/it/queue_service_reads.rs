@@ -60,49 +60,136 @@ fn answer(queue: &Queue, token: &str, use_case: UseCase, params: &Value) -> Valu
     response["result"].clone()
 }
 
-/// The service's answer is what the command line prints for `args`. A
-/// read that tells the time now is read again when the clock moved
-/// between the two service calls around the command line's. When it moves
-/// on every try (a loaded host makes each call cross a second), the
-/// answers are compared without the fields that only measure the clock.
+/// The service's answer is what the command line prints for `args`, read
+/// between two service calls. The fields that tell the time now
+/// ([`clock_fields`]) are compared apart: one the clock did not move
+/// between the two answers is printed as they serve it, and one it moved
+/// that grows with it is printed between the two answers' values, so a
+/// loaded host that makes every call cross a second fails nothing. The
+/// rest is compared whole; it is read again only when it changed between
+/// the two service calls (a period that ended in between).
 fn same_as_cli(queue: &Queue, token: &str, use_case: UseCase, params: &Value, args: &[&str]) {
+    let clock = clock_fields(use_case);
     for _ in 0..3 {
-        let before = answer(queue, token, use_case, params);
-        let printed = ok(&queue.db, args);
-        let after = answer(queue, token, use_case, params);
-        if before == after {
-            assert_eq!(before, printed, "{use_case:?} {params} against {args:?}");
-            return;
+        let mut before = answer(queue, token, use_case, params);
+        let mut printed = ok(&queue.db, args);
+        let mut after = answer(queue, token, use_case, params);
+        let told = [&mut before, &mut printed, &mut after].map(|value| take(value, &clock));
+        if before != after {
+            continue;
         }
-        let before = without_clock(before);
-        if before == without_clock(after) {
-            assert_eq!(
-                before,
-                without_clock(printed),
-                "{use_case:?} {params} against {args:?}"
+        assert_eq!(before, printed, "{use_case:?} {params} against {args:?}");
+        let [before, printed, after] = told;
+        let paths = |told: &Told| told.keys().cloned().collect::<Vec<_>>();
+        assert_eq!(paths(&before), paths(&printed), "{use_case:?} {params}");
+        assert_eq!(paths(&before), paths(&after), "{use_case:?} {params}");
+        for (path, (grows, then)) in &before {
+            let (now, later) = (&printed[path].1, &after[path].1);
+            let between = if then == later {
+                now == then
+            } else {
+                // A field derived from the clock otherwise is whatever the
+                // second the command line read made it.
+                !*grows
+                    || order(then, now).is_some_and(std::cmp::Ordering::is_le)
+                        && order(now, later).is_some_and(std::cmp::Ordering::is_le)
+            };
+            assert!(
+                between,
+                "{use_case:?} {params} {path}: printed {now}, served {then} then {later}"
             );
-            return;
         }
+        return;
     }
-    panic!("{use_case:?} {params} kept changing");
+    panic!("{use_case:?} {params} kept changing beside the clock");
 }
 
-/// `value` without the fields that grow with the clock alone: the length
-/// of a window that ends now (`landing_utilization`'s `window_secs` of
-/// the period not over yet, in `stats` and every period of `kpi`).
-fn without_clock(mut value: Value) -> Value {
-    fn strip(value: &mut Value) {
-        match value {
-            Value::Object(object) => {
-                object.remove("window_secs");
-                object.values_mut().for_each(strip);
+/// The fields of `use_case`'s answer that tell the time now, as paths
+/// (`*` is any index or key), and whether each only grows with the clock
+/// (a time, or the length of what has not ended yet) or is derived from
+/// it otherwise (`forecast`'s seed of the unix second).
+/// These are the ones [`seeded`]'s queue shows: a lease, a supervisor, an
+/// ask or a landed run would add their ages here.
+fn clock_fields(use_case: UseCase) -> Vec<(&'static [&'static str], bool)> {
+    match use_case {
+        UseCase::Stats => vec![
+            (&["host", "until"][..], true),
+            (&["landing_utilization", "window_secs"], true),
+        ],
+        // Every period of `kpi`: only the one not over yet moves.
+        UseCase::Kpi => vec![(
+            &[
+                "periods",
+                "*",
+                "details",
+                "landing_utilization",
+                "window_secs",
+            ][..],
+            true,
+        )],
+        UseCase::Status => vec![(&["checked_at"][..], true)],
+        UseCase::Forecast => vec![(&["at"][..], true), (&["seed"], false)],
+        // A gap still open ends now.
+        UseCase::Timeline => vec![
+            (&["gap_total_secs"][..], true),
+            (&["gaps", "*", "secs"], true),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+/// The fields taken out of an answer, keyed by where each was, with
+/// whether it grows with the clock.
+type Told = std::collections::BTreeMap<String, (bool, Value)>;
+
+/// Takes out of `value` the fields at `clock`'s paths.
+fn take(value: &mut Value, clock: &[(&[&str], bool)]) -> Told {
+    fn walk(value: &mut Value, path: &[&str], at: String, grows: bool, out: &mut Told) {
+        let [first, rest @ ..] = path else { return };
+        let children: Vec<(String, &mut Value)> = match (value, *first) {
+            (Value::Object(object), _) if rest.is_empty() => {
+                if let Some(taken) = object.remove(*first) {
+                    out.insert(format!("{at}/{first}"), (grows, taken));
+                }
+                return;
             }
-            Value::Array(items) => items.iter_mut().for_each(strip),
-            _ => {}
+            (Value::Object(object), "*") => object
+                .iter_mut()
+                .map(|(key, child)| (key.clone(), child))
+                .collect(),
+            (Value::Object(object), key) => object
+                .get_mut(key)
+                .map(|child| (key.to_owned(), child))
+                .into_iter()
+                .collect(),
+            (Value::Array(items), "*") => items
+                .iter_mut()
+                .enumerate()
+                .map(|(index, child)| (index.to_string(), child))
+                .collect(),
+            _ => return,
+        };
+        for (key, child) in children {
+            walk(child, rest, format!("{at}/{key}"), grows, out);
         }
     }
-    strip(&mut value);
-    value
+    let mut out = Told::new();
+    for (path, grows) in clock {
+        walk(value, path, String::new(), *grows, &mut out);
+    }
+    out
+}
+
+/// The order of two times or lengths of the same kind: numbers, or the
+/// RFC 3339 times of one format, which sort as text.
+fn order(first: &Value, second: &Value) -> Option<std::cmp::Ordering> {
+    match (first, second) {
+        (Value::Number(first), Value::Number(second)) => {
+            first.as_f64()?.partial_cmp(&second.as_f64()?)
+        }
+        (Value::String(first), Value::String(second)) => Some(first.cmp(second)),
+        _ => None,
+    }
 }
 
 #[test]
