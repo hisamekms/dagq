@@ -4,8 +4,8 @@ type: design
 title: レイヤーとコンテキストの境界（contextごとの所有・判断・操作・公開するport・依存の向き・境界をまたぐtransaction・検査できる規則・今の違反）
 status: current
 created: 2026-10-04
-updated: 2026-10-04 # task 1505
-last_verified: 2026-10-04 # task 1505
+updated: 2026-10-04 # task 1509: correct_goal (T8, T9)
+last_verified: 2026-10-04 # task 1509
 scope: system
 related:
   - adr-t1545-1
@@ -67,7 +67,7 @@ goal・task・proposalと、その検査と採否（plan review・goal review・
 
 - application: `application::commands::planning`・`application::commands::requests`、`application::planner`・`application::planner_request`・`application::planner_handoff`、`application::supervise`の`plan_review`・`goal_review`・`draft_planner`・`finding_planner`・`request_planner`・`planner_turns`、`application::diagram`（依存図）。
 - CLI: `add`・`edit`・`ready`・`draft`・`cancel`・`dependency`・`goal`・`set-goal`・`judge-follow-up`・`set-paths`・`set-priority`・`submit`・`proposal`・`lint`・`request`・`requests`・`search`・`related`・`candidates`・`graph`・`plan`・`planners`・`planner`・`planner-session`、読み取りの`list`・`show`。
-- infrastructure: `infrastructure::sqlite`（`TaskStore`の実装）、`proposals`・`plan_reviews`・`goal_reviews`・`draft_planners`・`follow_up_membership`（所属の判断とdraft/readyの移動を同じtransactionで記録。[所属の判断](follow-up-membership.md)）・`finding_planners`・`plan_requests`・`planners`・`planning`・`search`・`related`・`stranded`。
+- infrastructure: `infrastructure::sqlite`（`TaskStore`の実装）、`proposals`・`plan_reviews`・`goal_reviews`・`draft_planners`・`follow_up_membership`（所属の判断とdraft/readyの移動を同じtransactionで記録し、achievedで閉じた元goalへのrequiredではそのtransactionで`correct_goal`のaskを開く。そのaskのanswerの適用（`decide_correction`）も1つのtransaction。[所属の判断](follow-up-membership.md)、下のT8・T9）・`finding_planners`・`plan_requests`・`planners`・`planning`・`search`・`related`・`stranded`。
 
 **公開するport**
 
@@ -211,6 +211,8 @@ contextを1つに決められず、分ける先のtaskを持つもの。
 | T5 | goal reviewのverdictの適用 | 計画管理 | `asks`を閉じ、`goals`を閉じるか、足りないtaskを`tasks`に登録し、`goal_reviews`を直し、`goal_decided` | goalの判定と隙間のtaskを1回で揃える（同じcontextの中の表とask） | `infrastructure::goal_reviews`の`decide_goal`（`register_gaps`） |
 | T6 | findingのproposalの採否 | 計画管理 | `proposals`を作り`findings`をそのproposalに結ぶ（`submit_linking`）、proposalとそのtaskの状態から`findings`の状態を決める（`settle_findings`） | findingを1つのproposalに結び、二重のproposalを作らず、採否をfindingに戻す | `infrastructure::finding_planners`の`submit_linking`・`settle_findings`（判断は`domain::finding::settle`） |
 | T7 | follow_upsのdraftの登録 | 計画管理（実行と着地が`register_follow_ups`で呼ぶ） | `task_runs`と`run_events`を読み、`tasks`（draft）と`draft_origins`を書く | 着地したrunのfollow_upsをそのrunの由来つきで1回だけdraftにする | `infrastructure::draft_planners`の`register_follow_ups`（呼び出しは`application::integrate`。着地のT2とは別のtransaction） |
+| T8 | follow_upの所属の判断の記録 | 計画管理 | `follow_up_judgements`に行を足し、draft / readyの`tasks`の`goal_id`を移し（`task_goal_changed`）、achievedで閉じた元goalへのrequiredなら`asks`に`correct_goal`を開き（`ask_opened`）、`follow_up_judged` | 判断と所属と人への問いを食い違わせない（ADR-t1504-2決定1・6・9） | `infrastructure::follow_up_membership`の`SqliteQueue::judge_follow_up`（移動は`infrastructure::sqlite::set_goal_in`、askは`infrastructure::asks::insert_ask`） |
+| T9 | achievedの後の訂正のanswerの適用 | 計画管理 | `asks`を閉じ（`ask_closed`）、`reopen`は`goals`を開き直し（`goal_reopened`）、draft / readyのfollow_upの`tasks`の`goal_id`を移し、同じgoalのほかの`correct_goal`と残った`approve_goal`の`asks`をruntimeが答えて閉じ、`goal_correction_decided` | 人の答えとgoalの状態・follow_upの所属・残った問いを1回で揃える（ADR-t1504-2決定9。T5の`decide_goal`の対） | `infrastructure::follow_up_membership`の`decide_correction`（`domain::goal::reopen`、`infrastructure::asks::close_by_runtime`） |
 
 ## 検査できる規則
 

@@ -199,6 +199,11 @@ known_ask_kinds!(AskKind {
     // row names. The supervisor applies its answer, one of
     // [`goal_review::GOAL_OPTIONS`].
     ApproveGoal => "approve_goal",
+    // A follow-up judged required after its source goal closed as achieved
+    // (ADR-t1504-2 decision 9): about the follow-up's task and no run. The
+    // supervisor applies its answer, one of
+    // [`follow_up::CORRECTION_OPTIONS`].
+    CorrectGoal => "correct_goal",
     // A planner of the runtime's that needs a person (ADR-0041 decision
     // 13): about the draft (or the proposal's task) it works on and no run.
     // The supervisor types the answer into that planner's workspace, as it
@@ -251,6 +256,7 @@ impl AskKind {
                 | Self::Decide
                 | Self::ApprovePlan
                 | Self::ApproveGoal
+                | Self::CorrectGoal
                 | Self::ApproveUpdate
                 | Self::UpdateFailed
                 | Self::ApproveRelease
@@ -2264,6 +2270,7 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
                     || kind == AskKind::Decide.as_str()
                     || kind == AskKind::ApprovePlan.as_str()
                     || kind == AskKind::ApproveGoal.as_str()
+                    || kind == AskKind::CorrectGoal.as_str()
                     || kind == AskKind::UpdateFailed.as_str()
                     || kind == AskKind::ApproveRelease.as_str()
                     || kind == AskKind::QueueHold.as_str()
@@ -2591,6 +2598,7 @@ mod attention_tests {
             (AskKind::Stalled, false, true),
             (AskKind::ApprovePlan, true, false),
             (AskKind::ApproveGoal, true, false),
+            (AskKind::CorrectGoal, true, false),
             (AskKind::PlannerQuestion, false, false),
             (AskKind::QueueHold, false, false),
             (AskKind::UpdateFailed, true, false),

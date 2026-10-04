@@ -4,8 +4,8 @@ type: design
 title: Authorization
 status: current
 created: 2026-09-27
-updated: 2026-10-04 # task 1505
-last_verified: 2026-10-04 # task 1505
+updated: 2026-10-04 # task 1509
+last_verified: 2026-10-04 # task 1509
 scope: runtime
 related:
   - adr-t1394-1
@@ -165,7 +165,7 @@ answerは誰の権限で書かれたか（`AnswerAuthority`）を記録する（
 
 askの行には`answer_authority`と`answer_approval`（`0047_answer_authority.sql`）を、`ask_answered`のpayloadには`authority`と`approval`を書く。`answered_by`と`asked_by`の値の綴りは変えない（jobのaskの`asked_by`の改名とhumanからuserへの改名はgoal 48のtask 502が持つ）。eventのactorの列（roleとid）も同じ区別を持つ。migrationより前のanswerと古いバイナリのanswerは両方とも`NULL`で、JSONには出ない。
 
-承認に当たるask（後のgoalで人だけに限るときの土台。ADR-t728-3の決定3）はdomainが分類する（`AskKind::is_approval`と`answer_approves`）: kindが`approve_landing`・`decide`・`approve_plan`・`approve_goal`・`approve_update`・`update_failed`のaskのanswer、または`blocked`・`stalled`のaskがoptionに出した`propose` / `dismiss`（runtimeがfindingに適用する答え）。そのanswerは`answer_approval`が`1`、payloadの`approval`が`true`になる。runtimeが自分で閉じる・取り下げる・置き換えるanswer（`authority`が`runtime`）は何も承認しないので、kindに関わらず`0` / `false`にする。この段では承認を人だけに限る強制はしない。
+承認に当たるask（後のgoalで人だけに限るときの土台。ADR-t728-3の決定3）はdomainが分類する（`AskKind::is_approval`と`answer_approves`）: kindが`approve_landing`・`decide`・`approve_plan`・`approve_goal`・`correct_goal`・`approve_update`・`update_failed`のaskのanswer、または`blocked`・`stalled`のaskがoptionに出した`propose` / `dismiss`（runtimeがfindingに適用する答え）。そのanswerは`answer_approval`が`1`、payloadの`approval`が`true`になる。runtimeが自分で閉じる・取り下げる・置き換えるanswer（`authority`が`runtime`）は何も承認しないので、kindに関わらず`0` / `false`にする。この段では承認を人だけに限る強制はしない。
 
 ### runtimeの操作系のコマンド（application）
 

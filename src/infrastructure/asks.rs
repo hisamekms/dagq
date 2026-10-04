@@ -324,6 +324,15 @@ impl SqliteQueue {
             payload["runtime_delivers"] =
                 json!(super::goal_reviews::goal_answer_applies(&tx, &ask, text)?);
         }
+        if ask.kind == AskKind::CorrectGoal {
+            // The supervisor reopens the goal, records that its achieved
+            // verdict was wrong, or keeps it (ADR-t1504-2 decision 9); any
+            // other answer, or one for a goal no longer closed as achieved,
+            // is a person's to read.
+            payload["runtime_delivers"] = json!(
+                super::follow_up_membership::correction_answer_applies(&tx, &ask, text)?
+            );
+        }
         if ask.kind == AskKind::QueueHold {
             // The supervisor applies an option the ask offered: `done` /
             // `cancel_affected` of an authentication or usage-limit ask
@@ -843,6 +852,37 @@ impl SqliteQueue {
     }
 }
 
+/// Close the unclosed `ask` in the caller's write transaction at `now`: an
+/// open one gets `answer` from the runtime (`ask_answered` with
+/// `runtime_closed: true`), an answered one `ask_closed`.
+pub(super) fn close_by_runtime(tx: &Connection, ask: &Ask, answer: &str, now: i64) -> Result<()> {
+    if ask.is_open() {
+        let mut payload = json!({"ask_id": ask.id, "kind": ask.kind, "runtime_closed": true});
+        write_answer(tx, ask, answer, Answerer::RUNTIME, now, &mut payload)?;
+        ask_event(
+            tx,
+            ask.task_id,
+            ask.run_id.as_ref(),
+            EventKind::AskAnswered,
+            payload,
+        )?;
+    } else {
+        // An answer given before is applied by this close.
+        ask_event(
+            tx,
+            ask.task_id,
+            ask.run_id.as_ref(),
+            EventKind::AskClosed,
+            json!({"ask_id": ask.id, "kind": ask.kind}),
+        )?;
+    }
+    tx.execute(
+        "UPDATE asks SET closed_at=?2 WHERE id=?1",
+        params![ask.id, now],
+    )?;
+    Ok(())
+}
+
 /// [`SqliteQueue::close_asks_of`] inside the caller's write transaction,
 /// at `now`: an open ask gets `answer` from the runtime (`ask_answered`
 /// with `runtime_closed: true`), an answered one `ask_closed`.
@@ -863,30 +903,7 @@ pub(super) fn close_asks_in(
         .collect::<rusqlite::Result<_>>()?;
     let mut closed = Vec::with_capacity(unclosed.len());
     for ask in unclosed {
-        if ask.is_open() {
-            let mut payload = json!({"ask_id": ask.id, "kind": ask.kind, "runtime_closed": true});
-            write_answer(tx, &ask, answer, Answerer::RUNTIME, now, &mut payload)?;
-            ask_event(
-                tx,
-                ask.task_id,
-                ask.run_id.as_ref(),
-                EventKind::AskAnswered,
-                payload,
-            )?;
-        } else {
-            // An answer given before is applied by this close.
-            ask_event(
-                tx,
-                ask.task_id,
-                ask.run_id.as_ref(),
-                EventKind::AskClosed,
-                json!({"ask_id": ask.id, "kind": ask.kind}),
-            )?;
-        }
-        tx.execute(
-            "UPDATE asks SET closed_at=?2 WHERE id=?1",
-            params![ask.id, now],
-        )?;
+        close_by_runtime(tx, &ask, answer, now)?;
         closed.push(read_ask(tx, ask.id)?);
     }
     Ok(closed)

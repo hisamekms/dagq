@@ -608,6 +608,116 @@ pub fn membership_gap(facts: MembershipFacts) -> Option<MembershipGap> {
     }
 }
 
+/// Whether recording `classification` for a follow-up whose source goal
+/// closed with `verdict` opens a `correct_goal` ask (ADR-t1504-2 decision
+/// 9): a required judgement after the goal closed as achieved says the
+/// goal did not meet its acceptance, which only a person settles. An
+/// out-of-scope correction is recorded and moved without one, and an
+/// abandoned goal claimed nothing. Recording required again over a
+/// `previous` required judgement (a recheck) changes nothing the close
+/// knew, so it asks nothing.
+pub fn opens_correction(
+    classification: MembershipClassification,
+    previous: Option<MembershipClassification>,
+    verdict: Option<super::GoalVerdict>,
+) -> bool {
+    classification == MembershipClassification::Required
+        && previous != Some(MembershipClassification::Required)
+        && verdict == Some(super::GoalVerdict::Achieved)
+}
+
+// A person's answer to a `correct_goal` ask (ADR-t1504-2 decision 9),
+// which the supervisor applies: open the goal again and move the follow-up
+// back into it, keep the goal closed and record that its achieved verdict
+// was wrong (the fix goes to a fix goal), or keep it achieved (the
+// acceptance was met; the follow-up is out of scope).
+string_enum!(CorrectionAnswer {
+    Reopen => "reopen",
+    CorrectVerdict => "correct_verdict",
+    KeepAchieved => "keep_achieved",
+});
+
+/// The options of every `correct_goal` ask, in [`CorrectionAnswer`]'s
+/// order.
+pub const CORRECTION_OPTIONS: &[&str] = &[
+    CorrectionAnswer::Reopen.as_str(),
+    CorrectionAnswer::CorrectVerdict.as_str(),
+    CorrectionAnswer::KeepAchieved.as_str(),
+];
+
+/// Who opens the `correct_goal` asks: the runtime, as the judgement is
+/// recorded.
+pub const CORRECTION_ASKER: &str = "supervisor";
+
+impl CorrectionAnswer {
+    /// The option `text` names, or `None` for any other answer (left for
+    /// the inbox to read).
+    pub fn parse(text: &str) -> Option<Self> {
+        text.trim().parse().ok()
+    }
+}
+
+/// A task that waits on the closed goal (`--goal-dep`) and so was released
+/// when it closed as achieved, with its runs (ID and status, oldest first):
+/// what a `correct_goal` ask shows a person, since the runtime stops none
+/// of them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReleasedDependent {
+    pub task: super::TaskId,
+    pub title: String,
+    pub status: super::TaskStatus,
+    pub runs: Vec<(String, String)>,
+}
+
+/// The question of the `correct_goal` ask about follow-up `task` of
+/// `goal`, judged required by the row `judgement_id` with `judgement`, and
+/// the tasks the goal released.
+pub fn correction_question(
+    goal: super::GoalId,
+    task: super::TaskId,
+    judgement_id: i64,
+    judgement: &MembershipJudgement,
+    released: &[ReleasedDependent],
+) -> String {
+    let mut question = format!(
+        "Goal {goal} was closed as achieved, but its follow-up task {task} is now judged required for its acceptance (judgement {judgement_id}). Was the acceptance met?"
+    );
+    question.push_str(&format!(
+        "\nAcceptance items: {}",
+        judgement.acceptance_items.join("; ")
+    ));
+    question.push_str(&format!("\nReason: {}", judgement.reason.trim()));
+    if !judgement.evidence.is_empty() {
+        question.push_str(&format!("\nEvidence: {}", judgement.evidence.join(", ")));
+    }
+    question.push_str("\nTasks released by the goal (the runtime stops none of them):");
+    if released.is_empty() {
+        question.push_str("\n- none");
+    }
+    for dependent in released {
+        let runs = if dependent.runs.is_empty() {
+            "no runs".to_owned()
+        } else {
+            let runs: Vec<String> = dependent
+                .runs
+                .iter()
+                .map(|(id, status)| format!("{id} {status}"))
+                .collect();
+            format!("runs {}", runs.join(", "))
+        };
+        question.push_str(&format!(
+            "\n- task {} ({}): {}; {runs}",
+            dependent.task,
+            dependent.status.as_str(),
+            dependent.title
+        ));
+    }
+    question.push_str(
+        "\nAnswer reopen (open the goal again and move the follow-up back into it; its released tasks not yet claimed wait for it again), correct_verdict (keep it closed and record that achieved was wrong; the fix goes to a fix goal), or keep_achieved (the acceptance was met; the follow-up is out of scope).",
+    );
+    question
+}
+
 #[cfg(test)]
 mod membership_tests {
     use super::*;
@@ -753,6 +863,82 @@ mod membership_tests {
             "5:3-out_of_scope"
         );
         assert_eq!(follow_up(open, true, None).fingerprint(), "5:-");
+    }
+
+    /// ADR-t1504-2 decision 9: only a required judgement after an achieved
+    /// close asks a person; the ask names the judgement and every released
+    /// task with its runs, and offers the three answers.
+    #[test]
+    fn a_required_judgement_after_achieved_asks_with_the_released_tasks() {
+        use super::super::{GoalVerdict, TaskId, TaskStatus};
+        use MembershipClassification::*;
+        let achieved = Some(GoalVerdict::Achieved);
+        for (class, previous, verdict, opens) in [
+            (Required, None, achieved, true),
+            (Required, Some(OutOfScope), achieved, true),
+            (Required, Some(Undecided), achieved, true),
+            // A recheck of a required judgement settles nothing new.
+            (Required, Some(Required), achieved, false),
+            (Required, None, Some(GoalVerdict::Abandoned), false),
+            (Required, None, None, false),
+            (OutOfScope, Some(Required), achieved, false),
+            (Undecided, None, achieved, false),
+        ] {
+            assert_eq!(
+                opens_correction(class, previous, verdict),
+                opens,
+                "{class:?} {previous:?} {verdict:?}"
+            );
+        }
+        assert_eq!(
+            CORRECTION_OPTIONS,
+            ["reopen", "correct_verdict", "keep_achieved"]
+        );
+        assert_eq!(
+            CorrectionAnswer::parse(" reopen "),
+            Some(CorrectionAnswer::Reopen)
+        );
+        assert_eq!(CorrectionAnswer::parse("reopen it"), None);
+        let released = [
+            ReleasedDependent {
+                task: TaskId::new(8),
+                title: "next step".into(),
+                status: TaskStatus::InProgress,
+                runs: vec![
+                    ("r1".into(), "failed".into()),
+                    ("r2".into(), "running".into()),
+                ],
+            },
+            ReleasedDependent {
+                task: TaskId::new(9),
+                title: "later".into(),
+                status: TaskStatus::Ready,
+                runs: Vec::new(),
+            },
+        ];
+        let question =
+            correction_question(GoalId::new(3), TaskId::new(5), 4, &required(), &released);
+        assert!(
+            question.starts_with("Goal 3 was closed as achieved, but its follow-up task 5"),
+            "{question}"
+        );
+        for part in [
+            "(judgement 4)",
+            "Acceptance items: (1)",
+            "Reason: cannot satisfy (1) without it",
+            "Evidence: receipt:r",
+            "- task 8 (in_progress): next step; runs r1 failed, r2 running",
+            "- task 9 (ready): later; no runs",
+            "reopen (",
+            "correct_verdict (",
+            "keep_achieved (",
+        ] {
+            assert!(question.contains(part), "{part}: {question}");
+        }
+        assert!(
+            correction_question(GoalId::new(3), TaskId::new(5), 4, &required(), &[])
+                .contains("\n- none")
+        );
     }
 
     #[test]

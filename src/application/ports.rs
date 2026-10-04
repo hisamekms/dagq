@@ -3103,6 +3103,18 @@ pub trait GoalReviewStore {
     fn decide_goal(&mut self, ask: AskId) -> Result<Option<GoalDecided>>;
     /// Whether the supervisor applies the answer the `approve_goal` ask has.
     fn applies_goal_answer(&self, ask: &Ask) -> Result<bool>;
+    /// Answered `correct_goal` asks (ADR-t1504-2 decision 9) nobody closed
+    /// whose answer the runtime took to apply when it was given
+    /// (`runtime_delivers`), oldest first.
+    fn correction_answers(&self) -> Result<Vec<Ask>>;
+    /// Apply a person's answer to a `correct_goal` ask and close it
+    /// (`goal_correction_decided`, and `goal_reopened` for `reopen`); the
+    /// event's payload, or `None` when the answer is not one the runtime
+    /// applies now (left open for the inbox) or the goal is no longer
+    /// closed as achieved (the ask is closed).
+    fn decide_correction(&mut self, ask: AskId) -> Result<Option<serde_json::Value>>;
+    /// Whether the supervisor applies the answer the `correct_goal` ask has.
+    fn applies_correction_answer(&self, ask: &Ask) -> Result<bool>;
     /// The goals whose review failed, held for a person.
     fn goal_review_holds(&self) -> Result<Vec<GoalReviewHold>>;
     /// `goal review ID`: let the supervisor review the open goal again

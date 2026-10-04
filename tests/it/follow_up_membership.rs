@@ -949,3 +949,370 @@ fn submit_bypass_and_lint_need_a_current_membership_judgement() {
     assert!(unjudged(&q, gone).is_empty());
     submit(&mut q, gone).unwrap();
 }
+
+impl Landed {
+    fn goal_events(&mut self, kind: &str) -> Vec<serde_json::Value> {
+        self.q
+            .show_goal(self.source)
+            .unwrap()
+            .events
+            .into_iter()
+            .filter(|e| e.kind == kind)
+            .map(|e| e.payload)
+            .collect()
+    }
+
+    /// The source goal closed as achieved with `follow_up` judged out of
+    /// scope, a task waiting on the goal released and claimed (its run
+    /// running), and `follow_up` then corrected to required: the
+    /// `correct_goal` ask it opened, and the released task with its run.
+    fn corrected_after_achieved(
+        &mut self,
+        follow_up: TaskId,
+    ) -> (dagq::domain::Ask, TaskId, String) {
+        let out = self.out_of_scope(follow_up);
+        assert_eq!(self.close_refused(), None);
+        self.correct_to_required(follow_up, &out)
+    }
+
+    /// A task waiting on the closed source goal released and claimed, and
+    /// `follow_up` corrected from `last` to required.
+    fn correct_to_required(
+        &mut self,
+        follow_up: TaskId,
+        last: &serde_json::Value,
+    ) -> (dagq::domain::Ask, TaskId, String) {
+        let dependent = self
+            .q
+            .add(dagq::domain::NewTask {
+                goal_dependencies: vec![self.source],
+                ..new_task("waits on the goal")
+            })
+            .unwrap()
+            .id();
+        self.q
+            .transition(dependent, TaskAction::BypassReview)
+            .unwrap();
+        let ClaimOutcome::Claimed { run, .. } = self.q.claim(&base()).unwrap() else {
+            panic!("the released task is claimed")
+        };
+        assert_eq!(run.task_id(), dependent);
+        let mut correction = judgement(Class::Required, None);
+        correction.corrects = last["id"].as_i64();
+        let row = self
+            .q
+            .judge_follow_up(follow_up, correction, "planner")
+            .unwrap();
+        let ask = self
+            .q
+            .read_ask(dagq::domain::AskId::new(
+                row["correction_ask_id"].as_i64().unwrap(),
+            ))
+            .unwrap();
+        (ask, dependent, run.id().to_string())
+    }
+}
+
+/// ADR-t1504-2 decision 9: after an achieved close, an out-of-scope
+/// correction is only recorded and moved; a correction to required keeps
+/// the close, its verdict and the earlier judgements, opens a `scope` ask
+/// listing the released tasks and their runs, stops none of them, and
+/// holds the follow-up's membership until the answer.
+#[test]
+fn a_correction_after_achieved_keeps_the_history_and_asks_a_person() {
+    let mut l = landed();
+    let follow_up = l.follow_up("missed requirement");
+    let first = l.out_of_scope(follow_up);
+    assert_eq!(l.close_refused(), None);
+    // Out of scope to another destination: no ask, recorded and moved.
+    let third = l.q.add_goal(new_goal("better destination")).unwrap().id();
+    let row =
+        l.q.judge_follow_up(
+            follow_up,
+            judgement(Class::OutOfScope, Some(third)),
+            "planner",
+        )
+        .unwrap();
+    assert!(row.get("correction_ask_id").is_none());
+    assert_eq!(l.q.show(follow_up).unwrap().task.goal_id(), Some(third));
+    assert!(l.q.asks(Default::default()).unwrap().is_empty());
+
+    let (ask, dependent, run) = l.correct_to_required(follow_up, &row);
+    assert_eq!(ask.kind, dagq::domain::AskKind::CorrectGoal);
+    assert_eq!(ask.task_id, Some(follow_up));
+    assert_eq!(ask.run_id, None);
+    assert_eq!(ask.reason_category, dagq::domain::AskReason::Scope);
+    assert_eq!(ask.options, ["reopen", "correct_verdict", "keep_achieved"]);
+    for part in [
+        format!("Goal {} was closed as achieved", l.source),
+        format!("follow-up task {follow_up}"),
+        format!("- task {dependent} (in_progress): waits on the goal; runs {run} "),
+        "Acceptance items: (1)".to_owned(),
+    ] {
+        assert!(ask.question.contains(&part), "{part}: {}", ask.question);
+    }
+    // The close and its verdict stay; every judgement is kept.
+    let goal = l.q.show_goal(l.source).unwrap();
+    assert!(goal.closed);
+    assert_eq!(
+        goal.goal.verdict(),
+        Some(dagq::domain::GoalVerdict::Achieved)
+    );
+    assert_eq!(l.goal_events("goal_closed").len(), 1);
+    assert!(l.goal_events("goal_reopened").is_empty());
+    let history = l.q.show(follow_up).unwrap().membership_judgements;
+    let classes: Vec<_> = history
+        .iter()
+        .map(|j| j["classification"].clone())
+        .collect();
+    assert_eq!(
+        classes,
+        [
+            json!("out_of_scope"),
+            json!("out_of_scope"),
+            json!("required")
+        ]
+    );
+    assert_eq!(history[0]["id"], first["id"]);
+    let judged = l.goal_events("follow_up_judged");
+    assert_eq!(judged.last().unwrap()["correction_ask_id"], json!(ask.id));
+    // Nothing that was released is stopped, and the follow-up stays put.
+    assert_eq!(
+        l.q.show(dependent).unwrap().task.status(),
+        dagq::domain::TaskStatus::InProgress
+    );
+    assert_eq!(l.q.show(follow_up).unwrap().task.goal_id(), Some(third));
+    // While the ask is open the follow-up's membership waits for it.
+    let refused = l.q.set_goal(follow_up, Some(l.other)).unwrap_err();
+    assert!(
+        refused.to_string().contains("correct_goal ask"),
+        "{refused}"
+    );
+    let refused =
+        l.q.judge_follow_up(follow_up, judgement(Class::Required, None), "planner")
+            .unwrap_err();
+    assert!(
+        refused.to_string().contains("correct_goal ask"),
+        "{refused}"
+    );
+}
+
+/// ADR-t1504-2 decision 9: the supervisor applies each answer of the
+/// `correct_goal` ask in one transaction and keeps the history; another
+/// answer is left for the inbox.
+#[test]
+fn each_answer_to_a_correction_is_applied_and_keeps_the_history() {
+    use dagq::application::GoalReviewStore;
+    for answer in ["reopen", "correct_verdict", "keep_achieved"] {
+        let mut l = landed();
+        let follow_up = l.follow_up("missed requirement");
+        let (ask, dependent, _) = l.corrected_after_achieved(follow_up);
+        l.q.answer(ask.id, answer).unwrap();
+        let answered = l.q.read_ask(ask.id).unwrap();
+        assert!(
+            l.q.applies_correction_answer(&answered).unwrap(),
+            "{answer}"
+        );
+        assert_eq!(l.q.correction_answers().unwrap()[0].id, ask.id);
+        let decided = l.q.decide_correction(ask.id).unwrap().unwrap();
+        assert_eq!(decided["decision"], answer);
+        assert!(l.q.read_ask(ask.id).unwrap().closed_at.is_some());
+        // The applied answer is recorded as `ask close` records it.
+        assert_eq!(
+            l.q.show(follow_up)
+                .unwrap()
+                .events
+                .iter()
+                .filter(|e| e.kind == "ask_closed" && e.payload["ask_id"] == json!(ask.id))
+                .count(),
+            1
+        );
+        assert!(l.q.correction_answers().unwrap().is_empty());
+        assert_eq!(l.q.decide_correction(ask.id).unwrap(), None);
+        assert_eq!(
+            l.goal_events("goal_correction_decided"),
+            std::slice::from_ref(&decided)
+        );
+        // The close stays in the history, and the released task runs on.
+        assert_eq!(l.goal_events("goal_closed").len(), 1);
+        assert_eq!(
+            l.q.show(dependent).unwrap().task.status(),
+            dagq::domain::TaskStatus::InProgress
+        );
+        let goal = l.q.show_goal(l.source).unwrap();
+        if answer == "reopen" {
+            assert!(!goal.closed);
+            assert_eq!(goal.goal.verdict(), None);
+            let reopened = l.goal_events("goal_reopened");
+            assert_eq!(reopened[0]["previous_verdict"], "achieved");
+            assert_eq!(reopened[0]["ask_id"], json!(ask.id));
+            // The draft follow-up is back in the goal, which closes again
+            // once it ends.
+            assert_eq!(decided["moved"], true);
+            assert_eq!(l.q.show(follow_up).unwrap().task.goal_id(), Some(l.source));
+            assert!(l.close_refused().unwrap().contains("draft"));
+            l.set_status(follow_up, "completed");
+            assert_eq!(l.close_refused(), None);
+            assert_eq!(l.goal_events("goal_closed").len(), 2);
+        } else {
+            assert!(goal.closed);
+            assert_eq!(
+                goal.goal.verdict(),
+                Some(dagq::domain::GoalVerdict::Achieved)
+            );
+            assert!(l.goal_events("goal_reopened").is_empty());
+            assert_eq!(decided["moved"], false);
+            assert_eq!(l.q.show(follow_up).unwrap().task.goal_id(), Some(l.other));
+            // A recheck of the required judgement asks nothing again.
+            let row =
+                l.q.judge_follow_up(follow_up, judgement(Class::Required, None), "planner")
+                    .unwrap();
+            assert!(row.get("correction_ask_id").is_none());
+            // Answered, the follow-up may be judged again (here out of
+            // scope, as keep_achieved has it), and asks nothing.
+            let mut out = judgement(Class::OutOfScope, Some(l.other));
+            out.corrects = row["id"].as_i64();
+            let row = l.q.judge_follow_up(follow_up, out, "planner").unwrap();
+            assert!(row.get("correction_ask_id").is_none());
+        }
+    }
+
+    // Another answer is the inbox's to read and is never applied.
+    let mut l = landed();
+    let follow_up = l.follow_up("missed requirement");
+    let (ask, ..) = l.corrected_after_achieved(follow_up);
+    l.q.answer(ask.id, "split it").unwrap();
+    assert!(
+        !l.q.applies_correction_answer(&l.q.read_ask(ask.id).unwrap())
+            .unwrap()
+    );
+    assert!(l.q.correction_answers().unwrap().is_empty());
+    assert_eq!(l.q.decide_correction(ask.id).unwrap(), None);
+    assert!(l.q.read_ask(ask.id).unwrap().closed_at.is_none());
+    assert!(l.q.show_goal(l.source).unwrap().closed);
+}
+
+/// The correction is a membership judgement: a worker or a job may not
+/// record it on a follow-up of a closed goal (ADR-t1504-2 decisions 2 and
+/// 9), through the CLI or the store, and nothing is recorded or asked.
+#[test]
+fn a_correction_by_an_actor_without_the_authority_is_refused() {
+    use common::cli::invoke_as;
+    let mut l = landed();
+    let follow_up = l.follow_up("missed requirement");
+    let out = l.out_of_scope(follow_up);
+    assert_eq!(l.close_refused(), None);
+    let db = l.dir.path().join("queue.db");
+    let id = follow_up.to_string();
+    let corrects = out["id"].to_string();
+    let args = [
+        "judge-follow-up",
+        id.as_str(),
+        "--classification",
+        "required",
+        "--reason",
+        "acceptance (1) was not met",
+        "--acceptance-item",
+        "(1)",
+        "--evidence",
+        "task:1",
+        "--corrects",
+        corrects.as_str(),
+    ];
+    for role in ["worker", "review-job", "goal-review-job", "plan-review-job"] {
+        let refused = invoke_as(Some(role), &db, &args);
+        assert!(!refused.status.success(), "{role}");
+        let refusal: serde_json::Value = serde_json::from_slice(&refused.stderr).unwrap();
+        assert_eq!(refusal["denied"]["capability"], "follow_up.judge", "{role}");
+    }
+    for role in ["worker", "supervisor", "goal-review-job"] {
+        let mut correction = judgement(Class::Required, None);
+        correction.corrects = out["id"].as_i64();
+        assert!(
+            l.q.judge_follow_up(follow_up, correction, role).is_err(),
+            "{role}"
+        );
+    }
+    assert_eq!(l.q.show(follow_up).unwrap().membership_judgements.len(), 1);
+    assert!(l.q.asks(Default::default()).unwrap().is_empty());
+    assert!(l.q.show_goal(l.source).unwrap().closed);
+}
+
+/// A `reopen` answers and closes the goal's other questions asked of the
+/// closed goal (another follow-up's `correct_goal` ask and an `approve_goal`
+/// ask left from before the close), and a follow-up that waits on the goal
+/// stays where it is instead of failing the answer (ADR-t1504-2 decision 9).
+#[test]
+fn a_reopen_closes_the_goals_other_questions_and_keeps_a_follow_up_it_cannot_move() {
+    let mut l = landed();
+    let first = l.follow_up("first requirement");
+    let second = l.follow_up("second requirement");
+    // An approve_goal ask of a review of the goal, left open by a close.
+    let left =
+        l.q.ask(dagq::domain::NewAsk {
+            kind: dagq::domain::AskKind::ApproveGoal,
+            task_id: Some(l.task),
+            run_id: None,
+            question: "Goal 1: split it?".into(),
+            options: vec!["achieved".into(), "keep_open".into()],
+            asked_by: "supervisor".into(),
+            reason_category: dagq::domain::AskReason::Scope,
+            topics: Vec::new(),
+            recommendation: None,
+            confidence: None,
+            finding_id: None,
+            request_id: None,
+        })
+        .unwrap()
+        .ask;
+    Connection::open(l.dir.path().join("queue.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO goal_reviews(goal_id,attempt,supervisor_token,fingerprint,started_at,finished_at,outcome,ask_id)
+             VALUES (?1,1,'t','f',1,2,'ask',?2)",
+            params![l.source.as_i64(), left.id.as_i64()],
+        )
+        .unwrap();
+    let out_first = l.out_of_scope(first);
+    let out_second = l.out_of_scope(second);
+    // The first waits on the goal, so the goal cannot take it back.
+    l.q.add_goal_dependency(first, l.source).unwrap();
+    assert_eq!(l.close_refused(), None);
+    let mut asks = Vec::new();
+    for (task, out) in [(first, &out_first), (second, &out_second)] {
+        let mut correction = judgement(Class::Required, None);
+        correction.corrects = out["id"].as_i64();
+        let row = l.q.judge_follow_up(task, correction, "planner").unwrap();
+        asks.push(dagq::domain::AskId::new(
+            row["correction_ask_id"].as_i64().unwrap(),
+        ));
+    }
+    l.q.answer(asks[0], "reopen").unwrap();
+    use dagq::application::GoalReviewStore;
+    let decided = l.q.decide_correction(asks[0]).unwrap().unwrap();
+    assert!(!l.q.show_goal(l.source).unwrap().closed);
+    assert_eq!(decided["moved"], false);
+    assert!(
+        decided["move_refused"].as_str().unwrap().contains("goal"),
+        "{decided}"
+    );
+    assert_eq!(l.q.show(first).unwrap().task.goal_id(), Some(l.other));
+    assert_eq!(decided["closed_asks"], json!([asks[1], left.id]));
+    for ask in [asks[1], left.id] {
+        let closed = l.q.read_ask(ask).unwrap();
+        assert!(closed.closed_at.is_some());
+        assert!(closed.answer.unwrap().contains("was reopened"));
+        assert_eq!(closed.answered_by.as_deref(), Some("runtime"));
+    }
+    // The second follow-up's membership may move again: into the open goal.
+    l.q.judge_follow_up(second, judgement(Class::Required, None), "planner")
+        .unwrap();
+    assert_eq!(l.q.show(second).unwrap().task.goal_id(), Some(l.source));
+    // The first holds the goal as a required follow-up outside it.
+    l.set_status(second, "completed");
+    let refused = l.close_refused().unwrap();
+    assert!(
+        refused.contains(&format!("{first} required but outside the goal")),
+        "{refused}"
+    );
+}

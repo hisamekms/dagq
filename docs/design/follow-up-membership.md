@@ -4,8 +4,8 @@ type: design
 title: Follow-up membership judgements
 status: current
 created: 2026-10-04
-updated: 2026-10-04 # task 1507
-last_verified: 2026-10-04 # task 1507
+updated: 2026-10-04 # task 1509
+last_verified: 2026-10-04 # task 1509
 scope: runtime
 related:
   - adr-t1504-2
@@ -68,8 +68,8 @@ required/out_of_scopeの判断を持つtaskの`set-goal`は、最後の判断の
 判断の履歴・材料・深さを載せる（移動したfollow_upも含む）。`events`は
 `follow_up_registered`の登録時の材料と`follow_up_judged`の判断を読める。
 
-achieved後のaskと訂正の適用はADR-t1504-2の後続の実装範囲である。
-閉じた元goalへのrequiredの記録は達成のeventや閉じた状態を変更しない。
+閉じた元goalへのrequiredの記録は達成のeventや閉じた状態を変更しない
+（下の「achievedの後の訂正」）。
 
 ## 閉じる条件
 
@@ -107,6 +107,20 @@ draft / submittedのfollow_upに同じ検査をする。`lint`は同じ欠けを
 `follow_up_membership`（登録時の材料、判断の行、最新の分類、版の一致）を載せ、
 元goalを材料のgoalに足し、plannerの対応づけを起点に検査し疑わしいものは周辺の
 証拠も読むよう指示する（[Plan review](supervisor-lifecycle/plan-review.md)）。
+
+## achievedの後の訂正
+
+閉じたgoalを元goalとするfollow_upの訂正も同じ`judge-follow-up`（user・inbox・
+runtimeのplanner）で記録し、前の行もgoalの`goal_closed`とverdictも消さない。
+out_of_scopeの訂正（所属先の誤りなど）は人に問わず、記録と開いた所属先への移動だけを行う。
+元goalがachievedで閉じた後のrequired（新しい判断かout_of_scope・undecidedからの訂正。
+requiredの確かめ直しは問わない。`follow_up::opens_correction`）は、同じtransactionで`correct_goal`のaskを開き、
+そのIDを`follow_up_judged`のpayloadと出力の`correction_ask_id`に残す。goalは
+自動で開き直さず、follow_upも動かさない。abandonedで閉じたgoalへのrequiredはaskを開かない。
+
+askが閉じるまで、そのfollow_upの`judge-follow-up`と`set-goal`は拒む。askの中身と
+`reopen` / `correct_verdict` / `keep_achieved`の適用は
+[Goal review](supervisor-lifecycle/goal-review.md)の9が持つ。
 
 ## 旧schemaの移行
 

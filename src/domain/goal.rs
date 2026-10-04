@@ -216,6 +216,25 @@ pub fn ready(mut goal: Goal) -> Result<Goal, DomainError> {
     Ok(goal)
 }
 
+/// A person's `reopen` answer to a `correct_goal` ask (ADR-t1504-2
+/// decision 9, the one exception to ADR-0009's closed goal): a goal closed
+/// as achieved opens again, so it can be closed again. Its `goal_closed`
+/// event stays; the store adds the reopening one. A goal that is open, or
+/// was abandoned, is not reopened.
+pub fn reopen(mut goal: Goal, reopened_at: String) -> Result<Goal, DomainError> {
+    require(goal.verdict == Some(GoalVerdict::Achieved), || {
+        DomainError::GoalNotReopenable {
+            goal_id: goal.id,
+            verdict: goal.verdict,
+        }
+    })?;
+    goal.status = GoalStatus::Open;
+    goal.verdict = None;
+    goal.closed_at = None;
+    goal.updated_at = reopened_at;
+    Ok(goal)
+}
+
 /// Whether the follow-ups whose source goal is `goal_id` let it close with
 /// `verdict` (ADR-t1504-2 decision 8): `achieved` needs every one that is
 /// not completed or canceled judged, rechecked after the last change of the
@@ -320,6 +339,36 @@ mod tests {
 
     fn goal(verdict: Option<GoalVerdict>) -> Goal {
         Goal::restore(record(GoalStatus::Open, verdict)).unwrap()
+    }
+
+    /// ADR-t1504-2 decision 9: only an achieved goal opens again, without
+    /// its verdict, and it can be closed again.
+    #[test]
+    fn only_an_achieved_goal_is_reopened() {
+        let reopened = reopen(goal(Some(GoalVerdict::Achieved)), "later".into()).unwrap();
+        assert!(!reopened.is_closed());
+        assert_eq!(
+            (reopened.status(), reopened.verdict(), reopened.updated_at()),
+            (GoalStatus::Open, None, "later")
+        );
+        let counts = TaskStatusCounts::default();
+        assert!(close(reopened, GoalVerdict::Achieved, &counts, "again".into()).is_ok());
+        for verdict in [None, Some(GoalVerdict::Abandoned)] {
+            let refused = reopen(goal(verdict), "later".into()).unwrap_err();
+            assert_eq!(
+                refused,
+                DomainError::GoalNotReopenable {
+                    goal_id: GoalId::new(7),
+                    verdict
+                }
+            );
+        }
+        assert_eq!(
+            reopen(goal(Some(GoalVerdict::Abandoned)), "later".into())
+                .unwrap_err()
+                .to_string(),
+            "goal 7 is closed as abandoned; only a goal closed as achieved is opened again"
+        );
     }
 
     #[test]

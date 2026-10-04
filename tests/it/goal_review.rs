@@ -760,3 +760,91 @@ fn handoff_reviews(keep_candidates: bool) {
         if keep_candidates { 2 } else { 1 }
     );
 }
+
+/// ADR-t1504-2 decision 9: a follow-up registered after its goal closed as
+/// achieved and judged required opens a `correct_goal` ask; the supervisor
+/// applies the person's `reopen`, which opens the goal again with the
+/// follow-up in it and leaves the close in the history.
+#[test]
+fn the_supervisor_applies_a_reopen_answer_to_a_correction() {
+    use dagq::domain::follow_up::{MembershipClassification, MembershipJudgement};
+    let fx = fixture();
+    let (goal, _) = goal_done(&fx);
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    queue.close_goal(goal, GoalVerdict::Achieved).unwrap();
+    let follow_up = add(&mut queue, "missed requirement", &[], Priority::Normal);
+    assert_eq!(
+        queue.show(follow_up).unwrap().task.status(),
+        TaskStatus::Draft
+    );
+    queue
+        .record_draft_origin(
+            follow_up,
+            DraftOrigin::FollowUp,
+            &json!({"source_goal_id": goal, "source_goal_state": "closed",
+                "source_goal_provenance": "recorded"}),
+        )
+        .unwrap();
+    let row = queue
+        .judge_follow_up(
+            follow_up,
+            MembershipJudgement {
+                classification: MembershipClassification::Required,
+                acceptance_items: vec!["(2) docs say how".into()],
+                reason: "the docs were never written".into(),
+                evidence: vec!["task:1".into()],
+                destination_goal_id: None,
+                source_goal_id: None,
+                corrects: None,
+            },
+            "planner",
+        )
+        .unwrap();
+    let asks = queue.asks(Default::default()).unwrap();
+    assert_eq!(asks.len(), 1);
+    assert_eq!(asks[0].kind, AskKind::CorrectGoal);
+    assert_eq!(
+        asks[0].id.as_i64(),
+        row["correction_ask_id"].as_i64().unwrap()
+    );
+    queue.answer(asks[0].id, "reopen").unwrap();
+    let answered = queue
+        .show(follow_up)
+        .unwrap()
+        .events
+        .into_iter()
+        .rev()
+        .find(|e| e.kind == "ask_answered")
+        .unwrap()
+        .payload;
+    assert_eq!(answered["runtime_delivers"], true);
+    // `status` shows it as the runtime's to apply, not the inbox's.
+    let status_now = dagq::runtime::status(&fx.db).unwrap();
+    let entry = status_now["attention"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["ask_id"] == json!(asks[0].id))
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        entry["next"],
+        format!("applying the answer of ask {} (runtime)", asks[0].id)
+    );
+
+    let idle = StubReviewer::new(&[json!({"verdict": "achieved"})]);
+    supervise(&fx, &idle);
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    assert!(queue.read_ask(asks[0].id).unwrap().closed_at.is_some());
+    let detail = queue.show_goal(goal).unwrap();
+    assert!(!detail.closed);
+    assert_eq!(goal_events(&mut queue, goal, "goal_closed").len(), 1);
+    assert_eq!(goal_events(&mut queue, goal, "goal_reopened").len(), 1);
+    assert_eq!(
+        goal_events(&mut queue, goal, "goal_correction_decided")[0]["decision"],
+        "reopen"
+    );
+    assert_eq!(queue.show(follow_up).unwrap().task.goal_id(), Some(goal));
+    // The goal now waits for its follow-up, so it is not reviewed.
+    assert!(idle.prompts().is_empty());
+}

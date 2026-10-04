@@ -16,7 +16,7 @@ A failed job (non-zero exit, timeout, no verdict) leaves the goal open and is no
 "$DAGQ" goal review ID   # rearm the goal review; the person or the inbox, never a planner
 ```
 
-Follow it with `goal show ID` and `events --goal ID` (`goal_review_started`, `goal_review_finished`, `goal_review_failed`, `goal_review_rearmed`, `goal_decided`).
+Follow it with `goal show ID` and `events --goal ID` (`goal_review_started`, `goal_review_finished`, `goal_review_failed`, `goal_review_rearmed`, `goal_decided`, and after an achieved close `goal_correction_decided` / `goal_reopened` for a `correct_goal` ask).
 
 ## What `goal close` is still for
 

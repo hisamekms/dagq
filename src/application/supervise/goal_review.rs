@@ -508,7 +508,8 @@ impl Supervisor<'_> {
         }
     }
 
-    /// Apply the answered `approve_goal` asks (ADR-0047 decision 43).
+    /// Apply the answered `approve_goal` asks (ADR-0047 decision 43) and
+    /// `correct_goal` asks (ADR-t1504-2 decision 9).
     fn apply_goal_answers(&mut self) -> Result<bool> {
         let mut applied = false;
         for answered in self.queue.goal_answers()? {
@@ -516,6 +517,20 @@ impl Supervisor<'_> {
                 Ok(Some(decided)) => {
                     applied = true;
                     info!(ask_id = %answered.id, "goal {}: ask {} answered {} applied", decided.goal_id, answered.id, decided.answer)
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    warn!(ask_id = %answered.id, error = %format_args!("{error:#}"), "the answer of ask {} could not be applied: {error:#}", answered.id)
+                }
+            }
+        }
+        // A person's answer about a goal closed as achieved whose
+        // follow-up was judged required after it (ADR-t1504-2 decision 9).
+        for answered in self.queue.correction_answers()? {
+            match self.queue.decide_correction(answered.id) {
+                Ok(Some(decided)) => {
+                    applied = true;
+                    info!(ask_id = %answered.id, "goal {}: ask {} answered {} applied", decided["goal_id"], answered.id, decided["decision"])
                 }
                 Ok(None) => {}
                 Err(error) => {

@@ -4,8 +4,8 @@ type: design
 title: Security
 status: current
 created: 2026-09-28
-updated: 2026-10-04 # task 1505
-last_verified: 2026-10-04 # task 1505
+updated: 2026-10-04 # task 1509
+last_verified: 2026-10-04 # task 1509
 scope: runtime
 tags:
   - security
@@ -131,7 +131,7 @@ host実行ではIntegratorもsupervisorや`integrate`と同じプロセスとユ
 inboxは全てのaskにanswerでき、`dagq-recover`の手作業（`integrate`・`recover`・`review`・`ready --bypass-review`・`cancel`・`up` / `down` / `install`など）も人の言葉で代行できる（ADR-t728-3の決定1）。そのかわり記録で人自身と区別する（決定2）。
 
 - eventのactor: 人自身は`actor_role`が`user`、inboxの代行は`inbox`（`events --full`・`show --full`の`actor`）。Integratorが着地するときは`requested_by`が`user`か`inbox`
-- answer: askの`answer_authority`（`ask_answered`のpayloadの`authority`）が、人自身は`user`、inboxは`delegated`、runtimeが閉じたものは`runtime`。承認に当たるask（`approve_landing`・`decide`・`approve_plan`・`approve_goal`・`approve_update`・`update_failed`と、`blocked` / `stalled`の`propose` / `dismiss`）は`answer_approval`が`1`
+- answer: askの`answer_authority`（`ask_answered`のpayloadの`authority`）が、人自身は`user`、inboxは`delegated`、runtimeが閉じたものは`runtime`。承認に当たるask（`approve_landing`・`decide`・`approve_plan`・`approve_goal`・`correct_goal`・`approve_update`・`update_failed`と、`blocked` / `stalled`の`propose` / `dismiss`）は`answer_approval`が`1`
 - 区別はactorの型から決め、answerの文やpromptから推さない
 - inboxのterminalで人が打つ`!`のコマンドも`DAGQ_ROLE=inbox`を継ぐので`delegated`として記録される。人自身の操作として残したいときは、`DAGQ_ROLE`の無い別のterminalで打つ
 

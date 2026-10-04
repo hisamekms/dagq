@@ -175,6 +175,13 @@ pub enum DomainError {
     GoalNotDraft {
         goal_id: GoalId,
     },
+    /// Only a goal closed as achieved is opened again, and only by a
+    /// person's `reopen` answer to a `correct_goal` ask (ADR-t1504-2
+    /// decision 9).
+    GoalNotReopenable {
+        goal_id: GoalId,
+        verdict: Option<GoalVerdict>,
+    },
     /// A note kind that is not a lowercase slug.
     InvalidNoteKind {
         kind: String,
@@ -532,6 +539,11 @@ impl fmt::Display for DomainError {
             }
             Self::RunInconsistent { run_id, reason } => write!(f, "run {run_id} {reason}"),
             Self::GoalNotDraft { goal_id } => write!(f, "goal {goal_id} is not a draft"),
+            Self::GoalNotReopenable { goal_id, verdict } => write!(
+                f,
+                "goal {goal_id} is {}; only a goal closed as achieved is opened again",
+                verdict.map_or("open".to_owned(), |v| format!("closed as {}", v.as_str()))
+            ),
             Self::InvalidNoteKind { kind } => write!(
                 f,
                 "note kind {kind:?} must be a slug of lowercase letters, digits, '-' and '_'"

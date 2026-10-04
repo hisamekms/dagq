@@ -724,6 +724,23 @@ impl GoalReviewStore for SqliteQueue {
         }
     }
 
+    fn correction_answers(&self) -> Result<Vec<Ask>> {
+        follow_up_membership::correction_answers(&self.conn)
+    }
+
+    fn decide_correction(&mut self, ask: AskId) -> Result<Option<Value>> {
+        let stamp = self.generators.clock.timestamp();
+        let now = self.generators.clock.now();
+        follow_up_membership::decide_correction(&mut self.conn, ask, stamp, now)
+    }
+
+    fn applies_correction_answer(&self, ask: &Ask) -> Result<bool> {
+        match &ask.answer {
+            Some(text) => follow_up_membership::correction_answer_applies(&self.conn, ask, text),
+            None => Ok(false),
+        }
+    }
+
     fn goal_review_holds(&self) -> Result<Vec<GoalReviewHold>> {
         let goals: Vec<GoalId> = self
             .conn

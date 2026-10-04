@@ -1493,6 +1493,14 @@ pub fn attention(
                 event_kind::ASK_ANSWERED,
                 AttentionNext::ApplyingAnswer { ask_id: ask.id },
             )
+        } else if ask.kind == AskKind::CorrectGoal && queue.applies_correction_answer(&ask)? {
+            // The supervisor reopens the goal, records that its achieved
+            // verdict was wrong, or keeps it (ADR-t1504-2 decision 9).
+            (
+                "answered",
+                event_kind::ASK_ANSWERED,
+                AttentionNext::ApplyingAnswer { ask_id: ask.id },
+            )
         } else if ask.kind == AskKind::PlannerQuestion
             && queue.planner_answer_route(&ask)? != PlannerAnswerRoute::Person
         {
