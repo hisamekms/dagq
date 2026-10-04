@@ -153,4 +153,46 @@ mod tests {
         assert_eq!(applied.requested_by.as_deref(), Some("review-job:r1:2"));
         assert_eq!(latest(&queue, "backend_call_failed").requested_by, None);
     }
+
+    #[test]
+    fn a_restored_request_is_written_as_the_requester_of_later_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db"))
+            .unwrap()
+            .with_actor(ActorContext::instance(ActorRole::Supervisor, 42));
+        let requested_by = |kind: &str| {
+            queue
+                .latest_event_of(kind)
+                .unwrap()
+                .unwrap()
+                .actor
+                .unwrap()
+                .requested_by
+        };
+        let outer = ActorContext::review_job(&crate::domain::RunId::new("r1").unwrap(), 1);
+        let inner = ActorContext::review_job(&crate::domain::RunId::new("r2").unwrap(), 3);
+        assert_eq!(queue.request_as(Some(&outer)), None);
+        let previous = queue.request_as(Some(&inner));
+        assert_eq!(previous.as_deref(), Some("review-job:r1:1"));
+        queue
+            .record_queue_event(EventKind::ObserveStarted, json!({}))
+            .unwrap();
+        queue.restore_request(previous);
+        queue
+            .record_queue_event(EventKind::ObserveFinished, json!({}))
+            .unwrap();
+        queue.restore_request(None);
+        queue
+            .record_queue_event(EventKind::BackendCallFailed, json!({}))
+            .unwrap();
+        assert_eq!(
+            requested_by("observe_started").as_deref(),
+            Some("review-job:r2:3")
+        );
+        assert_eq!(
+            requested_by("observe_finished").as_deref(),
+            Some("review-job:r1:1")
+        );
+        assert_eq!(requested_by("backend_call_failed"), None);
+    }
 }

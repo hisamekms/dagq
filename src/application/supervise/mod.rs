@@ -3359,55 +3359,215 @@ fn requested_by_job<S: ?Sized, T>(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use serde_json::json;
 
     use super::*;
     use crate::{
-        domain::actor::{ActorContext, ActorRole},
-        infrastructure::sqlite::SqliteQueue,
+        application::{EndedRunWorkspace, EndedRunWorktree},
+        domain::actor::ActorContext,
     };
+
+    /// A run log that keeps the requester [`RunLog::request_as`] sets, the
+    /// calls in their order, and the kind of each queue event with the
+    /// requester it was written under. That the SQLite store writes the
+    /// requester as the event's `actor.requested_by` is the store's own test
+    /// (`a_restored_request_is_written_as_the_requester_of_later_events`).
+    #[derive(Default)]
+    struct Requests {
+        requested_by: RefCell<Option<String>>,
+        calls: RefCell<Vec<String>>,
+        recorded: RefCell<Vec<(String, Option<String>)>>,
+    }
+
+    #[allow(unused_variables)]
+    impl RunLog for Requests {
+        fn update_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
+            unreachable!("requested_by_job writes queue events only")
+        }
+        fn active_runs(&self) -> Result<Vec<TaskRun>> {
+            unreachable!("requested_by_job writes queue events only")
+        }
+        fn all_runs(&self) -> Result<Vec<TaskRun>> {
+            unreachable!("requested_by_job writes queue events only")
+        }
+        fn all_events(&self) -> Result<Vec<RunEvent>> {
+            unreachable!("requested_by_job writes queue events only")
+        }
+        fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>> {
+            unreachable!("requested_by_job writes queue events only")
+        }
+        fn run(&self, id: &RunId) -> Result<TaskRun> {
+            unreachable!("requested_by_job writes queue events only")
+        }
+        fn runs_with_status(&self, status: RunStatus) -> Result<Vec<TaskRun>> {
+            unreachable!("requested_by_job writes queue events only")
+        }
+        fn next_awaiting_integration(&self) -> Result<Option<TaskRun>> {
+            unreachable!("requested_by_job writes queue events only")
+        }
+        fn run_events(&self, id: &RunId) -> Result<Vec<RunEvent>> {
+            unreachable!("requested_by_job writes queue events only")
+        }
+        fn has_run_event(&self, id: &RunId, kind: &str) -> Result<bool> {
+            unreachable!("requested_by_job writes queue events only")
+        }
+        fn record_runtime_event(
+            &self,
+            id: &RunId,
+            kind: EventKind,
+            payload: serde_json::Value,
+        ) -> Result<()> {
+            unreachable!("requested_by_job writes queue events only")
+        }
+        fn ended_run_workspaces(&self) -> Result<Vec<EndedRunWorkspace>> {
+            unreachable!("requested_by_job writes queue events only")
+        }
+        fn ended_run_worktrees(&self) -> Result<Vec<EndedRunWorktree>> {
+            unreachable!("requested_by_job writes queue events only")
+        }
+        fn ended_run_worktree(&self, _: &RunId) -> Result<Option<EndedRunWorktree>> {
+            unreachable!("requested_by_job writes queue events only")
+        }
+        fn last_observe(&self, mode: &str) -> Result<Option<i64>> {
+            unreachable!("requested_by_job writes queue events only")
+        }
+        fn latest_event_id(&self) -> Result<EventId> {
+            unreachable!("requested_by_job writes queue events only")
+        }
+        fn latest_runs_in_progress(&self) -> Result<Vec<TaskRun>> {
+            unreachable!("requested_by_job writes queue events only")
+        }
+        fn runs_with_pending_push(&self) -> Result<Vec<TaskRun>> {
+            unreachable!("requested_by_job writes queue events only")
+        }
+        fn run_in_workspace(&self, workspace_id: &str) -> Result<Option<RunId>> {
+            unreachable!("requested_by_job writes queue events only")
+        }
+        fn record_backend_failure(
+            &self,
+            run: Option<&RunId>,
+            payload: serde_json::Value,
+        ) -> Result<()> {
+            unreachable!("requested_by_job writes queue events only")
+        }
+        fn record_queue_event(
+            &self,
+            kind: EventKind,
+            payload: serde_json::Value,
+        ) -> Result<EventId> {
+            let mut recorded = self.recorded.borrow_mut();
+            recorded.push((kind.as_str().to_owned(), self.requested_by.borrow().clone()));
+            Ok(EventId::new(recorded.len() as i64))
+        }
+        fn latest_event_of(&self, kind: &str) -> Result<Option<RunEvent>> {
+            unreachable!("requested_by_job writes queue events only")
+        }
+        fn latest_events_of(&self, kind: &str, limit: usize) -> Result<Vec<RunEvent>> {
+            unreachable!("requested_by_job writes queue events only")
+        }
+        fn claim_inbox_nudge(&self, payload: serde_json::Value) -> Result<bool> {
+            unreachable!("requested_by_job writes queue events only")
+        }
+        fn record_inbox_watcher_change(
+            &self,
+            kind: EventKind,
+            payload: serde_json::Value,
+        ) -> Result<bool> {
+            unreachable!("requested_by_job writes queue events only")
+        }
+        fn latest_queue_event(&self, kinds: &[&str]) -> Result<Option<RunEvent>> {
+            unreachable!("requested_by_job writes queue events only")
+        }
+        fn events_of_between(
+            &self,
+            kinds: &[&str],
+            after: EventId,
+            upto: EventId,
+            limit: usize,
+        ) -> Result<Vec<RunEvent>> {
+            unreachable!("requested_by_job writes queue events only")
+        }
+        fn request_as(&self, requester: Option<&ActorContext>) -> Option<String> {
+            self.calls.borrow_mut().push(format!(
+                "request_as {:?}",
+                requester.map(ActorContext::actor_id)
+            ));
+            self.requested_by
+                .replace(requester.map(|actor| actor.actor_id().to_owned()))
+        }
+        fn restore_request(&self, previous: Option<String>) {
+            self.calls
+                .borrow_mut()
+                .push(format!("restore_request {previous:?}"));
+            self.requested_by.replace(previous);
+        }
+    }
 
     #[test]
     fn a_nested_job_request_gives_the_outer_one_back() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut queue = SqliteQueue::init(dir.path().join("q.db"))
-            .unwrap()
-            .with_actor(ActorContext::instance(ActorRole::Supervisor, 42));
+        let mut log = Requests::default();
         let outer = ActorContext::review_job(&RunId::new("r1").unwrap(), 1);
         let inner = ActorContext::review_job(&RunId::new("r2").unwrap(), 3);
-        fn log(queue: &SqliteQueue) -> &dyn RunLog {
-            queue
+        fn run_log(log: &Requests) -> &dyn RunLog {
+            log
         }
-        let result: Result<()> = requested_by_job(&mut queue, log, &outer, |queue| {
-            let inner_result: Result<()> = requested_by_job(queue, log, &inner, |queue| {
-                queue.record_queue_event(EventKind::ObserveStarted, json!({}))?;
+        let result: Result<()> = requested_by_job(&mut log, run_log, &outer, |log| {
+            let inner_result: Result<()> = requested_by_job(log, run_log, &inner, |log| {
+                log.record_queue_event(EventKind::ObserveStarted, json!({}))?;
                 anyhow::bail!("the inner apply failed")
             });
             assert!(inner_result.is_err());
-            queue.record_queue_event(EventKind::ObserveFinished, json!({}))?;
+            log.record_queue_event(EventKind::ObserveFinished, json!({}))?;
             Ok(())
         });
         result.unwrap();
-        queue
-            .record_queue_event(EventKind::BackendCallFailed, json!({}))
+        log.record_queue_event(EventKind::BackendCallFailed, json!({}))
             .unwrap();
-        let requested_by = |kind: &str| {
-            queue
-                .latest_event_of(kind)
-                .unwrap()
-                .unwrap()
-                .actor
-                .unwrap()
-                .requested_by
-        };
         assert_eq!(
-            requested_by("observe_started").as_deref(),
-            Some("review-job:r2:3")
+            log.calls.into_inner(),
+            [
+                "request_as Some(\"review-job:r1:1\")",
+                "request_as Some(\"review-job:r2:3\")",
+                "restore_request Some(\"review-job:r1:1\")",
+                "restore_request None",
+            ]
         );
         assert_eq!(
-            requested_by("observe_finished").as_deref(),
-            Some("review-job:r1:1")
+            log.recorded.into_inner(),
+            [
+                (
+                    "observe_started".to_owned(),
+                    Some("review-job:r2:3".to_owned())
+                ),
+                (
+                    "observe_finished".to_owned(),
+                    Some("review-job:r1:1".to_owned())
+                ),
+                ("backend_call_failed".to_owned(), None),
+            ]
         );
-        assert_eq!(requested_by("backend_call_failed"), None);
+    }
+
+    #[test]
+    fn a_failed_apply_still_gives_the_previous_requester_back() {
+        let mut log = Requests::default();
+        let job = ActorContext::review_job(&RunId::new("r1").unwrap(), 2);
+        fn run_log(log: &Requests) -> &dyn RunLog {
+            log
+        }
+        let result: Result<()> = requested_by_job(&mut log, run_log, &job, |_| {
+            anyhow::bail!("the apply failed")
+        });
+        assert_eq!(result.unwrap_err().to_string(), "the apply failed");
+        assert_eq!(*log.requested_by.borrow(), None);
+        assert_eq!(
+            log.calls.into_inner(),
+            [
+                "request_as Some(\"review-job:r1:2\")",
+                "restore_request None"
+            ]
+        );
     }
 }

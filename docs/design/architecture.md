@@ -4,8 +4,8 @@ type: design
 title: レイヤーとコンテキストの境界（contextごとの所有・判断・操作・公開するport・依存の向き・境界をまたぐtransaction・検査できる規則・今の違反）
 status: current
 created: 2026-10-04
-updated: 2026-10-04 # task 1548: mark/retract are application::marks, the L6 and L7 rows are gone
-last_verified: 2026-10-04 # task 1548
+updated: 2026-10-04 # task 1631: the supervise/mod.rs test uses a RunLog fake, its L3 row is gone
+last_verified: 2026-10-04 # task 1631
 scope: system
 related:
   - adr-t1545-1
@@ -259,12 +259,11 @@ contextを1つに決められず、分ける先のtaskを持つもの。
 
 ## 今の違反と行き先
 
-2026-10-04のmain（base `e465d467`）で`grep`して見つけたもの（task 1545）に、`scripts/check-layer-deps.sh`が見つけた行（`src/application/supervise/mod.rs`のL3。task 1546）を足した。scriptが検査する規則（L1・L2・L3・L4・L6）の行は、どれも行き先のtaskを持ち、許可の一覧`.config/layer-deps-allow.txt`の項目と一致する（一覧の書式は「[検査の範囲](#検査の範囲)」）。行き先が「未登録」のまま残っているのはreviewで見るX3・C1の行だけで、task 1545のreceiptのfollow_upでplannerに渡した。行き先のtaskは着地したら同じ変更でこの表の行と一覧の項目を消す。
+2026-10-04のmain（base `e465d467`）で`grep`して見つけたもの（task 1545）に、`scripts/check-layer-deps.sh`が見つけた行（`src/application/supervise/mod.rs`のL3。task 1546）を足した（その行はtask 1631が直して消した）。scriptが検査する規則（L1・L2・L3・L4・L6）の行は、どれも行き先のtaskを持ち、許可の一覧`.config/layer-deps-allow.txt`の項目と一致する（一覧の書式は「[検査の範囲](#検査の範囲)」）。行き先が「未登録」のまま残っているのはreviewで見るX3・C1の行だけで、task 1545のreceiptのfollow_upでplannerに渡した。行き先のtaskは着地したら同じ変更でこの表の行と一覧の項目を消す。
 
 | 規則 | 場所 | 違反 | 行き先 |
 | --- | --- | --- | --- |
 | L3 | `src/application/prompt.rs`（`crate::throughput_review::review_prompt`） | applicationからレイヤーの外のthroughput_reviewを参照する | task 1615 |
-| L3 | `src/application/supervise/mod.rs`の`#[cfg(test)]`（`use crate::{..., infrastructure::sqlite::SqliteQueue}`） | applicationのtestがinfrastructureのstoreを使う（組の`use`のため2026-10-04の`grep`では見落とし、task 1546のscriptが見つけた） | task 1631 |
 | L3 | `src/application/planner_handoff.rs`の`#[cfg(test)]`（`crate::infrastructure::run_files::LocalRunFiles`） | applicationのtestがinfrastructureのadapterを使う | task 1619（`application::memory_files`に替える） |
 | L1 | `src/domain/stats.rs`・`src/domain/stats/thresholds.rs`・`src/domain/stats/conflicts.rs`の`#[cfg(test)]`（`crate::application::timestamp`） | domainのtestがapplicationの関数を使う | task 1616 |
 | L2 | `src/domain/landing_branch.rs`（`anyhow::Result`・`anyhow::ensure!`・`anyhow::bail!`） | domainが`anyhow`を返す（ADR-0013決定6） | task 1617 |
