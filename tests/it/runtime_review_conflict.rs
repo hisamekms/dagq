@@ -209,6 +209,7 @@ fn an_adopted_run_with_a_withdrawn_revise_asks_a_person_without_sending_it() {
         },
         String::new,
         false,
+        &[],
     );
     let texts = session_texts(&detail.runs[0]);
     assert!(texts.is_empty(), "{texts:?}");
@@ -278,6 +279,7 @@ fn an_adopted_headless_run_with_a_pending_conflict_request_waits_without_sending
         },
         || format!("main is now {moved} (your base commit was {seed})."),
         true,
+        &[],
     );
     let run = detail.runs[0].clone();
     assert_landed(&repo, &run, "test task", &moved);
@@ -338,6 +340,7 @@ fn an_adopted_headless_run_with_a_pending_revise_waits_without_sending_it_again(
         },
         || "dagq: the supervisor's review asks for changes (revise 1 of 2).".to_owned(),
         true,
+        &[],
     );
     let run = detail.runs[0].clone();
     assert_landed(&repo, &run, "test task", &base);
@@ -348,6 +351,93 @@ fn an_adopted_headless_run_with_a_pending_revise_waits_without_sending_it_again(
     assert_not_requested_again(&detail, &run, "revise request");
     assert_eq!(payloads(&detail, "revise_requested").len(), 1);
     assert_eq!(payloads(&detail, "revise_finished").len(), 1);
+    assert_eq!(reviewer.prompts().len(), 1);
+    assert_exit_sent(&backend, &run, 1);
+}
+
+/// A headless run whose supervisor stopped after it recorded its second
+/// revise request (`revise_requested` of attempt 2) and before it wrote it
+/// to the session's `turns/` has the request written once by the
+/// supervisor that adopts it (task 1683): the first attempt's request,
+/// taken with the same `what`, is no delivery of the second. The session
+/// runs it as its next turn, and the rewritten receipt is reviewed again
+/// and landed.
+#[test]
+fn an_adopted_revise_recorded_but_not_written_is_written_once() {
+    const FIRST: &str = "dagq: the supervisor's review asks for changes (revise 1 of 2).";
+    const SECOND: &str = "dagq: the supervisor's review asks for changes (revise 2 of 2).";
+    let (_dir, repo, db) = fixture();
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let backend = TestWorkspace::new(&db, false, &crate::runtime_review::revising_agent(1));
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "fixed")]);
+    let detail = adopt_pending_request(
+        &repo,
+        &db,
+        &backend,
+        &reviewer,
+        |_, sent_at| {
+            let review = |attempt: u64| {
+                [
+                    ("review_started", json!({"attempt": attempt})),
+                    (
+                        "review_finished",
+                        json!({"verdict": "revise", "reasons": ["add a line"], "summary": "one gap", "attempt": attempt}),
+                    ),
+                    (
+                        "revise_requested",
+                        json!({"attempt": attempt, "reasons": ["add a line"], "sent_at": sent_at}),
+                    ),
+                ]
+            };
+            let mut events = vec![(
+                "validation_finished",
+                json!({"status": "awaiting_integration"}),
+            )];
+            events.extend(review(1));
+            events.push((
+                "turn_requested",
+                json!({"seq": 1, "what": "revise request", "workspace_id": "w"}),
+            ));
+            events.push(("revise_finished", json!({"attempt": 1})));
+            events.extend(review(2));
+            events
+        },
+        || SECOND.to_owned(),
+        false,
+        &[(FIRST, "revise request")],
+    );
+    let run = detail.runs[0].clone();
+    assert_landed(&repo, &run, "test task", &base);
+    assert_eq!(
+        fs::read_to_string(repo.join("change.txt")).unwrap(),
+        format!("change by {}\nfix 1\n", run.id())
+    );
+    // The adopter wrote the second attempt's request once, after the
+    // first, and the session ran it as its second turn.
+    let requested: Vec<&Value> = payloads(&detail, "turn_requested")
+        .into_iter()
+        .filter(|p| p["what"] == "revise request")
+        .collect();
+    assert_eq!(
+        requested
+            .iter()
+            .map(|p| p["seq"].clone())
+            .collect::<Vec<_>>(),
+        [json!(1), json!(2)]
+    );
+    let run_dir = Path::new(run.run_dir().unwrap());
+    let written: dagq::domain::turn::TurnRequest = serde_json::from_str(
+        &fs::read_to_string(dagq::domain::turn::taken_path(run_dir, 2)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(written.prompt, SECOND);
+    assert!(!dagq::domain::turn::request_path(run_dir, 3).exists());
+    assert!(
+        !dagq::domain::turn::taken_path(run_dir, 3).exists(),
+        "written twice"
+    );
+    assert_eq!(stub_calls(&run).len(), 2);
+    assert_eq!(payloads(&detail, "revise_requested").len(), 2);
     assert_eq!(reviewer.prompts().len(), 1);
     assert_exit_sent(&backend, &run, 1);
 }
@@ -448,7 +538,11 @@ fn a_conflict_request_that_cannot_be_written_is_withdrawn_and_the_run_lands() {
 /// directory (`revise-1.txt` or `conflict-1.txt`, after the request's
 /// event), and with `typed` the dead supervisor also wrote it as the
 /// headless session's next request, which the session takes and runs as
-/// its turn. Returns the adopted run's detail once the supervisor returns.
+/// its turn. Each of `taken` (a prompt and what it is) is left in `turns/`
+/// as a request an earlier attempt wrote and the session took, before the
+/// events are recorded. Returns the adopted run's detail once the
+/// supervisor returns.
+#[allow(clippy::too_many_arguments)]
 fn adopt_pending_request(
     repo: &Path,
     db: &Path,
@@ -457,6 +551,7 @@ fn adopt_pending_request(
     events: impl FnOnce(&str, i64) -> Vec<(&'static str, Value)>,
     message: impl FnOnce() -> String,
     typed: bool,
+    taken: &[(&str, &str)],
 ) -> dagq::domain::TaskDetail {
     let run = start_run_under_dead_supervisor(repo, db, backend, "dead-supervisor");
     let idle = run.idle_marker_path().unwrap();
@@ -476,25 +571,53 @@ fn adopt_pending_request(
     // then predates it.
     await_second_after(modified_second(&idle));
     let sent_at = unix_second_now();
+    let run_dir = Path::new(run.run_dir().unwrap());
+    // Written straight under its taken name: a pending request would be
+    // taken by the live session, which polls `turns/`.
+    for (prompt, what) in taken {
+        use dagq::domain::turn::{TurnRequest, next_seq, taken_path, turns_dir};
+        let turns = turns_dir(run_dir);
+        fs::create_dir_all(&turns).unwrap();
+        let names: Vec<String> = fs::read_dir(&turns)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        let seq = next_seq(names.iter().map(String::as_str));
+        let request = TurnRequest {
+            seq,
+            what: (*what).to_owned(),
+            prompt: (*prompt).to_owned(),
+        };
+        let path = taken_path(run_dir, seq);
+        let written = run_dir.join("taken-request.tmp");
+        fs::write(&written, serde_json::to_string(&request).unwrap()).unwrap();
+        fs::rename(&written, &path).unwrap();
+    }
     let mut queue = SqliteQueue::open(db).unwrap();
     let events = events(&head, sent_at);
-    let file = events.iter().rev().find_map(|(kind, _)| match *kind {
-        "revise_requested" => Some("revise-1.txt"),
-        "conflict_precheck" => Some("conflict-1.txt"),
-        _ => None,
+    // The request's file is the one of the last request's attempt.
+    let file = events.iter().rev().find_map(|(kind, payload)| {
+        let attempt = payload["attempt"].as_u64().unwrap_or(1);
+        match *kind {
+            "revise_requested" => Some(format!("revise-{attempt}.txt")),
+            "conflict_precheck" => Some(format!("conflict-{attempt}.txt")),
+            _ => None,
+        }
     });
     for (kind, payload) in events {
         queue
             .record_runtime_event(run.id(), EventKind::from_name(kind).unwrap(), payload)
             .unwrap();
     }
-    let run_dir = Path::new(run.run_dir().unwrap());
     let message = message();
-    if let Some(file) = file {
+    if let Some(file) = &file {
         fs::write(run_dir.join(file), &message).unwrap();
     }
     if typed {
-        let what = if file == Some("conflict-1.txt") {
+        let what = if file
+            .as_deref()
+            .is_some_and(|file| file.starts_with("conflict-"))
+        {
             "conflict request"
         } else {
             "revise request"

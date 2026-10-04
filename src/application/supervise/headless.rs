@@ -14,8 +14,8 @@ use crate::domain::EventKind;
 use crate::domain::PlannerRoute;
 use crate::domain::recovery::PERMISSION_DENIED;
 use crate::domain::turn::{
-    self, LIMITS_FILE, TurnFailure, TurnMark, TurnOutcome, TurnRequest, exit_path, next_seq,
-    request_path, turns_dir,
+    self, LIMITS_FILE, ListedRequest, RequestState, TurnFailure, TurnMark, TurnOutcome,
+    TurnRequest, exit_path, next_seq, request_path, turns_dir,
 };
 
 /// Write `input` for the headless session of `run` (in `workspace`, for
@@ -207,6 +207,43 @@ pub(super) fn requested(sv: &Supervisor<'_>, run: &TaskRun, what: &str) -> Resul
         }
     }
     Ok(None)
+}
+
+/// Every request in the `turns/` of the run directory `run_dir`, waiting,
+/// taken or dropped (none when it has no `turns/`). A request taken between
+/// the listing and the read is read under its taken name; one that cannot
+/// be parsed is skipped.
+pub(super) fn listed_requests(files: &dyn RunFiles, run_dir: &Path) -> Result<Vec<ListedRequest>> {
+    let paths = match files.read_dir(&turns_dir(run_dir)) {
+        Ok(paths) => paths,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).context("read the requests of the headless session"),
+    };
+    let mut listed = Vec::new();
+    for path in paths {
+        let Some((seq, mut state)) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(turn::request_state)
+        else {
+            continue;
+        };
+        let content = match files.read(&path) {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && state == RequestState::Pending =>
+            {
+                state = RequestState::Taken;
+                files.read(&turn::taken_path(run_dir, seq))
+            }
+            read => read,
+        }
+        .context("read a request of the headless session")?;
+        if let Ok(request) = serde_json::from_slice::<TurnRequest>(&content) {
+            listed.push(ListedRequest { state, request });
+        }
+    }
+    Ok(listed)
 }
 
 impl Supervisor<'_> {

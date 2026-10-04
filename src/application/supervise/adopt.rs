@@ -6,6 +6,7 @@ use super::*;
 use crate::domain::EventKind;
 use crate::domain::RunEvent;
 use crate::domain::concern::{ConcernDecision, EscalatedBecause};
+use crate::domain::turn;
 
 impl Supervisor<'_> {
     /// Take over `running` / `validating` runs whose lease went stale under
@@ -268,8 +269,9 @@ impl Supervisor<'_> {
     }
     /// Rebuild an adopted `awaiting_integration` run under review from its
     /// events: a `revise_requested` with nothing after it waits for the live
-    /// session again (it is recorded before it is typed, so it is typed a
-    /// second time only when its request was not queued), with the recovery jobs the
+    /// session again (it is recorded before it is written, so it is written
+    /// once more only when its attempt's request is not in `turns/`,
+    /// [`Supervisor::adopted_start`]), with the recovery jobs the
     /// previous supervisor recorded during it ([`SessionWatch::adopt`]), and
     /// a `revise_unsent` asks a person; a verdict already recorded (`review_finished` with
     /// nothing after it), or an approved run not reviewed since its
@@ -307,14 +309,16 @@ impl Supervisor<'_> {
                 {
                     let attempt = anchor.payload["attempt"].as_u64().unwrap_or(1) as usize;
                     let sent_at = adopted_sent_at(&anchor.payload);
-                    let start = self.adopted_start(
-                        run,
-                        &events,
-                        anchor.id,
-                        "revise request",
-                        &format!("revise-{attempt}.txt"),
-                        sent_at,
-                    );
+                    let start = self
+                        .adopted_start(
+                            run,
+                            &events,
+                            anchor.id,
+                            &live.workspace,
+                            "revise request",
+                            &format!("revise-{attempt}.txt"),
+                        )
+                        .then_some(sent_at);
                     let mut watch = ReviseWatch::new(
                         run,
                         live,
@@ -342,14 +346,16 @@ impl Supervisor<'_> {
                 {
                     let attempt = anchor.payload["attempt"].as_u64().unwrap_or(1) as usize;
                     let sent_at = adopted_sent_at(&anchor.payload);
-                    let start = self.adopted_start(
-                        run,
-                        &events,
-                        anchor.id,
-                        "conflict request",
-                        &format!("conflict-{attempt}.txt"),
-                        sent_at,
-                    );
+                    let start = self
+                        .adopted_start(
+                            run,
+                            &events,
+                            anchor.id,
+                            &live.workspace,
+                            "conflict request",
+                            &format!("conflict-{attempt}.txt"),
+                        )
+                        .then_some(sent_at);
                     let mut watch = ReviseWatch::new(
                         run,
                         live,
@@ -620,32 +626,60 @@ fn adopted_sent_at(payload: &Value) -> SystemTime {
 }
 
 impl Supervisor<'_> {
-    /// The start check of an adopted request (task 546): the request was
-    /// recorded before it was typed, so the supervisor adopted from may have
-    /// stopped in between. Its text is the one written to `file` in the run
-    /// directory before the record; without it the request is only waited
-    /// for, up to the resume timeout.
-    /// What the checks of earlier supervisors recorded after the request
-    /// (event `anchor`) carries over: one that sent it again leaves no
-    /// second resend, and one that recorded `submit_not_started` leaves
-    /// nothing to check (its recovery job has it).
+    /// The delivery of an adopted request (`what`, event `anchor`): the
+    /// request was recorded before it was written to the session's
+    /// `turns/`, so the supervisor adopted from may have stopped in
+    /// between. Its text is the one written to `file` in the run directory
+    /// before the record. The attempt's request is looked for among the
+    /// requests numbered after the last `turn_requested` before the record
+    /// ([`turn::adopted_delivery`]); when it is neither waiting nor taken
+    /// it is written once to the session in `workspace` and recorded as
+    /// `turn_requested`. Without the text the request is only waited for,
+    /// up to the resume timeout. Whether its text was read.
     fn adopted_start(
-        &self,
+        &mut self,
         run: &TaskRun,
-        _events: &[crate::domain::RunEvent],
-        _anchor: EventId,
+        events: &[crate::domain::RunEvent],
+        anchor: EventId,
+        workspace: &str,
         what: &str,
         file: &str,
-        sent_at: SystemTime,
-    ) -> Option<SystemTime> {
-        let path = Path::new(run.run_dir()?).join(file);
-        match self.files.read_to_string(&path) {
-            Ok(_text) => Some(sent_at),
+    ) -> bool {
+        let Some(run_dir) = run.run_dir().map(Path::new) else {
+            return false;
+        };
+        let path = run_dir.join(file);
+        let text = match self.files.read_to_string(&path) {
+            Ok(text) => text,
             Err(error) => {
-                warn!(run_id = %run.id(), error = %error, "the adopted {what} of {} cannot be checked for a start: {} could not be read: {error}", run.id(), path.display());
-                None
+                warn!(run_id = %run.id(), error = %error, "the adopted {what} of {} cannot be delivered: {} could not be read: {error}", run.id(), path.display());
+                return false;
+            }
+        };
+        let after = events
+            .iter()
+            .filter(|e| e.id < anchor && e.kind == event_kind::TURN_REQUESTED)
+            .filter_map(|e| e.payload["seq"].as_u64())
+            .next_back();
+        let requests = match listed_requests(&*self.files, run_dir) {
+            Ok(requests) => requests,
+            Err(error) => {
+                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "the adopted {what} of {} cannot be delivered: {error:#}", run.id());
+                return true;
+            }
+        };
+        match turn::adopted_delivery(&requests, what, &text, after) {
+            turn::AdoptedDelivery::Delivered(seq) => {
+                info!(run_id = %run.id(), "the adopted {what} of {} was written as request {seq}; it is not written again", run.id());
+            }
+            turn::AdoptedDelivery::Write => {
+                info!(run_id = %run.id(), "the adopted {what} of {} was recorded but not written; writing it once", run.id());
+                if let Err(error) = request_turn(self, run, workspace, Input::Text(&text), what) {
+                    warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "the adopted {what} of {} could not be written: {error:#}", run.id());
+                }
             }
         }
+        true
     }
 }
 

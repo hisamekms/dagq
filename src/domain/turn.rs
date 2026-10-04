@@ -420,6 +420,70 @@ pub fn pending<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<u64> {
     pending
 }
 
+/// Where a request file stands: waiting to be taken, taken by the wrapper,
+/// or dropped untaken when a later session started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestState {
+    Pending,
+    Taken,
+    Dropped,
+}
+
+/// The sequence number and state of a request file named `name`; `None`
+/// for any other file.
+pub fn request_state(name: &str) -> Option<(u64, RequestState)> {
+    let rest = name.strip_prefix("request-")?;
+    let (seq, state) = if let Some(seq) = rest.strip_suffix(".taken.json") {
+        (seq, RequestState::Taken)
+    } else if let Some(seq) = rest.strip_suffix(".dropped") {
+        (seq, RequestState::Dropped)
+    } else {
+        (rest.strip_suffix(".json")?, RequestState::Pending)
+    };
+    seq.parse().ok().map(|seq| (seq, state))
+}
+
+/// A request found in a session's `turns/`, with its state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedRequest {
+    pub state: RequestState,
+    pub request: TurnRequest,
+}
+
+/// Whether an adopted revise or conflict request (`what`, whose text is
+/// `text`) reached the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdoptedDelivery {
+    /// It waits or was taken as request `seq`: it is not written again.
+    Delivered(u64),
+    /// It was recorded and the supervisor stopped before writing it: it is
+    /// written once.
+    Write,
+}
+
+/// Whether the request of an adopted attempt is among `requests`: one of
+/// the same `what` and the attempt's `text`, numbered after `after` (the
+/// last `turn_requested` recorded before the attempt's record, which an
+/// earlier attempt's request cannot be numbered after), waiting or taken.
+/// `what` is the same for every attempt, so it alone names none; a dropped
+/// request never ran and does not count.
+pub fn adopted_delivery(
+    requests: &[ListedRequest],
+    what: &str,
+    text: &str,
+    after: Option<u64>,
+) -> AdoptedDelivery {
+    requests
+        .iter()
+        .filter(|listed| listed.state != RequestState::Dropped)
+        .map(|listed| &listed.request)
+        .filter(|request| after.is_none_or(|after| request.seq > after))
+        .find(|request| request.what == what && request.prompt == text)
+        .map_or(AdoptedDelivery::Write, |request| {
+            AdoptedDelivery::Delivered(request.seq)
+        })
+}
+
 /// What one line of a turn's output said, as the runtime reads it whatever
 /// the provider.
 #[derive(Debug, Clone, PartialEq)]
@@ -875,6 +939,118 @@ mod tests {
             Path::new("/r/turns/turn-000002.jsonl")
         );
         assert_eq!(exit_path(dir), Path::new("/r/turns/exit"));
+    }
+
+    #[test]
+    fn request_files_name_their_state() {
+        assert_eq!(
+            request_state("request-000002.json"),
+            Some((2, RequestState::Pending))
+        );
+        assert_eq!(
+            request_state("request-000001.taken.json"),
+            Some((1, RequestState::Taken))
+        );
+        assert_eq!(
+            request_state("request-000004.dropped"),
+            Some((4, RequestState::Dropped))
+        );
+        assert_eq!(request_state("request-x.json"), None);
+        assert_eq!(request_state("turn-000001.jsonl"), None);
+        assert_eq!(request_state("exit"), None);
+    }
+
+    fn listed(seq: u64, state: RequestState, what: &str, prompt: &str) -> ListedRequest {
+        ListedRequest {
+            state,
+            request: TurnRequest {
+                seq,
+                what: what.to_owned(),
+                prompt: prompt.to_owned(),
+            },
+        }
+    }
+
+    #[test]
+    fn an_adopted_request_is_matched_by_its_attempts_text_and_numbers() {
+        const WHAT: &str = "revise request";
+        let first = "revise 1: fix the test";
+        let second = "revise 2: fix the docs";
+        // Nothing written: write it.
+        assert_eq!(
+            adopted_delivery(&[], WHAT, second, Some(1)),
+            AdoptedDelivery::Write
+        );
+        // An earlier attempt's request of the same what, in any state,
+        // does not hold back the attempt's own.
+        for state in [
+            RequestState::Pending,
+            RequestState::Taken,
+            RequestState::Dropped,
+        ] {
+            assert_eq!(
+                adopted_delivery(&[listed(1, state, WHAT, first)], WHAT, second, Some(1)),
+                AdoptedDelivery::Write
+            );
+        }
+        // Nor does one with the attempt's text numbered no later than the
+        // last request recorded before the attempt (the same text sent by
+        // an earlier attempt).
+        assert_eq!(
+            adopted_delivery(
+                &[listed(1, RequestState::Taken, WHAT, second)],
+                WHAT,
+                second,
+                Some(1)
+            ),
+            AdoptedDelivery::Write
+        );
+        // The attempt's request waiting or taken is not written twice.
+        for state in [RequestState::Pending, RequestState::Taken] {
+            assert_eq!(
+                adopted_delivery(
+                    &[
+                        listed(1, RequestState::Taken, WHAT, first),
+                        listed(2, state, WHAT, second)
+                    ],
+                    WHAT,
+                    second,
+                    Some(1)
+                ),
+                AdoptedDelivery::Delivered(2)
+            );
+        }
+        // A dropped one never ran: it is written.
+        assert_eq!(
+            adopted_delivery(
+                &[listed(2, RequestState::Dropped, WHAT, second)],
+                WHAT,
+                second,
+                Some(1)
+            ),
+            AdoptedDelivery::Write
+        );
+        // Another what with the same text is not the attempt's request.
+        assert_eq!(
+            adopted_delivery(
+                &[listed(2, RequestState::Pending, "nudge", second)],
+                WHAT,
+                second,
+                Some(1)
+            ),
+            AdoptedDelivery::Write
+        );
+        // Without a request recorded before the attempt, no number is
+        // ruled out.
+        assert_eq!(
+            adopted_delivery(
+                &[listed(1, RequestState::Taken, WHAT, first)],
+                WHAT,
+                first,
+                None
+            ),
+            AdoptedDelivery::Delivered(1)
+        );
     }
 
     fn turn_event(kind: &str, payload: Value) -> RunEvent {

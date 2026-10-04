@@ -854,9 +854,10 @@ impl Supervisor<'_> {
             ),
         };
         let sent_at = self.files.now();
-        // Recorded before it is typed: a supervisor that stops in
-        // between leaves an adopter that waits for the session
-        // rather than sending the request a second time.
+        // Recorded before it is written to `turns/`: a supervisor that
+        // stops in between leaves an adopter that writes it once when
+        // the attempt's request is not there (`adopted_start`), and
+        // never a second time when it is.
         let mut requested = json!({"attempt": attempt, "reasons": verdict.reasons, "sent_at": super::file_time::request_sent_at(sent_at)});
         if let Some(requested) = requested.as_object_mut() {
             let provider = run.actual_provider();
@@ -1049,7 +1050,8 @@ impl Supervisor<'_> {
                     message.as_bytes(),
                 )?;
                 let sent_at = self.files.now();
-                // Recorded before it is typed, like a revise request; a
+                // Recorded before it is written, like a revise request (an
+                // adopter writes it once when it is not in `turns/`); a
                 // request that could not be sent is withdrawn below.
                 let mut sending = payload.clone();
                 sending["requested"] = json!(true);
