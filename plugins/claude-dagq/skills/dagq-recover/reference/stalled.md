@@ -1,6 +1,6 @@
 # A `stalled` ask: `wait`, `intervene`, `stop`, and stepping in
 
-Read this to carry out, on the person's word, the answer to a `stalled` ask (the `dagq-recover` skill, section 7). The rules are ADR-0043 decision 1 and ADR-0047 decision 40; the runtime's side is in `docs/design/supervisor-lifecycle/idle-without-receipt.md`.
+Read this to carry out, on the person's word, the answer to a `stalled` ask (the `dagq-recover` skill, section 7). The rules are ADR-0043 decision 1 and ADR-0047 decision 40.
 
 ## Where the ask comes from
 

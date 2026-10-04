@@ -241,14 +241,41 @@ fn dated(text: &str) -> Option<&str> {
     })
 }
 
+/// Where a Markdown link's relative target, read from `dir` (the file's
+/// directory under the plugin root, as its components), climbs out of the
+/// plugin: an installed plugin has nothing above its own directory.
+fn link_out_of_the_plugin<'a>(dir: &[&str], text: &'a str) -> Option<&'a str> {
+    text.match_indices("](").find_map(|(start, _)| {
+        let rest = &text[start + 2..];
+        let target = &rest[..rest.find(')').unwrap_or(rest.len())];
+        if target.contains("://") || target.starts_with('#') || target.starts_with('/') {
+            return None;
+        }
+        let mut depth = dir.len();
+        for part in target.split(['#', '?']).next().unwrap_or("").split('/') {
+            match part {
+                ".." if depth == 0 => return Some(target),
+                ".." => depth -= 1,
+                "" | "." => {}
+                _ => depth += 1,
+            }
+        }
+        None
+    })
+}
+
 /// ADR-t1453-2 decision 1: the plugin is dagq's generic procedure for any
 /// repository and refers to that repository's rules, so no skill or
 /// reference carries this repository's rules, values or history. The marks:
 /// this repository's check and test commands (the coverage gate and its
 /// threshold, the test binaries and helpers, which paths take the runtime
 /// checks), its `[areas]` name, its host tools, the old ADR file form,
-/// wording that speaks for "this repository", a task's, goal's or ask's
-/// number told as an anecdote, and a date. Where each rule lives now is in
+/// wording that speaks for "this repository", this repository's term "fixed
+/// binary" (looked for in every file of the plugin), a path into its
+/// `docs/design/` or `docs/plans/`, a pointer to "the design docs" and a
+/// relative link out of the plugin's directory (none of them reachable from
+/// an installed plugin), a task's, goal's or ask's number told as an
+/// anecdote, and a date. Where each rule lives now is in
 /// `docs/plans/agents-slim-inventory.md` section 4.
 #[test]
 fn no_skill_carries_this_repository_s_rules() {
@@ -264,7 +291,20 @@ fn no_skill_carries_this_repository_s_rules() {
     assert_eq!(numbered_anecdote("ask <id>, the task's goal"), None);
     assert_eq!(dated("on 2026-09-26 (median"), Some("2026-09-26"));
     assert_eq!(dated("version 0.4.0-dev"), None);
-    const MARKS: [&str; 21] = [
+    let reference = ["skills", "dagq", "reference"];
+    assert_eq!(
+        link_out_of_the_plugin(&reference, "[d](../../../../docs/x.md#a) and"),
+        Some("../../../../docs/x.md#a")
+    );
+    assert_eq!(
+        link_out_of_the_plugin(&reference, "[r](../../dagq-recover/SKILL.md)"),
+        None
+    );
+    assert_eq!(
+        link_out_of_the_plugin(&reference, "[w](https://example.com/../..)"),
+        None
+    );
+    const MARKS: [&str; 27] = [
         "llvm-cov",
         "nextest",
         "fail-under-lines",
@@ -286,21 +326,45 @@ fn no_skill_carries_this_repository_s_rules() {
         "in this repository",
         "In this repository",
         "this repository's AGENTS.md",
+        "docs/design/",
+        "docs/plans/",
+        "fixed binary",
+        "Fixed binary",
+        "design doc",
+        "Design doc",
     ];
     let mut files = Vec::new();
-    let mut dirs = vec![plugin_root().join("skills")];
+    let mut others = Vec::new();
+    let mut dirs = vec![plugin_root()];
     while let Some(dir) = dirs.pop() {
         for entry in fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
             if path.is_dir() {
                 dirs.push(path);
-            } else if path.extension().is_some_and(|extension| extension == "md") {
+            } else if path.starts_with(plugin_root().join("skills"))
+                && path.extension().is_some_and(|extension| extension == "md")
+            {
                 files.push(path);
+            } else {
+                others.push(path);
             }
         }
     }
     assert!(files.len() > 4, "{files:?}");
-    let mut found = Vec::new();
+    assert!(others.len() > 4, "{others:?}");
+    let mut found: Vec<String> = others
+        .iter()
+        .filter(|file| {
+            fs::read_to_string(file)
+                .unwrap()
+                .to_ascii_lowercase()
+                .contains("fixed binary")
+        })
+        .map(|file| {
+            let name = file.strip_prefix(plugin_root()).unwrap().display();
+            format!("{name}: fixed binary")
+        })
+        .collect();
     for file in files {
         let text = fs::read_to_string(&file).unwrap();
         let name = file
@@ -308,6 +372,13 @@ fn no_skill_carries_this_repository_s_rules() {
             .unwrap()
             .display()
             .to_string();
+        let relative = file.strip_prefix(plugin_root()).unwrap();
+        let dir: Vec<&str> = relative
+            .parent()
+            .unwrap()
+            .iter()
+            .map(|part| part.to_str().unwrap())
+            .collect();
         for (number, line) in text.lines().enumerate() {
             let at = |what: &str| format!("{name}:{}: {what}", number + 1);
             found.extend(
@@ -318,6 +389,7 @@ fn no_skill_carries_this_repository_s_rules() {
             );
             found.extend(numbered_anecdote(line).map(at));
             found.extend(dated(line).map(at));
+            found.extend(link_out_of_the_plugin(&dir, line).map(at));
         }
     }
     assert!(

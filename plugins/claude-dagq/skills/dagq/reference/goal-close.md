@@ -1,6 +1,6 @@
 # Closing a goal
 
-A goal is closed once. Closing it after its last task is not a planner's step (ADR-0047 decisions 16 and 43): the supervisor's headless **goal review** job judges it (`docs/design/supervisor-lifecycle/goal-review.md`).
+A goal is closed once. Closing it after its last task is not a planner's step (ADR-0047 decisions 16 and 43): the supervisor's headless **goal review** job judges it.
 
 ## The goal review job
 

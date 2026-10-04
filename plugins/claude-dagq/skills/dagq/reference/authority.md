@@ -1,6 +1,6 @@
 # Who may run what, and how it is recorded
 
-Read this when the binary refuses a command with `<role> may not <capability> (<reason>)` or with a `queue_service` code (`{"error": ..., "queue_service": {"code": ...}}`, a worker's or a job's `dagq` in client mode), or before doing on a person's word something your role may not do. The model behind it is the repository's `docs/design/security.md`; the command-by-command table is `docs/design/authorization.md`.
+Read this when the binary refuses a command with `<role> may not <capability> (<reason>)` or with a `queue_service` code (`{"error": ..., "queue_service": {"code": ...}}`, a worker's or a job's `dagq` in client mode), or before doing on a person's word something your role may not do.
 
 ## The check
 

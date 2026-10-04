@@ -1,6 +1,6 @@
 # A worker's provider and route, and falling back
 
-Read this to choose which agent runs a task's worker and how, to read which one actually ran, or to tell a person what to do when a provider cannot be used. The decisions are ADR-t813-1 (the headless route), ADR-t1340-1 (headless is Claude's default), ADR-t813-2 (provider per task, mutual fallback) and ADR-t813-3 (Codex's permissions); the runtime's side is `docs/design/provider-lifecycle.md` and `docs/design/supervisor-lifecycle/headless-worker.md`.
+Read this to choose which agent runs a task's worker and how, to read which one actually ran, or to tell a person what to do when a provider cannot be used. The decisions are ADR-t813-1 (the headless route), ADR-t1340-1 (headless is Claude's default), ADR-t813-2 (provider per task, mutual fallback) and ADR-t813-3 (Codex's permissions).
 
 ## Provider and route
 
