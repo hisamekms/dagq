@@ -3882,6 +3882,82 @@ impl crate::application::observer::ObserverSources<SqliteQueue> for ObserverRead
     }
 }
 
+/// `throughput-review`: one review of the queue at `db`
+/// ([`crate::application::throughput_review::review`]) with the
+/// repository's reads and the local host, on `provider`, the provider of
+/// its launch.
+pub fn throughput_review(
+    db: &Path,
+    provider: &dyn AgentProvider,
+    options: &crate::application::throughput_review::ReviewOptions,
+) -> Result<Value> {
+    let db = db
+        .canonicalize()
+        .context("queue must already be initialized")?;
+    let mut queue = SqliteQueue::open(&db)?;
+    let generators = queue.generators().clone();
+    let sources = ThroughputReviewReads {
+        one_shot: OneShot::new(generators.clone()),
+    };
+    crate::application::throughput_review::review(
+        &mut queue,
+        &db,
+        provider,
+        options,
+        &crate::application::throughput_review::ThroughputReviewEnvironment {
+            sources: &sources,
+            host: &crate::infrastructure::throughput_review::LocalThroughputReview,
+            generators: &generators,
+        },
+    )
+}
+
+/// What the throughput review starts with when no supervisor routed it:
+/// the launch of `[roles.throughput_review]` of the queue's bound
+/// checkout's `dagq.toml` (the provider's default without one).
+pub fn throughput_review_launch(db: &Path) -> Result<crate::domain::actor_model::ActorLaunch> {
+    let queue = SqliteQueue::open(
+        &db.canonicalize()
+            .context("queue must already be initialized")?,
+    )?;
+    let checkout = bound_checkout(&queue)?;
+    Ok(crate::infrastructure::throughput_review::review_launch(
+        checkout.as_deref(),
+    ))
+}
+
+/// The throughput review's reads that [`OneShot`] gives on the opened
+/// queue.
+struct ThroughputReviewReads {
+    one_shot: OneShot,
+}
+
+impl crate::application::throughput_review::ThroughputReviewSources<SqliteQueue>
+    for ThroughputReviewReads
+{
+    fn stats(&self, queue: &SqliteQueue, db: &Path, query: &StatsQuery) -> Result<Value> {
+        self.one_shot.stats_of(queue, db, query, None)
+    }
+    fn kpi(
+        &self,
+        queue: &SqliteQueue,
+        db: &Path,
+        query: &crate::domain::kpi::KpiQuery,
+    ) -> Result<Value> {
+        self.one_shot.kpi_of(queue, db, query)
+    }
+    fn checkout(&self, queue: &SqliteQueue) -> Result<Option<PathBuf>> {
+        bound_checkout(queue)
+    }
+    fn record_finding(
+        &self,
+        queue: &mut SqliteQueue,
+        finding: crate::domain::NewFinding,
+    ) -> Result<i64> {
+        Ok(queue.record_finding(finding)?.finding.id.as_i64())
+    }
+}
+
 /// `events --after`: the events after `after`, oldest first, in compact
 /// form with no filter.
 pub fn events(db: &Path, after: EventId, limit: usize, all: bool) -> Result<Value> {

@@ -9,9 +9,7 @@ L1 | src/domain/stats/conflicts.rs | crate::application | 1616 | domainのtest�
 L1 | src/domain/stats/thresholds.rs | crate::application | 1616 | domainのtestがapplication::timestampで時刻の文字列を作る
 L2 | src/domain/landing_branch.rs | anyhow | 1617 | domainがanyhowのResult・ensure!・bail!を返す（ADR-0013決定6）
 L3 | src/application/planner_handoff.rs | crate::infrastructure | 1619 | testがinfrastructure::run_files::LocalRunFilesを使う（application::memory_filesに替える）
-L3 | src/application/prompt.rs | crate::throughput_review | 1615 | throughput_reviewのreview_promptを呼ぶ（スループットの見直しのpromptをapplicationへ移す）
 L4 | src/application/broker_admin.rs | std::fs | 1550 | auditがstd::fs::read_dir・readで直接ファイルを読む
 L4 | src/application/headless_session.rs | SystemTime::now | 1618 | 注入したClockではなく壁時計を読む
 L4 | src/application/supervise/jobs.rs | SystemTime::now | 1618 | 注入したClockではなく壁時計を読む
-L6 | src/infrastructure/adapters.rs | crate::throughput_review | 1615 | throughput_review::ACCESSの定数を読む
 L6 | src/infrastructure/queue_service.rs | crate::view | 1620 | view::task_detailを呼ぶ

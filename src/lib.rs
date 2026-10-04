@@ -11,9 +11,7 @@
 //!   parses the CLI and prints what it returns.
 //!
 //! Outside the layers: [`view`] shapes the CLI's compact output;
-//! [`throughput_review`] is the throughput review job, a use case not yet
-//! moved into [`application`] that still takes the `SqliteQueue` and the
-//! infrastructure directly; [`broker_material`] and [`migration_numbers`]
+//! [`broker_material`] and [`migration_numbers`]
 //! are shared with `build.rs`; and [`runtime`] and [`lifecycle`] only
 //! re-export the names the tests use from before the move.
 pub mod application;
@@ -26,7 +24,6 @@ pub mod infrastructure;
 pub mod lifecycle;
 pub mod migration_numbers;
 pub mod runtime;
-pub mod throughput_review;
 pub mod view;
 
 /// The build identifier of this binary (ADR-0045 decision 2): `X.Y.Z` for a

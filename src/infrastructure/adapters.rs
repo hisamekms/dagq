@@ -4573,7 +4573,7 @@ mod tests {
             ),
             (
                 "throughput review",
-                crate::throughput_review::ACCESS,
+                crate::application::throughput_review::ACCESS,
                 &["Bash(dagq:*)"][..],
             ),
         ] {

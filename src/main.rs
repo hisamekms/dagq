@@ -4057,7 +4057,7 @@ fn execute(cli: Cli) -> Result<Value> {
             };
             let launch: ActorLaunch = match launch {
                 Some(launch) => serde_json::from_str(&launch).context("parse --launch")?,
-                None => dagq::throughput_review::configured_launch(&db)?,
+                None => dagq::compose::throughput_review_launch(&db)?,
             };
             // A dry run starts nothing, so it needs no executable; nor does a
             // review no provider can run. One that cannot be resolved (gone
@@ -4084,10 +4084,10 @@ fn execute(cli: Cli) -> Result<Value> {
                     home: codex_home,
                 }),
             };
-            dagq::throughput_review::review(
+            dagq::compose::throughput_review(
                 &db,
                 provider.as_ref(),
-                &dagq::throughput_review::ReviewOptions {
+                &dagq::application::throughput_review::ReviewOptions {
                     mode: mode.parse()?,
                     at,
                     dry_run,

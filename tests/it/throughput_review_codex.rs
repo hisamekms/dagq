@@ -145,7 +145,7 @@ fn a_throughput_review_on_codex_reads_its_last_message_like_claude_s_output() {
         let done = review(
             &db,
             &codex,
-            &dagq::throughput_review::ReviewOptions {
+            &dagq::application::throughput_review::ReviewOptions {
                 launch: Some(codex_launch()),
                 switchable: true,
                 ..options(mode)
@@ -283,7 +283,7 @@ fn a_codex_review_at_the_usage_limit_says_codex_cannot_be_used() {
         let done = review(
             &db,
             &codex,
-            &dagq::throughput_review::ReviewOptions {
+            &dagq::application::throughput_review::ReviewOptions {
                 launch: Some(codex_launch()),
                 switchable,
                 ..options(ReviewMode::Daily)
@@ -321,7 +321,7 @@ fn a_codex_that_does_not_start_cannot_be_used() {
     let done = review(
         &db,
         &codex,
-        &dagq::throughput_review::ReviewOptions {
+        &dagq::application::throughput_review::ReviewOptions {
             launch: Some(codex_launch()),
             switchable: true,
             ..options(ReviewMode::Daily)
@@ -460,7 +460,7 @@ fn a_review_no_provider_can_run_records_why() {
     let done = review(
         &db,
         &codex,
-        &dagq::throughput_review::ReviewOptions {
+        &dagq::application::throughput_review::ReviewOptions {
             launch: Some(codex_launch()),
             unavailable: Some("provider_disabled: codex cannot be used (usage_limit)".into()),
             ..options(ReviewMode::Weekly)

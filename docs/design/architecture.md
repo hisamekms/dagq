@@ -4,8 +4,8 @@ type: design
 title: レイヤーとコンテキストの境界（contextごとの所有・判断・操作・公開するport・依存の向き・境界をまたぐtransaction・検査できる規則・今の違反）
 status: current
 created: 2026-10-04
-updated: 2026-10-04 # task 1547: the review subagent architecture-boundaries checks the rules the script does not
-last_verified: 2026-10-04 # task 1547
+updated: 2026-10-04 # task 1615: the throughput review moved into application, infrastructure and compose
+last_verified: 2026-10-04 # task 1615
 scope: system
 related:
   - adr-t1545-1
@@ -133,9 +133,9 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 
 **操作**
 
-- application: `application::stats`・`application::areas`・`application::marks`（`mark`・`mark --retract`。`MarkLog`と注入した`Clock`越し。task 1548が`compose`から移した）・`application::kpi`・`application::forecast`・`application::report`・`application::push`、`application::supervise`の`forecast`・`report`・`push`・`throughput_review`。`application::observer`（observerのjob）・`application::watch`（`events`・`timeline`・`watch`。task 251がレイヤーの外から移した）。レイヤーの外の`src/throughput_review.rs`・`src/view.rs`。
+- application: `application::stats`・`application::areas`・`application::marks`（`mark`・`mark --retract`。`MarkLog`と注入した`Clock`越し。task 1548が`compose`から移した）・`application::kpi`・`application::forecast`・`application::report`・`application::push`、`application::supervise`の`forecast`・`report`・`push`・`throughput_review`。`application::observer`（observerのjob）・`application::watch`（`events`・`timeline`・`watch`。task 251がレイヤーの外から移した）・`application::throughput_review`（スループットの見直しのjob。promptの組み立てと`ACCESS`。portは`ThroughputReviewSources`と`ThroughputReviewHost`。task 1615がレイヤーの外から移した）。組み立ては`compose::throughput_review`・`compose::throughput_review_launch`。レイヤーの外の`src/view.rs`。
 - CLI: `events`・`watch`・`stats`・`kpi`・`report`・`forecast`・`mark`・`marks`・`timeline`・`finding`・`findings`・`observe`・`throughput-review`・`note`・`notes`、`status`の読み取り。
-- infrastructure: `findings`・`observer`（observerのファイル・設定・headlessのagentのprocess）・`runtime_store::queue_records`・`kpi_config`・`kpi_push`・`report_config`・`d2`・`transcripts`・`claude_turns`・`codex_turns`。
+- infrastructure: `findings`・`observer`（observerのファイル・設定・headlessのagentのprocess）・`throughput_review`（見直しのdirのファイル・`[roles.throughput_review]`・hostの時間帯・agentのprocess）・`runtime_store::queue_records`・`kpi_config`・`kpi_push`・`report_config`・`d2`・`transcripts`・`claude_turns`・`codex_turns`。
 
 **公開するport**
 
@@ -220,14 +220,14 @@ contextを1つに決められず、分ける先のtaskを持つもの。
 
 ### レイヤーの規則
 
-- **L1** `src/domain`のコードは`crate::application`・`crate::infrastructure`・`crate::compose`と、レイヤーの外のmodule（`crate::view`・`crate::throughput_review`・`crate::runtime`・`crate::lifecycle`）を参照しない。`#[cfg(test)]`の中も同じ（domainのtestはdomainの値と関数だけで組む）。検査: script。
+- **L1** `src/domain`のコードは`crate::application`・`crate::infrastructure`・`crate::compose`と、レイヤーの外のmodule（`crate::view`・`crate::runtime`・`crate::lifecycle`）を参照しない。`#[cfg(test)]`の中も同じ（domainのtestはdomainの値と関数だけで組む）。検査: script。
 - **L2** `src/domain`の本番のコード（`#[cfg(test)]`の外）は`rusqlite`・`std::fs`・`std::process`・`std::net`・`SystemTime::now`・`Instant::now`・`Uuid::new_v4`・`anyhow`を参照しない（ADR-0013のAlternativesの検査の機械化）。検査: script。
 - **L3** `src/application`のコードは`crate::infrastructure`・`crate::compose`とレイヤーの外のmoduleを参照しない。`#[cfg(test)]`の中も同じ（testはapplicationのtest double、たとえば`application::memory_files`を使う）。例外は共有の部品の`crate::migration_numbers`だけ。検査: script。
 - **L4** `src/application`の本番のコードは`rusqlite`・`std::fs`・`std::process::Command`・`SystemTime::now`・`Uuid::new_v4`を直接使わず、portを通す。`#[cfg(test)]`の中でfixtureを作る`std::fs`と`tempfile`はよい。検査: script。
 - **L5** `src/application`の状態の判断（遷移・回数と上限・送るかどうか・待つかどうかを決めるもの）は、時刻を`Clock`か値の引数で受け、`Instant::now`・`SystemTime::now`を判断の中で読まない（[ADR-t1410-1](../adr/2026-10-03-t1410-1-decisions-in-unit-tests-boundaries-in-integration-tests.md)）。検査: review（今の`Instant::now`は数が多く、task 1557・1558が減らすまでscriptには入れない）。
 - **L6** `src/infrastructure`のコードは`crate::compose`とレイヤーの外のmoduleを参照しない。検査: script。
 - **L7** 起動部分（`src/compose.rs`と、task 1556が作るその下のmodule）はadapterを作ってuse caseに注入する配線だけを持ち、判断・時刻の読み取り・eventのpayloadの組み立てを持たない。検査: review（task 1556の後にscript）。
-- **L8** レイヤーの外のmodule（`view`・`throughput_review`。`observer`と`watch`はtask 251がapplicationへ移した）は起動部分と同じ外側に置き、domain・applicationを使ってよいが、domain・application・infrastructureから参照されない（L1・L3・L6）。新しいmoduleをレイヤーの外に足さない。検査: script（L1・L3・L6として）とreview。
+- **L8** レイヤーの外のmodule（`view`。`observer`と`watch`はtask 251、`throughput_review`はtask 1615がapplicationへ移した）は起動部分と同じ外側に置き、domain・applicationを使ってよいが、domain・application・infrastructureから参照されない（L1・L3・L6）。新しいmoduleをレイヤーの外に足さない。検査: script（L1・L3・L6として）とreview。
 
 ### コンテキストの規則
 
@@ -264,7 +264,6 @@ contextを1つに決められず、分ける先のtaskを持つもの。
 
 | 規則 | 場所 | 違反 | 行き先 |
 | --- | --- | --- | --- |
-| L3 | `src/application/prompt.rs`（`crate::throughput_review::review_prompt`） | applicationからレイヤーの外のthroughput_reviewを参照する | task 1615 |
 | L3 | `src/application/planner_handoff.rs`の`#[cfg(test)]`（`crate::infrastructure::run_files::LocalRunFiles`） | applicationのtestがinfrastructureのadapterを使う | task 1619（`application::memory_files`に替える） |
 | L1 | `src/domain/stats.rs`・`src/domain/stats/thresholds.rs`・`src/domain/stats/conflicts.rs`の`#[cfg(test)]`（`crate::application::timestamp`） | domainのtestがapplicationの関数を使う | task 1616 |
 | L2 | `src/domain/landing_branch.rs`（`anyhow::Result`・`anyhow::ensure!`・`anyhow::bail!`） | domainが`anyhow`を返す（ADR-0013決定6） | task 1617 |
@@ -272,7 +271,6 @@ contextを1つに決められず、分ける先のtaskを持つもの。
 | L4 | `src/application/supervise/jobs.rs`（`SystemTime::now`）・`src/application/headless_session.rs`（`SystemTime::now`） | applicationが注入した`Clock`ではなく壁時計を読む | task 1618 |
 | L5 | `src/application`の`Instant::now`（2026-10-04で109箇所。多いのは`supervise/resume.rs`・`lifecycle.rs`・`supervise/session.rs`・`supervise/revise.rs`・`supervise/reopen.rs`・`supervise/adopt.rs`） | 判断が実時間を読む | task 1557（revise・reopen・resume・session）、task 1558（stall・stall_recovery・adopt）。残りは計測（task 1559）の後に判断 |
 | L6 | `src/infrastructure/queue_service.rs`（`crate::view::task_detail`） | infrastructureがレイヤーの外を呼ぶ | task 1620 |
-| L6 | `src/infrastructure/adapters.rs`（`crate::throughput_review::ACCESS`） | infrastructureがレイヤーの外の定数を読む | task 1615 |
 | C3 | `src/application/supervise/mod.rs`の`Supervisor`と、`impl Supervisor`を持つ`supervise/`の39のsubmodule（2026-10-04） | 全てのcontextの欄を1つのstructで共有し、submoduleが互いの欄を変える | task 1552・1553 |
 | C4 | `Box<dyn Queue>`・`&mut dyn Queue`・`QueueOpener`を取るuse case（`application::lifecycle`・`update`・`install`・`health`・`supervise`ほか） | 要るportだけを取っていない | task 1555（観測と分析・host運用）、task 1553（実行と着地） |
 | C5 | `SessionRegistry`が計画管理の`planners`を書く | 実行と着地のportに計画管理の状態が混ざる | task 1554 |

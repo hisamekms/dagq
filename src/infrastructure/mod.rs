@@ -55,4 +55,5 @@ pub mod sql_ids;
 pub mod sqlite;
 mod stranded;
 pub mod telemetry;
+pub mod throughput_review;
 pub mod transcripts;

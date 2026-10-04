@@ -36,7 +36,7 @@ BEGIN {
   # The patterns per layer, "rule:pattern"; a pattern starting with ^
   # matches at the start of a path, otherwise anywhere in it. The rules that
   # count inside #[cfg(test)] are in ref, the others in prod.
-  outer = "crate::view crate::throughput_review crate::runtime crate::lifecycle"
+  outer = "crate::view crate::runtime crate::lifecycle"
   ref["domain"] = "L1:^crate::application L1:^crate::infrastructure L1:^crate::compose"
   ref["application"] = "L3:^crate::infrastructure L3:^crate::compose"
   ref["infrastructure"] = "L6:^crate::compose"
@@ -324,20 +324,20 @@ EOF
 
   base allowed
   cat >>"$tmp/allowed/src/application/use_case.rs" <<'EOF'
-pub fn p() -> &'static str { crate::throughput_review::review_prompt() }
+pub fn p() -> &'static str { crate::view::task_detail() }
 EOF
-  echo 'L3 | src/application/use_case.rs | crate::throughput_review | 1 | fixture' >"$tmp/allowed/allow.txt"
+  echo 'L3 | src/application/use_case.rs | crate::view | 1 | fixture' >"$tmp/allowed/allow.txt"
   expect 0 "violation in the allow list" "$tmp/allowed"
 
   base stale
-  echo 'L3 | src/application/use_case.rs | crate::throughput_review | 1 | fixture' >"$tmp/stale/allow.txt"
-  expect 1 "stale item in the allow list" "$tmp/stale" "stale item L3 src/application/use_case.rs crate::throughput_review"
+  echo 'L3 | src/application/use_case.rs | crate::view | 1 | fixture' >"$tmp/stale/allow.txt"
+  expect 1 "stale item in the allow list" "$tmp/stale" "stale item L3 src/application/use_case.rs crate::view"
 
   base notask
   cat >>"$tmp/notask/src/application/use_case.rs" <<'EOF'
-pub fn p() -> &'static str { crate::throughput_review::review_prompt() }
+pub fn p() -> &'static str { crate::view::task_detail() }
 EOF
-  echo 'L3 | src/application/use_case.rs | crate::throughput_review | | fixture' >"$tmp/notask/allow.txt"
+  echo 'L3 | src/application/use_case.rs | crate::view | | fixture' >"$tmp/notask/allow.txt"
   expect 1 "allow item without a task ID" "$tmp/notask" "allow.txt:1: want a rule"
 
   rm -rf "$tmp"

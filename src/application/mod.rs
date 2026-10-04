@@ -50,6 +50,7 @@ pub mod session;
 pub mod session_log;
 pub mod stats;
 pub mod supervise;
+pub mod throughput_review;
 pub mod update;
 pub mod watch;
 pub mod workspace_cleanup;

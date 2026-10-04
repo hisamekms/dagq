@@ -20,25 +20,30 @@
 //! period again on the other provider.
 //! The prompt carries a summary of the inputs within [`PROMPT_LIMIT`]
 //! ([`prompt_input`]); the whole is the job directory's `input.json`.
+//! The reads the composition root assembles come through
+//! [`ThroughputReviewSources`], the files and the agent's process through
+//! [`ThroughputReviewHost`]; [`crate::compose::throughput_review`] opens
+//! the queue and runs [`review`].
 use std::{
-    fs,
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 use crate::{
-    application::AgentProvider,
-    application::observer::HeadlessAgent,
+    application::{
+        AgentProvider, AskQuery, EventReads, Generators, Queue, observer::HeadlessAgent,
+    },
     domain::{
         ActorContext, EventFilter, EventId, EventKind, FindingTarget, NewFinding, Provider,
         RunEvent, RunId,
-        actor_model::{ActorLaunch, ModelRole},
+        actor_model::ActorLaunch,
         event_kind::{ASK_OPENED, RUN_INTEGRATED},
         headless_job::JobAccess,
         kpi::{DAY_MS, KpiQuery, Period},
+        language::Language,
         stats::{Cursor, StatsQuery, timestamp_millis},
         throughput_review::{
             HOUR_MS, HourlyJudgment, LOOKBACK_HOURS, NEXT_MOVE_FENCE, ReviewMode, ReviewOutput,
@@ -46,7 +51,6 @@ use crate::{
         },
         transcript::millis_text,
     },
-    infrastructure::{asks::AskQuery, observer::run_agent, sqlite::SqliteQueue},
 };
 
 /// How long one review may take before it is killed.
@@ -107,7 +111,7 @@ const DROP_ORDER: &[&[&str]] = &[
 
 /// The dagq skill's KPI reference, whose weekly review the job follows: the
 /// prompt carries the procedure from there, not a copy of its own.
-const KPI_REFERENCE: &str = include_str!("../plugins/claude-dagq/skills/dagq/reference/kpi.md");
+const KPI_REFERENCE: &str = include_str!("../../plugins/claude-dagq/skills/dagq/reference/kpi.md");
 /// The heading of the weekly review in [`KPI_REFERENCE`].
 const PROCEDURE_HEADING: &str = "## Raising throughput: the weekly review";
 
@@ -133,7 +137,7 @@ pub struct ReviewOptions {
     /// What the job starts with: the provider the supervisor routed it to
     /// (ADR-t1063-1 decisions 1 and 4, task 1220), the provider of
     /// `provider`; `None` reads `[roles.throughput_review]` of the bound
-    /// checkout's `dagq.toml` ([`configured_launch`]).
+    /// checkout's `dagq.toml` ([`ThroughputReviewHost::launch`]).
     pub launch: Option<ActorLaunch>,
     /// Whether `[roles.throughput_review]` names its provider, so that a
     /// Codex job that stopped at a wall (a login, the usage limit, a launch
@@ -167,42 +171,89 @@ pub fn procedure() -> &'static str {
     rest[..end].trim()
 }
 
-/// What the job starts with when no supervisor routed it: the launch of
-/// `[roles.throughput_review]` of the queue's bound checkout's `dagq.toml`
-/// (the provider's default without one).
-pub fn configured_launch(db: &Path) -> Result<ActorLaunch> {
-    let queue = crate::compose::open_queue(
-        &db.canonicalize()
-            .context("queue must already be initialized")?,
-    )?;
-    let checkout = crate::compose::bound_checkout(&queue)?;
-    Ok(review_launch(checkout.as_deref()))
+/// The reads of the queue the review's input takes that the composition
+/// root assembles (`stats`, the KPIs and the bound checkout), and the
+/// finding the weekly next move records.
+pub trait ThroughputReviewSources<Q: ?Sized> {
+    fn stats(&self, queue: &Q, db: &Path, query: &StatsQuery) -> Result<Value>;
+    fn kpi(&self, queue: &Q, db: &Path, query: &KpiQuery) -> Result<Value>;
+    /// The checkout the queue is bound to, if any.
+    fn checkout(&self, queue: &Q) -> Result<Option<PathBuf>>;
+    /// Record `finding`: its id.
+    fn record_finding(&self, queue: &mut Q, finding: NewFinding) -> Result<i64>;
+}
+
+/// The host the review runs on: its time zone and process, its files
+/// under `<queue dir>/reports/reviews`, the configuration its agent starts
+/// with and the agent's process.
+pub trait ThroughputReviewHost {
+    /// The host's time zone at `now` (unix seconds), seconds east of UTC.
+    fn utc_offset(&self, now: i64) -> i64;
+    /// This process's id and its parent's: who to reap.
+    fn pids(&self) -> (u32, u32);
+    /// A new directory for the review of `period` ([`reviews_dir`]).
+    fn review_dir(&self, db: &Path, period: &Window) -> Result<PathBuf>;
+    fn write(&self, path: &Path, contents: &str) -> Result<()>;
+    fn read(&self, path: &Path) -> Result<String>;
+    /// What the job's agent starts with (ADR-0079 decision 7).
+    fn launch(&self, checkout: Option<&Path>) -> ActorLaunch;
+    /// The language of the prompt (ADR-t616-2).
+    fn language(&self, checkout: Option<&Path>, user_config: Option<&Path>) -> Option<Language>;
+    /// Start the agent in `dir` and wait for it up to its timeout: the
+    /// exit code, or `None` when a signal ended it.
+    fn run(
+        &self,
+        provider: &dyn AgentProvider,
+        db: &Path,
+        dir: &Path,
+        prompt: &str,
+        agent: &HeadlessAgent<'_>,
+    ) -> Result<Option<i32>>;
+}
+
+/// What [`review`] reaches outside the queue through.
+pub struct ThroughputReviewEnvironment<'a, Q: ?Sized> {
+    pub sources: &'a dyn ThroughputReviewSources<Q>,
+    pub host: &'a dyn ThroughputReviewHost,
+    pub generators: &'a Generators,
 }
 
 /// Run one review: judge the hour (hourly), gather the inputs, start the
 /// agent headless on `provider` (the provider of the launch), save what it
-/// printed and tell the inbox.
-pub fn review(db: &Path, provider: &dyn AgentProvider, options: &ReviewOptions) -> Result<Value> {
-    let db = db
-        .canonicalize()
-        .context("queue must already be initialized")?;
-    let mut queue = crate::compose::open_queue(&db)?;
-    let now = options.at.unwrap_or_else(|| queue.generators().clock.now());
-    let offset_ms = options
-        .utc_offset
-        .unwrap_or_else(|| crate::infrastructure::clock::local_utc_offset(now))
-        * 1000;
+/// printed and tell the inbox. `db` is the queue's canonical path, which
+/// names its directory.
+pub fn review<Q: Queue + EventReads>(
+    queue: &mut Q,
+    db: &Path,
+    provider: &dyn AgentProvider,
+    options: &ReviewOptions,
+    environment: &ThroughputReviewEnvironment<'_, Q>,
+) -> Result<Value> {
+    let host = environment.host;
+    let now = options
+        .at
+        .unwrap_or_else(|| environment.generators.clock.now());
+    let offset_ms = options.utc_offset.unwrap_or_else(|| host.utc_offset(now)) * 1000;
     let period = window(options.mode, now * 1000, offset_ms);
+    let (pid, parent_pid) = host.pids();
     let mut failure = json!({
         "mode": options.mode.as_str(),
         "period": period.label,
         "outcome": "error",
         "exit_code": null,
         "dir": null,
-        "pid": std::process::id(),
-        "parent_pid": std::os::unix::process::parent_id(),
+        "pid": pid,
+        "parent_pid": parent_pid,
     });
-    let result = review_period(&mut queue, &db, provider, options, &period, &mut failure);
+    let result = review_period(
+        queue,
+        db,
+        provider,
+        options,
+        environment,
+        &period,
+        &mut failure,
+    );
     if options.dry_run {
         return result;
     }
@@ -225,14 +276,20 @@ pub fn review(db: &Path, provider: &dyn AgentProvider, options: &ReviewOptions) 
 }
 
 /// Prepare and execute a known period; retain context for preparation errors.
-fn review_period(
-    queue: &mut SqliteQueue,
+fn review_period<Q: Queue + EventReads>(
+    queue: &mut Q,
     db: &Path,
     provider: &dyn AgentProvider,
     options: &ReviewOptions,
+    environment: &ThroughputReviewEnvironment<'_, Q>,
     period: &Window,
     failure: &mut Value,
 ) -> Result<Value> {
+    let ThroughputReviewEnvironment {
+        sources,
+        host,
+        generators,
+    } = *environment;
     let landings = landings(queue, period)?;
     let judgment = match options.mode {
         ReviewMode::Hourly => Some(judge_hourly(&bucket_counts(
@@ -252,8 +309,8 @@ fn review_period(
             "outcome": "skipped",
             "reason": "the hour met no rule",
             "hourly": judged,
-            "pid": std::process::id(),
-            "parent_pid": std::os::unix::process::parent_id(),
+            "pid": failure["pid"],
+            "parent_pid": failure["parent_pid"],
         });
         tracing::info!(
             period = period.label,
@@ -269,20 +326,25 @@ fn review_period(
     {
         anyhow::bail!("the throughput review could not start: {why}");
     }
-    let input = gather(queue, db, period, &landings, judgment.as_ref())?;
+    let input = gather(
+        queue,
+        db,
+        sources,
+        generators,
+        period,
+        &landings,
+        judgment.as_ref(),
+    )?;
     // The job's `dagq` goes to the queue service in client mode: the
     // prompt names no queue path (goal 82's stage (3)).
     let command = "dagq";
-    let checkout = crate::compose::bound_checkout(queue)?;
-    let language = crate::infrastructure::language::language_for_prompt(
-        checkout.as_deref(),
-        options.user_config.as_deref(),
-    );
+    let checkout = sources.checkout(queue)?;
+    let language = host.language(checkout.as_deref(), options.user_config.as_deref());
     // A dry run makes no directory: its prompt names where one would be.
     let dir = if options.dry_run {
         reviews_dir(db).join(format!("{}-{}", period.mode.as_str(), period.label))
     } else {
-        review_dir(db, period)?
+        host.review_dir(db, period)?
     };
     failure["dir"] = json!(dir);
     let ReviewPrompt {
@@ -309,19 +371,18 @@ fn review_period(
         merge(&mut payload, &prompt_record);
         return Ok(payload);
     }
-    fs::write(dir.join("prompt.md"), &prompt)?;
-    fs::write(
-        dir.join("input.json"),
-        serde_json::to_string_pretty(&input)?,
+    host.write(&dir.join("prompt.md"), &prompt)?;
+    host.write(
+        &dir.join("input.json"),
+        &serde_json::to_string_pretty(&input)?,
     )?;
     let launch = options
         .launch
         .clone()
-        .unwrap_or_else(|| review_launch(checkout.as_deref()));
+        .unwrap_or_else(|| host.launch(checkout.as_deref()));
     // The job's Claude session id (ADR-0048 decision 4); Codex names its
     // thread itself, which the finish records (ADR-t1063-1 decision 6).
-    let session_id =
-        (launch.provider == Provider::Claude).then(|| uuid::Uuid::new_v4().to_string());
+    let session_id = (launch.provider == Provider::Claude).then(|| generators.ids.uuid());
     failure["session_id"] = json!(session_id);
     let reasons = judgment.as_ref().map(|judged| judged.reasons.clone());
     let mut started = json!({
@@ -342,11 +403,13 @@ fn review_period(
         prompt_record["prompt_bytes"]
     );
     let clock = Instant::now();
-    let started_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let started_ms = generators
+        .clock
+        .system_time()
+        .duration_since(UNIX_EPOCH)
         .ok()
         .and_then(|since| i64::try_from(since.as_millis()).ok());
-    let ran = run_agent(
+    let ran = host.run(
         provider,
         db,
         &dir,
@@ -374,6 +437,7 @@ fn review_period(
             ("error", None, Some(format!("{error:#}")))
         }
     };
+    let (pid, parent_pid) = host.pids();
     let mut payload = json!({
         "mode": options.mode.as_str(),
         "period": period.label,
@@ -387,11 +451,11 @@ fn review_period(
         "duration_secs": clock.elapsed().as_secs(),
         // Who to reap: a supervisor that exec'd while this ran is still its
         // parent and waits on it by these.
-        "pid": std::process::id(),
-        "parent_pid": std::os::unix::process::parent_id(),
+        "pid": pid,
+        "parent_pid": parent_pid,
     });
     merge(&mut payload, &prompt_record);
-    let stdout = fs::read_to_string(dir.join("output.out")).unwrap_or_default();
+    let stdout = host.read(&dir.join("output.out")).unwrap_or_default();
     // Codex's thread and the model of its rollout (ADR-t1063-1 decision 6):
     // the id that closes its span and the model `stats` reads.
     if let Some(session) = provider.job_session(&stdout, started_ms) {
@@ -402,7 +466,7 @@ fn review_period(
     // Codex and starts the period again. Under `--no-claude` it finds no
     // provider and records why, so Claude is never started.
     if outcome != "succeeded" && options.switchable && launch.provider == Provider::Codex {
-        let stderr = fs::read_to_string(dir.join("output.err")).unwrap_or_default();
+        let stderr = host.read(&dir.join("output.err")).unwrap_or_default();
         let failure = start_failure.unwrap_or_else(|| provider.job_failure(&stdout, &stderr));
         if let Some(reason) = failure.switch_reason() {
             payload["provider_unusable"] =
@@ -412,7 +476,15 @@ fn review_period(
     if outcome == "succeeded" {
         // A review that could not be saved or reported is a failed one:
         // the event says why, and the loop goes on.
-        match report(queue, provider, &dir, period, reasons.as_deref(), started) {
+        match report(
+            queue,
+            provider,
+            environment,
+            &dir,
+            period,
+            reasons.as_deref(),
+            started,
+        ) {
             Ok(reported) => {
                 payload["reported_event_id"] = json!(reported.event_id);
                 payload["finding_id"] = json!(reported.finding_id);
@@ -438,15 +510,19 @@ struct Reported {
 /// `review.json`, the conclusion and the next move), record the weekly
 /// next move as a finding marked for a proposal, and record
 /// `throughput_review_reported` for the inbox.
-fn report(
-    queue: &mut SqliteQueue,
+fn report<Q: Queue>(
+    queue: &mut Q,
     provider: &dyn AgentProvider,
+    environment: &ThroughputReviewEnvironment<'_, Q>,
     dir: &Path,
     period: &Window,
     reasons: Option<&[crate::domain::throughput_review::HourlyReason]>,
     started: EventId,
 ) -> Result<Reported> {
-    let output = fs::read_to_string(dir.join("output.out")).context("read the review's output")?;
+    let host = environment.host;
+    let output = host
+        .read(&dir.join("output.out"))
+        .context("read the review's output")?;
     // The reply its provider reads out of the output (ADR-t1063-1 decision
     // 2), whatever the provider.
     let output = provider.job_reply(&output);
@@ -457,7 +533,7 @@ fn report(
         next_move_error,
     } = parse_output(&output);
     let path = dir.join("review.md");
-    fs::write(&path, format!("{text}\n"))?;
+    host.write(&path, &format!("{text}\n"))?;
     // Only the weekly review proposes a change (ADR-t996-1 decision 4).
     let next_move = next_move.filter(|_| period.mode == ReviewMode::Weekly);
     let finding_id = match &next_move {
@@ -466,24 +542,26 @@ fn report(
                 Some(detail) => format!("{detail}\n\nWhy: {}", next.why),
                 None => format!("Why: {}", next.why),
             };
-            let recorded = queue.record_finding(NewFinding {
-                kind: FINDING_KIND.to_owned(),
-                target: FindingTarget::Queue,
-                subject: format!("weekly/{}", period.label),
-                summary: next.summary.clone(),
-                detail: Some(detail),
-                impact: None,
-                evidence: vec![started],
-                propose: Some(next.why.clone()),
-                by: crate::domain::ActorRole::Supervisor.as_str().to_owned(),
-            })?;
-            Some(recorded.finding.id.as_i64())
+            Some(environment.sources.record_finding(
+                queue,
+                NewFinding {
+                    kind: FINDING_KIND.to_owned(),
+                    target: FindingTarget::Queue,
+                    subject: format!("weekly/{}", period.label),
+                    summary: next.summary.clone(),
+                    detail: Some(detail),
+                    impact: None,
+                    evidence: vec![started],
+                    propose: Some(next.why.clone()),
+                    by: crate::domain::ActorRole::Supervisor.as_str().to_owned(),
+                },
+            )?)
         }
         None => None,
     };
-    fs::write(
-        dir.join("review.json"),
-        serde_json::to_string_pretty(&json!({
+    host.write(
+        &dir.join("review.json"),
+        &serde_json::to_string_pretty(&json!({
             "mode": period.mode.as_str(),
             "period": period.label,
             "reasons": reasons,
@@ -516,7 +594,7 @@ fn report(
 /// The landings (`run_integrated`) from the start of what the review of
 /// `period` compares with to its end: the hours the rules read, or the
 /// period before as long as this one. Each with its unix milliseconds.
-fn landings(queue: &SqliteQueue, period: &Window) -> Result<Vec<(i64, RunEvent)>> {
+fn landings(queue: &(impl Queue + EventReads), period: &Window) -> Result<Vec<(i64, RunEvent)>> {
     let from = match period.mode {
         ReviewMode::Hourly => {
             period.end_ms - HOUR_MS * i64::try_from(LOOKBACK_HOURS + 1).unwrap_or(i64::MAX)
@@ -543,9 +621,11 @@ fn landings(queue: &SqliteQueue, period: &Window) -> Result<Vec<(i64, RunEvent)>
 /// The review's input: the landings, the rules' judgment, the workers'
 /// health and the disk's free space, `kpi`, `stats`, the claim deferrals,
 /// the asks and the timelines of the longest runs that landed. A part that does not read is its `{"error": ...}`.
-fn gather(
-    queue: &SqliteQueue,
+fn gather<Q: Queue + EventReads>(
+    queue: &Q,
     db: &Path,
+    sources: &dyn ThroughputReviewSources<Q>,
+    generators: &Generators,
     period: &Window,
     landings: &[(i64, RunEvent)],
     judgment: Option<&HourlyJudgment>,
@@ -562,10 +642,9 @@ fn gather(
         ReviewMode::Weekly => (7, DAY_MS, "by_day"),
     };
     let stats_from = stats_from(period);
-    let one_shot = crate::compose::OneShot::new(queue.generators().clone());
     let or_error =
         |value: Result<Value>| value.unwrap_or_else(|error| json!({"error": format!("{error:#}")}));
-    let stats = or_error(one_shot.stats_of(
+    let stats = or_error(sources.stats(
         queue,
         db,
         &StatsQuery {
@@ -573,14 +652,13 @@ fn gather(
             until: Some(Cursor::Time(period.end_ms)),
             ..StatsQuery::default()
         },
-        None,
     ));
     let (kpi_period, last) = match period.mode {
         ReviewMode::Hourly => (Period::Day, 2),
         ReviewMode::Daily => (Period::Day, 8),
         ReviewMode::Weekly => (Period::Week, 5),
     };
-    let kpi = or_error(one_shot.kpi_of(
+    let kpi = or_error(sources.kpi(
         queue,
         db,
         &KpiQuery {
@@ -618,7 +696,7 @@ fn gather(
         "stats": stats,
         "claim_deferred": or_error(counted(queue, &[crate::domain::claim_defer::CLAIM_DEFERRED], stats_from, period.end_ms, "reason")),
         "asks": or_error(asks(queue, stats_from, period.end_ms)),
-        "timelines": or_error(timelines(queue, &in_period)),
+        "timelines": or_error(timelines(queue, generators, &in_period)),
     }))
 }
 
@@ -658,7 +736,13 @@ fn stats_from(period: &Window) -> i64 {
 }
 
 /// The events of `kinds` in `[from, to)` counted by their payload's `key`.
-fn counted(queue: &SqliteQueue, kinds: &[&str], from: i64, to: i64, key: &str) -> Result<Value> {
+fn counted(
+    queue: &(impl Queue + EventReads),
+    kinds: &[&str],
+    from: i64,
+    to: i64,
+    key: &str,
+) -> Result<Value> {
     let events = queue.events_between(
         EventId::new(0),
         queue.latest_event_id()?,
@@ -680,7 +764,7 @@ fn counted(queue: &SqliteQueue, kinds: &[&str], from: i64, to: i64, key: &str) -
 }
 
 /// The asks opened in `[from, to)` by kind, and the open ones by kind.
-fn asks(queue: &SqliteQueue, from: i64, to: i64) -> Result<Value> {
+fn asks(queue: &(impl Queue + EventReads), from: i64, to: i64) -> Result<Value> {
     let opened = counted(queue, &[ASK_OPENED], from, to, "kind")?;
     let mut open = serde_json::Map::new();
     let asks = queue.asks(AskQuery {
@@ -696,7 +780,11 @@ fn asks(queue: &SqliteQueue, from: i64, to: i64) -> Result<Value> {
 
 /// The timelines of the [`TIMELINES`] runs that landed in the period and
 /// took the longest from their first event to their landing.
-fn timelines(queue: &SqliteQueue, landed: &[&(i64, RunEvent)]) -> Result<Value> {
+fn timelines(
+    queue: &(impl Queue + EventReads),
+    generators: &Generators,
+    landed: &[&(i64, RunEvent)],
+) -> Result<Value> {
     let mut spans = Vec::new();
     for (at, event) in landed {
         let Some(run) = &event.run_id else { continue };
@@ -715,49 +803,17 @@ fn timelines(queue: &SqliteQueue, landed: &[&(i64, RunEvent)]) -> Result<Value> 
             Ok(json!({
                 "run_id": run,
                 "secs": span / 1000,
-                "timeline": crate::compose::timeline_in(queue, &run, TIMELINE_GAP_SECS, false)?,
+                "timeline": crate::application::watch::timeline_in(
+                    queue,
+                    &run,
+                    TIMELINE_GAP_SECS,
+                    false,
+                    generators.clock.as_ref(),
+                )?,
             }))
         })
         .collect::<Result<Vec<_>>>()
         .map(Value::Array)
-}
-
-/// `<queue dir>/reports/reviews/<mode>-<period>/`, suffixed when one
-/// already exists (a review run again by hand).
-fn review_dir(db: &Path, period: &Window) -> Result<PathBuf> {
-    let root = reviews_dir(db);
-    fs::create_dir_all(&root).with_context(|| format!("create {}", root.display()))?;
-    for n in 0.. {
-        let name = if n == 0 {
-            format!("{}-{}", period.mode.as_str(), period.label)
-        } else {
-            format!("{}-{}-{n}", period.mode.as_str(), period.label)
-        };
-        let dir = root.join(name);
-        match fs::create_dir(&dir) {
-            Ok(()) => return Ok(dir),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error).with_context(|| format!("create {}", dir.display())),
-        }
-    }
-    unreachable!("the suffixes do not run out")
-}
-
-/// What the job's agent starts with (ADR-0079 decision 7):
-/// `[roles.throughput_review]` of the bound checkout's `dagq.toml`; none,
-/// no checkout, or a file that cannot be read starts it with the
-/// provider's default.
-fn review_launch(checkout: Option<&Path>) -> ActorLaunch {
-    let Some(checkout) = checkout else {
-        return ActorLaunch::default_of(ModelRole::ThroughputReview);
-    };
-    match crate::infrastructure::run_env::load_role_models(checkout) {
-        Ok(models) => models.launch(ModelRole::ThroughputReview),
-        Err(error) => {
-            tracing::warn!(error = %format_args!("{error:#}"), "[roles.throughput_review] could not be read; starting it with the default: {error:#}");
-            ActorLaunch::default_of(ModelRole::ThroughputReview)
-        }
-    }
 }
 
 /// The prompt the job is given and what it took.

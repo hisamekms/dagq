@@ -1,7 +1,7 @@
 //! Runtime tests: the throughput review (ADR-t996-1).
 use crate::{common, runtime_support};
+use dagq::application::throughput_review::{PROMPT_INPUT_LIMIT, PROMPT_LIMIT, ReviewOptions};
 use dagq::domain::throughput_review::{HOUR_MS, ReviewMode, window};
-use dagq::throughput_review::{PROMPT_INPUT_LIMIT, PROMPT_LIMIT, ReviewOptions};
 
 use runtime_support::*;
 
@@ -13,7 +13,7 @@ pub(crate) fn review(
     options: &ReviewOptions,
 ) -> Result<Value> {
     common::service::serve(db);
-    dagq::throughput_review::review(db, provider, options)
+    dagq::compose::throughput_review(db, provider, options)
 }
 
 /// The review's provider double: the headless job is a shell script in the
@@ -381,7 +381,7 @@ pub(crate) fn attentions(db: &Path) -> Vec<Value> {
 #[test]
 fn a_preparation_failure_is_finished_once_and_told_to_the_inbox() {
     let (_dir, _repo, db) = fixture();
-    let root = dagq::throughput_review::reviews_dir(&db.canonicalize().unwrap());
+    let root = dagq::application::throughput_review::reviews_dir(&db.canonicalize().unwrap());
     fs::create_dir_all(root.parent().unwrap()).unwrap();
     // A file where the reviews directory belongs fails deterministically,
     // including when the test user could override directory permissions.

@@ -6065,7 +6065,7 @@ mod tests {
         .text;
         let throughput = [ReviewMode::Hourly, ReviewMode::Daily, ReviewMode::Weekly]
             .map(|mode| {
-                crate::throughput_review::review_prompt(
+                crate::application::throughput_review::review_prompt(
                     &window(mode, 1_790_655_900_000, 9 * HOUR_MS),
                     "dagq",
                     &json!({}),
