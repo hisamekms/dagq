@@ -201,10 +201,19 @@ impl SessionRegistry for SqliteQueue {
     fn close_gone_sessions(&self, gone: &[EventId]) -> Result<usize> {
         crate::infrastructure::sessions::close_gone_hook_spans(&self.conn, gone)
     }
-    fn close_review_session(&self, id: &RunId) -> Result<usize> {
+    fn close_review_session(
+        &self,
+        id: &RunId,
+        session: Option<&crate::domain::headless_job::JobSession>,
+    ) -> Result<usize> {
         let _read = read_before(&self.conn, Closing::Run(id, &[event_kind::REVIEW_FAILED]))?;
         let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let closed = crate::infrastructure::sessions::close_review(&tx, id)?;
+        let ending = session.map(|session| {
+            let mut ending = serde_json::json!({});
+            session.record(&mut ending);
+            ending
+        });
+        let closed = crate::infrastructure::sessions::close_review(&tx, id, ending.as_ref())?;
         tx.commit()?;
         Ok(closed)
     }

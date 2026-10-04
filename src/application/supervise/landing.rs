@@ -17,6 +17,7 @@ use crate::domain::actor_model::{ActorLaunch, JobRoute, ModelRole, job_route};
 use crate::domain::concern::{
     self, ConcernDecision, ConcernReason, EscalatedBecause, LandingRecommendation,
 };
+use crate::domain::headless_job::JobSession;
 use crate::domain::language::with_instruction;
 use crate::domain::provider_switch::SwitchReason;
 use crate::domain::review_reason;
@@ -221,7 +222,8 @@ impl Supervisor<'_> {
         run: &TaskRun,
         session: Option<SessionRef>,
         attempt: usize,
-        error: &str,
+        // Why the attempt failed, and what its job said of its session.
+        (error, job_session): (&str, Option<&JobSession>),
         (provider, reason): (Provider, SwitchReason),
         retried: bool,
     ) -> Result<std::result::Result<Phase, Option<SessionRef>>> {
@@ -234,16 +236,18 @@ impl Supervisor<'_> {
         if !moves {
             return Ok(Err(session));
         }
-        self.queue.record_runtime_event(
-            run.id(),
-            EventKind::ReviewRetried,
-            json!({
-                "attempt": attempt,
-                "error": error,
-                "provider": provider.as_str(),
-                "switch_reason": reason.as_str(),
-            }),
-        )?;
+        let mut retried_event = json!({
+            "attempt": attempt,
+            "error": error,
+            "provider": provider.as_str(),
+            "switch_reason": reason.as_str(),
+        });
+        // The job that ran on Codex names its thread and model (task 1339).
+        if let Some(job_session) = job_session {
+            job_session.record(&mut retried_event);
+        }
+        self.queue
+            .record_runtime_event(run.id(), EventKind::ReviewRetried, retried_event)?;
         Ok(Ok(match route {
             ReviewRoute::Wait(why) => {
                 warn!(run_id = %run.id(), error = %error, "run {} review {attempt}: {} cannot be used ({}); the review waits: {why}", run.id(), provider.as_str(), reason.as_str());
@@ -265,15 +269,18 @@ impl Supervisor<'_> {
         session: Option<SessionRef>,
         attempt: usize,
         error: &str,
+        job_session: Option<&JobSession>,
     ) -> Result<Phase> {
         if self.review_held(run) {
             return Ok(Phase::ReviewHeld(session));
         }
-        self.queue.record_runtime_event(
-            run.id(),
-            EventKind::ReviewRetried,
-            json!({"attempt": attempt, "error": error}),
-        )?;
+        let mut retried_event = json!({"attempt": attempt, "error": error});
+        // The job that ran on Codex names its thread and model (task 1339).
+        if let Some(job_session) = job_session {
+            job_session.record(&mut retried_event);
+        }
+        self.queue
+            .record_runtime_event(run.id(), EventKind::ReviewRetried, retried_event)?;
         warn!(run_id = %run.id(), error = %error, "run {} review {attempt} printed no readable verdict: {error}; reviewing it once more", run.id());
         self.begin_review(run, session, true)
     }
@@ -304,6 +311,7 @@ impl Supervisor<'_> {
                         error,
                         duration_secs: 0,
                         output: None,
+                        session: None,
                     },
                 )));
             }
@@ -336,8 +344,11 @@ impl Supervisor<'_> {
                 }
             }
         };
-        // The job's Claude session id (ADR-0048 decision 4).
-        let session_id = self.generators.ids.uuid();
+        // The job's Claude session id (ADR-0048 decision 4); Codex names
+        // its thread itself, which the review's end records (ADR-t1063-1
+        // decision 6), as a goal review's does.
+        let session_id = (launch.provider == crate::domain::Provider::Claude)
+            .then(|| self.generators.ids.uuid());
         let mut started = json!({
             "attempt": attempt,
             "workspace_id": session.as_ref().map(|s| s.workspace.clone()),
@@ -350,8 +361,13 @@ impl Supervisor<'_> {
         }
         self.queue
             .record_runtime_event(run.id(), EventKind::ReviewStarted, started)?;
-        let error = match self.spawn_review(run, attempt, &session_id, &launch, subagents.as_ref())
-        {
+        let error = match self.spawn_review(
+            run,
+            attempt,
+            session_id.as_deref(),
+            &launch,
+            subagents.as_ref(),
+        ) {
             Ok(Ok((child, stdout, stderr))) => {
                 info!(run_id = %run.id(), "run {} review {attempt} started on {} (session {})", run.id(), launch.provider.as_str(), if live { "kept open" } else { "ended" });
                 let mut job = self.headless_job(
@@ -390,7 +406,14 @@ impl Supervisor<'_> {
                     &HoldJob::Review(run.id().clone()),
                     switchable,
                 ) {
-                    match self.move_review(run, session, attempt, &error, unusable, retried)? {
+                    match self.move_review(
+                        run,
+                        session,
+                        attempt,
+                        (&error, None),
+                        unusable,
+                        retried,
+                    )? {
                         Ok(phase) => return Ok(phase),
                         Err(back) => session = back,
                     }
@@ -401,7 +424,7 @@ impl Supervisor<'_> {
             Err(prepared) => format!("the headless review could not start: {prepared:#}"),
         };
         warn!(run_id = %run.id(), error = %error, "run {}: {error}", run.id());
-        self.close_review_session(run);
+        self.close_review_session(run, None);
         Ok(Phase::Exiting(ExitWatch::new(
             session,
             AfterExit::ReviewFailed {
@@ -412,6 +435,7 @@ impl Supervisor<'_> {
                 // follows a job that ran and printed an unreadable verdict
                 // (task 426).
                 output: unstarted_review_output(retried, attempt),
+                session: None,
             },
         )))
     }
@@ -440,6 +464,7 @@ impl Supervisor<'_> {
                 error,
                 duration_secs: 0,
                 output: unstarted_review_output(retried, attempt),
+                session: None,
             },
         )))
     }
@@ -496,7 +521,7 @@ impl Supervisor<'_> {
         &mut self,
         run: &TaskRun,
         attempt: usize,
-        session_id: &str,
+        session_id: Option<&str>,
         launch: &ActorLaunch,
         subagents: Option<&SubagentSnapshot>,
     ) -> Result<Result<StartedReview>> {
@@ -571,7 +596,7 @@ impl Supervisor<'_> {
                                 access: REVIEW_ACCESS,
                                 subagents: &definitions,
                             },
-                            session_id: Some(session_id),
+                            session_id,
                             launch: Some(launch),
                             without_mcp: false,
                             env,

@@ -139,7 +139,9 @@ ask() {{ "$DAGQ" ask --run "${{DAGQ_RUN_ID:-$SESSION}}" --kind worker_question -
 /// command the sandbox refused), `commit MESSAGE`, `receipt COMMIT
 /// [RESULT] [EVIDENCE]`, `ask QUESTION`. A read-only job (the run's
 /// review: its job permission profile, or `--sandbox read-only`) logs its
-/// arguments and actor and prints the review's reply instead.
+/// arguments and actor and prints the review's reply instead, and writes
+/// the model of `codex-review-model` to its thread's rollout when there
+/// is one.
 pub fn headless_codex(dir: &Path, db: &Path) -> PathBuf {
     let test_pid = std::process::id();
     let stub = dir.join("codex-headless");
@@ -168,6 +170,12 @@ if [ -n "$REVIEW" ]; then
   printf '%s\n' "${{RUSTC_WRAPPER-unset}}" >> {dir}/codex-review-wrapper.log
   REVIEW_CALL=$(wc -l < {dir}/codex-review-actors.log | tr -d ' ')
   printf '{{"type":"thread.started","thread_id":"codex-review-thread"}}\n{{"type":"turn.started"}}\n'
+  # The review's model goes to its thread's rollout only, as Codex writes it.
+  if [ -f {review_model} ]; then
+    SESSIONS={home}/sessions/$(date +%Y/%m/%d)
+    mkdir -p "$SESSIONS"
+    printf '{{"timestamp":"%s","type":"turn_context","payload":{{"model":"%s","effort":"high"}}}}\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$(cat {review_model})" >> "$SESSIONS/rollout-2026-09-29T00-00-00-codex-review-thread.jsonl"
+  fi
   if [ -f {dir}/codex-review-failure.jsonl ]; then
     cat {dir}/codex-review-failure.jsonl
     exit 1
@@ -245,6 +253,7 @@ fi
         db = "\"$STUB_DB\"",
         turns = "\"${0%/*}/turn.sh\"",
         model = "\"${0%/*}/codex-model\"",
+        review_model = "\"${0%/*}/codex-review-model\"",
         home = "\"${0%/*}/codex-home\"",
         dir = "\"${0%/*}\"",
         watchdog = HEADLESS_WATCHDOG,

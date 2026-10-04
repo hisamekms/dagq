@@ -2126,8 +2126,15 @@ pub trait SessionRegistry {
     /// Close the run's review span still open, as `job_finished` now: its
     /// headless job ended (or could not start) without a verdict, and its
     /// `review_failed` waits for the session's `/exit` (task 541); returns
-    /// how many spans it closed.
-    fn close_review_session(&self, id: &RunId) -> Result<usize>;
+    /// how many spans it closed. `session` is what the job's output said
+    /// of its session when its provider names it itself (Codex,
+    /// ADR-t1063-1 decision 6): the span takes its thread and model, as
+    /// `review_failed` records them.
+    fn close_review_session(
+        &self,
+        id: &RunId,
+        session: Option<&crate::domain::headless_job::JobSession>,
+    ) -> Result<usize>;
 }
 
 /// A successful lookup found no run; storage/read errors remain distinct.

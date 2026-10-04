@@ -968,7 +968,11 @@ fn close_with(
         && !span.headless()
         && let Some(ending) = ending
     {
+        // A span closed as `inferred` by another job's start (a review
+        // started again on Claude after a Codex one) does not take that
+        // job's session id.
         if span.session_id().is_none()
+            && reason != INFERRED
             && let Some(session) = ending.get("session_id").filter(|id| id.is_string())
         {
             payload["session_id"] = session.clone();
@@ -1772,8 +1776,14 @@ pub(super) fn close_goal_review(
 /// Close the review span of `run_id` still open, as `job_finished` now:
 /// its headless job ended without a verdict, or could not start, and the
 /// `review_failed` that would close it is recorded only after the worker's
-/// session exits (task 541). Returns how many spans it closed.
-pub(super) fn close_review(conn: &Connection, run_id: &RunId) -> Result<usize> {
+/// session exits (task 541). `ending` is what that `review_failed` will
+/// record of a Codex job's session (its thread and model), which the span
+/// takes as [`close_with`] does. Returns how many spans it closed.
+pub(super) fn close_review(
+    conn: &Connection,
+    run_id: &RunId,
+    ending: Option<&Value>,
+) -> Result<usize> {
     let open = open_spans(
         conn,
         "o.run_id=?1 AND json_extract(o.payload,'$.kind')=?2",
@@ -1790,7 +1800,15 @@ pub(super) fn close_review(conn: &Connection, run_id: &RunId) -> Result<usize> {
         .optional()?;
     let now = now(conn)?;
     for span in &open {
-        close(conn, &now, task_id, Some(run_id), span, JOB_FINISHED)?;
+        close_with(
+            conn,
+            &now,
+            task_id,
+            Some(run_id),
+            span,
+            JOB_FINISHED,
+            ending,
+        )?;
     }
     Ok(open.len())
 }
@@ -2469,6 +2487,43 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap()
+    }
+
+    /// A Codex review's span names no session at its start (Codex names
+    /// its thread, task 1339): its end gives it the thread and the model,
+    /// and a later review's start that closes it as `inferred` gives it
+    /// none of its own session.
+    #[test]
+    fn a_codex_review_span_takes_its_thread_from_its_end_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let (queue, task_id, run) = run_queue(dir.path());
+        let record = |kind: EventKind, payload: Value| {
+            event(&queue.conn, task_id, Some(&run), kind, payload).unwrap();
+        };
+        let codex = json!({"role": "review", "provider": "codex"});
+        record(
+            EventKind::ReviewStarted,
+            json!({"attempt": 1, "session_id": null, "launch": codex}),
+        );
+        record(
+            EventKind::ReviewFinished,
+            json!({"verdict": "revise", "session_id": "t-1", "model": "gpt-6-astra"}),
+        );
+        record(
+            EventKind::ReviewStarted,
+            json!({"attempt": 2, "session_id": null, "launch": codex}),
+        );
+        record(
+            EventKind::ReviewStarted,
+            json!({"attempt": 3, "session_id": "s-claude",
+                   "launch": {"role": "review", "provider": "claude"}}),
+        );
+        let closed = of_kind(&queue, SESSION_CLOSED);
+        assert_eq!(closed.len(), 2, "{closed:?}");
+        assert_eq!(closed[0].payload["session_id"], "t-1");
+        assert_eq!(closed[0].payload["model"], "gpt-6-astra");
+        assert_eq!(closed[1].payload["reason"], INFERRED);
+        assert!(closed[1].payload["session_id"].is_null(), "{closed:?}");
     }
 
     /// A headless Codex worker's span (ADR-t813-2 decision 7) records its
@@ -3978,7 +4033,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            SessionRegistry::close_review_session(&queue, &run).unwrap(),
+            SessionRegistry::close_review_session(&queue, &run, None).unwrap(),
             1
         );
         queue

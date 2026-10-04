@@ -147,11 +147,46 @@ fn codex_review_reply(dir: &Path, call: usize, verdict: Value) {
     .unwrap();
 }
 
+/// The thread the stub `codex` names for a review.
+const REVIEW_THREAD: &str = "codex-review-thread";
+
+/// The model the stub `codex` writes to a review's rollout.
+const REVIEW_MODEL: &str = "gpt-test-review";
+
+/// Have the stub `codex` write [`REVIEW_MODEL`] to each review's rollout.
+fn set_codex_review_model(dir: &Path) {
+    fs::write(dir.join("codex-review-model"), REVIEW_MODEL).unwrap();
+}
+
+/// The `session_closed` of the run's review spans.
+fn review_spans(detail: &dagq::domain::TaskDetail) -> Vec<&Value> {
+    payloads(detail, "session_closed")
+        .into_iter()
+        .filter(|span| span["kind"] == "review")
+        .collect()
+}
+
+/// The end of a Codex review with no rollout to read its model from: its
+/// thread, no model and why (ADR-t1063-1 decision 6), on the end's event
+/// and on its span.
+fn assert_thread_without_model(end: &Value, span: &Value) {
+    for recorded in [end, span] {
+        assert_eq!(recorded["session_id"], REVIEW_THREAD, "{recorded}");
+        assert!(recorded["model"].is_null(), "{recorded}");
+        assert!(recorded["model_unknown"].is_string(), "{recorded}");
+    }
+}
+
+/// A Codex review's end records its thread and the model of its rollout
+/// as a goal or plan review's does (ADR-t1063-1 decision 6): its
+/// `review_finished`, its span's `session_closed` and `stats`'s jobs by
+/// model.
 #[test]
 fn no_claude_run_uses_a_read_only_codex_review_and_lands() {
     let (dir, repo, db, backend, codex) = codex_fixture();
     select_codex_review(&repo);
     set_turns(dir.path(), FINISH);
+    set_codex_review_model(dir.path());
     let mut options = supervise_options(1, true);
     options.codex = codex;
     options.no_claude = true;
@@ -180,8 +215,23 @@ fn no_claude_run_uses_a_read_only_codex_review_and_lands() {
         payloads(&detail, "review_started")[0]["launch"]["provider"],
         "codex"
     );
-    assert_eq!(payloads(&detail, "review_finished")[0]["verdict"], "pass");
+    let finished = &payloads(&detail, "review_finished")[0];
+    assert_eq!(finished["verdict"], "pass");
+    assert_eq!(finished["session_id"], REVIEW_THREAD);
+    assert_eq!(finished["model"], REVIEW_MODEL);
+    assert!(finished.get("model_unknown").is_none(), "{finished}");
     assert!(payloads(&detail, "review_failed").is_empty());
+    let spans = review_spans(&detail);
+    assert_eq!(spans.len(), 1, "{spans:?}");
+    assert_eq!(spans[0]["session_id"], REVIEW_THREAD);
+    assert_eq!(spans[0]["model"], REVIEW_MODEL);
+    let jobs = &common::cli::ok(&db, &["stats", "--full"])["jobs"]["review"];
+    assert_eq!(
+        jobs["by_provider"]["codex"]["verdicts"]["pass"], 1,
+        "{jobs}"
+    );
+    assert_eq!(jobs["by_model"][REVIEW_MODEL]["count"], 1, "{jobs}");
+    assert!(jobs["by_model"].get("unknown").is_none(), "{jobs}");
     let args = fs::read_to_string(dir.path().join("codex-review-args.log")).unwrap();
     // Read-only, in the profile that lets its `dagq` reach the queue
     // service's socket in place of `--sandbox read-only` (ADR-t1233-5
@@ -228,6 +278,7 @@ fn no_claude_codex_review_concern_records_reasons_and_asks() {
     assert_eq!(finished[0]["primary_code"], "out_of_scope_change");
     assert_eq!(payloads(&detail, "ask_opened").len(), 1);
     assert!(payloads(&detail, "review_failed").is_empty());
+    assert_thread_without_model(finished[0], review_spans(&detail)[0]);
 }
 
 /// A Codex review's concern carries its recommendation like Claude's
@@ -367,6 +418,7 @@ fn no_claude_codex_review_failure_asks_without_starting_claude() {
     let (dir, repo, db, backend, codex) = codex_fixture();
     select_codex_review(&repo);
     set_turns(dir.path(), FINISH);
+    set_codex_review_model(dir.path());
     fs::write(
         dir.path().join("codex-review-failure.jsonl"),
         "{\"type\":\"turn.failed\",\"error\":{\"message\":\"review crashed\"}}\n",
@@ -395,6 +447,16 @@ fn no_claude_codex_review_failure_asks_without_starting_claude() {
     assert_eq!(failed.len(), 1, "{failed:?}");
     assert_eq!(failed[0]["code"], "job_failed");
     assert!(!failed[0]["error"].as_str().unwrap().contains("Claude"));
+    // The failed review's thread and model, on its end and its span, which
+    // closed when the job ended.
+    assert_eq!(failed[0]["session_id"], REVIEW_THREAD);
+    assert_eq!(failed[0]["model"], REVIEW_MODEL);
+    let spans = review_spans(&detail);
+    assert_eq!(spans.len(), 1, "{spans:?}");
+    assert_eq!(spans[0]["session_id"], REVIEW_THREAD);
+    assert_eq!(spans[0]["model"], REVIEW_MODEL);
+    let jobs = &common::cli::ok(&db, &["stats", "--full"])["jobs"]["review"];
+    assert_eq!(jobs["by_model"][REVIEW_MODEL]["failed"], 1, "{jobs}");
     assert_eq!(
         payloads(&detail, "review_started")[0]["launch"]["provider"],
         "codex"
@@ -599,6 +661,12 @@ fn a_codex_review_at_its_usage_limit_holds_codex_and_moves_to_claude() {
     assert_eq!(retried.len(), 1, "{retried:?}");
     assert_eq!(retried[0]["provider"], "codex");
     assert_eq!(retried[0]["switch_reason"], "usage_limit");
+    // The Codex review that moved names its thread on its end and its
+    // span; the Claude review's span keeps its own session.
+    let spans = review_spans(&detail);
+    assert_eq!(spans.len(), 2, "{spans:?}");
+    assert_thread_without_model(retried[0], spans[0]);
+    assert_eq!(spans[1]["session_id"], started[1]["session_id"]);
     assert!(payloads(&detail, "review_failed").is_empty());
     let held = queue_events(&db, "provider_held");
     assert_eq!(held.len(), 1, "{held:?}");
@@ -706,6 +774,7 @@ fn no_claude_unreadable_codex_review_at_its_limit_fails_with_its_output() {
     assert_eq!(failed.len(), 1, "{failed:?}");
     assert_eq!(failed[0]["code"], "job_failed");
     assert_eq!(failed[0]["attempt"], 1);
+    assert_thread_without_model(failed[0], review_spans(&detail)[0]);
     let asks = SqliteQueue::open(&db)
         .unwrap()
         .asks(AskQuery::default())

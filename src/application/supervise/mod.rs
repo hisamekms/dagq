@@ -1278,6 +1278,10 @@ enum AfterExit {
         /// this one when it ran, the one before when this one could not
         /// start after it (task 426), `None` when no job ran.
         output: Option<usize>,
+        /// What the job's output said of its session when its provider
+        /// names it itself (Codex's thread and model, ADR-t1063-1
+        /// decision 6); `None` on Claude and when no job ran.
+        session: Option<crate::domain::headless_job::JobSession>,
     },
     /// Give the lease back: a run parked for evidence (its workspace is
     /// closed) or a failed one (its workspace is kept for inspection).
@@ -2296,8 +2300,12 @@ impl Supervisor<'_> {
     /// or could not start: `review_failed` waits for the session's `/exit`,
     /// which is no time of the review (task 541). A failure is logged only
     /// (ADR-0048 decision 10); the span then closes with `review_failed`.
-    pub(super) fn close_review_session(&mut self, run: &TaskRun) {
-        if let Err(error) = self.queue.close_review_session(run.id()) {
+    pub(super) fn close_review_session(
+        &mut self,
+        run: &TaskRun,
+        session: Option<&crate::domain::headless_job::JobSession>,
+    ) {
+        if let Err(error) = self.queue.close_review_session(run.id(), session) {
             warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: the span of its failed review could not be closed: {error:#}", run.id());
         }
     }
@@ -2830,6 +2838,17 @@ impl Supervisor<'_> {
                 };
                 let attempt = watch.attempt;
                 let duration_secs = watch.job.started.elapsed().as_secs();
+                // A provider that names its session itself (Codex) says its
+                // thread and model in its output and rollout: the review's
+                // end records them, as a goal or plan review's does
+                // (ADR-t1063-1 decision 6); Claude's says nothing here.
+                let job_session = provider.job_session(
+                    &self
+                        .files
+                        .read_to_string(&watch.job.stdout)
+                        .unwrap_or_default(),
+                    watch.job.started_at,
+                );
                 // Kept in the phase until it is replaced (task 237).
                 let session = watch.session.clone();
                 let run = self.queue.run(slot.run.id())?;
@@ -2868,7 +2887,14 @@ impl Supervisor<'_> {
                         &HoldJob::Review(run.id().clone()),
                         watch.switchable,
                     ) {
-                        match self.move_review(&run, session, attempt, error, unusable, retried)? {
+                        match self.move_review(
+                            &run,
+                            session,
+                            attempt,
+                            (error, job_session.as_ref()),
+                            unusable,
+                            retried,
+                        )? {
                             Ok(phase) => {
                                 slot.phase = phase;
                                 slot.run = run;
@@ -2910,6 +2936,9 @@ impl Supervisor<'_> {
                             finished["agents"] = json!(verdict.agents);
                             finished["route"] = verdict.route(revise_left).event_value();
                         }
+                        if let Some(job_session) = &job_session {
+                            job_session.record(&mut finished);
+                        }
                         self.for_job(&job, |sv| {
                             sv.queue.record_runtime_event(
                                 run.id(),
@@ -2921,11 +2950,11 @@ impl Supervisor<'_> {
                         })?
                     }
                     ReviewEnd::Unreadable(error) if retry_unreadable => {
-                        self.retry_review(&run, session, attempt, &error)?
+                        self.retry_review(&run, session, attempt, &error, job_session.as_ref())?
                     }
                     ReviewEnd::Unreadable(error) | ReviewEnd::Failed(error) => {
                         warn!(run_id = %run.id(), error = %error, "run {} review {attempt} failed: {error}; a person is asked", run.id());
-                        self.close_review_session(&run);
+                        self.close_review_session(&run, job_session.as_ref());
                         Phase::Exiting(ExitWatch::new(
                             session,
                             AfterExit::ReviewFailed {
@@ -2933,6 +2962,7 @@ impl Supervisor<'_> {
                                 error,
                                 duration_secs,
                                 output: Some(attempt),
+                                session: job_session,
                             },
                         ))
                     }
@@ -3086,6 +3116,7 @@ impl Supervisor<'_> {
                         error,
                         duration_secs,
                         output,
+                        session,
                     } => {
                         // The ask goes with the failure (task 328): the
                         // person answers it rather than finding the run in
@@ -3114,6 +3145,9 @@ impl Supervisor<'_> {
                         });
                         if let Some(ask) = ask {
                             payload["ask_id"] = json!(ask);
+                        }
+                        if let Some(session) = &session {
+                            session.record(&mut payload);
                         }
                         self.queue.record_runtime_event(
                             run.id(),
