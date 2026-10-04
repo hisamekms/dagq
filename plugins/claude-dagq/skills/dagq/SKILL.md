@@ -39,7 +39,7 @@ Skip the goal only for a one-shot task that finishes the problem by itself; when
 Collect title, description, acceptance, constraints and doc (what each holds, and draft goals: `reference/register.md`).
 
 ```sh
-"$DAGQ" goal add "TITLE" --description "..." --acceptance "..." --constraints "..." --doc docs/adr/NNNN-name.md
+"$DAGQ" goal add "TITLE" --description "..." --acceptance "..." --constraints "..." --doc PATH/TO/DECISION.md
 ```
 
 A goal has no verification commands; a goal-level check is a final task depending on the others. `goal add --draft` makes a draft goal, adopted by `submit --goal ID` or rejected by `goal close ID --verdict abandoned`. Findings and proposals: `reference/observer.md`.
@@ -51,7 +51,7 @@ Split the goal into tasks, each one session in one worktree. Per task: title, de
 ```sh
 "$DAGQ" add "TITLE" --goal 1 \
   --description "..." --acceptance "..." --context "..." \
-  --verify "cargo fmt --all --check" --verify "cargo test --locked" \
+  --verify "CHECK" --verify "TEST" \
   --change feature --depends-on 3
 "$DAGQ" lint ID...               # the fixed rules; each violation {code, task_id, reason}
 "$DAGQ" submit ID...             # or --goal GOAL; prints the proposal

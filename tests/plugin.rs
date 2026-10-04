@@ -193,6 +193,139 @@ fn skills_point_at_their_reference_files() {
     assert!(review.contains("git push origin main"));
 }
 
+/// Where a word like `task` is followed by its number (`task 528`,
+/// `ask #160`), outside a flag's placeholder (`--goal 1`).
+fn numbered_anecdote(text: &str) -> Option<&str> {
+    const WORDS: [&str; 8] = [
+        "task", "goal", "ask", "proposal", "finding", "note", "run", "mark",
+    ];
+    let lower = text.to_ascii_lowercase();
+    for word in WORDS {
+        for (start, _) in lower.match_indices(word) {
+            let before = lower[..start].chars().next_back();
+            if before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+                continue;
+            }
+            let rest = lower[start + word.len()..]
+                .strip_prefix('s')
+                .unwrap_or(&lower[start + word.len()..]);
+            let Some(rest) = rest.strip_prefix(' ') else {
+                continue;
+            };
+            let rest = rest.strip_prefix('#').unwrap_or(rest);
+            if rest.starts_with(|c: char| c.is_ascii_digit()) {
+                let end = text.len() - rest.len()
+                    + rest
+                        .find(|c: char| !c.is_ascii_digit())
+                        .unwrap_or(rest.len());
+                return Some(&text[start..end]);
+            }
+        }
+    }
+    None
+}
+
+/// Where a date (`2026-09-26`) stands.
+fn dated(text: &str) -> Option<&str> {
+    let bytes = text.as_bytes();
+    (0..bytes.len().saturating_sub(9)).find_map(|start| {
+        let date = &bytes[start..start + 10];
+        let digits = |range: std::ops::Range<usize>| date[range].iter().all(u8::is_ascii_digit);
+        (date.starts_with(b"20")
+            && digits(0..4)
+            && date[4] == b'-'
+            && digits(5..7)
+            && date[7] == b'-'
+            && digits(8..10))
+        .then(|| &text[start..start + 10])
+    })
+}
+
+/// ADR-t1453-2 decision 1: the plugin is dagq's generic procedure for any
+/// repository and refers to that repository's rules, so no skill or
+/// reference carries this repository's rules, values or history. The marks:
+/// this repository's check and test commands (the coverage gate and its
+/// threshold, the test binaries and helpers, which paths take the runtime
+/// checks), its `[areas]` name, its host tools, the old ADR file form,
+/// wording that speaks for "this repository", a task's, goal's or ask's
+/// number told as an anecdote, and a date. Where each rule lives now is in
+/// `docs/plans/agents-slim-inventory.md` section 4.
+#[test]
+fn no_skill_carries_this_repository_s_rules() {
+    assert_eq!(
+        numbered_anecdote("decided in task 528 by"),
+        Some("task 528")
+    );
+    assert_eq!(numbered_anecdote("(Asks #160)"), Some("Asks #160"));
+    assert_eq!(
+        numbered_anecdote("add --goal 1 and --depends-on-goal 2"),
+        None
+    );
+    assert_eq!(numbered_anecdote("ask <id>, the task's goal"), None);
+    assert_eq!(dated("on 2026-09-26 (median"), Some("2026-09-26"));
+    assert_eq!(dated("version 0.4.0-dev"), None);
+    const MARKS: [&str; 21] = [
+        "llvm-cov",
+        "nextest",
+        "fail-under-lines",
+        "tests/it",
+        "tests/common",
+        "tests/plugin.rs",
+        "--test it",
+        "--test plugin",
+        "cargo fmt",
+        "clippy",
+        "RUSTC_WRAPPER",
+        "sccache",
+        "docs/adr/NNNN",
+        "runtime checks",
+        "--area runtime",
+        "area=runtime",
+        "For this repository",
+        "for this repository",
+        "in this repository",
+        "In this repository",
+        "this repository's AGENTS.md",
+    ];
+    let mut files = Vec::new();
+    let mut dirs = vec![plugin_root().join("skills")];
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|extension| extension == "md") {
+                files.push(path);
+            }
+        }
+    }
+    assert!(files.len() > 4, "{files:?}");
+    let mut found = Vec::new();
+    for file in files {
+        let text = fs::read_to_string(&file).unwrap();
+        let name = file
+            .strip_prefix(plugin_root())
+            .unwrap()
+            .display()
+            .to_string();
+        for (number, line) in text.lines().enumerate() {
+            let at = |what: &str| format!("{name}:{}: {what}", number + 1);
+            found.extend(
+                MARKS
+                    .iter()
+                    .filter(|mark| line.contains(*mark))
+                    .map(|mark| at(mark)),
+            );
+            found.extend(numbered_anecdote(line).map(at));
+            found.extend(dated(line).map(at));
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "this repository's rules in the plugin: {found:#?}"
+    );
+}
+
 /// ADR-0024: the roles are the supervisor, the worker, the planner, the
 /// inbox and the observer. Every attention reaches the person through the
 /// inbox, which decides nothing and acts only on the person's word through

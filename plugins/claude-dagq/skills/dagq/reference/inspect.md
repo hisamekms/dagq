@@ -106,7 +106,7 @@ When planning a goal or deciding what to submit next, read `"$DAGQ" graph --goal
 
 1. `critical` is the chain that holds back the most work. Its first task should be `ready` and running; if it is `draft`, complete it and `submit` it for plan review before tasks with small `unblocks` (only plan review, or a person's explicit `ready --bypass-review`, makes it `ready`).
 2. A task with a large `unblocks` that is not in `candidates` waits on its `ready_after`; those predecessors are what to finish (or to review and land) first.
-3. When one task blocks many (goal 8 had five tasks waiting on one), consider splitting it or removing a dependency that is not real (`dependency remove`) so more tasks run in parallel.
+3. When one task blocks many, consider splitting it or removing a dependency that is not real (`dependency remove`) so more tasks run in parallel.
 4. `candidates` is the order the supervisor will claim in, so there is no need to register or submit tasks in a particular order to get the releasing ones first. To put a task ahead of the others, give it a priority (below).
 
 `graph [--goal ID] [--format json|d2|svg] [--out PATH]` keeps `json` as the default and returns the same dependency graph as before. `d2` writes D2 source and `svg` writes the rendered SVG directly; with `--out` (only for `d2` / `svg`) it writes the file and returns its format, path and drawn task IDs as JSON. The diagram selects tasks that are in progress, have effective priority `high` or above, or lie on `critical`, plus one level of their unfinished task or goal prerequisites. With `--goal`, those first two roots stay inside the goal, while its critical chain and prerequisites may cross goal boundaries. D2 source needs no host tool; SVG needs executable `d2` and `d2plugin-tala` on PATH and fails with the reason if either is missing. `doctor`'s `d2` field shows both resolved paths. Full selection and rendering rules: [the dependency-diagram design](../../../../../docs/design/supervisor-lifecycle/dependency-diagram.md).
@@ -117,7 +117,7 @@ Every task has one of five priorities. Pick it by what waiting costs, not by how
 
 | Level | Use for | Example |
 | --- | --- | --- |
-| `interrupt` | An exceptional cut-in that must run before every other ready task. Not for routine use: when many tasks are `interrupt`, it orders nothing | A goal the person decided to put ahead of the whole queue (goal 28, which added priorities) |
+| `interrupt` | An exceptional cut-in that must run before every other ready task. Not for routine use: when many tasks are `interrupt`, it orders nothing | A goal the person decided to put ahead of the whole queue |
 | `urgent` | A defect that is stopping operation now | The supervisor or landing is broken |
 | `high` | Work to do early, because other work builds on it | A cleanup or refactor several planned tasks assume |
 | `normal` | Everything else (the default) | |
@@ -140,7 +140,7 @@ Fix a draft or submitted task in place instead of canceling it and registering i
 
 ```sh
 "$DAGQ" edit TASK --description "..." --acceptance "..."   # also --title, --context
-"$DAGQ" edit TASK --verify 'cargo fmt --all --check' --verify 'cargo test --locked --test plugin'
+"$DAGQ" edit TASK --verify 'CHECK' --verify 'TEST'
 "$DAGQ" edit TASK --evidence e2e --paths 'src/**'          # --no-verify / --no-evidence / --no-paths empty a list
 "$DAGQ" edit TASK --change fix                              # one of dagq.toml's [tasks] changes (reference/scope.md)
 ```
@@ -170,7 +170,7 @@ A task registered with `--paths` may change only what they match (`reference/sco
 - **`scope_violation`.** Validation parked the run as `needs_session` (`events --run RUN --kind scope_violation --full` has `paths`, the changed paths no glob matches, and `allowed`), or `integrate` deferred it (`integration_deferred` with `scope_violation`). The supervisor resumes the session to restore those paths; nothing is needed while the task's paths are right.
 - **A `failed` receipt naming paths.** The worker found the task truly needs a path outside its globs and stopped; its `summary` names the path and the work.
 
-Next: while the task is `draft`, `submitted` or `ready`, widen its globs with `set-paths TASK --paths ...` (every glob it should keep) or remove the limit with `--none`. A run already claimed keeps the paths it started with, so after a failed run register the task again with wider `--paths` and the verification those paths need (a `src/` path takes the runtime checks).
+Next: while the task is `draft`, `submitted` or `ready`, widen its globs with `set-paths TASK --paths ...` (every glob it should keep) or remove the limit with `--none`. A run already claimed keeps the paths it started with, so after a failed run register the task again with wider `--paths` and the verification those paths need (per the repository's rules: `reference/scope.md`).
 
 ## Change a goal or a task's goal
 

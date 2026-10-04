@@ -47,6 +47,10 @@ llvm-covとcargo testの重ね方:
 
 変更の対象でverificationを軽くしてよい。条件は`--paths`で変えてよいパスを宣言すること（[ADR-0029](../adr/0029-task-declares-paths-and-verification-follows-the-kind-of-change.md)）。宣言外のパスを変えたrunはvalidatingで`needs_session`（`scope_violation`）になり、`integrate`もrebase後の差分を同じく検査して着地させないので、軽い検証のまま`src/`の変更が入ることはない。`--paths`を付けないtaskは制限されない。宣言外のパスが本当に要るときのworkerとplannerの手順はpluginの`dagq`の`reference/scope.md`の「What happens outside the paths」「Change the paths」が持つ。
 
+## runtimeのtaskの主なファイル
+
+runtimeのtaskは`--paths`を宣言しない（上の「推奨の組み合わせ」）ので、主に触るファイルをdescriptionに書く（例: 「主に`src/application/supervise/plan_review.rs`と`tests/it/plan_review.rs`を触る」）。読み手（plan reviewの衝突の検出と`related`）、予想で制限でないこと、`--paths`に書かない理由はpluginの`dagq`の`reference/scope.md`の「Name the files a task without paths mainly touches」が持つ。
+
 ## coverageの関門
 
 - 登録済みのtaskの`cargo llvm-cov nextest --locked --fail-under-lines 80`と`cargo llvm-cov --locked --fail-under-lines 80`は書き換えず、同じ関門としてそのまま有効（ADR-0076決定4、[ADR-t828-1](../adr/2026-09-28-t828-1-coverage-gate-covers-the-workspace-with-workspace-flag.md)決定2。dagqのcoverageと全てのcrateのtestの成否は見るが、brokerのcrateの行はcoverageに数えない）。
