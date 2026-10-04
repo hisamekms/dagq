@@ -1,10 +1,10 @@
 ---
 id: development-local-checks
 type: development
-title: このrepositoryの手元の検証（人とworkerが流すもの、testの範囲、stress、e2eを流さないこと、resumeでの再現、受け入れ条件の対応づけ、askにしないもの）
+title: このrepositoryの手元の検証（人とworkerが流すもの、testの範囲、stress、負荷の下で落ちるtestの再現、e2eを流さないこと、resumeでの再現、受け入れ条件の対応づけ、askにしないもの）
 status: current
 created: 2026-10-03
-updated: 2026-10-05 # task 1707
+updated: 2026-10-05 # task 1480
 owners:
   - hisamekms
 tags:
@@ -17,6 +17,7 @@ related:
   - plan-local-checks-history
   - adr-t1420-1
   - adr-t1707-1
+  - adr-t1480-1
   - development-documents
 ---
 
@@ -90,6 +91,17 @@ subagent reviewは該当するときに実行し、しないときは理由をre
 - 変えたtestが無いrun（docsだけ、testに触らない`src/`の変更など）はstressをせず、しないことと理由（変えたtestが無い）をevidenceに書く。
 - cargo-nextestはhostに入っている前提（[ADR-0076](../adr/0076-run-the-coverage-gate-tests-with-nextest.md)決定3。入れ方は[運用](operations.md)の「hostのツール」）で、無ければworkerは入れず、stressをしなかったことと理由（cargo-nextestが無い）をreceiptに書く。
 - これは足した・変えたtestだけをworkerの手元で流すもので、全体の`cargo test --locked`と`cargo llvm-cov`をworkerが流さない規則はそのまま。
+
+## 負荷の下で落ちるtestの再現
+
+負荷の下で落ちるtestを直すとき（resumeでの検証の失敗、flaky_testのtaskなど）、workerは再現のためにhostに負荷を足さない（[ADR-t1480-1](../adr/2026-10-05-t1480-1-workers-add-no-load-to-the-host-to-reproduce-failures-under-load.md)）。hostはworker・`integrate`の検証（coverageの関門）・supervisorの見張りが共有していて、1本のrunが作った負荷が他のrunの検証と見張りを壊すため。
+
+- 起動しないもの: testと別に負荷だけを作るprocess（`yes`・busy loop・stressの道具など）、同時に2本以上の`cargo test` / `cargo nextest`のprocess（backgroundに置いたものも数える）、`[run.env]`が渡すtestの並列度（`NEXTEST_TEST_THREADS`・`RUST_TEST_THREADS`。今の値は`dagq.toml`）より大きい`-j` / `--test-threads`。
+- 再現と原因の確かめ方: 記録（eventのdump・log）を読む、待っている条件と上限を確かめる、testの中で遅れを決定的に作る（stubの遅延、上限を縮めるなど）、1本のprocessでの上限つきの繰り返し。
+- 上限の数値: 同時に流すtestのprocessは1本、`-j` / `--test-threads`はnextestなら`NEXTEST_TEST_THREADS`、`cargo test`なら`RUST_TEST_THREADS`以下（指定しなければ`[run.env]`の値のまま）、1回の繰り返しは20周か5分（`--stress-count 20`か`--stress-duration 5m`）まで。上の「stress」の5周・60秒より大きいのは原因を確かめる繰り返しだからで、ADR-t920-1が定時実行に移した重い繰り返し（20周以上を高い並列度で同時に複数本）とは、並列度を`[run.env]`の値に留めて1本ずつ流し、時間に上限を付ける点で分けた。繰り返しを何度か流すときも続けて1本ずつ流す。
+- それで再現しない稀な失敗は、直せる範囲（待っている条件・上限・順序への依存）を直し、失敗のときの出力（待っていた条件・最後の状態・eventの要約）を増やし、receiptの`follow_ups`（`flaky_test`、`<module>::<name>`で名指す）とCIの定時実行（[Stress CI](../design/stress-ci.md)）に任せる。receiptの`summary`には再現を試したやり方と、再現しなかったことを書く。
+- 上の「stress」との関係: stressは足した・変えたtestを他のrunが作る自然な負荷の下で軽く繰り返すもので、負荷を足さず、負荷が下がるのを待たない。この節はstressを変えず、stressも同じく負荷を作る処理と同時の複数のprocessを使わない。
+- 例外: 人がplan reviewのapprove_planのaskで認めた、高い負荷の下での確認をacceptanceに持つtask（ask 323のtask 1360・1361、ask 304のtask 1344）のworkerは、そのacceptanceどおりに確かめてよい。acceptanceが求める範囲（周回・並列度・同時の本数）を超えて負荷を足さない。それ以外のtaskのacceptanceが高い負荷の下での再現を求めていても例外にはならないので、この節のやり方で確かめ、求めに沿えない項目は「askにしないもの」とworkerのpromptのaskの規則どおり`worker_question`（`--because scope`）か`failed`のreceiptにする（例外を認めるのは人だけ。[taskの登録](task-registration.md)の「plan reviewが当てはめる規則」）。
 
 ## itのtestの時間の関門
 

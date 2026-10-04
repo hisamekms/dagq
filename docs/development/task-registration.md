@@ -1,10 +1,10 @@
 ---
 id: development-task-registration
 type: development
-title: このrepositoryのtaskの登録（verify・paths・evidence・changeの選び方、ADRを書くtask、plan reviewが当てはめる規則）
+title: このrepositoryのtaskの登録（verify・paths・evidence・changeの選び方、負荷の下で落ちるtestを直すtask、ADRを書くtask、plan reviewが当てはめる規則）
 status: current
 created: 2026-10-03
-updated: 2026-10-05 # task 1592
+updated: 2026-10-05 # task 1480
 owners:
   - hisamekms
 tags:
@@ -15,6 +15,7 @@ related:
   - adr-t1504-1
   - adr-t1504-2
   - adr-t1591-1
+  - adr-t1480-1
   - development-local-checks
   - development-testing
   - development-migrations
@@ -80,6 +81,12 @@ runtimeのtaskは`--paths`を宣言しない（上の「推奨の組み合わせ
 - 混ざるときは主な目的の1つを選ぶ（例: 不具合の修正にtestを足すなら`fix`、新しい機能のdocsを同じtaskで書くなら`feature`）。changeは検証を決めない（検証は上の推奨の組み合わせのとおり、変更の対象で選ぶ）。
 - 作業時間の前後比較で読む層は[運用](operations.md)の「KPIの読み方と印」。
 
+## 負荷の下で落ちるtestを直すtask
+
+- 負荷の下で落ちるtestを直すtaskのacceptanceとdescriptionに、高い負荷の下での再現を求めない（[ADR-t1480-1](../adr/2026-10-05-t1480-1-workers-add-no-load-to-the-host-to-reproduce-failures-under-load.md)決定(d)）。求めないもの: loadの値の指定（「load average 20以上で」など）、`-j` / `--test-threads`の`[run.env]`の並列度を超える引き上げ（`-j 16`など）、同時の複数のstressかtestのprocess、負荷をかける処理（`yes`・busy loop・stressの道具、「他のrunか負荷をかける処理」）。workerはそれらをhostで起動しないため（[手元の検証](local-checks.md)の「負荷の下で落ちるtestの再現」）。
+- 代わりに、再現と確かめ方は記録（eventのdump・log）を読む、待っている条件と上限を確かめる、testの中で遅れを決定的に作る（stubの遅延、上限を縮めるなど）、1本のprocessでの上限つきの繰り返し（上限の数値は同じ節）から選んで書き、それで再現しない稀な失敗は直せる範囲を直して失敗のときの出力を増やし、follow_up（`flaky_test`）とCIの定時実行（[ADR-t920-1](../adr/2026-09-28-t920-1-light-worker-stress-and-heavy-repetition-in-scheduled-ci.md)）に任せる、と書く。
+- 例外は、plan reviewのapprove_planのaskに人がreadyと答えて、高い負荷の下での確認をacceptanceに持つtaskを認めたものだけ（ask 323のtask 1360・1361（event 62021・62046に承認と適用）、ask 304のtask 1344）。これらは上の対象外で、workerはacceptanceどおりに確かめてよい（acceptanceの範囲を超えて負荷は足さない）。新しい例外は人のapprove_planの答えでだけ認められ、plannerもplan reviewも自分では例外を作らない（決定(e)）。既存の例外を取り消すときも、人の判断を得てから1360・1361を計画し直す。
+
 ## ADRを書くtask
 
 - ADRを書くtaskを登録するときは、descriptionに本数と各IDの中身を書く（自分のIDは`add`が返すまで分からないので「このtaskのIDでADR-t<ID>-1を書く」と書くか、`add`の後にdraftを直す）。verifyは上の「推奨の組み合わせ」の「ADRを書く」の行。IDの形と、番号の割り当ての棚卸しをしないことは[文書の規則](documents.md)の「ADRのID」。
@@ -96,4 +103,5 @@ runtimeのtaskは`--paths`を宣言しない（上の「推奨の組み合わせ
 - [ADRの索引](../adr/README.md)と、taskが名指すADRと`docs/design/`の文書を読み、`accepted`のADRの決定と矛盾するtaskは`concern`にする（`superseded`なら`superseded_by`を辿る）。
 - ADRを書くtaskが上の「ADRを書くtask」を満たすこと（IDとファイル名の形、`check-adr-numbers.sh`のverify、置き換えか`amends`か）。足りなければ`revise`。
 - 挙動や仕様を変えるtaskは、関連文書（[文書の規則](documents.md)の「workerの文書の照合」が挙げる文書）のpath・節と更新が要る理由をdescriptionかcontextに書くこと。欠けていて関連する文書が明らかなら、見つけたpathを理由に書いて`revise`にする。文書の差分を求めるverifyやevidenceは求めない（[ADR-t1428-1](../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)）。
+- 負荷の下で落ちるtestのtaskが上の「負荷の下で落ちるtestを直すtask」を満たすこと。acceptanceかdescriptionが高い負荷の下での再現を求めるtaskは`revise`にする（[ADR-t1480-1](../adr/2026-10-05-t1480-1-workers-add-no-load-to-the-host-to-reproduce-failures-under-load.md)決定(d)）。ただし人がapprove_planのaskにreadyと答えて認めたtask（ask 323のtask 1360・1361、ask 304のtask 1344）は例外として保ち、`revise`にしない。plan reviewは自分で新しい例外を作らない（決定(e)）。
 - 元goalのあるfollow_upのdraftは、plannerの所属の判断（分類・acceptanceの項目・理由・証拠・所属先・判定時の版）を起点に検査する。手順と判定の基準はpluginの`dagq`の`reference/register.md`の「A follow_up's membership」、決定は[ADR-t1504-1](../adr/2026-10-04-t1504-1-follow-ups-belong-to-the-goal-whose-acceptance-needs-them.md)と[ADR-t1504-2](../adr/2026-10-04-t1504-2-runtime-records-and-enforces-follow-up-membership-judgements.md)が持つ。疑わしいときにこのrepositoryで読む周辺の証拠は、元のrunのreceipt（`dagq events --full --run R --kind integration_receipt`）、元のtaskの差分（commit）、元goalのacceptanceの他の項目とdoc、名指されたADRと`docs/design/`の節。直せる対応づけの誤りは`revise`、follow_upを外すためにacceptanceを弱めたものは`concern`にする。
