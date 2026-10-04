@@ -480,8 +480,12 @@ fn provider_checks(
 /// `waiting` (`count` of `limit`, with the `returning` among them), and the
 /// runs that wait for a person or for a slot to go back to (ADR-0071
 /// decision 12), from the leases and the run events. `used` counts the
-/// leased runs that do not wait, landing ones included, as the supervisor
-/// counts its slots (ADR-t610-1); `count` is what
+/// leased runs that do not wait, landing ones included (ADR-t610-1), less
+/// `landing_queue`: those that wait only for their landing turn, up to
+/// `parallel` (ADR-t1591-1). A heavy task is claimed while `used` and
+/// `landing_queue` together are under `parallel`, a light one (of
+/// `[supervisor] light_changes`, with no returning run) while `used` is;
+/// `count` is what
 /// `--max-waiting` bounds (ADR-0071 (f2)): the runs that wait and those
 /// that wait to go back (`state: returning` in `waiting`). A supervisor that holds its claims
 /// has `claim_hold`: its latest `claim_held` payload and `since` (task
@@ -497,13 +501,19 @@ fn slots_and_waits(
     let mut waiting = Vec::new();
     // Per token: the slots in use and the runs out of them, counted as
     // `--max-waiting` counts them.
-    let mut counts: HashMap<&str, (i64, WaitCount)> = HashMap::new();
+    // Per token: the slots in use, the landing queue among them, and the
+    // runs out of them.
+    let mut counts: HashMap<&str, (usize, usize, WaitCount)> = HashMap::new();
     for lease in leases {
         let run = queue.run(&lease.run_id)?;
         let entry = counts.entry(lease.token.as_str()).or_default();
+        let events = queue.run_events(run.id())?;
         // The same wait as the run's `progress.slot` in `runs` ([`crate::domain::run_progress::SlotUse`]).
-        let Some(state) = WaitState::of(&queue.run_events(run.id())?) else {
+        let Some(state) = WaitState::of(&events) else {
             entry.0 += 1;
+            if crate::domain::run_progress::in_landing_queue(run.status(), &events) {
+                entry.1 += 1;
+            }
             continue;
         };
         let since = state.since_ms.div_euclid(1000);
@@ -521,7 +531,7 @@ fn slots_and_waits(
             wait["ended_at"] = json!(ms.div_euclid(1000));
             wait["cause"] = json!(cause.as_str());
         }
-        entry.1.add(state.ended.is_some());
+        entry.2.add(state.ended.is_some());
         waiting.push(wait);
     }
     // The hold on new claims in progress (task 327), on its supervisor.
@@ -551,12 +561,17 @@ fn slots_and_waits(
         .map(|(index, health)| {
             let mut value = serde_json::to_value(health)?;
             if let Some(registration) = registrations.get(index) {
-                let (used, count) = counts
+                let (held, queued, count) = counts
                     .get(registration.token.as_str())
                     .copied()
                     .unwrap_or_default();
+                // Up to `parallel` of the landing queue are out of the
+                // slots (ADR-t1591-1).
+                let parallel = usize::try_from(registration.parallel).unwrap_or(0);
+                let landing_queue = crate::domain::light_slots::outside_the_slots(queued, parallel);
                 value["slots"] = json!({
-                    "used": used,
+                    "used": held - landing_queue,
+                    "landing_queue": landing_queue,
                     "parallel": registration.parallel,
                     "source": registration.parallel_source,
                 });

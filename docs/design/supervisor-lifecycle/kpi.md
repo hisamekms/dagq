@@ -4,8 +4,8 @@ type: design
 title: "`kpi`"
 status: current
 created: 2026-09-26
-updated: 2026-10-03 # task 1398: session_* route= strata and health.planner_routes
-last_verified: 2026-10-03 # task 1398
+updated: 2026-10-04 # task 1591: slot_usage counts the landing queue and the light room
+last_verified: 2026-10-04 # task 1591
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -114,7 +114,7 @@ dagq kpi --compare <mark> --area runtime --change fix --by provider --by route -
 | `max_load_avg` | 期間のclaim時のload averageと`backend_call_failed`の`load_avg`の最大（`value`）と、claim時の分布 | `all` |
 | `auto_repairs` | 期間の`auto_repaired`の数。`layer`ごとは`details.auto_repairs_by_layer` | `all` |
 | `verify_command.<コマンド>` | `integrate`の検証コマンドごとの秒 | `all` |
-| `slot_usage` | runがslotを占めた時間 ÷ （`parallel` × supervisorが生きていた時間）。runはclaimから終わり（`run_integrated`、`succeeded` / `failed` / `interrupted`）まで、`run_waiting_started`→`run_slot_regained`を除く。supervisorは`supervisor_started`から、次のうち最も早いものまで: 次の`supervisor_started`（どのsupervisorでも）、同じsupervisorの`supervisor_stopped`（`up` / `down`が登録を消したときの印は`last_heartbeat_at`の時刻）、`supervisors`表に残る登録のheartbeatがstale（`HEARTBEAT_TIMEOUT_SECS`より古い）ならその`heartbeat_at`、今。どれも無く登録も消えている（停止の印を残さずに行が消えた）supervisorは、そのsupervisorの名を`supervisor`に持つ最後のeventで閉じる。生きているsupervisor（heartbeatが新しい登録）は今まで開いたまま。runの占有はsupervisorが生きていた区間に限る（印の記録より前と、終わりの記録が無いrunを数えない）。supervisorを複数同時に動かすと分母が小さく出る。`n`は占有のあったrun | `all` |
+| `slot_usage` | runがslotを占めた時間 ÷ （`parallel` × supervisorが生きていた時間）。runはclaimから終わり（`run_integrated`、`succeeded` / `failed` / `interrupted`）まで、`run_waiting_started`→`run_slot_regained`を除く。supervisorは`supervisor_started`から、次のうち最も早いものまで: 次の`supervisor_started`（どのsupervisorでも）、同じsupervisorの`supervisor_stopped`（`up` / `down`が登録を消したときの印は`last_heartbeat_at`の時刻）、`supervisors`表に残る登録のheartbeatがstale（`HEARTBEAT_TIMEOUT_SECS`より古い）ならその`heartbeat_at`、今。どれも無く登録も消えている（停止の印を残さずに行が消えた）supervisorは、そのsupervisorの名を`supervisor`に持つ最後のeventで閉じる。生きているsupervisor（heartbeatが新しい登録）は今まで開いたまま。runの占有はsupervisorが生きていた区間に限る（印の記録より前と、終わりの記録が無いrunを数えない）。supervisorを複数同時に動かすと分母が小さく出る。着地の順番を待つだけのrunもclaimから着地までの占有に数え、着地待ちが空けた軽い枠のrun（ADR-t1591-1）も同じく数えるので、軽い枠を使うと1を超えうる。`n`は占有のあったrun | `all` |
 | `landing_utilization` | 期間に`integrate`の試行が1本だけの着地slotを占めた時間の合計 ÷ 期間の長さ（まだ終わっていない期間は今まで）。試行は`integration_started`からその試行の終わり（`run_integrated`・延期・hold・error・失敗）までで、着地しなかった試行も数える。試行は重ならないので1を超えない（規則は[stats](stats.md#着地の直列処理の使用率)と同じ関数`stats::landing_utilization`）。`max`は`landing_utilization.peak`と同じ。`n`は期間に重なった試行の数。良い向きは持たない（制約を見る値）。既定の目標は持たない | `all` |
 | `landing_utilization.peak` | 期間の始まりから1時間ずつ切った丸ごとの1時間のうち、試行が占めた割合の最大。その時間の始まりは`details.landing_utilization.peak_hour.start` | `all` |
 | `landing_attempt` | 期間に終わった試行1回あたりの占有時間の秒（`median`・`p90`・`min`・`max`。開いたままの試行は数えない） | `all` |

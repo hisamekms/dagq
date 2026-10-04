@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::claim_spacing::DEFAULT_CLAIM_SPACING_SECS;
+use super::light_slots::LightChanges;
 use super::waiting::DEFAULT_MAX_WAITING;
 
 /// The default of `parallel`.
@@ -56,7 +57,7 @@ impl SettingSource {
 }
 
 /// `[supervisor]` of `dagq.toml`: each key it sets.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SupervisorConfig {
     /// At least 1.
     pub parallel: Option<usize>,
@@ -66,16 +67,25 @@ pub struct SupervisorConfig {
     pub runtime_planners: Option<usize>,
     /// Seconds; 0 spaces no claim.
     pub claim_spacing: Option<usize>,
+    /// The changes claimed in the room the landing queue leaves
+    /// (ADR-t1591-1); none claims nothing there. It has no flag.
+    pub light_changes: Option<LightChanges>,
 }
 
 impl SupervisorConfig {
     /// The keys `[supervisor]` may set.
-    pub const KEYS: [&'static str; 4] = [
+    pub const KEYS: [&'static str; 5] = [
         "parallel",
         "max_waiting",
         "runtime_planners",
         "claim_spacing",
+        "light_changes",
     ];
+
+    /// `light_changes`, empty when not set.
+    pub fn light_changes(&self) -> LightChanges {
+        self.light_changes.clone().unwrap_or_default()
+    }
 }
 
 /// The flags given to `supervise`; `None` is not given. `claim_spacing`
@@ -138,7 +148,7 @@ pub struct SlotLimits {
 impl SlotLimits {
     /// The flags over `[supervisor]` (none for no file or no table) over
     /// the defaults.
-    pub fn resolve(flags: SlotFlags, file: SupervisorConfig) -> Self {
+    pub fn resolve(flags: SlotFlags, file: &SupervisorConfig) -> Self {
         Self {
             parallel: Setting::resolve(flags.parallel, file.parallel, DEFAULT_PARALLEL),
             max_waiting: Setting::resolve(flags.max_waiting, file.max_waiting, DEFAULT_MAX_WAITING),
@@ -170,9 +180,26 @@ impl SlotLimits {
 }
 
 /// The payload of [`SUPERVISOR_CONFIG_CHANGED`] for a change from `from`
-/// to `to`, `None` when nothing changed.
-pub fn slot_limits_change(from: SlotLimits, to: SlotLimits) -> Option<Value> {
-    (from != to).then(|| json!({"from": from.json(), "to": to.json()}))
+/// to `to`, `None` when nothing changed: the slot limits and
+/// `light_changes` (ADR-t1591-1), by the names of the changes.
+pub fn supervisor_config_change(
+    from: (SlotLimits, &LightChanges),
+    to: (SlotLimits, &LightChanges),
+) -> Option<Value> {
+    let names = |light: &LightChanges| -> Vec<String> {
+        light
+            .values()
+            .iter()
+            .map(|c| c.as_str().to_owned())
+            .collect()
+    };
+    (from.0 != to.0 || from.1 != to.1).then(|| {
+        let mut from_json = from.0.json();
+        from_json["light_changes"] = json!(names(from.1));
+        let mut to_json = to.0.json();
+        to_json["light_changes"] = json!(names(to.1));
+        json!({"from": from_json, "to": to_json})
+    })
 }
 
 #[cfg(test)]
@@ -186,6 +213,7 @@ mod tests {
             max_waiting: Some(0),
             runtime_planners: Some(2),
             claim_spacing: Some(60),
+            light_changes: None,
         };
         let all = SlotFlags {
             parallel: Some(2),
@@ -193,7 +221,7 @@ mod tests {
             runtime_planners: Some(3),
             claim_spacing: Some(0),
         };
-        let limits = SlotLimits::resolve(all, file);
+        let limits = SlotLimits::resolve(all, &file);
         assert_eq!(limits.parallel.value, 2);
         assert_eq!(limits.parallel.source, SettingSource::Flag);
         assert_eq!(limits.max_waiting.value, 1);
@@ -225,7 +253,7 @@ mod tests {
             .complete()
         );
 
-        let limits = SlotLimits::resolve(SlotFlags::default(), file);
+        let limits = SlotLimits::resolve(SlotFlags::default(), &file);
         assert_eq!(
             (limits.parallel.value, limits.parallel.source),
             (3, SettingSource::File)
@@ -246,7 +274,7 @@ mod tests {
             (60, SettingSource::File)
         );
 
-        let limits = SlotLimits::resolve(SlotFlags::default(), SupervisorConfig::default());
+        let limits = SlotLimits::resolve(SlotFlags::default(), &SupervisorConfig::default());
         assert_eq!(
             (limits.parallel.value, limits.parallel.source),
             (DEFAULT_PARALLEL, SettingSource::Default)
@@ -283,18 +311,20 @@ mod tests {
             );
         }
         assert_eq!(SettingSource::parse("elsewhere"), None);
-        let from = SlotLimits::resolve(SlotFlags::default(), SupervisorConfig::default());
-        assert_eq!(slot_limits_change(from, from), None);
+        let from = SlotLimits::resolve(SlotFlags::default(), &SupervisorConfig::default());
+        let none = LightChanges::default();
+        assert_eq!(supervisor_config_change((from, &none), (from, &none)), None);
         let to = SlotLimits::resolve(
             SlotFlags::default(),
-            SupervisorConfig {
+            &SupervisorConfig {
                 parallel: Some(2),
                 max_waiting: None,
                 runtime_planners: Some(2),
                 claim_spacing: Some(0),
+                light_changes: None,
             },
         );
-        let payload = slot_limits_change(from, to).unwrap();
+        let payload = supervisor_config_change((from, &none), (to, &none)).unwrap();
         assert_eq!(payload["from"]["parallel"], json!(4));
         assert_eq!(payload["to"]["parallel"], json!(2));
         assert_eq!(payload["to"]["parallel_source"], json!("dagq.toml"));
@@ -306,6 +336,17 @@ mod tests {
         assert_eq!(payload["from"]["claim_spacing_source"], json!("default"));
         assert_eq!(payload["to"]["claim_spacing"], json!(0));
         assert_eq!(payload["to"]["claim_spacing_source"], json!("dagq.toml"));
+        assert_eq!(payload["to"]["light_changes"], json!([]));
+        // Only `light_changes` changed: reported all the same.
+        let docs = LightChanges::new(
+            vec!["docs".parse().unwrap()],
+            Some(&crate::domain::change::ChangeSet::new(vec!["docs".parse().unwrap()]).unwrap()),
+        )
+        .unwrap();
+        let payload = supervisor_config_change((from, &none), (from, &docs)).unwrap();
+        assert_eq!(payload["from"]["light_changes"], json!([]));
+        assert_eq!(payload["to"]["light_changes"], json!(["docs"]));
+        assert_eq!(payload["to"]["parallel"], json!(4));
     }
 }
 

@@ -94,7 +94,7 @@ fn a_run_waiting_for_its_answer_leaves_the_slot_to_another_task() {
     let status = runtime::status(&db).unwrap();
     assert_eq!(
         status["supervisors"][0]["slots"],
-        json!({"used": 0, "parallel": 1, "source": "flag"}),
+        json!({"used": 0, "landing_queue": 0, "parallel": 1, "source": "flag"}),
         "{status}"
     );
     assert_eq!(
@@ -211,7 +211,7 @@ fn the_waits_stay_within_their_limit() {
     );
     assert_eq!(
         status["supervisors"][0]["slots"],
-        json!({"used": 1, "parallel": 2, "source": "flag"})
+        json!({"used": 1, "landing_queue": 0, "parallel": 2, "source": "flag"})
     );
 
     // The first wait ends; the deferred run takes its place in the waits.
@@ -272,7 +272,7 @@ fn a_returning_run_counts_toward_the_limit() {
     );
     assert_eq!(
         status["supervisors"][0]["slots"],
-        json!({"used": 1, "parallel": 1, "source": "flag"})
+        json!({"used": 1, "landing_queue": 0, "parallel": 1, "source": "flag"})
     );
     assert_eq!(status["waiting"][0]["run_id"], json!(first.id()));
     assert_eq!(status["waiting"][0]["state"], "returning");
@@ -808,7 +808,7 @@ fn a_landing_run_fills_its_supervisors_slot_in_status_and_stats() {
         let status = runtime::status(&db).unwrap();
         assert_eq!(
             status["supervisors"][0]["slots"],
-            json!({"used": used, "parallel": 2, "source": null}),
+            json!({"used": used, "landing_queue": 0, "parallel": 2, "source": null}),
             "{token}: {status}"
         );
         // The dependent task is ready but blocked by the landing one.
@@ -836,7 +836,7 @@ fn a_landing_run_fills_its_supervisors_slot_in_status_and_stats() {
         let status = runtime::status(&db).unwrap();
         assert_eq!(
             status["supervisors"][0]["slots"],
-            json!({"used": used, "parallel": 2, "source": null}),
+            json!({"used": used, "landing_queue": 0, "parallel": 2, "source": null}),
             "{token}: {status}"
         );
         assert_eq!(idle_slots(&db), Some(json!(free)), "{token}");

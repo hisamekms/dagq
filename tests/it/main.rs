@@ -118,6 +118,7 @@ mod runtime_integrate;
 mod runtime_job_verdicts;
 mod runtime_landing_answers;
 mod runtime_landing_release;
+mod runtime_light_slots;
 mod runtime_observer;
 mod runtime_open_turn;
 mod runtime_precheck;

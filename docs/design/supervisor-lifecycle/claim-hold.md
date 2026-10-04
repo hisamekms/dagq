@@ -9,6 +9,7 @@ last_verified: 2026-10-04
 scope: runtime
 related:
   - adr-t1479-1
+  - adr-t1591-1
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-supervise
   - design-supervisor-lifecycle-status
@@ -54,6 +55,19 @@ loadの保留が有効なsupervisorは、新しいclaimの間を空ける（[ADR
 - **記録**: 間隔のための待ちは`claim_held` / `claim_resumed`にしない（observerと`stats`の`claim_holds`の控えの数え方に混ぜない）。待ち始めたときにlogにinfo（`claim_spaced`）を出す。間隔が効いているsupervisorの`run_claimed`のpayloadには、`claim_spacing`（秒）と`claim_spacing_wait_secs`（このprocessが間隔のためにそのclaimを待った秒。待たなければ0）が付く（`domain::measure::ClaimSpacing`）。待ちは、claimできる候補と空きslotがあるのに間隔で抜けた最初のpassから、claimしたpassまで。控え・空きslotが無い・候補が無いpassを挟むとそこで終わる。間隔の効いていないclaimには2つの欄が無い。
 - **登録と`status`**: supervisorは登録に`claim_spacing`と出どころ（`claim_spacing_source`）を`parallel`と一緒に書き、`--max-load`（無効ならNULL）を起動時に書く（migration 0063）。`status`のsupervisorの項目の`claim_spacing`がそれと次にclaimできる時刻を出す（[`status`](status.md)）。
 - `--once`のsupervisorは、runが無く次のclaimが間隔を待つpassで終わる（控えと同じ扱い）。
+
+## 着地待ちが空けた軽い枠
+
+reviewとe2eを終えて着地の順番を待つだけのrun（着地待ち）が空けた枠では、repositoryが軽いと決めたchangeのtaskだけをclaimする（[ADR-t1591-1](../../adr/2026-10-04-t1591-1-landing-queue-leaves-room-for-light-changes.md)、task 1591）。
+
+- **着地待ち**: `AwaitingSlot`のslotが、e2eが要らないか終わった後に、他のrunの着地中（`integrating`のrunがある）でそのpassの着地を始められなかったとき、`Slot::landing_turn`の印を付ける（見るたびに付け直す）。`Supervisor::landing_queue()`はその数。`used_slots()`は今までどおり着地待ちを含む。
+- **判定**: `fill_slots`のclaimのloopの各周で、`domain::light_slots::claim_room`が`used_slots()`・着地待ちの数・`parallel`・戻り待ちの数・`light_changes`が空でないかから`Any`（`used_slots()`が`parallel`未満。今までの空き）・`LightOnly`・`None`を返す。`LightOnly`は、`light_changes`が空でなく、戻り待ちのrunが無く、`used_slots()`から着地待ち（`parallel`件まで。`outside_the_slots`）を引いた数が`parallel`未満のとき。`LightOnly`の周は、claimの順（`claimable`）から`LightChanges::admits`に当たるtask（changeが`light_changes`の1つで、`--paths`を宣言している）だけを残し、同じ順でclaimする。interrupt・urgentでも軽くないtaskは残さない。
+- **関門**: claimの控え（`hold_claims`のloadとディスク）はloopの前に判定するので、控えているpassは軽い枠でもclaimしない。claimの間隔（上の「claimの間隔」）は軽い枠の周にも同じに効き（`domain::light_slots::gated`）、軽い枠のclaimも`run_claimed`を記録するので次の間隔を始める。
+- **戻る規則**: parkしたrunのresume（着地に失敗して`needs_session`に戻ったrunを含む）と待ちからの戻り・triage・adoptは今までどおり`used_slots()`が`parallel`未満のときだけ行い、軽い枠を使わない。
+- **記録**: 軽い枠のclaimの`run_claimed`のpayloadに`light_room: true`が付く（`domain::measure::ClaimAttributes`。それ以外のclaimには無い）。`slots`は今までどおりclaimの前の`used_slots()`（着地待ちを含む）。着地待ちに出入りするeventは無い。
+- **設定**: `dagq.toml`の`[supervisor] light_changes`（[Run environment](run-environment.md)の`[supervisor]`）。各passで読み直し、変わったら`supervisor_config_changed`の`from` / `to`の`light_changes`に記録する。flagは無く、全てのflagを与えたsupervisorも読む。
+- **見え方**: `status`のsupervisorの`slots.landing_queue`とrunの`progress.slot: landing_queue`（[`status`](status.md)）。`stats`の`idle_slots`の空きと`kpi`の`slot_usage`は軽い枠を数えない（着地待ちを含めて数える今のまま）。
+- test: `src/domain/light_slots.rs`のunit test（`light_changes`の検査・`admits`・`claim_room`・戻り待ちとresumeが通常の枠を待つこと・`gated`がloadの控えと間隔を軽い枠にも当てること）、`tests/it/runtime_light_slots.rs`（`light_changes = ["docs"]`・`parallel` 1で、着地待ちのrunが枠を埋めたとき`--paths`を宣言したdocsのtaskはclaimされ、interruptのfeatureと`--paths`の無いdocsのtaskはclaimされない。`a_parked_run_waits_for_a_normal_slot_while_the_landing_queue_fills_it`は、着地待ちが枠を埋めるあいだ`needs_session`のrunをresumeせずに軽いtaskだけをclaimし、枠が空くとinterruptのtaskのclaimより先にresumeすること）。
 
 ## 記録
 

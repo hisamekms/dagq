@@ -4,8 +4,8 @@ type: design
 title: "`stats`"
 status: current
 created: 2026-09-26
-updated: 2026-10-04 # task 655: a hook span's measurements come from its final session_turns
-last_verified: 2026-10-04 # task 655
+updated: 2026-10-04 # task 1591: idle_slots counts the landing queue in the slots
+last_verified: 2026-10-04 # task 1591
 scope: runtime
 related:
   - adr-t655-1
@@ -77,7 +77,7 @@ related:
   - `ask_unanswered`: `ask_opened`から60分答えられていないask（ADR-0022。`ask_answered`とはpayloadの`ask_id`（無ければ`id`）とrun・taskで対にする）。そのaskの`ask_id`（無ければ`id`）を文字列で`ask_id`に添える（記録が無ければ付けない。observerのskipの判定がaskを見分けるため。task 649）。その後に`run_integrated`になったrunのask、runを名指さない`blocked`のaskでそのtaskのrunが`run_integrated`になったものは数えない（task 329。runtimeが閉じる前に開いたaskも含む）
   - `task_failed`: 同じtaskのrunの`failed`が合わせて2回。回数はpageに関係なく全runで数え、`run_id`はその最後に失敗したrunで、そのrunが対象に入るときに出す（`--since`で2回目だけが新しくても出る）
   - `work_over_median`: `work`がそのgoal（goalの無いrunはgoalの無いrun同士）の中央値の2倍を超えたrun
-  - `idle_slots`: staleでないsupervisorの`parallel`の合計から実行中（`integrating`以外の未完了のrunと、登録されたsupervisorのtokenのleaseを持つrun（`integrating`、reviewや着地の順番を待つ`awaiting_integration`、resume中の`needs_session`などstatusを問わない）の和から、人の答えを待つ・slotへ戻るのを待つrunを除いたもの。登録の無いtokenのlease（人が手で打った`integrate`など）で着地中のrunは数えない。登録されたsupervisorについてはその`used_slots()`と同じ集合。[ADR-0071](../../adr/0071-runs-waiting-in-revise-and-resume-leave-the-slot.md)の決定13、[ADR-t610-1](../../adr/2026-09-27-t610-1-landing-runs-fill-the-slot-in-status-and-stats.md)）runを引いた空きslotがあるのに、candidatesがゼロで`ready`のtaskが残っている（依存で詰まっている）。`value`は空きslot数で、`task_id` / `run_id`はnull。readyのtaskが無い空のqueueは詰まりではないので出さない。draftのgoalに属するreadyのtaskは`goal ready`を待っているだけなので数えない。`stats`を読んだ時点のsnapshotで判定し、時間帯の履歴は持たない
+  - `idle_slots`: staleでないsupervisorの`parallel`の合計から実行中（`integrating`以外の未完了のrunと、登録されたsupervisorのtokenのleaseを持つrun（`integrating`、reviewや着地の順番を待つ`awaiting_integration`、resume中の`needs_session`などstatusを問わない）の和から、人の答えを待つ・slotへ戻るのを待つrunを除いたもの。登録の無いtokenのlease（人が手で打った`integrate`など）で着地中のrunは数えない。登録されたsupervisorについてはその`used_slots()`と同じ集合。[ADR-0071](../../adr/0071-runs-waiting-in-revise-and-resume-leave-the-slot.md)の決定13、[ADR-t610-1](../../adr/2026-09-27-t610-1-landing-runs-fill-the-slot-in-status-and-stats.md)）runを引いた空きslotがあるのに、candidatesがゼロで`ready`のtaskが残っている（依存で詰まっている）。`value`は空きslot数で、`task_id` / `run_id`はnull。着地の順番を待つだけのrunも今までどおり埋まったslotに数えるので、空きは重いtaskも使える枠で、着地待ちが空けた軽い枠（`status`の`slots.landing_queue`、[claimを控える](claim-hold.md#着地待ちが空けた軽い枠)、ADR-t1591-1）は数えない。readyのtaskが無い空のqueueは詰まりではないので出さない。draftのgoalに属するreadyのtaskは`goal ready`を待っているだけなので数えない。`stats`を読んだ時点のsnapshotで判定し、時間帯の履歴は持たない
   - `claim_held`: supervisorがclaimを控えている（`claim_holds.held`がある。load averageでも空き容量の不足でも）間に空きslotがある。`value`は空きslot数（`idle_slots`と同じ数え方）で、`task_id` / `run_id`はnull。これが出るときは`idle_slots`を出さない（[claimを控える](claim-hold.md)。task 327）
   - `claim_deferred`: `claim_held`が出ていないときに、空きslotがあり、衝突の多いファイルでclaimを控えているtask（`claim_deferrals.deferred`）がある。`value`は控えているtaskの数、`task_id` / `run_id`はnull。これが出るときは`idle_slots`を出さない（[claimを控える（衝突の多いファイル）](claim-defer.md)。ADR-0080）
   - `backend_failures`: 同じwindowの`backend_call_failed`が2件以上。`value`は件数、`task_id` / `run_id`はnull

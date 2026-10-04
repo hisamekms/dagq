@@ -144,13 +144,15 @@ impl Phase {
 
 /// How a run uses its supervisor's slot, as `status`' `slots` and
 /// `waiting` count it ([`WaitState`]): a leased run that does not wait
-/// takes a slot (`used`), one that waits for a person is out of it
-/// (`waiting`), one whose wait ended waits to go back (`returning`). A run
-/// nobody leases has none (`None`).
+/// takes a slot (`used`), one that waits only for its landing turn
+/// (`landing_queue`, ADR-t1591-1) leaves room for a light task, one that
+/// waits for a person is out of it (`waiting`), one whose wait ended waits
+/// to go back (`returning`). A run nobody leases has none (`None`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SlotUse {
     Used,
+    LandingQueue,
     Waiting,
     Returning,
 }
@@ -163,6 +165,15 @@ impl SlotUse {
             Some(_) => Self::Returning,
         })
     }
+}
+
+/// Whether a run in `status` waits only for its landing turn by its events
+/// (ADR-t1591-1): awaiting integration, its review passed and its e2e done
+/// or not needed (`landing_queued`, or an e2e that passed or found nothing
+/// to run, last).
+pub fn in_landing_queue(status: RunStatus, events: &[RunEvent]) -> bool {
+    status == RunStatus::AwaitingIntegration
+        && Progress::of(status, Lease::Live, events, 0).phase == Some(Phase::LandingQueue)
 }
 
 /// The run's lease as [`Progress::of`] reads it.
@@ -212,7 +223,15 @@ impl Progress {
             phase: current.map(|(phase, _)| phase),
             since,
             elapsed_secs: since.map(|since| (now - since).max(0)),
-            slot: SlotUse::of(lease != Lease::None, WaitState::of(events).as_ref()),
+            slot: SlotUse::of(lease != Lease::None, WaitState::of(events).as_ref()).map(|slot| {
+                let queued = status == RunStatus::AwaitingIntegration
+                    && current.is_some_and(|(phase, _)| phase == Phase::LandingQueue);
+                if slot == SlotUse::Used && queued {
+                    SlotUse::LandingQueue
+                } else {
+                    slot
+                }
+            }),
         }
     }
 }
@@ -494,5 +513,47 @@ mod tests {
             Progress::of(RunStatus::AwaitingIntegration, Lease::None, &returning, 0).slot,
             None
         );
+    }
+
+    #[test]
+    fn a_leased_run_that_waits_only_for_its_landing_turn_is_in_the_landing_queue() {
+        use RunStatus as S;
+        let queued = [
+            event(1, "review_finished", json!({"verdict": "pass"})),
+            event(2, "landing_queued", json!({"via": "exit"})),
+        ];
+        assert!(in_landing_queue(S::AwaitingIntegration, &queued));
+        assert_eq!(
+            Progress::of(S::AwaitingIntegration, Lease::Live, &queued, 0).slot,
+            Some(SlotUse::LandingQueue)
+        );
+        assert_eq!(
+            Progress::of(S::AwaitingIntegration, Lease::None, &queued, 0).slot,
+            None
+        );
+        // Its e2e runs: it works, in its slot.
+        let e2e = [queued[1].clone(), event(3, "run_e2e_started", json!({}))];
+        assert!(!in_landing_queue(S::AwaitingIntegration, &e2e));
+        assert_eq!(
+            Progress::of(S::AwaitingIntegration, Lease::Live, &e2e, 0).slot,
+            Some(SlotUse::Used)
+        );
+        // Its e2e passed: back in the landing queue.
+        let passed = [
+            e2e[0].clone(),
+            e2e[1].clone(),
+            event(4, "run_e2e_finished", json!({"outcome": "passed"})),
+        ];
+        assert!(in_landing_queue(S::AwaitingIntegration, &passed));
+        // Landing, or back in a session, it is in its slot.
+        let landing = [
+            passed[2].clone(),
+            event(5, "integration_started", json!({})),
+        ];
+        assert!(!in_landing_queue(S::Integrating, &landing));
+        assert!(!in_landing_queue(S::NeedsSession, &queued));
+        // In review: in its slot.
+        let review = [event(1, "review_started", json!({}))];
+        assert!(!in_landing_queue(S::AwaitingIntegration, &review));
     }
 }

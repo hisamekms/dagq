@@ -8,7 +8,16 @@ use anyhow::Result;
 use tracing::{info, warn};
 
 use super::Supervisor;
-use crate::domain::slot_limits::{SlotLimits, slot_limits_change};
+use crate::domain::light_slots::LightChanges;
+use crate::domain::slot_limits::{SlotLimits, supervisor_config_change};
+
+fn names(light: &LightChanges) -> Vec<&str> {
+    light
+        .values()
+        .iter()
+        .map(|change| change.as_str())
+        .collect()
+}
 
 impl Supervisor<'_> {
     /// Read `[supervisor]` again. Values that differ from those in use
@@ -21,10 +30,9 @@ impl Supervisor<'_> {
     /// under it. Planners over a lowered `runtime_planners` go on too; no
     /// new one is opened until they are under it. A changed
     /// `claim_spacing` spaces the next claim from the queue's latest one.
+    /// `light_changes` (ADR-t1591-1) has no flag: it is read with every
+    /// flag given too, and a change takes effect at the next claim.
     pub(super) fn reread_slot_limits(&mut self) -> Result<()> {
-        if self.slot_flags.complete() {
-            return Ok(());
-        }
         let Some(read) = self.supervisor_file.clone() else {
             return Ok(());
         };
@@ -46,10 +54,27 @@ impl Supervisor<'_> {
                 return Ok(());
             }
         };
-        let to = SlotLimits::resolve(self.slot_flags, config);
-        let Some(mut payload) = slot_limits_change(self.limits, to) else {
+        let to = SlotLimits::resolve(self.slot_flags, &config);
+        let light = config.light_changes();
+        let Some(mut payload) =
+            supervisor_config_change((self.limits, &self.light_changes), (to, &light))
+        else {
             return Ok(());
         };
+        if light != self.light_changes {
+            info!(
+                "[supervisor] light_changes of dagq.toml changed: {:?} -> {:?}",
+                names(&self.light_changes),
+                names(&light)
+            );
+            self.light_changes = light;
+        }
+        if to == self.limits {
+            payload["supervisor"] = serde_json::json!(self.token);
+            self.queue
+                .record_queue_event(EventKind::SupervisorConfigChanged, payload)?;
+            return Ok(());
+        }
         info!(
             "[supervisor] of dagq.toml changed: parallel {} -> {}, max_waiting {} -> {}, runtime_planners {} -> {}, claim_spacing {} -> {}",
             self.limits.parallel.value,

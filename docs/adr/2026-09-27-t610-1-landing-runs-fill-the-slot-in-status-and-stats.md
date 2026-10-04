@@ -9,6 +9,8 @@ accepted_on: 2026-09-27
 amends:
   - adr-0071 decision 12
   - adr-0071 decision 13
+amended_by:
+  - adr-t1591-1
 owners:
   - hisamekms
 tags:

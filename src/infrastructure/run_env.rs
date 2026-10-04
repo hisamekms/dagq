@@ -48,6 +48,7 @@ use crate::{
         exit::ExitConfig,
         kpi::KpiSettings,
         landing_branch::RepositoryConfig,
+        light_slots::LightChanges,
         resume::ResumeConfig,
         review_subagents::{self, ReviewSubagent},
         run_env::{RunEnvCheck, RunEnvProgram},
@@ -226,6 +227,9 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut exit_keys: Vec<String> = Vec::new();
     let mut trial_keys: Vec<String> = Vec::new();
     let mut supervisor_keys: Vec<String> = Vec::new();
+    // `[supervisor] light_changes` and its line, checked against `[tasks]
+    // changes` once the file is read whole (ADR-t1591-1).
+    let mut light_changes: Option<(Vec<TaskChange>, usize)> = None;
     let mut broker_keys: Vec<String> = Vec::new();
     let mut role: Option<ModelRole> = None;
     let mut roles_seen: Vec<ModelRole> = Vec::new();
@@ -623,6 +627,14 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     let secs = parse_whole(rest.trim()).with_context(with)?;
                     let secs = u32::try_from(secs).with_context(with)?;
                     config.supervisor.claim_spacing = Some(usize::try_from(secs)?);
+                } else if key == "light_changes" {
+                    let changes = parse_string_array(rest.trim())
+                        .with_context(with)?
+                        .iter()
+                        .map(|change| change.parse::<TaskChange>())
+                        .collect::<Result<Vec<_>, _>>()
+                        .with_context(with)?;
+                    light_changes = Some((changes, number));
                 } else {
                     let limit = parse_whole(rest.trim()).with_context(with)?;
                     config.supervisor.max_waiting =
@@ -747,6 +759,13 @@ pub fn parse_config(text: &str) -> Result<Config> {
         .map(|areas| AreaMap::new(areas).map_err(anyhow::Error::msg))
         .transpose()
         .with_context(|| format!("{CONFIG_FILE_NAME}: [{AREAS_TABLE}]"))?;
+    if let Some((changes, line)) = light_changes {
+        config.supervisor.light_changes = Some(
+            LightChanges::new(changes, config.changes.as_ref())
+                .map_err(anyhow::Error::msg)
+                .with_context(|| format!("{CONFIG_FILE_NAME}:{line}: value of light_changes"))?,
+        );
+    }
     Ok(config)
 }
 
@@ -2291,6 +2310,69 @@ LITERAL = 'no \n escapes # here'
         );
     }
 
+    /// `[supervisor] light_changes` names changes of `[tasks] changes`,
+    /// wherever `[tasks]` is, each once (ADR-t1591-1).
+    #[test]
+    fn parses_the_light_changes_of_the_supervisor_table() {
+        let tasks = "[tasks]\nchanges = [\"feature\", \"docs\", \"config\"]\n";
+        let config = parse_config(&format!(
+            "[supervisor]\nlight_changes = [\"docs\", 'config'] # light\n{tasks}"
+        ))
+        .unwrap();
+        let light = config.supervisor.light_changes();
+        assert_eq!(
+            light
+                .values()
+                .iter()
+                .map(|change| change.as_str())
+                .collect::<Vec<_>>(),
+            ["docs", "config"]
+        );
+        // Left out, nothing is light.
+        assert!(
+            parse_config(tasks)
+                .unwrap()
+                .supervisor
+                .light_changes()
+                .is_empty()
+        );
+        for (text, message) in [
+            (
+                format!("{tasks}[supervisor]\nlight_changes = [\"measure\"]\n"),
+                "dagq.toml:4: value of light_changes: names measure, which is not one of [tasks] changes",
+            ),
+            (
+                format!("{tasks}[supervisor]\n\nlight_changes = [\"docs\", \"docs\"]\n"),
+                "dagq.toml:5: value of light_changes: names docs twice",
+            ),
+            (
+                format!("{tasks}[supervisor]\nlight_changes = \"docs\"\n"),
+                "dagq.toml:4: value of light_changes: expected an array",
+            ),
+            (
+                format!("{tasks}[supervisor]\nlight_changes = [\"Docs\"]\n"),
+                "dagq.toml:4: value of light_changes",
+            ),
+            (
+                format!("{tasks}[supervisor]\nlight_changes = []\n"),
+                "dagq.toml:4: value of light_changes: names no change",
+            ),
+            (
+                "[supervisor]\nlight_changes = [\"docs\"]\n".to_owned(),
+                "dagq.toml:2: value of light_changes: names docs, but there is no [tasks] changes",
+            ),
+            (
+                format!(
+                    "{tasks}[supervisor]\nlight_changes = [\"docs\"]\nlight_changes = [\"docs\"]\n"
+                ),
+                "dagq.toml:5: light_changes is defined twice",
+            ),
+        ] {
+            let error = format!("{:#}", parse_config(&text).unwrap_err());
+            assert!(error.contains(message), "{text:?}: {error}");
+        }
+    }
+
     #[test]
     fn parses_and_loads_the_supervisor_table() {
         let config =
@@ -2303,6 +2385,7 @@ LITERAL = 'no \n escapes # here'
                 max_waiting: Some(0),
                 runtime_planners: Some(2),
                 claim_spacing: Some(120),
+                light_changes: None,
             }
         );
         assert_eq!(
@@ -2321,6 +2404,7 @@ LITERAL = 'no \n escapes # here'
                 max_waiting: Some(2),
                 runtime_planners: None,
                 claim_spacing: None,
+                light_changes: None,
             }
         );
         assert_eq!(
@@ -2367,7 +2451,7 @@ LITERAL = 'no \n escapes # here'
             ),
             (
                 "[supervisor]\nslots = 2\n",
-                "unknown key slots in [supervisor]; the keys are parallel, max_waiting, runtime_planners, claim_spacing",
+                "unknown key slots in [supervisor]; the keys are parallel, max_waiting, runtime_planners, claim_spacing, light_changes",
             ),
             (
                 "[supervisor]\nclaim_spacing = -1\n",
@@ -2411,6 +2495,7 @@ LITERAL = 'no \n escapes # here'
                 max_waiting: None,
                 runtime_planners: None,
                 claim_spacing: None,
+                light_changes: None,
             })
         );
         fs::write(dir.path().join(CONFIG_FILE_NAME), "[supervisors]\n").unwrap();

@@ -39,6 +39,7 @@ impl Slot {
             waiting: None,
             consumed: Vec::new(),
             deferred: Vec::new(),
+            landing_turn: false,
         }
     }
 
@@ -46,6 +47,11 @@ impl Slot {
     /// go back.
     pub(super) fn out_of_slot(&self) -> bool {
         self.waiting.is_some()
+    }
+
+    /// Whether the run waits only for its landing turn (ADR-t1591-1).
+    pub(super) fn in_landing_queue(&self) -> bool {
+        self.landing_turn && matches!(self.phase, Phase::AwaitingSlot) && self.waiting.is_none()
     }
 
     fn waiting_now(&self) -> bool {
@@ -150,6 +156,24 @@ impl Supervisor<'_> {
     /// to go back (decision 5).
     pub(super) fn used_slots(&self) -> usize {
         self.slots.iter().filter(|slot| !slot.out_of_slot()).count()
+    }
+
+    /// The runs in the slots that wait only for their landing turn
+    /// (ADR-t1591-1): `used_slots` counts them, and up to `parallel` of
+    /// them leave room for a light task.
+    pub(super) fn landing_queue(&self) -> usize {
+        self.slots
+            .iter()
+            .filter(|slot| slot.in_landing_queue())
+            .count()
+    }
+
+    /// The runs whose wait ended and that wait to go back to a slot.
+    pub(super) fn returning_runs(&self) -> usize {
+        self.slots
+            .iter()
+            .filter(|slot| slot.waiting.as_ref().is_some_and(|w| w.ended.is_some()))
+            .count()
     }
 
     /// The runs held against `--max-waiting`: the waiting ones and those

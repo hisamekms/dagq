@@ -73,6 +73,10 @@ pub struct ClaimAttributes {
     pub load_avg: Option<f64>,
     #[serde(flatten)]
     pub spacing: Option<ClaimSpacing>,
+    /// `true` for a light task claimed in the room the landing queue
+    /// leaves (ADR-t1591-1); left out otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub light_room: Option<bool>,
 }
 
 /// The spacing a claim was made under (ADR-t1479-1).
@@ -252,6 +256,7 @@ mod tests {
             slots: 1,
             load_avg: Some(7.5),
             spacing: None,
+            light_room: None,
         };
         assert_eq!(
             serde_json::to_value(&attributes).unwrap(),
@@ -272,8 +277,13 @@ mod tests {
             }),
             ..attributes
         };
-        let value = serde_json::to_value(spaced).unwrap();
+        let value = serde_json::to_value(&spaced).unwrap();
         assert_eq!(value["claim_spacing"], 180);
         assert_eq!(value["claim_spacing_wait_secs"], 42);
+        let light = ClaimAttributes {
+            light_room: Some(true),
+            ..spaced
+        };
+        assert_eq!(serde_json::to_value(light).unwrap()["light_room"], true);
     }
 }

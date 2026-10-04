@@ -874,6 +874,7 @@ pub mod kpi;
 pub mod landing_branch;
 pub mod landing_release;
 pub mod language;
+pub mod light_slots;
 pub mod lint;
 pub mod marks;
 pub mod measure;

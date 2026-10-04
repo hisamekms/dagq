@@ -389,6 +389,11 @@ fn status_lists_the_held_and_the_latest_runs_with_their_phase_and_slot() {
             let count = |slot: &str| slots.get(slot).copied().unwrap_or(0);
             assert_eq!(supervisor["slots"]["used"], count("used"), "{supervisor}");
             assert_eq!(
+                supervisor["slots"]["landing_queue"],
+                count("landing_queue"),
+                "{supervisor}"
+            );
+            assert_eq!(
                 supervisor["waiting"]["count"],
                 count("waiting") + count("returning"),
                 "{supervisor}"

@@ -27,6 +27,7 @@
 use crate::domain::EventKind;
 use crate::domain::LeaseToken;
 use crate::domain::language::with_instruction;
+use crate::domain::light_slots::{self, ClaimRoom};
 use crate::domain::slot_limits::{SlotFlags, SlotLimits, SupervisorConfig};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::Serialize;
@@ -224,6 +225,9 @@ pub struct LoopSettings {
     /// The flags `limits` was resolved from: a value not given is read
     /// again from `[supervisor]` each pass.
     pub slot_flags: SlotFlags,
+    /// `[supervisor] light_changes` at the start (ADR-t1591-1), read again
+    /// each pass.
+    pub light_changes: crate::domain::light_slots::LightChanges,
     /// Exit when no run is active and no task can be claimed, instead of
     /// polling for new work.
     pub once: bool,
@@ -833,6 +837,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         slot_flags: settings.slot_flags,
         supervisor_file: ports.supervisor_file.clone(),
         supervisor_error: None,
+        light_changes: settings.light_changes.clone(),
         finished: Vec::new(),
         errors: Vec::new(),
         claiming: true,
@@ -975,6 +980,9 @@ struct Supervisor<'a> {
     /// The error the last read of `[supervisor]` failed with, warned of
     /// once until it changes or a read succeeds.
     supervisor_error: Option<String>,
+    /// `[supervisor] light_changes` as last read (ADR-t1591-1): the tasks
+    /// claimed in the room the landing queue leaves.
+    light_changes: crate::domain::light_slots::LightChanges,
     finished: Vec<TaskRun>,
     errors: Vec<RunError>,
     /// Cleared after a provisioning failure so an unavailable cmux or Git
@@ -1180,6 +1188,10 @@ struct Slot {
     consumed: Vec<AskId>,
     /// The asks `run_waiting_deferred` was recorded for.
     deferred: Vec<AskId>,
+    /// In `AwaitingSlot`, the run's review passed and its e2e is done, and
+    /// it waits only for its landing turn (ADR-t1591-1): its last look
+    /// found another run landing.
+    landing_turn: bool,
 }
 
 enum Phase {
@@ -1778,19 +1790,45 @@ impl Supervisor<'_> {
             warn!(error = %format_args!("{error:#}"), "[worker.trial] could not be read; claiming without the trial: {error:#}");
             WorkerTrial::default()
         });
-        while self.used_slots() < parallel {
+        loop {
+            // A heavy task needs a slot with the landing queue in it, as
+            // always; the room the landing queue leaves takes only a light
+            // task (ADR-t1591-1).
+            let room = light_slots::claim_room(
+                self.used_slots(),
+                self.landing_queue(),
+                parallel,
+                self.returning_runs(),
+                !self.light_changes.is_empty(),
+            );
+            if room == ClaimRoom::None {
+                break;
+            }
             // Highest effective priority, then most-releasing, then lowest
             // ID (ADR-0040 decision 4); `candidates` and `graph` show the
             // same order, so it is not recorded.
             // Less the candidates deferred on a conflict hotspot (ADR-0069).
             let graph = dependency_graph(self.queue.graph_input()?, None);
-            let order = self.claimable(&graph)?;
+            let mut order = self.claimable(&graph)?;
+            // In the light room, only the light tasks, in the same order,
+            // whatever the priority of the others.
+            if room == ClaimRoom::LightOnly {
+                let light: HashSet<TaskId> = self
+                    .queue
+                    .candidates()?
+                    .into_iter()
+                    .filter(|task| self.light_changes.admits(task.change(), task.paths()))
+                    .map(|task| task.id())
+                    .collect();
+                order.retain(|id| light.contains(id));
+            }
             if order.is_empty() {
                 break;
             }
             // While the load hold is on, a claim waits for the spacing
-            // after the queue's latest claim, and the next pass judges the
-            // load again before it (ADR-t1479-1).
+            // after the queue's latest claim, a light one too, and the next
+            // pass judges the load again before it (ADR-t1479-1). The hold
+            // itself returned above, before any claim.
             let spacing = claim_spacing::in_effect(self.max_load, self.limits.claim_spacing.value);
             let now_ms = crate::application::unix_millis(self.generators.clock.system_time());
             if spacing.is_some() {
@@ -1798,8 +1836,7 @@ impl Supervisor<'_> {
                     .queue
                     .latest_event_of(crate::domain::event_kind::RUN_CLAIMED)?
                     .and_then(|event| crate::domain::stats::timestamp_millis(&event.created_at));
-                let next = claim_spacing::next_claim_ms(spacing, last);
-                if claim_spacing::waits(next, now_ms) {
+                if light_slots::gated(room, false, spacing, last, now_ms) == ClaimRoom::None {
                     if spaced_since.is_none() {
                         info!(
                             event = "claim_spaced",
@@ -1851,6 +1888,7 @@ impl Supervisor<'_> {
             });
             let attributes = ClaimAttributes {
                 spacing,
+                light_room: (room == ClaimRoom::LightOnly).then_some(true),
                 ..self.claim_attributes(parallel, host.clone())
             };
             let run = match self.queue.claim_for_supervisor_in_order(
@@ -2065,6 +2103,7 @@ impl Supervisor<'_> {
             slots: self.used_slots(),
             load_avg: (self.load_average)(),
             spacing: None,
+            light_room: None,
         }
     }
     /// Sample the load average once for every slot's current interval
@@ -2601,6 +2640,9 @@ impl Supervisor<'_> {
                 self.finish_resumed_session(slot, attempt, &workspace, verdict)
             }
             Phase::AwaitingSlot => {
+                // Judged again on each look: only the landing of another run
+                // keeps it in the landing queue (ADR-t1591-1).
+                slot.landing_turn = false;
                 // Its verification would fail on the missing program: the
                 // run stays awaiting integration, leased, and the
                 // integration slot stays free (ADR-0049 decision 9). A
@@ -2658,6 +2700,9 @@ impl Supervisor<'_> {
                     .runs_with_status(RunStatus::Integrating)?
                     .is_empty()
                 {
+                    // Reviewed and its e2e done, it waits only for its
+                    // landing turn (ADR-t1591-1).
+                    slot.landing_turn = true;
                     return Ok(Step::Continue);
                 }
                 let current = self.queue.run(slot.run.id())?;
@@ -2680,6 +2725,7 @@ impl Supervisor<'_> {
                             .runs_with_status(RunStatus::Integrating)?
                             .is_empty() =>
                     {
+                        slot.landing_turn = true;
                         return Ok(Step::Continue);
                     }
                     Err(error) => return Err(error),

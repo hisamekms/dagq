@@ -46,7 +46,7 @@ use crate::{
     domain::{
         IntegrationOutcome, NewAsk, PlannerId, Provider, RunId, SessionRole, SupervisorMode,
         SupervisorRegistration, TaskDetail, TaskId, TaskRun,
-        slot_limits::{SlotFlags, SlotLimits, SupervisorConfig},
+        slot_limits::{SlotFlags, SlotLimits},
         stall::StallConfig,
         stats::{ConflictConfigReport, StatsQuery},
         worker::{ProviderCheck, Worker, WorkerMode},
@@ -607,6 +607,7 @@ impl SuperviseOptions {
             no_claude: self.no_claude,
             retry_unreadable_review: self.retry_unreadable_review,
             limits,
+            light_changes: Default::default(),
             slot_flags: self.slot_flags(),
             once: self.once,
             stop: self.stop.clone(),
@@ -750,20 +751,19 @@ pub fn supervise_with_reviewer(
     // `[supervisor]` that cannot be read at the start leaves the defaults,
     // as `[disk]` does; later reads keep the values in use.
     let slot_flags = options.slot_flags();
-    let limits = SlotLimits::resolve(
-        slot_flags,
-        if slot_flags.complete() {
-            SupervisorConfig::default()
-        } else {
-            load_supervisor_config(&main_checkout)
-                .unwrap_or_else(|error| {
-                    tracing::warn!(error = %format_args!("{error:#}"), "[supervisor] of dagq.toml not read: {error:#}; using the defaults");
-                    None
-                })
-                .unwrap_or_default()
-        },
-    );
-    let supervisor_file = (!slot_flags.complete()).then(|| {
+    // Read even with every flag given: `light_changes` has no flag
+    // (ADR-t1591-1).
+    let supervisor_config = load_supervisor_config(&main_checkout)
+        .unwrap_or_else(|error| {
+            tracing::warn!(error = %format_args!("{error:#}"), "[supervisor] of dagq.toml not read: {error:#}; using the defaults");
+            None
+        })
+        .unwrap_or_default();
+    let limits = SlotLimits::resolve(slot_flags, &supervisor_config);
+    let light_changes = supervisor_config.light_changes();
+    // Read each pass even with every flag given: `light_changes` has no
+    // flag (ADR-t1591-1).
+    let supervisor_file = Some({
         let checkout = main_checkout.clone();
         Arc::new(move || load_supervisor_config(&checkout))
             as crate::application::supervise::SupervisorFile
@@ -1183,6 +1183,7 @@ pub fn supervise_with_reviewer(
     };
     let settings = LoopSettings {
         conflicts_error,
+        light_changes,
         ..options.settings(stall, conflicts, disk, resume, exit, limits)
     };
     supervisor::supervise(&ports, &settings)
