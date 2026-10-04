@@ -869,13 +869,14 @@ fn a_turn_past_its_limit_is_stopped_with_its_command_outside_its_group() {
     // waits for `ready` before returning, so even a slow first exec cannot
     // spend the turn's limit before the outside command exists. The initial
     // 3 s delay deliberately exceeds the 2 s limit to exercise this ordering.
-    // The resume's commit precedes its ready marker as well; only receipt
-    // publication and the turn's result spend that turn's short limit.
+    // The resume's commit and the read of its head precede its ready marker
+    // as well, so no Git under load spends that turn's short limit: only
+    // the receipt's rename and the turn's result do (task 1629).
     set_turns(
         dir.path(),
         &format!(
             r#"case "$MODE" in
-resume) commit work; {ready}; receipt "$(git rev-parse HEAD)"; say finished ;;
+resume) commit work; head=$(git rev-parse HEAD); {ready}; receipt "$head"; say finished ;;
 *) sleep 3
 perl -e 'setpgrp(0, 0) or die "setpgrp: $!";
 open(my $pid, ">", "$ARGV[0]/outside.pid") or die $!;
