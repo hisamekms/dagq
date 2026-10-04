@@ -200,13 +200,16 @@ impl Supervisor<'_> {
         // exec reads it again before the plugin is asked about.
         let plugin = read("plugin").filter(|_| read("current").as_deref() == Some(&port.current));
         let latest = read("latest");
-        // A request about the plugin of a release older than one out now is
-        // left with its reason, not silently.
+        // Leave requests this build cannot run with their reason.
         for dropped in release_update::dropped_requests(&port.current, latest.as_deref(), &updates)
         {
             info!(
-                "release update: the plugin-only {} for {} is not run: {} is out, and its install brings the plugin up too",
-                dropped["request"], dropped["release"], dropped["newer"]
+                "release update: {} for {} is not run by {}: {} (plugin_only: {})",
+                dropped["request"],
+                dropped["release"],
+                port.current,
+                dropped["reason"],
+                dropped["plugin_only"]
             );
             let mut payload = dropped;
             payload["supervisor"] = json!(self.token);
@@ -394,7 +397,9 @@ Answer `retry` to update the plugin again at the supervisor's next check, or `sk
             format!(
                 "The job that installs release {version} (pid {}) ended without recording how, at \
 its {}; nothing tells whether the binary was replaced. Its logs are in the queue's logs/ directory. \
-Answer `retry` to install release {version} again at the supervisor's next check, or `skip` to \
+Answer `retry` to install release {version} at the next check of a supervisor running an older \
+build. A supervisor already on that release or newer records `update_dropped` instead; any older \
+plugin is handled separately by auto mode or a plugin approval. Answer `skip` to \
 leave it (the next release asks again).",
                 job_pid(step).unwrap_or_default(),
                 step.kind

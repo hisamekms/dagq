@@ -774,3 +774,49 @@ fn a_plugin_install_behind_a_newer_release_is_dropped_with_its_reason() {
     assert_eq!(s.steps("update_dropped", "0.4.0").len(), 1);
     assert!(events_of(&s.db, "update_started").is_empty());
 }
+
+/// A retry of an interrupted binary job, answered on a supervisor already on
+/// that release, is dropped once with its reason and starts no job; an older
+/// build sharing the queue still installs it. The reasons and install versus
+/// retry are decided in `release_update::dropped_requests` (its unit tests).
+#[test]
+fn binary_requests_already_installed_are_dropped_once_and_an_older_build_can_install() {
+    let mut s = setup("", "0.4.0", false);
+    record_look(&s, "0.4.0", "0.4.0");
+    s.record(
+        EventKind::UpdateStarted,
+        json!({
+            "source": "release", "release": "0.4.0", "pid": 2147483647,
+            "plugin_only": false
+        }),
+    );
+    s.supervise();
+    let ask = s
+        .asks(false)
+        .into_iter()
+        .find(|ask| ask.kind == AskKind::UpdateFailed)
+        .unwrap();
+    assert!(ask.question.contains("update_dropped"));
+    s.answer(&ask, "retry");
+    s.supervise();
+    let answered = s.steps("update_retry", "0.4.0");
+    let dropped = s.steps("update_dropped", "0.4.0");
+    assert_eq!(dropped.len(), 1, "{dropped:?}");
+    assert_eq!(dropped[0]["ask_id"], answered[0]["ask_id"]);
+    assert_eq!(dropped[0]["answer"], "retry");
+    assert_eq!(dropped[0]["request"], "update_retry");
+    assert_eq!(dropped[0]["plugin_only"], false);
+    assert_eq!(dropped[0]["current"], "0.4.0");
+    assert_eq!(dropped[0]["reason"], "already_installed");
+    let status = runtime::status(&s.db).unwrap();
+    assert_eq!(status["auto_update"]["state"], "dropped");
+    assert_eq!(status["auto_update"]["last"]["reason"], "already_installed");
+    assert_eq!(s.steps("update_started", "0.4.0").len(), 1);
+    s.supervise();
+    assert_eq!(s.steps("update_dropped", "0.4.0").len(), 1);
+    assert_eq!(s.steps("update_started", "0.4.0").len(), 1);
+    s.options.release_current = Some("0.3.0".into());
+    s.supervise();
+    assert_eq!(s.steps("update_started", "0.4.0").len(), 2);
+    s.wait_failed("0.4.0", 2);
+}

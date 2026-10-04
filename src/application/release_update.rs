@@ -179,8 +179,9 @@ fn plugin_only(update: &RunEvent) -> Option<bool> {
 
 /// Whether the request `updates[at]` was followed: a job of its release
 /// (or of a newer one) started after it, or the release update dropped it
-/// ([`dropped_requests`]).
-fn followed(updates: &[RunEvent], at: usize) -> bool {
+/// ([`dropped_requests`]) for this build. A binary drop does not consume
+/// the request for an older build.
+fn followed(updates: &[RunEvent], at: usize, current: &str) -> bool {
     let request = &updates[at];
     let Some(version) = step_release(request) else {
         return true;
@@ -192,6 +193,10 @@ fn followed(updates: &[RunEvent], at: usize) -> bool {
             later.payload.get("ask_id").is_some()
                 && later.payload.get("ask_id") == request.payload.get("ask_id")
                 && step_release(later) == Some(version)
+                // A binary drop describes the observing build, not a job.
+                // An older supervisor may still install this request.
+                && !(later.payload["plugin_only"] == false
+                    && is_newer(version, current))
         }
         _ => false,
     })
@@ -207,18 +212,19 @@ pub fn answer_plugin_only(recorded: Option<bool>, release: &str, current: &str) 
     recorded.unwrap_or(release == current)
 }
 
-/// Why a plugin-only request is dropped: a newer release is out, and the
-/// job that installs it brings the plugin to it too.
+/// A newer release supersedes the request: the binary already runs it,
+/// or its install brings the plugin up too.
 pub const DROPPED_NEWER_RELEASE: &str = "newer_release";
 
-/// The requests about the plugin alone (an `install` answer or a `retry`
-/// with `plugin_only: true`) that no job followed and that
-/// [`next_plugin_action`] never will: a release newer than theirs is the
-/// supervisor's build `current` or the `latest` found, and the plugin's job
-/// only runs for the latest release (the binary's job of the newer release
-/// updates the plugin after it). Each is left with an `update_dropped`
-/// (`reason: newer_release`) instead of silently: the payloads of those
-/// to record. `updates` is newest first.
+/// The supervisor already runs the requested binary release.
+pub const DROPPED_ALREADY_INSTALLED: &str = "already_installed";
+
+/// Requests no job followed that this build cannot run: a binary release
+/// already installed (or older), or a plugin superseded by a newer release.
+/// Leave their reason once per request. Binary drops do not consume a
+/// request for a supervisor whose build is older than the requested release.
+/// Legacy requests without a purpose retain their previous behavior.
+/// `updates` is newest first.
 pub fn dropped_requests(current: &str, latest: Option<&str>, updates: &[RunEvent]) -> Vec<Value> {
     if !is_release_build(current) {
         return Vec::new();
@@ -226,24 +232,32 @@ pub fn dropped_requests(current: &str, latest: Option<&str>, updates: &[RunEvent
     updates
         .iter()
         .enumerate()
-        .filter(|(at, update)| {
-            is_request(update) && plugin_only(update) == Some(true) && !followed(updates, *at)
-        })
+        .filter(|(at, update)| is_request(update) && !followed(updates, *at, current))
         .filter_map(|(_, update)| {
             let version = step_release(update)?;
-            let newer = [Some(current), latest]
-                .into_iter()
-                .flatten()
-                .filter(|newer| is_newer(newer, version))
-                .reduce(|best, newer| if is_newer(newer, best) { newer } else { best })?;
+            let plugin_only = plugin_only(update)?;
+            let (reason, newer) = if plugin_only {
+                let newer = [Some(current), latest]
+                    .into_iter()
+                    .flatten()
+                    .filter(|newer| is_newer(newer, version))
+                    .reduce(|best, newer| if is_newer(newer, best) { newer } else { best })?;
+                (DROPPED_NEWER_RELEASE, Some(newer))
+            } else if version == current {
+                (DROPPED_ALREADY_INSTALLED, None)
+            } else if is_newer(current, version) {
+                (DROPPED_NEWER_RELEASE, Some(current))
+            } else {
+                return None;
+            };
             Some(json!({
                 "source": update.payload["source"],
                 "release": version,
                 "ask_id": update.payload["ask_id"],
                 "answer": update.payload["answer"],
                 "request": update.kind,
-                "plugin_only": true,
-                "reason": DROPPED_NEWER_RELEASE,
+                "plugin_only": plugin_only,
+                "reason": reason,
                 "newer": newer,
                 "current": current,
             }))
@@ -284,7 +298,7 @@ pub fn next_action(
         .filter_map(|(at, update)| {
             let version = step_release(update)?;
             // A job of it, or of a newer release, answered it.
-            (!followed(updates, at) && is_newer(version, current)).then_some(version)
+            (!followed(updates, at, current) && is_newer(version, current)).then_some(version)
         })
         .reduce(|best, version| {
             if is_newer(version, best) {
@@ -350,7 +364,7 @@ pub fn next_plugin_action(
         is_request(update)
             && plugin_only(update) != Some(false)
             && step_release(update) == Some(current)
-            && !followed(updates, at)
+            && !followed(updates, at, current)
     });
     if requested {
         return ReleaseAction::StartPlugin(current.to_owned());
@@ -730,7 +744,7 @@ mod tests {
     }
 
     /// A request about the plugin of a release older than the build or the
-    /// latest found is dropped once, with its reason; one about the binary,
+    /// latest found is dropped once, with its reason; one about a newer binary,
     /// one of the latest release, one a job followed and one of a
     /// development build are not.
     #[test]
@@ -775,7 +789,7 @@ mod tests {
             ("0.4.0", Some("0.4.0"), plugin.to_vec()),
             ("0.3.0", Some("0.4.0"), plugin.to_vec()),
             (
-                "0.4.0",
+                "0.3.0",
                 Some("0.5.0"),
                 vec![request(UPDATE_ANSWERED, false)],
             ),
@@ -811,6 +825,64 @@ mod tests {
                 dropped_requests(current, latest, &updates).is_empty(),
                 "{current} {latest:?} {updates:?}"
             );
+        }
+    }
+
+    #[test]
+    fn binary_requests_already_installed_are_dropped_without_consuming_older_builds() {
+        for (kind, answer) in [(UPDATE_ANSWERED, "install"), (UPDATE_RETRY, "retry")] {
+            for (current, reason) in [
+                ("0.4.0", DROPPED_ALREADY_INSTALLED),
+                ("0.5.0", DROPPED_NEWER_RELEASE),
+            ] {
+                let request = plugin_step(
+                    kind,
+                    "0.4.0",
+                    json!({"plugin_only": false, "answer": answer, "ask_id": 7}),
+                );
+                let drops =
+                    dropped_requests(current, Some("0.6.0"), std::slice::from_ref(&request));
+                assert_eq!(drops.len(), 1);
+                assert_eq!(drops[0]["reason"], reason);
+                assert_eq!(drops[0]["current"], current);
+                assert_eq!(drops[0]["plugin_only"], false);
+                let after = [update(UPDATE_DROPPED, drops[0].clone()), request.clone()];
+                assert!(dropped_requests(current, None, &after).is_empty());
+                assert_eq!(
+                    next_action(ReleaseMode::Ask, current, None, &after, &[]),
+                    ReleaseAction::Nothing
+                );
+                assert_eq!(
+                    next_action(ReleaseMode::Ask, "0.3.0", None, &after, &[]),
+                    ReleaseAction::Start("0.4.0".into())
+                );
+                assert_eq!(
+                    next_plugin_action(ReleaseMode::Ask, "0.4.0", Some("0.4.0"), None, &after, &[]),
+                    ReleaseAction::Nothing
+                );
+                // Independent plugin detection still works after a binary drop.
+                for (mode, expected) in [
+                    (ReleaseMode::Ask, ReleaseAction::AskPlugin("0.4.0".into())),
+                    (
+                        ReleaseMode::Auto,
+                        ReleaseAction::StartPlugin("0.4.0".into()),
+                    ),
+                ] {
+                    assert_eq!(
+                        next_plugin_action(
+                            mode,
+                            "0.4.0",
+                            Some("0.4.0"),
+                            Some("0.3.0"),
+                            &after,
+                            &[]
+                        ),
+                        expected
+                    );
+                }
+                let followed = [release(UPDATE_STARTED, "0.4.0", None), request];
+                assert!(dropped_requests(current, None, &followed).is_empty());
+            }
         }
     }
 

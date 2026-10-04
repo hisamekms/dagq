@@ -1377,9 +1377,11 @@ supervisor serves the queue now, `up` starts one.",
         ),
         Subject::Release(version) => format!(
             "The update to {} failed at its {stage}: {error}\n\n{situation} The job's log is \
-{}.\n\nAnswer `retry` to install release {version} again at the supervisor's next check (after \
-fixing what failed; it needs cargo), or `skip` to leave release {version} (the next release asks \
-again). By hand, `dagq install --release {version}` does the same, and `dagq install --from \
+{}.\n\nAnswer `retry` to install release {version} at the next check of a supervisor running an older \
+build (after fixing what failed; it needs cargo). A supervisor already on that release or newer \
+records `update_dropped` instead; any older plugin is handled separately by auto mode or a plugin \
+approval. Answer `skip` to leave release {version} (the next release asks \
+again). By hand, `dagq install --release {version}` explicitly installs that release, and `dagq install --from \
 <binary>` puts a dagq {version} installed another way in place. If no supervisor serves the queue \
 now, `up` starts one.",
             job.subject.describe(),
