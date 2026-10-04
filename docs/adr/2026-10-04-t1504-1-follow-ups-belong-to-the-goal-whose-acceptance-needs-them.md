@@ -9,6 +9,8 @@ accepted_on: 2026-10-04
 amends:
   - adr-0047 decision 16
   - adr-0047 decision 43
+amended_by:
+  - adr-t1639-2
 owners:
   - hisamekms
 tags:
