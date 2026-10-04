@@ -1487,9 +1487,11 @@ impl Supervisor<'_> {
             if !self.queue.ask_delivered_to(ask.id, workspace)? {
                 continue;
             }
-            // A headless planner took the answer up once the turn of its
-            // request finished: its turns are recorded, and a stub's turn
-            // may end within the second the answer was claimed.
+            // A headless planner took the answer up once a turn carrying
+            // it finished otherwise than at Claude's wall (the turn of its
+            // request, or the provider retry after it): its turns are
+            // recorded, and a stub's turn may end within the second the
+            // answer was claimed.
             if let Some(taken) = self.headless_answer_taken(view, ask.id)? {
                 if !taken {
                     return Ok(Some(PlannerBusy::AnswerTyped));

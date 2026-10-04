@@ -1,7 +1,8 @@
 //! How the turns of a headless planner of the runtime's end, as the
 //! supervisor acts on them (ADR-t1394-2 decisions 3 and 5): a turn that
 //! failed at Claude's usage limit waits in the queue's hold and goes on
-//! with the same call once the hold is answered, a turn stopped at its
+//! with the same call once the hold is answered (and a request written
+//! during that turn waits behind the retry), a turn stopped at its
 //! limit tells the inbox, and a planning request's planner (ADR-t1394-1)
 //! ends in `proposed`, or, ending undecided, is followed by another (the
 //! one after an answer carrying it) until the request is `exhausted`, all
@@ -159,6 +160,161 @@ say "turn $TURN""#,
         TaskStatus::Canceled
     );
     // One planner all along, ended as it exited, never told of as silent.
+    assert_eq!(queue.planners(true).unwrap().len(), 1);
+    let closed = queue_events(&fx.db, "planner_closed");
+    assert_eq!(closed.len(), 1, "{closed:?}");
+    assert_eq!(closed[0]["code"], "runtime_exited");
+    assert!(queue_events(&fx.db, "planner_unresponsive").is_empty());
+    assert!(backend.texts().is_empty(), "nothing typed");
+}
+
+/// Acceptance (task 1596): a follow-up request written while the turn of
+/// the answer runs waits behind it when that turn fails at Claude's usage
+/// limit: the wrapper takes nothing before the `provider retry`, so the
+/// planner is idle at the wall and waits in the queue's hold, and once the
+/// hold is answered the retry carries the answer and the follow-up comes
+/// after it; the follow-up's turn finishes the draft and the planner is
+/// closed.
+#[test]
+fn a_request_written_during_a_turn_at_the_usage_limit_waits_for_the_retry_of_that_turn() {
+    let fx = headless_fixture(
+        r#"case "$TURN" in
+1) "$DAGQ" --db "$DB" ask --kind planner_question --because scope --task 2 --question "in the goal?" --cmux true >> "$RUN_DIR/ask.log" 2>&1 ;;
+2) await_file "$RUN_DIR/turns/request-000002.json"
+  fail "Claude AI usage limit reached|1790535600" ;;
+*) case "$PROMPT" in *"a request for you"*) "$DAGQ" --db "$DB" cancel 2 >> "$RUN_DIR/cancel.log" 2>&1 ;; esac ;;
+esac
+say "turn $TURN""#,
+    );
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let goal = open_goal(&mut queue);
+    let draft = runtime_draft(
+        &mut queue,
+        "gap",
+        Some(goal),
+        DraftOrigin::FollowUp,
+        json!({"source_task_id": 1, "source_run_id": null, "index": 0}),
+    );
+    assert_eq!(draft, TaskId::new(2));
+    let reviewer = StubReviewer::new(&[]);
+    let backend = PlanWorkspace::default();
+    let open_ask = |kind: AskKind| {
+        SqliteQueue::open(&fx.db)
+            .unwrap()
+            .asks(Default::default())
+            .unwrap()
+            .into_iter()
+            .find(|ask| ask.kind == kind)
+    };
+    supervise_until(
+        &fx,
+        &backend,
+        &reviewer,
+        || open_ask(AskKind::PlannerQuestion).is_some(),
+        || diagnose_planner(&fx.db),
+    );
+    let asked = open_ask(AskKind::PlannerQuestion).unwrap();
+    queue.answer(asked.id, "keep it").unwrap();
+    // The answer's turn runs; the inbox hands a follow-up meanwhile.
+    supervise_until(
+        &fx,
+        &backend,
+        &reviewer,
+        || queue_events(&fx.db, "turn_started").len() == 2,
+        || diagnose_planner(&fx.db),
+    );
+    let handed = crate::common::cli::ok_as(
+        "inbox",
+        &fx.db,
+        &[
+            "planner",
+            "request",
+            "1",
+            "--text",
+            "also split the docs",
+            "--cmux",
+            "true",
+        ],
+    );
+    assert_eq!(handed["seq"], 2, "{handed}");
+    supervise_until(
+        &fx,
+        &backend,
+        &reviewer,
+        || open_ask(AskKind::QueueHold).is_some(),
+        || diagnose_planner(&fx.db),
+    );
+    for _ in 0..3 {
+        supervise_with(
+            &fx,
+            &backend,
+            &reviewer,
+            &options(1, Duration::from_secs(3600)),
+        );
+    }
+    // At the wall: the follow-up is not run against the Claude that cannot
+    // be used, and the planner waits in the hold, not ended.
+    let dir = planners_dir(&fx.db).join("1");
+    let turns = dir.join("turns");
+    assert!(turns.join("request-000002.json").is_file(), "not taken");
+    assert_eq!(queue_events(&fx.db, "turn_started").len(), 2);
+    assert!(!turns.join("exit").exists(), "not ended");
+    assert!(
+        queue
+            .planner(PlannerId::new(1))
+            .unwrap()
+            .closed_at
+            .is_none()
+    );
+    let waiting = queue_events(&fx.db, "provider_waiting");
+    assert_eq!(waiting.len(), 1, "{waiting:?}");
+    assert_eq!(waiting[0]["planner_id"], 1);
+    assert_eq!(waiting[0]["turn"], 2);
+    assert_eq!(waiting[0]["reason"], "usage_limit");
+    let hold = open_ask(AskKind::QueueHold).unwrap();
+    assert_eq!(waiting[0]["ask_id"], hold.id.as_i64());
+
+    queue.answer(hold.id, "done").unwrap();
+    supervise_until(
+        &fx,
+        &backend,
+        &reviewer,
+        || !queue_events(&fx.db, "planner_closed").is_empty(),
+        || diagnose_planner(&fx.db),
+    );
+    // The answer, its retry, then the follow-up: nothing is lost.
+    let requests = taken(&fx.db, PlannerId::new(1));
+    let whats: Vec<&str> = requests
+        .iter()
+        .map(|r| r["what"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        whats,
+        [
+            format!("answer of ask {}", asked.id).as_str(),
+            "follow-up request followup-1",
+            "provider retry",
+        ],
+        "by seq"
+    );
+    let started: Vec<Value> = queue_events(&fx.db, "turn_started");
+    let order: Vec<&str> = started
+        .iter()
+        .map(|s| s["what"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(started.len(), 4, "{started:?}");
+    assert_eq!(order[2], "provider retry", "{order:?}");
+    assert_eq!(order[3], "follow-up request followup-1", "{order:?}");
+    let retry = requests[2]["prompt"].as_str().unwrap();
+    assert!(retry.contains("can be used again"), "{retry}");
+    assert!(
+        retry.contains(&format!("answer to ask {}: keep it", asked.id)),
+        "{retry}"
+    );
+    assert_eq!(
+        queue.show(draft).unwrap().task.status(),
+        TaskStatus::Canceled
+    );
     assert_eq!(queue.planners(true).unwrap().len(), 1);
     let closed = queue_events(&fx.db, "planner_closed");
     assert_eq!(closed.len(), 1, "{closed:?}");

@@ -14,7 +14,10 @@ use crate::application::{planner::PlannerView, planner_idle_marker};
 use crate::domain::{
     EventKind, PlannerOrigin, PlannerRoute, PlannerSession, PlannerState,
     provider_switch::{self, SwitchReason},
-    turn::{TurnFailure, TurnMark, TurnOutcome, TurnRequest, taken_path},
+    turn::{
+        TurnFailure, TurnMark, TurnOutcome, TurnRequest, request_read, request_to_retry,
+        taken_path, wall_answered,
+    },
 };
 
 /// Whether the planner of `view` is a headless planner of the runtime's.
@@ -32,7 +35,10 @@ impl Supervisor<'_> {
     }
 
     /// Whether the headless planner of `view` took up the answer of `ask`
-    /// written as its request: the turn that took the request finished.
+    /// written as its request: the turn that took the request finished
+    /// otherwise than at Claude's wall, or the `provider retry` that made
+    /// it again did ([`request_read`]); a turn that failed at the wall did
+    /// not get to it, and the planner ended then would lose it unread.
     /// `None` for an interactive planner, and when no request of the answer
     /// is recorded (its record failed), which leave it to the idle marker's
     /// time.
@@ -53,15 +59,7 @@ impl Supervisor<'_> {
         else {
             return Ok(None);
         };
-        let turn = events
-            .iter()
-            .find(|e| e.kind == event_kind::TURN_STARTED && e.payload["request"] == seq)
-            .and_then(|e| e.payload["turn"].as_u64());
-        Ok(Some(turn.is_some_and(|turn| {
-            events
-                .iter()
-                .any(|e| e.kind == event_kind::TURN_FINISHED && e.payload["turn"] == turn)
-        })))
+        Ok(Some(request_read(&events, seq)))
     }
 
     /// The provider failure the idle headless planner of `view` stopped at
@@ -110,11 +108,8 @@ impl Supervisor<'_> {
         else {
             return Ok(());
         };
-        // A request after the turn (the retry) answers it.
-        if events[finished_at..]
-            .iter()
-            .any(|e| e.kind == event_kind::TURN_REQUESTED)
-        {
+        // The retry after the turn answers it ([`wall_answered`]).
+        if wall_answered(&events[finished_at..]) {
             return Ok(());
         }
         let turn = finished["turn"].as_u64().unwrap_or(0);
@@ -160,12 +155,9 @@ impl Supervisor<'_> {
         if self.provider_held(Provider::Claude).is_some() {
             return Ok(());
         }
-        let started = events
-            .iter()
-            .rfind(|e| e.kind == event_kind::TURN_STARTED && e.payload["turn"] == turn)
-            .map(|e| e.payload.clone())
-            .unwrap_or_default();
-        let undelivered = started["request"].as_u64().and_then(|seq| {
+        // The call that first met the wall, which a retry that met it
+        // again carries too.
+        let undelivered = request_to_retry(&events).and_then(|seq| {
             let text = self
                 .files
                 .read_to_string(&taken_path(&view.dir, seq))
@@ -173,6 +165,10 @@ impl Supervisor<'_> {
             serde_json::from_str::<TurnRequest>(&text).ok()
         });
         let text = retry_text(Provider::Claude, reason, undelivered.as_ref());
+        // Stamped before it is written, as every request: a stamp whose
+        // retry was not written (or was, after a turn that already ended)
+        // leaves the marker stale, and the wrapper, which takes nothing
+        // before the retry, renews it so that the wall is tended again.
         self.stamp_planner_input(view);
         self.send_to_planner(view, &workspace, Input::Text(&text), PROVIDER_RETRY)?;
         info!(

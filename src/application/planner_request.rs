@@ -148,8 +148,10 @@ pub fn request_planner(
     let name = next_follow_up_name(names.iter().map(String::as_str));
     let handed = hand_request_to_planner(probes.files, &view.dir, &name, words)?;
     // Not stamped as input: the planner is not idle while the request
-    // waits in its `turns/`, and its wrapper stamps the input as it takes
-    // it.
+    // waits in its `turns/` (unless its last turn met Claude's wall, when
+    // the wrapper takes nothing before the `provider retry` and the planner
+    // stays idle at the wall, task 1596), and its wrapper stamps the input
+    // as it takes it.
     let what = format!("follow-up request {name}");
     let seq = write_request(probes.files, &view.dir, &handed.sentence, &what)?;
     // The supervisor may have asked it to exit meanwhile: a request still

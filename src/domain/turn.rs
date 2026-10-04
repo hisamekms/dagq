@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 
 use super::{
     DomainError, RunEvent,
-    event_kind::{TURN_FINISHED, TURN_STARTED},
+    event_kind::{TURN_FINISHED, TURN_REQUESTED, TURN_STARTED},
     stats::timestamp_millis,
     tokens::TokenUsage,
     transcript::Turn,
@@ -80,12 +80,142 @@ impl TurnOutcome {
     pub fn goes_on(self, failure: Option<TurnFailure>) -> bool {
         match self {
             Self::Succeeded => true,
-            Self::Failed => matches!(
-                failure,
-                Some(TurnFailure::Authentication | TurnFailure::UsageLimit | TurnFailure::Launch)
-            ),
+            Self::Failed => failure.is_some_and(TurnFailure::at_provider_wall),
             Self::Silent | Self::TimedOut | Self::LaunchMismatch | Self::Stopped => false,
         }
+    }
+}
+
+impl TurnFailure {
+    /// Whether a turn that failed so met the provider's wall (its login,
+    /// its usage limit, an agent that did not start): the session waits
+    /// for the provider rather than ending.
+    pub fn at_provider_wall(self) -> bool {
+        matches!(self, Self::Authentication | Self::UsageLimit | Self::Launch)
+    }
+}
+
+/// What a request that makes a call failed at the provider's wall again,
+/// on the same provider once its hold ended, is called (`turn_requested`'s
+/// `what`).
+pub const PROVIDER_RETRY: &str = "provider retry";
+
+/// Whether a turn that ended with `outcome` and `failure` met the
+/// provider's wall.
+fn walled(outcome: Option<&str>, failure: Option<&str>) -> bool {
+    outcome == Some(TurnOutcome::Failed.as_str())
+        && failure
+            .and_then(|failure| failure.parse::<TurnFailure>().ok())
+            .is_some_and(TurnFailure::at_provider_wall)
+}
+
+/// The request a headless planner's wrapper takes next of the `pending`
+/// ones (oldest first, each with its `what`). After a turn that met the
+/// provider's wall (`after_wall`) it takes none but the `provider retry`
+/// the supervisor writes once Claude can be used again, so that the
+/// request the failed turn took is made again before any request that
+/// waited behind it (a revise, an answer, a `planner request` written
+/// while the turn ran), and none of those runs against a Claude that
+/// cannot be used (task 1596); the ones that waited are taken after it,
+/// in order.
+pub fn request_to_take<'a>(
+    pending: impl IntoIterator<Item = (u64, &'a str)>,
+    after_wall: bool,
+) -> Option<u64> {
+    pending
+        .into_iter()
+        .find(|(_, what)| !after_wall || *what == PROVIDER_RETRY)
+        .map(|(seq, _)| seq)
+}
+
+/// Whether a headless planner whose idle marker is newer than its last
+/// input is idle: no request waits in its `turns/` (`waiting`), or the
+/// turn the marker is of (`mark`) met the provider's wall, after which the
+/// wrapper takes nothing before the `provider retry` and the planner waits
+/// at the wall for the supervisor's hold (task 1596).
+pub fn idle_after_turn(mark: Option<&TurnMark>, waiting: bool) -> bool {
+    !waiting || mark.is_some_and(TurnMark::at_provider_wall)
+}
+
+/// Whether the wall a headless planner's last turn met is answered: a
+/// `provider retry` was requested among the `events` after that turn's
+/// `turn_finished`. Another request written after it waits behind the
+/// retry (the wrapper takes the retry first), so it is no answer.
+pub fn wall_answered(events: &[RunEvent]) -> bool {
+    events
+        .iter()
+        .any(|e| e.kind == TURN_REQUESTED && e.payload["what"] == PROVIDER_RETRY)
+}
+
+/// Whether a headless planner's wrapper waiting at the provider's wall
+/// renews its idle marker (written at `marker`, `None` without one): an
+/// input stamped after it (`last_input`) with no `provider retry` waiting
+/// (`retry_waiting`) is a request the wrapper does not take before the
+/// retry, or a retry whose write failed after its stamp, and leaves the
+/// planner at work by its view while nothing runs, so that the wall would
+/// never be tended (task 1596). Renewed, the planner is idle at the wall
+/// again.
+pub fn renew_wall_marker(
+    retry_waiting: bool,
+    marker: Option<std::time::SystemTime>,
+    last_input: std::time::SystemTime,
+) -> bool {
+    !retry_waiting && marker.is_some_and(|marker| marker < last_input)
+}
+
+/// The request a `provider retry` after the last turn of a headless
+/// planner's `events` makes again: the one that turn took, or, when that
+/// turn was itself a `provider retry` (it met the wall again), the one the
+/// turn before it took, back to the call that first met the wall, so that
+/// a retry carries the call itself rather than a retry of a retry. `None`
+/// when that turn took no request (the initial prompt).
+pub fn request_to_retry(events: &[RunEvent]) -> Option<u64> {
+    let mut started = events.iter().rev().filter(|e| e.kind == TURN_STARTED);
+    loop {
+        let turn = started.next()?;
+        if turn.payload["what"] != PROVIDER_RETRY {
+            return turn.payload["request"].as_u64();
+        }
+    }
+}
+
+/// Whether the headless planner whose turns are `events` read the request
+/// `seq` (the answer of its question): the turn that took it finished
+/// otherwise than at the provider's wall, or it met the wall and the
+/// `provider retry` turn the wrapper took next carried it to such an end.
+/// A turn that met the wall did not get to its request, and a planner
+/// ended then would lose the answer unread (task 1596).
+pub fn request_read(events: &[RunEvent], seq: u64) -> bool {
+    let Some(mut at) = events
+        .iter()
+        .position(|e| e.kind == TURN_STARTED && e.payload["request"] == seq)
+    else {
+        return false;
+    };
+    loop {
+        let turn = &events[at].payload["turn"];
+        let Some(finished) = events[at..]
+            .iter()
+            .position(|e| e.kind == TURN_FINISHED && e.payload["turn"] == *turn)
+            .map(|offset| at + offset)
+        else {
+            return false;
+        };
+        let payload = &events[finished].payload;
+        if !walled(payload["outcome"].as_str(), payload["failure"].as_str()) {
+            return true;
+        }
+        let Some(next) = events[finished..]
+            .iter()
+            .position(|e| e.kind == TURN_STARTED)
+            .map(|offset| finished + offset)
+        else {
+            return false;
+        };
+        if events[next].payload["what"] != PROVIDER_RETRY {
+            return false;
+        }
+        at = next;
     }
 }
 
@@ -437,6 +567,13 @@ pub struct TurnMark {
 }
 
 impl TurnMark {
+    /// Whether the turn met the provider's wall: it failed at a login, a
+    /// usage limit or an agent that did not start.
+    pub fn at_provider_wall(&self) -> bool {
+        self.outcome == TurnOutcome::Failed
+            && self.failure.is_some_and(TurnFailure::at_provider_wall)
+    }
+
     pub fn parse(content: &[u8]) -> Option<Self> {
         let value: Value = serde_json::from_slice(content).ok()?;
         let turn = value.get("dagq_turn")?;
@@ -738,6 +875,188 @@ mod tests {
             Path::new("/r/turns/turn-000002.jsonl")
         );
         assert_eq!(exit_path(dir), Path::new("/r/turns/exit"));
+    }
+
+    fn turn_event(kind: &str, payload: Value) -> RunEvent {
+        RunEvent {
+            id: super::super::EventId::new(1),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.to_owned(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        }
+    }
+
+    fn started(turn: u64, request: Option<u64>, what: &str) -> RunEvent {
+        turn_event(
+            TURN_STARTED,
+            json!({"turn": turn, "request": request, "what": what}),
+        )
+    }
+
+    fn finished(turn: u64, failure: Option<&str>) -> RunEvent {
+        let outcome = if failure.is_some() {
+            "failed"
+        } else {
+            "succeeded"
+        };
+        turn_event(
+            TURN_FINISHED,
+            json!({"turn": turn, "outcome": outcome, "failure": failure}),
+        )
+    }
+
+    #[test]
+    fn after_a_wall_only_the_provider_retry_is_taken_and_the_rest_wait_behind_it() {
+        let pending = [(2, "revise"), (3, "answer of ask 4"), (5, PROVIDER_RETRY)];
+        assert_eq!(request_to_take(pending, false), Some(2));
+        assert_eq!(request_to_take(pending, true), Some(5));
+        assert_eq!(request_to_take(pending[..2].iter().copied(), true), None);
+        assert_eq!(request_to_take([], false), None);
+        for failure in [
+            TurnFailure::Authentication,
+            TurnFailure::UsageLimit,
+            TurnFailure::Launch,
+        ] {
+            assert!(failure.at_provider_wall(), "{failure:?}");
+        }
+        for failure in [TurnFailure::Model, TurnFailure::Sandbox, TurnFailure::Other] {
+            assert!(!failure.at_provider_wall(), "{failure:?}");
+        }
+    }
+
+    #[test]
+    fn a_planner_at_the_wall_is_idle_with_requests_waiting_and_otherwise_not() {
+        let mark = |outcome, failure| TurnMark {
+            turn: 2,
+            outcome,
+            failure,
+            permission_denials: 0,
+        };
+        let walls = [
+            TurnFailure::Authentication,
+            TurnFailure::UsageLimit,
+            TurnFailure::Launch,
+        ];
+        for failure in walls {
+            let walled = mark(TurnOutcome::Failed, Some(failure));
+            assert!(walled.at_provider_wall(), "{failure:?}");
+            assert!(idle_after_turn(Some(&walled), true), "{failure:?}");
+            assert!(idle_after_turn(Some(&walled), false), "{failure:?}");
+        }
+        for other in [
+            mark(TurnOutcome::Succeeded, None),
+            mark(TurnOutcome::Failed, Some(TurnFailure::Model)),
+            mark(TurnOutcome::Failed, None),
+            mark(TurnOutcome::TimedOut, Some(TurnFailure::UsageLimit)),
+        ] {
+            assert!(!other.at_provider_wall(), "{other:?}");
+            assert!(!idle_after_turn(Some(&other), true), "{other:?}");
+            assert!(idle_after_turn(Some(&other), false), "{other:?}");
+        }
+        assert!(!idle_after_turn(None, true));
+        assert!(idle_after_turn(None, false));
+    }
+
+    #[test]
+    fn only_a_provider_retry_after_the_turn_answers_its_wall() {
+        let requested = |what: &str| turn_event(TURN_REQUESTED, json!({"seq": 3, "what": what}));
+        assert!(!wall_answered(&[]));
+        assert!(!wall_answered(&[requested("revise")]));
+        assert!(!wall_answered(&[
+            requested("follow-up request followup-1"),
+            requested("answer of ask 4"),
+        ]));
+        assert!(wall_answered(&[
+            requested("revise"),
+            requested(PROVIDER_RETRY),
+        ]));
+        assert!(!wall_answered(&[turn_event(
+            TURN_STARTED,
+            json!({"turn": 3, "what": PROVIDER_RETRY}),
+        )]));
+    }
+
+    #[test]
+    fn a_marker_at_the_wall_is_renewed_after_a_later_stamp_until_the_retry_waits() {
+        let at = |secs| std::time::UNIX_EPOCH + Duration::from_secs(secs);
+        assert!(renew_wall_marker(false, Some(at(10)), at(11)));
+        assert!(!renew_wall_marker(true, Some(at(10)), at(11)), "the retry");
+        assert!(!renew_wall_marker(false, Some(at(11)), at(11)), "not stale");
+        assert!(!renew_wall_marker(false, Some(at(12)), at(11)));
+        assert!(!renew_wall_marker(false, None, at(11)), "no marker");
+    }
+
+    #[test]
+    fn a_retry_makes_again_the_call_that_first_met_the_wall_not_a_retry_of_it() {
+        let first = [
+            started(1, None, "initial prompt"),
+            finished(1, None),
+            started(2, Some(1), "answer of ask 3"),
+            finished(2, Some("usage_limit")),
+        ];
+        assert_eq!(request_to_retry(&first), Some(1));
+        let again = [
+            first.to_vec(),
+            vec![
+                started(3, Some(4), PROVIDER_RETRY),
+                finished(3, Some("authentication")),
+            ],
+        ]
+        .concat();
+        assert_eq!(request_to_retry(&again), Some(1));
+        assert_eq!(
+            request_to_retry(&[
+                started(1, None, "initial prompt"),
+                finished(1, Some("launch"))
+            ]),
+            None
+        );
+        assert_eq!(request_to_retry(&[]), None);
+    }
+
+    #[test]
+    fn an_answer_is_read_only_once_a_turn_carrying_it_ends_otherwise_than_at_the_wall() {
+        let walled = vec![
+            started(1, Some(2), "answer of ask 3"),
+            finished(1, Some("usage_limit")),
+        ];
+        assert!(!request_read(&walled, 2));
+        let retried = [walled.clone(), vec![started(2, Some(4), PROVIDER_RETRY)]].concat();
+        assert!(!request_read(&retried, 2), "the retry runs");
+        let again = [retried.clone(), vec![finished(2, Some("launch"))]].concat();
+        assert!(!request_read(&again, 2), "the retry met the wall too");
+        let read = [
+            again.clone(),
+            vec![started(3, Some(5), PROVIDER_RETRY), finished(3, None)],
+        ]
+        .concat();
+        assert!(request_read(&read, 2));
+        let other = [
+            walled.clone(),
+            vec![started(2, Some(4), "revise"), finished(2, None)],
+        ]
+        .concat();
+        assert!(!request_read(&other, 2), "a turn that did not carry it");
+        assert!(request_read(
+            &[started(1, Some(2), "answer of ask 3"), finished(1, None)],
+            2
+        ));
+        assert!(
+            request_read(
+                &[
+                    started(1, Some(2), "answer of ask 3"),
+                    finished(1, Some("model"))
+                ],
+                2
+            ),
+            "a failure that ends the session is no wall"
+        );
+        assert!(!request_read(&[started(1, Some(2), "answer of ask 3")], 2));
+        assert!(!request_read(&walled, 9));
     }
 
     #[test]

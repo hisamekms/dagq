@@ -4,8 +4,8 @@ type: design
 title: "Draft planners (supervisor)"
 status: current
 created: 2026-09-26
-updated: 2026-10-04 # task 1571: the limits of draft_planner_prompt and planner_prompt_written (ADR-t1566-1) (after task 1506, task 1508)
-last_verified: 2026-10-04 # task 1571 (after task 1506, task 1508)
+updated: 2026-10-04 # task 1596: a headless planner at the provider wall takes the provider retry before the requests behind it, and an answer is read only past the wall
+last_verified: 2026-10-04 # task 1596
 scope: runtime
 related:
   - adr-t1394-1
@@ -56,7 +56,7 @@ related:
 
 ## 人のplannerの廃止と非対話の経路（ADR-t1394-1の`dagq plan`の拒否とADR-t1394-2の経路は実装済み）<a id="予定-人のplannerの廃止と非対話の経路"></a>
 
-[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)と[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)（goal 87）。人が開くplannerは廃止した（ADR-t1394-1）: `dagq plan`は何も開かず、inboxへの計画の依頼の案内を付けて拒み（task 1399）、計画の依頼のruntimeのplannerはtask 1395で実装した。廃止前から開いている人のplannerは、今はADR-t1394-1決定9のとおり終わるまで動いてsupervisorが閉じる。それを閉じた行として扱いcmuxを呼ばないこと（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定5、goal 92）だけが**まだ実装していない**。非対話の経路（ADR-t1394-2の決定1・2・3・5）は実装した（task 1396・1397）: answerは次のturnの依頼として届き、読み終えたかはその依頼を取ったturnの`turn_finished`で判じ（`headless_answer_taken`）、最後のturnがClaudeのログイン切れ・利用上限・起動の失敗で終わってClaudeを待つplanner（`busy`の`provider_wall`）は終わらせず、控えが解けて続きの`provider retry`のturnが終わるまでanswerを置かない（[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)）。綴りは仮で、残りの予定は[予定: inboxからの依頼と非対話のplanner](plan-planners.md#予定-inboxからの依頼と非対話のplanner)にある。
+[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)と[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)（goal 87）。人が開くplannerは廃止した（ADR-t1394-1）: `dagq plan`は何も開かず、inboxへの計画の依頼の案内を付けて拒み（task 1399）、計画の依頼のruntimeのplannerはtask 1395で実装した。廃止前から開いている人のplannerは、今はADR-t1394-1決定9のとおり終わるまで動いてsupervisorが閉じる。それを閉じた行として扱いcmuxを呼ばないこと（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定5、goal 92）だけが**まだ実装していない**。非対話の経路（ADR-t1394-2の決定1・2・3・5）は実装した（task 1396・1397）: answerは次のturnの依頼として届き、読み終えたかは、そのanswerの依頼（`turn_requested`の`what`が`answer of ask <id>`）を取ったturnが終わり、そのturnがClaudeのログイン切れ・利用上限・起動の失敗（`failure`が`authentication` / `usage_limit` / `launch`）で失敗していなければ読み終えたとし、壁で失敗したturnだけでは読み終えたとせず、wrapperが次に取る`provider retry`のturn（そのanswerを載せる）が壁で失敗せずに終わるまで追う（`headless_answer_taken`、判断は`src/domain/turn.rs`の`request_read`。壁で失敗したturnの後にplannerを`/exit`すると、answerが読まれずに失われるため。task 1596）。また、最後のturnがClaudeのログイン切れ・利用上限・起動の失敗で終わってClaudeを待つplanner（`busy`の`provider_wall`）は終わらせず、控えが解けて続きの`provider retry`のturnが終わるまでanswerを置かない（[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)）。綴りは仮で、残りの予定は[予定: inboxからの依頼と非対話のplanner](plan-planners.md#予定-inboxからの依頼と非対話のplanner)にある。
 
 - **人が開いたplannerからのsubmit、の行き先**: 4の`draft_planner_exhausted`のattentionと5の`keep_draft`で残したdraftの行き先は、inboxの参照付きの依頼か人の自分のterminalに変えた（実装済み、4と5）。6の「人が開いたplannerからのsubmit」は、人が開くplannerの廃止（`dagq plan`は拒む）で、廃止前に開いた人のplannerのsubmitのほかは、依頼のruntimeのplannerのsubmitか、人が`DAGQ_ROLE`の無い自分のterminalで打つ`submit`になった。依頼のplannerはruntimeのplannerなので、6の自動で採用しない上限は効き、上限のdraftは`planner_question`の`adopt`を経る。人のterminalからのsubmitは「人が開いたplanner」と同じく人の判断を経たものとして扱う（`by: "person"`、深さを0に戻す）。
 - **非対話の経路**（実装済み、task 1396）: draftのplannerも`[roles.runtime_planner]`の経路に従う。非対話のplannerでは、5の答えの打ち込みと7の`/exit`が次のturnの依頼と終了の依頼になり（`Supervisor::send_to_planner`）、7のidleはStop hookのmarkerと画面からの推定でなくturnの終わりのidle markerで判断する。束・3回の上限・結末の記録（8）は変えない（[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)）。予定（goal 92）: [ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定3・[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)決定1で経路を選ぶことは無くなり、draftのplannerは非対話でbackgroundのwrapperだけで動く（`[roles.runtime_planner]`の`route`は受け付けて無視する）。

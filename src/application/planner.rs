@@ -57,7 +57,7 @@ use crate::domain::{
     actor_model::{ActorLaunch, ModelRole, REVISE_ESCALATION, RoleModels},
     background_wrapper::{BACKGROUND_FLAG, BackgroundSession, HeadlessWrapper},
     language::{Language, with_instruction},
-    turn::{self, LIMITS_FILE, TurnLimits, exit_path, request_path, turns_dir},
+    turn::{self, LIMITS_FILE, TurnLimits, TurnMark, exit_path, request_path, turns_dir},
 };
 
 /// The planner's first message, which its wrapper hands the agent.
@@ -760,30 +760,43 @@ pub fn planner_view(probes: &PlannerProbes<'_>, planner: PlannerSession) -> Resu
         let marker = match probes.files.read_stamped(&marker_path)? {
             None => Err(MarkerState::Missing),
             Some((modified, _)) if modified < last_input => Err(MarkerState::Stale),
-            Some((modified, bytes)) => Ok(IdleProbe {
-                since: super::unix_seconds(modified),
-                background_running: probes.signals.idle_hook(&bytes).background_running,
-            }),
+            Some((modified, bytes)) => Ok((
+                IdleProbe {
+                    since: super::unix_seconds(modified),
+                    background_running: probes.signals.idle_hook(&bytes).background_running,
+                },
+                TurnMark::parse(&bytes),
+            )),
         };
+        // A turn that met Claude's wall leaves the requests written behind
+        // it waiting until its `provider retry` (the wrapper takes none
+        // before it, task 1596): the planner is idle at the wall all the
+        // same, for `tend_planner_walls` ([`turn::idle_after_turn`]).
+        let marker =
+            marker.map(|(idle, mark)| (idle, turn::idle_after_turn(mark.as_ref(), waiting)));
         if planner.route == PlannerRoute::Headless {
             // A headless planner has no screen (ADR-t1394-2 decision 3):
             // it is idle once the marker its wrapper wrote at the end of a
             // turn is newer than the last input stamped for it and no
-            // request waits in its `turns/`, and at work until then (a
+            // request waits in its `turns/` (or that turn met Claude's
+            // wall, above), and at work until then (a
             // request written while a turn ran, such as `planner request`'s,
             // waits for the next turn; the wrapper stamps the input as it
             // takes one, before it leaves `turns/`, which is why `turns/` is
             // read before the marker). Its wrapper ends what a turn left
             // running.
-            probe.idle = marker.ok().filter(|_| !waiting).map(|idle| IdleProbe {
-                background_running: false,
-                ..idle
-            });
+            probe.idle = marker
+                .ok()
+                .filter(|&(_, idle)| idle)
+                .map(|(idle, _)| IdleProbe {
+                    background_running: false,
+                    ..idle
+                });
         } else if probe.workspace_listed
             && let Some(workspace) = &planner.workspace_id
         {
             match marker {
-                Ok(idle) => {
+                Ok((idle, _)) => {
                     probe.idle = Some(idle);
                     probe.working = probes
                         .cmux
@@ -812,7 +825,7 @@ pub fn planner_view(probes: &PlannerProbes<'_>, planner: PlannerSession) -> Resu
                     });
                 }
             }
-        } else if let Ok(idle) = marker {
+        } else if let Ok((idle, _)) = marker {
             probe.idle = Some(idle);
         }
     }

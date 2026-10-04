@@ -439,7 +439,7 @@ pub(super) const PROVIDER_SWITCH: &str = "provider switch";
 
 /// What a request that makes a failed call again on the same provider,
 /// once its hold ended, is called.
-pub(super) const PROVIDER_RETRY: &str = "provider retry";
+pub(super) use crate::domain::turn::PROVIDER_RETRY;
 
 /// How many of the latest `provider_held` and `provider_released` events
 /// are read for the holds in place.

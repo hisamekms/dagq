@@ -51,8 +51,8 @@ use crate::domain::{
     tokens::TokenUsage,
     turn::{
         LIMITS_FILE, TurnFailure, TurnLimits, TurnOutcome, TurnRequest, TurnResult, TurnSession,
-        TurnSignal, commands_path, exit_path, idle_marker, output_path, pending, request_path,
-        session_name, taken_path, turn_own_cost, turns_dir,
+        TurnSignal, commands_path, exit_path, idle_marker, output_path, pending, renew_wall_marker,
+        request_path, request_to_take, session_name, taken_path, turn_own_cost, turns_dir,
     },
     worker_model::WorkerSession,
 };
@@ -444,10 +444,13 @@ impl<'a> Turns<'a> {
         // The request of a turn that resumed a thread its agent does not
         // have, run once more as a new session.
         let mut again: Option<(String, Option<TurnRequest>)> = None;
+        // The last turn met the provider's wall: a planner's wrapper waits
+        // for the `provider retry` before the requests that wait behind it.
+        let mut walled = false;
         loop {
             let (prompt, request) = match again.take().or_else(|| first.take().map(|p| (p, None))) {
                 Some(next) => next,
-                None => match self.next_request(&run_dir)? {
+                None => match self.next_request(&run_dir, walled)? {
                     Some(request) => (request.prompt.clone(), Some(request)),
                     None => {
                         say(self.background, "exit requested; the session ends");
@@ -526,6 +529,8 @@ impl<'a> Turns<'a> {
                 again = Some((asked, request));
                 continue;
             }
+            walled = ended.outcome == TurnOutcome::Failed
+                && ended.failure.is_some_and(TurnFailure::at_provider_wall);
             if !ended.outcome.goes_on(ended.failure) {
                 say(
                     self.background,
@@ -556,8 +561,15 @@ impl<'a> Turns<'a> {
     }
 
     /// Wait for the supervisor's next request, heartbeating, and take it;
-    /// `None` once the exit is requested.
-    fn next_request(&mut self, run_dir: &Path) -> Result<Option<TurnRequest>> {
+    /// `None` once the exit is requested. A planner's wrapper whose last
+    /// turn met the provider's wall (`walled`) takes the `provider retry`
+    /// first and leaves the requests before it waiting ([`request_to_take`]):
+    /// the planner stays idle at the wall for the supervisor's hold, and
+    /// the failed turn's request is made again before them (task 1596). A
+    /// worker's takes them in order, as before: its supervisor tends the
+    /// wall by the run's events rather than by its idleness.
+    fn next_request(&mut self, run_dir: &Path, walled: bool) -> Result<Option<TurnRequest>> {
+        let after_wall = walled && matches!(self.owner, TurnOwner::Planner { .. });
         loop {
             if self.files.is_file(&exit_path(run_dir)) {
                 return Ok(None);
@@ -568,10 +580,24 @@ impl<'a> Turns<'a> {
                 .iter()
                 .filter_map(|path| path.file_name()?.to_str().map(str::to_owned))
                 .collect();
-            if let Some(&seq) = pending(names.iter().map(String::as_str)).first() {
+            let mut waiting = Vec::new();
+            for seq in pending(names.iter().map(String::as_str)) {
                 let path = request_path(run_dir, seq);
                 let request: TurnRequest = serde_json::from_str(&self.files.read_to_string(&path)?)
                     .with_context(|| format!("read request {}", path.display()))?;
+                waiting.push(request);
+                if !after_wall {
+                    break;
+                }
+            }
+            let next =
+                request_to_take(waiting.iter().map(|r| (r.seq, r.what.as_str())), after_wall);
+            if after_wall && next.is_none() {
+                self.renew_wall_marker(run_dir);
+            }
+            if let Some(request) = next.and_then(|seq| waiting.into_iter().find(|r| r.seq == seq)) {
+                let seq = request.seq;
+                let path = request_path(run_dir, seq);
                 // Stamped before it is taken: a planner's idle marker of the
                 // turn before is no idle with this one (a request written
                 // while that turn ran), not even between the two.
@@ -590,6 +616,30 @@ impl<'a> Turns<'a> {
             }
             self.heartbeat();
             thread::sleep(self.provider.wait_interval());
+        }
+    }
+
+    /// Write a planner's idle marker of the turn that met the provider's
+    /// wall again when an input stamped after it left it stale while no
+    /// `provider retry` waits ([`renew_wall_marker`]): the planner is idle
+    /// at the wall again, for the supervisor's `tend_planner_walls`. A
+    /// failure is only logged; the next look tries again.
+    fn renew_wall_marker(&self, run_dir: &Path) {
+        let marker = super::planner_idle_marker(run_dir);
+        let Ok(Some((modified, bytes))) = self.files.read_stamped(&marker) else {
+            return;
+        };
+        let last_input = super::screen_idle::last_input(self.files, &marker, std::time::UNIX_EPOCH);
+        if !renew_wall_marker(false, Some(modified), last_input) {
+            return;
+        }
+        let tmp = marker.with_extension("json.tmp");
+        if let Err(error) = self
+            .files
+            .write(&tmp, &bytes)
+            .and_then(|()| self.files.rename(&tmp, &marker))
+        {
+            tracing::warn!("the idle marker at the wall could not be renewed: {error}");
         }
     }
 
