@@ -43,7 +43,8 @@ fn waiting_then_landing(
 /// parks the run and resumes it at once with the recheck's request, without
 /// counting the resume. The rebased run is not reviewed again: it waits
 /// for the answer, which the ask's question now explains, and `land` lands
-/// it. `status` and `stats` show the recheck.
+/// it. `status` and `stats` show the recheck, and `stats` the landing in
+/// the group of runs that waited after their review, with its conflict.
 #[test]
 fn a_waiting_run_that_a_landing_conflicts_with_is_resumed_before_its_answer() {
     let (_dir, repo, db) = fixture();
@@ -181,6 +182,32 @@ fn a_waiting_run_that_a_landing_conflicts_with_is_resumed_before_its_answer() {
         "resolved by the resumed session\n"
     );
     assert_eq!(reviewer.prompts().len(), 2);
+
+    // The run that waited in its `approve_landing` ask landed after the
+    // recheck found its conflict; the landing that moved main did not wait.
+    let stats = runtime::stats(
+        &db,
+        &StatsQuery {
+            full: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let waits = &stats["landing_waits"];
+    let waited = &waits["waited"];
+    assert_eq!(waited["landed"], 1, "{waits}");
+    assert_eq!(waited["conflicted"], 1);
+    assert_eq!(waited["conflicted_ratio"], 1.0);
+    assert_eq!(waited["recheck_conflicts"], 1);
+    assert_eq!(waited["rebase_conflicts"], 0);
+    assert_eq!(waited["wait_secs"]["count"], 1);
+    assert_eq!(waited["by_wait"], json!({"approve_landing": 1}));
+    assert_eq!(waited["runs"][0]["run_id"], json!(run.id()));
+    let not_waited = &waits["not_waited"];
+    assert_eq!(not_waited["landed"], 1);
+    assert_eq!(not_waited["conflicted"], 0);
+    assert_eq!(not_waited["conflicted_ratio"], 0.0);
+    assert!(not_waited.get("wait_secs").is_none(), "{not_waited}");
 }
 
 /// A conflict Git does not see: the waiting run adds `a.txt`, which needs

@@ -77,7 +77,7 @@ pub struct Spread {
 }
 
 impl Spread {
-    fn of(mut secs: Vec<i64>) -> Self {
+    pub(super) fn of(mut secs: Vec<i64>) -> Self {
         Self {
             count: secs.len(),
             median: median(&mut secs),

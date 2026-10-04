@@ -26,6 +26,7 @@ pub mod follow_up_categories;
 pub mod jobs;
 pub mod landing;
 pub mod landing_utilization;
+pub mod landing_waits;
 pub mod measures;
 pub mod planner_routes;
 pub mod predictions;
@@ -504,6 +505,10 @@ pub struct Stats {
     /// The landing rechecks of the waiting runs (ADR-0068 decision 6) in
     /// the same window as `backend_failures`.
     pub landing_rechecks: LandingRechecks,
+    /// The runs landed in the same window as `backend_failures`, by
+    /// whether they waited for a person or a recover after their review,
+    /// and how many of each conflicted on the way (goal 39, task 1312).
+    pub landing_waits: landing_waits::LandingWaits,
     /// Those runs per version of `dagq`, Claude Code and `rustc` they
     /// were claimed with (task 197).
     pub versions: Versions,
@@ -1024,6 +1029,7 @@ pub fn stats(
     let duplicate_cancels = duplicate_cancels(events, window_start, window_last, counts);
     let review_reasons = review_reasons::review_reasons(events, window_start, window_last, counts);
     let landing_rechecks = landing_rechecks(events, window_start, window_last, counts);
+    let landing_waits = landing_waits::landing_waits(events, window_start, window_last, counts);
     // The window ends now unless it stops at an earlier event.
     let window_end = match events.iter().find(|event| event.id == window_last) {
         Some(event) if until.is_some() || window_last < latest_event => {
@@ -1237,6 +1243,7 @@ pub fn stats(
         stall_thresholds,
         conflict_hotspots,
         landing_rechecks,
+        landing_waits,
         versions,
         load_bands,
         trial_groups,
