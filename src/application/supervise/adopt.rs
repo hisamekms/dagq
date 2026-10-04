@@ -27,6 +27,9 @@ impl Supervisor<'_> {
                 lease,
                 wrapper,
             } = candidate;
+            if self.in_slot(run.id()) {
+                continue;
+            }
             if !self.lease_stale(&lease, now) {
                 continue;
             }

@@ -1,5 +1,6 @@
 //! Runtime tests: The recovery job of failed runs, dead runs and silent
 //! wrappers.
+use crate::common;
 use crate::runtime_support;
 use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
@@ -1658,4 +1659,118 @@ fn recover_releases_the_stale_lease_of_an_awaiting_run_for_integrate() {
     assert_eq!(integrate(&db, 1, &repo).unwrap()["outcome"], "integrated");
     let detail = queue.show(TaskId::new(1)).unwrap();
     assert_landed_run(&detail.runs[0], &repo, &base);
+}
+
+/// A triage whose lease another token took while its recovery job runs
+/// (as a stalled supervisor's round looks to the next one) is not triaged
+/// again into a second slot by the supervisor that still drives it: its
+/// slot is dropped first, its job stopped and nothing written about the
+/// round, and only a later pass starts the next round, once, from the
+/// lease it took over (task 1361).
+#[test]
+fn a_triage_whose_lease_moved_is_triaged_again_only_after_its_slot_is_dropped() {
+    let (dir, repo, db) = fixture();
+    let _dump = EventsOnPanic(db.clone());
+    let backend = Arc::new(TestWorkspace::new(&db, false, "exit 7"));
+    // Each of the two recovery jobs runs until the test lets it go (job n
+    // at `triage-go-<n>`), then escalates; the first is stopped with its
+    // dropped slot before that.
+    let gate = |n: usize| dir.path().join(format!("triage-go-{n}"));
+    let reviewer = Arc::new(
+        TestReviewer::new(&[verdict("pass", &[], "fine")]).with_triages(&[
+            format!(
+                "{}; printf '%s\\n' '{ESCALATE}'",
+                common::await_path(gate(1))
+            ),
+            format!(
+                "{}; printf '%s\\n' '{ESCALATE}'",
+                common::await_path(gate(2))
+            ),
+        ]),
+    );
+    // A long tick: the lease most likely moves while the supervisor sleeps
+    // between passes, so the next pass judges the triage before it steps
+    // the slot that lost the lease.
+    let options = SuperviseOptions {
+        tick: Duration::from_millis(500),
+        ..supervise_options(2, false)
+    };
+    let supervisor = {
+        let (db, repo, backend, reviewer, options) = (
+            db.clone(),
+            repo.clone(),
+            backend.clone(),
+            reviewer.clone(),
+            options.clone(),
+        );
+        thread::spawn(move || supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options))
+    };
+    wait_until(&db, Duration::from_secs(30), |queue| {
+        queue
+            .show(TaskId::new(1))
+            .unwrap()
+            .events
+            .iter()
+            .any(|e| e.kind == "triage_started")
+    });
+    // The pass that started the round steps its slot before it ends: the
+    // lease moves only after that, in the sleep of the next pass, so that
+    // the pass after judges the triage before it steps the slot. The
+    // half tick only places the move: whenever it lands, the run must not
+    // get a second slot.
+    let started_in = options.passes.load(Ordering::SeqCst);
+    wait_until(&db, Duration::from_secs(30), |_| {
+        options.passes.load(Ordering::SeqCst) > started_in
+    });
+    thread::sleep(options.tick / 2);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    let moved = take_lease(&db, &run, false);
+    wait_until(&db, Duration::from_secs(30), |queue| {
+        run_payloads(&queue.show(TaskId::new(1)).unwrap(), &run, "triage_started").len() == 2
+    });
+    options.stop.store(true, Ordering::SeqCst);
+    // One slot triages the run, not the dropped one beside the new round.
+    assert_eq!(draining_runs(&db), json!([run.id()]));
+    fs::write(gate(2), "").unwrap();
+    let outcome = joined(supervisor, "the supervisor thread to return");
+    fs::write(gate(1), "").unwrap();
+    assert_eq!(outcome["outcome"], "stopped", "{outcome}");
+    let disowned: Vec<&Value> = outcome["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            e["message"]
+                .as_str()
+                .unwrap()
+                .contains("held by another process")
+        })
+        .collect();
+    assert_eq!(disowned.len(), 1, "{outcome}");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let rounds = |kind: &str| -> Vec<Value> {
+        run_payloads(&detail, &run, kind)
+            .into_iter()
+            .map(|p| p["attempt"].clone())
+            .collect()
+    };
+    assert_eq!(rounds("triage_started"), [json!(1), json!(2)]);
+    // Nothing more about the first round once its lease moved.
+    assert_eq!(
+        rounds("triage_finished"),
+        [json!(2)],
+        "{:?}",
+        run_events_after(&queue, &run, moved)
+    );
+    assert!(rounds("triage_failed").is_empty());
+    let acquired: Vec<Value> = run_payloads(&detail, &run, "lease_acquired")
+        .into_iter()
+        .filter(|p| p["reason"] == "triage")
+        .map(|p| p["previous_token"].clone())
+        .collect();
+    // The second round replaced the moved, stale lease.
+    assert_eq!(acquired.len(), 2, "{acquired:?}");
+    assert_eq!(acquired[1], "taken");
+    assert_eq!(reviewer.triage_prompts().len(), 2);
 }

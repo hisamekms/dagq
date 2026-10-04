@@ -2111,3 +2111,133 @@ fn no_claude_leaves_an_old_claude_resume_for_manual_recovery() {
             .any(|a| a["kind"] == "provider_disabled")
     );
 }
+
+/// A resume whose lease another token took while its session ended
+/// unwatched (as a stalled supervisor's resume looks to the next one) is
+/// not resumed again into a second slot by the supervisor that still
+/// drives it: its slot is dropped first, writing nothing about the
+/// attempt, and only a later pass starts the next attempt, once, from the
+/// lease it took over (task 1361).
+#[test]
+fn a_resume_whose_lease_moved_is_resumed_again_only_after_its_slot_is_dropped() {
+    let (_dir, repo, db) = fixture();
+    let _dump = EventsOnPanic(db.clone());
+    let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
+    let (run, _) = parked_conflict(&repo, &db, &backend);
+    // Each of the two attempts works until the test lets it go (attempt n
+    // at `$EXIT.go<n>`), then gives up.
+    backend.resume_script_for(
+        2,
+        "n=$(($(cat \"$RUN_DIR/attempts\" 2>/dev/null || echo 0) + 1)); echo $n > \"$RUN_DIR/attempts\"; \
+         if [ $n -le 2 ]; then await_file \"$EXIT.go$n\"; fi; say 'gave up'",
+    );
+    // A long tick: the lease most likely moves while the supervisor sleeps
+    // between passes, so the next pass judges the resume before it steps
+    // the slot that lost the lease.
+    let options = SuperviseOptions {
+        tick: Duration::from_millis(500),
+        ..supervise_options(2, false)
+    };
+    let supervisor = {
+        let (db, repo, backend, options) =
+            (db.clone(), repo.clone(), backend.clone(), options.clone());
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
+    };
+    wait_until(&db, Duration::from_secs(30), |queue| {
+        let events = queue.run_events(run.id()).unwrap();
+        let started = events.iter().position(|e| e.kind == "resume_started");
+        started.is_some_and(|at| events[at..].iter().any(|e| e.kind == "turn_started"))
+            && wrapper_lives(&db, &run)
+    });
+    let moved = take_lease(&db, &run, true);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    wait_until(&db, Duration::from_secs(30), |queue| {
+        payloads(&queue.show(TaskId::new(2)).unwrap(), "resume_started").len() == 2
+    });
+    options.stop.store(true, Ordering::SeqCst);
+    // One slot resumes the run, not the dropped one beside the new attempt.
+    assert_eq!(draining_runs(&db), json!([run.id()]));
+    let run_dir = Path::new(run.run_dir().unwrap());
+    fs::write(run_dir.join("exit-requested.go2"), "").unwrap();
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    // The first attempt's session ends last, unwatched, once the second's
+    // wrapper recorded its exit: the test's wrappers share the test's pid,
+    // so the first's exit, recorded meanwhile, would land on the second's
+    // row. What the first's wrapper returns is not this test's subject: its
+    // run was taken from it (here its row is gone or exited).
+    fs::write(run_dir.join("exit-requested.go1"), "").unwrap();
+    let first = workspace_of_attempt(&queue.show(TaskId::new(2)).unwrap(), 1);
+    let wrapper = backend
+        .sessions
+        .lock()
+        .unwrap()
+        .iter_mut()
+        .find(|(id, _)| *id == first)
+        .and_then(|(_, session)| session.worker.take())
+        .unwrap();
+    let _ = joined(wrapper, "the first attempt's wrapper to return");
+    backend.join();
+    assert_eq!(outcome["outcome"], "stopped", "{outcome}");
+    let disowned: Vec<&Value> = outcome["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            e["message"]
+                .as_str()
+                .unwrap()
+                .contains("held by another process")
+        })
+        .collect();
+    assert_eq!(disowned.len(), 1, "{outcome}");
+    let detail = queue.show(TaskId::new(2)).unwrap();
+    let started: Vec<&Value> = payloads(&detail, "resume_started")
+        .into_iter()
+        .map(|p| &p["attempt"])
+        .collect();
+    assert_eq!(started, [&json!(1), &json!(2)]);
+    // Nothing more about the first attempt once its lease moved.
+    let finished: Vec<&Value> = payloads(&detail, "resume_finished")
+        .into_iter()
+        .map(|p| &p["attempt"])
+        .collect();
+    assert_eq!(
+        finished,
+        [&json!(2)],
+        "{:?}",
+        run_events_after(&queue, &run, moved)
+    );
+    let acquired = detail
+        .events
+        .iter()
+        .filter(|e| e.kind == "lease_acquired" && e.payload["reason"] == "resume")
+        .map(|e| e.payload["previous_token"].clone())
+        .collect::<Vec<_>>();
+    // The second attempt replaced the moved, stale lease.
+    assert_eq!(acquired.len(), 2, "{acquired:?}");
+    assert_eq!(acquired[1], "taken");
+}
+
+/// The workspace the resume `attempt` of the task's run opened.
+fn workspace_of_attempt(detail: &dagq::domain::TaskDetail, attempt: i64) -> String {
+    payloads(detail, "workspace_created")
+        .into_iter()
+        .find(|p| p["resume_attempt"] == attempt)
+        .unwrap()["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// Whether `run`'s wrapper registered and has not exited.
+fn wrapper_lives(db: &Path, run: &TaskRun) -> bool {
+    Connection::open(db)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM run_processes WHERE run_id=?1 AND role='wrapper' AND exited_at IS NULL",
+            [&run.id()],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+        == 1
+}

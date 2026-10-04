@@ -2403,6 +2403,14 @@ impl Supervisor<'_> {
             }
         }
     }
+    /// Whether this process still drives `id` in a slot. Such a run whose
+    /// lease another token holds now, stale or not, is adopted, resumed or
+    /// triaged by none of the claims of a pass: its slot is dropped on its
+    /// next step ([`Self::disown`]), and only a later pass may take the run
+    /// like any other, never into a second slot (task 1361).
+    fn in_slot(&self, id: &RunId) -> bool {
+        self.slots.iter().any(|slot| slot.run.id() == id)
+    }
     /// Drop a slot whose lease another process holds now, writing nothing
     /// about the run: the new owner's record is the record.
     fn disown(&mut self, slot: &Slot) {

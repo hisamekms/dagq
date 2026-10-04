@@ -1563,10 +1563,14 @@ fn two_supervisors_racing_for_one_stale_lease_adopt_it_once() {
 
 /// A resident supervisor whose lease was taken over (here by hand, as an
 /// adopter or `recover` would) drops the run from its slots without writing
-/// anything more about it, while the adopter drives the run to the end.
+/// anything more about it or starting its next turn, while the adopter
+/// drives the run to the end. The lease moves right after the stop, so a
+/// pass that began before it may still adopt: it must not take back the
+/// run it still drives into a second slot (task 1361).
 #[test]
 fn a_supervisor_that_lost_its_lease_stops_touching_the_run() {
     let (_dir, repo, db) = fixture();
+    let _dump = EventsOnPanic(db.clone());
     // The session works until the test lets it finish (`$EXIT.go`), after
     // the lease changed hands and the original returned: a session that
     // finished as soon as the lease moved let the run reach validation
@@ -1578,41 +1582,29 @@ fn a_supervisor_that_lost_its_lease_stops_touching_the_run() {
             (db.clone(), repo.clone(), backend.clone(), options.clone());
         thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
     };
-    wait_until(&db, Duration::from_secs(20), |queue| {
-        queue
-            .active_runs()
-            .unwrap()
-            .first()
-            .is_some_and(|r| r.status() == RunStatus::Running)
-    });
+    let run = turn_in_progress(&db);
     let mut queue = SqliteQueue::open(&db).unwrap();
-    let run = queue.active_runs().unwrap().remove(0);
-    // Draining: the original keeps driving its run but adopts and claims
-    // nothing more, so it cannot take the lease back once it loses it.
+    // Draining: the original keeps driving its run but claims nothing more.
     options.stop.store(true, Ordering::SeqCst);
-    // A pass already under way may still adopt: move the lease only once
-    // the original drains.
-    wait_until(&db, Duration::from_secs(20), |queue| {
-        queue
-            .all_events()
-            .unwrap()
-            .iter()
-            .any(|event| event.kind == "supervisor_draining")
-    });
-    // The lease changes hands: another token, stale, as a killed
-    // supervisor's would look to an adopter.
-    Connection::open(&db)
-        .unwrap()
-        .execute(
-            "UPDATE run_leases SET token='taken', heartbeat_at=unixepoch()-31 WHERE run_id=?1",
-            [&run.id()],
-        )
-        .unwrap();
+    let moved = take_lease(&db, &run, false);
     // The original notices within a tick, drops the run and, draining with
     // nothing active, exits.
     let outcome = joined(original, "the first supervisor thread to return").unwrap();
     assert_eq!(queue.run(run.id()).unwrap().status(), RunStatus::Running);
     assert_eq!(queue.run_lease(run.id()).unwrap().unwrap().token, "taken");
+    // It wrote nothing about the run once the lease moved.
+    assert_eq!(run_events_after(&queue, &run, moved), Vec::<String>::new());
+    let draining = draining_runs(&db);
+    assert!(
+        draining
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|id| **id == json!(run.id()))
+            .count()
+            <= 1,
+        "{draining}"
+    );
     // Only now may the session finish, for the adopter to drive.
     fs::write(
         Path::new(run.run_dir().unwrap()).join("exit-requested.go"),
@@ -1626,6 +1618,9 @@ fn a_supervisor_that_lost_its_lease_stops_touching_the_run() {
         "{adopter}"
     );
     assert_exit_sent(&backend, &run, 1);
+    // The worker had its first turn only: neither supervisor started another.
+    assert_eq!(session_texts(&backend, &run), Vec::<String>::new());
+    assert_eq!(turn_models(&db).len(), 1, "{:?}", turn_models(&db));
     assert_eq!(outcome["outcome"], "stopped");
     assert_eq!(outcome["runs"], json!([]));
     assert_eq!(outcome["errors"][0]["run_id"], json!(run.id()));
@@ -1646,4 +1641,90 @@ fn a_supervisor_that_lost_its_lease_stops_touching_the_run() {
     assert_eq!(adopted.len(), 1);
     assert_eq!(adopted[0]["previous_token"], "taken");
     assert!(queue.supervisors().unwrap().is_empty());
+}
+
+/// A supervisor at work whose lease of a run it drives went stale under
+/// another token adopts nothing into a second slot: it drops its slot
+/// first, and only a later pass adopts the run, once, like any adopter,
+/// which then drives it to the end (task 1361).
+#[test]
+fn a_supervisor_takes_back_a_run_it_lost_only_after_dropping_its_slot() {
+    let (_dir, repo, db) = fixture();
+    let _dump = EventsOnPanic(db.clone());
+    let backend = Arc::new(TestWorkspace::new(&db, false, PROMPTED_AGENT));
+    // A long tick: the lease most likely moves while the supervisor sleeps
+    // between passes, so the next pass judges adoption before it steps the
+    // slot that lost the lease.
+    let options = SuperviseOptions {
+        tick: Duration::from_millis(500),
+        ..supervise_options(2, false)
+    };
+    let original = {
+        let (db, repo, backend, options) =
+            (db.clone(), repo.clone(), backend.clone(), options.clone());
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
+    };
+    let run = turn_in_progress(&db);
+    let token = supervisor_token_of(&db, &run);
+    // Not draining: every pass adopts before it steps the slots.
+    take_lease(&db, &run, false);
+    wait_until(&db, Duration::from_secs(20), |queue| {
+        queue.has_run_event(run.id(), "run_adopted").unwrap()
+    });
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    assert_eq!(queue.run_lease(run.id()).unwrap().unwrap().token, token);
+    options.stop.store(true, Ordering::SeqCst);
+    // One slot drives the run, not the dropped one beside the adopted one.
+    assert_eq!(draining_runs(&db), json!([run.id()]));
+    fs::write(
+        Path::new(run.run_dir().unwrap()).join("exit-requested.go"),
+        "",
+    )
+    .unwrap();
+    let outcome = joined(original, "the supervisor thread to return").unwrap();
+    backend.join();
+    assert_eq!(outcome["outcome"], "stopped");
+    assert_eq!(
+        outcome["runs"][0]["status"], "awaiting_integration",
+        "{outcome}"
+    );
+    assert_eq!(outcome["errors"].as_array().unwrap().len(), 1, "{outcome}");
+    assert!(
+        outcome["errors"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("held by another process"),
+        "{outcome}"
+    );
+    assert_exit_sent(&backend, &run, 1);
+    assert_eq!(session_texts(&backend, &run), Vec::<String>::new());
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let kinds = event_kinds(&detail);
+    assert!(!kinds.contains(&"runtime_error"), "{kinds:?}");
+    assert_eq!(kinds.iter().filter(|k| **k == "exit_requested").count(), 1);
+    assert_eq!(
+        kinds.iter().filter(|k| **k == "receipt_observed").count(),
+        1
+    );
+    let adopted = adoption_events(&detail);
+    assert_eq!(adopted.len(), 1);
+    assert_eq!(adopted[0]["previous_token"], "taken");
+    assert_eq!(adopted[0]["token"], token);
+}
+
+/// The fixture's run once its worker's first turn is under way (the
+/// wrapper recorded `turn_started`), so that nothing about it is left to
+/// record but what a supervisor does. The turn starts only once the queue
+/// service answers, which a loaded host may take its 10 s for.
+fn turn_in_progress(db: &Path) -> TaskRun {
+    wait_until(db, Duration::from_secs(30), |queue| {
+        queue.active_runs().unwrap().first().is_some_and(|r| {
+            r.status() == RunStatus::Running && queue.has_run_event(r.id(), "turn_started").unwrap()
+        })
+    });
+    SqliteQueue::open(db)
+        .unwrap()
+        .active_runs()
+        .unwrap()
+        .remove(0)
 }

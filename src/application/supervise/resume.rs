@@ -46,6 +46,9 @@ impl Supervisor<'_> {
                 wrapper,
                 resumes,
             } = candidate;
+            if self.in_slot(run.id()) {
+                continue;
+            }
             if self.no_claude && run.actual_provider() == crate::domain::Provider::Claude {
                 // Do not spend resume attempts trying to launch a forbidden provider.
                 continue;

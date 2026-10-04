@@ -431,6 +431,7 @@ impl Supervisor<'_> {
                 TriageState::Failed | TriageState::Finished => false,
             };
             if !due
+                || self.in_slot(run.id())
                 || self
                     .queue
                     .run_lease(run.id())?
