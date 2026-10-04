@@ -58,6 +58,8 @@ pub struct GoalTask {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GoalDetail {
+    pub acceptance_version: i64,
+    pub follow_up_memberships: Vec<serde_json::Value>,
     pub goal: Goal,
     pub closed: bool,
     pub tasks: Vec<GoalTask>,
@@ -128,6 +130,7 @@ pub struct EventFilter {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskDetail {
+    pub membership_judgements: Vec<serde_json::Value>,
     pub task: Task,
     pub dependencies: Vec<TaskId>,
     /// Goals the task depends on (ADR-0038), ascending.

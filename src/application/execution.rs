@@ -287,6 +287,7 @@ pub const DAGQ_COMMANDS: &[(&str, &[Capability])] = &[
     ("add", &[C::TaskWrite]),
     ("draft", &[C::TaskWrite]),
     ("edit", &[C::TaskWrite]),
+    ("judge-follow-up", &[C::FollowUpJudge]),
     ("set-goal", &[C::TaskWrite]),
     ("set-paths", &[C::TaskWrite]),
     ("set-priority", &[C::TaskWrite]),

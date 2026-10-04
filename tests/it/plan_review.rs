@@ -1593,36 +1593,7 @@ fn a_withdrawn_reopen_gets_a_planner_of_the_runtimes_with_the_reason() {
     assert_eq!(status(&mut queue, ready), TaskStatus::Draft);
 }
 
-/// A draft as the runtime or a job registers it: `origin` with `material`.
-pub(crate) fn runtime_draft(
-    queue: &mut SqliteQueue,
-    title: &str,
-    goal: Option<dagq::domain::GoalId>,
-    origin: DraftOrigin,
-    material: Value,
-) -> TaskId {
-    let id = queue
-        .add(NewTask {
-            title: title.into(),
-            description: format!("{title}: found outside the task"),
-            acceptance: String::new(),
-            verification_commands: Vec::new(),
-            required_evidence: Vec::new(),
-            paths: Vec::new(),
-            priority: Priority::Normal,
-            change: None,
-            dependencies: Vec::new(),
-            goal_dependencies: Vec::new(),
-            goal_id: goal,
-            context: String::new(),
-            provider: None,
-            worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
-        })
-        .unwrap()
-        .id();
-    queue.record_draft_origin(id, origin, &material).unwrap();
-    id
-}
+pub(crate) use crate::common::queue::runtime_draft;
 
 pub(crate) fn open_goal(queue: &mut SqliteQueue) -> dagq::domain::GoalId {
     queue

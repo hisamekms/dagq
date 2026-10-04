@@ -72,7 +72,6 @@ impl SqliteQueue {
         run: &RunId,
         entries: Vec<FollowUpRegistration>,
         depth: i64,
-        goal_closed: bool,
     ) -> Result<Vec<RegisteredFollowUp>> {
         ensure!(depth >= 0, "follow_up_depth must not be negative");
         let tx = self
@@ -82,6 +81,9 @@ impl SqliteQueue {
             tx.query_row("SELECT task_id FROM task_runs WHERE id=?1", [run], |row| {
                 row.get(0)
             })?;
+        let source_goal = read_task(&tx, source)?.goal_id();
+        let source_open = goal_open(&tx, source_goal)?;
+        let goal_closed = source_goal.is_some() && !source_open;
         let registered: HashSet<u64> =
             RunHistory::from_events(&super::runtime_store::run_events_of(&tx, run)?)
                 .registered_follow_ups()
@@ -92,7 +94,8 @@ impl SqliteQueue {
             if registered.contains(&(entry.index as u64)) {
                 continue;
             }
-            let payload = if let Some(new) = entry.draft {
+            let payload = if let Some(mut new) = entry.draft {
+                new.goal_id = source_goal.filter(|_| source_open);
                 new.validate()?;
                 if let (Some(changes), Some(change)) = (&self.changes, &new.change) {
                     changes.check(change)?;
@@ -104,6 +107,9 @@ impl SqliteQueue {
                 )?;
                 let material = json!({
                     "source_task_id": source, "source_run_id": run,
+                    "source_goal_id": source_goal,
+                    "source_goal_state": if source_goal.is_none() { "none" } else if source_open { "open" } else { "closed" },
+                    "source_goal_provenance": "recorded",
                     "index": entry.index, "category": entry.category,
                 });
                 tx.execute(
@@ -123,6 +129,9 @@ impl SqliteQueue {
                 let mut payload = json!({
                     "task_id": created.id(), "title": created.title(),
                     "index": entry.index, "category": entry.category,
+                    "source_task_id": source, "source_run_id": run,
+                    "source_goal_id": source_goal, "source_goal_state": material["source_goal_state"],
+                    "source_goal_provenance": "recorded", "follow_up_depth": depth,
                 });
                 if goal_closed {
                     payload["goal_closed"] = json!(true);
@@ -512,9 +521,8 @@ impl DraftPlannerStore for SqliteQueue {
         run: &RunId,
         entries: Vec<FollowUpRegistration>,
         depth: i64,
-        goal_closed: bool,
     ) -> Result<Vec<RegisteredFollowUp>> {
-        SqliteQueue::register_follow_ups(self, run, entries, depth, goal_closed)
+        SqliteQueue::register_follow_ups(self, run, entries, depth)
     }
     fn record_draft_origin(
         &mut self,
@@ -1107,6 +1115,7 @@ pub(super) fn check_adoptions(
             && draft_origin == DraftOrigin::FollowUp
             && let Some(why) = adopt_needs_person(FollowUpFacts {
                 goal_open: goal_open(conn, task.goal_id())?,
+                source_goal_open: crate::domain::follow_up::source_goal_was_open(&material),
                 depth,
             })
         {
@@ -1288,7 +1297,7 @@ mod tests {
                 .record_draft_origin(
                     task,
                     DraftOrigin::FollowUp,
-                    &json!({"source_task_id": 1, "source_run_id": "r"}),
+                    &json!({"source_task_id": 1, "source_run_id": "r", "source_goal_id": goal_id, "source_goal_state": if goal_id.is_some() {"open"} else {"none"}, "source_goal_provenance": "recorded"}),
                 )
                 .unwrap();
             queue.set_follow_up_depth(task, depth).unwrap();
@@ -1320,7 +1329,7 @@ mod tests {
         );
         let orphan = follow_up(&mut queue, None, 1);
         let error = submit(&mut queue, orphan).unwrap_err().to_string();
-        assert!(error.contains("goal is closed"), "{error}");
+        assert!(error.contains("at registration"), "{error}");
     }
 
     #[test]

@@ -29,6 +29,7 @@ string_enum!(Capability {
     GoalClose => "goal.close",
     GoalReviewRequest => "goal.review_request",
     TaskWrite => "task.write",
+    FollowUpJudge => "follow_up.judge",
     TaskVerifyEdit => "task.verify_edit",
     TaskCancel => "task.cancel",
     TaskReady => "task.ready",
@@ -87,7 +88,7 @@ string_enum!(Capability {
 });
 
 impl Capability {
-    pub const ALL: [Self; 48] = [
+    pub const ALL: [Self; 49] = [
         Self::QueueRead,
         Self::QueueWatch,
         Self::ExportFile,
@@ -96,6 +97,7 @@ impl Capability {
         Self::GoalClose,
         Self::GoalReviewRequest,
         Self::TaskWrite,
+        Self::FollowUpJudge,
         Self::TaskVerifyEdit,
         Self::TaskCancel,
         Self::TaskReady,
@@ -339,6 +341,7 @@ const USER: &[Capability] = &[
     C::GoalClose,
     C::GoalReviewRequest,
     C::TaskWrite,
+    C::FollowUpJudge,
     C::TaskVerifyEdit,
     C::TaskCancel,
     C::TaskReady,
@@ -384,6 +387,7 @@ const PLANNER: &[Capability] = &[
     C::GoalWrite,
     C::GoalClose,
     C::TaskWrite,
+    C::FollowUpJudge,
     C::TaskCancel,
     C::ProposalSubmit,
     C::ProposalWithdraw,
@@ -879,6 +883,7 @@ mod tests {
             C::TaskReadyBypassReview,
             C::TaskCancel,
             C::TaskWrite,
+            C::FollowUpJudge,
             C::NoteWrite,
             C::MarkWrite,
             C::GoalClose,
@@ -953,6 +958,7 @@ mod tests {
             C::MarkWrite,
             C::GoalWrite,
             C::TaskWrite,
+            C::FollowUpJudge,
             C::IntegrationRequest,
             C::ObserveRun,
             C::ExportFile,
@@ -1201,5 +1207,40 @@ mod tests {
             C::NoteWrite,
             &Resource::task(TaskId::new(1))
         ));
+    }
+}
+
+#[cfg(test)]
+mod membership_policy_tests {
+    use super::*;
+    #[test]
+    fn only_people_and_runtime_planners_judge_even_after_a_task_started() {
+        for role in ActorRole::ALL {
+            let actor = ActorContext::instance(role, 1);
+            for status in [
+                TaskStatus::Draft,
+                TaskStatus::Submitted,
+                TaskStatus::Ready,
+                TaskStatus::InProgress,
+                TaskStatus::Completed,
+            ] {
+                let result = StaticPolicy.authorize(
+                    &actor,
+                    Capability::FollowUpJudge,
+                    &Resource::Task {
+                        id: TaskId::new(1),
+                        status: Some(status),
+                    },
+                );
+                assert_eq!(
+                    result.is_ok(),
+                    matches!(
+                        role,
+                        ActorRole::User | ActorRole::Inbox | ActorRole::Planner
+                    ),
+                    "{role:?} {status:?}"
+                );
+            }
+        }
     }
 }

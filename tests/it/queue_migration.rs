@@ -718,10 +718,14 @@ fn migration_to_v28_gives_the_follow_up_drafts_already_queued_their_origin() {
     // person's draft does not.
     let (origin, material) = queue.draft_origin(TaskId::new(2)).unwrap().unwrap();
     assert_eq!(origin, dagq::domain::DraftOrigin::FollowUp);
-    assert_eq!(
-        material,
-        serde_json::json!({"source_task_id": 1, "source_run_id": "run-1", "index": 0})
-    );
+    assert_eq!(material["source_task_id"], 1);
+    assert_eq!(material["source_run_id"], "run-1");
+    assert_eq!(material["index"], 0);
+    assert_eq!(material["source_goal_id"], serde_json::Value::Null);
+    assert_eq!(material["source_goal_state"], "none");
+    assert_eq!(material["source_goal_provenance"], "restored");
+    assert_eq!(material["registration_event_id"], 1);
+    assert!(material["registered_at"].is_string());
     assert!(queue.draft_origin(TaskId::new(3)).unwrap().is_none());
     let targets: Vec<TaskId> = queue
         .planner_drafts()

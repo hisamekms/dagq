@@ -2599,12 +2599,13 @@ pub enum PlannerAnswerRoute {
 pub trait DraftPlannerStore {
     /// Register every still-unrecorded entry of one receipt atomically,
     /// including skipped entries and their `follow_up_registered` events.
+    /// Snapshot the source task's goal and state in the same transaction;
+    /// callers cannot supply registration-time goal facts.
     fn register_follow_ups(
         &mut self,
         run: &RunId,
         entries: Vec<FollowUpRegistration>,
         depth: i64,
-        goal_closed: bool,
     ) -> Result<Vec<crate::domain::RegisteredFollowUp>>;
     /// Record where a draft the runtime or a job registered came from, and
     /// what its planner is shown about it. A draft has one origin: a second

@@ -35,6 +35,15 @@ impl PlanningStore for SqliteQueue {
         TaskStore::edit_task(self, task, edit, authorized)
     }
 
+    fn judge_follow_up(
+        &mut self,
+        task: TaskId,
+        judgement: crate::domain::follow_up::MembershipJudgement,
+        role: &str,
+    ) -> Result<Value> {
+        SqliteQueue::judge_follow_up(self, task, judgement, role)
+    }
+
     fn set_goal(&mut self, task: TaskId, goal: Option<GoalId>) -> Result<Task> {
         TaskStore::set_goal(self, task, goal)
     }

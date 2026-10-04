@@ -114,6 +114,7 @@ pub fn task_detail(detail: &TaskDetail, events: usize) -> Value {
         "duplicates": detail.duplicates,
         "origin": detail.origin,
         "follow_up_drafts": detail.follow_up_drafts,
+        "membership_judgements": detail.membership_judgements,
         "runs": runs,
         "runs_total": detail.runs.len(),
         "events": events,
@@ -200,6 +201,8 @@ pub fn goal_detail(detail: &GoalDetail) -> Value {
     json!({
         "goal": goal,
         "closed": detail.closed,
+        "acceptance_version": detail.acceptance_version,
+        "follow_up_memberships": detail.follow_up_memberships,
         "tasks": detail.tasks,
         "dependents": detail.dependents,
         "events": events,
@@ -296,6 +299,7 @@ mod tests {
     #[test]
     fn task_detail_keeps_the_latest_run_and_events_without_paths() {
         let detail = TaskDetail {
+            membership_judgements: Vec::new(),
             task: task(&"d".repeat(TEXT_LIMIT + 5)),
             dependencies: vec![TaskId::new(3)],
             goal_dependencies: vec![GoalId::new(4)],
@@ -362,6 +366,7 @@ mod tests {
     #[test]
     fn task_detail_without_runs_is_empty() {
         let detail = TaskDetail {
+            membership_judgements: Vec::new(),
             task: task("short"),
             dependencies: vec![],
             goal_dependencies: vec![],
@@ -382,6 +387,8 @@ mod tests {
     #[test]
     fn goal_detail_truncates_texts_and_keeps_kinds_of_latest_events() {
         let detail = GoalDetail {
+            acceptance_version: 1,
+            follow_up_memberships: Vec::new(),
             goal: Goal::restore(crate::domain::GoalRecord {
                 id: GoalId::new(1),
                 title: "g".into(),
@@ -440,6 +447,7 @@ mod tests {
             ..note(9, &"n".repeat(TEXT_LIMIT + 1))
         });
         let detail = TaskDetail {
+            membership_judgements: Vec::new(),
             task: task("short"),
             dependencies: vec![],
             goal_dependencies: vec![],

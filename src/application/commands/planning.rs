@@ -30,6 +30,12 @@ pub trait PlanningStore {
     /// `authorized` is the status the edit was authorized with; the store
     /// refuses the edit when the task has another one in its transaction.
     fn edit_task(&mut self, task: TaskId, edit: TaskEdit, authorized: TaskStatus) -> Result<Task>;
+    fn judge_follow_up(
+        &mut self,
+        task: TaskId,
+        judgement: crate::domain::follow_up::MembershipJudgement,
+        role: &str,
+    ) -> Result<Value>;
     fn set_goal(&mut self, task: TaskId, goal: Option<GoalId>) -> Result<Task>;
     fn set_paths(&mut self, task: TaskId, paths: Vec<String>) -> Result<Task>;
     fn set_priority(&mut self, task: TaskId, priority: Priority) -> Result<Task>;
@@ -96,6 +102,16 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
             },
         )?;
         self.store.edit_task(task, edit, status)
+    }
+
+    pub fn judge_follow_up(
+        &mut self,
+        task: TaskId,
+        judgement: crate::domain::follow_up::MembershipJudgement,
+    ) -> Result<Value> {
+        self.authorize(Capability::FollowUpJudge, Resource::task(task))?;
+        self.store
+            .judge_follow_up(task, judgement, self.actor.role().as_str())
     }
 
     pub fn set_goal(&mut self, task: TaskId, goal: Option<GoalId>) -> Result<Task> {
@@ -309,6 +325,14 @@ mod tests {
         fn edit_task(&mut self, _: TaskId, _: TaskEdit, authorized: TaskStatus) -> Result<Task> {
             self.edited_as = Some(authorized);
             Err(reached("edit"))
+        }
+        fn judge_follow_up(
+            &mut self,
+            _: TaskId,
+            _: crate::domain::follow_up::MembershipJudgement,
+            _: &str,
+        ) -> Result<Value> {
+            unreachable!()
         }
         fn set_goal(&mut self, _: TaskId, _: Option<GoalId>) -> Result<Task> {
             Err(reached("set-goal"))

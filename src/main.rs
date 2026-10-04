@@ -278,6 +278,24 @@ enum Command {
         #[command(subcommand)]
         command: GoalCommand,
     },
+    /// Record or correct a follow-up membership judgement against its source goal acceptance.
+    JudgeFollowUp {
+        task: i64,
+        #[arg(long)]
+        classification: String,
+        #[arg(long = "acceptance-item")]
+        acceptance_items: Vec<String>,
+        #[arg(long)]
+        reason: String,
+        #[arg(long = "evidence")]
+        evidence: Vec<String>,
+        #[arg(long = "destination-goal")]
+        destination_goal: Option<i64>,
+        #[arg(long = "source-goal")]
+        source_goal: Option<i64>,
+        #[arg(long)]
+        corrects: Option<i64>,
+    },
     /// Move a draft or ready task to an open goal, or out of its goal with --none.
     SetGoal {
         /// Draft or ready task to move.
@@ -1937,6 +1955,7 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
             },
             task_resource(*id),
         ),
+        Command::JudgeFollowUp { task, .. } => one(C::FollowUpJudge, task_resource(*task)),
         Command::Draft { id }
         | Command::Edit { task: id, .. }
         | Command::SetGoal { task: id, .. }
@@ -2196,7 +2215,8 @@ fn finding_target(
 /// from it, and records what it refuses (task 732).
 fn authorized_in_application(command: &Command) -> bool {
     match command {
-        Command::Add { .. }
+        Command::JudgeFollowUp { .. }
+        | Command::Add { .. }
         | Command::Edit { .. }
         | Command::Submit { .. }
         | Command::Draft { .. }
@@ -3218,6 +3238,27 @@ fn execute(cli: Cli) -> Result<Value> {
             )?,
             GoalCommand::Review { id } => planning!().review_goal(GoalId::new(id))?,
         },
+        Command::JudgeFollowUp {
+            task,
+            classification,
+            acceptance_items,
+            reason,
+            evidence,
+            destination_goal,
+            source_goal,
+            corrects,
+        } => planning!().judge_follow_up(
+            TaskId::new(task),
+            dagq::domain::follow_up::MembershipJudgement {
+                classification: classification.parse()?,
+                acceptance_items,
+                reason,
+                evidence,
+                destination_goal_id: destination_goal.map(GoalId::new),
+                source_goal_id: source_goal.map(GoalId::new),
+                corrects,
+            },
+        )?,
         Command::SetGoal {
             task,
             goal,
@@ -4493,6 +4534,10 @@ mod tests {
             ("add", &["t"]),
             ("draft", &["1"]),
             ("edit", &["1", "--title", "t"]),
+            (
+                "judge-follow-up",
+                &["1", "--classification", "required", "--reason", "r"],
+            ),
             ("set-goal", &["1", "1"]),
             ("set-paths", &["1", "--none"]),
             ("set-priority", &["1", "high"]),

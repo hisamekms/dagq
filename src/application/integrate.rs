@@ -910,21 +910,9 @@ pub fn register_follow_ups<Q: Queue + ?Sized>(
     let Some(entries) = follow_ups.and_then(Value::as_array) else {
         return Vec::new();
     };
-    let goal_closed = match task.goal_id() {
-        Some(goal_id) => match queue.show_goal(goal_id) {
-            Ok(detail) => detail.closed,
-            Err(error) => {
-                warn!(
-                    op = "follow_up",
-                    run_id = %run_id,
-                    error = %format_args!("{error:#}"),
-                    "run {run_id}: follow_ups not registered: {error:#}"
-                );
-                return Vec::new();
-            }
-        },
-        None => false,
-    };
+    // The store reads the source task and goal again inside its registration
+    // transaction. Draft membership and immutable origin facts come from that
+    // snapshot, including a close that won the race with registration.
     // A draft is one follow-up further from a person's judgement than the
     // task that proposed it (ADR-0037 decision 6).
     // An unreadable depth counts as the deepest that still asks, so the
@@ -969,7 +957,7 @@ pub fn register_follow_ups<Q: Queue + ?Sized>(
                     change: None,
                     dependencies: Vec::new(),
                     goal_dependencies: Vec::new(),
-                    goal_id: task.goal_id().filter(|_| !goal_closed),
+                    goal_id: task.goal_id(),
                     context: format!(
                         "follow_up proposed by the receipt of run {run_id} of task {} ({})",
                         task.id(),
@@ -987,7 +975,7 @@ pub fn register_follow_ups<Q: Queue + ?Sized>(
             }
         })
         .collect();
-    match queue.register_follow_ups(run_id, prepared, depth, goal_closed) {
+    match queue.register_follow_ups(run_id, prepared, depth) {
         Ok(added) => {
             for item in &added {
                 info!(op = "follow_up", run_id = %run_id, follow_up_task_id = %item.task_id,

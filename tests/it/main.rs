@@ -168,3 +168,5 @@ mod worker_escalation;
 mod worker_model;
 
 mod stub_templates;
+
+mod follow_up_membership;

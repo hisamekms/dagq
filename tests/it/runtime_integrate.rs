@@ -1628,13 +1628,13 @@ fn integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once() {
     assert_eq!(
         events_of(&db, run.id(), "follow_up_registered"),
         vec![
-            json!({"task_id": 2, "title": "later work", "index": 0, "category": "defect"}),
+            json!({"task_id": 2, "title": "later work", "index": 0, "category": "defect", "source_task_id": 1, "source_run_id": run.id(), "source_goal_id": goal.id(), "source_goal_state": "open", "source_goal_provenance": "recorded", "follow_up_depth": 1}),
             json!({
                 "task_id": null, "title": "  ", "index": 1, "category": "ops",
                 "skipped": "title is not a non-blank string",
                 "follow_up": {"title": "  ", "description": "no title, not a task", "category": "ops"},
             }),
-            json!({"task_id": 3, "title": "more work", "index": 2, "category": "unlabeled"}),
+            json!({"task_id": 3, "title": "more work", "index": 2, "category": "unlabeled", "source_task_id": 1, "source_run_id": run.id(), "source_goal_id": goal.id(), "source_goal_state": "open", "source_goal_provenance": "recorded", "follow_up_depth": 1}),
             json!({
                 "task_id": null, "title": "no description", "index": 3, "category": "unlabeled",
                 "skipped": "description is not a string",
@@ -1693,7 +1693,7 @@ fn integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once() {
     assert_eq!(detail.task.goal_id(), None);
     assert_eq!(
         events_of(&db, run.id(), "follow_up_registered")[4],
-        json!({"task_id": added[0].task_id, "title": "after the goal", "index": 4, "category": "unlabeled", "goal_closed": true})
+        json!({"task_id": added[0].task_id, "title": "after the goal", "index": 4, "category": "unlabeled", "goal_closed": true, "source_task_id": 1, "source_run_id": run.id(), "source_goal_id": goal.id(), "source_goal_state": "closed", "source_goal_provenance": "recorded", "follow_up_depth": 1})
     );
     // Nothing to register without follow_ups.
     assert!(runtime::register_follow_ups(&mut queue, &task, run.id(), None).is_empty());

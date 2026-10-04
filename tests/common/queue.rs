@@ -3,11 +3,16 @@
 use std::path::Path;
 
 use dagq::{
+    application::TaskStore,
+    domain::{DraftOrigin, Priority, TaskId},
+};
+use dagq::{
     domain::search::{SearchQuery, SearchRef},
     domain::{CommitSha, NewGoal, NewTask},
     infrastructure::{schema::MIGRATIONS, sqlite::SqliteQueue},
 };
 use rusqlite::Connection;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 pub const BASE: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -130,4 +135,44 @@ pub fn search(
             )
         })
         .collect()
+}
+
+/// A draft as the runtime or a job registers it: `origin` with `material`.
+pub fn runtime_draft(
+    queue: &mut SqliteQueue,
+    title: &str,
+    goal: Option<dagq::domain::GoalId>,
+    origin: DraftOrigin,
+    mut material: Value,
+) -> TaskId {
+    let id = queue
+        .add(NewTask {
+            title: title.into(),
+            description: format!("{title}: found outside the task"),
+            acceptance: String::new(),
+            verification_commands: Vec::new(),
+            required_evidence: Vec::new(),
+            paths: Vec::new(),
+            priority: Priority::Normal,
+            change: None,
+            dependencies: Vec::new(),
+            goal_dependencies: Vec::new(),
+            goal_id: goal,
+            context: String::new(),
+            provider: None,
+            worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
+        })
+        .unwrap()
+        .id();
+    if origin == DraftOrigin::FollowUp {
+        material["source_goal_id"] = json!(goal);
+        material["source_goal_state"] = json!(match goal {
+            None => "none",
+            Some(goal) if queue.show_goal(goal).unwrap().closed => "closed",
+            Some(_) => "open",
+        });
+        material["source_goal_provenance"] = json!("recorded");
+    }
+    queue.record_draft_origin(id, origin, &material).unwrap();
+    id
 }

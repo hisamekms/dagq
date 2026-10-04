@@ -754,10 +754,12 @@ impl TaskStore for SqliteQueue {
         let processes = super::runtime_store::processes_for_task(&tx, task_id)?;
         let duplicate_of = duplicate_target(&tx, task_id)?;
         let duplicates = duplicates_of(&tx, task_id)?;
+        let membership_judgements = super::follow_up_membership::judgements(&tx, task_id)?;
         let origin = super::draft_planners::task_origin(&tx, task_id)?;
         let follow_up_drafts = super::draft_planners::follow_up_drafts(&tx, task_id)?;
         tx.commit()?;
         Ok(TaskDetail {
+            membership_judgements,
             task,
             dependencies,
             goal_dependencies,
@@ -1001,6 +1003,8 @@ impl TaskStore for SqliteQueue {
     fn show_goal(&mut self, goal_id: GoalId) -> Result<GoalDetail> {
         let tx = self.conn.transaction()?;
         let goal = read_goal(&tx, goal_id)?;
+        let acceptance_version = super::follow_up_membership::acceptance_version(&tx, goal_id)?;
+        let follow_up_memberships = super::follow_up_membership::goal_memberships(&tx, goal_id)?;
         let tasks = tx
             .prepare("SELECT id, title, status FROM tasks WHERE goal_id=?1 ORDER BY id")?
             .query_map([goal_id], goal_task_row)?
@@ -1019,6 +1023,8 @@ impl TaskStore for SqliteQueue {
             .collect::<rusqlite::Result<_>>()?;
         tx.commit()?;
         Ok(GoalDetail {
+            acceptance_version,
+            follow_up_memberships,
             closed: goal.is_closed(),
             goal,
             tasks,
@@ -1035,6 +1041,7 @@ impl TaskStore for SqliteQueue {
         let old = read_goal(&tx, goal_id)?;
         // The event keeps the goal before the edit, which consumes it.
         let old_json = serde_json::to_value(&old)?;
+        let old_version = super::follow_up_membership::acceptance_version(&tx, goal_id)?;
         let new = goal::edit(old, edit)?;
         tx.execute(
             "UPDATE goals SET title=?1, description=?2, acceptance=?3, constraints=?4, doc=?5,
@@ -1053,7 +1060,8 @@ impl TaskStore for SqliteQueue {
             &tx,
             goal_id,
             EventKind::GoalUpdated,
-            json!({"old": old_json, "new": new}),
+            json!({"old": old_json, "new": new, "old_acceptance_version": old_version,
+                "new_acceptance_version": super::follow_up_membership::acceptance_version(&tx, goal_id)?}),
         )?;
         let result = read_goal(&tx, goal_id)?;
         tx.commit()?;
@@ -1234,38 +1242,8 @@ impl TaskStore for SqliteQueue {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let task = read_task(&tx, task_id)?;
-        let from = task.goal_id();
-        let task = task::set_goal(task, goal_id)?;
-        if let Some(goal_id) = task.goal_id() {
-            goal::check_accepts_tasks(&read_goal(&tx, goal_id)?)?;
-            if from != Some(goal_id) {
-                // The goal would wait for the task: the task must not wait
-                // for the goal (ADR-0038).
-                let direct: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM task_goal_dependencies
-                     WHERE task_id=?1 AND goal_id=?2)",
-                    params![task_id, goal_id],
-                    |r| r.get(0),
-                )?;
-                let cycle = waits_for(&tx, Node::Task(task_id), Node::Goal(goal_id))?;
-                task::check_membership_acyclic(&task, goal_id, direct, cycle)?;
-            }
-        }
-        if from != task.goal_id() {
-            tx.execute(
-                "UPDATE tasks SET goal_id=?1, updated_at=?2 WHERE id=?3",
-                params![task.goal_id(), self.generators.clock.timestamp(), task_id],
-            )?;
-            event(
-                &tx,
-                task_id,
-                None,
-                EventKind::TaskGoalChanged,
-                json!({"from": from, "to": task.goal_id()}),
-            )?;
-        }
-        let result = read_task(&tx, task_id)?;
+        super::follow_up_membership::check_set_goal(&tx, task_id, goal_id)?;
+        let result = set_goal_in(&tx, task_id, goal_id, &self.generators.clock.timestamp())?;
         tx.commit()?;
         Ok(result)
     }
@@ -2417,4 +2395,45 @@ pub(super) fn event_row(row: &Row<'_>) -> rusqlite::Result<RunEvent> {
         created_at: row.get("created_at")?,
         actor: event_actor(row)?,
     })
+}
+
+pub(super) fn set_goal_in(
+    conn: &Connection,
+    task_id: TaskId,
+    goal_id: Option<GoalId>,
+    timestamp: &str,
+) -> Result<Task> {
+    let task = read_task(conn, task_id)?;
+    let from = task.goal_id();
+    let task = task::set_goal(task, goal_id)?;
+    if let Some(goal_id) = task.goal_id() {
+        goal::check_accepts_tasks(&read_goal(conn, goal_id)?)?;
+        if from != Some(goal_id) {
+            // The goal would wait for the task: the task must not wait
+            // for the goal (ADR-0038).
+            let direct: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM task_goal_dependencies
+                     WHERE task_id=?1 AND goal_id=?2)",
+                params![task_id, goal_id],
+                |r| r.get(0),
+            )?;
+            let cycle = waits_for(conn, Node::Task(task_id), Node::Goal(goal_id))?;
+            task::check_membership_acyclic(&task, goal_id, direct, cycle)?;
+        }
+    }
+    if from != task.goal_id() {
+        conn.execute(
+            "UPDATE tasks SET goal_id=?1, updated_at=?2 WHERE id=?3",
+            params![task.goal_id(), timestamp, task_id],
+        )?;
+        event(
+            conn,
+            task_id,
+            None,
+            EventKind::TaskGoalChanged,
+            json!({"from": from, "to": task.goal_id()}),
+        )?;
+    }
+    let result = read_task(conn, task_id)?;
+    Ok(result)
 }

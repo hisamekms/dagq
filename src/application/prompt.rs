@@ -1009,8 +1009,8 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Strin
          {each}Then do exactly one of these three{with_each}:\n\
          1. Adopt: {adopt} add its dependencies with `dagq dependency add`, check it with `dagq lint {t}` and submit it with `dagq submit {t}`. Say in its `--context` why you adopted it. Plan review checks it before it becomes ready.\n\
          2. Drop: when it is already done, duplicated or not worth doing, cancel it with `dagq cancel {t}` and record why with `dagq note --task {t} --text '<why>'`. When another task already covers it (a duplicate, or a completed task that already did it), cancel it with `dagq cancel {t} --duplicate-of <that task>` instead, so the queue records which task it duplicates, and still note why.\n\
-         3. Ask: only for a draft you cannot decide yourself: (a) it needs a person's judgement, `scope` (the acceptance, the scope or a goal's decision would change with their intent) or `discard` (whether to throw work away), that the queue, the repository (its code and the decisions it records) and a person's precedents cannot settle; (b) your confidence in the decision is low; or (c) it is a follow_up draft past the runtime's follow_up limit, {FOLLOW_UP_ASK_DEPTH} or more follow-ups from a person's judgement or with no goal or a closed goal. Run `dagq ask --task {t} --kind planner_question --because scope --recommend <adopt|cancel|keep_draft> --confidence <high|low> --question '<everything the person needs, with your recommendation and why>' --option adopt --option cancel --option keep_draft` (`--because discard` when the question is whether to throw work away; for (c), recommend what you would do on your own), report briefly and stop. The answer arrives in this terminal as `answer to ask <id>: ...`: on adopt do 1, on cancel do 2 (the note names the ask), on keep_draft leave the draft as it is, record why with `dagq note --task {t} --text '<why>'` (naming the ask) and stop. A draft kept so stays a draft until a person has the inbox record a planning request that names it; no planner of the runtime's is opened for it again.\n\
-         The runtime refuses your submit of a follow_up draft past that limit unless a person answered adopt: ask then, as (c) says.\n\
+         3. Ask: only for a draft you cannot decide yourself: (a) it needs a person's judgement, `scope` (the acceptance, the scope or a goal's decision would change with their intent) or `discard` (whether to throw work away), that the queue, the repository (its code and the decisions it records) and a person's precedents cannot settle; (b) your confidence in the decision is low; or (c) it is a follow_up draft past the runtime's follow_up limit, {FOLLOW_UP_ASK_DEPTH} or more follow-ups from a person's judgement, a source goal that was missing, closed or unknown at registration (even if its current goal is open), or no current goal or a closed current goal. Run `dagq ask --task {t} --kind planner_question --because scope --recommend <adopt|cancel|keep_draft> --confidence <high|low> --question '<everything the person needs, with your recommendation and why>' --option adopt --option cancel --option keep_draft` (`--because discard` when the question is whether to throw work away; for (c), recommend what you would do on your own), report briefly and stop. The answer arrives in this terminal as `answer to ask <id>: ...`: on adopt do 1, on cancel do 2 (the note names the ask), on keep_draft leave the draft as it is, record why with `dagq note --task {t} --text '<why>'` (naming the ask) and stop. A draft kept so stays a draft until a person has the inbox record a planning request that names it; no planner of the runtime's is opened for it again.\n\
+         The runtime refuses your submit of a follow_up draft past that limit unless a person answered adopt or already adopted it: ask then, as (c) says. Membership changes (`set-goal` or `judge-follow-up`) do not count as adoption or reset depth; an existing person's adopt remains valid.\n\
          When you are done, report the outcome in one or two sentences and stop; the runtime ends this session. Do not work on anything but {this}. Never open the queue database directly; use the dagq CLI only.\n",
         drafts = if single { "draft" } else { "drafts" },
         it = if single { "it" } else { "them" },
@@ -3644,6 +3644,7 @@ mod tests {
     /// A task of the proposal as plan review reads it.
     fn proposal_task(task: Task, dependencies: Vec<TaskId>) -> TaskDetail {
         TaskDetail {
+            membership_judgements: Vec::new(),
             task,
             dependencies,
             goal_dependencies: Vec::new(),
@@ -4918,9 +4919,9 @@ mod tests {
     }
 
     /// The draft planner decides what it can recommend and records why;
-    /// only what it cannot settle, a low confidence and a follow_up past
-    /// ADR-t808-1's limit go to a person, with a recommendation and its
-    /// confidence (ADR-t451-1 decision 5).
+    /// only what it cannot settle, low confidence or a follow_up requiring
+    /// person adoption for registration-time facts or depth goes to a person,
+    /// with a recommendation and confidence (ADR-t451-1 decision 5).
     #[test]
     fn the_draft_planner_decides_what_it_can_recommend() {
         let material = json!({"source_run_id": RUN, "source_task_id": 3, "index": 0});
@@ -4953,11 +4954,12 @@ mod tests {
             "that the queue, the repository (its code and the decisions it records) and a person's precedents cannot settle",
             "(b) your confidence in the decision is low; or (c)",
             "when none of them settles it, decide them yourself from the source, the decisions the repository records and a person's precedents, and ask a person with a `planner_question` ask as below only when that material cannot settle them and the decision is a person's (`scope` or `discard`) or your confidence in it is low.",
-            "(c) it is a follow_up draft past the runtime's follow_up limit, 3 or more follow-ups from a person's judgement or with no goal or a closed goal",
+            "(c) it is a follow_up draft past the runtime's follow_up limit, 3 or more follow-ups from a person's judgement, a source goal that was missing, closed or unknown at registration (even if its current goal is open), or no current goal or a closed current goal",
             "dagq ask --task 9 --kind planner_question --because scope --recommend <adopt|cancel|keep_draft> --confidence <high|low>",
             "on keep_draft leave the draft as it is, record why with `dagq note --task 9",
             "A draft kept so stays a draft until a person has the inbox record a planning request that names it; no planner of the runtime's is opened for it again.",
-            "The runtime refuses your submit of a follow_up draft past that limit unless a person answered adopt",
+            "The runtime refuses your submit of a follow_up draft past that limit unless a person answered adopt or already adopted it",
+            "Membership changes (`set-goal` or `judge-follow-up`) do not count as adoption or reset depth; an existing person's adopt remains valid",
         ] {
             assert!(prompt.contains(part), "{part} in {prompt}");
         }

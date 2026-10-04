@@ -18,6 +18,7 @@ tags:
 - [Architecture](architecture.md)（レイヤーとコンテキスト（計画管理・実行と着地・観測と分析・host運用）の2軸の境界。contextごとの所有する状態・判断・操作・公開するport・依存の向き、境界をまたぐtransactionの一覧、検査できる規則と今の違反。ADR-t1545-1）
 - [Domain model](domain-model.md)
 - [Persistence](persistence.md)
+- [Follow-up membership judgements](follow-up-membership.md)（所属の分類と必須の欄・acceptanceの版・出どころと深さ・所属の変更と人のadopt・旧schemaの移行）
 - [Authorization](authorization.md)
 - [Security](security.md)（信頼の区分・actorとcapability・host実行は助言的で隔離ではないこと・Podmanとqueue serviceへの道筋）
 - [Queue service](queue-service.md)（hostで動きqueue DBを開くservice。unix socket・APIのversion・tokenによるprincipalとservice側の認可・ask・show・noteのユースケース・`up`・`down`・supervisorによる起動と停止・落ちたときのattention。goal 82）

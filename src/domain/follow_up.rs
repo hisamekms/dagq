@@ -118,22 +118,38 @@ pub fn follow_up_category(entry: &serde_json::Value) -> String {
         .to_owned()
 }
 
+/// Only a complete recorded/restored registration establishes an open source.
+/// Missing or conflicting registration information requires a person.
+pub fn source_goal_was_open(material: &serde_json::Value) -> bool {
+    material["source_goal_state"].as_str() == Some("open")
+        && material["source_goal_id"].as_i64().is_some_and(|id| id > 0)
+        && matches!(
+            material["source_goal_provenance"].as_str(),
+            Some("recorded" | "restored")
+        )
+}
+
 /// Where a follow_up draft stands when a planner of the runtime's submits
 /// it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FollowUpFacts {
     /// The draft belongs to a goal that is not closed.
     pub goal_open: bool,
+    /// The immutable registration establishes that the source goal was open.
+    pub source_goal_open: bool,
     /// The draft's `follow_up_depth`.
     pub depth: i64,
 }
 
 /// Why a planner of the runtime's may not submit a follow_up draft without
 /// a person's `adopt` answer (ADR-0041 decision 16), or `None`: the draft's
+/// source goal was missing, closed or unknown at registration, its current
 /// goal is closed or missing, or the draft is [`FOLLOW_UP_ASK_DEPTH`] or
 /// more follow-ups from a person.
 pub fn adopt_needs_person(facts: FollowUpFacts) -> Option<String> {
-    if !facts.goal_open {
+    if !facts.source_goal_open {
+        Some("its source goal was missing, closed or unknown at registration, so a person must adopt it".into())
+    } else if !facts.goal_open {
         Some("its goal is closed (or it has none), so a person decides whether it belongs to a new goal".to_owned())
     } else if facts.depth >= FOLLOW_UP_ASK_DEPTH {
         Some(format!(
@@ -264,6 +280,7 @@ mod tests {
     fn a_follow_up_needs_a_person_for_a_closed_goal_or_depth_three() {
         let open = FollowUpFacts {
             goal_open: true,
+            source_goal_open: true,
             depth: 1,
         };
         assert_eq!(adopt_needs_person(open), None);
@@ -377,5 +394,191 @@ mod tests {
             reopened_material("r", crate::domain::ProposalId::new(7), None)["reviewed_proposal_id"]
                 .is_null()
         );
+    }
+}
+
+string_enum!(MembershipClassification {
+    Required => "required",
+    OutOfScope => "out_of_scope",
+    Undecided => "undecided",
+});
+
+/// The judge supplies evidence; the store snapshots the acceptance version.
+#[derive(Debug, Clone)]
+pub struct MembershipJudgement {
+    pub classification: MembershipClassification,
+    pub acceptance_items: Vec<String>,
+    pub reason: String,
+    pub evidence: Vec<String>,
+    pub destination_goal_id: Option<super::GoalId>,
+    /// Required when the registration history cannot name the source.
+    pub source_goal_id: Option<super::GoalId>,
+    pub corrects: Option<i64>,
+}
+
+impl MembershipJudgement {
+    pub fn validate(
+        &self,
+        previous: Option<(i64, MembershipClassification)>,
+        source: super::GoalId,
+    ) -> Result<(), String> {
+        use MembershipClassification::*;
+        if self.reason.trim().is_empty()
+            || self
+                .acceptance_items
+                .iter()
+                .chain(&self.evidence)
+                .any(|s| s.trim().is_empty())
+        {
+            return Err("reason and each supplied item/reference must be non-blank".into());
+        }
+        if self.classification == Required && self.acceptance_items.is_empty() {
+            return Err("required needs at least one acceptance item".into());
+        }
+        if self.classification != Undecided && self.evidence.is_empty() {
+            return Err("required and out_of_scope need evidence".into());
+        }
+        if self.classification == OutOfScope
+            && (self.destination_goal_id.is_none() || self.destination_goal_id == Some(source))
+        {
+            return Err("out_of_scope needs a destination different from the source goal".into());
+        }
+        if self.classification == Required && self.destination_goal_id.is_some_and(|g| g != source)
+        {
+            return Err("required belongs to the source goal".into());
+        }
+        if let Some((id, class)) = previous {
+            if class != Undecided && self.classification == Undecided {
+                return Err("a decided judgement cannot return to undecided".into());
+            }
+            if class != Undecided && class != self.classification && self.corrects != Some(id) {
+                return Err("a correction must name the previous judgement with --corrects".into());
+            }
+        }
+        if self.corrects.is_some() && self.corrects != previous.map(|p| p.0) {
+            return Err("--corrects must name the latest judgement".into());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod membership_tests {
+    use super::*;
+    use crate::domain::GoalId;
+    fn required() -> MembershipJudgement {
+        MembershipJudgement {
+            classification: MembershipClassification::Required,
+            acceptance_items: vec!["(1)".into()],
+            reason: "cannot satisfy (1) without it".into(),
+            evidence: vec!["receipt:r".into()],
+            destination_goal_id: None,
+            source_goal_id: None,
+            corrects: None,
+        }
+    }
+    #[test]
+    fn membership_requires_fields_and_allows_only_documented_transitions() {
+        use MembershipClassification::*;
+        let source = GoalId::new(1);
+        let valid = required();
+        assert!(valid.validate(None, source).is_ok());
+        for invalid in [
+            MembershipJudgement {
+                reason: " ".into(),
+                ..valid.clone()
+            },
+            MembershipJudgement {
+                acceptance_items: vec![],
+                ..valid.clone()
+            },
+            MembershipJudgement {
+                evidence: vec![],
+                ..valid.clone()
+            },
+            MembershipJudgement {
+                evidence: vec![" ".into()],
+                ..valid.clone()
+            },
+            MembershipJudgement {
+                classification: OutOfScope,
+                ..valid.clone()
+            },
+            MembershipJudgement {
+                classification: OutOfScope,
+                destination_goal_id: Some(source),
+                ..valid.clone()
+            },
+        ] {
+            assert!(invalid.validate(None, source).is_err());
+        }
+        assert!("tiny".parse::<MembershipClassification>().is_err());
+        let undecided = MembershipJudgement {
+            classification: Undecided,
+            acceptance_items: vec![],
+            evidence: vec![],
+            ..valid.clone()
+        };
+        assert!(undecided.validate(None, source).is_ok());
+        assert!(valid.validate(Some((1, Undecided)), source).is_ok());
+        assert!(valid.validate(Some((1, Required)), source).is_ok());
+        assert!(undecided.validate(Some((1, Required)), source).is_err());
+        assert!(undecided.validate(Some((1, OutOfScope)), source).is_err());
+        let outside = MembershipJudgement {
+            classification: OutOfScope,
+            destination_goal_id: Some(GoalId::new(2)),
+            ..valid.clone()
+        };
+        assert!(outside.validate(Some((1, Required)), source).is_err());
+        assert!(
+            MembershipJudgement {
+                corrects: Some(1),
+                ..outside.clone()
+            }
+            .validate(Some((1, Required)), source)
+            .is_ok()
+        );
+        assert!(
+            MembershipJudgement {
+                corrects: Some(2),
+                ..outside
+            }
+            .validate(Some((1, Required)), source)
+            .is_err()
+        );
+        assert!(
+            MembershipJudgement {
+                corrects: Some(1),
+                ..valid
+            }
+            .validate(Some((1, OutOfScope)), source)
+            .is_ok()
+        );
+    }
+    #[test]
+    fn registration_facts_cannot_be_overridden_by_current_membership() {
+        for provenance in ["recorded", "restored", "unknown"] {
+            for goal in [None, Some(1), Some(-1)] {
+                let material = serde_json::json!({"source_goal_state":"open", "source_goal_id":goal, "source_goal_provenance":provenance});
+                assert_eq!(
+                    source_goal_was_open(&material),
+                    goal == Some(1) && provenance != "unknown"
+                );
+            }
+        }
+        assert!(!source_goal_was_open(&serde_json::json!({})));
+        for depth in [0, 1, 2, 3, 4] {
+            for current in [false, true] {
+                for source in [false, true] {
+                    let needs = adopt_needs_person(FollowUpFacts {
+                        goal_open: current,
+                        source_goal_open: source,
+                        depth,
+                    })
+                    .is_some();
+                    assert_eq!(needs, !source || !current || depth >= 3);
+                }
+            }
+        }
     }
 }
