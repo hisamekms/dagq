@@ -20,7 +20,9 @@ use std::path::{Path, PathBuf};
 use super::{
     RunFiles, TaskListItem, fenced,
     integrate::{integrate_logs, log_names},
-    or_none, tail,
+    or_none,
+    prompt_fit::{self, Fit, Keep, NOT_READABLE, left_out_note, shrink},
+    tail,
 };
 use crate::domain::worker::WorkerMode;
 use crate::domain::{
@@ -705,42 +707,343 @@ pub const RECORD_READING: &str = "To see what happened, read the record rather t
 without `--kind` it lists attention events only, so add `--all` for every kind; it gives the oldest 100 first, so page on with `--after <cursor>` or narrow with `--since`. \
 `dagq timeline RUN` gives a run's events oldest first with each gap and its reason (idle, waiting_ask, background, after_receipt, ...).";
 
+/// The read-only dagq commands the prompts of the planners the runtime
+/// opens name to read what their limits left out, as they write them
+/// (`ID` for a number): each is one a planner's role may run (task 1571,
+/// ADR-t1566-1 decision 3).
+pub const PLANNER_READS: &[&str] = &[
+    "dagq show ID --full",
+    "dagq goal show ID --full",
+    "dagq proposal show ID",
+    "dagq findings ID --full",
+    "dagq requests ID",
+    "dagq asks --all",
+    "dagq events --full --task ID --kind plan_review_finished",
+    "dagq events --full --task ID --kind integration_receipt",
+    "dagq events --full --run ID --kind integration_receipt",
+    "dagq events --full --all --after ID --limit 1",
+];
+
+/// The bytes of one text field of a goal in a planner's prompt (its
+/// description or acceptance; its constraints take half), of the lines of
+/// its tasks, and of all the goals of one prompt.
+pub const PLANNER_GOAL_TEXT_BYTES: usize = 4_000;
+pub const PLANNER_GOAL_TASKS_BYTES: usize = 4_000;
+pub const PLANNER_GOALS_BYTES: usize = 16_000;
+
+/// The bytes of the asks a planner's prompt lists (the newest first) and of
+/// one question or answer in them.
+pub const PLANNER_ASKS_BYTES: usize = 8_000;
+pub const PLANNER_ASK_TEXT_BYTES: usize = 1_000;
+
+/// The bytes of the answered question a planner carries for the planner
+/// before it, its question and its answer each.
+pub const PLANNER_ANSWER_BYTES: usize = 3_000;
+
+/// Characters of a task's title in a list of a planner's prompt.
+const PLANNER_TITLE_CHARS: usize = 200;
+
+/// `title` cut to [`PLANNER_TITLE_CHARS`] characters.
+fn short_title(title: &str) -> String {
+    super::health::truncate(title, PLANNER_TITLE_CHARS).unwrap_or_else(|| title.to_owned())
+}
+
+/// The lines of `tasks`, the newest first within `bytes`, kept in their
+/// order, with a note of how many were left out and how to read them.
+fn planner_task_lines(
+    fit: &mut Fit,
+    name: &'static str,
+    tasks: &[GoalTask],
+    bytes: usize,
+    read: &str,
+) -> String {
+    if tasks.is_empty() {
+        return "(none)".to_owned();
+    }
+    let lines: Vec<String> = tasks
+        .iter()
+        .map(|t| {
+            format!(
+                "- task {} ({}): {}",
+                t.id,
+                t.status.as_str(),
+                short_title(&t.title)
+            )
+        })
+        .collect();
+    let sizes: Vec<usize> = lines.iter().map(String::len).collect();
+    let kept = prompt_fit::pick(&sizes, (0..lines.len()).rev(), usize::MAX, bytes);
+    let left_out: Vec<String> = tasks
+        .iter()
+        .zip(&kept)
+        .filter(|(_, kept)| !**kept)
+        .map(|(t, _)| t.id.to_string())
+        .collect();
+    fit.omit(name, left_out.len());
+    let mut text = lines
+        .into_iter()
+        .zip(&kept)
+        .filter(|(_, kept)| **kept)
+        .map(|(line, _)| line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !left_out.is_empty() {
+        text.push('\n');
+        text.push_str(&left_out_note("tasks (the oldest)", &left_out, read));
+    }
+    text
+}
+
+/// The section of a goal in a planner's prompt: `heading`, its text
+/// fields, its doc when `doc`, and the lines of `tasks` (headed
+/// `tasks_label`), each held to its limit.
+fn planner_goal(
+    fit: &mut Fit,
+    heading: &str,
+    goal: &Goal,
+    (tasks, tasks_label): (&[GoalTask], &str),
+    doc: bool,
+) -> String {
+    let read = format!("read it whole with `dagq goal show {} --full`", goal.id());
+    let description = fit.text(
+        "goals",
+        or_none(goal.description()),
+        PLANNER_GOAL_TEXT_BYTES,
+        Keep::Start,
+        &read,
+    );
+    let acceptance = fit.text(
+        "goals",
+        or_none(goal.acceptance()),
+        PLANNER_GOAL_TEXT_BYTES,
+        Keep::Start,
+        &read,
+    );
+    let constraints = fit.text(
+        "goals",
+        or_none(goal.constraints()),
+        PLANNER_GOAL_TEXT_BYTES / 2,
+        Keep::Start,
+        &read,
+    );
+    let tasks = planner_task_lines(
+        fit,
+        "goals",
+        tasks,
+        PLANNER_GOAL_TASKS_BYTES,
+        &format!("`dagq goal show {} --full`", goal.id()),
+    );
+    format!(
+        "{heading}\n\n{description}\n\nAcceptance:\n{acceptance}\n\nConstraints:\n{constraints}\n\n{doc}{tasks_label}:\n{tasks}\n",
+        doc = if doc {
+            format!("Doc: {}\n\n", goal.doc().unwrap_or("(none)"))
+        } else {
+            String::new()
+        },
+    )
+}
+
+/// The goals' sections of a planner's prompt within
+/// [`PLANNER_GOALS_BYTES`] in their order, with a note of the goals left
+/// out.
+fn planner_goals(fit: &mut Fit, sections: Vec<(GoalId, String)>) -> String {
+    let sizes: Vec<usize> = sections.iter().map(|(_, text)| text.len()).collect();
+    let kept = prompt_fit::pick(&sizes, 0..sections.len(), usize::MAX, PLANNER_GOALS_BYTES);
+    let left_out: Vec<String> = sections
+        .iter()
+        .zip(&kept)
+        .filter(|(_, kept)| !**kept)
+        .map(|((id, _), _)| id.to_string())
+        .collect();
+    fit.omit("goals", left_out.len());
+    let mut text: String = sections
+        .into_iter()
+        .zip(&kept)
+        .filter(|(_, kept)| **kept)
+        .map(|((_, text), _)| text)
+        .collect();
+    if !left_out.is_empty() {
+        text.push_str(&format!(
+            "\n## Goals left out\n\n{}",
+            left_out_note("goals", &left_out, "`dagq goal show ID --full`")
+        ));
+    }
+    fit.section("goals", &text);
+    text
+}
+
+/// The lines of `asks`, the newest first within [`PLANNER_ASKS_BYTES`] and
+/// kept in their order, each question and answer cut, with a note of the
+/// asks left out. `kind` adds each ask's kind.
+fn planner_asks(fit: &mut Fit, asks: &[Ask], kind: bool) -> String {
+    let read = "read it whole with `dagq asks --all`";
+    let lines: Vec<String> = asks
+        .iter()
+        .map(|ask| {
+            let question = fit.text(
+                "asks",
+                &ask.question,
+                PLANNER_ASK_TEXT_BYTES,
+                Keep::Start,
+                read,
+            );
+            let answer = fit.text(
+                "asks",
+                ask.answer.as_deref().unwrap_or("(none yet)"),
+                PLANNER_ASK_TEXT_BYTES,
+                Keep::Start,
+                read,
+            );
+            format!(
+                "- ask {aid}{kind}: {question}\n  answer: {answer}\n",
+                aid = ask.id,
+                kind = if kind {
+                    format!(" ({})", ask.kind.as_str())
+                } else {
+                    String::new()
+                },
+                question = question.replace('\n', "\n  "),
+            )
+        })
+        .collect();
+    let sizes: Vec<usize> = lines.iter().map(String::len).collect();
+    let kept = prompt_fit::pick(
+        &sizes,
+        (0..lines.len()).rev(),
+        usize::MAX,
+        PLANNER_ASKS_BYTES,
+    );
+    let left_out: Vec<String> = asks
+        .iter()
+        .zip(&kept)
+        .filter(|(_, kept)| !**kept)
+        .map(|(ask, _)| ask.id.to_string())
+        .collect();
+    fit.omit("asks", left_out.len());
+    let mut text: String = lines
+        .into_iter()
+        .zip(&kept)
+        .filter(|(_, kept)| **kept)
+        .map(|(line, _)| line)
+        .collect();
+    if !left_out.is_empty() {
+        text.push_str(&left_out_note(
+            "asks (the oldest)",
+            &left_out,
+            "`dagq asks --all`",
+        ));
+    }
+    fit.section("asks", &text);
+    text
+}
+
+/// The question and the answer of the ask a planner carries for the
+/// planner before it, each held to [`PLANNER_ANSWER_BYTES`].
+fn planner_answer(fit: &mut Fit, answer: &Ask) -> (String, String) {
+    let read = format!("read ask {} whole with `dagq asks --all`", answer.id);
+    let question = fit.text(
+        "answer",
+        &answer.question,
+        PLANNER_ANSWER_BYTES,
+        Keep::Start,
+        &read,
+    );
+    let text = fit.text(
+        "answer",
+        answer.answer.as_deref().unwrap_or_default(),
+        PLANNER_ANSWER_BYTES,
+        Keep::Start,
+        &read,
+    );
+    (question, text)
+}
+
+/// The bytes the whole prompt of a planner the runtime opens for a revise
+/// takes at most, the language's instruction included (task 1571): in
+/// production it took 2,849 bytes at the median, 5,084 at p90 and 10,976
+/// at most, mostly the reasons and the tasks' lines.
+pub const RUNTIME_PLANNER_PROMPT_LIMIT: usize = 32_000;
+
+/// The bytes of the reasons plan review gave and of one reason, and of
+/// the lines of the proposal's tasks.
+pub const RUNTIME_PLANNER_REASONS_BYTES: usize = 12_000;
+pub const RUNTIME_PLANNER_REASON_BYTES: usize = 4_000;
+pub const RUNTIME_PLANNER_TASKS_BYTES: usize = 8_000;
+
 /// The initial prompt of a planner the runtime opens for a proposal plan
 /// review sent back while its own planner was closed (ADR-0041 decision
 /// 12): the proposal, its tasks, and the reasons to fix. No person watches
 /// the session, so what needs one goes to the inbox as an ask (decision 13).
+/// The reasons and the tasks are held to their limits and the whole to
+/// [`RUNTIME_PLANNER_PROMPT_LIMIT`] (task 1571, ADR-t1566-1).
 pub fn runtime_planner_prompt(
     db: &Path,
     proposal: ProposalId,
     tasks: &[Task],
     reasons: &[String],
-) -> Result<String> {
-    let tasks = if tasks.is_empty() {
-        "(none)".to_owned()
-    } else {
-        tasks
-            .iter()
-            .map(|task| {
-                format!(
-                    "- task {} ({}): {}",
-                    task.id(),
-                    task.status().as_str(),
-                    task.title()
+) -> Result<FittedPrompt> {
+    let mut fit = Fit::new(RUNTIME_PLANNER_PROMPT_LIMIT);
+    let goal_tasks: Vec<GoalTask> = tasks
+        .iter()
+        .map(|task| GoalTask {
+            id: task.id(),
+            title: task.title().to_owned(),
+            status: task.status(),
+        })
+        .collect();
+    let tasks = planner_task_lines(
+        &mut fit,
+        "tasks",
+        &goal_tasks,
+        RUNTIME_PLANNER_TASKS_BYTES,
+        &format!("`dagq proposal show {proposal}`"),
+    );
+    fit.section("tasks", &tasks);
+    let reason_read = format!(
+        "read it whole with `dagq events --full --task ID --kind plan_review_finished` for a task of proposal {proposal}"
+    );
+    let lines: Vec<String> = reasons
+        .iter()
+        .map(|reason| {
+            format!(
+                "- {}",
+                fit.text(
+                    "reasons",
+                    reason,
+                    RUNTIME_PLANNER_REASON_BYTES,
+                    Keep::Start,
+                    &reason_read
                 )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    let reasons = if reasons.is_empty() {
+            )
+        })
+        .collect();
+    let sizes: Vec<usize> = lines.iter().map(String::len).collect();
+    let kept = prompt_fit::pick(
+        &sizes,
+        0..lines.len(),
+        usize::MAX,
+        RUNTIME_PLANNER_REASONS_BYTES,
+    );
+    let left_out = kept.iter().filter(|kept| !**kept).count();
+    fit.omit("reasons", left_out);
+    let mut reasons = if lines.is_empty() {
         "(none given)".to_owned()
     } else {
-        reasons
-            .iter()
-            .map(|reason| format!("- {reason}"))
+        lines
+            .into_iter()
+            .zip(&kept)
+            .filter(|(_, kept)| **kept)
+            .map(|(line, _)| line)
             .collect::<Vec<_>>()
             .join("\n")
     };
-    Ok(format!(
+    if left_out > 0 {
+        reasons.push_str(&format!(
+            "\n({left_out} more reasons left out by this section's limit. To read them: `dagq events --full --task ID --kind plan_review_finished` for a task of proposal {proposal}.)"
+        ));
+    }
+    fit.section("reasons", &reasons);
+    Ok(fit.finish(format!(
         "You are a planner the dagq runtime opened for proposal {proposal} of the queue at {db}; no person watches this session.\n\
          Plan review sent the proposal back. Its reasons:\n{reasons}\n\
          Its tasks:\n{tasks}\n\
@@ -751,7 +1054,7 @@ pub fn runtime_planner_prompt(
          Never open the queue database directly; use the dagq CLI only.\n",
         db = super::path_text(db)?,
         rules = repository_rules(RUNTIME_PLANNER_ASK),
-    ))
+    )))
 }
 
 /// What the initial prompt of a planner the runtime opens for a bundle of
@@ -851,13 +1154,40 @@ fn follow_up_membership_step(t: &str) -> String {
 /// they cannot settle goes to a person.
 const DECIDE_YOURSELF: &str = "decide what you can recommend yourself and go on, asking no one, and leave why in the record (a task's `--context`, a `note`, a `--reason`); raise to a person, with your recommendation and its confidence, only what step Ask below names.";
 
+/// The bytes the whole prompt of a planner the runtime opens for a bundle
+/// of drafts takes at most, the language's instruction included (task
+/// 1571): in production it took 18,021 bytes at the median, 26,352 at p90
+/// and 38,241 at most (planner 828: the source task's receipt's summary
+/// 8,423, the goal 7,398, the goal's other tasks 4,303).
+pub const DRAFT_PLANNER_PROMPT_LIMIT: usize = 80_000;
+
+/// The bytes of the drafts' sections, and of one draft's title,
+/// description and context.
+pub const DRAFT_MEMBERS_BYTES: usize = 20_000;
+pub const DRAFT_TITLE_BYTES: usize = 1_000;
+pub const DRAFT_DESCRIPTION_BYTES: usize = 6_000;
+pub const DRAFT_CONTEXT_BYTES: usize = 4_000;
+
+/// The bytes of where the drafts came from (the source task, its landed
+/// receipt, plan review's reason, the goal review's findings), and in it
+/// of the source task's description and acceptance each, of the receipt's
+/// summary (8,423 at most in production) and of its follow_ups.
+pub const DRAFT_ORIGIN_BYTES: usize = 20_000;
+pub const DRAFT_SOURCE_TEXT_BYTES: usize = 3_000;
+pub const DRAFT_RECEIPT_SUMMARY_BYTES: usize = 12_000;
+pub const DRAFT_RECEIPT_FOLLOW_UPS_BYTES: usize = 6_000;
+
 /// The initial prompt of a planner the runtime opens for a bundle of drafts
 /// the runtime or a job registered (ADR-0041 decision 16, ADR-t807-1): the
 /// material, and the three things it may do with each draft — submit it
 /// completed (adopt), cancel it with a note (drop), or ask the inbox a
 /// `planner_question` and apply the answer typed into its terminal — and,
-/// for a bundle of more than one, what to weigh between its drafts.
-pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<String> {
+/// for a bundle of more than one, what to weigh between its drafts. Each
+/// section is held to its limit and the whole to
+/// [`DRAFT_PLANNER_PROMPT_LIMIT`]; what is left out is counted and named
+/// with the read-only dagq command that reads it (task 1571, ADR-t1566-1).
+pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<FittedPrompt> {
+    let mut fit = Fit::new(DRAFT_PLANNER_PROMPT_LIMIT);
     let (first, _) = material
         .members
         .first()
@@ -902,6 +1232,7 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Strin
             max = MAX_DRAFT_PLANNERS,
         )
     };
+    let mut drafts = Vec::new();
     for (target, attempt) in material.members {
         let task = &target.task;
         let heading = if single {
@@ -909,17 +1240,52 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Strin
         } else {
             format!("## Draft {} (planner {attempt} for it)", task.id())
         };
-        out.push_str(&format!(
+        let read = format!("read it whole with `dagq show {} --full`", task.id());
+        drafts.push(format!(
             "\n{heading}\n\nTask {id}: {title}\n{category}{proposal}\n### Description\n\n{description}\n\n### Context\n\n{context}\n",
             id = task.id(),
-            title = task.title(),
+            title = fit.text("drafts", task.title(), DRAFT_TITLE_BYTES, Keep::Start, &read),
             category = follow_up_category_line(target),
             proposal = follow_up_proposal_line(target)?,
-            description = or_none(task.description()),
-            context = or_none(task.context()),
+            description = fit.required("drafts", or_none(task.description()), DRAFT_DESCRIPTION_BYTES, &read),
+            context = fit.text("drafts", or_none(task.context()), DRAFT_CONTEXT_BYTES, Keep::Start, &read),
         ));
     }
-    out.push_str(&format!("\n## Where it came from: {}\n\n", origin.as_str()));
+    // The drafts in their order (the oldest first) within their limit.
+    let sizes: Vec<usize> = drafts.iter().map(String::len).collect();
+    let kept = prompt_fit::pick(&sizes, 0..drafts.len(), usize::MAX, DRAFT_MEMBERS_BYTES);
+    let left_out: Vec<String> = material
+        .members
+        .iter()
+        .zip(&kept)
+        .filter(|(_, kept)| !**kept)
+        .map(|((target, _), _)| target.task.id().to_string())
+        .collect();
+    fit.omit("drafts", left_out.len());
+    let mut members: String = drafts
+        .into_iter()
+        .zip(&kept)
+        .filter(|(_, kept)| **kept)
+        .map(|(text, _)| text)
+        .collect();
+    if !left_out.is_empty() {
+        members.push_str(&format!(
+            "\n## Drafts left out\n\n{}",
+            left_out_note("drafts", &left_out, "`dagq show ID --full` for each")
+        ));
+    }
+    fit.section("drafts", &members);
+    out.push_str(&members);
+    let mut whence_text = format!("\n## Where it came from: {}\n\n", origin.as_str());
+    let out_before_origin = std::mem::take(&mut out);
+    // Only a follow_up's drafts came from a run's receipt.
+    let receipt_read = first.material["source_run_id"]
+        .as_str()
+        .map_or_else(String::new, |run| {
+            format!(
+                "read it whole with `dagq events --full --run {run} --kind integration_receipt`"
+            )
+        });
     match origin {
         DraftOrigin::FollowUp => {
             out.push_str(&format!(
@@ -944,10 +1310,10 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Strin
                 out.push_str(&format!(
                     "\n### Source task {sid}: {title} ({status})\n\n{description}\n\nAcceptance:\n{acceptance}\n\nVerification: {verify}\nPaths: {paths}\nEvidence: {evidence}\n",
                     sid = source.id(),
-                    title = source.title(),
+                    title = short_title(source.title()),
                     status = source.status().as_str(),
-                    description = or_none(source.description()),
-                    acceptance = or_none(source.acceptance()),
+                    description = fit.text("origin", or_none(source.description()), DRAFT_SOURCE_TEXT_BYTES, Keep::Start, &format!("read it whole with `dagq show {} --full`", source.id())),
+                    acceptance = fit.text("origin", or_none(source.acceptance()), DRAFT_SOURCE_TEXT_BYTES, Keep::Start, &format!("read it whole with `dagq show {} --full`", source.id())),
                     verify = list_or_none(source.verification_commands()),
                     paths = list_or_none(source.paths()),
                     evidence = list_or_none(
@@ -962,10 +1328,22 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Strin
             if let Some(receipt) = material.receipt {
                 out.push_str(&format!(
                     "\n### The landed receipt\n\nSummary:\n{summary}\n\nIts follow_ups:\n{follow_ups}",
-                    summary = or_none(receipt["summary"].as_str().unwrap_or_default()),
+                    summary = fit.text(
+                        "origin",
+                        or_none(receipt["summary"].as_str().unwrap_or_default()),
+                        DRAFT_RECEIPT_SUMMARY_BYTES,
+                        Keep::Start,
+                        &receipt_read,
+                    ),
                     follow_ups = fenced(
                         "json",
-                        &serde_json::to_string_pretty(&receipt["follow_ups"])?
+                        &fit.text(
+                            "origin",
+                            &serde_json::to_string_pretty(&receipt["follow_ups"])?,
+                            DRAFT_RECEIPT_FOLLOW_UPS_BYTES,
+                            Keep::Start,
+                            &receipt_read,
+                        ),
                     ),
                 ));
             }
@@ -1002,27 +1380,47 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Strin
             }
         }
     }
-    for (goal, closed, siblings) in material.goals {
-        out.push_str(&format!(
-            "\n## Goal {gid}: {title}{closed}\n\n{description}\n\nAcceptance:\n{acceptance}\n\nConstraints:\n{constraints}\n\nDoc: {doc}\n\nIts other tasks:\n{tasks}\n",
-            gid = goal.id(),
-            title = goal.title(),
-            closed = if *closed { " (closed)" } else { "" },
-            description = or_none(goal.description()),
-            acceptance = or_none(goal.acceptance()),
-            constraints = or_none(goal.constraints()),
-            doc = goal.doc().unwrap_or("(none)"),
-            tasks = if siblings.is_empty() {
-                "(none)".to_owned()
-            } else {
-                siblings
-                    .iter()
-                    .map(|t| format!("- task {} ({}): {}", t.id, t.status.as_str(), t.title))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            },
-        ));
-    }
+    // Everything about where the drafts came from, within its limit.
+    let origin_text = std::mem::replace(&mut out, out_before_origin);
+    whence_text.push_str(&origin_text);
+    let whence_text = fit.text(
+        "origin",
+        &whence_text,
+        DRAFT_ORIGIN_BYTES,
+        Keep::Start,
+        &if receipt_read.is_empty() {
+            "`dagq show ID --full` for the drafts".to_owned()
+        } else {
+            format!(
+                "`dagq show ID --full` for the drafts and their source task, and {receipt_read}"
+            )
+        },
+    );
+    fit.section("origin", &whence_text);
+    out.push_str(&whence_text);
+    let goals = material
+        .goals
+        .iter()
+        .map(|(goal, closed, siblings)| {
+            let heading = format!(
+                "\n## Goal {gid}: {title}{closed}",
+                gid = goal.id(),
+                title = short_title(goal.title()),
+                closed = if *closed { " (closed)" } else { "" },
+            );
+            (
+                goal.id(),
+                planner_goal(
+                    &mut fit,
+                    &heading,
+                    goal,
+                    (siblings, "Its other tasks"),
+                    true,
+                ),
+            )
+        })
+        .collect();
+    out.push_str(&planner_goals(&mut fit, goals));
     let goalless: Vec<String> = material
         .members
         .iter()
@@ -1088,16 +1486,33 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Strin
         rules = repository_rules(RUNTIME_PLANNER_ASK),
     ));
     if let Some(answer) = material.answer {
-        out.push_str(&format!(
+        let (question, text) = planner_answer(&mut fit, answer);
+        let carried = format!(
             "\nThe planner before you asked a person (ask {aid}) about draft {task} and is gone:\n{question}\n\nanswer to ask {aid}: {text}\n\nApply this answer as step 3 says.\n",
             aid = answer.id,
             task = answer.task_id.map_or("?".to_owned(), |t| t.to_string()),
-            question = answer.question,
-            text = answer.answer.as_deref().unwrap_or_default(),
-        ));
+        );
+        fit.section("answer", &carried);
+        out.push_str(&carried);
     }
-    Ok(out)
+    Ok(fit.finish(out))
 }
+
+/// The bytes the whole prompt of a planner the runtime opens for a finding
+/// takes at most, the language's instruction included (task 1571): in
+/// production it took 37,974 bytes at the median, 156,358 at p90 and
+/// 276,417 at most (planner 768: finding 44's evidence took 270,669).
+pub const FINDING_PLANNER_PROMPT_LIMIT: usize = 80_000;
+
+/// The bytes of the finding's evidence events, the newest first, and of
+/// one event.
+pub const FINDING_EVIDENCE_BYTES: usize = 28_000;
+pub const FINDING_EVENT_BYTES: usize = 8_000;
+
+/// The bytes of the finding's detail, and of its summary, subject and why
+/// it is proposed each.
+pub const FINDING_DETAIL_BYTES: usize = 8_000;
+pub const FINDING_SHORT_BYTES: usize = 2_000;
 
 /// What the initial prompt of a planner opened for a finding shows
 /// (ADR-0044 decision 19).
@@ -1124,11 +1539,16 @@ pub struct FindingPlannerMaterial<'a> {
 /// for a proposal (ADR-0044 decisions 19, 20): the finding and its
 /// evidence, the asks about it, the goal of its target, and what it may do:
 /// a proposal of tasks for an open goal or of a new goal, a dismissal, or a
-/// `planner_question` for a person.
-pub fn finding_planner_prompt(material: &FindingPlannerMaterial<'_>) -> Result<String> {
+/// `planner_question` for a person. Each section is held to its limit and
+/// the whole to [`FINDING_PLANNER_PROMPT_LIMIT`]: the evidence newest
+/// first; what is left out is counted and named with the read-only dagq
+/// command that reads it (task 1571, ADR-t1566-1).
+pub fn finding_planner_prompt(material: &FindingPlannerMaterial<'_>) -> Result<FittedPrompt> {
+    let mut fit = Fit::new(FINDING_PLANNER_PROMPT_LIMIT);
     let view = material.finding;
     let finding = &view.finding;
     let id = finding.id;
+    let read = format!("read it whole with `dagq findings {id} --full`");
     let mut out = format!(
         "You are a planner the dagq runtime opened for finding {id} of the queue at {db}; no person watches this session. The finding is marked for a proposal: make the plan that remedies it (planner {attempt} of at most {max} the runtime opens for it).\n",
         db = super::path_text(material.db)?,
@@ -1141,23 +1561,73 @@ pub fn finding_planner_prompt(material: &FindingPlannerMaterial<'_>) -> Result<S
         (_, _, Some(goal)) => format!("goal {goal}"),
         _ => "the queue".to_owned(),
     };
-    out.push_str(&format!(
+    let head = format!(
         "\n## Finding {id}: {summary}\n\n- kind: {kind}\n- on: {target}\n- subject: {subject}\n- impact: {impact}\n- occurrences: {occurrences}, first seen {first}, last seen {last} (Unix seconds)\n- recorded by: {by}\n- why a proposal: {why}\n\n### Detail\n\n{detail}\n",
-        summary = finding.summary,
+        summary = fit.text(
+            "finding",
+            &finding.summary,
+            FINDING_SHORT_BYTES,
+            Keep::Start,
+            &read
+        ),
         kind = finding.kind,
-        subject = or_none(&finding.subject),
+        subject = fit.text(
+            "finding",
+            or_none(&finding.subject),
+            FINDING_SHORT_BYTES,
+            Keep::Start,
+            &read
+        ),
         impact = finding.impact.as_str(),
         occurrences = finding.occurrences,
         first = finding.first_seen_at,
         last = finding.last_seen_at,
         by = finding.recorded_by,
-        why = finding.propose_reason.as_deref().unwrap_or("(none)"),
-        detail = or_none(&finding.detail),
-    ));
+        why = fit.text(
+            "finding",
+            finding.propose_reason.as_deref().unwrap_or("(none)"),
+            FINDING_SHORT_BYTES,
+            Keep::Start,
+            &read
+        ),
+        detail = fit.required(
+            "finding",
+            or_none(&finding.detail),
+            FINDING_DETAIL_BYTES,
+            &read
+        ),
+    );
+    fit.section("finding", &head);
+    out.push_str(&head);
     out.push_str("\n### Its evidence\n\n");
     match &view.evidence_events {
         Some(events) if !events.is_empty() => {
-            out.push_str(&fenced("json", &serde_json::to_string_pretty(events)?));
+            // The newest evidence first within the section's limit.
+            let values = events
+                .iter()
+                .map(serde_json::to_value)
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let (kept, left_out) = fit.lines(
+                "evidence",
+                &values,
+                (0..values.len()).rev(),
+                (usize::MAX, FINDING_EVIDENCE_BYTES, FINDING_EVENT_BYTES),
+                &read,
+            );
+            let mut evidence = fenced("json", &kept.join("\n"));
+            if !left_out.is_empty() {
+                let ids: Vec<String> = left_out
+                    .iter()
+                    .map(|&index| events[index].id.to_string())
+                    .collect();
+                evidence.push_str(&left_out_note(
+                    "evidence events (the oldest)",
+                    &ids,
+                    &format!("`dagq findings {id} --full`, or one event with `dagq events --full --all --after <its ID - 1> --limit 1`"),
+                ));
+            }
+            fit.section("evidence", &evidence);
+            out.push_str(&evidence);
         }
         _ => out.push_str("(no event)\n"),
     }
@@ -1166,37 +1636,28 @@ pub fn finding_planner_prompt(material: &FindingPlannerMaterial<'_>) -> Result<S
     ));
     if !material.asks.is_empty() {
         out.push_str("\n### Asks about it\n\n");
-        for ask in material.asks {
-            out.push_str(&format!(
-                "- ask {aid} ({kind}): {question}\n  answer: {answer}\n",
-                aid = ask.id,
-                kind = ask.kind.as_str(),
-                question = ask.question.replace('\n', "\n  "),
-                answer = ask.answer.as_deref().unwrap_or("(none yet)"),
-            ));
-        }
+        out.push_str(&planner_asks(&mut fit, material.asks, true));
     }
     match material.goal {
         Some(goal) => {
-            out.push_str(&format!(
-                "\n## Goal {gid} of its target: {title}{closed}\n\n{description}\n\nAcceptance:\n{acceptance}\n\nConstraints:\n{constraints}\n\nIts tasks:\n{tasks}\n",
+            let heading = format!(
+                "\n## Goal {gid} of its target: {title}{closed}",
                 gid = goal.id(),
-                title = goal.title(),
-                closed = if material.goal_closed { " (closed)" } else { "" },
-                description = or_none(goal.description()),
-                acceptance = or_none(goal.acceptance()),
-                constraints = or_none(goal.constraints()),
-                tasks = if material.siblings.is_empty() {
-                    "(none)".to_owned()
+                title = short_title(goal.title()),
+                closed = if material.goal_closed {
+                    " (closed)"
                 } else {
-                    material
-                        .siblings
-                        .iter()
-                        .map(|t| format!("- task {} ({}): {}", t.id, t.status.as_str(), t.title))
-                        .collect::<Vec<_>>()
-                        .join("\n")
+                    ""
                 },
-            ));
+            );
+            let section = planner_goal(
+                &mut fit,
+                &heading,
+                goal,
+                (material.siblings, "Its tasks"),
+                false,
+            );
+            out.push_str(&planner_goals(&mut fit, vec![(goal.id(), section)]));
         }
         None => out.push_str(
             "\n## Goal\n\nIts target belongs to no goal. `dagq goal list` shows the open goals.\n",
@@ -1216,14 +1677,15 @@ pub fn finding_planner_prompt(material: &FindingPlannerMaterial<'_>) -> Result<S
         rules = repository_rules(RUNTIME_PLANNER_ASK),
     ));
     if let Some(answer) = material.answer {
-        out.push_str(&format!(
+        let (question, text) = planner_answer(&mut fit, answer);
+        let carried = format!(
             "\nThe planner before you asked a person (ask {aid}) and is gone:\n{question}\n\nanswer to ask {aid}: {text}\n\nApply this answer as step 4 says.\n",
             aid = answer.id,
-            question = answer.question,
-            text = answer.answer.as_deref().unwrap_or_default(),
-        ));
+        );
+        fit.section("answer", &carried);
+        out.push_str(&carried);
     }
-    Ok(out)
+    Ok(fit.finish(out))
 }
 
 /// What a planning request refers to, as its planner's prompt shows it
@@ -1256,6 +1718,21 @@ pub enum RequestRefMaterial {
     },
 }
 
+/// The bytes the whole prompt of a planner the runtime opens for a
+/// planning request takes at most, the language's instruction included
+/// (task 1571). Production had no such prompt yet: the limit is the other
+/// planners' (the draft planner's p90 26,352 and largest 38,241 fit in
+/// it), and the unit test's largest input
+/// (`a_request_planner_prompt_of_huge_references_stays_within_its_limits`)
+/// measures what the sections' limits add up to.
+pub const REQUEST_PLANNER_PROMPT_LIMIT: usize = 80_000;
+
+/// The bytes of the inbox's note, of the references' sections (in the
+/// order the inbox gave them) and of one reference.
+pub const REQUEST_NOTE_BYTES: usize = 8_000;
+pub const REQUEST_REFS_BYTES: usize = 32_000;
+pub const REQUEST_REF_BYTES: usize = 8_000;
+
 /// What the initial prompt of a planner the runtime opens for a planning
 /// request is made of.
 pub struct RequestPlannerMaterial<'a> {
@@ -1282,8 +1759,12 @@ pub struct RequestPlannerMaterial<'a> {
 /// refers to, the goals it leads to, how to look for what already covers
 /// it, the Basic policy of what to raise to a person, and what it may do:
 /// submit a proposal, decline the request with a reason, or ask a
-/// `planner_question` about it.
-pub fn request_planner_prompt(material: &RequestPlannerMaterial<'_>) -> Result<String> {
+/// `planner_question` about it. Each section is held to its limit and the
+/// whole to [`REQUEST_PLANNER_PROMPT_LIMIT`]; what is left out is counted
+/// and named with the read-only dagq command that reads it (task 1571,
+/// ADR-t1566-1).
+pub fn request_planner_prompt(material: &RequestPlannerMaterial<'_>) -> Result<FittedPrompt> {
+    let mut fit = Fit::new(REQUEST_PLANNER_PROMPT_LIMIT);
     let request = material.request;
     let id = request.id;
     let mut out = format!(
@@ -1299,105 +1780,78 @@ pub fn request_planner_prompt(material: &RequestPlannerMaterial<'_>) -> Result<S
         at = request.created_at,
     ));
     if let Some(note) = &request.note {
-        out.push_str(&format!(
-            "\nThe inbox added this, apart from the person's words:\n\n{note}\n"
-        ));
+        let note = format!(
+            "\nThe inbox added this, apart from the person's words:\n\n{}\n",
+            fit.text(
+                "note",
+                note,
+                REQUEST_NOTE_BYTES,
+                Keep::Start,
+                &format!("read it whole with `dagq requests {id}`"),
+            )
+        );
+        fit.section("note", &note);
+        out.push_str(&note);
     }
     if !material.refs.is_empty() {
         out.push_str("\n## What it refers to\n");
     }
+    // Each reference within its limit, in the order the inbox gave them.
+    let mut refs = Vec::new();
     for reference in material.refs {
-        match reference {
-            RequestRefMaterial::Ask(ask) => out.push_str(&format!(
-                "\n### Ask {aid} ({kind})\n\n{question}\n\nanswer: {answer}\n",
-                aid = ask.id,
-                kind = ask.kind.as_str(),
-                question = ask.question,
-                answer = ask.answer.as_deref().unwrap_or("(none yet)"),
-            )),
-            RequestRefMaterial::Task { task, receipt } => {
-                out.push_str(&format!(
-                    "\n### Task {tid} ({status}): {title}\n\n{description}\n\nAcceptance:\n{acceptance}\n",
-                    tid = task.id(),
-                    status = task.status().as_str(),
-                    title = task.title(),
-                    description = or_none(task.description()),
-                    acceptance = or_none(task.acceptance()),
-                ));
-                push_receipt(&mut out, receipt.as_ref())?;
-            }
-            RequestRefMaterial::Run { run, task, receipt } => {
-                out.push_str(&format!(
-                    "\n### Run {run}{of}\n",
-                    of = task
-                        .map(|task| format!(" (task {task})"))
-                        .unwrap_or_default(),
-                ));
-                push_receipt(&mut out, receipt.as_ref())?;
-            }
-            RequestRefMaterial::Event(event) => {
-                out.push_str(&format!(
-                    "\n### Event {eid} ({kind})\n\n",
-                    eid = event.id,
-                    kind = event.kind,
-                ));
-                out.push_str(&fenced(
-                    "json",
-                    &serde_json::to_string_pretty(&event.payload)?,
-                ));
-            }
-            RequestRefMaterial::Finding(view) => {
-                let finding = &view.finding;
-                out.push_str(&format!(
-                    "\n### Finding {fid} ({kind}, {status}): {summary}\n\n{detail}\n\nRead its evidence with `dagq findings {fid} --full`.\n",
-                    fid = finding.id,
-                    kind = finding.kind,
-                    status = finding.status.as_str(),
-                    summary = finding.summary,
-                    detail = or_none(&finding.detail),
-                ));
-            }
-            RequestRefMaterial::Goal(goal) => {
-                out.push_str(&format!("\n### Goal {goal}\n\nSee the goals below.\n"));
-            }
-            RequestRefMaterial::Unreadable { reference, error } => out.push_str(&format!(
-                "\n### {reference}\n\nIt could not be read: {error}\n"
-            )),
+        let (label, read, text) = request_ref(reference)?;
+        let text = fit.text(
+            "refs",
+            &text,
+            REQUEST_REF_BYTES,
+            Keep::Start,
+            &format!("read it whole with {read}"),
+        );
+        refs.push((label, read, text));
+    }
+    let sizes: Vec<usize> = refs.iter().map(|(_, _, text)| text.len()).collect();
+    let kept = prompt_fit::pick(&sizes, 0..refs.len(), usize::MAX, REQUEST_REFS_BYTES);
+    let mut referred = String::new();
+    let mut left_out = Vec::new();
+    for ((label, read, text), kept) in refs.into_iter().zip(&kept) {
+        if *kept {
+            referred.push_str(&text);
+        } else {
+            left_out.push(format!("{label} ({read})"));
         }
     }
+    fit.omit("refs", left_out.len());
+    if !left_out.is_empty() {
+        referred.push_str(&format!(
+            "\n### Left out\n\n{}",
+            left_out_note("references", &left_out, "the command named with each")
+        ));
+    }
+    fit.section("refs", &referred);
+    out.push_str(&referred);
     if material.goals.is_empty() {
         out.push_str("\n## Goals\n\nNothing it refers to belongs to a goal. `dagq goal list` shows the open goals.\n");
     }
-    for (goal, closed, tasks) in material.goals {
-        out.push_str(&format!(
-            "\n## Goal {gid}: {title}{closed}\n\n{description}\n\nAcceptance:\n{acceptance}\n\nConstraints:\n{constraints}\n\nIts tasks:\n{tasks}\n",
-            gid = goal.id(),
-            title = goal.title(),
-            closed = if *closed { " (closed)" } else { "" },
-            description = or_none(goal.description()),
-            acceptance = or_none(goal.acceptance()),
-            constraints = or_none(goal.constraints()),
-            tasks = if tasks.is_empty() {
-                "(none)".to_owned()
-            } else {
-                tasks
-                    .iter()
-                    .map(|t| format!("- task {} ({}): {}", t.id, t.status.as_str(), t.title))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            },
-        ));
-    }
+    let goals = material
+        .goals
+        .iter()
+        .map(|(goal, closed, tasks)| {
+            let heading = format!(
+                "\n## Goal {gid}: {title}{closed}",
+                gid = goal.id(),
+                title = short_title(goal.title()),
+                closed = if *closed { " (closed)" } else { "" },
+            );
+            (
+                goal.id(),
+                planner_goal(&mut fit, &heading, goal, (tasks, "Its tasks"), false),
+            )
+        })
+        .collect();
+    out.push_str(&planner_goals(&mut fit, goals));
     if !material.asks.is_empty() {
         out.push_str("\n## Earlier questions about it\n\n");
-        for ask in material.asks {
-            out.push_str(&format!(
-                "- ask {aid}: {question}\n  answer: {answer}\n",
-                aid = ask.id,
-                question = ask.question.replace('\n', "\n  "),
-                answer = ask.answer.as_deref().unwrap_or("(none yet)"),
-            ));
-        }
+        out.push_str(&planner_asks(&mut fit, material.asks, false));
     }
     out.push_str(&format!(
         "\n## What to do\n\n\
@@ -1410,14 +1864,115 @@ pub fn request_planner_prompt(material: &RequestPlannerMaterial<'_>) -> Result<S
         rules = repository_rules(RUNTIME_PLANNER_ASK),
     ));
     if let Some(answer) = material.answer {
-        out.push_str(&format!(
+        let (question, text) = planner_answer(&mut fit, answer);
+        let carried = format!(
             "\nThe planner before you asked a person (ask {aid}) and is gone:\n{question}\n\nanswer to ask {aid}: {text}\n\nApply this answer as step 3 says.\n",
             aid = answer.id,
-            question = answer.question,
-            text = answer.answer.as_deref().unwrap_or_default(),
-        ));
+        );
+        fit.section("answer", &carried);
+        out.push_str(&carried);
     }
-    Ok(out)
+    Ok(fit.finish(out))
+}
+
+/// One reference of a planning request as its planner's prompt shows it:
+/// how the prompt names it, the read-only dagq command that reads it
+/// whole, and its section.
+fn request_ref(reference: &RequestRefMaterial) -> Result<(String, String, String)> {
+    let mut out = String::new();
+    let (label, read) = match reference {
+        RequestRefMaterial::Ask(ask) => {
+            out.push_str(&format!(
+                "\n### Ask {aid} ({kind})\n\n{question}\n\nanswer: {answer}\n",
+                aid = ask.id,
+                kind = ask.kind.as_str(),
+                question = ask.question,
+                answer = ask.answer.as_deref().unwrap_or("(none yet)"),
+            ));
+            (format!("ask {}", ask.id), "`dagq asks --all`".to_owned())
+        }
+        RequestRefMaterial::Task { task, receipt } => {
+            out.push_str(&format!(
+                "\n### Task {tid} ({status}): {title}\n\n{description}\n\nAcceptance:\n{acceptance}\n",
+                tid = task.id(),
+                status = task.status().as_str(),
+                title = short_title(task.title()),
+                description = or_none(task.description()),
+                acceptance = or_none(task.acceptance()),
+            ));
+            push_receipt(&mut out, receipt.as_ref())?;
+            (
+                format!("task {}", task.id()),
+                format!(
+                    "`dagq show {tid} --full` and `dagq events --full --task {tid} --kind integration_receipt`",
+                    tid = task.id()
+                ),
+            )
+        }
+        RequestRefMaterial::Run { run, task, receipt } => {
+            out.push_str(&format!(
+                "\n### Run {run}{of}\n",
+                of = task
+                    .map(|task| format!(" (task {task})"))
+                    .unwrap_or_default(),
+            ));
+            push_receipt(&mut out, receipt.as_ref())?;
+            (
+                format!("run {run}"),
+                format!("`dagq events --full --run {run} --kind integration_receipt`"),
+            )
+        }
+        RequestRefMaterial::Event(event) => {
+            out.push_str(&format!(
+                "\n### Event {eid} ({kind})\n\n",
+                eid = event.id,
+                kind = event.kind,
+            ));
+            out.push_str(&fenced(
+                "json",
+                &serde_json::to_string_pretty(&event.payload)?,
+            ));
+            (
+                format!("event {}", event.id),
+                format!(
+                    "`dagq events --full --all --after {} --limit 1`",
+                    event.id.as_i64() - 1
+                ),
+            )
+        }
+        RequestRefMaterial::Finding(view) => {
+            let finding = &view.finding;
+            out.push_str(&format!(
+                "\n### Finding {fid} ({kind}, {status}): {summary}\n\n{detail}\n\nRead its evidence with `dagq findings {fid} --full`.\n",
+                fid = finding.id,
+                kind = finding.kind,
+                status = finding.status.as_str(),
+                summary = finding.summary,
+                detail = or_none(&finding.detail),
+            ));
+            (
+                format!("finding {}", finding.id),
+                format!("`dagq findings {} --full`", finding.id),
+            )
+        }
+        RequestRefMaterial::Goal(goal) => {
+            out.push_str(&format!("\n### Goal {goal}\n\nSee the goals below.\n"));
+            (
+                format!("goal {goal}"),
+                format!("`dagq goal show {goal} --full`"),
+            )
+        }
+        RequestRefMaterial::Unreadable { reference, error } => {
+            out.push_str(&format!(
+                "\n### {reference}\n\nIt could not be read: {error}\n"
+            ));
+            (
+                reference.to_string(),
+                "nothing: it could not be read".to_owned(),
+            )
+        }
+    };
+    Ok((label, read, out))
 }
 
 /// The `summary` and `follow_ups` of a landed receipt, or that there is
@@ -1815,13 +2370,72 @@ pub(crate) fn closed_question_notice(
     Ok(lines.join("\n"))
 }
 
+/// The bytes the whole run review prompt takes at most, the language's
+/// instruction included (task 1571, ADR-t1566-1 decision 4): in production
+/// it took 6,385 bytes at the median, 10,218 at p90 and 18,535 at most.
+pub const RUN_REVIEW_PROMPT_LIMIT: usize = 32_000;
+
+/// The bytes of the task's title, of its acceptance (1,544 at most in
+/// production) and of the required subagents' list in the review prompt.
+pub const RUN_REVIEW_TITLE_BYTES: usize = 1_000;
+pub const RUN_REVIEW_ACCEPTANCE_BYTES: usize = 8_000;
+pub const RUN_REVIEW_SUBAGENTS_BYTES: usize = 8_000;
+
 /// What the headless reviewer is asked (ADR-0023 decision 2, ADR-0027
 /// decision 2 as ADR-t451-1 decision 3 amends it): where the material is,
 /// the task's acceptance, the verdict schema, where `revise` ends and
 /// `concern` begins, and how a concern is judged and when it reaches a
-/// person.
-pub fn review_prompt(task: &Task, run: &TaskRun, review_path: &str) -> String {
-    format!(
+/// person; then the required subagents (`subagents`, from
+/// [`super::review::review_subagents_prompt`]), when there are any. The
+/// title, the acceptance and the subagents are held to their limits and
+/// the whole to [`RUN_REVIEW_PROMPT_LIMIT`]; what is cut says where in
+/// the worktree or the run directory the job reads it whole (task 1571,
+/// ADR-t1566-1 decision 3).
+pub fn review_prompt(
+    task: &Task,
+    run: &TaskRun,
+    review_path: &str,
+    subagents: Option<&str>,
+) -> FittedPrompt {
+    let mut fit = Fit::new(RUN_REVIEW_PROMPT_LIMIT);
+    let material = format!("read it whole in the review material at {review_path}");
+    let title = fit.text(
+        "title",
+        task.title(),
+        RUN_REVIEW_TITLE_BYTES,
+        Keep::Start,
+        &material,
+    );
+    fit.section("title", &title);
+    let acceptance = fit.required(
+        "acceptance",
+        or_none(task.acceptance()),
+        RUN_REVIEW_ACCEPTANCE_BYTES,
+        &format!("{material}, its section Acceptance"),
+    );
+    fit.section("acceptance", &acceptance);
+    // The list of agents is held to its limit; how to run them and report
+    // their results is never cut.
+    let subagents = subagents.map_or_else(String::new, |text| {
+        let instruction = super::review::SUBAGENTS_INSTRUCTION;
+        let list = text.strip_suffix(instruction).unwrap_or(text);
+        let mut kept = fit.text(
+            "subagents",
+            list,
+            RUN_REVIEW_SUBAGENTS_BYTES - instruction.len(),
+            Keep::Start,
+            "every agent and the paths that selected it are in the file the list names",
+        );
+        if kept.len() != list.len() {
+            kept.push('\n');
+        }
+        if list.len() != text.len() {
+            kept.push_str(instruction);
+        }
+        fit.section("subagents", &kept);
+        kept
+    });
+    let mut text = format!(
         "You review run {run_id} of dagq task {task_id} ({title}) before it lands.\n\
          Read the review material at {review_path}: the task, its goal, the receipt, the commits and the full diff. Read the worktree if you need more. Do not change any file.\n\
          {rules}\n\
@@ -1838,13 +2452,13 @@ pub fn review_prompt(task: &Task, run: &TaskRun, review_path: &str) -> String {
          reasons lists each finding (empty for pass); summary is one or two sentences; recommendation, confidence and reason_category are for a concern only (null for pass and revise).\n",
         run_id = run.id(),
         task_id = task.id(),
-        title = task.title(),
-        acceptance = or_none(task.acceptance()),
         docs = REVIEW_DOCS_CHECK,
         concern = CONCERN_RECOMMENDATION,
         codes = reason_codes_section(review_reason::REVIEW_CODES),
         rules = REVIEW_RULES,
-    )
+    );
+    text.push_str(&subagents);
+    fit.finish(text)
 }
 
 /// How a review checks the documents on the changed behavior
@@ -2146,17 +2760,133 @@ fn recovery_action_help(route: Route, action: &str) -> &'static str {
 /// dialogs and its `/exit`: never offered for a headless run.
 pub(crate) const HEADLESS_NEVER: [&str; 2] = ["answer_known_dialog", "close_and_proceed"];
 
+/// The bytes the whole recovery job prompt takes at most, the language's
+/// instruction included (task 1571, ADR-t1566-1 decision 4): in production
+/// it took 19,773 bytes at the median, 27,553 at p90 and 66,814 at most,
+/// of which a headless session's last turns took 46,559. The limit is the
+/// sum of the sections' limits below (81,000 bytes) and the instructions
+/// (about 6,000) with room for the language's instruction.
+pub const RECOVERY_PROMPT_LIMIT: usize = 96_000;
+
+/// The bytes of the task's title, description (2,166 at most in
+/// production), acceptance and verification commands.
+pub const RECOVERY_TITLE_BYTES: usize = 1_000;
+pub const RECOVERY_DESCRIPTION_BYTES: usize = 6_000;
+pub const RECOVERY_ACCEPTANCE_BYTES: usize = 4_000;
+pub const RECOVERY_VERIFY_BYTES: usize = 2_000;
+
+/// The bytes of the alert's facts (6,806 at most in production).
+pub const RECOVERY_FACTS_BYTES: usize = 12_000;
+
+/// The bytes of the screen's end, or of a headless session's last turns
+/// (46,559 at most in production), newest first.
+pub const RECOVERY_SCREEN_BYTES: usize = 16_000;
+
+/// The bytes of the run's processes and of its worktree's `git status`.
+pub const RECOVERY_PROCESSES_BYTES: usize = 4_000;
+pub const RECOVERY_STATUS_BYTES: usize = 4_000;
+
+/// The bytes of the earlier verdicts, repairs and `task_edited` (6,748 at
+/// most in production), newest first, and of one of them.
+pub const RECOVERY_HISTORY_BYTES: usize = 8_000;
+pub const RECOVERY_HISTORY_ITEM_BYTES: usize = 2_000;
+
+/// The bytes of what a run that ended adds ([`ended_run_material`]: its
+/// error, receipt, logs, final screen, turns and events).
+pub const RECOVERY_ENDED_BYTES: usize = 24_000;
+
 /// What the recovery job of an alert is asked (ADR-0047 decisions 39 and
 /// 40): the alert, the task, the screen, the run's processes, the
 /// worktree's state and the run's earlier repairs, for a run that ended
 /// also its error, receipt, logs and events, then the allowed actions and
-/// the verdict schema.
+/// the verdict schema. Each section is held to its limit and the whole to
+/// [`RECOVERY_PROMPT_LIMIT`]; what is cut names the file in the run
+/// directory or the worktree it is in, or says the job cannot read it
+/// (the job reads files only, ADR-t1566-1 decision 3; task 1571).
 pub fn recovery_prompt(
     task: &Task,
     run: &TaskRun,
     attempt: usize,
     material: &RecoveryMaterial<'_>,
-) -> Result<String> {
+) -> Result<FittedPrompt> {
+    let mut fit = Fit::new(RECOVERY_PROMPT_LIMIT);
+    let claimed = "the task as the run claimed it is in prompt.txt of the run directory, and a later edit is a task_edited below";
+    let title = fit.text(
+        "task",
+        task.title(),
+        RECOVERY_TITLE_BYTES,
+        Keep::Start,
+        claimed,
+    );
+    let description = fit.required(
+        "task",
+        or_none(task.description()),
+        RECOVERY_DESCRIPTION_BYTES,
+        claimed,
+    );
+    let acceptance = fit.required(
+        "task",
+        or_none(task.acceptance()),
+        RECOVERY_ACCEPTANCE_BYTES,
+        claimed,
+    );
+    let verification = fit.required(
+        "task",
+        &task.verification_commands().join("\n"),
+        RECOVERY_VERIFY_BYTES,
+        claimed,
+    );
+    let pretty = serde_json::to_string_pretty(material.facts)?;
+    // Cut as a value, so that what is kept stays JSON.
+    let facts = if pretty.len() > RECOVERY_FACTS_BYTES - 16 {
+        fenced(
+            "json",
+            &fit.json(
+                "facts",
+                material.facts,
+                RECOVERY_FACTS_BYTES - 16,
+                NOT_READABLE,
+            ),
+        )
+    } else {
+        fenced("json", &pretty)
+    };
+    fit.section("facts", &facts);
+    let route = Route::of(run);
+    let screen_read = if route.headless() {
+        "each turn's whole output is in turns/turn-NNNNNN.jsonl of the run directory"
+    } else {
+        NOT_READABLE
+    };
+    // A headless session's turns come newest first; a screen's last lines
+    // are its end.
+    let keep = if route.headless() {
+        Keep::Start
+    } else {
+        Keep::End
+    };
+    let screen = fenced(
+        "text",
+        &fit.text(
+            "screen",
+            or_none(material.screen.trim()),
+            RECOVERY_SCREEN_BYTES,
+            keep,
+            screen_read,
+        ),
+    );
+    fit.section("screen", &screen);
+    let ended = material.ended.as_deref().map_or_else(String::new, |ended| {
+        let ended = fit.text(
+            "ended",
+            ended,
+            RECOVERY_ENDED_BYTES,
+            Keep::Start,
+            "the run directory has the receipt, the verification logs (integrate-*-verify-*.log, verify-*.log), terminal-final.txt and turns/",
+        );
+        fit.section("ended", &ended);
+        ended
+    });
     let processes = match &material.processes {
         Ok(processes) if processes.is_empty() => "none".to_owned(),
         Ok(processes) => processes
@@ -2179,17 +2909,57 @@ pub fn recovery_prompt(
             .join("\n"),
         Err(error) => format!("(the processes could not be listed: {error})"),
     };
-    let history = if material.history.is_empty() {
+    let processes = fit.text(
+        "processes",
+        &processes,
+        RECOVERY_PROCESSES_BYTES,
+        Keep::Start,
+        NOT_READABLE,
+    );
+    fit.section("processes", &processes);
+    let status = fenced(
+        "text",
+        &fit.text(
+            "git_status",
+            or_none(material.git_status.trim()),
+            RECOVERY_STATUS_BYTES,
+            Keep::Start,
+            &format!(
+                "read the files of the worktree at {}",
+                run.worktree_path().unwrap_or("none")
+            ),
+        ),
+    );
+    fit.section("git_status", &status);
+    let (kept, left_out) = fit.lines(
+        "history",
+        material.history,
+        (0..material.history.len()).rev(),
+        (
+            usize::MAX,
+            RECOVERY_HISTORY_BYTES,
+            RECOVERY_HISTORY_ITEM_BYTES,
+        ),
+        NOT_READABLE,
+    );
+    let mut history = if kept.is_empty() {
         "none".to_owned()
     } else {
-        material
-            .history
-            .iter()
-            .map(Value::to_string)
-            .collect::<Vec<_>>()
-            .join("\n")
+        kept.join("\n")
     };
-    let route = Route::of(run);
+    if !left_out.is_empty() {
+        let ids: Vec<String> = left_out
+            .iter()
+            .map(|&index| {
+                material.history[index]
+                    .get("id")
+                    .map_or_else(|| format!("#{}", index + 1), Value::to_string)
+            })
+            .collect();
+        history.push('\n');
+        history.push_str(&left_out_note("of them (the oldest)", &ids, NOT_READABLE));
+    }
+    fit.section("history", &history);
     // A headless session has no screen, dialog or `/exit`: the actions
     // that answer them are never offered for it (ADR-t813-1 decision 9).
     let actions = material
@@ -2199,10 +2969,10 @@ pub fn recovery_prompt(
         .map(|action| format!("- {}", recovery_action_help(route, action)))
         .collect::<Vec<_>>()
         .join("\n");
-    Ok(format!(
+    let text = format!(
         "You are dagq's recovery job (attempt {attempt}) for run {run_id} of task {task_id} ({title}), {state}. The supervisor raised the alert {alert}: {meaning}\n\
          Decide whether the runtime can repair it with one of the allowed actions below, or whether a person has to look.\n\
-         Read only: the material below, and the files it names if you need more (the worktree is {worktree}). Do not change any file and do not run commands; the runtime applies your verdict.\n\n\
+         Read only: the material below, and the files it names if you need more (the worktree is {worktree}, the run directory {run_dir}). Do not change any file and do not run commands; the runtime applies your verdict. The material is held to limits: what was cut says how much and in which file it is, or that you cannot read it.\n\n\
          Task description:\n{description}\n\n\
          Acceptance criteria:\n{acceptance}\n\n\
          Current task verification commands (use these, including after a person's correction):\n{verification}\n\n\
@@ -2219,7 +2989,6 @@ pub fn recovery_prompt(
          diagnosis says what you found in one or two sentences. repair needs at least one action and is applied only with confidence high; with confidence low, or with escalate, a person is asked, with your actions as the recommendation, question as the question and options added to theirs. If a broken verification command caused an ended run to fail, offer `edit the task's --verify, then retry_inherit` to the person: user or inbox can edit only verification commands after the run ends; you cannot edit. Once the task_edited event and current commands show the correction, retry_inherit carries the committed work forward and integration uses the corrected commands. reason_category says why a person is needed: recovery_failed when you cannot repair it or are not sure, discard when the work would be thrown away, scope when it needs a permission you do not have.\n",
         run_id = run.id(),
         task_id = task.id(),
-        title = task.title(),
         state = match &material.ended {
             Some(_) => format!("which ended {}; its session is gone", run.status().as_str()),
             None => format!(
@@ -2227,7 +2996,6 @@ pub fn recovery_prompt(
                 material.workspace
             ),
         },
-        ended = material.ended.as_deref().unwrap_or_default(),
         alert = material.alert.as_str(),
         meaning = match material.alert {
             RecoveryAlert::LongBackground =>
@@ -2250,6 +3018,7 @@ pub fn recovery_prompt(
                 "processes of the run (listed in the alert facts with how long they have used almost no CPU time) are alive but have not made progress for longer than the threshold; the session may be waiting for them.",
         },
         worktree = run.worktree_path().unwrap_or("none"),
+        run_dir = run.run_dir().unwrap_or("none"),
         screen_label = if route.headless() {
             "Last turns of the headless session (it has no screen):"
         } else {
@@ -2260,15 +3029,14 @@ pub fn recovery_prompt(
         } else {
             "sending keys to a dialog that is not a known one"
         },
-        description = or_none(task.description()),
-        acceptance = or_none(task.acceptance()),
-        verification = fenced("sh", &task.verification_commands().join("\n")),
-        facts = fenced("json", &serde_json::to_string_pretty(material.facts)?),
-        screen = fenced("text", or_none(material.screen.trim())),
+        verification = fenced("sh", &verification),
         head = material.head,
         receipt = material.receipt_commit.unwrap_or("(no receipt)"),
-        status = fenced("text", or_none(material.git_status.trim())),
-    ))
+    );
+    for counted in [&title, &description, &acceptance, &verification] {
+        fit.section("task", counted);
+    }
+    Ok(fit.finish(text))
 }
 
 /// The fixed request the supervisor types into the live session for a
@@ -2482,6 +3250,15 @@ pub struct PromptBytes {
 /// The plan review prompt and what it takes.
 #[derive(Debug, Clone)]
 pub struct PlanReviewPrompt {
+    pub text: String,
+    pub bytes: PromptBytes,
+}
+
+/// The prompt of a headless job or of a planner of the runtime's held to
+/// its limits, and what it takes (task 1571, ADR-t1566-1 decisions 4 to
+/// 6): goal review, run review, recovery job and the four planners'.
+#[derive(Debug, Clone)]
+pub struct FittedPrompt {
     pub text: String,
     pub bytes: PromptBytes,
 }
@@ -3298,28 +4075,185 @@ pub struct GoalReviewMaterial<'a> {
     pub repo_root: &'a Path,
 }
 
+/// The bytes the whole goal review prompt takes at most, the language's
+/// instruction included (task 1571, ADR-t1566-1 decision 4): the largest
+/// in production, goal review job 24 of 2026-10-02, took 218,427 bytes, of
+/// which its 50 tasks took 200,200.
+pub const GOAL_REVIEW_PROMPT_LIMIT: usize = 200_000;
+
+/// The bytes of the goal itself (5,241 at most in production): it is
+/// required, and past this its longest fields are cut.
+pub const GOAL_REVIEW_GOAL_BYTES: usize = 16_000;
+
+/// The bytes of the goal's tasks, each with what landed for it, and of
+/// one task: in production a task took 4,000 bytes on average and 12,126
+/// at most, most of it its landed receipt.
+pub const GOAL_REVIEW_TASKS_BYTES: usize = 110_000;
+pub const GOAL_REVIEW_TASK_BYTES: usize = 8_000;
+
+/// The bytes of the stubs (ID, title, status) of the tasks left out.
+pub const GOAL_REVIEW_STUB_BYTES: usize = 8_000;
+
+/// The bytes of the follow-ups, of the notes and edits (10,877 at most in
+/// production) and of the earlier reviews, and of one item of them.
+pub const GOAL_REVIEW_FOLLOW_UPS_BYTES: usize = 16_000;
+pub const GOAL_REVIEW_EVENTS_BYTES: usize = 16_000;
+pub const GOAL_REVIEW_PREVIOUS_BYTES: usize = 12_000;
+pub const GOAL_REVIEW_ITEM_BYTES: usize = 4_000;
+
+/// The read-only dagq commands the goal review prompt names to read what
+/// its limits left out, as it writes them (`ID` for a number): each is one
+/// the goal review job's role may run (task 1571, ADR-t1566-1 decision 3).
+pub const GOAL_REVIEW_READS: &[&str] = &[
+    "dagq show ID --full",
+    "dagq goal show ID --full",
+    "dagq events --full --all --goal ID",
+    "dagq events --full --goal ID --kind goal_review_finished",
+    "dagq events --full --task ID --kind integration_receipt",
+];
+
 /// The prompt of the headless goal review (ADR-0047 decision 43): whether
-/// the goal whose tasks all ended met its acceptance.
-pub fn goal_review_prompt(material: &GoalReviewMaterial<'_>) -> String {
-    let lines = |values: &[Value]| {
-        if values.is_empty() {
+/// the goal whose tasks all ended met its acceptance. Each section is held
+/// to its limit and the whole to [`GOAL_REVIEW_PROMPT_LIMIT`]: the tasks
+/// that landed come first and the newest first, the others after them;
+/// the notes and the earlier reviews newest first. What is left out is
+/// counted and named with the read-only dagq command that reads it (task
+/// 1571, ADR-t1566-1).
+pub fn goal_review_prompt(material: &GoalReviewMaterial<'_>) -> FittedPrompt {
+    let goal_id = material.goal["id"].clone();
+    let goal_read = format!("read it whole with `dagq goal show {goal_id} --full`");
+    let mut fit = Fit::new(GOAL_REVIEW_PROMPT_LIMIT);
+    let block = |lines: &[String]| {
+        if lines.is_empty() {
             "(none)".to_owned()
         } else {
-            super::fenced(
-                "json",
-                &values
-                    .iter()
-                    .map(Value::to_string)
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            )
+            fenced("json", &lines.join("\n"))
         }
     };
-    let goal_id = material.goal["id"].clone();
-    format!(
-        "You are the goal review of the dagq queue, a headless job. Every task of goal {goal_id} ended (completed or canceled): judge whether the goal met its acceptance. Change nothing: read the repository's documents and source in {repo} (the main checkout, where the tasks landed) and run read-only dagq commands (`dagq show ID`, `dagq goal show {goal_id} --full`, `dagq findings`, `dagq events --goal {goal_id} --full`, `dagq search ...`) as you need.\n\n\
+    let goal = match shrink(&material.goal, GOAL_REVIEW_GOAL_BYTES, &goal_read) {
+        Some((shrunk, left_out)) => {
+            fit.omit("goal", 1);
+            fit.over(format!(
+                "goal: {left_out} bytes left out by its limit of {GOAL_REVIEW_GOAL_BYTES}"
+            ));
+            shrunk.to_string()
+        }
+        None => material.goal.to_string(),
+    };
+    let goal = block(&[goal]);
+    fit.section("goal", &goal);
+    // The tasks that landed, newest first, then the others, newest first.
+    let tasks = &material.tasks;
+    let landed = |task: &Value| task.get("landed").is_some();
+    let order: Vec<usize> = (0..tasks.len())
+        .rev()
+        .filter(|&index| landed(&tasks[index]))
+        .chain(
+            (0..tasks.len())
+                .rev()
+                .filter(|&index| !landed(&tasks[index])),
+        )
+        .collect();
+    let task_read = "read it whole with `dagq show ID --full` and what landed for it with `dagq events --full --task ID --kind integration_receipt`";
+    let (kept, left_out) = fit.lines(
+        "tasks",
+        tasks,
+        order,
+        (usize::MAX, GOAL_REVIEW_TASKS_BYTES, GOAL_REVIEW_TASK_BYTES),
+        task_read,
+    );
+    let mut task_text = block(&kept);
+    if !left_out.is_empty() {
+        let stubs: Vec<String> = left_out
+            .iter()
+            .map(|&index| {
+                let task = &tasks[index];
+                serde_json::json!({"id": task["id"], "title": task["title"], "status": task["status"], "landed": landed(task)}).to_string()
+            })
+            .collect();
+        let sizes: Vec<usize> = stubs.iter().map(String::len).collect();
+        let shown = prompt_fit::pick(&sizes, 0..stubs.len(), usize::MAX, GOAL_REVIEW_STUB_BYTES);
+        let shown: Vec<String> = stubs
+            .into_iter()
+            .zip(&shown)
+            .filter(|(_, shown)| **shown)
+            .map(|(stub, _)| stub)
+            .collect();
+        let ids: Vec<String> = left_out
+            .iter()
+            .map(|&index| tasks[index]["id"].to_string())
+            .collect();
+        task_text.push_str(&format!(
+            "The tasks left out, in summary:\n{}{}",
+            block(&shown),
+            left_out_note(
+                "tasks",
+                &ids,
+                "`dagq show ID --full` for each, and `dagq events --full --task ID --kind integration_receipt` for what landed for it"
+            )
+        ));
+    }
+    fit.section("tasks", &task_text);
+    let newest_first = |items: &[Value]| (0..items.len()).rev().collect::<Vec<_>>();
+    let listed = |fit: &mut Fit,
+                  name: &'static str,
+                  items: &[Value],
+                  bytes: usize,
+                  what: &str,
+                  read: &str| {
+        let (kept, left_out) = fit.lines(
+            name,
+            items,
+            newest_first(items),
+            (usize::MAX, bytes, GOAL_REVIEW_ITEM_BYTES),
+            read,
+        );
+        let mut text = block(&kept);
+        if !left_out.is_empty() {
+            let ids: Vec<String> = left_out
+                .iter()
+                .map(|&index| {
+                    let item = &items[index];
+                    item.get("task_id")
+                        .or_else(|| item.get("id"))
+                        .or_else(|| item.get("at"))
+                        .map_or_else(|| format!("#{}", index + 1), Value::to_string)
+                })
+                .collect();
+            text.push_str(&left_out_note(what, &ids, read));
+        }
+        fit.section(name, &text);
+        text
+    };
+    let follow_ups = listed(
+        &mut fit,
+        "follow_ups",
+        &material.follow_ups,
+        GOAL_REVIEW_FOLLOW_UPS_BYTES,
+        "follow-ups",
+        &format!("`dagq goal show {goal_id} --full`, and `dagq show ID --full` for each"),
+    );
+    let events = listed(
+        &mut fit,
+        "events",
+        &material.events,
+        GOAL_REVIEW_EVENTS_BYTES,
+        "notes and edits (the oldest)",
+        &format!("`dagq events --full --all --goal {goal_id}`"),
+    );
+    let previous = listed(
+        &mut fit,
+        "previous",
+        &material.previous,
+        GOAL_REVIEW_PREVIOUS_BYTES,
+        "earlier reviews (the oldest)",
+        &format!("`dagq events --full --goal {goal_id} --kind goal_review_finished`"),
+    );
+    fit.finish(format!(
+        "You are the goal review of the dagq queue, a headless job. Every task of goal {goal_id} ended (completed or canceled): judge whether the goal met its acceptance. Change nothing: read the repository's documents and source in {repo} (the main checkout, where the tasks landed) and run read-only dagq commands (`dagq show ID`, `dagq goal show {goal_id} --full`, `dagq findings`, `dagq events --goal {goal_id} --full`, `dagq search ...`) as you need. \
+         The material below is held to limits: a section that left something out says how many and how to read them, and an item cut short says so in its `cut`.\n\n\
          The goal:\n{goal}\n\n\
-         Its tasks, each with the run that landed it (the receipt's summary, its evidence and its follow_ups) when it was completed by a run:\n{tasks}\n\n\
+         Its tasks, each with the run that landed it (the receipt's summary, its evidence and its follow_ups) when it was completed by a run:\n{task_text}\n\n\
          The follow-ups registered from its tasks' receipts, or that belong to it now, wherever they belong (goal_id), with their membership judgements (classification, the acceptance items, reason, evidence, acceptance_version against current_acceptance_version, needs_recheck):\n{follow_ups}\n\n\
          The goal's notes, edits and earlier decisions:\n{events}\n\n\
          The goal's earlier reviews (gaps verdicts in a row before this one: {gaps}; after {max} in a row a gaps verdict is turned into a question to a person):\n{previous}\n\n\
@@ -3333,14 +4267,9 @@ pub fn goal_review_prompt(material: &GoalReviewMaterial<'_>) -> String {
          {{\"verdict\": \"achieved\" | \"gaps\" | \"ask\", \"criteria\": [{{\"criterion\": string, \"met\": bool, \"evidence\": [string]}}], \"gaps\": [{{\"title\": string, \"description\": string, \"criterion\": string}}], \"summary\": string, \"question\": string, \"options\": [string], \"reason_category\": \"scope\" | \"discard\"}}\n\
          criteria has one entry for each item of the acceptance; gaps is empty unless the verdict is gaps (or ask, to offer them); summary is one or two sentences; question, options and reason_category are for ask only.\n",
         repo = material.repo_root.display(),
-        goal = lines(std::slice::from_ref(&material.goal)),
-        tasks = lines(&material.tasks),
-        follow_ups = lines(&material.follow_ups),
-        events = lines(&material.events),
-        previous = lines(&material.previous),
         gaps = material.gaps_in_a_row,
         max = crate::domain::goal_review::MAX_GOAL_GAPS,
-    )
+    ))
 }
 
 /// What the supervisor types into the live planner a revise goes back to
@@ -3974,12 +4903,16 @@ mod tests {
     fn prompts_take_the_rules_from_the_repository_in_order() {
         let db = Path::new("/q/queue.db");
         let (plan_review, _) = plan_prompt(4, 0);
-        let revise = runtime_planner_prompt(db, ProposalId::new(3), &[], &["fix".into()]).unwrap();
+        let revise = runtime_planner_prompt(db, ProposalId::new(3), &[], &["fix".into()])
+            .unwrap()
+            .text;
         let review = review_prompt(
             &task(7, "work", TaskStatus::InProgress),
             &run(7, RunStatus::Succeeded, Some(SHA)),
             "/r/review.md",
-        );
+            None,
+        )
+        .text;
         let order = "in this order: its AGENTS.md; without one, its CLAUDE.md; without either, what its README, CI configuration and build configuration show; when none of them settles it, ";
         assert!(
             revise.contains(&format!(
@@ -4693,7 +5626,13 @@ mod tests {
             assert!(text.len() <= 600, "{}", text.len());
             assert!(!text.contains("cargo") && !text.contains('`'), "{text}");
         }
-        let review = review_prompt(&task, &run_on(Provider::Claude, WorkerMode::Headless), "r");
+        let review = review_prompt(
+            &task,
+            &run_on(Provider::Claude, WorkerMode::Headless),
+            "r",
+            None,
+        )
+        .text;
         assert!(!review.contains(ACCEPTANCE_MAP) && !review.contains(ACCEPTANCE_REMAP));
     }
 
@@ -4788,7 +5727,13 @@ mod tests {
         // No new command, and short (ADR-t1428-1; goal 91's constraints).
         assert!(DOCS_CHECK.len() <= 400, "{}", DOCS_CHECK.len());
         assert!(!DOCS_CHECK.contains("cargo") && !DOCS_CHECK.contains('`'));
-        let review = review_prompt(&task, &run_on(Provider::Claude, WorkerMode::Headless), "r");
+        let review = review_prompt(
+            &task,
+            &run_on(Provider::Claude, WorkerMode::Headless),
+            "r",
+            None,
+        )
+        .text;
         assert!(!review.contains(DOCS_CHECK));
         assert!(!review.contains("the documents you checked against the diff"));
     }
@@ -4800,7 +5745,13 @@ mod tests {
     #[test]
     fn the_review_prompt_checks_the_documents_and_keeps_its_verdict() {
         let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
-        let review = review_prompt(&task, &run_on(Provider::Codex, WorkerMode::Headless), "r");
+        let review = review_prompt(
+            &task,
+            &run_on(Provider::Codex, WorkerMode::Headless),
+            "r",
+            None,
+        )
+        .text;
         assert_eq!(review.matches(REVIEW_DOCS_CHECK).count(), 1, "{review}");
         assert!(review.contains(&format!(
             "Do not change any file.\n{REVIEW_RULES}\n{REVIEW_DOCS_CHECK}\nAcceptance criteria of the task:"
@@ -4849,7 +5800,13 @@ mod tests {
     #[test]
     fn the_review_prompt_names_the_repositorys_instructions() {
         let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
-        let review = review_prompt(&task, &run_on(Provider::Claude, WorkerMode::Headless), "r");
+        let review = review_prompt(
+            &task,
+            &run_on(Provider::Claude, WorkerMode::Headless),
+            "r",
+            None,
+        )
+        .text;
         let material = "Read the worktree if you need more. Do not change any file.\n";
         assert!(
             review.contains(&format!("{material}{REVIEW_RULES}\n{REVIEW_DOCS_CHECK}")),
@@ -4999,6 +5956,7 @@ mod tests {
                 },
             )
             .unwrap()
+            .text
         };
         let headless = recovery(
             &run_on(Provider::Codex, WorkerMode::Headless),
@@ -5056,7 +6014,8 @@ mod tests {
             previous: Vec::new(),
             gaps_in_a_row: 0,
             repo_root: Path::new("/repo"),
-        });
+        })
+        .text;
         assert!(prompt.contains(r#""task_id":9"#), "{prompt}");
         assert!(prompt.contains(
             "A follow-up judged out_of_scope is not part of the acceptance: leave its work out of your judgement and do not wait for it or list it as a gap."
@@ -5088,7 +6047,8 @@ mod tests {
             previous: Vec::new(),
             gaps_in_a_row: 0,
             repo_root: Path::new("/repo"),
-        });
+        })
+        .text;
         // With every section cut, so the prompt names each read of what it
         // left out.
         let observer = crate::application::observer::observer_prompt(
@@ -5185,7 +6145,8 @@ mod tests {
             goals: &[],
             answer: None,
         })
-        .unwrap();
+        .unwrap()
+        .text;
         for part in [
             "its Basic policy above all: decide what you can recommend yourself and go on, asking no one, and leave why in the record",
             "Say in its `--context` why you adopted it.",
@@ -5241,6 +6202,7 @@ mod tests {
                 answer: None,
             })
             .unwrap()
+            .text
         };
         let proposal =
             json!({"classification": "out_of_scope", "acceptance_items": ["(1)"], "reason": "r"});
@@ -5357,7 +6319,8 @@ mod tests {
             siblings: &[],
             answer: None,
         })
-        .unwrap();
+        .unwrap()
+        .text;
         for part in [
             "its Basic policy above all: decide what you can recommend yourself and go on, asking no one",
             "`from finding 4 (conflict)` and saying why you chose this remedy",
@@ -5584,5 +6547,577 @@ mod tests {
             assert!(text.contains("Do not run `dagq list`"), "{text}");
             assert!(!text.contains("Read its repository instructions"), "{text}");
         }
+    }
+
+    /// Task 1571 (ADR-t1566-1 decisions 4 to 6): how much a prompt held to
+    /// its limits may take before the language's instruction is added.
+    fn within(fitted: &FittedPrompt, limit: usize) {
+        assert_eq!(fitted.bytes.limit, limit);
+        assert_eq!(fitted.bytes.total, fitted.text.len());
+        assert!(
+            fitted.text.len() <= limit - prompt_fit::LANGUAGE_ROOM,
+            "{} bytes past the limit of {limit}: {:?}",
+            fitted.text.len(),
+            fitted.bytes
+        );
+        assert_eq!(
+            fitted.bytes.sections.values().sum::<usize>(),
+            fitted.bytes.total,
+            "{:?}",
+            fitted.bytes
+        );
+        // The language's instruction is counted when it is added, and the
+        // whole stays within the limit.
+        let language = crate::domain::language::Language {
+            tag: "ja".into(),
+            source: crate::domain::language::LanguageSource::Repository,
+        };
+        let with = fitted.clone().with_language(Some(&language));
+        assert_eq!(with.bytes.total, with.text.len());
+        assert!(with.bytes.total <= limit, "{}", with.bytes.total);
+        assert!(with.bytes.sections.contains_key("language"));
+    }
+
+    fn big(what: &str, bytes: usize) -> String {
+        format!("{what} ").repeat(bytes / (what.len() + 1) + 1)
+    }
+
+    fn goal_of(id: i64, bytes: usize) -> Goal {
+        Goal::restore(GoalRecord {
+            id: GoalId::new(id),
+            title: big("goal title", 2_000),
+            description: big("goal description", bytes),
+            acceptance: big("goal acceptance", bytes),
+            constraints: big("goal constraints", bytes),
+            doc: Some("docs/plans/goal.md".into()),
+            status: GoalStatus::Open,
+            closed_at: None,
+            verdict: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .unwrap()
+    }
+
+    fn goal_tasks(n: i64) -> Vec<GoalTask> {
+        (1..=n)
+            .map(|id| GoalTask {
+                id: TaskId::new(id),
+                title: big("a goal task's title", 500),
+                status: TaskStatus::Completed,
+            })
+            .collect()
+    }
+
+    fn asked(id: i64, bytes: usize) -> Ask {
+        serde_json::from_value(json!({
+            "id": id, "kind": "planner_question", "task_id": null, "run_id": null,
+            "question": big("question", bytes), "options": [], "answer": big("answer", bytes),
+            "asked_by": "planner", "reason_category": "scope", "created_at": 0,
+            "answered_at": 1, "closed_at": null,
+        }))
+        .unwrap()
+    }
+
+    fn event_of(id: i64, bytes: usize) -> RunEvent {
+        RunEvent {
+            id: crate::domain::EventId::new(id),
+            task_id: Some(TaskId::new(7)),
+            goal_id: None,
+            run_id: None,
+            kind: "turn_finished".into(),
+            payload: json!({"message": big("evidence", bytes)}),
+            created_at: String::new(),
+            actor: None,
+        }
+    }
+
+    fn big_task(id: i64, bytes: usize) -> Task {
+        Task::restore(TaskRecord {
+            id: TaskId::new(id),
+            title: big("title", 5_000),
+            description: big("description", bytes),
+            acceptance: big("acceptance", bytes),
+            verification_commands: vec![big("cargo test", bytes)],
+            required_evidence: Vec::new(),
+            paths: Vec::new(),
+            priority: Default::default(),
+            change: None,
+            status: TaskStatus::Draft,
+            goal_id: Some(GoalId::new(1)),
+            context: big("context", bytes),
+            created_at: String::new(),
+            updated_at: String::new(),
+            worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
+            named_mode: None,
+        })
+        .unwrap()
+    }
+
+    /// The goal review of a goal with many tasks, each with a long receipt
+    /// (job 24 of production had 50 tasks in 200,200 bytes), many notes and
+    /// earlier reviews, and a goal past its own limit stays within
+    /// [`GOAL_REVIEW_PROMPT_LIMIT`]: the tasks that landed come first, the
+    /// newest first, the rest are stubs with how to read them, and the
+    /// required goal is cut and said so.
+    #[test]
+    fn a_goal_review_prompt_of_many_large_tasks_stays_within_its_limits() {
+        let tasks: Vec<Value> = (1..=200)
+            .map(|id| {
+                let mut task = json!({"id": id, "title": format!("task {id}"), "status": "completed",
+                    "description": big("description", 3_000), "acceptance": big("acceptance", 1_000)});
+                // The even ones landed, with a receipt of 10 KB.
+                if id % 2 == 0 {
+                    task["landed"] = json!({"run_id": RUN, "summary": big("summary", 10_000)});
+                }
+                task
+            })
+            .collect();
+        let material = GoalReviewMaterial {
+            goal: json!({"id": 7, "description": big("goal", 50_000)}),
+            tasks,
+            follow_ups: (1..=100)
+                .map(|id| json!({"task_id": 1000 + id, "reason": big("why", 2_000)}))
+                .collect(),
+            events: (1..=200)
+                .map(|id| json!({"kind": "observation", "at": id, "payload": big("note", 1_000)}))
+                .collect(),
+            previous: (1..=50)
+                .map(|id| json!({"id": id, "summary": big("review", 3_000)}))
+                .collect(),
+            gaps_in_a_row: 1,
+            repo_root: Path::new("/repo"),
+        };
+        let fitted = goal_review_prompt(&material);
+        within(&fitted, GOAL_REVIEW_PROMPT_LIMIT);
+        let text = &fitted.text;
+        let bytes = &fitted.bytes;
+        // Every section left something out, and says how to read it.
+        for section in ["goal", "tasks", "follow_ups", "events", "previous"] {
+            assert!(
+                bytes.omitted.get(section).is_some_and(|n| *n > 0),
+                "{section}: {bytes:?}"
+            );
+        }
+        assert!(
+            bytes.over_limit.as_deref().unwrap().starts_with("goal: "),
+            "{bytes:?}"
+        );
+        assert!(text.contains("read it whole with `dagq goal show 7 --full`"));
+        assert!(text.contains("The tasks left out, in summary:"));
+        assert!(text.contains("tasks left out by this section's limit:"));
+        assert!(text.contains("`dagq show ID --full` for each, and `dagq events --full --task ID --kind integration_receipt`"));
+        assert!(text.contains("notes and edits (the oldest) left out by this section's limit"));
+        assert!(text.contains("To read them: `dagq events --full --all --goal 7`."));
+        assert!(
+            text.contains(
+                "To read them: `dagq events --full --goal 7 --kind goal_review_finished`."
+            )
+        );
+        // The newest landed task is in full; the oldest one that did not
+        // land is left out to a stub.
+        assert!(
+            text.contains(r#""id":200,"#),
+            "the newest landed task is shown"
+        );
+        assert!(text.contains(r#"{"id":1,"landed":false,"status":"completed","title":"task 1"}"#));
+        // A task past its own limit is cut and names how to read it.
+        assert!(text.contains("bytes left out; read it whole with `dagq show ID --full`"));
+        // The instructions and the schema are whole.
+        assert!(text.contains("Answer with one JSON object and nothing else"));
+        for read in GOAL_REVIEW_READS {
+            let form = read.replace("ID", "7");
+            let named = text.contains(&form) || text.contains(read);
+            assert!(named, "{read} is not named");
+        }
+    }
+
+    /// The run review of a task whose title, acceptance and required
+    /// subagents are huge stays within [`RUN_REVIEW_PROMPT_LIMIT`] and
+    /// names where in the review material the acceptance is whole.
+    #[test]
+    fn a_run_review_prompt_of_a_huge_acceptance_stays_within_its_limits() {
+        let task = big_task(7, 100_000);
+        let subagents = format!(
+            "\nRequired review subagents: ... in /runs/run/review-subagents-1.json\n{}{}",
+            big("- agent (changed: src/a.rs)\n", 50_000),
+            super::super::review::SUBAGENTS_INSTRUCTION
+        );
+        let fitted = review_prompt(
+            &task,
+            &run_on(Provider::Claude, WorkerMode::Headless),
+            "/runs/run/review.md",
+            Some(&subagents),
+        );
+        within(&fitted, RUN_REVIEW_PROMPT_LIMIT);
+        let bytes = &fitted.bytes;
+        for section in ["title", "acceptance", "subagents"] {
+            assert_eq!(bytes.omitted.get(section), Some(&1), "{section}: {bytes:?}");
+        }
+        assert!(
+            bytes
+                .over_limit
+                .as_deref()
+                .unwrap()
+                .starts_with("acceptance: ")
+        );
+        assert!(fitted.text.contains(
+            "read it whole in the review material at /runs/run/review.md, its section Acceptance"
+        ));
+        assert!(fitted.text.contains("in /runs/run/review-subagents-1.json"));
+        assert!(
+            fitted.text.contains(
+                "every agent and the paths that selected it are in the file the list names"
+            )
+        );
+        // How to run the agents and report them is never cut.
+        assert!(
+            fitted
+                .text
+                .ends_with(super::super::review::SUBAGENTS_INSTRUCTION)
+        );
+        // A small task is not cut.
+        let small = review_prompt(
+            &task_with_evidence(7, Vec::new()),
+            &run_on(Provider::Claude, WorkerMode::Headless),
+            "r",
+            None,
+        );
+        assert!(
+            small.bytes.omitted.is_empty() && small.bytes.over_limit.is_none(),
+            "{:?}",
+            small.bytes
+        );
+        within(&small, RUN_REVIEW_PROMPT_LIMIT);
+    }
+
+    /// The recovery job of a headless run whose last turns, alert facts,
+    /// history, processes, worktree and ended material are huge stays
+    /// within [`RECOVERY_PROMPT_LIMIT`] (the largest in production had
+    /// 46,559 bytes of turns): what is cut names the file in the run
+    /// directory it is in, or says the job cannot read it.
+    #[test]
+    fn a_recovery_prompt_of_huge_turns_and_facts_stays_within_its_limits() {
+        let task = big_task(7, 50_000);
+        let facts = json!({"reason": "idle_process", "processes": big("pid 1 idle", 100_000)});
+        let screen = big("turn 3: ended", 200_000);
+        let history: Vec<Value> = (1..=100).map(|id| json!({"id": id, "kind": "recovery_finished", "diagnosis": big("diagnosis", 1_000)})).collect();
+        let processes: Vec<ProcessInfo> = (1..=100)
+            .map(|pid| ProcessInfo {
+                pid,
+                ppid: 1,
+                elapsed_secs: 10,
+                cpu_ms: None,
+                cwd: Some("/runs/run/worktree".into()),
+                command: big("cargo test", 300),
+            })
+            .collect();
+        let status = big(" M src/a.rs", 50_000);
+        for (run, ended) in [
+            (run_on(Provider::Claude, WorkerMode::Headless), None),
+            (
+                run(7, RunStatus::Failed, None),
+                Some(big("Verification log", 100_000)),
+            ),
+        ] {
+            let fitted = recovery_prompt(
+                &task,
+                &run,
+                1,
+                &RecoveryMaterial {
+                    alert: RecoveryAlert::IdleProcess,
+                    ended: ended.clone(),
+                    facts: &facts,
+                    workspace: "ws",
+                    screen: &screen,
+                    processes: Ok(processes.clone()),
+                    git_status: &status,
+                    head: SHA,
+                    receipt_commit: None,
+                    history: &history,
+                    allowed: &["wait", "stop_processes"],
+                },
+            )
+            .unwrap();
+            within(&fitted, RECOVERY_PROMPT_LIMIT);
+            let (text, bytes) = (&fitted.text, &fitted.bytes);
+            for section in [
+                "task",
+                "facts",
+                "screen",
+                "processes",
+                "git_status",
+                "history",
+            ] {
+                assert!(
+                    bytes.omitted.get(section).is_some_and(|n| *n > 0),
+                    "{section}: {bytes:?}"
+                );
+            }
+            assert!(
+                bytes.over_limit.as_deref().unwrap().contains("task: "),
+                "{bytes:?}"
+            );
+            assert!(
+                text.contains(
+                    "the task as the run claimed it is in prompt.txt of the run directory"
+                )
+            );
+            assert!(text.contains(NOT_READABLE));
+            assert!(text.contains("of them (the oldest) left out by this section's limit"));
+            assert!(text.contains("read the files of the worktree at /runs/run/worktree"));
+            assert!(text.contains("Answer with one JSON object and nothing else"));
+            if ended.is_some() {
+                assert_eq!(bytes.omitted.get("ended"), Some(&1));
+                assert!(text.contains("the run directory has the receipt, the verification logs"));
+            } else {
+                assert!(text.contains(
+                    "each turn's whole output is in turns/turn-NNNNNN.jsonl of the run directory"
+                ));
+            }
+        }
+    }
+
+    /// The planner opened for a revise of a proposal with many long tasks
+    /// and reasons stays within [`RUNTIME_PLANNER_PROMPT_LIMIT`].
+    #[test]
+    fn a_runtime_planner_prompt_of_many_reasons_stays_within_its_limits() {
+        let tasks: Vec<Task> = (1..=500)
+            .map(|id| task(id, &big("title", 2_000), TaskStatus::Submitted))
+            .collect();
+        let reasons: Vec<String> = (1..=100)
+            .map(|n| big(&format!("reason {n}"), 5_000))
+            .collect();
+        let fitted = runtime_planner_prompt(
+            Path::new("/q/queue.db"),
+            ProposalId::new(3),
+            &tasks,
+            &reasons,
+        )
+        .unwrap();
+        within(&fitted, RUNTIME_PLANNER_PROMPT_LIMIT);
+        let (text, bytes) = (&fitted.text, &fitted.bytes);
+        assert!(
+            bytes.omitted["tasks"] > 0 && bytes.omitted["reasons"] > 0,
+            "{bytes:?}"
+        );
+        assert!(text.contains("tasks (the oldest) left out by this section's limit"));
+        assert!(text.contains("To read them: `dagq proposal show 3`."));
+        assert!(text.contains("more reasons left out by this section's limit. To read them: `dagq events --full --task ID --kind plan_review_finished` for a task of proposal 3."));
+        // The first reasons are kept, cut to their own limit.
+        assert!(text.contains("- reason 1 reason 1"));
+        assert!(text.contains("dagq submit --proposal 3"));
+    }
+
+    /// The planner opened for a large bundle of follow_up drafts with a
+    /// huge source task, receipt, goals and an answer stays within
+    /// [`DRAFT_PLANNER_PROMPT_LIMIT`].
+    #[test]
+    fn a_draft_planner_prompt_of_a_large_bundle_stays_within_its_limits() {
+        let members: Vec<(DraftTarget, usize)> = (10..60)
+            .map(|id| {
+                (
+                    DraftTarget {
+                        task: big_task(id, 20_000),
+                        origin: DraftOrigin::FollowUp,
+                        material: json!({"source_run_id": RUN, "source_task_id": 3, "index": id}),
+                        planners: 0,
+                    },
+                    1,
+                )
+            })
+            .collect();
+        let key = BundleKey::of(
+            DraftOrigin::FollowUp,
+            &members[0].0.material,
+            members[0].0.task.id(),
+        );
+        let source = big_task(3, 50_000);
+        let receipt = json!({"summary": big("summary", 50_000), "follow_ups": (0..100).map(|n| json!({"title": format!("f{n}"), "description": big("d", 1_000)})).collect::<Vec<_>>()});
+        let goals: Vec<(Goal, bool, Vec<GoalTask>)> = (1..=10)
+            .map(|id| (goal_of(id, 20_000), false, goal_tasks(500)))
+            .collect();
+        let answer = asked(9, 20_000);
+        let fitted = draft_planner_prompt(&DraftPlannerMaterial {
+            db: Path::new("/q/queue.db"),
+            key: &key,
+            members: &members,
+            source: Some(&source),
+            receipt: Some(&receipt),
+            goals: &goals,
+            answer: Some(&answer),
+        })
+        .unwrap();
+        within(&fitted, DRAFT_PLANNER_PROMPT_LIMIT);
+        let (text, bytes) = (&fitted.text, &fitted.bytes);
+        for section in ["drafts", "origin", "goals", "answer"] {
+            assert!(
+                bytes.omitted.get(section).is_some_and(|n| *n > 0),
+                "{section}: {bytes:?}"
+            );
+        }
+        assert!(
+            bytes.over_limit.as_deref().unwrap().starts_with("drafts: "),
+            "{bytes:?}"
+        );
+        assert!(text.contains("## Drafts left out"));
+        assert!(text.contains("`dagq show ID --full` for each"));
+        assert!(text.contains(&format!(
+            "read it whole with `dagq events --full --run {RUN} --kind integration_receipt`"
+        )));
+        assert!(text.contains("## Goals left out"));
+        assert!(text.contains("read it whole with `dagq goal show 1 --full`"));
+        assert!(text.contains("read ask 9 whole with `dagq asks --all`"));
+        assert!(text.contains("Apply this answer as step 3 says."));
+        assert!(text.contains("## What to do"));
+    }
+
+    /// The planner opened for a finding whose evidence is huge (finding 44
+    /// of production had 270,669 bytes of it) stays within
+    /// [`FINDING_PLANNER_PROMPT_LIMIT`], keeping the newest evidence.
+    #[test]
+    fn a_finding_planner_prompt_of_huge_evidence_stays_within_its_limits() {
+        let view = FindingView {
+            finding: crate::domain::Finding {
+                id: crate::domain::FindingId::new(4),
+                kind: "conflict".into(),
+                target: "queue".into(),
+                task_id: None,
+                run_id: None,
+                goal_id: None,
+                subject: big("subject", 5_000),
+                summary: big("summary", 5_000),
+                detail: big("detail", 50_000),
+                impact: crate::domain::Impact::Normal,
+                first_seen_at: 0,
+                last_seen_at: 0,
+                occurrences: 500,
+                evidence: Vec::new(),
+                status: crate::domain::FindingStatus::Open,
+                status_reason: None,
+                proposal_id: None,
+                propose_reason: Some(big("why", 5_000)),
+                propose_requested_at: None,
+                recorded_by: "observer".into(),
+                updated_at: 0,
+            },
+            proposal_status: None,
+            open_asks: Vec::new(),
+            evidence_events: Some((1..=500).map(|id| event_of(id, 5_000)).collect()),
+        };
+        let asks: Vec<Ask> = (1..=100).map(|id| asked(id, 2_000)).collect();
+        let goal = goal_of(5, 20_000);
+        let siblings = goal_tasks(500);
+        let answer = asked(200, 20_000);
+        let fitted = finding_planner_prompt(&FindingPlannerMaterial {
+            db: Path::new("/q/queue.db"),
+            finding: &view,
+            attempt: 1,
+            asks: &asks,
+            goal: Some(&goal),
+            goal_closed: false,
+            siblings: &siblings,
+            answer: Some(&answer),
+        })
+        .unwrap();
+        within(&fitted, FINDING_PLANNER_PROMPT_LIMIT);
+        let (text, bytes) = (&fitted.text, &fitted.bytes);
+        for section in ["finding", "evidence", "asks", "goals", "answer"] {
+            assert!(
+                bytes.omitted.get(section).is_some_and(|n| *n > 0),
+                "{section}: {bytes:?}"
+            );
+        }
+        assert!(
+            bytes
+                .over_limit
+                .as_deref()
+                .unwrap()
+                .starts_with("finding: "),
+            "{bytes:?}"
+        );
+        assert!(text.contains("evidence events (the oldest) left out by this section's limit"));
+        assert!(text.contains("`dagq findings 4 --full`, or one event with `dagq events --full --all --after <its ID - 1> --limit 1`"));
+        // The newest evidence is kept, the oldest left out.
+        assert!(text.contains(r#""id":500,"#));
+        assert!(!text.contains(r#""id":1,"kind":"turn_finished""#));
+        assert!(text.contains("asks (the oldest) left out by this section's limit"));
+        assert!(text.contains("To read them: `dagq asks --all`."));
+        assert!(text.contains("To read them: `dagq goal show 5 --full`."));
+        assert!(text.contains("## What to do"));
+    }
+
+    /// The planner opened for a planning request that refers to many huge
+    /// tasks, runs, events, asks and findings, with a huge note, goals and
+    /// asks, stays within [`REQUEST_PLANNER_PROMPT_LIMIT`]. Production had
+    /// no request planner yet: this input measures what the sections'
+    /// limits add up to.
+    #[test]
+    fn a_request_planner_prompt_of_huge_references_stays_within_its_limits() {
+        let request = crate::domain::plan_request::PlanRequest {
+            id: crate::domain::RequestId::new(6),
+            text: "plan it".into(),
+            note: Some(big("note", 50_000)),
+            refs: Vec::new(),
+            requested_by: "inbox".into(),
+            requested_by_id: "inbox".into(),
+            status: crate::domain::plan_request::RequestStatus::Open,
+            status_reason: None,
+            proposals: Vec::new(),
+            planners: 0,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let receipt = json!({"summary": big("summary", 20_000), "follow_ups": []});
+        let mut refs = Vec::new();
+        for n in 1..=10 {
+            refs.push(RequestRefMaterial::Task {
+                task: Box::new(big_task(n, 20_000)),
+                receipt: Some(receipt.clone()),
+            });
+            refs.push(RequestRefMaterial::Ask(asked(n, 20_000)));
+            refs.push(RequestRefMaterial::Event(event_of(100 + n, 20_000)));
+            refs.push(RequestRefMaterial::Run {
+                run: RunId::new(RUN).unwrap(),
+                task: Some(TaskId::new(n)),
+                receipt: Some(receipt.clone()),
+            });
+        }
+        let goals: Vec<(Goal, bool, Vec<GoalTask>)> = (1..=10)
+            .map(|id| (goal_of(id, 20_000), false, goal_tasks(500)))
+            .collect();
+        let asks: Vec<Ask> = (1..=100).map(|id| asked(id, 2_000)).collect();
+        let answer = asked(300, 20_000);
+        let fitted = request_planner_prompt(&RequestPlannerMaterial {
+            db: Path::new("/q/queue.db"),
+            request: &request,
+            handed: "The person's words are in /q/planners/1/request.md.",
+            attempt: 1,
+            refs: &refs,
+            goals: &goals,
+            asks: &asks,
+            answer: Some(&answer),
+        })
+        .unwrap();
+        within(&fitted, REQUEST_PLANNER_PROMPT_LIMIT);
+        let (text, bytes) = (&fitted.text, &fitted.bytes);
+        for section in ["note", "refs", "goals", "asks", "answer"] {
+            assert!(
+                bytes.omitted.get(section).is_some_and(|n| *n > 0),
+                "{section}: {bytes:?}"
+            );
+        }
+        assert!(text.contains("read it whole with `dagq requests 6`"));
+        assert!(text.contains("references left out by this section's limit"));
+        assert!(text.contains("read it whole with `dagq show 1 --full` and `dagq events --full --task 1 --kind integration_receipt`"));
+        assert!(text.contains("`dagq events --full --all --after 100 --limit 1`"));
+        assert!(text.contains(&format!(
+            "`dagq events --full --run {RUN} --kind integration_receipt`"
+        )));
+        assert!(text.contains("## Goals left out"));
+        assert!(text.contains("Apply this answer as step 3 says."));
+        // What the largest input takes, for the limit's reason in
+        // docs/design/supervisor-lifecycle/prompt.md.
+        assert!(bytes.total > 60_000, "{bytes:?}");
     }
 }

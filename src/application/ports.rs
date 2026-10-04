@@ -2999,6 +2999,9 @@ pub struct GoalReviewApply {
     /// The session the job's output names (Codex's thread and model,
     /// ADR-t1063-1 decision 6); `None` for a Claude job.
     pub session: Option<crate::domain::headless_job::JobSession>,
+    /// What the job's prompt took (task 1571), recorded as
+    /// `goal_review_finished`'s `prompt_bytes`.
+    pub prompt_bytes: Option<crate::application::prompt::PromptBytes>,
 }
 
 /// Why a goal review job failed (`goal_review_failed`).
@@ -3016,6 +3019,9 @@ pub struct GoalReviewFailure {
         crate::domain::Provider,
         crate::domain::provider_switch::SwitchReason,
     )>,
+    /// What the job's prompt took, when it was written (task 1571):
+    /// `goal_review_failed`'s `prompt_bytes`.
+    pub prompt_bytes: Option<crate::application::prompt::PromptBytes>,
 }
 
 /// What applying a goal review's verdict did. `stale`: nothing, because

@@ -10,7 +10,6 @@ use crate::domain::EventKind;
 use crate::domain::RecoveredLanding;
 use crate::domain::actor_model::{ActorLaunch, ModelRole};
 use crate::domain::landing_release;
-use crate::domain::language::with_instruction;
 use crate::domain::recovery::{
     ENDED_ACTIONS, MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, ProcessInfo, RecoveryAction,
     VERIFY_FIX_OPTION, attempts, current_alert, pending_request, run_processes,
@@ -611,10 +610,8 @@ impl Supervisor<'_> {
             history: &history,
             allowed: &ENDED_ACTIONS,
         };
-        let prompt = with_instruction(
-            recovery_prompt(&detail.task, run, attempt, &material)?,
-            self.verifier.language().as_ref(),
-        );
+        let prompt = recovery_prompt(&detail.task, run, attempt, &material)?
+            .with_language(self.verifier.language().as_ref());
         // The session id `triage_started` recorded (ADR-0048 decision 4),
         // and the model and effort (ADR-0079 decision 7).
         let started = events

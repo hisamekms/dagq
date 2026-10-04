@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::application::job_start_failure;
-use crate::application::prompt::REVIEW_ACCESS;
+use crate::application::prompt::{PromptBytes, REVIEW_ACCESS};
 use crate::application::review::{
     SubagentSnapshot, review_range_at, review_subagents_prompt, snapshot_subagents,
 };
@@ -359,15 +359,24 @@ impl Supervisor<'_> {
         if let Some(subagents) = &subagents {
             started["subagents"] = subagents.event_value();
         }
+        // What its prompt takes (task 1571, ADR-t1566-1 decision 6).
+        let prepared = self.prepare_review(run, attempt, subagents.as_ref());
+        if let Ok((_, prompt_bytes)) = &prepared {
+            started["prompt_bytes"] = json!(prompt_bytes);
+        }
         self.queue
             .record_runtime_event(run.id(), EventKind::ReviewStarted, started)?;
-        let error = match self.spawn_review(
-            run,
-            attempt,
-            session_id.as_deref(),
-            &launch,
-            subagents.as_ref(),
-        ) {
+        let spawned = match prepared {
+            Ok((prompt, _)) => self.spawn_review(
+                run,
+                (attempt, &prompt),
+                session_id.as_deref(),
+                &launch,
+                subagents.as_ref(),
+            ),
+            Err(error) => Err(error),
+        };
+        let error = match spawned {
             Ok(Ok((child, stdout, stderr))) => {
                 info!(run_id = %run.id(), "run {} review {attempt} started on {} (session {})", run.id(), launch.provider.as_str(), if live { "kept open" } else { "ended" });
                 let mut job = self.headless_job(
@@ -513,18 +522,14 @@ impl Supervisor<'_> {
             &range,
         )
     }
-    /// Write the review's material and prompt, then start its job on
-    /// `launch`'s provider. The outer error is the review's own preparation,
-    /// the inner one the start of its provider's process: only the latter
-    /// says whether the provider can be used (ADR-t1063-1 decision 4).
-    pub(super) fn spawn_review(
+    /// Write the review's material and prompt, held to its limits (task
+    /// 1571): the prompt and what it takes, which `review_started` records.
+    pub(super) fn prepare_review(
         &mut self,
         run: &TaskRun,
         attempt: usize,
-        session_id: Option<&str>,
-        launch: &ActorLaunch,
         subagents: Option<&SubagentSnapshot>,
-    ) -> Result<Result<StartedReview>> {
+    ) -> Result<(String, PromptBytes)> {
         let run_dir = PathBuf::from(run.run_dir().context("missing run directory")?);
         // The attempt's range as its agents were selected from it, so that
         // review.md shows the diff that selected them even when main moved
@@ -535,22 +540,38 @@ impl Supervisor<'_> {
             .context("review wrote no path")?
             .to_owned();
         let task = self.queue.show(run.task_id())?.task;
-        let mut prompt = review_prompt(&task, run, &path);
         // The selected agents and their definitions go to the job beside
         // review.md; a review that needs none reads as before.
+        let mut required = None;
         if let Some(snapshot) = subagents.filter(|s| !s.agents.is_empty()) {
             let input = run_dir.join(format!("review-subagents-{attempt}.json"));
             self.files.write(
                 &input,
                 serde_json::to_string_pretty(&snapshot.job_input())?.as_bytes(),
             )?;
-            prompt.push_str(&review_subagents_prompt(snapshot, &input));
+            required = Some(review_subagents_prompt(snapshot, &input));
         }
-        let prompt = with_instruction(prompt, self.verifier.language().as_ref());
+        let fitted = review_prompt(&task, run, &path, required.as_deref())
+            .with_language(self.verifier.language().as_ref());
         self.files.write(
             &run_dir.join(format!("review-prompt-{attempt}.txt")),
-            prompt.as_bytes(),
+            fitted.text.as_bytes(),
         )?;
+        Ok((fitted.text, fitted.bytes))
+    }
+    /// Start the job of review `attempt` with `prompt` on `launch`'s
+    /// provider. The outer error is the review's own preparation, the
+    /// inner one the start of its provider's process: only the latter says
+    /// whether the provider can be used (ADR-t1063-1 decision 4).
+    pub(super) fn spawn_review(
+        &mut self,
+        run: &TaskRun,
+        (attempt, prompt): (usize, &str),
+        session_id: Option<&str>,
+        launch: &ActorLaunch,
+        subagents: Option<&SubagentSnapshot>,
+    ) -> Result<Result<StartedReview>> {
+        let run_dir = PathBuf::from(run.run_dir().context("missing run directory")?);
         let stdout = run_dir.join(format!("review-{attempt}.out"));
         let stderr = run_dir.join(format!("review-{attempt}.err"));
         let worktree = PathBuf::from(run.worktree_path().context("missing worktree")?);
@@ -592,7 +613,7 @@ impl Supervisor<'_> {
                         ActorProgram::Headless {
                             program: HeadlessProgram::Review {
                                 run,
-                                prompt: &prompt,
+                                prompt,
                                 access: REVIEW_ACCESS,
                                 subagents: &definitions,
                             },

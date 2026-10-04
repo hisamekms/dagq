@@ -547,6 +547,7 @@ impl GoalReviewStore for SqliteQueue {
             "gap_tasks": applied.gap_tasks,
             "ask_id": applied.ask.as_ref().map(|outcome| outcome.ask.id),
             "duration_secs": apply.duration_secs,
+            "prompt_bytes": apply.prompt_bytes,
         });
         if let Some(session) = &apply.session {
             session.record(&mut finished);
@@ -589,6 +590,7 @@ impl GoalReviewStore for SqliteQueue {
             "error": failure.error,
             "duration_secs": failure.duration_secs,
             "reason_category": crate::domain::AskReason::RecoveryFailed,
+            "prompt_bytes": failure.prompt_bytes,
         });
         if let Some(session) = &failure.session {
             session.record(&mut failed);

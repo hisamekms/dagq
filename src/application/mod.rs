@@ -34,6 +34,7 @@ pub mod planner_handoff;
 pub mod planner_request;
 mod ports;
 pub mod prompt;
+mod prompt_fit;
 pub mod push;
 pub mod queue_reads;
 pub mod queue_service;

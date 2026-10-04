@@ -4,8 +4,8 @@ type: design
 title: Queue service
 status: current
 created: 2026-10-02
-updated: 2026-10-04 # task 1549: the reads are application::queue_reads::answer, injected into the service as ServeOptions.reads
-last_verified: 2026-10-04 # task 1549
+updated: 2026-10-04 # task 1571: the goal review job's reads of what its prompt left out (prompt::GOAL_REVIEW_READS)
+last_verified: 2026-10-04 # task 1571
 scope: runtime
 tags:
   - security
@@ -130,7 +130,7 @@ promptとskillが打たせるdagqのコマンドと、行き先のユースケ�
 | 呼び出し元 | どこが言うか | コマンド |
 | --- | --- | --- |
 | plan review job（`ReadFilesAndQueueCli`） | `prompt::plan_review_prompt`と`RECORD_READING`、上限で省いたものを読む方法の`prompt::PLAN_REVIEW_READS`（task 1561。[Plan review](supervisor-lifecycle/plan-review.md)の4）、AGENTS.mdのplan reviewの節 | `show ID`・`show ID --full`・`proposal show ID`・`goal show ID --full`・`search`・`related`・`findings`・`stats`・`lint`・`lint --proposal ID`・`asks --all`・`list --status ready,in_progress --limit 200`・`events --full`・`timeline RUN` |
-| goal review job（`ReadFilesAndQueueCli`） | `prompt::goal_review_prompt` | `show ID`・`goal show ID --full`・`findings`・`events --goal ID --full`・`search` |
+| goal review job（`ReadFilesAndQueueCli`） | `prompt::goal_review_prompt`、上限で省いたものを読む方法の`prompt::GOAL_REVIEW_READS`（task 1571。[Prompt](supervisor-lifecycle/prompt.md#goal-reviewrunのreview復旧jobruntimeのplannerの上限)） | `show ID`・`show ID --full`・`goal show ID --full`・`findings`・`events --goal ID --full`・`events --full --all --goal ID`・`events --full --goal ID --kind goal_review_finished`・`events --full --task ID --kind integration_receipt`・`search` |
 | observer（`QueueCli`） | `observer::observer_prompt` | 読み取り: `findings [ID] [--full]`・`stats`・`kpi`・`marks`・`notes`・`show ID`・`asks`・`graph`・`forecast`・`goal show ID`・`events --full`・`timeline RUN`・`observe --history`、promptが省いたものの`asks --open`・`candidates`・`observe --input OBSERVATION [--section PATH] [--offset N]`。書き込み: `finding record`・`finding resolve`・`ask --kind blocked --finding ID` |
 | スループットの見直しのjob（`QueueCli`） | `throughput_review::review_prompt`と、それが載せるdagq skillの`reference/kpi.md`の手順 | `kpi [--period] [--last] [--area] [--change]`・`stats [--since] [--until] [--full]`・`timeline RUN`・`events --full --kind --since --until`・`asks`・`marks`・`findings`・`show ID`・`forecast` |
 | review job・復旧job（`ReadFiles`） | `prompt::review_prompt`・`prompt::recovery_prompt` | なし（Bashを持たず、dagqを打たない） |

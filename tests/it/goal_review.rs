@@ -76,6 +76,29 @@ pub(crate) fn goal_events(queue: &mut SqliteQueue, goal: GoalId, kind: &str) -> 
         .collect()
 }
 
+/// The `prompt_bytes` a goal review's end records: the prompt the job was
+/// given, within the goal review's limit, section by section (task 1571).
+fn assert_prompt_bytes(recorded: &Value, prompt: &str) {
+    let bytes = &recorded["prompt_bytes"];
+    assert_eq!(bytes["total"], prompt.len(), "{recorded}");
+    assert_eq!(
+        bytes["limit"],
+        dagq::application::prompt::GOAL_REVIEW_PROMPT_LIMIT,
+        "{recorded}"
+    );
+    let sections: u64 = bytes["sections"]
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|bytes| bytes.as_u64().unwrap())
+        .sum();
+    assert_eq!(sections, prompt.len() as u64, "{recorded}");
+    assert!(
+        bytes["sections"]["tasks"].as_u64().unwrap() > 0,
+        "{recorded}"
+    );
+}
+
 fn gaps_verdict(title: &str) -> Value {
     json!({
         "verdict": "gaps",
@@ -126,6 +149,8 @@ fn an_achieved_goal_is_closed_with_its_evidence() {
         goal_events(&mut queue, goal, "goal_review_started").len(),
         1
     );
+    // What its prompt took (task 1571, ADR-t1566-1 decision 6).
+    assert_prompt_bytes(&finished[0], &prompts[0]);
 
     // A closed goal is no candidate.
     let again = StubReviewer::new(&[json!({"verdict": "achieved"})]);
@@ -410,6 +435,7 @@ fn a_failed_goal_review_waits_for_a_person_until_rearmed() {
     let failed = goal_events(&mut queue, goal, "goal_review_failed");
     assert_eq!(failed.len(), 1);
     assert_eq!(failed[0]["reason_category"], "recovery_failed");
+    assert_prompt_bytes(&failed[0], &failing.prompts()[0]);
     assert!(
         failed[0]["error"]
             .as_str()

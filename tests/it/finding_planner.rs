@@ -142,6 +142,12 @@ fn a_marked_finding_gets_one_planner_whose_proposal_plan_review_readies() {
         "{opened:?}"
     );
     let prompt = planner_prompt(&fx.db, planners[0].id);
+    crate::runtime_support::planner_prompt_bytes::assert_planner_prompt_bytes(
+        &fx.db,
+        planners[0].id,
+        "finding",
+        dagq::application::prompt::FINDING_PLANNER_PROMPT_LIMIT,
+    );
     for expected in [
         format!("finding {marked} of the queue"),
         "src/main.rs conflicts in most landings".to_owned(),

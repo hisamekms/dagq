@@ -7,11 +7,12 @@
 
 use super::*;
 use crate::domain::ActorContext;
-use crate::domain::language::with_instruction;
 use crate::{
     application::{
         GoalReviewApply, GoalReviewFailure, GoalReviewJob, job_start_failure,
-        prompt::{GOAL_REVIEW_ACCESS, GoalReviewMaterial, goal_review_prompt},
+        prompt::{
+            FittedPrompt, GOAL_REVIEW_ACCESS, GoalReviewMaterial, PromptBytes, goal_review_prompt,
+        },
     },
     domain::{
         GoalId, Receipt, RunStatus,
@@ -41,6 +42,8 @@ pub(super) struct GoalReviewWatch {
     /// Whether its role names its provider, so that a provider that cannot
     /// be used moves it (ADR-t1063-1 decision 4).
     pub(super) switchable: bool,
+    /// What its prompt takes (task 1571), recorded on its end.
+    pub(super) prompt_bytes: PromptBytes,
 }
 
 impl Supervisor<'_> {
@@ -127,16 +130,18 @@ impl Supervisor<'_> {
             return Ok(());
         };
         match self.spawn_goal_review(&job, &launch) {
-            Ok(Ok(headless)) => {
+            Ok((prompt_bytes, Ok(headless))) => {
                 info!(
-                    "goal {goal} goal review {} started on {}",
+                    "goal {goal} goal review {} started on {} with a prompt of {} bytes",
                     job.attempt,
-                    launch.provider.as_str()
+                    launch.provider.as_str(),
+                    prompt_bytes.total
                 );
                 self.goal_review = Some(GoalReviewWatch {
                     job,
                     headless,
                     switchable,
+                    prompt_bytes,
                 });
             }
             // Its own preparation failed: no provider was tried.
@@ -150,7 +155,7 @@ impl Supervisor<'_> {
                     },
                 );
             }
-            Ok(Err(failed)) => {
+            Ok((prompt_bytes, Err(failed))) => {
                 let error = format!("the headless goal review could not start: {failed:#}");
                 let unusable = self.job_provider_failed(
                     launch.provider,
@@ -164,6 +169,7 @@ impl Supervisor<'_> {
                     &GoalReviewFailure {
                         error,
                         unusable,
+                        prompt_bytes: Some(prompt_bytes),
                         ..GoalReviewFailure::default()
                     },
                 );
@@ -211,16 +217,17 @@ impl Supervisor<'_> {
         &mut self,
         job: &GoalReviewJob,
         launch: &ActorLaunch,
-    ) -> Result<Result<HeadlessJob>> {
+    ) -> Result<(PromptBytes, Result<HeadlessJob>)> {
         self.files
             .create_dir_all(&job.dir)
             .with_context(|| format!("create {}", job.dir.display()))?;
         let prompt = self.goal_review_material(job)?;
         self.files
-            .write(&job.dir.join("prompt.txt"), prompt.as_bytes())?;
+            .write(&job.dir.join("prompt.txt"), prompt.text.as_bytes())?;
         let stdout = job.dir.join("review.out");
         let stderr = job.dir.join("review.err");
-        Ok(self.start_goal_review_job(job, launch, &prompt, stdout, stderr))
+        let started = self.start_goal_review_job(job, launch, &prompt.text, stdout, stderr);
+        Ok((prompt.bytes, started))
     }
 
     /// Start the provider's process of the goal review.
@@ -276,8 +283,9 @@ impl Supervisor<'_> {
         ))
     }
 
-    /// The goal review prompt of the job's goal from the queue as it is now.
-    fn goal_review_material(&mut self, job: &GoalReviewJob) -> Result<String> {
+    /// The goal review prompt of the job's goal from the queue as it is
+    /// now, held to its limits (task 1571).
+    fn goal_review_material(&mut self, job: &GoalReviewJob) -> Result<FittedPrompt> {
         let detail = self.queue.show_goal(job.goal_id)?;
         let mut tasks = Vec::new();
         for task in &detail.tasks {
@@ -312,18 +320,16 @@ impl Supervisor<'_> {
             .into_iter()
             .map(|review| serde_json::to_value(review).map_err(Into::into))
             .collect::<Result<Vec<Value>>>()?;
-        Ok(with_instruction(
-            goal_review_prompt(&GoalReviewMaterial {
-                goal: serde_json::to_value(&detail.goal)?,
-                tasks,
-                follow_ups: detail.follow_up_memberships.clone(),
-                events,
-                previous,
-                gaps_in_a_row: job.gaps_in_a_row,
-                repo_root: &self.layout.repo_root,
-            }),
-            self.verifier.language().as_ref(),
-        ))
+        Ok(goal_review_prompt(&GoalReviewMaterial {
+            goal: serde_json::to_value(&detail.goal)?,
+            tasks,
+            follow_ups: detail.follow_up_memberships.clone(),
+            events,
+            previous,
+            gaps_in_a_row: job.gaps_in_a_row,
+            repo_root: &self.layout.repo_root,
+        })
+        .with_language(self.verifier.language().as_ref()))
     }
 
     /// What landed for a task: its integrated run, the commit and what
@@ -380,7 +386,13 @@ impl Supervisor<'_> {
         let applied = verdict.map_err(|error| anyhow!(error)).and_then(|verdict| {
             let job = ActorContext::goal_review_job(watch.job.goal_id, watch.job.attempt);
             self.for_job(&job, |sv| {
-                sv.apply_goal_verdict(&watch.job, verdict, duration_secs, session.clone())
+                sv.apply_goal_verdict(
+                    &watch.job,
+                    verdict,
+                    duration_secs,
+                    session.clone(),
+                    &watch.prompt_bytes,
+                )
             })
         });
         if let Err(error) = applied {
@@ -408,6 +420,7 @@ impl Supervisor<'_> {
                     duration_secs,
                     session,
                     unusable,
+                    prompt_bytes: Some(watch.prompt_bytes.clone()),
                 },
             );
         }
@@ -423,6 +436,7 @@ impl Supervisor<'_> {
         verdict: GoalReviewVerdict,
         duration_secs: u64,
         session: Option<JobSession>,
+        prompt_bytes: &PromptBytes,
     ) -> Result<()> {
         let goal = job.goal_id;
         let (decision, overridden) = decide(verdict.verdict, job.gaps_in_a_row);
@@ -453,6 +467,7 @@ impl Supervisor<'_> {
                 ask,
                 duration_secs,
                 session,
+                prompt_bytes: Some(prompt_bytes.clone()),
             },
         )?;
         if applied.stale {

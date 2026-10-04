@@ -46,7 +46,7 @@ use super::{
     lifecycle::{QueueWorkspaces, ROLE_STATUS_KEY, session_look},
     naming::{planner_workspace_name, shell_join},
     path_text, planner_idle_marker,
-    prompt::runtime_planner_prompt,
+    prompt::{FittedPrompt, runtime_planner_prompt},
     screen_idle::{self, Inference, MarkerState, ScreenIdle, ScreenProbe},
     session::{OwnWorkspace, wrapper_refused},
 };
@@ -164,11 +164,13 @@ pub fn open_runtime_planner(
         .roles
         .launch(ModelRole::RuntimePlanner)
         .escalated(REVISE_ESCALATION);
-    open_planner(
+    let planner = launch
+        .queue
+        .open_planner(PlannerOrigin::Runtime, Some(proposal))?;
+    launch_planner(
         launch,
-        PlannerOrigin::Runtime,
-        Some(proposal),
-        &prompt,
+        planner,
+        (&prompt.text, Some(("runtime", &prompt))),
         &actor,
     )
 }
@@ -188,26 +190,35 @@ pub fn open_planner(
     actor: &ActorLaunch,
 ) -> Result<OpenedPlanner> {
     let planner = launch.queue.open_planner(origin, proposal)?;
-    launch_planner(launch, planner, prompt, actor)
+    launch_planner(launch, planner, (prompt, None), actor)
 }
 
 /// Open the workspace of a planner the runtime recorded for a draft
-/// (ADR-0041 decision 16, [`super::DraftPlannerStore::open_draft_planner`])
+/// (ADR-0041 decision 16, [`super::DraftPlannerStore::open_draft_planner`]),
+/// a finding or a planning request (`kind`: `draft`, `finding`, `request`)
 /// with `prompt`, the way [`open_planner`] does, its agent starting with
 /// `[roles.runtime_planner]`.
 pub fn open_draft_planner(
     launch: &PlannerLaunch<'_>,
     planner: PlannerSession,
-    prompt: &str,
+    (kind, prompt): (&'static str, &FittedPrompt),
 ) -> Result<OpenedPlanner> {
     let actor = launch.roles.launch(ModelRole::RuntimePlanner);
-    launch_planner(launch, planner, prompt, &actor)
+    launch_planner(
+        launch,
+        planner,
+        (&prompt.text, Some((kind, prompt))),
+        &actor,
+    )
 }
 
+/// Open the workspace of `planner` with `prompt`. A prompt the runtime
+/// held to its limits (`fitted`, with its kind) has its bytes recorded as
+/// `planner_prompt_written` (task 1571, ADR-t1566-1 decision 6).
 fn launch_planner(
     launch: &PlannerLaunch<'_>,
     planner: PlannerSession,
-    prompt: &str,
+    (prompt, fitted): (&str, Option<(&'static str, &FittedPrompt)>),
     actor: &ActorLaunch,
 ) -> Result<OpenedPlanner> {
     let queue = launch.queue;
@@ -241,7 +252,14 @@ fn launch_planner(
     if let Some(request) = planner.request_id {
         name.push_str(&format!(" - request {request}"));
     }
-    let prompt = with_instruction(prompt.to_owned(), launch.language.as_ref());
+    let prompt = match fitted {
+        Some((kind, fitted)) => {
+            let fitted = fitted.clone().with_language(launch.language.as_ref());
+            record_prompt_bytes(queue, &planner, kind, &fitted);
+            fitted.text
+        }
+        None => with_instruction(prompt.to_owned(), launch.language.as_ref()),
+    };
     let opened = create_workspace(launch, &workspaces, &planner, &dir, &name, &prompt, actor);
     let workspace_id = match opened {
         Ok(id) => id,
@@ -295,6 +313,29 @@ fn launch_planner(
         warnings,
         launch: actor.clone(),
     })
+}
+
+/// Record what the prompt of a planner of the runtime's takes as
+/// `planner_prompt_written` (task 1571, ADR-t1566-1 decision 6); a record
+/// that fails is logged and does not keep the planner from opening.
+fn record_prompt_bytes(
+    queue: &dyn super::Queue,
+    planner: &PlannerSession,
+    kind: &str,
+    prompt: &FittedPrompt,
+) {
+    let recorded = queue.record_queue_event(
+        crate::domain::EventKind::PlannerPromptWritten,
+        serde_json::json!({
+            "planner_id": planner.id,
+            "subject": "planner",
+            "prompt": kind,
+            "prompt_bytes": prompt.bytes,
+        }),
+    );
+    if let Err(error) = recorded {
+        warn!(error = %format_args!("{error:#}"), "planner {}: what its prompt takes could not be recorded: {error:#}", planner.id);
+    }
 }
 
 fn create_workspace(

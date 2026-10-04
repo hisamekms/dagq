@@ -20,13 +20,13 @@
 //! `triage.rs`, with the same verdict.
 
 use super::*;
+use crate::application::prompt::FittedPrompt;
 use crate::domain::ActorContext;
 use crate::domain::EventKind;
 use crate::domain::actor_model::{ActorLaunch, ModelRole};
 use crate::domain::idle_process::{
     CpuWatch, IdleProcess, PROGRESS_CPU_PER_MILLE, without_session_helpers,
 };
-use crate::domain::language::with_instruction;
 use crate::domain::recovery::{
     MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, PROMPT_WAITING_ACTIONS, ProcessInfo, RecoveryAction,
     SEND_UNCONFIRMED, attempts, failed_live, run_processes,
@@ -985,10 +985,8 @@ fn spawn_live(
         history: &history,
         allowed: live.allowed,
     };
-    let prompt = with_instruction(
-        recovery_prompt(&task, run, attempt, &material)?,
-        sv.verifier.language().as_ref(),
-    );
+    let prompt = recovery_prompt(&task, run, attempt, &material)?
+        .with_language(sv.verifier.language().as_ref());
     start_job(
         sv,
         run.id(),
@@ -1058,7 +1056,7 @@ pub(super) fn start_job(
     dir: &Path,
     alert: RecoveryAlert,
     attempt: usize,
-    prompt: &str,
+    prompt: &FittedPrompt,
     session_id: Option<&str>,
     launch: &ActorLaunch,
 ) -> Result<HeadlessJob> {
@@ -1067,8 +1065,15 @@ pub(super) fn start_job(
         .with_context(|| format!("create {}", dir.display()))?;
     sv.files.write(
         &dir.join(job_file(alert, attempt, "prompt.txt")),
-        prompt.as_bytes(),
+        prompt.text.as_bytes(),
     )?;
+    // What the prompt takes (task 1571, ADR-t1566-1 decision 6).
+    sv.queue.record_runtime_event(
+        run,
+        EventKind::RecoveryPromptWritten,
+        json!({"alert": alert, "attempt": attempt, "prompt_bytes": prompt.bytes}),
+    )?;
+    let prompt = prompt.text.as_str();
     let stdout = dir.join(job_file(alert, attempt, "out"));
     let stderr = dir.join(job_file(alert, attempt, "err"));
     let child = sv

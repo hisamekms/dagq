@@ -19,7 +19,7 @@ use crate::{
     application::{
         DraftPlannerStart, PlannerAnswerRoute,
         planner::{PlannerView, open_draft_planner},
-        prompt::{DraftPlannerMaterial, draft_planner_prompt},
+        prompt::{DraftPlannerMaterial, FittedPrompt, draft_planner_prompt},
     },
     domain::{Ask, BundleKey, DraftOrigin, DraftTarget, PlannerState, follow_up::bundles},
 };
@@ -207,7 +207,7 @@ impl Supervisor<'_> {
             }
         };
         let id = planner.id;
-        let opened = open_draft_planner(&self.planner_launch(), *planner, &prompt)?;
+        let opened = open_draft_planner(&self.planner_launch(), *planner, ("draft", &prompt))?;
         let workspace = opened.planner.workspace_id.clone().unwrap_or_default();
         let ids: Vec<TaskId> = members.iter().map(|(target, _)| target.task.id()).collect();
         info!(
@@ -225,7 +225,7 @@ impl Supervisor<'_> {
         key: &BundleKey,
         members: &[(DraftTarget, usize)],
         answer: Option<&Ask>,
-    ) -> Result<String> {
+    ) -> Result<FittedPrompt> {
         let first = &members
             .first()
             .context("a bundle of drafts has at least one")?

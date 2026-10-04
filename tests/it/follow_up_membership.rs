@@ -656,6 +656,7 @@ impl Landed {
             ask: None,
             duration_secs: 1,
             session: None,
+            prompt_bytes: None,
         };
         self.q
             .finish_goal_review(job, &dagq::domain::LeaseToken::new(REVIEW_OWNER), &apply)

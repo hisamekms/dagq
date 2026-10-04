@@ -175,6 +175,22 @@ fn a_long_background_alert_is_repaired_by_stopping_the_orphan_of_the_worktree() 
     assert_eq!(prompts.len(), 1);
     let (prompt, cwd) = &prompts[0];
     assert_eq!(cwd, Path::new(run.run_dir().unwrap()));
+    // What the job's prompt took (task 1571, ADR-t1566-1 decision 6).
+    let written = payloads(&detail, "recovery_prompt_written");
+    assert_eq!(written.len(), 1, "{written:?}");
+    assert_eq!(written[0]["alert"], "long_background");
+    assert_eq!(written[0]["attempt"], 1);
+    assert_eq!(written[0]["prompt_bytes"]["total"], prompt.len());
+    assert_eq!(
+        written[0]["prompt_bytes"]["limit"],
+        dagq::application::prompt::RECOVERY_PROMPT_LIMIT
+    );
+    assert!(
+        written[0]["prompt_bytes"]["sections"]["processes"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
     for part in [
         "long_background",
         &format!("- pid {pid} (parent "),

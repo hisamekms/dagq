@@ -18,7 +18,7 @@ use crate::{
     application::{
         FindingPlannerStart, PlannerAnswerRoute,
         planner::{PlannerView, open_draft_planner},
-        prompt::{FindingPlannerMaterial, finding_planner_prompt},
+        prompt::{FindingPlannerMaterial, FittedPrompt, finding_planner_prompt},
     },
     domain::{
         Ask, FindingId, GoalId, ImprovementLimit, PlannerState,
@@ -223,7 +223,7 @@ impl Supervisor<'_> {
             }
         };
         let id = planner.id;
-        let opened = open_draft_planner(&self.planner_launch(), *planner, &prompt)?;
+        let opened = open_draft_planner(&self.planner_launch(), *planner, ("finding", &prompt))?;
         let workspace = opened.planner.workspace_id.clone().unwrap_or_default();
         info!("finding {finding}: opened planner {id} {attempt} in workspace {workspace}");
         Ok(Some(workspace))
@@ -236,7 +236,7 @@ impl Supervisor<'_> {
         finding: FindingId,
         attempt: usize,
         answer: Option<&Ask>,
-    ) -> Result<String> {
+    ) -> Result<FittedPrompt> {
         let view = self.queue.finding_view(finding)?;
         let asks = self.queue.finding_asks(finding)?;
         let goal_id: Option<GoalId> = match (view.finding.goal_id, view.finding.task_id) {

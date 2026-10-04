@@ -4653,6 +4653,55 @@ mod tests {
         }
     }
 
+    /// Task 1571 (ADR-t1566-1 decision 3): every command the goal review's
+    /// prompt and the prompts of the planners the runtime opens name to
+    /// read what their limits left out is a read the job's or the
+    /// planner's role may run on the command line; the goal review job's
+    /// `dagq` runs as a client of the queue service, which has a use case
+    /// for each (a planner opens the queue itself).
+    #[test]
+    fn the_goal_review_job_and_the_planners_may_run_each_read_their_prompts_name() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                assert!(dagq::runtime::GOAL_REVIEW_ACCESS.runs_queue_cli());
+                let readers = [
+                    (
+                        ActorContext::goal_review_job(3, 1),
+                        dagq::application::prompt::GOAL_REVIEW_READS,
+                        true,
+                    ),
+                    (
+                        ActorContext::instance(dagq::domain::ActorRole::Planner, 3),
+                        dagq::application::prompt::PLANNER_READS,
+                        false,
+                    ),
+                ];
+                for (actor, reads, client) in readers {
+                    for form in reads {
+                        let line = form.replace("ID", "3");
+                        let argv: Vec<&str> = line.split(' ').collect();
+                        let cli = Cli::try_parse_from(&argv)
+                            .unwrap_or_else(|error| panic!("{argv:?}: {error}"));
+                        let requested = requests(&cli.command);
+                        assert!(!requested.is_empty(), "{argv:?}");
+                        for (capability, _) in requested {
+                            assert_eq!(capability, Capability::QueueRead, "{argv:?}");
+                        }
+                        check_access(&actor, &cli.command, None)
+                            .unwrap_or_else(|error| panic!("{actor:?} {argv:?}: {error:#}"));
+                        assert!(
+                            !client || client_request(&cli.command).unwrap().is_some(),
+                            "{argv:?} has no use case of the queue service"
+                        );
+                    }
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     /// The subcommands `DAGQ_COMMANDS` leaves out, each for a reason: the
     /// ones that only read, and the ones with a form that reads, which a
     /// rule on the name would deny as well (the CLI refuses the other

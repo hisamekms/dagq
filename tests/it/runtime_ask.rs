@@ -591,7 +591,9 @@ fn a_session_killed_by_a_signal_is_classified_in_status_show_and_stats() {
     let failed = run_attention_of(&status, run.id()).unwrap();
     assert_eq!(failed["last_error"], "session exited with code 143");
     assert_eq!(failed["last_error_code"], "session_killed");
-    let view = dagq::view::task_detail(&detail, 10);
+    // Every event of the run: the failed run's triage (with its
+    // `recovery_prompt_written`, task 1571) follows `supervision_finished`.
+    let view = dagq::view::task_detail(&detail, detail.events.len());
     assert_eq!(
         view["runs"][0]["last_error_code"], "session_killed",
         "{view}"

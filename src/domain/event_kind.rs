@@ -159,6 +159,7 @@ event_kinds! {
     PlannerAnswerClaimed => "planner_answer_claimed",
     PlannerAnswerClosed => "planner_answer_closed",
     PlannerClosed => "planner_closed",
+    PlannerPromptWritten => "planner_prompt_written",
     PlannerReleased => "planner_released",
     PlannerRequestHanded => "planner_request_handed",
     PlannerUnresponsive => "planner_unresponsive",
@@ -185,6 +186,7 @@ event_kinds! {
     RecoveryFailed => "recovery_failed",
     RecoveryFinished => "recovery_finished",
     RecoveryParked => "recovery_parked",
+    RecoveryPromptWritten => "recovery_prompt_written",
     RecoveryRequested => "recovery_requested",
     ReleaseCheckFailed => "release_check_failed",
     ReleaseChecked => "release_checked",
@@ -340,6 +342,9 @@ impl EventKind {
                 // for a finding on the queue (ADR-0044 decision 19).
                 | FindingPlannerOpened
                 | FindingPlannerExhausted
+                // What the prompt of a planner of the runtime's takes
+                // (task 1571), by `planner_id`.
+                | PlannerPromptWritten
                 | AskDelivered
                 | AskDeliveryFailed
                 | PlannerAnswerClosed
@@ -980,6 +985,7 @@ mod tests {
             (EventKind::PlannerAnswerClaimed, "planner_answer_claimed"),
             (EventKind::PlannerAnswerClosed, "planner_answer_closed"),
             (EventKind::PlannerClosed, "planner_closed"),
+            (EventKind::PlannerPromptWritten, "planner_prompt_written"),
             (EventKind::PlannerReleased, "planner_released"),
             (EventKind::PlannerRequestHanded, "planner_request_handed"),
             (EventKind::PlannerUnresponsive, "planner_unresponsive"),
@@ -1012,6 +1018,7 @@ mod tests {
             (EventKind::RecoveryFailed, "recovery_failed"),
             (EventKind::RecoveryFinished, "recovery_finished"),
             (EventKind::RecoveryParked, "recovery_parked"),
+            (EventKind::RecoveryPromptWritten, "recovery_prompt_written"),
             (EventKind::RecoveryRequested, "recovery_requested"),
             (EventKind::ReleaseCheckFailed, "release_check_failed"),
             (EventKind::ReleaseChecked, "release_checked"),

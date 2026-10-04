@@ -207,6 +207,12 @@ fn a_request_the_inbox_records_gets_one_planner_whose_submission_proposes_it() {
         .join(format!("request-{id}.md"));
     assert_eq!(std::fs::read_to_string(&handed).unwrap(), words);
     let prompt = planner_prompt(&fx.db, planners[0].id);
+    crate::runtime_support::planner_prompt_bytes::assert_planner_prompt_bytes(
+        &fx.db,
+        planners[0].id,
+        "request",
+        dagq::application::prompt::REQUEST_PLANNER_PROMPT_LIMIT,
+    );
     for expected in [
         format!("planning request {id} of the queue"),
         format!(

@@ -402,6 +402,13 @@ fn the_runtime_opens_a_planner_for_a_proposal_with_its_reasons() {
         format!("[my repo]planner#1 - proposal {}", proposal.id())
     );
     let prompt = fs::read_to_string(opened.dir.join("prompt.txt")).unwrap();
+    // What it took, the language's instruction included (task 1571).
+    crate::runtime_support::planner_prompt_bytes::assert_planner_prompt_bytes(
+        &db,
+        opened.planner.id,
+        "runtime",
+        dagq::application::prompt::RUNTIME_PLANNER_PROMPT_LIMIT,
+    );
     assert!(
         prompt.starts_with(&format!(
             "You are a planner the dagq runtime opened for proposal {}",
@@ -474,8 +481,9 @@ fn the_runtime_opens_a_planner_for_a_proposal_with_its_reasons() {
         Some(proposal.id())
     );
     // Nothing to fix and no reasons still makes a prompt that says so.
-    let empty =
-        dagq::application::prompt::runtime_planner_prompt(&db, proposal.id(), &[], &[]).unwrap();
+    let empty = dagq::application::prompt::runtime_planner_prompt(&db, proposal.id(), &[], &[])
+        .unwrap()
+        .text;
     assert!(
         empty.contains("(none given)") && empty.contains("(none)"),
         "{empty}"

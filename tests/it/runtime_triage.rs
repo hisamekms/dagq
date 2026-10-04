@@ -100,6 +100,19 @@ fn a_failed_run_without_commits_is_retried_by_its_recovery_job_and_lands() {
     }
     assert!(dir.join("recovery-failed-1.prompt.txt").is_file());
     assert!(dir.join("recovery-failed-1.out").is_file());
+    // What the job's prompt took, the run's ended material included (task
+    // 1571, ADR-t1566-1 decision 6).
+    let written = &events[position(&kinds, "recovery_prompt_written")].payload;
+    assert_eq!(written["alert"], "failed");
+    assert_eq!(written["attempt"], 1);
+    assert_eq!(written["prompt_bytes"]["total"], prompt.len());
+    assert!(
+        written["prompt_bytes"]["sections"]["ended"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(position(&kinds, "triage_started") < position(&kinds, "recovery_prompt_written"));
 }
 
 /// Task 572 (ADR-t883-1): a run whose `integrate` verification fails on a

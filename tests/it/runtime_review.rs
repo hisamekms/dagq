@@ -84,7 +84,8 @@ fn a_passing_review_exits_the_live_session_and_lands_it() {
         started,
         [
             &json!({"attempt": 1, "workspace_id": WORKSPACE_ID, "session_live": true, "session_id": session_id,
-                    "launch": {"role": "review", "provider": "claude", "model": null, "effort": null, "source": "default"}})
+                    "launch": {"role": "review", "provider": "claude", "model": null, "effort": null, "source": "default"},
+                    "prompt_bytes": started[0]["prompt_bytes"]})
         ]
     );
     // The worker's session and the review's are spans, each closed once
@@ -152,6 +153,20 @@ fn a_passing_review_exits_the_live_session_and_lands_it() {
         fs::read_to_string(run_dir.join("review-prompt-1.txt")).unwrap(),
         prompts[0]
     );
+    // `review_started` records what the prompt took, within the run
+    // review's limit (task 1571, ADR-t1566-1 decision 6).
+    let started = payloads(&detail, "review_started");
+    let bytes = &started[0]["prompt_bytes"];
+    assert_eq!(bytes["total"], prompts[0].len(), "{}", started[0]);
+    assert_eq!(
+        bytes["limit"],
+        dagq::application::prompt::RUN_REVIEW_PROMPT_LIMIT
+    );
+    assert!(
+        bytes["sections"]["acceptance"].as_u64().unwrap() > 0,
+        "{bytes}"
+    );
+    assert_eq!(bytes["omitted"], json!({}), "{bytes}");
     assert!(run_dir.join("terminal-final.txt").is_file());
     // Nothing waits for anyone.
     assert!(run_attention_of(&runtime::status(&db).unwrap(), run.id()).is_none());

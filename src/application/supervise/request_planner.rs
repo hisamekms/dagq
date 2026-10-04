@@ -20,7 +20,9 @@ use crate::{
         PlannerAnswerRoute, RequestPlannerStart,
         planner::{PlannerView, open_draft_planner, planner_dir},
         planner_handoff::hand_request_to_planner,
-        prompt::{RequestPlannerMaterial, RequestRefMaterial, request_planner_prompt},
+        prompt::{
+            FittedPrompt, RequestPlannerMaterial, RequestRefMaterial, request_planner_prompt,
+        },
     },
     domain::{
         Ask, FindingId, GoalId, PlannerSession, PlannerState, RequestId, TaskId,
@@ -170,7 +172,7 @@ impl Supervisor<'_> {
             }
         };
         let id = planner.id;
-        let opened = open_draft_planner(&self.planner_launch(), *planner, &prompt)?;
+        let opened = open_draft_planner(&self.planner_launch(), *planner, ("request", &prompt))?;
         let workspace = opened.planner.workspace_id.clone().unwrap_or_default();
         info!("request {request}: opened planner {id} {attempt} in workspace {workspace}");
         Ok(Some(workspace))
@@ -184,7 +186,7 @@ impl Supervisor<'_> {
         request: &PlanRequest,
         attempt: usize,
         answer: Option<&Ask>,
-    ) -> Result<String> {
+    ) -> Result<FittedPrompt> {
         let dir = planner_dir(&self.layout.planners_dir, planner.id);
         let handed = hand_request_to_planner(
             &*self.files,

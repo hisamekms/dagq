@@ -120,6 +120,12 @@ fn one_runs_follow_ups_are_one_bundle_for_one_planner() {
     );
     let bundle = &planners[0];
     let prompt = planner_prompt(&fx.db, bundle.id);
+    crate::runtime_support::planner_prompt_bytes::assert_planner_prompt_bytes(
+        &fx.db,
+        bundle.id,
+        "draft",
+        dagq::application::prompt::DRAFT_PLANNER_PROMPT_LIMIT,
+    );
     for expected in [
         format!("draft tasks {}, {}, {}", a[0], a[1], a[2]),
         "(source_run_id run-a)".to_owned(),
