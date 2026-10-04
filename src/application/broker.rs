@@ -426,22 +426,50 @@ impl<P: Podman> Podman for Reconnecting<P> {
 
 /// Make dagq's machine ready and its connection answer, as a `start`
 /// would before its image (the e2e gate's check, task 1162): the machine
-/// ensured under the host lock through a [`Reconnecting`] podman, so a
+/// ensured and probed under one host lock through a [`Reconnecting`] podman, so a
 /// connection lost on the way is waited for within its bounds. An error
 /// is podman that cannot be reached: missing, busy with another machine,
-/// or a connection that did not answer.
+/// or a connection that did not answer. A machine already running is
+/// never restarted; on failure only one initialized or started here is
+/// stopped, before releasing the lock.
 pub fn connect<P: Podman>(
     podman: &Reconnecting<P>,
     lock: &dyn HostLock,
     spec: &MachineSpec,
 ) -> BrokerResult<MachineOutcome> {
-    let outcome = ensure_machine(podman, lock, spec)?;
-    checked(
-        podman,
-        &on_machine(&spec.name, &["info", "--format", "{{.Version.Version}}"]),
-        FailureCode::PodmanFailed,
-        &format!("podman --connection {} info", spec.name),
-    )?;
+    let _held = lock.hold()?;
+    // A machine already running belongs to its earlier user. Probe it,
+    // but never stop or restart it on the gate's behalf.
+    let mut outcome = MachineOutcome::default();
+    let attempt: BrokerResult<()> = (|| {
+        if machine_status(podman, &spec.name)?.state != MachineState::Running {
+            ensure_machine_steps(podman, None, spec, &mut outcome)?;
+        }
+        checked(
+            podman,
+            &on_machine(&spec.name, &["info", "--format", "{{.Version.Version}}"]),
+            FailureCode::PodmanFailed,
+            &format!("podman --connection {} info", spec.name),
+        )?;
+        Ok(())
+    })();
+    if let Err(mut failure) = attempt {
+        if outcome.started || outcome.initialized {
+            // Still under the lock: no other queue can start using the
+            // machine between the failed probe and this stop.
+            if let Err(stop) = checked(
+                podman,
+                &args(["machine", "stop", &spec.name]),
+                FailureCode::MachineFailed,
+                &format!("podman machine stop {}", spec.name),
+            ) {
+                failure
+                    .message
+                    .push_str(&format!("; cleanup failed: {stop}"));
+            }
+        }
+        return Err(failure);
+    }
     Ok(outcome)
 }
 
@@ -2897,15 +2925,103 @@ mod tests {
         let error = connect(&podman, &lock, &MachineSpec::default()).unwrap_err();
         assert_eq!(error.code, FailureCode::MachineBusy);
 
-        // A connection that never answers, even after the restart.
+        // A running machine that never answers is left alone.
         let podman = reconnecting(
             Script::default()
                 .on(&list(), vec![ok(RUNNING)])
                 .on(&info(), vec![exit(125, RESET)]),
         );
         let error = connect(&podman, &lock, &MachineSpec::default()).unwrap_err();
-        assert_eq!(error.code, FailureCode::MachineFailed);
+        assert_eq!(error.code, FailureCode::PodmanFailed);
         assert!(error.message.contains("did not answer"), "{error}");
+        assert_eq!(podman.inner.called("machine stop"), 0);
+    }
+
+    #[test]
+    fn connect_stops_only_its_own_machine_on_failure_while_holding_the_lock() {
+        use std::rc::Rc;
+        struct HeldLock(Rc<Cell<bool>>);
+        struct Guard(Rc<Cell<bool>>);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                self.0.set(false);
+            }
+        }
+        impl HostLock for HeldLock {
+            fn hold(&self) -> BrokerResult<Box<dyn std::any::Any>> {
+                assert!(!self.0.replace(true), "no recursive locking");
+                Ok(Box::new(Guard(self.0.clone())))
+            }
+        }
+        struct LockedPodman {
+            script: Script,
+            held: Rc<Cell<bool>>,
+        }
+        impl Podman for LockedPodman {
+            fn run(&self, args: &[String]) -> BrokerResult<PodmanOutput> {
+                assert!(self.held.get(), "every probe and cleanup holds the lock");
+                self.script.run(args)
+            }
+        }
+        for initial in [RUNNING, STOPPED, "[]"] {
+            for transport_error in [false, true] {
+                let held = Rc::new(Cell::new(false));
+                let mut script = Script::default()
+                    .on(&list(), vec![ok(initial), ok(STOPPED)])
+                    .on(&info(), vec![fail("connection unavailable")]);
+                if transport_error {
+                    script.error_on = args(info());
+                }
+                let podman = Reconnecting {
+                    inner: LockedPodman {
+                        script,
+                        held: held.clone(),
+                    },
+                    reconnect: Reconnect {
+                        reruns: 0,
+                        probes: 0,
+                        interval: Duration::ZERO,
+                    },
+                };
+                assert!(
+                    connect(&podman, &HeldLock(held.clone()), &MachineSpec::default()).is_err()
+                );
+                assert!(!held.get(), "lock released after cleanup");
+                let stops = podman.inner.script.called("machine stop");
+                if initial == RUNNING {
+                    assert_eq!(stops, 0);
+                    assert_eq!(podman.inner.script.called("machine start"), 0);
+                } else {
+                    assert!(
+                        stops >= 1,
+                        "own machine is stopped: {:?}",
+                        podman.inner.script.calls()
+                    );
+                    assert_eq!(
+                        podman.inner.script.calls().last().unwrap(),
+                        "machine stop dagq"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn connect_reports_a_failed_stop_after_its_final_probe_fails() {
+        let podman = reconnecting(
+            Script::default()
+                .on(&list(), vec![ok(STOPPED)])
+                .on(&info(), vec![ok("6.1.2"), fail("final probe failed")])
+                .on(&["machine", "stop"], vec![fail("stop failed")]),
+        );
+        let error =
+            connect(&podman, &CountingLock::default(), &MachineSpec::default()).unwrap_err();
+        assert_eq!(error.code, FailureCode::PodmanFailed);
+        assert!(error.message.contains("final probe failed"), "{error}");
+        assert!(error.message.contains("cleanup failed:"), "{error}");
+        assert!(error.message.contains("stop failed"), "{error}");
+        assert_eq!(podman.inner.called("machine start"), 1);
+        assert_eq!(podman.inner.called("machine stop"), 1);
     }
 
     #[test]

@@ -16,7 +16,7 @@ use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use dagq_broker_protocol::HealthResponse;
@@ -126,7 +126,15 @@ impl FileLock {
         }
     }
 
-    fn open(&self) -> std::io::Result<File> {
+    /// A lock whose acquisition waits at most `timeout`, for the e2e gate.
+    pub fn within(self, timeout: Duration) -> impl HostLock {
+        BoundedFileLock {
+            lock: self,
+            timeout,
+        }
+    }
+
+    fn file(&self) -> std::io::Result<File> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -135,12 +143,60 @@ impl FileLock {
             .truncate(false)
             .write(true)
             .open(&self.path)?;
+        Ok(file)
+    }
+
+    fn open(&self) -> std::io::Result<File> {
+        let file = self.file()?;
         // SAFETY: flock on a descriptor this function owns; it blocks until
         // the lock is free and is released when the file closes.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
             return Err(std::io::Error::last_os_error());
         }
         Ok(file)
+    }
+}
+
+struct BoundedFileLock {
+    lock: FileLock,
+    timeout: Duration,
+}
+
+impl HostLock for BoundedFileLock {
+    fn hold(&self) -> BrokerResult<Box<dyn std::any::Any>> {
+        let acquire = || -> std::io::Result<File> {
+            let deadline = Instant::now() + self.timeout;
+            let file = self.lock.file()?;
+            loop {
+                // SAFETY: this file owns the descriptor; LOCK_NB never blocks.
+                if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                    return Ok(file);
+                }
+                let error = std::io::Error::last_os_error();
+                if error.kind() != ErrorKind::WouldBlock && error.kind() != ErrorKind::Interrupted {
+                    return Err(error);
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(std::io::Error::new(
+                        ErrorKind::TimedOut,
+                        format!(
+                            "timed out waiting for the machine lock after {}s",
+                            self.timeout.as_secs()
+                        ),
+                    ));
+                }
+                std::thread::sleep(remaining.min(Duration::from_millis(50)));
+            }
+        };
+        acquire()
+            .map(|file| Box::new(file) as Box<dyn std::any::Any>)
+            .map_err(|error| {
+                BrokerFailure::new(
+                    FailureCode::PodmanFailed,
+                    format!("lock {}: {error}", self.lock.path.display()),
+                )
+            })
     }
 }
 

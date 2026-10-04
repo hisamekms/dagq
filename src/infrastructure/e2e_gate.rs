@@ -40,6 +40,9 @@ use crate::domain::e2e_quarantine::{self, QuarantineFile};
 use crate::infrastructure::adapters::unpiped_output_within;
 use crate::infrastructure::broker_podman::{FileLock, PodmanCli};
 
+/// How long the gate waits for the host-wide podman machine lock.
+pub const MACHINE_LOCK_LIMIT: Duration = Duration::from_secs(30);
+
 /// How long one cmux call of the gate (`ping`, a group's listing or
 /// deletion) and the `ps` of the cleanup may take.
 const CALL_LIMIT: Duration = Duration::from_secs(20);
@@ -513,7 +516,7 @@ fn podman_answers(check: &PodmanCheck) -> std::result::Result<(), String> {
         inner: podman,
         reconnect: check.reconnect,
     };
-    let lock = FileLock::machine(&check.lock_home);
+    let lock = FileLock::machine(&check.lock_home).within(MACHINE_LOCK_LIMIT);
     broker::connect(&podman, &lock, &check.machine)
         .map(|_| ())
         .map_err(|error| error.to_string())
