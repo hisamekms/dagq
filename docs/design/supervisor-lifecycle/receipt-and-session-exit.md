@@ -4,8 +4,8 @@ type: design
 title: "Receipt and session exit"
 status: current
 created: 2026-09-26
-updated: 2026-10-03
-last_verified: 2026-10-02
+updated: 2026-10-04 # task 1508
+last_verified: 2026-10-04 # task 1508
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -13,6 +13,7 @@ related:
   - adr-0022
   - adr-t803-1
   - adr-t947-3
+  - adr-t1504-2
 ---
 
 # Receipt and session exit
@@ -88,3 +89,13 @@ ADR-0047の決定25、task 555（`ExitRetry`、`application::supervise::exit_ret
 | `decision` | 人かplannerの判断が要る問いで、作業の中身が決まっていない | 269: 循環検出でcanceledのtaskを外すか |
 | `ops` | repositoryの変更ではなく、人かinboxがhost・本番queue・外部サービスで行う作業 | 572: `dagq.toml`にKPIの目標を書く |
 | `other` | どれにも当たらない。descriptionで説明する | 160: toolchainを上げるときの1行の注意 |
+
+## follow_upsの所属の提案
+
+[ADR-t1504-2](../../adr/2026-10-04-t1504-2-runtime-records-and-enforces-follow-up-membership-judgements.md)決定11と[ADR-t1504-1](../../adr/2026-10-04-t1504-1-follow-ups-belong-to-the-goal-whose-acceptance-needs-them.md)決定5（task 1508）。workerはfollow_upごとに、元goalのacceptanceとの関係を提案として書けるが、確定はしない（所属の判断を記録するのはruntimeのplannerと人。[所属の判断](../follow-up-membership.md)）。
+
+- **receiptの形**: `follow_ups`の各要素に任意の`membership_proposal`を足す: `{"classification": "required" | "out_of_scope" | "undecided", "acceptance_items": ["..."], "reason": "..."}`。`classification`は、そのfollow_upを実施しなくても元goalのacceptanceを満たせないと考えれば`required`、満たせると考えれば`out_of_scope`、分からなければ`undecided`。`acceptance_items`は関わる元goalのacceptanceの項目、`reason`はその根拠。問題と根拠は今までどおり`description`に書く。欄の無い要素も、未知の分類や形の違う値もreceiptの受理を変えない（`category`と同じ。ADR-t947-3決定3）。
+- **記録**: `integrate`の登録（[integrate](integrate.md)の10）が、`follow_up_registered`のpayloadとdraftの出どころの`material`に`membership_proposal`を書いたまま載せる（無ければnull。`src/domain/follow_up.rs`の`follow_up_membership_proposal`）。登録しなかった項目は`follow_up_registered`の`follow_up`（項目そのもの）に残る。runtimeは提案を判断として扱わず、`follow_up_judgements`の行も書かない。
+- **workerへの見せ方**: workerのprompt（[prompt](prompt.md)）のreceiptの例は`follow_ups`の要素に`membership_proposal`を持ち、`FOLLOW_UP_PROPOSAL`（`src/application/prompt.rs`）が、descriptionに問題と根拠を書くこと、`membership_proposal`の3つの欄の意味、提案に留めて自分で判断も移動もしないことを1段落で言う。resumeの解消依頼とreviseの依頼は手順5の`ACCEPTANCE_REMAP`の後に`FOLLOW_UP_PROPOSAL_AGAIN`（同じことの短い形）を足す。
+- **plannerへの見せ方**: runtimeのplannerのpromptはfollow_upのdraftごとの節に`Membership proposal (the worker's; where you start, not a judgement): <JSON>`（無ければ`(none)`）の行を載せ、提案を起点に所属を判断して記録する手順を持つ（[Draft planners](draft-planners.md#所属の判断)）。
+- **test**: `src/domain/receipt.rs`の`a_follow_up_with_or_without_a_membership_proposal_is_accepted`が欄つき・欄なし・形の違う値のreceiptの受理を、`src/domain/follow_up.rs`の`a_membership_proposal_is_kept_as_written_or_null`が記録する値を、`tests/it/runtime_integrate.rs`の`integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once`が`follow_up_registered`（登録したものと飛ばしたもの）と`show`の`origin.material`の`membership_proposal`を、`src/application/prompt.rs`の`every_worker_text_that_writes_a_receipt_proposes_follow_up_membership`がworker・resume・reviseのpromptを確かめる。

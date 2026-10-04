@@ -118,6 +118,22 @@ pub fn follow_up_category(entry: &serde_json::Value) -> String {
         .to_owned()
 }
 
+/// The field of a receipt's follow_up entry that carries the worker's
+/// proposal of how it relates to the source goal's acceptance (ADR-t1504-2
+/// decision 11).
+pub const MEMBERSHIP_PROPOSAL_FIELD: &str = "membership_proposal";
+
+/// The worker's membership proposal of a receipt's follow_up `entry` as the
+/// runtime records it: the value as written, whatever its shape, or null
+/// without one. It is a proposal for the planner, never a judgement, and
+/// its absence or shape never refuses the receipt (ADR-t947-3 decision 3).
+pub fn follow_up_membership_proposal(entry: &serde_json::Value) -> serde_json::Value {
+    entry
+        .get(MEMBERSHIP_PROPOSAL_FIELD)
+        .cloned()
+        .unwrap_or(serde_json::Value::Null)
+}
+
 /// Only a complete recorded/restored registration establishes an open source.
 /// Missing or conflicting registration information requires a person.
 pub fn source_goal_was_open(material: &serde_json::Value) -> bool {
@@ -274,6 +290,28 @@ mod tests {
                 .iter()
                 .any(|(code, _)| *code == "other")
         );
+    }
+
+    #[test]
+    fn a_membership_proposal_is_kept_as_written_or_null() {
+        use serde_json::json;
+        let proposal = |entry| follow_up_membership_proposal(&entry);
+        let written =
+            json!({"classification": "out_of_scope", "acceptance_items": ["(2)"], "reason": "r"});
+        assert_eq!(
+            proposal(json!({"membership_proposal": written.clone()})),
+            written
+        );
+        assert_eq!(
+            proposal(json!({"membership_proposal": {"classification": "maybe"}})),
+            json!({"classification": "maybe"})
+        );
+        assert_eq!(
+            proposal(json!({"membership_proposal": "required"})),
+            json!("required")
+        );
+        assert_eq!(proposal(json!({"title": "t"})), serde_json::Value::Null);
+        assert_eq!(proposal(json!("text")), serde_json::Value::Null);
     }
 
     #[test]

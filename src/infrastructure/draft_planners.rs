@@ -111,6 +111,7 @@ impl SqliteQueue {
                     "source_goal_state": if source_goal.is_none() { "none" } else if source_open { "open" } else { "closed" },
                     "source_goal_provenance": "recorded",
                     "index": entry.index, "category": entry.category,
+                    "membership_proposal": entry.membership_proposal,
                 });
                 tx.execute(
                     "INSERT INTO draft_origins(task_id, origin, material, created_at)
@@ -129,6 +130,7 @@ impl SqliteQueue {
                 let mut payload = json!({
                     "task_id": created.id(), "title": created.title(),
                     "index": entry.index, "category": entry.category,
+                    "membership_proposal": entry.membership_proposal,
                     "source_task_id": source, "source_run_id": run,
                     "source_goal_id": source_goal, "source_goal_state": material["source_goal_state"],
                     "source_goal_provenance": "recorded", "follow_up_depth": depth,

@@ -929,7 +929,8 @@ pub use finding::{
 };
 pub use follow_up::{
     BundleKey, BundleKeyKind, DraftOrigin, DraftOutcome, DraftTarget, FOLLOW_UP_CATEGORIES,
-    MAX_DRAFT_PLANNERS, PLANNER_QUESTION_OPTIONS, UNLABELED_CATEGORY, follow_up_category,
+    MAX_DRAFT_PLANNERS, MEMBERSHIP_PROPOSAL_FIELD, PLANNER_QUESTION_OPTIONS, UNLABELED_CATEGORY,
+    follow_up_category, follow_up_membership_proposal,
 };
 pub use goal::{Goal, StrandedDependency};
 pub use ids::{

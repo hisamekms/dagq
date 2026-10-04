@@ -1576,9 +1576,12 @@ fn integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once() {
     let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
     assert_eq!(run.status(), RunStatus::AwaitingIntegration);
     let head = run.result_commit().cloned().unwrap();
+    // The worker's membership proposal (ADR-t1504-2 decision 11) is
+    // optional and kept as written, unknown values too.
+    let proposal = json!({"classification": "out_of_scope", "acceptance_items": ["(1) done"], "reason": "done holds without it"});
     let follow_ups = json!([
-        {"title": "later work", "description": "outside the task", "category": "defect"},
-        {"title": "  ", "description": "no title, not a task", "category": "ops"},
+        {"title": "later work", "description": "outside the task", "category": "defect", "membership_proposal": proposal},
+        {"title": "  ", "description": "no title, not a task", "category": "ops", "membership_proposal": {"classification": "maybe"}},
         {"title": "more work", "description": ""},
         {"title": "no description"}
     ]);
@@ -1628,13 +1631,13 @@ fn integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once() {
     assert_eq!(
         events_of(&db, run.id(), "follow_up_registered"),
         vec![
-            json!({"task_id": 2, "title": "later work", "index": 0, "category": "defect", "source_task_id": 1, "source_run_id": run.id(), "source_goal_id": goal.id(), "source_goal_state": "open", "source_goal_provenance": "recorded", "follow_up_depth": 1}),
+            json!({"task_id": 2, "title": "later work", "index": 0, "category": "defect", "membership_proposal": proposal, "source_task_id": 1, "source_run_id": run.id(), "source_goal_id": goal.id(), "source_goal_state": "open", "source_goal_provenance": "recorded", "follow_up_depth": 1}),
             json!({
                 "task_id": null, "title": "  ", "index": 1, "category": "ops",
                 "skipped": "title is not a non-blank string",
-                "follow_up": {"title": "  ", "description": "no title, not a task", "category": "ops"},
+                "follow_up": {"title": "  ", "description": "no title, not a task", "category": "ops", "membership_proposal": {"classification": "maybe"}},
             }),
-            json!({"task_id": 3, "title": "more work", "index": 2, "category": "unlabeled", "source_task_id": 1, "source_run_id": run.id(), "source_goal_id": goal.id(), "source_goal_state": "open", "source_goal_provenance": "recorded", "follow_up_depth": 1}),
+            json!({"task_id": 3, "title": "more work", "index": 2, "category": "unlabeled", "membership_proposal": null, "source_task_id": 1, "source_run_id": run.id(), "source_goal_id": goal.id(), "source_goal_state": "open", "source_goal_provenance": "recorded", "follow_up_depth": 1}),
             json!({
                 "task_id": null, "title": "no description", "index": 3, "category": "unlabeled",
                 "skipped": "description is not a string",
@@ -1645,6 +1648,18 @@ fn integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once() {
     // The draft's origin keeps the worker's category (ADR-t947-3).
     let origin = &crate::common::cli::ok(&db, &["show", "2"])["origin"];
     assert_eq!(origin["material"]["category"], "defect", "{origin}");
+    // It keeps the worker's membership proposal too, or null without one;
+    // either receipt landed.
+    assert_eq!(
+        origin["material"]["membership_proposal"], proposal,
+        "{origin}"
+    );
+    let origin = &crate::common::cli::ok(&db, &["show", "3"])["origin"];
+    assert_eq!(
+        origin["material"]["membership_proposal"],
+        Value::Null,
+        "{origin}"
+    );
     // Drafts are not picked up by the supervisor.
     assert!(queue.candidates().unwrap().is_empty());
 
@@ -1693,7 +1708,7 @@ fn integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once() {
     assert_eq!(detail.task.goal_id(), None);
     assert_eq!(
         events_of(&db, run.id(), "follow_up_registered")[4],
-        json!({"task_id": added[0].task_id, "title": "after the goal", "index": 4, "category": "unlabeled", "goal_closed": true, "source_task_id": 1, "source_run_id": run.id(), "source_goal_id": goal.id(), "source_goal_state": "closed", "source_goal_provenance": "recorded", "follow_up_depth": 1})
+        json!({"task_id": added[0].task_id, "title": "after the goal", "index": 4, "category": "unlabeled", "membership_proposal": null, "goal_closed": true, "source_task_id": 1, "source_run_id": run.id(), "source_goal_id": goal.id(), "source_goal_state": "closed", "source_goal_provenance": "recorded", "follow_up_depth": 1})
     );
     // Nothing to register without follow_ups.
     assert!(runtime::register_follow_ups(&mut queue, &task, run.id(), None).is_empty());

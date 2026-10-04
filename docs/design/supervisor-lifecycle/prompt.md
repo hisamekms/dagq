@@ -4,8 +4,8 @@ type: design
 title: "Prompt"
 status: current
 created: 2026-09-26
-updated: 2026-10-04 # task 1507: the goal review's material has the goal's follow-ups and their membership judgements
-last_verified: 2026-10-04 # task 1507
+updated: 2026-10-04 # task 1508: the worker writes a membership proposal for each follow_up
+last_verified: 2026-10-04 # task 1508
 scope: runtime
 related:
   - adr-t1566-1
@@ -44,7 +44,7 @@ taskの`required_evidence`のうちworkerが裏付けるcheck（`domain::require
 
 **e2e**（[ADR-t1233-2](../../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)決定1・6、task 1239。`prompt::e2e_line`）: workerはe2eを流さない。e2eが要るrunにはruntimeがreviewのpassの後にhostで流す（[Review](review.md#着地の前のe2e)）。runがe2eを要りうるとき（taskの`required_evidence`に`e2e`があるか、main checkoutの`dagq.toml`に`[e2e] paths`があるとき）だけ、`Required evidence:`の行の次に`E2E: do not run the e2e (tests/e2e.rs) yourself. When the run needs it (...), the runtime runs it on the host after the review passes, before the run lands, and sends the run back to a session if it fails. Report `e2e` in the receipt as not_applicable with that reason.`の1行を載せる。e2eのコマンド、`[e2e] paths`のglobと見込み（task 965の`e2e_expectation`）、関門の印（task 1167・1198の`e2e_marks_line`）、Codexのworkerの除外（task 1206の`codex_worker_e2e_line`）は載せない（ADR-t963-1決定2・5とADR-t1165-1決定6はADR-t1233-2がamendsした）。印は着地の前のe2eがlanding branchの着地したcommitのtreeから読む（`Supervisor::main_quarantine`）。resumeの依頼にもe2eの行は無く、e2eが落ちて`needs_session`になったrunのresume（`ResumeKind::E2e`）だけが、reasonの落ちたtestとlogを読んで直してcommitし、再現は名前で絞った1本（`cargo test --locked --test e2e -- --ignored --exact <name>`）にとどめ全体のe2eは流さないことを頼む。最初の段落の検証の一文は「unit test・subagent reviewを行う」（Codexは「unit testを行う」）で、E2Eを含めない。testは`src/application/prompt.rs`の`the_worker_and_resume_prompts_leave_the_e2e_to_the_runtime`、`tests/it/runtime_evidence.rs`の`the_e2e_a_run_needs_is_recorded_and_its_receipt_backs_none`。
 
-4節の後に「担当はこのtaskだけ。兄弟taskの範囲を変えず、範囲外の仕事を見つけたら受け持たずにreceiptの`follow_ups`に書く」の一文を置き、receipt JSONの例に任意の`follow_ups`（`{title, description, category}`の配列。`Receipt::check`は配列であることだけを見る）を含める。その後の「follow_ups is optional」の行に、`follow_up_categories_line`が種類の一覧（`FOLLOW_UP_CATEGORIES`のコードと短い定義）と付け方（迷ったら片付けたときに何が変わるかで選ぶ、重複は種類にしない）を足す（[ADR-t947-3](../../adr/2026-09-28-t947-3-follow-ups-carry-category-codes.md)、[follow_upsの分類コード](receipt-and-session-exit.md#follow_upsの分類コード)）。
+4節の後に「担当はこのtaskだけ。兄弟taskの範囲を変えず、範囲外の仕事を見つけたら受け持たずにreceiptの`follow_ups`に書く」の一文を置き、receipt JSONの例に任意の`follow_ups`（`{title, description, category, membership_proposal}`の配列。`Receipt::check`は配列であることだけを見る）を含める。その後の「follow_ups is optional」の行に、`follow_up_categories_line`が種類の一覧（`FOLLOW_UP_CATEGORIES`のコードと短い定義）と付け方（迷ったら片付けたときに何が変わるかで選ぶ、重複は種類にしない）を足す（[ADR-t947-3](../../adr/2026-09-28-t947-3-follow-ups-carry-category-codes.md)、[follow_upsの分類コード](receipt-and-session-exit.md#follow_upsの分類コード)）。その次の段落の`FOLLOW_UP_PROPOSAL`は、follow_upごとに問題と根拠をdescriptionに書き、任意の`membership_proposal`（元goalのacceptanceのどの項目に関わるか、実施しなくても満たせると考えるか）を提案として書き、自分で判断も移動もしないことを言う（ADR-t1504-2決定11、[follow_upsの所属の提案](receipt-and-session-exit.md#follow_upsの所属の提案)）。
 
 schemaとCLIは変えない。`tests/e2e.rs`のstubはpromptの1行目とreceipt pathの行だけを読み、`follow_ups`のないreceiptを書くので、節の追加に影響されない。
 
@@ -54,7 +54,7 @@ schemaとCLIは変えない。`tests/e2e.rs`のstubはpromptの1行目とreceipt
 
 [ADR-t1420-1](../../adr/2026-10-03-t1420-1-worker-maps-each-acceptance-criterion-before-the-receipt.md)（goal 90、task 1420）。workerのpromptは、receiptの書き方（`Write a completion receipt to ...`の行）の直前に`ACCEPTANCE_MAP`の1段落（英語で564文字）を置く: receiptの前に受け入れ条件の各項目を満たすもの（変えたファイル・testの名前・receiptのevidence・文書の節や測るコマンド）へ対応づけ、まだ何も満たしていない項目はその場で直す。満たせない項目を`follow_ups`に回して`succeeded`を書かず、人の判断が要れば`worker_question`（`--because scope`）、範囲の外ならfailedのreceiptにする。対応は`summary`に項目ごとの短い句で書く。対話・非対話、Claude・Codexのどのworkerのpromptも同じ文で、新しいtestの実行や検査のコマンドは求めない。
 
-resumeの解消依頼（`resume_request`。全ての`ResumeKind`）とreviseの依頼（`revise_request`）は、receiptを書き直す手順5の末尾に`ACCEPTANCE_REMAP`（英語で237文字。task 1428で文書の照合の記録を含めて286文字）を足す: 直した項目の対応を改めて満たすものへ対応づけて`summary`の句を（照合した文書とともに。下の[文書の照合](#文書の照合)）書き直し、taskの中で満たせない項目は`worker_question`（`--because scope`）かfailedのreceiptにしてfollow_upにしない。
+resumeの解消依頼（`resume_request`。全ての`ResumeKind`）とreviseの依頼（`revise_request`）は、receiptを書き直す手順5の末尾に`ACCEPTANCE_REMAP`（英語で237文字。task 1428で文書の照合の記録を含めて286文字）と、その後にfollow_upの所属の提案の短い形`FOLLOW_UP_PROPOSAL_AGAIN`（task 1508）を足す: 直した項目の対応を改めて満たすものへ対応づけて`summary`の句を（照合した文書とともに。下の[文書の照合](#文書の照合)）書き直し、taskの中で満たせない項目は`worker_question`（`--because scope`）かfailedのreceiptにしてfollow_upにしない。
 
 Codexのworkerの`review_line`（下の[subagent review](#subagent-review)）は自分のdiffを読む見直しをこの対応づけの手順に寄せ、受け入れ条件との照合を2度言わない。runのreviewの判定の基準は変えない。runのreviewのprompt（`review_prompt`）の文書の照合はtask 1429が足した（[Review](review.md#文書の照合)）。testは`src/application/prompt.rs`の`every_worker_text_that_writes_a_receipt_maps_the_acceptance_once`。
 

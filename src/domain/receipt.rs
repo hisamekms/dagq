@@ -348,6 +348,29 @@ mod tests {
         );
     }
 
+    /// A follow_up's membership proposal (ADR-t1504-2 decision 11) is
+    /// optional: with it, without it, or of an unknown shape, the receipt is
+    /// accepted and keeps it as written.
+    #[test]
+    fn a_follow_up_with_or_without_a_membership_proposal_is_accepted() {
+        let proposal = serde_json::json!({"classification": "required", "acceptance_items": ["(1)"], "reason": "r"});
+        for follow_ups in [
+            serde_json::json!([{"title": "t", "description": "d", "category": "defect"}]),
+            serde_json::json!([{"title": "t", "description": "d", "membership_proposal": proposal}]),
+            serde_json::json!([{"title": "t", "description": "d", "membership_proposal": "unsure"}]),
+        ] {
+            let mut file = serde_json::to_value(receipt(
+                ("not_applicable", "no surface"),
+                ("passed", "reviewed"),
+            ))
+            .unwrap();
+            file["follow_ups"] = follow_ups.clone();
+            let parsed = Receipt::parse(&file.to_string()).unwrap();
+            assert!(parsed.check(&run()).is_ok(), "{follow_ups}");
+            assert_eq!(parsed.follow_ups(), Some(&follow_ups));
+        }
+    }
+
     #[test]
     fn parse_reads_the_fields_and_serializes_them_back_in_the_file_shape() {
         let text = r#"{"run_id":"r","result":"failed","commit":"ABC",

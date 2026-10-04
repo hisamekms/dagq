@@ -360,6 +360,16 @@ pub const DOCS_CHECK: &str = "Then check the documents on the behavior you chang
 /// the documents checked against the diff (ADR-t1428-1).
 pub const ACCEPTANCE_REMAP: &str = "Before you rewrite it, map each acceptance criterion your fix touched to what meets it again and rewrite its phrase in summary, with the documents you checked against the diff; a criterion the task cannot meet is a worker_question (--because scope) or a failed receipt, not a follow_up.";
 
+/// How the worker writes each follow_up (ADR-t1504-1 decision 5,
+/// ADR-t1504-2 decision 11): the problem and its evidence, and an optional
+/// proposal of how it relates to the goal's acceptance, which the planner
+/// decides on. The worker records no judgement.
+pub const FOLLOW_UP_PROPOSAL: &str = "In each follow_up's description, write the problem and its evidence. You may add membership_proposal, your proposal of how it relates to the goal's acceptance: classification required when you think the goal's acceptance cannot be met without it, out_of_scope when it can, undecided when you cannot tell; acceptance_items, the goal's acceptance items it bears on; and reason, why. It is only a proposal: the planner decides where the follow_up belongs, so do not judge or move it yourself.\n";
+
+/// What a resumed or revised session is told of a follow_up it adds or
+/// rewrites: the same proposal as [`FOLLOW_UP_PROPOSAL`], in short.
+pub const FOLLOW_UP_PROPOSAL_AGAIN: &str = "Write each follow_up as before: the problem and its evidence, and optionally a membership_proposal (the goal's acceptance items it bears on, and whether you think that acceptance can be met without it), a proposal the planner decides on, not a judgement.";
+
 /// What the worker is told of the subagent review. A Codex worker has no
 /// subagent (and a nested `codex exec review` could not write its session
 /// under the sandbox), so it reviews its own diff and reports the check
@@ -588,9 +598,10 @@ pub fn prompt(
          Your assignment is this task only. Do not change what a sibling task owns; if you find work outside this task, record it in the receipt as follow_ups instead of doing it.\n\
          {acceptance_map}{docs_check}\
          Write a completion receipt to {receipt} using a temporary file in the same directory and atomic rename.\n\
-         Receipt JSON: {{\"run_id\":\"{run_id}\",\"result\":\"succeeded or failed\",\"commit\":\"full Git SHA of the branch head\",\"tests\":{{\"status\":\"passed, failed or not_applicable\",\"evidence_or_reason\":\"...\"}},\"e2e\":{{\"status\":\"...\",\"evidence_or_reason\":\"...\"}},\"subagent_review\":{{\"status\":\"...\",\"evidence_or_reason\":\"...\"}},\"summary\":\"...\",\"follow_ups\":[{{\"title\":\"...\",\"description\":\"...\",\"category\":\"...\"}}]}}\n\
+         Receipt JSON: {{\"run_id\":\"{run_id}\",\"result\":\"succeeded or failed\",\"commit\":\"full Git SHA of the branch head\",\"tests\":{{\"status\":\"passed, failed or not_applicable\",\"evidence_or_reason\":\"...\"}},\"e2e\":{{\"status\":\"...\",\"evidence_or_reason\":\"...\"}},\"subagent_review\":{{\"status\":\"...\",\"evidence_or_reason\":\"...\"}},\"summary\":\"...\",\"follow_ups\":[{{\"title\":\"...\",\"description\":\"...\",\"category\":\"...\",\"membership_proposal\":{{\"classification\":\"required, out_of_scope or undecided\",\"acceptance_items\":[\"...\"],\"reason\":\"...\"}}}}]}}\n\
          Each of tests, e2e and subagent_review needs evidence when passed and a reason when not_applicable.\n\
          follow_ups is optional: an array of work you found outside this task, each with a title, a description and a category, for the planner to decide on; omit it when there is none. {categories}\n\
+         {follow_up_proposal}\
          You may write this receipt outside the worktree. Keep the worktree clean after committing.\n\
          The supervisor rejects the run unless the commit is the clean head of your branch on top of the base commit, and integrate runs the verification commands itself after rebasing onto main.\n\
          {ask_rules_first} When you need a decision you cannot make from the task and the repository, do not {dont_wait}: run `dagq ask --run {run_id} --kind worker_question --because scope --topic <code> --question '...'` in the worktree (one ask at a time, with everything you need decided in its question), report briefly that you asked, and {stop_word}. `--because` says why a person is needed: `scope` (the acceptance or the scope changes) or `discard` (whether to throw work away); a question that fits neither is yours to decide and record in the receipt's summary, or, when it leads outside the task, a failed receipt saying why. {topics} {answer_arrives}\n\
@@ -610,6 +621,7 @@ pub fn prompt(
         verification = serde_json::to_string_pretty(&task.verification_commands())?,
         local_checks = local_checks("above"),
         categories = follow_up_categories_line(),
+        follow_up_proposal = FOLLOW_UP_PROPOSAL,
         topics = worker_question_topics_line(),
         ask_rules_first = ASK_RULES_FIRST,
     ))
@@ -790,6 +802,49 @@ fn follow_up_category_line(target: &DraftTarget) -> String {
     )
 }
 
+/// The line of a follow_up draft's section that shows the worker's
+/// membership proposal (ADR-t1504-2 decision 11) as the material keeps
+/// it; empty for a draft of another origin.
+fn follow_up_proposal_line(target: &DraftTarget) -> Result<String> {
+    if target.origin != DraftOrigin::FollowUp {
+        return Ok(String::new());
+    }
+    let proposal = crate::domain::follow_up_membership_proposal(&target.material);
+    let material = &target.material;
+    let source_goal = match material["source_goal_id"].as_i64() {
+        Some(goal) => format!(
+            "goal {goal} ({}, {})",
+            material["source_goal_state"].as_str().unwrap_or("unknown"),
+            material["source_goal_provenance"]
+                .as_str()
+                .unwrap_or("unknown")
+        ),
+        None if material["source_goal_state"].as_str() == Some("none") => "none".to_owned(),
+        None => "unknown".to_owned(),
+    };
+    Ok(format!(
+        "Source goal (at registration; judge against its acceptance with `dagq goal show <id>`, not the current goal's): {source_goal}\n\
+         Membership proposal (the worker's; where you start, not a judgement): {}\n",
+        if proposal.is_null() {
+            "(none)".to_owned()
+        } else {
+            serde_json::to_string(&proposal)?
+        }
+    ))
+}
+
+/// The step of a follow_up draft's planner before it adopts, drops or asks
+/// (ADR-t1504-1 decisions 1 to 3 and 6, ADR-t1504-2 decisions 1 and 6):
+/// judge from the worker's proposal whether the source goal's acceptance
+/// can be met without the draft and record it, membership apart from
+/// adoption and priority, another goal found before one is made, and no
+/// acceptance weakened to leave a draft out.
+fn follow_up_membership_step(t: &str) -> String {
+    format!(
+        "For a follow_up draft whose source goal is not none, first judge where it belongs, apart from whether it is worth doing and from its priority. Start from the worker's membership proposal and decide the meaning yourself: can the source goal's acceptance be met without this draft? When it cannot, it is required and belongs to the source goal; when it can, it is out_of_scope and belongs to another goal: look for a fitting existing goal with `dagq search` first, make one only when none fits, and never park it in an unrelated large goal. Record the judgement before you adopt, drop or ask: `dagq judge-follow-up {t} --classification <required|out_of_scope|undecided> --acceptance-item '<the acceptance item>' --reason '<why that acceptance can or cannot be met without it>' --evidence '<a receipt, commit, document section or task>'`, with `--destination-goal <goal>` for out_of_scope, and `--source-goal <goal>` when the source goal is unknown. Read its earlier judgements with `dagq show {t}` (membership_judgements): one that still holds needs no new row; to change a required or out_of_scope one, record the other with `--corrects <its id>`; it never goes back to undecided. A draft you drop (a duplicate, already done, not worth doing) may skip the record when it would need a new goal, as a canceled follow-up never holds a goal open. When the acceptance, the receipt, the source and the recorded decisions cannot settle it, record undecided with why, ask as step 3 says with the membership question in it, and on the answer record required or out_of_scope before you do what it says. Moving a draft to another goal neither adopts it nor raises its priority. Never weaken a goal's acceptance to leave a follow_up out: that changes the goal's intent, so ask a person (`--because scope`).\n"
+    )
+}
+
 /// The Basic policy of the dagq-planner skill (ADR-t451-1 decision 5) as
 /// the planners the runtime opens for a draft or a finding read it: what
 /// they can recommend they decide themselves and record why; only what
@@ -855,10 +910,11 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Strin
             format!("## Draft {} (planner {attempt} for it)", task.id())
         };
         out.push_str(&format!(
-            "\n{heading}\n\nTask {id}: {title}\n{category}\n### Description\n\n{description}\n\n### Context\n\n{context}\n",
+            "\n{heading}\n\nTask {id}: {title}\n{category}{proposal}\n### Description\n\n{description}\n\n### Context\n\n{context}\n",
             id = task.id(),
             title = task.title(),
             category = follow_up_category_line(target),
+            proposal = follow_up_proposal_line(target)?,
             description = or_none(task.description()),
             context = or_none(task.context()),
         ));
@@ -1006,12 +1062,17 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Strin
     out.push_str(&format!(
         "\n## What to do\n\n\
          Follow the dagq-planner skill of the dagq plugin, its Basic policy above all: {DECIDE_YOURSELF} {rules} Look for tasks that already cover the {drafts} or code that already does {it} (`dagq search '<words>'`, `dagq show ID`, the source) before you decide. {RECORD_READING}\n\
-         {each}Then do exactly one of these three{with_each}:\n\
+         {membership}{each}Then do exactly one of these three{with_each}:\n\
          1. Adopt: {adopt} add its dependencies with `dagq dependency add`, check it with `dagq lint {t}` and submit it with `dagq submit {t}`. Say in its `--context` why you adopted it. Plan review checks it before it becomes ready.\n\
          2. Drop: when it is already done, duplicated or not worth doing, cancel it with `dagq cancel {t}` and record why with `dagq note --task {t} --text '<why>'`. When another task already covers it (a duplicate, or a completed task that already did it), cancel it with `dagq cancel {t} --duplicate-of <that task>` instead, so the queue records which task it duplicates, and still note why.\n\
          3. Ask: only for a draft you cannot decide yourself: (a) it needs a person's judgement, `scope` (the acceptance, the scope or a goal's decision would change with their intent) or `discard` (whether to throw work away), that the queue, the repository (its code and the decisions it records) and a person's precedents cannot settle; (b) your confidence in the decision is low; or (c) it is a follow_up draft past the runtime's follow_up limit, {FOLLOW_UP_ASK_DEPTH} or more follow-ups from a person's judgement, a source goal that was missing, closed or unknown at registration (even if its current goal is open), or no current goal or a closed current goal. Run `dagq ask --task {t} --kind planner_question --because scope --recommend <adopt|cancel|keep_draft> --confidence <high|low> --question '<everything the person needs, with your recommendation and why>' --option adopt --option cancel --option keep_draft` (`--because discard` when the question is whether to throw work away; for (c), recommend what you would do on your own), report briefly and stop. The answer arrives in this terminal as `answer to ask <id>: ...`: on adopt do 1, on cancel do 2 (the note names the ask), on keep_draft leave the draft as it is, record why with `dagq note --task {t} --text '<why>'` (naming the ask) and stop. A draft kept so stays a draft until a person has the inbox record a planning request that names it; no planner of the runtime's is opened for it again.\n\
          The runtime refuses your submit of a follow_up draft past that limit unless a person answered adopt or already adopted it: ask then, as (c) says. Membership changes (`set-goal` or `judge-follow-up`) do not count as adoption or reset depth; an existing person's adopt remains valid.\n\
          When you are done, report the outcome in one or two sentences and stop; the runtime ends this session. Do not work on anything but {this}. Never open the queue database directly; use the dagq CLI only.\n",
+        membership = if origin == DraftOrigin::FollowUp {
+            follow_up_membership_step(&t)
+        } else {
+            String::new()
+        },
         drafts = if single { "draft" } else { "drafts" },
         it = if single { "it" } else { "them" },
         each = if single {
@@ -1571,7 +1632,7 @@ pub(crate) fn resume_request(
     lines.push("3. Keep the worktree clean.".to_owned());
     lines.push(format!("4. {}", route.stop()));
     lines.push(format!(
-        "5. Rewrite the receipt at {receipt} with the new head commit, writing a temporary file in the same directory and renaming it. {ACCEPTANCE_REMAP}"
+        "5. Rewrite the receipt at {receipt} with the new head commit, writing a temporary file in the same directory and renaming it. {ACCEPTANCE_REMAP} {FOLLOW_UP_PROPOSAL_AGAIN}"
     ));
     lines.push(
         "6. If the change is no longer needed, write the receipt with result failed and the reason in summary."
@@ -2237,7 +2298,7 @@ pub(crate) fn revise_request(
     lines.push("3. Keep the worktree clean.".to_owned());
     lines.push(format!("4. {}", route.stop()));
     lines.push(format!(
-        "5. Rewrite the receipt at {receipt} with the new head commit, writing a temporary file in the same directory and renaming it. {ACCEPTANCE_REMAP}"
+        "5. Rewrite the receipt at {receipt} with the new head commit, writing a temporary file in the same directory and renaming it. {ACCEPTANCE_REMAP} {FOLLOW_UP_PROPOSAL_AGAIN}"
     ));
     lines.push(format!("6. {}", route.done(run)));
     Ok(lines.join("\n"))
@@ -2545,7 +2606,7 @@ fn stub(id: i64, title: Option<&str>, bytes: usize, read: String) -> String {
 /// The membership material of a follow_up task for plan review
 /// (ADR-t1504-2 decision 7), or `None` for any other task: where it came
 /// from (the source goal and its state at registration, the worker's
-/// category), every membership judgement (classification, acceptance
+/// category and membership_proposal, as written or null), every membership judgement (classification, acceptance
 /// items, reason, evidence, destination goal, the acceptance version it
 /// was judged at and the source goal's current one) and whether the latest
 /// one was judged at the current version (`null` without a judgement).
@@ -3780,7 +3841,8 @@ mod tests {
         use crate::domain::{BundleKey, DraftOrigin, TaskOrigin};
         let mut case = plan_case(1, 0);
         let material = serde_json::json!({"source_task_id": 3, "source_run_id": "r",
-            "source_goal_id": 9, "source_goal_state": "open", "source_goal_provenance": "recorded"});
+            "source_goal_id": 9, "source_goal_state": "open", "source_goal_provenance": "recorded",
+            "membership_proposal": {"classification": "required", "acceptance_items": ["(1)"], "reason": "w"}});
         case.tasks[0].origin = Some(TaskOrigin {
             origin: DraftOrigin::FollowUp,
             material: material.clone(),
@@ -3809,6 +3871,11 @@ mod tests {
         };
         let membership = &task(1000)["follow_up_membership"];
         assert_eq!(membership["origin"]["source_goal_id"], 9);
+        // The worker's proposal reaches plan review as written (task 1508).
+        assert_eq!(
+            membership["origin"]["membership_proposal"],
+            serde_json::json!({"classification": "required", "acceptance_items": ["(1)"], "reason": "w"})
+        );
         assert_eq!(membership["latest_classification"], "out_of_scope");
         assert_eq!(membership["latest_version_matches"], false);
         let row = &membership["judgements"][0];
@@ -4630,6 +4697,49 @@ mod tests {
         assert!(!review.contains(ACCEPTANCE_MAP) && !review.contains(ACCEPTANCE_REMAP));
     }
 
+    /// Task 1508 (ADR-t1504-2 decision 11): every worker's prompt shows a
+    /// follow_up's membership proposal in the receipt's example and says
+    /// once how to write it, as a proposal and not a judgement; every
+    /// resume and revise request says it again in short.
+    #[test]
+    fn every_worker_text_that_writes_a_receipt_proposes_follow_up_membership() {
+        let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
+        for (provider, mode) in [
+            (Provider::Claude, WorkerMode::Interactive),
+            (Provider::Claude, WorkerMode::Headless),
+            (Provider::Codex, WorkerMode::Headless),
+        ] {
+            let run = run_on(provider, mode);
+            let texts = session_texts(&task, &run);
+            let first = &texts[0];
+            assert_eq!(first.matches(FOLLOW_UP_PROPOSAL).count(), 1, "{first}");
+            assert!(
+                first.contains(r#""membership_proposal":{"classification":"required, out_of_scope or undecided","acceptance_items":["..."],"reason":"..."}"#),
+                "{first}"
+            );
+            assert!(!first.contains(FOLLOW_UP_PROPOSAL_AGAIN), "{first}");
+            for request in &texts[1..11] {
+                assert!(
+                    request.contains(&format!("{ACCEPTANCE_REMAP} {FOLLOW_UP_PROPOSAL_AGAIN}")),
+                    "{provider:?} {mode:?}: {request}"
+                );
+            }
+        }
+        for part in [
+            "write the problem and its evidence",
+            "required when you think the goal's acceptance cannot be met without it, out_of_scope when it can, undecided when you cannot tell",
+            "acceptance_items, the goal's acceptance items it bears on",
+            "It is only a proposal: the planner decides where the follow_up belongs, so do not judge or move it yourself.",
+        ] {
+            assert!(FOLLOW_UP_PROPOSAL.contains(part), "{part}");
+        }
+        assert!(FOLLOW_UP_PROPOSAL_AGAIN.contains("the problem and its evidence"));
+        assert!(FOLLOW_UP_PROPOSAL_AGAIN.contains("not a judgement"));
+        for text in [FOLLOW_UP_PROPOSAL, FOLLOW_UP_PROPOSAL_AGAIN] {
+            assert!(!text.contains("cargo") && !text.contains('`'), "{text}");
+        }
+    }
+
     /// Task 1428 (ADR-t1428-1): every worker's prompt, interactive or
     /// headless, on Claude or Codex, checks the documents against the diff
     /// once, right after the acceptance map and as part of it, not as a
@@ -5101,6 +5211,105 @@ mod tests {
         assert!(!prompt.contains("ADR"), "{prompt}");
     }
 
+    /// Task 1508 (ADR-t1504-1, ADR-t1504-2): a follow_up draft's planner
+    /// sees the worker's membership proposal, and judges and records where
+    /// the draft belongs before it adopts, drops or asks: membership apart
+    /// from adoption and priority, an existing goal found first, no
+    /// unrelated large goal, no acceptance weakened. A goal_gap draft gets
+    /// neither.
+    #[test]
+    fn the_follow_up_draft_planner_records_membership_before_it_decides() {
+        let planner = |origin, material: Value| {
+            let draft = task(9, "follow", TaskStatus::Draft);
+            let key = BundleKey::of(origin, &material, draft.id());
+            let members = [(
+                DraftTarget {
+                    task: draft,
+                    origin,
+                    material,
+                    planners: 0,
+                },
+                1,
+            )];
+            draft_planner_prompt(&DraftPlannerMaterial {
+                db: Path::new("/q/queue.db"),
+                key: &key,
+                members: &members,
+                source: None,
+                receipt: None,
+                goals: &[],
+                answer: None,
+            })
+            .unwrap()
+        };
+        let proposal =
+            json!({"classification": "out_of_scope", "acceptance_items": ["(1)"], "reason": "r"});
+        let prompt = planner(
+            DraftOrigin::FollowUp,
+            json!({"source_run_id": RUN, "source_task_id": 3, "index": 0, "membership_proposal": proposal,
+                "source_goal_id": 12, "source_goal_state": "open", "source_goal_provenance": "recorded"}),
+        );
+        assert!(prompt.contains("Source goal (at registration; judge against its acceptance with `dagq goal show <id>`, not the current goal's): goal 12 (open, recorded)\n"), "{prompt}");
+        for part in [
+            "Read its earlier judgements with `dagq show 9` (membership_judgements): one that still holds needs no new row; to change a required or out_of_scope one, record the other with `--corrects <its id>`; it never goes back to undecided.",
+            "A draft you drop (a duplicate, already done, not worth doing) may skip the record when it would need a new goal",
+            "record undecided with why, ask as step 3 says with the membership question in it, and on the answer record required or out_of_scope before you do what it says",
+        ] {
+            assert!(prompt.contains(part), "{part} in {prompt}");
+        }
+        let line = format!(
+            "Membership proposal (the worker's; where you start, not a judgement): {proposal}\n"
+        );
+        assert!(prompt.contains(&line), "{prompt}");
+        for part in [
+            "first judge where it belongs, apart from whether it is worth doing and from its priority",
+            "Start from the worker's membership proposal and decide the meaning yourself: can the source goal's acceptance be met without this draft?",
+            "When it cannot, it is required and belongs to the source goal; when it can, it is out_of_scope and belongs to another goal",
+            "look for a fitting existing goal with `dagq search` first, make one only when none fits, and never park it in an unrelated large goal",
+            "Record the judgement before you adopt, drop or ask: `dagq judge-follow-up 9 --classification <required|out_of_scope|undecided> --acceptance-item",
+            "`--destination-goal <goal>` for out_of_scope",
+            "Moving a draft to another goal neither adopts it nor raises its priority.",
+            "Never weaken a goal's acceptance to leave a follow_up out",
+        ] {
+            assert!(prompt.contains(part), "{part} in {prompt}");
+        }
+        let step = prompt.find("first judge where it belongs").unwrap();
+        assert!(step < prompt.find("Then do exactly one of these three").unwrap());
+        let none = planner(
+            DraftOrigin::FollowUp,
+            json!({"source_run_id": RUN, "source_task_id": 3, "index": 0}),
+        );
+        assert!(none.contains(
+            "Membership proposal (the worker's; where you start, not a judgement): (none)\n"
+        ));
+        assert!(
+            none.contains("not the current goal's): unknown\n"),
+            "{none}"
+        );
+        let text = planner(
+            DraftOrigin::FollowUp,
+            json!({"source_run_id": RUN, "source_task_id": 3, "index": 0, "membership_proposal": "unsure", "source_goal_id": null, "source_goal_state": "none"}),
+        );
+        assert!(text.contains("not the current goal's): none\n"), "{text}");
+        assert!(text.contains("not a judgement): \"unsure\"\n"), "{text}");
+        let gap = planner(
+            DraftOrigin::GoalGap,
+            json!({"goal_id": 1, "goal_review_id": 2, "criterion": "c", "summary": "s"}),
+        );
+        assert!(!gap.contains("Membership proposal"), "{gap}");
+        let reopened = planner(
+            DraftOrigin::Reopened,
+            json!({"reason": "r", "proposal_id": 4, "reviewed_proposal_id": 5}),
+        );
+        assert!(!reopened.contains("Membership proposal"), "{reopened}");
+        assert!(
+            !reopened.contains("first judge where it belongs"),
+            "{reopened}"
+        );
+        assert!(!gap.contains("first judge where it belongs"), "{gap}");
+        assert!(!prompt.contains("ADR"), "{prompt}");
+    }
+
     /// The finding planner proposes or dismisses on its own and records
     /// why; it asks only what it cannot settle or holds with low
     /// confidence, with a recommendation (ADR-t451-1 decision 5).
@@ -5348,7 +5557,7 @@ mod tests {
             // The receipt example shows the optional follow_ups, and the scope rule names it.
             assert!(
                 text.contains(
-                    "\"summary\":\"...\",\"follow_ups\":[{\"title\":\"...\",\"description\":\"...\",\"category\":\"...\"}]}\n"
+                    "\"summary\":\"...\",\"follow_ups\":[{\"title\":\"...\",\"description\":\"...\",\"category\":\"...\",\"membership_proposal\":{\"classification\":\"required, out_of_scope or undecided\",\"acceptance_items\":[\"...\"],\"reason\":\"...\"}}]}\n"
                 ),
                 "{text}"
             );

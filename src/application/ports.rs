@@ -2721,6 +2721,9 @@ pub struct FollowUpRegistration {
     pub index: usize,
     pub entry: serde_json::Value,
     pub category: String,
+    /// The worker's membership proposal as written, or null (ADR-t1504-2
+    /// decision 11).
+    pub membership_proposal: serde_json::Value,
     pub draft: Option<NewTask>,
     pub skipped: Option<&'static str>,
 }

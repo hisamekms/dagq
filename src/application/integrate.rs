@@ -896,7 +896,9 @@ fn decide_push(
 /// reason and the entry itself as `follow_up`. Every event carries the
 /// entry's `index` and its `category` (ADR-t947-3: as the worker wrote it,
 /// `unlabeled` without one), which the draft's origin material keeps too,
-/// and an entry already recorded is not looked at again, so
+/// and so does the entry's `membership_proposal` (ADR-t1504-2 decision 11:
+/// as written, null without one; a proposal for the planner, not a
+/// judgement), and an entry already recorded is not looked at again, so
 /// a second call for the same run adds nothing. All unregistered entries of
 /// one receipt, including skipped events, are committed in one transaction.
 /// A registration that fails is only reported: the landing stands either way.
@@ -970,6 +972,7 @@ pub fn register_follow_ups<Q: Queue + ?Sized>(
                 index,
                 entry: entry.clone(),
                 category: crate::domain::follow_up_category(entry),
+                membership_proposal: crate::domain::follow_up_membership_proposal(entry),
                 draft,
                 skipped,
             }
