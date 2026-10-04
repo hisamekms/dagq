@@ -42,7 +42,7 @@ use crate::{
             TRANSCRIPT_NOT_CLAUDE, TRANSCRIPT_NOT_READ_BEFORE, Transcript, TranscriptRecord, Turn,
             Turns, Unreadable, millis_text, span_turns, turns,
         },
-        turn::HeadlessSpan,
+        turn::{HeadlessSpan, TURN_COMMANDS_MISSING, codex_span_turns},
         worktime::{self, Breakdown, Command},
     },
 };
@@ -492,7 +492,9 @@ pub(super) fn read_before(conn: &Connection, closing: Closing<'_>) -> Result<Rea
         let transcript = read(conn, &span);
         // A run session's close with its transcript records its work
         // breakdown, whose rules depend on the repository (ADR-t614-1).
-        if transcript.is_ok() && RUN_SESSION.contains(&span.kind()) {
+        // A Codex worker's breakdown is made from its turns' commands.
+        let codex = !span.claude() && span.headless();
+        if (transcript.is_ok() || codex) && RUN_SESSION.contains(&span.kind()) {
             let source = match source {
                 Some(source) => source,
                 None => *source.insert(judge_dagq_source(conn)?),
@@ -1138,8 +1140,10 @@ fn fill_transcript(
 /// the close), recorded as `session_turns` like a transcript's; its tokens
 /// are the `tokens` its turns recorded from the provider's output. A
 /// Claude session's transcript, when it can be read, still gives the model
-/// and effort and the work breakdown; another provider's has none. Returns
-/// the work's `worktime.jsonl` lines.
+/// and effort and the work breakdown. A Codex worker's session has no
+/// transcript: its work breakdown is made from the commands files its
+/// turns' wrapper wrote ([`codex_breakdown`], task 1354), else it is
+/// `null` with why. Returns the work's `worktime.jsonl` lines.
 fn close_headless(
     conn: &Connection,
     now: &str,
@@ -1192,6 +1196,29 @@ fn close_headless(
         }
         return Ok(None);
     };
+    // Codex has no transcript: its turns' commands are in the files its
+    // wrapper wrote.
+    if !span.claude() {
+        if !RUN_SESSION.contains(&span.kind()) {
+            return Ok(None);
+        }
+        let inputs = work_inputs(conn, run_id, span)?;
+        return Ok(
+            match codex_breakdown(span, &inputs, &events, (start, now_ms), reason == INFERRED) {
+                Ok(breakdown) => {
+                    let (work, lines) = work_breakdown(span, inputs, breakdown);
+                    closed.work = Some(exited_work(&work, span.kind(), &span.payload["attempt"]));
+                    payload["work"] = work;
+                    lines
+                }
+                Err(code) => {
+                    payload["work"] = Value::Null;
+                    payload["work_unavailable"] = json!(code);
+                    None
+                }
+            },
+        );
+    }
     match transcript {
         Ok(mut read) => {
             let want = Want {
@@ -1224,6 +1251,90 @@ fn close_headless(
             Ok(None)
         }
     }
+}
+
+/// The run directory of the run is not known: no turn's commands can be
+/// read.
+pub const RUN_DIR_UNKNOWN: &str = "run_dir_unknown";
+/// A turn's file of its commands is not what its wrapper writes (not
+/// JSON lines of commands, not UTF-8, a link, too large).
+pub const TURN_COMMANDS_UNPARSABLE: &str = "turn_commands_unparsable";
+/// How large a turn's file of its commands is read: one line per command,
+/// read under the write lock, in a directory the worker can write.
+const TURN_COMMANDS_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The work breakdown of the Codex `span` closed at `end` that opened at
+/// `start` (unix milliseconds), from its turns (`events`, oldest first,
+/// taken as [`codex_span_turns`] decides) and the commands their wrapper
+/// wrote in the run directory, as a Claude span's is from its transcript;
+/// else the code of why it cannot be made. The files are read here, under
+/// the write lock when there is one: they are small (one line per
+/// command, read to [`TURN_COMMANDS_BYTES`]), unlike a transcript.
+fn codex_breakdown(
+    span: &OpenSpan,
+    inputs: &WorkInputs,
+    events: &[RunEvent],
+    (start, end): (i64, i64),
+    inferred: bool,
+) -> Result<Breakdown, &'static str> {
+    let run_dir = inputs.run_dir.as_deref().ok_or(RUN_DIR_UNKNOWN)?;
+    let run_dir = std::path::Path::new(run_dir);
+    let turns = codex_span_turns(events, start, end, inferred)?;
+    let mut read = Vec::new();
+    for turn in turns {
+        let Some(number) = turn.commands_of else {
+            read.push((turn.start, turn.end, Vec::new()));
+            continue;
+        };
+        let path = crate::domain::turn::commands_path(run_dir, number);
+        // The run directory is the worker's to write: read without
+        // following a link, and bounded.
+        let bytes = super::agent_dir::read_file(&path)
+            .and_then(|file| {
+                if file.metadata()?.len() > TURN_COMMANDS_BYTES {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "larger than a turn's commands are read",
+                    ));
+                }
+                super::agent_dir::read_bounded(file)
+            })
+            .map_err(|error| {
+                debug!(
+                    "session span {}: {} not read: {error}",
+                    span.opened_event_id,
+                    path.display()
+                );
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    TURN_COMMANDS_MISSING
+                } else {
+                    TURN_COMMANDS_UNPARSABLE
+                }
+            })?;
+        let text = String::from_utf8(bytes).map_err(|_| TURN_COMMANDS_UNPARSABLE)?;
+        let commands = text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(serde_json::from_str::<crate::domain::turn::TurnCommand>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| TURN_COMMANDS_UNPARSABLE)?;
+        read.push((turn.start, turn.end, commands));
+    }
+    let turns: Vec<worktime::HeadlessTurn<'_>> = read
+        .iter()
+        .map(|(from, to, commands)| worktime::HeadlessTurn {
+            start: *from,
+            end: *to,
+            commands,
+        })
+        .collect();
+    Ok(worktime::headless_breakdown(
+        &turns,
+        start,
+        end,
+        &inputs.verification,
+        inputs.source,
+    ))
 }
 
 /// Whose turns a headless span's are: its run's (a worker's, ADR-t813-2
@@ -2605,11 +2716,265 @@ mod tests {
         let expected = json!({"input": 20, "output": 10, "cache_read": 40, "cache_creation": 0, "messages": 2});
         assert_eq!(closed.payload["tokens"], expected);
         assert!(closed.payload.get("model").is_none());
+        // Its run directory has no file of its turns' commands: no work,
+        // and why (task 1354).
+        assert_eq!(closed.payload["work"], Value::Null);
+        assert_eq!(closed.payload["work_unavailable"], TURN_COMMANDS_MISSING);
         assert_eq!(
             of_kind(&queue, "session_exited")[0].payload["tokens"],
             expected
         );
         assert_eq!(READS.with(std::cell::Cell::get), reads);
+    }
+
+    /// A turn of [`codex_close`]: its number, when its start and end are
+    /// recorded (seconds after the span opened; none: not in the span, or
+    /// still running) and its provider.
+    type SpanTurnAt = (u64, Option<i64>, Option<i64>, &'static str);
+
+    /// Two Codex turns, 1 at 1..31 and 2 at 40..60 seconds.
+    const TWO_TURNS: [SpanTurnAt; 2] = [
+        (1, Some(1), Some(31), "codex"),
+        (2, Some(40), Some(60), "codex"),
+    ];
+
+    /// The close of a headless Codex worker's span in `dir`, opened at
+    /// `base`, with `turns`, whose run directory has the files `files(base)`
+    /// gives (turn, text) of their commands: its `session_closed` and the
+    /// run directory.
+    fn codex_close(
+        dir: &std::path::Path,
+        files: impl Fn(i64) -> Vec<(u64, String)>,
+        turns: &[SpanTurnAt],
+    ) -> (Value, std::path::PathBuf) {
+        let (queue, task_id, run) = run_queue(dir);
+        let conn = &queue.conn;
+        let run_dir = dir.join("run");
+        std::fs::create_dir_all(run_dir.join("turns")).unwrap();
+        bind(conn, dir, "dagq");
+        conn.execute(
+            "UPDATE task_runs SET worker_mode='headless', requested_provider='codex',
+               actual_provider='codex', run_dir=?1",
+            [run_dir.to_str().unwrap()],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE tasks SET verification_commands=?1",
+            [r#"["cargo llvm-cov --locked --fail-under-lines 80"]"#],
+        )
+        .unwrap();
+        let record = |kind: EventKind, payload: Value| {
+            event(conn, task_id, Some(&run), kind, payload).unwrap();
+            latest(conn)
+        };
+        let at = |id: i64, millis: i64| {
+            conn.execute(
+                "UPDATE run_events SET created_at=?1 WHERE id=?2",
+                params![millis_text(millis), id],
+            )
+            .unwrap();
+        };
+        let base = rfc3339_millis(&now(conn).unwrap()).unwrap() - 100_000;
+        at(
+            record(EventKind::AgentStarted, json!({"session_id": null})),
+            base,
+        );
+        for &(turn, from, to, provider) in turns {
+            if let Some(from) = from {
+                at(
+                    record(
+                        EventKind::TurnStarted,
+                        json!({"turn": turn, "provider": provider}),
+                    ),
+                    base + from * 1000,
+                );
+            }
+            if let Some(to) = to {
+                at(
+                    record(
+                        EventKind::TurnFinished,
+                        json!({"turn": turn, "outcome": "succeeded", "provider": provider}),
+                    ),
+                    base + to * 1000,
+                );
+            }
+        }
+        for (turn, text) in files(base) {
+            std::fs::write(crate::domain::turn::commands_path(&run_dir, turn), text).unwrap();
+        }
+        record(EventKind::SessionExited, json!({"exit_code": 0}));
+        let closed = of_kind(&queue, SESSION_CLOSED)[0].payload.clone();
+        (closed, run_dir)
+    }
+
+    /// A headless Codex worker's span (task 1354) takes its work from the
+    /// commands its turns' wrapper wrote, as a Claude span's from its
+    /// transcript: their times (one whose start was not read at its end),
+    /// the model's time in its turns, idle between them, the cargo-only
+    /// counts of dagq's source and the tests a test command's output named
+    /// as failed; and each command is a `worktime.jsonl` line that says how
+    /// its times were found.
+    #[test]
+    fn a_codex_span_takes_its_work_from_its_turns_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let (closed, run_dir) = codex_close(
+            dir.path(),
+            |base| {
+                let llvm = json!({"id": "c1", "tool": "command_execution",
+                    "command": "cargo llvm-cov --locked", "started": base + 5_000,
+                    "ended": base + 25_000, "exit_code": 1, "status": "failed",
+                    "failed_tests": ["a::b"]});
+                let git = json!({"id": "c2", "tool": "command_execution",
+                    "command": "git status", "ended": base + 50_000, "exit_code": 0,
+                    "status": "completed"});
+                vec![(1, format!("{llvm}\n")), (2, format!("{git}\n"))]
+            },
+            &TWO_TURNS,
+        );
+        let work = &closed["work"];
+        assert!(work.is_object(), "{closed}");
+        assert_eq!(closed.get("work_unavailable"), None);
+        assert_eq!(work["secs"]["llvm_cov"], 20, "{work}");
+        // 10 seconds of turn 1 and all 20 of turn 2: git took none.
+        assert_eq!(work["secs"]["model"], 30, "{work}");
+        assert_eq!(work["secs"].get("git"), None, "{work}");
+        assert_eq!(
+            work["commands"]["llvm_cov"],
+            json!({"runs": 1, "failed": 1})
+        );
+        assert_eq!(work["verification_repeats"], 1);
+        assert_eq!(work["llvm_cov_runs"], 1);
+        assert_eq!(work["failed_tests"], json!(["a::b"]));
+        assert!(!closed.to_string().contains("cargo"));
+        let lines: Vec<Value> = std::fs::read_to_string(run_dir.join(WORKTIME_FILE))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[0]["category"], "llvm_cov");
+        assert_eq!(lines[0]["secs"], 20);
+        assert_eq!(lines[0]["time_source"], worktime::TIMES_READ);
+        assert_eq!(lines[0]["failed_tests"], json!(["a::b"]));
+        assert_eq!(lines[1]["category"], "git");
+        assert_eq!(lines[1]["secs"], 0);
+        assert_eq!(lines[1]["time_source"], worktime::TIMES_COMPLETED_ONLY);
+    }
+
+    /// A headless Claude worker's span keeps taking its work from its
+    /// transcript (task 1354 changed only Codex's): its turns' commands
+    /// files are not read.
+    #[test]
+    fn a_headless_claude_span_takes_its_work_from_its_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let (queue, task_id, run) = run_queue(dir.path());
+        let conn = &queue.conn;
+        let run_dir = dir.path().join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        conn.execute(
+            "UPDATE task_runs SET worker_mode='headless', run_dir=?1",
+            [run_dir.to_str().unwrap()],
+        )
+        .unwrap();
+        event(
+            conn,
+            task_id,
+            Some(&run),
+            EventKind::AgentStarted,
+            json!({"session_id": RUN}),
+        )
+        .unwrap();
+        let start = retime(conn, 0, 100);
+        assert_eq!(
+            of_kind(&queue, SESSION_OPENED)[0].payload["route"],
+            "headless"
+        );
+        let project = dir.path().join("config/projects/-wt");
+        std::fs::create_dir_all(&project).unwrap();
+        let line = |kind: &str, secs: i64, content: Value| {
+            json!({"type": kind, "timestamp": millis_text(start + secs * 1000),
+                   "sessionId": RUN, "version": "2.1.283", "message": {"content": content}})
+            .to_string()
+        };
+        let lines = [
+            line("user", 1, json!("go")),
+            line(
+                "assistant",
+                5,
+                json!([{"type": "tool_use", "id": "a", "name": "Bash",
+                        "input": {"command": "cargo build"}}]),
+            ),
+            line(
+                "user",
+                25,
+                json!([{"type": "tool_result", "tool_use_id": "a", "content": "ok"}]),
+            ),
+            line("assistant", 30, json!([{"type": "text"}])),
+        ];
+        std::fs::write(project.join(format!("{RUN}.jsonl")), lines.join("\n")).unwrap();
+        event(
+            conn,
+            task_id,
+            Some(&run),
+            EventKind::SessionExited,
+            json!({"exit_code": 0}),
+        )
+        .unwrap();
+        let closed = &of_kind(&queue, SESSION_CLOSED)[0].payload;
+        assert_eq!(closed["work"]["secs"]["build"], 20, "{closed}");
+        assert_eq!(closed.get("work_unavailable"), None);
+        let written = std::fs::read_to_string(run_dir.join(WORKTIME_FILE)).unwrap();
+        assert!(!written.contains("time_source"), "{written}");
+    }
+
+    /// Why a Codex span records no work: a finished turn without its
+    /// file, a file that is not the wrapper's (or a link). Turns that ran
+    /// no command are the model's time.
+    #[test]
+    fn a_codex_span_without_its_turns_commands_says_why() {
+        let files = |texts: &'static [&'static str]| {
+            move |_| {
+                (1..)
+                    .zip(texts)
+                    .map(|(turn, text)| (turn, (*text).to_owned()))
+                    .collect()
+            }
+        };
+        for (texts, code) in [
+            (&[""][..], TURN_COMMANDS_MISSING),
+            (&["", "not json\n"][..], TURN_COMMANDS_UNPARSABLE),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (closed, run_dir) = codex_close(dir.path(), files(texts), &TWO_TURNS);
+            assert_eq!(closed["work"], Value::Null, "{code}: {closed}");
+            assert_eq!(closed["work_unavailable"], code, "{closed}");
+            assert!(!run_dir.join(WORKTIME_FILE).exists(), "{code}");
+        }
+        // A link the worker put in the run directory is not followed.
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = dir.path().join("elsewhere.jsonl");
+        std::fs::write(&elsewhere, "").unwrap();
+        let (closed, _) = codex_close(
+            dir.path(),
+            |_| {
+                let run_dir = dir.path().join("run");
+                std::os::unix::fs::symlink(
+                    &elsewhere,
+                    crate::domain::turn::commands_path(&run_dir, 2),
+                )
+                .unwrap();
+                vec![(1, String::new())]
+            },
+            &TWO_TURNS,
+        );
+        assert_eq!(
+            closed["work_unavailable"], TURN_COMMANDS_UNPARSABLE,
+            "{closed}"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let (closed, _) = codex_close(dir.path(), files(&["", ""]), &TWO_TURNS);
+        assert_eq!(closed["work"]["secs"]["model"], 50, "{closed}");
+        assert_eq!(closed["work"]["heavy"], json!([]));
     }
 
     /// A headless planner's span (ADR-t1394-2 decision 4) opens on its

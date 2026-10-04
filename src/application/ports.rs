@@ -819,6 +819,10 @@ pub fn job_start_failure(error: &anyhow::Error) -> crate::domain::headless_job::
 pub trait TurnReader: Send {
     /// One line of the turn's stdout, without its line break.
     fn line(&mut self, line: &str) -> Vec<crate::domain::turn::TurnSignal>;
+    /// The lines read next were read at `at` (unix milliseconds): a reader
+    /// whose output has no times takes them as its items' (Codex's, for
+    /// [`crate::domain::turn::TurnResult::commands`]).
+    fn stamp(&mut self, _at: i64) {}
     /// Whether the output goes on while the agent works (a heartbeat), so
     /// that a silence means the turn is stuck.
     fn heartbeats(&self) -> bool;

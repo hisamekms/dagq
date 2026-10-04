@@ -354,6 +354,54 @@ pub struct TurnResult {
     /// Codex's rollout), and why none was read when it was not.
     pub model: Option<String>,
     pub model_unknown: Option<String>,
+    /// The commands and tools the turn ran, with when the wrapper read
+    /// their start and end, for the session's work breakdown: `Some` for a
+    /// provider whose output names them (Codex's items) and that has no
+    /// transcript the breakdown is read from, `None` for the others.
+    #[serde(skip)]
+    pub commands: Option<Vec<TurnCommand>>,
+}
+
+/// The extension of the file of a headless turn's commands
+/// ([`commands_path`]).
+pub const COMMANDS_FILE: &str = "commands.jsonl";
+
+/// One item of a headless turn that ran a command or a tool (Codex's
+/// `command_execution` or `mcp_tool_call`), as the wrapper read it: one
+/// line of the turn's [`commands_path`]. Its output has no times, so its
+/// `started` and `ended` are when the wrapper read the item's
+/// `item.started` and `item.completed` (unix milliseconds); `None` when it
+/// did not read that line.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnCommand {
+    /// The item's id in the turn.
+    pub id: String,
+    /// The item's type: `command_execution` for a shell command.
+    pub tool: String,
+    /// The shell command of a `command_execution`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub started: Option<i64>,
+    #[serde(default)]
+    pub ended: Option<i64>,
+    #[serde(default)]
+    pub exit_code: Option<i64>,
+    /// The item's `status` when it completed (`completed`, `failed`,
+    /// `declined`).
+    #[serde(default)]
+    pub status: Option<String>,
+    /// The tests its output names as failed (whatever the command; the
+    /// breakdown keeps them only for one that runs tests).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_tests: Vec<String>,
+}
+
+/// The commands of turn `turn` of the run whose directory is `run_dir`,
+/// one [`TurnCommand`] per line, which the wrapper writes before it
+/// records the turn's end.
+pub fn commands_path(run_dir: &Path, turn: u64) -> PathBuf {
+    output_path(run_dir, turn, COMMANDS_FILE)
 }
 
 /// The idle marker the wrapper writes when turn `turn` ended: a `Stop`
@@ -537,6 +585,105 @@ pub fn shortened(text: &str, max: usize) -> String {
         Some((at, _)) => format!("{}…", &text[..at]),
         None => text.to_owned(),
     }
+}
+
+/// A finished Codex turn of the span has no file of its commands, or no
+/// turn number to find it by: it ran before its wrapper wrote them (the
+/// past), or the file could not be written (task 1354).
+pub const TURN_COMMANDS_MISSING: &str = "turn_commands_missing";
+
+/// A turn of a Codex span whose time and commands its work breakdown
+/// counts (task 1354), from [`codex_span_turns`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CodexSpanTurn {
+    /// When it started (unix milliseconds); `i64::MIN` when it began before
+    /// the span opened, so that none of its commands before the span is
+    /// the span's.
+    pub start: i64,
+    /// When it ended, or the span's end for one still running.
+    pub end: i64,
+    /// The turn whose commands file the breakdown reads; `None` for one
+    /// still running at the close, whose commands are not written yet.
+    pub commands_of: Option<u64>,
+}
+
+/// The turns of the Codex span `start`..`end` (unix milliseconds) whose
+/// work breakdown counts them, from its run's turn `events` after it
+/// opened, oldest first; other kinds are skipped. As its active time
+/// counts them ([`HeadlessSpan`]): a turn started again without an end is
+/// the new one; a `turn_finished` with no `turn_started` in the span began
+/// before it; a turn still running is the model's to the end, its
+/// commands not read, unless the close is `inferred`, whose end the turn's
+/// is not known to reach. Only a turn that ran on Codex (its events name
+/// Codex, or no provider) is kept: one that ran on another provider after
+/// a switch writes no commands. A finished one with no turn number is
+/// [`TURN_COMMANDS_MISSING`].
+pub fn codex_span_turns(
+    events: &[RunEvent],
+    start: i64,
+    end: i64,
+    inferred: bool,
+) -> Result<Vec<CodexSpanTurn>, &'static str> {
+    struct Seen {
+        number: Option<u64>,
+        start: Option<i64>,
+        end: Option<i64>,
+        codex: bool,
+    }
+    let mut seen: Vec<Seen> = Vec::new();
+    for event in events {
+        let Some(at) = timestamp_millis(&event.created_at) else {
+            continue;
+        };
+        let number = event.payload["turn"].as_u64();
+        let codex = event.payload["provider"]
+            .as_str()
+            .is_none_or(|provider| provider == "codex");
+        match event.kind.as_str() {
+            TURN_STARTED => {
+                if seen.last().is_some_and(|last| last.end.is_none()) {
+                    seen.pop();
+                }
+                seen.push(Seen {
+                    number,
+                    start: Some(at.max(start)),
+                    end: None,
+                    codex,
+                });
+            }
+            TURN_FINISHED => match seen.last_mut() {
+                Some(last) if last.end.is_none() => {
+                    last.end = Some(at.max(last.start.unwrap_or(start)));
+                    last.codex &= codex;
+                }
+                _ => seen.push(Seen {
+                    number,
+                    start: None,
+                    end: Some(at.max(start)),
+                    codex,
+                }),
+            },
+            _ => {}
+        }
+    }
+    let mut turns = Vec::new();
+    for turn in seen.into_iter().filter(|turn| turn.codex) {
+        let from = turn.start.unwrap_or(i64::MIN);
+        match turn.end {
+            Some(to) => turns.push(CodexSpanTurn {
+                start: from,
+                end: to,
+                commands_of: Some(turn.number.ok_or(TURN_COMMANDS_MISSING)?),
+            }),
+            None if inferred => {}
+            None => turns.push(CodexSpanTurn {
+                start: from,
+                end: end.max(from),
+                commands_of: None,
+            }),
+        }
+    }
+    Ok(turns)
 }
 
 impl std::fmt::Display for TurnOutcome {
@@ -757,6 +904,97 @@ mod tests {
             started(3, true),
         ];
         assert_eq!(turn_own_cost(&older, 3, "s", 5.5), 1.5);
+    }
+
+    /// A Codex span's turns for its work breakdown (task 1354), from turn
+    /// events as values: a turn begun before the span starts before it, a
+    /// turn started again without an end is replaced, a Claude turn after
+    /// a switch is left out, a running turn is the model's to the close
+    /// unless it was inferred, and a finished turn with no number is
+    /// missing its commands.
+    #[test]
+    fn a_codex_spans_turns_are_those_its_breakdown_counts() {
+        let event = |kind: &str, secs: i64, payload: Value| RunEvent {
+            id: super::super::EventId::new(1),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.to_owned(),
+            payload,
+            created_at: super::super::transcript::millis_text(secs * 1000),
+            actor: None,
+        };
+        let turn = |start: i64, end: i64, of: Option<u64>| CodexSpanTurn {
+            start,
+            end: end * 1000,
+            commands_of: of,
+        };
+        let events = [
+            // Begun before the span (opened at 100).
+            event(TURN_FINISHED, 120, json!({"turn": 1, "provider": "codex"})),
+            // Started again without an end: the next one replaces it.
+            event(TURN_STARTED, 125, json!({"turn": 2, "provider": "codex"})),
+            event(TURN_STARTED, 130, json!({"turn": 3})),
+            event(TURN_FINISHED, 140, json!({"turn": 3})),
+            // On Claude after a switch.
+            event(TURN_STARTED, 150, json!({"turn": 4, "provider": "claude"})),
+            event(TURN_FINISHED, 160, json!({"turn": 4, "provider": "claude"})),
+            // A time that cannot be read is skipped.
+            RunEvent {
+                created_at: "never".into(),
+                ..event(TURN_STARTED, 0, json!({"turn": 9}))
+            },
+            event(TURN_STARTED, 170, json!({"turn": 5, "provider": "codex"})),
+        ];
+        assert_eq!(
+            codex_span_turns(&events, 100_000, 200_000, false),
+            Ok(vec![
+                turn(i64::MIN, 120, Some(1)),
+                turn(130_000, 140, Some(3)),
+                turn(170_000, 200, None),
+            ])
+        );
+        // Inferred: the running turn is left out.
+        assert_eq!(
+            codex_span_turns(&events, 100_000, 200_000, true),
+            Ok(vec![
+                turn(i64::MIN, 120, Some(1)),
+                turn(130_000, 140, Some(3))
+            ])
+        );
+        // A turn that started before the span opened is counted from it.
+        assert_eq!(
+            codex_span_turns(
+                &[event(TURN_STARTED, 90, json!({"turn": 1}))],
+                100_000,
+                110_000,
+                false
+            ),
+            Ok(vec![turn(100_000, 110, None)])
+        );
+        // A finished turn with no number cannot be found.
+        assert_eq!(
+            codex_span_turns(
+                &[
+                    event(TURN_STARTED, 101, json!({})),
+                    event(TURN_FINISHED, 102, json!({}))
+                ],
+                100_000,
+                110_000,
+                false
+            ),
+            Err(TURN_COMMANDS_MISSING)
+        );
+        // Nothing but other events: no turn.
+        assert_eq!(
+            codex_span_turns(
+                &[event("session_exited", 105, json!({}))],
+                100_000,
+                110_000,
+                false
+            ),
+            Ok(Vec::new())
+        );
     }
 
     /// A headless span's turns run from each `turn_started` to its

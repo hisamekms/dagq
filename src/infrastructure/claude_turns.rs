@@ -271,6 +271,8 @@ impl TurnReader for ClaudeTurnReader {
             // Claude's session is the run's: a missing one is started
             // by `turn_session_exists` instead.
             session_missing: false,
+            // Its commands are read from its transcript.
+            commands: None,
             model: self.model.clone(),
             model_unknown: self
                 .model

@@ -4,8 +4,8 @@ type: design
 title: "非対話のworker"
 status: current
 created: 2026-09-28
-updated: 2026-10-04 # task 1649
-last_verified: 2026-10-04 # task 1649
+updated: 2026-10-04 # task 1354
+last_verified: 2026-10-04 # task 1354
 scope: runtime
 related:
   - adr-t1340-1
@@ -48,6 +48,7 @@ related:
 | `exit` | supervisor | 終了の依頼 |
 | `limits.json` | supervisor | turnの上限（`silence_secs`・`limit_secs`。testが秒未満で入れたときは`silence_ms`・`limit_ms`も持ち、秒の代わりに使う。[Stall thresholds](stall-thresholds.md)）。`[stall]`から |
 | `turn-NNNNNN.jsonl` / `.err` | agent | turnのstdout（providerのJSONL）とstderr |
+| `turn-NNNNNN.commands.jsonl` | wrapper | runのCodexのturnのコマンドとtool（`TurnCommand`。1行1つ、始まりと終わりを読んだ時刻つき）。`turn_finished`の前に一時fileからrenameで置く。区間の作業の内訳の元（[provider-lifecycle](../provider-lifecycle.md#非対話のworkerの区間)の「Codexの作業の内訳」、task 1354） |
 
 supervisorは最初のsessionのworkspaceを開く前（`provision`）とresumeのworkspaceを開く前（`start_resume`）に`prepare_turns`を行い、`limits.json`を書き、前のsessionの終了の依頼と取られていない依頼を捨てる。turnの設定は`claude-headless-settings.json`（`permissions.deny`だけ。`SIGNAL_BY_NAME_DENIED`とworkerのroleの拒否、`autoMode`）で、`turn_command`がturnのたびに書く。
 
@@ -62,6 +63,8 @@ task 1184でrun dirのI/Oを洗い出し、次の呼び出しを`agent_dir`の�
 | `session_log::print`（`run log`）→ `LocalRunFiles` | backgroundのwrapperのlogを、全体と`--follow`の追記は`read_range`で1MiBずつ（1回の読みは64MiBまで）、`--lines`は`size`と`read_tail`で末尾から読む。linkを辿らず通常のfileだけを読む |
 | `adapters::write_settings`・`turn_command`・`create` | Claudeの設定（Codexからの切り替え後も）とworkspaceの作成結果。安全な一時fileからrename |
 | `runtime_store::Refusals`・`sessions::work_breakdown` | 診断logへの追加。通常のfileを上限付きで読み、新しいinodeで置き換える。読めなければlogだけを欠く |
+| `headless_session.rs`の`write_commands` → `LocalRunFiles` | runのCodexのturnのコマンドのfile（`turns/turn-NNNNNN.commands.jsonl`、task 1354）。一時fileに書いてrenameで置く。書けなければwarnのlogだけで、turnは続く |
+| `sessions::codex_breakdown` → `agent_dir::read_file`・`read_bounded` | 区間を閉じるときのturnのコマンドのfile。linkを辿らず通常のfileだけを、4 MiB（`TURN_COMMANDS_BYTES`）まで読む（書き込みのトランザクションの中でも読むため、64MiBより小さくした）。無ければ`turn_commands_missing`、linkや上限超え・形の違いは`turn_commands_unparsable`で、区間の`work`をnullにして理由を書く |
 | `broker_token`・`LocalRunFiles`のtree操作 | runのbroker設定と後始末。dirの列挙・子dirのopen・削除・大きさの集計も記述子に対して行い、linkを辿らない |
 
 queueのdirなどworkerが書けない場所と、workerが書くrun dir（直下の`turns/`・`broker/`など）を区別する。pathにqueueの`runs/`の下の部分（run dirとその中）があるときだけ（`agent_dir::in_run_dir`）、`LocalRunFiles`と`agent_dir`の`create_file`・`append`は記述子の操作を使う: ディレクトリの初回openが指定したdirとその親の2段をlinkとして拒み、最後の要素のfileもlinkを辿らず（`O_NOFOLLOW`と`AT_SYMLINK_NOFOLLOW`）、通常のfileだけを64MiBまで読み、書きはlinkを置き換える。それ以外のpath（queueのdirとDB、installしたバイナリやbrokerのclient、macOSの`/tmp`、linkにしたdata dir、scratchpad）はhostのもので、`std::fs`と同じくlinkを辿り、上限も当てない。`in_run_dir`はpathだけで決め、最初の`runs`という名前の要素の下を run dir とみなすので、queueより上に`runs`というdirがあるhostのpath（`/Users/x/runs/project/...`）もrun dirの扱い（linkを拒むだけで、辿る範囲は広がらない）になる。任意の深さのpathを安全にするAPIではない。`LocalRunFiles::copy`の元（runtimeのバイナリ）はruntimeのもので、linkを辿って読み、64MiBの上限を当てない。Claudeのdebug logのhookの失敗は`RunFiles::read_tail`で末尾だけを読むので、64MiBを超えるlogでも見つかる。treeの走査は開いたdirから`openat`で子へ進む。

@@ -27,7 +27,9 @@ use serde_json::Value;
 
 use crate::application::{Exit, TurnReader};
 use crate::domain::tokens::TokenUsage;
-use crate::domain::turn::{TurnFailure, TurnResult, TurnSignal, shortened};
+use crate::domain::turn::{TurnCommand, TurnFailure, TurnResult, TurnSignal, shortened};
+use crate::domain::verify_failure::failed_tests;
+use crate::domain::worktime::SHELL_ITEM;
 
 /// How long a text of the agent's or a message is kept.
 const TEXT_KEPT: usize = 400;
@@ -70,7 +72,15 @@ pub struct CodexTurnReader {
     last_text: Option<String>,
     /// The commands the sandbox refused.
     denials: Vec<String>,
+    /// When the lines read now were read ([`TurnReader::stamp`]).
+    at: Option<i64>,
+    /// The commands and tools the turn ran, in the order they started.
+    commands: Vec<TurnCommand>,
 }
+
+/// The items of a turn that run something whose time the work breakdown
+/// counts: a shell command, and a tool of a server.
+const TIMED_ITEMS: [&str; 2] = [SHELL_ITEM, "mcp_tool_call"];
 
 /// What a message of Codex's says went wrong, by its words: `None` for one
 /// that names no kind (a retry, a transport fallback).
@@ -269,7 +279,19 @@ impl CodexTurnReader {
         }
     }
 
-    fn started(item: &Value) -> Vec<TurnSignal> {
+    fn started(&mut self, item: &Value) -> Vec<TurnSignal> {
+        if let Some(tool) = item["type"]
+            .as_str()
+            .filter(|tool| TIMED_ITEMS.contains(tool))
+        {
+            self.commands.push(TurnCommand {
+                id: item["id"].as_str().unwrap_or_default().to_owned(),
+                tool: tool.to_owned(),
+                command: item["command"].as_str().map(str::to_owned),
+                started: self.at,
+                ..TurnCommand::default()
+            });
+        }
         match item["type"].as_str() {
             Some("command_execution") => vec![TurnSignal::Tool(format!(
                 "shell {}",
@@ -279,7 +301,46 @@ impl CodexTurnReader {
         }
     }
 
+    /// The end of a command or tool `item` of [`TIMED_ITEMS`]: the one
+    /// its start began, else one whose start was not read.
+    fn ended(&mut self, item: &Value) {
+        let Some(tool) = item["type"]
+            .as_str()
+            .filter(|tool| TIMED_ITEMS.contains(tool))
+        else {
+            return;
+        };
+        let id = item["id"].as_str().unwrap_or_default();
+        let at = match self
+            .commands
+            .iter()
+            .position(|command| command.ended.is_none() && command.id == id)
+        {
+            Some(at) => at,
+            None => {
+                self.commands.push(TurnCommand {
+                    id: id.to_owned(),
+                    tool: tool.to_owned(),
+                    ..TurnCommand::default()
+                });
+                self.commands.len() - 1
+            }
+        };
+        let command = &mut self.commands[at];
+        command.ended = self.at;
+        if let Some(text) = item["command"].as_str() {
+            command.command = Some(text.to_owned());
+        }
+        command.exit_code = item["exit_code"].as_i64();
+        command.status = item["status"].as_str().map(str::to_owned);
+        command.failed_tests = item["aggregated_output"]
+            .as_str()
+            .map(|output| failed_tests(output).names)
+            .unwrap_or_default();
+    }
+
     fn completed_item(&mut self, item: &Value) -> Vec<TurnSignal> {
+        self.ended(item);
         match item["type"].as_str() {
             Some("error") => self.error(item["message"].as_str().unwrap_or("error")),
             Some("agent_message") => {
@@ -352,7 +413,7 @@ impl TurnReader for CodexTurnReader {
                     permission_mode: None,
                 }]
             }
-            Some("item.started") => Self::started(&event["item"]),
+            Some("item.started") => self.started(&event["item"]),
             Some("item.completed") => self.completed_item(&event["item"]),
             Some("turn.completed") => {
                 self.completed = Some(event);
@@ -373,6 +434,10 @@ impl TurnReader for CodexTurnReader {
 
     fn heartbeats(&self) -> bool {
         false
+    }
+
+    fn stamp(&mut self, at: i64) {
+        self.at = Some(at);
     }
 
     fn finish(&mut self, exit: Option<&Exit>, stderr: &str) -> TurnResult {
@@ -438,6 +503,7 @@ impl TurnReader for CodexTurnReader {
             session_missing: stderr.contains("no rollout found"),
             model: model.as_ref().ok().cloned(),
             model_unknown: model.err(),
+            commands: Some(std::mem::take(&mut self.commands)),
         }
     }
 }
@@ -788,5 +854,87 @@ mod tests {
         );
         // A missing directory has no rollout.
         assert!(rollout_model(&dir.path().join("none"), "th-1", None).is_err());
+    }
+
+    /// The reader keeps each command and tool the turn ran with when the
+    /// wrapper read its start and end (task 1354): a command whose start
+    /// was not read has none, one that did not end has no end, and the
+    /// tests a command's output names as failed are kept with it.
+    #[test]
+    fn a_turns_commands_carry_when_their_lines_were_read() {
+        let mut reader = CodexTurnReader::default();
+        let at = |reader: &mut CodexTurnReader, millis: i64, line: Value| {
+            reader.stamp(millis);
+            reader.line(&line.to_string());
+        };
+        at(
+            &mut reader,
+            1_000,
+            json!({"type": "thread.started", "thread_id": "th-1"}),
+        );
+        at(
+            &mut reader,
+            1_000,
+            json!({"type": "item.started", "item": {"id": "c1", "type": "command_execution", "command": "cargo test", "status": "in_progress"}}),
+        );
+        at(
+            &mut reader,
+            9_000,
+            json!({"type": "item.completed", "item": {"id": "c1", "type": "command_execution", "command": "cargo test", "exit_code": 101,
+            "aggregated_output": "failures:\n    a::b\n\ntest result: FAILED. 1 passed; 1 failed\n", "status": "failed"}}),
+        );
+        at(
+            &mut reader,
+            10_000,
+            json!({"type": "item.completed", "item": {"id": "c2", "type": "command_execution", "command": "git status", "exit_code": 0, "aggregated_output": "", "status": "completed"}}),
+        );
+        at(
+            &mut reader,
+            11_000,
+            json!({"type": "item.started", "item": {"id": "t1", "type": "mcp_tool_call", "server": "s", "tool": "t"}}),
+        );
+        at(
+            &mut reader,
+            12_000,
+            json!({"type": "item.completed", "item": {"id": "i9", "type": "agent_message", "text": "hi"}}),
+        );
+        at(
+            &mut reader,
+            13_000,
+            json!({"type": "item.started", "item": {"id": "c3", "type": "command_execution", "command": "sleep 100"}}),
+        );
+        let commands = reader.finish(None, "").commands.unwrap();
+        let got: Vec<_> = commands
+            .iter()
+            .map(|c| {
+                (
+                    c.id.as_str(),
+                    c.tool.as_str(),
+                    c.started,
+                    c.ended,
+                    c.exit_code,
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("c1", SHELL_ITEM, Some(1_000), Some(9_000), Some(101)),
+                ("c2", SHELL_ITEM, None, Some(10_000), Some(0)),
+                ("t1", "mcp_tool_call", Some(11_000), None, None),
+                ("c3", SHELL_ITEM, Some(13_000), None, None),
+            ]
+        );
+        assert_eq!(commands[0].failed_tests, ["a::b"]);
+        assert_eq!(commands[0].status.as_deref(), Some("failed"));
+        assert_eq!(commands[1].command.as_deref(), Some("git status"));
+        // The reader of a job reads none of it, unstamped.
+        let (mut unstamped, _) = read(&[
+            json!({"type": "item.started", "item": {"id": "c", "type": "command_execution", "command": "ls"}}),
+        ]);
+        assert_eq!(
+            unstamped.finish(None, "").commands.unwrap()[0].started,
+            None
+        );
     }
 }

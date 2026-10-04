@@ -51,11 +51,21 @@ use crate::domain::{
     tokens::TokenUsage,
     turn::{
         LIMITS_FILE, TurnFailure, TurnLimits, TurnOutcome, TurnRequest, TurnResult, TurnSession,
-        TurnSignal, exit_path, idle_marker, output_path, pending, request_path, session_name,
-        taken_path, turn_own_cost, turns_dir,
+        TurnSignal, commands_path, exit_path, idle_marker, output_path, pending, request_path,
+        session_name, taken_path, turn_own_cost, turns_dir,
     },
     worker_model::WorkerSession,
 };
+
+/// Unix milliseconds now: when the wrapper read the lines of a turn's
+/// output it reads next ([`TurnReader::stamp`]).
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|since| i64::try_from(since.as_millis()).ok())
+        .unwrap_or(0)
+}
 
 /// Whose turns [`Turns`] drives.
 pub(super) enum TurnOwner<'a> {
@@ -809,6 +819,7 @@ impl<'a> Turns<'a> {
         let (exit, stop, mut tail) =
             self.follow(run_dir, turn, on, child, reader, stdout, limits)?;
         // What it wrote after the last look.
+        reader.stamp(now_millis());
         for line in tail.read(self.files, stdout, true) {
             for signal in reader.line(&line) {
                 if let TurnSignal::Started {
@@ -844,6 +855,31 @@ impl<'a> Turns<'a> {
         let exit_code = exit.as_ref().and_then(|exit| exit.code);
         let stopped = stop.as_ref().map(|stop| stop.why.as_str());
         self.finished(turn, outcome, failure, stopped, exit_code, result)
+    }
+
+    /// Write the `commands` of a run's Codex turn `turn` to its file
+    /// ([`commands_path`]) before its end is recorded, for its session's
+    /// work breakdown: Codex has no transcript to read them from. A turn
+    /// that ran none (or could not start) gets an empty one, which tells
+    /// it from a turn whose file was never written. Failing to write it is
+    /// only logged: the span's close then records no breakdown and says
+    /// why.
+    fn write_commands(&self, turn: u64, commands: Vec<crate::domain::turn::TurnCommand>) {
+        let written = self.dir().and_then(|run_dir| {
+            let path = commands_path(&run_dir, turn);
+            let tmp = path.with_extension("jsonl.tmp");
+            let mut text = String::new();
+            for command in &commands {
+                text.push_str(&serde_json::to_string(command)?);
+                text.push('\n');
+            }
+            self.files.write(&tmp, text.as_bytes())?;
+            self.files.rename(&tmp, &path)?;
+            Ok(())
+        });
+        if let Err(error) = written {
+            tracing::warn!("the commands of turn {turn} could not be written: {error:#}");
+        }
     }
 
     /// Record that turn `turn` started (its agent's `pid`, none when it
@@ -954,6 +990,14 @@ impl<'a> Turns<'a> {
         // The provider the turn ran on: the wrapper's copy of the run may
         // predate a switch (ADR-t813-2).
         let provider = self.provider_now()?;
+        // A reader that read commands (Codex's) writes them whatever the
+        // run is on now, and a Codex turn that could not start an empty
+        // file.
+        if (result.commands.is_some() || provider == Provider::Codex)
+            && matches!(self.owner, TurnOwner::Run(_))
+        {
+            self.write_commands(turn, result.commands.take().unwrap_or_default());
+        }
         let mut payload = json!({
             "turn": turn,
             "outcome": outcome,
@@ -1105,6 +1149,7 @@ impl<'a> Turns<'a> {
         let mut tail = Tail::default();
         let mut stop: Option<Stop> = None;
         loop {
+            reader.stamp(now_millis());
             let lines = tail.read(self.files, stdout, false);
             if !lines.is_empty() {
                 last_output = Instant::now();

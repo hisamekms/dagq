@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use serde_json::{Value, json};
 
 use super::transcript::{RecordRole, TranscriptRecord, millis_text};
+use super::turn::TurnCommand;
 
 pub const MODEL: &str = "model";
 pub const E2E: &str = "e2e";
@@ -635,7 +636,20 @@ pub struct Command {
     /// not in the transcript, and another command's output (a file shown,
     /// a search) may quote the marks.
     pub failed_tests: Vec<String>,
+    /// How its times were found when they are not a transcript's: a
+    /// headless turn's command ([`turn_commands`]). `None` for a
+    /// transcript's, and then not in its line.
+    pub time_source: Option<&'static str>,
 }
+
+/// The times of a headless turn's command were when the wrapper read its
+/// start and its end.
+pub const TIMES_READ: &str = "read";
+/// Its end was not read (the turn ended or was stopped before it, or the
+/// span closed while it ran): it ends with the turn.
+pub const TIMES_TURN_END: &str = "turn_end";
+/// Its start was not read, only its end: it starts there, 0 seconds long.
+pub const TIMES_COMPLETED_ONLY: &str = "completed_only";
 
 impl Command {
     fn priority(&self) -> u8 {
@@ -658,7 +672,7 @@ impl Command {
             }
             &command[..end]
         });
-        json!({
+        let mut line = json!({
             "opened_event_id": span["opened_event_id"],
             "kind": span["kind"],
             "attempt": span["attempt"],
@@ -674,7 +688,11 @@ impl Command {
             "status": self.status,
             "command": command,
             "failed_tests": self.failed_tests,
-        })
+        });
+        if let Some(source) = self.time_source {
+            line["time_source"] = json!(source);
+        }
+        line
     }
 }
 
@@ -772,6 +790,7 @@ pub fn commands(records: &[TranscriptRecord], from: i64, to: i64, cargo: bool) -
                 status,
                 command: tool_use.command.clone(),
                 failed_tests,
+                time_source: None,
             });
         }
     }
@@ -848,6 +867,118 @@ pub fn breakdown(
     super::transcript::count_analysis();
     let to = to.max(from);
     let commands = commands(records, from, to, cargo);
+    assemble(
+        commands,
+        model_intervals(records),
+        (from, to),
+        verification,
+        cargo,
+    )
+}
+
+/// A headless turn of a span (ADR-t813-2 decision 7): when it started and
+/// ended (unix milliseconds; a turn that still runs ends with the span,
+/// one begun before the span starts before it, `i64::MIN` when that is
+/// not known) and the commands the wrapper read of it.
+#[derive(Debug, Clone, Copy)]
+pub struct HeadlessTurn<'a> {
+    pub start: i64,
+    pub end: i64,
+    pub commands: &'a [TurnCommand],
+}
+
+/// The commands of the headless `turns` that start in the span
+/// `from`..`to` (unix milliseconds), in the order they started, as
+/// [`commands`] makes a transcript's. Each starts when the wrapper read
+/// its start and ends when it read its end, both kept within its turn
+/// ([`TIMES_READ`]); one whose end was not read ends with its turn,
+/// unfinished ([`TIMES_TURN_END`]); one whose start was not read starts
+/// at its end ([`TIMES_COMPLETED_ONLY`]); one of which neither was read
+/// is left out. A `command_execution` is labelled by [`classify`], any
+/// other item is a [`TOOL`]. None runs in the background.
+pub fn turn_commands(turns: &[HeadlessTurn<'_>], from: i64, to: i64, cargo: bool) -> Vec<Command> {
+    let mut commands = Vec::new();
+    for turn in turns {
+        let end_of_turn = turn.end.max(turn.start);
+        let within = |at: i64| at.clamp(turn.start, end_of_turn);
+        for item in turn.commands {
+            let (start, end, source) = match (item.started.map(within), item.ended.map(within)) {
+                (Some(start), Some(end)) => (start, Some(end.max(start)), TIMES_READ),
+                (Some(start), None) => (start, None, TIMES_TURN_END),
+                (None, Some(end)) => (end, Some(end), TIMES_COMPLETED_ONLY),
+                (None, None) => continue,
+            };
+            if start < from || start >= to {
+                continue;
+            }
+            let category = if item.tool == SHELL_ITEM {
+                classify(item.command.as_deref().unwrap_or_default(), cargo)
+            } else {
+                TOOL
+            };
+            let failed = end.map(|_| {
+                item.exit_code.is_some_and(|code| code != 0)
+                    || item.status.as_deref() == Some("failed")
+            });
+            commands.push(Command {
+                tool_use_id: item.id.clone(),
+                tool: item.tool.clone(),
+                category,
+                start,
+                end: end.unwrap_or(end_of_turn).clamp(start, to),
+                finished: end.is_some(),
+                background: false,
+                exit_code: item.exit_code,
+                failed,
+                status: None,
+                command: item.command.clone(),
+                failed_tests: if TEST_KINDS.contains(&category) {
+                    item.failed_tests.clone()
+                } else {
+                    Vec::new()
+                },
+                time_source: Some(source),
+            });
+        }
+    }
+    commands.sort_by_key(|command| command.start);
+    commands
+}
+
+/// The item type of a headless turn's shell command (Codex's).
+pub const SHELL_ITEM: &str = "command_execution";
+
+/// The breakdown of the span `from`..`to` (unix milliseconds) of a
+/// headless session from its `turns` (Codex's, which has no transcript),
+/// as [`breakdown`] makes a transcript's: the commands are
+/// [`turn_commands`], and the model's time is its turns' (a turn's time
+/// that no command takes is the model's; between turns it is idle).
+pub fn headless_breakdown(
+    turns: &[HeadlessTurn<'_>],
+    from: i64,
+    to: i64,
+    verification: &[String],
+    cargo: bool,
+) -> Breakdown {
+    let to = to.max(from);
+    assemble(
+        turn_commands(turns, from, to, cargo),
+        turns.iter().map(|turn| (turn.start, turn.end)).collect(),
+        (from, to),
+        verification,
+        cargo,
+    )
+}
+
+/// The breakdown of the span `from`..`to` of `commands` and the model's
+/// `model` intervals.
+fn assemble(
+    commands: Vec<Command>,
+    model: Vec<(i64, i64)>,
+    (from, to): (i64, i64),
+    verification: &[String],
+    cargo: bool,
+) -> Breakdown {
     let order = |category: &str| {
         CATEGORIES
             .iter()
@@ -858,11 +989,7 @@ pub fn breakdown(
     let mut intervals: Vec<(i64, i64, u8, &'static str)> = commands
         .iter()
         .map(|c| (c.start, c.end, c.priority(), c.category))
-        .chain(
-            model_intervals(records)
-                .into_iter()
-                .map(|(start, end)| (start, end, 4, MODEL)),
-        )
+        .chain(model.into_iter().map(|(start, end)| (start, end, 4, MODEL)))
         .map(|(start, end, priority, category)| (start.max(from), end.min(to), priority, category))
         .filter(|(start, end, ..)| start < end)
         .collect();
@@ -1497,10 +1624,12 @@ mod tests {
             status: None,
             command: Some("あ".repeat(200)),
             failed_tests: Vec::new(),
+            time_source: None,
         };
         let line = command.line(&json!({}));
         assert_eq!(line["secs"], 2);
         assert_eq!(line["command"].as_str().unwrap().chars().count(), 100);
+        assert_eq!(line.get("time_source"), None);
     }
 
     /// A failed foreground command's tests are kept on it, in its line and
@@ -1711,5 +1840,166 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn item(id: &str, command: Option<&str>, times: (Option<i64>, Option<i64>)) -> TurnCommand {
+        TurnCommand {
+            id: id.into(),
+            tool: if command.is_some() {
+                SHELL_ITEM.into()
+            } else {
+                "mcp_tool_call".into()
+            },
+            command: command.map(str::to_owned),
+            started: times.0.map(ms),
+            ended: times.1.map(ms),
+            exit_code: times.1.and(command).map(|_| 0),
+            status: None,
+            failed_tests: Vec::new(),
+        }
+    }
+
+    /// A headless turn's commands (task 1354) take the times the wrapper
+    /// read, kept within their turn: one whose end was not read ends with
+    /// the turn unfinished, one whose start was not read starts at its end,
+    /// one of which neither was read is left out, and one that starts
+    /// outside the span is not the span's. A shell command is classified as
+    /// a transcript's; another item is a tool; the failed tests are kept
+    /// for a test command only.
+    #[test]
+    fn a_headless_turns_commands_take_the_times_read_within_their_turn() {
+        let mut test = item("t", Some("cargo test"), (Some(12), Some(30)));
+        test.exit_code = Some(101);
+        test.failed_tests = vec!["a::b".into()];
+        let mut git = item("g", Some("git diff"), (Some(31), Some(32)));
+        git.failed_tests = vec!["quoted::name".into()];
+        let first = [
+            // Read before the turn started (the clock): from its start.
+            item("b", Some("cargo build"), (Some(5), Some(11))),
+            test,
+            git,
+            item("x", Some("sleep 1"), (None, None)),
+        ];
+        let second = [
+            item("o", Some("echo done"), (None, Some(55))),
+            item("m", None, (Some(56), Some(58))),
+            // Never ended: cut at the turn's end; read past the turn's end:
+            // at it.
+            item("r", Some("cargo build"), (Some(59), None)),
+        ];
+        let turns = [
+            HeadlessTurn {
+                start: ms(10),
+                end: ms(40),
+                commands: &first,
+            },
+            HeadlessTurn {
+                start: ms(50),
+                end: ms(60),
+                commands: &second,
+            },
+        ];
+        let commands = turn_commands(&turns, ms(0), ms(100), true);
+        let got: Vec<_> = commands
+            .iter()
+            .map(|c| {
+                (
+                    c.tool_use_id.as_str(),
+                    c.category,
+                    (c.start - BASE) / 1000,
+                    (c.end - BASE) / 1000,
+                    c.finished,
+                    c.time_source,
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("b", BUILD, 10, 11, true, Some(TIMES_READ)),
+                ("t", TEST, 12, 30, true, Some(TIMES_READ)),
+                ("g", GIT, 31, 32, true, Some(TIMES_READ)),
+                ("o", OTHER_COMMAND, 55, 55, true, Some(TIMES_COMPLETED_ONLY)),
+                ("m", TOOL, 56, 58, true, Some(TIMES_READ)),
+                ("r", BUILD, 59, 60, false, Some(TIMES_TURN_END)),
+            ]
+        );
+        assert_eq!(commands[1].failed, Some(true));
+        assert_eq!(commands[1].failed_tests, ["a::b"]);
+        assert!(commands[2].failed_tests.is_empty());
+        assert_eq!(commands[0].failed, Some(false));
+        assert_eq!(commands[5].failed, None);
+        assert!(commands.iter().all(|c| !c.background && c.status.is_none()));
+        // Without the cargo rules a test is another command.
+        assert_eq!(
+            turn_commands(&turns, ms(0), ms(100), false)[1].category,
+            OTHER_COMMAND
+        );
+        // A span from 50 has the second turn's only; one to 57 cuts it.
+        let later = turn_commands(&turns, ms(50), ms(57), true);
+        let ids: Vec<(&str, i64)> = later
+            .iter()
+            .map(|c| (c.tool_use_id.as_str(), (c.end - BASE) / 1000))
+            .collect();
+        assert_eq!(ids, [("o", 55), ("m", 57)]);
+        // A turn begun before the span (its start not known): only its
+        // commands that start in the span are the span's.
+        let begun = [HeadlessTurn {
+            start: i64::MIN,
+            ..turns[0]
+        }];
+        let kept: Vec<String> = turn_commands(&begun, ms(12), ms(100), true)
+            .into_iter()
+            .map(|c| c.tool_use_id)
+            .collect();
+        assert_eq!(kept, ["t", "g"]);
+        // Its line says how its times were found; a transcript's does not.
+        let line = commands[3].line(&json!({"kind": "worker"}));
+        assert_eq!(line["time_source"], TIMES_COMPLETED_ONLY);
+        assert_eq!(line["secs"], 0);
+    }
+
+    /// A headless span's breakdown: its commands' time by category, the
+    /// rest of its turns the model's, the time between and around them
+    /// idle; and the cargo-only counts as a transcript's.
+    #[test]
+    fn a_headless_breakdown_counts_its_turns_as_the_models_time() {
+        let first = [item(
+            "c",
+            Some("cargo llvm-cov --locked"),
+            (Some(15), Some(25)),
+        )];
+        let turns = [
+            HeadlessTurn {
+                start: ms(10),
+                end: ms(30),
+                commands: &first,
+            },
+            HeadlessTurn {
+                start: ms(50),
+                end: ms(60),
+                commands: &[],
+            },
+        ];
+        let verification = ["cargo llvm-cov --locked --fail-under-lines 80".to_owned()];
+        let breakdown = headless_breakdown(&turns, ms(0), ms(100), &verification, true);
+        let payload = breakdown.payload();
+        assert_eq!(payload["total_secs"], 100);
+        assert_eq!(
+            payload["secs"],
+            json!({"llvm_cov": 10, "model": 20, "idle": 70})
+        );
+        assert_eq!(payload["verification_repeats"], 1);
+        assert_eq!(payload["llvm_cov_runs"], 1);
+        assert_eq!(payload["heavy"][0]["category"], LLVM_COV);
+        // Cut and moved as a transcript's.
+        let mut cut = breakdown.clone();
+        assert!(cut.retarget(None, ms(20)));
+        assert_eq!(
+            cut.payload()["secs"],
+            json!({"llvm_cov": 5, "model": 5, "idle": 10})
+        );
+        let plain = headless_breakdown(&turns, ms(0), ms(100), &verification, false);
+        assert_eq!(plain.payload().get("verification_repeats"), None);
     }
 }

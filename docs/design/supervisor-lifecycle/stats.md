@@ -4,8 +4,8 @@ type: design
 title: "`stats`"
 status: current
 created: 2026-09-26
-updated: 2026-10-04 # task 1591: idle_slots counts the landing queue in the slots
-last_verified: 2026-10-04 # task 1591
+updated: 2026-10-04 # task 1354: Codex's headless spans carry their work breakdown
+last_verified: 2026-10-04 # task 1354
 scope: runtime
 related:
   - adr-t655-1
@@ -207,10 +207,10 @@ runtimeが記録したClaude sessionの区間（`session_opened` / `session_clos
 
 ## 作業の内訳
 
-task 514で足した集計。runのsessionの区間（`worker` / `resume` / `revise`）が閉じるとき、runtimeがtranscriptから区間の時間を分類して`session_closed`の`work`に記録する（書き方は[provider-lifecycle](../provider-lifecycle.md#作業の内訳)）。集計は`domain::stats::work`がその`work`から再導出し、transcriptもrun directoryの`worktime.jsonl`も読まない。既存の項目は変えず、足すだけにする。
+task 514で足した集計。runのsessionの区間（`worker` / `resume` / `revise`）が閉じるとき、runtimeがtranscriptから区間の時間を分類して`session_closed`の`work`に記録する（書き方は[provider-lifecycle](../provider-lifecycle.md#作業の内訳)）。Codexの非対話の区間はtranscriptの代わりにwrapperが書いたturnのコマンドのfileから同じ形の`work`を記録するので、同じように集計に入る（task 1354。コマンドの時刻はwrapperが出力を読んだ時刻で、約1秒の精度。作れなかった区間は`work: null`と`work_unavailable`で、内訳の無い区間として数えない。task 1354より前に閉じたCodexの区間は内訳を持たないので、それを含む期間の`work_breakdown`はCodexの分が欠けた下限）。集計は`domain::stats::work`がその`work`から再導出し、transcriptもrun directoryの`worktime.jsonl`も読まない。既存の項目は変えず、足すだけにする。
 
-- **分類**（`secs`のkey）: `model`（Claudeの思考・生成）、`chain`（重いコマンドを2種類以上つないだもの）、`e2e`、`llvm_cov`、`test`、`build`（build / clippy / check / run）、`fmt`、`wait`（sleepなどの待ちと、ScheduleWakeup / Monitor / TaskOutput / BashOutputのtool）、`dagq`、`git`、`other_command`、`tool`（ファイルを読む・書く・探すtool）、`subagent`、`idle`。秒の無い分類は出さない
-- **`runs`の`work_breakdown`**: `{sessions, total_secs, secs: {<分類>: 秒}, commands: {<分類>: {runs, failed}}, verification_repeats, test_with_llvm_cov}`。区間の`work`を足したもの。`commands`は重いコマンド（`chain` / `e2e` / `llvm_cov` / `test` / `build`）の起動回数と失敗回数（foregroundは`is_error`か`Exit code`が0でない、backgroundは通知の`status: failed`か`exit code`が0でない）
+- **分類**（`secs`のkey）: `model`（Claudeの思考・生成。Codexの区間はturnの中でコマンドの無い時間）、`chain`（重いコマンドを2種類以上つないだもの）、`e2e`、`llvm_cov`、`test`、`build`（build / clippy / check / run）、`fmt`、`wait`（sleepなどの待ちと、ScheduleWakeup / Monitor / TaskOutput / BashOutputのtool）、`dagq`、`git`、`other_command`、`tool`（ファイルを読む・書く・探すtool。Codexの区間は`mcp_tool_call`）、`subagent`、`idle`。秒の無い分類は出さない
+- **`runs`の`work_breakdown`**: `{sessions, total_secs, secs: {<分類>: 秒}, commands: {<分類>: {runs, failed}}, verification_repeats, test_with_llvm_cov}`。区間の`work`を足したもの。`commands`は重いコマンド（`chain` / `e2e` / `llvm_cov` / `test` / `build`）の起動回数と失敗回数（foregroundは`is_error`か`Exit code`が0でない、backgroundは通知の`status: failed`か`exit code`が0でない、Codexの区間は`exit_code`が0でないか`status: failed`）
 - **検証の重複**: `verification_repeats`は、workerがtaskの`verification_commands`のうち`integrate`がもう一度流す検証（llvm-cov、全体の`cargo test`、e2e。fmt・clippyは数えない）と同じ種類のものを流したコマンドの数。一致はコマンドの文字列ではなく種類で見る（`cargo llvm-cov`を含むもの、targetを選ぶ・絞るflagや引数の無い`cargo test` / `cargo nextest run`（targetを選ぶflagが`--test it`（`--test=it`）だけで`--`の前にfilterの語が無いものも、integration testのほぼ全部を流すので全体として数える。`--test it runtime_claim::`のようにfilterが付くもの、`--test e2e`・`--test plugin`・`--lib`など他のtargetを選ぶもの、`--test it`と他のtargetを並べたものは絞った実行。`--`の後の引数は見ない。task 558）、`--test e2e`）。`test_with_llvm_cov`は、llvm-covも流したrunでの全体の`cargo test`の回数（同じtestを2回流した回数。llvm-covを流していないrunは0）
 - <a id="cargo専用の計測"></a>**cargo専用の計測**（[ADR-t614-1](../../adr/2026-09-27-t614-1-dagq-source-only-features-by-one-check.md)の(d)、[Source repository](source-repository.md)）: `runs`の`work_breakdown`の`verification_repeats`・`test_with_llvm_cov`、下の群の`work_breakdown`の`verification_repeats`・`runs_with_repeats`・`test_with_llvm_cov`、`runs`の`rustc_release`・`rustc_host`、`versions`の`rustc`は、dagqの検証の形（llvm-covの関門・全体の`cargo test`・`--test e2e`）とhostの`rustc`を前提にした値で、他のprojectでは0やnullが事実として読まれてしまう。`stats`はqueueが束縛されたrepositoryのmain checkoutがdagqのソースのときだけこれらを出し、ソースでない・束縛の無いqueueでは欄ごと出さない（0やnullにしない）。判定は`stats`を出すたびに行う（`compose`の`stats_of`が`StatsSources::dagq_source`を渡し、`application::stats`が最後に`domain::stats::without_cargo_measures`を当てる）。値は`domain::stats::cargo::CargoOnly`で持ち、隠したものはserializeしない。observerの入力の`stats`も同じ`stats_of`を通るので同じ。分類の`e2e`・`llvm_cov`・`test`（`secs`と`commands`）は、記録の側（[作業の内訳](../provider-lifecycle.md#作業の内訳)）がソースでないrepositoryで付けないので、出力では隠さない。domainの`stats::stats`を直接使うもの（KPIの窓、plan reviewの衝突の多いファイル、forecast）は隠さない
 - **`goals`と`overall`の`work_breakdown`**（`changes`・`versions`・`load_bands`も同じ形）: `{runs, total_secs, categories: {<分類>: {total, median, share}}, commands, verification_repeats, runs_with_repeats, test_with_llvm_cov}`。`runs`は内訳のあるrunの数で、内訳の無いrunは数えない。`median`はそれらのrunの秒の中央値（その分類の無いrunは0として数える）、`share`は`total`を`total_secs`で割った値（小数3桁）。`runs_with_repeats`は`verification_repeats`が1以上のrunの数
