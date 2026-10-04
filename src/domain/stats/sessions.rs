@@ -132,6 +132,9 @@ pub fn spans(events: &[RunEvent]) -> Vec<Span> {
                 else {
                     continue;
                 };
+                if event.payload["final"] == true && span.closed.is_some() {
+                    measurements(span, &event.payload);
+                }
                 let turns = event.payload["turns"].as_array().into_iter().flatten();
                 span.turns.extend(turns.filter_map(|turn| {
                     let time = |at: usize| turn.get(at)?.as_str().and_then(rfc3339_millis);
@@ -155,23 +158,24 @@ pub fn spans(events: &[RunEvent]) -> Vec<Span> {
                 span.closed = Some(event.id);
                 span.end = timestamp_millis(&event.created_at).map(|end| end.max(span.start));
                 span.inferred = event.payload["reason"] == INFERRED;
-                span.active = event.payload["active_secs"].as_i64();
-                span.active_unavailable = event.payload["active"] == "unavailable";
-                span.work = event.payload.get("work").filter(|w| w.is_object()).cloned();
-                span.tokens = event
-                    .payload
-                    .get("tokens")
-                    .filter(|t| t.is_object())
-                    .cloned();
-                span.model = event.payload["model"].as_str().map(|model| {
-                    let effort = event.payload["effort"].as_str().unwrap_or("unknown");
-                    format!("{model} {effort}")
-                });
+                measurements(span, &event.payload);
             }
             _ => {}
         }
     }
     spans
+}
+
+/// Deferred hook intake carries the same measurements as a synchronous close.
+fn measurements(span: &mut Span, payload: &Value) {
+    span.active = payload["active_secs"].as_i64();
+    span.active_unavailable = payload["active"] == "unavailable";
+    span.work = payload.get("work").filter(|w| w.is_object()).cloned();
+    span.tokens = payload.get("tokens").filter(|t| t.is_object()).cloned();
+    span.model = payload["model"].as_str().map(|model| {
+        let effort = payload["effort"].as_str().unwrap_or("unknown");
+        format!("{model} {effort}")
+    });
 }
 
 /// Count, sum, median, 90th percentile and maximum of seconds.
@@ -521,6 +525,63 @@ mod tests {
             json!({"opened_event_id": opened, "reason": reason}),
             secs,
         )
+    }
+
+    /// A hook span's measurements are its final `session_turns`', in place
+    /// of its pending close's (ADR-t655-1 decision 4); a final one before
+    /// its close is not read.
+    #[test]
+    fn a_hook_spans_final_turns_carry_its_measurements() {
+        let pending = |id, opened, secs| {
+            event(
+                id,
+                None,
+                SESSION_CLOSED,
+                json!({"opened_event_id": opened, "reason": "exited",
+                    "active": "unavailable", "active_unavailable": "hook_intake_pending"}),
+                secs,
+            )
+        };
+        let turns = |id, opened, payload: Value, secs| {
+            let mut payload = payload;
+            payload["opened_event_id"] = json!(opened);
+            event(id, None, SESSION_TURNS, payload, secs)
+        };
+        let finished = json!({"final": true, "turns": [], "active": "recorded",
+            "active_secs": 40, "tokens": {"input": 10}, "model": "claude-sonnet-4-6",
+            "effort": "high"});
+        let events = vec![
+            opened(1, None, "inbox", 0),
+            turns(
+                2,
+                1,
+                json!({"turns": [["1970-01-01T00:00:10.000Z", "1970-01-01T00:00:50.000Z"]]}),
+                50,
+            ),
+            pending(3, 1, 100),
+            turns(4, 1, finished.clone(), 600),
+            // Not yet taken in: counted as unavailable.
+            opened(5, None, "planner", 0),
+            pending(6, 5, 100),
+            // A final one before its close is not read.
+            opened(7, None, "inbox", 0),
+            turns(8, 7, finished, 50),
+            pending(9, 7, 100),
+        ];
+        let spans = spans(&events);
+        let taken = &spans[0];
+        assert_eq!(taken.end, Some(100_000));
+        assert_eq!(taken.active, Some(40));
+        assert!(!taken.active_unavailable);
+        assert_eq!(taken.tokens, Some(json!({"input": 10})));
+        assert_eq!(taken.model.as_deref(), Some("claude-sonnet-4-6 high"));
+        assert_eq!(taken.turns.len(), 1);
+        for span in &spans[1..] {
+            assert_eq!(span.active, None);
+            assert!(span.active_unavailable);
+            assert_eq!(span.tokens, None);
+            assert_eq!(span.model, None);
+        }
     }
 
     fn fixture() -> Vec<RunEvent> {

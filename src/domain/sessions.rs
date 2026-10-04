@@ -616,7 +616,10 @@ pub fn end_reason(reason: &str) -> &'static str {
 /// open goes on with it (`resume`, `compact`, a `clear` that kept the
 /// session id); one of a new session id closes the spans open in the same
 /// workspace as `next_span` (a `/clear` gave the session a new id) and
-/// opens its own. An end closes the session's span; one already closed
+/// opens its own. Without a workspace, it closes the spans of its kind
+/// open without one as `inferred` (ADR-t655-1 decision 3): their
+/// `SessionEnd` was missed, and two such sessions of a kind at once cannot
+/// be told apart. An end closes the session's span; one already closed
 /// changes nothing. `context` is added to the opened payload (a runtime
 /// planner's proposal and goals).
 pub fn hook_changes(hook: &SessionHook, open: &[OpenSpan], context: &Value) -> Vec<SpanChange> {
@@ -638,12 +641,23 @@ pub fn hook_changes(hook: &SessionHook, open: &[OpenSpan], context: &Value) -> V
                 .iter()
                 .filter(|span| {
                     HOOK_KINDS.contains(&span.kind())
-                        && hook.workspace_id.is_some()
-                        && span.payload["workspace_id"].as_str() == hook.workspace_id.as_deref()
+                        && match hook.workspace_id.as_deref() {
+                            Some(workspace) => {
+                                span.payload["workspace_id"].as_str() == Some(workspace)
+                            }
+                            None => {
+                                span.payload["workspace_id"].as_str().is_none()
+                                    && span.kind() == hook.kind
+                            }
+                        }
                 })
                 .map(|span| SpanChange::Close {
                     span: span.clone(),
-                    reason: NEXT_SPAN,
+                    reason: if hook.workspace_id.is_some() {
+                        NEXT_SPAN
+                    } else {
+                        INFERRED
+                    },
                 })
                 .collect();
             let mut payload = json!({
@@ -1271,9 +1285,27 @@ mod tests {
         assert_eq!(replaced.len(), 2);
         assert_eq!(closed(&replaced[0]), (1, NEXT_SPAN));
         assert_eq!(opened(&replaced[1])["session_id"], "s-2");
-        // No workspace: closes nothing.
+        // No workspace, and no span of its kind open without one: closes
+        // nothing.
         let alone = hook_changes(&start("s-3", None), &open, &Value::Null);
         assert_eq!(alone.len(), 1);
+        // No workspace: a span of its kind open without one missed its
+        // `SessionEnd` and closes as inferred (ADR-t655-1 decision 3); its
+        // own session's span, another kind's and one with a workspace
+        // do not.
+        let unscoped = [
+            span(1, payload.clone()),
+            span(4, json!({"kind": INBOX, "session_id": "s-5"})),
+            span(5, json!({"kind": PLANNER, "session_id": "s-6"})),
+            span(6, json!({"kind": INBOX, "session_id": "s-7"})),
+        ];
+        let next = hook_changes(&start("s-7", None), &unscoped, &Value::Null);
+        assert!(next.is_empty(), "its own session goes on: {next:?}");
+        let next = hook_changes(&start("s-8", None), &unscoped, &Value::Null);
+        assert_eq!(next.len(), 3);
+        assert_eq!(closed(&next[0]), (4, INFERRED));
+        assert_eq!(closed(&next[1]), (6, INFERRED));
+        assert_eq!(opened(&next[2])["session_id"], "s-8");
         let end = |session| {
             hook(
                 HookEvent::End {

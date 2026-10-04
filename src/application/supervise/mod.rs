@@ -2301,9 +2301,10 @@ impl Supervisor<'_> {
             warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: the span of its failed review could not be closed: {error:#}", run.id());
         }
     }
-    /// Record the finished transcript turns of the open session spans when
-    /// [`SESSION_TURNS_INTERVAL`] passed since the last time (at once with
-    /// `now`). A failure is logged only: it changes no run (ADR-0048
+    /// Record the finished transcript turns of the open session spans, and
+    /// the remaining turns and measurements of the hook spans closed
+    /// without them (ADR-t655-1), when [`SESSION_TURNS_INTERVAL`] passed
+    /// since the last time (at once with `now`). A failure is logged only: it changes no run (ADR-0048
     /// decision 10), and the next time reads the transcripts again.
     fn record_session_turns(&mut self, now: bool) {
         if !now
@@ -2317,7 +2318,7 @@ impl Supervisor<'_> {
         self.close_gone_sessions();
         match self.queue.record_session_turns() {
             Ok(0) => {}
-            Ok(spans) => info!("recorded the transcript turns of {spans} open session span(s)"),
+            Ok(spans) => info!("recorded the transcript turns of {spans} session span(s)"),
             Err(error) => {
                 warn!(error = %format_args!("{error:#}"), "transcript turns could not be recorded: {error:#}")
             }

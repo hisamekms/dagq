@@ -4,10 +4,11 @@ type: design
 title: "`stats`"
 status: current
 created: 2026-09-26
-updated: 2026-10-04 # task 1484: claim_deferrals ends as owner_waiting
-last_verified: 2026-10-04 # task 1484
+updated: 2026-10-04 # task 655: a hook span's measurements come from its final session_turns
+last_verified: 2026-10-04 # task 655
 scope: runtime
 related:
+  - adr-t655-1
   - adr-t639-1
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-claim-hold
@@ -197,7 +198,7 @@ goal 21（task 197）で足した集計。runごとの値は上の`runs`の`dagq
 runtimeが記録したClaude sessionの区間（`session_opened` / `session_closed`。書き方は[provider-lifecycle](../provider-lifecycle.md#claude-sessionの区間)）を、kindごとに数える（[ADR-0048](../../adr/0048-record-claude-sessions-by-kind-with-open-and-active-time.md)の決定3・11・12）。集計は`domain::stats::sessions`がrun_eventsから再導出し、transcriptは読まない。既存の項目は変えず、足すだけにする。
 
 - **区間**: `session_opened`と、その`opened_event_id`を持つ最初の`session_closed`の対。開いている時間はその`created_at`の差（ミリ秒を秒に切り捨て）。閉じていない区間は、runの行では`stats`を読んだ時刻まで、`sessions`ではwindowの終わりまでの長さにする。どの`session_opened`も指さない`session_closed`と、2回目の`session_closed`は数えない。
-- **稼働時間**（`active`）: 区間のtranscriptのturn（`session_turns`。書き方は[provider-lifecycle](../provider-lifecycle.md#transcriptと稼働時間)）の長さの合計。閉じた区間は`session_closed`が`active: "recorded"`（`active_secs`）のものだけ、閉じていない区間はそれまでに記録したturnがあるものだけを数える。runの行は閉じた区間の`active_secs`（閉じていなければ記録済みのturnの合計）で、どれも無ければnull。`active: "unavailable"`で閉じた区間は`active_unavailable`に数える。`active_ratio`は稼働時間の合計を、稼働時間を数えた区間の開いている時間の合計で割った値（小数3桁、そのような区間が無ければnull）。
+- **稼働時間**（`active`）: 区間のtranscriptのturn（`session_turns`。書き方は[provider-lifecycle](../provider-lifecycle.md#transcriptと稼働時間)）の長さの合計。閉じた区間は`session_closed`が`active: "recorded"`（`active_secs`）のものだけ、閉じていない区間はそれまでに記録したturnがあるものだけを数える。hookで閉じたinbox・plannerの区間は、`session_closed`が`active: "unavailable"`・`active_unavailable: "hook_intake_pending"`で、計測（`active`・`active_secs`・`tokens`・`model` / `effort`）はsupervisorの取り込みが閉じた後に書く最終の`session_turns`（`final: true`）から読み、`session_closed`のものと同じ欄に置く（[ADR-t655-1](../../adr/2026-10-04-t655-1-hook-close-defers-transcript-intake-to-the-supervisor.md)。閉じる前の`final`は読まない）。runの行は閉じた区間の`active_secs`（閉じていなければ記録済みのturnの合計）で、どれも無ければnull。`active: "unavailable"`で閉じた区間は`active_unavailable`に数える。取り込み前のhookの区間（最大で取り込みの間隔の10分、supervisorが居なければその間ずっと）もここに数える。`active_ratio`は稼働時間の合計を、稼働時間を数えた区間の開いている時間の合計で割った値（小数3桁、そのような区間が無ければnull）。
 - **`sessions`**: kindは`worker` / `resume` / `revise` / `review` / `triage` / `observer` / `plan_review` / `goal_review`（task 1062） / `throughput_review`（スループットの見直しのjob。task 1086、[スループットの見直し](throughput-review.md#sessionの区間task-1086)） / `runtime_planner` / `inbox` / `planner`の12個で、記録が0でも必ず出す。`window`の`after` / `upto`は`backend_failures`と同じwindowのevent id。`upto`以前に開き、`after`より後に閉じたか閉じていない区間を数え、長さはwindowで切る: 始まりは`after`のeventの時刻（0なら切らない）、終わりは`--until`があれば`upto`のeventの時刻、無ければ今の時刻（`upto`はpageの`next_cursor`ではなく窓の終わり。task 1379）。`open`と`active`は`{count, total, median, p90, max}`（`median`と`p90`は他と同じ規則）。`active`は区間ごとに、turnとwindowの重なりの秒を数える。`open_now`はwindowの終わりまでに閉じていない区間、`inferred`はwindowの中で`reason: inferred`で閉じた区間の数。`--goal`があれば、runの区間はそのgoalのtaskのものだけ、`plan_review`と`runtime_planner`は`goal_ids`にそのgoalを含むものだけにし、`observer` / `throughput_review` / `inbox` / `planner`などrunもproposalも持たない区間は0にする。`inbox` / `planner` / `runtime_planner`はrunを持たないので、`runs`・`goals`・`overall`の`sessions`には出ず、この期間集計にだけ出る（pluginのhookが記録する。[provider-lifecycle](../provider-lifecycle.md#claude-sessionの区間)、task 387。非対話の`runtime_planner`はhookが走らないのでturnから記録する。task 1398）。
 - **`sessions.by_route`**: `{<kind>: {<route>: <by_kindと同じ形>}}`（[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)の決定4、task 1398）。`by_kind`と同じwindow・`--goal`・数え方で、区間を経路ごとにも数える。経路は`session_opened`の`route`（runのsessionの区間はrunの`worker_mode`、非対話の`runtime_planner`は`headless`）で、`route`の無い区間はhookが記録するkind（`inbox` / `planner` / `runtime_planner`）なら`interactive`、ほかのkind（jobや`route`を記録する前のrunの区間）は経路に数えない。区間の無いkindと経路は出さない。対話と非対話のruntimeのplannerの`open` / `active` / `active_ratio` / `tokens` / `models`を並べて比べるための読み口。
 - **`runs`の`sessions`**: `{<kind>: {count, open, active}}`で、`open` / `active`はそのrunの区間の秒の合計（`active`は記録が無ければnull）。windowで切らない。区間の無いkindは出さない（区間の無い過去のrunは`{}`）。

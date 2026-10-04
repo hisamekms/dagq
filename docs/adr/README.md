@@ -145,6 +145,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-t774-1](2026-10-04-t774-1-confirm-conflicts-config-on-consecutive-passes.md) | conflictsの変更は2 pass続けて同じ値を読んでから適用する（ADR-0080決定11〜13をamends） | 2026-10-04 |
 | [ADR-t775-1](2026-10-04-t775-1-record-conflicts-at-start-against-the-latest-change.md) | 起動時のconflictsの値が最新の変更の記録の新しい値と違えば、起動の値として1回記録する。起動時の読みのエラーは最初の読み直しで再びwarnしない（ADR-0080決定12・13をamends） | 2026-10-04 |
 | [ADR-t1484-1](2026-10-04-t1484-1-runs-waiting-only-for-a-person-stop-holding-claims-past-a-grace.md) | 人のaskだけを待つ進行中のrun（ADR-0071の待ちか、leaseを持たないもの）は、待ちが`[conflicts] waiting_owner_grace_secs`（既定600秒）を過ぎたらhotspotの控えで進行中のrunに数えず、邪魔なrunが全てそれなら控えを`owner_waiting`で終えてclaimする（ADR-0080決定2・6をamends） | 2026-10-04 |
+| [ADR-t655-1](2026-10-04-t655-1-hook-close-defers-transcript-intake-to-the-supervisor.md) | hookで閉じるinbox・plannerの区間はtranscriptを読まずに先に閉じ、残りのturnと計測はsupervisorの取り込みが閉じた後に区間ごとに1回だけ記録する。workspaceの無いhookの区間は、同じkindでworkspaceの無い次の別sessionの開始で推定で閉じる（ADR-0048決定2・7・8・9をamends） | 2026-10-04 |
 
 goal 82（goal 38の段(1)〜(3)）のADRはtask 1233が書いた5本で、決定の置き場所は次のとおり。制御側と実行側の分け方・queue service・ユースケース単位のAPIとservice側の認可・unix socket・broker・クライアントモード・段の順と置き場所はADR-t1233-1、serviceの起動・停止の責任・落ちたときの知らせ方・brokerより前のprincipalの認証（token）はADR-t1233-4、読み取りのユースケースとroleごとの読める範囲・workerの読める範囲・Codexのsandboxからの到達はADR-t1233-5、e2eをreviewのpassの後のhostの工程に移すことはADR-t1233-2、このrepositoryを先にLinuxで通すことはADR-t1233-3にある。
 

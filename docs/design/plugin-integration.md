@@ -4,10 +4,11 @@ type: design
 title: Claude Code and Codex plugin integration
 status: current
 created: 2026-09-21
-updated: 2026-10-04 # task 1462: the plugin test checks the skills carry no repository-specific marks (after task 1400)
-last_verified: 2026-10-04 # task 1462
+updated: 2026-10-04 # task 655: the hook's close reads no transcript (after task 1462)
+last_verified: 2026-10-04 # task 655
 scope: distribution
 related:
+  - adr-t655-1
   - adr-0005
   - adr-0006
   - adr-0010
@@ -175,6 +176,7 @@ runtimeがheadlessで起動しないinbox・planner（runtimeが立てるもの�
 - `session-event.sh`は`DAGQ_ROLE`が`inbox` / `planner`で`DAGQ_QUEUE`があるときだけ、hookのstdin（`session_id`・`transcript_path`・`cwd`・`source` / `reason`）をそのまま`bin/dagq session-event open|close`（隠しコマンド）に渡す。`DAGQ_DB`が無ければ`DAGQ_QUEUE`を`DAGQ_DB`にする。それ以外のsession（workerを含む。workerの区間はruntimeが書く）では何もしない。
 - 区間のkindはworkspaceの`--env`の`DAGQ_SESSION_KIND`（`up`がinboxに`inbox`、supervisorが立てるplannerに`runtime_planner`を置く。廃止前の`dagq plan`は`planner`を置いた）で、無い古いworkspaceは`DAGQ_ROLE`（plannerは`DAGQ_PLANNER_ORIGIN=runtime`なら`runtime_planner`）から決める。workspaceは`CMUX_WORKSPACE_ID`、plannerは`DAGQ_PLANNER_ID`から取る。
 - `/clear`とcompactionで二重に数えない: 同じsession_idの`SessionStart`（`resume`・`compact`）は開いている区間を続け、別のsession_idの`SessionStart`は同じworkspaceの開いている区間を`next_span`で閉じてから開き、閉じた区間への2回目の`SessionEnd`は何も書かない。
+- closeはtranscriptを読まない（task 655）: `SessionEnd` と次の `SessionStart` によるcloseは先に `session_closed` をcommitし、残りの稼働時間・tokens・modelの取り込みはsupervisorの10分ごととobserver前に任せる。最終 `session_turns` の印で一度だけ取り込み、読めなくても区間は閉じたまま。`CMUX_WORKSPACE_ID` が無い場合は、workspace IDの無い同kindの次の別sessionの開始で前を `inferred` に閉じる（時間の閾値は使わない。次の開始1回が契機）。同じIDのresume・compactや別kind、workspace IDのある区間には影響しない。詳細と同時sessionの制約は[provider-lifecycle](provider-lifecycle.md#claude-sessionの区間)。
 - 失敗してもsessionを止めない: 何も出力せず（`SessionStart`のstdoutはcontextに入るので）、`dagq`が無い・実行できない、queueが開けない、入力にsession_idが無い、記録に失敗した、のどれでもexit 0する。記録のCLIは区間のeventだけを書き、run・proposal・plannerの状態を変えない。
 
 ### launcher

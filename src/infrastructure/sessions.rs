@@ -3,8 +3,9 @@
 //! `session_closed` events [`crate::domain::sessions::changes`] decides are
 //! written in the same transaction, at the same time as that event. A span
 //! that closes takes its transcript's turns with it (its active time,
-//! decision 8), and the supervisor records the finished turns of the spans
-//! still open ([`record_open_turns`]). No transcript is read under a write
+//! decision 8), except a hook's close: the supervisor finishes its intake
+//! after it closes, alongside the finished turns of spans still open
+//! ([`record_open_turns`]). No transcript is read under a write
 //! lock (task 543): a write that may close spans reads theirs first
 //! ([`read_before`]), and the close takes what was read. The close's
 //! analysis of it (its turns, tokens, models and work breakdown) is made
@@ -978,11 +979,10 @@ fn close_with(
             }
         }
     }
-    let mut closed_at = now.to_owned();
-    let mut closed = RunSessionClosed::default();
-    let mut worktime = None;
     if span.headless() {
-        worktime = close_headless(
+        let closed_at = now.to_owned();
+        let mut closed = RunSessionClosed::default();
+        let worktime = close_headless(
             conn,
             now,
             (task_id, run_id),
@@ -1002,6 +1002,39 @@ fn close_with(
         write_worktime(conn, worktime);
         return Ok(Some(closed).filter(|closed| closed.work.is_some() || closed.tokens.is_some()));
     }
+    let (closed_at, closed, worktime) =
+        fill_transcript(conn, now, (task_id, run_id), span, reason, &mut payload)?;
+    insert_at(
+        conn,
+        task_id,
+        run_id,
+        EventKind::SessionClosed,
+        &payload,
+        &closed_at,
+    )?;
+    write_worktime(conn, worktime);
+    Ok(run_id
+        .filter(|_| RUN_SESSION.contains(&span.kind()))
+        .filter(|_| closed.work.is_some() || closed.tokens.is_some())
+        .map(|_| closed))
+}
+
+/// Fill a close's `payload` (or its deferred hook intake's, task 655) with
+/// what the transcript of `span` measures to `now`, recording its turns
+/// not recorded yet. Returns when the close ends, what a run session's
+/// close carries, and its work's `worktime.jsonl` lines. Under a write
+/// lock it reads nothing: it takes what [`read_before`] read.
+fn fill_transcript(
+    conn: &Connection,
+    now: &str,
+    (task_id, run_id): (Option<TaskId>, Option<&RunId>),
+    span: &OpenSpan,
+    reason: &str,
+    payload: &mut Value,
+) -> Result<(String, RunSessionClosed, Option<WorktimeLines>)> {
+    let mut closed_at = now.to_owned();
+    let mut closed = RunSessionClosed::default();
+    let mut worktime = None;
     match (transcript_for_close(conn, span), times(conn, span, now)?) {
         (Ok(mut read), Some((start, now_ms))) => {
             let mut end = now_ms;
@@ -1030,15 +1063,7 @@ fn close_with(
             let Some(analysis) = read.analysis(conn, want) else {
                 payload["active"] = json!("unavailable");
                 payload["active_unavailable"] = json!(TRANSCRIPT_NOT_READ_BEFORE);
-                insert_at(
-                    conn,
-                    task_id,
-                    run_id,
-                    EventKind::SessionClosed,
-                    &payload,
-                    &closed_at,
-                )?;
-                return Ok(None);
+                return Ok((closed_at, closed, None));
             };
             if Some(end) != rfc3339_millis(now) {
                 closed_at = millis_text(end);
@@ -1082,7 +1107,7 @@ fn close_with(
             }
             // The model and effort its messages used (task 579), none when
             // no message names a model.
-            tokens::models_payload(&analysis.models, &mut payload);
+            tokens::models_payload(&analysis.models, payload);
             if let (Some(inputs), Some(breakdown)) = (analysis.want.work, analysis.work) {
                 let (work, lines) = work_breakdown(span, inputs, breakdown);
                 closed.work = Some(exited_work(&work, span.kind(), &span.payload["attempt"]));
@@ -1100,19 +1125,7 @@ fn close_with(
             payload["active_unavailable"] = json!("span_time_unparsable");
         }
     }
-    insert_at(
-        conn,
-        task_id,
-        run_id,
-        EventKind::SessionClosed,
-        &payload,
-        &closed_at,
-    )?;
-    write_worktime(conn, worktime);
-    Ok(run_id
-        .filter(|_| RUN_SESSION.contains(&span.kind()))
-        .filter(|_| closed.work.is_some() || closed.tokens.is_some())
-        .map(|_| closed))
+    Ok((closed_at, closed, worktime))
 }
 
 /// Fill the `session_closed` of a headless worker's `span` at `now`
@@ -1508,16 +1521,130 @@ fn turns_payload(span: &OpenSpan, turns: &[Turn]) -> Value {
     })
 }
 
+/// Why a closed hook span's transcript is read after its close (task
+/// 655): its end is the close's, never moved to the transcript's last
+/// record.
+const DEFERRED: &str = "deferred";
+
+/// The `active_unavailable` of a hook's `session_closed` whose transcript
+/// the supervisor has not taken in yet (task 655).
+const HOOK_INTAKE_PENDING: &str = "hook_intake_pending";
+
+/// The query of the closed hook spans whose transcript the supervisor has
+/// not taken in yet, with when each closed (task 655). Its `NOT EXISTS`
+/// finds their final `session_turns` by `events_by_opened_event`.
+fn pending_hook_intakes_sql() -> String {
+    let kinds = HOOK_KINDS.map(|kind| format!("'{kind}'")).join(",");
+    format!(
+        "SELECT o.id, o.payload, o.created_at, c.created_at AS closed_at
+             FROM run_events c JOIN run_events o
+               ON o.id=json_extract(c.payload,'$.opened_event_id')
+             WHERE c.kind='{SESSION_CLOSED}' AND c.run_id IS NULL
+               AND json_extract(c.payload,'$.active_unavailable')='{HOOK_INTAKE_PENDING}'
+               AND o.kind='{SESSION_OPENED}'
+               AND json_extract(o.payload,'$.kind') IN ({kinds})
+               AND NOT EXISTS (SELECT 1 FROM run_events t WHERE t.kind='{SESSION_TURNS}'
+                 AND json_extract(t.payload,'$.opened_event_id')=+o.id
+                 AND json_extract(t.payload,'$.final')=1)
+             ORDER BY o.id"
+    )
+}
+
+/// The query of whether the closed hook span opened by `?1` has its final
+/// `session_turns`, by `events_by_opened_event`.
+fn hook_intake_finished_sql() -> String {
+    format!(
+        "SELECT EXISTS (SELECT 1 FROM run_events WHERE kind='{SESSION_TURNS}'
+           AND json_extract(payload,'$.opened_event_id')=?1
+           AND json_extract(payload,'$.final')=1)"
+    )
+}
+
+/// Finish closed hook spans once, including their last (not necessarily
+/// followed by another input) turn. An append-only final session_turns event
+/// carries the measurements; even an unreadable transcript gets a final marker.
+fn record_closed_hook_turns(conn: &Connection) -> Result<usize> {
+    let pending = |conn: &Connection| -> Result<Vec<(OpenSpan, String)>> {
+        Ok(conn
+            .prepare(&pending_hook_intakes_sql())?
+            .query_map([], |r| {
+                Ok((
+                    OpenSpan {
+                        opened_event_id: r.get("id")?,
+                        payload: json_col(r, "payload")?,
+                        opened_ms: rfc3339_millis(&r.get::<_, String>("created_at")?),
+                    },
+                    r.get("closed_at")?,
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?)
+    };
+    let mut recorded = 0;
+    for (span, end) in pending(conn)? {
+        // One span that cannot be finalized does not hold back the others
+        // nor the open spans' turns: it is tried again next time.
+        match finalize_hook_intake(conn, &span, &end) {
+            Ok(true) => recorded += 1,
+            Ok(false) => {}
+            Err(error) => info!(
+                "session span {} ({}): hook intake not recorded now: {error:#}",
+                span.opened_event_id,
+                span.kind(),
+            ),
+        }
+    }
+    Ok(recorded)
+}
+
+/// Take in the transcript of the closed hook `span` that ended at `end`:
+/// its remaining turns and its final `session_turns` with its
+/// measurements. `false` when another intake finished it first.
+fn finalize_hook_intake(conn: &Connection, span: &OpenSpan, end: &str) -> Result<bool> {
+    let _read = read_before(conn, Closing::Spans(&[(span.clone(), DEFERRED)]))?;
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    // Another intake may have finished while this one read the transcript.
+    let finished: bool =
+        tx.query_row(&hook_intake_finished_sql(), [span.opened_event_id], |r| {
+            r.get(0)
+        })?;
+    if finished {
+        return Ok(false);
+    }
+    let task = span_task(&tx, span)?;
+    let mut payload = turns_payload(span, &[]);
+    // The hook fixed the end already, including an inferred next-start
+    // fallback. Do not move that boundary while enriching measurements.
+    let (_, _, worktime) = fill_transcript(&tx, end, (task, None), span, DEFERRED, &mut payload)?;
+    payload["final"] = json!(true);
+    insert_at(
+        &tx,
+        task,
+        None,
+        EventKind::SessionTurns,
+        &payload,
+        &now(&tx)?,
+    )?;
+    write_worktime(&tx, worktime);
+    tx.commit()?;
+    Ok(true)
+}
+
 /// Record the finished turns (those the next input followed) of every span
 /// still open that are not recorded yet, one `session_turns` per span, on
 /// the task and run of its `session_opened` (ADR-0048 decision 8). A
 /// transcript that cannot be read now is left for the next time. Returns
-/// how many spans got turns. The transcript is read outside the write lock;
+/// how many spans got turns or a final hook intake. Closed hook spans are
+/// finalized too, once. The transcript is read outside the write lock;
 /// the span is checked again under it, since the process that closes it
 /// (a session's wrapper) records its remaining turns itself.
 pub(super) fn record_open_turns(conn: &Connection) -> Result<usize> {
     let open = open_spans(conn, "1=1", "1=1", params![])?;
-    let mut recorded = 0;
+    // The closed hook spans' intake failing does not hold back the open
+    // spans' turns.
+    let mut recorded = record_closed_hook_turns(conn).unwrap_or_else(|error| {
+        info!("closed hook spans not taken in now: {error:#}");
+        0
+    });
     for span in open {
         // A headless span's turns are its run's (ADR-t813-2 decision 7).
         let read = (!span.headless()).then(|| read(conn, &span));
@@ -1712,8 +1839,12 @@ fn span_task(conn: &Connection, span: &OpenSpan) -> Result<Option<TaskId>> {
 /// Record what the plugin's hook reported of an inbox or planner session
 /// (ADR-0048 decision 6): open its span, go on with the one open for its
 /// session id, close the one of the session a `/clear` replaced in its
-/// workspace (`next_span`), or close it at its end. A span closed already
-/// is not closed again. A runtime planner's span is on the first task of
+/// workspace (`next_span`) or, without a workspace, the ones of its kind
+/// open without one (`inferred`, ADR-t655-1 decision 3), or close it at
+/// its end. A span closed already is not closed again. No transcript is
+/// read: a close is marked [`HOOK_INTAKE_PENDING`], and the supervisor's
+/// intake records its turns and measurements later
+/// ([`record_closed_hook_turns`], ADR-t655-1). A runtime planner's span is on the first task of
 /// its proposal, with the proposal and its goals; the others are on no
 /// task. Only the spans are written: no run, proposal or planner changes.
 pub(super) fn record_hook(conn: &Connection, hook: &SessionHook) -> Result<Value> {
@@ -1726,15 +1857,6 @@ pub(super) fn record_hook(conn: &Connection, hook: &SessionHook) -> Result<Value
             "skipped": "headless_planner",
         }));
     }
-    let closing: Vec<(OpenSpan, &'static str)> =
-        hook_changes(hook, &open_hook_spans(conn)?, &Value::Null)
-            .into_iter()
-            .filter_map(|change| match change {
-                SpanChange::Close { span, reason } => Some((span, reason)),
-                SpanChange::Open(_) => None,
-            })
-            .collect();
-    let _read = read_before(conn, Closing::Spans(&closing))?;
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let (task_id, context) = planner_context(&tx, hook)?;
     let changes = hook_changes(hook, &open_hook_spans(&tx)?, &context);
@@ -1745,7 +1867,10 @@ pub(super) fn record_hook(conn: &Connection, hook: &SessionHook) -> Result<Value
         match change {
             SpanChange::Close { span, reason } => {
                 let task = span_task(&tx, &span)?;
-                close(&tx, &now, task, None, &span, reason)?;
+                let mut payload = SpanChange::closed_payload(&span, reason);
+                payload["active"] = json!("unavailable");
+                payload["active_unavailable"] = json!(HOOK_INTAKE_PENDING);
+                insert_at(&tx, task, None, EventKind::SessionClosed, &payload, &now)?;
                 closed.push(span.opened_event_id);
             }
             SpanChange::Open(payload) => {
@@ -2052,6 +2177,8 @@ mod tests {
         };
         uses(&recorded_turns_sql());
         uses(&span_closed_sql());
+        uses(&hook_intake_finished_sql());
+        uses(&pending_hook_intakes_sql());
         // Every `closed` condition its callers give open_spans.
         for (opened, closed) in [
             ("1=1", "1=1"),
@@ -4037,14 +4164,17 @@ mod tests {
         assert_eq!(compacted["closed"], json!([]));
         // A /clear whose SessionStart comes first: the new session id
         // closes the span of its workspace as the next span.
+        READS.set(0);
         let cleared =
             record_hook(conn, &hook(dir.path(), Some("clear"), INBOX, "s-2", "W")).unwrap();
+        assert_eq!(READS.get(), 0);
         assert_eq!(cleared["closed"], json!([opened]));
         let closed = &of_kind(&queue, SESSION_CLOSED)[0];
         assert_eq!(closed.payload["reason"], crate::domain::sessions::NEXT_SPAN);
-        assert_eq!(closed.payload["active"], "recorded");
-        assert_eq!(closed.payload["active_secs"], 30);
+        assert_eq!(closed.payload["active_unavailable"], "hook_intake_pending");
         assert_eq!(closed.task_id, None);
+        assert_eq!(record_open_turns(conn).unwrap(), 1);
+        assert_eq!(record_open_turns(conn).unwrap(), 0);
         // Its SessionEnd, late, and a second one: closed once.
         for _ in 0..2 {
             let ended = record_hook(conn, &hook(dir.path(), None, INBOX, "s-1", "W")).unwrap();
@@ -4080,6 +4210,136 @@ mod tests {
         assert_eq!(inbox.active.summary.total, 30);
         assert!(inbox.open.summary.total >= 100, "{inbox:?}");
         assert_eq!(sessions.by_kind["planner"].count, 0);
+    }
+
+    #[test]
+    fn hook_close_defers_the_last_turn_and_measurements_once() {
+        use crate::domain::{sessions::INBOX, stats::sessions::spans};
+        let dir = tempfile::tempdir().unwrap();
+        ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let conn = &queue.conn;
+        let start_hook = hook(dir.path(), Some("startup"), INBOX, "s", "W");
+        record_hook(conn, &start_hook).unwrap();
+        let start = retime(conn, 0, 100);
+        hook_transcript(dir.path(), "s", start, &[(5, 25), (40, 50)], 60);
+        assert_eq!(record_open_turns(conn).unwrap(), 1);
+        // Append the final assistant without another input: open intake
+        // must leave this turn for the close, clipping it at that boundary.
+        let path = dir.path().join("s.jsonl");
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        let assistant = |offset| {
+            json!({"type":"assistant", "sessionId":"s",
+            "version":"2.1.283", "timestamp":millis_text(start + offset),
+            "message":{"id":"m-final", "model":"claude-sonnet-4-6",
+                "content":[{"type":"text","text":"done"}],
+                "usage":{"input_tokens":10,"output_tokens":5}}})
+        };
+        text.push_str(&format!("\n{}\n{}", assistant(80_000), assistant(150_000)));
+        std::fs::write(&path, text).unwrap();
+        READS.set(0);
+        record_hook(conn, &hook(dir.path(), None, INBOX, "s", "W")).unwrap();
+        assert_eq!(READS.get(), 0);
+        let closed = of_kind(&queue, SESSION_CLOSED)[0].clone();
+        let end = start + 100_000;
+        conn.execute(
+            "UPDATE run_events SET created_at=?1 WHERE id=?2",
+            params![millis_text(end), closed.id],
+        )
+        .unwrap();
+        assert_eq!(record_open_turns(conn).unwrap(), 1);
+        assert_eq!(READS.get(), 1);
+        assert_eq!(record_open_turns(conn).unwrap(), 0);
+        assert_eq!(READS.get(), 1);
+        let opened = of_kind(&queue, SESSION_OPENED)[0].id;
+        let recorded = recorded_turns(conn, opened).unwrap();
+        assert_eq!(
+            recorded.iter().map(|turn| turn.millis()).sum::<i64>(),
+            70_000
+        );
+        assert_eq!(recorded.last().unwrap().end, end);
+        let events: Vec<RunEvent> = conn
+            .prepare("SELECT * FROM run_events ORDER BY id")
+            .unwrap()
+            .query_map([], event_row)
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let spans = spans(&events);
+        assert_eq!(spans[0].active, Some(70));
+        assert!(spans[0].tokens.is_some());
+        assert_eq!(spans[0].model.as_deref(), Some("claude-sonnet-4-6 unknown"));
+        assert!(!spans[0].active_unavailable);
+        assert_eq!(spans[0].end, Some(end));
+        // Finalized even if intake is called again or SessionEnd is duplicated.
+        record_hook(conn, &hook(dir.path(), None, INBOX, "s", "W")).unwrap();
+        assert_eq!(of_kind(&queue, SESSION_CLOSED).len(), 1);
+        assert_eq!(
+            of_kind(&queue, SESSION_TURNS)
+                .iter()
+                .filter(|e| e.payload["final"] == true)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn missing_hook_transcript_stays_closed_and_is_finalized_once() {
+        use crate::domain::sessions::INBOX;
+        let dir = tempfile::tempdir().unwrap();
+        ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let conn = &queue.conn;
+        record_hook(
+            conn,
+            &hook(dir.path(), Some("startup"), INBOX, "missing", "W"),
+        )
+        .unwrap();
+        READS.set(0);
+        record_hook(conn, &hook(dir.path(), None, INBOX, "missing", "W")).unwrap();
+        assert_eq!(READS.get(), 0);
+        assert!(open_hook_spans(conn).unwrap().is_empty());
+        assert_eq!(record_open_turns(conn).unwrap(), 1);
+        let final_turns = of_kind(&queue, SESSION_TURNS);
+        assert_eq!(final_turns.len(), 1);
+        assert_eq!(final_turns[0].payload["active"], "unavailable");
+        assert_eq!(
+            final_turns[0].payload["active_unavailable"],
+            "transcript_missing"
+        );
+        assert_eq!(record_open_turns(conn).unwrap(), 0);
+        assert_eq!(READS.get(), 1);
+        assert!(open_hook_spans(conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn next_start_without_workspace_infers_only_the_same_kind() {
+        use crate::domain::sessions::{INBOX, PLANNER, RUNTIME_PLANNER};
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let conn = &queue.conn;
+        let no_workspace = |kind, session| SessionHook {
+            workspace_id: None,
+            ..hook(dir.path(), Some("startup"), kind, session, "unused")
+        };
+        for (kind, session) in [(INBOX, "i"), (PLANNER, "p"), (RUNTIME_PLANNER, "r")] {
+            record_hook(conn, &no_workspace(kind, session)).unwrap();
+        }
+        record_hook(
+            conn,
+            &hook(dir.path(), Some("startup"), INBOX, "with-w", "W"),
+        )
+        .unwrap();
+        READS.set(0);
+        record_hook(conn, &no_workspace(INBOX, "i")).unwrap();
+        assert!(of_kind(&queue, SESSION_CLOSED).is_empty());
+        record_hook(conn, &no_workspace(INBOX, "i-next")).unwrap();
+        assert_eq!(READS.get(), 0);
+        let closed = of_kind(&queue, SESSION_CLOSED);
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].payload["session_id"], "i");
+        assert_eq!(closed[0].payload["reason"], INFERRED);
+        assert_eq!(open_hook_spans(conn).unwrap().len(), 4);
     }
 
     /// A runtime planner's span is on the first task of its proposal, with

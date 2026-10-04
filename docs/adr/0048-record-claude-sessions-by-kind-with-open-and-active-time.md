@@ -9,6 +9,7 @@ accepted_on: 2026-09-26
 amended_by:
   - adr-t1404-1
   - adr-t1433-3
+  - adr-t655-1
 owners:
   - hisamekms
 tags:

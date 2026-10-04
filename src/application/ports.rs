@@ -2107,7 +2107,8 @@ pub trait SessionRegistry {
     /// each with that event: the inbox's attention.
     fn silent_planners(&self) -> Result<Vec<(PlannerSession, RunEvent)>>;
     /// Record the finished transcript turns of the Claude session spans
-    /// still open (ADR-0048 decision 8); returns how many spans got turns.
+    /// still open, and finalize closed hook spans awaiting intake (ADR-0048
+    /// decision 8); returns how many spans got turns or final measurements.
     fn record_session_turns(&self) -> Result<usize>;
     /// Record what the plugin's hook reported of an inbox or planner
     /// session (ADR-0048 decision 6): its span opened, gone on with or

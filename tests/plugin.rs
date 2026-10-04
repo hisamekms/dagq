@@ -829,11 +829,11 @@ fn session_event_hook_records_the_spans_of_the_inbox_and_planners_only() {
     let events = span_events(binary, &db, &data_home, &repo);
     assert_eq!(events[0]["payload"]["workspace_id"], "W-INBOX");
     assert_eq!(events[0]["task_id"], Value::Null);
-    // No transcript: the spans closed without their active time.
+    // Hook closes first; the supervisor has not attempted intake yet.
     assert_eq!(events[1]["payload"]["active"], "unavailable");
     assert_eq!(
         events[1]["payload"]["active_unavailable"],
-        "transcript_missing"
+        "hook_intake_pending"
     );
 
     // stats counts them in its window, per kind.

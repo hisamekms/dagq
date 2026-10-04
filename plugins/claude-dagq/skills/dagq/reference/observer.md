@@ -24,7 +24,7 @@ The supervisor detects stalled sessions by the `[stall]` settings (ADR-0043); th
 
 ## Session time: reading `sessions`
 
-The `stats` the observer reads carry the Claude session time per kind (`sessions.by_kind`, and `sessions` per run and goal; fields in `reference/inspect.md`, "Claude session time"). A kind whose `open` grows while its `active_ratio` falls spends its time waiting, not working; many `active_unavailable` spans mean the transcript could not be read (the active time is missing, not zero); many `inferred` spans mean sessions ended without a seen exit (recovered, triaged, or the workspace was gone). Read them when deciding a `capacity` or `wait` finding.
+The `stats` the observer reads carry the Claude session time per kind (`sessions.by_kind`, and `sessions` per run and goal; fields in `reference/inspect.md`, "Claude session time"). A kind whose `open` grows while its `active_ratio` falls spends its time waiting, not working; many `active_unavailable` spans mean the transcript could not be read, or inbox and planner spans just closed wait for the supervisor's intake (the active time is missing, not zero); many `inferred` spans mean sessions ended without a seen exit (recovered, triaged, or the workspace was gone). Read them when deciding a `capacity` or `wait` finding.
 
 ## KPI findings: kind `kpi` and the improvement limit
 
