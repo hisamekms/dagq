@@ -162,7 +162,7 @@ fn a_request_the_inbox_records_gets_one_planner_whose_submission_proposes_it() {
         &[
             "request",
             "add",
-            "--file",
+            "--text-file",
             words_file.to_str().unwrap(),
             "--note",
             "the person asked in the inbox at 10:02",

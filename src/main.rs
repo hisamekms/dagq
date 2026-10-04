@@ -1444,16 +1444,21 @@ enum RequestCommand {
     /// person at a plain terminal): the supervisor opens a planner of the runtime's for it, which
     /// submits a proposal (the request becomes proposed) or declines it. Prints the request.
     #[command(group = clap::ArgGroup::new("words").required(true))]
+    #[command(group = clap::ArgGroup::new("notes"))]
     Add {
-        /// The person's own words, not a summary.
+        /// The person's own words, not a summary; `-` reads them from stdin.
         #[arg(long, group = "words")]
         text: Option<String>,
-        /// A file holding the person's own words.
-        #[arg(long, group = "words")]
-        file: Option<PathBuf>,
-        /// What the inbox adds, kept apart from the person's words.
-        #[arg(long)]
+        /// A file holding the person's own words: what it holds when read is recorded, not
+        /// its path.
+        #[arg(long, group = "words", alias = "file")]
+        text_file: Option<PathBuf>,
+        /// What the inbox adds, kept apart from the person's words; `-` reads it from stdin.
+        #[arg(long, group = "notes")]
         note: Option<String>,
+        /// A file holding what the inbox adds: what it holds when read is recorded.
+        #[arg(long, group = "notes")]
+        note_file: Option<PathBuf>,
         /// What it refers to: ask:N, task:N, run:ID, event:N, finding:N or goal:N; repeatable.
         #[arg(long = "ref")]
         refs: Vec<String>,
@@ -1762,6 +1767,45 @@ enum GoalCommand {
 const OBSERVER_DENIED: &str = "observer may not change queue state";
 /// The error of a command a headless job may not run.
 const REVIEWER_DENIED: &str = "reviewer may not change queue state";
+
+/// The words `request add` records for `option` (`--text` or `--note`): the
+/// value itself, stdin for `-`, or what `file` holds when read (ADR-t1394-1
+/// decision 2 keeps the request as recorded, so a later change of the file
+/// changes nothing). UTF-8 as given, line breaks and quotes kept; a file or
+/// stdin that cannot be read, is not UTF-8 or holds nothing is refused.
+fn request_words(
+    option: &str,
+    value: Option<String>,
+    file: Option<PathBuf>,
+    cwd: &Path,
+) -> Result<Option<String>> {
+    let (source, bytes) = match (value, file) {
+        (Some(value), _) if value != "-" => return Ok(Some(value)),
+        (Some(_), _) => {
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut std::io::stdin(), &mut bytes)
+                .with_context(|| format!("{option} -: cannot read stdin"))?;
+            (format!("{option} - (stdin)"), bytes)
+        }
+        (None, Some(file)) => {
+            let file = cwd.join(file);
+            let bytes = std::fs::read(&file)
+                .with_context(|| format!("{option}-file: cannot read {}", file.display()))?;
+            (format!("{option}-file {}", file.display()), bytes)
+        }
+        (None, None) => return Ok(None),
+    };
+    let words = String::from_utf8(bytes).map_err(|error| {
+        anyhow::anyhow!(
+            "{source} is not UTF-8 (invalid byte at offset {}); nothing was recorded",
+            error.utf8_error().valid_up_to()
+        )
+    })?;
+    if words.trim().is_empty() {
+        bail!("{source} is empty; nothing was recorded");
+    }
+    Ok(Some(words))
+}
 
 /// A run named on the command line, or [`Resource::Unresolved`] when its
 /// id cannot be read: no owner matches it (fail closed).
@@ -3259,20 +3303,18 @@ fn execute(cli: Cli) -> Result<Value> {
             command:
                 RequestCommand::Add {
                     text,
-                    file,
+                    text_file,
                     note,
+                    note_file,
                     refs,
                 },
         } => {
-            let text = match (text, file) {
-                (Some(text), _) => text,
-                (None, Some(file)) => {
-                    let file = cwd.join(file);
-                    std::fs::read_to_string(&file)
-                        .with_context(|| format!("read {}", file.display()))?
-                }
-                (None, None) => unreachable!("clap requires --text or --file"),
-            };
+            if text.as_deref() == Some("-") && note.as_deref() == Some("-") {
+                bail!("--text - and --note - both read stdin; give one of them as a file");
+            }
+            let text = request_words("--text", text, text_file, &cwd)?
+                .expect("clap requires --text or --text-file");
+            let note = request_words("--note", note, note_file, &cwd)?;
             let request = dagq::domain::plan_request::NewPlanRequest {
                 text,
                 note,
