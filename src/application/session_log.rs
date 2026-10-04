@@ -145,23 +145,55 @@ fn size(files: &dyn RunFiles, path: &Path) -> Result<Option<u64>> {
     }
 }
 
-/// The bytes of the log from `offset` on: none while it is not there.
-fn read_from(files: &dyn RunFiles, path: &Path, offset: u64) -> Result<Vec<u8>> {
-    match files.read_from(path, offset) {
-        Ok(bytes) => Ok(bytes),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(Vec::new()),
-        Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+/// How many bytes one read of the log takes: a log larger than one read
+/// of the run directory allows is printed a chunk at a time.
+const CHUNK: u64 = 1024 * 1024;
+
+/// Print the log from `offset` on to `out`, `chunk` bytes per read, up to
+/// its end (none while it is not there); the offset after it.
+fn copy_from(
+    files: &dyn RunFiles,
+    path: &Path,
+    mut offset: u64,
+    chunk: u64,
+    out: &mut dyn Write,
+) -> Result<u64> {
+    loop {
+        let bytes = match files.read_range(path, offset, chunk) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+        };
+        out.write_all(&bytes)?;
+        offset += bytes.len() as u64;
+        // A short read is the end the log had then.
+        if (bytes.len() as u64) < chunk {
+            return Ok(offset);
+        }
     }
 }
 
 /// Print `log` to `out`: its last `lines` lines (all with `None`) and,
 /// with `follow`, what the wrapper appends, looked for every `follow`
-/// until the wrapper has ended (what it wrote last read after that).
+/// until the wrapper has ended (what it wrote last read after that). The
+/// whole log and what is appended are read in chunks, so no size limits
+/// what is printed.
 pub fn print(
     ports: &LogPorts<'_>,
     log: &SessionLog,
     lines: Option<usize>,
     follow: Option<Duration>,
+    out: &mut dyn Write,
+) -> Result<()> {
+    print_in_chunks(ports, log, lines, follow, CHUNK, out)
+}
+
+fn print_in_chunks(
+    ports: &LogPorts<'_>,
+    log: &SessionLog,
+    lines: Option<usize>,
+    follow: Option<Duration>,
+    chunk: u64,
     out: &mut dyn Write,
 ) -> Result<()> {
     let path = log.path();
@@ -173,20 +205,14 @@ pub fn print(
             out.write_all(&tail(ports.files, &path, size, lines)?)?;
             size
         }
-        (Some(_), None) => {
-            let bytes = read_from(ports.files, &path, 0)?;
-            out.write_all(&bytes)?;
-            bytes.len() as u64
-        }
+        (Some(_), None) => copy_from(ports.files, &path, 0, chunk, out)?,
     };
     out.flush()?;
     while let (true, Some(interval)) = (runs, follow) {
         std::thread::sleep(interval);
         // Judged before the read, so the read after the end takes all.
         runs = wrapper_runs(ports.processes, log);
-        let more = read_from(ports.files, &path, offset)?;
-        offset += more.len() as u64;
-        out.write_all(&more)?;
+        offset = copy_from(ports.files, &path, offset, chunk, out)?;
         out.flush()?;
     }
     Ok(())
@@ -210,7 +236,6 @@ mod tests {
 
     #[test]
     fn the_last_lines_of_a_large_log_are_read_from_its_end() {
-        use crate::application::memory_files::MemoryFiles;
         let files = MemoryFiles::default();
         let path = Path::new("/q/runs/r/session.log");
         // Lines longer than the first window, so it is doubled.
@@ -224,5 +249,152 @@ mod tests {
         // More lines than the log has: all of it.
         assert_eq!(tail(&files, path, size, 99).unwrap(), text.as_bytes());
         assert_eq!(tail(&files, path, size, 0).unwrap(), b"");
+    }
+
+    use crate::application::memory_files::MemoryFiles;
+
+    const LOG: &str = "/q/runs/r/session.log";
+
+    /// A wrapper that appends `appends` to the log one by one as
+    /// `--follow` looks whether it still runs, and has ended once all is
+    /// appended.
+    struct Appending<'a> {
+        files: &'a MemoryFiles,
+        appends: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl ProcessControl for Appending<'_> {
+        fn alive(&self, _: u32) -> bool {
+            unreachable!()
+        }
+        fn terminate(&self, _: u32) -> Result<()> {
+            unreachable!()
+        }
+        fn interrupt(&self, _: u32) -> Result<()> {
+            unreachable!()
+        }
+        fn kill(&self, _: u32) -> Result<()> {
+            unreachable!()
+        }
+        fn start_identity(&self, _: u32) -> Option<String> {
+            let mut appends = self.appends.lock().unwrap();
+            if appends.is_empty() {
+                return None;
+            }
+            let more = appends.remove(0);
+            let path = Path::new(LOG);
+            let mut text = String::from_utf8(self.files.bytes(path).unwrap()).unwrap();
+            text.push_str(&more);
+            self.files
+                .put(path, std::time::SystemTime::UNIX_EPOCH, &text);
+            Some("start".to_owned())
+        }
+    }
+
+    /// Files holding `text` as the log, read at most `limit` bytes at once.
+    fn bounded(limit: u64, text: &str) -> MemoryFiles {
+        let files = MemoryFiles::bounded(limit);
+        files.put(Path::new(LOG), std::time::SystemTime::UNIX_EPOCH, text);
+        files
+    }
+
+    fn appending<'a>(files: &'a MemoryFiles, appends: &[String]) -> Appending<'a> {
+        Appending {
+            files,
+            appends: std::sync::Mutex::new(appends.to_vec()),
+        }
+    }
+
+    fn session_log() -> SessionLog {
+        SessionLog {
+            session: BackgroundSession::of("background:7:start", LOG.to_owned()).unwrap(),
+        }
+    }
+
+    /// Numbered lines of `bytes` bytes or more, so a cut chunk or a lost
+    /// one shows.
+    fn numbered(from: usize, bytes: usize) -> String {
+        let mut text = String::new();
+        let mut n = from;
+        while text.len() < bytes {
+            text.push_str(&format!("line {n}\n"));
+            n += 1;
+        }
+        text
+    }
+
+    #[test]
+    fn a_log_larger_than_one_read_is_printed_whole_in_chunks() {
+        let text = numbered(0, 1000);
+        let files = bounded(64, &text);
+        let processes = appending(&files, &[]);
+        let ports = LogPorts {
+            files: &files,
+            processes: &processes,
+        };
+        let mut out = Vec::new();
+        print_in_chunks(&ports, &session_log(), None, None, 64, &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), text);
+        // A log of exactly whole chunks ends with an empty read.
+        let text = "x".repeat(128);
+        let files = bounded(64, &text);
+        let processes = appending(&files, &[]);
+        let ports = LogPorts {
+            files: &files,
+            processes: &processes,
+        };
+        let mut out = Vec::new();
+        print_in_chunks(&ports, &session_log(), None, None, 64, &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), text);
+        // `--lines` still prints the tail only, of a log larger than one read.
+        let text = numbered(0, 1000);
+        let files = bounded(64, &text);
+        let processes = appending(&files, &[]);
+        let ports = LogPorts {
+            files: &files,
+            processes: &processes,
+        };
+        let last = text.lines().last().unwrap();
+        let mut out = Vec::new();
+        print_in_chunks(&ports, &session_log(), Some(1), None, 64, &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), format!("{last}\n"));
+    }
+
+    #[test]
+    fn follow_keeps_up_when_more_than_one_read_is_appended_between_polls() {
+        let text = numbered(0, 300);
+        let appends = [numbered(1000, 500), numbered(2000, 700)];
+        let files = bounded(64, &text);
+        let processes = appending(&files, &appends);
+        let ports = LogPorts {
+            files: &files,
+            processes: &processes,
+        };
+        let mut out = Vec::new();
+        print_in_chunks(
+            &ports,
+            &session_log(),
+            None,
+            Some(Duration::ZERO),
+            64,
+            &mut out,
+        )
+        .unwrap();
+        let whole = String::from_utf8(files.bytes(Path::new(LOG)).unwrap()).unwrap();
+        assert_eq!(whole, format!("{text}{}{}", appends[0], appends[1]));
+        assert_eq!(String::from_utf8(out).unwrap(), whole);
+    }
+
+    #[test]
+    fn a_failed_read_names_the_log() {
+        let files = bounded(64, &numbered(0, 100));
+        let processes = appending(&files, &[]);
+        let ports = LogPorts {
+            files: &files,
+            processes: &processes,
+        };
+        let error =
+            print_in_chunks(&ports, &session_log(), None, None, 65, &mut Vec::new()).unwrap_err();
+        assert!(format!("{error:#}").contains(LOG), "{error:#}");
     }
 }

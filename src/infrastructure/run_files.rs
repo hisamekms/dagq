@@ -138,6 +138,19 @@ impl RunFiles for LocalRunFiles {
         }
         Ok(bytes)
     }
+    fn read_range(&self, path: &Path, offset: u64, len: u64) -> io::Result<Vec<u8>> {
+        if in_run_dir(path) && len > agent_dir::FILE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a read of the run directory takes at most 64 MiB",
+            ));
+        }
+        let mut file = open_to_read(path)?;
+        file.seek(SeekFrom::Start(offset))?;
+        let mut bytes = Vec::new();
+        file.take(len).read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
     fn read_tail(&self, path: &Path, bytes: u64) -> io::Result<Vec<u8>> {
         let mut file = open_to_read(path)?;
         let len = file.metadata()?.len();
@@ -474,6 +487,15 @@ mod tests {
         assert!(files.read(&log).is_err());
         let tail = files.read_tail(&log, 11).unwrap();
         assert_eq!(tail, b"hook failed");
+        // A bounded range of the large log is read; one past the limit is not.
+        let end = agent_dir::FILE_BYTES + 10;
+        assert_eq!(files.read_range(&log, end, 4).unwrap(), b"hook");
+        assert_eq!(files.read_range(&log, end + 5, 99).unwrap(), b"failed");
+        assert_eq!(files.read_range(&log, end + 99, 4).unwrap(), b"");
+        let error = files
+            .read_range(&log, 0, agent_dir::FILE_BYTES + 1)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert_eq!(files.read_tail(&copy, 1024).unwrap(), b"binary");
     }
 
@@ -497,6 +519,7 @@ mod tests {
         assert_eq!(files.read(&linked).unwrap(), b"binary");
         assert_eq!(files.read_to_string(&linked).unwrap(), "binary");
         assert_eq!(files.read_tail(&linked, 3).unwrap(), b"ary");
+        assert_eq!(files.read_range(&linked, 1, 3).unwrap(), b"ina");
         assert!(files.modified(&linked).is_ok());
         assert!(files.read_stamped(&linked).unwrap().is_some());
         files.write(&linked, b"new").unwrap();

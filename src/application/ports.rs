@@ -371,6 +371,14 @@ pub trait RunFiles: Send + Sync {
         let offset = usize::try_from(offset).unwrap_or(usize::MAX);
         Ok(bytes.get(offset..).unwrap_or_default().to_vec())
     }
+    /// At most `len` bytes of `path` from `offset` on (none past its end):
+    /// a bounded part of a file that may be larger than one read takes,
+    /// such as a background session's log.
+    fn read_range(&self, path: &Path, offset: u64, len: u64) -> io::Result<Vec<u8>> {
+        let mut bytes = self.read_from(path, offset)?;
+        bytes.truncate(usize::try_from(len).unwrap_or(usize::MAX));
+        Ok(bytes)
+    }
     /// The last `bytes` bytes of `path` (all of a shorter file), read
     /// without the whole of a large file such as an agent's debug log.
     fn read_tail(&self, path: &Path, bytes: u64) -> io::Result<Vec<u8>> {

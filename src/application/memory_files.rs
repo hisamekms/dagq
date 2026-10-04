@@ -15,9 +15,39 @@ use super::RunFiles;
 #[derive(Default)]
 pub struct MemoryFiles {
     files: Mutex<HashMap<PathBuf, (SystemTime, Vec<u8>)>>,
+    /// The most bytes one read takes, as the run directory's reads are
+    /// bounded; none when unbounded.
+    read_limit: Option<u64>,
 }
 
 impl MemoryFiles {
+    /// Files whose reads take at most `limit` bytes each.
+    pub fn bounded(limit: u64) -> Self {
+        Self {
+            read_limit: Some(limit),
+            ..Self::default()
+        }
+    }
+
+    fn check_limit(&self, len: u64) -> io::Result<()> {
+        match self.read_limit {
+            Some(limit) if len > limit => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "exceeds the read limit",
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    /// The bytes of `path`, whatever the read limit.
+    pub fn bytes(&self, path: &Path) -> io::Result<Vec<u8>> {
+        let files = self.files.lock().unwrap();
+        files
+            .get(path)
+            .map(|(_, bytes)| bytes.clone())
+            .ok_or_else(missing)
+    }
+
     pub fn put(&self, path: &Path, modified: SystemTime, contents: &str) {
         self.files
             .lock()
@@ -45,11 +75,29 @@ impl RunFiles for MemoryFiles {
         Ok(())
     }
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
-        let files = self.files.lock().unwrap();
-        files
-            .get(path)
-            .map(|(_, bytes)| bytes.clone())
-            .ok_or_else(missing)
+        let bytes = self.bytes(path)?;
+        self.check_limit(bytes.len() as u64)?;
+        Ok(bytes)
+    }
+    fn read_range(&self, path: &Path, offset: u64, len: u64) -> io::Result<Vec<u8>> {
+        self.check_limit(len)?;
+        let bytes = self.bytes(path)?;
+        let from = usize::try_from(offset)
+            .unwrap_or(usize::MAX)
+            .min(bytes.len());
+        let to = from.saturating_add(usize::try_from(len).unwrap_or(usize::MAX));
+        Ok(bytes[from..to.min(bytes.len())].to_vec())
+    }
+    /// Unbounded, as the run directory's tail reads are.
+    fn read_tail(&self, path: &Path, len: u64) -> io::Result<Vec<u8>> {
+        let bytes = self.bytes(path)?;
+        let from = bytes
+            .len()
+            .saturating_sub(usize::try_from(len).unwrap_or(usize::MAX));
+        Ok(bytes[from..].to_vec())
+    }
+    fn size(&self, path: &Path) -> io::Result<u64> {
+        self.bytes(path).map(|bytes| bytes.len() as u64)
     }
     fn read_to_string(&self, path: &Path) -> io::Result<String> {
         Ok(String::from_utf8_lossy(&self.read(path)?).into_owned())
