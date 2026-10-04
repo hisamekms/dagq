@@ -153,6 +153,7 @@ pub(crate) use self::background::{left_planner_turn, left_turn, still_open, stop
 pub use self::broker::{BROKER_FAILURES, BROKER_HEALTH_INTERVAL, BrokerPort};
 pub use self::claim_defer::read_conflicts_at_start;
 pub(crate) use self::deliver::{Input, Submission, submit_input};
+pub use self::disk::CLEANUP_INTERVAL;
 pub use self::e2e::RunE2ePort;
 pub use self::forecast::{FORECAST_CHECK, ForecastPort};
 pub use self::handoff::SUPERVISOR_HANDED_OFF;
@@ -257,6 +258,10 @@ pub struct LoopSettings {
     /// Least time between two sweeps of the workspaces of ended runs; the
     /// first pass sweeps at once.
     pub sweep_interval: Duration,
+    /// Least time from the end of a cleanup for room (the rest of one
+    /// another job took on included) to the next one
+    /// ([`CLEANUP_INTERVAL`]; tests shorten it, task 1627).
+    pub disk_cleanup_interval: Duration,
     /// The thresholds of the stalled-session checks (ADR-0043 decision 4),
     /// recorded as `stall_config_loaded` when the loop starts.
     pub stall: StallConfig,
@@ -1475,7 +1480,7 @@ impl Supervisor<'_> {
             self.reread_slot_limits()?;
             // Every pass too, so a hold on landings ends as soon as there
             // is room (task 377).
-            self.check_disk()?;
+            self.check_disk(options.disk_cleanup_interval)?;
             // Every pass too: the answer of an authentication or usage-limit
             // ask is applied and the hold read before any work starts (task
             // 437), and Codex's hold ends once its time is up (ADR-t813-2).

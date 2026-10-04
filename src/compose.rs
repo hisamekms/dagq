@@ -271,6 +271,10 @@ pub struct SuperviseOptions {
     /// Least time between two sweeps of the workspaces of ended runs; tests
     /// shorten it.
     pub sweep_interval: Duration,
+    /// Least time from the end of a cleanup for room to the next one
+    /// ([`supervisor::CLEANUP_INTERVAL`]); tests shorten it (task
+    /// 1627).
+    pub disk_cleanup_interval: Duration,
     /// The clock and IDs of everything the supervisor records; tests fix them.
     pub generators: Generators,
     /// The thresholds of the stalled-session checks; `None` reads `[stall]`
@@ -541,6 +545,7 @@ impl SuperviseOptions {
             landing_recheck: supervisor::LANDING_BRANCH_RECHECK,
             heartbeat_interval: supervisor::HEARTBEAT_INTERVAL,
             sweep_interval: SWEEP_INTERVAL,
+            disk_cleanup_interval: supervisor::CLEANUP_INTERVAL,
             generators: clock::system(),
             stall: None,
             conflicts: None,
@@ -620,6 +625,7 @@ impl SuperviseOptions {
             landing_recheck: self.landing_recheck,
             heartbeat_interval: self.heartbeat_interval,
             sweep_interval: self.sweep_interval,
+            disk_cleanup_interval: self.disk_cleanup_interval,
             stall,
             conflicts,
             conflicts_error: None,

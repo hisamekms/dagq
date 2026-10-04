@@ -61,7 +61,8 @@ struct Gate {
 }
 
 /// The local run files, but for the [`Gate`] on measuring build outputs:
-/// the first one, or only `only`'s; `then` gates a later one the same way.
+/// the first one, or only `only`'s; `then` gates a later one the same way
+/// (not the measure held here).
 #[derive(Clone, Default)]
 struct GatedFiles {
     gate: Arc<(Mutex<Gate>, Condvar)>,
@@ -85,25 +86,28 @@ impl GatedFiles {
         changed.notify_all();
     }
     fn wait(&self, dir: &Path) {
-        self.wait_here(dir);
-        if let Some(then) = &self.then {
+        if !self.wait_here(dir)
+            && let Some(then) = &self.then
+        {
             then.wait_here(dir);
         }
     }
-    fn wait_here(&self, dir: &Path) {
+    /// Whether this measure was the one held.
+    fn wait_here(&self, dir: &Path) -> bool {
         if !dir.ends_with("worktree/target") || self.only.as_ref().is_some_and(|only| only != dir) {
-            return;
+            return false;
         }
         let (lock, changed) = &*self.gate;
         let mut gate = lock.lock().unwrap();
         if gate.held.is_some() {
-            return;
+            return false;
         }
         gate.held = Some(dir.to_owned());
         changed.notify_all();
         let _ = changed
             .wait_timeout_while(gate, common::STEP_LIMIT, |gate| !gate.open)
             .unwrap();
+        true
     }
     fn options(&self, options: SuperviseOptions) -> SuperviseOptions {
         SuperviseOptions {
@@ -2223,4 +2227,110 @@ fn a_drain_on_a_provisioning_failure_runs_the_rest_of_a_cleanup_for_room_before_
             !enough
         );
     }
+}
+
+fn half_a_gibibyte(_: &Path) -> Option<u64> {
+    Some(GIB / 2)
+}
+
+/// Task 1627: a cleanup for room that runs longer than the interval between
+/// two of them asks for no other while it runs, and the pass after it ends
+/// judges the reading after it: still short of what a claim needs, the one
+/// disk ask opens and `claim_held` (`disk_space`) is recorded, with no
+/// other cleanup for room in between: the next measure of the run's build
+/// outputs (the ordinary sweep's) is held too, which would hold the disk
+/// ask were it another cleanup for room. The interval is shortened here; the
+/// decisions are the unit tests' of `asks_for_cleanup` and
+/// `add_disk_request`.
+#[test]
+fn the_pass_after_a_long_cleanup_for_room_asks_and_holds() {
+    const INTERVAL: Duration = Duration::from_millis(200);
+    let (_dir, repo, db) = fixture();
+    let building = TestWorkspace::new(&db, false, BUILDING_AGENT);
+    supervise(&db, &repo, &building).unwrap();
+    building.join();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let ended = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    assert_eq!(ended.status(), RunStatus::Failed);
+    let target = Path::new(ended.worktree_path().unwrap()).join("target");
+    fs::create_dir_all(target.join("debug")).unwrap();
+    fs::write(target.join("debug/again"), vec![0u8; 4096]).unwrap();
+    add_ready_task(&mut queue, "second task", &[]);
+    let next = GatedFiles::default();
+    let files = GatedFiles {
+        then: Some(Box::new(next.clone())),
+        ..GatedFiles::default()
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let options = files.options(SuperviseOptions {
+        stop: stop.clone(),
+        disk: Some(DiskConfig {
+            min_free_bytes: Some(GIB),
+            ..DiskConfig::default()
+        }),
+        free_space: half_a_gibibyte,
+        disk_cleanup_interval: INTERVAL,
+        ..supervise_options(1, false)
+    });
+    let passes = options.passes.clone();
+    let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
+    };
+    let disk_asks = |queue: &SqliteQueue| -> Vec<dagq::domain::Ask> {
+        queue
+            .asks(dagq::application::AskQuery {
+                all: true,
+                ..Default::default()
+            })
+            .unwrap()
+            .into_iter()
+            .filter(|ask| ask.kind == AskKind::QueueHold && ask.subject.as_deref() == Some("disk"))
+            .collect()
+    };
+    let events = |queue: &SqliteQueue, kind: &str| -> Vec<Value> {
+        queue
+            .all_events()
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == kind)
+            .map(|event| event.payload)
+            .filter(|payload| kind != "auto_repaired" || payload["repair"] == "disk_cleanup")
+            .collect()
+    };
+    // The cleanup for room of the first pass is held well past the
+    // interval: nothing is asked for or held meanwhile.
+    assert_eq!(files.held(), target);
+    let held_at = Instant::now();
+    wait_until(&db, common::STEP_LIMIT, |_| {
+        held_at.elapsed() > 4 * INTERVAL
+    });
+    await_passes(&passes, SOME_PASSES);
+    assert!(disk_asks(&queue).is_empty());
+    assert!(events(&queue, "claim_held").is_empty());
+    assert!(queue.show(TaskId::new(2)).unwrap().runs.is_empty());
+
+    files.open();
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        !disk_asks(queue).is_empty() && !events(queue, "claim_held").is_empty()
+    });
+    await_passes(&passes, SOME_PASSES);
+    let repaired = events(&queue, "auto_repaired");
+    assert_eq!(repaired.len(), 1, "{repaired:?}");
+    assert_eq!(repaired[0]["detail"]["runs"], json!([ended.id().as_str()]));
+    assert!(!target.exists());
+    let asks = disk_asks(&queue);
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    assert!(asks[0].is_open());
+    let held = events(&queue, "claim_held");
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0]["reason"], "disk_space");
+    assert!(events(&queue, "landing_held").is_empty());
+    assert!(queue.show(TaskId::new(2)).unwrap().runs.is_empty());
+    next.open();
+    stop.store(true, Ordering::SeqCst);
+    let outcome = joined(supervisor, "the supervisor to stop").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
 }

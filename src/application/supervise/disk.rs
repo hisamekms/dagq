@@ -6,7 +6,10 @@
 //! off the loop: task 405) and reads again once that is done, recording
 //! `auto_repaired` (`repair: disk_cleanup`) when it freed something; the
 //! claims and landings wait for it without a hold, and for the rest of it
-//! when another job took it on (task 1478). Still short, it opens
+//! when another job took it on (task 1478). While one waits or runs no
+//! other is asked for, and the next waits [`CLEANUP_INTERVAL`] from
+//! the end of the last ([`asks_for_cleanup`], task 1627): the pass after
+//! it judges the reading after it. Still short, it opens
 //! the queue's one `cost` ask about the disk (`subject: disk`) once, and
 //! the runs whose landing waits for the disk join it. The claims are held through
 //! [`Supervisor::hold_claims`] (`claim_held`, reason `disk_space`), the
@@ -23,8 +26,9 @@ use crate::domain::{
 
 /// How long the needs read from the recent runs' sizes are kept.
 const NEEDS_INTERVAL: Duration = Duration::from_secs(60);
-/// Least time between two cleanups for the disk.
-const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
+/// Least time from the end of a cleanup for room (the rest of one another
+/// job took on included) to the next one (task 1627).
+pub const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// The answer the runtime closes the disk ask with once there is room.
 const DISK_ENOUGH_CLOSED: &str = "the free disk space is enough again; closed by the runtime";
@@ -37,8 +41,9 @@ const DISK_QUESTION: &str = "The free disk space of the queue's directory stays 
 pub(super) struct DiskWatch {
     /// The needs and when they were read.
     needs: Option<(Instant, DiskNeeds)>,
-    /// When the disk was last cleaned for room; `None` while there is room.
-    cleaned: Option<Instant>,
+    /// When a cleanup for room was last asked for, then when it (or the
+    /// rest of it another job took on) ended; `None` while there is room.
+    pub(super) cleaned: Option<Instant>,
     /// The disk ask of this shortage was opened (or answered `wait`): it is
     /// not opened again until there is room, or a person answers `done`.
     asked: bool,
@@ -58,7 +63,7 @@ impl Supervisor<'_> {
     /// and ask when short, close the disk ask when there is room, and
     /// record the landings' hold. The claims' hold is judged when the
     /// supervisor claims ([`Self::hold_claims`]), from the same reading.
-    pub(super) fn check_disk(&mut self) -> Result<()> {
+    pub(super) fn check_disk(&mut self, interval: Duration) -> Result<()> {
         let unclosed: Vec<Ask> = self
             .queue
             .asks(AskQuery::default())?
@@ -71,7 +76,7 @@ impl Supervisor<'_> {
         let short = |free: Option<u64>, need: Option<u64>| matches!((free, need), (Some(free), Some(need)) if free < need);
         let most = needs.claim.max(needs.landing);
         if short(free, most) {
-            self.clean_for_disk(free, most);
+            self.clean_for_disk(free, most, interval);
         }
         self.free = free;
         // Short while the cleanup for room runs, or the rest of one another
@@ -155,15 +160,15 @@ impl Supervisor<'_> {
         self.disk.needs = Some((Instant::now(), needs));
         Ok(needs)
     }
-    /// Ask for what the ended runs left to be cleaned for room (at most
-    /// once every [`CLEANUP_INTERVAL`]); the job does it off the loop, and
+    /// Ask for what the ended runs left to be cleaned for room, when
+    /// [`asks_for_cleanup`] says so; the job does it off the loop, and
     /// [`Self::cleaned_for_disk`] follows.
-    fn clean_for_disk(&mut self, free: Option<u64>, needed: Option<u64>) {
-        if self
-            .disk
-            .cleaned
-            .is_some_and(|at| at.elapsed() < CLEANUP_INTERVAL)
-        {
+    fn clean_for_disk(&mut self, free: Option<u64>, needed: Option<u64>, interval: Duration) {
+        if !asks_for_cleanup(
+            self.disk.cleaned.map(|at| at.elapsed()),
+            self.cleanup.for_disk(),
+            interval,
+        ) {
             return;
         }
         // A request a drain does not take is not a cleanup: the next one
@@ -312,6 +317,22 @@ impl Supervisor<'_> {
     }
 }
 
+/// Whether a pass short of room asks for a cleanup for room (task 1627):
+/// not while one waits or runs (`for_disk`, the rest of one another job
+/// took on included), and not until `interval` passed since the end of the
+/// last one (`since_cleaned`; since it was asked for, until it ends). An
+/// ordinary job running is no cleanup for room: the first request is taken
+/// on by it, and its rest follows (task 1478). So after a cleanup for room
+/// ends, the next pass judges the reading after it instead of asking for
+/// another, and opens the disk ask when still short.
+pub(super) fn asks_for_cleanup(
+    since_cleaned: Option<Duration>,
+    for_disk: bool,
+    interval: Duration,
+) -> bool {
+    !for_disk && since_cleaned.is_none_or(|since| since >= interval)
+}
+
 /// The queue's `cost` ask about the disk.
 fn is_disk_ask(ask: &Ask) -> bool {
     ask.kind == AskKind::QueueHold
@@ -333,6 +354,34 @@ impl Cleaned {
             if !self.runs.contains(run) {
                 self.runs.push(run.clone());
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Task 1627: no cleanup for room is asked for while one waits or runs,
+    /// whatever the time; with none, the first is asked for at once and the
+    /// next once the interval passed since the last ended.
+    #[test]
+    fn a_cleanup_for_room_is_asked_for_only_with_none_in_flight_and_the_interval_passed() {
+        let interval = Duration::from_secs(60);
+        for (since, for_disk, asks) in [
+            (None, false, true),
+            (None, true, false),
+            (Some(Duration::ZERO), false, false),
+            (Some(Duration::from_secs(59)), false, false),
+            (Some(Duration::from_secs(60)), false, true),
+            (Some(Duration::from_secs(600)), false, true),
+            (Some(Duration::from_secs(600)), true, false),
+        ] {
+            assert_eq!(
+                asks_for_cleanup(since, for_disk, interval),
+                asks,
+                "{since:?} {for_disk}"
+            );
         }
     }
 }

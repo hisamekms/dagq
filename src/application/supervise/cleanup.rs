@@ -155,6 +155,34 @@ fn disk_cleanup_pending(
         || pending.counted.is_some()
 }
 
+/// Take a cleanup for room on (task 1627): while one waits or runs (the
+/// rest of one another job took on included), nothing is added, as it is
+/// the one the next reading follows. An ordinary job running takes it on
+/// (`disk`, the job's), and its rest, every ended run with the prune and
+/// the runs nobody works on that wait for no answer, waits for the next
+/// job, counted for room (task 1289, task 1478). With no job running it
+/// waits for the next. So one cleanup for room runs as one job, or as the
+/// job it rode on and its rest: no rest follows a rest.
+fn add_disk_request(
+    job: Option<(&mut Option<DiskRequest>, Option<DiskRequest>)>,
+    pending: &mut Request,
+    request: DiskRequest,
+) {
+    let running = job.as_ref().map(|(disk, counted)| (**disk, *counted));
+    if disk_cleanup_pending(running, pending) {
+        return;
+    }
+    if let Some((disk, _)) = job {
+        *disk = Some(request);
+        pending.add(None, None);
+        pending.prune = true;
+        pending.idle = true;
+        pending.counted = Some(request);
+        return;
+    }
+    pending.add(None, Some(request));
+}
+
 fn task_over(status: TaskStatus) -> bool {
     matches!(status, TaskStatus::Completed | TaskStatus::Canceled)
 }
@@ -371,17 +399,21 @@ impl Supervisor<'_> {
         // 1289), which only a cleanup for room removes, go in that rest,
         // which counts what it removes for room too; while the disk is
         // short, nothing is held or asked for until it is done (task 1478).
-        if let (Some(request), Some(job)) = (disk, self.cleanup.job.as_mut())
-            && job.disk.is_none()
-        {
-            job.disk = Some(request);
-            self.cleanup.pending.add(None, None);
-            self.cleanup.pending.prune = true;
-            self.cleanup.pending.idle = true;
-            self.cleanup.pending.counted = self.cleanup.pending.counted.or(Some(request));
-            return true;
+        // While a cleanup for room waits or runs, no other is added (task
+        // 1627).
+        if let Some(request) = disk {
+            add_disk_request(
+                self.cleanup
+                    .job
+                    .as_mut()
+                    .map(|job| (&mut job.disk, job.counted)),
+                &mut self.cleanup.pending,
+                request,
+            );
         }
-        self.cleanup.pending.add(task, disk);
+        if disk.is_none() || task.is_some() {
+            self.cleanup.pending.add(task, None);
+        }
         self.start_cleanup();
         true
     }
@@ -408,6 +440,9 @@ impl Supervisor<'_> {
         let cleaned = self.record_cleanup(outcomes);
         if let Some(disk) = job.disk.or(job.counted) {
             self.cleaned_for_disk(disk, &cleaned);
+            // The next cleanup for room waits its interval from here, so
+            // the pass after it judges the reading after it (task 1627).
+            self.disk.cleaned = Some(Instant::now());
         }
         self.start_cleanup();
     }
@@ -1156,6 +1191,150 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// Task 1627: a cleanup for room is added only while none waits or
+    /// runs. An ordinary job running takes it on and its rest waits,
+    /// counted for room (task 1478); a job for room, a rest running, or one
+    /// waiting takes nothing more and gets no further rest.
+    #[test]
+    fn a_cleanup_for_room_is_added_only_while_none_waits_or_runs() {
+        let other = DiskRequest {
+            free: Some(3),
+            needed: Some(4),
+        };
+        // None running and none waiting: it waits for (or starts) a job.
+        let mut pending = Request::default();
+        add_disk_request(None, &mut pending, DISK);
+        assert_eq!(pending.disk, Some(DISK));
+        assert_eq!(pending.counted, None);
+        assert!(pending.all && pending.prune && pending.idle);
+        // An ordinary job running, with an ordinary request waiting: the
+        // job takes it on, and its rest waits with that request.
+        let mut pending = Request::default();
+        pending.add(Some(TaskId::new(5)), None);
+        let mut disk = None;
+        add_disk_request(Some((&mut disk, None)), &mut pending, DISK);
+        assert_eq!(disk, Some(DISK));
+        assert_eq!(pending.disk, None);
+        assert_eq!(pending.counted, Some(DISK));
+        assert!(pending.all && pending.prune && pending.idle);
+        assert_eq!(pending.tasks, [TaskId::new(5)]);
+        // A cleanup for room running, its rest running, or one waiting:
+        // nothing is added.
+        for (job, waiting_disk, waiting_counted) in [
+            (Some((Some(DISK), None)), None, None),
+            (Some((None, Some(DISK))), None, None),
+            (Some((Some(DISK), Some(DISK))), None, None),
+            (Some((Some(DISK), None)), None, Some(DISK)),
+            (Some((None, None)), None, Some(DISK)),
+            (Some((None, None)), Some(DISK), None),
+            (None, Some(DISK), None),
+            (None, None, Some(DISK)),
+        ] {
+            let case = format!("{job:?} {waiting_disk:?} {waiting_counted:?}");
+            let mut pending = Request {
+                disk: waiting_disk,
+                counted: waiting_counted,
+                ..Request::default()
+            };
+            let mut running = job;
+            add_disk_request(
+                running.as_mut().map(|(disk, counted)| (disk, *counted)),
+                &mut pending,
+                other,
+            );
+            assert_eq!(running, job, "{case}");
+            assert_eq!(pending.disk, waiting_disk, "{case}");
+            assert_eq!(pending.counted, waiting_counted, "{case}");
+            assert!(
+                !pending.prune && !pending.idle && pending.is_empty(),
+                "{case}"
+            );
+        }
+    }
+
+    /// The loop's passes over a disk that stays short, as the supervisor
+    /// makes them: join a job that ended (the end of a cleanup for room
+    /// sets when the next may be asked for) and start what waits, then ask
+    /// for a cleanup for room when [`asks_for_cleanup`] says so, and judge
+    /// the reading when none waits or runs. Each job runs `length`; the
+    /// first is an ordinary one with `ordinary_first`. The jobs for room
+    /// that ran before the first pass that judged, or `None` when none
+    /// judged within `passes`.
+    fn jobs_before_a_judgement(
+        length: Duration,
+        ordinary_first: bool,
+        passes: usize,
+    ) -> Option<usize> {
+        use super::super::disk::asks_for_cleanup;
+        let interval = Duration::from_secs(60);
+        let tick = Duration::from_secs(1);
+        let mut now = Duration::ZERO;
+        let mut job: Option<(Option<DiskRequest>, Option<DiskRequest>, Duration)> =
+            ordinary_first.then_some((None, None, length));
+        let mut pending = Request::default();
+        let mut cleaned: Option<Duration> = None;
+        let mut jobs = 0;
+        let start = |pending: &mut Request, now: Duration| {
+            (!pending.is_empty()).then(|| {
+                let request = std::mem::take(pending);
+                (request.disk, request.counted, now + length)
+            })
+        };
+        for _ in 0..passes {
+            if let Some((disk, counted, _)) = job.take_if(|(_, _, end)| *end <= now) {
+                if disk.or(counted).is_some() {
+                    jobs += 1;
+                    cleaned = Some(now);
+                }
+                job = start(&mut pending, now);
+            }
+            let in_flight = |job: &Option<(Option<DiskRequest>, Option<DiskRequest>, Duration)>,
+                             pending: &Request| {
+                disk_cleanup_pending(job.map(|(disk, counted, _)| (disk, counted)), pending)
+            };
+            if asks_for_cleanup(
+                cleaned.map(|at| now - at),
+                in_flight(&job, &pending),
+                interval,
+            ) {
+                add_disk_request(
+                    job.as_mut().map(|(disk, counted, _)| (disk, *counted)),
+                    &mut pending,
+                    DISK,
+                );
+                if job.is_none() {
+                    job = start(&mut pending, now);
+                }
+                cleaned = Some(now);
+            }
+            if !in_flight(&job, &pending) {
+                return Some(jobs);
+            }
+            now += tick;
+        }
+        None
+    }
+
+    /// Task 1627: however long each job runs (here shorter and far longer
+    /// than the interval), a disk that stays short is judged (the disk ask
+    /// opened) after one cleanup for room, or after the ordinary job it
+    /// rode on and its rest: the chain ends there.
+    #[test]
+    fn a_cleanup_for_room_chains_at_most_into_its_rest_before_the_disk_is_judged() {
+        for length in [30, 61, 180, 6_000].map(Duration::from_secs) {
+            assert_eq!(
+                jobs_before_a_judgement(length, false, 100_000),
+                Some(1),
+                "{length:?}"
+            );
+            assert_eq!(
+                jobs_before_a_judgement(length, true, 100_000),
+                Some(2),
+                "{length:?}"
+            );
         }
     }
 
