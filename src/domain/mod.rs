@@ -849,6 +849,7 @@ pub mod areas;
 pub mod authorization;
 pub mod background_wrapper;
 pub mod broker;
+pub mod broker_usage;
 pub mod change;
 pub mod claim_defer;
 pub mod claim_hold;

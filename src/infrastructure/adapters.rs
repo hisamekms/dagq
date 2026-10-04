@@ -3113,7 +3113,13 @@ impl AgentProvider for ClaudeCode {
     fn command(&self, run: &TaskRun, prompt: &str) -> Result<CommandSpec> {
         let run_dir = Path::new(run.run_dir().context("missing run directory")?);
         let settings = run_dir.join("claude-settings.json");
-        write_settings(&settings, ActorRole::Worker, None, &run.idle_marker_path()?)?;
+        write_settings(
+            &settings,
+            ActorRole::Worker,
+            None,
+            &run.idle_marker_path()?,
+            direct_tools_log(run_dir).as_deref(),
+        )?;
         let mut command = CommandSpec::new(&self.executable);
         command
             .current_dir(run.worktree_path().context("missing worktree")?)
@@ -3135,7 +3141,13 @@ impl AgentProvider for ClaudeCode {
     fn resume_command(&self, run: &TaskRun) -> Result<CommandSpec> {
         let run_dir = Path::new(run.run_dir().context("missing run directory")?);
         let settings = run_dir.join("claude-settings.json");
-        write_settings(&settings, ActorRole::Worker, None, &run.idle_marker_path()?)?;
+        write_settings(
+            &settings,
+            ActorRole::Worker,
+            None,
+            &run.idle_marker_path()?,
+            direct_tools_log(run_dir).as_deref(),
+        )?;
         let mut command = CommandSpec::new(&self.executable);
         command
             .current_dir(run.worktree_path().context("missing worktree")?)
@@ -3162,6 +3174,7 @@ impl AgentProvider for ClaudeCode {
             ActorRole::Planner,
             Some(planner.origin),
             &planner.idle_marker(),
+            None,
         )?;
         let mut command = CommandSpec::new(&self.executable);
         command
@@ -3233,6 +3246,7 @@ impl AgentProvider for ClaudeCode {
             None,
             // The review has no hook to write a marker with.
             run_dir,
+            None,
         )?;
         let mut command = CommandSpec::new(&self.executable);
         command
@@ -3350,7 +3364,14 @@ impl AgentProvider for ClaudeCode {
         crate::application::RunFiles::write(
             &super::run_files::LocalRunFiles,
             &settings,
-            headless_worker_settings(&permission_deny(target.role))?.as_bytes(),
+            with_direct_tool_hooks(
+                headless_worker_settings(&permission_deny(target.role))?,
+                (target.role == ActorRole::Worker)
+                    .then(|| direct_tools_log(target.dir))
+                    .flatten()
+                    .as_deref(),
+            )?
+            .as_bytes(),
         )
         .with_context(|| format!("write {}", settings.display()))?;
         let mut command = CommandSpec::new(&self.executable);
@@ -3519,13 +3540,15 @@ fn review_disallowed_tools(access: JobAccess) -> Vec<&'static str> {
 /// Write the settings of the agent of `role` (a planner's by its
 /// `origin`) whose idle marker is `idle_marker` to `path`: the one place
 /// the role's settings ([`agent_settings`]) and the `permissions.deny` of
-/// its policy ([`permission_deny`]) become Claude Code's. Settings of none
-/// write nothing.
+/// its policy ([`permission_deny`]) become Claude Code's, with the hooks
+/// counting the built-in tools to `direct_tools` when it is given
+/// ([`with_direct_tool_hooks`]). Settings of none write nothing.
 fn write_settings(
     path: &Path,
     role: ActorRole,
     origin: Option<PlannerOrigin>,
     idle_marker: &Path,
+    direct_tools: Option<&Path>,
 ) -> Result<()> {
     let deny = permission_deny(role);
     let text = match agent_settings(role, origin) {
@@ -3536,8 +3559,60 @@ fn write_settings(
             runtime_session_settings(idle_marker, &deny)?
         }
     };
+    let text = with_direct_tool_hooks(text, direct_tools)?;
     crate::application::RunFiles::write(&super::run_files::LocalRunFiles, path, text.as_bytes())
         .with_context(|| format!("write {}", path.display()))
+}
+
+/// Where a worker's hooks count its built-in tools: the run dir's
+/// [`DIRECT_TOOLS_LOG`](crate::domain::broker_usage::DIRECT_TOOLS_LOG),
+/// only when the supervisor gave the run the broker's tools (its
+/// `<run dir>/broker/mcp.json` is there, the file the executor hands to
+/// the agent). A run without them (`disabled`, `broker_unavailable`)
+/// counts nothing and its settings stay as they were.
+fn direct_tools_log(run_dir: &Path) -> Option<PathBuf> {
+    crate::application::broker_run::mcp_config_path(run_dir)
+        .is_file()
+        .then(|| run_dir.join(crate::domain::broker_usage::DIRECT_TOOLS_LOG))
+}
+
+/// `settings` (Claude Code's settings as JSON) with, when `log` is given,
+/// a `PreToolUse` hook for each of
+/// [`DIRECT_TOOLS`](crate::domain::broker_usage::DIRECT_TOOLS) (matched by
+/// its exact name) appending that name alone to `log`: never the tool's
+/// input (paths, contents, commands). The hook reads its input away,
+/// prints nothing and always exits 0, so it never holds the tool up
+/// (Claude Code blocks a tool on a `PreToolUse` hook's exit 2), whatever
+/// shell runs it. A log that cannot be written loses the count only.
+pub fn with_direct_tool_hooks(settings: String, log: Option<&Path>) -> Result<String> {
+    let Some(log) = log else {
+        return Ok(settings);
+    };
+    let log = shell_quote(&path_text(log)?);
+    let mut value: Value = serde_json::from_str(&settings)?;
+    let hooks: Vec<Value> = crate::domain::broker_usage::DIRECT_TOOLS
+        .iter()
+        .map(|tool| {
+            serde_json::json!({
+                "matcher": tool,
+                "hooks": [{
+                    "type": "command",
+                    "command": format!("cat > /dev/null; printf '%s\\n' {tool} >> {log} 2> /dev/null; true"),
+                    "timeout": 10
+                }]
+            })
+        })
+        .collect();
+    let object = value
+        .as_object_mut()
+        .context("Claude Code's settings are not an object")?;
+    let all = object
+        .entry("hooks")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    all.as_object_mut()
+        .context("Claude Code's hooks are not an object")?
+        .insert("PreToolUse".to_owned(), Value::Array(hooks));
+    Ok(serde_json::to_string_pretty(&value)?)
 }
 
 /// Settings of the headless review: no hooks, the `permissions.deny` of
@@ -4854,6 +4929,109 @@ mod tests {
             serde_json::json!({"permissions": {"deny": permission_deny(ActorRole::Inbox)}})
         );
         assert!(deny_of(&path).contains(&cmux));
+    }
+
+    /// A worker given the broker's tools (its `<run dir>/broker/mcp.json`)
+    /// gets a `PreToolUse` hook per built-in file or command tool, in its
+    /// session's, its resume's and its headless turns' settings; one
+    /// without them (`disabled`) and a planner get none. The hook appends
+    /// the tool's name alone, reads its input away and exits 0.
+    #[test]
+    fn only_a_worker_with_the_brokers_tools_counts_its_built_in_tools() {
+        use crate::domain::broker_usage::{DIRECT_TOOLS, DIRECT_TOOLS_LOG};
+        let claude = ClaudeCode {
+            executable: "/bin/claude".into(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path().join("run");
+        fs::create_dir_all(&run_dir).unwrap();
+        let mut record = record(None);
+        record.worktree_path = Some(dir.path().join("worktree").to_string_lossy().into_owned());
+        record.run_dir = Some(run_dir.to_string_lossy().into_owned());
+        record.log_path = Some(run_dir.join("log").to_string_lossy().into_owned());
+        let run = TaskRun::restore(record).unwrap();
+        let read = |name: &str| -> Value {
+            serde_json::from_str(&fs::read_to_string(run_dir.join(name)).unwrap()).unwrap()
+        };
+        let all = || -> Vec<Value> {
+            claude.command(&run, "go").unwrap();
+            let session = read("claude-settings.json");
+            claude.resume_command(&run).unwrap();
+            let resume = read("claude-settings.json");
+            claude
+                .turn_command(
+                    &TurnTarget::of_run(&run).unwrap(),
+                    "go",
+                    crate::domain::turn::TurnSession::New("s"),
+                )
+                .unwrap();
+            vec![session, resume, read(HEADLESS_SETTINGS)]
+        };
+        for settings in all() {
+            assert!(settings["hooks"].get("PreToolUse").is_none(), "{settings}");
+        }
+
+        let config = crate::application::broker_run::mcp_config_path(&run_dir);
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(&config, "{}").unwrap();
+        let log = run_dir.join(DIRECT_TOOLS_LOG);
+        for settings in all() {
+            let hooks = settings["hooks"]["PreToolUse"].as_array().unwrap();
+            let matchers: Vec<&str> = hooks
+                .iter()
+                .map(|hook| hook["matcher"].as_str().unwrap())
+                .collect();
+            assert_eq!(matchers, DIRECT_TOOLS);
+            // The session's own hooks stay.
+            assert_eq!(
+                settings["hooks"].get("Stop").is_some(),
+                settings["hooks"].get("UserPromptSubmit").is_some()
+            );
+            for hook in hooks {
+                let command = hook["hooks"][0]["command"].as_str().unwrap();
+                let mut child = Command::new("sh")
+                    .args(["-c", command])
+                    .stdin(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                std::io::Write::write_all(
+                    child.stdin.as_mut().unwrap(),
+                    br#"{"tool_name":"x","tool_input":{"command":"secret"}}"#,
+                )
+                .unwrap();
+                drop(child.stdin.take());
+                assert!(child.wait().unwrap().success(), "{command}");
+            }
+        }
+        let expected: String = DIRECT_TOOLS
+            .repeat(3)
+            .iter()
+            .map(|tool| format!("{tool}\n"))
+            .collect();
+        assert_eq!(fs::read_to_string(&log).unwrap(), expected);
+
+        // A planner's turn in a dir with the file counts nothing.
+        let planner_dir = dir.path().join("planner");
+        let planner_config = crate::application::broker_run::mcp_config_path(&planner_dir);
+        fs::create_dir_all(planner_config.parent().unwrap()).unwrap();
+        fs::write(&planner_config, "{}").unwrap();
+        claude
+            .turn_command(
+                &TurnTarget {
+                    role: ActorRole::Planner,
+                    dir: &planner_dir,
+                    cwd: &planner_dir,
+                    debug_log: Some(&planner_dir.join("log")),
+                    plugin_dir: None,
+                },
+                "go",
+                crate::domain::turn::TurnSession::New("s"),
+            )
+            .unwrap();
+        let planner: Value =
+            serde_json::from_str(&fs::read_to_string(planner_dir.join(HEADLESS_SETTINGS)).unwrap())
+                .unwrap();
+        assert!(planner.get("hooks").is_none(), "{planner}");
     }
 
     #[test]

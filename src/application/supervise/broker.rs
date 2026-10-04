@@ -43,6 +43,7 @@ use crate::application::broker_run::{Grant, RENEW_BEFORE_SECS, RunTokens};
 use crate::domain::broker::{
     BROKER_ATTENTION_KINDS, BROKER_RESTART, BROKER_STOP_REQUESTED, BROKER_UNHEALTHY, BrokerMode,
 };
+use crate::domain::broker_usage::{ToolUsage, records_tool_use};
 
 /// How often the health is looked at, and a failed start tried again.
 pub const BROKER_HEALTH_INTERVAL: Duration = Duration::from_secs(30);
@@ -448,9 +449,16 @@ impl Supervisor<'_> {
     }
 
     /// Revoke every token of `run` (`reason` in `broker_token_revoked`).
-    fn broker_revoke(&mut self, tokens: &dyn RunTokens, run: &TaskRun, reason: &str) {
+    /// Whether one was; `None` when the revoke failed.
+    fn broker_revoke(
+        &mut self,
+        tokens: &dyn RunTokens,
+        run: &TaskRun,
+        reason: &str,
+    ) -> Option<bool> {
         match tokens.revoke(run.id(), run.run_dir().map(Path::new)) {
             Ok(revoked) => {
+                let any = !revoked.is_empty();
                 for jti in revoked {
                     info!(run_id = %run.id(), jti, reason, "run {}'s broker token is revoked ({reason})", run.id());
                     self.record_run_broker(
@@ -459,9 +467,26 @@ impl Supervisor<'_> {
                         json!({"jti": jti, "reason": reason}),
                     );
                 }
+                Some(any)
             }
             Err(error) => {
                 warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}'s broker token could not be revoked: {error:#}", run.id());
+                None
+            }
+        }
+    }
+
+    /// Record the ended `run`'s `broker_tool_use`: its calls through the
+    /// broker and around it ([`crate::domain::broker_usage`]). Counts that
+    /// cannot be read are a warning, never a hold on the sweep.
+    fn broker_record_usage(&mut self, run: &TaskRun, usage: Result<ToolUsage>) {
+        match usage {
+            Ok(usage) => {
+                info!(run_id = %run.id(), brokered = usage.brokered, direct = usage.direct, "run {} called the broker {} times and the built-in tools {} times", run.id(), usage.brokered, usage.direct);
+                self.record_run_broker(run.id(), EventKind::BrokerToolUse, usage.payload());
+            }
+            Err(error) => {
+                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}'s use of the broker could not be counted: {error:#}", run.id());
             }
         }
     }
@@ -510,7 +535,22 @@ impl Supervisor<'_> {
                 continue;
             };
             if broker_run_ended(run.status()) {
-                self.broker_revoke(&*port.tokens, &run, run.status().as_str());
+                // Counted before the revoke, recorded once with it
+                // (`records_tool_use`): the marks left are read only
+                // when the revoke failed.
+                let usage = port.tokens.usage(&run);
+                let revoked = self.broker_revoke(&*port.tokens, &run, run.status().as_str());
+                let marks_left = match revoked {
+                    Some(_) => None,
+                    None => port
+                        .tokens
+                        .held()
+                        .ok()
+                        .map(|held| held.iter().any(|token| token.run_id == run.id().as_str())),
+                };
+                if records_tool_use(revoked, marks_left) {
+                    self.broker_record_usage(&run, usage);
+                }
                 continue;
             }
             // A mark the run's token file does not hold (an older token
@@ -588,7 +628,10 @@ impl Supervisor<'_> {
             let id = RunId::new(&run_id).ok();
             match self.broker_sweep_run(&run_id) {
                 Err(_) => continue,
-                Ok(Some(run)) => self.broker_revoke(tokens, &run, MODE_DISABLED),
+                Ok(Some(run)) => {
+                    // `disabled` counts no tool use (goal 59's (2)).
+                    self.broker_revoke(tokens, &run, MODE_DISABLED);
+                }
                 Ok(None) => {
                     warn!(
                         run = run_id,

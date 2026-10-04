@@ -8,7 +8,7 @@ use serde_json::{Map, Value, json};
 
 use crate::domain::{
     GoalDetail, OBSERVATION_KIND, RunEvent, TaskDetail,
-    background_wrapper::current_background_session, reason,
+    background_wrapper::current_background_session, broker_usage, reason,
 };
 
 /// The one key of a command's value that is printed as is instead of as
@@ -92,6 +92,11 @@ pub fn task_detail(detail: &TaskDetail, events: usize) -> Value {
             // (`run log`, ADR-t1404-1 decision 6).
             if let Some(session) = current_background_session(&events) {
                 run.insert("background".into(), json!(session));
+            }
+            // Its calls through the resource broker and around it, when
+            // its end counted them (`broker_tool_use`).
+            if let Some(usage) = broker_usage::latest_tool_use(&events, latest.id()) {
+                run.insert("broker_tool_use".into(), usage);
             }
             Value::Object(run)
         })
@@ -342,6 +347,7 @@ mod tests {
         assert_eq!(runs[0]["truncated"], true);
         assert!(runs[0].get("run_dir").is_none());
         assert!(runs[0]["result_commit"].is_null());
+        assert!(runs[0].get("broker_tool_use").is_none());
         assert_eq!(view["processes"].as_array().unwrap().len(), 1);
         assert_eq!(view["processes"][0]["run_id"], "b");
         assert_eq!(view["events_total"], 13);
@@ -361,6 +367,41 @@ mod tests {
                    "actor": {"role": "supervisor", "id": "supervisor:9",
                              "requested_by": "review-job:b:1"}})
         );
+    }
+
+    /// The latest run carries its latest `broker_tool_use` whole: the
+    /// brokered and the direct counts side by side.
+    #[test]
+    fn task_detail_shows_the_latest_runs_brokered_and_direct_counts() {
+        let usage = |direct: u64| {
+            json!({"brokered": 2, "brokered_by_op": {"fs.read": 2},
+                   "direct": direct, "direct_by_tool": {"Bash": direct}})
+        };
+        let tool_use = |id: i64, run_id: &str, direct: u64| RunEvent {
+            run_id: Some(RunId::new(run_id).unwrap()),
+            kind: crate::domain::event_kind::BROKER_TOOL_USE.into(),
+            ..event(id, usage(direct))
+        };
+        let detail = TaskDetail {
+            membership_judgements: Vec::new(),
+            task: task("short"),
+            dependencies: vec![],
+            goal_dependencies: vec![],
+            duplicate_of: None,
+            duplicates: Vec::new(),
+            origin: None,
+            follow_up_drafts: Vec::new(),
+            runs: vec![run("a"), run("b")],
+            events: vec![
+                tool_use(1, "b", 1),
+                tool_use(2, "b", 3),
+                tool_use(3, "a", 9),
+            ],
+            processes: vec![],
+        };
+        let view = task_detail(&detail, 10);
+        assert_eq!(view["runs"][0]["id"], "b");
+        assert_eq!(view["runs"][0]["broker_tool_use"], usage(3));
     }
 
     #[test]

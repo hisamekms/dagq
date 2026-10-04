@@ -4,8 +4,8 @@ type: design
 title: Resource broker
 status: draft
 created: 2026-09-28
-updated: 2026-10-04 # task 1189
-last_verified: 2026-10-04 # task 1189
+updated: 2026-10-05 # task 839
+last_verified: 2026-10-05 # task 839
 scope: runtime
 tags:
   - security
@@ -80,6 +80,7 @@ rootの`Cargo.toml`のpackageは`dagq`のまま（ADR-t827-1決定1）。workspa
 - task 1125: `disabled`に戻したqueueのsupervisorが、`preferred`で残った全てのtoken・token file・`mcp.json`をpodmanなしで`mode_disabled`で失効させ、resumeに道具を渡さない（`Ports::broker_leftovers`、`Supervisor::broker_sweep_disabled`、testは`tests/it/runtime_broker.rs`の`a_disabled_supervisor_revokes_the_tokens_an_earlier_mode_left`と`a_disabled_supervisor_resumes_a_run_without_the_tools_left_to_it`）
 - task 1141: `disabled`のsweepが印の無いtoken fileのrunも失効させ（`RunTokens::token_files`）、非対話のrunのturnの要求の前にも残ったものを消す（`Supervisor::broker_before_turn`、testは`tests/it/runtime_broker.rs`の`a_disabled_answer_turn_gets_no_unmarked_tools_and_token_file`・`a_disabled_answer_turn_gets_no_unmarked_tools`・`a_disabled_supervisor_removes_an_unmarked_token_file_of_no_run`）
 - task 1126: `ensure_machine`が、startの失敗か接続が答えない（`podman --connection dagq info`）dagqのmachineを1回だけstopとstartでやり直し、`MachineOutcome`の`restarted`・`restart_reason`に残す（unit testは`src/application/broker.rs`の`a_start_that_fails_with_eof_is_stopped_and_started_once_more`・`a_started_machine_that_does_not_answer_is_restarted_once`・`a_restart_that_does_not_help_is_machine_failed_after_one_try`）
+- task 839: 組み込みの道具の数（下の「組み込みの道具の数」）。`src/domain/broker_usage.rs`（`DIRECT_TOOLS`・`DIRECT_TOOLS_LOG`・`ToolUsage`）、workerのsettingsの`PreToolUse`のhook（`infrastructure::adapters::with_direct_tool_hooks`）、`RunTokens::usage`、sweepの`broker_tool_use`と`show`の`runs[0].broker_tool_use`
 
 ### protocolの型
 
@@ -238,7 +239,7 @@ fsのopの細部（task 831）:
 - 有効な印: `<queue dir>/broker/active/<jti>`（中身はrun_id）。発行で作り、失効で消す。brokerは要求ごとに印の有無を見る
 - 期限: `exp = iat + 12時間`。supervisorは各pass（`Supervisor::broker_sweep`）で、残りが4時間（`RENEW_BEFORE_SECS`）を切った生きているrunのtokenを、brokerが使えるときに発行し直す（新しいjtiの印を作ってtoken fileと`mcp.json`を置き換え、古い印を消す。`broker_token_issued`に`renews`（古いjti）、`broker_token_revoked`に`reason: renewed`）。clientは要求ごとにtoken fileを読み直す
 - 失効: supervisorは各passのclaimの前（drainと引き継ぎの間も）と止まる直前（`supervise --once`の最後のpassで終わったrunのため）に有効な印を全て見て（`broker_sweep`）、runが終わっていれば（statusが`integrated`・`succeeded`・`failed`・`interrupted`。taskの`cancel`・leaseの喪失・`recover`もrunをこのどれかにする）そのrunの印を全て消し、`<queue dir>/broker/tokens/<run id>`と`<run dir>/broker/`を消して、印ごとに`broker_token_revoked`（`reason`はrunのstatus）を残す。queueが知らないrunの印はtoken fileとともに消し、eventは残さない。`preferred`と`disabled`のどちらも、runの読み取りが失敗したときは不在と区別し、warnを出してそのpassでは飛ばす（task 1142）。そのrunの印・token file・`<run dir>/broker/mcp.json`は消さず、`broker_token_revoked`も残さず、次のpassで読み直す。resumeの発行し直しも前の印を消す。supervisorが止まっている間に終わったrunの印は、次の起動の最初のpassか期限まで残る（その間そのtokenは使える）。modeが`disabled`のsupervisor（`preferred`から戻したqueue）はpodmanを探しも呼びもせず、fileだけを掃除する（task 1125）: 同じ時点に有効な印を全て見て、生きているrunのものも含めてそのrunの印・token file・`<run dir>/broker/`を消し、印ごとに`broker_token_revoked`（`reason: mode_disabled`）を残す（`Supervisor::broker_sweep_disabled`）。起動とresumeの前の`broker_grant`も、`disabled`ではそのrunに残ったものを同じく消す（`mode_disabled`）ので、executorが`mcp.json`を見つけて`--mcp-config`と`--allowedTools mcp__dagq-broker`を渡すことも、promptに`BROKER_TOOLS`の段落が載ることもない。印の無いものも残りうる（途中で失敗した失効、queueの知らないrunの`revoke`など）ので（task 1141）、`disabled`のsweepは有効な印に加えて`<queue dir>/broker/tokens/`のtoken file（印の有無に依らない。`RunTokens::token_files`）の名のrunも同じく失効させ（queueが知らないrunならtoken fileと印を消す）、非対話のrunのturnの要求（`worker_question`の答え・reviewの差し戻し・resumeなど、supervisorが`turns/`に書く全てのturn。`request_turn`）の前にも`broker_grant`と同じくそのrunに残ったものを消す（`Supervisor::broker_before_turn`）。印が無ければ`broker_token_revoked`は残さない。どちらもpodmanを探しも呼びもしない。`preferred`ではturnの前に何もしない（runは発行された道具を持ち続ける）。印の無い`disabled`のqueueでは何も書かず、workerの起動のenv・settings・引数は変わらない
-- event: runのevent `broker_token_issued`（`jti`・`capabilities`・`exp`、発行し直しなら`renews`）・`broker_token_revoked`（`jti`・`reason`）・`broker_unavailable`（`reason`・`message`）。どれもattentionではない。tokenの値は残さない（`tests/it/runtime_broker.rs`が、queueのdir・run dir・queue DB・workspaceのenvにtokenの値が無いことを確かめる）
+- event: runのevent `broker_token_issued`（`jti`・`capabilities`・`exp`、発行し直しなら`renews`）・`broker_token_revoked`（`jti`・`reason`）・`broker_unavailable`（`reason`・`message`）・`broker_tool_use`（下の「組み込みの道具の数」）。どれもattentionではない。tokenの値は残さない（`tests/it/runtime_broker.rs`が、queueのdir・run dir・queue DB・workspaceのenvにtokenの値が無いことを確かめる）
 - 未知のcapabilityを含むtokenは全体を拒む（fail closed）
 
 ### 実装（protocolとdagq）
@@ -483,7 +484,7 @@ task 836で測った（2026-09-28、podman 6.1.2、applehv）: 起点の値（CP
   設計の初めの案の`write_file`（`path`・`content`）に、protocolの`WriteRequest`にある`create_dirs`を足した（新しいdirのファイルを作るため）
 - 結果: 成功は`{"content":[{"type":"text","text":<opの応答のJSON>}],"isError":false}`。`exec`は子のexit codeに関わらず成功で、`exit_code`は応答の欄。brokerの拒否・失敗は`isError: true`で、textと`structuredContent`にbrokerのerror本体`{"error":{"code","message","request_id"}}`をそのまま入れる（codeは`unauthorized`・`capability_denied`・`workspace_violation`・`timeout`・`output_limit`・`backend_error`・`invalid_request`）。client側の失敗も`isError: true`で、`{"client_error":{"kind","message"}}`（`kind`は`invalid_arguments`（入力がschemaに合わずbrokerに送らない）・`config`・`transport`・`protocol`）。tokenの値はどこにも出さない
 - 切り詰め: 応答の最上位の文字列の欄（`read_file`の`content`、`git_diff`の`diff`、`git_show`の`show`、`exec`の`stdout`・`stderr`）は40000 byte（`TEXT_LIMIT_BYTES`、UTF-8の文字の境で切る）、最上位の配列（`list_dir`と`git_status`の`entries`、`git_log`の`commits`）は1000件（`ITEM_LIMIT`）で切り、切った欄を`mcp_cut`（`{"<欄>":{"kept":N,"total":M}}`、byteか件数）で示す。brokerの上限（`fs_limit_bytes`・`output_limit_bytes`）はそれより前にserverが強制し、`read_file`・`git_diff`・`git_show`の`truncated`はbroker側で切ったことを示す
-- server単位の`mcp__dagq-broker`を許す: settingsの`permissions.allow`ではなく、Claude Codeの引数`--allowedTools mcp__dagq-broker`で渡す（settingsのfileは`mcp.json`の有無で変わらず、`disabled`のrunのsettingsは今までと同じ）。`preferred`では組み込みの道具を拒まない
+- server単位の`mcp__dagq-broker`を許す: settingsの`permissions.allow`ではなく、Claude Codeの引数`--allowedTools mcp__dagq-broker`で渡す（settingsの`permissions`は`mcp.json`の有無で変わらず、`disabled`のrunのsettingsは今までと同じ。`mcp.json`のあるrunのsettingsには組み込みの道具を数える`PreToolUse`のhookだけが足される。下の「組み込みの道具の数」）。`preferred`では組み込みの道具を拒まない
 - workerのpromptに、brokerの道具があるとき（runのproviderがClaude Codeで`mcp.json`がある）だけ「ファイルの読み書き・置換、許されたコマンド、run branchのgitはbrokerの道具を優先し、拒まれたか届かなければ組み込みの道具を使う」段落（`prompt::BROKER_TOOLS`）を末尾に足す。claimでは道具を渡せたときにpromptを書き直す。tokenの値もtoken fileの場所も書かない
 - 人の診断のCLI（task 834）: `dagq-broker-client [--url URL] [--token-file FILE] <command>`。`--url`と`--token-file`が無ければ`DAGQ_BROKER_URL`と`DAGQ_BROKER_TOKEN_FILE`を読む。tokenの値は引数にもenvにも取らず、出力にも出さない。token fileは要求ごとに読み直す
   - URLは`http://<loopbackのaddress>:<port>`だけ（`localhost`は`127.0.0.1`、末尾の`/`は許す）。https・path・user・loopbackでないaddress・port 0は設定の誤りとして送らない（tokenをhostの外へ送らない）
@@ -504,6 +505,18 @@ task 836で測った（2026-09-28、podman 6.1.2、applehv）: 起点の値（CP
   - `--since`・`--until`は`events`と同じUTCの`YYYY-MM-DD`（その日の0時）か`YYYY-MM-DDTHH:MM:SS[.fff]Z`。`--since`はその時刻を含み、`--until`は含まない。行の`ts`を時刻として比べる。日のファイルは、名前の日付が`--since`の日から`--until`の直前の時刻の日までのものだけを読む（`--until`がその日の0時ならその日のファイルは読まない。読む間に消えたファイルは無いものとする）（名前が`<YYYY-MM-DD>.jsonl`でないファイルは読まない）。`--run`は`run_id`、`--task`は`task_id`の一致
   - 出力: `{"entries": [...], "skipped": N, "dropped": M}`。`entries`は合う行を古い順に並べたJSONの配列で、各要素はbrokerが書いた行のJSONのobjectそのまま（欄を足さず削らない。objectの欄の順はJSONの表現で変わりうる）。`skipped`は読んだ日のファイルのうち、JSONのobjectとして読めない行か`ts`が時刻として読めない行（壊れた行と、書きかけで途中で切れた末尾の行）の数で、飛ばして続ける（空行は数えない）。`--limit`（既定1000、`DEFAULT_AUDIT_LIMIT`）は合う行のうち新しいN行を残し、`dropped`は残さなかった古い行の数
   - auditのdirが無ければ`{"entries": [], "skipped": 0, "dropped": 0}`
+
+## 組み込みの道具の数
+
+goal 59の(2)、task 839。`preferred`のあいだ、workerがbrokerを通さずに組み込みの道具で行った操作をrunごとに数え、どこがbrokerに移っていないかを見えるようにする（`src/domain/broker_usage.rs`）。
+
+- 数える条件: brokerの道具を渡したrun（`<run dir>/broker/mcp.json`があり、executorが`--mcp-config`を渡すもの）だけ。`disabled`と、`broker_unavailable`で道具なしのrunはhookを持たず、settingsは今までと同じ（印の無い`disabled`のqueueで何も変わらないことは上の「token」のとおり）。`required`で拒まれた組み込みの道具の試みも、Claude Codeが`PreToolUse`のhookを呼ぶものは同じく数える
+- hook: workerのsession・resume・非対話のturnのsettings（`claude-settings.json`・`claude-headless-settings.json`）に、`DIRECT_TOOLS`（`Bash`・`Edit`・`Glob`・`Grep`・`LS`・`MultiEdit`・`NotebookEdit`・`Read`・`Write`）の1つずつに名前の完全一致の`matcher`を持つ`PreToolUse`のhookを足す（`infrastructure::adapters::with_direct_tool_hooks`）。hookは入力を読み捨て、道具の名前だけを`<run dir>/broker-direct-tools.log`（`DIRECT_TOOLS_LOG`。tokenの失効が消す`<run dir>/broker/`の外）に1行追記し、何も出さず必ずexit 0で終わる（exit 2は道具を止めるため）。書けなければ数が欠けるだけ。plannerのturnとreviewには足さない
+- 残さないもの: 道具の入力（path・ファイルの中身・コマンドの文字列）。制御側の`Bash`（`dagq ask`・receiptの書き込み）も`Bash`として数え、中身で分けない
+- 記録: runが終わってsupervisorがそのtokenを失効させるsweep（上の「token」の失効。`reason`がrunのstatusのもの）で、失効の前に数え（`RunTokens::usage`）、1つ以上の印を失効させたときだけrunのevent `broker_tool_use`を1回残す（印が残ったまま失効が失敗すれば次のpassで数え直す。印を消した後のファイルの削除で失敗したときは、次のpassがそのrunを見ないので、そのrunの印が無ければその場で残す。判定は`domain::broker_usage::records_tool_use`、記録は`Supervisor::broker_record_usage`）。数が読めなければwarnだけで、sweepは止めない。workerが書けるhookのlogは、run dirのほかのfileと同じくlinkを辿らずに開いた記述子で、通常のfileだけを上限（`agent_dir::FILE_BYTES`）付きで読み、FIFOのopenで待たない（[非対話のworker](supervisor-lifecycle/headless-worker.md)の「run dirの`turns/`」、task 1184）。linkやFIFOに置き換えられていれば読めないものとしてwarnになり、そのrunの`broker_tool_use`は残らない。`disabled`のsweep（`mode_disabled`）と発行し直し（`reissued`・`renewed`）は残さない
+- payload: `brokered`（auditのうちそのrunの`run_id`の行で、`op`があり`health`でないものの数。拒まれた要求も数える）・`brokered_by_op`（`op`ごと）・`direct`（hookの行のうち`DIRECT_TOOLS`の名前のもの。ほかの行はworkerが書けるので数えない）・`direct_by_tool`（道具ごと）。auditはrunの`created_at`の日（UTC）からの日のファイルを読む（`broker_admin::audit`）
+- 出口: `show`（既定の圧縮形）が最新runの`runs[0].broker_tool_use`に、そのrunの最新の`broker_tool_use`のpayloadをそのまま載せる（`view::task_detail`、`domain::broker_usage::latest_tool_use`）。`--full`と`events`はeventとして出す。`status`と`doctor`には足さない（backend・enforcementはtask 738、brokerの`mode`と`health`は下の「status と doctor」）
+- test: `domain::broker_usage`のunit test（数え方と、失効と一緒に1回だけ残す判定）、`infrastructure::broker_token`の`usage_reads_the_log_only_as_a_regular_file_and_never_waits`（logのlink・`/dev/zero`へのlink・FIFOを待たずに拒む）、`infrastructure::adapters`の`only_a_worker_with_the_brokers_tools_counts_its_built_in_tools`（`mcp.json`の有無とrole、hookの実行）、`view`の`task_detail_shows_the_latest_runs_brokered_and_direct_counts`、`tests/it/runtime_broker.rs`の`a_run_that_fails_or_is_interrupted_loses_its_token`（終わったrunの`broker_tool_use`と`show`）と`a_disabled_supervisor_revokes_the_tokens_an_earlier_mode_left`（`disabled`は数えない）
 
 ## mode と設定
 

@@ -24,7 +24,10 @@ use dagq_broker_protocol::{
 };
 
 use crate::application::broker_run::{Grant, HeldToken, IssuedRun, RunTokens};
-use crate::domain::{ActorContext, ActorRole, RunId, TaskRun};
+use crate::domain::{
+    ActorContext, ActorRole, RunId, TaskRun,
+    broker_usage::{DIRECT_TOOLS_LOG, ToolUsage},
+};
 
 /// The broker's dir under the queue dir.
 pub const BROKER_DIR: &str = "broker";
@@ -180,6 +183,8 @@ pub const TOKENS_DIR: &str = "tokens";
 /// The active marks under [`BROKER_DIR`] (`<jti>` holding the run's id),
 /// which the broker reads for every request.
 pub const ACTIVE_DIR: &str = "active";
+/// The broker's audit's dir in [`BROKER_DIR`].
+const AUDIT_DIR: &str = "audit";
 /// The mode of a token file and an active mark.
 pub const TOKEN_MODE: u32 = 0o600;
 
@@ -376,6 +381,42 @@ impl RunTokens for QueueRunTokens {
         runs.sort();
         Ok(runs)
     }
+
+    fn usage(&self, run: &TaskRun) -> Result<ToolUsage> {
+        let direct = match run.run_dir() {
+            Some(dir) => {
+                // The worker writes in its run dir: the log is read as
+                // the supervisor reads every run file there, through its
+                // pinned dir without following a link, only as a regular
+                // file opened without waiting (a FIFO never holds the
+                // sweep) and up to `agent_dir::FILE_BYTES`. Anything else
+                // is an error, which the sweep warns of.
+                let log = Path::new(dir).join(DIRECT_TOOLS_LOG);
+                match super::agent_dir::read_file(&log).and_then(super::agent_dir::read_bounded) {
+                    Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                    Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
+                    Err(error) => {
+                        return Err(error).with_context(|| format!("read {}", log.display()));
+                    }
+                }
+            }
+            None => String::new(),
+        };
+        let dir = self.queue_dir.join(BROKER_DIR).join(AUDIT_DIR);
+        let audit = crate::application::broker_admin::audit(
+            &dir,
+            &crate::application::broker_admin::AuditQuery {
+                run: Some(run.id().as_str().to_owned()),
+                // The day files from the run's start on.
+                since: crate::domain::stats::timestamp_millis(run.created_at())
+                    .map(|millis| millis - millis.rem_euclid(86_400_000)),
+                limit: Some(usize::MAX),
+                ..Default::default()
+            },
+        )
+        .with_context(|| format!("read the broker's audit {}", dir.display()))?;
+        Ok(ToolUsage::count(&direct, &audit.entries, run.id()))
+    }
 }
 
 #[cfg(test)]
@@ -473,6 +514,73 @@ mod tests {
         assert!(!debug.contains(issued.token.expose()), "{debug}");
         let key_bytes = fs::read(key_path(queue.path())).unwrap();
         assert!(!debug.contains(&format!("{key_bytes:?}")), "{debug}");
+    }
+
+    /// A run's usage counts its log and its audit lines. The log, which
+    /// the worker can replace, is read only as a regular file: a link
+    /// (to a file or to `/dev/zero`) and a FIFO are refused at once, and
+    /// a missing log is no direct call.
+    #[test]
+    fn usage_reads_the_log_only_as_a_regular_file_and_never_waits() {
+        let queue = tempfile::tempdir().unwrap();
+        let run_dir = queue.path().join("runs/run-1");
+        fs::create_dir_all(&run_dir).unwrap();
+        let run = TaskRun::restore(crate::domain::RunRecord {
+            id: RunId::new("run-1").unwrap(),
+            task_id: TaskId::new(839),
+            status: crate::domain::RunStatus::Succeeded,
+            requested_provider: crate::domain::Provider::Claude,
+            actual_provider: crate::domain::Provider::Claude,
+            worker_mode: crate::domain::worker::WorkerMode::Headless,
+            base_commit: crate::domain::CommitSha::try_from("a".repeat(40)).unwrap(),
+            branch: None,
+            worktree_path: None,
+            workspace_id: None,
+            receipt_path: None,
+            log_path: None,
+            result_commit: None,
+            repo_path: None,
+            run_dir: Some(run_dir.to_string_lossy().into_owned()),
+            last_error: None,
+            workspace_closed_at: None,
+            created_at: "2026-10-05 00:00:00".into(),
+        })
+        .unwrap();
+        let tokens = QueueRunTokens {
+            queue_dir: queue.path().to_path_buf(),
+        };
+        let audit = queue.path().join(BROKER_DIR).join(AUDIT_DIR);
+        fs::create_dir_all(&audit).unwrap();
+        fs::write(
+            audit.join("2026-10-05.jsonl"),
+            "{\"ts\":\"2026-10-05T01:00:00.000Z\",\"run_id\":\"run-1\",\"op\":\"fs.read\"}\n",
+        )
+        .unwrap();
+        // No log: the audit's line only.
+        let usage = tokens.usage(&run).unwrap();
+        assert_eq!((usage.brokered, usage.direct), (1, 0));
+        let log = run_dir.join(DIRECT_TOOLS_LOG);
+        fs::write(&log, "Read\nBash\n").unwrap();
+        assert_eq!(tokens.usage(&run).unwrap().direct, 2);
+
+        // A link, to a regular file or to a device, is not followed.
+        let elsewhere = queue.path().join("elsewhere.log");
+        fs::write(&elsewhere, "Read\n").unwrap();
+        for target in [elsewhere.as_path(), Path::new("/dev/zero")] {
+            fs::remove_file(&log).unwrap();
+            std::os::unix::fs::symlink(target, &log).unwrap();
+            let error = format!("{:#}", tokens.usage(&run).unwrap_err());
+            assert!(error.contains(DIRECT_TOOLS_LOG), "{error}");
+        }
+        // A FIFO is refused without waiting for a writer.
+        fs::remove_file(&log).unwrap();
+        let fifo = std::ffi::CString::new(log.to_str().unwrap()).unwrap();
+        // SAFETY: a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let started = std::time::Instant::now();
+        let error = format!("{:#}", tokens.usage(&run).unwrap_err());
+        assert!(error.contains("not a regular file"), "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]

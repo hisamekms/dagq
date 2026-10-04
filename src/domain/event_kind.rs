@@ -53,6 +53,7 @@ event_kinds! {
     BrokerStopped => "broker_stopped",
     BrokerTokenIssued => "broker_token_issued",
     BrokerTokenRevoked => "broker_token_revoked",
+    BrokerToolUse => "broker_tool_use",
     BrokerUnavailable => "broker_unavailable",
     BrokerUnhealthy => "broker_unhealthy",
     BuildOutputsRemoved => "build_outputs_removed",
@@ -538,6 +539,10 @@ pub const AUTH_REQUIRED: &str = EventKind::AuthRequired.as_str();
 pub const AUTHORIZATION_DENIED: &str = EventKind::AuthorizationDenied.as_str();
 pub const AUTO_REPAIRED: &str = EventKind::AutoRepaired.as_str();
 pub const BACKEND_CALL_FAILED: &str = EventKind::BackendCallFailed.as_str();
+/// A run's calls through the resource broker and around it, by op and by
+/// built-in tool, recorded when its token is revoked at its end
+/// ([`super::broker_usage`]).
+pub const BROKER_TOOL_USE: &str = EventKind::BrokerToolUse.as_str();
 pub const BUILD_OUTPUTS_REMOVED: &str = EventKind::BuildOutputsRemoved.as_str();
 pub const CLEANUP_FAILED: &str = EventKind::CleanupFailed.as_str();
 /// What the runtime made of a review's `concern` (ADR-t451-1 decision 3):
@@ -862,6 +867,7 @@ mod tests {
             (EventKind::BrokerStopped, "broker_stopped"),
             (EventKind::BrokerTokenIssued, "broker_token_issued"),
             (EventKind::BrokerTokenRevoked, "broker_token_revoked"),
+            (EventKind::BrokerToolUse, "broker_tool_use"),
             (EventKind::BrokerUnavailable, "broker_unavailable"),
             (EventKind::BrokerUnhealthy, "broker_unhealthy"),
             (EventKind::BuildOutputsRemoved, "build_outputs_removed"),

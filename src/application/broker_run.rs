@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use crate::domain::{RunId, TaskRun};
+use crate::domain::{RunId, TaskRun, broker_usage::ToolUsage};
 
 /// The broker's dir in a run's dir.
 pub const RUN_BROKER_DIR: &str = "broker";
@@ -112,6 +112,11 @@ pub trait RunTokens: Send + Sync {
     fn held(&self) -> Result<Vec<HeldToken>>;
     /// The runs with a token file, whether a mark names it or not.
     fn token_files(&self) -> Result<Vec<String>>;
+    /// `run`'s calls through the broker (its audit lines) and around it
+    /// (the built-in tools its dir's
+    /// [`DIRECT_TOOLS_LOG`](crate::domain::broker_usage::DIRECT_TOOLS_LOG)
+    /// lists), from the day of the run's start.
+    fn usage(&self, run: &TaskRun) -> Result<ToolUsage>;
 }
 
 #[cfg(test)]

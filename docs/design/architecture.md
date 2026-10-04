@@ -4,8 +4,8 @@ type: design
 title: レイヤーとコンテキストの境界（contextごとの所有・判断・操作・公開するport・依存の向き・境界をまたぐtransaction・検査できる規則・今の違反）
 status: current
 created: 2026-10-04
-updated: 2026-10-04 # task 1662: the observation and analysis context points to the measurement design; task 1437
-last_verified: 2026-10-04 # task 1615; task 1437
+updated: 2026-10-05 # task 839: domain::broker_usage among the host operations modules; task 1662: the observation and analysis context points to the measurement design; task 1437
+last_verified: 2026-10-05 # task 839; task 1615; task 1437
 scope: system
 related:
   - adr-t1545-1
@@ -165,7 +165,7 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 
 **判断**（domain）
 
-`domain::broker`・`domain::disk`・`domain::sccache`・`domain::release_update`・`domain::queue_service`・`domain::host_metrics`・`domain::source_repository`。
+`domain::broker`・`domain::broker_usage`・`domain::disk`・`domain::sccache`・`domain::release_update`・`domain::queue_service`・`domain::host_metrics`・`domain::source_repository`。
 
 **操作**
 

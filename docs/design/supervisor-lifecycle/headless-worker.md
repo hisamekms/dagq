@@ -4,8 +4,8 @@ type: design
 title: "非対話のworker"
 status: current
 created: 2026-09-28
-updated: 2026-10-05 # task 1594: a turn that failed after its receipt goes to validation whatever order the receipt and the exit were seen in; task 1109: the tests of the recovery job stopping a command outside the turn group; task 1711: the tests of the headless planners' turns kept as the boundary; task 1596: a headless planner at the provider wall takes the provider retry before the requests behind it, and an answer is read only past the wall; task 1437
-last_verified: 2026-10-05 # task 1594; task 1109; task 1711; task 1596; task 1437
+updated: 2026-10-05 # task 839: the PreToolUse hooks counting the built-in tools of a run with the broker's tools; the broker_token row reads broker-direct-tools.log as a regular file; task 1594: a turn that failed after its receipt goes to validation whatever order the receipt and the exit were seen in; task 1109: the tests of the recovery job stopping a command outside the turn group; task 1711: the tests of the headless planners' turns kept as the boundary; task 1596: a headless planner at the provider wall takes the provider retry before the requests behind it, and an answer is read only past the wall; task 1437
+last_verified: 2026-10-05 # task 839; task 1594; task 1109; task 1711; task 1596; task 1437
 scope: runtime
 related:
   - adr-t1594-1
@@ -36,7 +36,7 @@ related:
 - **e2eはworkerのturnで流さない**（[ADR-t1233-2](../../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)）。ClaudeでもCodexでも、e2eが要るrunにはreviewのpassの後にruntimeがhostで流し（[Review](review.md#着地の前のe2e)）、落ちれば同じsessionの次のturnとしてresumeの依頼（`ResumeKind::E2e`）を送る。Codexのworkspace-writeのsandboxで走らないe2eを名前で除外する規則と、その除外を書くreceiptの`e2e`の書式（task 1206）は無い。
 - **session wrapperがturnを動かす**（決定3）。runのworkspaceのwrapper（`session`、[session wrapper](session-wrapper.md)）は、runの`worker_mode`が`headless`なら`src/application/headless_session.rs`の`Turns`でturnを1つずつ起動する。最初のturnは`prompt.txt`をpromptにし、sessionを始める（Claudeはsessionのidをrunのidにする`--session-id <run id>`、Codexは出力の`thread.started`でthreadのidを名乗り、wrapperがそれを`turn_session_identified`としてrunに記録する）。後のturnはsupervisorの依頼を1つずつ取り、同じsessionをresumeする（Claudeは`--resume <run id>`、Codexは`codex exec resume <記録したthreadのid>`）。依頼を待つ間もheartbeatを続け、agentのprocessは無い。
 - **supervisorは打ち込まずに依頼を書く**。すべての worker の依頼・answer・revise・resume は `deliver::submit` が `request_turn` を通して `turns/` に書き、wrapper が次の turn として届ける。終了は終了依頼ファイルへ書く。run の画面の読み取り、入力欄・送信後の確認、Enter の送り直し、ダイアログ応答は撤去した。
-- **turnの終わりがidleの印**。wrapperはturnのprocessが終わり`turn_finished`を記録した後に、runのidle marker（`idle.json`）を`Stop`の形で書く（`hook_event_name: Stop`、background taskは無し、`dagq_turn`に`turn`・`outcome`・`failure`・`permission_denials`）。Claudeの`Stop` hookは使わない（turnのsettingsにhookは無い）。これで最初のsession・reviewのrevise・`needs_session`のresume・待ち（[waiting](waiting.md)）の既存の見張りが、idle markerとreceiptとaskをそのまま読む。
+- **turnの終わりがidleの印**。wrapperはturnのprocessが終わり`turn_finished`を記録した後に、runのidle marker（`idle.json`）を`Stop`の形で書く（`hook_event_name: Stop`、background taskは無し、`dagq_turn`に`turn`・`outcome`・`failure`・`permission_denials`）。Claudeの`Stop` hookは使わない（turnのsettingsに`Stop` hookは無い。brokerの道具を渡したworkerのrunだけ、組み込みの道具を数える`PreToolUse`のhookが付く。[Broker](../broker.md#組み込みの道具の数)）。これで最初のsession・reviewのrevise・`needs_session`のresume・待ち（[waiting](waiting.md)）の既存の見張りが、idle markerとreceiptとaskをそのまま読む。
 - **終了**: 終了の依頼を見たwrapperは、turnを走らせていれば止め（`outcome: stopped`）、exit code 0で終わる。reviewのpassの後の終了、resumeの試行の終わり、wrapperが黙ったときの終了、`stalled`のaskへの`stop`の答え（下の「turnの後の扱い」）は、どれもこの依頼になる。workspaceのcloseの時点は廃止した対話のworkerと同じ（決定5。workspaceの撤去はtask 1440）。
 
 ## run dirの`turns/`
@@ -53,7 +53,7 @@ related:
 | `turn-NNNNNN.jsonl` / `.err` | agent | turnのstdout（providerのJSONL）とstderr |
 | `turn-NNNNNN.commands.jsonl` | wrapper | runのCodexのturnのコマンドとtool（`TurnCommand`。1行1つ、始まりと終わりを読んだ時刻つき）。`turn_finished`の前に一時fileからrenameで置く。区間の作業の内訳の元（[provider-lifecycle](../provider-lifecycle.md#非対話のworkerの区間)の「Codexの作業の内訳」、task 1354） |
 
-supervisorは最初のsessionのworkspaceを開く前（`provision`）とresumeのworkspaceを開く前（`start_resume`）に`prepare_turns`を行い、`limits.json`を書き、前のsessionの終了の依頼と取られていない依頼を捨てる。turnの設定は`claude-headless-settings.json`（`permissions.deny`だけ。`SIGNAL_BY_NAME_DENIED`、`HEADLESS_DENIED_TOOLS`（`AskUserQuestion`）、actorのroleの拒否の順。それと`autoMode`）で、`turn_command`がturnのたびに書く。`AskUserQuestion`を拒むのは保険で、非対話のsessionの質問は誰にも届かずturnが止まるため。Claude Code 2.1.286の`-p`はこのtoolを出さないが、後の版で出てきても拒否の規則でmodelから外れ、呼ばれれば拒否として`turn_finished`の`denied_tools`に残る。人への質問は`dagq ask`だけ（goal 85の決定）。plannerのturnも同じ設定を使う。
+supervisorは最初のsessionのworkspaceを開く前（`provision`）とresumeのworkspaceを開く前（`start_resume`）に`prepare_turns`を行い、`limits.json`を書き、前のsessionの終了の依頼と取られていない依頼を捨てる。turnの設定は`claude-headless-settings.json`（`permissions.deny`だけ。`SIGNAL_BY_NAME_DENIED`、`HEADLESS_DENIED_TOOLS`（`AskUserQuestion`）、actorのroleの拒否の順。それと`autoMode`。brokerの道具を渡したworkerのrunだけ、組み込みの道具を数える`PreToolUse`のhookも足す。[Broker](../broker.md#組み込みの道具の数)）で、`turn_command`がturnのたびに書く。`AskUserQuestion`を拒むのは保険で、非対話のsessionの質問は誰にも届かずturnが止まるため。Claude Code 2.1.286の`-p`はこのtoolを出さないが、後の版で出てきても拒否の規則でmodelから外れ、呼ばれれば拒否として`turn_finished`の`denied_tools`に残る。人への質問は`dagq ask`だけ（goal 85の決定）。plannerのturnも同じ設定を使う。
 
 task 1184でrun dirのI/Oを洗い出し、次の呼び出しを`agent_dir`の記述子に対する操作へ寄せた。通常のfileが読めない・書けない場合のrunの失敗の扱いは既存の経路を使う（不正な依頼ならwrapperはerrorで終了し、復旧へ渡る）。
 
@@ -68,7 +68,7 @@ task 1184でrun dirのI/Oを洗い出し、次の呼び出しを`agent_dir`の�
 | `runtime_store::Refusals`・`sessions::work_breakdown` | 診断logへの追加。通常のfileを上限付きで読み、新しいinodeで置き換える。読めなければlogだけを欠く |
 | `headless_session.rs`の`write_commands` → `LocalRunFiles` | runのCodexのturnのコマンドのfile（`turns/turn-NNNNNN.commands.jsonl`、task 1354）。一時fileに書いてrenameで置く。書けなければwarnのlogだけで、turnは続く |
 | `sessions::codex_breakdown` → `agent_dir::read_file`・`read_bounded` | 区間を閉じるときのturnのコマンドのfile。linkを辿らず通常のfileだけを、4 MiB（`TURN_COMMANDS_BYTES`）まで読む（書き込みのトランザクションの中でも読むため、64MiBより小さくした）。無ければ`turn_commands_missing`、linkや上限超え・形の違いは`turn_commands_unparsable`で、区間の`work`をnullにして理由を書く |
-| `broker_token`・`LocalRunFiles`のtree操作 | runのbroker設定と後始末。dirの列挙・子dirのopen・削除・大きさの集計も記述子に対して行い、linkを辿らない |
+| `broker_token`・`LocalRunFiles`のtree操作 | runのbroker設定と後始末、終わったrunの`broker-direct-tools.log`の読み取り（`QueueRunTokens::usage`。`agent_dir::read_file`と`read_bounded`で通常のfileだけを上限付きで読み、link・FIFOはerrorにしてsweepはwarnだけ。task 839）。dirの列挙・子dirのopen・削除・大きさの集計も記述子に対して行い、linkを辿らない |
 
 queueのdirなどworkerが書けない場所と、workerが書くrun dir（直下の`turns/`・`broker/`など）を区別する。pathにqueueの`runs/`の下の部分（run dirとその中）があるときだけ（`agent_dir::in_run_dir`）、`LocalRunFiles`と`agent_dir`の`create_file`・`append`は記述子の操作を使う: ディレクトリの初回openが指定したdirとその親の2段をlinkとして拒み、最後の要素のfileもlinkを辿らず（`O_NOFOLLOW`と`AT_SYMLINK_NOFOLLOW`）、通常のfileだけを64MiBまで読み、書きはlinkを置き換える。それ以外のpath（queueのdirとDB、installしたバイナリやbrokerのclient、macOSの`/tmp`、linkにしたdata dir、scratchpad）はhostのもので、`std::fs`と同じくlinkを辿り、上限も当てない。`in_run_dir`はpathだけで決め、最初の`runs`という名前の要素の下を run dir とみなすので、queueより上に`runs`というdirがあるhostのpath（`/Users/x/runs/project/...`）もrun dirの扱い（linkを拒むだけで、辿る範囲は広がらない）になる。任意の深さのpathを安全にするAPIではない。`LocalRunFiles::copy`の元（runtimeのバイナリ）はruntimeのもので、linkを辿って読み、64MiBの上限を当てない。Claudeのdebug logのhookの失敗は`RunFiles::read_tail`で末尾だけを読むので、64MiBを超えるlogでも見つかる。treeの走査は開いたdirから`openat`で子へ進む。
 

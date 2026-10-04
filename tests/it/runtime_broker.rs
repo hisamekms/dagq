@@ -1094,6 +1094,35 @@ fn a_run_that_fails_or_is_interrupted_loses_its_token() {
         )
         .unwrap();
     }
+    // What the succeeded run did through the broker and around it: the
+    // hook's lines in its run dir and the broker's audit lines (goal 59's
+    // (2)); the health and another run's lines are not its own.
+    let counted = run_of(succeeded);
+    let run_dir = PathBuf::from(counted.run_dir().unwrap());
+    fs::write(
+        run_dir.join(dagq::domain::broker_usage::DIRECT_TOOLS_LOG),
+        "Read\nBash\nRead\nnot-a-tool\n",
+    )
+    .unwrap();
+    let audit = queue.join("broker/audit");
+    fs::create_dir_all(&audit).unwrap();
+    let line = |run: &str, op: &str| {
+        json!({"ts": "2099-01-01T00:00:00.000Z", "run_id": run, "op": op, "result": "ok"})
+            .to_string()
+    };
+    let id = counted.id().as_str();
+    fs::write(
+        audit.join("2099-01-01.jsonl"),
+        [
+            line(id, "fs.read"),
+            line(id, "process.exec"),
+            line(id, "fs.read"),
+            line(id, "health"),
+            line(run_of(interrupted).id().as_str(), "git.commit"),
+        ]
+        .join("\n"),
+    )
+    .unwrap();
     let options = SuperviseOptions {
         broker: broker(),
         ..options_with(&podman, &repo, true)
@@ -1103,6 +1132,34 @@ fn a_run_that_fails_or_is_interrupted_loses_its_token() {
     assert_revoked(interrupted, "interrupted");
     assert_revoked(succeeded, "succeeded");
     assert_eq!(runtime::status(&db).unwrap()["broker"]["active_tokens"], 0);
+
+    // Each ended run's counts are recorded once, with its revoke, and
+    // `show` puts them on the run.
+    let usage = json!({
+        "brokered": 3,
+        "brokered_by_op": {"fs.read": 2, "process.exec": 1},
+        "direct": 3,
+        "direct_by_tool": {"Bash": 1, "Read": 2},
+    });
+    assert_eq!(
+        events_of(&db, counted.id(), "broker_tool_use"),
+        std::slice::from_ref(&usage)
+    );
+    let shown = dagq::view::task_detail(
+        &SqliteQueue::open(&db).unwrap().show(succeeded).unwrap(),
+        10,
+    );
+    assert_eq!(shown["runs"][0]["broker_tool_use"], usage);
+    assert_eq!(
+        events_of(&db, run_of(failing).id(), "broker_tool_use"),
+        [json!({"brokered": 0, "brokered_by_op": {}, "direct": 0, "direct_by_tool": {}})]
+    );
+    assert_eq!(
+        events_of(&db, run_of(interrupted).id(), "broker_tool_use"),
+        [
+            json!({"brokered": 1, "brokered_by_op": {"git.commit": 1}, "direct": 0, "direct_by_tool": {}})
+        ]
+    );
 }
 
 /// A queue run `preferred` and then put back to `disabled` (task 1125):
@@ -1182,7 +1239,14 @@ fn a_disabled_supervisor_revokes_the_tokens_an_earlier_mode_left() {
         .collect();
     assert_eq!(runtime::status(&db).unwrap()["broker"]["active_tokens"], 2);
 
-    // Back to `disabled` (host.toml lowers it): the first pass revokes both.
+    // Back to `disabled` (host.toml lowers it): the first pass revokes both,
+    // and counts no tool use even of the ended run that left some.
+    fs::write(
+        PathBuf::from(run_of(ended).run_dir().unwrap())
+            .join(dagq::domain::broker_usage::DIRECT_TOOLS_LOG),
+        "Read\n",
+    )
+    .unwrap();
     fs::write(queue.join("host.toml"), "[broker]\nmode = \"disabled\"\n").unwrap();
     let calls = podman.calls().len();
     let outcome =
@@ -1219,6 +1283,7 @@ fn a_disabled_supervisor_revokes_the_tokens_an_earlier_mode_left() {
         supervise_with(&db, &repo, &backend, &options_with(&podman, &repo, true)).unwrap();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     assert_eq!(kinds(&db, "broker_token_revoked").len(), 2);
+    assert!(kinds(&db, "broker_tool_use").is_empty());
     assert_eq!(podman.calls().len(), calls);
 }
 
