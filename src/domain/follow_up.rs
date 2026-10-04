@@ -519,6 +519,57 @@ pub fn unsettled_follow_ups(follow_ups: &[SourceFollowUp]) -> Vec<(super::TaskId
     unsettled
 }
 
+// Why a follow_up draft has no membership judgement plan review can rely
+// on (ADR-t1504-2 decision 7): none recorded, the latest is `undecided`,
+// or it predates the source goal's current acceptance version.
+string_enum!(MembershipGap {
+    Missing => "missing",
+    Undecided => "undecided",
+    NeedsRecheck => "needs_recheck",
+});
+
+impl MembershipGap {
+    /// What the gap means and what records it, for a refusal or a lint.
+    pub fn explain(self) -> &'static str {
+        match self {
+            Self::Missing => "it has no membership judgement",
+            Self::Undecided => "its latest membership judgement is undecided",
+            Self::NeedsRecheck => {
+                "its membership judgement predates the source goal's current acceptance version (needs recheck)"
+            }
+        }
+    }
+}
+
+/// Where a follow_up draft's membership stands for submit and lint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MembershipFacts {
+    /// Registration recorded that the follow_up had no source goal
+    /// (`source_goal_state: none`): there is no acceptance to judge by.
+    pub source_goal_none: bool,
+    /// The source goal (registered, restored or named by a judge) closed
+    /// as abandoned: it claims no achievement to judge against.
+    pub source_goal_abandoned: bool,
+    /// The latest judgement's classification and whether it needs a
+    /// recheck (its acceptance version is older than the goal's).
+    pub latest: Option<(MembershipClassification, bool)>,
+}
+
+/// The gap that keeps a follow_up draft from being submitted, or `None`
+/// (ADR-t1504-2 decision 7). An unknown source goal is treated as one that
+/// exists, so it needs a judgement too.
+pub fn membership_gap(facts: MembershipFacts) -> Option<MembershipGap> {
+    if facts.source_goal_none || facts.source_goal_abandoned {
+        return None;
+    }
+    match facts.latest {
+        None => Some(MembershipGap::Missing),
+        Some((MembershipClassification::Undecided, _)) => Some(MembershipGap::Undecided),
+        Some((_, true)) => Some(MembershipGap::NeedsRecheck),
+        Some((_, false)) => None,
+    }
+}
+
 #[cfg(test)]
 mod membership_tests {
     use super::*;
@@ -666,6 +717,44 @@ mod membership_tests {
         assert_eq!(follow_up(open, true, None).fingerprint(), "5:-");
     }
 
+    #[test]
+    fn submit_needs_a_current_decided_judgement_unless_no_acceptance_applies() {
+        use MembershipClassification::*;
+        let facts = |latest| MembershipFacts {
+            source_goal_none: false,
+            source_goal_abandoned: false,
+            latest,
+        };
+        assert_eq!(membership_gap(facts(None)), Some(MembershipGap::Missing));
+        assert_eq!(
+            membership_gap(facts(Some((Undecided, false)))),
+            Some(MembershipGap::Undecided)
+        );
+        for class in [Required, OutOfScope] {
+            assert_eq!(membership_gap(facts(Some((class, false)))), None);
+            assert_eq!(
+                membership_gap(facts(Some((class, true)))),
+                Some(MembershipGap::NeedsRecheck)
+            );
+        }
+        for latest in [None, Some((Undecided, true))] {
+            assert_eq!(
+                membership_gap(MembershipFacts {
+                    source_goal_none: true,
+                    ..facts(latest)
+                }),
+                None
+            );
+            assert_eq!(
+                membership_gap(MembershipFacts {
+                    source_goal_abandoned: true,
+                    ..facts(latest)
+                }),
+                None
+            );
+        }
+        assert!(MembershipGap::NeedsRecheck.explain().contains("recheck"));
+    }
     #[test]
     fn registration_facts_cannot_be_overridden_by_current_membership() {
         for provenance in ["recorded", "restored", "unknown"] {

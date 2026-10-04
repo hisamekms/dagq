@@ -4,8 +4,8 @@ type: design
 title: "Draft planners (supervisor)"
 status: current
 created: 2026-09-26
-updated: 2026-10-04 # task 1505
-last_verified: 2026-10-04 # task 1505
+updated: 2026-10-04 # task 1506
+last_verified: 2026-10-04 # task 1506
 scope: runtime
 related:
   - adr-t1394-1
@@ -61,4 +61,4 @@ related:
 
 ## 所属の判断
 
-`judge-follow-up`は採用・priorityとは別に元goalのacceptanceとの関係を記録する。required/out_of_scopeの所属変更は判断と同じtransactionで行い、set-goalによる食い違う変更は拒む。登録時の出どころ・状態と深さは移動しても変わらないので、開いたgoalへの移動で人のadoptを迂回できない。CLI、必須の欄、訂正とacceptanceの版、旧材料の移行は[所属の判断](../follow-up-membership.md)。
+`judge-follow-up`は採用・priorityとは別に元goalのacceptanceとの関係を記録する。required/out_of_scopeの所属変更は判断と同じtransactionで行い、set-goalによる食い違う変更は拒む。登録時の出どころ・状態と深さは移動しても変わらないので、開いたgoalへの移動で人のadoptを迂回できない。元goalのあるfollow_upのdraftは、今の判断が無い・`undecided`・要再確認ならsubmit（runtimeのplannerも人も）が拒み、人の`ready --bypass-review`もdraft / submittedのものを拒むので、plannerは採用するdraftの判断を先に記録する（人のadoptの上限とは別の検査で、判断を記録してもadoptにはならない）。`lint`は同じ欠けを`follow_up_membership_unjudged`で出し、plan reviewは判断の行を材料に検査する（[Plan review](plan-review.md)）。CLI、必須の欄、訂正とacceptanceの版、旧材料の移行は[所属の判断](../follow-up-membership.md)。

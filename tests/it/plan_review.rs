@@ -1052,7 +1052,12 @@ fn a_withdrawn_proposal_closes_its_concern_and_its_drafts_are_free() {
     let blocker = TaskId::new(1);
     let task = add(&mut queue, "doubtful", &[blocker], Priority::Normal);
     queue
-        .record_draft_origin(task, DraftOrigin::FollowUp, &json!({"run": "r"}))
+        .record_draft_origin(
+            task,
+            DraftOrigin::FollowUp,
+            // Without a source goal it needs no membership judgement.
+            &json!({"run": "r", "source_goal_state": "none"}),
+        )
         .unwrap();
     assert!(
         queue

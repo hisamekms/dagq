@@ -9,7 +9,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
-use super::{ChangeSet, GoalId, GoalVerdict, Task, TaskId, TaskStatus, scope::validate_path_globs};
+use super::{
+    ChangeSet, GoalId, GoalVerdict, Task, TaskId, TaskStatus, follow_up::MembershipGap,
+    scope::validate_path_globs,
+};
 
 /// A rule [`lint`] checks; the snake-case name is the `code` it reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -45,6 +48,11 @@ pub enum LintCode {
     /// Another task of the linted set has the same title (ignoring case
     /// and surrounding whitespace).
     DuplicateTitle,
+    /// A draft or submitted follow_up with a source goal has no membership
+    /// judgement, an undecided one, or one older than the source goal's
+    /// acceptance version (ADR-t1504-2 decision 7): submit refuses such a
+    /// draft and a person's bypass such a draft or submitted task.
+    FollowUpMembershipUnjudged,
 }
 
 /// One broken rule: its code, the task it is about and why.
@@ -78,6 +86,9 @@ pub struct LintInput {
     pub goals: BTreeMap<GoalId, Option<GoalVerdict>>,
     /// The repository's set of changes (ADR-t980-1); none checks no change.
     pub changes: Option<ChangeSet>,
+    /// The follow_up targets whose membership judgement is missing,
+    /// undecided or needs a recheck (ADR-t1504-2 decision 7).
+    pub membership_gaps: BTreeMap<TaskId, MembershipGap>,
 }
 
 /// Check every rule on `input.targets`. The violations come per target in
@@ -117,6 +128,18 @@ pub fn lint(input: &LintInput) -> Vec<LintViolation> {
         content_rules(task, &mut found);
         if let Some(changes) = &input.changes {
             change_rule(task, changes, &mut found);
+        }
+        if let Some(gap) = input.membership_gaps.get(&task.id())
+            && matches!(task.status(), TaskStatus::Draft | TaskStatus::Submitted)
+        {
+            found.push(violation(
+                LintCode::FollowUpMembershipUnjudged,
+                task,
+                format!(
+                    "{}; record a current one with judge-follow-up",
+                    gap.explain()
+                ),
+            ));
         }
         violations.extend(found);
     }
@@ -336,6 +359,7 @@ mod tests {
             nodes,
             goals: BTreeMap::new(),
             changes: None,
+            membership_gaps: BTreeMap::new(),
         }
     }
 
@@ -629,6 +653,37 @@ mod tests {
                 "task_id": 2,
                 "reason": "its acceptance criteria are blank"
             })
+        );
+    }
+
+    /// A follow_up with a membership gap is reported with the gap's
+    /// meaning (ADR-t1504-2 decision 7); one without a gap is not.
+    #[test]
+    fn a_follow_up_without_a_current_membership_judgement_is_reported() {
+        let mut plan = input(vec![task(1, "a"), task(2, "b"), task(3, "c")], vec![]);
+        plan.membership_gaps
+            .insert(TaskId::new(1), MembershipGap::Missing);
+        plan.membership_gaps
+            .insert(TaskId::new(3), MembershipGap::NeedsRecheck);
+        let found = lint(&plan);
+        assert_eq!(
+            found
+                .iter()
+                .map(|v| (v.task_id.as_i64(), v.code))
+                .collect::<Vec<_>>(),
+            [
+                (1, LintCode::FollowUpMembershipUnjudged),
+                (3, LintCode::FollowUpMembershipUnjudged)
+            ]
+        );
+        assert!(
+            found[1].reason.contains("needs recheck"),
+            "{}",
+            found[1].reason
+        );
+        assert_eq!(
+            serde_json::to_value(&found[0]).unwrap()["code"],
+            "follow_up_membership_unjudged"
         );
     }
 }

@@ -1301,6 +1301,19 @@ mod tests {
                 )
                 .unwrap();
             queue.set_follow_up_depth(task, depth).unwrap();
+            if goal_id.is_some() {
+                // Submit needs its membership judgement (ADR-t1504-2).
+                let judgement = crate::domain::follow_up::MembershipJudgement {
+                    classification: crate::domain::follow_up::MembershipClassification::Required,
+                    acceptance_items: vec!["(1)".into()],
+                    reason: "(1) needs it".into(),
+                    evidence: vec!["receipt:r".into()],
+                    destination_goal_id: None,
+                    source_goal_id: None,
+                    corrects: None,
+                };
+                queue.judge_follow_up(task, judgement, "planner").unwrap();
+            }
             task
         };
         let submit = |queue: &mut SqliteQueue, task| {

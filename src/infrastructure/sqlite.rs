@@ -1737,7 +1737,7 @@ fn read_graph_input(conn: &Connection) -> Result<GraphInput> {
 /// The queue as `lint` reads it: `targets` in the order given and every
 /// task's status and dependencies, and every goal's verdict.
 fn read_lint_input(conn: &Connection, targets: &[TaskId]) -> Result<LintInput> {
-    let targets = targets
+    let targets: Vec<Task> = targets
         .iter()
         .map(|&id| read_task(conn, id))
         .collect::<Result<_>>()?;
@@ -1778,11 +1778,18 @@ fn read_lint_input(conn: &Connection, targets: &[TaskId]) -> Result<LintInput> {
         .query_map([], goal_row)?
         .map(|goal| goal.map(|goal| (goal.id(), goal.verdict())))
         .collect::<rusqlite::Result<_>>()?;
+    let mut membership_gaps = BTreeMap::new();
+    for task in &targets {
+        if let Some(gap) = super::follow_up_membership::membership_gap(conn, task.id())? {
+            membership_gaps.insert(task.id(), gap);
+        }
+    }
     Ok(LintInput {
         targets,
         nodes,
         goals,
         changes: None,
+        membership_gaps,
     })
 }
 
@@ -2082,6 +2089,12 @@ fn apply_transition(
 ) -> Result<Task> {
     let task = read_task(conn, task_id)?;
     let from = task.status();
+    if action == TaskAction::BypassReview {
+        // A person's bypass takes a follow_up past plan review only with a
+        // current membership judgement, like submit (ADR-t1504-2 decision
+        // 7); a submitted one too, as plan review is the other check.
+        super::follow_up_membership::check_judged(conn, &[task_id], true)?;
+    }
     let task = task::transition(task, action, has_unfinished_run(conn, task_id)?)?;
     // `status=?3` only detects a concurrent change; the domain decided the move.
     let changed = conn.execute(

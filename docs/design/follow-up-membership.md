@@ -68,9 +68,8 @@ required/out_of_scopeの判断を持つtaskの`set-goal`は、最後の判断の
 判断の履歴・材料・深さを載せる（移動したfollow_upも含む）。`events`は
 `follow_up_registered`の登録時の材料と`follow_up_judged`の判断を読める。
 
-判断をsubmitの必須条件にする検査とplan reviewの資料、achieved後のaskと訂正の
-適用はADR-t1504-2の後続の実装範囲である。閉じた元goalへのrequiredの記録は
-達成のeventや閉じた状態を変更しない。
+achieved後のaskと訂正の適用はADR-t1504-2の後続の実装範囲である。
+閉じた元goalへのrequiredの記録は達成のeventや閉じた状態を変更しない。
 
 ## 閉じる条件
 
@@ -90,6 +89,24 @@ acceptanceを変えると判定時の版が古くなり、同じ分類を記録�
 （人の言葉による代行を含む）、goal reviewの`achieved`の適用、`approve_goal`の
 answerの`achieved`が同じtransactionで同じ条件を使う。goal reviewの起動の条件と
 fingerprintにも入る（[Goal review](supervisor-lifecycle/goal-review.md)の2・5）。
+
+## submit・lint・plan review
+
+`follow_up_membership::membership_gap`がfollow_upのtaskの欠けを読み、domainの
+`follow_up::membership_gap`が決める。欠けは`missing`（判断が無い）、`undecided`
+（最新の判断がundecided）、`needs_recheck`（最新の判断の版が元goalの今の版より古い）。
+登録時に元goalが無い（`source_goal_state: none`）もの、元goal（登録時の材料か
+判断した者が名指したもの）が`abandoned`で閉じたものは欠けにしない。元goalが不明で
+判断の無いものは`missing`。goal_gapとreopenedのdraftは対象にしない。
+
+`submit`はproposalに入るdraftのうち欠けのあるものを、持ち主に依らず
+（runtimeのplannerも人も）、人のadoptの検査より先に1つのエラーで拒む。
+エラーはtaskごとの欠けと`judge-follow-up`を示す。人の`ready --bypass-review`も
+draft / submittedのfollow_upに同じ検査をする。`lint`は同じ欠けをdraft / submittedのtaskについて
+`follow_up_membership_unjudged`で出す。plan reviewのpromptはfollow_upのtaskに
+`follow_up_membership`（登録時の材料、判断の行、最新の分類、版の一致）を載せ、
+元goalを材料のgoalに足し、plannerの対応づけを起点に検査し疑わしいものは周辺の
+証拠も読むよう指示する（[Plan review](supervisor-lifecycle/plan-review.md)）。
 
 ## 旧schemaの移行
 

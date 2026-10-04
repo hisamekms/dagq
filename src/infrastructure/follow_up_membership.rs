@@ -5,7 +5,8 @@ use serde_json::{Value, json};
 
 use super::sqlite::{SqliteQueue, enum_col, event, goal_event, read_goal, read_task, set_goal_in};
 use crate::domain::follow_up::{
-    MembershipClassification as Class, MembershipJudgement, SourceFollowUp,
+    MembershipClassification as Class, MembershipFacts, MembershipGap, MembershipJudgement,
+    SourceFollowUp, membership_gap as membership_gap_of,
 };
 use crate::domain::{DraftOrigin, EventKind, GoalId, TaskId, TaskStatus};
 
@@ -70,6 +71,80 @@ pub(super) fn check_set_goal(conn: &Connection, task: TaskId, goal: Option<GoalI
             "task {task} has a membership judgement for a different goal; record a correction with judge-follow-up"
         );
     }
+    Ok(())
+}
+
+/// The membership gap of `task` (ADR-t1504-2 decision 7), or `None` for a
+/// task that is not a follow_up, has no source goal to judge by, or has a
+/// current decided judgement.
+pub(super) fn membership_gap(conn: &Connection, task: TaskId) -> Result<Option<MembershipGap>> {
+    let material: Option<String> = conn
+        .query_row(
+            "SELECT material FROM draft_origins WHERE task_id=?1 AND origin=?2",
+            params![task, DraftOrigin::FollowUp.as_str()],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(material) = material else {
+        return Ok(None);
+    };
+    let material: Value = serde_json::from_str(&material)?;
+    let history = judgements(conn, task)?;
+    let last = history.last();
+    let source = material["source_goal_id"]
+        .as_i64()
+        .or_else(|| last.and_then(|l| l["source_goal_id"].as_i64()));
+    let source_goal_abandoned = match source {
+        Some(goal) => conn
+            .query_row(
+                "SELECT verdict='abandoned' FROM goals WHERE id=?1 AND closed_at IS NOT NULL",
+                [goal],
+                |r| r.get::<_, Option<bool>>(0),
+            )
+            .optional()?
+            .flatten()
+            .unwrap_or(false),
+        None => false,
+    };
+    let latest = last
+        .map(|l| {
+            Ok::<_, anyhow::Error>((
+                l["classification"].as_str().unwrap_or_default().parse()?,
+                l["needs_recheck"].as_bool() == Some(true),
+            ))
+        })
+        .transpose()?;
+    Ok(membership_gap_of(MembershipFacts {
+        source_goal_none: material["source_goal_state"] == "none",
+        source_goal_abandoned,
+        latest,
+    }))
+}
+
+/// Refuse a submission that takes a follow_up draft (or a person's bypass
+/// of a draft or submitted follow_up, `include_submitted`) without a
+/// current decided membership judgement (ADR-t1504-2 decision 7).
+pub(super) fn check_judged(
+    conn: &Connection,
+    tasks: &[TaskId],
+    include_submitted: bool,
+) -> Result<()> {
+    let mut refused = Vec::new();
+    for &task in tasks {
+        match read_task(conn, task)?.status() {
+            TaskStatus::Draft => {}
+            TaskStatus::Submitted if include_submitted => {}
+            _ => continue,
+        }
+        if let Some(gap) = membership_gap(conn, task)? {
+            refused.push(format!("task {task}: {}", gap.explain()));
+        }
+    }
+    ensure!(
+        refused.is_empty(),
+        "follow_up drafts need a current membership judgement before submit or bypass (ADR-t1504-2): {}. Record one with `dagq judge-follow-up TASK --classification required|out_of_scope ...`",
+        refused.join("; ")
+    );
     Ok(())
 }
 

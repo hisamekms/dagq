@@ -114,6 +114,9 @@ pub(super) fn submit(
             changes.check_declared(task_id, task.change())?;
         }
     }
+    // Whoever submits, a follow_up draft goes only with a current decided
+    // membership judgement (ADR-t1504-2 decision 7).
+    super::follow_up_membership::check_judged(conn, &tasks, false)?;
     let adoptions = super::draft_planners::check_adoptions(conn, &tasks, submission.owner.origin)?;
     let submitted = match existing {
         Some(existing) => {

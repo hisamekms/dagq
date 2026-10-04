@@ -1527,7 +1527,7 @@ mod tests {
                 .record_draft_origin(
                     task,
                     DraftOrigin::FollowUp,
-                    &json!({"source_task_id": of.as_i64()}),
+                    &json!({"source_task_id": of.as_i64(), "source_goal_state": "none"}),
                 )
                 .unwrap();
         }

@@ -45,6 +45,19 @@ fn follow_up(
     )
 }
 
+/// A judgement that keeps a follow_up in its source goal.
+fn required_membership() -> dagq::domain::follow_up::MembershipJudgement {
+    dagq::domain::follow_up::MembershipJudgement {
+        classification: dagq::domain::follow_up::MembershipClassification::Required,
+        acceptance_items: vec!["(1)".into()],
+        reason: "(1) is not met without it".into(),
+        evidence: vec!["receipt:run-a".into()],
+        destination_goal_id: None,
+        source_goal_id: None,
+        corrects: None,
+    }
+}
+
 /// The planner of the runtime's working on `draft`, if one is open.
 fn planner_of(queue: &SqliteQueue, draft: TaskId) -> Option<PlannerSession> {
     queue
@@ -194,6 +207,12 @@ fn what_a_bundle_leaves_undecided_makes_the_next_and_the_outcomes_are_read() {
     pass(&fx, &backend, &reviewer);
     let first = planner_of(&queue, a[0]).unwrap();
     let workspace = first.workspace_id.clone().unwrap();
+    // The planner records each membership before it submits (ADR-t1504-2).
+    for &draft in &a[1..] {
+        queue
+            .judge_follow_up(draft, required_membership(), "planner")
+            .unwrap();
+    }
 
     let refused = submit_from(
         &fx.db,

@@ -342,10 +342,28 @@ impl Supervisor<'_> {
             .iter()
             .map(|&id| self.queue.show(id))
             .collect::<Result<Vec<_>>>()?;
+        // A follow_up's source goal too, whose acceptance its membership
+        // judgement is checked against (ADR-t1504-2 decision 7).
+        let source_goals = tasks.iter().flat_map(|detail| {
+            let registered = detail
+                .origin
+                .as_ref()
+                .filter(|origin| origin.origin == crate::domain::DraftOrigin::FollowUp)
+                .and_then(|origin| origin.material["source_goal_id"].as_i64());
+            let judged = detail
+                .membership_judgements
+                .iter()
+                .filter_map(|row| row["source_goal_id"].as_i64());
+            registered
+                .into_iter()
+                .chain(judged)
+                .map(crate::domain::GoalId::new)
+        });
         let mut goal_ids: Vec<_> = tasks
             .iter()
             .filter_map(|detail| detail.task.goal_id())
             .chain(proposal.goal_ids().iter().copied())
+            .chain(source_goals)
             .collect();
         goal_ids.sort();
         goal_ids.dedup();

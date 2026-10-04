@@ -2542,6 +2542,27 @@ fn stub(id: i64, title: Option<&str>, bytes: usize, read: String) -> String {
     stub.to_string()
 }
 
+/// The membership material of a follow_up task for plan review
+/// (ADR-t1504-2 decision 7), or `None` for any other task: where it came
+/// from (the source goal and its state at registration, the worker's
+/// category), every membership judgement (classification, acceptance
+/// items, reason, evidence, destination goal, the acceptance version it
+/// was judged at and the source goal's current one) and whether the latest
+/// one was judged at the current version (`null` without a judgement).
+fn follow_up_membership(detail: &TaskDetail) -> Option<Value> {
+    let origin = detail
+        .origin
+        .as_ref()
+        .filter(|origin| origin.origin == crate::domain::DraftOrigin::FollowUp)?;
+    let latest = detail.membership_judgements.last();
+    Some(serde_json::json!({
+        "origin": origin.material,
+        "judgements": detail.membership_judgements,
+        "latest_classification": latest.map(|row| row["classification"].clone()),
+        "latest_version_matches": latest.map(|row| row["needs_recheck"] == Value::Bool(false)),
+    }))
+}
+
 /// What the headless plan review is asked: the material, the checks, the
 /// fixes it may make itself and the verdict schema (ADR-0041 decisions 10,
 /// 11, 14, 15). The repository's own rules are not in the runtime: the job
@@ -2560,6 +2581,9 @@ pub fn plan_review_prompt(material: &PlanReviewMaterial<'_>) -> Result<PlanRevie
                 let mut task = serde_json::to_value(&detail.task)?;
                 task["dependencies"] = serde_json::to_value(&detail.dependencies)?;
                 task["goal_dependencies"] = serde_json::to_value(&detail.goal_dependencies)?;
+                if let Some(membership) = follow_up_membership(detail) {
+                    task["follow_up_membership"] = membership;
+                }
                 Ok(task)
             })
             .collect::<Result<_>>()?,
@@ -3161,6 +3185,7 @@ fn plan_review_text(material: &PlanReviewMaterial<'_>, sections: &PlanSections) 
          - a task that partly repeats a ready or in-progress task (the overlap goes once the scope of one is cut): not pass but revise, saying in the reason which part to cut and which of the two keeps it;\n\
          - a contradiction with another proposal: with one submitted before this one, send this one back; with one submitted after, pass this one (the later one is checked against it);\n\
          - a ready task that has to change for this proposal to hold: name it in reopen, and the runtime takes it out of the claim for a planner to fix; an in-progress task is never changed: send this proposal back asking for a task that fixes it after it lands and depends on it;\n\
+         - a follow_up's membership (its follow_up_membership: the planner's judgements of whether its source goal's acceptance needs it, each with the acceptance items, reason, evidence, destination goal and the acceptance version it was judged at against the source goal's current one): start from the planner's mapping and check that it holds against the source goal's acceptance; you need not repeat the whole investigation, but never pass a judgement on its form alone. When it looks doubtful (the reason names no item of the acceptance, the evidence disagrees with the receipt or the diff it cites, the destination is an unrelated catch-all goal, the acceptance was weakened so that the follow-up falls out of scope, the version does not match), read the evidence around it (the source run's receipt and commits, `dagq goal show ID --full` for the goal's acceptance and its history) before you decide. A wrong mapping the planner can fix is a revise; an acceptance weakened to drop a follow-up needs a person's intent, a concern;\n\
          - every finding of `dagq lint` is one to fix.\n\n\
          Decide one verdict:\n\
          - pass: the tasks may run as written, after the actions below.\n\
@@ -3744,6 +3769,77 @@ mod tests {
             .map(|item| serde_json::to_string(item).unwrap().len())
             .sum();
         (case.prompt().text, old_size)
+    }
+
+    /// A follow_up of the proposal carries its membership judgements with
+    /// the version check, another task none, and the prompt asks plan
+    /// review to start from the planner's mapping and read the evidence
+    /// around a doubtful one (ADR-t1504-2 decision 7).
+    #[test]
+    fn plan_review_checks_follow_up_membership_from_the_planner_s_mapping() {
+        use crate::domain::{BundleKey, DraftOrigin, TaskOrigin};
+        let mut case = plan_case(1, 0);
+        let material = serde_json::json!({"source_task_id": 3, "source_run_id": "r",
+            "source_goal_id": 9, "source_goal_state": "open", "source_goal_provenance": "recorded"});
+        case.tasks[0].origin = Some(TaskOrigin {
+            origin: DraftOrigin::FollowUp,
+            material: material.clone(),
+            source_task_id: Some(TaskId::new(3)),
+            source_run_id: Some("r".into()),
+            index: Some(0),
+            bundle_key: BundleKey::of(DraftOrigin::FollowUp, &material, TaskId::new(1000)),
+            bundles: Vec::new(),
+        });
+        case.tasks[0].membership_judgements = vec![serde_json::json!({
+            "id": 4, "classification": "out_of_scope", "acceptance_items": ["(2)"],
+            "reason": "(2) holds without it", "evidence": ["receipt:r"],
+            "destination_goal_id": 10, "acceptance_version": 1,
+            "current_acceptance_version": 2, "needs_recheck": true})];
+        case.tasks.push(proposal_task(
+            long_task(1001, TaskStatus::Submitted, &[]),
+            Vec::new(),
+        ));
+        let prompt = case.prompt().text;
+        let task = |id: i64| -> Value {
+            prompt
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .find(|line| line["id"] == id && line.get("acceptance").is_some())
+                .unwrap_or_else(|| panic!("no task {id} in {prompt}"))
+        };
+        let membership = &task(1000)["follow_up_membership"];
+        assert_eq!(membership["origin"]["source_goal_id"], 9);
+        assert_eq!(membership["latest_classification"], "out_of_scope");
+        assert_eq!(membership["latest_version_matches"], false);
+        let row = &membership["judgements"][0];
+        for field in [
+            "acceptance_items",
+            "reason",
+            "evidence",
+            "destination_goal_id",
+        ] {
+            assert!(!row[field].is_null(), "{field}");
+        }
+        assert_eq!(
+            (
+                row["acceptance_version"].clone(),
+                row["current_acceptance_version"].clone()
+            ),
+            (serde_json::json!(1), serde_json::json!(2))
+        );
+        assert!(task(1001).get("follow_up_membership").is_none());
+        for instruction in [
+            "start from the planner's mapping",
+            "need not repeat the whole investigation",
+            "never pass a judgement on its form alone",
+            "the reason names no item of the acceptance",
+            "the evidence disagrees with the receipt or the diff",
+            "an unrelated catch-all goal",
+            "the acceptance was weakened",
+            "read the evidence around it",
+        ] {
+            assert!(prompt.contains(instruction), "{instruction}");
+        }
     }
 
     #[test]

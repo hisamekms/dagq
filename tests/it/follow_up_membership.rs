@@ -318,13 +318,19 @@ fn migrated_histories_preserve_adopts_and_require_them_only_for_unsafe_registrat
         );
         assert_eq!(q.show(id).unwrap().task.goal_id(), Some(GoalId::new(2)));
         assert!(q.show(id).unwrap().membership_judgements.is_empty());
-        if [0, 5, 6, 8, 10].contains(&case) {
-            q.judge_follow_up(
-                id,
-                judgement(Class::OutOfScope, Some(GoalId::new(2))),
-                "planner",
-            )
-            .unwrap();
+        // Every follow_up with a source goal, unknown included, needs a
+        // membership judgement before any submit (ADR-t1504-2 decision 7).
+        if case != 2 {
+            let error = submit(&mut q, id).unwrap_err().to_string();
+            assert!(
+                error.contains("no membership judgement"),
+                "case {case}: {error}"
+            );
+            let mut judge = judgement(Class::OutOfScope, Some(GoalId::new(2)));
+            if state == "unknown" {
+                judge.source_goal_id = Some(GoalId::new(1));
+            }
+            q.judge_follow_up(id, judge, "planner").unwrap();
         }
         if [0, 6, 8, 10].contains(&case) {
             submit(&mut q, id).unwrap();
@@ -366,11 +372,16 @@ fn membership_changes_never_adopt_missing_closed_unknown_or_deep_follow_ups() {
             .unwrap();
         q.set_follow_up_depth(id, depth).unwrap();
         q.set_goal(id, Some(destination)).unwrap();
+        // Without a source goal no judgement applies; otherwise the missing
+        // judgement is refused first (ADR-t1504-2 decision 7).
+        let error = submit(&mut q, id).unwrap_err().to_string();
         assert!(
-            submit(&mut q, id)
-                .unwrap_err()
-                .to_string()
-                .contains("without a person")
+            error.contains(if state == "none" {
+                "without a person"
+            } else {
+                "no membership judgement"
+            }),
+            "{state}: {error}"
         );
         if state != "none" {
             let mut judge = judgement(Class::OutOfScope, Some(destination));
@@ -823,4 +834,118 @@ fn a_failed_review_is_taken_again_when_a_judgement_or_the_acceptance_changes() {
     assert!(!l.held());
     l.out_of_scope(first);
     assert!(l.reviewable());
+}
+
+/// Submit, a person's bypass and lint refuse or report a follow_up whose
+/// membership judgement is missing, undecided or stale, and let a current
+/// decided one through; a follow_up whose source goal is absent or was
+/// abandoned needs none (ADR-t1504-2 decision 7).
+#[test]
+fn submit_bypass_and_lint_need_a_current_membership_judgement() {
+    use dagq::domain::{GoalVerdict, LintCode, TaskStatus, lint::lint};
+    let (_dir, mut q) = fixture();
+    let source = q.add_goal(new_goal("source")).unwrap().id();
+    let destination = q.add_goal(new_goal("destination")).unwrap().id();
+    let follow_up = |q: &mut SqliteQueue, title: &str, goal: Option<GoalId>, state: &str| {
+        let id = q
+            .add(dagq::domain::NewTask {
+                goal_id: goal,
+                ..new_task(title)
+            })
+            .unwrap()
+            .id();
+        let material = json!({"source_task_id":99,"source_run_id":"r","source_goal_id":goal,
+            "source_goal_state":state,"source_goal_provenance":"recorded"});
+        q.record_draft_origin(id, DraftOrigin::FollowUp, &material)
+            .unwrap();
+        id
+    };
+    let unjudged = |q: &SqliteQueue, id: TaskId| -> Vec<String> {
+        lint(&q.lint_input(&[id]).unwrap())
+            .into_iter()
+            .filter(|v| v.code == LintCode::FollowUpMembershipUnjudged)
+            .map(|v| v.reason)
+            .collect()
+    };
+    let id = follow_up(&mut q, "needs a judgement", Some(source), "open");
+    let error = submit(&mut q, id).unwrap_err().to_string();
+    assert!(
+        error.contains(&format!("task {id}: it has no membership judgement")),
+        "{error}"
+    );
+    assert!(error.contains("judge-follow-up"), "{error}");
+    let error = q
+        .transition(id, TaskAction::BypassReview)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("no membership judgement"), "{error}");
+    assert_eq!(q.show(id).unwrap().task.status(), TaskStatus::Draft);
+    assert_eq!(unjudged(&q, id).len(), 1);
+
+    let mut undecided = judgement(Class::Undecided, None);
+    undecided.acceptance_items.clear();
+    q.judge_follow_up(id, undecided, "planner").unwrap();
+    let error = submit(&mut q, id).unwrap_err().to_string();
+    assert!(error.contains("undecided"), "{error}");
+    assert!(unjudged(&q, id)[0].contains("undecided"));
+
+    q.judge_follow_up(
+        id,
+        judgement(Class::OutOfScope, Some(destination)),
+        "planner",
+    )
+    .unwrap();
+    assert!(unjudged(&q, id).is_empty());
+    // The source goal's acceptance changes: the judgement needs a recheck.
+    q.edit_goal(
+        source,
+        GoalEdit {
+            acceptance: Some("changed criteria".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let error = submit(&mut q, id).unwrap_err().to_string();
+    assert!(error.contains("needs recheck"), "{error}");
+    assert!(unjudged(&q, id)[0].contains("needs recheck"));
+    q.judge_follow_up(
+        id,
+        judgement(Class::OutOfScope, Some(destination)),
+        "planner",
+    )
+    .unwrap();
+    submit(&mut q, id).unwrap();
+    assert_eq!(q.show(id).unwrap().task.status(), TaskStatus::Submitted);
+    // Submitted, its judgement goes stale again: a bypass is refused too.
+    q.edit_goal(
+        source,
+        GoalEdit {
+            acceptance: Some("criteria changed again".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let error = q
+        .transition(id, TaskAction::BypassReview)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("needs recheck"), "{error}");
+    assert_eq!(q.show(id).unwrap().task.status(), TaskStatus::Submitted);
+
+    // A person's bypass goes once the judgement is recorded.
+    let bypassed = follow_up(&mut q, "bypassed", Some(destination), "open");
+    let mut required = judgement(Class::Required, None);
+    required.destination_goal_id = None;
+    q.judge_follow_up(bypassed, required, "user").unwrap();
+    q.transition(bypassed, TaskAction::BypassReview).unwrap();
+
+    // No source goal, or one closed as abandoned: nothing to judge against.
+    let none = follow_up(&mut q, "no source", None, "none");
+    assert!(unjudged(&q, none).is_empty());
+    let abandoned = q.add_goal(new_goal("abandoned")).unwrap().id();
+    let gone = follow_up(&mut q, "abandoned source", Some(abandoned), "open");
+    q.set_goal(gone, Some(destination)).unwrap();
+    q.close_goal(abandoned, GoalVerdict::Abandoned).unwrap();
+    assert!(unjudged(&q, gone).is_empty());
+    submit(&mut q, gone).unwrap();
 }
