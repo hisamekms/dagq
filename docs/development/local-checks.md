@@ -4,7 +4,7 @@ type: development
 title: このrepositoryの手元の検証（人とworkerが流すもの、testの範囲、stress、e2eを流さないこと、resumeでの再現、受け入れ条件の対応づけ、askにしないもの）
 status: current
 created: 2026-10-03
-updated: 2026-10-04 # task 1463
+updated: 2026-10-05 # task 1707
 owners:
   - hisamekms
 tags:
@@ -16,6 +16,7 @@ related:
   - development-task-registration
   - plan-local-checks-history
   - adr-t1420-1
+  - adr-t1707-1
   - development-documents
 ---
 
@@ -42,6 +43,7 @@ dagqのworkerは全体の`cargo test --locked`を流さず、`cargo llvm-cov`（
 - 変更に関係するtestだけの`cargo test`（次の「testの範囲」と「全体を比べるtest」）
 - taskのverifyのうちcoverageの関門（`cargo llvm-cov nextest`。ADR-0076より前に登録されたtaskの`cargo llvm-cov`も同じ）と全体の`cargo test --locked`以外（`cargo test --locked --test plugin`など）
 - 足した・変えたtestのstress（下の「stress」）
+- `tests/it`のtestを足した・変えたら、そのstressのnextestの出力に時間の関門のscript（下の「itのtestの時間の関門」）
 
 全部のtestは`integrate`の検証（runtimeのtaskでは`cargo llvm-cov nextest`（coverageの関門）、llvm-covを含めないtaskではverifyにあれば`cargo test --locked`）がrebase後に1回だけ流す（仕組みは[integrate](../design/supervisor-lifecycle/integrate.md)と[Validation](../design/supervisor-lifecycle/validation.md)）。workerのpromptがverification_commandsを`integrate`が流すものとして見せ、手元の検証をこの文書に委ねる仕組みは[prompt](../design/supervisor-lifecycle/prompt.md)の冒頭（`# Prompt`の節）のverification commandsの段落が持つ。例外は「resumeでの再現」の1つだけ。
 
@@ -88,6 +90,21 @@ subagent reviewは該当するときに実行し、しないときは理由をre
 - 変えたtestが無いrun（docsだけ、testに触らない`src/`の変更など）はstressをせず、しないことと理由（変えたtestが無い）をevidenceに書く。
 - cargo-nextestはhostに入っている前提（[ADR-0076](../adr/0076-run-the-coverage-gate-tests-with-nextest.md)決定3。入れ方は[運用](operations.md)の「hostのツール」）で、無ければworkerは入れず、stressをしなかったことと理由（cargo-nextestが無い）をreceiptに書く。
 - これは足した・変えたtestだけをworkerの手元で流すもので、全体の`cargo test --locked`と`cargo llvm-cov`をworkerが流さない規則はそのまま。
+
+## itのtestの時間の関門
+
+足した・本文を変えた`tests/it`のtestの時間を閾値と比べる（規則は[testの制約](testing.md)の「判断と境界のtest」、値と書式は[Slow tests](../design/slow-tests.md)の「itのtestの時間の関門」）。
+
+- 流すtestを増やさない。上の「stress」で足した・変えたtestを流したnextestの出力を`tee`でfileに残し、それにscriptを当てる。`--base`はrunのbase commit（workerのpromptのbase、またはmainとのmerge base）。
+
+  ```sh
+  cargo nextest run --locked --test it --stress-count 5 -E 'test(=<module>::<name>)' 2>&1 | tee "$TMPDIR/it-stress.log"
+  sh scripts/check-it-test-time.sh --base <base commit> "$TMPDIR/it-stress.log"
+  ```
+
+- exit 1なら、名指されたtestを直すか、testing.mdの条件に当たる理由で許可の一覧に項目を足し、もう一度当てる。どちらもできなければ`failed`のreceiptに理由を書く。
+- receiptの`tests`のevidenceに、コマンドとexit statusと最後の1行（対象・超過・秒の無いものの本数）を書く。足した項目があれば名前と理由も書く。
+- `tests/it`のtestを変えていないrun、stressをしなかったrun（cargo-nextestが無いなど）はscriptを当てず、当てなかったことと理由をevidenceに書く。
 
 ## hostに触らない
 

@@ -4,15 +4,17 @@ type: design
 title: Slow tests summary from nextest output
 status: current
 created: 2026-09-30
-updated: 2026-09-30
-last_verified: 2026-09-30
+updated: 2026-10-05
+last_verified: 2026-10-05
 scope: operations
 tags:
   - testing
   - ci
 related:
   - adr-0076
+  - adr-t1707-1
   - design-stress-ci
+  - development-testing
 ---
 
 # Slow tests summary
@@ -56,3 +58,64 @@ cat nextest.log | sh scripts/slow-tests.sh --top 50
 ## CI
 
 `.github/workflows/ci.yml` の `cargo llvm-cov nextest` の step は、出力を `tee` で `$RUNNER_TEMP/nextest.log` にも残す（`shell: bash` の `-o pipefail` で、step の成否はコマンドの exit status のまま）。続く `Slow tests` の step が script に通して `$GITHUB_STEP_SUMMARY` に書くので、実行ごとの job summary に同じ表が出る。この step は test の step が落ちても（cancel のときを除き）走り、`continue-on-error: true` で自分の失敗では CI を落とさない。関門のコマンドと失敗の条件は変えていない。
+
+## itのtestの時間の関門
+
+差分で足した・変えた`tests/it`のtestの1本の時間を閾値と比べ、超えたものを許可の一覧の項目が無ければ落とす関門（[ADR-t1707-1](../adr/2026-10-05-t1707-1-time-gate-for-added-or-changed-integration-tests.md)）の今の値と形。許可の一覧に載せてよい理由と関門の場所の規則は[testの制約](../development/testing.md)の「判断と境界のtest」が持つ。
+
+### 閾値
+
+既定は1本**5秒**。本番の関門の`dagq::it`の1本の平均（goal 118の起点の直近10本で約2.6秒、task 1707の初期値を取った10本で約2.35秒＝1,222本・2,876.9秒）の2倍程度で、goal 68と`scripts/slow-tests.sh`の「5 秒を超える」の帯と同じ。test の秒は log の`PASS`と`FLKY-FL`（`FLAKY`）の行から上の「読む行」と同じに読み、1本のtestの行が複数あれば（複数のlog、stressの周回）その中央値と比べる。閾値ちょうどは超えない。
+
+CIのmacOSのrunner（`macos-14`）はnextestの既定（CPU数）の並列で流し、本番の関門は`dagq.toml`の`[run.env]`の`NEXTEST_TEST_THREADS`で絞って流すので、同じtestの秒が違う。今の値は本番の秒で決めたもので、CIで超えて本番で超えない（またはその逆の）testがありうる。CIで落ちたtestが本番では閾値の内なら、本番の関門のlogの秒を添えて直すか項目を足すかをplannerが決める。workerの手元の秒もhostの負荷で揺れる。
+
+### 許可の一覧
+
+`.config/it-slow-allow.toml`。1つの項目は`[[test]]`で、3つのkeyを全部持つ（書式は`.config/e2e-quarantine.toml`の流儀）。
+
+```toml
+[[test]]
+name = "runtime_handoff::review_verdicts::reviews_that_ended_before_the_exec_are_applied_not_run_again"
+reason = "R 移し替えの予定（代表がある、goal 119 か 120）: same review/handoff boundary"
+task = 1707
+```
+
+| key | 意味 |
+| --- | --- |
+| `name` | test binary `dagq::it`の中の完全なnextestの名前（下の「名前」）。末尾のfnの名前だけの項目は何も許さない |
+| `reason` | 守る境界か、移し替えの予定と行き先のtask・goal |
+| `task` | 項目を足したtaskのID |
+
+keyの欠けた項目・知らないkey・1つの項目の中で2回書いたkey・同じ`name`の2つの項目は読めない一覧として扱う（exit 2）。初期値（task 1707）は、本番の関門の直近10本（2026-10-04T20:32〜2026-10-05T00:06 +0900、Summaryを含む`integrate-*-verify-*.log`）を`scripts/slow-tests.sh`で集計し、中央値が5秒を超えた`dagq::it`のtest 129本。理由は[it-reduction](../plans/it-reduction.md)の`it-tests.tsv`のclassとreasonで、完全な名前の先頭の要素がTSVの`module`、末尾の要素が`test`と一致する行が1つのときだけ使い、0行か2行以上ならclassを`unknown`にする（TSVの`module`は入れ子のmodを落とし秒も当てにならないので、名前と秒はlogから取る）。各項目の上のcommentに中央値とclassを書く。
+
+### 名前
+
+対象のtestと許可の一覧とlogは、同じ完全なnextestの名前で照合する。
+
+- 対象は、HEADの`tests/it`の下の`.rs`のうち`#[test]`の付いたfnで、`git diff --unified=0 <base>...HEAD -- tests/it`が足した・変えた行が、その`#[test]`の行から閉じる`}`までに入るもの。消しただけの行は、消した位置の前後の行が両方その範囲に入るときだけ数える（testの直後のhelperを消してもそのtestは対象にならない）。
+- 名前は、fileの`tests/it`からのpathから`.rs`（と`/mod`）を除いて`/`を`::`にしたもの（`tests/it/runtime_handoff.rs`なら`runtime_handoff`、`tests/it/main.rs`なら無し）に、fnを囲む`mod NAME {`の入れ子とfnの名前を`::`でつなぐ。`tests/it/main.rs`に`#[path = "..."] mod NAME;`（1行でも2行に分けても）があってそのfileを指すなら、pathの代わりに`NAME`を使う。
+- signatureの`()`と`[]`の中の`;`（`-> [u8; 2]`）はitemの終わりと見ない。括弧の対応は、comment（入れ子の`/* */`を含む）・文字列・raw文字列・char literalの中の`{`と`}`を数えない。macroが展開するtestは見ない。
+- logの行の名前は、色を除いた`PASS [ 秒s] [i/N] (j/M) dagq::it <名前>`の末尾の2語（binaryと名前）で、binaryが`dagq::it`の行だけを読む。
+
+### script
+
+`scripts/check-it-test-time.sh`。`sh`とPOSIXの`awk`と`git`だけを使う。
+
+```sh
+sh scripts/check-it-test-time.sh --base REV [--threshold SECS] [--allow FILE] [LOG...]
+sh scripts/check-it-test-time.sh --self-test
+```
+
+| 引数 | 意味 |
+| --- | --- |
+| `--base REV` | 比べるcommit（必須、既定は無し）。`git diff REV...HEAD -- tests/it` |
+| `--threshold SECS` | 閾値の秒（既定5） |
+| `--allow FILE` | 許可の一覧（既定`.config/it-slow-allow.toml`） |
+| `LOG...` | nextestの出力のfile（複数可、`-`はstdin）。無ければstdin |
+| `--self-test` | `scripts/check-it-test-time-fixtures/`のbaseとheadから一時dirに2つのcommitを作り、超過・許可・変えていない遅いtest・logに無いtest・色の付いた行・入れ子のmodの中の既存のtestの本文の変更（と2行と1行の`#[path]`、signatureの`;`、testの直後のhelperを消すこと、閾値の内のexit 0、引数の誤り・読めないlog・理由の無い項目・2回書いたkeyのexit 2、このrepositoryの許可の一覧が読めること）を確かめる |
+
+exit statusは、閾値を超え許可の一覧に無い対象が無ければ0、あれば1（1本ずつ名前・秒・file:行をstderrに出す）、引数の誤り・読めないlogか許可の一覧・書式の誤り・gitの失敗は2。logに秒の無い対象（流さなかったtest、`#[ignore]`）は警告をstderrに出すだけ。最後の1行（stdout）に対象・超過・閾値の内か許可・秒の無いものの本数を出す。
+
+### CI
+
+`.github/workflows/ci.yml`のmacOSのjobの`Slow tests`の後の`IT test time gate`のstepが、同じ`$RUNNER_TEMP/nextest.log`をscriptに渡す。`--base`はpushでは`github.event.before`、pull_requestでは`github.event.pull_request.base.sha`。`before`が無い（新しいbranchの最初のpushで0の列）か、そのcommitが無いときは理由を出してskipする。checkoutは`fetch-depth: 0`なので`REV...HEAD`のmerge baseが求まる。nextestのstepが落ちても（cancelのときを除き）走り、`continue-on-error`を付けないので、超えればjobが落ち、mainへのpushではci-failureのissueが開く（[ci-failure-issues](ci-failure-issues.md)）。

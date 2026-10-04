@@ -1,0 +1,15 @@
+    Starting 11 tests across 1 binary
+        PASS [   9.000s] (1/9) dagq::it gate_fixture::an_unchanged_slow_test
+        PASS [   8.000s] (2/9) dagq::it gate_fixture::an_allowed_slow_test
+        PASS [   6.000s] [1/3] (3/9) dagq::it gate_fixture::a_new_slow_test
+        PASS [   8.000s] [2/3] (3/9) dagq::it gate_fixture::a_new_slow_test
+        PASS [   7.000s] [3/3] (3/9) dagq::it gate_fixture::a_new_slow_test
+        PASS [   0.500s] (4/9) dagq::it gate_fixture::a_new_fast_test
+\033[32;1m        PASS\033[0m [   6.500s] (5/9) \033[35;1mdagq::it\033[0m \033[36mgate_fixture\033[0m\033[36m::\033[0m\033[34;1ma_coloured_slow_test\033[0m
+        PASS [   8.000s] (6/9) dagq::it nested_fixture::review_verdicts::inner::a_nested_test_whose_body_changed
+        PASS [   9.500s] (7/9) dagq::it nested_fixture::a_nested_test_whose_body_changed
+        PASS [   9.000s] (8/9) dagq::it renamed_by_path::a_test_under_a_path_attribute
+        PASS [   9.000s] (9/9) dagq::it renamed_by_path::an_old_test_under_a_path_attribute
+        PASS [   9.000s] (10/11) dagq::it one_liner::a_test_after_a_one_line_path
+        PASS [   9.000s] (11/11) dagq::it gate_fixture::an_array_test
+     Summary [  20.000s] 11 tests run: 11 passed, 0 skipped

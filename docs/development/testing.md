@@ -4,7 +4,7 @@ type: development
 title: このrepositoryのtestの制約（coverageの関門・test binary・置き場所・書き方・判断と境界のtest・ファイルの行数・待ちの上限・e2eとその印・手動スモーク）
 status: current
 created: 2026-10-03
-updated: 2026-10-04
+updated: 2026-10-05 # task 1707
 owners:
   - hisamekms
 tags:
@@ -14,6 +14,8 @@ related:
   - adr-t1453-2
   - adr-t1582-1
   - adr-t1410-1
+  - adr-t1707-1
+  - design-slow-tests
   - development-local-checks
   - development-task-registration
   - development-migrations
@@ -54,6 +56,11 @@ testを書く・置く・直すときの今の規則。読むのは、`tests/`�
 - `tests/it`はSQLite・Git・プロセス・supervisorの配線・復旧とadopt・cmuxの境界を代表の1 caseで確かめ、判断のcaseごとにfixtureとsupervisorを起動し直さない。
 - e2eは実バイナリ・実Git・実cmuxのハッピーパスと境界だけにする（流し方は下の「e2e」）。
 - integration testを減らすときは、確かめていた中身をunit testか残すintegration testに対応づけ、行き先の無いまま消さない。
+- 時間の関門（[ADR-t1707-1](../adr/2026-10-05-t1707-1-time-gate-for-added-or-changed-integration-tests.md)）: baseからの差分で足した・本文を変えた`tests/it`のtestの1本の時間が閾値を超えたら、許可の一覧に項目が無いかぎり関門が落ちる。閾値・許可の一覧の置き場所と書式・testの名前の求め方・scriptの引数は[Slow tests](../design/slow-tests.md)の「itのtestの時間の関門」が持つ。
+  - 超えたら、まずtestを直す（判断をunit testへ移す、caseごとにfixtureとsupervisorを起動し直さない）。直さずに許可の一覧に項目を足してよいのは、理由が次のどちらかのときだけ: (a) そのtestが守る境界（SQLite・Git・プロセス・supervisorの配線・復旧とadoptのどれか。cmuxは挙げず、inboxへのcmuxの送り出しはsupervisorの配線として書く）を書ける、(b) 移し替えの予定があり、その行き先のtaskかgoalを書ける。判断のcaseを並べただけのtestは(a)に当たらない。項目には足したtaskのIDを書く。
+  - 項目のtestを直すか移すtaskは、同じ変更で自分の項目を外すか理由を直す。
+  - 関門の場所: workerの手元（[手元の検証](local-checks.md)の「itのtestの時間の関門」）、runのreviewのtestの規則の検査、CIのpushとpull_request（mainへのpushで落ちればci-failureのissue）。`integrate`の検証には足さない。
+  - helperやfixtureだけの変更は対象にならず（それを使うtestが遅くなっても捕まえない）、CIのrunnerと本番の関門では秒が違う。
 
 ## testファイルの行数
 

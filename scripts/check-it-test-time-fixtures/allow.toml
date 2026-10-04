@@ -1,0 +1,12 @@
+# The allow list of the self-test.
+
+[[test]]
+name = "gate_fixture::an_allowed_slow_test"
+reason = "B: the boundary of the fixture"
+task = 1707
+
+# An item with the fn's name alone does not allow the nested test.
+[[test]]
+name = "nested_fixture::a_nested_test_whose_body_changed"
+reason = "B: the top-level test of the same fn name"
+task = 1707

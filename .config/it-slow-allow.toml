@@ -1,0 +1,799 @@
+# The allow list of the time gate of the tests in tests/it (ADR-t1707-1).
+# `sh scripts/check-it-test-time.sh` fails when a test of dagq::it that the
+# diff added or changed took longer than the threshold in the nextest output
+# and has no item here. The threshold, the format and the naming rule are in
+# docs/design/slow-tests.md, section "itのtestの時間の関門", and the rule on
+# which reasons may put a test here in docs/development/testing.md, section
+# "判断と境界のtest". The script reads this file (CI and the worker run it).
+#
+# Each item is one [[test]] with all three keys:
+#
+# [[test]]
+# name = "runtime_handoff::review_verdicts::reviews_that_ended_before_the_exec_are_applied_not_run_again"
+# reason = "the boundary it keeps, or the move it waits for and the goal or task that does it"
+# task = 1707          # the task that put the item here
+#
+# name is the full nextest name of the test in the binary dagq::it, mods and
+# all; an item with the fn's name alone allows nothing.
+#
+# The first items (task 1707): every dagq::it test whose median over the ten
+# latest production gate logs with a Summary (2026-10-04T20:32 to
+# 2026-10-05T00:06 +0900) was over 5 seconds, as summed by
+# scripts/slow-tests.sh. The class and the reason come from
+# docs/plans/it-reduction/it-tests.tsv (task 1706) when its module and test
+# columns match the name's first and last parts in exactly one row, and the
+# class is unknown otherwise. The comment above an item gives the median.
+
+# 5.376s, class B
+[[test]]
+name = "actor_model::jobs_with_a_role_table_are_given_its_model_and_effort"
+reason = "B 境界（守る境界）: config reaches spawned job args and span"
+task = 1707
+
+# 5.423s, class R
+[[test]]
+name = "actor_model::jobs_without_a_role_table_start_as_before"
+reason = "R 移し替えの予定（代表がある、goal 119 か 120）: default no-role path; role->model mapping is pure"
+task = 1707
+
+# 8.454s, class B
+[[test]]
+name = "background_logs::a_background_runs_log_is_followed_and_read_after_it_ended"
+reason = "B 境界（守る境界）: run log --follow over a live wrapper process and file"
+task = 1707
+
+# 7.182s, class B
+[[test]]
+name = "background_logs::a_closed_background_planners_log_is_read_by_its_id"
+reason = "B 境界（守る境界）: planner log CLI over background planner's session.log"
+task = 1707
+
+# 26.818s, class B
+[[test]]
+name = "cli_version::auto_update_installs_each_runtime_landing_and_puts_a_broken_build_back"
+reason = "B 境界（守る境界）: build/install/exec across processes and git"
+task = 1707
+
+# 10.764s, class B
+[[test]]
+name = "cli_version::install_hands_a_running_supervisor_over_under_its_pid_and_rolls_back"
+reason = "B 境界（守る境界）: exec handoff under same pid, file rename"
+task = 1707
+
+# 5.016s, class B
+[[test]]
+name = "cli_version::migrate_is_explicit_and_older_binaries_keep_working_within_the_floor"
+reason = "B 境界（守る境界）: real DB schema migration across binaries"
+task = 1707
+
+# 6.734s, class D
+[[test]]
+name = "draft_bundles::what_a_bundle_leaves_undecided_makes_the_next_and_the_outcomes_are_read"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: next bundle / third-planner exhaustion is decision"
+task = 1707
+
+# 30.331s, class B
+[[test]]
+name = "e2e_gate_podman::a_busy_machine_lock_skips_broker_and_records_why"
+reason = "B 境界（守る境界）: real flock with fake podman"
+task = 1707
+
+# 6.729s, class G
+[[test]]
+name = "finding_planner::a_planner_question_about_a_finding_is_typed_to_its_planner_and_undecided_planners_end_in_the_inbox"
+reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: types answer into planner cmux session"
+task = 1707
+
+# 8.637s, class B
+[[test]]
+name = "inbox_nudge::an_idle_inbox_is_nudged_twice_then_the_person_is_notified_then_nothing"
+reason = "B 境界（守る境界: supervisorの配線、inboxへのcmuxの送り出しと通知）: representative cmux send/notify wiring (inbox stays)"
+task = 1707
+
+# 6.611s, class D
+[[test]]
+name = "inbox_nudge::an_inbox_at_work_or_with_a_line_typed_is_not_nudged"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: screen-idle judgment from text"
+task = 1707
+
+# 7.422s, class D
+[[test]]
+name = "inbox_nudge::failed_submissions_are_recorded_once_and_advance_to_the_next_nudge"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: nudge step progression decision"
+task = 1707
+
+# 5.651s, class D
+[[test]]
+name = "inbox_nudge::nothing_is_typed_with_a_watcher_without_an_ask_or_without_the_workspace"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: precondition decision"
+task = 1707
+
+# 5.198s, class D
+[[test]]
+name = "landing_branch::no_push_records_the_configured_remote"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: which remote is recorded is a decision"
+task = 1707
+
+# 5.311s, class G
+[[test]]
+name = "plan_review::a_planner_question_answer_is_typed_into_its_planner_or_carried_by_a_new_one"
+reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: typed into cmux planner"
+task = 1707
+
+# 7.867s, class D
+[[test]]
+name = "plan_review::drafts_of_the_runtime_get_planners_within_the_limit_and_a_persons_draft_none"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: planner limit/origin rule"
+task = 1707
+
+# 10.708s, class R
+[[test]]
+name = "planner_headless::a_headless_draft_planner_takes_the_answer_of_its_question_as_its_next_turn"
+reason = "R 移し替えの予定（代表がある、goal 119 か 120）: same turn boundary; answer routing decision"
+task = 1707
+
+# 6.888s, class B
+[[test]]
+name = "planner_headless::a_headless_planner_opened_for_a_revise_runs_its_prompt_as_a_turn_and_ends_on_the_exit_request"
+reason = "B 境界（守る境界）: representative background wrapper + turns/"
+task = 1707
+
+# 10.044s, class R
+[[test]]
+name = "planner_headless::a_headless_request_planner_takes_the_answer_as_its_next_turn_and_declines"
+reason = "R 移し替えの予定（代表がある、goal 119 か 120）: same turn boundary; request decline decision"
+task = 1707
+
+# 8.392s, class B
+[[test]]
+name = "planner_headless::the_turn_a_killed_background_planner_wrapper_left_is_stopped_as_the_planner_closes"
+reason = "B 境界（守る境界）: orphan process group cleanup"
+task = 1707
+
+# 10.009s, class R
+[[test]]
+name = "planner_headless_stats::a_headless_planners_session_and_route_are_read_by_stats_and_kpi"
+reason = "R 移し替えの予定（代表がある、goal 119 か 120）: headless planner wiring elsewhere; span/stat counts decision"
+task = 1707
+
+# 12.025s, class D
+[[test]]
+name = "planner_headless_turns::a_headless_finding_planner_takes_the_answer_as_its_next_turn_and_closes_with_its_finding"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: answer routing / close decision"
+task = 1707
+
+# 13.264s, class D
+[[test]]
+name = "planner_headless_turns::a_headless_planner_at_a_login_failure_waits_in_the_hold_and_goes_on"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: failure kind → authentication hold"
+task = 1707
+
+# 14.538s, class D
+[[test]]
+name = "planner_headless_turns::a_headless_planner_at_the_usage_limit_waits_in_the_hold_and_makes_the_same_call_again"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: failure kind → hold mapping"
+task = 1707
+
+# 7.108s, class B
+[[test]]
+name = "planner_headless_turns::a_headless_planners_turn_stopped_at_its_limit_tells_the_inbox_and_the_planner_closes"
+reason = "B 境界（守る境界）: wrapper kills turn at time limit"
+task = 1707
+
+# 19.379s, class D
+[[test]]
+name = "planner_headless_turns::a_headless_request_planners_answer_reaches_a_new_one_and_undecided_ends_exhaust_the_request"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: exhaustion count, routing answer"
+task = 1707
+
+# 9.386s, class D
+[[test]]
+name = "planner_headless_turns::a_headless_request_planners_submission_proposes_the_request_and_its_end_closes_it"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: request state transition"
+task = 1707
+
+# 8.499s, class D
+[[test]]
+name = "planner_headless_turns::a_live_headless_planner_takes_the_next_revise_of_its_proposal_as_its_next_turn"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: live planner vs new planner choice"
+task = 1707
+
+# 14.313s, class unknown
+[[test]]
+name = "planner_headless_turns::a_request_written_during_a_turn_at_the_usage_limit_waits_for_the_retry_of_that_turn"
+reason = "unknown: TSV と一意に対応しない（TSV に 0 行）。class と行き先は移し替えの goal（119・120）が決める"
+task = 1707
+
+# 14.781s, class B
+[[test]]
+name = "queue_service_reads::the_read_roles_read_what_their_prompts_name_as_the_command_line_prints_it"
+reason = "B 境界（守る境界）: queue service socket per principal"
+task = 1707
+
+# 6.099s, class D
+[[test]]
+name = "request_planner::a_planner_question_about_a_request_reaches_its_planner_or_a_new_one_and_three_exhaust_it"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: routing and three-attempt limit"
+task = 1707
+
+# 6.696s, class D; not in tests/it at the base of task 1707
+[[test]]
+name = "review_subagents::an_agents_concern_a_person_decides_under_a_pass_asks_a_person"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: concern rule routing loop (7s)"
+task = 1707
+
+# 6.122s, class B
+[[test]]
+name = "review_subagents::the_worker_cannot_change_or_drop_its_required_review"
+reason = "B 境界（守る境界）: reads config from main commit via git, not worktree"
+task = 1707
+
+# 5.774s, class B
+[[test]]
+name = "runtime_adopt::a_supervisor_takes_back_a_run_it_lost_only_after_dropping_its_slot"
+reason = "B 境界（守る境界）: slot/lease race wiring"
+task = 1707
+
+# 5.097s, class B
+[[test]]
+name = "runtime_adopt::independent_tasks_run_concurrently_and_a_dependent_starts_after_integration"
+reason = "B 境界（守る境界）: concurrent runs, git integrate, supervisor loop"
+task = 1707
+
+# 5.397s, class B
+[[test]]
+name = "runtime_background_process::a_detached_wrapper_and_its_turn_outlive_a_killed_supervisor"
+reason = "B 境界（守る境界）: SIGKILL supervisor, adopt detached wrapper"
+task = 1707
+
+# 6.141s, class R
+[[test]]
+name = "runtime_background_process::a_stop_answer_stops_the_background_session"
+reason = "R 移し替えの予定（代表がある、goal 119 か 120）: duplicates runtime_headless stop answer"
+task = 1707
+
+# 9.316s, class B
+[[test]]
+name = "runtime_background_process::stop_processes_stops_a_background_sessions_orphan"
+reason = "B 境界（守る境界）: real orphan process stopped"
+task = 1707
+
+# 6.397s, class B
+[[test]]
+name = "runtime_broker::a_preferred_worker_gets_its_token_and_the_end_of_its_run_revokes_it"
+reason = "B 境界（守る境界）: token files 0600, MCP config, broker refusal"
+task = 1707
+
+# 6.785s, class B
+[[test]]
+name = "runtime_claim::resident_supervisor_without_runs_is_listed_until_it_stops"
+reason = "B 境界（守る境界）: resident thread heartbeat/registration"
+task = 1707
+
+# 5.986s, class D
+[[test]]
+name = "runtime_claim::supervisor_claims_by_effective_priority_like_candidates_and_graph"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: claim ordering by priority"
+task = 1707
+
+# 6.481s, class D
+[[test]]
+name = "runtime_claim::supervisor_claims_the_candidate_that_releases_the_most_tasks_first"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: claim ordering via supervise restarts"
+task = 1707
+
+# 6.056s, class B
+[[test]]
+name = "runtime_claim_defer::a_changed_conflicts_table_is_read_again_without_a_restart"
+reason = "B 境界（守る境界）: dagq.toml reread each pass from main checkout"
+task = 1707
+
+# 5.169s, class D
+[[test]]
+name = "runtime_claim_defer::a_run_waiting_for_its_owner_past_the_grace_lets_the_deferred_task_go"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: grace time judgment"
+task = 1707
+
+# 7.688s, class D
+[[test]]
+name = "runtime_claim_defer::a_task_meeting_a_run_on_a_hotspot_waits_and_the_next_one_is_claimed"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: path overlap → defer and next candidate"
+task = 1707
+
+# 10.000s, class B
+[[test]]
+name = "runtime_claim_spacing::a_resident_supervisor_waits_for_the_spacing_and_status_shows_it"
+reason = "B 境界（守る境界）: representative resident supervisor with real config reread"
+task = 1707
+
+# 5.545s, class D
+[[test]]
+name = "runtime_claim_spacing::no_load_hold_or_no_spacing_fills_the_free_slots_in_one_pass"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: claim count per pass"
+task = 1707
+
+# 5.030s, class D
+[[test]]
+name = "runtime_claim_spacing::one_claim_per_pass_spaced_from_the_queues_latest_claim"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: spacing time judgment"
+task = 1707
+
+# 12.373s, class R
+[[test]]
+name = "runtime_cleanup::a_drain_on_a_provisioning_failure_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing"
+reason = "R 移し替えの予定（代表がある、goal 119 か 120）: drain/cleanup wiring variant; decision of ordering"
+task = 1707
+
+# 5.297s, class D
+[[test]]
+name = "runtime_cleanup::a_skipped_resume_waits_for_the_cleanup_of_its_build_outputs"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: skip_resume gated on cleanup"
+task = 1707
+
+# 30.822s, class R
+[[test]]
+name = "runtime_cleanup::a_withdrawn_handoff_resumes_the_cleanup"
+reason = "R 移し替えの予定（代表がある、goal 119 か 120）: handoff/drain wiring variant (37s); decisions of ordering"
+task = 1707
+
+# 28.091s, class B
+[[test]]
+name = "runtime_cleanup::draining_finishes_disk_cleanup_before_deciding_a_landing"
+reason = "B 境界（守る境界）: representative drain/handoff + cleanup wiring"
+task = 1707
+
+# 38.897s, class R
+[[test]]
+name = "runtime_cleanup::draining_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing"
+reason = "R 移し替えの予定（代表がある、goal 119 か 120）: same drain wiring; pass ordering decisions (46s)"
+task = 1707
+
+# 33.659s, class D
+[[test]]
+name = "runtime_cleanup::the_rest_of_a_cleanup_for_room_holds_and_asks_nothing_until_it_is_done"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: disk ask/hold decision by readings (39s)"
+task = 1707
+
+# 5.450s, class B
+[[test]]
+name = "runtime_client_mode::the_worker_and_its_resume_reach_the_queue_only_through_the_service"
+reason = "B 境界（守る境界）: process env/argv + service socket"
+task = 1707
+
+# 5.342s, class R
+[[test]]
+name = "runtime_e2e::a_failed_e2e_parks_the_run_for_a_resume_and_its_fix_lands"
+reason = "R 移し替えの予定（代表がある、goal 119 か 120）: failure->park decision; spawn covered"
+task = 1707
+
+# 7.340s, class D
+[[test]]
+name = "runtime_e2e::an_e2e_past_its_timeout_is_run_again_instead_of_sending_the_run_back"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: timeout count -> retry/attention"
+task = 1707
+
+# 6.328s, class B
+[[test]]
+name = "runtime_e2e::the_runs_of_a_supervisor_run_their_e2e_one_at_a_time"
+reason = "B 境界（守る境界）: concurrency of host e2e"
+task = 1707
+
+# 5.628s, class D
+[[test]]
+name = "runtime_evidence::the_e2e_a_run_needs_is_recorded_and_its_receipt_backs_none"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: e2e need from diff paths; pure"
+task = 1707
+
+# 5.232s, class G; not in tests/it at the base of task 1707
+[[test]]
+name = "runtime_handoff::a_handoff_before_the_resume_request_lets_the_next_supervisor_send_it"
+reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive input box"
+task = 1707
+
+# 5.087s, class R
+[[test]]
+name = "runtime_handoff::a_handoff_during_a_resume_goes_on_watching_the_resumed_session"
+reason = "R 移し替えの予定（代表がある、goal 119 か 120）: handoff.json carryover; covered by continuation test"
+task = 1707
+
+# 6.493s, class G; not in tests/it at the base of task 1707
+[[test]]
+name = "runtime_handoff::a_handoff_without_its_state_after_the_resumed_session_ended_gives_the_lease_back"
+reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive resume"
+task = 1707
+
+# 5.338s, class D
+[[test]]
+name = "runtime_handoff::a_handoff_without_its_state_during_a_resume_still_watches_the_session"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: rebuild resume from events"
+task = 1707
+
+# 5.282s, class G; not in tests/it at the base of task 1707
+[[test]]
+name = "runtime_handoff::a_resume_handoff_before_exit_does_not_answer_background_work"
+reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive background-work dialog"
+task = 1707
+
+# 6.196s, class G; not in tests/it at the base of task 1707
+[[test]]
+name = "runtime_handoff::a_resume_handoff_preserves_the_exit_for_its_background_dialog"
+reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive dialog /exit"
+task = 1707
+
+# 6.149s, class G; not in tests/it at the base of task 1707
+[[test]]
+name = "runtime_handoff::a_resume_without_a_snapshot_recovers_the_exit_for_its_background_dialog"
+reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive dialog /exit"
+task = 1707
+
+# 5.577s, class B
+[[test]]
+name = "runtime_handoff::a_supervisor_that_stops_during_a_resume_leaves_the_session_to_its_adopter"
+reason = "B 境界（守る境界）: adoption after stale lease, other token"
+task = 1707
+
+# 6.254s, class D
+[[test]]
+name = "runtime_handoff::canceling_a_handoff_during_a_landing_resumes_claims_without_exec"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: withdrawn request → resume claims"
+task = 1707
+
+# 6.869s, class R
+[[test]]
+name = "runtime_handoff::review_verdicts::reviews_that_ended_before_the_exec_are_applied_not_run_again"
+reason = "R 移し替えの予定（代表がある、goal 119 か 120）: same review/handoff boundary"
+task = 1707
+
+# 6.162s, class B
+[[test]]
+name = "runtime_headless::a_later_turn_is_the_runs_agent_and_its_helper_no_idle_process"
+reason = "B 境界（守る境界）: process tree / agent pid"
+task = 1707
+
+# 8.404s, class B
+[[test]]
+name = "runtime_headless::a_turn_past_its_limit_is_stopped_with_its_command_outside_its_group"
+reason = "B 境界（守る境界）: process groups and signals"
+task = 1707
+
+# 6.159s, class unknown
+[[test]]
+name = "runtime_headless_stall::a_headless_stall_past_its_three_recovery_jobs_is_asked_without_a_fourth"
+reason = "unknown: TSV と一意に対応しない（TSV に 0 行）。class と行き先は移し替えの goal（119・120）が決める"
+task = 1707
+
+# 5.056s, class B
+[[test]]
+name = "runtime_integrate::a_refused_renumbering_commit_is_undone_and_needs_a_session"
+reason = "B 境界（守る境界）: git commit refusal and undo"
+task = 1707
+
+# 5.943s, class D
+[[test]]
+name = "runtime_landing_answers::a_land_answer_is_applied_while_the_slot_is_taken_and_lands_before_a_new_claim"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: answer application vs slot ordering"
+task = 1707
+
+# 9.576s, class D
+[[test]]
+name = "runtime_landing_release::a_process_that_outlives_its_stop_is_the_inboxs_once"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: attention once decision (10.7s)"
+task = 1707
+
+# 6.024s, class D
+[[test]]
+name = "runtime_light_slots::a_parked_run_waits_for_a_normal_slot_while_the_landing_queue_fills_it"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: slot allocation and resume ordering"
+task = 1707
+
+# 5.514s, class B
+[[test]]
+name = "runtime_observer::observe_kills_an_agent_past_its_timeout_with_its_children"
+reason = "B 境界（守る境界）: process group kill"
+task = 1707
+
+# 7.545s, class B
+[[test]]
+name = "runtime_observer::supervisor_starts_the_observer_on_its_interval_without_a_run_slot"
+reason = "B 境界（守る境界）: supervisor wiring of observer job"
+task = 1707
+
+# 8.518s, class B
+[[test]]
+name = "runtime_precheck::precheck_conflicts_up_to_the_conflict_only_limit_retry_the_task_with_its_branch"
+reason = "B 境界（守る境界）: real git rebase conflict precheck representative"
+task = 1707
+
+# 5.809s, class D
+[[test]]
+name = "runtime_precheck::the_conflict_only_limit_of_dagq_toml_retries_the_task_sooner"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: configured limit counting"
+task = 1707
+
+# 7.053s, class unknown
+[[test]]
+name = "runtime_recheck::a_run_held_in_its_slot_for_its_e2e_that_a_landing_conflicts_with_is_parked_before_it_lands"
+reason = "unknown: TSV と一意に対応しない（TSV に 0 行）。class と行き先は移し替えの goal（119・120）が決める"
+task = 1707
+
+# 5.641s, class G; not in tests/it at the base of task 1707
+[[test]]
+name = "runtime_recheck::a_run_held_in_its_slot_that_a_landing_conflicts_with_is_parked_before_it_lands"
+reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive held /exit"
+task = 1707
+
+# 5.544s, class B
+[[test]]
+name = "runtime_recheck::a_waiting_run_that_a_landing_conflicts_with_is_resumed_before_its_answer"
+reason = "B 境界（守る境界）: real git merge-tree conflict"
+task = 1707
+
+# 5.092s, class unknown
+[[test]]
+name = "runtime_recheck::another_supervisors_recheck_of_main_leaves_the_run_held_for_its_e2e_to_check"
+reason = "unknown: TSV と一意に対応しない（TSV に 0 行）。class と行き先は移し替えの goal（119・120）が決める"
+task = 1707
+
+# 6.037s, class D
+[[test]]
+name = "runtime_repair::a_live_escalation_is_recorded_at_the_recovery_jobs_request_unless_the_job_failed"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: attribution of events"
+task = 1707
+
+# 5.034s, class G; not in tests/it at the base of task 1707
+[[test]]
+name = "runtime_resume::a_request_lost_twice_is_asked_to_the_inbox"
+reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive send confirmation"
+task = 1707
+
+# 5.036s, class G; not in tests/it at the base of task 1707
+[[test]]
+name = "runtime_resume::a_request_stuck_in_the_input_box_is_asked_to_the_inbox"
+reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: cmux input box send confirmation"
+task = 1707
+
+# 7.486s, class R
+[[test]]
+name = "runtime_resume::a_resume_whose_lease_moved_is_resumed_again_only_after_its_slot_is_dropped"
+reason = "R 移し替えの予定（代表がある、goal 100 の task 1557・1558）: same lease/slot race as runtime_adopt takes_back"
+task = 1707
+
+# 6.921s, class G; not in tests/it at the base of task 1707
+[[test]]
+name = "runtime_resume::a_resumed_session_gets_its_request_only_once_its_input_box_is_ready"
+reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: cmux input box readiness"
+task = 1707
+
+# 6.833s, class G; not in tests/it at the base of task 1707
+[[test]]
+name = "runtime_resume::a_resumed_session_that_ignores_exit_is_let_go"
+reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive /exit timeout"
+task = 1707
+
+# 10.391s, class unknown
+[[test]]
+name = "runtime_resume::a_resumed_session_that_ignores_its_exit_request_is_let_go_after_the_exit_timeout"
+reason = "unknown: TSV と一意に対応しない（TSV に 0 行）。class と行き先は移し替えの goal（119・120）が決める"
+task = 1707
+
+# 5.763s, class unknown
+[[test]]
+name = "runtime_resume::a_resumed_session_whose_wrapper_goes_silent_is_asked_to_exit_once_then_let_go"
+reason = "unknown: TSV と一意に対応しない（TSV に 0 行）。class と行き先は移し替えの goal（119・120）が決める"
+task = 1707
+
+# 5.601s, class D
+[[test]]
+name = "runtime_resume::a_run_whose_conflict_only_resumes_are_used_up_is_retried_with_its_branch"
+reason = "D 移し替えの予定（判断を unit test へ、goal 100 の task 1557・1558）: counting already unit tested in domain::resume"
+task = 1707
+
+# 6.396s, class B
+[[test]]
+name = "runtime_resume::a_session_nobody_watches_blocks_the_resume_until_it_ends"
+reason = "B 境界（守る境界）: live process of dead supervisor's resume"
+task = 1707
+
+# 5.188s, class D
+[[test]]
+name = "runtime_resume::a_used_up_run_is_retried_with_its_branch_by_its_recovery_job"
+reason = "D 移し替えの予定（判断を unit test へ、goal 100 の task 1557・1558）: alert routing and retry_inherit decision"
+task = 1707
+
+# 6.535s, class R
+[[test]]
+name = "runtime_resume::approved_needs_session_run_is_resumed_until_the_runtime_lands_it"
+reason = "R 移し替えの予定（代表がある、goal 100 の task 1557・1558）: resume wiring covered by conflicting_run"
+task = 1707
+
+# 5.058s, class B
+[[test]]
+name = "runtime_resume::conflicting_run_needs_a_session_and_lands_after_the_session_resolves_it"
+reason = "B 境界（守る境界）: real git conflict, session resolves, lands"
+task = 1707
+
+# 5.424s, class D
+[[test]]
+name = "runtime_resume::resuming_stops_after_three_attempts"
+reason = "D 移し替えの予定（判断を unit test へ、goal 100 の task 1557・1558）: attempt limit"
+task = 1707
+
+# 6.420s, class D
+[[test]]
+name = "runtime_resume::stats_ties_a_deferred_landing_to_the_landing_that_broke_it"
+reason = "D 移し替えの予定（判断を unit test へ、goal 100 の task 1557・1558）: stats attribution computation"
+task = 1707
+
+# 5.322s, class R
+[[test]]
+name = "runtime_resume::unapproved_resumed_run_is_validated_and_reviewed_with_its_session_open"
+reason = "R 移し替えの予定（代表がある、goal 100 の task 1557・1558）: resume wiring covered; approval branching decision"
+task = 1707
+
+# 5.739s, class G; not in tests/it at the base of task 1707
+[[test]]
+name = "runtime_resume_adopt::a_resume_taken_over_after_a_handoff_in_its_slot_does_not_record_its_dialog_again"
+reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive screen watch"
+task = 1707
+
+# 5.925s, class G; not in tests/it at the base of task 1707
+[[test]]
+name = "runtime_resume_adopt::a_resume_taken_over_after_a_handoff_keeps_its_dialog_and_clears_it_at_its_end"
+reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive dialog carryover (module says goal 92)"
+task = 1707
+
+# 5.290s, class G; not in tests/it at the base of task 1707
+[[test]]
+name = "runtime_resume_adopt::an_adopted_resume_in_its_slot_does_not_record_its_dialog_again"
+reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive dialog"
+task = 1707
+
+# 5.909s, class G; not in tests/it at the base of task 1707
+[[test]]
+name = "runtime_resume_adopt::an_adopted_resume_keeps_its_dialog_and_clears_it_at_its_end"
+reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive dialog"
+task = 1707
+
+# 6.181s, class G; not in tests/it at the base of task 1707
+[[test]]
+name = "runtime_resume_exit_retry::a_resumed_sessions_held_exit_is_typed_again_into_a_ready_input_box"
+reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive exit typing"
+task = 1707
+
+# 5.701s, class G; not in tests/it at the base of task 1707
+[[test]]
+name = "runtime_resume_exit_retry::used_up_retries_of_an_unreviewed_resume_go_to_the_stuck_exit_ask"
+reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive exit retries"
+task = 1707
+
+# 6.696s, class G; not in tests/it at the base of task 1707
+[[test]]
+name = "runtime_resume_exit_retry::used_up_retries_over_a_dialog_close_a_reviewed_resume_and_judge_it"
+reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive exit retries"
+task = 1707
+
+# 5.268s, class G; not in tests/it at the base of task 1707
+[[test]]
+name = "runtime_review_background::background_work_holds_the_resumed_session_until_it_ends"
+reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive resumed session"
+task = 1707
+
+# 5.362s, class unknown
+[[test]]
+name = "runtime_review_conflict::a_conflict_request_that_cannot_be_written_is_withdrawn_and_the_run_lands"
+reason = "unknown: TSV と一意に対応しない（TSV に 0 行）。class と行き先は移し替えの goal（119・120）が決める"
+task = 1707
+
+# 5.114s, class D
+[[test]]
+name = "runtime_run_env::a_missing_run_env_program_holds_resumes_until_it_is_found"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: hold decision on missing program"
+task = 1707
+
+# 6.375s, class G; not in tests/it at the base of task 1707
+[[test]]
+name = "runtime_screen_idle_input::a_markerless_resumed_session_gets_its_answer_once_its_screen_rests"
+reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: cmux screen"
+task = 1707
+
+# 5.317s, class D
+[[test]]
+name = "runtime_stale_receipt::a_resumed_session_idle_after_its_rebase_with_the_old_receipt_is_asked_once"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: nudge on resume phase"
+task = 1707
+
+# 6.099s, class D
+[[test]]
+name = "runtime_stale_receipt::a_resumed_session_that_leaves_the_old_receipt_ends_its_attempt_as_before"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: attempt outcome unresolved"
+task = 1707
+
+# 6.768s, class D
+[[test]]
+name = "runtime_stale_receipt::a_stale_receipt_left_during_a_wait_is_unchanged"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: outcome judgement across wait"
+task = 1707
+
+# 5.873s, class D
+[[test]]
+name = "runtime_stale_receipt::a_stale_receipt_rewritten_during_a_wait_is_rewritten"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: outcome judgement across wait"
+task = 1707
+
+# 7.697s, class G; not in tests/it at the base of task 1707
+[[test]]
+name = "runtime_stall::an_input_the_supervisor_did_not_send_holds_the_nudge_and_is_preempted"
+reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: person typing into cmux session"
+task = 1707
+
+# 6.404s, class G; not in tests/it at the base of task 1707
+[[test]]
+name = "runtime_stall_recovery::a_stall_past_its_three_recovery_jobs_is_asked_without_a_fourth"
+reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive stall recovery (limit decision)"
+task = 1707
+
+# 5.627s, class B
+[[test]]
+name = "runtime_support::thread_stacks::supervise_timeout_prints_stacks_before_cleanup"
+reason = "B 境界（守る境界）: child process timeout prints stacks"
+task = 1707
+
+# 8.632s, class B
+[[test]]
+name = "runtime_sweep::ended_runs_lose_their_build_outputs_and_canceled_tasks_their_worktrees"
+reason = "B 境界（守る境界）: filesystem and git worktree removal"
+task = 1707
+
+# 6.127s, class D
+[[test]]
+name = "runtime_triage::a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: round limit decision"
+task = 1707
+
+# 5.119s, class G; not in tests/it at the base of task 1707
+[[test]]
+name = "runtime_triage::a_silent_wrapper_after_the_review_waits_for_the_exit_with_an_ask"
+reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive /exit"
+task = 1707
+
+# 5.510s, class B
+[[test]]
+name = "runtime_triage::a_triage_whose_lease_moved_is_triaged_again_only_after_its_slot_is_dropped"
+reason = "B 境界（守る境界）: lease race between supervisors"
+task = 1707
+
+# 13.259s, class R
+[[test]]
+name = "runtime_waiting_stages::a_question_while_resuming_waits_outside_the_slot_and_gets_its_answer"
+reason = "R 移し替えの予定（代表がある、goal 119 か 120）: same wait wiring; clock/slot decisions (13s)"
+task = 1707
+
+# 11.141s, class B
+[[test]]
+name = "runtime_waiting_stages::a_question_while_revising_waits_outside_the_slot_with_its_clock_stopped"
+reason = "B 境界（守る境界）: representative slot/wait wiring with concurrent task"
+task = 1707
+
+# 15.070s, class D
+[[test]]
+name = "runtime_waiting_stages::a_resume_question_past_the_limit_waits_in_its_slot_with_its_clock_stopped"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: limit -> deferred decision (15s)"
+task = 1707
+
+# 5.786s, class G
+[[test]]
+name = "runtime_workspace_cleanup::ended_runs_workspaces_are_listed_then_closed_by_run_task_or_all"
+reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: cmux run workspaces cleanup"
+task = 1707
+
+# 5.179s, class B
+[[test]]
+name = "worker_escalation::a_raised_resume_starts_the_session_higher_and_stats_reads_it"
+reason = "B 境界（守る境界）: wrapper launched with raised model"
+task = 1707
+
+# 5.912s, class D
+[[test]]
+name = "worker_escalation::missing_evidence_and_a_scope_violation_keep_the_step"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: loop of decision cases"
+task = 1707

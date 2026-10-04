@@ -107,6 +107,28 @@ jobs:
             echo "no nextest output to summarise"
           fi
 
+      # The time gate of the tests in tests/it (ADR-t1707-1): a test the diff
+      # from the base added or changed that took longer than the threshold
+      # fails the job unless .config/it-slow-allow.toml names it
+      # (scripts/check-it-test-time.sh, docs/design/slow-tests.md). The base
+      # is the commit before the push or the pull request's base; a push
+      # without one (the first push of a new branch) skips the gate. It reads
+      # the same nextest output and runs after a failed test step too.
+      - name: IT test time gate
+        if: ${{ !cancelled() }}
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ ! -s "$RUNNER_TEMP/nextest.log" ]; then
+            echo "skipped: no nextest output to read"
+          elif [ -z "$BASE" ] || ! printf '%s' "$BASE" | grep -q '[^0]'; then
+            echo "skipped: no base commit (the first push of a new branch: before is $BASE)"
+          elif ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            echo "skipped: the base commit $BASE is not in the history (a force push)"
+          else
+            sh scripts/check-it-test-time.sh --base "$BASE" "$RUNNER_TEMP/nextest.log"
+          fi
+
   # Linux (ubuntu): cargo build and the whole test suite, the first step of
   # goal 83 (docs/design/linux-ci.md). The job may fail while the tests that
   # only hold on macOS are split out: continue-on-error keeps a Linux failure
