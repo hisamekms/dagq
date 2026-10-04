@@ -241,6 +241,10 @@ fn no_claude_run_uses_a_read_only_codex_review_and_lands() {
         "{args}"
     );
     assert!(!args.contains("--sandbox|"), "{args}");
+    // The worktree is untrusted, so that the worker's `.codex` does not
+    // reach its review (ADR-t1570-1).
+    assert!(args.contains(r#"={trust_level="untrusted"}}|"#), "{args}");
+    assert!(!args.contains(r#"trust_level="trusted""#), "{args}");
     let actors = fs::read_to_string(dir.path().join("codex-review-actors.log")).unwrap();
     assert!(actors.contains("review-job review-job:"), "{actors}");
 }

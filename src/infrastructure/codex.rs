@@ -227,11 +227,32 @@ fn cargo_home() -> Result<PathBuf> {
 /// written. The path goes in the value, as a quoted key: the key of a
 /// `-c` is split at every `.` (task 1174).
 pub fn trust_config(worktree: &Path) -> Result<String> {
+    project_trust(worktree, "trusted")
+}
+
+/// `projects={"<worktree>"={trust_level="untrusted"}}`: the worktree
+/// untrusted for a run's review (ADR-t1570-1 decision 1). A Git worktree
+/// of a main checkout the person's `~/.codex/config.toml` trusts takes
+/// that trust, and Codex then loads the project's layer from the worktree,
+/// which its worker can write: `.codex/config.toml` (its
+/// `developer_instructions` reached the review, seen with codex-cli
+/// 0.160.0) and `.codex/rules`. A trust given for the worktree itself is
+/// found before the main checkout's, and `untrusted` loads neither; the
+/// read-only sandbox, the job's permission profile and its commands run
+/// as before, and no approval is waited for. Codex then no longer reads
+/// the worktree's `AGENTS.md` by itself; the review's prompt names it
+/// (ADR-t1470-1 decision 2).
+pub fn distrust_config(worktree: &Path) -> Result<String> {
+    project_trust(worktree, "untrusted")
+}
+
+/// `projects={"<worktree>"={trust_level="<level>"}}`.
+fn project_trust(worktree: &Path, level: &str) -> Result<String> {
     let path = worktree
         .to_str()
         .with_context(|| format!("{} is not UTF-8", worktree.display()))?;
     Ok(format!(
-        r#"projects={{{}={{trust_level="trusted"}}}}"#,
+        r#"projects={{{}={{trust_level="{level}"}}}}"#,
         serde_json::to_string(path)?
     ))
 }
@@ -379,17 +400,19 @@ impl AgentProvider for Codex {
     fn runs_review_subagents(&self) -> bool {
         false
     }
+    /// A [`headless_command`](AgentProvider::headless_command) in the
+    /// run's worktree with [`distrust_config`] as `-c`: the worker's
+    /// `.codex` does not reach its review (ADR-t1570-1).
     fn review_command(
         &self,
         run: &TaskRun,
         prompt: &str,
         access: JobAccess,
     ) -> Result<CommandSpec> {
-        self.headless_command(
-            Path::new(run.worktree_path().context("missing worktree")?),
-            prompt,
-            access,
-        )
+        let worktree = Path::new(run.worktree_path().context("missing worktree")?);
+        let mut command = self.headless_command(worktree, prompt, access)?;
+        command.arg("-c").arg(distrust_config(worktree)?);
+        Ok(command)
     }
     /// `-m <model>` for a model of Codex's (a claim's Claude model is left
     /// to Codex's default) and `-c model_reasoning_effort="<effort>"`.
@@ -469,16 +492,16 @@ impl AgentProvider for Codex {
     /// `--skip-git-repo-check` because the cwd of the throughput review,
     /// the observer and the recovery job is a job or run directory outside
     /// any Git repository, which `codex exec` refuses without it (task
-    /// 1378); it only skips that check. No [`trust_config`]: the
-    /// read-only sandbox cannot write the cwd, so Codex persists no trust
-    /// for the project, and a trust given here would change the job's
-    /// default approval. The job still takes the trust the person's
-    /// `~/.codex/config.toml` gives the project: a Git worktree of a
-    /// trusted main checkout is trusted, and Codex then loads the
-    /// worktree's `.codex/config.toml` (seen with codex-cli 0.160.0 for a
-    /// run's review; a project without a trust does not load it.
-    /// ADR-t1470-1 decision 3 leaves closing that to a later task). Codex
-    /// names its thread itself, so no session id is given.
+    /// 1378); it only skips that check. No trust is given: the read-only
+    /// sandbox cannot write the cwd, so Codex persists no trust for the
+    /// project, and the job takes the trust the person's
+    /// `~/.codex/config.toml` gives it. The goal review and the plan
+    /// review run in the main checkout, whose project layer is landed,
+    /// committed content the person trusts; the other jobs run outside any
+    /// Git repository. Only a run's review, in a worktree its worker can
+    /// write, is given [`distrust_config`] (by `review_command`,
+    /// ADR-t1570-1 decision 2). Codex names its thread itself, so no
+    /// session id is given.
     fn headless_command(&self, cwd: &Path, prompt: &str, access: JobAccess) -> Result<CommandSpec> {
         let _ = access;
         let mut command = CommandSpec::new(&self.executable);
@@ -1061,6 +1084,17 @@ mod tests {
             .review_command(&run, "p", JobAccess::ReadFiles)
             .unwrap();
         assert_eq!(review.get_current_dir(), Some(worktree.as_path()));
+        // The review is a job in the worktree, which it is told to
+        // distrust so that the worker's `.codex` does not reach it
+        // (ADR-t1570-1); the worker's turns trust it as before.
+        let distrust = distrust_config(&worktree).unwrap();
+        assert_eq!(
+            distrust,
+            format!(
+                r#"projects={{"{}"={{trust_level="untrusted"}}}}"#,
+                worktree.display()
+            )
+        );
         assert_eq!(
             args(&review),
             [
@@ -1071,9 +1105,49 @@ mod tests {
                 "read-only",
                 "-C",
                 worktree_text.as_str(),
+                "-c",
+                distrust.as_str(),
             ]
         );
         assert_eq!(review.get_stdin(), Some("p"));
+        let job = codex
+            .headless_command(&worktree, "p", JobAccess::ReadFiles)
+            .unwrap();
+        assert_eq!(args(&review)[..7], args(&job)[..]);
+        // Its model and effort, and the profile that reaches the queue
+        // service in place of the read-only sandbox, are added as to any
+        // job, and the distrust stays.
+        use crate::domain::actor_model::{ModelRole, RoleModels};
+        let mut models = RoleModels::default();
+        models.entry(ModelRole::Review).provider = Some(crate::domain::Provider::Codex);
+        models.entry(ModelRole::Review).model = Some("gpt-6-astra".into());
+        models.entry(ModelRole::Review).effort = Some("low".into());
+        let mut launched = review.clone();
+        codex.apply_launch(&mut launched, &models.launch(ModelRole::Review));
+        let socket = dir.path().join("queue.sock");
+        codex.reach_queue_service(&mut launched, &socket);
+        let mut expected = vec![
+            "exec".to_owned(),
+            "--json".to_owned(),
+            "--skip-git-repo-check".to_owned(),
+            "-C".to_owned(),
+            worktree_text.clone(),
+            "-c".to_owned(),
+            distrust.clone(),
+            "-m".to_owned(),
+            "gpt-6-astra".to_owned(),
+            "-c".to_owned(),
+            r#"model_reasoning_effort="low""#.to_owned(),
+        ];
+        for config in job_service_config(&socket).unwrap() {
+            expected.extend(["-c".to_owned(), config]);
+        }
+        assert_eq!(args(&launched), expected);
+        assert_eq!(launched.get_stdin(), Some("p"));
+        // The worker's turns are given no distrust.
+        for command in [&first, &resumed] {
+            assert!(!args(command).contains(&distrust), "{:?}", args(command));
+        }
         // Codex runs no review subagents (ADR-t1453-1 decision 8): it says
         // so, refuses them, and its review command is as before.
         assert!(!codex.runs_review_subagents());
