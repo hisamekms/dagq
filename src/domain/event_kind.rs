@@ -137,6 +137,7 @@ event_kinds! {
     LandingQueued => "landing_queued",
     LandingReleaseStuck => "landing_release_stuck",
     LandingReleaseWaiting => "landing_release_waiting",
+    LandingRecheckClean => "landing_recheck_clean",
     LandingRecheckFailed => "landing_recheck_failed",
     LandingRecheckFinished => "landing_recheck_finished",
     LandingResumed => "landing_resumed",
@@ -966,6 +967,7 @@ mod tests {
             (EventKind::LandingQueued, "landing_queued"),
             (EventKind::LandingReleaseStuck, "landing_release_stuck"),
             (EventKind::LandingReleaseWaiting, "landing_release_waiting"),
+            (EventKind::LandingRecheckClean, "landing_recheck_clean"),
             (EventKind::LandingRecheckFailed, "landing_recheck_failed"),
             (
                 EventKind::LandingRecheckFinished,

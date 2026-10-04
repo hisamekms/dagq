@@ -1,7 +1,9 @@
 //! The recheck of the runs that wait to land after each landing
 //! (ADR-0068): what it found for one run, how that is written into the
 //! run's events, its asks and its `last_error`, and how the events are
-//! read back. The supervisor runs the checks; this module is the record.
+//! read back, for a run found no longer landing and, since ADR-t1311-1,
+//! for one found still landing. The supervisor runs the checks; this
+//! module is the record.
 
 use serde_json::{Value, json};
 
@@ -12,6 +14,12 @@ use super::{CommitSha, ReasonCode, RunEvent, RunId, TaskId};
 /// resume in the same transaction) or [`HELD`] (a session or the landing
 /// holds it; it is parked when it would land).
 pub const LANDING_RECHECK_FAILED: &str = super::event_kind::LANDING_RECHECK_FAILED;
+
+/// A run the recheck found still landing on main (ADR-t1311-1): the main
+/// and head it checked, the command that passed on them (null when only
+/// `git merge-tree` was looked at) and the landing that moved main.
+pub const LANDING_RECHECK_CLEAN: &str =
+    crate::domain::event_kind::EventKind::LandingRecheckClean.as_str();
 
 /// One recheck ended, recorded on the run whose landing moved main (or,
 /// when no dagq landing did, on the first run it checked, ADR-t1310-1):
@@ -60,13 +68,7 @@ impl RecheckFailure {
     /// The run's `last_error` once parked, and the reason of its resume.
     /// `landed` is `None` when main moved without a dagq landing.
     pub fn reason(&self, landed: Option<&Landed>, main: &CommitSha) -> String {
-        let after = match landed {
-            Some(landed) => format!(
-                "after task {} (run {}) landed, the landing recheck found",
-                landed.task_id, landed.run_id
-            ),
-            None => "after main moved without a dagq landing, the landing recheck found".to_owned(),
-        };
+        let after = after(landed);
         match self {
             Self::Conflict { paths } => format!(
                 "{after} that main {main} conflicts with the run in {}",
@@ -112,16 +114,77 @@ impl RecheckFailure {
     }
 }
 
-/// The paragraph the recheck adds to the run's open asks (ADR-0068
-/// decision 4): what it found, and that the run is resumed without waiting
-/// for the answer, which still applies once the run waits again.
+/// What a recheck's finding starts with: the landing that moved main.
+fn after(landed: Option<&Landed>) -> String {
+    match landed {
+        Some(landed) => format!(
+            "after task {} (run {}) landed, the landing recheck found",
+            landed.task_id, landed.run_id
+        ),
+        None => "after main moved without a dagq landing, the landing recheck found".to_owned(),
+    }
+}
+
+/// The payload of [`LANDING_RECHECK_CLEAN`] (ADR-t1311-1). `command` is
+/// null when only `git merge-tree` was looked at, and `landed_run_id` and
+/// `landed_task_id` when main moved without a dagq landing.
+pub fn clean_payload(
+    landed: Option<&Landed>,
+    main: &CommitSha,
+    head: &CommitSha,
+    command: Option<&str>,
+) -> Value {
+    json!({
+        "main": main,
+        "head": head,
+        "command": command,
+        "landed_run_id": landed.map(|l| &l.run_id),
+        "landed_task_id": landed.map(|l| l.task_id),
+    })
+}
+
+/// How the recheck's paragraph in a run's open asks starts: the asks hold
+/// one such paragraph, the latest finding's (ADR-t1311-1).
+pub const ASK_NOTE_PREFIX: &str = "Landing recheck: ";
+
+/// The paragraph a failure puts in the run's open asks (ADR-0068 decision
+/// 4): what it found, and that the run is resumed without waiting for the
+/// answer, which still applies once the run waits again.
 pub fn ask_note(reason: &str, resumed: bool) -> String {
     let next = if resumed {
         "The supervisor resumes the run to bring it onto main without waiting for this answer; once it waits again, the answer applies to the rebased run."
     } else {
         "The supervisor parks the run for a resume instead of landing it once its session has exited."
     };
-    format!("Landing recheck: {reason}. {next}")
+    format!("{ASK_NOTE_PREFIX}{reason}. {next}")
+}
+
+/// The paragraph a clean finding puts in the run's open asks
+/// (ADR-t1311-1): the main's short commit, that the run still lands there
+/// cleanly, and whether a command was run on it.
+pub fn clean_ask_note(landed: Option<&Landed>, main: &CommitSha, command: Option<&str>) -> String {
+    let short = &main.as_str()[..main.as_str().len().min(12)];
+    let checked = match command {
+        Some(command) => format!(
+            "git merges it without a conflict and {command:?} passes on main with the run merged in"
+        ),
+        None => "git merges it without a conflict (no command was run)".to_owned(),
+    };
+    format!(
+        "{ASK_NOTE_PREFIX}{} that the run still lands cleanly on main {short}: {checked}.",
+        after(landed)
+    )
+}
+
+/// `question` with `note` as its recheck paragraph: any paragraph that
+/// starts with [`ASK_NOTE_PREFIX`] is dropped and `note` ends the question,
+/// so the asks show only the latest finding (ADR-t1311-1).
+pub fn noted_question(question: &str, note: &str) -> String {
+    let kept: Vec<&str> = question
+        .split("\n\n")
+        .filter(|paragraph| !paragraph.trim_start().starts_with(ASK_NOTE_PREFIX))
+        .collect();
+    format!("{}\n\n{note}", kept.join("\n\n").trim_end())
 }
 
 /// Whether the event parked its run for a session.
@@ -236,6 +299,52 @@ mod tests {
         assert_eq!(payload["code"], "verification_failed");
         assert_eq!(payload["exit_code"], 101);
         assert_eq!(payload["output_tail"], "error[E0063]");
+    }
+
+    #[test]
+    fn a_clean_finding_names_the_main_and_whether_a_command_ran() {
+        let main = CommitSha::parse("a".repeat(40), "commit").unwrap();
+        let head = CommitSha::parse("b".repeat(40), "commit").unwrap();
+        assert_eq!(
+            clean_ask_note(Some(&landed()), &main, Some("cargo check")),
+            "Landing recheck: after task 7 (run landed-run) landed, the landing recheck found that the run still lands cleanly on main aaaaaaaaaaaa: git merges it without a conflict and \"cargo check\" passes on main with the run merged in."
+        );
+        assert_eq!(
+            clean_ask_note(None, &main, None),
+            "Landing recheck: after main moved without a dagq landing, the landing recheck found that the run still lands cleanly on main aaaaaaaaaaaa: git merges it without a conflict (no command was run)."
+        );
+        assert_eq!(
+            clean_payload(Some(&landed()), &main, &head, None),
+            json!({
+                "main": main,
+                "head": head,
+                "command": null,
+                "landed_run_id": "landed-run",
+                "landed_task_id": 7,
+            })
+        );
+        assert_eq!(
+            clean_payload(None, &main, &head, Some("cargo check"))["command"],
+            "cargo check"
+        );
+    }
+
+    #[test]
+    fn the_latest_note_replaces_every_earlier_recheck_paragraph() {
+        let question = "Land it?\n\nDetails.";
+        let once = noted_question(question, "Landing recheck: first.");
+        assert_eq!(once, "Land it?\n\nDetails.\n\nLanding recheck: first.");
+        let twice = noted_question(&once, "Landing recheck: second.");
+        assert_eq!(twice, "Land it?\n\nDetails.\n\nLanding recheck: second.");
+        // Paragraphs an earlier binary stacked go too.
+        let stacked = format!("{once}\n\nLanding recheck: older.");
+        assert_eq!(noted_question(&stacked, "Landing recheck: second."), twice);
+        assert_eq!(noted_question(&twice, "Landing recheck: second."), twice);
+        // A question that ends in a newline does not stack them either.
+        let trailing = noted_question("Land it?\n", "Landing recheck: first.");
+        assert_eq!(trailing, "Land it?\n\nLanding recheck: first.");
+        let stacked = "Land it?\n\n\nLanding recheck: older.";
+        assert_eq!(noted_question(stacked, "Landing recheck: first."), trailing);
     }
 
     #[test]

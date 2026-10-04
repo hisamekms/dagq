@@ -268,8 +268,10 @@ fn a_waiting_run_whose_check_fails_on_the_new_main_is_resumed() {
     );
 }
 
-/// A waiting run that still lands on the new main is left as it is: the
-/// recheck is recorded on the queue as clean, and nothing on the run.
+/// A waiting run that still lands on the new main is left waiting, and the
+/// recheck records that on it (ADR-t1311-1): `landing_recheck_clean` with
+/// the main and head it checked, and its open ask gets one recheck
+/// paragraph naming that main's short commit.
 #[test]
 fn a_waiting_run_that_still_lands_is_left_waiting() {
     let (_dir, repo, db) = fixture();
@@ -282,12 +284,37 @@ fn a_waiting_run_that_still_lands_is_left_waiting() {
     let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let mut queue = SqliteQueue::open(&db).unwrap();
+    let second = queue.show(TaskId::new(2)).unwrap().runs[0].clone();
+    let main = git_out(&repo, &["rev-parse", "main"]);
     let detail = queue.show(TaskId::new(1)).unwrap();
     assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
     assert_eq!(detail.runs[0].result_commit(), waiting.result_commit());
     assert!(payloads(&detail, "landing_recheck_failed").is_empty());
     assert!(payloads(&detail, "resume_started").is_empty());
-    assert_eq!(queue.read_ask(ask.id).unwrap().question, ask.question);
+    assert_eq!(
+        payloads(&detail, "landing_recheck_clean"),
+        [&json!({
+            "main": main,
+            "head": waiting.result_commit().unwrap(),
+            "command": null,
+            "landed_run_id": second.id(),
+            "landed_task_id": 2,
+        })]
+    );
+    let noted = queue.read_ask(ask.id).unwrap();
+    assert_eq!(
+        noted.question,
+        format!(
+            "{}\n\nLanding recheck: after task 2 (run {}) landed, the landing recheck found that the run still lands cleanly on main {}: git merges it without a conflict (no command was run).",
+            ask.question,
+            second.id(),
+            &main[..12]
+        )
+    );
+    assert_eq!(
+        payloads(&detail, "ask_updated"),
+        [&json!({"ask_id": ask.id, "kind": "approve_landing", "why": "landing_recheck_clean"})]
+    );
     let recheck = &runtime::status(&db).unwrap()["landing_recheck"];
     assert_eq!(recheck["checked"], 1, "{recheck}");
     assert_eq!(recheck["clean"], 1);
@@ -297,6 +324,120 @@ fn a_waiting_run_that_still_lands_is_left_waiting() {
     assert_eq!(
         queue.show(TaskId::new(1)).unwrap().task.status(),
         TaskStatus::Completed
+    );
+}
+
+/// Commit `file` on main by hand, outside dagq; the new main.
+fn move_main(repo: &Path, file: &str, text: &str) -> String {
+    fs::write(repo.join(file), text).unwrap();
+    git(repo, &["add", file]);
+    git(repo, &["commit", "-q", "-m", file]);
+    git_out(repo, &["rev-parse", "main"])
+}
+
+/// The ask's recheck paragraphs.
+fn recheck_paragraphs(question: &str) -> Vec<&str> {
+    question
+        .split("\n\n")
+        .filter(|p| p.starts_with("Landing recheck: "))
+        .collect()
+}
+
+/// Main moves twice while a run waits, and both rechecks find it still
+/// landing: each records `landing_recheck_clean`, and the ask's recheck
+/// paragraph is the latest main's alone (ADR-t1311-1).
+#[test]
+fn a_second_clean_recheck_replaces_the_asks_recheck_paragraph() {
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let (waiting, ask, reviewer) = one_waiting(&backend, &repo, &db);
+    let first = move_main(&repo, "one.txt", "one\n");
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let question = queue.read_ask(ask.id).unwrap().question;
+    assert_eq!(
+        recheck_paragraphs(&question),
+        [format!(
+            "Landing recheck: after main moved without a dagq landing, the landing recheck found that the run still lands cleanly on main {}: git merges it without a conflict (no command was run).",
+            &first[..12]
+        )]
+    );
+
+    let second = move_main(&repo, "two.txt", "two\n");
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
+    let clean = payloads(&detail, "landing_recheck_clean");
+    assert_eq!(clean.len(), 2, "{:?}", event_kinds(&detail));
+    assert_eq!(clean[0]["main"], json!(first));
+    assert_eq!(clean[1]["main"], json!(second));
+    assert_eq!(clean[1]["head"], json!(waiting.result_commit().unwrap()));
+    let question = queue.read_ask(ask.id).unwrap().question;
+    let paragraphs = recheck_paragraphs(&question);
+    assert_eq!(paragraphs.len(), 1, "{question}");
+    assert!(paragraphs[0].contains(&second[..12]), "{question}");
+    assert!(!question.contains(&first[..12]), "{question}");
+    assert!(question.starts_with(&ask.question), "{question}");
+    assert_eq!(payloads(&detail, "ask_updated").len(), 2);
+}
+
+/// A run found clean, then in conflict after main moves again: the ask's
+/// recheck paragraph becomes the failure's alone, and the run is resumed as
+/// before (`landing_recheck_failed` with `action: resumed`).
+#[test]
+fn a_conflict_after_a_clean_recheck_replaces_the_asks_recheck_paragraph() {
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let (waiting, ask, reviewer) = one_waiting(&backend, &repo, &db);
+    let first = move_main(&repo, "one.txt", "one\n");
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    assert_eq!(
+        payloads(
+            &queue.show(TaskId::new(1)).unwrap(),
+            "landing_recheck_clean"
+        )
+        .len(),
+        1
+    );
+
+    let second = move_main(&repo, "change.txt", "changed on main by hand\n");
+    backend.resume_script_for(1, RESOLVING_RESUME);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let found = payloads(&detail, "landing_recheck_failed");
+    assert_eq!(found.len(), 1, "{:?}", event_kinds(&detail));
+    assert_eq!(found[0]["code"], "rebase_conflict");
+    assert_eq!(found[0]["action"], "resumed");
+    assert_eq!(found[0]["status"], "needs_session");
+    assert_eq!(found[0]["main"], json!(second));
+    assert_eq!(found[0]["head"], json!(waiting.result_commit().unwrap()));
+    assert_eq!(payloads(&detail, "resume_started").len(), 1);
+    let reason = found[0]["reason"].as_str().unwrap();
+    let question = queue.read_ask(ask.id).unwrap().question;
+    let paragraphs = recheck_paragraphs(&question);
+    assert_eq!(paragraphs.len(), 1, "{question}");
+    assert!(
+        paragraphs[0].starts_with(&format!(
+            "Landing recheck: {reason}. The supervisor resumes"
+        )),
+        "{question}"
+    );
+    assert!(!question.contains(&first[..12]), "{question}");
+    let why: Vec<&Value> = payloads(&detail, "ask_updated")
+        .iter()
+        .map(|p| &p["why"])
+        .collect();
+    assert_eq!(
+        why,
+        [
+            &json!("landing_recheck_clean"),
+            &json!("landing_recheck_failed")
+        ]
     );
 }
 

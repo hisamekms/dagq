@@ -8,11 +8,14 @@
 //! in, in one scratch worktree with one target directory of the queue's.
 //! A run found no longer landing is parked for a resume at once, whatever
 //! asks it waits on; a run this supervisor holds in a slot is parked when
-//! it would land.
+//! it would land. A run found still landing records that (ADR-t1311-1).
+//! Either way the run's open asks show the latest finding.
 
 use super::*;
 use crate::domain::EventKind;
-use crate::domain::recheck::{self, HELD, LANDING_RECHECK_FAILED, Landed, RecheckFailure};
+use crate::domain::recheck::{
+    self, HELD, LANDING_RECHECK_CLEAN, LANDING_RECHECK_FAILED, Landed, RecheckFailure,
+};
 
 /// Where the recheck keeps its scratch worktree and its target directory,
 /// under the queue's directory.
@@ -350,15 +353,18 @@ impl Supervisor<'_> {
 
     /// Whether the run's head was judged against `main` already: by its
     /// passed review's conflict precheck (ADR-0027 decision 4), by its
-    /// landing that parked it, or by a recheck. What that found is handled
-    /// (a request to the session, an ask, a resume, or a landing that parks
-    /// the run), and is not judged again.
+    /// landing that parked it, or by a recheck, failed or clean. What that
+    /// found is handled (a request to the session, an ask, a resume, or a
+    /// landing that parks the run), and is not judged again.
     fn prechecked(&self, target: &Target, main: &CommitSha) -> Result<bool> {
         use crate::domain::event_kind::{CONFLICT_PRECHECK, INTEGRATION_DEFERRED};
         Ok(self.queue.run_events(&target.run_id)?.iter().any(|event| {
             matches!(
                 event.kind.as_str(),
-                CONFLICT_PRECHECK | INTEGRATION_DEFERRED | LANDING_RECHECK_FAILED
+                CONFLICT_PRECHECK
+                    | INTEGRATION_DEFERRED
+                    | LANDING_RECHECK_FAILED
+                    | LANDING_RECHECK_CLEAN
             ) && event.payload["main"] == main.as_str()
                 && event.payload["head"] == target.head.as_str()
         }))
@@ -440,8 +446,8 @@ impl Supervisor<'_> {
         Ok(())
     }
 
-    /// Record what a recheck found: each failure on its run (and its open
-    /// asks), and `landing_recheck_finished` with the counts on the run
+    /// Record what a recheck found: each finding, failed or clean, on its
+    /// run (and its open asks), and `landing_recheck_finished` with the counts on the run
     /// whose landing it followed (or the first run it checked).
     fn apply_recheck(&mut self, watch: &RecheckWatch, found: Vec<(Target, Finding)>) -> Result<()> {
         let mut counts = json!({
@@ -458,6 +464,15 @@ impl Supervisor<'_> {
             let failure = match finding {
                 Finding::Clean => {
                     bump(&mut counts, "clean");
+                    match self.record_recheck_clean(watch, &target) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            info!(run_id = %target.run_id, "run {}: the landing recheck found it still landing on main {}, but it moved on meanwhile", target.run_id, watch.main);
+                        }
+                        Err(error) => {
+                            warn!(run_id = %target.run_id, error = %format_args!("{error:#}"), "run {}: the landing recheck's clean finding could not be recorded: {error:#}", target.run_id);
+                        }
+                    }
                     continue;
                 }
                 Finding::Error(error) => {
@@ -513,6 +528,43 @@ impl Supervisor<'_> {
             payload,
         )?;
         Ok(())
+    }
+
+    /// Record on the run that it still lands on the main checked
+    /// (ADR-t1311-1): `landing_recheck_clean`, and the finding as the
+    /// recheck's paragraph of its open asks. Whether it was recorded: not
+    /// when the run moved on since it was checked (another head, another
+    /// status, or a lease of another process).
+    fn record_recheck_clean(&mut self, watch: &RecheckWatch, target: &Target) -> Result<bool> {
+        let run = self.queue.run(&target.run_id)?;
+        if run.status() != RunStatus::AwaitingIntegration
+            || run.result_commit() != Some(&target.head)
+            || self
+                .queue
+                .run_lease(run.id())?
+                .is_some_and(|lease| lease.token != self.token)
+        {
+            return Ok(false);
+        }
+        self.queue.record_runtime_event(
+            run.id(),
+            EventKind::LandingRecheckClean,
+            recheck::clean_payload(
+                watch.landed.as_ref(),
+                &watch.main,
+                &target.head,
+                watch.command.as_deref(),
+            ),
+        )?;
+        let note =
+            recheck::clean_ask_note(watch.landed.as_ref(), &watch.main, watch.command.as_deref());
+        for ask in self
+            .queue
+            .note_on_asks(run.id(), &note, LANDING_RECHECK_CLEAN)?
+        {
+            info!(run_id = %run.id(), ask_id = %ask.id, "run {}: the landing recheck's clean finding is now in its {} ask {}", run.id(), ask.kind.as_str(), ask.id);
+        }
+        Ok(true)
     }
 
     /// Record `failure` on the run (ADR-0068 decisions 3 and 4): a run

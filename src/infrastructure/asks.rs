@@ -740,11 +740,13 @@ impl SqliteQueue {
         self.close_asks_of(run_id, Some(task_id), AskKind::Blocked, answer)
     }
 
-    /// Add `note` as a paragraph to the question of every ask of the run
-    /// nobody closed, answered or not, and record `ask_updated` (with the
-    /// ask, its kind and `why`) on the run for each: what the person reads
-    /// before answering now includes it (ADR-0068 decision 4). Returns the
-    /// asks as noted, oldest first.
+    /// Make `note` the landing recheck's paragraph of the question of every
+    /// ask of the run nobody closed, answered or not, in place of the
+    /// recheck's earlier paragraphs (`recheck::noted_question`), and record
+    /// `ask_updated` (with the ask, its kind and `why`) on the run for each:
+    /// what the person reads before answering now shows the latest finding
+    /// (ADR-0068 decision 4, ADR-t1311-1). An ask whose question that leaves
+    /// as it was is not written. Returns the asks noted, oldest first.
     pub fn note_on_asks(&mut self, run_id: &RunId, note: &str, why: &str) -> Result<Vec<Ask>> {
         let tx = self
             .conn
@@ -755,9 +757,13 @@ impl SqliteQueue {
             .collect::<rusqlite::Result<_>>()?;
         let mut noted = Vec::with_capacity(unclosed.len());
         for ask in unclosed {
+            let question = crate::domain::recheck::noted_question(&ask.question, note);
+            if question == ask.question {
+                continue;
+            }
             tx.execute(
                 "UPDATE asks SET question=?2 WHERE id=?1",
-                params![ask.id, format!("{}\n\n{note}", ask.question)],
+                params![ask.id, question],
             )?;
             ask_event(
                 &tx,
