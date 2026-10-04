@@ -480,19 +480,27 @@ impl SessionWatch {
             .is_none()
             .then(|| sv.reopens.get(run.id()).and_then(|r| r.lost_exit()))
             .flatten();
+        // The receipt is read once the session ended, whatever order its
+        // receipt and its exit were seen in: one a turn wrote before it
+        // failed goes to validation (ADR-t1594-1).
         if let Some(code) = lost_exit {
             sv.reopens.remove(run.id());
             self.end_exited(sv, run, false)?;
+            let receipt = sv.files.is_file(&self.receipt_path);
             return sv
                 .queue
-                .finish_lost_session(run.id(), &sv.token, code)
+                .finish_lost_session(run.id(), &sv.token, code, receipt)
                 .map(Some);
         }
         if let Some(wrapper) = wrapper {
             if wrapper.exited_at.is_some() {
                 sv.reopens.remove(run.id());
                 self.end_exited(sv, run, true)?;
-                return sv.queue.finish_supervision(run.id(), &sv.token).map(Some);
+                let receipt = sv.files.is_file(&self.receipt_path);
+                return sv
+                    .queue
+                    .finish_supervision(run.id(), &sv.token, receipt)
+                    .map(Some);
             }
             let pulse = wrapper_pulse(
                 sv,

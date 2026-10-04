@@ -42,15 +42,23 @@ fn with_status_and_reason(mut payload: Value, run: &TaskRun, reason: &str) -> Va
 }
 
 /// [`finish_session`], recorded as `supervision_finished`: with the exit
-/// code and, for a non-zero one, its reason code; for a session that went
-/// idle after its receipt (`None`), `session_live: true` and no exit code.
-pub fn end_session(run: TaskRun, exit_code: Option<i32>) -> Result<Recorded, DomainError> {
-    let run = finish_session(run, exit_code)?;
+/// code and, for a non-zero one that failed the run, its reason code; a
+/// non-zero one that went on to validation with its receipt (ADR-t1594-1)
+/// carries `receipt: true` and no reason code. For a session that went idle
+/// after its receipt (`None`), `session_live: true` and no exit code.
+pub fn end_session(
+    run: TaskRun,
+    exit_code: Option<i32>,
+    receipt: bool,
+) -> Result<Recorded, DomainError> {
+    let run = finish_session(run, exit_code, receipt)?;
     let payload = match exit_code {
         Some(code) => {
             let mut payload = json!({"status": run.status(), "exit_code": code});
-            if code != 0 {
+            if code != 0 && run.status() == RunStatus::Failed {
                 Reason::of_exit_code(code).apply_to(&mut payload);
+            } else if code != 0 {
+                payload["receipt"] = json!(true);
             }
             payload
         }
@@ -345,7 +353,7 @@ mod tests {
 
     #[test]
     fn a_session_end_records_its_exit() {
-        let (run_, events) = end_session(run(RunStatus::Running), Some(0)).unwrap();
+        let (run_, events) = end_session(run(RunStatus::Running), Some(0), false).unwrap();
         assert_eq!(run_.status(), RunStatus::Validating);
         assert_eq!(kinds(&events), [event_kind::SUPERVISION_FINISHED]);
         assert_eq!(
@@ -353,17 +361,26 @@ mod tests {
             json!({"status": "validating", "exit_code": 0})
         );
 
-        let (run_, events) = end_session(run(RunStatus::Running), Some(137)).unwrap();
+        let (run_, events) = end_session(run(RunStatus::Running), Some(137), false).unwrap();
         assert_eq!(run_.status(), RunStatus::Failed);
         assert_eq!(events[0].payload["code"], "session_killed");
         assert_eq!(events[0].payload["signal"], 9);
 
-        let (_, events) = end_session(run(RunStatus::Running), None).unwrap();
+        // A turn that failed after writing its receipt (ADR-t1594-1).
+        let (run_, events) = end_session(run(RunStatus::Running), Some(7), true).unwrap();
+        assert_eq!(run_.status(), RunStatus::Validating);
+        assert_eq!(run_.last_error(), None);
+        assert_eq!(
+            events[0].payload,
+            json!({"status": "validating", "exit_code": 7, "receipt": true})
+        );
+
+        let (_, events) = end_session(run(RunStatus::Running), None, true).unwrap();
         assert_eq!(
             events[0].payload,
             json!({"status": "validating", "exit_code": null, "session_live": true})
         );
-        assert!(end_session(run(RunStatus::Failed), None).is_err());
+        assert!(end_session(run(RunStatus::Failed), None, true).is_err());
     }
 
     #[test]

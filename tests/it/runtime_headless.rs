@@ -1013,15 +1013,20 @@ fn a_turn_that_ends_by_itself_leaves_what_runs_outside_its_group() {
 /// after it, as a pass slowed by load does. Hiding the marker too keeps
 /// the end of the turn from falling later in a pass, where the hidden look
 /// would be the stall watch's own.
+/// With `idle_unseen` it shows the receipt as it is and never shows the
+/// idle marker: the supervisor sees the session's end only as its
+/// wrapper's exit.
 #[derive(Default)]
 struct ReceiptSeenLate {
     hidden: Mutex<bool>,
+    idle_unseen: bool,
 }
 
 impl ReceiptSeenLate {
     /// Whether `path` is the idle marker while it is hidden.
     fn idle_hidden(&self, path: &Path) -> bool {
-        path.file_name().is_some_and(|name| name == "idle.json") && !*self.hidden.lock().unwrap()
+        path.file_name().is_some_and(|name| name == "idle.json")
+            && (self.idle_unseen || !*self.hidden.lock().unwrap())
     }
 
     fn turn_ended(receipt: &Path) -> bool {
@@ -1077,7 +1082,7 @@ impl RunFiles for ReceiptSeenLate {
         if self.idle_hidden(path) || !LocalRunFiles.is_file(path) {
             return false;
         }
-        if path.file_name().is_some_and(|name| name == "receipt.json") {
+        if !self.idle_unseen && path.file_name().is_some_and(|name| name == "receipt.json") {
             // Hidden while the turn runs, then from one more look.
             if !Self::turn_ended(path) {
                 return false;
@@ -1154,6 +1159,45 @@ fn a_receipt_written_as_its_turn_ends_is_not_nudged() {
     );
     let calls = stub_calls(&detail.runs[0]);
     assert_eq!(calls.len(), 1, "{calls:?}");
+}
+
+/// Task 1594 (ADR-t1594-1): a turn that commits, writes its receipt and
+/// exits non-zero goes to validation and lands, also when the supervisor
+/// sees its wrapper's exit before its idle marker (here it never sees the
+/// marker, so the order is fixed). `supervision_finished` keeps the
+/// wrapper's code with `receipt: true` and no reason code, the turn's
+/// failure stays in its `turn_finished`, and no `last_error` is written.
+#[test]
+fn a_receipt_written_before_its_turn_failed_goes_to_validation() {
+    let (dir, repo, db, backend) = headless_fixture(&[]);
+    set_turns(dir.path(), &format!("{FINISH}; exit 7"));
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
+    let options = SuperviseOptions {
+        files: Some(RunFilesPort(Arc::new(ReceiptSeenLate {
+            idle_unseen: true,
+            ..ReceiptSeenLate::default()
+        }))),
+        ..supervise_options(4, true)
+    };
+    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
+    let detail = detail(&db);
+    let run = &detail.runs[0];
+    assert_landed_run(run, &repo, &base);
+    assert_eq!(run.last_error(), None);
+    let finished = payloads(&detail, "turn_finished");
+    assert_eq!(finished.len(), 1, "{finished:?}");
+    assert_eq!(finished[0]["outcome"], "failed", "{:?}", finished[0]);
+    assert_eq!(finished[0]["exit_code"], 7, "{:?}", finished[0]);
+    let ended = payloads(&detail, "supervision_finished");
+    assert_eq!(
+        ended,
+        [&json!({"status": "validating", "exit_code": 1, "receipt": true})]
+    );
+    assert!(payloads(&detail, "session_idle_observed").is_empty());
 }
 
 /// Task 1109: exercise the real recovery job's PID stop with a command

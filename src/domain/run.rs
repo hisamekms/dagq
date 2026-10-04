@@ -325,21 +325,36 @@ pub fn mark_running(mut run: TaskRun) -> Result<TaskRun, DomainError> {
     Ok(run)
 }
 
+/// The status a session's end gives its run (ADR-t1594-1): `failed` only
+/// when its wrapper exited non-zero (`exit_code`) with no receipt written
+/// (`receipt`); otherwise `validating`, where validation judges the
+/// receipt (or its absence) whatever order the supervisor saw the receipt
+/// and the exit in. A turn that failed after writing its receipt keeps its
+/// failure in its `turn_finished`.
+pub const fn session_end_status(exit_code: Option<i32>, receipt: bool) -> RunStatus {
+    match exit_code {
+        Some(code) if code != 0 && !receipt => RunStatus::Failed,
+        _ => RunStatus::Validating,
+    }
+}
+
 /// The session ended (`exit_code`) or went idle after its receipt with the
-/// session still open (`None`, ADR-0027): `validating`, except that a
-/// non-zero exit fails the run with the code as `last_error`.
-pub fn finish_session(mut run: TaskRun, exit_code: Option<i32>) -> Result<TaskRun, DomainError> {
+/// session still open (`None`, ADR-0027), `receipt` telling whether the
+/// run's receipt was written: the status of [`session_end_status`], and a
+/// failed run gets the code as `last_error`.
+pub fn finish_session(
+    mut run: TaskRun,
+    exit_code: Option<i32>,
+    receipt: bool,
+) -> Result<TaskRun, DomainError> {
     require_status(
         &run,
         &[RunStatus::Starting, RunStatus::Running],
         "finish the session of",
     )?;
-    match exit_code {
-        Some(code) if code != 0 => {
-            run.status = RunStatus::Failed;
-            run.last_error = Some(format!("session exited with code {code}"));
-        }
-        _ => run.status = RunStatus::Validating,
+    run.status = session_end_status(exit_code, receipt);
+    if let (RunStatus::Failed, Some(code)) = (run.status, exit_code) {
+        run.last_error = Some(format!("session exited with code {code}"));
     }
     Ok(run)
 }
@@ -902,7 +917,7 @@ mod tests {
         );
         let run = mark_running(run).unwrap();
         assert_eq!(run.status(), RunStatus::Running);
-        let run = finish_session(run, Some(0)).unwrap();
+        let run = finish_session(run, Some(0), true).unwrap();
         assert_eq!(run.status(), RunStatus::Validating);
         let run = accept(run, sha()).unwrap();
         assert_eq!(run.status(), RunStatus::AwaitingIntegration);
@@ -962,7 +977,7 @@ mod tests {
             refused(mark_running(run(RunStatus::Claimed)), RunStatus::Claimed),
             "mark running"
         );
-        let error = finish_session(run(RunStatus::Validating), Some(0)).unwrap_err();
+        let error = finish_session(run(RunStatus::Validating), Some(0), true).unwrap_err();
         assert_eq!(
             error.to_string(),
             "cannot finish the session of a run in validating state"
@@ -1046,11 +1061,37 @@ mod tests {
     }
 
     #[test]
+    fn a_receipt_takes_a_session_that_exited_in_failure_to_validation() {
+        let cases = [
+            // A turn that wrote its receipt and exited non-zero.
+            (Some(7), true, RunStatus::Validating),
+            // A failed turn with no receipt (ADR-t813-1 decision 9).
+            (Some(7), false, RunStatus::Failed),
+            (Some(137), false, RunStatus::Failed),
+            // A session that ended well, with or without its receipt.
+            (Some(0), true, RunStatus::Validating),
+            (Some(0), false, RunStatus::Validating),
+            // Idle after its receipt with the session open.
+            (None, true, RunStatus::Validating),
+        ];
+        for (exit_code, receipt, status) in cases {
+            assert_eq!(
+                session_end_status(exit_code, receipt),
+                status,
+                "{exit_code:?} {receipt}"
+            );
+        }
+    }
+
+    #[test]
     fn session_and_validation_outcomes() {
-        let failed = finish_session(run(RunStatus::Running), Some(2)).unwrap();
+        let failed = finish_session(run(RunStatus::Running), Some(2), false).unwrap();
         assert_eq!(failed.status(), RunStatus::Failed);
         assert_eq!(failed.last_error(), Some("session exited with code 2"));
-        let live = finish_session(run(RunStatus::Starting), None).unwrap();
+        let kept = finish_session(run(RunStatus::Running), Some(2), true).unwrap();
+        assert_eq!(kept.status(), RunStatus::Validating);
+        assert_eq!(kept.last_error(), None);
+        let live = finish_session(run(RunStatus::Starting), None, true).unwrap();
         assert_eq!(live.status(), RunStatus::Validating);
         let kept = abandon(run(RunStatus::Validating), "old".into()).unwrap();
         let parked = reject(kept.clone(), Some(sha()), None, true).unwrap();

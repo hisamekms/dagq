@@ -190,7 +190,12 @@ impl SqliteQueue {
         Ok(())
     }
 
-    pub fn finish_supervision(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun> {
+    pub fn finish_supervision(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        receipt: bool,
+    ) -> Result<TaskRun> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -205,7 +210,7 @@ impl SqliteQueue {
             id,
             Some(token),
             || "run is not owned by this supervisor".to_owned(),
-            |run| run::end_session(run, Some(code)),
+            |run| run::end_session(run, Some(code), receipt),
         )?;
         // Completion and dependency release belong to the next validation stage.
         tx.commit()?;
@@ -221,6 +226,7 @@ impl SqliteQueue {
         id: &RunId,
         token: &LeaseToken,
         exit_code: i32,
+        receipt: bool,
     ) -> Result<TaskRun> {
         let tx = self
             .conn
@@ -232,7 +238,7 @@ impl SqliteQueue {
             id,
             Some(token),
             || "run is not owned by this supervisor".to_owned(),
-            |run| run::end_session(run, Some(exit_code)),
+            |run| run::end_session(run, Some(exit_code), receipt),
         )?;
         tx.commit()?;
         Ok(run.relocated(&self.runs_dir))
@@ -253,7 +259,7 @@ impl SqliteQueue {
             id,
             Some(token),
             || "run is not owned by this supervisor".to_owned(),
-            |run| run::end_session(run, None),
+            |run| run::end_session(run, None, true),
         )?;
         tx.commit()?;
         Ok(run.relocated(&self.runs_dir))
@@ -1005,16 +1011,22 @@ impl RunTransitions for SqliteQueue {
     fn workspace_created(&mut self, id: &RunId, token: &LeaseToken, workspace: &str) -> Result<()> {
         SqliteQueue::workspace_created(self, id, token, workspace)
     }
-    fn finish_supervision(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun> {
-        SqliteQueue::finish_supervision(self, id, token)
+    fn finish_supervision(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        receipt: bool,
+    ) -> Result<TaskRun> {
+        SqliteQueue::finish_supervision(self, id, token, receipt)
     }
     fn finish_lost_session(
         &mut self,
         id: &RunId,
         token: &LeaseToken,
         exit_code: i32,
+        receipt: bool,
     ) -> Result<TaskRun> {
-        SqliteQueue::finish_lost_session(self, id, token, exit_code)
+        SqliteQueue::finish_lost_session(self, id, token, exit_code, receipt)
     }
     fn finish_supervision_live(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun> {
         SqliteQueue::finish_supervision_live(self, id, token)

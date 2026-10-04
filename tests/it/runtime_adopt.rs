@@ -1184,7 +1184,7 @@ fn exited_wrapper_and_validating_headless_runs_are_adopted_and_validated() {
         fs::remove_file(exit).unwrap();
     }
     queue
-        .finish_supervision(validating.id(), &LeaseToken::new("dead-b"))
+        .finish_supervision(validating.id(), &LeaseToken::new("dead-b"), false)
         .unwrap();
     assert_eq!(
         queue.run(validating.id()).unwrap().status(),

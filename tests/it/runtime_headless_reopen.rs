@@ -336,7 +336,9 @@ fn the_queue_forgets_only_the_lost_wrapper_and_takes_the_reopened_one() {
     queue
         .clear_lost_session(run.id(), &owner, Some(20))
         .unwrap();
-    let ended = queue.finish_lost_session(run.id(), &owner, 1).unwrap();
+    let ended = queue
+        .finish_lost_session(run.id(), &owner, 1, false)
+        .unwrap();
     assert_eq!(ended.status(), RunStatus::Failed);
     assert!(queue.clear_lost_session(run.id(), &owner, None).is_err());
 }

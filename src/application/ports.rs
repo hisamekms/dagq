@@ -1652,8 +1652,14 @@ pub trait RunTransitions {
     /// Save the paths a claimed run is provisioned at.
     fn plan_run(&mut self, id: &RunId, token: &LeaseToken, plan: &RunPlan) -> Result<()>;
     fn workspace_created(&mut self, id: &RunId, token: &LeaseToken, workspace: &str) -> Result<()>;
-    /// The session's wrapper exited: the run moves on by its exit code.
-    fn finish_supervision(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun>;
+    /// The session's wrapper exited: the run moves on by its exit code and
+    /// whether its `receipt` was written (ADR-t1594-1).
+    fn finish_supervision(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        receipt: bool,
+    ) -> Result<TaskRun>;
     /// End a running run's lost session that could not be opened again
     /// (task 1372) as if its wrapper exited with `exit_code`.
     fn finish_lost_session(
@@ -1661,6 +1667,7 @@ pub trait RunTransitions {
         id: &RunId,
         token: &LeaseToken,
         exit_code: i32,
+        receipt: bool,
     ) -> Result<TaskRun>;
     /// The session went idle after its receipt and stays open: validating.
     fn finish_supervision_live(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun>;

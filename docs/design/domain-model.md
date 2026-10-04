@@ -4,8 +4,8 @@ type: design
 title: Domain model
 status: current
 created: 2026-09-21
-updated: 2026-10-04 # task 1507, task 1506, task 1508, task 1509; tasks 1505, 1437
-last_verified: 2026-10-04 # task 1507, task 1506, task 1508, task 1509; tasks 1505, 1437
+updated: 2026-10-05 # task 1594; task 1507, task 1506, task 1508, task 1509; tasks 1505, 1437
+last_verified: 2026-10-05 # task 1594; task 1507, task 1506, task 1508, task 1509; tasks 1505, 1437
 scope: domain
 related:
   - adr-t1394-1
@@ -80,7 +80,7 @@ related:
 - `lint [TASK...] [--proposal ID...]`は、与えたtaskと各proposalのmemberのtaskに、repositoryに依存しない決まった規則を当てる（ADR-0044の決定10の機械的な検査。純粋関数`domain::lint::lint`、入力は`TaskStore::lint_input`が1スナップショットで読む`LintInput`: 対象のtask、全taskのstatusと依存、全goalのverdict）。結果は`{"tasks": [...], "violations": [{"code", "task_id", "reason"}]}`で、違反が無ければ`violations`は空。並びは対象の順、同じtaskの中はcodeの順、同じcodeの中は依存・globの順。codeは`dependency_cycle`（taskの依存と、goalへの依存をそのgoalの全taskへの依存と見て、自分に戻る。依存を足すときにqueueが拒否する循環と同じ辺で、goalから`canceled`の所属taskへの辺は外し、verdictでは辺を外さない）、`depends_on_completed`、`depends_on_canceled`、`depends_on_draft`（対象の外のdraft。同じ対象のdraftは一緒にsubmitされるので数えない）、`depends_on_abandoned_goal`、`unscoped_without_verification`（`paths`もverificationも無い）、`no_verification`（`paths`はあるがverificationが無い）、`invalid_path_glob`（`validate_path_globs`が拒否するglob）、`blank_acceptance`、`missing_change` / `change_outside_set`（`[tasks] changes`のあるqueueだけ。changeの無いtask / 集合の外のchange。[ADR-t980-1](../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)）、`duplicate_title`（対象の中で大文字小文字と前後の空白を無視して同じtitle）、`follow_up_membership_unjudged`（draft / submittedのfollow_upで、submitが拒む所属の判断の欠け。`LintInput.membership_gaps`をstoreが同じスナップショットで読み、reasonは欠けの種類（判断が無い・`undecided`・要再確認）を書く）。AGENTS.mdのverificationの規則やADR番号のようなrepository固有の規則は入れない（plan reviewのpromptが文書から読む）。読むだけなのでobserverとreviewerも打てる。
 - plan reviewの経路は`TaskStore::approve_proposal(id)`（`proposal::accept`。`submitted`のproposalを`accepted`にし、memberの`submitted`のtaskを`Approve`で`ready`に、draftのgoalを`open`にする。所属goalがsubmitの後に閉じた（`abandoned`は未着手のtaskを止めない）`submitted`のtaskは`ready`にせず`draft`に戻し、`approve_withheld`（`proposal_id`、`goal_id`、`verdict`）を記録する。閉じたgoalのtaskがclaimされないため）と`send_back_proposal(id)`（`proposal::send_back`。`revising`にして`revise_count`を1増やし、memberの`submitted`のtaskを`draft`に戻す）。どちらも1トランザクション。これを呼ぶplan review jobはgoal 29の後続taskが実装する。`proposal list [--all]`は`submitted` / `revising`のproposalをsubmitの古い順（plan reviewの順）に、`proposal show ID`は1件をmemberのIDとともに返す。`proposal withdraw ID`（`TaskStore::withdraw_proposal`、`proposal::withdraw`、1トランザクション）は`submitted` / `revising`のproposalをplan reviewを通さずに`canceled`にし、plan reviewの保留と未配送のreviseを消し、memberの`submitted`のtaskを`draft`に戻して、memberのtaskとgoalに`proposal_withdrawn`（`proposal_id`、`from`）を記録する。concernで保留中の`approve_plan`のaskで閉じていないものは閉じる（未回答なら`withdrawn`と回答し、`ask_answered`に`runtime_closed: true`を付ける。開いたままだと、taskが次に入ったproposalにその回答が当たるため。回答済みで未適用のaskは`ask_closed`（`ask_id`、`kind`。task 568）を記録して閉じる）。出どころを持つdraftは、runtimeのplannerの対象（`planner_drafts`）に戻る（`canceled`のproposalを指すdraftは、どのproposalにも入っていないと数える）。memberは`proposal_id`を履歴として残すが、`canceled`のproposalは縛らないので、別のproposalにsubmitできる（残ったdraftがbypassやcancelで消え、出し直せないrevisingのproposalを解くため）。それ以外のstatusは拒否する。observerとreviewerは打てない。`status`も`proposals`に同じ一覧を載せる。
 - `claim`だけが`ready → in_progress`へ遷移させる（`task::claim`。readyでなければ`TaskNotClaimable`）。同じトランザクションで`TaskRun::new`がclaimed状態のTaskRunを作り、イベントを記録し、supervisorからのclaimはそのrunの`RunLease`も作る。キュー全体の実行枠はなく、依存が解けたtaskは`supervise --parallel N`の上限まで同時に実行される。
-- supervisorはrunを（遷移の判断は[集約: TaskRun](#集約-taskrun)のコマンド）`claimed → starting`（path計画）→ `running`（agent起動）→ `validating`または`failed`（wrapper終了）→ `awaiting_integration`または`failed`（receipt検証）へ進め、`awaiting_integration`のworkspaceを閉じて`workspace_closed_at`を記録し、休止したrunの`RunLease`を解放する。各遷移はそのrunのleaseまたはwrapperの所有を要求する。runtime errorではsupervisorがそのrunだけを手放す（statusは変えず、`last_error`を書き、leaseを消す）。
+- supervisorはrunを（遷移の判断は[集約: TaskRun](#集約-taskrun)のコマンド）`claimed → starting`（path計画）→ `running`（agent起動）→ `validating`または`failed`（wrapper終了。非0でreceiptが無いときだけ`failed`）→ `awaiting_integration`または`failed`（receipt検証）へ進め、`awaiting_integration`のworkspaceを閉じて`workspace_closed_at`を記録し、休止したrunの`RunLease`を解放する。各遷移はそのrunのleaseまたはwrapperの所有を要求する。runtime errorではsupervisorがそのrunだけを手放す（statusは変えず、`last_error`を書き、leaseを消す）。
 - `integrate`だけが`awaiting_integration | needs_session → integrating`と、そこからの`→ integrated`（Taskは`in_progress → completed`、`result_commit`は`main`に積んだsquash commit）、`→ needs_session`（rebaseの衝突、再検証の失敗）、`→ failed`（セッションが書き直したreceiptが`failed`）、`→ 元のstatus`（mainを進める前のerror）を行う。`integrating`はqueue全体で1件。結果は`IntegrationOutcome`（`integrated` / `needs_session` / `failed` / `no_run_awaiting`）で返す。`integrate --next`は`awaiting_integration`のrunを検証完了の古い順に取り、`needs_session`は`integrate ID`で明示的に再開する。
 - `in_progress`のTaskは、未完了run（claimed/starting/running/validating/awaiting_integration/integrating/needs_session）がある間は手動変更できない。すべてのrunが`failed`または`interrupted`になった`in_progress`は`ready`/`draft`/`canceled`へ手動で戻せる。再試行は新しいTaskRunになる。終端状態は変更できない。依存の追加・削除はdraft / submitted / readyだけに許可する（plan reviewは`submitted`のtaskに依存を足し、優先度を下げる。ADR-0044の決定11）。
 - `recover`は未完了runを、そのrunの登録プロセスとleaseの所有者が停止していることを確認してから`interrupted`にする（`integrating`なら`awaiting_integration`へ戻す）。他のrunには触れない。Taskは`in_progress`のままで、`ready`への復帰は別操作。
@@ -197,7 +197,7 @@ IDとcommitはドメインプリミティブのnewtype（`src/domain/ids.rs`、`
 | `attach_workspace(run, workspace_id)` | `starting`でworkspace未設定 | `workspace_id`を設定 |
 | `reopen_workspace(run, workspace_id)` | `running` | 待ちの最中に失った非対話のsessionを開き直したworkspaceを`workspace_id`にし、`workspace_closed_at`を空に戻す（task 1372。[非対話のworker](supervisor-lifecycle/headless-worker.md#待ちの最中に失ったsessionの開き直し)） |
 | `mark_running(run)` | `starting` | `running` |
-| `finish_session(run, exit_code)` | `starting` / `running` | 0か`None`（sessionを開いたまま、ADR-0027）なら`validating`、非0なら`failed`と`session exited with code N` |
+| `finish_session(run, exit_code, receipt)` | `starting` / `running` | 状態は`run::session_end_status(exit_code, receipt)`: 非0でreceiptが無ければ`failed`と`session exited with code N`、ほか（0、`None`（sessionを開いたまま、ADR-0027）、receiptを書いた後に非0で終わったsession（[ADR-t1594-1](../adr/2026-10-05-t1594-1-a-receipt-left-by-a-failed-headless-turn-goes-to-validation.md)））は`validating`で`last_error`を書かない |
 | `accept(run, result_commit)` | `validating` | `awaiting_integration`と`result_commit` |
 | `reject(run, result_commit, reason, resumable)` | `validating` | `resumable`（evidence不足かscope違反だけ）なら`needs_session`、ほかは`failed`。`result_commit`は検証済みのcommitかnull、`reason`があれば`last_error` |
 | `restart_validation(run)` | `awaiting_integration` | `validating`（`revise`の後、ADR-0027） |
@@ -244,7 +244,7 @@ storeの保存は「`stored_run`で読む → domainのコマンド → `save_ru
 
 | 記録つきのコマンド | 遷移 | 記録するevent |
 | --- | --- | --- |
-| `end_session(run, exit_code)` | `finish_session` | `supervision_finished`（status、`exit_code`、非0なら`Reason::of_exit_code`。`None`は`exit_code: null`と`session_live: true`） |
+| `end_session(run, exit_code, receipt)` | `finish_session` | `supervision_finished`（status、`exit_code`。非0で`failed`なら`Reason::of_exit_code`、非0でreceiptにより`validating`なら`receipt: true`で理由のcodeは無い。`None`は`exit_code: null`と`session_live: true`） |
 | `finish_validation(run, &Validation)` | 受理は`accept`、拒否は`reject`（`Validation::resumable()`なら`needs_session`） | `validation_finished`（`Validation`とstatus）。`needs_session`なら続けて`scope_violation`（宣言外のpathがあれば優先）か`evidence_missing`（statusは持たない） |
 | `record_landing_decision(run, to, reason, payload)` | `decide_landing` | `landing_decided`（payloadにstatusとreason） |
 | `record_live_park(run, reason, payload)` | `park_live` | `recovery_parked`（payloadにstatusとreason） |
@@ -369,14 +369,14 @@ domainの関数は業務上の拒否を`DomainError`（`src/domain/error.rs`）�
 
 | 場面 | status | 書く文 | イベント |
 | --- | --- | --- | --- |
-| 非0終了 | `starting`/`running` → `failed` | `session exited with code N`（Nはwrapperが報告した終了コード。signalで終わったセッションは128） | `supervision_finished` |
+| receiptの無い非0終了 | `starting`/`running` → `failed` | `session exited with code N`（Nはwrapperが報告した終了コード。signalで終わったセッションは128）。receiptを書いた後の非0終了は`validating`に進み書かない（[ADR-t1594-1](../adr/2026-10-05-t1594-1-a-receipt-left-by-a-failed-headless-turn-goes-to-validation.md)） | `supervision_finished` |
 | receipt検証の拒否 | `validating` → `failed` | 最初に外れた項目の理由をそのまま。`receipt was not submitted at <path>`、receiptの構造や`run_id`の不一致のエラー文、`worktree is on <ref> instead of refs/heads/<branch>`、`receipt commit <sha> is not the head of <branch> (<head>)`、`no commit was made on top of base <sha>`、`commit <sha> does not descend from base <sha>`、`worktree is not clean:` に続く`git status`（検証コマンドはvalidatingでは実行しない。ADR-0040の決定1） | `validation_finished` |
-| runtime error / provisioning error | 変えない | errorの文をそのまま。worktree・workspaceの作成失敗は`run <run-id> provisioning failed: <error>`、監視中は`wrapper heartbeat expired; session may still be alive`、検証処理そのもの（Git・DB）のerror文。supervisorはそのrunのleaseを消して手放す（abandon）。wrapper自身のerrorとsupervisor heartbeatの失敗も同じ列に書くがleaseは残す（wrapperは子が死んでいれば続けて終了コード127を報告し、runは`session exited with code 127`で`failed`になる） | `runtime_error` |
+| runtime error / provisioning error | 変えない | errorの文をそのまま。worktree・workspaceの作成失敗は`run <run-id> provisioning failed: <error>`、監視中は`wrapper heartbeat expired; session may still be alive`、検証処理そのもの（Git・DB）のerror文。supervisorはそのrunのleaseを消して手放す（abandon）。wrapper自身のerrorとsupervisor heartbeatの失敗も同じ列に書くがleaseは残す（wrapperは子が死んでいれば続けて終了コード127を報告し、receiptが無ければrunは`session exited with code 127`で`failed`になる） | `runtime_error` |
 | cleanup失敗 | 変えない | 受け入れたrunのworkspace closeの失敗は`workspace <workspace-id> could not be closed: <error>`、着地後のworktree/branch削除の失敗は`landed worktree <path> could not be removed: <error>` | `cleanup_failed` |
 | 着地の保留・中断・失敗 | `integrating` → `needs_session` / 元のstatus / `failed` | rebaseの衝突や再検証の失敗の理由（検証コマンドの失敗は`verification command "<cmd>" exited with <code> after the rebase onto <main>; see <run-dir>/integrate-<attempt>-verify-N.log`）、mainを進める前のGit/DB errorは`integration stopped before main moved: <error>`、セッションが書き直した`failed` receiptの理由（[supervisor-lifecycle](supervisor-lifecycle/integrate.md#integrate)） | `integration_deferred` / `integration_error` / `integration_failed` |
 | 検証のhostの失敗のhold（task 639） | `integrating` → `awaiting_integration` | hostの分類（`disk_full`・`killed`・`timeout`）の検証コマンドの失敗が1回のやり直しでも落ちた（`disk_full`で容量が足りずやり直さなかったときも）: `verification command "<cmd>" failed on the host after the rebase onto <main> (<class>: <evidence>); see <logs>. …, then land it with dagq integrate <task>; no session is resumed`（[supervisor-lifecycle](supervisor-lifecycle/integrate.md#integrate)） | `integration_held` |
 
-`last_error`はstatusと最後のイベントに合わせて読む。`failed`なら非0終了・検証拒否・着地時の`failed` receipt、`claimed`/`starting`/`running`/`validating`で`last_error`があればsupervisorが手放したrun（`doctor`にleaseなしで出る）、`awaiting_integration`で`last_error`があればclose失敗（`cleanup_failed`、`workspace_closed_at`はnull）かmainを進める前に止まった着地（`integration_error`）、`needs_session`なら着地の衝突である。`show`・`doctor`・superviseの結果の`errors`に出て、`list`には出ない。`recover`は`last_error`を上書きしない。
+`last_error`はstatusと最後のイベントに合わせて読む。`failed`ならreceiptの無い非0終了・検証拒否・着地時の`failed` receipt、`claimed`/`starting`/`running`/`validating`で`last_error`があればsupervisorが手放したrun（`doctor`にleaseなしで出る）、`awaiting_integration`で`last_error`があればclose失敗（`cleanup_failed`、`workspace_closed_at`はnull）かmainを進める前に止まった着地（`integration_error`）、`needs_session`なら着地の衝突である。`show`・`doctor`・superviseの結果の`errors`に出て、`list`には出ない。`recover`は`last_error`を上書きしない。
 
 ### providerの切り替えの理由（`SwitchReason`）
 
@@ -442,7 +442,7 @@ domainの関数は業務上の拒否を`DomainError`（`src/domain/error.rs`）�
 
 | イベント | 経路 | code |
 | --- | --- | --- |
-| `supervision_finished` | sessionの非0終了（`last_error`は`session exited with code N`） | `session_exit_code` / `session_killed`。0終了とliveの受け渡しは持たない |
+| `supervision_finished` | receiptの無いsessionの非0終了（`last_error`は`session exited with code N`） | `session_exit_code` / `session_killed`。0終了・liveの受け渡し・receiptを書いた後の非0終了（`receipt: true`）は持たない |
 | `validation_finished` | receiptの照合の拒否（`last_error`） | `receipt_missing` / `receipt_invalid` / `worker_failed` / `evidence_failed` / `commit_mismatch` / `worktree_dirty` / `scope_violation` / `evidence_missing`。受理は持たない |
 | `scope_violation` / `evidence_missing` | validationの保留に添えるイベント | `scope_violation` / `evidence_missing`（`validation_finished`と同じコードなので`stats`の`reason_codes`は数えない。`backend_call_failed`も失敗した工程のイベントと重なるので数えない） |
 | `integration_deferred` | 着地の保留（`needs_session`） | `commit_mismatch` / `receipt_missing` / `receipt_invalid` / `worker_failed` / `evidence_failed` / `evidence_missing` / `worktree_dirty` / `rebase_conflict` / `rebase_empty` / `migration_number_taken` / `scope_violation` / `verification_failed` |

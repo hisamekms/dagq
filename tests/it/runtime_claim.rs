@@ -656,7 +656,7 @@ fn a_lease_of_its_own_token_is_renewed_after_a_host_sleep_until_another_supervis
     // Woken up after the adoption, the late supervisor is refused and
     // writes nothing: the lease, the run and its events stay the adopter's.
     let error = queue
-        .finish_supervision(taken.id(), &LeaseToken::new("late"))
+        .finish_supervision(taken.id(), &LeaseToken::new("late"), false)
         .unwrap_err();
     assert_eq!(
         error.to_string(),
@@ -777,14 +777,14 @@ fn wrapper_registration_is_one_shot_and_rejects_other_owners() {
     queue.register_agent(run.id(), 10, 12).unwrap();
     assert!(
         queue
-            .finish_supervision(run.id(), &LeaseToken::new("owner"))
+            .finish_supervision(run.id(), &LeaseToken::new("owner"), false)
             .is_err()
     ); // Still live.
     queue.wrapper_exited(run.id(), 10, 0).unwrap();
     assert!(queue.heartbeat_wrapper(run.id(), 10).is_err());
     assert_eq!(
         queue
-            .finish_supervision(run.id(), &LeaseToken::new("owner"))
+            .finish_supervision(run.id(), &LeaseToken::new("owner"), false)
             .unwrap()
             .status(),
         RunStatus::Validating
@@ -890,7 +890,7 @@ fn workspace_close_is_recorded_once_and_only_for_accepted_runs() {
     );
     queue.wrapper_exited(run.id(), 10, 0).unwrap();
     queue
-        .finish_supervision(run.id(), &LeaseToken::new("owner"))
+        .finish_supervision(run.id(), &LeaseToken::new("owner"), false)
         .unwrap();
     let accepted = queue
         .finish_validation(
