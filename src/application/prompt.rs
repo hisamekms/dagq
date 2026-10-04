@@ -354,8 +354,11 @@ pub const ACCEPTANCE_MAP: &str = "Before the receipt, map each acceptance criter
 /// [`ACCEPTANCE_MAP`] and part of the same step: the documents that
 /// describe the changed behavior, named by the task or not, are read
 /// against the diff, and summary says what was updated or why nothing was.
-/// It asks for no command and no document change only to show the check.
-pub const DOCS_CHECK: &str = "Then check the documents on the behavior you changed (named by the task or found as you work) against your diff: fix stale ones in the task's paths, put each one outside them in a docs_drift follow_up with its path and section (one the acceptance names is a criterion above), and in summary name each path and section you updated or why none needed it. Do not touch a document only to show it.\n";
+/// The candidates include what a search of the repository for each changed
+/// name finds, and summary gives the names searched, so the review can
+/// search again (ADR-t1688-1). It names no tool and no repository path,
+/// asks for no command and no document change only to show the check.
+pub const DOCS_CHECK: &str = "Then check against your diff the documents on what you changed: named by the task, found as you work, or found by searching the repository for each changed name (command, flag, setting, role, path). Fix stale ones in the task's paths, file the rest as docs_drift follow_ups with path and section (one the acceptance names is a criterion above); in summary give the names searched and each path and section updated or why none was. Touch no document only to show it.\n";
 
 /// What a resumed or revised session adds before it rewrites the receipt
 /// (ADR-t1420-1): the mapping of the criteria its fix touched, again, with
@@ -5685,7 +5688,9 @@ mod tests {
     /// second map; the Codex review line does not say it again; every
     /// resume and revise request keeps the record of the check inside the
     /// remap's phrase, not as another sentence; the run's review prompt is
-    /// untouched.
+    /// untouched. Task 1688 (ADR-t1688-1): the check finds candidates by a
+    /// search for each changed name and gives the names searched in
+    /// summary, still naming no command, tool or repository path.
     #[test]
     fn every_worker_text_that_writes_a_receipt_checks_the_documents_once() {
         let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
@@ -5699,11 +5704,13 @@ mod tests {
             let first = &texts[0];
             assert_eq!(first.matches(DOCS_CHECK).count(), 1, "{first}");
             assert!(first.contains(&format!("{ACCEPTANCE_MAP}{DOCS_CHECK}")));
-            assert_eq!(
-                first.matches("check the documents").count(),
-                1,
-                "{provider:?} {mode:?}: {first}"
-            );
+            for phrase in ["the documents on what you changed", "the names searched"] {
+                assert_eq!(
+                    first.matches(phrase).count(),
+                    1,
+                    "{provider:?} {mode:?}: {first}"
+                );
+            }
             for request in &texts[1..11] {
                 assert!(!request.contains(DOCS_CHECK), "{request}");
                 assert_eq!(
@@ -5724,9 +5731,15 @@ mod tests {
         assert!(codex.contains("read your own diff"), "{codex}");
         assert!(!codex.contains("documents") && !codex.contains("docs_drift"));
         assert!(!DOCS_CHECK.contains("own diff"));
-        // No new command, and short (ADR-t1428-1; goal 91's constraints).
-        assert!(DOCS_CHECK.len() <= 400, "{}", DOCS_CHECK.len());
-        assert!(!DOCS_CHECK.contains("cargo") && !DOCS_CHECK.contains('`'));
+        // Candidates come from a search for each changed name, and summary
+        // gives the names searched (ADR-t1688-1).
+        assert!(DOCS_CHECK.contains("searching the repository for each changed name"));
+        // No new command, no tool, no repository path, and short
+        // (ADR-t1428-1, ADR-t1688-1; goals 91 and 112's constraints).
+        assert!(DOCS_CHECK.len() <= 470, "{}", DOCS_CHECK.len());
+        for word in ["cargo", "`", "docs/", "grep"] {
+            assert!(!DOCS_CHECK.contains(word), "{word}");
+        }
         let review = review_prompt(
             &task,
             &run_on(Provider::Claude, WorkerMode::Headless),

@@ -6,6 +6,8 @@ status: accepted
 created: 2026-10-03
 updated: 2026-10-03
 accepted_on: 2026-10-03
+amended_by:
+  - adr-t1688-1
 owners:
   - hisamekms
 tags:
@@ -23,6 +25,8 @@ related:
 ---
 
 # ADR-t1428-1: 挙動や仕様を変えるtaskは変更する時点で更新する文書を決め、plannerが関連文書を書き、workerがreceiptの前に差分と照合してsummaryに更新したpath・節か不要の理由を書き、reviewが照合する。Task・receipt・schemaは変えない
+
+> **一部変更（2026-10-04）**: 決定4の文書の候補の拾い方とsummaryに書くものは[ADR-t1688-1](2026-10-04-t1688-1-worker-searches-documents-by-changed-names.md)がamendsした（変えた名前でrepositoryの文書を探し、summaryに探した名前を書く）。
 
 ## Context
 

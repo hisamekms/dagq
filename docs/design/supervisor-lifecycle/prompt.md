@@ -4,12 +4,13 @@ type: design
 title: "Prompt"
 status: current
 created: 2026-09-26
-updated: 2026-10-04 # task 1572: the throughput review records its prompt's bytes (after tasks 1571 and 1508)
-last_verified: 2026-10-04 # task 1572 (after task 1571)
+updated: 2026-10-04 # task 1688: DOCS_CHECK searches the documents by the changed names and summary gives them (after task 1572)
+last_verified: 2026-10-04 # task 1688 (after task 1572)
 scope: runtime
 related:
   - adr-t1566-1
   - adr-t1428-1
+  - adr-t1688-1
   - adr-t1420-1
   - adr-t963-1
   - adr-t1165-1
@@ -60,7 +61,7 @@ Codexのworkerの`review_line`（下の[subagent review](#subagent-review)）は
 
 ## 文書の照合
 
-[ADR-t1428-1](../../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)（goal 91、task 1428）。workerのpromptは`ACCEPTANCE_MAP`の直後（`Write a completion receipt to ...`の行の前）に`DOCS_CHECK`の1段落（英語で394文字）を置く: 変えた挙動を説明する文書（taskが名指すものと作業中に見つけたもの）を差分と照合し、taskのpathsの中の古いものを直し、pathsの外のものは`docs_drift`のfollow_upにpathと節を書く（受け入れ条件が求める文書は上の対応づけの項目として扱い、直せなければ`worker_question`かfailedのreceipt）。`summary`に更新したpathと節か、更新が要らない理由を書き、示すためだけに文書を触らない。対応づけの手順の続き（`Then ...`）で、受け入れ条件の対応づけを2度言わない。対話・非対話、Claude・Codexのどのworkerのpromptも同じ文で、Codexの`review_line`（自分のdiffを読む文）は文書に触れない。新しい検査のコマンドやtestの実行は求めない。
+[ADR-t1428-1](../../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)（goal 91、task 1428）。workerのpromptは`ACCEPTANCE_MAP`の直後（`Write a completion receipt to ...`の行の前）に`DOCS_CHECK`の1段落（英語で466文字。task 1428で394文字、task 1688で候補の探し方と探した名前を足した）を置く: 変えた挙動を説明する文書（taskが名指すもの、作業中に見つけたもの、変えた名前（コマンド・flag・設定・役割・path）でrepositoryを探して見つけたもの。[ADR-t1688-1](../../adr/2026-10-04-t1688-1-worker-searches-documents-by-changed-names.md)）を差分と照合し、taskのpathsの中の古いものを直し、pathsの外のものは`docs_drift`のfollow_upにpathと節を書く（受け入れ条件が求める文書は上の対応づけの項目として扱い、直せなければ`worker_question`かfailedのreceipt）。`summary`に探した名前と、更新したpathと節か更新が要らない理由を書き、示すためだけに文書を触らない。探した名前は読んだことの申告ではなく、reviewが同じ名前で探し直すための根拠。探す手段（検索のツール）とrepository固有のpathは名指さず、このrepositoryの探す範囲は[documents.md](../../development/documents.md#workerの文書の照合)が持つ。対応づけの手順の続き（`Then ...`）で、受け入れ条件の対応づけを2度言わない。対話・非対話、Claude・Codexのどのworkerのpromptも同じ文で、Codexの`review_line`（自分のdiffを読む文）は文書に触れない。新しい検査のコマンドやtestの実行は求めない。
 
 resumeとreviseの依頼は別の文を足さず、`ACCEPTANCE_REMAP`の「`summary`の句を書き直す」に`, with the documents you checked against the diff`（英語で49文字。`ACCEPTANCE_REMAP`は286文字）を含める。runのreviewのpromptと資料の側（文書の照合とtaskのcontext）はtask 1429が足した（[Review](review.md#文書の照合)）。testは`src/application/prompt.rs`の`every_worker_text_that_writes_a_receipt_checks_the_documents_once`。
 
