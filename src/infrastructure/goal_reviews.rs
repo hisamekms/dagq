@@ -779,6 +779,27 @@ impl GoalReviewStore for SqliteQueue {
         Ok(holds)
     }
 
+    fn goal_follow_ups(&self) -> Result<Vec<follow_up::GoalFollowUps>> {
+        let goals: Vec<GoalId> = self
+            .conn
+            .prepare("SELECT id FROM goals WHERE status='open' AND closed_at IS NULL ORDER BY id")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut found = Vec::new();
+        for goal in goals {
+            let follow_ups = follow_up_membership::waiting_follow_ups(&self.conn, goal)?;
+            if follow_ups.is_empty() {
+                continue;
+            }
+            found.push(follow_up::GoalFollowUps {
+                goal,
+                tasks: goal_tasks(&self.conn, goal)?,
+                follow_ups,
+            });
+        }
+        Ok(found)
+    }
+
     fn rearm_goal_review(&mut self, goal: GoalId) -> Result<Value> {
         let now = self.generators.clock.now();
         let tx = self

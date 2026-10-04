@@ -4,8 +4,8 @@ type: design
 title: Follow-up membership judgements
 status: current
 created: 2026-10-04
-updated: 2026-10-04 # task 1509
-last_verified: 2026-10-04 # task 1509
+updated: 2026-10-05 # task 1660
+last_verified: 2026-10-05 # task 1660
 scope: runtime
 related:
   - adr-t1504-2
@@ -89,6 +89,17 @@ acceptanceを変えると判定時の版が古くなり、同じ分類を記録�
 （人の言葉による代行を含む）、goal reviewの`achieved`の適用、`approve_goal`の
 answerの`achieved`が同じtransactionで同じ条件を使う。goal reviewの起動の条件と
 fingerprintにも入る（[Goal review](supervisor-lifecycle/goal-review.md)の2・5）。
+
+所属taskが全て終わり（`goal_review::tasks_done`）、この検査だけでgoal reviewが起動しないopenのGは、
+`status`のattentionに`goal_follow_ups_unsettled`（`next: request a plan for the
+follow-ups of goal G`）として1件出る（task 1660）。止めているfollow-upのtask IDと
+理由の分類（`unjudged`・`undecided`・`needs_recheck`・`required_outside`。
+`SourceFollowUp::unsettled_reason`）を並べ、runtimeのplannerが扱う途中の判断の無い
+follow_upのdraft、`draft_planner_exhausted`のdraft、closeされていないaskのあるtaskは数えず、
+`goal_review_failed`で人を待つGには出さない（判定は`follow_up::unshown_unsettled`）。
+inboxはplanning requestでplannerに`judge-follow-up`を頼み、判断を記録すれば消える。
+runtimeは所属を判定も移動もしない（ADR-t1504-1決定5）。項目の全体は
+[`status`](supervisor-lifecycle/status.md)のattentionの一覧。
 
 ## submit・lint・plan review
 

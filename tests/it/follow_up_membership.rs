@@ -1317,3 +1317,191 @@ fn a_reopen_closes_the_goals_other_questions_and_keeps_a_follow_up_it_cannot_mov
         "{refused}"
     );
 }
+
+impl Landed {
+    /// The `goal_follow_ups_unsettled` items `status` shows (task 1660).
+    fn unsettled_attention(&self) -> Vec<serde_json::Value> {
+        let status = dagq::runtime::status(&self.dir.path().join("queue.db")).unwrap();
+        status["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["kind"] == "goal_follow_ups_unsettled")
+            .cloned()
+            .collect()
+    }
+
+    /// The one item of the source goal, naming `anchor` and each follow-up
+    /// with its reason.
+    fn assert_unsettled(&self, anchor: TaskId, follow_ups: &str) {
+        let shown = self.unsettled_attention();
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        let item = &shown[0];
+        assert_eq!(item["run_id"], json!(null));
+        assert_eq!(item["task_id"], json!(anchor.as_i64()));
+        assert_eq!(item["status"], "open");
+        assert_eq!(
+            item["next"],
+            format!("request a plan for the follow-ups of goal {}", self.source)
+        );
+        assert_eq!(
+            item["last_error"],
+            format!(
+                "goal {}: its goal review waits for the membership of follow-ups {follow_ups}",
+                self.source
+            )
+        );
+    }
+
+    /// A follow-up moved out of the source goal past `draft`, where no
+    /// planner of the runtime's is opened for it.
+    fn submitted_outside(&mut self, title: &str) -> TaskId {
+        let task = self.follow_up(title);
+        self.q.set_goal(task, Some(self.other)).unwrap();
+        self.set_status(task, "submitted");
+        task
+    }
+}
+
+/// Task 1660: an open goal whose own work is done and whose goal review
+/// waits only for the membership of its follow-ups is shown once in the
+/// attention, with each follow-up and its reason, until each is judged
+/// (against the current acceptance), joins the goal or ends.
+#[test]
+fn a_goal_waiting_for_follow_up_membership_is_shown_until_judged() {
+    let mut l = landed();
+    assert!(l.unsettled_attention().is_empty());
+    // Not judged, then undecided, then judged out of scope.
+    let first = l.submitted_outside("first improvement");
+    assert!(!l.reviewable());
+    l.assert_unsettled(first, &format!("{first} (unjudged)"));
+    let mut undecided = judgement(Class::Undecided, None);
+    undecided.acceptance_items.clear();
+    l.q.judge_follow_up(first, undecided, "planner").unwrap();
+    l.assert_unsettled(first, &format!("{first} (undecided)"));
+    l.out_of_scope(first);
+    // Out of scope does not wait for its work.
+    assert!(l.reviewable());
+    assert!(l.unsettled_attention().is_empty());
+
+    // Required but outside the goal, listed with a stale judgement.
+    let second = l.submitted_outside("required outside");
+    l.q.judge_follow_up(second, judgement(Class::Required, None), "planner")
+        .unwrap();
+    assert_eq!(l.q.show(second).unwrap().task.goal_id(), Some(l.other));
+    l.assert_unsettled(second, &format!("{second} (required_outside)"));
+    l.change_acceptance("a stricter acceptance");
+    l.assert_unsettled(
+        first,
+        &format!("{first} (needs_recheck), {second} (needs_recheck)"),
+    );
+    // Rechecked, the required one still waits outside the goal.
+    l.out_of_scope(first);
+    l.q.judge_follow_up(second, judgement(Class::Required, None), "planner")
+        .unwrap();
+    l.assert_unsettled(second, &format!("{second} (required_outside)"));
+    // The goal's own work not done: its review waits for that.
+    l.set_status(l.task, "ready");
+    assert!(l.unsettled_attention().is_empty());
+    l.set_status(l.task, "completed");
+    l.assert_unsettled(second, &format!("{second} (required_outside)"));
+    // An ended follow-up never waits.
+    l.set_status(second, "completed");
+    assert!(l.reviewable());
+    assert!(l.unsettled_attention().is_empty());
+}
+
+/// Task 1660: what the runtime already handles or another attention item
+/// shows is not counted again: an unjudged follow_up draft its planners
+/// handle, a draft shown as `draft_planner_exhausted`, a follow-up with an
+/// open ask, and a goal held by `goal_review_failed`.
+#[test]
+fn follow_ups_the_runtime_or_another_item_covers_are_not_shown_again() {
+    use dagq::application::{DraftPlannerStore, GoalReviewFailure, GoalReviewStore};
+    let mut l = landed();
+    let status = |l: &Landed| dagq::runtime::status(&l.dir.path().join("queue.db")).unwrap();
+    let has = |status: &serde_json::Value, kind: &str, task: TaskId| {
+        status["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["kind"] == kind && a["task_id"] == json!(task.as_i64()))
+    };
+    // An unjudged draft outside the goal: its planners are still to open.
+    let draft = l.follow_up("draft improvement");
+    l.q.set_goal(draft, Some(l.other)).unwrap();
+    assert!(!l.reviewable());
+    assert!(l.unsettled_attention().is_empty());
+    // A planner open for it handles it too.
+    let dagq::application::DraftPlannerStart::Opened { planner, .. } =
+        l.q.open_draft_planner(&[draft], None).unwrap()
+    else {
+        panic!("a planner opens for the draft")
+    };
+    assert!(l.unsettled_attention().is_empty());
+    // Its planners used up (the last one closed), it is shown as
+    // `draft_planner_exhausted` only.
+    l.q.close_planner(planner.id, None).unwrap();
+    l.q.record_task_event(
+        draft,
+        dagq::domain::EventKind::DraftPlannerExhausted,
+        json!({"planners": 3}),
+    )
+    .unwrap();
+    let now = status(&l);
+    assert!(has(&now, "draft_planner_exhausted", draft));
+    assert!(l.unsettled_attention().is_empty());
+    l.out_of_scope(draft);
+
+    // A follow-up with an open ask is shown as the ask only.
+    let asked = l.submitted_outside("asked improvement");
+    let ask =
+        l.q.ask(dagq::domain::NewAsk {
+            recommendation: None,
+            confidence: None,
+            topics: Vec::new(),
+            kind: dagq::domain::AskKind::PlannerQuestion,
+            task_id: Some(asked),
+            run_id: None,
+            question: "is it in the goal?".into(),
+            options: vec!["adopt".into(), "cancel".into()],
+            asked_by: "planner".into(),
+            reason_category: dagq::domain::AskReason::Scope,
+            finding_id: None,
+            request_id: None,
+        })
+        .unwrap();
+    let now = status(&l);
+    assert!(has(&now, "ask_opened", asked), "{ask:?}");
+    assert!(l.unsettled_attention().is_empty());
+    l.set_status(asked, "canceled");
+    let ended = l.submitted_outside("ended improvement");
+    l.set_status(ended, "canceled");
+    assert!(l.reviewable());
+
+    // A goal held by its failed review is shown as `goal_review_failed`
+    // only, even when a follow-up it saw ended comes back unjudged (its
+    // status is not the review's input).
+    let job = l.begin_review();
+    l.q.fail_goal_review(
+        &job,
+        &dagq::domain::LeaseToken::new(REVIEW_OWNER),
+        &GoalReviewFailure {
+            error: "no verdict".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(l.held());
+    l.set_status(ended, "submitted");
+    assert!(l.held());
+    let now = status(&l);
+    assert!(
+        now["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["kind"] == "goal_review_failed")
+    );
+    assert!(l.unsettled_attention().is_empty());
+}

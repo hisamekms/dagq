@@ -7,7 +7,8 @@ use super::asks::{insert_ask, read_ask};
 use super::sqlite::{SqliteQueue, enum_col, event, goal_event, read_goal, read_task, set_goal_in};
 use crate::domain::follow_up::{
     self, CorrectionAnswer, MembershipClassification as Class, MembershipFacts, MembershipGap,
-    MembershipJudgement, ReleasedDependent, SourceFollowUp, membership_gap as membership_gap_of,
+    MembershipJudgement, ReleasedDependent, SourceFollowUp, WaitingFollowUp,
+    membership_gap as membership_gap_of,
 };
 use crate::domain::{
     Ask, AskId, AskKind, AskReason, DraftOrigin, EventKind, GoalId, GoalVerdict, NewAsk, TaskId,
@@ -620,6 +621,34 @@ pub(super) fn source_follow_ups(conn: &Connection, goal: GoalId) -> Result<Vec<S
                 status,
                 in_goal,
                 judgement,
+            })
+        })
+        .collect()
+}
+
+/// The source follow-ups of `goal` with no settled membership, each with
+/// what already shows or handles it (task 1660): a planner of the runtime's
+/// for the draft, its `draft_planner_exhausted`, an ask about it not closed.
+pub(super) fn waiting_follow_ups(conn: &Connection, goal: GoalId) -> Result<Vec<WaitingFollowUp>> {
+    source_follow_ups(conn, goal)?
+        .into_iter()
+        .filter(|f| f.unsettled_reason().is_some())
+        .map(|follow_up| {
+            let task = follow_up.task;
+            let (exhausted, open_ask) = conn.query_row(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM run_events WHERE task_id=?1 AND kind='{}'),
+                            EXISTS(SELECT 1 FROM asks WHERE task_id=?1 AND closed_at IS NULL)",
+                    crate::domain::event_kind::DRAFT_PLANNER_EXHAUSTED
+                ),
+                [task],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            Ok(WaitingFollowUp {
+                draft_planned: super::draft_planners::draft_planned(conn, task)?,
+                exhausted,
+                open_ask,
+                follow_up,
             })
         })
         .collect()

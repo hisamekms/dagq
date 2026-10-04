@@ -1880,6 +1880,17 @@ pub enum AttentionNext {
     /// add --ref finding:N`, ADR-t1394-1 decision 8), or a person decides it
     /// in their own terminal.
     DecideFinding,
+    /// An open goal's own work is done, but follow-ups whose source it is
+    /// have no settled membership (none, `undecided`, judged before the
+    /// acceptance changed, or required but outside it) and nothing else
+    /// shows them, so its goal review does not start
+    /// (`goal_follow_ups_unsettled`, task 1660): the inbox records a
+    /// planning request that names the goal or the follow-ups (`request add
+    /// --ref goal:G` or `--ref task:N`), whose planner judges them
+    /// (`judge-follow-up`).
+    DecideFollowUps {
+        goal_id: GoalId,
+    },
     /// A planning request's planner submitted a proposal of it
     /// (`request_proposed`, ADR-t1394-1 decision 6): a notice the inbox
     /// passes on to the person who asked, who acts on nothing.
@@ -1998,6 +2009,9 @@ impl fmt::Display for AttentionNext {
             Self::CheckPlanner => f.write_str("check the planner"),
             Self::DecideDraft => f.write_str("request a plan for the draft"),
             Self::DecideFinding => f.write_str("request a plan for the finding"),
+            Self::DecideFollowUps { goal_id } => {
+                write!(f, "request a plan for the follow-ups of goal {goal_id}")
+            }
             Self::ReportRequest => f.write_str("report the request's proposal"),
             Self::RephraseRequest => f.write_str("rephrase or drop the request"),
             Self::DecideWaiting => f.write_str("request a plan for the waiting tasks"),
@@ -2043,6 +2057,9 @@ pub const ATTENTION_KINDS: &[&str] = &[
     "planner_unresponsive",
     "draft_planner_exhausted",
     "finding_planner_exhausted",
+    // Never recorded: `status` derives it on each read, so no event wakes
+    // `watch` with it (task 1660).
+    follow_up::GOAL_FOLLOW_UPS_UNSETTLED,
     event_kind::REQUEST_PROPOSED,
     event_kind::REQUEST_DECLINED,
     event_kind::REQUEST_PLANNER_EXHAUSTED,
@@ -2228,6 +2245,14 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         ("planner_unresponsive", _) => Some(AttentionNext::CheckPlanner),
         ("draft_planner_exhausted", _) => Some(AttentionNext::DecideDraft),
         ("finding_planner_exhausted", _) => Some(AttentionNext::DecideFinding),
+        // Derived on each read and never recorded (task 1660); mapped for
+        // a reader that names it.
+        (follow_up::GOAL_FOLLOW_UPS_UNSETTLED, _) => payload
+            .get("goal_id")
+            .and_then(serde_json::Value::as_i64)
+            .map(|goal| AttentionNext::DecideFollowUps {
+                goal_id: GoalId::new(goal),
+            }),
         (event_kind::REQUEST_PROPOSED, _) => Some(AttentionNext::ReportRequest),
         (event_kind::REQUEST_DECLINED | event_kind::REQUEST_PLANNER_EXHAUSTED, _) => {
             Some(AttentionNext::RephraseRequest)
@@ -3444,6 +3469,13 @@ mod attention_tests {
                 Some(DecideFinding),
             ),
             (
+                "goal_follow_ups_unsettled",
+                json!({"goal_id": 108}),
+                Some(DecideFollowUps {
+                    goal_id: GoalId::new(108),
+                }),
+            ),
+            (
                 "dependency_stranded",
                 json!({"goal_id": 2, "verdict": "abandoned", "waiting": [5]}),
                 Some(DecideWaiting),
@@ -3536,6 +3568,13 @@ mod attention_tests {
         assert_eq!(QueueServiceStatus.to_string(), "dagq service status");
         assert_eq!(DecideDraft.to_string(), "request a plan for the draft");
         assert_eq!(DecideFinding.to_string(), "request a plan for the finding");
+        assert_eq!(
+            DecideFollowUps {
+                goal_id: GoalId::new(108)
+            }
+            .to_string(),
+            "request a plan for the follow-ups of goal 108"
+        );
         assert_eq!(
             DecideWaiting.to_string(),
             "request a plan for the waiting tasks"

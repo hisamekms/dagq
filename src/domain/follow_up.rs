@@ -519,6 +519,11 @@ impl SourceFollowUp {
     /// not wait for its work; a required one in the goal waits as a task of
     /// the goal (the goal's own rule), outside the goal it waits here.
     pub fn unsettled(&self) -> Option<&'static str> {
+        self.unsettled_reason().map(UnsettledReason::explain)
+    }
+
+    /// The class of [`Self::unsettled`], as the attention names it.
+    pub fn unsettled_reason(&self) -> Option<UnsettledReason> {
         use MembershipClassification::*;
         if matches!(
             self.status,
@@ -527,10 +532,10 @@ impl SourceFollowUp {
             return None;
         }
         match self.judgement {
-            None => Some("not judged"),
-            Some((_, Undecided, _)) => Some("undecided"),
-            Some((_, _, true)) => Some("judged before the acceptance changed"),
-            Some((_, Required, false)) if !self.in_goal => Some("required but outside the goal"),
+            None => Some(UnsettledReason::Unjudged),
+            Some((_, Undecided, _)) => Some(UnsettledReason::Undecided),
+            Some((_, _, true)) => Some(UnsettledReason::NeedsRecheck),
+            Some((_, Required, false)) if !self.in_goal => Some(UnsettledReason::RequiredOutside),
             Some(_) => None,
         }
     }
@@ -555,6 +560,101 @@ pub fn unsettled_follow_ups(follow_ups: &[SourceFollowUp]) -> Vec<(super::TaskId
         .collect();
     unsettled.sort_by_key(|(task, _)| *task);
     unsettled
+}
+
+// Why a source follow-up keeps its goal from closing as achieved
+// (ADR-t1504-2 decision 8).
+string_enum!(UnsettledReason {
+    Unjudged => "unjudged",
+    Undecided => "undecided",
+    NeedsRecheck => "needs_recheck",
+    RequiredOutside => "required_outside",
+});
+
+impl UnsettledReason {
+    /// What it means, for a refused close.
+    pub fn explain(self) -> &'static str {
+        match self {
+            Self::Unjudged => "not judged",
+            Self::Undecided => "undecided",
+            Self::NeedsRecheck => "judged before the acceptance changed",
+            Self::RequiredOutside => "required but outside the goal",
+        }
+    }
+}
+
+/// The attention of an open goal whose goal review waits only for the
+/// membership of its follow-ups (task 1660). Derived on each read, never a
+/// `run_events` kind.
+pub const GOAL_FOLLOW_UPS_UNSETTLED: &str = "goal_follow_ups_unsettled";
+
+/// A source follow-up as that attention reads it, with what already shows
+/// or handles it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaitingFollowUp {
+    pub follow_up: SourceFollowUp,
+    /// A planner of the runtime's is still to be opened for it or is open
+    /// (its draft planners are not used up).
+    pub draft_planned: bool,
+    /// It recorded `draft_planner_exhausted`.
+    pub exhausted: bool,
+    /// An ask about it is not closed.
+    pub open_ask: bool,
+}
+
+impl WaitingFollowUp {
+    /// Whether the runtime or another attention item already covers it: an
+    /// unjudged follow_up draft its planners handle, a draft shown as
+    /// `draft_planner_exhausted`, or one with an open ask.
+    fn covered(&self) -> bool {
+        let draft = self.follow_up.status == super::TaskStatus::Draft;
+        self.open_ask
+            || (draft && self.exhausted)
+            || (draft && self.follow_up.judgement.is_none() && self.draft_planned)
+    }
+}
+
+/// An open goal with its tasks and the follow-ups whose source it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalFollowUps {
+    pub goal: super::GoalId,
+    pub tasks: Vec<(super::TaskId, super::TaskStatus)>,
+    pub follow_ups: Vec<WaitingFollowUp>,
+}
+
+/// The follow-ups that alone keep the goal review from starting and that
+/// nothing else shows, with why, in task order: none unless the goal's own
+/// work is done (the rest of the goal review's candidate check). An
+/// out-of-scope one judged as such never counts (ADR-t1504-1 decision 4).
+pub fn unshown_unsettled(goal: &GoalFollowUps) -> Vec<(super::TaskId, UnsettledReason)> {
+    if !super::goal_review::tasks_done(&goal.tasks) {
+        return Vec::new();
+    }
+    let mut found: Vec<_> = goal
+        .follow_ups
+        .iter()
+        .filter(|f| !f.covered())
+        .filter_map(|f| {
+            f.follow_up
+                .unsettled_reason()
+                .map(|why| (f.follow_up.task, why))
+        })
+        .collect();
+    found.sort_by_key(|(task, _)| *task);
+    found
+}
+
+/// The attention's `last_error`: the goal and each follow-up with why.
+pub fn unsettled_summary(
+    goal: super::GoalId,
+    follow_ups: &[(super::TaskId, UnsettledReason)],
+) -> String {
+    let list = follow_ups
+        .iter()
+        .map(|(task, why)| format!("{task} ({})", why.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("goal {goal}: its goal review waits for the membership of follow-ups {list}")
 }
 
 // Why a follow_up draft has no membership judgement plan review can rely
@@ -863,6 +963,133 @@ mod membership_tests {
             "5:3-out_of_scope"
         );
         assert_eq!(follow_up(open, true, None).fingerprint(), "5:-");
+    }
+
+    /// Task 1660: an open goal whose own work is done shows each
+    /// follow-up that alone keeps its goal review from starting, with its
+    /// reason, unless the runtime or another attention item covers it.
+    #[test]
+    fn a_done_goal_shows_the_unsettled_follow_ups_nothing_else_covers() {
+        use super::super::{GoalId, TaskId, TaskStatus};
+        use MembershipClassification::*;
+        use UnsettledReason as Why;
+        let follow_up = |task, status, in_goal, judgement| WaitingFollowUp {
+            follow_up: SourceFollowUp {
+                task: TaskId::new(task),
+                status,
+                in_goal,
+                judgement,
+            },
+            draft_planned: false,
+            exhausted: false,
+            open_ask: false,
+        };
+        let done = vec![
+            (TaskId::new(1), TaskStatus::Completed),
+            (TaskId::new(2), TaskStatus::Canceled),
+        ];
+        let goal = |tasks: Vec<_>, follow_ups| GoalFollowUps {
+            goal: GoalId::new(7),
+            tasks,
+            follow_ups,
+        };
+        let ready = TaskStatus::Ready;
+        // The four reasons, in task order.
+        let all = vec![
+            follow_up(
+                14,
+                TaskStatus::InProgress,
+                false,
+                Some((4, Required, false)),
+            ),
+            follow_up(11, ready, false, None),
+            follow_up(12, ready, false, Some((2, Undecided, false))),
+            follow_up(13, ready, false, Some((3, OutOfScope, true))),
+        ];
+        let shown = unshown_unsettled(&goal(done.clone(), all.clone()));
+        assert_eq!(
+            shown,
+            [
+                (TaskId::new(11), Why::Unjudged),
+                (TaskId::new(12), Why::Undecided),
+                (TaskId::new(13), Why::NeedsRecheck),
+                (TaskId::new(14), Why::RequiredOutside),
+            ]
+        );
+        assert_eq!(
+            unsettled_summary(GoalId::new(7), &shown),
+            "goal 7: its goal review waits for the membership of follow-ups \
+             11 (unjudged), 12 (undecided), 13 (needs_recheck), 14 (required_outside)"
+        );
+        // The goal's own work is not done: its review waits for that.
+        for tasks in [
+            vec![
+                (TaskId::new(1), TaskStatus::Completed),
+                (TaskId::new(2), ready),
+            ],
+            vec![(TaskId::new(1), TaskStatus::Canceled)],
+            vec![],
+        ] {
+            assert!(unshown_unsettled(&goal(tasks, all.clone())).is_empty());
+        }
+        // Settled or ended follow-ups never count; out of scope does not
+        // wait for its work (ADR-t1504-1 decision 4).
+        assert!(
+            unshown_unsettled(&goal(
+                done.clone(),
+                vec![
+                    follow_up(11, ready, false, Some((1, OutOfScope, false))),
+                    follow_up(12, ready, true, Some((2, Required, false))),
+                    follow_up(13, TaskStatus::Canceled, false, None),
+                ]
+            ))
+            .is_empty()
+        );
+        // What the runtime or another attention item covers.
+        let draft = TaskStatus::Draft;
+        let covered = vec![
+            WaitingFollowUp {
+                draft_planned: true,
+                ..follow_up(11, draft, false, None)
+            },
+            WaitingFollowUp {
+                exhausted: true,
+                ..follow_up(12, draft, false, Some((2, Undecided, false)))
+            },
+            WaitingFollowUp {
+                open_ask: true,
+                ..follow_up(13, ready, false, Some((3, Required, true)))
+            },
+        ];
+        assert!(unshown_unsettled(&goal(done.clone(), covered)).is_empty());
+        // A planner of the runtime's covers only an unjudged draft, and
+        // an exhausted mark only a draft.
+        let uncovered = vec![
+            WaitingFollowUp {
+                draft_planned: true,
+                ..follow_up(11, draft, false, Some((1, Undecided, false)))
+            },
+            WaitingFollowUp {
+                draft_planned: true,
+                ..follow_up(12, ready, false, None)
+            },
+            WaitingFollowUp {
+                exhausted: true,
+                ..follow_up(13, ready, false, None)
+            },
+        ];
+        assert_eq!(
+            unshown_unsettled(&goal(done, uncovered)),
+            [
+                (TaskId::new(11), Why::Undecided),
+                (TaskId::new(12), Why::Unjudged),
+                (TaskId::new(13), Why::Unjudged),
+            ]
+        );
+        assert_eq!(
+            "required_outside".parse::<UnsettledReason>().unwrap(),
+            Why::RequiredOutside
+        );
     }
 
     /// ADR-t1504-2 decision 9: only a required judgement after an achieved

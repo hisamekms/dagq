@@ -66,6 +66,25 @@ fn targets() -> String {
     )
 }
 
+/// Whether a planner of the runtime's is still to be opened for draft
+/// `task` ([`targets`]) or one is open for it.
+pub(super) fn draft_planned(conn: &Connection, task: TaskId) -> Result<bool> {
+    Ok(conn.query_row(
+        &format!(
+            "SELECT EXISTS({} AND t.id=?1) OR EXISTS(SELECT 1 FROM tasks t
+                 JOIN planners p ON p.closed_at IS NULL
+                 AND (p.draft_task_id=t.id
+                      OR (t.proposal_id IS NOT NULL AND p.proposal_id=t.proposal_id)
+                      OR EXISTS(SELECT 1 FROM draft_bundle_members m
+                                WHERE m.planner_id=p.id AND m.task_id=t.id))
+                 WHERE t.id=?1 AND t.status='draft')",
+            targets()
+        ),
+        [task],
+        |r| r.get(0),
+    )?)
+}
+
 impl SqliteQueue {
     pub fn register_follow_ups(
         &mut self,

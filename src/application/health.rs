@@ -1377,7 +1377,8 @@ pub fn attention(
     // A goal whose goal review failed waits for a person until its tasks
     // change or `goal review ID` (ADR-0047 decision 43); it is shown on the
     // goal's first task.
-    for hold in queue.goal_review_holds()? {
+    let goal_holds = queue.goal_review_holds()?;
+    for hold in &goal_holds {
         if held(HoldJob::GoalReview(hold.goal_id)) {
             continue;
         }
@@ -1396,6 +1397,33 @@ pub fn attention(
             ))),
             last_error_code: Some(ReasonCode::JobFailed),
             next: AttentionNext::GoalReviewByHand,
+        });
+    }
+    // A goal whose own work is done but whose goal review waits for the
+    // membership of its follow-ups nothing else shows waits for a planning
+    // request the inbox records (task 1660, ADR-t1504-2 decision 8); it is
+    // shown on the first of those follow-ups.
+    for goal in queue.goal_follow_ups()? {
+        if goal_holds.iter().any(|hold| hold.goal_id == goal.goal) {
+            continue;
+        }
+        let unsettled = crate::domain::follow_up::unshown_unsettled(&goal);
+        let Some(&(anchor, _)) = unsettled.first() else {
+            continue;
+        };
+        attention.push(Attention {
+            run_id: None,
+            task_id: Some(anchor),
+            pid: None,
+            ask_id: None,
+            reason_category: None,
+            status: "open".into(),
+            kind: crate::domain::follow_up::GOAL_FOLLOW_UPS_UNSETTLED.into(),
+            last_error: Some(truncate_reason(
+                &crate::domain::follow_up::unsettled_summary(goal.goal, &unsettled),
+            )),
+            last_error_code: None,
+            next: AttentionNext::DecideFollowUps { goal_id: goal.goal },
         });
     }
     for ask in asks.iter().cloned() {

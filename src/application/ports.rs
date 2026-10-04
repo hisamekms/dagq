@@ -3075,6 +3075,10 @@ pub trait GoalReviewStore {
     fn applies_correction_answer(&self, ask: &Ask) -> Result<bool>;
     /// The goals whose review failed, held for a person.
     fn goal_review_holds(&self) -> Result<Vec<GoalReviewHold>>;
+    /// Each open goal with a follow-up whose source it is that has no
+    /// settled membership, with its tasks and those follow-ups and what
+    /// already shows or handles each (task 1660), in goal order.
+    fn goal_follow_ups(&self) -> Result<Vec<crate::domain::follow_up::GoalFollowUps>>;
     /// `goal review ID`: let the supervisor review the open goal again
     /// although its tasks did not change (`goal_review_rearmed`).
     fn rearm_goal_review(&mut self, goal: GoalId) -> Result<serde_json::Value>;

@@ -53,7 +53,7 @@ Report each in a short list (task, status, `next`, gist of `last_error`); act wi
 - `read the answer of ask <id> and close it` (`ask_answered`), `send the answer of ask <id> to the worker and close it`: carry it out (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/session.md`), then `"$DAGQ" ask close <id>`.
 - `triage by hand` (`triage_failed`), `recover by hand` (`recovery_failed`): `dagq-recover` section 4.
 - `goal review by hand` (`goal_review_failed`): on the person's word, `goal review ID` reruns it, or the person closes the goal (`dagq-recover` section 8).
-- `request a plan for the draft`, `request a plan for the finding`, `request a plan for the waiting tasks`: a request on the person's word (`reference/status.md`).
+- `request a plan for …` (the draft, the finding, the waiting tasks, the follow-ups of goal G): a request on the person's word (`reference/status.md`).
 - A new plan the person asks for: `"$DAGQ" request add --text '<the person's words>'` records it and a runtime planner takes it (`reference/requests.md`); `report the request's proposal`, `rephrase or drop the request` and a `planner_question` on a request: the same file. More words for an open runtime planner: `"$DAGQ" planner request <planner id> --text '<the person's words>'`, its next turn.
 - `check the planner`, `plan review by hand`: `dagq-recover` section 8.
 - `report the update` (`update_installed`), `report the review`, `check the failed review`: tell the person (`reference/watch.md`).
