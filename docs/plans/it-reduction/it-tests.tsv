@@ -1,0 +1,1193 @@
+module	test	class	secs	reason
+actor_model	jobs_with_a_role_table_are_given_its_model_and_effort	B	5.33	config reaches spawned job args and span
+actor_model	jobs_without_a_role_table_start_as_before	R	5.23	default no-role path; role->model mapping is pure
+background_logs	a_background_runs_log_is_followed_and_read_after_it_ended	B	8.20	run log --follow over a live wrapper process and file
+background_logs	a_closed_background_planners_log_is_read_by_its_id	B	6.92	planner log CLI over background planner's session.log
+broker_podman	the_broker_runs_in_its_container_and_answers_on_loopback_only	B	0.00	real container, mounts, loopback health
+broker_podman	the_machine_is_made_ready_idempotently_from_each_state	B	0.00	real podman machine init/start
+cli_actor	an_unknown_role_fails_closed_and_changes_nothing	B	1.98	DAGQ_ROLE env parsing, exit code and no write; CLI contract representative
+cli_actor	every_event_records_its_actor	B	1.60	actor columns persisted and printed by events/show; one rep
+cli_actor	every_headless_job_may_only_read_the_queue	D	2.62	role x command allow matrix; domain::authorization decision
+cli_actor	the_records_keep_the_writer_they_had	D	0.64	writer name mapping per role; pure mapping
+cli_areas	stats_and_kpi_split_the_landed_runs_by_the_areas_of_their_commit	B	3.13	areas read from real Git commit files and main checkout dagq.toml
+cli_authorization	a_planner_withdraws_only_its_own_proposal	D	0.21	ownership decision
+cli_authorization	a_refusal_does_not_depend_on_the_task_existing	D	0.09	order of checks; pure decision
+cli_authorization	a_refused_watch_with_no_queue_is_refused_unrecorded	B	0.04	no queue file: refused without creating/recording
+cli_authorization	ended_run_verify_edit_is_delegated_only_to_user_and_inbox	D	0.24	role/capability decision via CLI
+cli_authorization	the_inbox_readies_at_a_persons_word_and_the_record_tells_it_from_the_user	D	0.14	actor attribution decision
+cli_authorization	the_planner_a_revise_was_sent_to_may_withdraw_it	D	0.13	ownership decision
+cli_authorization	the_planner_keeps_its_authority_on_tasks_that_have_not_started	D	0.37	authority by task status; pure decision
+cli_authorization	the_planner_may_not_ready_a_task_or_touch_one_that_started	D	0.24	authority by status/command; pure
+cli_authorization	workers_jobs_and_the_observer_change_no_plan_and_each_refusal_is_recorded	B	1.07	representative: refusal exit code + authorization_denied row
+cli_authorization	workers_wrappers_and_the_integrator_read_but_do_not_watch_or_export	D	4.54	capability matrix over many commands (4.5s)
+cli_broker	a_repository_queue_walks_the_steps_and_records_the_failure	B	0.66	stub podman process steps and queue record
+cli_broker	audit_reads_the_day_files_as_any_role_without_the_queue	B	0.07	reads day files from filesystem without queue
+cli_broker	logs_only_read_and_fail_with_a_code_without_podman_or_a_machine	R	0.14	same missing-podman boundary; error code mapping
+cli_broker	without_podman_status_reports_it_and_start_fails_with_its_code	B	0.22	missing executable, CLI error code/exit
+cli_changes	change_is_added_shown_listed_searched_and_edited_without_a_set	B	0.29	representative CLI argv/output contract for --change
+cli_changes	stats_and_kpi_split_the_landed_runs_by_their_change	D	2.06	grouping landed runs by change is aggregation logic
+cli_changes	the_set_of_changes_of_dagq_toml_holds_add_edit_lint_and_submit	D	0.64	label-in-set validation is a pure check
+cli_dialogue	a_recommendation_reaches_the_ask_status_and_stats	D	0.42	recommendation validation and propagation into views
+cli_dialogue	a_send_back_with_a_reason_matches_the_recommendation_in_stats	D	0.16	answer text parse to reasoned_option
+cli_dialogue	a_worker_asks_on_its_own_run_and_task_only	B	0.19	representative CLI role denial: exit, error JSON, event
+cli_dialogue	a_worker_question_records_its_topics_primary_first	D	0.21	topic validation and ordering
+cli_dialogue	the_observer_still_records_findings_and_raises_blocked_asks	R	0.24	observer CLI path; decision is role permissions
+cli_dialogue	the_user_and_the_inbox_answer_and_the_record_tells_them_apart	D	0.22	answer_authority/approval mapping per answerer
+cli_dialogue	workers_jobs_the_observer_and_the_planner_neither_answer_nor_close	D	0.40	authorization matrix loop over roles x commands
+cli_forecast	forecast_keeps_runs_under_review_revise_and_resume_in_flight	D	0.27	which run states count as in flight is a pure mapping
+cli_forecast	forecast_prints_the_open_tasks_and_goals_with_what_it_assumed	B	0.29	CLI output contract representative for forecast
+cli_goals	a_canceled_member_does_not_make_its_goal_wait	D	0.13	cycle/wait judgment ignoring canceled
+cli_goals	a_dependency_on_an_abandoned_goal_is_refused	D	0.16	refusal by goal verdict + wording
+cli_goals	a_task_waits_for_its_goal_dependency_until_the_goal_is_achieved	D	0.50	candidate readiness by goal state
+cli_goals	draft_goal_tasks_wait_for_goal_ready	D	0.23	candidate filter by goal status
+cli_goals	goal_dependencies_on_the_own_goal_or_through_membership_are_refused	D	0.27	cycle detection decision
+cli_goals	goals_group_tasks_and_report_counts_by_status	B	0.38	representative CLI goal add/list/show over SQLite
+cli_goals	graph_reports_unfinished_dependencies_releases_and_the_critical_chain	D	0.25	critical chain computation; pure graph fn
+cli_goals	ready_tasks_of_a_draft_goal_do_not_raise_idle_slots	D	0.19	idle slot alert computation
+cli_graph	graph_of_a_goal_draws_the_prerequisites_outside_it	D	0.29	graph construction from tasks is pure
+cli_graph	graph_prints_the_near_term_diagram_as_d2_or_svg	B	2.53	stub d2 on PATH, process spawn and output
+cli_graph	report_carries_the_near_term_diagram_or_why_not	R	2.03	same d2/PATH boundary; reason text is decision
+cli_install_release	install_release_installs_with_cargo_and_puts_the_binary_in_place	B	3.71	install spawns cargo and places binary on filesystem
+cli_kpi	a_target_bound_by_kind_is_refused_with_its_replacement	D	0.05	config validation wording
+cli_kpi	kpi_and_stats_group_the_runs_by_any_label	D	0.55	grouping by label; kind refusal wording
+cli_kpi	kpi_counts_the_drafts_registered_per_landing	D	0.19	aggregation of drafts per landing
+cli_kpi	kpi_cross_reaches_periods_and_compare_without_replacing_single_axes	D	0.39	cross stratum aggregation
+cli_kpi	kpi_reads_the_queue_the_host_settings_and_the_marks	B	0.53	representative kpi: queue + host.toml + marks via CLI
+cli_kpi	kpi_summarizes_the_host_load_of_each_span	D	0.25	span cut and summary of host samples
+cli_kpi	report_writes_the_html_and_json_and_returns_their_paths	B	0.35	files written to report dir
+cli_kpi	the_throughput_review_jobs_reach_stats_and_kpi_per_mode	D	0.24	aggregation counts/rates per mode
+cli_kpi	the_worker_question_topics_reach_stats_and_kpi	D	0.14	aggregation per topic
+cli_operations	a_worker_runs_and_records_the_session_of_its_own_run_only	D	0.18	own-run check decision
+cli_operations	the_user_the_inbox_and_the_planner_keep_their_operations	D	0.41	allow matrix; authorizer pass-through
+cli_operations	workers_jobs_and_the_observer_land_recover_and_run_the_service_not_at_all	B	0.96	representative refusal JSON/exit for runtime ops
+cli_planner_request	a_follow_up_reaches_a_live_headless_planner_as_its_next_turn_with_its_actor	B	0.15	CLI delivers request into a live headless planner turn
+cli_planner_request	a_headless_planner_has_no_screen_and_takes_no_keys_or_answer	G	0.13	screen/keys commands disappear with cmux planner paths
+cli_planner_request	an_interactive_closed_lost_exited_exiting_or_walled_planner_is_refused_with_the_reason	G	0.31	interactive planner refusal path; goal 92 removes interactive planners
+cli_planner_request	only_the_inbox_and_a_person_hand_a_request_and_other_roles_are_recorded	D	0.21	role authorization decision per actor
+cli_proposals	lint_reports_violations_by_code_and_passes_a_sound_plan	D	0.29	lint rules are pure checks over plan values
+cli_proposals	proposal_withdraw_releases_the_members_for_another_proposal	D	0.29	membership release is a state transition
+cli_proposals	submit_bundles_drafts_into_a_proposal_that_plan_review_or_a_bypass_readies	B	0.49	CLI+SQLite representative for proposal submit
+cli_read	events_and_watch_read_past_a_cursor	B	1.24	cursor reads, watch blocking with real interval
+cli_read	events_full_and_filters_narrow_what_they_read	R	0.31	event filters; SQL read covered by cursor test
+cli_read	past_ask_request_taken_events_are_still_read	R	0.17	legacy event read; reading covered elsewhere
+cli_read	related_prints_candidates_with_their_clues	D	0.20	candidate scoring and clues
+cli_read	search_prints_hits_with_excerpts_and_checks_its_filters	B	0.25	SQLite FTS5 trigram query behavior
+cli_read	show_goal_show_and_doctor_are_compact_unless_full	D	0.46	truncation/compact rendering
+cli_read	status_and_doctor_show_every_actor_on_the_host_advisory	D	0.16	actor list rendering
+cli_read	status_and_doctor_show_the_codex_worker_confined	D	0.31	provider enforcement mapping
+cli_read	status_watch_and_show_read_kinds_a_newer_binary_wrote	B	0.37	unknown kinds in real DB rows read by older binary
+cli_read	timeline_and_stats_show_the_work_breakdown	D	0.45	work breakdown aggregation
+cli_read	timeline_names_the_long_gap_before_the_receipt	D	0.15	gap classification from timestamps
+cli_request_words	an_unreadable_file_words_not_utf8_and_empty_words_record_nothing	B	0.18	unreadable file, non-UTF8 stdin errors
+cli_request_words	two_of_the_inputs_or_none_are_refused	R	0.12	argv conflict exit code; decision of input choice
+cli_request_words	words_from_a_file_or_stdin_are_recorded_as_text_gives_them_and_stay	B	0.12	file/stdin input to CLI
+cli_roles	ask_answer_asks_and_close_through_the_cli	B	0.89	representative ask lifecycle via CLI + notification
+cli_roles	findings_are_recorded_once_per_problem_and_listed_by_impact	D	0.58	finding dedupe and impact ordering
+cli_roles	notes_are_observations_read_by_notes_show_and_goal_show	R	0.24	notes CLI; filters are decisions
+cli_roles	observer_may_record_findings_and_ask_but_not_change_queue_state	D	1.01	authorization matrix for observer
+cli_roles	plan_is_refused_with_the_way_to_ask_the_inbox_and_opens_nothing	D	0.12	refusal wording per role
+cli_roles	reviewer_may_only_read_the_queue	D	0.47	authorization matrix for reviewer
+cli_roles	stats_times_the_open_asks_up_to_the_window_end	D	0.25	ask timing aggregation to window end
+cli_screen	a_headless_run_has_no_screen_and_takes_nothing	G	0.32	run screen command goes with interactive runs
+cli_screen	a_planner_a_worker_and_the_jobs_are_refused_and_recorded	G	0.44	auth of screen commands being removed
+cli_screen	a_planner_question_is_answered_into_its_planner_once	G	1.53	answer typed into planner cmux screen
+cli_screen	a_planners_screen_is_read_and_sent_keys_by_its_id	G	0.23	planner cmux screen/send
+cli_screen	a_runs_screen_is_read_by_run_or_task_id_up_to_the_limit_and_recorded	G	0.15	run screen of interactive run via cmux
+cli_screen	a_send_types_only_keys_of_the_set_or_an_answer_of_the_run	G	1.67	run send keystrokes into cmux workspace
+cli_session_event	close_with_a_production_sized_transcript	B	0.09	SessionEnd hook latency on real transcript file
+cli_stats	a_verification_failure_onto_a_landing_that_passed_it_names_no_one	D	0.02	pure attribution rule
+cli_stats	at_most_fifty_runs_unless_full_and_since_pages_forward	D	0.05	pure paging limit
+cli_stats	backend_failures_are_counted_per_window_with_the_highest_load	D	0.03	pure aggregation, no boundary
+cli_stats	cli_stats_reads_the_queue_and_since_returns_only_new_runs	B	0.34	representative: stats CLI over real queue DB
+cli_stats	cli_stats_summarizes_the_host_load_of_its_window	R	0.10	host/ files read; summary math is the value
+cli_stats	land_phases_split_verify_by_command	D	0.02	pure stats() over built events
+cli_stats	landing_utilization_counts_every_attempt_over_the_window	D	0.02	pure utilization calc
+cli_stats	marks_are_recorded_retracted_and_derived_from_the_claims	B	0.27	mark/marks CLI write+read on SQLite
+cli_stats	runs_goals_and_alerts_come_from_the_event_sequence	D	0.03	pure stats() over built events
+cli_stats	timestamps_parse_the_queue_format	D	0.01	pure stats fn in tests/it; belongs in src unit tests
+cli_stats	versions_loads_and_verification_times_come_from_the_events	D	0.02	pure stats() over built events, no boundary
+cli_stats	work_over_the_goal_median_is_an_alert	D	0.02	pure alert threshold
+cli_status_runs	doctor_lists_the_same_runs_and_recoverable_follows_recover	D	0.92	recoverable classification per run state
+cli_status_runs	status_lists_the_held_and_the_latest_runs_with_their_phase_and_slot	B	0.69	representative status output over real leases/runs
+cli_tasks	add_evidence_is_stored_and_shown	R	0.12	field round-trip via CLI already covered
+cli_tasks	add_paths_is_stored_shown_and_replaced	R	0.17	field round-trip via CLI already covered
+cli_tasks	cancel_duplicate_of_is_recorded_shown_listed_and_counted	R	0.42	field round-trip via CLI; counting is decision
+cli_tasks	cli_persists_across_processes_and_reports_dependency_errors_as_json	B	0.42	cross-process persistence and JSON error contract
+cli_tasks	edit_replaces_fields_of_a_draft_task_only	D	0.24	draft-only edit rule is a state decision
+cli_tasks	list_options_filter_page_and_expand_tasks	R	0.22	CLI argv/output covered; filter/page logic is decision
+cli_tasks	priority_is_named_changed_while_editable_and_orders_candidates	D	0.30	editability and candidate ordering are decisions
+cli_tasks	reads_do_not_create_a_queue_and_unknown_tasks_fail	B	0.52	filesystem effect: read commands create no DB file
+cli_tasks	the_task_kind_is_gone_from_add_edit_show_and_list	R	0.11	argv rejection of removed flag; same CLI boundary
+cli_tasks	the_worker_provider_and_mode_are_added_shown_and_edited	R	0.29	field round-trip via CLI already covered
+cli_version	a_timed_out_wait_runs_the_cleanups_before_the_exit	B	0.84	process exit with cleanups
+cli_version	a_wait_past_its_limit_fails_with_the_test_and_the_condition	B	0.53	test-binary process exit behaviour
+cli_version	auto_update_installs_each_runtime_landing_and_puts_a_broken_build_back	B	24.29	build/install/exec across processes and git
+cli_version	deadline_cleanup_probe	B	0.00	subprocess probe for cleanup ordering
+cli_version	deadline_probe	B	0.00	subprocess probe for test harness deadline
+cli_version	install_hands_a_running_supervisor_over_under_its_pid_and_rolls_back	B	10.12	exec handoff under same pid, file rename
+cli_version	migrate_is_explicit_and_older_binaries_keep_working_within_the_floor	B	4.83	real DB schema migration across binaries
+cli_version	version_is_the_build_identifier	B	0.17	build-time identifier from git/build env
+cli_version	version_works_outside_a_repository_and_without_a_queue	B	0.03	process run outside repo, exit code
+draft_bundles	a_question_about_any_draft_of_the_bundle_goes_to_its_planner	G	1.79	answer typed into planner workspace (interactive)
+draft_bundles	one_runs_follow_ups_are_one_bundle_for_one_planner	B	1.28	representative planner launch with bundled prompt
+draft_bundles	what_a_bundle_leaves_undecided_makes_the_next_and_the_outcomes_are_read	D	5.76	next bundle / third-planner exhaustion is decision
+e2e_gate_podman	a_busy_machine_lock_skips_broker_and_records_why	B	30.28	real flock with fake podman
+finding_planner	a_marked_finding_gets_one_planner_whose_proposal_plan_review_readies	B	3.11	supervisor wiring finding->planner->plan review representative
+finding_planner	a_planner_question_about_a_finding_is_typed_to_its_planner_and_undecided_planners_end_in_the_inbox	G	6.50	types answer into planner cmux session
+finding_planner	a_propose_answer_marks_the_finding_and_a_planner_takes_it	D	0.69	answer->action mapping
+finding_planner	improvement_planners_wait_at_the_limit_and_their_tasks_are_normal_at_most	D	2.85	limit count and priority cap decision
+follow_up_membership	a_correction_after_achieved_keeps_the_history_and_asks_a_person	D	0.09	correction -> ask decision
+follow_up_membership	a_correction_by_an_actor_without_the_authority_is_refused	R	0.14	CLI refusal already covered by cli_records test
+follow_up_membership	a_failed_review_is_taken_again_when_a_judgement_or_the_acceptance_changes	D	0.11	retake decision
+follow_up_membership	a_reopen_closes_the_goals_other_questions_and_keeps_a_follow_up_it_cannot_move	D	0.09	reopen answer effects decision
+follow_up_membership	a_required_follow_up_holds_its_goal_until_it_ends	D	0.08	hold decision
+follow_up_membership	a_review_whose_follow_ups_or_acceptance_changed_does_not_close_the_goal	D	0.17	fingerprint staleness, parametric loop
+follow_up_membership	a_review_whose_input_changed_and_settled_again_is_not_applied	D	0.32	fingerprint staleness, parametric loop
+follow_up_membership	cli_records_judgements_and_denies_workers_and_jobs	B	0.20	CLI judge command + refusal representative
+follow_up_membership	each_answer_to_a_correction_is_applied_and_keeps_the_history	D	0.23	answer -> action mapping loop
+follow_up_membership	judgement_moves_membership_atomically_and_show_keeps_version_and_origin	B	0.07	atomic SQLite transaction for membership move
+follow_up_membership	membership_changes_never_adopt_missing_closed_unknown_or_deep_follow_ups	D	0.10	adoption eligibility by state/depth loop
+follow_up_membership	migrated_histories_preserve_adopts_and_require_them_only_for_unsafe_registration_facts	B	0.84	real migration on legacy DB
+follow_up_membership	out_of_scope_follow_ups_let_the_goal_close_and_unjudged_or_stale_ones_do_not	D	0.07	goal closable judgment
+follow_up_membership	submit_bypass_and_lint_need_a_current_membership_judgement	D	0.07	lint/submit refusal decision
+goal_review	a_failed_goal_review_waits_for_a_person_until_rearmed	D	2.32	state transition after failure
+goal_review	a_fourth_gaps_in_a_row_asks_a_person	D	3.90	count limit
+goal_review	a_goal_review_records_its_launch_and_session_and_takes_its_role_table	D	1.76	model/effort from role table is mapping
+goal_review	a_goal_review_verdict_is_applied_at_its_jobs_request_and_a_broken_one_fails_closed	B	4.69	job process→supervisor request wiring; parse part is D
+goal_review	abandoned_and_keep_open_answers_are_applied	D	3.18	answer→action mapping
+goal_review	an_achieved_goal_is_closed_with_its_evidence	B	1.44	representative supervisor + stub goal review job
+goal_review	an_answer_to_a_goal_closed_meanwhile_is_closed_with_ask_closed	D	0.85	stale answer handling decision
+goal_review	an_ask_waits_for_a_person_whose_answer_is_applied	D	1.69	answer→action mapping
+goal_review	gaps_become_drafts_of_the_open_goal_and_a_review_waits_for_them	D	2.51	verdict→drafts and wait judgment
+goal_review	handoff_closes_review_rows_and_spans_without_candidates	B	0.82	SQLite rows left by prepare_handoff closed on restart
+goal_review	handoff_reviews_candidates_again_without_counting_interrupted_attempts	R	1.03	same handoff rows boundary; counting is decision
+goal_review	only_goals_whose_tasks_ended_are_reviewed	D	0.83	candidate selection
+goal_review	the_supervisor_applies_a_reopen_answer_to_a_correction	D	0.88	answer→reopen mapping
+goal_review_codex	a_codex_that_cannot_log_in_moves_the_goal_review_to_claude	D	1.12	provider fallback decision
+goal_review_codex	a_goal_review_on_codex_runs_read_only_and_records_its_thread_and_model	B	1.35	codex argv/env, JSONL+rollout parsing representative
+goal_review_codex	a_goal_review_runs_on_codex_while_claudes_hold_ask_is_open	D	0.80	provider choice with open ask
+goal_review_codex	a_goal_review_waits_while_both_providers_are_held	D	0.75	hold decision
+goal_review_codex	a_timed_out_codex_goal_review_stops_a_command_in_another_process_group	B	3.51	process group kill on timeout
+goal_review_codex	no_claude_goal_review_runs_on_codex_and_never_falls_back	D	0.95	no-fallback decision
+goal_review_codex	without_codex_the_goal_review_starts_on_claude	D	0.42	provider choice when missing
+inbox_nudge	a_change_of_the_watcher_is_recorded_once_across_supervisors	B	0.05	cross-supervisor once-only record
+inbox_nudge	a_nudge_of_an_absence_is_claimed_once_across_supervisors	B	0.05	cross-supervisor claim on SQLite
+inbox_nudge	an_idle_inbox_is_nudged_twice_then_the_person_is_notified_then_nothing	B	7.85	representative cmux send/notify wiring (inbox stays)
+inbox_nudge	an_inbox_at_work_or_with_a_line_typed_is_not_nudged	D	6.07	screen-idle judgment from text
+inbox_nudge	failed_submissions_are_recorded_once_and_advance_to_the_next_nudge	D	6.67	nudge step progression decision
+inbox_nudge	nothing_is_typed_with_a_watcher_without_an_ask_or_without_the_workspace	D	4.97	precondition decision
+inbox_nudge	the_watchers_changes_are_recorded_once_and_give_how_long_an_ask_waited_to_be_seen	D	3.49	change detection and kpi derivation
+inbox_watch_wake	every_notice_past_the_cursor_comes_back_before_or_after_what_woke_it	D	1.95	cursor selection of notices is pure
+inbox_watch_wake	the_daily_and_weekly_reviews_and_a_failed_hourly_one_wake_the_inbox	D	0.25	which event kinds wake is a classification
+inbox_watch_wake	the_inbox_watch_sleeps_through_notices_and_brings_them_with_the_next_ask	B	2.20	watch process blocking/wakeup representative
+inbox_watch_wake	the_supervisors_health_wakes_the_inbox_with_every_notice_held	B	3.49	dead supervisor process detected by watch
+inbox_watcher	a_running_watch_with_a_stale_heartbeat_is_absent	D	0.12	heartbeat staleness time judgment
+inbox_watcher	a_watch_killed_without_writing_its_end_is_not_watching_before_its_heartbeat_goes_stale	D	0.16	liveness judgment from heartbeat age
+inbox_watcher	a_watch_until_attention_outlasts_empty_reads_and_returns_only_on_an_attention	B	4.11	watch CLI blocking loop over real queue
+inbox_watcher	a_watch_until_attention_refuses_a_timeout_and_a_queue_it_cannot_open	B	0.05	CLI argv refusal and exit code
+inbox_watcher	status_and_doctor_show_the_watcher_alive_while_it_watches_and_absent_after_the_grace	B	1.20	live watch process seen by status/doctor
+installed_plugin	a_restart_by_the_runtime_does_not_check_the_installed_plugin	R	0.54	env DAGQ_UP_RESTART branch; up boundary covered
+installed_plugin	plan_refuses_without_asking_for_the_installed_plugin	D	0.11	refusal wording of abolished plan
+installed_plugin	plugin_state_reads_the_json_plugin_list	D	0.01	already pure fn; belongs in src unit test
+installed_plugin	plugin_version_reads_the_enabled_entry_of_the_plugin_list	D	0.01	already pure fn
+installed_plugin	the_installed_plugin_is_read_and_updated_through_claude	B	0.26	spawns claude stub, cwd and failure output
+installed_plugin	up_with_a_plugin_dir_does_not_check_the_installed_plugin	R	0.11	same up boundary; flag branch is decision
+installed_plugin	up_without_a_plugin_dir_needs_the_installed_plugin	B	0.48	up CLI with stub claude, exit and hint
+landing_branch	a_branch_named_in_dagq_toml_is_where_runs_land	R	2.43	branch source choice is decision; landing covered
+landing_branch	a_landing_that_renames_the_branch_still_lands_and_pushes_on_its_branch	B	1.93	checkout rewrite during real landing and push
+landing_branch	a_master_repository_without_origin_lands_on_master	B	2.67	real git default-branch resolution and landing
+landing_branch	a_running_supervisor_follows_each_change_of_the_landing_branch	D	0.57	re-resolve/hold/resume decisions over many cases
+landing_branch	no_push_records_the_configured_remote	D	4.04	which remote is recorded is a decision
+landing_branch	up_and_doctor_check_the_configured_push_remote	D	0.30	remote-name validation/push=false rules
+landing_branch	up_checks_the_landing_branch_on_master	B	0.26	up CLI refusal and output contract
+language	nothing_set_adds_no_instruction	D	1.94	language resolution unset
+language	the_repositorys_language_is_over_the_users	B	3.38	representative: config files to run prompt.txt via supervise
+language	the_users_language_is_in_every_prompt	D	1.97	language resolution user
+lifecycle_cmux	detached_command_drops_every_inherited_cmux_variable_but_the_password	B	0.02	env of spawned detached command
+lifecycle_cmux	the_cmux_adapter_marks_a_workspace_and_unpins_it_before_closing	G	0.33	worker workspace look/pin/close
+lifecycle_cmux	the_cmux_adapter_notifies_with_title_body_and_an_optional_workspace	B	0.30	real cmux adapter argv (notify stays for inbox)
+lifecycle_cmux	the_cmux_adapter_pings_orphaned_with_the_detached_environment	B	1.60	process parent/env via launchd-orphaned spawn
+lifecycle_cmux	the_cmux_adapter_sends_one_line_and_names_the_resume_workspace	G	0.68	cmux send + worker resume workspace
+lifecycle_down	down_force_kills_after_the_unload_and_drops_the_registration	B	0.07	SIGKILL of real process
+lifecycle_down	down_force_kills_an_in_cmux_supervisor_and_closes_or_reports_its_workspace	G	0.07	in-cmux supervisor mode
+lifecycle_down	down_interrupts_an_in_cmux_supervisor_and_closes_its_workspace_once_it_is_gone	G	0.28	in-cmux supervisor mode
+lifecycle_down	down_prunes_reused_pids_without_signalling_them	B	0.10	real pid reuse/signal safety
+lifecycle_down	down_reports_not_running_without_a_live_registration_and_still_unloads_the_agent	R	0.07	launchd unload covered; message is decision
+lifecycle_down	down_signals_a_silent_supervisor_when_process_listing_fails	D	0.05	fallback choice when listing fails
+lifecycle_down	down_stops_a_launchd_and_an_in_cmux_supervisor_in_one_call	G	0.06	in-cmux supervisor mode
+lifecycle_down	down_unloads_the_agent_and_returns_while_the_supervisor_drains	B	0.08	representative launchd unload + drain
+lifecycle_down	down_wait_returns_stopped_once_the_registration_is_gone_or_the_process_died	B	0.31	waits on real process death
+lifecycle_handoff_stop	a_supervisor_still_asked_that_stops_fails_as_stopping	D	0.05	stopping vs timeout outcome decision
+lifecycle_handoff_stop	a_supervisor_that_stops_and_deregisters_between_the_reads_fails_as_stopping	B	0.05	race between DB reads of stops/registrations
+lifecycle_in_cmux	up_in_cmux_does_not_mistake_a_silent_supervisor_for_the_one_it_started	G	0.12	in-cmux mode removed
+lifecycle_in_cmux	up_in_cmux_forgets_a_supervisor_workspace_that_was_closed	G	0.14	in-cmux mode removed
+lifecycle_in_cmux	up_in_cmux_refuses_to_open_a_second_supervisor_workspace	G	0.13	in-cmux mode removed
+lifecycle_in_cmux	up_in_cmux_starts_the_supervisor_in_a_workspace_and_leaves_launchd_alone	G	0.24	in-cmux mode removed
+lifecycle_install	a_handoff_looks_again_at_a_supervisor_that_took_it_as_the_wait_ran_out	D	1.54	took-it-at-timeout judgment
+lifecycle_install	a_handoff_waits_through_the_exec_of_a_supervisor_that_took_its_request	B	0.74	exec window race between processes
+lifecycle_install	a_stale_row_of_the_same_pid_is_not_a_successor	D	0.27	successor judgment
+lifecycle_install	install_counts_a_supervisor_that_took_the_handoff_as_the_wait_ran_out	R	0.74	same as looks_again via install
+lifecycle_install	install_drains_only_for_a_breaking_migration_when_allowed	B	0.04	drain, migrate, restart up
+lifecycle_install	install_keeps_the_binary_unless_every_supervisor_failed_the_handoff	B	1.08	two real supervisors, partial handoff
+lifecycle_install	install_migrates_replaces_and_hands_over_and_restores_on_a_failed_handoff	B	0.29	binary replace, migrate, handoff, restore
+lifecycle_install	install_of_a_checkout_replaces_nothing_unless_its_e2e_passes	B	0.05	runs e2e process with timeout
+lifecycle_install	no_claude_policy_survives_install_drain_and_restart_arguments	D	0.03	restart argv construction
+lifecycle_install	the_plugin_only_job_updates_the_plugin_and_nothing_else	D	0.04	job kind → steps
+lifecycle_install	the_release_job_brings_the_plugin_after_the_binary	D	0.36	plugin step ordering/skip decision; claude boundary elsewhere
+lifecycle_install	the_release_job_installs_a_release_like_a_build_and_asks_on_a_failure	B	0.12	cargo install stub and swap
+lifecycle_install	the_release_job_skips_cargo_when_the_binary_is_that_release	D	0.04	version equality → skip
+lifecycle_install	the_update_job_brings_back_a_pid_that_registered_again_and_died	R	0.13	restart boundary covered; successor is decision
+lifecycle_install	the_update_job_brings_back_every_supervisor_when_none_takes_the_handoff	B	0.18	stops hung process, restarts gone ones
+lifecycle_install	the_update_job_brings_back_only_its_supervisor_when_the_install_fails_before_the_handoff	D	0.04	which supervisors to bring back
+lifecycle_install	the_update_job_follows_a_pid_that_registered_again_under_the_new_build	D	0.13	successor row judgment
+lifecycle_install	the_update_job_follows_the_row_registered_after_the_handoff_over_a_stale_one	D	0.13	successor by start time vs handoff time
+lifecycle_install	the_update_job_installs_past_a_supervisor_that_took_the_handoff_as_the_wait_ran_out	R	0.34	same judgment via update job
+lifecycle_install	the_update_job_installs_watches_restores_and_asks	B	0.23	update job swap/watch/restore representative
+lifecycle_install	the_update_job_keeps_the_binary_when_only_some_take_the_handoff	D	0.19	kept vs restore decision
+lifecycle_install	the_update_job_marks_a_supervisor_that_stops_as_stopping	D	0.20	stopping flag in failure payload
+lifecycle_install	the_update_job_names_the_e2e_it_did_not_run_for_want_of_podman	D	0.12	event payload content decision
+lifecycle_install	the_update_job_passes_flaky_and_quarantined_e2e_and_fails_the_rest	D	0.17	flaky/quarantine/expired mark classification
+lifecycle_install	the_update_job_puts_the_client_built_beside_dagq_in_place_with_it	B	0.22	filesystem swap of two binaries
+lifecycle_install	the_update_job_replaces_nothing_unless_the_build_passes_its_e2e	R	0.19	e2e gate covered by install test; ask stage decision
+lifecycle_install	the_update_job_watches_every_supervisor_it_handed_over	B	0.42	multi-supervisor process watch
+lifecycle_install_client	a_client_of_another_build_beside_a_given_binary_is_left_behind	D	0.02	pairing decision
+lifecycle_install_client	a_dagq_that_cannot_be_put_in_place_takes_its_client_back	B	0.02	rollback on real rename failure
+lifecycle_install_client	a_dagq_without_a_client_sets_the_old_client_aside	D	0.02	pairing decision
+lifecycle_install_client	a_failed_check_of_either_binary_replaces_neither	D	0.02	install plan decision on build check
+lifecycle_install_client	a_stale_previous_client_does_not_pair_with_the_previous_dagq	D	0.02	pairing decision across sequence
+lifecycle_install_client	install_puts_dagq_and_its_client_in_place_together_and_rollback_puts_both_back	B	0.02	real renames and .previous on filesystem
+lifecycle_plan	a_new_planner_does_not_take_the_idle_marker_an_old_database_left	G	0.10	interactive planner idle marker
+lifecycle_plan	a_persons_planner_whose_agent_exited_past_the_grace_is_closed	G	0.26	person's interactive planner (abolished)
+lifecycle_plan	a_planner_session_is_judged_alive_and_idle_like_a_worker	G	0.41	interactive planner session wrapper/idle marker
+lifecycle_plan	a_planner_whose_workspace_did_not_open_leaves_a_closed_record	G	0.10	planner cmux workspace failure
+lifecycle_plan	a_planner_workspace_made_although_its_create_failed_is_not_left_open	G	0.16	planner cmux workspace create
+lifecycle_plan	each_planner_opens_a_workspace_of_its_own_and_is_recorded	G	0.23	planner cmux workspace
+lifecycle_plan	the_inbox_prompt_names_the_queue_and_its_one_job	D	0.02	prompt wording is a pure function
+lifecycle_plan	the_records_of_planners_whose_workspace_and_wrapper_are_gone_are_closed	G	0.25	sweep of planner workspaces
+lifecycle_plan	the_runtime_opens_a_planner_for_a_proposal_with_its_reasons	D	0.10	first message content/title for proposal planner
+lifecycle_replace	a_handoff_follows_a_pid_that_registered_again_under_the_new_build	D	0.07	token/pid matching rule
+lifecycle_replace	a_handoff_waits_for_every_supervisor_past_a_failure	D	0.38	wait aggregation rule
+lifecycle_replace	up_applies_compatible_migrations_and_refuses_breaking_ones	B	1.17	real migrations on queue DB
+lifecycle_replace	up_drains_a_supervisor_whose_agent_starts_another_binary	D	0.16	drain vs handoff choice
+lifecycle_replace	up_drains_and_replaces_a_launchd_supervisor_of_another_version	B	0.41	representative drain+replace
+lifecycle_replace	up_drops_the_row_of_a_replaced_supervisor_that_died_without_deregistering	R	0.16	stale row cleanup; in-cmux flavored
+lifecycle_replace	up_finishes_its_steps_when_no_supervisor_takes_the_handoff	D	0.17	step sequencing decision
+lifecycle_replace	up_hands_a_supervisor_of_another_build_over_without_draining_it	B	0.49	representative handoff
+lifecycle_replace	up_in_cmux_refuses_a_leftover_supervisor_workspace_before_draining	G	0.12	in-cmux supervisor workspace
+lifecycle_replace	up_in_cmux_replaces_an_in_cmux_supervisor_of_another_version	G	0.15	in-cmux mode
+lifecycle_replace	up_names_the_supervisors_that_did_not_take_the_handoff	D	0.46	report and step order
+lifecycle_replace	up_no_wait_gives_up_on_a_supervisor_that_does_not_stop	R	0.43	bounded wait; drain boundary covered
+lifecycle_replace	up_no_wait_refuses_to_replace_while_runs_are_in_flight	D	0.26	refuse decision from in-flight runs
+lifecycle_replace	up_no_wait_refuses_while_a_replaced_supervisor_leases_a_run_at_any_stage	D	0.74	lease-stage predicate
+lifecycle_replace	up_proves_the_detached_connection_before_draining_the_old_supervisor	D	0.12	step ordering decision
+lifecycle_replace	up_reports_a_handoff_that_did_not_happen	D	0.45	handoff outcome classification
+lifecycle_replace	up_reuses_a_supervisor_of_this_binary_version	D	0.13	build identifier comparison
+lifecycle_replace	up_terminates_a_replaced_supervisor_that_launchd_did_not_signal	B	0.16	SIGTERM to real process
+lifecycle_up	no_claude_up_needs_no_claude_plugin_or_trust_and_opens_no_inbox	D	0.12	policy → required checks decision
+lifecycle_up	no_claude_up_refuses_to_reuse_a_supervisor_with_another_policy	D	0.18	policy mismatch → refusal decision
+lifecycle_up	up_and_down_record_what_they_did_through_tracing	R	0.18	tracing output; outcome/report is decision
+lifecycle_up	up_colors_labels_and_pins_the_inbox_on_every_up	R	0.25	cmux calls covered by inbox open representative
+lifecycle_up	up_fails_before_writing_the_plist_when_cmux_refuses_the_detached_ping	B	0.17	cmux connection proof for inbox, ordering before plist
+lifecycle_up	up_fails_when_claude_code_has_not_trusted_the_repository	D	0.37	trust config → refusal decision and wording
+lifecycle_up	up_fails_when_the_started_supervisor_never_registers	B	0.24	process start/registration wiring
+lifecycle_up	up_forgets_the_retired_and_the_resident_planner_workspaces_and_opens_only_the_inbox	G	0.19	retired/planner workspace handling
+lifecycle_up	up_from_a_linked_worktree_checks_the_trust_of_the_main_checkout	B	0.17	real git linked worktree resolution
+lifecycle_up	up_opens_the_inbox_with_the_cmux_guardrail_and_status_shows_whether_it_has_it	B	0.23	writes settings file for inbox; inbox cmux stays
+lifecycle_up	up_passes_max_load_to_the_supervisor_only_when_given	D	0.65	flag → argv mapping is pure
+lifecycle_up	up_passes_parallel_and_max_waiting_only_when_given	D	0.45	flag → argv mapping is pure
+lifecycle_up	up_passes_runtime_planners_only_when_given	D	0.44	flag → argv mapping is pure
+lifecycle_up	up_proves_the_connection_with_the_exported_password_and_stores_it_in_the_plist	R	0.14	plist write covered; env → plist mapping is decision
+lifecycle_up	up_prunes_dead_registrations_and_keeps_live_ones_and_leases	B	0.30	pid liveness of real processes
+lifecycle_up	up_prunes_rows_whose_pid_is_dead_or_taken_by_another_process	R	0.23	pid liveness covered; rest is row decision
+lifecycle_up	up_refuses_a_broker_mode_without_podman_on_its_path	D	0.58	config mode → requirement decision
+lifecycle_up	up_refuses_a_run_env_program_its_path_does_not_find	D	0.36	precondition refusal; PATH lookup incidental
+lifecycle_up	up_refuses_a_wrong_language_and_gives_the_inbox_a_right_one	D	0.21	config validation and prompt wording
+lifecycle_up	up_reopens_a_closed_inbox_and_down_leaves_the_sessions_open	B	0.22	inbox cmux workspace lifecycle and down
+lifecycle_up	up_reports_runs_that_wait_for_a_person_or_the_supervisor	D	0.28	report content from run states
+lifecycle_up	up_requires_cmux_claude_and_an_initialized_queue	D	0.16	precondition checks and error wording
+lifecycle_up	up_skips_the_inbox_inside_its_own_session	D	0.38	env role → skip decision
+lifecycle_up	up_starts_the_agent_and_the_sessions_once_and_reuses_them_after	B	0.24	launchd plist, supervisor start, inbox open representative
+lifecycle_up	up_stores_the_exported_config_home_in_the_plist	R	0.14	plist write covered; env mapping is decision
+lifecycle_up	up_warns_and_goes_on_when_cmux_refuses_the_look	D	0.15	refusal → warning decision
+lifecycle_up	up_warns_and_goes_on_when_the_workspace_group_cannot_be_made	D	0.13	cmux failure → warn-and-continue decision
+location	a_repository_queue_bound_elsewhere_is_refused_by_every_command	B	0.79	binding in DB enforced across CLI commands
+location	another_repository_gets_its_own_queue_and_outside_a_repository_fails	R	1.08	git resolution covered; outside-repo error
+location	data_home_falls_back_to_home_when_xdg_data_home_is_unset_or_relative	D	0.60	env → path resolution pure
+location	db_flag_overrides_the_repository_queue_and_stays_unbound	D	0.45	flag precedence
+location	every_worktree_of_a_repository_shares_one_queue_under_the_data_home	B	1.07	real git worktrees, common dir
+location	move_the_queue_directory_then_rebind	R	1.02	same move/rebind boundary, other order
+location	rebind_binds_an_unbound_db_queue_to_the_repo_flag	D	0.45	binding decision
+location	rebind_records_what_it_did_as_json_lines_in_the_log_dir	B	0.45	log file in logs/ and stderr
+location	rebind_with_db_then_move_the_queue_directory	B	0.85	filesystem move and rebind
+main_checkout	a_bare_repository_stops_up_supervise_integrate_and_doctor	B	0.47	bare repo + CLI exit contracts
+main_checkout	a_separate_git_dir_repository_reads_only_its_main_worktree	B	0.34	separate git dir behavior of git
+main_checkout	the_parent_of_a_dot_git_is_the_main_checkout_from_anywhere	B	0.23	real git worktree layout
+main_checkout	up_in_a_separate_git_dir_repository_trusts_the_main_worktree	R	0.35	same resolution via up
+plan_review	a_concern_asks_the_inbox_and_the_supervisor_applies_the_answers	D	3.47	verdict→ask, answer→action
+plan_review	a_duplicate_plan_review_cancels_is_recorded_as_cancel_duplicate_of_does	D	1.19	verdict → event mapping
+plan_review	a_failed_plan_review_waits_for_a_person_and_is_not_retried	D	3.46	failure → no retry decision
+plan_review	a_job_failing_after_an_edit_of_its_task_is_not_held_and_the_review_runs_again	D	1.13	failure+edit rule
+plan_review	a_job_failing_after_edits_before_it_or_to_another_proposal_is_held	D	1.10	failure+edit rule
+plan_review	a_passing_plan_review_readies_the_proposal_with_its_actions	B	1.71	representative plan review job wiring
+plan_review	a_passing_plan_review_records_a_forecast_snapshot	D	0.95	trigger decision
+plan_review	a_plan_review_at_the_usage_limit_joins_the_cost_ask_and_starts_again_after_done	D	2.32	usage-limit → ask mapping
+plan_review	a_plan_review_duplicate_of_a_canceled_missing_or_the_same_task_fails	D	3.58	validation of verdict
+plan_review	a_plan_review_verdict_is_applied_at_its_jobs_request_and_a_broken_one_fails_closed	B	3.53	job→supervisor request boundary
+plan_review	a_planner_question_answer_another_supervisor_claimed_is_not_typed_again	G	2.70	typed into cmux planner
+plan_review	a_planner_question_answer_is_typed_into_its_planner_or_carried_by_a_new_one	G	5.58	typed into cmux planner
+plan_review	a_proposal_with_an_interrupt_task_is_reviewed_first	D	1.10	ordering by priority
+plan_review	a_ready_task_the_review_reopens_leaves_the_claim_for_a_planner	D	2.45	reopen state transition
+plan_review	a_revise_goes_to_the_live_planner_with_the_precedents_and_times_out_to_the_inbox	G	3.68	typed into live cmux planner
+plan_review	a_revise_past_the_limit_is_a_concern	D	2.51	revise count limit
+plan_review	a_revise_without_a_live_planner_opens_planners_within_the_limit	D	3.14	planner count limit
+plan_review	a_verdict_on_a_task_edited_during_its_review_is_not_applied_and_the_review_runs_again	D	3.24	staleness by edit version
+plan_review	a_withdrawn_proposal_closes_its_concern_and_its_drafts_are_free	D	1.83	state transition on withdraw
+plan_review	a_withdrawn_reopen_gets_a_planner_of_the_runtimes_with_the_reason	D	3.06	state transition + reason
+plan_review	an_answered_plan_ask_closed_unapplied_records_ask_closed	D	1.97	ask close decision
+plan_review	an_in_progress_tasks_expected_files_are_what_its_run_changed	B	1.11	git diff of run branch
+plan_review	drafts_of_the_runtime_get_planners_within_the_limit_and_a_persons_draft_none	D	8.38	planner limit/origin rule
+plan_review	edits_before_a_review_or_to_another_proposal_leave_its_verdict_applied	D	1.08	staleness rule
+plan_review	no_claude_plan_review_waits_for_manual_handling_and_opens_no_planner	D	0.32	provider availability → action
+plan_review	plan_review_records_each_tasks_predicted_weight_and_goes_on_without_one	D	2.78	output parsing/recording rule
+plan_review	role_tables_set_the_plan_review_and_raise_the_revise_planner_from_them	D	1.01	config→model/effort mapping
+plan_review	the_prompt_lists_each_tasks_duplicate_candidates_but_not_the_proposals_own	R	1.00	FTS search covered; prompt content is decision
+plan_review	the_prompt_lists_ready_tasks_in_summary_and_in_full_those_on_the_proposals_hotspot	D	1.99	prompt assembly
+plan_review	the_search_candidates_of_a_japanese_title_include_similar_japanese_tasks	B	0.92	SQLite FTS Japanese tokenization
+plan_review_codex	a_codex_that_cannot_log_in_moves_the_plan_review_to_claude	D	0.97	failure kind → provider fallback decision
+plan_review_codex	a_plan_review_on_codex_runs_read_only_and_applies_its_verdicts	B	2.14	codex exec spawn argv/sandbox/env representative
+plan_review_codex	no_claude_plan_review_runs_on_codex_and_never_falls_back	D	1.63	policy → no fallback decision
+plan_review_codex	without_codex_the_plan_review_starts_on_claude	D	0.43	executable_missing → provider choice
+plan_review_concern	a_sure_ready_concern_is_applied_as_a_pass_with_its_actions_and_counted	B	1.01	representative plan review concern wiring via supervise
+plan_review_concern	a_sure_ready_with_an_action_that_does_not_hold_fails_as_a_pass_would	D	0.97	action validity decision
+plan_review_concern	a_sure_send_back_is_a_revise_counted_toward_the_limit_then_a_person_decides	D	2.84	revise limit counting
+plan_review_concern	low_scope_discard_and_the_old_shape_wait_for_a_person_with_the_recommendation	D	2.34	parametric verdict to ask mapping
+plan_review_launch	a_job_past_the_argument_limit_fails_alone_and_holds_no_provider	B	0.68	real E2BIG spawn failure
+plan_review_launch	a_missing_executable_still_holds_its_provider	B	0.70	real missing-executable spawn error
+plan_review_prompt_bytes	a_failed_plan_review_records_its_prompts_bytes	D	0.96	which event carries bytes
+plan_review_prompt_bytes	a_plan_review_records_its_prompts_bytes_when_it_ends	D	0.96	section byte accounting is pure prompt builder
+plan_review_reasons	a_concerns_codes_and_the_answers_outcomes_are_recorded_and_tallied	D	2.33	reason code mapping and tallies
+planner_close	a_persons_planner_whose_workspace_does_not_close_stays_open	G	0.34	person planner + cmux failure
+planner_close	the_supervisor_closes_a_persons_planner_once_its_agent_exited_past_the_grace	G	0.53	person planner + cmux workspace close
+planner_headless	a_headless_draft_planner_takes_the_answer_of_its_question_as_its_next_turn	R	10.22	same turn boundary; answer routing decision
+planner_headless	a_headless_planner_opened_for_a_revise_runs_its_prompt_as_a_turn_and_ends_on_the_exit_request	B	6.91	representative background wrapper + turns/
+planner_headless	a_headless_request_planner_takes_the_answer_as_its_next_turn_and_declines	R	10.25	same turn boundary; request decline decision
+planner_headless	the_sweep_keeps_a_live_background_planner_and_closes_an_ended_one_as_exited	B	0.16	process liveness of wrapper
+planner_headless	the_turn_a_killed_background_planner_wrapper_left_is_stopped_as_the_planner_closes	B	7.37	orphan process group cleanup
+planner_headless	without_the_route_or_with_interactive_the_runtimes_planner_opens_a_workspace	G	4.89	interactive planner workspace path
+planner_headless_stats	a_headless_planners_session_and_route_are_read_by_stats_and_kpi	R	9.00	headless planner wiring elsewhere; span/stat counts decision
+planner_headless_turns	a_headless_finding_planner_takes_the_answer_as_its_next_turn_and_closes_with_its_finding	D	10.60	answer routing / close decision
+planner_headless_turns	a_headless_planner_at_a_login_failure_waits_in_the_hold_and_goes_on	D	11.67	failure kind → authentication hold
+planner_headless_turns	a_headless_planner_at_the_usage_limit_waits_in_the_hold_and_makes_the_same_call_again	D	13.50	failure kind → hold mapping
+planner_headless_turns	a_headless_planners_turn_stopped_at_its_limit_tells_the_inbox_and_the_planner_closes	B	6.62	wrapper kills turn at time limit
+planner_headless_turns	a_headless_request_planners_answer_reaches_a_new_one_and_undecided_ends_exhaust_the_request	D	20.01	exhaustion count, routing answer
+planner_headless_turns	a_headless_request_planners_submission_proposes_the_request_and_its_end_closes_it	D	9.76	request state transition
+planner_headless_turns	a_live_headless_planner_takes_the_next_revise_of_its_proposal_as_its_next_turn	D	8.36	live planner vs new planner choice
+planner_headless_turns	the_sweep_tells_of_a_headless_planners_turn_stopped_at_its_limit_as_it_closes_it	R	1.56	sweep path of same stop; notify-once decision
+planner_screen_idle	a_persons_planner_shows_idle_by_its_screen_and_is_not_asked_to_exit	G	0.89	person's planner screen idle
+planner_screen_idle	a_runtime_planner_is_idle_only_once_its_agent_is_recorded	G	2.21	interactive planner wrapper/screen state
+planner_screen_idle	a_runtime_planner_whose_screen_shows_background_work_is_not_asked_to_exit	G	4.31	cmux screen parsing for planner
+planner_screen_idle	a_runtime_planner_without_its_marker_is_ended_by_its_screen	G	3.49	cmux screen-based planner idle
+planner_slots	a_planner_idle_after_its_typed_answer_is_ended_even_when_the_ask_closed_later	G	3.43	typed answer to interactive planner
+planner_slots	a_planner_waiting_on_a_person_keeps_its_place_past_the_timeout	D	2.41	slot hold decision
+planner_slots	a_revise_at_the_limit_names_its_holders_and_frees_a_place_past_the_timeout	D	4.71	limit/timeout/holder decision
+planner_slots	the_supervisor_table_sets_the_limit_of_the_runtimes_planners	D	1.82	flag vs config precedence
+planner_timeout	a_planner_inferred_idle_by_its_screen_is_not_told_to_the_inbox	G	3.18	cmux screen inference of planner
+planner_timeout	a_silent_finding_planner_is_told_to_the_inbox_once	D	2.57	same timeout rule, other origin
+planner_timeout	a_silent_runtime_planner_is_told_to_the_inbox_once	D	3.92	timeout judgment with moved clock
+queue_dependencies	a_goal_dependency_holds_the_claim_until_the_goal_is_achieved	R	0.07	claim query covered; goal rule decision
+queue_dependencies	awaiting_integration_keeps_dependents_blocked_but_frees_execution_slot	D	0.06	slot/blocking rule
+queue_dependencies	candidates_require_every_predecessor_to_be_completed	B	0.06	representative claim candidate query
+queue_dependencies	concurrent_opposite_edges_cannot_create_a_cycle	B	0.06	concurrent transactions on DB file
+queue_dependencies	dependencies_reject_self_cycles_and_missing_tasks_and_can_be_removed	R	0.05	SQLite edges covered; cycle check is decision
+queue_dependencies	dependency_change_and_claim_are_serialized	B	0.05	transaction serialization
+queue_dependencies	invalid_registration_rolls_back_task_dependencies_and_events	B	0.04	transaction rollback
+queue_dependencies	predecessors_carry_the_integrated_run_and_in_progress_tasks_are_listed	R	0.06	read views; query covered
+queue_dependencies	tasks_dependencies_runs_and_events_survive_reopen	B	0.05	SQLite persistence across reopen
+queue_goals	draft_goal_tasks_are_not_candidates_until_the_goal_is_ready	B	0.05	candidate filter lives in SQL
+queue_goals	findings_on_a_run_or_a_goal_ride_on_their_target	R	0.05	target choice decision; events storage covered
+queue_goals	goal_close_verdicts_depend_on_task_statuses	D	0.07	verdict from task statuses
+queue_goals	goal_events_are_recorded_without_a_run	B	0.05	schema: events without run
+queue_goals	notes_attach_to_tasks_runs_and_goals_and_page_by_cursor	B	0.05	SQL storage and cursor paging
+queue_goals	set_goal_and_add_with_goal_follow_the_dependency_rules	D	0.06	dependency rule validation
+queue_migration	goals_of_a_version_12_queue_migrate_as_open	B	0.49	real SQLite migration
+queue_migration	migration_adding_the_answerer_keeps_older_answers_unknown	B	0.60	additive migration
+queue_migration	migration_adding_the_task_change_keeps_older_tasks_without_one	B	0.74	additive migration, older binary insert
+queue_migration	migration_dropping_every_check_keeps_rows_ids_indexes_triggers_and_keys	B	0.68	table rebuild keeps structure
+queue_migration	migration_dropping_the_task_kind_keeps_tasks_and_their_change	B	0.88	breaking migration, backup, floor
+queue_migration	migration_from_v6_adds_goals_and_keeps_tasks_runs_and_events	B	0.41	real SQLite migration
+queue_migration	migration_indexes_the_existing_rows_and_landings_record_their_message	B	0.50	migration backup/floor/FTS index
+queue_migration	migration_opening_the_kinds_keeps_rows_and_moves_their_rules_to_the_write_port	B	0.61	CHECK removal migration
+queue_migration	migration_opening_the_run_providers_keeps_runs_and_takes_a_codex_run	B	0.66	CHECK removal migration
+queue_migration	migration_to_the_headless_default_frees_the_unclaimed_default_tasks	B	0.74	data migration SQL
+queue_migration	migration_to_v21_keeps_drafts_and_the_task_id_sequence	B	0.47	real SQLite migration, sequence
+queue_migration	migration_to_v28_gives_the_follow_up_drafts_already_queued_their_origin	B	0.51	real SQLite migration backfill
+queue_migration	migration_to_v29_gives_every_ask_the_reason_of_its_kind	B	0.49	real SQLite migration backfill
+queue_migration	migration_to_v5_rebuilds_runs_moves_the_lease_and_keeps_foreign_keys	B	0.35	real SQLite migration
+queue_migration	migration_to_v6_adds_the_integration_statuses_and_the_single_slot	B	0.35	real SQLite migration
+queue_migration	migration_to_v7_adds_the_supervisor_registry_and_keeps_leases	B	0.38	real SQLite migration
+queue_proposals	a_chain_in_an_abandoned_goal_is_told_once_at_its_root	D	0.08	graph root selection
+queue_proposals	a_withdrawn_proposal_releases_its_goals_and_tasks_as_drafts	D	0.07	state transitions on withdraw
+queue_proposals	a_withheld_task_tells_the_inbox_of_the_tasks_waiting_on_it	D	0.08	strand detection
+queue_proposals	abandoning_a_goal_tells_the_inbox_of_the_tasks_waiting_on_its_task	D	0.11	strand detection over dependency graph
+queue_proposals	approving_a_proposal_withholds_the_tasks_of_a_closed_goal	D	0.06	approve → withhold decision
+queue_proposals	readying_a_task_that_waits_on_a_stranded_task_tells_the_inbox	D	0.09	strand detection
+queue_proposals	submit_needs_a_draft_task_and_an_open_goal	D	0.04	precondition validation
+queue_proposals	submitted_tasks_wait_for_plan_review_which_readies_or_sends_them_back	B	0.08	representative SQLite proposal flow
+queue_runs	a_login_that_stops_several_runs_is_one_ask_that_lists_them	D	0.06	ask dedupe/join decision
+queue_runs	claim_takes_the_run_id_and_its_time_from_the_injected_generators	R	0.05	injection wiring; covered by timestamp test
+queue_runs	concurrent_connections_claim_each_ready_task_once	B	0.13	concurrent SQLite connections
+queue_runs	database_constraints_guard_per_task_runs_and_integration_ownership	B	0.05	schema constraints
+queue_runs	event_write_failure_rolls_back_claim_and_task_transition	B	0.06	transaction rollback
+queue_runs	injected_timestamps_have_the_form_sqlite_gives_its_timestamp_columns	B	0.02	compare with SQLite timestamp format
+queue_runs	manual_transitions_cannot_change_claimed_or_terminal_tasks	D	0.06	state transition table
+queue_schema	a_breaking_migration_waits_for_an_idle_queue	B	0.42	migrate gating against live rows
+queue_schema	a_newer_queue_within_the_floor_is_used_as_it_is	B	0.34	schema floor on real DB
+queue_schema	a_read_only_open_never_writes_and_reads_an_older_queue_in_memory	B	0.99	read-only/WAL semantics
+queue_schema	foreign_and_future_databases_are_rejected_without_rewriting_them	B	0.30	real foreign DB untouched
+queue_schema	initialization_is_repeatable_and_preserves_existing_tasks	B	0.32	SQLite init idempotency on file
+queue_schema	opening_or_initializing_an_older_queue_never_migrates_it	B	0.36	older schema not migrated on open
+queue_schema	the_latest_schema_has_no_check_constraint	B	0.29	sqlite_master inspection
+queue_schema	the_migration_check_refuses_a_check_after_they_were_dropped	B	2.75	shell script on file copy
+queue_schema	the_rows_the_ports_write_keep_the_check_rules	B	0.29	port writes read back from rows
+queue_search	search_finds_every_kind_in_every_status_and_follows_edits	B	0.07	SQLite search index follows edits
+queue_service	a_service_of_another_build_is_replaced_once_and_then_accepted	D	0.80	build-replace-once decision
+queue_service	a_service_that_keeps_dying_is_left_to_a_person_after_three_starts	D	0.81	restart limit count in window
+queue_service	status_doctor_and_service_status_report_the_service	B	0.63	CLI output contract with live service
+queue_service	the_last_supervisor_down_asked_stops_the_service_when_its_drain_ends	D	0.98	which supervisor stops it
+queue_service	the_service_answers_its_principals_and_refuses_the_rest_on_its_side	B	3.10	service over unix socket
+queue_service	the_supervisor_starts_the_service_and_holds_its_claims_while_it_is_down	B	2.28	supervisor-service process wiring
+queue_service	up_starts_the_service_and_down_stops_it	B	0.57	up/down process lifecycle
+queue_service_client	a_client_mode_dagq_opens_no_queue_and_says_why_it_refused	B	0.57	socket/token failure paths
+queue_service_client	a_plan_review_job_s_dagq_reads_through_the_service	R	0.82	socket reads covered by worker test
+queue_service_client	a_worker_s_dagq_runs_its_commands_through_the_service_as_the_worker	B	2.20	client mode over service socket
+queue_service_client	the_observer_s_dagq_writes_its_findings_through_the_service	B	0.56	observer write over socket
+queue_service_findings	every_role_reads_the_proposals_as_the_command_line_prints_them	R	0.68	service read path covered
+queue_service_findings	the_observer_writes_findings_through_the_service_as_the_command_line_does	R	0.89	duplicates queue_service_client observer test
+queue_service_findings	the_worker_and_the_jobs_write_no_findings	D	1.03	role authorization table
+queue_service_reads	a_worker_reads_what_a_measure_task_reads_as_the_command_line_prints_it	B	1.47	queue service socket vs CLI parity
+queue_service_reads	the_read_roles_read_what_their_prompts_name_as_the_command_line_prints_it	B	14.88	queue service socket per principal
+queue_service_reads	what_is_no_read_use_case_is_refused_on_the_service_s_side	B	1.04	service-side refusal over socket
+queue_tasks	an_edit_authorized_on_another_status_changes_nothing	B	0.03	status recheck inside store transaction
+queue_tasks	candidates_graph_and_claims_share_the_priority_order	D	0.04	effective priority ordering
+queue_tasks	edit_task_replaces_draft_fields_and_records_the_change	D	0.03	field diff and draft-only rule
+queue_tasks	ended_run_allows_only_verify_correction_before_inherited_retry	D	0.03	which edits allowed per state
+queue_tasks	list_defaults_to_unfinished_tasks_newest_first_with_compact_items	B	0.04	list SQL query representative
+queue_tasks	list_full_items_carry_every_task_field	R	0.02	item projection; list covered
+queue_tasks	list_pages_by_limit_with_next_as_the_following_before	R	0.04	paging cursor; list covered
+queue_tasks	paths_are_stored_and_replaced_while_the_task_is_editable	D	0.03	editable-status rule and glob validation
+queue_tasks	priority_is_stored_changed_while_editable_and_checked_on_read	B	0.03	column CHECK constraint on read
+related	at_least_half_of_the_known_duplicates_are_in_each_others_top_five	B	0.23	FTS ranking quality on real index
+related	related_explains_each_candidate_and_filters_by_status	B	0.11	related CLI output contract
+request_planner	a_planner_question_about_a_request_reaches_its_planner_or_a_new_one_and_three_exhaust_it	D	7.22	routing and three-attempt limit
+request_planner	a_request_the_inbox_records_gets_one_planner_whose_submission_proposes_it	B	2.11	request→runtime planner→proposal wiring representative
+request_planner	an_ask_or_an_event_alone_leads_the_prompt_to_its_goal	D	0.59	prompt content selection
+request_planner	only_the_inbox_and_a_person_record_a_request	D	0.24	role authorization decision
+request_planner	only_the_requests_own_planner_declines_it_and_the_inbox_is_told	D	1.95	actor check and notice decision
+request_planner	questions_about_two_requests_stay_apart_and_a_closed_answer_opens_no_planner	D	1.24	routing decision per request
+request_planner	requests_share_the_limit_of_the_runtimes_planners_and_come_first	D	1.29	limit and ordering of planner slots
+review_subagents	a_codex_review_with_required_agents_starts_on_claude	D	2.67	provider switch decision
+review_subagents	a_definition_in_the_index_only_is_not_in_the_tree	B	0.36	git index vs tree boundary
+review_subagents	a_pass_lacking_an_agents_completed_result_does_not_land	D	4.04	verdict completeness decision
+review_subagents	a_pass_with_every_agents_completed_result_lands	B	2.38	representative supervisor wiring to landing
+review_subagents	a_review_that_cannot_run_or_finish_its_agents_does_not_land	D	3.41	provider capability decision
+review_subagents	a_review_without_required_agents_is_unchanged	D	4.12	empty selection behavior
+review_subagents	a_selected_agent_without_its_definition_fails_the_review	D	1.56	missing definition -> fail decision
+review_subagents	an_agents_concern_a_person_decides_under_a_pass_asks_a_person	D	7.01	concern rule routing loop (7s)
+review_subagents	an_agents_revise_under_a_pass_sends_the_run_back	D	2.88	heaviest-judgment routing
+review_subagents	an_agents_scope_concern_under_a_landing_concern_asks_a_person	D	1.83	routing decision
+review_subagents	an_agents_send_back_under_a_pass_sends_the_run_back	D	2.75	routing decision
+review_subagents	an_unparsable_committed_config_fails_the_review	D	1.45	parse error -> fail decision
+review_subagents	the_material_shows_the_range_its_agents_were_selected_from	B	2.27	git range fixed across main move
+review_subagents	the_old_path_of_a_rename_and_a_deleted_path_select_an_agent	B	3.59	git diff without rename detection
+review_subagents	the_real_claude_review_runs_its_subagents_without_the_worktrees_settings	B	0.00	ignored manual smoke on real Claude argv
+review_subagents	the_worker_cannot_change_or_drop_its_required_review	B	6.74	reads config from main commit via git, not worktree
+review_subagents	this_repository_names_only_agents_it_defines	B	0.28	checks this repo's committed files
+review_subagents	uncommitted_main_checkout_edits_are_not_used	R	1.70	same git-commit-read boundary as above
+runtime_abandon	a_run_given_up_in_its_review_asks_its_session_to_exit	G	1.78	interactive_workers: /exit to cmux session
+runtime_abandon	a_session_that_cannot_be_asked_to_exit_is_a_persons_to_end	G	1.98	interactive_workers: unsendable /exit
+runtime_actor_env	the_review_and_the_recovery_job_run_as_their_own_actors	B	3.26	env of spawned job processes
+runtime_adopt	a_supervisor_takes_back_a_run_it_lost_only_after_dropping_its_slot	B	5.84	slot/lease race wiring
+runtime_adopt	a_supervisor_that_lost_its_lease_stops_touching_the_run	B	1.93	lease loss under concurrent supervisors
+runtime_adopt	a_timed_out_run_is_kept_while_the_other_run_is_accepted	G	3.55	interactive exit request timeout
+runtime_adopt	adopted_exit_request_times_out_from_its_recorded_request	G	1.41	interactive exit timeout
+runtime_adopt	adopted_run_asks_about_an_exit_that_timed_out_again	G	1.36	interactive stuck_exit ask
+runtime_adopt	adopted_run_does_not_ask_about_its_exit_twice	G	2.18	interactive stuck_exit ask
+runtime_adopt	adopted_run_does_not_record_an_exit_timeout_twice	G	2.19	interactive exit timeout
+runtime_adopt	adopted_wait_after_the_receipt_runs_from_the_recorded_receipt	G	1.25	interactive background-work wait after receipt
+runtime_adopt	adopter_closes_the_answer_prompt_ask_of_a_dialog_the_receipt_ended	G	1.08	interactive dialog prompt ask
+runtime_adopt	adopter_does_not_repeat_an_exit_request_the_previous_supervisor_sent	G	1.71	interactive /exit request
+runtime_adopt	adopter_ends_the_wait_for_a_dialog_the_receipt_ended_and_closes_its_ask	G	1.39	interactive dialog wait
+runtime_adopt	dead_supervisor_pid_with_a_fresh_heartbeat_is_adopted	R	1.37	adoption covered; pid-dead rule is decision
+runtime_adopt	exited_wrapper_and_validating_runs_are_adopted_and_validated	B	1.91	adopt from recorded wrapper exit and validation restart
+runtime_adopt	failed_runs_in_the_same_pass_do_not_affect_the_accepted_run	G	3.30	interactive session exit handling
+runtime_adopt	fresh_leases_dead_wrappers_early_runs_leaseless_and_integrating_runs_are_not_adopted	D	2.17	adoptability matrix of lease/state cases
+runtime_adopt	independent_tasks_run_concurrently_and_a_dependent_starts_after_integration	B	5.55	concurrent runs, git integrate, supervisor loop
+runtime_adopt	integrating_run_with_a_stale_lease_is_not_adopted	D	2.44	state → not adoptable decision
+runtime_adopt	recovering_one_orphaned_run_leaves_the_other_running	B	1.03	process groups of orphan vs sibling run
+runtime_adopt	stale_lease_of_a_live_wrapper_is_adopted_and_driven_to_awaiting_integration	B	1.42	adoption across supervisors representative
+runtime_adopt	two_supervisors_racing_for_one_stale_lease_adopt_it_once	B	1.62	SQLite transaction race between supervisors
+runtime_ask	a_follow_up_draft_records_its_origin_and_its_planner_question_is_delivered_by_the_runtime	D	0.14	follow-up origin and routing
+runtime_ask	a_session_killed_by_a_signal_is_classified_in_status_show_and_stats	G	1.43	interactive worker only; classification pure
+runtime_ask	an_abandoned_run_is_recovered_and_triaged_by_the_supervisor	B	2.80	recovery of abandoned run representative
+runtime_ask	asks_of_a_run_are_attention_for_the_inbox_until_closed	D	2.58	attention membership decision
+runtime_ask	attention_events_are_read_past_a_cursor_and_wake_watch	B	2.90	watch wakes across processes
+runtime_ask	only_a_new_ask_notifies_and_it_goes_to_the_inbox	D	2.01	notify-only-new decision
+runtime_ask	receipt_follow_ups_appear_as_one_atomic_planner_bundle	B	0.06	atomic transaction of bundle
+runtime_ask	status_reports_failed_runs_and_unanswered_exit_requests	G	2.13	interactive exit requests
+runtime_ask	watch_returns_when_supervisor_registrations_or_health_change	R	1.41	watch wake already covered
+runtime_background	a_background_headless_run_lands_without_a_workspace	B	2.10	background wrapper spawn, env, log representative
+runtime_background	a_background_session_takes_a_revise	R	2.66	same wrapper boundary; revise routing decision
+runtime_background	a_background_session_takes_the_answer_of_its_question	R	2.36	same wrapper boundary; answer→next turn decision
+runtime_background	a_new_supervisor_adopts_a_background_session	B	2.12	adopt by handle and heartbeat across supervisors
+runtime_background	a_parked_background_run_is_resumed_in_the_background	R	4.45	wrapper spawn covered; resume choice decision
+runtime_background	a_turn_left_by_a_killed_background_wrapper_is_stopped_and_a_resumed_wrapper_registers	B	3.28	killed process, process group of turn
+runtime_background	a_workspace_wrapper_still_waits_for_its_workspace	G	1.05	workspace wrapper path removed by goal 92
+runtime_background	a_wrapper_without_a_terminal_or_workspace_registers_once_its_start_is_recorded	B	3.30	real wrapper binary without tty
+runtime_background	close_workspaces_refuses_a_live_workspace_session_with_a_background_sessions_pids	G	0.21	workspace session after background; goal 92
+runtime_background	close_workspaces_stops_a_background_session_while_cmux_cannot_list_the_workspaces	R	0.80	process kill covered; cmux-list-failure fallback is decision
+runtime_background	close_workspaces_stops_the_turn_a_killed_background_wrapper_left	B	0.64	close-workspaces kills orphaned turn process
+runtime_background_process	a_canceled_landing_leaves_nothing_of_the_background_session	R	4.85	teardown covered; cancel ordering decision
+runtime_background_process	a_detached_wrapper_and_its_turn_outlive_a_killed_supervisor	B	5.79	SIGKILL supervisor, adopt detached wrapper
+runtime_background_process	a_stop_answer_stops_the_background_session	R	6.61	duplicates runtime_headless stop answer
+runtime_background_process	child_supervisor	B	0.00	helper child process entry for kill test
+runtime_background_process	stop_processes_stops_a_background_sessions_orphan	B	9.64	real orphan process stopped
+runtime_background_process	the_sweep_stops_an_ended_background_session_while_cmux_cannot_list	G	3.74	run workspace listing via cmux
+runtime_broker	a_busy_machine_tells_the_inbox_and_claims_go_on	D	1.45	machine_busy state to attention
+runtime_broker	a_disabled_answer_turn_gets_no_unmarked_tools	D	2.45	tool grant decision for answer turn
+runtime_broker	a_disabled_answer_turn_gets_no_unmarked_tools_and_token_file	D	2.52	tool grant decision for answer turn
+runtime_broker	a_disabled_broker_calls_no_podman	D	1.96	broker mode decision (disabled)
+runtime_broker	a_disabled_supervisor_removes_an_unmarked_token_file_of_no_run	R	1.58	orphan file cleanup; FS covered above
+runtime_broker	a_disabled_supervisor_resumes_a_run_without_the_tools_left_to_it	D	5.17	grant decision on resume
+runtime_broker	a_disabled_supervisor_revokes_the_tokens_an_earlier_mode_left	D	4.39	sweep decision under disabled mode
+runtime_broker	a_disabled_sweep_retries_a_failed_run_read	D	2.30	retry decision after failed read
+runtime_broker	a_handoff_leaves_the_broker_running	B	0.55	exec handoff wiring
+runtime_broker	a_preferred_sweep_retries_a_failed_run_read	D	2.23	retry decision after failed read
+runtime_broker	a_preferred_worker_gets_its_token_and_the_end_of_its_run_revokes_it	B	7.26	token files 0600, MCP config, broker refusal
+runtime_broker	a_required_broker_does_not_start_the_supervisor	D	0.18	mode required refusal wording
+runtime_broker	a_run_that_fails_or_is_interrupted_loses_its_token	D	4.57	revoke reason per run status
+runtime_broker	down_stops_the_broker_after_the_drain	B	1.94	down + drain + podman stop wiring
+runtime_broker	the_default_down_has_the_supervisor_stop_the_broker_after_its_drain	R	0.52	same stop path, decision who stops
+runtime_broker	the_image_builds_in_the_background_and_holds_no_claim	B	2.01	job thread vs claim concurrency
+runtime_broker	three_failed_looks_restart_the_container_and_then_tell_the_inbox	D	1.49	failure count threshold to restart/attention
+runtime_candidates	the_supervisor_samples_the_candidates_when_they_change	D	1.24	change detection of samples
+runtime_claim	a_lease_of_its_own_token_is_renewed_after_a_host_sleep_until_another_supervisor_adopts_it	B	0.08	lease-guarded writes vs adoption in DB
+runtime_claim	a_refused_run_transition_keeps_the_domain_reason_beside_the_old_error	D	0.05	error wording composition
+runtime_claim	a_workspace_group_cmux_cannot_make_is_a_logged_warning	G	3.17	cmux workspace group
+runtime_claim	an_injected_clock_decides_lease_staleness_and_injected_ids_name_the_run	D	0.06	lease_is_stale pure; clock injection
+runtime_claim	claim_creates_a_lease_that_only_its_owner_can_use_or_release	B	0.06	SQLite lease ownership guards
+runtime_claim	failed_agent_retains_worktree_and_does_not_complete_task	G	1.90	interactive_workers
+runtime_claim	failed_backend_calls_are_recorded_with_the_load_and_counted_by_stats	G	4.27	interactive cmux backend failures
+runtime_claim	integrate_takes_its_time_and_token_from_the_injected_generators	D	2.28	staleness by injected clock
+runtime_claim	killed_supervisor_registration_is_reported_stale_and_never_deleted	B	0.93	dead pid liveness check
+runtime_claim	main_vanishing_after_the_landing_branch_check_holds_the_claim	B	0.32	git race: main deleted mid pass
+runtime_claim	migration_from_v1_preserves_task_and_initializes_runtime_tables	B	0.46	real SQLite migration
+runtime_claim	no_ready_task_ends_a_once_pass_without_creating_a_run_or_lease	D	0.19	once pass with nothing to claim
+runtime_claim	provisioning_failure_retains_the_run_and_stops_claiming_other_tasks	B	0.71	worktree provisioning failure kept on disk
+runtime_claim	recover_ignores_exited_processes_and_tolerates_a_missing_lease	R	0.60	recover path covered; decision on missing lease
+runtime_claim	recover_requires_dead_processes_and_stale_lease_then_allows_a_new_run	B	2.66	recover with live/dead processes
+runtime_claim	resident_supervisor_without_runs_is_listed_until_it_stops	B	6.76	resident thread heartbeat/registration
+runtime_claim	shell_arguments_round_trip_without_expansion_and_cmux_handles_are_strict	B	0.03	real /bin/sh quoting round trip
+runtime_claim	stats_raise_running_alerts_for_a_worker_idle_without_a_receipt	G	0.33	interactive_workers idle marker
+runtime_claim	stats_time_background_work_from_its_first_marker	G	0.35	interactive_workers hook markers
+runtime_claim	status_and_doctor_measure_to_the_injected_clock	D	0.11	age computed from injected now
+runtime_claim	supervise_records_its_progress_as_json_lines	B	1.66	log file JSONL output
+runtime_claim	supervisor_claims_by_effective_priority_like_candidates_and_graph	D	5.86	claim ordering by priority
+runtime_claim	supervisor_claims_the_candidate_that_releases_the_most_tasks_first	D	6.49	claim ordering via supervise restarts
+runtime_claim	workspace_close_is_recorded_once_and_only_for_accepted_runs	G	0.11	session-wrapper workspace close
+runtime_claim	wrapper_registration_is_one_shot_and_rejects_other_owners	B	0.09	SQL guard on wrapper registration
+runtime_claim_defer	a_changed_conflicts_table_is_read_again_without_a_restart	B	6.43	dagq.toml reread each pass from main checkout
+runtime_claim_defer	a_run_waiting_for_its_owner_past_the_grace_lets_the_deferred_task_go	D	5.16	grace time judgment
+runtime_claim_defer	a_task_meeting_a_run_on_a_hotspot_waits_and_the_next_one_is_claimed	D	7.95	path overlap → defer and next candidate
+runtime_claim_defer	an_invalid_conflicts_table_at_the_start_is_warned_of_once	D	0.44	warn-once dedupe decision
+runtime_claim_defer	transient_conflicts_tables_are_ignored_and_stable_changes_are_confirmed	R	1.18	reread covered; confirm-stability is decision
+runtime_claim_defer	values_started_with_are_recorded_against_the_latest_change	D	1.53	compare to latest event → record decision
+runtime_claim_hold	no_run_is_claimed_while_the_load_is_above_the_threshold	B	2.72	representative hold across resident supervisors
+runtime_claim_hold	no_threshold_holds_nothing	D	1.80	default threshold none
+runtime_claim_spacing	a_resident_supervisor_waits_for_the_spacing_and_status_shows_it	B	10.21	representative resident supervisor with real config reread
+runtime_claim_spacing	no_load_hold_or_no_spacing_fills_the_free_slots_in_one_pass	D	6.21	claim count per pass
+runtime_claim_spacing	one_claim_per_pass_spaced_from_the_queues_latest_claim	D	5.21	spacing time judgment
+runtime_claim_worker	a_claim_writes_the_worker_of_its_task_on_the_run	B	0.14	claim transaction writes worker columns
+runtime_claim_worker	a_claude_task_without_a_mode_is_claimed_headless	D	0.10	default mode decision (interactive branch goes)
+runtime_claim_worker	a_missing_codex_is_recorded_as_not_found	R	0.07	executable resolution covered by registration test
+runtime_claim_worker	a_task_of_a_worker_the_supervisor_cannot_run_is_deferred	D	0.61	defer decision by adapters/holds
+runtime_claim_worker	the_providers_are_recorded_on_the_registration	B	1.70	executable resolution on PATH + registration
+runtime_cleanup	a_canceled_task_loses_the_branch_of_a_worktree_already_gone	B	1.95	git branch deletion without worktree
+runtime_cleanup	a_drain_on_a_provisioning_failure_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing	R	14.36	drain/cleanup wiring variant; decision of ordering
+runtime_cleanup	a_landing_waits_for_the_cleanup_of_its_build_outputs	D	3.29	landing gated on cleanup state
+runtime_cleanup	a_run_leased_during_the_cleanup_keeps_its_worktree	B	2.70	race between lease and cleanup thread
+runtime_cleanup	a_runs_tmp_dir_goes_only_once_its_task_is_over	D	1.79	removal eligibility by task status
+runtime_cleanup	a_scratchpad_gone_meanwhile_is_no_failure_and_one_failing_root_keeps_the_others	B	2.33	filesystem removal race/permission failure
+runtime_cleanup	a_skipped_resume_waits_for_the_cleanup_of_its_build_outputs	D	5.95	skip_resume gated on cleanup
+runtime_cleanup	a_slow_cleanup_does_not_hold_up_the_loop	B	3.43	off-loop thread wiring
+runtime_cleanup	a_withdrawn_handoff_resumes_the_cleanup	R	36.76	handoff/drain wiring variant (37s); decisions of ordering
+runtime_cleanup	a_worktree_left_pointing_at_an_old_repository_is_repaired_and_removed	B	2.28	git worktree repair
+runtime_cleanup	a_worktree_with_a_broken_git_goes_as_a_directory_once_its_task_is_over	B	2.46	broken .git filesystem/git behavior
+runtime_cleanup	draining_finishes_disk_cleanup_before_deciding_a_landing	B	33.92	representative drain/handoff + cleanup wiring
+runtime_cleanup	draining_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing	R	46.47	same drain wiring; pass ordering decisions (46s)
+runtime_cleanup	the_build_outputs_of_a_run_waiting_for_an_answer_go_on_the_sweep	D	2.47	sweep eligibility decision
+runtime_cleanup	the_build_outputs_of_an_idle_run_go_only_for_disk_space	D	2.21	eligibility by disk space reason
+runtime_cleanup	the_rest_of_a_cleanup_for_room_holds_and_asks_nothing_until_it_is_done	D	39.05	disk ask/hold decision by readings (39s)
+runtime_client_mode	the_review_and_the_recovery_job_are_given_the_service_not_the_queue	B	4.45	jobs env + token lifecycle over socket
+runtime_client_mode	the_worker_and_its_resume_reach_the_queue_only_through_the_service	B	6.11	process env/argv + service socket
+runtime_codex	a_codex_review_at_its_usage_limit_holds_codex_and_moves_to_claude	D	2.65	usage-limit -> hold/move decision
+runtime_codex	a_codex_review_starts_while_claudes_hold_ask_is_open	D	2.73	hold scope decision
+runtime_codex	a_codex_review_whose_codex_does_not_start_moves_to_claude	B	3.34	real launch failure of process
+runtime_codex	a_codex_review_without_codex_moves_to_claude_and_lands	D	2.68	provider fallback decision
+runtime_codex	a_codex_run_answers_and_revises_through_resumes_of_its_thread_and_lands	B	4.11	codex exec/resume argv and thread
+runtime_codex	a_codex_turn_at_its_usage_limit_holds_the_queue_then_resumes_its_thread	D	3.03	hold/join ask decision
+runtime_codex	a_codex_turn_that_failed_is_classified_on_the_run	D	1.30	error classification
+runtime_codex	a_resume_of_a_thread_codex_does_not_have_starts_a_new_one	D	3.16	no-rollout -> new thread decision
+runtime_codex	no_claude_codex_review_at_its_usage_limit_holds_codex_and_asks_a_person	D	2.17	no-provider -> ask decision
+runtime_codex	no_claude_codex_review_concern_records_reasons_and_asks	D	2.11	verdict->ask mapping
+runtime_codex	no_claude_codex_review_concern_with_a_high_land_lands_it	D	2.66	recommendation->action mapping
+runtime_codex	no_claude_codex_review_failure_asks_without_starting_claude	D	1.99	failure->ask decision
+runtime_codex	no_claude_codex_review_revise_reaches_the_worker_and_passes	R	3.51	revise path; resume boundary covered
+runtime_codex	no_claude_review_with_no_provider_asks_without_a_recommendation	D	2.03	provider availability decision
+runtime_codex	no_claude_run_uses_a_read_only_codex_review_and_lands	B	2.90	codex review process args/JSONL
+runtime_codex	no_claude_unreadable_codex_review_at_its_limit_fails_with_its_output	D	2.18	output classification decision
+runtime_codex_ask	a_codex_workers_ask_goes_to_the_queue_service	B	2.92	codex worker ask over queue service socket
+runtime_codex_work	a_codex_workers_commands_are_its_spans_work_and_worktime_lines	B	2.54	only Codex turn representative
+runtime_disk	a_cleanup_for_room_removes_the_scratchpads_and_the_needs_count_them	R	4.09	filesystem cleanup covered
+runtime_disk	a_cleanup_that_makes_room_claims_without_holding	B	3.36	representative filesystem cleanup
+runtime_disk	a_landing_waits_for_room_before_its_verification	D	3.24	threshold → landing_held
+runtime_disk	a_persons_integrate_counts_the_scratchpads_in_a_runs_size	D	2.41	run size computation
+runtime_disk	a_persons_integrate_refuses_to_land_while_the_disk_is_short	D	2.29	threshold check
+runtime_disk	a_persons_integrate_without_a_threshold_or_a_reading_lands	D	4.34	absent threshold rule
+runtime_disk	no_run_is_claimed_while_the_disk_is_short_and_the_inbox_is_told_once	D	2.99	free space threshold → hold/ask
+runtime_e2e	a_failed_e2e_parks_the_run_for_a_resume_and_its_fix_lands	R	5.88	failure->park decision; spawn covered
+runtime_e2e	a_mark_committed_on_main_passes_a_test_that_fails_its_rerun	D	3.78	quarantine matching
+runtime_e2e	a_passed_run_that_needs_the_e2e_runs_it_on_the_host_and_lands	B	3.24	e2e command spawn in worktree
+runtime_e2e	a_run_that_needs_no_e2e_or_has_none_lands_without_running_one	D	5.64	needs-e2e decision from paths
+runtime_e2e	an_e2e_past_its_timeout_is_run_again_instead_of_sending_the_run_back	D	7.81	timeout count -> retry/attention
+runtime_e2e	the_runs_of_a_supervisor_run_their_e2e_one_at_a_time	B	6.63	concurrency of host e2e
+runtime_evidence	a_branch_rebased_onto_a_moved_main_is_held_only_to_its_own_changes	B	2.77	git merge-base diff behavior
+runtime_evidence	a_change_inside_the_declared_paths_awaits_integration_and_lands	R	2.45	same scope boundary; decision only
+runtime_evidence	a_change_outside_the_declared_paths_parks_the_run_for_a_resumed_session	B	3.74	git diff vs declared paths representative
+runtime_evidence	a_required_check_reported_failed_parks_the_run_instead_of_failing_it	D	3.11	receipt check status -> park decision
+runtime_evidence	a_resume_or_integrate_without_the_required_evidence_does_not_land	D	5.16	resume exhaustion/integrate defer decision
+runtime_evidence	integrate_refuses_a_rebased_diff_outside_the_declared_paths	B	4.58	integrate rebase diff, main unmoved
+runtime_evidence	missing_required_evidence_parks_the_run_for_a_resumed_session	B	3.32	representative validate->park->resume->land wiring
+runtime_evidence	required_evidence_present_in_the_receipt_awaits_integration	D	1.99	evidence present decision
+runtime_evidence	the_e2e_a_run_needs_is_recorded_and_its_receipt_backs_none	D	5.92	e2e need from diff paths; pure
+runtime_exit_retry	a_held_exit_is_typed_again_into_a_ready_input_box	G	3.64	interactive /exit retry (goal 92)
+runtime_exit_retry	an_adopter_carries_the_retries_of_the_exit_on	G	1.49	interactive exit retries adopt
+runtime_exit_retry	an_adopter_does_not_retry_after_a_stuck_exit_ask	G	2.44	interactive adopt
+runtime_exit_retry	an_adopter_does_not_retry_after_a_stuck_exit_recovery_job	G	2.38	interactive adopt
+runtime_exit_retry	an_unsent_exit_of_a_run_that_cannot_land_is_retried	G	1.77	interactive unsent /exit
+runtime_exit_retry	an_unsent_exit_whose_retries_never_get_there_goes_to_the_stuck_exit_ask	G	2.72	interactive stuck_exit
+runtime_exit_retry	the_running_sessions_exit_is_retried_after_its_timeout	G	1.73	interactive session watch
+runtime_exit_retry	used_up_retries_do_not_close_a_run_with_a_rebase_in_progress	G	4.29	interactive workspace close guard
+runtime_exit_retry	used_up_retries_do_not_close_a_run_with_an_open_worker_question	G	4.39	interactive workspace close guard
+runtime_exit_retry	used_up_retries_of_a_run_that_does_not_land_go_to_the_stuck_exit_ask	G	3.97	interactive stuck_exit
+runtime_exit_retry	used_up_retries_over_a_dialog_close_the_workspace_of_a_landing_run	G	4.39	interactive workspace close
+runtime_forecast	a_failed_snapshot_stops_no_landing_and_off_records_nothing	D	4.82	error/off handling decision
+runtime_forecast	a_snapshot_records_runs_under_revise_and_resume_in_their_phase	D	0.13	run phase classification
+runtime_forecast	snapshots_are_recorded_at_the_day_a_moving_landing_and_a_start	B	5.09	representative snapshot recording in supervisor
+runtime_handoff	a_handoff_after_a_recovery_repair_of_the_exit_times_it_from_the_repair	G	2.88	interactive /exit dialog repair
+runtime_handoff	a_handoff_before_the_resume_request_lets_the_next_supervisor_send_it	G	6.63	interactive input box
+runtime_handoff	a_handoff_does_not_wait_for_a_supervisor_that_drains_for_a_stop	D	3.09	stop beats handoff decision
+runtime_handoff	a_handoff_during_a_resume_goes_on_watching_the_resumed_session	R	5.88	handoff.json carryover; covered by continuation test
+runtime_handoff	a_handoff_leaves_the_session_running_and_the_next_process_drives_it_on	B	2.38	representative continuation across processes
+runtime_handoff	a_handoff_replaced_at_the_take_execs_the_new_binary_without_a_claim	R	2.95	same exec boundary; reread decision
+runtime_handoff	a_handoff_replaced_while_draining_execs_the_new_binary_without_a_claim	B	2.67	exec of replacement binary
+runtime_handoff	a_handoff_while_a_rejected_run_waits_for_its_exit_sends_no_second_exit	G	1.99	interactive /exit
+runtime_handoff	a_handoff_while_a_run_waits_for_its_exit_times_it_from_the_recorded_request	G	2.36	interactive /exit timing
+runtime_handoff	a_handoff_without_its_state_after_the_resumed_session_ended_gives_the_lease_back	G	7.80	interactive resume
+runtime_handoff	a_handoff_without_its_state_during_a_resume_still_watches_the_session	D	7.21	rebuild resume from events
+runtime_handoff	a_resume_handoff_before_exit_does_not_answer_background_work	G	6.39	interactive background-work dialog
+runtime_handoff	a_resume_handoff_preserves_the_exit_for_its_background_dialog	G	7.09	interactive dialog /exit
+runtime_handoff	a_resume_without_a_snapshot_recovers_the_exit_for_its_background_dialog	G	7.08	interactive dialog /exit
+runtime_handoff	a_supervisor_that_stops_during_a_resume_leaves_the_session_to_its_adopter	B	6.82	adoption after stale lease, other token
+runtime_handoff	after_a_handoff_a_run_without_state_gives_its_lease_back	D	1.18	nothing to rebuild → release lease
+runtime_handoff	an_adopted_resume_before_exit_does_not_answer_background_work	G	4.92	interactive background-work dialog
+runtime_handoff	an_adopted_resume_with_an_unsent_exit_does_not_answer_background_work	G	4.78	interactive screens
+runtime_handoff	auto_update_builds_runtime_landings_and_retries_on_the_answer	D	2.42	runtime-vs-docs path decision, retry on answer
+runtime_handoff	canceling_a_handoff_during_a_landing_resumes_claims_without_exec	D	7.68	withdrawn request → resume claims
+runtime_handoff	reviews_still_running_at_the_exec_are_stopped_and_run_again	B	0.00	stops live review processes at exec
+runtime_handoff	reviews_that_end_while_a_handoff_waits_are_applied_in_the_wait	B	0.00	review job processes across handoff wait
+runtime_handoff	reviews_that_ended_before_the_exec_are_applied_not_run_again	R	0.00	same review/handoff boundary
+runtime_handoff	taking_a_handoff_requires_the_same_token_and_binary_and_beats_cancellation	B	0.11	SQLite take vs cancel race
+runtime_headless	a_headless_run_lands_after_its_first_turn	B	2.29	representative headless turn process
+runtime_headless	a_later_turn_is_the_runs_agent_and_its_helper_no_idle_process	B	6.29	process tree / agent pid
+runtime_headless	a_parked_run_is_resumed_with_a_turn_of_the_same_session	R	5.10	resume covered
+runtime_headless	a_receipt_written_as_its_turn_ends_is_not_nudged	D	2.39	recheck receipt after idle ordering
+runtime_headless	a_revise_is_sent_to_the_same_session_as_a_resume	R	2.82	resume covered; cost delta decision
+runtime_headless	a_stop_answer_ends_the_headless_session_and_its_run_goes_to_recovery	R	1.81	exit request boundary; answer mapping
+runtime_headless	a_stop_answer_to_a_run_out_of_its_slot_waits_for_the_slot	D	4.56	slot gating decision
+runtime_headless	a_turn_past_its_limit_is_stopped_with_its_command_outside_its_group	B	9.08	process groups and signals
+runtime_headless	a_turn_started_in_another_permission_mode_is_stopped	D	1.88	permission mode mismatch rule
+runtime_headless	a_turn_that_ends_by_itself_leaves_what_runs_outside_its_group	B	2.59	orphan/process group behavior
+runtime_headless	a_turn_that_failed_at_the_login_holds_the_queue_until_a_person_logs_in	D	2.99	login failure → auth ask
+runtime_headless	a_turn_without_a_receipt_is_nudged_then_its_recovery_job_instructs_it	D	3.27	nudge count → recovery
+runtime_headless	a_worker_question_is_answered_by_a_resume_of_the_same_session	B	2.90	representative resume of session
+runtime_headless	an_adopter_does_not_send_a_stalled_answer_already_requested	B	2.29	representative adopt
+runtime_headless	an_adopter_sends_a_stalled_answer_not_yet_requested	R	2.29	adopt covered; request-written decision
+runtime_headless	refused_permissions_go_to_the_recovery_job_whose_escalation_asks_a_person	D	3.03	denial count → recovery
+runtime_headless	the_exit_request_stops_a_turn_with_its_command_outside_its_group	R	1.69	process group stop covered
+runtime_headless_jobs	a_timed_out_review_stops_the_processes_it_started	B	2.92	process group kill
+runtime_headless_jobs	an_adopter_stops_the_review_a_dead_supervisor_left_and_only_its_own_runs	B	2.72	pid reuse, process stop on adopt
+runtime_headless_reopen	a_notice_whose_send_failed_is_sent_again	G	2.38	interactive send retry
+runtime_headless_reopen	a_question_closed_without_its_answer_is_told_as_the_next_turn	D	2.86	notice instead of nudge, once
+runtime_headless_reopen	a_session_lost_during_its_wait_is_opened_again_and_takes_the_answer	B	3.41	lost wrapper process, reopen with resume
+runtime_headless_reopen	a_session_lost_in_the_middle_of_a_turn_is_opened_again_once_the_turn_ended	B	3.67	orphan turn process liveness
+runtime_headless_reopen	a_session_that_cannot_be_opened_again_goes_to_its_recovery_job	D	4.63	three-attempt bound
+runtime_headless_reopen	a_turn_outliving_its_lost_wrapper_past_its_limit_goes_to_recovery	D	5.05	time limit judgment
+runtime_headless_reopen	an_interactive_session_is_told_of_its_closed_question_in_place_of_the_nudge	G	2.39	interactive typed notice
+runtime_headless_reopen	the_queue_forgets_only_the_lost_wrapper_and_takes_the_reopened_one	B	0.10	SQLite wrapper registration semantics
+runtime_headless_stall	a_failed_or_unsure_recovery_job_of_a_headless_stall_asks_a_person	D	3.38	verdict confidence -> ask
+runtime_headless_stall	an_adopter_opens_the_next_ask_of_a_closed_intervene_once	D	2.85	adopt-state -> next step
+runtime_headless_stall	an_adopter_opens_the_next_ask_of_an_intervene_a_person_closed	D	2.76	adopt-state -> next step
+runtime_headless_stall	an_adopter_reopens_a_headless_stalled_ask_left_answered_intervene	B	2.62	adopt representative for stall asks
+runtime_headless_stall	an_intervene_answer_closes_the_headless_stalled_ask_and_opens_another	D	2.07	answer->action mapping
+runtime_headless_stall	an_intervene_text_is_not_sent_and_the_next_ask_takes_an_instruction	D	2.69	answer parsing decision
+runtime_heartbeat	a_busy_heartbeat_is_tried_again_and_its_failures_are_recorded	B	0.83	real SQLite lock busy
+runtime_heartbeat	a_registration_gone_from_the_queue_stops_the_supervisor	D	0.27	lost registration → stop
+runtime_heartbeat	busy_writes_that_would_let_the_leases_go_stale_stop_the_supervisor	R	1.01	same busy-lock boundary; stop threshold decision
+runtime_heartbeat	the_supervisor_policy_retries_until_the_leases_would_go_stale	D	0.02	pure HeartbeatPolicy test living in it
+runtime_host_metrics	a_failed_sample_stops_nothing	B	3.48	panic isolation and unwritable dir in supervisor wiring
+runtime_host_metrics	supervisor_records_the_host_load_while_it_runs_and_prunes_old_files	B	0.74	files written/pruned on disk by running supervisor
+runtime_integrate	a_failed_push_keeps_the_landing_and_waits_as_attention	D	2.47	push failure -> attention
+runtime_integrate	a_later_landing_pushes_both_commits_before_the_first_push_finishes	B	4.23	concurrent push ordering
+runtime_integrate	a_refused_renumbering_commit_is_undone_and_needs_a_session	B	5.29	git commit refusal and undo
+runtime_integrate	conflict_free_run_lands_as_one_squash_commit_and_releases_dependents	B	3.34	real squash landing
+runtime_integrate	failing_verification_command_passes_validation_and_needs_a_session_at_integrate	D	2.85	where verification runs/outcome
+runtime_integrate	git_adapter_checks_whether_a_later_remote_head_contains_the_landing	B	2.87	real git ancestry
+runtime_integrate	git_adapter_pushes_main_to_a_bare_origin	B	4.98	real git push
+runtime_integrate	git_adapter_reads_what_the_renumbering_plan_needs	B	0.36	git --no-renames reading
+runtime_integrate	integrate_records_the_requester_and_the_integrator	D	2.44	actor attribution
+runtime_integrate	integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once	D	3.12	follow-up registration once
+runtime_integrate	integrate_renumbers_a_migration_whose_number_main_took	B	4.13	git commit of renumber
+runtime_integrate	integration_slot_is_exclusive_and_an_abandoned_landing_is_recoverable	B	5.26	process death, lease recovery
+runtime_integrate	moved_queue_directory_resolves_run_paths_and_lands_awaiting_runs	B	3.15	filesystem path resolution
+runtime_integrate	prompt_describes_landed_predecessors_and_sibling_tasks_in_progress	D	4.89	prompt composition
+runtime_integrate	prompt_snapshots_the_goal_at_claim_time	D	4.46	prompt snapshot timing
+runtime_integrate	rebind_follows_a_moved_repository_and_the_awaiting_run_lands	B	3.13	moved repo on filesystem
+runtime_integrate	rebind_is_refused_while_a_run_is_integrating	D	2.17	refusal rule
+runtime_integrate	review_writes_a_non_utf8_diff_as_raw_bytes	B	2.07	git raw bytes
+runtime_integrate	review_writes_the_run_material_to_review_md_and_returns_only_its_size	B	2.85	filesystem material file
+runtime_integrate	runs_land_fifo_by_validation_time_and_later_ones_are_rebased	B	4.38	real rebase and linear main
+runtime_integrate	successor_starts_when_the_predecessor_receipt_is_unavailable	D	4.67	missing receipt fallback
+runtime_integrate	the_landing_is_pushed_to_the_remote_dagq_toml_names	R	3.54	remote choice; push covered
+runtime_integrate	verification_failure_after_rebase_needs_a_session_and_keeps_the_rebased_tree	B	5.01	worktree state after rebase
+runtime_job_verdicts	a_broken_long_background_recovery_verdict_stops_nothing_and_opens_the_stalled_ask	G	3.79	interactive long_background alert
+runtime_job_verdicts	a_broken_prompt_waiting_recovery_verdict_answers_nothing_and_opens_the_answer_prompt_ask	G	3.56	interactive prompt_waiting dialog
+runtime_job_verdicts	a_broken_stuck_exit_recovery_verdict_closes_nothing_and_opens_the_stuck_exit_ask	G	2.40	interactive stuck_exit alert
+runtime_job_verdicts	a_concern_is_asked_at_the_review_jobs_request	D	1.91	verdict → ask mapping
+runtime_job_verdicts	a_passing_review_does_not_land_a_run_its_landing_does_not_verify	B	3.17	landing runs real verification process after review
+runtime_job_verdicts	a_recovery_verdict_is_applied_only_when_it_holds_and_a_broken_one_fails_closed	D	3.60	verdict validation → fail closed
+runtime_job_verdicts	a_review_verdict_with_an_unknown_field_asks_a_person_and_lands_nothing	D	2.62	verdict parse → action mapping
+runtime_job_verdicts	a_revise_past_its_limit_is_asked_at_the_review_jobs_request	D	3.39	revise count limit
+runtime_job_verdicts	an_adopted_concern_is_asked_at_the_review_jobs_request	D	0.89	recorded attempt → ask decision
+runtime_landing_answers	a_cancel_answer_is_applied_while_the_slot_is_taken	D	4.46	answer → action
+runtime_landing_answers	a_land_answer_is_applied_while_another_run_integrates	D	4.74	integration slot rule
+runtime_landing_answers	a_land_answer_is_applied_while_the_slot_is_taken_and_lands_before_a_new_claim	D	6.52	answer application vs slot ordering
+runtime_landing_answers	approved_runs_wait_for_the_landing_and_land_oldest_approval_first_once	B	4.49	cross-supervisor landing + run.env program
+runtime_landing_release	a_dead_landing_is_not_released_while_a_process_works_in_its_worktree	B	5.37	real process cwd detection in worktree
+runtime_landing_release	a_draining_supervisor_releases_a_dead_landing_and_leaves_it_queued	D	2.54	drain release decision
+runtime_landing_release	a_landing_that_died_after_its_rebase_lands_the_rebased_head	B	4.46	git rebased head recognition
+runtime_landing_release	a_landing_that_reached_main_before_its_supervisor_died_is_not_landed_twice	B	4.05	git: commit already on main detection
+runtime_landing_release	a_live_supervisors_landing_and_its_processes_are_left_alone	D	4.42	liveness heartbeat judgment
+runtime_landing_release	a_passed_run_a_person_recovered_from_its_landing_is_queued_to_land	D	4.20	recover state decision
+runtime_landing_release	a_passed_run_whose_landing_died_is_released_and_lands_again	B	4.13	representative dead-supervisor recovery + relanding
+runtime_landing_release	a_process_past_its_grace_is_stopped_and_the_dead_landing_released	B	4.52	kill by pid; grace is decision part
+runtime_landing_release	a_process_that_outlives_its_stop_is_the_inboxs_once	D	10.68	attention once decision (10.7s)
+runtime_landing_release	a_run_neither_approved_nor_passed_is_reviewed_again_once_its_landing_died	D	4.43	release action by approval state
+runtime_landing_release	processes_unlisted_past_twice_the_grace_are_the_inboxs_once	D	4.08	time/grace judgment; pure
+runtime_light_slots	a_parked_run_waits_for_a_normal_slot_while_the_landing_queue_fills_it	D	7.16	slot allocation and resume ordering
+runtime_light_slots	the_landing_queue_leaves_room_for_light_tasks_only	D	5.86	slot allocation policy
+runtime_observer	a_failing_supervisor_leaves_no_observer_process	B	3.44	orphan process cleanup on error
+runtime_observer	a_handoff_leaves_no_observer_process	B	2.09	orphan cleanup on exec handoff
+runtime_observer	an_observer_at_a_login_that_ran_out_joins_the_authentication_ask	D	1.19	wall classification to hold ask
+runtime_observer	observe_counts_the_findings_the_observer_closed_and_no_other_close	D	0.67	counting closed findings
+runtime_observer	observe_kills_an_agent_past_its_timeout_with_its_children	B	5.56	process group kill
+runtime_observer	observe_reads_again_what_others_wrote_while_its_agent_ran	D	1.22	skip/run decision on cursor
+runtime_observer	observe_reads_the_forecast_errors_and_a_forecast_breach_becomes_a_forecast_finding	D	0.73	forecast scoring/breach kind
+runtime_observer	observe_reads_the_kpis_and_the_improvements_and_keeps_one_kpi_finding_per_subject	D	0.90	kpi input and finding dedupe
+runtime_observer	observe_records_findings_and_a_blocked_ask_and_advances_the_cursor	B	2.02	agent process runs dagq via service, cursor
+runtime_observer	observe_starts_again_for_an_alert_that_time_alone_raised	D	1.34	alert change decision
+runtime_observer	observe_uses_only_the_selected_cmux_for_workspace_listing	G	0.83	cmux workspace listing
+runtime_observer	observer_uses_the_supplied_providers_failure_signals	D	0.38	provider signal mapping
+runtime_observer	observer_walls_read_both_streams_and_ignore_successful_output	D	3.71	wall classification from output
+runtime_observer	supervisor_starts_the_observer_on_its_interval_without_a_run_slot	B	9.16	supervisor wiring of observer job
+runtime_observer	the_observer_reads_what_its_prompt_left_out_and_the_prompt_bytes_are_recorded	D	1.29	prompt truncation by byte limit
+runtime_observer	the_observer_takes_its_role_table_and_records_what_it_started_with	D	1.06	role table to model/effort
+runtime_open_turn	a_resumed_session_at_work_on_a_notice_after_its_idle_is_not_ended	G	5.20	interactive idle/input markers
+runtime_open_turn	a_revised_session_at_work_on_a_notice_after_its_idle_is_not_ended	G	3.49	interactive idle/input markers
+runtime_precheck	a_precheck_conflict_after_the_counted_resumes_asks_a_person	D	1.24	counted resumes → ask decision
+runtime_precheck	precheck_conflicts_up_to_the_conflict_only_limit_retry_the_task_with_its_branch	B	10.28	real git rebase conflict precheck representative
+runtime_precheck	the_conflict_only_limit_of_dagq_toml_retries_the_task_sooner	D	6.75	configured limit counting
+runtime_provider_switch	a_claude_turn_at_its_usage_limit_moves_to_codex_and_lands	B	2.82	new session in same worktree via other provider
+runtime_provider_switch	a_codex_task_without_codex_starts_on_claude_and_lands	B	2.34	executable missing on host
+runtime_provider_switch	a_codex_that_does_not_start_moves_its_run_to_claude	R	2.48	launch failure; covered in codex module/start
+runtime_provider_switch	a_codex_that_does_not_start_while_claude_is_held_waits_in_the_hold_ask	D	2.66	wait vs move decision
+runtime_provider_switch	a_codex_turn_at_its_usage_limit_moves_to_claude_without_an_ask	D	4.09	hold/no-ask decision
+runtime_provider_switch	a_run_out_of_switches_waits_on_codexs_hold_and_retries_at_its_reset	D	4.79	reset time parse and retry
+runtime_provider_switch	a_run_switches_twice_at_most_and_then_waits_in_the_hold_ask	D	3.67	switch count limit
+runtime_provider_switch	an_interactive_claude_session_at_its_limit_moves_to_headless_codex	G	4.56	interactive worker
+runtime_provider_switch	no_claude_hands_ended_recovery_to_a_person_without_calling_a_job	D	1.37	policy -> ask
+runtime_provider_switch	no_claude_routes_a_worker_to_codex_and_releases_it_for_manual_landing	D	3.80	policy routing
+runtime_provider_switch	no_claude_waits_on_codex_limit_then_retries_codex_without_a_claude_hold	D	3.80	hold decision
+runtime_provider_switch	no_claude_without_codex_claims_nothing_and_reports_manual_policy	D	0.31	policy -> no claim
+runtime_provider_switch	with_neither_provider_a_task_waits_until_one_can_take_it	D	2.43	claim hold decision
+runtime_push	a_breach_is_recorded_once_per_start	B	0.08	two supervisors race on DB
+runtime_push	a_failing_command_is_retried_then_told_once_and_cleared_by_a_success	D	4.07	retry/notify state machine
+runtime_push	the_daily_summary_and_a_breach_reach_the_command_once	B	2.11	external command invocation
+runtime_push	without_push_nothing_is_called_nor_recorded	D	2.79	config off decision
+runtime_queue_hold	an_open_usage_limit_ask_holds_claims_and_reviews_until_done	D	3.84	open ask → hold claims/reviews decision
+runtime_queue_hold	cancel_affected_gives_the_held_runs_up	G	1.73	interactive held session cancel
+runtime_queue_hold	done_starts_again_the_recovery_job_that_failed_during_the_hold	D	2.09	answer → restart job decision
+runtime_queue_hold_detect	an_idle_session_at_the_usage_limit_joins_the_cost_ask	G	1.56	interactive_workers idle session
+runtime_queue_hold_detect	reviews_stopped_at_a_login_join_one_ask_and_review_again_after_done	B	6.11	review jobs wiring, restart after done
+runtime_queue_hold_detect	runs_and_jobs_join_the_one_ask_of_their_wall	D	0.10	hold ask join logic
+runtime_queue_hold_shared	cancel_affected_gives_up_the_held_runs_of_every_supervisor	B	2.90	two supervisors on one queue
+runtime_queue_hold_shared	done_tells_the_held_sessions_of_every_supervisor_to_go_on	R	4.86	same two-supervisor boundary
+runtime_queue_hold_shared	the_answered_ask_waits_for_the_runs_another_live_supervisor_leases	D	3.13	ask close condition over leases
+runtime_recheck	a_direct_integrate_rechecks_the_waiting_runs_on_the_next_pass	D	6.65	main moved → recheck due
+runtime_recheck	a_due_recheck_names_the_landing_main_is_at_when_it_starts	D	6.54	landing attribution
+runtime_recheck	a_main_already_rechecked_is_not_rechecked_again	D	3.17	already-checked main rule
+runtime_recheck	a_new_supervisor_rechecks_against_a_main_that_moved_before_it_started	D	4.01	main moved → recheck due
+runtime_recheck	a_run_held_in_its_slot_that_a_landing_conflicts_with_is_parked_before_it_lands	G	6.08	interactive held /exit
+runtime_recheck	a_run_that_starts_waiting_after_main_moved_is_rechecked_by_the_same_supervisor	D	2.67	recheck due rule
+runtime_recheck	a_waiting_run_that_a_landing_conflicts_with_is_resumed_before_its_answer	B	6.07	real git merge-tree conflict
+runtime_recheck	a_waiting_run_that_still_lands_is_left_waiting	D	4.80	clean recheck → no action
+runtime_recheck	a_waiting_run_whose_check_fails_on_the_new_main_is_resumed	B	5.25	recheck command on merged tree
+runtime_recheck	another_live_supervisor_does_not_keep_a_moved_main_from_being_rechecked	D	2.21	no election rule
+runtime_recheck	another_supervisors_recheck_of_main_leaves_the_runs_this_one_holds_to_check	G	4.32	interactive held /exit
+runtime_recheck	no_recheck_starts_while_another_supervisor_holds_the_recheck_lock	B	5.13	cross-supervisor lock
+runtime_release	a_binary_answer_applied_by_its_own_build_is_not_about_the_plugin	D	0.97	plugin_only decision
+runtime_release	a_development_build_and_release_off_do_not_look	D	0.58	build/config gate
+runtime_release	a_development_build_applies_no_release_answer	D	0.27	build gate
+runtime_release	a_look_by_another_supervisor_within_the_interval_is_not_repeated	D	0.61	interval decision
+runtime_release	a_new_release_opens_one_approve_release_and_a_newer_one_supersedes_it	D	0.74	ask open/supersede decision
+runtime_release	a_plugin_answer_applied_by_another_build_stays_about_the_plugin	D	0.33	plugin_only decision
+runtime_release	a_plugin_dir_supervisor_leaves_the_installed_plugin	D	0.56	plugin-dir gate
+runtime_release	a_plugin_install_behind_a_newer_release_is_dropped_with_its_reason	D	0.53	drop decision newer_release
+runtime_release	a_plugin_older_than_the_latest_binary_is_asked_about_and_updated_alone	R	0.98	plugin update commands run; decision plugin_only
+runtime_release	a_release_build_records_the_latest_release_and_asks_about_it	B	0.36	representative release index fetch via supervise
+runtime_release	a_skipped_release_is_not_asked_about_again	D	0.95	skip decision
+runtime_release	an_ask_without_its_purpose_is_about_the_plugin_only_on_its_own_build	D	0.56	parametric plugin_only decision
+runtime_release	an_index_that_cannot_be_read_is_recorded_and_asks_nothing	R	0.62	fetch failure path; decision no ask
+runtime_release	an_interrupted_release_job_is_reported_not_retried	D	0.55	interrupted stage from event sequence
+runtime_release	doctor_warns_of_a_wrong_update_value_taken_as_its_default	D	0.34	config validation warnings
+runtime_release	past_the_interval_the_etag_is_sent_and_a_304_keeps_the_last_result	D	0.32	etag/304 handling
+runtime_release	release_auto_installs_without_asking	D	0.69	auto mode decision
+runtime_release	the_install_answer_starts_the_job_and_retry_and_skip_follow_its_failure	B	1.50	cargo install job process
+runtime_repair	a_live_escalation_is_recorded_at_the_recovery_jobs_request_unless_the_job_failed	D	6.85	attribution of events
+runtime_repair	a_long_background_alert_is_repaired_by_stopping_the_orphan_of_the_worktree	G	3.30	interactive worker (orphan stop boundary)
+runtime_repair	a_long_process_that_uses_cpu_time_is_not_an_idle_process_alert	R	3.72	threshold decision; sampling covered
+runtime_repair	a_process_without_cpu_progress_is_an_idle_process_alert_for_the_recovery_job	B	3.31	real process CPU sampling and stop
+runtime_repair	a_recovery_repair_of_a_process_outside_the_run_becomes_an_ask	D	3.40	verdict validation -> ask
+runtime_repair	a_recovery_repair_of_low_confidence_becomes_an_ask	D	3.34	confidence -> ask
+runtime_repair	background_work_left_after_the_receipt_is_a_long_background_alert_for_the_recovery_job	G	3.27	interactive worker
+runtime_report	a_report_is_recorded_once	B	0.08	two writers dedupe in DB
+runtime_report	supervisor_writes_the_reports_it_owes_once_and_prunes_old_ones	B	1.90	report files written and pruned
+runtime_report	the_backfill_stops_at_the_retention_and_old_temporary_files_go	D	0.52	retention/backfill window decision
+runtime_report	the_reports_carry_the_dependency_diagram_or_why_not	B	2.53	external d2/TALA on PATH
+runtime_resume	a_request_left_in_the_input_box_gets_enter_again_not_the_text	G	5.75	cmux keystrokes/input box
+runtime_resume	a_request_lost_twice_is_asked_to_the_inbox	G	5.67	interactive send confirmation
+runtime_resume	a_request_stuck_in_the_input_box_is_asked_to_the_inbox	G	5.78	cmux input box send confirmation
+runtime_resume	a_resume_whose_lease_moved_is_resumed_again_only_after_its_slot_is_dropped	R	7.87	same lease/slot race as runtime_adopt takes_back
+runtime_resume	a_resumed_session_gets_its_request_only_once_its_input_box_is_ready	G	7.45	cmux input box readiness
+runtime_resume	a_resumed_session_that_ignores_exit_is_let_go	G	7.63	interactive /exit timeout
+runtime_resume	a_run_parked_again_after_a_skip_is_resumed_not_skipped	D	5.69	skip-once state decision
+runtime_resume	a_run_whose_conflict_only_resumes_are_used_up_is_retried_with_its_branch	D	6.22	counting already unit tested in domain::resume
+runtime_resume	a_run_with_a_dirty_worktree_is_resumed	B	4.67	skip conditions read from real worktree state
+runtime_resume	a_session_nobody_watches_blocks_the_resume_until_it_ends	B	6.79	live process of dead supervisor's resume
+runtime_resume	a_skipped_run_whose_supervisor_died_is_adopted	R	5.30	adoption covered in runtime_adopt
+runtime_resume	a_used_up_run_is_retried_with_its_branch_by_its_recovery_job	D	5.69	alert routing and retry_inherit decision
+runtime_resume	an_approved_run_resolved_by_an_earlier_resume_lands_without_a_session	D	5.05	skip conditions; unit test already exists
+runtime_resume	an_unapproved_run_resolved_by_an_earlier_resume_is_validated_without_a_session	D	5.33	skip + approval branching
+runtime_resume	approved_needs_session_run_is_resumed_until_the_runtime_lands_it	R	7.06	resume wiring covered by conflicting_run
+runtime_resume	conflicting_run_needs_a_session_and_lands_after_the_session_resolves_it	B	5.36	real git conflict, session resolves, lands
+runtime_resume	failed_receipt_from_a_session_ends_the_run_without_landing	D	3.75	failed receipt → no landing
+runtime_resume	no_claude_leaves_an_old_claude_resume_for_manual_recovery	D	3.76	policy → leave for manual decision
+runtime_resume	resumed_session_with_a_failed_receipt_fails_the_run	D	5.23	failed receipt → run failed
+runtime_resume	resuming_stops_after_three_attempts	D	5.82	attempt limit
+runtime_resume	stats_ties_a_deferred_landing_to_the_landing_that_broke_it	D	7.08	stats attribution computation
+runtime_resume	unapproved_resumed_run_is_validated_and_reviewed_with_its_session_open	R	6.25	resume wiring covered; approval branching decision
+runtime_resume_adopt	a_resume_taken_over_after_a_handoff_in_its_slot_does_not_record_its_dialog_again	G	6.29	interactive screen watch
+runtime_resume_adopt	a_resume_taken_over_after_a_handoff_keeps_its_dialog_and_clears_it_at_its_end	G	6.67	interactive dialog carryover (module says goal 92)
+runtime_resume_adopt	a_resume_taken_over_after_a_handoff_times_its_exit_from_the_recorded_request	G	4.14	interactive /exit timing
+runtime_resume_adopt	an_adopted_resume_in_its_slot_does_not_record_its_dialog_again	G	5.73	interactive dialog
+runtime_resume_adopt	an_adopted_resume_keeps_its_dialog_and_clears_it_at_its_end	G	7.02	interactive dialog
+runtime_resume_adopt	an_adopted_resume_times_its_exit_from_the_recorded_request	G	5.38	interactive /exit timing
+runtime_resume_exit_retry	a_resume_taken_over_after_a_handoff_carries_its_exit_retries_on	G	5.66	interactive exit retries
+runtime_resume_exit_retry	a_resume_taken_over_after_a_retry_answered_a_dialog_does_not_retry_anew	G	5.74	interactive exit retries
+runtime_resume_exit_retry	a_resumed_sessions_held_exit_is_typed_again_into_a_ready_input_box	G	6.83	interactive exit typing
+runtime_resume_exit_retry	an_adopted_resume_carries_its_exit_retries_on	G	5.37	interactive exit retries
+runtime_resume_exit_retry	an_unsent_exit_of_a_resumed_session_is_retried	G	5.05	interactive exit retries
+runtime_resume_exit_retry	used_up_retries_of_an_unreviewed_resume_go_to_the_stuck_exit_ask	G	5.92	interactive exit retries
+runtime_resume_exit_retry	used_up_retries_over_a_dialog_close_a_reviewed_resume_and_judge_it	G	7.04	interactive exit retries
+runtime_review	a_concern_sent_back_is_resumed_reviewed_again_and_landed	D	4.31	send_back answer → park/resume
+runtime_review	a_dialog_while_revising_is_recorded_as_prompt_waiting	G	3.92	interactive dialog screen
+runtime_review	a_failed_review_closes_the_session_and_asks_a_person_in_the_same_step	D	2.21	failure → ask
+runtime_review	a_failed_review_span_ends_with_its_job_not_with_the_exit	D	1.86	span end + retry once rule
+runtime_review	a_later_concern_closes_the_earlier_landing_ask_and_asks_again	D	3.30	ask close/open rule
+runtime_review	a_passing_review_exits_the_live_session_and_lands_it	B	2.48	representative review → land wiring
+runtime_review	a_revise_receipt_for_another_commit_is_sent_back_to_the_session_until_it_names_head	D	3.30	receipt HEAD check
+runtime_review	a_revise_verdict_is_fixed_by_the_live_session_and_reviewed_again	R	3.31	resume covered; revise loop decision
+runtime_review	a_run_the_supervisor_lands_closes_its_landing_ask	D	3.99	ask close rule
+runtime_review	a_session_idle_before_its_agent_is_registered_waits_for_the_agent_and_lands	G	3.29	interactive worker race
+runtime_review	a_third_review_that_does_not_pass_asks_a_person_and_land_lands_it	D	4.00	revise count limit → ask
+runtime_review	a_worker_question_asked_while_revising_is_answered_and_the_run_lands	D	3.76	question vs idle classification
+runtime_review	integrate_by_hand_closes_the_landing_and_blocked_asks_of_the_run	D	2.30	ask close rule on integrate
+runtime_review	the_default_test_reviewer_skips_retry_but_still_asks_after_its_job	R	1.84	fixture behavior; failure ask covered
+runtime_review_adopt	an_adopted_exit_after_a_failed_review_ask_times_out_from_its_recorded_request	G	1.27	interactive /exit timeout
+runtime_review_adopt	an_adopted_exit_after_a_passed_review_times_out_from_its_recorded_request	G	1.66	interactive /exit timeout
+runtime_review_adopt	an_adopted_revise_in_its_slot_does_not_record_its_dialog_again	G	2.88	interactive dialog adopt
+runtime_review_adopt	an_adopted_revise_keeps_the_dialog_recorded_before_and_clears_it_at_its_end	G	3.67	interactive dialog adopt
+runtime_review_adopt	an_adopted_revise_leaves_a_dialog_recorded_before_its_request	G	3.58	interactive dialog adopt
+runtime_review_adopt	an_adopter_asks_when_an_unsent_exit_to_land_no_longer_holds	G	1.65	interactive /exit adopt
+runtime_review_adopt	an_adopter_closes_and_lands_a_run_whose_unsent_exit_was_to_land	G	1.46	interactive /exit adopt
+runtime_review_adopt	an_adopter_keeps_an_unreviewed_head_on_the_stuck_exit_path_while_the_workspace_is_listed	G	1.39	interactive stuck exit
+runtime_review_adopt	an_adopter_parks_an_unreviewed_head_for_a_resume_when_the_workspace_is_gone	G	1.69	interactive workspace/exit
+runtime_review_adopt	an_adopter_takes_the_session_as_ended_when_the_workspace_of_an_unsent_exit_is_gone	G	1.69	interactive workspace/exit
+runtime_review_background	a_marker_without_running_background_work_is_idle	G	3.65	interactive idle marker
+runtime_review_background	a_revise_session_that_holds_exit_back_raises_a_stuck_exit_ask	G	3.05	interactive stuck_exit
+runtime_review_background	background_work_holds_the_exit_after_the_review	G	2.68	interactive /exit hold
+runtime_review_background	background_work_holds_the_first_session_until_it_ends	G	2.09	interactive session background-work marker
+runtime_review_background	background_work_holds_the_resumed_session_until_it_ends	G	5.17	interactive resumed session
+runtime_review_background	background_work_holds_the_revise_until_it_ends	G	3.26	interactive revise session
+runtime_review_background	background_work_that_never_ends_is_waited_for_up_to_the_resume_timeout	G	4.54	interactive background wait timeout
+runtime_review_concern	a_discard_concern_asks_a_person_with_the_recommendation	D	1.97	concern to ask mapping (unit tests exist)
+runtime_review_concern	a_high_land_lands_the_run_without_an_ask	B	2.46	representative review concern wiring to landing
+runtime_review_concern	a_high_land_of_a_run_that_needs_the_e2e_runs_it_before_landing	B	2.74	e2e process ordering before landing
+runtime_review_concern	a_high_send_back_revises_the_live_session	D	2.62	concern to revise decision
+runtime_review_concern	an_adopter_asks_as_the_concern_when_the_session_does_not_fix_its_send_back	G	3.28	interactive_workers
+runtime_review_concern	an_adopter_asks_with_the_reasons_of_the_subagent_that_sent_the_run_back	D	2.03	ask wording from subagent reasons
+runtime_review_concern	an_adopter_decides_a_concern_left_by_a_dead_supervisor	B	1.49	representative adopt of concern verdict
+runtime_review_concern	an_adopter_records_a_send_back_left_unrecorded_by_a_dead_supervisor	D	1.00	adopter backfill decision
+runtime_review_concern	an_applied_send_back_the_session_did_not_fix_asks_as_the_concern	D	1.88	ask after unfixed send_back
+runtime_review_conflict	a_conflict_request_that_cannot_be_sent_is_withdrawn_and_the_run_lands	G	2.55	interactive typing failure
+runtime_review_conflict	a_passed_run_that_conflicts_with_main_is_rebased_by_its_live_session_and_lands	B	3.41	git merge-tree precheck
+runtime_review_conflict	a_passed_run_that_merges_cleanly_with_main_lands_without_a_request	R	2.42	no-conflict branch; precheck covered
+runtime_review_conflict	a_revise_that_cannot_be_sent_is_withdrawn_and_asks_a_person	G	1.83	interactive typing failure
+runtime_review_conflict	an_adopted_conflict_request_the_session_never_got_is_sent_again_and_lands	G	3.89	interactive input box resend
+runtime_review_conflict	an_adopted_request_already_sent_again_is_not_sent_a_third_time	G	3.09	interactive resend
+runtime_review_conflict	an_adopted_request_lost_again_is_asked_to_the_inbox	G	3.65	interactive resend
+runtime_review_conflict	an_adopted_revise_the_session_never_got_is_sent_again_and_lands	G	3.70	interactive input box resend
+runtime_review_conflict	an_adopted_run_with_a_pending_conflict_request_waits_without_sending_it_again	G	2.82	interactive typed requests
+runtime_review_conflict	an_adopted_run_with_a_pending_revise_waits_without_sending_it_again	G	2.74	interactive typed requests
+runtime_review_conflict	an_adopted_run_with_a_withdrawn_revise_asks_a_person_without_sending_it	D	1.71	adopt-state -> ask decision
+runtime_review_exit	a_failed_stuck_exit_job_opens_the_stuck_exit_ask_answered_exit	G	2.46	interactive stuck exit
+runtime_review_exit	a_failed_stuck_exit_job_opens_the_stuck_exit_ask_answered_wait	G	2.37	interactive stuck exit
+runtime_review_exit	a_stuck_exit_after_a_pass_is_closed_and_landed_by_its_recovery_job	G	1.89	interactive stuck exit
+runtime_review_exit	a_stuck_exit_repair_that_does_not_hold_becomes_the_stuck_exit_ask	G	1.87	interactive stuck exit
+runtime_review_exit	adopted_run_waiting_for_its_exit_after_a_pass_asks_once_and_lands	G	2.34	interactive stuck exit adopt
+runtime_review_exit	an_exit_that_never_got_there_asks_for_a_passed_run_whose_worktree_changed	G	2.55	interactive /exit delivery
+runtime_review_exit	an_exit_that_never_got_there_asks_for_a_run_that_cannot_land	G	2.05	interactive /exit delivery
+runtime_review_exit	an_exit_that_never_got_there_asks_when_the_workspace_cannot_be_closed	G	2.70	cmux workspace close
+runtime_review_exit	an_exit_that_never_got_there_closes_a_sound_passed_run_and_lands_it	G	2.56	interactive /exit delivery
+runtime_review_exit	an_exit_that_timed_out_before_reaching_the_session_is_sent_again	G	2.35	interactive /exit delivery
+runtime_review_questions	a_mismatched_receipt_rewritten_after_an_open_question_is_judged	D	3.41	mismatch judgment
+runtime_review_questions	a_question_open_from_before_the_revise_does_not_hold_an_idle_session	D	2.46	hold decision
+runtime_review_questions	a_question_open_from_before_the_revise_does_not_stop_its_resume_timeout	D	4.52	timeout judgment
+runtime_review_questions	a_question_passed_by_a_rewritten_receipt_does_not_hold_its_fix	D	2.32	hold decision
+runtime_review_questions	a_receipt_rewritten_after_an_open_question_is_judged	D	3.05	receipt-after-question judgment
+runtime_review_questions	an_answer_to_a_question_from_before_the_revise_is_left_to_the_inbox	D	3.94	ask-age -> delivery decision
+runtime_review_questions	an_answer_whose_send_outlasts_the_turn_settles_the_revise_at_its_idle	G	3.82	interactive typed answer timing
+runtime_review_questions	an_open_question_without_a_rewritten_receipt_holds_past_the_resume_timeout	D	4.47	timeout hold decision
+runtime_review_reasons	a_concern_canceled_records_the_cancel	D	1.69	answer → outcome mapping
+runtime_review_reasons	a_concern_landed_records_the_departure_accepted	D	2.14	answer → outcome mapping
+runtime_review_reasons	a_concern_sent_back_records_its_codes_and_outcome_and_stats_tally_them	B	3.81	representative review job output parsed into events
+runtime_run_env	a_broken_dagq_toml_stops_provisioning_before_the_workspace	D	0.11	parse error → stop
+runtime_run_env	a_missing_run_env_program_holds_resumes_until_it_is_found	D	5.32	hold decision on missing program
+runtime_run_env	a_missing_run_env_program_stops_claims_and_landings_until_it_is_found	B	3.26	real PATH program lookup representative
+runtime_run_env	a_repository_without_dagq_toml_checks_no_program	D	2.32	no config → no check
+runtime_run_env	a_resumed_session_gets_the_run_env_too	R	5.00	same env boundary for resume
+runtime_run_env	dagq_toml_run_env_reaches_the_workspace_and_the_verification_commands	B	2.43	env reaches spawned processes
+runtime_run_env	supervisor_starts_and_run_env_changes_are_recorded_as_marks_once	D	3.01	change-detection of marks
+runtime_run_files	a_fifo_request_does_not_hold_the_wrapper	B	1.42	O_NONBLOCK FIFO open in wrapper
+runtime_run_files	fifo_markers_do_not_block_supervisor_passes	B	2.98	FIFO filesystem behaviour
+runtime_run_files	linked_exit_and_temporary_files_leave_the_target_untouched	B	2.40	symlink write safety on real fs
+runtime_run_files	linked_markers_are_not_read_by_the_supervisor	B	2.75	symlink handling on real fs
+runtime_run_files	linked_run_or_turns_directories_are_never_used_by_run_files	B	0.03	directory symlink rejection on real fs
+runtime_sccache	a_wrapper_other_than_sccache_is_left_alone	D	0.32	wrapper detection; pure
+runtime_sccache	the_supervisor_starts_a_missing_server_outside_the_sandbox_and_records_it	B	3.16	spawn stub sccache, loopback port probe
+runtime_sccache	turns_and_reviews_without_a_confirmed_server_run_without_the_wrapper	D	2.87	env decision without confirmed server
+runtime_screen_idle	a_first_session_whose_hook_could_not_write_its_marker_is_validated_by_its_screen	G	2.10	cmux screen idle inference
+runtime_screen_idle	a_first_session_with_its_marker_is_judged_by_the_marker	G	1.84	interactive marker vs screen
+runtime_screen_idle	a_first_session_without_its_marker_is_nudged_when_idle_without_a_receipt	G	2.02	cmux screen idle inference
+runtime_screen_idle	a_markerless_session_at_a_dialog_is_not_idle	G	2.44	cmux screen idle inference
+runtime_screen_idle	a_markerless_session_at_work_is_not_idle	G	2.43	cmux screen idle inference
+runtime_screen_idle	a_markerless_session_that_shows_background_work_is_not_idle	G	2.71	cmux screen idle inference
+runtime_screen_idle	a_markerless_session_whose_screen_cannot_be_read_is_not_idle	G	2.56	cmux screen idle inference
+runtime_screen_idle	a_resumed_session_without_its_marker_ends_its_stage_by_its_screen	G	4.61	cmux screen idle inference
+runtime_screen_idle	a_revised_session_without_its_marker_ends_its_revise_by_its_screen	G	3.07	cmux screen idle inference
+runtime_screen_idle_input	a_markerless_first_session_at_a_dialog_gets_no_answer	G	3.01	cmux screen
+runtime_screen_idle_input	a_markerless_first_session_gets_its_answer_once_its_screen_rests	G	3.01	cmux screen/keystrokes
+runtime_screen_idle_input	a_markerless_first_session_whose_screen_cannot_be_read_gets_no_answer	G	3.14	cmux screen
+runtime_screen_idle_input	a_markerless_resumed_session_gets_its_answer_once_its_screen_rests	G	6.75	cmux screen
+runtime_screen_idle_input	a_markerless_revised_session_gets_its_answer_once_its_screen_rests	G	5.12	cmux screen
+runtime_screen_idle_input	a_markerless_session_has_its_dialog_cleared_once_its_screen_rests	G	2.54	cmux screen dialog
+runtime_screen_idle_input	an_instruction_does_not_reach_a_markerless_session_at_work	G	3.65	cmux screen
+runtime_screen_idle_input	an_instruction_reaches_a_markerless_session_whose_screen_rests	G	3.15	cmux screen
+runtime_session	a_background_work_dialog_after_exit_is_answered_when_the_receipt_is_at_head	G	2.17	interactive dialog keys
+runtime_session	a_background_work_dialog_over_a_dirty_worktree_is_left_to_the_ask	G	2.50	interactive dialog keys
+runtime_session	a_compatible_migration_during_a_run_leaves_the_run_working	B	1.74	migration during live run, older binaries
+runtime_session	a_dialog_goes_to_its_recovery_job_before_the_inbox	G	4.50	interactive screen dialog
+runtime_session	a_dialog_on_the_screen_is_asked_once_and_cleared	G	3.37	interactive screen dialog
+runtime_session	a_failed_answer_delivery_is_left_to_the_inbox	G	2.56	interactive cmux send
+runtime_session	a_refused_run_wrapper_closes_its_workspace_the_run_does_not_record	G	0.08	session-wrapper workspace
+runtime_session	a_settings_panel_found_by_the_start_check_is_closed_with_escape	G	3.06	interactive keys
+runtime_session	a_settings_panel_is_closed_with_escape	G	2.87	interactive keys
+runtime_session	a_settings_panel_over_a_typed_answer_is_closed_with_escape	G	2.04	interactive keys
+runtime_session	a_stub_agent_dies_with_its_fixture_and_holds_no_stream_of_the_test	B	0.10	process group, fds of stub
+runtime_session	an_answer_is_typed_after_the_settings_panel_over_the_box_is_closed	G	1.85	interactive keys
+runtime_session	an_answered_worker_question_is_typed_into_the_idle_worker_and_closed	G	3.32	interactive typed answer
+runtime_session	an_idle_marker_after_a_typed_answer_counts_for_idle	G	3.61	interactive idle marker
+runtime_session	an_unknown_dialog_over_a_typed_answer_gets_no_key	G	2.10	interactive keys
+runtime_session	claude_stop_hook_settings_publish_the_idle_marker	D	0.32	settings JSON content generation
+runtime_session	dirty_worktree_fails_validation	R	1.54	git status real; decision is rejection
+runtime_session	exit_requested_precedes_a_session_exit_that_beats_the_send	G	1.66	interactive exit send
+runtime_session	failed_workspace_close_is_recorded_without_changing_run_status	G	1.62	workspace close failure
+runtime_session	idle_marker_after_receipt_triggers_exit_request_and_run_finishes	G	1.82	interactive idle/exit
+runtime_session	missing_or_stale_idle_marker_does_not_request_exit	G	4.64	interactive idle marker
+runtime_session	missing_receipt_fails_validation	G	1.76	interactive_workers
+runtime_session	receipt_commit_that_is_not_branch_head_fails_validation	D	1.97	receipt validation rejection reason
+runtime_session	receipt_structure_is_checked_before_git	D	0.02	pure Receipt::parse/check in it
+runtime_session	receipt_without_new_commit_fails_validation	D	1.82	receipt validation rejection reason
+runtime_session	run_id_mismatch_fails_validation	D	1.85	receipt validation rejection reason
+runtime_session	sessions_stopped_at_the_same_login_share_one_authentication_ask	G	3.08	interactive screen login
+runtime_session	the_first_commit_is_observed_once_while_the_session_works	B	2.11	polling worktree HEAD during live run
+runtime_session	unanswered_exit_request_times_out_and_keeps_the_run	G	3.77	interactive /exit stuck
+runtime_session	valid_receipt_is_verified_and_awaits_integration	B	2.14	representative receipt + git + processes
+runtime_slot_limits	a_flag_wins_over_the_table_and_the_default_is_four	D	2.58	flag/table/default precedence
+runtime_slot_limits	the_supervisor_table_sets_parallel_and_max_waiting_and_is_read_again	B	3.02	dagq.toml reread by running supervisor
+runtime_slot_limits	the_supervisor_table_sets_runtime_planners_and_is_read_again	R	1.54	reread covered; value resolution decision
+runtime_stale_receipt	a_receipt_for_the_head_is_not_asked_to_be_rewritten	D	1.85	receipt==HEAD no nudge
+runtime_stale_receipt	a_resumed_session_idle_after_its_rebase_with_the_old_receipt_is_asked_once	D	6.09	nudge on resume phase
+runtime_stale_receipt	a_resumed_session_that_leaves_the_old_receipt_ends_its_attempt_as_before	D	7.11	attempt outcome unresolved
+runtime_stale_receipt	a_session_idle_with_a_stale_receipt_is_asked_once_and_the_rewrite_goes_on	B	2.38	representative stale-receipt nudge with git
+runtime_stale_receipt	a_stale_receipt_left_as_it_is_goes_on_as_before	D	2.29	no repeat nudge decision
+runtime_stale_receipt	a_stale_receipt_left_during_a_wait_is_unchanged	D	7.12	outcome judgement across wait
+runtime_stale_receipt	a_stale_receipt_rewritten_during_a_wait_is_rewritten	D	6.38	outcome judgement across wait
+runtime_stall	a_receiptless_idle_is_nudged_once_and_the_receipt_resolves_it	G	2.21	nudge typed into interactive session
+runtime_stall	a_session_idle_after_its_nudge_gets_one_stalled_ask_and_its_answers_are_applied	G	4.15	interactive nudge/stalled ask
+runtime_stall	a_stalled_ask_closed_after_wait_is_asked_again	G	2.84	interactive stalled ask
+runtime_stall	a_worker_idle_at_its_question_is_not_nudged	G	2.24	session idle/nudge concept interactive only
+runtime_stall	an_adopted_stalled_session_is_neither_nudged_nor_asked_again	G	2.27	interactive nudge after adoption
+runtime_stall	an_idle_session_at_a_login_that_ran_out_waits_in_the_authentication_ask	G	2.48	interactive idle screen login
+runtime_stall	an_input_the_supervisor_did_not_send_holds_the_nudge_and_is_preempted	G	7.48	person typing into cmux session
+runtime_stall	an_input_whose_turn_never_ended_is_nudged_past_the_threshold	G	2.68	interactive Esc/idle marker
+runtime_stall_end	an_abandoned_run_closes_its_answered_stalled_ask_and_ends_its_nudge	D	0.30	detection end outcome mapping
+runtime_stall_end	recover_closes_the_stalled_ask_and_ends_its_detections_once	B	0.33	recover command closes ask, end records
+runtime_stall_recovery	a_failed_stalled_job_raises_the_stalled_ask	G	3.28	interactive stall recovery
+runtime_stall_recovery	a_recovery_job_of_low_confidence_raises_one_stalled_ask_that_closes_when_the_session_moves	G	3.51	interactive stall recovery
+runtime_stall_recovery	a_repair_whose_precondition_fails_raises_the_stalled_ask	G	2.64	interactive stall recovery
+runtime_stall_recovery	a_send_the_job_cannot_repair_becomes_the_stalled_ask_in_the_first_session	G	2.80	cmux send repair
+runtime_stall_recovery	a_send_the_session_did_not_take_is_repaired_by_the_recovery_job	G	3.16	cmux send not taken
+runtime_stall_recovery	a_stall_past_its_three_recovery_jobs_is_asked_without_a_fourth	G	6.54	interactive stall recovery (limit decision)
+runtime_stall_recovery	a_stalled_session_the_job_resumes_is_parked_resumed_and_lands	G	3.58	interactive stalled session resume
+runtime_stall_recovery	an_adopted_stall_whose_job_waits_gets_no_second_nudge_job_or_ask	G	2.27	interactive nudge after adoption
+runtime_stall_recovery	an_escalated_recovery_job_raises_the_stalled_ask_with_its_category	G	2.96	interactive stall recovery
+runtime_stall_recovery	an_idle_after_the_nudge_is_repaired_by_the_recovery_job_without_an_ask	G	2.62	interactive stall recovery
+runtime_stall_recovery	an_instruction_reaches_a_session_whose_interrupted_turn_left_no_idle_marker	G	4.78	interactive idle marker/instruction send
+runtime_support	a_stuck_tool_is_killed_and_reaped	B	0.23	kill and reap stuck child
+runtime_support	a_wrapped_tool_that_is_missing_counts_as_not_found	D	0.05	exit 127 classification
+runtime_support	failed_tool_reports_output_and_tries_the_fallback	D	0.07	fallback decision on failure
+runtime_support	missing_tools_do_not_stop_cleanup	B	0.02	spawn missing executable
+runtime_support	supervise_timeout_prints_stacks_before_cleanup	B	4.19	child process timeout prints stacks
+runtime_sweep	a_completed_task_loses_the_worktrees_of_all_its_runs	R	3.37	which worktrees go; removal covered
+runtime_sweep	a_task_over_loses_the_claude_scratchpads_of_its_runs	B	2.11	filesystem, symlink not followed
+runtime_sweep	an_ended_run_with_a_stale_lease_is_swept_but_not_one_with_a_live_lease	D	2.59	lease liveness -> sweep decision
+runtime_sweep	build_outputs_that_cannot_be_removed_are_retried_by_the_sweep	D	1.96	once-per-process failure record/retry
+runtime_sweep	ended_runs_lose_their_build_outputs_and_canceled_tasks_their_worktrees	B	7.95	filesystem and git worktree removal
+runtime_sweep	the_supervisor_closes_the_session_spans_of_gone_inbox_and_planner_workspaces	G	0.50	cmux workspace listing of planners
+runtime_sweep	the_sweep_closes_every_workspace_left_open_by_a_landed_run	G	3.01	worker/resume cmux workspaces
+runtime_sweep	the_sweep_closes_the_records_of_planners_whose_workspace_and_wrapper_are_gone	G	0.47	planner cmux workspaces
+runtime_sweep	the_sweep_closes_the_workspaces_of_failed_runs_the_triage_does_not_take	G	4.56	worker cmux workspaces
+runtime_sweep	the_sweep_removes_the_runners_of_planners_whose_wrapper_is_done	D	0.35	wrapper done -> remove runner
+runtime_throughput_review	a_failed_review_is_recorded_and_told_to_the_inbox_as_a_notice	D	1.03	failure outcome mapping
+runtime_throughput_review	a_failing_review_stops_no_claim_nor_landing	R	2.86	supervisor wiring covered; isolation decision
+runtime_throughput_review	a_preparation_failure_is_finished_once_and_told_to_the_inbox	D	0.66	failure outcome recording
+runtime_throughput_review	an_hour_a_rule_meets_is_reviewed_saved_and_told_to_the_inbox_and_the_job_only_reads	B	1.19	agent run, files, service refusals
+runtime_throughput_review	an_hour_no_rule_meets_starts_no_agent	D	0.51	hourly trigger rule
+runtime_throughput_review	the_daily_and_weekly_reviews_of_inputs_of_mbs_start_their_agent_with_a_small_prompt	D	5.09	prompt size decision
+runtime_throughput_review	the_reply_uses_only_stdout_for_text_and_structured_providers	R	1.39	stdout parse; decision of reply format
+runtime_throughput_review	the_supervisor_starts_each_review_due_once_without_a_run_slot	B	2.01	supervisor wiring of review jobs
+runtime_throughput_review	the_weekly_review_records_its_next_move_as_a_finding_marked_for_a_proposal	D	0.87	weekly output to finding
+runtime_triage	a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited	D	6.69	round limit decision
+runtime_triage	a_dead_run_nobody_leases_is_recovered_triaged_and_retried	B	2.75	dead wrapper recovery
+runtime_triage	a_dead_run_whose_dead_supervisor_still_leases_it_is_recovered_and_retried	R	2.93	stale lease variant
+runtime_triage	a_failed_run_the_recovery_job_resumes_is_resumed_in_its_session_and_lands	R	3.15	resume verdict; recovery covered
+runtime_triage	a_failed_run_without_commits_is_retried_by_its_recovery_job_and_lands	B	3.28	recovery job representative
+runtime_triage	a_resumed_session_with_a_silent_wrapper_is_asked_to_exit_then_let_go	G	4.69	interactive /exit
+runtime_triage	a_retry_of_a_run_with_commits_is_refused_and_asked_with_the_jobs_options	D	1.53	verdict guard -> ask
+runtime_triage	a_revise_for_an_adopted_run_whose_wrapper_died_asks_a_person	D	0.90	no session -> ask
+runtime_triage	a_silent_wrapper_after_the_review_waits_for_the_exit_with_an_ask	G	4.87	interactive /exit
+runtime_triage	a_silent_wrapper_that_dies_after_the_exit_closes_its_ask	G	2.29	interactive /exit
+runtime_triage	a_silent_wrapper_whose_process_is_gone_is_given_up_as_before	G	1.39	interactive worker
+runtime_triage	a_silent_wrapper_with_a_live_session_is_asked_to_exit_then_raised_to_the_inbox	G	2.72	interactive /exit
+runtime_triage	a_triage_whose_lease_moved_is_triaged_again_only_after_its_slot_is_dropped	B	5.22	lease race between supervisors
+runtime_triage	a_wait_runs_the_job_again_and_a_low_confidence_repair_is_asked	D	1.04	wait/confidence decisions
+runtime_triage	an_adopted_run_whose_concern_was_asked_waits_for_the_ask	D	0.79	adopt-state -> next step
+runtime_triage	an_adopted_run_whose_failed_review_ask_was_answered_has_the_answer_applied	D	0.43	adopt-state -> next step
+runtime_triage	an_adopted_run_whose_failed_review_ask_was_closed_is_reviewed_again	D	0.98	adopt-state -> next step
+runtime_triage	an_adopted_run_whose_failed_review_was_asked_waits_for_the_ask	D	0.45	adopt-state -> next step
+runtime_triage	an_adopted_run_whose_failed_review_was_recorded_is_not_recorded_again	D	0.45	adopt-state -> next step
+runtime_triage	an_adopted_run_whose_retried_review_was_asked_records_the_second_attempt	D	0.44	attempt numbering
+runtime_triage	an_awaiting_run_whose_supervisor_and_wrapper_died_is_adopted_reviewed_and_landed	B	1.07	adopt representative
+runtime_triage	an_escalation_waits_for_a_person_and_the_supervisor_applies_the_answer	D	1.41	answer -> action
+runtime_triage	recover_releases_the_stale_lease_of_an_awaiting_run_for_integrate	B	0.73	recover CLI on stale lease
+runtime_triage	retry_inherit_carries_the_branch_over_once_and_a_failed_job_is_recovered_by_hand	B	2.31	branch carried over in git
+runtime_triage	triage_answers_resume_the_run_or_ready_the_task	D	1.23	answer validation and mapping
+runtime_verify_flaky	a_failed_retry_resumes_and_a_later_landing_can_retry_again	D	2.07	retry budget per landing
+runtime_verify_flaky	a_failure_that_is_not_flaky_is_resumed_at_once	D	1.75	flaky classification
+runtime_verify_flaky	a_flaky_retry_keeps_coverage_and_host_failures	D	3.46	failure classification
+runtime_verify_flaky	only_flaky_tests_failing_lands_the_run_once_more_without_a_resume	B	1.84	representative verification rerun with logs
+runtime_verify_flaky	the_supervisor_lands_a_run_with_only_flaky_failures_once_more	R	1.86	same retry under supervisor
+runtime_verify_retry	a_command_past_its_whole_limit_is_a_timeout_failure	B	4.10	real timeout kill of command
+runtime_verify_retry	a_command_that_failed_on_the_host_is_retried_and_lands_when_it_passes	B	1.91	representative real command retry with own log
+runtime_verify_retry	a_command_that_fails_on_the_host_again_waits_for_a_person_without_a_resume	D	2.20	second failure → hold mapping
+runtime_verify_retry	a_failure_of_the_code_is_resumed_as_before	D	1.92	failure class → resume
+runtime_verify_retry	a_full_disk_without_room_is_held_without_a_retry	D	1.58	free space threshold judgment
+runtime_waiting	a_landing_run_fills_its_supervisors_slot_in_status_and_stats	D	3.46	slot accounting
+runtime_waiting	a_returning_run_counts_toward_the_limit	D	3.34	counting toward limit
+runtime_waiting	a_run_waiting_for_its_answer_leaves_the_slot_to_another_task	B	3.46	representative wait outside slot with supervisor
+runtime_waiting	a_stuck_exit_waits_outside_the_slot_until_its_session_exits	G	3.71	interactive stuck /exit
+runtime_waiting	a_wait_is_taken_over_after_a_handoff	R	2.30	handoff continuation covered elsewhere
+runtime_waiting	a_wrapper_heartbeat_that_comes_back_lets_the_run_wait_again	G	2.13	interactive workers
+runtime_waiting	a_wrapper_that_dies_during_a_wait_ends_it_as_the_sessions_end	G	2.88	interactive stuck_exit wait
+runtime_waiting	a_wrapper_that_goes_silent_during_a_wait_sends_the_run_back_for_its_exit	B	1.78	wrapper heartbeat vs live pid
+runtime_waiting	an_adopted_run_keeps_waiting_outside_the_slot	R	3.20	adoption boundary; wait rebuild decision
+runtime_waiting	no_wait_without_a_limit	D	2.52	limit 0 branch
+runtime_waiting	sessions_a_person_moved_go_back_at_once	G	4.63	interactive dialog screens
+runtime_waiting	the_waits_stay_within_their_limit	D	4.12	max-waiting limit
+runtime_waiting_stages	a_question_while_resuming_waits_outside_the_slot_and_gets_its_answer	R	13.35	same wait wiring; clock/slot decisions (13s)
+runtime_waiting_stages	a_question_while_revising_waits_outside_the_slot_with_its_clock_stopped	B	10.90	representative slot/wait wiring with concurrent task
+runtime_waiting_stages	a_resume_question_past_the_limit_waits_in_its_slot_with_its_clock_stopped	D	14.56	limit -> deferred decision (15s)
+runtime_waiting_stages	an_adopted_revise_keeps_waiting_outside_the_slot	G	4.67	interactive_workers adopt path
+runtime_workspace_cleanup	ended_runs_workspaces_are_listed_then_closed_by_run_task_or_all	G	5.08	cmux run workspaces cleanup
+shell_leftovers	a_file_wait_ends_when_its_parent_is_gone	B	0.07	parent death detection
+shell_leftovers	a_file_wait_ends_when_the_tests_directory_is_gone	B	0.28	filesystem/process leftover cleanup
+shell_leftovers	a_file_wait_returns_once_the_file_is_there	B	0.04	shell helper filesystem wait
+shell_leftovers	a_waiting_headless_turn_and_its_child_die_with_the_fixture	B	0.20	process group teardown
+shell_leftovers	a_waiting_headless_turn_and_its_child_die_with_their_test_process	B	0.77	orphan process group kill
+source_repository	install_without_from_builds_only_dagqs_source	B	0.30	CLI reads Cargo.toml on filesystem, exit
+source_repository	up_auto_update_needs_dagqs_source	B	0.30	up starts/refuses supervisor process
+stub_templates	concurrent_processes_share_a_warmed_inode_but_keep_paths_and_values_private	B	0.33	concurrent processes, inode sharing
+test_actor_env	the_actor_env_is_dropped_unless_the_command_sets_it	B	0.02	test helper env of child process
+test_actor_env	the_actor_env_is_the_callers_identity	B	0.02	test helper env of child process
+throughput_review_codex	a_codex_review_at_the_usage_limit_says_codex_cannot_be_used	D	1.34	usage-limit to provider_unusable
+throughput_review_codex	a_codex_that_does_not_start_cannot_be_used	D	0.39	start error wording
+throughput_review_codex	a_handed_over_codex_review_that_found_codex_unusable_holds_codex	B	1.52	exec handoff reaps reviews
+throughput_review_codex	a_no_claude_supervisor_never_moves_a_failed_codex_review_to_claude	D	1.03	provider fallback decision
+throughput_review_codex	a_no_claude_supervisor_runs_the_reviews_set_to_codex	D	1.46	provider selection under --no-claude
+throughput_review_codex	a_review_no_provider_can_run_records_why	D	0.31	provider selection none
+throughput_review_codex	a_throughput_review_on_codex_reads_its_last_message_like_claude_s_output	B	2.21	codex exec args/profile/cwd
+throughput_review_codex	the_command_with_a_codex_gone_records_that_codex_cannot_be_used	R	0.40	CLI command path; decision same
+worker_escalation	a_concern_sent_back_resumes_one_step_higher	D	2.26	failure kind → step
+worker_escalation	a_conflict_resume_keeps_the_step	D	2.38	failure kind → step (queue call only)
+worker_escalation	a_failed_verification_resumes_one_step_higher	D	2.63	failure kind → step
+worker_escalation	a_kill_keeps_the_step	D	2.63	failure kind → step
+worker_escalation	a_raised_resume_starts_the_session_higher_and_stats_reads_it	B	4.70	wrapper launched with raised model
+worker_escalation	a_retry_inherits_the_raised_step	D	0.07	inheritance of step
+worker_escalation	a_revise_whose_session_cannot_be_switched_goes_on_unraised	G	2.83	interactive model switch
+worker_escalation	a_switch_left_in_the_input_box_asks_a_person_without_typing_the_revise	G	1.69	interactive input box
+worker_escalation	missing_evidence_and_a_scope_violation_keep_the_step	D	5.30	loop of decision cases
+worker_model	a_codex_run_is_outside_the_trial	D	0.17	trial exclusion decision
+worker_model	claims_choose_the_session_in_their_transaction	B	0.11	choice inside claim transaction
+worker_model	stats_compare_the_groups	D	0.14	stats aggregation
+worker_model	the_trial_alternates_the_mechanical_tasks_of_the_lower_third	D	3.22	trial alternation decision via supervisor
+worker_model	workers_start_at_opus_medium_by_default	B	1.57	representative: argv model/effort at start + claim record
