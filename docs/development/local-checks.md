@@ -4,7 +4,7 @@ type: development
 title: このrepositoryの手元の検証（人とworkerが流すもの、testの範囲、stress、e2eを流さないこと、resumeでの再現、受け入れ条件の対応づけ、askにしないもの）
 status: current
 created: 2026-10-03
-updated: 2026-10-04 # task 1546
+updated: 2026-10-04 # task 1463
 owners:
   - hisamekms
 tags:
@@ -43,7 +43,7 @@ dagqのworkerは全体の`cargo test --locked`を流さず、`cargo llvm-cov`（
 - taskのverifyのうちcoverageの関門（`cargo llvm-cov nextest`。ADR-0076より前に登録されたtaskの`cargo llvm-cov`も同じ）と全体の`cargo test --locked`以外（`cargo test --locked --test plugin`など）
 - 足した・変えたtestのstress（下の「stress」）
 
-全部のtestは`integrate`の検証（runtimeのtaskでは`cargo llvm-cov nextest`（coverageの関門）、llvm-covを含めないtaskではverifyにあれば`cargo test --locked`）がrebase後に1回だけ流す（仕組みは[integrate](../design/supervisor-lifecycle/integrate.md)と[Validation](../design/supervisor-lifecycle/validation.md)）。workerのpromptがverification_commandsを`integrate`が流すものとして見せ、手元の検証をこの文書に委ねる仕組みは[prompt](../design/supervisor-lifecycle/prompt.md)の「repositoryの規則を読む順」が持つ。例外は「resumeでの再現」の1つだけ。
+全部のtestは`integrate`の検証（runtimeのtaskでは`cargo llvm-cov nextest`（coverageの関門）、llvm-covを含めないtaskではverifyにあれば`cargo test --locked`）がrebase後に1回だけ流す（仕組みは[integrate](../design/supervisor-lifecycle/integrate.md)と[Validation](../design/supervisor-lifecycle/validation.md)）。workerのpromptがverification_commandsを`integrate`が流すものとして見せ、手元の検証をこの文書に委ねる仕組みは[prompt](../design/supervisor-lifecycle/prompt.md)の冒頭（`# Prompt`の節）のverification commandsの段落が持つ。例外は「resumeでの再現」の1つだけ。
 
 subagent reviewは該当するときに実行し、しないときは理由をreceiptに書く。
 

@@ -4,7 +4,7 @@ type: development
 title: このrepositoryのtaskの登録（verify・paths・evidence・changeの選び方、ADRを書くtask、plan reviewが当てはめる規則）
 status: current
 created: 2026-10-03
-updated: 2026-10-04 # task 1546
+updated: 2026-10-04 # task 1463
 owners:
   - hisamekms
 tags:
@@ -39,7 +39,6 @@ related:
 
 llvm-covとcargo testの重ね方:
 
-- runtime（`src/`）を触るtaskは、verificationに`cargo llvm-cov nextest --locked --workspace --fail-under-lines 80`を含める。
 - llvm-covをverificationに含めるtaskでは`cargo test --locked`をverificationに重ねない。llvm-covは`cargo test`と同じtest binary群を全部実行し1件でも落ちれば失敗するので（[testの制約](testing.md)の「test binary」）、両方を並べてもintegrateの直列の検証で同じtestが2回走る（約100秒）だけで検出力は増えない。
 - llvm-covを含めないtask（docs・pluginの文書など）は、必要なら`cargo test --locked`をverificationに残す。
 
@@ -85,8 +84,8 @@ runtimeのtaskは`--paths`を宣言しない（上の「推奨の組み合わせ
 
 この repository のplan review jobは、proposalのtaskに次を当てはめる（読む文書はAGENTS.mdの「plan review」が名指す）。
 
-- verify・paths・evidenceは上の推奨の組み合わせに合い、changeは`dagq.toml`の`[tasks] changes`の7値のうちtaskの主な目的に合う1つであること。runtimeのtaskは`cargo llvm-cov nextest --locked --workspace --fail-under-lines 80`を持ち、llvm-covと`cargo test --locked`を重ねず、migrationを足すなら`check-migration-numbers.sh`を持つ。e2eの要否は差分からruntimeが決めるので、runtimeのtaskに一律の`--evidence e2e`は求めない。付いていれば`[e2e] paths`の外でも実cmuxで確かめる理由がdescriptionにあるかを見る。
+- verify・paths・evidenceは上の「推奨の組み合わせ」（llvm-covと`cargo test`の重ね方を含む）と「e2e」に合い、changeは上の「change」のとおりtaskの主な目的に合う1つであること。`--evidence e2e`が付いていれば、`[e2e] paths`の外でも実cmuxで確かめる理由がdescriptionにあるかを見る。
 - 測定のtask（changeが`measure`のtaskと、受け入れ条件に測定を含むtask）は、周回数（と交互に流すか）、表の列、値の計算式（何を何で割るか、待ちを引くときの区間）、証拠の所在（文書の節・CSV・script・コマンドと時刻の区切り）をacceptanceかdescriptionに書くこと（測定の形に当たらない項目、例えば1回だけ読む測定の周回数は、当たらない理由を書く）。条件の範囲を「同じ形のもの」で広げるtaskは、範囲を決めるgrepか一覧を書くこと。欠けていれば`revise`（workerはこれらを根拠に受け入れ条件の各項目を対応づける。[ADR-t1420-1](../adr/2026-10-03-t1420-1-worker-maps-each-acceptance-criterion-before-the-receipt.md)）。
 - [ADRの索引](../adr/README.md)と、taskが名指すADRと`docs/design/`の文書を読み、`accepted`のADRの決定と矛盾するtaskは`concern`にする（`superseded`なら`superseded_by`を辿る）。
 - ADRを書くtaskが上の「ADRを書くtask」を満たすこと（IDとファイル名の形、`check-adr-numbers.sh`のverify、置き換えか`amends`か）。足りなければ`revise`。
-- 挙動や仕様を変えるtaskは、関連文書（`docs/design/`・pluginのskillとreference・AGENTS.md・`docs/development/`・ADRの索引）のpath・節と更新が要る理由をdescriptionかcontextに書くこと。欠けていて関連する文書が明らかなら、見つけたpathを理由に書いて`revise`にする。文書の差分を求めるverifyやevidenceは求めない（[ADR-t1428-1](../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)）。
+- 挙動や仕様を変えるtaskは、関連文書（[文書の規則](documents.md)の「workerの文書の照合」が挙げる文書）のpath・節と更新が要る理由をdescriptionかcontextに書くこと。欠けていて関連する文書が明らかなら、見つけたpathを理由に書いて`revise`にする。文書の差分を求めるverifyやevidenceは求めない（[ADR-t1428-1](../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)）。

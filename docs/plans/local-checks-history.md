@@ -4,7 +4,7 @@ type: plan
 title: AGENTS.mdの「変更後に必ず通す」「テストの制約」から移した手元の検証とtestの規則の経緯
 status: completed
 created: 2026-10-03
-updated: 2026-10-03
+updated: 2026-10-04 # task 1463
 owners:
   - hisamekms
 tags:
@@ -27,7 +27,7 @@ goal 94のtask 1457が、AGENTS.mdの「変更後に必ず通す」「テスト�
 
 2026-09-26に人がplannerと決めた（task 528）。理由: workerの全体の`cargo test`はintegrateのllvm-covと同じtestを全部流すので重複で、testファイルを分けてtest binaryが増えたぶんbuildとlinkが重く（その後ADR-0078でintegration testを1つのbinaryにまとめた）、hostのloadとworkerのwork時間を押し上げていた。変更前の基準値は2026-09-26の`dagq stats`の直近46 runで、work中央値1439秒、startup中央値1172秒、land_phases.verify中央値276秒。失敗の発見がintegrateに移るコストは、task 514の検証の重複の回数と、integrateの検証の失敗率（resume）で変更の前後を見て判断する。
 
-workerのpromptはverification_commandsをintegrateが流すものとして見せ、手元の検証をrepositoryの文書に委ねる（task 510。今の仕組みは[prompt](../design/supervisor-lifecycle/prompt.md)の「repositoryの規則を読む順」）。
+workerのpromptはverification_commandsをintegrateが流すものとして見せ、手元の検証をrepositoryの文書に委ねる（task 510。今の仕組みは[prompt](../design/supervisor-lifecycle/prompt.md)の冒頭（`# Prompt`の節）のverification commandsの段落）。
 
 ## 全体を比べる既存のtestも流す（A-064）
 
