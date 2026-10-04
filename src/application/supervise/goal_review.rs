@@ -316,6 +316,7 @@ impl Supervisor<'_> {
             goal_review_prompt(&GoalReviewMaterial {
                 goal: serde_json::to_value(&detail.goal)?,
                 tasks,
+                follow_ups: detail.follow_up_memberships.clone(),
                 events,
                 previous,
                 gaps_in_a_row: job.gaps_in_a_row,

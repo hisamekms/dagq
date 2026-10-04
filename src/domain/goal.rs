@@ -216,6 +216,28 @@ pub fn ready(mut goal: Goal) -> Result<Goal, DomainError> {
     Ok(goal)
 }
 
+/// Whether the follow-ups whose source goal is `goal_id` let it close with
+/// `verdict` (ADR-t1504-2 decision 8): `achieved` needs every one that is
+/// not completed or canceled judged, rechecked after the last change of the
+/// acceptance, and, when required, a task of the goal; `abandoned` claims
+/// nothing and waits for none.
+pub fn check_follow_ups(
+    goal_id: GoalId,
+    verdict: GoalVerdict,
+    follow_ups: &[super::follow_up::SourceFollowUp],
+) -> Result<(), DomainError> {
+    if verdict != GoalVerdict::Achieved {
+        return Ok(());
+    }
+    let unsettled = super::follow_up::unsettled_follow_ups(follow_ups);
+    require(unsettled.is_empty(), || {
+        DomainError::GoalFollowUpsUnsettled {
+            goal_id,
+            follow_ups: unsettled,
+        }
+    })
+}
+
 /// Close `goal` with `verdict` at `closed_at`, its tasks numbering `counts`
 /// by status. A goal is closed once; the rejection names the statuses that
 /// do not allow the verdict.
@@ -474,6 +496,38 @@ mod tests {
             .to_string(),
             "goal title must not be blank"
         );
+    }
+
+    #[test]
+    fn only_achieved_waits_for_the_follow_ups_membership() {
+        use crate::domain::follow_up::{MembershipClassification, SourceFollowUp};
+        let unjudged = SourceFollowUp {
+            task: crate::domain::TaskId::new(9),
+            status: TaskStatus::Draft,
+            in_goal: false,
+            judgement: None,
+        };
+        let goal = GoalId::new(7);
+        assert_eq!(
+            check_follow_ups(goal, GoalVerdict::Achieved, std::slice::from_ref(&unjudged))
+                .unwrap_err()
+                .to_string(),
+            "goal 7 cannot be closed as achieved: its follow-up(s) 9 not judged; \
+             record their membership with judge-follow-up"
+        );
+        assert!(
+            check_follow_ups(
+                goal,
+                GoalVerdict::Abandoned,
+                std::slice::from_ref(&unjudged)
+            )
+            .is_ok()
+        );
+        let out_of_scope = SourceFollowUp {
+            judgement: Some((1, MembershipClassification::OutOfScope, false)),
+            ..unjudged
+        };
+        assert!(check_follow_ups(goal, GoalVerdict::Achieved, &[out_of_scope]).is_ok());
     }
 
     #[test]

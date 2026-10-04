@@ -3198,12 +3198,14 @@ fn plan_review_text(material: &PlanReviewMaterial<'_>, sections: &PlanSections) 
 }
 
 /// What the goal review job is shown about one goal (ADR-0047 decision
-/// 43): the goal, each of its tasks with what landed for it, the goal's
-/// notes and edits, and the goal's earlier reviews. Each value is one
-/// JSON line of the prompt.
+/// 43): the goal, each of its tasks with what landed for it, the
+/// follow-ups found from it with their membership judgements (ADR-t1504-2),
+/// the goal's notes and edits, and the goal's earlier reviews. Each value
+/// is one JSON line of the prompt.
 pub struct GoalReviewMaterial<'a> {
     pub goal: Value,
     pub tasks: Vec<Value>,
+    pub follow_ups: Vec<Value>,
     pub events: Vec<Value>,
     pub previous: Vec<Value>,
     pub gaps_in_a_row: usize,
@@ -3232,9 +3234,12 @@ pub fn goal_review_prompt(material: &GoalReviewMaterial<'_>) -> String {
         "You are the goal review of the dagq queue, a headless job. Every task of goal {goal_id} ended (completed or canceled): judge whether the goal met its acceptance. Change nothing: read the repository's documents and source in {repo} (the main checkout, where the tasks landed) and run read-only dagq commands (`dagq show ID`, `dagq goal show {goal_id} --full`, `dagq findings`, `dagq events --goal {goal_id} --full`, `dagq search ...`) as you need.\n\n\
          The goal:\n{goal}\n\n\
          Its tasks, each with the run that landed it (the receipt's summary, its evidence and its follow_ups) when it was completed by a run:\n{tasks}\n\n\
+         The follow-ups registered from its tasks' receipts, or that belong to it now, wherever they belong (goal_id), with their membership judgements (classification, the acceptance items, reason, evidence, acceptance_version against current_acceptance_version, needs_recheck):\n{follow_ups}\n\n\
          The goal's notes, edits and earlier decisions:\n{events}\n\n\
          The goal's earlier reviews (gaps verdicts in a row before this one: {gaps}; after {max} in a row a gaps verdict is turned into a question to a person):\n{previous}\n\n\
-         Split the acceptance into its items and check each against what landed, with evidence you saw (a commit, a file, a test, a receipt). Then answer one of:\n\
+         Split the acceptance into its items and check each against what landed, with evidence you saw (a commit, a file, a test, a receipt). \
+         A follow-up judged out_of_scope is not part of the acceptance: leave its work out of your judgement and do not wait for it or list it as a gap. A follow-up judged required is part of it: judge the goal with its work, as with the goal's own tasks. \
+         The runtime starts this review only when each follow-up of the goal that is not completed or canceled is judged against the current acceptance. Then answer one of:\n\
          - achieved: every item is met. The runtime closes the goal as achieved and records your criteria.\n\
          - gaps: some items are not met and the work to meet them is clear and within the goal. List each missing piece as a gap with a title and a description a planner can turn into a task; the runtime registers each as a draft of the goal and a planner of the runtime decides it. The goal stays open.\n\
          - ask: only when a person has to decide: the acceptance should change, the goal should be abandoned or split, or you cannot judge it. Write the question; the person answers achieved, abandoned, gaps (the gaps you listed, or `gaps: <what>`) or keep_open. reason_category is scope (the acceptance, the scope or a decision changes) or discard (work would be thrown away).\n\n\
@@ -3244,6 +3249,7 @@ pub fn goal_review_prompt(material: &GoalReviewMaterial<'_>) -> String {
         repo = material.repo_root.display(),
         goal = lines(std::slice::from_ref(&material.goal)),
         tasks = lines(&material.tasks),
+        follow_ups = lines(&material.follow_ups),
         events = lines(&material.events),
         previous = lines(&material.previous),
         gaps = material.gaps_in_a_row,
@@ -4829,6 +4835,33 @@ mod tests {
             .collect()
     }
 
+    /// The goal review is shown the goal's follow-ups and told that an
+    /// out-of-scope one is left out of the acceptance and a required one is
+    /// judged with it (ADR-t1504-2 decision 8).
+    #[test]
+    fn the_goal_review_judges_required_follow_ups_and_leaves_out_of_scope_ones_out() {
+        let prompt = goal_review_prompt(&GoalReviewMaterial {
+            goal: json!({"id": 7}),
+            tasks: Vec::new(),
+            follow_ups: vec![
+                json!({"task_id": 9, "judgements": [{"classification": "out_of_scope"}]}),
+            ],
+            events: Vec::new(),
+            previous: Vec::new(),
+            gaps_in_a_row: 0,
+            repo_root: Path::new("/repo"),
+        });
+        assert!(prompt.contains(r#""task_id":9"#), "{prompt}");
+        assert!(prompt.contains(
+            "A follow-up judged out_of_scope is not part of the acceptance: leave its work out of your judgement and do not wait for it or list it as a gap."
+        ));
+        assert!(
+            prompt.contains(
+                "A follow-up judged required is part of it: judge the goal with its work"
+            )
+        );
+    }
+
     /// Every `dagq` command the prompts of the jobs that read the queue
     /// (the plan review, the goal review, the observer and the throughput
     /// review with the dagq skill's procedure it carries) and the
@@ -4844,6 +4877,7 @@ mod tests {
         let goal = goal_review_prompt(&GoalReviewMaterial {
             goal: json!({"id": 7}),
             tasks: Vec::new(),
+            follow_ups: Vec::new(),
             events: Vec::new(),
             previous: Vec::new(),
             gaps_in_a_row: 0,

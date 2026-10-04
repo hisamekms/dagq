@@ -462,6 +462,63 @@ impl MembershipJudgement {
     }
 }
 
+/// A follow_up whose source goal is the goal a review or a close looks at
+/// (ADR-t1504-2 decision 8), wherever it belongs now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceFollowUp {
+    pub task: super::TaskId,
+    pub status: super::TaskStatus,
+    /// Whether it is a task of the source goal now.
+    pub in_goal: bool,
+    /// Its current judgement: the row's ID, the classification and whether
+    /// the source goal's acceptance changed after it (needs a recheck).
+    pub judgement: Option<(i64, MembershipClassification, bool)>,
+}
+
+impl SourceFollowUp {
+    /// Why it keeps its source goal from closing as achieved, or `None`.
+    /// A completed or canceled one never does; an out-of-scope one does
+    /// not wait for its work; a required one in the goal waits as a task of
+    /// the goal (the goal's own rule), outside the goal it waits here.
+    pub fn unsettled(&self) -> Option<&'static str> {
+        use MembershipClassification::*;
+        if matches!(
+            self.status,
+            super::TaskStatus::Completed | super::TaskStatus::Canceled
+        ) {
+            return None;
+        }
+        match self.judgement {
+            None => Some("not judged"),
+            Some((_, Undecided, _)) => Some("undecided"),
+            Some((_, _, true)) => Some("judged before the acceptance changed"),
+            Some((_, Required, false)) if !self.in_goal => Some("required but outside the goal"),
+            Some(_) => None,
+        }
+    }
+
+    /// What a goal review saw of it: its ID and current judgement. Its
+    /// status is left out, so the work of an out-of-scope one moving on
+    /// does not void a review; whether it ended is checked at the close.
+    pub fn fingerprint(&self) -> String {
+        let judgement = self.judgement.map_or("-".to_owned(), |(id, class, _)| {
+            format!("{id}-{}", class.as_str())
+        });
+        format!("{}:{judgement}", self.task)
+    }
+}
+
+/// Each follow-up of `follow_ups` that keeps its source goal from closing
+/// as achieved, with why, in task order.
+pub fn unsettled_follow_ups(follow_ups: &[SourceFollowUp]) -> Vec<(super::TaskId, String)> {
+    let mut unsettled: Vec<_> = follow_ups
+        .iter()
+        .filter_map(|f| f.unsettled().map(|why| (f.task, why.to_owned())))
+        .collect();
+    unsettled.sort_by_key(|(task, _)| *task);
+    unsettled
+}
+
 #[cfg(test)]
 mod membership_tests {
     use super::*;
@@ -555,6 +612,60 @@ mod membership_tests {
             .is_ok()
         );
     }
+    /// Which follow-ups keep their source goal from closing as achieved
+    /// (ADR-t1504-2 decision 8).
+    #[test]
+    fn only_unjudged_undecided_stale_or_outside_required_follow_ups_block_the_close() {
+        use super::super::{TaskId, TaskStatus};
+        use MembershipClassification::*;
+        let follow_up = |status, in_goal, judgement| SourceFollowUp {
+            task: TaskId::new(5),
+            status,
+            in_goal,
+            judgement,
+        };
+        let open = TaskStatus::Draft;
+        for (case, why) in [
+            (follow_up(open, true, None), Some("not judged")),
+            (
+                follow_up(open, false, Some((1, Undecided, false))),
+                Some("undecided"),
+            ),
+            (
+                follow_up(open, false, Some((1, OutOfScope, true))),
+                Some("judged before the acceptance changed"),
+            ),
+            (
+                follow_up(TaskStatus::InProgress, false, Some((1, Required, false))),
+                Some("required but outside the goal"),
+            ),
+            // Out of scope does not wait for its work, wherever it is.
+            (follow_up(open, false, Some((1, OutOfScope, false))), None),
+            // A required one in the goal waits as a task of the goal.
+            (follow_up(open, true, Some((1, Required, false))), None),
+            // An ended one never waits.
+            (follow_up(TaskStatus::Completed, false, None), None),
+            (
+                follow_up(TaskStatus::Canceled, false, Some((1, Undecided, true))),
+                None,
+            ),
+        ] {
+            assert_eq!(case.unsettled(), why, "{case:?}");
+        }
+        assert_eq!(
+            unsettled_follow_ups(&[
+                follow_up(open, false, Some((1, OutOfScope, false))),
+                follow_up(open, true, None),
+            ]),
+            [(TaskId::new(5), "not judged".to_owned())]
+        );
+        assert_eq!(
+            follow_up(open, false, Some((3, OutOfScope, false))).fingerprint(),
+            "5:3-out_of_scope"
+        );
+        assert_eq!(follow_up(open, true, None).fingerprint(), "5:-");
+    }
+
     #[test]
     fn registration_facts_cannot_be_overridden_by_current_membership() {
         for provenance in ["recorded", "restored", "unknown"] {

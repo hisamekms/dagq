@@ -135,6 +135,12 @@ pub enum DomainError {
         verdict: GoalVerdict,
         blocking: Vec<(TaskStatus, usize)>,
     },
+    /// Follow-ups of the goal (task and why) whose membership is not
+    /// settled keep it from closing as achieved (ADR-t1504-2 decision 8).
+    GoalFollowUpsUnsettled {
+        goal_id: GoalId,
+        follow_ups: Vec<(TaskId, String)>,
+    },
     /// The receipt text is not a completion receipt; `reason` is the parser's.
     MalformedReceipt {
         reason: String,
@@ -473,6 +479,15 @@ impl fmt::Display for DomainError {
                 blocking
                     .iter()
                     .map(|(status, n)| format!("{n} task(s) {}", status.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::GoalFollowUpsUnsettled { goal_id, follow_ups } => write!(
+                f,
+                "goal {goal_id} cannot be closed as achieved: its follow-up(s) {}; record their membership with judge-follow-up",
+                follow_ups
+                    .iter()
+                    .map(|(task, why)| format!("{task} {why}"))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),

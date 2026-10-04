@@ -12,7 +12,7 @@ use std::path::Path;
 
 use super::{
     asks::{insert_ask, read_ask, record_ask_closed},
-    sessions,
+    follow_up_membership, sessions,
     sqlite::{SqliteQueue, close_goal_in, enum_col, goal_event, insert_task},
 };
 use crate::{
@@ -22,7 +22,7 @@ use crate::{
     },
     domain::{
         Ask, AskId, AskKind, GoalId, GoalVerdict, HEARTBEAT_TIMEOUT_SECS, NewTask, TaskId,
-        TaskStatus,
+        TaskStatus, follow_up,
         goal_review::{self, GoalAnswer, GoalGap, GoalReviewDecision},
     },
 };
@@ -33,6 +33,22 @@ fn goal_tasks(conn: &Connection, goal: GoalId) -> Result<Vec<(TaskId, TaskStatus
         .prepare("SELECT id, status FROM tasks WHERE goal_id=?1 ORDER BY id")?
         .query_map([goal], |r| Ok((r.get(0)?, enum_col(r, "status")?)))?
         .collect::<rusqlite::Result<_>>()?)
+}
+
+/// What a review of the goal sees now (ADR-t1504-2 decision 8): its
+/// fingerprint (tasks, acceptance version, follow-ups and their
+/// judgements) and whether it may close as achieved — its tasks all ended,
+/// one completed, and no follow-up of it unsettled.
+fn review_input(conn: &Connection, goal: GoalId) -> Result<(String, bool)> {
+    let tasks = goal_tasks(conn, goal)?;
+    let follow_ups = follow_up_membership::source_follow_ups(conn, goal)?;
+    let version = follow_up_membership::acceptance_version(conn, goal)?;
+    let closable =
+        goal_review::tasks_done(&tasks) && follow_up::unsettled_follow_ups(&follow_ups).is_empty();
+    Ok((
+        goal_review::review_fingerprint(&tasks, version, &follow_ups),
+        closable,
+    ))
 }
 
 /// The goal's latest review that ran to an end (not `interrupted`):
@@ -59,8 +75,8 @@ fn open_ask(conn: &Connection, goal: GoalId) -> Result<bool> {
     )?)
 }
 
-/// Whether the goal is one a review may take now; `Some` with the state of
-/// its tasks when it is.
+/// Whether the goal is one a review may take now; `Some` with what the
+/// review sees ([`review_input`]) when it is.
 fn candidate(conn: &Connection, goal: GoalId) -> Result<Option<String>> {
     let open: bool = conn.query_row(
         "SELECT status='open' AND closed_at IS NULL FROM goals WHERE id=?1",
@@ -70,11 +86,10 @@ fn candidate(conn: &Connection, goal: GoalId) -> Result<Option<String>> {
     if !open {
         return Ok(None);
     }
-    let tasks = goal_tasks(conn, goal)?;
-    if !goal_review::tasks_done(&tasks) || open_ask(conn, goal)? {
+    let (fingerprint, closable) = review_input(conn, goal)?;
+    if !closable || open_ask(conn, goal)? {
         return Ok(None);
     }
-    let fingerprint = goal_review::fingerprint(&tasks);
     if let Some((_, _, seen, rearmed)) = latest(conn, goal)?
         && seen == fingerprint
         && !rearmed
@@ -218,7 +233,8 @@ fn ask_review(conn: &Connection, ask: AskId) -> Result<Option<(i64, GoalId)>> {
 
 /// What the answer `text` of `ask` does when the supervisor applies it
 /// now: `None` when it is no option, the goal closed, or it cannot be
-/// applied (`achieved` with a task not ended, `abandoned` with one in
+/// applied (`achieved` with a task not ended or a follow-up whose
+/// membership is not settled, `abandoned` with one in
 /// progress, `gaps` with nothing to register).
 fn applicable(
     conn: &Connection,
@@ -244,9 +260,15 @@ fn applicable(
     }
     let tasks = goal_tasks(conn, goal)?;
     let fits = match &answer {
-        GoalAnswer::Achieved => tasks
-            .iter()
-            .all(|(_, status)| GoalVerdict::Achieved.allows(*status)),
+        GoalAnswer::Achieved => {
+            tasks
+                .iter()
+                .all(|(_, status)| GoalVerdict::Achieved.allows(*status))
+                && follow_up::unsettled_follow_ups(&follow_up_membership::source_follow_ups(
+                    conn, goal,
+                )?)
+                .is_empty()
+        }
         GoalAnswer::Abandoned => tasks
             .iter()
             .all(|(_, status)| GoalVerdict::Abandoned.allows(*status)),
@@ -437,8 +459,10 @@ impl GoalReviewStore for SqliteQueue {
             });
         }
         let verdict_json = serde_json::to_value(&apply.verdict)?;
-        // The goal's tasks the job saw, still ended and unchanged, and no
-        // one closed the goal meanwhile.
+        // What the job saw (the goal's tasks, acceptance version and
+        // follow-ups with their judgements), unchanged and still closable,
+        // and no one closed the goal meanwhile. A verdict collected across a
+        // handoff (task 1425) is applied here too.
         let seen: String = tx.query_row(
             "SELECT fingerprint FROM goal_reviews WHERE id=?1",
             [job.id],
@@ -449,8 +473,8 @@ impl GoalReviewStore for SqliteQueue {
             [job.goal_id],
             |r| r.get(0),
         )?;
-        let tasks = goal_tasks(&tx, job.goal_id)?;
-        if !open || goal_review::fingerprint(&tasks) != seen || !goal_review::tasks_done(&tasks) {
+        let (fingerprint, closable) = review_input(&tx, job.goal_id)?;
+        if !open || fingerprint != seen || !closable {
             finish_row(
                 &tx,
                 job.id,
@@ -711,10 +735,7 @@ impl GoalReviewStore for SqliteQueue {
             let Some((id, outcome, seen, rearmed)) = latest(&self.conn, goal)? else {
                 continue;
             };
-            if outcome != "failed"
-                || rearmed
-                || seen != goal_review::fingerprint(&goal_tasks(&self.conn, goal)?)
-            {
+            if outcome != "failed" || rearmed || seen != review_input(&self.conn, goal)?.0 {
                 continue;
             }
             let error: Option<String> =

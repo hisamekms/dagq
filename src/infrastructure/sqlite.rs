@@ -1590,7 +1590,8 @@ pub(super) fn next_id(conn: &Connection, table: &str) -> Result<i64> {
     )?)
 }
 
-/// Close `goal_id` with `verdict` as `goal close` does, recording
+/// Close `goal_id` with `verdict` as `goal close` does (`achieved` only
+/// when its follow-ups' membership is settled), recording
 /// `goal_closed` with the task counts and the fields of `extra` (who closed
 /// it and why, for a goal review), and `dependency_stranded` on each task
 /// an `abandoned` close leaves that others wait on.
@@ -1604,6 +1605,13 @@ pub(super) fn close_goal_in(
     let goal = read_goal(conn, goal_id)?;
     let counts = task_counts(conn, goal_id)?;
     let closed = goal::close(goal, verdict, &counts, now.to_owned())?;
+    // The follow-ups found from it, read in the same transaction as the
+    // close, wherever they belong now (ADR-t1504-2 decision 8).
+    goal::check_follow_ups(
+        goal_id,
+        verdict,
+        &super::follow_up_membership::source_follow_ups(conn, goal_id)?,
+    )?;
     // `closed_at IS NULL` only detects a concurrent close; the domain
     // decided whether this one may happen.
     let changed = conn.execute(

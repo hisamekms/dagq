@@ -3,8 +3,10 @@ use anyhow::{Result, anyhow, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 
-use super::sqlite::{SqliteQueue, event, goal_event, read_goal, read_task, set_goal_in};
-use crate::domain::follow_up::{MembershipClassification as Class, MembershipJudgement};
+use super::sqlite::{SqliteQueue, enum_col, event, goal_event, read_goal, read_task, set_goal_in};
+use crate::domain::follow_up::{
+    MembershipClassification as Class, MembershipJudgement, SourceFollowUp,
+};
 use crate::domain::{DraftOrigin, EventKind, GoalId, TaskId, TaskStatus};
 
 pub(super) fn acceptance_version(conn: &Connection, goal: GoalId) -> Result<i64> {
@@ -189,6 +191,53 @@ pub(super) fn goal_memberships(conn: &Connection, goal: GoalId) -> Result<Vec<Va
             "follow_up_depth": depth, "material": serde_json::from_str::<Value>(&material)?,
             "judgements": judgements(conn,id)?}),
             )
+        })
+        .collect()
+}
+
+/// The follow_ups whose source goal is `goal` as recorded or restored at
+/// registration (one whose source is unknown enters no goal's check, even
+/// when its judge named one: ADR-t1504-2 decision 12(ii)), wherever
+/// they belong now, each with its current judgement against the goal's
+/// acceptance version (ADR-t1504-2 decision 8). Read inside the caller's
+/// transaction, so a review and a close check the queue as it is.
+pub(super) fn source_follow_ups(conn: &Connection, goal: GoalId) -> Result<Vec<SourceFollowUp>> {
+    let version = acceptance_version(conn, goal)?;
+    let rows = conn
+        .prepare(
+            "SELECT o.task_id, t.status, t.goal_id IS ?1, j.id, j.classification, j.acceptance_version
+             FROM draft_origins o JOIN tasks t ON t.id = o.task_id
+             LEFT JOIN follow_up_judgements j ON j.id =
+                 (SELECT max(id) FROM follow_up_judgements WHERE task_id = o.task_id)
+             WHERE o.origin = 'follow_up'
+               AND json_extract(o.material, '$.source_goal_id') = ?1
+             ORDER BY o.task_id",
+        )?
+        .query_map([goal], |r| {
+            Ok((
+                r.get::<_, TaskId>(0)?,
+                enum_col::<TaskStatus>(r, "status")?,
+                r.get::<_, bool>(2)?,
+                r.get::<_, Option<i64>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<i64>>(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.into_iter()
+        .map(|(task, status, in_goal, id, class, judged)| {
+            let judgement = match (id, class, judged) {
+                (Some(id), Some(class), Some(judged)) => {
+                    Some((id, class.parse::<Class>()?, judged != version))
+                }
+                _ => None,
+            };
+            Ok(SourceFollowUp {
+                task,
+                status,
+                in_goal,
+                judgement,
+            })
         })
         .collect()
 }

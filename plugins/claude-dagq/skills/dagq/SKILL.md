@@ -68,7 +68,7 @@ Split the goal into tasks, each one session in one worktree. Per task: title, de
 
 Judge completion only from `show`: the run's `status`, `result_commit`, `last_error`, and the `validation_finished` event. A Stop hook, an idle session or a receipt file is not success. Summarize: task status, latest run status, branch and commit, and the next step.
 
-A planner (or the inbox) closes a goal only to drop a draft goal or on the person's word. A goal whose tasks are all `completed` or `canceled`, with no draft left, is judged by the supervisor's goal review job instead: it closes it `achieved`, adds the gaps as drafts, or asks the person (`approve_goal`). Read `reference/goal-close.md` before `goal close` or `goal review`.
+A planner (or the inbox) closes a goal only to drop a draft goal or on the person's word. A goal whose tasks are all `completed` or `canceled`, with no draft left and every unfinished follow-up from it judged against its current acceptance, is judged by the supervisor's goal review job instead: it closes it `achieved`, adds the gaps as drafts, or asks the person (`approve_goal`). Read `reference/goal-close.md` before `goal close` or `goal review`.
 
 ## 5. Language
 

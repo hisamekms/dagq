@@ -5,7 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{AskReason, DomainError, TaskId, TaskStatus, parse_json_object};
+use super::{
+    AskReason, DomainError, TaskId, TaskStatus, follow_up::SourceFollowUp, parse_json_object,
+};
 
 // What goal review decided: `achieved` closes the goal, `gaps` registers
 // what is missing as drafts of the goal, `ask` waits for a person in an
@@ -176,6 +178,31 @@ pub fn fingerprint(tasks: &[(TaskId, TaskStatus)]) -> String {
         .join(",")
 }
 
+/// The input a review saw (ADR-t1504-2 decision 8): the state of the
+/// goal's tasks ([`fingerprint`]), then the acceptance version when it
+/// changed from the first, and each follow-up whose source is the goal
+/// with its current judgement. A goal with neither keeps the fingerprint
+/// of its tasks alone; one with a follow-up (ended ones included) or an
+/// acceptance version above 1 is reviewed once more after this changed,
+/// as its input now has them.
+pub fn review_fingerprint(
+    tasks: &[(TaskId, TaskStatus)],
+    acceptance_version: i64,
+    follow_ups: &[SourceFollowUp],
+) -> String {
+    let mut seen = fingerprint(tasks);
+    if acceptance_version != 1 {
+        seen.push_str(&format!(";acceptance:{acceptance_version}"));
+    }
+    if !follow_ups.is_empty() {
+        let mut follow_ups = follow_ups.to_vec();
+        follow_ups.sort_by_key(|f| f.task);
+        let follow_ups: Vec<String> = follow_ups.iter().map(SourceFollowUp::fingerprint).collect();
+        seen.push_str(&format!(";follow_ups:{}", follow_ups.join(",")));
+    }
+    seen
+}
+
 /// Whether the tasks of an open goal let a review start: at least one,
 /// each completed or canceled, and one completed.
 pub fn tasks_done(tasks: &[(TaskId, TaskStatus)]) -> bool {
@@ -260,6 +287,44 @@ mod tests {
         let gap = person_gap("write the docs\nfor the CLI");
         assert_eq!(gap.title, "write the docs");
         assert_eq!(gap.description, "write the docs\nfor the CLI");
+    }
+
+    /// A review's input changes with the acceptance version and with each
+    /// follow-up's registration and judgement (not its status); a goal with
+    /// neither keeps the fingerprint of its tasks (ADR-t1504-2 decision 8).
+    #[test]
+    fn the_review_fingerprint_covers_acceptance_and_follow_up_judgements() {
+        use crate::domain::follow_up::MembershipClassification::*;
+        let tasks = [(TaskId::new(2), TaskStatus::Completed)];
+        assert_eq!(review_fingerprint(&tasks, 1, &[]), "2:completed");
+        assert_eq!(
+            review_fingerprint(&tasks, 2, &[]),
+            "2:completed;acceptance:2"
+        );
+        let follow_up = |task, judgement| SourceFollowUp {
+            task: TaskId::new(task),
+            status: TaskStatus::Draft,
+            in_goal: false,
+            judgement,
+        };
+        let judged = review_fingerprint(
+            &tasks,
+            1,
+            &[
+                follow_up(9, Some((4, OutOfScope, false))),
+                follow_up(8, None),
+            ],
+        );
+        assert_eq!(judged, "2:completed;follow_ups:8:-,9:4-out_of_scope");
+        let rejudged = review_fingerprint(
+            &tasks,
+            1,
+            &[
+                follow_up(9, Some((6, OutOfScope, false))),
+                follow_up(8, None),
+            ],
+        );
+        assert_ne!(judged, rejudged);
     }
 
     #[test]

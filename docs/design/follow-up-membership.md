@@ -4,8 +4,8 @@ type: design
 title: Follow-up membership judgements
 status: current
 created: 2026-10-04
-updated: 2026-10-04
-last_verified: 2026-10-04
+updated: 2026-10-04 # task 1507
+last_verified: 2026-10-04 # task 1507
 scope: runtime
 related:
   - adr-t1504-2
@@ -68,10 +68,28 @@ required/out_of_scopeの判断を持つtaskの`set-goal`は、最後の判断の
 判断の履歴・材料・深さを載せる（移動したfollow_upも含む）。`events`は
 `follow_up_registered`の登録時の材料と`follow_up_judged`の判断を読める。
 
-このtaskが実装したのは記録・所属・登録時のadopt制限と移行。
-判断をsubmitの必須条件にする検査とplan reviewの資料、goal review/closeの条件と
-fingerprint、achieved後のaskと訂正の適用はADR-t1504-2の後続の実装範囲である。
-閉じた元goalへのrequiredの記録は達成のeventや閉じた状態を変更しない。
+判断をsubmitの必須条件にする検査とplan reviewの資料、achieved後のaskと訂正の
+適用はADR-t1504-2の後続の実装範囲である。閉じた元goalへのrequiredの記録は
+達成のeventや閉じた状態を変更しない。
+
+## 閉じる条件
+
+元goalがGのfollow_up（材料の`source_goal_id`が登録時に記録したか復元したG。
+今の所属は問わない。元goalが不明なものは判断した者が名指してもどのgoalの
+検査にも入らず、今のgoalに所属taskとして効く。ADR-t1504-2決定12(ii)）は`source_follow_ups`がtransactionの中で読み、
+それぞれのstatus、Gの所属か、最後の判断（行のid・分類・要再確認）を持つ
+（`SourceFollowUp`）。`completed` / `canceled`でないもので、判断が無い・
+undecided・要再確認・requiredなのにGの外、のどれかがあれば、Gは
+achievedで閉じられない（`domain::goal::check_follow_ups`、
+`GoalFollowUpsUnsettled`）。out_of_scopeの判断を持つものの未完了は妨げない
+（Gの所属taskのままなら所属taskとして今までどおり閉鎖を待たせる）。requiredで
+Gの所属のものは所属taskの規則で待つ。abandonedは達成を言わないので検査しない。
+acceptanceを変えると判定時の版が古くなり、同じ分類を記録し直すまで閉じない。
+
+この検査は`close_goal_in`の中にあるので、人の`goal close --verdict achieved`
+（人の言葉による代行を含む）、goal reviewの`achieved`の適用、`approve_goal`の
+answerの`achieved`が同じtransactionで同じ条件を使う。goal reviewの起動の条件と
+fingerprintにも入る（[Goal review](supervisor-lifecycle/goal-review.md)の2・5）。
 
 ## 旧schemaの移行
 

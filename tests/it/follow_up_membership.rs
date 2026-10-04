@@ -402,3 +402,425 @@ fn membership_changes_never_adopt_missing_closed_unknown_or_deep_follow_ups() {
         assert_eq!(q.follow_up_depth(id).unwrap(), 0);
     }
 }
+
+/// A goal `source` whose one task landed (completed) from run `run`, and
+/// an open goal `other` to move follow-ups to.
+struct Landed {
+    dir: tempfile::TempDir,
+    q: SqliteQueue,
+    source: GoalId,
+    other: GoalId,
+    task: TaskId,
+    run: dagq::domain::RunId,
+    /// The receipt's follow_ups so far: `integrate` registers each index
+    /// of a run once.
+    follow_ups: Vec<serde_json::Value>,
+}
+
+fn landed() -> Landed {
+    let (dir, mut q) = fixture();
+    let source = q.add_goal(new_goal("source")).unwrap().id();
+    let other = q.add_goal(new_goal("destination")).unwrap().id();
+    let task = q
+        .add(dagq::domain::NewTask {
+            goal_id: Some(source),
+            ..new_task("source task")
+        })
+        .unwrap()
+        .id();
+    q.transition(task, TaskAction::BypassReview).unwrap();
+    let ClaimOutcome::Claimed { run, .. } = q.claim(&base()).unwrap() else {
+        panic!("claim")
+    };
+    let mut landed = Landed {
+        dir,
+        q,
+        source,
+        other,
+        task,
+        run: run.id().clone(),
+        follow_ups: Vec::new(),
+    };
+    landed.set_status(task, "completed");
+    landed
+        .q
+        .register_supervisor(
+            &dagq::domain::LeaseToken::new(REVIEW_OWNER),
+            std::process::id(),
+            2,
+            "test",
+        )
+        .unwrap();
+    landed
+}
+
+impl Landed {
+    /// A follow-up the landed task's receipt names, registered as
+    /// `integrate` registers it.
+    fn follow_up(&mut self, title: &str) -> TaskId {
+        self.follow_ups
+            .push(json!({"title": title, "description": "new work"}));
+        let added = dagq::application::integrate::register_follow_ups(
+            &mut self.q,
+            &q_task(self.task, self.source),
+            &self.run,
+            Some(&json!(self.follow_ups)),
+        );
+        assert_eq!(added.len(), 1);
+        added[0].task_id
+    }
+
+    fn set_status(&self, task: TaskId, status: &str) {
+        Connection::open(self.dir.path().join("queue.db"))
+            .unwrap()
+            .execute(
+                "UPDATE tasks SET status=?2 WHERE id=?1",
+                params![task.as_i64(), status],
+            )
+            .unwrap();
+    }
+
+    fn reviewable(&self) -> bool {
+        use dagq::application::GoalReviewStore;
+        self.q
+            .goal_review_candidates()
+            .unwrap()
+            .contains(&self.source)
+    }
+
+    /// Why `goal close --verdict achieved` refuses the source goal, or
+    /// `None` when it closed it.
+    fn close_refused(&mut self) -> Option<String> {
+        self.q
+            .close_goal(self.source, dagq::domain::GoalVerdict::Achieved)
+            .err()
+            .map(|e| e.to_string())
+    }
+
+    fn change_acceptance(&mut self, text: &str) {
+        self.q
+            .edit_goal(
+                self.source,
+                GoalEdit {
+                    acceptance: Some(text.into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+
+    fn out_of_scope(&mut self, task: TaskId) -> serde_json::Value {
+        self.q
+            .judge_follow_up(
+                task,
+                judgement(Class::OutOfScope, Some(self.other)),
+                "planner",
+            )
+            .unwrap()
+    }
+}
+
+/// ADR-t1504-2 decision 8: a goal whose follow-ups are judged out of scope
+/// is reviewed and closes without waiting for their work; one not judged,
+/// undecided, or judged before its acceptance changed keeps it from both
+/// until it is judged against the current acceptance.
+#[test]
+fn out_of_scope_follow_ups_let_the_goal_close_and_unjudged_or_stale_ones_do_not() {
+    let mut l = landed();
+    let first = l.follow_up("first improvement");
+    // A draft of the goal waits as one of its tasks.
+    assert!(!l.reviewable());
+    l.out_of_scope(first);
+    assert_eq!(l.q.show(first).unwrap().task.goal_id(), Some(l.other));
+    assert!(
+        l.reviewable(),
+        "an out-of-scope draft elsewhere does not hold it"
+    );
+
+    // Moved out without a judgement, then undecided: still the goal's.
+    let second = l.follow_up("second improvement");
+    l.q.set_goal(second, Some(l.other)).unwrap();
+    assert!(!l.reviewable());
+    let refused = l.close_refused().unwrap();
+    assert!(
+        refused.contains(&format!("{second} not judged")),
+        "{refused}"
+    );
+    let mut undecided = judgement(Class::Undecided, None);
+    undecided.acceptance_items.clear();
+    l.q.judge_follow_up(second, undecided, "planner").unwrap();
+    assert!(!l.reviewable());
+    assert!(l.close_refused().unwrap().contains("undecided"));
+    l.out_of_scope(second);
+    assert!(l.reviewable());
+
+    // A changed acceptance makes both judgements stale until rechecked.
+    l.change_acceptance("a stricter acceptance");
+    assert!(!l.reviewable());
+    let refused = l.close_refused().unwrap();
+    assert!(
+        refused.contains(&format!(
+            "{first} judged before the acceptance changed, {second} judged before the acceptance changed"
+        )),
+        "{refused}"
+    );
+    l.out_of_scope(first);
+    assert!(!l.reviewable());
+    l.out_of_scope(second);
+    assert!(l.reviewable());
+    // Their work never ran: it does not hold the achieved close.
+    assert_eq!(l.close_refused(), None);
+    assert!(l.q.show_goal(l.source).unwrap().closed);
+}
+
+/// ADR-t1504-2 decision 8: a follow-up judged required holds its source
+/// goal until it ends, in the goal or (past ready, where the judgement
+/// cannot move it) outside it.
+#[test]
+fn a_required_follow_up_holds_its_goal_until_it_ends() {
+    let mut l = landed();
+    let inside = l.follow_up("required inside");
+    let outside = l.follow_up("required outside");
+    l.q.set_goal(outside, Some(l.other)).unwrap();
+    l.set_status(outside, "submitted");
+    for task in [inside, outside] {
+        l.q.judge_follow_up(task, judgement(Class::Required, None), "planner")
+            .unwrap();
+    }
+    assert_eq!(l.q.show(inside).unwrap().task.goal_id(), Some(l.source));
+    assert_eq!(l.q.show(outside).unwrap().task.goal_id(), Some(l.other));
+    assert!(!l.reviewable());
+    let refused = l.close_refused().unwrap();
+    assert!(refused.contains("1 task(s) draft"), "{refused}");
+    l.set_status(inside, "completed");
+    assert!(!l.reviewable());
+    let refused = l.close_refused().unwrap();
+    assert!(
+        refused.contains(&format!("{outside} required but outside the goal")),
+        "{refused}"
+    );
+    l.set_status(outside, "completed");
+    assert!(l.reviewable());
+    assert_eq!(l.close_refused(), None);
+}
+
+const REVIEW_OWNER: &str = "goal-review-owner";
+
+impl Landed {
+    /// Start a goal review of the source goal as the supervisor
+    /// `REVIEW_OWNER` (registered by [`landed`]) does.
+    fn begin_review(&mut self) -> dagq::application::GoalReviewJob {
+        use dagq::application::GoalReviewStore;
+        use dagq::domain::{
+            LeaseToken,
+            actor_model::{ActorLaunch, ModelRole},
+        };
+        let token = LeaseToken::new(REVIEW_OWNER);
+        let dir = self.dir.path().to_path_buf();
+        self.q
+            .begin_goal_review(
+                self.source,
+                &token,
+                &dir.join("goal-reviews"),
+                &dir,
+                &ActorLaunch::default_of(ModelRole::GoalReview),
+            )
+            .unwrap()
+            .expect("the goal is reviewed")
+    }
+
+    /// Apply an `achieved` verdict of `job`, as the supervisor does for a
+    /// verdict it reaped or collected across a handoff (task 1425).
+    fn finish_achieved(
+        &mut self,
+        job: &dagq::application::GoalReviewJob,
+    ) -> dagq::application::GoalReviewApplied {
+        use dagq::application::{GoalReviewApply, GoalReviewStore};
+        use dagq::domain::goal_review::{GoalReviewDecision, GoalReviewVerdict};
+        let apply = GoalReviewApply {
+            verdict: GoalReviewVerdict::parse(r#"{"verdict":"achieved","summary":"done"}"#)
+                .unwrap(),
+            decision: GoalReviewDecision::Achieved,
+            overridden: None,
+            ask: None,
+            duration_secs: 1,
+            session: None,
+        };
+        self.q
+            .finish_goal_review(job, &dagq::domain::LeaseToken::new(REVIEW_OWNER), &apply)
+            .unwrap()
+    }
+
+    fn review_outcome(&self, job: &dagq::application::GoalReviewJob) -> String {
+        Connection::open(self.dir.path().join("queue.db"))
+            .unwrap()
+            .query_row(
+                "SELECT outcome FROM goal_reviews WHERE id=?1",
+                [job.id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    fn held(&self) -> bool {
+        use dagq::application::GoalReviewStore;
+        self.q
+            .goal_review_holds()
+            .unwrap()
+            .iter()
+            .any(|hold| hold.goal_id == self.source)
+    }
+}
+
+/// ADR-t1504-2 decision 8: a review started before a follow-up was
+/// registered, a membership changed or the acceptance changed is not
+/// applied while the change leaves the goal unsettled: `finish_goal_review`
+/// (the one apply path, for a verdict reaped live or collected across a
+/// handoff, task 1425) leaves the goal open and the row `interrupted`, and
+/// `goal close --verdict achieved` refuses the goal too, until the input is
+/// settled and the review is taken again.
+#[test]
+fn a_review_whose_follow_ups_or_acceptance_changed_does_not_close_the_goal() {
+    for change in ["registered", "corrected", "acceptance"] {
+        let mut l = landed();
+        let first = l.follow_up("first improvement");
+        let row = l.out_of_scope(first);
+        assert!(l.reviewable(), "{change}");
+        let job = l.begin_review();
+        let second = match change {
+            "registered" => Some(l.follow_up("found meanwhile")),
+            "corrected" => {
+                let mut correction = judgement(Class::Required, None);
+                correction.corrects = row["id"].as_i64();
+                l.q.judge_follow_up(first, correction, "planner").unwrap();
+                None
+            }
+            _ => {
+                l.change_acceptance("a stricter acceptance");
+                None
+            }
+        };
+        let applied = l.finish_achieved(&job);
+        assert!(applied.stale && !applied.closed, "{change}");
+        assert!(!l.q.show_goal(l.source).unwrap().closed, "{change}");
+        assert_eq!(l.review_outcome(&job), "interrupted", "{change}");
+        assert!(l.close_refused().is_some(), "{change}");
+        assert!(!l.reviewable(), "{change}");
+        // Settled again, the goal is reviewed again.
+        match change {
+            "registered" => {
+                l.out_of_scope(second.unwrap());
+            }
+            "corrected" => l.set_status(first, "completed"),
+            _ => {
+                l.out_of_scope(first);
+            }
+        }
+        assert!(l.reviewable(), "{change}");
+    }
+}
+
+/// ADR-t1504-2 decision 8: a verdict whose input changed during the review
+/// is not used even when the change left the goal closable again before the
+/// verdict came: a follow-up registered and judged out of scope, an
+/// out-of-scope judgement recorded again, a required judgement of an ended
+/// follow-up corrected to out of scope, or the acceptance changed and the
+/// follow-up rejudged. The goal's own tasks are the same in each, so only
+/// the acceptance version and the judgements in the fingerprint tell the
+/// verdict is stale; the goal is reviewed again and may close.
+#[test]
+fn a_review_whose_input_changed_and_settled_again_is_not_applied() {
+    for change in ["registered", "rechecked", "corrected", "acceptance"] {
+        let mut l = landed();
+        let first = l.follow_up("first improvement");
+        l.out_of_scope(first);
+        // A required follow-up that already landed in the goal.
+        let ended = (change == "corrected").then(|| {
+            let ended = l.follow_up("required and done");
+            let row =
+                l.q.judge_follow_up(ended, judgement(Class::Required, None), "planner")
+                    .unwrap();
+            l.set_status(ended, "completed");
+            (ended, row)
+        });
+        assert!(l.reviewable(), "{change}");
+        let tasks = l.q.show_goal(l.source).unwrap().tasks.len();
+        let job = l.begin_review();
+        match change {
+            "registered" => {
+                let found = l.follow_up("found meanwhile");
+                l.out_of_scope(found);
+            }
+            "rechecked" => {
+                l.out_of_scope(first);
+            }
+            "corrected" => {
+                let (ended, row) = ended.unwrap();
+                let mut correction = judgement(Class::OutOfScope, Some(l.other));
+                correction.corrects = row["id"].as_i64();
+                l.q.judge_follow_up(ended, correction, "planner").unwrap();
+                // An ended task stays where it is.
+                assert_eq!(l.q.show(ended).unwrap().task.goal_id(), Some(l.source));
+            }
+            _ => {
+                l.change_acceptance("a stricter acceptance");
+                l.out_of_scope(first);
+            }
+        }
+        // The goal is closable again, with the same tasks as the review saw.
+        assert!(l.reviewable(), "{change}");
+        assert_eq!(
+            l.q.show_goal(l.source).unwrap().tasks.len(),
+            tasks,
+            "{change}"
+        );
+        let applied = l.finish_achieved(&job);
+        assert!(applied.stale && !applied.closed, "{change}");
+        assert!(!l.q.show_goal(l.source).unwrap().closed, "{change}");
+        assert_eq!(l.review_outcome(&job), "interrupted", "{change}");
+        // The interrupted review does not count: the goal is reviewed
+        // again, and its next verdict closes it.
+        assert!(l.reviewable(), "{change}");
+        let again = l.begin_review();
+        assert!(l.finish_achieved(&again).closed, "{change}");
+        assert!(l.q.show_goal(l.source).unwrap().closed, "{change}");
+    }
+}
+
+/// ADR-t1504-2 decision 8: a review that ended (here `failed`, which holds
+/// the goal for a person) is taken again by itself when only a follow-up's
+/// judgement or the goal's acceptance changes, as when its tasks change.
+#[test]
+fn a_failed_review_is_taken_again_when_a_judgement_or_the_acceptance_changes() {
+    use dagq::application::{GoalReviewFailure, GoalReviewStore};
+    let mut l = landed();
+    let first = l.follow_up("first improvement");
+    l.out_of_scope(first);
+    let fail = |l: &mut Landed| {
+        let job = l.begin_review();
+        l.q.fail_goal_review(
+            &job,
+            &dagq::domain::LeaseToken::new(REVIEW_OWNER),
+            &GoalReviewFailure {
+                error: "no verdict".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(l.review_outcome(&job), "failed");
+        assert!(!l.reviewable());
+        assert!(l.held());
+    };
+    fail(&mut l);
+    // The judgement recorded again (a recheck) is new input.
+    l.out_of_scope(first);
+    assert!(l.reviewable());
+    assert!(!l.held());
+    fail(&mut l);
+    // A changed acceptance waits for the rechecks, then is new input.
+    l.change_acceptance("a stricter acceptance");
+    assert!(!l.reviewable());
+    assert!(!l.held());
+    l.out_of_scope(first);
+    assert!(l.reviewable());
+}
