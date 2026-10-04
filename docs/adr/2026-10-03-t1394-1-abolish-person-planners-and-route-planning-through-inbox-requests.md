@@ -8,6 +8,7 @@ updated: 2026-10-03
 accepted_on: 2026-10-03
 amended_by:
   - adr-t1433-2
+  - adr-t1487-1
 amends:
   - adr-0047 decision 1
   - adr-0047 decision 5
