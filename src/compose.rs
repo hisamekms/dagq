@@ -3242,61 +3242,6 @@ pub fn stats(db: &Path, query: &StatsQuery) -> Result<Value> {
     OneShot::system().stats(db, query, None)
 }
 
-/// `dagq mark <label>`: record a person's or a planner's change mark
-/// (ADR-0051 decision 12), `at` the time the change took effect when it is
-/// marked afterwards. Returns the mark as `marks` lists it.
-pub fn record_mark(
-    queue: &SqliteQueue,
-    label: &str,
-    note: Option<&str>,
-    at: Option<crate::domain::stats::Cursor>,
-    by: &str,
-) -> Result<Value> {
-    use crate::domain::marks::{self};
-    let events = queue.all_events()?;
-    let at = at
-        .map(|cursor| {
-            marks::cursor_time(cursor, &events)
-                .context("--at names an event id this queue does not have")
-        })
-        .transpose()?;
-    if let Some(at) = &at {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_millis();
-        ensure!(
-            crate::domain::stats::timestamp_millis(at)
-                .is_some_and(|at| i128::from(at) <= now as i128),
-            "--at {at} is in the future; a mark stands for a change already made"
-        );
-    }
-    let payload = marks::mark_payload(label, note, at, by).map_err(anyhow::Error::msg)?;
-    let id = queue.record_queue_event(EventKind::MarkRecorded, payload)?;
-    recorded_mark(queue, id)
-}
-
-/// `dagq mark --retract <id>`: record that the mark `target` was no change
-/// (ADR-0051 decision 12); the mark stays, retracted.
-pub fn retract_mark(
-    queue: &SqliteQueue,
-    target: crate::domain::EventId,
-    by: &str,
-) -> Result<Value> {
-    use crate::domain::marks::{self};
-    let payload =
-        marks::retraction_payload(&queue.all_events()?, target, by).map_err(anyhow::Error::msg)?;
-    let id = queue.record_queue_event(EventKind::MarkRetracted, payload)?;
-    recorded_mark(queue, id)
-}
-
-fn recorded_mark(queue: &SqliteQueue, id: crate::domain::EventId) -> Result<Value> {
-    let mark = crate::domain::marks::marks(&queue.all_events()?, None, None)
-        .into_iter()
-        .find(|mark| mark.id == Some(id))
-        .context("the recorded mark is not listed")?;
-    Ok(serde_json::to_value(mark)?)
-}
-
 /// The near-term dependency diagram of `graph --format d2|svg`
 /// (ADR-0077): its d2 source
 /// ([`crate::application::queue_reads::graph_diagram`]), or the SVG the

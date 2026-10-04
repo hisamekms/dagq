@@ -1,7 +1,9 @@
 //! The queue the dialogue and record commands work on
 //! ([`crate::application::commands::dialogue`]): the asks, notes, marks
-//! and findings of a [`SqliteQueue`], with the checkout that names the
-//! repository and the backend that notifies the inbox of a new ask.
+//! and findings of a [`SqliteQueue`] (a mark through
+//! [`crate::application::marks`], on the queue's injected clock), with the
+//! checkout that names the repository and the backend that notifies the
+//! inbox of a new ask.
 
 use crate::domain::EventKind;
 use std::path::Path;
@@ -12,7 +14,7 @@ use serde_json::Value;
 use super::sqlite::SqliteQueue;
 use crate::application::commands::DenialLog;
 use crate::application::commands::dialogue::{DialogueStore, MarkChange};
-use crate::application::{RunLog, TaskStore, WorkspaceBackend};
+use crate::application::{RunLog, TaskStore, WorkspaceBackend, marks};
 use crate::domain::{
     Answerer, Ask, AskId, Finding, FindingId, FindingOutcome, FindingStatus, NewAsk, NewFinding,
     NewNote, RunEvent,
@@ -58,11 +60,17 @@ impl DialogueStore for DialogueQueue<'_> {
     }
 
     fn mark(&mut self, change: MarkChange, by: &str) -> Result<Value> {
+        let queue = &*self.queue;
         match change {
-            MarkChange::Record { label, note, at } => {
-                crate::compose::record_mark(self.queue, &label, note.as_deref(), at, by)
-            }
-            MarkChange::Retract(target) => crate::compose::retract_mark(self.queue, target, by),
+            MarkChange::Record { label, note, at } => marks::record_mark(
+                queue,
+                queue.generators().clock.as_ref(),
+                &label,
+                note.as_deref(),
+                at,
+                by,
+            ),
+            MarkChange::Retract(target) => marks::retract_mark(queue, target, by),
         }
     }
 

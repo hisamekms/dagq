@@ -2320,6 +2320,26 @@ pub trait ObserverLog {
     fn observations(&self, limit: usize) -> Result<Vec<(RunEvent, Option<RunEvent>)>>;
 }
 
+/// What the mark commands read and record (ADR-0051 decision 12): the
+/// queue's events, to resolve `--at` and list the marks, and a new event
+/// of the queue itself. Every [`RunLog`] is one.
+pub trait MarkLog {
+    /// Every event of the queue, oldest first.
+    fn events(&self) -> Result<Vec<RunEvent>>;
+    /// Record an event of the queue itself, on no task, goal or run.
+    fn record_event(&self, kind: EventKind, payload: serde_json::Value) -> Result<EventId>;
+}
+
+impl<T: RunLog + ?Sized> MarkLog for T {
+    fn events(&self) -> Result<Vec<RunEvent>> {
+        self.all_events()
+    }
+
+    fn record_event(&self, kind: EventKind, payload: serde_json::Value) -> Result<EventId> {
+        self.record_queue_event(kind, payload)
+    }
+}
+
 /// What reports read and record of the queue as a whole: the written
 /// reports, KPI breaches, forecasts and the lookups `stats` joins runs with.
 pub trait QueueRecords {

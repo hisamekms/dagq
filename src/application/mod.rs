@@ -25,6 +25,7 @@ pub mod install;
 pub mod integrate;
 pub mod kpi;
 pub mod lifecycle;
+pub mod marks;
 #[cfg(test)]
 mod memory_files;
 pub mod naming;
