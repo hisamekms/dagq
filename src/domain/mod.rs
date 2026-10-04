@@ -892,6 +892,7 @@ pub mod review_subagents;
 pub mod run;
 pub mod run_e2e;
 pub mod run_env;
+pub mod run_progress;
 pub mod sccache;
 pub mod scope;
 pub mod search;

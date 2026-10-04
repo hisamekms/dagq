@@ -176,7 +176,18 @@ fn independent_tasks_run_concurrently_and_a_dependent_starts_after_integration()
     let mut closed = backend.closed();
     closed.sort();
     assert_eq!(closed, [workspace_id(0), workspace_id(1), workspace_id(2)]);
-    assert_eq!(runtime::doctor(&db, true).unwrap()["runs"], json!([]));
+    // The two runs not landed await integration with nobody holding them:
+    // listed (goal 98), and not for `recover`.
+    let doctor = runtime::doctor(&db, true).unwrap();
+    let listed = doctor["runs"].as_array().unwrap();
+    assert_eq!(listed.len(), 2, "{doctor}");
+    assert!(
+        listed
+            .iter()
+            .all(|run| run["status"] == "awaiting_integration"
+                && run["lease"].is_null()
+                && run["recoverable"] == false)
+    );
     // The independent second run, on another file, lands on the first; the
     // dependent, built on the first's landing, lands after it.
     assert_eq!(integrate(&db, 2, &repo).unwrap()["outcome"], "integrated");
@@ -304,7 +315,14 @@ fn failed_runs_in_the_same_pass_do_not_affect_the_accepted_run() {
     );
     assert_eq!(backend.closed(), [workspace_id(0)]);
     assert!(queue.run_leases().unwrap().is_empty());
-    assert_eq!(runtime::doctor(&db, true).unwrap()["runs"], json!([]));
+    // Only the accepted run is listed (goal 98): the failed ones nobody
+    // holds are not.
+    let doctor = runtime::doctor(&db, true).unwrap();
+    let listed = doctor["runs"].as_array().unwrap();
+    assert_eq!(listed.len(), 1, "{doctor}");
+    assert_eq!(listed[0]["task_id"], 1);
+    assert_eq!(listed[0]["status"], "awaiting_integration");
+    assert_eq!(listed[0]["recoverable"], false);
     // Failed tasks can be retried independently; the accepted one still owns its slot.
     queue.transition(TaskId::new(2), TaskAction::Ready).unwrap();
     assert!(queue.transition(TaskId::new(1), TaskAction::Ready).is_err());

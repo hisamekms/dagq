@@ -812,16 +812,25 @@ fn moved_queue_directory_resolves_run_paths_and_lands_awaiting_runs() {
     assert!(paths.worktree.is_dir() && paths.receipt.is_file());
 
     let status = runtime::status(&db).unwrap();
-    let entry = &status["runs"].as_array().unwrap()[0];
-    assert_eq!(entry["run_id"], json!(unfinished.id()), "{status}");
+    // The awaiting run is listed too (goal 98).
+    let entry = status["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["run_id"] == json!(unfinished.id()))
+        .expect("the unfinished run is listed");
     assert_eq!(
         entry["worktree_path"],
         json!(text(expected(unfinished.id()).worktree)),
         "{status}"
     );
     let doctor = runtime::doctor(&db, true).unwrap();
-    let health = &doctor["runs"].as_array().unwrap()[0];
-    assert_eq!(health["run_id"], json!(unfinished.id()), "{doctor}");
+    let health = doctor["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|health| health["run_id"] == json!(unfinished.id()))
+        .expect("the unfinished run is listed");
     assert_eq!(
         health["worktree_path"],
         json!(text(expected(unfinished.id()).worktree))

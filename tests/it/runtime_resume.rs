@@ -75,7 +75,12 @@ fn conflicting_run_needs_a_session_and_lands_after_the_session_resolves_it() {
     );
     assert_eq!(integrate_next(&db, &repo)["outcome"], "no_run_awaiting");
     assert!(queue.candidates().unwrap().is_empty());
-    assert_eq!(runtime::doctor(&db, true).unwrap()["runs"], json!([]));
+    // Listed while it waits for its session (goal 98), not for `recover`.
+    let doctor = runtime::doctor(&db, true).unwrap();
+    let listed = doctor["runs"].as_array().unwrap();
+    assert_eq!(listed.len(), 1, "{doctor}");
+    assert_eq!(listed[0]["status"], "needs_session");
+    assert_eq!(listed[0]["recoverable"], false);
 
     // Nothing changed in the worktree: the runtime tries again and parks it again.
     let outcome = integrate(&db, 2, &repo).unwrap();

@@ -23,6 +23,7 @@ use crate::domain::{
     queue_hold::{self, HoldJob},
     reason, recheck, run_attention, run_attention_of,
     run_env::{RUN_ENV_PROGRAM_KINDS, RUN_ENV_PROGRAM_MISSING, RunEnvCheck},
+    run_progress::{Lease, Progress},
     session_takes_answers,
     slot_limits::SettingSource,
     supervisor_attention,
@@ -72,6 +73,10 @@ pub struct RunHealth {
     pub processes: Vec<ProcessHealth>,
     pub blockers: Vec<String>,
     pub recoverable: bool,
+    /// Its phase, since when and its slot ([`Progress`]); `doctor` adds it,
+    /// `recover`'s report has none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<Progress>,
 }
 
 impl RunHealth {
@@ -83,17 +88,34 @@ impl RunHealth {
             "run_id": self.run_id,
             "task_id": self.task_id,
             "status": self.status,
+            "lease_pid": self.lease.as_ref().map(|lease| lease.pid),
             "lease_stale": self.lease.as_ref().map(|lease| lease.stale),
             "recoverable": self.recoverable,
             "blocker_count": self.blockers.len(),
             "workspace_id": self.workspace_id,
             "worktree_path": self.worktree_path,
+            "progress": self.progress,
         })
     }
 }
 
-/// The health of `run` at `now`: a live process of the run, a fresh lease
-/// or a live lease holder blocks its recovery.
+/// Whether `recover` takes a run in `status`, `leased` or not: an
+/// unfinished run, or one awaiting integration that is still leased (its
+/// supervisor died during the review or the landing, task 236).
+pub fn recover_takes(status: RunStatus, leased: bool) -> bool {
+    matches!(
+        status,
+        RunStatus::Claimed
+            | RunStatus::Starting
+            | RunStatus::Running
+            | RunStatus::Validating
+            | RunStatus::Integrating
+    ) || (status == RunStatus::AwaitingIntegration && leased)
+}
+
+/// The health of `run` at `now`: a status `recover` does not take, a live
+/// process of the run, a fresh lease or a live lease holder blocks its
+/// recovery.
 pub fn run_health(
     run: &TaskRun,
     processes: &[RunProcess],
@@ -103,6 +125,17 @@ pub fn run_health(
     files: &dyn RunFiles,
 ) -> RunHealth {
     let mut blockers = Vec::new();
+    if !recover_takes(run.status(), lease.is_some()) {
+        blockers.push(format!(
+            "run is {}{}; recover takes only unfinished runs or a leased run awaiting integration",
+            run.status().as_str(),
+            if lease.is_some() {
+                ""
+            } else {
+                " without a lease"
+            }
+        ));
+    }
     let processes: Vec<ProcessHealth> = processes
         .iter()
         .map(|process| {
@@ -153,7 +186,50 @@ pub fn run_health(
         processes,
         recoverable: blockers.is_empty(),
         blockers,
+        progress: None,
     }
+}
+
+/// A run's lease as its `progress` reads it: a stale lease or a dead
+/// holder keeps the slot but shows no step going on.
+fn progress_lease(lease: Option<&LeaseHealth>) -> Lease {
+    match lease {
+        None => Lease::None,
+        Some(lease) if lease.stale || !lease.alive => Lease::Stale,
+        Some(_) => Lease::Live,
+    }
+}
+
+/// The runs `status` and `doctor` list (goal 98), each once, oldest first:
+/// every unfinished run (`claimed` to `integrating`, leased or not, as
+/// before), the latest run of each `in_progress` task that awaits
+/// integration or a session (under review, revise, resume, its e2e, its
+/// `/exit` or its landing, or waiting for the supervisor or a person), and
+/// every run a lease holds (the runs in `supervisors[].run_ids`: a failed
+/// or interrupted run under recovery, a run that ended and is being
+/// cleaned up). A finished or cancelled run nobody leases and an earlier
+/// attempt of a retried task are history and are left out. The selection
+/// is the listing's own: the automatic recovery, adoption and `stats` keep
+/// [`Queue::active_runs`].
+fn listed_runs(queue: &dyn Queue, leases: &[RunLease]) -> Result<Vec<TaskRun>> {
+    let mut runs = queue.active_runs()?;
+    let listed = |runs: &[TaskRun], id: &RunId| runs.iter().any(|run| run.id() == id);
+    for run in queue.latest_runs_in_progress()? {
+        if matches!(
+            run.status(),
+            RunStatus::AwaitingIntegration | RunStatus::NeedsSession
+        ) && !listed(&runs, run.id())
+        {
+            runs.push(run);
+        }
+    }
+    for lease in leases {
+        if !listed(&runs, &lease.run_id) {
+            runs.push(queue.run(&lease.run_id)?);
+        }
+    }
+    runs.sort_by(|a, b| a.created_at().cmp(b.created_at()));
+    Ok(runs)
 }
 
 /// A process that owns runs, as `status` and `doctor` report it: a resident
@@ -268,14 +344,14 @@ pub fn status(
     let now = clock.now();
     let registrations = queue.supervisors()?;
     let leases = queue.run_leases()?;
-    let runs = queue
-        .active_runs()?
+    let runs = listed_runs(queue, &leases)?
         .into_iter()
         .map(|run| {
             let lease = leases
                 .iter()
                 .find(|l| l.run_id == *run.id())
                 .map(|l| lease_health(l, now, control));
+            let events = queue.run_events(run.id())?;
             let mut entry = json!({
                 "run_id": run.id(),
                 "task_id": run.task_id(),
@@ -283,6 +359,8 @@ pub fn status(
                 "workspace_id": run.workspace_id(),
                 "worktree_path": run.worktree_path(),
                 "lease": lease,
+                // What it does now and how it uses its slot (goal 98).
+                "progress": Progress::of(run.status(), progress_lease(lease.as_ref()), &events, now),
             });
             let events = queue.run_events(run.id())?;
             // Why it waits or failed (ADR-0034), for a run that has an error.
@@ -423,6 +501,7 @@ fn slots_and_waits(
     for lease in leases {
         let run = queue.run(&lease.run_id)?;
         let entry = counts.entry(lease.token.as_str()).or_default();
+        // The same wait as the run's `progress.slot` in `runs` ([`crate::domain::run_progress::SlotUse`]).
         let Some(state) = WaitState::of(&queue.run_events(run.id())?) else {
             entry.0 += 1;
             continue;
@@ -563,8 +642,7 @@ pub fn doctor(
     let now = clock.now();
     let registrations = queue.supervisors()?;
     let leases = queue.run_leases()?;
-    let runs = queue
-        .active_runs()?
+    let runs = listed_runs(queue, &leases)?
         .into_iter()
         .map(|run| {
             let processes = queue.processes(run.id())?;
@@ -572,7 +650,15 @@ pub fn doctor(
                 .iter()
                 .find(|l| l.run_id == *run.id())
                 .map(|l| lease_health(l, now, control));
-            Ok(run_health(&run, &processes, lease, now, control, files))
+            let progress = Progress::of(
+                run.status(),
+                progress_lease(lease.as_ref()),
+                &queue.run_events(run.id())?,
+                now,
+            );
+            let mut health = run_health(&run, &processes, lease, now, control, files);
+            health.progress = Some(progress);
+            Ok(health)
         })
         .collect::<Result<Vec<_>>>()?;
     let supervisors = supervisors(&registrations, &leases, now, control);
@@ -631,14 +717,7 @@ pub fn recover(
     let run = queue.run(id)?;
     let lease = queue.run_lease(id)?;
     ensure!(
-        matches!(
-            run.status(),
-            RunStatus::Claimed
-                | RunStatus::Starting
-                | RunStatus::Running
-                | RunStatus::Validating
-                | RunStatus::Integrating
-        ) || (run.status() == RunStatus::AwaitingIntegration && lease.is_some()),
+        recover_takes(run.status(), lease.is_some()),
         "run {id} is {}; only unfinished runs, or a run awaiting integration that is still leased, can be recovered",
         run.status().as_str()
     );

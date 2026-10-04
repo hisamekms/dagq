@@ -32,6 +32,7 @@ mod cli_roles;
 mod cli_screen;
 mod cli_session_event;
 mod cli_stats;
+mod cli_status_runs;
 mod cli_tasks;
 mod cli_version;
 mod draft_bundles;
