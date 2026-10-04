@@ -503,6 +503,20 @@ fn a_recommendation_reaches_the_ask_status_and_stats() {
                 && event["payload"]["confidence"] == "low"),
         "{show}"
     );
+    // `show` lists the task's asks with the keys of `asks` (ADR-t451-1
+    // decision 1); the blocked ask is about no task and is not among them.
+    let shown = ok(&db, &["show", "1"]);
+    assert_eq!(shown["asks_total"], 3, "{shown}");
+    let task_asks = shown["asks"].as_array().unwrap();
+    assert_eq!(task_asks[0]["id"], recommended["id"], "{shown}");
+    assert_eq!(task_asks[0]["recommendation"], "retry");
+    assert_eq!(task_asks[0]["confidence"], "low");
+    assert_eq!(task_asks[0]["closed_at"], Value::Null);
+    assert_eq!(task_asks[1]["kind"], "worker_question");
+    assert_eq!(task_asks[1]["recommendation"], Value::Null);
+    assert_eq!(task_asks[1]["confidence"], Value::Null);
+    assert_eq!(task_asks[2]["confidence"], "high");
+    assert_eq!(show["asks"], shown["asks"], "{show}");
 
     // One answer chooses the recommendation and one does not.
     ok(

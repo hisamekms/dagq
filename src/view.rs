@@ -20,6 +20,8 @@ pub const RAW_STDOUT: &str = "__dagq_raw_stdout";
 pub const TEXT_LIMIT: usize = 300;
 /// Latest events a compact view keeps unless told otherwise.
 pub const DEFAULT_EVENTS: usize = 10;
+/// Latest asks `show` lists without `--full`.
+pub const DEFAULT_ASKS: usize = 10;
 /// Latest notes (`observation` events) a compact view lists in full.
 pub const DEFAULT_OBSERVATIONS: usize = 5;
 /// Payload keys a compact event keeps: what happened, not where. `code`
@@ -63,8 +65,9 @@ fn latest<T>(items: &[T], count: usize) -> &[T] {
 }
 
 /// `show` without `--full`: the task with long texts truncated, the latest
-/// run's identity and outcome, its processes, and the latest `events`
-/// events with their run and the gist of their payload (no paths).
+/// run's identity and outcome, its processes, the latest `events`
+/// events with their run and the gist of their payload (no paths), and the
+/// latest [`DEFAULT_ASKS`] asks about the task or its runs.
 pub fn task_detail(detail: &TaskDetail, events: usize) -> Value {
     let mut task = object(&detail.task);
     truncate_fields(&mut task, &["description", "acceptance", "context"]);
@@ -126,7 +129,24 @@ pub fn task_detail(detail: &TaskDetail, events: usize) -> Value {
         "events_total": detail.events.len(),
         "observations": observations(&detail.events),
         "processes": processes,
+        "asks": asks(detail),
+        "asks_total": detail.asks.len(),
     })
+}
+
+/// The latest [`DEFAULT_ASKS`] asks of the task, oldest first, with the
+/// keys of `asks` (`recommendation` and `confidence` null without them,
+/// `closed_at` null while one is open) and their question and answer cut
+/// to [`TEXT_LIMIT`].
+fn asks(detail: &TaskDetail) -> Vec<Value> {
+    latest(&detail.asks, DEFAULT_ASKS)
+        .iter()
+        .map(|ask| {
+            let mut ask = object(ask);
+            truncate_fields(&mut ask, &["question", "answer"]);
+            Value::Object(ask)
+        })
+        .collect()
 }
 
 /// The events of `run` among the task's.
@@ -312,6 +332,7 @@ mod tests {
             duplicates: Vec::new(),
             origin: None,
             follow_up_drafts: Vec::new(),
+            asks: Vec::new(),
             runs: vec![run("a"), run("b")],
             events: (1..=12)
                 .map(|id| {
@@ -391,6 +412,7 @@ mod tests {
             duplicates: Vec::new(),
             origin: None,
             follow_up_drafts: Vec::new(),
+            asks: Vec::new(),
             runs: vec![run("a"), run("b")],
             events: vec![
                 tool_use(1, "b", 1),
@@ -415,6 +437,7 @@ mod tests {
             duplicates: Vec::new(),
             origin: None,
             follow_up_drafts: Vec::new(),
+            asks: Vec::new(),
             runs: vec![],
             events: vec![],
             processes: vec![],
@@ -423,6 +446,108 @@ mod tests {
         assert!(view["task"].get("truncated").is_none());
         assert_eq!(view["runs"], json!([]));
         assert_eq!(view["events"], json!([]));
+        assert_eq!(view["asks"], json!([]));
+        assert_eq!(view["asks_total"], 0);
+    }
+
+    fn ask(id: i64, run: Option<&str>, question: &str) -> crate::domain::Ask {
+        crate::domain::Ask {
+            id: crate::domain::AskId::new(id),
+            kind: crate::domain::AskKind::Decide,
+            task_id: run.is_none().then(|| TaskId::new(1)),
+            run_id: run.map(|run| RunId::new(run).unwrap()),
+            question: question.into(),
+            options: vec!["retry".into(), "cancel".into()],
+            answer: None,
+            asked_by: "supervisor".into(),
+            reason_category: crate::domain::AskReason::Scope,
+            topics: Vec::new(),
+            recommendation: None,
+            confidence: None,
+            subject: None,
+            affected: Vec::new(),
+            created_at: id,
+            answered_at: None,
+            closed_at: None,
+            finding_id: None,
+            request_id: None,
+            answered_by: None,
+            option_index: None,
+            answer_authority: None,
+            answer_approval: None,
+        }
+    }
+
+    /// `show` lists the asks of the task and its runs (ADR-t451-1 decision
+    /// 1): the latest [`DEFAULT_ASKS`] oldest first, with the keys of
+    /// `asks`, a null recommendation and confidence without them, and the
+    /// question and answer cut.
+    #[test]
+    fn task_detail_lists_the_latest_asks_with_their_recommendation() {
+        let mut asks: Vec<crate::domain::Ask> = (1..=DEFAULT_ASKS as i64 + 2)
+            .map(|id| ask(id, None, "which?"))
+            .collect();
+        let recommended = asks.last_mut().unwrap();
+        recommended.run_id = Some(RunId::new("b").unwrap());
+        recommended.task_id = None;
+        recommended.recommendation = Some("retry".into());
+        recommended.confidence = Some(crate::domain::AskConfidence::Low);
+        recommended.question = "q".repeat(TEXT_LIMIT + 1);
+        recommended.answer = Some("a".repeat(TEXT_LIMIT + 1));
+        recommended.answered_at = Some(20);
+        recommended.closed_at = Some(21);
+        let detail = TaskDetail {
+            membership_judgements: Vec::new(),
+            task: task("short"),
+            dependencies: vec![],
+            goal_dependencies: vec![],
+            duplicate_of: None,
+            duplicates: Vec::new(),
+            origin: None,
+            follow_up_drafts: Vec::new(),
+            runs: vec![run("b")],
+            events: vec![],
+            processes: vec![],
+            asks,
+        };
+        let view = task_detail(&detail, DEFAULT_EVENTS);
+        assert_eq!(view["asks_total"], DEFAULT_ASKS + 2);
+        let listed = view["asks"].as_array().unwrap();
+        assert_eq!(listed.len(), DEFAULT_ASKS);
+        assert_eq!(listed[0]["id"], 3);
+        assert_eq!(listed[0]["task_id"], 1);
+        assert_eq!(listed[0]["kind"], "decide");
+        assert_eq!(listed[0]["question"], "which?");
+        assert_eq!(listed[0]["options"], json!(["retry", "cancel"]));
+        assert_eq!(listed[0]["reason_category"], "scope");
+        assert_eq!(listed[0]["recommendation"], Value::Null);
+        assert_eq!(listed[0]["confidence"], Value::Null);
+        assert_eq!(listed[0]["closed_at"], Value::Null);
+        assert!(listed[0].get("truncated").is_none());
+        let last = &listed[DEFAULT_ASKS - 1];
+        assert_eq!(last["id"], DEFAULT_ASKS + 2);
+        assert_eq!(last["run_id"], "b");
+        assert_eq!(last["task_id"], Value::Null);
+        assert_eq!(last["recommendation"], "retry");
+        assert_eq!(last["confidence"], "low");
+        assert_eq!(last["closed_at"], 21);
+        assert_eq!(last["truncated"], true);
+        for key in ["question", "answer"] {
+            let text = last[key].as_str().unwrap();
+            assert!(text.ends_with('…'), "{key}");
+            assert_eq!(text.chars().count(), TEXT_LIMIT + 1, "{key}");
+        }
+        // `--full` prints the stored records: every ask, whole.
+        let full = serde_json::to_value(&detail).unwrap();
+        assert_eq!(full["asks"].as_array().unwrap().len(), DEFAULT_ASKS + 2);
+        assert_eq!(
+            full["asks"][DEFAULT_ASKS + 1]["question"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count(),
+            TEXT_LIMIT + 1
+        );
     }
 
     #[test]
@@ -496,6 +621,7 @@ mod tests {
             duplicates: Vec::new(),
             origin: None,
             follow_up_drafts: Vec::new(),
+            asks: Vec::new(),
             runs: vec![],
             events,
             processes: vec![],

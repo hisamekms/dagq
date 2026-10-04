@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    CommitSha, EventId, Goal, GoalId, GoalStatus, GoalVerdict, LeaseToken, PushReport, RunId,
+    Ask, CommitSha, EventId, Goal, GoalId, GoalStatus, GoalVerdict, LeaseToken, PushReport, RunId,
     SupervisorMode, Task, TaskId, TaskRun, TaskStatus,
 };
 
@@ -148,6 +148,10 @@ pub struct TaskDetail {
     /// The follow_up drafts the receipts of this task's runs proposed, with
     /// their status now (ADR-t807-1).
     pub follow_up_drafts: Vec<FollowUpDraft>,
+    /// The asks about the task (`task_id`) or one of its runs (`run_id`),
+    /// open and closed, oldest first, with the asking AI's recommendation
+    /// and confidence (ADR-t451-1 decision 1).
+    pub asks: Vec<Ask>,
 }
 
 /// Where a draft the runtime or a job made came from (ADR-t807-1): its

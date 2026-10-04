@@ -423,6 +423,115 @@ fn timeline_names_the_long_gap_before_the_receipt() {
     );
 }
 
+/// `show` lists the asks of the task and of its runs (ADR-t451-1
+/// decision 1), not the asks about no task: the latest ten oldest first
+/// with their question and answer cut, all of them whole with `--full`.
+#[test]
+fn show_lists_the_asks_of_the_task_and_its_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("queue.db");
+    let run = run_with_events(&db, &[]);
+    assert_eq!(ok(&db, &["show", "1"])["asks"], serde_json::json!([]));
+    assert_eq!(ok(&db, &["show", "1"])["asks_total"], 0);
+    let long = "q".repeat(301);
+    let ask = |target: &[&str], question: &str, extra: &[&str]| {
+        let mut args = vec![
+            "ask",
+            "--kind",
+            "decide",
+            "--because",
+            "scope",
+            "--question",
+            question,
+            "--option",
+            "retry",
+            "--option",
+            "cancel",
+        ];
+        args.extend(target);
+        args.extend(extra);
+        ok(&db, &args)
+    };
+    // An open ask of the same kind is asked again only once answered.
+    for _ in 0..11 {
+        let id = ask(&["--task", "1"], &long, &[])["id"].to_string();
+        ok(&db, &["answer", &id, "--text", "retry"]);
+    }
+    let last = ask(
+        &["--run", &run],
+        "which?",
+        &["--recommend", "retry", "--confidence", "low"],
+    );
+    ok(&db, &["answer", &last["id"].to_string(), "--text", &long]);
+    // A finding's blocked ask is about no task.
+    let finding = ok(
+        &db,
+        &[
+            "finding",
+            "record",
+            "--kind",
+            "stall",
+            "--queue",
+            "--summary",
+            "waits",
+        ],
+    )["id"]
+        .to_string();
+    ok(
+        &db,
+        &[
+            "ask",
+            "--kind",
+            "blocked",
+            "--because",
+            "scope",
+            "--question",
+            "stuck?",
+            "--option",
+            "retry",
+            "--recommend",
+            "retry",
+            "--confidence",
+            "high",
+            "--finding",
+            &finding,
+        ],
+    );
+
+    let full = ok(&db, &["show", "1", "--full"]);
+    let all = full["asks"].as_array().unwrap();
+    assert_eq!(all.len(), 12, "{full}");
+    assert_eq!(all[0]["task_id"], 1);
+    assert_eq!(all[0]["question"], long.as_str());
+    assert_eq!(all[0]["recommendation"], Value::Null);
+    assert_eq!(all[0]["confidence"], Value::Null);
+    assert_eq!(all[0]["answer"], "retry");
+    assert_eq!(all[11]["id"], last["id"]);
+    assert_eq!(all[11]["run_id"], run.as_str());
+    assert_eq!(all[11]["recommendation"], "retry");
+    assert_eq!(all[11]["confidence"], "low");
+    assert_eq!(all[11]["answer"], long.as_str());
+    assert!(all.iter().all(|ask| ask.get("truncated").is_none()));
+
+    let shown = ok(&db, &["show", "1"]);
+    assert_eq!(shown["asks_total"], 12);
+    let latest = shown["asks"].as_array().unwrap();
+    assert_eq!(latest.len(), 10);
+    assert_eq!(latest[0]["id"], all[2]["id"]);
+    let question = latest[0]["question"].as_str().unwrap();
+    assert!(question.ends_with('…'), "{question}");
+    assert_eq!(question.chars().count(), 301);
+    assert_eq!(latest[0]["truncated"], true);
+    assert_eq!(latest[9]["id"], last["id"]);
+    assert_eq!(latest[9]["question"], "which?");
+    assert_eq!(latest[9]["recommendation"], "retry");
+    assert_eq!(latest[9]["confidence"], "low");
+    let answer = latest[9]["answer"].as_str().unwrap();
+    assert!(answer.ends_with('…'), "{answer}");
+    assert_eq!(answer.chars().count(), 301);
+    assert_eq!(latest[9]["truncated"], true);
+}
+
 #[test]
 fn show_goal_show_and_doctor_are_compact_unless_full() {
     let (_dir, db) = queue();

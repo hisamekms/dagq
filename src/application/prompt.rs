@@ -4647,6 +4647,7 @@ mod tests {
             processes: Vec::new(),
             origin: None,
             follow_up_drafts: Vec::new(),
+            asks: Vec::new(),
         }
     }
 

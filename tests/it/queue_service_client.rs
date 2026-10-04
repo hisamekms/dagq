@@ -131,6 +131,16 @@ fn a_worker_s_dagq_runs_its_commands_through_the_service_as_the_worker() {
     assert_eq!(asks[0]["id"], asked["id"], "{asks}");
     assert_eq!(asks[0]["asked_by"], "worker", "{asks}");
     assert_eq!(asks[0]["options"], json!(["a"]));
+    // `show` lists the ask of the run as the command line does.
+    for args in [
+        vec!["show", task.as_str()],
+        vec!["show", task.as_str(), "--full"],
+    ] {
+        let shown = answered(&as_worker(&args));
+        assert_eq!(shown["asks"][0]["id"], asked["id"], "{args:?}: {shown}");
+        assert_eq!(shown["asks"][0]["run_id"], run.as_str(), "{shown}");
+        assert_eq!(shown, ok(&queue.db, &args), "{args:?}");
+    }
     // The worker is the actor of what it wrote.
     for kind in ["observation", "ask_opened"] {
         let written = events(&queue.db, kind);
