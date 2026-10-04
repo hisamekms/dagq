@@ -8,6 +8,7 @@ use crate::{
     },
     domain::{
         ActorRole, CommitSha, PlannerOrigin, Task, TaskId, TaskRun,
+        disk::ProcessExecutable,
         headless_job::JobAccess,
         landing_branch::{self, LandingBranch, PushTarget, RepositoryConfig, RepositorySettings},
         measure::HostVersions,
@@ -213,6 +214,27 @@ impl ProcessControl for SystemProcesses {
         process_started_at(pid)
     }
 
+    fn executables(&self) -> Result<Vec<ProcessExecutable>> {
+        // One `ps` for the pids and parents, then one cheap read per pid
+        // for its executable (task 1590); no working directories.
+        // SAFETY: getuid(2) has no failure and no memory effects.
+        let uid = unsafe { libc::getuid() }.to_string();
+        let listing = output(Command::new("ps").args([
+            "-U",
+            &uid,
+            "-o",
+            "pid=,ppid=,etime=,time=,command=",
+        ]))?;
+        Ok(parse_ps(&listing)
+            .into_iter()
+            .map(|p| ProcessExecutable {
+                pid: p.pid,
+                ppid: p.ppid,
+                executable: process_executable(p.pid),
+            })
+            .collect())
+    }
+
     fn descendants(&self, pid: u32) -> Vec<u32> {
         // Only the parents are needed: no working directories.
         // SAFETY: getuid(2) has no failure and no memory effects.
@@ -352,6 +374,29 @@ fn process_cwd(pid: u32) -> Option<String> {
         .map(|&c| c as u8)
         .collect();
     (!path.is_empty()).then(|| String::from_utf8_lossy(&path).into_owned())
+}
+
+/// The path of the executable `pid` runs, from `proc_pidpath`: one system
+/// call for the one process (task 1590). `None` when the process is gone
+/// or not the user's.
+#[cfg(target_os = "macos")]
+fn process_executable(pid: u32) -> Option<String> {
+    let pid = libc::c_int::try_from(pid).ok()?;
+    let mut buffer = vec![0u8; usize::try_from(libc::PROC_PIDPATHINFO_MAXSIZE).ok()?];
+    let size = u32::try_from(buffer.len()).ok()?;
+    // SAFETY: the buffer holds `size` bytes, which proc_pidpath(3) fills
+    // at most and does not keep.
+    let read = unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), size) };
+    let read = usize::try_from(read).ok().filter(|read| *read > 0)?;
+    Some(String::from_utf8_lossy(&buffer[..read]).into_owned())
+}
+
+/// The path of the executable `pid` runs, from `/proc/<pid>/exe`; `None`
+/// where there is no `/proc` or the link cannot be read.
+#[cfg(not(target_os = "macos"))]
+fn process_executable(pid: u32) -> Option<String> {
+    let executable = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    Some(executable.to_string_lossy().into_owned())
 }
 
 /// The working directory of `pid` from `/proc/<pid>/cwd`; `None` where
@@ -4061,6 +4106,22 @@ mod tests {
         assert_eq!(cwd.canonicalize().unwrap(), dir);
         assert_eq!(process_cwd(child.id()), None);
         assert_eq!(process_cwd(u32::MAX), None);
+    }
+
+    /// Task 1590: a child's executable is read by its pid, and none for a
+    /// pid that runs nothing.
+    #[test]
+    fn a_childs_executable_is_read_and_none_for_a_pid_that_runs_nothing() {
+        let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let executable = process_executable(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+        let executable = PathBuf::from(executable.unwrap());
+        assert_eq!(
+            executable.canonicalize().unwrap(),
+            Path::new("/bin/sleep").canonicalize().unwrap()
+        );
+        assert_eq!(process_executable(u32::MAX), None);
     }
 
     #[test]

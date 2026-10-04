@@ -278,7 +278,10 @@ impl Supervisor<'_> {
     ///   the queue's rebind, and `broken_git: true` when Git took it for
     ///   no worktree, its `.git` broken, so the run's own
     ///   `<runs>/<run-id>/worktree` directory was removed instead, task
-    ///   1587). A worktree whose directory is already gone
+    ///   1587, and `stopped_processes` (`pid`, `executable`, `killed`)
+    ///   for what ran from under the run's own worktree and was stopped
+    ///   before its removal, or `processes_unlisted` when the processes
+    ///   could not be listed, task 1590). A worktree whose directory is already gone
     ///   loses its branch (after `git worktree prune`), recorded the same
     ///   with `bytes` 0 and `worktree_missing: true`;
     /// - otherwise (the task may run it again, or retry it on a new run):

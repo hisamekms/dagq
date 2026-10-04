@@ -8,9 +8,14 @@ use crate::{common, runtime_support};
 use dagq::infrastructure::git_binary::git_executable;
 
 use dagq::domain::disk::DiskConfig;
+use dagq::{application::ProcessControl, infrastructure::adapters::SystemProcesses};
 use dagq::{application::RunFiles, runtime::RunFilesPort};
 use runtime_support::*;
-use std::{io, sync::Condvar, sync::atomic::AtomicBool};
+use std::{
+    io,
+    sync::Condvar,
+    sync::atomic::{AtomicBool, AtomicUsize},
+};
 
 /// A worker script that commits, leaves build outputs in its worktree and
 /// fails: its receipt names the base commit, which validation refuses
@@ -429,6 +434,187 @@ fn a_worktree_with_a_broken_git_goes_as_a_directory_once_its_task_is_over() {
     assert_eq!(removed[0]["broken_git"], true);
     assert_eq!(removed[0].get("repaired"), None);
     assert!(payloads_of(&queue, &run, "cleanup_failed").is_empty());
+}
+
+/// The system's processes, counting the listings of their executables
+/// (task 1590).
+struct ListingsCounted(Arc<AtomicUsize>);
+
+impl ProcessControl for ListingsCounted {
+    fn alive(&self, pid: u32) -> bool {
+        SystemProcesses.alive(pid)
+    }
+    fn terminate(&self, pid: u32) -> Result<()> {
+        SystemProcesses.terminate(pid)
+    }
+    fn interrupt(&self, pid: u32) -> Result<()> {
+        SystemProcesses.interrupt(pid)
+    }
+    fn kill(&self, pid: u32) -> Result<()> {
+        SystemProcesses.kill(pid)
+    }
+    fn kill_group(&self, leader: u32) -> Result<()> {
+        SystemProcesses.kill_group(leader)
+    }
+    fn reap(&self, pid: u32) {
+        SystemProcesses.reap(pid)
+    }
+    fn list(&self) -> Result<Vec<dagq::domain::recovery::ProcessInfo>> {
+        SystemProcesses.list()
+    }
+    fn executables(&self) -> Result<Vec<dagq::domain::disk::ProcessExecutable>> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        SystemProcesses.executables()
+    }
+    fn start_identity(&self, pid: u32) -> Option<String> {
+        SystemProcesses.start_identity(pid)
+    }
+    fn started_at(&self, pid: u32) -> Option<i64> {
+        SystemProcesses.started_at(pid)
+    }
+    fn descendants(&self, pid: u32) -> Vec<u32> {
+        SystemProcesses.descendants(pid)
+    }
+}
+
+/// Kills the pids it holds when the test ends: on its drop, and on a
+/// timeout's exit, which skips the drop (`on_timeout`, as `KillOnDrop`).
+#[derive(Default)]
+struct Detached(Vec<(u32, common::Cleanup)>);
+
+impl Detached {
+    fn hold(&mut self, pid: u32) -> u32 {
+        let cleanup = common::on_timeout(
+            common::STEP_LIMIT,
+            format!("kill the detached pid {pid}"),
+            move || {
+                let _ = SystemProcesses.kill(pid);
+            },
+        );
+        self.0.push((pid, cleanup));
+        pid
+    }
+}
+
+impl Drop for Detached {
+    fn drop(&mut self) {
+        for (pid, _) in &self.0 {
+            let _ = SystemProcesses.kill(*pid);
+        }
+    }
+}
+
+/// Start `command` detached (its parent gone, as a test's child left
+/// behind), in `cwd`; its pid.
+fn detached(command: &str, cwd: &Path, pid_file: &Path) -> u32 {
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "{command} </dev/null >/dev/null 2>&1 & echo $! > {}",
+            shell_path(pid_file)
+        ))
+        .current_dir(cwd)
+        .bounded_status()
+        .unwrap();
+    assert!(status.success());
+    fs::read_to_string(pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+/// Task 1590: a process running an executable from under an ended run's
+/// worktree (as a test's child `dagq` left running from `target/`) is
+/// left alone while the task goes on, and stopped before the worktree
+/// goes once it is over, recorded in `worktree_removed`; the worktree is
+/// not made again after. One only started in the worktree, from an
+/// executable elsewhere, runs on. The processes are listed only for the
+/// removal, not on a sweep with nothing to remove.
+#[test]
+fn a_process_running_from_an_ended_runs_worktree_is_stopped_before_it_goes() {
+    let (dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, BUILDING_AGENT);
+    supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    let worktree = Path::new(run.worktree_path().unwrap()).to_path_buf();
+    // A copy of dagq in the worktree, waiting from elsewhere on a queue of
+    // its own that nothing writes to, so it runs until stopped (a copy of
+    // a system binary does not run on macOS).
+    let idle = dir.path().join("idle.db");
+    drop(common::template::queue(&idle));
+    let executable = worktree.join("tools").join("dagq");
+    fs::create_dir_all(executable.parent().unwrap()).unwrap();
+    fs::copy(env!("CARGO_BIN_EXE_dagq"), &executable).unwrap();
+    // Both end by themselves too: the watch after its 30 reads, the
+    // sleeper once the test's directory is gone or after 60 seconds.
+    let mut started = Detached::default();
+    let left = started.hold(detached(
+        &format!(
+            "{} --db {} watch --timeout 30 --interval 1",
+            shell_path(&executable),
+            shell_path(&idle)
+        ),
+        dir.path(),
+        &dir.path().join("left.pid"),
+    ));
+    let sleeper = started.hold(detached(
+        &format!(
+            "(i=0; while [ -d {} ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i+1)); done)",
+            shell_path(dir.path())
+        ),
+        &worktree,
+        &dir.path().join("sleeper.pid"),
+    ));
+    let listings = Arc::new(AtomicUsize::new(0));
+    let options = SuperviseOptions {
+        processes: Some(runtime::ProcessesPort(Arc::new(ListingsCounted(
+            listings.clone(),
+        )))),
+        ..sweeping_options()
+    };
+
+    // The task goes on: nothing to remove, nothing listed or stopped.
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    assert!(worktree.is_dir());
+    assert!(pid_alive(left));
+    assert_eq!(listings.load(Ordering::SeqCst), 0);
+
+    queue
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    assert!(!worktree.exists());
+    assert!(!pid_alive(left));
+    assert!(pid_alive(sleeper));
+    assert_eq!(listings.load(Ordering::SeqCst), 1);
+    let removed = payloads_of(&queue, &run, "worktree_removed");
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    let stopped = removed[0]["stopped_processes"].as_array().unwrap();
+    assert_eq!(stopped.len(), 1, "{stopped:?}");
+    assert_eq!(stopped[0]["pid"], left);
+    assert_eq!(
+        Path::new(stopped[0]["executable"].as_str().unwrap())
+            .canonicalize()
+            .ok(),
+        None,
+        "the executable went with the worktree"
+    );
+    assert!(
+        stopped[0]["executable"]
+            .as_str()
+            .unwrap()
+            .ends_with("/tools/dagq")
+    );
+    assert!(payloads_of(&queue, &run, "cleanup_failed").is_empty());
+
+    // Nothing is left to make the worktree again; the next sweep lists
+    // nothing.
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    assert!(!worktree.exists());
+    assert_eq!(listings.load(Ordering::SeqCst), 1);
 }
 
 /// Run files whose removal of a directory under a `raced` directory finds

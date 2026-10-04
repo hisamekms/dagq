@@ -41,6 +41,7 @@
 use super::*;
 use crate::application::{EndedRunWorktree, RUN_TMP_DIR, WorktreeCleanup};
 use crate::domain::EventKind;
+use crate::domain::disk::worktree_executables;
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -312,6 +313,11 @@ enum Outcome {
         missing: bool,
         repaired: bool,
         broken_git: bool,
+        /// What ran from under the worktree and was stopped before its
+        /// removal (task 1590, [`stop_worktree_processes`]).
+        stopped: Vec<Value>,
+        /// Why the processes could not be listed, when they could not.
+        unlisted: Option<String>,
     },
     /// The Claude Code scratchpads of a run whose task is over.
     Scratchpads {
@@ -368,6 +374,7 @@ pub(super) fn scratchpad_dir_name(cwd: &str) -> Option<String> {
 /// What the job works with, all of it shared with the loop.
 struct JobPorts {
     files: Arc<dyn RunFiles>,
+    processes: Arc<dyn ProcessControl + Send + Sync>,
     repository: Arc<dyn Repository + Send + Sync>,
     queues: Arc<dyn QueueOpener>,
     runs_dir: PathBuf,
@@ -524,6 +531,7 @@ impl Supervisor<'_> {
         drop(cleaning);
         let ports = JobPorts {
             files: self.files.clone(),
+            processes: self.processes.clone(),
             repository: self.repository.clone(),
             queues: self.queues.clone(),
             runs_dir: self.layout.runs_dir.clone(),
@@ -577,6 +585,8 @@ impl Supervisor<'_> {
                     missing,
                     repaired,
                     broken_git,
+                    stopped,
+                    unlisted,
                 } => {
                     let reason = format!("task_{}", task_status.as_str());
                     let mut payload = json!({"path": path, "branch": branch, "bytes": bytes, "by": "supervisor", "reason": reason});
@@ -592,6 +602,14 @@ impl Supervisor<'_> {
                     if broken_git {
                         payload["broken_git"] = json!(true);
                         info!(run_id = %run_id, "the worktree {path} of run {run_id} had a broken .git: removed its directory");
+                    }
+                    if !stopped.is_empty() {
+                        info!(run_id = %run_id, "stopped {} process(es) running from the worktree {path} of run {run_id} before its removal", stopped.len());
+                        payload["stopped_processes"] = json!(stopped);
+                    }
+                    if let Some(unlisted) = unlisted {
+                        warn!(run_id = %run_id, "the processes running from the worktree {path} of run {run_id} could not be listed before its removal: {unlisted}");
+                        payload["processes_unlisted"] = json!(unlisted);
                     }
                     cleaned.add(&run_id, bytes);
                     self.queue
@@ -914,7 +932,7 @@ fn clean_worktree(
         return Ok(None);
     }
     let over = task_over(candidate.task_status);
-    let removed = |bytes, missing, removal, branch: &str| Outcome::Worktree {
+    let removed = |bytes, missing, removal, branch: &str, stopped, unlisted| Outcome::Worktree {
         run_id: candidate.run_id.clone(),
         task_id: candidate.task_id,
         task_status: candidate.task_status,
@@ -924,6 +942,8 @@ fn clean_worktree(
         missing,
         repaired: removal == Removal::Repaired,
         broken_git: removal == Removal::BrokenGit,
+        stopped,
+        unlisted,
     };
     if !ports.files.is_dir(worktree) {
         // The directory is gone, but the branch may be left: Git still
@@ -946,7 +966,14 @@ fn clean_worktree(
         }
         ports.repository.delete_branch(branch)?;
         listed.retain(|listed| listed != short);
-        return Ok(Some(removed(0, true, Removal::Removed, branch)));
+        return Ok(Some(removed(
+            0,
+            true,
+            Removal::Removed,
+            branch,
+            Vec::new(),
+            None,
+        )));
     }
     if over {
         let Some(branch) = candidate.branch.as_deref() else {
@@ -957,8 +984,25 @@ fn clean_worktree(
             .tree_size(worktree)
             .with_context(|| format!("measure {}", worktree.display()))?
             .unwrap_or(0);
+        let (stopped, unlisted) =
+            if own_ended_worktree(candidate, &ports.runs_dir, &ports.repo_root) {
+                // The executables' paths are read resolved: so is the
+                // worktree's, when it can be.
+                let resolved = ports
+                    .files
+                    .canonicalize(worktree)
+                    .unwrap_or_else(|_| worktree.to_path_buf());
+                match stop_worktree_processes(&*ports.processes, &resolved, WORKTREE_STOP_POLLS) {
+                    Ok(stopped) => (stopped, None),
+                    Err(error) => (Vec::new(), Some(format!("{error:#}"))),
+                }
+            } else {
+                (Vec::new(), None)
+            };
         let removal = remove_worktree(ports, candidate, branch, pruned)?;
-        return Ok(Some(removed(bytes, false, removal, branch)));
+        return Ok(Some(removed(
+            bytes, false, removal, branch, stopped, unlisted,
+        )));
     }
     let mut paths = Vec::new();
     let mut bytes = 0;
@@ -991,6 +1035,72 @@ fn clean_worktree(
         paths,
         bytes,
     }))
+}
+
+/// Whether the run's task is over and its worktree is the run's own
+/// `<runs>/<run-id>/worktree`, holding no part of the repository's
+/// checkout: the worktree the cleanup stops what runs from under before it
+/// removes it (task 1590), and may remove as a directory when Git cannot
+/// ([`may_remove_broken`]). The worktree of a run whose task goes on only
+/// loses its build outputs, and its processes are left alone; a leased run
+/// is no candidate.
+fn own_ended_worktree(candidate: &EndedRunWorktree, runs_dir: &Path, repo_root: &Path) -> bool {
+    let worktree = Path::new(&candidate.worktree);
+    task_over(candidate.task_status)
+        && worktree == runs_dir.join(candidate.run_id.as_str()).join("worktree")
+        && !repo_root.starts_with(worktree)
+}
+
+/// How often [`stop_worktree_processes`] looks whether what it sent a
+/// SIGTERM ended, every [`WORKTREE_STOP_POLL`]: 3 seconds in all, the
+/// grace the recovery job's `stop_processes` gives. Counted rather than
+/// timed, so the wait reads no clock (L5).
+const WORKTREE_STOP_POLLS: u32 = 60;
+const WORKTREE_STOP_POLL: Duration = Duration::from_millis(50);
+
+/// Stop the processes whose executable is under `worktree`
+/// ([`worktree_executables`]: a test's child `dagq` left running, or what
+/// a worker's turn left with `&`), SIGTERM and then SIGKILL once `polls`
+/// looks ([`WORKTREE_STOP_POLLS`]) found one still running, so none writes
+/// into the worktree again once it is removed (task 1590). The processes are listed only here, once a
+/// worktree is about to go. Returns what was stopped: the pid, the
+/// executable, and whether it took a SIGKILL.
+fn stop_worktree_processes(
+    processes: &dyn ProcessControl,
+    worktree: &Path,
+    polls: u32,
+) -> Result<Vec<Value>> {
+    let all = processes.executables()?;
+    let targets = worktree_executables(&all, worktree, std::process::id());
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+    for process in &targets {
+        if let Err(error) = processes.terminate(process.pid)
+            && processes.alive(process.pid)
+        {
+            warn!(error = %format_args!("{error:#}"), "pid {} running from {} could not be stopped: {error:#}", process.pid, worktree.display());
+        }
+    }
+    for _ in 0..polls {
+        if !targets.iter().any(|p| processes.alive(p.pid)) {
+            break;
+        }
+        thread::sleep(WORKTREE_STOP_POLL);
+    }
+    Ok(targets
+        .into_iter()
+        .map(|process| {
+            let killed = processes.alive(process.pid);
+            if killed
+                && let Err(error) = processes.kill(process.pid)
+                && processes.alive(process.pid)
+            {
+                warn!(error = %format_args!("{error:#}"), "pid {} running from {} could not be killed: {error:#}", process.pid, worktree.display());
+            }
+            json!({"pid": process.pid, "executable": process.executable, "killed": killed})
+        })
+        .collect())
 }
 
 /// How [`remove_worktree`] removed a worktree.
@@ -1082,10 +1192,7 @@ fn may_remove_broken(
     removal: &str,
     repair: &str,
 ) -> bool {
-    let worktree = Path::new(&candidate.worktree);
-    task_over(candidate.task_status)
-        && worktree == runs_dir.join(candidate.run_id.as_str()).join("worktree")
-        && !repo_root.starts_with(worktree)
+    own_ended_worktree(candidate, runs_dir, repo_root)
         && NOT_A_WORKTREE.iter().any(|said| removal.contains(said))
         && repair.contains(BROKEN_GIT)
 }
@@ -1763,5 +1870,141 @@ mod tests {
         assert!(!may_remove_broken(&over, runs, repo, locked, broken));
         assert!(!may_remove_broken(&over, runs, repo, unregistered, busy));
         assert!(!may_remove_broken(&over, runs, repo, unregistered, ""));
+    }
+
+    /// Task 1590: only the run's own worktree of a task that is over has
+    /// what runs from under it stopped; not a task that goes on, nor a
+    /// worktree outside the runs directory, another run's, or one holding
+    /// the repository's checkout.
+    #[test]
+    fn only_the_own_worktree_of_an_ended_task_has_its_processes_stopped() {
+        let runs = Path::new("/runs");
+        let repo = Path::new("/repo");
+        for status in [TaskStatus::Completed, TaskStatus::Canceled] {
+            assert!(own_ended_worktree(&candidate("r", status), runs, repo));
+        }
+        for status in [
+            TaskStatus::InProgress,
+            TaskStatus::Ready,
+            TaskStatus::Submitted,
+            TaskStatus::Draft,
+        ] {
+            assert!(
+                !own_ended_worktree(&candidate("r", status), runs, repo),
+                "{status:?}"
+            );
+        }
+        let over = candidate("r", TaskStatus::Completed);
+        for worktree in [
+            "/elsewhere/r/worktree",
+            "/runs/other/worktree",
+            "/runs/r/worktree/sub",
+            "/runs/r",
+        ] {
+            let moved = EndedRunWorktree {
+                worktree: worktree.to_owned(),
+                ..over.clone()
+            };
+            assert!(!own_ended_worktree(&moved, runs, repo), "{worktree}");
+        }
+        assert!(!own_ended_worktree(
+            &over,
+            runs,
+            Path::new("/runs/r/worktree/repo")
+        ));
+    }
+
+    /// Processes listed with their executables, of which `stubborn` live
+    /// on through a SIGTERM; what was signalled is recorded.
+    #[derive(Default)]
+    struct Signalled {
+        listed: Vec<crate::domain::disk::ProcessExecutable>,
+        stubborn: Vec<u32>,
+        unlisted: bool,
+        alive: Mutex<Vec<u32>>,
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl ProcessControl for Signalled {
+        fn alive(&self, pid: u32) -> bool {
+            self.alive.lock().unwrap().contains(&pid)
+        }
+        fn terminate(&self, pid: u32) -> Result<()> {
+            self.calls.lock().unwrap().push(format!("term {pid}"));
+            if !self.stubborn.contains(&pid) {
+                self.alive.lock().unwrap().retain(|alive| *alive != pid);
+            }
+            Ok(())
+        }
+        fn interrupt(&self, pid: u32) -> Result<()> {
+            self.calls.lock().unwrap().push(format!("int {pid}"));
+            Ok(())
+        }
+        fn kill(&self, pid: u32) -> Result<()> {
+            self.calls.lock().unwrap().push(format!("kill {pid}"));
+            self.alive.lock().unwrap().retain(|alive| *alive != pid);
+            Ok(())
+        }
+        fn executables(&self) -> Result<Vec<crate::domain::disk::ProcessExecutable>> {
+            self.calls.lock().unwrap().push("list".to_owned());
+            anyhow::ensure!(!self.unlisted, "ps failed");
+            Ok(self.listed.clone())
+        }
+    }
+
+    /// Task 1590: what runs from under the worktree gets a SIGTERM, and a
+    /// SIGKILL once the grace is over if it still runs; what runs from
+    /// elsewhere is not signalled, and each stopped one is recorded with
+    /// its executable. A listing that fails stops nothing.
+    #[test]
+    fn processes_running_from_the_worktree_are_terminated_then_killed() {
+        let process = |pid, executable: &str| crate::domain::disk::ProcessExecutable {
+            pid,
+            ppid: 1,
+            executable: Some(executable.to_owned()),
+        };
+        let control = Signalled {
+            listed: vec![
+                process(60, "/runs/r/worktree/target/llvm-cov-target/debug/dagq"),
+                process(61, "/runs/r/worktree/target/debug/dagq"),
+                // Started in the worktree, from elsewhere.
+                process(72, "/bin/sleep"),
+            ],
+            stubborn: vec![61],
+            alive: Mutex::new(vec![60, 61, 72]),
+            ..Signalled::default()
+        };
+        let stopped = stop_worktree_processes(&control, Path::new("/runs/r/worktree"), 0).unwrap();
+        assert_eq!(
+            stopped,
+            [
+                json!({"pid": 60, "executable": "/runs/r/worktree/target/llvm-cov-target/debug/dagq", "killed": false}),
+                json!({"pid": 61, "executable": "/runs/r/worktree/target/debug/dagq", "killed": true}),
+            ]
+        );
+        assert_eq!(
+            *control.calls.lock().unwrap(),
+            ["list", "term 60", "term 61", "kill 61"]
+        );
+        assert_eq!(*control.alive.lock().unwrap(), [72]);
+
+        // Nothing from under the worktree: nothing signalled.
+        let idle = Signalled {
+            listed: vec![process(72, "/bin/sleep")],
+            alive: Mutex::new(vec![72]),
+            ..Signalled::default()
+        };
+        assert!(
+            stop_worktree_processes(&idle, Path::new("/runs/r/worktree"), 0)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(*idle.calls.lock().unwrap(), ["list"]);
+
+        let unlisted = Signalled {
+            unlisted: true,
+            ..Signalled::default()
+        };
+        assert!(stop_worktree_processes(&unlisted, Path::new("/runs/r/worktree"), 0).is_err());
     }
 }

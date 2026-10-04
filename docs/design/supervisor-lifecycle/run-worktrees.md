@@ -4,8 +4,8 @@ type: design
 title: "Run worktrees"
 status: current
 created: 2026-09-26
-updated: 2026-10-04 # task 1627; task 1482; task 1478; task 1427
-last_verified: 2026-10-04 # task 1627, task 1482, task 1478, task 1427
+updated: 2026-10-05 # task 1590; task 1627; task 1482; task 1478; task 1427
+last_verified: 2026-10-05 # task 1590, task 1627, task 1482, task 1478, task 1427
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -16,6 +16,7 @@ related:
 終わったrunのworktreeが占めるディスクを、supervisorが自動で空ける（task 376。goal 34のconstraintsの人の決定（2026-09-25）。2026-09-25に、消されずに残ったrunの`target/`（1 runあたり0.6〜3.4GB、合計20GB超）で空きが尽き、integrateの検証が`No space left on device`で落ちた）。対象は、slotに居ないrunのうち、生きているsupervisorのleaseが無く`integrated`・`succeeded`・`failed`・`interrupted`で終わったもの（staleなleaseは無いものとして扱う。[Run workspaces](run-workspaces.md#run-workspaces)の掃除と同じ。task 396）と、leaseが無くtaskが`completed` / `canceled`になったもの（runの状態を問わない）（`ended_run_worktrees`）。worktreeのpathはrun_dirの下の`<runs>/<run-id>/worktree`で、`--repo`のcheckoutとその祖先には触れない。消したものはもう無いので、何度見てもよい。ただし片付けるものが何も残っていないrunは、同じsupervisorのプロセスの次の掃除からは候補にしない（下の「片付け終わったrun」）。
 
 - **taskが`completed` / `canceled`**: worktreeとbranchを消す（`git worktree remove --force`、branchがあれば`git branch -D`）。`worktree_removed`（`path`、`branch`、`bytes`、`by: supervisor`、`reason`: `task_completed` / `task_canceled`）を記録する。前のrunのworktreeも、着地した（`integrate`がworktreeを消せなかった）runのものも同じ。run_dirとその記録、着地したcommitの`refs/dagq/runs/<run-id>`は残す
+  - 消す前に（`git worktree remove`の前、下の`.git`の壊れたdirを消す前とも）、worktreeがそのrun自身の`<runs>/<run-id>/worktree`（`--repo`のcheckoutとその祖先でない）なら、実行ファイルのpathがその下にあるプロセスを止める（SIGTERM、復旧jobの`stop_processes`と同じ3秒の猶予の後に残ればSIGKILL）。止めたものは`worktree_removed`の`stopped_processes`（`pid`、`executable`、SIGKILLまで要ったかの`killed`）に残す。一覧を取れなければ止めずに消し、その理由を`processes_unlisted`に残す（task 1590。2026-10-03に、coverageの関門のtestが取り残した計装済みの`dagq`（ppid 1）が、worktreeを消した後に終わって`LLVM_PROFILE_FILE`の`target/llvm-cov-target/*.profraw`を書き出し、`.git`もsourceも無いworktreeのdirを5件作り直していた）。止めるかは実行ファイルだけで決め、cwdだけがworktreeの中のプロセス、実行ファイルを読めないプロセス、supervisor自身とその祖先、pid 0と1は止めない（副作用の無い`domain::disk::worktree_executables`と`own_ended_worktree`）。taskが終わっていないrun（ビルド成果物だけを消す）とleaseのあるrun（候補にならない）のプロセスには触らない。プロセスの一覧（`ps`の1回と、pidごとの実行ファイルの読み取り。macOSは`proc_pidpath`、それ以外は`/proc/<pid>/exe`）はworktreeを実際に消すときにだけ取り、片付けるもののない掃除や候補ごとには取らない
   - `git worktree remove`が失敗したら（queueの`rebind`の後などで、worktreeの`.git`が古いcommon dirを指している）、`git worktree repair <worktree>`で直してからもう一度removeする。そうして消せたら`worktree_removed`に`repaired: true`を足す。repairか2回目のremoveも失敗すれば、最初の失敗と合わせて`cleanup_failed`にする（task 405）
   - repairも失敗し、その理由が`.git`の壊れ（removeが`is not a working tree` / `is not a .git file` / `.git' does not exist`、repairが`.git file broken`で、Gitがそのdirをworktreeとして扱えない）で、worktreeがそのrun自身の`<runs>/<run-id>/worktree`（`--repo`のcheckoutとその祖先でない）なら、dirをfilesystemで消し、`git worktree prune`の後に`git branch -D`でbranchを消して、`worktree_removed`に`broken_git: true`を足して記録する（task 1587。2026-10-03に記録の消えたworktree 5件がこの2つの失敗で消せず、supervisorのプロセスごとに`cleanup_failed`になって掃除のたびにGitを呼び続けた）。taskが終わっていて、worktreeを消す（task 376）のと同じ範囲なので、Gitが扱えなくてもdirを消してよい。この判断は副作用の無い`may_remove_broken`が持つ。別の理由の失敗と、dirかbranchを消せなかったときは上と同じく`cleanup_failed`にする（taskが終わっていないrunはworktreeを消さないので、この経路に来ない）
   - worktreeのディレクトリがもう無いのにbranch `dagq/<run-id>`が残っていれば、`git worktree prune`（Gitはpruneするまで消えたworktreeを覚えていて、そこにcheckoutされたbranchを消させない）の後に`git branch -D`で消し、`worktree_removed`（`bytes: 0`、`worktree_missing: true`、他の欄は同じ）を記録する。branchが無ければ何もしない（task 405。branchの一覧は1回の掃除で1回だけ読む）

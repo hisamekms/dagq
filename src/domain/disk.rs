@@ -12,6 +12,7 @@
 //! `dagq.toml` sets them.
 
 use serde::Serialize;
+use std::path::Path;
 
 use super::views::RunEvent;
 
@@ -168,6 +169,46 @@ pub fn gib(bytes: f64) -> String {
     format!("{:.1} GiB", bytes / f64::from(1u32 << 30))
 }
 
+/// A process with the path of the executable it runs (task 1590):
+/// `None` when that path could not be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessExecutable {
+    pub pid: u32,
+    pub ppid: u32,
+    pub executable: Option<String>,
+}
+
+/// The processes the cleanup of an ended run whose task is over stops
+/// before it removes the run's `worktree` (task 1590): those whose
+/// executable is under it (a test's child `dagq` left running from
+/// `target/`), which would otherwise write into it again as they end.
+/// Never `except` (the supervisor) nor a process it runs under, nor pid 0
+/// or 1; never one whose executable could not be read or is elsewhere,
+/// even with its working directory in the worktree.
+pub fn worktree_executables<'a>(
+    all: &'a [ProcessExecutable],
+    worktree: &Path,
+    except: u32,
+) -> Vec<&'a ProcessExecutable> {
+    let mut supervisor = vec![except];
+    let mut current = except;
+    while let Some(next) = all.iter().find(|p| p.pid == current).map(|p| p.ppid) {
+        if next <= 1 || supervisor.contains(&next) {
+            break;
+        }
+        supervisor.push(next);
+        current = next;
+    }
+    all.iter()
+        .filter(|p| p.pid > 1 && !supervisor.contains(&p.pid))
+        .filter(|p| {
+            p.executable
+                .as_deref()
+                .is_some_and(|executable| Path::new(executable).starts_with(worktree))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,5 +315,55 @@ mod tests {
             }
         );
         assert_eq!(gib(1.5 * f64::from(1u32 << 30)), "1.5 GiB");
+    }
+
+    fn executable(pid: u32, ppid: u32, executable: Option<&str>) -> ProcessExecutable {
+        ProcessExecutable {
+            pid,
+            ppid,
+            executable: executable.map(str::to_owned),
+        }
+    }
+
+    /// Task 1590: only what runs an executable under the worktree is
+    /// stopped, never the supervisor or what it runs under, pid 0 or 1, a
+    /// process whose executable is elsewhere (its cwd only in the
+    /// worktree) or unread, nor one under a sibling directory that only
+    /// shares the prefix.
+    #[test]
+    fn only_a_process_running_an_executable_under_the_worktree_may_be_stopped() {
+        let worktree = Path::new("/runs/r1/worktree");
+        let all = [
+            executable(1, 0, Some("/runs/r1/worktree/target/debug/dagq")),
+            executable(0, 0, Some("/runs/r1/worktree/target/debug/dagq")),
+            // The supervisor and its parents, as if run from the worktree.
+            executable(50, 40, Some("/runs/r1/worktree/target/debug/dagq")),
+            executable(40, 30, Some("/runs/r1/worktree/target/debug/dagq")),
+            executable(30, 1, Some("/runs/r1/worktree/wrapper")),
+            // Left behind by a test, and by a worker's `&`.
+            executable(
+                60,
+                1,
+                Some("/runs/r1/worktree/target/llvm-cov-target/debug/dagq"),
+            ),
+            executable(61, 60, Some("/runs/r1/worktree/bin/tool")),
+            // Another run, a prefix only, outside, unread.
+            executable(70, 1, Some("/runs/r2/worktree/target/debug/dagq")),
+            executable(71, 1, Some("/runs/r1/worktree-old/target/debug/dagq")),
+            // A `sleep` started in the worktree: its cwd is not read.
+            executable(72, 1, Some("/bin/sleep")),
+            executable(73, 1, None),
+        ];
+        let stopped: Vec<u32> = worktree_executables(&all, worktree, 50)
+            .iter()
+            .map(|p| p.pid)
+            .collect();
+        assert_eq!(stopped, [60, 61]);
+        // A supervisor not listed protects only itself.
+        let stopped: Vec<u32> = worktree_executables(&all, worktree, 99)
+            .iter()
+            .map(|p| p.pid)
+            .collect();
+        assert_eq!(stopped, [50, 40, 30, 60, 61]);
     }
 }

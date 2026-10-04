@@ -1369,6 +1369,12 @@ pub trait ProcessControl {
         let _ = pid;
         None
     }
+    /// This user's processes with their parents and the paths of their
+    /// executables, for the cleanup of an ended run's worktree (task
+    /// 1590); no working directories are read.
+    fn executables(&self) -> Result<Vec<crate::domain::disk::ProcessExecutable>> {
+        anyhow::bail!("this process control cannot list executables")
+    }
     /// The processes `pid` started, and theirs, from [`Self::list`]; none
     /// when the processes cannot be listed.
     fn descendants(&self, pid: u32) -> Vec<u32> {
