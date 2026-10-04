@@ -967,39 +967,12 @@ pub fn planner_idle_marker(dir: &std::path::Path) -> std::path::PathBuf {
     dir.join("idle.json")
 }
 
-/// What the supervisor reads of the agent of a live session: its screen,
-/// for a dialog that holds it (ADR-0019 decision 6), and the idle marker
-/// its hook writes when it stops (ADR-0016). Both formats are the agent's
-/// own (for Claude Code, its TUI and its `Stop` hook input), so the
-/// provider's adapter implements this; the supervisor decides what a dialog
-/// or an idle agent means for the run.
+/// Provider marker and job-output signals for workers, plus screen signals
+/// retained for the interactive planner and inbox submission paths.
 pub trait AgentSignals {
     /// The kind of dialog at the bottom of `screen` that holds the session
-    /// (recorded as `prompt` of `prompt_waiting`), or `None` while it works.
+    /// or `None` while it works. Used by planner and inbox submission.
     fn detect_prompt(&self, screen: &str) -> Option<&'static str>;
-    /// Whether the bottom of `screen` shows the agent stopped at a login
-    /// that ran out (ADR-0047 decision 42): only a person can log in again.
-    fn auth_required(&self, _screen: &str) -> bool {
-        false
-    }
-    /// Whether the bottom of `screen` shows the agent stopped at its usage
-    /// limit (ADR-0047 decision 42, task 438): only a person decides on
-    /// the cost.
-    fn usage_limited(&self, _screen: &str) -> bool {
-        false
-    }
-    /// The wall only a person moves that `screen` shows the agent stopped
-    /// at: a login that ran out, or the usage limit.
-    fn screen_wall(&self, screen: &str) -> Option<crate::domain::queue_hold::Wall> {
-        use crate::domain::queue_hold::Wall;
-        if self.auth_required(screen) {
-            Some(Wall::Authentication)
-        } else if self.usage_limited(screen) {
-            Some(Wall::UsageLimit)
-        } else {
-            None
-        }
-    }
     /// Why a headless job that failed did, from its output (its stdout and
     /// stderr), in the classes shared by every provider (ADR-t1063-1
     /// decision 4): a login that ran out and the usage limit are the walls
@@ -1007,33 +980,11 @@ pub trait AgentSignals {
     fn job_failure(&self, _output: &str) -> crate::domain::headless_job::JobFailure {
         crate::domain::headless_job::JobFailure::Other
     }
-    /// The inputs that switch a live worker session from `from` to `to`
-    /// (ADR-0079 decision 5), each typed and submitted in turn before a
-    /// request; `None` when the agent cannot switch inside a session.
-    fn model_switch(
-        &self,
-        _from: &crate::domain::worker_model::WorkerSession,
-        _to: &crate::domain::worker_model::WorkerSession,
-    ) -> Option<Vec<String>> {
-        None
-    }
-    /// The last lines of `screen` an ask and `prompt_waiting` carry.
+    /// The last lines of a planner or inbox screen.
     fn screen_excerpt(&self, screen: &str) -> String;
     /// What the idle marker's content says. A content the adapter cannot
     /// read still marks a stop.
     fn idle_hook(&self, content: &[u8]) -> IdleHook;
-    /// Who gave the input the input marker's content records (the
-    /// `prompt-submit.json` the agent's hook writes each time the session
-    /// takes an input, ADR-0043 decision 2). A provider whose hook writes
-    /// no such marker never has one to read.
-    fn input_source(&self, _content: &[u8]) -> InputSource {
-        InputSource::Unknown
-    }
-    /// The text of the input the input marker's content records, when it
-    /// says: matched against the texts the supervisor typed.
-    fn input_text(&self, _content: &[u8]) -> Option<String> {
-        None
-    }
     /// Whether the agent's input box is drawn with no dialog over it: text
     /// typed now reaches the agent (a booting session drops it).
     fn input_ready(&self, screen: &str) -> bool;
@@ -1061,64 +1012,12 @@ pub trait AgentSignals {
     fn transcript(&self, screen: &str) -> String {
         screen.to_owned()
     }
-    /// The dialog of the fixed list the supervisor answers by rule
-    /// (ADR-0047 decision 29) at the bottom of `screen`, with the keys that
-    /// answer it, or `None` for any other screen, however much a dialog.
-    fn known_dialog(&self, _screen: &str) -> Option<DialogAnswer> {
-        None
-    }
     /// The line of `log`, the end of the agent's debug log, that says its
     /// idle hook failed to write the marker (ADR-t803-1), the latest; a
     /// provider that logs none never has one.
     fn idle_hook_failure(&self, _log: &str) -> Option<String> {
         None
     }
-}
-
-/// A dialog of the agent's TUI the supervisor answers by a fixed rule once
-/// its safety conditions hold (ADR-0047 decision 29). Any other dialog gets
-/// no key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KnownDialog {
-    /// The confirmation a `/exit` gets while background work runs
-    /// ("Background work is running"): answered with "Exit and stop tasks"
-    /// only after the supervisor's `/exit`, with the worktree clean and the
-    /// receipt's commit at HEAD.
-    BackgroundWork,
-    /// The Settings panel (`/status`, `/usage`, ...) left open over the
-    /// input box: closed with Esc at any stage.
-    SettingsPanel,
-}
-
-impl KnownDialog {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::BackgroundWork => "background_work",
-            Self::SettingsPanel => "settings_panel",
-        }
-    }
-}
-
-/// A known dialog found on a screen and the keys that answer it, in the
-/// backend's key names ([`WorkspaceBackend::send_key`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DialogAnswer {
-    pub dialog: KnownDialog,
-    pub keys: Vec<&'static str>,
-}
-
-/// Who gave an input the session took, as [`AgentSignals::input_source`]
-/// reads its input marker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InputSource {
-    /// Text typed into the session: a person's, or the supervisor's (told
-    /// apart by the time of the supervisor's sends).
-    Typed,
-    /// Text the agent put in by itself, such as the notice that its
-    /// background work ended.
-    Agent,
-    /// The marker does not say.
-    Unknown,
 }
 
 /// The content of an idle marker, as [`AgentSignals::idle_hook`] read it.
@@ -1369,11 +1268,6 @@ pub trait WorkspaceBackend {
     /// the wrapper may be cmux itself, which needs time to come back.
     fn reopen_interval(&self) -> std::time::Duration {
         std::time::Duration::from_secs(60)
-    }
-    /// How long a session may run with neither a receipt nor an idle marker
-    /// before the supervisor starts reading its screen for a dialog.
-    fn prompt_wait(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(90)
     }
     /// How long a resumed session's agent may take, after it registered, to
     /// be ready for the resolution request.

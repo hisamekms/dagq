@@ -25,9 +25,10 @@ use crate::domain::recovery::{
 use crate::domain::turn::HEADLESS_NUDGES;
 
 /// The reasons of the `stalled` alert of a session idle without a receipt:
-/// an interactive session's idle after its nudge, and a headless session's
-/// turn that ended so after its nudges, or refused too many permissions
-/// (ADR-t813-1 decision 9).
+/// a headless session's turn that ended so after its nudges, or refused too
+/// many permissions (ADR-t813-1 decision 9), and the retired interactive
+/// session's idle after its nudge, which past records still carry (task
+/// 1437).
 pub(super) const IDLE_REASONS: [&str; 3] = [
     IDLE_WITHOUT_RECEIPT,
     TURN_WITHOUT_RECEIPT,
@@ -79,16 +80,14 @@ fn notice_step(sv: &Supervisor<'_>, run: &TaskRun, ask_id: i64) -> NoticeStep {
 }
 
 /// The latest `worker_question` of the run closed without its answer
-/// reaching the session and not told to it yet. An interactive session
-/// must not have moved past its close: a session that ended a turn after
-/// the close took an answer someone typed by hand. A turn that ended
-/// between the answer and the close does not count against it: the answer
-/// was not delivered then. A headless session has no terminal to type
-/// into, and its ask may close before the turn that asked ends.
+/// reaching the session and not told to it yet. The headless session has
+/// no terminal anyone could type an answer into, and its ask may close
+/// before the turn that asked ends, so no turn of it counts against the
+/// notice.
 fn closed_notice(
     sv: &Supervisor<'_>,
     run: &TaskRun,
-    idle: &IdleMarker,
+    _idle: &IdleMarker,
 ) -> Result<Option<ClosedNotice>> {
     // Most runs never had a question closed: no events are read for them.
     if sv.queue.last_worker_question_closed(run.id())?.is_none() {
@@ -97,11 +96,7 @@ fn closed_notice(
     let events = sv.queue.run_events(run.id())?;
     let Some(closed) = crate::domain::worker_question::closed_undelivered(&events)
         .into_iter()
-        .rev()
-        .find(|c| {
-            headless(run)
-                || at_event(&c.closed).is_some_and(|at| !written_after(idle.modified(), at))
-        })
+        .next_back()
     else {
         return Ok(None);
     };
@@ -124,16 +119,15 @@ fn closed_notice(
 /// The setting the idle detections are judged by.
 pub(super) const IDLE_THRESHOLD: &str = "idle_without_receipt_secs";
 
-/// The setting the `long_background` alert is judged by.
+/// Retained when reading historical background recovery events.
 pub(super) const BACKGROUND_THRESHOLD: &str = "background_alert_secs";
 
-/// The setting the checks that a sent text was taken are judged by (the
-/// `stalled` alert of reason `send_unconfirmed`).
+/// Retained when reading historical worker send recovery events.
 pub(super) const SEND_THRESHOLD: &str = "send_confirm_secs";
 
 /// The options of a `stalled` ask: leave the session alone and ask again
-/// if it stays idle, or have a person step in.
-pub(super) const STALLED_OPTIONS: [&str; 2] = ["wait", "intervene"];
+/// if it stays idle, or stop its wrapper through the exit request file.
+pub(super) const STALLED_OPTIONS: [&str; 2] = ["wait", "stop"];
 
 /// The option a headless session's `stalled` ask has after `wait`, in place
 /// of `intervene` ([`headless_options`]): the supervisor has the session end
@@ -153,9 +147,11 @@ pub(super) fn stalled_options(note: Option<&Note>) -> Vec<String> {
     options
 }
 
-/// The answer of an interactive session's `stalled` ask for a person to
-/// step in (ADR-0043), which a headless session's ask does not offer: its
-/// session takes no keys (task 1179).
+/// The answer of a `stalled` ask for a person to step in (ADR-0043), which
+/// asks no longer offer: a headless session takes no keys (task 1179). Asks
+/// opened before that (the retired interactive session's, and headless ones
+/// opened before task 1179) offered it, and an `intervene` that still comes
+/// opens the ask again.
 const INTERVENE_OPTION: &str = "intervene";
 
 /// Whether `answer` is `intervene` (or `intervene: <text>`).
@@ -230,12 +226,11 @@ struct Recovering {
 
 impl Recovering {
     /// Whether the session moved since the job started (or since its
-    /// repair): an idle marker (`marker`) or an input it took (`taken`)
-    /// written in a later millisecond than the event (task 1050).
-    fn moved(&self, marker: Option<SystemTime>, taken: Option<SystemTime>) -> bool {
+    /// repair): an idle marker written in a later millisecond than the
+    /// event (task 1050).
+    fn moved(&self, marker: Option<SystemTime>) -> bool {
         let since = self.repaired_at.unwrap_or(self.at);
         marker.is_some_and(|m| written_after(m, since))
-            || taken.is_some_and(|t| written_after(t, since))
     }
 }
 
@@ -272,35 +267,17 @@ struct Reopen {
 enum Park {
     /// A recovery job's `resume`, with its instruction.
     Resume(String),
-    /// The run moves to headless Codex.
-    Switch(PendingSwitch),
 }
 
 /// Receipt-less idle of one session, judged each tick.
 #[derive(Debug, Clone, Default)]
 pub(super) struct StallWatch {
     nudge: Option<Nudge>,
-    /// How many nudges the phase sent: one for an interactive session, up
-    /// to [`HEADLESS_NUDGES`] for a headless one.
+    /// How many turn nudges the phase sent, up to [`HEADLESS_NUDGES`].
     nudges: u8,
     /// The latest text the supervisor typed into the session: a marker no
     /// newer is not the end of a turn that answered it.
     last_input: Option<SystemTime>,
-    /// The latest texts the supervisor typed (at most [`SENDS_KEPT`]): when,
-    /// and the fingerprint of the text when known. An input marker one of
-    /// them explains is not a person's.
-    sends: Vec<(SystemTime, Option<u64>)>,
-    /// The latest input the session took, by its input marker: typed by a
-    /// person or the supervisor, or a notice the agent put in by itself.
-    /// An idle marker no newer is not the end of the turn it started.
-    taken: Option<SystemTime>,
-    /// The latest idle marker seen, for an input whose turn ended between
-    /// two observations.
-    seen_idle: Option<SystemTime>,
-    /// The first observation only takes the input marker in (sets
-    /// [`Self::taken`]): an adopted run's marker may be an input the
-    /// previous supervisor judged.
-    prime_input: bool,
     asked: Option<Asked>,
     /// The answer `wait` restarts the count here.
     wait_from: Option<SystemTime>,
@@ -424,8 +401,8 @@ fn nudged_text(nudge: Option<Nudge>, now: SystemTime) -> String {
 const WAIT_ASKS_AFTER_TURN: &str = " (the supervisor asks again after its next turn)";
 
 /// Where the answers of a `stalled` ask's question start, after what it
-/// says of the session: a headless one's, and an interactive one's (or
-/// one opened before task 1179).
+/// says of the session: a headless one's, and one of the retired
+/// interactive session (or opened before task 1179).
 const ANSWERS_START: [&str; 2] = ["Before answering, read what its turns did", "Answer `wait`"];
 
 /// The sentence of an ask opened again for an `intervene` answer, up to
@@ -489,21 +466,6 @@ fn headless_question(
     )
 }
 
-/// The sends of the supervisor's an input marker is matched against.
-const SENDS_KEPT: usize = 16;
-
-/// Slack past two [`confirm_wait`]s (the send, and the text sent again)
-/// within which an input is taken to be the supervisor's send.
-const SEND_SLACK: Duration = Duration::from_secs(10);
-
-/// Whether a send of the supervisor's at `sent` explains an input taken at
-/// `at`: taken no earlier than a second before it, and within two
-/// `confirm` waits (the text may be sent again once) and a slack after it.
-fn send_explains(sent: SystemTime, at: SystemTime, confirm: Duration) -> bool {
-    at + Duration::from_secs(1) >= sent
-        && elapsed(sent, at) < confirm.saturating_mul(2) + SEND_SLACK + Duration::from_secs(1)
-}
-
 /// Whether the idle marker `marker` shows a turn the session took since
 /// `since` (a `stalled` ask opened, a person stepped in): written in a later
 /// millisecond (task 1050).
@@ -531,15 +493,14 @@ impl StallWatch {
             })
         };
         let mut watch = Self {
-            prime_input: true,
+            nudges: events
+                .iter()
+                .filter(|e| e.kind == event_kind::STALL_NUDGED && e.payload["phase"] == PHASE)
+                .count()
+                .try_into()
+                .unwrap_or(u8::MAX),
             ..Self::default()
         };
-        watch.nudges = events
-            .iter()
-            .filter(|e| e.kind == event_kind::STALL_NUDGED && e.payload["phase"] == PHASE)
-            .count()
-            .try_into()
-            .unwrap_or(u8::MAX);
         if let Some(event) = events
             .iter()
             .rev()
@@ -577,9 +538,6 @@ impl StallWatch {
         // since. A headless session's `intervene` is no step in: its ask
         // is opened again instead (task 1179).
         watch.held = latest_outcome("answered_stop");
-        if !headless(run) {
-            watch.held = watch.held.max(latest_outcome("answered_intervene"));
-        }
         // A recovery job's escalation names its ask (ADR-0047), and its
         // alert the setting it was judged by.
         let threshold_of = |id: AskId| {
@@ -674,7 +632,7 @@ impl StallWatch {
         {
             if answered_wait(ask.answer.as_deref()) {
                 watch.wait_from = watch.wait_from.max(Some(at_unix(closed)));
-            } else if headless(run) && ask.answer.as_deref().is_some_and(answered_intervene) {
+            } else if ask.answer.as_deref().is_some_and(answered_intervene) {
                 // A headless session's `intervene` holds nothing: its ask
                 // is opened again (task 1179).
                 watch.reopen = Some(Reopen {
@@ -694,7 +652,7 @@ impl StallWatch {
             // A headless session's `intervene` is never applied: its watch
             // closes the ask and opens it again, recording its outcome only
             // if the previous supervisor did not (task 1179).
-            let reopens = headless(run) && ask.answer.as_deref().is_some_and(answered_intervene);
+            let reopens = ask.answer.as_deref().is_some_and(answered_intervene);
             let applied = !reopens && ask.answered_at.is_some() && resolved("ask", Some(ask.id));
             watch.asked = Some(Asked {
                 id: ask.id,
@@ -710,8 +668,7 @@ impl StallWatch {
             if let Some(nudge) = &mut watch.nudge {
                 nudge.settled = true;
             }
-        } else if headless(run)
-            && let Some(at) = events.iter().rposition(|e| {
+        } else if let Some(at) = events.iter().rposition(|e| {
                 e.kind == event_kind::STALL_RESOLVED
                     && e.payload["phase"] == PHASE
                     && e.payload["detection"] == "ask"
@@ -745,46 +702,8 @@ impl StallWatch {
     }
 
     /// The supervisor typed `text` (when known) into the session at `at`.
-    pub(super) fn input_sent(&mut self, at: SystemTime, text: Option<&str>) {
+    pub(super) fn input_sent(&mut self, at: SystemTime, _text: Option<&str>) {
         self.last_input = Some(self.last_input.map_or(at, |last| last.max(at)));
-        self.sends.push((at, text.map(text_fingerprint)));
-        if self.sends.len() > SENDS_KEPT {
-            self.sends.remove(0);
-        }
-    }
-
-    /// When the supervisor last typed a text into the session.
-    pub(super) fn last_send(&self) -> Option<SystemTime> {
-        self.last_input
-    }
-
-    /// Whether a text the supervisor typed explains `input`: the same text
-    /// typed no later than a second after it (an answer the session took
-    /// only after its turn), or any text typed within the window of
-    /// [`send_explains`] before it.
-    fn sent_by_supervisor(&self, input: &InputMarker, confirm: Duration) -> bool {
-        self.sends.iter().any(|(sent, text)| {
-            send_explains(*sent, input.modified, confirm)
-                || (text.is_some()
-                    && *text == input.text
-                    && input.modified + Duration::from_secs(1) >= *sent)
-        })
-    }
-
-    /// Whether the session took an input at `input` (its input marker) no
-    /// earlier than the last text the supervisor typed: the text, if any,
-    /// is not still waiting to be taken. Compared to the millisecond, an
-    /// input of the send's millisecond is taken after it: the hook may
-    /// write the marker before the send's event is recorded (task 1050).
-    pub(super) fn taken_after_sends(&self, input: SystemTime) -> bool {
-        self.last_input.is_none_or(|at| !written_after(at, input))
-    }
-
-    /// Whether the session ended a turn (its idle marker `marker`) since the
-    /// last text the supervisor typed and the last input it took.
-    pub(super) fn turn_since_input(&self, marker: SystemTime) -> bool {
-        self.last_input.is_none_or(|at| written_after(marker, at))
-            && self.taken.is_none_or(|at| marker > at)
     }
 
     /// Whether the idle marker written at `modified` ended a turn after the
@@ -800,83 +719,6 @@ impl StallWatch {
     /// `modified` is of a turn after the answer; `None` without one.
     fn after_wait(&self, modified: SystemTime) -> Option<bool> {
         self.wait_from.map(|wait| written_after(modified, wait))
-    }
-
-    /// The session took `input` (its input marker), `idle` being its idle
-    /// marker now: the input counts as its last one, like a text the
-    /// supervisor typed, so a turn it started by itself (from a person's
-    /// input, or a notice that its background work ended) is not taken
-    /// for a stall. Returns the idle seconds to record as
-    /// `stall_preempted` when the input is new, typed, explained by no
-    /// send of the supervisor's, and taken while the session was idle
-    /// (its idle marker older than it) short of `threshold`, with no
-    /// `stalled` ask open and no person stepped in since its last turn
-    /// (ADR-0043 decision 3). A notice of the agent's, or an input the
-    /// marker does not say the source of, is never counted.
-    pub(super) fn input_taken(
-        &mut self,
-        input: InputMarker,
-        idle: Option<SystemTime>,
-        threshold: Duration,
-        confirm: Duration,
-    ) -> Option<i64> {
-        let before = self.seen_idle;
-        if idle.is_some() {
-            self.seen_idle = idle;
-        }
-        if self.taken.is_some_and(|at| input.modified <= at) {
-            return None;
-        }
-        self.taken = Some(input.modified);
-        if std::mem::take(&mut self.prime_input)
-            || input.source != InputSource::Typed
-            || self.asked.is_some()
-        {
-            return None;
-        }
-        // The idle the input ended: the marker now, or the one seen before
-        // when the turn it started has ended already.
-        let idle = [idle, before]
-            .into_iter()
-            .flatten()
-            .filter(|idle| *idle < input.modified)
-            .max()?;
-        if self.held.is_some_and(|at| !written_after(idle, at))
-            || self.sent_by_supervisor(&input, confirm)
-        {
-            return None;
-        }
-        let from = self.wait_from.map_or(idle, |at| at.max(idle));
-        (elapsed(from, input.modified) < threshold).then(|| secs_between(from, input.modified))
-    }
-
-    /// Record the input a person typed before the idle detection as
-    /// `stall_preempted`, unless the session waits at a dialog or on a
-    /// question to a person, which is not an idle.
-    fn preempted(
-        sv: &mut Supervisor<'_>,
-        run: &TaskRun,
-        idle_secs: i64,
-        dialog: bool,
-    ) -> Result<()> {
-        if dialog
-            || sv.queue.has_unclosed_worker_question(run.id())?
-            || sv.queue.has_unclosed_ask(run.id(), AskKind::AnswerPrompt)?
-        {
-            return Ok(());
-        }
-        sv.queue.record_runtime_event(
-            run.id(),
-            EventKind::StallPreempted,
-            json!({
-                "phase": PHASE,
-                "threshold": IDLE_THRESHOLD,
-                "threshold_secs": sv.stall.idle_without_receipt_secs,
-                "idle_secs": idle_secs,
-            }),
-        )?;
-        info!(run_id = %run.id(), "run {} took an input the supervisor did not send after {idle_secs}s idle without a receipt", run.id());
-        Ok(())
     }
 
     /// A recovery job escalated the alert of `threshold` to the `stalled`
@@ -976,39 +818,10 @@ impl StallWatch {
         self.followed
     }
 
-    /// A recovery job chose `resume` with `instruction`: the session's
-    /// watch parks the run on its next step.
-    pub(super) fn request_park(&mut self, instruction: String) {
-        self.park = Some(Box::new(Park::Resume(instruction)));
-    }
-
     /// The `resume` a recovery job chose, once.
     pub(super) fn take_park(&mut self) -> Option<String> {
         match self.park.take().map(|park| *park) {
             Some(Park::Resume(instruction)) => Some(instruction),
-            other => {
-                self.park = other.map(Box::new);
-                None
-            }
-        }
-    }
-
-    /// The interactive session stopped at a wall and its run moved to
-    /// headless Codex (ADR-t813-2 decision 5): the session's watch parks
-    /// the run for a session of Codex's, which `instruction` starts.
-    pub(super) fn request_switch(&mut self, switch: PendingSwitch) {
-        self.park = Some(Box::new(Park::Switch(switch)));
-    }
-
-    /// Whether the session's watch is to park the run on its next step.
-    pub(super) fn parking(&self) -> bool {
-        self.park.is_some()
-    }
-
-    /// The move to Codex, once.
-    pub(super) fn take_switch(&mut self) -> Option<PendingSwitch> {
-        match self.park.take().map(|park| *park) {
-            Some(Park::Switch(switch)) => Some(switch),
             other => {
                 self.park = other.map(Box::new);
                 None
@@ -1195,19 +1008,16 @@ impl StallWatch {
     }
 
     /// One observation of a session with a fresh wrapper, no receipt and no
-    /// `/exit` requested. `dialog` is a `prompt_waiting` not cleared.
-    /// Returns what was typed into the session, for the check that it was
-    /// taken ([`StartCheck`]).
+    /// exit requested. Returns the queued request time.
     pub(super) fn poll(
         &mut self,
         sv: &mut Supervisor<'_>,
         run: &TaskRun,
         workspace: &str,
         idle_marker: &Path,
-        dialog: bool,
         recovery: StallRecovery<'_, '_>,
-    ) -> Result<Option<StartCheck>> {
-        self.observe(sv, run, workspace, idle_marker, dialog, Some(recovery))
+    ) -> Result<Option<SystemTime>> {
+        self.observe(sv, run, workspace, idle_marker, Some(recovery))
     }
 
     /// The same observation for a run that waits for a person outside
@@ -1221,9 +1031,8 @@ impl StallWatch {
         run: &TaskRun,
         workspace: &str,
         idle_marker: &Path,
-        dialog: bool,
     ) -> Result<()> {
-        self.observe(sv, run, workspace, idle_marker, dialog, None)
+        self.observe(sv, run, workspace, idle_marker, None)
             .map(|_| ())
     }
 
@@ -1235,41 +1044,20 @@ impl StallWatch {
         run: &TaskRun,
         workspace: &str,
         idle_marker: &Path,
-        dialog: bool,
         recovery: Option<StallRecovery<'_, '_>>,
-    ) -> Result<Option<StartCheck>> {
+    ) -> Result<Option<SystemTime>> {
         self.followed = false;
         let now = sv.files.now();
-        // Without a marker newer than its last input, the session's screen
-        // stands in for it (ADR-t803-1).
-        let idle = sv.session_idle(
-            run,
-            workspace,
-            idle_marker,
-            self.last_input.unwrap_or(UNIX_EPOCH),
-            PHASE,
-        )?;
+        // Only a wrapper idle marker newer than the last request counts.
+        let idle = sv.session_idle(idle_marker)?;
         let marker = idle.as_ref().map(IdleMarker::modified);
-        match InputMarker::read(&*sv.files, sv.signals, idle_marker)? {
-            Some(input) => {
-                if let Some(idle_secs) = self.input_taken(
-                    input,
-                    marker,
-                    sv.stall.idle_without_receipt(),
-                    sv.stall.send_confirm(),
-                ) {
-                    Self::preempted(sv, run, idle_secs, dialog)?;
-                }
-            }
-            None => self.prime_input = false,
-        }
         // The session moved since the idle's recovery job started (or since
         // its repair): the job's detection ended, and a job still running
         // is stopped by the session's watch ([`Self::recovering`]).
         if self
             .recovering
             .as_deref()
-            .is_some_and(|recovering| recovering.moved(marker, self.taken))
+            .is_some_and(|recovering| recovering.moved(marker))
         {
             let outcome = self.moved_outcome();
             self.recovery_resolved(sv, run, outcome)?;
@@ -1296,32 +1084,9 @@ impl StallWatch {
         if !self.ended_after_inputs(modified) {
             return Ok(None);
         }
-        // An input it took since its last turn ended started a turn of its
-        // own: no stall while it runs. A turn a person interrupted (Esc)
-        // ends with no idle marker, so past the threshold from the input
-        // the screen decides: the idle counts from the input unless the
-        // agent is at work.
-        let open_input = self.taken.filter(|at| modified <= *at);
-        let start = open_input.unwrap_or(modified);
-        let from = [self.wait_from, self.recovered_from]
-            .into_iter()
-            .flatten()
-            .fold(start, SystemTime::max);
-        // A headless turn that ended is done for good: nothing to wait out
-        // (ADR-t813-1 decision 9).
-        let threshold = if headless(run) {
-            Duration::ZERO
-        } else {
-            sv.stall.idle_without_receipt()
-        };
-        if elapsed(from, now) < threshold {
-            return Ok(None);
-        }
-        // A dialog or an ask the session waits at is not a stall.
-        if dialog
-            || sv.queue.has_unclosed_worker_question(run.id())?
-            || sv.queue.has_unclosed_ask(run.id(), AskKind::AnswerPrompt)?
-        {
+        let start = modified;
+        // A question the session waits on is not a stall.
+        if sv.queue.has_unclosed_worker_question(run.id())? {
             return Ok(None);
         }
         // A session stopped at a login that ran out waits for a person to
@@ -1340,19 +1105,19 @@ impl StallWatch {
             let Some(nudge) = self.nudge else {
                 return Ok(None);
             };
-            if open_input.is_some() || self.wait_from.is_none() {
+            if self.wait_from.is_none() {
                 return Ok(None);
             }
             // A headless session takes no turn by itself: after `wait` the
             // ask follows its next turn.
-            if headless(run) && self.after_wait(idle.modified()) == Some(false) {
+            if self.after_wait(idle.modified()) == Some(false) {
                 return Ok(None);
             }
             self.open_ask(sv, run, workspace, &idle, idle_secs, Some(nudge), now, None)?;
             return Ok(None);
         };
-        if headless(run) {
-            return self.observe_turn(
+        {
+            self.observe_turn(
                 sv,
                 run,
                 workspace,
@@ -1361,67 +1126,7 @@ impl StallWatch {
                 idle_secs,
                 now,
                 recovery,
-            );
-        }
-        let screen = sv.cmux.capture(workspace);
-        if open_input.is_some() && screen.as_ref().ok().is_none_or(|s| sv.signals.working(s)) {
-            return Ok(None);
-        }
-        if let Ok(screen) = screen {
-            if let Some(wall) = sv.signals.screen_wall(&screen) {
-                // An interactive Claude worker moves to headless Codex
-                // (ADR-t813-2 decision 5), else it joins the hold ask.
-                if self.parking() {
-                    return Ok(None);
-                }
-                if let Some(switch) = interactive_switch(sv, run, wall)? {
-                    self.request_switch(switch);
-                    return Ok(None);
-                }
-                if raise_wall(sv, run, workspace, &screen, wall)? {
-                    return Ok(None);
-                }
-            }
-            // A Settings panel left open would take the nudge: it is closed
-            // first, and the nudge follows on a later tick (ADR-0047
-            // decision 29).
-            if answer_known_dialog(sv, run, workspace, &screen, false, None)? {
-                return Ok(None);
-            }
-        }
-        // A question closed without its answer is told in place of the
-        // nudge, or of the recovery job after it (task 1372).
-        if self.wait_from.is_none()
-            && self.recovering.is_none()
-            && let Some(closed) = closed_notice(sv, run, &idle)?
-        {
-            match notice_step(sv, run, closed.ask_id) {
-                NoticeStep::Send => {
-                    return self.send_notice(sv, run, workspace, &idle, idle_secs, now, closed);
-                }
-                NoticeStep::Wait => return Ok(None),
-                NoticeStep::GaveUp => {}
-            }
-        }
-        match self.nudge {
-            None => self.send_nudge(sv, run, workspace, &idle, idle_secs, now),
-            // A person answered `wait` to the ask the stall came to: asked
-            // again, without another job (ADR-0047 decision 30).
-            Some(nudge) if self.wait_from.is_some() => {
-                self.open_ask(sv, run, workspace, &idle, idle_secs, Some(nudge), now, None)?;
-                Ok(None)
-            }
-            Some(nudge) => self.recover(
-                sv,
-                run,
-                workspace,
-                &idle,
-                idle_secs,
-                Some(nudge),
-                now,
-                recovery,
-                IDLE_WITHOUT_RECEIPT,
-            ),
+            )
         }
     }
 
@@ -1443,7 +1148,7 @@ impl StallWatch {
         idle_secs: i64,
         now: SystemTime,
         recovery: StallRecovery<'_, '_>,
-    ) -> Result<Option<StartCheck>> {
+    ) -> Result<Option<SystemTime>> {
         let mark = last_turn(sv, idle_marker);
         // A turn that failed or was stopped ends the session: its run goes
         // to its recovery job once the wrapper exited, and nothing is sent.
@@ -1518,7 +1223,7 @@ impl StallWatch {
         now: SystemTime,
         stall: StallRecovery<'_, '_>,
         why: &'static str,
-    ) -> Result<Option<StartCheck>> {
+    ) -> Result<Option<SystemTime>> {
         self.followed = true;
         let reason = Some(why);
         let StallRecovery { recovery, live } = stall;
@@ -1552,9 +1257,9 @@ impl StallWatch {
         // A headless session's last turn, as its idle marker says it
         // (ADR-t813-1): its turns are in the job's material too.
         let mut facts = facts;
-        if let Some(mark) = headless(run)
-            .then(|| run.idle_marker_path().ok())
-            .flatten()
+        if let Some(mark) = run
+            .idle_marker_path()
+            .ok()
             .and_then(|marker| last_turn(sv, &marker))
         {
             facts["turn"] = json!({
@@ -1588,9 +1293,9 @@ impl StallWatch {
                 if let Some(instruction) = applied.resume {
                     self.park = Some(Box::new(Park::Resume(instruction)));
                 }
-                Ok(applied.sent.map(|(text, sent_at, submission)| {
+                Ok(applied.sent.map(|(text, sent_at, _submission)| {
                     self.input_sent(sent_at, Some(&text));
-                    StartCheck::new("recovery instruction", &text, sent_at, &submission)
+                    sent_at
                 }))
             }
             LiveStep::Escalate(attempt, escalation) => {
@@ -1631,16 +1336,16 @@ impl StallWatch {
         idle: &IdleMarker,
         idle_secs: i64,
         now: SystemTime,
-    ) -> Result<Option<StartCheck>> {
+    ) -> Result<Option<SystemTime>> {
         let background = idle.background_tasks();
         self.nudged(sv, run, workspace, idle, idle_secs, now, None)?;
         let text = stall_nudge(run, idle_secs, background, idle.background_running())?;
         let sent_at = sv.files.now();
         match submit(sv, run, workspace, Input::Text(&text), "nudge") {
-            Ok(submission) => {
+            Ok(_submission) => {
                 self.input_sent(sent_at, Some(&text));
                 info!(run_id = %run.id(), "run {} was idle without a receipt for {idle_secs}s; nudged it in workspace {workspace}", run.id());
-                Ok(Some(StartCheck::new("nudge", &text, sent_at, &submission)))
+                Ok(Some(sent_at))
             }
             Err(error) => {
                 warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "the nudge of {} could not be typed into workspace {workspace}: {error:#}; asking the inbox instead", run.id());
@@ -1664,11 +1369,11 @@ impl StallWatch {
         idle_secs: i64,
         now: SystemTime,
         closed: ClosedNotice,
-    ) -> Result<Option<StartCheck>> {
+    ) -> Result<Option<SystemTime>> {
         let sent_at = sv.files.now();
         let what = "notice of a closed question";
         match submit(sv, run, workspace, Input::Text(&closed.text), what) {
-            Ok(submission) => {
+            Ok(_submission) => {
                 sv.notice_failures.remove(run.id());
                 self.nudged(
                     sv,
@@ -1681,12 +1386,7 @@ impl StallWatch {
                 )?;
                 self.input_sent(sent_at, Some(&closed.text));
                 info!(run_id = %run.id(), ask_id = closed.ask_id, "run {} was told in workspace {workspace} that its question {} was closed without an answer", run.id(), closed.ask_id);
-                Ok(Some(StartCheck::new(
-                    "nudge",
-                    &closed.text,
-                    sent_at,
-                    &submission,
-                )))
+                Ok(Some(sent_at))
             }
             Err(error) => {
                 let failures = match sv.notice_failures.get(run.id()) {
@@ -1768,44 +1468,20 @@ impl StallWatch {
         &mut self,
         sv: &mut Supervisor<'_>,
         run: &TaskRun,
-        workspace: &str,
-        idle: &IdleMarker,
+        _workspace: &str,
+        _idle: &IdleMarker,
         idle_secs: i64,
         nudge: Option<Nudge>,
         now: SystemTime,
         note: Option<&Note>,
     ) -> Result<AskId> {
-        let background = match idle.background_tasks() {
-            [] if idle.background_running() => {
-                "background work was running (not listed)".to_owned()
-            }
-            [] => "no background task was running".to_owned(),
-            tasks => tasks
-                .iter()
-                .map(|t| format!("- {} ({}): {}", t.description, t.id, t.command))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        };
         let recovered = note.map_or_else(String::new, |note| {
             format!(" And {}.\n{}\n", note.why, note.text)
         });
         let nudged = nudged_text(nudge, now);
-        let question = if headless(run) {
-            headless_question(sv, run, idle_secs, &nudged, &recovered)
-        } else {
-            let screen = match sv.cmux.capture(workspace) {
-                Ok(screen) => sv.signals.screen_excerpt(&screen),
-                Err(error) => format!("(the screen could not be read: {error:#})"),
-            };
-            format!(
-                "The session of run {run_id} (task {task_id}) in workspace {workspace} has been idle without a receipt for {idle_secs}s (reason: idle_without_receipt, phase: {PHASE}), {nudged}.{recovered} Answer `wait` to leave the session alone (the supervisor asks again if it stays idle for another {threshold}s), or `intervene` to step in yourself (read the screen, stop or check its background work, type an instruction, or stop the run and recover it; see the dagq-recover skill). Answer `propose` (or `propose: <why>`) to have a planner of the runtime's propose a remedy for its cause; the session is then left alone as for `wait`. This ask closes itself once the session moves on.\n\nBackground tasks when it stopped:\n{background}\n\nLast lines of the screen:\n{screen}",
-                run_id = run.id(),
-                task_id = run.task_id(),
-                threshold = sv.stall.idle_without_receipt_secs,
-            )
-        };
+        let question = { headless_question(sv, run, idle_secs, &nudged, &recovered) };
         let mut options = stalled_options(note);
-        if headless(run) {
+        {
             options = headless_options(options);
         }
         let category = note.map_or(AskReason::RecoveryFailed, |note| note.category);
@@ -1916,23 +1592,6 @@ impl StallWatch {
         Ok(())
     }
 
-    /// Follow the `stalled` ask a recovery job of a session in a revise or
-    /// a resume escalated to (their watch runs no idle detection):
-    /// close it once the session moves on and apply its answer.
-    pub(super) fn follow_ask(
-        &mut self,
-        sv: &mut Supervisor<'_>,
-        run: &TaskRun,
-        idle_marker: &Path,
-    ) -> Result<()> {
-        if self.asked.is_none() && self.reopen.is_none() {
-            return Ok(());
-        }
-        let marker = sv.files.modified(idle_marker).ok();
-        let now = sv.files.now();
-        self.watch_ask(sv, run, marker, now, true)
-    }
-
     /// Follow the `stalled` ask: close it when the session ended a turn
     /// since (by itself, or after a person stepped in), and apply its
     /// answer: `wait` restarts the count and closes it; anything else is a
@@ -1965,7 +1624,7 @@ impl StallWatch {
             let wait = answered_wait(answer.as_deref());
             // A headless session's `intervene` holds nothing: its ask is
             // opened again (task 1179).
-            if headless(run) && answer.as_deref().is_some_and(answered_intervene) {
+            if answer.as_deref().is_some_and(answered_intervene) {
                 let reopen = Reopen {
                     previous: asked.id,
                     at: asked.at,
@@ -2040,7 +1699,7 @@ impl StallWatch {
             // closed, and marked `reopened`: an adopter of a supervisor
             // that stopped in between opens the ask, once, without
             // recording it again.
-            Some(answer) if headless(run) && answered_intervene(answer) => {
+            Some(answer) if answered_intervene(answer) => {
                 if !ask_resolved(&*sv.queue, run, ask.id)? {
                     let mut payload = Self::resolved_payload(
                         sv,
@@ -2076,7 +1735,7 @@ impl StallWatch {
             // once (the wrapper stops a running turn and exits), never as
             // a turn. The run then ends without a receipt: validating fails
             // it and its recovery job takes it (task 1104).
-            Some(answer) if headless(run) && answer == STOP_OPTION => {
+            Some(answer) if answer == STOP_OPTION => {
                 // Sent once the run is back in its slot.
                 if !send {
                     return Ok(());
@@ -2107,7 +1766,7 @@ impl StallWatch {
             // A headless session takes no keys: a person's answer other
             // than `intervene` is its next turn's prompt (ADR-t813-1
             // decision 6).
-            Some(answer) if headless(run) && headless_delivers(answer) => {
+            Some(answer) if headless_delivers(answer) => {
                 // Sent once the run is back in its slot.
                 if !send {
                     return Ok(());
@@ -2185,7 +1844,7 @@ mod tests {
                 "The headless session has had background work running (alert: long_background), and the job escalated.\nDiagnosis: stuck"
             )
         );
-        // An interactive ask's, or one opened before task 1179.
+        // A retired interactive session's ask, or one opened before task 1179.
         let old = "pid 7 is idle (alert: idle_process). And the job gave up.\nAnswer `wait` to leave the session alone, or `intervene` to step in yourself (read the screen).";
         assert_eq!(
             situation_of(old).as_deref(),
@@ -2197,239 +1856,6 @@ mod tests {
         );
         assert_eq!(situation_of(&again).as_deref(), Some("It ended its turn."));
         assert_eq!(situation_of("no answers here"), None);
-    }
-
-    const THRESHOLD: Duration = Duration::from_secs(1200);
-    const CONFIRM: Duration = Duration::from_secs(60);
-
-    fn at(secs: u64) -> SystemTime {
-        UNIX_EPOCH + Duration::from_secs(1_000_000 + secs)
-    }
-
-    fn typed(secs: u64) -> InputMarker {
-        InputMarker {
-            modified: at(secs),
-            source: InputSource::Typed,
-            text: None,
-        }
-    }
-
-    /// Task 380: an input the session took after its idle marker (a person's,
-    /// or a notice of its background work) starts a turn: no turn has ended
-    /// since, so there is no idle to nudge until its idle marker follows.
-    #[test]
-    fn an_input_newer_than_the_idle_marker_holds_the_nudge_off() {
-        for source in [InputSource::Typed, InputSource::Agent, InputSource::Unknown] {
-            let mut watch = StallWatch::default();
-            assert!(watch.turn_since_input(at(100)));
-            watch.input_taken(
-                InputMarker {
-                    modified: at(200),
-                    source,
-                    text: None,
-                },
-                Some(at(100)),
-                THRESHOLD,
-                CONFIRM,
-            );
-            // The idle marker is older than the input: still the turn it
-            // started, however long it takes.
-            assert!(!watch.turn_since_input(at(100)), "{source:?}");
-            assert!(!watch.turn_since_input(at(200)), "{source:?}");
-            // Its end is a turn since the input.
-            assert!(watch.turn_since_input(at(201)), "{source:?}");
-        }
-        // The supervisor's own texts count as before.
-        let mut watch = StallWatch::default();
-        watch.input_sent(at(300), None);
-        watch.input_taken(typed(301), Some(at(100)), THRESHOLD, CONFIRM);
-        assert!(!watch.turn_since_input(at(301)));
-        assert!(watch.turn_since_input(at(302)));
-    }
-
-    /// ADR-0043 decision 3: an input typed while the session was idle short
-    /// of the threshold, which no send of the supervisor's explains, is a
-    /// person who stepped in before the detection: once, with how long the
-    /// session had been idle.
-    #[test]
-    fn a_typed_input_short_of_the_threshold_is_preempted_once() {
-        let mut watch = StallWatch::default();
-        assert_eq!(
-            watch.input_taken(typed(700), Some(at(100)), THRESHOLD, CONFIRM),
-            Some(600)
-        );
-        // The same marker seen again records nothing more.
-        assert_eq!(
-            watch.input_taken(typed(700), Some(at(100)), THRESHOLD, CONFIRM),
-            None
-        );
-        // Its turn ended between two looks: the idle seen before counts.
-        let mut watch = StallWatch::default();
-        assert_eq!(
-            watch.input_taken(typed(10), Some(at(5)), THRESHOLD, CONFIRM),
-            Some(5)
-        );
-        assert_eq!(
-            watch.input_taken(typed(300), Some(at(100)), THRESHOLD, CONFIRM),
-            Some(200)
-        );
-        assert_eq!(
-            watch.input_taken(typed(900), Some(at(950)), THRESHOLD, CONFIRM),
-            Some(800)
-        );
-        // After `wait`, the idle counts from the answer.
-        let mut watch = StallWatch {
-            wait_from: Some(at(500)),
-            ..StallWatch::default()
-        };
-        assert_eq!(
-            watch.input_taken(typed(700), Some(at(100)), THRESHOLD, CONFIRM),
-            Some(200)
-        );
-    }
-
-    #[test]
-    fn no_preemption_past_the_threshold_or_after_a_send_of_the_supervisor() {
-        // Past the threshold, the detection was due: no preemption.
-        let mut watch = StallWatch::default();
-        assert_eq!(
-            watch.input_taken(typed(1300), Some(at(100)), THRESHOLD, CONFIRM),
-            None
-        );
-        // Right after a send of the supervisor's (the text, or the text
-        // sent again after the confirm wait), the input is that send.
-        for taken in [100, 101, 160, 230] {
-            let mut watch = StallWatch::default();
-            watch.input_sent(at(100), None);
-            assert_eq!(
-                watch.input_taken(typed(taken), Some(at(50)), THRESHOLD, CONFIRM),
-                None,
-                "{taken}"
-            );
-        }
-        // Long after it, it is a person's again.
-        let mut watch = StallWatch::default();
-        watch.input_sent(at(100), None);
-        assert_eq!(
-            watch.input_taken(typed(400), Some(at(300)), THRESHOLD, CONFIRM),
-            Some(100)
-        );
-    }
-
-    /// Two answers typed back to back: the session takes the first at once
-    /// and the second only after the first one's turn, long after it was
-    /// typed. Each is the supervisor's, by its time or by its text.
-    #[test]
-    fn every_recent_send_of_the_supervisor_explains_its_input() {
-        let mut watch = StallWatch::default();
-        watch.input_sent(at(100), Some("answer to ask 1: blue"));
-        watch.input_sent(at(103), Some("answer to ask 2: red"));
-        let first = InputMarker {
-            text: Some(text_fingerprint("answer to ask 1: blue")),
-            ..typed(100)
-        };
-        assert_eq!(
-            watch.input_taken(first, Some(at(50)), THRESHOLD, CONFIRM),
-            None
-        );
-        // Queued behind a 10-minute turn, and matched by its text.
-        let second = InputMarker {
-            text: Some(text_fingerprint("answer to ask 2: red\n")),
-            ..typed(700)
-        };
-        assert_eq!(
-            watch.input_taken(second, Some(at(650)), THRESHOLD, CONFIRM),
-            None
-        );
-        // Another text at that time is a person's.
-        let other = InputMarker {
-            text: Some(text_fingerprint("please stop")),
-            ..typed(800)
-        };
-        assert_eq!(
-            watch.input_taken(other, Some(at(750)), THRESHOLD, CONFIRM),
-            Some(50)
-        );
-        // A text typed before the send is not explained by it.
-        let mut watch = StallWatch::default();
-        watch.input_sent(at(500), Some("hello"));
-        let early = InputMarker {
-            text: Some(text_fingerprint("hello")),
-            ..typed(300)
-        };
-        assert_eq!(
-            watch.input_taken(early, Some(at(100)), THRESHOLD, CONFIRM),
-            Some(200)
-        );
-        // Only the latest sends are kept.
-        let mut watch = StallWatch::default();
-        for n in 0..=SENDS_KEPT as u64 {
-            watch.input_sent(at(n), None);
-        }
-        assert_eq!(watch.sends.len(), SENDS_KEPT);
-        assert_eq!(watch.sends[0].0, at(1));
-    }
-
-    #[test]
-    fn only_a_typed_input_ending_an_idle_is_preempted() {
-        // A notice of the agent's own, or an input the marker does not say
-        // the source of, is not counted.
-        for source in [InputSource::Agent, InputSource::Unknown] {
-            let mut watch = StallWatch::default();
-            let input = InputMarker {
-                modified: at(700),
-                source,
-                text: None,
-            };
-            assert_eq!(
-                watch.input_taken(input, Some(at(100)), THRESHOLD, CONFIRM),
-                None
-            );
-        }
-        // Before any idle (the first prompt), there was no idle to end.
-        let mut watch = StallWatch::default();
-        assert_eq!(watch.input_taken(typed(10), None, THRESHOLD, CONFIRM), None);
-        assert_eq!(
-            watch.input_taken(typed(20), Some(at(30)), THRESHOLD, CONFIRM),
-            None
-        );
-        // An adopted run's first marker is only taken in.
-        let mut watch = StallWatch {
-            prime_input: true,
-            ..StallWatch::default()
-        };
-        assert_eq!(
-            watch.input_taken(typed(700), Some(at(100)), THRESHOLD, CONFIRM),
-            None
-        );
-        assert_eq!(
-            watch.input_taken(typed(900), Some(at(800)), THRESHOLD, CONFIRM),
-            Some(100)
-        );
-        // While a stalled ask is open, or after a person stepped in with no
-        // turn ended since, typing is the answer, not a preemption.
-        let mut watch = StallWatch {
-            asked: Some(Asked {
-                id: AskId::new(1),
-                at: at(50),
-                detected_after_secs: 0,
-                applied: false,
-                threshold: IDLE_THRESHOLD,
-            }),
-            ..StallWatch::default()
-        };
-        assert_eq!(
-            watch.input_taken(typed(700), Some(at(100)), THRESHOLD, CONFIRM),
-            None
-        );
-        let mut watch = StallWatch {
-            held: Some(at(150)),
-            ..StallWatch::default()
-        };
-        assert_eq!(
-            watch.input_taken(typed(700), Some(at(100)), THRESHOLD, CONFIRM),
-            None
-        );
     }
 
     use super::super::file_time::at_ns;
@@ -2445,14 +1871,8 @@ mod tests {
         // The last text typed (an adopted `stall_nudged`).
         let mut watch = StallWatch::default();
         watch.input_sent(event, None);
-        assert!(!watch.turn_since_input(same));
         assert!(!watch.ended_after_inputs(same));
-        assert!(watch.turn_since_input(next));
         assert!(watch.ended_after_inputs(next));
-        // An input marker of the send's millisecond is the send taken.
-        assert!(watch.taken_after_sends(same));
-        assert!(watch.taken_after_sends(at_ns(250, 0)));
-        assert!(!watch.taken_after_sends(at_ns(249, 999_999)));
         // A person who stepped in (`answered_intervene`).
         let held = StallWatch {
             held: Some(event),
@@ -2460,19 +1880,6 @@ mod tests {
         };
         assert!(!held.ended_after_inputs(same));
         assert!(held.ended_after_inputs(next));
-        // An idle of the millisecond of the step in is not one that ended
-        // since: no `stall_preempted` for the input after it.
-        let mut watch = held.clone();
-        assert_eq!(
-            watch.input_taken(typed(10), Some(same), THRESHOLD, CONFIRM),
-            None
-        );
-        let mut watch = held;
-        assert!(
-            watch
-                .input_taken(typed(10), Some(next), THRESHOLD, CONFIRM)
-                .is_some()
-        );
         // `wait` (`answered_wait`).
         let waited = StallWatch {
             wait_from: Some(event),
@@ -2489,12 +1896,11 @@ mod tests {
             detected_after_secs: 0,
             repaired_at: None,
         };
-        assert!(!recovering.moved(Some(same), Some(same)));
-        assert!(recovering.moved(Some(next), None));
-        assert!(recovering.moved(None, Some(next)));
+        assert!(!recovering.moved(Some(same)));
+        assert!(recovering.moved(Some(next)));
         recovering.repaired_at = Some(at_ns(900, 0));
-        assert!(!recovering.moved(Some(next), Some(at_ns(900, 999_999))));
-        assert!(recovering.moved(Some(at_ns(901, 0)), None));
+        assert!(!recovering.moved(Some(at_ns(900, 999_999))));
+        assert!(recovering.moved(Some(at_ns(901, 0))));
     }
 
     /// Task 1050: a marker of the millisecond of a `stalled` ask's opening

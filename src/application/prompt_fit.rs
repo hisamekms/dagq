@@ -66,10 +66,9 @@ fn cut_note(left_out: usize, read: &str) -> String {
 /// Which part of a long text to keep.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Keep {
-    /// The start (a description, the newest turns first).
+    /// The start (a description, the newest turns first). The end of a
+    /// worker's screen was the other choice until task 1437 retired it.
     Start,
-    /// The end (a screen, a log).
-    End,
 }
 
 /// `text` within `max` bytes, its note of what was left out included, and
@@ -84,17 +83,10 @@ pub(crate) fn cut(text: &str, max: usize, keep: Keep, read: &str) -> Option<(Str
     let room = max.saturating_sub(note_room);
     let kept = match keep {
         Keep::Start => head(text, room),
-        Keep::End => end(text, room),
     };
     let left_out = text.len() - kept.len();
     let note = cut_note(left_out, read);
-    Some((
-        match keep {
-            Keep::Start => format!("{kept}\n{note}"),
-            Keep::End => format!("{note}\n{kept}"),
-        },
-        left_out,
-    ))
+    Some((format!("{kept}\n{note}"), left_out))
 }
 
 /// The longest string in `value`.
@@ -418,9 +410,6 @@ mod tests {
         assert!(start.starts_with('あ'));
         assert!(start.ends_with("read X]"), "{start}");
         assert_eq!(left_out, text.len() - start.lines().next().unwrap().len());
-        let (tail, _) = cut(&text, 1_000, Keep::End, "read X").unwrap();
-        assert!(tail.len() <= 1_000);
-        assert!(tail.starts_with("[… ") && tail.ends_with('あ'), "{tail}");
         assert!(cut("short", 1_000, Keep::Start, "read X").is_none());
     }
 

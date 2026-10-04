@@ -9,9 +9,8 @@
 //! holds and the adapters leave it; a headless turn that failed at its
 //! provider's login, usage limit or start has its call made on the other
 //! provider in a new session ([`Supervisor::switch`]), or waits for a
-//! provider, never failed ([`Supervisor::turn_at_wall`]); an interactive
-//! Claude session stopped at such a wall is parked and resumed as a
-//! headless Codex one ([`interactive_switch`]).
+//! provider, never failed ([`Supervisor::turn_at_wall`]). Every worker
+//! session is headless since task 1437 (ADR-t1433-2).
 
 use super::file_time::recorded_at;
 use super::*;
@@ -267,8 +266,8 @@ impl Supervisor<'_> {
                 from.as_str(),
                 reason.as_str()
             );
-            // The same hold, event and question as an interactive session's
-            // screen at the wall (task 438).
+            // Held in the queue's one queue_hold ask of the wall (task
+            // 438), as a failed headless job is.
             raise_wall(self, run, workspace, &text, wall)?;
         }
         Ok(WallStep::Held)
@@ -376,11 +375,8 @@ impl Supervisor<'_> {
             let task = self.queue.show(moved.task_id())?.task;
             self.write_prompt(&task, &moved, Path::new(run_dir))?;
         }
-        // A headless session takes the call as its next turn; an
-        // interactive one is parked, and its resume carries it.
-        if headless(run) {
-            request_turn(self, &moved, workspace, Input::Text(text), PROVIDER_SWITCH)?;
-        }
+        // The headless session takes the call as its next turn.
+        request_turn(self, &moved, workspace, Input::Text(text), PROVIDER_SWITCH)?;
         Ok(moved)
     }
 
@@ -506,111 +502,6 @@ pub(super) fn switch_text(
     text
 }
 
-/// An interactive session's move to headless Codex, from its wall to the
-/// park of its run: what the resume says, and why.
-#[derive(Debug, Clone)]
-pub(super) struct PendingSwitch {
-    pub(super) instruction: String,
-    pub(super) reason: SwitchReason,
-    pub(super) message: String,
-}
-
-/// Why a parked run moves to headless Codex when its resume begins: the
-/// `provider_switch` its interactive session's park recorded
-/// ([`interactive_switch`]).
-pub(super) const PARK_SWITCH: &str = "provider_switch";
-
-impl Supervisor<'_> {
-    /// The resume of `run` begins (under this supervisor's lease): when its
-    /// interactive session was parked to move to headless Codex
-    /// ([`interactive_switch`]) and Codex can still take it, the run moves
-    /// now, before the resume's session opens, and the moved run is
-    /// returned. The interactive session was asked to exit as the
-    /// interactive one it was.
-    pub(super) fn switch_parked(&mut self, run: TaskRun) -> Result<TaskRun> {
-        if headless(&run) {
-            return Ok(run);
-        }
-        let events = self.queue.run_events(run.id())?;
-        let Some(park) = events
-            .iter()
-            .rfind(|e| e.kind == event_kind::RECOVERY_PARKED)
-            .map(|e| e.payload[PARK_SWITCH].clone())
-            .filter(|switch| !switch.is_null())
-        else {
-            return Ok(run);
-        };
-        let reason = park["reason"]
-            .as_str()
-            .and_then(|reason| reason.parse::<SwitchReason>().ok())
-            .unwrap_or(SwitchReason::UsageLimit);
-        // Codex held since is its first turn's to find: the run then waits
-        // in the hold ask with both providers held.
-        let codex = Worker {
-            provider: Provider::Codex,
-            mode: WorkerMode::Headless,
-        };
-        if !provider_switch::may_switch(&events) || !self.workers.contains(&codex) {
-            info!(run_id = %run.id(), "run {} stays on interactive Claude: this supervisor has no headless Codex worker", run.id());
-            return Ok(run);
-        }
-        let message = park["message"].as_str().unwrap_or("").to_owned();
-        self.switch(
-            &run,
-            "",
-            Provider::Codex,
-            reason,
-            SwitchPhase::Resume,
-            None,
-            &message,
-            "",
-        )
-    }
-}
-
-/// A worker's interactive Claude session stopped at `wall` on its screen:
-/// when Codex's headless worker can take the run and the run has switches
-/// left, Claude's hold ask opens (without the run) for the Claude-only jobs
-/// and the instruction the run's resume carries is returned, for the
-/// session's watch to park the run with; the run moves to headless Codex
-/// when that resume begins ([`Supervisor::switch_parked`], ADR-t813-2
-/// decision 5). `None` leaves the run to the hold ask as before.
-pub(super) fn interactive_switch(
-    sv: &mut Supervisor<'_>,
-    run: &TaskRun,
-    wall: Wall,
-) -> Result<Option<PendingSwitch>> {
-    if headless(run) || run.actual_provider() != Provider::Claude {
-        return Ok(None);
-    }
-    let events = sv.queue.run_events(run.id())?;
-    if !provider_switch::may_switch(&events) || !sv.headless_usable(Provider::Codex) {
-        return Ok(None);
-    }
-    let reason = match wall {
-        Wall::Authentication => SwitchReason::Authentication,
-        Wall::UsageLimit => SwitchReason::UsageLimit,
-    };
-    let message = format!(
-        "the interactive session stopped at the {} wall",
-        wall.as_str()
-    );
-    let instruction = switch_text(
-        run,
-        Provider::Claude,
-        Provider::Codex,
-        reason,
-        &message,
-        None,
-    );
-    sv.open_claude_hold(run, reason, &message)?;
-    Ok(Some(PendingSwitch {
-        instruction,
-        reason,
-        message,
-    }))
-}
-
 /// What a revise's or a resume's watch does about a headless turn at its
 /// provider's wall ([`SessionWatch::provider_wall`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -635,9 +526,6 @@ impl SessionWatch {
         sv: &mut Supervisor<'_>,
         run: &TaskRun,
     ) -> Result<WallGate> {
-        if !headless(run) {
-            return Ok(WallGate::Open);
-        }
         let Ok(modified) = sv.files.modified(&self.idle_marker) else {
             return Ok(WallGate::Open);
         };
@@ -658,4 +546,53 @@ impl SessionWatch {
             WallStep::Held => WallGate::Held,
         })
     }
+}
+
+/// Hold `run` at `wall` in the queue's one `queue_hold` ask of that wall
+/// (task 438), opening it or joining it; a run that newly joins records the
+/// wall's event with `screen` (the failed turn's text) as its excerpt.
+/// `false` when the same excerpt was already held by an ask now closed: the
+/// wall a person cleared is not raised again for it.
+pub(super) fn raise_wall(
+    sv: &mut Supervisor<'_>,
+    run: &TaskRun,
+    workspace: &str,
+    screen: &str,
+    wall: Wall,
+) -> Result<bool> {
+    let excerpt = screen.to_owned();
+    let hash = format!("{:x}", Sha256::digest(excerpt.as_bytes()));
+    let last = sv
+        .queue
+        .run_events(run.id())?
+        .into_iter()
+        .rev()
+        .find(|e| e.kind == wall.event_kind() && e.payload.get("job").is_none());
+    if let Some(last) = last
+        && last.payload.get("screen_hash").and_then(Value::as_str) == Some(hash.as_str())
+        && let Some(id) = last.payload.get("ask_id").and_then(Value::as_i64)
+        && !sv.queue.read_ask(AskId::new(id))?.is_open()
+    {
+        return Ok(false);
+    }
+    let (outcome, value) = ask::hold(
+        &mut *sv.queue,
+        &sv.layout.main_checkout,
+        NewHold::wall(wall, Some(run.id().clone()), None),
+        sv.cmux,
+    )?;
+    if outcome.joined {
+        sv.queue.record_runtime_event(
+            run.id(),
+            wall.event_kind(),
+            json!({
+                "workspace_id": workspace,
+                "excerpt": excerpt,
+                "screen_hash": hash,
+                "ask_id": outcome.ask.id,
+            }),
+        )?;
+        warn!(ask_id = %outcome.ask.id, run_id = %run.id(), "run {} stopped at the {} wall in workspace {workspace}; ask {} holds {} run(s) and job(s) (notified: {})", run.id(), wall.as_str(), outcome.ask.id, outcome.ask.affected.len(), value["notified"]);
+    }
+    Ok(true)
 }

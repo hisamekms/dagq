@@ -1,6 +1,6 @@
-//! A headless worker's session as the supervisor sees it (ADR-t813-1): what
-//! it would type into an interactive session is written as the session's
-//! next request in the run's `turns/` directory, and `/exit` as its exit
+//! A headless worker's session as the supervisor sees it (ADR-t813-1), the
+//! only kind since task 1437: every text for the session is written as its
+//! next request in the run's `turns/` directory, and the end as its exit
 //! request ([`request_turn`]); the session wrapper runs each request as a
 //! resume of the same session and writes the idle marker when the turn
 //! ended. The screen is never read for such a session (no dialog, input box
@@ -17,12 +17,6 @@ use crate::domain::turn::{
     self, LIMITS_FILE, TurnFailure, TurnMark, TurnOutcome, TurnRequest, exit_path, next_seq,
     request_path, turns_dir,
 };
-use crate::domain::worker::WorkerMode;
-
-/// Whether `run`'s worker runs headless.
-pub(super) fn headless(run: &TaskRun) -> bool {
-    run.worker_mode() == WorkerMode::Headless
-}
 
 /// Write `input` for the headless session of `run` (in `workspace`, for
 /// the records): a text becomes its next request, recorded as
@@ -219,12 +213,8 @@ impl Supervisor<'_> {
     /// Before a headless session of `run` starts in its run directory: its
     /// turn limits from the `[stall]` settings, and neither the exit request
     /// nor a request an earlier session left untaken: the new session
-    /// starts from the supervisor's own request. Nothing for an
-    /// interactive run.
+    /// starts from the supervisor's own request.
     pub(super) fn prepare_turns(&self, run: &TaskRun, run_dir: &Path) -> Result<()> {
-        if !headless(run) {
-            return Ok(());
-        }
         let dir = turns_dir(run_dir);
         self.files.create_dir_all(&dir)?;
         self.files.write(

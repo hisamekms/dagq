@@ -2,37 +2,8 @@
 //! and [`TestWorkspace`] runs each one's agent script as the turns of a stub
 //! `claude` of the run's own, so that the runtime tests that check nothing
 //! of an interactive session go through the headless worker without
-//! changing their scripts; [`interactive_workers`] chooses an interactive
-//! session for the tests of what is particular to one.
+//! changing their scripts. Planner and inbox screen fixtures are separate.
 use super::*;
-
-thread_local! {
-    /// The worker mode of the tasks the fixture makes in this test:
-    /// headless unless the test chose [`interactive_workers`].
-    static WORKER_MODE: std::cell::Cell<dagq::domain::worker::WorkerMode> =
-        const { std::cell::Cell::new(dagq::domain::worker::WorkerMode::Headless) };
-}
-
-/// Run this test's workers in interactive sessions: from now on the tasks
-/// the fixture makes ([`fixture`], [`add_ready_task`], [`run_agent`],
-/// [`awaiting_run`], [`parked_conflict`]) are interactive, and a
-/// [`TestWorkspace`] made after it types into the fake cmux session that
-/// runs each one's script. Only the tests of what is particular to an
-/// interactive session (its screen, dialogs, `/exit`, Enter, the answer
-/// prompt, a stuck exit, the typed texts) call it, before the fixture
-/// (goal 92); every other test's workers are headless: a [`TestWorkspace`]
-/// runs each one's script (its [`TestWorkspace::script_for`] or default
-/// script, with [`TURN_PRELUDE`]) as every turn of the stub `claude` of
-/// [`headless_claude`], and a resumed run's script (with
-/// [`RESUME_TURN_PRELUDE`]) as its turns after the resume.
-pub fn interactive_workers() {
-    WORKER_MODE.set(dagq::domain::worker::WorkerMode::Interactive);
-}
-
-/// The worker mode of the tasks the fixture makes in this test.
-pub fn worker_mode() -> dagq::domain::worker::WorkerMode {
-    WORKER_MODE.get()
-}
 
 /// A headless turn has no session to go idle in or to be asked to exit:
 /// its `idle` helpers and `await_exit` return at once, and the turn ends
@@ -74,14 +45,14 @@ await_message() {
 
 impl TestWorkspace {
     /// The stub `claude` of `run`'s headless turns: [`Self::headless`], or
-    /// with [`Self::turn_scripts`] a stub of the run's own (one per run on
+    /// otherwise a stub of the run's own (one per run on
     /// the queue, whichever backend starts it) whose turns run, from each
     /// start on, this backend's script for the task ([`Self::script_for`]
     /// or the default) after [`TURN_PRELUDE`], and from a resume on its
     /// [`Self::resume_script_for`] after [`RESUME_TURN_PRELUDE`]; a resume
-    /// without one fails, as an interactive one does (goal 92).
+    /// without one fails.
     pub fn claude_for(&self, run: &TaskRun, resume: bool) -> Result<Option<PathBuf>> {
-        if self.headless.is_some() || !self.turn_scripts {
+        if self.headless.is_some() {
             return Ok(self.headless.clone());
         }
         let dir = self.db.with_file_name("turn-stubs").join(run.id().as_str());
@@ -116,7 +87,8 @@ impl TestWorkspace {
 }
 
 /// `script` as the turns of `run`'s stub `claude` (goal 92): after
-/// `prelude`, with the variables an interactive session's script is given.
+/// `prelude`, with the variables a fake agent's script is given (`RUN_ID`,
+/// `RECEIPT`, `IDLE`, `EXIT`, `MESSAGE`, `DAGQ`, `DB`, `BASE`).
 /// Each turn keeps its prompt as `turn-<n>.prompt` in the run directory
 /// ([`session_texts`]) and says something, so that the wrapper resumes the
 /// session for the next turn.
@@ -145,14 +117,8 @@ fn turn_script(run: &TaskRun, prelude: &str, script: &str) -> String {
     format!("{vars}{prelude}\n{script}\n")
 }
 
-/// What the supervisor told `run`'s worker after starting it (a resume's
-/// request, an answer), in order: the texts typed into an interactive
-/// session ([`TestWorkspace::texts`], of every workspace), or the prompts of
-/// a headless run's turns after its first (goal 92).
-pub fn session_texts(backend: &TestWorkspace, run: &TaskRun) -> Vec<String> {
-    if run.worker_mode() != dagq::domain::worker::WorkerMode::Headless {
-        return backend.texts().into_iter().map(|(_, text)| text).collect();
-    }
+/// Prompts queued for the run after its first turn, in order.
+pub fn session_texts(run: &TaskRun) -> Vec<String> {
     let run_dir = Path::new(run.run_dir().unwrap());
     (2..)
         .map_while(|turn| fs::read_to_string(run_dir.join(format!("turn-{turn}.prompt"))).ok())
@@ -160,8 +126,7 @@ pub fn session_texts(backend: &TestWorkspace, run: &TaskRun) -> Vec<String> {
 }
 
 /// The model and effort each turn of the headless runs on `db` was started
-/// with, as [`session_models`] has an interactive session's (goal 92):
-/// `run_id`, `resume`, `model`, `effort`, from the arguments the stub of
+/// with: `run_id`, `resume`, `model`, `effort`, from the arguments the stub of
 /// [`headless_claude`] logged, in the order of the runs' directories.
 pub fn turn_models(db: &Path) -> Vec<Value> {
     let runs = db.canonicalize().unwrap().with_file_name("runs");
@@ -195,40 +160,27 @@ pub fn turn_models(db: &Path) -> Vec<Value> {
     models
 }
 
-/// The supervisor asked `run`'s worker to exit, or with `times` 0 did not:
-/// for an interactive session, `/exit` was typed `times` times into the
-/// backend's sessions ([`TestWorkspace::exits_sent`], all runs together);
-/// for a headless one, nothing was typed and its wrapper got an exit request
-/// in the run's turns directory (or none), whose count the run's
-/// `exit_requested` events give (goal 92).
+/// That the supervisor asked `run`'s sessions to exit `times` times in all
+/// (its `exit_requested` events), and that the wrapper exit request file is
+/// there exactly when it asked at all.
 pub fn assert_exit_sent(backend: &TestWorkspace, run: &TaskRun, times: usize) {
-    if run.worker_mode() == dagq::domain::worker::WorkerMode::Headless {
-        assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 0);
-        let exit = dagq::domain::turn::exit_path(Path::new(run.run_dir().unwrap()));
-        assert_eq!(
-            exit.exists(),
-            times > 0,
-            "the exit request at {}",
-            exit.display()
-        );
-    } else {
-        assert_eq!(backend.exits_sent.load(Ordering::SeqCst), times);
-    }
+    let requested = events_of(&backend.db, run.id(), "exit_requested");
+    assert_eq!(requested.len(), times, "exit_requested: {requested:?}");
+    let exit = dagq::domain::turn::exit_path(Path::new(run.run_dir().unwrap()));
+    assert_eq!(
+        exit.exists(),
+        times > 0,
+        "the exit request at {}",
+        exit.display()
+    );
 }
 
 /// The steps the supervisor raised the live worker to before its revises,
-/// in order: the `/effort` texts it switched an interactive session with
-/// ([`TestWorkspace::switches`]), or the `--effort` of every resumed turn
-/// of the headless runs on the backend's queue, which took no switch (goal
-/// 92). It reads the revises only for a queue whose one run's resumed
-/// turns are all revises.
+/// in order, as `/effort <effort>`: the `--effort` of every resumed turn of
+/// the headless runs on the backend's queue. It reads the revises only for
+/// a queue whose one run's resumed turns are all revises.
 pub fn revise_efforts(backend: &TestWorkspace) -> Vec<String> {
-    let switches: Vec<String> = backend.switches().into_iter().map(|(_, s)| s).collect();
     let turns = turn_models(&backend.db);
-    if turns.is_empty() {
-        return switches;
-    }
-    assert_eq!(switches, Vec::<String>::new());
     turns
         .iter()
         .filter(|turn| turn["resume"] == true)

@@ -168,7 +168,7 @@ fn an_answer_to_a_question_from_before_the_revise_is_left_to_the_inbox() {
     let detail = queue.show(TaskId::new(1)).unwrap();
     assert!(payloads(&detail, "ask_delivered").is_empty());
     let run = detail.runs[0].clone();
-    let texts = session_texts(&backend, &run);
+    let texts = session_texts(&run);
     assert_eq!(texts.len(), 1, "{texts:?}");
 
     fs::write(
@@ -183,7 +183,7 @@ fn an_answer_to_a_question_from_before_the_revise_is_left_to_the_inbox() {
     assert_landed(&repo, &detail.runs[0], "test task", &base);
     assert_eq!(payloads(&detail, "revise_finished").len(), 1);
     assert!(payloads(&detail, "ask_delivered").is_empty());
-    let texts = session_texts(&backend, &detail.runs[0]);
+    let texts = session_texts(&detail.runs[0]);
     assert_eq!(texts.len(), 1, "{texts:?}");
     assert!(!texts[0].contains("answer to ask"), "{texts:?}");
     assert!(queue.read_ask(ask).unwrap().closed_at.is_none());
@@ -413,65 +413,4 @@ fn an_open_question_without_a_rewritten_receipt_holds_past_the_resume_timeout() 
     assert_landed(&repo, &detail.runs[0], "test task", &base);
     assert_eq!(payloads(&detail, "revise_finished").len(), 1);
     assert!(queue.read_ask(ask).unwrap().closed_at.is_some());
-}
-
-/// An answer the revise typed whose send returns in a later second than it
-/// was typed in, after the session already rewrote its receipt and went
-/// idle on it: `ask_delivered` closes the ask in that later second, which
-/// is the answer typed, not one delivered by hand. The revise is settled by
-/// the idle the session wrote right after the answer, not by its resume
-/// timeout (task 971; a close taken for a hand delivery moved the last
-/// input past that idle).
-#[test]
-fn an_answer_whose_send_outlasts_the_turn_settles_the_revise_at_its_idle() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    let base = git_out(&repo, &["rev-parse", "main"]);
-    let mut backend = TestWorkspace::new(
-        &db,
-        false,
-        &format!(
-            "commit work; receipt \"$(git rev-parse HEAD)\"; idle\n\
-             await_file \"$MESSAGE\"; rm \"$MESSAGE\"\n\
-             {ASKS}\nidle\n\
-             await_file \"$MESSAGE\"; rm \"$MESSAGE\"\n\
-             printf 'fix\\n' >> change.txt; git commit -q -am fix\n\
-             receipt \"$(git rev-parse HEAD)\"; idle\n\
-             : > \"$(dirname \"$RECEIPT\")/answered\"; await_exit\n"
-        ),
-    );
-    backend.answer_send_outlasts_turn = true;
-    backend.resume_timeout = Duration::from_secs(30);
-    let backend = Arc::new(backend);
-    let reviewer = Arc::new(TestReviewer::new(&[
-        verdict("revise", &["add a line"], "one gap"),
-        verdict("pass", &[], "fixed"),
-    ]));
-    let (supervisor, _) = run_supervisor(&db, &repo, &backend, &reviewer);
-    wait_until(&db, Duration::from_secs(30), |queue| {
-        queue
-            .asks(AskQuery::default())
-            .unwrap()
-            .iter()
-            .any(|a| a.kind == AskKind::WorkerQuestion)
-    });
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let ask = open_question(&mut queue);
-    queue.answer(ask, "the second").unwrap();
-    let outcome = joined(supervisor, "the supervisor thread to return");
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    assert_landed(&repo, &detail.runs[0], "test task", &base);
-    assert_eq!(payloads(&detail, "revise_finished").len(), 1);
-    assert!(queue.read_ask(ask).unwrap().closed_at.is_some());
-    let at = |kind: &str| {
-        let event = detail.events.iter().find(|e| e.kind == kind).unwrap();
-        dagq::domain::stats::timestamp_millis(&event.created_at).unwrap()
-    };
-    let settled_ms = at("revise_finished") - at("ask_delivered");
-    assert!(
-        settled_ms < 15_000,
-        "settled {settled_ms} ms after the answer"
-    );
 }

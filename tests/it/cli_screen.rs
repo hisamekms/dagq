@@ -1,10 +1,6 @@
-//! `run screen` / `run send` and `planner screen` / `planner send`
-//! (ADR-t1228-1 decisions 4, 5 and 7): a person or the inbox reads a
-//! session's screen, at most 200 lines, and types into it only a key of the
-//! set or the answer of an answered ask about it, naming the run (or task)
-//! or planner, never the workspace. Other roles are refused and recorded,
-//! a headless run has no screen, and each read and send is recorded with
-//! its actor. A stub `cmux` shows the screen and keeps the calls.
+//! Worker screen/send commands return turns or refuse typing without
+//! touching cmux. Planner screen/send commands keep their screen, key,
+//! answer delivery and actor authorization behavior.
 
 use crate::common;
 
@@ -54,19 +50,18 @@ fn calls(cmux: &Path) -> String {
     fs::read_to_string(cmux.parent().unwrap().join("calls")).unwrap_or_default()
 }
 
-/// A run of a new ready task claimed and planned, its session's workspace
-/// `workspace`; returns its run id.
-fn run_in(db: &Path, title: &str, mode: Option<WorkerMode>, workspace: &str) -> String {
+/// A headless run of a new ready task claimed and planned, its session's
+/// workspace `workspace`, or with `recorded_interactive` a run stored as
+/// interactive before task 1437 (a claim no longer makes one); returns its
+/// run id.
+fn run_in(db: &Path, title: &str, recorded_interactive: bool, workspace: &str) -> String {
     let mut queue = SqliteQueue::open(db).unwrap();
     let mut task = common::queue::new_task(title);
-    task.worker_mode = Some(mode.unwrap_or(WorkerMode::Interactive));
+    task.worker_mode = Some(WorkerMode::Headless);
     let id = queue.add(task).unwrap().id();
     queue.transition(id, TaskAction::BypassReview).unwrap();
     let token = LeaseToken::new(format!("lease-{workspace}"));
-    let worker = Worker {
-        mode: mode.unwrap_or(WorkerMode::Interactive),
-        ..Worker::CLAUDE_INTERACTIVE
-    };
+    let worker = Worker::CLAUDE_HEADLESS;
     let ClaimOutcome::Claimed { run } = queue
         .claim_for_supervisor_in_order(
             &common::queue::base(),
@@ -80,6 +75,16 @@ fn run_in(db: &Path, title: &str, mode: Option<WorkerMode>, workspace: &str) -> 
     else {
         panic!("no claim")
     };
+    // An already stored historical run; a new claim always runs headless.
+    if recorded_interactive {
+        rusqlite::Connection::open(db)
+            .unwrap()
+            .execute(
+                "UPDATE task_runs SET worker_mode='interactive' WHERE id=?1",
+                [run.id()],
+            )
+            .unwrap();
+    }
     let dir = format!("/runs/{}", run.id());
     queue
         .plan_run(
@@ -141,185 +146,100 @@ fn answered_ask(db: &Path, run: &str, answer: &str) -> String {
 }
 
 #[test]
-fn a_runs_screen_is_read_by_run_or_task_id_up_to_the_limit_and_recorded() {
+fn runs_return_their_turns_directory_and_refuse_typing_without_cmux() {
     let (_dir, db) = queue();
-    let run = run_in(&db, "screen", None, "WS-1");
-    let long: String = (1..=300).map(|n| format!("line {n}\n")).collect();
-    let cmux = stub_cmux(&db, &format!("{long}\n\n"));
-    let cmux = cmux.to_str().unwrap();
-
-    let read = ok(&db, &["run", "screen", &run, "--cmux", cmux]);
-    assert_eq!(read["run_id"], run.as_str());
-    assert_eq!(read["task_id"], 1);
-    assert_eq!(read["lines"], 40);
-    assert_eq!(read["truncated"], true);
-    let screen = read["screen"].as_str().unwrap();
-    assert!(screen.starts_with("line 261\n") && screen.ends_with("line 300"));
-
-    // By the task's id, more lines than the limit are cut to it.
-    let read = ok(
-        &db,
-        &["run", "screen", "1", "--lines", "1000", "--cmux", cmux],
-    );
-    assert_eq!(read["run_id"], run.as_str());
-    assert_eq!(
-        (read["lines_requested"].clone(), read["lines_limit"].clone()),
-        (1000.into(), 200.into())
-    );
-    assert_eq!(read["lines"], 200);
-    assert!(calls(Path::new(cmux)).contains("read-screen --workspace WS-1"));
-
-    // The inbox reads too; each read is recorded with its actor and
-    // without the screen.
-    ok_as("inbox", &db, &["run", "screen", &run, "--cmux", cmux]);
-    let reads = events(&db, "screen_read");
-    assert_eq!(reads.len(), 3);
-    assert_eq!(reads[0]["actor"]["role"], "user");
-    assert_eq!(reads[2]["actor"]["role"], "inbox");
-    assert_eq!(reads[0]["run_id"], run.as_str());
-    assert_eq!(reads[0]["payload"]["workspace_id"], "WS-1");
-    assert!(!reads[0]["payload"].to_string().contains("line 300"));
-}
-
-#[test]
-fn a_send_types_only_keys_of_the_set_or_an_answer_of_the_run() {
-    let (_dir, db) = queue();
-    let run = run_in(&db, "send", None, "WS-1");
-    let other = run_in(&db, "other", None, "WS-2");
+    // Include the old stored mode: historical interactive records no
+    // longer grant access to a terminal, either by run or task id.
+    let interactive = run_in(&db, "historical", true, "WS-I");
+    let headless = run_in(&db, "headless", false, "WS-H");
     let cmux = stub_cmux(&db, READY);
     let cmux = cmux.to_str().unwrap();
-
-    let sent = ok(
-        &db,
-        &[
-            "run", "send", &run, "--key", "down", "--key", "2", "--key", "enter", "--cmux", cmux,
-        ],
-    );
-    assert_eq!(sent["keys"], serde_json::json!(["down", "2", "enter"]));
-    let typed = calls(Path::new(cmux));
-    assert!(
-        typed.contains("send-key --workspace WS-1 -- down\n"),
-        "{typed}"
-    );
-    assert!(
-        typed.contains("send-key --workspace WS-1 -- 2\n"),
-        "{typed}"
-    );
-    assert!(
-        typed.contains("send-key --workspace WS-1 -- enter\n"),
-        "{typed}"
-    );
-
-    // The answer of an answered ask on the run, as the supervisor types it.
-    let ask = answered_ask(&db, &run, "the left one");
-    let sent = ok_as(
-        "inbox",
-        &db,
-        &["run", "send", "1", "--answer", &ask, "--cmux", cmux],
-    );
-    assert_eq!(sent["input"], "answer");
-    assert_eq!(sent["outcome"], "submitted");
-    let typed = calls(Path::new(cmux));
-    assert!(
-        typed.contains(&format!(
-            "send --workspace WS-1 -- answer to ask {ask}: the left one\n"
-        )),
-        "{typed}"
-    );
-
-    // Refused: free text, a key outside the set, an ask still open, an ask
-    // of another run, both at once, or nothing.
-    let open = ok(
-        &db,
-        &[
-            "ask",
-            "--run",
-            &run,
-            "--kind",
-            "worker_question",
-            "--because",
-            "scope",
-            "--topic",
-            "task_overlap",
-            "--question",
-            "Again?",
-        ],
-    )["id"]
-        .to_string();
-    let elsewhere = answered_ask(&db, &other, "no");
-    let before = calls(Path::new(cmux));
-    for (args, error) in [
-        (vec!["--key", "rm -rf /"], "is not a key"),
-        (vec!["--key", "ctrl-c"], "is not a key"),
-        (vec!["--key", "0"], "is not a key"),
+    // The run dirs resolve through the queue's canonical directory
+    // (`/private/var` for a macOS temp dir).
+    let turns = std::fs::canonicalize(db.parent().unwrap())
+        .unwrap()
+        .join("runs");
+    for (run, task, mode, reason) in [
         (
-            vec!["--key", "exit", "--key", "enter"],
-            "exit is sent alone",
+            &interactive,
+            "1",
+            "interactive",
+            dagq::application::screen::RETIRED_SCREEN,
         ),
-        (vec!["--answer", &open], "has no answer yet"),
-        (vec!["--answer", &elsewhere], "is not about run"),
-        (vec![], "send either --key"),
+        (&headless, "2", "headless", "a headless run has no screen"),
     ] {
-        let mut argv = vec!["run", "send", &run];
-        argv.extend(args.iter().copied());
-        argv.extend(["--cmux", cmux]);
-        let failed = failed_with(&[], &db, &argv);
-        assert!(
-            failed["error"].as_str().unwrap().contains(error),
-            "{argv:?}: {failed}"
+        let ask = answered_ask(&db, run, "continue");
+        // Asking can notify the inbox; compare only screen/send calls.
+        let before = calls(Path::new(cmux));
+        for target in [run.as_str(), task] {
+            let read = ok_as(
+                "inbox",
+                &db,
+                &["run", "screen", target, "--lines", "1000", "--cmux", cmux],
+            );
+            assert_eq!(
+                read,
+                serde_json::json!({
+                    "run_id": run,
+                    "task_id": task.parse::<i64>().unwrap(),
+                    "worker_mode": mode,
+                    "screen": null,
+                    "reason": reason,
+                    "turns": turns.join(run).join("turns").to_str().unwrap(),
+                })
+            );
+            for input in [
+                vec!["--key", "enter"],
+                vec!["--key", "exit"],
+                vec!["--answer", &ask],
+            ] {
+                let mut argv = vec!["run", "send", target];
+                argv.extend(input);
+                argv.extend(["--cmux", cmux]);
+                let failed = failed_with(&[], &db, &argv);
+                let error = failed["error"].as_str().unwrap();
+                assert!(
+                    error.contains("no interactive input")
+                        && error.contains("`answer`")
+                        && error.contains("next turn"),
+                    "{failed}"
+                );
+            }
+        }
+        assert_eq!(
+            calls(Path::new(cmux)),
+            before,
+            "worker commands must not read or type"
         );
     }
-    // No free text through any flag.
-    assert!(
-        !invoke(&db, &["run", "send", &run, "hello", "--cmux", cmux])
-            .status
-            .success()
+    // Neither needs cmux: a host without it gets the same replies.
+    let missing = "/nonexistent/cmux";
+    let read = ok_as(
+        "inbox",
+        &db,
+        &["run", "screen", &headless, "--cmux", missing],
     );
-    assert!(
-        !invoke(&db, &["run", "send", &run, "--text", "hi", "--cmux", cmux])
-            .status
-            .success()
-    );
-    assert_eq!(
-        calls(Path::new(cmux)),
-        before,
-        "a refused send typed nothing"
-    );
-
-    // Each send is recorded with its actor.
-    let sends = events(&db, "screen_input_sent");
-    assert_eq!(sends.len(), 2);
-    assert_eq!(sends[0]["actor"]["role"], "user");
-    assert_eq!(sends[0]["payload"]["input"], "keys");
-    assert_eq!(sends[1]["actor"]["role"], "inbox");
-    assert_eq!(sends[1]["payload"]["ask_id"].to_string(), ask);
-}
-
-#[test]
-fn a_headless_run_has_no_screen_and_takes_nothing() {
-    let (_dir, db) = queue();
-    let run = run_in(&db, "headless", Some(WorkerMode::Headless), "WS-H");
-    let cmux = stub_cmux(&db, READY);
-    let cmux = cmux.to_str().unwrap();
-    let read = ok(&db, &["run", "screen", &run, "--cmux", cmux]);
-    assert_eq!(read["screen"], Value::Null);
-    assert!(
-        read["turns"]
-            .as_str()
-            .unwrap()
-            .ends_with(&format!("/runs/{run}/turns")),
-        "{read}"
-    );
+    assert_eq!(read["screen"], serde_json::Value::Null, "{read}");
     let failed = failed_with(
         &[],
         &db,
-        &["run", "send", &run, "--key", "enter", "--cmux", cmux],
+        &[
+            "run", "send", &headless, "--key", "enter", "--cmux", missing,
+        ],
     );
     assert!(
-        failed["error"].as_str().unwrap().contains("is headless"),
+        failed["error"]
+            .as_str()
+            .unwrap()
+            .contains("no interactive input"),
         "{failed}"
     );
-    assert_eq!(calls(Path::new(cmux)), "");
+    assert!(events(&db, "screen_read").is_empty());
+    assert!(events(&db, "screen_input_sent").is_empty());
+    assert!(
+        events(&db, "ask_delivered").is_empty(),
+        "refused sends leave answers for the supervisor"
+    );
 }
 
 #[test]
@@ -329,8 +249,9 @@ fn a_planners_screen_is_read_and_sent_keys_by_its_id() {
     let planner = queue.open_planner(PlannerOrigin::Person, None).unwrap();
     queue.planner_workspace_created(planner.id, "PW-1").unwrap();
     drop(queue);
-    let run = run_in(&db, "asked", None, "WS-1");
-    let cmux = stub_cmux(&db, READY);
+    let run = run_in(&db, "asked", false, "WS-1");
+    let long: String = (1..=300).map(|n| format!("line {n}\n")).collect();
+    let cmux = stub_cmux(&db, &format!("{long}\n\n"));
     let cmux = cmux.to_str().unwrap();
     let id = planner.id.to_string();
 
@@ -339,7 +260,18 @@ fn a_planners_screen_is_read_and_sent_keys_by_its_id() {
         read["planner_id"],
         planner.id.to_string().parse::<i64>().unwrap()
     );
-    assert!(read["screen"].as_str().unwrap().contains("Done."));
+    assert_eq!(read["lines"], 40);
+    assert_eq!(read["truncated"], true);
+    let screen = read["screen"].as_str().unwrap();
+    assert!(screen.starts_with("line 261\n") && screen.ends_with("line 300"));
+    let read = ok(
+        &db,
+        &["planner", "screen", &id, "--lines", "1000", "--cmux", cmux],
+    );
+    assert_eq!(read["lines_requested"], 1000);
+    assert_eq!(read["lines_limit"], 200);
+    assert_eq!(read["lines"], 200);
+    assert_eq!(read["screen"].as_str().unwrap().lines().count(), 200);
     ok(
         &db,
         &["planner", "send", &id, "--key", "escape", "--cmux", cmux],
@@ -365,7 +297,7 @@ fn a_planners_screen_is_read_and_sent_keys_by_its_id() {
             .is_some()
     );
     let reads = events(&db, "screen_read");
-    assert_eq!(reads.len(), 1);
+    assert_eq!(reads.len(), 2);
     assert_eq!(reads[0]["actor"]["role"], "inbox");
     assert_eq!(reads[0]["payload"]["target"], "planner");
     assert_eq!(reads[0]["payload"]["workspace_id"], "PW-1");
@@ -375,7 +307,7 @@ fn a_planners_screen_is_read_and_sent_keys_by_its_id() {
 #[test]
 fn a_planner_a_worker_and_the_jobs_are_refused_and_recorded() {
     let (_dir, db) = queue();
-    let run = run_in(&db, "guarded", None, "WS-1");
+    let run = run_in(&db, "guarded", false, "WS-1");
     let cmux = stub_cmux(&db, READY);
     let cmux = cmux.to_str().unwrap();
     let planner = [

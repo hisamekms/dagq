@@ -4,8 +4,8 @@ type: design
 title: "Cleanup and recovery"
 status: current
 created: 2026-09-26
-updated: 2026-10-02
-last_verified: 2026-10-02
+updated: 2026-10-04 # task 1437
+last_verified: 2026-10-04 # task 1437
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -16,7 +16,7 @@ related:
 
 # Cleanup and recovery
 
-workspaceの終了はsupervisorが行う。leaseはrun単位で（[ADR-0054](../../adr/0054-run-lease-ownership-parallel-supervisors-and-recover.md)の決定4）、1 runの復旧が他のrunに影響しない。receipt検証を通った`awaiting_integration`のrunは、reviewのverdict（pass・concern・reviewの失敗）の後にsessionの`/exit`を待ってworkspaceだけを閉じ（reviseの間は生きているsessionに差し戻すので閉じない。[`supervise`](supervise.md#supervise)の10、ADR-0054の決定1）、worktreeとbranchは`integrate`が着地するまで残す（着地後に`integrate`が削除する）。`failed`（非0終了、検証拒否）、provisioningや検証処理のエラー、wrapper heartbeat切れの場合はworkspaceもworktreeも調査のため残し、closeを呼ばない（worktreeのビルド成果物だけは消す。[Run worktrees](run-worktrees.md#run-worktrees)）。
+workspaceの終了はsupervisorが行う。leaseはrun単位で（[ADR-0054](../../adr/0054-run-lease-ownership-parallel-supervisors-and-recover.md)の決定4）、1 runの復旧が他のrunに影響しない。receipt検証を通った`awaiting_integration`のrunは、reviewのverdict（pass・concern・reviewの失敗）の後にsessionの終了を待ってworkspaceだけを閉じ（reviseの間は生きているsessionに差し戻すので閉じない。[`supervise`](supervise.md#supervise)の10、ADR-0054の決定1）、worktreeとbranchは`integrate`が着地するまで残す（着地後に`integrate`が削除する）。`failed`（非0終了、検証拒否）、provisioningや検証処理のエラー、wrapper heartbeat切れの場合はworkspaceもworktreeも調査のため残し、closeを呼ばない（worktreeのビルド成果物だけは消す。[Run worktrees](run-worktrees.md#run-worktrees)）。
 
 cmux 0.64.25の`workspace create --command`はコマンドをログインシェルに打ち込む形で起動し、wrapperが終了してもシェルとworkspaceは残る（2026-09-22の故障経路のスモーク（[manual-smoke](../manual-smoke.md#観測済みの環境依存)）で、cmux 0.64.25 (106)で`--command true` / `sleep 1`のworkspaceが5秒以上残ることを確認した。同じ日に同じ版の別の環境では、コマンド終了の1〜2秒後にworkspaceが自動で閉じ、supervisorのcloseのほうが先に成功していた。cmuxの設定に依存するとみられる）。どちらの場合もsupervisorの手順は同じで、先にworkspaceが消えていれば`cmux workspace close`は`not_found`で失敗して`cleanup_failed`になり、wrapper終了直後の`read-screen`も`screen_capture_failed`になりうる。`failed`・`interrupted`のrunのworkspaceはtriageの後にsupervisorが閉じ（[Triage](triage.md#triage-supervisor)）、triageが失敗したrunだけは調査が済んだら人かinboxが`dagq run close-workspaces RUN`（dry-run）で確かめてから`--apply`で閉じる（cmuxを直接打たない。[ADR-t1228-1](../../adr/2026-10-02-t1228-1-inbox-and-planner-reach-sessions-through-the-dagq-cli.md)の決定6）。人が`ready` / cancelした後、そのrunはtriageの対象でなくなり、次の掃除（[Run workspaces](run-workspaces.md)）が閉じる。
 

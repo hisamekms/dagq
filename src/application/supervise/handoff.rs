@@ -70,7 +70,7 @@ enum Snapshot {
         close: bool,
         requested: bool,
         timed_out: bool,
-        exit_asked: bool,
+
         exit_for_silence: bool,
     },
 }
@@ -151,10 +151,10 @@ impl Supervisor<'_> {
                     started_at: seconds(watch.started_at),
                     message: watch.message.clone(),
                     message_sent_at: watch.message_sent.map(|(_, at)| seconds(at)),
-                    not_ready_asked: watch.not_ready_asked,
+                    not_ready_asked: false,
                     exit_requested: watch.exit_requested.is_some(),
-                    exit_typed: watch.exit_typed,
-                    exit_for_silence: watch.exit_for_silence,
+                    exit_typed: watch.exit_requested.is_some(),
+                    exit_for_silence: false,
                     approved: watch.approved,
                 }),
                 Phase::Exiting(watch) if run.status() != RunStatus::AwaitingIntegration => {
@@ -163,10 +163,10 @@ impl Supervisor<'_> {
                             workspace: watch.session.as_ref().map(|s| s.workspace.clone()),
                             resume: watch.session.as_ref().and_then(|s| s.resume),
                             close,
-                            requested: watch.requested.is_some(),
-                            timed_out: watch.timed_out,
-                            exit_asked: watch.exit_asked,
-                            exit_for_silence: watch.exit_for_silence,
+                            requested: watch.requested,
+                            timed_out: false,
+
+                            exit_for_silence: false,
                         }),
                         _ => None,
                     }
@@ -311,9 +311,9 @@ impl Supervisor<'_> {
                 started_at,
                 message,
                 message_sent_at,
-                not_ready_asked,
+                not_ready_asked: _,
                 exit_requested,
-                exit_typed,
+                exit_typed: _,
                 exit_for_silence,
                 approved,
             } => Phase::Resume(self.rebuilt_resume(
@@ -324,9 +324,8 @@ impl Supervisor<'_> {
                     started_at: time(started_at),
                     message,
                     message_sent_at: message_sent_at.map(time),
-                    not_ready_asked,
                     exit_requested,
-                    exit_typed,
+
                     exit_for_silence,
                     approved,
                 },
@@ -336,32 +335,17 @@ impl Supervisor<'_> {
                 resume,
                 close,
                 requested,
-                timed_out,
-                exit_asked,
-                exit_for_silence,
+                timed_out: _,
+
+                exit_for_silence: _,
             } => {
                 let session = workspace.map(|workspace| SessionRef { workspace, resume });
                 let mut watch = ExitWatch::new(session, AfterExit::Rest { close });
-                watch.timed_out = timed_out;
-                watch.exit_asked = exit_asked;
-                watch.exit_for_silence = exit_for_silence;
-                let events = self.queue.run_events(run.id())?;
-                let now = Instant::now();
-                // Never a second /exit; its timeout runs from the recorded
-                // request (or a dialog answered by rule since), not the
-                // takeover (task 894). Without a record it restarts now.
-                if requested {
-                    watch.requested = Some(
-                        self.exit_requested_at(&events, |_| true, now)
-                            .unwrap_or(now),
-                    );
-                }
-                // The retries of the `/exit` are read from the events, as
-                // an adopter reads them (ADR-0047 decision 25).
-                if timed_out {
-                    let history = RunHistory::from_events(&events);
-                    watch.retry = ExitRetry::adopt(&history, |event| self.instant_of(event, now));
-                }
+
+                // Never a second exit request (task 894); the watch has no
+                // timeout since task 1437.
+                watch.requested = requested;
+
                 Phase::Exiting(watch)
             }
         })

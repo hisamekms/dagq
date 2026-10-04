@@ -196,57 +196,6 @@ impl Spawner for StubSpawner {
     }
 }
 
-/// How long [`LateAgentSpawner`] holds the agent's registration back
-/// after the stub went idle, unless the run leaves `starting` first: many
-/// supervisor ticks ([`TEST_TICK`]), so a supervisor that took a session
-/// whose agent is not registered yet to validation would do it within.
-const LATE_AGENT_HOLD: Duration = Duration::from_secs(1);
-
-/// [`StubSpawner`], returning the agent to its wrapper (which registers it)
-/// only once the stub wrote its idle marker after its receipt, and then
-/// [`LATE_AGENT_HOLD`] later or as soon as the run is no longer `starting`:
-/// the order a wrapper slowed by load between starting its agent and
-/// registering it sees (task 1274).
-pub struct LateAgentSpawner {
-    pub inner: StubSpawner,
-    pub db: PathBuf,
-    pub run: RunId,
-}
-
-impl Spawner for LateAgentSpawner {
-    fn spawn(&self, spec: &CommandSpec, streams: Streams<'_>) -> Result<Box<dyn Spawned>> {
-        let idle = spec
-            .get_envs()
-            .find(|(key, _)| *key == "IDLE")
-            .and_then(|(_, value)| value)
-            .map(PathBuf::from)
-            .ok_or_else(|| anyhow::anyhow!("the agent has no idle marker"))?;
-        let mut child = self.inner.spawn(spec, streams)?;
-        let _waiting = common::within(common::STEP_LIMIT, "the stub agent's idle marker");
-        while !idle.exists() {
-            ensure!(
-                child.try_wait()?.is_none() || idle.exists(),
-                "the stub agent exited before {}",
-                idle.display()
-            );
-            thread::sleep(Duration::from_millis(10));
-        }
-        let held = Instant::now();
-        while held.elapsed() < LATE_AGENT_HOLD {
-            let status: String = Connection::open(&self.db)?.query_row(
-                "SELECT status FROM task_runs WHERE id=?1",
-                [&self.run],
-                |r| r.get(0),
-            )?;
-            if status != "starting" {
-                break;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        Ok(child)
-    }
-}
-
 /// The directory of a fake `cmux` next to the queue at `db`, which appends
 /// the arguments of each call to `calls` there and exits at once: what the
 /// stub agents' `dagq` (a notifying `ask`, a `stats`) resolves as `cmux`
@@ -395,7 +344,7 @@ pub fn add_ready_task(queue: &mut SqliteQueue, title: &str, dependencies: &[Task
             goal_id: None,
             context: String::new(),
             provider: None,
-            worker_mode: Some(worker_mode()),
+            worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
         })
         .unwrap();
     queue
@@ -583,26 +532,6 @@ impl AgentProvider for TestProvider {
     fn review_command(&self, _: &TaskRun, _: &str, _: JobAccess) -> Result<CommandSpec> {
         unreachable!("sessions do not review")
     }
-    /// Kept in [`session_models`] rather than passed on: `/bin/sh` takes
-    /// no model.
-    fn select_model(&self, command: &mut CommandSpec, model: &str, effort: &str) {
-        use std::io::Write as _;
-        let run_id = command
-            .get_envs()
-            .find(|(key, _)| *key == "RUN_ID")
-            .and_then(|(_, value)| value)
-            .map(|value| value.to_string_lossy().into_owned());
-        let resume = command
-            .get_args()
-            .any(|arg| arg.to_string_lossy().starts_with(RESUME_PRELUDE));
-        let line = json!({"run_id": run_id, "resume": resume, "model": model, "effort": effort});
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(session_models_path(&self.db))
-            .unwrap();
-        writeln!(file, "{line}").unwrap();
-    }
     // `headless_command` keeps the default refusal: a run's provider has no
     // headless job, which the observer test relies on.
     fn command(&self, run: &TaskRun, prompt: &str) -> Result<CommandSpec> {
@@ -622,7 +551,7 @@ impl AgentProvider for TestProvider {
             "`dagq ask --run {} --kind worker_question --because scope --topic <code> --question '...'`",
             run.id()
         )));
-        // Background work is stopped before the receipt, or /exit stalls.
+        // Background work is stopped before the receipt.
         assert!(prompt.contains(runtime::STOP_BACKGROUND), "{prompt}");
         let mut command = CommandSpec::new("/bin/sh");
         command
@@ -651,58 +580,6 @@ fn worker_env(command: &mut CommandSpec, run: &TaskRun) {
         command.env(name, value);
     }
 }
-
-fn session_models_path(db: &Path) -> PathBuf {
-    db.with_file_name("session-models.jsonl")
-}
-
-/// The model and effort each session of [`TestProvider`] was started with
-/// (ADR-0079 decision 3), in the order they started: `run_id`, `resume`,
-/// `model`, `effort`.
-pub fn session_models(db: &Path) -> Vec<Value> {
-    fs::read_to_string(session_models_path(db))
-        .unwrap_or_default()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect()
-}
-
-/// Claude Code's empty input box, the screen `capture` returns unless a
-/// test sets another: the session takes input, and what the supervisor
-/// typed left the box.
-pub const READY_SCREEN: &str = "\
-⏺ Done.
-
-──────────────────────────────────────────────────────────────────────
-❯ 
-──────────────────────────────────────────────────────────────────────
-  ? for shortcuts
-";
-
-/// [`READY_SCREEN`] once the session took a text: at work on it.
-pub const WORKING_SCREEN: &str = "\
-⏺ Done.
-
-✻ Working… (3s · esc to interrupt)
-
-──────────────────────────────────────────────────────────────────────
-❯ 
-──────────────────────────────────────────────────────────────────────
-  ? for shortcuts
-";
-
-/// Claude Code's input box still holding `text` after its Enter.
-pub fn pending_screen(text: &str) -> String {
-    format!(
-        "⏺ Done.\n\n{rule}\n❯ {}\n{rule}\n  ? for shortcuts\n",
-        dagq::infrastructure::adapters::single_line(text),
-        rule = "─".repeat(70)
-    )
-}
-
-/// The runner's shell line before Claude Code draws its input box.
-pub const BOOT_SCREEN: &str =
-    "worktree on dagq/run\n❯ '/run/runner' '--db' '/queue.db' 'session' '--resume'\n";
 
 /// The test backend delivers an exit request as a file the fake agent polls for.
 pub fn exit_request_path(run_dir: &str) -> PathBuf {
@@ -743,22 +620,9 @@ pub struct TestWorkspace {
     /// wrapper never registers (a reopen whose wrapper does not start).
     pub resume_no_session: bool,
     pub resume_timeout: Duration,
-    /// `send_exit` returns only after the wrapper recorded its exit, as a
-    /// slow `cmux send` does when the session exits on the first keystroke.
-    pub exit_returns_after_session: bool,
-    pub prompt_wait: Duration,
-    /// What `capture` returns, and how often it was asked.
-    pub screen: Mutex<String>,
+    /// How often supervision attempted a screen read through this backend
+    /// (a worker has no screen, so none should).
     pub captures: AtomicUsize,
-    /// `send_enter` calls: Enters sent again after a submit (task 285).
-    pub enters: AtomicUsize,
-    /// This many Enters leave a typed text in the input box (the screen
-    /// shows it there until the last one), as a long paste does.
-    pub swallowed_enters: AtomicUsize,
-    /// This many texts are typed but never reach the session, as one typed
-    /// before Claude Code's input box is drawn.
-    pub dropped_texts: AtomicUsize,
-    pub exits_sent: AtomicUsize,
     pub sessions: Mutex<Vec<(String, TestSession)>>,
     pub closed: Mutex<Vec<String>>,
     /// `notify` calls as (title, body, workspace); the supervisor sends
@@ -770,9 +634,6 @@ pub struct TestWorkspace {
     pub groups: Mutex<Vec<(String, String)>>,
     /// `workspace-group create` fails.
     pub group_fails: bool,
-    /// `send_exit` delivers the request but reports a timeout, the way
-    /// `cmux send` does when cmux answers too late under load.
-    pub send_times_out: bool,
     /// Resumed-session script per task; a resume of any other task fails.
     pub resume_scripts: Mutex<HashMap<TaskId, String>>,
     /// `create_resume` calls: the workspace name and the command.
@@ -784,25 +645,6 @@ pub struct TestWorkspace {
     pub launched: Mutex<Vec<headless::Launch>>,
     /// `send_text` calls: the workspace and the text.
     pub texts: Mutex<Vec<(String, String)>>,
-    /// The inputs that switched a live session's model or effort
-    /// (`/model`, `/effort`; ADR-0079 decision 5): the workspace and the
-    /// input. The session takes them as the agent does, without working.
-    pub switches: Mutex<Vec<(String, String)>>,
-    /// A switch input fails to be typed, the other texts going on.
-    pub switch_fails: bool,
-    /// A switch input stays in the input box, whatever Enter is sent.
-    pub switch_stuck: bool,
-    /// `send_text` records the call and then fails, as a `cmux send` to a
-    /// workspace that went away does.
-    pub text_fails: bool,
-    /// This many `send_text` calls (after `/model` and `/effort`) record
-    /// the call and then fail, the later ones going through.
-    pub text_failures: AtomicUsize,
-    /// A `send_text` of an answer to an ask returns only in a later second
-    /// than the session's turn on it ended: once the session wrote
-    /// `answered` next to its receipt, and past the next second, as a
-    /// `cmux send` that is slow under load does (task 971).
-    pub answer_send_outlasts_turn: bool,
     /// `exists` fails, as `cmux workspace list` does when cmux is gone.
     pub exists_fails: bool,
     /// Workspaces cmux lists although this backend did not open them (a
@@ -810,36 +652,12 @@ pub struct TestWorkspace {
     pub listed: Mutex<Vec<String>>,
     /// Workspaces cmux does not list for now although they are open.
     pub hidden: Mutex<Vec<String>>,
-    /// This many captures time out, as `cmux read-screen` does under load.
-    pub capture_timeouts: AtomicUsize,
-    /// This many `send_exit` calls time out before the `/exit` reaches the
-    /// session (task 354).
-    pub exit_unsent: AtomicUsize,
     /// `close` ends the session in the workspace, as closing a cmux
     /// workspace kills its terminal, instead of requiring it gone.
     pub close_ends_session: bool,
     /// `close` times out and leaves the workspace and its session as they
     /// are, as cmux does under load.
     pub close_times_out: bool,
-    /// `send_key` calls: the keys a known dialog was answered with. Enter on
-    /// the "Background work is running" screen lets a held session exit,
-    /// and Escape closes the Settings panel.
-    pub keys: Mutex<Vec<String>>,
-    /// The screen the next `send_text` leaves, once: a dialog that came up
-    /// over the text the supervisor typed (task 480).
-    pub screen_after_text: Mutex<Option<String>>,
-    /// The screen the first capture after the next `send_text` leaves, once:
-    /// that capture (the submit's confirmation) still shows the text taken,
-    /// and a later one (the send's start check) shows this.
-    pub screen_after_confirm: Mutex<Option<String>>,
-    /// [`Self::screen_after_confirm`] armed by a `send_text` or, from
-    /// [`Self::screen_after_exit`], by a delivered `send_exit`.
-    armed_screen: Mutex<Option<String>>,
-    /// The screen the first capture after the next delivered `send_exit`
-    /// leaves, once: that capture (the submit's confirmation) still shows
-    /// the screen the `/exit` reached, and every later one (an exit retry's)
-    /// shows this, a dialog that came up after it, whatever the load.
-    pub screen_after_exit: Mutex<Option<String>>,
     /// The `claude` a headless run's wrapper calls for its turns
     /// ([`headless_claude`]); a headless run fails its wrapper without one.
     pub headless: Option<PathBuf>,
@@ -855,14 +673,6 @@ pub struct TestWorkspace {
     /// environment held it (the workspace's `[run.env]` in production),
     /// set before each turn's own variables ([`headless::InheritingSpawner`]).
     pub inherited_env: Vec<(String, String)>,
-    /// An interactive session's wrapper registers its agent only after the
-    /// stub went idle after its receipt, while the run is `starting`
-    /// ([`LateAgentSpawner`]), as a wrapper slowed by load does (task 1274).
-    /// A headless session ignores it.
-    pub agent_registers_late: bool,
-    /// Made without [`interactive_workers`]: a headless run with no
-    /// [`Self::headless`] runs its script as its turns ([`Self::claude_for`]).
-    pub turn_scripts: bool,
 }
 
 impl TestWorkspace {
@@ -880,51 +690,28 @@ impl TestWorkspace {
             no_session: false,
             resume_no_session: false,
             resume_timeout: Duration::from_secs(120),
-            exit_returns_after_session: false,
-            prompt_wait: Duration::from_secs(90),
-            screen: Mutex::new(READY_SCREEN.into()),
             captures: AtomicUsize::new(0),
-            enters: AtomicUsize::new(0),
-            swallowed_enters: AtomicUsize::new(0),
-            dropped_texts: AtomicUsize::new(0),
-            exits_sent: AtomicUsize::new(0),
             sessions: Mutex::new(Vec::new()),
             closed: Mutex::new(Vec::new()),
             notifications: Mutex::new(Vec::new()),
             tags: Mutex::new(Vec::new()),
             groups: Mutex::new(Vec::new()),
             group_fails: false,
-            send_times_out: false,
-            answer_send_outlasts_turn: false,
             resume_scripts: Mutex::new(HashMap::new()),
             resumes: Mutex::new(Vec::new()),
             resume_tags: Mutex::new(Vec::new()),
             launched: Mutex::new(Vec::new()),
             texts: Mutex::new(Vec::new()),
-            switches: Mutex::new(Vec::new()),
-            switch_fails: false,
-            switch_stuck: false,
-            text_fails: false,
-            text_failures: AtomicUsize::new(0),
             exists_fails: false,
             listed: Mutex::new(Vec::new()),
             hidden: Mutex::new(Vec::new()),
-            capture_timeouts: AtomicUsize::new(0),
-            exit_unsent: AtomicUsize::new(0),
             close_ends_session: false,
             close_times_out: false,
-            keys: Mutex::new(Vec::new()),
-            screen_after_text: Mutex::new(None),
-            screen_after_confirm: Mutex::new(None),
-            armed_screen: Mutex::new(None),
-            screen_after_exit: Mutex::new(None),
             headless: None,
             headless_ready: None,
             codex: None,
             sccache: None,
             inherited_env: Vec::new(),
-            agent_registers_late: false,
-            turn_scripts: worker_mode() == dagq::domain::worker::WorkerMode::Headless,
         }
     }
     /// Let cmux list `workspace` as if an earlier supervisor opened it.
@@ -941,9 +728,7 @@ impl TestWorkspace {
     pub fn texts(&self) -> Vec<(String, String)> {
         self.texts.lock().unwrap().clone()
     }
-    pub fn switches(&self) -> Vec<(String, String)> {
-        self.switches.lock().unwrap().clone()
-    }
+
     /// Agent script for one task; other tasks use the default script.
     pub fn script_for(&self, task_id: i64, script: &str) {
         self.scripts
@@ -1019,13 +804,6 @@ impl WorkspaceBackend for TestWorkspace {
         )?;
         let db = self.db.clone();
         let id = run.id().clone();
-        let script = self
-            .scripts
-            .lock()
-            .unwrap()
-            .get(&run.task_id())
-            .cloned()
-            .unwrap_or_else(|| self.script.clone());
         let mut sessions = self.sessions.lock().unwrap();
         let workspace = workspace_id(sessions.len());
         if self.no_session {
@@ -1044,31 +822,19 @@ impl WorkspaceBackend for TestWorkspace {
         let ready = self.headless_ready.clone();
         let sccache = self.sccache.clone();
         let inherited_env = self.inherited_env.clone();
-        let late = self.agent_registers_late;
         let worker = thread::spawn(move || {
             let spawner = StubSpawner { db: db.clone() };
-            if let Some((provider, other)) = headless {
-                let spawner = headless::ReadySpawner {
+            let (provider, other) = headless;
+            let spawner = headless::ReadySpawner {
+                inner: spawner,
+                ready,
+            };
+            if let Some(sccache) = sccache {
+                let spawner = headless::InheritingSpawner {
                     inner: spawner,
-                    ready,
+                    env: inherited_env,
                 };
-                if let Some(sccache) = sccache {
-                    let spawner = headless::InheritingSpawner {
-                        inner: spawner,
-                        env: inherited_env,
-                    };
-                    return runtime::session_with_sccache(
-                        &db,
-                        &id,
-                        &LeaseToken::new(&token),
-                        &provider,
-                        Some(&other),
-                        &spawner,
-                        false,
-                        sccache,
-                    );
-                }
-                return runtime::session_with_providers(
+                return runtime::session_with_sccache(
                     &db,
                     &id,
                     &LeaseToken::new(&token),
@@ -1076,27 +842,18 @@ impl WorkspaceBackend for TestWorkspace {
                     Some(&other),
                     &spawner,
                     false,
+                    sccache,
                 );
             }
-            let provider = TestProvider {
-                script,
-                db: db.clone(),
-            };
-            if late {
-                let spawner = LateAgentSpawner {
-                    inner: spawner,
-                    db: db.clone(),
-                    run: id.clone(),
-                };
-                return runtime::session_with_provider(
-                    &db,
-                    &id,
-                    &LeaseToken::new(&token),
-                    &provider,
-                    &spawner,
-                );
-            }
-            runtime::session_with_provider(&db, &id, &LeaseToken::new(&token), &provider, &spawner)
+            runtime::session_with_providers(
+                &db,
+                &id,
+                &LeaseToken::new(&token),
+                &provider,
+                Some(&other),
+                &spawner,
+                false,
+            )
         });
         sessions.push((
             workspace.clone(),
@@ -1146,16 +903,6 @@ impl WorkspaceBackend for TestWorkspace {
         );
         let claude = self.claude_for(run, true)?;
         let headless = headless_provider(run, claude.as_deref(), self.codex.as_deref());
-        let script = match &headless {
-            Some(_) => String::new(),
-            None => self
-                .resume_scripts
-                .lock()
-                .unwrap()
-                .get(&run.task_id())
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("no resume script for task {}", run.task_id()))?,
-        };
         let token: String = Connection::open(&self.db)?.query_row(
             "SELECT token FROM run_leases WHERE run_id=?1",
             [&run.id()],
@@ -1187,31 +934,19 @@ impl WorkspaceBackend for TestWorkspace {
         let ready = self.headless_ready.clone();
         let worker = thread::spawn(move || {
             let spawner = StubSpawner { db: db.clone() };
-            if let Some((provider, other)) = headless {
-                let spawner = headless::ReadySpawner {
-                    inner: spawner,
-                    ready,
-                };
-                return runtime::session_with_providers(
-                    &db,
-                    &id,
-                    &LeaseToken::new(&token),
-                    &provider,
-                    Some(&other),
-                    &spawner,
-                    true,
-                );
-            }
-            let provider = TestProvider {
-                script,
-                db: db.clone(),
+            let (provider, other) = headless;
+            let spawner = headless::ReadySpawner {
+                inner: spawner,
+                ready,
             };
-            runtime::resume_session_with_provider(
+            runtime::session_with_providers(
                 &db,
                 &id,
                 &LeaseToken::new(&token),
                 &provider,
+                Some(&other),
                 &spawner,
+                true,
             )
         });
         sessions.push((
@@ -1234,92 +969,17 @@ impl WorkspaceBackend for TestWorkspace {
         headless::launch_background(self, cwd, command, env, log)
     }
     fn send_text(&self, workspace_id: &str, text: &str) -> Result<()> {
-        if text.starts_with("/model ") || text.starts_with("/effort ") {
-            self.switches
-                .lock()
-                .unwrap()
-                .push((workspace_id.into(), text.into()));
-            if self.switch_fails || self.text_fails {
-                bail!("injected cmux send failure");
-            }
-            if self.switch_stuck {
-                *self.screen.lock().unwrap() = pending_screen(text);
-            }
-            return Ok(());
-        }
         self.texts
             .lock()
             .unwrap()
-            .push((workspace_id.into(), text.into()));
-        let failing = self
-            .text_failures
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-            .is_ok();
-        if self.text_fails || failing {
-            bail!("injected cmux send failure");
-        }
-        if self.swallowed_enters.load(Ordering::SeqCst) > 0 {
-            *self.screen.lock().unwrap() = pending_screen(text);
-        }
-        if self
-            .dropped_texts
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-            .is_ok()
-        {
-            return Ok(());
-        }
-        // The session got it and works on it.
-        let mut screen = self.screen.lock().unwrap();
-        if *screen == READY_SCREEN {
-            *screen = WORKING_SCREEN.into();
-        }
-        if let Some(after) = self.screen_after_text.lock().unwrap().take() {
-            *screen = after;
-        }
-        if let Some(after) = self.screen_after_confirm.lock().unwrap().take() {
-            *self.armed_screen.lock().unwrap() = Some(after);
-        }
-        drop(screen);
-        let run_dir = self.session_run_dir(workspace_id);
-        let path = resume_message_path(&run_dir);
-        fs::write(path.with_extension("tmp"), text)?;
-        fs::rename(path.with_extension("tmp"), path)?;
-        if self.answer_send_outlasts_turn && text.starts_with("answer to ask") {
-            let answered = Path::new(&run_dir).join("answered");
-            let deadline = Instant::now() + Duration::from_secs(30);
-            while !answered.exists() && Instant::now() < deadline {
-                thread::sleep(Duration::from_millis(20));
-            }
-            let second = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-            while SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() <= second {
-                thread::sleep(Duration::from_millis(20));
-            }
-        }
-        Ok(())
+            .push((workspace_id.to_owned(), text.to_owned()));
+        bail!("a worker has no interactive input: {workspace_id}, {text}")
     }
     fn send_enter(&self, _: &str) -> Result<()> {
-        self.enters.fetch_add(1, Ordering::SeqCst);
-        if self
-            .swallowed_enters
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-            == Ok(1)
-        {
-            *self.screen.lock().unwrap() = READY_SCREEN.into();
-        }
-        Ok(())
+        bail!("a worker has no interactive input")
     }
     fn send_key(&self, workspace_id: &str, key: &str) -> Result<()> {
-        self.keys.lock().unwrap().push(key.into());
-        let mut screen = self.screen.lock().unwrap();
-        match key {
-            "enter" if screen.contains("Background work is running") => {
-                *screen = READY_SCREEN.into();
-                release_held_session(&self.session_run_dir(workspace_id));
-            }
-            "escape" if screen.contains("Settings:") => *screen = WORK_SCREEN.into(),
-            _ => (),
-        }
-        Ok(())
+        bail!("a worker has no interactive input: {workspace_id}, {key}")
     }
     fn resume_prompt_delay(&self) -> Duration {
         Duration::ZERO
@@ -1332,19 +992,7 @@ impl WorkspaceBackend for TestWorkspace {
     }
     fn capture(&self, _: &str) -> Result<String> {
         self.captures.fetch_add(1, Ordering::SeqCst);
-        if self
-            .capture_timeouts
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-            .is_ok()
-        {
-            bail!("cmux read-screen failed: Error: Command timed out");
-        }
-        let mut screen = self.screen.lock().unwrap();
-        let read = screen.clone();
-        if let Some(after) = self.armed_screen.lock().unwrap().take() {
-            *screen = after;
-        }
-        Ok(read)
+        bail!("a worker has no screen")
     }
     fn retry_backoff(&self) -> Duration {
         Duration::from_millis(10)
@@ -1419,48 +1067,7 @@ impl WorkspaceBackend for TestWorkspace {
         unreachable!("only up pins a workspace")
     }
     fn send_exit(&self, workspace_id: &str) -> Result<()> {
-        self.exits_sent.fetch_add(1, Ordering::SeqCst);
-        if self
-            .exit_unsent
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-            .is_ok()
-        {
-            bail!("\"cmux\" send did not finish within 30s");
-        }
-        let run_dir = self.session_run_dir(workspace_id);
-        fs::write(exit_request_path(&run_dir), "")?;
-        if let Some(after) = self.screen_after_exit.lock().unwrap().take() {
-            *self.armed_screen.lock().unwrap() = Some(after);
-        }
-        if self.send_times_out {
-            // The /exit got there: the transcript shows it.
-            *self.screen.lock().unwrap() = format!("❯ /exit\n{READY_SCREEN}");
-            bail!("\"cmux\" send did not finish within 30s");
-        }
-        if self.exit_returns_after_session {
-            let run_id = self
-                .sessions
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|(id, _)| id == workspace_id)
-                .map(|(_, s)| s.run_id.clone())
-                .expect("workspace was created");
-            let connection = Connection::open(&self.db)?;
-            let started = Instant::now();
-            while !connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM run_processes WHERE run_id=?1 AND role='wrapper' AND exited_at IS NOT NULL)",
-                [&run_id],
-                |r| r.get::<_, bool>(0),
-            )? {
-                ensure!(
-                    started.elapsed() < Duration::from_secs(30),
-                    "session did not exit"
-                );
-                thread::sleep(Duration::from_millis(20));
-            }
-        }
-        Ok(())
+        bail!("a worker uses an exit request file: {workspace_id}")
     }
     fn exit_timeout(&self) -> Duration {
         self.exit_timeout
@@ -1470,9 +1077,6 @@ impl WorkspaceBackend for TestWorkspace {
     }
     fn reopen_interval(&self) -> Duration {
         self.reopen_interval
-    }
-    fn prompt_wait(&self) -> Duration {
-        self.prompt_wait
     }
     // A workspace is listed from its creation until it is closed, as cmux
     // does; one this backend never opened is not.
@@ -1525,19 +1129,25 @@ impl WorkspaceBackend for TestWorkspace {
 /// provider's own turns and reader (Claude Code's calling the stub `claude`
 /// at `claude`, Codex's the stub `codex` at `codex`), with the test tick,
 /// and the other provider's, which the run's turns go to once the
-/// supervisor moves it there (ADR-t813-2). `None` for an interactive run.
+/// supervisor moves it there (ADR-t813-2). Every worker run is headless
+/// (task 1437); the run must be.
 pub(crate) fn headless_provider(
     run: &TaskRun,
     claude: Option<&Path>,
     codex: Option<&Path>,
-) -> Option<(HeadlessProvider, HeadlessProvider)> {
-    (run.worker_mode() == dagq::domain::worker::WorkerMode::Headless).then(|| {
-        let provider = run.actual_provider();
-        (
-            headless_of(provider, claude, codex),
-            headless_of(provider.other(), claude, codex),
-        )
-    })
+) -> (HeadlessProvider, HeadlessProvider) {
+    // Claim and resume start every worker run headless (task 1437).
+    assert_eq!(
+        run.worker_mode(),
+        dagq::domain::worker::WorkerMode::Headless,
+        "a worker session of {}",
+        run.id()
+    );
+    let provider = run.actual_provider();
+    (
+        headless_of(provider, claude, codex),
+        headless_of(provider.other(), claude, codex),
+    )
 }
 
 /// `provider`'s headless turns with its stub.
@@ -1774,13 +1384,6 @@ pub fn supervise_options(parallel: usize, once: bool) -> SuperviseOptions {
         // No Codex worker unless a test gives its stub: the host's `codex`
         // is not these tests'.
         codex: PathBuf::from("/nonexistent/codex"),
-        // No retries of a held /exit (ADR-0047 decision 25) unless a test
-        // asks for them: a test's exit timeout goes on to the stuck_exit
-        // path at once, as it did before the retries.
-        exit: Some(dagq::domain::exit::ExitConfig {
-            retries: 0,
-            intervals: Vec::new(),
-        }),
         // An update's or a release's job that starts a supervisor again
         // does not reach the host's cmux (task 1128).
         update: dagq::application::supervise::UpdateSettings {
@@ -2071,8 +1674,6 @@ fn run_agent_with_review_retry(
     let mut options = supervise_options(4, true);
     options.retry_unreadable_review = retry;
     let outcome = supervise_retrying_with(&db, &repo, &backend, &options).unwrap();
-    // These scripts exit on their own, like a person's /exit; nothing was requested.
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 0);
     backend.join();
     assert_eq!(outcome["outcome"], "finished");
     assert_eq!(outcome["runs"].as_array().unwrap().len(), 1);
@@ -2081,8 +1682,11 @@ fn run_agent_with_review_retry(
     let detail = queue.show(TaskId::new(1)).unwrap();
     assert_eq!(detail.task.status(), TaskStatus::InProgress);
     let run = &detail.runs[0];
-    // The worker the test chose (headless unless [`interactive_workers`]).
-    assert_eq!(run.worker_mode(), worker_mode());
+    // The worker the test chose (headless always non-interactive).
+    assert_eq!(
+        run.worker_mode(),
+        dagq::domain::worker::WorkerMode::Headless
+    );
     assert_eq!(outcome["runs"][0]["id"], json!(run.id()));
     // Runs live in `runs/` next to the (canonicalized) database, worktree inside.
     let run_dir = db
@@ -2183,36 +1787,16 @@ pub fn event_kinds(detail: &dagq::domain::TaskDetail) -> Vec<&str> {
     detail.events.iter().map(|e| e.kind.as_str()).collect()
 }
 
-/// Fake agent that ignores the supervisor's `/exit` (as when a dialog holds
-/// it back) and ends only once the test writes `$EXIT.held`, the way a person
-/// would answer the dialog and exit.
-/// Blocks a fake session until the test calls `release_held_session`.
+/// Blocks a fake turn until `$EXIT.held` exists, which no test writes: a
+/// turn that does not end when its session is asked to exit, so its
+/// wrapper outlives the exit request until its session is stopped (its
+/// workspace closed, or the fixture ended).
 pub const HOLD: &str = "await_file \"$EXIT.held\"";
 
-pub const HELD_AGENT: &str =
-    "commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_file \"$EXIT.held\"";
-
-pub fn release_held_session(run_dir: &str) {
-    fs::write(Path::new(run_dir).join("exit-requested.held"), "").unwrap();
-}
-
-/// A screen of ordinary work.
-pub const WORK_SCREEN: &str =
-    "⏺ Bash(cargo test)\n  ⎿  test result: ok\n\n│ ❯ \n  ? for shortcuts\n";
-
-/// Fake agent that works (no receipt, no idle marker) until the test writes
-/// `$EXIT.go`, then finishes like `VALID_AGENT` and waits for `/exit`.
-pub const PROMPTED_AGENT: &str =
+/// Fake agent whose turn works (no receipt) until the test writes
+/// `$EXIT.go`, then commits and writes its receipt like `VALID_AGENT`.
+pub const GATED_AGENT: &str =
     "await_file \"$EXIT.go\"; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit";
-
-/// A session stopped at a login that ran out (task 266).
-pub const LOGIN_SCREEN: &str = "\
-⏺ Bash(cargo test)
-  ⎿  API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"OAuth token has expired.\"}} · Please run /login
-
-│ ❯ 
-  ? for shortcuts
-";
 
 /// The attention entries of `status` for one ask.
 pub fn ask_attention(status: &Value, ask_id: AskId) -> Vec<Value> {
@@ -2511,7 +2095,7 @@ fn awaiting_run_with_review_retry(retry: bool) -> (Fixture, PathBuf, PathBuf, Ta
             goal_id: None,
             context: String::new(),
             provider: None,
-            worker_mode: Some(worker_mode()),
+            worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
         })
         .unwrap();
     queue

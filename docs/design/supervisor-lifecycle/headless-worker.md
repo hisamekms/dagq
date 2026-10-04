@@ -4,10 +4,12 @@ type: design
 title: "非対話のworker"
 status: current
 created: 2026-09-28
-updated: 2026-10-04 # task 1596: a headless planner at the provider wall takes the provider retry before the requests behind it, and an answer is read only past the wall
-last_verified: 2026-10-04 # task 1596
+updated: 2026-10-04 # task 1596: a headless planner at the provider wall takes the provider retry before the requests behind it, and an answer is read only past the wall; task 1437
+last_verified: 2026-10-04 # task 1596; task 1437
 scope: runtime
 related:
+  - adr-t1433-2
+  - adr-t1433-3
   - adr-t1340-1
   - adr-t1404-1
   - design-supervisor-lifecycle
@@ -24,17 +26,17 @@ related:
 
 # 非対話のworker
 
-> **予定（goal 92）**: 対話の経路は廃止し（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）、非対話のsession wrapperは下の「workspaceなしのbackgroundのwrapper」の形だけで動く（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）。`dagq.toml`の切り替えの欄（`[headless] wrapper`）は受け付けて無視し（値に関わらずbackground）、後で消す。workspaceの中のwrapper、「対話の経路との違い」、runのworkspaceのterminalに出力を見せることの記述は、goal 92の後続のtaskが実装するまでの今の姿である。人がrunの出力を見るのはturnのlogのCLIになる。
+> **goal 92**: worker の対話の経路は task 1437 で廃止した（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）。非対話のsession wrapperをbackgroundの形だけにすることは [ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md) が決める。wrapper の workspace の撤去と background への統一は task 1440、runtime の planner の対話の撤去は task 1441、inbox の促しは task 1442 が実装する予定であり、下のそれらの節は現在の挙動を残す。
 
-[ADR-t813-1](../../adr/2026-09-28-t813-1-headless-worker-path.md)の実装（task 815）。taskの`worker_mode`が`headless`（経路を指定しないClaudeのtask（既定、[ADR-t1340-1](../../adr/2026-10-02-t1340-1-claude-worker-defaults-to-headless.md)）と`add --headless`、Codexのtask。[provider-lifecycle](../provider-lifecycle.md#workerのproviderと経路)）のrunは、workerの1 turnを1回の非対話の呼び出しにする。動くのはClaude（`claude -p --output-format stream-json --verbose`）とCodex（`codex exec --json`と`codex exec resume --json`、task 816。[provider-lifecycle](../provider-lifecycle.md#codexの非対話のworker)）。providerの違いは`AgentProvider`の`turn_command`（呼び出しのargv）と`turn_reader`（出力を読む`TurnReader`）と`turn_permission_mode`に閉じ込め、supervisorとsession wrapperの流れはproviderを知らない。
+[ADR-t813-1](../../adr/2026-09-28-t813-1-headless-worker-path.md)の実装（task 815）。worker の run はすべて、workerの1 turnを1回の非対話の呼び出しにする。動くのはClaude（`claude -p --output-format stream-json --verbose`）とCodex（`codex exec --json`と`codex exec resume --json`、task 816。[provider-lifecycle](../provider-lifecycle.md#codexの非対話のworker)）。providerの違いは`AgentProvider`の`turn_command`（呼び出しのargv）と`turn_reader`（出力を読む`TurnReader`）と`turn_permission_mode`に閉じ込め、supervisorとsession wrapperの流れはproviderを知らない。
 
 ## 経路の全体
 
 - **e2eはworkerのturnで流さない**（[ADR-t1233-2](../../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)）。ClaudeでもCodexでも、e2eが要るrunにはreviewのpassの後にruntimeがhostで流し（[Review](review.md#着地の前のe2e)）、落ちれば同じsessionの次のturnとしてresumeの依頼（`ResumeKind::E2e`）を送る。Codexのworkspace-writeのsandboxで走らないe2eを名前で除外する規則と、その除外を書くreceiptの`e2e`の書式（task 1206）は無い。
 - **session wrapperがturnを動かす**（決定3）。runのworkspaceのwrapper（`session`、[session wrapper](session-wrapper.md)）は、runの`worker_mode`が`headless`なら`src/application/headless_session.rs`の`Turns`でturnを1つずつ起動する。最初のturnは`prompt.txt`をpromptにし、sessionを始める（Claudeはsessionのidをrunのidにする`--session-id <run id>`、Codexは出力の`thread.started`でthreadのidを名乗り、wrapperがそれを`turn_session_identified`としてrunに記録する）。後のturnはsupervisorの依頼を1つずつ取り、同じsessionをresumeする（Claudeは`--resume <run id>`、Codexは`codex exec resume <記録したthreadのid>`）。依頼を待つ間もheartbeatを続け、agentのprocessは無い。
-- **supervisorは打ち込まずに依頼を書く**（決定2）。supervisorがsessionに送るものはすべて`deliver.rs`の`submit`を通るので、`headless`のrunでは`headless.rs`の`request_turn`が、文をrunの`turns/`への依頼に、`/exit`を終了の依頼に替える（`Submission::Queued`）。送った文の確認（`StartCheck`）、Enterの送り直し、入力欄の確認、画面の読み取り（ダイアログ・作業中・認証の画面・idleの推定・既知のダイアログへの応答）は`headless`のrunでは行わない（`watch_prompt`・`session_idle`・`answer_known_dialog`・`answer_exit_dialog`・`known_dialog_ready`が早く戻る）。
+- **supervisorは打ち込まずに依頼を書く**。すべての worker の依頼・answer・revise・resume は `deliver::submit` が `request_turn` を通して `turns/` に書き、wrapper が次の turn として届ける。終了は終了依頼ファイルへ書く。run の画面の読み取り、入力欄・送信後の確認、Enter の送り直し、ダイアログ応答は撤去した。
 - **turnの終わりがidleの印**。wrapperはturnのprocessが終わり`turn_finished`を記録した後に、runのidle marker（`idle.json`）を`Stop`の形で書く（`hook_event_name: Stop`、background taskは無し、`dagq_turn`に`turn`・`outcome`・`failure`・`permission_denials`）。Claudeの`Stop` hookは使わない（turnのsettingsにhookは無い）。これで最初のsession・reviewのrevise・`needs_session`のresume・待ち（[waiting](waiting.md)）の既存の見張りが、idle markerとreceiptとaskをそのまま読む。
-- **終了**: 終了の依頼を見たwrapperは、turnを走らせていれば止め（`outcome: stopped`）、exit code 0で終わる。reviewのpassの後の`/exit`、resumeの試行の終わり、wrapperが黙ったときの`/exit`、`stalled`のaskへの`stop`の答え（下の「turnの後の扱い」）は、どれもこの依頼になる。workspaceのcloseの時点は対話と同じ（決定5）。
+- **終了**: 終了の依頼を見たwrapperは、turnを走らせていれば止め（`outcome: stopped`）、exit code 0で終わる。reviewのpassの後の終了、resumeの試行の終わり、wrapperが黙ったときの終了、`stalled`のaskへの`stop`の答え（下の「turnの後の扱い」）は、どれもこの依頼になる。workspaceのcloseの時点は廃止した対話のworkerと同じ（決定5。workspaceの撤去はtask 1440）。
 
 ## run dirの`turns/`
 
@@ -107,9 +109,9 @@ wrapper自身がturnの途中で終わるとき（エラー）は、上と同じ
 
 - **Codexのworkerのask**: turnのagentは（Claudeのturnと同じく）queue serviceのsocketとtokenのfileを持ち、queue DBのpathは持たないので、sandboxの中の`dagq ask`はクライアントモードでserviceに送られ、その場で開く（ADR-t1233-5決定4・5、[Queue service](../queue-service.md#クライアントモード)）。開いたaskは下のaskと同じに扱う。
 - **成功**（receiptかaskが残ったturnを含む）: wrapperは次の依頼を待つ。supervisorはidle markerを読み、receiptがあれば今のvalidatingへ（[receipt and session exit](receipt-and-session-exit.md)）、`worker_question`が開いていれば答えを待つ（runはslotを空けて待ちになる。ADR-0071の読み替え、決定6）。答えは`answer to ask N: ...`を依頼にして送る（[workerの質問への回答の送信](worker-question-answer.md)）。
-- **receiptもaskも無いturnの終わり**（`StallWatch::observe_turn`）: 対話の`idle_without_receipt_secs`は待たず（閾値0）、決まった文の促し（`stall_nudged`）を依頼で送る。促しは1 phaseに`HEADLESS_NUDGES`（2）回まで（対話は1回。ADR-0047決定30の読み替え）。前の促しの`stall_resolved`は`nudged_again`になる。使い切った後のturnも同じなら復旧jobの`stalled`（理由`turn_without_receipt`）にする。receiptが無いことは、idle markerを読んだ後にもう一度確かめる（`StallWatch::observe`）。passの初めにreceiptを探した後で、turnがreceiptを書いて終わると、そのturnは促されず次のpassでreceiptが読まれる。促しのturnが同じ受け入れの作業をもう一度すると、最初のreceiptのvalidationの最中にcommitが進み（`receipt commit … is not the head`・`worktree is not clean`）、runが失敗するため（task 1328。testは`runtime_headless::a_receipt_written_as_its_turn_ends_is_not_nudged`）。
+- **receiptもaskも無いturnの終わり**（`StallWatch::observe_turn`）: 廃止した対話のworkerの`idle_without_receipt_secs`は待たず（閾値0）、決まった文の促し（`stall_nudged`）を依頼で送る。促しは1 phaseに`HEADLESS_NUDGES`（2）回まで（廃止した対話のworkerは1回。ADR-0047決定30の読み替え）。前の促しの`stall_resolved`は`nudged_again`になる。使い切った後のturnも同じなら復旧jobの`stalled`（理由`turn_without_receipt`）にする。receiptが無いことは、idle markerを読んだ後にもう一度確かめる（`StallWatch::observe`）。passの初めにreceiptを探した後で、turnがreceiptを書いて終わると、そのturnは促されず次のpassでreceiptが読まれる。促しのturnが同じ受け入れの作業をもう一度すると、最初のreceiptのvalidationの最中にcommitが進み（`receipt commit … is not the head`・`worktree is not clean`）、runが失敗するため（task 1328。testは`runtime_headless::a_receipt_written_as_its_turn_ends_is_not_nudged`）。
 - **permissionの拒否が続いて進まない**: receiptもaskも無く終わったturnの`permission_denials`が`PERMISSION_DENIAL_LIMIT`（3）件以上なら、促さずにすぐ復旧jobの`stalled`（理由`permission_denied`）にする。
-- **providerが使えない**（`failure`が`authentication` / `usage_limit` / `launch`）: wrapperはsessionを終えずに次の依頼を待ち、supervisorは促しも復旧jobもせず、失敗したturnの呼び出しをもう一方のproviderの新しいsessionへの依頼にする（ADR-t813-2。[provider-lifecycle](../provider-lifecycle.md#使えないproviderからの切り替え)）。切り替えられない（もう一方も使えない、切り替えの上限）ときはrunを失敗にせず待たせ（`provider_waiting`）、自分のproviderの控えが解ければ同じsessionへもう一度送る（`provider retry`）。Claudeの認証と利用上限、および両方使えないときは、`authentication`ならqueueの認証のholdに、`usage_limit`なら利用上限のhold（`reason_category: cost`、subject `usage_limit`）に、対話のsessionの画面と同じ`raise_wall`で加わる（`auth_required` / `usage_limited`を記録する。task 438）。人が`done`と答えると、対話と同じくsupervisorが「続けて」（`continue`）を依頼で送る（[queue hold](queue-hold.md)）。reviseとresumeの段でも同じ（`SessionWatch::provider_wall`）。
+- **providerが使えない**（`failure`が`authentication` / `usage_limit` / `launch`）: wrapperはsessionを終えずに次の依頼を待ち、supervisorは促しも復旧jobもせず、失敗したturnの呼び出しをもう一方のproviderの新しいsessionへの依頼にする（ADR-t813-2。[provider-lifecycle](../provider-lifecycle.md#使えないproviderからの切り替え)）。切り替えられない（もう一方も使えない、切り替えの上限）ときはrunを失敗にせず待たせ（`provider_waiting`）、自分のproviderの控えが解ければ同じsessionへもう一度送る（`provider retry`）。Claudeの認証と利用上限、および両方使えないときは、`authentication`ならqueueの認証のholdに、`usage_limit`なら利用上限のhold（`reason_category: cost`、subject `usage_limit`）に`raise_wall`で加わる（`auth_required` / `usage_limited`を記録する。task 438）。人が`done`と答えると、supervisorが「続けて」（`continue`）を次のturnの依頼で送る（[queue hold](queue-hold.md)）。reviseとresumeの段でも同じ（`SessionWatch::provider_wall`）。
 - **turnの失敗と、wrapperが止めたturn**（`other`・`model`の失敗、`silent`・`timed_out`・`launch_mismatch`）: wrapperはsessionを終える（exit code 1）。supervisorはそのturnを促さず、wrapperの終了を待つ。receiptの無いまま終わったrunは`failed`になり、今の[triage](triage.md)の復旧job（alert `failed`）にかかる（runが`worker_question`か`stalled`のaskの答えを待つ最中にwrapperが終わったときは、下の「待ちの最中に失ったsessionの開き直し」が先に開き直す）。復旧jobの材料（`ended_run_material`）には、最後の5つの`turn_finished`（`outcome`と`stopped`）が載る。
 - **答えずに閉じた`worker_question`**（task 1372）: 答えがworkerに届かないまま閉じた`worker_question`（`ask_delivered`の無い`ask_closed`か、runtimeが答えを書いて閉じた`ask_answered`の`runtime_closed`）があり、sessionがそのcloseより後にturnを終えていない（idle markerがcloseのミリ秒より後でない）なら、`stall_nudged`の促しか復旧jobの代わりに、閉じたことを伝える文（`prompt::closed_question_notice`）を次のturnの依頼として1回だけ送る。中身と記録は[receiptの無いidleの検知](idle-without-receipt.md)の「答えずに閉じた`worker_question`」。
 
@@ -126,23 +128,27 @@ task 1372（goal 86の暫定の対応）。2026-09-30T08:42にtask 681・695の�
 
 ## 復旧jobのalertと操作（決定9）
 
-| alert | どこで | 選べる操作 |
-| --- | --- | --- |
-| `stalled`、理由`turn_without_receipt` | 生きているrun（最初のsession） | `send_instruction`・`stop_processes`・`resume`・`wait`（`HEADLESS_STALLED_ACTIONS`） |
-| `stalled`、理由`permission_denied` | 同上 | 同上 |
-| `failed`（`turn_finished`の`outcome`が`silent`・`timed_out`・`launch_mismatch`・`failed`） | 終わったrun | `retry`・`retry_inherit`・`resume`・`wait`（`ENDED_ACTIONS`） |
+worker の生きている run の復旧は `stalled`（`turn_without_receipt` / `permission_denied`）と、CPU 時間が伸びないプロセスの `idle_process` を扱う。非対話の `idle_process` の検知・復旧と共通の test は残す（ask 394 の回答）。操作は `send_instruction`・`stop_processes`・`resume`（最初の session だけ）・`wait` で、適用時に次の依頼が無く turn が終わっていることや run 所有のプロセスであることを確認する。終わった run の `failed` の復旧は従来どおり。
 
-- `send_instruction`はinstructionを依頼にした同じsessionのresume（`dagq: the supervisor's recovery job for run ... asks: ...`）、`resume`は生きているrunなら`needs_session`に退けて新しいworkspaceのwrapperでresume、終わったrunなら今のtriageのresume（どちらも同じsessionのresumeで、依頼が解消依頼になる）。`retry` / `retry_inherit`は終わったrunだけで選べる（turnを止めてsessionを終えるのはruntimeが先に行う）。`stop_processes`はrunのprocess（wrapperの子を含む）をpidで止める。`answer_known_dialog`・`close_and_proceed`と、`prompt_waiting`・`stuck_exit`・`long_background`・`idle_process`の画面由来のalertの操作は出さない（ダイアログが無い）。
-- runtimeは今と同じく`confidence: high`の`repair`で前提が成り立つときだけ適用する（`send_instruction`はturnが終わってから次の依頼がまだ無いこと）。`escalate`・`low`・上限（alertごとに3回）超えのときだけ`stalled`のask（`reason_category`付き）が開く。復旧jobは画面の代わりに最後のturnの要約（`turns_excerpt`）を読み、`recovery_requested`の`facts`には`turn`（`turn`・`outcome`・`failure`・`permission_denials`）と`nudges`が載る。
-- `headless`の`stalled`のaskは、画面もキーも無いことと、答える前にturnの記録（questionの末尾のturns、runのdirの`turns/`、`dagq timeline RUN`）を読むことを書き、選択肢は`wait` / `stop` / `propose`とjobの足したもの（`stall::headless_options`。`intervene`は無く、`stop`は`headless`のaskだけ。対話のrunのaskは`wait` / `intervene` / `propose`のままで、人がworkspaceに`/exit`を打つ）。`wait`は次のturnが終わるまで次のaskを開かない。記録を読んで人に持っていくのは答える前に行うことで、答えの選択肢にしない（task 1179）。`intervene`は画面とキーに手を入れる印で、非対話のsessionには手を入れる経路が無いため。それでも`intervene`（`intervene: ...`の文を含む）が届いたとき（変更前に開いたaskへの答えか、文として打たれたもの）は、supervisorはheldにせず、そのaskの`stall_resolved`の`answered_intervene`を`reopened: true`つきで1回記録してからaskを閉じ、すぐに同じrunの新しい`stalled`のaskを、前のaskのoptionsから`intervene`を除いたもの（`stop`が無ければ`wait`の後に足す）と同じ`reason_category`で開き直す（促しも復旧jobも通さず、通知は新しいaskとして1回）。questionは前のaskのquestionのうちsessionの様子を書いた部分（答えの説明より前。元のalert・秒数・jobの見立て。`stall::situation_of`）をそのまま残し、前のaskが`intervene`と答えられたことを1文足し、答えの説明と末尾のturnsを非対話のもの（`stall::headless_ask_text`）にする。前のaskが見つからないか答えの説明が読めなければ、receiptの無いturnのquestionにする。`intervene`を次のturnとして送らない。slotの外で待つrunでも開き直す（何も送らないので）。記録してから閉じるので、その間でsupervisorが止まれば、引き継いだsupervisor（adopt）は閉じていない回答済みの`intervene`のaskを適用済みとして読まずにwatchの`asked`にし、次のpollで記録を重ねずに閉じて開き直す。閉じた後・開く前に止まれば、最後の`stalled`のaskが`reopened: true`の`answered_intervene`で閉じられていてそれより新しいaskが無いことから開き直しを読み、次のpollで1回だけ開く。supervisorが適用する前に誰かが`intervene`のaskを閉じたとき（supervisorの居ない間を含む）も、heldにせず、結末が無ければ`answered_intervene`（`reopened: true`）を記録して開き直す。開き直しはaskが開くまでwatchに残り、開けなければ次のpollでやり直す。`reopened`の結末の後にsessionへ何か送られていれば（`turn_requested`・`ask_delivered`・`stall_nudged`）、adoptはそれを開き直しとして読まない。adoptは非対話のrunでは`answered_intervene`を人が手を入れた時刻（held）として読まない。復旧jobがescalateした`long_background`・`idle_process`の`stalled`のaskも、非対話のrunでは同じoptions（`intervene`無し、`stop`あり）にし、questionはworkspaceと画面・キーの手順を書かずに、alertの様子とjobの見立ての後に非対話の答えの説明と末尾のturnsを置く（`headless_ask_text`）。`stop`は、supervisorがそのsessionに終了の依頼（`submit`の`Input::Exit`。上の「終了」と同じ`turns/exit`）を1回だけ書き、askを閉じて`stall_resolved`の`answered_stop`を記録する（task 1104）。`stop`は指示の文として次のturnに送らない。wrapperは走っているturnを止めて（`outcome: stopped`）exit code 0で終わり、runはreceiptの無いまま終わったsessionと同じく、validatingがreceiptの欠けで`failed`にして復旧job（alert `failed`）にかかる。`turns/exit`を書いてからaskを閉じるので、その間でsupervisorが止まっても、引き継いだsupervisorは`turns/exit`を見て（`exit_requested`）書き直さず、askを閉じて`answered_stop`を記録するだけにする。adoptは`answered_stop`の時刻を人が手を入れた時刻として読み、促しもaskも出さない。それ以外の答えは`answer to ask N: <答え>`を依頼にして次のturnにし（`stall_resolved`の`answered_instruction`）、askを閉じる。runが待ちでslotの外にいる間は送らず（`stop`の終了の依頼も同じ）、slotに戻ってから送る（決定6）。非対話のsessionは待ちのあいだ動かないので、この2つの答えは待ちを`answered`で終え、runはslotが空けば戻る（[待ち](waiting.md)、task 1104）。この答えはちょうど1回だけ送る（task 863）: 依頼の`what`はaskを名指す`answer of the stalled ask N`（`stalled_answer_what`）で、supervisorは依頼を書いてから`close_ask`と`stall_resolved`を記録する。書く前に`turns/`に同じ`what`の依頼（取られていないものか取られたもの。前のsessionとともに捨てられた`.dropped`は数えない）があれば（`requested`）書かず、askを閉じて`answered_instruction`を記録するだけにする。依頼のfileが送ったことの記録なので、依頼を書いた後・askを閉じる前にsupervisorが止まれば、引き継いだsupervisor（adoptもexecの引き継ぎも、閉じていない回答済みのaskを`StallWatch`がもう一度読む）は依頼を見つけて2回目を書かず、依頼を書く前に止まれば1回書く。`turn_requested`のeventは依頼の後に書き、その記録の失敗は注記だけなので、eventではなくfileで照合する。
+画面由来の `prompt_waiting`・`stuck_exit` と、対話の背景表示の `long_background` は撤去した（task 1437、[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）。`answer_known_dialog`・`close_and_proceed` の操作も適用しない。過去の alert・verdict・event は履歴として読める。新しい ask の選択肢は `wait` / `stop` と job の操作から `intervene` を除いたものになる。
+
+過去の `intervene` の ask に答えた記録は捨てない。非対話の worker に人が打鍵できないため、その答えは ask を開き直し、答えの選択を求める。新しい答えの指示は次の turn として届ける。
+
 
 ## workerへの文面
 
 非対話のrunのworkerに送るprompt・依頼・答え・復旧jobの指示は、`/exit`・画面への打ち込み・backgroundの処理に頼る指示を持たず、「このturnで終え、receiptかaskでturnを終える」「答えは次のturnのpromptで届く」「AGENTS.mdを読む」「`pkill` / `killall`を使わない」を書く。Codexはsubagent reviewをせず、taskの要る`subagent_review`はCodexのrunには要らない。どれも[Prompt](prompt.md#経路とproviderごとの文面)にまとめる（task 817）。
 
-## 対話の経路との違い
+## 対話と記録されたtaskのclaimとresume
 
-対話のrunの経路（画面の判定・idleの印・`/exit`・打ち込み・Enterの送り直し・既知のダイアログ・`prompt_waiting`・`stuck_exit`）はそのまま（決定7）。Claudeの既定は非対話で、対話の経路は`add` / `edit`の`--interactive`で選んだtaskだけが使う（ADR-t1340-1。保存の形と、既定の`interactive`をNULLに戻したmigration 0057は[provider-lifecycle](../provider-lifecycle.md#workerのproviderと経路)）。`headless`のrunだけが上の経路を通り、分岐はsupervisorの`headless(run)`とwrapperの`worker_mode`で行う。
+worker の対話の経路は [ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md) で廃止した（task 1437。runtime の planner の対話は task 1441 まで残る）。
+
+task の `worker_mode: interactive` は保存されたまま読めるが、claim は実際の run の `worker_mode` を `headless` にし、resume は過去の interactive run の mode を同じトランザクションで `headless` に更新する。どちらも worker は非対話の turn の経路で始まる。
+
+変換時だけ `worker_mode_converted` を記録する。欄は `phase`（`claim` / `resume`）、`from: interactive`、`to: headless`、`reason: interactive_worker_removed`。claim の `run_claimed` と resume が返す run は実際の `headless` を持つ。既に headless の run は変換の event を増やさない。provider の切り替えは従来の `provider_switched` で別に記録する。
+
+`run screen` は過去の interactive run にも既存の非対話の応答と同じ形（`screen: null`・reason・`turns/` の場所）を返し、画面を読まない。reason だけは対話の worker を廃止したことを示す（`screen::RETIRED_SCREEN`）。run screen の拒否への変更は task 1440 の範囲である。
+
 
 ## workspaceなしのbackgroundのwrapper
 

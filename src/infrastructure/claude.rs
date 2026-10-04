@@ -14,11 +14,8 @@ use serde_json::Value;
 
 use super::adapters::ClaudeCode;
 use crate::{
-    application::{AgentSignals, DialogAnswer, IdleHook, InputSource, KnownDialog},
-    domain::{
-        headless_job::JobFailure, queue_hold::Wall, stall::BackgroundTask,
-        worker_model::WorkerSession,
-    },
+    application::{AgentSignals, IdleHook},
+    domain::{headless_job::JobFailure, queue_hold::Wall, stall::BackgroundTask},
 };
 
 /// `prompt_waiting` carries this many last non-empty lines of the screen.
@@ -93,82 +90,6 @@ pub fn detect_prompt(screen: &str) -> Option<PromptKind> {
     tail.iter()
         .any(|line| line.starts_with("Enter to confirm") || line.starts_with("Esc to cancel"))
         .then_some(PromptKind::Confirm)
-}
-
-/// The title line of the confirmation Claude Code shows for `/exit` while
-/// background work runs.
-const BACKGROUND_WORK_TITLE: &str = "Background work is running";
-
-/// Its option that stops the background work and exits.
-const EXIT_AND_STOP: &str = "Exit and stop tasks";
-
-/// The title of the Settings panel, followed by its tabs.
-const SETTINGS_TITLE: &str = "Settings:";
-
-/// The footer of the Settings panel, under its title.
-const SETTINGS_FOOTER: &str = "Esc to";
-
-/// The tabs of the Settings panel; two on the title line mark it.
-const SETTINGS_TABS: &[&str] = &["Status", "Config", "Usage"];
-
-/// The dialog of the fixed list (ADR-0047 decision 29) at the bottom of a
-/// screen with no input box under it, and the keys that answer it:
-///
-/// - the "Background work is running" confirmation: a title line starting
-///   with it and, below, a `❯`-marked choice among numbered options one of
-///   which starts with "Exit and stop tasks". The keys move the mark to that
-///   option (`down` or `up`, as many as it is away) and press `enter`.
-/// - the Settings panel (`/status`, `/usage`, ...): a line starting with
-///   `Settings:` that names two of its tabs, and below it a line starting
-///   with `Esc to`. The key is `escape`.
-///
-/// Anything else, a dialog or not, is `None`: a changed screen gets no key.
-pub fn known_dialog(screen: &str) -> Option<DialogAnswer> {
-    if input_box(screen).is_some() {
-        return None;
-    }
-    let lines: Vec<&str> = screen
-        .lines()
-        .map(strip_frame)
-        .filter(|line| !line.is_empty())
-        .collect();
-    let tail = &lines[lines.len().saturating_sub(PROMPT_SCAN_LINES)..];
-    if let Some(title) = tail
-        .iter()
-        .rposition(|line| line.starts_with(BACKGROUND_WORK_TITLE))
-    {
-        let options: Vec<(bool, &str)> = tail[title + 1..]
-            .iter()
-            .filter_map(|line| option_text(line).map(|text| (line.starts_with('❯'), text)))
-            .collect();
-        let marked = options.iter().position(|(marked, _)| *marked)?;
-        let target = options
-            .iter()
-            .position(|(_, text)| text.starts_with(EXIT_AND_STOP))?;
-        let step = if target > marked { "down" } else { "up" };
-        let mut keys = vec![step; target.abs_diff(marked)];
-        keys.push("enter");
-        return Some(DialogAnswer {
-            dialog: KnownDialog::BackgroundWork,
-            keys,
-        });
-    }
-    let title = tail.iter().rposition(|line| {
-        line.strip_prefix(SETTINGS_TITLE).is_some_and(|rest| {
-            SETTINGS_TABS
-                .iter()
-                .filter(|tab| rest.contains(*tab))
-                .count()
-                >= 2
-        })
-    })?;
-    tail[title + 1..]
-        .iter()
-        .any(|line| line.starts_with(SETTINGS_FOOTER))
-        .then(|| DialogAnswer {
-            dialog: KnownDialog::SettingsPanel,
-            keys: vec!["escape"],
-        })
 }
 
 /// How Claude Code reports a login that ran out or was never there (task
@@ -508,59 +429,13 @@ pub fn idle_hook(content: &[u8]) -> IdleHook {
     }
 }
 
-/// The tags Claude Code wraps the input it puts in by itself in: the
-/// notice that a background task ended (seen with Claude Code 2.1.283:
-/// `<task-notification>` with the task's id, status and summary).
-const AGENT_INPUT_TAGS: [&str; 1] = ["<task-notification>"];
-
-/// The input marker is the input of Claude Code's `UserPromptSubmit` hook,
-/// as JSON (Claude Code 2.1.283: `session_id`, `transcript_path`, `cwd`,
-/// `prompt_id`, `permission_mode`, `hook_event_name` and `prompt`). The
-/// hook fires for typed text and also for the notice Claude Code puts in
-/// when background work ends, with no field naming the source: the notice
-/// is told by its tag at the start of `prompt`. A content without a
-/// `prompt` string does not say.
-pub fn input_source(content: &[u8]) -> InputSource {
-    let hook: Value = serde_json::from_slice(content).unwrap_or(Value::Null);
-    match hook.get("prompt").and_then(Value::as_str) {
-        Some(prompt)
-            if AGENT_INPUT_TAGS
-                .iter()
-                .any(|tag| prompt.trim_start().starts_with(tag)) =>
-        {
-            InputSource::Agent
-        }
-        Some(_) => InputSource::Typed,
-        None => InputSource::Unknown,
-    }
-}
-
 impl AgentSignals for ClaudeCode {
     fn detect_prompt(&self, screen: &str) -> Option<&'static str> {
         detect_prompt(screen).map(PromptKind::as_str)
     }
 
-    fn auth_required(&self, screen: &str) -> bool {
-        auth_required(screen)
-    }
-
-    fn usage_limited(&self, screen: &str) -> bool {
-        usage_limited(screen)
-    }
-
     fn job_failure(&self, output: &str) -> JobFailure {
         job_failure(output)
-    }
-
-    /// `/model <model>` when the model changes, then `/effort <effort>`:
-    /// a model switch may reset the effort, so it goes last.
-    fn model_switch(&self, from: &WorkerSession, to: &WorkerSession) -> Option<Vec<String>> {
-        let mut inputs = Vec::new();
-        if from.model != to.model {
-            inputs.push(format!("/model {}", to.model));
-        }
-        inputs.push(format!("/effort {}", to.effort));
-        Some(inputs)
     }
 
     fn screen_excerpt(&self, screen: &str) -> String {
@@ -569,17 +444,6 @@ impl AgentSignals for ClaudeCode {
 
     fn idle_hook(&self, content: &[u8]) -> IdleHook {
         idle_hook(content)
-    }
-
-    fn input_source(&self, content: &[u8]) -> InputSource {
-        input_source(content)
-    }
-
-    fn input_text(&self, content: &[u8]) -> Option<String> {
-        let hook: Value = serde_json::from_slice(content).ok()?;
-        hook.get("prompt")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
     }
 
     fn input_ready(&self, screen: &str) -> bool {
@@ -604,10 +468,6 @@ impl AgentSignals for ClaudeCode {
 
     fn transcript(&self, screen: &str) -> String {
         transcript(screen)
-    }
-
-    fn known_dialog(&self, screen: &str) -> Option<DialogAnswer> {
-        known_dialog(screen)
     }
 
     fn idle_hook_failure(&self, log: &str) -> Option<String> {
@@ -947,126 +807,6 @@ worktree on  dagq/68a96a60 took 8h32m49s
         );
     }
 
-    /// The confirmation of a `/exit` sent while a `run_in_background`
-    /// shell runs (Claude Code 2.1, task 49).
-    const BACKGROUND_WORK: &str = "\
-⏺ The receipt is written; the run is ready for review.
-
-╭──────────────────────────────────────────────────────────────────────╮
-│ Background work is running                                           │
-│                                                                      │
-│ 1 background task is still running:                                  │
-│   · cargo test --locked --test e2e -- --ignored (shell)              │
-│                                                                      │
-│ ❯ 1. Exit and stop tasks                                             │
-│   2. Move to background and exit                                     │
-│   3. Stay                                                            │
-╰──────────────────────────────────────────────────────────────────────╯
-   Enter to confirm · Esc to cancel
-";
-
-    /// The Settings panel `/status` opens, on its Usage tab.
-    const SETTINGS_PANEL: &str = "\
-⏺ The receipt is written; the run is ready for review.
-
-────────────────────────────────────────────────────────────────────────
- Settings:  Status   Config   Usage   (←/→ or tab to cycle)
-
- Current session
- ███████████▌                                       23% used
- Resets 11pm (Asia/Tokyo)
-
- Current week (all models)
- ████                                               8% used
- Resets Oct 1, 9am (Asia/Tokyo)
-
- Esc to exit
-";
-
-    #[test]
-    fn known_dialog_answers_background_work_with_exit_and_stop_tasks() {
-        let answer = known_dialog(BACKGROUND_WORK).expect("known dialog");
-        assert_eq!(answer.dialog, KnownDialog::BackgroundWork);
-        assert_eq!(answer.keys, vec!["enter"]);
-        // The mark on another option is moved to it first.
-        let stay = BACKGROUND_WORK
-            .replace("│ ❯ 1. Exit", "│   1. Exit")
-            .replace("│   3. Stay  ", "│ ❯ 3. Stay  ");
-        assert_eq!(known_dialog(&stay).unwrap().keys, vec!["up", "up", "enter"]);
-        let reordered = BACKGROUND_WORK
-            .replace(
-                "❯ 1. Exit and stop tasks      ",
-                "❯ 1. Move to background and exit",
-            )
-            .replace(
-                "  2. Move to background and exit",
-                "  2. Exit and stop tasks        ",
-            );
-        assert_eq!(
-            known_dialog(&reordered).unwrap().keys,
-            vec!["down", "enter"]
-        );
-        // It also counts as a dialog for prompt_waiting.
-        assert_eq!(detect_prompt(BACKGROUND_WORK), Some(PromptKind::Choice));
-    }
-
-    #[test]
-    fn known_dialog_closes_the_settings_panel_with_escape() {
-        let answer = known_dialog(SETTINGS_PANEL).expect("known dialog");
-        assert_eq!(answer.dialog, KnownDialog::SettingsPanel);
-        assert_eq!(answer.keys, vec!["escape"]);
-        assert_eq!(KnownDialog::SettingsPanel.as_str(), "settings_panel");
-        assert_eq!(KnownDialog::BackgroundWork.as_str(), "background_work");
-        // The Status tab of the same panel.
-        let status = "Settings:  Status   Config   Usage\n Version: 2.1.281\n Esc to exit\n";
-        assert_eq!(
-            known_dialog(status).map(|a| a.dialog),
-            Some(KnownDialog::SettingsPanel)
-        );
-    }
-
-    #[test]
-    fn known_dialog_leaves_every_other_screen_alone() {
-        for screen in [
-            TRUST,
-            LSP_PLUGIN,
-            AUTO_MODE,
-            WORK,
-            READY,
-            EXIT_PENDING,
-            BOOT,
-            "",
-        ] {
-            assert_eq!(known_dialog(screen), None, "{screen}");
-        }
-        // The title quoted in the work, above a drawn input box.
-        let quoted = format!(
-            "⏺ grep \"Background work is running\" AGENTS.md\n{SETTINGS_TITLE} Status Usage\n Esc to exit\n{READY}"
-        );
-        assert_eq!(known_dialog(&quoted), None);
-        // Without the option to pick, or without a marked option.
-        let no_exit = BACKGROUND_WORK.replace("Exit and stop tasks", "Exit anyway       ");
-        assert_eq!(known_dialog(&no_exit), None);
-        let unmarked = BACKGROUND_WORK.replace("❯ 1.", "  1.");
-        assert_eq!(known_dialog(&unmarked), None);
-        // The panel's title without its footer.
-        assert_eq!(
-            known_dialog("Settings:  Status   Config   Usage\n Version: 2.1.281\n"),
-            None
-        );
-        // A line that merely starts with Settings.
-        assert_eq!(
-            known_dialog("Settings saved to ~/.claude/settings.json\n"),
-            None
-        );
-        // A dialog scrolled far above the bottom no longer counts.
-        let scrolled = format!(
-            "{SETTINGS_PANEL}{}",
-            "output line\n".repeat(PROMPT_SCAN_LINES)
-        );
-        assert_eq!(known_dialog(&scrolled), None);
-    }
-
     #[test]
     fn detect_prompt_ignores_a_working_session() {
         assert_eq!(detect_prompt(WORK), None);
@@ -1158,30 +898,6 @@ worktree on  dagq/68a96a60 took 8h32m49s
         assert_eq!(claude.transcript(SUBMITTED), transcript(SUBMITTED_TICKED));
     }
 
-    /// A live session is switched with its own commands: the model only
-    /// when it changes, the effort last (ADR-0079 decision 5).
-    #[test]
-    fn a_live_session_switches_with_model_and_effort_commands() {
-        use crate::domain::worker_model::{TrialGroup, WorkerSession};
-        let claude = ClaudeCode {
-            executable: "claude".into(),
-        };
-        let sonnet = WorkerSession::of_group(TrialGroup::Treatment);
-        let opus = sonnet.raised().unwrap();
-        assert_eq!(
-            claude.model_switch(&sonnet, &opus),
-            Some(vec![
-                "/model claude-opus-5-5".to_owned(),
-                "/effort medium".to_owned()
-            ])
-        );
-        let high = opus.raised().unwrap();
-        assert_eq!(
-            claude.model_switch(&opus, &high),
-            Some(vec!["/effort high".to_owned()])
-        );
-    }
-
     #[test]
     fn screen_tail_keeps_the_last_non_empty_lines() {
         assert_eq!(screen_tail("a  \n\nb\nc\n\n\n", 2), "b\nc");
@@ -1256,48 +972,6 @@ worktree on  dagq/68a96a60 took 8h32m49s
     }
 
     #[test]
-    fn input_source_tells_a_typed_input_from_a_background_notice() {
-        let claude = ClaudeCode {
-            executable: "claude".into(),
-        };
-        // Hook inputs as Claude Code 2.1.283 wrote them.
-        let typed = json!({
-            "session_id": "s1",
-            "prompt_id": "p1",
-            "permission_mode": "default",
-            "hook_event_name": "UserPromptSubmit",
-            "prompt": "Please rebase onto main",
-        });
-        assert_eq!(
-            claude.input_source(typed.to_string().as_bytes()),
-            InputSource::Typed
-        );
-        assert_eq!(
-            claude.input_text(typed.to_string().as_bytes()).as_deref(),
-            Some("Please rebase onto main")
-        );
-        assert_eq!(claude.input_text(b"not json"), None);
-        let notice = json!({
-            "hook_event_name": "UserPromptSubmit",
-            "prompt": "<task-notification>\n<task-id>b9g52xog2</task-id>\n<status>completed</status>\n<summary>Background command \"sleep 5\" completed (exit code 0)</summary>\n</task-notification>",
-        });
-        assert_eq!(
-            claude.input_source(notice.to_string().as_bytes()),
-            InputSource::Agent
-        );
-        for content in [
-            json!({"hook_event_name": "UserPromptSubmit"}).to_string(),
-            "not json".to_owned(),
-        ] {
-            assert_eq!(
-                claude.input_source(content.as_bytes()),
-                InputSource::Unknown,
-                "{content}"
-            );
-        }
-    }
-
-    #[test]
     fn auth_required_reads_a_login_that_ran_out() {
         let expired = "\
 ⏺ Bash(cargo test)
@@ -1307,10 +981,7 @@ worktree on  dagq/68a96a60 took 8h32m49s
   ? for shortcuts
 ";
         assert!(auth_required(expired));
-        let claude = ClaudeCode {
-            executable: "claude".into(),
-        };
-        assert!(claude.auth_required("│ Invalid API key · Please run /login │\n"));
+        assert!(auth_required("│ Invalid API key · Please run /login │\n"));
         assert!(!auth_required(WORK));
         assert!(!auth_required(READY));
         // Text that only mentions the error is the work.
@@ -1326,9 +997,6 @@ worktree on  dagq/68a96a60 took 8h32m49s
 
     #[test]
     fn usage_limited_reads_a_limit_reached_at_the_bottom() {
-        let claude = ClaudeCode {
-            executable: "claude".into(),
-        };
         for screen in [
             "⏺ Bash(cargo test)\n  ⎿  5-hour limit reached ∙ resets 3pm\n     /upgrade to increase your usage limit.\n\n│ ❯ \n",
             "  ⎿  Opus weekly limit reached · resets Mon 9am (Asia/Tokyo)\n",
@@ -1336,7 +1004,6 @@ worktree on  dagq/68a96a60 took 8h32m49s
             "│ You've hit your limit · resets 11pm │\n",
         ] {
             assert!(usage_limited(screen), "{screen}");
-            assert!(claude.usage_limited(screen), "{screen}");
             assert!(!auth_required(screen), "{screen}");
         }
         assert!(!usage_limited(WORK));

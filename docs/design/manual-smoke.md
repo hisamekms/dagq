@@ -4,8 +4,8 @@ type: design
 title: Manual smoke of the paths that include real Claude and Codex
 status: current
 created: 2026-09-25
-updated: 2026-10-04 # task 1580: the e2e stub moved to tests/e2e/stub.rs (after task 1461)
-last_verified: 2026-10-04 # task 1580
+updated: 2026-10-04 # task 1580: the e2e stub moved to tests/e2e/stub.rs (after task 1461); task 1437
+last_verified: 2026-10-04 # task 1580; task 1437
 scope: operations
 related:
   - adr-0036
@@ -45,7 +45,7 @@ related:
 - **repository**: `git init` した使い捨て repository。ディレクトリ名は `dagq-smoke` にする（task 710）。runtime は queue の cmux の workspace group を `[<repository のディレクトリ名>]`（例 `[dagq-smoke]`）、workspace の title を `[<ディレクトリ名>]worker#...` などと名付けるので、残った group がどのスモークのものか名前で分かる（`tests/e2e.rs` の fixture は `dagq-e2e` で、group は `[dagq-e2e]`）。`repo` のような汎用の名前にしない。`seed.txt`（検証コマンドが見る）、3 行の `shared.txt`（衝突用）、`CLAUDE.md`、`.claude/settings.json`（`permissions.defaultMode: auto`）を commit しておく。scratch に置いた bare repository を `origin` にする（supervisor の着地は push まで行い、`origin` が無いと `push_failed` の attention になる。手で `integrate` するときは `--no-push` でもよい）。
 - **queue**: 全コマンドを `XDG_DATA_HOME=<scratch>/xdg` で、repository を cwd にして打つ（queue は `<scratch>/xdg/dagq/<hash>/queue.db` に解決される）。これを 1 行の wrapper script（例 `tq`）にしておく。
 - **supervisor**: 専用の cmux workspace で `supervise --parallel 2 --claude <agent>` を起動し、`--log-dir` か `tee` で log を残す。`up` は使わない（inbox / planner の workspace と launchd agent を作るため）。`--once` は付けない。
-- **folder trust**: 実 Claude を使う前に、使い捨て repository の root で一度 `claude` を起動して trust dialog を承認する。worktree で dialog が出るかは親 repository の root が信頼済みかで決まる（[provider-lifecycle](provider-lifecycle.md#trust-prompt)）。承認しないと、最初の承認より前に起動した run session がすべて dialog で止まる。
+- **folder trust**: 実 Claude を使う前に、使い捨て repository の root で一度 `claude` を起動して trust dialog を承認する。worktree で dialog が出るかは親 repository の root が信頼済みかで決まる（[provider-lifecycle](provider-lifecycle.md#trust-prompt)）。承認しないと、最初の承認より前に起動した対話の session がすべて dialog で止まる（worker の run は task 1437 から非対話で、この dialog に当たらない）。
 
 #### scratch の worker が打つ `dagq` の環境
 
@@ -105,7 +105,7 @@ task 1236 から worker の `dagq` はクライアントモードで動く（[Qu
 
 - **workspace はコマンド終了後も残る**（cmux 0.64.25 (106)、2026-09-22）。`cmux workspace create --command` はコマンドをログインシェルに打ち込む形で起動し、wrapper が終わってもシェルと workspace は残る（`--command true` / `sleep 1` の probe で 5 秒以上残った）。同じ版の別の環境では 1〜2 秒後に workspace が自動で閉じたことがあり、cmux の設定に依存するとみられる。どちらでも supervisor の手順は同じ（[Cleanup and recovery](supervisor-lifecycle/cleanup-and-recovery.md#cleanup-and-recovery)）。
 - **wrapper が SIGKILL で死ぬと** `run_processes.exited_at` は wrapper 行も agent 行も null のまま残る。`doctor` は PID の生死で補うので判定は変わらない。
-- **未確認のまま残っているもの**: `exit_request_timed_out` の実機、検証コマンドの 30 分 timeout、`main` を進めた後の DB 更新失敗（[ADR-0008](../adr/0008-merge-queue-squash-landing.md) の既知の限界）。
+- **未確認のまま残っているもの**: 検証コマンドの 30 分 timeout、`main` を進めた後の DB 更新失敗（[ADR-0008](../adr/0008-merge-queue-squash-landing.md) の既知の限界）。`exit_request_timed_out` の実機は、task 1437 で worker の `/exit` とともに撤去したので確かめない。
 
 ## 独立 task 1 件の完走
 
@@ -114,8 +114,8 @@ task 1236 から worker の `dagq` はクライアントモードで動く（[Qu
 1. `which dagq` が `~/.local/bin/dagq` に解決し、`dagq --version` が確かめたい版であることを見る。固定バイナリの入れ替えが要るなら、[運用の開発文書](../development/operations.md)の「本番queueと固定バイナリ」のとおり人に報告してから行う。
 2. planner の session で task を 1 件登録する（`dagq add` に title・description・acceptance・`--verify`、docs だけなら `--paths`）。返った ID だけに `dagq ready` を打つ。
 3. supervisor が居なければ inbox か planner の session から `dagq up --in-cmux ...`（[運用の開発文書](../development/operations.md)の「`up`のコマンド」）。
-4. 経過は `dagq show ID` と inbox の `watch` で見る。期待する流れ: claim → `[<repo>]worker#<task-id> - <title>` の workspace で worker が作業 → commit と receipt → validating → headless の review → pass なら `/exit`・workspace の close → `integrate`（rebase・検証・squash）→ push → task `completed`、run `integrated`。
-5. 人の操作が要るのは、worker が止まったダイアログ（`answer_prompt` の ask）、review の `concern`（`approve_landing` の ask）、`review by hand`、`push_failed` だけで、どれも inbox に届く。それ以外で止まったら詰まりとして記録する。
+4. 経過は `dagq show ID` と inbox の `watch` で見る。期待する流れ: claim → `[<repo>]worker#<task-id> - <title>` の workspace で worker が作業 → commit と receipt → validating → headless の review → pass なら終了の依頼・workspace の close → `integrate`（rebase・検証・squash）→ push → task `completed`、run `integrated`。worker は非対話の turn で動くので（task 1437）、worker の画面は読まず、turn の要約は `dagq run log RUN --follow` で読む。
+5. 人の操作が要るのは、worker の `worker_question`、review の `concern`（`approve_landing` の ask）、`review by hand`、`push_failed` だけで、どれも inbox に届く。ask は inbox が `dagq answer` で答え、worker への答えは supervisor が次の turn として届ける（worker に打ち込まない）。それ以外で止まったら詰まりとして記録する。
 6. 着地した commit（`Dagq-Task` / `Dagq-Run` trailer）、`refs/dagq/runs/<run-id>`、worktree と branch の削除、`origin/main` への push を確かめ、所要時間と詰まりを残す。
 
 2026-09-22 の初回（固定バイナリ 0.1.0、README の手順の追記 1 件）は、登録から着地まで約 5 分、DB を手で直さずに通った（当時は review と `integrate` を常駐 session が手で行った）。worktree が信頼済みの repository のものだったので trust dialog は出なかった。
@@ -127,9 +127,9 @@ run の session の作業の内訳（task 514。[provider-lifecycle](provider-li
 ### 手順
 
 1. [隔離](#隔離)のとおり scratch に使い捨て repository（`cargo init --lib` の crate に、15 秒 sleep する `#[test]` を 1 本足して commit。background の `cargo test` に時間がかかるようにする）、bare の `origin`、`XDG_DATA_HOME=<scratch>/xdg` と scratch のバイナリで打つ wrapper（`tq`）を用意し、trust dialog を承認しておく。wrapper は `env -u DAGQ_ROLE -u DAGQ_QUEUE -u DAGQ_ACTOR_ID -u DAGQ_RUN_ID -u DAGQ_TASK_ID` を付ける（inbox や planner の session の terminal は本番 queue の `DAGQ_ROLE`（`inbox` / `planner`）と `DAGQ_QUEUE` を workspace の env に持つので、そのまま打つと scratch の queue の操作がその role の権限と記録で扱われる。人が scratch の queue を自分（`user`）として操作するために外すもので、worker の拒否を迂回するためのものではない。このスモークを worker は行わない（[隔離](#隔離)））。
-2. `tq add` で task を 1 件登録し（`--verify 'cargo test'`、`--change feature`）、`tq ready ID --bypass-review`。description で worker に順番どおり次をさせる: (a) `cargo build`、`cargo test`、`cargo test --test does_not_exist`（失敗する）をそれぞれ `run_in_background: true` で起動して完了の通知を待つ、(b) Agent tool を `run_in_background: true` で起動して完了の通知を待つ、(c) foreground で 15 秒以上かかるコマンド（`cargo test --release`）を実行し、その間に人が worker の workspace に Ctrl-B を届けて background に移す（送り方は次の段落）、(d) foreground で `cargo fmt && cargo test`、(e) commit と receipt。`sleep N && ...` は Claude Code の harness が `Blocked: sleep N followed by: ...` で拒むので使わない。
+2. `tq add` で task を 1 件登録し（`--verify 'cargo test'`、`--change feature`）、`tq ready ID --bypass-review`。description で worker に順番どおり次をさせる: (a) `cargo build`、`cargo test`、`cargo test --test does_not_exist`（失敗する）をそれぞれ `run_in_background: true` で起動して完了の通知を待つ、(b) Agent tool を `run_in_background: true` で起動して完了の通知を待つ、(c) foreground で 15 秒以上かかるコマンド（`cargo test --release`）を実行する、(d) foreground で `cargo fmt && cargo test`、(e) commit と receipt。`sleep N && ...` は Claude Code の harness が `Blocked: sleep N followed by: ...` で拒むので使わない。
 
-   Ctrl-B は、対象がこの scratch の worker の workspace / session であることを人が確認し、その Claude Code を収容する pty の入力側（master）に **1 byte の `0x02`（`\x02`）** を送る。pty を保持する操作ツールの stdin 送信で、文字列 `\x02` の 4 文字ではなく制御文字を渡す（JSON の入力なら `"\u0002"`、master fd を保持する Python の操作元なら `os.write(master_fd, b"\x02")`）。対象 pty への入力ハンドルが無ければ、人が対象 workspace にフォーカスして Ctrl-B を打つ。別 session の pty で代用しない。`/dev/ttys...` の slave への通常の書き込みは入力注入ではない。task 547 では `cmux send-key --workspace <worker> ctrl+b` は `OK` でも移らず、別の対話 session で pty に `\x02` を書くと移った。送信の成功だけで済ませず、この worker の transcript の `backgroundedByUser: true` と完了通知を確認する。これは対話の Claude worker 用で、非対話の worker には当たらない。
+   worker は非対話の turn で動くので（task 1437）、人は worker に打てない。以前の手順で人が worker の pty に Ctrl-B を届けて foreground のコマンドを background に移したこと（transcript の `backgroundedByUser: true`。下の 2026-09-28 の結果の「不一致・注意」の Ctrl-B）は、このスモークでは起こせない。background のコマンドと subagent は同じ turn の中で完了を待たせる（turn の終わりに残ったものは止められる。[非対話のworker](supervisor-lifecycle/headless-worker.md#wrapperがturnを止めるとき)）。経過は `tq run log RUN --follow` で読み、worker の ask には `tq answer` で答える。
 3. 専用の cmux workspace で `tq supervise --parallel 1 --claude <実体の path> --log-dir ... --observe-interval 0 --observe-daily false --report-daily false --forecast-snapshots false --host-metrics-interval 0` を起動する。
 4. run が閉じたら次を集める: `tq events --all --full --run RUN`（`session_closed` の `work` と `session_exited` の `work_breakdown`）、run dir の `worktime.jsonl`、`tq stats --full`（`runs[].work_breakdown` と `overall.work_breakdown`）、`tq timeline RUN`（`commands`）、session の transcript（`~/.claude/projects/<cwd を符号化した名前>/<session_id>.jsonl`。worker の session_id は run ID と同じ）。
 5. transcript の中では tool-use-id で `tool_use`（開始）と `tool_result` / 完了通知を結び、`tool_use` の開始時刻・category・コマンドで `worktime.jsonl` の行と対応づける。`worktime.jsonl` と `session_exited.work_breakdown.heavy` の `start` / `end`・`background`・`finished`・`failed` を transcript と比べ、`exit_code`・`status` は `worktime.jsonl` で比べる。`src/domain/worktime.rs` の `Command::line` と `Breakdown::payload` の出力には tool-use-id が無く、event の `heavy` には `exit_code`・`status` も無い。`secs` の合計が区間の長さ（`session_opened` から `session_closed`）と一致すること、`stats` と `timeline` が `session_closed.work` と同じ値を出すことも見る。
@@ -165,7 +165,7 @@ background のコマンドの summary は `Background command "<Bash tool の de
 
 - **引数や heredoc の中の `cargo` で分類が誤る**: `dagq ask --question '... sleep 40 && cargo build --release ...'` が `build` に、receipt を heredoc で書く `cat > receipt.json.tmp <<'EOF' ... EOF`（本文に `cargo build`・`cargo test` などの経過を書いた）が `chain` に数えられた。分類は `&&` / `||` / `;` / 改行で分けた部分ごとに、部分の中のどこかにある `cargo` の後の語を subcommand として見るので、引用符や heredoc の中の文字列も数える。
 - **harness が拒んだコマンドも失敗した実行に数える**: `sleep 40 && cargo build --release` は `<tool_use_error>Blocked: ...`（`is_error: true`、0 秒）で実行されなかったが、`commands.build` の `runs` と `failed` に 1 ずつ入った。
-- **Ctrl-B**: pty への `\x02` で移ったのは別の対話 session。worker の run の記録は未確認なので、人か inbox が `dagq-smoke` で上の手順を実施する。worker の transcript に `backgroundedByUser: true` と完了の `enqueue` があり、対応する `worktime.jsonl` と `session_exited.work_breakdown.heavy` の `start` が `tool_use`、`end` が完了通知の時刻で、`background: true`、`finished: true`、`failed` が通知と一致すること（`exit_code`・`status` は `worktime.jsonl` で照合）を確認して結果を追記する。timeout の行も同じ記録を確認する。
+- **Ctrl-B**: pty への `\x02` で移ったのは別の対話 session。worker の run の記録は未確認のまま、task 1437 で worker が非対話になり人が worker に Ctrl-B を届けられなくなったので、この確認は行わない。以前の予定は、worker の transcript に `backgroundedByUser: true` と完了の `enqueue` があり、対応する `worktime.jsonl` と `session_exited.work_breakdown.heavy` の `start` が `tool_use`、`end` が完了通知の時刻で、`background: true`、`finished: true`、`failed` が通知と一致すること（`exit_code`・`status` は `worktime.jsonl` で照合）を確認して結果を追記することだった（timeout の行も同じ）。
 - **worker の `dagq`**: task 547 では worker の workspace は supervisor の `XDG_DATA_HOME` を継がず、PATH の `dagq` は固定バイナリ `~/.local/bin/dagq` に解決した。最初の `dagq ask` は既定の `~/.local/share/dagq/<hash>/queue.db`（存在しない）を開こうとして失敗し、XDG を付けた打ち直しでは固定バイナリが scratch の queue に ask を書いた（本番 queue には触れていない）。[隔離の設定と確認](#scratch-の-worker-が打つ-dagq-の環境)に `[run.env]` のコード上の根拠と手順を記した。その設定で実 worker が scratch のバイナリ・queue を使えるかは、人か inbox が `dagq-smoke` で解決先と ask / answer を確認して結果を追記する。
 
 ## 非対話の worker のスモーク

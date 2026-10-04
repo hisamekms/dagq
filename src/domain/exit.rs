@@ -1,5 +1,7 @@
 //! The retries of a `/exit` a session held back (ADR-0047 decision 25):
-//! how many and how far apart, as `[exit]` of `dagq.toml` sets them.
+//! how many and how far apart, as `[exit]` of `dagq.toml` sets them. Since
+//! task 1437 retired the interactive worker, `[exit]` is still checked when
+//! `dagq.toml` is parsed (old files keep working) and nothing reads it.
 
 use std::time::Duration;
 
@@ -12,8 +14,8 @@ pub const EXIT_RETRY_INTERVALS_SECS: [u64; 3] = [30, 60, 120];
 
 /// `[exit]` of `dagq.toml` (ADR-0047 decision 25): the retries of a `/exit`
 /// the session held back past its timeout (or that never reached it), and
-/// the wait after each one. `retries = 0` makes none: the session's
-/// `stuck_exit` path follows the timeout at once.
+/// the wait after each one. Since task 1437 it is only parsed and checked:
+/// nothing retries a `/exit` any more.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExitConfig {
     /// The retries after the timeout.

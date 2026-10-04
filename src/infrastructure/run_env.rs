@@ -9,8 +9,9 @@
 //! merged in (ADR-0068 decision 2). `[disk]` holds how much free disk
 //! space a claim and a landing need (ADR-0047 decision 44, task 377).
 //! `[resume]` holds the limit of a run's conflict-only attempts (ADR-0047
-//! decision 24). `[exit]` holds the retries of a `/exit` the session held
-//! back and the wait after each (ADR-0047 decision 25). `[worker.trial]` turns on the limited trial of the worker's model
+//! decision 24). `[exit]` held the retries of a `/exit` the session held
+//! back and the wait after each (ADR-0047 decision 25): since task 1437 it
+//! is still checked when the file is parsed and is otherwise ignored. `[worker.trial]` turns on the limited trial of the worker's model
 //! (ADR-0079 decision 4). `[roles.<role>]` holds the provider, model and effort
 //! of a session other than the worker's (ADR-0079 decision 7, ADR-t1063-1
 //! decision 1). `[supervisor]`
@@ -184,7 +185,8 @@ pub struct Config {
     pub disk: DiskConfig,
     /// `[resume]`, the default for the key it does not set.
     pub resume: ResumeConfig,
-    /// `[exit]`, the defaults for the keys it does not set.
+    /// `[exit]`, the defaults for the keys it does not set: checked and
+    /// otherwise ignored since task 1437 (no `/exit` is retried).
     pub exit: ExitConfig,
     /// `[kpi]` and its `[kpi.targets."<kpi>"]`; `None` without any.
     pub kpi: Option<KpiSettings>,
@@ -924,20 +926,6 @@ pub fn load_resume_config(root: &Path) -> Result<Option<ResumeConfig>> {
         parse_config(&text)
             .with_context(|| format!("parse {}", path.display()))?
             .resume,
-    ))
-}
-
-/// `[exit]` of the `dagq.toml` in `root` (ADR-0047 decision 25), `None`
-/// when there is no file; no table or no key is the default.
-pub fn load_exit_config(root: &Path) -> Result<Option<ExitConfig>> {
-    let path = root.join(CONFIG_FILE_NAME);
-    let Some(text) = read_config(&path)? else {
-        return Ok(None);
-    };
-    Ok(Some(
-        parse_config(&text)
-            .with_context(|| format!("parse {}", path.display()))?
-            .exit,
     ))
 }
 
@@ -2208,7 +2196,7 @@ LITERAL = 'no \n escapes # here'
     }
 
     #[test]
-    fn parses_and_loads_the_exit_table() {
+    fn parses_the_exit_table_that_is_accepted_and_ignored() {
         use crate::domain::exit::ExitConfig;
         let secs = |list: &[u64]| {
             list.iter()
@@ -2230,19 +2218,14 @@ LITERAL = 'no \n escapes # here'
         let config = parse_config("[exit]\nretries = 0\n").unwrap();
         assert_eq!(config.exit.retries, 0);
         assert_eq!(config.exit.intervals, secs(&[30, 60, 120]));
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(load_exit_config(dir.path()).unwrap(), None);
-        fs::write(
-            dir.path().join(CONFIG_FILE_NAME),
-            "[exit]\nretry_intervals_secs = [1,2,3,4]\n",
-        )
-        .unwrap();
         assert_eq!(
-            load_exit_config(dir.path()).unwrap(),
-            Some(ExitConfig {
+            parse_config("[exit]\nretry_intervals_secs = [1,2,3,4]\n")
+                .unwrap()
+                .exit,
+            ExitConfig {
                 retries: 3,
                 intervals: secs(&[1, 2, 3, 4]),
-            })
+            }
         );
         for (text, message) in [
             ("[exit]\nx = 1", "dagq.toml:2: unknown key x in [exit]"),
@@ -2268,8 +2251,7 @@ LITERAL = 'no \n escapes # here'
             let error = format!("{:#}", parse_config(text).unwrap_err());
             assert!(error.contains(message), "{text:?}: {error}");
         }
-        fs::write(dir.path().join(CONFIG_FILE_NAME), "[exit]\nretries = x\n").unwrap();
-        assert!(load_exit_config(dir.path()).is_err());
+        assert!(parse_config("[exit]\nretries = x\n").is_err());
     }
 
     #[test]

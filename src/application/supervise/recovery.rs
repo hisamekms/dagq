@@ -1,23 +1,6 @@
-//! The recovery job of a live session's alert (ADR-0047 decisions 39 and
-//! 40): background work past `[stall].background_alert_secs`
-//! (`long_background`), processes of the run that stay alive without
-//! using CPU time (`idle_process`, task 469), a session that holds the
-//! supervisor's `/exit` back after the runtime's own repairs
-//! (`stuck_exit`), and a dialog the runtime does not answer by itself
-//! (`prompt_waiting`); the `stalled` alert's session side is in
-//! `stall_recovery.rs`. The supervisor records
-//! `recovery_requested` and starts a headless job with the screen, the
-//! run's processes and the worktree's state; the job only reads and prints
-//! a verdict. The runtime checks every action's preconditions again, and
-//! applies a `repair` of high confidence only when all of them hold,
-//! recording `auto_repaired` (`layer: recovery`) for each and
-//! `recovery_finished`. A verdict it does not apply, one of low confidence,
-//! an escalation, a failed job and an alert past [`MAX_RECOVERY_ATTEMPTS`]
-//! become the alert's ask to the inbox (`stalled`, `stuck_exit`,
-//! `answer_prompt`), with the job's diagnosis, its actions as the
-//! recommendation, its options added and its reason category. A run that
-//! ended (`failed`, `interrupted`, `resume_exhausted`) is recovered in
-//! `triage.rs`, with the same verdict.
+//! Non-interactive worker recovery: turn stalls and idle processes.
+//! Verdicts are checked again before application; failures and low confidence
+//! escalate to an ask. Historical alert kinds remain readable in the domain.
 
 use super::*;
 use crate::application::prompt::FittedPrompt;
@@ -28,14 +11,9 @@ use crate::domain::idle_process::{
     CpuWatch, IdleProcess, PROGRESS_CPU_PER_MILLE, without_session_helpers,
 };
 use crate::domain::recovery::{
-    MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, PROMPT_WAITING_ACTIONS, ProcessInfo, RecoveryAction,
-    SEND_UNCONFIRMED, attempts, failed_live, run_processes,
+    MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, ProcessInfo, RecoveryAction, attempts, failed_live,
+    run_processes,
 };
-
-/// The actions a recovery job may choose for a running session's
-/// `long_background` alert.
-pub(super) const LONG_BACKGROUND_ACTIONS: [&str; 3] =
-    ["stop_processes", "send_instruction", "wait"];
 
 /// The actions a recovery job may choose for an `idle_process` alert;
 /// `send_instruction` holds only while the session is idle at its prompt.
@@ -43,11 +21,6 @@ pub(super) const IDLE_PROCESS_ACTIONS: [&str; 3] = ["stop_processes", "send_inst
 
 /// The setting the `idle_process` alert is judged by.
 pub(super) const IDLE_PROCESS_THRESHOLD: &str = "idle_process_secs";
-
-/// The actions for a `stuck_exit` of a run that does not land after its
-/// exit: [`STUCK_EXIT_ACTIONS`] without `close_and_proceed`.
-pub(super) const STUCK_EXIT_HELD_ACTIONS: [&str; 3] =
-    ["answer_known_dialog", "stop_processes", "wait"];
 
 /// How long a stopped process gets between SIGTERM and SIGKILL.
 pub(super) const STOP_GRACE: Duration = Duration::from_secs(3);
@@ -59,25 +32,17 @@ type JobOutcome = std::result::Result<RecoveryVerdict, String>;
 pub(super) struct RecoveryJob {
     pub(super) alert: RecoveryAlert,
     /// Why the alert was raised, for an alert raised for more than one
-    /// reason (`stalled`: [`IDLE_WITHOUT_RECEIPT`] or [`SEND_UNCONFIRMED`]).
+    /// reason (`stalled`: `turn_without_receipt` or `permission_denied`).
     pub(super) reason: Option<&'static str>,
     pub(super) attempt: usize,
-    /// The idle marker a `long_background` job was started for.
     marker: Option<SystemTime>,
-    idle_secs: i64,
+
     job: HeadlessJob,
 }
 
-/// The recovery of one live session: the job in progress (one at a time;
-/// another alert waits for it), which idle marker the last
-/// `long_background` job was started for, so one marker starts one job (or
-/// one more after a `wait`), and the `wait` of a `stuck_exit` or
-/// `prompt_waiting` job.
 #[derive(Default)]
 pub(super) struct RecoveryWatch {
     job: Option<Box<RecoveryJob>>,
-    seen: Option<SystemTime>,
-    recheck: Option<SystemTime>,
     /// The `wait` of each alert (and reason) whose job answered it, until
     /// when.
     held: Vec<(RecoveryAlert, Option<&'static str>, SystemTime)>,
@@ -98,13 +63,8 @@ pub(super) struct Live<'a> {
     pub(super) run_dir: &'a Path,
     /// The actions that apply to the alert here.
     pub(super) allowed: &'static [&'static str],
-    /// The supervisor typed the session's `/exit`: the condition of the
-    /// "Background work is running" dialog (ADR-0047 decision 29).
-    pub(super) exit_typed: bool,
     /// The session is idle at its prompt, for `send_instruction`.
     pub(super) at_prompt: bool,
-    /// The run lands once its session exits, for `close_and_proceed`.
-    pub(super) lands: bool,
     /// The run is running in its first session, which `resume` parks as
     /// `needs_session` for a session of its own (task 442).
     pub(super) park: bool,
@@ -116,18 +76,11 @@ pub(super) struct Applied {
     pub(super) names: Vec<&'static str>,
     /// The instruction typed, when and how it went.
     pub(super) sent: Option<(String, SystemTime, Submission)>,
-    /// A known dialog was answered or processes were stopped: the session
-    /// gets the exit timeout again.
-    pub(super) exit_again: bool,
-    /// The workspace was closed: the run goes on as after the session's
-    /// exit.
-    pub(super) closed: bool,
     /// `resume` was chosen, with its instruction: the watch parks the run
     /// as `needs_session` and asks its session to exit.
     pub(super) resume: Option<String>,
 }
 
-/// Where a `stuck_exit` or `prompt_waiting` alert stands after one look.
 pub(super) enum LiveStep {
     /// Nothing to do now: its job runs, another alert's does, or its
     /// `wait` holds.
@@ -158,46 +111,6 @@ fn millis(at: SystemTime) -> i64 {
 
 fn at_millis(ms: i64) -> SystemTime {
     UNIX_EPOCH + Duration::from_millis(u64::try_from(ms).unwrap_or(0))
-}
-
-fn secs_between(from: SystemTime, to: SystemTime) -> i64 {
-    i64::try_from(super::stall::elapsed(from, to).as_secs()).unwrap_or(i64::MAX)
-}
-
-/// When the longest running of the marker's `tasks` was first listed in
-/// the hook's `idle.log` next to the marker (the streak that ends with the
-/// marker written `at`); the marker's own time when the log shows none
-/// earlier or cannot be read.
-fn background_since(
-    sv: &Supervisor<'_>,
-    marker_path: &Path,
-    at: SystemTime,
-    tasks: &[BackgroundTask],
-) -> SystemTime {
-    let at_ms = millis(at);
-    let log = marker_path.with_file_name(crate::domain::stall::IDLE_LOG);
-    let Ok(Some((_, bytes))) = sv.files.read_stamped(&log) else {
-        return at;
-    };
-    let history = String::from_utf8_lossy(&bytes)
-        .lines()
-        .filter_map(|line| {
-            let (secs, marker) = line.split_once('\t')?;
-            let secs: i64 = secs.trim().parse().ok()?;
-            Some((
-                secs.saturating_mul(1000),
-                sv.signals.idle_hook(marker.as_bytes()).background_tasks,
-            ))
-        })
-        .chain([(at_ms, tasks.to_vec())])
-        .collect::<Vec<_>>();
-    let seen = crate::domain::stall::background_first_seen(history);
-    tasks
-        .iter()
-        .filter_map(|task| seen.get(&task.id).copied())
-        .min()
-        .filter(|&since| since < at_ms)
-        .map_or(at, at_millis)
 }
 
 /// Why a person is asked instead of the verdict being applied.
@@ -393,38 +306,15 @@ pub(super) fn job_file(alert: RecoveryAlert, attempt: usize, what: &str) -> Stri
     format!("recovery-{}-{attempt}.{what}", alert.as_str())
 }
 
-/// The event an alert of a live session is raised from, the evidence of
-/// its `recovery_requested`.
-fn evidence_kind(alert: RecoveryAlert) -> Option<&'static str> {
-    match alert {
-        RecoveryAlert::StuckExit => Some(event_kind::EXIT_REQUEST_TIMED_OUT),
-        RecoveryAlert::PromptWaiting => Some(event_kind::PROMPT_WAITING),
-        _ => None,
-    }
-}
-
 impl RecoveryWatch {
     /// Rebuild the watch of an adopted run from its events, so a marker
     /// already handed to a job is not handed again.
     pub(super) fn adopt(queue: &dyn Queue, run: &TaskRun) -> Result<Self> {
         let events = queue.run_events(run.id())?;
-        let alert = |e: &&crate::domain::RunEvent| {
-            e.payload["alert"] == RecoveryAlert::LongBackground.as_str()
-        };
         let mut watch = Self::default();
-        if let Some(event) = events
-            .iter()
-            .filter(alert)
-            // A job the previous supervisor left running is gone: its
-            // marker gets a new one (counted as another attempt).
-            .rfind(|e| e.kind == event_kind::RECOVERY_FINISHED)
-        {
-            watch.seen = event.payload["marker_at_ms"].as_i64().map(at_millis);
-            watch.recheck = event.payload["recheck_at_ms"].as_i64().map(at_millis);
-        }
         // The `wait` a `stalled` job answered holds for the adopter too, so
         // it starts no job before the wait is over.
-        for reason in IDLE_REASONS.into_iter().chain([SEND_UNCONFIRMED]) {
+        for reason in IDLE_REASONS {
             let finished = events.iter().rfind(|e| {
                 e.kind == "recovery_finished"
                     && e.payload["alert"] == RecoveryAlert::Stalled.as_str()
@@ -438,15 +328,6 @@ impl RecoveryWatch {
             }
         }
         Ok(watch)
-    }
-
-    /// Whether the `long_background` idle marker written at `marker` was
-    /// already handed to a job: an adopter reads the marker's time from
-    /// `marker_at_ms`, to the millisecond, so the marker is compared at the
-    /// millisecond too (task 1050).
-    fn marker_seen(&self, marker: SystemTime) -> bool {
-        self.seen
-            .is_some_and(|seen| !super::file_time::written_after(marker, seen))
     }
 
     /// Stop a job still running: the session ended or the run moved on.
@@ -563,11 +444,7 @@ impl RecoveryWatch {
             return Ok(Some((done, Escalation::UsedUp(done))));
         }
         let attempt = done + 1;
-        let evidence: Vec<EventId> = evidence_kind(alert)
-            .and_then(|kind| events.iter().rev().find(|e| e.kind == kind))
-            .map(|e| e.id)
-            .into_iter()
-            .collect();
+        let evidence: Vec<EventId> = Vec::new();
         let mut payload = json!({
             "alert": alert,
             "attempt": attempt,
@@ -577,8 +454,7 @@ impl RecoveryWatch {
         if let Some(reason) = reason {
             payload["reason"] = json!(reason);
         }
-        // The facts may name the evidence themselves (the send a
-        // `send_unconfirmed` alert was raised for).
+        // The facts may name the evidence themselves.
         if let (Value::Object(payload), Value::Object(facts)) = (&mut payload, facts) {
             payload.extend(facts);
         }
@@ -597,7 +473,7 @@ impl RecoveryWatch {
                     reason,
                     attempt,
                     marker: marker.map(|(at, _)| at),
-                    idle_secs: marker.map_or(0, |(_, secs)| secs),
+
                     job,
                 }));
                 Ok(None)
@@ -634,12 +510,6 @@ impl RecoveryWatch {
         )))
     }
 
-    /// Follow a `stuck_exit` or `prompt_waiting` alert that holds now: act
-    /// on its job once it ended, or start one when no job runs, no `wait`
-    /// holds the alert and no failed job of it recorded by an earlier
-    /// runtime waits for a person ([`failed_live`]). A job that failed is
-    /// returned as [`LiveStep::Escalate`] with [`Escalation::JobFailed`]:
-    /// the alert's ask opens (ADR-t609-1).
     pub(super) fn follow(
         &mut self,
         sv: &mut Supervisor<'_>,
@@ -844,11 +714,6 @@ fn process_sample(
         .cloned()
 }
 
-/// An `idle_process` escalation of a phase that asks the inbox by itself
-/// when it runs out (the wait on background work after the receipt ends at
-/// the resume timeout, a held `/exit` becomes the `stuck_exit` alert):
-/// the job's diagnosis is recorded (`outcome: left_to_phase`) for that
-/// ask's recovery job to read, and no ask of its own is opened.
 pub(super) fn leave_idle_to_phase(
     sv: &mut Supervisor<'_>,
     run: &TaskRun,
@@ -867,9 +732,6 @@ pub(super) fn leave_idle_to_phase(
     )
 }
 
-/// [`leave_idle_to_phase`] for `alert`: also a `long_background`
-/// escalation after the receipt (task 918), whose wait ends at the resume
-/// timeout from the receipt. `extra` goes into its `recovery_finished`.
 pub(super) fn leave_to_phase(
     sv: &mut Supervisor<'_>,
     run: &TaskRun,
@@ -953,14 +815,7 @@ fn spawn_live(
     let detail = sv.queue.show(run.task_id())?;
     let task = detail.task;
     // A headless session has no screen: its last turns stand in for it.
-    let screen = if headless(run) {
-        turns_excerpt(sv, run)
-    } else {
-        match sv.cmux.capture(live.workspace) {
-            Ok(screen) => sv.signals.screen_excerpt(&screen),
-            Err(error) => format!("(the screen could not be read: {error:#})"),
-        }
-    };
+    let screen = { turns_excerpt(sv, run) };
     let listed = own_processes(sv, run).map_err(|error| format!("{error:#}"));
     let (status, head, receipt) = git_facts(sv, run)?;
     let mut history = repair_history(sv, run)?;
@@ -1126,7 +981,7 @@ fn check_live(
     for action in actions {
         // A headless session has no dialog and no /exit, whatever the
         // alert allows (ADR-t813-1 decision 9).
-        if headless(run) && HEADLESS_NEVER.contains(&action.name()) {
+        if HEADLESS_NEVER.contains(&action.name()) {
             return Err(format!(
                 "{} does not apply to a headless session",
                 action.name()
@@ -1163,21 +1018,7 @@ fn check_live(
                     );
                 }
             }
-            RecoveryAction::AnswerKnownDialog { dialog } => {
-                known_dialog_ready(sv, run, live.workspace, live.exit_typed, dialog)
-                    .map_err(|why| format!("answer_known_dialog: {why}"))?;
-            }
-            RecoveryAction::CloseAndProceed => {
-                if !live.lands {
-                    return Err(
-                        "close_and_proceed: the run does not land after its session's exit"
-                            .to_owned(),
-                    );
-                }
-                if let Some(why) = landable_without_exit(sv, run) {
-                    return Err(format!("close_and_proceed: {why}"));
-                }
-            }
+
             RecoveryAction::Resume { .. } => {
                 if !live.park {
                     return Err(
@@ -1256,7 +1097,6 @@ fn apply_live_verdict(
                     }
                 };
                 repaired(sv, action, json!({"processes": stopped}))?;
-                applied.exit_again = true;
                 info!(run_id = %run.id(), "run {}: recovery job {} stopped processes {pids:?} of its worktree", run.id(), job.attempt);
             }
             RecoveryAction::SendInstruction { instruction } => {
@@ -1284,48 +1124,7 @@ fn apply_live_verdict(
                 )?;
                 applied.sent = Some((text, sent_at, submission));
             }
-            RecoveryAction::AnswerKnownDialog { .. } => {
-                let screen = match sv.cmux.capture(live.workspace) {
-                    Ok(screen) => screen,
-                    Err(error) => {
-                        return Ok(Err(Escalation::Refused(
-                            verdict.clone(),
-                            format!("the screen could not be read: {error:#}"),
-                        )));
-                    }
-                };
-                if !answer_known_dialog(
-                    sv,
-                    run,
-                    live.workspace,
-                    &screen,
-                    live.exit_typed,
-                    Some((job.alert, job.attempt)),
-                )? {
-                    return Ok(Err(Escalation::Refused(
-                        verdict.clone(),
-                        "the known dialog's keys could not be sent".to_owned(),
-                    )));
-                }
-                applied.exit_again = true;
-            }
-            RecoveryAction::CloseAndProceed => {
-                if let Err(error) = sv.cmux.close(live.workspace) {
-                    return Ok(Err(Escalation::Refused(
-                        verdict.clone(),
-                        format!("its workspace could not be closed: {error:#}"),
-                    )));
-                }
-                repaired(
-                    sv,
-                    action,
-                    json!({
-                        "workspace_id": live.workspace,
-                        "conditions": {"review": "pass", "clean": true, "receipt": "head", "reviewed": true},
-                    }),
-                )?;
-                applied.closed = true;
-            }
+
             RecoveryAction::Resume { instruction } => {
                 let instruction = if instruction.trim().is_empty() {
                     verdict.diagnosis.trim().to_owned()
@@ -1366,276 +1165,6 @@ fn apply_live_verdict(
 }
 
 impl SessionWatch {
-    /// One look at the session's background work (ADR-0047 decision 39):
-    /// follow its recovery job in progress, or start one when the idle
-    /// marker says background work has run past the threshold, no other
-    /// alert's job runs and no `stalled` ask is open for the run. Also
-    /// after the receipt, where the work holds the run back from its
-    /// validation (task 918): there an escalation opens no ask and is left
-    /// to the wait's own end at the resume timeout.
-    pub(super) fn watch_background(
-        &mut self,
-        sv: &mut Supervisor<'_>,
-        run: &TaskRun,
-    ) -> Result<()> {
-        if let Some((job, verdict)) =
-            self.recovery
-                .ended(sv, RecoveryAlert::LongBackground, None)?
-        {
-            return self.act_on_background(sv, run, &job, verdict);
-        }
-        if self.recovery.running() {
-            return Ok(());
-        }
-        let Some(idle) = running_background(
-            || IdleMarker::read(&*sv.files, sv.signals, &self.idle_marker),
-            IdleMarker::background_running,
-            || sv.queue.has_unclosed_ask(run.id(), AskKind::Stalled),
-            || {
-                Ok(failed_live(
-                    &sv.queue.run_events(run.id())?,
-                    Some(RecoveryAlert::LongBackground),
-                )
-                .is_some())
-            },
-        )?
-        else {
-            return Ok(());
-        };
-        let now = sv.files.now();
-        let marker = idle.modified();
-        // Timed from when the running tasks were first listed, as `stats`
-        // does (task 331), so turns the session keeps taking do not reset it.
-        let since = background_since(sv, &self.idle_marker, marker, idle.background_tasks());
-        let idle_secs = secs_between(since, now);
-        if super::stall::elapsed(since, now) <= sv.stall.background_alert()
-            || self.recovery.recheck.is_some_and(|at| now < at)
-            || (self.recovery.recheck.is_none() && self.recovery.marker_seen(marker))
-        {
-            return Ok(());
-        }
-        // A login or usage limit that holds the queue starts no job (task
-        // 437): the alert holds on and is raised once it is fixed.
-        if sv.queue_hold.is_some() {
-            return Ok(());
-        }
-        self.recovery.recheck = None;
-        self.recovery.seen = Some(marker);
-        let facts = json!({
-            "phase": self.background_phase(),
-            "idle_secs": idle_secs,
-            "background_since_ms": millis(since),
-            "threshold": BACKGROUND_THRESHOLD,
-            "threshold_secs": sv.stall.background_alert_secs,
-            "background_tasks": idle.background_tasks(),
-            "marker_at_ms": millis(marker),
-        });
-        info!(run_id = %run.id(), "run {}: background work has run {idle_secs}s (over {}s)", run.id(), sv.stall.background_alert_secs);
-        let live = Live {
-            workspace: &self.workspace,
-            run_dir: &self.run_dir,
-            allowed: &LONG_BACKGROUND_ACTIONS,
-            exit_typed: false,
-            at_prompt: self.at_prompt(sv, run),
-            lands: false,
-            park: false,
-        };
-        let started = self.recovery.start(
-            sv,
-            run,
-            &live,
-            RecoveryAlert::LongBackground,
-            None,
-            facts,
-            Some((marker, idle_secs)),
-        )?;
-        match started {
-            None => Ok(()),
-            Some((attempt, escalation)) => {
-                self.escalate_background(sv, run, attempt, marker, idle_secs, escalation)
-            }
-        }
-    }
-
-    /// Act on the `long_background` job's verdict: apply a `repair` of high
-    /// confidence whose every action holds now, and ask the inbox
-    /// otherwise.
-    fn act_on_background(
-        &mut self,
-        sv: &mut Supervisor<'_>,
-        run: &TaskRun,
-        job: &RecoveryJob,
-        verdict: std::result::Result<RecoveryVerdict, String>,
-    ) -> Result<()> {
-        let marker = job.marker.unwrap_or(UNIX_EPOCH);
-        let verdict = match verdict {
-            Ok(verdict) => verdict,
-            Err(error) => {
-                return self.escalate_background(
-                    sv,
-                    run,
-                    job.attempt,
-                    marker,
-                    job.idle_secs,
-                    Escalation::JobFailed(error),
-                );
-            }
-        };
-        let (workspace, run_dir) = (self.workspace.clone(), self.run_dir.clone());
-        let live = Live {
-            workspace: &workspace,
-            run_dir: &run_dir,
-            allowed: &LONG_BACKGROUND_ACTIONS,
-            exit_typed: false,
-            at_prompt: self.at_prompt(sv, run),
-            lands: false,
-            park: false,
-        };
-        match apply_live(sv, run, &live, job, verdict)? {
-            Ok(applied) => {
-                if let Some((text, sent_at, submission)) = applied.sent {
-                    self.stall.input_sent(sent_at, Some(&text));
-                    self.answer_start = Some(StartCheck::new(
-                        "recovery instruction",
-                        &text,
-                        sent_at,
-                        &submission,
-                    ));
-                }
-                self.recovery.recheck = applied_recheck(sv, job, run)?;
-                Ok(())
-            }
-            Err(escalation) => {
-                self.escalate_background(sv, run, job.attempt, marker, job.idle_secs, escalation)
-            }
-        }
-    }
-
-    /// The phase the `long_background` alert is raised in: before the
-    /// receipt (`session`) or after it (`after_receipt`).
-    fn background_phase(&self) -> &'static str {
-        if self.receipt_seen {
-            "after_receipt"
-        } else {
-            SESSION_PHASE
-        }
-    }
-
-    /// Raise the `long_background` alert to the inbox as a `stalled` ask
-    /// with the job's diagnosis, its recommended actions and why a person
-    /// is needed, and hand the ask to the [`StallWatch`]. After the receipt
-    /// no ask is opened: the wait on background work goes on to validation
-    /// at the resume timeout by itself ([`leave_to_phase`]).
-    fn escalate_background(
-        &mut self,
-        sv: &mut Supervisor<'_>,
-        run: &TaskRun,
-        attempt: usize,
-        marker: SystemTime,
-        idle_secs: i64,
-        escalation: Escalation,
-    ) -> Result<()> {
-        let alert = RecoveryAlert::LongBackground;
-        if self.receipt_seen {
-            return leave_to_phase(
-                sv,
-                run,
-                alert,
-                attempt,
-                &escalation,
-                self.background_phase(),
-                json!({"marker_at_ms": millis(marker)}),
-            );
-        }
-        sv.for_escalation(run, alert, attempt, &escalation, |sv| {
-            self.ask_background(sv, run, attempt, marker, idle_secs, &escalation)
-        })
-    }
-
-    /// [`Self::escalate_background`] with the job recorded as the
-    /// requester when its verdict asked for it.
-    fn ask_background(
-        &mut self,
-        sv: &mut Supervisor<'_>,
-        run: &TaskRun,
-        attempt: usize,
-        marker: SystemTime,
-        idle_secs: i64,
-        escalation: &Escalation,
-    ) -> Result<()> {
-        let alert = RecoveryAlert::LongBackground;
-        let note = escalation.note(run, alert, attempt);
-        let extra = json!({"marker_at_ms": millis(marker)});
-        // A `stalled` ask opened meanwhile (the idle detection's) already
-        // has a person looking: the diagnosis is recorded, not merged into
-        // it.
-        if sv.queue.has_unclosed_ask(run.id(), AskKind::Stalled)? {
-            escalation.record(sv, run, alert, attempt, &note, None, extra)?;
-            warn!(run_id = %run.id(), "run {}: {}; a stalled ask is already open, so no other is asked", run.id(), note.why);
-            return Ok(());
-        }
-        let question = if headless(run) {
-            // No screen and no keys: its turns, and no `intervene` (task
-            // 1179).
-            let situation = format!(
-                "The headless session of run {run_id} (task {task_id}) has had background work running for {idle_secs}s (alert: long_background, over {threshold}s), and {why}.\n{text}",
-                run_id = run.id(),
-                task_id = run.task_id(),
-                threshold = sv.stall.background_alert_secs,
-                why = note.why,
-                text = note.text.trim_end(),
-            );
-            super::stall::headless_ask_text(run.id(), &situation, "", &turns_excerpt(sv, run))
-        } else {
-            format!(
-                "The session of run {run_id} (task {task_id}) in workspace {workspace} has had background work running for {idle_secs}s (alert: long_background, over {threshold}s), and {why}.\n{text}\nAnswer `wait` to leave the session alone, or `intervene` to step in yourself (read the screen, stop its background work, type an instruction; see the dagq-recover skill). This ask closes itself once the session moves on.",
-                run_id = run.id(),
-                task_id = run.task_id(),
-                workspace = self.workspace,
-                threshold = sv.stall.background_alert_secs,
-                why = note.why,
-                text = note.text,
-            )
-        };
-        let mut options = ask_options(&STALLED_OPTIONS, Some(&note));
-        // A headless session takes no keys: no `intervene` (task 1179).
-        if headless(run) {
-            options = super::stall::headless_options(options);
-        }
-        let outcome = ask::ask(
-            &mut *sv.queue,
-            &sv.layout.main_checkout,
-            NewAsk {
-                recommendation: None,
-                confidence: None,
-                kind: AskKind::Stalled,
-                task_id: Some(run.task_id()),
-                run_id: Some(run.id().clone()),
-                question,
-                options,
-                asked_by: SessionRole::Supervisor.as_str().into(),
-                reason_category: note.category,
-                topics: Vec::new(),
-                finding_id: None,
-                request_id: None,
-            },
-            sv.cmux,
-        )?;
-        let id = AskId::new(outcome["id"].as_i64().context("ask returned no id")?);
-        let now = sv.files.now();
-        self.stall
-            .escalated(id, now, idle_secs, BACKGROUND_THRESHOLD);
-        escalation.record(sv, run, alert, attempt, &note, Some(id), extra)?;
-        warn!(ask_id = %id, run_id = %run.id(), "run {}: {}; stalled ask {id} (notified: {})", run.id(), note.why, outcome["notified"]);
-        Ok(())
-    }
-
-    /// One look at the session's processes before its `/exit` (task 469):
-    /// the `idle_process` alert, before and after the receipt. Before the
-    /// receipt an escalation is the `stalled` ask, as `long_background`'s;
-    /// after it the wait on background work ends at the resume timeout by
-    /// itself, so it is left to that ([`leave_idle_to_phase`]). No job
-    /// starts while a `stalled` ask of the run is open.
     pub(super) fn watch_idle_processes(
         &mut self,
         sv: &mut Supervisor<'_>,
@@ -1653,22 +1182,17 @@ impl SessionWatch {
             workspace: &self.workspace,
             run_dir: &self.run_dir,
             allowed: &IDLE_PROCESS_ACTIONS,
-            exit_typed: false,
+
             at_prompt: self.at_prompt(sv, run),
-            lands: false,
+
             park: false,
         };
         match self.recovery.watch_idle(sv, run, &live, phase)? {
             LiveStep::Pending => Ok(()),
             LiveStep::Repaired(applied) => {
-                if let Some((text, sent_at, submission)) = applied.sent {
+                if let Some((text, sent_at, _submission)) = applied.sent {
                     self.stall.input_sent(sent_at, Some(&text));
-                    self.answer_start = Some(StartCheck::new(
-                        "recovery instruction",
-                        &text,
-                        sent_at,
-                        &submission,
-                    ));
+                    self.answer_start = Some(sent_at);
                 }
                 Ok(())
             }
@@ -1728,7 +1252,7 @@ impl SessionWatch {
             .collect::<Vec<_>>()
             .join("; ");
         let idle_secs = idle.iter().map(|p| p.idle_secs).max().unwrap_or(0);
-        let question = if headless(run) {
+        let question = {
             // No screen and no keys: its turns, and no `intervene` (task
             // 1179).
             let situation = format!(
@@ -1740,20 +1264,10 @@ impl SessionWatch {
                 text = note.text.trim_end(),
             );
             super::stall::headless_ask_text(run.id(), &situation, "", &turns_excerpt(sv, run))
-        } else {
-            format!(
-                "The session of run {run_id} (task {task_id}) in workspace {workspace} has processes that have used almost no CPU time for over {threshold}s (alert: idle_process): {listed}. And {why}.\n{text}\nAnswer `wait` to leave the session alone, or `intervene` to step in yourself (read the screen, stop the processes, type an instruction; see the dagq-recover skill). This ask closes itself once the session moves on.",
-                run_id = run.id(),
-                task_id = run.task_id(),
-                workspace = self.workspace,
-                threshold = sv.stall.idle_process_secs,
-                why = note.why,
-                text = note.text,
-            )
         };
         let mut options = ask_options(&STALLED_OPTIONS, Some(&note));
         // A headless session takes no keys: no `intervene` (task 1179).
-        if headless(run) {
+        {
             options = super::stall::headless_options(options);
         }
         let outcome = ask::ask(
@@ -1781,106 +1295,6 @@ impl SessionWatch {
             .escalated(id, now, idle_secs, IDLE_PROCESS_THRESHOLD);
         escalation.record(sv, run, alert, attempt, &note, Some(id), json!({}))?;
         warn!(ask_id = %id, run_id = %run.id(), "run {}: {}; stalled ask {id} (notified: {})", run.id(), note.why, outcome["notified"]);
-        Ok(())
-    }
-
-    /// The session holds its `/exit` back past the exit timeout: its
-    /// recovery job (`stuck_exit`), and the `stuck_exit` ask once it
-    /// escalates. A repair that answered a dialog or stopped processes
-    /// gives the session the exit timeout again.
-    pub(super) fn recover_stuck_exit(
-        &mut self,
-        sv: &mut Supervisor<'_>,
-        run: &TaskRun,
-    ) -> Result<()> {
-        // A `long_background` or `idle_process` job is only followed
-        // before the `/exit`: left running, it would hold this alert's job
-        // back for good.
-        for alert in [RecoveryAlert::LongBackground, RecoveryAlert::IdleProcess] {
-            self.recovery
-                .stop_for(sv, run, Some(alert), "exit_requested");
-        }
-        let live = Live {
-            workspace: &self.workspace,
-            run_dir: &self.run_dir,
-            allowed: &STUCK_EXIT_HELD_ACTIONS,
-            exit_typed: self.exit_requested.is_some(),
-            at_prompt: false,
-            lands: false,
-            park: false,
-        };
-        let timeout = sv.cmux.exit_timeout().as_secs();
-        let step = self.recovery.follow(sv, run, &live, RecoveryAlert::StuckExit, || {
-            json!({"timeout_secs": timeout, "exit_typed": true, "silent": self.exit_for_silence})
-        })?;
-        match step {
-            LiveStep::Pending => {}
-            LiveStep::Repaired(applied) => {
-                if applied.exit_again {
-                    self.exit_requested = Some(Instant::now());
-                    self.exit_timed_out = false;
-                }
-            }
-            LiveStep::Escalate(attempt, escalation) => {
-                let alert = RecoveryAlert::StuckExit;
-                let note = escalation.note(run, alert, attempt);
-                let after = stuck_exit_after(
-                    self.exit_for_silence,
-                    "The run stays running, and goes on to validating once the session exits",
-                );
-                let workspace = self.workspace.clone();
-                sv.for_escalation(run, alert, attempt, &escalation, |sv| {
-                    let id = ask_stuck_exit(sv, run, &workspace, &after, Some(&note))?;
-                    escalation.record(sv, run, alert, attempt, &note, Some(id), json!({}))
-                })?;
-                self.exit_asked = true;
-            }
-        }
-        Ok(())
-    }
-
-    /// The session waits at a dialog the runtime does not answer: its
-    /// recovery job (`prompt_waiting`), and the `answer_prompt` ask once it
-    /// escalates. `kind` and `excerpt` are the dialog on `screen` now.
-    pub(super) fn recover_prompt(
-        &mut self,
-        sv: &mut Supervisor<'_>,
-        run: &TaskRun,
-        kind: &str,
-        excerpt: &str,
-    ) -> Result<()> {
-        if sv.queue.has_unclosed_ask(run.id(), AskKind::AnswerPrompt)? {
-            return Ok(());
-        }
-        let live = Live {
-            workspace: &self.workspace,
-            run_dir: &self.run_dir,
-            allowed: &PROMPT_WAITING_ACTIONS,
-            exit_typed: self.exit_requested.is_some(),
-            at_prompt: false,
-            lands: false,
-            park: false,
-        };
-        let hash = self.prompt_hash.clone();
-        let step = self.recovery.follow(
-            sv,
-            run,
-            &live,
-            RecoveryAlert::PromptWaiting,
-            || json!({"prompt": kind, "screen_hash": hash, "excerpt": excerpt}),
-        )?;
-        match step {
-            LiveStep::Pending | LiveStep::Repaired(_) => {}
-            LiveStep::Escalate(attempt, escalation) => {
-                let alert = RecoveryAlert::PromptWaiting;
-                let note = escalation.note(run, alert, attempt);
-                let workspace = self.workspace.clone();
-                sv.for_escalation(run, alert, attempt, &escalation, |sv| {
-                    let id = ask_answer_prompt(sv, run, &workspace, kind, excerpt, Some(&note))?;
-                    escalation.record(sv, run, alert, attempt, &note, Some(id), json!({}))
-                })?;
-            }
-        }
         Ok(())
     }
 }
@@ -1928,28 +1342,6 @@ fn stop_processes(sv: &Supervisor<'_>, run: &TaskRun, pids: &[u32]) -> Result<Ve
         stopped.push(json!({"pid": pid, "gone": true}));
     }
     Ok(stopped)
-}
-
-/// The idle marker whose background work the `long_background` alert
-/// judges: `None` without a marker, when it lists no background work
-/// running, when a `stalled` ask of the run is open, or when the alert's
-/// last job failed and nothing cleared it. The marker is read first and
-/// the queue only for one with background work running, so a session
-/// without it (most of them) does not read all of its run's events on
-/// every look (task 1589).
-fn running_background<M>(
-    marker: impl FnOnce() -> Result<Option<M>>,
-    background_running: impl FnOnce(&M) -> bool,
-    stalled_ask: impl FnOnce() -> Result<bool>,
-    failed_job: impl FnOnce() -> Result<bool>,
-) -> Result<Option<M>> {
-    let Some(marker) = marker()? else {
-        return Ok(None);
-    };
-    if !background_running(&marker) || stalled_ask()? || failed_job()? {
-        return Ok(None);
-    }
-    Ok(Some(marker))
 }
 
 /// A run of task 1 in `/runs/r1` with `status` and `last_error`, for the
@@ -2124,41 +1516,22 @@ mod tests {
         assert!(used_up.requester(&run, alert, 3).is_none());
     }
 
-    /// The options of each live alert's ask once its job escalates (moved
-    /// from `runtime_job_verdicts`, task 1415): `stalled` (for
-    /// `long_background` and `idle_process`) offers `wait` and `intervene`
-    /// (the queue adds `propose`), `stuck_exit` `exit` and `wait`, and
-    /// `answer_prompt` none of its own; a failed job adds none, a verdict
-    /// its options not already there.
     #[test]
     fn each_live_alerts_ask_offers_its_own_options_then_the_jobs() {
         let run = test_run(RunStatus::Running, None);
         let failed = Escalation::JobFailed("no verdict".to_owned()).note(
             &run,
-            RecoveryAlert::LongBackground,
+            RecoveryAlert::IdleProcess,
             1,
         );
         assert_eq!(
             ask_options(&STALLED_OPTIONS, Some(&failed)),
-            ["wait", "intervene"]
+            ["wait", "stop"]
         );
-        assert_eq!(
-            ask_options(&super::super::exit::STUCK_EXIT_OPTIONS, Some(&failed)),
-            ["exit", "wait"]
-        );
-        assert!(ask_options(&[], Some(&failed)).is_empty());
-        assert_eq!(
-            ask_options(&super::super::exit::STUCK_EXIT_OPTIONS, None),
-            ["exit", "wait"]
-        );
-        let jobs = Escalation::Verdict(verdict(json!({
-            "verdict": "escalate", "confidence": "high", "diagnosis": "x",
-            "options": ["wait", "kill it", "kill it"],
-        })))
-        .note(&run, RecoveryAlert::StuckExit, 1);
+        let jobs = Escalation::Verdict(verdict(json!({"verdict":"escalate", "confidence":"high", "diagnosis":"x", "options":["wait", "kill it", "kill it"]}))).note(&run, RecoveryAlert::IdleProcess, 1);
         assert_eq!(
             ask_options(&STALLED_OPTIONS, Some(&jobs)),
-            ["wait", "intervene", "kill it"]
+            ["wait", "stop", "kill it"]
         );
         assert_eq!(ask_options(&[], Some(&jobs)), ["wait", "kill it"]);
     }
@@ -2177,65 +1550,5 @@ mod tests {
             sample_interval(Duration::from_millis(300)),
             Duration::from_millis(300)
         );
-    }
-
-    /// Task 1589: the `long_background` alert reads its run's events (for
-    /// a failed job) and its `stalled` ask only for a marker with
-    /// background work running, so a session without it reads neither on
-    /// any look; with it running, an open `stalled` ask or a failed job
-    /// still starts no job, as before.
-    #[test]
-    fn only_running_background_work_reads_the_runs_events() {
-        use std::cell::Cell;
-        let asks = Cell::new(0);
-        let events = Cell::new(0);
-        let look = |marker: Option<bool>, ask_open: bool, failed: bool| {
-            running_background(
-                || Ok(marker),
-                |running: &bool| *running,
-                || {
-                    asks.set(asks.get() + 1);
-                    Ok(ask_open)
-                },
-                || {
-                    events.set(events.get() + 1);
-                    Ok(failed)
-                },
-            )
-            .unwrap()
-        };
-        let count = |marker, ask_open, failed| {
-            asks.set(0);
-            events.set(0);
-            let judged = look(marker, ask_open, failed);
-            (judged, asks.get(), events.get())
-        };
-        // No marker, or one with no background work: neither is read.
-        assert_eq!(count(None, false, false), (None, 0, 0));
-        assert_eq!(count(Some(false), false, false), (None, 0, 0));
-        assert_eq!(count(Some(false), true, true), (None, 0, 0));
-        // Background work running: judged unless an ask is open or the
-        // last job failed (the events are not read under an open ask).
-        assert_eq!(count(Some(true), false, false), (Some(true), 1, 1));
-        assert_eq!(count(Some(true), true, false), (None, 1, 0));
-        assert_eq!(count(Some(true), false, true), (None, 1, 1));
-    }
-
-    use super::super::file_time::at_ns;
-
-    /// Task 1050: an adopter reads the marker handed to a `long_background`
-    /// job from `marker_at_ms`: the same marker, whose file time keeps
-    /// nanoseconds, is the one seen, not a new one to hand again.
-    #[test]
-    fn the_marker_handed_to_a_job_is_seen_at_the_millisecond() {
-        let marker = at_ns(250, 700_000);
-        let watch = RecoveryWatch {
-            seen: Some(at_millis(millis(marker))),
-            ..RecoveryWatch::default()
-        };
-        assert!(watch.marker_seen(marker));
-        assert!(watch.marker_seen(at_ns(249, 0)));
-        assert!(!watch.marker_seen(at_ns(251, 0)));
-        assert!(!RecoveryWatch::default().marker_seen(marker));
     }
 }

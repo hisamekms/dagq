@@ -1862,7 +1862,11 @@ pub(super) fn claim_task(
         .inheriting(&session_events(tx, task.id())?);
     let now = timestamp(at);
     let run_id = RunId::new(ids.uuid())?;
-    let run = TaskRun::new(run_id, &task, base_commit, now.clone())?.running_on(route.actual);
+    let actual = crate::domain::worker::Worker {
+        mode: crate::domain::worker::WorkerMode::Headless,
+        ..route.actual
+    };
+    let run = TaskRun::new(run_id, &task, base_commit, now.clone())?.running_on(actual);
     // `status='ready'` only detects a concurrent change; the domain decided the claim.
     ensure!(
         tx.execute(
@@ -1886,6 +1890,15 @@ pub(super) fn claim_task(
             run.created_at()
         ],
     )?;
+    if task.worker().mode == crate::domain::worker::WorkerMode::Interactive {
+        event(
+            tx,
+            task.id(),
+            Some(run.id()),
+            EventKind::WorkerModeConverted,
+            json!({"phase":"claim", "from":"interactive", "to":"headless", "reason":"interactive_worker_removed"}),
+        )?;
+    }
     if let Some(reason) = route.switch {
         event(
             tx,
@@ -1894,7 +1907,7 @@ pub(super) fn claim_task(
             EventKind::ProviderSwitched,
             provider_switch::switched_payload(
                 run.requested_provider(),
-                route.actual,
+                actual,
                 reason,
                 SwitchPhase::Start,
                 None,

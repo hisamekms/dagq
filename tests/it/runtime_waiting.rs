@@ -20,8 +20,8 @@ esac
 
 /// What the supervisor sent `run`'s worker, without the headless turn's
 /// note after it: the first line of each text.
-fn sent(backend: &TestWorkspace, run: &TaskRun) -> Vec<String> {
-    session_texts(backend, run)
+fn sent(run: &TaskRun) -> Vec<String> {
+    session_texts(run)
         .into_iter()
         .map(|text| text.lines().next().unwrap_or_default().to_owned())
         .collect()
@@ -110,7 +110,7 @@ fn a_run_waiting_for_its_answer_leaves_the_slot_to_another_task() {
         json!([{"id": ask, "kind": "worker_question"}])
     );
     // Nothing was sent to the waiting session.
-    assert!(sent(&backend, &first).is_empty());
+    assert!(sent(&first).is_empty());
 
     queue.answer(ask, "blue").unwrap();
     let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
@@ -118,10 +118,7 @@ fn a_run_waiting_for_its_answer_leaves_the_slot_to_another_task() {
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let first = run_of(&mut queue, 1).unwrap();
     assert_eq!(first.status(), RunStatus::AwaitingIntegration);
-    assert_eq!(
-        sent(&backend, &first),
-        [format!("answer to ask {ask}: blue")]
-    );
+    assert_eq!(sent(&first), [format!("answer to ask {ask}: blue")]);
     let ended = events_of(&db, first.id(), "run_waiting_ended");
     assert_eq!(ended.len(), 1);
     assert_eq!(ended[0]["cause"], "answered");
@@ -307,53 +304,6 @@ fn a_returning_run_counts_toward_the_limit() {
     assert_eq!(events_of(&db, first.id(), "run_slot_regained").len(), 1);
 }
 
-/// A session that holds the `/exit` after its verdict back waits for the
-/// person outside the slot, as its `stuck_exit` ask says; another task
-/// runs meanwhile. When the person lets it exit, the session's end is
-/// seen during the wait (acceptance 4) and its ask closed; the run goes
-/// back to a slot and on to what follows its exit (acceptance 3).
-#[test]
-fn a_stuck_exit_waits_outside_the_slot_until_its_session_exits() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "second", &[]);
-    let mut backend = TestWorkspace::new(&db, false, HELD_AGENT);
-    backend.exit_timeout = Duration::from_millis(500);
-    backend.script_for(2, VALID_AGENT);
-    let backend = Arc::new(backend);
-    let supervisor = supervise_in_thread(&db, &repo, &backend, supervise_options(1, true));
-    wait_until(&db, Duration::from_secs(60), |queue| {
-        run_of(queue, 2).is_some_and(|run| queue.run_lease(run.id()).unwrap().is_none())
-    });
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let first = run_of(&mut queue, 1).unwrap();
-    let ask = open_ask_of(&mut queue, &first, AskKind::StuckExit).unwrap();
-    let started = events_of(&db, first.id(), "run_waiting_started");
-    assert_eq!(started.len(), 1);
-    assert_eq!(started[0]["ask_kind"], "stuck_exit");
-    assert_eq!(started[0]["phase"], "exit");
-    assert_eq!(started[0]["status"], "awaiting_integration");
-    // The lease stays with the waiting run.
-    assert!(queue.run_lease(first.id()).unwrap().is_some());
-
-    release_held_session(first.run_dir().unwrap());
-    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert!(queue.read_ask(ask).unwrap().closed_at.is_some());
-    let ended = events_of(&db, first.id(), "run_waiting_ended");
-    assert_eq!(ended.len(), 1);
-    assert_eq!(ended[0]["cause"], "session_exited");
-    let kinds = kinds_of(&db, 1);
-    let at = |kind: &str| kinds.iter().rposition(|k| k == kind).unwrap();
-    assert!(
-        at("run_waiting_ended") < at("run_slot_regained"),
-        "{kinds:?}"
-    );
-    // What follows the exit came after the run was back in its slot.
-    assert!(at("run_slot_regained") < at("review_failed"), "{kinds:?}");
-}
-
 /// A supervisor that hands off keeps the waiting run's lease, and the
 /// process that continues it takes the wait over from the run's events
 /// without starting it again (acceptance 5); the answer then reaches the
@@ -409,7 +359,7 @@ fn a_wait_is_taken_over_after_a_handoff() {
     assert_eq!(events_of(&db, run.id(), "run_waiting_started").len(), 1);
     assert_eq!(events_of(&db, run.id(), "run_waiting_ended").len(), 1);
     assert_eq!(events_of(&db, run.id(), "run_slot_regained").len(), 1);
-    assert_eq!(sent(&backend, &run), [format!("answer to ask {ask}: blue")]);
+    assert_eq!(sent(&run), [format!("answer to ask {ask}: blue")]);
 }
 
 /// `--max-waiting 0` keeps the runs in their slots, as before.
@@ -442,71 +392,6 @@ fn no_wait_without_a_limit() {
     let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
-}
-
-/// A dialog screen as Claude Code draws it.
-const DIALOG_SCREEN: &str = "\
- Auto mode is available
-
- ❯ 1. Yes, turn on auto mode
-   2. No, keep asking
-
- Esc to cancel
-";
-
-/// Sessions that stop at a dialog wait outside the one slot, so both
-/// tasks run into it; their screens are read while they wait (no key is
-/// sent), and once a person answers the dialog both go back at once,
-/// the second past `--parallel` (decision 10), and finish.
-#[test]
-fn sessions_a_person_moved_go_back_at_once() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "second", &[]);
-    let mut backend = TestWorkspace::new(&db, false, PROMPTED_AGENT);
-    backend.prompt_wait = Duration::from_millis(300);
-    *backend.screen.lock().unwrap() = DIALOG_SCREEN.into();
-    let backend = Arc::new(backend);
-    let supervisor = supervise_in_thread(&db, &repo, &backend, supervise_options(1, true));
-    wait_until(&db, Duration::from_secs(60), |queue| {
-        [1, 2].iter().all(|task| {
-            run_of(queue, *task)
-                .is_some_and(|run| !events_of(&db, run.id(), "run_waiting_started").is_empty())
-        })
-    });
-    let status = runtime::status(&db).unwrap();
-    assert_eq!(status["supervisors"][0]["waiting"]["count"], 2, "{status}");
-    *backend.screen.lock().unwrap() = WORK_SCREEN.into();
-    wait_until(&db, Duration::from_secs(30), |queue| {
-        [1, 2].iter().all(|task| {
-            run_of(queue, *task)
-                .is_some_and(|run| !events_of(&db, run.id(), "run_slot_regained").is_empty())
-        })
-    });
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let mut over = 0;
-    for task in [1, 2] {
-        let run = run_of(&mut queue, task).unwrap();
-        let ended = events_of(&db, run.id(), "run_waiting_ended");
-        assert_eq!(ended[0]["cause"], "dialog_cleared");
-        assert_eq!(ended[0]["ask_kind"], "answer_prompt");
-        let regained = events_of(&db, run.id(), "run_slot_regained");
-        assert_eq!(regained[0]["slot_wait_secs"], 0);
-        over += usize::from(regained[0]["over_parallel"] == true);
-        assert!(open_ask_of(&mut queue, &run, AskKind::AnswerPrompt).is_none());
-        fs::write(
-            exit_request_path(run.run_dir().unwrap()).with_extension("go"),
-            "",
-        )
-        .unwrap();
-    }
-    assert_eq!(over, 1);
-    assert!(backend.keys.lock().unwrap().is_empty());
-    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let stats = runtime::stats(&db, &Default::default()).unwrap();
-    assert_eq!(stats["waiting"]["over_parallel"], 1, "{stats}");
 }
 
 /// A supervisor that took over the run of one that died adopts its wait
@@ -583,45 +468,6 @@ fn stop_wrapper_heartbeat(db: &Path, run: &TaskRun, pid: u32) {
     .unwrap();
 }
 
-/// A wrapper that dies during a `stuck_exit` wait without recording its
-/// exit (its heartbeat expired and its pid is gone) is detected as the
-/// session's end, as `ExitWatch` does (acceptance 4): the `stuck_exit` ask
-/// is closed at once, the wait ends `session_exited`, and back in its slot
-/// the run goes on to what follows its exit.
-#[test]
-fn a_wrapper_that_dies_during_a_wait_ends_it_as_the_sessions_end() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    let mut backend = TestWorkspace::new(&db, false, HELD_AGENT);
-    backend.exit_timeout = Duration::from_millis(500);
-    let backend = Arc::new(backend);
-    let supervisor = supervise_in_thread(&db, &repo, &backend, supervise_options(1, true));
-    wait_until(&db, Duration::from_secs(60), |queue| {
-        run_of(queue, 1)
-            .is_some_and(|run| !events_of(&db, run.id(), "run_waiting_started").is_empty())
-    });
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let run = run_of(&mut queue, 1).unwrap();
-    let ask = open_ask_of(&mut queue, &run, AskKind::StuckExit).unwrap();
-    stop_wrapper_heartbeat(&db, &run, dead_pid());
-    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert!(queue.read_ask(ask).unwrap().closed_at.is_some());
-    let ended = events_of(&db, run.id(), "run_waiting_ended");
-    assert_eq!(ended.len(), 1);
-    assert_eq!(ended[0]["cause"], "session_exited");
-    let kinds = kinds_of(&db, 1);
-    let at = |kind: &str| kinds.iter().rposition(|k| k == kind).unwrap();
-    assert!(
-        at("run_waiting_ended") < at("run_slot_regained"),
-        "{kinds:?}"
-    );
-    assert!(at("run_slot_regained") < at("review_failed"), "{kinds:?}");
-    assert!(!kinds.iter().any(|k| k == "runtime_error"), "{kinds:?}");
-    // The stub session is let go; its wrapper no longer owns the row.
-    release_held_session(run.run_dir().unwrap());
-}
-
 /// A worker's first session whose wrapper goes silent during a wait (its
 /// heartbeat expired while its process lives) is detected as before
 /// (acceptance 4): `wrapper_heartbeat_expired` is recorded, the wait ends
@@ -678,18 +524,18 @@ await_exit
     );
 }
 
-/// Make the run's wrapper heartbeat come back (far ahead, so it stays
-/// fresh) in the transaction that records the wait's end: back in its slot
-/// the run sees a fresh heartbeat on its first look, whatever the test's
-/// timing.
-fn restore_heartbeat_when_the_wait_ends(db: &Path, run: &TaskRun) {
+/// Bring the run's wrapper row back to its own pid with a fresh heartbeat
+/// once the wait ends, as if the silent wrapper beat again before the
+/// run's slot looked at it.
+fn restore_heartbeat_when_the_wait_ends(db: &Path, run: &TaskRun, pid: i64) {
     Connection::open(db)
         .unwrap()
         .execute_batch(&format!(
             "CREATE TRIGGER heartbeat_back AFTER INSERT ON run_events
              WHEN NEW.run_id = '{run}' AND NEW.kind = 'run_waiting_ended'
              BEGIN
-               UPDATE run_processes SET heartbeat_at = CAST(strftime('%s','now') AS INTEGER) + 3600
+               UPDATE run_processes SET pid = {pid},
+                 heartbeat_at = CAST(strftime('%s','now') AS INTEGER) + 3600
                WHERE run_id = '{run}' AND role = 'wrapper';
              END;",
             run = run.id()
@@ -698,27 +544,22 @@ fn restore_heartbeat_when_the_wait_ends(db: &Path, run: &TaskRun) {
 }
 
 /// A wrapper whose heartbeat stops during a wait and comes back before the
-/// run's slot looks at it leaves no silence behind (task 606): the wait
-/// ends `wrapper_silent`, the session goes on without a `/exit`, its next
+/// run's slot looks at it leaves no silence behind (task 606; moved to a
+/// headless run by task 1437): the wait ends `wrapper_silent`, the run goes
+/// on without an exit request, the answer's turn asks again and that
 /// `worker_question` waits outside the slot again, and a second silence is
-/// recorded as `wrapper_heartbeat_expired` again before the `/exit`.
+/// recorded as `wrapper_heartbeat_expired` again before the exit request.
 #[test]
 fn a_wrapper_heartbeat_that_comes_back_lets_the_run_wait_again() {
-    // The test silences the wrapper by giving its row another pid, which
-    // a headless wrapper that runs the answer's turn does not survive.
-    interactive_workers();
     let (_dir, repo, db) = fixture();
     let backend = Arc::new(TestWorkspace::new(
         &db,
         false,
         r#"
-"$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
-idle
-await_file "$MESSAGE"
-rm "$MESSAGE"
-"$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which colour?' --cmux /usr/bin/true > /dev/null || exit 70
-idle
-await_exit
+case "$PROMPT" in
+"answer to ask "*) "$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which colour?' --cmux /usr/bin/true > /dev/null || exit 70 ;;
+*) "$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70 ;;
+esac
 "#,
     ));
     let supervisor = supervise_in_thread(&db, &repo, &backend, supervise_options(1, true));
@@ -729,8 +570,16 @@ await_exit
     let mut queue = SqliteQueue::open(&db).unwrap();
     let run = run_of(&mut queue, 1).unwrap();
     let first = open_ask_of(&mut queue, &run, AskKind::WorkerQuestion).unwrap();
+    let wrapper: i64 = Connection::open(&db)
+        .unwrap()
+        .query_row(
+            "SELECT pid FROM run_processes WHERE run_id=?1 AND role='wrapper'",
+            [run.id()],
+            |row| row.get(0),
+        )
+        .unwrap();
     let mut silent = sleeper();
-    restore_heartbeat_when_the_wait_ends(&db, &run);
+    restore_heartbeat_when_the_wait_ends(&db, &run, wrapper);
     stop_wrapper_heartbeat(&db, &run, silent.id());
     wait_until(&db, Duration::from_secs(30), |_| {
         !events_of(&db, run.id(), "run_slot_regained").is_empty()
@@ -742,8 +591,8 @@ await_exit
         1
     );
 
-    // The session goes on: its answer is delivered from the slot and its
-    // next question waits outside it again.
+    // The run goes on: its answer is the next turn, and that turn's
+    // question waits outside the slot again.
     queue.answer(first, "blue").unwrap();
     wait_until(&db, Duration::from_secs(60), |_| {
         events_of(&db, run.id(), "run_waiting_started").len() == 2
@@ -756,14 +605,13 @@ await_exit
     );
     assert!(events_of(&db, run.id(), "exit_requested").is_empty());
 
-    // A second silence is recorded again, and this one gets the /exit.
-    let raw = Connection::open(&db).unwrap();
-    raw.execute_batch("DROP TRIGGER heartbeat_back").unwrap();
-    raw.execute(
-        "UPDATE run_processes SET heartbeat_at=0 WHERE run_id=?1 AND role='wrapper'",
-        [run.id()],
-    )
-    .unwrap();
+    // A second silence is recorded again, and this one gets the exit
+    // request.
+    Connection::open(&db)
+        .unwrap()
+        .execute_batch("DROP TRIGGER heartbeat_back")
+        .unwrap();
+    stop_wrapper_heartbeat(&db, &run, silent.id());
     wait_until(&db, Duration::from_secs(30), |_| {
         !events_of(&db, run.id(), "exit_requested").is_empty()
     });

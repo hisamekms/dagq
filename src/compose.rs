@@ -66,8 +66,8 @@ use crate::{
         },
         process::LocalSpawner,
         run_env::{
-            ShellVerifier, load_conflict_config, load_disk_config, load_exit_config,
-            load_kpi_settings, load_resume_config, load_stall_config, load_supervisor_config,
+            ShellVerifier, load_conflict_config, load_disk_config, load_kpi_settings,
+            load_resume_config, load_stall_config, load_supervisor_config,
         },
         run_files::LocalRunFiles,
         runtime_store::SqliteOpener,
@@ -328,9 +328,6 @@ pub struct SuperviseOptions {
     /// The limit of a run's conflict-only attempts (ADR-0047 decision
     /// 24); `None` reads `[resume]` of the main checkout's `dagq.toml`.
     pub resume: Option<crate::domain::resume::ResumeConfig>,
-    /// The retries of a `/exit` a session held back (ADR-0047 decision
-    /// 25); `None` reads `[exit]` of the main checkout's `dagq.toml`.
-    pub exit: Option<crate::domain::exit::ExitConfig>,
     /// Reads the free bytes of the file system of a path; tests set it.
     pub free_space: fn(&Path) -> Option<u64>,
     /// The directories Claude Code keeps the sessions' scratchpads under,
@@ -564,7 +561,6 @@ impl SuperviseOptions {
             load_conflicts: load_conflict_config,
             disk: None,
             resume: None,
-            exit: None,
             free_space: free_disk_bytes,
             scratchpad_roots: Some(Vec::new()),
             report_daily: false,
@@ -605,7 +601,6 @@ impl SuperviseOptions {
         conflicts: ConflictConfigReport,
         disk: crate::domain::disk::DiskConfig,
         resume: crate::domain::resume::ResumeConfig,
-        exit: crate::domain::exit::ExitConfig,
         limits: SlotLimits,
     ) -> LoopSettings {
         LoopSettings {
@@ -636,7 +631,6 @@ impl SuperviseOptions {
             max_load: self.max_load,
             disk,
             resume,
-            exit,
             passes: self.passes.clone(),
         }
     }
@@ -738,16 +732,6 @@ pub fn supervise_with_reviewer(
         load_resume_config(&main_checkout)
             .unwrap_or_else(|error| {
                 tracing::warn!(error = %format_args!("{error:#}"), "[resume] of dagq.toml not read: {error:#}; using the defaults");
-                None
-            })
-            .unwrap_or_default()
-    });
-    // The retries of a `/exit` the session held back (ADR-0047 decision
-    // 25): an `[exit]` that cannot be read leaves the defaults.
-    let exit = options.exit.clone().unwrap_or_else(|| {
-        load_exit_config(&main_checkout)
-            .unwrap_or_else(|error| {
-                tracing::warn!(error = %format_args!("{error:#}"), "[exit] of dagq.toml not read: {error:#}; using the defaults");
                 None
             })
             .unwrap_or_default()
@@ -1190,7 +1174,7 @@ pub fn supervise_with_reviewer(
     let settings = LoopSettings {
         conflicts_error,
         light_changes,
-        ..options.settings(stall, conflicts, disk, resume, exit, limits)
+        ..options.settings(stall, conflicts, disk, resume, limits)
     };
     supervisor::supervise(&ports, &settings)
 }

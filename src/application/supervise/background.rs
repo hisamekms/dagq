@@ -8,7 +8,6 @@ use crate::domain::background_wrapper::{
     BACKGROUND_FLAG, BackgroundHandle, HeadlessWrapper, is_background, launch_of, session_log_name,
     wrapper_is_recorded,
 };
-use headless::headless;
 
 impl Supervisor<'_> {
     /// The log of `run`'s session wrapper when it is started in the
@@ -24,9 +23,6 @@ impl Supervisor<'_> {
         resume: Option<usize>,
         reopen: bool,
     ) -> Option<PathBuf> {
-        if !headless(run) {
-            return None;
-        }
         match self.verifier.headless_wrapper() {
             Ok(HeadlessWrapper::Background) => Some(run_dir.join(session_log_name(resume, reopen))),
             Ok(HeadlessWrapper::Workspace) => None,

@@ -186,17 +186,6 @@ impl Supervisor<'_> {
             })
         })
     }
-    /// Rebuild the slot of an adopted run from what the queue and the run
-    /// directory hold: the planned paths, whether the receipt is already on
-    /// disk and whether `/exit` was already requested (never sent twice, and
-    /// an `exit_request_timed_out` already recorded is not recorded again).
-    /// The wait after the receipt and the `/exit`'s timeout run from the
-    /// events that started them (`receipt_observed`, and `exit_requested` or
-    /// a dialog answered by rule since), not from the takeover: supervisors
-    /// handed over more often than the resume timeout must not hold a run
-    /// forever (task 879). The wrapper is registered, so no registration
-    /// timeout applies. A `validating` run restarts validation from the
-    /// beginning: it is a function of the receipt and the worktree alone.
     pub(super) fn resume(&self, run: &TaskRun) -> Result<Phase> {
         Ok(match run.status() {
             RunStatus::Validating => {
@@ -212,23 +201,7 @@ impl Supervisor<'_> {
                 let now = Instant::now();
                 let since = |event: &RunEvent| self.instant_of(event, now);
                 let exit_requested = self.exit_requested_at(&events, |_| true, now);
-                // Only the latest request's timeout and ask count: a run
-                // resumed and stuck again is asked again (task 240).
-                let exit_timed_out = history.latest_exit_timed_out();
-                // The retries recorded are not made again (ADR-0047
-                // decision 25).
-                let exit_retry = Box::new(ExitRetry::adopt(&history, since));
                 let first_commit_seen = history.has(event_kind::FIRST_COMMIT_OBSERVED);
-                // A dialog recorded before adoption is not recorded again
-                // while the same screen stays up; one the receipt ended is
-                // kept so the adopter closes its `answer_prompt` ask
-                // (task 239).
-                let prompt_hash = if receipt_seen {
-                    history.prompt_hash_at_receipt()
-                } else {
-                    history.waiting_prompt_hash()
-                }
-                .map(Box::from);
                 Phase::Session(SessionWatch {
                     workspace: run
                         .workspace_id()
@@ -244,30 +217,19 @@ impl Supervisor<'_> {
                         .filter(|_| receipt_seen)
                         .map(since),
                     exit_requested,
-                    exit_timed_out,
-                    exit_retry,
+
                     first_commit_seen,
-                    agent_seen: None,
-                    prompt_checked: None,
-                    prompt_hash,
-                    // A timeout recorded without its ask (by a binary that
-                    // made none, or a supervisor that died between the two)
-                    // still gets one; one asked before is not asked again.
-                    // A request that has not timed out yet is asked about
-                    // (after its retries) once the adopter's own timeout
-                    // passes.
-                    exit_asked: history.latest_exit_asked(),
+
                     // Only a run whose wrapper heartbeats is adopted.
                     silent: false,
                     exit_for_silence: false,
                     answer_start: None,
-                    stall: StallWatch::adopt(&*self.queue, run)?,
+                    stall: Box::new(StallWatch::adopt(&*self.queue, run)?),
                     stale: adopted_stale_nudge(&*self.queue, run, SESSION_PHASE, None)?,
                     recovery: RecoveryWatch::adopt(&*self.queue, run)?,
                     input_at: None,
                     answered_at: None,
                     asks_from: 0,
-                    stage: Stage::Session,
                 })
             }
         })
@@ -307,8 +269,7 @@ impl Supervisor<'_> {
     /// Rebuild an adopted `awaiting_integration` run under review from its
     /// events: a `revise_requested` with nothing after it waits for the live
     /// session again (it is recorded before it is typed, so it is typed a
-    /// second time only when the session shows no sign of it,
-    /// [`StartCheck::adopted`]), with the dialog and the recovery jobs the
+    /// second time only when its request was not queued), with the recovery jobs the
     /// previous supervisor recorded during it ([`SessionWatch::adopt`]), and
     /// a `revise_unsent` asks a person; a verdict already recorded (`review_finished` with
     /// nothing after it), or an approved run not reviewed since its
@@ -543,37 +504,8 @@ impl Supervisor<'_> {
         }
         let after = |kind: &str| events.iter().any(|e| e.id > anchor.id && e.kind == kind);
         let mut watch = ExitWatch::new(session, then);
-        // Never a second /exit; its timeout runs from the request recorded
-        // after the anchor (or a restart of it since), not from the
-        // takeover (task 959).
-        if after(event_kind::EXIT_REQUESTED) {
-            let now = Instant::now();
-            watch.requested = Some(
-                self.exit_requested_at(&events, |e| e.id > anchor.id, now)
-                    .unwrap_or(now),
-            );
-        }
-        watch.timed_out =
-            after(event_kind::EXIT_REQUEST_TIMED_OUT) && history.latest_exit_timed_out();
-        // A timeout recorded without its ask still gets one; one asked
-        // about the same request is not asked again (as for a running run,
-        // task 104), one about an earlier request is (task 240).
-        watch.exit_asked = history.latest_exit_asked();
-        // Its retries recorded are not made again (ADR-0047 decision 25).
-        if watch.timed_out {
-            let now = Instant::now();
-            watch.retry = ExitRetry::adopt(&history, |event| self.instant_of(event, now));
-        }
-        // A /exit that never got there, whose close to land the previous
-        // supervisor decided but did not record, is judged again now
-        // (task 464) rather than waited out as one the session held back.
-        if watch.requested.is_some()
-            && let Some(unsent) = history.latest_exit_unsent_to_land()
-            && let Some(workspace) = watch.session.as_ref().map(|s| s.workspace.clone())
-        {
-            let attempts = unsent.payload["attempts"].as_u64().unwrap_or(1);
-            watch.adopt_unsent(self, run, &workspace, attempts)?;
-        }
+        // Never a second exit request after the anchor (task 959).
+        watch.requested = after(event_kind::EXIT_REQUESTED);
         Ok(Phase::Exiting(watch))
     }
     /// The failed review whose `approve_landing` ask was opened before the
@@ -624,24 +556,9 @@ impl Supervisor<'_> {
         }
         info!(run_id = %run.id(), ask_id = %ask.id, "run {} waits for a person in ask {} about its failed review, opened before the supervisor stopped; it is not reviewed again", run.id(), ask.id);
         let mut watch = ExitWatch::new(session.clone(), AfterExit::Rest { close: true });
-        // The failed review's /exit was requested before the ask: never a
-        // second one, and its timeout runs from the recorded request (or a
-        // restart of it since), not from the takeover (task 959).
-        if after(event_kind::EXIT_REQUESTED) {
-            let now = Instant::now();
-            watch.requested = Some(
-                self.exit_requested_at(events, |e| e.id > started.id, now)
-                    .unwrap_or(now),
-            );
-        }
-        let history = RunHistory::from_events(events);
-        watch.timed_out =
-            after(event_kind::EXIT_REQUEST_TIMED_OUT) && history.latest_exit_timed_out();
-        watch.exit_asked = history.latest_exit_asked();
-        if watch.timed_out {
-            let now = Instant::now();
-            watch.retry = ExitRetry::adopt(&history, |event| self.instant_of(event, now));
-        }
+        // The failed review's exit was requested before the ask: never a
+        // second one (task 959).
+        watch.requested = after(event_kind::EXIT_REQUESTED);
         Ok(Some(Phase::Exiting(watch)))
     }
     /// The last `approve_landing` ask the supervisor opened after event
@@ -683,13 +600,6 @@ impl Supervisor<'_> {
             .unwrap_or_default();
         now.checked_sub(ago).unwrap_or(now)
     }
-    /// The instant from which the `/exit`'s timeout runs, on the monotonic
-    /// clock whose `now` is `now`: the last `exit_requested` of `events`
-    /// that `of` keeps, or the last restart of its timeout since: a known
-    /// dialog answered by rule (ADR-0047 decision 29), or a `stuck_exit`
-    /// recovery job that answered the dialog or stopped the processes
-    /// holding the `/exit` back. `None` when no such request was recorded.
-    /// A takeover keeps the time already waited (tasks 879, 894 and 959).
     pub(super) fn exit_requested_at(
         &self,
         events: &[RunEvent],
@@ -699,24 +609,8 @@ impl Supervisor<'_> {
         let requested = events
             .iter()
             .rfind(|e| e.kind == event_kind::EXIT_REQUESTED && of(e))?;
-        let restarted = events
-            .iter()
-            .rev()
-            .find(|e| e.id > requested.id && restarts_exit_timeout(e));
-        Some(self.instant_of(restarted.unwrap_or(requested), now))
+        Some(self.instant_of(requested, now))
     }
-}
-
-/// Whether `event` gave a held `/exit` its timeout again: a known dialog
-/// answered by rule (ADR-0047 decision 29), or a `stuck_exit` recovery job
-/// that answered the dialog or stopped the processes holding it back.
-pub(super) fn restarts_exit_timeout(event: &RunEvent) -> bool {
-    event.kind == event_kind::AUTO_REPAIRED
-        && (event.payload["repair"] == DIALOG_ANSWERED
-            || event.payload["alert"] == RecoveryAlert::StuckExit.as_str()
-                && [RECOVERY_DIALOG_ANSWERED, "stop_processes"]
-                    .iter()
-                    .any(|repair| event.payload["repair"] == *repair))
 }
 
 /// When an adopted revise or conflict request was recorded as sent, to the
@@ -738,26 +632,15 @@ impl Supervisor<'_> {
     fn adopted_start(
         &self,
         run: &TaskRun,
-        events: &[crate::domain::RunEvent],
-        anchor: EventId,
+        _events: &[crate::domain::RunEvent],
+        _anchor: EventId,
         what: &str,
         file: &str,
         sent_at: SystemTime,
-    ) -> Option<StartCheck> {
-        let checked = |kind: &str| {
-            events
-                .iter()
-                .skip_while(|e| e.id != anchor)
-                .skip(1)
-                .any(|e| e.kind == kind && e.payload["what"] == what)
-        };
-        if checked(event_kind::SUBMIT_NOT_STARTED) {
-            return None;
-        }
-        let resent = checked(event_kind::SUBMIT_RESENT);
+    ) -> Option<SystemTime> {
         let path = Path::new(run.run_dir()?).join(file);
         match self.files.read_to_string(&path) {
-            Ok(text) => Some(StartCheck::adopted(what, &text, sent_at, resent)),
+            Ok(_text) => Some(sent_at),
             Err(error) => {
                 warn!(run_id = %run.id(), error = %error, "the adopted {what} of {} cannot be checked for a start: {} could not be read: {error}", run.id(), path.display());
                 None

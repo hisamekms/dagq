@@ -58,7 +58,7 @@ fn kinds_of(db: &Path, task: i64) -> Vec<String> {
 #[test]
 fn an_open_usage_limit_ask_holds_claims_and_reviews_until_done() {
     let (_dir, repo, db) = fixture();
-    let backend = Arc::new(TestWorkspace::new(&db, false, PROMPTED_AGENT));
+    let backend = Arc::new(TestWorkspace::new(&db, false, GATED_AGENT));
     let stop = Arc::new(AtomicBool::new(false));
     let options = SuperviseOptions {
         stop: stop.clone(),
@@ -184,90 +184,6 @@ fn an_open_usage_limit_ask_holds_claims_and_reviews_until_done() {
     stop.store(true, Ordering::SeqCst);
     joined(supervisor, "the supervisor to drain").unwrap();
     backend.join();
-}
-
-/// `cancel_affected` is the runtime's to apply: the run the login held is
-/// given up as an abandon does (its lease released, `runtime_error` with
-/// the code `hold_canceled`, `recover run` for the inbox), and the ask
-/// closes with `queue_hold_applied` naming the run.
-#[test]
-fn cancel_affected_gives_the_held_runs_up() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    let backend = TestWorkspace::new(
-        &db,
-        false,
-        r#"
-commit work; idle
-await_file "$EXIT.go"
-"#,
-    );
-    *backend.screen.lock().unwrap() = LOGIN_SCREEN.into();
-    let backend = Arc::new(backend);
-    let stop = Arc::new(AtomicBool::new(false));
-    let options = SuperviseOptions {
-        stop: stop.clone(),
-        stall: Some(
-            dagq::domain::stall::StallConfig::default()
-                .with_millis("idle_without_receipt_secs", 200),
-        ),
-        ..supervise_options(2, false)
-    };
-    let supervisor = {
-        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
-    };
-    wait_until(&db, Duration::from_secs(30), |_| {
-        kinds_of(&db, 1).iter().any(|kind| kind == "auth_required")
-    });
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
-    let ask = queue.hold_of(run.id()).unwrap().unwrap();
-    assert_eq!(ask.affected, [run.id().as_str()]);
-    assert!(
-        ask.question.contains("`cancel_affected`"),
-        "{}",
-        ask.question
-    );
-    assert!(
-        !ask.question.contains("does not apply it yet"),
-        "{}",
-        ask.question
-    );
-    queue.answer(ask.id, "cancel_affected").unwrap();
-    wait_until(&db, Duration::from_secs(30), |queue| {
-        queue.run_lease(run.id()).unwrap().is_none()
-    });
-    stop.store(true, Ordering::SeqCst);
-    let outcome = joined(supervisor, "the supervisor to stop").unwrap();
-    fs::write(
-        exit_request_path(run.run_dir().unwrap()).with_extension("go"),
-        "",
-    )
-    .unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"][0]["run_id"], json!(run.id()), "{outcome}");
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    let errors = payloads(&detail, "runtime_error");
-    assert_eq!(errors.len(), 1, "{errors:?}");
-    assert_eq!(errors[0]["code"], "hold_canceled");
-    assert_eq!(errors[0]["lease_released"], true);
-    let applied = queue_events(&db, "queue_hold_applied");
-    assert_eq!(applied.len(), 1, "{applied:?}");
-    assert_eq!(applied[0]["answer"], "cancel_affected");
-    assert_eq!(applied[0]["released"], json!([run.id()]));
-    // Each run in one list only: this supervisor held it.
-    assert_eq!(applied[0]["elsewhere"], json!([]), "{applied:?}");
-    assert_eq!(applied[0]["moved_on"], json!([]), "{applied:?}");
-    assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
-    let status = runtime::status(&db).unwrap();
-    let recover = status["attention"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|a| a["run_id"] == json!(run.id()))
-        .unwrap_or_else(|| panic!("{status}"));
-    assert_eq!(recover["next"], "recover run", "{status}");
 }
 
 /// A recovery job of an ended run that failed around the hold starts

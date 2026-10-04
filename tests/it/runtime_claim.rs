@@ -7,81 +7,6 @@ use dagq::infrastructure::git_binary::git_executable;
 
 use runtime_support::*;
 
-#[test]
-fn failed_agent_retains_worktree_and_does_not_complete_task() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    let backend = TestWorkspace::new(
-        &db,
-        false,
-        "commit work; receipt \"$(git rev-parse HEAD)\"; exit 7",
-    );
-    let outcome = supervise(&db, &repo, &backend).unwrap();
-    backend.join();
-    assert_eq!(outcome["runs"][0]["status"], "failed");
-    // A nonzero session exit is final; the receipt is not validated and the
-    // workspace stays open for inspection.
-    assert_eq!(outcome["runs"][0]["result_commit"], Value::Null);
-    assert_eq!(outcome["runs"][0]["workspace_closed_at"], Value::Null);
-    assert_eq!(
-        outcome["runs"][0]["last_error"],
-        "session exited with code 7"
-    );
-    assert!(backend.closed().is_empty());
-    // A failed run is reported through `watch`, not a notification (ADR-0022).
-    assert!(backend.notifications.lock().unwrap().is_empty());
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    assert_eq!(detail.task.status(), TaskStatus::InProgress);
-    assert_eq!(
-        detail.runs[0].last_error(),
-        Some("session exited with code 7")
-    );
-    assert!(Path::new(detail.runs[0].worktree_path().unwrap()).exists());
-    assert!(queue.run_leases().unwrap().is_empty());
-    assert!(queue.candidates().unwrap().is_empty());
-    // A failed run does not free the task automatically, but a person may give up on it.
-    assert_eq!(runtime::doctor(&db, true).unwrap()["runs"], json!([]));
-    queue
-        .transition(TaskId::new(1), TaskAction::Cancel)
-        .unwrap();
-    assert_eq!(
-        queue.show(TaskId::new(1)).unwrap().task.status(),
-        TaskStatus::Canceled
-    );
-}
-
-#[test]
-fn provisioning_failure_retains_the_run_and_stops_claiming_other_tasks() {
-    let (_dir, repo, db) = fixture();
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    add_ready_task(&mut queue, "untouched", &[]);
-    let backend = TestWorkspace::new(&db, true, VALID_AGENT);
-    let error = format!("{:#}", supervise(&db, &repo, &backend).unwrap_err());
-    assert!(error.contains("injected workspace"), "{error}");
-    assert!(error.contains("claiming stopped"), "{error}");
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    let run = &detail.runs[0];
-    assert_eq!(run.status(), RunStatus::Starting);
-    assert!(run.last_error().unwrap().contains("injected workspace"));
-    assert!(Path::new(run.worktree_path().unwrap()).exists());
-    // The environment is suspect: the second candidate was left alone.
-    assert!(queue.show(TaskId::new(2)).unwrap().runs.is_empty());
-    assert_eq!(queue.candidates().unwrap()[0].id(), TaskId::new(2));
-    // The run is disowned, so nothing has to be stopped before recovering it;
-    // the drained loop took its registration with it.
-    assert!(queue.run_leases().unwrap().is_empty());
-    assert!(queue.supervisors().unwrap().is_empty());
-    let report = runtime::doctor(&db, true).unwrap();
-    assert_eq!(report["supervisors"], json!([]));
-    assert_eq!(report["runs"][0]["recoverable"], true);
-    assert_eq!(
-        runtime::recover(&db, run.id()).unwrap()["run"]["status"],
-        "interrupted"
-    );
-    assert_eq!(queue.show(TaskId::new(1)).unwrap().runs.len(), 1);
-}
-
 /// A failed backend call carries the call, the error and the load it
 /// failed under: the load average (or null), the supervisor's slots held
 /// and its `--parallel` (task 109).
@@ -106,22 +31,26 @@ fn assert_backend_failure(
     assert_eq!(event.payload["parallel"], 4);
 }
 
-/// cmux failing to create, close or send is recorded as
-/// `backend_call_failed` on the run, next to (and before) what the
-/// supervisor already recorded for it: the abandon's `runtime_error`, and
-/// `cleanup_failed`; `stats` counts them and raises `backend_failures`.
+/// A workspace cmux fails to create leaves the run `starting` and stops
+/// claiming. The failure is recorded as `backend_call_failed` on the run
+/// before the supervisor's own `runtime_error`, which carries the call's
+/// code and op (ADR-0034) — moved from the interactive
+/// `failed_backend_calls_are_recorded_with_the_load_and_counted_by_stats`
+/// that task 1437 deleted.
 #[test]
-fn failed_backend_calls_are_recorded_with_the_load_and_counted_by_stats() {
-    interactive_workers();
-    // create: the provisioning failure abandons the run.
+fn provisioning_failure_retains_the_run_and_stops_claiming_other_tasks() {
     let (_dir, repo, db) = fixture();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    add_ready_task(&mut queue, "untouched", &[]);
     let backend = TestWorkspace::new(&db, true, VALID_AGENT);
-    supervise(&db, &repo, &backend).unwrap_err();
-    let detail = SqliteQueue::open(&db)
-        .unwrap()
-        .show(TaskId::new(1))
-        .unwrap();
+    let error = format!("{:#}", supervise(&db, &repo, &backend).unwrap_err());
+    assert!(error.contains("injected workspace"), "{error}");
+    assert!(error.contains("claiming stopped"), "{error}");
+    let detail = queue.show(TaskId::new(1)).unwrap();
     let run = &detail.runs[0];
+    assert_eq!(run.status(), RunStatus::Starting);
+    assert!(run.last_error().unwrap().contains("injected workspace"));
+    assert!(Path::new(run.worktree_path().unwrap()).exists());
     let failures = backend_failures(&detail);
     assert_eq!(failures.len(), 1, "{failures:?}");
     assert_backend_failure(
@@ -131,19 +60,41 @@ fn failed_backend_calls_are_recorded_with_the_load_and_counted_by_stats() {
         "injected workspace creation failure",
         run.id(),
     );
+    assert_eq!(failures[0].payload["code"], "backend_failed");
     let abandoned = detail
         .events
         .iter()
         .find(|e| e.kind == "runtime_error")
         .unwrap();
     assert!(failures[0].id < abandoned.id);
-    // The abandon carries the backend call's code and op (ADR-0034).
-    assert_eq!(failures[0].payload["code"], "backend_failed");
     assert_eq!(abandoned.payload["code"], "backend_failed");
     assert_eq!(abandoned.payload["op"], "create");
+    // The environment is suspect: the second candidate was left alone.
+    assert!(queue.show(TaskId::new(2)).unwrap().runs.is_empty());
+    assert_eq!(queue.candidates().unwrap()[0].id(), TaskId::new(2));
+    // The run is disowned, so nothing has to be stopped before recovering it;
+    // the drained loop took its registration with it.
+    assert!(queue.run_leases().unwrap().is_empty());
+    assert!(queue.supervisors().unwrap().is_empty());
+    let report = runtime::doctor(&db, true).unwrap();
+    assert_eq!(report["supervisors"], json!([]));
+    assert_eq!(report["runs"][0]["recoverable"], true);
+    assert_eq!(
+        runtime::recover(&db, run.id()).unwrap()["run"]["status"],
+        "interrupted"
+    );
+    assert_eq!(queue.show(TaskId::new(1)).unwrap().runs.len(), 1);
+}
 
-    // close: `cleanup_failed` stays as it was, and the failure is recorded too.
-    let (_dir, db, detail) = run_agent_with(VALID_AGENT, true);
+/// cmux failing to close an accepted run's workspace is recorded as
+/// `backend_call_failed` on the run before the supervisor's
+/// `cleanup_failed`, which carries the call's code and op beside its
+/// message and workspace — moved from the interactive
+/// `failed_backend_calls_are_recorded_with_the_load_and_counted_by_stats`
+/// that task 1437 deleted.
+#[test]
+fn a_failed_workspace_close_is_recorded_before_the_cleanup_failure_with_its_code_and_op() {
+    let (_dir, _db, detail) = run_agent_with(VALID_AGENT, true);
     let run = &detail.runs[0];
     let failures = backend_failures(&detail);
     assert_eq!(failures.len(), 1, "{failures:?}");
@@ -154,6 +105,7 @@ fn failed_backend_calls_are_recorded_with_the_load_and_counted_by_stats() {
         "injected workspace close failure",
         run.id(),
     );
+    assert_eq!(failures[0].payload["code"], "backend_failed");
     let cleanup = detail
         .events
         .iter()
@@ -171,114 +123,124 @@ fn failed_backend_calls_are_recorded_with_the_load_and_counted_by_stats() {
     assert_eq!(cleanup.payload["code"], "backend_failed");
     assert_eq!(cleanup.payload["op"], "close");
     assert!(failures[0].id < cleanup.id);
-    let stats = runtime::stats(&db, &Default::default()).unwrap();
-    assert_eq!(stats["backend_failures"]["count"], 1, "{stats}");
-    assert!(
-        !stats["alerts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|a| a["kind"] == "backend_failures")
-    );
+}
 
-    // send: the /exit that timed out is not typed again, and the run goes
-    // on, its screen read for whether the /exit got there (task 326).
+/// A cmux whose first `capture_timeouts` screen reads and every `exists`
+/// time out, as cmux does under load; nothing else is called.
+struct TimingOutCmux {
+    capture_timeouts: AtomicUsize,
+}
+
+impl WorkspaceBackend for TimingOutCmux {
+    fn preflight(&self) -> Result<()> {
+        unimplemented!()
+    }
+    fn preflight_detached(&self, _: &SupervisorEnvironment) -> Result<()> {
+        unimplemented!()
+    }
+    fn create(&self, _: &Task, _: &TaskRun, _: &str, _: &WorkspaceTags) -> Result<String> {
+        unimplemented!()
+    }
+    fn create_resume(&self, _: &Task, _: &TaskRun, _: &str, _: &WorkspaceTags) -> Result<String> {
+        unimplemented!()
+    }
+    fn send_text(&self, _: &str, _: &str) -> Result<()> {
+        unimplemented!()
+    }
+    fn send_enter(&self, _: &str) -> Result<()> {
+        unimplemented!()
+    }
+    fn capture(&self, _: &str) -> Result<String> {
+        let left = &self.capture_timeouts;
+        if left
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            bail!("cmux read-screen failed: Command timed out");
+        }
+        Ok("ready".into())
+    }
+    fn close(&self, _: &str) -> Result<()> {
+        unimplemented!()
+    }
+    fn set_color(&self, _: &str, _: &str) -> Result<()> {
+        unimplemented!()
+    }
+    fn set_status(&self, _: &str, _: &str, _: &str, _: &str) -> Result<()> {
+        unimplemented!()
+    }
+    fn pin(&self, _: &str) -> Result<()> {
+        unimplemented!()
+    }
+    fn send_exit(&self, _: &str) -> Result<()> {
+        unimplemented!()
+    }
+    fn exists(&self, _: &str) -> Result<bool> {
+        bail!("cmux list-workspaces failed: Command timed out")
+    }
+    fn listed_workspace_ids(&self) -> Result<Vec<String>> {
+        unimplemented!()
+    }
+    fn create_named(&self, _: &str, _: &Path, _: &str, _: &WorkspaceTags) -> Result<String> {
+        unimplemented!()
+    }
+    fn ensure_group(&self, _: &str, _: &str) -> Result<String> {
+        unimplemented!()
+    }
+    fn notify(&self, _: &str, _: &str, _: Option<&str>) -> Result<()> {
+        unimplemented!()
+    }
+    fn retry_backoff(&self) -> Duration {
+        Duration::from_millis(10)
+    }
+}
+
+/// A timed-out effect-free call (`capture`, `exists`) is made again after
+/// a backoff doubled each time, and every failed attempt is recorded as
+/// `backend_call_failed` on the run whose workspace it was for, with its
+/// number of the backend's attempts and the backoff that followed it (none
+/// after the last) — moved from the interactive
+/// `failed_backend_calls_are_recorded_with_the_load_and_counted_by_stats`
+/// that task 1437 deleted.
+#[test]
+fn timed_out_effect_free_calls_are_retried_with_a_doubling_backoff_each_attempt_recorded() {
     let (_dir, repo, db) = fixture();
-    let mut backend = TestWorkspace::new(
-        &db,
-        false,
-        "commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
-    );
-    backend.send_times_out = true;
-    let cursor = runtime::status(&db).unwrap()["cursor"].as_i64().unwrap();
-    let outcome = supervise(&db, &repo, &backend).unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
-    let detail = SqliteQueue::open(&db)
-        .unwrap()
-        .show(TaskId::new(1))
+    let run = provision_under(&repo, &db, "owner");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue
+        .workspace_created(run.id(), &LeaseToken::new("owner"), "timing-out-ws")
         .unwrap();
-    let run = &detail.runs[0];
-    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
-    let failures = backend_failures(&detail);
-    assert_eq!(failures.len(), 1, "{failures:?}");
-    assert_backend_failure(
-        failures[0],
-        "send_exit",
-        Some(WORKSPACE_ID),
-        "did not finish within 30s",
-        run.id(),
-    );
-    // cmux's timeout is told apart from its other failures.
-    assert_eq!(failures[0].payload["code"], "backend_timeout");
-    // One of up to three attempts, not made again: the screen shows the
-    // /exit got there (task 354).
-    assert_eq!(failures[0].payload["attempt"], 1);
-    assert_eq!(failures[0].payload["max_attempts"], 3);
-    assert_eq!(failures[0].payload["retry_after_ms"], Value::Null);
-    assert!(!detail.events.iter().any(|e| e.kind == "runtime_error"));
-
-    // capture: a timeout is read again after a backoff, each failed
-    // attempt recorded with its number and the backoff that followed.
-    *backend.screen.lock().unwrap() = READY_SCREEN.into();
-    backend.capture_timeouts.store(2, Ordering::SeqCst);
-    let recording = runtime::RecordingBackend::new(&backend, db.clone(), None);
-    assert_eq!(recording.capture(WORKSPACE_ID).unwrap(), READY_SCREEN);
-    let detail = SqliteQueue::open(&db)
-        .unwrap()
-        .show(TaskId::new(1))
-        .unwrap();
-    let retried: Vec<_> = backend_failures(&detail)
+    let cmux = TimingOutCmux {
+        capture_timeouts: AtomicUsize::new(2),
+    };
+    let recording = runtime::RecordingBackend::new(&cmux, db.clone(), None);
+    assert_eq!(recording.capture("timing-out-ws").unwrap(), "ready");
+    assert!(recording.exists("timing-out-ws").is_err());
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let attempts: Vec<_> = backend_failures(&detail)
         .into_iter()
-        .filter(|e| e.payload["op"] == "capture")
         .map(|e| {
+            assert_eq!(e.run_id.as_ref(), Some(run.id()));
+            assert_eq!(e.payload["workspace_id"], "timing-out-ws");
+            assert_eq!(e.payload["code"], "backend_timeout");
             (
+                e.payload["op"].clone(),
                 e.payload["attempt"].clone(),
                 e.payload["max_attempts"].clone(),
                 e.payload["retry_after_ms"].clone(),
-                e.payload["code"].clone(),
             )
         })
         .collect();
     assert_eq!(
-        retried,
+        attempts,
         [
-            (json!(1), json!(3), json!(10), json!("backend_timeout")),
-            (json!(2), json!(3), json!(20), json!("backend_timeout")),
+            (json!("capture"), json!(1), json!(3), json!(10)),
+            (json!("capture"), json!(2), json!(3), json!(20)),
+            (json!("exists"), json!(1), json!(3), json!(10)),
+            (json!("exists"), json!(2), json!(3), json!(20)),
+            (json!("exists"), json!(3), json!(3), Value::Null),
         ]
     );
-    // Recorded on the run whose workspace it read.
-    assert_eq!(retried.len(), 2);
-
-    // A second failure in the same window is an alert.
-    backend.exists_fails = true;
-    let recording = runtime::RecordingBackend::new(&backend, db.clone(), None);
-    assert!(recording.exists(WORKSPACE_ID).is_err());
-    let stats = runtime::stats(
-        &db,
-        &dagq::domain::stats::StatsQuery {
-            since: Some(EventId::new(cursor).into()),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    let failures = &stats["backend_failures"];
-    assert_eq!(failures["count"], 4, "{stats}");
-    assert_eq!(
-        failures["by_op"],
-        json!({"capture": 2, "exists": 1, "send_exit": 1})
-    );
-    // The codes of the window, per code and per kind.
-    let codes = &stats["reason_codes"];
-    // `backend_call_failed` is `backend_failures`' to count, not again here.
-    assert_eq!(codes["by_kind"].get("backend_call_failed"), None, "{stats}");
-    assert_eq!(failures["max_slots"], 1);
-    assert!(failures["max_load_avg"].is_f64() || failures["max_load_avg"].is_null());
-    assert!(stats["alerts"].as_array().unwrap().contains(&json!({
-        "kind": "backend_failures", "task_id": null, "run_id": null,
-        "value": 4, "threshold": 2
-    })));
 }
 
 /// A workspace group cmux cannot make leaves a warning in the supervisor
@@ -1445,271 +1407,6 @@ fn killed_supervisor_registration_is_reported_stale_and_never_deleted() {
             .unwrap()
             .len(),
         3
-    );
-}
-
-/// Workspaces as the test lists them, or a failing cmux.
-struct Listing(Result<Vec<(&'static str, String)>, &'static str>);
-
-impl dagq::application::stats::WorkspaceListing for Listing {
-    fn list_workspaces(&self) -> Result<Vec<dagq::domain::stats::ListedWorkspace>> {
-        match &self.0 {
-            Ok(workspaces) => Ok(workspaces
-                .iter()
-                .map(|(id, description)| dagq::domain::stats::ListedWorkspace {
-                    id: (*id).to_owned(),
-                    description: Some(description.clone()),
-                })
-                .collect()),
-            Err(message) => bail!("{message}"),
-        }
-    }
-}
-
-/// Task 182 (ADR-0043 decision 5): a running worker that stopped with a
-/// background `cargo test` left running and no receipt is in `stats`'s
-/// `running_alerts`, judged by the `[stall]` of the main checkout's
-/// `dagq.toml`, with the cmux workspaces that do not match the runs.
-#[test]
-fn stats_raise_running_alerts_for_a_worker_idle_without_a_receipt() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    fs::write(
-        repo.join("dagq.toml"),
-        "[stall]\nidle_without_receipt_secs = 600\nbackground_alert_secs = 3600\n",
-    )
-    .unwrap();
-    let run = orphan_run(&repo, &db, "owner", dead_pid(), dead_pid());
-    let run_dir = PathBuf::from(run.run_dir().unwrap());
-    // The session's markers count only when written after its
-    // `agent_started` event, which the queue stamps with the wall clock to
-    // the millisecond. A marker written right after it can share that
-    // millisecond, so the markers are stamped at `now`, the next whole
-    // second of the wall clock, past the event whatever the timing.
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
-        + 1;
-    let written_at_now = |path: PathBuf, text: &str| {
-        fs::write(&path, text).unwrap();
-        fs::File::options()
-            .write(true)
-            .open(&path)
-            .unwrap()
-            .set_modified(UNIX_EPOCH + Duration::from_secs(now as u64))
-            .unwrap();
-    };
-    written_at_now(
-        run_dir.join("idle.json"),
-        r#"{"hook_event_name":"Stop","background_tasks":[{"id":"b1","type":"shell","status":"running","description":"cargo test","command":"cargo test --locked"}]}"#,
-    );
-    let one_shot = |late: i64| {
-        runtime::OneShot::new(Generators {
-            clock: Arc::new(ManualClock::at(now + late)),
-            ids: Arc::new(FixedIds(Mutex::new(vec![]))),
-        })
-    };
-    let hash = QueueLocation::explicit(&db).hash();
-    let left = Listing(Ok(vec![
-        (
-            "WS-LEFT",
-            format!(
-                "dagq role=worker queue={hash} run=99999999-9999-4999-8999-999999999999 task=7"
-            ),
-        ),
-        (
-            "WS-OTHER",
-            "dagq role=worker queue=other run=x task=1".to_owned(),
-        ),
-    ]));
-
-    // Past 600 seconds of idle, under the hour of background work.
-    let stats = one_shot(700)
-        .stats(&db, &Default::default(), Some(&left))
-        .unwrap();
-    assert_eq!(stats["stall_config"]["source"], "file", "{stats}");
-    assert_eq!(stats["stall_config"]["idle_without_receipt_secs"], 600);
-    assert_eq!(
-        stats["workspace_check"],
-        json!({"status": "checked", "workspaces": 2})
-    );
-    let alerts = stats["running_alerts"].as_array().unwrap();
-    let idle = alerts
-        .iter()
-        .find(|alert| alert["kind"] == "idle_without_receipt")
-        .unwrap_or_else(|| panic!("no idle_without_receipt alert: {stats}"));
-    assert_eq!(idle["run_id"], run.id().as_str());
-    assert_eq!(idle["phase"], "session");
-    assert_eq!(idle["threshold"], 600);
-    assert!(idle["value"].as_i64().unwrap() >= 699, "{idle}");
-    assert_eq!(idle["nudged"], false);
-    assert_eq!(idle["asked"], false);
-    assert_eq!(
-        idle["background_tasks"][0]["command"],
-        "cargo test --locked"
-    );
-    let mismatches: Vec<_> = alerts
-        .iter()
-        .filter(|alert| alert["kind"] == "workspace_mismatch")
-        .map(|alert| (alert["reason"].clone(), alert["workspace_id"].clone()))
-        .collect();
-    assert_eq!(
-        mismatches,
-        [
-            (json!("run_without_workspace"), json!("ws-1")),
-            (json!("workspace_without_run"), json!("WS-LEFT")),
-        ]
-    );
-    assert!(
-        !alerts
-            .iter()
-            .any(|alert| alert["kind"] == "long_background")
-    );
-    // The finished-run alerts are where they were.
-    assert!(stats["alerts"].as_array().unwrap().is_empty(), "{stats}");
-
-    // Hours later the background work is an alert too; a cmux that cannot
-    // be asked leaves only the workspaces unjudged.
-    let stats = one_shot(4 * 3600)
-        .stats(
-            &db,
-            &Default::default(),
-            Some(&Listing(Err("cmux is gone"))),
-        )
-        .unwrap();
-    let kinds: Vec<_> = stats["running_alerts"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|alert| alert["kind"].as_str().unwrap().to_owned())
-        .collect();
-    assert_eq!(kinds, ["idle_without_receipt", "long_background"]);
-    assert_eq!(stats["workspace_check"]["status"], "unavailable");
-    assert!(
-        stats["workspace_check"]["reason"]
-            .as_str()
-            .unwrap()
-            .contains("cmux is gone")
-    );
-
-    // A receipt of the session ends the idle alert; without cmux nothing
-    // is said about the workspaces.
-    written_at_now(run_dir.join("receipt.json"), "{}");
-    let stats = one_shot(700).stats(&db, &Default::default(), None).unwrap();
-    assert_eq!(stats["running_alerts"], json!([]), "{stats}");
-    assert_eq!(stats["workspace_check"]["status"], "unavailable");
-}
-
-/// Task 331 (ADR-0043 decision 5): background work is timed from the first
-/// idle marker that listed it as running, from the hook's log, so a session
-/// that keeps taking turns does not restart the count.
-#[test]
-fn stats_time_background_work_from_its_first_marker() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    let run = orphan_run(&repo, &db, "owner", dead_pid(), dead_pid());
-    let run_dir = PathBuf::from(run.run_dir().unwrap());
-    let running = |ids: &[&str]| {
-        let tasks: Vec<Value> = ids
-            .iter()
-            .map(|id| json!({"id": id, "status": "running", "description": id, "command": "sleep"}))
-            .collect();
-        json!({"hook_event_name": "Stop", "background_tasks": tasks}).to_string()
-    };
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
-    fs::write(run_dir.join("idle.json"), running(&["b1", "b2"])).unwrap();
-    let background = |log: String| {
-        fs::write(run_dir.join("idle.log"), log).unwrap();
-        let stats = runtime::OneShot::new(Generators {
-            clock: Arc::new(ManualClock::at(now + 60)),
-            ids: Arc::new(FixedIds(Mutex::new(vec![]))),
-        })
-        .stats(&db, &Default::default(), None)
-        .unwrap();
-        stats["running_alerts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|alert| alert["kind"] == "long_background")
-            .cloned()
-    };
-
-    // b1 first listed 50 minutes ago, through turns taken since; a line
-    // that is not a marker is skipped.
-    let alert = background(format!(
-        "{}\t{}\nnot a marker\n{}\t{}\n{now}\t{}\n",
-        now - 3000,
-        running(&["b1"]),
-        now - 100,
-        running(&["b1", "b2"]),
-        running(&["b1", "b2"]),
-    ))
-    .expect("long_background");
-    assert_eq!(alert["run_id"], run.id().as_str());
-    assert_eq!(alert["threshold"], 1800);
-    assert!(
-        (3060..3065).contains(&alert["value"].as_i64().unwrap()),
-        "{alert}"
-    );
-    assert_eq!(alert["background_tasks"][1]["id"], "b2");
-
-    // A marker without b1 ended it: the b1 listed since started later.
-    assert!(
-        background(format!(
-            "{}\t{}\n{}\t{}\n{}\t{}\n",
-            now - 3000,
-            running(&["b1"]),
-            now - 1000,
-            running(&[]),
-            now - 900,
-            running(&["b1", "b2"]),
-        ))
-        .is_none()
-    );
-    // The hook keeps only the lines from the last marker that listed no
-    // running task (task 422): the times read from that tail are the same
-    // as from the whole log.
-    let tail = format!(
-        "{}\t{}\n{}\t{}\n{now}\t{}\n",
-        now - 2500,
-        running(&[]),
-        now - 2400,
-        running(&["b2"]),
-        running(&["b1", "b2"]),
-    );
-    let whole = background(format!(
-        "{}\t{}\n{}\t{}\n{tail}",
-        now - 4000,
-        running(&["b2"]),
-        now - 3000,
-        running(&["b1", "b2"]),
-    ))
-    .expect("long_background");
-    assert_eq!(background(tail), Some(whole.clone()));
-    assert!(
-        (2460..2465).contains(&whole["value"].as_i64().unwrap()),
-        "{whole}"
-    );
-    // Without a log (a session started before the hook kept one), the
-    // marker's time is all there is.
-    fs::remove_file(run_dir.join("idle.log")).unwrap();
-    let stats = runtime::OneShot::new(Generators {
-        clock: Arc::new(ManualClock::at(now + 1900)),
-        ids: Arc::new(FixedIds(Mutex::new(vec![]))),
-    })
-    .stats(&db, &Default::default(), None)
-    .unwrap();
-    assert!(
-        stats["running_alerts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|alert| alert["kind"] == "long_background"),
-        "{stats}"
     );
 }
 

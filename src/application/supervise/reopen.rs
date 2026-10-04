@@ -128,9 +128,6 @@ impl Supervisor<'_> {
         let Phase::Session(watch) = &mut slot.phase else {
             return Ok(Reopen::GiveUp);
         };
-        if !headless(&run) {
-            return Ok(Reopen::GiveUp);
-        }
         let known = self.reopens.contains_key(run.id());
         let reopen = self.reopens.entry(run.id().clone()).or_default();
         if let Some(lost) = lost {
@@ -266,7 +263,6 @@ impl Supervisor<'_> {
                 watch.workspace = workspace;
                 watch.startup = Instant::now();
                 watch.silent = false;
-                watch.agent_seen = None;
                 if let Some(reopen) = self.reopens.get_mut(run.id()) {
                     reopen.opened = Some(Instant::now());
                 }

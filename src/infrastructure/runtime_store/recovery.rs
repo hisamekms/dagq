@@ -337,6 +337,25 @@ impl SqliteQueue {
         let Some(previous) = lease_parked_run(&tx, id, token, now, true)? else {
             return Ok(None);
         };
+        let run = if run.worker_mode() == crate::domain::worker::WorkerMode::Interactive {
+            tx.execute(
+                "UPDATE task_runs SET worker_mode='headless' WHERE id=?1",
+                [id],
+            )?;
+            run_event(
+                &tx,
+                id,
+                EventKind::WorkerModeConverted,
+                json!({"phase":"resume", "from":"interactive", "to":"headless", "reason":"interactive_worker_removed"}),
+            )?;
+            let provider = run.actual_provider();
+            run.running_on(crate::domain::worker::Worker {
+                provider,
+                mode: crate::domain::worker::WorkerMode::Headless,
+            })
+        } else {
+            run
+        };
         let attempt = plan.attempt;
         run_event(
             &tx,

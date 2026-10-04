@@ -4,8 +4,8 @@ type: design
 title: Supervisor and workspace lifecycle
 status: current
 created: 2026-09-21
-updated: 2026-09-29
-last_verified: 2026-09-29
+updated: 2026-10-04 # task 1437
+last_verified: 2026-10-04 # task 1437
 scope: runtime
 related:
   - design-supervisor-lifecycle-throughput-review
@@ -68,12 +68,12 @@ ready task (dependencies completed)
   → completion receipt, session idle │ (the session stays open)
   → validate receipt, commit, clean state (own thread)
   → awaiting_integration: headless review (claude -p) → verdict
-      pass    → /exit → close workspace → land (single slot, push)
+      pass    → exit request → close workspace → land (single slot, push)
       revise  → fixed request to the live session → rewritten receipt
                 → validate → review again (at most 2 revises)
-      concern / 3rd non-pass → /exit → close → approve_landing ask
+      concern / 3rd non-pass → exit request → close → approve_landing ask
       unreadable verdict     → review once more (review_retried)
-      review failed          → review span closed → /exit → close → approve_landing ask + review_failed
+      review failed          → review span closed → exit request → close → approve_landing ask + review_failed
   → release run lease               ─┘
   → integrate (by hand, one at a time, FIFO by validation):
       integrating → rebase onto main → re-validate → squash-land on main
@@ -97,7 +97,7 @@ a run whose resumes are used up is failed with its resume_exhausted alert)
                        (retry / resume / cancel + the job's options), applied once answered;
                        a job's option goes back to the job
       job failed → triage_failed (triage by hand, read as recover by hand)
-live session alert (long_background, idle_process, stuck_exit, prompt_waiting)
+live worker alert (stalled, idle_process)
   → the same recovery job in the session's slot → repair applied, or the alert's ask;
     a failed job → the alert's ask too (reason_category recovery_failed, ADR-t609-1)
 ```
@@ -238,17 +238,17 @@ live session alert (long_background, idle_process, stuck_exit, prompt_waiting)
 
 - [wrapperが黙ったsession](supervisor-lifecycle/silent-wrapper.md)
 
-### ダイアログ待ちの検知
+### ダイアログ待ちの検知（廃止）
 
-- [ダイアログ待ちの検知](supervisor-lifecycle/prompt-waiting.md)
+- [ダイアログ待ちの検知](supervisor-lifecycle/prompt-waiting.md)（task 1437で廃止。過去の記録の読み方）
 
 ### receiptの無いidleの検知
 
 - [receiptの無いidleの検知](supervisor-lifecycle/idle-without-receipt.md)
 
-### backgroundの処理が終わらないときの復旧job
+### 生きているsessionの復旧job
 
-- [生きているsessionの復旧job](supervisor-lifecycle/background-recovery-job.md)（`long_background`、`idle_process`、`stuck_exit`、`prompt_waiting`）
+- [生きているsessionの復旧job](supervisor-lifecycle/background-recovery-job.md)（stalled、非対話の idle_process）
 
 ### workerの質問への回答の送信
 

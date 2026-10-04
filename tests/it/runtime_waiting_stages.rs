@@ -5,6 +5,7 @@ use crate::{common, runtime_support};
 use dagq::domain::EventKind;
 use dagq::domain::stats::timestamp_millis;
 
+use runtime_support::headless::request_turn_left_by_a_dead_supervisor;
 use runtime_support::*;
 
 /// The resume timeout of these tests: long enough for a session to ask
@@ -64,19 +65,6 @@ case "$PROMPT" in
 esac
 "#
 );
-
-/// [`REVISE_ASKING_AGENT`] in an interactive session, which waits for the
-/// revise request and the answer in `$MESSAGE`.
-const REVISE_ASKING_SESSION: &str = r#"
-commit work; receipt "$(git rev-parse HEAD)"; idle
-await_file "$MESSAGE"; rm "$MESSAGE"
-"$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which line?' --cmux /usr/bin/true > /dev/null || exit 70
-idle
-await_file "$MESSAGE"
-cp "$MESSAGE" answer.txt; rm "$MESSAGE"
-git add answer.txt; git commit -q -m answer
-receipt "$(git rev-parse HEAD)"; idle; await_exit
-"#;
 
 /// A worker whose change lands beside the others' (`two.txt`).
 const BESIDE_AGENT: &str = r#"
@@ -258,6 +246,116 @@ fn a_question_while_revising_waits_outside_the_slot_with_its_clock_stopped() {
     assert_eq!(stats["waiting"]["started"]["worker_question"], 1, "{stats}");
 }
 
+/// A supervisor that takes over a revising headless run whose supervisor
+/// died adopts its wait from the run's events without a free slot
+/// (decision 11): the one slot goes to another task, which lands, while
+/// the question the session asked in its turn of the revise stays open;
+/// the answer then reaches the live session as its next turn, and the run
+/// lands. Moved from the deleted interactive
+/// `an_adopted_revise_keeps_waiting_outside_the_slot` (task 1437).
+#[test]
+fn an_adopted_headless_revise_keeps_waiting_outside_the_slot() {
+    let (_dir, repo, db) = fixture();
+    add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "second", &[]);
+    let backend = TestWorkspace::new(&db, false, REVISE_ASKING_AGENT);
+    backend.script_for(2, BESIDE_AGENT);
+    let backend = Arc::new(backend);
+    let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
+    assert_eq!(run.task_id(), TaskId::new(1));
+    let idle = run.idle_marker_path().unwrap();
+    wait_until(&db, common::STEP_LIMIT, |_| idle.is_file());
+    let head = git_out(
+        Path::new(run.worktree_path().unwrap()),
+        &["rev-parse", "HEAD"],
+    );
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE task_runs SET status='awaiting_integration', result_commit=?2 WHERE id=?1",
+            rusqlite::params![run.id(), head],
+        )
+        .unwrap();
+    // The request is sent a second after the session's idle marker.
+    await_second_after(modified_second(&idle));
+    let sent_at = unix_second_now();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    for (kind, payload) in [
+        (
+            EventKind::ValidationFinished,
+            json!({"status": "awaiting_integration"}),
+        ),
+        (EventKind::ReviewStarted, json!({"attempt": 1})),
+        (
+            EventKind::ReviewFinished,
+            json!({"verdict": "revise", "reasons": ["say which line"], "summary": "one gap", "attempt": 1}),
+        ),
+        (
+            EventKind::ReviseRequested,
+            json!({"attempt": 1, "reasons": ["say which line"], "sent_at": sent_at}),
+        ),
+    ] {
+        queue.record_runtime_event(run.id(), kind, payload).unwrap();
+    }
+    let text = "dagq: the supervisor's review asks for changes (revise 1 of 2).";
+    fs::write(Path::new(run.run_dir().unwrap()).join("revise-1.txt"), text).unwrap();
+    request_turn_left_by_a_dead_supervisor(&db, &run, text, "revise request");
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        open_ask_of(queue, &run, AskKind::WorkerQuestion).is_some()
+    });
+    let ask = open_ask_of(&mut queue, &run, AskKind::WorkerQuestion).unwrap();
+    // What the dead supervisor recorded when the run began to wait.
+    queue
+        .record_runtime_event(
+            run.id(),
+            EventKind::RunWaitingStarted,
+            json!({"ask_id": ask, "ask_kind": "worker_question", "phase": "revise",
+                   "status": "awaiting_integration", "waiting": 1, "limit": 4}),
+        )
+        .unwrap();
+    age_lease(&db, &run, 31);
+    let reviewer = Arc::new(TestReviewer::new(&[
+        verdict("pass", &[], "fine"),
+        verdict("pass", &[], "fixed"),
+    ]));
+    let supervisor = supervise_in_thread(
+        &db,
+        &repo,
+        &backend,
+        Some(&reviewer),
+        supervise_options(1, true),
+    );
+    wait_until(&db, Duration::from_secs(60), |queue| {
+        run_of(queue, 2).is_some_and(|two| two.status() == RunStatus::Integrated)
+    });
+    assert_eq!(
+        adoption_events(&queue.show(TaskId::new(1)).unwrap()).len(),
+        1
+    );
+    let status = runtime::status(&db).unwrap();
+    assert_eq!(status["waiting"][0]["run_id"], json!(run.id()), "{status}");
+    assert_eq!(status["waiting"][0]["phase"], "revise");
+    assert_eq!(status["waiting"][0]["state"], "waiting");
+    assert!(queue.read_ask(ask).unwrap().closed_at.is_none());
+
+    queue.answer(ask, "the first").unwrap();
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(queue.run(run.id()).unwrap().status(), RunStatus::Integrated);
+    assert_eq!(events_of(&db, run.id(), "run_waiting_started").len(), 1);
+    assert_eq!(
+        events_of(&db, run.id(), "run_waiting_ended")[0]["cause"],
+        "answered"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join("answer.txt")).unwrap(),
+        format!("answer to ask {ask}: the first")
+    );
+    // The revise was not written again: the first turn, the revise's and
+    // the answer's.
+    assert_eq!(stub_calls(&run).len(), 3, "{:?}", stub_calls(&run));
+}
+
 /// A resumed session that asks a `worker_question` waits for the answer
 /// outside the one slot with its clock stopped (decisions 1, 15 and 16):
 /// the question held past the resume timeout does not get it `/exit`, and
@@ -332,7 +430,7 @@ fn a_question_while_resuming_waits_outside_the_slot_and_gets_its_answer() {
         ended[0]["waited_secs"].as_u64().unwrap() >= STAGE_TIMEOUT.as_secs(),
         "{ended:?}"
     );
-    let texts = session_texts(&backend, &detail.runs[0]);
+    let texts = session_texts(&detail.runs[0]);
     assert!(
         texts
             .iter()
@@ -421,106 +519,4 @@ fn a_resume_question_past_the_limit_waits_in_its_slot_with_its_clock_stopped() {
     assert_eq!(payloads(&detail, "ask_delivered").len(), 1);
     let stats = runtime::stats(&db, &Default::default()).unwrap();
     assert_eq!(stats["waiting"]["deferred"], 1, "{stats}");
-}
-
-/// A supervisor that takes over a revising run whose supervisor died
-/// adopts its wait from the run's events without a free slot (decision
-/// 11): the one slot goes to another task, which lands, while the question
-/// stays open; the answer then reaches the live session, and the run lands.
-#[test]
-fn an_adopted_revise_keeps_waiting_outside_the_slot() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "second", &[]);
-    let backend = TestWorkspace::new(&db, false, REVISE_ASKING_SESSION);
-    backend.script_for(2, BESIDE_AGENT);
-    let backend = Arc::new(backend);
-    let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
-    let idle = run.idle_marker_path().unwrap();
-    wait_until(&db, Duration::from_secs(20), |_| idle.is_file());
-    let head = git_out(
-        Path::new(run.worktree_path().unwrap()),
-        &["rev-parse", "HEAD"],
-    );
-    Connection::open(&db)
-        .unwrap()
-        .execute(
-            "UPDATE task_runs SET status='awaiting_integration', result_commit=?2 WHERE id=?1",
-            rusqlite::params![run.id(), head],
-        )
-        .unwrap();
-    // The request is sent a second after the session's idle marker.
-    await_second_after(modified_second(&idle));
-    let sent_at = unix_second_now();
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    for (kind, payload) in [
-        (
-            EventKind::ValidationFinished,
-            json!({"status": "awaiting_integration"}),
-        ),
-        (EventKind::ReviewStarted, json!({"attempt": 1})),
-        (
-            EventKind::ReviewFinished,
-            json!({"verdict": "revise", "reasons": ["say which line"], "summary": "one gap", "attempt": 1}),
-        ),
-        (
-            EventKind::ReviseRequested,
-            json!({"attempt": 1, "reasons": ["say which line"], "sent_at": sent_at}),
-        ),
-    ] {
-        queue.record_runtime_event(run.id(), kind, payload).unwrap();
-    }
-    fs::write(resume_message_path(run.run_dir().unwrap()), "revise 1").unwrap();
-    wait_until(&db, Duration::from_secs(30), |queue| {
-        open_ask_of(queue, &run, AskKind::WorkerQuestion).is_some()
-    });
-    let ask = open_ask_of(&mut queue, &run, AskKind::WorkerQuestion).unwrap();
-    // What the dead supervisor recorded when the run began to wait.
-    queue
-        .record_runtime_event(
-            run.id(),
-            EventKind::RunWaitingStarted,
-            json!({"ask_id": ask, "ask_kind": "worker_question", "phase": "revise",
-                   "status": "awaiting_integration", "waiting": 1, "limit": 4}),
-        )
-        .unwrap();
-    age_lease(&db, &run, 31);
-    let reviewer = Arc::new(TestReviewer::new(&[
-        verdict("pass", &[], "fine"),
-        verdict("pass", &[], "fixed"),
-    ]));
-    let supervisor = supervise_in_thread(
-        &db,
-        &repo,
-        &backend,
-        Some(&reviewer),
-        supervise_options(1, true),
-    );
-    wait_until(&db, Duration::from_secs(60), |queue| {
-        run_of(queue, 2).is_some_and(|two| two.status() == RunStatus::Integrated)
-    });
-    assert_eq!(
-        adoption_events(&queue.show(TaskId::new(1)).unwrap()).len(),
-        1
-    );
-    let status = runtime::status(&db).unwrap();
-    assert_eq!(status["waiting"][0]["run_id"], json!(run.id()), "{status}");
-    assert_eq!(status["waiting"][0]["phase"], "revise");
-    assert_eq!(status["waiting"][0]["state"], "waiting");
-    assert!(queue.read_ask(ask).unwrap().closed_at.is_none());
-
-    queue.answer(ask, "the first").unwrap();
-    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(queue.run(run.id()).unwrap().status(), RunStatus::Integrated);
-    assert_eq!(events_of(&db, run.id(), "run_waiting_started").len(), 1);
-    assert_eq!(
-        events_of(&db, run.id(), "run_waiting_ended")[0]["cause"],
-        "answered"
-    );
-    assert_eq!(
-        fs::read_to_string(repo.join("answer.txt")).unwrap(),
-        format!("answer to ask {ask}: the first")
-    );
 }

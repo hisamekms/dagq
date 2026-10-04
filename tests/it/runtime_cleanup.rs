@@ -2259,7 +2259,7 @@ fn a_drain_on_a_provisioning_failure_takes_cleanup_requests_and_lets_the_job_fin
     // fails with build outputs, the second lands.
     let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
     backend.script_for(3, &format!("await_file \"$EXIT.go\"; {BUILDING_AGENT}"));
-    backend.script_for(4, PROMPTED_AGENT);
+    backend.script_for(4, GATED_AGENT);
     add_ready_task(&mut queue, "failing", &[]);
     add_ready_task(&mut queue, "landing", &[]);
     let files = GatedFiles::default();

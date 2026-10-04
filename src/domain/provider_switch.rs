@@ -255,8 +255,8 @@ impl WorkerRoute {
 }
 
 /// How a supervisor with the adapters of `supported` runs each worker a
-/// task may ask for, while `held` says why a provider is held: as asked
-/// when it has its adapters and its provider is not held; otherwise
+/// task may ask for, while `held` says why a provider is held: headless
+/// on the requested provider when it is usable; otherwise
 /// headless on the other provider when that one is (ADR-t813-2 decisions
 /// 2 and 6); otherwise not at all (no route: the task waits).
 pub fn routes(
@@ -267,10 +267,14 @@ pub fn routes(
     Worker::ALL
         .iter()
         .filter_map(|&requested| {
-            if usable(&requested) {
+            let preferred = Worker {
+                provider: requested.provider,
+                mode: WorkerMode::Headless,
+            };
+            if usable(&preferred) {
                 return Some(WorkerRoute {
                     requested,
-                    actual: requested,
+                    actual: preferred,
                     switch: None,
                 });
             }
@@ -473,14 +477,23 @@ mod tests {
     fn a_worker_runs_as_asked_or_on_the_other_provider() {
         let all = Worker::ALL.to_vec();
         let none = |_: Provider| None;
-        assert_eq!(routes(&all, none), WorkerRoute::direct(&all));
+        let normalized = routes(&all, none);
+        for requested in Worker::ALL {
+            let route = route_of(&normalized, requested).unwrap();
+            assert_eq!(route.actual.provider, requested.provider);
+            assert_eq!(route.actual.mode, WorkerMode::Headless);
+            assert_eq!(route.switch, None);
+        }
         // No Codex: its tasks run on headless Claude.
         let claude_only = [CLAUDE, CLAUDE_HEADLESS];
         let routes_now = routes(&claude_only, none);
         let codex = route_of(&routes_now, CODEX).unwrap();
         assert_eq!(codex.actual, CLAUDE_HEADLESS);
         assert_eq!(codex.switch, Some(SwitchReason::ExecutableMissing));
-        assert_eq!(route_of(&routes_now, CLAUDE).unwrap().actual, CLAUDE);
+        assert_eq!(
+            route_of(&routes_now, CLAUDE).unwrap().actual,
+            CLAUDE_HEADLESS
+        );
         // Claude held: every task runs on Codex.
         let claude_held = |p: Provider| (p == Provider::Claude).then_some(SwitchReason::UsageLimit);
         let routes_now = routes(&all, claude_held);

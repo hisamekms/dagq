@@ -1576,34 +1576,32 @@ enum BrokerCommand {
 
 #[derive(Subcommand, Clone)]
 enum RunCommand {
-    /// Print the last lines of the screen of the run's session (at most
-    /// 200), recorded as `screen_read` without its text. A headless run has
-    /// no screen: the reply names its turns' directory instead.
+    /// Name the directory of the run's turns: no worker run has a screen
+    /// since task 1437 (the reply's `screen` is null, with the reason).
+    /// Nothing is read or recorded, and cmux is not needed.
     Screen {
         /// Run ID, or a task ID for the task's latest run.
         run: String,
-        /// How many lines, from the bottom; more than 200 is cut to 200.
+        /// Accepted and ignored: there is no screen to read.
         #[arg(long, default_value_t = dagq::application::screen::DEFAULT_LINES)]
         lines: usize,
-        /// cmux executable.
+        /// Accepted and ignored: cmux is not used.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
     },
-    /// Type into the run's session one or more keys of the set (enter,
-    /// escape, up, down, 1-9, or exit alone for `/exit`), or the answer of
-    /// an answered ask on that run as `answer to ask <id>: <answer>`; no
-    /// other text. Recorded as `screen_input_sent`. A headless run is
-    /// refused.
+    /// Refused for every run: no worker run takes keys or text since task
+    /// 1437. Answer the run's asks with `answer`; the supervisor delivers
+    /// the answer as the session's next turn. cmux is not needed.
     Send {
         /// Run ID, or a task ID for the task's latest run.
         run: String,
-        /// A key to send; repeat for several, sent in order.
+        /// Accepted and ignored.
         #[arg(long = "key", conflicts_with = "answer")]
         keys: Vec<String>,
-        /// The answered ask whose answer is typed.
+        /// Accepted and ignored.
         #[arg(long)]
         answer: Option<i64>,
-        /// cmux executable.
+        /// Accepted and ignored: cmux is not used.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
     },
@@ -2965,7 +2963,8 @@ fn execute(cli: Cli) -> Result<Value> {
         };
     }
     // `report` and `graph --out` write files but no queue state; `run log`
-    // and `planner log` read a session's log, recording nothing.
+    // and `planner log` read a session's log, and `run screen` / `run send`
+    // only read the run (task 1437), recording nothing.
     let mut queue = if reads_only(&cli.command)
         || matches!(
             cli.command,
@@ -2973,6 +2972,8 @@ fn execute(cli: Cli) -> Result<Value> {
                 | Command::Graph { .. }
                 | Command::Run {
                     command: RunCommand::Log { .. }
+                        | RunCommand::Screen { .. }
+                        | RunCommand::Send { .. }
                 }
                 | Command::Planner {
                     command: PlannerCommand::Log { .. }
@@ -3786,17 +3787,14 @@ fn execute(cli: Cli) -> Result<Value> {
             )?
         }
         Command::Run { command } => {
-            use dagq::application::screen::{self, RunTarget, ScreenPorts, Sending};
-            use dagq::infrastructure::adapters::{ClaudeCode, Cmux, executable};
+            use dagq::application::screen::{self, RunTarget};
+            use dagq::infrastructure::adapters::{Cmux, executable};
             match command {
-                RunCommand::Screen { run, lines, cmux } => screen::run_screen(
-                    &mut queue,
-                    &Cmux {
-                        executable: executable(&cmux)?,
-                    },
-                    &RunTarget::parse(&run)?,
-                    lines,
-                )?,
+                // Neither builds a cmux nor an agent adapter: they read only
+                // the queue (task 1437).
+                RunCommand::Screen { run, .. } => {
+                    screen::run_screen(&mut queue, &RunTarget::parse(&run)?)?
+                }
                 RunCommand::Log { run, lines, follow } => {
                     let log = dagq::application::session_log::run_log(
                         &mut queue,
@@ -3804,27 +3802,8 @@ fn execute(cli: Cli) -> Result<Value> {
                     )?;
                     print_session_log(&log, lines, follow)?
                 }
-                RunCommand::Send {
-                    run,
-                    keys,
-                    answer,
-                    cmux,
-                } => {
-                    let sending = Sending::parse(&keys, answer)?;
-                    screen::run_send(
-                        &mut queue,
-                        &ScreenPorts {
-                            cmux: &Cmux {
-                                executable: executable(&cmux)?,
-                            },
-                            // Only Claude Code has a session with a screen.
-                            signals: &ClaudeCode {
-                                executable: PathBuf::from("claude"),
-                            },
-                        },
-                        &RunTarget::parse(&run)?,
-                        &sending,
-                    )?
+                RunCommand::Send { run, .. } => {
+                    screen::run_send(&mut queue, &RunTarget::parse(&run)?)?
                 }
                 RunCommand::CloseWorkspaces {
                     run,

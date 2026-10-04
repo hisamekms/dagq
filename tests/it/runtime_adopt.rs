@@ -1,7 +1,6 @@
 //! Runtime tests: Concurrent runs and the adoption of runs from a dead supervisor.
 use crate::common;
 use crate::runtime_support;
-use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
 
 use runtime_support::*;
@@ -22,7 +21,7 @@ fn independent_tasks_run_concurrently_and_a_dependent_starts_after_integration()
     // Starting a session is bounded by the same limit as the test's waits:
     // under a loaded host a run's wrapper took longer than the backend's
     // default windows to register.
-    let mut backend = TestWorkspace::new(&db, false, PROMPTED_AGENT);
+    let mut backend = TestWorkspace::new(&db, false, GATED_AGENT);
     backend.registration_timeout = common::STEP_LIMIT;
     // The independent task changes another file than the first: once the
     // first lands, the landing recheck finds the waiting second still
@@ -205,128 +204,6 @@ fn first_event(events: &[dagq::domain::RunEvent], task: i64, kinds: &[&str]) -> 
         .iter()
         .find(|e| e.task_id == Some(TaskId::new(task)) && kinds.contains(&e.kind.as_str()))
         .map(|e| e.id.as_i64())
-}
-
-/// A run that does not answer the exit request keeps its lease without
-/// disturbing the run next to it, and is validated once its session ends.
-#[test]
-fn a_timed_out_run_is_kept_while_the_other_run_is_accepted() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    add_ready_task(&mut queue, "healthy", &[]);
-    let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    backend.script_for(1, HELD_AGENT);
-    // Kept at a second: the healthy session exits at its /exit under the
-    // same timeout, and may take longer than a short one on a loaded host.
-    backend.exit_timeout = Duration::from_secs(1);
-    let backend = Arc::new(backend);
-    let supervisor = {
-        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise(&db, &repo, &backend))
-    };
-    wait_until(&db, Duration::from_secs(30), |queue| {
-        event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"exit_request_timed_out")
-            && queue
-                .show(TaskId::new(2))
-                .unwrap()
-                .runs
-                .first()
-                .is_some_and(|r| {
-                    r.status() == RunStatus::AwaitingIntegration
-                        && queue.run_lease(r.id()).unwrap().is_none()
-                })
-    });
-    let stuck = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
-    let healthy = queue.show(TaskId::new(2)).unwrap().runs[0].clone();
-    assert!(healthy.last_error().is_none());
-    assert!(healthy.workspace_closed_at().is_some());
-    // The stuck session held back the /exit that followed its review, so
-    // its run is already accepted and its supervisor still holds it.
-    assert_eq!(stuck.status(), RunStatus::AwaitingIntegration);
-    assert!(stuck.last_error().is_none());
-    assert!(queue.run_lease(stuck.id()).unwrap().is_some());
-    // Its stuck_exit ask is the attention, not the run (task 104).
-    wait_until(&db, Duration::from_secs(10), |queue| {
-        queue.asks(AskQuery::default()).unwrap().iter().any(|a| {
-            a.kind == AskKind::StuckExit
-                && a.run_id.as_ref().map(RunId::as_str) == Some(stuck.id().as_str())
-        })
-    });
-    let status = runtime::status(&db).unwrap();
-    assert!(run_attention_of(&status, stuck.id()).is_none(), "{status}");
-    assert!(runtime::recover(&db, stuck.id()).is_err());
-
-    release_held_session(stuck.run_dir().unwrap());
-    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
-    backend.join();
-    assert_eq!(outcome["outcome"], "finished");
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(outcome["runs"].as_array().unwrap().len(), 2);
-    for task in [1, 2] {
-        assert_eq!(
-            queue.show(TaskId::new(task)).unwrap().runs[0].status(),
-            RunStatus::AwaitingIntegration
-        );
-    }
-    assert!(queue.run_leases().unwrap().is_empty());
-}
-
-/// A nonzero session exit and a rejected receipt in one pass leave the
-/// accepted run untouched; every run releases its lease.
-#[test]
-fn failed_runs_in_the_same_pass_do_not_affect_the_accepted_run() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    add_ready_task(&mut queue, "crashes", &[]);
-    add_ready_task(&mut queue, "no receipt", &[]);
-    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    backend.script_for(2, "commit work; exit 7");
-    backend.script_for(3, "commit work");
-    let outcome = supervise(&db, &repo, &backend).unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]));
-    let mut statuses: Vec<(i64, String)> = outcome["runs"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|r| {
-            (
-                r["task_id"].as_i64().unwrap(),
-                r["status"].as_str().unwrap().to_owned(),
-            )
-        })
-        .collect();
-    statuses.sort();
-    assert_eq!(
-        statuses,
-        [
-            (1, "awaiting_integration".to_owned()),
-            (2, "failed".to_owned()),
-            (3, "failed".to_owned())
-        ]
-    );
-    assert!(
-        queue.show(TaskId::new(3)).unwrap().runs[0]
-            .last_error()
-            .unwrap()
-            .contains("receipt was not submitted")
-    );
-    assert_eq!(backend.closed(), [workspace_id(0)]);
-    assert!(queue.run_leases().unwrap().is_empty());
-    // Only the accepted run is listed (goal 98): the failed ones nobody
-    // holds are not.
-    let doctor = runtime::doctor(&db, true).unwrap();
-    let listed = doctor["runs"].as_array().unwrap();
-    assert_eq!(listed.len(), 1, "{doctor}");
-    assert_eq!(listed[0]["task_id"], 1);
-    assert_eq!(listed[0]["status"], "awaiting_integration");
-    assert_eq!(listed[0]["recoverable"], false);
-    // Failed tasks can be retried independently; the accepted one still owns its slot.
-    queue.transition(TaskId::new(2), TaskAction::Ready).unwrap();
-    assert!(queue.transition(TaskId::new(1), TaskAction::Ready).is_err());
-    assert_eq!(queue.candidates().unwrap()[0].id(), TaskId::new(2));
 }
 
 /// Recovering one orphaned run touches neither the lease nor the processes of
@@ -739,704 +616,6 @@ fn integrating_run_with_a_stale_lease_is_not_adopted() {
     assert_eq!(payloads(&detail, "review_started").len(), 2);
 }
 
-/// The previous supervisor already asked the session to exit: the adopter
-/// rebuilds that from the `exit_requested` event and does not send `/exit`
-/// again, and its receipt observation is not repeated either.
-#[test]
-fn adopter_does_not_repeat_an_exit_request_the_previous_supervisor_sent() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    // The session ends on its own once the adopter has watched it for a
-    // while, as it would after the /exit that was already typed.
-    let backend = Arc::new(TestWorkspace::new(
-        &db,
-        false,
-        &format!("commit work; receipt \"$(git rev-parse HEAD)\"; idle; {HOLD}"),
-    ));
-    let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
-    let receipt = PathBuf::from(run.receipt_path().unwrap());
-    wait_until(&db, Duration::from_secs(10), |_| receipt.is_file());
-    // What the previous supervisor recorded before it died.
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    queue
-        .record_runtime_event(
-            run.id(),
-            EventKind::ReceiptObserved,
-            json!({"path": run.receipt_path(), "validated": false}),
-        )
-        .unwrap();
-    queue
-        .record_runtime_event(run.id(), EventKind::SessionIdleObserved, json!({}))
-        .unwrap();
-    queue
-        .record_runtime_event(
-            run.id(),
-            EventKind::ExitRequested,
-            json!({"workspace_id": WORKSPACE_ID, "timeout_secs": 120}),
-        )
-        .unwrap();
-    age_lease(&db, &run, 31);
-    let options = supervise_options(4, true);
-    let passes = options.passes.clone();
-    let supervisor = {
-        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
-    };
-    wait_until(&db, Duration::from_secs(30), |queue| {
-        !adoption_events(&queue.show(TaskId::new(1)).unwrap()).is_empty()
-    });
-    // Several passes over the idle session send nothing.
-    await_passes(&passes, SOME_PASSES);
-    release_held_session(run.run_dir().unwrap());
-    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
-    backend.join();
-    assert_eq!(
-        outcome["runs"][0]["status"], "awaiting_integration",
-        "{outcome}"
-    );
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 0);
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    assert_eq!(adoption_events(&detail).len(), 1);
-    let kinds = event_kinds(&detail);
-    assert_eq!(kinds.iter().filter(|k| **k == "exit_requested").count(), 1);
-    assert_eq!(
-        kinds.iter().filter(|k| **k == "receipt_observed").count(),
-        1
-    );
-    assert_eq!(
-        kinds
-            .iter()
-            .filter(|k| **k == "session_idle_observed")
-            .count(),
-        1
-    );
-    assert!(!kinds.contains(&"exit_request_timed_out"));
-}
-
-/// A session whose dialog the previous supervisor raised as an
-/// `answer_prompt` ask (`prompt_waiting`) and whose receipt it then observed
-/// (`receipt_observed`) is adopted with the ask still open: the adopter
-/// closes it because of the receipt, before the session exits (task 239).
-#[test]
-fn adopter_closes_the_answer_prompt_ask_of_a_dialog_the_receipt_ended() {
-    interactive_workers();
-    adopt_receipt_after_dialog(false);
-}
-
-/// The same when the previous supervisor had the run wait outside its slot
-/// for that ask: the adopter ends the wait (`phase_changed`) and closes the
-/// ask from the slot.
-#[test]
-fn adopter_ends_the_wait_for_a_dialog_the_receipt_ended_and_closes_its_ask() {
-    interactive_workers();
-    adopt_receipt_after_dialog(true);
-}
-
-fn adopt_receipt_after_dialog(waited: bool) {
-    let (_dir, repo, db) = fixture();
-    let backend = Arc::new(TestWorkspace::new(&db, false, HELD_AGENT));
-    let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
-    let receipt = PathBuf::from(run.receipt_path().unwrap());
-    wait_until(&db, Duration::from_secs(10), |_| receipt.is_file());
-    // The dialog is still drawn, so only the receipt ends it.
-    *backend.screen.lock().unwrap() = "\
- Do you want to proceed?
-
- ❯ 1. Yes
-   2. No
-
- Esc to cancel
-"
-    .into();
-    // What the previous supervisor recorded before it died.
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    queue
-        .record_runtime_event(
-            run.id(),
-            EventKind::PromptWaiting,
-            json!({
-                "workspace_id": WORKSPACE_ID,
-                "excerpt": "Do you want to proceed?",
-                "screen_hash": "dialog",
-                "prompt": "choice",
-            }),
-        )
-        .unwrap();
-    let ask = queue
-        .ask(dagq::domain::NewAsk {
-            recommendation: None,
-            confidence: None,
-            topics: Vec::new(),
-            kind: AskKind::AnswerPrompt,
-            task_id: Some(run.task_id()),
-            run_id: Some(run.id().clone()),
-            question: "run waits at a choice dialog".into(),
-            options: vec![],
-            asked_by: "supervisor".into(),
-            reason_category: dagq::domain::AskReason::RecoveryFailed,
-            finding_id: None,
-            request_id: None,
-        })
-        .unwrap()
-        .ask;
-    if waited {
-        queue
-            .record_runtime_event(
-                run.id(),
-                EventKind::RunWaitingStarted,
-                json!({
-                    "ask_id": ask.id,
-                    "ask_kind": "answer_prompt",
-                    "phase": "session",
-                    "status": "running",
-                    "waiting": 1,
-                    "limit": 4,
-                }),
-            )
-            .unwrap();
-    }
-    queue
-        .record_runtime_event(
-            run.id(),
-            EventKind::ReceiptObserved,
-            json!({"path": run.receipt_path(), "validated": false}),
-        )
-        .unwrap();
-    age_lease(&db, &run, 31);
-    let supervisor = {
-        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise(&db, &repo, &backend))
-    };
-    wait_until(&db, Duration::from_secs(30), |queue| {
-        queue.read_ask(ask.id).unwrap().closed_at.is_some()
-    });
-    // The session is still up: the receipt closed the ask, not its exit.
-    let closed = queue.read_ask(ask.id).unwrap();
-    assert_eq!(
-        closed.answer.as_deref(),
-        Some("the receipt arrived; closed by the runtime")
-    );
-    assert!(!adoption_events(&queue.show(TaskId::new(1)).unwrap()).is_empty());
-    release_held_session(run.run_dir().unwrap());
-    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(
-        outcome["runs"][0]["status"], "awaiting_integration",
-        "{outcome}"
-    );
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    let kinds = event_kinds(&detail);
-    assert_eq!(kinds.iter().filter(|k| **k == "prompt_waiting").count(), 1);
-    assert_eq!(
-        kinds.iter().filter(|k| **k == "receipt_observed").count(),
-        1
-    );
-    assert!(!kinds.contains(&"prompt_cleared"), "{kinds:?}");
-    // The adopter closes the ask from its slot, without a wait for it.
-    assert_eq!(
-        kinds
-            .iter()
-            .filter(|k| **k == "run_waiting_started")
-            .count(),
-        usize::from(waited),
-        "{kinds:?}"
-    );
-    let ended = payloads(&detail, "run_waiting_ended");
-    if waited {
-        assert_eq!(ended.len(), 1, "{kinds:?}");
-        assert_eq!(ended[0]["cause"], "phase_changed");
-    } else {
-        assert!(ended.is_empty(), "{kinds:?}");
-    }
-}
-
-/// Background work a session left after its receipt is waited for up to
-/// the resume timeout from the recorded `receipt_observed`, not from the
-/// adoption (task 879): a run adopted with a receipt older than the timeout
-/// and its background work still running goes on to validation on the
-/// adopter's first passes, its `session_idle_observed` saying the work
-/// still ran. Handovers more frequent than the timeout no longer hold it.
-#[test]
-fn adopted_wait_after_the_receipt_runs_from_the_recorded_receipt() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    let mut backend = TestWorkspace::new(
-        &db,
-        false,
-        "commit work; receipt \"$(git rev-parse HEAD)\"; idle_bg; await_exit",
-    );
-    let resume_timeout = Duration::from_secs(60);
-    backend.resume_timeout = resume_timeout;
-    let backend = Arc::new(backend);
-    let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
-    let idle = run.idle_marker_path().unwrap();
-    wait_until(&db, Duration::from_secs(10), |_| idle.is_file());
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    queue
-        .record_runtime_event(
-            run.id(),
-            EventKind::ReceiptObserved,
-            json!({"path": run.receipt_path(), "validated": false}),
-        )
-        .unwrap();
-    // Observed by the dead supervisor twice the timeout ago.
-    backdate_event(&db, &run, "receipt_observed", 120);
-    age_lease(&db, &run, 31);
-    let supervisor = {
-        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise(&db, &repo, &backend))
-    };
-    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    assert_eq!(adoption_events(&detail).len(), 1);
-    let observed = payloads(&detail, "session_idle_observed");
-    assert_eq!(observed.len(), 1, "{observed:?}");
-    assert_eq!(observed[0]["background_running"], true);
-    let kinds = event_kinds(&detail);
-    assert_eq!(
-        kinds.iter().filter(|k| **k == "receipt_observed").count(),
-        1
-    );
-    assert!(position(&kinds, "run_adopted") < position(&kinds, "session_idle_observed"));
-    let waited = between(&mut queue, "run_adopted", "session_idle_observed");
-    assert!(
-        waited < resume_timeout,
-        "went on {waited:?} after the adoption"
-    );
-}
-
-/// Move the latest `kind` event of `run` `seconds` into the past, as if an
-/// earlier supervisor recorded it then.
-pub(crate) fn backdate_event(db: &Path, run: &TaskRun, kind: &str, seconds: i64) {
-    Connection::open(db)
-        .unwrap()
-        .execute(
-            "UPDATE run_events SET created_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?3 || ' seconds')
-             WHERE id=(SELECT MAX(id) FROM run_events WHERE run_id=?1 AND kind=?2)",
-            rusqlite::params![run.id(), kind, -seconds],
-        )
-        .unwrap();
-}
-
-/// The time between the first `from` and the first `to` event of task 1.
-pub(crate) fn between(queue: &mut SqliteQueue, from: &str, to: &str) -> Duration {
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    let at = |kind: &str| {
-        let event = detail.events.iter().find(|e| e.kind == kind).unwrap();
-        dagq::domain::stats::timestamp_millis(&event.created_at).unwrap()
-    };
-    Duration::from_millis(u64::try_from(at(to) - at(from)).unwrap())
-}
-
-/// The exit timeout of an adopted run runs from the recorded
-/// `exit_requested`, not from the adoption (task 879): a session that still
-/// ignores a request older than the timeout is reported on the adopter's
-/// first passes, with one `exit_requested` event in total, and the adopter
-/// keeps the run until the session ends.
-#[test]
-fn adopted_exit_request_times_out_from_its_recorded_request() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
-    let exit_timeout = Duration::from_secs(60);
-    backend.exit_timeout = exit_timeout;
-    let backend = Arc::new(backend);
-    let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    queue
-        .record_runtime_event(
-            run.id(),
-            EventKind::ExitRequested,
-            json!({"workspace_id": WORKSPACE_ID, "timeout_secs": 60}),
-        )
-        .unwrap();
-    // Requested by the dead supervisor twice the timeout ago.
-    backdate_event(&db, &run, "exit_requested", 120);
-    age_lease(&db, &run, 31);
-    let supervisor = {
-        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise(&db, &repo, &backend))
-    };
-    wait_until(&db, Duration::from_secs(30), |queue| {
-        event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"exit_request_timed_out")
-    });
-    let waited = between(&mut queue, "run_adopted", "exit_request_timed_out");
-    assert!(
-        waited < exit_timeout,
-        "timed out {waited:?} after the adoption"
-    );
-    assert_eq!(queue.run(run.id()).unwrap().status(), RunStatus::Running);
-    let lease = queue.run_lease(run.id()).unwrap().unwrap();
-    assert_ne!(lease.token, "dead-supervisor");
-    // Let the fake session out, the way a person answering it would.
-    fs::write(exit_request_path(run.run_dir().unwrap()), "").unwrap();
-    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 0);
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    assert_eq!(adoption_events(&detail).len(), 1);
-    let kinds = event_kinds(&detail);
-    assert_eq!(kinds.iter().filter(|k| **k == "exit_requested").count(), 1);
-    assert_eq!(
-        kinds
-            .iter()
-            .filter(|k| **k == "exit_request_timed_out")
-            .count(),
-        1
-    );
-    assert!(!kinds.contains(&"runtime_error"));
-    assert!(queue.run_leases().unwrap().is_empty());
-}
-
-/// A run whose exit request already timed out under the previous supervisor
-/// is adopted without recording the timeout again, and is validated once
-/// its session ends.
-#[test]
-fn adopted_run_does_not_record_an_exit_timeout_twice() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
-    backend.exit_timeout = Duration::from_millis(500);
-    let backend = Arc::new(backend);
-    let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    for kind in [EventKind::ExitRequested, EventKind::ExitRequestTimedOut] {
-        queue
-            .record_runtime_event(
-                run.id(),
-                kind,
-                json!({"workspace_id": WORKSPACE_ID, "timeout_secs": 120}),
-            )
-            .unwrap();
-    }
-    age_lease(&db, &run, 31);
-    let options = supervise_options(4, true);
-    let passes = options.passes.clone();
-    let supervisor = {
-        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise_retrying_with(&db, &repo, &backend, &options))
-    };
-    wait_until(&db, Duration::from_secs(30), |queue| {
-        !adoption_events(&queue.show(TaskId::new(1)).unwrap()).is_empty()
-    });
-    // Past the adopter's own timeout, counted from the adoption before now,
-    // and passes after it.
-    thread::sleep(backend.exit_timeout);
-    await_passes(&passes, SOME_PASSES);
-    // The stuck_exit ask follows once its recovery job escalated, a process
-    // of its own that may take longer than that.
-    wait_until(&db, Duration::from_secs(30), |queue| {
-        !queue.asks(AskQuery::default()).unwrap().is_empty()
-    });
-    let kinds = event_kinds(&queue.show(TaskId::new(1)).unwrap())
-        .into_iter()
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    assert_eq!(
-        kinds
-            .iter()
-            .filter(|k| *k == "exit_request_timed_out")
-            .count(),
-        1
-    );
-    assert!(queue.run_lease(run.id()).unwrap().is_some());
-    // The timeout the dead supervisor recorded without its ask gets one
-    // stuck_exit ask from the adopter, once.
-    let asks = queue.asks(AskQuery::default()).unwrap();
-    assert_eq!(asks.len(), 1, "{asks:?}");
-    assert_eq!(asks[0].kind, AskKind::StuckExit);
-    assert_eq!(backend.notifications.lock().unwrap().len(), 1);
-    fs::write(exit_request_path(run.run_dir().unwrap()), "").unwrap();
-    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 0);
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    let kinds = event_kinds(&detail);
-    assert_eq!(
-        kinds
-            .iter()
-            .filter(|k| **k == "exit_request_timed_out")
-            .count(),
-        1
-    );
-    assert!(!kinds.contains(&"runtime_error"));
-    assert!(queue.read_ask(asks[0].id).unwrap().closed_at.is_some());
-    // The other notification is the ask of its stand-in review.
-    let notifications = backend.notifications.lock().unwrap();
-    assert_eq!(notifications.len(), 2, "{notifications:?}");
-    assert!(notifications[1].0.ends_with("approve_landing"));
-}
-
-/// An adopted run whose timeout already has a stuck_exit ask (answered by
-/// the inbox here, the session still up) is not asked again; the runtime
-/// only closes the answered ask once the session exits.
-#[test]
-fn adopted_run_does_not_ask_about_its_exit_twice() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
-    backend.exit_timeout = Duration::from_millis(500);
-    let backend = Arc::new(backend);
-    let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    for kind in [EventKind::ExitRequested, EventKind::ExitRequestTimedOut] {
-        queue
-            .record_runtime_event(
-                run.id(),
-                kind,
-                json!({"workspace_id": WORKSPACE_ID, "timeout_secs": 120}),
-            )
-            .unwrap();
-    }
-    let asked = queue
-        .ask(NewAsk {
-            recommendation: None,
-            confidence: None,
-            topics: Vec::new(),
-            kind: AskKind::StuckExit,
-            task_id: None,
-            run_id: Some(run.id().clone()),
-            question: "send /exit".into(),
-            options: Vec::new(),
-            asked_by: "supervisor".into(),
-            reason_category: dagq::domain::AskReason::RecoveryFailed,
-            finding_id: None,
-            request_id: None,
-        })
-        .unwrap()
-        .ask;
-    queue.answer(asked.id, "sent /exit").unwrap();
-    age_lease(&db, &run, 31);
-    let options = supervise_options(4, true);
-    let passes = options.passes.clone();
-    let supervisor = {
-        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise_retrying_with(&db, &repo, &backend, &options))
-    };
-    wait_until(&db, Duration::from_secs(30), |queue| {
-        !adoption_events(&queue.show(TaskId::new(1)).unwrap()).is_empty()
-    });
-    // Past the adopter's own timeout, counted from the adoption before now,
-    // and passes after it.
-    thread::sleep(backend.exit_timeout);
-    await_passes(&passes, SOME_PASSES);
-    assert_eq!(
-        queue
-            .asks(AskQuery {
-                all: true,
-                ..Default::default()
-            })
-            .unwrap()
-            .len(),
-        1
-    );
-    // No recovery job started for the exit either: its ask would open only
-    // once that job escalated, later than these passes.
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    assert!(
-        payloads(&detail, "recovery_requested")
-            .iter()
-            .all(|p| p["alert"] != "stuck_exit"),
-        "{:?}",
-        event_kinds(&detail)
-    );
-    fs::write(exit_request_path(run.run_dir().unwrap()), "").unwrap();
-    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
-    let closed = queue.read_ask(asked.id).unwrap();
-    assert!(closed.closed_at.is_some());
-    assert_eq!(closed.answer.as_deref(), Some("sent /exit"));
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    let kinds = event_kinds(&detail);
-    assert_eq!(kinds.iter().filter(|k| **k == "ask_answered").count(), 1);
-    // Only the ask of its stand-in review notifies.
-    let notifications = backend.notifications.lock().unwrap();
-    assert_eq!(notifications.len(), 1, "{notifications:?}");
-    assert!(notifications[0].0.ends_with("approve_landing"));
-}
-
-/// A run whose earlier `/exit` timed out and was asked about (the ask
-/// closed since), and whose later `/exit` timed out again under the
-/// previous supervisor without an ask, gets a new stuck_exit ask from the
-/// adopter: only the ask about the latest request counts (task 240).
-#[test]
-fn adopted_run_asks_about_an_exit_that_timed_out_again() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
-    backend.exit_timeout = Duration::from_millis(500);
-    let backend = Arc::new(backend);
-    let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let timed_out = |queue: &mut SqliteQueue| {
-        for kind in [EventKind::ExitRequested, EventKind::ExitRequestTimedOut] {
-            queue
-                .record_runtime_event(
-                    run.id(),
-                    kind,
-                    json!({"workspace_id": WORKSPACE_ID, "timeout_secs": 120}),
-                )
-                .unwrap();
-        }
-    };
-    timed_out(&mut queue);
-    let earlier = queue
-        .ask(NewAsk {
-            recommendation: None,
-            confidence: None,
-            topics: Vec::new(),
-            kind: AskKind::StuckExit,
-            task_id: None,
-            run_id: Some(run.id().clone()),
-            question: "send /exit".into(),
-            options: Vec::new(),
-            asked_by: "supervisor".into(),
-            reason_category: dagq::domain::AskReason::RecoveryFailed,
-            finding_id: None,
-            request_id: None,
-        })
-        .unwrap()
-        .ask;
-    queue.answer(earlier.id, "sent /exit").unwrap();
-    queue.close_ask(earlier.id).unwrap();
-    timed_out(&mut queue);
-    age_lease(&db, &run, 31);
-    let supervisor = {
-        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise(&db, &repo, &backend))
-    };
-    wait_until(&db, Duration::from_secs(30), |queue| {
-        !adoption_events(&queue.show(TaskId::new(1)).unwrap()).is_empty()
-    });
-    // The stuck_exit ask follows once its recovery job escalated.
-    wait_until(&db, Duration::from_secs(30), |queue| {
-        !queue.asks(AskQuery::default()).unwrap().is_empty()
-    });
-    let asks = queue.asks(AskQuery::default()).unwrap();
-    assert_eq!(asks.len(), 1, "{asks:?}");
-    assert_eq!(asks[0].kind, AskKind::StuckExit);
-    assert_ne!(asks[0].id, earlier.id);
-    let kinds = event_kinds(&queue.show(TaskId::new(1)).unwrap())
-        .into_iter()
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    assert_eq!(
-        kinds
-            .iter()
-            .filter(|k| *k == "exit_request_timed_out")
-            .count(),
-        2
-    );
-    fs::write(exit_request_path(run.run_dir().unwrap()), "").unwrap();
-    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 0);
-    assert!(queue.read_ask(asks[0].id).unwrap().closed_at.is_some());
-}
-
-/// The supervisor died after the wrapper reported its exit but before
-/// `supervision_finished`, and, separately, while a run was `validating`.
-/// Both are adopted: the first finishes supervision from the recorded exit,
-/// the second restarts validation from the receipt and worktree.
-#[test]
-fn exited_wrapper_and_validating_runs_are_adopted_and_validated() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    add_ready_task(&mut queue, "validating", &[]);
-    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    // The first session goes idle after its receipt and then ends on its own
-    // (a person's /exit by the old procedure): the adopter must not
-    // send /exit to a session that already exited.
-    backend.script_for(
-        1,
-        "commit work; receipt \"$(git rev-parse HEAD)\"; idle; sleep 0.1",
-    );
-    let exited = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-a");
-    let validating = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-b");
-    backend.join(); // Both sessions end by themselves.
-    for run in [&exited, &validating] {
-        assert!(event_kinds(&queue.show(run.task_id()).unwrap()).contains(&"session_exited"));
-        assert_eq!(queue.run(run.id()).unwrap().status(), RunStatus::Running);
-    }
-    queue
-        .finish_supervision(validating.id(), &LeaseToken::new("dead-b"))
-        .unwrap();
-    assert_eq!(
-        queue.run(validating.id()).unwrap().status(),
-        RunStatus::Validating
-    );
-    age_lease(&db, &exited, 31);
-    age_lease(&db, &validating, 31);
-
-    let outcome = supervise(&db, &repo, &backend).unwrap();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(outcome["runs"].as_array().unwrap().len(), 2);
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 0);
-    let mut closed = backend.closed();
-    closed.sort();
-    assert_eq!(closed, [workspace_id(0), workspace_id(1)]);
-    for run in [&exited, &validating] {
-        let detail = queue.show(run.task_id()).unwrap();
-        let after = &detail.runs[0];
-        assert_eq!(
-            after.status(),
-            RunStatus::AwaitingIntegration,
-            "{}",
-            run.id()
-        );
-        assert!(after.last_error().is_none(), "{after:?}");
-        assert!(!event_kinds(&detail).contains(&"exit_requested"));
-        assert!(after.result_commit().is_some());
-        assert!(after.workspace_closed_at().is_some());
-        let adopted = adoption_events(&detail);
-        assert_eq!(adopted.len(), 1);
-        assert_eq!(adopted[0]["wrapper"]["alive"], Value::Null);
-        assert!(adopted[0]["wrapper"]["exited_at"].is_number());
-        let kinds = event_kinds(&detail);
-        assert_eq!(
-            kinds
-                .iter()
-                .filter(|k| **k == "supervision_finished")
-                .count(),
-            1
-        );
-        assert_eq!(
-            kinds
-                .iter()
-                .filter(|k| **k == "validation_finished")
-                .count(),
-            1
-        );
-        // Validation checks the receipt only; integrate runs the commands.
-        assert!(!kinds.contains(&"verification_command"));
-    }
-    let detail = queue.show(exited.task_id()).unwrap();
-    let kinds = event_kinds(&detail);
-    let position = |kind: &str| kinds.iter().position(|k| *k == kind).unwrap();
-    assert!(position("session_exited") < position("run_adopted"));
-    assert!(position("run_adopted") < position("supervision_finished"));
-    let detail = queue.show(validating.task_id()).unwrap();
-    let kinds = event_kinds(&detail);
-    let position = |kind: &str| kinds.iter().position(|k| *k == kind).unwrap();
-    assert!(position("supervision_finished") < position("run_adopted"));
-    assert!(position("run_adopted") < position("validation_finished"));
-    assert!(queue.run_leases().unwrap().is_empty());
-}
-
 /// Two supervisors with free slots find the same stale lease at once: the
 /// transaction lets exactly one of them adopt, the other sees no lease
 /// under the old token and moves on. One `run_adopted` event, one owner.
@@ -1593,7 +772,7 @@ fn a_supervisor_that_lost_its_lease_stops_touching_the_run() {
     // the lease changed hands and the original returned: a session that
     // finished as soon as the lease moved let the run reach validation
     // before the original noticed under a loaded host.
-    let backend = Arc::new(TestWorkspace::new(&db, false, PROMPTED_AGENT));
+    let backend = Arc::new(TestWorkspace::new(&db, false, GATED_AGENT));
     let options = supervise_options(2, false);
     let original = {
         let (db, repo, backend, options) =
@@ -1637,7 +816,7 @@ fn a_supervisor_that_lost_its_lease_stops_touching_the_run() {
     );
     assert_exit_sent(&backend, &run, 1);
     // The worker had its first turn only: neither supervisor started another.
-    assert_eq!(session_texts(&backend, &run), Vec::<String>::new());
+    assert_eq!(session_texts(&run), Vec::<String>::new());
     assert_eq!(turn_models(&db).len(), 1, "{:?}", turn_models(&db));
     assert_eq!(outcome["outcome"], "stopped");
     assert_eq!(outcome["runs"], json!([]));
@@ -1669,7 +848,7 @@ fn a_supervisor_that_lost_its_lease_stops_touching_the_run() {
 fn a_supervisor_takes_back_a_run_it_lost_only_after_dropping_its_slot() {
     let (_dir, repo, db) = fixture();
     let _dump = EventsOnPanic(db.clone());
-    let backend = Arc::new(TestWorkspace::new(&db, false, PROMPTED_AGENT));
+    let backend = Arc::new(TestWorkspace::new(&db, false, GATED_AGENT));
     // A long tick: the lease most likely moves while the supervisor sleeps
     // between passes, so the next pass judges adoption before it steps the
     // slot that lost the lease.
@@ -1715,7 +894,7 @@ fn a_supervisor_takes_back_a_run_it_lost_only_after_dropping_its_slot() {
         "{outcome}"
     );
     assert_exit_sent(&backend, &run, 1);
-    assert_eq!(session_texts(&backend, &run), Vec::<String>::new());
+    assert_eq!(session_texts(&run), Vec::<String>::new());
     let detail = queue.show(TaskId::new(1)).unwrap();
     let kinds = event_kinds(&detail);
     assert!(!kinds.contains(&"runtime_error"), "{kinds:?}");
@@ -1745,4 +924,316 @@ fn turn_in_progress(db: &Path) -> TaskRun {
         .active_runs()
         .unwrap()
         .remove(0)
+}
+
+/// The fixture's next run started under the dead supervisor `token` once
+/// its headless worker's first turn ended with its receipt: the session
+/// waits between its turns for the next request or the exit request.
+fn receipt_turn_under_dead_supervisor(
+    repo: &Path,
+    db: &Path,
+    backend: &TestWorkspace,
+    token: &str,
+) -> TaskRun {
+    let run = start_run_under_dead_supervisor(repo, db, backend, token);
+    let receipt = PathBuf::from(run.receipt_path().unwrap());
+    wait_until(db, common::STEP_LIMIT, |queue| {
+        receipt.is_file() && queue.has_run_event(run.id(), "turn_finished").unwrap()
+    });
+    run
+}
+
+/// The adopter of `run`, whose previous supervisor recorded an exit
+/// request and died before writing it: once it adopted the run, its passes
+/// over the waiting session write no exit request, and then the test ends
+/// the session as that request would have. The outcome and the run's
+/// events once the supervisor returned, with one `exit_requested`.
+fn adopter_sends_no_second_exit(
+    db: &Path,
+    repo: &Path,
+    backend: &Arc<TestWorkspace>,
+    run: &TaskRun,
+) -> (Value, dagq::domain::TaskDetail) {
+    let options = supervise_options(4, true);
+    let passes = options.passes.clone();
+    let supervisor = {
+        let (db, repo, backend) = (db.to_owned(), repo.to_owned(), backend.clone());
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
+    };
+    wait_until(db, common::STEP_LIMIT, |queue| {
+        queue.has_run_event(run.id(), "run_adopted").unwrap()
+    });
+    // Some whole passes after the adoption ([`await_passes`]), or the end
+    // of a supervisor that ended the session itself and went on.
+    let target = passes.load(Ordering::SeqCst) + SOME_PASSES + 1;
+    let started = Instant::now();
+    while passes.load(Ordering::SeqCst) < target && !supervisor.is_finished() {
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the adopter made no {SOME_PASSES} passes in 60 seconds"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    let exit = dagq::domain::turn::exit_path(Path::new(run.run_dir().unwrap()));
+    assert!(!exit.exists(), "the adopter wrote {}", exit.display());
+    let mut queue = SqliteQueue::open(db).unwrap();
+    let kinds = event_kinds(&queue.show(run.task_id()).unwrap())
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert!(!kinds.iter().any(|k| k == "session_exited"), "{kinds:?}");
+    fs::write(&exit, "").unwrap();
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    backend.join();
+    let detail = queue.show(run.task_id()).unwrap();
+    assert_eq!(adoption_events(&detail).len(), 1);
+    let kinds = event_kinds(&detail);
+    assert_eq!(
+        kinds.iter().filter(|k| **k == "exit_requested").count(),
+        1,
+        "{kinds:?}"
+    );
+    (outcome, detail)
+}
+
+/// The previous supervisor recorded the exit request of the headless
+/// session it watched, and died: the adopter rebuilds that request from
+/// the `exit_requested` event and never sends a second one, nor takes the
+/// run to validation while the session lives, and observes the receipt
+/// only once. Moved from the interactive `runtime_adopt` tests of the same
+/// judgment when the interactive worker went (task 1437).
+#[test]
+fn an_adopter_does_not_repeat_an_exit_request_recorded_while_the_session_worked() {
+    use dagq::domain::EventKind;
+    let (_dir, repo, db) = fixture();
+    let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
+    let run = receipt_turn_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
+    let queue = SqliteQueue::open(&db).unwrap();
+    queue
+        .record_runtime_event(
+            run.id(),
+            EventKind::ReceiptObserved,
+            json!({"path": run.receipt_path(), "validated": false}),
+        )
+        .unwrap();
+    queue
+        .record_runtime_event(
+            run.id(),
+            EventKind::ExitRequested,
+            json!({"workspace_id": run.workspace_id()}),
+        )
+        .unwrap();
+    age_lease(&db, &run, 31);
+    let (outcome, detail) = adopter_sends_no_second_exit(&db, &repo, &backend, &run);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(
+        outcome["runs"][0]["status"], "awaiting_integration",
+        "{outcome}"
+    );
+    let kinds = event_kinds(&detail);
+    assert_eq!(
+        kinds.iter().filter(|k| **k == "receipt_observed").count(),
+        1
+    );
+    // Validated only once the session ended.
+    assert!(
+        position(&kinds, "session_exited") < position(&kinds, "validation_finished"),
+        "{kinds:?}"
+    );
+}
+
+/// A headless run its dead supervisor took to review: `awaiting_integration`
+/// with its validation and `review_started` recorded, then a passing
+/// `review_finished` (or, with `failed_ask`, the `approve_landing` ask of
+/// a review that gave no verdict), then `exit_requested` whose request the
+/// supervisor died before writing.
+fn reviewed_run_whose_exit_was_recorded(
+    repo: &Path,
+    db: &Path,
+    backend: &TestWorkspace,
+    failed_ask: bool,
+) -> TaskRun {
+    use dagq::domain::{AskReason, EventKind};
+    let run = receipt_turn_under_dead_supervisor(repo, db, backend, "dead-supervisor");
+    let head = git_out(
+        Path::new(run.worktree_path().unwrap()),
+        &["rev-parse", "HEAD"],
+    );
+    Connection::open(db)
+        .unwrap()
+        .execute(
+            "UPDATE task_runs SET status='awaiting_integration', result_commit=?2 WHERE id=?1",
+            rusqlite::params![run.id(), head],
+        )
+        .unwrap();
+    let mut queue = SqliteQueue::open(db).unwrap();
+    queue
+        .record_runtime_event(
+            run.id(),
+            EventKind::ValidationFinished,
+            json!({"status": "awaiting_integration"}),
+        )
+        .unwrap();
+    queue
+        .record_runtime_event(run.id(), EventKind::ReviewStarted, json!({"attempt": 1}))
+        .unwrap();
+    if failed_ask {
+        queue
+            .ask(NewAsk {
+                recommendation: None,
+                confidence: None,
+                topics: Vec::new(),
+                kind: AskKind::ApproveLanding,
+                task_id: None,
+                run_id: Some(run.id().clone()),
+                question: "The supervisor's headless review of run r (task 1) failed and gave no verdict (review 1): exit status 3".into(),
+                options: vec!["land".into(), "send_back".into(), "cancel".into()],
+                asked_by: "supervisor".into(),
+                reason_category: AskReason::Scope,
+                finding_id: None,
+                request_id: None,
+            })
+            .unwrap();
+    } else {
+        queue
+            .record_runtime_event(
+                run.id(),
+                EventKind::ReviewFinished,
+                json!({"verdict": "pass", "reasons": [], "summary": "meets the acceptance", "attempt": 1}),
+            )
+            .unwrap();
+    }
+    queue
+        .record_runtime_event(
+            run.id(),
+            EventKind::ExitRequested,
+            json!({"workspace_id": run.workspace_id()}),
+        )
+        .unwrap();
+    age_lease(db, &run, 31);
+    run
+}
+
+/// The exit request a passed run's supervisor recorded after its review,
+/// before it died, is never sent a second time by its adopter, which waits
+/// for the headless session to end and lands the run without reviewing it
+/// again. Moved from the interactive `runtime_review_adopt` test of the
+/// same judgment when the interactive worker went (task 1437).
+#[test]
+fn an_adopter_does_not_repeat_the_exit_request_recorded_after_a_passed_review() {
+    let (_dir, repo, db) = fixture();
+    let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
+    let run = reviewed_run_whose_exit_was_recorded(&repo, &db, &backend, false);
+    let (outcome, detail) = adopter_sends_no_second_exit(&db, &repo, &backend, &run);
+    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
+    assert_eq!(payloads(&detail, "review_started").len(), 1);
+}
+
+/// The same for the exit request of a review that failed and whose
+/// `approve_landing` ask was opened before the supervisor died: the run
+/// waits for the ask and is not reviewed again. Moved from the interactive
+/// `runtime_review_adopt` test of the same judgment when the interactive
+/// worker went (task 1437).
+#[test]
+fn an_adopter_does_not_repeat_the_exit_request_recorded_before_a_failed_review_ask() {
+    let (_dir, repo, db) = fixture();
+    let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
+    let run = reviewed_run_whose_exit_was_recorded(&repo, &db, &backend, true);
+    let (outcome, detail) = adopter_sends_no_second_exit(&db, &repo, &backend, &run);
+    assert_eq!(
+        outcome["runs"][0]["status"], "awaiting_integration",
+        "{outcome}"
+    );
+    assert_eq!(payloads(&detail, "review_started").len(), 1);
+    let failed = payloads(&detail, "review_failed");
+    assert_eq!(failed.len(), 1, "{:?}", event_kinds(&detail));
+    assert_eq!(failed[0]["adopted"], true);
+}
+
+/// The supervisor died after a headless run's wrapper reported its exit
+/// but before `supervision_finished`, and, separately, while a run was
+/// `validating` with its session ended. Both are adopted and validated
+/// without an exit request to either session (none recorded or written):
+/// the first finishes supervision from the recorded exit, the second
+/// restarts validation from the receipt and worktree. Moved from the
+/// interactive `runtime_adopt` test of the same judgment when the
+/// interactive worker went (task 1437).
+#[test]
+fn exited_wrapper_and_validating_headless_runs_are_adopted_and_validated() {
+    let (_dir, repo, db) = fixture();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    add_ready_task(&mut queue, "validating", &[]);
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let exited = receipt_turn_under_dead_supervisor(&repo, &db, &backend, "dead-a");
+    let validating = receipt_turn_under_dead_supervisor(&repo, &db, &backend, "dead-b");
+    // Both sessions end without a supervisor (a person's exit request),
+    // whose files are gone before the adopter comes, so that one it wrote
+    // would show.
+    let runs = [&exited, &validating];
+    let exits: Vec<PathBuf> = runs
+        .iter()
+        .map(|run| dagq::domain::turn::exit_path(Path::new(run.run_dir().unwrap())))
+        .collect();
+    for exit in &exits {
+        fs::write(exit, "").unwrap();
+    }
+    backend.join();
+    for (run, exit) in runs.into_iter().zip(&exits) {
+        assert!(event_kinds(&queue.show(run.task_id()).unwrap()).contains(&"session_exited"));
+        assert_eq!(queue.run(run.id()).unwrap().status(), RunStatus::Running);
+        fs::remove_file(exit).unwrap();
+    }
+    queue
+        .finish_supervision(validating.id(), &LeaseToken::new("dead-b"))
+        .unwrap();
+    assert_eq!(
+        queue.run(validating.id()).unwrap().status(),
+        RunStatus::Validating
+    );
+    age_lease(&db, &exited, 31);
+    age_lease(&db, &validating, 31);
+
+    let outcome = supervise(&db, &repo, &backend).unwrap();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"].as_array().unwrap().len(), 2, "{outcome}");
+    for exit in &exits {
+        assert!(!exit.exists(), "the adopter wrote {}", exit.display());
+    }
+    let mut closed = backend.closed();
+    closed.sort();
+    assert_eq!(closed, [workspace_id(0), workspace_id(1)]);
+    for run in runs {
+        let detail = queue.show(run.task_id()).unwrap();
+        let after = &detail.runs[0];
+        assert_eq!(
+            after.status(),
+            RunStatus::AwaitingIntegration,
+            "{}",
+            run.id()
+        );
+        assert!(after.last_error().is_none(), "{after:?}");
+        assert!(after.result_commit().is_some());
+        assert!(after.workspace_closed_at().is_some());
+        let adopted = adoption_events(&detail);
+        assert_eq!(adopted.len(), 1);
+        assert_eq!(adopted[0]["wrapper"]["alive"], Value::Null);
+        assert!(adopted[0]["wrapper"]["exited_at"].is_number());
+        let kinds = event_kinds(&detail);
+        assert!(!kinds.contains(&"exit_requested"), "{kinds:?}");
+        for once in ["supervision_finished", "validation_finished"] {
+            let count = kinds.iter().filter(|k| **k == once).count();
+            assert_eq!(count, 1, "{once} in {kinds:?}");
+        }
+        // Validation checks the receipt only; integrate runs the commands.
+        assert!(!kinds.contains(&"verification_command"));
+    }
+    let detail = queue.show(exited.task_id()).unwrap();
+    let kinds = event_kinds(&detail);
+    assert!(position(&kinds, "session_exited") < position(&kinds, "run_adopted"));
+    assert!(position(&kinds, "run_adopted") < position(&kinds, "supervision_finished"));
+    let detail = queue.show(validating.task_id()).unwrap();
+    let kinds = event_kinds(&detail);
+    assert!(position(&kinds, "supervision_finished") < position(&kinds, "run_adopted"));
+    assert!(position(&kinds, "run_adopted") < position(&kinds, "validation_finished"));
+    assert!(queue.run_leases().unwrap().is_empty());
 }

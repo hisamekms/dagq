@@ -46,10 +46,13 @@ fn tasks_dependencies_runs_and_events_survive_reopen() {
             .iter()
             .map(|e| e.kind.as_str())
             .collect::<Vec<_>>(),
+        // A task without a mode asks for the interactive worker, which is
+        // claimed headless since task 1437.
         [
             "task_created",
             "task_status_changed",
             "review_bypassed",
+            "worker_mode_converted",
             "run_claimed"
         ]
     );

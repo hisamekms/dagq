@@ -29,7 +29,7 @@ fn receipt_follow_ups_appear_as_one_atomic_planner_bundle() {
             goal_id: None,
             context: String::new(),
             provider: None,
-            worker_mode: Some(worker_mode()),
+            worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
         })
         .unwrap();
     queue
@@ -573,128 +573,6 @@ fn attention_events_are_read_past_a_cursor_and_wake_watch() {
     assert!(run_attention_of(&runtime::status(&db).unwrap(), run.id()).is_none());
 }
 
-/// A session ended by a signal (exit 143, SIGTERM) is classified as
-/// `session_killed` with its exit code and signal (ADR-0034), and `status`,
-/// `show` and `stats` report the code next to the unchanged free text.
-#[test]
-fn a_session_killed_by_a_signal_is_classified_in_status_show_and_stats() {
-    interactive_workers();
-    let (_dir, db, detail) = run_agent("commit work; receipt \"$(git rev-parse HEAD)\"; exit 143");
-    let run = &detail.runs[0];
-    assert_eq!(run.last_error(), Some("session exited with code 143"));
-    let finished = payloads(&detail, "supervision_finished");
-    assert_eq!(
-        finished[0],
-        &json!({"status": "failed", "exit_code": 143, "code": "session_killed", "signal": 15})
-    );
-    let status = runtime::status(&db).unwrap();
-    let failed = run_attention_of(&status, run.id()).unwrap();
-    assert_eq!(failed["last_error"], "session exited with code 143");
-    assert_eq!(failed["last_error_code"], "session_killed");
-    // Every event of the run: the failed run's triage (with its
-    // `recovery_prompt_written`, task 1571) follows `supervision_finished`.
-    let view = dagq::view::task_detail(&detail, detail.events.len());
-    assert_eq!(
-        view["runs"][0]["last_error_code"], "session_killed",
-        "{view}"
-    );
-    assert!(
-        view["events"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|e| e["payload"]["code"] == "session_killed"),
-        "{view}"
-    );
-    let stats = runtime::stats(&db, &Default::default()).unwrap();
-    assert_eq!(
-        stats["reason_codes"]["by_code"]["session_killed"], 1,
-        "{stats}"
-    );
-    assert_eq!(
-        stats["reason_codes"]["by_kind"]["supervision_finished"],
-        json!({"session_killed": 1})
-    );
-    // `watch` / `events` keep the code in their compact form.
-    let events = dagq::compose::events(&db, EventId::new(0), 1000, true).unwrap();
-    assert!(
-        events["events"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|e| e["kind"] == "supervision_finished" && e["code"] == "session_killed"),
-        "{events}"
-    );
-}
-
-#[test]
-fn status_reports_failed_runs_and_unanswered_exit_requests() {
-    interactive_workers();
-    let (_dir, db, detail) = run_agent("commit work; receipt \"$(git rev-parse HEAD)\"; exit 7");
-    let run = &detail.runs[0];
-    let status = runtime::status(&db).unwrap();
-    let failed = run_attention_of(&status, run.id()).unwrap();
-    assert_eq!(failed["status"], "failed");
-    // The failed run itself is the supervisor's triage; its triage failed
-    // (the stub `claude` prints no verdict), which is a person's.
-    assert_eq!(failed["kind"], "triage_failed");
-    assert_eq!(failed["last_error"], "session exited with code 7");
-    assert_eq!(failed["last_error_code"], "session_exit_code");
-    assert_eq!(failed["next"], "triage by hand");
-    let events = dagq::compose::events(&db, EventId::new(0), 100, false).unwrap();
-    assert_eq!(events["events"].as_array().unwrap().len(), 1, "{events}");
-    assert_eq!(events["events"][0]["kind"], "triage_failed");
-    assert_eq!(events["events"][0]["next"], "triage by hand");
-    // Before its triage, the failed run is the supervisor's.
-    Connection::open(&db)
-        .unwrap()
-        .execute("DELETE FROM run_events WHERE kind='triage_failed'", [])
-        .unwrap();
-    let status = runtime::status(&db).unwrap();
-    let pending = run_attention_of(&status, run.id()).unwrap();
-    assert_eq!(pending["kind"], "failed");
-    assert_eq!(pending["next"], "triaging (runtime)");
-
-    // A running run whose /exit request went unanswered, until its session exits.
-    let (_dir, repo, db) = fixture();
-    let pid = std::process::id();
-    let orphan = orphan_run(&repo, &db, "owner", pid, pid);
-    assert!(run_attention_of(&runtime::status(&db).unwrap(), orphan.id()).is_none());
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let watcher = spawn_watch(&db, None);
-    queue
-        .record_runtime_event(
-            orphan.id(),
-            EventKind::ExitRequestTimedOut,
-            json!({"workspace_id": "ws-1", "timeout_secs": 120}),
-        )
-        .unwrap();
-    // The timeout alone is no attention: the supervisor's stuck_exit ask is.
-    queue
-        .ask(NewAsk {
-            recommendation: None,
-            confidence: None,
-            topics: Vec::new(),
-            kind: AskKind::StuckExit,
-            task_id: None,
-            run_id: Some(orphan.id().clone()),
-            question: "send /exit".into(),
-            options: Vec::new(),
-            asked_by: "supervisor".into(),
-            reason_category: dagq::domain::AskReason::RecoveryFailed,
-            finding_id: None,
-            request_id: None,
-        })
-        .unwrap();
-    let woke = joined(watcher, "the watch thread to return");
-    assert_eq!(woke["events"].as_array().unwrap().len(), 1, "{woke}");
-    assert_eq!(woke["events"][0]["kind"], "ask_opened");
-    let status = runtime::status(&db).unwrap();
-    assert!(run_attention_of(&status, orphan.id()).is_none(), "{status}");
-    queue.wrapper_exited(orphan.id(), pid, 0).unwrap();
-    assert!(run_attention_of(&runtime::status(&db).unwrap(), orphan.id()).is_none());
-}
-
 #[test]
 fn watch_returns_when_supervisor_registrations_or_health_change() {
     let (_dir, _repo, db) = fixture();
@@ -785,7 +663,7 @@ fn a_follow_up_draft_records_its_origin_and_its_planner_question_is_delivered_by
             goal_id: None,
             context: String::new(),
             provider: None,
-            worker_mode: Some(worker_mode()),
+            worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
         })
         .unwrap();
     queue

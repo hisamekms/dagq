@@ -25,8 +25,6 @@ pub(super) struct Waiting {
     /// When its first ask was opened (or it started, if earlier), on the
     /// run files' clock: a marker newer than this is a session that moved.
     pub(super) since: SystemTime,
-    /// When the screen was last read for the dialog the run waits at.
-    pub(super) checked: Option<Instant>,
     /// When and how it ended, for a run that waits for a free slot.
     pub(super) ended: Option<(i64, WaitCause)>,
 }
@@ -67,15 +65,9 @@ impl Slot {
     fn wait_phase(&self) -> Option<WaitPhase> {
         match &self.phase {
             Phase::Session(watch)
-                if watch.exit_requested.is_none()
-                    && !watch.silent
-                    && !watch.recovery.running()
-                    && !watch.receipt_ends_dialog() =>
+                if watch.exit_requested.is_none() && !watch.silent && !watch.recovery.running() =>
             {
                 Some(WaitPhase::Session)
-            }
-            Phase::Exiting(watch) if watch.session.is_some() && !watch.recovery.running() => {
-                Some(WaitPhase::Exit)
             }
             Phase::Revise(watch) if !watch.live.silent && !watch.live.recovery.running() => {
                 Some(WaitPhase::Revise)
@@ -113,17 +105,6 @@ impl Slot {
                 ask.created_at >= watch.holds_questions_from()
             }
             _ => true,
-        }
-    }
-
-    /// The watch of the live session's answers and dialogs, in the phases
-    /// that have one.
-    fn live_mut(&mut self) -> Option<&mut SessionWatch> {
-        match &mut self.phase {
-            Phase::Session(watch) => Some(watch),
-            Phase::Revise(watch) => Some(&mut watch.live),
-            Phase::Resume(watch) => Some(&mut watch.live),
-            _ => None,
         }
     }
 }
@@ -238,7 +219,8 @@ impl Supervisor<'_> {
             .into_iter()
             .filter(|ask| {
                 ask.is_open()
-                    && waits_for(phase, &ask.kind)
+                    && (matches!(ask.kind, AskKind::WorkerQuestion | AskKind::Stalled)
+                        && waits_for(phase, &ask.kind))
                     && slot.follows(ask)
                     && !slot.consumed.contains(&ask.id)
             })
@@ -275,7 +257,7 @@ impl Supervisor<'_> {
             asks: vec![(id, kind)],
             started_at: self.generators.clock.now(),
             since: asked_since(asked_at).min(self.files.now()),
-            checked: None,
+
             ended: None,
         });
         Ok(())
@@ -331,16 +313,15 @@ impl Supervisor<'_> {
             }
             // Nobody needs to send /exit to a session that ended, nor
             // answer its dialog, while it waits for a slot.
-            close_answer_prompt_asks(self, &run, PROMPT_EXITED_CLOSED)?;
+
             for ask in self
                 .queue
-                .close_stuck_exit_asks(run.id(), STUCK_EXIT_CLOSED)?
+                .close_stuck_exit_asks(run.id(), "the session exited; closed by the runtime")?
             {
                 info!(run_id = %run.id(), ask_id = %ask.id, "session of {} exited while it waited; closed its stuck_exit ask {}", run.id(), ask.id);
             }
             if let Phase::Session(watch) = &mut slot.phase {
                 watch.stall.ended(self, &run)?;
-                watch.end_sends(self, &run)?;
             }
             self.end_wait(slot, WaitCause::SessionExited, None)?;
             return Ok(Step::Continue);
@@ -352,7 +333,7 @@ impl Supervisor<'_> {
         }
         let silent = match &mut slot.phase {
             Phase::Session(watch) => &mut watch.silent,
-            Phase::Exiting(watch) => &mut watch.silent,
+            Phase::Exiting(_) => return Ok(Step::Continue),
             Phase::Revise(watch) => &mut watch.live.silent,
             Phase::Resume(watch) => &mut watch.silent,
             _ => return Ok(Step::Continue),
@@ -405,8 +386,7 @@ impl Supervisor<'_> {
         // the run's unclosed one, not only one the wait holds: an ask its
         // watch opened again for `intervene` during the wait, and answered
         // before it joined the wait, joins it no more (task 1179).
-        if headless(&run)
-            && held.iter().any(|(_, kind)| *kind == AskKind::Stalled)
+        if held.iter().any(|(_, kind)| *kind == AskKind::Stalled)
             && let Some(ask) = self.queue.unclosed_stalled_ask(run.id())?
             && ask
                 .answer
@@ -433,10 +413,9 @@ impl Supervisor<'_> {
             && !watch.receipt_seen
             && !self.files.is_file(&watch.receipt_path)
         {
-            let dialog = watch.prompt_hash.is_some();
             watch
                 .stall
-                .poll_quiet(self, &run, &workspace, &idle_marker, dialog)?;
+                .poll_quiet(self, &run, &workspace, &idle_marker)?;
         }
         // A revise whose session rewrote its receipt since the request
         // moved on past its question: its stage judges that receipt once
@@ -462,19 +441,13 @@ impl Supervisor<'_> {
         }
         // A person who answered the dialog or typed into the session (a
         // receipt rewritten during the wait is one of its markers).
-        let moves = held_kind(AskKind::AnswerPrompt).or(held_kind(AskKind::Stalled));
+        let moves = held_kind(AskKind::Stalled);
         let since = slot.waiting.as_ref().map_or(UNIX_EPOCH, |w| w.since);
         if let Some(ask) = moves
             && self.session_moved(&run, &idle_marker, since)
         {
             self.end_wait(slot, WaitCause::SessionMoved, Some(ask))?;
             return Ok(Step::Continue);
-        }
-        if phase != WaitPhase::Exit
-            && let Some(ask) = held_kind(AskKind::AnswerPrompt)
-            && let Some(cause) = self.dialog_ended(slot, &run, &workspace)?
-        {
-            self.end_wait(slot, cause, Some(ask))?;
         }
         Ok(Step::Continue)
     }
@@ -488,7 +461,8 @@ impl Supervisor<'_> {
                 return Ok(());
             };
             if !ask.is_open()
-                || !waits_for(phase, &ask.kind)
+                || !(matches!(ask.kind, AskKind::WorkerQuestion | AskKind::Stalled)
+                    && waits_for(phase, &ask.kind))
                 || !follows
                 || slot.consumed.contains(&ask.id)
                 || waiting.asks.iter().any(|(id, _)| *id == ask.id)
@@ -519,56 +493,6 @@ impl Supervisor<'_> {
         markers
             .iter()
             .any(|path| self.files.modified(path).is_ok_and(|at| at > since))
-    }
-
-    /// Read the screen of a session that waits at a dialog, as often as
-    /// [`SessionWatch::watch_prompt`] does: a login that ran out holds the
-    /// queue (`queue_hold`), and a screen without the dialog clears it
-    /// (`dialog_cleared`). A resumed session whose input box was not ready
-    /// for its request waits until it is (its `ResumeWatch` closes the ask
-    /// before it sends the request). No key is sent.
-    fn dialog_ended(
-        &mut self,
-        slot: &mut Slot,
-        run: &TaskRun,
-        workspace: &str,
-    ) -> Result<Option<WaitCause>> {
-        let interval = self.cmux.prompt_wait().min(PROMPT_CHECK_INTERVAL);
-        let Some(waiting) = &mut slot.waiting else {
-            return Ok(None);
-        };
-        if waiting.checked.is_some_and(|at| at.elapsed() < interval) {
-            return Ok(None);
-        }
-        waiting.checked = Some(Instant::now());
-        let screen = match self.cmux.capture(workspace) {
-            Ok(screen) => screen,
-            Err(error) => {
-                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "screen of {} could not be read for its dialog: {error:#}", run.id());
-                return Ok(None);
-            }
-        };
-        let unsent = matches!(&slot.phase, Phase::Resume(watch) if watch.message_sent.is_none());
-        let Some(watch) = slot.live_mut() else {
-            return Ok(None);
-        };
-        if let Some(wall) = self.signals.screen_wall(&screen)
-            && raise_wall(self, run, workspace, &screen, wall)?
-        {
-            watch.clear_prompt(self, run)?;
-            return Ok(Some(WaitCause::QueueHold));
-        }
-        if self.signals.detect_prompt(&screen).is_some() {
-            return Ok(None);
-        }
-        if unsent {
-            return Ok(self
-                .signals
-                .input_ready(&screen)
-                .then_some(WaitCause::DialogCleared));
-        }
-        watch.clear_prompt(self, run)?;
-        Ok(Some(WaitCause::DialogCleared))
     }
 
     /// End the slot's wait: record `run_waiting_ended` and, when a person
@@ -691,7 +615,7 @@ impl Supervisor<'_> {
             asks,
             started_at: since_secs,
             since: asked_since(asked_at),
-            checked: None,
+
             ended: state.ended.map(|(ms, cause)| (ms.div_euclid(1000), cause)),
         };
         let keeps = slot.wait_phase().is_some() && (as_waiting || waiting.ended.is_some());

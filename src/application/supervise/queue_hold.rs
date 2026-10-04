@@ -441,7 +441,7 @@ impl SessionWatch {
         match submit(sv, run, &workspace, Input::Text(&text), "continue") {
             Ok(submission) => {
                 self.stall.input_sent(sent_at, Some(&text));
-                self.answer_start = Some(StartCheck::new("continue", &text, sent_at, &submission));
+                self.answer_start = Some(sent_at);
                 sv.queue.record_runtime_event(
                     run.id(),
                     EventKind::HoldContinueSent,

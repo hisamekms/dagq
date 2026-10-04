@@ -112,7 +112,7 @@ fn a_waiting_run_that_a_landing_conflicts_with_is_resumed_before_its_answer() {
             "lease_released",
         ]
     );
-    let text = &session_texts(&backend, &run)[0];
+    let text = &session_texts(&run)[0];
     assert!(
         text.contains("the supervisor's landing recheck found that it no longer lands"),
         "{text}"
@@ -252,7 +252,7 @@ fn a_waiting_run_whose_check_fails_on_the_new_main_is_resumed() {
     let started = payloads(&detail, "resume_started");
     assert_eq!(started.len(), 1);
     assert_eq!(started[0]["counted"], true);
-    let text = &session_texts(&backend, &run)[0];
+    let text = &session_texts(&run)[0];
     assert!(
         text.contains("run that command in the worktree after the rebase"),
         "{text}"
@@ -297,135 +297,6 @@ fn a_waiting_run_that_still_lands_is_left_waiting() {
     assert_eq!(
         queue.show(TaskId::new(1)).unwrap().task.status(),
         TaskStatus::Completed
-    );
-}
-
-/// A run this supervisor holds in its slot to land (its session holds the
-/// `/exit` back after the review passed) conflicts with the run that lands
-/// meanwhile: the recheck after that landing records `landing_recheck_failed`
-/// with `action: held` and leaves it in the slot. Once its session exits,
-/// the run is parked instead of landing (`repeat: true`, `needs_session`,
-/// no integration tried) and resumed with the recheck's request.
-#[test]
-fn a_run_held_in_its_slot_that_a_landing_conflicts_with_is_parked_before_it_lands() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "second", &[]);
-    let backend = Arc::new(TestWorkspace::new(&db, false, HELD_AGENT));
-    backend.script_for(2, PROMPTED_AGENT);
-    backend.resume_script_for(1, RESOLVING_RESUME);
-    let reviewer = Arc::new(TestReviewer::new(&[verdict(
-        "pass",
-        &[],
-        "meets the acceptance",
-    )]));
-    let run_of = |task: i64| {
-        SqliteQueue::open(&db)
-            .unwrap()
-            .show(TaskId::new(task))
-            .unwrap()
-            .runs
-            .first()
-            .cloned()
-    };
-    let has_event = |task: i64, kind: &str| {
-        run_of(task).is_some_and(|run| !events_of(&db, run.id(), kind).is_empty())
-    };
-    let supervisor = {
-        let (db, repo, backend, reviewer) =
-            (db.clone(), repo.clone(), backend.clone(), reviewer.clone());
-        thread::spawn(move || {
-            runtime::supervise_with_reviewer(
-                &db,
-                &repo,
-                &*backend,
-                &claude_stub(&db),
-                &*reviewer,
-                Path::new(env!("CARGO_BIN_EXE_dagq")),
-                &supervise_options(4, true),
-            )
-        })
-    };
-    // Task 1 is reviewed and waits in its slot for its session's exit
-    // before task 2's session commits anything.
-    wait_until(&db, Duration::from_secs(60), |_| {
-        has_event(1, "exit_requested") && run_of(2).is_some()
-    });
-    let second = run_of(2).unwrap();
-    fs::write(
-        exit_request_path(second.run_dir().unwrap()).with_extension("go"),
-        "",
-    )
-    .unwrap();
-    wait_until(&db, Duration::from_secs(60), |_| {
-        has_event(1, "landing_recheck_failed")
-    });
-    release_held_session(run_of(1).unwrap().run_dir().unwrap());
-    let outcome = joined(supervisor, "the supervisor to return").unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let second = queue.show(TaskId::new(2)).unwrap().runs[0].clone();
-    assert_eq!(second.status(), RunStatus::Integrated);
-    let landed = events_of(&db, second.id(), "run_integrated");
-    let main = landed[0]["commit"].as_str().unwrap();
-
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    let run = detail.runs[0].clone();
-    let head = payloads(&detail, "validation_finished")[0]["receipt"]["commit"].clone();
-    let found = payloads(&detail, "landing_recheck_failed");
-    assert_eq!(found.len(), 2, "{:?}", event_kinds(&detail));
-    let (held, parked) = (found[0], found[1]);
-    assert_eq!(held["action"], "held");
-    assert_eq!(held["code"], "rebase_conflict");
-    assert_eq!(held["conflicts"], json!(["change.txt"]));
-    assert_eq!(held["main"], main);
-    assert_eq!(held["head"], head);
-    assert_eq!(held["landed_task_id"], 2);
-    assert_eq!(held["landed_run_id"], json!(second.id()));
-    assert!(held.get("status").is_none(), "{held}");
-    assert!(held.get("repeat").is_none(), "{held}");
-    // Parked when it would land, against the same main and head.
-    assert_eq!(parked["action"], "resumed");
-    assert_eq!(parked["repeat"], true);
-    assert_eq!(parked["status"], "needs_session");
-    assert_eq!(parked["code"], "rebase_conflict");
-    assert_eq!(parked["main"], main);
-    assert_eq!(parked["head"], head);
-    assert_eq!(parked["reason"], held["reason"]);
-    let kinds = event_kinds(&detail);
-    let first = |kind: &str| position(&kinds, kind);
-    let at = |from: usize, kind: &str| from + position(&kinds[from..], kind);
-    let recorded = first("landing_recheck_failed");
-    let parked_at = at(recorded + 1, "landing_recheck_failed");
-    assert!(first("exit_requested") < recorded, "{kinds:?}");
-    // Held in its slot until its session exited, then parked, not landed.
-    let exited = at(recorded, "session_exited");
-    let released = at(exited, "lease_released");
-    assert!(released < parked_at, "{kinds:?}");
-    assert_eq!(
-        payloads(&detail, "lease_released")[0],
-        &json!({"reason": "landing_recheck_failed"})
-    );
-    let resumed = at(parked_at, "resume_started");
-    assert!(first("integration_started") > resumed, "{kinds:?}");
-    assert_eq!(payloads(&detail, "resume_started")[0]["counted"], false);
-    let recheck = &runtime::status(&db).unwrap()["landing_recheck"];
-    assert_eq!(recheck["main"], main, "{recheck}");
-    assert_eq!(recheck["checked"], 1);
-    assert_eq!(recheck["conflicts"], 1);
-    assert_eq!(recheck["held"], 1);
-    assert_eq!(recheck["resumed"], 0);
-    assert_eq!(
-        recheck["failed_runs"],
-        json!([{"run_id": run.id(), "code": "rebase_conflict", "action": "held"}])
-    );
-    // The resumed session brought it onto main, and it landed from there.
-    assert_eq!(detail.task.status(), TaskStatus::Completed);
-    assert_eq!(run.status(), RunStatus::Integrated);
-    assert_eq!(
-        fs::read_to_string(repo.join("change.txt")).unwrap(),
-        "resolved by the resumed session\n"
     );
 }
 
@@ -594,6 +465,17 @@ fn supervising(
     backend: &Arc<TestWorkspace>,
     reviewer: &Arc<TestReviewer>,
 ) -> thread::JoinHandle<Result<Value>> {
+    supervising_with(db, repo, backend, reviewer, supervise_options(4, true))
+}
+
+/// [`supervising`] with `options`.
+fn supervising_with(
+    db: &Path,
+    repo: &Path,
+    backend: &Arc<TestWorkspace>,
+    reviewer: &Arc<TestReviewer>,
+    options: SuperviseOptions,
+) -> thread::JoinHandle<Result<Value>> {
     let (db, repo, backend, reviewer) = (
         db.to_path_buf(),
         repo.to_path_buf(),
@@ -608,7 +490,7 @@ fn supervising(
             &claude_stub(&db),
             &*reviewer,
             Path::new(env!("CARGO_BIN_EXE_dagq")),
-            &supervise_options(4, true),
+            &options,
         )
     })
 }
@@ -750,7 +632,7 @@ fn a_due_recheck_names_the_landing_main_is_at_when_it_starts() {
 #[test]
 fn a_run_that_starts_waiting_after_main_moved_is_rechecked_by_the_same_supervisor() {
     let (_dir, repo, db) = fixture();
-    let backend = Arc::new(TestWorkspace::new(&db, false, PROMPTED_AGENT));
+    let backend = Arc::new(TestWorkspace::new(&db, false, GATED_AGENT));
     let reviewer = Arc::new(TestReviewer::new(&[verdict(
         "concern",
         &["a person should look"],
@@ -828,37 +710,174 @@ fn another_live_supervisor_does_not_keep_a_moved_main_from_being_rechecked() {
     assert_eq!(finished[0]["clean"], 1);
 }
 
-/// Another supervisor's recheck of a main settles only the runs it could
-/// see. Here this supervisor holds task 1's run in its slot to land (its
-/// session holds the `/exit` back) when main moves outside it and into the
-/// run; before this supervisor can look (the test holds the recheck lock),
-/// another supervisor records its recheck of that main, which could not see
-/// the held run. This supervisor still checks the run it holds against that
-/// main: the conflict holds it, and it is parked instead of landing.
+/// A worker that adds `e2e.txt`, which `[e2e] paths` names, with its change:
+/// its run passes its review and then waits in its slot for its e2e before
+/// it lands.
+const E2E_AGENT: &str = "printf 'e2e\\n' > e2e.txt && git add e2e.txt; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit";
+
+/// Options whose e2e (the stand-in for `cargo test --test e2e`) passes only
+/// once the test writes `release`: until then the run that needs it is held
+/// in its slot to land, as a headless worker's run is (its session exits as
+/// soon as its review passes, so nothing else holds it there).
+fn held_e2e(release: &Path) -> SuperviseOptions {
+    crate::runtime_e2e::e2e_options(format!(
+        "{}; echo 'test result: ok. 1 passed; 0 failed'",
+        crate::common::await_path(release)
+    ))
+}
+
+/// The run of `task`, once it has one.
+fn run_of(db: &Path, task: i64) -> Option<TaskRun> {
+    SqliteQueue::open(db)
+        .unwrap()
+        .show(TaskId::new(task))
+        .unwrap()
+        .runs
+        .first()
+        .cloned()
+}
+
+/// Whether the run of `task` has an event of `kind`.
+fn has_event(db: &Path, task: i64, kind: &str) -> bool {
+    run_of(db, task).is_some_and(|run| !events_of(db, run.id(), kind).is_empty())
+}
+
+/// A run this supervisor holds in its slot to land (here waiting for its
+/// e2e after its review passed) conflicts with the run that lands
+/// meanwhile: the recheck after that landing records
+/// `landing_recheck_failed` with `action: held` and leaves it in the slot.
+/// Once its e2e passed, the run is parked instead of landing (`repeat:
+/// true`, `needs_session`, no integration tried) and resumed with the
+/// recheck's request, uncounted, and lands from there. Moved from the
+/// interactive `a_run_held_in_its_slot_that_a_landing_conflicts_with_is_parked_before_it_lands`,
+/// which held the run with its session's `/exit` and which task 1437
+/// deleted.
 #[test]
-fn another_supervisors_recheck_of_main_leaves_the_runs_this_one_holds_to_check() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    let backend = Arc::new(TestWorkspace::new(&db, false, HELD_AGENT));
+fn a_run_held_in_its_slot_for_its_e2e_that_a_landing_conflicts_with_is_parked_before_it_lands() {
+    let (dir, repo, db) = fixture();
+    crate::runtime_e2e::with_e2e_paths(&repo, "[\"e2e.txt\"]");
+    add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "second", &[]);
+    let backend = Arc::new(TestWorkspace::new(&db, false, E2E_AGENT));
+    backend.script_for(2, GATED_AGENT);
     backend.resume_script_for(1, RESOLVING_RESUME);
-    let reviewer = Arc::new(TestReviewer::new(&[
-        verdict("pass", &[], "meets the acceptance"),
-        verdict("pass", &[], "meets the acceptance"),
-    ]));
-    let supervisor = supervising(&db, &repo, &backend, &reviewer);
-    let run_of = || {
-        SqliteQueue::open(&db)
-            .unwrap()
-            .show(TaskId::new(1))
-            .unwrap()
-            .runs
-            .first()
-            .cloned()
-    };
+    let reviewer = Arc::new(TestReviewer::new(&[verdict(
+        "pass",
+        &[],
+        "meets the acceptance",
+    )]));
+    let release = dir.path().join("e2e-release");
+    let supervisor = supervising_with(&db, &repo, &backend, &reviewer, held_e2e(&release));
+    // Task 1 is reviewed and waits in its slot for its e2e before task 2's
+    // session commits anything.
     wait_until(&db, Duration::from_secs(60), |_| {
-        run_of().is_some_and(|run| !events_of(&db, run.id(), "exit_requested").is_empty())
+        has_event(&db, 1, "run_e2e_started") && run_of(&db, 2).is_some()
     });
-    let held = run_of().unwrap();
+    let second = run_of(&db, 2).unwrap();
+    fs::write(
+        exit_request_path(second.run_dir().unwrap()).with_extension("go"),
+        "",
+    )
+    .unwrap();
+    wait_until(&db, Duration::from_secs(60), |_| {
+        has_event(&db, 1, "landing_recheck_failed")
+    });
+    assert!(!has_event(&db, 1, "run_e2e_finished"));
+    fs::write(&release, "").unwrap();
+    let outcome = joined(supervisor, "the supervisor to return").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let second = queue.show(TaskId::new(2)).unwrap().runs[0].clone();
+    assert_eq!(second.status(), RunStatus::Integrated);
+    let landed = events_of(&db, second.id(), "run_integrated");
+    let main = landed[0]["commit"].as_str().unwrap();
+
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let run = detail.runs[0].clone();
+    let head = payloads(&detail, "validation_finished")[0]["receipt"]["commit"].clone();
+    let found = payloads(&detail, "landing_recheck_failed");
+    assert_eq!(found.len(), 2, "{:?}", event_kinds(&detail));
+    let (held, parked) = (found[0], found[1]);
+    assert_eq!(held["action"], "held");
+    assert_eq!(held["code"], "rebase_conflict");
+    assert_eq!(held["conflicts"], json!(["change.txt"]));
+    assert_eq!(held["main"], main);
+    assert_eq!(held["head"], head);
+    assert_eq!(held["landed_task_id"], 2);
+    assert_eq!(held["landed_run_id"], json!(second.id()));
+    assert!(held.get("status").is_none(), "{held}");
+    assert!(held.get("repeat").is_none(), "{held}");
+    // Parked when it would land, against the same main and head.
+    assert_eq!(parked["action"], "resumed");
+    assert_eq!(parked["repeat"], true);
+    assert_eq!(parked["status"], "needs_session");
+    assert_eq!(parked["code"], "rebase_conflict");
+    assert_eq!(parked["main"], main);
+    assert_eq!(parked["head"], head);
+    assert_eq!(parked["reason"], held["reason"]);
+    let kinds = event_kinds(&detail);
+    let first = |kind: &str| position(&kinds, kind);
+    let at = |from: usize, kind: &str| from + position(&kinds[from..], kind);
+    let recorded = first("landing_recheck_failed");
+    let parked_at = at(recorded + 1, "landing_recheck_failed");
+    // Held in its slot through its e2e, then parked, not landed.
+    assert!(first("run_e2e_started") < recorded, "{kinds:?}");
+    let e2e_passed = at(recorded, "run_e2e_finished");
+    assert!(e2e_passed < parked_at, "{kinds:?}");
+    assert_eq!(
+        payloads(&detail, "run_e2e_finished")[0]["outcome"],
+        "passed"
+    );
+    let resumed = at(parked_at, "resume_started");
+    assert!(first("integration_started") > resumed, "{kinds:?}");
+    assert_eq!(payloads(&detail, "resume_started")[0]["counted"], false);
+    let recheck = &runtime::status(&db).unwrap()["landing_recheck"];
+    assert_eq!(recheck["main"], main, "{recheck}");
+    assert_eq!(recheck["checked"], 1);
+    assert_eq!(recheck["conflicts"], 1);
+    assert_eq!(recheck["held"], 1);
+    assert_eq!(recheck["resumed"], 0);
+    assert_eq!(
+        recheck["failed_runs"],
+        json!([{"run_id": run.id(), "code": "rebase_conflict", "action": "held"}])
+    );
+    // The resumed session brought it onto main, and it landed from there.
+    assert_eq!(detail.task.status(), TaskStatus::Completed);
+    assert_eq!(run.status(), RunStatus::Integrated);
+    assert_eq!(
+        fs::read_to_string(repo.join("change.txt")).unwrap(),
+        "resolved by the resumed session\n"
+    );
+}
+
+/// Another supervisor's recheck of a main settles only the runs it could
+/// see. Here this supervisor holds task 1's run in its slot to land (it
+/// waits for its e2e) when main moves outside it and into the run; before
+/// this supervisor can look (the test holds the recheck lock), another
+/// supervisor records its recheck of that main, which could not see the
+/// held run. This supervisor still checks the run it holds against that
+/// main: the conflict holds it, and it is parked instead of landing.
+/// Moved from the interactive
+/// `another_supervisors_recheck_of_main_leaves_the_runs_this_one_holds_to_check`,
+/// which held the run with its session's `/exit` and which task 1437
+/// deleted.
+#[test]
+fn another_supervisors_recheck_of_main_leaves_the_run_held_for_its_e2e_to_check() {
+    let (dir, repo, db) = fixture();
+    crate::runtime_e2e::with_e2e_paths(&repo, "[\"e2e.txt\"]");
+    let backend = Arc::new(TestWorkspace::new(&db, false, E2E_AGENT));
+    backend.resume_script_for(1, RESOLVING_RESUME);
+    let reviewer = Arc::new(TestReviewer::new(&[verdict(
+        "pass",
+        &[],
+        "meets the acceptance",
+    )]));
+    let release = dir.path().join("e2e-release");
+    let supervisor = supervising_with(&db, &repo, &backend, &reviewer, held_e2e(&release));
+    wait_until(&db, Duration::from_secs(60), |_| {
+        has_event(&db, 1, "run_e2e_started")
+    });
+    let held = run_of(&db, 1).unwrap();
     let head = held.result_commit().unwrap().clone();
     // Main moves into the held run while another supervisor's recheck
     // holds the lock, and that recheck records main as checked.
@@ -894,12 +913,13 @@ fn another_supervisors_recheck_of_main_leaves_the_runs_this_one_holds_to_check()
     wait_until(&db, Duration::from_secs(60), |_| {
         !events_of(&db, held.id(), "landing_recheck_failed").is_empty()
     });
-    release_held_session(held.run_dir().unwrap());
+    fs::write(&release, "").unwrap();
     let outcome = joined(supervisor, "the supervisor to return").unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
 
     let found = events_of(&db, held.id(), "landing_recheck_failed");
+    assert_eq!(found.len(), 2, "{found:?}");
     assert_eq!(found[0]["action"], "held");
     assert_eq!(found[0]["code"], "rebase_conflict");
     assert_eq!(found[0]["main"], json!(main));
@@ -908,7 +928,7 @@ fn another_supervisors_recheck_of_main_leaves_the_runs_this_one_holds_to_check()
     assert_eq!(found[1]["action"], "resumed");
     assert_eq!(found[1]["repeat"], true);
     let finished = events_of(&db, held.id(), "landing_recheck_finished");
-    assert_eq!(finished.len(), 2);
+    assert_eq!(finished.len(), 2, "{finished:?}");
     let own = &finished[1];
     assert_ne!(own["supervisor"], "another-supervisor");
     assert_eq!(own["main"], json!(main));

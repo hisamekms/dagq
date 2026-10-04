@@ -4,8 +4,8 @@ type: design
 title: レイヤーとコンテキストの境界（contextごとの所有・判断・操作・公開するport・依存の向き・境界をまたぐtransaction・検査できる規則・今の違反）
 status: current
 created: 2026-10-04
-updated: 2026-10-04 # task 1662: the observation and analysis context points to the measurement design
-last_verified: 2026-10-04 # task 1615
+updated: 2026-10-04 # task 1662: the observation and analysis context points to the measurement design; task 1437
+last_verified: 2026-10-04 # task 1615; task 1437
 scope: system
 related:
   - adr-t1545-1
@@ -91,8 +91,8 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 **所有する状態**
 
 - table: `task_runs`・`run_leases`・`run_processes`・`session_workspaces`。ファイルはqueueのdirの`runs/<run-id>/`（receipt・log・idle marker。`RunFiles`）とrunのworktree。
-- eventの種類: `run_*`（`run_claimed`・`run_planned`・`run_integrated`・`run_adopted`・`run_recovered`・`run_e2e_*`・`run_waiting_*`ほか。run_tmp_removedはhost運用）、`supervision_finished`（runのrunningからvalidatingへの遷移。`domain::run::recorded`が返す）、`lease_*`、`claim_*`、`worktree_*`、`workspace_*`、`wrapper_*`、`agent_started`、`session_*`、`turn_*`、`receipt_observed`・`validation_finished`・`verification_command`・`scope_violation`・`evidence_missing`、`review_*`、`revise_*`、`resume_*`、`triage_*`、`recovery_*`、`integration_*`、`landing_*`、`conflict_*`、`concern_*`、`approve_withheld`、`exit_*`、`stall_*`、`stale_receipt_*`、`prompt_waiting`・`prompt_cleared`・`screen_*`・`idle_inferred`・`input_not_ready`・`known_dialog_unanswered`、`provider_*`、`queue_hold_applied`・`hold_*`・`usage_limited`・`auth_required`、`submit_*`（sessionへの打ち込み）、`stall_config_loaded`・`conflicts_config_changed`・`run_env_changed`・`run_env_program_*`、`first_commit_observed`、`migration_renumbered`、`push_*`（着地のpush）、`job_restarted`・`runtime_error`・`cleanup_failed`。
-- `Supervisor`の欄: `workers`・`slots`・`parallel`・`max_waiting`・`limits`・`slot_flags`・`finished`・`errors`・`claiming`・`provisioning_error`・`triaged`・`stall`・`conflicts`・`conflicts_file`・`conflicts_error`・`job_ends`・`screen_spans`・`screen_probes`・`last_turns`・`run_env_missing`・`landing_unresolved`・`landing_stamp`・`run_e2e`・`e2e`・`queue_hold`・`provider_holds`・`moved`・`hold_continue`・`reopens`・`notice_failures`・`rechecks`・`defer`・`loads`・`resume_config`・`exit_config`・`retry_unreadable_review`・`review_material`と、使うadapter（`repository`・`remote`・`verifier`・`reviewer`・`codex_jobs`・`signals`・`spawner`・`files`）。
+- eventの種類（廃止した worker の画面・打鍵の event は過去の記録を読むためのもの）: `worker_mode_converted`、`run_*`（`run_claimed`・`run_planned`・`run_integrated`・`run_adopted`・`run_recovered`・`run_e2e_*`・`run_waiting_*`ほか。run_tmp_removedはhost運用）、`supervision_finished`（runのrunningからvalidatingへの遷移。`domain::run::recorded`が返す）、`lease_*`、`claim_*`、`worktree_*`、`workspace_*`、`wrapper_*`、`agent_started`、`session_*`、`turn_*`、`receipt_observed`・`validation_finished`・`verification_command`・`scope_violation`・`evidence_missing`、`review_*`、`revise_*`、`resume_*`、`triage_*`、`recovery_*`、`integration_*`、`landing_*`、`conflict_*`、`concern_*`、`approve_withheld`、`exit_*`、`stall_*`、`stale_receipt_*`、`prompt_waiting`・`prompt_cleared`・`screen_*`・`idle_inferred`・`input_not_ready`・`known_dialog_unanswered`、`provider_*`、`queue_hold_applied`・`hold_*`・`usage_limited`・`auth_required`、`submit_*`（sessionへの打ち込み）、`stall_config_loaded`・`conflicts_config_changed`・`run_env_changed`・`run_env_program_*`、`first_commit_observed`、`migration_renumbered`、`push_*`（着地のpush）、`job_restarted`・`runtime_error`・`cleanup_failed`。
+- `Supervisor`の欄: `workers`・`slots`・`parallel`・`max_waiting`・`limits`・`slot_flags`・`finished`・`errors`・`claiming`・`provisioning_error`・`triaged`・`stall`・`conflicts`・`conflicts_file`・`conflicts_error`・`job_ends`・`screen_spans`（plannerとinboxの画面のidleの区間。workerのrunには使わない）・`last_turns`・`run_env_missing`・`landing_unresolved`・`landing_stamp`・`run_e2e`・`e2e`・`queue_hold`・`provider_holds`・`moved`・`hold_continue`・`reopens`・`notice_failures`・`rechecks`・`defer`・`loads`・`resume_config`・`retry_unreadable_review`・`review_material`と、使うadapter（`repository`・`remote`・`verifier`・`reviewer`・`codex_jobs`・`signals`・`spawner`・`files`）。
 
 **判断**（domain）
 
@@ -100,7 +100,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 
 **操作**
 
-- application: `application::supervise`のループとslot（`mod.rs`）と工程のsubmodule（`session`・`exit`・`exit_retry`・`jobs`・`landing`・`revise`・`resume`・`reopen`・`triage`・`adopt`・`recovery`・`stall`・`stall_recovery`・`waiting`・`deliver`・`dialog`・`idle`・`recheck`・`claim_defer`・`queue_hold`・`provider`・`slot_limits`・`e2e`・`stale`・`headless`・`background`・`file_time`）、`application::session`・`application::headless_session`・`application::integrate`・`application::review`・`application::e2e_verdict`・`application::screen`・`application::screen_idle`・`application::recording`・`application::commands::operations`。
+- application: `application::supervise`のループとslot（`mod.rs`）と工程のsubmodule（`session`・`exit`・`jobs`・`landing`・`revise`・`resume`・`reopen`・`triage`・`adopt`・`recovery`・`stall`・`stall_recovery`・`waiting`・`deliver`・`idle`・`recheck`・`claim_defer`・`queue_hold`・`provider`・`slot_limits`・`e2e`・`stale`・`headless`・`background`・`file_time`）、`application::session`・`application::headless_session`・`application::integrate`・`application::review`・`application::e2e_verdict`・`application::screen`・`application::screen_idle`・`application::recording`・`application::commands::operations`。
 - CLI: `supervise`・`run`・`session`・`session-event`（session wrapper）・`integrate`・`review`・`recover`。
 - infrastructure: `runtime_store`の`transitions`・`recovery`・`session_registry`・`run_log`と`coordination`のleaseとprocessの部分、`sessions`・`adapters`（`GitRepository`・`ClaudeCode`）・`claude`・`codex`・`run_files`・`run_env`・`e2e_gate`・`process`・`background`。
 
@@ -207,7 +207,7 @@ contextを1つに決められず、分ける先のtaskを持つもの。
 
 | ID | transaction | 書き手のcontext | 変える状態 | 理由 | コード |
 | --- | --- | --- | --- | --- | --- |
-| T1 | claim | 実行と着地 | `tasks`を`ready`から`in_progress`に、`task_runs`を作り、`task_runs.supervisor_token`と`run_leases`の行、`run_claimed`・`lease_acquired` | 所有者の無いclaimed runとrunの無い`in_progress`を作らない（ADR-0054、ADR-0013決定9） | `infrastructure::runtime_store::transitions`の`SqliteQueue::claim_for_supervisor_in_order`が`infrastructure::sqlite::claim_task`を呼ぶ。人の`claim`は`TaskStore::claim` |
+| T1 | claim | 実行と着地 | `tasks`を`ready`から`in_progress`に、`task_runs`を作り、`task_runs.supervisor_token`と`run_leases`の行、`run_claimed`・`lease_acquired`（interactiveのtaskを非対話でclaimしたときは`worker_mode_converted`も。task 1437） | 所有者の無いclaimed runとrunの無い`in_progress`を作らない（ADR-0054、ADR-0013決定9） | `infrastructure::runtime_store::transitions`の`SqliteQueue::claim_for_supervisor_in_order`が`infrastructure::sqlite::claim_task`を呼ぶ。人の`claim`は`TaskStore::claim` |
 | T2 | 着地の完了 | 実行と着地 | runを`integrated`にし、`run_leases`の行を消し、`tasks`を`completed`に、`run_integrated`・`lease_released`・`task_status_changed`。`run_integrated`の追記でSQLのtrigger（`search_run_integrated`）が`landed_commits`と`search_index`を書く | mainへの着地とtaskの完了を食い違わせない | `infrastructure::runtime_store::transitions`の`SqliteQueue::finish_integration` |
 | T3 | plan reviewのverdictの適用 | 計画管理 | `asks`を閉じ、`proposals`を承認・差し戻し・取り消しにし、その`tasks`を`ready`・`draft`・`canceled`にし、`plan_decided` | proposalとそのtaskの状態を1回で揃える（同じcontextの中の表とaskの組で、askは共有の部品） | `infrastructure::plan_reviews`の`decide_plan`（`infrastructure::proposals`の`approve`・`send_back`が`transition_task`を呼ぶ） |
 | T4 | triageのanswerの適用 | 実行と着地 | `run_leases`・`task_runs`を見て`asks`を閉じ、`retry`は`tasks`を`ready`に、`cancel`は`canceled`に、`resume`はrunを`needs_session`に、`triage_decided` | runの失敗の扱いとtaskの次の状態を1回で決める（ADR-0047決定40） | `infrastructure::runtime_store::recovery`の`decide_triage`が`infrastructure::sqlite::transition_task`を呼ぶ |

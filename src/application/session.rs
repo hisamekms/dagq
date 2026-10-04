@@ -9,26 +9,17 @@
 //! workspace: it waits for the supervisor's record of its start instead.
 
 use crate::domain::LeaseToken;
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use serde_json::{Value, json};
 use std::{
-    path::{Path, PathBuf},
+    path::Path,
     thread,
     time::{Duration, Instant},
 };
 
 use super::headless_session::Turns;
-use super::{
-    AgentProvider, ProcessControl, Queue, RunFiles, Spawner, WorkspaceBackend,
-    actor_executor::{
-        ActorExecutionSpec, ActorExecutor, ActorProgram, HostActorExecutor, SessionAgent,
-        WorkspaceAccess,
-    },
-};
-use crate::domain::{
-    ActorContext, ReasonCode, RunId, TaskRun, run::run_workspaces, worker::WorkerMode,
-    worker_model::WorkerSession,
-};
+use super::{AgentProvider, ProcessControl, Queue, RunFiles, Spawner, WorkspaceBackend};
+use crate::domain::{ReasonCode, RunId, TaskRun, run::run_workspaces};
 use tracing::warn;
 
 /// How long the wrapper waits for the supervisor to record the workspace
@@ -226,37 +217,22 @@ pub fn run_session(
     };
     let mut child_may_be_alive = false;
     // A headless worker runs one call per turn (ADR-t813-1).
-    let result = if run.worker_mode() == WorkerMode::Headless {
-        Turns {
-            queue: &mut *queue,
-            db,
-            owner: super::headless_session::TurnOwner::Run(&run),
-            provider,
-            other,
-            spawner,
-            queue_service: Some(queue_service),
-            processes,
-            files,
-            pid,
-            resume,
-            sccache: sccache.as_ref().map(|(target, server)| (target, *server)),
-            background: start == WrapperStart::Background,
-        }
-        .drive(&mut child_may_be_alive)
-    } else {
-        drive_agent(
-            queue,
-            db,
-            &run,
-            provider,
-            spawner,
-            queue_service,
-            files,
-            pid,
-            resume,
-            &mut child_may_be_alive,
-        )
-    };
+    let result = Turns {
+        queue: &mut *queue,
+        db,
+        owner: super::headless_session::TurnOwner::Run(&run),
+        provider,
+        other,
+        spawner,
+        queue_service: Some(queue_service),
+        processes,
+        files,
+        pid,
+        resume,
+        sccache: sccache.as_ref().map(|(target, server)| (target, *server)),
+        background: start == WrapperStart::Background,
+    }
+    .drive(&mut child_may_be_alive);
     match result {
         Ok(code) => {
             record_exit(queue, id, pid, code)?;
@@ -350,79 +326,6 @@ fn retry_exit_record(
         pause = pause.saturating_mul(2);
     }
     unreachable!("the loop returns by the last attempt")
-}
-
-#[allow(clippy::too_many_arguments)]
-fn drive_agent(
-    queue: &mut dyn Queue,
-    db: &Path,
-    run: &TaskRun,
-    provider: &dyn AgentProvider,
-    spawner: &dyn Spawner,
-    queue_service: &dyn super::queue_service::ServiceAccess,
-    files: &dyn RunFiles,
-    pid: u32,
-    resume: bool,
-    child_may_be_alive: &mut bool,
-) -> Result<i32> {
-    let prompt = if resume {
-        None
-    } else {
-        let prompt_path =
-            Path::new(run.run_dir().context("missing run directory")?).join("prompt.txt");
-        Some(files.read_to_string(&prompt_path)?)
-    };
-    let agent = match &prompt {
-        None => SessionAgent::Resume { run },
-        Some(prompt) => SessionAgent::Worker { run, prompt },
-    };
-    // The model and effort the claim chose (ADR-0079 decision 3), or the
-    // ones the resume recorded, raised after a failure the task caused
-    // (decision 5).
-    let session = WorkerSession::current(&queue.run_events(run.id())?);
-    let mut child = HostActorExecutor::new(db)
-        .with_provider(provider)
-        .with_spawner(spawner)
-        .with_queue_service(queue_service)
-        .spawn(ActorExecutionSpec::new(
-            ActorContext::worker(run.id(), run.task_id()),
-            WorkspaceAccess::Write(PathBuf::from(
-                run.worktree_path().context("missing worktree")?,
-            )),
-            ActorProgram::SessionAgent {
-                agent,
-                model: Some((&session.model, &session.effort)),
-            },
-        ))?
-        .process()?;
-    *child_may_be_alive = true;
-    let registered = if resume {
-        queue.register_resume_agent(run.id(), pid, child.id())
-    } else {
-        queue.register_agent(run.id(), pid, child.id())
-    };
-    if let Err(error) = registered {
-        let _ = child.kill();
-        if child.wait().is_ok() {
-            *child_may_be_alive = false;
-        }
-        return Err(error);
-    }
-    loop {
-        if let Some(status) = child.try_wait()? {
-            *child_may_be_alive = false;
-            return Ok(status.code.unwrap_or(128));
-        }
-        if let Err(error) = queue.heartbeat_wrapper(run.id(), pid) {
-            // Keep owning/waiting on the existing child even during a DB outage.
-            tracing::warn!(
-                run_id = %run.id(),
-                error = %format_args!("{error:#}"),
-                "wrapper heartbeat failed: {error:#}"
-            );
-        }
-        thread::sleep(provider.wait_interval());
-    }
 }
 
 #[cfg(test)]

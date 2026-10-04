@@ -109,8 +109,8 @@ pub(crate) fn add(
             goal_id: None,
             context: String::new(),
             provider: None,
-            // Headless unless the test chose interactive workers.
-            worker_mode: Some(crate::runtime_support::worker_mode()),
+            // Headless: the fixture has no interactive workers (task 1437).
+            worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
         })
         .unwrap()
         .id()

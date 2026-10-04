@@ -1,5 +1,4 @@
 //! Runtime tests: The handoff of a supervisor to the next process.
-use crate::runtime_adopt::backdate_event;
 use crate::runtime_support;
 use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
@@ -439,7 +438,7 @@ fn supervise_after_handoff_with(
 #[test]
 fn a_handoff_leaves_the_session_running_and_the_next_process_drives_it_on() {
     let (_dir, repo, db) = fixture();
-    let backend = Arc::new(TestWorkspace::new(&db, false, PROMPTED_AGENT));
+    let backend = Arc::new(TestWorkspace::new(&db, false, GATED_AGENT));
     let (outcome, token) = hand_off_when(&db, &repo, &backend, |queue| {
         queue
             .show(TaskId::new(1))
@@ -454,7 +453,7 @@ fn a_handoff_leaves_the_session_running_and_the_next_process_drives_it_on() {
     assert_eq!(run.status(), RunStatus::Running);
     assert_eq!(queue.run_lease(run.id()).unwrap().unwrap().token, token);
     // The session was not asked anything.
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 0);
+
     assert!(
         !Path::new(run.run_dir().unwrap())
             .join("turns/exit")
@@ -534,166 +533,6 @@ fn a_handoff_leaves_the_session_running_and_the_next_process_drives_it_on() {
     );
 }
 
-/// A run rejected by validation waits for its session to take the `/exit`;
-/// a handoff in that wait carries the request over in the run's
-/// `handoff.json`, so the next process sends no second `/exit` and lets
-/// the run rest once the session exits.
-#[test]
-fn a_handoff_while_a_rejected_run_waits_for_its_exit_sends_no_second_exit() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    let backend = Arc::new(TestWorkspace::new(
-        &db,
-        false,
-        &format!(
-            "commit work; printf 'scratch\\n' > untracked.txt; receipt \"$(git rev-parse HEAD)\"; idle; {HOLD}"
-        ),
-    ));
-    let (outcome, token) = hand_off_when(&db, &repo, &backend, |queue| {
-        event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"exit_requested")
-    });
-    assert_eq!(outcome["handed_over"], 1, "{outcome}");
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
-    assert_eq!(run.status(), RunStatus::Failed);
-    let snapshot = Path::new(run.run_dir().unwrap()).join("handoff.json");
-    let written: Value = serde_json::from_slice(&fs::read(&snapshot).unwrap()).unwrap();
-    assert_eq!(written["phase"], "exit");
-    assert_eq!(written["requested"], true);
-    assert_eq!(written["close"], false);
-
-    let next = {
-        let (db, repo, backend, token) = (db.clone(), repo.clone(), backend.clone(), token.clone());
-        thread::spawn(move || supervise_after_handoff(&db, &repo, &backend, &token))
-    };
-    wait_until(&db, Duration::from_secs(30), |_| !snapshot.exists());
-    release_held_session(run.run_dir().unwrap());
-    let outcome = joined(next, "the supervisor after the handoff").unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(outcome["runs"][0]["status"], "failed");
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
-    assert!(queue.run_lease(run.id()).unwrap().is_none());
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    let kinds = event_kinds(&detail);
-    assert_eq!(kinds.iter().filter(|k| **k == "exit_requested").count(), 1);
-    assert!(!kinds.contains(&"run_adopted"), "{kinds:?}");
-}
-
-/// The `/exit` carried over in `handoff.json` keeps the time already
-/// waited (task 894): requested 120 seconds before the takeover with an
-/// exit timeout of 60 seconds, the next process records
-/// `exit_request_timed_out` without waiting the timeout again, and sends
-/// no second `/exit`.
-#[test]
-fn a_handoff_while_a_run_waits_for_its_exit_times_it_from_the_recorded_request() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    let mut backend = TestWorkspace::new(
-        &db,
-        false,
-        &format!(
-            "commit work; printf 'scratch\\n' > untracked.txt; receipt \"$(git rev-parse HEAD)\"; idle; {HOLD}"
-        ),
-    );
-    let exit_timeout = Duration::from_secs(60);
-    backend.exit_timeout = exit_timeout;
-    let backend = Arc::new(backend);
-    let (_, token) = hand_off_when(&db, &repo, &backend, |queue| {
-        event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"exit_requested")
-    });
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
-    let snapshot = Path::new(run.run_dir().unwrap()).join("handoff.json");
-    let written: Value = serde_json::from_slice(&fs::read(&snapshot).unwrap()).unwrap();
-    assert_eq!(written["phase"], "exit");
-    assert_eq!(written["requested"], true);
-    backdate_event(&db, &run, "exit_requested", 120);
-
-    let next = {
-        let (db, repo, backend, token) = (db.clone(), repo.clone(), backend.clone(), token.clone());
-        thread::spawn(move || supervise_after_handoff(&db, &repo, &backend, &token))
-    };
-    wait_until(&db, Duration::from_secs(30), |queue| {
-        event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"exit_request_timed_out")
-    });
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    let at = |kind: &str| {
-        let event = detail.events.iter().find(|e| e.kind == kind).unwrap();
-        dagq::domain::stats::timestamp_millis(&event.created_at).unwrap()
-    };
-    let waited = Duration::from_millis(
-        u64::try_from(at("exit_request_timed_out") - at("supervisor_handed_off")).unwrap(),
-    );
-    assert!(
-        waited < exit_timeout,
-        "timed out {waited:?} after the handoff"
-    );
-    release_held_session(run.run_dir().unwrap());
-    let outcome = joined(next, "the supervisor after the handoff").unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(outcome["runs"][0]["status"], "failed");
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    let kinds = event_kinds(&detail);
-    assert_eq!(kinds.iter().filter(|k| **k == "exit_requested").count(), 1);
-    assert!(!kinds.contains(&"run_adopted"), "{kinds:?}");
-}
-
-/// A `stuck_exit` recovery job that answered the dialog holding the `/exit`
-/// back gave it its timeout again: carried over in `handoff.json`, the
-/// timeout runs from that repair, not from the request 120 seconds ago
-/// (task 894), so the next process records no `exit_request_timed_out` at
-/// once.
-#[test]
-fn a_handoff_after_a_recovery_repair_of_the_exit_times_it_from_the_repair() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    let mut backend = TestWorkspace::new(
-        &db,
-        false,
-        &format!(
-            "commit work; printf 'scratch\\n' > untracked.txt; receipt \"$(git rev-parse HEAD)\"; idle; {HOLD}"
-        ),
-    );
-    backend.exit_timeout = Duration::from_secs(60);
-    let backend = Arc::new(backend);
-    let (_, token) = hand_off_when(&db, &repo, &backend, |queue| {
-        event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"exit_requested")
-    });
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
-    let snapshot = Path::new(run.run_dir().unwrap()).join("handoff.json");
-    backdate_event(&db, &run, "exit_requested", 120);
-    queue
-        .record_runtime_event(
-            run.id(),
-            EventKind::AutoRepaired,
-            json!({"layer": "recovery", "repair": "answer_known_dialog", "alert": "stuck_exit", "attempt": 1}),
-        )
-        .unwrap();
-
-    let options = supervise_options(4, true);
-    let passes = options.passes.clone();
-    let next = {
-        let (db, repo, backend, token) = (db.clone(), repo.clone(), backend.clone(), token.clone());
-        thread::spawn(move || supervise_after_handoff_with(&db, &repo, &backend, &token, options))
-    };
-    wait_until(&db, Duration::from_secs(30), |_| !snapshot.exists());
-    // Several passes of the next process.
-    await_passes(&passes, SOME_PASSES);
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    let kinds = event_kinds(&detail);
-    assert!(!kinds.contains(&"exit_request_timed_out"), "{kinds:?}");
-    release_held_session(run.run_dir().unwrap());
-    let outcome = joined(next, "the supervisor after the handoff").unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(outcome["runs"][0]["status"], "failed");
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
-}
-
 /// A handoff while a resumed session resolves a conflict carries the
 /// resume over in `handoff.json`: the next process goes on watching that
 /// session instead of resuming the run again, and records it as
@@ -751,85 +590,6 @@ fn a_handoff_during_a_resume_goes_on_watching_the_resumed_session() {
             .any(|p| p["repair"] == "conflict_resume_uncounted"),
         "{kinds:?}"
     );
-}
-
-/// Task 1161: a handoff asked after the resumed session started but before
-/// its resolution request went out (its input box not ready yet) is taken
-/// at the next pass: the wait for the box holds no pass. `handoff.json`
-/// carries the resume without a send, and the next process sends the
-/// request once the box is ready, without resuming the run again, and the
-/// run lands.
-#[test]
-fn a_handoff_before_the_resume_request_lets_the_next_supervisor_send_it() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
-    let (run, first_landed) = parked_conflict(&repo, &db, &backend);
-    // The resumed session boots and draws no input box until the test
-    // says so.
-    *backend.screen.lock().unwrap() = BOOT_SCREEN.into();
-    backend.resume_script_for(
-        2,
-        "await_message; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
-    );
-    // Once the resumed session's agent registered, the first supervisor
-    // waits only for the box.
-    let (outcome, token) = hand_off_when(&db, &repo, &backend, |queue| {
-        let detail = queue.show(TaskId::new(2)).unwrap();
-        let kinds = event_kinds(&detail);
-        kinds
-            .iter()
-            .rposition(|k| *k == "resume_started")
-            .is_some_and(|started| kinds[started..].contains(&"agent_started"))
-    });
-    assert_eq!(outcome["handed_over"], 1, "{outcome}");
-    let detail = SqliteQueue::open(&db)
-        .unwrap()
-        .show(TaskId::new(2))
-        .unwrap();
-    let kinds = event_kinds(&detail);
-    assert!(!kinds.contains(&"resume_request_sent"), "{kinds:?}");
-    assert!(backend.texts().is_empty());
-    let snapshot = Path::new(run.run_dir().unwrap()).join("handoff.json");
-    let written: Value = serde_json::from_slice(&fs::read(&snapshot).unwrap()).unwrap();
-    assert_eq!(written["phase"], "resume");
-    assert_eq!(written["message_sent_at"], Value::Null, "{written}");
-
-    let next = {
-        let (db, repo, backend, token) = (db.clone(), repo.clone(), backend.clone(), token.clone());
-        thread::spawn(move || supervise_after_handoff(&db, &repo, &backend, &token))
-    };
-    wait_until(&db, crate::common::STEP_LIMIT, |_| !snapshot.exists());
-    assert!(backend.texts().is_empty());
-    *backend.screen.lock().unwrap() = READY_SCREEN.into();
-    let outcome = joined(next, "the supervisor after the handoff").unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let detail = SqliteQueue::open(&db)
-        .unwrap()
-        .show(TaskId::new(2))
-        .unwrap();
-    assert_landed(&repo, &detail.runs[0], "second", &first_landed);
-    let kinds = event_kinds(&detail);
-    assert_eq!(kinds.iter().filter(|k| **k == "resume_started").count(), 1);
-    assert_eq!(
-        kinds
-            .iter()
-            .filter(|k| **k == "resume_request_sent")
-            .count(),
-        1,
-        "{kinds:?}"
-    );
-    // The request went once, from the next process, into the same session.
-    let texts = backend.texts();
-    assert_eq!(texts.len(), 1, "{texts:?}");
-    assert_eq!(texts[0].0, written["workspace"].as_str().unwrap());
-    let adopted: Vec<&Value> = payloads(&detail, "auto_repaired")
-        .into_iter()
-        .filter(|p| p["repair"] == "resume_adopted")
-        .collect();
-    assert_eq!(adopted.len(), 1, "{kinds:?}");
-    assert_eq!(adopted[0]["conditions"]["handoff"], true);
 }
 
 /// Task 640: a handoff during a resume whose `handoff.json` could not be
@@ -909,55 +669,6 @@ fn a_handoff_without_its_state_during_a_resume_still_watches_the_session() {
     assert_eq!(finished[0]["outcome"], "resolved");
 }
 
-/// Task 640: a `needs_session` run found after a handoff without its
-/// `handoff.json` whose resumed session has ended has nothing to watch: its
-/// lease is given back as before, no `resume_adopted` is recorded, and the
-/// supervisor resumes it again.
-#[test]
-fn a_handoff_without_its_state_after_the_resumed_session_ended_gives_the_lease_back() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
-    let (run, _) = parked_conflict(&repo, &db, &backend);
-    // The first resumed session ends without resolving anything.
-    backend.resume_script_for(2, "await_message; await_file \"$EXIT.go\"");
-    let (_, token) = hand_off_when(&db, &repo, &backend, |queue| {
-        event_kinds(&queue.show(TaskId::new(2)).unwrap()).contains(&"resume_request_sent")
-    });
-    fs::remove_file(Path::new(run.run_dir().unwrap()).join("handoff.json")).unwrap();
-    fs::write(
-        exit_request_path(run.run_dir().unwrap()).with_extension("go"),
-        "",
-    )
-    .unwrap();
-    backend.join();
-    // The next resume resolves the conflict.
-    backend.resume_script_for(
-        2,
-        "await_message; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
-    );
-
-    let outcome = supervise_after_handoff(&db, &repo, &backend, &token).unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let detail = SqliteQueue::open(&db)
-        .unwrap()
-        .show(TaskId::new(2))
-        .unwrap();
-    assert_eq!(detail.task.status(), TaskStatus::Completed);
-    let kinds = event_kinds(&detail);
-    assert_eq!(kinds.iter().filter(|k| **k == "resume_started").count(), 2);
-    let handed = payloads(&detail, "supervisor_handed_off");
-    assert_eq!(handed.len(), 1, "{kinds:?}");
-    assert_eq!(handed[0]["state"], Value::Null);
-    assert!(
-        !payloads(&detail, "auto_repaired")
-            .iter()
-            .any(|p| p["repair"] == "resume_adopted"),
-        "{kinds:?}"
-    );
-}
-
 /// Task 356: a supervisor that stops during a resume (its lease goes
 /// stale while the resumed session lives on, and it leaves no
 /// `handoff.json`) is replaced by one with another token, which adopts the
@@ -1032,7 +743,7 @@ fn a_supervisor_that_stops_during_a_resume_leaves_the_session_to_its_adopter() {
         "{kinds:?}"
     );
     assert!(!kinds.contains(&"supervisor_handed_off"), "{kinds:?}");
-    let requests = session_texts(&backend, &detail.runs[0])
+    let requests = session_texts(&detail.runs[0])
         .iter()
         .filter(|text| text.contains("main is now"))
         .count();
@@ -1263,149 +974,6 @@ fn auto_update_builds_runtime_landings_and_retries_on_the_answer() {
     assert_eq!(of("update_started", &source), 3, "{:?}", updates());
     let status = runtime::status(&db).unwrap();
     assert_eq!(status["auto_update"]["state"], "building", "{status}");
-    backend.join();
-}
-
-#[test]
-fn a_resume_handoff_preserves_the_exit_for_its_background_dialog() {
-    interactive_workers();
-    resumed_background_dialog(true);
-}
-
-#[test]
-fn a_resume_without_a_snapshot_recovers_the_exit_for_its_background_dialog() {
-    interactive_workers();
-    resumed_background_dialog(false);
-}
-
-fn resumed_background_dialog(snapshot: bool) {
-    let (_dir, repo, db) = fixture();
-    let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    backend.exit_timeout = Duration::from_secs(60);
-    let backend = Arc::new(backend);
-    let (run, first_landed) = parked_conflict(&repo, &db, &backend);
-    backend.resume_script_for(
-        2,
-        &format!("await_message; resolve; receipt \"$(git rev-parse HEAD)\"; idle; {HOLD}"),
-    );
-    let before = backend.exits_sent.load(Ordering::SeqCst);
-    let (_, token) = hand_off_when(&db, &repo, &backend, |queue| {
-        payloads(&queue.show(TaskId::new(2)).unwrap(), "exit_requested")
-            .iter()
-            .any(|p| p["resume_attempt"] == 1)
-    });
-    let path = Path::new(run.run_dir().unwrap()).join("handoff.json");
-    let written: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    assert_eq!(written["exit_typed"], true);
-    if !snapshot {
-        fs::remove_file(path).unwrap();
-    }
-    backdate_event(&db, &run, "exit_requested", 120);
-    *backend.screen.lock().unwrap() = "Background work is running\n❯ 1. Exit and stop tasks\n  2. Move to background and exit\n  3. Stay\nEnter to confirm · Esc to cancel".into();
-    let outcome = supervise_after_handoff(&db, &repo, &backend, &token).unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(*backend.keys.lock().unwrap(), ["enter"]);
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst) - before, 1);
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let detail = queue.show(TaskId::new(2)).unwrap();
-    assert_landed(&repo, &detail.runs[0], "second", &first_landed);
-    assert!(
-        payloads(&detail, "auto_repaired")
-            .iter()
-            .any(|p| p["repair"] == "dialog_answered"
-                && p["conditions"]["exit_requested"] == true
-                && p["conditions"]["clean"] == true
-                && p["conditions"]["receipt_commit"] == p["conditions"]["head"])
-    );
-    assert!(
-        queue
-            .asks(AskQuery::default())
-            .unwrap()
-            .iter()
-            .all(|a| a.kind != AskKind::StuckExit)
-    );
-}
-
-#[test]
-fn a_resume_handoff_before_exit_does_not_answer_background_work() {
-    interactive_workers();
-    resumed_background_dialog_is_not_answered(true, false);
-}
-
-#[test]
-fn an_adopted_resume_before_exit_does_not_answer_background_work() {
-    interactive_workers();
-    resumed_background_dialog_is_not_answered(false, false);
-}
-
-#[test]
-fn an_adopted_resume_with_an_unsent_exit_does_not_answer_background_work() {
-    interactive_workers();
-    resumed_background_dialog_is_not_answered(false, true);
-}
-
-fn resumed_background_dialog_is_not_answered(snapshot: bool, unsent: bool) {
-    let (_dir, repo, db) = fixture();
-    let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    backend.exit_timeout = Duration::from_secs(60);
-    let backend = Arc::new(backend);
-    let (run, _) = parked_conflict(&repo, &db, &backend);
-    backend.resume_script_for(
-        2,
-        &format!("await_message; resolve; receipt \"$(git rev-parse HEAD)\"; {HOLD}"),
-    );
-    let before = backend.exits_sent.load(Ordering::SeqCst);
-    let (_, token) = hand_off_when(&db, &repo, &backend, |queue| {
-        event_kinds(&queue.show(TaskId::new(2)).unwrap()).contains(&"resume_request_sent")
-    });
-    let path = Path::new(run.run_dir().unwrap()).join("handoff.json");
-    let written: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    assert_eq!(written["exit_requested"], false);
-    assert_eq!(written["exit_typed"], false);
-    if !snapshot {
-        fs::remove_file(path).unwrap();
-    }
-    if unsent {
-        let queue = SqliteQueue::open(&db).unwrap();
-        for (kind, payload) in [
-            (EventKind::ExitRequested, json!({"resume_attempt": 1})),
-            (
-                EventKind::ExitRequestTimedOut,
-                json!({"resume_attempt": 1, "unsent": true}),
-            ),
-        ] {
-            queue.record_runtime_event(run.id(), kind, payload).unwrap();
-        }
-    }
-    *backend.screen.lock().unwrap() = "Background work is running\n❯ 1. Exit and stop tasks\n  2. Move to background and exit\n  3. Stay\nEnter to confirm · Esc to cancel".into();
-    let options = SuperviseOptions {
-        exit: Some(dagq::domain::exit::ExitConfig {
-            retries: 1,
-            intervals: vec![Duration::from_secs(60)],
-        }),
-        ..supervise_options(4, true)
-    };
-    let passes = options.passes.clone();
-    let next = {
-        let (db, repo, backend, token) = (db.clone(), repo.clone(), backend.clone(), token.clone());
-        thread::spawn(move || supervise_after_handoff_with(&db, &repo, &backend, &token, options))
-    };
-    await_passes(&passes, SOME_PASSES);
-    assert!(backend.keys.lock().unwrap().is_empty());
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), before);
-    SqliteQueue::open(&db)
-        .unwrap()
-        .request_handoff(&LeaseToken::new(token), "/next/dagq")
-        .unwrap();
-    let outcome = joined(next, "negative dialog handoff").unwrap();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let restored: Value = serde_json::from_slice(
-        &fs::read(Path::new(run.run_dir().unwrap()).join("handoff.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(restored["exit_typed"], false);
-    release_held_session(run.run_dir().unwrap());
     backend.join();
 }
 
@@ -1687,4 +1255,395 @@ mod review_verdicts {
             1
         );
     }
+}
+
+/// Make the last `kind` event of `run` `seconds` older.
+fn backdate_event(db: &Path, run: &TaskRun, kind: &str, seconds: i64) {
+    let changed = Connection::open(db)
+        .unwrap()
+        .execute(
+            "UPDATE run_events SET created_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?3 || ' seconds')
+             WHERE id=(SELECT MAX(id) FROM run_events WHERE run_id=?1 AND kind=?2)",
+            rusqlite::params![run.id(), kind, -seconds],
+        )
+        .unwrap();
+    assert_eq!(changed, 1, "no {kind} of {} to backdate", run.id());
+}
+
+/// When the first `kind` event of `detail` whose payload `keep` takes was
+/// recorded, in milliseconds.
+fn recorded_millis(
+    detail: &dagq::domain::TaskDetail,
+    kind: &str,
+    keep: impl Fn(&Value) -> bool,
+) -> i64 {
+    let event = detail
+        .events
+        .iter()
+        .find(|e| e.kind == kind && keep(&e.payload))
+        .unwrap_or_else(|| panic!("no {kind}: {:?}", event_kinds(detail)));
+    dagq::domain::stats::timestamp_millis(&event.created_at).unwrap()
+}
+
+/// A resume whose exit was requested (twice the exit timeout ago) before
+/// its supervisor handed off keeps that request: the next process asks for
+/// no second exit and lets the session go at once, without waiting the
+/// exit timeout again. Moved from the interactive
+/// `a_resume_taken_over_after_a_handoff_times_its_exit_from_the_recorded_request`
+/// (task 1437).
+#[test]
+fn a_resume_taken_over_after_a_handoff_keeps_its_recorded_exit_request() {
+    resume_taken_over_after_its_exit(true);
+}
+
+/// The same for a resume adopted from a supervisor that died, rebuilt from
+/// the run's events. Moved from the interactive
+/// `an_adopted_resume_times_its_exit_from_the_recorded_request` (task 1437).
+#[test]
+fn an_adopted_resume_keeps_its_recorded_exit_request() {
+    resume_taken_over_after_its_exit(false);
+}
+
+/// A resumed session asked to exit under the previous process, which
+/// recorded `exit_requested` of the attempt 120 seconds ago and never saw
+/// the session go (here the session works on, and no exit request was
+/// written for it): taken over (after a `handoff`, or adopted) with an exit
+/// timeout of 60 seconds, the resume writes no exit request and records no
+/// second `exit_requested`, and ends `unresolved` with `exit_timed_out`
+/// well within the timeout of the takeover.
+fn resume_taken_over_after_its_exit(handoff: bool) {
+    let (_dir, repo, db) = fixture();
+    let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let exit_timeout = Duration::from_secs(60);
+    backend.exit_timeout = exit_timeout;
+    let backend = Arc::new(backend);
+    let (run, _) = parked_conflict(&repo, &db, &backend);
+    backend.resume_script_for(
+        2,
+        "await_message; await_file \"$EXIT.go\"; resolve; receipt \"$(git rev-parse HEAD)\"",
+    );
+    let (_, token) = hand_off_when(&db, &repo, &backend, |queue| {
+        event_kinds(&queue.show(TaskId::new(2)).unwrap()).contains(&"resume_request_sent")
+    });
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(2)).unwrap();
+    let workspace = payloads(&detail, "workspace_created")
+        .into_iter()
+        .rfind(|p| p["resume_attempt"] == 1)
+        .and_then(|p| p["workspace_id"].as_str())
+        .unwrap()
+        .to_owned();
+    queue
+        .record_runtime_event(
+            run.id(),
+            EventKind::ExitRequested,
+            json!({"workspace_id": workspace, "resume_attempt": 1}),
+        )
+        .unwrap();
+    backdate_event(&db, &run, "exit_requested", 120);
+    let snapshot = Path::new(run.run_dir().unwrap()).join("handoff.json");
+    if handoff {
+        // The state the handing-off process wrote had the request.
+        let mut written: Value = serde_json::from_slice(&fs::read(&snapshot).unwrap()).unwrap();
+        assert_eq!(written["phase"], "resume");
+        written["exit_requested"] = json!(true);
+        fs::write(&snapshot, serde_json::to_vec(&written).unwrap()).unwrap();
+    } else {
+        // No state and a dead pid make it a supervisor that died.
+        fs::remove_file(&snapshot).unwrap();
+        Connection::open(&db)
+            .unwrap()
+            .execute(
+                "UPDATE run_leases SET pid=?2 WHERE run_id=?1",
+                rusqlite::params![run.id(), dead_pid()],
+            )
+            .unwrap();
+    }
+
+    let next = {
+        let (db, repo, backend, token) = (db.clone(), repo.clone(), backend.clone(), token.clone());
+        thread::spawn(move || {
+            if handoff {
+                supervise_after_handoff(&db, &repo, &backend, &token)
+            } else {
+                supervise(&db, &repo, &backend)
+            }
+        })
+    };
+    // Bounded well below the exit timeout: a timeout run from the takeover
+    // does not end the resume within it.
+    wait_until(&db, Duration::from_secs(30), |queue| {
+        !payloads(&queue.show(TaskId::new(2)).unwrap(), "resume_finished").is_empty()
+    });
+    let detail = queue.show(TaskId::new(2)).unwrap();
+    let kinds = event_kinds(&detail);
+    let finished = payloads(&detail, "resume_finished");
+    assert_eq!(finished[0]["outcome"], "unresolved", "{kinds:?}");
+    assert_eq!(finished[0]["exit_timed_out"], true, "{kinds:?}");
+    let adopted = recorded_millis(&detail, "auto_repaired", |p| {
+        p["repair"] == "resume_adopted" && p["conditions"]["handoff"] == handoff
+    });
+    let ended = recorded_millis(&detail, "resume_finished", |_| true);
+    let waited = Duration::from_millis(u64::try_from(ended - adopted).unwrap());
+    assert!(
+        waited < exit_timeout,
+        "the resume was let go {waited:?} after the takeover"
+    );
+    // No second exit request: none written, and only the test's recorded
+    // during the resume.
+    let exit = dagq::domain::turn::exit_path(Path::new(run.run_dir().unwrap()));
+    assert!(!exit.exists(), "{}", exit.display());
+    assert_eq!(
+        kinds[position(&kinds, "resume_started")..]
+            .iter()
+            .filter(|k| **k == "exit_requested")
+            .count(),
+        1,
+        "{kinds:?}"
+    );
+
+    // The session let go resolves the conflict and exits.
+    let run_dir = run.run_dir().unwrap();
+    fs::write(exit_request_path(run_dir).with_extension("go"), "").unwrap();
+    fs::write(dagq::domain::turn::exit_path(Path::new(run_dir)), "").unwrap();
+    let outcome = joined(next, "the supervisor taking the resume over").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let kinds = event_kinds(&queue.show(TaskId::new(2)).unwrap())
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert!(!kinds.iter().any(|k| k == "runtime_error"), "{kinds:?}");
+}
+
+/// Start the wrapper of `run`'s resumed session the way the test backend's
+/// `create_resume` does, for a resume whose workspace that backend opened
+/// without a session (`resume_no_session`).
+fn start_resume_wrapper(
+    backend: &TestWorkspace,
+    run: &TaskRun,
+) -> thread::JoinHandle<Result<Value>> {
+    let claude = backend.claude_for(run, true).unwrap();
+    let (provider, other) = headless_provider(run, claude.as_deref(), backend.codex.as_deref());
+    let token: String = Connection::open(&backend.db)
+        .unwrap()
+        .query_row(
+            "SELECT token FROM run_leases WHERE run_id=?1",
+            [run.id()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let (db, id) = (backend.db.clone(), run.id().clone());
+    thread::spawn(move || {
+        runtime::session_with_providers(
+            &db,
+            &id,
+            &LeaseToken::new(&token),
+            &provider,
+            Some(&other),
+            &StubSpawner { db: db.clone() },
+            true,
+        )
+    })
+}
+
+/// A handoff after the resumed session's workspace opened but before its
+/// wrapper registered, so before the resolution request was sent: the
+/// state carries the resume without a send, and the next process sends the
+/// request once the wrapper registers, once, into the same resume, without
+/// resuming the run again, and the run lands. Moved from the interactive
+/// `a_handoff_before_the_resume_request_lets_the_next_supervisor_send_it`
+/// (task 1437).
+#[test]
+fn a_handoff_before_the_resume_request_lets_the_next_supervisor_send_it_once() {
+    let (_dir, repo, db) = fixture();
+    let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let (run, first_landed) = parked_conflict(&repo, &db, &backend);
+    // The resume's workspace opens with no wrapper until the test starts
+    // one.
+    backend.resume_no_session = true;
+    backend.resume_script_for(
+        2,
+        "await_message; resolve; receipt \"$(git rev-parse HEAD)\"",
+    );
+    let backend = Arc::new(backend);
+    let (outcome, token) = hand_off_when(&db, &repo, &backend, |queue| {
+        payloads(&queue.show(TaskId::new(2)).unwrap(), "workspace_created")
+            .iter()
+            .any(|p| p["resume_attempt"] == 1)
+    });
+    assert_eq!(outcome["handed_over"], 1, "{outcome}");
+    let kinds = event_kinds(
+        &SqliteQueue::open(&db)
+            .unwrap()
+            .show(TaskId::new(2))
+            .unwrap(),
+    )
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    assert!(
+        !kinds.iter().any(|k| k == "resume_request_sent"),
+        "{kinds:?}"
+    );
+    let snapshot = Path::new(run.run_dir().unwrap()).join("handoff.json");
+    let written: Value = serde_json::from_slice(&fs::read(&snapshot).unwrap()).unwrap();
+    assert_eq!(written["phase"], "resume");
+    assert_eq!(written["message_sent_at"], Value::Null, "{written}");
+
+    let next = {
+        let (db, repo, backend, token) = (db.clone(), repo.clone(), backend.clone(), token.clone());
+        thread::spawn(move || supervise_after_handoff(&db, &repo, &backend, &token))
+    };
+    wait_until(&db, crate::common::STEP_LIMIT, |_| !snapshot.exists());
+    let wrapper = start_resume_wrapper(&backend, &run);
+    // Well within the resume timeout, after which a request never sent
+    // would end the resume too.
+    wait_until(&db, Duration::from_secs(30), |queue| {
+        !payloads(&queue.show(TaskId::new(2)).unwrap(), "resume_request_sent").is_empty()
+    });
+    let outcome = joined(next, "the supervisor after the handoff").unwrap();
+    joined(wrapper, "the resumed session's wrapper to return").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(2))
+        .unwrap();
+    assert_landed(&repo, &detail.runs[0], "second", &first_landed);
+    let kinds = event_kinds(&detail);
+    assert_eq!(kinds.iter().filter(|k| **k == "resume_started").count(), 1);
+    // The request went once, from the next process, into the same resume.
+    let sent = payloads(&detail, "resume_request_sent");
+    assert_eq!(sent.len(), 1, "{kinds:?}");
+    assert_eq!(sent[0]["resume_attempt"], 1);
+    assert_eq!(sent[0]["workspace_id"], written["workspace"]);
+    let handed = position(&kinds, "supervisor_handed_off");
+    assert!(
+        handed < position(&kinds, "resume_request_sent"),
+        "{kinds:?}"
+    );
+    let requests: Vec<&Value> = payloads(&detail, "turn_requested")
+        .into_iter()
+        .filter(|p| p["what"] == "resolution request")
+        .collect();
+    assert_eq!(requests.len(), 1, "{kinds:?}");
+    let adopted: Vec<&Value> = payloads(&detail, "auto_repaired")
+        .into_iter()
+        .filter(|p| p["repair"] == "resume_adopted")
+        .collect();
+    assert_eq!(adopted.len(), 1, "{kinds:?}");
+    assert_eq!(adopted[0]["conditions"]["handoff"], true);
+}
+
+/// Point the live wrapper row of `run_id` at the process `stand_in`: the
+/// session it stands for stays after its exit request until the test
+/// records that process's exit, while the in-test wrapper, which ends at
+/// the request, can no longer record its exit on the row.
+fn stand_in_for_the_wrapper(db: &Path, run_id: &RunId, stand_in: u32) {
+    let changed = Connection::open(db)
+        .unwrap()
+        .execute(
+            "UPDATE run_processes SET pid=?2 WHERE run_id=?1 AND role='wrapper' AND exited_at IS NULL",
+            rusqlite::params![run_id, stand_in],
+        )
+        .unwrap();
+    assert_eq!(changed, 1, "no live wrapper of {run_id}");
+}
+
+/// A run rejected by validation waits for its session to exit; a handoff in
+/// that wait carries the recorded exit request over in `handoff.json`, so
+/// the next process writes no second exit request and lets the run rest
+/// once the session exits. The session that holds its exit back is a
+/// stand-in process the wrapper row names from before the request on.
+/// Moved from the interactive
+/// `a_handoff_while_a_rejected_run_waits_for_its_exit_sends_no_second_exit`
+/// (task 1437).
+#[test]
+fn a_handoff_while_a_rejected_run_waits_for_its_exit_requests_no_second_exit() {
+    let (_dir, repo, db) = fixture();
+    let backend = Arc::new(TestWorkspace::new(
+        &db,
+        false,
+        "commit work; printf 'scratch\\n' > untracked.txt; : > \"$RUN_DIR/turn-started\"; \
+         await_file \"$EXIT.go\"; receipt \"$(git rev-parse HEAD)\"",
+    ));
+    let mut stand_in = crate::common::KillOnDrop::new(sleeper(), "the wrapper's stand-in");
+    let stand_in_pid = stand_in.child().id();
+    let mut taken = false;
+    let (outcome, token) = hand_off_when(&db, &repo, &backend, |queue| {
+        let detail = queue.show(TaskId::new(1)).unwrap();
+        let Some(run) = detail.runs.first() else {
+            return false;
+        };
+        // Once the turn works, the stand-in takes the wrapper's row and the
+        // turn writes its receipt.
+        if !taken {
+            // A run just claimed has no run directory yet.
+            let Some(run_dir) = run.run_dir() else {
+                return false;
+            };
+            if !Path::new(run_dir).join("turn-started").exists() {
+                return false;
+            }
+            stand_in_for_the_wrapper(&db, run.id(), stand_in_pid);
+            fs::write(exit_request_path(run_dir).with_extension("go"), "").unwrap();
+            taken = true;
+            return false;
+        }
+        event_kinds(&detail).contains(&"exit_requested")
+    });
+    assert_eq!(outcome["handed_over"], 1, "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    assert_eq!(run.status(), RunStatus::Failed);
+    let snapshot = Path::new(run.run_dir().unwrap()).join("handoff.json");
+    let written: Value = serde_json::from_slice(&fs::read(&snapshot).unwrap()).unwrap();
+    assert_eq!(written["phase"], "exit");
+    assert_eq!(written["requested"], true);
+    assert_eq!(written["close"], false);
+    // The in-test wrapper ended at the request; its exit request is
+    // removed, so a second one shows.
+    let wrapper = backend.sessions.lock().unwrap()[0].1.worker.take().unwrap();
+    let _ = joined(wrapper, "the in-test wrapper to end at its exit request");
+    let exit = dagq::domain::turn::exit_path(Path::new(run.run_dir().unwrap()));
+    fs::remove_file(&exit).unwrap();
+
+    let options = supervise_options(4, true);
+    let passes = options.passes.clone();
+    let next = {
+        let (db, repo, backend, token) = (db.clone(), repo.clone(), backend.clone(), token.clone());
+        thread::spawn(move || supervise_after_handoff_with(&db, &repo, &backend, &token, options))
+    };
+    wait_until(&db, Duration::from_secs(30), |_| !snapshot.exists());
+    // Several passes of the next process with the session still there.
+    await_passes(&passes, SOME_PASSES);
+    assert!(!exit.exists());
+    let kinds = event_kinds(&queue.show(TaskId::new(1)).unwrap())
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds.iter().filter(|k| *k == "exit_requested").count(),
+        1,
+        "{kinds:?}"
+    );
+    // The session exits.
+    queue.wrapper_exited(run.id(), stand_in_pid, 0).unwrap();
+    let outcome = joined(next, "the supervisor after the handoff").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "failed");
+    assert!(!exit.exists());
+    assert!(queue.run_lease(run.id()).unwrap().is_none());
+    let kinds = event_kinds(&queue.show(TaskId::new(1)).unwrap())
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds.iter().filter(|k| *k == "exit_requested").count(),
+        1,
+        "{kinds:?}"
+    );
+    assert!(!kinds.iter().any(|k| k == "run_adopted"), "{kinds:?}");
 }

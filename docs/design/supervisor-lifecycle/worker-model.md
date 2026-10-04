@@ -4,8 +4,8 @@ type: design
 title: "Worker model"
 status: current
 created: 2026-09-27
-updated: 2026-09-29
-last_verified: 2026-09-29
+updated: 2026-10-04 # task 1437
+last_verified: 2026-10-04 # task 1437
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -60,7 +60,7 @@ Codexのworkerは段のClaudeのmodelを使わず（`-m`を渡さずCodexの既�
   - resume: runを`needs_session`にした最新のevent（`domain::resume::parks`: `integration_deferred`・`integration_error`・`evidence_missing`・`scope_violation`・`landing_decided`・`triage_finished`・`triage_decided`、landing recheckの`landing_recheck_failed`）のcodeが`verification_failed`（integrateの検証か、landing recheckの検証の失敗）か`sent_back`（reviewの`concern`の`approve_landing`に人が`send_back`と答えた）なら上げる（`worker_model::raises`、`worker_model::for_resume`）。そのeventが最後にsessionを開いたeventより後にあるときだけ上げるので、1つの失敗で2回上げない（sessionを開かずに終わったresumeの後の次のresumeは同じ段）。判定はresumeを始めるtransaction（`begin_resume`）の中で行い、`resume_started`に書く。
   - revise: reviewの`revise`の差し戻しは必ず上げる（理由`revise`）。
 - **上げない**: rebaseの衝突（`rebase_conflict`。integrateのrebase・merge-treeの事前検査・landing recheck）、外からのkill（killされたsessionのrunはfailedになり、復旧jobの`resume`が`triage_finished`（code `triage_resume`）で送り返す）、`evidence_missing`・`scope_violation`・`migration_number_taken`など、上の2つ以外のcodeのresume。conflict_precheckの差し戻し（生きているsessionへの衝突の解消の依頼）も上げない。
-- **生きているsessionの切り替え**: interactiveのreviseでは、`revise_requested`を記録する前に、agentの切り替えの入力（`AgentSignals::model_switch`。Claude Codeは、modelが変わるときだけ`/model <model>`、続けて`/effort <effort>`）を1つずつ送り（`submit`、what `model switch`）、どれも入力欄を抜けたら上げた値で記録して差し戻す。何もsessionに届いていないとき（agentが切り替えを持たない、最初の入力の打鍵が失敗した。打鍵の失敗は入力欄に何も残さない）は、上げずに直前の値で差し戻し、`escalation_skipped`に理由を書く（ADR-0079の決定3）。入力が入力欄に残った・ダイアログが出た・2つ目の入力が失敗した（`/model`だけ効いた）ときは、差し戻しをその上に打つと入力欄の残りやダイアログに入り、sessionのmodel / effortも記録と食い違うので、差し戻しを打たず`revise_requested`も記録せずに、送れなかった差し戻しと同じく`approve_landing`のaskにする（`Unswitched::Unsettled`）。headlessのreviseは入力を送らず、次のturnが上げた値で起動する。
+- **生きているsessionの切り替え**: task 1437より前のinteractiveのreviseでは、`revise_requested`を記録する前に、agentの切り替えの入力（`AgentSignals::model_switch`。Claude Codeは、modelが変わるときだけ`/model <model>`、続けて`/effort <effort>`）を1つずつ送り（`submit`、what `model switch`）、どれも入力欄を抜けたら上げた値で記録して差し戻す。何もsessionに届いていないとき（agentが切り替えを持たない、最初の入力の打鍵が失敗した。打鍵の失敗は入力欄に何も残さない）は、上げずに直前の値で差し戻し、`escalation_skipped`に理由を書く（ADR-0079の決定3）。入力が入力欄に残った・ダイアログが出た・2つ目の入力が失敗した（`/model`だけ効いた）ときは、差し戻しをその上に打つと入力欄の残りやダイアログに入り、sessionのmodel / effortも記録と食い違うので、差し戻しを打たず`revise_requested`も記録せずに、送れなかった差し戻しと同じく`approve_landing`のaskにする（`Unswitched::Unsettled`）。headlessのreviseは入力を送らず、次のturnが上げた値で起動する。今はworkerのrunがすべて非対話なので（task 1437）、headlessのreviseだけが当たる。
 - **取り下げた差し戻し**: `revise_requested`の後に同じattemptの`revise_unsent`がある（差し戻しを打てなかった）ものは、sessionを開いたeventに数えない（`worker_model`の`openings`）。その段上げは直前の値にも、taskへの引き継ぎにも、`stats`の`revise_escalations`にも入らず、その後の人の`send_back`によるresumeは実際に走っていたsessionから1段上げる。
 - **taskに引き継ぐ**: 上げた段はそのtaskの以後のrun（retry、引き継ぐretryを含む）に引き継ぐ。claimは試しの選んだsessionと、そのtaskの前のrunで最後にsessionを開いたeventの値を比べ、taskのどれかのeventが`escalated_from`を持ち（一度でも上げた）、前の値の段が高いときは前の値を使う（群は試しの選んだもの。`WorkerSession::inheriting`、`infrastructure::sqlite::claim_task`）。一度も上げていないtaskは今までどおり。
 - **層**: `kpi`の`--by model` / `effort`はrunの最初の`run_claimed`の値で層別するので、resume・reviseで上げた段は層に出ず、retryで引き継いだ段は出る。

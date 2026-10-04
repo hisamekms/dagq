@@ -4,8 +4,8 @@ type: design
 title: "Run environment"
 status: current
 created: 2026-09-26
-updated: 2026-10-04 # task 1591: [supervisor] light_changes
-last_verified: 2026-10-04 # task 1591
+updated: 2026-10-04 # task 1591: [supervisor] light_changes; task 1437
+last_verified: 2026-10-04 # task 1591; task 1437
 scope: runtime
 related:
   - adr-t963-1
@@ -40,7 +40,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 - `[disk]`はclaimと着地の検証の前に確かめる空き容量の閾値で、`sample_runs`（正の整数、既定20）、`claim_factor`（正の数、既定2）、`integrate_factor`（正の数、既定1.5）、`min_free_bytes`（正の整数、既定なし）を持つ（[空き容量を確かめる](disk-space.md)、ADR-0047の決定44、task 377。`load_disk_config`）。supervisorが起動時に読み、読めなければ既定値で動く。`[recheck]`と同じく、旧バイナリは未知の表を拒むので、固定バイナリを`[disk]`を知るものに入れ替えてから足す
 
 - `[resume]`は`needs_session`のrunの衝突だけの試行の上限で、`conflict_only_limit`（正の整数、既定5）の1 keyだけを持つ（[Needs session](needs-session.md)の「試行の数え方」、ADR-0047の決定24、task 512。`load_resume_config`、`domain::resume::ResumeConfig`）。未知のkey・0以下・整数でない値・重複は他の表と同じく行番号付きのエラーにする。数える試行の上限`MAX_RESUME_ATTEMPTS`（3）は設定にしない。supervisorが起動時に読み（`SuperviseOptions::resume`で上書きできる）、読めなければ既定値で動く。起動の後の変更はsupervisorを起動し直すまで効かない。`[recheck]`と同じく、旧バイナリは未知の表を拒むので、固定バイナリを`[resume]`を知るものに入れ替えてから足す
-- `[exit]`はsessionが止めた`/exit`の再試行（[Receipt and session exit](receipt-and-session-exit.md#exitの再試行)、ADR-0047の決定25、task 555。`load_exit_config`、`domain::exit::ExitConfig`）で、`retries`（0以上の整数、既定3。0は再試行と、使い切った後にworkspaceを閉じて着地へ進める経路を行わない）と`retry_intervals_secs`（正の整数の秒の配列`[30, 60, 120]`の形、既定`[30, 60, 120]`。n回目の再試行の後に待つ秒で、回数より短ければ最後の値を繰り返す）の2 keyを持つ。未知のkey・負の数・整数でない値・空の配列・配列でない値・重複は行番号付きのエラーにする。supervisorが起動時に読み（`SuperviseOptions::exit`で上書きできる）、読めなければ既定値で動く。起動の後の変更はsupervisorを起動し直すまで効かない。旧バイナリは未知の表を拒むので、固定バイナリを`[exit]`を知るものに入れ替えてから足す
+- `[exit]`はsessionが止めた`/exit`の再試行の設定だった（[Receipt and session exit](receipt-and-session-exit.md#exitの再試行)、ADR-0047の決定25、task 555。`domain::exit::ExitConfig`）。task 1437で対話のworkerの`/exit`とともに再試行を撤去したので、今は`dagq.toml`を読むときに検査するだけで（古いfileもそのまま通る）、supervisorは読まず、何も使わない。`retries`（0以上の整数、既定3。0は再試行と、使い切った後にworkspaceを閉じて着地へ進める経路を行わない）と`retry_intervals_secs`（正の整数の秒の配列`[30, 60, 120]`の形、既定`[30, 60, 120]`。n回目の再試行の後に待つ秒で、回数より短ければ最後の値を繰り返す）の2 keyを持つ。未知のkey・負の数・整数でない値・空の配列・配列でない値・重複は行番号付きのエラーにする。旧バイナリは未知の表を拒むので、固定バイナリを`[exit]`を知るものに入れ替えてから足す
 
 - `[supervisor]`はsupervisorの同時に走らせるrunの数`parallel`（1以上の整数）と、人の答えを待つrunの上限`max_waiting`（0以上の整数。0で待ちを使わない。[人の答えを待つrun](waiting.md)）と、runtimeが同時に立てるplannerの上限`runtime_planners`（1以上の整数。draft・finding・reviseのplannerで共有し、run slotとは別、人が開いたplannerは数えない。[Draft planners](draft-planners.md)・[Finding planners](finding-planners.md)・[Plan review (supervisor)](plan-review.md#plan-review-supervisor)）と、loadの保留が有効なときの新しいclaimの間隔`claim_spacing`（0以上の整数の秒。0で間を空けない。[claimを控える](claim-hold.md#claimの間隔)、ADR-t1479-1）と、着地の順番を待つだけのrunが空けた枠でclaimする軽いchangeの集合`light_changes`（文字列の配列で、値は`[tasks] changes`の中のもの。書かなければ空で、空なら軽い枠を使わない。runtimeは値の意味を持たない。[claimを控える](claim-hold.md#着地待ちが空けた軽い枠)、ADR-t1591-1）を持つ（task 698、`runtime_planners`はtask 941、`light_changes`はtask 1591。`load_supervisor_config`、`domain::slot_limits::SupervisorConfig`、`domain::light_slots::LightChanges`）。projectごとのbuildの重さに合わせた並列数と、答えを待つplannerが枠をふさいでもdraftとreviseが進む数と、buildのloadが出るまでの間をrepositoryに置くため。未知のkey・範囲外や整数でない値（負の数・小数・`3m`など。`parallel`と`runtime_planners`は65535まで、`claim_spacing`は4294967295まで）・重複は他の表と同じく行番号付きのエラーにする。`light_changes`は、配列でない・changeの書式に合わない・空の配列・同じ値の重複・`[tasks] changes`の外の値（`[tasks] changes`が無いときは全ての値）を、ファイルを読み終えた後に`light_changes`の行の番号付きのエラーにする（`[tasks]`は`[supervisor]`の後にあってもよい）。
   - **優先順**: どのkeyも、`supervise`のflag（`--parallel` / `--max-waiting` / `--runtime-planners`）の明示 > `[supervisor]` > 既定（`parallel`と`max_waiting`は4、`runtime_planners`は1、`claim_spacing`は180。`SlotLimits::resolve`）。`claim_spacing`にCLIのflagは無く、libraryの`SuperviseOptions::claim_spacing`だけがflagの位置で与える。`light_changes`にはflagが無く、`[supervisor]`か既定（空）で決まる。`up`はflagを明示されたときだけ`supervise`の引数に渡し、明示が無ければ焼き込まない（[`up` / `down`](up-down.md)）ので、`up`で起動したsupervisorもこの順で決まる。

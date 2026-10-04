@@ -7,6 +7,7 @@ use crate::runtime_review::revising_agent;
 use crate::{common, runtime_support};
 
 use dagq::domain::{AskConfidence, AskReason, EventKind, TaskDetail};
+use runtime_support::headless::request_turn_left_by_a_dead_supervisor;
 use runtime_support::*;
 
 /// A reviewer script that prints a `concern` with its recommendation,
@@ -187,7 +188,7 @@ fn a_high_send_back_revises_the_live_session() {
                 "reason_category": null, "applied": true, "escalated_because": null})
         ]
     );
-    let texts = session_texts(&backend, &detail.runs[0]);
+    let texts = session_texts(&detail.runs[0]);
     assert_eq!(texts.len(), 1);
     assert!(texts[0].contains("(revise 1 of 2)"), "{}", texts[0]);
     assert_eq!(reviewer.prompts().len(), 2);
@@ -315,7 +316,7 @@ fn a_discard_concern_asks_a_person_with_the_recommendation() {
         assert!(ask.question.contains(part), "{part} in {}", ask.question);
     }
     assert!(payloads(&detail, "revise_requested").is_empty());
-    assert!(session_texts(&backend, &run).is_empty());
+    assert!(session_texts(&run).is_empty());
     let kinds = event_kinds(&detail);
     assert!(position(&kinds, "workspace_closed") < position(&kinds, "ask_opened"));
 
@@ -570,14 +571,17 @@ fn an_adopter_asks_with_the_reasons_of_the_subagent_that_sent_the_run_back() {
 }
 
 /// A supervisor that died after it sent a concern back on the job's
-/// recommendation, having recorded its `concern_decided` or not (the
-/// adopter backfills it): its adopter waits for the live session on the
-/// revise, and when the session ends without fixing it, asks as that
-/// concern as the live supervisor does
-/// ([`assert_asked_after_the_applied_send_back`]).
+/// recommendation (`revise_requested`, the request written as the headless
+/// session's next turn), having recorded its `concern_decided` or not (the
+/// adopter backfills it): its adopter waits for the session's turn of the
+/// revise, and when that turn ends without rewriting the receipt, asks as
+/// that concern as the live supervisor does
+/// ([`assert_asked_after_the_applied_send_back`]). Moved from the deleted
+/// interactive
+/// `an_adopter_asks_as_the_concern_when_the_session_does_not_fix_its_send_back`
+/// (task 1437).
 #[test]
-fn an_adopter_asks_as_the_concern_when_the_session_does_not_fix_its_send_back() {
-    interactive_workers();
+fn an_adopter_asks_as_the_concern_when_the_headless_session_does_not_fix_its_send_back() {
     for recorded in [true, false] {
         adopt_an_unfixed_send_back(recorded);
     }
@@ -585,13 +589,7 @@ fn an_adopter_asks_as_the_concern_when_the_session_does_not_fix_its_send_back() 
 
 fn adopt_an_unfixed_send_back(recorded: bool) {
     let (_dir, repo, db) = fixture();
-    // The session ends, its receipt not rewritten, once `$EXIT.go` exists.
-    let backend = Arc::new(TestWorkspace::new(
-        &db,
-        false,
-        "commit work; receipt \"$(git rev-parse HEAD)\"; idle; \
-         await_file \"$EXIT.go\"",
-    ));
+    let backend = Arc::new(TestWorkspace::new(&db, false, ENDS_ON_REVISE));
     let run = left_by_a_dead_supervisor(
         &repo,
         &db,
@@ -607,8 +605,7 @@ fn adopt_an_unfixed_send_back(recorded: bool) {
         ],
     );
     // The request is sent a second after the session's idle marker, which
-    // then predates it. No `revise-1.txt` is written, so the adopter does
-    // not type it again.
+    // then predates it.
     await_second_after(modified_second(&run.idle_marker_path().unwrap()));
     let queue = SqliteQueue::open(&db).unwrap();
     let decided = (
@@ -616,6 +613,8 @@ fn adopt_an_unfixed_send_back(recorded: bool) {
         json!({"attempt": 1, "recommendation": "send_back", "confidence": "high",
                "reason_category": null, "applied": true, "escalated_because": null}),
     );
+    let text = "dagq: the supervisor's review asks for changes (revise 1 of 2).";
+    fs::write(Path::new(run.run_dir().unwrap()).join("revise-1.txt"), text).unwrap();
     for (kind, payload) in [(
         EventKind::ReviseRequested,
         json!({"attempt": 1, "reasons": ["a finding"], "sent_at": unix_second_now()}),
@@ -625,25 +624,14 @@ fn adopt_an_unfixed_send_back(recorded: bool) {
     {
         queue.record_runtime_event(run.id(), kind, payload).unwrap();
     }
-    let ends = {
-        let (db, run) = (db.clone(), run.clone());
-        thread::spawn(move || {
-            wait_until(&db, Duration::from_secs(30), |queue| {
-                !adoption_events(&queue.show(TaskId::new(1)).unwrap()).is_empty()
-            });
-            fs::write(
-                exit_request_path(run.run_dir().unwrap()).with_extension("go"),
-                "",
-            )
-            .unwrap();
-        })
-    };
+    request_turn_left_by_a_dead_supervisor(&db, &run, text, "revise request");
     let outcome = adopt(&db, &repo, &backend, Vec::new());
-    joined(ends, "the session to be let end");
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    // The adopter wrote no second request: the first turn and the revise's.
+    assert_eq!(stub_calls(&run).len(), 2, "recorded: {recorded}");
     assert_asked_after_the_applied_send_back(
         &db,
         &run,
-        "the session ended before it rewrote the receipt after revise 1",
+        "the session went idle without rewriting the receipt after revise 1",
     );
 }

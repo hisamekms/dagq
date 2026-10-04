@@ -4,10 +4,6 @@
 use super::*;
 use crate::domain::AskConfidence;
 
-/// The phase an idle the screen showed during a revise or a conflict
-/// request is recorded with (`idle_inferred`).
-pub(super) const REVISE_PHASE: &str = "revise";
-
 /// A `revise` verdict, or a conflict the precheck found, sent to the live
 /// session: it is waited for until the session rewrites its receipt and
 /// goes idle.
@@ -20,7 +16,7 @@ pub(super) struct ReviseWatch {
     pub(super) sent: Instant,
     /// Whether the session took the request, or the last answer typed
     /// (task 285).
-    pub(super) start: Option<StartCheck>,
+    pub(super) start: Option<SystemTime>,
     /// The answers of the session's `worker_question`s and the dialogs it
     /// stops at, followed as a worker's own session's are (task 238).
     pub(super) live: Box<SessionWatch>,
@@ -172,10 +168,9 @@ pub(super) enum ReviseOutcome {
 }
 
 /// Whether `idle` ends the turn of the revise: written after the last input
-/// typed (`input_at`, in a later millisecond, task 1050), with no input the
-/// session took since (`input`) still running a turn (task 672).
-fn idle_ends_turn(idle: &IdleMarker, input_at: SystemTime, input: Option<&InputMarker>) -> bool {
-    super::file_time::written_after(idle.modified(), input_at) && !idle.turn_open_after(input)
+/// requested (`input_at`, in a later millisecond, task 1050).
+fn idle_ends_turn(idle: &IdleMarker, input_at: SystemTime) -> bool {
+    super::file_time::written_after(idle.modified(), input_at)
 }
 
 /// Whether a receipt written at `modified` was rewritten after the request
@@ -194,14 +189,9 @@ impl ReviseWatch {
         attempt: usize,
         fix: Fix,
         sent_at: SystemTime,
-        start: Option<StartCheck>,
+        start: Option<SystemTime>,
     ) -> Result<Self> {
-        let mut live = Box::new(SessionWatch::fixing(
-            run,
-            &session.workspace,
-            sent_at,
-            Stage::Revise,
-        )?);
+        let mut live = Box::new(SessionWatch::fixing(run, &session.workspace, sent_at)?);
         // A question from before the request (asked during validation or
         // the review, or left open before the receipt) is the inbox's to
         // deliver by hand: it neither gets its answer typed here nor holds
@@ -222,7 +212,7 @@ impl ReviseWatch {
 
     /// Another request typed at `sent_at` (a receipt to fix): only what the
     /// session does after it counts.
-    pub(super) fn requested(&mut self, sent_at: SystemTime, start: StartCheck) {
+    pub(super) fn requested(&mut self, sent_at: SystemTime, start: SystemTime) {
         self.sent_at = sent_at;
         self.live.input_at = Some(sent_at);
         self.start = Some(start);
@@ -240,14 +230,13 @@ impl ReviseWatch {
         ) {
             // The revise ends here: a dialog recorded during it is no
             // attention any more.
-            self.live.clear_prompt(sv, run)?;
+
             self.live.recovery.stop(sv, run);
             // A `stalled` ask of a send it did not take ends with it.
             match outcome {
                 Some(ReviseOutcome::Rewritten(_)) => self.live.stall.settle(sv, run, true)?,
                 _ => self.live.stall.ended(sv, run)?,
             }
-            self.live.end_sends(sv, run)?;
         }
         Ok(outcome)
     }
@@ -308,23 +297,9 @@ impl ReviseWatch {
             self.delivered_closed = sv.queue.last_worker_question_closed(run.id())?;
             self.start = self.live.answer_start.take();
         }
-        if let Some(agent) = processes
-            .iter()
-            .find(|p| p.role == "agent" && p.exited_at.is_none())
-        {
-            self.live.watch_prompt(sv, run, agent)?;
-        }
-        if let Some(start) = &mut self.start {
-            let workspace = self.session.workspace.clone();
-            start.poll(sv, run, &workspace, &run.idle_marker_path()?)?;
-        }
+
         // A request or an answer it did not take goes to its recovery job
         // (ADR-0047 decision 31); an instruction the job typed is input.
-        if let Some((typed, start)) = self.live.watch_sends(sv, run)? {
-            self.live.input_at = Some(typed);
-            self.sent = Instant::now();
-            self.start = Some(start);
-        }
         // A session stopped at its own question, asked since the request,
         // waits for its answer, however long a person takes: it neither went
         // idle without rewriting the receipt nor ran out of time. A receipt
@@ -378,28 +353,12 @@ impl ReviseWatch {
         }
         // The idle marker is read before the receipt: a receipt rewritten
         // after this read is judged at the next poll, never as idle without
-        // it. A marker from before the last input typed is not this turn's.
-        // Without such a marker (or one newer than the receipt it
-        // rewrote), the screen stands in for it (ADR-t803-1).
+        // it. A marker from before the last request is not this turn's.
         let input_at = self.live.input_at.unwrap_or(self.sent_at);
-        let after = sv
-            .files
-            .modified(receipt)
-            .map_or(input_at, |modified| modified.max(input_at));
         let idle_marker = run.idle_marker_path()?;
-        let idle = sv.session_idle(
-            run,
-            &self.session.workspace,
-            &idle_marker,
-            after,
-            REVISE_PHASE,
-        )?;
-        // An input the session took since its marker (read after it: a
-        // notice that its background work ended, or a prompt) started a
-        // turn that is still running: only the idle that ends it ends the
-        // revise (task 672).
-        let input = InputMarker::read(&*sv.files, sv.signals, &idle_marker)?;
-        let idle = idle.filter(|idle| idle_ends_turn(idle, input_at, input.as_ref()));
+        let idle = sv.session_idle(&idle_marker)?;
+        // Only an idle marker newer than the queued request ends the revise.
+        let idle = idle.filter(|idle| idle_ends_turn(idle, input_at));
         let rewritten = self.rewritten(sv, receipt);
         let idle_after_receipt = match &idle {
             Some(idle) if rewritten => idle.idle_after_receipt(&*sv.files, receipt)?.is_some(),
@@ -486,18 +445,7 @@ mod tests {
         let path = Path::new("/run/idle.json");
         let input_at = at_ns(250, 0);
         let idle = |at| IdleMarker::written_at(path, at);
-        assert!(!idle_ends_turn(&idle(at_ns(250, 700_000)), input_at, None));
-        assert!(idle_ends_turn(&idle(at_ns(251, 0)), input_at, None));
-        // An input taken after the marker still runs its turn.
-        let input = InputMarker {
-            modified: at_ns(252, 0),
-            source: InputSource::Typed,
-            text: None,
-        };
-        assert!(!idle_ends_turn(
-            &idle(at_ns(251, 0)),
-            input_at,
-            Some(&input)
-        ));
+        assert!(!idle_ends_turn(&idle(at_ns(250, 700_000)), input_at));
+        assert!(idle_ends_turn(&idle(at_ns(251, 0)), input_at));
     }
 }

@@ -229,7 +229,7 @@ fn a_failed_e2e_parks_the_run_for_a_resume_and_its_fix_lands() {
         assert!(reason.contains(part), "{part}: {reason}");
     }
     // The resume asked to fix the failed tests.
-    let text = &session_texts(&backend, run)[0];
+    let text = &session_texts(run)[0];
     assert!(
         text.contains("the e2e the runtime ran on the host before landing it failed"),
         "{text}"

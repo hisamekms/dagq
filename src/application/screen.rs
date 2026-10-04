@@ -1,16 +1,9 @@
-//! What a person, or the inbox at a person's word, reads from and sends
-//! to a run's or a planner's session without typing `cmux` (ADR-t1228-1
-//! decisions 4, 5 and 7): `run screen` / `planner screen` read the
-//! session's screen, at most [`MAX_LINES`] lines, and `run send` /
-//! `planner send` type into it only a key of [`SessionKey`] or the answer
-//! of an answered ask about that session, never free text. The target is
-//! named by its run (or task) or planner id and its workspace is looked up
-//! in the queue. Each read and each send is recorded with its actor
-//! (`screen_read`, `screen_input_sent`), without the screen's text. A
-//! headless run or planner has no screen: a read says where its turns are
-//! and a send is refused (ADR-t1228-1 decision 4, ADR-t1533-1). The
-//! caller authorizes the command first (`screen.read`, `screen.send`;
-//! `docs/design/authorization.md`).
+//! Read and send to a planner's session by its id. Worker runs expose
+//! their turns directory through `run screen`; `run send` is refused and
+//! points to `answer`, whose answer the supervisor delivers as a turn.
+//! Only planner reads and sends use the workspace backend and record
+//! `screen_read` / `screen_input_sent`. Authorization remains the caller's
+//! responsibility (`screen.read`, `screen.send`).
 
 use std::path::Path;
 
@@ -22,7 +15,7 @@ use super::supervise::{Input, Submission, submit_input};
 use super::{AgentSignals, PlannerAnswerRoute, Queue, WorkspaceBackend};
 use crate::domain::{
     AskId, AskKind, EventKind, PlannerId, PlannerRoute, PlannerSession, Resource, RunId, TaskId,
-    TaskRun, turn::turns_dir, worker::WorkerMode,
+    TaskRun, turn::turns_dir,
 };
 
 /// The lines a read returns when the caller names no number.
@@ -165,26 +158,6 @@ pub(crate) fn resolve_run(queue: &mut dyn Queue, target: &RunTarget) -> Result<T
     }
 }
 
-/// The workspace of `run`'s session that a person may read or type into:
-/// one with a terminal (not a headless run's) that is still open.
-fn run_workspace(run: &TaskRun) -> Result<String> {
-    ensure!(
-        run.worker_mode() != WorkerMode::Headless,
-        "run {} is headless: its session has no screen and takes no keys (read its turns in {}/turns; answer its asks with `answer`)",
-        run.id(),
-        run.run_dir().unwrap_or("its run directory")
-    );
-    ensure!(
-        run.workspace_closed_at().is_none(),
-        "the workspace of run {} is closed",
-        run.id()
-    );
-    match run.workspace_id() {
-        Some(workspace) => Ok(workspace.to_owned()),
-        None => bail!("run {} has no workspace", run.id()),
-    }
-}
-
 /// The workspace of `planner`'s session, while the queue has not given it
 /// up.
 fn planner_workspace(planner: &PlannerSession) -> Result<String> {
@@ -229,32 +202,28 @@ fn read(cmux: &dyn WorkspaceBackend, workspace: &str, lines: usize) -> Result<(V
     Ok((output, record))
 }
 
-/// `run screen`: the screen of the session of the run `target` names. A
-/// headless run has none; the reply says where its turns are instead.
-pub fn run_screen(
-    queue: &mut dyn Queue,
-    cmux: &dyn WorkspaceBackend,
-    target: &RunTarget,
-    lines: usize,
-) -> Result<Value> {
+/// Why `run screen` reads no screen of a run recorded as interactive: its
+/// worker was retired with no screen left to read (task 1437).
+pub const RETIRED_SCREEN: &str =
+    "the interactive worker was retired (task 1437); the run has no screen to read";
+
+/// `run screen`: no worker run has a screen to read. Return its turns
+/// directory, and why: a headless run has none, and a run recorded as
+/// interactive had its worker retired.
+pub fn run_screen(queue: &mut dyn Queue, target: &RunTarget) -> Result<Value> {
     let run = resolve_run(queue, target)?;
-    if run.worker_mode() == WorkerMode::Headless {
-        return Ok(json!({
-            "run_id": run.id(),
-            "task_id": run.task_id(),
-            "worker_mode": run.worker_mode(),
-            "screen": null,
-            "reason": "a headless run has no screen",
-            "turns": run.run_dir().map(|dir| format!("{dir}/turns")),
-        }));
-    }
-    let workspace = run_workspace(&run)?;
-    let (mut output, mut record) = read(cmux, &workspace, lines)?;
-    record["target"] = json!("run");
-    queue.record_runtime_event(run.id(), EventKind::ScreenRead, record)?;
-    output["run_id"] = json!(run.id());
-    output["task_id"] = json!(run.task_id());
-    Ok(output)
+    let reason = match run.worker_mode() {
+        crate::domain::worker::WorkerMode::Interactive => RETIRED_SCREEN,
+        crate::domain::worker::WorkerMode::Headless => "a headless run has no screen",
+    };
+    Ok(json!({
+        "run_id": run.id(),
+        "task_id": run.task_id(),
+        "worker_mode": run.worker_mode(),
+        "screen": null,
+        "reason": reason,
+        "turns": run.run_dir().map(|dir| format!("{dir}/turns")),
+    }))
 }
 
 /// `planner screen`: the screen of `planner`'s session. A headless planner
@@ -345,42 +314,15 @@ fn merge(mut record: Value, sent: Value) -> Value {
     record
 }
 
-/// `run send`: type `sending` into the session of the run `target` names.
-/// An answer must be of an answered ask on that run, and is typed as the
-/// supervisor delivers a worker's answer. A headless run takes no keys.
-pub fn run_send(
-    queue: &mut dyn Queue,
-    ports: &ScreenPorts<'_>,
-    target: &RunTarget,
-    sending: &Sending,
-) -> Result<Value> {
+/// `run send`: refused for every run (task 1437). Answers are delivered by
+/// the supervisor as the session's next turn, through `answer`.
+pub fn run_send(queue: &mut dyn Queue, target: &RunTarget) -> Result<Value> {
     let run = resolve_run(queue, target)?;
-    let workspace = run_workspace(&run)?;
-    let sent = match sending {
-        Sending::Keys(keys) => send_keys(ports, &workspace, keys)?,
-        Sending::Answer(id) => {
-            let (ask, answer) = answered(queue, *id)?;
-            ensure!(
-                ask.run_id.as_ref() == Some(run.id()),
-                "ask {id} is not about run {}",
-                run.id()
-            );
-            let text = super::prompt::answer_text(&run, ask.id, &answer);
-            let (submission, retries) =
-                submit_input(ports.cmux, ports.signals, &workspace, Input::Text(&text))?;
-            // The supervisor does not type a worker's answer again.
-            if ask.kind == AskKind::WorkerQuestion && ask.closed_at.is_none() {
-                queue.ask_delivered(ask.id, &workspace)?;
-            }
-            outcome(&submission, retries)
-        }
-    };
-    let mut record = merge(sent_record(&workspace, sending), sent);
-    record["target"] = json!("run");
-    queue.record_runtime_event(run.id(), EventKind::ScreenInputSent, record.clone())?;
-    record["run_id"] = json!(run.id());
-    record["task_id"] = json!(run.task_id());
-    Ok(record)
+    bail!(
+        "run {} has no interactive input: run send takes no keys or answers; answer its asks with `answer`, and the supervisor delivers the answer as the next turn (read its turns in {}/turns)",
+        run.id(),
+        run.run_dir().unwrap_or("its run directory")
+    )
 }
 
 /// `planner send`: type `sending` into `planner`'s session. An answer must

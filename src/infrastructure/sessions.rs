@@ -3603,10 +3603,11 @@ mod tests {
     }
 
     /// Every span closes with the tokens of its transcript's messages in
-    /// it: a run's session also gives them to its `session_exited` and a
-    /// resume's to its `resume_finished`, a headless job's span has its
-    /// own; a usage this reader does not know records none, and leaves the
-    /// active time and the run as they were.
+    /// it: a run's session also gives them to its `session_exited`, a
+    /// resume (headless since task 1437) the tokens of its turns to its
+    /// `resume_finished`, and a headless job's span has its own; a usage
+    /// this reader does not know records none, and leaves the active time
+    /// as it was.
     #[test]
     fn spans_record_the_tokens_of_their_transcripts() {
         use crate::domain::CommitSha;
@@ -3688,6 +3689,7 @@ mod tests {
         assert_eq!(exited.payload["exit_code"], 0);
 
         // A resume whose session exits before it finishes: its own tokens.
+        // A resume runs headless (task 1437), so they are its turns'.
         let main = CommitSha::try_from("0123456789abcdef0123456789abcdef01234567").unwrap();
         queue
             .conn
@@ -3710,23 +3712,18 @@ mod tests {
             )
             .unwrap()
             .unwrap();
+        assert_eq!(
+            of_kind(&queue, "worker_mode_converted")[0].payload["phase"],
+            "resume"
+        );
         let before = latest(&queue.conn);
         record(&queue, EventKind::AgentStarted, json!({"session_id": RUN}));
-        // Its span opened 20 s ago; begin_resume's events are now.
-        let resumed = retime(&queue.conn, before, 20) - 20_000;
-        write(
-            RUN,
-            start,
-            &[
-                ("user", 1, go.clone()),
-                ("assistant", 2, reply("m1", 3, 9)),
-                ("user", (resumed - start) / 1000 + 1, go.clone()),
-                (
-                    "assistant",
-                    (resumed - start) / 1000 + 2,
-                    reply("m3", 11, 13),
-                ),
-            ],
+        record(&queue, EventKind::TurnStarted, json!({"turn": 1}));
+        record(
+            &queue,
+            EventKind::TurnFinished,
+            json!({"turn": 1, "outcome": "succeeded", "tokens":
+                   {"input": 11, "output": 13, "cache_read": 100, "cache_creation": 10}}),
         );
         record(&queue, EventKind::SessionExited, json!({"exit_code": 0}));
         queue
@@ -3739,33 +3736,25 @@ mod tests {
                 json!({"outcome": "unresolved"}),
             )
             .unwrap();
+        let resumed = json!({"input": 11, "output": 13, "cache_read": 100, "cache_creation": 10, "messages": 1});
         let finished = &of_kind(&queue, "resume_finished")[0];
+        assert_eq!(finished.payload["tokens"], resumed);
         assert_eq!(
-            finished.payload["tokens"],
-            json!({"input": 11, "output": 13, "cache_read": 100, "cache_creation": 10, "messages": 1})
+            closed_tokens(&queue.conn, &run, "resume", EventId::new(before)).unwrap(),
+            Some(resumed)
         );
 
-        // A usage of an unknown form: no tokens, the rest as before.
-        queue
-            .conn
-            .execute("UPDATE task_runs SET status='needs_session'", [])
-            .unwrap();
-        queue
-            .begin_resume(
-                &run,
-                &LeaseToken::new("tok"),
-                &main,
-                None,
-                Default::default(),
-            )
-            .unwrap()
-            .unwrap();
-        let before = latest(&queue.conn);
-        record(&queue, EventKind::AgentStarted, json!({"session_id": RUN}));
-        let again = retime(&queue.conn, before, 10) - 10_000;
+        // A usage of an unknown form in a transcript: no tokens, the rest
+        // as before.
+        record(
+            &queue,
+            EventKind::ReviewStarted,
+            json!({"attempt": 2, "session_id": "s-review-2"}),
+        );
+        let again = retime(&queue.conn, latest(&queue.conn) - 1, 10);
         write(
-            RUN,
-            again,
+            "s-review-2",
+            again - 10_000,
             &[
                 ("user", 1, go),
                 (
@@ -3775,17 +3764,18 @@ mod tests {
                 ),
             ],
         );
-        record(&queue, EventKind::SessionExited, json!({"exit_code": 0}));
-        let closed = of_kind(&queue, SESSION_CLOSED);
-        let last = closed.last().unwrap();
-        assert_eq!(last.payload["active"], "recorded");
-        assert!(last.payload.get("tokens").is_none());
-        let exited = of_kind(&queue, "session_exited");
-        assert!(exited.last().unwrap().payload.get("tokens").is_none());
-        assert_eq!(
-            closed_tokens(&queue.conn, &run, "resume", EventId::new(before)).unwrap(),
-            None
+        record(
+            &queue,
+            EventKind::ReviewFinished,
+            json!({"verdict": "pass"}),
         );
+        let closed = of_kind(&queue, SESSION_CLOSED);
+        let last = closed
+            .iter()
+            .rfind(|e| e.payload["kind"] == "review")
+            .unwrap();
+        assert_eq!(last.payload["active"], "recorded");
+        assert!(last.payload.get("tokens").is_none(), "{last:?}");
     }
 
     /// An inferred close ends at the transcript's last record, whose

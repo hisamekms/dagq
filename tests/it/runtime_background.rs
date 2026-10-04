@@ -900,7 +900,7 @@ fn a_workspace_wrapper_still_waits_for_its_workspace() {
     let (_dir, repo, db, backend) = headless_fixture(&[]);
     let run = provision_under(&repo, &db, "owner");
     let (provider, other) =
-        headless_provider(&run, backend.headless.as_deref(), backend.codex.as_deref()).unwrap();
+        headless_provider(&run, backend.headless.as_deref(), backend.codex.as_deref());
     let mut queue = SqliteQueue::open(&db).unwrap();
     queue
         .record_runtime_event(

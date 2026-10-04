@@ -25,7 +25,7 @@ fn evidence_fixture(evidence: &[EvidenceCheck]) -> (Fixture, PathBuf, PathBuf) {
             goal_id: None,
             context: String::new(),
             provider: None,
-            worker_mode: Some(worker_mode()),
+            worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
         })
         .unwrap();
     assert_eq!(task.id(), TaskId::new(2));
@@ -96,7 +96,7 @@ fn missing_required_evidence_parks_the_run_for_a_resumed_session() {
     assert!(event_kinds(&detail).contains(&"workspace_closed"));
     assert!(backend.closed().contains(&WORKSPACE_ID.to_owned()));
     // The resume asked for the missing check, not a rebase.
-    let text = &session_texts(&backend, run)[0];
+    let text = &session_texts(run)[0];
     assert!(
         text.contains("found required evidence missing from the receipt"),
         "{text}"
@@ -335,7 +335,7 @@ fn scope_fixture(paths: &[&str]) -> (Fixture, PathBuf, PathBuf) {
             goal_id: None,
             context: String::new(),
             provider: None,
-            worker_mode: Some(worker_mode()),
+            worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
         })
         .unwrap();
     assert_eq!(task.id(), TaskId::new(2));
@@ -386,7 +386,7 @@ fn a_change_outside_the_declared_paths_parks_the_run_for_a_resumed_session() {
     );
     assert!(!event_kinds(&detail).contains(&"evidence_missing"));
     // The resume asked to take the path out, not for a rebase or evidence.
-    let text = &session_texts(&backend, run)[0];
+    let text = &session_texts(run)[0];
     assert!(
         text.contains("changes paths outside the task's --paths (docs/**, *.md)"),
         "{text}"
@@ -523,7 +523,7 @@ fn integrate_refuses_a_rebased_diff_outside_the_declared_paths() {
     let outcome = supervise(&db, &repo, &backend).unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let text = &session_texts(&backend, &run)[0];
+    let text = &session_texts(&run)[0];
     assert!(
         text.contains("changes paths outside the task's --paths (*.txt)"),
         "{text}"

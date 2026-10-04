@@ -9,17 +9,6 @@ use dagq::domain::{
     queue_hold::{HoldJob, Wall},
 };
 use runtime_support::*;
-use std::sync::atomic::AtomicBool;
-
-/// A session stopped at Claude Code's usage limit.
-const LIMIT_SCREEN: &str = "\
-⏺ Bash(cargo test)
-  ⎿  5-hour limit reached ∙ resets 3pm
-     /upgrade to increase your usage limit.
-
-│ ❯
-  ? for shortcuts
-";
 
 fn queue_events(db: &Path, kind: &str) -> Vec<dagq::domain::RunEvent> {
     SqliteQueue::open(db)
@@ -42,85 +31,6 @@ fn open_holds(db: &Path) -> Vec<dagq::domain::Ask> {
         .into_iter()
         .filter(|ask| ask.kind == AskKind::QueueHold)
         .collect()
-}
-
-/// A session idle without a receipt at the usage limit is neither nudged
-/// nor raised as `stalled`: it records `usage_limited` and joins the `cost`
-/// ask of `subject: usage_limit`, which lists it as a run.
-#[test]
-fn an_idle_session_at_the_usage_limit_joins_the_cost_ask() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    let backend = TestWorkspace::new(
-        &db,
-        false,
-        r#"
-commit work; idle
-await_file "$EXIT.go"
-"#,
-    );
-    *backend.screen.lock().unwrap() = LIMIT_SCREEN.into();
-    let backend = Arc::new(backend);
-    let stop = Arc::new(AtomicBool::new(false));
-    let options = SuperviseOptions {
-        stop: stop.clone(),
-        stall: Some(
-            dagq::domain::stall::StallConfig::default()
-                .with_millis("idle_without_receipt_secs", 200),
-        ),
-        ..supervise_options(2, false)
-    };
-    let supervisor = {
-        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
-    };
-    wait_until(&db, Duration::from_secs(30), |queue| {
-        event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"usage_limited")
-    });
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
-    let ask = queue.hold_of(run.id()).unwrap().unwrap();
-    assert_eq!(ask.reason_category, AskReason::Cost);
-    assert_eq!(ask.subject.as_deref(), Some("usage_limit"));
-    assert_eq!(ask.affected, [run.id().as_str()]);
-    assert!(
-        ask.question
-            .starts_with("Claude Code reached its usage limit"),
-        "{}",
-        ask.question
-    );
-    assert!(
-        ask.question
-            .ends_with(&format!("\n\nAffected: run {}", run.id())),
-        "{}",
-        ask.question
-    );
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    let limited = payloads(&detail, "usage_limited");
-    assert_eq!(limited[0]["ask_id"], json!(ask.id));
-    assert!(
-        limited[0]["excerpt"]
-            .as_str()
-            .unwrap()
-            .contains("limit reached"),
-        "{limited:?}"
-    );
-    assert!(payloads(&detail, "auth_required").is_empty());
-    assert!(payloads(&detail, "stall_nudged").is_empty());
-    assert!(stalled_asks(&queue).is_empty());
-    assert!(backend.texts().is_empty());
-    queue.answer(ask.id, "cancel_affected").unwrap();
-    wait_until(&db, Duration::from_secs(30), |queue| {
-        queue.run_lease(run.id()).unwrap().is_none()
-    });
-    stop.store(true, Ordering::SeqCst);
-    joined(supervisor, "the supervisor to stop").unwrap();
-    fs::write(
-        exit_request_path(run.run_dir().unwrap()).with_extension("go"),
-        "",
-    )
-    .unwrap();
-    backend.join();
 }
 
 /// Two reviews that stop at a login that ran out are no `review_failed`:

@@ -5,40 +5,6 @@ use runtime_support::*;
 
 use dagq::{application::ProcessControl, infrastructure::adapters::SystemProcesses};
 
-/// The worker of the `long_background` tests: it commits, leaves an orphan
-/// `sleep` in its worktree (its pid in `bg.pid` of the run directory), goes
-/// idle with background work running, and writes its receipt once the
-/// orphan is gone.
-const ORPHAN_AGENT: &str = r#"
-commit work
-bg="$(dirname "$RECEIPT")/bg.pid"
-( sleep 300 >/dev/null 2>&1 & echo $! > "$bg.tmp"; mv "$bg.tmp" "$bg" )
-idle_bg
-pid=$(cat "$bg")
-while kill -0 "$pid" 2>/dev/null; do sleep 0.05; done
-receipt "$(git rev-parse HEAD)"; idle; await_exit
-"#;
-
-/// Thresholds with the `long_background` alert after a fifth of a second.
-fn background_alert() -> dagq::domain::stall::StallConfig {
-    dagq::domain::stall::StallConfig::default().with_millis("background_alert_secs", 200)
-}
-
-/// Supervise the fixture's task with [`ORPHAN_AGENT`], a background alert
-/// after a fifth of a second, and `recovery` as the recovery job's script,
-/// on a thread.
-pub(crate) fn supervise_long_background(
-    db: &Path,
-    repo: &Path,
-    recovery: &str,
-) -> (
-    Arc<TestWorkspace>,
-    Arc<TestReviewer>,
-    thread::JoinHandle<Result<Value>>,
-) {
-    supervise_repair(db, repo, ORPHAN_AGENT, background_alert(), &[recovery])
-}
-
 /// Supervise the fixture's task with `agent`, the thresholds `stall`, and
 /// `recoveries` as the recovery jobs' scripts, on a thread.
 fn supervise_repair(
@@ -135,164 +101,6 @@ fn supervise_idle_orphan(
 pub(crate) fn recovery_verdict(verdict: &Value) -> String {
     let text = verdict.to_string().replace("\"PID\"", "$(cat bg.pid)");
     format!("printf '%s\\n' \"{}\"", text.replace('"', "\\\""))
-}
-
-/// Task 360 (ADR-0047 decisions 39 and 40): background work past its
-/// threshold starts the recovery job with the run's processes; its repair
-/// stops only the orphan of the run's worktree, recorded as
-/// `auto_repaired`, and the session goes on to its receipt without an ask.
-#[test]
-fn a_long_background_alert_is_repaired_by_stopping_the_orphan_of_the_worktree() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    let (backend, reviewer, supervisor) = supervise_long_background(
-        &db,
-        &repo,
-        &recovery_verdict(&json!({
-            "verdict": "repair",
-            "confidence": "high",
-            "diagnosis": "an orphan sleep holds the session",
-            "actions": [{"action": "stop_processes", "pids": ["PID"]}],
-        })),
-    );
-    finished(&db, &backend, supervisor);
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    let run = &detail.runs[0];
-    let pid: u32 = fs::read_to_string(Path::new(run.run_dir().unwrap()).join("bg.pid"))
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
-    assert!(!pid_alive(pid));
-    let requested = payloads(&detail, "recovery_requested");
-    assert_eq!(requested.len(), 1, "{requested:?}");
-    assert_eq!(requested[0]["alert"], "long_background");
-    assert_eq!(requested[0]["attempt"], 1);
-    assert_eq!(requested[0]["threshold_secs"], 1);
-    assert_eq!(requested[0]["background_tasks"][0]["command"], "cargo test");
-    let prompts = reviewer.triage_prompts();
-    assert_eq!(prompts.len(), 1);
-    let (prompt, cwd) = &prompts[0];
-    assert_eq!(cwd, Path::new(run.run_dir().unwrap()));
-    // What the job's prompt took (task 1571, ADR-t1566-1 decision 6).
-    let written = payloads(&detail, "recovery_prompt_written");
-    assert_eq!(written.len(), 1, "{written:?}");
-    assert_eq!(written[0]["alert"], "long_background");
-    assert_eq!(written[0]["attempt"], 1);
-    assert_eq!(written[0]["prompt_bytes"]["total"], prompt.len());
-    assert_eq!(
-        written[0]["prompt_bytes"]["limit"],
-        dagq::application::prompt::RECOVERY_PROMPT_LIMIT
-    );
-    assert!(
-        written[0]["prompt_bytes"]["sections"]["processes"]
-            .as_u64()
-            .unwrap()
-            > 0
-    );
-    for part in [
-        "long_background",
-        &format!("- pid {pid} (parent "),
-        "stop_processes",
-        "\"verdict\": \"repair\" | \"escalate\"",
-    ] {
-        assert!(prompt.contains(part), "{part}: {prompt}");
-    }
-    let repaired = payloads(&detail, "auto_repaired");
-    assert_eq!(repaired.len(), 1, "{repaired:?}");
-    assert_eq!(repaired[0]["layer"], "recovery");
-    assert_eq!(repaired[0]["repair"], "stop_processes");
-    assert_eq!(repaired[0]["processes"][0]["pid"], pid);
-    let finished = payloads(&detail, "recovery_finished");
-    assert_eq!(finished.len(), 1, "{finished:?}");
-    assert_eq!(finished[0]["escalated"], false);
-    assert_eq!(finished[0]["applied"], json!(["stop_processes"]));
-    assert_eq!(finished[0]["confidence"], "high");
-    assert!(stalled_asks(&queue).is_empty());
-}
-
-/// The worker of task 438's run (task 918): it commits, leaves a wait loop
-/// in its worktree (a shell that forks `sleep`, its pid in `bg.pid` of the
-/// run directory), writes its receipt and goes idle with that background
-/// work running. It goes idle without it once the loop is gone, or after a
-/// bounded wait so that a runtime that never stops the loop fails the test
-/// instead of hanging it. The loop is nobody's child, so neither the
-/// fixture nor the watchdog stops it: it ends by itself with the worktree
-/// (the test's directory) or after the test's limit (task 1580).
-const LEFTOVER_LOOP_AGENT: &str = r#"
-commit work
-bg="$(dirname "$RECEIPT")/bg.pid"
-( sh -c 'n=0; while [ -d "$1" ] && [ $n -lt 600 ]; do sleep 1; n=$((n + 1)); done' sh "$PWD" >/dev/null 2>&1 & echo $! > "$bg.tmp"; mv "$bg.tmp" "$bg" )
-receipt "$(git rev-parse HEAD)"; idle_bg
-pid=$(cat "$bg")
-i=0; while kill -0 "$pid" 2>/dev/null && [ $i -lt 1200 ]; do sleep 0.05; i=$((i + 1)); done
-kill "$pid" 2>/dev/null
-idle_bg_done; await_exit
-"#;
-
-/// Task 918: background work the session left running after its receipt
-/// (task 438's run held its slot 5.6 hours with a wait loop) is the
-/// `long_background` alert past its threshold too, with `phase:
-/// after_receipt`; the recovery job's `stop_processes` stops the loop, the
-/// session goes idle, and the run goes on to validation and lands without
-/// an ask, a person or the observer.
-#[test]
-fn background_work_left_after_the_receipt_is_a_long_background_alert_for_the_recovery_job() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    let (backend, reviewer, supervisor) = supervise_repair(
-        &db,
-        &repo,
-        LEFTOVER_LOOP_AGENT,
-        background_alert(),
-        &[&recovery_verdict(&json!({
-            "verdict": "repair",
-            "confidence": "high",
-            "diagnosis": "a wait loop left after the receipt holds the session",
-            "actions": [{"action": "stop_processes", "pids": ["PID"]}],
-        }))],
-    );
-    finished(&db, &backend, supervisor);
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    assert_eq!(detail.task.status(), TaskStatus::Completed);
-    let run = &detail.runs[0];
-    let pid: u32 = fs::read_to_string(Path::new(run.run_dir().unwrap()).join("bg.pid"))
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
-    assert!(!pid_alive(pid));
-    let requested = payloads(&detail, "recovery_requested");
-    assert_eq!(requested.len(), 1, "{requested:?}");
-    assert_eq!(requested[0]["alert"], "long_background");
-    assert_eq!(requested[0]["phase"], "after_receipt");
-    assert_eq!(requested[0]["threshold_secs"], 1);
-    let kinds = event_kinds(&detail);
-    assert!(position(&kinds, "receipt_observed") < position(&kinds, "recovery_requested"));
-    let prompts = reviewer.triage_prompts();
-    assert_eq!(prompts.len(), 1);
-    for part in [
-        "long_background",
-        "after_receipt",
-        &format!("- pid {pid} (parent "),
-    ] {
-        assert!(prompts[0].0.contains(part), "{part}: {}", prompts[0].0);
-    }
-    let repaired = payloads(&detail, "auto_repaired");
-    assert_eq!(repaired.len(), 1, "{repaired:?}");
-    assert_eq!(repaired[0]["alert"], "long_background");
-    assert_eq!(repaired[0]["repair"], "stop_processes");
-    assert_eq!(repaired[0]["processes"][0]["pid"], pid);
-    let finished = payloads(&detail, "recovery_finished");
-    assert_eq!(finished.len(), 1, "{finished:?}");
-    assert_eq!(finished[0]["applied"], json!(["stop_processes"]));
-    let idle = payloads(&detail, "session_idle_observed");
-    assert_eq!(idle.len(), 1, "{idle:?}");
-    assert_eq!(idle[0]["background_running"], false);
-    assert!(position(&kinds, "auto_repaired") < position(&kinds, "session_idle_observed"));
-    assert!(stalled_asks(&queue).is_empty());
 }
 
 /// Wait for the `stalled` ask of an orphan's alert, check that the orphan
@@ -570,6 +378,23 @@ fn a_process_without_cpu_progress_is_an_idle_process_alert_for_the_recovery_job(
     for part in ["idle_process", &format!("- pid {pid} (parent "), ", cpu 0."] {
         assert!(prompts[0].0.contains(part), "{part}: {}", prompts[0].0);
     }
+    // What the live session's job's prompt took (task 1571, ADR-t1566-1
+    // decision 6).
+    let written = payloads(&detail, "recovery_prompt_written");
+    assert_eq!(written.len(), 1, "{written:?}");
+    assert_eq!(written[0]["alert"], "idle_process");
+    assert_eq!(written[0]["attempt"], 1);
+    assert_eq!(written[0]["prompt_bytes"]["total"], prompts[0].0.len());
+    assert_eq!(
+        written[0]["prompt_bytes"]["limit"],
+        dagq::application::prompt::RECOVERY_PROMPT_LIMIT
+    );
+    assert!(
+        written[0]["prompt_bytes"]["sections"]["processes"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
     let repaired = payloads(&detail, "auto_repaired");
     assert_eq!(repaired.len(), 1, "{repaired:?}");
     assert_eq!(repaired[0]["alert"], "idle_process");

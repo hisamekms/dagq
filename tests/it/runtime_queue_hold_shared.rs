@@ -242,7 +242,7 @@ fn done_tells_the_held_sessions_of_every_supervisor_to_go_on() {
     held.backend.join();
     // Each session got the text to go on once, as its next turn.
     for run in runs {
-        let texts = session_texts(&held.backend, run);
+        let texts = session_texts(run);
         let continues = texts
             .iter()
             .filter(|text| text.starts_with(CONTINUE_TEXT))

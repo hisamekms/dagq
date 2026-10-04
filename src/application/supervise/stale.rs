@@ -112,7 +112,7 @@ pub(super) fn nudge_stale_receipt(
     phase: &str,
     attempt: Option<usize>,
     stale: &StaleReceipt,
-) -> Result<Option<(StaleNudge, StartCheck)>> {
+) -> Result<Option<(StaleNudge, SystemTime)>> {
     let mut payload = json!({
         "phase": phase,
         "receipt_commit": stale.receipt_commit,
@@ -167,7 +167,7 @@ pub(super) fn nudge_stale_receipt(
                     typed_at: sent_at,
                     settled: false,
                 },
-                StartCheck::new("stale receipt nudge", &text, sent_at, &submission),
+                sent_at,
             )))
         }
         Err(error) => {

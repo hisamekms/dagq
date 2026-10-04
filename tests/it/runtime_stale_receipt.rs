@@ -13,8 +13,8 @@ const COMMIT_AGAIN: &str =
 const NUDGE: &str = "*'cannot accept a receipt for another commit'*";
 
 /// The requests to rewrite its receipt that `run`'s worker got.
-fn nudges(backend: &TestWorkspace, run: &TaskRun) -> Vec<String> {
-    session_texts(backend, run)
+fn nudges(run: &TaskRun) -> Vec<String> {
+    session_texts(run)
         .into_iter()
         .filter(|text| text.contains("cannot accept a receipt for another commit"))
         .collect()
@@ -51,7 +51,7 @@ fn a_session_idle_with_a_stale_receipt_is_asked_once_and_the_rewrite_goes_on() {
     let run = &detail.runs[0];
     let head = run.result_commit().unwrap().to_string();
     let old = git_out(&repo, &["rev-parse", &format!("{head}~1")]);
-    let texts = nudges(&backend, run);
+    let texts = nudges(run);
     assert_eq!(texts.len(), 1, "{texts:?}");
     for expected in [
         run.id().to_string(),
@@ -103,7 +103,7 @@ fn a_stale_receipt_left_as_it_is_goes_on_as_before() {
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(1)).unwrap();
-    assert_eq!(nudges(&backend, &detail.runs[0]).len(), 1);
+    assert_eq!(nudges(&detail.runs[0]).len(), 1);
     assert_eq!(
         payloads(&detail, "stale_receipt_resolved"),
         [&json!({"phase": "session", "outcome": "unchanged"})]
@@ -128,7 +128,7 @@ fn a_receipt_for_the_head_is_not_asked_to_be_rewritten() {
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(1)).unwrap();
-    assert!(nudges(&backend, &detail.runs[0]).is_empty());
+    assert!(nudges(&detail.runs[0]).is_empty());
     assert!(payloads(&detail, "stale_receipt_nudged").is_empty());
 }
 
@@ -156,7 +156,7 @@ fn a_resumed_session_idle_after_its_rebase_with_the_old_receipt_is_asked_once() 
     let landed = detail.runs[0].clone();
     assert_landed(&repo, &landed, "second", &first_landed);
     assert_eq!(detail.task.status(), TaskStatus::Completed);
-    assert_eq!(nudges(&backend, &landed).len(), 1);
+    assert_eq!(nudges(&landed).len(), 1);
     let nudged = payloads(&detail, "stale_receipt_nudged");
     assert_eq!(nudged.len(), 1, "{nudged:?}");
     assert_eq!(nudged[0]["phase"], "resume");
@@ -192,7 +192,7 @@ fn a_resumed_session_that_leaves_the_old_receipt_ends_its_attempt_as_before() {
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(2)).unwrap();
     assert_landed(&repo, &detail.runs[0], "second", &first_landed);
-    assert_eq!(nudges(&backend, &detail.runs[0]).len(), 1);
+    assert_eq!(nudges(&detail.runs[0]).len(), 1);
     assert_eq!(
         payloads(&detail, "stale_receipt_resolved"),
         [&json!({"phase": "resume", "attempt": 1, "outcome": "unchanged"})]
@@ -265,7 +265,7 @@ esac"#
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let detail = queue.show(TaskId::new(2)).unwrap();
     assert_landed(&repo, &detail.runs[0], "second", &first_landed);
-    assert_eq!(nudges(&backend, &detail.runs[0]).len(), 1);
+    assert_eq!(nudges(&detail.runs[0]).len(), 1);
     let kinds = event_kinds(&detail);
     let regained = kinds.iter().position(|k| *k == "run_slot_regained");
     let resolved = kinds.iter().position(|k| *k == "stale_receipt_resolved");

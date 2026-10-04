@@ -4,8 +4,8 @@ type: design
 title: "claimを控える（衝突の多いファイル）"
 status: current
 created: 2026-09-26
-updated: 2026-10-04
-last_verified: 2026-10-04
+updated: 2026-10-04 # task 1437
+last_verified: 2026-10-04 # task 1437
 scope: runtime
 related:
   - adr-0080
@@ -33,7 +33,7 @@ related:
 
 [ADR-t1484-1](../../adr/2026-10-04-t1484-1-runs-waiting-only-for-a-person-stop-holding-claims-past-a-grace.md)（ADR-0080の決定2・6をamends。task 1484）。進行中のrunのうち次の両方に当たるものは、人の答えだけを待つ（`domain::claim_defer::owner_waiting_since`。supervisorの側は`Supervisor::owner_waiting_since`が`unclosed_run_asks`・`run_lease`・`run_events`から組み立てる。askが無ければleaseとeventは読まない）。
 
-- runに紐づく、答え（`answered_at`）も閉じ（`closed_at`）も無いaskで、kindが`worker_question` / `approve_landing` / `stuck_exit` / `answer_prompt` / `stalled` / `decide`のもの（`waits_for_owner`）がある
+- runに紐づく、答え（`answered_at`）も閉じ（`closed_at`）も無いaskで、kindが`worker_question` / `approve_landing` / `stuck_exit` / `answer_prompt` / `stalled` / `decide`のもの（`waits_for_owner`。`stuck_exit`と`answer_prompt`はtask 1437で新しく開かれなくなり、それより前に開いたaskだけ）がある
 - [人の答えを待つrun](waiting.md)の待ち（`WaitState::of`で終わっていない。戻り待ちは動くので除く）にあるか、どのsupervisorのleaseも持たない（`approve_landing`で休む着地待ち、answerを待つ`needs_session`など）。leaseを持ち待ちに居ないrun（作業中・validating・review・着地中・resume中）は、askがあっても動くので除く
 
 待ちの始まりは、待ちならその`run_waiting_started`の時刻、leaseが無いならrunの最後の`lease_acquired` / `lease_released`の時刻で、どちらもそのaskのうち最も古いものの`created_at`より前にはしない（leaseのeventが無ければaskの時刻）。

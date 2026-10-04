@@ -42,39 +42,18 @@ pub const MAX_RECHECK_SECS: u64 = 3600;
 /// task on, and `wait`.
 pub const ENDED_ACTIONS: [&str; 4] = ["retry", "retry_inherit", "resume", "wait"];
 
-/// The actions for a session that holds the supervisor's `/exit` back
-/// (`stuck_exit`): `close_and_proceed` only where the run lands after its
-/// exit, which the runtime checks.
-pub const STUCK_EXIT_ACTIONS: [&str; 4] = [
-    "answer_known_dialog",
-    "close_and_proceed",
-    "stop_processes",
-    "wait",
-];
-
-/// The actions for a session held by a dialog (`prompt_waiting`).
-pub const PROMPT_WAITING_ACTIONS: [&str; 3] = ["answer_known_dialog", "stop_processes", "wait"];
-
-/// The actions for a session that looks stuck (`stalled`, ADR-0047
-/// decisions 30 and 31): an instruction only while it is idle at its
-/// prompt, a known dialog only under its rule, and `resume` (the run is
-/// parked for a session of its own) only for a run in its first session
-/// with resumes left.
-pub const STALLED_ACTIONS: [&str; 5] = [
-    "send_instruction",
-    "stop_processes",
-    "answer_known_dialog",
-    "resume",
-    "wait",
-];
+// The actions of the retired interactive worker's live alerts
+// (`stuck_exit`, `prompt_waiting` and its `stalled`) went with it (task
+// 1437); their past verdicts still parse below.
 
 /// Why a session raised the `stalled` alert (`recovery_requested`'s
-/// `reason`): idle without a receipt after its nudge (decision 30).
+/// `reason`): idle without a receipt after its nudge (decision 30). Only
+/// the retired interactive worker raised it; past records still carry it.
 pub const IDLE_WITHOUT_RECEIPT: &str = "idle_without_receipt";
 
-/// The other reason of a `stalled` alert: a text the supervisor typed was
-/// not taken (`submit_unconfirmed` of a text, `submit_not_started`,
-/// decision 31).
+/// The other reason of the retired interactive worker's `stalled` alert:
+/// a text the supervisor typed was not taken (`submit_unconfirmed` of a
+/// text, `submit_not_started`, decision 31); past records still carry it.
 pub const SEND_UNCONFIRMED: &str = "send_unconfirmed";
 
 /// The reason of a headless session's `stalled` alert (ADR-t813-1

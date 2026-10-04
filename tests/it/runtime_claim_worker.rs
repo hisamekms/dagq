@@ -42,9 +42,10 @@ fn add_task(
     task.id()
 }
 
-/// A Claude task that names no mode runs headless, the default
-/// (ADR-t1340-1); one that names `interactive` runs in the interactive
-/// session; Codex runs headless only.
+/// A Claude task that names no mode runs headless, and one that names
+/// `interactive` is converted to headless: the interactive route is
+/// abolished (ADR-t1433-2, task 1437).
+/// Codex runs headless only.
 #[test]
 fn a_claude_task_without_a_mode_is_claimed_headless() {
     let (_dir, _repo, db) = fixture();
@@ -57,7 +58,7 @@ fn a_claude_task_without_a_mode_is_claimed_headless() {
     for (task, provider, mode) in [
         (plain, Provider::Claude, WorkerMode::Headless),
         (claude, Provider::Claude, WorkerMode::Headless),
-        (watched, Provider::Claude, WorkerMode::Interactive),
+        (watched, Provider::Claude, WorkerMode::Headless),
         (codex, Provider::Codex, WorkerMode::Headless),
     ] {
         let ClaimOutcome::Claimed { run } = queue
@@ -78,6 +79,19 @@ fn a_claude_task_without_a_mode_is_claimed_headless() {
             (run.requested_provider(), run.worker_mode()),
             (provider, mode)
         );
+        let conversions: Vec<_> = queue
+            .run_events(run.id())
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "worker_mode_converted")
+            .collect();
+        assert_eq!(conversions.len(), usize::from(task == watched));
+        if let Some(event) = conversions.first() {
+            assert_eq!(
+                event.payload,
+                json!({"phase":"claim", "from":"interactive", "to":"headless", "reason":"interactive_worker_removed"})
+            );
+        }
     }
 }
 
@@ -96,19 +110,16 @@ fn runs_of(db: &Path, task: TaskId) -> Vec<TaskRun> {
     SqliteQueue::open(db).unwrap().show(task).unwrap().runs
 }
 
-/// A claim writes the provider and mode of the task's worker on the run
-/// (requested and actual alike) and on its `run_claimed`; a claim that
-/// runs only some workers passes over the tasks of the others.
+/// The claim's worker filter skips another provider without losing the
+/// stored run mode or the worker fields on `run_claimed`.
 #[test]
 fn a_claim_writes_the_worker_of_its_task_on_the_run() {
-    // The fixture's task is the one of the interactive worker.
-    interactive_workers();
     let (_dir, _repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let codex = add_task(&mut queue, "codex", Some(Provider::Codex), None);
     let headless = add_task(&mut queue, "headless", None, Some(WorkerMode::Headless));
     let base = CommitSha::parse("0123456789abcdef0123456789abcdef01234567", "base").unwrap();
-    let claim = |queue: &mut SqliteQueue, order: &[TaskId], workers: &[Worker]| {
+    let claim = |queue: &mut SqliteQueue, order: &[TaskId]| {
         queue
             .claim_for_supervisor_in_order(
                 &base,
@@ -116,34 +127,21 @@ fn a_claim_writes_the_worker_of_its_task_on_the_run() {
                 order,
                 None,
                 &Default::default(),
-                &WorkerRoute::direct(workers),
+                &WorkerRoute::direct(&[Worker::CLAUDE_HEADLESS]),
             )
             .unwrap()
     };
-    // Neither worker is run: the task of fixture() (interactive Claude)
-    // is taken instead of the ones asked for first.
-    let ClaimOutcome::Claimed { run } = claim(
-        &mut queue,
-        &[codex, headless],
-        &[Worker::CLAUDE_INTERACTIVE],
-    ) else {
-        panic!("the interactive task is claimed")
-    };
-    assert_eq!(run.task_id(), TaskId::new(1));
-    assert_eq!(run.worker_mode(), WorkerMode::Interactive);
-    assert!(matches!(
-        claim(&mut queue, &[], &[Worker::CLAUDE_INTERACTIVE]),
-        ClaimOutcome::NoReadyTask
-    ));
-    let ClaimOutcome::Claimed { run } = claim(&mut queue, &[], &Worker::ALL[..2]) else {
+    let ClaimOutcome::Claimed { run } = claim(&mut queue, &[codex, headless]) else {
         panic!("the headless Claude task is claimed")
     };
     assert_eq!(run.task_id(), headless);
     assert_eq!(run.requested_provider(), Provider::Claude);
     assert_eq!(run.actual_provider(), Provider::Claude);
     assert_eq!(run.worker_mode(), WorkerMode::Headless);
-    let stored = queue.run(run.id()).unwrap();
-    assert_eq!(stored.worker_mode(), WorkerMode::Headless);
+    assert_eq!(
+        queue.run(run.id()).unwrap().worker_mode(),
+        WorkerMode::Headless
+    );
     let claimed = events(&db, "run_claimed");
     let (_, payload) = claimed
         .iter()
@@ -151,13 +149,18 @@ fn a_claim_writes_the_worker_of_its_task_on_the_run() {
         .unwrap();
     assert_eq!(payload["provider"], "claude");
     assert_eq!(payload["worker_mode"], "headless");
-    assert_eq!(runs_of(&db, codex).len(), 0);
+    let ClaimOutcome::Claimed { run } = claim(&mut queue, &[]) else {
+        panic!("the fixture's headless Claude task is claimed")
+    };
+    assert_eq!(run.task_id(), TaskId::new(1));
+    assert!(matches!(claim(&mut queue, &[]), ClaimOutcome::NoReadyTask));
+    assert!(runs_of(&db, codex).is_empty());
 }
 
 /// A supervisor with the adapters of Claude only (interactive and headless,
 /// ADR-t813-2: its `codex` is not found) while Claude is held (its hold ask
 /// is open) can run no worker: it claims neither the Codex task nor the
-/// interactive Claude one (`provider_unavailable`): each deferral is
+/// headless Claude one (`provider_unavailable`): each deferral is
 /// recorded once, with the worker, and shown by `status`. A task that
 /// leaves the candidates ends its deferral. (A mode the binary lacks for a
 /// provider it has, `mode_unavailable`, is judged the same way:

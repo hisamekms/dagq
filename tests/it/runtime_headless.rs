@@ -6,7 +6,7 @@
 use crate::common;
 use crate::runtime_support;
 
-use dagq::domain::{AskReason, EventKind, worker::WorkerMode};
+use dagq::domain::{AskReason, worker::WorkerMode};
 use dagq::{application::RunFiles, runtime::RunFilesPort};
 use runtime_support::headless::*;
 use runtime_support::*;
@@ -147,11 +147,11 @@ fn a_headless_run_lands_after_its_first_turn() {
     // The exit went to the session's turns, nothing to its terminal.
     assert!(run_dir.join("turns/exit").exists());
     assert!(backend.texts().is_empty());
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 0);
+
     assert_eq!(
         backend.captures.load(Ordering::SeqCst),
-        1,
-        "only the final screen"
+        0,
+        "worker supervision never reads a screen"
     );
     // The worker was told it runs headless.
     assert!(read_prompt(run).contains(runtime::HEADLESS_WORKER));
@@ -1165,7 +1165,7 @@ fn a_receipt_written_as_its_turn_ends_is_not_nudged() {
 /// answer waits for the test's `go` file, so the adopter's watch meets the
 /// ask while it runs.
 fn adopted_stalled_answer(written: bool) {
-    use dagq::domain::turn::{TurnRequest, next_seq, request_path, turns_dir};
+    use dagq::domain::turn::turns_dir;
     let (dir, repo, db, backend) = headless_fixture(&[]);
     set_turns(
         dir.path(),
@@ -1205,32 +1205,12 @@ esac"#
     let what = format!("answer of the stalled ask {}", ask.id);
     if written {
         // What the dead supervisor wrote and recorded before it stopped.
-        let turns = turns_dir(&run_dir);
-        fs::create_dir_all(&turns).unwrap();
-        let names: Vec<String> = fs::read_dir(&turns)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-            .collect();
-        let seq = next_seq(names.iter().map(String::as_str));
-        let request = TurnRequest {
-            seq,
-            what: what.clone(),
-            prompt: format!("answer to ask {}: go on", ask.id),
-        };
-        let path = request_path(&run_dir, seq);
-        fs::write(
-            path.with_extension("json.tmp"),
-            serde_json::to_string(&request).unwrap(),
-        )
-        .unwrap();
-        fs::rename(path.with_extension("json.tmp"), &path).unwrap();
-        queue
-            .record_runtime_event(
-                run.id(),
-                EventKind::TurnRequested,
-                json!({"seq": seq, "what": what, "workspace_id": run.workspace_id()}),
-            )
-            .unwrap();
+        request_turn_left_by_a_dead_supervisor(
+            &db,
+            &run,
+            &format!("answer to ask {}: go on", ask.id),
+            &what,
+        );
         // The session took it.
         wait_until(&db, common::STEP_LIMIT, |_| stub_calls(&run).len() == 2);
     }

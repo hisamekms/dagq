@@ -2724,18 +2724,16 @@ pub struct RecoveryMaterial<'a> {
     pub allowed: &'a [&'a str],
 }
 
-/// What each allowed action does, for the recovery prompt of a run on
-/// `route`: an instruction to a headless session is its next turn's prompt.
-fn recovery_action_help(route: Route, action: &str) -> &'static str {
+/// What each allowed action does, for the recovery prompt of a worker
+/// run: an instruction is the prompt of the session's next turn (every
+/// worker run is headless since task 1437).
+fn recovery_action_help(action: &str) -> &'static str {
     match action {
-        "send_instruction" if route.headless() => {
+        "send_instruction" => {
             "{\"action\": \"send_instruction\", \"instruction\": string}: send this instruction once, as the prompt of the session's next turn (a resume of the same session; its previous turn has ended), for example to rerun the tests in the foreground, commit and write the receipt."
         }
         "stop_processes" => {
             "{\"action\": \"stop_processes\", \"pids\": [pid, ...]}: stop these processes (SIGTERM, then SIGKILL after a grace). Only processes listed below as the run's own are allowed; any other pid makes the whole verdict an escalation. Use it for a background process the session waits for that will not end by itself (an orphan holding a pipe, a hung test). Never the session's own wrapper or agent."
-        }
-        "send_instruction" => {
-            "{\"action\": \"send_instruction\", \"instruction\": string}: type this instruction into the session once (it must be idle at its prompt), for example to stop a background command it waits for and rerun the tests."
         }
         "wait" => {
             "{\"action\": \"wait\", \"recheck_after_secs\": n}: do nothing now; if the alert still holds after n seconds (at most 3600), another recovery job runs. The work looks healthy and is only slow, or what holds it passes by itself."
@@ -2749,18 +2747,13 @@ fn recovery_action_help(route: Route, action: &str) -> &'static str {
         "resume" => {
             "{\"action\": \"resume\", \"instruction\": string}: send the run back to a session of its own in its worktree, with the instruction (what to do: fix the failing test, commit and rewrite the receipt, rebase) added to the resolution request. Only while its resumes are not used up."
         }
-        "answer_known_dialog" => {
-            "{\"action\": \"answer_known_dialog\", \"dialog\": \"background_work\" | \"settings_panel\"}: send the fixed keys to one of the known dialogs on the screen (Background work is running, only after the supervisor's /exit with a clean worktree and the receipt at HEAD; the Settings / Usage panel). Never another dialog."
-        }
-        "close_and_proceed" => {
-            "{\"action\": \"close_and_proceed\"}: close the session's workspace and go on to land. Only when the review passed, the worktree is clean and the receipt names its HEAD, the reviewed commit."
-        }
         _ => "",
     }
 }
 
-/// The recovery actions that answer an interactive session's screen, its
-/// dialogs and its `/exit`: never offered for a headless run.
+/// The recovery actions that answered the retired interactive session's
+/// screen, its dialogs and its `/exit`: never offered, and refused in a
+/// verdict (task 1437).
 pub(crate) const HEADLESS_NEVER: [&str; 2] = ["answer_known_dialog", "close_and_proceed"];
 
 /// The bytes the whole recovery job prompt takes at most, the language's
@@ -2855,27 +2848,16 @@ pub fn recovery_prompt(
         fenced("json", &pretty)
     };
     fit.section("facts", &facts);
-    let route = Route::of(run);
-    let screen_read = if route.headless() {
-        "each turn's whole output is in turns/turn-NNNNNN.jsonl of the run directory"
-    } else {
-        NOT_READABLE
-    };
-    // A headless session's turns come newest first; a screen's last lines
-    // are its end.
-    let keep = if route.headless() {
-        Keep::Start
-    } else {
-        Keep::End
-    };
+    // Every worker run is headless since task 1437, a historical
+    // interactive one too: its material is its last turns, newest first.
     let screen = fenced(
         "text",
         &fit.text(
             "screen",
             or_none(material.screen.trim()),
             RECOVERY_SCREEN_BYTES,
-            keep,
-            screen_read,
+            Keep::Start,
+            "each turn's whole output is in turns/turn-NNNNNN.jsonl of the run directory",
         ),
     );
     fit.section("screen", &screen);
@@ -2964,12 +2946,12 @@ pub fn recovery_prompt(
     }
     fit.section("history", &history);
     // A headless session has no screen, dialog or `/exit`: the actions
-    // that answer them are never offered for it (ADR-t813-1 decision 9).
+    // that answer them are never offered (ADR-t813-1 decision 9).
     let actions = material
         .allowed
         .iter()
-        .filter(|action| !route.headless() || !HEADLESS_NEVER.contains(action))
-        .map(|action| format!("- {}", recovery_action_help(route, action)))
+        .filter(|action| !HEADLESS_NEVER.contains(action))
+        .map(|action| format!("- {}", recovery_action_help(action)))
         .collect::<Vec<_>>()
         .join("\n");
     let text = format!(
@@ -2981,12 +2963,12 @@ pub fn recovery_prompt(
          Current task verification commands (use these, including after a person's correction):\n{verification}\n\n\
          Alert facts:\n{facts}\n\n\
          {ended}\
-         {screen_label}\n{screen}\n\n\
+         Last turns of the headless session (it has no screen):\n{screen}\n\n\
          Processes of the run (working directory in the worktree, or under the session's wrapper; the wrapper and the agent themselves are not listed):\n{processes}\n\n\
          Worktree: HEAD {head}, receipt commit {receipt}, git status:\n{status}\n\n\
          Earlier recovery verdicts, repairs, and task_edited events:\n{history}\n\n\
          Allowed actions:\n{actions}\n\
-         Not allowed, ever: cancelling the task, retrying a run that has commits, editing the task, landing without review, writing to main, pushing, deleting branches or worktrees, touching anything outside this run's worktree and workspace, writing the queue database, {never_keys}. If the repair needs any of these, escalate.\n\n\
+         Not allowed, ever: cancelling the task, retrying a run that has commits, editing the task, landing without review, writing to main, pushing, deleting branches or worktrees, touching anything outside this run's worktree and workspace, writing the queue database, typing into the session (a headless session takes no keys; an instruction goes as its next turn). If the repair needs any of these, escalate.\n\n\
          Answer with one JSON object and nothing else, matching this schema:\n\
          {{\"verdict\": \"repair\" | \"escalate\", \"confidence\": \"high\" | \"low\", \"diagnosis\": string, \"actions\": [action, ...], \"question\": string, \"options\": [string, ...], \"reason_category\": \"recovery_failed\" | \"discard\" | \"scope\"}}\n\
          diagnosis says what you found in one or two sentences. repair needs at least one action and is applied only with confidence high; with confidence low, or with escalate, a person is asked, with your actions as the recommendation, question as the question and options added to theirs. If a broken verification command caused an ended run to fail, offer `edit the task's --verify, then retry_inherit` to the person: user or inbox can edit only verification commands after the run ends; you cannot edit. Once the task_edited event and current commands show the correction, retry_inherit carries the committed work forward and integration uses the corrected commands. reason_category says why a person is needed: recovery_failed when you cannot repair it or are not sure, discard when the work would be thrown away, scope when it needs a permission you do not have.\n",
@@ -3001,37 +2983,23 @@ pub fn recovery_prompt(
         },
         alert = material.alert.as_str(),
         meaning = match material.alert {
-            RecoveryAlert::LongBackground =>
-                "background work the session started has run longer than the threshold, and the session waits for it. With phase after_receipt the session already wrote its receipt: the run goes on to its validation and landing only once the session goes idle with no background work running, so work left over from before the receipt (a wait loop, a watch) holds it.",
             RecoveryAlert::Failed =>
                 "the run failed (its receipt said failed, its validation or landing failed, or its session exited without finishing).",
             RecoveryAlert::Interrupted =>
                 "the run's session died and the supervisor recovered the run as interrupted.",
             RecoveryAlert::ResumeExhausted =>
                 "the run still needed a session after its last resume, so the supervisor stopped resuming it.",
-            RecoveryAlert::StuckExit =>
-                "the session did not exit after the supervisor's /exit (or the /exit never reached it), and the runtime's own repairs did not apply.",
-            RecoveryAlert::PromptWaiting =>
-                "the session waits at a dialog the runtime does not answer by itself.",
-            RecoveryAlert::Stalled if route.headless() =>
-                "the headless session does not get on: its turns end with neither a receipt nor an open question after the supervisor's nudges, each sent as the next turn (reason turn_without_receipt), or a turn was refused permissions too often to get on (reason permission_denied). The alert facts say which. The session has no screen, input box or dialog: an instruction is the prompt of its next turn, and resume parks the run for a session of its own.",
             RecoveryAlert::Stalled =>
-                "the session looks stuck: it stays idle without a receipt after the supervisor nudged it (reason idle_without_receipt), or it did not take a text the supervisor typed, which stays in its input box, showed no sign of work or brought up a dialog (reason send_unconfirmed). The alert facts say which. An instruction goes only into a session idle at its prompt, never over a text still in its input box. resume applies only to a run in its first session: the run is parked for a session of its own and this session is asked to /exit, which waits for background work it still runs, so stop what hangs with stop_processes in the same verdict.",
+                "the headless session does not get on: its turns end with neither a receipt nor an open question after the supervisor's nudges, each sent as the next turn (reason turn_without_receipt), or a turn was refused permissions too often to get on (reason permission_denied). The alert facts say which. The session has no screen, input box or dialog: an instruction is the prompt of its next turn, and resume parks the run for a session of its own.",
             RecoveryAlert::IdleProcess =>
                 "processes of the run (listed in the alert facts with how long they have used almost no CPU time) are alive but have not made progress for longer than the threshold; the session may be waiting for them.",
+            RecoveryAlert::StuckExit
+            | RecoveryAlert::PromptWaiting
+            | RecoveryAlert::LongBackground =>
+                "an alert of the retired interactive worker run (task 1437), which the supervisor no longer raises.",
         },
         worktree = run.worktree_path().unwrap_or("none"),
         run_dir = run.run_dir().unwrap_or("none"),
-        screen_label = if route.headless() {
-            "Last turns of the headless session (it has no screen):"
-        } else {
-            "Last lines of the session's screen:"
-        },
-        never_keys = if route.headless() {
-            "typing into the session (a headless session takes no keys; an instruction goes as its next turn)"
-        } else {
-            "sending keys to a dialog that is not a known one"
-        },
         verification = fenced("sh", &verification),
         head = material.head,
         receipt = material.receipt_commit.unwrap_or("(no receipt)"),
@@ -5991,15 +5959,15 @@ mod tests {
             &run_on(Provider::Claude, WorkerMode::Interactive),
             RecoveryAlert::Stalled,
         );
-        for kept in [
+        for retired in [
             "answer_known_dialog",
             "close_and_proceed",
             "Last lines of the session's screen",
             "idle at its prompt",
-            "a dialog that is not a known one",
         ] {
-            assert!(interactive.contains(kept), "{kept}: {interactive}");
+            assert!(!interactive.contains(retired), "{retired}: {interactive}");
         }
+        assert!(interactive.contains("Last turns of the headless session"));
     }
 
     /// The `dagq <command> ...` spans in backquotes of `text`, without

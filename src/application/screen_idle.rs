@@ -426,8 +426,8 @@ pub fn hook_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::IdleHook;
     use crate::application::memory_files::MemoryFiles;
-    use crate::application::{IdleHook, InputSource};
     use std::time::Duration;
 
     /// Screens are `ready`, `working`, `dialog` or anything else (no box),
@@ -445,9 +445,7 @@ mod tests {
         fn idle_hook(&self, _: &[u8]) -> IdleHook {
             IdleHook::default()
         }
-        fn input_source(&self, _: &[u8]) -> InputSource {
-            InputSource::Unknown
-        }
+
         fn input_ready(&self, screen: &str) -> bool {
             screen.starts_with("ready") || screen == "working"
         }

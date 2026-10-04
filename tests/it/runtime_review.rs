@@ -4,29 +4,16 @@ use crate::runtime_support;
 
 use runtime_support::*;
 
-/// The worker goes idle after its receipt and never exits by itself; each
-/// time a text arrives in its terminal it appends a line, commits, rewrites
-/// the receipt and goes idle again, `revises` times. A headless worker
-/// (goal 92) does the same in its turns: its first commits, and each later
-/// one (a revise request) appends `fix <n>`, commits and rewrites the
-/// receipt, up to `revises`.
+/// The headless worker's turns: its first commits, and each later one (a
+/// revise request) appends `fix <n>`, commits and rewrites the receipt, up
+/// to `revises` times.
 pub(crate) fn revising_agent(revises: usize) -> String {
-    if worker_mode() == dagq::domain::worker::WorkerMode::Headless {
-        return format!(
-            "if [ \"$TURN\" -eq 1 ]; then commit work; \
-             elif [ \"$TURN\" -le {} ]; then n=$((TURN - 1)); \
-               printf 'fix %s\\n' \"$n\" >> change.txt; git commit -q -am \"fix $n\"; \
-             fi; receipt \"$(git rev-parse HEAD)\"",
-            revises + 1
-        );
-    }
     format!(
-        "commit work; receipt \"$(git rev-parse HEAD)\"; idle; \
-         for n in $(seq 1 {revises}); do \
-           await_file \"$MESSAGE\"; rm \"$MESSAGE\"; \
+        "if [ \"$TURN\" -eq 1 ]; then commit work; \
+         elif [ \"$TURN\" -le {} ]; then n=$((TURN - 1)); \
            printf 'fix %s\\n' \"$n\" >> change.txt; git commit -q -am \"fix $n\"; \
-           receipt \"$(git rev-parse HEAD)\"; idle; \
-         done; await_exit"
+         fi; receipt \"$(git rev-parse HEAD)\"",
+        revises + 1
     )
 }
 
@@ -167,7 +154,7 @@ fn a_passing_review_exits_the_live_session_and_lands_it() {
         "{bytes}"
     );
     assert_eq!(bytes["omitted"], json!({}), "{bytes}");
-    assert!(run_dir.join("terminal-final.txt").is_file());
+    assert!(!run_dir.join("terminal-final.txt").exists());
     // Nothing waits for anyone.
     assert!(run_attention_of(&runtime::status(&db).unwrap(), run.id()).is_none());
 }
@@ -218,7 +205,7 @@ fn a_revise_verdict_is_fixed_by_the_live_session_and_reviewed_again() {
     assert!(position(&kinds, "revise_finished") < position(&kinds, "exit_requested"));
     // One exit, after the second review; the request named the findings.
     assert_exit_sent(&backend, &run, 1);
-    let texts = session_texts(&backend, &run);
+    let texts = session_texts(&run);
     assert_eq!(texts.len(), 1);
     let text = &texts[0];
     for expected in [
@@ -275,7 +262,7 @@ fn a_third_review_that_does_not_pass_asks_a_person_and_land_lands_it() {
     crate::worker_escalation::assert_revises_raised(&detail, &backend);
     assert_eq!(payloads(&detail, "revise_finished").len(), 2);
     assert_eq!(payloads(&detail, "review_finished").len(), 3);
-    assert_eq!(session_texts(&backend, &run).len(), 2);
+    assert_eq!(session_texts(&run).len(), 2);
     assert_eq!(backend.closed(), vec![WORKSPACE_ID.to_owned()]);
     assert!(queue.run_leases().unwrap().is_empty());
     let kinds = event_kinds(&detail);
@@ -375,7 +362,7 @@ fn a_concern_sent_back_is_resumed_reviewed_again_and_landed() {
     let detail = queue.show(TaskId::new(1)).unwrap();
     let run = detail.runs[0].clone();
     assert_eq!(run.status(), RunStatus::AwaitingIntegration);
-    assert!(session_texts(&backend, &run).is_empty());
+    assert!(session_texts(&run).is_empty());
     assert_exit_sent(&backend, &run, 1);
     let kinds = event_kinds(&detail);
     assert!(position(&kinds, "review_finished") < position(&kinds, "exit_requested"));
@@ -443,7 +430,7 @@ fn a_concern_sent_back_is_resumed_reviewed_again_and_landed() {
     assert_eq!(outcomes.len(), 1, "{outcomes:?}");
     assert_eq!(outcomes[0]["outcome"], "deviation_rejected");
     assert_eq!(outcomes[0]["ask_id"], ask.id.as_i64());
-    let text = &session_texts(&backend, &landed)[0];
+    let text = &session_texts(&landed)[0];
     assert!(
         text.contains("raised findings a person sent back to you"),
         "{text}"
@@ -937,34 +924,6 @@ fn a_failed_review_span_ends_with_its_job_not_with_the_exit() {
     assert!(!question.contains("review-2."), "{question}");
 }
 
-/// A session that writes its receipt and goes idle before its wrapper has
-/// registered its agent (the wrapper slowed by load between the two) is
-/// not taken to validation while the run is still `starting`: the
-/// supervisor waits for `agent_started`, the wrapper's registration is not
-/// refused ("run is not starting"), and the run is reviewed and lands
-/// (task 1274).
-#[test]
-fn a_session_idle_before_its_agent_is_registered_waits_for_the_agent_and_lands() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    let base = git_out(&repo, &["rev-parse", "main"]);
-    let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
-    backend.agent_registers_late = true;
-    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
-    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let detail = SqliteQueue::open(&db)
-        .unwrap()
-        .show(TaskId::new(1))
-        .unwrap();
-    assert_landed_run(&detail.runs[0], &repo, &base);
-    let kinds = event_kinds(&detail);
-    assert!(
-        position(&kinds, "agent_started") < position(&kinds, "supervision_finished"),
-        "{kinds:?}"
-    );
-}
-
 /// A revise whose rewritten receipt does not name the clean worktree HEAD
 /// (here the commit before the fix) is not handed to validation, which
 /// would fail the run and its work: the live session is asked to rewrite
@@ -1017,7 +976,7 @@ fn a_revise_receipt_for_another_commit_is_sent_back_to_the_session_until_it_name
     assert_eq!(payloads(&detail, "revise_finished").len(), 1);
     let kinds = event_kinds(&detail);
     assert!(position(&kinds, "revise_receipt_rejected") < position(&kinds, "revise_finished"));
-    let texts = session_texts(&backend, &run);
+    let texts = session_texts(&run);
     assert_eq!(texts.len(), 2);
     assert!(
         texts[1].contains(&format!(
@@ -1097,7 +1056,7 @@ fn a_worker_question_asked_while_revising_is_answered_and_the_run_lands() {
     assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
     let detail = queue.show(TaskId::new(1)).unwrap();
     assert_landed(&repo, &detail.runs[0], "test task", &base);
-    let texts = session_texts(&backend, &detail.runs[0]);
+    let texts = session_texts(&detail.runs[0]);
     assert_eq!(texts.len(), 2, "{texts:?}");
     let answer = format!("answer to ask {}: the second", ask.id);
     assert!(texts[1].starts_with(&answer), "{texts:?}");
@@ -1109,90 +1068,6 @@ fn a_worker_question_asked_while_revising_is_answered_and_the_run_lands() {
     );
     assert_eq!(payloads(&detail, "revise_finished").len(), 1);
     // Nothing waits for a person.
-    assert!(queue.asks(AskQuery::default()).unwrap().is_empty());
-}
-
-/// A dialog screen as Claude Code draws it.
-const REVISE_DIALOG_SCREEN: &str = "\
- Auto mode is available
-
- ❯ 1. Yes, turn on auto mode
-   2. No, keep asking
-
- Esc to cancel
-";
-
-/// A session that stops at a dialog while it revises records
-/// `prompt_waiting` and raises it (through its recovery job) as an
-/// `answer_prompt` ask, as a worker's own session does, instead of waiting
-/// out the resume timeout; the dialog gone, `prompt_cleared` closes the ask
-/// and the revise goes on (task 238).
-#[test]
-fn a_dialog_while_revising_is_recorded_as_prompt_waiting() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    let base = git_out(&repo, &["rev-parse", "main"]);
-    let mut backend = TestWorkspace::new(
-        &db,
-        false,
-        "commit work; receipt \"$(git rev-parse HEAD)\"; idle; \
-         await_file \"$MESSAGE\"; rm \"$MESSAGE\"; \
-         await_file \"$EXIT.go\"; \
-         printf 'fix\\n' >> change.txt; git commit -q -am fix; \
-         receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
-    );
-    backend.prompt_wait = Duration::from_millis(300);
-    let backend = Arc::new(backend);
-    let reviewer = Arc::new(TestReviewer::new(&[
-        verdict("revise", &["add a line"], "one gap"),
-        verdict("pass", &[], "fixed"),
-    ]));
-    let supervisor = {
-        let (db, repo, backend, reviewer) =
-            (db.clone(), repo.clone(), backend.clone(), reviewer.clone());
-        thread::spawn(move || supervise_reviewed(&db, &repo, &backend, &reviewer))
-    };
-    wait_until(&db, Duration::from_secs(30), |queue| {
-        event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"revise_requested")
-    });
-    *backend.screen.lock().unwrap() = REVISE_DIALOG_SCREEN.into();
-    wait_until(&db, Duration::from_secs(30), |queue| {
-        !queue.asks(AskQuery::default()).unwrap().is_empty()
-    });
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    let kinds = event_kinds(&detail);
-    assert!(position(&kinds, "revise_requested") < position(&kinds, "prompt_waiting"));
-    let waiting = payloads(&detail, "prompt_waiting");
-    assert_eq!(waiting.len(), 1);
-    assert_eq!(waiting[0]["workspace_id"], WORKSPACE_ID);
-    assert_eq!(waiting[0]["prompt"], "choice");
-    let asks = queue.asks(AskQuery::default()).unwrap();
-    assert_eq!(asks.len(), 1, "{asks:?}");
-    assert_eq!(asks[0].kind, AskKind::AnswerPrompt);
-    assert!(!kinds.contains(&"exit_requested"), "{kinds:?}");
-
-    // Someone answers the dialog: the screen goes back to work.
-    *backend.screen.lock().unwrap() = WORK_SCREEN.into();
-    // `prompt_cleared` is recorded before the ask is closed, in its own
-    // write: wait for both.
-    wait_until(&db, Duration::from_secs(30), |queue| {
-        event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"prompt_cleared")
-            && queue.read_ask(asks[0].id).unwrap().closed_at.is_some()
-    });
-    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
-    fs::write(
-        exit_request_path(run.run_dir().unwrap()).with_extension("go"),
-        "",
-    )
-    .unwrap();
-    let outcome = joined(supervisor, "the supervisor thread to return");
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    assert_landed(&repo, &detail.runs[0], "test task", &base);
-    assert_eq!(payloads(&detail, "revise_finished").len(), 1);
-    assert_eq!(payloads(&detail, "prompt_waiting").len(), 1);
     assert!(queue.asks(AskQuery::default()).unwrap().is_empty());
 }
 

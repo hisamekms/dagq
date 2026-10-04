@@ -3,7 +3,7 @@
 //! [`headless_claude`] runs, and a supervisor on a thread
 //! (`runtime_headless`, `runtime_headless_stall`).
 use super::*;
-use dagq::domain::{Provider, worker::WorkerMode};
+use dagq::domain::{EventKind, Provider, worker::WorkerMode};
 
 /// The fixture's task, canceled, and in its place task 2 (`test task`) for
 /// a headless Claude worker that requires `evidence`; the backend runs its
@@ -271,8 +271,7 @@ pub fn launch_background(
         let _ = fs::remove_file(resume_message_path(&run_dir));
     }
     let claude = backend.claude_for(&run, resume)?;
-    let (provider, other) = headless_provider(&run, claude.as_deref(), backend.codex.as_deref())
-        .expect("only a headless session starts in the background");
+    let (provider, other) = headless_provider(&run, claude.as_deref(), backend.codex.as_deref());
     let (db, ready) = (backend.db.clone(), backend.headless_ready.clone());
     let worker = thread::spawn(move || {
         let spawner = ReadySpawner {
@@ -318,4 +317,45 @@ pub fn wrappers_in_background(repo: &Path) {
         repo,
         &["commit", "-qm", "headless wrappers in the background"],
     );
+}
+
+/// Write `prompt` as the next request (`what`) of the headless session of
+/// `run`, the way the supervisor writes one (a temporary file renamed into
+/// `turns/`), and return its number: the test stands in for whatever has
+/// the session take another turn (a headless session takes none by itself).
+pub fn write_turn_request(run: &TaskRun, prompt: &str, what: &str) -> u64 {
+    use dagq::domain::turn::{TurnRequest, next_seq, request_path, turns_dir};
+    let run_dir = Path::new(run.run_dir().unwrap());
+    let turns = turns_dir(run_dir);
+    fs::create_dir_all(&turns).unwrap();
+    let names: Vec<String> = fs::read_dir(&turns)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    let seq = next_seq(names.iter().map(String::as_str));
+    let request = TurnRequest {
+        seq,
+        what: what.to_owned(),
+        prompt: prompt.to_owned(),
+    };
+    let path = request_path(run_dir, seq);
+    let written = path.with_extension("json.tmp");
+    fs::write(&written, serde_json::to_string(&request).unwrap()).unwrap();
+    fs::rename(&written, &path).unwrap();
+    seq
+}
+
+/// [`write_turn_request`] with its `turn_requested`, as the supervisor's
+/// request records it (ADR-t813-1): what a supervisor that died after
+/// sending a request left.
+pub fn request_turn_left_by_a_dead_supervisor(db: &Path, run: &TaskRun, prompt: &str, what: &str) {
+    let seq = write_turn_request(run, prompt, what);
+    SqliteQueue::open(db)
+        .unwrap()
+        .record_runtime_event(
+            run.id(),
+            EventKind::TurnRequested,
+            json!({"seq": seq, "what": what, "workspace_id": run.workspace_id()}),
+        )
+        .unwrap();
 }

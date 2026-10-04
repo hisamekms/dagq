@@ -48,9 +48,9 @@ use tracing::{error, info, warn};
 
 use super::{
     AgentProvider, AgentSignals, AskQuery, CommandSpec, Exhaustion, Generators, IdleHook,
-    InputSource, LeasedRun, MainRemote, ProcessControl, Queue, QueueOpener, Repository,
-    ResumeCandidate, RunFiles, RunLog, Spawned, Spawner, Streams, TRIAGE_ASKER, TriageAction,
-    Validation, Verifier, WorkerAdapters, WorkspaceBackend,
+    LeasedRun, MainRemote, ProcessControl, Queue, QueueOpener, Repository, ResumeCandidate,
+    RunFiles, RunLog, Spawned, Spawner, Streams, TRIAGE_ASKER, TriageAction, Validation, Verifier,
+    WorkerAdapters, WorkspaceBackend,
     actor_executor::{
         ActorExecutionSpec, ActorExecutor, ActorProgram, HeadlessProgram, HostActorExecutor,
         WorkspaceAccess,
@@ -89,7 +89,7 @@ use crate::domain::{
     marks::{RUN_ENV_CHANGED, run_env_digest},
     measure::{ClaimAttributes, ClaimSpacing, HostVersions, LoadSummary, LoadWindow},
     queue_hold::{HoldJob, Wall},
-    recovery::{RecoveryAlert, RecoveryDecision, RecoveryVerdict, STUCK_EXIT_ACTIONS},
+    recovery::{RecoveryAlert, RecoveryDecision, RecoveryVerdict},
     resume::{
         KILL_ONLY_RESUME_LIMIT, ResumeConfig, ResumeCount, inherits_on_exhaustion, is_inherit_retry,
     },
@@ -106,12 +106,10 @@ mod broker;
 mod claim_defer;
 mod cleanup;
 mod deliver;
-mod dialog;
 mod disk;
 mod draft_planner;
 mod e2e;
 mod exit;
-mod exit_retry;
 mod file_time;
 mod finding_planner;
 mod forecast;
@@ -168,8 +166,8 @@ pub use self::report::ReportPort;
 pub use self::sccache::SccachePort;
 pub use self::update::{UPDATE_INTERVAL, UpdateSettings};
 use self::{
-    deliver::*, dialog::*, exit::*, exit_retry::*, headless::*, idle::*, jobs::*, provider::*,
-    recovery::*, resume::*, revise::*, session::*, stale::*, stall::*, sweep::*, waiting::*,
+    deliver::*, exit::*, headless::*, idle::*, jobs::*, provider::*, recovery::*, resume::*,
+    revise::*, session::*, stale::*, stall::*, sweep::*, waiting::*,
 };
 
 /// How often the supervisor records the finished transcript turns of the
@@ -293,9 +291,6 @@ pub struct LoopSettings {
     /// `[resume]`: the limit of a run's conflict-only attempts (ADR-0047
     /// decision 24).
     pub resume: ResumeConfig,
-    /// `[exit]`: the retries of a `/exit` a session held back (ADR-0047
-    /// decision 25).
-    pub exit: crate::domain::exit::ExitConfig,
     /// Counts the loop's passes, one at the top of each; only read by
     /// tests, which wait for passes after a threshold instead of a fixed
     /// sleep (task 1046).
@@ -369,8 +364,9 @@ pub struct Ports<'a> {
     pub cmux: &'a dyn WorkspaceBackend,
     /// The adapters of each worker (provider and mode) this binary runs
     /// (ADR-t813-2): every agent is checked before anything is claimed, the
-    /// signals of Claude's interactive sessions read the run screens, and a
-    /// task whose worker has none is not claimed.
+    /// signals of Claude's interactive adapter read the planner and inbox
+    /// screens and every idle marker (no worker screen is read since task
+    /// 1437), and a task whose worker has none is not claimed.
     pub workers: WorkerAdapters<'a>,
     /// Starts the headless review and triage (ADR-0027, ADR-0024).
     pub reviewer: &'a dyn AgentProvider,
@@ -686,7 +682,8 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         "keep the queue outside the worktree or under its Git common directory"
     );
     ports.cmux.preflight()?;
-    // The screens and idle markers are those of the interactive sessions.
+    // The planner and inbox screens and the idle markers are read with the
+    // interactive Claude adapter's signals.
     let interactive = ports
         .workers
         .get(Worker::CLAUDE_INTERACTIVE)
@@ -866,7 +863,6 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         jobs_swept: false,
         planner_exits: Vec::new(),
         screen_spans: Default::default(),
-        screen_probes: Default::default(),
         handoff: None,
         exec: None,
         run_env_missing: false,
@@ -908,7 +904,6 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         defer: claim_defer::DeferWatch::default(),
         disk_config: settings.disk,
         resume_config: settings.resume,
-        exit_config: settings.exit.clone(),
         retry_unreadable_review: settings.retry_unreadable_review,
         free_space: ports.free_space,
         scratchpad_roots: ports.scratchpad_roots.clone(),
@@ -956,7 +951,8 @@ struct Supervisor<'a> {
     reviewer: &'a dyn AgentProvider,
     /// Starts the headless jobs a role puts on Codex (ADR-t1063-1).
     codex_jobs: Option<&'a dyn AgentProvider>,
-    /// Reads the screen and the idle marker of the run sessions.
+    /// Reads the idle marker of the run sessions, and the screens of the
+    /// planner and inbox sessions (no worker screen since task 1437).
     signals: &'a dyn AgentSignals,
     /// The workers this supervisor runs: a candidate whose worker is not
     /// one of them is not claimed (ADR-t813-2).
@@ -1049,11 +1045,6 @@ struct Supervisor<'a> {
     /// The screen's idle spans of the sessions without a fresh idle marker
     /// (ADR-t803-1), kept here so a disk that takes no file loses none.
     screen_spans: crate::application::screen_idle::Spans,
-    /// The last capture of each worker session judged by its screen, and
-    /// what it inferred, so a session is captured at most once per
-    /// [`idle::probe_interval`], and less often while its screen keeps
-    /// showing it at work ([`Supervisor::session_idle`], task 845).
-    screen_probes: idle::ScreenProbes,
     /// The binary a handoff asked this process to exec (ADR-0045 decision
     /// 10): no new work starts, and the loop ends once every slot rests at
     /// a point the next process rebuilds it from.
@@ -1158,9 +1149,6 @@ struct Supervisor<'a> {
     /// `[resume]`: the limit of a run's conflict-only attempts (ADR-0047
     /// decision 24).
     resume_config: ResumeConfig,
-    /// `[exit]`: the retries of a `/exit` a session held back (ADR-0047
-    /// decision 25).
-    exit_config: crate::domain::exit::ExitConfig,
     retry_unreadable_review: bool,
     /// Reads the free bytes of the file system of a path.
     free_space: fn(&Path) -> Option<u64>,
@@ -2530,12 +2518,7 @@ impl Supervisor<'_> {
         } else {
             let failed = |why: String| (ABANDON_EXIT_FAILED, Some(why));
             match submit(self, &slot.run, &workspace, Input::Exit, "/exit") {
-                Ok(Submission::Submitted(_) | Submission::Queued) => (ABANDON_EXIT_SENT, None),
-                Ok(Submission::Dialog(_)) => {
-                    failed("a dialog is on the screen, so /exit was not submitted".into())
-                }
-                Ok(Submission::Stuck(_)) => failed("/exit stayed in the input box".into()),
-                Ok(Submission::Unsent) => failed("/exit did not get to the session".into()),
+                Ok(_) => (ABANDON_EXIT_SENT, None),
                 Err(error) => failed(format!("{error:#}")),
             }
         };
@@ -3059,16 +3042,8 @@ impl Supervisor<'_> {
                             Input::Text(&message),
                             "receipt fix request",
                         ) {
-                            Ok(submission) => {
-                                watch.requested(
-                                    sent_at,
-                                    StartCheck::new(
-                                        "receipt fix request",
-                                        &message,
-                                        sent_at,
-                                        &submission,
-                                    ),
-                                );
+                            Ok(_submission) => {
+                                watch.requested(sent_at, sent_at);
                                 let kind = match watch.fix {
                                     Fix::Revise { .. } => EventKind::ReviseReceiptRejected,
                                     Fix::Conflict(_) => EventKind::ConflictReceiptRejected,
@@ -3097,10 +3072,7 @@ impl Supervisor<'_> {
                             format!("the session {why} after {label}"),
                             None,
                         );
-                        let mut exit = ExitWatch::new(Some(session), then);
-                        // A silence the revise's wait recorded is not
-                        // recorded twice.
-                        exit.silent = watch.live.silent && why.starts_with("went silent");
+                        let exit = ExitWatch::new(Some(session), then);
                         slot.phase = Phase::Exiting(exit);
                     }
                 }
@@ -3240,8 +3212,8 @@ fn open_session(phase: &Phase) -> Option<(&str, bool)> {
             .map(|session| (session.workspace.as_str(), false)),
         Phase::Revise(watch) => Some((&watch.session.workspace, false)),
         Phase::Exiting(watch) => watch.session.as_ref().map(|session| {
-            // A `/exit` that never got there (task 354) was not typed.
-            let typed = watch.requested.is_some() && watch.unsent.is_none();
+            // Whether the wrapper has already been asked to exit.
+            let typed = watch.requested;
             (session.workspace.as_str(), typed)
         }),
         _ => None,
@@ -3252,7 +3224,7 @@ fn open_session(phase: &Phase) -> Option<(&str, bool)> {
 fn stop_recovery(slot: &mut Slot) {
     match &mut slot.phase {
         Phase::Session(watch) => watch.recovery.stop_job(),
-        Phase::Exiting(watch) => watch.recovery.stop_job(),
+        Phase::Exiting(_) => (),
         Phase::Resume(watch) => {
             watch.recovery.stop_job();
             watch.live.recovery.stop_job();

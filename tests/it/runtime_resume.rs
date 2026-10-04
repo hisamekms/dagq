@@ -383,7 +383,7 @@ fn approved_needs_session_run_is_resumed_until_the_runtime_lands_it() {
             "{command}"
         );
     }
-    let texts = session_texts(&backend, &run);
+    let texts = session_texts(&run);
     assert_eq!(texts.len(), 2);
     let text = &texts[0];
     for expected in [
@@ -414,10 +414,10 @@ fn approved_needs_session_run_is_resumed_until_the_runtime_lands_it() {
         &fs::read_to_string(run_dir.join("resume-1.txt")).unwrap(),
         text
     );
-    assert!(run_dir.join("terminal-resume-2.txt").is_file());
-    // An exit request per resumed session; both resume workspaces were
-    // closed.
-    assert_exit_sent(&backend, &run, 2);
+    assert!(!run_dir.join("terminal-resume-2.txt").exists());
+    // An exit request per session (the first and the two resumed); both
+    // resume workspaces were closed.
+    assert_exit_sent(&backend, &run, 3);
     let kinds = event_kinds(&detail);
     let resumed = position(&kinds, "resume_started");
     assert_eq!(
@@ -540,7 +540,7 @@ fn unapproved_resumed_run_is_validated_and_reviewed_with_its_session_open() {
             payloads(&detail, "integration_started").len() == 1
         }
     );
-    let text = &session_texts(&backend, &detail.runs[0])[0];
+    let text = &session_texts(&detail.runs[0])[0];
     assert!(
         text.contains("found required evidence missing from the receipt"),
         "{text}"
@@ -647,7 +647,7 @@ fn an_approved_run_resolved_by_an_earlier_resume_lands_without_a_session() {
     assert_landed(&repo, &detail.runs[0], "second", &first_landed);
     assert_eq!(detail.task.status(), TaskStatus::Completed);
     assert!(backend.resumes.lock().unwrap().is_empty());
-    assert!(session_texts(&backend, &detail.runs[0]).is_empty());
+    assert!(session_texts(&detail.runs[0]).is_empty());
     assert_eq!(payloads(&detail, "resume_started").len(), 1);
     assert_eq!(
         payloads(&detail, "resume_skipped"),
@@ -1175,7 +1175,8 @@ fn resuming_stops_after_three_attempts() {
     assert_eq!(finished[2]["exhausted"], true);
     assert_eq!(finished[2]["status"], "needs_session");
     assert!(queue.run_leases().unwrap().is_empty());
-    assert_exit_sent(&backend, &detail.runs[0], 1);
+    // The first session's and the last resume's.
+    assert_exit_sent(&backend, &detail.runs[0], 2);
     assert_eq!(backend.closed().len(), 2 + 1); // two workers, one resume
     // The used-up run is the recovery job's (`resume_exhausted`), which
     // escalates it as a `decide` ask.
@@ -1331,391 +1332,6 @@ fn a_used_up_run_is_retried_with_its_branch_by_its_recovery_job() {
             .iter()
             .all(|ask| ask.kind != AskKind::Decide)
     );
-}
-
-/// A resumed session that does not exit within the exit timeout of `/exit`
-/// is let go as `unresolved` (its lease released, its workspace kept), so the
-/// supervisor's slot and a drain are not held forever. While it runs, the run
-/// is the supervisor's (`resuming (runtime)`) and is not resumed again; once it
-/// ended, the next pass closes the workspace it left and resumes the run.
-/// Task 285: the resolution request waits for Claude Code's input box. A
-/// booting session's screen gets nothing; past the registration timeout
-/// the run records `input_not_ready` and asks the inbox once, and the
-/// request goes as soon as the box is drawn. The ask closes when the
-/// session exits.
-#[test]
-fn a_resumed_session_gets_its_request_only_once_its_input_box_is_ready() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    let (run, first_landed) = parked_conflict(&repo, &db, &backend);
-    backend.registration_timeout = Duration::from_secs(2);
-    *backend.screen.lock().unwrap() = BOOT_SCREEN.into();
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    backend.resume_script_for(
-        2,
-        "await_message; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
-    );
-    let outcome = thread::scope(|scope| {
-        scope.spawn(|| {
-            // Nothing is typed while the session boots. The box gets ready
-            // only once the runtime gave up on it (`input_not_ready`), not
-            // at a time of the test's own: under load the resumed session
-            // may register later than any fixed time after the start.
-            wait_until(&db, Duration::from_secs(60), |queue| {
-                assert!(backend.texts().is_empty());
-                let detail = queue.show(TaskId::new(2)).unwrap();
-                !payloads(&detail, "input_not_ready").is_empty()
-            });
-            assert!(backend.texts().is_empty());
-            *backend.screen.lock().unwrap() = READY_SCREEN.into();
-        });
-        supervise(&db, &repo, &backend).unwrap()
-    });
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let detail = queue.show(TaskId::new(2)).unwrap();
-    assert_landed(&repo, &detail.runs[0], "second", &first_landed);
-    assert_eq!(backend.texts().len(), 1);
-    let not_ready = payloads(&detail, "input_not_ready");
-    assert_eq!(not_ready.len(), 1, "{:?}", event_kinds(&detail));
-    assert_eq!(not_ready[0]["waited_secs"], 2);
-    assert_eq!(not_ready[0]["prompt"], Value::Null);
-    assert!(
-        not_ready[0]["excerpt"]
-            .as_str()
-            .unwrap()
-            .contains("'session'")
-    );
-    let asks = other_asks(&mut queue, true);
-    assert_eq!(asks.len(), 1, "{asks:?}");
-    assert_eq!(asks[0].kind, AskKind::AnswerPrompt);
-    assert_eq!(asks[0].run_id.as_ref(), Some(run.id()));
-    assert!(
-        asks[0].question.contains("input box is not ready"),
-        "{}",
-        asks[0].question
-    );
-    assert_eq!(
-        asks[0].answer.as_deref(),
-        Some("the input box got ready and the request was sent; closed by the runtime")
-    );
-    assert!(payloads(&detail, "submit_retried").is_empty());
-}
-
-/// Task 285: a request whose Enter a long paste swallowed stays in the
-/// input box; Enter alone goes again, the text is typed once, and the run
-/// goes on as usual.
-#[test]
-fn a_request_left_in_the_input_box_gets_enter_again_not_the_text() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    let (_run, first_landed) = parked_conflict(&repo, &db, &backend);
-    backend.swallowed_enters.store(2, Ordering::SeqCst);
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    backend.resume_script_for(
-        2,
-        "await_message; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
-    );
-    let outcome = supervise(&db, &repo, &backend).unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let detail = queue.show(TaskId::new(2)).unwrap();
-    assert_landed(&repo, &detail.runs[0], "second", &first_landed);
-    assert_eq!(backend.texts().len(), 1);
-    assert_eq!(backend.enters.load(Ordering::SeqCst), 2);
-    let retried = payloads(&detail, "submit_retried");
-    assert_eq!(retried.len(), 1, "{:?}", event_kinds(&detail));
-    assert_eq!(retried[0]["what"], "resolution request");
-    assert_eq!(retried[0]["input"], "text");
-    assert_eq!(retried[0]["retries"], 2);
-    assert_eq!(retried[0]["submitted"], true);
-    assert!(payloads(&detail, "submit_unconfirmed").is_empty());
-    // The Enters that got it through are one repair (ADR-0047 decision 38).
-    let repaired: Vec<&Value> = payloads(&detail, "auto_repaired")
-        .into_iter()
-        .filter(|p| p["repair"] == "submit_enter_retry")
-        .collect();
-    assert_eq!(repaired.len(), 1, "{:?}", event_kinds(&detail));
-    assert_eq!(repaired[0]["layer"], "runtime");
-    assert_eq!(
-        repaired[0]["conditions"],
-        json!({"input": "text", "retries": 2, "submitted": true})
-    );
-    assert_eq!(repaired[0]["detail"]["what"], "resolution request");
-    assert!(other_asks(&mut queue, true).is_empty());
-}
-
-/// Task 285: a request still in the input box after the Enters sent again
-/// is recorded; `/exit` left there gets Enter again too but is never typed
-/// twice. Task 442 (ADR-0047 decision 31): the request goes to the
-/// session's recovery job (`stalled`, reason `send_unconfirmed`) and, as it
-/// escalates, becomes the `stalled` ask, not an `answer_prompt` ask; the
-/// ask closes with the stage. Task 771: it closes as resolved by itself
-/// whether or not the poll that sees the session idle after its receipt
-/// followed the ask after the idle marker was written.
-#[test]
-fn a_request_stuck_in_the_input_box_is_asked_to_the_inbox() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    let (run, _) = parked_conflict(&repo, &db, &backend);
-    backend.swallowed_enters.store(1000, Ordering::SeqCst);
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    // The fake session still reads the request, so the run resolves, once
-    // the ask is open.
-    backend.resume_script_for(
-        2,
-        "await_message; until \"$DAGQ\" asks --open | grep -q stalled; do sleep 0.05; done; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
-    );
-    let outcome = supervise(&db, &repo, &backend).unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let detail = queue.show(TaskId::new(2)).unwrap();
-    let unconfirmed = payloads(&detail, "submit_unconfirmed");
-    assert_eq!(unconfirmed.len(), 2, "{:?}", event_kinds(&detail));
-    assert_eq!(unconfirmed[0]["input"], "text");
-    assert_eq!(unconfirmed[0]["retries"], 3);
-    assert!(
-        unconfirmed[0]["excerpt"]
-            .as_str()
-            .unwrap()
-            .contains("do not run /exit")
-    );
-    assert_eq!(unconfirmed[1]["input"], "exit");
-    // Three Enters after the request and three after /exit, sent once.
-    assert_eq!(backend.enters.load(Ordering::SeqCst), 6);
-    assert_eq!(backend.texts().len(), 1);
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
-    let asks = other_asks(&mut queue, true);
-    assert_eq!(asks.len(), 1, "{asks:?}");
-    assert_eq!(asks[0].kind, AskKind::Stalled);
-    assert_eq!(asks[0].run_id.as_ref(), Some(run.id()));
-    assert_eq!(
-        asks[0].reason_category,
-        dagq::domain::AskReason::RecoveryFailed
-    );
-    for part in [
-        "resolution request the supervisor typed stays in the input box after 4 Enters",
-        "reason: send_unconfirmed",
-        "the recovery job could not repair it",
-    ] {
-        assert!(
-            asks[0].question.contains(part),
-            "{part}: {}",
-            asks[0].question
-        );
-    }
-    assert_eq!(asks[0].options[..2], ["wait", "intervene"]);
-    assert!(asks[0].closed_at.is_some());
-    // The job came first, for the text and not for the /exit.
-    let requested = payloads(&detail, "recovery_requested");
-    assert_eq!(requested.len(), 1, "{requested:?}");
-    assert_eq!(requested[0]["alert"], "stalled");
-    assert_eq!(requested[0]["reason"], "send_unconfirmed");
-    assert_eq!(requested[0]["event"], "submit_unconfirmed");
-    assert_eq!(requested[0]["send"], "resolution request");
-    assert_eq!(
-        requested[0]["evidence"],
-        json!([requested[0]["send_event"]])
-    );
-    let kinds = event_kinds(&detail);
-    let asked = kinds.iter().rposition(|k| *k == "ask_opened").unwrap();
-    assert!(position(&kinds, "recovery_requested") < asked, "{kinds:?}");
-    let resolved: Vec<(&Value, &Value)> = payloads(&detail, "stall_resolved")
-        .into_iter()
-        .map(|p| (&p["detection"], &p["outcome"]))
-        .collect();
-    assert_eq!(
-        resolved,
-        [
-            (&json!("recovery"), &json!("escalated")),
-            (&json!("ask"), &json!("resolved_by_itself")),
-        ]
-    );
-}
-
-/// Task 285: a request the session never got (typed into a box that lost
-/// it) shows no sign of work within `[stall].send_confirm_secs`; with the
-/// input box empty it is sent once more (`submit_resent`), and a request
-/// lost twice is not sent a third time: the run records
-/// `submit_not_started`, and (task 442) its recovery job escalates it to
-/// the `stalled` ask. Which sign leads to which step is the unit test
-/// `supervise::deliver::tests::a_lost_text_is_sent_again_only_once`; the
-/// first two attempts are recorded without their sessions, so the last
-/// one is the only session.
-#[test]
-fn a_request_lost_twice_is_asked_to_the_inbox() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    let (run, _) = parked_conflict(&repo, &db, &backend);
-    count_resumes_of_parked(&db);
-    backend.dropped_texts.store(usize::MAX, Ordering::SeqCst);
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    earlier_resumes(&mut queue, &run, MAX_RESUME_ATTEMPTS - 1);
-    // It never gets the request, and exits by itself once the ask is open
-    // (or at an /exit, so that it never outlives the test). The fixture's
-    // resume timeout does not end the resume first: a timeout short enough
-    // to end each resume raced the two sends and the recovery job, which
-    // under load took longer, and left the resume without its ask.
-    backend.resume_script_for(
-        2,
-        "until [ -f \"$EXIT\" ] || \"$DAGQ\" asks --open | grep -q stalled; do sleep 0.05; done",
-    );
-    let options = SuperviseOptions {
-        stall: Some(
-            dagq::domain::stall::StallConfig::default().with_millis("send_confirm_secs", 200),
-        ),
-        ..supervise_options(4, true)
-    };
-    let outcome = supervise_with(&db, &repo, &backend, &options).unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let detail = queue.show(TaskId::new(2)).unwrap();
-    // The last resume (unresolved) sends it twice and asks once.
-    assert_eq!(
-        payloads(&detail, "resume_started").len(),
-        MAX_RESUME_ATTEMPTS,
-        "{:?}",
-        event_kinds(&detail)
-    );
-    let resumes = 1;
-    let texts = backend.texts();
-    assert_eq!(texts.len(), 2 * resumes);
-    assert_eq!(texts[0], texts[1]);
-    let not_started = payloads(&detail, "submit_not_started");
-    assert_eq!(not_started.len(), resumes, "{:?}", event_kinds(&detail));
-    assert!(not_started.iter().all(|p| p["resent"] == true));
-    let resent = payloads(&detail, "submit_resent");
-    assert_eq!(resent.len(), resumes);
-    assert_eq!(resent[0]["what"], "resolution request");
-    assert_eq!(resent[0]["waited_secs"], 1);
-    let asks = queue
-        .asks(AskQuery {
-            all: true,
-            ..Default::default()
-        })
-        .unwrap()
-        .into_iter()
-        .filter(|a| a.kind == AskKind::Stalled)
-        .collect::<Vec<_>>();
-    assert_eq!(asks.len(), resumes, "{asks:?}");
-    assert!(
-        !other_asks(&mut queue, true)
-            .iter()
-            .any(|a| a.kind == AskKind::AnswerPrompt)
-    );
-    // One job for the resume's alert.
-    let requested: Vec<&Value> = payloads(&detail, "recovery_requested")
-        .into_iter()
-        .filter(|p| p["alert"] == "stalled")
-        .collect();
-    assert_eq!(requested.len(), resumes, "{requested:?}");
-    assert!(
-        requested
-            .iter()
-            .all(|p| p["reason"] == "send_unconfirmed" && p["event"] == "submit_not_started")
-    );
-    assert_eq!(asks[0].run_id.as_ref(), Some(run.id()));
-    // Each closes once its session exited.
-    assert!(asks.iter().all(|a| a.closed_at.is_some()));
-    assert!(
-        asks[0].question.contains(
-            "showed no sign of work within 1s of the resolution request the supervisor sent twice"
-        ),
-        "{}",
-        asks[0].question
-    );
-}
-
-#[test]
-fn a_resumed_session_that_ignores_exit_is_let_go() {
-    interactive_workers();
-    let (_dir, repo, db) = fixture();
-    let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    let (run, first_landed) = parked_conflict(&repo, &db, &backend);
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    // The short exit timeout is for the session that holds its /exit back
-    // only. A session that exits at its /exit, as the next resume's does,
-    // may take longer than a second to do so under load: with this timeout
-    // it would be let go as stuck too (task 770).
-    let exit_timeout = backend.exit_timeout;
-    backend.exit_timeout = Duration::from_millis(500);
-    backend.resume_script_for(2, &format!("await_message; idle; {HOLD}"));
-    let outcome = supervise_retrying(&db, &repo, &backend).unwrap();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let detail = queue.show(TaskId::new(2)).unwrap();
-    let finished = payloads(&detail, "resume_finished");
-    assert_eq!(finished.len(), 1, "{:?}", event_kinds(&detail));
-    assert_eq!(finished[0]["outcome"], "unresolved");
-    assert_eq!(finished[0]["exit_timed_out"], true);
-    assert_eq!(finished[0]["workspace_closed"], false);
-    assert!(queue.run_leases().unwrap().is_empty());
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
-    let kept = finished[0]["workspace_id"].as_str().unwrap().to_owned();
-    assert!(!backend.closed().contains(&kept));
-    assert_eq!(
-        run_attention_of(&runtime::status(&db).unwrap(), run.id()).unwrap()["next"],
-        "resuming (runtime)"
-    );
-    // Its dialog does not go away by itself: one stuck_exit ask goes to the
-    // inbox (task 147), as for the worker's session.
-    let asks = other_asks(&mut queue, false);
-    assert_eq!(asks.len(), 1, "{asks:?}");
-    let ask = asks[0].clone();
-    assert_eq!(ask.kind, AskKind::StuckExit);
-    assert_eq!(ask.run_id.as_ref(), Some(run.id()));
-    assert!(ask.question.contains(&kept), "{}", ask.question);
-    assert!(
-        ask.question.contains(
-            "The run stays needs_session, and the supervisor resumes it again once the session exits"
-        ),
-        "{}",
-        ask.question
-    );
-    // A pass while the session still runs neither resumes the run nor asks
-    // again, nor closes the ask.
-    let outcome = supervise_retrying(&db, &repo, &backend).unwrap();
-    assert_eq!(outcome["runs"], json!([]), "{outcome}");
-    assert_eq!(other_asks(&mut queue, false).len(), 1);
-    assert!(queue.read_ask(ask.id).unwrap().is_open());
-
-    // Its session ends; the workspace it left no longer blocks the run.
-    release_held_session(run.run_dir().unwrap());
-    backend.join();
-    assert_eq!(
-        run_attention_of(&runtime::status(&db).unwrap(), run.id()).unwrap()["next"],
-        "resuming (runtime)"
-    );
-    backend.exit_timeout = exit_timeout;
-    backend.resume_script_for(
-        2,
-        "await_message; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
-    );
-    let outcome = supervise_retrying(&db, &repo, &backend).unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert!(backend.closed().contains(&kept));
-    let detail = queue.show(TaskId::new(2)).unwrap();
-    assert_landed(&repo, &detail.runs[0], "second", &first_landed);
-    assert_eq!(payloads(&detail, "resume_started").len(), 2);
-    // The next pass closed the ask of the session that ended.
-    let closed = queue.read_ask(ask.id).unwrap();
-    assert!(closed.closed_at.is_some());
-    assert_eq!(
-        closed.answer.as_deref(),
-        Some("the session exited; closed by the runtime")
-    );
-    assert!(other_asks(&mut queue, false).is_empty());
-    // One ask about the session, besides the one of the run's failed
-    // stand-in review before it was integrated by hand (task 328).
-    let opened: Vec<&Value> = payloads(&detail, "ask_opened")
-        .into_iter()
-        .filter(|p| p["kind"] != "approve_landing")
-        .collect();
-    assert_eq!(opened.len(), 1, "{opened:?}");
 }
 
 /// The supervisor never resumes a run next to the live session of a
@@ -2245,4 +1861,224 @@ fn wrapper_lives(db: &Path, run: &TaskRun) -> bool {
         )
         .unwrap()
         == 1
+}
+
+#[test]
+fn a_historical_interactive_run_resumes_headless_and_records_its_conversion() {
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let (run, first_landed) = parked_conflict(&repo, &db, &backend);
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE task_runs SET worker_mode='interactive' WHERE id=?1",
+            [run.id()],
+        )
+        .unwrap();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let token = LeaseToken::new("converted-resume");
+    let (resumed, _) = queue
+        .begin_resume(
+            run.id(),
+            &token,
+            &sha(&first_landed),
+            None,
+            Default::default(),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        resumed.worker_mode(),
+        dagq::domain::worker::WorkerMode::Headless
+    );
+    assert_eq!(
+        queue.run(run.id()).unwrap().worker_mode(),
+        resumed.worker_mode()
+    );
+    let events = queue.run_events(run.id()).unwrap();
+    let converted: Vec<_> = events
+        .iter()
+        .filter(|e| e.kind == "worker_mode_converted")
+        .collect();
+    assert_eq!(converted.len(), 1);
+    assert_eq!(
+        converted[0].payload,
+        json!({"phase":"resume", "from":"interactive", "to":"headless", "reason":"interactive_worker_removed"})
+    );
+    assert!(
+        queue
+            .begin_resume(
+                run.id(),
+                &LeaseToken::new("another"),
+                &sha(&first_landed),
+                None,
+                Default::default()
+            )
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        queue
+            .run_events(run.id())
+            .unwrap()
+            .iter()
+            .filter(|e| e.kind == "worker_mode_converted")
+            .count(),
+        1
+    );
+}
+
+/// Hold the turns the session wrappers of `backend` start in their start
+/// until the test writes the returned marker: a wrapper held there runs no
+/// turn, heartbeats no more and does not read its exit request, as a
+/// session that ignores that request. A turn whose script runs the
+/// returned command first writes the marker itself and is not held.
+fn hold_turn_starts(dir: &Path, backend: &mut TestWorkspace) -> (PathBuf, String) {
+    let release = runtime_support::headless::ready_turn(dir, backend);
+    (backend.headless_ready.clone().unwrap(), release)
+}
+
+/// The `exit_requested` events of the resume `attempt` of the task's run.
+fn exit_requests_of_attempt(detail: &dagq::domain::TaskDetail, attempt: i64) -> usize {
+    payloads(detail, "exit_requested")
+        .into_iter()
+        .filter(|p| p["resume_attempt"] == attempt)
+        .count()
+}
+
+/// A resumed session that does not exit at its exit request is let go
+/// after the exit timeout: the resume ends `unresolved` with
+/// `exit_timed_out`, its lease is given back but its workspace stays open,
+/// and no pass resumes the run next to the session while it runs; once it
+/// ended, the next attempt closes that workspace and lands the run. The
+/// session's wrapper is held in the start of its turn, so it neither works
+/// nor reads the exit request the resume timeout made the supervisor write.
+/// Moved from the interactive `a_resumed_session_that_ignores_exit_is_let_go`
+/// (task 1437).
+#[test]
+fn a_resumed_session_that_ignores_its_exit_request_is_let_go_after_the_exit_timeout() {
+    let (dir, repo, db) = fixture();
+    let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let (run, first_landed) = parked_conflict(&repo, &db, &backend);
+    let (held, release) = hold_turn_starts(dir.path(), &mut backend);
+    let timeouts = (backend.exit_timeout, backend.resume_timeout);
+    backend.exit_timeout = Duration::from_millis(500);
+    backend.resume_timeout = Duration::from_secs(1);
+    backend.resume_script_for(2, &format!("await_message; {HOLD}"));
+    let outcome = supervise(&db, &repo, &backend).unwrap();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(2)).unwrap();
+    let finished = payloads(&detail, "resume_finished");
+    assert_eq!(finished.len(), 1, "{:?}", event_kinds(&detail));
+    assert_eq!(finished[0]["outcome"], "unresolved");
+    assert_eq!(finished[0]["exit_timed_out"], true);
+    assert_eq!(finished[0]["workspace_closed"], false);
+    // Asked once to exit, and let go without a second request.
+    assert_eq!(exit_requests_of_attempt(&detail, 1), 1);
+    // The first session's and the resume's, written once each.
+    assert_exit_sent(&backend, &run, 2);
+    assert!(queue.run_leases().unwrap().is_empty());
+    let kept = workspace_of_attempt(&detail, 1);
+    assert_eq!(finished[0]["workspace_id"], json!(kept));
+    assert!(!backend.closed().contains(&kept));
+    assert!(wrapper_lives(&db, &run));
+    assert_eq!(
+        run_attention_of(&runtime::status(&db).unwrap(), run.id()).unwrap()["next"],
+        "resuming (runtime)"
+    );
+    // A pass while the session still runs does not resume the run.
+    let outcome = supervise(&db, &repo, &backend).unwrap();
+    assert_eq!(outcome["runs"], json!([]), "{outcome}");
+    assert_eq!(
+        payloads(&queue.show(TaskId::new(2)).unwrap(), "resume_started").len(),
+        1
+    );
+
+    // The session goes on, finds the exit request and ends; the workspace
+    // it left no longer blocks the run.
+    fs::write(&held, "").unwrap();
+    backend.join();
+    (backend.exit_timeout, backend.resume_timeout) = timeouts;
+    backend.resume_script_for(
+        2,
+        &format!("{release}; await_message; resolve; receipt \"$(git rev-parse HEAD)\""),
+    );
+    let outcome = supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert!(backend.closed().contains(&kept));
+    let detail = queue.show(TaskId::new(2)).unwrap();
+    assert_landed(&repo, &detail.runs[0], "second", &first_landed);
+    assert_eq!(payloads(&detail, "resume_started").len(), 2);
+}
+
+/// A resumed session whose wrapper stops heartbeating while its process
+/// lives on is asked to exit once, the silence recorded once as
+/// `wrapper_heartbeat_expired`, and, as it does not exit, let go after the
+/// exit timeout like a session that ignores its exit request: `unresolved`
+/// with `exit_timed_out` and its workspace kept. Moved from the interactive
+/// `a_resumed_session_with_a_silent_wrapper_is_asked_to_exit_then_let_go`
+/// (task 1437).
+#[test]
+fn a_resumed_session_whose_wrapper_goes_silent_is_asked_to_exit_once_then_let_go() {
+    let (dir, repo, db) = fixture();
+    let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let (run, _) = parked_conflict(&repo, &db, &backend);
+    let (held, _) = hold_turn_starts(dir.path(), &mut backend);
+    backend.exit_timeout = Duration::from_millis(500);
+    let started = Path::new(run.run_dir().unwrap()).join("resume-turn-started");
+    backend.resume_script_for(
+        2,
+        &format!(": > \"$RUN_DIR/resume-turn-started\"; await_message; {HOLD}"),
+    );
+    let backend = Arc::new(backend);
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || supervise(&db, &repo, &backend))
+    };
+    // The turn of the request runs while its wrapper, held in the turn's
+    // start, heartbeats no more: its last heartbeat is made older than the
+    // timeout.
+    wait_until(&db, Duration::from_secs(30), |_| started.exists());
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE run_processes SET heartbeat_at=unixepoch()-?2
+             WHERE run_id=?1 AND role='wrapper' AND exited_at IS NULL",
+            rusqlite::params![run.id(), dagq::domain::HEARTBEAT_TIMEOUT_SECS + 5],
+        )
+        .unwrap();
+    // The silence, not the resume timeout (120 seconds), asks for the exit.
+    wait_until(&db, Duration::from_secs(30), |queue| {
+        !payloads(&queue.show(TaskId::new(2)).unwrap(), "resume_finished").is_empty()
+    });
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(2))
+        .unwrap();
+    let kinds = event_kinds(&detail);
+    assert!(!kinds.contains(&"runtime_error"), "{kinds:?}");
+    assert_eq!(
+        payloads(&detail, "wrapper_heartbeat_expired").len(),
+        1,
+        "{kinds:?}"
+    );
+    assert_eq!(exit_requests_of_attempt(&detail, 1), 1, "{kinds:?}");
+    assert!(
+        position(&kinds, "wrapper_heartbeat_expired")
+            < kinds.iter().rposition(|k| *k == "exit_requested").unwrap()
+    );
+    // The first session's and the resume's.
+    assert_exit_sent(&backend, &run, 2);
+    let finished = payloads(&detail, "resume_finished");
+    assert_eq!(finished.len(), 1, "{kinds:?}");
+    assert_eq!(finished[0]["outcome"], "unresolved");
+    assert_eq!(finished[0]["exit_timed_out"], true);
+    assert_eq!(finished[0]["workspace_closed"], false);
+    assert!(!backend.closed().contains(&workspace_of_attempt(&detail, 1)));
+    fs::write(&held, "").unwrap();
+    backend.join();
 }

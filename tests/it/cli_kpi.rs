@@ -788,6 +788,16 @@ fn kpi_cross_reaches_periods_and_compare_without_replacing_single_axes() {
             queue.record_runtime_event(run.id(), kind, payload).unwrap();
         }
     }
+    // Claims run headless since task 1437; the interactive task's claim
+    // stands for one recorded before, which kpi still reads by its route.
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE run_events SET payload=json_set(payload,'$.worker_mode','interactive')
+              WHERE kind='run_claimed' AND task_id=3",
+            [],
+        )
+        .unwrap();
     let args = [
         "--last",
         "1",

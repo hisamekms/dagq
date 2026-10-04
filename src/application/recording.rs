@@ -516,9 +516,6 @@ impl WorkspaceBackend for RecordingBackend<'_> {
     fn reopen_interval(&self) -> Duration {
         self.inner.reopen_interval()
     }
-    fn prompt_wait(&self) -> Duration {
-        self.inner.prompt_wait()
-    }
     fn resume_prompt_delay(&self) -> Duration {
         self.inner.resume_prompt_delay()
     }
@@ -533,7 +530,185 @@ impl WorkspaceBackend for RecordingBackend<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::{Context, anyhow};
+    use crate::application::Queue;
+    use anyhow::{Context, anyhow, bail};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A cmux whose first `failures` calls fail with `error`, counting
+    /// every call it gets. Only `exists` and `close` are made through it.
+    struct Backend {
+        error: &'static str,
+        failures: AtomicUsize,
+        calls: AtomicUsize,
+    }
+
+    impl Backend {
+        fn failing(error: &'static str, failures: usize) -> Self {
+            Self {
+                error,
+                failures: AtomicUsize::new(failures),
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn call(&self) -> Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            match self
+                .failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            {
+                Ok(_) => bail!("{}", self.error),
+                Err(_) => Ok(()),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl WorkspaceBackend for Backend {
+        fn preflight(&self) -> Result<()> {
+            unimplemented!()
+        }
+        fn preflight_detached(&self, _: &SupervisorEnvironment) -> Result<()> {
+            unimplemented!()
+        }
+        fn create(&self, _: &Task, _: &TaskRun, _: &str, _: &WorkspaceTags) -> Result<String> {
+            unimplemented!()
+        }
+        fn create_resume(
+            &self,
+            _: &Task,
+            _: &TaskRun,
+            _: &str,
+            _: &WorkspaceTags,
+        ) -> Result<String> {
+            unimplemented!()
+        }
+        fn send_text(&self, _: &str, _: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn send_enter(&self, _: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn capture(&self, _: &str) -> Result<String> {
+            unimplemented!()
+        }
+        fn close(&self, _: &str) -> Result<()> {
+            self.call()
+        }
+        fn set_color(&self, _: &str, _: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn set_status(&self, _: &str, _: &str, _: &str, _: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn pin(&self, _: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn send_exit(&self, _: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn exists(&self, _: &str) -> Result<bool> {
+            self.call().map(|()| true)
+        }
+        fn listed_workspace_ids(&self) -> Result<Vec<String>> {
+            unimplemented!()
+        }
+        fn create_named(&self, _: &str, _: &Path, _: &str, _: &WorkspaceTags) -> Result<String> {
+            unimplemented!()
+        }
+        fn ensure_group(&self, _: &str, _: &str) -> Result<String> {
+            unimplemented!()
+        }
+        fn notify(&self, _: &str, _: &str, _: Option<&str>) -> Result<()> {
+            unimplemented!()
+        }
+        /// No sleep between attempts in a unit test.
+        fn retry_backoff(&self) -> Duration {
+            Duration::ZERO
+        }
+    }
+
+    /// No queue: the failures [`RecordingBackend`] records are dropped, so
+    /// that only what it hands back and how often it calls are checked.
+    struct NoQueue;
+
+    impl QueueOpener for NoQueue {
+        fn open(&self) -> Result<Box<dyn Queue + Send>> {
+            bail!("no queue")
+        }
+    }
+
+    fn recording(backend: &Backend) -> RecordingBackend<'_> {
+        RecordingBackend::over(backend, Arc::new(NoQueue), None, || None)
+    }
+
+    /// The [`BackendFailure`] `error` wraps.
+    fn failure(error: &anyhow::Error) -> &BackendFailure {
+        error.downcast_ref::<BackendFailure>().unwrap()
+    }
+
+    /// `exists`, a call that leaves nothing behind, is made again while it
+    /// times out, up to the backend's `call_attempts` in all, and fails as
+    /// effect-free with `backend_timeout` and its op once they run out; a
+    /// failure that is not a timeout is never made again. Moved from the
+    /// interactive
+    /// `failed_backend_calls_are_recorded_with_the_load_and_counted_by_stats`
+    /// that task 1437 deleted.
+    #[test]
+    fn an_effect_free_call_that_timed_out_is_made_again_until_its_attempts_run_out() {
+        const TIMEOUT: &str = "cmux list-workspaces failed: Command timed out";
+        let backend = Backend::failing(TIMEOUT, 2);
+        assert!(recording(&backend).exists("ws").unwrap());
+        assert_eq!(backend.calls(), 3);
+
+        let backend = Backend::failing(TIMEOUT, 3);
+        let error = recording(&backend).exists("ws").unwrap_err();
+        assert_eq!(backend.calls(), 3);
+        assert_eq!(failure(&error).op, "exists");
+        assert!(failure(&error).effect_free);
+        let reason = reason_of_error(&error, ReasonCode::Other);
+        assert_eq!(reason.code, ReasonCode::BackendTimeout);
+        assert_eq!(reason.detail["op"], "exists");
+        assert!(!timed_out_maybe_sent(&error));
+
+        let backend = Backend::failing("injected workspace list failure", 1);
+        let error = recording(&backend).exists("ws").unwrap_err();
+        assert_eq!(backend.calls(), 1);
+        assert!(!failure(&error).effect_free);
+        assert_eq!(
+            reason_of_error(&error, ReasonCode::Other).code,
+            ReasonCode::BackendFailed
+        );
+    }
+
+    /// `close` is made once, timed out or not, and its failure is handed
+    /// back with its code and op, which `cleanup_failed` carries
+    /// ([`reason_of_error`]); a close that timed out may have taken effect.
+    /// Moved from the interactive
+    /// `failed_backend_calls_are_recorded_with_the_load_and_counted_by_stats`
+    /// that task 1437 deleted.
+    #[test]
+    fn a_failed_close_is_made_once_and_handed_back_with_its_code_and_op() {
+        let backend = Backend::failing("injected workspace close failure", 1);
+        let error = recording(&backend).close("ws").unwrap_err();
+        assert_eq!(backend.calls(), 1);
+        assert_eq!(format!("{error:#}"), "injected workspace close failure");
+        let reason = reason_of_error(&error, ReasonCode::Other);
+        assert_eq!(reason.code, ReasonCode::BackendFailed);
+        assert_eq!(reason.detail["op"], "close");
+
+        let backend = Backend::failing("cmux close-workspace failed: Command timed out", 1);
+        let error = recording(&backend).close("ws").unwrap_err();
+        assert_eq!(backend.calls(), 1);
+        assert_eq!(
+            reason_of_error(&error, ReasonCode::Other).code,
+            ReasonCode::BackendTimeout
+        );
+        assert!(timed_out_maybe_sent(&error));
+    }
 
     #[test]
     fn a_backend_failure_prints_as_the_error_it_wraps_and_classifies_it() {
