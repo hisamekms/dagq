@@ -17,6 +17,7 @@ use super::{
     DomainError, Provider, RunEvent, RunId,
     claim_hold::HoldReason,
     event_kind,
+    queue_hold::Wall,
     turn::TurnFailure,
     worker::{Worker, WorkerMode},
 };
@@ -289,6 +290,130 @@ pub fn routes(
             })
         })
         .collect()
+}
+
+/// Why `provider` is held for the workers now, if it is, given
+/// `--no-claude` (`no_claude`), why the queue's open hold ask holds Claude
+/// (`queue_hold`) and the provider's own [`ProviderHold`] (`own`, see
+/// [`own_hold`]): Claude is disabled under `--no-claude`, else held by the
+/// hold ask before its own hold (an agent that did not start); Codex only
+/// by its own, so Claude's hold ask never holds it.
+pub fn held(
+    provider: Provider,
+    no_claude: bool,
+    queue_hold: Option<SwitchReason>,
+    own: Option<SwitchReason>,
+) -> Option<SwitchReason> {
+    match provider {
+        Provider::Claude if no_claude => Some(SwitchReason::Disabled),
+        Provider::Claude => queue_hold.or(own),
+        Provider::Codex => own,
+    }
+}
+
+/// Why `provider`'s own [`ProviderHold`] among `holds` holds it, if one
+/// does.
+pub fn own_hold(holds: &[ProviderHold], provider: Provider) -> Option<SwitchReason> {
+    holds
+        .iter()
+        .find(|hold| hold.provider == provider)
+        .map(|hold| hold.reason)
+}
+
+/// Whether a headless turn of `from` that failed for `reason` stopped at a
+/// wall of Claude's that its hold ask holds (a login or a usage limit,
+/// not an agent that did not start): no [`ProviderHold`] is recorded for
+/// it, and the run that moves on opens Claude's hold ask for the
+/// Claude-only jobs.
+pub fn claude_wall(from: Provider, reason: SwitchReason) -> bool {
+    from == Provider::Claude && reason != SwitchReason::LaunchFailed
+}
+
+/// The wall of the hold ask a provider that cannot be used for `reason`
+/// raises: a usage limit or a login; none for the rest.
+pub const fn wall_of(reason: SwitchReason) -> Option<Wall> {
+    match reason {
+        SwitchReason::UsageLimit => Some(Wall::UsageLimit),
+        SwitchReason::Authentication => Some(Wall::Authentication),
+        SwitchReason::Disabled
+        | SwitchReason::LaunchFailed
+        | SwitchReason::ExecutableMissing
+        | SwitchReason::SubagentsUnsupported => None,
+    }
+}
+
+/// What a run whose headless turn failed at its provider's wall does on
+/// this look (ADR-t813-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WallMove {
+    /// The call is made again on the other provider in a new session.
+    Switch,
+    /// Its own provider can be used again: the call is made again there.
+    Retry,
+    /// It waits for a provider; `record` on the first look
+    /// (`provider_waiting`).
+    Wait { record: bool },
+}
+
+/// What a run at its provider's wall does: it moves when it has switches
+/// left (`may_switch`) and the other provider can be used
+/// (`other_usable`); else, on a later look (`first_look` false), the call
+/// is made again on its own provider once that one is not held
+/// (`own_held`) and no hold ask holds the run for a person's `done`
+/// (`hold_unclosed`); else it waits, recorded once on the first look.
+pub fn wall_move(
+    may_switch: bool,
+    other_usable: bool,
+    first_look: bool,
+    own_held: bool,
+    hold_unclosed: bool,
+) -> WallMove {
+    if may_switch && other_usable {
+        WallMove::Switch
+    } else if !first_look && !own_held && !hold_unclosed {
+        WallMove::Retry
+    } else {
+        WallMove::Wait { record: first_look }
+    }
+}
+
+/// The hold ask a run that waits for a provider joins, if any, after its
+/// turn on `from` failed for `reason`: none under `--no-claude`
+/// (`no_claude`: Codex keeps its own hold, which no ask shows); Claude's
+/// login or usage limit always opens it; otherwise only when the other
+/// provider cannot be used either (this supervisor has no headless worker
+/// of it, `other_headless` false, or it is held), with the wall of the
+/// hold ask open already (`open_hold`, its reason), or of whichever
+/// provider's hold is a login or a usage limit. Two agents that do not
+/// start open none: the run waits on their holds (`holds`).
+pub fn wall_to_raise(
+    no_claude: bool,
+    from: Provider,
+    reason: SwitchReason,
+    other_headless: bool,
+    open_hold: Option<HoldReason>,
+    holds: &[ProviderHold],
+) -> Option<Wall> {
+    if no_claude {
+        return None;
+    }
+    if claude_wall(from, reason) {
+        return wall_of(reason);
+    }
+    let to = from.other();
+    let to_held = held(
+        to,
+        false,
+        open_hold.and_then(SwitchReason::of_hold),
+        own_hold(holds, to),
+    );
+    if other_headless && to_held.is_none() {
+        return None;
+    }
+    if let Some(hold) = open_hold {
+        return SwitchReason::of_hold(hold).and_then(wall_of);
+    }
+    wall_of(reason).or_else(|| to_held.and_then(wall_of))
 }
 
 /// The route of `worker` among `routes`.
@@ -578,6 +703,280 @@ mod tests {
         let hold = ProviderHold::new(Provider::Codex, SwitchReason::UsageLimit, now);
         assert_eq!(hold.until(Some(now + 5)).retry_at, now + 5);
         assert_eq!(hold.until(None).retry_at, now + 1800);
+    }
+
+    fn hold(provider: Provider, reason: SwitchReason) -> ProviderHold {
+        ProviderHold::new(provider, reason, 100)
+    }
+
+    /// Why `provider` is held with the hold ask of `ask` open and `holds`
+    /// recorded.
+    fn held_by(
+        provider: Provider,
+        no_claude: bool,
+        ask: Option<HoldReason>,
+        holds: &[ProviderHold],
+    ) -> Option<SwitchReason> {
+        held(
+            provider,
+            no_claude,
+            ask.and_then(SwitchReason::of_hold),
+            own_hold(holds, provider),
+        )
+    }
+
+    // Moved here by task 1713 from the tests/it cases it removed:
+    // runtime_codex::a_codex_review_starts_while_claudes_hold_ask_is_open and
+    // runtime_provider_switch::no_claude_without_codex_claims_nothing_and_reports_manual_policy.
+    #[test]
+    fn claudes_hold_ask_holds_only_claude_and_no_claude_disables_it() {
+        let codex_limit = [hold(Provider::Codex, SwitchReason::UsageLimit)];
+        // Claude's hold ask holds Claude, not Codex.
+        let ask = Some(HoldReason::Authentication);
+        assert_eq!(
+            held_by(Provider::Claude, false, ask, &[]),
+            Some(SwitchReason::Authentication)
+        );
+        assert_eq!(held_by(Provider::Codex, false, ask, &[]), None);
+        // A hold ask of the disk or the load is no provider's.
+        assert_eq!(
+            held_by(Provider::Claude, false, Some(HoldReason::DiskSpace), &[]),
+            None
+        );
+        // Each provider's own hold.
+        assert_eq!(
+            held_by(Provider::Codex, false, None, &codex_limit),
+            Some(SwitchReason::UsageLimit)
+        );
+        assert_eq!(held_by(Provider::Claude, false, None, &codex_limit), None);
+        let claude_launch = [hold(Provider::Claude, SwitchReason::LaunchFailed)];
+        assert_eq!(
+            held_by(Provider::Claude, false, None, &claude_launch),
+            Some(SwitchReason::LaunchFailed)
+        );
+        // The hold ask's reason before Claude's own.
+        assert_eq!(
+            held_by(
+                Provider::Claude,
+                false,
+                Some(HoldReason::UsageLimit),
+                &claude_launch
+            ),
+            Some(SwitchReason::UsageLimit)
+        );
+        // `--no-claude` disables Claude whatever holds it, and not Codex.
+        assert_eq!(
+            held_by(Provider::Claude, true, None, &[]),
+            Some(SwitchReason::Disabled)
+        );
+        assert_eq!(
+            held_by(Provider::Claude, true, ask, &claude_launch),
+            Some(SwitchReason::Disabled)
+        );
+        assert_eq!(held_by(Provider::Codex, true, None, &[]), None);
+        // Claude disabled and no Codex: no worker can be claimed.
+        let no_claude = |p: Provider| held_by(p, true, None, &[]);
+        assert!(routes(&[CLAUDE, CLAUDE_HEADLESS], no_claude).is_empty());
+        // Claude disabled with Codex: its tasks run on Codex, why said.
+        let routes_now = routes(&Worker::ALL, no_claude);
+        let claude = route_of(&routes_now, CLAUDE_HEADLESS).unwrap();
+        assert_eq!(claude.actual, CODEX);
+        assert_eq!(claude.switch, Some(SwitchReason::Disabled));
+    }
+
+    // Moved here by task 1713 from the tests/it cases it removed:
+    // runtime_provider_switch::a_codex_that_does_not_start_moves_its_run_to_claude
+    // and a_run_switches_twice_at_most_and_then_waits_in_the_hold_ask.
+    #[test]
+    fn only_claudes_login_or_limit_is_a_wall_of_its_hold_ask() {
+        assert!(claude_wall(Provider::Claude, SwitchReason::UsageLimit));
+        assert!(claude_wall(Provider::Claude, SwitchReason::Authentication));
+        // An agent of Claude's that did not start is held like Codex's.
+        assert!(!claude_wall(Provider::Claude, SwitchReason::LaunchFailed));
+        for reason in [
+            SwitchReason::UsageLimit,
+            SwitchReason::Authentication,
+            SwitchReason::LaunchFailed,
+        ] {
+            assert!(!claude_wall(Provider::Codex, reason), "{reason:?}");
+        }
+        assert_eq!(wall_of(SwitchReason::UsageLimit), Some(Wall::UsageLimit));
+        assert_eq!(
+            wall_of(SwitchReason::Authentication),
+            Some(Wall::Authentication)
+        );
+        for reason in [
+            SwitchReason::Disabled,
+            SwitchReason::LaunchFailed,
+            SwitchReason::ExecutableMissing,
+            SwitchReason::SubagentsUnsupported,
+        ] {
+            assert_eq!(wall_of(reason), None, "{reason:?}");
+        }
+    }
+
+    // Moved here by task 1713 from the tests/it cases it removed:
+    // runtime_provider_switch::a_codex_that_does_not_start_moves_its_run_to_claude,
+    // a_run_switches_twice_at_most_and_then_waits_in_the_hold_ask and
+    // a_run_out_of_switches_waits_on_codexs_hold_and_retries_at_its_reset. The
+    // kept runtime_provider_switch::a_codex_that_does_not_start_while_claude_is_held_waits_in_the_hold_ask
+    // checks the wiring of the wait.
+    #[test]
+    fn a_run_at_a_wall_moves_retries_or_waits_recorded_once() {
+        // Switches left and the other provider usable: it moves, whether
+        // or not this is the first look.
+        assert_eq!(wall_move(true, true, true, true, false), WallMove::Switch);
+        assert_eq!(wall_move(true, true, false, false, true), WallMove::Switch);
+        // The other provider held (Claude's hold ask open), or switches used
+        // up: the first look records the wait.
+        assert_eq!(
+            wall_move(true, false, true, true, false),
+            WallMove::Wait { record: true }
+        );
+        assert_eq!(
+            wall_move(false, true, true, true, false),
+            WallMove::Wait { record: true }
+        );
+        // A later look: its own provider still held, or a hold ask holds
+        // the run for a person's `done`: it waits, not recorded again.
+        assert_eq!(
+            wall_move(false, true, false, true, false),
+            WallMove::Wait { record: false }
+        );
+        assert_eq!(
+            wall_move(true, false, false, false, true),
+            WallMove::Wait { record: false }
+        );
+        // Its own hold ended (at the reset its text said, or by `done`)
+        // and no ask holds it: the call is made again there.
+        assert_eq!(wall_move(false, true, false, false, false), WallMove::Retry);
+        assert_eq!(wall_move(true, false, false, false, false), WallMove::Retry);
+        // Never on the first look, even with its own provider free (a
+        // Claude wall records no hold of its own).
+        assert_eq!(
+            wall_move(false, false, true, false, false),
+            WallMove::Wait { record: true }
+        );
+    }
+
+    // Moved here by task 1713 from the tests/it cases it removed:
+    // runtime_provider_switch::a_run_switches_twice_at_most_and_then_waits_in_the_hold_ask
+    // and a_run_out_of_switches_waits_on_codexs_hold_and_retries_at_its_reset.
+    // The kept runtime_provider_switch cases check the wiring:
+    // a_codex_turn_at_its_usage_limit_moves_to_claude_without_an_ask,
+    // a_codex_that_does_not_start_while_claude_is_held_waits_in_the_hold_ask and
+    // no_claude_waits_on_codex_limit_then_retries_codex_without_a_claude_hold.
+    #[test]
+    fn a_waiting_run_joins_the_hold_ask_only_when_a_person_must_act() {
+        use Provider::{Claude, Codex};
+        use SwitchReason::{Authentication, LaunchFailed, UsageLimit};
+        let none: &[ProviderHold] = &[];
+        // Claude's login or usage limit always raises its wall, even with
+        // Codex usable (switches used up).
+        assert_eq!(
+            wall_to_raise(false, Claude, UsageLimit, true, None, none),
+            Some(Wall::UsageLimit)
+        );
+        assert_eq!(
+            wall_to_raise(false, Claude, Authentication, true, None, none),
+            Some(Wall::Authentication)
+        );
+        // Codex at its limit while Claude can take the run: no ask.
+        assert_eq!(
+            wall_to_raise(false, Codex, UsageLimit, true, None, none),
+            None
+        );
+        // ... with Claude's hold ask open, the run joins it, of its wall.
+        assert_eq!(
+            wall_to_raise(
+                false,
+                Codex,
+                UsageLimit,
+                true,
+                Some(HoldReason::UsageLimit),
+                none
+            ),
+            Some(Wall::UsageLimit)
+        );
+        assert_eq!(
+            wall_to_raise(
+                false,
+                Codex,
+                LaunchFailed,
+                true,
+                Some(HoldReason::UsageLimit),
+                none
+            ),
+            Some(Wall::UsageLimit)
+        );
+        assert_eq!(
+            wall_to_raise(
+                false,
+                Codex,
+                UsageLimit,
+                true,
+                Some(HoldReason::Authentication),
+                none
+            ),
+            Some(Wall::Authentication)
+        );
+        // No headless Claude here: Codex's own limit is the wall.
+        assert_eq!(
+            wall_to_raise(false, Codex, UsageLimit, false, None, none),
+            Some(Wall::UsageLimit)
+        );
+        // Two agents that do not start open none: the run waits on their
+        // holds.
+        let claude_launch = [hold(Claude, LaunchFailed)];
+        assert_eq!(
+            wall_to_raise(false, Codex, LaunchFailed, true, None, &claude_launch),
+            None
+        );
+        assert_eq!(
+            wall_to_raise(
+                false,
+                Claude,
+                LaunchFailed,
+                true,
+                None,
+                &[hold(Codex, LaunchFailed)]
+            ),
+            None
+        );
+        // An agent that did not start while the other provider's hold is a
+        // wall: that wall.
+        assert_eq!(
+            wall_to_raise(
+                false,
+                Claude,
+                LaunchFailed,
+                true,
+                None,
+                &[hold(Codex, Authentication)]
+            ),
+            Some(Wall::Authentication)
+        );
+        // A Claude agent that did not start while Codex can take the run.
+        assert_eq!(
+            wall_to_raise(false, Claude, LaunchFailed, true, None, none),
+            None
+        );
+        // Under `--no-claude` no hold ask opens: Codex keeps its own hold.
+        assert_eq!(
+            wall_to_raise(true, Codex, UsageLimit, true, None, none),
+            None
+        );
+        assert_eq!(
+            wall_to_raise(
+                true,
+                Codex,
+                UsageLimit,
+                false,
+                Some(HoldReason::UsageLimit),
+                none
+            ),
+            None
+        );
     }
 
     #[test]

@@ -3,8 +3,12 @@
 //! starts on the other one; a headless turn at its provider's usage limit
 //! has its call made again on the other provider, in a new session of the
 //! same worktree; Codex's hold opens no ask, Claude's opens the queue's
-//! hold ask for the Claude-only jobs; with neither provider the run waits
-//! in the hold ask; a run switches twice at most.
+//! hold ask for the Claude-only jobs. The judgments (which provider is
+//! held, whether a run moves, retries or waits, which hold ask it joins,
+//! the two switches at most, the review's route) are unit tests of
+//! `domain::provider_switch` and `application::supervise::provider`; these
+//! cases are their wiring through the supervisor, the wrapper and the
+//! queue (ADR-t1410-1).
 use crate::common;
 use crate::runtime_support;
 
@@ -460,138 +464,6 @@ fn with_neither_provider_a_task_waits_until_one_can_take_it() {
     );
 }
 
-/// Acceptance (3), (5): a run moves at most twice. Claude's limit moves it
-/// to Codex (1); Codex's limit while Claude's ask is open cannot move it
-/// back, so it joins the ask and waits, not failed; after `done`, Codex's
-/// limit again moves it to Claude (2) in a new session; Claude's limit
-/// then cannot move it again, and it waits in the new ask; after `done` it
-/// goes on on Claude and lands.
-#[test]
-fn a_run_switches_twice_at_most_and_then_waits_in_the_hold_ask() {
-    let (dir, repo, db, backend, codex) = switch_fixture(Provider::Claude, true);
-    set_turns(
-        dir.path(),
-        &format!(
-            r#"case "$TURN" in
-1|4) {CLAUDE_LIMIT} ;;
-2|3) {CODEX_LIMIT} ;;
-*) {FINISH} ;;
-esac"#
-        ),
-    );
-    let base = git_out(&repo, &["rev-parse", "main"]);
-    let backend = Arc::new(backend);
-    let supervisor = supervise_thread(
-        &db,
-        &repo,
-        backend.clone(),
-        codex.as_deref(),
-        &[verdict("pass", &[], "fine")],
-    );
-    let run_id = || {
-        detail(&db, TASK)
-            .runs
-            .first()
-            .map(|run| run.id().to_string())
-            .unwrap_or_default()
-    };
-    // Codex at its limit while Claude is held: the run joins Claude's ask.
-    let first = wait_for_hold(&db, |ask| {
-        let run = run_id();
-        !run.is_empty() && ask.affected.contains(&run)
-    });
-    let run = &detail(&db, TASK).runs[0];
-    assert_eq!(run.status(), RunStatus::Running);
-    assert_eq!(run.actual_provider(), Provider::Codex);
-    SqliteQueue::open(&db)
-        .unwrap()
-        .answer(first.id, "done")
-        .unwrap();
-    // Back on Claude, whose limit cannot move it again: a new ask.
-    let second = wait_for_hold(&db, |ask| {
-        ask.id != first.id && ask.affected.contains(&run_id())
-    });
-    let now = detail(&db, TASK);
-    assert_eq!(
-        switches(&now),
-        [
-            (
-                json!("claude"),
-                json!("codex"),
-                json!("usage_limit"),
-                json!("start")
-            ),
-            (
-                json!("codex"),
-                json!("claude"),
-                json!("usage_limit"),
-                json!("resume")
-            ),
-        ]
-    );
-    assert_eq!(now.runs[0].status(), RunStatus::Running);
-    assert_eq!(now.runs[0].actual_provider(), Provider::Claude);
-    SqliteQueue::open(&db)
-        .unwrap()
-        .answer(second.id, "done")
-        .unwrap();
-    finished(&db, &backend, supervisor);
-    let detail = detail(&db, TASK);
-    let run = &detail.runs[0];
-    assert_landed_run(run, &repo, &base);
-    assert_eq!(switches(&detail).len(), 2);
-    let calls = stub_calls(run);
-    let second_claude = session_name(run.id().as_str(), 2);
-    assert!(
-        calls[3].starts_with(&format!("start {second_claude} You are executing")),
-        "{calls:?}"
-    );
-    assert!(calls[4].contains(&second_claude), "{calls:?}");
-    // Codex's hold ended with the person's `done`.
-    let released = queue_events(&db, "provider_released");
-    assert_eq!(released[0]["why"], "done", "{released:?}");
-}
-
-/// Acceptance (1): a Codex whose agent does not start (its executable is
-/// gone from under the wrapper) fails its first turn to start (`launch`):
-/// Codex is held (`launch_failed`) and the call goes to Claude, and the run
-/// lands.
-#[test]
-fn a_codex_that_does_not_start_moves_its_run_to_claude() {
-    let (dir, repo, db, mut backend, codex) = switch_fixture(Provider::Codex, true);
-    // The supervisor finds `codex`; the wrapper's is missing.
-    backend.codex = None;
-    set_turns(dir.path(), FINISH);
-    let base = git_out(&repo, &["rev-parse", "main"]);
-    let backend = Arc::new(backend);
-    let supervisor = supervise_thread(
-        &db,
-        &repo,
-        backend.clone(),
-        codex.as_deref(),
-        &[verdict("pass", &[], "fine")],
-    );
-    finished(&db, &backend, supervisor);
-    let detail = detail(&db, TASK);
-    let run = &detail.runs[0];
-    assert_landed_run(run, &repo, &base);
-    assert_eq!(run.actual_provider(), Provider::Claude);
-    let turns = payloads(&detail, "turn_finished");
-    assert_eq!(turns[0]["outcome"], "failed", "{turns:?}");
-    assert_eq!(turns[0]["failure"], "launch");
-    assert_eq!(
-        switches(&detail),
-        [(
-            json!("codex"),
-            json!("claude"),
-            json!("launch_failed"),
-            json!("start")
-        )]
-    );
-    let held = queue_events(&db, "provider_held");
-    assert_eq!(held[0]["reason"], "launch_failed", "{held:?}");
-}
-
 /// Acceptance (3): a Codex that does not start while Claude is held (its
 /// usage-limit ask open) cannot move its run: the run is not failed but
 /// waits (`provider_waiting`), in the hold ask with its session kept.
@@ -653,84 +525,14 @@ fn a_codex_that_does_not_start_while_claude_is_held_waits_in_the_hold_ask() {
     );
     let released = queue_events(&db, "provider_released");
     assert!(released.iter().any(|r| r["why"] == "done"), "{released:?}");
-}
-
-/// Acceptance (3), (5): a run whose switches are used up waits when Codex
-/// hits its usage limit while Claude could take it: not failed, and no ask
-/// (only Codex is held). Codex's hold ends at the reset its text says
-/// (`try again in 2 seconds`, ADR-t813-2 decision 6), and the call is made
-/// again on Codex in the same thread (`provider retry`); the run lands.
-#[test]
-fn a_run_out_of_switches_waits_on_codexs_hold_and_retries_at_its_reset() {
-    let (dir, repo, db, backend, codex) = switch_fixture(Provider::Codex, true);
-    let gate = dir.path().join("gate");
-    set_turns(
-        dir.path(),
-        &format!(
-            r#"case "$TURN" in
-1) error "unexpected status 429 Too Many Requests: You have hit your usage limit. Try again in 0 seconds."; sleep 30 ;;
-2) {CLAUDE_LIMIT} ;;
-3) await_file {gate}; error "unexpected status 429 Too Many Requests: You have hit your usage limit. Try again in 2 seconds."; sleep 30 ;;
-*) {FINISH} ;;
-esac"#,
-            gate = gate.display()
-        ),
-    );
-    let base = git_out(&repo, &["rev-parse", "main"]);
-    let backend = Arc::new(backend);
-    let supervisor = supervise_thread(
-        &db,
-        &repo,
-        backend.clone(),
-        codex.as_deref(),
-        &[verdict("pass", &[], "fine")],
-    );
-    // Codex (1) -> Claude, whose limit opens its ask -> Codex (2).
-    let ask = wait_for_hold(&db, |ask| ask.reason_category == AskReason::Cost);
-    wait_until(&db, common::STEP_LIMIT, |queue| {
-        switches_of(&queue.show(TASK).unwrap()) == 2
-    });
-    SqliteQueue::open(&db)
-        .unwrap()
-        .answer(ask.id, "done")
-        .unwrap();
-    wait_until(&db, common::STEP_LIMIT, |_| hold_asks(&db).is_empty());
-    fs::write(&gate, "").unwrap();
-    finished(&db, &backend, supervisor);
-    let detail = detail(&db, TASK);
-    let run = &detail.runs[0];
-    assert_landed_run(run, &repo, &base);
-    assert_eq!(run.actual_provider(), Provider::Codex);
-    assert_eq!(switches(&detail).len(), 2);
-    let waiting = payloads(&detail, "provider_waiting");
-    assert_eq!(waiting.len(), 1, "{waiting:?}");
-    assert_eq!(waiting[0]["turn"], 3);
-    assert_eq!(waiting[0]["provider"], "codex");
-    let requested: Vec<&Value> = payloads(&detail, "turn_requested")
-        .into_iter()
-        .map(|p| &p["what"])
-        .collect();
-    assert_eq!(
-        requested.last(),
-        Some(&&json!("provider retry")),
-        "{requested:?}"
-    );
-    // Its turn resumed the same thread.
-    let calls = stub_calls(run);
-    assert!(calls[3].starts_with("resume codex-thread-3 "), "{calls:?}");
-    // The hold ended at the reset its text said, and no ask opened for it.
+    // The wrapper's agent that did not start is the turn's `launch`, which
+    // holds Codex (`launch_failed`) without an ask of its own.
+    let turns = payloads(&detail, "turn_finished");
+    assert_eq!(turns[0]["outcome"], "failed", "{turns:?}");
+    assert_eq!(turns[0]["failure"], "launch");
     let held = queue_events(&db, "provider_held");
-    let last = held.last().unwrap();
-    assert_eq!(last["reset_read"], true, "{held:?}");
-    assert_eq!(
-        last["retry_at"].as_i64().unwrap() - last["since"].as_i64().unwrap(),
-        2
-    );
-    assert!(hold_asks(&db).is_empty());
-}
-
-fn switches_of(detail: &dagq::domain::TaskDetail) -> usize {
-    payloads(detail, "provider_switched").len()
+    assert_eq!(held[0]["provider"], "codex", "{held:?}");
+    assert_eq!(held[0]["reason"], "launch_failed", "{held:?}");
 }
 
 /// Explicit policy is tested with a missing Claude binary, not a fake login/limit.
@@ -761,6 +563,9 @@ fn no_claude_routes_a_worker_to_codex_and_releases_it_for_manual_landing() {
     .unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    // The supervisor's registration says it runs without Claude.
+    let started = queue_events(&db, "supervisor_started");
+    assert_eq!(started[0]["no_claude"], true, "{started:?}");
     let detail = detail(&db, TASK);
     let run = &detail.runs[0];
     assert_eq!(run.status(), RunStatus::AwaitingIntegration);
@@ -784,6 +589,15 @@ fn no_claude_routes_a_worker_to_codex_and_releases_it_for_manual_landing() {
         .collect();
     assert_eq!(asks.len(), 1);
     assert!(asks[0].question.contains("provider_disabled"));
+    // No review agent ran: the person is asked with no recommendation.
+    assert!(
+        asks[0].question.contains("No review agent ran"),
+        "{}",
+        asks[0].question
+    );
+    assert_eq!(asks[0].recommendation, None);
+    assert_eq!(asks[0].confidence, None);
+    assert!(payloads(&detail, "concern_decided").is_empty());
     // Sending the manually reviewed Codex work back resumes Codex, then releases
     // the lease for another manual review, without starting a Claude review job.
     queue.answer(asks[0].id, "send_back").unwrap();
@@ -810,34 +624,6 @@ fn no_claude_routes_a_worker_to_codex_and_releases_it_for_manual_landing() {
     let landed = integrate(&db, 2, &repo).unwrap();
     assert_eq!(landed["outcome"], "integrated", "{landed}");
     assert_landed_run(&queue.show(TASK).unwrap().runs[0], &repo, &base);
-}
-
-#[test]
-fn no_claude_without_codex_claims_nothing_and_reports_manual_policy() {
-    let (dir, repo, db, backend, _) = switch_fixture(Provider::Codex, false);
-    let reviewer = TestReviewer::new(&[]);
-    let options = SuperviseOptions {
-        no_claude: true,
-        codex: dir.path().join("missing-codex"),
-        ..supervise_options(1, true)
-    };
-    runtime::supervise_with_reviewer(
-        &db,
-        &repo,
-        &backend,
-        &dir.path().join("missing-claude"),
-        &reviewer,
-        Path::new(env!("CARGO_BIN_EXE_dagq")),
-        &options,
-    )
-    .unwrap();
-    assert!(detail(&db, TASK).runs.is_empty());
-    assert!(reviewer.prompts().is_empty());
-    assert!(reviewer.triage_prompts().is_empty());
-    assert!(hold_asks(&db).is_empty());
-    // The registration remains as stopped history after --once.
-    let started = queue_events(&db, "supervisor_started");
-    assert_eq!(started[0]["no_claude"], true);
 }
 
 #[test]
@@ -909,7 +695,28 @@ esac"#
     assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
     assert_eq!(detail.runs[0].actual_provider(), Provider::Codex);
     assert!(switches(&detail).is_empty());
-    assert!(!payloads(&detail, "provider_waiting").is_empty());
+    let waiting = payloads(&detail, "provider_waiting");
+    assert_eq!(waiting.len(), 1, "{waiting:?}");
+    assert_eq!(waiting[0]["turn"], 1);
+    assert_eq!(waiting[0]["provider"], "codex");
+    // Codex's hold ended at the reset its text said, and the call was made
+    // again on Codex in the same thread (`provider retry`).
+    let held = queue_events(&db, "provider_held");
+    let last = held.last().unwrap();
+    assert_eq!(last["reset_read"], true, "{held:?}");
+    assert_eq!(
+        last["retry_at"].as_i64().unwrap() - last["since"].as_i64().unwrap(),
+        2
+    );
+    let released = queue_events(&db, "provider_released");
+    assert_eq!(released[0]["why"], "retry_due", "{released:?}");
+    let requested: Vec<&Value> = payloads(&detail, "turn_requested")
+        .into_iter()
+        .map(|p| &p["what"])
+        .collect();
+    assert_eq!(requested, [&json!("provider retry")]);
+    let calls = stub_calls(&detail.runs[0]);
+    assert!(calls[1].starts_with("resume codex-thread-1 "), "{calls:?}");
     assert!(
         queue_events(&db, "ask_opened")
             .iter()

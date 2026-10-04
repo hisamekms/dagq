@@ -13,49 +13,34 @@
 //! session is headless since task 1437 (ADR-t1433-2).
 
 use super::file_time::recorded_at;
+use super::landing::{REVIEW_PROVIDER_DISABLED, ReviewRoute};
 use super::*;
 use crate::domain::{
+    actor_model::{ActorLaunch, JobRoute, job_route},
+    claim_hold::QueueHold,
     provider_switch::{
-        self, MAX_PROVIDER_SWITCHES, ProviderHold, SwitchPhase, SwitchReason, WorkerRoute,
-        switched_payload,
+        self, MAX_PROVIDER_SWITCHES, ProviderHold, SwitchPhase, SwitchReason, WallMove,
+        WorkerRoute, switched_payload,
     },
     turn::{TurnFailure, TurnRequest, taken_path},
     worker::WorkerMode,
 };
 
-/// Why `provider` is held now, given `--no-claude`, why the queue's open
-/// hold ask holds Claude (`queue_hold`) and the provider's own
-/// [`ProviderHold`] (`own`): Claude is disabled under `--no-claude`, else
-/// held by the hold ask before its own hold; Codex only by its own.
-pub(super) fn provider_held_of(
-    provider: Provider,
-    no_claude: bool,
-    queue_hold: Option<SwitchReason>,
-    own: Option<SwitchReason>,
-) -> Option<SwitchReason> {
-    match provider {
-        Provider::Claude if no_claude => Some(SwitchReason::Disabled),
-        Provider::Claude => queue_hold.or(own),
-        Provider::Codex => own,
-    }
-}
+/// Why `provider` is held now ([`provider_switch::held`]), under the name
+/// the goal review's route uses.
+pub(super) use crate::domain::provider_switch::held as provider_held_of;
 
 impl Supervisor<'_> {
     /// Why `provider` is held for the workers now, if it is: Claude by the
     /// queue's open hold ask or its [`ProviderHold`] (an agent that did not
     /// start), Codex by its [`ProviderHold`].
     pub(super) fn provider_held(&self, provider: Provider) -> Option<SwitchReason> {
-        let own = self
-            .provider_holds
-            .iter()
-            .find(|hold| hold.provider == provider)
-            .map(|hold| hold.reason);
         provider_held_of(
             provider,
             self.no_claude,
             self.queue_hold
                 .and_then(|hold| SwitchReason::of_hold(hold.reason)),
-            own,
+            provider_switch::own_hold(&self.provider_holds, provider),
         )
     }
 
@@ -207,7 +192,7 @@ impl Supervisor<'_> {
         };
         let from = run.actual_provider();
         let message = finished["message"].as_str().unwrap_or("no message");
-        let claude_wall = from == Provider::Claude && reason != SwitchReason::LaunchFailed;
+        let claude_wall = provider_switch::claude_wall(from, reason);
         let first_look = !provider_switch::waiting_on(&events, turn);
         if first_look && !claude_wall {
             self.hold_provider(from, reason, Some(run.id()), message)?;
@@ -221,7 +206,21 @@ impl Supervisor<'_> {
         let request = started["request"].as_u64();
         // The call the failed turn made, to make again.
         let undelivered = request.and_then(|seq| self.taken_request(run, seq));
-        if provider_switch::may_switch(&events) && self.headless_usable(to) {
+        let may_switch = provider_switch::may_switch(&events);
+        let other_usable = may_switch && self.headless_usable(to);
+        let own_held = self.provider_held(from).is_some();
+        // The hold ask is read only when the run does not move and its own
+        // provider is free again.
+        let hold_unclosed =
+            !other_usable && !first_look && !own_held && self.queue.hold_unclosed(run.id())?;
+        let next = provider_switch::wall_move(
+            may_switch,
+            other_usable,
+            first_look,
+            own_held,
+            hold_unclosed,
+        );
+        if next == WallMove::Switch {
             let phase = SwitchPhase::of_request(request, started["what"].as_str().unwrap_or(""));
             let text = switch_text(run, from, to, reason, message, undelivered.as_ref());
             self.switch(
@@ -242,16 +241,13 @@ impl Supervisor<'_> {
         // Its own provider can be used again (its hold ended), and no hold
         // ask holds the run for a person's `done`: the call is made again
         // there, in the same session.
-        if !first_look
-            && self.provider_held(from).is_none()
-            && !self.queue.hold_unclosed(run.id())?
-        {
+        if next == WallMove::Retry {
             let text = retry_text(from, reason, undelivered.as_ref());
             request_turn(self, run, workspace, Input::Text(&text), PROVIDER_RETRY)?;
             info!(run_id = %run.id(), "run {}: {} can be used again; the call of turn {turn} is made again", run.id(), from.as_str());
             return Ok(WallStep::Switched(self.files.now()));
         }
-        if first_look {
+        if next == (WallMove::Wait { record: true }) {
             let blocked = switch_blocked(&events, self.provider_held(to));
             self.queue.record_runtime_event(
                 run.id(),
@@ -292,7 +288,8 @@ impl Supervisor<'_> {
     /// provider cannot be used either, with the wall of the hold ask open
     /// already, or of whichever provider's hold is a login or a usage
     /// limit. Two agents that do not start open none: the run waits on
-    /// their holds.
+    /// their holds. Under `--no-claude` none opens. `to` is
+    /// `from.other()` ([`provider_switch::wall_to_raise`]).
     /// The hold ask is read afresh: one a person answered since the top of
     /// this pass no longer holds Claude.
     fn wall_to_raise(
@@ -301,49 +298,28 @@ impl Supervisor<'_> {
         reason: SwitchReason,
         to: Provider,
     ) -> Result<Option<Wall>> {
-        if self.no_claude {
-            // Codex retains its own real hold; do not describe it as a Claude queue hold.
-            return Ok(None);
-        }
-        let wall_of = |reason: SwitchReason| match reason {
-            SwitchReason::UsageLimit => Some(Wall::UsageLimit),
-            SwitchReason::Authentication => Some(Wall::Authentication),
-            SwitchReason::Disabled
-            | SwitchReason::LaunchFailed
-            | SwitchReason::ExecutableMissing
-            | SwitchReason::SubagentsUnsupported => None,
-        };
-        if from == Provider::Claude && reason != SwitchReason::LaunchFailed {
-            return Ok(wall_of(reason));
-        }
-        let open_hold = self
-            .queue
-            .asks(AskQuery::default())?
-            .iter()
-            .find_map(crate::domain::queue_hold::hold_of);
-        let own_hold = |provider: Provider| {
-            self.provider_holds
+        // The asks are read only when the hold ask decides it: not under
+        // `--no-claude`, nor for Claude's own wall.
+        let open_hold = if self.no_claude || provider_switch::claude_wall(from, reason) {
+            None
+        } else {
+            self.queue
+                .asks(AskQuery::default())?
                 .iter()
-                .find(|hold| hold.provider == provider)
+                .find_map(crate::domain::queue_hold::hold_of)
                 .map(|hold| hold.reason)
         };
-        let to_held = match to {
-            Provider::Claude => open_hold
-                .and_then(|hold| SwitchReason::of_hold(hold.reason))
-                .or(own_hold(to)),
-            Provider::Codex => own_hold(to),
-        };
-        let other_usable = self.workers.contains(&Worker {
-            provider: to,
-            mode: WorkerMode::Headless,
-        }) && to_held.is_none();
-        if other_usable {
-            return Ok(None);
-        }
-        if let Some(hold) = open_hold {
-            return Ok(SwitchReason::of_hold(hold.reason).and_then(wall_of));
-        }
-        Ok(wall_of(reason).or_else(|| to_held.and_then(wall_of)))
+        Ok(provider_switch::wall_to_raise(
+            self.no_claude,
+            from,
+            reason,
+            self.workers.contains(&Worker {
+                provider: to,
+                mode: WorkerMode::Headless,
+            }),
+            open_hold,
+            &self.provider_holds,
+        ))
     }
 
     /// Move `run`'s worker to headless `to` for `reason` (in `phase`, in
@@ -405,14 +381,9 @@ impl Supervisor<'_> {
     /// jobs, with no run in it: `run` moved on to Codex (ADR-t813-2
     /// decision 6). The wall is recorded on the run.
     fn open_claude_hold(&mut self, run: &TaskRun, reason: SwitchReason, text: &str) -> Result<()> {
-        let wall = match reason {
-            SwitchReason::UsageLimit => Wall::UsageLimit,
-            SwitchReason::Authentication => Wall::Authentication,
-            // An agent that did not start is no wall a person moves.
-            SwitchReason::Disabled
-            | SwitchReason::LaunchFailed
-            | SwitchReason::ExecutableMissing
-            | SwitchReason::SubagentsUnsupported => return Ok(()),
+        // An agent that did not start is no wall a person moves.
+        let Some(wall) = provider_switch::wall_of(reason) else {
+            return Ok(());
         };
         let (outcome, _) = ask::hold(
             &mut *self.queue,
@@ -441,6 +412,64 @@ pub(super) enum WallStep {
     Switched(SystemTime),
     /// The run waits for a provider (in the hold ask, or on a hold).
     Held,
+}
+
+/// Where the next review of a run goes (ADR-t1207-1), given
+/// `--no-claude` (`no_claude`), whether `[roles.review]` names its
+/// provider (`switchable`), the role's `launch`, the queue's open hold ask
+/// (`queue_hold`) and why a job cannot start on each provider now
+/// (`unusable`). A role that names no provider reviews on Claude as
+/// before: under `--no-claude` the person reviews it, and it waits while
+/// the hold ask holds Claude (task 437). One that names its provider goes
+/// like the goal review (ADR-t1063-1 decisions 4 and 5): to its provider
+/// when it can be used, else to the other provider when that one can,
+/// else it waits, or, under `--no-claude`, goes to the person.
+pub(super) fn review_route(
+    no_claude: bool,
+    switchable: bool,
+    launch: ActorLaunch,
+    queue_hold: Option<QueueHold>,
+    unusable: impl Fn(Provider) -> Option<SwitchReason>,
+) -> ReviewRoute {
+    if !switchable {
+        if no_claude {
+            return ReviewRoute::Manual(REVIEW_PROVIDER_DISABLED.to_owned());
+        }
+        return match queue_hold {
+            Some(hold) => ReviewRoute::Wait(format!(
+                "ask {} ({}) holds the headless jobs",
+                hold.ask_id,
+                hold.reason.as_str()
+            )),
+            None => ReviewRoute::Start(launch, false),
+        };
+    }
+    match job_route(&launch, true, &unusable) {
+        JobRoute::Start(launch) => ReviewRoute::Start(launch, true),
+        JobRoute::Wait { .. } if no_claude => {
+            let codex = unusable(Provider::Codex).map_or("unknown", |reason| reason.as_str());
+            ReviewRoute::Manual(format!(
+                "{REVIEW_PROVIDER_DISABLED} and codex cannot be used ({codex})"
+            ))
+        }
+        JobRoute::Wait { provider, reason } => ReviewRoute::Wait(format!(
+            "{} cannot be used ({}), nor can the other provider",
+            provider.as_str(),
+            reason.as_str()
+        )),
+    }
+}
+
+/// Whether a review whose attempt on `provider` could not run moves on
+/// `route`: to the other provider, or to wait for one; not when the route
+/// still sends it to `provider` (its hold was not written) or to the
+/// person, so that it fails to the person instead.
+pub(super) fn review_moves(route: &ReviewRoute, provider: Provider) -> bool {
+    match route {
+        ReviewRoute::Start(next, _) => next.provider != provider,
+        ReviewRoute::Wait(_) => true,
+        ReviewRoute::Manual(_) => false,
+    }
 }
 
 /// What a request that moves a run to the other provider is called
@@ -609,4 +638,231 @@ pub(super) fn raise_wall(
         warn!(ask_id = %outcome.ask.id, run_id = %run.id(), "run {} stopped at the {} wall in workspace {workspace}; ask {} holds {} run(s) and job(s) (notified: {})", run.id(), wall.as_str(), outcome.ask.id, outcome.ask.affected.len(), value["notified"]);
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{EventId, actor_model::ModelRole, claim_hold::HoldReason};
+
+    /// The review's launch when `[roles.review]` names `provider`.
+    fn launch(provider: Provider) -> ActorLaunch {
+        ActorLaunch {
+            provider,
+            ..ActorLaunch::default_of(ModelRole::Review)
+        }
+    }
+
+    fn unusable(
+        claude: Option<SwitchReason>,
+        codex: Option<SwitchReason>,
+    ) -> impl Fn(Provider) -> Option<SwitchReason> {
+        move |provider| match provider {
+            Provider::Claude => claude,
+            Provider::Codex => codex,
+        }
+    }
+
+    const HOLD: QueueHold = QueueHold {
+        reason: HoldReason::Authentication,
+        ask_id: 7,
+        affected: 0,
+    };
+
+    // Moved here by task 1713 from the tests/it case it removed:
+    // runtime_codex::no_claude_review_with_no_provider_asks_without_a_recommendation.
+    #[test]
+    fn a_review_whose_role_names_no_provider_goes_to_claude_a_person_or_waits() {
+        let route = review_route(
+            false,
+            false,
+            launch(Provider::Claude),
+            None,
+            unusable(None, None),
+        );
+        assert!(
+            matches!(&route, ReviewRoute::Start(l, false) if l.provider == Provider::Claude),
+            "{}",
+            describe(&route)
+        );
+        // Under `--no-claude` the person reviews it: no review agent ran.
+        let route = review_route(
+            true,
+            false,
+            launch(Provider::Claude),
+            None,
+            unusable(None, None),
+        );
+        assert!(
+            matches!(&route, ReviewRoute::Manual(why) if why == REVIEW_PROVIDER_DISABLED),
+            "{}",
+            describe(&route)
+        );
+        // Claude's hold ask holds it (task 437).
+        let route = review_route(
+            false,
+            false,
+            launch(Provider::Claude),
+            Some(HOLD),
+            unusable(Some(SwitchReason::Authentication), None),
+        );
+        assert!(
+            matches!(&route, ReviewRoute::Wait(why) if why == "ask 7 (authentication) holds the headless jobs"),
+            "{}",
+            describe(&route)
+        );
+    }
+
+    // Moved here by task 1713 from the tests/it cases it removed:
+    // runtime_codex::a_codex_review_starts_while_claudes_hold_ask_is_open,
+    // a_codex_review_without_codex_moves_to_claude_and_lands and
+    // no_claude_codex_review_at_its_usage_limit_holds_codex_and_asks_a_person.
+    // The kept runtime_codex cases check the wiring:
+    // a_codex_review_at_its_usage_limit_holds_codex_and_moves_to_claude and
+    // no_claude_unreadable_codex_review_at_its_limit_fails_with_its_output.
+    #[test]
+    fn a_review_on_codex_moves_to_claude_waits_or_goes_to_a_person() {
+        // Claude's hold ask does not hold a review on Codex.
+        let claude_held = Some(SwitchReason::Authentication);
+        let route = review_route(
+            false,
+            true,
+            launch(Provider::Codex),
+            Some(HOLD),
+            unusable(claude_held, None),
+        );
+        assert!(
+            matches!(&route, ReviewRoute::Start(l, true) if l.provider == Provider::Codex && l.switched_from.is_none()),
+            "{}",
+            describe(&route)
+        );
+        // No Codex here, or Codex held: on Claude, saying from which and why.
+        for reason in [SwitchReason::ExecutableMissing, SwitchReason::UsageLimit] {
+            let route = review_route(
+                false,
+                true,
+                launch(Provider::Codex),
+                None,
+                unusable(None, Some(reason)),
+            );
+            let ReviewRoute::Start(moved, true) = &route else {
+                panic!("{}", describe(&route));
+            };
+            assert_eq!(moved.provider, Provider::Claude);
+            assert_eq!(moved.switched_from, Some(Provider::Codex));
+            assert_eq!(moved.switch_reason, Some(reason));
+            assert!(review_moves(&route, Provider::Codex));
+        }
+        // Neither provider: it waits with the session open.
+        let route = review_route(
+            false,
+            true,
+            launch(Provider::Codex),
+            Some(HOLD),
+            unusable(claude_held, Some(SwitchReason::UsageLimit)),
+        );
+        assert!(
+            matches!(&route, ReviewRoute::Wait(why) if why == "codex cannot be used (usage_limit), nor can the other provider"),
+            "{}",
+            describe(&route)
+        );
+        assert!(review_moves(&route, Provider::Codex));
+        // Under `--no-claude` with Codex held: the person reviews it, and
+        // the review that could not run does not move.
+        let route = review_route(
+            true,
+            true,
+            launch(Provider::Codex),
+            None,
+            unusable(Some(SwitchReason::Disabled), Some(SwitchReason::UsageLimit)),
+        );
+        assert!(
+            matches!(&route, ReviewRoute::Manual(why) if why == "provider_disabled: Claude is disabled by --no-claude and codex cannot be used (usage_limit)"),
+            "{}",
+            describe(&route)
+        );
+        assert!(!review_moves(&route, Provider::Codex));
+        // A route that still sends it to the provider that failed (its hold
+        // was not written) does not move it either.
+        let same = review_route(
+            false,
+            true,
+            launch(Provider::Codex),
+            None,
+            unusable(None, None),
+        );
+        assert!(!review_moves(&same, Provider::Codex));
+        assert!(review_moves(&same, Provider::Claude));
+    }
+
+    fn describe(route: &ReviewRoute) -> String {
+        match route {
+            ReviewRoute::Start(launch, switchable) => {
+                format!("start {} {switchable}", launch.to_value())
+            }
+            ReviewRoute::Wait(why) => format!("wait {why}"),
+            ReviewRoute::Manual(why) => format!("manual {why}"),
+        }
+    }
+
+    fn switched() -> RunEvent {
+        RunEvent {
+            id: EventId::new(1),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: event_kind::PROVIDER_SWITCHED.to_owned(),
+            payload: json!({}),
+            created_at: String::new(),
+            actor: None,
+        }
+    }
+
+    // Moved here by task 1713 from the tests/it case it removed:
+    // runtime_provider_switch::a_run_out_of_switches_waits_on_codexs_hold_and_retries_at_its_reset.
+    // The kept runtime_provider_switch::a_codex_that_does_not_start_while_claude_is_held_waits_in_the_hold_ask
+    // checks the wiring.
+    #[test]
+    fn a_waiting_run_says_why_it_did_not_move() {
+        assert_eq!(
+            switch_blocked(&[switched(), switched()], None),
+            "its 2 switches are used up"
+        );
+        assert_eq!(
+            switch_blocked(&[switched()], Some(SwitchReason::UsageLimit)),
+            "the other provider is held (usage_limit)"
+        );
+        assert_eq!(
+            switch_blocked(&[], Some(SwitchReason::Disabled)),
+            "the other provider is held (provider_disabled)"
+        );
+        assert_eq!(
+            switch_blocked(&[], None),
+            "this supervisor has no headless worker of the other provider"
+        );
+    }
+
+    // Moved here by task 1713 from the tests/it case it removed:
+    // runtime_provider_switch::a_run_out_of_switches_waits_on_codexs_hold_and_retries_at_its_reset.
+    // The kept runtime_provider_switch::no_claude_waits_on_codex_limit_then_retries_codex_without_a_claude_hold
+    // checks the wiring.
+    #[test]
+    fn a_retry_makes_the_call_again_or_asks_to_go_on() {
+        let head = "dagq: codex can be used again after the usage_limit that stopped your previous turn. Go on with the task in this turn.";
+        assert_eq!(
+            retry_text(Provider::Codex, SwitchReason::UsageLimit, None),
+            head
+        );
+        let request = TurnRequest {
+            seq: 2,
+            what: "revise request".to_owned(),
+            prompt: "fix it".to_owned(),
+        };
+        assert_eq!(
+            retry_text(Provider::Codex, SwitchReason::UsageLimit, Some(&request)),
+            format!(
+                "{head} Your previous turn was asked this (revise request) and did not get to it:\n\nfix it"
+            )
+        );
+    }
 }

@@ -13,7 +13,7 @@ use crate::domain::AskConfidence;
 use crate::domain::EventKind;
 use crate::domain::LandingAnswer;
 use crate::domain::RecoveredLanding;
-use crate::domain::actor_model::{ActorLaunch, JobRoute, ModelRole, job_route};
+use crate::domain::actor_model::{ActorLaunch, ModelRole};
 use crate::domain::concern::{
     self, ConcernDecision, ConcernReason, EscalatedBecause, LandingRecommendation,
 };
@@ -194,36 +194,13 @@ impl Supervisor<'_> {
     pub(super) fn review_route(&self) -> ReviewRoute {
         let role = ModelRole::Review;
         let models = self.role_models(role);
-        let launch = models.launch(role);
-        if !models.switchable(role) {
-            if self.no_claude {
-                return ReviewRoute::Manual(REVIEW_PROVIDER_DISABLED.to_owned());
-            }
-            return match self.queue_hold {
-                Some(hold) => ReviewRoute::Wait(format!(
-                    "ask {} ({}) holds the headless jobs",
-                    hold.ask_id,
-                    hold.reason.as_str()
-                )),
-                None => ReviewRoute::Start(launch, false),
-            };
-        }
-        match job_route(&launch, true, |provider| self.job_unusable(provider)) {
-            JobRoute::Start(launch) => ReviewRoute::Start(launch, true),
-            JobRoute::Wait { .. } if self.no_claude => {
-                let codex = self
-                    .job_unusable(crate::domain::Provider::Codex)
-                    .map_or("unknown", |reason| reason.as_str());
-                ReviewRoute::Manual(format!(
-                    "{REVIEW_PROVIDER_DISABLED} and codex cannot be used ({codex})"
-                ))
-            }
-            JobRoute::Wait { provider, reason } => ReviewRoute::Wait(format!(
-                "{} cannot be used ({}), nor can the other provider",
-                provider.as_str(),
-                reason.as_str()
-            )),
-        }
+        provider::review_route(
+            self.no_claude,
+            models.switchable(role),
+            models.launch(role),
+            self.queue_hold,
+            |provider| self.job_unusable(provider),
+        )
     }
     /// Whether the review waits with the session open (`review_route`).
     fn review_held(&self, run: &TaskRun) -> bool {
@@ -252,12 +229,7 @@ impl Supervisor<'_> {
         retried: bool,
     ) -> Result<std::result::Result<Phase, Option<SessionRef>>> {
         let route = self.review_route();
-        let moves = match &route {
-            ReviewRoute::Start(next, _) => next.provider != provider,
-            ReviewRoute::Wait(_) => true,
-            ReviewRoute::Manual(_) => false,
-        };
-        if !moves {
+        if !provider::review_moves(&route, provider) {
             return Ok(Err(session));
         }
         let mut retried_event = json!({
