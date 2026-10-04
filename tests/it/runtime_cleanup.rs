@@ -2229,6 +2229,156 @@ fn a_drain_on_a_provisioning_failure_runs_the_rest_of_a_cleanup_for_room_before_
     }
 }
 
+/// Task 1636: a drain on a provisioning failure (claiming stops, neither a
+/// stop nor a handoff) does not end the cleanup. The ordinary job running
+/// when the drain starts is not stopped and goes to its last candidate;
+/// a cleanup asked for during the drain (a run that failed) is taken,
+/// waits for that job and then runs, while the drain still waits for a
+/// run. A drain that ended the cleanup, as a stop or a handoff does, would
+/// stop the job after its current worktree and refuse the request.
+#[test]
+fn a_drain_on_a_provisioning_failure_takes_cleanup_requests_and_lets_the_job_finish() {
+    let (_dir, repo, db) = fixture();
+    // Two ended runs whose tasks go on (the fixture's task and one more):
+    // the ordinary sweep's two candidates.
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    add_ready_task(&mut queue, "ended", &[]);
+    let building = TestWorkspace::new(&db, false, BUILDING_AGENT);
+    supervise(&db, &repo, &building).unwrap();
+    building.join();
+    let ended: Vec<TaskRun> = [1, 2]
+        .map(|task| queue.show(TaskId::new(task)).unwrap().runs[0].clone())
+        .into();
+    for run in &ended {
+        assert_eq!(run.status(), RunStatus::Failed);
+        let target = Path::new(run.worktree_path().unwrap()).join("target");
+        fs::create_dir_all(target.join("debug")).unwrap();
+        fs::write(target.join("debug/again"), vec![0u8; 4096]).unwrap();
+    }
+    // Two runs that work until the test lets them finish: the first then
+    // fails with build outputs, the second lands.
+    let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
+    backend.script_for(3, &format!("await_file \"$EXIT.go\"; {BUILDING_AGENT}"));
+    backend.script_for(4, PROMPTED_AGENT);
+    add_ready_task(&mut queue, "failing", &[]);
+    add_ready_task(&mut queue, "landing", &[]);
+    let files = GatedFiles::default();
+    let options = files.options(SuperviseOptions {
+        // The first pass's sweep only: a drain sweeps no more anyway.
+        sweep_interval: Duration::from_secs(3600),
+        ..supervise_options(3, false)
+    });
+    let options_passes = options.passes.clone();
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || {
+            let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets acceptance")]);
+            runtime::supervise_with_reviewer(
+                &db,
+                &repo,
+                &*backend,
+                &claude_stub(&db),
+                &reviewer,
+                Path::new(env!("CARGO_BIN_EXE_dagq")),
+                &options,
+            )
+        })
+    };
+    // The sweep's ordinary job is held on its first candidate.
+    let held = files.held();
+    let target_of = |run: &TaskRun| Path::new(run.worktree_path().unwrap()).join("target");
+    assert!(ended.iter().any(|run| target_of(run) == held), "{held:?}");
+    let claimed = |queue: &mut SqliteQueue, task: i64| {
+        queue.show(TaskId::new(task)).unwrap().runs.first().cloned()
+    };
+    wait_until(&db, common::STEP_LIMIT, |q| {
+        claimed(q, 3).is_some() && claimed(q, 4).is_some()
+    });
+    // The next claim fails to provision: claiming stops and the supervisor
+    // drains while the job is held.
+    backend.fail_tasks.lock().unwrap().push(TaskId::new(5));
+    add_ready_task(&mut queue, "unprovisioned", &[]);
+    wait_until(&db, common::STEP_LIMIT, |q| {
+        claimed(q, 5).is_some_and(|run| run.last_error().is_some())
+    });
+    // The first run fails in the drain (which triages none): a cleanup of
+    // its task is asked for as it ends, while the job is held, and waits
+    // for it.
+    let first = claimed(&mut queue, 3).unwrap();
+    fs::write(
+        Path::new(first.run_dir().unwrap()).join("exit-requested.go"),
+        "",
+    )
+    .unwrap();
+    wait_until(&db, common::STEP_LIMIT, |q| {
+        q.run(first.id()).unwrap().status() == RunStatus::Failed
+            && q.run_lease(first.id()).unwrap().is_none()
+    });
+    let passes = options_passes.load(Ordering::SeqCst);
+    wait_until(&db, common::STEP_LIMIT, |_| {
+        options_passes.load(Ordering::SeqCst) >= passes + 3
+    });
+    let first_target_dir = Path::new(first.worktree_path().unwrap()).join("target");
+    assert!(first_target_dir.join("debug/big").is_file());
+    assert!(payloads_of(&queue, &first, "build_outputs_removed").is_empty());
+
+    files.open();
+    // The job goes to its last candidate, and the request taken in the
+    // drain then runs, while the drain still waits for the second run.
+    wait_until(&db, common::STEP_LIMIT, |q| {
+        ended
+            .iter()
+            .all(|run| payloads_of(q, run, "build_outputs_removed").len() == 2)
+            && !payloads_of(q, &first, "build_outputs_removed").is_empty()
+    });
+    assert!(!supervisor.is_finished());
+    for run in &ended {
+        assert!(!target_of(run).exists(), "{}", run.id());
+    }
+    // The request's job came after the ordinary one.
+    let order = |run: &TaskRun| {
+        queue
+            .run_events(run.id())
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "build_outputs_removed")
+            .map(|e| e.id)
+            .max()
+            .unwrap()
+    };
+    assert!(ended.iter().all(|run| order(run) < order(&first)));
+    let removed = payloads_of(&queue, &first, "build_outputs_removed");
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    assert_eq!(removed[0]["reason"], "run_ended", "{removed:?}");
+    assert!(!first_target_dir.exists());
+
+    let second = claimed(&mut queue, 4).unwrap();
+    fs::write(
+        Path::new(second.run_dir().unwrap()).join("exit-requested.go"),
+        "",
+    )
+    .unwrap();
+    let error = format!(
+        "{:#}",
+        joined(supervisor, "the drain on the provisioning failure").unwrap_err()
+    );
+    backend.join();
+    assert!(error.contains("injected workspace"), "{error}");
+    assert!(error.contains("claiming stopped"), "{error}");
+    assert_eq!(
+        queue.run(second.id()).unwrap().status(),
+        RunStatus::Integrated
+    );
+    let failed: Vec<Value> = queue
+        .all_events()
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == "cleanup_failed")
+        .map(|event| event.payload)
+        .collect();
+    assert!(failed.is_empty(), "{failed:?}");
+}
+
 fn half_a_gibibyte(_: &Path) -> Option<u64> {
     Some(GIB / 2)
 }
