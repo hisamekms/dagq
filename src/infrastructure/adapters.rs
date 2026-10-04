@@ -3412,14 +3412,15 @@ pub fn inbox_settings(deny: &[String]) -> Result<String> {
 pub const HEADLESS_SETTINGS: &str = "claude-headless-settings.json";
 
 /// Settings of a headless worker's turns (ADR-t813-1): no hook, the
-/// worker's `permissions.deny` ([`SIGNAL_BY_NAME_DENIED`], then `deny`, as
-/// in [`stop_hook_settings`]) and the same `autoMode` environment as an
-/// interactive run session.
+/// worker's `permissions.deny` ([`SIGNAL_BY_NAME_DENIED`], then
+/// [`HEADLESS_DENIED_TOOLS`], then `deny`, as in [`stop_hook_settings`])
+/// and the same `autoMode` environment as an interactive run session.
 pub fn headless_worker_settings(deny: &[String]) -> Result<String> {
     Ok(serde_json::to_string_pretty(&serde_json::json!({
         "permissions": {
             "deny": SIGNAL_BY_NAME_DENIED
                 .iter()
+                .chain(HEADLESS_DENIED_TOOLS.iter())
                 .map(|rule| (*rule).to_owned())
                 .chain(deny.iter().cloned())
                 .collect::<Vec<_>>()
@@ -3699,6 +3700,14 @@ pub fn runtime_session_settings(idle_marker: &Path, deny: &[String]) -> Result<S
 /// runs' sessions (exit 143) and `integrate`'s checks (task 359). Claude
 /// Code applies a deny rule to each command of a `;` / `&&` chain.
 pub const SIGNAL_BY_NAME_DENIED: [&str; 2] = ["Bash(pkill:*)", "Bash(killall:*)"];
+
+/// The tools a headless turn's settings deny: nobody reads a headless
+/// session, so a question to the person through `AskUserQuestion` would
+/// stop the turn with no answer to come. Claude Code 2.1.286 does not offer
+/// it to `-p`; the denial keeps a later version's from reaching the model,
+/// and a call is recorded as refused (`turn_finished`'s `denied_tools`).
+/// The person is asked through `dagq ask` only (goal 85).
+pub const HEADLESS_DENIED_TOOLS: [&str; 1] = ["AskUserQuestion"];
 
 #[cfg(test)]
 mod tests {
@@ -4728,6 +4737,32 @@ mod tests {
         }
     }
 
+    /// A headless turn's settings deny `AskUserQuestion` beside the
+    /// signals by name and the role's denials, keep the `autoMode`
+    /// environment and add no hook (task 1373).
+    #[test]
+    fn a_headless_turns_settings_deny_ask_user_question() {
+        let role = vec!["Bash(dagq integrate:*)".to_owned()];
+        let settings: Value =
+            serde_json::from_str(&headless_worker_settings(&role).unwrap()).unwrap();
+        let deny: Vec<String> =
+            serde_json::from_value(settings["permissions"]["deny"].clone()).unwrap();
+        assert_eq!(
+            deny,
+            [
+                "Bash(pkill:*)",
+                "Bash(killall:*)",
+                "AskUserQuestion",
+                "Bash(dagq integrate:*)"
+            ]
+        );
+        assert_eq!(
+            settings["autoMode"]["environment"],
+            serde_json::json!(["$defaults"])
+        );
+        assert!(settings.get("hooks").is_none(), "{settings}");
+    }
+
     #[test]
     fn a_claude_jobs_reply_is_its_stdout() {
         let claude = ClaudeCode {
@@ -4779,6 +4814,7 @@ mod tests {
         let worker_turn = turn(ActorRole::Worker, "worker");
         assert!(!worker_turn.contains(&cmux), "{worker_turn:?}");
         assert!(worker_turn.contains(&identity));
+        assert!(worker_turn.contains(&"AskUserQuestion".to_owned()));
 
         let planner_dir = dir.path().join("session");
         fs::create_dir_all(&planner_dir).unwrap();

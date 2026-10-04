@@ -50,7 +50,7 @@ related:
 | `turn-NNNNNN.jsonl` / `.err` | agent | turnのstdout（providerのJSONL）とstderr |
 | `turn-NNNNNN.commands.jsonl` | wrapper | runのCodexのturnのコマンドとtool（`TurnCommand`。1行1つ、始まりと終わりを読んだ時刻つき）。`turn_finished`の前に一時fileからrenameで置く。区間の作業の内訳の元（[provider-lifecycle](../provider-lifecycle.md#非対話のworkerの区間)の「Codexの作業の内訳」、task 1354） |
 
-supervisorは最初のsessionのworkspaceを開く前（`provision`）とresumeのworkspaceを開く前（`start_resume`）に`prepare_turns`を行い、`limits.json`を書き、前のsessionの終了の依頼と取られていない依頼を捨てる。turnの設定は`claude-headless-settings.json`（`permissions.deny`だけ。`SIGNAL_BY_NAME_DENIED`とworkerのroleの拒否、`autoMode`）で、`turn_command`がturnのたびに書く。
+supervisorは最初のsessionのworkspaceを開く前（`provision`）とresumeのworkspaceを開く前（`start_resume`）に`prepare_turns`を行い、`limits.json`を書き、前のsessionの終了の依頼と取られていない依頼を捨てる。turnの設定は`claude-headless-settings.json`（`permissions.deny`だけ。`SIGNAL_BY_NAME_DENIED`、`HEADLESS_DENIED_TOOLS`（`AskUserQuestion`）、actorのroleの拒否の順。それと`autoMode`）で、`turn_command`がturnのたびに書く。`AskUserQuestion`を拒むのは保険で、非対話のsessionの質問は誰にも届かずturnが止まるため。Claude Code 2.1.286の`-p`はこのtoolを出さないが、後の版で出てきても拒否の規則でmodelから外れ、呼ばれれば拒否として`turn_finished`の`denied_tools`に残る。人への質問は`dagq ask`だけ（goal 85の決定）。plannerのturnも同じ設定を使う。
 
 task 1184でrun dirのI/Oを洗い出し、次の呼び出しを`agent_dir`の記述子に対する操作へ寄せた。通常のfileが読めない・書けない場合のrunの失敗の扱いは既存の経路を使う（不正な依頼ならwrapperはerrorで終了し、復旧へ渡る）。
 
