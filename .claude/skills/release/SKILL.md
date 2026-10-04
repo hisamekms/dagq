@@ -17,12 +17,14 @@ main checkout が clean で `origin/main` と同じ HEAD にあり、最新の m
 
 ## 2. `-dev` を外して version を確定する
 
-`Cargo.toml` と `crates/*/Cargo.toml` の `[package]` の `version`、`crates/*/Cargo.toml` の `dagq-broker-protocol` への依存の `version = "=X.Y.Z"`、`plugins/claude-dagq/.claude-plugin/plugin.json` の `"version"` を同じ `X.Y.Z` にし（main の `X.Y.Z-dev` から `-dev` を外す。上げる桁を変えるなら、ここで `-dev` の数字と違う `X.Y.Z` にしてよい）、`Cargo.lock` を更新する。tag は `-dev` の無い commit に打つ（`release.yml` は tag と `Cargo.toml` の version の一致を検査するので、`-dev` が残っていれば落ちる）。
+`Cargo.toml` と `crates/*/Cargo.toml` の `[package]` の `version`、`crates/*/Cargo.toml` の `dagq-broker-protocol` への依存の `version = "=X.Y.Z"`、`plugins/claude-dagq/.claude-plugin/plugin.json` の `"version"` を同じ `X.Y.Z` にし（main の `X.Y.Z-dev` から `-dev` を外す。上げる桁を変えるなら、ここで `-dev` の数字と違う `X.Y.Z` にしてよい）、`Cargo.lock` を更新する。同じ変更で `.claude-plugin/marketplace.json` の `claude-dagq` の entry の `source` を `{"source": "git-subdir", "url": "hisamekms/dagq", "path": "plugins/claude-dagq", "ref": "vX.Y.Z"}`（これから打つ tag）にし、entry に `version` を書かない（[ADR-t617-1](../../../docs/adr/2026-09-27-t617-1-plugin-marketplace-pinned-to-release-tag.md) 決定 2〜4）。tag は `-dev` の無い commit に打つ（`release.yml` は tag と `Cargo.toml`・`plugin.json` の version の一致と、tag の marketplace の `ref` がその tag であることを `scripts/check-plugin-version.sh --tag` で検査するので、`-dev` が残っているか `ref` が違えば落ちる）。
 
 - main に直接 commit しない（AGENTS.md）。この変更も dagq の task として登録し、`integrate` で main に着地させる
 - worker のコマンド、登録の例、semver の目安（上げる桁の決め方）は [reference/version.md](reference/version.md) の「2. `-dev` を外して version を確定する」
 
 ## 3. tag を切る（ユーザーの確認を取ってから）
+
+2 の変更が着地したら、すぐに tag を push する。着地から tag の push までは、main の marketplace がまだ無い tag `vX.Y.Z` を指し、利用者の `claude plugin install` と `claude plugin update` が失敗する（手元の plugin は壊れず、tag の push で解消する。ADR-t617-1 決定 4）。この時間を短くするため、確認は 2 の着地の前に済ませておいてよい。
 
 「`vX.Y.Z` を main の `<HEAD の短い SHA>` に打って push してよいか」をユーザーに聞き、了承を得てから:
 
@@ -35,7 +37,7 @@ git push origin vX.Y.Z
 
 ## 4. 確認
 
-`release.yml` の run の成功、GitHub Release の asset、crates.io の各 crate の `max_version` を確かめる。コマンドと、broker の crate の最初の publish（tag の push の前に人が行うこと）は [reference/publish.md](reference/publish.md) の「4. 確認」。
+`release.yml` の run の成功、GitHub Release の asset、crates.io の各 crate の `max_version` を確かめる。`release.yml` の成功の後、使い捨ての `HOME` で `claude plugin marketplace add hisamekms/dagq` と `claude plugin install claude-dagq@dagq` を行い、入った plugin の version が `X.Y.Z` であることを確かめる。コマンドと、broker の crate の最初の publish（tag の push の前に人が行うこと）は [reference/publish.md](reference/publish.md) の「4. 確認」。
 
 ## 5. 初回の自動 publish の確認（Trusted Publishing に切り替えて最初のリリースだけ）
 
@@ -47,7 +49,7 @@ tag と version の不一致・Trusted Publisher の不一致・id-token 権限�
 
 ## 6. 次の開発版へ上げる
 
-tag の run が成功したら（4 の確認の後）、main の version を次の開発版 `X.Y.Z-dev` に上げる task を登録する。ここでの `X.Y.Z` は次のリリースの見込みで、普段は minor を 1 つ上げる（`0.4.0` の後は `0.5.0-dev`）。互換を保つ修正だけのリリースが続くと分かっていれば patch でもよく、次のリリースの 2 で改めて決め直せる。2 と同じく `Cargo.toml`・`plugin.json`・`Cargo.lock` の 3 つを変える。登録の例と忘れたときに起きることは [reference/after-release.md](reference/after-release.md) の「6. 次の開発版へ上げる」。
+tag の run が成功したら（4 の確認の後）、main の version を次の開発版 `X.Y.Z-dev` に上げる task を登録する。ここでの `X.Y.Z` は次のリリースの見込みで、普段は minor を 1 つ上げる（`0.4.0` の後は `0.5.0-dev`）。互換を保つ修正だけのリリースが続くと分かっていれば patch でもよく、次のリリースの 2 で改めて決め直せる。`Cargo.toml`・`crates/*/Cargo.toml`・`plugin.json`・`Cargo.lock` を変え、`.claude-plugin/marketplace.json` の `ref` は変えない（次のリリースの 2 まで、利用者にはリリースした `vX.Y.Z` の plugin を配り続ける）。登録の例と忘れたときに起きることは [reference/after-release.md](reference/after-release.md) の「6. 次の開発版へ上げる」。
 
 ## 7. 固定バイナリの更新
 

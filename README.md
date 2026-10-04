@@ -198,7 +198,16 @@ cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-To use the plugin from the checkout instead of the installed one, pass `--plugin-dir <repository>/plugins/claude-dagq` to `up` (or `claude --plugin-dir`). It overrides an installed plugin of the same name. Releases are cut by a tag, following [`.claude/skills/release/SKILL.md`](.claude/skills/release/SKILL.md). [`.github/workflows/release.yml`](.github/workflows/release.yml) builds the GitHub Release and publishes the crate to crates.io.
+To use the plugin from the checkout instead of the installed one, pass `--plugin-dir <repository>/plugins/claude-dagq` to `up` (or `claude --plugin-dir`). It overrides an installed plugin of the same name.
+
+### Release
+
+Releases are cut by a tag, following [`.claude/skills/release/SKILL.md`](.claude/skills/release/SKILL.md). [`.github/workflows/release.yml`](.github/workflows/release.yml) builds the GitHub Release and publishes the crates to crates.io. The plugin's marketplace is pinned to the release tag ([ADR-t617-1](docs/adr/2026-09-27-t617-1-plugin-marketplace-pinned-to-release-tag.md)):
+
+1. The release change drops `-dev` from the version in `Cargo.toml`, `crates/*/Cargo.toml`, `plugins/claude-dagq/.claude-plugin/plugin.json` and `Cargo.lock`. The same change points the `claude-dagq` entry of `.claude-plugin/marketplace.json` at the tag to come: `"source": {"source": "git-subdir", "url": "hisamekms/dagq", "path": "plugins/claude-dagq", "ref": "vX.Y.Z"}`, with no `version` in the entry. `sh scripts/check-plugin-version.sh` checks both.
+2. As soon as that change lands, push the tag `vX.Y.Z`. Until then the marketplace on main points at a tag that does not exist, and `claude plugin install` and `claude plugin update` fail. `release.yml` runs `scripts/check-plugin-version.sh --tag` and stops if the tag's marketplace entry does not point at the tag itself.
+3. After `release.yml` succeeds, check the plugin with a throwaway `HOME`: run `claude plugin marketplace add hisamekms/dagq` and `claude plugin install claude-dagq@dagq`. The installed plugin's version must be `X.Y.Z`.
+4. The next change bumps main to the next `-dev` version. It does not touch the marketplace `ref`, so users keep getting the released plugin until the next release.
 
 ## Documentation
 

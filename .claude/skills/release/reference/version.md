@@ -26,18 +26,24 @@ cargo update --workspace   # Cargo.lock の dagq の version を更新
 # 確認
 grep -n '^version' Cargo.toml
 grep -n '"version"' plugins/claude-dagq/.claude-plugin/plugin.json
-git diff --stat                                                  # Cargo.toml / Cargo.lock / plugin.json だけ
+grep -n '"ref"' .claude-plugin/marketplace.json                  # "ref": "vX.Y.Z"
+sh scripts/check-plugin-version.sh                               # version の一致と marketplace の entry の形・ref
+git diff --stat   # Cargo.toml / crates/*/Cargo.toml / Cargo.lock / plugin.json / marketplace.json だけ
 ```
 
 この変更を登録する例（planner の session から、固定バイナリ `~/.local/bin/dagq` で）:
 
 ```sh
 dagq add 'release: version を X.Y.Z に上げる' \
-  --description 'Cargo.toml と plugins/claude-dagq/.claude-plugin/plugin.json の version を X.Y.Z にし、Cargo.lock を更新する' \
-  --acceptance 'Cargo.toml・plugin.json・Cargo.lock の dagq の version が X.Y.Z で、cargo publish --dry-run --locked が通る' \
-  --paths Cargo.toml --paths Cargo.lock --paths 'plugins/claude-dagq/.claude-plugin/plugin.json' \
+  --description 'Cargo.toml・crates/*/Cargo.toml と plugins/claude-dagq/.claude-plugin/plugin.json の version を X.Y.Z にし、Cargo.lock を更新する。.claude-plugin/marketplace.json の claude-dagq の entry の source を git-subdir（url hisamekms/dagq、path plugins/claude-dagq、ref vX.Y.Z）にし、entry に version を書かない（ADR-t617-1）' \
+  --acceptance 'Cargo.toml・crates/*/Cargo.toml・plugin.json・Cargo.lock の version が X.Y.Z、marketplace.json の claude-dagq の entry が git-subdir の source で ref が vX.Y.Z（version なし）で、sh scripts/check-plugin-version.sh と cargo publish --dry-run --locked が通る' \
+  --paths Cargo.toml --paths 'crates/*/Cargo.toml' --paths Cargo.lock \
+  --paths 'plugins/claude-dagq/.claude-plugin/plugin.json' --paths '.claude-plugin/marketplace.json' \
+  --verify 'sh scripts/check-plugin-version.sh' \
   --verify 'cargo publish --dry-run --locked' --verify 'cargo test --locked --test plugin'
 ```
+
+着地したら、待たずに [SKILL.md](../SKILL.md) の 3 で tag を push する（着地から push までは marketplace が無い tag を指す）。
 
 登録の書式は dagq skill に従う。着地後に 1 の前提の確認をやり直す。
 

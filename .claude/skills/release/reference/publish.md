@@ -17,6 +17,19 @@ curl -sS -A 'dagq-release (https://github.com/hisamekms/dagq)' \
 
 crates.io の API は User-Agent の無い request を拒むので `-A` を付ける。`dagq-broker-protocol`・`dagq-broker-client`・`dagq-broker` も同じ URL の形で `max_version` を見る。
 
+`release.yml` が成功したら、使い捨ての `HOME` で公式の手順の plugin が `X.Y.Z` で入ることを確かめる（ADR-t617-1。自分の `~/.claude` は変えない）:
+
+```sh
+tmp=$(mktemp -d)
+HOME=$tmp claude plugin marketplace add hisamekms/dagq
+HOME=$tmp claude plugin install claude-dagq@dagq
+ls "$tmp/.claude/plugins/cache/dagq/claude-dagq/"                # X.Y.Z が出ること
+jq -r .version "$tmp"/.claude/plugins/cache/dagq/claude-dagq/*/.claude-plugin/plugin.json   # X.Y.Z
+rm -rf "$tmp"
+```
+
+`install` が `vX.Y.Z` を見つけられずに失敗するなら tag がまだ push されていない。前の version が入るなら、tag の後に main の `marketplace.json` の `ref` が変わっていないかを見る（2 の変更での書き換え漏れなら `release.yml` の `Check the plugin version` が落ちているので、ここまで来ない）。
+
 **broker の crate の最初の publish**: Trusted Publisher は crates.io に既にある crate にしか登録できないので、`dagq-broker-protocol`・`dagq-broker-client`・`dagq-broker` を含む最初のリリースでは、tag の push の前に人が API token でこの 3 つを手で publish し（`cargo publish --locked -p dagq-broker-protocol` を先に）、それぞれに `dagq` と同じ Trusted Publisher を登録する。そうしないと `Publish to crates.io` が `dagq-broker-protocol` で落ちる（GitHub Release は出る。登録してから `gh run rerun <run-id> --failed`）。
 
 ## 5. 初回の自動 publish の確認
@@ -44,6 +57,7 @@ gh run view <run-id> --log | grep -E 'Authenticate to crates.io|Publish to crate
 ## 失敗したときの見どころ
 
 - **tag と version の不一致**: `Check that the tag matches the crate version` が `tag vX.Y.Z declares version ... but Cargo.toml has ...` で落ちる。build も publish もされない。tag を消して（`git push origin :refs/tags/vX.Y.Z` と `git tag -d vX.Y.Z`、ユーザーの確認を取ってから）version を上げた commit に打ち直す
+- **marketplace の entry の不一致**: `Check the plugin version`（`scripts/check-plugin-version.sh --tag`）が `marketplace.json` の `source.ref` などを名指して落ちる。build も publish もされない。tag を消して、entry を `ref: vX.Y.Z` の git-subdir にする変更を着地させ、打ち直す
 - **Trusted Publisher の不一致**: `Authenticate to crates.io` が失敗する。crates.io の `dagq` の Settings → Trusted Publishing の owner `hisamekms` / repository `dagq` / workflow filename `release.yml` / environment（空）が、実際の repository と workflow のファイル名に一致しているかを見る。登録を直したら `gh run rerun <run-id> --failed`（GitHub Release は `--clobber` で上書きされる）
 - **id-token 権限**: OIDC token が取れないエラー（`ACTIONS_ID_TOKEN_REQUEST_URL` が無い等）は、`release.yml` の `permissions:` に `id-token: write` が無いか、fork からの run。workflow の変更は dagq の task にする
 - **crates.io の API の失敗**: `crates.io answered HTTP <status>` で止まったら、時間を置いて rerun する
