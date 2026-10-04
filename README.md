@@ -159,7 +159,7 @@ The supervisor and its jobs run some of these for you (`supervise`, `observe`, `
 
 ## Update
 
-**Automatic, with your answer.** A supervisor running a release build (`dagq --version` prints a plain `X.Y.Z`) checks crates.io once a day and at start ([ADR-t618-1](docs/adr/2026-09-27-t618-1-release-update-by-ask-from-crates-io.md), [Release update](docs/design/supervisor-lifecycle/release-update.md)). When there is a newer release, the inbox gets an `approve_release` ask. Answer `install` to update, or `skip` to skip that version.
+**Automatic, with your answer.** A supervisor running a release build (`dagq --version` prints a plain `X.Y.Z`) checks crates.io about once a day, and when it starts as a new build ([ADR-t618-1](docs/adr/2026-09-27-t618-1-release-update-by-ask-from-crates-io.md), [Release update](docs/design/supervisor-lifecycle/release-update.md)). When there is a newer release, the inbox gets an `approve_release` ask. It names the new version and the version the supervisor runs now. Answer `install` to update, or `skip` to skip that version. When the binary already runs the newest release but the installed plugin is older, the same ask asks about the plugin, and `install` runs only the two plugin commands below.
 
 On `install`, the supervisor runs `cargo install --locked dagq@<version>` into the queue directory. It checks the new binary's `--version` and that it starts on a throwaway queue, and applies compatible migrations. It then replaces the running binary by a rename (the old one stays as `dagq.previous`) and hands the supervisor over without stopping the runs in flight. After that it updates the installed plugin to the same release with `claude plugin marketplace update dagq` and `claude plugin update claude-dagq@dagq` ([ADR-t618-2](docs/adr/2026-09-27-t618-2-plugin-follows-the-release-update.md)). The open inbox and planner sessions load the new plugin when you restart them. If a check fails, nothing is replaced (or the old binary is put back), and the inbox gets an `update_failed` ask (`retry` / `skip`). A release with a breaking migration is never installed automatically. It opens an `approve_update` ask instead, because the supervisor must drain first. The ask names the `dagq install ... --allow-breaking` command for the release it built. That command waits for the runs in flight, backs up the queue, migrates it, and starts the supervisor again. Run it only after you have answered the open asks.
 
@@ -170,14 +170,18 @@ Choose the behavior in `host.toml`:
 release = "ask"   # "ask" (default), "auto" (no ask; breaking migrations still ask), or "off"
 ```
 
-A failed check, for example while offline, is recorded as an event only and is tried again later.
+A failed check, for example while offline, is recorded as an event only and is tried again later. `dagq status` shows the last check under `release_update`, and `dagq doctor` shows the settings in effect. If no supervisor is running when you answer `install`, nothing applies the answer: update by hand as below.
 
 **By hand.**
 
 ```sh
 dagq install --release          # the newest release (or --release 0.4.0); same checks, swap and handoff
 dagq install --rollback         # put dagq.previous back
+claude plugin marketplace update dagq
+claude plugin update claude-dagq@dagq   # install --release does not update the plugin
 ```
+
+Reopen the inbox and planner sessions after the plugin is updated; they keep the plugin they started with.
 
 `cargo install --locked dagq` followed by `dagq up` also works: `up` hands the supervisor over to the new binary. It skips the checks and keeps no `.previous`. Update the plugin with `claude plugin update claude-dagq@dagq` either way.
 

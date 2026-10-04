@@ -44,7 +44,7 @@ It prints each open ask in full, oldest first. Take them one at a time:
 
 A run waiting on an ask holds no `--parallel` slot. For context: `"$DAGQ" show <task_id>` (`--full` for a receipt). Leave open an ask the person will not answer yet.
 
-Before showing an ask whose kind, options or effect you are unsure of, read `reference/asks.md`: every kind (`approve_landing`, `decide`, `stalled`, `queue_hold`, ...), its options, and the answers the runtime applies (`propose`, `dismiss`, a goal review's `approve_goal`). An answer the runtime does not apply comes back as `read the answer of ask <id> and close it` (step 4).
+Before showing an ask whose kind, options or effect you are unsure of, read `reference/asks.md`: every kind (`approve_landing`, `decide`, `approve_release`, ...), its options, and the answers the runtime applies (`propose`, `dismiss`, a goal review's `approve_goal`). An answer the runtime does not apply comes back as `read the answer of ask <id> and close it` (step 4).
 
 ## 4. Report the other attention, act only on the person's word
 
