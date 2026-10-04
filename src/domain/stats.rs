@@ -2170,6 +2170,9 @@ pub fn timestamp_millis(text: &str) -> Option<i64> {
 }
 
 #[cfg(test)]
+mod event_sequence_tests;
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn a_cursor_s_text_reads_back_as_the_same_cursor() {

@@ -383,8 +383,15 @@ fn a_refusal_does_not_depend_on_the_task_existing() {
     assert_eq!(denials(&db).len(), 1);
 }
 
+/// The CLI's refusal of a watch and of an export, recorded as the refused
+/// caller (task 1151): who may not watch and export is
+/// `domain::authorization::tests::workers_wrappers_the_integrator_and_the_jobs_neither_watch_nor_export`,
+/// which capability each command asks `main`'s
+/// `tests::watching_and_exporting_ask_their_own_capability_and_reads_ask_to_read`
+/// (task 1709). A refused export writes no file, a read goes through and
+/// writes nothing, and the user watches and exports as before.
 #[test]
-fn workers_wrappers_and_the_integrator_read_but_do_not_watch_or_export() {
+fn a_worker_is_refused_watch_and_export_and_each_refusal_is_recorded() {
     let (dir, db) = queue();
     ok(&db, &["goal", "add", "open goal"]);
     ok(&db, &["add", "existing", "--goal", "1"]);
@@ -393,10 +400,9 @@ fn workers_wrappers_and_the_integrator_read_but_do_not_watch_or_export() {
     let reports = dir.path().join("reports-out");
     let reports = reports.to_str().unwrap();
     let watch: &[&str] = &["watch", "--after", "0", "--timeout", "1"];
-    let export: [&[&str]; 3] = [
+    let export: [&[&str]; 2] = [
         &["graph", "--format", "d2", "--out", graph],
         &["report", "--out", reports],
-        &["report", "--print", "json"],
     ];
     let worker = vec![
         ("DAGQ_ROLE", "worker".to_owned()),
@@ -404,66 +410,47 @@ fn workers_wrappers_and_the_integrator_read_but_do_not_watch_or_export() {
         ("DAGQ_RUN_ID", "r1".to_owned()),
         ("DAGQ_TASK_ID", "1".to_owned()),
     ];
-    let wrapper = vec![("DAGQ_ROLE", "wrapper".to_owned())];
-    let integrator = vec![("DAGQ_ROLE", "integrator".to_owned())];
-    let job = vec![("DAGQ_ROLE", "review-job".to_owned())];
     let before = denials(&db).len();
     let mut refused = Vec::new();
-    for (role, env) in [
-        ("worker", &worker),
-        ("wrapper", &wrapper),
-        ("integrator", &integrator),
-        ("review-job", &job),
-    ] {
-        for (args, capability) in std::iter::once((watch, "queue.watch"))
-            .chain(export.iter().map(|args| (*args, "queue.export")))
-        {
-            let error = denied_as(env, &db, args);
-            assert_eq!(error["denied"]["role"], role, "{args:?}: {error}");
-            assert_eq!(error["denied"]["capability"], capability, "{error}");
-            assert_eq!(error["denied"]["reason"], "not granted", "{error}");
-            if role != "review-job" {
-                assert!(
-                    error["error"]
-                        .as_str()
-                        .unwrap()
-                        .starts_with(&format!("{role} may not {capability}")),
-                    "{error}"
-                );
-            }
-            refused.push((role, capability));
-        }
-        // Reading stays open to every role, and writes nothing.
-        let written = event_count(&db);
-        for args in [&["status"][..], &["show", "1"], &["list"], &["graph"]] {
-            allowed_as(env, &db, args);
-        }
-        assert_eq!(event_count(&db), written, "{role}");
+    for (args, capability) in std::iter::once((watch, "queue.watch"))
+        .chain(export.iter().map(|args| (*args, "queue.export")))
+    {
+        let error = denied_as(&worker, &db, args);
+        assert_eq!(error["denied"]["role"], "worker", "{args:?}: {error}");
+        assert_eq!(error["denied"]["capability"], capability, "{error}");
+        assert_eq!(error["denied"]["reason"], "not granted", "{error}");
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap()
+                .starts_with(&format!("worker may not {capability}")),
+            "{error}"
+        );
+        refused.push(capability);
     }
-    // Each refusal is recorded as the refused caller (task 1151).
+    // Reading stays open, and writes nothing.
+    let written = event_count(&db);
+    for args in [&["show", "1"][..], &["graph"]] {
+        allowed_as(&worker, &db, args);
+    }
+    assert_eq!(event_count(&db), written);
     let recorded = denials(&db);
     assert_eq!(recorded.len() - before, refused.len(), "{recorded:?}");
-    for (event, (role, capability)) in recorded[before..].iter().zip(&refused) {
-        assert_eq!(event["actor"]["role"], *role, "{event}");
-        assert_eq!(event["payload"]["role"], *role, "{event}");
+    for (event, capability) in recorded[before..].iter().zip(&refused) {
+        assert_eq!(event["actor"]["role"], "worker", "{event}");
+        assert_eq!(event["actor"]["id"], "worker:r1", "{event}");
+        assert_eq!(event["payload"]["role"], "worker", "{event}");
         assert_eq!(event["payload"]["capability"], *capability, "{event}");
         assert_eq!(event["payload"]["reason"], "not granted", "{event}");
         assert_eq!(event["payload"]["resource"]["kind"], "queue", "{event}");
     }
-    assert_eq!(recorded[before]["actor"]["id"], "worker:r1");
     let events = event_count(&db);
     assert!(!Path::new(graph).exists());
     assert!(!Path::new(reports).exists());
-    // The user, the inbox and a planner watch and export as before.
-    for env in [
-        vec![],
-        vec![("DAGQ_ROLE", "inbox".to_owned())],
-        planner("planner:1").to_vec(),
-    ] {
-        allowed_as(&env, &db, watch);
-        for args in export {
-            allowed_as(&env, &db, args);
-        }
+    // The user watches and exports as before.
+    allowed_as(&[], &db, watch);
+    for args in export {
+        allowed_as(&[], &db, args);
     }
     assert!(Path::new(graph).is_file());
     assert!(Path::new(reports).is_dir());

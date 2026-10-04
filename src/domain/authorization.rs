@@ -872,6 +872,41 @@ mod tests {
         }
     }
 
+    /// Workers, wrappers, the integrator and the jobs read the queue but
+    /// neither watch it nor export it to a file; the user, the inbox and a
+    /// planner do both (the observer watches too, as
+    /// `the_observer_records_findings_and_asks_on_one_only` has it) (moved from `tests/it/cli_authorization.rs`, task
+    /// 1709).
+    #[test]
+    fn workers_wrappers_the_integrator_and_the_jobs_neither_watch_nor_export() {
+        for role_ in [
+            ActorRole::Worker,
+            ActorRole::Wrapper,
+            ActorRole::Integrator,
+            ActorRole::ReviewJob,
+        ] {
+            let actor = role(role_);
+            assert!(allowed(&actor, C::QueueRead, &Resource::Queue), "{role_:?}");
+            for capability in [C::QueueWatch, C::ExportFile] {
+                let error = StaticPolicy
+                    .authorize(&actor, capability, &Resource::Queue)
+                    .unwrap_err();
+                assert_eq!(
+                    (error.role, error.capability, error.reason),
+                    (role_, capability, DenyReason::NotGranted)
+                );
+            }
+        }
+        for role_ in [ActorRole::User, ActorRole::Inbox, ActorRole::Planner] {
+            for capability in [C::QueueRead, C::QueueWatch, C::ExportFile] {
+                assert!(
+                    allowed(&role(role_), capability, &Resource::Queue),
+                    "{role_:?} {capability:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn the_jobs_read_and_write_nothing() {
         let writes = [

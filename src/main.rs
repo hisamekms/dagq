@@ -4809,4 +4809,85 @@ mod tests {
             );
         }
     }
+
+    /// `watch` asks to watch the queue, `graph --out` and `report` to
+    /// export it to a file, and the reads (`graph` without `--out`
+    /// included) to read it: the capabilities a worker, a wrapper, the
+    /// integrator and the jobs are refused or granted by the table
+    /// (moved from `tests/it/cli_authorization.rs`, task 1709; the
+    /// refusal's wiring and record stay there).
+    #[test]
+    fn watching_and_exporting_ask_their_own_capability_and_reads_ask_to_read() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(watching_and_exporting_ask_their_own_capability)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn watching_and_exporting_ask_their_own_capability() {
+        let forms: [(&[&str], Capability); 8] = [
+            (
+                &["watch", "--after", "0", "--timeout", "1"],
+                Capability::QueueWatch,
+            ),
+            (
+                &["graph", "--format", "d2", "--out", "/g.d2"],
+                Capability::ExportFile,
+            ),
+            (&["report", "--out", "/reports"], Capability::ExportFile),
+            (&["report", "--print", "json"], Capability::ExportFile),
+            (&["status"], Capability::QueueRead),
+            (&["show", "1"], Capability::QueueRead),
+            (&["list"], Capability::QueueRead),
+            (&["graph"], Capability::QueueRead),
+        ];
+        for (args, capability) in forms {
+            let argv: Vec<&str> = std::iter::once("dagq")
+                .chain(args.iter().copied())
+                .collect();
+            let cli =
+                Cli::try_parse_from(&argv).unwrap_or_else(|error| panic!("{argv:?}: {error}"));
+            assert!(!authorized_in_application(&cli.command), "{argv:?}");
+            assert_eq!(
+                requests(&cli.command),
+                [(capability, Resource::Queue)],
+                "{argv:?}"
+            );
+        }
+    }
+
+    /// A refusal names the role, the capability and why; the observer and
+    /// every headless job keep the message they always got (ADR-0027,
+    /// ADR-t728-1 decision 2; moved from `tests/it/cli_actor.rs`, task
+    /// 1709).
+    #[test]
+    fn a_refusal_of_the_observer_or_a_job_keeps_its_old_message() {
+        let refusal = |role| {
+            error_json(&anyhow::Error::new(AuthorizationError {
+                role,
+                capability: Capability::MarkWrite,
+                reason: dagq::domain::authorization::DenyReason::NotGranted,
+            }))
+        };
+        for job in [
+            ActorRole::ReviewJob,
+            ActorRole::RecoveryJob,
+            ActorRole::PlanReviewJob,
+            ActorRole::GoalReviewJob,
+            ActorRole::ThroughputReviewJob,
+        ] {
+            let error = refusal(job);
+            assert_eq!(error["error"], REVIEWER_DENIED, "{job:?}");
+            assert_eq!(error["denied"]["role"], json!(job), "{job:?}");
+            assert_eq!(error["denied"]["capability"], "mark.write");
+            assert_eq!(error["denied"]["reason"], "not granted");
+        }
+        assert_eq!(refusal(ActorRole::Observer)["error"], OBSERVER_DENIED);
+        assert_eq!(
+            refusal(ActorRole::Worker)["error"],
+            "worker may not mark.write (not granted)"
+        );
+    }
 }

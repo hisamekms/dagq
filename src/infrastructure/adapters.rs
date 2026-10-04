@@ -5374,4 +5374,72 @@ esac
         let gone = host_versions(&other, Some(&dir.path().join("gone")), Some(dir.path()));
         assert_eq!(gone.codex_version, None);
     }
+
+    /// The plugin list as `claude plugin list --json` prints it (moved
+    /// from `tests/it/installed_plugin.rs`, task 1709).
+    const PLUGIN_LIST_ENABLED: &str = r#"[{"id":"claude-dagq@dagq","version":"0.4.0","scope":"user","enabled":true,"installPath":"/x"}]"#;
+
+    #[test]
+    fn plugin_state_reads_the_json_plugin_list() {
+        assert_eq!(
+            plugin_state(PLUGIN_LIST_ENABLED, "claude-dagq").unwrap(),
+            PluginState::Enabled
+        );
+        assert_eq!(
+            plugin_state("[]", "claude-dagq").unwrap(),
+            PluginState::Missing
+        );
+        // Enabled in any scope or marketplace counts.
+        assert_eq!(
+            plugin_state(
+                r#"[{"id":"claude-dagq@dagq","enabled":false},{"id":"claude-dagq@fork","enabled":true}]"#,
+                "claude-dagq"
+            )
+            .unwrap(),
+            PluginState::Enabled
+        );
+        assert_eq!(
+            plugin_state(
+                r#"[{"id":"claude-dagq@dagq","enabled":false},{"id":"claude-dagq-extra@dagq","enabled":true}]"#,
+                "claude-dagq"
+            )
+            .unwrap(),
+            PluginState::Disabled(vec!["claude-dagq@dagq".into()])
+        );
+        for unreadable in [
+            "No plugins installed.",
+            "{}",
+            r#"[{"enabled":true}]"#,
+            r#"[{"id":"claude-dagq@dagq"}]"#,
+        ] {
+            assert!(
+                plugin_state(unreadable, "claude-dagq").is_err(),
+                "{unreadable}"
+            );
+        }
+    }
+
+    #[test]
+    fn plugin_version_reads_the_enabled_entry_of_the_plugin_list() {
+        assert_eq!(
+            plugin_version(PLUGIN_LIST_ENABLED, "claude-dagq")
+                .unwrap()
+                .as_deref(),
+            Some("0.4.0")
+        );
+        let two = r#"[{"id":"claude-dagq@old","version":"0.1.0","enabled":false},{"id":"claude-dagq@dagq","version":"0.4.0","enabled":true}]"#;
+        assert_eq!(
+            plugin_version(two, "claude-dagq").unwrap().as_deref(),
+            Some("0.4.0")
+        );
+        let disabled = r#"[{"id":"claude-dagq@dagq","version":"0.2.0","enabled":false}]"#;
+        assert_eq!(
+            plugin_version(disabled, "claude-dagq").unwrap().as_deref(),
+            Some("0.2.0")
+        );
+        assert_eq!(plugin_version("[]", "claude-dagq").unwrap(), None);
+        let versionless = r#"[{"id":"claude-dagq@dagq","enabled":true}]"#;
+        assert_eq!(plugin_version(versionless, "claude-dagq").unwrap(), None);
+        assert!(plugin_version("No plugins installed.", "claude-dagq").is_err());
+    }
 }

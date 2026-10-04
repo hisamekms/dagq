@@ -61,50 +61,46 @@ fn an_unknown_role_fails_closed_and_changes_nothing() {
     assert_eq!(ok(&db, &["notes"])["notes"][0]["payload"]["by"], "human");
 }
 
-/// Every headless job, and the legacy `reviewer` an older binary started,
-/// reads the queue and changes nothing (ADR-0027, ADR-t728-1 decision 2).
+/// A headless job, and the legacy `reviewer` an older binary started,
+/// reads the queue and changes nothing (ADR-0027, ADR-t728-1 decision 2):
+/// each write command's path refuses the review job with the message the
+/// jobs always got. That no job is granted a write is
+/// `domain::authorization::tests::the_jobs_read_and_write_nothing`, and that
+/// every job keeps that message `main`'s
+/// `tests::a_refusal_of_the_observer_or_a_job_keeps_its_old_message`
+/// (task 1709).
 #[test]
-fn every_headless_job_may_only_read_the_queue() {
+fn a_headless_job_may_only_read_the_queue() {
     let (_dir, db) = queue();
     ok(&db, &["goal", "add", "open goal"]);
     ok(&db, &["add", "existing", "--goal", "1"]);
     let asked = ok(&db, &ask_args("which?"));
     let ask = asked["id"].to_string();
-    for role in [
-        "review-job",
-        "recovery-job",
-        "plan-review-job",
-        "goal-review-job",
-        "reviewer",
+    for args in [
+        &["cancel", "1"][..],
+        &["integrate", "1"],
+        &["answer", &ask, "--text", "x"],
+        &["ready", "1", "--bypass-review"],
+        &["note", "--task", "1", "--text", "x"],
+        &ask_args("q"),
+        &["goal", "close", "1", "--verdict", "achieved"],
+        &["mark", "label"],
     ] {
-        for args in [
-            &["cancel", "1"][..],
-            &["integrate", "1"],
-            &["answer", &ask, "--text", "x"],
-            &["ready", "1", "--bypass-review"],
-            &["note", "--task", "1", "--text", "x"],
-            &ask_args("q"),
-            &["goal", "close", "1", "--verdict", "achieved"],
-            &["mark", "label"],
-        ] {
-            assert_eq!(
-                refused_as(role, &db, args),
-                "reviewer may not change queue state",
-                "{role} {args:?}"
-            );
-        }
-        for args in [
-            &["list"][..],
-            &["show", "1"],
-            &["status"],
-            &["asks"],
-            &["notes"],
-            &["findings"],
-            &["goal", "show", "1"],
-        ] {
-            ok_as(role, &db, args);
-        }
+        assert_eq!(
+            refused_as("review-job", &db, args),
+            "reviewer may not change queue state",
+            "{args:?}"
+        );
     }
+    for args in [&["list"][..], &["asks"], &["goal", "show", "1"]] {
+        ok_as("review-job", &db, args);
+    }
+    // The legacy role is a job too.
+    assert_eq!(
+        refused_as("reviewer", &db, &["mark", "label"]),
+        "reviewer may not change queue state"
+    );
+    ok_as("reviewer", &db, &["show", "1"]);
     // Nothing was answered or cancelled.
     assert!(ok(&db, &["asks", "--all"])["asks"][0]["answer"].is_null());
     assert_eq!(ok(&db, &["show", "1"])["task"]["status"], "draft");

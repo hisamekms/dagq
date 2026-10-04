@@ -496,3 +496,31 @@ impl crate::application::QueueOpener for SqliteOpener {
         Ok(Box::new(queue))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{LeaseToken, RunId, RunLease};
+
+    fn lease(pid: u32, heartbeat_at: i64) -> RunLease {
+        RunLease {
+            run_id: RunId::new("11111111-1111-4111-8111-111111111111").unwrap(),
+            token: LeaseToken::new("first"),
+            pid,
+            heartbeat_at,
+        }
+    }
+
+    /// A lease of a live process turns stale one second past
+    /// `HEARTBEAT_TIMEOUT_SECS` (moved from `tests/it/runtime_claim.rs`,
+    /// task 1709); a pid that cannot be a process is stale at once.
+    #[test]
+    fn a_lease_turns_stale_one_second_past_the_heartbeat_timeout() {
+        const T: i64 = 1_900_000_000;
+        let live = lease(std::process::id(), T);
+        assert!(!lease_is_stale(&live, T));
+        assert!(!lease_is_stale(&live, T + HEARTBEAT_TIMEOUT_SECS));
+        assert!(lease_is_stale(&live, T + HEARTBEAT_TIMEOUT_SECS + 1));
+        assert!(lease_is_stale(&lease(u32::MAX, T), T));
+    }
+}

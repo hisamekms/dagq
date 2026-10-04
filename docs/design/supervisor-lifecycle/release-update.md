@@ -4,7 +4,7 @@ type: design
 title: "Release update"
 status: current
 created: 2026-09-27
-updated: 2026-09-30
+updated: 2026-10-04 # task 1709
 last_verified: 2026-09-30
 scope: runtime
 related:
@@ -91,5 +91,5 @@ supervisor側は`src/application/supervise/release.rs`の`release_update_pass`�
 - `tests/it/lifecycle_install.rs`がfakeのbinaryと`ReleaseInstaller`で、jobの確認・差し替え・引き継ぎ・見張りの後の`update_installed`（`source: release`）、cargoの失敗の`update_failed`（置き換えない）、非互換のmigrationの`approve_update`（コマンドに`up`と`--auto-update`が無い）、置き換える先がすでにその版ならcargoを打たず置き換えもしないことを確かめる。
 - `tests/it/lifecycle_install.rs`がfakeの`InstalledPlugin`で、入れ替えの成功の後に2つのコマンドを打ち、`update_installed`の`plugin`と開き直しの`message`（`compact_event`の`reason`）を書くこと、`--plugin-dir`（None）では打たず`skipped: plugin-dir`を書くこと、pluginの更新の失敗は`update_failed`（`stage: plugin`）で`restore`しないこと、見張りの失敗でバイナリを戻したときはpluginに触らないこと、pluginだけのjobはcargoも差し替えもせず`plugin_only`の`update_installed`か`update_failed`を書くことを確かめる。
 - `tests/it/runtime_release.rs`がstubの`claude`で、バイナリが最新でpluginだけ古いと`release_checked`の`plugin`にversionを書き、pluginについての`approve_release`が1件開き、`install`の答えで`plugin_only`のjobが起動してsupervisorの`--claude`で2つのコマンドを打ち（cargoは打たない）、その後は聞きも起動もしないこと、`--plugin-dir`のsupervisorはpluginを読まず聞かないことを確かめる。また、pluginだけの`approve_release`の答えは古いbuildのsupervisorが適用しても`plugin_only: true`でバイナリのjobを起動しないこと、バイナリの`approve_release`の答えはその版のsupervisorが適用しても`plugin_only: false`でpluginだけのjobを起動しないこと、目的の記録の無いaskは`release`とbuildの一致で決まること、新しいリリースの後に適用されたpluginだけの`install`は起動されず`update_dropped`（`reason: newer_release`・`newer`）が1回だけ残り、新しい版を聞くことを確かめる。
-- `tests/it/installed_plugin.rs`が`plugin_version`と、stubの`claude`で`ClaudePlugin`のversionの読み取り・2つのコマンドの順とcwd・失敗で止まることを確かめる。
+- `src/infrastructure/adapters.rs`のunit test（`plugin_version_reads_the_enabled_entry_of_the_plugin_list`）が`plugin_version`を、`tests/it/installed_plugin.rs`がstubの`claude`で`ClaudePlugin`のversionの読み取り・2つのコマンドの順とcwd・失敗で止まることを確かめる。
 - `tests/it/cli_install_release.rs`が`install --release`（[`install`](install.md)の「リリースから」）を確かめる。

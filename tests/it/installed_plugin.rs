@@ -8,12 +8,7 @@ use crate::common;
 
 use common::lifecycle::*;
 
-use dagq::{
-    application::{PluginState, planner::PLAN_REFUSED},
-    infrastructure::adapters::plugin_state,
-    infrastructure::sqlite::SqliteQueue,
-    lifecycle,
-};
+use dagq::{application::planner::PLAN_REFUSED, infrastructure::sqlite::SqliteQueue, lifecycle};
 use serde_json::Value;
 use std::{fs, path::PathBuf};
 
@@ -71,46 +66,6 @@ fn assert_install_hint(message: &str, command: &str) {
         "{message}"
     );
     assert!(message.contains("pass --plugin-dir"), "{message}");
-}
-
-#[test]
-fn plugin_state_reads_the_json_plugin_list() {
-    assert_eq!(
-        plugin_state(ENABLED, "claude-dagq").unwrap(),
-        PluginState::Enabled
-    );
-    assert_eq!(
-        plugin_state("[]", "claude-dagq").unwrap(),
-        PluginState::Missing
-    );
-    // Enabled in any scope or marketplace counts.
-    assert_eq!(
-        plugin_state(
-            r#"[{"id":"claude-dagq@dagq","enabled":false},{"id":"claude-dagq@fork","enabled":true}]"#,
-            "claude-dagq"
-        )
-        .unwrap(),
-        PluginState::Enabled
-    );
-    assert_eq!(
-        plugin_state(
-            r#"[{"id":"claude-dagq@dagq","enabled":false},{"id":"claude-dagq-extra@dagq","enabled":true}]"#,
-            "claude-dagq"
-        )
-        .unwrap(),
-        PluginState::Disabled(vec!["claude-dagq@dagq".into()])
-    );
-    for unreadable in [
-        "No plugins installed.",
-        "{}",
-        r#"[{"enabled":true}]"#,
-        r#"[{"id":"claude-dagq@dagq"}]"#,
-    ] {
-        assert!(
-            plugin_state(unreadable, "claude-dagq").is_err(),
-            "{unreadable}"
-        );
-    }
 }
 
 /// Without `--plugin-dir`, an enabled claude-dagq lets `up` start as
@@ -250,29 +205,6 @@ fn a_restart_by_the_runtime_does_not_check_the_installed_plugin() {
         printed,
         serde_json::json!({"restart": "1", "arguments": "up --in-cmux"})
     );
-}
-
-#[test]
-fn plugin_version_reads_the_enabled_entry_of_the_plugin_list() {
-    use dagq::infrastructure::adapters::plugin_version;
-    assert_eq!(
-        plugin_version(ENABLED, "claude-dagq").unwrap().as_deref(),
-        Some("0.4.0")
-    );
-    let two = r#"[{"id":"claude-dagq@old","version":"0.1.0","enabled":false},{"id":"claude-dagq@dagq","version":"0.4.0","enabled":true}]"#;
-    assert_eq!(
-        plugin_version(two, "claude-dagq").unwrap().as_deref(),
-        Some("0.4.0")
-    );
-    let disabled = r#"[{"id":"claude-dagq@dagq","version":"0.2.0","enabled":false}]"#;
-    assert_eq!(
-        plugin_version(disabled, "claude-dagq").unwrap().as_deref(),
-        Some("0.2.0")
-    );
-    assert_eq!(plugin_version("[]", "claude-dagq").unwrap(), None);
-    let versionless = r#"[{"id":"claude-dagq@dagq","enabled":true}]"#;
-    assert_eq!(plugin_version(versionless, "claude-dagq").unwrap(), None);
-    assert!(plugin_version("No plugins installed.", "claude-dagq").is_err());
 }
 
 /// The release update reaches the installed plugin through the `claude` it

@@ -511,11 +511,15 @@ impl IdGenerator for FixedIds {
     }
 }
 
+/// The store takes its times and run IDs from the injected generators and
+/// writes them to SQLite: the registration, the claim, the run's lease and
+/// the heartbeats. Whether a lease is stale is `lease_is_stale`'s unit test
+/// in `infrastructure::runtime_store` (task 1709).
 #[test]
-fn an_injected_clock_decides_lease_staleness_and_injected_ids_name_the_run() {
+fn an_injected_clock_stamps_the_heartbeats_and_injected_ids_name_the_run() {
     use dagq::{
         domain::{ClaimOutcome, HEARTBEAT_TIMEOUT_SECS},
-        infrastructure::runtime_store::{RunPlan, lease_is_stale},
+        infrastructure::runtime_store::RunPlan,
     };
     const T: i64 = 1_900_000_000;
     const RUN: &str = "11111111-1111-4111-8111-111111111111";
@@ -546,8 +550,6 @@ fn an_injected_clock_decides_lease_staleness_and_injected_ids_name_the_run() {
     assert_eq!(task.updated_at(), "2030-03-17T17:46:40.000Z");
     let lease = queue.run_lease(run.id()).unwrap().unwrap();
     assert_eq!(lease.heartbeat_at, T);
-    assert!(!lease_is_stale(&lease, T + HEARTBEAT_TIMEOUT_SECS));
-    assert!(lease_is_stale(&lease, T + HEARTBEAT_TIMEOUT_SECS + 1));
     let plan = RunPlan {
         repo_path: "/test".into(),
         run_dir: "/run".into(),

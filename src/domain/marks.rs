@@ -552,7 +552,8 @@ mod tests {
             payload,
             json!({"label": "parallel 4→3", "note": null, "at": null, "by": "human"})
         );
-        assert!(mark_payload("  ", None, None, "human").is_err());
+        let error = mark_payload("  ", None, None, "human").unwrap_err();
+        assert!(error.to_string().contains("needs a label"), "{error}");
         assert!(mark_payload(&"x".repeat(MAX_LABEL_CHARS + 1), None, None, "human").is_err());
     }
 
@@ -569,7 +570,8 @@ mod tests {
         ];
         let payload = retraction_payload(&events, EventId::new(1), "planner").unwrap();
         assert_eq!(payload["label"], json!("host arm64"));
-        assert!(retraction_payload(&events, EventId::new(2), "human").is_err());
+        let error = retraction_payload(&events, EventId::new(2), "human").unwrap_err();
+        assert!(error.to_string().contains("not a mark"), "{error}");
         assert!(retraction_payload(&events, EventId::new(9), "human").is_err());
         events.push(queue_event(
             3,
@@ -637,6 +639,14 @@ mod tests {
         );
         let at = timestamp_millis("2026-09-26T00:45:00Z").unwrap();
         assert_eq!(labels(None, Some(Cursor::Time(at))), ["host arm64"]);
+        assert_eq!(
+            labels(Some(Cursor::Time(at)), None),
+            [
+                "supervisor started: 0.4.0+a, parallel 3",
+                "[run.env] changed: RUSTC_WRAPPER",
+                "supervisor stopped: 0.4.0+a",
+            ]
+        );
     }
 
     #[test]
