@@ -77,6 +77,7 @@ git grep -noE "(task|goal|ask|proposal|finding|note|run|mark)s? [0-9]{1,4}" 7fea
   - `config-rules`（`dagq.toml`・`.config/**`）
   - `plugin-generic`（`plugins/**`: 固有の規則・値・経緯の戻り。plugin testと分担）
   - `receipt-evidence`（`**`: workerのreceiptのevidenceとこのrepositoryの手元の検証の規則との適合。全差分で選び、既存の重複した項目も同じ検査のIDとしてまとめる）
+  - `architecture-boundaries`（`src/**`・`crates/**`: この棚卸しの行ではなくdocs/design/architecture.mdの規則のIDで辿る。task 1547が足した）
   - 「plan review」はsubagentでなくplan review jobが見るもの、「script」は既存のscriptとCIが見るもの、「—」は検査しない（sessionの振る舞い・人の手順・設計の説明）。
 - `runtime-boundary`は棚卸しの行に割り当てが無いため独立agentを置かない。runtimeの固有性の境界はdocs/development/documents.md「pluginの汎用性」から辿る。
 - **移した後の場所**: 後続のtaskが書き込む空の欄。

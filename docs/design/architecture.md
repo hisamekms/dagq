@@ -4,8 +4,8 @@ type: design
 title: レイヤーとコンテキストの境界（contextごとの所有・判断・操作・公開するport・依存の向き・境界をまたぐtransaction・検査できる規則・今の違反）
 status: current
 created: 2026-10-04
-updated: 2026-10-04 # task 1631: the supervise/mod.rs test uses a RunLog fake, its L3 row is gone
-last_verified: 2026-10-04 # task 1631
+updated: 2026-10-04 # task 1547: the review subagent architecture-boundaries checks the rules the script does not
+last_verified: 2026-10-04 # task 1547
 scope: system
 related:
   - adr-t1545-1
@@ -256,6 +256,7 @@ contextを1つに決められず、分ける先のtaskを持つもの。
 - `#[cfg(test)]`の中は、その属性が付いた項目（`mod tests { ... }`・関数・`use`など）の終わりまでと、`#[cfg(test)] mod name;`が宣言するファイル（`name.rs`と`name/`の下）。上のとおりL1・L3・L6では数え、L2・L4では数えない。
 - 許可の一覧は`.config/layer-deps-allow.txt`。1行が1項目で、`規則 | path | 参照 | 行き先のtask | 理由`の5つを`|`で区切る（`#`で始まる行と空行は読まない）。規則はL1・L2・L3・L4・L6のどれか、pathは`src/`からのファイル、参照はscriptが出す参照（`crate::application`・`std::fs`・`SystemTime::now`・`anyhow`など、規則が禁止する形の先頭）、行き先のtaskはtask IDか`,`で区切った複数のtask ID、理由は空でない。同じファイルの同じ参照は何箇所あっても1項目。一覧に無い参照（新しい違反）、一覧にあるのにもう無い参照（古い項目）、書式の誤りと重複はどれもexit 1。
 - 違反を直すtaskは、同じ変更で一覧の項目と下の「今の違反と行き先」の行を消す。
+- 「検査: review」の規則と、境界を変えた差分がこの文書と許可の一覧を直しているかは、`src/**`・`crates/**`の差分で選ばれるreviewのsubagent `architecture-boundaries`（`.dagq/review-agents/architecture-boundaries.md`、[Review](supervisor-lifecycle/review.md#reviewのsubagent)）が見て、scriptが見る規則は見ない。
 
 ## 今の違反と行き先
 

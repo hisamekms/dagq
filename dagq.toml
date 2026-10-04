@@ -211,3 +211,6 @@ paths = ["**"]
 
 [review.subagents.plugin-generic]
 paths = ["plugins/**"]
+
+[review.subagents.architecture-boundaries]
+paths = ["src/**", "crates/**"]
