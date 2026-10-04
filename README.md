@@ -142,7 +142,7 @@ Settings for the host, not the repository, go in `host.toml`: the queue's `<queu
 
 ## Commands
 
-Every command prints JSON on stdout (except `graph --format d2|svg`); a runtime error prints JSON on stderr and exits nonzero. `dagq <command> --help` lists every flag. The plugin's skills run these commands for you; the table is for reading what they do.
+Every command prints JSON on stdout (except `graph --format d2|svg`, and `run log` / `planner log`, which print a background session's log as text); a runtime error prints JSON on stderr and exits nonzero. `dagq <command> --help` lists every flag. The plugin's skills run these commands for you; the table is for reading what they do.
 
 | Area | Commands |
 | --- | --- |
@@ -150,7 +150,7 @@ Every command prints JSON on stdout (except `graph --format d2|svg`); a runtime 
 | Goals | `goal add`, `goal list`, `goal show`, `goal edit`, `goal ready` (open a draft goal), `goal close --verdict achieved\|abandoned`, `goal review` |
 | Tasks | `add`, `edit`, `list`, `show`, `search`, `related`, `draft`, `cancel`, `dependency add\|remove`, `set-goal`, `set-paths`, `set-priority` |
 | Plans | `lint`, `submit`, `proposal list\|show\|withdraw`, `ready ID --bypass-review` (a person only) |
-| Watching | `status [--role inbox]`, `doctor [--full]`, `watch [--role inbox] [--until-attention]`, `events`, `timeline RUN`, `candidates`, `graph`, `run screen\|send`, `planner screen\|send` |
+| Watching | `status [--role inbox]`, `doctor [--full]`, `watch [--role inbox] [--until-attention]`, `events`, `timeline RUN`, `candidates`, `graph`, `run screen\|send\|log`, `planner screen\|send\|log` |
 | Asks and notes | `asks [--open]`, `ask`, `answer ID --text TEXT`, `ask close`, `note`, `notes`, `findings`, `finding` |
 | Landing and recovery | `review ID`, `integrate ID\|--next`, `recover RUN_ID`, `run close-workspaces` |
 | Measuring | `stats`, `kpi`, `forecast`, `report`, `mark`, `marks` |

@@ -45,6 +45,7 @@ pub mod review;
 pub mod screen;
 pub mod screen_idle;
 pub mod session;
+pub mod session_log;
 pub mod stats;
 pub mod supervise;
 pub mod update;

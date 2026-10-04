@@ -61,7 +61,7 @@ host実行ではこの判定は助言的（advisory）で、sandboxでも隔離�
 | 人との対話 | `ask.answer` / `ask.close` | `answer` / `ask close` |
 | | `planner.open` | `plan` |
 | | `request.record` / `request.decline` | `request add` / `request decline`（計画の依頼。[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)の決定3・6、[`plan` / `planners`](supervisor-lifecycle/plan-planners.md#inboxからの計画の依頼)） |
-| | `screen.read` / `screen.send` | `run screen` `planner screen` / `run send` `planner send`（sessionの画面を読む・送る。[ADR-t1228-1](../adr/2026-10-02-t1228-1-inbox-and-planner-reach-sessions-through-the-dagq-cli.md)、[sessionへの送信と確認](supervisor-lifecycle/session-send.md#人とinboxの画面の読み取りと送信)） |
+| | `screen.read` / `screen.send` | `run screen` `planner screen` `run log` `planner log` / `run send` `planner send`（sessionの画面を読む・送る。backgroundのsessionのlogを読む（ADR-t1404-1決定6）。[ADR-t1228-1](../adr/2026-10-02-t1228-1-inbox-and-planner-reach-sessions-through-the-dagq-cli.md)、[sessionへの送信と確認](supervisor-lifecycle/session-send.md#人とinboxの画面の読み取りと送信)） |
 | | `planner.request` | `planner request`（開いている非対話のruntimeのplannerへの続きの依頼を次のturnとして置く。[ADR-t1533-1](../adr/2026-10-03-t1533-1-follow-up-requests-go-to-headless-planners-by-planner-id-and-no-planner-close.md)、[`plan` / `planners`](supervisor-lifecycle/plan-planners.md#続きの依頼と非対話のplannerのcli)）。plannerを閉じるCLIは無い |
 | schedulerの遷移 | `scheduler.supervise` | `supervise` |
 | | `run.recover` | `recover` |
@@ -181,15 +181,15 @@ runtimeの操作系のコマンドは、`src/application/commands/operations.rs`
 | `review ID` | `review.prepare` | task |
 | `session --run RUN` | `session.run` | run（読めないidは`Unresolved`） |
 | `planner-session --planner ID` | `session.run` | planner |
-| `run screen RUN` / `run send RUN` | `screen.read` / `screen.send` | run（数字はtask。読めないidは`Unresolved`） |
-| `planner screen ID` / `planner send ID` | `screen.read` / `screen.send` | planner |
+| `run screen RUN` `run log RUN` / `run send RUN` | `screen.read` / `screen.send` | run（数字はtask。読めないidは`Unresolved`） |
+| `planner screen ID` `planner log ID` / `planner send ID` | `screen.read` / `screen.send` | planner |
 | `planner request ID` | `planner.request` | planner |
 | `session-event open/close` | `session.record` | hookが記録するspan: inboxのspanはqueue、plannerのspanは`DAGQ_PLANNER_ID`のplanner（無いか、`DAGQ_ACTOR_ID`より前に開いたworkspaceならqueue）、spanの無いsession（run）は`--run`、無ければ`DAGQ_RUN_ID`のrun（どちらも無ければ`Unresolved`） |
 
 結果（上のPolicyの表から決まる）:
 
 - userとinboxは全てを打てる（inboxは人の言葉での代行で、dagq-recoverの手作業の`integrate`・`recover`・`review`を含む。区別は記録のactorが持つ）
-- `run screen` / `run send` / `planner screen` / `planner send`はuserとinboxだけ（ADR-t1228-1の決定7）。plannerは自分のplannerのものも拒み（`screen.read`・`screen.send`を持たない）、supervisorも持たない（自分の送信の経路を使う）
+- `run screen` / `run send` / `planner screen` / `planner send`と、backgroundのsessionのlogを読む`run log` / `planner log`はuserとinboxだけ（ADR-t1228-1の決定7）。plannerは自分のplannerのものも拒み（`screen.read`・`screen.send`を持たない）、supervisorも持たない（自分の送信の経路を使う）
 - `planner request`（`planner.request`）はuserとinboxだけ（ADR-t1533-1）。plannerは自分のplannerへのものも拒み、supervisorも持たない（自分の依頼は`send_to_planner`で置く）。成功した依頼は`turn_requested`と`planner_request_handed`を呼び出し元をactorにして記録する
 - `run close-workspaces`（`workspace.cleanup`）はuserとinboxだけ（ADR-t1228-1の決定7）。plannerとsupervisorを含むほかのroleは拒む。supervisorは終わったrunのworkspaceを自分の掃除（[Run workspaces](supervisor-lifecycle/run-workspaces.md)）で閉じ、このCLIを使わない。閉じた`workspace_closed`は呼び出し元をactorにして記録する
 - plannerの権限は`up`・`down`・`install`・`init`・`migrate`・`rebind`・`plan`と、自分のplannerの`planner-session`と`session-event`を許す（ADR-t728-1の決定7のとおり今の権限のまま）。plannerはruntimeだけが立て、人が頼む相手ではないので（[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)）、`up`・`down`・`install`は使わない（打つのはinboxか人の`DAGQ_ROLE`の無いterminal。[Roles](supervisor-lifecycle/roles.md)）。`plan`は権限の判定を通っても誰が打っても何も開かず、inboxへの依頼の案内（`PLAN_REFUSED`）で失敗する。`integrate`・`recover`・`review`・`supervise`・`observe`・`session`は拒む

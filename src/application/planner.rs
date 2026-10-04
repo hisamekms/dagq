@@ -55,7 +55,7 @@ use crate::domain::{
     PlannerOrigin, PlannerProbe, PlannerRoute, PlannerSession, PlannerState, ProposalId,
     SessionRole, Task,
     actor_model::{ActorLaunch, ModelRole, REVISE_ESCALATION, RoleModels},
-    background_wrapper::{BACKGROUND_FLAG, HeadlessWrapper},
+    background_wrapper::{BACKGROUND_FLAG, BackgroundSession, HeadlessWrapper},
     language::{Language, with_instruction},
     turn::{self, LIMITS_FILE, TurnLimits, exit_path, request_path, turns_dir},
 };
@@ -496,6 +496,12 @@ pub fn run_planner_session(
             return Err(error);
         }
         let session = turn::planner_session_name(&dir.display().to_string(), planner.created_at);
+        // Started in the background, its record is its handle.
+        let background = queue
+            .planner(id)
+            .ok()
+            .and_then(|planner| planner.workspace_id)
+            .is_some_and(|handle| crate::domain::background_wrapper::is_background(&handle));
         let mut child_may_be_alive = false;
         let driven = Turns {
             queue: &mut *queue,
@@ -517,6 +523,7 @@ pub fn run_planner_session(
             pid,
             resume: false,
             sccache: None,
+            background,
         }
         .drive(&mut child_may_be_alive);
         let code = match driven {
@@ -646,6 +653,10 @@ pub struct PlannerView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idle_inferred: Option<Inference>,
     pub dir: PathBuf,
+    /// The wrapper of a planner started in the background (ADR-t1404-1
+    /// decision 8): its pid and the log `planner log` reads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background: Option<BackgroundSession>,
     /// The bundle of drafts a planner of the runtime's was opened for
     /// (ADR-t807-1), with what became of each draft.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -778,6 +789,9 @@ pub fn planner_view(probes: &PlannerProbes<'_>, planner: PlannerSession) -> Resu
         // planner is `working`, and its span is recorded.
         idle_inferred: inferred
             .filter(|inference| idle || inference.background_running == Some(true)),
+        background: planner.workspace_id.as_deref().and_then(|handle| {
+            BackgroundSession::of(handle, dir.join(PLANNER_SESSION_LOG).display().to_string())
+        }),
         dir,
         planner,
         bundle: None,

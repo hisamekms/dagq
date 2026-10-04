@@ -284,9 +284,17 @@ pub fn status(
                 "worktree_path": run.worktree_path(),
                 "lease": lease,
             });
+            let events = queue.run_events(run.id())?;
             // Why it waits or failed (ADR-0034), for a run that has an error.
-            if let Some(code) = reason::run_error_code(&run, &queue.run_events(run.id())?) {
+            if let Some(code) = reason::run_error_code(&run, &events) {
                 entry["last_error_code"] = json!(code);
+            }
+            // A session in the background: its wrapper's pid and its log
+            // (`run log`, ADR-t1404-1 decision 6).
+            if let Some(session) =
+                crate::domain::background_wrapper::current_background_session(&events)
+            {
+                entry["background"] = json!(session);
             }
             Ok(entry)
         })

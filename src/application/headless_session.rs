@@ -29,7 +29,7 @@ use crate::domain::EventKind;
 use anyhow::{Context, Result};
 use serde_json::json;
 use std::{
-    io::IsTerminal,
+    io::{IsTerminal, Write},
     path::{Path, PathBuf},
     thread,
     time::Instant,
@@ -103,6 +103,10 @@ pub(super) struct Turns<'a> {
     /// runs without `RUSTC_WRAPPER` unless the server listens just before
     /// it starts (ADR-t1215-1). `None` when the wrapper names no sccache.
     pub(super) sccache: Option<(&'a SccacheTarget, &'a dyn SccacheServer)>,
+    /// The wrapper runs in the background (ADR-t1404-1 decision 6): its
+    /// stdout is the session's log, not a terminal, and takes the `[dagq]`
+    /// summary of the turns all the same, for `run log` / `planner log`.
+    pub(super) background: bool,
 }
 
 /// The session of the provider a run is on, as its events since it last
@@ -218,11 +222,14 @@ impl Tail {
     }
 }
 
-/// A line for the workspace's terminal, which shows what the turns do;
-/// nothing when the wrapper has no terminal.
-fn say(text: &str) {
-    if std::io::stdout().is_terminal() {
-        println!("[dagq] {text}");
+/// A line for the workspace's terminal, which shows what the turns do, or
+/// for the log of a wrapper in the `background`; nothing otherwise (no
+/// terminal).
+fn say(background: bool, text: &str) {
+    // The summary is a convenience: a write that fails (a full disk under
+    // the log) loses the line, never the session.
+    if background || std::io::stdout().is_terminal() {
+        let _ = writeln!(std::io::stdout(), "[dagq] {text}");
     }
 }
 
@@ -368,7 +375,7 @@ impl<'a> Turns<'a> {
                 None => match self.next_request(&run_dir)? {
                     Some(request) => (request.prompt.clone(), Some(request)),
                     None => {
-                        say("exit requested; the session ends");
+                        say(self.background, "exit requested; the session ends");
                         return Ok(0);
                     }
                 },
@@ -382,10 +389,13 @@ impl<'a> Turns<'a> {
                 // The supervisor wrote the task's prompt again for this
                 // provider's worker.
                 task_prompt = self.files.read_to_string(&run_dir.join("prompt.txt"))?;
-                say(&format!(
-                    "the run moved to {}; a new session starts",
-                    provider.as_str()
-                ));
+                say(
+                    self.background,
+                    &format!(
+                        "the run moved to {}; a new session starts",
+                        provider.as_str()
+                    ),
+                );
             }
             let agent = self.agent(on.provider)?;
             // A session is resumed once its model answered or the agent
@@ -433,16 +443,19 @@ impl<'a> Turns<'a> {
                         "provider": on.provider,
                     }),
                 )?;
-                say(&format!("session {missing} is gone; a new one starts"));
+                say(
+                    self.background,
+                    &format!("session {missing} is gone; a new one starts"),
+                );
                 on.identified = None;
                 again = Some((asked, request));
                 continue;
             }
             if !ended.outcome.goes_on(ended.failure) {
-                say(&format!(
-                    "turn {turn} {}; the session ends",
-                    ended.outcome.as_str()
-                ));
+                say(
+                    self.background,
+                    &format!("turn {turn} {}; the session ends", ended.outcome.as_str()),
+                );
                 return Ok(if ended.outcome == TurnOutcome::Stopped {
                     0
                 } else {
@@ -815,7 +828,7 @@ impl<'a> Turns<'a> {
             payload["launch"] = launch;
         }
         self.record(EventKind::TurnStarted, payload)?;
-        say(&format!("turn {turn} started: {what}"));
+        say(self.background, &format!("turn {turn} started: {what}"));
         Ok(())
     }
 
@@ -919,15 +932,18 @@ impl<'a> Turns<'a> {
                 .as_bytes(),
         )?;
         self.files.rename(&tmp, &marker)?;
-        say(&format!(
-            "turn {turn} {}{}{}",
-            outcome.as_str(),
-            failure.map_or(String::new(), |f| format!(" ({})", f.as_str())),
-            result
-                .message
-                .as_deref()
-                .map_or(String::new(), |m| format!(": {m}"))
-        ));
+        say(
+            self.background,
+            &format!(
+                "turn {turn} {}{}{}",
+                outcome.as_str(),
+                failure.map_or(String::new(), |f| format!(" ({})", f.as_str())),
+                result
+                    .message
+                    .as_deref()
+                    .map_or(String::new(), |m| format!(": {m}"))
+            ),
+        );
         Ok(Turn {
             outcome,
             failure,
@@ -1064,8 +1080,8 @@ impl<'a> Turns<'a> {
                                 });
                             }
                         }
-                        TurnSignal::Said(text) => say(&text),
-                        TurnSignal::Tool(tool) => say(&format!("→ {tool}")),
+                        TurnSignal::Said(text) => say(self.background, &text),
+                        TurnSignal::Tool(tool) => say(self.background, &format!("→ {tool}")),
                     }
                 }
             }
@@ -1103,7 +1119,7 @@ impl<'a> Turns<'a> {
                 };
             }
             if let Some(stop) = stop {
-                say(&format!("stopping the turn: {}", stop.why));
+                say(self.background, &format!("stopping the turn: {}", stop.why));
                 stop_turn(self.processes, child)?;
                 let _ = child.wait();
                 return Ok((None, Some(stop), tail));

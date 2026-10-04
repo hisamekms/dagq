@@ -240,6 +240,7 @@ pub fn run_session(
             pid,
             resume,
             sccache: sccache.as_ref().map(|(target, server)| (target, *server)),
+            background: start == WrapperStart::Background,
         }
         .drive(&mut child_may_be_alive)
     } else {

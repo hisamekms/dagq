@@ -380,6 +380,10 @@ pub trait RunFiles: Send + Sync {
             .saturating_sub(usize::try_from(bytes).unwrap_or(usize::MAX));
         Ok(all[from..].to_vec())
     }
+    /// How many bytes `path` holds now, without reading them.
+    fn size(&self, path: &Path) -> io::Result<u64> {
+        self.read(path).map(|bytes| bytes.len() as u64)
+    }
     fn read_to_string(&self, path: &Path) -> io::Result<String>;
     /// Take an exclusive lock on `path` (created if missing) without
     /// waiting, held across processes until the returned guard drops;

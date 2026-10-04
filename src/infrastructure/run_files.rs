@@ -146,6 +146,9 @@ impl RunFiles for LocalRunFiles {
         file.take(bytes).read_to_end(&mut tail)?;
         Ok(tail)
     }
+    fn size(&self, path: &Path) -> io::Result<u64> {
+        Ok(open_to_read(path)?.metadata()?.len())
+    }
     fn read_to_string(&self, path: &Path) -> io::Result<String> {
         String::from_utf8(self.read(path)?)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))

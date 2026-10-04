@@ -48,7 +48,7 @@ fn cmux_stub(db: &Path) -> PathBuf {
 /// The handles of `kind`'s records of the run of task 2: the wrapper
 /// starts (`wrapper_launched`) or the turns (`turn_started`), each with
 /// its pid and the start recorded.
-fn recorded(db: &Path, kind: &str) -> Vec<BackgroundHandle> {
+pub(crate) fn recorded(db: &Path, kind: &str) -> Vec<BackgroundHandle> {
     payloads(&detail(db), kind)
         .into_iter()
         .filter_map(|p| {
@@ -61,7 +61,7 @@ fn recorded(db: &Path, kind: &str) -> Vec<BackgroundHandle> {
 }
 
 /// Whether the process `handle` names still runs: its pid shows its start.
-fn running(handle: &BackgroundHandle) -> bool {
+pub(crate) fn running(handle: &BackgroundHandle) -> bool {
     handle.is(
         handle.pid,
         SystemProcesses.start_identity(handle.pid).as_deref(),
@@ -70,7 +70,7 @@ fn running(handle: &BackgroundHandle) -> bool {
 
 /// Wait until no wrapper and no turn the run recorded runs.
 #[track_caller]
-fn nothing_left(db: &Path) {
+pub(crate) fn nothing_left(db: &Path) {
     let started = Instant::now();
     loop {
         let left: Vec<BackgroundHandle> = recorded(db, "wrapper_launched")
@@ -92,7 +92,7 @@ fn nothing_left(db: &Path) {
 /// Stops, when the test ends (a failing one included), every wrapper and
 /// turn of the queue at its path that still runs: they are no children of
 /// the test, which the fixture's cleanup would reach.
-struct Leftovers(PathBuf);
+pub(crate) struct Leftovers(PathBuf);
 
 impl Drop for Leftovers {
     fn drop(&mut self) {
@@ -138,7 +138,7 @@ impl Drop for SupervisorProcess {
 /// Supervise the queue at `db` on a thread through the production cmux
 /// adapter, the wrappers' turns run by `claude`, with `reviewer` and
 /// `stall`, until nothing is left to do.
-fn supervise_real(
+pub(crate) fn supervise_real(
     db: &Path,
     repo: &Path,
     claude: &Path,
@@ -166,7 +166,7 @@ fn supervise_real(
 /// The fixture of these tests: task 2 for a headless Claude worker whose
 /// wrapper starts in the background, the stub `claude` its turns run, and
 /// the guard that stops what the run leaves.
-fn background_fixture(turns: &str) -> (Fixture, PathBuf, PathBuf, PathBuf, Leftovers) {
+pub(crate) fn background_fixture(turns: &str) -> (Fixture, PathBuf, PathBuf, PathBuf, Leftovers) {
     let (dir, repo, db, backend) = headless_fixture(&[]);
     wrappers_in_background(&repo);
     set_turns(dir.path(), turns);
@@ -195,7 +195,7 @@ fn turns_only(dir: &Path, headless: &Path) -> PathBuf {
 
 /// A turn that waits (at most 60 s) for the run dir's `go` file, then
 /// commits and writes its receipt; later turns only say so.
-fn waiting_turn() -> String {
+pub(crate) fn waiting_turn() -> String {
     format!(
         r#"case "$TURN" in
 1) i=0; while [ ! -f "$RUN_DIR/go" ] && [ $i -lt 1200 ]; do sleep 0.05; i=$((i + 1)); done; {FINISH} ;;

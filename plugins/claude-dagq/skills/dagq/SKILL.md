@@ -5,7 +5,7 @@ description: Register and inspect dagq goals and tasks through the locally built
 
 # dagq: register and inspect tasks
 
-dagq runs development tasks in cmux workspaces and isolated Git worktrees. This skill drives the `dagq` binary; every command prints JSON on stdout, and a runtime error prints `{"error": ...}` on stderr with exit status 1. Never read or modify the SQLite queue file (no `sqlite3`); the binary is the only interface.
+dagq runs development tasks in cmux workspaces and isolated Git worktrees. This skill drives the `dagq` binary; every command prints JSON on stdout (but `run log` / `planner log` print a session's log as text, and `graph --format d2|svg` its diagram), and a runtime error prints `{"error": ...}` on stderr with exit status 1. Never read or modify the SQLite queue file (no `sqlite3`); the binary is the only interface.
 
 A goal is the problem several tasks solve together; a task is one unit of work a session executes in its own worktree. Registering and submitting belong to a planner the runtime opens (`dagq-planner`); a person asks for a plan through the inbox (`request add`; `plan` is refused). The supervisor runs plan review of each proposal, runs and lands the queue, and has a goal review close a finished goal; its asks and attention go to the inbox (`dagq-inbox`); what a person does by hand (up / down, recovery, a review by hand) is `dagq-recover`.
 

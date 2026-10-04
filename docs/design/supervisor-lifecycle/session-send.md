@@ -4,8 +4,8 @@ type: design
 title: "sessionへの送信と確認"
 status: current
 created: 2026-09-26
-updated: 2026-10-03
-last_verified: 2026-10-03
+updated: 2026-10-04 # task 1406
+last_verified: 2026-10-04 # task 1406
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -38,6 +38,7 @@ task 285。supervisorが生きているsessionに打つもの（resumeの解消�
 
 - 自由な文・集合の外のキー・`--key`と`--answer`の両方・どちらも無い送信は、cmuxを呼ぶ前に拒む。`stalled`の`intervene`の指示のような人の文は、先にaskの答えとして記録してから`--answer`で送る
 - 非対話のrun（`worker_mode: headless`）は画面を持たない。`run screen`は`screen: null`とturnの出力の場所（run dirの`turns/`）を返し（何も読まないので`screen_read`は残さない）、`run send`は拒む（答えは今までどおり`answer`で、supervisorが次のturnとして送る）。workspaceが閉じたrun（`workspace_closed_at`）・workspaceの無いrun、閉じたplanner（`closed_at`）・workspaceの無いplannerは拒む
+- backgroundで動く非対話のsession（[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)）のturnの要約は、画面の代わりに`run log RUN [--lines N] [--follow]` / `planner log ID [--lines N] [--follow]`でそのlogを読む（終わったrun・閉じたplannerも。capabilityは`screen.read`で、何も記録しないのでqueueを読み取りで開く。[非対話のworker](headless-worker.md#workspaceなしのbackgroundのwrapper)の「logを読むCLI」）
 - 記録: 読むと`screen_read`、送ると`screen_input_sent`を残す。runはそのrunのevent、plannerはqueueのevent（`planner_id`）で、どちらもeventのactor（呼び出し元のroleとid）を持つ。payloadは`target`（`run` / `planner`）・`workspace_id`と、読み取りは行数、送信は`input`（`keys` / `answer`）・`keys`か`ask_id`・`outcome`（キーは`sent`、打った文と`/exit`は`submitted` / `dialog` / `stuck` / `unsent`）・`retries`。画面の中身はeventに載せない。どちらもattentionにはしない
 - 判定: capabilityは`screen.read`・`screen.send`で、userとinboxだけが持つ（[Authorization](../authorization.md)）。`Operation`の入口で判定し、拒めば`authorization_denied`を残す。読むこともeventを残すので、どちらも状態を変えるコマンドとしてqueueを書き込みで開く（本番queueでは固定バイナリで打つ）
 - 送信の判定（`AgentSignals`）はClaude Codeの画面のもの（`ClaudeCode`）を使う。画面を持つsessionはClaude Codeだけのため

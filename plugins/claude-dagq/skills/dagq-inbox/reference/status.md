@@ -17,7 +17,7 @@ Read this when a field of `status`, `watch` or `show` is unclear.
   - `last_seen_at` (unix seconds; `null` if no watch ever ran) and `absent_secs` (only while `absent`): how long the inbox has gone unwatched. Tell the person when it was long: asks opened meanwhile reached nobody.
   - While it is `absent` and an ask has waited 5 minutes, the supervisor types one line into this inbox (`dagq: N open ask(s) wait for the inbox and no ... watch ... is running`) when your screen is idle and your input box empty; once more 10 minutes later, then it notifies the person. On that line, run `status --role inbox`, then start the watch as `watch.md` says, and show the open asks.
 - `waiting`: the runs outside the slots (below), one entry each.
-- `runs`: unfinished runs with their leases and `worktree_path`.
+- `runs`: unfinished runs with their leases and `worktree_path`. A run whose session runs in the background (no workspace) has `background`: its wrapper's `pid`, `start` and `log` (`show` gives the same on its latest run, `planners` on a runtime planner's). Read that session with `"$DAGQ" run log RUN` (or `planner log ID`), not `run screen`: "Watching a background session" below.
 - `attention`: each with `run_id`, `task_id`, `status`, `kind` (the run event that brought it there), `last_error` and a fixed `next`:
   - `reviewing (runtime)`: `awaiting_integration` under the supervisor's lease: its headless review and what follows from the verdict (ADR-0027); nothing to do.
   - `review by hand`: `awaiting_integration` after `review_failed` (the headless review failed) with no open `approve_landing` ask; the person reviews it and has it integrated (the `dagq-recover` skill, section 6). A failed review normally opens that ask in the same step (with the failure and the `review.md` path), and then shows only as the ask.
@@ -119,6 +119,19 @@ Registering one (`"$DAGQ" ask --kind <kind> --because <reason> --question <text>
 - `backend_failures`: `{count, by_op, retried, exhausted, retried_by_op, exhausted_by_op, max_load_avg, max_slots, by_load_band}` — cmux calls that failed or timed out (30 s each) in the window: after `--since` (otherwise since the oldest returned run started) up to `--until` or the latest event, not the page's `next_cursor`. `by_op` counts per call (`create`, `create_named`, `capture`, `close`, `send_exit`, `exists`, `ensure_group`); `retried` counts the failed attempts that were retried (non-null `retry_after_ms`) and `exhausted` the failures that gave up (null or missing `retry_after_ms`, which includes events from before the retry), with `retried + exhausted = count` and each split per op in `retried_by_op` / `exhausted_by_op`; `max_load_avg` is the highest 1-minute load average recorded with one (null when unavailable) and `max_slots` the most runs the supervisor held then. Each failure is a `backend_call_failed` event (`op`, `workspace_id`, `timeout_secs`, `error`, `load_avg`, `slots`, `parallel`, `attempt`, `max_attempts`, `retry_after_ms`: a `capture`, `exists` or a `send_text` that left no trace on the screen is retried with backoff after a timeout, and every failed attempt is one event), on its run when it was for one and on no task for `up` / `down` / the workspace group. `cleanup_failed`, `screen_capture_failed` and `exit_request_timed_out` are still recorded as before; the first two also produce a `backend_call_failed`, while `exit_request_timed_out` (a session that did not exit) does not — only a failed `send_exit` does.
 - `waiting`: `{started: {<ask_kind>: count}, waited: {<ask_kind>: {count, total_secs, median_secs, max_secs}}, slot_wait: {count, total_secs, median_secs, max_secs}, over_parallel, deferred}` — the waits started in the window per ask kind, how long they waited (`total_secs` is the slot time a waiting run would have held), how long each run waited to get its slot back (about 0 for one that returned at once), how many came back beyond `--parallel`, and how often `--max-waiting` deferred a wait. The alert `idle_slots` counts no waiting or returning run as busy.
 - The alert `backend_failures` (`value` the count, `threshold` 2, no task or run): two or more failures in the window, counted from `count` (retried attempts included). A high `max_load_avg` with it is the evidence for proposing a lower `--parallel`; the observer reads it from `stats` and does not fix it.
+
+## Watching a background session
+
+A headless session may run as a background process instead of in a cmux workspace (`[headless] wrapper = "background"` in the repository's `dagq.toml`, ADR-t1404-1). Nothing shows it on a screen: its wrapper writes the `[dagq]` line of each turn (its start, the agent's text, its tools, its outcome) to its log. When the person wants to see what such a run or planner does, or before you report one that seems stuck:
+
+```sh
+"$DAGQ" run log RUN                # the run id, or the task id for its latest run; the whole log
+"$DAGQ" run log RUN --lines 40     # the last 40 lines
+"$DAGQ" run log RUN --follow       # keep printing until the wrapper ends (run it in the background, or let the person run it in their own terminal)
+"$DAGQ" planner log ID [--follow]  # a runtime planner's, the id from `planners`
+```
+
+It finds the log from the queue: never build the path yourself. An ended run's and a closed planner's log stay readable. It prints the log's text, not JSON. A session in a workspace is refused (use `run screen`, or `planner screen` for a planner). Each turn's raw output stays in the `turns/` directory of the run dir (`show ID --full`) or planner dir, and `"$DAGQ" timeline RUN` gives the times. Nothing can be typed into it: the supervisor sends an answer as its next turn.
 
 ## show
 

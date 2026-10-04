@@ -274,6 +274,70 @@ pub fn last_planner_turn(events: &[super::RunEvent]) -> Option<BackgroundHandle>
         })
 }
 
+/// A session wrapper started in the background, as a person reads it
+/// (`show`, `status`, `planners`, ADR-t1404-1 decision 6): its handle, pid
+/// and start, and the log its output goes to.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct BackgroundSession {
+    pub handle: String,
+    pub pid: u32,
+    pub start: String,
+    pub log: String,
+}
+
+impl BackgroundSession {
+    /// The wrapper `handle`, writing to `log`; `None` for a workspace ID.
+    pub fn of(handle: &str, log: String) -> Option<Self> {
+        let parsed = BackgroundHandle::parse(handle)?;
+        Some(Self {
+            handle: handle.to_owned(),
+            pid: parsed.pid,
+            start: parsed.start,
+            log,
+        })
+    }
+
+    /// The process the handle names.
+    pub fn wrapper(&self) -> BackgroundHandle {
+        BackgroundHandle {
+            pid: self.pid,
+            start: self.start.clone(),
+        }
+    }
+}
+
+/// The background session a run started last, of its events `events`
+/// (oldest first): the handle and log of its last `wrapper_launched`, an
+/// ended one included, so that its log is read after the run ended.
+pub fn last_background_session(events: &[super::RunEvent]) -> Option<BackgroundSession> {
+    events
+        .iter()
+        .rfind(|event| event.kind == super::event_kind::WRAPPER_LAUNCHED)
+        .and_then(|event| {
+            BackgroundSession::of(
+                event.payload["workspace_id"].as_str()?,
+                event.payload["log"].as_str()?.to_owned(),
+            )
+        })
+}
+
+/// The session the run opened last when it was started in the background
+/// ([`last_background_session`] with no later session's
+/// `workspace_created`); `None` while a session in a workspace is the
+/// last.
+pub fn current_background_session(events: &[super::RunEvent]) -> Option<BackgroundSession> {
+    let launched = events
+        .iter()
+        .rposition(|event| event.kind == super::event_kind::WRAPPER_LAUNCHED)?;
+    if events[launched + 1..]
+        .iter()
+        .any(|event| event.kind == super::event_kind::WORKSPACE_CREATED)
+    {
+        return None;
+    }
+    last_background_session(events)
+}
+
 /// The log in the run dir the background wrapper of a session writes its
 /// output to: `session.log` for the worker's session, one per resume and
 /// per reopening (`resume` is the attempt).
@@ -567,5 +631,51 @@ mod tests {
             ),
         ];
         assert_eq!(last_planner_turn(&events), None);
+    }
+
+    #[test]
+    fn a_runs_background_session_is_its_last_wrapper_launched() {
+        let created =
+            |id: &str| event("workspace_created", serde_json::json!({"workspace_id": id}));
+        let launched = |handle: &BackgroundHandle, log: &str| {
+            event(
+                "wrapper_launched",
+                serde_json::json!({"pid": handle.pid, "start": handle.start, "workspace_id": handle.to_string(), "log": log}),
+            )
+        };
+        let first = BackgroundHandle::new(40, START);
+        let resume = BackgroundHandle::new(41, OTHER);
+        assert_eq!(last_background_session(&[created("WS-1")]), None);
+        let events = [
+            created(&first.to_string()),
+            launched(&first, "/r/session.log"),
+            created(&resume.to_string()),
+            launched(&resume, "/r/session-resume-1.log"),
+        ];
+        let session = current_background_session(&events).unwrap();
+        assert_eq!(
+            session,
+            BackgroundSession {
+                handle: resume.to_string(),
+                pid: 41,
+                start: resume.start.clone(),
+                log: "/r/session-resume-1.log".into(),
+            }
+        );
+        assert_eq!(session.wrapper(), resume);
+        assert_eq!(last_background_session(&events), Some(session.clone()));
+        // A later session in a workspace is the run's current one; the
+        // background log stays readable.
+        let mut later = events.to_vec();
+        later.push(created("WS-2"));
+        assert_eq!(current_background_session(&later), None);
+        assert_eq!(last_background_session(&later), Some(session));
+        // A record without its log, or of a workspace ID, names none.
+        let bare = event(
+            "wrapper_launched",
+            serde_json::json!({"pid": 40, "workspace_id": first.to_string()}),
+        );
+        assert_eq!(last_background_session(&[bare]), None);
+        assert_eq!(BackgroundSession::of("WS-1", "/x".into()), None);
     }
 }

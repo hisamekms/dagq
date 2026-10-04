@@ -10,6 +10,7 @@ mod common;
 mod runtime_support;
 
 mod actor_model;
+mod background_logs;
 mod broker_podman;
 mod cli_actor;
 mod cli_areas;

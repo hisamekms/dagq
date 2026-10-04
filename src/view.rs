@@ -6,10 +6,15 @@
 
 use serde_json::{Map, Value, json};
 
-use crate::domain::{GoalDetail, OBSERVATION_KIND, RunEvent, TaskDetail, reason};
+use crate::domain::{
+    GoalDetail, OBSERVATION_KIND, RunEvent, TaskDetail,
+    background_wrapper::current_background_session, reason,
+};
 
 /// The one key of a command's value that is printed as is instead of as
-/// JSON: `graph --format d2|svg` without `--out`.
+/// JSON: `graph --format d2|svg` without `--out`, and `run log` /
+/// `planner log`, which print a session's log themselves and leave it
+/// empty.
 pub const RAW_STDOUT: &str = "__dagq_raw_stdout";
 /// Characters a long text field keeps before `…`.
 pub const TEXT_LIMIT: usize = 300;
@@ -79,8 +84,14 @@ pub fn task_detail(detail: &TaskDetail, events: usize) -> Value {
                 ],
             );
             truncate_fields(&mut run, &["last_error"]);
-            if let Some(code) = reason::run_error_code(latest, &run_events(detail, latest)) {
+            let events = run_events(detail, latest);
+            if let Some(code) = reason::run_error_code(latest, &events) {
                 run.insert("last_error_code".into(), json!(code));
+            }
+            // A session in the background: its wrapper's pid and its log
+            // (`run log`, ADR-t1404-1 decision 6).
+            if let Some(session) = current_background_session(&events) {
+                run.insert("background".into(), json!(session));
             }
             Value::Object(run)
         })

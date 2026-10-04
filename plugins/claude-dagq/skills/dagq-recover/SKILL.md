@@ -55,7 +55,7 @@ Attention `review by hand` (`review_failed`: the supervisor's headless review fa
 
 ## 7. A run's session: dialogs, stalls, stuck exits, undelivered answers
 
-The answer of a `stuck_exit`, `answer_prompt` or `stalled` ask, and `send the answer of ask <id> to the worker and close it`, are carried out with `"$DAGQ" run screen RUN` and `run send RUN --key K` / `--answer ASK` (never `cmux`), never by `recover` while a supervisor runs. Follow `reference/session.md` (also `input_not_ready`, `send_unconfirmed` and a headless run, which has no screen or keys), `reference/stuck-exit.md` for `stuck_exit` and `reference/stalled.md` for a `stalled` `intervene`. What the runtime's resume sends and when it ends: `reference/resume.md`; never open a resume workspace yourself.
+The answer of a `stuck_exit`, `answer_prompt` or `stalled` ask, and `send the answer of ask <id> to the worker and close it`, are carried out with `"$DAGQ" run screen RUN` and `run send RUN --key K` / `--answer ASK` (never `cmux`), never by `recover` while a supervisor runs. Follow `reference/session.md` (also `input_not_ready`, `send_unconfirmed` and a headless run, which has no screen or keys; one in the background is read with `"$DAGQ" run log RUN [--follow]`, a planner's with `planner log ID`), `reference/stuck-exit.md` for `stuck_exit` and `reference/stalled.md` for a `stalled` `intervene`. What the runtime's resume sends and when it ends: `reference/resume.md`; never open a resume workspace yourself.
 
 ## 8. Bypass plan review; a failed plan or goal review
 

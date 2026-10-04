@@ -4,8 +4,8 @@ type: design
 title: "`session` wrapper"
 status: current
 created: 2026-09-26
-updated: 2026-10-03
-last_verified: 2026-10-03
+updated: 2026-10-04 # task 1406
+last_verified: 2026-10-04 # task 1406
 scope: runtime
 related:
   - adr-t1404-1
@@ -25,4 +25,4 @@ cmux workspaceが起動する隠しコマンド。TTYが必要で、パイプか
 
 runの`worker_mode`が`headless`なら、2と3の代わりに`src/application/headless_session.rs`の`Turns`が1 turnごとに非対話の呼び出しを起動し、run dirの`turns/`の依頼を待ってsessionをresumeし、turnを記録してidle markerを書き、終了の依頼で終わる（[非対話のworker](headless-worker.md)）。最初のturnのprocessを`agent`として登録し（`agent_started`、runが`running`になる）、後のturnは起動のたびに同じ`agent`の行の`pid`をそのturnのprocessに差し替える（`register_turn_agent`。eventも状態遷移も無い。task 862）。
 
-**backgroundのwrapper**: [ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)（goal 89）で、`dagq.toml`の`[headless] wrapper = "background"`を選んだ非対話のsessionでは、supervisorがwrapperをcmuxのworkspaceでなく切り離したprocess（`setsid`、親は1）として`session ... --background`で起動する。入口（`compose::wrapper_entry`）はTTYを確かめず、`CMUX_WORKSPACE_ID`の自分のworkspaceを持たずに自分で`setsid`する。1の`workspace_id`の代わりに、supervisorが記録した起動（`wrapper_launched`の`pid`が自分のpid）を待って登録する（`WrapperStart`）。envはworkspaceの`--env`でなくprocessのenvで受け、`[dagq]`の要約はrun dirの`session.log`に書く。止めるのはworkspaceのcloseのhangupでなく、終了の依頼と、pid・process groupへのsignal（SIGTERMの後に残ればSIGKILL）。workspaceのときは今のまま。詳細は[非対話のworker](headless-worker.md#workspaceなしのbackgroundのwrapper)。
+**backgroundのwrapper**: [ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)（goal 89）で、`dagq.toml`の`[headless] wrapper = "background"`を選んだ非対話のsessionでは、supervisorがwrapperをcmuxのworkspaceでなく切り離したprocess（`setsid`、親は1）として`session ... --background`で起動する。入口（`compose::wrapper_entry`）はTTYを確かめず、`CMUX_WORKSPACE_ID`の自分のworkspaceを持たずに自分で`setsid`する。1の`workspace_id`の代わりに、supervisorが記録した起動（`wrapper_launched`の`pid`が自分のpid）を待って登録する（`WrapperStart`）。envはworkspaceの`--env`でなくprocessのenvで受け、`[dagq]`の要約は端末が無くてもrun dirの`session.log`に書き（`Turns`の`background`、task 1406）、人は`dagq run log RUN [--follow]`で読む。止めるのはworkspaceのcloseのhangupでなく、終了の依頼と、pid・process groupへのsignal（SIGTERMの後に残ればSIGKILL）。workspaceのときは今のまま。詳細は[非対話のworker](headless-worker.md#workspaceなしのbackgroundのwrapper)。

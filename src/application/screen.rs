@@ -155,7 +155,7 @@ pub struct ScreenPorts<'a> {
 }
 
 /// The run `target` names: the run, or its task's latest run.
-fn resolve_run(queue: &mut dyn Queue, target: &RunTarget) -> Result<TaskRun> {
+pub(crate) fn resolve_run(queue: &mut dyn Queue, target: &RunTarget) -> Result<TaskRun> {
     match target {
         RunTarget::Run(id) => queue.run(id),
         RunTarget::Task(id) => match queue.show(*id)?.runs.pop() {

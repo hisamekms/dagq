@@ -1589,6 +1589,22 @@ enum RunCommand {
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
     },
+    /// Print the output of the run's session wrapper started in the
+    /// background (ADR-t1404-1): the `[dagq]` summary of each turn (its
+    /// start, the agent's text, its tools, its outcome) in the log of the
+    /// session the run started last, an ended run's too. With --follow,
+    /// keep printing what the wrapper appends until it ends. A run whose
+    /// session runs in a workspace is refused (`run screen`).
+    Log {
+        /// Run ID, or a task ID for the task's latest run.
+        run: String,
+        /// Only the last N lines; without it, the whole log.
+        #[arg(long)]
+        lines: Option<usize>,
+        /// Keep printing what the wrapper appends until it ends.
+        #[arg(long, short = 'f')]
+        follow: bool,
+    },
     /// List, or with --apply close, the workspaces ended runs (integrated, succeeded, failed,
     /// interrupted) left open that cmux still lists, as the supervisor's sweep would; it needs
     /// no supervisor. Without RUN or --task: every run the sweep takes. RUN or --task also takes
@@ -1624,6 +1640,20 @@ enum PlannerCommand {
         /// cmux executable.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
+    },
+    /// Print the output of the planner's session wrapper started in the
+    /// background (ADR-t1404-1 decision 8): the `[dagq]` summary of each
+    /// turn in `session.log` of its directory, a closed planner's too.
+    /// With --follow, keep printing what the wrapper appends until it
+    /// ends. A planner in a workspace is refused (`planner screen`).
+    Log {
+        planner: i64,
+        /// Only the last N lines; without it, the whole log.
+        #[arg(long)]
+        lines: Option<usize>,
+        /// Keep printing what the wrapper appends until it ends.
+        #[arg(long, short = 'f')]
+        follow: bool,
     },
     /// Type into the planner's session one or more keys of the set (enter,
     /// escape, up, down, 1-9, or exit alone for `/exit`), or the answer of
@@ -2081,18 +2111,22 @@ fn operation(command: &Command, env: impl Fn(&str) -> Option<String>) -> Option<
         }
         Command::Run {
             command:
-                command
-                @ (RunCommand::Screen { run: target, .. } | RunCommand::Send { run: target, .. }),
+                command @ (RunCommand::Screen { run: target, .. }
+                | RunCommand::Log { run: target, .. }
+                | RunCommand::Send { run: target, .. }),
         } => {
             let resource = dagq::application::screen::RunTarget::parse(target)
                 .map_or(Resource::Unresolved, |target| target.resource());
             match command {
-                RunCommand::Screen { .. } => Operation::ReadScreen(resource),
+                // A background session's log is read as its screen is.
+                RunCommand::Screen { .. } | RunCommand::Log { .. } => {
+                    Operation::ReadScreen(resource)
+                }
                 _ => Operation::SendToScreen(resource),
             }
         }
         Command::Planner { command } => match command {
-            PlannerCommand::Screen { planner, .. } => {
+            PlannerCommand::Screen { planner, .. } | PlannerCommand::Log { planner, .. } => {
                 Operation::ReadScreen(Resource::Planner(PlannerId::new(*planner)))
             }
             PlannerCommand::Send { planner, .. } => {
@@ -2909,10 +2943,20 @@ fn execute(cli: Cli) -> Result<Value> {
             }
         };
     }
-    // `report` and `graph --out` write files but no queue state.
+    // `report` and `graph --out` write files but no queue state; `run log`
+    // and `planner log` read a session's log, recording nothing.
     let mut queue = if reads_only(&cli.command)
-        || matches!(cli.command, Command::Report { .. } | Command::Graph { .. })
-    {
+        || matches!(
+            cli.command,
+            Command::Report { .. }
+                | Command::Graph { .. }
+                | Command::Run {
+                    command: RunCommand::Log { .. }
+                }
+                | Command::Planner {
+                    command: PlannerCommand::Log { .. }
+                }
+        ) {
         dagq::compose::open_queue_read_only(&db)?
     } else {
         dagq::compose::open_queue(&db)?
@@ -3711,6 +3755,13 @@ fn execute(cli: Cli) -> Result<Value> {
                     &RunTarget::parse(&run)?,
                     lines,
                 )?,
+                RunCommand::Log { run, lines, follow } => {
+                    let log = dagq::application::session_log::run_log(
+                        &mut queue,
+                        &RunTarget::parse(&run)?,
+                    )?;
+                    print_session_log(&log, lines, follow)?
+                }
                 RunCommand::Send {
                     run,
                     keys,
@@ -3779,6 +3830,18 @@ fn execute(cli: Cli) -> Result<Value> {
                     PlannerId::new(planner),
                     lines,
                 )?,
+                PlannerCommand::Log {
+                    planner,
+                    lines,
+                    follow,
+                } => {
+                    let log = dagq::application::session_log::planner_log(
+                        &queue,
+                        &dagq::infrastructure::location::planners_dir(&db),
+                        PlannerId::new(planner),
+                    )?;
+                    print_session_log(&log, lines, follow)?
+                }
                 PlannerCommand::Send {
                     planner,
                     keys,
@@ -4221,6 +4284,28 @@ fn run(mut arguments: Vec<OsString>) -> Result<Value> {
 
 use dagq::view::RAW_STDOUT;
 
+/// Print `log` to stdout as `run log` / `planner log` do, following it
+/// with `follow`; nothing is left for the JSON output.
+fn print_session_log(
+    log: &dagq::application::session_log::SessionLog,
+    lines: Option<usize>,
+    follow: bool,
+) -> Result<Value> {
+    use dagq::application::session_log::{FOLLOW_INTERVAL, LogPorts, print};
+    use dagq::infrastructure::{adapters::SystemProcesses, run_files::LocalRunFiles};
+    print(
+        &LogPorts {
+            files: &LocalRunFiles,
+            processes: &SystemProcesses,
+        },
+        log,
+        lines,
+        follow.then_some(FOLLOW_INTERVAL),
+        &mut io::stdout().lock(),
+    )?;
+    Ok(json!({ RAW_STDOUT: "" }))
+}
+
 fn main() -> ExitCode {
     let result = run(env::args_os().collect()).and_then(|value| {
         let mut stdout = io::stdout().lock();
@@ -4398,8 +4483,10 @@ mod tests {
             ("planner-session", &["--planner", "1", "--claude", "/c"]),
             ("session-event", &["open"]),
             ("run screen", &["r1"]),
+            ("run log", &["r1", "--follow"]),
             ("run send", &["1", "--key", "enter"]),
             ("planner screen", &["1"]),
+            ("planner log", &["1", "--lines", "5"]),
             ("planner send", &["1", "--answer", "2"]),
             ("planner request", &["1", "--text", "t"]),
             ("add", &["t"]),
