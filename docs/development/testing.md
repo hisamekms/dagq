@@ -4,7 +4,7 @@ type: development
 title: このrepositoryのtestの制約（coverageの関門・test binary・置き場所・書き方・macOSに固有のtest・判断と境界のtest・ファイルの行数・待ちの上限・e2eとその印・手動スモーク）
 status: current
 created: 2026-10-03
-updated: 2026-10-05 # task 1707; task 1451; task 1238
+updated: 2026-10-05 # task 1707; task 1451; task 1238; task 1352
 owners:
   - hisamekms
 tags:
@@ -84,6 +84,7 @@ testはmacOS（関門とCIの`checks`）とLinux（CIの`linux`、失敗を通�
 - 上限を過ぎるとtest binaryがtestの名前と待っていた条件をstderrに出してexit 101で失敗する（`cargo test --test it`では同じbinaryの残りのtestもそこで止まる。関門のnextestはtestごとのprocessなので止まるのはそのtestだけ）。`cargo test | tail`が戻らなくなることはない。
 - testが起動するシェルの待ち・ループ・stub（taskのverification、stubのagentやturnのscript、reviewerやjobのscript、wrapperのscript、`#[cfg(test)]`の子プロセス）は、testが成功・失敗・panic・時間切れのどれで終わっても終わる形にする。testが書くファイルを待つときは`while [ ! -f ... ]`を直接書かず、`tests/common`の`await_file`（シェルの単語を待つ）か`await_path`（pathを引用して待つ）を使う。stubの前置き（`AGENT_PRELUDE`・`RESUME_PRELUDE`・`headless_claude`と`headless_codex`のstub）は同じシェル関数`await_file`を定義しているので、その中では`await_file "$EXIT.go"`と書く。この待ちは、待つファイルのディレクトリ（testの`TempDir`）が無くなるか、testのprocess（headlessのstubでは`STUB_TEST_PID`、それ以外はシェルの親）が居なくなると抜ける。
 - 無限ループ（`while :`）や長い`sleep`を持つ子は、親を失ったら（`kill -0 "$PPID"`が失敗したら）終わる条件か、`Drop`で子かそのprocess groupをkillするguardの下に置く。`Drop`のguardだけでは足りない: 時間切れの`process::exit`は`Drop`を通らないので、同じkillを`tests/common`の`on_timeout`に登録する（`KillOnDrop`と`runtime_support`の`Fixture`の形）か、子に親の死で終わる条件を持たせて組にする。headlessのstubは`HEADLESS_WATCHDOG`が、testのprocess（`STUB_TEST_PID`）かstubのディレクトリが無くなったら、interactiveのstubは`watchdog!`が親を失ったら、自分のprocess groupをkillする（headlessのstubが親でなくtestを見るのは、testがbackgroundのwrapperをkillして、それが残したturnをruntimeが止めることを確かめるため）。親から切り離して起動する子（testが孤児にするもの）は、ディレクトリの消滅か上限の回数で終わる条件を持たせる。
+- `tests/it`のqueueのserviceを起動するtest（`service start`・`supervise`・`up`のどれを通すものも）は、起動するcommandに`tests/common/service.rs`の`OwnedByTest::owned_by_test`を付けるか、testのprocessの中で動くsupervisorには`owned_executable`を実行ファイルに渡す。serviceは`setsid`と二重のforkでtestから離れるので、`Drop`の`service stop`とqueueのディレクトリの消滅だけでは、時間切れの`process::exit`やSIGKILLで終わったtestのserviceが残る（task 1352。仕組みは[Queue service](../design/queue-service.md)の`owner_gone`）。実バイナリのsupervisorのような長く動く子は`KillOnDrop`の下で起動する。
 
 ## e2e
 

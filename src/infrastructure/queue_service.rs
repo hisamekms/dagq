@@ -46,8 +46,9 @@ use crate::application::queue_service::{
 };
 use crate::application::{Exit, Generators, RunLog, RunNotFound, Spawned, TaskStore};
 use crate::domain::queue_service::{
-    API_VERSION, LOCK_FILE, LOG_FILE, MAX_REQUEST_BYTES, Principal, SERVICE_DIR, SOCKET_FILE,
-    STATE_FILE, ServiceErrorCode, ServiceRequest, ServiceResponse, ServiceState, UseCase,
+    API_VERSION, LOCK_FILE, LOG_FILE, MAX_REQUEST_BYTES, OWNER_PID_ENV, Principal, SERVICE_DIR,
+    SOCKET_FILE, STATE_FILE, ServiceErrorCode, ServiceRequest, ServiceResponse, ServiceState,
+    UseCase,
 };
 use crate::domain::{
     ActorContext, ActorRole, Answerer, Ask, AskId, EventKind, Finding, FindingId, FindingOutcome,
@@ -599,9 +600,31 @@ pub struct ServeOptions {
     pub stop: Arc<AtomicBool>,
     /// How often the loop looks for a connection or a stop.
     pub poll: Duration,
+    /// The process the service stops with ([`OWNER_PID_ENV`]): a test's.
+    /// None in production, where the service runs until it is stopped or
+    /// its queue goes.
+    pub owner: Option<u32>,
 }
 
-/// Run the queue's service until `stop` is set or its queue goes: take
+/// The owner [`OWNER_PID_ENV`] names in `env`, if it names a pid.
+pub fn owner_from_env(env: impl Fn(&str) -> Option<String>) -> Option<u32> {
+    env(OWNER_PID_ENV).and_then(|pid| pid.trim().parse().ok())
+}
+
+/// Whether the service's owner is gone: never without one. A pid another
+/// user's process holds is there, and so is a zombie until its parent
+/// reaps it.
+fn owner_gone(owner: Option<u32>) -> bool {
+    let Some(pid) = owner.and_then(|pid| libc::pid_t::try_from(pid).ok()) else {
+        return false;
+    };
+    // SAFETY: kill(2) with signal 0 only checks the pid; it takes no pointer.
+    let found = unsafe { libc::kill(pid, 0) } == 0;
+    !found && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+/// Run the queue's service until `stop` is set, its queue goes or its
+/// owner does (`owner`, a test's process): take
 /// the queue's lock (a second service of the queue is refused), bind the
 /// socket, record itself, and answer each connection on its own thread.
 pub fn serve(options: &ServeOptions) -> Result<Value> {
@@ -672,6 +695,9 @@ pub fn serve(options: &ServeOptions) -> Result<Value> {
             checked = Instant::now();
             if !options.db.is_file() {
                 break "queue_gone";
+            }
+            if owner_gone(options.owner) {
+                break "owner_gone";
             }
         }
         match listener.accept() {
@@ -1166,6 +1192,23 @@ mod tests {
         // The control side issues no token for itself or a person.
         let user = Principal::of(&ActorContext::user());
         assert!(issue(dir.path(), &user, 1).is_err());
+    }
+
+    #[test]
+    fn a_service_takes_its_owner_from_the_env_and_never_stops_without_one() {
+        let env = |value: &'static str| {
+            move |name: &str| (name == OWNER_PID_ENV).then(|| value.to_owned())
+        };
+        assert_eq!(owner_from_env(env("123")), Some(123));
+        assert_eq!(owner_from_env(env("not a pid")), None);
+        assert_eq!(owner_from_env(|_| None), None);
+        // Production names no owner: the service never stops for one.
+        assert!(!owner_gone(None));
+        assert!(!owner_gone(Some(std::process::id())));
+        // The init process is there, whoever's it is.
+        assert!(!owner_gone(Some(1)));
+        // A gone owner: queue_service::a_service_stops_once_the_test_process_that_started_it_is_gone
+        // in tests/it, with real processes.
     }
 
     #[test]

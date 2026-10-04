@@ -42,6 +42,12 @@ pub const SOCKET_ENV: &str = "DAGQ_SERVICE_SOCKET";
 /// says no `TOKEN`: Codex keeps a variable whose name holds `KEY`,
 /// `SECRET` or `TOKEN` out of the commands it runs.
 pub const CREDENTIAL_FILE_ENV: &str = "DAGQ_SERVICE_CREDENTIAL_FILE";
+/// The variable that names the process a service started with it stops
+/// with: a test names its own pid, so a service it started stops within
+/// seconds of the test's process going, however that ends (a timeout's
+/// `process::exit`, a SIGKILL) and with its queue's directory left behind
+/// (task 1352). Nothing in production sets it.
+pub const OWNER_PID_ENV: &str = "DAGQ_SERVICE_OWNER_PID";
 /// The variables of a client-mode `dagq`.
 pub const CLIENT_ENV: [&str; 2] = [SOCKET_ENV, CREDENTIAL_FILE_ENV];
 /// The longest request line the service reads.

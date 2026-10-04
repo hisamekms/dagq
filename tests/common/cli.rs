@@ -9,7 +9,7 @@ use std::{
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::{Bounded, WithoutActor};
+use super::{Bounded, WithoutActor, service::OwnedByTest};
 
 /// A fresh queue, `queue.db` in a new temporary directory, as `init` with
 /// `--db` leaves it (migrated, bound to no repository), copied from the
@@ -54,7 +54,7 @@ pub fn invoke_with(env: &[(&str, &str)], db: &Path, args: &[&str]) -> Output {
     )
     .unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
-    command.without_actor_env();
+    command.without_actor_env().owned_by_test();
     command.env("PATH", path);
     command.envs(env.iter().copied());
     command

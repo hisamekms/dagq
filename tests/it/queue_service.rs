@@ -411,7 +411,9 @@ fn the_supervisor_starts_the_service_and_holds_its_claims_while_it_is_down() {
     assert_eq!(runs(), 0);
 
     // The binary: the service runs, the attention ends, the task is claimed.
-    let dagq = PathBuf::from(env!("CARGO_BIN_EXE_dagq"));
+    // The tests' binary, with the service it starts stopping once this test
+    // process is gone (task 1352).
+    let dagq = common::service::owned_executable(db.parent().unwrap());
     supervise_with(&db, &repo, &backend, &options(&dagq)).unwrap();
     let started = events(&db, "queue_service_started");
     assert_eq!(started.len(), 1);
@@ -443,7 +445,8 @@ fn the_supervisor_starts_the_service_and_holds_its_claims_while_it_is_down() {
 fn up_starts_the_service_and_down_stops_it() {
     let mut fixture = common::lifecycle::fixture();
     fixture.options.queue_service = true;
-    fixture.environment.current_exe = PathBuf::from(env!("CARGO_BIN_EXE_dagq"));
+    fixture.environment.current_exe =
+        common::service::owned_executable(fixture.location.db.parent().unwrap());
     let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
@@ -605,7 +608,9 @@ fn request_stop(db: &Path, tokens: &[&str]) {
 #[test]
 fn the_last_supervisor_down_asked_stops_the_service_when_its_drain_ends() {
     let (_fixture, repo, db) = idle_queue();
-    let dagq = PathBuf::from(env!("CARGO_BIN_EXE_dagq"));
+    // The service the supervisor starts stops once this test process is
+    // gone (task 1352).
+    let dagq = common::service::owned_executable(db.parent().unwrap());
     let queue_dir = db.parent().unwrap().to_path_buf();
     let running = |state| service::probe(&queue_dir).state == state;
     use dagq::domain::queue_service::ServiceState::{Running as Up, Stopped};
@@ -745,4 +750,95 @@ fn a_service_of_another_build_is_replaced_once_and_then_accepted() {
     assert_eq!(started[0]["payload"]["replaced"]["build"], "0.0.1-old");
     assert_eq!(started[0]["payload"]["restart"], false);
     assert!(events(&db, "queue_service_down").is_empty());
+}
+
+/// Only when [`a_service_stops_once_the_test_process_that_started_it_is_gone`]
+/// runs it: a test that starts its queue's service and then never returns,
+/// timing out (`DAGQ_OWNER_PROBE_MODE=timeout`, the monitor's
+/// `process::exit`) or waiting to be killed.
+#[test]
+#[ignore = "run by a_service_stops_once_the_test_process_that_started_it_is_gone"]
+fn owner_probe() {
+    let Some(dir) = std::env::var_os("DAGQ_OWNER_PROBE") else {
+        return;
+    };
+    let db = PathBuf::from(dir).join("queue.db");
+    drop(common::template::queue(&db));
+    common::service::serve(&db);
+    fs::write(db.with_file_name("served"), "").unwrap();
+    let _waiting = (std::env::var("DAGQ_OWNER_PROBE_MODE").as_deref() == Ok("timeout"))
+        .then(|| common::within(Duration::from_millis(300), "the probe's condition to hold"));
+    loop {
+        std::thread::park();
+    }
+}
+
+/// A test process that ends without its drops, by a timeout's exit or a
+/// SIGKILL, leaves its queue's directory, so the service it started does
+/// not see its queue go; it stops within seconds of the process instead
+/// (task 1352). The two ends run side by side.
+#[test]
+fn a_service_stops_once_the_test_process_that_started_it_is_gone() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::{Command, Stdio};
+    let waited = |what: &str, done: &mut dyn FnMut() -> bool| {
+        let started = std::time::Instant::now();
+        while !done() {
+            assert!(started.elapsed() < Duration::from_secs(60), "{what}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    let mut probes: Vec<_> = ["timeout", "kill"]
+        .into_iter()
+        .map(|mode| {
+            let dir = tempfile::tempdir().unwrap();
+            let probe = common::KillOnDrop::new(
+                Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "queue_service::owner_probe", "--ignored"])
+                    .env("DAGQ_OWNER_PROBE", dir.path())
+                    .env("DAGQ_OWNER_PROBE_MODE", mode)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap(),
+                format!("the {mode} probe"),
+            );
+            (mode, dir, probe)
+        })
+        .collect();
+    for (mode, dir, probe) in &mut probes {
+        waited(
+            &format!("the {mode} probe started the service"),
+            &mut || dir.path().join("served").exists(),
+        );
+        // An owner that exited stays a zombie, there to the service, until
+        // the wait below reaps it: the service runs until then.
+        let running = service::probe(dir.path());
+        assert_eq!(running.state.as_str(), "running", "{mode}: {running:?}");
+        if *mode == "kill" {
+            let pid = libc::pid_t::try_from(probe.child().id()).unwrap();
+            // SAFETY: kill(2) takes no pointer.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+    }
+    for (mode, dir, probe) in &mut probes {
+        let exit = {
+            let _waiting = common::within(common::STEP_LIMIT, format!("the {mode} probe to end"));
+            probe.child().wait().unwrap()
+        };
+        if *mode == "kill" {
+            assert_eq!(exit.signal(), Some(libc::SIGKILL), "{exit:?}");
+        } else {
+            assert_eq!(exit.code(), Some(common::TIMED_OUT), "{exit:?}");
+        }
+        // No drop ran: the queue is there, and only its owner is gone.
+        assert!(dir.path().join("queue.db").is_file(), "{mode}");
+    }
+    for (mode, dir, _) in &probes {
+        waited(&format!("the {mode} probe's service stopped"), &mut || {
+            service::probe(dir.path()).state.as_str() == "stopped"
+        });
+        let log = fs::read_to_string(service::log_path(dir.path())).unwrap();
+        assert!(log.contains("owner_gone"), "{mode}: {log}");
+    }
 }

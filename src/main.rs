@@ -2911,6 +2911,9 @@ fn execute(cli: Cli) -> Result<Value> {
                         reads: dagq::compose::service_reads(),
                         stop: install_stop_signal()?,
                         poll: Duration::from_millis(50),
+                        owner: dagq::infrastructure::queue_service::owner_from_env(|name| {
+                            env::var(name).ok()
+                        }),
                     },
                 )
             }

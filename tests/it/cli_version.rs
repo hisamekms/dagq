@@ -2,7 +2,7 @@ use crate::common;
 use dagq::infrastructure::git_binary::git_executable;
 
 use common::cli::*;
-use common::{Bounded, WithoutActor};
+use common::{Bounded, WithoutActor, service::OwnedByTest};
 
 use std::{
     path::Path,
@@ -443,22 +443,28 @@ fn install_hands_a_running_supervisor_over_under_its_pid_and_rolls_back() {
         String::from_utf8_lossy(&missing.stderr)
     );
 
-    let mut supervisor = Command::new(&fixed)
-        .without_actor_env()
-        .arg("--db")
-        .arg(&db)
-        .args(["supervise", "--observe-interval", "0", "--repo"])
-        .arg(&repo)
-        .arg("--cmux")
-        .arg(&cmux)
-        .arg("--claude")
-        .arg(&claude)
-        // Looks for the handoff every 100ms instead of 2s (task 1048).
-        .args(FAST_SUPERVISOR)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
+    // Killed when the test ends however it does (task 1352): a panic left
+    // it running from the copy, and the service it started with it.
+    let mut supervisor = common::KillOnDrop::new(
+        Command::new(&fixed)
+            .without_actor_env()
+            .owned_by_test()
+            .arg("--db")
+            .arg(&db)
+            .args(["supervise", "--observe-interval", "0", "--repo"])
+            .arg(&repo)
+            .arg("--cmux")
+            .arg(&cmux)
+            .arg("--claude")
+            .arg(&claude)
+            // Looks for the handoff every 100ms instead of 2s (task 1048).
+            .args(FAST_SUPERVISOR)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+        "the supervisor",
+    );
     let registered = || SqliteQueue::open(&db).unwrap().supervisors().unwrap();
     let started = std::time::Instant::now();
     while registered().is_empty() {
@@ -469,7 +475,7 @@ fn install_hands_a_running_supervisor_over_under_its_pid_and_rolls_back() {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     let token = registered()[0].token.clone();
-    assert_eq!(registered()[0].pid, supervisor.id());
+    assert_eq!(registered()[0].pid, supervisor.child().id());
     assert!(registered()[0].handoff_accepted);
 
     for args in [&["--from", env!("CARGO_BIN_EXE_dagq")][..], &["--rollback"]] {
@@ -493,24 +499,24 @@ fn install_hands_a_running_supervisor_over_under_its_pid_and_rolls_back() {
             token.as_str(),
             "{report}"
         );
-        assert_eq!(report["supervisors"][0]["pid"], supervisor.id());
+        assert_eq!(report["supervisors"][0]["pid"], supervisor.child().id());
         assert!(previous.is_file());
         let registration = registered().remove(0);
         assert_eq!(registration.token, token);
-        assert_eq!(registration.pid, supervisor.id());
+        assert_eq!(registration.pid, supervisor.child().id());
         assert_eq!(registration.handoff_binary, None);
         assert_eq!(registration.binary_version.as_deref(), Some(dagq::VERSION));
         assert!(
-            supervisor.try_wait().unwrap().is_none(),
+            supervisor.child().try_wait().unwrap().is_none(),
             "the supervisor exited"
         );
     }
 
     // SIGINT drains the continued supervisor like any other.
-    unsafe { libc::kill(supervisor.id() as i32, libc::SIGINT) };
+    unsafe { libc::kill(supervisor.child().id() as i32, libc::SIGINT) };
     let exit = {
         let _waiting = common::within(common::STEP_LIMIT, "the supervisor to drain on SIGINT");
-        supervisor.wait().unwrap()
+        supervisor.child().wait().unwrap()
     };
     assert!(exit.success());
     assert!(registered().is_empty());
@@ -582,30 +588,36 @@ exec {quoted_bin} \"$@\"\n"
     std::fs::create_dir_all(fixed.parent().unwrap()).unwrap();
     std::fs::copy(bin, &fixed).unwrap();
     let log = dir.path().join("supervisor.log");
-    let mut supervisor = Command::new(&fixed)
-        .without_actor_env()
-        .arg("--db")
-        .arg(&db)
-        .args(["supervise", "--observe-interval", "0", "--repo"])
-        .arg(&repo)
-        .arg("--cmux")
-        .arg(&cmux)
-        .arg("--claude")
-        .arg(&claude)
-        .args(["--auto-update", "--update-interval", "1"])
-        .arg("--update-build-command")
-        .arg(&build)
-        // The e2e gate (ADR-t963-1) passes without running the e2e.
-        .args(["--update-e2e-command", "echo 'test e2e::stub ... ok'"])
-        // The job's watch sees the next heartbeat sooner (task 1048).
-        .args(FAST_SUPERVISOR)
-        .args(["--update-poll-ms", "50"])
-        .stdout(std::process::Stdio::null())
-        // Every process of the supervisor, the exec'd ones too, appends
-        // here: the looks at main are waited for in it.
-        .stderr(std::fs::File::create(&log).unwrap())
-        .spawn()
-        .unwrap();
+    // Killed when the test ends however it does (task 1352): a panic left
+    // it running from the copy, and the service it started with it.
+    let mut supervisor = common::KillOnDrop::new(
+        Command::new(&fixed)
+            .without_actor_env()
+            .owned_by_test()
+            .arg("--db")
+            .arg(&db)
+            .args(["supervise", "--observe-interval", "0", "--repo"])
+            .arg(&repo)
+            .arg("--cmux")
+            .arg(&cmux)
+            .arg("--claude")
+            .arg(&claude)
+            .args(["--auto-update", "--update-interval", "1"])
+            .arg("--update-build-command")
+            .arg(&build)
+            // The e2e gate (ADR-t963-1) passes without running the e2e.
+            .args(["--update-e2e-command", "echo 'test e2e::stub ... ok'"])
+            // The job's watch sees the next heartbeat sooner (task 1048).
+            .args(FAST_SUPERVISOR)
+            .args(["--update-poll-ms", "50"])
+            .stdout(std::process::Stdio::null())
+            // Every process of the supervisor, the exec'd ones too, appends
+            // here: the looks at main are waited for in it.
+            .stderr(std::fs::File::create(&log).unwrap())
+            .spawn()
+            .unwrap(),
+        "the supervisor",
+    );
     // Waits for the look at main's `sha` that builds nothing, for `why`;
     // a later look at the same head starts no job either.
     let looked = |sha: &str, why: &str| {
@@ -650,10 +662,10 @@ exec {quoted_bin} \"$@\"\n"
     let registration = registered().remove(0);
     assert_eq!(
         (registration.token.as_str(), registration.pid),
-        (token.as_str(), supervisor.id())
+        (token.as_str(), supervisor.child().id())
     );
     assert!(
-        supervisor.try_wait().unwrap().is_none(),
+        supervisor.child().try_wait().unwrap().is_none(),
         "the supervisor exited"
     );
     let checkout = db.parent().unwrap().join("update").join("checkout");
@@ -677,10 +689,10 @@ exec {quoted_bin} \"$@\"\n"
         installed(&source)
     });
     assert!(
-        supervisor.try_wait().unwrap().is_none(),
+        supervisor.child().try_wait().unwrap().is_none(),
         "the supervisor exited"
     );
-    assert_eq!(registered()[0].pid, supervisor.id());
+    assert_eq!(registered()[0].pid, supervisor.child().id());
 
     // Once the repository is not dagq's source (ADR-t614-1), runtime
     // landings build nothing; they do again once it is.
@@ -728,7 +740,7 @@ exec {quoted_bin} \"$@\"\n"
     let broken_commit = commit("src/broken");
     wait("the failed update", &mut || {
         // Reaps the supervisor once the broken build's exec ended it.
-        let _ = supervisor.try_wait();
+        let _ = supervisor.child().try_wait();
         updates()
             .iter()
             .any(|u| u.kind == "update_failed" && u.payload["commit"] == broken_commit.as_str())
@@ -820,7 +832,7 @@ exec {quoted_bin} \"$@\"\n"
     assert_eq!(rows, 0);
     let exit = {
         let _waiting = common::within(common::STEP_LIMIT, "the broken supervisor to exit");
-        supervisor.wait().unwrap()
+        supervisor.child().wait().unwrap()
     };
     assert_eq!(exit.code(), Some(3));
 }

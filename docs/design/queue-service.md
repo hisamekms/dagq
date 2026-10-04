@@ -4,8 +4,8 @@ type: design
 title: Queue service
 status: current
 created: 2026-10-02
-updated: 2026-10-04 # task 1571: the goal review job's reads of what its prompt left out (prompt::GOAL_REVIEW_READS)
-last_verified: 2026-10-04 # task 1571
+updated: 2026-10-05 # task 1352: a service a test started stops once the test's process is gone (DAGQ_SERVICE_OWNER_PID, owner_gone)
+last_verified: 2026-10-05 # task 1352
 scope: runtime
 tags:
   - security
@@ -166,7 +166,7 @@ ADR-t1233-1決定7、ADR-t1233-5決定1・2・5、task 1236。`dagq`（`src/main
 
 ## 起動と停止（ADR-t1233-4決定1・2）
 
-serviceは`dagq --db <db> service serve --cmux <cmux>`で、固定バイナリ（`up`かsupervisorを動かしているもの）から起動する。起動するときはactorを名指すenv（`DAGQ_ROLE`など）を外し、`setsid`で起動元のsessionから離し、もう1度forkして起動元の子でなくし（execで入れ替わるsupervisorにzombieを残さない）、`service.log`に出力を足す。起動したものは、このbuildのserviceが答えれば（競った別の起動元のものでも）成功とする。`SIGINT`・`SIGTERM`で受け付けを止めて終わる。queueのDBが消えれば（使い捨てのqueueの片付け）2秒以内に自分で終わる（`outcome: queue_gone`）。
+serviceは`dagq --db <db> service serve --cmux <cmux>`で、固定バイナリ（`up`かsupervisorを動かしているもの）から起動する。起動するときはactorを名指すenv（`DAGQ_ROLE`など）を外し、`setsid`で起動元のsessionから離し、もう1度forkして起動元の子でなくし（execで入れ替わるsupervisorにzombieを残さない）、`service.log`に出力を足す。起動したものは、このbuildのserviceが答えれば（競った別の起動元のものでも）成功とする。`SIGINT`・`SIGTERM`で受け付けを止めて終わる。queueのDBが消えれば（使い捨てのqueueの片付け）2秒以内に自分で終わる（`outcome: queue_gone`）。起動元のenvの`DAGQ_SERVICE_OWNER_PID`（`domain::queue_service::OWNER_PID_ENV`）がpidを名指していれば、そのprocessが居なくなって（親が回収して`kill(pid, 0)`が`ESRCH`になって）から2秒以内にも終わる（`outcome: owner_gone`）。これを付けるのはtestだけで（`tests/common/service.rs`の`OwnedByTest`と`owned_executable`。testのprocessが時間切れの`process::exit`やSIGKILLで`Drop`もqueueのディレクトリの削除も通らずに終わっても、testが起動したserviceを残さない。task 1352）、本番の起動元（`up`・supervisor・`service start`）は付けないので、本番のserviceの寿命（supervisorのexecの引き継ぎやdrainの間も動き続けること）は変わらない。
 
 - `up`: preflightの後、supervisorより先に`application::queue_service::ensure`を打つ。このbuildのserviceが答えれば`reused`、居なければ`started`、別のbuildか答えないものが居れば止めて`replaced`。起動できなければ`up`はsupervisorを起動せずに止まる。結果は`up`の出力の`queue_service`（`outcome`・`service`・`replaced`）で、`started` / `replaced`はevent `queue_service_started`（`by: up`）に残す。`UpOptions::queue_service`がfalse（`up`の他の段のtest）なら何もしない
 - supervisor: `up`が起動したsupervisor（`--once`でないもの）は`QUEUE_SERVICE_INTERVAL`（10秒）ごとにserviceを見て、居ない・答えないものは起動し直し、別のbuildのもの（`install`や自動更新の引き継ぎの前のバイナリが残したもの）は入れ替える（`queue_service_started`、`by: supervisor`、2回目からは`restart: true`、入れ替えなら`replaced`）。起動し直しは`QUEUE_SERVICE_RESTART_WINDOW`（600秒）に`QUEUE_SERVICE_RESTARTS`（3回）まで。別のbuildの入れ替えは数えず、入れ替えて動いたbuildはそれ以後そのまま受け入れる（`install`が新しいバイナリを置いた後でexecの前のsupervisorは、自分のbuildと違う新しいserviceを入れ替え続けない）。drainと引き継ぎの間は見ない（execはserviceを次のプロセスに残し、次のプロセスがbuildの違いで入れ替える）

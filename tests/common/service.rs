@@ -3,7 +3,10 @@
 //! token, never the queue's path, so a test whose stub agent runs `dagq`
 //! starts the queue's service first ([`serve`]) and stops it when done
 //! ([`Served`], or [`unserve`]). A service also stops itself within seconds
-//! of its queue's directory going away.
+//! of its queue's directory going away, and one a test started within
+//! seconds of the test's process going ([`OwnedByTest`]): a timeout's
+//! `process::exit` or a SIGKILL skips the drops and leaves the directory
+//! (task 1352).
 
 use std::{
     collections::HashSet,
@@ -21,9 +24,43 @@ fn served() -> MutexGuard<'static, HashSet<PathBuf>> {
     SERVED.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Has the queue service the command starts, itself or through a
+/// supervisor it runs, stop once this test process is gone
+/// ([`dagq::domain::queue_service::OWNER_PID_ENV`]).
+pub trait OwnedByTest {
+    fn owned_by_test(&mut self) -> &mut Self;
+}
+
+impl OwnedByTest for Command {
+    fn owned_by_test(&mut self) -> &mut Self {
+        self.env(
+            dagq::domain::queue_service::OWNER_PID_ENV,
+            std::process::id().to_string(),
+        )
+    }
+}
+
+/// A `dagq` in `dir` that runs the tests' binary [`OwnedByTest`], for a
+/// supervisor the test runs in its own process to start the service with:
+/// the service would inherit no owner from the test's environment.
+pub fn owned_executable(dir: &Path) -> PathBuf {
+    let wrapper = dir.join("owned-dagq");
+    let owner = std::process::id().to_string();
+    crate::common::template::script_env(
+        &wrapper,
+        "#!/bin/sh\nexport DAGQ_SERVICE_OWNER_PID\nexec \"$OWNED_DAGQ\" \"$@\"\n",
+        &[
+            (dagq::domain::queue_service::OWNER_PID_ENV, &owner),
+            ("OWNED_DAGQ", env!("CARGO_BIN_EXE_dagq")),
+        ],
+    );
+    wrapper
+}
+
 fn dagq(db: &Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_dagq"))
         .without_actor_env()
+        .owned_by_test()
         .arg("--db")
         .arg(db)
         .args(args)
