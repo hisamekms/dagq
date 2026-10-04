@@ -153,8 +153,13 @@ impl QueueRecords for SqliteQueue {
     fn related_landed_commits(&self, task: TaskId, limit: usize) -> Result<Vec<String>> {
         SqliteQueue::related_landed_commits(self, task, limit)
     }
-    fn related_tasks(&self, task: TaskId, limit: usize) -> Result<RelatedPage> {
-        SqliteQueue::related(self, task.as_i64(), &[], limit)
+    fn related_tasks(
+        &self,
+        task: TaskId,
+        statuses: &[String],
+        limit: usize,
+    ) -> Result<RelatedPage> {
+        SqliteQueue::related(self, task.as_i64(), statuses, limit)
     }
     fn search_documents(&self, query: &SearchQuery) -> Result<SearchPage> {
         SqliteQueue::search(self, query)

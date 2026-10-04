@@ -2327,9 +2327,11 @@ pub trait QueueRecords {
     /// `task` (`dagq related`, ADR-0046), for the files it is expected to
     /// touch when it declares no paths (ADR-0069).
     fn related_landed_commits(&self, task: TaskId, limit: usize) -> Result<Vec<String>>;
-    /// The `limit` tasks most related to `task` in any status, best first,
-    /// with their clues (`dagq related`, ADR-0046 decision 4).
-    fn related_tasks(&self, task: TaskId, limit: usize) -> Result<RelatedPage>;
+    /// The `limit` tasks most related to `task`, best first, with their
+    /// clues, kept to `statuses` (empty: any status; `dagq related`,
+    /// ADR-0046 decision 4).
+    fn related_tasks(&self, task: TaskId, statuses: &[String], limit: usize)
+    -> Result<RelatedPage>;
     /// The documents matching `query`, best first (`dagq search`, ADR-0046).
     fn search_documents(&self, query: &SearchQuery) -> Result<SearchPage>;
     /// The goal of every task, for `stats`.

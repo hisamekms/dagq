@@ -2889,6 +2889,7 @@ fn execute(cli: Cli) -> Result<Value> {
                         // A missing cmux fails only an ask's notification.
                         cmux: executable(&cmux).unwrap_or(cmux),
                         generators: generators.clone(),
+                        reads: dagq::compose::service_reads(),
                         stop: install_stop_signal()?,
                         poll: Duration::from_millis(50),
                     },

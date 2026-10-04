@@ -4,8 +4,8 @@ type: design
 title: レイヤーとコンテキストの境界（contextごとの所有・判断・操作・公開するport・依存の向き・境界をまたぐtransaction・検査できる規則・今の違反）
 status: current
 created: 2026-10-04
-updated: 2026-10-04 # task 1546
-last_verified: 2026-10-04 # task 1546
+updated: 2026-10-04 # task 1549
+last_verified: 2026-10-04 # task 1549
 scope: system
 related:
   - adr-t1545-1
@@ -192,9 +192,9 @@ contextを1つに決められず、分ける先のtaskを持つもの。
 | --- | --- | --- |
 | `src/application/ports.rs` | 全てのcontextのportと`Queue`（13のstoreのportのsupertrait）・`QueueOpener` | task 1554（contextごとのmodule）、task 1555（use caseが要るportだけを取る） |
 | `src/application/supervise/mod.rs`の`Supervisor` | 4つのcontextの欄（上の各節）を1つのstructで持ち、`impl Supervisor`のsubmoduleが互いの欄を変える | task 1552（観測と分析・host運用）、task 1553（実行と着地のslotと工程） |
-| `src/compose.rs` | 全てのcontextの組み立てと、use case（`record_mark`・`retract_mark`・`marks`・`read_queue`） | task 1548・1549（use caseをapplicationへ）、task 1556（contextごとの組み立てのmodule） |
+| `src/compose.rs` | 全てのcontextの組み立てと、use case（`record_mark`・`retract_mark`） | task 1548（use caseをapplicationへ）、task 1556（contextごとの組み立てのmodule） |
 | `runtime_store::session_registry`（`SessionRegistry`） | 実行と着地の`session_workspaces`と、計画管理の`planners`（`open_planner`・`close_planner`・`planner_*`） | task 1554（portの分割） |
-| `application::queue_reads` | CLIとqueue serviceの読み取りの入口で、各armは自分のcontextの読み取り | task 1549 |
+| `application::queue_reads` | CLIとqueue serviceの読み取りの入口（`answer`。task 1549で`compose::read_queue`から移した）で、各armは自分のcontextのport（`TaskStore`・`AskStore`・`RunLog`・`EventReads`・`ObserverLog`・`QueueRecords`）と起動部分が組む`QueueReadSources`を読む | 未登録（follow_up） |
 | `application::prompt` | workerのprompt（実行と着地）、inbox・plannerのprompt（計画管理）、observerとスループットの見直しのprompt（観測と分析） | 未登録（follow_up） |
 | `application::health` | `status`・`doctor`とattention（観測と分析）、`recover`（実行と着地）、`doctor`のhostの部分（host運用） | 未登録（follow_up） |
 
@@ -270,10 +270,9 @@ contextを1つに決められず、分ける先のtaskを持つもの。
 | L4 | `src/application/supervise/jobs.rs`（`SystemTime::now`）・`src/application/headless_session.rs`（`SystemTime::now`） | applicationが注入した`Clock`ではなく壁時計を読む | task 1618 |
 | L5 | `src/application`の`Instant::now`（2026-10-04で109箇所。多いのは`supervise/resume.rs`・`lifecycle.rs`・`supervise/session.rs`・`supervise/revise.rs`・`supervise/reopen.rs`・`supervise/adopt.rs`） | 判断が実時間を読む | task 1557（revise・reopen・resume・session）、task 1558（stall・stall_recovery・adopt）。残りは計測（task 1559）の後に判断 |
 | L6 | `src/infrastructure/dialogue.rs`（`crate::compose::record_mark`・`crate::compose::retract_mark`） | infrastructureが起動部分のuse caseを呼ぶ | task 1548 |
-| L6 | `src/infrastructure/queue_service.rs`（`crate::compose::OneShot`・`crate::compose::read_queue`・`crate::view::task_detail`） | infrastructureが起動部分とレイヤーの外を呼ぶ | task 1549（`read_queue`）、task 1556（`OneShot`）、task 1620（`view`） |
+| L6 | `src/infrastructure/queue_service.rs`（`crate::view::task_detail`） | infrastructureがレイヤーの外を呼ぶ | task 1620 |
 | L6 | `src/infrastructure/adapters.rs`（`crate::throughput_review::ACCESS`） | infrastructureがレイヤーの外の定数を読む | task 1615 |
-| L7 | `src/compose.rs`の`record_mark`・`retract_mark`・`marks`（`SystemTime::now`とpayloadの組み立て） | 起動部分にuse caseと時刻の読み取りがある | task 1548 |
-| L7 | `src/compose.rs`の`read_queue` | 起動部分に読み取りの解釈と整形がある | task 1549 |
+| L7 | `src/compose.rs`の`record_mark`・`retract_mark`（`SystemTime::now`とpayloadの組み立て） | 起動部分にuse caseと時刻の読み取りがある | task 1548 |
 | C3 | `src/application/supervise/mod.rs`の`Supervisor`と、`impl Supervisor`を持つ`supervise/`の39のsubmodule（2026-10-04） | 全てのcontextの欄を1つのstructで共有し、submoduleが互いの欄を変える | task 1552・1553 |
 | C4 | `Box<dyn Queue>`・`&mut dyn Queue`・`QueueOpener`を取るuse case（`application::lifecycle`・`update`・`install`・`health`・`supervise`ほか） | 要るportだけを取っていない | task 1555（観測と分析・host運用）、task 1553（実行と着地） |
 | C5 | `SessionRegistry`が計画管理の`planners`を書く | 実行と着地のportに計画管理の状態が混ざる | task 1554 |

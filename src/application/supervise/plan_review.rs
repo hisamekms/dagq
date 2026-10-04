@@ -445,7 +445,7 @@ impl Supervisor<'_> {
         let wanted = DUPLICATE_CANDIDATES + own.len();
         let related = self
             .queue
-            .related_tasks(task.id(), wanted)?
+            .related_tasks(task.id(), &[], wanted)?
             .related
             .into_iter()
             .filter(|candidate| !own.contains(&TaskId::new(candidate.id)))

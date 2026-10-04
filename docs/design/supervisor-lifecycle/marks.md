@@ -4,8 +4,8 @@ type: design
 title: "変更の印（`mark` / `marks`）"
 status: current
 created: 2026-09-26
-updated: 2026-09-30
-last_verified: 2026-09-30
+updated: 2026-10-04 # task 1549: marks is read by application::queue_reads::answer
+last_verified: 2026-10-04 # task 1549
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -18,7 +18,7 @@ related:
 
 # 変更の印（`mark` / `marks`）
 
-[ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)の決定10〜13の実装（task 429）。KPIの期間を「いつ何が変わったか」で区切るための印で、記録する印（run_eventsの行）と導く印（claimの属性から読むだけで何も書かない）の2種類があり、同じ変化を二重に記録しない。印はrunの状態を変えず、attentionにもならない（`events`の既定の絞り込みにも`watch`にも出ない）。読み書きの規則は`src/domain/marks.rs`、CLIは`src/compose.rs`の`record_mark` / `retract_mark` / `marks`。
+[ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)の決定10〜13の実装（task 429）。KPIの期間を「いつ何が変わったか」で区切るための印で、記録する印（run_eventsの行）と導く印（claimの属性から読むだけで何も書かない）の2種類があり、同じ変化を二重に記録しない。印はrunの状態を変えず、attentionにもならない（`events`の既定の絞り込みにも`watch`にも出ない）。読み書きの規則は`src/domain/marks.rs`、CLIは`src/compose.rs`の`record_mark` / `retract_mark`と、`marks`を読む`application::queue_reads::answer`（`QueueRead::Marks`。CLIは`compose::read_queue`、queue serviceは`compose::service_reads`を通して呼ぶ）。
 
 ## 記録する印
 

@@ -580,6 +580,13 @@ fn lock_held(queue_dir: &Path) -> bool {
 
 // --- The service ---------------------------------------------------------------
 
+/// How the service answers a read use case: as the command line reads it
+/// (`compose::read_queue`), given by the composition root. It takes the
+/// request's queue, its DB and the cmux that lists the workspaces for
+/// `stats` (none when it does not resolve).
+pub type ServiceReads =
+    Arc<dyn Fn(&mut SqliteQueue, &Path, Option<&Cmux>, &QueueRead) -> Result<Value> + Send + Sync>;
+
 /// How `dagq service serve` runs.
 #[derive(Clone)]
 pub struct ServeOptions {
@@ -587,6 +594,7 @@ pub struct ServeOptions {
     /// The cmux a new ask notifies the inbox through.
     pub cmux: PathBuf,
     pub generators: Generators,
+    pub reads: ServiceReads,
     /// Set by SIGINT or SIGTERM: the service stops accepting and exits.
     pub stop: Arc<AtomicBool>,
     /// How often the loop looks for a connection or a stop.
@@ -652,6 +660,7 @@ pub fn serve(options: &ServeOptions) -> Result<Value> {
         queue_dir: queue_dir.clone(),
         cmux: options.cmux.clone(),
         generators: options.generators.clone(),
+        reads: options.reads.clone(),
     });
     let mut served = 0u64;
     let mut checked = Instant::now();
@@ -731,6 +740,7 @@ pub struct SqliteServiceBackend {
     pub queue_dir: PathBuf,
     pub cmux: PathBuf,
     pub generators: Generators,
+    pub reads: ServiceReads,
 }
 
 impl SqliteServiceBackend {
@@ -760,6 +770,7 @@ impl ServiceBackend for SqliteServiceBackend {
             cmux: Cmux {
                 executable: self.cmux.clone(),
             },
+            reads: self.reads.clone(),
         }))
     }
 
@@ -778,6 +789,7 @@ struct ServiceSqlite {
     db: PathBuf,
     queue_dir: PathBuf,
     cmux: Cmux,
+    reads: ServiceReads,
 }
 
 impl ServiceSqlite {
@@ -857,18 +869,14 @@ impl ServiceQueue for ServiceSqlite {
         )?)?)
     }
 
-    /// As the command line reads it (`compose::read_queue`), with the
+    /// As the command line reads it ([`ServiceReads`]), with the
     /// service's own cmux for `stats`' workspaces: as for the command
     /// line, a cmux that does not resolve lists none.
     fn read(&mut self, read: &QueueRead) -> Result<Value> {
         let cmux = super::adapters::executable(&self.cmux.executable)
             .ok()
             .map(|executable| Cmux { executable });
-        let one_shot = crate::compose::OneShot {
-            user_config: crate::infrastructure::language::user_config_file(),
-            ..crate::compose::OneShot::new(self.queue.generators().clone())
-        };
-        crate::compose::read_queue(&mut self.queue, &self.db, &one_shot, cmux.as_ref(), read)
+        (self.reads)(&mut self.queue, &self.db, cmux.as_ref(), read)
     }
 }
 
