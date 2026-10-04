@@ -1,0 +1,6 @@
+    Starting 4 tests across 2 binaries
+        PASS [   0.750s] (1/4) dagq domain::a_fast_unit_test
+        PASS [  55.000s] (2/4) dagq::it runtime_x::a_very_slow_test
+        PASS [   8.000s] (3/4) dagq::it runtime_x::a_slow_test
+     Summary [  60.000s] 4 tests run: 4 passed (1 flaky), 0 failed, 0 skipped
+     FLAKY 2/2 [   1.500s] (4/4) dagq::it runtime_y::an_old_flaky_test

@@ -195,7 +195,7 @@ paths = ["src/infrastructure/adapters.rs", "src/infrastructure/process.rs", "src
 paths = ["src/**", "crates/**", "migrations/**", "docs/design/**", "docs/development/**"]
 
 [review.subagents.test-rules]
-paths = ["tests/**", "src/**", "crates/**", "Cargo.toml", ".config/e2e-quarantine.toml"]
+paths = ["tests/**", "src/**", "crates/**", "Cargo.toml", ".config/e2e-quarantine.toml", ".config/it-slow-allow.toml"]
 
 [review.subagents.migration-rules]
 paths = ["migrations/**", "build.rs", "src/infrastructure/schema.rs", "src/infrastructure/schema/**", "tests/**", "crates/**"]

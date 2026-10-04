@@ -1,10 +1,12 @@
 #!/bin/sh
 # Summarise the slow tests of cargo nextest output (goal 68): the slowest
 # tests, how many took more than 1, 5 and 30 seconds and how long they took
-# together, and the count and total of every timed test. The output is a
-# Markdown table, printed to stdout; CI appends it to $GITHUB_STEP_SUMMARY.
+# together, the count and total of every timed test, and the count and total
+# of each test binary (goal 118). The output is Markdown tables, printed to
+# stdout; CI appends it to $GITHUB_STEP_SUMMARY.
 #
 # Usage: sh scripts/slow-tests.sh [--top N] [--min-ratio R] [LOG...]
+#        sh scripts/slow-tests.sh --self-test
 #   LOG            nextest output (a file, or - for stdin); stdin when none.
 #                  The dagq integrate logs <runs_dir>/*/integrate-*-verify-*.log
 #                  are read as they are
@@ -13,11 +15,16 @@
 #                  tests it started ("Starting N tests"), or, when it has no
 #                  such line, than R times the most timed tests of any log:
 #                  a run stopped midway (default 0.9)
+#   --self-test    check the tables against the fixtures under
+#                  scripts/slow-tests-fixtures/ (exit 0 when they match)
 #
 # A test's time is read from its PASS line and, for a test that passed on a
 # retry, from its FLKY-FL (or FLAKY) line; FAIL, TRY, SLOW and SKIP lines are
 # not timed. With several logs the time of a test is its median over the logs
 # counted. Colour codes are removed, so --color always output reads the same.
+# A test's binary is the first word of its name, nextest's binary id (dagq::it,
+# dagq for the lib, a crate's name); a binary's total is the sum of the times
+# (medians) of its tests.
 # Only sh and a POSIX awk are needed (macOS and ubuntu).
 #
 # Exit status: 0 with the summary (also when no test was timed), 2 on a usage
@@ -26,12 +33,44 @@ set -eu
 
 top=20
 ratio=0.9
+given=0
+
+# self_test runs the script on the fixtures and compares its whole output
+# with the expected Markdown, then checks the exit status of usage errors.
+self_test() {
+  dir=$(dirname "$0")/slow-tests-fixtures
+  fail=0
+  out=$(mktemp "${TMPDIR:-/tmp}/slow-tests-self-test.XXXXXX")
+  check() { # name expected-file args...
+    name=$1; want=$2; shift 2
+    if sh "$0" "$@" > "$out" && diff -u "$want" "$out" >&2; then
+      echo "slow-tests --self-test: $name: ok"
+    else
+      echo "slow-tests --self-test: $name: FAILED" >&2; fail=1
+    fi
+  }
+  check one_log "$dir/one.md" "$dir/one.log"
+  check two_logs_median "$dir/two.md" --top 3 "$dir/one.log" "$dir/two.log"
+  check stdin "$dir/one.md" - < "$dir/one.log"
+  check stopped_log_left_out "$dir/stopped.md" --min-ratio 0.9 "$dir/one.log" "$dir/stopped.log"
+  for bad in "--top x" "--min-ratio 1.2.3" "--unknown" "$dir/missing.log" "--top 3 --self-test"; do
+    # shellcheck disable=SC2086 # the words of a case are its arguments
+    if sh "$0" $bad > /dev/null 2>&1; then status=0; else status=$?; fi
+    if [ "$status" -eq 2 ]; then echo "slow-tests --self-test: $bad: exit 2: ok"
+    else echo "slow-tests --self-test: $bad: exit $status, want 2" >&2; fail=1; fi
+  done
+  rm -f "$out"
+  if [ "$fail" -eq 0 ]; then echo "slow-tests --self-test: ok"; else exit 1; fi
+}
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --top) top=${2:?--top needs a number}; shift 2 ;;
-    --min-ratio) ratio=${2:?--min-ratio needs a number}; shift 2 ;;
-    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+    --top) top=${2:?--top needs a number}; given=1; shift 2 ;;
+    --min-ratio) ratio=${2:?--min-ratio needs a number}; given=1; shift 2 ;;
+    --self-test)
+      [ $# -eq 1 ] && [ "$given" -eq 0 ] || { echo "slow-tests: --self-test takes no other argument" >&2; exit 2; }
+      self_test; exit 0 ;;
+    -h|--help) sed -n '2,31p' "$0"; exit 0 ;;
     --) shift; break ;;
     -?*) echo "slow-tests: unknown argument: $1" >&2; exit 2 ;;
     *) break ;;
@@ -154,6 +193,29 @@ END {
       if (!(i in taken) && (best == 0 || tsec[i] > tsec[best])) best = i
     taken[best] = 1
     printf "| %d | %.3f | `%s` |\n", r, tsec[best], tname[best]
+  }
+
+  # per test binary: the first word of the name is the nextest binary id
+  nb = 0
+  for (i = 1; i <= n; i++) {
+    b = tname[i]
+    sub(/ .*/, "", b)
+    if (!(b in bcount)) bnames[++nb] = b
+    bcount[b]++; bsum[b] += tsec[i]
+  }
+  print ""
+  print "### test binary ごと"
+  print ""
+  print "| test binary | 本数 | 合計（秒） | 全体の合計に占める割合 |"
+  print "| --- | ---: | ---: | ---: |"
+  for (r = 1; r <= nb; r++) {
+    best = 0
+    for (i = 1; i <= nb; i++)
+      if (!(i in btaken) && (best == 0 || bsum[bnames[i]] > bsum[bnames[best]] ||
+          (bsum[bnames[i]] == bsum[bnames[best]] && bnames[i] < bnames[best]))) best = i
+    btaken[best] = 1
+    b = bnames[best]
+    printf "| `%s` | %d | %.1f | %s |\n", b, bcount[b], bsum[b], pct(bsum[b], total)
   }
 }
 ' "$@"

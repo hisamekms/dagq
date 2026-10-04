@@ -36,9 +36,9 @@ description: この repository の本番 queue の着地の流れ（スループ
 
 ## 3. 日次の見直し（「日次の見直し」）
 
-目標割れと外れ値を見る。コマンドと読み方は [reference/daily.md](reference/daily.md)。
+目標割れと外れ値と、本番の関門の `dagq::it` の本数と時間を見る。コマンドと読み方は [reference/daily.md](reference/daily.md)。
 
-報告は目標割れの一覧、外れ値の run と理由、前日の着地数と 7 日の中央値との比。
+報告は目標割れの一覧、外れ値の run と理由、前日の着地数と 7 日の中央値との比、`dagq::it` の本数と合計の前の 7 日との並び。
 
 ## 4. 毎週の見直し（「週次の見直し」）
 

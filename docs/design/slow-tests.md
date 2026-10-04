@@ -19,7 +19,7 @@ related:
 
 # Slow tests summary
 
-`scripts/slow-tests.sh` は cargo nextest の出力から、遅い test の上位と、1 秒・5 秒・30 秒を超えた test の本数と合計の秒を Markdown の表にする。遅い test が少しずつ増えて suite（と `integrate` の検証の test 段）が遅くなるのを記録から見えるようにし、test の待ちを減らす修正（goal 68）の前後を比べる土台にする。`.config/nextest.toml` の `slow-timeout`（60 秒を超えた test を `SLOW` と出す）は 1 本ずつの目印で、全体の分布は出さない。
+`scripts/slow-tests.sh` は cargo nextest の出力から、遅い test の上位と、1 秒・5 秒・30 秒を超えた test の本数と合計の秒と、test binary ごとの本数と合計の秒を Markdown の表にする。遅い test が少しずつ増えて suite（と `integrate` の検証の test 段）が遅くなるのを記録から見えるようにし、test の待ちを減らす修正（goal 68）の前後を比べる土台にする。`.config/nextest.toml` の `slow-timeout`（60 秒を超えた test を `SLOW` と出す）は 1 本ずつの目印で、全体の分布は出さない。
 
 ## 使い方
 
@@ -31,6 +31,8 @@ sh scripts/slow-tests.sh nextest.log
 sh scripts/slow-tests.sh <runs_dir>/*/integrate-*-verify-*.log
 # stdin から、上位 50 本
 cat nextest.log | sh scripts/slow-tests.sh --top 50
+# fixture で表の値を確かめる
+sh scripts/slow-tests.sh --self-test
 ```
 
 | 引数 | 意味 |
@@ -38,8 +40,9 @@ cat nextest.log | sh scripts/slow-tests.sh --top 50
 | `LOG...` | nextest の出力のファイル（`-` は stdin）。無ければ stdin を読む |
 | `--top N` | 上位に並べる本数（既定 20） |
 | `--min-ratio R` | 途中で止まった log を除く割合（既定 0.9）。時間の出た test の数が、その log の `Starting N tests` の N の R 倍に満たない log を数えない。`Starting` の行が無い log は、log の中で最も多い数の R 倍と比べる |
+| `--self-test` | 下の「self-test」の fixture で表を確かめる（ほかの引数と一緒には取らない） |
 
-`sh` と POSIX の `awk` だけを使うので、macOS と ubuntu の host にそのまま使える。読めない log と引数の誤りは exit 2、ほかは表を出して exit 0（数えた test が無くてもそう出して 0）。
+`sh` と POSIX の `awk` だけを使うので、macOS と ubuntu の host にそのまま使える。読めない log と引数の誤りは exit 2、ほかは表を出して exit 0（数えた test が無くてもそう出して 0）。`--self-test` は合えば 0、違えば 1。
 
 ## 読む行
 
@@ -53,7 +56,12 @@ cat nextest.log | sh scripts/slow-tests.sh --top 50
 - 冒頭の行: test の時間の出た log の本数と、そのうち数えた本数（`fmt` や `clippy` の verify の log のように test の出ない log は数に入らない）
 - 範囲の表: `全体` は数えた test の本数と秒の合計、`N 秒を超える` はその test の時間が N 秒より長い本数・その秒の合計・全体の合計に占める割合。合計は test の時間の和で、並列に流れた実時間ではない。`integrate` の test 段の実時間はおおむね「合計 ÷ `NEXTEST_TEST_THREADS`」なので、合計の変化が test 段の変化の目安になる
 - 上位の表: 時間の長い順に N 本
+- test binary ごとの表（`### test binary ごと`、最後の表）: test の名前の先頭の語（nextest の binary id。`dagq::it`、lib の unit test の `dagq`、`dagq::plugin`、`dagq-broker` などの crate）ごとの本数・秒の合計・全体の合計に占める割合を、合計の長い順に並べる。log を複数渡したときの合計は test ごとの中央値の和。throughput-review の日次の見直しが `dagq::it` と `dagq` の行を日ごとに並べる（`.claude/skills/throughput-review/reference/daily.md`）。前の 3 つの表は足す前と同じで、この表は末尾に足しただけなので、CI の job summary の読み方は変わらない
 - log を複数渡すと、test ごとの秒は数えた log をまたいだ中央値（偶数本なら中の 2 つの平均）で、表は中央値で数える。その test が出た log だけで中央値を取るので、期間中に名前の変わった・足された test は別の test として並び、全体の本数が 1 回の実行より多くなることがある。前後を比べるときは、同じ手順で期間を分けて渡し、host の load average を併記する（goal 68 の制約）
+
+## self-test
+
+`sh scripts/slow-tests.sh --self-test` は `scripts/slow-tests-fixtures/` の nextest の出力（`PASS`・`TRY n FAIL`/`TRY n PASS`・最後の要約の `FLKY-FL` と古い `FLAKY`・`FAIL`・`SLOW`・色の付いた行・`dagq::it`・`dagq`・`dagq-broker` の 3 つの binary）を script に通し、出力の全体を同じ dir の期待の Markdown（`one.md`・`two.md`・`stopped.md`）と比べる。1 本の log、2 本の log の中央値（`--top 3`）、stdin、途中で止まった log を除くこと、と引数の誤り（`--self-test` とほかの引数の組を含む）と読めない log の exit 2 を確かめ、全部が合えば exit 0、どれかが違えば差分を stderr に出して exit 1。期待の Markdown は、表を変えるときに fixture の値から手で確かめて書き直す。
 
 ## CI
 

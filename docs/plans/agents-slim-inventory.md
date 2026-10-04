@@ -4,7 +4,7 @@ type: plan
 title: AGENTS.mdとpluginのdagq repository固有の記述の棚卸しの表と、整理の前後の照合と役割ごとの読む量
 status: active
 created: 2026-10-03
-updated: 2026-10-04
+updated: 2026-10-05
 owners:
   - hisamekms
 tags:
@@ -71,7 +71,7 @@ git grep -noE "(task|goal|ask|proposal|finding|note|run|mark)s? [0-9]{1,4}" 7fea
   - 新しいADRの予定のpathは、task 1457が`docs/adr/<accepted_on>-t1457-1-history-of-local-checks-and-test-rules.md`、task 1458が`docs/adr/<accepted_on>-t1458-1-history-of-operation-rules.md`で、どちらも「## Context」に経緯を書く（IDとslugは移すtaskが決めてよく、変えたら表を直す）。
 - **検査**: reviewのsubagentで機械的でない意味の検査ができる規則か。agentの名前はtask 1460で確定した。対応する検査項目は`.dagq/review-agents/<agent>.md`の各行のIDで辿る。1項目の意味の検査は1 agentだけが受け持つ（scriptの検査は別）。
   - `design-consistency`（`src/**`・`crates/**`・`migrations/**`・`docs/design/**`・`docs/development/**`: 実装の変更とdesignの対応、`updated`・`last_verified`）
-  - `test-rules`（`tests/**`・`src/**`・`crates/**`・`Cargo.toml`・`.config/e2e-quarantine.toml`: 置き場所・helper・processの状態・待ちの上限・e2eの印）
+  - `test-rules`（`tests/**`・`src/**`・`crates/**`・`Cargo.toml`・`.config/e2e-quarantine.toml`・`.config/it-slow-allow.toml`: 置き場所・helper・processの状態・待ちの上限・e2eの印・itのtestの時間の関門。時間の関門の検査項目はtask 1708が足し、棚卸しの後にtask 1707がtesting.mdに足した規則なので棚卸しの行もIDも無い）
   - `migration-rules`（`migrations/**`・`build.rs`・`src/infrastructure/schema.rs`・`src/infrastructure/schema/**`・`tests/**`・`crates/**`）
   - `adr-rules`（`docs/**`のADRとfrontmatter）
   - `config-rules`（`dagq.toml`・`.config/**`）

@@ -1,0 +1,16 @@
+    Starting 10 tests across 3 binaries
+        PASS [   0.250s] (1/10) dagq domain::a_fast_unit_test
+        PASS [   0.750s] (2/10) dagq domain::another_unit_test
+        PASS [   1.500s] (3/10) dagq domain::a_slower_unit_test
+        SLOW [> 60.000s] (4/10) dagq::it runtime_x::a_very_slow_test
+        PASS [  65.000s] (4/10) dagq::it runtime_x::a_very_slow_test
+        PASS [   6.000s] (5/10) dagq::it runtime_x::a_slow_test
+[32;1m        PASS[0m [   2.000s] (6/10) [35;1mdagq::it[0m [36mruntime_y[0m[36m::[0m[34;1ma_coloured_test[0m
+        TRY 1 FAIL [   3.000s] (7/10) dagq::it runtime_y::a_flaky_test
+        TRY 2 PASS [   4.000s] (7/10) dagq::it runtime_y::a_flaky_test
+        FAIL [   1.000s] (8/10) dagq::it runtime_y::a_failing_test
+        PASS [   0.500s] (9/10) dagq-broker broker::a_crate_test
+        PASS [   0.300s] (10/10) dagq::it runtime_y::a_quick_test
+     Summary [  70.000s] 10 tests run: 9 passed (1 flaky), 1 failed, 0 skipped
+   FLKY-FL 2/2 [   4.000s] (7/10) dagq::it runtime_y::a_flaky_test
+        FAIL [   1.000s] (8/10) dagq::it runtime_y::a_failing_test
