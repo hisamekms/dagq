@@ -1698,12 +1698,13 @@ enum PlannerCommand {
     #[command(group = clap::ArgGroup::new("words").required(true))]
     Request {
         planner: i64,
-        /// The person's own words, not a summary.
+        /// The person's own words, not a summary; `-` reads them from stdin.
         #[arg(long, group = "words")]
         text: Option<String>,
-        /// A file holding the person's own words.
-        #[arg(long, group = "words")]
-        file: Option<PathBuf>,
+        /// A file holding the person's own words: what it holds when read is handed, not
+        /// its path.
+        #[arg(long, group = "words", alias = "file")]
+        text_file: Option<PathBuf>,
         /// cmux executable, used to judge whether the planner is alive.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
@@ -1814,10 +1815,10 @@ const OBSERVER_DENIED: &str = "observer may not change queue state";
 /// The error of a command a headless job may not run.
 const REVIEWER_DENIED: &str = "reviewer may not change queue state";
 
-/// The words `request add` records for `option` (`--text` or `--note`): the
-/// value itself, stdin for `-`, or what `file` holds when read (ADR-t1394-1
-/// decision 2 keeps the request as recorded, so a later change of the file
-/// changes nothing). UTF-8 as given, line breaks and quotes kept; a file or
+/// The words `request add` records for `option` (`--text` or `--note`), and
+/// `planner request` hands as `--text`: the value itself, stdin for `-`, or
+/// what `file` holds when read (ADR-t1394-1 decision 2 keeps the request as
+/// recorded, so a later change of the file changes nothing). UTF-8 as given, line breaks and quotes kept; a file or
 /// stdin that cannot be read, is not UTF-8 or holds nothing is refused.
 fn request_words(
     option: &str,
@@ -3887,18 +3888,11 @@ fn execute(cli: Cli) -> Result<Value> {
                 PlannerCommand::Request {
                     planner,
                     text,
-                    file,
+                    text_file,
                     cmux,
                 } => {
-                    let words = match (text, file) {
-                        (Some(text), _) => text,
-                        (None, Some(file)) => {
-                            let file = cwd.join(file);
-                            std::fs::read_to_string(&file)
-                                .with_context(|| format!("read {}", file.display()))?
-                        }
-                        (None, None) => unreachable!("clap requires --text or --file"),
-                    };
+                    let words = request_words("--text", text, text_file, &cwd)?
+                        .expect("clap requires --text or --text-file");
                     one_shot.request_planner(
                         &mut queue,
                         &db,

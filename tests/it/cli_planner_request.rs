@@ -6,9 +6,13 @@
 //! an interactive planner and one closed, lost, exited or asked to exit
 //! are refused, and nothing reaches cmux. Other roles are refused and
 //! recorded. A headless planner has no screen and takes no keys. The
-//! planner's background handle is this test process, alive throughout.
+//! words come as `--text`, from a file with `--text-file` (`--file`) or
+//! from stdin with `--text -`, handed as read; two of them or none, and a
+//! file or stdin that cannot be read, is not UTF-8 or holds nothing, are
+//! refused and hand nothing. The planner's background handle is this test
+//! process, alive throughout.
 
-use crate::common;
+use crate::common::{self, WithoutActor};
 
 use common::cli::*;
 
@@ -24,7 +28,9 @@ use dagq::{
 use serde_json::Value;
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
+    process::{Command, Output, Stdio},
 };
 
 /// A stub `cmux` beside `db` that only keeps its calls; returns its path.
@@ -349,4 +355,174 @@ fn a_headless_planner_has_no_screen_and_takes_no_keys_or_answer() {
     assert_eq!(calls(Path::new(cmux)), "", "nothing read or typed");
     assert!(events(&db, "screen_read").is_empty());
     assert!(events(&db, "screen_input_sent").is_empty());
+}
+
+/// Multi-line words with quotes, backticks, Japanese and a trailing line
+/// break, which a shell's quoting breaks.
+const WORDS: &str = "残りの task も分けて。\"戻す\" 計画は後で。\nIt's `dagq.toml`'s [run.env]; keep it.\n\n  - 2 行目の箇条書き\n";
+
+/// `planner request ID ARGS --cmux CMUX` as the inbox with `stdin` on its
+/// standard input.
+fn request_with_stdin(
+    db: &Path,
+    planner: PlannerId,
+    args: &[&str],
+    cmux: &str,
+    stdin: &[u8],
+) -> Output {
+    let _waiting = common::within(common::STEP_LIMIT, "planner request with stdin");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dagq"))
+        .without_actor_env()
+        .env("DAGQ_ROLE", "inbox")
+        .arg("--db")
+        .arg(db)
+        .args(["planner", "request", &planner.to_string()])
+        .args(args)
+        .args(["--cmux", cmux])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // A refusal before stdin is read (a conflict clap rejects) closes the
+    // pipe early; its exit is what the test reads, not the write.
+    let _ = child.stdin.take().unwrap().write_all(stdin);
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn words_from_a_file_or_stdin_are_handed_as_text_gives_them() {
+    let (dir, db) = queue();
+    let cmux = stub_cmux(&db);
+    let cmux = cmux.to_str().unwrap();
+    let id = planner(
+        &db,
+        PlannerRoute::Headless,
+        &live_handle(),
+        std::process::id(),
+    );
+    let words_file = dir.path().join("words.md");
+    fs::write(&words_file, WORDS).unwrap();
+    let words_path = words_file.to_str().unwrap();
+
+    let mut handed = Vec::new();
+    for args in [
+        &["--text", WORDS][..],
+        &["--text-file", words_path][..],
+        // `--file`, the spelling task 1533 landed, is the same input.
+        &["--file", words_path][..],
+        &["--text", "-"][..],
+    ] {
+        let output = request_with_stdin(&db, id, args, cmux, WORDS.as_bytes());
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let request: Value = serde_json::from_slice(&output.stdout).unwrap();
+        handed.push(request["file"].as_str().unwrap().to_owned());
+    }
+    let requests = planners_dir(&db).join(id.to_string()).join("requests");
+    for (n, file) in handed.iter().enumerate() {
+        assert_eq!(
+            *file,
+            requests
+                .join(format!("followup-{}.md", n + 1))
+                .display()
+                .to_string()
+        );
+        assert_eq!(fs::read_to_string(file).unwrap(), WORDS, "{file}");
+    }
+    assert_eq!(events(&db, "turn_requested").len(), 4);
+    // What is handed is what the file held when read, not its path.
+    fs::write(&words_file, "rewritten after the hand-over").unwrap();
+    assert_eq!(fs::read_to_string(&handed[1]).unwrap(), WORDS);
+}
+
+#[test]
+fn two_inputs_none_or_unreadable_words_are_refused_and_hand_nothing() {
+    let (dir, db) = queue();
+    let cmux = stub_cmux(&db);
+    let cmux = cmux.to_str().unwrap();
+    let id = planner(
+        &db,
+        PlannerRoute::Headless,
+        &live_handle(),
+        std::process::id(),
+    );
+    let words = dir.path().join("words.md");
+    fs::write(&words, WORDS).unwrap();
+    let missing = dir.path().join("missing.md");
+    let latin1 = dir.path().join("latin1.md");
+    fs::write(&latin1, b"caf\xe9 \xff\n").unwrap();
+    let empty = dir.path().join("empty.md");
+    fs::write(&empty, "").unwrap();
+    let blank = dir.path().join("blank.md");
+    fs::write(&blank, " \n\t\n").unwrap();
+    let path = |file: &Path| file.to_str().unwrap().to_owned();
+
+    // Two of the inputs, or none, are refused by clap.
+    for args in [
+        vec![],
+        vec![
+            "--text".into(),
+            "x".into(),
+            "--text-file".into(),
+            path(&words),
+        ],
+        vec!["--text".into(), "-".into(), "--file".into(), path(&words)],
+        vec![
+            "--text-file".into(),
+            path(&words),
+            "--file".into(),
+            path(&words),
+        ],
+        vec!["--text".into(), "x".into(), "--text".into(), "-".into()],
+    ] {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let output = request_with_stdin(&db, id, &args, cmux, WORDS.as_bytes());
+        assert!(!output.status.success(), "{args:?}");
+    }
+    // Words that cannot be read, are not UTF-8 or hold nothing are
+    // refused with the input and the reason.
+    let cases: Vec<(Vec<String>, &[u8], &str)> = vec![
+        (
+            vec!["--text-file".into(), path(&missing)],
+            b"",
+            "--text-file",
+        ),
+        (
+            vec!["--text-file".into(), path(&missing)],
+            b"",
+            "cannot read",
+        ),
+        (vec!["--file".into(), path(&latin1)], b"", "not UTF-8"),
+        (vec!["--text-file".into(), path(&empty)], b"", "is empty"),
+        (vec!["--text-file".into(), path(&blank)], b"", "is empty"),
+        (
+            vec!["--text".into(), "-".into()],
+            b"",
+            "--text - (stdin) is empty",
+        ),
+        (vec!["--text".into(), "-".into()], b" \n", "is empty"),
+        (vec!["--text".into(), "-".into()], b"\xff\xfe", "not UTF-8"),
+    ];
+    for (args, stdin, reason) in cases {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let output = request_with_stdin(&db, id, &args, cmux, stdin);
+        assert!(!output.status.success(), "{args:?}");
+        let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+        let message = error["error"].as_str().unwrap();
+        assert!(message.contains(reason), "{args:?}: {message}");
+    }
+    assert!(
+        !planners_dir(&db)
+            .join(id.to_string())
+            .join("requests")
+            .exists(),
+        "no followup-N.md"
+    );
+    assert!(events(&db, "planner_request_handed").is_empty());
+    assert!(events(&db, "turn_requested").is_empty());
+    assert_eq!(calls(Path::new(cmux)), "", "nothing reached cmux");
 }

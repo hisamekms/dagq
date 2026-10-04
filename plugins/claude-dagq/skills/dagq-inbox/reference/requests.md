@@ -55,4 +55,12 @@ The planner asks with `ask --request N --kind planner_question`: options `plan` 
 
 ## More words for a planner still at work
 
-As the skill says, a follow-up to an open headless runtime planner goes as its next turn with `"$DAGQ" planner request <planner id> --text '<the person's words>'` (the planner id from `dagq planners` or the request's planners). It is refused for an interactive planner and for one closed, lost, exited or asked to exit; then, or for a new plan, record a new request.
+As the skill says, a follow-up to an open headless runtime planner goes as its next turn with `"$DAGQ" planner request <planner id> --text '<the person's words>'` (the planner id from `dagq planners` or the request's planners). The words take the same three forms as `request add`, exactly one: `--text '<words>'`, `--text-file PATH` (`--file` is the same; what the file holds when you run it is written, not its path) or `--text -` (stdin). Two of them, or none, is refused, and so is a file or stdin that cannot be read, is not UTF-8 or holds nothing (or only blanks), with the reason; nothing reaches the planner then. Long or multi-line words go through a file or stdin:
+
+```sh
+"$DAGQ" planner request <planner id> --text - <<'WORDS'
+<the person's own words, as many lines as they wrote>
+WORDS
+```
+
+It is refused for an interactive planner and for one closed, lost, exited or asked to exit; then, or for a new plan, record a new request.
