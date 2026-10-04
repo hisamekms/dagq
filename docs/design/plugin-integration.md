@@ -4,8 +4,8 @@ type: design
 title: Claude Code and Codex plugin integration
 status: current
 created: 2026-09-21
-updated: 2026-10-04 # task 655: the hook's close reads no transcript (after task 1462)
-last_verified: 2026-10-04 # task 655
+updated: 2026-10-04 # task 1467: details of the dagq, dagq-planner and dagq-recover SKILL.md moved to reference (after task 655)
+last_verified: 2026-10-04 # task 1467
 scope: distribution
 related:
   - adr-t655-1
@@ -121,9 +121,9 @@ plugins/claude-dagq/
   hooks/stop-watch.sh             DAGQ_ROLE が inbox で watch --role inbox が 1 つも watching でない時だけ、turn の終わりを block して watch --role inbox --until-attention のコマンドを reason で渡す
   hooks/session-event.sh          DAGQ_ROLE が inbox / planner で DAGQ_QUEUE がある時だけ、hook の stdin を dagq session-event open|close に渡して session の区間を記録する（何も出力しない）
   skills/dagq/                    バイナリと DB の解決、goal の登録と task への分解、ready、参照コマンドの要点、結果の読み方
-    reference/locate.md             install、version 警告、db_exists false と rebind
+    reference/locate.md             install、version 警告、db_exists false と rebind、言語の設定の場所
     reference/inspect.md            参照コマンドの表と各フィールド（findings・events --full と絞り込み・timeline・observe --history を含む）、list のページング、task / run の状態、graph、goal edit / set-goal
-    reference/register.md           goal と task の登録の詳細: goal の欄と draft goal、task の欄（--verify・--depends-on(-goal)・--context・--evidence・--paths・--change）、draft から ready まで（submit・plan review の pass / revise / concern・proposal withdraw・ready --bypass-review・candidates）、登録後の変更（edit・draft・cancel・dependency）、priority の段
+    reference/register.md           goal と task の登録の詳細: goal の欄と draft goal、task の欄（--verify・--depends-on(-goal)・--context・--evidence・--paths・--change）、draft から ready まで（submit・plan review の pass / revise / concern・proposal withdraw・ready --bypass-review・candidates）、登録後の変更（edit・draft・cancel・dependency）、priority の段、planner の確認・revise・依頼の計画の手順
     reference/goal-close.md         goal の close（終わった goal は supervisor の goal review の job が判定して閉じる。ADR-0047。goal close は draft goal の破棄と人の言葉のときだけ）
     reference/observer.md           observer の finding の見方（findings・events・timeline・observe --history、kind: kpi の finding と改善の上限）と行き先（印からの runtime の planner、blocked の ask の propose / dismiss、人の言葉で inbox が記録する依頼（request add --ref finding:N）の planner での submit --finding / finding dismiss）
     reference/kpi.md                dagq kpi（期間・種類・層・比較・目標）、dagq mark / marks と kpi --compare での前後比較、dagq forecast の見込み（p50 / p90 と前提、流入を含まない）と forecast.* の答え合わせの KPI、dagq report と日次のレポートの場所、host.toml の [push] と送るもの・失敗の attention

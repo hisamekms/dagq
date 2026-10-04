@@ -7,7 +7,7 @@ description: Be a dagq planner the runtime opened, with no person at the termina
 
 Prerequisite: `DAGQ="${CLAUDE_PLUGIN_ROOT}/bin/dagq"` resolved as in the `dagq` skill. Read `${CLAUDE_PLUGIN_ROOT}/skills/dagq/SKILL.md` first: it holds every command this skill uses. Use the CLI only, never the database.
 
-Roles (ADR-0044, ADR-t1394-1): the supervisor runs and lands runs and runs the headless **plan review** job; the inbox, the one resident session, relays every ask and attention to the person and records their plans as **requests**. Only the runtime opens a planner: for a request, a proposal plan review sent back, a draft, or a finding marked for a proposal. Only plan review (or a person's bypass) makes tasks `ready`. After compaction or `/clear` the SessionStart hook prints `status --role planner`; re-read your work with `"$DAGQ" proposal list` and `goal show ID`. Write goals, tasks, asks and replies in the language your prompt or the status's `language.instruction` names (`dagq` skill, section 5).
+Roles (ADR-0044, ADR-t1394-1): the supervisor runs and lands runs and runs the headless **plan review** job; the inbox, the one resident session, relays every ask and attention to the person and records their plans as **requests**. Only the runtime opens a planner: for a request, a proposal plan review sent back, a draft, or a finding marked for a proposal. Only plan review (or a person's bypass) makes tasks `ready`. After compaction or `/clear` the SessionStart hook prints `status --role planner`; re-read your work with `"$DAGQ" proposal list` and `goal show ID`. Write goals, tasks, asks and replies in the language the `dagq` skill's section 5 names.
 
 Your initial prompt says what you were opened for; no person watches this session. On the interactive route the runtime types into your terminal; on the headless route each answer, revise or follow-up comes as your next turn (`dagq: a request for you is in the file ...`: read it and work on it). Work only on what you were opened for, report briefly and stop; the runtime ends the session.
 
@@ -17,32 +17,32 @@ Decide what you can recommend and go on, asking no one: adopting or dropping a f
 
 ## 1. A request: plan it or decline it
 
-The prompt holds the person's own words, the inbox's note, what it refers to (asks, tasks, runs, events, findings, goals) and the goals they lead to. Look for work that covers it first (`search`, `related`, `goal list`, the source). Then one of:
+The prompt holds the person's own words, the inbox's note and what they refer to. Look for work that covers it first (`search`, `related`, `goal list`, the source). Then one of:
 
-- **Plan it**: follow the `dagq` skill's section 2: a goal (`goal add --draft`) unless it is a one-shot task or fits an open goal, and tasks with `add --goal` (acceptance, verification, dependencies, `--context` beginning `from request N`, `--paths`, `--evidence`, `--change` per the repository's rules; `e2e` from the diff and `[e2e] paths`, not a blanket `--evidence e2e`; no throwaway-queue hand steps in a worker's acceptance). After each `add`, `"$DAGQ" related ID`; cancel a duplicate with `cancel ID --duplicate-of X`. Files to name, goal dependencies, `set-paths`: `skills/dagq/reference/register.md`, "For a planner". Check the order with `"$DAGQ" graph --goal ID`, then:
+- **Plan it**: the `dagq` skill's section 2 and `skills/dagq/reference/register.md`, "For a planner" (the goal, the task fields, `related` after each `add`, `graph --goal ID`). No blanket `--evidence e2e`, no throwaway-queue hand steps in a worker's acceptance. Then:
 
 ```sh
 "$DAGQ" lint TASK...            # or --proposal ID; fix every violation first
 "$DAGQ" submit TASK...          # or --goal GOAL
 ```
 
-  `submit` refuses what `lint` rejects, makes you the proposal's owner, its tasks `submitted` and the request `proposed` (no person's approval needed, even for a new goal). Report the proposal ID.
+  `submit` refuses what `lint` rejects and makes the request `proposed` (no person's approval needed). Report the proposal ID.
 - **Decline** (done already, a duplicate in flight, or not plannable as asked: name the task or code, or say why): `"$DAGQ" request decline N --reason '<why>'`. The inbox tells the person.
 - **Ask**: `"$DAGQ" ask --request N --kind planner_question --because scope --recommend <plan|decline> --confidence <high|low> --question '...' --option plan --option decline`.
 
-The worker's provider and route: no flag (Claude headless) unless the person's words ask for `--provider codex` or `--interactive`; never to dodge a login or usage limit (`skills/dagq/reference/provider.md`). Traffic control is plan review's. Set a priority only when the person's words say a task goes first or can wait.
+The worker's provider and route: no flag unless the person's words ask, never to dodge a login or usage limit (`skills/dagq/reference/provider.md`). Traffic control is plan review's; a priority only when the person's words say a task goes first or can wait.
 
 ## 2. When plan review sends it back (revise)
 
-"Plan review sent proposal N back" arrives with reasons (in your prompt, or typed or as a turn while you are open). Fix them (`edit`, `dependency`, `add`, `cancel`), `lint --proposal N`, `"$DAGQ" submit --proposal N`; on `EmptyProposal` or a dropped plan, `"$DAGQ" proposal withdraw N`. A fix that changes the plan's intent and you cannot settle goes up as the Basic policy says. A ready task moved back to `submitted` is fixed the same way. Details: `skills/dagq/reference/register.md`, "A revise".
+"Plan review sent proposal N back" arrives with reasons. Fix them (`edit`, `dependency`, `add`, `cancel`), `lint --proposal N`, `"$DAGQ" submit --proposal N`; on `EmptyProposal` or a dropped plan, `"$DAGQ" proposal withdraw N`. Details: `skills/dagq/reference/register.md`, "A revise".
 
 ## 3. A draft or a finding you were opened for
 
-Run `related ID` (and `search`), then do one of what the prompt lists: adopt (`edit`, `lint`, `submit`), drop (`cancel`, `--duplicate-of X`), or, per the Basic policy only, ask (`planner_question`); for a finding, `submit ... --finding N`, `finding dismiss N --reason` or `ask --finding N`. A request that names a draft or finding (`--ref task:N`, `finding:N`) is decided the same way. Details: `skills/dagq/reference/register.md`, "A runtime planner".
+Run `related ID` (and `search`), then do one of what the prompt lists: adopt (`edit`, `lint`, `submit`), drop (`cancel`, `--duplicate-of X`), or, per the Basic policy only, ask (`planner_question`; a finding: `submit --finding N`, `finding dismiss N` or `ask --finding N`). A request that names a draft or finding (`--ref task:N`, `finding:N`) is decided the same way. Details: `skills/dagq/reference/register.md`, "A runtime planner".
 
 ## 4. Goals, forecasts, findings, KPIs
 
-`"$DAGQ" goal list`, `goal show ID`, `graph --goal ID` and `forecast --goal ID` (p50 and p90 with their premises, no inflow counted: `skills/dagq/reference/kpi.md`) show progress. Decide the observer's findings per `skills/dagq/reference/observer.md`: `submit ... --finding ID` or `finding dismiss ID --reason`. When a setting, the operation or the host changes (not builds, `--parallel`, Claude or `[run.env]`: the runtime marks those), record `"$DAGQ" mark '<label>' --note '...'`; judge it with `kpi --compare <mark id> --area <area>` (or `--change <change>`).
+`"$DAGQ" goal list`, `goal show ID`, `graph --goal ID` and `forecast --goal ID` show progress. Decide the observer's findings per `skills/dagq/reference/observer.md` (section 3). When a setting, the operation or the host changes (not what the runtime marks), `"$DAGQ" mark '<label>' --note '...'`; judge it with `kpi --compare` in one `--area` or `--change` (`skills/dagq/reference/kpi.md`).
 
 ## 5. A finished goal
 
