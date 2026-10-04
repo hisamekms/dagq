@@ -32,7 +32,7 @@ use std::{
     io::{IsTerminal, Write},
     path::{Path, PathBuf},
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use super::{
@@ -149,10 +149,75 @@ struct Turn {
 }
 
 /// Why the wrapper stopped a turn that still ran.
+#[derive(Debug, PartialEq, Eq)]
 struct Stop {
     outcome: TurnOutcome,
     failure: Option<TurnFailure>,
     why: String,
+}
+
+/// The first unusable observation wins over exit and time limits. The caller
+/// reads the clock and files; this decision only sees their values.
+fn stop_decision(
+    observed: Option<Stop>,
+    exit_requested: bool,
+    heartbeats: bool,
+    since_output: Duration,
+    elapsed: Duration,
+    limits: TurnLimits,
+) -> Option<Stop> {
+    observed.or_else(|| {
+        if exit_requested {
+            Some(Stop {
+                outcome: TurnOutcome::Stopped,
+                failure: None,
+                why: "the supervisor asked the session to exit".to_owned(),
+            })
+        } else if heartbeats && since_output >= limits.silence() {
+            Some(Stop {
+                outcome: TurnOutcome::Silent,
+                failure: None,
+                why: format!("no output for {}s", limits.silence_secs),
+            })
+        } else if elapsed >= limits.limit() {
+            Some(Stop {
+                outcome: TurnOutcome::TimedOut,
+                failure: None,
+                why: format!("the turn ran past {}s", limits.limit_secs),
+            })
+        } else {
+            None
+        }
+    })
+}
+
+/// A signal's stop, keeping the first one in output order.
+fn observed_stop(
+    previous: Option<Stop>,
+    signal: &TurnSignal,
+    expected: Option<&str>,
+) -> Option<Stop> {
+    previous.or_else(|| match signal {
+        TurnSignal::Started {
+            permission_mode, ..
+        } if expected.is_some_and(|expected| permission_mode.as_deref() != Some(expected)) => {
+            Some(Stop {
+                outcome: TurnOutcome::LaunchMismatch,
+                failure: None,
+                why: format!(
+                    "the agent started in permission mode {} instead of {}",
+                    permission_mode.as_deref().unwrap_or("(none)"),
+                    expected.unwrap()
+                ),
+            })
+        }
+        TurnSignal::Unusable(failure, message) => Some(Stop {
+            outcome: TurnOutcome::Failed,
+            failure: Some(*failure),
+            why: message.clone(),
+        }),
+        _ => None,
+    })
 }
 
 /// Stop a turn that still runs: SIGKILL to its process group and to each
@@ -1038,8 +1103,6 @@ impl<'a> Turns<'a> {
         let started = Instant::now();
         let mut last_output = Instant::now();
         let mut tail = Tail::default();
-        let silence = limits.silence();
-        let limit = limits.limit();
         let mut stop: Option<Stop> = None;
         loop {
             let lines = tail.read(self.files, stdout, false);
@@ -1048,38 +1111,22 @@ impl<'a> Turns<'a> {
             }
             for line in lines {
                 for signal in reader.line(&line) {
+                    // Identification precedes acting on an unusable observation.
+                    if let TurnSignal::Started {
+                        session_id: Some(id),
+                        ..
+                    } = &signal
+                    {
+                        self.identify(turn, on, id)?;
+                    }
+                    let expected = if matches!(signal, TurnSignal::Started { .. }) {
+                        self.agent(on.provider)?.turn_permission_mode()
+                    } else {
+                        None
+                    };
+                    stop = observed_stop(stop, &signal, expected);
                     match signal {
-                        TurnSignal::Started {
-                            session_id,
-                            permission_mode,
-                            ..
-                        } => {
-                            if let Some(id) = session_id {
-                                self.identify(turn, on, &id)?;
-                            }
-                            if let Some(expected) = self.agent(on.provider)?.turn_permission_mode()
-                                && permission_mode.as_deref() != Some(expected)
-                                && stop.is_none()
-                            {
-                                stop = Some(Stop {
-                                    outcome: TurnOutcome::LaunchMismatch,
-                                    failure: None,
-                                    why: format!(
-                                        "the agent started in permission mode {} instead of {expected}",
-                                        permission_mode.as_deref().unwrap_or("(none)")
-                                    ),
-                                });
-                            }
-                        }
-                        TurnSignal::Unusable(failure, message) => {
-                            if stop.is_none() {
-                                stop = Some(Stop {
-                                    outcome: TurnOutcome::Failed,
-                                    failure: Some(failure),
-                                    why: message,
-                                });
-                            }
-                        }
+                        TurnSignal::Started { .. } | TurnSignal::Unusable(..) => {}
                         TurnSignal::Said(text) => say(self.background, &text),
                         TurnSignal::Tool(tool) => say(self.background, &format!("→ {tool}")),
                     }
@@ -1095,29 +1142,18 @@ impl<'a> Turns<'a> {
                 let _ = child.kill_group();
                 return Ok((Some(exit), None, tail));
             }
-            if stop.is_none() {
-                stop = if self.files.is_file(&exit_path(run_dir)) {
-                    Some(Stop {
-                        outcome: TurnOutcome::Stopped,
-                        failure: None,
-                        why: "the supervisor asked the session to exit".to_owned(),
-                    })
-                } else if reader.heartbeats() && last_output.elapsed() >= silence {
-                    Some(Stop {
-                        outcome: TurnOutcome::Silent,
-                        failure: None,
-                        why: format!("no output for {}s", limits.silence_secs),
-                    })
-                } else if started.elapsed() >= limit {
-                    Some(Stop {
-                        outcome: TurnOutcome::TimedOut,
-                        failure: None,
-                        why: format!("the turn ran past {}s", limits.limit_secs),
-                    })
-                } else {
-                    None
-                };
-            }
+            stop = if stop.is_some() {
+                stop_decision(stop, false, false, Duration::ZERO, Duration::ZERO, limits)
+            } else {
+                stop_decision(
+                    None,
+                    self.files.is_file(&exit_path(run_dir)),
+                    reader.heartbeats(),
+                    last_output.elapsed(),
+                    started.elapsed(),
+                    limits,
+                )
+            };
             if let Some(stop) = stop {
                 say(self.background, &format!("stopping the turn: {}", stop.why));
                 stop_turn(self.processes, child)?;
@@ -1134,6 +1170,252 @@ impl<'a> Turns<'a> {
 mod tests {
     use super::*;
     use crate::application::memory_files::MemoryFiles;
+
+    fn limits() -> TurnLimits {
+        TurnLimits {
+            silence_secs: 1,
+            limit_secs: 2,
+            silence_ms: Some(500),
+            limit_ms: Some(1500),
+        }
+    }
+
+    #[test]
+    fn silence_and_limit_use_elapsed_values_at_the_exact_threshold() {
+        let limits = limits();
+        let judge = |heartbeat, quiet, elapsed| {
+            stop_decision(
+                None,
+                false,
+                heartbeat,
+                Duration::from_millis(quiet),
+                Duration::from_millis(elapsed),
+                limits,
+            )
+        };
+        assert_eq!(judge(true, 499, 1499), None);
+        assert_eq!(judge(true, 0, 0), None);
+        assert_eq!(
+            judge(true, 500, 1499),
+            Some(Stop {
+                outcome: TurnOutcome::Silent,
+                failure: None,
+                why: "no output for 1s".into(),
+            })
+        );
+        // Output resets silence, but never the turn's total running time.
+        assert_eq!(
+            judge(true, 0, 1500),
+            Some(Stop {
+                outcome: TurnOutcome::TimedOut,
+                failure: None,
+                why: "the turn ran past 2s".into(),
+            })
+        );
+        assert_eq!(judge(false, 9999, 1499), None);
+        assert_eq!(
+            judge(false, 9999, 1500).unwrap().outcome,
+            TurnOutcome::TimedOut
+        );
+        assert_eq!(judge(true, 500, 1500).unwrap().outcome, TurnOutcome::Silent);
+        assert_eq!(judge(true, 501, 1501).unwrap().outcome, TurnOutcome::Silent);
+        // The former integration case's millisecond limit still records
+        // its rounded whole seconds, without waiting for a real clock.
+        let short = TurnLimits {
+            silence_ms: Some(800),
+            limit_ms: Some(500),
+            limit_secs: 1,
+            ..limits
+        };
+        assert_eq!(
+            stop_decision(
+                None,
+                false,
+                true,
+                Duration::from_millis(499),
+                Duration::from_millis(499),
+                short
+            ),
+            None
+        );
+        assert_eq!(
+            stop_decision(
+                None,
+                false,
+                true,
+                Duration::from_millis(0),
+                Duration::from_millis(500),
+                short
+            ),
+            Some(Stop {
+                outcome: TurnOutcome::TimedOut,
+                failure: None,
+                why: "the turn ran past 1s".into(),
+            })
+        );
+        assert_eq!(
+            stop_decision(
+                None,
+                false,
+                true,
+                Duration::from_millis(800),
+                Duration::from_millis(800),
+                short
+            ),
+            Some(Stop {
+                outcome: TurnOutcome::Silent,
+                failure: None,
+                why: "no output for 1s".into(),
+            })
+        );
+        // The seconds fallback has the same inclusive threshold.
+        let seconds = TurnLimits {
+            silence_ms: None,
+            limit_ms: None,
+            ..limits
+        };
+        assert_eq!(
+            stop_decision(
+                None,
+                false,
+                true,
+                Duration::from_millis(999),
+                Duration::from_millis(1999),
+                seconds
+            ),
+            None
+        );
+        assert_eq!(
+            stop_decision(
+                None,
+                false,
+                true,
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                seconds
+            )
+            .unwrap()
+            .outcome,
+            TurnOutcome::Silent
+        );
+        assert_eq!(
+            stop_decision(
+                None,
+                false,
+                false,
+                Duration::ZERO,
+                Duration::from_secs(2),
+                seconds
+            )
+            .unwrap()
+            .outcome,
+            TurnOutcome::TimedOut
+        );
+    }
+
+    #[test]
+    fn exit_wins_over_time_limits_and_the_first_observation_wins_over_exit() {
+        let elapsed = Duration::from_secs(10);
+        assert_eq!(
+            stop_decision(None, true, true, elapsed, elapsed, limits()),
+            Some(Stop {
+                outcome: TurnOutcome::Stopped,
+                failure: None,
+                why: "the supervisor asked the session to exit".into(),
+            })
+        );
+        for (outcome, failure) in [
+            (TurnOutcome::LaunchMismatch, None),
+            (TurnOutcome::Failed, Some(TurnFailure::Authentication)),
+            (TurnOutcome::Failed, Some(TurnFailure::UsageLimit)),
+        ] {
+            let observed = Stop {
+                outcome,
+                failure,
+                why: "first observation".into(),
+            };
+            assert_eq!(
+                stop_decision(Some(observed), true, true, elapsed, elapsed, limits()),
+                Some(Stop {
+                    outcome,
+                    failure,
+                    why: "first observation".into(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn permission_modes_must_match_only_when_the_provider_requires_one() {
+        let started = |mode: Option<&str>| TurnSignal::Started {
+            session_id: Some("s".into()),
+            model: None,
+            permission_mode: mode.map(str::to_owned),
+        };
+        assert_eq!(
+            observed_stop(None, &started(Some("auto")), Some("auto")),
+            None
+        );
+        for mode in [None, Some("default"), Some("auto")] {
+            assert_eq!(observed_stop(None, &started(mode), None), None);
+        }
+        for (mode, said) in [(Some("default"), "default"), (None, "(none)")] {
+            assert_eq!(
+                observed_stop(None, &started(mode), Some("auto")),
+                Some(Stop {
+                    outcome: TurnOutcome::LaunchMismatch,
+                    failure: None,
+                    why: format!("the agent started in permission mode {said} instead of auto"),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn unusable_signals_keep_their_failure_and_message_in_output_order() {
+        for failure in [
+            TurnFailure::Authentication,
+            TurnFailure::UsageLimit,
+            TurnFailure::Launch,
+            TurnFailure::Model,
+            TurnFailure::Sandbox,
+        ] {
+            assert_eq!(
+                observed_stop(
+                    None,
+                    &TurnSignal::Unusable(failure, "provider said why".into()),
+                    None
+                ),
+                Some(Stop {
+                    outcome: TurnOutcome::Failed,
+                    failure: Some(failure),
+                    why: "provider said why".into(),
+                })
+            );
+        }
+        let mismatch = TurnSignal::Started {
+            session_id: None,
+            model: None,
+            permission_mode: None,
+        };
+        let unusable = TurnSignal::Unusable(TurnFailure::Authentication, "login failed".into());
+        let first = observed_stop(None, &mismatch, Some("auto"));
+        assert_eq!(
+            observed_stop(first, &unusable, None).unwrap().outcome,
+            TurnOutcome::LaunchMismatch
+        );
+        let first = observed_stop(None, &unusable, None);
+        assert_eq!(
+            observed_stop(first, &mismatch, Some("auto")).unwrap().why,
+            "login failed"
+        );
+        for signal in [
+            TurnSignal::Said("output".into()),
+            TurnSignal::Tool("Bash".into()),
+        ] {
+            assert_eq!(observed_stop(None, &signal, Some("auto")), None);
+        }
+    }
 
     #[test]
     fn only_an_executable_that_cannot_be_run_is_a_start_that_failed() {

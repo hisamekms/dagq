@@ -334,106 +334,6 @@ esac"#,
     );
 }
 
-/// The quiet period after the stub signals readiness. Resume turns keep
-/// emitting output during slow work such as commits.
-const SILENCE_MILLIS: u64 = 800;
-
-/// Says `tick` every 0.1 s in the background (pid in `$ticker`), so that a
-/// turn's slow steps (a commit under load) are not silent.
-const KEEP_SAYING: &str = "(while :; do say tick; sleep 0.1; done) & ticker=$!";
-
-/// Acceptance (5) and (5b): a turn silent past `[stall].turn_silence_secs`
-/// is stopped with what it runs; the session ends and the run goes to its
-/// recovery job as a run that failed, whose `resume` with an instruction
-/// is a resume of the same session, and the run lands.
-#[test]
-fn a_silent_turn_is_stopped_and_its_recovery_job_resumes_the_session() {
-    let (dir, repo, db, mut backend) = headless_fixture(&[]);
-    let ready = ready_turn(dir.path(), &mut backend);
-    set_turns(
-        dir.path(),
-        &format!(
-            r#"case "$MODE" in
-start) say starting; {ready}; sleep 60 ;;
-resume) {KEEP_SAYING}; {ready}; {FINISH}; kill $ticker ;;
-esac"#
-        ),
-    );
-    let base = git_out(&repo, &["rev-parse", "main"]);
-    let backend = Arc::new(backend);
-    let (reviewer, supervisor) = supervise_thread(
-        &db,
-        &repo,
-        backend.clone(),
-        dagq::domain::stall::StallConfig::default()
-            .with_millis("turn_silence_secs", SILENCE_MILLIS),
-        &[repair(
-            json!({"action": "resume", "instruction": "commit your work and write the receipt"}),
-            "the turn hung",
-        )],
-    );
-    let detail = landed(&db, &repo, &base, &backend, supervisor);
-    let run = &detail.runs[0];
-    let finished = payloads(&detail, "turn_finished");
-    assert_eq!(finished[0]["outcome"], "silent", "{finished:?}");
-    // Events record the milliseconds as their whole seconds.
-    assert_eq!(finished[0]["stopped"], "no output for 1s");
-    assert_eq!(finished[1]["outcome"], "succeeded");
-    let requested = payloads(&detail, "recovery_requested");
-    assert_eq!(requested.len(), 1, "{requested:?}");
-    assert_eq!(requested[0]["alert"], "failed");
-    let prompts = reviewer.triage_prompts();
-    assert!(
-        prompts[0].0.contains("\"outcome\":\"silent\""),
-        "{}",
-        prompts[0].0
-    );
-    let calls = stub_calls(run);
-    assert_eq!(calls.len(), 2, "{calls:?}");
-    assert!(
-        calls[1].starts_with(&format!("resume {} ", run.id())),
-        "{calls:?}"
-    );
-    let args =
-        fs::read_to_string(Path::new(run.run_dir().unwrap()).join("turns/turn-000002.jsonl"))
-            .unwrap();
-    assert!(args.contains("\"type\":\"result\""), "{args}");
-}
-
-/// Acceptance (5): a turn past `[stall].turn_limit_secs` is stopped and
-/// recorded as `timed_out`, and its run goes to its recovery job.
-#[test]
-fn a_turn_past_its_limit_is_stopped() {
-    let (dir, repo, db, mut backend) = headless_fixture(&[]);
-    let ready = ready_turn(dir.path(), &mut backend);
-    set_turns(
-        dir.path(),
-        &format!(
-            "say starting; {ready}; i=0; while [ $i -lt 300 ]; do say tick; sleep 0.1; i=$((i + 1)); done"
-        ),
-    );
-    let backend = Arc::new(backend);
-    let (_reviewer, supervisor) = supervise_thread(
-        &db,
-        &repo,
-        backend.clone(),
-        dagq::domain::stall::StallConfig::default().with_millis("turn_limit_secs", 500),
-        &[],
-    );
-    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let detail = detail(&db);
-    assert_eq!(detail.runs[0].status(), RunStatus::Failed);
-    let finished = payloads(&detail, "turn_finished");
-    assert_eq!(finished.len(), 1, "{finished:?}");
-    assert_eq!(finished[0]["outcome"], "timed_out");
-    assert_eq!(finished[0]["stopped"], "the turn ran past 1s");
-    assert_eq!(payloads(&detail, "turn_started")[0]["limit_secs"], 1);
-    let requested = payloads(&detail, "recovery_requested");
-    assert_eq!(requested[0]["alert"], "failed", "{requested:?}");
-}
-
 /// Acceptance (5b): a turn that ends with neither a receipt nor a question
 /// is nudged twice, each a resume; still without one, the recovery job
 /// (`stalled`, reason `turn_without_receipt`) is asked, and its
@@ -969,10 +869,14 @@ fn a_turn_past_its_limit_is_stopped_with_its_command_outside_its_group() {
     // waits for `ready` before returning, so even a slow first exec cannot
     // spend the turn's limit before the outside command exists. The initial
     // 3 s delay deliberately exceeds the 2 s limit to exercise this ordering.
+    // The resume's commit precedes its ready marker as well; only receipt
+    // publication and the turn's result spend that turn's short limit.
     set_turns(
         dir.path(),
         &format!(
-            r#"sleep 3
+            r#"case "$MODE" in
+resume) commit work; {ready}; receipt "$(git rev-parse HEAD)"; say finished ;;
+*) sleep 3
 perl -e 'setpgrp(0, 0) or die "setpgrp: $!";
 open(my $pid, ">", "$ARGV[0]/outside.pid") or die $!;
 print $pid "$$\n"; close($pid) or die $!;
@@ -980,11 +884,14 @@ rename "$ARGV[0]/outside.pid", "$ARGV[0]/outside-ready.pid" or die $!;
 exec "sleep", "600"' "$RUN_DIR" >/dev/null 2>&1 &
 await_file "$RUN_DIR/outside-ready.pid"
 {ready}
-i=0; while [ $i -lt 300 ]; do say tick; sleep 0.1; i=$((i + 1)); done"#
+i=0; while [ $i -lt 300 ]; do say tick; sleep 0.1; i=$((i + 1)); done ;;
+esac"#
         ),
     );
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let recovery_gate = dir.path().join("recover-now");
     let backend = Arc::new(backend);
-    let (_reviewer, supervisor) = supervise_thread(
+    let (reviewer, supervisor) = supervise_thread(
         &db,
         &repo,
         backend.clone(),
@@ -992,19 +899,57 @@ i=0; while [ $i -lt 300 ]; do say tick; sleep 0.1; i=$((i + 1)); done"#
             turn_limit_secs: 2,
             ..Default::default()
         },
-        &[],
+        &[format!(
+            "{}\n{}; {}",
+            common::AWAIT_FILE,
+            common::await_path(&recovery_gate),
+            repair(
+                json!({"action": "resume", "instruction": "commit your work and write the receipt"}),
+                "the turn hung",
+            ),
+        )],
     );
-    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let detail = detail(&db);
-    let outside = Reaped(written_pid(&detail.runs[0], "outside-ready.pid"));
-    let finished = payloads(&detail, "turn_finished");
-    assert_eq!(finished[0]["outcome"], "timed_out", "{finished:?}");
+    // Check the stop before recovery can stop any leftover processes itself.
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        let detail = queue.show(TASK).unwrap();
+        detail
+            .runs
+            .first()
+            .is_some_and(|run| run.status() == RunStatus::Failed)
+            && !payloads(&detail, "recovery_requested").is_empty()
+    });
+    let ended = detail(&db);
+    assert_eq!(payloads(&ended, "turn_finished").len(), 1);
+    let outside = Reaped(written_pid(&ended.runs[0], "outside-ready.pid"));
     assert!(
         !still_running(outside.0),
         "the command outside the turn's group outlived the turn"
     );
+    fs::write(&recovery_gate, "").unwrap();
+    let detail = landed(&db, &repo, &base, &backend, supervisor);
+    let finished = payloads(&detail, "turn_finished");
+    assert_eq!(finished.len(), 2, "{finished:?}");
+    assert_eq!(finished[0]["outcome"], "timed_out", "{finished:?}");
+    assert_eq!(finished[0]["stopped"], "the turn ran past 2s");
+    assert_eq!(finished[1]["outcome"], "succeeded");
+    assert_eq!(finished[1]["session_id"], json!(detail.runs[0].id()));
+    let started = payloads(&detail, "turn_started");
+    assert_eq!(started.len(), 2, "{started:?}");
+    assert_eq!(started[0]["limit_secs"], 2);
+    assert_eq!(started[1]["resume"], true);
+    let requested = payloads(&detail, "recovery_requested");
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    assert_eq!(requested[0]["alert"], "failed");
+    assert!(
+        reviewer.triage_prompts()[0]
+            .0
+            .contains("\"outcome\":\"timed_out\"")
+    );
+    let output = fs::read_to_string(
+        Path::new(detail.runs[0].run_dir().unwrap()).join("turns/turn-000002.jsonl"),
+    )
+    .unwrap();
+    assert!(output.contains("\"type\":\"result\""), "{output}");
 }
 
 /// Task 1085 (1): the exit request stops a running turn with the command it

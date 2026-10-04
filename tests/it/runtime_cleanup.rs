@@ -27,14 +27,6 @@ fn sweeping_options() -> SuperviseOptions {
     }
 }
 
-/// The same, for a supervisor that runs until it is stopped.
-fn sweeping_options_running() -> SuperviseOptions {
-    SuperviseOptions {
-        sweep_interval: Duration::ZERO,
-        ..supervise_options(4, false)
-    }
-}
-
 /// The payloads of a run's events of `kind`.
 fn payloads_of(queue: &SqliteQueue, run: &TaskRun, kind: &str) -> Vec<Value> {
     queue
@@ -356,9 +348,6 @@ fn a_canceled_task_loses_the_branch_of_a_worktree_already_gone() {
         })]
     );
     assert!(payloads_of(&queue, &run, "cleanup_failed").is_empty());
-    // Nothing is left: another sweep records nothing.
-    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
-    assert_eq!(payloads_of(&queue, &run, "worktree_removed").len(), 1);
 }
 
 /// Task 405: a worktree whose `.git` still points at the repository's
@@ -813,13 +802,6 @@ fn the_build_outputs_of_an_idle_run_go_only_for_disk_space() {
         free_space: short_while_idle_target,
         ..sweeping_options()
     };
-    // Room: they stay.
-    IDLE_SHORT.store(false, Ordering::SeqCst);
-    let outcome = supervise_with(&db, &repo, &backend, &options).unwrap();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert!(target.join("debug/big").is_file());
-    assert!(payloads_of(&queue, &run, "build_outputs_removed").is_empty());
-
     // Short: they go, for disk space.
     IDLE_SHORT.store(true, Ordering::SeqCst);
     let outcome = supervise_with(&db, &repo, &backend, &options).unwrap();
@@ -974,140 +956,6 @@ fn a_skipped_resume_waits_for_the_cleanup_of_its_build_outputs() {
     assert_eq!(removed[0]["reason"], "disk_space");
 }
 
-/// The build outputs whose presence makes the counted test's disk short,
-/// once it turned short.
-static COUNTED_TARGET: Mutex<Option<PathBuf>> = Mutex::new(None);
-static COUNTED_SHORT: AtomicBool = AtomicBool::new(false);
-static COUNTED_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-fn short_while_counted_target(_: &Path) -> Option<u64> {
-    COUNTED_READS.fetch_add(1, Ordering::SeqCst);
-    let target = COUNTED_TARGET
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    Some(
-        if COUNTED_SHORT.load(Ordering::SeqCst) && target.as_ref().is_some_and(|dir| dir.exists()) {
-            1
-        } else {
-            4 * GIB
-        },
-    )
-}
-
-/// Task 1289: a cleanup for disk space asked for while an ordinary
-/// cleanup runs is taken on by that job, and the rest (the runs it did not
-/// pick, with the idle ones) follows as `Request::counted`: it removes the
-/// `target/` and `llvm-cov-target/` of a run nobody works on that waits for
-/// no answer, records `build_outputs_removed` with the reason
-/// `disk_space`, and counts the bytes and the run in `auto_repaired`
-/// (`disk_cleanup`). The worktree, its branch and commit, its
-/// uncommitted source and the run directory stay.
-#[test]
-fn the_rest_of_a_cleanup_for_room_clears_and_counts_the_idle_runs() {
-    let (_dir, repo, db) = fixture();
-    let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
-    let (idle, ask) = run_awaiting_an_answer(&db, &repo, &backend, true);
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    queue.answer(ask.id, "withdrawn").unwrap();
-    queue.close_ask(ask.id).unwrap();
-    // An ended run whose task goes on: the ordinary sweep's.
-    add_ready_task(&mut queue, "ended", &[]);
-    let building = TestWorkspace::new(&db, false, BUILDING_AGENT);
-    supervise(&db, &repo, &building).unwrap();
-    building.join();
-    let ended = queue.show(TaskId::new(2)).unwrap().runs[0].clone();
-    assert_eq!(ended.status(), RunStatus::Failed);
-    let ended_target = Path::new(ended.worktree_path().unwrap()).join("target");
-    fs::create_dir_all(ended_target.join("debug")).unwrap();
-    fs::write(ended_target.join("debug/again"), vec![0u8; 4096]).unwrap();
-    let idle_target = Path::new(idle.worktree_path().unwrap()).join("target");
-    assert!(idle_target.join("debug/big").is_file());
-    assert_eq!(
-        queue
-            .ended_run_worktrees()
-            .unwrap()
-            .iter()
-            .find(|w| w.run_id == *idle.id())
-            .map(|w| w.cleanup),
-        Some(dagq::application::WorktreeCleanup::Idle)
-    );
-    let branch = idle.branch().unwrap();
-    let head = git_out(&repo, &["rev-parse", branch]);
-    *COUNTED_TARGET.lock().unwrap() = Some(idle_target.clone());
-    COUNTED_SHORT.store(false, Ordering::SeqCst);
-    let files = GatedFiles::default();
-    let stop = Arc::new(AtomicBool::new(false));
-    let options = files.options(SuperviseOptions {
-        stop: stop.clone(),
-        disk: Some(DiskConfig {
-            min_free_bytes: Some(GIB),
-            ..DiskConfig::default()
-        }),
-        free_space: short_while_counted_target,
-        ..sweeping_options_running()
-    });
-    let supervisor = {
-        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
-    };
-    // The sweep's job, with room: the ended run only.
-    assert_eq!(files.held(), ended_target);
-    // Short while it is held: it takes on the cleanup for room.
-    COUNTED_SHORT.store(true, Ordering::SeqCst);
-    let reads = COUNTED_READS.load(Ordering::SeqCst);
-    wait_until(&db, common::STEP_LIMIT, |_| {
-        COUNTED_READS.load(Ordering::SeqCst) >= reads + 3
-    });
-    assert!(idle_target.join("debug/big").is_file());
-    assert!(payloads_of(&queue, &idle, "build_outputs_removed").is_empty());
-
-    files.open();
-    let repairs = |queue: &SqliteQueue| -> Vec<Value> {
-        queue
-            .all_events()
-            .unwrap()
-            .into_iter()
-            .filter(|event| event.kind == "auto_repaired")
-            .map(|event| event.payload)
-            .collect()
-    };
-    wait_until(&db, Duration::from_secs(60), |queue| {
-        repairs(queue).len() >= 2
-    });
-    stop.store(true, Ordering::SeqCst);
-    let outcome = joined(supervisor, "the supervisor to finish").unwrap();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_kept_but_the_build_outputs(&repo, &idle);
-    assert_eq!(git_out(&repo, &["rev-parse", branch]), head);
-    assert!(Path::new(idle.run_dir().unwrap()).is_dir());
-    let removed = payloads_of(&queue, &idle, "build_outputs_removed");
-    assert_eq!(removed.len(), 1, "{removed:?}");
-    assert_eq!(removed[0]["reason"], "disk_space");
-    assert_eq!(removed[0]["paths"].as_array().unwrap().len(), 2);
-    assert!(removed[0]["bytes"].as_u64().unwrap() >= 2 * 65536);
-    let repaired = repairs(&queue);
-    assert_eq!(repaired.len(), 2, "{repaired:?}");
-    assert_eq!(repaired[0]["repair"], "disk_cleanup");
-    // The job that took the cleanup on counts what it removed, the rest
-    // what it removed.
-    assert_eq!(
-        repaired[0]["detail"]["runs"],
-        json!([ended.id().as_str()]),
-        "{repaired:?}"
-    );
-    assert_eq!(repaired[1]["repair"], "disk_cleanup");
-    assert_eq!(repaired[1]["bytes"], removed[0]["bytes"]);
-    assert_eq!(
-        repaired[1]["detail"]["runs"],
-        json!([idle.id().as_str()]),
-        "{repaired:?}"
-    );
-    assert_eq!(
-        queue.run(idle.id()).unwrap().status(),
-        RunStatus::AwaitingIntegration
-    );
-}
-
 /// Task 1290: the temporary files directory a run's Codex turns got as
 /// their `TMPDIR` (`tmp` in its run directory) stays while its task goes
 /// on, a resume may go on in it, and goes once the task is canceled,
@@ -1150,10 +998,6 @@ fn a_runs_tmp_dir_goes_only_once_its_task_is_over() {
     assert_eq!(removed[0]["reason"], "task_canceled");
     assert!(run_dir.join("receipt.json").is_file());
     assert!(run_dir.join("kept.log").is_file());
-    // Not recorded again on a later sweep.
-    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
-    backend.join();
-    assert_eq!(payloads_of(&queue, &run, "run_tmp_removed").len(), 1);
 }
 
 /// State belongs to the single matrix test below, including under cargo test.
@@ -1468,6 +1312,15 @@ fn draining_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing() {
             fs::write(ended_target.join("debug/again"), vec![0u8; 4096]).unwrap();
             let idle_target = Path::new(idle.worktree_path().unwrap()).join("target");
             assert!(idle_target.join("debug/big").is_file());
+            let idle_head = git_out(&repo, &["rev-parse", idle.branch().unwrap()]);
+            assert_eq!(
+                queue
+                    .ended_run_worktree(idle.id())
+                    .unwrap()
+                    .unwrap()
+                    .cleanup,
+                dagq::application::WorktreeCleanup::Idle,
+            );
             add_ready_task(&mut queue, "landing", &[]);
             let rest = GatedFiles {
                 only: Some(idle_target.clone()),
@@ -1595,6 +1448,17 @@ fn draining_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing() {
             let removed = payloads_of(&queue, &idle, "build_outputs_removed");
             assert_eq!(removed.len(), 1, "{removed:?}");
             assert_eq!(removed[0]["reason"], "disk_space");
+            assert_eq!(removed[0]["paths"].as_array().unwrap().len(), 2);
+            assert!(removed[0]["bytes"].as_u64().unwrap() >= 2 * 65536);
+            assert_eq!(
+                git_out(&repo, &["rev-parse", idle.branch().unwrap()]),
+                idle_head
+            );
+            assert!(Path::new(idle.run_dir().unwrap()).is_dir());
+            assert_eq!(
+                queue.run(idle.id()).unwrap().status(),
+                RunStatus::AwaitingIntegration
+            );
             let repaired: Vec<Value> = queue
                 .all_events()
                 .unwrap()
@@ -1603,6 +1467,7 @@ fn draining_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing() {
                 .map(|event| event.payload)
                 .collect();
             assert_eq!(repaired.len(), 2, "{repaired:?}");
+            assert_eq!(repaired[0]["repair"], "disk_cleanup");
             assert_eq!(repaired[0]["detail"]["runs"], json!([ended.id().as_str()]));
             assert_eq!(repaired[1]["repair"], "disk_cleanup");
             assert_eq!(repaired[1]["bytes"], removed[0]["bytes"]);

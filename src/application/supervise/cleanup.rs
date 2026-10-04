@@ -133,17 +133,52 @@ impl CleanupWatch {
     /// nothing is held or asked for while it may still free room (task
     /// 1478), and a drain decides its landings on that reading (task 1426).
     pub(super) fn for_disk(&self) -> bool {
-        self.job
-            .as_ref()
-            .is_some_and(|job| job.disk.is_some() || job.counted.is_some())
-            || self.pending.disk.is_some()
-            || self.pending.counted.is_some()
+        disk_cleanup_pending(
+            self.job.as_ref().map(|job| (job.disk, job.counted)),
+            &self.pending,
+        )
     }
     /// The lock the loop holds while it leases an ended run, and the runs
     /// the job has yet to pass, which the loop leaves for a later pass.
     pub(super) fn cleaning(&self) -> Arc<Mutex<Cleaning>> {
         self.cleaning.clone()
     }
+}
+
+/// Whether cleanup may still free room; draining does not alter this decision.
+fn disk_cleanup_pending(
+    job: Option<(Option<DiskRequest>, Option<DiskRequest>)>,
+    pending: &Request,
+) -> bool {
+    job.is_some_and(|(disk, counted)| disk.is_some() || counted.is_some())
+        || pending.disk.is_some()
+        || pending.counted.is_some()
+}
+
+fn task_over(status: TaskStatus) -> bool {
+    matches!(status, TaskStatus::Completed | TaskStatus::Canceled)
+}
+
+fn safe_worktree(worktree: &Path, runs_dir: &Path, repo_root: &Path) -> bool {
+    worktree.starts_with(runs_dir) && !repo_root.starts_with(worktree)
+}
+
+/// The build-output event and the suffix of its log message. Ordinary cleanup
+/// records the event too; only its job's disk/counting request makes a repair.
+fn build_outputs_record(cleanup: WorktreeCleanup, paths: &[String], bytes: u64) -> (String, Value) {
+    let (reason, why) = match cleanup {
+        WorktreeCleanup::Ended => (BUILD_OUTPUTS_RUN_ENDED, String::new()),
+        WorktreeCleanup::AwaitingAnswer(ask) => (
+            BUILD_OUTPUTS_AWAITING_ANSWER,
+            format!(", waiting for the answer to ask {ask}"),
+        ),
+        WorktreeCleanup::Idle => (BUILD_OUTPUTS_DISK_SPACE, ", for disk space".to_owned()),
+    };
+    let mut payload = json!({"paths": paths, "bytes": bytes, "by": "supervisor", "reason": reason});
+    if let WorktreeCleanup::AwaitingAnswer(ask) = cleanup {
+        payload["ask_id"] = json!(ask);
+    }
+    (why, payload)
 }
 
 /// What the loop and the job share under one lock.
@@ -197,10 +232,7 @@ struct Left {
 /// resume): the job leaves them, and they count once the queue lists the
 /// run otherwise. A branch the job did not see the list of may be left.
 fn nothing_left(candidate: &EndedRunWorktree, left: Left) -> bool {
-    let over = matches!(
-        candidate.task_status,
-        TaskStatus::Completed | TaskStatus::Canceled
-    );
+    let over = task_over(candidate.task_status);
     let branch = over && candidate.branch.is_some() && left.branch != Some(false);
     !left.worktree && !left.failed && !branch
 }
@@ -491,22 +523,9 @@ impl Supervisor<'_> {
                     paths,
                     bytes,
                 } => {
-                    let (reason, why) = match cleanup {
-                        WorktreeCleanup::Ended => (BUILD_OUTPUTS_RUN_ENDED, String::new()),
-                        WorktreeCleanup::AwaitingAnswer(ask) => (
-                            BUILD_OUTPUTS_AWAITING_ANSWER,
-                            format!(", waiting for the answer to ask {ask}"),
-                        ),
-                        WorktreeCleanup::Idle => {
-                            (BUILD_OUTPUTS_DISK_SPACE, ", for disk space".to_owned())
-                        }
-                    };
+                    let (why, payload) = build_outputs_record(cleanup, &paths, bytes);
                     info!(run_id = %run_id, "run {run_id} is {}{why}; removed the build outputs of its worktree ({bytes} bytes)", status.as_str());
                     cleaned.add(&run_id, bytes);
-                    let mut payload = json!({"paths": paths, "bytes": bytes, "by": "supervisor", "reason": reason});
-                    if let WorktreeCleanup::AwaitingAnswer(ask) = cleanup {
-                        payload["ask_id"] = json!(ask);
-                    }
                     self.queue.record_runtime_event(
                         &run_id,
                         EventKind::BuildOutputsRemoved,
@@ -746,10 +765,8 @@ fn remove_run_runner(ports: &JobPorts, candidate: &EndedRunWorktree) -> bool {
 /// (another supervisor's cleanup, or Claude Code's) is no failure. What
 /// was removed is pushed to `outcomes` with a failure under another root.
 fn remove_scratchpads(ports: &JobPorts, candidate: &EndedRunWorktree, outcomes: &mut Vec<Outcome>) {
-    if !matches!(
-        candidate.task_status,
-        TaskStatus::Completed | TaskStatus::Canceled
-    ) || !Path::new(&candidate.worktree).starts_with(&ports.runs_dir)
+    if !task_over(candidate.task_status)
+        || !Path::new(&candidate.worktree).starts_with(&ports.runs_dir)
     {
         return;
     }
@@ -808,10 +825,7 @@ fn remove_scratchpads(ports: &JobPorts, candidate: &EndedRunWorktree, outcomes: 
 /// link (one there is left alone) and nothing else of the run directory;
 /// one not there, or gone before its removal, is no failure.
 fn remove_run_tmp(ports: &JobPorts, candidate: &EndedRunWorktree, outcomes: &mut Vec<Outcome>) {
-    if !matches!(
-        candidate.task_status,
-        TaskStatus::Completed | TaskStatus::Canceled
-    ) {
+    if !task_over(candidate.task_status) {
         return;
     }
     let dir = ports
@@ -861,13 +875,10 @@ fn clean_worktree(
     pruned: &mut bool,
 ) -> Result<Option<Outcome>> {
     let worktree = Path::new(&candidate.worktree);
-    if !worktree.starts_with(&ports.runs_dir) || ports.repo_root.starts_with(worktree) {
+    if !safe_worktree(worktree, &ports.runs_dir, &ports.repo_root) {
         return Ok(None);
     }
-    let over = matches!(
-        candidate.task_status,
-        TaskStatus::Completed | TaskStatus::Canceled
-    );
+    let over = task_over(candidate.task_status);
     let removed = |bytes, missing, removal, branch: &str| Outcome::Worktree {
         run_id: candidate.run_id.clone(),
         task_id: candidate.task_id,
@@ -1037,10 +1048,8 @@ fn may_remove_broken(
     repair: &str,
 ) -> bool {
     let worktree = Path::new(&candidate.worktree);
-    matches!(
-        candidate.task_status,
-        TaskStatus::Completed | TaskStatus::Canceled
-    ) && worktree == runs_dir.join(candidate.run_id.as_str()).join("worktree")
+    task_over(candidate.task_status)
+        && worktree == runs_dir.join(candidate.run_id.as_str()).join("worktree")
         && !repo_root.starts_with(worktree)
         && NOT_A_WORKTREE.iter().any(|said| removal.contains(said))
         && repair.contains(BROKEN_GIT)
@@ -1049,6 +1058,190 @@ fn may_remove_broken(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const DISK: DiskRequest = DiskRequest {
+        free: Some(1),
+        needed: Some(2),
+    };
+
+    #[test]
+    fn cleanup_requests_merge_tasks_and_all_without_selecting_idle_runs() {
+        let mut request = Request::default();
+        assert!(request.is_empty());
+        request.add(Some(TaskId::new(1)), None);
+        request.add(Some(TaskId::new(1)), None);
+        request.add(Some(TaskId::new(2)), None);
+        assert!(!request.is_empty());
+        assert_eq!(request.tasks, [TaskId::new(1), TaskId::new(2)]);
+        let run = candidate("r", TaskStatus::InProgress);
+        assert!(request.wants(&run));
+        let other = EndedRunWorktree {
+            task_id: TaskId::new(3),
+            ..run.clone()
+        };
+        assert!(!request.wants(&other));
+        let awaiting = EndedRunWorktree {
+            cleanup: WorktreeCleanup::AwaitingAnswer(AskId::new(7)),
+            ..run.clone()
+        };
+        let idle = EndedRunWorktree {
+            cleanup: WorktreeCleanup::Idle,
+            ..run
+        };
+        assert!(request.wants(&awaiting));
+        assert!(!request.wants(&idle));
+        request.add(None, None);
+        assert!(request.all);
+        assert!(request.wants(&other));
+        assert!(!request.wants(&idle));
+        assert!(!request.prune);
+        assert!(request.disk.is_none());
+        request.add(Some(TaskId::new(1)), Some(DISK));
+        request.add(
+            None,
+            Some(DiskRequest {
+                free: Some(100),
+                needed: None,
+            }),
+        );
+        assert!(request.all && request.prune && request.idle);
+        assert!(request.wants(&idle));
+        assert_eq!(request.disk, Some(DISK));
+        assert_eq!(request.counted, None);
+        let mut disk_only = Request::default();
+        disk_only.add(Some(TaskId::new(1)), Some(DISK));
+        assert!(disk_only.wants(&other));
+        assert!(!disk_only.is_empty());
+    }
+
+    #[test]
+    fn disk_cleanup_includes_running_and_pending_disk_or_counted_requests() {
+        for job_disk in [None, Some(DISK)] {
+            for job_counted in [None, Some(DISK)] {
+                for pending_disk in [None, Some(DISK)] {
+                    for pending_counted in [None, Some(DISK)] {
+                        let pending = Request {
+                            disk: pending_disk,
+                            counted: pending_counted,
+                            ..Request::default()
+                        };
+                        let expected = job_disk.is_some()
+                            || job_counted.is_some()
+                            || pending_disk.is_some()
+                            || pending_counted.is_some();
+                        assert_eq!(
+                            disk_cleanup_pending(Some((job_disk, job_counted)), &pending),
+                            expected
+                        );
+                        assert_eq!(
+                            disk_cleanup_pending(None, &pending),
+                            pending_disk.is_some() || pending_counted.is_some()
+                        );
+                        // No running thread is needed to test ending or waiting.
+                        for ending in [false, true] {
+                            let watch = CleanupWatch {
+                                ending,
+                                pending: Request {
+                                    disk: pending_disk,
+                                    counted: pending_counted,
+                                    ..Request::default()
+                                },
+                                ..CleanupWatch::default()
+                            };
+                            assert_eq!(
+                                watch.for_disk(),
+                                pending_disk.is_some() || pending_counted.is_some()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn build_output_records_keep_the_reason_ask_and_log_suffix() {
+        let paths = vec![
+            "/runs/r/worktree/target".into(),
+            "/runs/r/worktree/llvm-cov-target".into(),
+        ];
+        for (cleanup, reason, why) in [
+            (WorktreeCleanup::Ended, "run_ended", ""),
+            (
+                WorktreeCleanup::AwaitingAnswer(AskId::new(7)),
+                "awaiting_answer",
+                ", waiting for the answer to ask 7",
+            ),
+            (WorktreeCleanup::Idle, "disk_space", ", for disk space"),
+        ] {
+            let (suffix, payload) = build_outputs_record(cleanup, &paths, 42);
+            assert_eq!(suffix, why);
+            let mut expected =
+                json!({"paths": paths, "bytes": 42, "by": "supervisor", "reason": reason});
+            if cleanup == WorktreeCleanup::AwaitingAnswer(AskId::new(7)) {
+                expected["ask_id"] = json!(7);
+            }
+            assert_eq!(payload, expected);
+        }
+    }
+
+    #[test]
+    fn only_completed_and_canceled_tasks_remove_tmp_and_worktree_branches() {
+        for status in [
+            TaskStatus::Draft,
+            TaskStatus::Submitted,
+            TaskStatus::Ready,
+            TaskStatus::InProgress,
+        ] {
+            assert!(!task_over(status));
+        }
+        assert!(task_over(TaskStatus::Completed));
+        assert!(task_over(TaskStatus::Canceled));
+        let runs = Path::new("/runs");
+        let repo = Path::new("/repo");
+        assert!(safe_worktree(Path::new("/runs/r/worktree"), runs, repo));
+        assert!(!safe_worktree(
+            Path::new("/elsewhere/r/worktree"),
+            runs,
+            repo
+        ));
+        assert!(!safe_worktree(
+            Path::new("/runs-other/r/worktree"),
+            runs,
+            repo
+        ));
+        assert!(!safe_worktree(
+            Path::new("/runs/r/worktree"),
+            runs,
+            Path::new("/runs/r/worktree")
+        ));
+        assert!(!safe_worktree(
+            Path::new("/runs/r/worktree"),
+            runs,
+            Path::new("/runs/r/worktree/repo")
+        ));
+        assert!(!safe_worktree(runs, runs, Path::new("/runs/repo")));
+    }
+
+    #[test]
+    fn cleaned_counts_positive_bytes_and_each_run_once_regardless_of_reason() {
+        let run = RunId::new("r").unwrap();
+        let other = RunId::new("other").unwrap();
+        let mut cleaned = Cleaned::default();
+        cleaned.add(&run, 0);
+        assert!(cleaned.runs.is_empty());
+        for cleanup in [
+            WorktreeCleanup::Ended,
+            WorktreeCleanup::AwaitingAnswer(AskId::new(7)),
+            WorktreeCleanup::Idle,
+        ] {
+            let (_, payload) = build_outputs_record(cleanup, &[], 42);
+            cleaned.add(&run, payload["bytes"].as_u64().unwrap());
+        }
+        cleaned.add(&other, 1);
+        assert_eq!(cleaned.bytes, 127);
+        assert_eq!(cleaned.runs, [run, other]);
+    }
 
     #[test]
     fn a_scratchpad_is_named_after_its_cwd_as_claude_code_names_it() {

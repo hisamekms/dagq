@@ -285,6 +285,11 @@ pub(super) fn turns_excerpt(sv: &Supervisor<'_>, run: &TaskRun) -> String {
         Ok(events) => events,
         Err(error) => return format!("(the turns could not be read: {error:#})"),
     };
+    format_turns_excerpt(&events)
+}
+
+/// A recovery job's material from recorded turns, independent of the queue.
+fn format_turns_excerpt(events: &[RunEvent]) -> String {
     let finished: Vec<String> = events
         .iter()
         .filter(|e| e.kind == event_kind::TURN_FINISHED)
@@ -360,6 +365,98 @@ mod tests {
             outcome,
             failure,
             permission_denials: denials,
+        }
+    }
+
+    #[test]
+    fn recovery_material_includes_silent_and_timed_out_turns_without_a_screen() {
+        let event = |kind: &str, payload: Value| RunEvent {
+            id: crate::domain::EventId::new(1),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.into(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        };
+        assert_eq!(
+            format_turns_excerpt(&[]),
+            "(a headless session: no turn ended yet)"
+        );
+        let events = [
+            event(event_kind::TURN_STARTED, json!({"turn": 1})),
+            event(
+                event_kind::TURN_FINISHED,
+                json!({"turn": 1, "outcome": "silent", "failure": null, "permission_denials": 0}),
+            ),
+            event(
+                event_kind::TURN_FINISHED,
+                json!({"turn": 2, "outcome": "timed_out", "failure": null, "permission_denials": 0}),
+            ),
+            event(
+                event_kind::TURN_FINISHED,
+                json!({"turn": 3, "outcome": "failed", "failure": "authentication", "permission_denials": 3, "denied_tools": ["Bash", "Edit"], "message": "Not logged in"}),
+            ),
+        ];
+        assert_eq!(
+            format_turns_excerpt(&events),
+            "(a headless session has no screen; its last turns, newest first)\nturn 3: failed (authentication); 3 permission denial(s) [Bash, Edit]: Not logged in\nturn 2: timed_out; 0 permission denial(s)\nturn 1: silent; 0 permission denial(s)"
+        );
+        let many: Vec<_> = (1..=6)
+            .map(|turn| {
+                event(
+                    event_kind::TURN_FINISHED,
+                    json!({"turn": turn, "outcome": "succeeded"}),
+                )
+            })
+            .collect();
+        let text = format_turns_excerpt(&many);
+        assert_eq!(text.lines().count(), 6);
+        assert!(!text.contains("turn 1:"));
+        assert!(text.lines().nth(1).unwrap().starts_with("turn 6:"));
+    }
+
+    #[test]
+    fn permission_denials_and_provider_failures_cover_every_outcome() {
+        for outcome in [
+            TurnOutcome::Succeeded,
+            TurnOutcome::Failed,
+            TurnOutcome::Silent,
+            TurnOutcome::TimedOut,
+            TurnOutcome::LaunchMismatch,
+            TurnOutcome::Stopped,
+        ] {
+            for denials in [
+                0,
+                turn::PERMISSION_DENIAL_LIMIT - 1,
+                turn::PERMISSION_DENIAL_LIMIT,
+                turn::PERMISSION_DENIAL_LIMIT + 1,
+            ] {
+                assert_eq!(
+                    alert_at_once(Some(mark(outcome, None, denials))),
+                    (denials >= turn::PERMISSION_DENIAL_LIMIT).then_some(PERMISSION_DENIED)
+                );
+            }
+            for failure in [
+                None,
+                Some(TurnFailure::Authentication),
+                Some(TurnFailure::UsageLimit),
+                Some(TurnFailure::Launch),
+                Some(TurnFailure::Model),
+                Some(TurnFailure::Sandbox),
+            ] {
+                let expected = failure.filter(|failure| {
+                    outcome == TurnOutcome::Failed
+                        && matches!(
+                            failure,
+                            TurnFailure::Authentication
+                                | TurnFailure::UsageLimit
+                                | TurnFailure::Launch
+                        )
+                });
+                assert_eq!(provider_failure(Some(mark(outcome, failure, 10))), expected);
+            }
         }
     }
 
