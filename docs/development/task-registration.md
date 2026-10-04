@@ -4,7 +4,7 @@ type: development
 title: このrepositoryのtaskの登録（verify・paths・evidence・changeの選び方、ADRを書くtask、plan reviewが当てはめる規則）
 status: current
 created: 2026-10-03
-updated: 2026-10-05 # task 1707
+updated: 2026-10-05 # task 1592
 owners:
   - hisamekms
 tags:
@@ -14,6 +14,7 @@ related:
   - adr-t1453-2
   - adr-t1504-1
   - adr-t1504-2
+  - adr-t1591-1
   - development-local-checks
   - development-testing
   - development-migrations
@@ -38,6 +39,7 @@ related:
 - pluginとバイナリのversionを変える: verifyに`sh scripts/check-plugin-version.sh`を付ける（検査の中身は[plugin integration](../design/plugin-integration.md)の「tagとversionの一致規則」）
 - itのtestの時間の関門の許可の一覧（`.config/it-slow-allow.toml`）か関門のscript（`scripts/check-it-test-time.sh`）を変える: verifyに`sh scripts/check-it-test-time.sh --self-test`を付ける（fixtureでscriptの照合を確かめ、このrepositoryの許可の一覧の書式を読む。関門そのものはCIが流す。許可の一覧に載せてよい理由は[testの制約](testing.md)の「判断と境界のtest」、書式は[Slow tests](../design/slow-tests.md)の「itのtestの時間の関門」）
 - AGENTS.mdを変える: verifyに`sh scripts/check-agents-md-size.sh`を付ける（byteの上限を検査する。CIも実行する。上限と、規則の本文をAGENTS.mdに足さないことは[文書の規則](documents.md)の「AGENTS.md」）
+- configだけ（設定と運用）: 変えるものだけを`--paths`に挙げる（`--paths 'dagq.toml'`・`--paths 'scripts/**'`・`--paths '.github/**'`・`--paths '.config/**'`・`--paths '.dagq/**'`・`--paths 'rust-toolchain.toml'`から選ぶ。runtimeのpathは含めない。下の「plan reviewが当てはめる規則」）。verifyは変えるものの検査: `dagq.toml`なら読めることを確かめる`--verify 'python3 -c "import tomllib; tomllib.load(open(\"dagq.toml\", \"rb\"))"'`（task 942の先例。構文だけを見てkeyの意味は見ない。`tomllib`はPython 3.11以上なので、integrateのhostの`python3`が古いと着地に失敗する。[ADR-t883-1](../adr/2026-09-30-t883-1-edit-ended-run-verification-before-inherited-retry.md)のContext）、scriptと`.config/`の印・一覧はこの節のそれぞれの行の検査（`check-e2e-quarantine.sh`・`check-it-test-time.sh --self-test`など）。検査の無いもの（CIのworkflowなど）は検証なし。新しいkeyを足すのは本番の固定バイナリが読めるようになってから（[運用](operations.md)の「`dagq.toml`を変えるとき」）
 - 対象が混ざるtaskは重い方の検証にする。
 
 llvm-covとcargo testの重ね方:
@@ -73,7 +75,8 @@ runtimeのtaskは`--paths`を宣言しない（上の「推奨の組み合わせ
   - `test`: testだけを足す・直す。不安定なtestの修正とtestのhelperを含む
   - `measure`: 数えて確かめる・測る。statsやkpiを読んで結果をdocsに書く測定と、測るための一時の計装
   - `docs`: 文書だけ。ADR・design・pluginのskill・AGENTS.md。実装を伴わない決定の記録
-  - `config`: 設定と運用だけ。`dagq.toml`・CI・`scripts/`・toolchain・version
+  - `config`: 設定と運用だけ。`dagq.toml`・CI・`scripts/`・toolchain。`Cargo.toml`・`Cargo.lock`を変えるもの（versionと依存）はbuildの設定を変えるのでconfigにせず、`--paths`なしのruntimeの組み合わせで主な目的のchangeにする（下の「plan reviewが当てはめる規則」）
+- `dagq.toml`の`[supervisor] light_changes`に置いたchange（このrepositoryではdocsとconfigを置く予定で、置くのはtask 1593）のtaskは、着地の順番を待つだけのrunが空けた枠でもclaimされうるが、そこでclaimされるのは`--paths`を宣言したtaskだけなので、docs・configのtaskには`--paths`の宣言が要る（[ADR-t1591-1](../adr/2026-10-04-t1591-1-landing-queue-leaves-room-for-light-changes.md)決定2・3、判定は[claimを控える](../design/supervisor-lifecycle/claim-hold.md#着地待ちが空けた軽い枠)）。軽い枠に重い変更が紛れると、`parallel`と`[run.env]`が前提にする重いbuildの同時数を超えるため。宣言の外を変えたrunは軽い枠のものも上の「pathsと軽い検証」のとおり止まる。
 - 混ざるときは主な目的の1つを選ぶ（例: 不具合の修正にtestを足すなら`fix`、新しい機能のdocsを同じtaskで書くなら`feature`）。changeは検証を決めない（検証は上の推奨の組み合わせのとおり、変更の対象で選ぶ）。
 - 作業時間の前後比較で読む層は[運用](operations.md)の「KPIの読み方と印」。
 
@@ -88,6 +91,7 @@ runtimeのtaskは`--paths`を宣言しない（上の「推奨の組み合わせ
 この repository のplan review jobは、proposalのtaskに次を当てはめる（読む文書はAGENTS.mdの「plan review」が名指す）。
 
 - verify・paths・evidenceは上の「推奨の組み合わせ」（llvm-covと`cargo test`の重ね方を含む）と「e2e」に合い、changeは上の「change」のとおりtaskの主な目的に合う1つであること。`--evidence e2e`が付いていれば、`[e2e] paths`の外でも実cmuxで確かめる理由がdescriptionにあるかを見る。
+- changeが`docs`か`config`のtaskは`--paths`を宣言し、そのglobがruntimeのpath（`src/`・`tests/`・`migrations/`・`crates/`と、buildの設定の`Cargo.toml`・`Cargo.lock`・`build.rs`）に当たらないこと。`docs`は上の「推奨の組み合わせ」のdocs・pluginの文書の行のpaths、`config`は同じ節のconfigの行のpathsの範囲に収める。`--paths`が無い・runtimeのpathを含む（`**`のような広いglobを含む）・descriptionやacceptanceがruntimeのpathの変更を求める、といった食い違いは`revise`にし、主な目的に合うchange（`feature`・`fix`・`refactor`など）に直すか`--paths`を絞らせる。上の「change」の軽い枠で重いbuildが走らないようにするため（[ADR-t1591-1](../adr/2026-10-04-t1591-1-landing-queue-leaves-room-for-light-changes.md)決定3。軽い枠でclaimしてよいかの判定はruntimeが持ち、この規則は登録の時にpathsの中身を見る）。
 - 測定のtask（changeが`measure`のtaskと、受け入れ条件に測定を含むtask）は、周回数（と交互に流すか）、表の列、値の計算式（何を何で割るか、待ちを引くときの区間）、証拠の所在（文書の節・CSV・script・コマンドと時刻の区切り）をacceptanceかdescriptionに書くこと（測定の形に当たらない項目、例えば1回だけ読む測定の周回数は、当たらない理由を書く）。条件の範囲を「同じ形のもの」で広げるtaskは、範囲を決めるgrepか一覧を書くこと。欠けていれば`revise`（workerはこれらを根拠に受け入れ条件の各項目を対応づける。[ADR-t1420-1](../adr/2026-10-03-t1420-1-worker-maps-each-acceptance-criterion-before-the-receipt.md)）。
 - [ADRの索引](../adr/README.md)と、taskが名指すADRと`docs/design/`の文書を読み、`accepted`のADRの決定と矛盾するtaskは`concern`にする（`superseded`なら`superseded_by`を辿る）。
 - ADRを書くtaskが上の「ADRを書くtask」を満たすこと（IDとファイル名の形、`check-adr-numbers.sh`のverify、置き換えか`amends`か）。足りなければ`revise`。
