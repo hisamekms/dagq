@@ -118,6 +118,29 @@ pub(crate) fn open_ask(
         .unwrap()
 }
 
+/// The supervisor returned no error and its one run landed. Either message
+/// carries the result and the task's events, one line each (time, kind,
+/// payload), so that a run that ends otherwise under load shows what its
+/// review and landing did (task 1584).
+#[track_caller]
+fn assert_integrated(result: &Value, db: &Path) {
+    let events = || {
+        detail(db)
+            .events
+            .iter()
+            .map(|event| format!("{} {} {}", event.created_at, event.kind, event.payload))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(result["errors"], json!([]), "{result}\n{}", events());
+    assert_eq!(
+        result["runs"][0]["status"],
+        "integrated",
+        "{result}\n{}",
+        events()
+    );
+}
+
 /// The person's `~/.codex/config.toml`, which no run may change
 /// (ADR-t813-3 decision 6); `None` when there is none.
 fn codex_config() -> Option<Vec<u8>> {
@@ -312,8 +335,7 @@ fn no_claude_codex_review_concern_with_a_high_land_lands_it() {
     )
     .unwrap();
     backend.join();
-    assert_eq!(result["errors"], json!([]), "{result}");
-    assert_eq!(result["runs"][0]["status"], "integrated", "{result}");
+    assert_integrated(&result, &db);
     let detail = detail(&db);
     assert_eq!(
         payloads(&detail, "review_started")[0]["launch"]["provider"],
@@ -405,8 +427,7 @@ fn no_claude_codex_review_revise_reaches_the_worker_and_passes() {
     )
     .unwrap();
     backend.join();
-    assert_eq!(result["errors"], json!([]), "{result}");
-    assert_eq!(result["runs"][0]["status"], "integrated", "{result}");
+    assert_integrated(&result, &db);
     let detail = detail(&db);
     let finished = payloads(&detail, "review_finished");
     assert_eq!(finished.len(), 2, "{finished:?}");
