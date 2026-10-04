@@ -40,7 +40,7 @@ planner は runtime だけが立て、`dagq-planner` skill に従う。基本方
 
 ### plan review
 
-runtime の plan review の prompt が名指す「plan review の部分」。[task-registration.md](docs/development/task-registration.md) の「plan reviewが当てはめる規則」を当てはめる（読む文書もそこが名指す）。
+runtime の plan review の prompt が名指す「plan review の部分」。[task-registration.md](docs/development/task-registration.md) の「plan reviewが当てはめる規則」を当てはめる（読む文書もそこが名指す）。follow-up の所属の検査は ADR-t1504-1 と dagq skill の `reference/register.md`。
 
 ### review
 
@@ -67,5 +67,5 @@ inbox は `dagq-inbox` skill に従い、復旧と手での操作は `dagq-recov
 ## 検証と文書の規則
 
 - 手元の検証: [local-checks.md](docs/development/local-checks.md)
-- test・task の登録・migration: [testing.md](docs/development/testing.md)・[task-registration.md](docs/development/task-registration.md)・[migrations.md](docs/development/migrations.md)（経緯は [local-checks-history](docs/plans/local-checks-history.md)）
+- test・task の登録・migration: [testing.md](docs/development/testing.md)・[task-registration.md](docs/development/task-registration.md)・[migrations.md](docs/development/migrations.md)
 - 文書（ADR・design・plans・frontmatter）と commit メッセージ: [documents.md](docs/development/documents.md)。着地と push は `dagq integrate` だけが行う（[integrate](docs/design/supervisor-lifecycle/integrate.md)）
