@@ -612,7 +612,8 @@ fn show_goal_show_and_doctor_are_compact_unless_full() {
     assert!(goal["goal"]["constraints"].as_str().unwrap().ends_with('…'));
     assert_eq!(
         goal["tasks"],
-        serde_json::json!([{"id": 1, "title": "task", "status": "draft"}])
+        serde_json::json!([{"id": 1, "title": "task", "status": "draft", "priority": "normal",
+            "priority_source": "goal"}])
     );
     assert_eq!(
         goal["events"]

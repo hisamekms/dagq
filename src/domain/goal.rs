@@ -5,7 +5,7 @@
 use serde::Serialize;
 
 use super::{
-    DomainError, GoalEdit, GoalId, GoalRecord, GoalStatus, GoalVerdict, NewGoal, TaskId,
+    DomainError, GoalEdit, GoalId, GoalRecord, GoalStatus, GoalVerdict, NewGoal, Priority, TaskId,
     TaskStatus, TaskStatusCounts, require,
 };
 
@@ -34,6 +34,9 @@ pub struct Goal {
     acceptance: String,
     constraints: String,
     doc: Option<String>,
+    /// What the goal's tasks without a priority of their own inherit
+    /// (ADR-t1639-1 decisions 1 and 2).
+    priority: Priority,
     status: GoalStatus,
     /// Set together with `verdict` by the one close.
     closed_at: Option<String>,
@@ -59,6 +62,7 @@ impl Goal {
             acceptance: new.acceptance,
             constraints: new.constraints,
             doc: new.doc.filter(|d| !d.trim().is_empty()),
+            priority: new.priority,
             status: if new.draft {
                 GoalStatus::Draft
             } else {
@@ -87,6 +91,7 @@ impl Goal {
             acceptance: record.acceptance,
             constraints: record.constraints,
             doc: record.doc,
+            priority: record.priority,
             status: record.status,
             closed_at: record.closed_at,
             verdict: record.verdict,
@@ -117,6 +122,10 @@ impl Goal {
 
     pub fn doc(&self) -> Option<&str> {
         self.doc.as_deref()
+    }
+
+    pub fn priority(&self) -> Priority {
+        self.priority
     }
 
     pub fn status(&self) -> GoalStatus {
@@ -184,8 +193,14 @@ pub fn check_accepts_dependents(goal: &Goal) -> Result<(), DomainError> {
 }
 
 /// `goal` with the fields of `edit` replaced; a title must stay non-blank
-/// and an empty `doc` clears the reference.
+/// and an empty `doc` clears the reference. The priority changes only while
+/// the goal is a draft or open (ADR-t1639-1 decision 1): a closed goal has
+/// no tasks left to claim.
 pub fn edit(mut goal: Goal, edit: GoalEdit) -> Result<Goal, DomainError> {
+    if let Some(priority) = edit.priority {
+        check_accepts_tasks(&goal)?;
+        goal.priority = priority;
+    }
     if let Some(title) = edit.title {
         require(!title.trim().is_empty(), || GOAL_TITLE_BLANK)?;
         goal.title = title;
@@ -329,6 +344,7 @@ mod tests {
             acceptance: String::new(),
             constraints: String::new(),
             doc: None,
+            priority: Priority::Normal,
             status,
             closed_at: verdict.map(|_| "2026-09-23T00:00:00Z".into()),
             verdict,
@@ -419,7 +435,7 @@ mod tests {
             serde_json::to_value(&draft).unwrap(),
             serde_json::json!({
                 "id": 1, "title": "g", "description": "", "acceptance": "",
-                "constraints": "", "doc": "docs/g.md", "status": "draft",
+                "constraints": "", "doc": "docs/g.md", "priority": "normal", "status": "draft",
                 "closed_at": null, "verdict": null,
                 "created_at": "now", "updated_at": "now"
             })
@@ -510,6 +526,7 @@ mod tests {
                 acceptance: Some("a".into()),
                 constraints: Some("c".into()),
                 doc: Some("x.md".into()),
+                priority: None,
             },
         )
         .unwrap();
@@ -545,6 +562,41 @@ mod tests {
             .to_string(),
             "goal title must not be blank"
         );
+    }
+
+    /// ADR-t1639-1 decision 1: a draft or open goal takes another
+    /// priority; a closed one refuses it but keeps its other edits.
+    #[test]
+    fn only_an_unclosed_goal_changes_its_priority() {
+        let high = GoalEdit {
+            priority: Some(Priority::High),
+            ..GoalEdit::default()
+        };
+        assert_eq!(goal(None).priority(), Priority::Normal);
+        assert_eq!(
+            edit(goal(None), high.clone()).unwrap().priority(),
+            Priority::High
+        );
+        let draft = Goal::restore(record(GoalStatus::Draft, None)).unwrap();
+        assert_eq!(
+            edit(draft, high.clone()).unwrap().priority(),
+            Priority::High
+        );
+        assert_eq!(
+            edit(goal(Some(GoalVerdict::Achieved)), high)
+                .unwrap_err()
+                .to_string(),
+            "goal 7 is closed as achieved; create a new goal for further work"
+        );
+        let renamed = edit(
+            goal(Some(GoalVerdict::Abandoned)),
+            GoalEdit {
+                title: Some("t".into()),
+                ..GoalEdit::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(renamed.title(), "t");
     }
 
     #[test]

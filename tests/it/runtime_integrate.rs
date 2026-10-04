@@ -433,6 +433,7 @@ fn review_writes_the_run_material_to_review_md_and_returns_only_its_size() {
     let mut queue = SqliteQueue::open(&db).unwrap();
     let goal = queue
         .add_goal(NewGoal {
+            priority: Default::default(),
             title: "goal title".into(),
             description: String::new(),
             acceptance: "goal acceptance".into(),
@@ -1561,6 +1562,7 @@ fn integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once() {
     let mut queue = SqliteQueue::open(&db).unwrap();
     let goal = queue
         .add_goal(NewGoal {
+            priority: Default::default(),
             title: "goal".into(),
             description: String::new(),
             acceptance: "done".into(),

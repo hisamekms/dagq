@@ -603,6 +603,7 @@ mod tests {
             id: TaskId::new(id),
             status: TaskStatus::Ready,
             priority: Priority::Normal,
+            priority_source: crate::domain::PrioritySource::Default,
             effective_priority: Priority::Normal,
             title: format!("task {id}"),
             goal_id: goal.map(GoalId::new),

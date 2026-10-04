@@ -36,6 +36,7 @@ pub(crate) fn goal_done(fx: &Fixture) -> (GoalId, TaskId) {
     let mut queue = SqliteQueue::open(&fx.db).unwrap();
     let goal = queue
         .add_goal(NewGoal {
+            priority: Default::default(),
             title: "faster landings".into(),
             description: "land in half the time".into(),
             acceptance: "(1) the median landing is under 5 minutes (2) docs say how".into(),

@@ -5206,6 +5206,7 @@ mod tests {
 
     fn task(title: &str) -> Task {
         Task::restore(crate::domain::TaskRecord {
+            goal_priority: None,
             id: TaskId::new(15),
             title: title.into(),
             description: String::new(),

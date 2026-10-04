@@ -193,8 +193,7 @@ fn apply_action(conn: &Connection, action: &PlanReviewAction, now: &str) -> Resu
             depends_on,
         } => insert_dependency(conn, *task_id, *depends_on, now),
         PlanReviewAction::LowerPriority { task_id, priority } => {
-            let from = read_task(conn, *task_id)?.priority();
-            set_priority(conn, *task_id, from, *priority, now)
+            set_priority(conn, *task_id, *priority, now)
         }
         PlanReviewAction::CancelDuplicate {
             task_id,
@@ -238,24 +237,24 @@ fn improvement_priorities(
     Ok(actions)
 }
 
-fn set_priority(
-    conn: &Connection,
-    task_id: TaskId,
-    from: Priority,
-    to: Priority,
-    now: &str,
-) -> Result<()> {
-    let changed = task::set_priority(read_task(conn, task_id)?, to)?;
+/// Lower the task's priority to `to` as a priority of its own, so a later
+/// change of its goal's priority does not raise it again (ADR-t1639-1
+/// decision 2).
+fn set_priority(conn: &Connection, task_id: TaskId, to: Priority, now: &str) -> Result<()> {
+    let task = read_task(conn, task_id)?;
+    let (from, from_source) = (task.priority(), task.priority_source());
+    let changed = task::set_priority(task, Some(to))?;
     conn.execute(
         "UPDATE tasks SET priority=?1, updated_at=?2 WHERE id=?3",
-        params![changed.priority().as_i64(), now, task_id],
+        params![changed.own_priority().map(Priority::as_i64), now, task_id],
     )?;
     event(
         conn,
         task_id,
         None,
         EventKind::TaskPriorityChanged,
-        json!({"from": from, "to": to, "by": "plan_review"}),
+        json!({"from": from, "to": to, "from_source": from_source,
+            "to_source": changed.priority_source(), "by": "plan_review"}),
     )
 }
 
@@ -1314,10 +1313,13 @@ fn record_predictions(
 
 /// Submitted proposals with no hold and a submitted task, oldest
 /// submission first, each with whether a submitted task is `interrupt`.
+/// The `coalesce` is [`crate::domain::base_priority`] in SQL, so the whole
+/// queue is not read to find one: change the two together.
 fn candidates(conn: &Connection) -> Result<Vec<PlanReviewCandidate>> {
     Ok(conn
         .prepare(
-            "SELECT p.id, p.submitted_at, max(t.status='submitted' AND t.priority=?1)
+            "SELECT p.id, p.submitted_at, max(t.status='submitted'
+                 AND coalesce(t.priority, (SELECT g.priority FROM goals g WHERE g.id = t.goal_id), 1)=?1)
              FROM proposals p JOIN tasks t ON t.proposal_id = p.id
              WHERE p.status='submitted' AND p.review_hold IS NULL
              GROUP BY p.id HAVING max(t.status='submitted')

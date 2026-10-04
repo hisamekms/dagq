@@ -62,8 +62,8 @@ pub use recording::reason_of_error;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::domain::{
-    EvidenceCheck, GoalId, GoalStatus, GoalVerdict, Priority, RunId, RunStatus, Task, TaskChange,
-    TaskId, TaskStatus,
+    EvidenceCheck, GoalId, GoalStatus, GoalVerdict, Priority, PrioritySource, RunId, RunStatus,
+    Task, TaskChange, TaskId, TaskStatus,
 };
 
 /// Which task statuses `list` returns.
@@ -125,7 +125,10 @@ pub struct TaskPage {
 pub struct TaskListItem {
     pub id: TaskId,
     pub status: TaskStatus,
+    /// Its base priority: its own, else its goal's (ADR-t1639-1).
     pub priority: Priority,
+    /// Where `priority` comes from: `task`, `goal` or `default`.
+    pub priority_source: PrioritySource,
     /// The kind of change it declares (ADR-t980-1); null without one.
     pub change: Option<TaskChange>,
     /// The provider and mode of its worker (ADR-t813-2), shown as
@@ -188,6 +191,7 @@ impl TaskListItem {
             id: task.id(),
             status: task.status(),
             priority: task.priority(),
+            priority_source: task.priority_source(),
             change: task.change().cloned(),
             worker: task.worker(),
             title: task.title().to_owned(),
@@ -207,7 +211,9 @@ impl TaskListItem {
 pub struct GraphTask {
     pub id: TaskId,
     pub status: TaskStatus,
+    /// Its base priority: its own, else its goal's (ADR-t1639-1).
     pub priority: Priority,
+    pub priority_source: PrioritySource,
     pub title: String,
     pub goal_id: Option<GoalId>,
     /// Status of the task's goal; a draft goal's tasks are not candidates.
@@ -256,8 +262,11 @@ pub struct GraphInput {
 pub struct GraphNode {
     pub id: TaskId,
     pub status: TaskStatus,
-    /// The priority a person gave the task.
+    /// The task's base priority: the one a person gave it, else its
+    /// goal's, else `normal` (ADR-t1639-1 decision 2).
     pub priority: Priority,
+    /// Where `priority` comes from: `task`, `goal` or `default`.
+    pub priority_source: PrioritySource,
     /// The priority the claim order compares: the highest of its own and
     /// those of the ready tasks that wait for it (see [`ClaimRank`]).
     pub effective_priority: Priority,
@@ -443,6 +452,7 @@ pub fn dependency_graph(input: GraphInput, goal_id: Option<GoalId>) -> Dependenc
             id: task.id,
             status: task.status,
             priority: task.priority,
+            priority_source: task.priority_source,
             title: task.title,
             goal_id: task.goal_id,
             goal_status: task.goal_status,
@@ -499,6 +509,7 @@ mod tests {
                 TaskStatus::Draft
             },
             priority: Priority::Normal,
+            priority_source: PrioritySource::Default,
             title: format!("task {id}"),
             goal_id: goal_id.map(GoalId::new),
             goal_status: goal_id.map(|_| GoalStatus::Open),
@@ -637,6 +648,58 @@ mod tests {
         );
     }
 
+    /// ADR-t1639-1 decisions 2 to 4: a task without a priority of its own
+    /// takes its goal's, so raising the goal moves it up the claim order
+    /// and raises what it waits for; a task with its own stays put.
+    #[test]
+    fn a_goals_priority_orders_the_tasks_that_inherit_it() {
+        let graph = |goal: Priority| {
+            let member = |id: i64, own: Option<Priority>, depends_on: &[i64]| {
+                let (priority, priority_source) = crate::domain::base_priority(own, Some(goal));
+                GraphTask {
+                    priority,
+                    priority_source,
+                    status: TaskStatus::Ready,
+                    ..task(id, Some(7), depends_on)
+                }
+            };
+            dependency_graph(
+                GraphInput {
+                    tasks: vec![
+                        task(1, None, &[]),
+                        task(2, None, &[]),
+                        member(3, None, &[]),
+                        member(4, Some(Priority::Normal), &[]),
+                        member(5, None, &[2]),
+                    ],
+                    candidates: ids(&[1, 2, 3, 4]),
+                },
+                None,
+            )
+        };
+        let effective = |graph: &DependencyGraph| -> Vec<(i64, Priority, PrioritySource)> {
+            graph
+                .tasks
+                .iter()
+                .map(|t| (t.id.as_i64(), t.effective_priority, t.priority_source))
+                .collect()
+        };
+        let normal = graph(Priority::Normal);
+        assert_eq!(normal.candidates, ids(&[2, 1, 3, 4]));
+        let high = graph(Priority::High);
+        assert_eq!(high.candidates, ids(&[2, 3, 1, 4]));
+        assert_eq!(
+            effective(&high),
+            [
+                (1, Priority::Normal, PrioritySource::Default),
+                (2, Priority::High, PrioritySource::Default),
+                (3, Priority::High, PrioritySource::Goal),
+                (4, Priority::Normal, PrioritySource::Task),
+                (5, Priority::High, PrioritySource::Goal),
+            ]
+        );
+    }
+
     #[test]
     fn only_ready_tasks_outside_a_draft_goal_pass_their_priority_on() {
         let waiter = |status, goal_status, priority| GraphTask {
@@ -746,6 +809,7 @@ mod tests {
     fn candidates_carry_the_effective_priority_of_the_graph() {
         let task = |id: i64| {
             Task::restore(crate::domain::TaskRecord {
+                goal_priority: None,
                 id: TaskId::new(id),
                 title: format!("task {id}"),
                 description: String::new(),
@@ -753,7 +817,7 @@ mod tests {
                 verification_commands: Vec::new(),
                 required_evidence: Vec::new(),
                 paths: Vec::new(),
-                priority: Priority::Low,
+                priority: Some(Priority::Low),
                 change: None,
                 status: TaskStatus::Ready,
                 goal_id: None,

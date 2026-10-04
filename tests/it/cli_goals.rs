@@ -60,8 +60,10 @@ fn goals_group_tasks_and_report_counts_by_status() {
     assert_eq!(
         shown["tasks"],
         serde_json::json!([
-            {"id": 1, "title": "prompt", "status": "draft"},
-            {"id": 2, "title": "entity", "status": "ready"}
+            {"id": 1, "title": "prompt", "status": "draft", "priority": "normal",
+                "priority_source": "goal"},
+            {"id": 2, "title": "entity", "status": "ready", "priority": "normal",
+                "priority_source": "goal"}
         ])
     );
     assert_eq!(shown["events"][0]["kind"], "goal_created");
@@ -164,7 +166,7 @@ fn graph_reports_unfinished_dependencies_releases_and_the_critical_chain() {
     assert_eq!(
         tasks[1],
         serde_json::json!({
-            "id": 2, "status": "ready", "priority": "normal",
+            "id": 2, "status": "ready", "priority": "normal", "priority_source": "default",
             "effective_priority": "normal", "title": "root", "goal_id": null,
             "depends_on": [], "goal_dependencies": [], "blocks": [3], "unblocks": 2,
             "ready_after": [],
@@ -218,7 +220,8 @@ fn a_task_waits_for_its_goal_dependency_until_the_goal_is_achieved() {
     let goal = ok(&db, &["goal", "show", "1"]);
     assert_eq!(
         goal["dependents"],
-        serde_json::json!([{"id": 2, "title": "downstream", "status": "ready"}])
+        serde_json::json!([{"id": 2, "title": "downstream", "status": "ready",
+            "priority": "normal", "priority_source": "default"}])
     );
     let candidates = |db: &Path| -> Vec<i64> {
         ok(db, &["candidates"])
@@ -440,4 +443,68 @@ fn a_canceled_member_does_not_make_its_goal_wait() {
     ok(&db, &["cancel", "2"]);
     let added = ok(&db, &["dependency", "add", "1", "--goal", "1"]);
     assert_eq!(added["goal_dependencies"], serde_json::json!([1]));
+}
+
+/// ADR-t1639-1 decision 1: a goal takes one of the five priority names
+/// (normal unless given), changes it while it is a draft or open, refuses
+/// it once closed, and `goal_updated` keeps the old and the new.
+#[test]
+fn a_goal_takes_a_priority_by_name_while_it_is_not_closed() {
+    let (_dir, db) = queue();
+    assert_eq!(
+        ok(&db, &["goal", "add", "urgent", "--priority", "urgent"])["priority"],
+        "urgent"
+    );
+    assert_eq!(ok(&db, &["goal", "add", "plain"])["priority"], "normal");
+    let draft = ok(&db, &["goal", "add", "drafted", "--draft"])["id"].to_string();
+    for bad in ["2", "Urgent", "top"] {
+        for args in [
+            vec!["goal", "add", "bad", "--priority", bad],
+            vec!["goal", "edit", "1", "--priority", bad],
+        ] {
+            let output = invoke(&db, &args);
+            assert!(!output.status.success(), "{args:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("invalid value"),
+                "{args:?}"
+            );
+        }
+    }
+    assert_eq!(
+        ok(&db, &["goal", "show", "1"])["goal"]["priority"],
+        "urgent"
+    );
+
+    let edited = ok(&db, &["goal", "edit", "1", "--priority", "low"]);
+    assert_eq!(edited["priority"], "low");
+    assert_eq!(edited["title"], "urgent");
+    let shown = ok(&db, &["goal", "show", "1", "--full"]);
+    assert_eq!(shown["goal"]["priority"], "low");
+    let updated = shown["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["kind"] == "goal_updated")
+        .unwrap();
+    assert_eq!(
+        (
+            &updated["payload"]["old"]["priority"],
+            &updated["payload"]["new"]["priority"]
+        ),
+        (&serde_json::json!("urgent"), &serde_json::json!("low"))
+    );
+    assert_eq!(
+        ok(&db, &["goal", "edit", &draft, "--priority", "high"])["priority"],
+        "high"
+    );
+
+    ok(&db, &["goal", "close", "2", "--verdict", "abandoned"]);
+    assert_eq!(
+        refused(&db, &["goal", "edit", "2", "--priority", "high"]),
+        "goal 2 is closed as abandoned; create a new goal for further work"
+    );
+    assert_eq!(
+        ok(&db, &["goal", "show", "2"])["goal"]["priority"],
+        "normal"
+    );
 }

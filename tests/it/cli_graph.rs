@@ -324,3 +324,121 @@ fn graph_of_a_goal_draws_the_prerequisites_outside_it() {
     drawn.sort_unstable();
     assert_eq!(written["tasks"], serde_json::json!(drawn));
 }
+
+/// ADR-t1639-1 decisions 2 to 4: a task added without `--priority` inherits
+/// its goal's, so a change of the goal's priority moves its draft,
+/// submitted and ready tasks in `candidates` and `graph`, while a task with
+/// a priority of its own stays put until `set-priority --inherit` clears it.
+#[test]
+fn a_goals_priority_orders_the_tasks_that_inherit_it_and_not_those_with_their_own() {
+    let (_dir, db) = queue();
+    let goal = ok(&db, &["goal", "add", "raised later"])["id"].to_string();
+    let source = |task: &serde_json::Value| {
+        (
+            task["priority"].as_str().unwrap().to_owned(),
+            task["priority_source"].as_str().unwrap().to_owned(),
+        )
+    };
+    let pair = |priority: &str, source: &str| (priority.to_owned(), source.to_owned());
+    assert_eq!(
+        source(&ok(&db, &["add", "alone"])),
+        pair("normal", "default")
+    );
+    assert_eq!(
+        source(&ok(&db, &["add", "inherits", "--goal", &goal])),
+        pair("normal", "goal")
+    );
+    let own = ok(
+        &db,
+        &["add", "own", "--goal", &goal, "--priority", "normal"],
+    );
+    assert_eq!(source(&own), pair("normal", "task"));
+    ok(&db, &["add", "drafted", "--goal", &goal]);
+    ok(&db, &["add", "submitted", "--goal", &goal]);
+    for id in ["1", "2", "3"] {
+        ok(&db, &["ready", id, "--bypass-review"]);
+    }
+    let submitted = submit_from(&db, Some("W-1"), None, &["5"]);
+    assert!(submitted.status.success());
+    let candidates = |db: &std::path::Path| -> Vec<i64> {
+        ok(db, &["candidates"])
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|task| task["id"].as_i64().unwrap())
+            .collect()
+    };
+    assert_eq!(candidates(&db), [1, 2, 3]);
+
+    ok(&db, &["goal", "edit", &goal, "--priority", "high"]);
+    assert_eq!(candidates(&db), [2, 1, 3]);
+    let first = &ok(&db, &["candidates"])[0];
+    assert_eq!(source(first), pair("high", "goal"));
+    assert_eq!(first["effective_priority"], "high");
+    let graph = ok(&db, &["graph"]);
+    let nodes: Vec<(i64, String, String, String)> = graph["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| {
+            let (priority, from) = source(node);
+            (
+                node["id"].as_i64().unwrap(),
+                priority,
+                from,
+                node["effective_priority"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    let node = |id: i64, priority: &str, from: &str, effective: &str| {
+        (
+            id,
+            priority.to_owned(),
+            from.to_owned(),
+            effective.to_owned(),
+        )
+    };
+    assert_eq!(
+        nodes,
+        [
+            node(1, "normal", "default", "normal"),
+            node(2, "high", "goal", "high"),
+            node(3, "normal", "task", "normal"),
+            node(4, "high", "goal", "high"),
+            node(5, "high", "goal", "high"),
+        ]
+    );
+    assert_eq!(graph["candidates"], serde_json::json!([2, 1, 3]));
+    assert_eq!(
+        source(&ok(&db, &["show", "2"])["task"]),
+        pair("high", "goal")
+    );
+    let shown = ok(&db, &["goal", "show", &goal]);
+    assert_eq!(shown["goal"]["priority"], "high");
+    assert_eq!(source(&shown["tasks"][1]), pair("normal", "task"));
+
+    assert_eq!(
+        source(&ok(&db, &["set-priority", "2", "low"])),
+        pair("low", "task")
+    );
+    assert_eq!(candidates(&db), [1, 3, 2]);
+    assert_eq!(
+        source(&ok(&db, &["set-priority", "2", "--inherit"])),
+        pair("high", "goal")
+    );
+    ok(&db, &["set-priority", "3", "--inherit"]);
+    assert_eq!(candidates(&db), [2, 3, 1]);
+    // Moved to another goal, a task without its own takes that goal's.
+    ok(&db, &["goal", "add", "later", "--priority", "low"]);
+    assert_eq!(
+        source(&ok(&db, &["set-goal", "2", "2"])),
+        pair("low", "goal")
+    );
+    assert_eq!(candidates(&db), [3, 1, 2]);
+    for args in [
+        vec!["set-priority", "3"],
+        vec!["set-priority", "3", "low", "--inherit"],
+    ] {
+        assert!(!invoke(&db, &args).status.success(), "{args:?}");
+    }
+}

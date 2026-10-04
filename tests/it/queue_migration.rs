@@ -1746,3 +1746,143 @@ fn migration_dropping_every_check_keeps_rows_ids_indexes_triggers_and_keys() {
         .is_err()
     );
 }
+
+/// ADR-t1639-1 decision 5: the migration that gives goals a priority reads
+/// a normal task as inheriting its goal's and any other level as its own,
+/// so with every goal normal no task's priority, effective priority or
+/// place in the claim order changes, with or without a goal.
+#[test]
+fn migration_to_goal_priority_keeps_every_tasks_priority_and_the_claim_order() {
+    use dagq::application::{GraphInput, GraphTask, dependency_graph};
+    use dagq::domain::{ClaimOutcome, PrioritySource};
+    // Found by its statement, not its number, which a landing may change.
+    let at = MIGRATIONS
+        .iter()
+        .position(|migration| migration.contains("ALTER TABLE goals ADD COLUMN priority"))
+        .unwrap();
+    let before = i64::try_from(at).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("queue.db");
+    let raw = Connection::open(&path).unwrap();
+    for migration in &MIGRATIONS[..at] {
+        raw.execute_batch(migration).unwrap();
+    }
+    raw.execute_batch(&format!(
+        "PRAGMA application_id = 1129599281; PRAGMA user_version = {before};
+         INSERT INTO schema_floor(singleton, floor) VALUES (1, {floor});
+         INSERT INTO goals(title,description,acceptance,constraints,status)
+         VALUES ('one','','','','open'), ('two','','','','open');
+         INSERT INTO tasks(title,description,acceptance,verification_commands,status,goal_id,
+                           priority)
+         VALUES ('alone','','','[]','ready',NULL,1),
+                ('in goal','','','[]','ready',1,1),
+                ('high in goal','','','[]','ready',1,2),
+                ('low alone','','','[]','ready',NULL,0),
+                ('urgent waiter','','','[]','ready',2,3),
+                ('draft','','','[]','draft',1,4),
+                ('landed','','','[]','completed',1,2);
+         INSERT INTO task_dependencies(task_id,predecessor_id) VALUES (5,2);",
+        floor = floor_for(before),
+    ))
+    .unwrap();
+    // The claim order before the migration, from the stored levels.
+    let rows: Vec<(i64, String, Option<i64>, i64)> = raw
+        .prepare("SELECT id, status, goal_id, priority FROM tasks WHERE status<>'completed'")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let old = dependency_graph(
+        GraphInput {
+            tasks: rows
+                .iter()
+                .map(|(id, status, goal, priority)| GraphTask {
+                    id: TaskId::new(*id),
+                    status: status.parse().unwrap(),
+                    priority: Priority::from_i64(*priority).unwrap(),
+                    priority_source: PrioritySource::Task,
+                    title: String::new(),
+                    goal_id: goal.map(GoalId::new),
+                    goal_status: goal.map(|_| GoalStatus::Open),
+                    depends_on: if *id == 5 {
+                        vec![TaskId::new(2)]
+                    } else {
+                        Vec::new()
+                    },
+                    goal_dependencies: Vec::new(),
+                })
+                .collect(),
+            candidates: [1, 2, 3, 4].map(TaskId::new).to_vec(),
+        },
+        None,
+    );
+    drop(raw);
+    let report = SqliteQueue::migrate(&path, None, 0).unwrap();
+    assert!(
+        report
+            .applied
+            .iter()
+            .any(|m| m.version == before + 1 && !m.compatible)
+    );
+    let raw = Connection::open(&path).unwrap();
+    let stored: Vec<Option<i64>> = raw
+        .prepare("SELECT priority FROM tasks ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        stored,
+        [None, None, Some(2), Some(0), Some(3), Some(4), Some(2)]
+    );
+    let goals: Vec<i64> = raw
+        .prepare("SELECT priority FROM goals ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(goals, [1, 1]);
+    drop(raw);
+
+    let mut queue = SqliteQueue::open(&path).unwrap();
+    for id in 1..=7 {
+        let task = queue.show(TaskId::new(id)).unwrap().task;
+        let level = [1, 1, 2, 0, 3, 4, 2][usize::try_from(id - 1).unwrap()];
+        assert_eq!(task.priority(), Priority::from_i64(level).unwrap(), "{id}");
+    }
+    let sources: Vec<PrioritySource> = (1..=3)
+        .map(|id| queue.show(TaskId::new(id)).unwrap().task.priority_source())
+        .collect();
+    assert_eq!(
+        sources,
+        [
+            PrioritySource::Default,
+            PrioritySource::Goal,
+            PrioritySource::Task
+        ]
+    );
+    let new = dependency_graph(queue.graph_input().unwrap(), None);
+    let effective = |graph: &dagq::application::DependencyGraph| -> Vec<(TaskId, Priority)> {
+        graph
+            .tasks
+            .iter()
+            .map(|node| (node.id, node.effective_priority))
+            .collect()
+    };
+    assert_eq!(effective(&new), effective(&old));
+    let expected = [2, 3, 1, 4].map(TaskId::new);
+    assert_eq!(old.candidates, expected);
+    assert_eq!(new.candidates, expected);
+    let candidates: Vec<TaskId> = queue.candidates().unwrap().iter().map(|t| t.id()).collect();
+    assert_eq!(candidates, expected);
+    let mut claimed = Vec::new();
+    while let ClaimOutcome::Claimed { run } = queue.claim(&base()).unwrap() {
+        claimed.push(run.task_id());
+    }
+    assert_eq!(claimed, expected);
+}

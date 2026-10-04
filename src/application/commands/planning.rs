@@ -54,7 +54,7 @@ pub trait PlanningStore {
     fn set_priority(
         &mut self,
         task: TaskId,
-        priority: Priority,
+        priority: Option<Priority>,
         authorized: TaskStatus,
     ) -> Result<Task>;
     fn transition(
@@ -162,7 +162,7 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
         self.store.set_paths(task, paths, status)
     }
 
-    pub fn set_priority(&mut self, task: TaskId, priority: Priority) -> Result<Task> {
+    pub fn set_priority(&mut self, task: TaskId, priority: Option<Priority>) -> Result<Task> {
         let status = self.authorize_task(Capability::TaskWrite, task)?;
         self.store.set_priority(task, priority, status)
     }
@@ -390,7 +390,12 @@ mod tests {
             self.authorized_as = Some(authorized);
             Err(reached("set-paths"))
         }
-        fn set_priority(&mut self, _: TaskId, _: Priority, authorized: TaskStatus) -> Result<Task> {
+        fn set_priority(
+            &mut self,
+            _: TaskId,
+            _: Option<Priority>,
+            authorized: TaskStatus,
+        ) -> Result<Task> {
             self.authorized_as = Some(authorized);
             Err(reached("set-priority"))
         }
@@ -473,7 +478,7 @@ mod tests {
             context: String::new(),
             required_evidence: Vec::new(),
             paths: Vec::new(),
-            priority: Priority::default(),
+            priority: None,
             change: None,
             provider: None,
             worker_mode: None,
@@ -502,7 +507,7 @@ mod tests {
                 p.set_paths(TASK, vec!["docs/**".into()]).map(drop)
             }),
             ("set-priority", |p| {
-                p.set_priority(TASK, Priority::High).map(drop)
+                p.set_priority(TASK, Some(Priority::High)).map(drop)
             }),
             ("draft", |p| p.draft(TASK).map(drop)),
             ("ready", |p| p.ready(TASK, false).map(drop)),
@@ -540,6 +545,7 @@ mod tests {
 
     fn new_goal() -> NewGoal {
         NewGoal {
+            priority: Default::default(),
             title: "g".into(),
             description: String::new(),
             acceptance: String::new(),
@@ -785,7 +791,7 @@ mod tests {
             }),
             ("store: set-paths", |p| p.set_paths(TASK, vec![]).map(drop)),
             ("store: set-priority", |p| {
-                p.set_priority(TASK, Priority::default()).map(drop)
+                p.set_priority(TASK, None).map(drop)
             }),
             ("store: Draft", |p| p.draft(TASK).map(drop)),
             ("store: Ready", |p| p.ready(TASK, false).map(drop)),

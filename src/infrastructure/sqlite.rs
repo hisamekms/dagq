@@ -44,13 +44,23 @@ use crate::{
 };
 
 const APPLICATION_ID: i64 = 0x43545131;
+/// The start of a query of tasks aliased `t`, each with the priority of its
+/// goal as `goal_priority`, which [`task_row`] reads to resolve what a task
+/// without a priority of its own inherits (ADR-t1639-1 decision 2).
+macro_rules! select_tasks {
+    () => {
+        "SELECT t.*, (SELECT g.priority FROM goals g WHERE g.id = t.goal_id) AS goal_priority
+         FROM tasks t"
+    };
+}
 /// Ready tasks whose predecessors are completed, whose goal dependencies
 /// are all closed as achieved (ADR-0038), that own no unfinished run and
 /// whose goal, if any, is not a draft (ADR-0024 decision 5).
 /// In ID order: the claim order (ADR-0040 decision 4) needs the whole
 /// dependency graph, so [`claim_order`] applies it, not SQL.
-const READY_QUERY: &str = "
-    SELECT t.* FROM tasks t
+const READY_QUERY: &str = concat!(
+    select_tasks!(),
+    "
     WHERE t.status = 'ready'
       AND NOT EXISTS (
         SELECT 1 FROM goals g WHERE g.id = t.goal_id AND g.status = 'draft'
@@ -69,7 +79,8 @@ const READY_QUERY: &str = "
           AND r.status IN ('claimed','starting','running','validating','awaiting_integration',
                            'integrating','needs_session')
       )
-    ORDER BY t.id";
+    ORDER BY t.id"
+);
 
 pub struct SqliteQueue {
     pub(super) conn: Connection,
@@ -801,7 +812,7 @@ impl SqliteQueue {
     pub(super) fn set_priority_authorized(
         &mut self,
         task_id: TaskId,
-        priority: Priority,
+        priority: Option<Priority>,
         authorized: Option<TaskStatus>,
     ) -> Result<Task> {
         let tx = self
@@ -809,13 +820,16 @@ impl SqliteQueue {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         check_authorized(&tx, task_id, authorized)?;
         let task = read_task(&tx, task_id)?;
-        let from = task.priority();
+        let (from, from_source) = (task.priority(), task.priority_source());
+        let own = task.own_priority();
         let task = task::set_priority(task, priority)?;
-        if from != task.priority() {
+        // Setting or clearing the task's own priority is the change, even
+        // when the base value stays the same (ADR-t1639-1 decision 2).
+        if own != task.own_priority() {
             tx.execute(
                 "UPDATE tasks SET priority=?1, updated_at=?2 WHERE id=?3",
                 params![
-                    task.priority().as_i64(),
+                    task.own_priority().map(Priority::as_i64),
                     self.generators.clock.timestamp(),
                     task_id
                 ],
@@ -825,7 +839,8 @@ impl SqliteQueue {
                 task_id,
                 None,
                 EventKind::TaskPriorityChanged,
-                json!({"from": from, "to": task.priority()}),
+                json!({"from": from, "to": task.priority(),
+                    "from_source": from_source, "to_source": task.priority_source()}),
             )?;
         }
         let result = read_task(&tx, task_id)?;
@@ -904,7 +919,8 @@ impl TaskStore for SqliteQueue {
         values.push(Value::from(i64::try_from(query.limit)?.saturating_add(1)));
         let mut tasks: Vec<Task> = tx
             .prepare(&format!(
-                "SELECT * FROM tasks{page} ORDER BY id DESC LIMIT ?"
+                concat!(select_tasks!(), "{page} ORDER BY id DESC LIMIT ?"),
+                page = page
             ))?
             .query_map(params_from_iter(&values), task_row)?
             .collect::<rusqlite::Result<_>>()?;
@@ -1070,8 +1086,11 @@ impl TaskStore for SqliteQueue {
         landed_tasks(
             &self.conn,
             &self.runs_dir,
-            "SELECT p.* FROM task_dependencies d JOIN tasks p ON p.id = d.predecessor_id
-             WHERE d.task_id = ?1 ORDER BY p.id",
+            concat!(
+                select_tasks!(),
+                " JOIN task_dependencies d ON t.id = d.predecessor_id
+                 WHERE d.task_id = ?1 ORDER BY t.id"
+            ),
             task_id.as_i64(),
         )
     }
@@ -1091,7 +1110,10 @@ impl TaskStore for SqliteQueue {
                 let tasks = landed_tasks(
                     &self.conn,
                     &self.runs_dir,
-                    "SELECT * FROM tasks WHERE goal_id = ?1 AND status = 'completed' ORDER BY id",
+                    concat!(
+                        select_tasks!(),
+                        " WHERE t.goal_id = ?1 AND t.status = 'completed' ORDER BY t.id"
+                    ),
                     goal.id().as_i64(),
                 )?;
                 Ok(GoalPredecessor { goal, tasks })
@@ -1102,7 +1124,10 @@ impl TaskStore for SqliteQueue {
     fn tasks_in_progress(&self) -> Result<Vec<Task>> {
         Ok(self
             .conn
-            .prepare("SELECT * FROM tasks WHERE status = 'in_progress' ORDER BY id")?
+            .prepare(concat!(
+                select_tasks!(),
+                " WHERE t.status = 'in_progress' ORDER BY t.id"
+            ))?
             .query_map([], task_row)?
             .collect::<rusqlite::Result<_>>()?)
     }
@@ -1121,8 +1146,8 @@ impl TaskStore for SqliteQueue {
         let id = goal.id();
         tx.execute(
             "INSERT INTO goals(id, title, description, acceptance, constraints, doc, status,
-                               created_at, updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                               created_at, updated_at, priority)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
             params![
                 id,
                 goal.title(),
@@ -1132,7 +1157,8 @@ impl TaskStore for SqliteQueue {
                 goal.doc(),
                 goal.status().as_str(),
                 goal.created_at(),
-                goal.updated_at()
+                goal.updated_at(),
+                goal.priority().as_i64()
             ],
         )?;
         let result = read_goal(&tx, id)?;
@@ -1168,13 +1194,17 @@ impl TaskStore for SqliteQueue {
         let acceptance_version = super::follow_up_membership::acceptance_version(&tx, goal_id)?;
         let follow_up_memberships = super::follow_up_membership::goal_memberships(&tx, goal_id)?;
         let tasks = tx
-            .prepare("SELECT id, title, status FROM tasks WHERE goal_id=?1 ORDER BY id")?
+            .prepare(
+                "SELECT t.id, t.title, t.status, t.priority, g.priority AS goal_priority
+                 FROM tasks t JOIN goals g ON g.id = t.goal_id WHERE t.goal_id=?1 ORDER BY t.id",
+            )?
             .query_map([goal_id], goal_task_row)?
             .collect::<rusqlite::Result<_>>()?;
         let dependents = tx
             .prepare(
-                "SELECT t.id, t.title, t.status FROM task_goal_dependencies d
-                 JOIN tasks t ON t.id = d.task_id
+                "SELECT t.id, t.title, t.status, t.priority, g.priority AS goal_priority
+                 FROM task_goal_dependencies d
+                 JOIN tasks t ON t.id = d.task_id LEFT JOIN goals g ON g.id = t.goal_id
                  WHERE d.goal_id=?1 AND t.status NOT IN ('completed','canceled') ORDER BY t.id",
             )?
             .query_map([goal_id], goal_task_row)?
@@ -1207,7 +1237,7 @@ impl TaskStore for SqliteQueue {
         let new = goal::edit(old, edit)?;
         tx.execute(
             "UPDATE goals SET title=?1, description=?2, acceptance=?3, constraints=?4, doc=?5,
-             updated_at=?6 WHERE id=?7",
+             updated_at=?6, priority=?8 WHERE id=?7",
             params![
                 new.title(),
                 new.description(),
@@ -1215,7 +1245,8 @@ impl TaskStore for SqliteQueue {
                 new.constraints(),
                 new.doc(),
                 self.generators.clock.timestamp(),
-                goal_id
+                goal_id,
+                new.priority().as_i64()
             ],
         )?;
         goal_event(
@@ -1499,7 +1530,7 @@ impl TaskStore for SqliteQueue {
         Ok(result)
     }
 
-    fn set_priority(&mut self, task_id: TaskId, priority: Priority) -> Result<Task> {
+    fn set_priority(&mut self, task_id: TaskId, priority: Option<Priority>) -> Result<Task> {
         self.set_priority_authorized(task_id, priority, None)
     }
 }
@@ -1561,7 +1592,7 @@ pub(super) fn insert_task(tx: &Connection, new: NewTask, now: &str) -> Result<Ta
             params![id, task.title(), task.description(), task.acceptance(),
                 serde_json::to_string(task.verification_commands())?, task.status().as_str(),
                 task.goal_id(), task.context(), serde_json::to_string(task.required_evidence())?,
-                serde_json::to_string(task.paths())?, task.priority().as_i64(),
+                serde_json::to_string(task.paths())?, task.own_priority().map(Priority::as_i64),
                 task.created_at(), task.updated_at(),
                 task.worker().provider.as_str(), task.stored_worker_mode().map(WorkerMode::as_str),
                 task.change().map(TaskChange::as_str)],
@@ -1595,10 +1626,16 @@ const GOAL_DEPENDENCIES_QUERY: &str =
     "SELECT goal_id FROM task_goal_dependencies WHERE task_id=?1 ORDER BY goal_id";
 
 fn goal_task_row(row: &Row<'_>) -> rusqlite::Result<GoalTask> {
+    let (priority, priority_source) = crate::domain::base_priority(
+        optional_priority_col(row, "priority")?,
+        optional_priority_col(row, "goal_priority")?,
+    );
     Ok(GoalTask {
         id: row.get("id")?,
         title: row.get("title")?,
         status: enum_col(row, "status")?,
+        priority,
+        priority_source,
     })
 }
 
@@ -1792,7 +1829,10 @@ fn ready_tasks(conn: &Connection) -> Result<Vec<Task>> {
 /// transaction so they are one snapshot.
 fn read_graph_input(conn: &Connection) -> Result<GraphInput> {
     let tasks: Vec<Task> = conn
-        .prepare("SELECT * FROM tasks WHERE status IN ('draft','submitted','ready','in_progress') ORDER BY id")?
+        .prepare(concat!(
+            select_tasks!(),
+            " WHERE t.status IN ('draft','submitted','ready','in_progress') ORDER BY t.id"
+        ))?
         .query_map([], task_row)?
         .collect::<rusqlite::Result<_>>()?;
     let mut dependencies = conn.prepare(
@@ -1826,6 +1866,7 @@ fn read_graph_input(conn: &Connection) -> Result<GraphInput> {
                 id: task.id(),
                 status: task.status(),
                 priority: task.priority(),
+                priority_source: task.priority_source(),
                 goal_id: task.goal_id(),
                 title: task.into_title(),
             })
@@ -2270,9 +2311,13 @@ fn has_unfinished_run(conn: &Connection, task_id: TaskId) -> Result<bool> {
 }
 
 pub(super) fn read_task(conn: &Connection, task_id: TaskId) -> Result<Task> {
-    conn.query_row("SELECT * FROM tasks WHERE id=?1", [task_id], task_row)
-        .optional()?
-        .with_context(|| format!("task {task_id} does not exist"))
+    conn.query_row(
+        concat!(select_tasks!(), " WHERE t.id=?1"),
+        [task_id],
+        task_row,
+    )
+    .optional()?
+    .with_context(|| format!("task {task_id} does not exist"))
 }
 
 pub(super) fn insert_dependency(
@@ -2443,7 +2488,9 @@ fn task_row(row: &Row<'_>) -> rusqlite::Result<Task> {
         verification_commands: json_col(row, "verification_commands")?,
         required_evidence: json_col(row, "required_evidence")?,
         paths: json_col(row, "paths")?,
-        priority: Priority::from_i64(row.get("priority")?).map_err(restore_error)?,
+        // NULL inherits the goal's (ADR-t1639-1 decision 2).
+        priority: optional_priority_col(row, "priority")?,
+        goal_priority: optional_priority_col(row, "goal_priority")?,
         // Any label reads as written (ADR-t980-1), whatever set dagq.toml
         // names now; a value that is not a label reads as none, so the task
         // still restores and the queue keeps claiming.
@@ -2468,6 +2515,14 @@ fn task_row(row: &Row<'_>) -> rusqlite::Result<Task> {
     .map_err(restore_error)
 }
 
+/// A nullable priority column, stored as `low`=0 … `interrupt`=4.
+fn optional_priority_col(row: &Row<'_>, name: &str) -> rusqlite::Result<Option<Priority>> {
+    row.get::<_, Option<i64>>(name)?
+        .map(Priority::from_i64)
+        .transpose()
+        .map_err(restore_error)
+}
+
 /// A nullable column of a [`string_enum!`] type.
 pub(super) fn optional_enum_col<T: std::str::FromStr<Err = DomainError>>(
     row: &Row<'_>,
@@ -2488,6 +2543,7 @@ fn goal_row(row: &Row<'_>) -> rusqlite::Result<Goal> {
         acceptance: row.get("acceptance")?,
         constraints: row.get("constraints")?,
         doc: row.get("doc")?,
+        priority: Priority::from_i64(row.get("priority")?).map_err(restore_error)?,
         status: enum_col(row, "status")?,
         closed_at: row.get("closed_at")?,
         verdict: verdict

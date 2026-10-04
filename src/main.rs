@@ -152,9 +152,11 @@ enum Command {
         paths: Vec<String>,
         /// How urgently the supervisor should claim it: interrupt (ahead of every other ready
         /// task), urgent (a defect stopping the operation), high (groundwork other work needs
-        /// soon), normal, or low (later). A ready task it waits for inherits it.
-        #[arg(long, default_value = "normal", value_parser = PRIORITIES)]
-        priority: String,
+        /// soon), normal, or low (later). A ready task it waits for inherits it. Omitted: the
+        /// task inherits its goal's priority (normal without a goal) and follows a later change of
+        /// it (ADR-t1639-1).
+        #[arg(long, value_parser = PRIORITIES)]
+        priority: Option<String>,
         /// The kind of change the task makes (ADR-t980-1), as a label of the repository's own (a
         /// lowercase slug of letters, digits, '-' and '_', not `unknown` or `all`); `stats`, `kpi`
         /// and `forecast` group the runs by it. When dagq.toml has `[tasks] changes`, one of them,
@@ -377,14 +379,19 @@ enum Command {
         #[arg(long, group = "field")]
         interactive: bool,
     },
-    /// Give a draft or ready task another priority (`add --priority`); it takes effect at the
-    /// next claim and never stops a running run.
+    /// Give a draft or ready task a priority of its own (`add --priority`), or with --inherit
+    /// let it inherit its goal's again (ADR-t1639-1); it takes effect at the next claim and never
+    /// stops a running run.
+    #[command(group = clap::ArgGroup::new("setting").required(true))]
     SetPriority {
         /// Draft or ready task.
         task: i64,
         /// interrupt, urgent, high, normal or low.
-        #[arg(value_parser = PRIORITIES)]
-        level: String,
+        #[arg(value_parser = PRIORITIES, group = "setting")]
+        level: Option<String>,
+        /// Clear the task's own priority: it inherits its goal's (normal without a goal).
+        #[arg(long, group = "setting")]
+        inherit: bool,
     },
     /// Record a note (an `observation` run event) on a task, a run or a goal.
     #[command(group = clap::ArgGroup::new("target").required(true))]
@@ -1770,6 +1777,10 @@ enum GoalCommand {
         /// Register a draft: its tasks are not candidates until `goal ready`.
         #[arg(long)]
         draft: bool,
+        /// The priority its tasks without one of their own inherit (ADR-t1639-1): interrupt,
+        /// urgent, high, normal or low.
+        #[arg(long, default_value = "normal", value_parser = PRIORITIES)]
+        priority: String,
     },
     /// Open a draft goal so the supervisor may claim its ready tasks.
     Ready { id: i64 },
@@ -1798,6 +1809,10 @@ enum GoalCommand {
         /// New document path; an empty value clears it.
         #[arg(long, group = "field")]
         doc: Option<String>,
+        /// New priority of a draft or open goal; its draft, submitted and ready tasks without one
+        /// of their own take it at their next claim (ADR-t1639-1).
+        #[arg(long, group = "field", value_parser = PRIORITIES)]
+        priority: Option<String>,
     },
     /// Record the verdict once. `achieved` needs every task completed or canceled; `abandoned` needs no task in progress.
     Close {
@@ -3103,7 +3118,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     .map(|name| name.parse())
                     .collect::<Result<_, _>>()?,
                 paths,
-                priority: priority.parse()?,
+                priority: priority.as_deref().map(str::parse).transpose()?,
                 change: change.map(|change| change.parse()).transpose()?,
                 provider: provider.map(|provider| provider.parse()).transpose()?,
                 worker_mode: match (headless, interactive) {
@@ -3207,6 +3222,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 constraints,
                 doc,
                 draft,
+                priority,
             } => serde_json::to_value(planning!().add_goal(NewGoal {
                 title,
                 description,
@@ -3214,6 +3230,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 constraints,
                 doc,
                 draft,
+                priority: priority.parse()?,
             })?)?,
             GoalCommand::Ready { id } => {
                 serde_json::to_value(planning!().ready_goal(GoalId::new(id))?)?
@@ -3228,6 +3245,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 acceptance,
                 constraints,
                 doc,
+                priority,
             } => serde_json::to_value(planning!().edit_goal(
                 GoalId::new(id),
                 GoalEdit {
@@ -3236,6 +3254,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     acceptance,
                     constraints,
                     doc,
+                    priority: priority.as_deref().map(str::parse).transpose()?,
                 },
             )?)?,
             GoalCommand::Close { id, verdict } => serde_json::to_value(
@@ -3317,8 +3336,10 @@ fn execute(cli: Cli) -> Result<Value> {
                 },
             )?)?
         }
-        Command::SetPriority { task, level } => {
-            serde_json::to_value(planning!().set_priority(TaskId::new(task), level.parse()?)?)?
+        Command::SetPriority { task, level, .. } => {
+            // Without a level, --inherit clears the task's own priority.
+            let level = level.as_deref().map(str::parse).transpose()?;
+            serde_json::to_value(planning!().set_priority(TaskId::new(task), level)?)?
         }
         Command::Note {
             task,

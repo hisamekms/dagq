@@ -3924,6 +3924,7 @@ mod tests {
         let (mut queue, task_id, _) = run_queue(dir.path());
         let goal = queue
             .add_goal(crate::domain::NewGoal {
+                priority: Default::default(),
                 title: "g".into(),
                 description: String::new(),
                 acceptance: String::new(),
@@ -4139,6 +4140,7 @@ mod tests {
         let (mut queue, task_id, _) = run_queue(dir.path());
         let goal = queue
             .add_goal(crate::domain::NewGoal {
+                priority: Default::default(),
                 title: "g".into(),
                 description: String::new(),
                 acceptance: String::new(),
@@ -4247,6 +4249,7 @@ mod tests {
         let (mut queue, task_id, _) = run_queue(dir.path());
         let goal = queue
             .add_goal(crate::domain::NewGoal {
+                priority: Default::default(),
                 title: "g".into(),
                 description: String::new(),
                 acceptance: String::new(),
@@ -4766,6 +4769,7 @@ mod tests {
         let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
         let goal = queue
             .add_goal(NewGoal {
+                priority: Default::default(),
                 title: "g".into(),
                 description: String::new(),
                 acceptance: String::new(),

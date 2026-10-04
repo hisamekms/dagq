@@ -151,6 +151,7 @@ fn the_cmux_adapter_sends_one_line_and_names_the_resume_workspace() {
     assert_eq!(
         cmux.create_resume(
             &Task::restore(dagq::domain::TaskRecord {
+                goal_priority: None,
                 id: dagq::domain::TaskId::new(3),
                 title: "fix it".into(),
                 description: String::new(),

@@ -103,7 +103,7 @@ pub(crate) fn add(
             verification_commands: vec!["true".into()],
             required_evidence: Vec::new(),
             paths: Vec::new(),
-            priority,
+            priority: Some(priority),
             dependencies: deps.to_vec(),
             goal_dependencies: Vec::new(),
             goal_id: None,
@@ -1603,6 +1603,7 @@ pub(crate) use crate::common::queue::runtime_draft;
 pub(crate) fn open_goal(queue: &mut SqliteQueue) -> dagq::domain::GoalId {
     queue
         .add_goal(NewGoal {
+            priority: Default::default(),
             title: "tidy the queue".into(),
             description: "d".into(),
             acceptance: "every draft is decided".into(),
@@ -2236,7 +2237,7 @@ fn add_text(queue: &mut SqliteQueue, title: &str, description: &str, acceptance:
             verification_commands: vec!["true".into()],
             required_evidence: Vec::new(),
             paths: Vec::new(),
-            priority: Priority::Normal,
+            priority: Some(Priority::Normal),
             dependencies: vec![TaskId::new(1)],
             goal_dependencies: Vec::new(),
             goal_id: None,
@@ -2417,7 +2418,7 @@ fn add_paths(queue: &mut SqliteQueue, title: &str, paths: &[&str]) -> TaskId {
             verification_commands: vec!["true".into()],
             required_evidence: Vec::new(),
             paths: paths.iter().map(|path| (*path).to_owned()).collect(),
-            priority: Priority::Normal,
+            priority: Some(Priority::Normal),
             dependencies: vec![TaskId::new(1)],
             goal_dependencies: Vec::new(),
             goal_id: None,
@@ -2529,7 +2530,7 @@ fn an_in_progress_tasks_expected_files_are_what_its_run_changed() {
             verification_commands: vec!["true".into()],
             required_evidence: Vec::new(),
             paths: vec!["other.txt".into()],
-            priority: Priority::Normal,
+            priority: Some(Priority::Normal),
             dependencies: Vec::new(),
             goal_dependencies: Vec::new(),
             goal_id: None,

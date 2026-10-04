@@ -96,7 +96,7 @@ fn draft_at(
             verification_commands: vec!["true".into()],
             required_evidence: Vec::new(),
             paths: Vec::new(),
-            priority,
+            priority: Some(priority),
             dependencies: vec![TaskId::new(1)],
             goal_dependencies: Vec::new(),
             goal_id: Some(goal),

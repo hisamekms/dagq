@@ -291,7 +291,7 @@ mod tests {
                 verification_commands: Vec::new(),
                 required_evidence: Vec::new(),
                 paths: Vec::new(),
-                priority: Priority::Normal,
+                priority: Some(Priority::Normal),
                 dependencies: Vec::new(),
                 goal_dependencies: Vec::new(),
                 goal_id: None,

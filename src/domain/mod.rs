@@ -801,6 +801,26 @@ impl Priority {
     }
 }
 
+// Where a task's priority comes from (ADR-t1639-1 decision 2): its own
+// setting, the goal it belongs to, or the default for a task in no goal.
+string_enum!(PrioritySource {
+    Task => "task",
+    Goal => "goal",
+    Default => "default",
+});
+
+/// A task's priority before the claim order raises it (ADR-t1639-1
+/// decision 2), and where it comes from: `own`, the task's own setting,
+/// when it has one, else `goal`, the priority of the goal it belongs to,
+/// else `normal`. The effective priority starts from this value.
+pub fn base_priority(own: Option<Priority>, goal: Option<Priority>) -> (Priority, PrioritySource) {
+    match (own, goal) {
+        (Some(own), _) => (own, PrioritySource::Task),
+        (None, Some(goal)) => (goal, PrioritySource::Goal),
+        (None, None) => (Priority::Normal, PrioritySource::Default),
+    }
+}
+
 /// Where a task stands in the claim order (ADR-0040 decision 4); the
 /// smaller rank is claimed first. The one ordering `candidates`, `graph`
 /// and the supervisor's claims share.
@@ -808,8 +828,8 @@ impl Priority {
 pub struct ClaimRank {
     /// Highest effective priority first.
     priority: std::cmp::Reverse<Priority>,
-    // The goal's rank (goal 13) goes here, once goals have one: after the
-    // priority, before `unblocks`.
+    // No goal rank: the goal's priority is the task's base (ADR-t1639-1
+    // decision 8).
     /// Most tasks released first.
     unblocks: std::cmp::Reverse<usize>,
     /// Lowest ID first.
@@ -1602,6 +1622,26 @@ mod tests {
             LANDING_OPTIONS
                 .iter()
                 .all(|option| LandingAnswer::parse(option).is_some())
+        );
+    }
+
+    #[test]
+    fn a_tasks_own_priority_wins_over_its_goals_and_normal_is_the_last_resort() {
+        assert_eq!(
+            base_priority(Some(Priority::Low), Some(Priority::High)),
+            (Priority::Low, PrioritySource::Task)
+        );
+        assert_eq!(
+            base_priority(Some(Priority::Normal), None),
+            (Priority::Normal, PrioritySource::Task)
+        );
+        assert_eq!(
+            base_priority(None, Some(Priority::Urgent)),
+            (Priority::Urgent, PrioritySource::Goal)
+        );
+        assert_eq!(
+            base_priority(None, None),
+            (Priority::Normal, PrioritySource::Default)
         );
     }
 

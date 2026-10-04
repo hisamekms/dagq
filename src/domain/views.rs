@@ -5,8 +5,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    Ask, CommitSha, EventId, Goal, GoalId, GoalStatus, GoalVerdict, LeaseToken, PushReport, RunId,
-    SupervisorMode, Task, TaskId, TaskRun, TaskStatus,
+    Ask, CommitSha, EventId, Goal, GoalId, GoalStatus, GoalVerdict, LeaseToken, Priority,
+    PrioritySource, PushReport, RunId, SupervisorMode, Task, TaskId, TaskRun, TaskStatus,
 };
 
 /// Number of a goal's tasks in each status; progress is derived from these.
@@ -54,6 +54,9 @@ pub struct GoalTask {
     pub id: TaskId,
     pub title: String,
     pub status: TaskStatus,
+    /// Its base priority and where it comes from (ADR-t1639-1 decision 2).
+    pub priority: Priority,
+    pub priority_source: PrioritySource,
 }
 
 #[derive(Debug, Clone, Serialize)]

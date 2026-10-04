@@ -42,6 +42,7 @@ pub fn new_task(title: &str) -> NewTask {
 
 pub fn new_goal(title: &str) -> NewGoal {
     NewGoal {
+        priority: Default::default(),
         title: title.into(),
         description: "One problem several tasks solve".into(),
         acceptance: "Every task landed and the feature works end to end".into(),
@@ -153,7 +154,7 @@ pub fn runtime_draft(
             verification_commands: Vec::new(),
             required_evidence: Vec::new(),
             paths: Vec::new(),
-            priority: Priority::Normal,
+            priority: Some(Priority::Normal),
             change: None,
             dependencies: Vec::new(),
             goal_dependencies: Vec::new(),

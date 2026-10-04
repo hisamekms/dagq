@@ -32,9 +32,10 @@ pub struct NewTask {
     /// Globs of the paths the task may change (ADR-0029); empty: no limit.
     #[serde(default)]
     pub paths: Vec<String>,
-    /// How urgently the task should be claimed (ADR-0040 decision 4).
+    /// The task's own priority (ADR-0040 decision 4); none inherits the
+    /// goal's (ADR-t1639-1 decision 2).
     #[serde(default)]
-    pub priority: Priority,
+    pub priority: Option<Priority>,
     /// The kind of change it makes (ADR-t980-1); none when the registrant
     /// did not say.
     #[serde(default)]
@@ -110,6 +111,9 @@ pub struct NewGoal {
     pub doc: Option<String>,
     /// Register the goal as a draft whose tasks are not candidates.
     pub draft: bool,
+    /// What its tasks inherit (ADR-t1639-1 decision 1).
+    #[serde(default)]
+    pub priority: Priority,
 }
 
 impl NewGoal {
@@ -131,11 +135,14 @@ pub struct GoalEdit {
     pub acceptance: Option<String>,
     pub constraints: Option<String>,
     pub doc: Option<String>,
+    #[serde(default)]
+    pub priority: Option<Priority>,
 }
 
 impl GoalEdit {
     pub fn is_empty(&self) -> bool {
-        self.title.is_none()
+        self.priority.is_none()
+            && self.title.is_none()
             && self.description.is_none()
             && self.acceptance.is_none()
             && self.constraints.is_none()
@@ -224,7 +231,10 @@ pub struct TaskRecord {
     pub verification_commands: Vec<String>,
     pub required_evidence: Vec<EvidenceCheck>,
     pub paths: Vec<String>,
-    pub priority: Priority,
+    /// The task's own priority; none inherits `goal_priority`.
+    pub priority: Option<Priority>,
+    /// The priority of the goal the task belongs to, if any.
+    pub goal_priority: Option<Priority>,
     pub change: Option<TaskChange>,
     pub worker: Worker,
     /// The mode the store keeps: none is the provider's default.
@@ -245,6 +255,7 @@ pub struct GoalRecord {
     pub acceptance: String,
     pub constraints: String,
     pub doc: Option<String>,
+    pub priority: Priority,
     pub status: GoalStatus,
     pub closed_at: Option<String>,
     pub verdict: Option<GoalVerdict>,

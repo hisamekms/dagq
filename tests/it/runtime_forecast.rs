@@ -75,6 +75,7 @@ fn snapshots_are_recorded_at_the_day_a_moving_landing_and_a_start() {
         let mut queue = SqliteQueue::open(&db).unwrap();
         let goal = queue
             .add_goal(NewGoal {
+                priority: Default::default(),
                 title: "forecast".into(),
                 description: "d".into(),
                 acceptance: "a".into(),

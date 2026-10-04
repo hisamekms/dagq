@@ -26,7 +26,7 @@ fn add_task(
             verification_commands: vec!["test -f seed.txt".into()],
             required_evidence: Vec::new(),
             paths: Vec::new(),
-            priority: Priority::Normal,
+            priority: Some(Priority::Normal),
             change: None,
             dependencies: Vec::new(),
             goal_dependencies: Vec::new(),

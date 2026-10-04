@@ -20,7 +20,7 @@ fn add_task(db: &Path, title: &str, change: &str, paths: &[&str], priority: Prio
             verification_commands: vec!["test -f seed.txt".into()],
             required_evidence: Vec::new(),
             paths: paths.iter().map(|path| (*path).to_owned()).collect(),
-            priority,
+            priority: Some(priority),
             change: Some(change.parse::<TaskChange>().unwrap()),
             dependencies: Vec::new(),
             goal_dependencies: Vec::new(),

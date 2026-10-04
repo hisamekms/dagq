@@ -417,6 +417,7 @@ fn build(dir: &TempDir) -> (SqliteQueue, HashMap<i64, i64>, std::path::PathBuf) 
             *goals.entry(real).or_insert_with(|| {
                 queue
                     .add_goal(NewGoal {
+                        priority: Default::default(),
                         title: format!("goal {real}"),
                         description: String::new(),
                         acceptance: "done".into(),

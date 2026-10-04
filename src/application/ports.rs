@@ -84,9 +84,10 @@ pub trait TaskStore {
         edit: TaskEdit,
         authorized: TaskStatus,
     ) -> Result<Task>;
-    /// Give a draft or ready task another priority (ADR-0040 decision 4);
+    /// Give a draft or ready task a priority of its own, or with none let
+    /// it inherit its goal's (ADR-0040 decision 4, ADR-t1639-1 decision 2);
     /// it takes effect at the next claim.
-    fn set_priority(&mut self, task_id: TaskId, priority: Priority) -> Result<Task>;
+    fn set_priority(&mut self, task_id: TaskId, priority: Option<Priority>) -> Result<Task>;
     /// Bundle draft tasks, the draft tasks of the given goals and those
     /// goals into a proposal and submit it for plan review (ADR-0041
     /// decisions 7, 8): the tasks become `submitted`, which no claim takes.

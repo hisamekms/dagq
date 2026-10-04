@@ -9,7 +9,8 @@ use dagq::{
         dependency_graph,
     },
     domain::{
-        ClaimOutcome, EvidenceCheck, GoalId, Priority, TaskAction, TaskEdit, TaskId, TaskStatus,
+        ClaimOutcome, EvidenceCheck, GoalId, Priority, PrioritySource, TaskAction, TaskEdit,
+        TaskId, TaskStatus,
     },
     infrastructure::sqlite::SqliteQueue,
 };
@@ -395,6 +396,43 @@ fn an_edit_authorized_on_another_status_changes_nothing() {
     assert_eq!(edited_events(&mut queue), 1);
 }
 
+/// ADR-t1639-1 decision 2: setting or clearing a task's own priority is
+/// recorded even when its base value stays the same, with where the value
+/// comes from before and after; asking again for what it has records nothing.
+#[test]
+fn clearing_an_own_priority_records_the_change_of_its_source() {
+    let (_dir, mut queue) = fixture();
+    let goal = queue.add_goal(new_goal("normal goal")).unwrap().id();
+    let mut spec = new_task("own normal");
+    spec.priority = Some(Priority::Normal);
+    spec.goal_id = Some(goal);
+    let task = queue.add(spec).unwrap().id();
+    let inherited = queue.set_priority(task, None).unwrap();
+    assert_eq!(
+        (inherited.priority(), inherited.priority_source()),
+        (Priority::Normal, PrioritySource::Goal)
+    );
+    queue.set_priority(task, None).unwrap();
+    queue.set_priority(task, Some(Priority::Normal)).unwrap();
+    let changes: Vec<_> = queue
+        .show(task)
+        .unwrap()
+        .events
+        .into_iter()
+        .filter(|e| e.kind == "task_priority_changed")
+        .map(|e| e.payload)
+        .collect();
+    assert_eq!(
+        changes,
+        [
+            serde_json::json!({"from": "normal", "to": "normal", "from_source": "task",
+                "to_source": "goal"}),
+            serde_json::json!({"from": "normal", "to": "normal", "from_source": "goal",
+                "to_source": "task"}),
+        ]
+    );
+}
+
 /// `add` stores the priority and `set_priority` changes it on a draft or
 /// ready task only, recording `task_priority_changed` when it changes; the
 /// column refuses anything outside 0..=4 (ADR-0040 decision 4).
@@ -402,7 +440,7 @@ fn an_edit_authorized_on_another_status_changes_nothing() {
 fn priority_is_stored_changed_while_editable_and_checked_on_read() {
     let (dir, mut queue) = fixture();
     let mut spec = new_task("urgent");
-    spec.priority = Priority::Urgent;
+    spec.priority = Some(Priority::Urgent);
     let task = queue.add(spec).unwrap();
     assert_eq!(task.priority(), Priority::Urgent);
     assert_eq!(
@@ -410,11 +448,13 @@ fn priority_is_stored_changed_while_editable_and_checked_on_read() {
         Priority::Urgent
     );
     // No change, no event.
-    queue.set_priority(task.id(), Priority::Urgent).unwrap();
+    queue
+        .set_priority(task.id(), Some(Priority::Urgent))
+        .unwrap();
     queue
         .transition(task.id(), TaskAction::BypassReview)
         .unwrap();
-    let low = queue.set_priority(task.id(), Priority::Low).unwrap();
+    let low = queue.set_priority(task.id(), Some(Priority::Low)).unwrap();
     assert_eq!(low.priority(), Priority::Low);
     let changes: Vec<_> = queue
         .show(task.id())
@@ -426,17 +466,24 @@ fn priority_is_stored_changed_while_editable_and_checked_on_read() {
         .collect();
     assert_eq!(
         changes,
-        [serde_json::json!({"from": "urgent", "to": "low"})]
+        [
+            serde_json::json!({"from": "urgent", "to": "low", "from_source": "task",
+            "to_source": "task"})
+        ]
     );
     queue.claim(&base()).unwrap();
     assert_eq!(
         queue
-            .set_priority(task.id(), Priority::Interrupt)
+            .set_priority(task.id(), Some(Priority::Interrupt))
             .unwrap_err()
             .to_string(),
         "the priority can only be changed for draft, submitted or ready tasks"
     );
-    assert!(queue.set_priority(TaskId::new(99), Priority::Low).is_err());
+    assert!(
+        queue
+            .set_priority(TaskId::new(99), Some(Priority::Low))
+            .is_err()
+    );
 
     let raw = Connection::open(dir.path().join("queue.db")).unwrap();
     // A priority outside the domain's fails the read (ADR-t876-1).
@@ -465,7 +512,7 @@ fn candidates_graph_and_claims_share_the_priority_order() {
     let draft_goal = queue.add_goal(draft_goal).unwrap().id();
     let mut add = |title: &str, priority: Priority, depends_on: &[TaskId], goal: Option<GoalId>| {
         let mut spec = new_task(title);
-        spec.priority = priority;
+        spec.priority = Some(priority);
         spec.dependencies = depends_on.to_vec();
         spec.goal_id = goal;
         queue.add(spec).unwrap().id()
@@ -540,12 +587,14 @@ fn list_defaults_to_unfinished_tasks_newest_first_with_compact_items() {
         serde_json::to_value(&page).unwrap(),
         serde_json::json!({
             "tasks": [
-                {"id": d, "status": "ready", "priority": "normal", "change": null,
+                {"id": d, "status": "ready", "priority": "normal", "priority_source": "default",
+                 "change": null,
                  "title": "waiting",
                  "provider": "claude", "worker_mode": "interactive",
                  "goal_id": null,
                  "dependencies": [], "goal_dependencies": [], "latest_run": null},
-                {"id": c, "status": "in_progress", "priority": "normal", "change": null,
+                {"id": c, "status": "in_progress", "priority": "normal", "priority_source": "goal",
+                 "change": null,
                  "title": "claimed", "provider": "claude", "worker_mode": "interactive",
                  "goal_id": goal,
                  "dependencies": [a], "goal_dependencies": [],
@@ -701,7 +750,7 @@ fn changes_authorized_on_another_status_change_nothing() {
         planning::PlanningStore::cancel_duplicate(&mut queue, task, other, ready),
         planning::PlanningStore::set_goal(&mut queue, task, Some(goal), ready),
         planning::PlanningStore::set_paths(&mut queue, task, vec!["docs/**".into()], ready),
-        planning::PlanningStore::set_priority(&mut queue, task, Priority::High, ready),
+        planning::PlanningStore::set_priority(&mut queue, task, Some(Priority::High), ready),
     ]
     .into_iter()
     .map(|result| result.unwrap_err().to_string())
@@ -776,7 +825,7 @@ fn changes_authorized_on_another_status_change_nothing() {
     let moved = planning::PlanningStore::set_goal(&mut queue, task, Some(goal), ready).unwrap();
     assert_eq!(moved.goal_id(), Some(goal));
     planning::PlanningStore::set_paths(&mut queue, task, vec!["docs/**".into()], ready).unwrap();
-    planning::PlanningStore::set_priority(&mut queue, task, Priority::High, ready).unwrap();
+    planning::PlanningStore::set_priority(&mut queue, task, Some(Priority::High), ready).unwrap();
     planning::PlanningStore::add_dependency(&mut queue, task, Dependency::Task(other), ready)
         .unwrap();
     assert_eq!(queue.show(task).unwrap().dependencies.len(), 1);

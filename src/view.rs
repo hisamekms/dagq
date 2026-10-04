@@ -246,6 +246,7 @@ mod tests {
 
     fn task(description: &str) -> Task {
         Task::restore(crate::domain::TaskRecord {
+            goal_priority: None,
             id: TaskId::new(1),
             title: "t".into(),
             description: description.into(),
@@ -556,6 +557,7 @@ mod tests {
             acceptance_version: 1,
             follow_up_memberships: Vec::new(),
             goal: Goal::restore(crate::domain::GoalRecord {
+                priority: Default::default(),
                 id: GoalId::new(1),
                 title: "g".into(),
                 description: "x".repeat(TEXT_LIMIT * 2),
@@ -574,11 +576,15 @@ mod tests {
                 id: TaskId::new(2),
                 title: "t".into(),
                 status: TaskStatus::Ready,
+                priority: crate::domain::Priority::High,
+                priority_source: crate::domain::PrioritySource::Goal,
             }],
             dependents: vec![GoalTask {
                 id: TaskId::new(5),
                 title: "waits".into(),
                 status: TaskStatus::Draft,
+                priority: crate::domain::Priority::Low,
+                priority_source: crate::domain::PrioritySource::Task,
             }],
             events: (1..=11).map(|id| event(id, json!({"goal": {}}))).collect(),
         };
@@ -588,11 +594,13 @@ mod tests {
         assert_eq!(view["goal"]["acceptance"], "a");
         assert_eq!(
             view["tasks"],
-            json!([{"id": 2, "title": "t", "status": "ready"}])
+            json!([{"id": 2, "title": "t", "status": "ready", "priority": "high",
+                "priority_source": "goal"}])
         );
         assert_eq!(
             view["dependents"],
-            json!([{"id": 5, "title": "waits", "status": "draft"}])
+            json!([{"id": 5, "title": "waits", "status": "draft", "priority": "low",
+                "priority_source": "task"}])
         );
         assert_eq!(view["events_total"], 11);
         let events = view["events"].as_array().unwrap();

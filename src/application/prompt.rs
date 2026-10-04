@@ -992,6 +992,8 @@ pub fn runtime_planner_prompt(
             id: task.id(),
             title: task.title().to_owned(),
             status: task.status(),
+            priority: task.priority(),
+            priority_source: task.priority_source(),
         })
         .collect();
     let tasks = planner_task_lines(
@@ -1672,7 +1674,7 @@ pub fn finding_planner_prompt(material: &FindingPlannerMaterial<'_>) -> Result<F
          1. Tasks for an open goal: when the remedy is within an open goal's scope (the one above, or another from `dagq goal list`), add its tasks to that goal as drafts (`dagq add --goal GOAL ...`, with `--context` beginning with `from finding {id} ({kind})` and saying why you chose this remedy), check them with `dagq lint`, and submit them with `dagq submit ID... --finding {id}`.\n\
          2. A new goal: when no open goal covers it, write a draft goal (`dagq goal add --draft ...`) and its draft tasks, lint them and submit with `dagq submit --goal GOAL --finding {id}`.\n\
          Either way the submission makes finding {id} proposed with the proposal, and plan review checks it before it becomes ready; you need no person's approval for it, even for a new goal. \
-         An improvement's tasks are `--priority normal` (the default) or `low`, never higher: plan review lowers a higher one to normal.\n\
+         An improvement's tasks are `--priority normal` or `low`, never higher (without --priority a task inherits its goal's): plan review lowers a higher one to normal.\n\
          3. Dismiss: when a task already remedies it (name the task), it no longer occurs, or it is not worth remedying, run `dagq finding dismiss {id} --reason '<why>'`, the reason saying why you decided so.\n\
          4. Ask: only when you cannot decide it yourself: (a) it needs a person's judgement, `scope` (the plan's intent, an acceptance, a contradiction with a goal's constraints or a decision the repository records, a precedent a person answered otherwise) or `discard` (whether to throw work away), that the queue, the repository (its code and the decisions it records) and a person's precedents cannot settle; or (b) your confidence in the decision is low. Run `dagq ask --finding {id} --kind planner_question --because scope --recommend <propose|dismiss> --confidence <high|low> --question '<everything the person needs, with your recommendation and why>' --option propose --option dismiss` (`--because discard` when the question is whether to throw work away), report briefly and stop. The answer arrives in this terminal as `answer to ask <id>: ...`: follow it (propose: do 1 or 2; dismiss: do 3).\n\
          When you are done, report the outcome in one or two sentences and stop; the runtime ends this session. Do not work on anything but this finding. Never open the queue database directly; use the dagq CLI only.\n",
@@ -4286,6 +4288,7 @@ mod tests {
         verification_commands: Vec<String>,
     ) -> Task {
         Task::restore(TaskRecord {
+            goal_priority: None,
             id: TaskId::new(id),
             title: title.into(),
             description: String::new(),
@@ -4308,6 +4311,7 @@ mod tests {
 
     fn task_with_evidence(id: i64, required_evidence: Vec<EvidenceCheck>) -> Task {
         Task::restore(TaskRecord {
+            goal_priority: None,
             id: TaskId::new(id),
             title: "work".into(),
             description: String::new(),
@@ -4370,6 +4374,7 @@ mod tests {
             &receipt.to_string(),
         );
         let goal = Goal::restore(GoalRecord {
+            priority: Default::default(),
             id: GoalId::new(4),
             title: "upstream goal".into(),
             description: String::new(),
@@ -4563,6 +4568,7 @@ mod tests {
     /// queue's (about 3 KB, task 591's measure of prompt 157).
     fn long_task(id: i64, status: TaskStatus, paths: &[&str]) -> Task {
         Task::restore(TaskRecord {
+            goal_priority: None,
             id: TaskId::new(id),
             title: format!("task {id}"),
             description: format!("description of {id} ").repeat(100),
@@ -4949,6 +4955,7 @@ mod tests {
     /// A task whose description takes about `bytes`.
     fn sized_task(id: i64, status: TaskStatus, bytes: usize) -> Task {
         Task::restore(TaskRecord {
+            goal_priority: None,
             id: TaskId::new(id),
             title: format!("task {id}"),
             description: "d".repeat(bytes),
@@ -5217,6 +5224,7 @@ mod tests {
         ];
         case.goals = vec![
             Goal::restore(GoalRecord {
+                priority: Default::default(),
                 id: GoalId::new(4),
                 title: "a huge goal".into(),
                 description: "g".repeat(300_000),
@@ -5466,6 +5474,7 @@ mod tests {
     #[test]
     fn headless_sessions_are_told_to_finish_in_a_turn_and_never_about_exit() {
         let task = Task::restore(TaskRecord {
+            goal_priority: None,
             id: TaskId::new(7),
             title: "work".into(),
             description: String::new(),
@@ -5806,6 +5815,7 @@ mod tests {
     #[test]
     fn a_path_outside_the_scope_is_a_failed_receipt_and_asks_follow_the_repository_rules() {
         let scoped = Task::restore(TaskRecord {
+            goal_priority: None,
             id: TaskId::new(7),
             title: "work".into(),
             description: String::new(),
@@ -6328,6 +6338,7 @@ mod tests {
     /// A task in progress with `goal` and `context`.
     fn grouped_task(id: i64, title: &str, goal: Option<i64>, context: &str) -> Task {
         Task::restore(TaskRecord {
+            goal_priority: None,
             id: TaskId::new(id),
             title: title.into(),
             description: "small change".into(),
@@ -6386,6 +6397,7 @@ mod tests {
     #[test]
     fn prompt_describes_the_goal_the_context_and_its_company_and_keeps_one_shape_without_them() {
         let goal = Goal::restore(GoalRecord {
+            priority: Default::default(),
             id: GoalId::new(3),
             title: "goal title".into(),
             description: "goal description\nsecond line".into(),
@@ -6566,6 +6578,7 @@ mod tests {
 
     fn goal_of(id: i64, bytes: usize) -> Goal {
         Goal::restore(GoalRecord {
+            priority: Default::default(),
             id: GoalId::new(id),
             title: big("goal title", 2_000),
             description: big("goal description", bytes),
@@ -6587,6 +6600,8 @@ mod tests {
                 id: TaskId::new(id),
                 title: big("a goal task's title", 500),
                 status: TaskStatus::Completed,
+                priority: crate::domain::Priority::Normal,
+                priority_source: crate::domain::PrioritySource::Goal,
             })
             .collect()
     }
@@ -6616,6 +6631,7 @@ mod tests {
 
     fn big_task(id: i64, bytes: usize) -> Task {
         Task::restore(TaskRecord {
+            goal_priority: None,
             id: TaskId::new(id),
             title: big("title", 5_000),
             description: big("description", bytes),

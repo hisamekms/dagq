@@ -598,6 +598,7 @@ fn supervisor_starts_the_observer_on_its_interval_without_a_run_slot() {
             .unwrap();
         queue
             .add_goal(NewGoal {
+                priority: Default::default(),
                 title: "observed".into(),
                 description: String::new(),
                 acceptance: String::new(),

@@ -340,12 +340,12 @@ fn supervisor_claims_by_effective_priority_like_candidates_and_graph() {
     let (_dir, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let low = add_ready_task(&mut queue, "later", &[]);
-    queue.set_priority(low, Priority::Low).unwrap();
+    queue.set_priority(low, Some(Priority::Low)).unwrap();
     let base = add_ready_task(&mut queue, "base", &[]);
     let waiter = add_ready_task(&mut queue, "urgent waiter", &[base]);
-    queue.set_priority(waiter, Priority::Urgent).unwrap();
+    queue.set_priority(waiter, Some(Priority::Urgent)).unwrap();
     let high = add_ready_task(&mut queue, "high", &[]);
-    queue.set_priority(high, Priority::High).unwrap();
+    queue.set_priority(high, Some(Priority::High)).unwrap();
     let expected = [base, high, TaskId::new(1), low];
     let candidates: Vec<TaskId> = queue.candidates().unwrap().iter().map(|t| t.id()).collect();
     assert_eq!(candidates, expected);

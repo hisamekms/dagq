@@ -23,7 +23,7 @@ fn add_task(queue: &mut SqliteQueue, title: &str, paths: &[&str], priority: Prio
                 .map(|path| (*path).to_owned())
                 .chain(["change.txt".to_owned()])
                 .collect(),
-            priority,
+            priority: Some(priority),
             change: None,
             dependencies: Vec::new(),
             goal_dependencies: Vec::new(),
@@ -87,7 +87,7 @@ fn hot_fixture() -> (Fixture, PathBuf, PathBuf) {
             verification_commands: Vec::new(),
             required_evidence: Vec::new(),
             paths: Vec::new(),
-            priority: Priority::Normal,
+            priority: Some(Priority::Normal),
             change: None,
             dependencies: Vec::new(),
             goal_dependencies: Vec::new(),

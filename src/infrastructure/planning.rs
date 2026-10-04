@@ -65,7 +65,7 @@ impl PlanningStore for SqliteQueue {
     fn set_priority(
         &mut self,
         task: TaskId,
-        priority: Priority,
+        priority: Option<Priority>,
         authorized: TaskStatus,
     ) -> Result<Task> {
         self.set_priority_authorized(task, priority, Some(authorized))

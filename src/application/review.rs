@@ -456,6 +456,7 @@ mod tests {
 
     fn task(context: &str) -> Task {
         Task::restore(TaskRecord {
+            goal_priority: None,
             id: TaskId::new(7),
             title: "work".into(),
             description: "change the behavior".into(),

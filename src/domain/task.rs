@@ -5,8 +5,8 @@
 use serde::Serialize;
 
 use super::{
-    DomainError, EvidenceCheck, GoalId, NewTask, Priority, Provider, TaskChange, TaskEdit, TaskId,
-    TaskRecord, TaskStatus, require,
+    DomainError, EvidenceCheck, GoalId, NewTask, Priority, PrioritySource, Provider, TaskChange,
+    TaskEdit, TaskId, TaskRecord, TaskStatus, base_priority, require,
     scope::{dedup_globs, validate_path_globs},
     worker::{Worker, WorkerMode},
 };
@@ -99,8 +99,18 @@ pub struct Task {
     /// `integrate` refuse a diff with a path none of them matches. Empty:
     /// no limit.
     paths: Vec<String>,
-    /// How urgently a person wants it claimed (ADR-0040 decision 4).
+    /// How urgently a person wants it claimed (ADR-0040 decision 4): its
+    /// own setting, else its goal's (ADR-t1639-1 decision 2). The claim
+    /// order raises it to the effective priority.
     priority: Priority,
+    /// Where `priority` comes from: `task`, `goal` or `default`.
+    priority_source: PrioritySource,
+    /// The task's own setting; none inherits `goal_priority`. Not shown.
+    #[serde(skip)]
+    own_priority: Option<Priority>,
+    /// The priority of the goal it belongs to, as read with it. Not shown.
+    #[serde(skip)]
+    goal_priority: Option<Priority>,
     /// The kind of change it makes, as the registrant declared it
     /// (ADR-t980-1); null for a task registered without one.
     change: Option<TaskChange>,
@@ -129,13 +139,17 @@ impl Task {
     pub fn new(id: TaskId, new: NewTask, created_at: String) -> Result<Self, DomainError> {
         new.validate()?;
         require_positive(id)?;
+        let (priority, priority_source) = base_priority(new.priority, None);
         Ok(Self {
             id,
             worker: new.worker()?,
             named_mode: new.worker_mode,
             required_evidence: new.required_evidence(),
             paths: dedup_globs(&new.paths),
-            priority: new.priority,
+            priority,
+            priority_source,
+            own_priority: new.priority,
+            goal_priority: None,
             change: new.change,
             title: new.title,
             description: new.description,
@@ -160,6 +174,7 @@ impl Task {
         require(record.goal_id.is_none_or(|id| id.as_i64() > 0), || {
             DomainError::NonPositiveId { field: "goal ID" }
         })?;
+        let (priority, priority_source) = base_priority(record.priority, record.goal_priority);
         Ok(Self {
             id: record.id,
             title: record.title,
@@ -168,7 +183,10 @@ impl Task {
             verification_commands: record.verification_commands,
             required_evidence: record.required_evidence,
             paths: record.paths,
-            priority: record.priority,
+            priority,
+            priority_source,
+            own_priority: record.priority,
+            goal_priority: record.goal_priority,
             change: record.change,
             worker: record.worker,
             named_mode: record.named_mode,
@@ -208,8 +226,18 @@ impl Task {
         &self.paths
     }
 
+    /// The base priority: its own, else its goal's, else `normal`.
     pub fn priority(&self) -> Priority {
         self.priority
+    }
+
+    pub fn priority_source(&self) -> PrioritySource {
+        self.priority_source
+    }
+
+    /// The task's own setting, which the store keeps; none inherits.
+    pub fn own_priority(&self) -> Option<Priority> {
+        self.own_priority
     }
 
     pub fn change(&self) -> Option<&TaskChange> {
@@ -316,11 +344,13 @@ pub fn set_paths(mut task: Task, paths: Vec<String>) -> Result<Task, DomainError
     Ok(task)
 }
 
-/// Give `task` another priority (ADR-0040 decision 4): only before it is
+/// Give `task` a priority of its own, or with none take its goal's again
+/// (ADR-0040 decision 4, ADR-t1639-1 decision 2): only before it is
 /// claimed, so a running run is never preempted.
-pub fn set_priority(mut task: Task, priority: Priority) -> Result<Task, DomainError> {
+pub fn set_priority(mut task: Task, priority: Option<Priority>) -> Result<Task, DomainError> {
     require_editable(&task, "the priority")?;
-    task.priority = priority;
+    task.own_priority = priority;
+    (task.priority, task.priority_source) = base_priority(priority, task.goal_priority);
     Ok(task)
 }
 
@@ -507,7 +537,8 @@ mod tests {
             verification_commands: Vec::new(),
             required_evidence: Vec::new(),
             paths: Vec::new(),
-            priority: Default::default(),
+            priority: None,
+            goal_priority: None,
             change: None,
             status,
             goal_id: None,
@@ -748,8 +779,59 @@ mod tests {
         assert!(waiting.status().content_editable());
         assert!(dependencies_editable(&waiting));
         assert_eq!(
-            set_priority(waiting, Priority::Low).unwrap().priority(),
+            set_priority(waiting, Some(Priority::Low))
+                .unwrap()
+                .priority(),
             Priority::Low
+        );
+    }
+
+    /// ADR-t1639-1 decision 2: a task without a priority of its own takes
+    /// its goal's; setting one overrides it, and clearing it inherits again.
+    #[test]
+    fn a_task_inherits_its_goals_priority_until_it_sets_its_own() {
+        let inheriting = Task::restore(TaskRecord {
+            goal_id: Some(GoalId::new(3)),
+            goal_priority: Some(Priority::High),
+            ..record(TaskStatus::Ready)
+        })
+        .unwrap();
+        assert_eq!(
+            (inheriting.priority(), inheriting.priority_source()),
+            (Priority::High, PrioritySource::Goal)
+        );
+        let json = serde_json::to_value(&inheriting).unwrap();
+        assert_eq!(
+            (&json["priority"], &json["priority_source"]),
+            (&serde_json::json!("high"), &serde_json::json!("goal"))
+        );
+        let own = set_priority(inheriting, Some(Priority::Low)).unwrap();
+        assert_eq!(
+            (own.priority(), own.priority_source(), own.own_priority()),
+            (Priority::Low, PrioritySource::Task, Some(Priority::Low))
+        );
+        let back = set_priority(own, None).unwrap();
+        assert_eq!(
+            (back.priority(), back.priority_source(), back.own_priority()),
+            (Priority::High, PrioritySource::Goal, None)
+        );
+        let alone = Task::restore(record(TaskStatus::Draft)).unwrap();
+        assert_eq!(
+            (alone.priority(), alone.priority_source()),
+            (Priority::Normal, PrioritySource::Default)
+        );
+        let registered = Task::new(
+            TaskId::new(9),
+            NewTask {
+                priority: Some(Priority::Urgent),
+                ..new_task()
+            },
+            "now".into(),
+        )
+        .unwrap();
+        assert_eq!(
+            (registered.priority(), registered.priority_source()),
+            (Priority::Urgent, PrioritySource::Task)
         );
     }
 
@@ -763,7 +845,7 @@ mod tests {
         let scoped = set_paths(moved, vec!["src/**".into(), "src/**".into()]).unwrap();
         assert_eq!(scoped.paths(), ["src/**"]);
         assert_eq!(scoped.priority(), Priority::Normal);
-        let urgent = set_priority(scoped, Priority::Urgent).unwrap();
+        let urgent = set_priority(scoped, Some(Priority::Urgent)).unwrap();
         assert_eq!(urgent.priority(), Priority::Urgent);
         assert_eq!(
             serde_json::to_value(&urgent).unwrap()["priority"],
@@ -775,7 +857,7 @@ mod tests {
         ));
         let draft = Task::restore(record(TaskStatus::Draft)).unwrap();
         assert_eq!(
-            set_priority(draft, Priority::Low).unwrap().priority(),
+            set_priority(draft, Some(Priority::Low)).unwrap().priority(),
             Priority::Low
         );
 
@@ -796,7 +878,7 @@ mod tests {
         ] {
             let task = Task::restore(record(status)).unwrap();
             assert_eq!(
-                set_priority(task, Priority::Interrupt)
+                set_priority(task, Some(Priority::Interrupt))
                     .unwrap_err()
                     .to_string(),
                 "the priority can only be changed for draft, submitted or ready tasks"

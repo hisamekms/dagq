@@ -2328,6 +2328,7 @@ mod tests {
 
     fn task_requiring(paths: &[&str], required: &[EvidenceCheck]) -> Task {
         Task::restore(TaskRecord {
+            goal_priority: None,
             id: TaskId::new(7),
             title: "  land the change  ".to_owned(),
             description: String::new(),

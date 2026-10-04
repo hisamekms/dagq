@@ -510,6 +510,7 @@ mod tests {
 
     fn with(task: Task, edit: impl FnOnce(&mut crate::domain::TaskRecord)) -> Task {
         let mut record = crate::domain::TaskRecord {
+            goal_priority: None,
             id: task.id(),
             title: task.title().into(),
             description: task.description().into(),
@@ -517,7 +518,7 @@ mod tests {
             verification_commands: task.verification_commands().to_vec(),
             required_evidence: task.required_evidence().to_vec(),
             paths: task.paths().to_vec(),
-            priority: task.priority(),
+            priority: task.own_priority(),
             change: task.change().cloned(),
             status: task.status(),
             goal_id: task.goal_id(),
