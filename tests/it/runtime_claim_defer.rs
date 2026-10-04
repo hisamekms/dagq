@@ -293,6 +293,73 @@ fn a_run_waiting_for_its_owner_past_the_grace_lets_the_deferred_task_go() {
     );
 }
 
+/// Run the task in the way with `agent`, which fails its validation, then
+/// a pass with a stand-in that works: the fixture, the queue and the task
+/// that was deferred behind the failed run.
+fn after_a_failed_run_in_the_way(agent: &str) -> (Fixture, PathBuf, TaskId) {
+    let (dir, repo, db) = hot_fixture();
+    let (hot, near) = {
+        let mut queue = SqliteQueue::open(&db).unwrap();
+        let hot = add_task(&mut queue, "edits the hot file", &[HOT], Priority::Normal);
+        let near = add_task(&mut queue, "edits the docs", &["docs/**"], Priority::Normal);
+        (hot, near)
+    };
+    let backend = TestWorkspace::new(&db, false, agent);
+    let outcome = supervise_with(&db, &repo, &backend, &options(3600)).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let run = SqliteQueue::open(&db).unwrap().show(hot).unwrap().runs[0].clone();
+    assert_eq!(run.status(), RunStatus::Failed);
+    assert_eq!(events(&db, "claim_deferred").len(), 1);
+    // The stats window starts at the first finished run: the conflicts are
+    // recorded again so the file stays a hotspot.
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    for main in ["m4", "m5", "m6"] {
+        queue
+            .record_task_event(
+                TaskId::new(2),
+                EventKind::IntegrationDeferred,
+                json!({"conflicts": [HOT], "main": main}),
+            )
+            .unwrap();
+    }
+    drop(queue);
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let outcome = supervise_with(&db, &repo, &backend, &options(3600)).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    (dir, db, near)
+}
+
+/// A run in the way that failed with no commit of its own (its receipt
+/// names its base) holds the task back no longer: the task is claimed at
+/// once, without the grace or the limit, and the deferral ends as
+/// `no_commit` (ADR-t1634-1).
+#[test]
+fn a_failed_run_with_no_commit_of_its_own_lets_the_deferred_task_go() {
+    let (_dir, db, near) = after_a_failed_run_in_the_way("receipt \"$BASE\"");
+    assert_eq!(runs_of(&db, near), 1, "the failed run holds nothing");
+    let ended = events(&db, "claim_deferral_ended");
+    assert_eq!(ended.len(), 1, "{ended:?}");
+    assert_eq!(ended[0].0, Some(near));
+    assert_eq!(ended[0].1["why"], "no_commit");
+    let stats = runtime::stats(&db, &Default::default()).unwrap();
+    assert_eq!(
+        stats["claim_deferrals"]["by_end"]["no_commit"]["count"], 1,
+        "{stats}"
+    );
+}
+
+/// A run in the way that failed with a commit of its own still holds the
+/// task back (ADR-t1634-1).
+#[test]
+fn a_failed_run_with_a_commit_of_its_own_still_holds_the_task_back() {
+    let (_dir, db, near) = after_a_failed_run_in_the_way("commit work; receipt \"$BASE\"");
+    assert_eq!(runs_of(&db, near), 0, "a commit of its own is in the way");
+    let ended = events(&db, "claim_deferral_ended");
+    assert!(ended.is_empty(), "{ended:?}");
+}
+
 /// A supervisor reads `[conflicts]` of the main checkout's `dagq.toml`
 /// again every pass (ADR-0080): a lower `hotspot_conflicts` makes the hot
 /// file a hotspot and a task over it waits, with the file's limit; an

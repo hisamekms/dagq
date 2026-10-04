@@ -11,7 +11,8 @@
 //! once it has lasted `[conflicts] defer_max_secs`: the task is claimed
 //! then even if the files still meet. A run in flight that only waits for
 //! a person's answer stops counting once it has waited
-//! `[conflicts] waiting_owner_grace_secs` (ADR-t1484-1).
+//! `[conflicts] waiting_owner_grace_secs` (ADR-t1484-1), and a failed run
+//! with no commit of its own never counts (ADR-t1634-1).
 
 use super::EventKind;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -20,7 +21,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use super::{
-    Ask, AskKind, EventId, LeaseToken, RunEvent, TaskId,
+    Ask, AskKind, EventId, LeaseToken, RunEvent, RunStatus, TaskId,
     event_kind::{LEASE_ACQUIRED, LEASE_RELEASED},
     scope::glob_matches,
     stats::timestamp_millis,
@@ -33,8 +34,9 @@ pub const CLAIM_DEFERRED: &str = crate::domain::event_kind::EventKind::ClaimDefe
 /// Recorded on the task when its deferral ends (`reason`, `why`,
 /// `deferred_secs`, `supervisor`): `cleared` (the files no longer meet or
 /// the task became an interrupt), `owner_waiting` (they meet only runs
-/// that wait for a person's answer past the grace, ADR-t1484-1),
-/// `expired` (it lasted the limit) or `not_candidate` (it left the
+/// left out, one of them waiting for a person's answer past the grace,
+/// ADR-t1484-1), `no_commit` (they meet only failed runs with no commit
+/// of their own, ADR-t1634-1), `expired` (it lasted the limit) or `not_candidate` (it left the
 /// candidates: claimed elsewhere, canceled, blocked again).
 pub const CLAIM_DEFERRAL_ENDED: &str =
     crate::domain::event_kind::EventKind::ClaimDeferralEnded.as_str();
@@ -64,6 +66,10 @@ pub const DEFAULT_WAITING_OWNER_GRACE_SECS: i64 = 600;
 /// person past the grace.
 pub const OWNER_WAITING: &str = "owner_waiting";
 
+/// How a deferral ends when the files meet only failed runs with no
+/// commit of their own (ADR-t1634-1).
+pub const NO_COMMIT: &str = "no_commit";
+
 /// How many related landed tasks give the files of a task that declares no
 /// paths.
 pub const RELATED_TASKS: usize = 3;
@@ -78,6 +84,18 @@ pub struct InFlight {
     /// Since when (unix seconds) the run only waits for a person's answer
     /// ([`owner_waiting_since`]); `None` while it moves.
     pub owner_waiting_since: Option<i64>,
+    /// The run failed with no commit of its own ([`failed_without_commit`]).
+    pub no_commit: bool,
+}
+
+/// Whether a run of `status` has failed with no commit of its own
+/// (ADR-t1634-1): `changed` is what its head (its result commit, or its
+/// branch) changed from its base, `None` when it has no head. A failed run
+/// that waits for its triage, its recovery or a person changed no file the
+/// others could conflict with. A head that could not be read is not known
+/// to be empty, so the caller passes such a run as changing something.
+pub fn failed_without_commit(status: RunStatus, changed: Option<&[String]>) -> bool {
+    status == RunStatus::Failed && changed.is_none_or(<[String]>::is_empty)
 }
 
 /// Whether a run's open ask of `kind` stops it on a person: the run does
@@ -123,16 +141,43 @@ pub fn owner_waiting_since(asks: &[Ask], leased: bool, events: &[RunEvent]) -> O
 }
 
 /// The runs of `in_flight` that hold the claims back at `now`: all but
-/// those that have only waited for a person for `grace_secs` or longer.
+/// those that have only waited for a person for `grace_secs` or longer
+/// (ADR-t1484-1) and those that failed with no commit of their own
+/// (ADR-t1634-1).
 pub fn counted(in_flight: &[InFlight], now: i64, grace_secs: i64) -> Vec<InFlight> {
     in_flight
         .iter()
         .filter(|run| {
-            run.owner_waiting_since
-                .is_none_or(|since| now - since < grace_secs)
+            !run.no_commit
+                && run
+                    .owner_waiting_since
+                    .is_none_or(|since| now - since < grace_secs)
         })
         .cloned()
         .collect()
+}
+
+/// Why a candidate's files meet no run that counts though they meet
+/// `in_flight` on `hot`: [`NO_COMMIT`] when every run they meet failed
+/// with no commit of its own, [`OWNER_WAITING`] when one of them waits for
+/// a person past the grace instead; `None` when they meet a run
+/// [`counted`] or none at all.
+pub fn left_out(
+    hot: &[String],
+    candidate: &[String],
+    in_flight: &[InFlight],
+    counted: &[InFlight],
+) -> Option<&'static str> {
+    if overlap(hot, candidate, counted).is_some() {
+        return None;
+    }
+    let met = overlap(hot, candidate, in_flight)?;
+    let no_commit = met.runs.iter().all(|met| {
+        in_flight
+            .iter()
+            .any(|run| run.run_id == met.run_id && run.no_commit)
+    });
+    Some(if no_commit { NO_COMMIT } else { OWNER_WAITING })
 }
 
 /// Where a candidate's expected files meet the runs in flight on hotspots.
@@ -249,13 +294,13 @@ pub enum Decision {
 }
 
 /// Judge one candidate: `interrupt` for a task of interrupt priority,
-/// `overlap` of its files with the runs [`counted`], `owner_waiting` when
-/// they meet only runs left out as waiting for a person, `deferral` the
-/// one in place (updated here), `now` in unix seconds.
+/// `overlap` of its files with the runs [`counted`], `left_out` why they
+/// meet only runs left out ([`left_out`]), `deferral` the one in place
+/// (updated here), `now` in unix seconds.
 pub fn decide(
     interrupt: bool,
     overlap: Option<Overlap>,
-    owner_waiting: bool,
+    left_out: Option<&'static str>,
     deferral: &mut Option<Deferral>,
     now: i64,
     max_secs: i64,
@@ -311,11 +356,7 @@ pub fn decide(
         (None, Some(open)) if open.expired => Decision::Claim { event: None },
         (None, Some(open)) => {
             *deferral = None;
-            let why = if owner_waiting && !interrupt {
-                OWNER_WAITING
-            } else {
-                "cleared"
-            };
+            let why = left_out.filter(|_| !interrupt).unwrap_or("cleared");
             Decision::Claim {
                 event: ended(why, open.since),
             }
@@ -560,6 +601,7 @@ mod tests {
             task_id: TaskId::new(task),
             files: files.iter().map(|file| (*file).to_owned()).collect(),
             owner_waiting_since: None,
+            no_commit: false,
         }
     }
 
@@ -624,7 +666,7 @@ mod tests {
         } = decide(
             false,
             hot(),
-            false,
+            None,
             &mut deferral,
             100,
             60,
@@ -651,7 +693,7 @@ mod tests {
             decide(
                 false,
                 hot(),
-                false,
+                None,
                 &mut deferral,
                 130,
                 60,
@@ -665,7 +707,7 @@ mod tests {
         } = decide(
             false,
             None,
-            false,
+            None,
             &mut deferral,
             150,
             60,
@@ -682,7 +724,7 @@ mod tests {
             decide(
                 false,
                 None,
-                false,
+                None,
                 &mut deferral,
                 160,
                 60,
@@ -699,7 +741,7 @@ mod tests {
             decide(
                 true,
                 hot(),
-                false,
+                None,
                 &mut deferral,
                 100,
                 60,
@@ -716,7 +758,7 @@ mod tests {
         } = decide(
             true,
             hot(),
-            false,
+            None,
             &mut deferral,
             110,
             60,
@@ -739,7 +781,7 @@ mod tests {
         } = decide(
             false,
             hot(),
-            false,
+            None,
             &mut deferral,
             160,
             60,
@@ -758,7 +800,7 @@ mod tests {
             decide(
                 false,
                 hot(),
-                false,
+                None,
                 &mut deferral,
                 170,
                 60,
@@ -772,7 +814,7 @@ mod tests {
             decide(
                 false,
                 None,
-                false,
+                None,
                 &mut deferral,
                 180,
                 60,
@@ -785,7 +827,7 @@ mod tests {
             decide(
                 false,
                 hot(),
-                false,
+                None,
                 &mut deferral,
                 190,
                 60,
@@ -796,15 +838,7 @@ mod tests {
         // A limit of 0 defers nothing.
         let mut none = None;
         assert_eq!(
-            decide(
-                false,
-                hot(),
-                false,
-                &mut none,
-                100,
-                0,
-                &LeaseToken::new("s")
-            ),
+            decide(false, hot(), None, &mut none, 100, 0, &LeaseToken::new("s")),
             Decision::Claim { event: None }
         );
         assert_eq!(none, None);
@@ -934,7 +968,7 @@ mod tests {
         } = decide(
             false,
             None,
-            true,
+            Some(OWNER_WAITING),
             &mut deferral,
             700,
             3600,
@@ -952,7 +986,7 @@ mod tests {
             decide(
                 false,
                 None,
-                true,
+                Some(OWNER_WAITING),
                 &mut deferral,
                 710,
                 3600,
@@ -965,7 +999,7 @@ mod tests {
             decide(
                 false,
                 hot(),
-                false,
+                None,
                 &mut deferral,
                 720,
                 3600,
@@ -973,6 +1007,76 @@ mod tests {
             ),
             Decision::Defer { event: Some(_) }
         ));
+    }
+
+    #[test]
+    fn a_failed_run_with_no_commit_of_its_own_holds_no_claim_back() {
+        let changed = strings(&["x.md"]);
+        assert!(failed_without_commit(RunStatus::Failed, None));
+        assert!(failed_without_commit(RunStatus::Failed, Some(&[])));
+        // A commit of its own, or a run still worked on, is in the way.
+        assert!(!failed_without_commit(RunStatus::Failed, Some(&changed)));
+        for status in [
+            RunStatus::Running,
+            RunStatus::Validating,
+            RunStatus::NeedsSession,
+            RunStatus::AwaitingIntegration,
+        ] {
+            assert!(!failed_without_commit(status, Some(&[])), "{status:?}");
+        }
+        let hot_files = strings(&["x.md"]);
+        let failed = InFlight {
+            no_commit: true,
+            ..run("r1", 1, &["x.md"])
+        };
+        let committed = run("r2", 2, &["x.md"]);
+        let waiting = InFlight {
+            owner_waiting_since: Some(100),
+            ..run("r3", 3, &["x.md"])
+        };
+        // Left out at once, without the grace.
+        assert!(counted(std::slice::from_ref(&failed), 100, 600).is_empty());
+        let both = [failed.clone(), committed.clone()];
+        let left = counted(&both, 100, 600);
+        assert_eq!(left, [committed]);
+        assert_eq!(left_out(&hot_files, &hot_files, &both, &left), None);
+        let alone = [failed.clone()];
+        assert_eq!(
+            left_out(&hot_files, &hot_files, &alone, &[]),
+            Some(NO_COMMIT)
+        );
+        // With a run waiting for a person past the grace, it is that wait.
+        let with_waiting = [failed, waiting];
+        let left = counted(&with_waiting, 700, 600);
+        assert!(left.is_empty());
+        assert_eq!(
+            left_out(&hot_files, &hot_files, &with_waiting, &left),
+            Some(OWNER_WAITING)
+        );
+        assert_eq!(left_out(&hot_files, &[], &with_waiting, &left), None);
+        // The deferral ends as no_commit, long before the limit.
+        let mut deferral = Some(Deferral {
+            since: 100,
+            expired: false,
+        });
+        let Decision::Claim {
+            event: Some((kind, payload)),
+        } = decide(
+            false,
+            None,
+            Some(NO_COMMIT),
+            &mut deferral,
+            130,
+            3600,
+            &LeaseToken::new("s"),
+        )
+        else {
+            panic!("claimed past the failed run")
+        };
+        assert_eq!(kind, EventKind::ClaimDeferralEnded);
+        assert_eq!(payload["why"], NO_COMMIT);
+        assert_eq!(payload["deferred_secs"], 30);
+        assert_eq!(deferral, None);
     }
 
     #[test]

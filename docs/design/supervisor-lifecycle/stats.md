@@ -4,8 +4,8 @@ type: design
 title: "`stats`"
 status: current
 created: 2026-09-26
-updated: 2026-10-04 # task 1486: the gaps of today's token counts (ADR-t1486-1); task 1437; task 1712
-last_verified: 2026-10-04 # task 1486; task 1437; task 1712
+updated: 2026-10-05 # task 1486: the gaps of today's token counts (ADR-t1486-1); task 1437; task 1712; task 1634
+last_verified: 2026-10-05 # task 1486; task 1437; task 1712; task 1634
 scope: runtime
 related:
   - adr-t1486-1
@@ -87,7 +87,7 @@ related:
   - `conflict_hotspot`: `conflict_hotspots`の`alert`が立ったファイルごとに1件。`value`はそのファイルの衝突の回数、`threshold`は`[conflicts].hotspot_conflicts`、`path`にファイル（このalertだけが持つ）、`task_id` / `run_id`はnull
 - **`claim_holds`**: `{count, secs, by_reason, held}`。windowの中で始まったclaimの控え（`claim_held`）の件数と合計秒、理由ごとの`{count, secs}`、今の控え`held`（無ければnull）。理由は`load_average`と`disk_space`（空き容量の不足。[空き容量を確かめる](disk-space.md)）。集計は`domain::claim_hold::claim_holds`（[claimを控える](claim-hold.md)）。loadの保留が有効なときのclaimの間隔のための待ち（ADR-t1479-1）は控えではないので数えない。間隔のために待った秒は`run_claimed`のpayloadの`claim_spacing_wait_secs`が持つ（[claimを控える](claim-hold.md#claimの間隔)）
 - **`landing_holds`**: `claim_holds`と同じ形で、空き容量の不足による着地の検証の控え（`landing_held` / `landing_resumed`）。集計は`domain::claim_hold::holds_of`（[空き容量を確かめる](disk-space.md)、task 377）
-- **`claim_deferrals`**: `{count, secs, by_end, by_file, deferred}`。windowの中で始まった、衝突の多いファイルでのtaskのclaimの控え（`claim_deferred`）の件数と合計秒、終わり方ごとの`{count, secs}`（`cleared` / `owner_waiting`（邪魔なrunが全て人の答えだけを待って猶予を過ぎた。ADR-t1484-1） / `expired` / `not_candidate` / `claimed` / `superseded` / `open`）、hotspotごとの控えた回数、今控えているtaskの`[{task_id, reason, since, files, runs, supervisor}]`。`--goal`はそのgoalのtaskの控えだけを数えるが、`deferred`はqueueの今を出す。集計は`domain::claim_defer::claim_deferrals`（[claimを控える（衝突の多いファイル）](claim-defer.md)）
+- **`claim_deferrals`**: `{count, secs, by_end, by_file, deferred}`。windowの中で始まった、衝突の多いファイルでのtaskのclaimの控え（`claim_deferred`）の件数と合計秒、終わり方ごとの`{count, secs}`（`cleared` / `owner_waiting`（邪魔なrunが全て数えないrunで、人の答えだけを待って猶予を過ぎたものを含む。ADR-t1484-1） / `no_commit`（邪魔なrunが全て自分のcommitを持たないfailedのrun。ADR-t1634-1） / `expired` / `not_candidate` / `claimed` / `superseded` / `open`）、hotspotごとの控えた回数、今控えているtaskの`[{task_id, reason, since, files, runs, supervisor}]`。`--goal`はそのgoalのtaskの控えだけを数えるが、`deferred`はqueueの今を出す。集計は`domain::claim_defer::claim_deferrals`（[claimを控える（衝突の多いファイル）](claim-defer.md)）
 - **`backend_failures`**: `{count, by_op, retried, exhausted, retried_by_op, exhausted_by_op, max_load_avg, max_slots, by_load_band}`。`backend_call_failed`の件数、`op`ごとの件数、そのうちretryした試行（`retry_after_ms`が非null）の`retried`と使い切った失敗（`retry_after_ms`がnullか無い。task 326より前のイベントも最後の失敗として数える）の`exhausted`とそれぞれの`op`ごとの件数（`retried + exhausted = count`。task 397。alertは今までどおり`count`で判定する）、記録された`load_avg`の最大（無ければnull）、`slots`の最大（無ければnull）、`load_avg`の帯ごとの件数`[{band, count}]`（軽い帯から。`load_avg`の無い失敗は数えない。task 197）。windowは上の期間集計の窓。`--goal`はそのgoalのrunの失敗だけを数える（runの無い失敗は数えない）
 - **`running_alerts`**: まだ終わっていない（`integrated` / `succeeded` / `failed` / `interrupted`以外の）runの、今の状態から導くalert（ADR-0043の決定5、task 290）。`--since`に関係なく毎回出し、`--goal`はそのgoalのtaskのものだけにする。run_events・askに加えて、run directoryの`idle.json`（idle marker。`background_tasks`の`running`の処理）、`prompt-submit.json`（sessionが入力を受けた印。Claude adapterの`UserPromptSubmit` hookが書く。task 409。無ければ見ない）、`receipt_path`のmtimeと、全windowの`workspace list`（[Naming](naming.md#naming)）を読む。新しい表は持たない。各要素は`{kind, task_id, run_id, …}`で、`value`と`threshold`は秒。
   - 見ているsession（`phase`）: `running`のrunは`session`（最新の`agent_started`から。無ければ`run_claimed`）、`needs_session`で最後のresumeのeventが`resume_started`なら`resume`（その時刻から）、`validating` / `awaiting_integration`でreviewの流れの最後のeventが`revise_requested`なら`revise`（その時刻から。送れずに`revise_unsent`で取り消したものは除く）。それ以外は見ているsessionが無い。

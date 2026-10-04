@@ -7,7 +7,8 @@
 //! they are judged by is read again every pass (ADR-0080): a change drops
 //! the cached hotspots. A run in flight that only waits for a person's
 //! answer stops holding the claims back past
-//! `[conflicts] waiting_owner_grace_secs` (ADR-t1484-1).
+//! `[conflicts] waiting_owner_grace_secs` (ADR-t1484-1), and a failed run
+//! with no commit of its own does not hold them back at all (ADR-t1634-1).
 use crate::domain::EventKind;
 use std::collections::{HashMap, HashSet};
 
@@ -20,8 +21,8 @@ use crate::domain::{
     Priority, RunId, TaskId,
     claim_defer::{
         self, DEFERRAL_KINDS, Decision, Deferral, InFlight, RELATED_TASKS, deferrals_in_place,
-        expected_files, owner_waiting_since, worker_deferral_ended, worker_deferrals_in_place,
-        worker_deferred,
+        expected_files, failed_without_commit, owner_waiting_since, worker_deferral_ended,
+        worker_deferrals_in_place, worker_deferred,
     },
     provider_switch::route_of,
     stats::{
@@ -218,8 +219,9 @@ impl Supervisor<'_> {
         let now = self.generators.clock.now();
         let max_secs = self.conflicts.config.defer_max_secs;
         let (hot, in_flight) = self.hot_in_flight(now)?;
-        // The runs that only wait for a person past the grace are left out
-        // (ADR-t1484-1).
+        // The runs that only wait for a person past the grace (ADR-t1484-1)
+        // and the failed runs with no commit of their own (ADR-t1634-1) are
+        // left out.
         let counted = claim_defer::counted(
             &in_flight,
             now,
@@ -286,21 +288,23 @@ impl Supervisor<'_> {
                 .iter()
                 .find(|node| node.id == id)
                 .is_some_and(|node| node.effective_priority == Priority::Interrupt);
-            let (overlap, owner_waiting) = if hot.is_empty() || interrupt {
-                (None, false)
+            let (overlap, left_out) = if hot.is_empty() || interrupt {
+                (None, None)
             } else {
                 let expected = self.expected(id)?;
                 let overlap = claim_defer::overlap(&hot, &expected, &counted);
-                let owner_waiting = overlap.is_none()
-                    && counted.len() < in_flight.len()
-                    && claim_defer::overlap(&hot, &expected, &in_flight).is_some();
-                (overlap, owner_waiting)
+                let left_out = if counted.len() < in_flight.len() {
+                    claim_defer::left_out(&hot, &expected, &in_flight, &counted)
+                } else {
+                    None
+                };
+                (overlap, left_out)
             };
             let mut deferral = deferrals.get(&id).copied();
             let decision = claim_defer::decide(
                 interrupt,
                 overlap,
-                owner_waiting,
+                left_out,
                 &mut deferral,
                 now,
                 max_secs,
@@ -414,7 +418,8 @@ impl Supervisor<'_> {
     /// The runs in flight (the latest run of each in-progress task) and
     /// the files each is expected to touch: its diff from its base to its
     /// head and the expected files of its task (ADR-0069 decision 2), with
-    /// since when each only waits for a person (ADR-t1484-1).
+    /// since when each only waits for a person (ADR-t1484-1) and whether it
+    /// failed with no commit of its own (ADR-t1634-1).
     pub(super) fn runs_in_flight(&mut self) -> Result<Vec<InFlight>> {
         let mut in_flight = Vec::new();
         for run in self.queue.latest_runs_in_progress()? {
@@ -423,22 +428,28 @@ impl Supervisor<'_> {
                 .result_commit()
                 .map(|commit| commit.as_str().to_owned())
                 .or_else(|| run.branch().map(str::to_owned));
+            let mut changed = None;
+            // A head that cannot be read may hold a change: the run counts.
+            let mut readable = true;
             if let Some(head) = head {
                 match self
                     .repository
                     .changed_paths(run.base_commit().as_str(), &head)
                 {
-                    Ok(changed) => files.extend(changed),
+                    Ok(paths) => changed = Some(paths),
                     Err(error) => {
+                        readable = false;
                         warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "the files run {} changed could not be read: {error:#}", run.id())
                     }
                 }
             }
+            files.extend(changed.iter().flatten().cloned());
             in_flight.push(InFlight {
                 run_id: run.id().as_str().to_owned(),
                 task_id: run.task_id(),
                 files,
                 owner_waiting_since: self.owner_waiting_since(run.id())?,
+                no_commit: readable && failed_without_commit(run.status(), changed.as_deref()),
             });
         }
         Ok(in_flight)
