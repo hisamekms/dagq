@@ -843,3 +843,221 @@ fn kpi_cross_reaches_periods_and_compare_without_replacing_single_axes() {
         3
     );
 }
+
+/// Claim the next task with `attributes` in its `run_claimed` and land it;
+/// returns the claim's event id.
+fn land_claimed(db: &Path, queue: &mut SqliteQueue, attributes: Value) -> i64 {
+    let base = CommitSha::try_from("0123456789abcdef0123456789abcdef01234567").unwrap();
+    let ClaimOutcome::Claimed { run } = queue
+        .claim_for_supervisor_in_order(
+            &base,
+            &LeaseToken::new("t"),
+            &[],
+            Some(&attributes),
+            &dagq::domain::worker_model::WorkerTrial::default(),
+            &dagq::domain::provider_switch::WorkerRoute::direct(&dagq::domain::worker::Worker::ALL),
+        )
+        .unwrap()
+    else {
+        panic!("nothing to claim");
+    };
+    for (kind, payload) in [
+        (EventKind::ReceiptObserved, json!({})),
+        (
+            EventKind::ValidationFinished,
+            json!({"status": "awaiting_integration"}),
+        ),
+        (EventKind::RunIntegrated, json!({"status": "integrated"})),
+    ] {
+        queue.record_runtime_event(run.id(), kind, payload).unwrap();
+    }
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .query_row(
+            "SELECT id FROM run_events WHERE kind = 'run_claimed' AND run_id = ?1",
+            [run.id().to_string()],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// The queue's events a few milliseconds apart, so that each mark has a
+/// time of its own.
+fn tick() {
+    std::thread::sleep(std::time::Duration::from_millis(5));
+}
+
+/// Routine marks (ADR-t1381-1) — a supervisor's start at the same
+/// `parallel`, its stop and a derived build — are confounders only: a
+/// person's mark next to them is a change of its own, close marks with
+/// them between are still one change, naming one splits at it alone, and
+/// a claim that derives a build and a `parallel` names the `parallel`.
+#[test]
+fn kpi_compare_leaves_routine_marks_out_of_every_change() {
+    let (dir, db) = queue();
+    let config = dir.path().join("config");
+    std::fs::create_dir_all(config.join("dagq")).unwrap();
+    std::fs::write(config.join("dagq/host.toml"), "[kpi]\nmin_samples = 1\n").unwrap();
+    for index in 0..5 {
+        ok(&db, &["add", &format!("task {index}")]);
+        ok(&db, &["ready", &(index + 1).to_string(), "--bypass-review"]);
+    }
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let start = |queue: &SqliteQueue, parallel: i64, build: &str| {
+        tick();
+        queue
+            .record_queue_event(
+                EventKind::SupervisorStarted,
+                json!({"supervisor": "s", "parallel": parallel, "dagq_version": build, "handoff": true}),
+            )
+            .unwrap()
+            .as_i64()
+    };
+    let mark = |label: &str| {
+        tick();
+        ok(&db, &["mark", label])["id"].as_i64().unwrap()
+    };
+    // The first start sets `parallel`: a change, a run before the mark.
+    start(&queue, 3, "b1");
+    land_claimed(
+        &db,
+        &mut queue,
+        json!({"dagq_version": "b1", "parallel": 3}),
+    );
+    let a = mark("a");
+    let handoff = start(&queue, 3, "b2");
+    tick();
+    queue
+        .record_queue_event(
+            EventKind::SupervisorStopped,
+            json!({"supervisor": "s", "dagq_version": "b2"}),
+        )
+        .unwrap();
+    land_claimed(
+        &db,
+        &mut queue,
+        json!({"dagq_version": "b2", "parallel": 3}),
+    );
+    tick();
+    queue
+        .record_queue_event(EventKind::RunEnvChanged, json!({"changed": ["X"]}))
+        .unwrap();
+    start(&queue, 3, "b2");
+    let b = mark("b");
+    land_claimed(
+        &db,
+        &mut queue,
+        json!({"dagq_version": "b2", "parallel": 3}),
+    );
+    tick();
+    let both = land_claimed(
+        &db,
+        &mut queue,
+        json!({"dagq_version": "b3", "parallel": 4}),
+    );
+    tick();
+    let build = land_claimed(
+        &db,
+        &mut queue,
+        json!({"dagq_version": "b4", "parallel": 4}),
+    );
+    let compare = |cursor: i64| {
+        kpi_ok(
+            &db,
+            &config,
+            &["--last", "1", "--compare", &cursor.to_string()],
+        )["compare"]
+            .clone()
+    };
+    let kinds = |marks: &Value| -> Vec<String> {
+        marks
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|mark| mark["kind"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let confounders = |compare: &Value| -> Vec<(String, String)> {
+        compare["confounders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                (
+                    c["position"].as_str().unwrap().to_owned(),
+                    c["kind"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    };
+
+    // A person's mark with only routine marks around it splits alone.
+    let at_a = compare(a);
+    assert_eq!(kinds(&at_a["split"]["marks"]), ["mark_recorded"], "{at_a}");
+    assert_eq!(at_a["split"]["separable"], true);
+    assert_eq!(at_a["split"]["marks"][0]["id"], a);
+    assert_eq!(at_a["before"]["end"], at_a["split"]["start"]);
+    assert_eq!(at_a["after"]["start"], at_a["split"]["start"]);
+    let around = confounders(&at_a);
+    for routine in [
+        ("before", "supervisor_started"),
+        ("after", "supervisor_started"),
+        ("after", "supervisor_stopped"),
+        ("after", "derived:dagq_version"),
+    ] {
+        let routine = (routine.0.to_owned(), routine.1.to_owned());
+        assert!(around.contains(&routine), "{routine:?}: {at_a}");
+    }
+    // `[run.env]` and the person's mark after it, a routine start between
+    // and no run: one change.
+    let at_b = compare(b);
+    assert_eq!(
+        kinds(&at_b["split"]["marks"]),
+        ["run_env_changed", "mark_recorded"],
+        "{at_b}"
+    );
+    assert_eq!(at_b["split"]["separable"], false);
+    let overlapping = at_b["overlapping"].as_array().unwrap();
+    assert_eq!(overlapping.len(), 1, "{at_b}");
+    assert_eq!(kinds(&overlapping[0]), ["run_env_changed", "mark_recorded"]);
+    // Naming a routine handoff splits at it alone.
+    let at_handoff = compare(handoff);
+    assert_eq!(
+        kinds(&at_handoff["split"]["marks"]),
+        ["supervisor_started"],
+        "{at_handoff}"
+    );
+    assert_eq!(at_handoff["split"]["marks"][0]["id"], handoff);
+    assert_eq!(at_handoff["split"]["separable"], true);
+    assert!(confounders(&at_handoff).contains(&("before".into(), "mark_recorded".into())));
+    // A claim that derives a build and a `parallel` names the `parallel`;
+    // its build sits after.
+    let at_both = compare(both);
+    assert_eq!(
+        kinds(&at_both["split"]["marks"]),
+        ["derived:parallel"],
+        "{at_both}"
+    );
+    assert_eq!(at_both["split"]["separable"], true);
+    let same_claim: Vec<&Value> = at_both["confounders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["detail"]["claim_event"] == both)
+        .collect();
+    assert_eq!(same_claim.len(), 1, "{at_both}");
+    assert_eq!(same_claim[0]["kind"], "derived:dagq_version");
+    assert_eq!(same_claim[0]["position"], "after");
+    // A claim that derives only a build names that mark alone.
+    let at_build = compare(build);
+    assert_eq!(
+        kinds(&at_build["split"]["marks"]),
+        ["derived:dagq_version"],
+        "{at_build}"
+    );
+    assert_eq!(at_build["split"]["separable"], true);
+    assert_eq!(
+        at_build["split"]["marks"][0]["detail"]["claim_event"],
+        build
+    );
+}

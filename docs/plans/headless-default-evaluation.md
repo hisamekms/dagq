@@ -4,7 +4,7 @@ type: plan
 title: Claude の worker の既定を非対話にした変更（task 1340、印 61916）の基準値と評価のコマンドと、既定を対話に戻す基準の案
 status: active
 created: 2026-10-02
-updated: 2026-10-02
+updated: 2026-10-04
 owners:
   - hisamekms
 tags:
@@ -163,6 +163,8 @@ run に紐づかない queue の `queue_hold`（`cost`）は窓に 24 件（2026
 ### kpi の前後比較
 
 印 61916 で `--compare` すると、印の前後に supervisor の引き継ぎ（自動更新）が短い間隔で続くため、`kpi` は印を「重なった変更」にまとめ（`split.separable: false`）、後の窓をまとまりの最後の引き継ぎの後から始める（2026-10-02T11:00Z に読んだときは後の窓が 10:57Z から始まった）。自動更新は着地ごとに起きるので、1 週間後もまとまりが伸びて後の窓がずれうる。そこで窓を時刻で明示する。
+
+task 1381（[ADR-t1381-1](../adr/2026-10-04-t1381-1-routine-build-marks-are-confounders-not-overlapping-changes.md)）の後は、`parallel` を変えない引き継ぎと build だけの印をまとまりに入れないので、印 61916 の近くに日常でない印（`parallel` を変える起動・`[run.env]` の変化・外部のツールの導く印・人の印）が無ければ `kpi --compare 61916` でも印 1 つを境に読める（あれば `split.marks` に並ぶ）（窓の明示のコマンドはそのまま有効）。
 
 ```sh
 B=2026-09-25T08:05:36Z..2026-10-02T08:05:36Z

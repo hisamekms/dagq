@@ -4,8 +4,11 @@
 //! the area, `parallel`, the load band, the build and the axes of `--by`,
 //! and marks too close to split
 //! (fewer finished runs between them than `min_samples`) taken as one
-//! overlapping change. Nothing is removed automatically: a person narrows
-//! the windows with `--compare A..B,C..D`.
+//! overlapping change. A routine mark, one that only records a
+//! supervisor's build, is no change of its own (ADR-t1381-1): it is listed
+//! among the confounders and the build is read in the `build=` strata.
+//! Nothing is removed automatically: a person narrows the windows with
+//! `--compare A..B,C..D`.
 use std::collections::BTreeMap;
 
 use serde::Serialize;
@@ -15,7 +18,7 @@ use super::{
 };
 use crate::domain::{
     host_metrics::HostSummary,
-    marks::{self, MARK_RETRACTED, Mark},
+    marks::{self, DERIVED_PREFIX, MARK_RETRACTED, Mark, SUPERVISOR_STARTED, SUPERVISOR_STOPPED},
     stats::{Cursor, timestamp_millis},
 };
 
@@ -100,12 +103,44 @@ fn mark_ms(mark: &Mark) -> i64 {
     timestamp_millis(&mark.at).unwrap_or(i64::MIN)
 }
 
+/// Whether each of `marks` (time order) is routine (ADR-t1381-1): a
+/// supervisor's start with the same `parallel` as the start before it, a
+/// supervisor's stop, or a derived build. Such a mark only records the
+/// build, which the `build=` strata read, so it groups with no other.
+fn routine(marks: &[&Mark]) -> Vec<bool> {
+    let mut parallel: Option<&serde_json::Value> = None;
+    marks
+        .iter()
+        .map(|mark| match mark.kind.as_str() {
+            SUPERVISOR_STARTED => {
+                let this = mark.detail.get("parallel");
+                let same = matches!((parallel, this), (Some(before), Some(now)) if before == now);
+                parallel = this;
+                same
+            }
+            SUPERVISOR_STOPPED => true,
+            kind => kind.strip_prefix(DERIVED_PREFIX) == Some("dagq_version"),
+        })
+        .collect()
+}
+
+/// The splitting marks, each with whether it is routine.
+fn classified(marks: &[Mark]) -> Vec<(&Mark, bool)> {
+    let splitting = splitting(marks);
+    let routine = routine(&splitting);
+    splitting.into_iter().zip(routine).collect()
+}
+
 /// The marks grouped into changes (decision 16): a mark joins the group of
 /// the one before it when fewer than `min_samples` runs finished after that
-/// one up to it. `finishes` are the runs' finish times, ascending.
+/// one up to it. `finishes` are the runs' finish times, ascending. Routine
+/// marks are in no group and are skipped when counting (ADR-t1381-1).
 pub fn overlapping_groups(marks: &[Mark], finishes: &[i64], min_samples: usize) -> Vec<Vec<Mark>> {
     let mut groups: Vec<Vec<Mark>> = Vec::new();
-    for mark in splitting(marks) {
+    for (mark, _) in classified(marks)
+        .into_iter()
+        .filter(|(_, routine)| !routine)
+    {
         let at = mark_ms(mark);
         match groups.last_mut() {
             Some(group)
@@ -122,6 +157,27 @@ pub fn overlapping_groups(marks: &[Mark], finishes: &[i64], min_samples: usize) 
         }
     }
     groups
+}
+
+/// The change `cursor` names: the group of a mark that is not routine, or
+/// a routine mark alone. A claim names its derived marks; when they are
+/// both routine and not, the one that is not (ADR-t1381-1 (i)).
+fn named_change(marks: &[Mark], groups: &[Vec<Mark>], cursor: Cursor) -> Option<Vec<Mark>> {
+    let names = |mark: &Mark| match cursor {
+        // A derived mark is named by the claim it was read off.
+        Cursor::Event(id) => mark.id == Some(id) || mark.detail["claim_event"] == id.as_i64(),
+        Cursor::Time(ms) => mark_ms(mark) == ms,
+    };
+    groups
+        .iter()
+        .find(|group| group.iter().any(names))
+        .cloned()
+        .or_else(|| {
+            classified(marks)
+                .into_iter()
+                .find(|(mark, routine)| *routine && names(mark))
+                .map(|(mark, _)| vec![mark.clone()])
+        })
 }
 
 /// The comparison `spec` asks for.
@@ -146,16 +202,8 @@ pub(super) fn compare(
                     .map_or_else(|| at(cursor), |mark| Ok(mark_ms(mark)))?,
                 Cursor::Time(ms) => ms,
             };
-            let group = groups.iter().find(|group| {
-                group.iter().any(|mark| match cursor {
-                    // A derived mark is named by the claim it was read off.
-                    Cursor::Event(id) => {
-                        mark.id == Some(id) || mark.detail["claim_event"] == id.as_i64()
-                    }
-                    Cursor::Time(ms) => mark_ms(mark) == ms,
-                })
-            });
-            let (first, last) = group.map_or((time, time), |group| {
+            let group = named_change(&context.marks, &groups, cursor);
+            let (first, last) = group.as_ref().map_or((time, time), |group| {
                 (mark_ms(&group[0]), mark_ms(&group[group.len() - 1]))
             });
             let window = query.window_days.max(1) * DAY_MS;
@@ -163,8 +211,8 @@ pub(super) fn compare(
                 Some(Split {
                     start: marks::utc_text(first),
                     end: marks::utc_text(last),
-                    marks: group.cloned().unwrap_or_default(),
-                    separable: group.is_none_or(|group| group.len() == 1),
+                    separable: group.as_ref().is_none_or(|group| group.len() == 1),
+                    marks: group.unwrap_or_default(),
                 }),
                 (first - window, first),
                 (last, last + window),
@@ -186,6 +234,18 @@ pub(super) fn compare(
             .as_ref()
             .is_some_and(|split| split.marks.iter().any(|kept| kept == mark))
     };
+    // A routine mark read off the claim of the change takes effect with it,
+    // on the window after (ADR-t1381-1 (i)).
+    let claim_of_split = |mark: &Mark| {
+        let claim = &mark.detail["claim_event"];
+        !claim.is_null()
+            && split.as_ref().is_some_and(|split| {
+                split
+                    .marks
+                    .iter()
+                    .any(|kept| &kept.detail["claim_event"] == claim)
+            })
+    };
     let confounders = splitting(&context.marks)
         .into_iter()
         .filter(|mark| {
@@ -195,7 +255,9 @@ pub(super) fn compare(
         .map(|mark| {
             let at = mark_ms(mark);
             Confounder {
-                position: if at <= before.1 {
+                position: if claim_of_split(mark) {
+                    "after"
+                } else if at <= before.1 {
                     "before"
                 } else if at > after.0 {
                     "after"
