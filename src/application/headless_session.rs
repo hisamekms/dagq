@@ -758,6 +758,7 @@ impl<'a> Turns<'a> {
                         cwd: &cwd,
                         debug_log: Some(&debug_log),
                         plugin_dir: *plugin_dir,
+                        broker_required: None,
                     },
                     prompt,
                     session,
@@ -1198,6 +1199,15 @@ impl<'a> Turns<'a> {
         let mut last_output = Instant::now();
         let mut tail = Tail::default();
         let mut stop: Option<Stop> = None;
+        // A `required` run's turn started in its own permission mode
+        // (ADR-t838-1), as the executor found the run when it started it.
+        let broker_required = match &self.owner {
+            TurnOwner::Run(run) => matches!(
+                super::broker_run::worker_broker(run),
+                Ok(super::broker_run::WorkerBroker::Required(_))
+            ),
+            TurnOwner::Planner { .. } => false,
+        };
         loop {
             reader.stamp(now_millis());
             let lines = tail.read(self.files, stdout, false);
@@ -1215,7 +1225,8 @@ impl<'a> Turns<'a> {
                         self.identify(turn, on, id)?;
                     }
                     let expected = if matches!(signal, TurnSignal::Started { .. }) {
-                        self.agent(on.provider)?.turn_permission_mode()
+                        self.agent(on.provider)?
+                            .turn_permission_mode(broker_required)
                     } else {
                         None
                     };

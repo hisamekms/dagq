@@ -272,8 +272,12 @@ impl RunTokens for QueueRunTokens {
             &token_file,
             format!("{}\n", issued.token.expose()).as_bytes(),
         )?;
-        let config =
-            crate::application::broker_run::mcp_config(&grant.client, grant.port, &token_file);
+        let config = crate::application::broker_run::mcp_config(
+            &grant.client,
+            grant.port,
+            &token_file,
+            grant.receipt.as_deref(),
+        );
         put_private(
             &crate::application::broker_run::mcp_config_path(run_dir),
             serde_json::to_string_pretty(&config)?.as_bytes(),
@@ -417,6 +421,22 @@ impl RunTokens for QueueRunTokens {
         .with_context(|| format!("read the broker's audit {}", dir.display()))?;
         Ok(ToolUsage::count(&direct, &audit.entries, run.id()))
     }
+
+    /// The key read or made, the dirs of the marks and the token files
+    /// made, and the repository's committer read: what [`Self::issue`]
+    /// needs for any run of the repository (a run's worktree reads the
+    /// repository's config).
+    fn ready(&self, repository: &Path) -> Result<()> {
+        ensure_key(&self.queue_dir)?;
+        for dir in [
+            active_dir(&self.queue_dir),
+            self.queue_dir.join(BROKER_DIR).join(TOKENS_DIR),
+        ] {
+            fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+        }
+        git_committer(repository)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -471,6 +491,46 @@ mod tests {
 
         fs::write(&path, b"short-secret").unwrap();
         let error = format!("{:#}", ensure_key(queue.path()).unwrap_err());
+        assert!(error.contains("is not 32 bytes"), "{error}");
+        assert!(!error.contains("short-secret"), "{error}");
+    }
+
+    /// `required` claims only when a token could be issued (ADR-t838-1):
+    /// `ready` makes the key and the dirs, and fails on a key it cannot
+    /// use, naming no secret, and on a repository that names no committer.
+    #[test]
+    fn ready_makes_what_an_issue_needs_and_refuses_a_bad_key_or_no_committer() {
+        let queue = tempfile::tempdir().unwrap();
+        let repo = queue.path().join("repo");
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        fs::create_dir_all(&repo).unwrap();
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "A"]);
+        git(&["config", "user.email", "a@example.com"]);
+        let tokens = QueueRunTokens {
+            queue_dir: queue.path().to_path_buf(),
+        };
+        tokens.ready(&repo).unwrap();
+        assert_eq!(mode(&key_path(queue.path())), 0o600);
+        assert!(active_dir(queue.path()).is_dir());
+        assert!(queue.path().join(BROKER_DIR).join(TOKENS_DIR).is_dir());
+        tokens.ready(&repo).unwrap();
+
+        git(&["config", "user.name", ""]);
+        let error = format!("{:#}", tokens.ready(&repo).unwrap_err());
+        assert!(error.contains("git config user.name is not set"), "{error}");
+        git(&["config", "user.name", "A"]);
+
+        fs::write(key_path(queue.path()), b"short-secret").unwrap();
+        let error = format!("{:#}", tokens.ready(&repo).unwrap_err());
         assert!(error.contains("is not 32 bytes"), "{error}");
         assert!(!error.contains("short-secret"), "{error}");
     }

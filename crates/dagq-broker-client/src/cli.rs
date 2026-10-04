@@ -115,7 +115,16 @@ fn mcp(
             return EXIT_CLIENT;
         }
     };
-    match crate::mcp::serve(&client, &mut std::io::BufReader::new(stdin), out) {
+    // `required` names the run's receipt for `write_receipt` (ADR-t838-1).
+    let receipt = env(crate::mcp::RECEIPT_FILE_ENV)
+        .filter(|file| !file.is_empty())
+        .map(PathBuf::from);
+    match crate::mcp::serve_with(
+        &client,
+        receipt.as_deref(),
+        &mut std::io::BufReader::new(stdin),
+        out,
+    ) {
         Ok(()) => EXIT_OK,
         Err(error) => {
             let _ = writeln!(err, "{NAME}: mcp: {error}");
@@ -798,6 +807,59 @@ mod tests {
         let (code, _, err) = run_with(&["token", "inspect"], &[]);
         assert_eq!(code, EXIT_CLIENT);
         assert!(err.contains("no --token-file"), "{err}");
+    }
+
+    /// `mcp` serves `write_receipt` only when `DAGQ_RECEIPT_FILE` names the
+    /// receipt (`required`, ADR-t838-1), and writes it there with no broker
+    /// answering.
+    #[test]
+    fn mcp_serves_write_receipt_with_the_receipt_file_of_its_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let receipt = dir.path().join("receipt.json");
+        let serve = |env: Vec<(&str, String)>| {
+            let lookup = move |name: &str| {
+                env.iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| value.clone())
+            };
+            let input = concat!(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+                "\n",
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"write_receipt","arguments":{"receipt":{"result":"failed"}}}}"#,
+                "\n"
+            );
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let code = run(
+                &args(&["--url", "http://127.0.0.1:9", "mcp"]),
+                &lookup,
+                &mut input.as_bytes(),
+                &mut out,
+                &mut err,
+            );
+            assert_eq!(code, EXIT_OK, "{}", String::from_utf8_lossy(&err));
+            String::from_utf8(out)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let with = serve(vec![(
+            crate::mcp::RECEIPT_FILE_ENV,
+            receipt.to_str().unwrap().to_owned(),
+        )]);
+        assert!(with[0].to_string().contains("write_receipt"), "{}", with[0]);
+        assert_eq!(with[1]["result"]["isError"], false, "{}", with[1]);
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&receipt).unwrap()).unwrap();
+        assert_eq!(written, serde_json::json!({"result": "failed"}));
+
+        std::fs::remove_file(&receipt).unwrap();
+        for env in [vec![], vec![(crate::mcp::RECEIPT_FILE_ENV, String::new())]] {
+            let without = serve(env);
+            assert!(!without[0].to_string().contains("write_receipt"));
+            assert!(without[1].get("error").is_some(), "{}", without[1]);
+            assert!(!receipt.exists());
+        }
     }
 
     #[test]

@@ -1927,7 +1927,10 @@ pub enum AttentionNext {
     /// health failed again after the restart (`broker_unhealthy`,
     /// ADR-t827-3 decision 3): a person reads `dagq broker status` and
     /// fixes what it names (a machine of theirs running, say). It ends once
-    /// the broker runs again.
+    /// the broker runs again. With `required`, the claims the supervisor
+    /// held because no worker could be given the broker's tools
+    /// (`broker_claims_held`, ADR-t838-1) are the same: it ends once the
+    /// claims go on (`broker_claims_resumed`).
     BrokerStatus,
     /// The supervisor could not keep the queue service running (it did not
     /// start again within its limit, `queue_service_down`, ADR-t1233-4
@@ -2050,6 +2053,7 @@ pub const ATTENTION_KINDS: &[&str] = &[
     event_kind::THROUGHPUT_REVIEW_FINISHED,
     kpi::push::KPI_PUSH_ABANDONED,
     broker::BROKER_UNHEALTHY,
+    broker::BROKER_CLAIMS_HELD,
     queue_service::QUEUE_SERVICE_DOWN,
     "ask_opened",
     "ask_answered",
@@ -2260,7 +2264,9 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
             Some(AttentionNext::CheckReview)
         }
         (kpi::push::KPI_PUSH_ABANDONED, _) => Some(AttentionNext::FixPush),
-        (broker::BROKER_UNHEALTHY, _) => Some(AttentionNext::BrokerStatus),
+        (broker::BROKER_UNHEALTHY | broker::BROKER_CLAIMS_HELD, _) => {
+            Some(AttentionNext::BrokerStatus)
+        }
         (queue_service::QUEUE_SERVICE_DOWN, _) => Some(AttentionNext::QueueServiceStatus),
         (event_kind::RUNTIME_ERROR, _) if abandon_left_session_open(kind, payload) => {
             Some(AttentionNext::ExitSession)
@@ -3241,6 +3247,12 @@ mod attention_tests {
                 Some(BrokerStatus),
             ),
             ("broker_healthy", json!({}), None),
+            (
+                "broker_claims_held",
+                json!({"reason": "not_ready"}),
+                Some(BrokerStatus),
+            ),
+            ("broker_claims_resumed", json!({}), None),
             (
                 "queue_service_down",
                 json!({"reason": "start_failed"}),

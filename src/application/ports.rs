@@ -777,7 +777,10 @@ pub trait AgentProvider {
     /// The permission mode a headless turn must say it started in; one
     /// that says another is stopped as started otherwise than asked
     /// (ADR-t813-1 decision 8). `None` when the provider says none.
-    fn turn_permission_mode(&self) -> Option<&'static str> {
+    /// `broker_required` says the turn was started for a `required` run
+    /// ([`TurnTarget::broker_required`]).
+    fn turn_permission_mode(&self, broker_required: bool) -> Option<&'static str> {
+        let _ = broker_required;
         None
     }
 }
@@ -917,7 +920,9 @@ impl<'a> WorkerAdapters<'a> {
 /// requests, settings and turns (the run's or the planner's), the directory
 /// it works in (the run's worktree, or the repository's checkout), its
 /// agent's debug log (a provider that writes one refuses a target without
-/// it), and the plugin directory it loads (a planner's).
+/// it), the plugin directory it loads (a planner's), and the MCP
+/// configuration of the broker a worker of a `required` run must work
+/// through (ADR-t838-1).
 #[derive(Debug, Clone, Copy)]
 pub struct TurnTarget<'a> {
     pub role: crate::domain::ActorRole,
@@ -925,6 +930,10 @@ pub struct TurnTarget<'a> {
     pub cwd: &'a std::path::Path,
     pub debug_log: Option<&'a std::path::Path>,
     pub plugin_dir: Option<&'a std::path::Path>,
+    /// `[broker] mode = "required"`: the turn gets the broker's tools from
+    /// this configuration instead of the built-in file and command tools.
+    /// A provider that cannot give it so refuses the turn.
+    pub broker_required: Option<&'a std::path::Path>,
 }
 
 impl<'a> TurnTarget<'a> {
@@ -937,6 +946,7 @@ impl<'a> TurnTarget<'a> {
             cwd: std::path::Path::new(run.worktree_path().context("missing worktree")?),
             debug_log: run.log_path().map(std::path::Path::new),
             plugin_dir: None,
+            broker_required: None,
         })
     }
 }

@@ -74,9 +74,9 @@ fn up_refuses_a_run_env_program_its_path_does_not_find() {
 
 /// With `[broker]` mode other than `disabled`, `up` looks for podman on
 /// the supervisor's PATH and starts no supervisor without it (ADR-t827-3
-/// decision 2); `host.toml` lowering the mode to `disabled` needs none, and
-/// `required` (Phase 2) is refused. Without `[broker]` nothing is looked
-/// for (every other test here).
+/// decision 2); `host.toml` lowering the mode to `disabled` needs none.
+/// `required` (ADR-t838-1) needs podman as `preferred` does. Without
+/// `[broker]` nothing is looked for (every other test here).
 #[test]
 fn up_refuses_a_broker_mode_without_podman_on_its_path() {
     let mut fixture = fixture();
@@ -153,12 +153,16 @@ fn up_refuses_a_broker_mode_without_podman_on_its_path() {
         "[broker]\nmode = \"required\"\n",
     )
     .unwrap();
+    let report = up(&fixture, &cmux, &launchd, &processes);
+    assert_eq!(report["broker"]["mode"], "required", "{report}");
+    assert_eq!(report["broker"]["podman"], podman.to_str().unwrap());
+    fs::remove_file(&podman).unwrap();
     let error = format!(
         "{:#}",
         try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
     );
     assert!(
-        error.contains("mode = \"required\"") && error.contains("the supervisor was not started"),
+        error.contains("mode = \"required\"") && error.contains("needs podman"),
         "{error}"
     );
 }

@@ -773,3 +773,18 @@ task = 1707
 name = "worker_escalation::missing_evidence_and_a_scope_violation_keep_the_step"
 reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: loop of decision cases"
 task = 1707
+
+# task 838: about 5.6s under the worker's stress, most of it parked_conflict's
+# setup (a supervisor run and two integrations) before the resume
+[[test]]
+name = "runtime_broker::a_required_resume_refused_its_tools_is_given_up"
+reason = "B 境界（守る境界）: supervisor の配線（resume の起動）。[broker] mode = required の resume が broker の道具を渡せないとき workspace を開かず resume_finished の broker_required になる（fail closed、ADR-t838-1）"
+task = 838
+
+# task 838: 5.8s to 7.4s under the worker's stress (5.17s, class D, in
+# docs/plans/it-reduction/it-tests.tsv); task 838 only added the Grant's
+# receipt field to its body, and most of its time is parked_conflict's setup
+[[test]]
+name = "runtime_broker::a_disabled_supervisor_resumes_a_run_without_the_tools_left_to_it"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: grant decision on resume"
+task = 838

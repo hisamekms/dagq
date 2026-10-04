@@ -2,8 +2,15 @@
 //! one broker operation of [`BrokerClient`]; a refusal of the broker comes
 //! back as a tool error (`isError`) that carries the broker's error body as
 //! it answered. JSON-RPC 2.0, one message per line, without batches.
+//!
+//! With `DAGQ_RECEIPT_FILE` set (the queue's `[broker] mode = "required"`,
+//! ADR-t838-1) it also serves [`RECEIPT_TOOL`], `write_receipt`: the run's
+//! receipt written on the host by this process, not through the broker, so
+//! a worker refused the built-in file tools can still end its run, and
+//! can say it failed when the broker does not answer.
 
 use std::io::{self, BufRead, Write};
+use std::path::Path;
 
 use dagq_broker_protocol::{ErrorBody, fs as fs_ops, git, process};
 use serde::Serialize;
@@ -248,6 +255,32 @@ relative to the run's worktree.",
     },
 ];
 
+/// The receipt's file the supervisor names with `required`.
+pub const RECEIPT_FILE_ENV: &str = "DAGQ_RECEIPT_FILE";
+
+/// `write_receipt`, served after [`TOOLS`] when the receipt's file is
+/// named.
+pub const RECEIPT_TOOL: Tool = Tool {
+    name: "write_receipt",
+    description: "Write the run's completion receipt (the JSON object the task's prompt \
+describes) to the receipt file the runtime named, atomically through a temporary file and a \
+rename. It runs on the host, not through the dagq broker, so it works when the broker does not \
+answer. Use it instead of writing the receipt file yourself.",
+    schema: || {
+        object(
+            &[(
+                "receipt",
+                json!({
+                    "type": "object",
+                    "description": "The receipt: run_id, result, commit, tests, e2e, \
+                subagent_review, summary and follow_ups as the prompt says."
+                }),
+            )],
+            &["receipt"],
+        )
+    },
+};
+
 fn object(properties: &[(&str, Value)], required: &[&str]) -> Value {
     let properties: Map<String, Value> = properties
         .iter()
@@ -293,6 +326,16 @@ pub fn serve(
     input: &mut dyn BufRead,
     output: &mut dyn Write,
 ) -> io::Result<()> {
+    serve_with(client, None, input, output)
+}
+
+/// [`serve`], with `write_receipt` writing `receipt` when it is named.
+pub fn serve_with(
+    client: &BrokerClient,
+    receipt: Option<&Path>,
+    input: &mut dyn BufRead,
+    output: &mut dyn Write,
+) -> io::Result<()> {
     let mut bytes = Vec::new();
     loop {
         bytes.clear();
@@ -304,7 +347,7 @@ pub fn serve(
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(answer) = handle(client, &line) {
+        if let Some(answer) = handle_with(client, receipt, &line) {
             let text = serde_json::to_string(&answer).expect("a JSON value serializes");
             writeln!(output, "{text}")?;
             output.flush()?;
@@ -314,6 +357,11 @@ pub fn serve(
 
 /// The answer to one line, or `None` for a notification.
 pub fn handle(client: &BrokerClient, line: &str) -> Option<Value> {
+    handle_with(client, None, line)
+}
+
+/// [`handle`], with `write_receipt` writing `receipt` when it is named.
+pub fn handle_with(client: &BrokerClient, receipt: Option<&Path>, line: &str) -> Option<Value> {
     let message: Value = match serde_json::from_str(line) {
         Ok(message) => message,
         Err(error) => {
@@ -343,8 +391,8 @@ pub fn handle(client: &BrokerClient, line: &str) -> Option<Value> {
     Some(match method {
         "initialize" => rpc_result(id, initialize(&params)),
         "ping" => rpc_result(id, json!({})),
-        "tools/list" => rpc_result(id, tools_list()),
-        "tools/call" => match tools_call(client, &params) {
+        "tools/list" => rpc_result(id, tools_list(receipt.is_some())),
+        "tools/call" => match tools_call(client, receipt, &params) {
             Ok(result) => rpc_result(id, result),
             Err(message) => rpc_error(id, INVALID_PARAMS, &message),
         },
@@ -377,9 +425,10 @@ fn initialize(params: &Value) -> Value {
     })
 }
 
-fn tools_list() -> Value {
+fn tools_list(receipt: bool) -> Value {
     let tools: Vec<Value> = TOOLS
         .iter()
+        .chain(receipt.then_some(&RECEIPT_TOOL))
         .map(|tool| {
             json!({
                 "name": tool.name,
@@ -394,7 +443,11 @@ fn tools_list() -> Value {
 /// A tool's answer: `Ok` for the operation's answer, `Err` for a tool error
 /// (the broker's or the client's). An unknown tool or params of the wrong
 /// shape are a protocol error (`Err` of this function).
-fn tools_call(client: &BrokerClient, params: &Value) -> Result<Value, String> {
+fn tools_call(
+    client: &BrokerClient,
+    receipt: Option<&Path>,
+    params: &Value,
+) -> Result<Value, String> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
@@ -417,6 +470,10 @@ fn tools_call(client: &BrokerClient, params: &Value) -> Result<Value, String> {
         "git_add" => run(arguments, |q: git::AddRequest| client.git_add(&q)),
         "git_commit" => run(arguments, |q: git::CommitRequest| client.git_commit(&q)),
         "git_restore" => run(arguments, |q: git::RestoreRequest| client.git_restore(&q)),
+        "write_receipt" => match receipt {
+            Some(file) => write_receipt(file, arguments),
+            None => return Err("unknown tool `write_receipt`".to_owned()),
+        },
         other => return Err(format!("unknown tool `{other}`")),
     };
     Ok(match answer {
@@ -447,6 +504,48 @@ fn run<Q: DeserializeOwned, A: Serialize>(
         Err(ClientError::Transport(message)) => Err(client_error("transport", &message)),
         Err(ClientError::Protocol(message)) => Err(client_error("protocol", &message)),
     }
+}
+
+/// `write_receipt`: `arguments.receipt` (an object) written to `file`
+/// through a new temporary file in its dir and a rename, so the runtime
+/// reads the old receipt or the new one. A failure is the client's
+/// (`receipt`).
+fn write_receipt(file: &Path, arguments: Value) -> Result<Value, Value> {
+    let receipt = match arguments {
+        Value::Object(mut fields) if fields.len() == 1 => fields.remove("receipt"),
+        _ => None,
+    };
+    let Some(receipt @ Value::Object(_)) = receipt else {
+        return Err(client_error(
+            "invalid_arguments",
+            "the arguments: `receipt` must be the only field, and an object",
+        ));
+    };
+    let dir = file
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = file
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("receipt.json");
+    let temporary = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+    let mut text = serde_json::to_string_pretty(&receipt).expect("a JSON value serializes");
+    text.push('\n');
+    let written = std::fs::File::create(&temporary)
+        .and_then(|mut handle| {
+            handle.write_all(text.as_bytes())?;
+            handle.sync_all()
+        })
+        .and_then(|()| std::fs::rename(&temporary, file));
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(client_error(
+            "receipt",
+            &format!("write {}: {error}", file.display()),
+        ));
+    }
+    Ok(json!({"written": file, "bytes": text.len()}))
 }
 
 /// A failure on the client's side, apart from the broker's error codes.
@@ -648,6 +747,73 @@ mod tests {
         let text: Value =
             serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(text, result["structuredContent"]);
+    }
+
+    /// `required` (ADR-t838-1): with the receipt's file named,
+    /// `write_receipt` is listed after the broker's tools and writes the
+    /// receipt on the host, with no broker answering; without it the tool
+    /// is neither listed nor served.
+    #[test]
+    fn write_receipt_is_served_only_with_the_receipt_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("receipt.json");
+        let client = offline();
+        let list = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let names = |answer: Value| -> Vec<String> {
+            answer["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let with = names(handle_with(&client, Some(&file), list).unwrap());
+        assert_eq!(with.len(), TOOLS.len() + 1);
+        assert_eq!(with.last().unwrap(), "write_receipt");
+        assert!(!names(handle(&client, list).unwrap()).contains(&"write_receipt".to_owned()));
+
+        let receipt =
+            json!({"run_id": "r", "result": "failed", "summary": "the broker did not answer"});
+        let line = |arguments: Value| {
+            json!({"jsonrpc":"2.0","id":7,"method":"tools/call",
+                "params":{"name": "write_receipt", "arguments": arguments}})
+            .to_string()
+        };
+        let answer = handle_with(&client, Some(&file), &line(json!({"receipt": receipt}))).unwrap()
+            ["result"]
+            .clone();
+        assert_eq!(answer["isError"], false, "{answer}");
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(written, receipt);
+        // Only the receipt is left in the dir: no temporary file.
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+
+        for arguments in [
+            json!({"receipt": [1]}),
+            json!({"receipt": {}, "x": 1}),
+            json!({}),
+        ] {
+            let answer =
+                handle_with(&client, Some(&file), &line(arguments.clone())).unwrap()["result"]
+                    .clone();
+            assert_eq!(answer["isError"], true, "{arguments}");
+            assert_eq!(
+                answer["structuredContent"]["client_error"]["kind"],
+                "invalid_arguments"
+            );
+        }
+        let missing = dir.path().join("gone").join("receipt.json");
+        let answer =
+            handle_with(&client, Some(&missing), &line(json!({"receipt": {}}))).unwrap()["result"]
+                .clone();
+        assert_eq!(
+            answer["structuredContent"]["client_error"]["kind"], "receipt",
+            "{answer}"
+        );
+        // Without the file named the tool is unknown.
+        let answer = handle(&client, &line(json!({"receipt": {}}))).unwrap();
+        assert_eq!(answer["error"]["code"], INVALID_PARAMS);
     }
 
     #[test]

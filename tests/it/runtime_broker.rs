@@ -302,20 +302,174 @@ fn a_disabled_broker_calls_no_podman() {
     assert!(kinds(&db, "broker_%").is_empty());
 }
 
-/// `required` is Phase 2's: the supervisor does not start rather than run
-/// as `preferred`.
+/// The configuration names the variables the client reads (its URL, its
+/// token's file and, with `required`, the receipt for `write_receipt`).
 #[test]
-fn a_required_broker_does_not_start_the_supervisor() {
+fn the_configuration_names_the_variables_the_client_reads() {
+    use dagq::application::broker_run;
+    assert_eq!(
+        broker_run::RECEIPT_FILE_ENV,
+        dagq_broker_client::mcp::RECEIPT_FILE_ENV
+    );
+    assert_eq!(
+        broker_run::TOKEN_FILE_ENV,
+        dagq_broker_client::TOKEN_FILE_ENV
+    );
+    assert_eq!(broker_run::URL_ENV, dagq_broker_client::URL_ENV);
+}
+
+fn claims_attention(db: &Path) -> Option<Value> {
+    runtime::status(db).unwrap()["attention"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["kind"] == "broker_claims_held")
+        .cloned()
+}
+
+/// `required` (ADR-t838-1) with a broker that cannot start (a person's
+/// machine runs): the supervisor starts, claims nothing and opens no
+/// workspace, so no worker is started at all, let alone with the built-in
+/// tools, and the inbox is told (`broker_claims_held`, `reason:
+/// not_ready`, next `dagq broker status`). The same queue run `preferred`
+/// claims as before, and the hold ends (`broker_claims_resumed`).
+#[test]
+fn a_required_broker_that_cannot_start_holds_the_claims_and_tells_the_inbox() {
     let (_fixture, repo, db) = fixture();
     broker_mode(&repo, "required");
-    let podman = FakePodman::new(RUNNING);
+    let podman = FakePodman::new(BUSY);
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    let error = format!(
-        "{:#}",
-        supervise_with(&db, &repo, &backend, &options_with(&podman, &repo, true)).unwrap_err()
+    let outcome =
+        supervise_with(&db, &repo, &backend, &options_with(&podman, &repo, true)).unwrap();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert!(
+        SqliteQueue::open(&db)
+            .unwrap()
+            .show(TaskId::new(1))
+            .unwrap()
+            .runs
+            .is_empty()
     );
-    assert!(error.contains("mode = \"required\""), "{error}");
-    assert!(podman.calls().is_empty());
+    assert!(backend.sessions.lock().unwrap().is_empty());
+    assert!(backend.tags.lock().unwrap().is_empty());
+    let held = kinds(&db, "broker_claims_%");
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0].0, "broker_claims_held");
+    assert_eq!(held[0].1["reason"], "not_ready", "{held:?}");
+    let attention = claims_attention(&db).expect("the attention");
+    assert_eq!(attention["status"], "not_ready", "{attention}");
+    assert_eq!(attention["next"], "dagq broker status");
+    // Another pass of a still unusable broker tells the inbox no more.
+    let outcome =
+        supervise_with(&db, &repo, &backend, &options_with(&podman, &repo, true)).unwrap();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(kinds(&db, "broker_claims_%").len(), 1);
+
+    broker_mode(&repo, "preferred");
+    let outcome =
+        supervise_with(&db, &repo, &backend, &options_with(&podman, &repo, true)).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(
+        kinds(&db, "broker_claims_%").last().unwrap().0,
+        "broker_claims_resumed"
+    );
+    assert!(claims_attention(&db).is_none());
+    let run = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap()
+        .runs[0]
+        .clone();
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+    let run_dir = PathBuf::from(run.run_dir().unwrap());
+    assert!(!run_dir.join("broker-required").exists());
+}
+
+/// `required` (ADR-t838-1) with a running broker whose token cannot be
+/// issued (a file where the token files' dir goes): no claim, the attention
+/// with `reason: token_failed`. Once a token can be issued the claims go
+/// on (`broker_claims_resumed`), and the run's worker is marked
+/// `required`, given the configuration with its receipt for
+/// `write_receipt`, and told in its prompt that the broker's tools are its
+/// only way to the worktree.
+#[test]
+fn a_required_broker_without_a_token_holds_the_claims_until_one_can_be_issued() {
+    let (fixture, repo, db) = fixture();
+    SqliteQueue::open(&db)
+        .unwrap()
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+    broker_mode(&repo, "required");
+    let podman = FakePodman::new(RUNNING);
+    podman.image.store(true, Ordering::SeqCst);
+    let client = fixture.dir.path().join("dagq-broker-client");
+    fs::write(&client, "").unwrap();
+    let blocked = queue_dir(&db).join("broker/tokens");
+    fs::create_dir_all(blocked.parent().unwrap()).unwrap();
+    fs::write(&blocked, "not a dir").unwrap();
+    let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
+    let stop = Arc::new(AtomicBool::new(false));
+    let options = SuperviseOptions {
+        stop: stop.clone(),
+        broker: Some(BrokerOptions {
+            client: Some(client.clone()),
+            ..broker_options(&podman)
+        }),
+        ..options_with(&podman, &repo, false)
+    };
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
+    };
+    let task = add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "brokered", &[]);
+    wait_until(&db, Duration::from_secs(30), |_| {
+        kinds(&db, "broker_claims_held")
+            .iter()
+            .any(|(_, payload)| payload["reason"] == "token_failed")
+    });
+    assert!(
+        SqliteQueue::open(&db)
+            .unwrap()
+            .show(task)
+            .unwrap()
+            .runs
+            .is_empty()
+    );
+    let attention = claims_attention(&db).expect("the attention");
+    assert_eq!(attention["status"], "token_failed", "{attention}");
+    assert!(has_kind(&db, "broker_started"));
+    fs::remove_file(&blocked).unwrap();
+    wait_until(&db, Duration::from_secs(60), |queue| {
+        queue
+            .show(task)
+            .unwrap()
+            .runs
+            .first()
+            .is_some_and(|run| run.status() == RunStatus::AwaitingIntegration)
+    });
+    stop.store(true, Ordering::SeqCst);
+    let outcome = joined(supervisor, "the supervisor to stop").unwrap();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(
+        kinds(&db, "broker_claims_%").last().unwrap().0,
+        "broker_claims_resumed"
+    );
+    assert!(claims_attention(&db).is_none());
+    let run = SqliteQueue::open(&db).unwrap().show(task).unwrap().runs[0].clone();
+    let run_dir = PathBuf::from(run.run_dir().unwrap());
+    assert_eq!(events_of(&db, run.id(), "broker_token_issued").len(), 1);
+    assert!(run_dir.join("broker-required").is_file());
+    let config: Value =
+        serde_json::from_str(&fs::read_to_string(run_dir.join("broker/mcp.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        config["mcpServers"]["dagq-broker"]["env"]["DAGQ_RECEIPT_FILE"],
+        json!(run.receipt_path().unwrap())
+    );
+    let prompt = fs::read_to_string(run_dir.join("prompt.txt")).unwrap();
+    assert!(prompt.contains("mode = \"required\""), "{prompt}");
+    assert!(prompt.contains("mcp__dagq-broker__write_receipt"));
 }
 
 /// On its first pass the supervisor makes the broker ready on a job
@@ -887,11 +1041,14 @@ fn a_preferred_worker_gets_its_token_and_the_end_of_its_run_revokes_it() {
             .unwrap()
             .starts_with("http://127.0.0.1:")
     );
-    assert!(
-        fs::read_to_string(run_dir.join("prompt.txt"))
-            .unwrap()
-            .contains("mcp__dagq-broker__read_file")
-    );
+    let prompt = fs::read_to_string(run_dir.join("prompt.txt")).unwrap();
+    assert!(prompt.contains("mcp__dagq-broker__read_file"));
+    // `preferred` is not `required` (ADR-t838-1): no mark, no receipt for
+    // the client, the built-in tools left to the worker.
+    assert!(server["env"].get("DAGQ_RECEIPT_FILE").is_none(), "{server}");
+    assert!(!run_dir.join("broker-required").exists());
+    assert!(!prompt.contains("write_receipt"), "{prompt}");
+    assert!(kinds(&db, "broker_claims_%").is_empty());
     // The value is in its file only (the key signs it): not in the queue
     // DB, a prompt, a log, the configuration or the workspace's env.
     let leaks = files_holding(
@@ -1312,7 +1469,15 @@ fn a_disabled_supervisor_resumes_a_run_without_the_tools_left_to_it() {
         .unwrap()
         .as_secs();
     let issued = tokens
-        .issue(&run, &Grant { client, port: 8750 }, now)
+        .issue(
+            &run,
+            &Grant {
+                client,
+                port: 8750,
+                receipt: None,
+            },
+            now,
+        )
         .unwrap();
     tokens.retire(&issued.jti).unwrap();
     assert!(tokens.held().unwrap().is_empty());
@@ -1372,6 +1537,7 @@ fn sweep_retries_a_failed_run_read(mode: &str) {
             &Grant {
                 client: fixture.dir.path().join("dagq-broker-client"),
                 port: 8750,
+                receipt: None,
             },
             1,
         )
@@ -1504,7 +1670,7 @@ esac"#
     fs::create_dir_all(config.parent().unwrap()).unwrap();
     fs::write(
         &config,
-        mcp_config(&dir.path().join("dagq-broker-client"), 8750, &token).to_string(),
+        mcp_config(&dir.path().join("dagq-broker-client"), 8750, &token, None).to_string(),
     )
     .unwrap();
     assert_eq!(worker_mcp_config(&run), Some(config));
@@ -1577,4 +1743,399 @@ fn a_disabled_supervisor_removes_an_unmarked_token_file_of_no_run() {
     assert!(!orphan.exists());
     assert!(podman.calls().is_empty(), "{:?}", podman.calls());
     assert_eq!(kinds(&db, "broker_%"), []);
+}
+
+/// The options of a `required` supervisor that runs until `stop`, with a
+/// running broker of a fake podman (its image built) and a client file.
+fn required_options(
+    fixture_dir: &Path,
+    podman: &Arc<FakePodman>,
+    repo: &Path,
+    stop: &Arc<AtomicBool>,
+) -> SuperviseOptions {
+    podman.image.store(true, Ordering::SeqCst);
+    let client = fixture_dir.join("dagq-broker-client");
+    fs::write(&client, "").unwrap();
+    SuperviseOptions {
+        stop: stop.clone(),
+        broker: Some(BrokerOptions {
+            client: Some(client),
+            ..broker_options(podman)
+        }),
+        ..options_with(podman, repo, false)
+    }
+}
+
+/// The repository names no committer (`git config user.name` empty): no
+/// token can be issued for any of its runs, which the look before the
+/// claims sees (`token_failed`).
+fn no_committer(repo: &Path) {
+    git(repo, &["config", "user.name", ""]);
+}
+
+/// A token that cannot be issued for the runs alone, past the look before
+/// the claims: on a run branch (`dagq/...`) the repository's config names no
+/// committer, through an `includeIf "onbranch:dagq/**"` that the main
+/// checkout (on `main`), which the look reads, does not take.
+fn no_committer_on_run_branches(repo: &Path) {
+    let common = PathBuf::from(git_out(repo, &["rev-parse", "--git-common-dir"]));
+    let common = if common.is_absolute() {
+        common
+    } else {
+        repo.join(common)
+    };
+    fs::write(common.join("no-committer.cfg"), "[user]\n\tname =\n").unwrap();
+    git(
+        repo,
+        &[
+            "config",
+            "includeIf.onbranch:dagq/**.path",
+            "no-committer.cfg",
+        ],
+    );
+}
+
+/// `required` (ADR-t838-1): a repository that names no committer can have
+/// no token issued for any run, so the look before the claims holds them
+/// (`token_failed`): nothing is claimed, no run is given up, and once the
+/// committer is named again the task is claimed (`broker_claims_resumed`).
+#[test]
+fn a_required_repository_without_a_committer_claims_nothing() {
+    let (fixture, repo, db) = fixture();
+    SqliteQueue::open(&db)
+        .unwrap()
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+    broker_mode(&repo, "required");
+    let name = git_out(&repo, &["config", "user.name"]);
+    no_committer(&repo);
+    let podman = FakePodman::new(RUNNING);
+    let stop = Arc::new(AtomicBool::new(false));
+    let options = required_options(fixture.dir.path(), &podman, &repo, &stop);
+    let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
+    };
+    let task = add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "brokered", &[]);
+    wait_until(&db, Duration::from_secs(60), |_| {
+        kinds(&db, "broker_claims_held").iter().any(|(_, payload)| {
+            payload["reason"] == "token_failed"
+                && payload["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("user.name"))
+        })
+    });
+    assert!(has_kind(&db, "broker_started"));
+    assert!(
+        SqliteQueue::open(&db)
+            .unwrap()
+            .show(task)
+            .unwrap()
+            .runs
+            .is_empty()
+    );
+    assert!(kinds(&db, "runtime_error").is_empty());
+    assert_eq!(grant_failed_holds(&db), 0);
+    assert!(backend.tags.lock().unwrap().is_empty());
+    git(&repo, &["config", "user.name", &name]);
+    wait_until(&db, Duration::from_secs(60), |queue| {
+        !queue.show(task).unwrap().runs.is_empty()
+    });
+    stop.store(true, Ordering::SeqCst);
+    let outcome = joined(supervisor, "the supervisor to stop").unwrap();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(
+        kinds(&db, "broker_claims_%").last().unwrap().0,
+        "broker_claims_resumed"
+    );
+}
+
+fn grant_failed_holds(db: &Path) -> usize {
+    kinds(db, "broker_claims_held")
+        .iter()
+        .filter(|(_, payload)| payload["reason"] == "grant_failed")
+        .count()
+}
+
+/// `required` (ADR-t838-1): a run claimed after the look whose worker
+/// cannot be given the tools (its token alone cannot be issued: its branch
+/// names no committer) is not started:
+/// no workspace is opened, the run is given up (`runtime_error` with
+/// `broker_required`, then the triage), the hold is recorded
+/// (`grant_failed`), and the claims are not stopped: the supervisor ends
+/// on its stop, not with the provisioning error that stops claiming.
+#[test]
+fn a_required_run_refused_after_its_claim_fails_and_claims_go_on() {
+    let (fixture, repo, db) = fixture();
+    SqliteQueue::open(&db)
+        .unwrap()
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+    broker_mode(&repo, "required");
+    no_committer_on_run_branches(&repo);
+    let podman = FakePodman::new(RUNNING);
+    let stop = Arc::new(AtomicBool::new(false));
+    let options = required_options(fixture.dir.path(), &podman, &repo, &stop);
+    let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
+    };
+    let task = add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "first", &[]);
+    let refused = |db: &Path| {
+        kinds(db, "runtime_error")
+            .iter()
+            .any(|(_, error)| error.to_string().contains("broker_required"))
+    };
+    wait_until(&db, Duration::from_secs(60), |_| refused(&db));
+    stop.store(true, Ordering::SeqCst);
+    // Claiming did not stop: a stop ends the supervisor without the error
+    // of a provisioning failure.
+    let outcome = joined(supervisor, "the supervisor to stop").unwrap();
+    assert!(backend.tags.lock().unwrap().is_empty());
+    assert!(backend.sessions.lock().unwrap().is_empty());
+    let run = SqliteQueue::open(&db).unwrap().show(task).unwrap().runs[0].clone();
+    let errors = events_of(&db, run.id(), "runtime_error");
+    assert!(
+        errors[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("was not started: broker_required"),
+        "{errors:?}"
+    );
+    let unavailable = events_of(&db, run.id(), "broker_unavailable");
+    assert_eq!(unavailable[0]["reason"], "token_failed", "{unavailable:?}");
+    assert!(events_of(&db, run.id(), "broker_token_issued").is_empty());
+    assert!(
+        Path::new(run.run_dir().unwrap())
+            .join("broker-required")
+            .is_file()
+    );
+    assert!(!Path::new(run.run_dir().unwrap()).join("broker").exists());
+    assert!(
+        grant_failed_holds(&db) >= 1,
+        "{:?}",
+        kinds(&db, "broker_claims_%")
+    );
+    assert!(
+        outcome["errors"].to_string().contains("broker_required"),
+        "{outcome}"
+    );
+}
+
+/// `required` (ADR-t838-1): a parked run whose resumed worker cannot be
+/// given the tools is not resumed: no resume workspace, its resume ends
+/// with `broker_required` (`resume_finished`), and the hold is recorded
+/// (`grant_failed`).
+#[test]
+fn a_required_resume_refused_its_tools_is_given_up() {
+    let (fixture, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let (run, _) = parked_conflict(&repo, &db, &backend);
+    broker_mode(&repo, "required");
+    no_committer_on_run_branches(&repo);
+    let podman = FakePodman::new(RUNNING);
+    let stop = Arc::new(AtomicBool::new(false));
+    let options = required_options(fixture.dir.path(), &podman, &repo, &stop);
+    let backend = Arc::new(backend);
+    let resumes_before = backend.tags.lock().unwrap().len();
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
+    };
+    wait_until(&db, Duration::from_secs(60), |_| {
+        events_of(&db, run.id(), "resume_finished")
+            .iter()
+            .any(|finished| finished.to_string().contains("broker_required"))
+    });
+    stop.store(true, Ordering::SeqCst);
+    joined(supervisor, "the supervisor to stop").unwrap();
+    assert_eq!(backend.tags.lock().unwrap().len(), resumes_before);
+    let finished = events_of(&db, run.id(), "resume_finished");
+    assert!(
+        finished[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("could not be resumed: broker_required"),
+        "{finished:?}"
+    );
+    assert!(
+        grant_failed_holds(&db) >= 1,
+        "{:?}",
+        kinds(&db, "broker_claims_%")
+    );
+    assert!(!Path::new(run.run_dir().unwrap()).join("broker").exists());
+}
+
+/// A `required` headless run (its worker's turns with the broker's tools)
+/// that waits for the answer to its question: the supervisor's thread, its
+/// stop and the run.
+struct RequiredHeadless {
+    _dir: Fixture,
+    repo: PathBuf,
+    db: PathBuf,
+    backend: Arc<TestWorkspace>,
+    stop: Arc<AtomicBool>,
+    supervisor: thread::JoinHandle<Result<Value>>,
+    run: TaskRun,
+}
+
+fn required_headless_waiting() -> RequiredHeadless {
+    use runtime_support::headless::*;
+    let (dir, repo, db, mut backend) = headless_fixture(&[]);
+    // A lost session is opened again (or given up) without the default wait.
+    backend.reopen_interval = Duration::from_millis(100);
+    set_turns(
+        dir.path(),
+        &format!(
+            r#"case "$TURN" in
+1) ask "which file"; say asked ;;
+*) case "$PROMPT" in "answer to ask "*) {FINISH} ;; *) say lost ;; esac ;;
+esac"#
+        ),
+    );
+    broker_mode(&repo, "required");
+    let podman = FakePodman::new(RUNNING);
+    let stop = Arc::new(AtomicBool::new(false));
+    let options = SuperviseOptions {
+        stall: Some(Default::default()),
+        ..required_options(dir.path(), &podman, &repo, &stop)
+    };
+    let backend = Arc::new(backend);
+    let reviewer = Arc::new(TestReviewer::new(&[verdict("pass", &[], "fine")]));
+    let supervisor = {
+        let (db, repo, backend, reviewer) =
+            (db.clone(), repo.clone(), backend.clone(), reviewer.clone());
+        thread::spawn(move || {
+            runtime::supervise_with_reviewer(
+                &db,
+                &repo,
+                &*backend,
+                &claude_stub(&db),
+                &*reviewer,
+                Path::new(env!("CARGO_BIN_EXE_dagq")),
+                &options,
+            )
+        })
+    };
+    wait_until(&db, crate::common::STEP_LIMIT, |queue| {
+        queue
+            .show(TASK)
+            .unwrap()
+            .events
+            .iter()
+            .any(|e| e.kind == "run_waiting_started")
+    });
+    let run = detail(&db).runs[0].clone();
+    // Its first turn ran on the broker's tools only.
+    let args = stub_args(&run);
+    assert!(args[0].contains("--permission-mode dontAsk"), "{args:?}");
+    assert!(args[0].contains("--mcp-config"), "{args:?}");
+    RequiredHeadless {
+        _dir: dir,
+        repo,
+        db,
+        backend,
+        stop,
+        supervisor,
+        run,
+    }
+}
+
+/// `required` (ADR-t838-1): a headless run's session lost while it waits is
+/// not opened again without the broker's tools: the reopen is refused
+/// (`session_reopen_failed`, `open_failed`, `broker_required`), no
+/// workspace is opened for it, and the hold is recorded (`grant_failed`).
+#[test]
+fn a_required_reopen_refused_its_tools_opens_no_session() {
+    let RequiredHeadless {
+        _dir,
+        repo,
+        db,
+        backend,
+        stop,
+        supervisor,
+        run,
+    } = required_headless_waiting();
+    let workspaces = backend.tags.lock().unwrap().len();
+    no_committer_on_run_branches(&repo);
+    fs::write(
+        dagq::domain::turn::exit_path(Path::new(run.run_dir().unwrap())),
+        "",
+    )
+    .unwrap();
+    wait_until(&db, crate::common::STEP_LIMIT, |_| {
+        events_of(&db, run.id(), "session_reopen_failed")
+            .iter()
+            .any(|failed| failed.to_string().contains("broker_required"))
+    });
+    stop.store(true, Ordering::SeqCst);
+    let _ = joined(supervisor, "the supervisor to stop");
+    backend.join();
+    let failed = events_of(&db, run.id(), "session_reopen_failed");
+    assert_eq!(failed[0]["cause"], "open_failed", "{failed:?}");
+    assert_eq!(backend.tags.lock().unwrap().len(), workspaces);
+    assert_eq!(stub_calls(&run).len(), 1);
+    assert!(
+        grant_failed_holds(&db) >= 1,
+        "{:?}",
+        kinds(&db, "broker_claims_%")
+    );
+}
+
+/// `required` (ADR-t838-1): a turn whose run's mark cannot be written (a
+/// directory is in its place) is not requested: the run's token is revoked
+/// (`unmarked`) and its configuration goes, the answer's delivery fails
+/// with `broker_required` (the inbox's `ask_delivery_failed`), and no turn
+/// runs, with or without the built-in tools.
+#[test]
+fn a_required_turn_whose_mark_cannot_be_written_is_not_requested() {
+    let RequiredHeadless {
+        _dir,
+        repo,
+        db,
+        backend,
+        stop,
+        supervisor,
+        run,
+    } = required_headless_waiting();
+    let run_dir = PathBuf::from(run.run_dir().unwrap());
+    let mark = run_dir.join("broker-required");
+    fs::remove_file(&mark).unwrap();
+    fs::create_dir(&mark).unwrap();
+    let ask = SqliteQueue::open(&db)
+        .unwrap()
+        .asks(AskQuery::default())
+        .unwrap()
+        .into_iter()
+        .find(|ask| ask.kind == AskKind::WorkerQuestion)
+        .unwrap();
+    SqliteQueue::open(&db)
+        .unwrap()
+        .answer(ask.id, "change.txt")
+        .unwrap();
+    wait_until(&db, crate::common::STEP_LIMIT, |_| {
+        events_of(&db, run.id(), "ask_delivery_failed")
+            .iter()
+            .any(|failed| failed.to_string().contains("broker_required"))
+    });
+    let revoked = events_of(&db, run.id(), "broker_token_revoked");
+    assert!(
+        revoked
+            .iter()
+            .any(|revoked| revoked["reason"] == "unmarked"),
+        "{revoked:?}"
+    );
+    assert!(!run_dir.join("broker").exists());
+    let calls = stub_calls(&run);
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    // The run waits for a person. Its session ended and not opened again
+    // (no committer for a token), it fails and the supervisor drains.
+    no_committer_on_run_branches(&repo);
+    fs::write(dagq::domain::turn::exit_path(&run_dir), "").unwrap();
+    stop.store(true, Ordering::SeqCst);
+    let _ = joined(supervisor, "the supervisor to stop");
+    backend.join();
+    assert_eq!(stub_calls(&run).len(), 1);
 }

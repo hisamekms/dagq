@@ -42,7 +42,8 @@ pub(super) fn request_turn(
     };
     // No turn of a `disabled` queue starts with the tools an earlier mode
     // left (task 1141).
-    sv.broker_before_turn(run);
+    // Nor of a `required` run that could not be marked (ADR-t838-1).
+    sv.broker_before_turn(run)?;
     let seq = write_request(&*sv.files, run_dir, text, what)?;
     // Written: a record that fails is only noted, as for a typed text.
     if let Err(error) = sv.queue.record_runtime_event(

@@ -147,13 +147,23 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
             &self.e2e_paths(),
         )?;
         // A Claude worker the supervisor gave the broker's tools is told of
-        // them (ADR-t827-4 decision 1).
+        // them (ADR-t827-4 decision 1), and with `required` that they are
+        // its only way to the worktree (ADR-t838-1).
         if run.actual_provider() == Provider::Claude
             && self
                 .files
                 .exists(&crate::application::broker_run::mcp_config_path(run_dir))
         {
-            text.push_str(crate::application::prompt::BROKER_TOOLS);
+            text.push_str(
+                if self
+                    .files
+                    .exists(&crate::application::broker_run::required_path(run_dir))
+                {
+                    crate::application::prompt::BROKER_REQUIRED
+                } else {
+                    crate::application::prompt::BROKER_TOOLS
+                },
+            );
         }
         self.files.write(
             &run_dir.join("prompt.txt"),
@@ -209,9 +219,10 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
             EventKind::WorktreeCreated,
             json!({"path": plan.worktree_path, "branch": plan.branch}),
         )?;
-        // The broker's tools (`preferred`): the worker is told of them in
-        // its prompt, written again with them.
-        let granted = self.broker_grant(&run);
+        // The broker's tools: the worker is told of them in its prompt,
+        // written again with them. `required` starts no worker without
+        // them (ADR-t838-1).
+        let granted = self.broker_grant_or_refuse(&run)?;
         if granted {
             self.write_prompt(&task, &run, &run_dir)?;
         }

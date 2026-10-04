@@ -401,8 +401,9 @@ impl Supervisor<'_> {
             .copy(&self.layout.runner, &run_dir.join(RUN_RUNNER_FILE))
             .context("snapshot runtime binary")?;
         self.prepare_turns(run, &run_dir)?;
-        // The resumed worker's broker token is issued again (`preferred`).
-        self.broker_grant(run);
+        // The resumed worker's broker token is issued again; `required`
+        // resumes no worker without the tools (ADR-t838-1).
+        self.broker_grant_or_refuse(run)?;
         let background = self.background_log(run, &run_dir, Some(attempt), false);
         let command = background::wrapper_command(
             vec![

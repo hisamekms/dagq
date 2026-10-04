@@ -148,6 +148,7 @@ mod update;
 mod waiting;
 
 pub(crate) use self::background::{left_planner_turn, left_turn, still_open, stop_left_turn};
+use self::broker::broker_refused;
 pub use self::broker::{BROKER_FAILURES, BROKER_HEALTH_INTERVAL, BrokerPort};
 pub use self::claim_defer::read_conflicts_at_start;
 pub(crate) use self::deliver::{Input, Submission, submit_input};
@@ -1736,11 +1737,19 @@ impl Supervisor<'_> {
             warn!(error = %format_args!("{error:#}"), "a run recovered from its landing could not start its review: {error:#}");
         }
         self.apply_triage_answers()?;
+        // With `[broker] mode = "required"`, no worker starts while none
+        // could be given the broker's tools: the claims and the resumes
+        // wait for it (ADR-t838-1).
+        let broker_held = self.broker_holds_claims();
         // Resumes and triage read the landing branch: they wait with the
         // claims until it resolves (ADR-t615-1). A resumed session gets
         // `[run.env]` like a claimed run, so it waits with the claims for a
         // missing program too (task 303).
-        if self.used_slots() < parallel && !self.landing_unresolved && !self.run_env_missing {
+        if self.used_slots() < parallel
+            && !self.landing_unresolved
+            && !self.run_env_missing
+            && !broker_held
+        {
             self.resume_parked_runs(parallel)?;
         }
         if self.used_slots() < parallel && !self.landing_unresolved {
@@ -1757,7 +1766,7 @@ impl Supervisor<'_> {
         // A run claimed now would fail every cargo command (ADR-0049
         // decision 9; checked at the top of the pass); the runs in flight
         // and their reviews go on (resumes wait above).
-        if self.run_env_missing || self.landing_unresolved {
+        if self.run_env_missing || self.landing_unresolved || broker_held {
             return Ok(());
         }
         // A queue service that is down holds the new claims; the runs in
@@ -1904,6 +1913,15 @@ impl Supervisor<'_> {
                 Ok(watch) => {
                     let run = self.queue.run(run.id())?;
                     self.slots.push(Slot::new(run, Phase::Session(watch)));
+                }
+                // `required` refused the run's worker without the broker's
+                // tools (ADR-t838-1): the run fails, and the claims wait
+                // for the broker rather than stop.
+                Err(error) if broker_refused(&error) => {
+                    let message = format!("run {} was not started: {error:#}", run.id());
+                    warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "{message}");
+                    self.abandon(&run, message, &reason_of_error(&error, ReasonCode::Other));
+                    break;
                 }
                 Err(error) => {
                     let message = format!("run {} provisioning failed: {error:#}", run.id());

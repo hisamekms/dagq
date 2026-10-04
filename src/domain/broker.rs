@@ -25,7 +25,10 @@ pub enum BrokerMode {
     /// The supervisor keeps a broker; a worker may use it, and runs go on
     /// without it.
     Preferred,
-    /// Refused until Phase 2 enforces it: never silently `preferred`.
+    /// Phase 2 (ADR-t838-1): a worker and its resume are refused the
+    /// built-in file and command tools and given the broker's only; a
+    /// broker that cannot be used holds the claims (the attention
+    /// `broker_claims_held`), and no worker starts without its tools.
     Required,
 }
 
@@ -42,15 +45,6 @@ impl BrokerMode {
 
     pub fn parse(text: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|mode| mode.as_str() == text)
-    }
-
-    /// Why a mode cannot run now: `required` is Phase 2's.
-    pub fn unsupported(self) -> Option<String> {
-        (self == Self::Required).then(|| {
-            "[broker] mode = \"required\" of dagq.toml is not implemented yet (Phase 2 enforces it); \
-use \"preferred\" or \"disabled\""
-                .to_owned()
-        })
     }
 }
 
@@ -229,6 +223,71 @@ pub const BROKER_ATTENTION_KINDS: [&str; 4] = [
     BROKER_STOPPED,
 ];
 
+/// With `required`, the supervisor held its claims because no worker could
+/// be given the broker's tools now (`reason`: `not_ready`, `unhealthy`,
+/// `version_mismatch`, `client_missing`, `token_failed`, ..., and its
+/// `message`): the inbox's attention, next `dagq broker status`, until
+/// [`BROKER_CLAIMS_RESUMED`] (ADR-t838-1).
+pub const BROKER_CLAIMS_HELD: &str =
+    crate::domain::event_kind::EventKind::BrokerClaimsHeld.as_str();
+/// The claims a [`BROKER_CLAIMS_HELD`] held go on: the broker can be used
+/// again, or the supervisor no longer runs `required`.
+pub const BROKER_CLAIMS_RESUMED: &str =
+    crate::domain::event_kind::EventKind::BrokerClaimsResumed.as_str();
+/// The kinds whose latest says whether the claims are held.
+pub const BROKER_CLAIMS_KINDS: [&str; 2] = [BROKER_CLAIMS_HELD, BROKER_CLAIMS_RESUMED];
+
+/// What the supervisor records of its `required` claim hold
+/// ([`claims_record`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimsRecord {
+    /// [`BROKER_CLAIMS_HELD`] with the new reason.
+    Held,
+    /// [`BROKER_CLAIMS_RESUMED`].
+    Resumed,
+}
+
+/// What to record given the reason of the hold the queue's latest
+/// [`BROKER_CLAIMS_KINDS`] event stands for (`held`, `None` when it is a
+/// resume or there is none) and why the claims are held now (`now`, `None`
+/// when they may go on): a hold is recorded when it starts or its reason
+/// changes, a resume when a hold stands and nothing holds now.
+pub fn claims_record(held: Option<&str>, now: Option<&str>) -> Option<ClaimsRecord> {
+    match (held, now) {
+        (held, Some(reason)) if held != Some(reason) => Some(ClaimsRecord::Held),
+        (Some(_), None) => Some(ClaimsRecord::Resumed),
+        _ => None,
+    }
+}
+
+/// Why a `required` supervisor holds its claims and resumes now, as
+/// (`reason`, `message`): the broker cannot be used (`usable`, the reason
+/// of `broker_unavailable`), or else a token could not be issued (`ready`,
+/// asked only when the broker can be used: `token_failed`). `None` lets
+/// them go on.
+pub fn hold_reason(
+    usable: Result<(), (String, String)>,
+    ready: impl FnOnce() -> Result<(), String>,
+) -> Option<(String, String)> {
+    usable
+        .and_then(|()| ready().map_err(|message| ("token_failed".to_owned(), message)))
+        .err()
+}
+
+/// Whether a worker or resume about to start is refused: with `required`,
+/// unless its grant gave the tools and its run is marked (an unmarked run's
+/// executor would not refuse the built-in tools). Another mode refuses
+/// nothing.
+pub const fn worker_refused(required: bool, granted: bool, marked: bool) -> bool {
+    required && !(granted && marked)
+}
+
+/// Whether a turn of a run is not requested: with `required`, when its mark
+/// could not be written (`marked` false), so that no turn runs unmarked.
+pub const fn turn_refused(required: bool, marked: bool) -> bool {
+    required && !marked
+}
+
 /// Whether the attention stands: the latest of
 /// [`BROKER_ATTENTION_KINDS`] is [`BROKER_UNHEALTHY`].
 pub fn attention_stands(latest: Option<&str>) -> bool {
@@ -307,8 +366,57 @@ mod tests {
         assert_eq!(BrokerMode::default(), BrokerMode::Disabled);
         assert_eq!(BrokerMode::parse("preferred"), Some(BrokerMode::Preferred));
         assert_eq!(BrokerMode::parse("on"), None);
-        assert!(BrokerMode::Required.unsupported().is_some());
-        assert!(BrokerMode::Preferred.unsupported().is_none());
+        assert_eq!(BrokerMode::parse("required"), Some(BrokerMode::Required));
+    }
+
+    /// `required` (ADR-t838-1): a hold is recorded when it starts and again
+    /// when its reason changes (`not_ready` to `token_failed`), not again
+    /// for the same reason; a resume only when a hold stands.
+    #[test]
+    fn a_claim_hold_is_recorded_when_it_starts_or_its_reason_changes() {
+        use ClaimsRecord::{Held, Resumed};
+        assert_eq!(claims_record(None, Some("not_ready")), Some(Held));
+        assert_eq!(claims_record(Some("not_ready"), Some("not_ready")), None);
+        assert_eq!(
+            claims_record(Some("not_ready"), Some("token_failed")),
+            Some(Held)
+        );
+        assert_eq!(claims_record(Some("token_failed"), None), Some(Resumed));
+        assert_eq!(claims_record(None, None), None);
+    }
+
+    /// The broker's reason comes first; the token is looked at only when
+    /// the broker can be used.
+    #[test]
+    fn the_hold_reason_is_the_brokers_then_the_tokens() {
+        let unusable = || Err(("not_ready".to_owned(), "no port".to_owned()));
+        let mut asked = false;
+        assert_eq!(
+            hold_reason(unusable(), || {
+                asked = true;
+                Ok(())
+            }),
+            Some(("not_ready".to_owned(), "no port".to_owned()))
+        );
+        assert!(!asked);
+        assert_eq!(
+            hold_reason(Ok(()), || Err("bad key".to_owned())),
+            Some(("token_failed".to_owned(), "bad key".to_owned()))
+        );
+        assert_eq!(hold_reason(Ok(()), || Ok(())), None);
+    }
+
+    /// A `required` worker starts only granted and marked; a turn is
+    /// requested only marked. Other modes refuse nothing.
+    #[test]
+    fn required_refuses_a_worker_without_its_tools_or_its_mark() {
+        for (granted, marked) in [(true, true), (true, false), (false, true), (false, false)] {
+            assert_eq!(worker_refused(true, granted, marked), !(granted && marked));
+            assert!(!worker_refused(false, granted, marked));
+        }
+        assert!(turn_refused(true, false));
+        assert!(!turn_refused(true, true));
+        assert!(!turn_refused(false, false));
     }
 
     #[test]

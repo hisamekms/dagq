@@ -35,13 +35,25 @@
 //! its token file too, and a headless run loses what is left before each
 //! turn it requests (task 1141).
 //!
+//! With `required` (ADR-t838-1) no worker runs without the broker's
+//! tools: before each pass's claims and resumes the supervisor checks that
+//! a worker could be given them now (the broker ready and of dagq's build,
+//! the client, a token that could be issued); while not, it claims and
+//! resumes nothing and the queue's attention `broker_claims_held` stands
+//! until `broker_claims_resumed`. A run whose grant still fails is not
+//! started ([`Supervisor::broker_grant_or_refuse`]), and the mark
+//! `<run dir>/broker-required` has the executor refuse its worker without
+//! the tools.
+//!
 //! [Broker]: ../../../docs/design/broker.md
 
 use super::*;
 use crate::application::broker::{BrokerControl, BrokerFailure, StartReport};
 use crate::application::broker_run::{Grant, RENEW_BEFORE_SECS, RunTokens};
 use crate::domain::broker::{
-    BROKER_ATTENTION_KINDS, BROKER_RESTART, BROKER_STOP_REQUESTED, BROKER_UNHEALTHY, BrokerMode,
+    BROKER_ATTENTION_KINDS, BROKER_CLAIMS_HELD, BROKER_CLAIMS_KINDS, BROKER_RESTART,
+    BROKER_STOP_REQUESTED, BROKER_UNHEALTHY, BrokerMode, ClaimsRecord, claims_record, hold_reason,
+    turn_refused, worker_refused,
 };
 use crate::domain::broker_usage::{ToolUsage, records_tool_use};
 
@@ -99,6 +111,9 @@ pub(super) struct BrokerWatch {
     port: Option<u16>,
     /// Whether the last start's health named dagq's build.
     build_matches: bool,
+    /// A supervisor of another mode than `required` looked once whether
+    /// an earlier one left the claims held, and ended the hold.
+    claims_ended: bool,
 }
 
 impl Supervisor<'_> {
@@ -326,7 +341,8 @@ impl Supervisor<'_> {
     }
 
     /// Why `run`'s worker cannot be given the broker's tools now, as the
-    /// `reason` and `message` of `broker_unavailable`; else the grant.
+    /// `reason` and `message` of `broker_unavailable`; else the grant,
+    /// which with `required` names the run's receipt for `write_receipt`.
     fn broker_offer(
         &self,
         port: &BrokerPort,
@@ -341,6 +357,16 @@ impl Supervisor<'_> {
                 ),
             ));
         }
+        let mut grant = self.broker_usable(port)?;
+        if port.mode == BrokerMode::Required {
+            grant.receipt = run.receipt_path().map(PathBuf::from);
+        }
+        Ok(grant)
+    }
+
+    /// Why no worker could be given the broker's tools now, whatever its
+    /// run; else where they go.
+    fn broker_usable(&self, port: &BrokerPort) -> std::result::Result<Grant, (String, String)> {
         let port_number = match self.broker.port {
             Some(number) if self.broker.ready && self.broker.failures == 0 => number,
             Some(_) if self.broker.ready => {
@@ -360,6 +386,7 @@ impl Supervisor<'_> {
                         Ok(client) => Ok(Grant {
                             client: client.clone(),
                             port: number,
+                            receipt: None,
                         }),
                         Err(failure) => {
                             Err((failure.code.as_str().to_owned(), failure.message.clone()))
@@ -379,6 +406,7 @@ impl Supervisor<'_> {
             Ok(client) => Ok(Grant {
                 client: client.clone(),
                 port: port_number,
+                receipt: None,
             }),
             Err(failure) => Err((failure.code.as_str().to_owned(), failure.message.clone())),
         }
@@ -392,7 +420,13 @@ impl Supervisor<'_> {
     /// the worker starts without the tools; nothing stops the run. With
     /// `disabled` only what an earlier mode left of the run goes
     /// (`mode_disabled`). Whether the tools were given.
+    ///
+    /// With `required` the run is marked first (`<run dir>/broker-required`,
+    /// ADR-t838-1), so that its worker is refused rather than started
+    /// without the tools when none are given; with another mode a mark an
+    /// earlier `required` left goes.
     pub(super) fn broker_grant(&mut self, run: &TaskRun) -> bool {
+        self.broker_mark(run);
         let Some(port) = self.broker_port.clone() else {
             if let Some(tokens) = self.broker_leftovers.clone() {
                 self.broker_revoke(&*tokens, run, MODE_DISABLED);
@@ -439,13 +473,157 @@ impl Supervisor<'_> {
     /// an earlier mode left of the run goes (`mode_disabled`), so the turn
     /// (an answer, a revise, a resume) gets no `--mcp-config` of a broker
     /// that no longer serves it, marked or not (task 1141). With another
-    /// mode the run keeps the tools its grant gave.
-    pub(super) fn broker_before_turn(&mut self, run: &TaskRun) {
+    /// mode the run keeps the tools its grant gave. The run's mark of
+    /// `required` follows the mode, as in [`Self::broker_grant`].
+    ///
+    /// A `required` run whose mark cannot be written loses its tools
+    /// (`unmarked`) and its turn is not requested: a
+    /// [`crate::application::broker_run::BrokerRequiredRefused`].
+    pub(super) fn broker_before_turn(&mut self, run: &TaskRun) -> Result<()> {
+        let marked = self.broker_mark(run);
+        if turn_refused(self.broker_required(), marked) {
+            if let Some(port) = self.broker_port.clone() {
+                self.broker_revoke(&*port.tokens, run, "unmarked");
+            }
+            return Err(crate::application::broker_run::BrokerRequiredRefused(format!(
+                "[broker] mode = \"required\" and run {}'s mark could not be written; its turn is \
+not requested",
+                run.id()
+            ))
+            .into());
+        }
         if self.broker_port.is_none()
             && let Some(tokens) = self.broker_leftovers.clone()
         {
             self.broker_revoke(&*tokens, run, MODE_DISABLED);
         }
+        Ok(())
+    }
+
+    /// [`Self::broker_grant`] for a worker or a resume about to start: with
+    /// `required`, a run whose worker could not be given the tools is not
+    /// started (a [`crate::application::broker_run::BrokerRequiredRefused`],
+    /// its `broker_unavailable` recorded), and the claims are held until it
+    /// could. Whether the tools were given.
+    pub(super) fn broker_grant_or_refuse(&mut self, run: &TaskRun) -> Result<bool> {
+        let granted = self.broker_grant(run);
+        // Unmarked, the executor would not know to refuse the built-in
+        // tools: such a run is not started either.
+        let marked = run.run_dir().is_some_and(|dir| {
+            self.files
+                .exists(&crate::application::broker_run::required_path(Path::new(
+                    dir,
+                )))
+        });
+        if worker_refused(self.broker_required(), granted, marked) {
+            self.broker_claims(Some((
+                "grant_failed".to_owned(),
+                format!(
+                    "run {}'s worker could not be given the broker's tools",
+                    run.id()
+                ),
+            )));
+            return Err(crate::application::broker_run::BrokerRequiredRefused(format!(
+                "[broker] mode = \"required\" and run {}'s worker could not be given the broker's \
+tools (see its broker_unavailable); it is not started without them",
+                run.id()
+            ))
+            .into());
+        }
+        Ok(granted)
+    }
+
+    /// Whether the supervisor runs `required`.
+    pub(super) fn broker_required(&self) -> bool {
+        self.broker_port
+            .as_ref()
+            .is_some_and(|port| port.mode == BrokerMode::Required)
+    }
+
+    /// With `required`, before the pass's claims and resumes: whether they
+    /// are held because no worker could be given the broker's tools now
+    /// (the broker ready and of dagq's build, the client, a token that
+    /// could be issued). The attention `broker_claims_held` is recorded
+    /// when they start to be held, and `broker_claims_resumed` when they
+    /// go on. Another mode holds nothing, and ends a hold an earlier
+    /// `required` supervisor left.
+    pub(super) fn broker_holds_claims(&mut self) -> bool {
+        let Some(port) = self.broker_port.clone().filter(|_| self.broker_required()) else {
+            if !self.broker.claims_ended {
+                self.broker.claims_ended = true;
+                self.broker_claims(None);
+            }
+            return false;
+        };
+        let why = hold_reason(self.broker_usable(&port).map(drop), || {
+            port.tokens
+                .ready(&self.layout.repo_root)
+                .map_err(|error| format!("{error:#}"))
+        });
+        let held = why.is_some();
+        self.broker_claims(why);
+        held
+    }
+
+    /// Record the claims held for `why` (`reason`, `message`), or going on
+    /// for `None`, when the queue's latest says otherwise: a hold is
+    /// recorded again only when its reason changes (`not_ready` while the
+    /// broker starts, then `token_failed`, say), so the inbox reads why the
+    /// claims wait now.
+    fn broker_claims(&mut self, why: Option<(String, String)>) {
+        let latest = match self.queue.latest_queue_event(&BROKER_CLAIMS_KINDS) {
+            Ok(latest) => latest,
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the broker's claim holds could not be read: {error:#}");
+                return;
+            }
+        };
+        let held = latest
+            .filter(|event| event.kind == BROKER_CLAIMS_HELD)
+            .map(|event| event.payload["reason"].as_str().unwrap_or("").to_owned());
+        let record = claims_record(
+            held.as_deref(),
+            why.as_ref().map(|(reason, _)| reason.as_str()),
+        );
+        match (record, why) {
+            (Some(ClaimsRecord::Held), Some((reason, message))) => {
+                warn!(
+                    reason,
+                    "[broker] mode = \"required\": no task is claimed or resumed while no worker can be given the broker's tools: {message}"
+                );
+                self.record_broker(
+                    EventKind::BrokerClaimsHeld,
+                    json!({"reason": reason, "message": message}),
+                );
+            }
+            (Some(ClaimsRecord::Resumed), _) => {
+                info!("the broker's tools can be given again: claims and resumes go on");
+                self.record_broker(EventKind::BrokerClaimsResumed, json!({}));
+            }
+            _ => {}
+        }
+    }
+
+    /// Put `run`'s mark of `required` in place, or remove it with another
+    /// mode. A mark that cannot be written is only logged here:
+    /// [`Self::broker_grant_or_refuse`] does not start an unmarked run.
+    /// Whether the run is marked as its mode says.
+    fn broker_mark(&mut self, run: &TaskRun) -> bool {
+        let Some(run_dir) = run.run_dir().map(Path::new) else {
+            return true;
+        };
+        let mark = crate::application::broker_run::required_path(run_dir);
+        let done = if self.broker_required() {
+            self.files.write(&mark, b"")
+        } else if self.files.exists(&mark) {
+            self.files.remove_file(&mark)
+        } else {
+            Ok(())
+        };
+        if let Err(error) = &done {
+            warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}'s mark of [broker] mode = \"required\" could not be changed: {error:#}", run.id());
+        }
+        done.is_ok() || !self.broker_required()
     }
 
     /// Revoke every token of `run` (`reason` in `broker_token_revoked`).
@@ -716,6 +894,12 @@ impl Supervisor<'_> {
             warn!(error = %format_args!("{error:#}"), "the broker's {kind} could not be recorded: {error:#}");
         }
     }
+}
+
+/// Whether `error` is `required`'s refusal of a worker without the
+/// broker's tools.
+pub(super) fn broker_refused(error: &anyhow::Error) -> bool {
+    crate::application::broker_run::BrokerRequiredRefused::is(error)
 }
 
 /// A run whose token is revoked: it ended.

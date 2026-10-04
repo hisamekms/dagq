@@ -957,8 +957,9 @@ pub fn supervise_with_reviewer(
     });
     // The resource broker (ADR-t827-3 decision 2): `[broker]` of dagq.toml
     // lowered by host.toml; `disabled` gives no port and calls no podman,
-    // only revoking the tokens an earlier mode left (task 1125), and
-    // `required` does not start (Phase 2).
+    // only revoking the tokens an earlier mode left (task 1125);
+    // `required` holds the claims while no worker can be given the
+    // broker's tools (ADR-t838-1).
     let (broker, broker_leftovers) = {
         let queue_dir = db.parent().unwrap_or(Path::new(".")).to_path_buf();
         let host_wide = options
@@ -968,9 +969,6 @@ pub fn supervise_with_reviewer(
         let setup = load_broker_setup(Some(&main_checkout), &queue_dir, host_wide.as_deref())?;
         for warning in &setup.host.warnings {
             tracing::warn!("[broker] of host.toml: {warning}");
-        }
-        if let Some(reason) = setup.mode.unsupported() {
-            bail!("{reason}; the supervisor was not started");
         }
         let tokens: Arc<dyn crate::application::broker_run::RunTokens> =
             Arc::new(crate::infrastructure::broker_token::QueueRunTokens {
@@ -2225,9 +2223,6 @@ impl lifecycle::BrokerLifecycle for OneShot {
         let setup = load_broker_setup(Some(checkout), queue_dir, self.host_wide().as_deref())?;
         if setup.mode == crate::domain::broker::BrokerMode::Disabled {
             return Ok(None);
-        }
-        if let Some(reason) = setup.mode.unsupported() {
-            bail!("{reason}");
         }
         // The supervisor runs podman from this PATH (ADR-t827-3 decision
         // 2); a person installs it, dagq does not.

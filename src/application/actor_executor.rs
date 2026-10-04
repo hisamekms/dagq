@@ -742,7 +742,29 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 let provider = self.provider()?;
                 let mut streams = Streams::Inherit;
                 let mut without: &[&str] = &[];
+                // The resource broker's tools, as the supervisor left them
+                // in the run's dir (ADR-t827-4 decision 1, ADR-t838-1): a
+                // `required` run without them is refused here, before any
+                // command of the agent is made.
+                let broker = match &agent {
+                    SessionAgent::Worker { run, .. }
+                    | SessionAgent::Resume { run }
+                    | SessionAgent::Turn { run, .. } => super::broker_run::worker_broker(run)?,
+                    SessionAgent::Planner(_) | SessionAgent::PlannerTurn { .. } => {
+                        super::broker_run::WorkerBroker::None
+                    }
+                };
                 let (mut command, worker) = match agent {
+                    SessionAgent::Worker { run, .. } | SessionAgent::Resume { run }
+                        if matches!(broker, super::broker_run::WorkerBroker::Required(_)) =>
+                    {
+                        return Err(super::broker_run::BrokerRequiredRefused(format!(
+                            "[broker] mode = \"required\" runs run {}'s worker in headless turns \
+only; an interactive session has no settings that refuse the built-in tools",
+                            run.id()
+                        ))
+                        .into());
+                    }
                     SessionAgent::Worker { run, prompt } => {
                         (provider.command(run, prompt)?, Some(run))
                     }
@@ -757,10 +779,11 @@ impl ActorExecutor for HostActorExecutor<'_> {
                     } => {
                         streams = Streams::Files { stdout, stderr };
                         without = without_env;
-                        (
-                            provider.turn_command(&TurnTarget::of_run(run)?, prompt, session)?,
-                            Some(run),
-                        )
+                        let mut target = TurnTarget::of_run(run)?;
+                        if let super::broker_run::WorkerBroker::Required(config) = &broker {
+                            target.broker_required = Some(config);
+                        }
+                        (provider.turn_command(&target, prompt, session)?, Some(run))
                     }
                     SessionAgent::Planner(planner) => (provider.planner_command(&planner)?, None),
                     SessionAgent::PlannerTurn {
@@ -774,11 +797,13 @@ impl ActorExecutor for HostActorExecutor<'_> {
                         (provider.turn_command(&target, prompt, session)?, None)
                     }
                 };
-                // The resource broker's tools, when the supervisor issued
-                // the run's token (`preferred`, ADR-t827-4 decision 1); a
-                // run without them starts as before.
-                if let Some(config) = worker.and_then(super::broker_run::worker_mcp_config) {
-                    provider.broker_tools(&mut command, &config);
+                // With `preferred`, the tools beside the built-in ones when
+                // the supervisor issued the run's token; a run without them
+                // starts as before. `required`'s are the turn's own.
+                if let (Some(_), super::broker_run::WorkerBroker::Preferred(config)) =
+                    (worker, &broker)
+                {
+                    provider.broker_tools(&mut command, config);
                 }
                 if let Some((model, effort)) = model {
                     provider.select_model(&mut command, model, effort);
@@ -1056,6 +1081,24 @@ mod tests {
         fn broker_tools(&self, command: &mut CommandSpec, config: &Path) -> bool {
             command.option_args([std::ffi::OsStr::new("--mcp-config"), config.as_os_str()]);
             true
+        }
+        /// `turn <session> [--required <config>]`: what the turn's target
+        /// asked of the broker.
+        fn turn_command(
+            &self,
+            target: &TurnTarget<'_>,
+            _: &str,
+            session: crate::domain::turn::TurnSession<'_>,
+        ) -> Result<CommandSpec> {
+            let mut command = CommandSpec::new("turn");
+            command.arg(match session {
+                crate::domain::turn::TurnSession::New(name)
+                | crate::domain::turn::TurnSession::Resume(name) => name,
+            });
+            if let Some(config) = target.broker_required {
+                command.arg("--required").arg(config);
+            }
+            Ok(command)
         }
     }
 
@@ -2060,6 +2103,142 @@ mod tests {
         // The environment is the same either way: no token, no URL.
         assert_eq!(with[0].1, without[0].1);
         assert_eq!(with[1].1, without[1].1);
+    }
+
+    /// `required` (ADR-t838-1): a run the supervisor marked `required`
+    /// without its MCP configuration is refused before any command of its
+    /// agent is made, so nothing starts with the built-in tools; with the
+    /// configuration, its turns (new and resumed) are made for the broker
+    /// (`TurnTarget::broker_required`) and not given `preferred`'s
+    /// `--mcp-config` beside the built-in tools. An interactive worker or
+    /// resume of a `required` run is refused. Without the mark nothing
+    /// changes.
+    #[test]
+    fn a_required_run_starts_only_with_the_brokers_tools() {
+        use crate::application::broker_run::{
+            BrokerRequiredRefused, mcp_config_path, required_path,
+        };
+        use crate::domain::turn::TurnSession;
+        let dir = tempfile::tempdir().unwrap();
+        let (_, run) = claimed_run("r1");
+        let run_dir = dir.path().join("r1");
+        let text = |name: &str| run_dir.join(name).to_string_lossy().into_owned();
+        let run = crate::domain::run::start_provisioning(
+            run,
+            &crate::domain::RunPlan {
+                repo_path: "/repo".into(),
+                run_dir: text(""),
+                branch: "dagq/r1".into(),
+                worktree_path: text("worktree"),
+                receipt_path: text("receipt.json"),
+                log_path: text("log"),
+            },
+        )
+        .unwrap();
+        let (stdout, stderr) = (run_dir.join("out"), run_dir.join("err"));
+        // Each agent's spawn: the arguments started, or the refusal.
+        let spawn = || {
+            let fake = Fake::default();
+            let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
+                .with_provider(&fake)
+                .with_spawner(&fake)
+                .with_queue_service(&fake);
+            let agents = [
+                SessionAgent::Turn {
+                    run: &run,
+                    prompt: "work",
+                    session: TurnSession::New("s"),
+                    stdout: &stdout,
+                    stderr: &stderr,
+                    without_env: &[],
+                },
+                SessionAgent::Turn {
+                    run: &run,
+                    prompt: "go on",
+                    session: TurnSession::Resume("s"),
+                    stdout: &stdout,
+                    stderr: &stderr,
+                    without_env: &[],
+                },
+                SessionAgent::Worker {
+                    run: &run,
+                    prompt: "work",
+                },
+                SessionAgent::Resume { run: &run },
+            ];
+            let outcomes: Vec<std::result::Result<(), bool>> = agents
+                .into_iter()
+                .map(|agent| {
+                    executor
+                        .spawn(ActorExecutionSpec::new(
+                            ActorContext::worker(run.id(), run.task_id()),
+                            WorkspaceAccess::Write("/w".into()),
+                            ActorProgram::SessionAgent { agent, model: None },
+                        ))
+                        .map(drop)
+                        .map_err(|error| BrokerRequiredRefused::is(&error))
+                })
+                .collect();
+            let spawned: Vec<Vec<String>> = fake
+                .spawned
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|command| {
+                    std::iter::once(command.get_program())
+                        .chain(command.get_args())
+                        .map(|arg| arg.to_string_lossy().into_owned())
+                        .collect()
+                })
+                .collect();
+            (outcomes, spawned)
+        };
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let (outcomes, before) = spawn();
+        assert_eq!(outcomes, [Ok(()), Ok(()), Ok(()), Ok(())]);
+        assert_eq!(before[0], ["turn", "s"]);
+
+        // Marked, without the configuration: nothing is made or started.
+        std::fs::write(required_path(&run_dir), "").unwrap();
+        let (outcomes, spawned) = spawn();
+        assert_eq!(outcomes, [Err(true), Err(true), Err(true), Err(true)]);
+        assert!(spawned.is_empty(), "{spawned:?}");
+
+        // With it: the turns are the broker's, the sessions refused.
+        let config = mcp_config_path(&run_dir);
+        let config_dir = config.parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(&config, "{}").unwrap();
+        let config = config.to_string_lossy().into_owned();
+        let (outcomes, spawned) = spawn();
+        assert_eq!(outcomes, [Ok(()), Ok(()), Err(true), Err(true)]);
+        assert_eq!(
+            spawned,
+            [
+                ["turn", "s", "--required", config.as_str()],
+                ["turn", "s", "--required", config.as_str()],
+            ]
+        );
+
+        // The mark gone (`preferred`): the configuration beside the
+        // built-in tools, as before.
+        std::fs::remove_file(required_path(&run_dir)).unwrap();
+        let (outcomes, spawned) = spawn();
+        assert_eq!(outcomes, [Ok(()), Ok(()), Ok(()), Ok(())]);
+        assert_eq!(spawned[0], ["turn", "s", "--mcp-config", config.as_str()]);
+        assert_eq!(
+            spawned[3],
+            ["agent", "--resume", "r1", "--mcp-config", config.as_str()]
+        );
+
+        // Whatever is at the mark's path marks the run (a mark the
+        // supervisor could not write as a file): without the configuration
+        // nothing starts.
+        std::fs::create_dir(required_path(&run_dir)).unwrap();
+        std::fs::remove_dir_all(config_dir).unwrap();
+        let (outcomes, spawned) = spawn();
+        assert_eq!(outcomes, [Err(true), Err(true), Err(true), Err(true)]);
+        assert!(spawned.is_empty(), "{spawned:?}");
     }
 
     #[test]

@@ -240,6 +240,14 @@ pub const HEADLESS_WORKER: &str = "This session is headless: each of your turns 
 /// no token: the client reads its file.
 pub const BROKER_TOOLS: &str = "The resource broker's tools are available as the MCP server `dagq-broker` (`mcp__dagq-broker__read_file`, `list_dir`, `write_file`, `edit_file`, `exec`, `git_status`, `git_diff`, `git_log`, `git_show`, `git_add`, `git_commit`, `git_restore`). Prefer them for reading, writing and editing files, for the commands the broker allows, and for Git on your run branch; paths are relative to the worktree. The broker refuses paths outside the worktree, `.git`, pushes and commands it does not allow; when it refuses or cannot be reached, use the built-in tools instead.\n";
 
+/// What a worker of a `required` run is told (ADR-t838-1): the built-in
+/// file and command tools are refused, the broker's tools are the way to
+/// the worktree, `dagq` is the one command Bash runs, the receipt goes
+/// through `write_receipt`, and a broker that stops answering ends the
+/// run with a failed receipt or an ask, never a way around it. It names no
+/// token: the client reads its file.
+pub const BROKER_REQUIRED: &str = "This queue runs `[broker] mode = \"required\"`: the built-in Read, Edit, Write, MultiEdit, NotebookEdit, Glob, Grep and LS are refused, and Bash runs only `dagq` commands (one `dagq ...` per call, without pipes, redirections or other commands). Work through the resource broker's tools, the MCP server `dagq-broker`: `mcp__dagq-broker__read_file`, `list_dir`, `write_file`, `edit_file`, `exec` (only the programs the broker allows, without a shell), `git_status`, `git_diff`, `git_log`, `git_show`, `git_add`, `git_commit` and `git_restore`; paths are relative to the worktree, and the broker refuses paths outside it, `.git`, pushes and programs it does not allow. Write the receipt with `mcp__dagq-broker__write_receipt` (its `receipt` argument is the receipt's JSON object): it writes the receipt file atomically, so do not write the file yourself. A check you cannot run through `exec` is reported in the receipt as not run, with that reason. When a broker tool fails with `unauthorized`, `transport`, `config` or `protocol` (the broker is not answering, or your token is gone), do not look for another way to the files: write a failed receipt with `write_receipt` that names the error, or ask with `dagq ask` when a person must decide.\n";
+
 /// [`STOP_BACKGROUND`] for a headless session: nothing waits for an `/exit`,
 /// but a process the agent detached outlives its turn (the spike measured
 /// Claude's `nohup ... &`), and the signalling rule is the same.

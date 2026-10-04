@@ -46,6 +46,8 @@ event_kinds! {
     AuthorizationDenied => "authorization_denied",
     AutoRepaired => "auto_repaired",
     BackendCallFailed => "backend_call_failed",
+    BrokerClaimsHeld => "broker_claims_held",
+    BrokerClaimsResumed => "broker_claims_resumed",
     BrokerHealthy => "broker_healthy",
     BrokerImageBuilt => "broker_image_built",
     BrokerStarted => "broker_started",
@@ -453,7 +455,10 @@ impl EventKind {
                 // The cleanup for the disk (task 377) is about no run.
                 | AutoRepaired
                 // The supervisor's resource broker (ADR-t827-3 decisions
-                // 2 and 3) is the queue's.
+                // 2 and 3) is the queue's, and so are the claims `required`
+                // holds for it (ADR-t838-1).
+                | BrokerClaimsHeld
+                | BrokerClaimsResumed
                 | BrokerHealthy
                 | BrokerImageBuilt
                 | BrokerStarted
@@ -861,6 +866,8 @@ mod tests {
             (EventKind::AuthorizationDenied, "authorization_denied"),
             (EventKind::AutoRepaired, "auto_repaired"),
             (EventKind::BackendCallFailed, "backend_call_failed"),
+            (EventKind::BrokerClaimsHeld, "broker_claims_held"),
+            (EventKind::BrokerClaimsResumed, "broker_claims_resumed"),
             (EventKind::BrokerHealthy, "broker_healthy"),
             (EventKind::BrokerImageBuilt, "broker_image_built"),
             (EventKind::BrokerStarted, "broker_started"),

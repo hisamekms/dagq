@@ -3436,6 +3436,13 @@ impl AgentProvider for ClaudeCode {
     /// marker when the turn's process ends), its debug file, the directory
     /// added and the plugin directory a planner loads. It leads a session
     /// of its own, so that stopping it stops what it runs.
+    ///
+    /// A `required` run's turn (ADR-t838-1) starts instead in
+    /// [`BROKER_REQUIRED_PERMISSION_MODE`] with
+    /// [`headless_required_settings`] (the built-in file tools denied,
+    /// only the broker's server and `dagq` allowed) and
+    /// `--mcp-config <config> --strict-mcp-config`: the broker's server and
+    /// no other.
     fn turn_command(
         &self,
         target: &TurnTarget<'_>,
@@ -3443,11 +3450,19 @@ impl AgentProvider for ClaudeCode {
         session: TurnSession<'_>,
     ) -> Result<CommandSpec> {
         let settings = target.dir.join(HEADLESS_SETTINGS);
+        let deny = permission_deny(target.role);
+        let (contents, mode) = match target.broker_required {
+            Some(_) => (
+                headless_required_settings(&deny)?,
+                BROKER_REQUIRED_PERMISSION_MODE,
+            ),
+            None => (headless_worker_settings(&deny)?, HEADLESS_PERMISSION_MODE),
+        };
         crate::application::RunFiles::write(
             &super::run_files::LocalRunFiles,
             &settings,
             with_direct_tool_hooks(
-                headless_worker_settings(&permission_deny(target.role))?,
+                contents,
                 (target.role == ActorRole::Worker)
                     .then(|| direct_tools_log(target.dir))
                     .flatten()
@@ -3465,13 +3480,24 @@ impl AgentProvider for ClaudeCode {
                 TurnSession::New(name) => ["--session-id", name],
             })
             .arg("--permission-mode")
-            .arg(HEADLESS_PERMISSION_MODE)
+            .arg(mode)
             .arg("--debug-file")
             .arg(target.debug_log.context("missing log path")?)
             .arg("--add-dir")
             .arg(target.dir)
             .arg("--settings")
             .arg(&settings);
+        // No settings file but the run's: allow rules of the user's or of
+        // the worktree's `.claude/` (which the broker's `write_file` can
+        // write) would widen what `dontAsk` lets Bash run.
+        if let Some(config) = target.broker_required {
+            command
+                .arg("--mcp-config")
+                .arg(config)
+                .arg("--strict-mcp-config")
+                .arg("--setting-sources")
+                .arg("");
+        }
         if let Some(dir) = target.plugin_dir {
             command.arg("--plugin-dir").arg(dir);
         }
@@ -3488,8 +3514,12 @@ impl AgentProvider for ClaudeCode {
             crate::infrastructure::transcripts::ClaudeTranscripts::from_env().exists(cwd, name)
         })
     }
-    fn turn_permission_mode(&self) -> Option<&'static str> {
-        Some(HEADLESS_PERMISSION_MODE)
+    fn turn_permission_mode(&self, broker_required: bool) -> Option<&'static str> {
+        Some(if broker_required {
+            BROKER_REQUIRED_PERMISSION_MODE
+        } else {
+            HEADLESS_PERMISSION_MODE
+        })
     }
 }
 
@@ -3524,6 +3554,57 @@ pub fn headless_worker_settings(deny: &[String]) -> Result<String> {
             "deny": SIGNAL_BY_NAME_DENIED
                 .iter()
                 .chain(HEADLESS_DENIED_TOOLS.iter())
+                .map(|rule| (*rule).to_owned())
+                .chain(deny.iter().cloned())
+                .collect::<Vec<_>>()
+        },
+        "autoMode": {
+            "environment": ["$defaults"]
+        }
+    }))?)
+}
+
+/// The permission mode of a `required` run's turn (ADR-t838-1): a tool the
+/// settings do not allow is refused without a question, so `Bash` runs
+/// only what [`BROKER_REQUIRED_ALLOWED`] names. Claude Code's deny rules win
+/// over its allow rules, so `Bash` itself cannot be denied while `dagq`
+/// stays allowed; `auto` would let its classifier approve other commands.
+pub const BROKER_REQUIRED_PERMISSION_MODE: &str = "dontAsk";
+
+/// The built-in tools a `required` run's turn is denied (ADR-t838-1): the
+/// file tools, which need no permission to read, and those that write.
+/// `Bash` is limited by [`BROKER_REQUIRED_PERMISSION_MODE`] instead.
+pub const BROKER_REQUIRED_DENIED_TOOLS: [&str; 8] = [
+    "Read",
+    "Edit",
+    "Write",
+    "MultiEdit",
+    "NotebookEdit",
+    "Glob",
+    "Grep",
+    "LS",
+];
+
+/// What a `required` run's turn is allowed (ADR-t838-1): the broker's
+/// server (its file, command and git tools, and `write_receipt`) and the
+/// control side's `dagq` commands (`dagq ask` and the others the worker's
+/// role may run; [`permission_deny`] still denies the rest).
+pub const BROKER_REQUIRED_ALLOWED: [&str; 2] =
+    [crate::application::broker_run::MCP_TOOLS, "Bash(dagq:*)"];
+
+/// Settings of a `required` run's turns (ADR-t838-1): those of
+/// [`headless_worker_settings`] with [`BROKER_REQUIRED_DENIED_TOOLS`] denied
+/// after [`HEADLESS_DENIED_TOOLS`] and [`BROKER_REQUIRED_ALLOWED`] allowed.
+/// A guardrail, not enforcement: the worker is a process of this user on
+/// this host (ADR-t728-1 decision 6).
+pub fn headless_required_settings(deny: &[String]) -> Result<String> {
+    Ok(serde_json::to_string_pretty(&serde_json::json!({
+        "permissions": {
+            "allow": BROKER_REQUIRED_ALLOWED,
+            "deny": SIGNAL_BY_NAME_DENIED
+                .iter()
+                .chain(HEADLESS_DENIED_TOOLS.iter())
+                .chain(BROKER_REQUIRED_DENIED_TOOLS.iter())
                 .map(|rule| (*rule).to_owned())
                 .chain(deny.iter().cloned())
                 .collect::<Vec<_>>()
@@ -4950,6 +5031,128 @@ mod tests {
         assert!(settings.get("hooks").is_none(), "{settings}");
     }
 
+    /// `required` (ADR-t838-1): a worker's turn, new or resumed, starts
+    /// in `dontAsk` with the broker's server alone (`--mcp-config`,
+    /// `--strict-mcp-config`) and settings that deny the built-in file
+    /// tools and allow only the broker's server and `dagq`, which the
+    /// worker's role leaves `ask` and the other commands it runs to (the
+    /// receipt is the server's `write_receipt`). Bash is not denied itself:
+    /// a deny would win over the `dagq` allow. Without the configuration
+    /// the turn is the same as before.
+    #[test]
+    fn a_required_turn_has_only_the_brokers_tools_and_dagq() {
+        let claude = ClaudeCode {
+            executable: "/bin/claude".into(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("turn.log");
+        let config = dir.path().join("broker/mcp.json");
+        let turn = |required: Option<&Path>, session| {
+            let command = claude
+                .turn_command(
+                    &TurnTarget {
+                        role: ActorRole::Worker,
+                        dir: dir.path(),
+                        cwd: dir.path(),
+                        debug_log: Some(&log),
+                        plugin_dir: None,
+                        broker_required: required,
+                    },
+                    "go",
+                    session,
+                )
+                .unwrap();
+            let args: Vec<String> = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            let settings: Value = serde_json::from_str(
+                &fs::read_to_string(dir.path().join(HEADLESS_SETTINGS)).unwrap(),
+            )
+            .unwrap();
+            (args, settings)
+        };
+        let after = |args: &[String], flag: &str| {
+            args.iter()
+                .position(|arg| arg == flag)
+                .map(|at| args[at + 1].clone())
+        };
+        let config_text = config.to_string_lossy().into_owned();
+        // The run was given the broker's tools: its configuration is there,
+        // so its turns' settings count the built-in tools too (task 839).
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(&config, "{}").unwrap();
+        for session in [
+            crate::domain::turn::TurnSession::New("s"),
+            crate::domain::turn::TurnSession::Resume("s"),
+        ] {
+            let (args, settings) = turn(Some(&config), session);
+            assert_eq!(
+                after(&args, "--permission-mode").as_deref(),
+                Some("dontAsk")
+            );
+            assert_eq!(after(&args, "--mcp-config"), Some(config_text.clone()));
+            assert!(args.contains(&"--strict-mcp-config".to_owned()), "{args:?}");
+            assert_eq!(after(&args, "--setting-sources").as_deref(), Some(""));
+            // The options come before the prompt.
+            let prompt = args.iter().position(|arg| arg == "--").unwrap();
+            assert!(args.iter().position(|arg| arg == "--mcp-config").unwrap() < prompt);
+            let deny: Vec<String> =
+                serde_json::from_value(settings["permissions"]["deny"].clone()).unwrap();
+            for tool in BROKER_REQUIRED_DENIED_TOOLS {
+                assert!(deny.contains(&tool.to_owned()), "{tool}: {deny:?}");
+            }
+            for tool in ["Read", "Edit", "Write", "NotebookEdit", "Glob", "Grep"] {
+                assert!(deny.contains(&tool.to_owned()), "{tool}");
+            }
+            assert!(deny.contains(&"AskUserQuestion".to_owned()));
+            assert!(deny.contains(&"Bash(pkill:*)".to_owned()));
+            // The worker's role still runs `dagq ask`; Bash itself and the
+            // broker's server are not denied.
+            assert!(deny.contains(&"Bash(dagq integrate:*)".to_owned()));
+            for allowed in [
+                "Bash",
+                "Bash(dagq ask:*)",
+                "Bash(dagq:*)",
+                "mcp__dagq-broker",
+            ] {
+                assert!(!deny.contains(&allowed.to_owned()), "{allowed}");
+            }
+            assert_eq!(
+                settings["permissions"]["allow"],
+                serde_json::json!(["mcp__dagq-broker", "Bash(dagq:*)"])
+            );
+            assert_eq!(claude.turn_permission_mode(true), Some("dontAsk"));
+            let counted: Vec<&str> = settings["hooks"]["PreToolUse"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|hook| hook["matcher"].as_str().unwrap())
+                .collect();
+            assert!(
+                counted.contains(&"Read") && counted.contains(&"Bash"),
+                "{counted:?}"
+            );
+        }
+        fs::remove_file(&config).unwrap();
+        // Without it: `auto`, the settings of before, no MCP option.
+        let (args, settings) = turn(None, crate::domain::turn::TurnSession::New("s"));
+        assert_eq!(after(&args, "--permission-mode").as_deref(), Some("auto"));
+        assert!(after(&args, "--mcp-config").is_none());
+        assert!(!args.contains(&"--strict-mcp-config".to_owned()));
+        assert!(after(&args, "--setting-sources").is_none());
+        let before: Value = serde_json::from_str(
+            &headless_worker_settings(&crate::application::execution::permission_deny(
+                ActorRole::Worker,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(settings, before);
+        assert!(settings["permissions"].get("allow").is_none());
+        assert_eq!(claude.turn_permission_mode(false), Some("auto"));
+    }
+
     #[test]
     fn a_claude_jobs_reply_is_its_stdout() {
         let claude = ClaudeCode {
@@ -4987,6 +5190,7 @@ mod tests {
                         cwd: &target_dir,
                         debug_log: Some(&log),
                         plugin_dir: None,
+                        broker_required: None,
                     },
                     "go",
                     crate::domain::turn::TurnSession::New("s"),
@@ -5135,6 +5339,7 @@ mod tests {
                     cwd: &planner_dir,
                     debug_log: Some(&planner_dir.join("log")),
                     plugin_dir: None,
+                    broker_required: None,
                 },
                 "go",
                 crate::domain::turn::TurnSession::New("s"),

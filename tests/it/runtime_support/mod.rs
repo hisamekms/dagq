@@ -1218,8 +1218,8 @@ impl AgentProvider for HeadlessProvider {
     fn turn_reader(&self) -> Result<Box<dyn dagq::application::TurnReader>> {
         self.agent.turn_reader()
     }
-    fn turn_permission_mode(&self) -> Option<&'static str> {
-        self.agent.turn_permission_mode()
+    fn turn_permission_mode(&self, broker_required: bool) -> Option<&'static str> {
+        self.agent.turn_permission_mode(broker_required)
     }
     fn turn_session_from_output(&self) -> bool {
         self.agent.turn_session_from_output()

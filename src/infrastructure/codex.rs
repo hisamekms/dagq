@@ -441,6 +441,16 @@ impl AgentProvider for Codex {
         prompt: &str,
         session: TurnSession<'_>,
     ) -> Result<CommandSpec> {
+        // Codex is given no broker tools yet: a `required` run's turn is
+        // refused rather than run with its own (ADR-t838-1).
+        if target.broker_required.is_some() {
+            return Err(crate::application::broker_run::BrokerRequiredRefused(
+                "[broker] mode = \"required\": a Codex worker is given no broker tools yet, and is \
+not started with its own"
+                    .to_owned(),
+            )
+            .into());
+        }
         // Codex names a new thread itself.
         let resume = session.resumed();
         let (worktree, run_dir) = (target.cwd, target.dir);
@@ -1026,6 +1036,23 @@ mod tests {
         expected.extend(sandbox);
         expected.extend(["--", "th-1", "answer"]);
         assert_eq!(args(&resumed), expected);
+        // A `required` run's turn is refused: Codex gets no broker tools
+        // yet, and never runs with its own instead (ADR-t838-1).
+        let config = run_dir.join("broker/mcp.json");
+        let error = codex
+            .turn_command(
+                &TurnTarget {
+                    broker_required: Some(&config),
+                    ..TurnTarget::of_run(&run).unwrap()
+                },
+                "-do it",
+                TurnSession::New("ignored"),
+            )
+            .unwrap_err();
+        assert!(
+            crate::application::broker_run::BrokerRequiredRefused::is(&error),
+            "{error:#}"
+        );
         // Both keep their temporary files in the run directory's `tmp`,
         // made for them inside a writable root (task 1290).
         let tmp = run_dir.join(RUN_TMP_DIR);

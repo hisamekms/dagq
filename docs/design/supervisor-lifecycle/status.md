@@ -4,8 +4,8 @@ type: design
 title: "`status`"
 status: current
 created: 2026-09-26
-updated: 2026-10-04 # task 1591: slots.landing_queue and the landing_queue slot; task 1437
-last_verified: 2026-10-04 # task 1591; task 1437
+updated: 2026-10-05 # task 838: broker_claims_held attention
+last_verified: 2026-10-05 # task 838
 scope: runtime
 related:
   - adr-t1228-2
@@ -52,6 +52,7 @@ related:
 - run env: queueの最新の`run_env_program_missing` / `run_env_program_found`が`run_env_program_missing`なら、`kind: run_env_program_missing`、`status: missing`、`next: install tool`、`last_error`にその`message`（`run_id` / `task_id`はnull）。supervisorは見つかるまでclaimも着地もしない（[Run environment](run-environment.md#runenvが名指すプログラムの検査)）。
 - queue service: queueの最新の`queue_service_down` / `queue_service_running` / `queue_service_started` / `queue_service_stopped`が`queue_service_down`なら、`kind: queue_service_down`、`status`にその`reason`（`start_failed`・`restart_limit`）、`next: dagq service status`、`last_error`にその`message`（`run_id` / `task_id`はnull）。serviceがまた動けば消える（[Queue service](../queue-service.md#落ちたときの知らせadr-t1233-4決定3)）。
 - broker: queueの最新の`broker_unhealthy` / `broker_healthy` / `broker_started` / `broker_stopped`が`broker_unhealthy`なら、`kind: broker_unhealthy`、`status`にその`reason`（`unhealthy`・`machine_busy`・`podman_missing`など）、`next: dagq broker status`、`last_error`にその`message`（`run_id` / `task_id`はnull）。brokerが動けば（`broker_started`・`broker_healthy`）消える（[Broker](../broker.md#supervisorの統合)）。
+- broker（`required`）: queueの最新の`broker_claims_held` / `broker_claims_resumed`が`broker_claims_held`なら、`kind: broker_claims_held`、`status`にその`reason`（`not_ready`・`token_failed`など）、`next: dagq broker status`、`last_error`にその`message`（`run_id` / `task_id`はnull）。workerにbrokerの道具を渡せるようになれば（`broker_claims_resumed`）消える（[Broker](../broker.md#required)、ADR-t838-1）
 - KPIのpush: queueの最新の`kpi_push_sent` / `kpi_push_abandoned`が`kpi_push_abandoned`なら、`kind: kpi_push_abandoned`、`status: failed`、`reason_category: recovery_failed`、`next: fix the push command`、`last_error`にその`message`（`run_id` / `task_id`はnull）。次のpushが成功すると消える（[push](push.md#実行再試行失敗)）。
 - ask（[ADR-0022](../../adr/0022-ask-answer-inbox-planner-and-landing-on-doubt.md)、[ask / answer](ask.md#ask--answer--asks)）: closeされていないaskを`asks`表の順に並べる。未回答のものは`kind: ask_opened`、`status: open`、`next: answer ask <id>`、回答済みのものは`kind: ask_answered`、`status: answered`、`next: read the answer of ask <id> and close it`。ただし回答済みの`worker_question`は`delivering the answer of ask <id> (runtime)`か`send the answer of ask <id> to the worker and close it`（[workerの質問への回答の送信](worker-question-answer.md#workerの質問への回答の送信)）。回答済みの`approve_landing`で、runが`awaiting_integration`で回答が`land` / `send_back` / `cancel`か`send_back: <理由>`のどれか（`LandingAnswer::parse`、task 1424）なら`applying the answer of ask <id> (runtime)`（supervisorが適用する。[Review](review.md#review-supervisor)の6）。回答済みの`approve_goal`と`correct_goal`も、supervisorが今適用できる答え（`applies_goal_answer` / `applies_correction_answer`）なら同じ`applying the answer of ask <id> (runtime)`（[Goal review](goal-review.md)の7・9）。項目は`ask_id`を持ち、`run_id`はaskのrun（taskだけのaskはnull）、`last_error`はnull。
 

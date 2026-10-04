@@ -329,7 +329,7 @@ impl Supervisor<'_> {
             .copy(&self.layout.runner, &run_dir.join(RUN_RUNNER_FILE))
             .context("snapshot runtime binary")?;
         self.prepare_turns(run, &run_dir)?;
-        self.broker_grant(run);
+        self.broker_grant_or_refuse(run)?;
         let run_env = self.verifier.run_env(&run_dir)?;
         let task = self.queue.show(run.task_id())?.task;
         let background = self.background_log(run, &run_dir, Some(lost.attempt), true);

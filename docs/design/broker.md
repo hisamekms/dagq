@@ -4,13 +4,14 @@ type: design
 title: Resource broker
 status: draft
 created: 2026-09-28
-updated: 2026-10-05 # task 839; task 1451
-last_verified: 2026-10-05 # task 839; task 1451
+updated: 2026-10-05 # task 838; task 839; task 1451
+last_verified: 2026-10-05 # task 838; task 839; task 1451
 scope: runtime
 tags:
   - security
   - broker
 related:
+  - adr-t838-1
   - adr-t1582-1
   - adr-t827-1
   - adr-t827-2
@@ -25,11 +26,11 @@ related:
 
 # Resource broker
 
-fs・process・gitを仲介するresource broker（`dagq-broker`）の設計。goal 58（Phase 1）が実装する。**この文書はまだ実装されていない姿（status: draft）を書き、goal 58の各taskが実装に合わせて直し、全体が着地したら`current`にする。** 決定の理由は[ADR-t827-1](../adr/2026-09-28-t827-1-broker-crates-binaries-and-version-alignment.md)（crateとバイナリと配布）、[ADR-t827-2](../adr/2026-09-28-t827-2-broker-transport-run-token-and-workspace-confinement.md)（transport・token・mountと閉じ込め・git）、[ADR-t827-3](../adr/2026-09-28-t827-3-supervisor-runs-the-broker-container-on-a-dedicated-podman-machine.md)（containerとPodman machine）、[ADR-t827-4](../adr/2026-09-28-t827-4-worker-mcp-tools-audit-mode-and-relations.md)（workerの道具・audit・mode・関係）。
+fs・process・gitを仲介するresource broker（`dagq-broker`）の設計。goal 58（Phase 1）が実装する。**この文書はまだ実装されていない姿（status: draft）を書き、goal 58の各taskが実装に合わせて直し、全体が着地したら`current`にする。** 決定の理由は[ADR-t827-1](../adr/2026-09-28-t827-1-broker-crates-binaries-and-version-alignment.md)（crateとバイナリと配布）、[ADR-t827-2](../adr/2026-09-28-t827-2-broker-transport-run-token-and-workspace-confinement.md)（transport・token・mountと閉じ込め・git）、[ADR-t827-3](../adr/2026-09-28-t827-3-supervisor-runs-the-broker-container-on-a-dedicated-podman-machine.md)（containerとPodman machine）、[ADR-t827-4](../adr/2026-09-28-t827-4-worker-mcp-tools-audit-mode-and-relations.md)（workerの道具・audit・mode・関係）、[ADR-t838-1](../adr/2026-10-05-t838-1-required-broker-mode-refuses-built-in-tools-and-holds-claims.md)（`required`。goal 59、Phase 2）。
 
 名前: この文書の「broker」はresource brokerのこと。goal 38（draft）の「broker」は実行側からqueue serviceへの出口で、別物（ADR-t827-4決定6）。
 
-**隔離ではない。** workerはhostのプロセスのままで、`preferred`のworkerはbrokerを迂回して組み込みの道具やhostのファイルを直接使える。host実行は助言的（[Security](security.md#host実行は助言的advisory)、ADR-t728-1決定6）で、この段はbrokerの契約（token・閉じ込め・上限・audit）を証明するもの。
+**隔離ではない。** workerはhostのプロセスのままで、`preferred`のworkerはbrokerを迂回して組み込みの道具やhostのファイルを直接使える。`required`のworkerの組み込みの道具を拒むのもClaude Codeの設定（`permissions.deny`とpermission mode）で、guardrailでありenforcementではない（下の「required」）。host実行は助言的（[Security](security.md#host実行は助言的advisory)、ADR-t728-1決定6）で、この段はbrokerの契約（token・閉じ込め・上限・audit）を証明するもの。
 
 ## 全体の形
 
@@ -235,7 +236,7 @@ fsのopの細部（task 831）:
 
 - 鍵: `<queue dir>/broker/key`（32 byteの乱数、mode 0600）。`broker::ensure`が無ければ作る。containerには読み取り専用でmountする。鍵を替えると全てのtokenが無効になる。Phase 1に定期の入れ替えは無く、入れ替えは人がbrokerを止めて鍵を消し、`broker start`で作り直す（生きているrunのtokenは次の更新のtickで新しい鍵で発行し直す）
 - 偽造: hostでは同じユーザーのプロセス（workerを含む）が鍵を読めるので、tokenを偽造できる。Phase 1の`process.exec`も鍵をmountから読めうる（下の「既知の制限」）。tokenは誤りと事故を止め、auditでrunを名指すためのもので、境界ではない
-- 発行: supervisorがclaimでworkerを起こすとき（`provision`）とresumeのとき、modeが`preferred`でbrokerが健康で版が一致するときだけ。capabilityはdagqの`broker_grants(role)`（Phase 1はworkerだけに上の5つ）から写す。書き先は`<queue dir>/broker/tokens/<run id>`（mode 0600、同じdirの一時ファイルとrenameで置く）。containerにmountしない場所に置き、`process.exec`から他のrunのtokenを読めないようにする
+- 発行: supervisorがclaimでworkerを起こすとき（`provision`）とresumeのとき、modeが`preferred`か`required`でbrokerが健康で版が一致するときだけ。capabilityはdagqの`broker_grants(role)`（Phase 1はworkerだけに上の5つ）から写す。書き先は`<queue dir>/broker/tokens/<run id>`（mode 0600、同じdirの一時ファイルとrenameで置く）。containerにmountしない場所に置き、`process.exec`から他のrunのtokenを読めないようにする
 - 有効な印: `<queue dir>/broker/active/<jti>`（中身はrun_id）。発行で作り、失効で消す。brokerは要求ごとに印の有無を見る
 - 期限: `exp = iat + 12時間`。supervisorは各pass（`Supervisor::broker_sweep`）で、残りが4時間（`RENEW_BEFORE_SECS`）を切った生きているrunのtokenを、brokerが使えるときに発行し直す（新しいjtiの印を作ってtoken fileと`mcp.json`を置き換え、古い印を消す。`broker_token_issued`に`renews`（古いjti）、`broker_token_revoked`に`reason: renewed`）。clientは要求ごとにtoken fileを読み直す
 - 失効: supervisorは各passのclaimの前（drainと引き継ぎの間も）と止まる直前（`supervise --once`の最後のpassで終わったrunのため）に有効な印を全て見て（`broker_sweep`）、runが終わっていれば（statusが`integrated`・`succeeded`・`failed`・`interrupted`。taskの`cancel`・leaseの喪失・`recover`もrunをこのどれかにする）そのrunの印を全て消し、`<queue dir>/broker/tokens/<run id>`と`<run dir>/broker/`を消して、印ごとに`broker_token_revoked`（`reason`はrunのstatus）を残す。queueが知らないrunの印はtoken fileとともに消し、eventは残さない。`preferred`と`disabled`のどちらも、runの読み取りが失敗したときは不在と区別し、warnを出してそのpassでは飛ばす（task 1142）。そのrunの印・token file・`<run dir>/broker/mcp.json`は消さず、`broker_token_revoked`も残さず、次のpassで読み直す。resumeの発行し直しも前の印を消す。supervisorが止まっている間に終わったrunの印は、次の起動の最初のpassか期限まで残る（その間そのtokenは使える）。modeが`disabled`のsupervisor（`preferred`から戻したqueue）はpodmanを探しも呼びもせず、fileだけを掃除する（task 1125）: 同じ時点に有効な印を全て見て、生きているrunのものも含めてそのrunの印・token file・`<run dir>/broker/`を消し、印ごとに`broker_token_revoked`（`reason: mode_disabled`）を残す（`Supervisor::broker_sweep_disabled`）。起動とresumeの前の`broker_grant`も、`disabled`ではそのrunに残ったものを同じく消す（`mode_disabled`）ので、executorが`mcp.json`を見つけて`--mcp-config`と`--allowedTools mcp__dagq-broker`を渡すことも、promptに`BROKER_TOOLS`の段落が載ることもない。印の無いものも残りうる（途中で失敗した失効、queueの知らないrunの`revoke`など）ので（task 1141）、`disabled`のsweepは有効な印に加えて`<queue dir>/broker/tokens/`のtoken file（印の有無に依らない。`RunTokens::token_files`）の名のrunも同じく失効させ（queueが知らないrunならtoken fileと印を消す）、非対話のrunのturnの要求（`worker_question`の答え・reviewの差し戻し・resumeなど、supervisorが`turns/`に書く全てのturn。`request_turn`）の前にも`broker_grant`と同じくそのrunに残ったものを消す（`Supervisor::broker_before_turn`）。印が無ければ`broker_token_revoked`は残さない。どちらもpodmanを探しも呼びもしない。`preferred`ではturnの前に何もしない（runは発行された道具を持ち続ける）。印の無い`disabled`のqueueでは何も書かず、workerの起動のenv・settings・引数は変わらない
@@ -417,17 +418,17 @@ podmanのmachine（applehv・vfkit）は、startのたびにnetworkの`gvproxy`�
 
 ADR-t827-3の決定2・3。modeが`disabled`（既定。`[broker]`の無いqueueを含む）なら、supervisor・`up`・`down`はpodmanを探しも呼びもしない（`Ports::broker`が`None`。`tests/it/runtime_broker.rs`の`a_disabled_broker_calls_no_podman`）。
 
-- **mode**: supervisorは起動時にmain checkoutの`dagq.toml`の`[broker]`と`host.toml`の`[broker]`を読み（`compose::load_broker_setup`）、modeを決める。起動の後の変更はsupervisorを起動し直すまで効かない。`required`はerrorで起動しない
-- **ensure**: 最初のpassと、brokerが用意できていない間は各passのclaimの前に、`QueueBroker::start`（上の「用意の手順」）をjobのthreadで1本ずつ走らせる（`Supervisor::broker_pass`）。loopは待たず、後のpassで結果を刈り取る。imageのbuildの間`state.json`は`building`で、claimは止まらない。成功で`broker_started`（buildしたなら先に`broker_image_built`）。失敗（`machine_busy`・`podman_missing`・`image_build_failed`など）は`broker_unhealthy`（`reason`はそのcode）で、`BROKER_HEALTH_INTERVAL`（30秒）ごとにやり直す
+- **mode**: supervisorは起動時にmain checkoutの`dagq.toml`の`[broker]`と`host.toml`の`[broker]`を読み（`compose::load_broker_setup`）、modeを決める。起動の後の変更はsupervisorを起動し直すまで効かない。`required`の動きは下の「required」
+- **ensure**: 最初のpassと、brokerが用意できていない間は各passのclaimの前に、`QueueBroker::start`（上の「用意の手順」）をjobのthreadで1本ずつ走らせる（`Supervisor::broker_pass`）。loopは待たず、後のpassで結果を刈り取る。imageのbuildの間`state.json`は`building`で、`preferred`ではclaimは止まらない（`required`はbrokerが用意できるまでclaimとresumeを止める。下の「required」）。成功で`broker_started`（buildしたなら先に`broker_image_built`）。失敗（`machine_busy`・`podman_missing`・`image_build_failed`など）は`broker_unhealthy`（`reason`はそのcode）で、`BROKER_HEALTH_INTERVAL`（30秒）ごとにやり直す
 - **health**: 用意できた後は`BROKER_HEALTH_INTERVAL`ごとに`state.json`のportの`/v1/health`を1回見る（これもjob）。`BROKER_FAILURES`（3）回続けて失敗したら、containerを1回起動し直す（`application::broker::restart`: host全体のlockの中で、machineが動いていればcontainerを消して作り直し、healthを待つ。machineが動いていなければ起動し直さずに`machine_failed`か`machine_busy`）。直れば`auto_repaired`（`repair: broker_restart`、`layer: runtime`、`conditions.failures`。ADR-0047の1層目）。起動し直しが失敗したら`broker_unhealthy`（`reason`はそのcode）を残し、用意できていないものとして次の間隔から`ensure`（machineから）をやり直す。起動し直した後にまた3回続けて失敗したら`broker_unhealthy`（`reason: unhealthy`）。healthが答えれば数えるのをやめ、attentionが立っていれば`broker_healthy`を残す（起動し直しもまた1回できる）
 - **attention**: `broker_unhealthy`はinbox宛てのattention（`next: dagq broker status`、`status`は`reason`）で、最新の`broker_unhealthy` / `broker_healthy` / `broker_started` / `broker_stopped`が`broker_unhealthy`の間出る。立っている間は`reason`が変わっても書き直さない（1つの不調で1回知らせる）
 - **claim**: `preferred`ではbrokerの状態でclaimを止めない。使えるbrokerならworkerにtokenとMCPの道具を渡し、使えなければ`broker_unavailable`を残して道具なしで動かす（上の「token」の発行）。このsupervisorの`ensure`がまだ返っていない間（起動の直後と`--once`）は、`state.json`が`running`でdagqのbuildを名指すbrokerのhealthを見て、答えればそのportを使う（`BrokerControl::running_port`）。負荷の高いhostで1回答えそこねただけでrun全体が道具なしにならないよう、healthが答えないときは`RUNNING_PORT_PROBES`（3）回まで`health_interval`（500ミリ秒）をあけて見直し、答えたがstatus・protocol・buildの合わない答えは見直さない。使えないときの`broker_unavailable`（`reason: not_ready`）の`message`は、stateの食い違いか、各回のhealthの失敗の理由を持つ（task 1255。e2eの`broker::a_preferred_worker_does_its_task_through_the_broker_and_lands`の1回の失敗は、着地したcommitにexec.txtだけが無くworktreeがcleanだったことから、stubがbrokerを使わない経路でcommitした、つまりclaimが道具を渡さなかったと消去法で推定した。当時のmessageは理由を持たず、このhealthの取りこぼしと確かめきれていない。stubは今、`E2E-BROKER`のtaskで道具が無ければその理由で止まる）
 - **sweep**: 各passのclaimの前と止まる直前に、終わったrunのtokenを失効させ、期限の近いtokenを発行し直す（上の「token」の失効と期限）。`disabled`では残った全てのtokenを`mode_disabled`で失効させる
 - **停止**: supervisorがbrokerを止めるのは、`down`が頼んだdrain（最新の`broker_stop_requested`が自分のtokenを挙げる）を終えたときだけで、自分の登録を消した後に、queueのほかのsupervisor（heartbeatの新しい登録）が残っていなければ、走っているjobの終わりを待ってから`QueueBroker::stop`（containerの停止と`release_machine`）を呼び、`broker_stopped`（`by: supervisor`）を残す（`Supervisor::stop_broker_after_down`。ほかのsupervisorが残れば、最後に終わるものに任せる）。`up`の入れ替えのdrainは頼まないので止めず、execの引き継ぎ（`install`と自動更新）はdrainしないので止めない。execの引き継ぎは走っているjobの終わりを待ち（execでpodmanのコマンドが孤児にならないように。その間新しいjobは始めない）、それ以外でloopが終わるときに走っているjobは待たずに放す。新しいsupervisorの`ensure`はimageのtag（build識別子から作る）が違えば作り直し、有効なtokenのrunが残る間は古いcontainerを残す（上の`kept_stale`）
 - **`down`**: 生きているsupervisorにsignalを送る前に（launchdのunloadより前に）、modeが`disabled`でなければ`broker_stop_requested`を残して、drainの終わりにbrokerを止めるよう頼む（`lifecycle::BrokerLifecycle::request_stop`。`--force`は頼まない）。drainを待たない既定の`down`（`draining`）は自分では止めず、出力の`broker`に`stopped: false`と、supervisorがdrainの終わりに止めることを載せる。drainを見届けた`not_running`・`stopped`（`--wait`）・`killed`（`--force`）の後には、`dagq broker stop`と同じ`QueueBroker::stop`を自分でも呼ぶ（supervisorが止め損ねた・落ちていた・killされたときのため。何か止めたときだけ`broker_stopped`（`by: down`）を残す。`lifecycle::BrokerLifecycle::after_drain`）。止め損ないは`down`を失敗にせず`broker.error`に載せる
-- **`up`のpreflight**: modeが`disabled`でなければ、`host.toml`の`podman`（無ければ`podman`）が`up`のPATHで解決できることを確かめ、無ければsupervisorを起動しない（`[run.env]`のプログラムの検査と同じ扱い。`lifecycle::BrokerLifecycle::preflight`）。`required`も拒む
+- **`up`のpreflight**: modeが`disabled`でなければ、`host.toml`の`podman`（無ければ`podman`）が`up`のPATHで解決できることを確かめ、無ければsupervisorを起動しない（`[run.env]`のプログラムの検査と同じ扱い。`lifecycle::BrokerLifecycle::preflight`）。`required`も`preferred`と同じ
 - podmanを要る`#[ignore]`のtestとスモークも終わりに同じ`release_machine`を呼ぶ
-- test: `tests/it/runtime_broker.rs`（podmanはportのfake）がdisabled・background build・3回の失敗と起動し直しとattention（`down`の頼まないdrainでは止めないことも）・`machine_busy`とclaim・handoff・`down`（`--wait`の後と、既定の`down`の後のsupervisorのdrainの終わり）を、`tests/it/lifecycle_up.rs`の`up_refuses_a_broker_mode_without_podman_on_its_path`が`up`のpreflightを見る
+- test: `tests/it/runtime_broker.rs`（podmanはportのfake）がdisabled・background build・3回の失敗と起動し直しとattention（`down`の頼まないdrainでは止めないことも）・`machine_busy`とclaim・handoff・`down`（`--wait`の後と、既定の`down`の後のsupervisorのdrainの終わり）と`required`（下の「required」のtest）を、`tests/it/lifecycle_up.rs`の`up_refuses_a_broker_mode_without_podman_on_its_path`が`up`のpreflight（`required`も）を見る
 
 ### 資源
 
@@ -454,13 +455,15 @@ task 836で測った（2026-09-28、podman 6.1.2、applehv）: 起点の値（CP
 
 ## workerの道具（MCP）
 
-- modeが`preferred`で、brokerが健康で版が一致し、providerがClaude Codeのworker（とresume、非対話のturn）にだけ渡す。Codexのworkerには渡さず、`broker_unavailable`（`reason: provider`）を残す（CodexのMCPの渡し方は後のtask。runの途中でCodexへ切り替わったworkerは`mcp.json`が残っていても受け取らない: `AgentProvider::broker_tools`の既定は何もしない）
+- modeが`preferred`か`required`で、brokerが健康で版が一致し、providerがClaude Codeのworker（とresume、非対話のturn）にだけ渡す。Codexのworkerには渡さず、`broker_unavailable`（`reason: provider`）を残す（CodexのMCPの渡し方は後のtask。runの途中でCodexへ切り替わったworkerは`mcp.json`が残っていても受け取らない: `AgentProvider::broker_tools`の既定は何もしない）
 - `<run dir>/broker/mcp.json`:
 
   ```json
   {"mcpServers":{"dagq-broker":{"command":"<dagqの隣>/dagq-broker-client","args":["mcp"],
     "env":{"DAGQ_BROKER_URL":"http://127.0.0.1:<port>","DAGQ_BROKER_TOKEN_FILE":"<queue dir>/broker/tokens/<run id>"}}}}
   ```
+
+  `required`ではenvに`"DAGQ_RECEIPT_FILE":"<run dir>/receipt.json"`（runのreceipt）も入る（`Grant::receipt`。`write_receipt`のため）
 
   を`HostActorExecutor`がClaude Codeの`--mcp-config <file>`で渡す。envにtokenの値は入れない
 - 起動: `dagq-broker-client [--url URL] [--token-file FILE] mcp`（`mcp`はflagも引数も取らない）。URLが無いか誤っていればserverは始めずにstderrに理由を出してexit 3。token fileは呼び出しごとに読むので、無くても起動し、道具の呼び出しが`client_error`（`config`）になる。stdinが閉じたらexit 0
@@ -483,15 +486,40 @@ task 836で測った（2026-09-28、podman 6.1.2、applehv）: 起点の値（CP
   | `git_restore` | `git.restore` | `staged`（boolean）・`paths`※ |
 
   設計の初めの案の`write_file`（`path`・`content`）に、protocolの`WriteRequest`にある`create_dirs`を足した（新しいdirのファイルを作るため）
+
+  envに`DAGQ_RECEIPT_FILE`（`RECEIPT_FILE_ENV`）があるとき（`required`）だけ、12本の後に`write_receipt`（入力: `receipt`※（object）。他の欄は`invalid_arguments`）を出す（`mcp::RECEIPT_TOOL`）。brokerを通さず、clientのプロセスがhostで、名指されたfileに同じdirの一時ファイル（`.<名前>.<pid>.tmp`）とrenameでreceiptを書く（brokerが答えなくても書ける）。成功は`{"written":<path>,"bytes":N}`、書けなければ`client_error`の`kind: receipt`。envが無ければ`tools/list`に出さず、呼べば`-32602`（未知の道具）
 - 結果: 成功は`{"content":[{"type":"text","text":<opの応答のJSON>}],"isError":false}`。`exec`は子のexit codeに関わらず成功で、`exit_code`は応答の欄。brokerの拒否・失敗は`isError: true`で、textと`structuredContent`にbrokerのerror本体`{"error":{"code","message","request_id"}}`をそのまま入れる（codeは`unauthorized`・`capability_denied`・`workspace_violation`・`timeout`・`output_limit`・`backend_error`・`invalid_request`）。client側の失敗も`isError: true`で、`{"client_error":{"kind","message"}}`（`kind`は`invalid_arguments`（入力がschemaに合わずbrokerに送らない）・`config`・`transport`・`protocol`）。tokenの値はどこにも出さない
 - 切り詰め: 応答の最上位の文字列の欄（`read_file`の`content`、`git_diff`の`diff`、`git_show`の`show`、`exec`の`stdout`・`stderr`）は40000 byte（`TEXT_LIMIT_BYTES`、UTF-8の文字の境で切る）、最上位の配列（`list_dir`と`git_status`の`entries`、`git_log`の`commits`）は1000件（`ITEM_LIMIT`）で切り、切った欄を`mcp_cut`（`{"<欄>":{"kept":N,"total":M}}`、byteか件数）で示す。brokerの上限（`fs_limit_bytes`・`output_limit_bytes`）はそれより前にserverが強制し、`read_file`・`git_diff`・`git_show`の`truncated`はbroker側で切ったことを示す
-- server単位の`mcp__dagq-broker`を許す: settingsの`permissions.allow`ではなく、Claude Codeの引数`--allowedTools mcp__dagq-broker`で渡す（settingsの`permissions`は`mcp.json`の有無で変わらず、`disabled`のrunのsettingsは今までと同じ。`mcp.json`のあるrunのsettingsには組み込みの道具を数える`PreToolUse`のhookだけが足される。下の「組み込みの道具の数」）。`preferred`では組み込みの道具を拒まない
-- workerのpromptに、brokerの道具があるとき（runのproviderがClaude Codeで`mcp.json`がある）だけ「ファイルの読み書き・置換、許されたコマンド、run branchのgitはbrokerの道具を優先し、拒まれたか届かなければ組み込みの道具を使う」段落（`prompt::BROKER_TOOLS`）を末尾に足す。claimでは道具を渡せたときにpromptを書き直す。tokenの値もtoken fileの場所も書かない
+- server単位の`mcp__dagq-broker`を許す: settingsの`permissions.allow`ではなく、Claude Codeの引数`--allowedTools mcp__dagq-broker`で渡す（settingsの`permissions`は`mcp.json`の有無で変わらず、`disabled`のrunのsettingsは今までと同じ。`mcp.json`のあるrunのsettingsには組み込みの道具を数える`PreToolUse`のhookだけが足される。下の「組み込みの道具の数」）。`preferred`では組み込みの道具を拒まない（`required`のsettingsは下の「required」）
+- workerのpromptに、brokerの道具があるとき（runのproviderがClaude Codeで`mcp.json`がある）だけ、`required`の印があれば下の「required」の段落（`prompt::BROKER_REQUIRED`）を、無ければ「ファイルの読み書き・置換、許されたコマンド、run branchのgitはbrokerの道具を優先し、拒まれたか届かなければ組み込みの道具を使う」段落（`prompt::BROKER_TOOLS`）を末尾に足す。claimでは道具を渡せたときにpromptを書き直す。tokenの値もtoken fileの場所も書かない
 - 人の診断のCLI（task 834）: `dagq-broker-client [--url URL] [--token-file FILE] <command>`。`--url`と`--token-file`が無ければ`DAGQ_BROKER_URL`と`DAGQ_BROKER_TOKEN_FILE`を読む。tokenの値は引数にもenvにも取らず、出力にも出さない。token fileは要求ごとに読み直す
   - URLは`http://<loopbackのaddress>:<port>`だけ（`localhost`は`127.0.0.1`、末尾の`/`は許す）。https・path・user・loopbackでないaddress・port 0は設定の誤りとして送らない（tokenをhostの外へ送らない）
   - command: `health [--json]`（tokenを要らない。既定は`ok build <build> protocol 1`の1行）、`token inspect`（token fileのclaimsのJSONだけ。署名は確かめず、tokenと署名は出さない）、`fs read PATH [--offset N] [--limit N]`、`fs list PATH`、`fs write PATH [--content TEXT] [--create-dirs]`（`--content`が無ければstdin）、`fs edit PATH --old TEXT --new TEXT [--replace-all]`、`exec [--env NAME=VALUE]... [--stdin TEXT] [--timeout-secs N] -- PROGRAM [ARG]...`、`git status`、`git diff [--staged] [PATH]...`、`git log [--limit N]`、`git show [--commit REV] [PATH]...`、`git add PATH...`、`git commit --message TEXT`、`git restore [--staged] PATH...`（addとrestoreはpathが1つ以上）。token fileの中身が空白か制御文字を含めば送らない。push・fetch・remoteのcommandは無い
   - 出力と終了: 成功はopの応答のJSONをstdoutに1行で出してexit 0（`exec`は子のexit codeに関わらず0で、`exit_code`は応答の欄）。要求の本体が8 MiB（`MAX_REQUEST_BYTES`）を超えれば送らずにclient側の失敗にする。brokerの拒否・失敗はbrokerの`{"error":{"code","message","request_id"}}`をstderrに1行で出してexit 1。command lineの誤りはexit 2。client側の失敗（設定・接続・応答のprotocolの版の違いや形の違い）はstderrに理由を出してexit 3
   - 応答の`X-Dagq-Broker-Protocol`が`1`でないか無いときは、本体を解釈せずにprotocolの誤りにする（fail closed）
+
+## required
+
+ADR-t838-1（goal 59、Phase 2）。`[broker] mode = "required"`のqueueでは、workerに組み込みのファイルとコマンドの道具を使わせず、brokerの道具だけで作業させ、brokerが使えなければworkerを起こさない。制御側の操作（workerの`dagq`のコマンドとreceiptの書き込み）はbrokerの外に残す。**guardrailでありenforcementではない**: `permissions.deny`・permission mode・`permissions.allow`はClaude Codeの設定で、hostのプロセスを隔離しない（別のpathのコマンドやscriptは通る）。`status`と`doctor`の`backend: host`・`enforcement: advisory`は変えない。
+
+- **印**: supervisorは`broker_grant`（claimの`provision`・resume・reopen）と非対話のturnの依頼の前（`broker_before_turn`）に、`required`なら`<run dir>/broker-required`（空、`broker_run::REQUIRED_FILE`）を置き、他のmodeなら消す。tokenの失効は`<run dir>/broker/`を消すが印は残す。印のpathに何かあれば（fileでなくても）印とみなす（書けなかった印で組み込みの道具に戻らないため）。turnの前に印を書けなければ、runのtokenを失効させ（`reason: unmarked`）、turnを依頼しない（`BrokerRequiredRefused`。答えの届けなら`ask_delivery_failed`がinboxに出る。`domain::broker::turn_refused`）
+- **executor**（`HostActorExecutor::spawn`の`SessionAgent`、`broker_run::worker_broker`）: 印があり`mcp.json`が無いrunのworkerは、agentの起動の引数を作る前に`BrokerRequiredRefused`（`broker_required: ...`）で拒む。印のあるrunの対話のworkerとresume（`SessionAgent::Worker`・`Resume`）も拒む（settingsで組み込みの道具を拒めない）。印と`mcp.json`があれば、turnの`TurnTarget::broker_required`に`mcp.json`を渡し、`preferred`の`broker_tools`（`--mcp-config`と`--allowedTools`を足すだけ）は使わない。印が無ければ今までどおり
+- **turn**（Claude Codeの`turn_command`、新しいturnもresumeも）:
+  - `--permission-mode dontAsk`（`BROKER_REQUIRED_PERMISSION_MODE`。allowに無い道具は問わずに拒まれる）。turnの`system/init`の`permissionMode`はこれと比べる（`turn_permission_mode(true)`。違えば`launch_mismatch`）
+  - `--mcp-config <run dir>/broker/mcp.json --strict-mcp-config`（brokerのserverだけ。利用者・project・pluginのserverを読まない）と`--setting-sources ""`（`--settings`のrunのsettingsだけを読む。利用者やworktreeの`.claude/`のallowがBashを広げないように。worktreeの`.claude/`はbrokerの`write_file`で書ける）
+  - `claude-headless-settings.json`（`headless_required_settings`）: `permissions.deny`は`Bash(pkill:*)`・`Bash(killall:*)`・`AskUserQuestion`・`BROKER_REQUIRED_DENIED_TOOLS`（`Read`・`Edit`・`Write`・`MultiEdit`・`NotebookEdit`・`Glob`・`Grep`・`LS`）・roleの`permission_deny`の順、`permissions.allow`は`mcp__dagq-broker`と`Bash(dagq:*)`（`BROKER_REQUIRED_ALLOWED`）、`autoMode`は今と同じ
+  - `Bash`はdenyに入れない。Claude Codeのdenyはallowに勝つので、`Bash`をdenyすると`Bash(dagq:*)`も打てない。`dontAsk`とallowで、Bashは`dagq`で始まるコマンドだけになる（`;`・`&&`でつないだ他のコマンドは各々が見られて拒まれる）。workerのroleの`permission_deny`が打てない`dagq`のコマンドを拒むのは今のまま
+  - `--setting-sources ""`の効果: 利用者・project・localのsettingsのfileを読まない（利用者やworktreeの`.claude/`のallowが`dontAsk`のBashを広げないため）。そのため利用者のsettingsが有効にしたpluginも、それらのsettingsのhookも読まれない。利用者の`~/.claude/settings.json`のそれ以外（`env`・`apiKeyHelper`・modelの既定・認証の設定など）も効かないので、それに頼るhostでは`required`のturnが認証やmodelで失敗しうる（そのhostでは`required`にしないか、`claude`のlogin・環境変数で足りるようにする）。repositoryの`CLAUDE.md`・`AGENTS.md`はpromptが名指し、workerはbrokerの`read_file`で読む
+  - hook: 非対話のturnは`Stop`のhookを持たない（idleの印はwrapperが書く）。`required`のrunはbrokerの道具を渡したrunなので、`headless_required_settings`にも組み込みの道具を数える`PreToolUse`のhook（下の「組み込みの道具の数」、task 839）が足され、`--settings`のfileにあるので`--setting-sources ""`でも読まれ、拒まれた試みも数える
+  - Codexの`turn_command`は`broker_required`のturnを`BrokerRequiredRefused`で拒む（Codexに道具を渡す形は後のtask）
+- **receipt**: `mcp.json`のenvの`DAGQ_RECEIPT_FILE`で、clientの`write_receipt`（上の「workerの道具（MCP）」）がhostで書く。workerのpromptの「tmpとrename」の書き方の代わり
+- **prompt**（`prompt::BROKER_REQUIRED`）: 組み込みの道具が拒まれること、Bashは`dagq`だけ、brokerの道具の名前、receiptは`write_receipt`で書くこと、`exec`で流せないcheckは理由をreceiptに書くこと、brokerの道具が`unauthorized`・`transport`・`config`・`protocol`で失敗したら（brokerが答えない、tokenが無い）別の道を探さず、`write_receipt`で失敗のreceiptにするか`dagq ask`にすること
+- **判断の関数**（`domain::broker`、unit test）: `hold_reason`（brokerの理由、次にtokenの`token_failed`）、`claims_record`（holdを記録するのは始まりと理由の変わったとき、resumeはholdが立っているときだけ）、`worker_refused`（`required`でgrantと印のどちらかが無ければ拒む）、`turn_refused`
+- **claimとresumeの前**（`Supervisor::broker_holds_claims`、`fill_slots`の中で、resumeとclaimの前に毎pass）: workerに今道具を渡せるか（`broker_usable`: brokerが用意できて最後のhealthが答え、dagqのbuildで、clientがある。用意の前は`running_port`。と`RunTokens::ready(repository)`: 鍵を読めるか作れ、`<queue dir>/broker/active`と`tokens`のdirを作れ、repository（main checkout）の`git config user.name`と`user.email`がある。どのrunのtokenにも要るものはここで`token_failed`になり、claimしてから拒むことはしない）を見る。できなければそのpassはresumeもclaimもしない（landing・review・triageは続く）
+- **attention**: 止めたときqueueのevent `broker_claims_held`（`reason`: `not_ready`・`unhealthy`・`version_mismatch`・`client_missing`・`token_failed`・`grant_failed`など、`message`、`supervisor`）をinbox宛てのattention（`kind: broker_claims_held`、`status`は`reason`、`next: dagq broker status`）にする。最新の`broker_claims_held` / `broker_claims_resumed`が`broker_claims_held`の間出る。`reason`が変われば書き直し、同じなら書かない。渡せるようになれば`broker_claims_resumed`で閉じる。`required`でないsupervisorは最初のpassで、前の`required`が残した`broker_claims_held`を`broker_claims_resumed`で閉じる。brokerそのものの不調は今までどおり`broker_unhealthy`も出る
+- **claimの後に渡せなかったrun**（passの見た後にbrokerが落ちた、Codexのrun、そのrunのworktreeだけがcommitterを名指さないなど、runごとの失敗）: `broker_grant_or_refuse`が`broker_unavailable`（今までと同じ`reason`）を残し、`broker_claims_held`（`reason: grant_failed`）を出して`BrokerRequiredRefused`を返す。claimの`provision`ではrunを`abandon`（`runtime_error`）してclaimのloopを抜け、`preferred`の`provision`の失敗と違ってclaimを止めない（次のpassの判定に任せる）。resumeでは`resume_finished`の`error`（`could not be resumed: broker_required: ...`）、reopenでは`session_reopen_failed`（`cause: open_failed`、`error`）になり、どちらもworkspaceを開かない。印を置けなかったrunも同じ。runごとの失敗（そのrunのtokenだけが発行できない）は次のpassの判定を止めないので、同じrunのresumeを次のpassでまた試す
+- **走っているrunでbrokerが落ちたとき**: 道具は構造化のerror（brokerの`error.code`かclientの`client_error`）を返し、workerはpromptに従って失敗のreceiptかaskにする。supervisorはrunを止めない
+- test: `src/application/actor_executor.rs`の`a_required_run_starts_only_with_the_brokers_tools`（印と`mcp.json`の組み合わせごとの起動と拒否、拒否で何も起動しないこと）、`src/infrastructure/adapters.rs`の`a_required_turn_has_only_the_brokers_tools_and_dagq`（新しいturnとresumeのsettingsと引数、`dagq ask`が拒まれないこと、印の無いturnが前と同じこと）、`src/infrastructure/codex.rs`の`a_turn_starts_or_resumes_the_thread_with_the_same_sandbox`（Codexの拒否）、`crates/dagq-broker-client/src/mcp.rs`の`write_receipt_is_served_only_with_the_receipt_file`、`src/infrastructure/broker_token.rs`の`ready_makes_what_an_issue_needs_and_refuses_a_bad_key_or_no_committer`、`crates/dagq-broker-client/src/cli.rs`の`mcp_serves_write_receipt_with_the_receipt_file_of_its_env`、`src/domain/broker.rs`の`a_claim_hold_is_recorded_when_it_starts_or_its_reason_changes`・`the_hold_reason_is_the_brokers_then_the_tokens`・`required_refuses_a_worker_without_its_tools_or_its_mark`、`tests/it/runtime_broker.rs`の`a_required_repository_without_a_committer_claims_nothing`（repositoryのcommitterが無ければ`token_failed`でclaimしない）・`a_required_run_refused_after_its_claim_fails_and_claims_go_on`（runのbranchだけがcommitterを名指さない（`includeIf "onbranch:dagq/**"`）ときのclaimの後のgrantの失敗: workspaceを開かず`runtime_error`、`grant_failed`、claimを止めない）・`a_required_resume_refused_its_tools_is_given_up`（resumeの拒否）・`a_required_reopen_refused_its_tools_opens_no_session`（reopenの拒否、`session_reopen_failed`）・`a_required_turn_whose_mark_cannot_be_written_is_not_requested`（`unmarked`）・`the_configuration_names_the_variables_the_client_reads`（envの名前がclientと同じ）・`a_required_broker_that_cannot_start_holds_the_claims_and_tells_the_inbox`（`machine_busy`でclaimせずworkspaceも開かずattention、`preferred`に戻すとclaimして閉じる）と`a_required_broker_without_a_token_holds_the_claims_until_one_can_be_issued`（`token_failed`で止め、直ればclaimして印・receiptの名指し・promptを見る）、`preferred`の`a_preferred_worker_gets_its_token_and_the_end_of_its_run_revokes_it`（印もreceiptの名指しも無い）
 
 ## audit
 
@@ -525,7 +553,7 @@ goal 59の(2)、task 839。`preferred`のあいだ、workerがbrokerを通さず
 
 ```toml
 [broker]
-mode = "preferred"            # disabled（既定）| preferred | required（Phase 2まで起動を拒む）
+mode = "preferred"            # disabled（既定）| preferred | required（上の「required」）
 exec_allow = ["sh", "ls", "cat", "grep"]   # 既定は空
 exec_env = []                 # execに通すenvの名前
 exec_timeout_secs = 60
@@ -549,7 +577,7 @@ container_pids = 256
 port = 0                      # 0 は空いている port
 ```
 
-- `[broker]`が無ければ`disabled`。`required`はerrorにし、supervisorを起動せず`up`も止まる（黙って`preferred`に落とさない。`BrokerMode::unsupported`）
+- `[broker]`が無ければ`disabled`。`required`は上の「required」（task 838より前の版は`required`をerrorにして起動しなかった）
 - `dagq.toml`の`[broker]`は他の表と同じく未知のkey・重複・型の違う値・`exec_timeout_secs`が`exec_max_timeout_secs`より大きいことを行番号付きのerrorにする（`parse_config`、`load_broker_config`）。`exec_*`・`output_limit_bytes`・`fs_limit_bytes`は`serve`の既定と違うものだけがcontainerの`serve`の引数になる（`BrokerConfig::serve_args`。変えればcontainerの引数のhashが変わり、作り直される）
 - `host.toml`の`[broker]`は`[update]`と同じく、queueの`<queue dir>/host.toml`にあればそれが丸ごと勝ち、無ければhost全体の`$XDG_CONFIG_HOME/dagq/host.toml`（`load_host_broker`）。`mode`に`"disabled"`以外（`"preferred"`・`"required"`）を書いても上げず、読めない値と同じく警告にして既定のままにする（`dagq.toml`のmodeが効く）。警告はsupervisorのlogと`up`の出力の`broker.warnings`に出る。`port`が0か無ければ、前に使ったport、無ければ空いているport
 - `dagq.toml`の`[broker]`は[Run environment](supervisor-lifecycle/run-environment.md)の読み手（`parse_config`）が表として受け付ける（task 923）。`[broker]`を知らない固定バイナリは未知の表で止まるので、この repositoryの`dagq.toml`には置かない（本番queueはdisabled）。検証は使い捨てのrepositoryで行う
@@ -569,5 +597,5 @@ port = 0                      # 0 は空いている port
 ## 段階
 
 - Phase 1（goal 58）: この文書。workerはhostのまま、`preferred`で契約を証明する
-- Phase 2: `required`の強制（組み込みの道具を拒み、brokerが使えなければclaimしない）
+- Phase 2（goal 59）: `required`（上の「required」、task 838）。互換の診断・package backend・`required`の代表taskのe2eは同じgoalの他のtask
 - Phase 3以降: workerのcontainer化（`PodmanActorExecutor`）、runごとのmountでの閉じ込め、containerのworkerのqueueの操作（goal 38か後のgoal）
