@@ -1158,10 +1158,28 @@ fn two_independent_tasks_run_concurrently_and_a_dependent_follows_integration() 
     assert_eq!(detail["task"]["status"], "ready");
     assert_eq!(detail["runs"], Value::Array(vec![]));
     assert_eq!(dagq(env, &["candidates"]).as_array().unwrap().len(), 0);
-    assert_eq!(
-        dagq(env, &["doctor", "--full"])["runs"],
-        Value::Array(vec![])
-    );
+    // `doctor` still lists the two waiting runs (task 1520), but neither
+    // holds a lease nor is left for `recover`: the pass let go of both.
+    let doctor = dagq(env, &["doctor", "--full"]);
+    let mut listed: Vec<&str> = doctor["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            assert_eq!(r["status"], "awaiting_integration", "{doctor}");
+            assert!(r["lease"].is_null(), "{doctor}");
+            assert_eq!(r["recoverable"], false, "{doctor}");
+            r["run_id"].as_str().unwrap()
+        })
+        .collect();
+    listed.sort_unstable();
+    let mut waiting = Vec::new();
+    for task in [&first, &second] {
+        let detail = dagq(env, &["show", task, "--full"]);
+        waiting.push(detail["runs"][0]["id"].as_str().unwrap().to_owned());
+    }
+    waiting.sort_unstable();
+    assert_eq!(listed, waiting, "{doctor}");
 
     // Land the first task; the dependent becomes claimable from the landed main.
     let first_run = dagq(env, &["show", &first, "--full"])["runs"][0].clone();
@@ -1521,11 +1539,21 @@ fn killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands() {
         position("exit_requested") < position("session_exited"),
         "{kinds:?}"
     );
+    // The adopted run waits to land with no lease left; `status` still lists
+    // it as the latest awaiting run of its in-progress task (task 1520).
+    let released = |status: &Value| {
+        status["runs"].as_array().is_some_and(|runs| {
+            runs.len() == 1
+                && runs[0]["run_id"] == run_id.as_str()
+                && runs[0]["status"] == "awaiting_integration"
+                && runs[0]["lease"].is_null()
+        })
+    };
     // The adopter deregistered on exit; the killed one's row stays for `up` to prune.
     let status = status_when(env, |status| {
         status["supervisors"].as_array().is_some_and(|s| {
             s.len() == 1 && s[0]["pid"] == victim_pid && s[0]["run_ids"] == Value::Array(vec![])
-        }) && status["runs"] == Value::Array(vec![])
+        }) && released(status)
     });
     let supervisors = status["supervisors"].as_array().unwrap();
     let diagnosis = format!(
@@ -1539,7 +1567,7 @@ fn killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands() {
         Value::Array(vec![]),
         "{diagnosis}"
     );
-    assert_eq!(status["runs"], Value::Array(vec![]));
+    assert!(released(&status), "{status}");
 
     let integrated = dagq(env, &["integrate", &task_id]);
     assert_eq!(integrated["outcome"], "integrated", "{integrated}");
