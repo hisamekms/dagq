@@ -4,12 +4,13 @@ type: design
 title: レイヤーとコンテキストの境界（contextごとの所有・判断・操作・公開するport・依存の向き・境界をまたぐtransaction・検査できる規則・今の違反）
 status: current
 created: 2026-10-04
-updated: 2026-10-04 # task 1615: the throughput review moved into application, infrastructure and compose
+updated: 2026-10-04 # task 1662: the observation and analysis context points to the measurement design
 last_verified: 2026-10-04 # task 1615
 scope: system
 related:
   - adr-t1545-1
   - adr-0013
+  - design-measurement
   - adr-0032
   - adr-0054
   - adr-t1410-1
@@ -120,6 +121,8 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 ## 観測と分析
 
 起きたことを読み、数え、予測し、知らせること（events・watch・stats・KPI・forecast・印・observer・スループットの見直し）。
+
+計測の作り直し（goal 71。区間とタグ・台帳とそれを作る係・論理ストアのSSOTとビューの区分・送る口）の予定は[計測](measurement.md)が持ち、新しいportと台帳の係はこのcontextに置く（[ADR-t1662-2](../adr/2026-10-04-t1662-2-measurement-stores-ssot-and-views.md)決定6）。まだ実装は無く、下の節は今の姿のまま。
 
 **所有する状態**
 

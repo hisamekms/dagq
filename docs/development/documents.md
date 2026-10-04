@@ -15,6 +15,7 @@ related:
   - adr-t598-1
   - adr-t1091-1
   - adr-t1428-1
+  - adr-t1662-2
   - docs-frontmatter
   - development-task-registration
 ---
@@ -48,6 +49,8 @@ related:
 ## design
 
 実装を変えたら`docs/design/`の該当文書の内容と`updated` / `last_verified`を更新する。内容を変える必要がない文書には日付だけの差分を作らない（[ADR-t1428-1](../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)）。
+
+計測が読む・書くストアやビュー（表・ファイル・外の記録）を足すtaskは、同じ変更で[計測](../design/measurement.md)の「SSOTとビュー」の節に区分（SSOT・ビュー・材料）と今のアダプタを書く（[ADR-t1662-2](../adr/2026-10-04-t1662-2-measurement-stores-ssot-and-views.md)決定9）。
 
 ## plans
 

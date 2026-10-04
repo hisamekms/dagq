@@ -10,6 +10,7 @@ amended_by:
   - adr-t624-1
   - adr-t980-1
   - adr-t1381-1
+  - adr-t1662-1
 owners:
   - hisamekms
 tags:

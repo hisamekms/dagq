@@ -8,6 +8,7 @@ updated: 2026-10-02
 accepted_on: 2026-10-02
 amended_by:
   - adr-t1433-5
+  - adr-t1662-3
 owners:
   - hisamekms
 tags:

@@ -16,6 +16,7 @@ tags:
 
 - [Overview](overview.md)
 - [Architecture](architecture.md)（レイヤーとコンテキスト（計画管理・実行と着地・観測と分析・host運用）の2軸の境界。contextごとの所有する状態・判断・操作・公開するport・依存の向き、境界をまたぐtransactionの一覧、検査できる規則と今の違反。ADR-t1545-1）
+- [計測](measurement.md)（計測の作り直しの予定。冒頭の「SSOTとビュー」が記録の論理ストアと材料の区分を持ち、新しいストアやビューを足すtaskはそこに区分を書く。区間とタグ・台帳の形・畳む関数・台帳を作る係・送る口・コマンドの形と分類。ADR-t1662-1〜3、まだ実装は無いdraft）
 - [Domain model](domain-model.md)
 - [Persistence](persistence.md)
 - [Follow-up membership judgements](follow-up-membership.md)（所属の分類と必須の欄・acceptanceの版・出どころと深さ・所属の変更と人のadopt・旧schemaの移行）

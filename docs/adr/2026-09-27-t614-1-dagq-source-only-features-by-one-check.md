@@ -10,6 +10,8 @@ amends:
   - adr-0067 decision 3
   - adr-0073 decision 14
   - adr-0073 decision 17
+amended_by:
+  - adr-t1662-3
 owners:
   - hisamekms
 tags:
