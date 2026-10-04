@@ -26,6 +26,15 @@ pub const FILE: &str = "broker-image.tar";
 pub const BUILD_BEGIN: &str = "# dagq:build-from-source begin";
 /// The line that closes it.
 pub const BUILD_END: &str = "# dagq:build-from-source end";
+/// The cache mounts of the build stage's compile (task 1451): cargo's
+/// registry and target directory, kept by the machine between builds and
+/// not images, so the start's prune of images keeps them. The Containerfile
+/// of a checkout and of a release both use them, so a build whose
+/// `Cargo.lock` and Rust are the same compiles no dependency again.
+pub const CACHE_MOUNTS: [&str; 2] = [
+    "--mount=type=cache,id=dagq-broker-cargo-registry,target=/usr/local/cargo/registry,sharing=locked",
+    "--mount=type=cache,id=dagq-broker-cargo-target,target=/src/target,sharing=locked",
+];
 
 /// What the material builds the server from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,7 +159,8 @@ pub fn narrowed_manifest() -> String {
 
 /// The Containerfile of a release: the lines from [`BUILD_BEGIN`] to
 /// [`BUILD_END`] (the build from the sources) become one `cargo install
-/// --locked dagq-broker@<version>`.
+/// --locked dagq-broker@<version>`, with the [`CACHE_MOUNTS`] and its
+/// target directory in the cached one.
 pub fn release_containerfile(text: &str, version: &str) -> Result<String, String> {
     let (before, rest) = text
         .split_once(&format!("{BUILD_BEGIN}\n"))
@@ -158,9 +168,12 @@ pub fn release_containerfile(text: &str, version: &str) -> Result<String, String
     let (_, after) = rest
         .split_once(&format!("{BUILD_END}\n"))
         .ok_or_else(|| format!("{CONTAINERFILE} has no line `{BUILD_END}`"))?;
+    let [registry, target] = CACHE_MOUNTS;
     Ok(format!(
         "{before}# A release: the server of dagq's own version from crates.io.\n\
-         RUN cargo install --locked dagq-broker@{version} --root /usr/local/dagq-broker \\\n \
+         RUN {registry} \\\n    {target} \\\n    \
+         cargo install --locked dagq-broker@{version} --root /usr/local/dagq-broker \
+         --target-dir /src/target \\\n \
          && install -m 0755 /usr/local/dagq-broker/bin/dagq-broker /dagq-broker\n{after}"
     ))
 }
@@ -377,8 +390,50 @@ mod tests {
             containerfile,
             &std::fs::read(root.join(CONTAINERFILE)).unwrap()
         );
+        build_stage_reuses_the_compiled_dependencies(std::str::from_utf8(containerfile).unwrap());
         assert!(material.watched.contains(&root.join(CONTAINERFILE)));
         assert!(material.watched.contains(&root.join("crates/dagq-broker")));
+    }
+
+    /// The checkout's Containerfile compiles in the [`CACHE_MOUNTS`], so
+    /// a build whose build identifier alone changed compiles no dependency
+    /// again (task 1451): the identifier's ARG comes after the layers that do
+    /// not use it, and the context's crates are touched so they compile
+    /// again from these sources.
+    fn build_stage_reuses_the_compiled_dependencies(text: &str) {
+        let lines: Vec<&str> = text.lines().collect();
+        let at = |needle: &str| {
+            lines
+                .iter()
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} in {text}"))
+        };
+        let begin = at(BUILD_BEGIN);
+        let end = at(BUILD_END);
+        let run = at("RUN --mount=type=cache");
+        assert!(begin < run && run < end, "{text}");
+        let block = lines[run..end].join("\n");
+        for mount in CACHE_MOUNTS {
+            assert!(block.contains(mount), "{mount} in {block}");
+        }
+        assert!(
+            block.contains("find crates -type f -exec touch {} +"),
+            "{block}"
+        );
+        assert!(
+            block.contains("cargo build --release -p dagq-broker"),
+            "{block}"
+        );
+        // The cached target is where cargo builds: /src is the WORKDIR.
+        assert!(lines[begin..run].contains(&"WORKDIR /src"), "{text}");
+        assert!(CACHE_MOUNTS[1].contains("target=/src/target"));
+        // The build identifier's ARG: after `apk add`, before the build, and
+        // outside the markers, so a release declares it too.
+        let arg = at("ARG DAGQ_BROKER_IMAGE_BUILD=");
+        assert!(
+            at("RUN apk add --no-cache musl-dev") < arg && arg < begin,
+            "{text}"
+        );
     }
 
     #[test]
@@ -402,12 +457,26 @@ mod tests {
         assert_eq!(name, "Containerfile");
         let text = String::from_utf8(content.clone()).unwrap();
         assert!(
-            text.contains("RUN cargo install --locked dagq-broker@0.5.0 "),
+            text.contains("    cargo install --locked dagq-broker@0.5.0 "),
             "{text}"
         );
         assert!(!text.contains("COPY . ."), "{text}");
         assert!(!text.contains("cargo build"), "{text}");
         assert!(!text.contains(BUILD_BEGIN) && !text.contains(BUILD_END));
+        // The same caches as a checkout's build: cargo install compiles in
+        // the cached target, so a release of the same dependencies and Rust
+        // compiles none of them again.
+        for mount in CACHE_MOUNTS {
+            assert!(
+                text.contains(&format!("RUN {mount}")) || text.contains(&format!("    {mount}")),
+                "{text}"
+            );
+        }
+        assert!(
+            text.contains("--root /usr/local/dagq-broker --target-dir /src/target \\\n"),
+            "{text}"
+        );
+        assert!(text.contains("ARG DAGQ_BROKER_IMAGE_BUILD="), "{text}");
         // The run stage stays as it is.
         let run_stage = checkout.split_once(BUILD_END).unwrap().1;
         assert!(text.ends_with(run_stage.trim_start_matches('\n')), "{text}");

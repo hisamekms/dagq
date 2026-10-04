@@ -25,9 +25,7 @@
 //! does not skip them. Names and reasons used by the worker's receipt are in
 //! `CODEX_WORKER_E2E_EXCLUSIONS` in `src/domain/validation.rs`.
 //!
-//! ADR-t1582-1 keeps four cases, and the helpers only they use, out under `#[cfg(any())]`.
-// Out until task 1451 brings it back and runs it on real podman (ADR-t1582-1).
-#[cfg(any())]
+//! ADR-t1582-1 keeps three cases, and the helpers only they use, out under `#[cfg(any())]`.
 #[path = "e2e/broker.rs"]
 mod broker;
 #[path = "e2e/cleanup.rs"]

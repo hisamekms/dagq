@@ -6,27 +6,41 @@
 # a workspace manifest narrowed to those two crates; a release (dagq's
 # crates.io package, without crates/) embeds this file alone, with the lines
 # between the two `dagq:build-from-source` markers replaced by
-# `cargo install --locked dagq-broker@<version>`. It builds in dagq's own
-# Podman machine with `--build-arg RUST_VERSION` (from rust-toolchain.toml),
-# `--build-arg CARGO_BUILD_JOBS=1` (the machine is small) and
-# `--build-arg DAGQ_BROKER_IMAGE_BUILD=<dagq's build identifier>`.
+# `cargo install --locked dagq-broker@<version>` with the same caches. It
+# builds in dagq's own Podman machine with `--build-arg RUST_VERSION` (from
+# rust-toolchain.toml), `--build-arg CARGO_BUILD_JOBS=1` (the machine is
+# small) and `--build-arg DAGQ_BROKER_IMAGE_BUILD=<dagq's build identifier>`.
+#
+# The build keeps cargo's registry and target directory in two cache mounts
+# (`--mount=type=cache`, task 1451): they are not images, so neither the
+# start's `podman image rm` of old tags nor its `podman image prune --force`
+# of dangling images removes them (only `--build-cache` would), and a build
+# whose Cargo.lock and Rust are the same compiles none of the dependencies
+# again. `sharing=locked` lets one build at a time use them.
 
 ARG RUST_VERSION=1.98.1
 
 FROM docker.io/library/rust:${RUST_VERSION}-alpine AS build
 ARG CARGO_BUILD_JOBS=1
+RUN apk add --no-cache musl-dev
 # dagq's build identifier (`--build-arg DAGQ_BROKER_IMAGE_BUILD`): the build
 # stage has no Git, so the server embeds this one and its health names the
-# build of the dagq that built the image (ADR-t827-1 decision 7).
+# build of the dagq that built the image (ADR-t827-1 decision 7). Declared
+# after the layers that do not use it, as it changes with each build.
 ARG DAGQ_BROKER_IMAGE_BUILD=
-RUN apk add --no-cache musl-dev
 # dagq:build-from-source begin
 WORKDIR /src
 COPY . .
 # No --locked: Cargo.lock is the whole workspace's, and only the lines of
 # the packages this narrowed workspace does not use go; the versions of the
-# ones it uses stay as locked.
-RUN cargo build --release -p dagq-broker \
+# ones it uses stay as locked. The context's files are touched first, so
+# cargo sees them newer than anything in the cached target and compiles the
+# two crates again (the build identifier reruns the server's build script
+# too), whatever times COPY gave them; the dependencies stay compiled.
+RUN --mount=type=cache,id=dagq-broker-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=dagq-broker-cargo-target,target=/src/target,sharing=locked \
+    find crates -type f -exec touch {} + \
+ && cargo build --release -p dagq-broker \
  && install -m 0755 target/release/dagq-broker /dagq-broker
 # dagq:build-from-source end
 

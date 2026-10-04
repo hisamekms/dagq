@@ -1435,7 +1435,10 @@ pub fn prune_images(podman: &dyn Podman, machine: &str, current: &str) -> ImageP
 /// Remove the dangling images on dagq's machine: `podman image prune
 /// --force`, without `--all` or a filter, so only images with no tag go
 /// (the build stages each build leaves as `<none>`), never one a container
-/// (a build under way included) uses, and the build cache stays. Nothing
+/// (a build under way included) uses, and the build cache stays: without
+/// `--build-cache`, the cache mounts of the image's build (cargo's registry
+/// and target, which let the next build skip compiling the dependencies)
+/// stay too. Nothing
 /// here fails: the removed ids, or why the prune failed, go in `prune`.
 pub fn prune_dangling(podman: &dyn Podman, machine: &str, prune: &mut ImagePrune) {
     match checked(
@@ -3940,6 +3943,22 @@ mod tests {
             .rposition(|call| call.contains("image rm"))
             .unwrap();
         assert!(rm_at < prune_at, "{calls:?}");
+        // The build's cache mounts (cargo's registry and target, task 1451)
+        // are not images: the start removes images by tag and the dangling
+        // ones, never the build cache, a volume or the system's storage.
+        for call in &calls {
+            for word in ["--build-cache", "system", "volume", "builder"] {
+                assert!(!call.split(' ').any(|w| w == word), "{call}");
+            }
+            assert!(
+                !call.contains("prune") || call == "--connection dagq image prune --force",
+                "{call}"
+            );
+            assert!(
+                !call.contains("image rm") || !call.contains("--force"),
+                "{call}"
+            );
+        }
         assert_eq!(report.images.removed, ["localhost/dagq-broker:oldest"]);
         assert_eq!(report.images.dangling_removed, ["sha256:aaa", "sha256:bbb"]);
         assert!(report.images.dangling_error.is_none());
