@@ -4,10 +4,11 @@ type: design
 title: "`stats`"
 status: current
 created: 2026-09-26
-updated: 2026-10-04 # task 1354: Codex's headless spans carry their work breakdown
-last_verified: 2026-10-04 # task 1354
+updated: 2026-10-04 # task 1486: the gaps of today's token counts (ADR-t1486-1)
+last_verified: 2026-10-04 # task 1486
 scope: runtime
 related:
+  - adr-t1486-1
   - adr-t655-1
   - adr-t639-1
   - design-supervisor-lifecycle
@@ -222,6 +223,7 @@ task 199で足した集計。Claude sessionの区間が閉じるとき、runtime
 - **`runs`の`tokens`**: `{sessions, input, output, cache_read, cache_creation, total, cost_usd, cost_sessions, by_kind: {<kind>: {sessions, input, output, cache_read, cache_creation, total, cost_usd, cost_sessions}}}`。そのrunの区間（`worker` / `resume` / `revise` / `review` / `triage`）の`tokens`を足したもの。windowで切らない
 - **`goals`と`overall`の`tokens`**（`changes`も同じ形）: `{runs, input, output, cache_read, cache_creation, total, cost_usd}`で、`input`などはrunごとの値の`{count, total, median}`、`cost_usd`はコストのあるrunの`{count, total, median}`。`runs`はトークン数のあるrunの数で、無いrunは数えない
 - **`sessions.by_kind`の`tokens`**: kindごとに、windowの中で閉じた区間の`tokens`の合計（`runs`の`tokens`から`by_kind`を除いた形）。runを持たない`observer`と`plan_review`のトークン数はここで読む
+- **今の数え方の穴と後続の置き換え**（[ADR-t1486-1](../../adr/2026-10-04-t1486-1-supervisor-records-token-usage-per-execution.md)）: 上の`tokens`は区間が閉じたときの記録を足すので、`sessions.by_kind`の`tokens`は区間を閉じた日の窓にまとめて入る。長く開いた区間（常駐のinbox）は数日分が閉じた日に載り（2026-10-02のinboxは241M）、日ごと・actorごとには比べられない。ほかに、Claudeの非対話のturnはsubagentの分が抜け、Codexのjobの区間は`tokens`を持たず（0に見える）、Codexのworkerはmulti-agentの子のthreadの分が入らない可能性がある（数える元と穴の表は[provider-lifecycle](../provider-lifecycle.md#今の数える元と穴adr-t1486-1)）。goal 95の後続のtaskが、supervisorがExecution（非対話のturnとheadlessのjobの1回、対話は毎時と閉じたときの区切り）ごとに記録したトークン数を、日・週×actor（kind）×provider×modelと着地1件あたりで、Executionの終わった時刻（対話は区切りの時刻）の日に振り分けて読む項目に替える。そのtaskがこの節と`sessions.by_kind`の`tokens`の説明を直す
 - **`sessions.by_kind`の`models`**（task 579）: kindごとに、windowの中で閉じた区間を、`session_closed`の`model`と`effort`（[provider-lifecycle](../provider-lifecycle.md#modelとeffort)）を空白でつないだ`"<model> <effort>"`（effortの無い記録は`unknown`）ごとに数えたもの。modelを記録しなかった区間は数えない。worker以外のアクターの基準値はここで読む。計画の品質（proposalごと）は[kpi](kpi.md#計画の品質)
 
 ## 重さの予測と実績

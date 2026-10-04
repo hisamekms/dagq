@@ -4,10 +4,11 @@ type: design
 title: Agent provider lifecycle
 status: current
 created: 2026-09-21
-updated: 2026-10-04 # task 1570 (after task 1354)
-last_verified: 2026-10-04 # task 1570
+updated: 2026-10-04 # task 1486 (after task 1570)
+last_verified: 2026-10-04 # task 1486
 scope: provider
 related:
+  - adr-t1486-1
   - adr-t1570-1
   - adr-t655-1
   - adr-t1228-2
@@ -183,6 +184,22 @@ runのsessionの区間（`worker` / `resume` / `revise`）は、閉じるとき�
 - **eventのpayload**: `session_closed`の`tokens`（`{input, output, cache_read, cache_creation, messages}`と、あれば`cost_usd`。小数6桁）。runのsessionの区間は同じものを`session_exited`の`tokens`（その終了が閉じた区間のもの）と`resume_finished`の`tokens`（`work_breakdown`と同じく、その`resume_started`の後に開いて閉じた`resume`の区間のもの）にも載せる。区間に`assistant`のレコードが無ければ0を記録する
 - **読めない版**: transcriptが読めなければ（上のコード）記録しない。読めても、区間の`assistant`のレコードの`usage`に数値の`input_tokens`と`output_tokens`が無いか、`assistant`のレコードがあるのにどれも`usage`を持たなければ、その版の形式を知らないものとして`usage_unsupported`とし、`tokens`を書かない。どちらも理由とClaude Codeのversionを`info`のtracingに書くだけで、区間を閉じたevent・run・jobの結果は変わらない
 - Claude Code自身のtelemetry（OTLP）とは別の経路で、ここではOTLPを使わない
+
+#### 今の数える元と穴（ADR-t1486-1）
+
+[ADR-t1486-1](../adr/2026-10-04-t1486-1-supervisor-records-token-usage-per-execution.md)は、トークン数をsupervisorがExecution（`claude -p` / `codex exec`の1回＝非対話のturnとheadlessのjobの1回）ごとに今のturnとjobの記録に載せ、actorを起動したkindで決め、対話のsessionは一定間隔と閉じたときに区切って記録すると決めた。後続のtask（goal 95）が実装するまでの、actorごとの今の数える元と穴は次のとおり（2026-10-03の人の調査で確かめた）。
+
+| actor（kind） | 今の数える元 | 記録する欄 | 穴 |
+| --- | --- | --- | --- |
+| Claudeの非対話のworkerのturnと非対話のruntimeのplanner（`route: headless`） | streamの最後の`result`の`usage`（そのturnの全呼び出しの合計） | `turn_finished`の`tokens`、区間の合計は`session_closed`の`tokens` | subagentの分が抜ける（あるworkerのturnで`result.usage`のoutput 117.6kに対し`modelUsage`は139.2k）。subagentを含む`modelUsage`は`total_cost_usd`と同じくsessionの累計（task 1199）で、今は読まない |
+| Codexの非対話のworkerのturn | streamの`turn.completed`の`usage`（threadの累計）から前のturnの`tokens_total`を引いた分 | `turn_finished`の`tokens`・`tokens_total` | multi-agentの子のthreadの分が入らない可能性がある。rolloutは読まない |
+| Claudeのheadlessのjob（`review` / `triage` / `plan_review` / `goal_review` / `observer`） | 区間のtranscriptの`assistant`の`message.usage`（sidechainも数える） | `session_closed`の`tokens` | 区間が閉じたときにだけ記録する。jobの出力（`-p`）の`modelUsage`は読まない |
+| Codexのheadlessのjob（`launch.provider`が`codex`） | 無い（transcriptを読まない） | 書かない | トークン数を記録しない（2026-10-02〜03の`stats`で0） |
+| 対話のinbox・plannerの区間（hook） | 区間のtranscriptの`assistant`の`message.usage` | 閉じた後の最終の`session_turns`（`final: true`）の`tokens`（ADR-t655-1） | 区間が閉じたときにだけ記録し、`stats`は閉じた日にまとめて数える（長く開いたinboxが2026-10-02に241M）。開いている間のsupervisorの10分ごとの取り込みはturnだけでトークン数を書かず、トークン数は閉じた後の最終の取り込みだけが書く |
+
+- **streamの`assistant`の`usage`は使わない**: stream-jsonの`assistant`のeventの`usage`は生成を始めた時点の途中の値で、turnより細かい内訳には使えない
+- **後続で変わる方向**: Claudeの非対話のturnとClaudeのjobは、最後の`result`の`modelUsage`（`inputTokens`・`outputTokens`・`cacheReadInputTokens`・`cacheCreationInputTokens`・`costUSD`、subagentを含むsessionの累計）の前のturnとの差でExecutionの分を数え、modelごとの内訳とsubagentの数を持つ。Codexのworkerのturnと全てのCodexのjobは、rolloutの`token_usage_record`のうち`session_id`がroot threadの`thread_id`のものを`(thread_id, response_id)`で重複を除いて数える（`token_count`は累計なので足さない。`input`はcachedを含み、`output`はreasoningを含む）。rolloutが残らないので計測するExecutionでは`--ephemeral`を使わない（今も使っていない）。podmanのコンテナではrolloutをrun dirに書かせて終わった後に制御側が読む。inboxと人が開いたplannerは毎時と閉じたときにtranscriptを前回の位置から読み足して区切りごとに記録する。利用枠（rate_limits）と処理したトークン数は同一視せず、利用枠は記録しない
+- **実装したら直す箇所**: 上の表と、この節の「数え方」「eventのpayload」、下の[非対話のworkerの区間](#非対話のworkerの区間)の「turnのトークン数」「Codexのusageはthreadの累計」「Claudeのcostはsessionの累計」の`modelUsage`を読まないこと、[Claude sessionの区間](#claude-sessionの区間)の「Claude以外のproviderのjobの区間」がtranscriptを読まずトークン数を持たないこと、[stats](supervisor-lifecycle/stats.md#トークン数)の`sessions.by_kind`の`tokens`
 
 ### 非対話のworkerの区間
 
