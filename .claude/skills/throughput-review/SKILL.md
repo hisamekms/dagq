@@ -97,6 +97,15 @@ FROM=2026-09-28T13:00:00Z; TO=2026-09-28T14:00:00Z
 - `claim_deferred`（衝突の多いファイルでの保留。reason は `hot_files`）の数と、`stats` の `claim_holds`（load などによる claim の保留。`by_reason.load_average` など、件数と秒）で、slot が空いていたのに claim されなかった時間を見る
 - resume と ask は、作業のやり直しと人待ちで slot が埋まっていたかを見る
 
+(トークン) トークン消費の増減を見るときは、`stats` の `sessions.by_kind.tokens` を使わない（session が閉じた日にまとめて数え、Claude の subagent と Codex の job の分が抜ける）。host の transcript と rollout を数える当面の script で、actor × JST の日と着地 1 件あたりを比べる:
+
+```sh
+python3 scripts/token-usage.py --repo ~/ghq/github.com/hisamekms/dagq --dagq ~/.local/bin/dagq --since 2026-09-26 --until 2026-10-03   # --format json も出せる
+```
+
+- 日は JST、`--since` / `--until` はその両端を含む。queue の dir の既定は repository で打った `dagq locate` から求める。dagq が起動していない session（人が checkout で開いた session など）は合計に入れず、数だけを出す
+- この script と節は、恒久の記録（goal 95 の kpi / stats の Execution の軸、task 1494）が入ったら外す
+
 (c) 結論を分ける。書くのは次のどれか（重なるなら全部）と、その根拠の数字:
 
 - **軽い task の偏り**: 増えた時間の着地が `docs`・`plugin`（作業が短い）に偏り、`runtime` の claim→着地の中央値は前と変わらない → 本当に速くなったのではない

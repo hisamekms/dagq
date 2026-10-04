@@ -1,0 +1,2 @@
+{"type":"user","timestamp":"2026-10-02T05:00:00Z","cwd":"{{REPO}}-smoke","message":{"role":"user","content":"You review run r9 of dagq task 9 (t) before it lands."}}
+{"type":"assistant","requestId":"q6","timestamp":"2026-10-02T05:00:00Z","cwd":"{{REPO}}-smoke","message":{"id":"m6","role":"assistant","model":"claude-x","usage":{"input_tokens":9999,"output_tokens":9999,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}

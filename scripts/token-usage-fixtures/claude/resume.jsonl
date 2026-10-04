@@ -1,0 +1,2 @@
+{"type":"user","timestamp":"2026-10-03T01:00:00Z","cwd":"{{QUEUE}}/runs/def/worktree","message":{"role":"user","content":"dagq: this is the next turn of your session for run def (task 3)."}}
+{"type":"assistant","requestId":"q7","timestamp":"2026-10-03T01:00:00Z","cwd":"{{QUEUE}}/runs/def/worktree","message":{"id":"m7","role":"assistant","model":"claude-x","usage":{"input_tokens":3,"output_tokens":30,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}

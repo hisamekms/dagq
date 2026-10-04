@@ -1,0 +1,2 @@
+{"type":"user","timestamp":"2026-10-02T04:00:00Z","cwd":"{{REPO}}","message":{"role":"user","content":"Please fix this bug."}}
+{"type":"assistant","requestId":"q5","timestamp":"2026-10-02T04:00:00Z","cwd":"{{REPO}}","message":{"id":"m5","role":"assistant","model":"claude-x","usage":{"input_tokens":1000,"output_tokens":1000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}

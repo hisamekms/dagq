@@ -1,0 +1,5 @@
+{"timestamp":"2026-10-02T06:00:00Z","type":"session_meta","payload":{"id":"T3","cwd":"{{QUEUE}}/runs/xyz/worktree","originator":"codex_exec"}}
+{"timestamp":"2026-10-02T06:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"You are executing dagq task 2, run xyz."}]}}
+{"timestamp":"2026-10-02T06:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":103},"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":3,"total_tokens":0}}}}
+{"timestamp":"2026-10-02T06:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":103},"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":3,"total_tokens":0}}}}
+{"timestamp":"2026-10-02T06:10:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":155},"last_token_usage":{"input_tokens":50,"cached_input_tokens":0,"output_tokens":2,"total_tokens":0}}}}

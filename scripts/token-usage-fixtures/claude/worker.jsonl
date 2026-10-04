@@ -1,0 +1,2 @@
+{"type":"user","timestamp":"2026-10-02T03:00:00Z","cwd":"{{QUEUE}}/runs/abc/worktree","message":{"role":"user","content":"You are executing dagq task 1, run abc.\\nWork only in the assigned Git worktree."}}
+{"type":"assistant","requestId":"q4","timestamp":"2026-10-02T03:00:00Z","cwd":"{{QUEUE}}/runs/abc/worktree","message":{"id":"m4","role":"assistant","model":"claude-x","usage":{"input_tokens":7,"output_tokens":70,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}

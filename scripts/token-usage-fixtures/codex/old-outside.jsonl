@@ -1,0 +1,3 @@
+{"timestamp":"2026-09-20T06:00:00Z","type":"session_meta","payload":{"id":"T5","cwd":"{{QUEUE}}/runs/old/worktree"}}
+{"timestamp":"2026-09-20T06:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"You are executing dagq task 0, run old."}]}}
+{"timestamp":"2026-09-20T06:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":9},"last_token_usage":{"input_tokens":9,"cached_input_tokens":0,"output_tokens":0}}}}

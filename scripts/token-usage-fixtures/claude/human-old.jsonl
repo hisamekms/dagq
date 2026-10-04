@@ -1,0 +1,2 @@
+{"type":"user","timestamp":"2026-09-20T01:00:00Z","cwd":"{{REPO}}","message":{"role":"user","content":"An older question of a person."}}
+{"type":"assistant","requestId":"q8","timestamp":"2026-09-20T01:00:00Z","cwd":"{{REPO}}","message":{"id":"m8","role":"assistant","model":"claude-x","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
