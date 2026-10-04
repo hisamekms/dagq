@@ -4,7 +4,7 @@ type: plan
 title: 非対話の worker の workspace のコスト（cmux の呼び出しの失敗・時間切れ・残った workspace・startup・待ちの間の workspace）の基準値と、background の wrapper に切り替えた後の評価のコマンドと戻す基準の案
 status: active
 created: 2026-10-03
-updated: 2026-10-03
+updated: 2026-10-04
 owners:
   - hisamekms
 tags:
@@ -135,10 +135,10 @@ Claude 非対話は窓の中で待ちが 0 回で、基準は「0」ではなく
 
 ### 切り替えの時刻と印
 
-`dagq.toml` の設定（[headless-worker](../design/supervisor-lifecycle/headless-worker.md) の「予定」の節の `[headless] wrapper = "background"`。綴りは task 1405 が決めたものに読み替える）が着地して main checkout に反映され、supervisor が読んだ時刻に、人か inbox が固定バイナリで印を打つ（`dagq.toml` の `[run.env]` 以外の変更は runtime が印にしない）。
+`dagq.toml` の設定（[headless-worker](../design/supervisor-lifecycle/headless-worker.md) の「workspaceなしのbackgroundのwrapper」の `[headless] wrapper = "background"`。task 1408 が足した）が着地して main checkout に反映され、supervisor が読んだ時刻に、人か inbox が固定バイナリで印を打つ（`dagq.toml` の `[run.env]` 以外の変更は runtime が印にしない）。
 
 ```sh
-dagq mark 'headless wrapper → background (goal 89)' --note 'dagq.toml [headless] wrapper = "background"; workspace wrapper before' --at <効いた時刻>
+dagq mark 'headless wrapper background' --note 'dagq.toml [headless] wrapper = "background"; workspace wrapper before' --at <効いた時刻>
 ```
 
 設定は session の wrapper を起動する時点で読むので、印の時点で走っている run は workspace のまま終わる。後の窓では run を「wrapper をどちらに置いたか」で分ける（下の `g.jq`）。
@@ -152,7 +152,7 @@ F=<印の時刻>; T=<F + 7 日以上>
 for k in run_claimed provider_switched backend_call_failed workspace_created workspace_closed resume_finished \
          turn_started turn_finished wrapper_started agent_started run_waiting_started run_waiting_ended \
          run_adopted session_reopen_failed wrapper_heartbeat_expired recovery_requested auto_repaired \
-         wrapper_launched wrapper_stopped; do      # wrapper_launched / wrapper_stopped は仮の綴り（task 1405 の綴りに読み替える）
+         wrapper_launched wrapper_stopped; do      # wrapper_stopped は task 1405 に無く 0 件（止めた記録は handle の workspace_closed）
   dagq events --all --full --kind $k --since $F --until $T --limit 20000
 done | jq -s '[.[].events[]]' > ev.json
 jq -c 'group_by(.kind) | map({(.[0].kind): length}) | add' ev.json   # どの kind も --limit に届いていないことを確かめる
@@ -247,7 +247,7 @@ EOF
 jq -c -f st.jq tagged.json
 ```
 
-background の run の始まりは workspace の作成の代わりに wrapper の起動の記録（`wrapper_launched`、仮）。
+background の run の始まりは workspace の作成の代わりに wrapper の起動の記録（`wrapper_launched`）。
 
 ### C4: 待ちの間に抱えた workspace と wrapper
 
@@ -332,7 +332,7 @@ jq -c '.compare.confounders[] | select(.kind == "mark_recorded") | {at, label, p
 | adopt の失敗 | 1 件で: 引き継ぎ（`supervisor_handed_off`）か stale な lease の引き継ぎ（`run_adopted`）の後に、生きている `-bg` の wrapper を見失って run が `interrupted`・`failed` になった、または同じ run に 2 つの wrapper が登録された。加えて、引き継ぎをまたいだ `-bg` の turn のうち `succeeded` 以外が 10% を超えた | 引き継ぎをまたいだ Claude 非対話の turn 28 のうち `succeeded` 26、`stopped` 2（引き継ぎでなく heartbeat の途絶え）。`run_adopted` 0、`session_reopen_failed` 0 | 切り離した wrapper は pid と起動時刻で識別し直すので、識別を誤ると turn を失うか二重に走らせる。二重の wrapper は同じ worktree に 2 つの agent を走らせるので 1 件で見る |
 | heartbeat の途絶え | `-bg` の `wrapper_heartbeat_expired` が 100 run あたり 7 件を超える（基準 3/44 ≒ 6.8 件）。cmux の時間切れと同じ時刻に起きたものは数えない | 3（2 run。うち 2 件は cmux の 4 分の詰まりと同じ時刻） | background の wrapper は cmux の terminal に書かないので、cmux の詰まりと同じ時刻の途絶えは消えるはず。消えずに別の時刻で増えるなら、切り離した process の heartbeat の書き方を疑う |
 | startup | `-bg` の claim→最初の turn の p90 が 30 秒を超える | 3 / 4 / 15（中央値 / p90 / 最大） | workspace の作成を省くので延びないはず。延びたら起動の待ち（`wrapper_launched` の記録と登録の待ち）を疑う |
-| 人が出力を追えない | 人か inbox が `dagq run log`（仮）で run の出力を追えなかった報告が 1 件で、直す task を作る（戻すのは追えない状態が続くとき） | — | ADR-t1404-1 決定 6 の代わりの見方 |
+| 人が出力を追えない | 人か inbox が `dagq run log`で run の出力を追えなかった報告が 1 件で、直す task を作る（戻すのは追えない状態が続くとき） | — | ADR-t1404-1 決定 6 の代わりの見方 |
 
 戻す基準に当たらず、min_samples を満たし、C1 で `-bg` の run の cmux の失敗が 0、C2 で `-bg` の run の workspace が 0 なら、既定を変えるかを決める ADR（ADR-t1404-1 決定 7）の材料にする。
 

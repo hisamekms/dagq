@@ -109,6 +109,18 @@ provider = "codex"
 # provider・model・effort は書かず、Claude の既定のまま（Codex の planner は別の goal）。
 route = "headless"
 
+[headless]
+# 非対話の session wrapper（worker と runtime の planner）を cmux の workspace でなく、supervisor から切り離した
+# background の process として動かす（人の 2026-10-02 の提起「supervisor が background で起動すればよいのでは」。
+# goal 89、ADR-t1404-1 の決定 7、task 1405・1408。書式と振る舞いは docs/design/supervisor-lifecycle/headless-worker.md の
+# 「workspaceなしのbackgroundのwrapper」と run-environment.md の [headless] の項）。runtime の既定（workspace）は変えず、
+# この repository だけを切り替える。supervisor が wrapper を起動するたびに読むので、着地して main checkout に反映された後に
+# 起動する session から効き、動いている wrapper は workspace のまま終わる。出力は `dagq run log` / `planner log` で読む。
+# 基準値・評価のコマンド・戻す基準は docs/plans/headless-background-evaluation.md（戻すときはこの節を消すか wrapper = "workspace" にする）。
+# goal 92（ADR-t1433-3）の実装の後は、この欄を受け付けて無視し、値に関わらず background で動く（戻す経路は無くなる）。
+# [headless] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 1405・1406 を含んでから足した。
+wrapper = "background"
+
 [areas]
 # stats と kpi が着地 commit の差分から run の変更の対象（area）を求める対応表（ADR-t980-1、task 983。
 # 書式と求め方は docs/design/supervisor-lifecycle/kpi.md の「area」）。glob は --paths と同じ規則で重なってよく、
