@@ -62,10 +62,11 @@ const TIMELINE_GAP_SECS: i64 = 300;
 const LANDING_EVENTS: usize = 200;
 /// The finding kind of the weekly next move.
 pub const FINDING_KIND: &str = "throughput";
-/// The most the prompt may hold, in bytes (task 1099). Claude's headless
-/// job takes the prompt as an argument of `claude -p`, and the arguments
-/// and the environment together may not pass the host's `ARG_MAX` (1 MiB
-/// on macOS); the whole inputs of a day or a week are MBs.
+/// The most the prompt may hold, in bytes (task 1099). The job took the
+/// prompt as an argument then, which with the environment may not pass
+/// the host's `ARG_MAX` (1 MiB on macOS); it reads it from stdin now (task
+/// 1560), and the limit keeps the agent's context small, as the whole
+/// inputs of a day or a week are MBs.
 pub const PROMPT_LIMIT: usize = 128 * 1024;
 /// The most the inputs in the prompt ([`prompt_input`], pretty JSON) may
 /// hold, in bytes: the rest of [`PROMPT_LIMIT`] holds the instructions,
@@ -270,8 +271,7 @@ fn review_period(
     }
     let input = gather(queue, db, period, &landings, judgment.as_ref())?;
     // The job's `dagq` goes to the queue service in client mode: the
-    // prompt, an argument of the agent, names no queue path (goal 82's
-    // stage (3)).
+    // prompt names no queue path (goal 82's stage (3)).
     let command = "dagq";
     let checkout = crate::compose::bound_checkout(queue)?;
     let language = crate::infrastructure::language::language_for_prompt(
@@ -285,18 +285,29 @@ fn review_period(
         review_dir(db, period)?
     };
     failure["dir"] = json!(dir);
-    let prompt = crate::domain::language::with_instruction(
-        review_prompt(period, command, &input, &dir.join("input.json"))?,
+    let ReviewPrompt {
+        text: prompt,
+        record: prompt_record,
+    } = job_prompt(
+        period,
+        command,
+        &input,
+        &dir.join("input.json"),
         language.as_ref(),
-    );
+    )?;
+    // What the prompt took (ADR-t1566-1 decision 6), on the start and on
+    // the finish, whichever way the review ends.
+    merge(failure, &prompt_record);
     if options.dry_run {
-        return Ok(json!({
+        let mut payload = json!({
             "dry_run": true,
             "mode": options.mode.as_str(),
             "period": period.label,
             "hourly": judgment,
             "prompt": prompt,
-        }));
+        });
+        merge(&mut payload, &prompt_record);
+        return Ok(payload);
     }
     fs::write(dir.join("prompt.md"), &prompt)?;
     fs::write(
@@ -313,22 +324,22 @@ fn review_period(
         (launch.provider == Provider::Claude).then(|| uuid::Uuid::new_v4().to_string());
     failure["session_id"] = json!(session_id);
     let reasons = judgment.as_ref().map(|judged| judged.reasons.clone());
-    let started = queue.record_queue_event(
-        EventKind::ThroughputReviewStarted,
-        json!({
-            "mode": options.mode.as_str(),
-            "period": period.label,
-            "reasons": reasons,
-            "dir": dir,
-            "session_id": session_id,
-            "launch": launch.to_value(),
-        }),
-    )?;
+    let mut started = json!({
+        "mode": options.mode.as_str(),
+        "period": period.label,
+        "reasons": reasons,
+        "dir": dir,
+        "session_id": session_id,
+        "launch": launch.to_value(),
+    });
+    merge(&mut started, &prompt_record);
+    let started = queue.record_queue_event(EventKind::ThroughputReviewStarted, started)?;
     tracing::info!(
         mode = options.mode.as_str(),
         period = period.label,
-        "throughput review ({}) started",
-        options.mode.as_str()
+        "throughput review ({}) started with a prompt of {} bytes",
+        options.mode.as_str(),
+        prompt_record["prompt_bytes"]
     );
     let clock = Instant::now();
     let started_ms = std::time::SystemTime::now()
@@ -379,6 +390,7 @@ fn review_period(
         "pid": std::process::id(),
         "parent_pid": std::os::unix::process::parent_id(),
     });
+    merge(&mut payload, &prompt_record);
     let stdout = fs::read_to_string(dir.join("output.out")).unwrap_or_default();
     // Codex's thread and the model of its rollout (ADR-t1063-1 decision 6):
     // the id that closes its span and the model `stats` reads.
@@ -748,12 +760,67 @@ fn review_launch(checkout: Option<&Path>) -> ActorLaunch {
     }
 }
 
+/// The prompt the job is given and what it took.
+#[derive(Debug, Clone)]
+pub struct ReviewPrompt {
+    pub text: String,
+    /// What the prompt took (ADR-t1566-1 decision 6), recorded on
+    /// `throughput_review_started` and `throughput_review_finished` in the
+    /// observer's names (task 1567): `prompt_bytes` (the whole prompt with
+    /// its language line) and `prompt_limit`, `input_bytes` (the summary of
+    /// the inputs, pretty JSON) and `input_limit`, and `omitted_to_fit`,
+    /// the parts [`DROP_ORDER`] left out (empty when none).
+    pub record: Value,
+}
+
+/// The job's prompt ([`review_prompt`] with the language line) and what it
+/// took.
+pub fn job_prompt(
+    period: &Window,
+    dagq: &str,
+    input: &Value,
+    input_path: &Path,
+    language: Option<&crate::domain::language::Language>,
+) -> Result<ReviewPrompt> {
+    let summary = prompt_input(input);
+    let text = crate::domain::language::with_instruction(
+        render_prompt(period, dagq, &summary, input_path)?,
+        language,
+    );
+    let record = json!({
+        "prompt_bytes": text.len(),
+        "prompt_limit": PROMPT_LIMIT,
+        "input_bytes": pretty_len(&summary),
+        "input_limit": PROMPT_INPUT_LIMIT,
+        "omitted_to_fit": summary.get("omitted_to_fit").cloned().unwrap_or_else(|| json!([])),
+    });
+    Ok(ReviewPrompt { text, record })
+}
+
+/// Copy the keys of the object `from` into the object `into`.
+fn merge(into: &mut Value, from: &Value) {
+    if let (Value::Object(into), Value::Object(from)) = (into, from) {
+        into.extend(from.iter().map(|(key, value)| (key.clone(), value.clone())));
+    }
+}
+
 /// The job's instructions: its cadence's part of the weekly review, the
 /// form of its output, the procedure itself and the inputs.
 pub fn review_prompt(
     period: &Window,
     dagq: &str,
     input: &Value,
+    input_path: &Path,
+) -> Result<String> {
+    render_prompt(period, dagq, &prompt_input(input), input_path)
+}
+
+/// [`review_prompt`] with the summary of the inputs ([`prompt_input`])
+/// made already.
+fn render_prompt(
+    period: &Window,
+    dagq: &str,
+    summary: &Value,
     input_path: &Path,
 ) -> Result<String> {
     let cadence = match period.mode {
@@ -815,7 +882,7 @@ pub fn review_prompt(
         input_path = input_path.display(),
         start = millis_text(stats_from(period)),
         end = millis_text(period.end_ms),
-        input = serde_json::to_string_pretty(&prompt_input(input))?,
+        input = serde_json::to_string_pretty(summary)?,
     ))
 }
 
@@ -1220,5 +1287,62 @@ mod tests {
         assert_eq!(summary["period"]["label"], "x");
         assert!(summary.get("landings").is_none());
         assert_eq!(summary["omitted_to_fit"], json!(["landings"]));
+    }
+
+    #[test]
+    fn the_job_prompt_records_its_bytes_within_the_limit_after_dropping_parts() {
+        let huge = "s".repeat(PROMPT_INPUT_LIMIT);
+        let input = json!({
+            "period": {"label": "2026-W39"},
+            "landings": {"total": 5},
+            "stats": {"overall": huge},
+            "timelines": [{"run_id": "run-0", "secs": 9, "timeline": huge}],
+            "kpi": {"cores": 8, "periods": [{"label": "2026-W39", "kpis": {"a": {"all": {"value": huge}}}}], "targets": []},
+        });
+        assert!(input.to_string().len() > PROMPT_LIMIT);
+        let language = crate::domain::language::Language {
+            tag: "ja".to_owned(),
+            source: crate::domain::language::LanguageSource::Repository,
+        };
+        let window = window(ReviewMode::Weekly, 1_790_655_900_000, 0);
+        let fitted = job_prompt(
+            &window,
+            "dagq",
+            &input,
+            Path::new("/q/input.json"),
+            Some(&language),
+        )
+        .unwrap();
+        let record = &fitted.record;
+        // The whole prompt, its language line included, is counted.
+        assert!(fitted.text.ends_with(&language.instruction()));
+        assert_eq!(record["prompt_bytes"], fitted.text.len());
+        assert!(fitted.text.len() <= PROMPT_LIMIT, "{record}");
+        assert_eq!(record["prompt_limit"], PROMPT_LIMIT);
+        let summary = prompt_input(&input);
+        assert_eq!(record["input_bytes"], pretty_len(&summary));
+        assert!(pretty_len(&summary) <= PROMPT_INPUT_LIMIT, "{record}");
+        assert_eq!(record["input_limit"], PROMPT_INPUT_LIMIT);
+        assert_eq!(record["omitted_to_fit"], json!(["stats", "kpi.latest"]));
+        assert_eq!(record["omitted_to_fit"], summary["omitted_to_fit"]);
+        // The text is the prompt the review renders, with the language.
+        assert_eq!(
+            fitted.text,
+            crate::domain::language::with_instruction(
+                review_prompt(&window, "dagq", &input, Path::new("/q/input.json")).unwrap(),
+                Some(&language)
+            )
+        );
+        // Nothing dropped: the names are an empty list.
+        let small = job_prompt(
+            &window,
+            "dagq",
+            &json!({"landings": {"total": 3}}),
+            Path::new("/q/input.json"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(small.record["omitted_to_fit"], json!([]));
+        assert_eq!(small.record["prompt_bytes"], small.text.len());
     }
 }

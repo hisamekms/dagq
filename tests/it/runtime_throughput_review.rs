@@ -1,7 +1,7 @@
 //! Runtime tests: the throughput review (ADR-t996-1).
 use crate::{common, runtime_support};
 use dagq::domain::throughput_review::{HOUR_MS, ReviewMode, window};
-use dagq::throughput_review::{PROMPT_LIMIT, ReviewOptions};
+use dagq::throughput_review::{PROMPT_INPUT_LIMIT, PROMPT_LIMIT, ReviewOptions};
 
 use runtime_support::*;
 
@@ -266,6 +266,16 @@ fn an_hour_a_rule_meets_is_reviewed_saved_and_told_to_the_inbox_and_the_job_only
         json!({"role": "throughput_review", "provider": "claude", "model": null,
                "effort": null, "source": "default"})
     );
+    // Its start and its finish record what its prompt took (ADR-t1566-1
+    // decision 6), in the observer's names.
+    let prompt = fs::read_to_string(dir.join("prompt.md")).unwrap();
+    let finished = &queue_events(&db, "throughput_review_finished")[0];
+    for event in [&started[0], finished] {
+        assert_eq!(event["prompt_bytes"], prompt.len(), "{event}");
+        assert_eq!(event["prompt_limit"], PROMPT_LIMIT, "{event}");
+        assert!(event["input_bytes"].as_u64().unwrap() > 0, "{event}");
+        assert_eq!(event["omitted_to_fit"], json!([]), "{event}");
+    }
     // Its start opens its session's span and its finish, naming the same
     // session, closes it (task 1086); `stats` counts it under its kind.
     let session = &started[0]["session_id"];
@@ -447,6 +457,11 @@ fn a_failed_review_is_recorded_and_told_to_the_inbox_as_a_notice() {
     };
     let error = review(&db, &unstartable, &options(ReviewMode::Weekly)).unwrap();
     assert_eq!(error["outcome"], "error", "{error}");
+    // A job that did not start still records its prompt's bytes.
+    let prompt =
+        fs::read_to_string(PathBuf::from(error["dir"].as_str().unwrap()).join("prompt.md"))
+            .unwrap();
+    assert_eq!(error["prompt_bytes"], prompt.len(), "{error}");
     assert!(
         error["error"].as_str().unwrap().contains("start"),
         "{error}"
@@ -542,6 +557,14 @@ fn the_daily_and_weekly_reviews_of_inputs_of_mbs_start_their_agent_with_a_small_
         );
         assert!(prompt.contains(&dir.join("input.json").display().to_string()));
         assert!(prompt.contains("\"health\""), "{}", mode.as_str());
+        // The prompt's bytes are recorded on its start and finish.
+        let started = queue_events(&db, "throughput_review_started");
+        let started = started.last().unwrap();
+        assert_eq!(started["period"], done["period"]);
+        for event in [started, &done] {
+            assert_eq!(event["prompt_bytes"], prompt.len(), "{event}");
+            assert!(event["input_bytes"].as_u64().unwrap() <= PROMPT_INPUT_LIMIT as u64);
+        }
     }
     assert_eq!(queue_events(&db, "throughput_review_reported").len(), 2);
 }
