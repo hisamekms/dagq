@@ -36,13 +36,51 @@ pub trait PlanningStore {
         judgement: crate::domain::follow_up::MembershipJudgement,
         role: &str,
     ) -> Result<Value>;
-    fn set_goal(&mut self, task: TaskId, goal: Option<GoalId>) -> Result<Task>;
-    fn set_paths(&mut self, task: TaskId, paths: Vec<String>) -> Result<Task>;
-    fn set_priority(&mut self, task: TaskId, priority: Priority) -> Result<Task>;
-    fn transition(&mut self, task: TaskId, action: TaskAction) -> Result<Task>;
-    fn cancel_duplicate(&mut self, task: TaskId, duplicate_of: TaskId) -> Result<Task>;
-    fn add_dependency(&mut self, task: TaskId, on: Dependency) -> Result<()>;
-    fn remove_dependency(&mut self, task: TaskId, on: Dependency) -> Result<()>;
+    // Like `edit_task`, each change of a task below gets the status it was
+    // authorized with and refuses, changing nothing, a task with another
+    // one in the store's transaction (task 1609).
+    fn set_goal(
+        &mut self,
+        task: TaskId,
+        goal: Option<GoalId>,
+        authorized: TaskStatus,
+    ) -> Result<Task>;
+    fn set_paths(
+        &mut self,
+        task: TaskId,
+        paths: Vec<String>,
+        authorized: TaskStatus,
+    ) -> Result<Task>;
+    fn set_priority(
+        &mut self,
+        task: TaskId,
+        priority: Priority,
+        authorized: TaskStatus,
+    ) -> Result<Task>;
+    fn transition(
+        &mut self,
+        task: TaskId,
+        action: TaskAction,
+        authorized: TaskStatus,
+    ) -> Result<Task>;
+    fn cancel_duplicate(
+        &mut self,
+        task: TaskId,
+        duplicate_of: TaskId,
+        authorized: TaskStatus,
+    ) -> Result<Task>;
+    fn add_dependency(
+        &mut self,
+        task: TaskId,
+        on: Dependency,
+        authorized: TaskStatus,
+    ) -> Result<()>;
+    fn remove_dependency(
+        &mut self,
+        task: TaskId,
+        on: Dependency,
+        authorized: TaskStatus,
+    ) -> Result<()>;
     fn show(&mut self, task: TaskId) -> Result<TaskDetail>;
     fn submit(&mut self, submission: Submission, findings: &[FindingId]) -> Result<Proposal>;
     fn withdraw_proposal(&mut self, proposal: ProposalId) -> Result<Proposal>;
@@ -115,23 +153,23 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
     }
 
     pub fn set_goal(&mut self, task: TaskId, goal: Option<GoalId>) -> Result<Task> {
-        self.authorize_task(Capability::TaskWrite, task)?;
-        self.store.set_goal(task, goal)
+        let status = self.authorize_task(Capability::TaskWrite, task)?;
+        self.store.set_goal(task, goal, status)
     }
 
     pub fn set_paths(&mut self, task: TaskId, paths: Vec<String>) -> Result<Task> {
-        self.authorize_task(Capability::TaskWrite, task)?;
-        self.store.set_paths(task, paths)
+        let status = self.authorize_task(Capability::TaskWrite, task)?;
+        self.store.set_paths(task, paths, status)
     }
 
     pub fn set_priority(&mut self, task: TaskId, priority: Priority) -> Result<Task> {
-        self.authorize_task(Capability::TaskWrite, task)?;
-        self.store.set_priority(task, priority)
+        let status = self.authorize_task(Capability::TaskWrite, task)?;
+        self.store.set_priority(task, priority, status)
     }
 
     pub fn draft(&mut self, task: TaskId) -> Result<Task> {
-        self.authorize_task(Capability::TaskWrite, task)?;
-        self.store.transition(task, TaskAction::Draft)
+        let status = self.authorize_task(Capability::TaskWrite, task)?;
+        self.store.transition(task, TaskAction::Draft, status)
     }
 
     /// `ready`, or `ready --bypass-review` past plan review: the user's and
@@ -142,30 +180,30 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
         } else {
             (Capability::TaskReady, TaskAction::Ready)
         };
-        self.authorize_task(capability, task)?;
-        self.store.transition(task, action)
+        let status = self.authorize_task(capability, task)?;
+        self.store.transition(task, action, status)
     }
 
     /// `cancel`, as a duplicate of another task when it names one.
     pub fn cancel(&mut self, task: TaskId, duplicate_of: Option<TaskId>) -> Result<Task> {
-        self.authorize_task(Capability::TaskCancel, task)?;
+        let status = self.authorize_task(Capability::TaskCancel, task)?;
         match duplicate_of {
-            Some(other) => self.store.cancel_duplicate(task, other),
-            None => self.store.transition(task, TaskAction::Cancel),
+            Some(other) => self.store.cancel_duplicate(task, other, status),
+            None => self.store.transition(task, TaskAction::Cancel, status),
         }
     }
 
     /// `dependency add`: the task as it is afterwards.
     pub fn add_dependency(&mut self, task: TaskId, on: Dependency) -> Result<TaskDetail> {
-        self.authorize_task(Capability::TaskWrite, task)?;
-        self.store.add_dependency(task, on)?;
+        let status = self.authorize_task(Capability::TaskWrite, task)?;
+        self.store.add_dependency(task, on, status)?;
         self.store.show(task)
     }
 
     /// `dependency remove`: the task as it is afterwards.
     pub fn remove_dependency(&mut self, task: TaskId, on: Dependency) -> Result<TaskDetail> {
-        self.authorize_task(Capability::TaskWrite, task)?;
-        self.store.remove_dependency(task, on)?;
+        let status = self.authorize_task(Capability::TaskWrite, task)?;
+        self.store.remove_dependency(task, on, status)?;
         self.store.show(task)
     }
 
@@ -233,7 +271,10 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
         Ok(Resource::Proposal { id, owner })
     }
 
-    fn authorize_task(&mut self, capability: Capability, id: TaskId) -> Result<()> {
+    /// Authorize `capability` on the task as the store holds it now; the
+    /// status it was authorized with is returned for the store to check
+    /// again in its transaction (task 1609).
+    fn authorize_task(&mut self, capability: Capability, id: TaskId) -> Result<TaskStatus> {
         self.refuse_ungranted(capability, &Resource::task(id))?;
         let status = self.store.task_status(id)?;
         self.authorize(
@@ -242,7 +283,8 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
                 id,
                 status: Some(status),
             },
-        )
+        )?;
+        Ok(status)
     }
 
     /// Refuse, before the store is read, a capability the actor has on no
@@ -297,8 +339,9 @@ mod tests {
         owner: Option<String>,
         denials: RefCell<Vec<Value>>,
         record_fails: bool,
-        /// The status `edit_task` was handed as the authorized one.
-        edited_as: Option<TaskStatus>,
+        /// The status the last change of a task was handed as the
+        /// authorized one.
+        authorized_as: Option<TaskStatus>,
     }
 
     fn reached(what: &str) -> anyhow::Error {
@@ -323,7 +366,7 @@ mod tests {
             Err(reached("add"))
         }
         fn edit_task(&mut self, _: TaskId, _: TaskEdit, authorized: TaskStatus) -> Result<Task> {
-            self.edited_as = Some(authorized);
+            self.authorized_as = Some(authorized);
             Err(reached("edit"))
         }
         fn judge_follow_up(
@@ -334,25 +377,57 @@ mod tests {
         ) -> Result<Value> {
             unreachable!()
         }
-        fn set_goal(&mut self, _: TaskId, _: Option<GoalId>) -> Result<Task> {
+        fn set_goal(
+            &mut self,
+            _: TaskId,
+            _: Option<GoalId>,
+            authorized: TaskStatus,
+        ) -> Result<Task> {
+            self.authorized_as = Some(authorized);
             Err(reached("set-goal"))
         }
-        fn set_paths(&mut self, _: TaskId, _: Vec<String>) -> Result<Task> {
+        fn set_paths(&mut self, _: TaskId, _: Vec<String>, authorized: TaskStatus) -> Result<Task> {
+            self.authorized_as = Some(authorized);
             Err(reached("set-paths"))
         }
-        fn set_priority(&mut self, _: TaskId, _: Priority) -> Result<Task> {
+        fn set_priority(&mut self, _: TaskId, _: Priority, authorized: TaskStatus) -> Result<Task> {
+            self.authorized_as = Some(authorized);
             Err(reached("set-priority"))
         }
-        fn transition(&mut self, _: TaskId, action: TaskAction) -> Result<Task> {
+        fn transition(
+            &mut self,
+            _: TaskId,
+            action: TaskAction,
+            authorized: TaskStatus,
+        ) -> Result<Task> {
+            self.authorized_as = Some(authorized);
             Err(reached(&format!("{action:?}")))
         }
-        fn cancel_duplicate(&mut self, _: TaskId, _: TaskId) -> Result<Task> {
+        fn cancel_duplicate(
+            &mut self,
+            _: TaskId,
+            _: TaskId,
+            authorized: TaskStatus,
+        ) -> Result<Task> {
+            self.authorized_as = Some(authorized);
             Err(reached("cancel-duplicate"))
         }
-        fn add_dependency(&mut self, _: TaskId, _: Dependency) -> Result<()> {
+        fn add_dependency(
+            &mut self,
+            _: TaskId,
+            _: Dependency,
+            authorized: TaskStatus,
+        ) -> Result<()> {
+            self.authorized_as = Some(authorized);
             Err(reached("dependency add"))
         }
-        fn remove_dependency(&mut self, _: TaskId, _: Dependency) -> Result<()> {
+        fn remove_dependency(
+            &mut self,
+            _: TaskId,
+            _: Dependency,
+            authorized: TaskStatus,
+        ) -> Result<()> {
+            self.authorized_as = Some(authorized);
             Err(reached("dependency remove"))
         }
         fn show(&mut self, _: TaskId) -> Result<TaskDetail> {
@@ -695,7 +770,50 @@ mod tests {
                 .edit(TASK, verify())
                 .unwrap_err();
             assert_eq!(error.to_string(), "store: edit", "{actor:?} {status:?}");
-            assert_eq!(store.edited_as, Some(status), "{actor:?}");
+            assert_eq!(store.authorized_as, Some(status), "{actor:?}");
+        }
+    }
+
+    /// Task 1609: every other change of a task hands the store the status
+    /// it was authorized with too, `ready` and `cancel` included.
+    #[test]
+    fn each_change_of_a_task_hands_the_store_the_status_it_was_authorized_with() {
+        type Command = fn(&mut Planning<'_, Store>) -> Result<()>;
+        let commands: [(&str, Command); 10] = [
+            ("store: set-goal", |p| {
+                p.set_goal(TASK, Some(GOAL)).map(drop)
+            }),
+            ("store: set-paths", |p| p.set_paths(TASK, vec![]).map(drop)),
+            ("store: set-priority", |p| {
+                p.set_priority(TASK, Priority::default()).map(drop)
+            }),
+            ("store: Draft", |p| p.draft(TASK).map(drop)),
+            ("store: Ready", |p| p.ready(TASK, false).map(drop)),
+            ("store: BypassReview", |p| p.ready(TASK, true).map(drop)),
+            ("store: Cancel", |p| p.cancel(TASK, None).map(drop)),
+            ("store: cancel-duplicate", |p| {
+                p.cancel(TASK, Some(TaskId::new(2))).map(drop)
+            }),
+            ("store: dependency add", |p| {
+                p.add_dependency(TASK, Dependency::Goal(GOAL)).map(drop)
+            }),
+            ("store: dependency remove", |p| {
+                p.remove_dependency(TASK, Dependency::Task(TaskId::new(2)))
+                    .map(drop)
+            }),
+        ];
+        for status in [TaskStatus::Draft, TaskStatus::Submitted] {
+            for (reached, command) in commands {
+                let mut store = Store {
+                    status: Some(status),
+                    ..Store::default()
+                };
+                let me = ActorContext::user();
+                let error =
+                    command(&mut Planning::new(&mut store, &me, &StaticPolicy)).unwrap_err();
+                assert_eq!(error.to_string(), reached, "{status:?}");
+                assert_eq!(store.authorized_as, Some(status), "{reached}");
+            }
         }
     }
 

@@ -4,8 +4,8 @@ type: design
 title: Authorization
 status: current
 created: 2026-09-27
-updated: 2026-10-04 # task 1509; task 1437
-last_verified: 2026-10-04 # task 1509; task 1437
+updated: 2026-10-05 # task 1509; task 1437; task 1609
+last_verified: 2026-10-05 # task 1509; task 1437; task 1609
 scope: runtime
 related:
   - adr-t1394-1
@@ -120,7 +120,7 @@ askのkindはroleごとに決まる（`opens_ask`）: userとinboxとsupervisor�
 | `proposal withdraw` | `proposal.withdraw` | proposal（持ち主） |
 | `goal add` / `goal edit` / `goal ready` / `goal close` / `goal review` | `goal.write` / `goal.write` / `goal.ready` / `goal.close` / `goal.review_request` | queue / goal |
 
-終了runのverifyだけはuserとinboxが`task.verify_edit`で直せる（[ADR-t883-1](../adr/2026-09-30-t883-1-edit-ended-run-verification-before-inherited-retry.md)）。planner・worker・jobはこの権限を持たない。`required_evidence`と`paths`は変更できず、`task_edited`の`from`/`to`とactorに修正が残る。`edit`のcapabilityは`Planning`がtransactionの外で読んだtaskの状態から選ぶので、`Planning`はその状態をstoreの`edit_task`に渡し、storeは同じtransactionで読んだ状態と照合する。食い違えば（例: `ready`で`task.write`を通った後にclaimされ、runが失敗して`in_progress`になった）、taskも`task_edited`も変えずに状態が変わったことを理由に拒む（task 1247）。
+終了runのverifyだけはuserとinboxが`task.verify_edit`で直せる（[ADR-t883-1](../adr/2026-09-30-t883-1-edit-ended-run-verification-before-inherited-retry.md)）。planner・worker・jobはこの権限を持たない。`required_evidence`と`paths`は変更できず、`task_edited`の`from`/`to`とactorに修正が残る。`edit`のcapabilityは`Planning`がtransactionの外で読んだtaskの状態から選ぶので、`Planning`はその状態をstoreの`edit_task`に渡し、storeは同じtransactionで読んだ状態と照合する。食い違えば（例: `ready`で`task.write`を通った後にclaimされ、runが失敗して`in_progress`になった）、taskも`task_edited`も変えずに状態が変わったことを理由に拒む（task 1247）。taskの状態で認可する他のコマンド（`set-goal`・`set-paths`・`set-priority`・`draft`・`ready`（`--bypass-review`を含む）・`cancel`（`--duplicate-of`を含む）・`dependency add` / `remove`）も同じく、認可に使った状態をstoreに渡し、storeは書く前に同じtransactionで照合して、食い違えばtask・依存・eventを変えずに拒む。domainの遷移はrunの終わった`in_progress`からの`draft`と`cancel`を許すので、照合が無いと`ready`で認可したplannerの`cancel` / `draft`が、その間にclaimされてrunが失敗した`in_progress`のtaskに当たる（task 1609）。
 
 `judge-follow-up`は`follow_up.judge`をtask resourceで判定し、user・inbox・plannerだけに許す。taskの状態による制限は無く、submitted以降の訂正も記録できる（所属を動かすのはdraft/readyだけ。[所属の判断](follow-up-membership.md)）。
 

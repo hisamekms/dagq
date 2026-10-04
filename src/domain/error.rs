@@ -51,9 +51,11 @@ pub enum DomainError {
         task_id: TaskId,
         status: TaskStatus,
     },
-    /// `dagq edit` of a task whose status changed between the
-    /// authorization and the store's transaction: what the edit was allowed
-    /// to do was decided from the status it had then (ADR-t883-1).
+    /// A change of a task (`dagq edit`, `set-goal`, `set-paths`,
+    /// `set-priority`, `draft`, `ready`, `cancel`, `dependency`) whose status
+    /// changed between the authorization and the store's transaction: what
+    /// the command was allowed to do was decided from the status it had
+    /// then (ADR-t883-1, task 1609).
     TaskStatusChangedSinceAuthorized {
         task_id: TaskId,
         authorized: TaskStatus,
@@ -369,7 +371,7 @@ impl fmt::Display for DomainError {
                 status,
             } => write!(
                 f,
-                "task {task_id} is {} now, not {} as when this edit was authorized; nothing was edited, run it again",
+                "task {task_id} is {} now, not {} as when this command was authorized; nothing was changed, run it again",
                 status.as_str(),
                 authorized.as_str()
             ),

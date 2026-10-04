@@ -607,6 +607,233 @@ fn path_text(path: &Path) -> Result<&str> {
         .with_context(|| format!("path is not UTF-8: {}", path.display()))
 }
 
+/// The planning commands' changes of a task (task 1609): each refuses,
+/// before it writes, a task whose status in its transaction is not
+/// `authorized`, the one the caller authorized it with. The [`TaskStore`]
+/// methods of the same names pass `None` and check nothing more.
+impl SqliteQueue {
+    pub(super) fn transition_authorized(
+        &mut self,
+        task_id: TaskId,
+        action: TaskAction,
+        authorized: Option<TaskStatus>,
+    ) -> Result<Task> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        check_authorized(&tx, task_id, authorized)?;
+        let result = transition_task(&tx, task_id, action, &self.generators.clock.timestamp())?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    pub(super) fn cancel_duplicate_authorized(
+        &mut self,
+        task_id: TaskId,
+        duplicate_of: TaskId,
+        authorized: Option<TaskStatus>,
+    ) -> Result<Task> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        check_authorized(&tx, task_id, authorized)?;
+        let result = cancel_as_duplicate(
+            &tx,
+            task_id,
+            duplicate_of,
+            None,
+            &self.generators.clock.timestamp(),
+        )?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    pub(super) fn add_dependency_authorized(
+        &mut self,
+        task_id: TaskId,
+        predecessor_id: TaskId,
+        authorized: Option<TaskStatus>,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        check_authorized(&tx, task_id, authorized)?;
+        insert_dependency(
+            &tx,
+            task_id,
+            predecessor_id,
+            &self.generators.clock.timestamp(),
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(super) fn remove_dependency_authorized(
+        &mut self,
+        task_id: TaskId,
+        predecessor_id: TaskId,
+        authorized: Option<TaskStatus>,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        check_authorized(&tx, task_id, authorized)?;
+        task::check_dependencies_editable(&read_task(&tx, task_id)?)?;
+        let changed = tx.execute(
+            "DELETE FROM task_dependencies WHERE task_id=?1 AND predecessor_id=?2",
+            params![task_id, predecessor_id],
+        )?;
+        ensure!(
+            changed == 1,
+            "dependency {task_id} -> {predecessor_id} does not exist"
+        );
+        touch(&tx, task_id, &self.generators.clock.timestamp())?;
+        event(
+            &tx,
+            task_id,
+            None,
+            EventKind::DependencyRemoved,
+            json!({"predecessor_id": predecessor_id}),
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(super) fn add_goal_dependency_authorized(
+        &mut self,
+        task_id: TaskId,
+        goal_id: GoalId,
+        authorized: Option<TaskStatus>,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        check_authorized(&tx, task_id, authorized)?;
+        insert_goal_dependency(&tx, task_id, goal_id, &self.generators.clock.timestamp())?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(super) fn remove_goal_dependency_authorized(
+        &mut self,
+        task_id: TaskId,
+        goal_id: GoalId,
+        authorized: Option<TaskStatus>,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        check_authorized(&tx, task_id, authorized)?;
+        task::check_dependencies_editable(&read_task(&tx, task_id)?)?;
+        let changed = tx.execute(
+            "DELETE FROM task_goal_dependencies WHERE task_id=?1 AND goal_id=?2",
+            params![task_id, goal_id],
+        )?;
+        ensure!(
+            changed == 1,
+            "dependency {task_id} -> goal {goal_id} does not exist"
+        );
+        touch(&tx, task_id, &self.generators.clock.timestamp())?;
+        event(
+            &tx,
+            task_id,
+            None,
+            EventKind::GoalDependencyRemoved,
+            json!({"goal_id": goal_id}),
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(super) fn set_goal_authorized(
+        &mut self,
+        task_id: TaskId,
+        goal_id: Option<GoalId>,
+        authorized: Option<TaskStatus>,
+    ) -> Result<Task> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        check_authorized(&tx, task_id, authorized)?;
+        super::follow_up_membership::check_set_goal(&tx, task_id, goal_id)?;
+        let result = set_goal_in(&tx, task_id, goal_id, &self.generators.clock.timestamp())?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    pub(super) fn set_paths_authorized(
+        &mut self,
+        task_id: TaskId,
+        paths: Vec<String>,
+        authorized: Option<TaskStatus>,
+    ) -> Result<Task> {
+        // Checked before the task is read, so a bad glob is reported first.
+        validate_path_globs(&paths)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        check_authorized(&tx, task_id, authorized)?;
+        let task = read_task(&tx, task_id)?;
+        let from = task.paths().to_vec();
+        let task = task::set_paths(task, paths)?;
+        if from != task.paths() {
+            tx.execute(
+                "UPDATE tasks SET paths=?1, updated_at=?2 WHERE id=?3",
+                params![
+                    serde_json::to_string(task.paths())?,
+                    self.generators.clock.timestamp(),
+                    task_id
+                ],
+            )?;
+            event(
+                &tx,
+                task_id,
+                None,
+                EventKind::TaskPathsChanged,
+                json!({"from": from, "to": task.paths()}),
+            )?;
+        }
+        let result = read_task(&tx, task_id)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    pub(super) fn set_priority_authorized(
+        &mut self,
+        task_id: TaskId,
+        priority: Priority,
+        authorized: Option<TaskStatus>,
+    ) -> Result<Task> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        check_authorized(&tx, task_id, authorized)?;
+        let task = read_task(&tx, task_id)?;
+        let from = task.priority();
+        let task = task::set_priority(task, priority)?;
+        if from != task.priority() {
+            tx.execute(
+                "UPDATE tasks SET priority=?1, updated_at=?2 WHERE id=?3",
+                params![
+                    task.priority().as_i64(),
+                    self.generators.clock.timestamp(),
+                    task_id
+                ],
+            )?;
+            event(
+                &tx,
+                task_id,
+                None,
+                EventKind::TaskPriorityChanged,
+                json!({"from": from, "to": task.priority()}),
+            )?;
+        }
+        let result = read_task(&tx, task_id)?;
+        tx.commit()?;
+        Ok(result)
+    }
+}
+
 impl TaskStore for SqliteQueue {
     fn add(&mut self, new: NewTask) -> Result<Task> {
         // Rejected before taking the write lock; `new` checks it again.
@@ -774,100 +1001,27 @@ impl TaskStore for SqliteQueue {
     }
 
     fn transition(&mut self, task_id: TaskId, action: TaskAction) -> Result<Task> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let result = transition_task(&tx, task_id, action, &self.generators.clock.timestamp())?;
-        tx.commit()?;
-        Ok(result)
+        self.transition_authorized(task_id, action, None)
     }
 
     fn cancel_duplicate(&mut self, task_id: TaskId, duplicate_of: TaskId) -> Result<Task> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let result = cancel_as_duplicate(
-            &tx,
-            task_id,
-            duplicate_of,
-            None,
-            &self.generators.clock.timestamp(),
-        )?;
-        tx.commit()?;
-        Ok(result)
+        self.cancel_duplicate_authorized(task_id, duplicate_of, None)
     }
 
     fn add_dependency(&mut self, task_id: TaskId, predecessor_id: TaskId) -> Result<()> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        insert_dependency(
-            &tx,
-            task_id,
-            predecessor_id,
-            &self.generators.clock.timestamp(),
-        )?;
-        tx.commit()?;
-        Ok(())
+        self.add_dependency_authorized(task_id, predecessor_id, None)
     }
 
     fn remove_dependency(&mut self, task_id: TaskId, predecessor_id: TaskId) -> Result<()> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        task::check_dependencies_editable(&read_task(&tx, task_id)?)?;
-        let changed = tx.execute(
-            "DELETE FROM task_dependencies WHERE task_id=?1 AND predecessor_id=?2",
-            params![task_id, predecessor_id],
-        )?;
-        ensure!(
-            changed == 1,
-            "dependency {task_id} -> {predecessor_id} does not exist"
-        );
-        touch(&tx, task_id, &self.generators.clock.timestamp())?;
-        event(
-            &tx,
-            task_id,
-            None,
-            EventKind::DependencyRemoved,
-            json!({"predecessor_id": predecessor_id}),
-        )?;
-        tx.commit()?;
-        Ok(())
+        self.remove_dependency_authorized(task_id, predecessor_id, None)
     }
 
     fn add_goal_dependency(&mut self, task_id: TaskId, goal_id: GoalId) -> Result<()> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        insert_goal_dependency(&tx, task_id, goal_id, &self.generators.clock.timestamp())?;
-        tx.commit()?;
-        Ok(())
+        self.add_goal_dependency_authorized(task_id, goal_id, None)
     }
 
     fn remove_goal_dependency(&mut self, task_id: TaskId, goal_id: GoalId) -> Result<()> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        task::check_dependencies_editable(&read_task(&tx, task_id)?)?;
-        let changed = tx.execute(
-            "DELETE FROM task_goal_dependencies WHERE task_id=?1 AND goal_id=?2",
-            params![task_id, goal_id],
-        )?;
-        ensure!(
-            changed == 1,
-            "dependency {task_id} -> goal {goal_id} does not exist"
-        );
-        touch(&tx, task_id, &self.generators.clock.timestamp())?;
-        event(
-            &tx,
-            task_id,
-            None,
-            EventKind::GoalDependencyRemoved,
-            json!({"goal_id": goal_id}),
-        )?;
-        tx.commit()?;
-        Ok(())
+        self.remove_goal_dependency_authorized(task_id, goal_id, None)
     }
 
     fn candidates(&self) -> Result<Vec<Task>> {
@@ -1239,44 +1393,11 @@ impl TaskStore for SqliteQueue {
     }
 
     fn set_goal(&mut self, task_id: TaskId, goal_id: Option<GoalId>) -> Result<Task> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        super::follow_up_membership::check_set_goal(&tx, task_id, goal_id)?;
-        let result = set_goal_in(&tx, task_id, goal_id, &self.generators.clock.timestamp())?;
-        tx.commit()?;
-        Ok(result)
+        self.set_goal_authorized(task_id, goal_id, None)
     }
 
     fn set_paths(&mut self, task_id: TaskId, paths: Vec<String>) -> Result<Task> {
-        // Checked before the task is read, so a bad glob is reported first.
-        validate_path_globs(&paths)?;
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let task = read_task(&tx, task_id)?;
-        let from = task.paths().to_vec();
-        let task = task::set_paths(task, paths)?;
-        if from != task.paths() {
-            tx.execute(
-                "UPDATE tasks SET paths=?1, updated_at=?2 WHERE id=?3",
-                params![
-                    serde_json::to_string(task.paths())?,
-                    self.generators.clock.timestamp(),
-                    task_id
-                ],
-            )?;
-            event(
-                &tx,
-                task_id,
-                None,
-                EventKind::TaskPathsChanged,
-                json!({"from": from, "to": task.paths()}),
-            )?;
-        }
-        let result = read_task(&tx, task_id)?;
-        tx.commit()?;
-        Ok(result)
+        self.set_paths_authorized(task_id, paths, None)
     }
 
     fn edit_task(
@@ -1371,32 +1492,7 @@ impl TaskStore for SqliteQueue {
     }
 
     fn set_priority(&mut self, task_id: TaskId, priority: Priority) -> Result<Task> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let task = read_task(&tx, task_id)?;
-        let from = task.priority();
-        let task = task::set_priority(task, priority)?;
-        if from != task.priority() {
-            tx.execute(
-                "UPDATE tasks SET priority=?1, updated_at=?2 WHERE id=?3",
-                params![
-                    task.priority().as_i64(),
-                    self.generators.clock.timestamp(),
-                    task_id
-                ],
-            )?;
-            event(
-                &tx,
-                task_id,
-                None,
-                EventKind::TaskPriorityChanged,
-                json!({"from": from, "to": task.priority()}),
-            )?;
-        }
-        let result = read_task(&tx, task_id)?;
-        tx.commit()?;
-        Ok(result)
+        self.set_priority_authorized(task_id, priority, None)
     }
 }
 
@@ -2228,6 +2324,20 @@ fn insert_goal_dependency(
             EventKind::GoalDependencyAdded,
             json!({"goal_id": goal_id}),
         )?;
+    }
+    Ok(())
+}
+
+/// Refuse, before anything is written, a task whose status in the open
+/// transaction is not `authorized`, the one its command was authorized
+/// with (ADR-t883-1, task 1609); `None` checks nothing.
+fn check_authorized(
+    conn: &Connection,
+    task_id: TaskId,
+    authorized: Option<TaskStatus>,
+) -> Result<()> {
+    if let Some(authorized) = authorized {
+        task::check_status_authorized(&read_task(conn, task_id)?, authorized)?;
     }
     Ok(())
 }

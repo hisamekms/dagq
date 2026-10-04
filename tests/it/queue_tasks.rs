@@ -3,7 +3,11 @@
 use crate::common;
 
 use dagq::{
-    application::{StatusFilter, TaskQuery, TaskStore, dependency_graph},
+    application::{
+        StatusFilter, TaskQuery, TaskStore,
+        commands::planning::{self, Dependency},
+        dependency_graph,
+    },
     domain::{
         ClaimOutcome, EvidenceCheck, GoalId, Priority, TaskAction, TaskEdit, TaskId, TaskStatus,
     },
@@ -366,7 +370,7 @@ fn an_edit_authorized_on_another_status_changes_nothing() {
             .unwrap_err()
             .to_string(),
         format!(
-            "task {} is in_progress now, not ready as when this edit was authorized; nothing was edited, run it again",
+            "task {} is in_progress now, not ready as when this command was authorized; nothing was changed, run it again",
             task.id()
         )
     );
@@ -649,4 +653,148 @@ fn list_pages_by_limit_with_next_as_the_following_before() {
         ..TaskQuery::default()
     };
     assert!(queue.list(&zero).is_err());
+}
+
+/// A ready task claimed in between and left `in_progress` by a failed run,
+/// as a planner's `cancel` or `draft` authorized on `ready` would find it.
+fn claimed_and_failed(dir: &tempfile::TempDir, queue: &mut SqliteQueue, title: &str) -> TaskId {
+    let task = queue.add(new_task(title)).unwrap().id();
+    queue.transition(task, TaskAction::BypassReview).unwrap();
+    let run = match queue.claim(&base()).unwrap() {
+        ClaimOutcome::Claimed { run } => run,
+        other => panic!("unexpected claim: {other:?}"),
+    };
+    assert_eq!(run.task_id(), task);
+    Connection::open(dir.path().join("queue.db"))
+        .unwrap()
+        .execute(
+            "UPDATE task_runs SET status='failed' WHERE id=?1",
+            [run.id().as_str()],
+        )
+        .unwrap();
+    task
+}
+
+/// Task 1609: `cancel` (with `--duplicate-of` too), `draft`, `set-goal`,
+/// `set-paths`, `set-priority`, `ready` and `dependency add` / `remove`,
+/// authorized while the task was `ready`, are refused when the store finds
+/// it `in_progress` with a failed run; the task, its dependencies and its
+/// events stay as they were. Authorized with the status the task has, the
+/// same commands go on as before.
+#[test]
+fn changes_authorized_on_another_status_change_nothing() {
+    let (dir, mut queue) = fixture();
+    let refused = |id: TaskId| {
+        format!(
+            "task {id} is in_progress now, not ready as when this command was authorized; nothing was changed, run it again"
+        )
+    };
+    let other = queue.add(new_task("predecessor")).unwrap().id();
+    let goal = queue.add_goal(new_goal("grouped")).unwrap().id();
+    let task = claimed_and_failed(&dir, &mut queue, "claimed in between");
+    let before = queue.show(task).unwrap();
+    let ready = TaskStatus::Ready;
+    let errors = [
+        planning::PlanningStore::transition(&mut queue, task, TaskAction::Cancel, ready),
+        planning::PlanningStore::transition(&mut queue, task, TaskAction::Draft, ready),
+        planning::PlanningStore::transition(&mut queue, task, TaskAction::BypassReview, ready),
+        planning::PlanningStore::cancel_duplicate(&mut queue, task, other, ready),
+        planning::PlanningStore::set_goal(&mut queue, task, Some(goal), ready),
+        planning::PlanningStore::set_paths(&mut queue, task, vec!["docs/**".into()], ready),
+        planning::PlanningStore::set_priority(&mut queue, task, Priority::High, ready),
+    ]
+    .into_iter()
+    .map(|result| result.unwrap_err().to_string())
+    .chain(
+        [
+            planning::PlanningStore::add_dependency(
+                &mut queue,
+                task,
+                Dependency::Task(other),
+                ready,
+            ),
+            planning::PlanningStore::add_dependency(
+                &mut queue,
+                task,
+                Dependency::Goal(goal),
+                ready,
+            ),
+            planning::PlanningStore::remove_dependency(
+                &mut queue,
+                task,
+                Dependency::Task(other),
+                ready,
+            ),
+            planning::PlanningStore::remove_dependency(
+                &mut queue,
+                task,
+                Dependency::Goal(goal),
+                ready,
+            ),
+        ]
+        .into_iter()
+        .map(|result| result.unwrap_err().to_string()),
+    )
+    .collect::<Vec<_>>();
+    assert_eq!(errors, vec![refused(task); 11]);
+    let after = queue.show(task).unwrap();
+    assert_eq!(after.task.status(), TaskStatus::InProgress);
+    assert_eq!(
+        serde_json::to_value(&after.task).unwrap(),
+        serde_json::to_value(&before.task).unwrap()
+    );
+    assert_eq!(after.events.len(), before.events.len());
+    assert!(after.dependencies.is_empty());
+    assert!(after.goal_dependencies.is_empty());
+
+    // Authorized with the status the task has, `cancel` and `draft` of an
+    // `in_progress` task whose run ended go on as before.
+    let in_progress = TaskStatus::InProgress;
+    let canceled =
+        planning::PlanningStore::transition(&mut queue, task, TaskAction::Cancel, in_progress)
+            .unwrap();
+    assert_eq!(canceled.status(), TaskStatus::Canceled);
+    let task = claimed_and_failed(&dir, &mut queue, "drafted again");
+    let drafted =
+        planning::PlanningStore::transition(&mut queue, task, TaskAction::Draft, in_progress)
+            .unwrap();
+    assert_eq!(drafted.status(), TaskStatus::Draft);
+    let task = claimed_and_failed(&dir, &mut queue, "a duplicate");
+    let duplicate =
+        planning::PlanningStore::cancel_duplicate(&mut queue, task, other, in_progress).unwrap();
+    assert_eq!(duplicate.status(), TaskStatus::Canceled);
+
+    // And on a `ready` task authorized as `ready`, the rest go on too.
+    let task = queue.add(new_task("still ready")).unwrap().id();
+    planning::PlanningStore::transition(
+        &mut queue,
+        task,
+        TaskAction::BypassReview,
+        TaskStatus::Draft,
+    )
+    .unwrap();
+    let moved = planning::PlanningStore::set_goal(&mut queue, task, Some(goal), ready).unwrap();
+    assert_eq!(moved.goal_id(), Some(goal));
+    planning::PlanningStore::set_paths(&mut queue, task, vec!["docs/**".into()], ready).unwrap();
+    planning::PlanningStore::set_priority(&mut queue, task, Priority::High, ready).unwrap();
+    planning::PlanningStore::add_dependency(&mut queue, task, Dependency::Task(other), ready)
+        .unwrap();
+    assert_eq!(queue.show(task).unwrap().dependencies.len(), 1);
+    planning::PlanningStore::remove_dependency(&mut queue, task, Dependency::Task(other), ready)
+        .unwrap();
+    assert!(queue.show(task).unwrap().dependencies.is_empty());
+    let task = queue.show(task).unwrap().task;
+    assert_eq!(task.paths(), ["docs/**"]);
+    assert_eq!(task.priority(), Priority::High);
+    // A status the store does not find is refused on a `ready` task too.
+    assert!(
+        planning::PlanningStore::transition(
+            &mut queue,
+            task.id(),
+            TaskAction::Cancel,
+            TaskStatus::Draft
+        )
+        .is_err()
+    );
+    assert_eq!(queue.show(task.id()).unwrap().task.status(), ready);
 }

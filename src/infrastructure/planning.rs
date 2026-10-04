@@ -44,37 +44,80 @@ impl PlanningStore for SqliteQueue {
         SqliteQueue::judge_follow_up(self, task, judgement, role)
     }
 
-    fn set_goal(&mut self, task: TaskId, goal: Option<GoalId>) -> Result<Task> {
-        TaskStore::set_goal(self, task, goal)
+    fn set_goal(
+        &mut self,
+        task: TaskId,
+        goal: Option<GoalId>,
+        authorized: TaskStatus,
+    ) -> Result<Task> {
+        self.set_goal_authorized(task, goal, Some(authorized))
     }
 
-    fn set_paths(&mut self, task: TaskId, paths: Vec<String>) -> Result<Task> {
-        TaskStore::set_paths(self, task, paths)
+    fn set_paths(
+        &mut self,
+        task: TaskId,
+        paths: Vec<String>,
+        authorized: TaskStatus,
+    ) -> Result<Task> {
+        self.set_paths_authorized(task, paths, Some(authorized))
     }
 
-    fn set_priority(&mut self, task: TaskId, priority: Priority) -> Result<Task> {
-        TaskStore::set_priority(self, task, priority)
+    fn set_priority(
+        &mut self,
+        task: TaskId,
+        priority: Priority,
+        authorized: TaskStatus,
+    ) -> Result<Task> {
+        self.set_priority_authorized(task, priority, Some(authorized))
     }
 
-    fn transition(&mut self, task: TaskId, action: TaskAction) -> Result<Task> {
-        TaskStore::transition(self, task, action)
+    fn transition(
+        &mut self,
+        task: TaskId,
+        action: TaskAction,
+        authorized: TaskStatus,
+    ) -> Result<Task> {
+        self.transition_authorized(task, action, Some(authorized))
     }
 
-    fn cancel_duplicate(&mut self, task: TaskId, duplicate_of: TaskId) -> Result<Task> {
-        TaskStore::cancel_duplicate(self, task, duplicate_of)
+    fn cancel_duplicate(
+        &mut self,
+        task: TaskId,
+        duplicate_of: TaskId,
+        authorized: TaskStatus,
+    ) -> Result<Task> {
+        self.cancel_duplicate_authorized(task, duplicate_of, Some(authorized))
     }
 
-    fn add_dependency(&mut self, task: TaskId, on: Dependency) -> Result<()> {
+    fn add_dependency(
+        &mut self,
+        task: TaskId,
+        on: Dependency,
+        authorized: TaskStatus,
+    ) -> Result<()> {
+        let authorized = Some(authorized);
         match on {
-            Dependency::Task(predecessor) => TaskStore::add_dependency(self, task, predecessor),
-            Dependency::Goal(goal) => TaskStore::add_goal_dependency(self, task, goal),
+            Dependency::Task(predecessor) => {
+                self.add_dependency_authorized(task, predecessor, authorized)
+            }
+            Dependency::Goal(goal) => self.add_goal_dependency_authorized(task, goal, authorized),
         }
     }
 
-    fn remove_dependency(&mut self, task: TaskId, on: Dependency) -> Result<()> {
+    fn remove_dependency(
+        &mut self,
+        task: TaskId,
+        on: Dependency,
+        authorized: TaskStatus,
+    ) -> Result<()> {
+        let authorized = Some(authorized);
         match on {
-            Dependency::Task(predecessor) => TaskStore::remove_dependency(self, task, predecessor),
-            Dependency::Goal(goal) => TaskStore::remove_goal_dependency(self, task, goal),
+            Dependency::Task(predecessor) => {
+                self.remove_dependency_authorized(task, predecessor, authorized)
+            }
+            Dependency::Goal(goal) => {
+                self.remove_goal_dependency_authorized(task, goal, authorized)
+            }
         }
     }
 

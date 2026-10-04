@@ -393,10 +393,12 @@ pub fn edit_ended_verify(mut task: Task, edit: TaskEdit) -> Result<Task, DomainE
     Ok(task)
 }
 
-/// `dagq edit` goes on only while `task` has the status the edit was
-/// authorized with: the capability (`task.write`, or `task.verify_edit` on
-/// an `in_progress` task) was chosen from that status, and the store reads
-/// it again in its transaction.
+/// A planning command's change of `task` (`dagq edit`, `set-goal`,
+/// `set-paths`, `set-priority`, `draft`, `ready`, `cancel`, `dependency`)
+/// goes on only while it has the status the command was authorized with:
+/// what the actor may do (`task.write`, or `task.verify_edit` on an
+/// `in_progress` task) was decided from that status, and the store reads it
+/// again in its transaction (task 1609).
 pub fn check_status_authorized(task: &Task, authorized: TaskStatus) -> Result<(), DomainError> {
     require(task.status == authorized, || {
         DomainError::TaskStatusChangedSinceAuthorized {
@@ -1010,7 +1012,7 @@ mod tests {
             check_status_authorized(&task, TaskStatus::Ready)
                 .unwrap_err()
                 .to_string(),
-            "task 5 is in_progress now, not ready as when this edit was authorized; nothing was edited, run it again"
+            "task 5 is in_progress now, not ready as when this command was authorized; nothing was changed, run it again"
         );
         check_status_authorized(&task, TaskStatus::InProgress).unwrap();
         let ready = Task::restore(record(TaskStatus::Ready)).unwrap();
