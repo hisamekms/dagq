@@ -4,8 +4,8 @@ type: design
 title: "非対話のworker"
 status: current
 created: 2026-09-28
-updated: 2026-10-05 # task 1711: the tests of the headless planners' turns kept as the boundary; task 1596: a headless planner at the provider wall takes the provider retry before the requests behind it, and an answer is read only past the wall; task 1437
-last_verified: 2026-10-05 # task 1711; task 1596; task 1437
+updated: 2026-10-05 # task 1109: the tests of the recovery job stopping a command outside the turn group; task 1711: the tests of the headless planners' turns kept as the boundary; task 1596: a headless planner at the provider wall takes the provider retry before the requests behind it, and an answer is read only past the wall; task 1437
+last_verified: 2026-10-05 # task 1109; task 1711; task 1596; task 1437
 scope: runtime
 related:
   - adr-t1433-2
@@ -103,7 +103,7 @@ wrapperはturnの出力を`turn_*.jsonl`から読みながら（wait interval、
 
 turnが自分で終わったときも、wrapperはそのprocess groupに残ったものを止める。ただしClaudeもCodexもtoolのコマンドをturnと別のgroupで走らせるので、`nohup … &`のように切り離したものはturnのgroupに居らず、これでは止まらない（task 864の測定）。groupの外に残った子孫（turnのprocessが別のgroupで起動し、turnの終わりより長く生きるもの）は止めない。理由: (a) turnのprocessが終わった時点でその子は親が1になっていて、親子関係ではturnのものと見分けられない。(b) turnの途中で集めたpidを後で止めると、その間に終わったpidを別のprocessが使っていれば無関係のprocessを止めうる（見張りのたびに`ps`を打つ負荷もかかる）。(c) Codexはturnを終える前に実行したコマンドの終わりを待つので、自分で終わったturnがgroupの外に残すのは、agentがわざと切り離したものに限られる（Claudeも終わる前に`run_in_background`のtaskを止める。task 864の測定）。残ったものはrunのworktreeで動くprocessとして、復旧jobの`stop_processes`がpidで止められる（`run_processes`はworktreeで動くprocessを含む）。この振る舞いはtest（`runtime_headless::a_turn_that_ends_by_itself_leaves_what_runs_outside_its_group`）が確かめる。
 
-wrapper自身がturnの途中で終わるとき（エラー）は、上と同じく子孫とturnのgroupを止めてから終わる。hangup・terminate・interruptのsignal（workspaceのclose、`stop_processes`）で終わるときは、`stop_groups_on_exit_signals`（`src/infrastructure/process.rs`。実のwrapperの入口`compose::session`だけが入れる）が、このprocessが`new_session`で起動してまだ止めていないgroupだけを止める。signal handlerの中では子孫を集める`ps`を呼べず（async-signal-safeでない）、wrapperは子孫のpidを見張りのたびに記録してもいない（上の(b)）ので、groupの外のコマンドはhandlerでは止めない。`stop_processes`は自分でrunのprocess（wrapperの子孫とworktreeで動くもの）をpidで止めるのでそのコマンドも止まり、workspaceのcloseで残ったものは上と同じくworktreeで動くprocessとして`stop_processes`が止められる。turnは端末を持たないので、止めなければwrapperより長く生きる。
+wrapper自身がturnの途中で終わるとき（エラー）は、上と同じく子孫とturnのgroupを止めてから終わる。hangup・terminate・interruptのsignal（workspaceのclose、`stop_processes`）で終わるときは、`stop_groups_on_exit_signals`（`src/infrastructure/process.rs`。実のwrapperの入口`compose::session`だけが入れる）が、このprocessが`new_session`で起動してまだ止めていないgroupだけを止める。signal handlerの中では子孫を集める`ps`を呼べず（async-signal-safeでない）、wrapperは子孫のpidを見張りのたびに記録してもいない（上の(b)）ので、groupの外のコマンドはhandlerでは止めない。`stop_processes`は自分でrunのprocess（wrapperの子孫とworktreeで動くもの）をpidで止めるのでそのコマンドも止まり、workspaceのcloseで残ったものは上と同じくworktreeで動くprocessとして`stop_processes`が止められる。turnは端末を持たないので、止めなければwrapperより長く生きる。別のgroupのコマンドを復旧jobがpidで止める経路は、`runtime_headless::recovery_stops_a_headless_turns_descendant_outside_its_group`（turnとwrapperの子孫のまま）と`runtime_headless::recovery_stops_a_headless_turns_orphan_outside_its_group_by_worktree`（親が1になりworktreeのcwdだけで所属を判じる）が、実際のprocessの停止と`auto_repaired`・`recovery_finished.applied`の`stop_processes`を確かめる。このfixtureはwrapperをtestのprocessの中で動かし、`run_processes`はsupervisorを兼ねるwrapperを子孫をたどる起点にしないので、どちらの場合もコマンドはworktreeのcwdで選ばれる。cwdがworktreeの外のwrapperの子孫を選ぶことはunit test（`domain::recovery::tests::only_the_runs_own_processes_may_be_stopped`）が確かめる。これらはsignal handler自体を起動するtestではない。
 
 ## turnの後の扱い
 

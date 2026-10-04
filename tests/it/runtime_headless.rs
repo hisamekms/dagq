@@ -1156,6 +1156,183 @@ fn a_receipt_written_as_its_turn_ends_is_not_nudged() {
     assert_eq!(calls.len(), 1, "{calls:?}");
 }
 
+/// Task 1109: exercise the real recovery job's PID stop with a command
+/// outside the turn's group. A short-lived intermediate parent makes the
+/// command an orphan; keeping that parent waiting preserves the wrapper's
+/// descendants. The extra parent also distinguishes a command from the
+/// agent's direct children, which the idle watch treats as session helpers.
+/// The fixture hosts the wrapper in the test's own process, which
+/// `run_processes` never takes as a wrapper to descend from, so in both
+/// cases the job finds the command by its worktree cwd; picking a wrapper's
+/// descendant whose cwd is elsewhere is the unit test
+/// `domain::recovery::tests::only_the_runs_own_processes_may_be_stopped`.
+fn recovery_stops_outside_command(orphan: bool) {
+    use dagq::application::ProcessControl;
+    use dagq::infrastructure::adapters::SystemProcesses;
+
+    let (dir, repo, db, backend) = headless_fixture(&[]);
+    set_turns(
+        dir.path(),
+        &format!(
+            r#"export RUN_DIR
+perl -e '
+    my ($parent, $test) = ($$, {test_pid});
+    my $child = fork(); defined $child or die "fork: $!";
+    if (!$child) {{
+        setpgrp(0, 0) or die "setpgrp: $!";
+        open my $p, ">", "$ENV{{RUN_DIR}}/outside.parent" or die $!;
+        print $p "$parent\n"; close $p;
+        open my $f, ">", "$ENV{{RUN_DIR}}/outside.pid.tmp" or die $!;
+        print $f "$$\n"; close $f;
+        rename "$ENV{{RUN_DIR}}/outside.pid.tmp", "$ENV{{RUN_DIR}}/outside.pid" or die $!;
+        # Detached from the stub: it ends by itself once the test or its
+        # directory is gone, or after 600 s.
+        for (1 .. 1200) {{
+            last unless -d $ENV{{RUN_DIR}} && kill(0, $test);
+            select(undef, undef, undef, 0.5);
+        }}
+        exit 0;
+    }}
+    {parent_wait}
+' >/dev/null 2>&1 &
+await_file "$RUN_DIR/outside.pid"
+pid=$(cat "$RUN_DIR/outside.pid")
+i=0
+while kill -0 "$pid" 2>/dev/null && [ $i -lt 1200 ]; do sleep 0.05; i=$((i + 1)); done
+{FINISH}
+"#,
+            test_pid = std::process::id(),
+            parent_wait = if orphan { "" } else { "waitpid($child, 0);" },
+        ),
+    );
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let backend = Arc::new(backend);
+    let repair_script = crate::runtime_repair::recovery_verdict(&json!({
+        "verdict": "repair",
+        "confidence": "high",
+        "diagnosis": "stop the command outside the turn group",
+        "actions": [{"action": "stop_processes", "pids": ["PID"]}],
+    }))
+    .replace("bg.pid", "outside.pid");
+    // Keep the child alive until the test has observed its actual parent,
+    // group and cwd. No fixed sleep decides when recovery may stop it.
+    // The job runs in the run's directory.
+    let recovery = format!(
+        "{}\n{repair_script}",
+        common::await_file("\"$PWD/allow-repair\"")
+    );
+    let reviewer =
+        Arc::new(TestReviewer::new(&[verdict("pass", &[], "fine")]).with_triages(&[recovery]));
+    let options = SuperviseOptions {
+        stall: Some(
+            dagq::domain::stall::StallConfig::default().with_millis("idle_process_secs", 200),
+        ),
+        // The fixture hosts wrapper and supervisor on threads of the same
+        // process; detach only the stub turn's listed parent, as the other
+        // process-watch tests do. Listing cwd and signalling use real OS PIDs.
+        processes: Some(runtime::ProcessesPort(Arc::new(DetachedStubs {
+            db: db.clone(),
+        }))),
+        ..supervise_options(4, true)
+    };
+    let supervisor = {
+        let (db, repo, backend, reviewer) =
+            (db.clone(), repo.clone(), backend.clone(), reviewer.clone());
+        thread::spawn(move || {
+            runtime::supervise_with_reviewer(
+                &db,
+                &repo,
+                &*backend,
+                &claude_stub(&db),
+                &*reviewer,
+                Path::new(env!("CARGO_BIN_EXE_dagq")),
+                &options,
+            )
+        })
+    };
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        queue.show(TASK).unwrap().runs.first().is_some_and(|run| {
+            run.run_dir()
+                .is_some_and(|dir| Path::new(dir).join("outside.pid").exists())
+        })
+    });
+    let run = detail(&db).runs[0].clone();
+    let outside = Reaped(written_pid(&run, "outside.pid"));
+    // A timeout's exit skips Reaped's drop.
+    let _kill_on_timeout = {
+        let pid = outside.0;
+        common::on_timeout(
+            Duration::from_secs(5),
+            format!("kill the command {pid} outside the turn's group"),
+            move || drop(Reaped(pid)),
+        )
+    };
+    let run_dir = Path::new(run.run_dir().unwrap());
+    let parent = written_pid(&run, "outside.parent");
+    // In the orphan case, wait for reparenting, not a guessed delay.
+    wait_until(&db, common::STEP_LIMIT, |_| {
+        SystemProcesses
+            .list()
+            .unwrap()
+            .iter()
+            .any(|p| p.pid == outside.0 && (!orphan || p.ppid != parent))
+    });
+    let all = SystemProcesses.list().unwrap();
+    let child = all.iter().find(|p| p.pid == outside.0).unwrap();
+    let processes = SqliteQueue::open(&db).unwrap().processes(run.id()).unwrap();
+    let agent = processes.iter().find(|p| p.role == "agent").unwrap().pid;
+    // SAFETY: getpgid takes a PID, not a pointer; both PIDs belong to this fixture.
+    unsafe {
+        assert_eq!(libc::getpgid(outside.0 as i32), outside.0 as i32);
+        assert_ne!(libc::getpgid(agent as i32), outside.0 as i32);
+    }
+    assert_eq!(child.cwd.as_deref(), run.worktree_path());
+    if orphan {
+        // init on macOS; a Linux subreaper may adopt it instead.
+        if cfg!(target_os = "macos") {
+            assert_eq!(child.ppid, 1);
+        }
+        assert!(!SystemProcesses.descendants(agent).contains(&outside.0));
+    } else {
+        assert_eq!(child.ppid, parent);
+        assert!(SystemProcesses.descendants(agent).contains(&outside.0));
+        let wrapper = processes.iter().find(|p| p.role == "wrapper").unwrap().pid;
+        assert!(SystemProcesses.descendants(wrapper).contains(&outside.0));
+    }
+    fs::write(run_dir.join("allow-repair"), "").unwrap();
+    let detail = landed(&db, &repo, &base, &backend, supervisor);
+    assert!(
+        !still_running(outside.0),
+        "recovery left the command running"
+    );
+    let repaired = payloads(&detail, "auto_repaired");
+    assert_eq!(repaired.len(), 1, "{repaired:?}");
+    assert_eq!(repaired[0]["layer"], "recovery");
+    assert_eq!(repaired[0]["repair"], "stop_processes");
+    assert_eq!(repaired[0]["processes"][0]["pid"], outside.0);
+    assert_eq!(repaired[0]["processes"][0]["ppid"], child.ppid);
+    assert!(repaired[0]["processes"][0].get("gone").is_none());
+    let finished = payloads(&detail, "recovery_finished");
+    assert_eq!(finished.len(), 1, "{finished:?}");
+    assert_eq!(finished[0]["applied"], json!(["stop_processes"]));
+    assert_eq!(finished[0]["escalated"], false);
+    assert!(
+        reviewer.triage_prompts()[0]
+            .0
+            .contains(&format!("- pid {} (parent ", outside.0))
+    );
+}
+
+#[test]
+fn recovery_stops_a_headless_turns_descendant_outside_its_group() {
+    recovery_stops_outside_command(false);
+}
+
+#[test]
+fn recovery_stops_a_headless_turns_orphan_outside_its_group_by_worktree() {
+    recovery_stops_outside_command(true);
+}
+
 /// The headless run's supervisor died with its first turn ended and its
 /// `stalled` ask answered with an instruction: after writing the answer's
 /// request when `written` (and before closing the ask), before writing it
