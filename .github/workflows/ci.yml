@@ -129,16 +129,15 @@ jobs:
             sh scripts/check-it-test-time.sh --base "$BASE" "$RUNNER_TEMP/nextest.log"
           fi
 
-  # Linux (ubuntu): cargo build and the whole test suite, the first step of
-  # goal 83 (docs/design/linux-ci.md). The job may fail while the tests that
-  # only hold on macOS are split out: continue-on-error keeps a Linux failure
-  # from failing the workflow, and the names of the failed tests go to the job
-  # summary. Coverage, fmt, clippy and the scripts' checks stay in the macOS
-  # job above.
+  # Linux (ubuntu): cargo build and the whole test suite (goal 83,
+  # docs/design/linux-ci.md). A Linux failure fails the workflow like a macOS
+  # one; the tests that only hold on macOS are split out with
+  # #[cfg(target_os = "macos")] and listed in that document, and the names of
+  # the failed tests go to the job summary. Coverage, fmt, clippy and the
+  # scripts' checks stay in the macOS job above.
   linux:
     name: linux build / test
     runs-on: ubuntu-24.04
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -169,8 +168,7 @@ jobs:
         run: cargo nextest run --locked --color never 2>&1 | tee "$RUNNER_TEMP/nextest.log"
 
       # The failed tests, one "<binary id> <test name>" per row, in the job
-      # summary, for the task that splits them out to read. FLKY-FL is a test
-      # that failed and then passed on its retry.
+      # summary. FLKY-FL is a test that failed and then passed on its retry.
       - name: Failed tests
         if: ${{ !cancelled() }}
         shell: bash

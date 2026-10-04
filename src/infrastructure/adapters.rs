@@ -193,7 +193,12 @@ impl ProcessControl for SystemProcesses {
             "-o",
             "pid=,ppid=,etime=,time=,command=",
         ]))?;
-        Ok(with_working_directories(parse_ps(&listing), process_cwd))
+        let processes = parse_ps(&listing);
+        // Linux's `ps` prints CPU time in whole seconds, too coarse to see a
+        // process make progress between two samples: read the clock ticks.
+        #[cfg(target_os = "linux")]
+        let processes = with_proc_cpu_time(processes);
+        Ok(with_working_directories(processes, process_cwd))
     }
 
     fn start_identity(&self, pid: u32) -> Option<String> {
@@ -309,6 +314,38 @@ fn parse_cpu_time(text: &str) -> Option<u64> {
         digits.parse::<u64>().ok()? * 10u64.pow(3 - u32::try_from(digits.len()).ok()?)
     };
     Some(secs * 1000 + millis)
+}
+
+/// `processes` with the CPU time `/proc/<pid>/stat` holds in clock ticks
+/// (Linux); a process whose file does not read keeps what `ps` printed.
+#[cfg(target_os = "linux")]
+fn with_proc_cpu_time(mut processes: Vec<ProcessInfo>) -> Vec<ProcessInfo> {
+    // SAFETY: sysconf(3) has no memory effects.
+    let ticks_per_sec = u64::try_from(unsafe { libc::sysconf(libc::_SC_CLK_TCK) }).unwrap_or(0);
+    if ticks_per_sec == 0 {
+        return processes;
+    }
+    for process in &mut processes {
+        let ticks = fs::read_to_string(format!("/proc/{}/stat", process.pid))
+            .ok()
+            .and_then(|stat| proc_stat_cpu_ticks(&stat));
+        if let Some(ticks) = ticks {
+            process.cpu_ms = Some(ticks * 1000 / ticks_per_sec);
+        }
+    }
+    processes
+}
+
+/// `utime + stime` of a `/proc/<pid>/stat` line, in clock ticks: the 14th
+/// and 15th fields, counted after the `)` that ends the command (which may
+/// hold spaces and parentheses itself).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn proc_stat_cpu_ticks(stat: &str) -> Option<u64> {
+    let (_, rest) = stat.rsplit_once(')')?;
+    let mut fields = rest.split_whitespace().skip(11);
+    let user = fields.next()?.parse::<u64>().ok()?;
+    let system = fields.next()?.parse::<u64>().ok()?;
+    user.checked_add(system)
 }
 
 /// `processes` with the working directories `read_cwd` reads, one pid at
@@ -4046,6 +4083,14 @@ mod tests {
         assert_eq!(parse_cpu_time("1-00:00:01"), Some(86_401_000));
         assert_eq!(parse_cpu_time("0:01.5"), Some(1500));
         assert_eq!(parse_cpu_time("x"), None);
+        // Linux's /proc/<pid>/stat: utime 7 and stime 5 after a command
+        // that holds a space and a ")".
+        assert_eq!(
+            proc_stat_cpu_ticks("42 (a b) c) S 1 42 42 0 -1 4194304 90 0 0 0 7 5 0 0 20 0 1 0"),
+            Some(12)
+        );
+        assert_eq!(proc_stat_cpu_ticks("42 (x) S 1 2"), None);
+        assert_eq!(proc_stat_cpu_ticks("no command"), None);
         let processes = parse_ps(
             "  1     0  3-00:00:00 12:00.50 /sbin/launchd\n 42  1 01:05 bad sleep 600 --x\nbad line\n",
         );
@@ -4506,10 +4551,16 @@ mod tests {
         let (dir, git) = committed_repository();
         let index = dir.path().join(".git/index");
         let before = fs::read(&index).unwrap();
-        // Same content, new stat data: the index entry is stale.
-        std::thread::sleep(Duration::from_millis(20));
-        fs::remove_file(dir.path().join("change.txt")).unwrap();
-        fs::write(dir.path().join("change.txt"), "0\n").unwrap();
+        // Same content, new stat data: the index entry is stale. The mtime
+        // moves by whole seconds: Git on Linux compares seconds only and the
+        // file system may give a rewritten file its old inode back, so a
+        // rewrite within the second would leave the entry matching there.
+        fs::File::options()
+            .write(true)
+            .open(dir.path().join("change.txt"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(3600))
+            .unwrap();
 
         assert_eq!(git.status(dir.path()).unwrap(), "");
         assert_eq!(

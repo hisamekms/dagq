@@ -31,4 +31,4 @@ tags:
 - [Stress CI](stress-ci.md)（mainで直近に足した・変えたtestをGitHub Actionsの定時実行で繰り返し、落ちたらflaky-testのissueで知らせる）
 - [CI failure issues](ci-failure-issues.md)（mainへのpushのCI（ci.yml）が落ちたらci-failureのissueを開くか追記し、次に通ったら閉じる。workflow全体の結論で決め、continue-on-errorのjobの失敗だけでは開かない）
 - [Slow tests](slow-tests.md)（nextestの出力から遅いtestの上位と1秒・5秒・30秒を超えた本数と合計とtest binaryごとの本数と合計を出すscripts/slow-tests.sh。CIのjob summaryにも出す。差分で足した・変えたtests/itのtestの時間の関門scripts/check-it-test-time.shと許可の一覧.config/it-slow-allow.toml）
-- [Linux CI](linux-ci.md)（CIのubuntuのjobでcargo buildと全体のtestを流し、落ちたtestの名前をjob summaryに出す。macOSに固有のtestを分けるまではcontinue-on-errorで失敗を通す。goal 83）
+- [Linux CI](linux-ci.md)（CIのubuntuのjobでcargo buildと全体のtestを流し、落ちたtestの名前をjob summaryに出す。失敗を通さず、task 1238で扱ったLinuxの失敗とmacOSに固有として分けたtestを挙げる。goal 83）

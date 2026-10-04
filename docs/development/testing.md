@@ -1,10 +1,10 @@
 ---
 id: development-testing
 type: development
-title: このrepositoryのtestの制約（coverageの関門・test binary・置き場所・書き方・判断と境界のtest・ファイルの行数・待ちの上限・e2eとその印・手動スモーク）
+title: このrepositoryのtestの制約（coverageの関門・test binary・置き場所・書き方・macOSに固有のtest・判断と境界のtest・ファイルの行数・待ちの上限・e2eとその印・手動スモーク）
 status: current
 created: 2026-10-03
-updated: 2026-10-05 # task 1707; task 1451
+updated: 2026-10-05 # task 1707; task 1451; task 1238
 owners:
   - hisamekms
 tags:
@@ -19,6 +19,7 @@ related:
   - development-local-checks
   - development-task-registration
   - development-migrations
+  - design-linux-ci
   - plan-local-checks-history
 ---
 
@@ -47,6 +48,14 @@ testを書く・置く・直すときの今の規則。読むのは、`tests/`�
 - 関門ではtestは1件ずつ別processになるので、binaryの中の他のtestとprocessの状態（staticや一度だけの初期化）を共有することに頼るtestを書かない。
 - `cargo test`では同じprocessのthreadで走るので、process全体の状態（env・cwd）を変えるtestを書かない。
 - testのshellに渡る文字列（stubのagent・reviewerのscript、taskの`verification_commands`、wrapperのscriptなど）にfilesystemのpathを埋めるときは、`'{}'`と単引用符で直接囲まず、`tests/common`の`shell_path`（`dagq::infrastructure::adapters::shell_quote`を包む）で引用する。runtimeのtestのfixtureはqueueとrepositoryを`queue's data.db`・`repo's directory`とapostropheを含む名前で作るので、その下のpathを単引用符で直接埋めると引用が途中で閉じてshellがsyntax errorで終わり、testが意図を確かめないまま通るか不安定に落ちる。SQL・TOMLの文字列リテラルとpathでない文字列は対象外。
+
+## macOSに固有のtest
+
+testはmacOS（関門とCIの`checks`）とLinux（CIの`linux`、失敗を通さない）の両方で通す（goal 83、[Linux build and test job in CI](../design/linux-ci.md)）。
+
+- まず移植できる形に書く: `ps`・`lsof`・`sed`の出力と引数の違い、`/private/tmp`などのpath、inodeの再利用、時刻の精度（Linuxの`ps`のCPU時間は秒単位、Gitは秒単位で比べることがある）に頼らない。stat dataを変えるならmtimeを秒単位で動かす（`File::set_modified`）。
+- macOSにしか無い機能（launchd・実物のcmuxなど）を使うtestだけを`#[cfg(target_os = "macos")]`で分け、直前のコメントに理由（何がmacOSにしか無いか）を書き、[Linux build and test job in CI](../design/linux-ci.md)の「macOSに固有として分けたtest」に足す。Linuxで消すのはtestだけで、runtimeの機能は消さない（Linuxで使えない機能は分かるerrorにし、それを`#[cfg(not(target_os = "macos"))]`のtestで確かめる）。
+- worker（macOS）はLinuxのtestを流せないので、Linuxの結果は着地後のmainのCIの`linux`のjobのsummaryで読む。
 
 ## 判断と境界のtest
 

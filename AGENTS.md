@@ -57,7 +57,7 @@ inbox は `dagq-inbox` skill に従い、復旧と手での操作は `dagq-recov
 ### 変更の範囲ごと
 
 - runtime（`src/`・`crates/`）: 触る範囲の `docs/design/*.md`。判断は unit test、境界は integration test（[testing.md](docs/development/testing.md) の「判断と境界のtest」）
-- tests（`tests/`・`#[cfg(test)]`・`.config/e2e-quarantine.toml`）: [testing.md](docs/development/testing.md)
+- tests（`tests/`・`#[cfg(test)]`・`.config/e2e-quarantine.toml`）: [testing.md](docs/development/testing.md)（macOS に固有の test は「macOSに固有のtest」）
 - migrations: [migrations.md](docs/development/migrations.md)
 - docs（ADR・design・plans）: [documents.md](docs/development/documents.md)
 - plugin: documents.md の「pluginの汎用性」「権限の表を写す文書」
@@ -67,5 +67,5 @@ inbox は `dagq-inbox` skill に従い、復旧と手での操作は `dagq-recov
 ## 検証と文書の規則
 
 - 手元の検証: [local-checks.md](docs/development/local-checks.md)
-- test・task の登録・migration: [testing.md](docs/development/testing.md)・[task-registration.md](docs/development/task-registration.md)・[migrations.md](docs/development/migrations.md)
+- task の登録: [task-registration.md](docs/development/task-registration.md)（test・migration は上）
 - 文書（ADR・design・plans・frontmatter）と commit メッセージ: [documents.md](docs/development/documents.md)。着地と push は `dagq integrate` だけが行う（[integrate](docs/design/supervisor-lifecycle/integrate.md)）

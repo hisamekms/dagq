@@ -3,6 +3,10 @@
 //! into the user's `gui/<uid>` domain; `down` unloads it. launchd restarts
 //! the supervisor whenever it exits (`KeepAlive`), which is why stopping it
 //! goes through `bootout` rather than a signal.
+//!
+//! launchd is macOS's: on another host nothing can be loaded, so `down`
+//! finds no agent and `up` fails saying launchd mode needs macOS, rather
+//! than with `launchctl` not found (goal 83, docs/design/linux-ci.md).
 use anyhow::{Context, Result, ensure};
 use std::{
     fs,
@@ -30,6 +34,9 @@ pub struct Launchctl {
 const REPLACE_TIMEOUT: Duration = Duration::from_secs(60);
 const LAUNCHCTL_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Whether this host has launchd (macOS).
+const HAS_LAUNCHD: bool = cfg!(target_os = "macos");
+
 impl Launchctl {
     fn domain(&self) -> String {
         format!("gui/{}", self.uid)
@@ -42,6 +49,12 @@ impl Launchctl {
     /// The service as launchd sees it: loaded (still listed) and its pid.
     /// A service stays listed after `bootout` until its process has exited.
     fn state(&self, label: &str) -> Result<AgentState> {
+        if !HAS_LAUNCHD {
+            return Ok(AgentState {
+                loaded: false,
+                pid: None,
+            });
+        }
         let (status, stdout, _) = capture(
             Command::new("launchctl").args(["print", &self.target(label)]),
             LAUNCHCTL_TIMEOUT,
@@ -61,6 +74,9 @@ impl Launchctl {
     /// Ask launchd to remove the service; it returns at once and the
     /// process gets SIGTERM. `Ok(false)` when nothing was loaded.
     fn bootout(&self, label: &str) -> Result<bool> {
+        if !HAS_LAUNCHD {
+            return Ok(false);
+        }
         let target = self.target(label);
         let (status, _, stderr) = capture(
             Command::new("launchctl").args(["bootout", &target]),
@@ -120,6 +136,11 @@ impl LaunchAgent for Launchctl {
             path.is_absolute(),
             "LaunchAgent path {} must be absolute (HOME is unset?)",
             path.display()
+        );
+        ensure!(
+            HAS_LAUNCHD,
+            "launchd mode needs macOS: this host ({}) has no launchd to keep the supervisor resident",
+            std::env::consts::OS
         );
         let dir = path.parent().context("LaunchAgent path has no parent")?;
         fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
@@ -253,6 +274,23 @@ mod tests {
             }
         );
         assert!(!launchctl.bootout("com.dagq.missing").unwrap());
+    }
+
+    /// Off macOS `up` names what is missing instead of failing to start
+    /// `launchctl`, and writes no definition.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn install_off_macos_says_launchd_mode_needs_macos() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agents/com.dagq.x.plist");
+        let error = Launchctl { uid: 0 }
+            .install("com.dagq.x", &path, "")
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("launchd mode needs macOS"),
+            "{error:#}"
+        );
+        assert!(!path.exists());
     }
 
     #[test]

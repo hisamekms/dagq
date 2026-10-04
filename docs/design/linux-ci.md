@@ -4,8 +4,8 @@ type: design
 title: Linux build and test job in CI
 status: current
 created: 2026-10-02
-updated: 2026-10-02
-last_verified: 2026-10-02
+updated: 2026-10-05
+last_verified: 2026-10-05
 scope: operations
 tags:
   - testing
@@ -14,6 +14,7 @@ related:
   - design-stress-ci
   - design-slow-tests
   - adr-0076
+  - development-testing
 ---
 
 # Linux build and test job in CI
@@ -34,9 +35,26 @@ related:
 
 runner は `ubuntu-24.04`（x86_64）。`rust-toolchain.toml` の `targets` は `aarch64-apple-darwin` だけを挙げるが、rustup は挙げた target に加えて host（`x86_64-unknown-linux-gnu`）の std を必ず入れるので、Linux の job のために `rust-toolchain.toml` は変えない。rusqlite は `bundled` で、C compiler は runner に入っている。
 
-## 失敗を通す期間
+## 失敗を通さない
 
-job は `continue-on-error: true` で、Linux の build か test が落ちても workflow 全体の結果（main の CI の結果）は落ちない。job 自体は失敗として表示され、pull request でもこの job の check は失敗と出るが、required の check にしない限り merge を止めない。macOS に固有の test を理由付きで分ける（`#[cfg(target_os = "macos")]` など）まで Linux の失敗を見えるだけにしておくための一時の措置で、goal 83 の受け入れ条件は main で Linux の job が通り、`continue-on-error` を外すこと。
+job は失敗を通さない（`continue-on-error` を持たない）。Linux の build か test が落ちれば workflow 全体（main の CI の結果、[ci-failure の issue](ci-failure-issues.md)）が落ちる。task 1237 で `continue-on-error: true` の形で足し、task 1238 が main の Linux の job の失敗を全部扱ってから外した。macOS に固有の test の書き方は [testの制約](../development/testing.md) の「macOSに固有のtest」が持つ。
+
+## task 1238 で扱った Linux の失敗
+
+task 1237 の後の main の run（例 run 37230895149、`2736 tests run: 2732 passed, 4 failed`）で毎回落ちた 4 件は、どれも移植できる形に直し、macOS に固有として分けたものは無い。
+
+| test | Linux で落ちた理由 | 扱い |
+| --- | --- | --- |
+| `dagq infrastructure::launchd::tests::uninstall_tolerates_a_missing_plist_but_not_a_relative_install_path` | `launchctl` が無く、`uninstall` と `bootout` が `start "launchctl"` で落ちた | runtime を直した: macOS の外では launchd に何も載り得ないので、`Launchctl` の `state` は載っていない、`bootout` は `false` を返し、`install` は「launchd mode needs macOS」の error にする（`src/infrastructure/launchd.rs`）。test は両方で流し、Linux では `install_off_macos_says_launchd_mode_needs_macos`（`#[cfg(not(target_os = "macos"))]`）が error の文面を確かめる |
+| `dagq::it cli_operations::the_user_the_inbox_and_the_planner_keep_their_operations` | supervisor の無い `down` が同じく `launchctl` を起動できずに落ちた | 上と同じ runtime の直しで、Linux の `down` は載っている agent が無いとして成功する |
+| `dagq infrastructure::adapters::tests::worktree_status_does_not_write_back_the_index` | file を消して 20ms 後に同じ中身で書き直して index を古くしていたが、Linux の Git は stat を秒単位で比べ、ext4 は消した inode を再び使うので、index の項目が変わらず見えて素の `git status` が index を書き直さなかった | test を直した: mtime を 1 時間前に動かして（`File::set_modified`）、どちらの OS でも stat data が確実に変わる形にした |
+| `dagq::it runtime_repair::a_long_process_that_uses_cpu_time_is_not_an_idle_process_alert` | Linux の `ps -o time=` は CPU 時間を秒単位で出すので、約 1 秒 CPU を使う process の進みが 0 に見え、`idle_process` の警報と復旧 job が出た | runtime を直した: Linux では `SystemProcesses::list` が CPU 時間を `/proc/<pid>/stat` の `utime + stime`（clock tick）から読む（読めない process は `ps` の値のまま）。読み取りの判断は unit test（`ps_listings_are_read` の `proc_stat_cpu_ticks`）が確かめる |
+
+同じ期間に一度だけ落ちたものは扱いが別: `dagq::it planner_headless_turns::a_headless_request_planners_answer_reaches_a_new_one_and_undecided_ends_exhaust_the_request` は 2026-10-04 の 2 回の run で timeout し、後の run では落ちていない。`dagq::it runtime_slot_limits::the_supervisor_table_sets_parallel_and_max_waiting_and_is_read_again` は流し直しで通った（`FLKY-FL`、job を落とさない）。
+
+## macOSに固有として分けたtest
+
+今は無い。足すときは [testの制約](../development/testing.md) の「macOSに固有のtest」に従い、test の名前と、何が macOS にしか無いかをここに書く。
 
 ## summary の書式
 
@@ -47,4 +65,4 @@ job は `continue-on-error: true` で、Linux の build か test が落ちても
 - どちらでも、その後に nextest の `Summary [` の行（流した数・通った数・落ちた数）
 - log が無いか `Summary [` の行が無いとき（build か準備の失敗）: `no nextest summary (the build or the setup failed; see the log)`
 
-次の task はこの summary から、Linux で落ちる test を読んで macOS に固有のものを分ける。
+Linux で新しく落ちた test は、この summary から読んで移植できる形に直すか、macOS に固有として分けて上の節に足す。

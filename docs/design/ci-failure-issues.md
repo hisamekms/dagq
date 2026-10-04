@@ -4,7 +4,7 @@ type: design
 title: Issue for failing CI on main
 status: current
 created: 2026-10-02
-updated: 2026-10-02
+updated: 2026-10-05
 last_verified: 2026-10-02
 scope: operations
 tags:
@@ -29,7 +29,7 @@ main への push ごとの CI（`.github/workflows/ci.yml`）が落ちたら、G
 - 実行の `event` が `push` のときだけ。`pull_request` の実行（head の branch が main でも）は issue を開きも閉じもしない
 - 実行の結論（workflow 全体の `conclusion`）が `failure` なら開くか追記し、`success` なら閉じる。`cancelled`・`skipped` などでは何もしない（main の実行は concurrency で待っている古い実行が `cancelled` になる）
 
-workflow 全体の結論で決めるので、`ci.yml` のどの job が落ちても（`checks` に限らず）開く。job 単位の `continue-on-error: true` の job（今の `linux` job。[Linux CI](linux-ci.md)）が落ちても workflow の結論は `success` のままなので、その失敗だけでは開かない。task 1238 がその job から `continue-on-error` を外せば、その失敗で workflow の結論が `failure` になり、この workflow を書き直さずに開く。
+workflow 全体の結論で決めるので、`ci.yml` のどの job が落ちても（`checks` に限らず）開く。job 単位の `continue-on-error: true` の job が落ちても workflow の結論は `success` のままなので、その失敗だけでは開かない。`linux` job（[Linux CI](linux-ci.md)）は task 1238 で `continue-on-error` を外したので、その失敗で workflow の結論が `failure` になって開く。
 
 通知の job を `ci.yml` の中に置いて全ての job を `needs` に持たせる作りは採らなかった。job 単位の `continue-on-error` の job の失敗が `needs.<job>.result` にどう出るか（`failure` か `success` か）に依って、`continue-on-error` を外す前後の振る舞いが変わりうるうえ、job を足すたびに `needs` を直す必要がある。`workflow_run` の結論は GitHub が workflow の成否として決めた値そのものなので、この扱いに依らない。
 

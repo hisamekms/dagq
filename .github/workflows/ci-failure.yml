@@ -3,8 +3,8 @@ name: CI failure issue
 # Opens (or comments on) the one open ci-failure issue when a push run of
 # ci.yml on main concludes failure, and closes it with a comment when a later
 # push run on main succeeds. The trigger is the conclusion of the whole CI
-# workflow, so a job with continue-on-error (the linux job for now) does not
-# open the issue by itself, and does once its continue-on-error is removed.
+# workflow, so a job with continue-on-error does not open the issue by itself
+# (the linux job has none since task 1238).
 # How it works: docs/design/ci-failure-issues.md.
 on:
   workflow_run:
