@@ -35,6 +35,7 @@ tags:
 - [worker の問い（worker_question）の中身の分類と、ラベルの定義案](worker-question-topics.md)（goal 64、task 950）
 - [receipt の follow_up の種類と runtime の planner の判断の分類と、ラベルの定義案](follow-up-kinds.md)（goal 64、task 951）
 - [既存の open の goal に残る follow_up 由来の task と draft の所属の分類案](follow-up-membership-inventory.md)（goal 97、task 1512）
+- [既存の open・draft の goal のラベルと優先度の初期値の案と、high 以上の goal に残る task の後回しの判定の案](goal-priority-inventory.md)（goal 106、task 1642）
 - [task の cancel の理由の分類と、ラベルの定義案](cancel-reasons.md)（goal 64、task 952）
 - [スパイク：Claude（claude -p）と Codex（codex exec）の非対話の worker の測定](headless-worker-spike.md)（goal 57、task 812）
 - [本番の queue での Claude の非対話の worker と対話の worker の比較と、既定を切り替えるかの推奨](headless-worker-measurement.md)（goal 57、task 821）
