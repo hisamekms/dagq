@@ -6,7 +6,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    AskReason, DomainError, TaskId, TaskStatus, follow_up::SourceFollowUp, parse_json_object,
+    AskReason, DomainError, GoalId, GoalVerdict, TaskId, TaskStatus, follow_up::SourceFollowUp,
+    parse_json_object,
 };
 
 // What goal review decided: `achieved` closes the goal, `gaps` registers
@@ -214,6 +215,98 @@ pub fn tasks_done(tasks: &[(TaskId, TaskStatus)]) -> bool {
             .any(|(_, status)| *status == TaskStatus::Completed)
 }
 
+/// How many of a goal's latest reviews that decided something were
+/// `gaps`, given their outcomes newest first.
+pub fn gaps_in_a_row(outcomes: &[&str]) -> usize {
+    outcomes.iter().take_while(|o| **o == "gaps").count()
+}
+
+/// What a goal's latest review that ran to an end (not `interrupted`)
+/// left: its outcome, the input it saw ([`review_fingerprint`]) and
+/// whether a person rearmed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LatestReview<'a> {
+    pub outcome: &'a str,
+    pub seen: &'a str,
+    pub rearmed: bool,
+}
+
+/// Whether a review may take the goal now: it is open, its input
+/// (`fingerprint`) may close it (`closable`: its tasks all ended, one
+/// completed, no follow-up of it unsettled), no `approve_goal` ask of it is
+/// open, and its latest review saw another input or a person rearmed it.
+pub fn reviewable(
+    open: bool,
+    closable: bool,
+    ask_open: bool,
+    latest: Option<LatestReview<'_>>,
+    fingerprint: &str,
+) -> bool {
+    open && closable
+        && !ask_open
+        && !latest.is_some_and(|latest| latest.seen == fingerprint && !latest.rearmed)
+}
+
+/// Whether an open goal waits for a person to review it by hand: its latest
+/// review failed on the input it has now (`fingerprint`), and nobody
+/// rearmed it.
+pub fn waits_for_a_person(latest: Option<LatestReview<'_>>, fingerprint: &str) -> bool {
+    latest.is_some_and(|latest| {
+        latest.outcome == "failed" && !latest.rearmed && latest.seen == fingerprint
+    })
+}
+
+/// Whether `goal` may be reviewed again by a person's rearm, given whether
+/// it exists and is open (`open`, `None` when it does not exist).
+pub fn rearmable(goal: GoalId, open: Option<bool>) -> Result<(), String> {
+    match open {
+        None => Err(format!("goal {goal} does not exist")),
+        Some(false) => Err(format!(
+            "goal {goal} is not open; only an open goal is reviewed"
+        )),
+        Some(true) => Ok(()),
+    }
+}
+
+impl GoalAnswer {
+    /// Whether the supervisor can apply the answer to an open goal whose
+    /// tasks are `tasks`: `achieved` needs every task ended and no
+    /// follow-up of the goal unsettled (`follow_ups_settled`), `abandoned`
+    /// no task in progress, `gaps` without a text the review's gaps
+    /// (`review_has_gaps`); `gaps: <what>` and `keep_open` always apply.
+    pub fn fits(
+        &self,
+        tasks: &[(TaskId, TaskStatus)],
+        follow_ups_settled: bool,
+        review_has_gaps: bool,
+    ) -> bool {
+        match self {
+            Self::Achieved => {
+                tasks
+                    .iter()
+                    .all(|(_, status)| GoalVerdict::Achieved.allows(*status))
+                    && follow_ups_settled
+            }
+            Self::Abandoned => tasks
+                .iter()
+                .all(|(_, status)| GoalVerdict::Abandoned.allows(*status)),
+            Self::Gaps(Some(_)) | Self::KeepOpen => true,
+            Self::Gaps(None) => review_has_gaps,
+        }
+    }
+
+    /// The verdict the goal closes with on the answer; `None` for one that
+    /// leaves it open (`gaps` registers drafts, `keep_open` waits for its
+    /// tasks to change).
+    pub fn closes(&self) -> Option<GoalVerdict> {
+        match self {
+            Self::Achieved => Some(GoalVerdict::Achieved),
+            Self::Abandoned => Some(GoalVerdict::Abandoned),
+            Self::Gaps(_) | Self::KeepOpen => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,5 +434,143 @@ mod tests {
             (TaskId::new(1), TaskStatus::Completed),
             (TaskId::new(2), TaskStatus::Draft)
         ]));
+    }
+
+    #[test]
+    fn gaps_are_counted_back_from_the_newest_decision() {
+        assert_eq!(gaps_in_a_row(&[]), 0);
+        assert_eq!(gaps_in_a_row(&["gaps", "gaps", "gaps"]), 3);
+        assert_eq!(gaps_in_a_row(&["gaps", "ask", "gaps"]), 1);
+        assert_eq!(gaps_in_a_row(&["achieved", "gaps"]), 0);
+        // Three in a row make the fourth gaps an ask.
+        let (decision, why) = decide(
+            GoalReviewDecision::Gaps,
+            gaps_in_a_row(&["gaps", "gaps", "gaps"]),
+        );
+        assert_eq!(decision, GoalReviewDecision::Ask);
+        assert_eq!(
+            why.as_deref(),
+            Some("goal review found gaps 3 times in a row already (at most 3)")
+        );
+    }
+
+    /// Only an open goal whose tasks all ended (one completed), with no
+    /// open ask, is reviewed, and only once per input unless a person
+    /// rearms it; a failed review holds it for a person until then.
+    #[test]
+    fn a_goal_is_reviewed_once_per_input_unless_rearmed() {
+        let done = [
+            (TaskId::new(1), TaskStatus::Completed),
+            (TaskId::new(2), TaskStatus::Canceled),
+        ];
+        let seen = fingerprint(&done);
+        let latest = |outcome, seen, rearmed| {
+            Some(LatestReview {
+                outcome,
+                seen,
+                rearmed,
+            })
+        };
+        assert!(reviewable(true, tasks_done(&done), false, None, &seen));
+        // No task, only canceled tasks, a task still draft.
+        for tasks in [
+            &[][..],
+            &[(TaskId::new(1), TaskStatus::Canceled)][..],
+            &[
+                (TaskId::new(1), TaskStatus::Completed),
+                (TaskId::new(2), TaskStatus::Draft),
+            ][..],
+        ] {
+            assert!(!reviewable(
+                true,
+                tasks_done(tasks),
+                false,
+                None,
+                &fingerprint(tasks)
+            ));
+        }
+        // A closed goal; an open approve_goal ask.
+        assert!(!reviewable(false, true, false, None, &seen));
+        assert!(!reviewable(true, true, true, None, &seen));
+        // Seen already: not again, unless rearmed or the input changed (a
+        // gap's draft that ended).
+        assert!(!reviewable(
+            true,
+            true,
+            false,
+            latest("gaps", &seen, false),
+            &seen
+        ));
+        assert!(reviewable(
+            true,
+            true,
+            false,
+            latest("gaps", &seen, true),
+            &seen
+        ));
+        let after_gap = fingerprint(&[
+            (TaskId::new(1), TaskStatus::Completed),
+            (TaskId::new(2), TaskStatus::Canceled),
+            (TaskId::new(3), TaskStatus::Completed),
+        ]);
+        assert!(reviewable(
+            true,
+            true,
+            false,
+            latest("gaps", &seen, false),
+            &after_gap
+        ));
+        // A failed review: it waits for a person, not reviewed again by
+        // itself, until rearmed or its input changes.
+        let failed = latest("failed", &seen, false);
+        assert!(waits_for_a_person(failed, &seen));
+        assert!(!reviewable(true, true, false, failed, &seen));
+        assert!(!waits_for_a_person(latest("failed", &seen, true), &seen));
+        assert!(!waits_for_a_person(failed, &after_gap));
+        assert!(!waits_for_a_person(latest("ask", &seen, false), &seen));
+        assert!(!waits_for_a_person(None, &seen));
+        // Only an open goal is rearmed.
+        assert_eq!(rearmable(GoalId::new(4), Some(true)), Ok(()));
+        assert_eq!(
+            rearmable(GoalId::new(4), Some(false)).unwrap_err(),
+            "goal 4 is not open; only an open goal is reviewed"
+        );
+        assert_eq!(
+            rearmable(GoalId::new(99), None).unwrap_err(),
+            "goal 99 does not exist"
+        );
+    }
+
+    /// The answers of an `approve_goal` ask the supervisor applies, and
+    /// when: `achieved` and `abandoned` close the goal, `gaps` registers
+    /// the review's gaps or the person's, `keep_open` leaves it open; an
+    /// option the runtime does not know (the job's own) is the inbox's.
+    #[test]
+    fn an_answer_applies_when_the_goal_allows_it() {
+        let ended = [
+            (TaskId::new(1), TaskStatus::Completed),
+            (TaskId::new(2), TaskStatus::Canceled),
+        ];
+        let pending = [
+            (TaskId::new(1), TaskStatus::Completed),
+            (TaskId::new(2), TaskStatus::Ready),
+        ];
+        let running = [(TaskId::new(1), TaskStatus::InProgress)];
+        let parse = |text| GoalAnswer::parse(text).unwrap();
+        assert!(parse("achieved").fits(&ended, true, false));
+        assert!(!parse("achieved").fits(&pending, true, false));
+        assert!(!parse("achieved").fits(&ended, false, false));
+        assert!(parse("abandoned").fits(&pending, false, false));
+        assert!(!parse("abandoned").fits(&running, true, true));
+        assert!(parse("keep_open").fits(&running, false, false));
+        assert!(parse("gaps: docs").fits(&running, false, false));
+        assert!(parse("gaps").fits(&ended, true, true));
+        assert!(!parse("gaps").fits(&ended, true, false));
+        assert_eq!(GoalAnswer::parse("lower_target"), None);
+
+        assert_eq!(parse("achieved").closes(), Some(GoalVerdict::Achieved));
+        assert_eq!(parse("abandoned").closes(), Some(GoalVerdict::Abandoned));
+        assert_eq!(parse("keep_open").closes(), None);
+        assert_eq!(parse("gaps").closes(), None);
     }
 }

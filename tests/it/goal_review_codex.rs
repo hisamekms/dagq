@@ -372,7 +372,10 @@ fn a_goal_review_on_codex_runs_read_only_and_records_its_thread_and_model() {
 /// A Codex whose login ran out (ADR-t1063-1 decision 4): the job's failure
 /// says its provider could not be used, Codex is held, and the goal is
 /// reviewed again at once on Claude, whose launch says from which provider
-/// and why.
+/// and why. The wiring from the job's failure through the hold to the next
+/// start; where a goal review starts for each state of the providers
+/// (without Codex, under Claude's hold ask, `--no-claude`) is
+/// `supervise::goal_review::tests::the_goal_review_starts_on_a_provider_it_can_use_or_waits`.
 #[test]
 fn a_codex_that_cannot_log_in_moves_the_goal_review_to_claude() {
     let fx = fixture();
@@ -415,32 +418,12 @@ fn a_codex_that_cannot_log_in_moves_the_goal_review_to_claude() {
     assert!(!holds.to_string().contains("goal_review_failed"), "{holds}");
 }
 
-/// A supervisor with no Codex that runs starts the goal review on Claude
-/// (`executable_missing`), without calling any Codex.
-#[test]
-fn without_codex_the_goal_review_starts_on_claude() {
-    let fx = fixture();
-    roles(&fx, "[roles.goal_review]\nprovider = \"codex\"\n");
-    let (goal, _) = goal_done(&fx);
-    let claude = StubReviewer::new(&[achieved("from Claude")]);
-    let missing = fx.db.parent().unwrap().join("no-such-codex");
-    supervise(&fx, &claude, &missing);
-    assert_eq!(claude.prompts().len(), 1);
-    let mut queue = SqliteQueue::open(&fx.db).unwrap();
-    let started = goal_events(&mut queue, goal, "goal_review_started");
-    assert_eq!(started.len(), 1);
-    assert_eq!(started[0]["launch"]["provider"], "claude");
-    assert_eq!(started[0]["launch"]["switched_from"], "codex");
-    assert_eq!(started[0]["launch"]["switch_reason"], "executable_missing");
-    assert_eq!(
-        queue.show_goal(goal).unwrap().goal.verdict(),
-        Some(GoalVerdict::Achieved)
-    );
-}
-
 /// A role that names Claude moves to Codex at Claude's usage limit, which
 /// holds the queue's jobs as before; when Codex is at its limit too, the
-/// goal review waits and nothing starts (ADR-t1063-1 decision 5).
+/// goal review waits and nothing starts (ADR-t1063-1 decision 5). The
+/// wiring of Claude's wall to the queue's hold ask and of Codex's to its
+/// own hold; which a failure raises is `supervise::goal_review::tests::
+/// a_failed_job_raises_the_hold_ask_or_holds_its_provider`.
 #[test]
 fn a_goal_review_waits_while_both_providers_are_held() {
     let fx = fixture();
@@ -478,68 +461,4 @@ fn a_goal_review_waits_while_both_providers_are_held() {
     assert_eq!(held.len(), 1);
     assert_eq!(held[0]["provider"], "codex");
     assert_eq!(queue.show_goal(goal).unwrap().goal.verdict(), None);
-}
-
-/// Claude's hold ask, opened in an earlier pass while no Codex could take
-/// the goal review, does not stop it once Codex can: it starts on Codex
-/// with the ask still open (ADR-t1063-1 decision 5).
-#[test]
-fn a_goal_review_runs_on_codex_while_claudes_hold_ask_is_open() {
-    let fx = fixture();
-    roles(&fx, "[roles.goal_review]\nprovider = \"claude\"\n");
-    let (goal, _) = goal_done(&fx);
-    let claude = StubReviewer::limited_then(&achieved("from Claude"));
-    let missing = fx.db.parent().unwrap().join("no-such-codex");
-    supervise(&fx, &claude, &missing);
-    let mut queue = SqliteQueue::open(&fx.db).unwrap();
-    assert_eq!(
-        goal_events(&mut queue, goal, "goal_review_started").len(),
-        1
-    );
-    assert_eq!(queue.asks(Default::default()).unwrap().len(), 1);
-
-    let codex = stub_codex(&fx, "ok", &achieved("from Codex"));
-    supervise(&fx, &claude, &codex);
-    assert_eq!(claude.prompts().len(), 1, "Claude is held");
-    let started = goal_events(&mut queue, goal, "goal_review_started");
-    assert_eq!(started.len(), 2);
-    assert_eq!(started[1]["launch"]["provider"], "codex");
-    assert_eq!(started[1]["launch"]["switched_from"], "claude");
-    assert_eq!(started[1]["launch"]["switch_reason"], "usage_limit");
-    assert_eq!(
-        queue.show_goal(goal).unwrap().goal.verdict(),
-        Some(GoalVerdict::Achieved)
-    );
-    let asks = queue.asks(Default::default()).unwrap();
-    assert_eq!(asks.len(), 1);
-    assert_eq!(asks[0].answer, None, "the ask is still open");
-}
-
-#[test]
-fn no_claude_goal_review_runs_on_codex_and_never_falls_back() {
-    for mode in ["ok", "auth", "missing"] {
-        let mut fx = fixture();
-        roles(&fx, "[roles.goal_review]\nprovider = 'codex'\n");
-        let (goal, _) = goal_done(&fx);
-        let codex = if mode == "missing" {
-            fx.repo.join("missing-codex")
-        } else {
-            stub_codex(&fx, mode, &achieved("done"))
-        };
-        fx.claude = fx.repo.join("missing-claude");
-        let reviewer = StubReviewer::new(&[achieved("must never run")]);
-        let mut opts = options(1, Duration::from_secs(3600));
-        opts.no_claude = true;
-        opts.codex = codex;
-        opts.codex_home = Some(codex_home(&fx));
-        supervise_with(&fx, &PlanWorkspace::default(), &reviewer, &opts);
-        assert!(reviewer.prompts().is_empty());
-        let mut queue = SqliteQueue::open(&fx.db).unwrap();
-        let started = goal_events(&mut queue, goal, "goal_review_started");
-        assert_eq!(started.len(), usize::from(mode != "missing"));
-        for event in started {
-            assert_eq!(event["launch"]["provider"], "codex");
-        }
-        assert!(queue.asks(Default::default()).unwrap().is_empty());
-    }
 }

@@ -23,26 +23,40 @@ use crate::domain::{
     worker::WorkerMode,
 };
 
+/// Why `provider` is held now, given `--no-claude`, why the queue's open
+/// hold ask holds Claude (`queue_hold`) and the provider's own
+/// [`ProviderHold`] (`own`): Claude is disabled under `--no-claude`, else
+/// held by the hold ask before its own hold; Codex only by its own.
+pub(super) fn provider_held_of(
+    provider: Provider,
+    no_claude: bool,
+    queue_hold: Option<SwitchReason>,
+    own: Option<SwitchReason>,
+) -> Option<SwitchReason> {
+    match provider {
+        Provider::Claude if no_claude => Some(SwitchReason::Disabled),
+        Provider::Claude => queue_hold.or(own),
+        Provider::Codex => own,
+    }
+}
+
 impl Supervisor<'_> {
     /// Why `provider` is held for the workers now, if it is: Claude by the
     /// queue's open hold ask or its [`ProviderHold`] (an agent that did not
     /// start), Codex by its [`ProviderHold`].
     pub(super) fn provider_held(&self, provider: Provider) -> Option<SwitchReason> {
-        if self.no_claude && provider == Provider::Claude {
-            return Some(SwitchReason::Disabled);
-        }
         let own = self
             .provider_holds
             .iter()
             .find(|hold| hold.provider == provider)
             .map(|hold| hold.reason);
-        match provider {
-            Provider::Claude => self
-                .queue_hold
-                .and_then(|hold| SwitchReason::of_hold(hold.reason))
-                .or(own),
-            Provider::Codex => own,
-        }
+        provider_held_of(
+            provider,
+            self.no_claude,
+            self.queue_hold
+                .and_then(|hold| SwitchReason::of_hold(hold.reason)),
+            own,
+        )
     }
 
     /// How this pass's claims run each worker a task may ask for.

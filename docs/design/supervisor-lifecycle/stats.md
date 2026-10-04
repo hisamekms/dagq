@@ -4,8 +4,8 @@ type: design
 title: "`stats`"
 status: current
 created: 2026-09-26
-updated: 2026-10-04 # task 1486: the gaps of today's token counts (ADR-t1486-1); task 1437
-last_verified: 2026-10-04 # task 1486; task 1437
+updated: 2026-10-04 # task 1486: the gaps of today's token counts (ADR-t1486-1); task 1437; task 1712
+last_verified: 2026-10-04 # task 1486; task 1437; task 1712
 scope: runtime
 related:
   - adr-t1486-1
@@ -346,7 +346,7 @@ goal 73（task 1066、スループットの見直しはtask 1173）。**`jobs`**
 - **`by_provider`**: 同じ形（`by_provider` / `by_model`を除く）を、開始のeventの`launch.provider`（[Actor model](actor-model.md)）ごとに分けたもの。`launch`か`provider`の無い開始（task 1062より前の記録）と、開始の見つからない終わりは`claude`に数える（それより前はClaudeでしか動かなかった）。workerのrunの`turns.by_provider`と同じくproviderの値をkeyにする。
 - **`by_mode`**: `throughput_review`だけが持ち、同じ形（`by_provider` / `by_model` / `by_mode`を除く）を`throughput_review_*`のeventの`mode`（`hourly` / `daily` / `weekly`）ごとに分けたもの。3つのmodeを記録が0でも必ず出す。毎時と日次・週次では所要時間の桁が違い、費用を見たいのは毎時なので分ける。ほかの種類の`jobs.<kind>`には出ない。
 - **`by_model`**: 同じ形を、開始のeventの`session_id`の区間の`session_closed`の`model`（transcriptから読んだ実際のmodel。[provider-lifecycle](../provider-lifecycle.md#modelとeffort)）ごとに分けたもの。modelの記録の無いjob（transcriptが読めない、区間を持たない生きているrunの復旧のjob）は`unknown`。Claudeのjobは実際のmodelをjobの終わりのeventに写さない（[Actor model](actor-model.md)）ので、`session_id`で結ぶ。Codexのjob（開始の`session_id`がnull）は終わりのeventの`model`（rolloutから読んだもの。task 1065）を読む。
-- `src/domain/stats/jobs.rs`のunit test（`goal_reviews_are_split_by_provider_and_model`はClaudeとCodexのgoal reviewが混ざった記録で件数・失敗率・所要時間・verdictの分布をproviderとmodelごとに、`every_kind_pairs_its_ends_with_its_starts`は種類ごとの開始と終わりの対応を確かめる）、`a_codex_job_takes_the_model_its_end_records`（Codexのjobの終わりの`model`）、`throughput_reviews_are_counted_per_mode_without_the_skipped_hours`（見直しの開始と終わりの組、skippedを数えないこと、`failed` / `error`の失敗、modeごとの件数・失敗率・所要時間）と、`tests/it/goal_review.rs`の`a_goal_review_records_its_launch_and_session_and_takes_its_role_table`・`tests/it/goal_review_codex.rs`の`a_goal_review_on_codex_runs_read_only_and_records_its_thread_and_model`（`stats --full`の`jobs.goal_review`）、`tests/it/cli_kpi.rs`の`the_throughput_review_jobs_reach_stats_and_kpi_per_mode`（`stats --full`の`jobs.throughput_review`と`--goal`での0、`kpi`と`kpi --compare`の`mode=`の層）。
+- `src/domain/stats/jobs.rs`のunit test（`goal_reviews_are_split_by_provider_and_model`はClaudeとCodexのgoal reviewが混ざった記録で件数・失敗率・所要時間・verdictの分布をproviderとmodelごとに、`every_kind_pairs_its_ends_with_its_starts`は種類ごとの開始と終わりの対応を確かめる）、`a_codex_job_takes_the_model_its_end_records`（Codexのjobの終わりの`model`）、`throughput_reviews_are_counted_per_mode_without_the_skipped_hours`（見直しの開始と終わりの組、skippedを数えないこと、`failed` / `error`の失敗、modeごとの件数・失敗率・所要時間）と、`tests/it/goal_review.rs`の`a_goal_review_records_its_launch_and_session`・`tests/it/goal_review_codex.rs`の`a_goal_review_on_codex_runs_read_only_and_records_its_thread_and_model`（`stats --full`の`jobs.goal_review`）、`tests/it/cli_kpi.rs`の`the_throughput_review_jobs_reach_stats_and_kpi_per_mode`（`stats --full`の`jobs.throughput_review`と`--goal`での0、`kpi`と`kpi --compare`の`mode=`の層）。
 
 ## AIの推奨と確信度の集計
 

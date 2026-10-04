@@ -23,7 +23,7 @@ use crate::{
     domain::{
         Ask, AskId, AskKind, GoalId, GoalVerdict, HEARTBEAT_TIMEOUT_SECS, NewTask, TaskId,
         TaskStatus, follow_up,
-        goal_review::{self, GoalAnswer, GoalGap, GoalReviewDecision},
+        goal_review::{self, GoalAnswer, GoalGap, GoalReviewDecision, LatestReview},
     },
 };
 
@@ -65,6 +65,15 @@ fn latest(conn: &Connection, goal: GoalId) -> Result<Option<(i64, String, String
         .optional()?)
 }
 
+/// What [`latest`] read, for the decisions of [`goal_review`].
+fn latest_review((_, outcome, seen, rearmed): &(i64, String, String, bool)) -> LatestReview<'_> {
+    LatestReview {
+        outcome,
+        seen,
+        rearmed: *rearmed,
+    }
+}
+
 /// An `approve_goal` ask of the goal's reviews that is not closed.
 fn open_ask(conn: &Connection, goal: GoalId) -> Result<bool> {
     Ok(conn.query_row(
@@ -87,16 +96,18 @@ fn candidate(conn: &Connection, goal: GoalId) -> Result<Option<String>> {
         return Ok(None);
     }
     let (fingerprint, closable) = review_input(conn, goal)?;
-    if !closable || open_ask(conn, goal)? {
-        return Ok(None);
-    }
-    if let Some((_, _, seen, rearmed)) = latest(conn, goal)?
-        && seen == fingerprint
-        && !rearmed
-    {
-        return Ok(None);
-    }
-    Ok(Some(fingerprint))
+    // Read only what the decision still needs.
+    let ask_open = closable && open_ask(conn, goal)?;
+    let latest = if closable && !ask_open {
+        latest(conn, goal)?
+    } else {
+        None
+    };
+    let latest = latest.as_ref().map(latest_review);
+    Ok(
+        goal_review::reviewable(open, closable, ask_open, latest, &fingerprint)
+            .then_some(fingerprint),
+    )
 }
 
 fn candidates(conn: &Connection) -> Result<Vec<GoalId>> {
@@ -159,7 +170,8 @@ fn gaps_in_a_row(conn: &Connection, goal: GoalId) -> Result<usize> {
         )?
         .query_map([goal], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
-    Ok(outcomes.iter().take_while(|o| *o == "gaps").count())
+    let outcomes: Vec<&str> = outcomes.iter().map(String::as_str).collect();
+    Ok(goal_review::gaps_in_a_row(&outcomes))
 }
 
 /// Register `gaps` as draft tasks of the goal, each with the origin
@@ -259,22 +271,16 @@ fn applicable(
         return Ok(None);
     }
     let tasks = goal_tasks(conn, goal)?;
-    let fits = match &answer {
-        GoalAnswer::Achieved => {
-            tasks
-                .iter()
-                .all(|(_, status)| GoalVerdict::Achieved.allows(*status))
-                && follow_up::unsettled_follow_ups(&follow_up_membership::source_follow_ups(
-                    conn, goal,
-                )?)
-                .is_empty()
-        }
-        GoalAnswer::Abandoned => tasks
+    // Read only what the answer needs.
+    let follow_ups_settled = answer != GoalAnswer::Achieved
+        || !tasks
             .iter()
-            .all(|(_, status)| GoalVerdict::Abandoned.allows(*status)),
-        GoalAnswer::Gaps(Some(_)) | GoalAnswer::KeepOpen => true,
-        GoalAnswer::Gaps(None) => !review_gaps(conn, review)?.is_empty(),
-    };
+            .all(|(_, status)| GoalVerdict::Achieved.allows(*status))
+        || follow_up::unsettled_follow_ups(&follow_up_membership::source_follow_ups(conn, goal)?)
+            .is_empty();
+    let review_has_gaps =
+        answer == GoalAnswer::Gaps(None) && !review_gaps(conn, review)?.is_empty();
+    let fits = answer.fits(&tasks, follow_ups_settled, review_has_gaps);
     Ok(fits.then_some((answer, review, goal)))
 }
 
@@ -669,11 +675,7 @@ impl GoalReviewStore for SqliteQueue {
         let by = json!({"by": "person", "ask_id": ask_id, "goal_review_id": review});
         match &answer {
             GoalAnswer::Achieved | GoalAnswer::Abandoned => {
-                let verdict = if answer == GoalAnswer::Achieved {
-                    GoalVerdict::Achieved
-                } else {
-                    GoalVerdict::Abandoned
-                };
+                let verdict = answer.closes().context("the answer closes the goal")?;
                 close_goal_in(&tx, goal, verdict, &stamp, by)?;
                 decided.closed = Some(verdict);
             }
@@ -751,12 +753,18 @@ impl GoalReviewStore for SqliteQueue {
             .collect::<rusqlite::Result<_>>()?;
         let mut holds = Vec::new();
         for goal in goals {
-            let Some((id, outcome, seen, rearmed)) = latest(&self.conn, goal)? else {
+            let Some(row) = latest(&self.conn, goal)? else {
                 continue;
             };
-            if outcome != "failed" || rearmed || seen != review_input(&self.conn, goal)?.0 {
+            // Its input is read only for a failed review nobody rearmed.
+            if row.1 != "failed" || row.3 {
                 continue;
             }
+            let fingerprint = review_input(&self.conn, goal)?.0;
+            if !goal_review::waits_for_a_person(Some(latest_review(&row)), &fingerprint) {
+                continue;
+            }
+            let id = row.0;
             let error: Option<String> =
                 self.conn
                     .query_row("SELECT error FROM goal_reviews WHERE id=?1", [id], |r| {
@@ -783,11 +791,7 @@ impl GoalReviewStore for SqliteQueue {
                 |r| r.get(0),
             )
             .optional()?;
-        ensure!(open.is_some(), "goal {goal} does not exist");
-        ensure!(
-            open == Some(true),
-            "goal {goal} is not open; only an open goal is reviewed"
-        );
+        goal_review::rearmable(goal, open).map_err(anyhow::Error::msg)?;
         let rearmed = match latest(&tx, goal)? {
             Some((id, ..)) => {
                 tx.execute(

@@ -5,7 +5,7 @@
 
 use crate::common::WithoutActor;
 use crate::plan_review::{
-    Fixture, PlanWorkspace, StubReviewer, add, fixture, git, job_actors, options, supervise_with,
+    Fixture, PlanWorkspace, StubReviewer, add, fixture, job_actors, options, supervise_with,
 };
 
 use dagq::{
@@ -18,7 +18,7 @@ use dagq::{
 };
 use rusqlite::Connection;
 use serde_json::{Value, json};
-use std::{fs, time::Duration};
+use std::time::Duration;
 
 /// Supervise once without planners of the runtime's, so a gap's draft
 /// stays as it is registered.
@@ -159,17 +159,17 @@ fn an_achieved_goal_is_closed_with_its_evidence() {
 }
 
 /// Without `[roles.goal_review]` the goal review starts as before (no
-/// model or effort given); with it, the job is given its model and effort
-/// (ADR-0079 decision 7). Either way `goal_review_started` records the
-/// launch with its provider and the session id the runtime gave the job,
-/// and the job's span opens and closes on the goal's first task (task
-/// 1062).
+/// model or effort given); `goal_review_started` records the launch with
+/// its provider and the session id the runtime gave the job, and the job's
+/// span opens and closes on the goal's first task (task 1062). What a role
+/// table gives the job is `supervise::goal_review::tests::
+/// a_role_table_gives_the_goal_review_its_model_and_effort`.
 #[test]
-fn a_goal_review_records_its_launch_and_session_and_takes_its_role_table() {
+fn a_goal_review_records_its_launch_and_session() {
     let achieved = json!({"verdict": "achieved", "criteria": [], "summary": "done"});
     let fx = fixture();
     let (goal, done) = goal_done(&fx);
-    let reviewer = StubReviewer::new(std::slice::from_ref(&achieved));
+    let reviewer = StubReviewer::new(&[achieved]);
     supervise(&fx, &reviewer);
     assert_eq!(reviewer.models(), []);
     let mut queue = SqliteQueue::open(&fx.db).unwrap();
@@ -212,30 +212,11 @@ fn a_goal_review_records_its_launch_and_session_and_takes_its_role_table() {
     assert_eq!((&jobs["count"], &jobs["failed"]), (&json!(1), &json!(0)));
     assert_eq!(jobs["by_provider"]["claude"]["verdicts"]["achieved"], 1);
     assert_eq!(jobs["by_provider"]["claude"]["secs"]["count"], 1);
-
-    let fx = fixture();
-    fs::write(
-        fx.repo.join("dagq.toml"),
-        "[roles.goal_review]\nmodel = \"claude-sonnet-5\"\neffort = \"high\"\n",
-    )
-    .unwrap();
-    git(&fx.repo, &["add", "dagq.toml"]);
-    git(&fx.repo, &["commit", "-m", "roles"]);
-    let (goal, _) = goal_done(&fx);
-    let reviewer = StubReviewer::new(&[achieved]);
-    supervise(&fx, &reviewer);
-    assert_eq!(
-        reviewer.models(),
-        [("claude-sonnet-5".to_owned(), "high".to_owned())]
-    );
-    let mut queue = SqliteQueue::open(&fx.db).unwrap();
-    assert_eq!(
-        goal_events(&mut queue, goal, "goal_review_started")[0]["launch"],
-        json!({"role": "goal_review", "provider": "claude", "model": "claude-sonnet-5",
-               "effort": "high", "source": "dagq.toml"})
-    );
 }
 
+/// A `gaps` verdict registers its gaps as drafts of the open goal, whose
+/// draft keeps it from review (the SQLite rows; when it is reviewed again
+/// is `domain::goal_review::tests::a_goal_is_reviewed_once_per_input_unless_rearmed`).
 #[test]
 fn gaps_become_drafts_of_the_open_goal_and_a_review_waits_for_them() {
     let fx = fixture();
@@ -261,43 +242,66 @@ fn gaps_become_drafts_of_the_open_goal_and_a_review_waits_for_them() {
 
     // The draft keeps the goal from review; so do unchanged tasks.
     assert!(queue.goal_review_candidates().unwrap().is_empty());
-    let idle = StubReviewer::new(&[json!({"verdict": "achieved"})]);
-    supervise(&fx, &idle);
-    assert!(idle.prompts().is_empty());
-
-    // Once the gap's task ended, the goal is reviewed again.
-    set_status(&fx, gap, TaskStatus::Completed);
-    let next = StubReviewer::new(&[json!({"verdict": "achieved", "summary": "docs landed"})]);
-    supervise(&fx, &next);
-    assert_eq!(next.prompts().len(), 1);
-    assert!(
-        next.prompts()[0].contains("the docs are missing"),
-        "earlier review shown"
-    );
-    let mut queue = SqliteQueue::open(&fx.db).unwrap();
-    assert_eq!(
-        queue.show_goal(goal).unwrap().goal.verdict(),
-        Some(GoalVerdict::Achieved)
-    );
 }
 
+/// A fourth `gaps` in a row asks a person: the store counts the goal's
+/// review rows (the limit is `domain::goal_review::tests::
+/// gaps_are_counted_back_from_the_newest_decision`), and the supervisor's
+/// ask lists the gaps, whose `gaps` answer registers them.
 #[test]
 fn a_fourth_gaps_in_a_row_asks_a_person() {
+    use dagq::application::GoalReviewApply;
+    use dagq::domain::{
+        LeaseToken,
+        actor_model::{ActorLaunch, ModelRole},
+        goal_review::{GoalReviewDecision, GoalReviewVerdict},
+    };
     let fx = fixture();
     let (goal, _) = goal_done(&fx);
+    // Three gaps in a row, applied through the store as a supervisor
+    // applies a review's, each gap's draft canceled after.
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let token = LeaseToken::new("earlier-supervisor");
     for round in 0..3 {
-        let reviewer = StubReviewer::new(&[gaps_verdict(&format!("gap {round}"))]);
-        supervise(&fx, &reviewer);
-        assert_eq!(reviewer.prompts().len(), 1, "round {round}");
-        let mut queue = SqliteQueue::open(&fx.db).unwrap();
-        let finished = goal_events(&mut queue, goal, "goal_review_finished");
-        let gap = finished.last().unwrap()["gap_tasks"][0].as_i64().unwrap();
+        let job = queue
+            .begin_goal_review(
+                goal,
+                &token,
+                &fx.repo.join("goal-reviews"),
+                &fx.repo,
+                &ActorLaunch::default_of(ModelRole::GoalReview),
+            )
+            .unwrap()
+            .unwrap();
+        let verdict = gaps_verdict(&format!("gap {round}"));
+        let applied = queue
+            .finish_goal_review(
+                &job,
+                &token,
+                &GoalReviewApply {
+                    verdict: GoalReviewVerdict::parse(&verdict.to_string()).unwrap(),
+                    decision: GoalReviewDecision::Gaps,
+                    overridden: None,
+                    ask: None,
+                    duration_secs: 0,
+                    session: None,
+                    prompt_bytes: None,
+                },
+            )
+            .unwrap();
         queue
-            .transition(TaskId::new(gap), TaskAction::Cancel)
+            .transition(applied.gap_tasks[0], TaskAction::Cancel)
             .unwrap();
     }
     let reviewer = StubReviewer::new(&[gaps_verdict("gap 3")]);
     supervise(&fx, &reviewer);
+    // The earlier reviews are shown to the job.
+    let prompts = reviewer.prompts();
+    assert_eq!(prompts.len(), 1);
+    assert!(
+        prompts[0].contains("the docs are missing"),
+        "earlier review shown"
+    );
     let mut queue = SqliteQueue::open(&fx.db).unwrap();
     let finished = goal_events(&mut queue, goal, "goal_review_finished");
     assert_eq!(finished.len(), 4);
@@ -331,6 +335,10 @@ fn a_fourth_gaps_in_a_row_asks_a_person() {
     assert!(queue.read_ask(asks[0].id).unwrap().closed_at.is_some());
 }
 
+/// An `ask` verdict opens an `approve_goal` ask on the goal's first task;
+/// an option the runtime does not apply waits for the inbox, and an answer
+/// to a goal closed meanwhile is closed (the SQLite rows; which answers
+/// apply is `domain::goal_review::tests::an_answer_applies_when_the_goal_allows_it`).
 #[test]
 fn an_ask_waits_for_a_person_whose_answer_is_applied() {
     let fx = fixture();
@@ -360,14 +368,10 @@ fn an_ask_waits_for_a_person_whose_answer_is_applied() {
             .starts_with(&format!("Goal {goal}: Lower the target"))
     );
     assert!(!queue.show_goal(goal).unwrap().closed);
-
     // The open ask keeps the goal from another review.
-    let idle = StubReviewer::new(&[json!({"verdict": "achieved"})]);
-    supervise(&fx, &idle);
-    assert!(idle.prompts().is_empty());
+    assert!(queue.goal_review_candidates().unwrap().is_empty());
 
     // An option the runtime does not apply stays for the inbox to read.
-    let mut queue = SqliteQueue::open(&fx.db).unwrap();
     queue.answer(ask.id, "lower_target").unwrap();
     assert!(
         !queue
@@ -378,6 +382,17 @@ fn an_ask_waits_for_a_person_whose_answer_is_applied() {
     assert!(queue.read_ask(ask.id).unwrap().closed_at.is_none());
     let answered = goal_answered(&mut queue, anchor);
     assert_eq!(answered["runtime_delivers"], false);
+
+    // An answered ask of a goal closed meanwhile is closed unapplied and
+    // records `ask_closed` (task 568).
+    queue.close_goal(goal, GoalVerdict::Achieved).unwrap();
+    assert_eq!(queue.decide_goal(ask.id).unwrap().map(|d| d.goal_id), None);
+    assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
+    assert!(goal_events(&mut queue, goal, "goal_decided").is_empty());
+    assert_eq!(
+        crate::plan_review::events(&mut queue, anchor, "ask_closed"),
+        [json!({"ask_id": ask.id, "kind": "approve_goal"})]
+    );
 }
 
 #[test]
@@ -424,6 +439,10 @@ fn abandoned_and_keep_open_answers_are_applied() {
     assert_eq!(closed[0]["ask_id"], ask.id.as_i64());
 }
 
+/// A failed goal review holds the goal for a person, whom the inbox's
+/// `status` tells and whose `goal review ID` rearms it (the CLI and the
+/// SQLite rows; when a goal waits is `domain::goal_review::tests::
+/// a_goal_is_reviewed_once_per_input_unless_rearmed`).
 #[test]
 fn a_failed_goal_review_waits_for_a_person_until_rearmed() {
     let fx = fixture();
@@ -449,9 +468,7 @@ fn a_failed_goal_review_waits_for_a_person_until_rearmed() {
     assert_eq!(holds[0].anchor, Some(anchor));
 
     // Not reviewed again by itself.
-    let idle = StubReviewer::new(&[json!({"verdict": "achieved"})]);
-    supervise(&fx, &idle);
-    assert!(idle.prompts().is_empty());
+    assert!(queue.goal_review_candidates().unwrap().is_empty());
 
     // The inbox shows it as a goal review to do by hand.
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_dagq"))
@@ -494,68 +511,6 @@ fn a_failed_goal_review_waits_for_a_person_until_rearmed() {
     assert_eq!(next.prompts().len(), 1);
     let mut queue = SqliteQueue::open(&fx.db).unwrap();
     assert!(queue.show_goal(goal).unwrap().closed);
-}
-
-#[test]
-fn only_goals_whose_tasks_ended_are_reviewed() {
-    let fx = fixture();
-    let mut queue = SqliteQueue::open(&fx.db).unwrap();
-    let new_goal = |queue: &mut SqliteQueue, title: &str| {
-        queue
-            .add_goal(NewGoal {
-                title: title.into(),
-                description: String::new(),
-                acceptance: String::new(),
-                constraints: String::new(),
-                doc: None,
-                draft: false,
-            })
-            .unwrap()
-            .id()
-    };
-    // No task; only canceled tasks; a task still draft.
-    new_goal(&mut queue, "empty");
-    let canceled = new_goal(&mut queue, "canceled");
-    let task = add(&mut queue, "c", &[], Priority::Normal);
-    queue.set_goal(task, Some(canceled)).unwrap();
-    queue.transition(task, TaskAction::Cancel).unwrap();
-    let pending = new_goal(&mut queue, "pending");
-    let done = add(&mut queue, "d", &[], Priority::Normal);
-    let open = add(&mut queue, "o", &[], Priority::Normal);
-    queue.set_goal(done, Some(pending)).unwrap();
-    queue.set_goal(open, Some(pending)).unwrap();
-    set_status(&fx, done, TaskStatus::Completed);
-    assert!(queue.goal_review_candidates().unwrap().is_empty());
-    let idle = StubReviewer::new(&[json!({"verdict": "achieved"})]);
-    supervise(&fx, &idle);
-    assert!(idle.prompts().is_empty());
-    // A closed goal cannot be rearmed.
-    queue.close_goal(canceled, GoalVerdict::Abandoned).unwrap();
-    assert!(queue.rearm_goal_review(canceled).is_err());
-    assert!(queue.rearm_goal_review(GoalId::new(99)).is_err());
-}
-
-/// An answered `approve_goal` ask of a goal closed meanwhile is closed
-/// unapplied and records `ask_closed` (task 568).
-#[test]
-fn an_answer_to_a_goal_closed_meanwhile_is_closed_with_ask_closed() {
-    let fx = fixture();
-    let (goal, anchor) = goal_done(&fx);
-    supervise(
-        &fx,
-        &StubReviewer::new(&[json!({"verdict": "ask", "summary": "split the goal?"})]),
-    );
-    let mut queue = SqliteQueue::open(&fx.db).unwrap();
-    let ask = queue.asks(Default::default()).unwrap().remove(0);
-    queue.answer(ask.id, "keep_open").unwrap();
-    queue.close_goal(goal, GoalVerdict::Achieved).unwrap();
-    assert_eq!(queue.decide_goal(ask.id).unwrap().map(|d| d.goal_id), None);
-    assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
-    assert!(goal_events(&mut queue, goal, "goal_decided").is_empty());
-    assert_eq!(
-        crate::plan_review::events(&mut queue, anchor, "ask_closed"),
-        [json!({"ask_id": ask.id, "kind": "approve_goal"})]
-    );
 }
 
 /// The payload of the latest `ask_answered` on `task`.

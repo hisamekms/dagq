@@ -548,4 +548,267 @@ mod tests {
         );
         assert_eq!(empty.matches("### Context").count(), 1);
     }
+
+    /// A repository whose landing branch is at [`SHA`] and holds `files`
+    /// there only, and whose reviewed range changes `changed`: what
+    /// [`snapshot_subagents`] reads, with nothing else.
+    struct Committed {
+        files: Vec<(&'static str, &'static str)>,
+        changed: Vec<String>,
+    }
+
+    impl Repository for Committed {
+        fn is_dagq_source(&self) -> bool {
+            false
+        }
+        fn main_head(&self) -> Result<CommitSha> {
+            Ok(CommitSha::try_from(SHA).unwrap())
+        }
+        fn file_in(&self, commit: &str, path: &str) -> Result<Option<String>> {
+            // Only the landing branch's commit is ever read.
+            assert_eq!(commit, SHA);
+            Ok(self
+                .files
+                .iter()
+                .find(|(name, _)| *name == path)
+                .map(|(_, text)| (*text).to_owned()))
+        }
+        fn merge_base(&self, _: &str, _: &str) -> Result<Option<CommitSha>> {
+            Ok(None)
+        }
+        fn changed_paths(&self, from: &str, to: &str) -> Result<Vec<String>> {
+            assert_eq!((from, to), ("base", "head"));
+            Ok(self.changed.clone())
+        }
+        fn current_branch(&self, _: &Path) -> Result<Option<String>> {
+            unreachable!()
+        }
+        fn head(&self, _: &Path) -> Result<CommitSha> {
+            unreachable!()
+        }
+        fn is_ancestor(&self, _: &str, _: &str) -> Result<bool> {
+            unreachable!()
+        }
+        fn status(&self, _: &Path) -> Result<String> {
+            unreachable!()
+        }
+        fn rebase_in_progress(&self, _: &Path) -> Result<bool> {
+            unreachable!()
+        }
+        fn rebase_abort(&self, _: &Path) -> Result<()> {
+            unreachable!()
+        }
+        fn rebase(&self, _: &Path, _: &str) -> Result<std::result::Result<(), String>> {
+            unreachable!()
+        }
+        fn conflicted_files(&self, _: &Path) -> Result<Vec<String>> {
+            unreachable!()
+        }
+        fn added_paths(&self, _: &str, _: &str) -> Result<Vec<String>> {
+            unreachable!()
+        }
+        fn paths_in(&self, _: &str, _: &str) -> Result<Vec<String>> {
+            unreachable!()
+        }
+        fn paths_containing(&self, _: &str, _: &str, _: &[String]) -> Result<Vec<String>> {
+            unreachable!()
+        }
+        fn rename_and_commit(
+            &self,
+            _: &Path,
+            _: &str,
+            _: &str,
+            _: &[String],
+        ) -> Result<std::result::Result<CommitSha, String>> {
+            unreachable!()
+        }
+        fn tree_of(&self, _: &str) -> Result<String> {
+            unreachable!()
+        }
+        fn commit_tree(&self, _: &str, _: &str, _: &[String]) -> Result<CommitSha> {
+            unreachable!()
+        }
+        fn update_ref(&self, _: &str, _: &str) -> Result<()> {
+            unreachable!()
+        }
+        fn advance_main(
+            &self,
+            _: &crate::domain::landing_branch::LandingBranch,
+            _: &str,
+            _: &str,
+        ) -> Result<()> {
+            unreachable!()
+        }
+        fn repair_worktree(&self, _: &Path) -> Result<()> {
+            unreachable!()
+        }
+        fn remove_worktree_and_branch(&self, _: &Path, _: &str) -> Result<()> {
+            unreachable!()
+        }
+        fn branches(&self) -> Result<Vec<String>> {
+            unreachable!()
+        }
+        fn delete_branch(&self, _: &str) -> Result<()> {
+            unreachable!()
+        }
+        fn tracks(&self, _: &Path, _: &str) -> Result<bool> {
+            unreachable!()
+        }
+        fn main_checkout(&self) -> Result<Option<std::path::PathBuf>> {
+            unreachable!()
+        }
+        fn create_worktree(&self, _: &TaskRun) -> Result<String> {
+            unreachable!()
+        }
+        fn merge_conflicts(&self, _: &str, _: &str) -> Result<Vec<String>> {
+            unreachable!()
+        }
+        fn landed_task_ids(&self, _: &str, _: &str) -> Result<Vec<TaskId>> {
+            unreachable!()
+        }
+        fn log_oneline(&self, _: &str, _: &str) -> Result<String> {
+            unreachable!()
+        }
+        fn diff_stat(&self, _: &str, _: &str) -> Result<String> {
+            unreachable!()
+        }
+        fn diff_numbers(&self, _: &str, _: &str) -> Result<super::super::DiffNumbers> {
+            unreachable!()
+        }
+        fn diff_to_file(&self, _: &str, _: &str, _: &Path) -> Result<()> {
+            unreachable!()
+        }
+    }
+
+    const CONFIG: &str = "the committed dagq.toml";
+    const DEFINITION: &str = "---\ndescription: main's design checks\n---\nCheck the design.\n";
+
+    /// `design` reviews `change.txt` and `docs/**`; `unused` matches
+    /// nothing and has no definition. A config of `bad` does not parse;
+    /// one without the table names no agent.
+    fn parse(text: &str) -> Result<Vec<ReviewSubagent>> {
+        let agent = |name: &str, paths: &[&str]| ReviewSubagent {
+            name: name.to_owned(),
+            paths: paths.iter().map(|p| (*p).to_owned()).collect(),
+        };
+        match text {
+            CONFIG => Ok(vec![
+                agent("design", &["change.txt", "docs/**"]),
+                agent("unused", &["nothing/**"]),
+            ]),
+            "bad" => anyhow::bail!("dagq.toml:1: [review.subagents.design] has no paths"),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    fn snapshot(
+        files: Vec<(&'static str, &'static str)>,
+        changed: &[&str],
+    ) -> Result<Option<SubagentSnapshot>> {
+        let repository = Committed {
+            files,
+            changed: changed.iter().map(|p| (*p).to_owned()).collect(),
+        };
+        let range = |main: &CommitSha| {
+            assert_eq!(main.as_str(), SHA);
+            Ok(ReviewRange {
+                base: "base".to_owned(),
+                head: "head".to_owned(),
+            })
+        };
+        snapshot_subagents(&repository, &parse, &range)
+    }
+
+    /// The review's subagents as the landing branch's commit has them
+    /// (ADR-t1453-1 decisions 3 and 4): those the range's paths select,
+    /// with the committed definition and its digest; the snapshot the
+    /// event records and the job reads, and what the prompt adds.
+    #[test]
+    fn the_committed_config_selects_the_agents_the_range_requires() {
+        let found = snapshot(
+            vec![
+                (CONFIG_FILE, CONFIG),
+                (".dagq/review-agents/design.md", DEFINITION),
+            ],
+            &["change.txt", "other.txt"],
+        )
+        .unwrap()
+        .unwrap();
+        let digest = format!("{:x}", Sha256::digest(DEFINITION.as_bytes()));
+        let expected = json!({"commit": SHA, "base": "base", "head": "head", "agents": [{
+            "agent": "design", "paths": ["change.txt"],
+            "definition": ".dagq/review-agents/design.md", "digest": digest}]});
+        assert_eq!(found.event_value(), expected);
+        let mut input = expected;
+        input["agents"][0]["text"] = json!(DEFINITION);
+        assert_eq!(found.job_input(), input);
+        let prompt = review_subagents_prompt(&found, Path::new("/runs/r/review-subagents-1.json"));
+        for part in [
+            "Required review subagents: ".to_owned(),
+            format!(
+                "committed on the landing branch at {SHA}, are in /runs/r/review-subagents-1.json"
+            ),
+            "- design (changed: change.txt)\n".to_owned(),
+            SUBAGENTS_INSTRUCTION.to_owned(),
+        ] {
+            assert!(prompt.contains(&part), "{part} in {prompt}");
+        }
+    }
+
+    /// Without `[review.subagents]` on the landing branch (no `dagq.toml`,
+    /// or one without the table) the review is as before: no snapshot, so
+    /// no `subagents` in `review_started`, no job input and no word of
+    /// subagents in the prompt or the material. With the table but a range
+    /// it does not select, the snapshot records the empty selection.
+    #[test]
+    fn a_review_without_required_agents_reads_as_before() {
+        assert!(snapshot(Vec::new(), &["change.txt"]).unwrap().is_none());
+        assert!(
+            snapshot(vec![(CONFIG_FILE, "[run.env]")], &["change.txt"])
+                .unwrap()
+                .is_none()
+        );
+        let none = snapshot(vec![(CONFIG_FILE, CONFIG)], &["other.txt"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            none.event_value(),
+            json!({"commit": SHA, "base": "base", "head": "head", "agents": []})
+        );
+        let prompt =
+            crate::application::prompt::review_prompt(&task(""), &run(), "/runs/r/review.md", None)
+                .text;
+        assert!(!prompt.contains("subagent"), "{prompt}");
+        let material = material(&task(""));
+        assert!(!material.contains("subagent"), "{material}");
+    }
+
+    /// The required checks cannot be known, so the review must not pass
+    /// (ADR-t1453-1 decision 4): a committed `dagq.toml` that does not
+    /// parse, or a selected agent whose definition is not in the landing
+    /// branch's commit, is an error saying which. An agent that is not
+    /// selected needs no definition.
+    #[test]
+    fn an_unreadable_config_or_a_missing_definition_is_an_error() {
+        let error = format!(
+            "{:#}",
+            snapshot(vec![(CONFIG_FILE, "bad")], &["change.txt"]).unwrap_err()
+        );
+        assert!(
+            error.contains(&format!(
+                "parse dagq.toml in the landing branch's commit {SHA}"
+            )) && error.contains("[review.subagents.design] has no paths"),
+            "{error}"
+        );
+        let error = format!(
+            "{:#}",
+            snapshot(vec![(CONFIG_FILE, CONFIG)], &["change.txt"]).unwrap_err()
+        );
+        assert!(
+            error.contains(&format!(
+                "the review subagent design that dagq.toml names has no definition .dagq/review-agents/design.md in the landing branch's commit {SHA}"
+            )),
+            "{error}"
+        );
+    }
 }

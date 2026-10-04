@@ -79,33 +79,21 @@ impl Supervisor<'_> {
     fn goal_review_route(&self) -> Option<(ActorLaunch, bool)> {
         let role = ModelRole::GoalReview;
         let models = self.role_models(role);
-        let launch = models.launch(role);
-        if !models.switchable(role) {
-            return (!self.no_claude && self.queue_hold.is_none()).then_some((launch, false));
-        }
-        match job_route(&launch, true, |provider| self.job_unusable(provider)) {
-            JobRoute::Start(launch) => Some((launch, true)),
-            JobRoute::Wait { provider, reason } => {
-                tracing::debug!(
-                    "the goal review waits: {} cannot be used ({}), nor can the other provider",
-                    provider.as_str(),
-                    reason.as_str()
-                );
-                None
-            }
-        }
+        goal_review_route_of(
+            models.launch(role),
+            models.switchable(role),
+            self.no_claude || self.queue_hold.is_some(),
+            |provider| self.job_unusable(provider),
+        )
     }
 
     /// Why a headless job cannot start on `provider` now: this supervisor
     /// has no agent for it (no Codex found that runs), or it is held.
     pub(super) fn job_unusable(&self, provider: Provider) -> Option<SwitchReason> {
-        if let Some(reason) = self.provider_held(provider) {
-            return Some(reason);
-        }
-        if self.job_agent(provider).is_none() {
-            return Some(SwitchReason::ExecutableMissing);
-        }
-        self.provider_held(provider)
+        job_unusable_of(
+            self.provider_held(provider),
+            self.job_agent(provider).is_some(),
+        )
     }
 
     /// Start the goal review of the first candidate, when none runs.
@@ -195,14 +183,12 @@ impl Supervisor<'_> {
         job: &HoldJob,
         switchable: bool,
     ) -> Option<(Provider, SwitchReason)> {
-        let wall = failure.wall().filter(|_| provider == Provider::Claude);
+        let (wall, moves) = job_failure_route(provider, failure, switchable);
         if let Some(wall) = wall {
             self.raise_job_wall(wall, job, error);
         }
-        let reason = failure.switch_reason().filter(|_| switchable)?;
-        if wall.is_none()
-            && let Err(held) = self.hold_provider(provider, reason, None, said)
-        {
+        let (reason, hold) = moves?;
+        if hold && let Err(held) = self.hold_provider(provider, reason, None, said) {
             warn!(error = %format_args!("{held:#}"), "{} could not be held after the headless {} failed: {held:#}", provider.as_str(), job.entry());
         }
         Some((provider, reason))
@@ -557,6 +543,64 @@ impl Supervisor<'_> {
     }
 }
 
+/// Where the next goal review starts (ADR-t1063-1 decisions 1, 4 and 5),
+/// or `None` while it waits, given its role's `launch`, whether the role
+/// names its provider (`switchable`), whether Claude waits for the
+/// queue's hold ask or `--no-claude` (`claude_waits`) and why each
+/// provider cannot be used now (`unusable`). A role that names no provider
+/// runs on Claude as before, waiting while Claude waits; one that names its
+/// provider starts there when it can be used, else on the other provider
+/// when that one runs the role and can be used, else waits.
+fn goal_review_route_of(
+    launch: ActorLaunch,
+    switchable: bool,
+    claude_waits: bool,
+    unusable: impl Fn(Provider) -> Option<SwitchReason>,
+) -> Option<(ActorLaunch, bool)> {
+    if !switchable {
+        return (!claude_waits).then_some((launch, false));
+    }
+    match job_route(&launch, true, unusable) {
+        JobRoute::Start(launch) => Some((launch, true)),
+        JobRoute::Wait { provider, reason } => {
+            tracing::debug!(
+                "the goal review waits: {} cannot be used ({}), nor can the other provider",
+                provider.as_str(),
+                reason.as_str()
+            );
+            None
+        }
+    }
+}
+
+/// Why a headless job cannot start on a provider `held` for that reason,
+/// if it is, and whose agent this supervisor has (`has_agent`): its hold,
+/// else no agent for it (no Codex found that runs).
+pub(super) fn job_unusable_of(held: Option<SwitchReason>, has_agent: bool) -> Option<SwitchReason> {
+    held.or((!has_agent).then_some(SwitchReason::ExecutableMissing))
+}
+
+/// What a headless job of `provider` that failed with `failure` leads to
+/// (task 438, ADR-t1063-1 decisions 4 and 5): the wall Claude's job raises
+/// the queue's hold ask for, and, for a role that names its provider
+/// (`switchable`), why the job moves to the other provider with whether
+/// `provider` is held for it (not when the hold ask holds it already).
+pub(super) fn job_failure_route(
+    provider: Provider,
+    failure: JobFailure,
+    switchable: bool,
+) -> (
+    Option<crate::domain::queue_hold::Wall>,
+    Option<(SwitchReason, bool)>,
+) {
+    let wall = failure.wall().filter(|_| provider == Provider::Claude);
+    let moves = failure
+        .switch_reason()
+        .filter(|_| switchable)
+        .map(|reason| (reason, wall.is_none()));
+    (wall, moves)
+}
+
 /// The question of the `approve_goal` ask: the job's question (its summary
 /// when blank), why the runtime asks instead of registering gaps, the
 /// acceptance items not met, and the gaps it found.
@@ -651,5 +695,181 @@ mod tests {
             goal_options(&verdict()),
             ["achieved", "abandoned", "gaps", "keep_open", "split"]
         );
+    }
+
+    /// Where the goal review starts, from the supervisor's state as values
+    /// (ADR-t1063-1 decisions 1, 4 and 5): `--no-claude`, the queue's hold
+    /// ask on Claude, the providers' own holds and whether a Codex runs.
+    struct Providers {
+        no_claude: bool,
+        queue_hold: Option<SwitchReason>,
+        codex_hold: Option<SwitchReason>,
+        codex: bool,
+    }
+
+    impl Providers {
+        const READY: Self = Self {
+            no_claude: false,
+            queue_hold: None,
+            codex_hold: None,
+            codex: true,
+        };
+
+        fn route(&self, table: Option<Provider>) -> Option<ActorLaunch> {
+            use crate::application::supervise::provider::provider_held_of;
+            use crate::domain::actor_model::RoleModels;
+            let mut models = RoleModels::default();
+            if let Some(provider) = table {
+                models.entry(ModelRole::GoalReview).provider = Some(provider);
+            }
+            let unusable = |provider| {
+                let own = match provider {
+                    Provider::Claude => None,
+                    Provider::Codex => self.codex_hold,
+                };
+                job_unusable_of(
+                    provider_held_of(provider, self.no_claude, self.queue_hold, own),
+                    match provider {
+                        Provider::Claude => !self.no_claude,
+                        Provider::Codex => self.codex,
+                    },
+                )
+            };
+            goal_review_route_of(
+                models.launch(ModelRole::GoalReview),
+                models.switchable(ModelRole::GoalReview),
+                self.no_claude || self.queue_hold.is_some(),
+                unusable,
+            )
+            .map(|(launch, switchable)| {
+                assert_eq!(switchable, table.is_some());
+                launch
+            })
+        }
+    }
+
+    fn moved(launch: &ActorLaunch) -> (Provider, Option<Provider>, Option<SwitchReason>) {
+        (launch.provider, launch.switched_from, launch.switch_reason)
+    }
+
+    #[test]
+    fn the_goal_review_starts_on_a_provider_it_can_use_or_waits() {
+        use Provider::{Claude, Codex};
+        use SwitchReason::*;
+        // A role that names no provider runs on Claude as before, and
+        // waits while Claude is held or disabled.
+        let ready = Providers::READY;
+        assert_eq!(
+            ready.route(None),
+            Some(ActorLaunch::default_of(ModelRole::GoalReview))
+        );
+        let claude_held = Providers {
+            queue_hold: Some(UsageLimit),
+            ..Providers::READY
+        };
+        assert_eq!(claude_held.route(None), None);
+        // Without a Codex that runs, a Codex goal review starts on Claude.
+        let no_codex = Providers {
+            codex: false,
+            ..Providers::READY
+        };
+        assert_eq!(
+            moved(&no_codex.route(Some(Codex)).unwrap()),
+            (Claude, Some(Codex), Some(ExecutableMissing))
+        );
+        // A Codex held for its login moves it to Claude.
+        let codex_held = Providers {
+            codex_hold: Some(Authentication),
+            ..Providers::READY
+        };
+        assert_eq!(
+            moved(&codex_held.route(Some(Codex)).unwrap()),
+            (Claude, Some(Codex), Some(Authentication))
+        );
+        // Claude's open hold ask does not stop a role that names Claude
+        // once Codex can take it.
+        assert_eq!(
+            moved(&claude_held.route(Some(Claude)).unwrap()),
+            (Codex, Some(Claude), Some(UsageLimit))
+        );
+        // Both held: it waits.
+        let both = Providers {
+            queue_hold: Some(UsageLimit),
+            codex_hold: Some(UsageLimit),
+            ..Providers::READY
+        };
+        assert_eq!(both.route(Some(Claude)), None);
+        // `--no-claude`: on Codex, never back to Claude.
+        let no_claude = Providers {
+            no_claude: true,
+            ..Providers::READY
+        };
+        assert_eq!(
+            moved(&no_claude.route(Some(Codex)).unwrap()),
+            (Codex, None, None)
+        );
+        for codex in [
+            Providers {
+                codex_hold: Some(Authentication),
+                ..no_claude
+            },
+            Providers {
+                codex: false,
+                ..no_claude
+            },
+        ] {
+            assert_eq!(codex.route(Some(Codex)), None);
+        }
+        assert_eq!(no_claude.route(None), None);
+    }
+
+    /// A failed job's provider: Claude's login or usage limit raises the
+    /// queue's hold ask, a role that names its provider moves, and a
+    /// provider not held by the ask is held for it; Codex raises no ask.
+    #[test]
+    fn a_failed_job_raises_the_hold_ask_or_holds_its_provider() {
+        use crate::domain::queue_hold::Wall;
+        use Provider::{Claude, Codex};
+        assert_eq!(
+            job_failure_route(Claude, JobFailure::UsageLimit, true),
+            (
+                Some(Wall::UsageLimit),
+                Some((SwitchReason::UsageLimit, false))
+            )
+        );
+        assert_eq!(
+            job_failure_route(Claude, JobFailure::Authentication, false),
+            (Some(Wall::Authentication), None)
+        );
+        assert_eq!(
+            job_failure_route(Codex, JobFailure::Authentication, true),
+            (None, Some((SwitchReason::Authentication, true)))
+        );
+        assert_eq!(
+            job_failure_route(Codex, JobFailure::UsageLimit, false),
+            (None, None)
+        );
+        assert_eq!(
+            job_failure_route(Claude, JobFailure::Other, true),
+            (None, None)
+        );
+    }
+
+    /// `[roles.goal_review]` gives the job its model and effort, recorded
+    /// with `dagq.toml` as the source (ADR-0079 decision 7).
+    #[test]
+    fn a_role_table_gives_the_goal_review_its_model_and_effort() {
+        use crate::domain::actor_model::RoleModels;
+        let mut models = RoleModels::default();
+        models.entry(ModelRole::GoalReview).model = Some("claude-sonnet-5".into());
+        models.entry(ModelRole::GoalReview).effort = Some("high".into());
+        let launch = models.launch(ModelRole::GoalReview);
+        assert_eq!(launch.arguments(), Some(("claude-sonnet-5", "high")));
+        assert_eq!(
+            launch.to_value(),
+            json!({"role": "goal_review", "provider": "claude", "model": "claude-sonnet-5",
+                   "effort": "high", "source": "dagq.toml"})
+        );
+        assert!(!models.switchable(ModelRole::GoalReview));
     }
 }

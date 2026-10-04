@@ -4,8 +4,8 @@ type: design
 title: "Actor model"
 status: current
 created: 2026-09-27
-updated: 2026-10-04
-last_verified: 2026-10-04
+updated: 2026-10-04 # task 1712: the goal review's role table is checked by a unit test
+last_verified: 2026-10-04 # task 1712
 scope: runtime
 related:
   - adr-t1394-1
@@ -124,7 +124,7 @@ route = "headless"   # 省けばinteractive（評価まで）
 - `tests/it/planner_headless.rs`: `doctor`の`roles.runtime_planner`の`route`と`route_source`（`headless` / `dagq.toml`、`interactive` / `default`と`dagq.toml`）
 - `infrastructure::run_env`の`parses_the_role_tables`（`provider`の値、`CODEX_ROLES`以外の`codex`とCodexの表のClaudeのmodelのエラー、`plan_review`と`throughput_review`の`codex`を受け付けること）
 - `domain::actor_model`の`a_role_table_names_its_provider`と`a_job_moves_to_the_other_provider_or_waits`（task 1065）
-- `tests/it/goal_review_codex.rs`（task 1065）: `provider = "codex"`でgoal reviewがstubの`codex exec --json`（`:read-only`を継ぐjobのpermission profile `dagq_job`。goal 82の段(3)）で動き、jobの`dagq`がqueue service経由で読み、verdict・thread・modelを読んで適用し、`doctor`の`roles`とgoal review以外の`codex`のエラー、Codexの認証の失敗からClaudeへの切り替え、Codexが無いときのClaude、両方控えられたときの待ち
+- `tests/it/goal_review_codex.rs`（task 1065）: `provider = "codex"`でgoal reviewがstubの`codex exec --json`（`:read-only`を継ぐjobのpermission profile `dagq_job`。goal 82の段(3)）で動き、jobの`dagq`がqueue service経由で読み、verdict・thread・modelを読んで適用し、`doctor`の`roles`とgoal review以外の`codex`のエラー、Codexの認証の失敗からClaudeへの切り替え、両方控えられたときの待ち。providerの状態ごとの行き先（Codexが無いときのClaude、Claudeの控えのaskが開いたままのCodex、`--no-claude`）は`application::supervise::goal_review`のunit test `the_goal_review_starts_on_a_provider_it_can_use_or_waits`
 - `tests/it/plan_review_codex.rs`（task 1218）: `provider = "codex"`でplan reviewがstubの`codex exec --json`（goal reviewと同じjobのpermission profile `dagq_job`）で動き、jobの`dagq`がqueue service経由で読み、pass・revise・concernをClaudeのjobと同じ経路で適用し、開始の`launch.provider`・終わりのthreadとmodel・`headless_jobs.provider`・`stats`と`kpi`のproviderごとの集計、Codexの認証の失敗からClaudeへの切り替え、Codexが無いときのClaude、`--no-claude`でCodexで動きClaudeに戻らず、Codexが使えなければ理由付きでplan review by handに渡ること
 - `tests/it/throughput_review_codex.rs`（task 1220）: `provider = "codex"`で時間・日次・週次の見直しがstubの`codex exec --json`（jobのpermission profile `dagq_job`）で動き、jobの`dagq`がqueue service経由で読み、最後の返答をClaudeの出力と同じく`reports/reviews/`への保存・週次の次の一手のfinding・`throughput_review_reported`にし、開始の`launch.provider`・終わりと区間のthreadとmodel・`stats`と`kpi`のproviderごとの集計、利用上限で止まったCodexの`provider_unusable`、`--no-claude`でCodexで動き、失敗してもClaudeを起動せず理由を記録すること。`domain::stats::jobs`の`a_codex_throughput_review_is_counted_under_codex_and_its_model`
 - `domain::sessions`の`a_hook_input_names_its_session_and_the_environment_its_span`（`DAGQ_LAUNCH`の読み取りと`session_opened`の`launch`）
@@ -132,6 +132,6 @@ route = "headless"   # 省けばinteractive（評価まで）
 - `tests/it/plan_review.rs`: `a_revise_without_a_live_planner_opens_planners_within_the_limit`（既定のplan reviewと、開き直したplannerの`high`への段上げ）、`a_revise_goes_to_the_live_planner_...`（生きているplannerは上げない）、`role_tables_set_the_plan_review_and_raise_the_revise_planner_from_them`（`[roles.plan_review]`と、`[roles.runtime_planner]`の`high`から`xhigh`）
 - `tests/it/runtime_observer.rs`の`the_observer_takes_its_role_table_and_records_what_it_started_with`
 - `infrastructure::sessions`の`a_throughput_review_span_records_its_launch_and_the_model_of_its_transcript`（スループットの見直しの区間の`launch`、`session_closed`のtranscriptの`model` / `effort`、並ぶ見直しと時間を過ぎた区間の閉じ方、observerの区間が変わらないこと。task 1086）
-- `tests/it/goal_review.rs`の`a_goal_review_records_its_launch_and_session_and_takes_its_role_table`（`goal_review_started`の`launch`・`session_id`・`cwd`、区間の`session_opened` / `session_closed`、`[roles.goal_review]`が起動に効くこと）と、`infrastructure::sessions`の`a_goal_review_span_records_its_launch_and_the_model_of_its_transcript`（transcriptの`model` / `effort`が`session_closed`に入ること、`interrupted`の行の区間を`inferred`で閉じること）
+- `tests/it/goal_review.rs`の`a_goal_review_records_its_launch_and_session`（`goal_review_started`の`launch`・`session_id`・`cwd`、区間の`session_opened` / `session_closed`）と`application::supervise::goal_review`の`a_role_table_gives_the_goal_review_its_model_and_effort`（`[roles.goal_review]`のmodel・effortから起動の`launch`への対応。committedの表を読みjobに渡す配線はroleに共通で、Claudeは`tests/it/plan_review.rs`の`role_tables_set_the_plan_review_and_raise_the_revise_planner_from_them`、goal reviewのCodexは`tests/it/goal_review_codex.rs`の`a_goal_review_on_codex_runs_read_only_and_records_its_thread_and_model`）と、`infrastructure::sessions`の`a_goal_review_span_records_its_launch_and_the_model_of_its_transcript`（transcriptの`model` / `effort`が`session_closed`に入ること、`interrupted`の行の区間を`inferred`で閉じること）
 - `tests/it/runtime_stall_recovery.rs`（生きているrunの`recovery_requested`の`launch.provider`）、`tests/it/runtime_throughput_review.rs`（`throughput_review_started`の`launch`）、`infrastructure::headless_jobs`の`a_job_records_its_provider_and_one_without_reads_as_claude`
 - `tests/it/lifecycle_plan.rs`: 既定の`DAGQ_LAUNCH`（`each_planner_opens_a_workspace_of_its_own_and_is_recorded`）、runtimeのplannerの段上げ、wrapperが`select_model`で渡すこと（`[roles.planner]`を読んだ`dagq plan`のtestは、`dagq plan`の廃止とともに消した）

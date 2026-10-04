@@ -50,6 +50,30 @@ pub(super) fn subagents_unsupported(provider: Provider, required: &[String]) -> 
     )
 }
 
+/// The launch of a review that requires the subagents `required`
+/// (ADR-t1453-1 decision 8), given whether a provider's agent runs review
+/// subagents (`runs`) and whether it can be used now (`usable`): `launch`
+/// when its provider runs them; else the other provider's when that one
+/// runs the review role, can be used and runs them, with why it was
+/// switched (no hold: the provider itself can be used); else why neither
+/// can, for the person.
+pub(super) fn subagent_launch_of(
+    launch: ActorLaunch,
+    required: &[String],
+    runs: impl Fn(Provider) -> bool,
+    usable: impl Fn(Provider) -> bool,
+) -> std::result::Result<ActorLaunch, String> {
+    if runs(launch.provider) {
+        return Ok(launch);
+    }
+    let other = launch.provider.other();
+    if crate::domain::actor_model::runs_on(ModelRole::Review, other) && usable(other) && runs(other)
+    {
+        return Ok(launch.switched(other, SwitchReason::SubagentsUnsupported));
+    }
+    Err(subagents_unsupported(launch.provider, required))
+}
+
 /// A review job that started: its process and its stdout and stderr.
 type StartedReview = (Box<dyn Spawned>, PathBuf, PathBuf);
 
@@ -486,21 +510,15 @@ impl Supervisor<'_> {
         launch: ActorLaunch,
         required: &[String],
     ) -> std::result::Result<ActorLaunch, String> {
-        let runs = |provider| {
-            self.job_agent(provider)
-                .is_some_and(|agent| agent.runs_review_subagents())
-        };
-        if runs(launch.provider) {
-            return Ok(launch);
-        }
-        let other = launch.provider.other();
-        if crate::domain::actor_model::runs_on(ModelRole::Review, other)
-            && self.job_unusable(other).is_none()
-            && runs(other)
-        {
-            return Ok(launch.switched(other, SwitchReason::SubagentsUnsupported));
-        }
-        Err(subagents_unsupported(launch.provider, required))
+        subagent_launch_of(
+            launch,
+            required,
+            |provider| {
+                self.job_agent(provider)
+                    .is_some_and(|agent| agent.runs_review_subagents())
+            },
+            |provider| self.job_unusable(provider).is_none(),
+        )
     }
     /// The review's required subagents from the landing branch's commit
     /// ([`snapshot_subagents`]); the range is the receipt's, read only when
@@ -2215,5 +2233,173 @@ mod tests {
             subagents_unsupported(Provider::Codex, &["design".to_owned(), "lint".to_owned()]),
             "subagents_unsupported: the review requires the subagents design, lint, which codex cannot run, and no other provider that can run them can be used"
         );
+    }
+
+    /// A review that requires subagents its provider cannot run starts on
+    /// the other provider when that one runs them and can be used, its
+    /// launch saying from which and why, and holds nothing; with neither,
+    /// it fails to the person with why (ADR-t1453-1 decision 8).
+    #[test]
+    fn a_review_whose_provider_cannot_run_its_agents_moves_or_fails() {
+        use crate::domain::actor_model::RoleModels;
+        let required = ["design".to_owned(), "tests".to_owned()];
+        let mut models = RoleModels::default();
+        models.entry(ModelRole::Review).provider = Some(Provider::Codex);
+        let codex = models.launch(ModelRole::Review);
+        let claude_runs = |provider: Provider| provider == Provider::Claude;
+        // `[roles.review]` names Codex, which runs no review subagents: it
+        // starts on Claude, its launch saying why.
+        let moved = subagent_launch_of(codex.clone(), &required, claude_runs, |_| true).unwrap();
+        assert_eq!(moved.provider, Provider::Claude);
+        assert_eq!(moved.to_value()["switched_from"], "codex");
+        assert_eq!(moved.to_value()["switch_reason"], SUBAGENTS_UNSUPPORTED);
+        // On a provider that runs them it starts as it is.
+        let claude = ActorLaunch::default_of(ModelRole::Review);
+        assert_eq!(
+            subagent_launch_of(claude.clone(), &required, claude_runs, |_| true),
+            Ok(claude.clone())
+        );
+        // Claude cannot be used: the Codex review fails to the person.
+        assert_eq!(
+            subagent_launch_of(codex, &required, claude_runs, |provider| {
+                provider != Provider::Claude
+            }),
+            Err(subagents_unsupported(Provider::Codex, &required))
+        );
+        // No provider runs them.
+        assert_eq!(
+            subagent_launch_of(claude, &required, |_| false, |_| true).unwrap_err(),
+            "subagents_unsupported: the review requires the subagents design, tests, which claude cannot run, and no other provider that can run them can be used"
+        );
+    }
+
+    /// The verdict is lighter than an agent's judgment (ADR-t1453-1
+    /// decision 7): a concern a person must decide by the rule of a concern
+    /// (ADR-t451-1 decision 3) asks, the ask naming the agent, what it
+    /// returned, that the verdict was lighter and why a person is needed;
+    /// a `send_back` on high confidence or a `revise` goes back with the
+    /// agent's reasons; and an agent's `scope` concern under a concern that
+    /// would land on high confidence still asks.
+    #[test]
+    fn an_agents_heavier_judgment_under_a_lighter_verdict_decides_where_the_run_goes() {
+        let tests_pass = json!({"agent": "tests", "status": "completed", "verdict": "pass", "reasons": [], "summary": "ok"});
+        let under_pass = |design: Value| {
+            verdict(
+                json!({"verdict": "pass", "reasons": [], "summary": "meets the acceptance",
+                "agents": [design, tests_pass.clone()]}),
+            )
+        };
+        let design_concern = |fields: Value| {
+            let mut concern = json!({"agent": "design", "status": "completed", "verdict": "concern",
+                "reasons": ["departs"], "summary": "s"});
+            for (key, value) in fields.as_object().unwrap() {
+                concern[key] = value.clone();
+            }
+            concern
+        };
+        let question = |combined: &ReviewVerdict, why: &str| {
+            landing_question(
+                &run(),
+                combined.verdict,
+                &combined.reasons,
+                &combined.summary,
+                Some(why),
+                (combined.recommendation, combined.confidence),
+            )
+        };
+        for (fields, said, reason) in [
+            (
+                json!({"recommendation": "land", "confidence": "high", "reason_category": "scope"}),
+                "the subagent design returned concern recommending land (high confidence, scope)",
+                AskReason::Scope,
+            ),
+            (
+                json!({"recommendation": "land", "confidence": "high", "reason_category": "discard"}),
+                "the subagent design returned concern recommending land (high confidence, discard)",
+                AskReason::Discard,
+            ),
+            (
+                json!({"recommendation": "send_back", "confidence": "low"}),
+                "the subagent design returned concern recommending send_back (low confidence)",
+                AskReason::Scope,
+            ),
+            (
+                json!({}),
+                "the subagent design returned concern recommending nothing (no confidence)",
+                AskReason::Scope,
+            ),
+        ] {
+            let asking = under_pass(design_concern(fields));
+            let route = asking.route(true);
+            assert_eq!(
+                (route.destination, route.parent, route.parent_lighter()),
+                (Destination::Ask, Destination::Land, true),
+                "{said}"
+            );
+            let combined = combined_verdict(&asking, &route, false);
+            assert_eq!(combined.verdict, ReviewDecision::Concern, "{said}");
+            assert_eq!(combined.reasons, ["design: departs"], "{said}");
+            assert_eq!(
+                landing_ask_reason(combined.reason_category),
+                reason,
+                "{said}"
+            );
+            let why = agents_escalation(&asking, &route, false);
+            let asked = question(&combined, &why);
+            for part in [
+                said,
+                "the review's own verdict pass was lighter",
+                "- design: departs",
+            ] {
+                assert!(asked.contains(part), "{part} in {asked}");
+            }
+        }
+        // A send_back on high confidence and a revise go back with the
+        // agent's reasons, the verdict lighter.
+        for (design, reasons) in [
+            (
+                design_concern(json!({"recommendation": "send_back", "confidence": "high"})),
+                ["design: departs"],
+            ),
+            (
+                json!({"agent": "design", "status": "completed", "verdict": "revise",
+                    "reasons": ["add a test"], "summary": "s"}),
+                ["design: add a test"],
+            ),
+        ] {
+            let back = under_pass(design);
+            let route = back.route(true);
+            assert_eq!(route.destination, Destination::SendBack, "{reasons:?}");
+            assert!(route.parent_lighter(), "{reasons:?}");
+            assert_eq!(route.event_value()["parent_lighter"], true);
+            let combined = combined_verdict(&back, &route, false);
+            assert_eq!(combined.verdict, ReviewDecision::Revise);
+            assert_eq!(combined.reasons, reasons);
+        }
+        // An agent's scope concern under a concern that would land.
+        let landing = verdict(
+            json!({"verdict": "concern", "reasons": [], "summary": "lands",
+            "recommendation": "land", "confidence": "high",
+            "agents": [design_concern(json!({"recommendation": "land", "confidence": "high",
+                "reason_category": "scope"})), tests_pass]}),
+        );
+        let route = landing.route(true);
+        assert_eq!(
+            (route.destination, route.parent),
+            (Destination::Ask, Destination::Land)
+        );
+        let parent_decides = route.parent == route.destination;
+        let combined = combined_verdict(&landing, &route, parent_decides);
+        let asked = question(
+            &combined,
+            &agents_escalation(&landing, &route, parent_decides),
+        );
+        for part in [
+            "the subagent design returned concern recommending land (high confidence, scope)",
+            "the review's own verdict concern was lighter",
+            "- design: departs",
+        ] {
+            assert!(asked.contains(part), "{part} in {asked}");
+        }
     }
 }
