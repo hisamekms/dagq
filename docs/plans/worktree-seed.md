@@ -4,7 +4,7 @@ type: plan
 title: 新しいrunのworktreeに温まったtargetをAPFSのcloneで入れたときのbuildの短縮の見積もり（sccacheとの重なりを含めて）
 status: completed
 created: 2026-10-02
-updated: 2026-10-02
+updated: 2026-10-05
 owners:
   - hisamekms
 tags:
@@ -16,6 +16,7 @@ related:
   - plan-sccache-measurement
   - plan-nextest-post-test-stage
   - adr-0049
+  - plan-build-script-rerun-paths
 ---
 
 # 新しいrunのworktreeに温まったtargetをAPFSのcloneで入れたときのbuildの短縮の見積もり（sccacheとの重なりを含めて）
@@ -280,6 +281,8 @@ cloneは共有ではない。
   - seedの作り直しの契機（mainへの着地ごとか、時間ごと）と、そのbuildのload（seedのbuildそのものが、着地ごとに1本の重いbuildを足す）。
 
 ## 8. この測定で分からないこと
+
+build scriptを直した場合と、3.2節の理由は、task 1359が測った（[build-script-rerun-paths](build-script-rerun-paths.md)）。
 
 - 3.2節の、`cov`で(c)が短かった理由。incrementalの再利用かどうか。
 - build scriptを直した場合と、変わっていないファイルにだけseedのmtimeを入れた場合に、dagqのcrateのbuildがどれだけ縮むか。この場合でも、runの変更とrebaseで変わったcrateはcompileし直しになる。
