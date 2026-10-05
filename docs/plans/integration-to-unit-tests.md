@@ -4,7 +4,7 @@ type: plan
 title: 判断を unit test に移した着地（goal 68、task 1412〜1416）の前後の本番の coverage の関門の test の時間と Summary
 status: active
 created: 2026-10-03
-updated: 2026-10-03
+updated: 2026-10-05 # task 1785
 owners:
   - hisamekms
 tags:
@@ -188,6 +188,24 @@ load の近い組でも、変えた module の −120〜−137 秒を、変え�
 | 1415 runtime_job_verdicts | 壊れた verdict の loop 4 本（no JSON・欠けた欄・未知の欄・未知の variant） | `domain::recovery::tests::a_broken_verdict_is_refused_with_what_is_wrong`、`supervise::recovery::tests` の 3 本。alert ごとに代表の 1 case を残した |
 | 1415 runtime_triage | round の使い切り・decide の ask の文面 | `supervise::triage::tests` の 3 本。end-to-end は `a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited` に寄せた |
 | 1416 fixture | （test は減らしていない） | `warm_dagq()` で最初の dagq の exec の待ちを fixture の準備と重ねた |
+
+### 1583 で変えた headless の境界 test の stress
+
+対象は `runtime_headless::a_turn_past_its_limit_is_stopped_with_its_command_outside_its_group`。1583 の receipt（event 82032）の行き先の表は、削除した `a_silent_turn_is_stopped_and_its_recovery_job_resumes_the_session` の recovery・同じ session の resume・着地の確認をこの境界 test に移した。process group 外の子孫を `ps` で確かめるため、1583 の worker は sandbox の手元で stress を流せず、ask 395 で host に移した。その手順を持った follow-up の task 1659 は、手順の script が消えたため取り消された。
+
+行き先の resume の誤停止の調査・修正と負荷の下の stress は task 1629（goal 37）が持つ。その着地 commit は `79a47c1a50ae08346ce8ce3ce4708d5a78fa39d3`（`git log -1 79a47c1a50ae08346ce8ce3ce4708d5a78fa39d3` で確認）。この commit は resume の ready の後、2 秒の時計の中に残っていた `git rev-parse HEAD` を ready の前へ移した。task 1785 は src・tests を変えず、この着地の後の retries なしの 5 周 stress の確認だけを持つ。
+
+ps を実行できる host の `integrate` が rebase 後の verify の 2 本目で次を流す。前後の `uptime` で load average を残し、test の終了コードを保つ。
+
+```sh
+sh -c 'git rev-parse HEAD; uptime; cargo nextest run --locked --test it --retries 0 --stress-count 5 -E "test(=runtime_headless::a_turn_past_its_limit_is_stopped_with_its_command_outside_its_group)"; s=$?; uptime; exit $s'
+```
+
+`--retries 0` はこの stress に限る。通常の `.config/nextest.toml` は `retries = 1` で、落ちた test が全て FLAKY なら integrate は worker を resume せず検証をやり直し、その回は `NEXTEST_FLAKY_RESULT=pass` で FLAKY も成功と数える（[integrate の「不安定なtestの着地のやり直し」](../design/supervisor-lifecycle/integrate.md)、ADR-t768-1・ADR-t1039-1）。この救済で 5/5 を満たしたことにしないため、再試行を無効にする。1 周でも test が落ちれば FLAKY ではなく `test_failure` として着地を止め、`needs_session` にする。
+
+証拠は `runs/<run>/integrate-<attempt>-verify-2.log`（一般形は `runs/<run>/integrate-*-verify-*.log`）と `verification_command` event に残す。log の commit・コマンド・5 周の結果・前後の load average を対応づけ、goal review は `dagq events --full --task 1785 --kind verification_command` で着地した run の stress のコマンドが `exit_code: 0`、`flaky_tests` が空であることを読む。合格は FLAKY を含まない 5/5 passed と exit 0。worker は ps の要らない文書の照合と手元の静的検査だけを行い、integrate 前に stress の結果を推測で書かない。
+
+integrate の stress が落ちて resume された worker は src・tests を直さず、落ちた周・test・load average・log の場所を failed receipt に書く。原因の調査・修正を持つ follow-up（goal 37 に合い、同じ retries なしの 5 周 stress を verify に持つ）を提案する。修正の着地の後に task 1785 を流し直し、その integrate で 5/5 passed になって初めて着地する。以前の run・試行に失敗があれば、goal review は同じ events と修正 task の receipt で、failed receipt が提案した修正の着地と、その後の合格を対応づける。
 
 ### 外部プロセス・固定の待ち・fixture の数と module の A/B（各 task の worker が手元で測った値）
 
