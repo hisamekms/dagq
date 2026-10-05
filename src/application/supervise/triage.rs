@@ -5,10 +5,11 @@
 //! asks it escalates to. The rounds keep the triage's event names
 //! (`triage_started`, `triage_finished`, `triage_failed`).
 
+use super::recovery::JobEnd;
 use super::*;
 use crate::domain::EventKind;
 use crate::domain::RecoveredLanding;
-use crate::domain::actor_model::{ActorLaunch, ModelRole};
+use crate::domain::actor_model::{ActorLaunch, JobStartRoute, ModelRole};
 use crate::domain::landing_release;
 use crate::domain::recovery::{
     ENDED_ACTIONS, MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, ProcessInfo, RecoveryAction,
@@ -405,11 +406,12 @@ impl Supervisor<'_> {
     /// round took them since their last resume, or their round's `wait` is
     /// over (ADR-0047 decision 39), in the order the queue lists them. A
     /// run someone leases (a session still asked to exit) waits, and none
-    /// is due while a login or usage limit holds the queue.
+    /// is due while no provider can run the job ([`Self::recovery_route`]
+    /// waits): a login or usage limit that holds the queue holds a role
+    /// that names no provider (task 437), while one whose role names its
+    /// provider may start on Codex meanwhile (ADR-t1063-1 decision 5).
     pub(super) fn triage_candidates(&mut self) -> Result<Vec<TaskRun>> {
-        // A login or usage limit that holds the queue starts no recovery
-        // job (task 437): each would stop at it.
-        if self.queue_hold.is_some() {
+        if self.recovery_route().is_none() {
             return Ok(Vec::new());
         }
         let now = self.generators.clock.now();
@@ -442,7 +444,11 @@ impl Supervisor<'_> {
     /// round records its own request unless one is pending. An alert that
     /// got its [`MAX_RECOVERY_ATTEMPTS`] jobs is escalated without one (but
     /// for a person's verify fix after an edit, [`verify_fix_round`]), and a
-    /// job that cannot even start fails its round right away.
+    /// job that cannot even start fails its round right away. The job starts
+    /// on the provider [`Self::recovery_route`] says, which is recorded as
+    /// the `launch` of `triage_started` the job is started from; under
+    /// `--no-claude` with no provider for it, the round fails to a person
+    /// told why.
     pub(super) fn triage_run(&mut self, run: TaskRun) -> Result<()> {
         let events = self.queue.run_events(run.id())?;
         let pending = pending_request(&events);
@@ -498,7 +504,15 @@ impl Supervisor<'_> {
             self.cleanup.deferred = true;
             return Ok(());
         }
-        let launch = self.actor_launch(ModelRole::Recovery);
+        // The route as it reads now: a job reaped earlier in this pass may
+        // have held a provider.
+        let Some(route) = self.recovery_route() else {
+            return Ok(());
+        };
+        let (launch, switchable, unavailable) = match route {
+            JobStartRoute::Start(launch, switchable) => (launch, switchable, None),
+            JobStartRoute::Unavailable(launch, why) => (launch, false, Some(why)),
+        };
         let begun = self
             .queue
             .begin_triage(run.id(), &self.token, request, &launch)?;
@@ -508,23 +522,47 @@ impl Supervisor<'_> {
         };
         if used_up {
             let used = attempt - 1;
+            let end = JobEnd::default();
             if let Err(error) =
-                self.escalate_ended(&run, round, alert, used, Escalation::UsedUp(used), 0)
+                self.escalate_ended(&run, round, alert, used, Escalation::UsedUp(used), 0, &end)
             {
-                self.fail_recovery(&run, round, alert, used, format!("{error:#}"), 0);
+                self.fail_recovery(&run, round, alert, used, format!("{error:#}"), 0, &end);
             }
             let run = self.queue.run(run.id())?;
             self.note_triaged(&run);
             return Ok(());
         }
-        match self.spawn_ended(&run, round, alert, attempt) {
+        if let Some(why) = unavailable {
+            let error = format!("the recovery job could not start: {why}");
+            self.fail_recovery(&run, round, alert, attempt, error, 0, &JobEnd::default());
+            let run = self.queue.run(run.id())?;
+            self.note_triaged(&run);
+            return Ok(());
+        }
+        // The outer error is the job's own preparation, the inner one the
+        // start of its provider's process.
+        let started = self
+            .spawn_ended(&run, round, alert, attempt, switchable)
+            .map_err(|error| (error, false))
+            .and_then(|started| started.map_err(|error| (error, true)));
+        match started {
             Ok(watch) => {
-                info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {} ({}) recovery job {attempt} for {} started (round {round})", run.id(), run.task_id(), run.status().as_str(), alert.as_str());
+                info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {} ({}) recovery job {attempt} for {} started on {} (round {round})", run.id(), run.task_id(), run.status().as_str(), alert.as_str(), watch.job.provider.as_str());
                 self.slots.push(Slot::new(run, Phase::Recovery(watch)));
             }
-            Err(error) => {
-                let error = format!("the recovery job could not start: {error:#}");
-                self.fail_recovery(&run, round, alert, attempt, error, 0);
+            Err((failed, spawned)) => {
+                let error = format!("the recovery job could not start: {failed:#}");
+                let unusable = spawned
+                    .then(|| {
+                        let launch = self.started_launch(&run);
+                        self.recovery_start_failed(run.id(), &launch, &failed, &error, switchable)
+                    })
+                    .flatten();
+                let end = JobEnd {
+                    session: None,
+                    unusable,
+                };
+                self.fail_recovery(&run, round, alert, attempt, error, 0, &end);
                 let run = self.queue.run(run.id())?;
                 self.note_triaged(&run);
             }
@@ -536,13 +574,16 @@ impl Supervisor<'_> {
     /// (ADR-0047 decision 39: the task, the run's error, receipt, logs,
     /// final screen and events, the processes left in its worktree, its
     /// git state and earlier repairs).
+    /// The outer error is the job's own preparation, the inner one the
+    /// start of its provider's process ([`super::recovery::start_job`]).
     fn spawn_ended(
         &mut self,
         run: &TaskRun,
         round: usize,
         alert: RecoveryAlert,
         attempt: usize,
-    ) -> Result<EndedRecovery> {
+        switchable: bool,
+    ) -> Result<Result<EndedRecovery>> {
         let dir = match &run.run_dir() {
             Some(dir) => PathBuf::from(dir),
             None => self.layout.runs_dir.join(run.id().as_str()),
@@ -615,19 +656,16 @@ impl Supervisor<'_> {
         };
         let prompt = recovery_prompt(&detail.task, run, attempt, &material)?
             .with_language(self.verifier.language().as_ref());
-        // The session id `triage_started` recorded (ADR-0048 decision 4),
-        // and the model and effort (ADR-0079 decision 7).
-        let started = events
+        // The session id `triage_started` recorded (ADR-0048 decision 4;
+        // none for Codex, which names its thread itself), and the provider,
+        // model and effort (ADR-0079 decision 7, ADR-t1063-1).
+        let session_id = events
             .iter()
             .rev()
-            .find(|e| e.kind == event_kind::TRIAGE_STARTED);
-        let session_id = started
+            .find(|e| e.kind == event_kind::TRIAGE_STARTED)
             .and_then(|e| e.payload["session_id"].as_str())
             .map(str::to_owned);
-        let launch = started.map_or_else(
-            || ActorLaunch::default_of(ModelRole::Recovery),
-            |e| ActorLaunch::recorded(&e.payload, ModelRole::Recovery),
-        );
+        let launch = launch_of(&events);
         let job = start_job(
             self,
             run.id(),
@@ -637,12 +675,21 @@ impl Supervisor<'_> {
             session_id.as_deref(),
             &launch,
         )?;
-        Ok(EndedRecovery {
+        Ok(job.map(|job| EndedRecovery {
             round,
             alert,
             attempt,
+            switchable,
             job,
-        })
+        }))
+    }
+
+    /// The launch the latest `triage_started` of `run` recorded.
+    fn started_launch(&self, run: &TaskRun) -> ActorLaunch {
+        self.queue.run_events(run.id()).map_or_else(
+            |_| ActorLaunch::default_of(ModelRole::Recovery),
+            |events| launch_of(&events),
+        )
     }
     /// Act on the recovery job's verdict for a run that ended (ADR-0047
     /// decision 40): a `repair` of high confidence whose one action's
@@ -651,6 +698,7 @@ impl Supervisor<'_> {
     /// and `recovery_finished`; anything else becomes the `decide` ask.
     /// Then the workspaces the run left open are closed and the lease is
     /// released.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn act_on_recovery(
         &mut self,
         run: &TaskRun,
@@ -659,6 +707,7 @@ impl Supervisor<'_> {
         attempt: usize,
         duration_secs: u64,
         verdict: RecoveryVerdict,
+        end: &JobEnd,
     ) -> Result<TaskRun> {
         ensure!(
             self.queue.holds_lease(run.id(), &self.token)?,
@@ -673,6 +722,7 @@ impl Supervisor<'_> {
                 attempt,
                 Escalation::Verdict(verdict),
                 duration_secs,
+                end,
             );
         }
         let (action, conditions) = match self.plan_ended(run, &verdict) {
@@ -686,11 +736,12 @@ impl Supervisor<'_> {
                     attempt,
                     Escalation::Refused(verdict, why),
                     duration_secs,
+                    end,
                 );
             }
         };
         let name = verdict.actions[0].name();
-        let payload = json!({
+        let mut payload = json!({
             "attempt": round,
             "alert": alert,
             "recovery_attempt": attempt,
@@ -699,6 +750,7 @@ impl Supervisor<'_> {
             "reason": verdict.diagnosis,
             "duration_secs": duration_secs,
         });
+        end.record(&mut payload);
         let mut also = Vec::new();
         if !matches!(action, TriageAction::Wait { .. }) {
             also.push((
@@ -712,23 +764,22 @@ impl Supervisor<'_> {
                 }),
             ));
         }
-        also.push((
-            EventKind::RecoveryFinished,
-            json!({
-                "alert": alert,
-                "attempt": attempt,
-                "verdict": verdict.verdict,
-                "confidence": verdict.confidence,
-                "diagnosis": verdict.diagnosis,
-                "applied": [name],
-                "escalated": false,
-                "recheck_at": match &action {
-                    TriageAction::Wait { recheck_at } => Some(*recheck_at),
-                    _ => None,
-                },
-                "duration_secs": duration_secs,
-            }),
-        ));
+        let mut finished = json!({
+            "alert": alert,
+            "attempt": attempt,
+            "verdict": verdict.verdict,
+            "confidence": verdict.confidence,
+            "diagnosis": verdict.diagnosis,
+            "applied": [name],
+            "escalated": false,
+            "recheck_at": match &action {
+                TriageAction::Wait { recheck_at } => Some(*recheck_at),
+                _ => None,
+            },
+            "duration_secs": duration_secs,
+        });
+        end.record(&mut finished);
+        also.push((EventKind::RecoveryFinished, finished));
         let finished = self
             .queue
             .finish_triage(run.id(), &self.token, &action, payload, also)?;
@@ -899,6 +950,7 @@ impl Supervisor<'_> {
     /// the job's reason category; recorded as `triage_finished` (action
     /// `ask`) and `recovery_finished`. The supervisor applies the answer
     /// ([`Self::apply_triage_answers`]).
+    #[allow(clippy::too_many_arguments)]
     fn escalate_ended(
         &mut self,
         run: &TaskRun,
@@ -907,6 +959,7 @@ impl Supervisor<'_> {
         attempt: usize,
         escalation: Escalation,
         duration_secs: u64,
+        end: &JobEnd,
     ) -> Result<TaskRun> {
         let note = escalation.note(run, alert, attempt);
         let exhausted =
@@ -940,7 +993,7 @@ impl Supervisor<'_> {
             .map(AskId::new)
             .context("ask returned no id")?;
         let verdict = escalation.verdict();
-        let payload = json!({
+        let mut payload = json!({
             "attempt": round,
             "alert": alert,
             "recovery_attempt": attempt,
@@ -952,13 +1005,15 @@ impl Supervisor<'_> {
             },
             "duration_secs": duration_secs,
         });
-        let finished = escalation.finished(
+        end.record(&mut payload);
+        let mut finished = escalation.finished(
             alert,
             attempt,
             &note,
             Some(ask_id),
             json!({"duration_secs": duration_secs}),
         );
+        end.record(&mut finished);
         let asked = match self.queue.finish_triage(
             run.id(),
             &self.token,
@@ -1001,6 +1056,14 @@ impl Supervisor<'_> {
     /// applied) as `triage_failed`, the attention a person recovers the run
     /// from by hand, and `recovery_finished` (`outcome: job_failed`), and
     /// give the lease back; the run stays as it is (ADR-0047 decision 40).
+    /// Both record the job's `end` (its Codex thread and model, the
+    /// provider it found unusable). A round whose provider could not be
+    /// used (`provider_unusable`) is no person's: the run is due again and
+    /// its next round starts on the other provider, or, when none can run
+    /// it (`--no-claude`), fails to a person told why (ADR-t1063-1 decision
+    /// 4, [`crate::domain::triage_state`]). Any other failure of a Codex job
+    /// never moves to Claude.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn fail_recovery(
         &mut self,
         run: &TaskRun,
@@ -1009,8 +1072,13 @@ impl Supervisor<'_> {
         attempt: usize,
         error: String,
         duration_secs: u64,
+        end: &JobEnd,
     ) {
-        warn!(run_id = %run.id(), error = %error, "run {} recovery job {attempt} of {} failed: {error}; the run waits to be recovered by hand", run.id(), alert.as_str());
+        let then = match end.unusable {
+            Some(_) => "its provider cannot be used, and the next round starts on the other one",
+            None => "the run waits to be recovered by hand",
+        };
+        warn!(run_id = %run.id(), error = %error, "run {} recovery job {attempt} of {} failed: {error}; {then}", run.id(), alert.as_str());
         for (kind, payload) in [
             (
                 EventKind::TriageFailed,
@@ -1036,6 +1104,8 @@ impl Supervisor<'_> {
                 }),
             ),
         ] {
+            let mut payload = payload;
+            end.record(&mut payload);
             if let Err(error) = self.queue.record_runtime_event(run.id(), kind, payload) {
                 warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: could not record the failed recovery job: {error:#}", run.id());
             }
@@ -1065,6 +1135,20 @@ impl Supervisor<'_> {
             "status": run.status(),
         }));
     }
+}
+
+/// The launch the latest `triage_started` among `events` recorded, which
+/// the round's job is started from; the default of the role for a round
+/// recorded before launches were.
+fn launch_of(events: &[RunEvent]) -> ActorLaunch {
+    events
+        .iter()
+        .rev()
+        .find(|e| e.kind == event_kind::TRIAGE_STARTED)
+        .map_or_else(
+            || ActorLaunch::default_of(ModelRole::Recovery),
+            |e| ActorLaunch::recorded(&e.payload, ModelRole::Recovery),
+        )
 }
 
 /// Whether a round of a run that ended finds its alert's jobs used up, and

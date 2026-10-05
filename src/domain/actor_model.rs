@@ -47,14 +47,16 @@ impl ModelRole {
 pub const ROLE_PROVIDER: Provider = Provider::Claude;
 
 /// The roles Codex has an implementation for (ADR-t1063-1 decisions 1
-/// and 7): goal, run and plan reviews, the throughput review and the
-/// observer (ADR-t1222-1, task 1223). Claude runs every role.
-pub const CODEX_ROLES: [ModelRole; 5] = [
+/// and 7): goal, run and plan reviews, the throughput review, the
+/// observer (ADR-t1222-1, task 1223) and the recovery job (task 1225).
+/// Claude runs every role.
+pub const CODEX_ROLES: [ModelRole; 6] = [
     ModelRole::GoalReview,
     ModelRole::Review,
     ModelRole::PlanReview,
     ModelRole::ThroughputReview,
     ModelRole::Observer,
+    ModelRole::Recovery,
 ];
 
 /// Whether `provider` can run a session of `role`.
@@ -260,6 +262,20 @@ pub enum JobRoute {
         provider: Provider,
         reason: SwitchReason,
     },
+}
+
+/// How a due headless job starts once its route is decided (ADR-t1063-1
+/// decisions 1, 4 and 5, ADR-t1204-1): the throughput review's and the
+/// observer's (`job_start_route`) and the recovery job's
+/// (`recovery_route_of`, task 1225). A value both the observation and the
+/// execution contexts read, so it lives here with [`JobRoute`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobStartRoute {
+    /// On this launch; `true` when its `[roles.<role>]` names its provider.
+    Start(ActorLaunch, bool),
+    /// Under `--no-claude`, no provider can run it: the job records why,
+    /// starting no agent.
+    Unavailable(ActorLaunch, String),
 }
 
 /// Where the job that `launch` starts goes, given why each provider cannot
@@ -535,10 +551,14 @@ mod tests {
         review.entry(ModelRole::PlanReview).provider = Some(Provider::Codex);
         review.entry(ModelRole::ThroughputReview).provider = Some(Provider::Codex);
         review.entry(ModelRole::Observer).provider = Some(Provider::Codex);
-        assert!(review.check().is_ok());
         review.entry(ModelRole::Recovery).provider = Some(Provider::Codex);
+        assert!(review.check().is_ok());
+        review.entry(ModelRole::RuntimePlanner).provider = Some(Provider::Codex);
         let error = review.check().unwrap_err();
-        assert!(error.contains("cannot run the recovery role"), "{error}");
+        assert!(
+            error.contains("cannot run the runtime_planner role"),
+            "{error}"
+        );
         for role in ModelRole::ALL {
             assert!(runs_on(role, Provider::Claude));
             assert_eq!(
@@ -550,6 +570,7 @@ mod tests {
                         | ModelRole::PlanReview
                         | ModelRole::ThroughputReview
                         | ModelRole::Observer
+                        | ModelRole::Recovery
                 )
             );
         }
@@ -624,8 +645,9 @@ mod tests {
         assert_eq!(moved.provider, Provider::Codex);
         // A run review whose `[roles.review]` names Claude moves to Codex
         // when Claude cannot be used, as the supervisor's review route does
-        // (ADR-t1207-1), and so do a plan review, a throughput review and
-        // the observer; a recovery job, which Codex does not run, waits.
+        // (ADR-t1207-1), and so do a plan review, a throughput review, the
+        // observer and a recovery job (task 1225); a planner, which Codex
+        // does not run, waits.
         let review = ActorLaunch::default_of(ModelRole::Review);
         let JobRoute::Start(moved) = job_route(&review, true, no_claude) else {
             panic!("moved the review to Codex");
@@ -647,8 +669,13 @@ mod tests {
         };
         assert_eq!(moved.provider, Provider::Codex);
         let recovery = ActorLaunch::default_of(ModelRole::Recovery);
+        let JobRoute::Start(moved) = job_route(&recovery, true, no_claude) else {
+            panic!("moved the recovery job to Codex");
+        };
+        assert_eq!(moved.provider, Provider::Codex);
+        let planner = ActorLaunch::default_of(ModelRole::RuntimePlanner);
         assert!(matches!(
-            job_route(&recovery, true, no_claude),
+            job_route(&planner, true, no_claude),
             JobRoute::Wait { .. }
         ));
     }

@@ -835,3 +835,45 @@ task = 1540
 name = "draft_revisit::a_persons_draft_gets_a_planner_only_at_its_revisit_time"
 reason = "B 境界（守る境界）: supervisor wiring and process: a person's draft without an origin gets a background headless planner only at its revisit time (the decisions are unit tests in infrastructure::draft_planners)"
 task = 1540
+
+# 3.2s to 4.4s in task 1225's stress (5 rounds) and 5.8s in a run of the module, added by task 1225
+[[test]]
+name = "recovery_codex::a_codex_recovery_job_of_a_failed_run_is_read_only_and_its_retry_is_applied"
+reason = "B 境界（守る境界）: supervisor wiring and process: the recovery job of a failed run starts as the stub codex exec read-only from triage_started's launch, its verdict is applied in SQLite and the retried run lands, with the thread and model on the round's end and span, headless_jobs and stats/kpi (the route and the end's record are unit tests in application::supervise::recovery)"
+task = 1225
+
+# 3.3s to 4.5s in task 1225's stress (5 rounds) and 6.2s in a run of the module, added by task 1225
+[[test]]
+name = "recovery_codex::a_codex_recovery_job_of_a_stalled_run_resumes_it_and_it_lands"
+reason = "B 境界（守る境界）: supervisor wiring and process: a stalled headless session's recovery job runs as the stub codex exec read-only, its resume parks the live run, which is resumed and lands, with the thread and model on recovery_finished (the route is a unit test in application::supervise::recovery)"
+task = 1225
+
+# 6.6s to 10.1s in task 1225's stress (5 rounds), added by task 1225
+[[test]]
+name = "recovery_codex::a_codex_recovery_job_that_cannot_log_in_moves_the_round_to_claude"
+reason = "B 境界（守る境界）: supervisor wiring and process: the stub codex exec's login failure holds Codex in SQLite, the round's triage_failed with provider_unusable makes the run due again, and the next round starts on Claude from the switched launch and lands the retried run (triage_state and event_attention of the round are unit tests in domain)"
+task = 1225
+
+# 5.9s to 7.6s in task 1225's stress (5 rounds), added by task 1225
+[[test]]
+name = "recovery_codex::a_live_codex_recovery_job_that_cannot_log_in_moves_to_claude"
+reason = "B 境界（守る境界）: supervisor wiring and process: a stalled headless session's Codex job fails at its login, Codex is held without an ask, and the alert's next job runs on Claude, whose resume parks the run, which is resumed and lands (the route is a unit test in application::supervise::recovery)"
+task = 1225
+
+# 4.4s to 5.4s in task 1225's stress (5 rounds, host load average 25), added by task 1225
+[[test]]
+name = "recovery_codex::a_timed_out_codex_recovery_job_is_stopped_with_its_command"
+reason = "B 境界（守る境界）: process: a recovery job past its time limit is stopped by pid with the command its stub codex exec ran in a process group of its own, and the round fails in SQLite (the 2s limit itself is most of the time)"
+task = 1225
+
+# 4.5s to 7.2s in task 1225's stress (5 rounds, host load average 25), added by task 1225
+[[test]]
+name = "recovery_codex::a_codex_repair_of_low_confidence_for_a_stalled_run_is_asked"
+reason = "B 境界（守る境界）: supervisor wiring and process: a stalled headless session is nudged, its recovery job runs as the stub codex exec, and the low-confidence verdict opens the stalled ask, whose stop ends the run (the verdict checks are unit tests in application::supervise::recovery)"
+task = 1225
+
+# 3.9s to 6.5s in task 1225's stress (5 rounds, host load average 25), added by task 1225
+[[test]]
+name = "recovery_codex::a_failed_codex_recovery_job_of_a_stalled_run_asks_a_person"
+reason = "B 境界（守る境界）: supervisor wiring and process: a stalled headless session's recovery job fails as the stub codex exec, and the failure opens the alert's recovery_failed ask, whose stop ends the run (the escalation's note is a unit test in application::supervise::recovery)"
+task = 1225

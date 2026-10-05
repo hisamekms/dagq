@@ -4,8 +4,8 @@ type: design
 title: Supervisor and workspace lifecycle
 status: current
 created: 2026-09-21
-updated: 2026-10-04 # task 1437
-last_verified: 2026-10-04 # task 1437
+updated: 2026-10-05 # task 1225: a recovery job whose provider could not be used starts again on the other one; task 1437
+last_verified: 2026-10-05 # task 1225; task 1437
 scope: runtime
 related:
   - design-supervisor-lifecycle-throughput-review
@@ -67,7 +67,8 @@ ready task (dependencies completed)
   → running                          │
   → completion receipt, session idle │ (the session stays open)
   → validate receipt, commit, clean state (own thread)
-  → awaiting_integration: headless review (claude -p) → verdict
+  → awaiting_integration: headless review (claude -p, or codex exec --json read-only when
+    [roles.review] says provider = "codex") → verdict
       pass    → exit request → close workspace → land (single slot, push)
       revise  → fixed request to the live session → rewritten receipt
                 → validate → review again (at most 2 revises)
@@ -87,7 +88,8 @@ ready task (dependencies completed)
   → dependents become candidates; the resident loop claims them from the landed main
 failed / interrupted run (a dead run nobody leases is recovered to interrupted first;
 a run whose resumes are used up is failed with its resume_exhausted alert)
-  → headless recovery job (claude -p) → verdict; the runtime checks the action again,
+  → headless recovery job (claude -p, or codex exec --json read-only when
+    [roles.recovery] says provider = "codex") → verdict; the runtime checks the action again,
     then closes its workspaces
       retry          → task ready → a new run (only without commits of its own)
       retry_inherit  → task ready → a new run carrying the branch over (once per task)
@@ -96,10 +98,14 @@ a run whose resumes are used up is failed with its resume_exhausted alert)
       escalate / low confidence / refused / 3 jobs used → decide ask
                        (retry / resume / cancel + the job's options), applied once answered;
                        a job's option goes back to the job
-      job failed → triage_failed (triage by hand, read as recover by hand)
+      job failed → triage_failed (triage by hand, read as recover by hand);
+                   its provider could not be used (provider_unusable, a role that names its
+                   provider) → the next round on the other provider (task 1225)
 live worker alert (stalled, idle_process)
   → the same recovery job in the session's slot → repair applied, or the alert's ask;
-    a failed job → the alert's ask too (reason_category recovery_failed, ADR-t609-1)
+    a failed job → the alert's ask too (reason_category recovery_failed, ADR-t609-1);
+    its provider could not be used (provider_unusable, a role that names its provider)
+    → the provider is held, no ask, and the alert's next job on the other provider
 ```
 
 各節は`supervisor-lifecycle/`の下の別のファイルにある。下の見出しは各ファイルへの目次で、以前この文書の中にあった節へのリンク（見出しのanchor）もここに届く。

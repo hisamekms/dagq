@@ -4,8 +4,8 @@ type: design
 title: "Headless job processes"
 status: current
 created: 2026-09-27
-updated: 2026-10-05 # task 1794: the ps listing is read as bytes and decoded lossily
-last_verified: 2026-10-05 # task 1794
+updated: 2026-10-05 # task 1225: the recovery job may run on Codex; task 1794: the ps listing is read as bytes and decoded lossily
+last_verified: 2026-10-05 # task 1225; task 1794
 scope: runtime
 related:
   - adr-t1566-1
@@ -23,11 +23,11 @@ related:
 
 # Headless job processes
 
-task 443。supervisorが起動するheadlessのjob（runのreview、終わったrunと生きているsessionの復旧job、plan review、goal review）の`claude -p`のプロセスをqueueに記録し、そのsupervisorが死んだ後に引き継ぐsupervisorが、同じjobを立て直す前に前のjobを止める。同じ入力のjobが二重に走ること、その費用、古いjobが出力ファイルを書くことを防ぐ。use caseは`src/application/supervise/jobs.rs`、表は`src/infrastructure/headless_jobs.rs`、判定は`src/domain/headless_job.rs`。observerの子プロセスはここに記録せず、時間切れとsupervisorのループのerrorでの終了のときに子孫ごとkillする（task 245、[Observer](observer.md)）。
+task 443。supervisorが起動するheadlessのjob（runのreview、終わったrunと生きているsessionの復旧job、plan review、goal review）の`claude -p`か`codex exec --json`（`[roles.<role>] provider = "codex"`。[Actor model](actor-model.md#provider)）のプロセスをqueueに記録し、そのsupervisorが死んだ後に引き継ぐsupervisorが、同じjobを立て直す前に前のjobを止める。同じ入力のjobが二重に走ること、その費用、古いjobが出力ファイルを書くことを防ぐ。use caseは`src/application/supervise/jobs.rs`、表は`src/infrastructure/headless_jobs.rs`、判定は`src/domain/headless_job.rs`。observerの子プロセスはここに記録せず、時間切れとsupervisorのループのerrorでの終了のときに子孫ごとkillする（task 245、[Observer](observer.md)）。
 
 ## 記録
 
-- jobのプロセスを起動した直後に、`Supervisor::headless_job`が`headless_jobs`（schema v43、[Persistence](../persistence.md)）に1行書く: `kind`（`review` / `recovery` / `plan_review` / `goal_review`）、`label`（復旧jobのalert）、`run_id` / `proposal_id` / `goal_id`、`attempt`、`pid`、`process_start`（`ProcessControl::start_identity`。`LC_ALL=C`の`ps -o lstart= -p <pid>`の秒までの起動時刻）、`supervisor_token`、`started_at`、`provider`（jobを起動したprovider（`JobSubject::provider`）。schema v55、task 1062。goal review（task 1065）・runのreview（ADR-t1207-1）・plan review（task 1218）は行き先で実際に起動したprovider（launchの`provider`。使えないproviderから切り替えた後ならその先）、他のjob（復旧）は`claude`（`domain::actor_model::ROLE_PROVIDER`）で、列の既定も`claude`なので、それより前の行と古いバイナリが書く行は`claude`と読める。値の集合はworkerのrunの`requested_provider` / `actual_provider`と同じ）。書けなくてもjobはそのまま走る（logだけ）。
+- jobのプロセスを起動した直後に、`Supervisor::headless_job`が`headless_jobs`（schema v43、[Persistence](../persistence.md)）に1行書く: `kind`（`review` / `recovery` / `plan_review` / `goal_review`）、`label`（復旧jobのalert）、`run_id` / `proposal_id` / `goal_id`、`attempt`、`pid`、`process_start`（`ProcessControl::start_identity`。`LC_ALL=C`の`ps -o lstart= -p <pid>`の秒までの起動時刻）、`supervisor_token`、`started_at`、`provider`（jobを起動したprovider（`JobSubject::provider`）。schema v55、task 1062。goal review（task 1065）・runのreview（ADR-t1207-1）・plan review（task 1218）・終わったrunと生きているsessionの復旧job（task 1225）は行き先で実際に起動したprovider（launchの`provider`。使えないproviderから切り替えた後ならその先）で、列の既定は`claude`なので、それより前の行と古いバイナリが書く行は`claude`と読める。値の集合はworkerのrunの`requested_provider` / `actual_provider`と同じ）。書けなくてもjobはそのまま走る（logだけ）。
 - jobの終わりで`ended_at`と`outcome`を書く: 自分で終わったjob（exitを読んだ）は`ended`、自分のsupervisorが止めたjob（timeout、見るのをやめたslot、handoffの前）は`stopped`。jobが終わる場所はqueueを持たないので、終わりは`JobEnds`に積み、次のpassの先頭（と、ループを抜けた直後）に書く。終わりを読む前に捨てられたjob（途中のerror、失敗したループ）は`Drop`で止めて`stopped`にするので、走ったまま見られなくなるjobは無い。
 - timeoutの停止（`HeadlessJob::stop`）は、killの前に`ProcessControl::descendants`（`ps -U <uid> -o pid=,ppid=,…`の親子の連なり）でjobの子孫を集め、jobをSIGKILLしてwaitした後、子孫もSIGKILLする。`claude -p`のBashとその子がjobより長く残らない。
 - この`ps`の一覧（`ProcessControl::list`・`descendants`・`executables`が共有する`user_ps_listing`）はstdoutをbytesで受け、`parse_ps`が`String::from_utf8_lossy`で読む（task 1794）。hostのどれか1つのprocessのcommandにUTF-8でないbyteがあっても一覧全体は失敗せず、その行もpid・ppidのまま残り（commandのそのbyteだけが置換文字になる）、子孫の連なりが切れない。行を飛ばさないのは、飛ばすとその下の子孫が停止と孤児の検出から漏れるため。brokerの`SystemProcesses`（[Broker](../broker.md)）の一覧も前から同じくlossyに読む。

@@ -883,6 +883,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         last_sweep: None,
         last_turns: None,
         process_sample: None,
+        live_job_ends: Vec::new(),
         sweep_failures: Vec::new(),
         triaged: Vec::new(),
         generators: ports.generators.clone(),
@@ -1046,6 +1047,10 @@ struct Supervisor<'a> {
     /// alert (task 469): when it was taken, and the listing with its wall
     /// time, `None` when it failed. One listing serves every run.
     process_sample: Option<(Instant, Option<ProcessSample>)>,
+    /// The ends of the live sessions' recovery jobs whose verdict a person
+    /// is asked about (run, alert, attempt), until the escalation records
+    /// its `recovery_finished` ([`recovery::Escalation::record`]).
+    live_job_ends: Vec<(RunId, RecoveryAlert, usize, recovery::JobEnd)>,
     /// The workspaces the sweep could not close: retried on every sweep,
     /// their `cleanup_failed` recorded once per process.
     sweep_failures: Vec<String>,
@@ -2352,7 +2357,15 @@ impl Supervisor<'_> {
                         Phase::Recovery(watch) => (watch.round, watch.alert, watch.attempt),
                         _ => unreachable!("matched a recovery"),
                     };
-                    self.fail_recovery(&slot.run, round, alert, attempt, format!("{error:#}"), 0);
+                    self.fail_recovery(
+                        &slot.run,
+                        round,
+                        alert,
+                        attempt,
+                        format!("{error:#}"),
+                        0,
+                        &recovery::JobEnd::default(),
+                    );
                     let run = self.queue.run(slot.run.id()).unwrap_or(slot.run);
                     self.note_triaged(&run);
                 }
@@ -2462,10 +2475,10 @@ impl Supervisor<'_> {
             return;
         };
         let (launch, switchable, unavailable) = match route {
-            throughput_review::JobStartRoute::Start(launch, switchable) => {
+            crate::domain::actor_model::JobStartRoute::Start(launch, switchable) => {
                 (launch, switchable, None)
             }
-            throughput_review::JobStartRoute::Unavailable(launch, why) => {
+            crate::domain::actor_model::JobStartRoute::Unavailable(launch, why) => {
                 (launch, false, Some(why))
             }
         };
@@ -2969,29 +2982,48 @@ impl Supervisor<'_> {
             }
             Phase::Landing(_) => unreachable!("joined above"),
             Phase::Recovery(watch) => {
-                let Some(outcome) = watch.poll(&*self.files, self.reviewer)? else {
+                // The job's reply, session and failure are read by the
+                // provider it ran on (ADR-t1063-1 decisions 2, 4 and 6).
+                let agent = self.job_agent(watch.job.provider).unwrap_or(self.reviewer);
+                let Some(outcome) = watch.poll(&*self.files, agent)? else {
                     return Ok(Step::Continue);
                 };
                 let (round, alert, attempt) = (watch.round, watch.alert, watch.attempt);
                 let duration_secs = watch.job.started.elapsed().as_secs();
                 let run = self.queue.run(slot.run.id())?;
+                // A job that failed: stopped at a wall only a person moves
+                // (Claude's), it joins the hold ask, whose `done` starts it
+                // again, and its `triage_failed` is no attention meanwhile
+                // (task 438). When `[roles.recovery]` names its provider
+                // and that provider could not be used, the provider is held
+                // and the round's `triage_failed` carries
+                // `provider_unusable`: no attention, and the next round
+                // starts on the other provider (ADR-t1063-1 decision 4).
+                // Only under `--no-claude`, with no provider left, does the
+                // next round go to a person told why, never to Claude.
+                let end = self.recovery_job_end(
+                    run.id(),
+                    &watch.job,
+                    agent,
+                    watch.switchable,
+                    outcome.as_ref().err().map(String::as_str),
+                );
                 let acted = match outcome {
                     Ok(verdict) => {
                         let job = ActorContext::recovery_job(run.id(), alert.as_str(), attempt);
                         self.for_job(&job, |sv| {
-                            sv.act_on_recovery(&run, round, alert, attempt, duration_secs, verdict)
+                            sv.act_on_recovery(
+                                &run,
+                                round,
+                                alert,
+                                attempt,
+                                duration_secs,
+                                verdict,
+                                &end,
+                            )
                         })
                     }
-                    Err(error) => {
-                        // Stopped at a wall only a person moves: it joins
-                        // the hold ask, whose `done` starts it again, and
-                        // its `triage_failed` is no attention meanwhile
-                        // (task 438).
-                        if let Some(wall) = self.job_wall(&watch.job) {
-                            self.raise_job_wall(wall, &HoldJob::Recovery(run.id().clone()), &error);
-                        }
-                        Err(anyhow!("{error}"))
-                    }
+                    Err(error) => Err(anyhow!("{error}")),
                 };
                 if let Err(error) = acted {
                     // Another process took the run's lease meanwhile: its
@@ -3006,6 +3038,7 @@ impl Supervisor<'_> {
                         attempt,
                         format!("{error:#}"),
                         duration_secs,
+                        &end,
                     );
                 }
                 Ok(Step::Triaged(Box::new(self.queue.run(run.id())?)))

@@ -53,7 +53,9 @@ pub(super) struct JobSubject {
 }
 
 impl JobSubject {
-    /// A job of `run`, on Claude (a run's jobs run only there).
+    /// A job of `run`, on Claude; a job whose role names another provider
+    /// sets `provider` to its launch's (the review and the recovery job,
+    /// ADR-t1063-1).
     pub(super) fn run(kind: &'static str, run: &RunId, attempt: usize) -> Self {
         Self {
             kind,
@@ -530,6 +532,10 @@ pub(super) struct EndedRecovery {
     pub(super) alert: RecoveryAlert,
     /// The job's number for its alert (`recovery_requested`'s `attempt`).
     pub(super) attempt: usize,
+    /// Whether `[roles.recovery]` names its provider, so that a provider
+    /// that cannot be used is held for the next jobs (ADR-t1063-1
+    /// decision 4).
+    pub(super) switchable: bool,
     pub(super) job: HeadlessJob,
 }
 

@@ -6,10 +6,12 @@ use super::*;
 use crate::application::prompt::{BinaryFacts, FittedPrompt, binary_facts, recovery_binary_file};
 use crate::domain::ActorContext;
 use crate::domain::EventKind;
-use crate::domain::actor_model::{ActorLaunch, ModelRole};
+use crate::domain::actor_model::{ActorLaunch, JobRoute, JobStartRoute, ModelRole, job_route};
+use crate::domain::headless_job::JobSession;
 use crate::domain::idle_process::{
     CpuWatch, IdleProcess, PROGRESS_CPU_PER_MILLE, without_session_helpers,
 };
+use crate::domain::provider_switch::SwitchReason;
 use crate::domain::recovery::{
     MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, ProcessInfo, RecoveryAction, attempts, failed_live,
     run_processes,
@@ -36,6 +38,10 @@ pub(super) struct RecoveryJob {
     pub(super) reason: Option<&'static str>,
     pub(super) attempt: usize,
     marker: Option<SystemTime>,
+    /// Whether `[roles.recovery]` names its provider, so that a provider
+    /// that cannot be used is held for the next jobs (ADR-t1063-1
+    /// decision 4).
+    switchable: bool,
 
     job: HeadlessJob,
 }
@@ -247,7 +253,8 @@ impl Escalation {
         payload
     }
 
-    /// Record [`Self::finished`] for a live session's alert.
+    /// Record [`Self::finished`] for a live session's alert, with the end
+    /// of the job that led to it ([`JobEnd`]) when one ran.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn record(
         &self,
@@ -259,7 +266,17 @@ impl Escalation {
         ask_id: Option<AskId>,
         extra: Value,
     ) -> Result<()> {
-        let payload = self.finished(alert, attempt, note, ask_id, extra);
+        let mut payload = self.finished(alert, attempt, note, ask_id, extra);
+        if let Some(at) = sv.live_job_ends.iter().position(|(id, ended, number, _)| {
+            id == run.id() && *ended == alert && *number == attempt
+        }) {
+            let (_, _, _, end) = sv.live_job_ends.remove(at);
+            // An alert past its jobs ran none: an end its last job left
+            // (its escalation failed before this record) is dropped.
+            if !matches!(self, Self::UsedUp(_)) {
+                end.record(&mut payload);
+            }
+        }
         sv.queue
             .record_runtime_event(run.id(), EventKind::RecoveryFinished, payload)?;
         Ok(())
@@ -304,6 +321,153 @@ pub(super) fn ask_options(base: &[&str], note: Option<&Note>) -> Vec<String> {
 /// (`prompt.txt`), stdout (`out`) and stderr (`err`).
 pub(super) fn job_file(alert: RecoveryAlert, attempt: usize, what: &str) -> String {
     format!("recovery-{}-{attempt}.{what}", alert.as_str())
+}
+
+/// How the error of a recovery job no agent ran begins when `--no-claude`
+/// leaves no provider for it: the run goes to a person (`triage_failed`
+/// of a run that ended, the `recovery_failed` ask of a live one).
+const RECOVERY_PROVIDER_DISABLED: &str = "provider_disabled: Claude is disabled by --no-claude";
+
+/// Where a recovery job starts (ADR-t1063-1 decisions 1, 4 and 5,
+/// ADR-t1204-1), or `None` while it waits, given its role's `launch`,
+/// whether `[roles.recovery]` names its provider (`switchable`),
+/// `--no-claude`, whether the queue's hold ask holds Claude
+/// (`claude_held`) and why each provider cannot be used now
+/// (`unusable`). A role that names no provider runs on Claude as before:
+/// it waits while the hold ask holds Claude, and under `--no-claude` goes
+/// to a person told why. One that names its provider starts there when it
+/// can be used, else on the other provider when that one can be, else
+/// waits, or, under `--no-claude`, goes to a person told why: a Codex job
+/// never moves to Claude then.
+pub(super) fn recovery_route_of(
+    launch: ActorLaunch,
+    switchable: bool,
+    no_claude: bool,
+    claude_held: bool,
+    unusable: impl Fn(Provider) -> Option<SwitchReason>,
+) -> Option<JobStartRoute> {
+    if !switchable {
+        if no_claude {
+            return Some(JobStartRoute::Unavailable(
+                launch,
+                format!("{RECOVERY_PROVIDER_DISABLED}; handle this role manually"),
+            ));
+        }
+        return (!claude_held).then_some(JobStartRoute::Start(launch, false));
+    }
+    match job_route(&launch, true, &unusable) {
+        JobRoute::Start(launch) => Some(JobStartRoute::Start(launch, true)),
+        JobRoute::Wait { .. } if no_claude => {
+            let codex = unusable(Provider::Codex).map_or("unknown", SwitchReason::as_str);
+            Some(JobStartRoute::Unavailable(
+                launch,
+                format!(
+                    "{RECOVERY_PROVIDER_DISABLED} and codex cannot be used ({codex}); handle this role manually"
+                ),
+            ))
+        }
+        JobRoute::Wait { provider, reason } => {
+            tracing::debug!(
+                "the recovery job waits: {} cannot be used ({}), nor can the other provider",
+                provider.as_str(),
+                reason.as_str()
+            );
+            None
+        }
+    }
+}
+
+/// What the end of a recovery job records beyond its verdict
+/// (ADR-t1063-1 decisions 4 and 6): the session its provider names itself
+/// (Codex's thread, and its model or why none was read; none on Claude,
+/// whose session id its start records), and the provider found unusable
+/// when the job failed for that.
+#[derive(Debug, Clone, Default)]
+pub(super) struct JobEnd {
+    pub(super) session: Option<JobSession>,
+    pub(super) unusable: Option<(Provider, SwitchReason)>,
+}
+
+impl JobEnd {
+    /// Put the end into the payload of an event that ends the job.
+    pub(super) fn record(&self, payload: &mut Value) {
+        if let Some(session) = &self.session {
+            session.record(payload);
+        }
+        if let Some((provider, reason)) = self.unusable {
+            payload["provider_unusable"] = json!({"provider": provider, "reason": reason});
+        }
+    }
+}
+
+impl Supervisor<'_> {
+    /// Where the next recovery job starts ([`recovery_route_of`]), from
+    /// `[roles.recovery]` as it reads now.
+    pub(super) fn recovery_route(&self) -> Option<JobStartRoute> {
+        let role = ModelRole::Recovery;
+        let models = self.role_models(role);
+        recovery_route_of(
+            models.launch(role),
+            models.switchable(role),
+            self.no_claude,
+            self.queue_hold.is_some(),
+            |provider| self.job_unusable(provider),
+        )
+    }
+
+    /// The end of the recovery `job` once it ended: the session its
+    /// provider's output names (read by `agent`, the provider that ran
+    /// it), and, for a job that failed (`error`), the provider held when
+    /// it could not be used and the role names its provider
+    /// (`switchable`), as a goal review's (ADR-t1063-1 decisions 4 and 5).
+    /// A Claude job stopped at a login or the usage limit joins the
+    /// queue's hold ask (task 438).
+    pub(super) fn recovery_job_end(
+        &mut self,
+        run: &RunId,
+        job: &HeadlessJob,
+        agent: &dyn AgentProvider,
+        switchable: bool,
+        error: Option<&str>,
+    ) -> JobEnd {
+        let stdout = self.files.read_to_string(&job.stdout).unwrap_or_default();
+        let session = agent.job_session(&stdout, job.started_at);
+        let unusable = error.and_then(|error| {
+            let failure = self.job_failure(job);
+            // The provider's own words (Codex's `turn.failed` is on its
+            // stdout) may say when a usage limit resets.
+            let said = format!("{error}\n{stdout}");
+            self.job_provider_failed(
+                job.provider,
+                failure,
+                (error, &said),
+                &HoldJob::Recovery(run.clone()),
+                switchable,
+            )
+        });
+        JobEnd { session, unusable }
+    }
+
+    /// A recovery job whose provider's process did not start (`failed`,
+    /// told as `error`): the provider is held when the role names its
+    /// provider (`switchable`) and it cannot be used for that, so that the
+    /// next jobs start on the other one (ADR-t1063-1 decisions 4 and 5).
+    pub(super) fn recovery_start_failed(
+        &mut self,
+        run: &RunId,
+        launch: &ActorLaunch,
+        failed: &anyhow::Error,
+        error: &str,
+        switchable: bool,
+    ) -> Option<(Provider, SwitchReason)> {
+        self.job_provider_failed(
+            launch.provider,
+            crate::application::job_start_failure(failed),
+            (error, error),
+            &HoldJob::Recovery(run.clone()),
+            switchable,
+        )
+    }
 }
 
 impl RecoveryWatch {
@@ -434,10 +598,12 @@ impl RecoveryWatch {
         marker: Option<(SystemTime, i64)>,
     ) -> Result<Option<(usize, Escalation)>> {
         // A login or usage limit that holds the queue starts no recovery
-        // job (task 437): the alert is followed again once it is fixed.
-        if sv.queue_hold.is_some() {
+        // job on Claude (task 437): the alert is followed again once it is
+        // fixed. One whose role names its provider may start on Codex
+        // meanwhile (ADR-t1063-1 decision 5).
+        let Some(route) = sv.recovery_route() else {
             return Ok(None);
-        }
+        };
         let events = sv.queue.run_events(run.id())?;
         let done = attempts(&events, alert);
         if done >= MAX_RECOVERY_ATTEMPTS {
@@ -459,29 +625,70 @@ impl RecoveryWatch {
             payload.extend(facts);
         }
         // What the job is started with (ADR-0079 decision 7): recorded,
-        // not shown to the job among the facts.
-        let launch = sv.actor_launch(ModelRole::Recovery);
+        // not shown to the job among the facts. A job no provider can run
+        // under `--no-claude` is recorded on the provider its role names,
+        // so that the person sees why.
+        let (launch, switchable, unavailable) = match route {
+            JobStartRoute::Start(launch, switchable) => (launch, switchable, None),
+            JobStartRoute::Unavailable(launch, why) => (launch, false, Some(why)),
+        };
         let mut recorded = payload.clone();
         recorded["launch"] = launch.to_value();
         sv.queue
             .record_runtime_event(run.id(), EventKind::RecoveryRequested, recorded)?;
-        info!(run_id = %run.id(), "run {}: alert {}; recovery job {attempt} starts", run.id(), alert.as_str());
-        match spawn_live(sv, run, live, alert, attempt, &payload, &launch) {
+        if let Some(why) = unavailable {
+            return Ok(Some((
+                attempt,
+                Escalation::JobFailed(format!("the recovery job could not start: {why}")),
+            )));
+        }
+        info!(run_id = %run.id(), "run {}: alert {}; recovery job {attempt} starts on {}", run.id(), alert.as_str(), launch.provider.as_str());
+        // The outer error is the job's own preparation, the inner one the
+        // start of its provider's process: only the latter says whether
+        // the provider can be used.
+        let started = spawn_live(sv, run, live, alert, attempt, &payload, &launch)
+            .map_err(|error| (error, false))
+            .and_then(|started| started.map_err(|error| (error, true)));
+        match started {
             Ok(job) => {
                 self.job = Some(Box::new(RecoveryJob {
                     alert,
                     reason,
                     attempt,
                     marker: marker.map(|(at, _)| at),
+                    switchable,
 
                     job,
                 }));
                 Ok(None)
             }
-            Err(error) => Ok(Some((
-                attempt,
-                Escalation::JobFailed(format!("the recovery job could not start: {error:#}")),
-            ))),
+            Err((failed, spawned)) => {
+                let error = format!("the recovery job could not start: {failed:#}");
+                let unusable = spawned
+                    .then(|| {
+                        sv.recovery_start_failed(run.id(), &launch, &failed, &error, switchable)
+                    })
+                    .flatten();
+                // A provider that cannot be used is held, and the alert's
+                // next job starts on the other one (ADR-t1063-1 decision 4).
+                if let Some(unusable) = unusable {
+                    let end = JobEnd {
+                        session: None,
+                        unusable: Some(unusable),
+                    };
+                    Self::restarted(
+                        sv,
+                        run,
+                        (alert, reason),
+                        attempt,
+                        marker.map(|(at, _)| at),
+                        &error,
+                        &end,
+                    )?;
+                    return Ok(None);
+                }
+                Ok(Some((attempt, Escalation::JobFailed(error))))
+            }
         }
     }
 
@@ -500,7 +707,10 @@ impl RecoveryWatch {
         else {
             return Ok(None);
         };
-        let Some(output) = job.job.poll(&*sv.files, sv.reviewer)? else {
+        // The job's reply is read by the provider it ran on (ADR-t1063-1
+        // decision 2).
+        let agent = sv.job_agent(job.job.provider).unwrap_or(sv.reviewer);
+        let Some(output) = job.job.poll(&*sv.files, agent)? else {
             return Ok(None);
         };
         let job = self.job.take().expect("polled above");
@@ -535,11 +745,13 @@ impl RecoveryWatch {
         facts: impl FnOnce() -> Value,
     ) -> Result<LiveStep> {
         if let Some((job, verdict)) = self.ended(sv, alert, reason)? {
+            let agent = sv.job_agent(job.job.provider).unwrap_or(sv.reviewer);
             let verdict = match verdict {
                 Ok(verdict) => verdict,
                 // Stopped at a wall only a person moves: it joins the hold
                 // ask and no failure is recorded; the next job of the alert
-                // starts once the hold ends (task 438).
+                // starts once the hold ends (task 438). Only Claude's walls
+                // hold the queue.
                 Err(error)
                     if let Some(wall) = sv.job_wall(&job.job)
                         && sv.raise_job_wall(
@@ -550,14 +762,45 @@ impl RecoveryWatch {
                 {
                     return Ok(LiveStep::Pending);
                 }
+                // A provider that could not be used (its login, its usage
+                // limit, an agent that did not start) of a role that names
+                // its provider is held, and the alert's next job starts on
+                // the other one (ADR-t1063-1 decision 4), or, under
+                // `--no-claude` with none left, goes to its ask told why.
+                // Any other failure (a non-zero exit, the time limit, a
+                // verdict that does not parse) is the alert's own ask
+                // (ADR-t609-1), whatever the provider: a Codex job that
+                // failed never moves to Claude.
                 Err(error) => {
+                    let end = sv.recovery_job_end(
+                        run.id(),
+                        &job.job,
+                        agent,
+                        job.switchable,
+                        Some(&error),
+                    );
+                    if end.unusable.is_some() {
+                        Self::restarted(
+                            sv,
+                            run,
+                            (alert, reason),
+                            job.attempt,
+                            job.marker,
+                            &error,
+                            &end,
+                        )?;
+                        return Ok(LiveStep::Pending);
+                    }
+                    sv.live_job_ends
+                        .push((run.id().clone(), alert, job.attempt, end));
                     return Ok(LiveStep::Escalate(
                         job.attempt,
                         Escalation::JobFailed(error),
                     ));
                 }
             };
-            return Ok(match apply_live(sv, run, live, &job, verdict)? {
+            let end = sv.recovery_job_end(run.id(), &job.job, agent, job.switchable, None);
+            return Ok(match apply_live(sv, run, live, &job, verdict, end)? {
                 Ok(applied) => {
                     if let Some(at) = applied_recheck(sv, &job, run)? {
                         self.held
@@ -589,6 +832,37 @@ impl RecoveryWatch {
             },
         )
     }
+    /// Record the end of the live `alert`'s job `attempt` whose provider could
+    /// not be used (`end`'s `provider_unusable`, told as `error`): its
+    /// `recovery_finished` (`outcome: job_failed`, no ask), after which the
+    /// alert's next job starts on the provider the route gives then
+    /// (ADR-t1063-1 decision 4, task 1225).
+    fn restarted(
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+        (alert, reason): (RecoveryAlert, Option<&'static str>),
+        attempt: usize,
+        marker: Option<SystemTime>,
+        error: &str,
+        end: &JobEnd,
+    ) -> Result<()> {
+        let mut finished = json!({
+            "alert": alert,
+            "reason": reason,
+            "attempt": attempt,
+            "outcome": "job_failed",
+            "applied": [],
+            "escalated": false,
+            "error": error,
+            "marker_at_ms": marker.map(millis),
+        });
+        end.record(&mut finished);
+        sv.queue
+            .record_runtime_event(run.id(), EventKind::RecoveryFinished, finished)?;
+        warn!(run_id = %run.id(), "run {}: recovery job {attempt} of {} failed: {error}; its provider cannot be used, and the next job starts on the other one", run.id(), alert.as_str());
+        Ok(())
+    }
+
     /// One look at the run's processes for the `idle_process` alert (task
     /// 469): follow its job in progress, or, at each new process sample,
     /// start one when a process of the run and its descendants have used
@@ -607,6 +881,12 @@ impl RecoveryWatch {
         let alert = RecoveryAlert::IdleProcess;
         if self.job.as_ref().is_some_and(|job| job.alert == alert) {
             let step = self.follow(sv, run, live, alert, || json!({}))?;
+            // A job that ended with nothing applied nor asked (a wall, a
+            // provider that could not be used) leaves its processes to
+            // raise the alert again.
+            if matches!(step, LiveStep::Pending) && self.job.is_none() {
+                self.cpu = std::mem::take(&mut self.cpu).released();
+            }
             return Ok(self.after_idle(step));
         }
         if self.job.is_some() {
@@ -802,7 +1082,9 @@ fn own_of(sv: &Supervisor<'_>, run: &TaskRun, all: &[ProcessInfo]) -> Result<Vec
 }
 
 /// Write the job's prompt with what the runtime reads now and start it in
-/// the run directory, allowed to read only.
+/// the run directory, allowed to read only. The outer error is the job's
+/// own preparation, the inner one the start of its provider's process
+/// ([`start_job`]).
 fn spawn_live(
     sv: &mut Supervisor<'_>,
     run: &TaskRun,
@@ -811,7 +1093,7 @@ fn spawn_live(
     attempt: usize,
     facts: &Value,
     launch: &ActorLaunch,
-) -> Result<HeadlessJob> {
+) -> Result<Result<HeadlessJob>> {
     let detail = sv.queue.show(run.task_id())?;
     let binary = binary_facts_of(sv, run, &detail)?;
     let task = detail.task;
@@ -936,8 +1218,13 @@ pub(super) fn repair_history(sv: &Supervisor<'_>, run: &TaskRun) -> Result<Vec<V
 /// Write `prompt` next to the run and start the headless job in `dir`,
 /// allowed to read only; the job's environment and CLI are the review's.
 /// `session_id` is the Claude session id the job runs as, when its start
-/// recorded one (ADR-0048 decision 4); `launch` the model and effort it
-/// starts with (ADR-0079 decision 7).
+/// recorded one (ADR-0048 decision 4); `launch` the provider, model and
+/// effort it starts with (ADR-0079 decision 7, ADR-t1063-1): Claude
+/// Code's `claude -p`, or Codex's `codex exec --json` in its read-only
+/// sandbox, as [`TRIAGE_ACCESS`] says. The outer error is the job's own
+/// preparation (its prompt and files), the inner one the start of its
+/// provider's process: only the latter says whether the provider can be
+/// used.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn start_job(
     sv: &mut Supervisor<'_>,
@@ -947,7 +1234,7 @@ pub(super) fn start_job(
     (prompt, binary): (&FittedPrompt, &BinaryFacts),
     session_id: Option<&str>,
     launch: &ActorLaunch,
-) -> Result<HeadlessJob> {
+) -> Result<Result<HeadlessJob>> {
     sv.files
         .create_dir_all(dir)
         .with_context(|| format!("create {}", dir.display()))?;
@@ -970,8 +1257,35 @@ pub(super) fn start_job(
     let prompt = prompt.text.as_str();
     let stdout = dir.join(job_file(alert, attempt, "out"));
     let stderr = dir.join(job_file(alert, attempt, "err"));
+    Ok(spawn_job(
+        sv,
+        run,
+        dir,
+        (alert, attempt),
+        prompt,
+        session_id,
+        launch,
+        (stdout, stderr),
+    ))
+}
+
+/// Start the provider's process of a recovery job ([`start_job`]).
+#[allow(clippy::too_many_arguments)]
+fn spawn_job(
+    sv: &mut Supervisor<'_>,
+    run: &RunId,
+    dir: &Path,
+    (alert, attempt): (RecoveryAlert, usize),
+    prompt: &str,
+    session_id: Option<&str>,
+    launch: &ActorLaunch,
+    (stdout, stderr): (PathBuf, PathBuf),
+) -> Result<HeadlessJob> {
+    let agent = sv
+        .job_agent(launch.provider)
+        .with_context(|| format!("no {} runs on this supervisor", launch.provider.as_str()))?;
     let child = sv
-        .actors()
+        .actors_on(agent)
         .spawn(ActorExecutionSpec::new(
             ActorContext::recovery_job(run, alert.as_str(), attempt),
             WorkspaceAccess::Scratch(dir.to_path_buf()),
@@ -1001,6 +1315,7 @@ pub(super) fn start_job(
         stderr,
         JobSubject {
             label: Some(alert.as_str().to_owned()),
+            provider: launch.provider,
             ..JobSubject::run(headless_job::RECOVERY, run, attempt)
         },
     ))
@@ -1087,9 +1402,18 @@ pub(super) fn apply_live(
     live: &Live<'_>,
     job: &RecoveryJob,
     verdict: RecoveryVerdict,
+    end: JobEnd,
 ) -> Result<std::result::Result<Applied, Escalation>> {
     let actor = ActorContext::recovery_job(run.id(), job.alert.as_str(), job.attempt);
-    sv.for_job(&actor, |sv| apply_live_verdict(sv, run, live, job, verdict))
+    let applied = sv.for_job(&actor, |sv| {
+        apply_live_verdict(sv, run, live, job, verdict, &end)
+    })?;
+    // An escalation records the job's end with its `recovery_finished`.
+    if applied.is_err() {
+        sv.live_job_ends
+            .push((run.id().clone(), job.alert, job.attempt, end));
+    }
+    Ok(applied)
 }
 
 /// [`apply_live`] with the job recorded as the requester.
@@ -1099,6 +1423,7 @@ fn apply_live_verdict(
     live: &Live<'_>,
     job: &RecoveryJob,
     verdict: RecoveryVerdict,
+    end: &JobEnd,
 ) -> Result<std::result::Result<Applied, Escalation>> {
     let duration_secs = job.job.started.elapsed().as_secs();
     if !verdict.applies() {
@@ -1182,23 +1507,22 @@ fn apply_live_verdict(
         }
         applied.names.push(action.name());
     }
-    sv.queue.record_runtime_event(
-        run.id(),
-        EventKind::RecoveryFinished,
-        json!({
-            "alert": job.alert,
-            "reason": job.reason,
-            "attempt": job.attempt,
-            "verdict": verdict.verdict,
-            "confidence": verdict.confidence,
-            "diagnosis": verdict.diagnosis,
-            "applied": applied.names,
-            "escalated": false,
-            "marker_at_ms": job.marker.map(millis),
-            "recheck_at_ms": recheck_at,
-            "duration_secs": duration_secs,
-        }),
-    )?;
+    let mut finished = json!({
+        "alert": job.alert,
+        "reason": job.reason,
+        "attempt": job.attempt,
+        "verdict": verdict.verdict,
+        "confidence": verdict.confidence,
+        "diagnosis": verdict.diagnosis,
+        "applied": applied.names,
+        "escalated": false,
+        "marker_at_ms": job.marker.map(millis),
+        "recheck_at_ms": recheck_at,
+        "duration_secs": duration_secs,
+    });
+    end.record(&mut finished);
+    sv.queue
+        .record_runtime_event(run.id(), EventKind::RecoveryFinished, finished)?;
     info!(run_id = %run.id(), "run {}: recovery job {} of {} repaired it ({}): {}", run.id(), job.attempt, job.alert.as_str(), applied.names.join(", "), verdict.diagnosis);
     Ok(Ok(applied))
 }
@@ -1573,6 +1897,135 @@ mod tests {
             ["wait", "stop", "kill it"]
         );
         assert_eq!(ask_options(&[], Some(&jobs)), ["wait", "kill it"]);
+    }
+
+    fn describe(route: Option<JobStartRoute>) -> String {
+        match route {
+            None => "wait".to_owned(),
+            Some(JobStartRoute::Start(launch, switchable)) => format!(
+                "start {} {switchable} {:?} {:?}",
+                launch.provider.as_str(),
+                launch.switched_from.map(Provider::as_str),
+                launch.switch_reason.map(SwitchReason::as_str),
+            ),
+            Some(JobStartRoute::Unavailable(launch, why)) => {
+                format!("manual {} {why}", launch.provider.as_str())
+            }
+        }
+    }
+
+    /// Where a recovery job starts (task 1225, ADR-t1063-1 decisions 1, 4
+    /// and 5, ADR-t1204-1): a role that names no provider runs on Claude,
+    /// waits while the hold ask holds Claude and goes to a person under
+    /// `--no-claude`; one that names Codex starts there, moves to Claude
+    /// when Codex cannot be used, waits when neither can be, and under
+    /// `--no-claude` never moves to Claude but goes to a person told why.
+    #[test]
+    fn a_recovery_job_starts_on_a_provider_it_can_use_waits_or_goes_to_a_person() {
+        use crate::domain::actor_model::RoleModels;
+        let usable = |_: Provider| None;
+        let claude_only = |provider: Provider| {
+            (provider == Provider::Codex).then_some(SwitchReason::ExecutableMissing)
+        };
+        let neither = |provider: Provider| {
+            Some(match provider {
+                Provider::Claude => SwitchReason::Disabled,
+                Provider::Codex => SwitchReason::Authentication,
+            })
+        };
+        let default = RoleModels::default().launch(ModelRole::Recovery);
+        assert_eq!(
+            describe(recovery_route_of(
+                default.clone(),
+                false,
+                false,
+                false,
+                usable
+            )),
+            "start claude false None None"
+        );
+        assert_eq!(
+            describe(recovery_route_of(
+                default.clone(),
+                false,
+                false,
+                true,
+                usable
+            )),
+            "wait"
+        );
+        assert_eq!(
+            describe(recovery_route_of(default, false, true, false, usable)),
+            "manual claude provider_disabled: Claude is disabled by --no-claude; handle this role manually"
+        );
+
+        let mut models = RoleModels::default();
+        models.entry(ModelRole::Recovery).provider = Some(Provider::Codex);
+        let codex = models.launch(ModelRole::Recovery);
+        assert!(models.switchable(ModelRole::Recovery));
+        // Claude's hold ask does not hold a Codex job.
+        assert_eq!(
+            describe(recovery_route_of(codex.clone(), true, false, true, usable)),
+            "start codex true None None"
+        );
+        assert_eq!(
+            describe(recovery_route_of(
+                codex.clone(),
+                true,
+                false,
+                false,
+                claude_only
+            )),
+            "start claude true Some(\"codex\") Some(\"executable_missing\")"
+        );
+        let held = |provider: Provider| {
+            Some(match provider {
+                Provider::Claude => SwitchReason::UsageLimit,
+                Provider::Codex => SwitchReason::Authentication,
+            })
+        };
+        assert_eq!(
+            describe(recovery_route_of(codex.clone(), true, false, true, held)),
+            "wait"
+        );
+        assert_eq!(
+            describe(recovery_route_of(codex.clone(), true, true, false, usable)),
+            "start codex true None None"
+        );
+        assert_eq!(
+            describe(recovery_route_of(codex, true, true, false, neither)),
+            "manual codex provider_disabled: Claude is disabled by --no-claude and codex cannot be used (authentication); handle this role manually"
+        );
+    }
+
+    /// The end of a recovery job records the thread and model its provider
+    /// names (Codex's, or why no model was read) and the provider it found
+    /// unusable; a Claude job's end adds nothing (its session id is its
+    /// start's).
+    #[test]
+    fn a_jobs_end_records_its_thread_model_and_unusable_provider() {
+        let mut payload = json!({"alert": "failed"});
+        JobEnd::default().record(&mut payload);
+        assert_eq!(payload, json!({"alert": "failed"}));
+        let end = JobEnd {
+            session: Some(JobSession {
+                session_id: Some("codex-thread-1".into()),
+                model: None,
+                model_unknown: Some("no rollout".into()),
+            }),
+            unusable: Some((Provider::Codex, SwitchReason::Authentication)),
+        };
+        end.record(&mut payload);
+        assert_eq!(
+            payload,
+            json!({
+                "alert": "failed",
+                "session_id": "codex-thread-1",
+                "model": null,
+                "model_unknown": "no rollout",
+                "provider_unusable": {"provider": "codex", "reason": "authentication"},
+            })
+        );
     }
 
     /// The processes are sampled every tenth of the threshold in whole

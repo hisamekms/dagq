@@ -519,8 +519,8 @@ impl SqliteQueue {
     /// ([`crate::domain::triage_state`]), and that it is still the task's
     /// latest run, lease it to `token` and record `lease_acquired`,
     /// `request` as `recovery_requested` when given, and `triage_started`
-    /// (`attempt`, `status`). `Ok(None)` means another process took it or
-    /// it changed.
+    /// (`attempt`, `status`, the session id of a Claude job and `launch`).
+    /// `Ok(None)` means another process took it or it changed.
     pub fn begin_triage(
         &mut self,
         id: &RunId,
@@ -579,12 +579,16 @@ impl SqliteQueue {
         if let Some(request) = request {
             run_event(&tx, id, EventKind::RecoveryRequested, request)?;
         }
+        // The job's Claude session id (ADR-0048 decision 4); Codex names
+        // its thread itself, which the round's end records (ADR-t1063-1
+        // decision 6).
+        let session_id = (launch.provider == crate::domain::Provider::Claude)
+            .then(|| self.generators.ids.uuid());
         run_event(
             &tx,
             id,
             EventKind::TriageStarted,
-            // The job's Claude session id (ADR-0048 decision 4).
-            json!({"attempt": attempt, "status": run.status().as_str(), "session_id": self.generators.ids.uuid(), "launch": launch.to_value()}),
+            json!({"attempt": attempt, "status": run.status().as_str(), "session_id": session_id, "launch": launch.to_value()}),
         )?;
         tx.commit()?;
         Ok(Some((run, attempt)))

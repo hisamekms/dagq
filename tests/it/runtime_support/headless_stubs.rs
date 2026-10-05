@@ -138,10 +138,14 @@ ask() {{ "$DAGQ" ask --run "${{DAGQ_RUN_ID:-$SESSION}}" --kind worker_question -
 /// event), `fail TEXT` (`turn.failed`, exit 1), `refused COMMAND` (a
 /// command the sandbox refused), `commit MESSAGE`, `receipt COMMIT
 /// [RESULT] [EVIDENCE]`, `ask QUESTION`. A read-only job (the run's
-/// review: its job permission profile, or `--sandbox read-only`) logs its
-/// arguments and actor and prints the review's reply instead, and writes
-/// the model of `codex-review-model` to its thread's rollout when there
-/// is one.
+/// review or a recovery job: its job permission profile, or `--sandbox
+/// read-only`) logs its arguments and actor and prints the reply of its
+/// call (`codex-review-<call>.jsonl`, else a review's `pass`) instead,
+/// and writes the model of `codex-review-model` to its thread's rollout
+/// when there is one; with `codex-review-failure.jsonl` it prints that
+/// and fails, and with `codex-review-hang` it runs a command in a process
+/// group of its own until it is stopped (or the test process or the
+/// stub's directory is gone).
 pub fn headless_codex(dir: &Path, db: &Path) -> PathBuf {
     let test_pid = std::process::id();
     let stub = dir.join("codex-headless");
@@ -179,6 +183,15 @@ if [ -n "$REVIEW" ]; then
   if [ -f {dir}/codex-review-failure.jsonl ]; then
     cat {dir}/codex-review-failure.jsonl
     exit 1
+  fi
+  # A job that runs a command in a process group of its own until it is
+  # stopped (its pid in `codex-review-child.pid`). The command ends by
+  # itself once the test process or the stub's directory is gone, or after
+  # two minutes.
+  if [ -f {dir}/codex-review-hang ]; then
+    perl -e 'setpgrp(0,0) or die "setpgrp: $!"; open(my $f, ">", $ARGV[0]) or die $!; print $f "$$\n"; close($f) or die $!; for (1..600) {{ last unless kill(0, $ARGV[2]) && -d $ARGV[1]; select(undef, undef, undef, 0.2) }}' {dir}/codex-review-child.pid {dir} "$STUB_TEST_PID" &
+    wait
+    exit 0
   fi
   if [ -f {dir}/codex-review-$REVIEW_CALL.jsonl ]; then
     cat {dir}/codex-review-$REVIEW_CALL.jsonl

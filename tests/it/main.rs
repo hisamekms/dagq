@@ -85,6 +85,7 @@ mod queue_service_client;
 mod queue_service_findings;
 mod queue_service_reads;
 mod queue_tasks;
+mod recovery_codex;
 mod related;
 mod request_planner;
 mod review_subagents;

@@ -1917,11 +1917,12 @@ LITERAL = 'no \n escapes # here'
             ),
             ("[roles.review]\n[roles.review]", "is defined twice"),
             ("[roles.review]\nprovider = 'gemini'", "provider"),
-            // Codex runs goal, normal run, plan and throughput reviews and
-            // the observer (ADR-t1207-1, tasks 1218, 1220 and 1223).
+            // Codex runs goal, normal run, plan and throughput reviews, the
+            // observer and the recovery job (ADR-t1207-1, tasks 1218, 1220,
+            // 1223 and 1225), and no planner.
             (
-                "[roles.recovery]\nprovider = 'codex'",
-                "[roles.recovery]: provider codex cannot run the recovery role",
+                "[roles.runtime_planner]\nprovider = 'codex'",
+                "[roles.runtime_planner]: provider codex cannot run the runtime_planner role",
             ),
             (
                 "[roles.goal_review]\nmodel = 'claude-opus-5-5'\nprovider = 'codex'",

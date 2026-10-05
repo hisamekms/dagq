@@ -704,6 +704,11 @@ pub fn session_takes_answers(status: RunStatus, events: &[RunEvent], ask_created
         || (status == RunStatus::NeedsSession && resume_in_progress(events))
 }
 
+/// Where the recovery of a run that ended stands, from its latest round,
+/// resume or restart. A round whose job failed because its provider could
+/// not be used (`triage_failed` with `provider_unusable`, ADR-t1063-1
+/// decision 4, task 1225) is due again: the next round starts on the other
+/// provider, or, when none can run it, fails to a person told why.
 pub fn triage_state(events: &[RunEvent]) -> TriageState {
     let last = events.iter().rev().find(|e| {
         matches!(
@@ -721,6 +726,9 @@ pub fn triage_state(events: &[RunEvent]) -> TriageState {
             }
         }
         Some(e) if e.kind == "triage_finished" => TriageState::Finished,
+        Some(e) if e.kind == "triage_failed" && e.payload.get("provider_unusable").is_some() => {
+            TriageState::Pending
+        }
         Some(e) if e.kind == "triage_failed" => TriageState::Failed,
         _ => TriageState::Pending,
     }
@@ -2249,6 +2257,9 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         ("review_failed", _) => Some(AttentionNext::ReviewByHand),
         // The supervisor triages a failed run and acts on the verdict
         // (ADR-0024 decision 3); only a triage that failed is a person's.
+        // One whose provider could not be used starts again on the other
+        // provider by itself (ADR-t1063-1 decision 4, task 1225).
+        ("triage_failed", _) if payload.get("provider_unusable").is_some() => None,
         ("triage_failed", _) => Some(AttentionNext::TriageByHand),
         // The recovery job of a live session's alert failed (ADR-0047
         // decision 40): the session is a person's to recover by hand.
@@ -3969,8 +3980,19 @@ mod attention_tests {
         assert_eq!(triage_state(&[wait]), TriageState::Waiting { until: 42 });
         let mut events = vec![event(1, "validation_finished"), event(2, "triage_started")];
         assert_eq!(triage_state(&events), TriageState::Pending);
+        // A round whose provider could not be used is due again, and no
+        // person's (task 1225).
+        let mut unusable = event(3, "triage_failed");
+        unusable.payload = serde_json::json!({"provider_unusable": {"provider": "codex", "reason": "authentication"}});
+        assert_eq!(event_attention(&unusable.kind, &unusable.payload), None);
+        events.push(unusable);
+        assert_eq!(triage_state(&events), TriageState::Pending);
         events.push(event(3, "triage_failed"));
         assert_eq!(triage_state(&events), TriageState::Failed);
+        assert_eq!(
+            event_attention("triage_failed", &serde_json::json!({})),
+            Some(AttentionNext::TriageByHand)
+        );
         events.push(event(4, "triage_finished"));
         assert_eq!(triage_state(&events), TriageState::Finished);
         // A run resumed after its triage is triaged again once it fails.

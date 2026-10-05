@@ -356,13 +356,15 @@ fn a_goal_review_on_codex_runs_read_only_and_records_its_thread_and_model() {
     // file: `doctor` says so, and every role starts as before meanwhile.
     fs::write(
         fx.repo.join("dagq.toml"),
-        "[roles.recovery]\nprovider = \"codex\"\n",
+        "[roles.runtime_planner]\nprovider = \"codex\"\n",
     )
     .unwrap();
     let doctor = crate::common::cli::ok(&fx.db, &["doctor"]);
     let error = doctor["roles"]["error"].as_str().unwrap();
     assert!(
-        error.contains("[roles.recovery]: provider codex cannot run the recovery role"),
+        error.contains(
+            "[roles.runtime_planner]: provider codex cannot run the runtime_planner role"
+        ),
         "{error}"
     );
     assert_eq!(doctor["roles"]["review"]["provider"], "claude");

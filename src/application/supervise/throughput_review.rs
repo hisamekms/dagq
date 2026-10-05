@@ -11,7 +11,7 @@
 //! holds a claim or a landing.
 
 use super::*;
-use crate::domain::actor_model::{ActorLaunch, JobRoute, ModelRole, job_route};
+use crate::domain::actor_model::{JobRoute, JobStartRoute, ModelRole, job_route};
 use crate::domain::event_kind::{THROUGHPUT_REVIEW_FINISHED, THROUGHPUT_REVIEW_STARTED};
 use crate::domain::provider_switch::SwitchReason;
 use crate::domain::throughput_review::{
@@ -31,16 +31,6 @@ struct ReviewJob {
     /// finish that says Codex could not be used holds Codex and starts the
     /// period again (ADR-t1063-1 decision 4).
     switchable_codex: bool,
-}
-
-/// How a due job of the queue's (the throughput review, the observer)
-/// starts (ADR-t1063-1 decisions 1, 4 and 5, ADR-t1204-1).
-pub(super) enum JobStartRoute {
-    /// On this launch; `true` when its `[roles.<role>]` names its provider.
-    Start(ActorLaunch, bool),
-    /// Under `--no-claude`, no provider can run it: the command records
-    /// why, starting no agent.
-    Unavailable(ActorLaunch, String),
 }
 
 /// The review running now and the periods this process started.
