@@ -4,8 +4,8 @@ type: design
 title: Manual smoke of the paths that include real Claude and Codex
 status: current
 created: 2026-09-25
-updated: 2026-10-04 # task 1580: the e2e stub moved to tests/e2e/stub.rs (after task 1461); task 1437
-last_verified: 2026-10-04 # task 1580; task 1437
+updated: 2026-10-05 # task 841: the smoke of a required broker; task 1580: the e2e stub moved to tests/e2e/stub.rs (after task 1461); task 1437
+last_verified: 2026-10-05 # task 841; task 1580; task 1437
 scope: operations
 related:
   - adr-0036
@@ -17,13 +17,15 @@ related:
   - adr-t1233-2
   - adr-t1228-1
   - adr-t1228-2
+  - adr-t838-1
+  - design-broker
 ---
 
 # Manual smoke of the paths that include real Claude and Codex
 
 実 Claude Code と実 Codex CLI を含む経路は自動 test にしない（[testの制約](../development/testing.md)の「手動スモーク」）。`tests/e2e.rs` のハッピーパスは stub を provider にするので、実 Claude の起動・ダイアログ・resume と、異常系の組み合わせはこの手順で人（または人に頼まれた session）が確かめる。runtime の振る舞いを大きく変えたとき、Claude Code か cmux の版を上げたときに流す。結果は task の receipt の `summary`（または `note`）に、版・シナリオごとの結果・見つけた問題を残す。
 
-手順は 6 つある。
+手順は 8 つある。
 
 - [故障経路のスモーク](#故障経路のスモーク): 使い捨て repository で異常系 6 シナリオを起こし、二重起動と成果の喪失が無いことを確かめる。
 - [独立 task 1 件の完走](#独立-task-1-件の完走): この repository の本番 queue で、登録から着地まで人が DB を直さずに通ることを確かめる。
@@ -32,6 +34,7 @@ related:
 - [Codex の goal review のスモーク](#codex-の-goal-review-のスモーク): 使い捨て repository で goal review を実 Codex で動かし、launch と sandbox と記録を確かめる。
 - [Codex の run review のスモーク](#codex-の-run-review-のスモーク): 使い捨て repository で通常 run の review を実 Codex で動かし、verdict から着地まで確かめる。
 - [他の repository のスモーク](#他の-repository-のスモーク): dagq のソースでない使い捨て repository（default branch が `master`、`origin` なし、`Cargo.toml` も `AGENTS.md` も無い）で、`cargo install` したバイナリと公式の手順で入れた plugin を使い、`up`・計画の依頼から着地までを通す。
+- [required の broker のスモーク](#required-の-broker-のスモーク): 使い捨て repository を `[broker] mode = "required"` にし、実 Claude の非対話の worker が broker の道具と `dagq` と `write_receipt` だけで着地すること、broker を止めると claim されず inbox に知らせが出ることを確かめる。
 
 ## 故障経路のスモーク
 
@@ -492,3 +495,43 @@ dagq のソースでない repository で使えること（goal 52）は、stub 
 ### 結果
 
 まだ行っていない（task 629 は worker として動き、使い捨ての queue を作れず、plugin も入れられないため。receipt の `follow_ups`（`ops`）で人か inbox に任せた）。流したら、この節に版（dagq・plugin・Claude Code・cmux）と確認点の結果を足す。
+
+## required の broker のスモーク
+
+`[broker] mode = "required"`（[ADR-t838-1](../adr/2026-10-05-t838-1-required-broker-mode-refuses-built-in-tools-and-holds-claims.md)、[Resource broker](broker.md)の「required」）の代表 task は、stub の provider の e2e（`tests/e2e/broker.rs`）でだけ自動 test される。`a_required_worker_does_its_task_only_through_the_broker_and_lands` は stub の worker の turn の引数（`--permission-mode dontAsk`・`--mcp-config`・`--strict-mcp-config`・`--setting-sources ""`・settings の deny と allow）を確かめ、client の MCP server に `read_file`・`write_file`・`exec`・`package_install`・`git_add`・`git_commit`・`write_receipt` を 1 回ずつ送って着地させ、audit・`broker_tool_use`・token の失効を見る。`a_required_queue_claims_nothing_while_its_broker_is_stopped_and_tells_the_inbox` は止まった broker の queue で常駐の supervisor が claim せず `broker_claims_held` を出し、自分で broker を用意してから claim することを見る。実 Claude Code がその引数で組み込みの道具を本当に拒むか、broker の道具を選んで使うか、利用者の settings を読まない turn で認証と model が通るかは stub では確かめられないので、この手順で確かめる。Claude Code の版を上げたとき、`required` の turn の組み立て（`turn_command`・`headless_required_settings`）・`prompt::BROKER_REQUIRED`・client の MCP の道具を変えたときに流す。人か inbox が行う（worker は使い捨ての queue を作れず、host に podman の machine を用意しない。[隔離](#隔離)）。
+
+### podman の用意
+
+- podman は人が入れる（`brew install podman`）。`podman machine init` は人が打たない。dagq 専用の machine `dagq` は `dagq broker start` か supervisor が必要なときに最小の資源で `init`・`start` する（[Resource broker](broker.md)の「人が行うこと」「用意の手順」）。最初の起動は machine の image の download と broker の image の build で数分かかる。
+- 人の machine（`podman-machine-default` など）が動いていれば `machine_busy` で止まる。止めてよいか人が決める（dagq は人の machine を止めない）。
+- scratch の dagq の隣に、同じ commit の `dagq-broker-client` を置く: 確かめたい commit で `cargo build --locked -p dagq -p dagq-broker-client` し、両方を `<scratch>/bin` にコピーする（`install` と同じ配置。[Resource broker](broker.md)の「配布と版」）。
+
+### 手順
+
+1. [隔離](#隔離)のとおり scratch に使い捨て repository `dagq-smoke`（`seed.txt` と `CLAUDE.md` を commit）、bare の `origin`、wrapper `tq`（`<scratch>/bin/dagq`）を用意し、`tq init` する。`dagq-smoke/dagq.toml` に次を足して commit する（`[run.env]` は [scratch の worker が打つ `dagq` の環境](#scratch-の-worker-が打つ-dagq-の環境)）。
+
+   ```toml
+   [broker]
+   mode = "required"
+   exec_allow = ["sh", "ls", "cat"]
+
+   [broker.package]
+   smoke-touch = ["touch", "package.txt"]
+   ```
+
+2. `tq broker start`（`state: running`）を打ち、`tq status` の `broker` が `mode: required`・`health.state: healthy`・`client.matches: true`・`image_matches: true`、`actors` が `backend: host`・`enforcement: advisory`（sandbox と書かない）であることを見る。`tq doctor` の `broker` も同じ `mode` と `health` を出す。
+3. `required` の turn は `--setting-sources ""` で利用者の `~/.claude/settings.json` を読まない（[Resource broker](broker.md)の「required」）。`~/.local/bin/claude -p --setting-sources "" 'say ok'` が答えることを確かめ、答えなければ認証や model をその settings に頼っているので、このスモークの前に `claude` の login か環境変数で足りるようにする。
+4. task を 1 件登録して `tq ready ID --bypass-review` を add が返した ID に打つ。`--verify 'test -f seed.txt' --verify 'test -f smoke.txt' --verify 'test -f package.txt'`、description に「`seed.txt` を読み、`smoke.txt` に 1 行書き、`exec` で `ls` を走らせ、`package_install` で `smoke-touch` を走らせ、commit して receipt を書く。最初に `dagq ask --run $DAGQ_RUN_ID --kind worker_question --because scope --topic other --question '続けてよいか'` を打って turn を終え、答えを受けてから作業する。`Read` と `Bash` の `cat seed.txt` も 1 回ずつ試し、拒まれたことを receipt の summary に書く」。
+5. 専用の cmux workspace で `tq supervise --parallel 1 --claude ~/.local/bin/claude --log-dir <scratch>/logs` を起動する。ask に `tq answer <id> --text 'yes'` と答える。
+6. run が着地したら次を確かめる。
+   - `turns/turn-000001.jsonl` の `system/init`: `permissionMode` が `dontAsk`、`mcp_servers` が `dagq-broker`（`connected`）だけ、`tools` に `mcp__dagq-broker__*` の 14 本（`write_receipt` を含む）がある。組み込みの道具が拒まれたことの主な証拠は、試した turn（answer の後の turn。`turns/turn-000002.jsonl` など）の result の `permission_denials` で、試した `Read` と `Bash`（`cat seed.txt`）が載る。
+   - `tq events --run RUN --full`: `broker_token_issued` が 1 回、`broker_token_revoked`（`reason: integrated`）、`broker_tool_use` の `brokered_by_op` に `fs.read`・`fs.write`・`process.exec`・`package.install`・`git.add`・`git.commit`。`ask_opened` の actor が `worker:<run id>`（`Bash(dagq:*)` が通った）。`broker_tool_use` の `direct` は拒まれた試みの数と一致しなくてよい: 制御側の `Bash`（手順 4 の `dagq ask` など、worker が打った `dagq`）も `Bash` として数え（[Resource broker](broker.md)の「組み込みの道具の数」）、拒まれた試みは Claude Code がその道具の `PreToolUse` の hook を呼んだときだけ数えるので、`direct_by_tool` の `Bash` は `dagq` の呼び出しの数以上になり、`Read` は無いこともある。拒否は `direct` ではなく上の `permission_denials` で判定する。`broker_unavailable` と `broker_claims_held` が無い。
+   - `tq broker audit --run RUN`: 上の op の行が `result: ok` で、`jti` が `broker_token_issued` のもの。token・中身・引数が残っていない。
+   - run dir の `receipt.json` が `write_receipt` で書かれ（`.receipt.json.<pid>.tmp` が残らない）、`broker-required` の印があり、`broker/` が消えている。`tq status` の `broker.active_tokens` が 0。
+   - `origin/main` に 1 commit で、`smoke.txt` と `package.txt` が入り、`.claude/` が入っていない。
+7. broker を止めた状態を見る: supervisor を止め（`Ctrl-C`）、`tq broker stop` を打ち、同じ形の task をもう 1 件 ready にして supervisor を起動し直す。最初の pass で `tq status --role inbox` の `attention` に `broker_claims_held`（`status: not_ready`、`next: dagq broker status`）が出て task に run が無く、supervisor が broker を用意すると `broker_claims_resumed` の後に `run_claimed` が来て、`broker_started` も `broker_claims_held` の後に残ることを `tq events --kind broker_claims_held --kind broker_started --kind broker_claims_resumed --kind run_claimed` で見る。知らせへの対応は plugin の `dagq-inbox` skill の `reference/status.md` の `broker_claims_held` の項（`dagq broker status` を見せる。supervisor は毎 pass 見直し、直接の実行には戻らない）。直らない場合（`machine_busy`・`podman_missing` など）は `broker_unhealthy` も立ち、原因を人が取り除くまで claim されないままであることを見る。
+8. 後始末: supervisor を止め、`tq broker stop`（container を消し、他の container が無ければ machine `dagq` を止める）。`podman machine list` で `dagq` が止まり、`ps -A -ww -o pid= -o args=` に `dagq-gvproxy.sock` を持つ gvproxy が残っていないことを見る（[Resource broker](broker.md)の「machineのgvproxyの後片付け」）。[故障経路のスモーク](#シナリオ)の後始末と同じく workspace group を消す。
+
+### 結果
+
+まだ行っていない（task 841 は worker として動き、使い捨ての queue を作れず、host の podman の machine も実 Claude の worker も動かさないため。receipt の `follow_ups`（`ops`）で人か inbox に任せた）。流したら、この節に版（dagq・Claude Code・podman）と確認点の結果を足す。
