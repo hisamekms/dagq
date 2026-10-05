@@ -185,15 +185,7 @@ impl ProcessControl for SystemProcesses {
     }
 
     fn list(&self) -> Result<Vec<ProcessInfo>> {
-        // SAFETY: getuid(2) has no failure and no memory effects.
-        let uid = unsafe { libc::getuid() }.to_string();
-        let listing = output(Command::new("ps").args([
-            "-U",
-            &uid,
-            "-o",
-            "pid=,ppid=,etime=,time=,command=",
-        ]))?;
-        let processes = parse_ps(&listing);
+        let processes = parse_ps(&user_ps_listing()?);
         // Linux's `ps` prints CPU time in whole seconds, too coarse to see a
         // process make progress between two samples: read the clock ticks.
         #[cfg(target_os = "linux")]
@@ -222,15 +214,7 @@ impl ProcessControl for SystemProcesses {
     fn executables(&self) -> Result<Vec<ProcessExecutable>> {
         // One `ps` for the pids and parents, then one cheap read per pid
         // for its executable (task 1590); no working directories.
-        // SAFETY: getuid(2) has no failure and no memory effects.
-        let uid = unsafe { libc::getuid() }.to_string();
-        let listing = output(Command::new("ps").args([
-            "-U",
-            &uid,
-            "-o",
-            "pid=,ppid=,etime=,time=,command=",
-        ]))?;
-        Ok(parse_ps(&listing)
+        Ok(parse_ps(&user_ps_listing()?)
             .into_iter()
             .map(|p| ProcessExecutable {
                 pid: p.pid,
@@ -242,9 +226,7 @@ impl ProcessControl for SystemProcesses {
 
     fn descendants(&self, pid: u32) -> Vec<u32> {
         // Only the parents are needed: no working directories.
-        // SAFETY: getuid(2) has no failure and no memory effects.
-        let uid = unsafe { libc::getuid() }.to_string();
-        output(Command::new("ps").args(["-U", &uid, "-o", "pid=,ppid=,etime=,time=,command="]))
+        user_ps_listing()
             .map(|listing| crate::domain::headless_job::descendants(&parse_ps(&listing), pid))
             .unwrap_or_default()
     }
@@ -262,10 +244,26 @@ pub fn process_started_at(pid: u32) -> Option<i64> {
     Some(i64::try_from(now).ok()? - age)
 }
 
+/// `ps -U <uid> -o pid=,ppid=,etime=,time=,command=` for this user's
+/// processes, as the bytes `ps` printed: a command line need not be UTF-8
+/// (task 1794), so [`parse_ps`] reads them, not [`output`].
+fn user_ps_listing() -> Result<Vec<u8>> {
+    // SAFETY: getuid(2) has no failure and no memory effects.
+    let uid = unsafe { libc::getuid() }.to_string();
+    let mut command = Command::new("ps");
+    command.args(["-U", &uid, "-o", "pid=,ppid=,etime=,time=,command="]);
+    let (status, stdout, stderr) = capture_bytes(&mut command, OUTPUT_TIMEOUT)?;
+    ensure!(status.success(), "\"ps\" failed ({status}): {stderr}");
+    Ok(stdout)
+}
+
 /// The lines of `ps -o pid=,ppid=,etime=,time=,command=`; a line that does
-/// not read is skipped.
-fn parse_ps(listing: &str) -> Vec<ProcessInfo> {
-    listing
+/// not read is skipped. The listing is read lossily (task 1794): a command
+/// with bytes that are not UTF-8 keeps its process, pid and parent, with
+/// U+FFFD in place of those bytes, so one process's name neither fails the
+/// whole list nor cuts a descendant out of the parent chain.
+fn parse_ps(listing: &[u8]) -> Vec<ProcessInfo> {
+    String::from_utf8_lossy(listing)
         .lines()
         .filter_map(|line| {
             let mut fields = line.split_whitespace();
@@ -4173,7 +4171,7 @@ mod tests {
         assert_eq!(proc_stat_cpu_ticks("42 (x) S 1 2"), None);
         assert_eq!(proc_stat_cpu_ticks("no command"), None);
         let processes = parse_ps(
-            "  1     0  3-00:00:00 12:00.50 /sbin/launchd\n 42  1 01:05 bad sleep 600 --x\nbad line\n",
+            b"  1     0  3-00:00:00 12:00.50 /sbin/launchd\n 42  1 01:05 bad sleep 600 --x\nbad line\n",
         );
         assert_eq!(processes.len(), 2);
         assert_eq!(processes[0].cpu_ms, Some(720_500));
@@ -4182,6 +4180,20 @@ mod tests {
         assert_eq!(processes[1].elapsed_secs, 65);
         assert_eq!(processes[1].cpu_ms, None);
         assert_eq!(processes[1].command, "sleep 600 --x");
+        // Task 1794: a byte that is not UTF-8 in one command keeps that
+        // process and every other line.
+        let processes = parse_ps(
+            b"  7  1 00:05 0:00.01 a\n  8  7 00:05 0:00.01 b\xff c\n  9  8 00:05 0:00.01 d\n",
+        );
+        assert_eq!(
+            processes
+                .iter()
+                .map(|p| (p.pid, p.ppid))
+                .collect::<Vec<_>>(),
+            [(7, 1), (8, 7), (9, 8)]
+        );
+        assert_eq!(processes[1].command, "b\u{fffd} c");
+        assert_eq!(processes[2].command, "d");
     }
 
     /// Task 1581: the directories are read one pid at a time, once for
@@ -4191,7 +4203,7 @@ mod tests {
     #[test]
     fn each_listed_pid_is_read_once_and_one_unread_stays_listed_without_a_cwd() {
         let processes =
-            parse_ps("  7  1 00:05 0:00.01 a\n  8  7 00:05 0:00.01 b\n  9  7 00:05 0:00.01 c\n");
+            parse_ps(b"  7  1 00:05 0:00.01 a\n  8  7 00:05 0:00.01 b\n  9  7 00:05 0:00.01 c\n");
         let mut reads = Vec::new();
         let read = |pid: u32| {
             reads.push(pid);
