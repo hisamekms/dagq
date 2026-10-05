@@ -2023,20 +2023,38 @@ impl GitRepository {
     /// after the directory moved (`git worktree repair`); a no-op otherwise.
     pub fn repair_worktree(&self, worktree: &Path) -> Result<()> {
         let primary = self.primary_worktree()?;
-        output(
-            Command::new(&self.git)
-                .arg("-C")
-                .arg(&primary)
-                .args(["worktree", "repair"])
-                .arg(worktree),
-        )
-        .with_context(|| {
+        output(&mut self.repair_worktree_command(&primary, worktree)).with_context(|| {
             format!(
                 "repair worktree {} (was its record pruned after the queue moved?)",
                 worktree.display()
             )
         })?;
         Ok(())
+    }
+
+    // Cleanup reads repair's English stderr in `may_remove_broken`.
+    fn repair_worktree_command(&self, primary: &Path, worktree: &Path) -> Command {
+        let mut command = Command::new(&self.git);
+        command
+            .env("LC_ALL", "C")
+            .arg("-C")
+            .arg(primary)
+            .args(["worktree", "repair"])
+            .arg(worktree);
+        command
+    }
+
+    // Keep the locale override on remove and repair only: other Git output
+    // (including paths and commit messages) retains the caller's locale.
+    fn remove_worktree_command(&self, primary: &Path, worktree: &Path) -> Command {
+        let mut command = Command::new(&self.git);
+        command
+            .env("LC_ALL", "C")
+            .arg("-C")
+            .arg(primary)
+            .args(["worktree", "remove", "--force"])
+            .arg(worktree);
+        command
     }
 
     /// Forget the worktrees whose directory is gone (`git worktree
@@ -2058,13 +2076,7 @@ impl GitRepository {
     /// branch already gone is left at that.
     pub fn remove_worktree_and_branch(&self, worktree: &Path, branch: &str) -> Result<()> {
         let primary = self.primary_worktree()?;
-        output(
-            Command::new(&self.git)
-                .arg("-C")
-                .arg(&primary)
-                .args(["worktree", "remove", "--force"])
-                .arg(worktree),
-        )?;
+        output(&mut self.remove_worktree_command(&primary, worktree))?;
         self.delete_branch_from(&primary, branch)
     }
 
@@ -3965,6 +3977,53 @@ mod tests {
     use crate::domain::{
         PlannerId, PlannerOrigin, ProposalId, Provider, RunId, RunStatus, SessionRole,
     };
+
+    #[test]
+    fn worktree_remove_and_repair_commands_fix_the_message_locale() {
+        // No inspection or execution: even the Git executable need not exist.
+        let repository = GitRepository {
+            root: "/repo".into(),
+            common_dir: "/repo/.git".into(),
+            checkout: Ok("/repo".into()),
+            git: "/unused/git".into(),
+        };
+        let primary = Path::new("/primary checkout");
+        let worktree = Path::new("/runs/run/worktree");
+        for (command, operation) in [
+            (
+                repository.remove_worktree_command(primary, worktree),
+                vec!["worktree", "remove", "--force"],
+            ),
+            (
+                repository.repair_worktree_command(primary, worktree),
+                vec!["worktree", "repair"],
+            ),
+        ] {
+            assert_eq!(command.get_program(), repository.git.as_os_str());
+            let mut expected = vec![std::ffi::OsStr::new("-C"), primary.as_os_str()];
+            expected.extend(operation.iter().map(std::ffi::OsStr::new));
+            expected.push(worktree.as_os_str());
+            assert_eq!(command.get_args().collect::<Vec<_>>(), expected);
+            assert_eq!(
+                command.get_envs().collect::<Vec<_>>(),
+                vec![(
+                    std::ffi::OsStr::new("LC_ALL"),
+                    Some(std::ffi::OsStr::new("C"))
+                )]
+            );
+        }
+        assert_eq!(repository.git_root().get_envs().count(), 0);
+        assert_eq!(
+            repository
+                .read_worktree(worktree)
+                .get_envs()
+                .collect::<Vec<_>>(),
+            vec![(
+                std::ffi::OsStr::new("GIT_OPTIONAL_LOCKS"),
+                Some(std::ffi::OsStr::new("0"))
+            )]
+        );
+    }
 
     /// The pids a verification command wrote to `dir`, once it wrote them
     /// all (within a bound).
