@@ -11,6 +11,7 @@ amends:
 amended_by:
   - adr-t1487-2
   - adr-t1811-1
+  - adr-t1850-1
 owners:
   - hisamekms
 tags:

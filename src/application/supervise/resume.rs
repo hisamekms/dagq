@@ -16,10 +16,13 @@ fn resume_required(task: &Task, run: &TaskRun) -> Vec<EvidenceCheck> {
 }
 
 impl Supervisor<'_> {
-    /// Resume `needs_session` runs with attempts left (ADR-0019 decision 1),
-    /// oldest first, while slots are free: a run with a lease that is not
-    /// stale, or whose last session still runs, is someone's already.
-    pub(super) fn resume_parked_runs(&mut self, parallel: usize) -> Result<()> {
+    /// The `needs_session` runs to resume with attempts left (ADR-0019
+    /// decision 1), oldest first: a run with a lease that is not stale, or
+    /// whose last session still runs, is someone's already. A run out of
+    /// attempts is handed on here, and one whose ended session left a
+    /// stuck_exit ask has it closed, whether or not a slot is free; the
+    /// fill pass resumes the rest in the order of its line (ADR-t1850-1).
+    pub(super) fn resume_candidates(&mut self) -> Result<Vec<ResumeCandidate>> {
         let candidates = self.queue.runs_needing_session()?;
         // A resumed session let go after the exit timeout raised a
         // stuck_exit ask; once it ended nobody needs to answer it, whether
@@ -38,13 +41,9 @@ impl Supervisor<'_> {
                 }
             }
         }
+        let mut ready = Vec::new();
         for candidate in candidates {
-            let ResumeCandidate {
-                run,
-                lease,
-                wrapper,
-                resumes,
-            } = candidate;
+            let run = &candidate.run;
             if self.in_slot(run.id()) {
                 continue;
             }
@@ -53,84 +52,94 @@ impl Supervisor<'_> {
                 continue;
             }
             let now = self.generators.clock.now();
-            let session_alive = wrapper
+            let session_alive = candidate
+                .wrapper
                 .as_ref()
                 .is_some_and(|w| w.exited_at.is_none() && self.wrapper_lives(w));
             // A previous session whose wrapper process lives on, however
             // silent, is never joined by a second one on the same worktree.
-            if lease.is_some_and(|lease| !self.lease_stale(&lease, now)) || session_alive {
+            if candidate
+                .lease
+                .as_ref()
+                .is_some_and(|lease| !self.lease_stale(lease, now))
+                || session_alive
+            {
                 continue;
             }
             // Out of attempts: the run is retried with its branch carried
             // over, or a person decides, whether or not a slot is free.
-            if resumes.exhausted(self.resume_config) {
-                if let Err(error) = self.exhaust_resumes(&run, resumes) {
+            if candidate.resumes.exhausted(self.resume_config) {
+                if let Err(error) = self.exhaust_resumes(run, candidate.resumes) {
                     warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: its used-up resumes could not be handed to a person: {error:#}", run.id());
                 }
                 continue;
             }
-            if self.used_slots() >= parallel {
-                break;
+            ready.push(candidate);
+        }
+        Ok(ready)
+    }
+    /// Resume `candidate`, one of [`Self::resume_candidates`], in a free
+    /// slot: the fill pass calls it in the order of its line (ADR-t1850-1).
+    pub(super) fn resume_run(&mut self, candidate: ResumeCandidate) -> Result<()> {
+        let ResumeCandidate { run, resumes, .. } = candidate;
+        self.close_left_resume_workspaces(&run)?;
+        let main = self.repository.main_head()?;
+        // Read before the resume begins, so a failure leaves the run parked.
+        let branch = self.repository.landing_branch()?.name;
+        if let Some(head) = self.resolved_head(&run, &main)? {
+            self.skip_resume(&run, &head, &main)?;
+            return Ok(());
+        }
+        // The session runs the worker's checks with the worker's
+        // `[run.env]`, read before the resume begins like the branch (a
+        // run without a run directory fails in `start_resume`).
+        let run_env = match run.run_dir() {
+            Some(run_dir) => self.verifier.run_env(Path::new(run_dir))?,
+            None => Vec::new(),
+        };
+        let (reason, kind) = resume_reason(&self.queue.run_events(run.id())?, run.last_error());
+        // Not while the cleanup job clears the run's worktree (task 405).
+        let cleaning = self.cleanup.cleaning();
+        let mut guard = cleanup::lock_cleaning(&cleaning);
+        if !guard.may_lease(run.id()) {
+            self.cleanup.deferred = true;
+            return Ok(());
+        }
+        let begun = self.queue.begin_resume(
+            run.id(),
+            &self.token,
+            &main,
+            reason.as_deref(),
+            self.resume_config,
+        )?;
+        drop(guard);
+        let Some((run, attempt)) = begun else {
+            return Ok(());
+        };
+        if run.actual_provider() == crate::domain::Provider::Codex {
+            self.ensure_sccache(crate::domain::sccache::CheckReason::BeforeResume);
+        }
+        let request = ResumeRequest {
+            main,
+            branch,
+            reason: reason.unwrap_or_else(|| "(no reason recorded)".to_owned()),
+            kind,
+        };
+        match self.start_resume(&run, attempt, &request, run_env) {
+            Ok(watch) => {
+                info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {} resumed (attempt {attempt}; {} of at most {MAX_RESUME_ATTEMPTS} counted before it) in workspace {}", run.id(), run.task_id(), resumes.counted, watch.workspace);
+                self.slots.push(Slot::new(run, Phase::Resume(watch)));
             }
-            self.close_left_resume_workspaces(&run)?;
-            let main = self.repository.main_head()?;
-            // Read before the resume begins, so a failure leaves the run parked.
-            let branch = self.repository.landing_branch()?.name;
-            if let Some(head) = self.resolved_head(&run, &main)? {
-                self.skip_resume(&run, &head, &main)?;
-                continue;
-            }
-            // The session runs the worker's checks with the worker's
-            // `[run.env]`, read before the resume begins like the branch (a
-            // run without a run directory fails in `start_resume`).
-            let run_env = match run.run_dir() {
-                Some(run_dir) => self.verifier.run_env(Path::new(run_dir))?,
-                None => Vec::new(),
-            };
-            let (reason, kind) = resume_reason(&self.queue.run_events(run.id())?, run.last_error());
-            // Not while the cleanup job clears the run's worktree (task 405).
-            let cleaning = self.cleanup.cleaning();
-            let mut guard = cleanup::lock_cleaning(&cleaning);
-            if !guard.may_lease(run.id()) {
-                self.cleanup.deferred = true;
-                continue;
-            }
-            let begun = self.queue.begin_resume(
-                run.id(),
-                &self.token,
-                &main,
-                reason.as_deref(),
-                self.resume_config,
-            )?;
-            drop(guard);
-            let Some((run, attempt)) = begun else {
-                continue;
-            };
-            if run.actual_provider() == crate::domain::Provider::Codex {
-                self.ensure_sccache(crate::domain::sccache::CheckReason::BeforeResume);
-            }
-            let request = ResumeRequest {
-                main,
-                branch,
-                reason: reason.unwrap_or_else(|| "(no reason recorded)".to_owned()),
-                kind,
-            };
-            match self.start_resume(&run, attempt, &request, run_env) {
-                Ok(watch) => {
-                    info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {} resumed (attempt {attempt}; {} of at most {MAX_RESUME_ATTEMPTS} counted before it) in workspace {}", run.id(), run.task_id(), resumes.counted, watch.workspace);
-                    self.slots.push(Slot::new(run, Phase::Resume(watch)));
-                }
-                Err(error) => {
-                    let message = format!("run {} could not be resumed: {error:#}", run.id());
-                    warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "{}", message);
-                    self.give_up_resume(
-                        &run,
-                        attempt,
-                        None,
-                        message,
-                        &reason_of_error(&error, ReasonCode::Other),
-                    );
-                }
+            Err(error) => {
+                let message = format!("run {} could not be resumed: {error:#}", run.id());
+                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "{}", message);
+                self.give_up_resume(
+                    &run,
+                    attempt,
+                    None,
+                    message,
+                    &reason_of_error(&error, ReasonCode::Other),
+                );
             }
         }
         Ok(())

@@ -8,7 +8,7 @@ use crate::common;
 
 use common::cli::*;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::path::Path;
 
 #[test]
@@ -276,6 +276,55 @@ fn the_planner_may_not_ready_a_task_or_touch_one_that_started() {
         serde_json::json!({"kind": "task", "id": 2, "status": "in_progress"})
     );
     assert_eq!(recorded[2]["actor"]["id"], "planner:1");
+}
+
+/// ADR-t1850-1 decision 7: the user and the inbox set and clear the
+/// priority of an in-progress task, recorded as `task_priority_changed`
+/// like any other; the planner's set-priority on it is refused and
+/// recorded as `authorization_denied`, and a finished task keeps its own.
+#[test]
+fn only_user_and_inbox_set_the_priority_of_a_task_in_progress() {
+    let (_dir, db) = queue();
+    ok(&db, &["add", "parked"]);
+    ok(&db, &["ready", "1", "--bypass-review"]);
+    set_status(&db, 1, "in_progress");
+    let low = ok(&db, &["set-priority", "1", "low"]);
+    assert_eq!(low["priority"], "low");
+    assert_eq!(low["status"], "in_progress");
+    let high = ok_as("inbox", &db, &["set-priority", "1", "high"]);
+    assert_eq!(high["priority"], "high");
+    let inherited = ok_as("inbox", &db, &["set-priority", "1", "--inherit"]);
+    assert_eq!(inherited["priority"], "normal");
+    assert_eq!(inherited["priority_source"], "default");
+    let changes: Vec<_> = ok(&db, &["show", "1", "--full"])["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "task_priority_changed")
+        .map(|e| (e["actor"]["role"].clone(), e["payload"]["to"].clone()))
+        .collect();
+    assert_eq!(
+        changes,
+        [
+            (json!("user"), json!("low")),
+            (json!("inbox"), json!("high")),
+            (json!("inbox"), json!("normal")),
+        ]
+    );
+    let error = denied_as(&planner("planner:1"), &db, &["set-priority", "1", "low"]);
+    assert_eq!(error["denied"]["reason"], "not on this resource", "{error}");
+    assert_eq!(ok(&db, &["show", "1"])["task"]["priority"], "normal");
+    let recorded = denials(&db);
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(
+        recorded[0]["payload"]["resource"],
+        json!({"kind": "task", "id": 1, "status": "in_progress"})
+    );
+    set_status(&db, 1, "completed");
+    assert_eq!(
+        refused(&db, &["set-priority", "1", "low"]),
+        "task 1 is completed; the priority can only be changed for draft, submitted, ready or in_progress tasks"
+    );
 }
 
 #[test]

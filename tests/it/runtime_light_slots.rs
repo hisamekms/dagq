@@ -199,8 +199,9 @@ fn task_events(db: &Path, task: TaskId) -> Vec<(i64, String)> {
 
 /// A parked `needs_session` run waits for a normal slot: while the landing
 /// queue fills `parallel`, it is not resumed and only the light task is
-/// claimed; once the slots free, it is resumed ahead of any new claim,
-/// the interrupt one included.
+/// claimed; once the slots free, it is resumed ahead of a new claim of the
+/// same effective priority (ADR-t1850-1): its task, set to interrupt while
+/// in progress, goes before the interrupt one.
 #[test]
 fn a_parked_run_waits_for_a_normal_slot_while_the_landing_queue_fills_it() {
     let (_dir, repo, db) = fixture();
@@ -285,7 +286,11 @@ fn a_parked_run_waits_for_a_normal_slot_while_the_landing_queue_fills_it() {
     assert_eq!(queue.show(heavy).unwrap().task.status(), TaskStatus::Ready);
 
     // The other landing gives its slot back: `first` and the light run
-    // land, and the freed slot resumes the parked run before any claim.
+    // land, and the freed slot resumes the parked run, raised to the heavy
+    // task's priority, before the claim.
+    queue
+        .set_priority(TaskId::new(2), Some(Priority::Interrupt))
+        .unwrap();
     queue
         .abort_integration(
             blocker.id(),

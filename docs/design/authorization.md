@@ -4,8 +4,8 @@ type: design
 title: Authorization
 status: current
 created: 2026-09-27
-updated: 2026-10-05 # task 1564: ask --request is the request's own planner's; task 1540: revisit is task.write; task 838: required turns add the built-in file tools to deny and permissions.allow; task 1509; task 1437; task 1609
-last_verified: 2026-10-05 # task 1564; task 1540; task 838; task 1509; task 1437; task 1609
+updated: 2026-10-06 # task 1851: set-priority on in_progress tasks is the user's and the inbox's; task 1564: ask --request is the request's own planner's; task 1540: revisit is task.write; task 838: required turns add the built-in file tools to deny and permissions.allow; task 1509; task 1437; task 1609
+last_verified: 2026-10-06 # task 1851; task 1564; task 1540; task 838; task 1509; task 1437; task 1609
 scope: runtime
 related:
   - adr-t1394-1
@@ -111,7 +111,8 @@ askのkindはroleごとに決まる（`opens_ask`）: userとinboxとsupervisor�
 | コマンド | capability | resource |
 | --- | --- | --- |
 | `add` | `task.write` | `--goal`のgoal、無ければqueue |
-| `edit` `set-goal` `set-paths` `set-priority` `draft` `dependency add/remove` | `task.write` | task（queueにある状態） |
+| `edit` `set-goal` `set-paths` `draft` `dependency add/remove` | `task.write` | task（queueにある状態） |
+| `set-priority` | `task.write` | task（queueにある状態）。`in_progress`のtask（再開待ちか復旧を待つrunを持つもの）にも置け・外せ、次の再開と復旧jobの順に効く（[ADR-t1850-1](../adr/2026-10-06-t1850-1-resumes-recovery-jobs-and-claims-share-one-line-by-effective-priority.md)の決定7）。plannerは今の規則（in_progress以降のtaskの`task.write`は`not on this resource`）で拒まれ、user・inboxだけが通る。新しいcapabilityは作らない。`completed` / `canceled`は全てのroleでdomainが拒む |
 | `revisit ID --at` / `revisit ID --clear` | `task.write` | task（queueにある状態）。draftの再検討の時刻を付け・変え・外す（[ADR-t1540-1](../adr/2026-10-05-t1540-1-a-kept-draft-returns-to-runtime-planners-at-its-revisit-time.md)）。開始前のtaskの変更と同じroleの集合（user・inbox・planner。worker・observer・job・supervisorは`not granted`）なので、新しいcapabilityを作らず`task.write`に含めた。storeは同じtransactionでtaskが`draft`であることを確かめ（認可に使った状態は渡さない。draft以外は全てのroleに拒む）、`user` / `inbox`以外が`draft_planner_exhausted`のあるdraftに付けるのを拒む |
 | `judge-follow-up` | `follow_up.judge` | task（状態による制限なし。follow_upの出どころと必須の欄・遷移をstoreが同一transactionで検査） |
 | `edit --verify` / `edit --no-verify`（`in_progress`のみ） | `task.verify_edit` | task（最新runが終了し、生きているrunが無いことをstoreが同一transactionで検査） |
@@ -125,7 +126,7 @@ askのkindはroleごとに決まる（`opens_ask`）: userとinboxとsupervisor�
 
 `judge-follow-up`は`follow_up.judge`をtask resourceで判定し、user・inbox・plannerだけに許す。taskの状態による制限は無く、submitted以降の訂正も記録できる（所属を動かすのはdraft/readyだけ。[所属の判断](follow-up-membership.md)）。
 
-policyは上の表のまま: plannerは今の権限（draft・submitted・readyのtaskの変更と`cancel`、goalの追加・編集・close、自分のproposalの取り下げ）を持ち、`ready`（`--bypass-review`を含む）・`goal ready`・`goal review`とin_progress以降のtaskの変更（follow_upの所属判断の記録を除く）は持たない。`ready`はuserとinbox（人の言葉での代行。区別はeventのactorが持つ）。worker・4つのjob・observer・wrapper・integratorは計画系を何もできない。supervisorはCLIからは`ready`・`cancel`・`goal close`だけ。capabilityをどのresourceにも持たないroleは、storeを読む前に拒む（taskやproposalが無くても拒否になり、記録のresourceは状態と持ち主が`null`）。capabilityを持つroleで、taskやproposalが見つからないときは拒否ではなく、そのerror（`task N does not exist`など）になる。
+policyは上の表のまま: plannerは今の権限（draft・submitted・readyのtaskの変更と`cancel`、goalの追加・編集・close、自分のproposalの取り下げ）を持ち、`ready`（`--bypass-review`を含む）・`goal ready`・`goal review`とin_progress以降のtaskの変更（follow_upの所属判断の記録を除く。`in_progress`のtaskの`set-priority`もuserとinboxだけ）は持たない。`ready`はuserとinbox（人の言葉での代行。区別はeventのactorが持つ）。worker・4つのjob・observer・wrapper・integratorは計画系を何もできない。supervisorはCLIからは`ready`・`cancel`・`goal close`だけ。capabilityをどのresourceにも持たないroleは、storeを読む前に拒む（taskやproposalが無くても拒否になり、記録のresourceは状態と持ち主が`null`）。capabilityを持つroleで、taskやproposalが見つからないときは拒否ではなく、そのerror（`task N does not exist`など）になる。
 
 拒んだときは、queueのevent `authorization_denied`（taskにもgoalにも紐づかないqueueのevent。actorの列は拒まれた呼び出し元）を記録し、`AuthorizationError`を返す。payloadは`role`・`capability`・`reason`（`not granted`・`reserved`・`not on this resource`）・`resource`（`kind`と`id`、taskなら`status`、proposalなら`owner`、依頼なら`planner`。開くask（`new_ask`）はidの代わりに`ask_kind`・`run`・`task`を持ち、`--request`付きなら`request`と依頼の`planner`も持つ）。記録に失敗しても拒否は拒否のまま返す。observerのこのeventは、observerの次の起動を決める「自分以外のevent」に数えない。
 

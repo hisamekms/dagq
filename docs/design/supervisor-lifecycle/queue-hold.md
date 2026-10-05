@@ -4,8 +4,8 @@ type: design
 title: "認証と利用上限のaskの待ちとanswer"
 status: current
 created: 2026-09-27
-updated: 2026-10-05 # task 1223: the observer on Codex; task 1711: the headless planner's hold is a unit test with one test kept on the boundary; task 1437
-last_verified: 2026-10-05 # task 1223; task 1711; task 1437
+updated: 2026-10-06 # task 1850: resumes, recovery jobs and claims share one line by effective priority; task 1223: the observer on Codex; task 1711: the headless planner's hold is a unit test with one test kept on the boundary; task 1437
+last_verified: 2026-10-06 # task 1850; task 1223; task 1711; task 1437
 scope: runtime
 related:
   - adr-0047
@@ -58,7 +58,7 @@ supervisorは毎pass（drainの途中も）、ディスクの確認（`check_dis
 
 - **claim**: `ClaimHold::judge`は`HoldInputs.queue_hold`（どのworkerにも経路が無いときだけ渡す。上の「providerごとの控え」）をディスクとloadより先に判定し、`claim_held`（`reason`が`authentication` / `usage_limit`、`value`がaskの`affected`の数、`threshold`が0、`ask_id`、`message`）を記録してclaimしない。askが閉じるか回答されると次のpassで`claim_resumed`になる（記録の規則と`status`の`claim_hold`・`stats`の`claim_holds.by_reason`は[claimを控える](claim-hold.md)と同じ）
 - **review**: 受理されたrunのreviewは`Phase::ReviewHeld`で待ち、sessionは開いたまま、`review_started`を書かない（`start_review` / `retry_review`が入口で`review_route`に聞く。`provider`を書いたreviewが待つのは、そのproviderと切り替え先の両方が使えないときだけ）。控えが解けたpassで`start_review`が始める。引き継ぎとadoptは`awaiting_integration`のreviewの無いrunを`start_review`で組み立て直すので、同じく待つ
-- **復旧job**: 終わったrunのtriage（`triage_runs`）を始めない。生きているsessionのalertの復旧job（`RecoveryWatch::start`）も始めず、alertは控えが解けた後のpassでまた拾う（長く走るbackgroundのalertは、`seen`を進める前に判定するので失われない）
+- **復旧job**: 終わったrunのtriage（`triage_candidates`が候補を出さない）を始めない。生きているsessionのalertの復旧job（`RecoveryWatch::start`）も始めず、alertは控えが解けた後のpassでまた拾う（長く走るbackgroundのalertは、`seen`を進める前に判定するので失われない）
 - **plan review・goal review・observer**: 起動しない（`plan_review_pass`に`starting: false`。goal reviewは`goal_review_pass`に控えによらず`starting`を渡し、`Supervisor::goal_review_route`が`provider`を書かない役割を控えの間は起動しない。observerはqueue serviceが居れば控えによらず`start_observer_when_due`を呼び、行き先の`Supervisor::job_start_route`が`provider`を書かない役割を控えの間は起動しない。task 1223）。走っているjobは最後まで追う。`[roles.goal_review]`・`[roles.observer]`に`provider`を書いたgoal review・observerは、上の「providerを書いた役割のjob」のとおり控えの間も使えるproviderで起動する（`provider = "codex"`のobserverはClaudeの控えの間もCodexで起動する）
 - 走っているrunはleaseとsessionを持ったまま進む。着地（`integrate`）はClaudeを使わないので控えない
 
@@ -87,7 +87,7 @@ runのeventかleaseが読めなかったpassは閉じず、次のpassで読み�
 
 閉じたsupervisorだけが（`close_ask`に負けたsupervisorは何もしない）、`done`なら失敗したjobを起動し直し、queueに`queue_hold_applied`（`ask_id`、`answer`、`reason_category`、`subject`、`continued`、`released`、`moved_on`、`elsewhere`、`unwatched`（runのIDの配列。どのrunもこの5つのどれか1つにだけ載る）、`runs`（runごとの`{run_id, outcome, supervisor}`。`supervisor`は適用したsupervisorか、`elsewhere` / `unwatched`ではleaseのtoken、leaseが無ければnull）、`restarted`、`jobs`（askの`affected`のjobの項目）、`supervisor`（閉じたsupervisor））を書く。`done`で起動し直すのは、askが開いた時刻の600秒前（`FAILED_BEFORE_ASK_SECS`。askはsessionかjobがエラーを見せてから開くので、その直前に記録された失敗を含める）以後に失敗したjob:
 
-- 終わったrunの復旧job（`triage_failed`）: runが`failed` / `interrupted`でleaseが無く、triageの状態が`Failed`でその失敗が最新なら、runに`job_restarted`（`job: triage`、`ask_id`、失敗の`event_id`）を書く。`triage_state`は`job_restarted`（`job: triage`）を`Pending`に戻すので、次のpassの`triage_runs`が拾う（試行回数は数え続け、上限を超えれば従来どおりaskになる）
+- 終わったrunの復旧job（`triage_failed`）: runが`failed` / `interrupted`でleaseが無く、triageの状態が`Failed`でその失敗が最新なら、runに`job_restarted`（`job: triage`、`ask_id`、失敗の`event_id`）を書く。`triage_state`は`job_restarted`（`job: triage`）を`Pending`に戻すので、次のpassの`triage_candidates`が拾う（試行回数は数え続け、上限を超えれば従来どおりaskになる）
 - plan review（`plan_review_failed`）: proposalがまだ失敗で止まっていれば、`submit --proposal ID`と同じく出し直す（`proposal_resubmitted`）
 - goal review（`goal_review_failed`）: goalがまだ失敗で止まっていれば、`goal review ID`と同じくrearmする（`goal_review_rearmed`）
 - 起動し直さないもの: 壁で止まったreviewは`ReviewHeld`で待っているので、控えが解けたpassで自分でやり直す。それ以外のrunのreviewの失敗は失敗のときに`approve_landing`のaskを開いている（task 328）ので人の答えに任せる。生きているsessionの復旧jobの失敗はそのalertのask（ADR-t609-1）になり人の答えに任せ、askはsessionが進めば閉じる（壁で止まったものはaskにせず、控えが解けた後のpassで次のjobが始まる）。observerは次の間隔で動く

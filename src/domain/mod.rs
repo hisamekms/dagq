@@ -928,6 +928,7 @@ pub mod scope;
 pub mod search;
 pub mod sessions;
 pub mod slot_limits;
+pub mod slot_order;
 pub mod source_repository;
 pub mod stall;
 pub mod stats;

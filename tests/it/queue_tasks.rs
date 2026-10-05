@@ -433,8 +433,8 @@ fn clearing_an_own_priority_records_the_change_of_its_source() {
     );
 }
 
-/// `add` stores the priority and `set_priority` changes it on a draft or
-/// ready task only, recording `task_priority_changed` when it changes; the
+/// `add` stores the priority and `set_priority` changes it on a draft,
+/// ready or in-progress task only, recording `task_priority_changed` when it changes; the
 /// column refuses anything outside 0..=4 (ADR-0040 decision 4).
 #[test]
 fn priority_is_stored_changed_while_editable_and_checked_on_read() {
@@ -471,13 +471,25 @@ fn priority_is_stored_changed_while_editable_and_checked_on_read() {
             "to_source": "task"})
         ]
     );
+    // In progress, it orders the next resume and recovery job of its run
+    // (ADR-t1850-1 decision 7); a finished task keeps it.
     queue.claim(&base()).unwrap();
+    let interrupt = queue
+        .set_priority(task.id(), Some(Priority::Interrupt))
+        .unwrap();
+    assert_eq!(interrupt.priority(), Priority::Interrupt);
+    assert_eq!(interrupt.status(), TaskStatus::InProgress);
+    queue.set_priority(task.id(), Some(Priority::Low)).unwrap();
+    Connection::open(dir.path().join("queue.db"))
+        .unwrap()
+        .execute("UPDATE tasks SET status='completed' WHERE id=1", [])
+        .unwrap();
     assert_eq!(
         queue
             .set_priority(task.id(), Some(Priority::Interrupt))
             .unwrap_err()
             .to_string(),
-        "the priority can only be changed for draft, submitted or ready tasks"
+        "task 1 is completed; the priority can only be changed for draft, submitted, ready or in_progress tasks"
     );
     assert!(
         queue

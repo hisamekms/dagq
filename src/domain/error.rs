@@ -45,6 +45,12 @@ pub enum DomainError {
     TaskNotEditable {
         what: &'static str,
     },
+    /// `set-priority` of a completed or canceled task: the priority also
+    /// changes while the task is in progress (ADR-t1850-1 decision 7).
+    TaskPriorityNotEditable {
+        task_id: TaskId,
+        status: TaskStatus,
+    },
     /// `dagq edit` of a task whose status keeps its content (ADR-0041
     /// decision 9): only a draft or a submitted task is edited.
     TaskContentNotEditable {
@@ -395,6 +401,11 @@ impl fmt::Display for DomainError {
                     "{what} can only be changed for draft, submitted or ready tasks"
                 )
             }
+            Self::TaskPriorityNotEditable { task_id, status } => write!(
+                f,
+                "task {task_id} is {}; the priority can only be changed for draft, submitted, ready or in_progress tasks",
+                status.as_str()
+            ),
             Self::TaskContentNotEditable { task_id, status } => write!(
                 f,
                 "task {task_id} is {}; only a draft or submitted task can be edited freely; an in_progress task permits only user or inbox --verify/--no-verify after its latest run ended and no live run remains",

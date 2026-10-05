@@ -26,9 +26,11 @@
 
 use crate::domain::EventKind;
 use crate::domain::LeaseToken;
+use crate::domain::Priority;
 use crate::domain::language::with_instruction;
 use crate::domain::light_slots::{self, ClaimRoom};
 use crate::domain::slot_limits::{SlotFlags, SlotLimits, SupervisorConfig};
+use crate::domain::slot_order::{SlotCandidate, SlotKind, slot_order};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -171,6 +173,31 @@ use self::{
     deliver::*, exit::*, headless::*, idle::*, jobs::*, provider::*, recovery::*, resume::*,
     revise::*, session::*, stale::*, stall::*, sweep::*, waiting::*,
 };
+
+/// What a candidate in the line of a fill pass starts (ADR-t1850-1).
+enum LineItem {
+    Resume(Box<ResumeCandidate>),
+    Recovery(Box<TaskRun>),
+    /// The claim loop of the candidate's priority (it reads its own order).
+    Claim,
+}
+
+/// What the claims of one fill pass carry from one priority to the next.
+struct ClaimPass {
+    /// Since when a claim waits for the claim spacing (ADR-t1479-1).
+    spaced_since: Option<i64>,
+    host: Option<HostVersions>,
+    trial: WorkerTrial,
+}
+
+/// How a claim loop of a fill pass ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaimStep {
+    /// The candidates of its priority ran out; a lower one may claim.
+    Next,
+    /// No further claim may start in this pass.
+    Stop,
+}
 
 /// How often the supervisor records the finished transcript turns of the
 /// session spans still open (ADR-0048 decision 8).
@@ -1759,15 +1786,47 @@ impl Supervisor<'_> {
         // claims until it resolves (ADR-t615-1). A resumed session gets
         // `[run.env]` like a claimed run, so it waits with the claims for a
         // missing program too (task 303).
-        if self.used_slots() < parallel
+        let resumes = if self.used_slots() < parallel
             && !self.landing_unresolved
             && !self.run_env_missing
             && !broker_held
         {
-            self.resume_parked_runs(parallel)?;
+            self.resume_candidates()?
+        } else {
+            Vec::new()
+        };
+        let recoveries = if self.used_slots() < parallel && !self.landing_unresolved {
+            self.triage_candidates()?
+        } else {
+            Vec::new()
+        };
+        // The resumes, the recovery jobs and the claims stand in one line
+        // by the effective priority of their task (ADR-t1850-1); a held
+        // kind only leaves the line, and holds no slot for itself. Read
+        // after the candidates: a run out of resumes may have made its task
+        // ready again for a claim in this pass.
+        let graph = dependency_graph(self.queue.graph_input()?, None);
+        let effective: HashMap<TaskId, Priority> = graph
+            .tasks
+            .iter()
+            .map(|node| (node.id, node.effective_priority))
+            .collect();
+        let mut line = Vec::new();
+        for candidate in resumes {
+            let priority = self.line_priority(&effective, candidate.run.task_id())?;
+            line.push(SlotCandidate {
+                kind: SlotKind::Resume,
+                priority,
+                item: LineItem::Resume(Box::new(candidate)),
+            });
         }
-        if self.used_slots() < parallel && !self.landing_unresolved {
-            self.triage_runs(parallel)?;
+        for run in recoveries {
+            let priority = self.line_priority(&effective, run.task_id())?;
+            line.push(SlotCandidate {
+                kind: SlotKind::Recovery,
+                priority,
+                item: LineItem::Recovery(Box::new(run)),
+            });
         }
         // Takes no slot: only closes and frees what ended runs left.
         if let Err(error) = self.sweep_ended_runs(sweep_interval) {
@@ -1776,49 +1835,122 @@ impl Supervisor<'_> {
         // A wait for the claim spacing goes on only from one claim pass to
         // the next that reaches the spacing again (ADR-t1479-1): a hold or
         // a pass with no free slot or candidate ends it.
-        let mut spaced_since = self.spaced_since.take();
+        let spaced_since = self.spaced_since.take();
         // A run claimed now would fail every cargo command (ADR-0049
         // decision 9; checked at the top of the pass); the runs in flight
-        // and their reviews go on (resumes wait above).
-        if self.run_env_missing || self.landing_unresolved || broker_held {
-            return Ok(());
-        }
-        // A queue service that is down holds the new claims; the runs in
-        // flight go on (ADR-t1233-4 decision 2).
-        if !self.service_up {
-            return Ok(());
-        }
-        // The runs in flight go on; only new claims wait (task 327).
-        if self.hold_claims()? {
-            // Neither provider can take a worker: the candidates are
-            // deferred for it too (ADR-t813-2 decision 6).
-            if self.routes().is_empty() {
-                let graph = dependency_graph(self.queue.graph_input()?, None);
-                self.claimable(&graph)?;
+        // and their reviews go on (resumes wait above). A queue service
+        // that is down holds the new claims; the runs in flight go on
+        // (ADR-t1233-4 decision 2).
+        let mut claims = None;
+        if !(self.run_env_missing || self.landing_unresolved || broker_held) && self.service_up {
+            // The runs in flight go on; only new claims wait (task 327).
+            if self.hold_claims()? {
+                // Neither provider can take a worker: the candidates are
+                // deferred for it too (ADR-t813-2 decision 6).
+                if self.routes().is_empty() {
+                    self.claimable(&graph)?;
+                }
+            } else {
+                // Read once per pass, so turning the trial on or off takes
+                // effect without a restart; a file that cannot be read
+                // claims outside it (provisioning reports the file's error).
+                let trial = self.verifier.worker_trial().unwrap_or_else(|error| {
+                    warn!(error = %format_args!("{error:#}"), "[worker.trial] could not be read; claiming without the trial: {error:#}");
+                    WorkerTrial::default()
+                });
+                claims = Some(ClaimPass {
+                    spaced_since,
+                    host: None,
+                    trial,
+                });
+                // Only while there is room for a claim, as the claim loop
+                // reads the candidates only then.
+                if self.claim_room(parallel) != ClaimRoom::None {
+                    for id in self.claimable(&graph)? {
+                        let priority = self.line_priority(&effective, id)?;
+                        line.push(SlotCandidate {
+                            kind: SlotKind::Claim,
+                            priority,
+                            item: LineItem::Claim,
+                        });
+                    }
+                }
             }
-            return Ok(());
         }
-        let mut host: Option<HostVersions> = None;
-        // Read once per pass, so turning the trial on or off takes effect
-        // without a restart; a file that cannot be read claims outside it
-        // (provisioning reports the file's error).
-        let trial = self.verifier.worker_trial().unwrap_or_else(|error| {
-            warn!(error = %format_args!("{error:#}"), "[worker.trial] could not be read; claiming without the trial: {error:#}");
-            WorkerTrial::default()
-        });
+        // The claims of one priority run together: the claim loop takes
+        // every candidate of that priority or higher, in its own order.
+        let mut claimed_down_to: Option<Priority> = None;
+        for candidate in slot_order(line) {
+            match candidate.item {
+                // A resume and a recovery job use the normal room only.
+                LineItem::Resume(resume) => {
+                    if self.used_slots() < parallel {
+                        self.resume_run(*resume)?;
+                    }
+                }
+                LineItem::Recovery(run) => {
+                    if self.used_slots() < parallel {
+                        self.triage_run(*run)?;
+                    }
+                }
+                LineItem::Claim => {
+                    let Some(pass) = claims.as_mut() else {
+                        continue;
+                    };
+                    if claimed_down_to.is_some_and(|floor| floor <= candidate.priority) {
+                        continue;
+                    }
+                    claimed_down_to = Some(candidate.priority);
+                    if self.claim_tasks(parallel, candidate.priority, pass)? == ClaimStep::Stop {
+                        claims = None;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    /// The room for the next claim (ADR-t1591-1).
+    fn claim_room(&self, parallel: usize) -> ClaimRoom {
+        light_slots::claim_room(
+            self.used_slots(),
+            self.landing_queue(),
+            parallel,
+            self.returning_runs(),
+            !self.light_changes.is_empty(),
+        )
+    }
+    /// The effective priority of `task_id` in the line of the fill pass
+    /// (ADR-t1850-1): the graph's, else (a task the graph read before it
+    /// does not hold) its own.
+    fn line_priority(
+        &mut self,
+        effective: &HashMap<TaskId, Priority>,
+        task_id: TaskId,
+    ) -> Result<Priority> {
+        match effective.get(&task_id) {
+            Some(priority) => Ok(*priority),
+            None => Ok(self.queue.show(task_id)?.task.priority()),
+        }
+    }
+    /// Claim the ready tasks of effective priority `floor` or higher while
+    /// there is room, in the claim order (ADR-0040 decision 4).
+    /// [`ClaimStep::Stop`] when no further claim may start in this pass
+    /// (no room, the claim spacing, the landing branch, a worker that could
+    /// not be provisioned), [`ClaimStep::Next`] when only the candidates of
+    /// this priority ran out.
+    fn claim_tasks(
+        &mut self,
+        parallel: usize,
+        floor: Priority,
+        pass: &mut ClaimPass,
+    ) -> Result<ClaimStep> {
         loop {
             // A heavy task needs a slot with the landing queue in it, as
             // always; the room the landing queue leaves takes only a light
             // task (ADR-t1591-1).
-            let room = light_slots::claim_room(
-                self.used_slots(),
-                self.landing_queue(),
-                parallel,
-                self.returning_runs(),
-                !self.light_changes.is_empty(),
-            );
+            let room = self.claim_room(parallel);
             if room == ClaimRoom::None {
-                break;
+                return Ok(ClaimStep::Stop);
             }
             // Highest effective priority, then most-releasing, then lowest
             // ID (ADR-0040 decision 4); `candidates` and `graph` show the
@@ -1826,6 +1958,14 @@ impl Supervisor<'_> {
             // Less the candidates deferred on a conflict hotspot (ADR-0069).
             let graph = dependency_graph(self.queue.graph_input()?, None);
             let mut order = self.claimable(&graph)?;
+            // The candidates of a lower priority wait for the resumes and
+            // recovery jobs before them in the line (ADR-t1850-1).
+            let effective: HashMap<TaskId, Priority> = graph
+                .tasks
+                .iter()
+                .map(|node| (node.id, node.effective_priority))
+                .collect();
+            order.retain(|id| effective.get(id).is_some_and(|priority| *priority >= floor));
             // In the light room, only the light tasks, in the same order,
             // whatever the priority of the others.
             if room == ClaimRoom::LightOnly {
@@ -1839,7 +1979,7 @@ impl Supervisor<'_> {
                 order.retain(|id| light.contains(id));
             }
             if order.is_empty() {
-                break;
+                return Ok(ClaimStep::Next);
             }
             // While the load hold is on, a claim waits for the spacing
             // after the queue's latest claim, a light one too, and the next
@@ -1853,20 +1993,21 @@ impl Supervisor<'_> {
                     .latest_event_of(crate::domain::event_kind::RUN_CLAIMED)?
                     .and_then(|event| crate::domain::stats::timestamp_millis(&event.created_at));
                 if light_slots::gated(room, false, spacing, last, now_ms) == ClaimRoom::None {
-                    if spaced_since.is_none() {
+                    if pass.spaced_since.is_none() {
                         info!(
                             event = "claim_spaced",
                             "the next claim waits for the claim spacing of {}s after the latest claim",
                             self.limits.claim_spacing.value
                         );
                     }
-                    self.spaced_since = Some(spaced_since.unwrap_or(now_ms));
-                    break;
+                    self.spaced_since = Some(pass.spaced_since.unwrap_or(now_ms));
+                    return Ok(ClaimStep::Stop);
                 }
             }
             let spacing = spacing.map(|secs| ClaimSpacing {
                 claim_spacing: secs,
-                claim_spacing_wait_secs: spaced_since
+                claim_spacing_wait_secs: pass
+                    .spaced_since
                     .take()
                     .map_or(0, |since| claim_spacing::waited_secs(since, now_ms)),
             });
@@ -1882,13 +2023,13 @@ impl Supervisor<'_> {
                             event = "claim_landing_branch_unresolved",
                             "claim held after the landing branch stopped resolving during the pass"
                         );
-                        break;
+                        return Ok(ClaimStep::Stop);
                     }
                     return Err(error);
                 }
             };
             // Read once per pass: `rustc -vV` takes a moment on a loaded host.
-            let host = host.get_or_insert_with(|| {
+            let host = pass.host.get_or_insert_with(|| {
                 // Codex's version only when this supervisor runs Codex.
                 let codex = self
                     .workers
@@ -1912,11 +2053,11 @@ impl Supervisor<'_> {
                 &self.token,
                 &order,
                 Some(&serde_json::to_value(&attributes)?),
-                &trial,
+                &pass.trial,
                 &self.routes(),
             )? {
                 ClaimOutcome::Claimed { run } => *run,
-                ClaimOutcome::NoReadyTask => break,
+                ClaimOutcome::NoReadyTask => return Ok(ClaimStep::Next),
             };
             self.defer.claimed();
             // The work interval starts at the claim, with its sample.
@@ -1935,7 +2076,7 @@ impl Supervisor<'_> {
                     let message = format!("run {} was not started: {error:#}", run.id());
                     warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "{message}");
                     self.abandon(&run, message, &reason_of_error(&error, ReasonCode::Other));
-                    break;
+                    return Ok(ClaimStep::Stop);
                 }
                 Err(error) => {
                     let message = format!("run {} provisioning failed: {error:#}", run.id());
@@ -1947,11 +2088,10 @@ impl Supervisor<'_> {
                     );
                     self.claiming = false;
                     self.provisioning_error = Some(message);
-                    break;
+                    return Ok(ClaimStep::Stop);
                 }
             }
         }
-        Ok(())
     }
     /// Record `candidates_sampled` (ADR-0051 decision 3) when this pass's
     /// claimable ready tasks (`graph`'s `candidates`), free slots or ready

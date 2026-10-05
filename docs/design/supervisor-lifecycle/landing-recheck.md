@@ -4,8 +4,8 @@ type: design
 title: "Landing recheck"
 status: current
 created: 2026-09-26
-updated: 2026-10-05 # task 1312; task 1311
-last_verified: 2026-10-05 # task 1312; task 1311
+updated: 2026-10-06 # task 1850: resumes, recovery jobs and claims share one line by effective priority; task 1312; task 1311
+last_verified: 2026-10-06 # task 1850; task 1312; task 1311
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -47,7 +47,7 @@ recheckのthreadが対象を1件ずつ確かめる（`recheck_runs`）。
 
 記録はloopのthreadで行う（`apply_recheck`）。runのheadかstatusがrecheckの後に変わっていれば何もしない。
 
-- **leaseの無いrun**: `park_rechecked`が1 transactionでrunを`awaiting_integration` → `needs_session`にし（`last_error`は`reason`）、`landing_recheck_failed`（`code`、`main`、`head`、`landed_run_id`、`landed_task_id`、`conflicts`か`command`・`exit_code`・`log_path`・`output_tail`、`reason`、`action: resumed`、`status: needs_session`）を記録する。次のpassの`resume_parked_runs`（[`needs_session`](needs-session.md)）が、空いたslotからふつうのresumeとして拾う。依頼文は`ResumeKind::Recheck`（「waiting to land … the supervisor's landing recheck found that it no longer lands」）で、手順は着地の延期と同じrebaseと、commandの失敗ならrebase後にそのcommandを手元で流して直すこと。
+- **leaseの無いrun**: `park_rechecked`が1 transactionでrunを`awaiting_integration` → `needs_session`にし（`last_error`は`reason`）、`landing_recheck_failed`（`code`、`main`、`head`、`landed_run_id`、`landed_task_id`、`conflicts`か`command`・`exit_code`・`log_path`・`output_tail`、`reason`、`action: resumed`、`status: needs_session`）を記録する。次のpassの`resume_candidates`（[`needs_session`](needs-session.md)）が、ふつうのresumeとして拾い、効く優先度の順で空いたslotを受ける。依頼文は`ResumeKind::Recheck`（「waiting to land … the supervisor's landing recheck found that it no longer lands」）で、手順は着地の延期と同じrebaseと、commandの失敗ならrebase後にそのcommandを手元で流して直すこと。
 - **このsupervisorがslotに持つrun**: `landing_recheck_failed`を`action: held`（`reason`付き）で記録するだけにする。そのrunが`AwaitingSlot`で着地slotを取る直前に`park_held_by_recheck`が、最新の`landing_recheck_failed`が`held`で`main`と`head`が今のmainと`result_commit`に一致するかを見て、一致すれば`park_rechecked`（このsupervisorのtoken）でleaseを手放して`needs_session`にし、同じ内容を`action: resumed`、`repeat: true`でもう1度記録する（`lease_released`の`reason`は`landing_recheck_failed`）。mainがさらに動いていれば着地を試みる。
 - **きれいなrun**（ADR-t1311-1）: merge-treeが衝突せず、`[recheck] command`があればそれも通ったrunのうち、leaseが無いかこのsupervisorがslotに持つものに`landing_recheck_clean`（`main`、`head`、`command`（merge-treeだけならnull）、`landed_run_id`、`landed_task_id`（着地のrunの無いmainの動きならnull））を記録する（`record_recheck_clean`、payloadは`recheck::clean_payload`）。statusは変えない。
 - **askの段落**: 失敗でもきれいでも、runの閉じていないask（答えの有無を問わない）のquestionのrecheckの段落を最新の結果1つに置き換え、`ask_updated`（`ask_id`、`kind`、`why`）を記録する（`AskStore::note_on_asks`、置き換えは`recheck::noted_question`）。recheckの段落は`Landing recheck: `で始まる段落（空行で区切ったもの）で、置くときは前のものを全部除いてからquestionの末尾に置く（ADR-t1311-1以前のバイナリが積み重ねた段落も除く）。置き換えた結果が前のquestionと同じなら書き直さず、`ask_updated`も記録しない。askは閉じない。

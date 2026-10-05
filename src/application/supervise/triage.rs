@@ -401,28 +401,20 @@ impl Supervisor<'_> {
         }
         Ok(())
     }
-    /// Start the recovery job of `failed` / `interrupted` runs no round
-    /// took since their last resume, or whose round's `wait` is over,
-    /// while slots are free (ADR-0047 decision 39). The alert is that of
-    /// the run's latest `recovery_requested` since its last resume
-    /// (`resume_exhausted`, or the alert a `wait` or a stopped round left),
-    /// else its status; a round records its own request unless one is
-    /// pending. A run someone leases (a
-    /// session still asked to exit) waits. An alert that got its
-    /// [`MAX_RECOVERY_ATTEMPTS`] jobs is escalated without one (but for
-    /// a person's verify fix after an edit, [`verify_fix_round`]), and a job
-    /// that cannot even start fails its round right away.
-    pub(super) fn triage_runs(&mut self, parallel: usize) -> Result<()> {
+    /// The `failed` / `interrupted` runs whose recovery job is due: no
+    /// round took them since their last resume, or their round's `wait` is
+    /// over (ADR-0047 decision 39), in the order the queue lists them. A
+    /// run someone leases (a session still asked to exit) waits, and none
+    /// is due while a login or usage limit holds the queue.
+    pub(super) fn triage_candidates(&mut self) -> Result<Vec<TaskRun>> {
         // A login or usage limit that holds the queue starts no recovery
         // job (task 437): each would stop at it.
         if self.queue_hold.is_some() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let now = self.generators.clock.now();
+        let mut due_runs = Vec::new();
         for run in self.queue.runs_to_triage()? {
-            if self.used_slots() >= parallel {
-                break;
-            }
             let events = self.queue.run_events(run.id())?;
             let due = match triage_state(&events) {
                 TriageState::Pending => true,
@@ -438,90 +430,103 @@ impl Supervisor<'_> {
             {
                 continue;
             }
-            let pending = pending_request(&events);
-            let alert =
-                current_alert(&events).unwrap_or_else(|| RecoveryAlert::of_ended(run.status()));
-            let done = attempts(&events, alert);
-            // A person's verify-fix answer after the task's verification
-            // was edited gets its round past the limit (ADR-t883-1).
-            let granted = pending.is_none()
-                && done >= MAX_RECOVERY_ATTEMPTS
-                && verify_fix_round(&events, &self.queue.show(run.task_id())?.events);
-            let (used_up, attempt) = recovery_round(pending.is_some(), done, granted);
-            let request = match pending {
-                Some(_) => None,
-                None if used_up => None,
-                None => {
-                    let evidence: Vec<EventId> = events
-                        .iter()
-                        .rev()
-                        .find(|e| e.payload["status"] == run.status().as_str())
-                        .map(|e| e.id)
-                        .into_iter()
-                        .collect();
-                    let mut request = json!({
-                        "alert": alert,
-                        "attempt": done + 1,
-                        "status": run.status().as_str(),
-                        "evidence": evidence,
-                        "last_error": run.last_error(),
-                    });
-                    // A person chose one of the last job's own options.
-                    if let Some(decided) = events
-                        .iter()
-                        .rev()
-                        .take_while(|e| e.kind != event_kind::TRIAGE_STARTED)
-                        .find(|e| {
-                            e.kind == event_kind::TRIAGE_DECIDED
-                                && e.payload["action"] == crate::domain::RECOVER_AGAIN
-                        })
-                    {
-                        request["person_answer"] = json!({
-                            "ask_id": decided.payload["ask_id"],
-                            "answer": decided.payload["answer"],
-                        });
-                    }
-                    Some(request)
-                }
-            };
-            // Not while the cleanup job is to clear the run's worktree (task
-            // 405).
-            let cleaning = self.cleanup.cleaning();
-            let mut guard = cleanup::lock_cleaning(&cleaning);
-            if !guard.may_lease(run.id()) {
-                self.cleanup.deferred = true;
-                continue;
-            }
-            let launch = self.actor_launch(ModelRole::Recovery);
-            let begun = self
-                .queue
-                .begin_triage(run.id(), &self.token, request, &launch)?;
-            drop(guard);
-            let Some((run, round)) = begun else {
-                continue;
-            };
-            if used_up {
-                let used = attempt - 1;
-                if let Err(error) =
-                    self.escalate_ended(&run, round, alert, used, Escalation::UsedUp(used), 0)
+            due_runs.push(run);
+        }
+        Ok(due_runs)
+    }
+    /// Start the recovery job of `run`, one of [`Self::triage_candidates`],
+    /// in a free slot: the fill pass calls it in the order of its line
+    /// (ADR-t1850-1). The alert is that of the run's latest
+    /// `recovery_requested` since its last resume (`resume_exhausted`, or
+    /// the alert a `wait` or a stopped round left), else its status; a
+    /// round records its own request unless one is pending. An alert that
+    /// got its [`MAX_RECOVERY_ATTEMPTS`] jobs is escalated without one (but
+    /// for a person's verify fix after an edit, [`verify_fix_round`]), and a
+    /// job that cannot even start fails its round right away.
+    pub(super) fn triage_run(&mut self, run: TaskRun) -> Result<()> {
+        let events = self.queue.run_events(run.id())?;
+        let pending = pending_request(&events);
+        let alert = current_alert(&events).unwrap_or_else(|| RecoveryAlert::of_ended(run.status()));
+        let done = attempts(&events, alert);
+        // A person's verify-fix answer after the task's verification
+        // was edited gets its round past the limit (ADR-t883-1).
+        let granted = pending.is_none()
+            && done >= MAX_RECOVERY_ATTEMPTS
+            && verify_fix_round(&events, &self.queue.show(run.task_id())?.events);
+        let (used_up, attempt) = recovery_round(pending.is_some(), done, granted);
+        let request = match pending {
+            Some(_) => None,
+            None if used_up => None,
+            None => {
+                let evidence: Vec<EventId> = events
+                    .iter()
+                    .rev()
+                    .find(|e| e.payload["status"] == run.status().as_str())
+                    .map(|e| e.id)
+                    .into_iter()
+                    .collect();
+                let mut request = json!({
+                    "alert": alert,
+                    "attempt": done + 1,
+                    "status": run.status().as_str(),
+                    "evidence": evidence,
+                    "last_error": run.last_error(),
+                });
+                // A person chose one of the last job's own options.
+                if let Some(decided) = events
+                    .iter()
+                    .rev()
+                    .take_while(|e| e.kind != event_kind::TRIAGE_STARTED)
+                    .find(|e| {
+                        e.kind == event_kind::TRIAGE_DECIDED
+                            && e.payload["action"] == crate::domain::RECOVER_AGAIN
+                    })
                 {
-                    self.fail_recovery(&run, round, alert, used, format!("{error:#}"), 0);
+                    request["person_answer"] = json!({
+                        "ask_id": decided.payload["ask_id"],
+                        "answer": decided.payload["answer"],
+                    });
                 }
+                Some(request)
+            }
+        };
+        // Not while the cleanup job is to clear the run's worktree (task
+        // 405).
+        let cleaning = self.cleanup.cleaning();
+        let mut guard = cleanup::lock_cleaning(&cleaning);
+        if !guard.may_lease(run.id()) {
+            self.cleanup.deferred = true;
+            return Ok(());
+        }
+        let launch = self.actor_launch(ModelRole::Recovery);
+        let begun = self
+            .queue
+            .begin_triage(run.id(), &self.token, request, &launch)?;
+        drop(guard);
+        let Some((run, round)) = begun else {
+            return Ok(());
+        };
+        if used_up {
+            let used = attempt - 1;
+            if let Err(error) =
+                self.escalate_ended(&run, round, alert, used, Escalation::UsedUp(used), 0)
+            {
+                self.fail_recovery(&run, round, alert, used, format!("{error:#}"), 0);
+            }
+            let run = self.queue.run(run.id())?;
+            self.note_triaged(&run);
+            return Ok(());
+        }
+        match self.spawn_ended(&run, round, alert, attempt) {
+            Ok(watch) => {
+                info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {} ({}) recovery job {attempt} for {} started (round {round})", run.id(), run.task_id(), run.status().as_str(), alert.as_str());
+                self.slots.push(Slot::new(run, Phase::Recovery(watch)));
+            }
+            Err(error) => {
+                let error = format!("the recovery job could not start: {error:#}");
+                self.fail_recovery(&run, round, alert, attempt, error, 0);
                 let run = self.queue.run(run.id())?;
                 self.note_triaged(&run);
-                continue;
-            }
-            match self.spawn_ended(&run, round, alert, attempt) {
-                Ok(watch) => {
-                    info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {} ({}) recovery job {attempt} for {} started (round {round})", run.id(), run.task_id(), run.status().as_str(), alert.as_str());
-                    self.slots.push(Slot::new(run, Phase::Recovery(watch)));
-                }
-                Err(error) => {
-                    let error = format!("the recovery job could not start: {error:#}");
-                    self.fail_recovery(&run, round, alert, attempt, error, 0);
-                    let run = self.queue.run(run.id())?;
-                    self.note_triaged(&run);
-                }
             }
         }
         Ok(())

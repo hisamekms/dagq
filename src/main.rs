@@ -401,12 +401,13 @@ enum Command {
         #[arg(long, group = "field")]
         no_wait_for_build: bool,
     },
-    /// Give a draft or ready task a priority of its own (`add --priority`), or with --inherit
-    /// let it inherit its goal's again (ADR-t1639-1); it takes effect at the next claim and never
-    /// stops a running run.
+    /// Give a draft, ready or in-progress task a priority of its own (`add --priority`), or with
+    /// --inherit let it inherit its goal's again (ADR-t1639-1). It takes effect at the next claim,
+    /// or for an in-progress task at the next resume or recovery job of its run (ADR-t1850-1; the
+    /// user and the inbox only), and never stops a running run.
     #[command(group = clap::ArgGroup::new("setting").required(true))]
     SetPriority {
-        /// Draft or ready task.
+        /// Draft, submitted, ready or in-progress task.
         task: i64,
         /// interrupt, urgent, high, normal or low.
         #[arg(value_parser = PRIORITIES, group = "setting")]

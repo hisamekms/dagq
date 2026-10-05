@@ -648,7 +648,7 @@ fn priority_is_named_changed_while_editable_and_orders_candidates() {
     ok(&db, &["cancel", "1"]);
     assert_eq!(
         refused(&db, &["set-priority", "1", "high"]),
-        "the priority can only be changed for draft, submitted or ready tasks"
+        "task 1 is canceled; the priority can only be changed for draft, submitted, ready or in_progress tasks"
     );
 }
 

@@ -62,11 +62,18 @@ impl TaskStatus {
         }
     }
 
-    /// Dependencies, the goal, the paths and the priority may change only
-    /// before the task is claimed; plan review adds dependencies and lowers
-    /// priorities of submitted tasks (ADR-0041 decision 11).
+    /// Dependencies, the goal and the paths may change only before the
+    /// task is claimed; plan review adds dependencies and lowers priorities
+    /// of submitted tasks (ADR-0041 decision 11).
     pub fn dependencies_editable(self) -> bool {
         matches!(self, Self::Draft | Self::Submitted | Self::Ready)
+    }
+
+    /// The priority changes before the task is claimed and while it is in
+    /// progress, where it orders the next resume and recovery job of its
+    /// run (ADR-t1850-1 decision 7); a finished task keeps it.
+    pub fn priority_editable(self) -> bool {
+        self.dependencies_editable() || self == Self::InProgress
     }
 
     /// Whether `dagq edit` may change the content of the task: a draft or a
@@ -358,10 +365,16 @@ pub fn set_paths(mut task: Task, paths: Vec<String>) -> Result<Task, DomainError
 }
 
 /// Give `task` a priority of its own, or with none take its goal's again
-/// (ADR-0040 decision 4, ADR-t1639-1 decision 2): only before it is
-/// claimed, so a running run is never preempted.
+/// (ADR-0040 decision 4, ADR-t1639-1 decision 2): before it is claimed, or
+/// while it is in progress (ADR-t1850-1 decision 7), where it orders only
+/// the next resume and recovery job, so a running run is never preempted.
 pub fn set_priority(mut task: Task, priority: Option<Priority>) -> Result<Task, DomainError> {
-    require_editable(&task, "the priority")?;
+    require(task.status.priority_editable(), || {
+        DomainError::TaskPriorityNotEditable {
+            task_id: task.id,
+            status: task.status,
+        }
+    })?;
     task.own_priority = priority;
     (task.priority, task.priority_source) = base_priority(priority, task.goal_priority);
     Ok(task)
@@ -854,6 +867,33 @@ mod tests {
     }
 
     #[test]
+    fn the_priority_changes_until_the_task_is_finished() {
+        for (status, editable) in [
+            (TaskStatus::Draft, true),
+            (TaskStatus::Submitted, true),
+            (TaskStatus::Ready, true),
+            (TaskStatus::InProgress, true),
+            (TaskStatus::Completed, false),
+            (TaskStatus::Canceled, false),
+        ] {
+            assert_eq!(status.priority_editable(), editable, "{status:?}");
+            let task = Task::restore(record(status)).unwrap();
+            assert_eq!(
+                set_priority(task, Some(Priority::Low)).is_ok(),
+                editable,
+                "{status:?}"
+            );
+        }
+        // Only the priority: the rest stays fixed once the task is claimed.
+        assert!(!TaskStatus::InProgress.dependencies_editable());
+        let task = Task::restore(record(TaskStatus::InProgress)).unwrap();
+        let low = set_priority(task, Some(Priority::Low)).unwrap();
+        assert_eq!(low.priority(), Priority::Low);
+        assert_eq!(low.status(), TaskStatus::InProgress);
+        assert_eq!(set_priority(low, None).unwrap().own_priority(), None);
+    }
+
+    #[test]
     fn only_a_draft_or_ready_task_changes_its_goal_paths_or_dependencies() {
         let ready = Task::restore(record(TaskStatus::Ready)).unwrap();
         assert!(dependencies_editable(&ready));
@@ -889,17 +929,16 @@ mod tests {
             set_paths(claimed(), Vec::new()).unwrap_err().to_string(),
             "the paths can only be changed for draft, submitted or ready tasks"
         );
-        for status in [
-            TaskStatus::InProgress,
-            TaskStatus::Completed,
-            TaskStatus::Canceled,
-        ] {
+        for status in [TaskStatus::Completed, TaskStatus::Canceled] {
             let task = Task::restore(record(status)).unwrap();
             assert_eq!(
                 set_priority(task, Some(Priority::Interrupt))
                     .unwrap_err()
                     .to_string(),
-                "the priority can only be changed for draft, submitted or ready tasks"
+                format!(
+                    "task 5 is {}; the priority can only be changed for draft, submitted, ready or in_progress tasks",
+                    status.as_str()
+                )
             );
         }
         assert_eq!(
