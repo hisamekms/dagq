@@ -27,14 +27,16 @@ use serde_json::{Value, json};
 
 use crate::{
     application::{
-        AgentProvider, AgentSignals, AskQuery, Generators, ObserverLog, Queue, WorkspaceBackend,
-        dependency_graph, lifecycle::OBSERVER_ROLE,
+        AgentProvider, AgentSignals, AskQuery, Generators, ObserverLog, Queue, RunLog,
+        WorkspaceBackend, dependency_graph, lifecycle::OBSERVER_ROLE,
     },
     domain::{
-        ActorContext, ActorRole, AskId, EventId, FindingQuery, NewHold, NoteQuery, RunEvent,
+        ActorContext, ActorRole, AskId, EventId, FindingQuery, NewHold, NoteQuery, Provider,
+        RunEvent,
         actor_model::ActorLaunch,
-        headless_job::JobAccess,
+        headless_job::{JobAccess, JobFailure},
         language::Language,
+        provider_switch::SwitchReason,
         queue_hold::{HoldJob, Wall},
         stats::StatsQuery,
     },
@@ -73,6 +75,22 @@ pub struct ObserveOptions {
     pub user_config: Option<PathBuf>,
     /// The prompt's bytes ([`PROMPT_LIMIT`] but in tests).
     pub prompt_limit: usize,
+    /// What the agent starts with: the provider the supervisor routed it
+    /// to (ADR-t1063-1 decisions 1 and 4, task 1223), the provider of
+    /// `provider`; `None` reads `[roles.observer]` of the bound checkout's
+    /// `dagq.toml` ([`ObserverHost::launch`]).
+    pub launch: Option<ActorLaunch>,
+    /// Whether `[roles.observer]` names its provider, so that a Codex
+    /// observation that stopped where Codex cannot be used (a login, the
+    /// usage limit, a launch that failed, the executable gone) records
+    /// `provider_unusable`, and the supervisor holds Codex and starts the
+    /// observation again on the other provider (ADR-t1063-1 decision 4).
+    pub switchable: bool,
+    /// Why no provider can run the observation (`--no-claude` with Codex
+    /// not usable, ADR-t1204-1): an observation that is not skipped records
+    /// its finish as an `error` with this reason instead of starting the
+    /// agent.
+    pub unavailable: Option<String>,
 }
 
 /// The reads of the queue the observer's input takes that the composition
@@ -98,9 +116,9 @@ pub trait ObserverHost {
     /// A new directory for the observation started at `started`.
     fn observation_dir(&self, db: &Path, started: i64) -> Result<PathBuf>;
     fn write(&self, path: &Path, contents: &str) -> Result<()>;
-    /// What the agent printed in `dir`, stdout then stderr on a line of
-    /// their own; empty for a stream it did not leave.
-    fn output(&self, dir: &Path) -> String;
+    /// What the agent printed in `dir`: its stdout and its stderr, each
+    /// empty for a stream it did not leave.
+    fn output(&self, dir: &Path) -> (String, String);
     /// What the observer's agent starts with (ADR-0079 decision 7).
     fn launch(&self, checkout: Option<&Path>) -> ActorLaunch;
     /// The language of the prompt (ADR-t616-2).
@@ -127,13 +145,15 @@ pub struct ObserverEnvironment<'a, Q: ?Sized> {
 /// Run one observation: gather the inputs, start the agent headless with
 /// `DAGQ_ROLE=observer`, wait for it, then record `observe_finished` with
 /// what it wrote and, for a succeeded hourly one, save the new cursor.
-/// `signals` must belong to the provider that starts this observation.
-/// `db` is the queue's canonical path, which names its directory.
+/// `signals` are Claude Code's, which read a Claude observation's failure
+/// (a Codex one is read by `provider`'s `job_failure`); they must belong to
+/// `provider` when it is Claude's. `db` is the queue's canonical path,
+/// which names its directory.
 pub fn observe<Q: Queue + ObserverLog>(
     queue: &mut Q,
     db: &Path,
     provider: &dyn AgentProvider,
-    signals: &dyn AgentSignals,
+    signals: Option<&dyn AgentSignals>,
     options: &ObserveOptions,
     environment: &ObserverEnvironment<'_, Q>,
 ) -> Result<Value> {
@@ -165,6 +185,14 @@ pub fn observe<Q: Queue + ObserverLog>(
         return Ok(payload);
     }
     let cursor = EventId::new(stats["next_cursor"].as_i64().unwrap_or_default());
+    // No provider can run it (`--no-claude`, Codex not usable): the
+    // observation records why and starts no agent (ADR-t1204-1, task
+    // 1223). Its window is read again by the next one.
+    if !options.dry_run
+        && let Some(why) = &options.unavailable
+    {
+        return unavailable(queue, options.mode, since, cursor, &alerts, why);
+    }
     let notes = queue.notes(&NoteQuery {
         goal_id: None,
         task_id: None,
@@ -241,9 +269,15 @@ pub fn observe<Q: Queue + ObserverLog>(
         &serde_json::to_string_pretty(&input)?,
     )?;
     let ask_mark = queue.ask_high_water()?;
-    // The job's Claude session id (ADR-0048 decision 4).
-    let session_id = generators.ids.uuid();
-    let launch = host.launch(checkout.as_deref());
+    let launch = options
+        .launch
+        .clone()
+        .unwrap_or_else(|| host.launch(checkout.as_deref()));
+    // The job's Claude session id (ADR-0048 decision 4); Codex names its
+    // thread itself, which the finish records (ADR-t1063-1 decision 6).
+    // The actor is one per observation either way.
+    let instance = generators.ids.uuid();
+    let session_id = (launch.provider == Provider::Claude).then(|| instance.clone());
     let mut started_payload = json!({"mode": options.mode.as_str(), "since": since, "dir": dir, "session_id": session_id, "launch": launch.to_value()});
     merge(&mut started_payload, &prompt_record);
     let event_mark = queue.record_queue_event(EventKind::ObserveStarted, started_payload)?;
@@ -254,37 +288,53 @@ pub fn observe<Q: Queue + ObserverLog>(
         options.mode.as_str()
     );
     let clock = Instant::now();
+    let started_ms = generators
+        .clock
+        .system_time()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|since| i64::try_from(since.as_millis()).ok());
     // `failed`: the agent exited non-zero or by a signal; `error`: it could
     // not start or ran past the timeout.
+    let mut start_failure = None;
     let (outcome, exit_code, error) = match host.run(
         provider,
         db,
         &dir,
         &prompt,
         &HeadlessAgent {
-            actor: observer_actor(&session_id),
-            session_id: Some(&session_id),
+            actor: observer_actor(&instance),
+            session_id: session_id.as_deref(),
             launch: &launch,
             dagq: &options.dagq,
             timeout: options.timeout,
-            what: "the observer",
+            what: OBSERVER_JOB,
             access: ACCESS,
         },
     ) {
         Ok(Some(0)) => ("succeeded", Some(0), None),
         Ok(code) => ("failed", code, None),
-        Err(error) => ("error", None, Some(format!("{error:#}"))),
+        Err(error) => {
+            // An agent that did not start at all (its executable gone)
+            // left no output to read why: its start's error says.
+            if not_started(&error, OBSERVER_JOB) {
+                start_failure = Some(crate::application::job_start_failure(&error));
+            }
+            ("error", None, Some(format!("{error:#}")))
+        }
     };
-    // An agent stopped at a login that ran out or the usage limit joins
-    // the queue's hold ask (ADR-0047 decision 42, task 438): no observer
-    // starts again until a person answers it.
-    let wall = if outcome == "succeeded" {
-        None
-    } else {
-        // Read both streams as before, with a line boundary so stderr
-        // diagnostics cannot be joined onto a partial stdout line.
-        signals.job_failure(&host.output(&dir)).wall()
-    };
+    let (stdout, stderr) = host.output(&dir);
+    let (wall, unusable) = read_failure(
+        outcome == "succeeded",
+        launch.provider,
+        options.switchable,
+        || start_failure.unwrap_or_else(|| provider.job_failure(&stdout, &stderr)),
+        // Both streams, with a line boundary so stderr diagnostics cannot
+        // be joined onto a partial stdout line.
+        || signals.map(|signals| signals.job_failure(&format!("{stdout}\n{stderr}"))),
+    );
+    let provider_unusable = unusable
+        .map(|reason| json!({"provider": launch.provider.as_str(), "reason": reason.as_str()}));
     // A hold that could not be written is logged: the observation's
     // finish is recorded either way.
     let hold = wall.and_then(|wall| {
@@ -306,7 +356,7 @@ pub fn observe<Q: Queue + ObserverLog>(
     if saved {
         host.write_cursor(db, cursor)?;
     }
-    let payload = json!({
+    let mut payload = json!({
         "mode": options.mode.as_str(),
         "outcome": outcome,
         "exit_code": exit_code,
@@ -330,6 +380,15 @@ pub fn observe<Q: Queue + ObserverLog>(
         "hold_ask_id": hold,
         "alerts": alerts,
     });
+    // The span this observation's start opened closes by its directory;
+    // Codex's thread and the model of its rollout (ADR-t1063-1 decision 6)
+    // are the id and the model it and `stats` read.
+    if let Some(session) = provider.job_session(&stdout, started_ms) {
+        session.record(&mut payload);
+    }
+    if let Some(unusable) = provider_unusable {
+        payload["provider_unusable"] = unusable;
+    }
     queue.record_queue_event(EventKind::ObserveFinished, payload.clone())?;
     tracing::info!(
         mode = options.mode.as_str(),
@@ -343,6 +402,81 @@ pub fn observe<Q: Queue + ObserverLog>(
         findings_without_ask = without_ask,
         "observer ({}) finished: {outcome}",
         options.mode.as_str()
+    );
+    Ok(payload)
+}
+
+/// The observer as the errors of its agent name it.
+const OBSERVER_JOB: &str = "the observer";
+
+/// What the failure of an observation that did not succeed leads to: the
+/// wall of the queue's hold ask it joins, and the reason its provider
+/// cannot be used. A Claude agent stopped at a login that ran out or the
+/// usage limit joins the queue's hold ask (ADR-0047 decision 42, task
+/// 438): no observer starts again until a person answers it; `claude`
+/// reads it with Claude's signals (`None` without them). A Codex one does
+/// not hold Claude: when its role names its provider (`switchable`),
+/// `codex` (its start's error, or its provider's reading of its output)
+/// says whether Codex could not be used, and the supervisor holds Codex
+/// and starts the observation again on the other provider (ADR-t1063-1
+/// decision 4). Neither is read for a success.
+fn read_failure(
+    succeeded: bool,
+    provider: Provider,
+    switchable: bool,
+    codex: impl FnOnce() -> JobFailure,
+    claude: impl FnOnce() -> Option<JobFailure>,
+) -> (Option<Wall>, Option<SwitchReason>) {
+    match (succeeded, provider) {
+        (true, _) => (None, None),
+        (false, Provider::Codex) => (
+            None,
+            switchable.then(codex).and_then(JobFailure::switch_reason),
+        ),
+        (false, Provider::Claude) => (claude().and_then(JobFailure::wall), None),
+    }
+}
+
+/// Record the finish of an observation no provider can run (`why`), with
+/// no agent started and no directory, and return its payload: an `error`,
+/// so the next observation reads its window again.
+fn unavailable(
+    queue: &dyn RunLog,
+    mode: ObserveMode,
+    since: Option<EventId>,
+    cursor: EventId,
+    alerts: &[Value],
+    why: &str,
+) -> Result<Value> {
+    let error = format!("the observer could not start: {why}");
+    let payload = json!({
+        "mode": mode.as_str(),
+        "outcome": "error",
+        "exit_code": null,
+        "error": error,
+        "unavailable": true,
+        "since": since,
+        "cursor": cursor,
+        "cursor_saved": false,
+        "findings_recorded": 0,
+        "findings_updated": 0,
+        "findings_closed": 0,
+        "asks": 0,
+        "findings_without_ask": 0,
+        "recorded_finding_ids": [],
+        "updated_finding_ids": [],
+        "closed_finding_ids": [],
+        "ask_ids": [],
+        "without_ask_finding_ids": [],
+        "duration_secs": 0,
+        "dir": null,
+        "alerts": alerts,
+    });
+    queue.record_queue_event(EventKind::ObserveFinished, payload.clone())?;
+    tracing::warn!(
+        mode = mode.as_str(),
+        "observer ({}) not started: {why}",
+        mode.as_str()
     );
     Ok(payload)
 }
@@ -591,9 +725,20 @@ fn history_entry(finished: &RunEvent, started: Option<&RunEvent>) -> Value {
 }
 
 /// The actor the observer's agent runs as (ADR-t728-1 decision 4):
-/// `observer`, one actor per session.
-fn observer_actor(session_id: &str) -> ActorContext {
-    ActorContext::instance(ActorRole::Observer, session_id)
+/// `observer`, one actor per observation, by `instance`, the uuid made once
+/// per observation. On Claude it is also the job's session id; a Codex
+/// observation has no session id, since Codex names its thread itself
+/// (task 1223).
+fn observer_actor(instance: &str) -> ActorContext {
+    ActorContext::instance(ActorRole::Observer, instance)
+}
+
+/// Whether `error` says the agent of the job `what` names did not start at
+/// all: its context is [`HeadlessAgent::start_context`], which the host
+/// that runs the agent gives the error of its start, so its output has
+/// nothing to read why.
+pub fn not_started(error: &anyhow::Error, what: &str) -> bool {
+    error.to_string() == HeadlessAgent::start_context(what)
 }
 
 /// Who a headless job of the queue's (the observer, the throughput review)
@@ -613,6 +758,15 @@ pub struct HeadlessAgent<'a> {
     /// What the agent may do, as an intent its provider turns into its
     /// own mechanism.
     pub access: JobAccess,
+}
+
+impl HeadlessAgent<'_> {
+    /// The context of the error of an agent that did not start, for the
+    /// job `what` names: the host that runs the agent gives it, and
+    /// [`not_started`] reads it.
+    pub fn start_context(what: &str) -> String {
+        format!("start {what}'s agent")
+    }
 }
 
 /// The observer's instructions and its input within `limit` bytes
@@ -741,6 +895,75 @@ pub fn observer_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A failed observation (task 1223): a Codex one of a role that names
+    /// its provider says why Codex cannot be used and joins no hold; one
+    /// whose role names none, or whose failure is no reason, says nothing;
+    /// a Claude one joins the hold of its wall; a success reads nothing.
+    #[test]
+    fn a_failure_holds_claude_or_says_codex_cannot_be_used() {
+        let unread = || -> JobFailure { panic!("read Codex's failure") };
+        let unread_claude = || -> Option<JobFailure> { panic!("read Claude's failure") };
+        for provider in [Provider::Claude, Provider::Codex] {
+            assert_eq!(
+                read_failure(true, provider, true, unread, unread_claude),
+                (None, None)
+            );
+        }
+        for (failure, reason) in [
+            (JobFailure::UsageLimit, Some(SwitchReason::UsageLimit)),
+            (
+                JobFailure::Authentication,
+                Some(SwitchReason::Authentication),
+            ),
+            (JobFailure::LaunchFailed, Some(SwitchReason::LaunchFailed)),
+            (
+                JobFailure::ExecutableMissing,
+                Some(SwitchReason::ExecutableMissing),
+            ),
+            (JobFailure::Other, None),
+        ] {
+            assert_eq!(
+                read_failure(false, Provider::Codex, true, || failure, unread_claude),
+                (None, reason),
+                "{failure:?}"
+            );
+        }
+        assert_eq!(
+            read_failure(false, Provider::Codex, false, unread, unread_claude),
+            (None, None)
+        );
+        assert_eq!(
+            read_failure(false, Provider::Claude, true, unread, || Some(
+                JobFailure::UsageLimit
+            )),
+            (Some(Wall::UsageLimit), None)
+        );
+        assert_eq!(
+            read_failure(false, Provider::Claude, false, unread, || Some(
+                JobFailure::LaunchFailed
+            )),
+            (None, None)
+        );
+        assert_eq!(
+            read_failure(false, Provider::Claude, false, unread, || None),
+            (None, None)
+        );
+    }
+
+    /// The error of an agent that did not start is told apart by the
+    /// context its host gives it, not by what caused it.
+    #[test]
+    fn an_agent_that_did_not_start_is_told_by_its_start_context() {
+        let failed = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::NotFound))
+            .context(HeadlessAgent::start_context(OBSERVER_JOB));
+        assert!(not_started(&failed, OBSERVER_JOB));
+        assert!(!not_started(&failed, "the throughput review"));
+        assert!(!not_started(
+            &anyhow::anyhow!("the observer did not finish within 5s"),
+            OBSERVER_JOB
+        ));
+    }
 
     #[test]
     fn the_agent_runs_as_the_observer_with_its_actor_id() {

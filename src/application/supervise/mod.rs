@@ -121,6 +121,7 @@ mod idle;
 mod inbox_nudge;
 mod jobs;
 mod landing;
+mod observer;
 mod plan_review;
 mod planner_turns;
 mod provider;
@@ -850,6 +851,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         provisioning_error: None,
         observer: None,
         observers_launched: Vec::new(),
+        observer_again: None,
         throughput_review: throughput_review::ThroughputReviewWatch::default(),
         last_sweep: None,
         last_turns: None,
@@ -996,10 +998,14 @@ struct Supervisor<'a> {
     claiming: bool,
     provisioning_error: Option<String>,
     /// The observer job running now: one at a time, outside the run slots.
-    observer: Option<(ObserveMode, Box<dyn Spawned>)>,
+    observer: Option<observer::ObserverJob>,
     /// When this process last launched each observation, so one that dies
     /// before it records anything is not relaunched on every pass.
     observers_launched: Vec<(ObserveMode, Instant)>,
+    /// The observation due again now whatever the queue says: a Codex one
+    /// that found Codex unusable, which starts again on the other provider
+    /// (ADR-t1063-1 decision 4, task 1223).
+    observer_again: Option<ObserveMode>,
     /// The throughput review running now (ADR-t996-1), and the periods this
     /// process started.
     throughput_review: throughput_review::ThroughputReviewWatch,
@@ -1648,7 +1654,9 @@ impl Supervisor<'_> {
             // (ADR-t1063-1 decision 5, ADR-t1204-1, task 1220).
             self.throughput_review_pass(options, !stopping && self.claiming && self.service_up);
             if !stopping && self.claiming {
-                if !self.no_claude && self.queue_hold.is_none() && self.service_up {
+                // Its route decides on `--no-claude` and the hold as the
+                // throughput review's does (task 1223).
+                if self.service_up {
                     self.start_observer_when_due(options);
                 }
                 self.auto_update_pass(options);
@@ -2277,6 +2285,9 @@ impl Supervisor<'_> {
         if options.observe_daily {
             modes.insert(0, (ObserveMode::Daily, DAILY_WINDOW_SECS));
         }
+        if let Some(mode) = self.observer_again {
+            return Ok(Some(mode));
+        }
         for (mode, every) in modes {
             let recorded = self
                 .queue
@@ -2306,8 +2317,29 @@ impl Supervisor<'_> {
                 return;
             }
         };
+        let Some(route) = self.job_start_route(crate::domain::actor_model::ModelRole::Observer)
+        else {
+            return;
+        };
+        let (launch, switchable, unavailable) = match route {
+            throughput_review::JobStartRoute::Start(launch, switchable) => {
+                (launch, switchable, None)
+            }
+            throughput_review::JobStartRoute::Unavailable(launch, why) => {
+                (launch, false, Some(why))
+            }
+        };
+        // Its finish is the first `observe_finished` past this mark.
+        let mark = match self.queue.latest_event_id() {
+            Ok(mark) => mark,
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "observer schedule could not be read: {error:#}");
+                return;
+            }
+        };
         // The observer reads the active time of the spans still open too.
         self.record_session_turns(true);
+        self.observer_again = None;
         self.observers_launched
             .retain(|(launched, _)| *launched != mode);
         self.observers_launched.push((mode, Instant::now()));
@@ -2320,7 +2352,20 @@ impl Supervisor<'_> {
             .arg(&self.layout.cmux)
             .arg("--claude")
             .arg(&self.layout.claude)
+            .arg("--codex")
+            .arg(&self.layout.codex)
+            .arg("--launch")
+            .arg(launch.to_value().to_string())
             .current_dir(&self.layout.repo_root);
+        if let Some(home) = &self.layout.codex_home {
+            command.arg("--codex-home").arg(home);
+        }
+        if switchable {
+            command.arg("--switchable");
+        }
+        if let Some(why) = &unavailable {
+            command.arg("--unavailable").arg(why);
+        }
         for name in &self.layout.observer_env_remove {
             command.env_remove(name);
         }
@@ -2332,8 +2377,20 @@ impl Supervisor<'_> {
         }
         match self.spawner.spawn(&command, Streams::Null) {
             Ok(child) => {
-                info!("observer ({}) started: pid {}", mode.as_str(), child.id());
-                self.observer = Some((mode, child));
+                info!(
+                    "observer ({}) started on {}: pid {}",
+                    mode.as_str(),
+                    launch.provider.as_str(),
+                    child.id()
+                );
+                self.observer = Some(observer::ObserverJob {
+                    mode,
+                    child,
+                    switchable_codex: switchable
+                        && unavailable.is_none()
+                        && launch.provider == Provider::Codex,
+                    mark,
+                });
             }
             Err(error) => {
                 warn!(error = %format_args!("{error:#}"), "observer ({}) could not start: {error:#}", mode.as_str())
@@ -2430,7 +2487,10 @@ impl Supervisor<'_> {
     /// agent and that agent's Bash), so none outlives this supervisor or
     /// runs on unwatched after its exec; `why` ends the log line.
     pub(super) fn stop_observer(&mut self, why: &str) {
-        let Some((mode, mut child)) = self.observer.take() else {
+        let Some(observer::ObserverJob {
+            mode, mut child, ..
+        }) = self.observer.take()
+        else {
             return;
         };
         // Listed before the kill: once `observe` is gone, its agent is no
@@ -2449,22 +2509,26 @@ impl Supervisor<'_> {
         );
     }
     /// Reap the observer once it exited; its own `observe_finished` is the
-    /// record.
+    /// record. A Codex one that found Codex unusable holds Codex and is
+    /// due again ([`Self::codex_observer_unusable`]).
     fn poll_observer(&mut self) {
-        let Some((mode, child)) = self.observer.as_mut() else {
+        let Some(job) = self.observer.as_mut() else {
             return;
         };
-        let mode = *mode;
-        match child.try_wait() {
-            Ok(None) => {}
+        let mode = job.mode;
+        match job.child.try_wait() {
+            Ok(None) => return,
             Ok(Some(status)) => {
                 info!("observer ({}) exited: {status}", mode.as_str());
-                self.observer = None;
             }
             Err(error) => {
                 warn!(error = %format_args!("{error:#}"), "observer ({}) could not be waited for: {error:#}", mode.as_str());
-                self.observer = None;
             }
+        }
+        if let Some(job) = self.observer.take()
+            && job.switchable_codex
+        {
+            self.codex_observer_unusable(&job);
         }
     }
     /// Whether this process still drives `id` in a slot. Such a run whose

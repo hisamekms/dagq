@@ -33,14 +33,13 @@ struct ReviewJob {
     switchable_codex: bool,
 }
 
-/// How the due review starts (ADR-t1063-1 decisions 1, 4 and 5,
-/// ADR-t1204-1).
-enum ReviewRoute {
-    /// On this launch; `true` when `[roles.throughput_review]` names its
-    /// provider.
+/// How a due job of the queue's (the throughput review, the observer)
+/// starts (ADR-t1063-1 decisions 1, 4 and 5, ADR-t1204-1).
+pub(super) enum JobStartRoute {
+    /// On this launch; `true` when its `[roles.<role>]` names its provider.
     Start(ActorLaunch, bool),
     /// Under `--no-claude`, no provider can run it: the command records
-    /// why for the period that needs a review, starting no agent.
+    /// why, starting no agent.
     Unavailable(ActorLaunch, String),
 }
 
@@ -96,28 +95,28 @@ impl Supervisor<'_> {
         Ok(None)
     }
 
-    /// Where the due review goes, or `None` while it waits. A role that
-    /// names no provider runs on Claude as before: it waits while the
-    /// queue's hold ask holds Claude, and does not start under
-    /// `--no-claude` (ADR-t1204-1 decision 2). One that names its provider
-    /// starts there when it can be used, else on the other provider when
-    /// that one can be, else waits, or, under `--no-claude`, records why
-    /// (a Codex review never moves to Claude then).
-    fn throughput_review_route(&self) -> Option<ReviewRoute> {
-        let role = ModelRole::ThroughputReview;
+    /// Where the due job of `role` (the throughput review, the observer)
+    /// goes, or `None` while it waits. A role that names no provider runs
+    /// on Claude as before: it waits while the queue's hold ask holds
+    /// Claude, and does not start under `--no-claude` (ADR-t1204-1
+    /// decision 2). One that names its provider starts there when it can
+    /// be used, else on the other provider when that one can be, else
+    /// waits, or, under `--no-claude`, records why (a Codex job never
+    /// moves to Claude then).
+    pub(super) fn job_start_route(&self, role: ModelRole) -> Option<JobStartRoute> {
         let models = self.role_models(role);
         let launch = models.launch(role);
         if !models.switchable(role) {
             return (!self.no_claude && self.queue_hold.is_none())
-                .then_some(ReviewRoute::Start(launch, false));
+                .then_some(JobStartRoute::Start(launch, false));
         }
         match job_route(&launch, true, |provider| self.job_unusable(provider)) {
-            JobRoute::Start(launch) => Some(ReviewRoute::Start(launch, true)),
+            JobRoute::Start(launch) => Some(JobStartRoute::Start(launch, true)),
             JobRoute::Wait { .. } if self.no_claude => {
                 let codex = self
                     .job_unusable(Provider::Codex)
                     .map_or("unknown", SwitchReason::as_str);
-                Some(ReviewRoute::Unavailable(
+                Some(JobStartRoute::Unavailable(
                     launch,
                     format!(
                         "provider_disabled: Claude is disabled by --no-claude and codex cannot be used ({codex}); handle this role manually"
@@ -126,7 +125,8 @@ impl Supervisor<'_> {
             }
             JobRoute::Wait { provider, reason } => {
                 tracing::debug!(
-                    "the throughput review waits: {} cannot be used ({}), nor can the other provider",
+                    "the {} job waits: {} cannot be used ({}), nor can the other provider",
+                    role.as_str(),
                     provider.as_str(),
                     reason.as_str()
                 );
@@ -173,12 +173,12 @@ impl Supervisor<'_> {
                 return;
             }
         };
-        let Some(route) = self.throughput_review_route() else {
+        let Some(route) = self.job_start_route(ModelRole::ThroughputReview) else {
             return;
         };
         let (launch, switchable, unavailable) = match route {
-            ReviewRoute::Start(launch, switchable) => (launch, switchable, None),
-            ReviewRoute::Unavailable(launch, why) => (launch, false, Some(why)),
+            JobStartRoute::Start(launch, switchable) => (launch, switchable, None),
+            JobStartRoute::Unavailable(launch, why) => (launch, false, Some(why)),
         };
         self.throughput_review
             .launched

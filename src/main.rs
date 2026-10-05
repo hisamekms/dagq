@@ -817,9 +817,11 @@ enum Command {
         #[arg(long)]
         plugin_only: bool,
     },
-    /// Run the observer job once: headless Claude under DAGQ_ROLE=observer reads stats past the
-    /// cursor, the open findings, the latest notes, the open asks and the graph, and writes
-    /// findings and blocked asks on them only (ADR-0044 decision 4). Records observe_started / observe_finished and saves the new cursor.
+    /// Run the observer job once: a headless agent under DAGQ_ROLE=observer (Claude by default, or
+    /// Codex in its read-only sandbox when [roles.observer] of dagq.toml says provider = "codex"; the
+    /// supervisor passes the provider it routed the observer to) reads stats past the cursor, the open
+    /// findings, the latest notes, the open asks and the graph, and writes findings and blocked asks on
+    /// them only, through the queue service (ADR-0044 decision 4, ADR-t1222-1). Records observe_started / observe_finished and saves the new cursor.
     /// When no event but the observer's own came since the last observation, starts no agent and records
     /// observe_finished with outcome skipped (unless --since is given). The agent loads no MCP server.
     Observe {
@@ -854,13 +856,32 @@ enum Command {
         /// Seconds the agent may run before it is killed.
         #[arg(long, default_value_t = 1800)]
         timeout: u64,
-        /// Claude Code executable; a bare name is resolved on PATH.
+        /// Claude Code executable, for an observer on Claude; a bare name is resolved on PATH.
         #[arg(long, default_value = "claude")]
         claude: PathBuf,
+        /// Codex CLI executable, for `[roles.observer]`'s `provider = "codex"`; a bare name is
+        /// resolved on PATH outside cmux's shims.
+        #[arg(long, default_value = "codex")]
+        codex: PathBuf,
         /// cmux executable for workspace listing and inbox notifications; bare names resolve
         /// on PATH. If not found, neither listing nor notification is attempted.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
+        /// What the agent starts with, as the supervisor routed it (an actor launch as JSON);
+        /// `[roles.observer]` of dagq.toml without.
+        #[arg(long, hide = true)]
+        launch: Option<String>,
+        /// Codex's home, whose rollouts name the model (tests); Codex's own without.
+        #[arg(long, hide = true)]
+        codex_home: Option<PathBuf>,
+        /// The role names its provider: a Codex observation that cannot use Codex records
+        /// provider_unusable for the supervisor to start it again on the other provider.
+        #[arg(long, hide = true)]
+        switchable: bool,
+        /// No provider can run the observation (--no-claude, Codex not usable): one that is not
+        /// skipped records its finish as an error with this reason.
+        #[arg(long, hide = true)]
+        unavailable: Option<String>,
     },
     /// Run the throughput review once (ADR-t996-1): for the last whole hour (--mode hourly), yesterday
     /// (daily) or the ISO week before this one (weekly). An hour the runtime's rules find unremarkable starts
@@ -4083,22 +4104,59 @@ fn execute(cli: Cli) -> Result<Value> {
             daily,
             timeout,
             claude,
+            codex,
             cmux,
+            launch,
+            codex_home,
+            switchable,
+            unavailable,
             ..
         } => {
             use dagq::application::observer::{ObserveMode, ObserveOptions};
-            use dagq::infrastructure::adapters::{ClaudeCode, executable};
-            // A dry run starts nothing, so it needs no Claude Code.
-            let executable = if dry_run {
-                claude
-            } else {
-                executable(&claude)?
+            use dagq::domain::{Provider, actor_model::ActorLaunch};
+            use dagq::infrastructure::{
+                adapters::{ClaudeCode, executable},
+                codex::Codex,
             };
-            let provider = ClaudeCode { executable };
+            let launch: ActorLaunch = match launch {
+                Some(launch) => serde_json::from_str(&launch).context("parse --launch")?,
+                None => dagq::compose::observer_launch(&db)?,
+            };
+            // A dry run starts nothing, so it needs no executable; nor does
+            // an observation no provider can run, nor the provider it does
+            // not start. A Claude Code that cannot be resolved fails as
+            // before; a Codex one (gone since the supervisor found it) is
+            // kept as given, so the observation records its finish, whose
+            // start error says Codex cannot be used (task 1223).
+            let resolve = !dry_run && unavailable.is_none();
+            let claude = if resolve && launch.provider == Provider::Claude {
+                executable(&claude)?
+            } else {
+                claude
+            };
+            let claude = ClaudeCode { executable: claude };
+            let codex = Codex {
+                executable: if resolve && launch.provider == Provider::Codex {
+                    dagq::infrastructure::codex::executable(&codex).unwrap_or_else(|error| {
+                        tracing::warn!(error = %format_args!("{error:#}"), "{} could not be resolved: {error:#}", codex.display());
+                        codex
+                    })
+                } else {
+                    codex
+                },
+                home: codex_home,
+            };
+            let (provider, signals): (
+                &dyn dagq::application::AgentProvider,
+                Option<&dyn dagq::application::AgentSignals>,
+            ) = match launch.provider {
+                Provider::Claude => (&claude, Some(&claude)),
+                Provider::Codex => (&codex, None),
+            };
             dagq::compose::observe(
                 &db,
-                &provider,
-                &provider,
+                provider,
+                signals,
                 &ObserveOptions {
                     mode: if daily {
                         ObserveMode::Daily
@@ -4112,6 +4170,9 @@ fn execute(cli: Cli) -> Result<Value> {
                     dagq: env::current_exe()?,
                     user_config: dagq::infrastructure::language::user_config_file(),
                     prompt_limit: dagq::application::observer::PROMPT_LIMIT,
+                    launch: Some(launch),
+                    switchable,
+                    unavailable,
                 },
             )?
         }

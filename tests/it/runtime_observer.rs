@@ -44,7 +44,7 @@ impl AgentProvider for ObserverProvider {
 
 // The composition supplies the signals of the same provider that starts
 // the job. These shell doubles emit Claude's diagnostics.
-fn observe(
+pub(crate) fn observe(
     db: &Path,
     provider: &dyn AgentProvider,
     options: &dagq::application::observer::ObserveOptions,
@@ -55,14 +55,14 @@ fn observe(
     dagq::compose::observe(
         db,
         provider,
-        &ClaudeCode {
+        Some(&ClaudeCode {
             executable: "/unused".into(),
-        },
+        }),
         options,
     )
 }
 
-fn observe_options(
+pub(crate) fn observe_options(
     mode: dagq::application::observer::ObserveMode,
 ) -> dagq::application::observer::ObserveOptions {
     dagq::application::observer::ObserveOptions {
@@ -74,10 +74,13 @@ fn observe_options(
         dagq: PathBuf::from(env!("CARGO_BIN_EXE_dagq")),
         user_config: None,
         prompt_limit: dagq::application::observer::PROMPT_LIMIT,
+        launch: None,
+        switchable: false,
+        unavailable: None,
     }
 }
 
-fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
+pub(crate) fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
     Connection::open(db)
         .unwrap()
         .prepare("SELECT payload FROM run_events WHERE kind=?1 ORDER BY id")
@@ -1391,7 +1394,7 @@ fn observer_uses_the_supplied_providers_failure_signals() {
     let done = dagq::compose::observe(
         &db,
         &provider,
-        &Signals,
+        Some(&Signals),
         &observe_options(dagq::application::observer::ObserveMode::Daily),
     )
     .unwrap();

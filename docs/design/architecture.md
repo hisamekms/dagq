@@ -4,8 +4,8 @@ type: design
 title: レイヤーとコンテキストの境界（contextごとの所有・判断・操作・公開するport・依存の向き・境界をまたぐtransaction・検査できる規則・今の違反）
 status: current
 created: 2026-10-04
-updated: 2026-10-05 # task 1641: domain::goal_tag among the planning modules; task 839: domain::broker_usage among the host operations modules; task 1662: the observation and analysis context points to the measurement design; task 1437; task 1632
-last_verified: 2026-10-05 # task 1641; task 839; task 1615; task 1437; task 1632
+updated: 2026-10-05 # task 1223: the observer on Codex; task 1641: domain::goal_tag among the planning modules; task 839: domain::broker_usage among the host operations modules; task 1662: the observation and analysis context points to the measurement design; task 1437; task 1632
+last_verified: 2026-10-05 # task 1223; task 1641; task 839; task 1615; task 1437; task 1632
 scope: system
 related:
   - adr-t1545-1
@@ -129,7 +129,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 
 - table: `findings`。ファイルはqueueのdirの日次のKPIのreport（`report_written`が指す）とKPIのpushの待ち。
 - eventの種類: `observation`・`observe_*`、`finding_recorded`・`finding_updated`・`finding_status_changed`、`mark_recorded`・`mark_retracted`、`forecast_recorded`、`kpi_breach_*`・`kpi_push_*`、`report_written`、`throughput_review_*`、`candidates_sampled`。
-- `Supervisor`の欄: `observer`・`observers_launched`・`throughput_review`・`report`・`reports`・`forecasts`・`forecast`・`push`（KPIのpush）・`candidates`。
+- `Supervisor`の欄: `observer`・`observers_launched`・`observer_again`（Codexを使えなかったobservationを起動し直すmode。task 1223）・`throughput_review`・`report`・`reports`・`forecasts`・`forecast`・`push`（KPIのpush）・`candidates`。
 
 **判断**（domain）
 
@@ -137,7 +137,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 
 **操作**
 
-- application: `application::stats`・`application::areas`・`application::marks`（`mark`・`mark --retract`。`MarkLog`と注入した`Clock`越し。task 1548が`compose`から移した）・`application::kpi`・`application::forecast`・`application::report`・`application::push`、`application::supervise`の`forecast`・`report`・`push`・`throughput_review`。`application::observer`（observerのjob）・`application::watch`（`events`・`timeline`・`watch`。task 251がレイヤーの外から移した）・`application::throughput_review`（スループットの見直しのjob。promptの組み立てと`ACCESS`。portは`ThroughputReviewSources`と`ThroughputReviewHost`。task 1615がレイヤーの外から移した）。組み立ては`compose::throughput_review`・`compose::throughput_review_launch`。レイヤーの外の`src/view.rs`。
+- application: `application::stats`・`application::areas`・`application::marks`（`mark`・`mark --retract`。`MarkLog`と注入した`Clock`越し。task 1548が`compose`から移した）・`application::kpi`・`application::forecast`・`application::report`・`application::push`、`application::supervise`の`forecast`・`report`・`push`・`throughput_review`（行き先の`job_start_route`はobserverと共有）・`observer`（observerのjobの終わりの`provider_unusable`を読んでCodexを控える。task 1223）。`application::observer`（observerのjob）・`application::watch`（`events`・`timeline`・`watch`。task 251がレイヤーの外から移した）・`application::throughput_review`（スループットの見直しのjob。promptの組み立てと`ACCESS`。portは`ThroughputReviewSources`と`ThroughputReviewHost`。task 1615がレイヤーの外から移した）。組み立ては`compose::throughput_review`・`compose::throughput_review_launch`・`compose::observe`・`compose::observer_launch`（手で打つ`observe`の`[roles.observer]`。task 1223）。レイヤーの外の`src/view.rs`。
 - CLI: `events`・`watch`・`stats`・`kpi`・`report`・`forecast`・`mark`・`marks`・`timeline`・`finding`・`findings`・`observe`・`throughput-review`・`note`・`notes`、`status`の読み取り。
 - infrastructure: `findings`・`observer`（observerのファイル・設定・headlessのagentのprocess）・`throughput_review`（見直しのdirのファイル・`[roles.throughput_review]`・hostの時間帯・agentのprocess）・`runtime_store::queue_records`・`kpi_config`・`kpi_push`・`report_config`・`d2`・`transcripts`・`claude_turns`・`codex_turns`。
 

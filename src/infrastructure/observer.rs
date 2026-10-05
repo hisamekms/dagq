@@ -75,9 +75,10 @@ fn observation_dir(db: &Path, started: i64) -> Result<PathBuf> {
 }
 
 /// What the observer's agent starts with (ADR-0079 decision 7):
-/// `[roles.observer]` of the bound checkout's `dagq.toml`; none, no
-/// checkout, or a file that cannot be read starts it as before.
-fn observer_launch(checkout: Option<&Path>) -> ActorLaunch {
+/// `[roles.observer]` of the bound checkout's `dagq.toml` (its provider
+/// too, ADR-t1222-1); none, no checkout, or a file that cannot be read
+/// starts it as before.
+pub fn observer_launch(checkout: Option<&Path>) -> ActorLaunch {
     let Some(checkout) = checkout else {
         return ActorLaunch::default_of(ModelRole::Observer);
     };
@@ -161,7 +162,7 @@ pub fn run_agent(
             )
             .with_timeout(agent.timeout),
         )
-        .with_context(|| format!("start {}'s agent", agent.what))?
+        .with_context(|| HeadlessAgent::start_context(agent.what))?
         .process()?;
     let deadline = Instant::now() + agent.timeout;
     loop {
@@ -204,12 +205,11 @@ impl ObserverHost for LocalObserver {
     fn write(&self, path: &Path, contents: &str) -> Result<()> {
         Ok(fs::write(path, contents)?)
     }
-    fn output(&self, dir: &Path) -> String {
-        // Both streams as before, with a line boundary so stderr
-        // diagnostics cannot be joined onto a partial stdout line.
-        let stdout = fs::read_to_string(dir.join("output.out")).unwrap_or_default();
-        let stderr = fs::read_to_string(dir.join("output.err")).unwrap_or_default();
-        format!("{stdout}\n{stderr}")
+    fn output(&self, dir: &Path) -> (String, String) {
+        (
+            fs::read_to_string(dir.join("output.out")).unwrap_or_default(),
+            fs::read_to_string(dir.join("output.err")).unwrap_or_default(),
+        )
     }
     fn launch(&self, checkout: Option<&Path>) -> ActorLaunch {
         observer_launch(checkout)

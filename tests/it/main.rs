@@ -58,6 +58,7 @@ mod lifecycle_replace;
 mod lifecycle_up;
 mod location;
 mod main_checkout;
+mod observer_codex;
 mod plan_review;
 mod plan_review_codex;
 mod plan_review_concern;

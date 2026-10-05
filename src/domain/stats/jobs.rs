@@ -149,7 +149,7 @@ fn review_key(event: &RunEvent) -> Option<String> {
 
 /// The kind of job an event ends, its key, whether it failed and its
 /// verdict; `None` for an event that ends no job (an observation skipped
-/// without its agent).
+/// without its agent, or one no provider could run).
 fn end_of(event: &RunEvent) -> Option<(&'static str, String, bool, Option<String>)> {
     let run = || event.run_id.as_ref().map(|run| run.as_str().to_owned());
     let payload = &event.payload;
@@ -187,6 +187,9 @@ fn end_of(event: &RunEvent) -> Option<(&'static str, String, bool, Option<String
         event_kind::GOAL_REVIEW_FAILED => {
             Some(("goal_review", text(payload, "goal_review_id")?, true, None))
         }
+        // An observation no provider could run started no agent either
+        // (task 1223).
+        event_kind::OBSERVE_FINISHED if payload["unavailable"] == true => None,
         event_kind::OBSERVE_FINISHED => match payload["outcome"].as_str() {
             Some("skipped") => None,
             outcome => Some((
@@ -644,6 +647,44 @@ mod tests {
         assert_eq!(json["count"], 0);
         assert!(json.get("secs_values").is_none());
         assert_eq!(json["by_provider"], json!({}));
+    }
+
+    /// A Codex observation (task 1223): its start names no session and its
+    /// end the thread and the model, so it counts under Codex and its
+    /// model; one no provider could run (`--no-claude`, Codex unusable)
+    /// started no agent and is no job.
+    #[test]
+    fn a_codex_observation_is_counted_under_codex_and_its_model() {
+        let events = [
+            event(
+                1,
+                event_kind::OBSERVE_STARTED,
+                None,
+                json!({"mode": "hourly", "dir": "/q/observer/1", "session_id": null,
+                       "launch": {"provider": "codex"}}),
+            ),
+            event(
+                2,
+                event_kind::OBSERVE_FINISHED,
+                None,
+                json!({"mode": "hourly", "dir": "/q/observer/1", "outcome": "succeeded",
+                       "session_id": "codex-thread-1", "model": "gpt-6-astra",
+                       "duration_secs": 30}),
+            ),
+            event(
+                3,
+                event_kind::OBSERVE_FINISHED,
+                None,
+                json!({"mode": "hourly", "dir": null, "outcome": "error", "unavailable": true,
+                       "error": "the observer could not start: provider_disabled"}),
+            ),
+        ];
+        let stats = jobs(&events, EventId::new(0), EventId::new(3), |_| true);
+        let observer = &stats["observer"];
+        assert_eq!((observer.all.count, observer.all.failed), (1, 0));
+        assert_eq!(observer.by_provider["codex"].count, 1);
+        assert!(!observer.by_provider.contains_key("claude"));
+        assert_eq!(observer.by_model["gpt-6-astra"].count, 1);
     }
 
     /// A Codex throughput review (task 1220): its start names no session

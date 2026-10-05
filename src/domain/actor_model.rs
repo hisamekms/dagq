@@ -47,13 +47,14 @@ impl ModelRole {
 pub const ROLE_PROVIDER: Provider = Provider::Claude;
 
 /// The roles Codex has an implementation for (ADR-t1063-1 decisions 1
-/// and 7): goal, run and plan reviews and the throughput review. Claude
-/// runs every role.
-pub const CODEX_ROLES: [ModelRole; 4] = [
+/// and 7): goal, run and plan reviews, the throughput review and the
+/// observer (ADR-t1222-1, task 1223). Claude runs every role.
+pub const CODEX_ROLES: [ModelRole; 5] = [
     ModelRole::GoalReview,
     ModelRole::Review,
     ModelRole::PlanReview,
     ModelRole::ThroughputReview,
+    ModelRole::Observer,
 ];
 
 /// Whether `provider` can run a session of `role`.
@@ -494,7 +495,8 @@ mod tests {
     }
 
     /// `[roles.<role>]`'s `provider` (ADR-t1063-1 decision 1, ADR-t1207-1):
-    /// Codex runs the goal, run, plan and throughput reviews, with a model of its own or its
+    /// Codex runs the goal, run, plan and throughput reviews and the
+    /// observer, with a model of its own or its
     /// default, and the effort `medium` unless given; a role that names no
     /// provider runs on Claude and does not move.
     #[test]
@@ -532,6 +534,7 @@ mod tests {
         review.entry(ModelRole::Review).provider = Some(Provider::Codex);
         review.entry(ModelRole::PlanReview).provider = Some(Provider::Codex);
         review.entry(ModelRole::ThroughputReview).provider = Some(Provider::Codex);
+        review.entry(ModelRole::Observer).provider = Some(Provider::Codex);
         assert!(review.check().is_ok());
         review.entry(ModelRole::Recovery).provider = Some(Provider::Codex);
         let error = review.check().unwrap_err();
@@ -546,6 +549,7 @@ mod tests {
                         | ModelRole::Review
                         | ModelRole::PlanReview
                         | ModelRole::ThroughputReview
+                        | ModelRole::Observer
                 )
             );
         }
@@ -620,8 +624,8 @@ mod tests {
         assert_eq!(moved.provider, Provider::Codex);
         // A run review whose `[roles.review]` names Claude moves to Codex
         // when Claude cannot be used, as the supervisor's review route does
-        // (ADR-t1207-1), and so do a plan review and a throughput review; a
-        // recovery job, which Codex does not run, waits.
+        // (ADR-t1207-1), and so do a plan review, a throughput review and
+        // the observer; a recovery job, which Codex does not run, waits.
         let review = ActorLaunch::default_of(ModelRole::Review);
         let JobRoute::Start(moved) = job_route(&review, true, no_claude) else {
             panic!("moved the review to Codex");
@@ -635,6 +639,11 @@ mod tests {
         let throughput = ActorLaunch::default_of(ModelRole::ThroughputReview);
         let JobRoute::Start(moved) = job_route(&throughput, true, no_claude) else {
             panic!("moved the throughput review to Codex");
+        };
+        assert_eq!(moved.provider, Provider::Codex);
+        let observer = ActorLaunch::default_of(ModelRole::Observer);
+        let JobRoute::Start(moved) = job_route(&observer, true, no_claude) else {
+            panic!("moved the observer to Codex");
         };
         assert_eq!(moved.provider, Provider::Codex);
         let recovery = ActorLaunch::default_of(ModelRole::Recovery);

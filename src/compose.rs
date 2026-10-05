@@ -3910,7 +3910,7 @@ pub fn open_queue_read_only(db: &Path) -> Result<SqliteQueue> {
 pub fn observe(
     db: &Path,
     provider: &dyn AgentProvider,
-    signals: &dyn crate::application::AgentSignals,
+    signals: Option<&dyn crate::application::AgentSignals>,
     options: &crate::application::observer::ObserveOptions,
 ) -> Result<Value> {
     let db = db
@@ -4012,6 +4012,19 @@ pub fn throughput_review_launch(db: &Path) -> Result<crate::domain::actor_model:
     )?;
     let checkout = bound_checkout(&queue)?;
     Ok(crate::infrastructure::throughput_review::review_launch(
+        checkout.as_deref(),
+    ))
+}
+
+/// What the observer starts with when no supervisor routed it (a command
+/// typed by hand): `[roles.observer]` of the bound checkout's `dagq.toml`.
+pub fn observer_launch(db: &Path) -> Result<crate::domain::actor_model::ActorLaunch> {
+    let queue = SqliteQueue::open(
+        &db.canonicalize()
+            .context("queue must already be initialized")?,
+    )?;
+    let checkout = bound_checkout(&queue)?;
+    Ok(crate::infrastructure::observer::observer_launch(
         checkout.as_deref(),
     ))
 }

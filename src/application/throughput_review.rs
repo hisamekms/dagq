@@ -431,7 +431,7 @@ fn review_period<Q: Queue + EventReads>(
         Ok(Some(0)) => ("succeeded", Some(0), None),
         Ok(code) => ("failed", code, None),
         Err(error) => {
-            if error.to_string() == "start the throughput review's agent" {
+            if crate::application::observer::not_started(&error, "the throughput review") {
                 start_failure = Some(crate::application::job_start_failure(&error));
             }
             ("error", None, Some(format!("{error:#}")))
