@@ -256,6 +256,10 @@ pub struct SearchHit {
     /// the other kinds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change: Option<super::TaskChange>,
+    /// A goal's tags (ADR-t1639-1 decision 6), empty for a goal without
+    /// one; none for the other kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<super::GoalTag>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]

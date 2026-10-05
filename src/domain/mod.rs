@@ -887,6 +887,7 @@ pub mod follow_up;
 pub mod forecast;
 pub mod goal;
 pub mod goal_review;
+pub mod goal_tag;
 pub mod headless_job;
 pub mod host_metrics;
 pub mod idle_process;
@@ -962,6 +963,7 @@ pub use follow_up::{
     follow_up_category, follow_up_membership_proposal,
 };
 pub use goal::{Goal, StrandedDependency};
+pub use goal_tag::{GoalTag, TagSet};
 pub use ids::{
     AskId, CommitSha, EventId, FindingId, GoalId, LeaseToken, PlannerId, ProposalId, RequestId,
     RunId, TaskId,

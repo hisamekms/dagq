@@ -50,6 +50,7 @@ pub fn new_goal(title: &str) -> NewGoal {
         constraints: "Keep the module boundary".into(),
         doc: Some("docs/adr/0009-goal-groups-tasks.md".into()),
         draft: false,
+        tags: Vec::new(),
     }
 }
 

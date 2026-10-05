@@ -678,7 +678,7 @@ fn search_prints_hits_with_excerpts_and_checks_its_filters() {
         goal["hits"][0],
         serde_json::json!({
             "kind": "goal", "id": 1, "status": "open", "title": "重複を見つける",
-            "field": "acceptance", "excerpt": "«上位» 5 件に出る",
+            "field": "acceptance", "excerpt": "«上位» 5 件に出る", "tags": [],
         })
     );
     let full = ok(

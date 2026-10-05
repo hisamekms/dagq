@@ -209,6 +209,26 @@ pub enum DomainError {
         task_id: TaskId,
         changes: Vec<String>,
     },
+    /// A goal's tag is not a lowercase slug (ADR-t1639-1 decision 6).
+    InvalidGoalTag {
+        tag: String,
+    },
+    /// A goal names the same tag twice.
+    GoalTagRepeated {
+        tag: String,
+    },
+    /// A tag outside the repository's set, `[goals] tags` of dagq.toml
+    /// (ADR-t1639-1 decision 6).
+    GoalTagNotInSet {
+        tag: String,
+        tags: Vec<String>,
+    },
+    /// The repository names a set of tags and a draft goal submitted for
+    /// plan review has none (ADR-t1639-1 decision 6).
+    GoalTagMissing {
+        goal_id: GoalId,
+        tags: Vec<String>,
+    },
     /// A worker provider that has no such mode (ADR-t813-1 decision 7:
     /// Codex runs headless only).
     WorkerModeUnsupported {
@@ -567,6 +587,21 @@ impl fmt::Display for DomainError {
                 f,
                 "task {task_id} declares no change; [tasks] changes of dagq.toml requires one of {} (edit {task_id} --change CHANGE)",
                 changes.join(", ")
+            ),
+            Self::InvalidGoalTag { tag } => write!(
+                f,
+                "goal tag {tag:?} must be a slug of lowercase letters, digits, '-' and '_' of at most 64 bytes"
+            ),
+            Self::GoalTagRepeated { tag } => write!(f, "goal tag {tag:?} is given twice"),
+            Self::GoalTagNotInSet { tag, tags } => write!(
+                f,
+                "tag {tag:?} is not one of [goals] tags of dagq.toml: {}",
+                tags.join(", ")
+            ),
+            Self::GoalTagMissing { goal_id, tags } => write!(
+                f,
+                "draft goal {goal_id} has no tag; [goals] tags of dagq.toml requires one of {} (goal edit {goal_id} --tag TAG)",
+                tags.join(", ")
             ),
             Self::WorkerModeUnsupported { provider, mode } => write!(
                 f,

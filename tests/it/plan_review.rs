@@ -1611,6 +1611,7 @@ pub(crate) fn open_goal(queue: &mut SqliteQueue) -> dagq::domain::GoalId {
             constraints: "no new tables".into(),
             doc: None,
             draft: false,
+            tags: Vec::new(),
         })
         .unwrap()
         .id()

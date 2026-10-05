@@ -1794,11 +1794,20 @@ enum GoalCommand {
         /// urgent, high, normal or low.
         #[arg(long, default_value = "normal", value_parser = PRIORITIES)]
         priority: String,
+        /// A tag naming what the goal is about (ADR-t1639-1); repeatable. With `[goals] tags` in
+        /// dagq.toml, one of them.
+        #[arg(long = "tag")]
+        tags: Vec<String>,
     },
     /// Open a draft goal so the supervisor may claim its ready tasks.
     Ready { id: i64 },
-    /// List goals with their status and task counts by status.
-    List,
+    /// List goals with their status, priority, tags and task counts by status: the open and draft
+    /// goals first, then by priority (highest first), then by ID.
+    List {
+        /// Only the goals with this tag; repeatable, any of them.
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+    },
     /// Show a goal, its tasks, and the kinds of its latest 10 events; long
     /// texts are cut to 300 characters (ending in `…`, with `truncated: true`).
     Show {
@@ -1826,6 +1835,13 @@ enum GoalCommand {
         /// of their own take it at their next claim (ADR-t1639-1).
         #[arg(long, group = "field", value_parser = PRIORITIES)]
         priority: Option<String>,
+        /// The tags that replace the goal's (ADR-t1639-1); repeatable. With `[goals] tags` in
+        /// dagq.toml, each one of them.
+        #[arg(long = "tag", group = "field", conflicts_with = "no_tags")]
+        tags: Vec<String>,
+        /// Remove every tag of the goal.
+        #[arg(long, group = "field")]
+        no_tags: bool,
     },
     /// Record the verdict once. `achieved` needs every task completed or canceled; `abandoned` needs no task in progress.
     Close {
@@ -1882,6 +1898,15 @@ fn request_words(
     Ok(Some(words))
 }
 
+/// The goal tags given on the command line (`--tag`), each checked for its
+/// form (ADR-t1639-1 decision 6).
+fn goal_tags(tags: &[String]) -> Result<Vec<dagq::domain::GoalTag>> {
+    Ok(tags
+        .iter()
+        .map(|tag| tag.parse())
+        .collect::<Result<_, _>>()?)
+}
+
 /// A run named on the command line, or [`Resource::Unresolved`] when its
 /// id cannot be read: no owner matches it (fail closed).
 fn run_resource(run: &str) -> Resource {
@@ -1933,7 +1958,7 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
         | Command::Planners { .. }
         | Command::Lint { .. }
         | Command::Goal {
-            command: GoalCommand::List | GoalCommand::Show { .. },
+            command: GoalCommand::List { .. } | GoalCommand::Show { .. },
         }
         | Command::Observe { history: true, .. }
         | Command::Observe { input: Some(_), .. } => queue(C::QueueRead),
@@ -2017,7 +2042,7 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
             GoalCommand::Review { id } => {
                 one(C::GoalReviewRequest, Resource::Goal(GoalId::new(*id)))
             }
-            GoalCommand::List | GoalCommand::Show { .. } => queue(C::QueueRead),
+            GoalCommand::List { .. } | GoalCommand::Show { .. } => queue(C::QueueRead),
         },
         Command::Note {
             task, run, goal, ..
@@ -2257,7 +2282,7 @@ fn authorized_in_application(command: &Command) -> bool {
             command: ProposalCommand::Withdraw { .. },
         } => true,
         Command::Goal { command } => {
-            !matches!(command, GoalCommand::List | GoalCommand::Show { .. })
+            !matches!(command, GoalCommand::List { .. } | GoalCommand::Show { .. })
         }
         // The asks, answers, notes, marks and findings (task 733).
         Command::Ask { .. }
@@ -2545,8 +2570,8 @@ fn queue_read(command: &Command) -> Option<QueueRead> {
             limit,
         }),
         Command::Goal {
-            command: GoalCommand::List,
-        } => QueueRead::GoalList,
+            command: GoalCommand::List { tags },
+        } => QueueRead::GoalList(reads::GoalListRead { tag: tags }),
         Command::Goal {
             command: GoalCommand::Show { id, full },
         } => QueueRead::GoalShow(reads::GoalShowRead { id, full }),
@@ -3029,6 +3054,17 @@ fn execute(cli: Cli) -> Result<Value> {
         let changes = dagq::compose::task_changes(&queue)?;
         queue = queue.with_changes(changes);
     }
+    // The repository's set of goal tags holds the goals the planning
+    // commands register, edit and submit (ADR-t1639-1 decision 6).
+    if matches!(
+        cli.command,
+        Command::Goal {
+            command: GoalCommand::Add { .. } | GoalCommand::Edit { .. }
+        } | Command::Submit { .. }
+    ) {
+        let tags = dagq::compose::goal_tags(&queue)?;
+        queue = queue.with_goal_tags(tags);
+    }
     // The planning commands run as the caller through the application,
     // which authorizes each before it changes the queue (task 732).
     macro_rules! planning {
@@ -3238,6 +3274,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 doc,
                 draft,
                 priority,
+                tags,
             } => serde_json::to_value(planning!().add_goal(NewGoal {
                 title,
                 description,
@@ -3246,11 +3283,12 @@ fn execute(cli: Cli) -> Result<Value> {
                 doc,
                 draft,
                 priority: priority.parse()?,
+                tags: goal_tags(&tags)?,
             })?)?,
             GoalCommand::Ready { id } => {
                 serde_json::to_value(planning!().ready_goal(GoalId::new(id))?)?
             }
-            GoalCommand::List | GoalCommand::Show { .. } => {
+            GoalCommand::List { .. } | GoalCommand::Show { .. } => {
                 unreachable!("a read is answered above")
             }
             GoalCommand::Edit {
@@ -3261,17 +3299,24 @@ fn execute(cli: Cli) -> Result<Value> {
                 constraints,
                 doc,
                 priority,
-            } => serde_json::to_value(planning!().edit_goal(
-                GoalId::new(id),
-                GoalEdit {
-                    title,
-                    description,
-                    acceptance,
-                    constraints,
-                    doc,
-                    priority: priority.as_deref().map(str::parse).transpose()?,
-                },
-            )?)?,
+                tags,
+                no_tags,
+            } => serde_json::to_value(
+                planning!().edit_goal(
+                    GoalId::new(id),
+                    GoalEdit {
+                        title,
+                        description,
+                        acceptance,
+                        constraints,
+                        doc,
+                        priority: priority.as_deref().map(str::parse).transpose()?,
+                        tags: (!tags.is_empty() || no_tags)
+                            .then(|| goal_tags(&tags))
+                            .transpose()?,
+                    },
+                )?,
+            )?,
             GoalCommand::Close { id, verdict } => serde_json::to_value(
                 planning!().close_goal(GoalId::new(id), verdict.parse::<GoalVerdict>()?)?,
             )?,

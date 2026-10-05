@@ -82,6 +82,7 @@ fn snapshots_are_recorded_at_the_day_a_moving_landing_and_a_start() {
                 constraints: "c".into(),
                 doc: None,
                 draft: false,
+                tags: Vec::new(),
             })
             .unwrap()
             .id();

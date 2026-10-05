@@ -4,8 +4,8 @@ type: design
 title: レイヤーとコンテキストの境界（contextごとの所有・判断・操作・公開するport・依存の向き・境界をまたぐtransaction・検査できる規則・今の違反）
 status: current
 created: 2026-10-04
-updated: 2026-10-05 # task 839: domain::broker_usage among the host operations modules; task 1662: the observation and analysis context points to the measurement design; task 1437; task 1632
-last_verified: 2026-10-05 # task 839; task 1615; task 1437; task 1632
+updated: 2026-10-05 # task 1641: domain::goal_tag among the planning modules; task 839: domain::broker_usage among the host operations modules; task 1662: the observation and analysis context points to the measurement design; task 1437; task 1632
+last_verified: 2026-10-05 # task 1641; task 839; task 1615; task 1437; task 1632
 scope: system
 related:
   - adr-t1545-1
@@ -63,7 +63,7 @@ goal・task・proposalと、その検査と採否（plan review・goal review・
 
 **判断**（domain）
 
-`domain::task`（`Task`・`TaskAction`）、`domain::goal`、`domain::proposal`、`domain::plan_review`、`domain::goal_review`、`domain::plan_request`、`domain::planner`、`domain::follow_up`、`domain::lint`、`domain::plan_quality`、`domain::prediction`、`domain::related`・`domain::search`、`domain::change`（taskの変更の宣言）。
+`domain::task`（`Task`・`TaskAction`）、`domain::goal`、`domain::proposal`、`domain::plan_review`、`domain::goal_review`、`domain::plan_request`、`domain::planner`、`domain::follow_up`、`domain::lint`、`domain::plan_quality`、`domain::prediction`、`domain::related`・`domain::search`、`domain::change`（taskの変更の宣言）、`domain::goal_tag`（goalのラベルとその語彙）。
 
 **操作**
 

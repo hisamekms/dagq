@@ -118,7 +118,9 @@ impl SqliteQueue {
                     (SELECT t.worker_mode FROM tasks t
                      WHERE search_index.kind = 'task' AND t.id = search_index.ref) AS worker_mode,
                     (SELECT t.change FROM tasks t
-                     WHERE search_index.kind = 'task' AND t.id = search_index.ref) AS change
+                     WHERE search_index.kind = 'task' AND t.id = search_index.ref) AS change,
+                    (SELECT g.tags FROM goals g
+                     WHERE search_index.kind = 'goal' AND g.id = search_index.ref) AS goal_tags
              FROM search_index WHERE {filter} ORDER BY {order} LIMIT ?"
         );
         let words: Vec<String> = terms.long.iter().chain(&terms.short).cloned().collect();
@@ -269,6 +271,10 @@ fn hit(row: &Row<'_>, terms: &[String], full: bool) -> rusqlite::Result<SearchHi
         change: row
             .get::<_, Option<String>>("change")?
             .and_then(|change| change.parse().ok()),
+        // A goal's tags as stored; none for the other kinds.
+        tags: row
+            .get::<_, Option<String>>("goal_tags")?
+            .map(|tags| serde_json::from_str(&tags).unwrap_or_default()),
         score: if full { row.get("score")? } else { None },
         fields,
     })

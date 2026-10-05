@@ -3932,6 +3932,7 @@ mod tests {
                 constraints: String::new(),
                 doc: None,
                 draft: false,
+                tags: Vec::new(),
             })
             .unwrap()
             .id();
@@ -4148,6 +4149,7 @@ mod tests {
                 constraints: String::new(),
                 doc: None,
                 draft: false,
+                tags: Vec::new(),
             })
             .unwrap()
             .id();
@@ -4257,6 +4259,7 @@ mod tests {
                 constraints: String::new(),
                 doc: None,
                 draft: false,
+                tags: Vec::new(),
             })
             .unwrap()
             .id();
@@ -4777,6 +4780,7 @@ mod tests {
                 constraints: String::new(),
                 doc: None,
                 draft: false,
+                tags: Vec::new(),
             })
             .unwrap();
         let first = task(&mut queue);

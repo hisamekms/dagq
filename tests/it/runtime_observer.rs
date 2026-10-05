@@ -605,6 +605,7 @@ fn supervisor_starts_the_observer_on_its_interval_without_a_run_slot() {
                 constraints: String::new(),
                 doc: None,
                 draft: false,
+                tags: Vec::new(),
             })
             .unwrap();
     }

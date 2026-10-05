@@ -571,6 +571,7 @@ mod tests {
             follow_up_memberships: Vec::new(),
             goal: Goal::restore(crate::domain::GoalRecord {
                 priority: Default::default(),
+                tags: Vec::new(),
                 id: GoalId::new(1),
                 title: "g".into(),
                 description: "x".repeat(TEXT_LIMIT * 2),

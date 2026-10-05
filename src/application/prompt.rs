@@ -4658,6 +4658,7 @@ mod tests {
         );
         let goal = Goal::restore(GoalRecord {
             priority: Default::default(),
+            tags: Vec::new(),
             id: GoalId::new(4),
             title: "upstream goal".into(),
             description: String::new(),
@@ -5510,6 +5511,7 @@ mod tests {
         case.goals = vec![
             Goal::restore(GoalRecord {
                 priority: Default::default(),
+                tags: Vec::new(),
                 id: GoalId::new(4),
                 title: "a huge goal".into(),
                 description: "g".repeat(300_000),
@@ -6688,6 +6690,7 @@ mod tests {
     fn prompt_describes_the_goal_the_context_and_its_company_and_keeps_one_shape_without_them() {
         let goal = Goal::restore(GoalRecord {
             priority: Default::default(),
+            tags: Vec::new(),
             id: GoalId::new(3),
             title: "goal title".into(),
             description: "goal description\nsecond line".into(),
@@ -6869,6 +6872,7 @@ mod tests {
     fn goal_of(id: i64, bytes: usize) -> Goal {
         Goal::restore(GoalRecord {
             priority: Default::default(),
+            tags: Vec::new(),
             id: GoalId::new(id),
             title: big("goal title", 2_000),
             description: big("goal description", bytes),

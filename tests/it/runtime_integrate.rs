@@ -441,6 +441,7 @@ fn review_writes_the_run_material_to_review_md_and_returns_only_its_size() {
             constraints: "goal constraints".into(),
             doc: None,
             draft: false,
+            tags: Vec::new(),
         })
         .unwrap();
     queue.set_goal(TaskId::new(1), Some(goal.id())).unwrap();
@@ -1572,6 +1573,7 @@ fn integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once() {
             constraints: String::new(),
             doc: None,
             draft: false,
+            tags: Vec::new(),
         })
         .unwrap();
     queue.set_goal(TaskId::new(1), Some(goal.id())).unwrap();

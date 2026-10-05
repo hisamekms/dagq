@@ -43,6 +43,7 @@ pub(crate) fn goal_done(fx: &Fixture) -> (GoalId, TaskId) {
             constraints: String::new(),
             doc: None,
             draft: false,
+            tags: Vec::new(),
         })
         .unwrap()
         .id();

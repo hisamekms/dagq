@@ -6,8 +6,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    CommitSha, DomainError, EvidenceCheck, GoalId, GoalStatus, GoalVerdict, Priority, Provider,
-    RunId, RunStatus, TaskChange, TaskId, TaskStatus, require, scope,
+    CommitSha, DomainError, EvidenceCheck, GoalId, GoalStatus, GoalTag, GoalVerdict, Priority,
+    Provider, RunId, RunStatus, TaskChange, TaskId, TaskStatus, require, scope,
     worker::{Worker, WorkerMode},
 };
 
@@ -118,11 +118,15 @@ pub struct NewGoal {
     /// What its tasks inherit (ADR-t1639-1 decision 1).
     #[serde(default)]
     pub priority: Priority,
+    /// Its tags, each once (ADR-t1639-1 decision 6).
+    #[serde(default)]
+    pub tags: Vec<GoalTag>,
 }
 
 impl NewGoal {
     pub fn validate(&self) -> Result<(), DomainError> {
-        require(!self.title.trim().is_empty(), || GOAL_TITLE_BLANK)
+        require(!self.title.trim().is_empty(), || GOAL_TITLE_BLANK)?;
+        super::goal_tag::check_distinct(&self.tags)
     }
 }
 
@@ -141,11 +145,15 @@ pub struct GoalEdit {
     pub doc: Option<String>,
     #[serde(default)]
     pub priority: Option<Priority>,
+    /// The tags that replace the goal's; an empty list removes every one.
+    #[serde(default)]
+    pub tags: Option<Vec<GoalTag>>,
 }
 
 impl GoalEdit {
     pub fn is_empty(&self) -> bool {
         self.priority.is_none()
+            && self.tags.is_none()
             && self.title.is_none()
             && self.description.is_none()
             && self.acceptance.is_none()
@@ -267,6 +275,7 @@ pub struct GoalRecord {
     pub constraints: String,
     pub doc: Option<String>,
     pub priority: Priority,
+    pub tags: Vec<GoalTag>,
     pub status: GoalStatus,
     pub closed_at: Option<String>,
     pub verdict: Option<GoalVerdict>,

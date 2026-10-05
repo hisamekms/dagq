@@ -2658,6 +2658,17 @@ pub fn task_changes(queue: &SqliteQueue) -> Result<Option<crate::domain::ChangeS
     }
 }
 
+/// The `[goals] tags` of the `dagq.toml` of the main checkout `queue` is
+/// bound to (ADR-t1639-1 decision 6), which `goal add`, `goal edit`,
+/// `submit` and `lint` hold the goals to; none for a queue bound to no
+/// checkout or without them.
+pub fn goal_tags(queue: &SqliteQueue) -> Result<Option<crate::domain::TagSet>> {
+    match bound_checkout(queue)? {
+        Some(checkout) => crate::infrastructure::run_env::load_goal_tags(&checkout),
+        None => Ok(None),
+    }
+}
+
 /// The `[areas]` of `checkout`'s `dagq.toml` and its Git for the landed
 /// commits' changes (ADR-t980-1); no checkout or no `[areas]` gives no run
 /// areas.
@@ -3397,6 +3408,9 @@ impl crate::application::queue_reads::QueueReadSources<SqliteQueue> for HostRead
     }
     fn changes(&self, queue: &SqliteQueue) -> Result<Option<crate::domain::ChangeSet>> {
         task_changes(queue)
+    }
+    fn goal_tags(&self, queue: &SqliteQueue) -> Result<Option<crate::domain::TagSet>> {
+        goal_tags(queue)
     }
     fn render_svg(&self, source: &str) -> Result<String> {
         render_svg(source)

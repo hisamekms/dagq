@@ -51,7 +51,7 @@ pub enum QueueRead {
     Findings(FindingsRead),
     Search(SearchRead),
     Related(RelatedRead),
-    GoalList,
+    GoalList(GoalListRead),
     GoalShow(GoalShowRead),
     Lint(LintRead),
     ObserveHistory(ObserveHistoryRead),
@@ -278,6 +278,25 @@ pub struct RelatedRead {
     pub status: Vec<String>,
     #[serde(default = "ten")]
     pub limit: u32,
+}
+
+/// `goal list`'s options: the tags a goal must carry one of (ADR-t1639-1
+/// decision 7), none for every goal.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoalListRead {
+    #[serde(default)]
+    pub tag: Vec<String>,
+}
+
+impl GoalListRead {
+    fn tags(&self) -> Result<Vec<crate::domain::GoalTag>> {
+        Ok(self
+            .tag
+            .iter()
+            .map(|tag| tag.parse())
+            .collect::<Result<_, _>>()?)
+    }
 }
 
 /// `goal show`'s options.
@@ -526,10 +545,7 @@ impl QueueRead {
             UseCase::Findings => Self::Findings(read(use_case, params)?),
             UseCase::Search => Self::Search(read(use_case, params)?),
             UseCase::Related => Self::Related(read(use_case, params)?),
-            UseCase::GoalList => {
-                none(use_case, params)?;
-                Self::GoalList
-            }
+            UseCase::GoalList => Self::GoalList(read(use_case, params)?),
             UseCase::GoalShow => Self::GoalShow(read(use_case, params)?),
             UseCase::Lint => Self::Lint(read(use_case, params)?),
             UseCase::ObserveHistory => Self::ObserveHistory(read(use_case, params)?),
@@ -651,10 +667,13 @@ impl QueueRead {
                 crate::application::observer::check_read(&read.observation, read.limit)
                     .map_err(|error| bad(format!("{error:#}")))?;
             }
+            Self::GoalList(read) => {
+                read.tags()
+                    .map_err(|error| bad(format!("goal list's tag: {error}")))?;
+            }
             Self::Candidates
             | Self::Stats(_)
             | Self::Marks(_)
-            | Self::GoalList
             | Self::GoalShow(_)
             | Self::ObserveHistory(_) => {}
         }
@@ -741,7 +760,10 @@ impl QueueRead {
                 UseCase::Related,
                 json!({"task": read.task, "status": read.status, "limit": read.limit}),
             ),
-            Self::GoalList => (UseCase::GoalList, json!({})),
+            // No `tag` without one, so a service from before `--tag`,
+            // which takes no params, still answers a plain `goal list`.
+            Self::GoalList(read) if read.tag.is_empty() => (UseCase::GoalList, json!({})),
+            Self::GoalList(read) => (UseCase::GoalList, json!({"tag": read.tag})),
             Self::GoalShow(read) => (UseCase::GoalShow, json!({"id": read.id, "full": read.full})),
             Self::Lint(read) => (
                 UseCase::Lint,
@@ -773,6 +795,9 @@ pub trait QueueReadSources<Q: ?Sized> {
     /// The repository's set of changes (ADR-t980-1), none without a
     /// checkout.
     fn changes(&self, queue: &Q) -> Result<Option<ChangeSet>>;
+    /// The repository's set of goal tags (ADR-t1639-1 decision 6), none
+    /// without a checkout.
+    fn goal_tags(&self, queue: &Q) -> Result<Option<crate::domain::TagSet>>;
     /// The SVG the host's d2 draws from `source`.
     fn render_svg(&self, source: &str) -> Result<String>;
     /// A page of an observation's input (`observe --input`).
@@ -935,7 +960,10 @@ where
                 usize::try_from(read.limit)?,
             )?)?
         }
-        QueueRead::GoalList => serde_json::to_value(queue.list_goals()?)?,
+        QueueRead::GoalList(read) => serde_json::to_value(crate::domain::goal::list(
+            queue.list_goals()?,
+            &read.tags()?,
+        ))?,
         QueueRead::GoalShow(read) => {
             let detail = queue.show_goal(GoalId::new(read.id))?;
             if read.full {
@@ -954,6 +982,7 @@ where
             // (ADR-t980-1).
             let mut input = queue.lint_input(&targets)?;
             input.changes = sources.changes(queue)?;
+            input.goal_tags = sources.goal_tags(queue)?;
             json!({"tasks": targets, "violations": crate::domain::lint::lint(&input)})
         }
         QueueRead::ObserveHistory(read) => observer::history(queue, read.limit)?,
@@ -1091,7 +1120,11 @@ mod tests {
         assert_eq!(kpi.changes, ["fix"]);
         assert_eq!(
             QueueRead::parse(UseCase::GoalList, &json!({})).unwrap(),
-            Some(QueueRead::GoalList)
+            Some(QueueRead::GoalList(GoalListRead::default()))
+        );
+        assert_eq!(
+            QueueRead::GoalList(GoalListRead::default()).request(),
+            (UseCase::GoalList, json!({}))
         );
         assert_eq!(
             QueueRead::parse(UseCase::ObserveHistory, &Value::Null).unwrap(),
@@ -1152,6 +1185,7 @@ mod tests {
                 json!({"task": 4, "status": ["ready"], "limit": 3}),
             ),
             (UseCase::GoalList, json!({})),
+            (UseCase::GoalList, json!({"tag": ["codex", "cmux"]})),
             (UseCase::GoalShow, json!({"id": 2, "full": true})),
             (UseCase::Lint, json!({"tasks": [1], "proposals": [2]})),
             (UseCase::ObserveHistory, json!({"limit": 4})),
@@ -1179,6 +1213,8 @@ mod tests {
             (UseCase::List, json!({"sql": "x"})),
             (UseCase::Candidates, json!({"x": 1})),
             (UseCase::GoalList, json!([1])),
+            (UseCase::GoalList, json!({"tag": ["Codex"]})),
+            (UseCase::GoalList, json!({"tags": ["codex"]})),
             (UseCase::Graph, json!({"format": "png"})),
             (UseCase::Graph, json!({"format": "svg"})),
             (UseCase::Kpi, json!({"change": ["Bad Change!"]})),

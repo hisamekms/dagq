@@ -1293,6 +1293,7 @@ mod tests {
                 constraints: String::new(),
                 doc: None,
                 draft: false,
+                tags: Vec::new(),
             })
             .unwrap()
             .id();

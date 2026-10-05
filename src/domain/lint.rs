@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 
 use super::{
-    ChangeSet, GoalId, GoalVerdict, Task, TaskId, TaskStatus, follow_up::MembershipGap,
-    scope::validate_path_globs,
+    ChangeSet, GoalId, GoalTag, GoalVerdict, TagSet, Task, TaskId, TaskStatus,
+    follow_up::MembershipGap, scope::validate_path_globs,
 };
 
 /// A rule [`lint`] checks; the snake-case name is the `code` it reports.
@@ -45,6 +45,13 @@ pub enum LintCode {
     /// The task's change is not one of the repository's set, which changed
     /// since it was declared.
     ChangeOutsideSet,
+    /// The repository names a set of goal tags (`[goals] tags`, ADR-t1639-1
+    /// decision 6) and the task's goal is a draft without a tag: submitting
+    /// it for plan review is refused.
+    MissingGoalTag,
+    /// The task's goal is a draft with a tag the repository's set of goal
+    /// tags no longer names.
+    GoalTagOutsideSet,
     /// Another task of the linted set has the same title (ignoring case
     /// and surrounding whitespace).
     DuplicateTitle,
@@ -86,6 +93,11 @@ pub struct LintInput {
     pub goals: BTreeMap<GoalId, Option<GoalVerdict>>,
     /// The repository's set of changes (ADR-t980-1); none checks no change.
     pub changes: Option<ChangeSet>,
+    /// The repository's set of goal tags (ADR-t1639-1 decision 6); none
+    /// checks no goal's tags.
+    pub goal_tags: Option<TagSet>,
+    /// The tags of every draft goal that is not closed.
+    pub draft_goal_tags: BTreeMap<GoalId, Vec<GoalTag>>,
     /// The follow_up targets whose membership judgement is missing,
     /// undecided or needs a recheck (ADR-t1504-2 decision 7).
     pub membership_gaps: BTreeMap<TaskId, MembershipGap>,
@@ -128,6 +140,17 @@ pub fn lint(input: &LintInput) -> Vec<LintViolation> {
         content_rules(task, &mut found);
         if let Some(changes) = &input.changes {
             change_rule(task, changes, &mut found);
+        }
+        if let (Some(set), Some(goal_id)) = (&input.goal_tags, task.goal_id())
+            && let Some(tags) = input.draft_goal_tags.get(&goal_id)
+            && let Err(error) = set.check_declared(goal_id, tags)
+        {
+            let code = if tags.is_empty() {
+                LintCode::MissingGoalTag
+            } else {
+                LintCode::GoalTagOutsideSet
+            };
+            found.push(violation(code, task, error.to_string()));
         }
         if let Some(gap) = input.membership_gaps.get(&task.id())
             && matches!(task.status(), TaskStatus::Draft | TaskStatus::Submitted)
@@ -360,6 +383,8 @@ mod tests {
             nodes,
             goals: BTreeMap::new(),
             changes: None,
+            goal_tags: None,
+            draft_goal_tags: BTreeMap::new(),
             membership_gaps: BTreeMap::new(),
         }
     }
@@ -555,6 +580,43 @@ mod tests {
         );
         let found = lint(&input);
         assert!(found[1].reason.contains("declares no change"), "{found:?}");
+    }
+
+    /// With the repository's set of goal tags (ADR-t1639-1 decision 6), a
+    /// task of a draft goal needs the goal to have a tag of the set; a task
+    /// of an open goal or of none is not checked, nor anything without a set.
+    #[test]
+    fn a_set_of_goal_tags_requires_one_on_a_draft_goal() {
+        let codex: GoalTag = "codex".parse().unwrap();
+        let cmux: GoalTag = "cmux".parse().unwrap();
+        let of = |id: i64, goal: i64| {
+            with(task(id, &format!("t{id}")), |r| {
+                r.goal_id = Some(GoalId::new(goal))
+            })
+        };
+        let mut input = input(
+            vec![of(1, 7), of(2, 8), of(3, 9), of(4, 10), task(5, "alone")],
+            vec![],
+        );
+        input.draft_goal_tags = BTreeMap::from([
+            (GoalId::new(7), vec![codex.clone()]),
+            (GoalId::new(8), vec![]),
+            (GoalId::new(9), vec![cmux]),
+        ]);
+        assert_eq!(codes(&input), []);
+        input.goal_tags = Some(TagSet::new(vec![codex]).unwrap());
+        assert_eq!(
+            codes(&input),
+            [
+                (2, LintCode::MissingGoalTag),
+                (3, LintCode::GoalTagOutsideSet)
+            ]
+        );
+        let found = lint(&input);
+        assert!(
+            found[0].reason.contains("draft goal 8 has no tag"),
+            "{found:?}"
+        );
     }
 
     #[test]

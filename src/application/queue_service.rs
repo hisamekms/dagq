@@ -1030,7 +1030,10 @@ mod tests {
             assert!(read.starts_with("Events(EventsRead"), "{read}");
             assert!(read.contains("full: true"), "{read}");
             let response = service.handle(&request(Some(token), UseCase::GoalList, Value::Null));
-            assert_eq!(response.result.unwrap()["read"], "GoalList");
+            assert_eq!(
+                response.result.unwrap()["read"],
+                "GoalList(GoalListRead { tag: [] })"
+            );
         }
         for (use_case, params) in [
             (UseCase::Stats, json!({"cmux": "/bin/sh"})),

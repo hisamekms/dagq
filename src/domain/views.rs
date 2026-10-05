@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    Ask, CommitSha, EventId, Goal, GoalId, GoalStatus, GoalVerdict, LeaseToken, Priority,
+    Ask, CommitSha, EventId, Goal, GoalId, GoalStatus, GoalTag, GoalVerdict, LeaseToken, Priority,
     PrioritySource, PushReport, RunId, SupervisorMode, Task, TaskId, TaskRun, TaskStatus,
 };
 
@@ -43,6 +43,11 @@ pub struct GoalSummary {
     pub id: GoalId,
     pub title: String,
     pub status: GoalStatus,
+    /// What its tasks without one of their own inherit (ADR-t1639-1
+    /// decision 1).
+    pub priority: Priority,
+    /// Its tags (ADR-t1639-1 decision 6).
+    pub tags: Vec<GoalTag>,
     pub closed: bool,
     pub verdict: Option<GoalVerdict>,
     pub tasks: TaskStatusCounts,

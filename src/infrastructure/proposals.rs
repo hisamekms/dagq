@@ -13,8 +13,8 @@ use serde_json::json;
 use super::sqlite::{enum_col, event, goal_event, read_goal, transition_task};
 use crate::domain::{
     Ask, ChangeSet, DomainError, GoalStatus, PlannerOwner, Proposal, ProposalId, ProposalRecord,
-    ProposalStatus, Submission, TaskAction, TaskId, TaskStatus, follow_up::reopened_material, goal,
-    proposal,
+    ProposalStatus, Submission, TagSet, TaskAction, TaskId, TaskStatus,
+    follow_up::reopened_material, goal, proposal,
 };
 
 /// Submit `submission` inside the caller's write transaction: its tasks
@@ -22,11 +22,14 @@ use crate::domain::{
 /// the proposal already holds) move from `draft` to `submitted` and join
 /// the proposal, recording `task_status_changed` and `task_submitted`
 /// (`goal_submitted` for a goal). With the repository's set of changes,
-/// every task that moves must declare one of them (ADR-t980-1).
+/// every task that moves must declare one of them (ADR-t980-1); with its
+/// set of goal tags, every draft goal submitted, or of a task that moves,
+/// must have one and only tags of the set (ADR-t1639-1 decision 6).
 pub(super) fn submit(
     conn: &Connection,
     submission: Submission,
     changes: Option<&ChangeSet>,
+    goal_tags: Option<&TagSet>,
     now: &str,
 ) -> Result<Proposal> {
     submission.validate()?;
@@ -112,6 +115,20 @@ pub(super) fn submit(
         for &task_id in &tasks {
             let task = super::sqlite::read_task(conn, task_id)?;
             changes.check_declared(task_id, task.change())?;
+        }
+    }
+    if let Some(goal_tags) = goal_tags {
+        let mut drafts = goals.clone();
+        for &task_id in &tasks {
+            drafts.extend(super::sqlite::read_task(conn, task_id)?.goal_id());
+        }
+        drafts.sort();
+        drafts.dedup();
+        for goal_id in drafts {
+            let goal = read_goal(conn, goal_id)?;
+            if goal.is_draft() {
+                goal_tags.check_declared(goal_id, goal.tags())?;
+            }
         }
     }
     // Whoever submits, a follow_up draft goes only with a current decided

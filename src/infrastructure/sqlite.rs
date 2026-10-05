@@ -23,9 +23,9 @@ use crate::{
         ChangeSet, ClaimOutcome, CommitSha, DomainError, EventId, Goal, GoalDetail, GoalEdit,
         GoalId, GoalPredecessor, GoalRecord, GoalSummary, GoalTask, GoalVerdict, LintInput,
         LintNode, NewGoal, NewNote, NewTask, NotePage, NoteQuery, NoteTarget, OBSERVATION_KIND,
-        Predecessor, Priority, Proposal, ProposalId, RunEvent, RunId, RunRecord, Submission, Task,
-        TaskAction, TaskChange, TaskDetail, TaskEdit, TaskId, TaskRecord, TaskRun, TaskStatus,
-        TaskStatusCounts,
+        Predecessor, Priority, Proposal, ProposalId, RunEvent, RunId, RunRecord, Submission,
+        TagSet, Task, TaskAction, TaskChange, TaskDetail, TaskEdit, TaskId, TaskRecord, TaskRun,
+        TaskStatus, TaskStatusCounts,
         actor::ActorContext,
         goal,
         provider_switch::{self, SwitchPhase, WorkerRoute},
@@ -98,6 +98,10 @@ pub struct SqliteQueue {
     /// ADR-t980-1) that `add`, `edit`, `submit` and `lint` hold the tasks
     /// to; none accepts any change and a task without one.
     pub(super) changes: Option<ChangeSet>,
+    /// The repository's set of goal tags (`[goals] tags` of dagq.toml,
+    /// ADR-t1639-1 decision 6) that `goal add`, `goal edit`, `submit` and
+    /// `lint` hold the goals to; none accepts any tag and a goal without one.
+    pub(super) goal_tags: Option<TagSet>,
 }
 
 impl SqliteQueue {
@@ -192,6 +196,7 @@ impl SqliteQueue {
             generators: queue.generators.clone(),
             actors,
             changes: queue.changes.clone(),
+            goal_tags: queue.goal_tags.clone(),
         };
         copy.apply(state.version, None)?;
         Ok((schema, ReadOnlyQueue::Readable(copy)))
@@ -289,6 +294,13 @@ impl SqliteQueue {
         self
     }
 
+    /// The queue holding the goals to the repository's set of tags
+    /// (ADR-t1639-1 decision 6); `None` holds them to none.
+    pub fn with_goal_tags(mut self, tags: Option<TagSet>) -> Self {
+        self.goal_tags = tags;
+        self
+    }
+
     pub fn generators(&self) -> &Generators {
         &self.generators
     }
@@ -343,6 +355,7 @@ impl SqliteQueue {
             generators: clock::system(),
             actors,
             changes: None,
+            goal_tags: None,
         })
     }
 
@@ -1163,6 +1176,9 @@ impl TaskStore for SqliteQueue {
     fn add_goal(&mut self, new: NewGoal) -> Result<Goal> {
         // Rejected before taking the write lock; `new` checks it again.
         new.validate()?;
+        if let Some(tags) = &self.goal_tags {
+            tags.check(&new.tags)?;
+        }
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1174,8 +1190,8 @@ impl TaskStore for SqliteQueue {
         let id = goal.id();
         tx.execute(
             "INSERT INTO goals(id, title, description, acceptance, constraints, doc, status,
-                               created_at, updated_at, priority)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                               created_at, updated_at, priority, tags)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             params![
                 id,
                 goal.title(),
@@ -1186,7 +1202,8 @@ impl TaskStore for SqliteQueue {
                 goal.status().as_str(),
                 goal.created_at(),
                 goal.updated_at(),
-                goal.priority().as_i64()
+                goal.priority().as_i64(),
+                serde_json::to_string(goal.tags())?
             ],
         )?;
         let result = read_goal(&tx, id)?;
@@ -1207,6 +1224,8 @@ impl TaskStore for SqliteQueue {
                 Ok(GoalSummary {
                     id: goal.id(),
                     status: goal.status(),
+                    priority: goal.priority(),
+                    tags: goal.tags().to_vec(),
                     closed: goal.is_closed(),
                     verdict: goal.verdict(),
                     tasks: task_counts(&self.conn, goal.id())?,
@@ -1255,6 +1274,9 @@ impl TaskStore for SqliteQueue {
 
     fn edit_goal(&mut self, goal_id: GoalId, edit: GoalEdit) -> Result<Goal> {
         ensure!(!edit.is_empty(), "goal edit changes nothing");
+        if let (Some(set), Some(tags)) = (&self.goal_tags, &edit.tags) {
+            set.check(tags)?;
+        }
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1265,7 +1287,7 @@ impl TaskStore for SqliteQueue {
         let new = goal::edit(old, edit)?;
         tx.execute(
             "UPDATE goals SET title=?1, description=?2, acceptance=?3, constraints=?4, doc=?5,
-             updated_at=?6, priority=?8 WHERE id=?7",
+             updated_at=?6, priority=?8, tags=?9 WHERE id=?7",
             params![
                 new.title(),
                 new.description(),
@@ -1274,7 +1296,8 @@ impl TaskStore for SqliteQueue {
                 new.doc(),
                 self.generators.clock.timestamp(),
                 goal_id,
-                new.priority().as_i64()
+                new.priority().as_i64(),
+                serde_json::to_string(new.tags())?
             ],
         )?;
         goal_event(
@@ -1355,6 +1378,7 @@ impl TaskStore for SqliteQueue {
         let tx = self.conn.unchecked_transaction()?;
         let mut input = read_lint_input(&tx, tasks)?;
         input.changes = self.changes.clone();
+        input.goal_tags = self.goal_tags.clone();
         Ok(input)
     }
 
@@ -1954,11 +1978,19 @@ fn read_lint_input(conn: &Connection, targets: &[TaskId]) -> Result<LintInput> {
             node.goal_dependencies.push(goal_id);
         }
     }
-    let goals = conn
+    let all_goals: Vec<Goal> = conn
         .prepare("SELECT * FROM goals")?
         .query_map([], goal_row)?
-        .map(|goal| goal.map(|goal| (goal.id(), goal.verdict())))
         .collect::<rusqlite::Result<_>>()?;
+    let goals = all_goals
+        .iter()
+        .map(|goal| (goal.id(), goal.verdict()))
+        .collect();
+    let draft_goal_tags = all_goals
+        .iter()
+        .filter(|goal| goal.is_draft())
+        .map(|goal| (goal.id(), goal.tags().to_vec()))
+        .collect();
     let mut membership_gaps = BTreeMap::new();
     for task in &targets {
         if let Some(gap) = super::follow_up_membership::membership_gap(conn, task.id())? {
@@ -1970,6 +2002,8 @@ fn read_lint_input(conn: &Connection, targets: &[TaskId]) -> Result<LintInput> {
         nodes,
         goals,
         changes: None,
+        goal_tags: None,
+        draft_goal_tags,
         membership_gaps,
     })
 }
@@ -2599,6 +2633,9 @@ fn goal_row(row: &Row<'_>) -> rusqlite::Result<Goal> {
         constraints: row.get("constraints")?,
         doc: row.get("doc")?,
         priority: Priority::from_i64(row.get("priority")?).map_err(restore_error)?,
+        tags: serde_json::from_str(&row.get::<_, String>("tags")?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
+        })?,
         status: enum_col(row, "status")?,
         closed_at: row.get("closed_at")?,
         verdict: verdict

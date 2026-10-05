@@ -5,8 +5,8 @@
 use serde::Serialize;
 
 use super::{
-    DomainError, GoalEdit, GoalId, GoalRecord, GoalStatus, GoalVerdict, NewGoal, Priority, TaskId,
-    TaskStatus, TaskStatusCounts, require,
+    DomainError, GoalEdit, GoalId, GoalRecord, GoalStatus, GoalSummary, GoalTag, GoalVerdict,
+    NewGoal, Priority, TaskId, TaskStatus, TaskStatusCounts, require,
 };
 
 impl GoalVerdict {
@@ -37,6 +37,9 @@ pub struct Goal {
     /// What the goal's tasks without a priority of their own inherit
     /// (ADR-t1639-1 decisions 1 and 2).
     priority: Priority,
+    /// What the goal is about, each once, in the order given (ADR-t1639-1
+    /// decision 6).
+    tags: Vec<GoalTag>,
     status: GoalStatus,
     /// Set together with `verdict` by the one close.
     closed_at: Option<String>,
@@ -63,6 +66,7 @@ impl Goal {
             constraints: new.constraints,
             doc: new.doc.filter(|d| !d.trim().is_empty()),
             priority: new.priority,
+            tags: new.tags,
             status: if new.draft {
                 GoalStatus::Draft
             } else {
@@ -76,10 +80,12 @@ impl Goal {
     }
 
     /// A stored goal as it was saved. Checked: a positive ID, a title that
-    /// is not blank, and a close time exactly when there is a verdict.
+    /// is not blank, tags given once, and a close time exactly when there
+    /// is a verdict.
     pub fn restore(record: GoalRecord) -> Result<Self, DomainError> {
         require_positive(record.id)?;
         require(!record.title.trim().is_empty(), || GOAL_TITLE_BLANK)?;
+        super::goal_tag::check_distinct(&record.tags)?;
         require(
             record.closed_at.is_some() == record.verdict.is_some(),
             || DomainError::GoalCloseInconsistent { goal_id: record.id },
@@ -92,6 +98,7 @@ impl Goal {
             constraints: record.constraints,
             doc: record.doc,
             priority: record.priority,
+            tags: record.tags,
             status: record.status,
             closed_at: record.closed_at,
             verdict: record.verdict,
@@ -126,6 +133,10 @@ impl Goal {
 
     pub fn priority(&self) -> Priority {
         self.priority
+    }
+
+    pub fn tags(&self) -> &[GoalTag] {
+        &self.tags
     }
 
     pub fn status(&self) -> GoalStatus {
@@ -195,11 +206,17 @@ pub fn check_accepts_dependents(goal: &Goal) -> Result<(), DomainError> {
 /// `goal` with the fields of `edit` replaced; a title must stay non-blank
 /// and an empty `doc` clears the reference. The priority changes only while
 /// the goal is a draft or open (ADR-t1639-1 decision 1): a closed goal has
-/// no tasks left to claim.
+/// no tasks left to claim. The tags replace the whole list, each once; an
+/// empty list removes them, and a closed goal's tags change too, so `goal
+/// list --tag` still finds it.
 pub fn edit(mut goal: Goal, edit: GoalEdit) -> Result<Goal, DomainError> {
     if let Some(priority) = edit.priority {
         check_accepts_tasks(&goal)?;
         goal.priority = priority;
+    }
+    if let Some(tags) = edit.tags {
+        super::goal_tag::check_distinct(&tags)?;
+        goal.tags = tags;
     }
     if let Some(title) = edit.title {
         require(!title.trim().is_empty(), || GOAL_TITLE_BLANK)?;
@@ -218,6 +235,18 @@ pub fn edit(mut goal: Goal, edit: GoalEdit) -> Result<Goal, DomainError> {
         goal.doc = Some(doc).filter(|d| !d.trim().is_empty());
     }
     Ok(goal)
+}
+
+/// `goal list` (ADR-t1639-1 decision 7): the goals that carry one of
+/// `tags` (all of them when `tags` is empty), the unclosed ones (open and
+/// draft, a draft without tasks included) before the closed ones, each part
+/// by priority, highest first, then by ID.
+pub fn list(mut goals: Vec<GoalSummary>, tags: &[GoalTag]) -> Vec<GoalSummary> {
+    if !tags.is_empty() {
+        goals.retain(|goal| goal.tags.iter().any(|tag| tags.contains(tag)));
+    }
+    goals.sort_by_key(|goal| (goal.closed, std::cmp::Reverse(goal.priority), goal.id));
+    goals
 }
 
 /// `goal ready`: a draft that is not closed opens, so its tasks become
@@ -345,6 +374,7 @@ mod tests {
             constraints: String::new(),
             doc: None,
             priority: Priority::Normal,
+            tags: Vec::new(),
             status,
             closed_at: verdict.map(|_| "2026-09-23T00:00:00Z".into()),
             verdict,
@@ -435,7 +465,8 @@ mod tests {
             serde_json::to_value(&draft).unwrap(),
             serde_json::json!({
                 "id": 1, "title": "g", "description": "", "acceptance": "",
-                "constraints": "", "doc": "docs/g.md", "priority": "normal", "status": "draft",
+                "constraints": "", "doc": "docs/g.md", "priority": "normal", "tags": [],
+                "status": "draft",
                 "closed_at": null, "verdict": null,
                 "created_at": "now", "updated_at": "now"
             })
@@ -473,6 +504,106 @@ mod tests {
             .to_string(),
             "goal ID must be positive"
         );
+    }
+
+    fn tag(value: &str) -> GoalTag {
+        value.parse().unwrap()
+    }
+
+    /// ADR-t1639-1 decision 6: the tags replace the whole list, each once,
+    /// and change on a closed goal too.
+    #[test]
+    fn an_edit_replaces_the_tags_given_once() {
+        let tagged = edit(
+            goal(None),
+            GoalEdit {
+                tags: Some(vec![tag("codex"), tag("cmux")]),
+                ..GoalEdit::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(tagged.tags(), [tag("codex"), tag("cmux")]);
+        let cleared = edit(
+            tagged,
+            GoalEdit {
+                tags: Some(Vec::new()),
+                ..GoalEdit::default()
+            },
+        )
+        .unwrap();
+        assert!(cleared.tags().is_empty());
+        assert_eq!(
+            edit(
+                cleared,
+                GoalEdit {
+                    tags: Some(vec![tag("a"), tag("a")]),
+                    ..GoalEdit::default()
+                },
+            )
+            .unwrap_err(),
+            DomainError::GoalTagRepeated { tag: "a".into() }
+        );
+        let closed = edit(
+            goal(Some(GoalVerdict::Abandoned)),
+            GoalEdit {
+                tags: Some(vec![tag("codex")]),
+                ..GoalEdit::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(closed.tags(), [tag("codex")]);
+        assert!(
+            Goal::restore(GoalRecord {
+                tags: vec![tag("a"), tag("a")],
+                ..record(GoalStatus::Open, None)
+            })
+            .is_err()
+        );
+        let new = NewGoal {
+            title: "g".into(),
+            description: String::new(),
+            acceptance: String::new(),
+            constraints: String::new(),
+            doc: None,
+            draft: false,
+            priority: Priority::Normal,
+            tags: vec![tag("b"), tag("b")],
+        };
+        assert!(Goal::new(GoalId::new(1), new, "now".into()).is_err());
+    }
+
+    /// ADR-t1639-1 decision 7: unclosed goals first, then priority
+    /// descending, then ID ascending; `--tag` keeps the goals with any.
+    #[test]
+    fn the_list_puts_unclosed_goals_first_by_priority_then_id() {
+        let summary = |id: i64, priority: Priority, closed: bool, tags: &[&str]| GoalSummary {
+            id: GoalId::new(id),
+            title: format!("g{id}"),
+            status: GoalStatus::Open,
+            priority,
+            tags: tags.iter().map(|t| tag(t)).collect(),
+            closed,
+            verdict: closed.then_some(GoalVerdict::Achieved),
+            tasks: TaskStatusCounts::default(),
+        };
+        let goals = vec![
+            summary(1, Priority::Low, false, &["codex"]),
+            summary(2, Priority::Interrupt, true, &["codex"]),
+            summary(3, Priority::High, false, &[]),
+            summary(4, Priority::Normal, false, &["cmux", "throughput"]),
+            summary(5, Priority::High, false, &["throughput"]),
+            summary(6, Priority::Low, true, &[]),
+        ];
+        let ids = |listed: Vec<GoalSummary>| -> Vec<i64> {
+            listed.iter().map(|goal| goal.id.as_i64()).collect()
+        };
+        assert_eq!(ids(list(goals.clone(), &[])), [3, 5, 4, 1, 2, 6]);
+        assert_eq!(ids(list(goals.clone(), &[tag("codex")])), [1, 2]);
+        assert_eq!(
+            ids(list(goals.clone(), &[tag("throughput"), tag("codex")])),
+            [5, 4, 1, 2]
+        );
+        assert!(list(goals, &[tag("enterprise")]).is_empty());
     }
 
     #[test]
@@ -527,6 +658,7 @@ mod tests {
                 constraints: Some("c".into()),
                 doc: Some("x.md".into()),
                 priority: None,
+                tags: None,
             },
         )
         .unwrap();

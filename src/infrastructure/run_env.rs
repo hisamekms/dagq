@@ -20,6 +20,8 @@
 //! ADR-t1479-1). `[areas]` maps the
 //! areas `stats` and `kpi` split the landed runs by to globs (ADR-t980-1),
 //! and `[tasks] changes` names the set of changes a task declares one of.
+//! `[goals] tags` names the set of tags a goal's tags are taken from
+//! (ADR-t1639-1 decision 6).
 //! `[e2e] paths` names, as globs, the paths whose change requires `e2e` of
 //! a run (ADR-t963-1 decision 2). `[broker]` holds the resource broker's
 //! mode and the limits of its server (ADR-t827-4 decision 4).
@@ -40,7 +42,7 @@ use std::{
 use crate::{
     application::{Exit, Verifier},
     domain::{
-        ChangeSet, TaskChange,
+        ChangeSet, GoalTag, TagSet, TaskChange,
         actor_model::{ModelRole, RoleModel, RoleModels, check_effort},
         areas::AreaMap,
         background_wrapper::HeadlessWrapper,
@@ -101,6 +103,11 @@ const AREAS_TABLE: &str = "areas";
 const TASKS_TABLE: &str = "tasks";
 /// The one key of `[tasks]`.
 const TASKS_CHANGES: &str = "changes";
+/// `[goals]`: `tags`, the repository's set of goal tags (ADR-t1639-1
+/// decision 6).
+const GOALS_TABLE: &str = "goals";
+/// The one key of `[goals]`.
+const GOALS_TAGS: &str = "tags";
 /// `[e2e]`: `paths`, the globs whose change requires `e2e` of a run
 /// (ADR-t963-1 decision 2).
 const E2E_TABLE: &str = "e2e";
@@ -125,7 +132,7 @@ const REVIEW_SUBAGENT_PATHS: &str = "paths";
 const HEADLESS_TABLE: &str = "headless";
 /// The one key of `[headless]`.
 const HEADLESS_WRAPPER: &str = "wrapper";
-const TABLES: [&str; 17] = [
+const TABLES: [&str; 18] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
@@ -139,6 +146,7 @@ const TABLES: [&str; 17] = [
     SUPERVISOR_TABLE,
     AREAS_TABLE,
     TASKS_TABLE,
+    GOALS_TABLE,
     E2E_TABLE,
     BROKER_TABLE,
     BROKER_PACKAGE_TABLE,
@@ -173,8 +181,8 @@ pub fn parse_run_env(text: &str) -> Result<Vec<(String, String)>> {
 /// What the file holds: `[run.env]`, `[stall]` (ADR-0043 decision 4),
 /// `[conflicts]`, `[recheck]` (ADR-0068 decision 2), `[disk]` (ADR-0047
 /// decision 44), `[resume]` (ADR-0047 decision 24), `[exit]` (ADR-0047
-/// decision 25) and `[kpi]` (ADR-0051
-/// decisions 17 and 19).
+/// decision 25), `[kpi]` (ADR-0051 decisions 17 and 19), and the tables
+/// each field below names, `[tasks] changes` and `[goals] tags` among them.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Config {
     /// `[run.env]` as written, in file order, values unexpanded.
@@ -208,6 +216,8 @@ pub struct Config {
     pub areas: Option<AreaMap>,
     /// `[tasks] changes` (ADR-t980-1); `None` without it.
     pub changes: Option<ChangeSet>,
+    /// `[goals] tags` (ADR-t1639-1 decision 6); `None` without it.
+    pub goal_tags: Option<TagSet>,
     /// `[e2e] paths` (ADR-t963-1 decision 2); empty without it.
     pub e2e_paths: Vec<String>,
     /// `[broker]` (ADR-t827-4 decision 4), the defaults (mode `disabled`)
@@ -319,7 +329,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{E2E_TABLE}], [{BROKER_TABLE}], [{BROKER_PACKAGE_TABLE}], [{HEADLESS_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{BROKER_TABLE}], [{BROKER_PACKAGE_TABLE}], [{HEADLESS_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -390,6 +400,28 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     .with_context(with)?;
                 config.changes = Some(
                     ChangeSet::new(changes)
+                        .map_err(anyhow::Error::msg)
+                        .with_context(with)?,
+                );
+            }
+            Some(GOALS_TABLE) => {
+                ensure!(
+                    key == GOALS_TAGS,
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{GOALS_TABLE}]; the key is {GOALS_TAGS}"
+                );
+                ensure!(
+                    config.goal_tags.is_none(),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                let tags = parse_string_array(rest.trim())
+                    .with_context(with)?
+                    .iter()
+                    .map(|tag| tag.parse::<GoalTag>())
+                    .collect::<Result<Vec<_>, _>>()
+                    .with_context(with)?;
+                config.goal_tags = Some(
+                    TagSet::new(tags)
                         .map_err(anyhow::Error::msg)
                         .with_context(with)?,
                 );
@@ -756,7 +788,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 stall_keys.push(key.to_owned());
             }
             None => bail!(
-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{BROKER_TABLE}], [{BROKER_PACKAGE_TABLE}], [{HEADLESS_TABLE}] or [{KPI_TABLE}]"
+                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{BROKER_TABLE}], [{BROKER_PACKAGE_TABLE}], [{HEADLESS_TABLE}] or [{KPI_TABLE}]"
             ),
         }
     }
@@ -1066,6 +1098,20 @@ pub fn load_change_set(root: &Path) -> Result<Option<ChangeSet>> {
             parse_config(&text)
                 .with_context(|| format!("parse {}", path.display()))?
                 .changes
+        }
+        None => None,
+    })
+}
+
+/// `[goals] tags` of the `dagq.toml` in `root` (ADR-t1639-1 decision 6),
+/// `None` when there is no file or no such key.
+pub fn load_goal_tags(root: &Path) -> Result<Option<TagSet>> {
+    let path = root.join(CONFIG_FILE_NAME);
+    Ok(match read_config(&path)? {
+        Some(text) => {
+            parse_config(&text)
+                .with_context(|| format!("parse {}", path.display()))?
+                .goal_tags
         }
         None => None,
     })
@@ -1715,6 +1761,49 @@ mod tests {
         )
         .unwrap();
         assert!(load_headless_wrapper(dir.path()).is_err());
+    }
+
+    /// `[goals] tags` names the repository's set of goal tags (ADR-t1639-1
+    /// decision 6).
+    #[test]
+    fn parses_the_tags_of_the_goals_table() {
+        let config = parse_config("[goals]\ntags = [\"codex\", 'cmux'] # set\n").unwrap();
+        let tags = config.goal_tags.unwrap();
+        assert_eq!(
+            tags.values()
+                .iter()
+                .map(GoalTag::as_str)
+                .collect::<Vec<_>>(),
+            ["codex", "cmux"]
+        );
+        assert_eq!(parse_config("[goals]\n").unwrap().goal_tags, None);
+        assert_eq!(parse_config("").unwrap().goal_tags, None);
+        let error = |text: &str| format!("{:#}", parse_config(text).unwrap_err());
+        for (text, expected) in [
+            ("[goals]\nlabels = [\"a\"]\n", "unknown key labels"),
+            ("[goals]\ntags = [\"a\"]\ntags = [\"b\"]\n", "defined twice"),
+            ("[goals]\ntags = \"a\"\n", "expected an array"),
+            ("[goals]\ntags = [\"Codex\"]\n", "goal tag"),
+            ("[goals]\ntags = []\n", "names no tag"),
+            ("[goals]\ntags = [\"a\", \"a\"]\n", "twice"),
+            ("[goals]\ntags = [\"a\"]\n[goals]\n", "defined twice"),
+        ] {
+            let got = error(text);
+            assert!(got.contains(expected), "{text}: {got}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(load_goal_tags(dir.path()).unwrap(), None);
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[goals]\ntags = [\"codex\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            load_goal_tags(dir.path()).unwrap().unwrap().values().len(),
+            1
+        );
+        fs::write(dir.path().join(CONFIG_FILE_NAME), "[goals]\ntags = 1\n").unwrap();
+        assert!(load_goal_tags(dir.path()).is_err());
     }
 
     /// `[tasks] changes` names the repository's set of changes (ADR-t980-1).
@@ -2546,7 +2635,7 @@ LITERAL = 'no \n escapes # here'
         let error = format!("{:#}", load_supervisor_config(dir.path()).unwrap_err());
         assert!(
             error.contains(
-                "[supervisor], [areas], [tasks], [e2e], [broker], [broker.package], [headless] and [kpi]"
+                "[supervisor], [areas], [tasks], [goals], [e2e], [broker], [broker.package], [headless] and [kpi]"
             ),
             "{error}"
         );

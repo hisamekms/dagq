@@ -65,6 +65,7 @@ impl SqliteQueue {
             &tx,
             submission,
             self.changes.as_ref(),
+            self.goal_tags.as_ref(),
             &self.generators.clock.timestamp(),
         )?;
         link_findings(&tx, proposal.id(), workspace.as_deref(), findings, by, now)?;

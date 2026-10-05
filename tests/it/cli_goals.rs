@@ -508,3 +508,313 @@ fn a_goal_takes_a_priority_by_name_while_it_is_not_closed() {
         "normal"
     );
 }
+
+/// The queue at `db` bound to `repo`, so the commands read the `dagq.toml`
+/// of `repo` (ADR-t980-1, ADR-t1639-1 decision 6).
+fn bind(db: &Path, repo: &Path) {
+    let repository = dagq::infrastructure::adapters::GitRepository::inspect(repo).unwrap();
+    SqliteQueue::open(db)
+        .unwrap()
+        .bind_repository(
+            &dagq::infrastructure::adapters::path_text(&repository.common_dir).unwrap(),
+        )
+        .unwrap();
+}
+
+/// ADR-t1639-1 decision 6 without a set of tags: `goal add --tag` and
+/// `goal edit --tag` take any tag of the form, `--tag` replaces the whole
+/// list, `--no-tags` removes it, `goal_updated` records both, and `goal
+/// show` and `search` print them.
+#[test]
+fn a_goal_takes_tags_that_an_edit_replaces_or_removes() {
+    let (_dir, db) = queue();
+    let added = ok(
+        &db,
+        &[
+            "goal",
+            "add",
+            "tagged",
+            "--tag",
+            "codex",
+            "--tag",
+            "front-end_2",
+        ],
+    );
+    assert_eq!(added["tags"], serde_json::json!(["codex", "front-end_2"]));
+    assert_eq!(
+        ok(&db, &["goal", "add", "plain"])["tags"],
+        serde_json::json!([])
+    );
+    let long = "t".repeat(65);
+    for args in [
+        vec!["goal", "add", "bad", "--tag", "Codex"],
+        vec!["goal", "add", "bad", "--tag", "two words"],
+        vec!["goal", "add", "bad", "--tag", &long],
+        vec!["goal", "edit", "1", "--tag", "Codex"],
+    ] {
+        let error = refused(&db, &args);
+        assert!(error.contains("must be a slug"), "{args:?}: {error}");
+    }
+    assert_eq!(
+        refused(&db, &["goal", "add", "bad", "--tag", "a", "--tag", "a"]),
+        "goal tag \"a\" is given twice"
+    );
+    assert!(
+        !invoke(&db, &["goal", "edit", "1", "--tag", "a", "--no-tags"])
+            .status
+            .success()
+    );
+    assert_eq!(
+        ok(&db, &["goal", "show", "1"])["goal"]["tags"],
+        serde_json::json!(["codex", "front-end_2"])
+    );
+
+    let edited = ok(&db, &["goal", "edit", "1", "--tag", "cmux"]);
+    assert_eq!(edited["tags"], serde_json::json!(["cmux"]));
+    assert_eq!(edited["title"], "tagged");
+    let cleared = ok(&db, &["goal", "edit", "1", "--no-tags"]);
+    assert_eq!(cleared["tags"], serde_json::json!([]));
+    let updated: Vec<Value> = ok(&db, &["goal", "show", "1", "--full"])["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["kind"] == "goal_updated")
+        .map(|event| {
+            serde_json::json!([
+                event["payload"]["old"]["tags"],
+                event["payload"]["new"]["tags"]
+            ])
+        })
+        .collect();
+    assert_eq!(
+        updated,
+        [
+            serde_json::json!([["codex", "front-end_2"], ["cmux"]]),
+            serde_json::json!([["cmux"], []])
+        ]
+    );
+
+    // A closed goal's tags change too, and a search hit of a goal shows them.
+    ok(&db, &["goal", "edit", "2", "--tag", "throughput"]);
+    ok(&db, &["goal", "close", "2", "--verdict", "abandoned"]);
+    ok(
+        &db,
+        &["goal", "edit", "2", "--tag", "throughput", "--tag", "codex"],
+    );
+    let found = ok(&db, &["search", "plain"]);
+    assert_eq!(found["hits"][0]["kind"], "goal", "{found}");
+    assert_eq!(
+        found["hits"][0]["tags"],
+        serde_json::json!(["throughput", "codex"])
+    );
+    let untagged = ok(&db, &["search", "tagged"]);
+    assert_eq!(untagged["hits"][0]["tags"], serde_json::json!([]));
+    ok(&db, &["add", "tagged task"]);
+    let task_hit = ok(&db, &["search", "task", "--kind", "task"]);
+    assert!(task_hit["hits"][0].get("tags").is_none(), "{task_hit}");
+}
+
+/// ADR-t1639-1 decision 6 with `[goals] tags` in the bound checkout's
+/// dagq.toml: `goal add` and `goal edit` refuse a tag outside it, and
+/// `lint` and `submit` refuse a draft goal without a tag, moving nothing,
+/// until it has one.
+#[test]
+fn the_set_of_goal_tags_of_dagq_toml_holds_goal_add_edit_lint_and_submit() {
+    let (_fixture, repo, db) = crate::runtime_support::fixture();
+    bind(&db, &repo);
+    std::fs::write(
+        repo.join("dagq.toml"),
+        "[goals]\ntags = [\"codex\", \"throughput\"]\n",
+    )
+    .unwrap();
+    let outside = refused(&db, &["goal", "add", "outside", "--tag", "cmux"]);
+    assert!(outside.contains("not one of [goals] tags"), "{outside}");
+    assert!(outside.contains("codex, throughput"), "{outside}");
+    let draft = ok(&db, &["goal", "add", "untagged", "--draft"])["id"].to_string();
+    let refused_edit = refused(&db, &["goal", "edit", &draft, "--tag", "cmux"]);
+    assert!(
+        refused_edit.contains("not one of [goals] tags"),
+        "{refused_edit}"
+    );
+    let open = ok(&db, &["goal", "add", "open goal"])["id"].to_string();
+    let sound = ["--acceptance", "works", "--verify", "x"];
+    let member = ok(
+        &db,
+        &[&["add", "member", "--goal", &draft][..], &sound].concat(),
+    )["id"]
+        .to_string();
+    let other = ok(
+        &db,
+        &[&["add", "other", "--goal", &open][..], &sound].concat(),
+    )["id"]
+        .to_string();
+
+    // Only the task of the draft goal without a tag is linted.
+    let linted = ok(&db, &["lint", &member, &other]);
+    let violations = linted["violations"].as_array().unwrap();
+    assert_eq!(violations.len(), 1, "{linted}");
+    assert_eq!(violations[0]["code"], "missing_goal_tag");
+    assert_eq!(violations[0]["task_id"].to_string(), member);
+    let submitted = submit_from(&db, None, None, &["--goal", &draft]);
+    assert!(!submitted.status.success());
+    let stderr = String::from_utf8_lossy(&submitted.stderr);
+    assert!(
+        stderr.contains(&format!("draft goal {draft} has no tag")),
+        "{stderr}"
+    );
+    // By task ID too: the task's draft goal holds the whole submit.
+    let by_task = submit_from(&db, None, None, &[&member, &other]);
+    assert!(!by_task.status.success());
+    let stderr = String::from_utf8_lossy(&by_task.stderr);
+    assert!(
+        stderr.contains(&format!("draft goal {draft} has no tag")),
+        "{stderr}"
+    );
+    for id in [&member, &other] {
+        assert_eq!(ok(&db, &["show", id])["task"]["status"], "draft");
+    }
+    assert_eq!(
+        ok(&db, &["proposal", "list", "--all"])["proposals"],
+        serde_json::json!([])
+    );
+    // A task of an open goal is not held by the tags.
+    assert!(submit_from(&db, None, None, &[&other]).status.success());
+    assert_eq!(ok(&db, &["show", &other])["task"]["status"], "submitted");
+
+    ok(&db, &["goal", "edit", &draft, "--tag", "codex"]);
+    assert_eq!(
+        ok(&db, &["lint", &member, &other])["violations"],
+        serde_json::json!([])
+    );
+    // A tag the set no longer names is linted as outside it.
+    std::fs::write(repo.join("dagq.toml"), "[goals]\ntags = [\"throughput\"]\n").unwrap();
+    assert_eq!(
+        ok(&db, &["lint", &member])["violations"][0]["code"],
+        "goal_tag_outside_set"
+    );
+    std::fs::write(
+        repo.join("dagq.toml"),
+        "[goals]\ntags = [\"codex\", \"throughput\"]\n",
+    )
+    .unwrap();
+    assert!(
+        submit_from(&db, None, None, &["--goal", &draft])
+            .status
+            .success()
+    );
+    assert_eq!(ok(&db, &["show", &member])["task"]["status"], "submitted");
+
+    // Without the key, any tag of the form again, and a draft goal may
+    // have none.
+    std::fs::write(repo.join("dagq.toml"), "[goals]\n").unwrap();
+    assert_eq!(
+        ok(&db, &["goal", "add", "free", "--tag", "cmux"])["tags"],
+        serde_json::json!(["cmux"])
+    );
+    let bare = ok(&db, &["goal", "add", "bare", "--draft"])["id"].to_string();
+    let bare_task = ok(
+        &db,
+        &[&["add", "bare task", "--goal", &bare][..], &sound].concat(),
+    )["id"]
+        .to_string();
+    assert_eq!(
+        ok(&db, &["lint", &bare_task])["violations"],
+        serde_json::json!([])
+    );
+    assert!(
+        submit_from(&db, None, None, &["--goal", &bare])
+            .status
+            .success()
+    );
+}
+
+/// ADR-t1639-1 decision 7: `goal list` puts the open and draft goals
+/// before the closed ones, each part by priority (highest first) then ID,
+/// prints each goal's priority and tags, keeps a draft goal without tasks,
+/// and `--tag` keeps the goals with any of the tags given.
+#[test]
+fn goal_list_orders_by_priority_and_narrows_by_tag() {
+    let (_dir, db) = queue();
+    for args in [
+        &[
+            "goal",
+            "add",
+            "low codex",
+            "--priority",
+            "low",
+            "--tag",
+            "codex",
+        ][..],
+        &[
+            "goal",
+            "add",
+            "closed interrupt",
+            "--priority",
+            "interrupt",
+            "--tag",
+            "codex",
+        ][..],
+        &["goal", "add", "high plain", "--priority", "high"][..],
+        &[
+            "goal",
+            "add",
+            "normal two",
+            "--tag",
+            "cmux",
+            "--tag",
+            "throughput",
+        ][..],
+        &[
+            "goal",
+            "add",
+            "empty draft",
+            "--draft",
+            "--priority",
+            "high",
+            "--tag",
+            "throughput",
+        ][..],
+    ] {
+        ok(&db, args);
+    }
+    ok(&db, &["goal", "close", "2", "--verdict", "abandoned"]);
+    ok(&db, &["add", "a task", "--goal", "1"]);
+    let ids = |listed: &Value| -> Vec<i64> {
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|goal| goal["id"].as_i64().unwrap())
+            .collect()
+    };
+    let listed = ok(&db, &["goal", "list"]);
+    assert_eq!(ids(&listed), [3, 5, 4, 1, 2]);
+    let draft = &listed[1];
+    assert_eq!(
+        (&draft["status"], &draft["priority"], &draft["tags"]),
+        (
+            &serde_json::json!("draft"),
+            &serde_json::json!("high"),
+            &serde_json::json!(["throughput"])
+        )
+    );
+    assert_eq!(draft["tasks"]["total"], 0);
+    assert_eq!(listed[0]["tags"], serde_json::json!([]));
+    assert_eq!(listed[4]["priority"], "interrupt");
+    assert_eq!(listed[4]["closed"], true);
+
+    assert_eq!(ids(&ok(&db, &["goal", "list", "--tag", "codex"])), [1, 2]);
+    assert_eq!(
+        ids(&ok(
+            &db,
+            &["goal", "list", "--tag", "throughput", "--tag", "codex"]
+        )),
+        [5, 4, 1, 2]
+    );
+    assert_eq!(
+        ok(&db, &["goal", "list", "--tag", "enterprise"]),
+        serde_json::json!([])
+    );
+    let error = refused(&db, &["goal", "list", "--tag", "Codex"]);
+    assert!(error.contains("must be a slug"), "{error}");
+}

@@ -424,6 +424,7 @@ fn build(dir: &TempDir) -> (SqliteQueue, HashMap<i64, i64>, std::path::PathBuf) 
                         constraints: String::new(),
                         doc: None,
                         draft: false,
+                        tags: Vec::new(),
                     })
                     .unwrap()
                     .id()

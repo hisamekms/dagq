@@ -4,8 +4,8 @@ type: design
 title: Queue service
 status: current
 created: 2026-10-02
-updated: 2026-10-05 # task 840: broker package backend in the name note; task 1352: a service a test started stops once the test's process is gone (DAGQ_SERVICE_OWNER_PID, owner_gone)
-last_verified: 2026-10-05 # task 840; task 1352
+updated: 2026-10-05 # task 1641: goal_list's tag; task 840: broker package backend in the name note; task 1352: a service a test started stops once the test's process is gone (DAGQ_SERVICE_OWNER_PID, owner_gone)
+last_verified: 2026-10-05 # task 1641; task 840; task 1352
 scope: runtime
 tags:
   - security
@@ -115,7 +115,7 @@ queue全体の読み取り（ADR-t1233-5決定1〜3、task 1242）。1つの読�
 | `findings` | `findings` | `id`・`all`・`status`・`kind`（配列）・対象を高々1つ（`task`・`run`・`goal`か`queue: true`）・`full` |
 | `search` | `search QUERY` | `query`・`status`・`kind`・`goal`・`limit`（20）・`full` |
 | `related` | `related TASK` | `task`・`status`・`limit`（10） |
-| `goal_list` | `goal list` | なし |
+| `goal_list` | `goal list` | `tag`（配列。どれかを持つgoalだけ、形の合わないものはbad request） |
 | `goal_show` | `goal show ID` | `id`・`full` |
 | `lint` | `lint` | `tasks`・`proposals`（どちらかは要る） |
 | `observe_history` | `observe --history` | `limit`（`observer::HISTORY_LIMIT`） |

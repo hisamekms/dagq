@@ -816,3 +816,10 @@ task = 1439
 name = "runtime_review_questions::an_open_question_without_a_rewritten_receipt_holds_past_the_resume_timeout"
 reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: timeout hold decision; waits out its 6 s resume_timeout"
 task = 1360
+
+# 5.09s in it-tests.tsv (class B); 5.343s to 8.283s in 7 stress rounds
+# (task 1641, which only added a tags field to its NewGoal literal).
+[[test]]
+name = "runtime_forecast::snapshots_are_recorded_at_the_day_a_moving_landing_and_a_start"
+reason = "B 境界（守る境界）: supervisor の配線が forecast の snapshot を日・着地・起動で記録する（representative snapshot recording in supervisor）"
+task = 1641
