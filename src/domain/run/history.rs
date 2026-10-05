@@ -5,8 +5,10 @@
 //! limits) or on whether the run was approved. The events are read by the
 //! application; nothing here reads or writes them.
 
-use serde_json::Value;
-
+use super::payload::{
+    AskOf, AskOpened, FollowUpRegistered, HeadRewritten, IntegrationApproved, Parking, PushFailed,
+    ResumeFinished, RunRecovered, StatusOf, WorkspaceClosed, restore,
+};
 use crate::domain::resume::{ResumeConfig, ResumeCount};
 use crate::domain::{
     ASK_EVENT_KINDS, AskId, AttentionNext, EventId, MAX_RESUME_ATTEMPTS, MAX_REVISE_ATTEMPTS,
@@ -171,7 +173,7 @@ impl<'a> RunHistory<'a> {
     pub fn queued_approval(&self) -> Option<EventId> {
         let approved = self.events.iter().rev().find(|e| {
             e.kind == event_kind::INTEGRATION_APPROVED
-                && e.payload.get("ask_id").is_some_and(|id| !id.is_null())
+                && restore::<IntegrationApproved>(&e.payload).names_ask()
         })?;
         (!self.moved_on_after(approved.id)).then_some(approved.id)
     }
@@ -189,7 +191,7 @@ impl<'a> RunHistory<'a> {
                         | event_kind::RESUME_STARTED
                         | event_kind::LANDING_DECIDED
                 ) || e.kind == event_kind::ASK_OPENED
-                    && e.payload.get("kind").and_then(Value::as_str) == Some("approve_landing"))
+                    && restore::<AskOpened>(&e.payload).kind == Some("approve_landing"))
         })
     }
 
@@ -203,7 +205,7 @@ impl<'a> RunHistory<'a> {
     pub fn recovered_landing(&self) -> Option<RecoveredLanding> {
         let recovered = self.events.iter().rev().find(|e| {
             e.kind == event_kind::RUN_RECOVERED
-                && e.payload.get("previous_status").and_then(Value::as_str)
+                && restore::<RunRecovered>(&e.payload).previous_status
                     == Some(RunStatus::Integrating.as_str())
         })?;
         if self.moved_on_after(recovered.id) {
@@ -241,8 +243,9 @@ impl<'a> RunHistory<'a> {
                 event_kind::INTEGRATION_REBASED | event_kind::MIGRATION_RENUMBERED
             )
         }) {
-            if event.payload["head_before"].as_str() == Some(current.as_str())
-                && let Some(after) = event.payload["head_after"].as_str()
+            let rewritten: HeadRewritten = restore(&event.payload);
+            if rewritten.head_before == Some(current.as_str())
+                && let Some(after) = rewritten.head_after
             {
                 current = after.to_owned();
             }
@@ -270,7 +273,7 @@ impl<'a> RunHistory<'a> {
     pub fn approved_by_ask(&self, ask_id: AskId) -> bool {
         self.events.iter().any(|e| {
             e.kind == event_kind::INTEGRATION_APPROVED
-                && e.payload.get("ask_id").and_then(Value::as_i64) == Some(ask_id.as_i64())
+                && restore::<IntegrationApproved>(&e.payload).ask_id() == Some(ask_id.as_i64())
         })
     }
 
@@ -281,7 +284,7 @@ impl<'a> RunHistory<'a> {
         self.events
             .iter()
             .find(|e| e.kind == event_kind::INTEGRATION_APPROVED)
-            .is_none_or(|e| e.payload.get("push") != Some(&Value::Bool(false)))
+            .is_none_or(|e| restore::<IntegrationApproved>(&e.payload).push != Some(false))
     }
 
     /// The resumed sessions started (`resume_started`), split by whether
@@ -309,7 +312,7 @@ impl<'a> RunHistory<'a> {
             .rposition(|e| match e.kind.as_str() {
                 event_kind::RESUME_STARTED | event_kind::CONFLICT_RESOLVED => true,
                 event_kind::LANDING_DECIDED => {
-                    e.payload["status"] == RunStatus::NeedsSession.as_str()
+                    restore::<StatusOf>(&e.payload).status == Some(RunStatus::NeedsSession.as_str())
                 }
                 _ => false,
             })
@@ -398,7 +401,7 @@ impl<'a> RunHistory<'a> {
                 self.events.iter().any(|e| {
                     e.id > requested.id
                         && e.kind == event_kind::ASK_OPENED
-                        && e.payload["kind"] == "stuck_exit"
+                        && restore::<AskOpened>(&e.payload).kind == Some("stuck_exit")
                 })
             })
     }
@@ -440,20 +443,17 @@ impl<'a> RunHistory<'a> {
             .iter()
             .rev()
             .find(|e| PARKING.contains(&e.kind.as_str()) || recheck::parks(e))?;
-        let key = if event.kind == event_kind::TRIAGE_FINISHED
+        let parking: Parking = restore(&event.payload);
+        let reason = if event.kind == event_kind::TRIAGE_FINISHED
             || event.kind == event_kind::RECOVERY_PARKED
         {
-            "instruction"
+            parking.instruction
         } else {
-            "reason"
+            parking.reason
         };
-        let cause = if event.kind == event_kind::EVIDENCE_MISSING
-            || event.payload.get("checks").is_some()
-        {
+        let cause = if event.kind == event_kind::EVIDENCE_MISSING || parking.names_checks {
             ParkCause::EvidenceMissing
-        } else if event.kind == event_kind::SCOPE_VIOLATION
-            || event.payload.get("scope_violation").is_some()
-        {
+        } else if event.kind == event_kind::SCOPE_VIOLATION || parking.names_scope_violation {
             ParkCause::ScopeViolation
         } else if event.kind == event_kind::LANDING_DECIDED {
             ParkCause::SentBack
@@ -471,10 +471,7 @@ impl<'a> RunHistory<'a> {
         } else {
             ParkCause::Landing
         };
-        Some(Park {
-            cause,
-            reason: event.payload.get(key).and_then(Value::as_str),
-        })
+        Some(Park { cause, reason })
     }
 
     /// Whether the run was last parked by the landing, its recheck or
@@ -491,7 +488,8 @@ impl<'a> RunHistory<'a> {
         });
         parked.is_some_and(|e| e.kind != event_kind::LANDING_DECIDED)
             && last.is_some_and(|e| {
-                e.kind == event_kind::RESUME_FINISHED && e.payload["outcome"] == "unresolved"
+                e.kind == event_kind::RESUME_FINISHED
+                    && restore::<ResumeFinished>(&e.payload).outcome == Some("unresolved")
             })
     }
 
@@ -507,17 +505,15 @@ impl<'a> RunHistory<'a> {
         let Some(event) = self.last_of(&RESUMES) else {
             return ResumedSession::NotResumed;
         };
+        let finished: ResumeFinished = restore(&event.payload);
         if event.kind == event_kind::RESUME_FINISHED
-            && event.payload["status"] == RunStatus::Validating.as_str()
-            && let (Some(workspace), Some(attempt)) = (
-                event.payload["workspace_id"].as_str(),
-                event.payload["attempt"].as_u64(),
-            )
+            && finished.status == Some(RunStatus::Validating.as_str())
+            && let (Some(workspace), Some(attempt)) = (finished.workspace_id, finished.attempt)
         {
             let closed = self.events.iter().any(|e| {
                 e.id > event.id
                     && e.kind == event_kind::WORKSPACE_CLOSED
-                    && e.payload["workspace_id"] == workspace
+                    && restore::<WorkspaceClosed>(&e.payload).workspace_id == Some(workspace)
             });
             if !closed {
                 return ResumedSession::Open {
@@ -578,7 +574,7 @@ impl<'a> RunHistory<'a> {
         self.events
             .iter()
             .filter(|e| e.kind == event_kind::ASK_DELIVERY_FAILED)
-            .filter_map(|e| e.payload.get("ask_id").and_then(Value::as_i64))
+            .filter_map(|e| restore::<AskOf>(&e.payload).ask_id)
             .map(AskId::new)
             .collect()
     }
@@ -588,7 +584,7 @@ impl<'a> RunHistory<'a> {
         self.events
             .iter()
             .filter(|e| e.kind == event_kind::FOLLOW_UP_REGISTERED)
-            .filter_map(|e| e.payload["index"].as_u64())
+            .filter_map(|e| restore::<FollowUpRegistered>(&e.payload).index)
             .collect()
     }
 
@@ -606,7 +602,7 @@ impl<'a> RunHistory<'a> {
     /// The `error` of the latest `push_failed`.
     pub fn push_failure(&self) -> Option<&'a str> {
         self.last(event_kind::PUSH_FAILED)
-            .and_then(|e| e.payload.get("error").and_then(Value::as_str))
+            .and_then(|e| restore::<PushFailed>(&e.payload).error)
     }
 }
 
@@ -631,8 +627,7 @@ pub fn run_attention_of<'a>(
         AttentionNext::RecoverRun => e.kind == event_kind::RUNTIME_ERROR,
         // Whatever parked the run for a session last.
         AttentionNext::Resuming => {
-            e.payload.get("status").and_then(Value::as_str)
-                == Some(RunStatus::NeedsSession.as_str())
+            restore::<StatusOf>(&e.payload).status == Some(RunStatus::NeedsSession.as_str())
         }
         // A failed review whose `approve_landing` ask was closed
         // without moving the run (task 328) is reviewed by hand.
@@ -764,7 +759,7 @@ pub fn after_validation(
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::*;
 
@@ -1631,6 +1626,183 @@ mod tests {
                 true
             ),
             None
+        );
+    }
+
+    /// Recorded payloads are read as the earlier `serde_json::Value` reads
+    /// read them (task 1551): a missing key, an extra key, `null`, a value
+    /// of another type or a payload that is not an object reads as the
+    /// key's absence; `checks` and `scope_violation` count when present at
+    /// all, and old values such as a `stuck_exit` ask are still read.
+    #[test]
+    fn recorded_payloads_with_missing_extra_null_or_mistyped_keys_are_read_as_before() {
+        fn history(events: &[RunEvent]) -> RunHistory<'_> {
+            RunHistory::from_events(events)
+        }
+
+        // integration_approved: `ask_id` names an ask unless missing or
+        // null, whatever its type; only an integer is the ask's id; only a
+        // boolean `false` stops the push.
+        for (payload, queued, by_ask_7, pushes) in [
+            (json!({}), false, false, true),
+            (json!({"ask_id": null, "push": null}), false, false, true),
+            (json!({"ask_id": 7, "extra": [1]}), true, true, true),
+            (json!({"ask_id": "7", "push": "false"}), true, false, true),
+            (json!({"ask_id": 7.0, "push": 0}), true, false, true),
+            (json!({"ask_id": -7, "push": false}), true, false, false),
+            (json!(null), false, false, true),
+            (json!([7, false]), false, false, true),
+        ] {
+            let events = [event(1, "integration_approved", payload.clone())];
+            let h = history(&events);
+            assert_eq!(h.queued_approval().is_some(), queued, "{payload}");
+            assert_eq!(h.approved_by_ask(AskId::new(7)), by_ask_7, "{payload}");
+            assert_eq!(h.landing_pushes(), pushes, "{payload}");
+        }
+
+        // ask_opened: an old `stuck_exit` ask is still read; a kind of
+        // another type moves nothing on.
+        let approved = event(1, "integration_approved", json!({"ask_id": 7}));
+        for (kind, moved) in [
+            (json!("approve_landing"), true),
+            (json!(["approve_landing"]), false),
+            (Value::Null, false),
+        ] {
+            let events = [
+                approved.clone(),
+                event(2, "ask_opened", json!({"kind": kind, "ask_id": 8})),
+            ];
+            assert_eq!(history(&events).queued_approval().is_none(), moved);
+        }
+        let events = [
+            event(1, "exit_requested", json!({})),
+            event(2, "ask_opened", json!({"kind": "stuck_exit", "extra": 1})),
+        ];
+        assert!(history(&events).latest_exit_asked());
+
+        // run_recovered with no or a mistyped previous status is not a
+        // landing given up.
+        for payload in [json!({}), json!({"previous_status": 1})] {
+            let events = [event(1, "run_recovered", payload)];
+            assert_eq!(history(&events).recovered_landing(), None);
+        }
+
+        // A rebase without its heads, or with heads of another type, is
+        // skipped; the next one still continues the chain.
+        let events = [
+            event(1, "integration_rebased", json!({"head_before": "a"})),
+            event(
+                2,
+                "integration_rebased",
+                json!({"head_before": 1, "head_after": "x"}),
+            ),
+            event(
+                3,
+                "migration_renumbered",
+                json!({"head_before": "a", "head_after": "b", "n": 1}),
+            ),
+        ];
+        assert!(history(&events).landing_rewrote("A", "b"));
+
+        // A landing_decided boundary needs `status: needs_session`.
+        for (payload, round) in [
+            (json!({}), 2),
+            (json!({"status": null}), 2),
+            (json!({"status": "needs_session", "reason": 1}), 1),
+        ] {
+            let events = [
+                event(1, "revise_requested", json!({})),
+                event(2, "landing_decided", payload),
+                event(3, "revise_requested", json!({})),
+            ];
+            assert_eq!(history(&events).round_revise_attempts(), round);
+        }
+
+        // A park reads its reason only as a string; `checks` and
+        // `scope_violation` count even when null.
+        let park = |payload: Value| {
+            let events = [event(1, "integration_deferred", payload)];
+            history(&events)
+                .last_park()
+                .map(|p| (p.cause, p.reason.map(str::to_owned)))
+        };
+        assert_eq!(park(json!({"reason": 1})), Some((ParkCause::Landing, None)));
+        assert_eq!(
+            park(json!({"reason": "r", "checks": null})),
+            Some((ParkCause::EvidenceMissing, Some("r".into())))
+        );
+        assert_eq!(
+            park(json!({"scope_violation": null})),
+            Some((ParkCause::ScopeViolation, None))
+        );
+        assert_eq!(park(json!("reason")), Some((ParkCause::Landing, None)));
+
+        // resume_finished: an outcome or workspace of another type, or an
+        // attempt that is not an unsigned integer, reads as absent.
+        let parked = event(1, "integration_deferred", json!({}));
+        for (outcome, unresolved) in [
+            (json!("unresolved"), true),
+            (json!(null), false),
+            (json!(0), false),
+        ] {
+            let events = [
+                parked.clone(),
+                event(2, "resume_finished", json!({"outcome": outcome})),
+            ];
+            assert_eq!(history(&events).unresolved_since_park(), unresolved);
+        }
+        for attempt in [json!(-1), json!(2.0), json!("2"), Value::Null] {
+            let events = [event(
+                1,
+                "resume_finished",
+                json!({"status": "validating", "workspace_id": "w", "attempt": attempt}),
+            )];
+            assert_eq!(history(&events).resumed_session(), ResumedSession::Closed);
+        }
+        let events = [
+            event(
+                1,
+                "resume_finished",
+                json!({"status": "validating", "workspace_id": "w", "attempt": 1, "extra": {}}),
+            ),
+            event(2, "workspace_closed", json!({"workspace_id": ["w"]})),
+        ];
+        assert_eq!(
+            history(&events).resumed_session(),
+            ResumedSession::Open {
+                workspace: "w",
+                attempt: 1
+            }
+        );
+
+        // Deliveries, follow-ups and push failures skip mistyped values.
+        let events = [
+            event(1, "ask_delivery_failed", json!({"ask_id": "7"})),
+            event(2, "ask_delivery_failed", json!({"ask_id": 8})),
+            event(3, "follow_up_registered", json!({"index": -1})),
+            event(4, "follow_up_registered", json!({"index": 1.5})),
+            event(5, "follow_up_registered", json!({"index": 2})),
+            event(6, "push_failed", json!({"error": "old"})),
+            event(7, "push_failed", json!({"error": {"code": 1}})),
+        ];
+        let h = history(&events);
+        assert_eq!(h.failed_deliveries(), [AskId::new(8)]);
+        assert_eq!(h.registered_follow_ups(), [2]);
+        assert_eq!(h.push_failure(), None);
+
+        // run_attention's `status: needs_session` of whatever event parked
+        // the run: one of another type is not it.
+        let events = [
+            event(
+                1,
+                "integration_deferred",
+                json!({"status": "needs_session"}),
+            ),
+            event(2, "integration_error", json!({"status": ["needs_session"]})),
+        ];
+        assert_eq!(
+            run_attention_of(&history(&events), RunStatus::NeedsSession, false),
+            Some((AttentionNext::Resuming, Some("integration_deferred")))
         );
     }
 }

@@ -14,6 +14,7 @@ use super::{
 };
 
 mod history;
+mod payload;
 mod recorded;
 
 pub use history::{

@@ -4,8 +4,8 @@ type: design
 title: レイヤーとコンテキストの境界（contextごとの所有・判断・操作・公開するport・依存の向き・境界をまたぐtransaction・検査できる規則・今の違反）
 status: current
 created: 2026-10-04
-updated: 2026-10-05 # task 1550: the L4 row of broker_admin removed, AuditFiles among the host operations ports; task 1540: the revisit command and draft_revisits; task 1223: the observer on Codex; task 1641: domain::goal_tag among the planning modules; task 839: domain::broker_usage among the host operations modules; task 1662: the observation and analysis context points to the measurement design; task 1437; task 1632
-last_verified: 2026-10-05 # task 1550; task 1540; task 1223; task 1641; task 839; task 1615; task 1437; task 1632
+updated: 2026-10-05 # task 1551: domain::run::payload among the run modules, the C6 row no longer names run/history.rs; task 1550: the L4 row of broker_admin removed, AuditFiles among the host operations ports; task 1540: the revisit command and draft_revisits; task 1223: the observer on Codex; task 1641: domain::goal_tag among the planning modules; task 839: domain::broker_usage among the host operations modules; task 1662: the observation and analysis context points to the measurement design; task 1437; task 1632
+last_verified: 2026-10-05 # task 1551; task 1550; task 1540; task 1223; task 1641; task 839; task 1615; task 1437; task 1632
 scope: system
 related:
   - adr-t1545-1
@@ -97,7 +97,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 
 **判断**（domain）
 
-`domain::run`（`TaskRun`と遷移）・`domain::run::history`（`RunHistory`）・`domain::run::recorded`、`domain::resume`・`domain::recovery`・`domain::receipt`・`domain::validation`・`domain::verify_failure`・`domain::concern`・`domain::review_reason`・`domain::review_subagents`、`domain::claim_defer`・`domain::build_wait`・`domain::claim_hold`・`domain::queue_hold`・`domain::slot_limits`・`domain::waiting`・`domain::recheck`・`domain::stall`・`domain::exit`・`domain::idle_process`・`domain::sessions`・`domain::turn`・`domain::worker`・`domain::worker_question`・`domain::provider_switch`・`domain::run_e2e`・`domain::e2e_quarantine`・`domain::landing_branch`・`domain::landing_release`・`domain::scope`・`domain::run_env`・`domain::headless_job`・`domain::background_wrapper`・`domain::worker_model`（plan reviewの重さの予測とtrialからclaimのときにworkerのmodelを選ぶ）。
+`domain::run`（`TaskRun`と遷移）・`domain::run::history`（`RunHistory`）・`domain::run::payload`（`RunHistory`が読む記録済みのeventのpayloadの型付きの復元の値）・`domain::run::recorded`、`domain::resume`・`domain::recovery`・`domain::receipt`・`domain::validation`・`domain::verify_failure`・`domain::concern`・`domain::review_reason`・`domain::review_subagents`、`domain::claim_defer`・`domain::build_wait`・`domain::claim_hold`・`domain::queue_hold`・`domain::slot_limits`・`domain::waiting`・`domain::recheck`・`domain::stall`・`domain::exit`・`domain::idle_process`・`domain::sessions`・`domain::turn`・`domain::worker`・`domain::worker_question`・`domain::provider_switch`・`domain::run_e2e`・`domain::e2e_quarantine`・`domain::landing_branch`・`domain::landing_release`・`domain::scope`・`domain::run_env`・`domain::headless_job`・`domain::background_wrapper`・`domain::worker_model`（plan reviewの重さの予測とtrialからclaimのときにworkerのmodelを選ぶ）。
 
 **操作**
 
@@ -278,7 +278,7 @@ contextを1つに決められず、分ける先のtaskを持つもの。
 | C3 | `src/application/supervise/mod.rs`の`Supervisor`と、`impl Supervisor`を持つ`supervise/`の39のsubmodule（2026-10-04） | 全てのcontextの欄を1つのstructで共有し、submoduleが互いの欄を変える | task 1552・1553 |
 | C4 | `Box<dyn Queue>`・`&mut dyn Queue`・`QueueOpener`を取るuse case（`application::lifecycle`・`update`・`install`・`health`・`supervise`ほか） | 要るportだけを取っていない | task 1555（観測と分析・host運用）、task 1553（実行と着地） |
 | C5 | `SessionRegistry`が計画管理の`planners`を書く | 実行と着地のportに計画管理の状態が混ざる | task 1554 |
-| C6 | `src/application/supervise/stall.rs`・`supervise/adopt.rs`・`src/domain/run/history.rs`ほか | 判断に使うeventのpayloadを`serde_json::Value`の文字列のkeyで読む | task 1551（`run/history.rs`）、task 1558（stall・adopt）、task 681（domainのkindの比較を定数へ） |
+| C6 | `src/application/supervise/stall.rs`・`supervise/adopt.rs`ほか | 判断に使うeventのpayloadを`serde_json::Value`の文字列のkeyで読む（`src/domain/run/history.rs`はtask 1551で型付きの復元の値`domain::run::payload`に移した。残る4行はtask 1437で書かれなくなった`exit_unsent`・`prompt_waiting`を読む呼び手の無い関数） | task 1558（stall・adopt）、task 681（domainのkindの比較を定数へ）、history.rsの残る4行は未登録（follow_up） |
 | X3・C1 | T1: `src/infrastructure/sqlite.rs`の`claim_task`（計画管理のstore）が`INSERT INTO task_runs`を書く | 計画管理のstoreが実行と着地の表をSQLで直接書く | 未登録（follow_up） |
 | X3・C1 | T2: `src/infrastructure/runtime_store/transitions.rs`の`finish_integration`が`UPDATE tasks SET status='completed'`を書く | 実行と着地のstoreが計画管理の表を`transition_task`を通さずSQLで直接書く | 未登録（follow_up） |
 | X3・C1 | T6: `src/infrastructure/finding_planners.rs`（`settle_findings`・`link_findings`ほか）が`UPDATE findings`を書く | 計画管理のstoreが観測と分析の表を`infrastructure::findings`を通さずSQLで直接書く | 未登録（follow_up） |
