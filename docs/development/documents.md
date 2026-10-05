@@ -4,7 +4,7 @@ type: development
 title: このrepositoryの文書の規則（判断の記録・ADR・design・plans・frontmatter・workerの文書の照合・AGENTS.md・commit）
 status: current
 created: 2026-10-03
-updated: 2026-10-04 # task 1688
+updated: 2026-10-05 # task 1727
 owners:
   - hisamekms
 tags:
@@ -76,6 +76,7 @@ pluginとrepositoryの規則・値・経緯の受け持ちは[ADR-t1453-2](../ad
 workerはreceiptの前に、受け入れ条件の対応づけ（[手元の検証](local-checks.md)の「受け入れ条件の対応づけ」）に続けて、workerのpromptが指示する文書の照合（仕組みは[prompt](../design/supervisor-lifecycle/prompt.md)の「文書の照合」、[ADR-t1428-1](../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)）を行う。このrepositoryで差分と照合する文書は、taskが名指す文書と、変えた挙動を説明する`docs/design/`・pluginのskillとreference・AGENTS.md・`docs/development/`・ADRの索引で、`summary`に更新したpath・節か不要の理由を書く。taskのpathsの外のずれは`docs_drift`のfollow_upにする。
 
 - 候補は、変えた名前（コマンド・flag・設定のkey・役割・fileのpath）で`docs/design/`・`docs/development/`・`plugins/claude-dagq/skills`の`SKILL.md`と`reference/`・AGENTS.md・ADRの索引（`docs/adr/README.md`）を探して拾い、`summary`に探した名前を書く（[ADR-t1688-1](../adr/2026-10-04-t1688-1-worker-searches-documents-by-changed-names.md)。探す手段は問わない）。
+- このrepositoryでsummaryの探した名前を確かめるreviewのdesign-consistencyのsubagentが当たる変更の範囲は、`dagq.toml`の`[review.subagents.design-consistency] paths`が持つ。
 - 見落としやすい型: 役割・権限の説明は複数の文書に散らばる（task 1400: `docs/design/overview.md`の用語集の役割の行・`docs/design/authorization.md`・`docs/design/supervisor-lifecycle/roles.md`・`triage.md`）。testやscriptが何を検査するかを列挙する節も古くなりやすい（task 1462: `docs/design/plugin-integration.md`「読み込みと検証」）。
 
 ## AGENTS.md

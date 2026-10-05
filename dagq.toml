@@ -200,7 +200,8 @@ paths = ["src/infrastructure/adapters.rs", "src/infrastructure/process.rs", "src
 # 固定バイナリが task 1455 を含むことを着手時に確認し、着地の verify でも検査する。
 
 [review.subagents.design-consistency]
-paths = ["src/**", "crates/**", "migrations/**", "docs/design/**", "docs/development/**"]
+# 挙動の名前を変えうる差分にも探した名前の確認を当てる（ADR-t1688-1 決定2、task 1727）。
+paths = ["src/**", "crates/**", "migrations/**", "docs/design/**", "docs/development/**", "plugins/**", "tests/**", "scripts/**", "AGENTS.md", "dagq.toml", ".dagq/**"]
 
 [review.subagents.test-rules]
 paths = ["tests/**", "src/**", "crates/**", "Cargo.toml", ".config/e2e-quarantine.toml", ".config/it-slow-allow.toml"]
