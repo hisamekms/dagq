@@ -1381,6 +1381,17 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Fitte
     }
     fit.section("drafts", &members);
     out.push_str(&members);
+    // Origin is one composite item, even when several inner fields and
+    // the section as a whole are cut.
+    let mut origin_cut = false;
+    let mut cut_origin_text =
+        |text: &str, max: usize, read: &str| match prompt_fit::cut(text, max, Keep::Start, read) {
+            Some((cut, _)) => {
+                origin_cut = true;
+                cut
+            }
+            None => text.to_owned(),
+        };
     let mut whence_text = format!("\n## Where it came from: {}\n\n", origin.as_str());
     let out_before_origin = std::mem::take(&mut out);
     // Only a follow_up's drafts came from a run's receipt.
@@ -1417,8 +1428,8 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Fitte
                     sid = source.id(),
                     title = short_title(source.title()),
                     status = source.status().as_str(),
-                    description = fit.text("origin", or_none(source.description()), DRAFT_SOURCE_TEXT_BYTES, Keep::Start, &format!("read it whole with `dagq show {} --full`", source.id())),
-                    acceptance = fit.text("origin", or_none(source.acceptance()), DRAFT_SOURCE_TEXT_BYTES, Keep::Start, &format!("read it whole with `dagq show {} --full`", source.id())),
+                    description = cut_origin_text(or_none(source.description()), DRAFT_SOURCE_TEXT_BYTES, &format!("read it whole with `dagq show {} --full`", source.id())),
+                    acceptance = cut_origin_text(or_none(source.acceptance()), DRAFT_SOURCE_TEXT_BYTES, &format!("read it whole with `dagq show {} --full`", source.id())),
                     verify = list_or_none(source.verification_commands()),
                     paths = list_or_none(source.paths()),
                     evidence = list_or_none(
@@ -1433,20 +1444,16 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Fitte
             if let Some(receipt) = material.receipt {
                 out.push_str(&format!(
                     "\n### The landed receipt\n\nSummary:\n{summary}\n\nIts follow_ups:\n{follow_ups}",
-                    summary = fit.text(
-                        "origin",
+                    summary = cut_origin_text(
                         or_none(receipt["summary"].as_str().unwrap_or_default()),
                         DRAFT_RECEIPT_SUMMARY_BYTES,
-                        Keep::Start,
                         &receipt_read,
                     ),
                     follow_ups = fenced(
                         "json",
-                        &fit.text(
-                            "origin",
+                        &cut_origin_text(
                             &serde_json::to_string_pretty(&receipt["follow_ups"])?,
                             DRAFT_RECEIPT_FOLLOW_UPS_BYTES,
-                            Keep::Start,
                             &receipt_read,
                         ),
                     ),
@@ -1493,11 +1500,9 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Fitte
     // Everything about where the drafts came from, within its limit.
     let origin_text = std::mem::replace(&mut out, out_before_origin);
     whence_text.push_str(&origin_text);
-    let whence_text = fit.text(
-        "origin",
+    let whence_text = cut_origin_text(
         &whence_text,
         DRAFT_ORIGIN_BYTES,
-        Keep::Start,
         &if receipt_read.is_empty() {
             "`dagq show ID --full` for the drafts".to_owned()
         } else {
@@ -1506,6 +1511,7 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Fitte
             )
         },
     );
+    fit.omit("origin", usize::from(origin_cut));
     fit.section("origin", &whence_text);
     out.push_str(&whence_text);
     out.push_str(&revisit_section(&mut fit, material));
@@ -7711,6 +7717,68 @@ mod tests {
         assert!(text.contains("read ask 9 whole with `dagq asks --all`"));
         assert!(text.contains("Apply this answer as step 3 says."));
         assert!(text.contains("## What to do"));
+    }
+
+    #[test]
+    fn draft_planner_origin_counts_inner_and_whole_cuts_once() {
+        let members = vec![(
+            DraftTarget {
+                task: big_task(10, 0),
+                origin: DraftOrigin::FollowUp,
+                material: json!({"source_run_id": RUN, "source_task_id": 3, "index": 0}),
+                planners: 0,
+                revisit: None,
+            },
+            1,
+        )];
+        let key = BundleKey::of(
+            DraftOrigin::FollowUp,
+            &members[0].0.material,
+            members[0].0.task.id(),
+        );
+        // No cut, several inner cuts, and inner plus whole section cuts.
+        for (source_bytes, receipt_bytes, whole_cut, any_cut) in [
+            (0, 0, false, false),
+            (5_000, 0, false, true),
+            (50_000, 50_000, true, true),
+        ] {
+            let source = big_task(3, source_bytes);
+            let receipt = json!({"summary": big("summary", receipt_bytes), "follow_ups": big("follow_ups", receipt_bytes)});
+            let fitted = draft_planner_prompt(&DraftPlannerMaterial {
+                db: Path::new("/q/queue.db"),
+                key: &key,
+                members: &members,
+                source: Some(&source),
+                receipt: Some(&receipt),
+                goals: &[],
+                answer: None,
+                revisits: &[],
+            })
+            .unwrap();
+            assert_eq!(
+                fitted.bytes.omitted.get("origin").copied().unwrap_or(0),
+                usize::from(any_cut),
+                "{source_bytes}, {receipt_bytes}: {:?}",
+                fitted.bytes
+            );
+            let section = fitted
+                .text
+                .split("## Where it came from:")
+                .nth(1)
+                .unwrap()
+                .split("## What to do")
+                .next()
+                .unwrap();
+            assert_eq!(
+                section.contains("for the drafts and their source task"),
+                whole_cut,
+                "{source_bytes}, {receipt_bytes}: {section}"
+            );
+            if any_cut {
+                assert!(section.contains("bytes left out by the prompt's limit"));
+                assert!(section.contains("dagq show"));
+            }
+        }
     }
 
     /// ADR-t1540-1: with every other section at its limit, a revisited

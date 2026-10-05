@@ -318,7 +318,8 @@ impl Fit {
 
     /// The items of section `name` chosen by [`pick`], each first shrunk to
     /// `each` bytes, within `count` and `bytes`: the kept lines in their
-    /// own order and the indices left out, which are counted.
+    /// own order and the indices left out. Count each item once: either
+    /// left out, or kept and cut.
     pub(crate) fn lines(
         &mut self,
         name: &'static str,
@@ -327,20 +328,28 @@ impl Fit {
         (count, bytes, each): (usize, usize, usize),
         read: &str,
     ) -> (Vec<String>, Vec<usize>) {
-        let lines: Vec<String> = items
+        let lines: Vec<(String, bool)> = items
             .iter()
-            .map(|item| self.json(name, item, each, read))
+            .map(|item| match shrink(item, each, read) {
+                Some((shrunk, _)) => (shrunk.to_string(), true),
+                None => (item.to_string(), false),
+            })
             .collect();
-        let sizes: Vec<usize> = lines.iter().map(String::len).collect();
+        let sizes: Vec<usize> = lines.iter().map(|(line, _)| line.len()).collect();
         let kept = pick(&sizes, order, count, bytes);
         let left_out: Vec<usize> = (0..items.len()).filter(|index| !kept[*index]).collect();
-        self.omit(name, left_out.len());
+        let kept_cuts = lines
+            .iter()
+            .zip(&kept)
+            .filter(|((_, cut), kept)| *cut && **kept)
+            .count();
+        self.omit(name, left_out.len() + kept_cuts);
         (
             lines
                 .into_iter()
                 .zip(&kept)
                 .filter(|(_, kept)| **kept)
-                .map(|(line, _)| line)
+                .map(|((line, _), _)| line)
                 .collect(),
             left_out,
         )
@@ -447,6 +456,24 @@ mod tests {
         let kept = pick(&[10, 500, 10, 10], [3, 1, 2, 0], 2, 100);
         // 3 first, 1 does not fit, 2 next; the count stops before 0.
         assert_eq!(kept, vec![false, false, true, true]);
+    }
+
+    #[test]
+    fn lines_count_each_kept_cut_or_left_out_item_once() {
+        let long = json!({"id": 1, "description": "x".repeat(2_000)});
+        let short = json!({"id": 2});
+        for (item, count, cut) in [(long.clone(), 1, true), (long, 0, true), (short, 0, false)] {
+            assert_eq!(shrink(&item, 300, "read it").is_some(), cut);
+            let mut fit = Fit::new(10_000);
+            let (lines, left_out) =
+                fit.lines("items", &[item], [0], (count, 1_000, 300), "read it");
+            assert_eq!(lines.len(), count);
+            assert_eq!(left_out.len(), 1 - count);
+            if count == 1 {
+                assert!(lines[0].contains("bytes left out; read it"));
+            }
+            assert_eq!(fit.finish(lines.join("\n")).bytes.omitted["items"], 1);
+        }
     }
 
     #[test]

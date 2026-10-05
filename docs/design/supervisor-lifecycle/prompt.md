@@ -4,8 +4,8 @@ type: design
 title: "Prompt"
 status: current
 created: 2026-09-26
-updated: 2026-10-05 # task 1540: the revisit section of the draft planner; task 1633: the recovery job's binary sections and their limits; task 1688 (after task 1572)
-last_verified: 2026-10-05 # task 1540; task 1633; task 1688 (after task 1572)
+updated: 2026-10-06 # task 1680 revise 1; task 1540: the revisit section of the draft planner; task 1633: the recovery job's binary sections and their limits; task 1688 (after task 1572)
+last_verified: 2026-10-06 # task 1680 revise 1; task 1540; task 1633; task 1688 (after task 1572)
 scope: runtime
 related:
   - adr-t1566-1
@@ -152,7 +152,7 @@ task 1571。plan review（task 1561）とobserver（task 1567）と同じ形で�
 - **省いたことの明示**（決定5）: 節ごとに、省いた件数・ID（40件まで）・読む方法の注記（`(N tasks left out by this section's limit: … To read them: ….)`）を書く。goal reviewの省いたtaskはID・title・status・着地したかの要約の行に替える（決定2）。
 - **読む方法**（決定3）: goal reviewとruntimeのplannerは読むだけの`dagq`（`prompt::GOAL_REVIEW_READS`・`prompt::PLANNER_READS`。どれもそのroleで打てることを`src/main.rs`の`the_goal_review_job_and_the_planners_may_run_each_read_their_prompts_name`が確かめ、goal review jobのものはqueue serviceのユースケースがあることも確かめる）。runのreviewと復旧jobはworktreeとrun directoryのファイルだけ（`review.md`、`review-subagents-<attempt>.json`、`prompt.txt`、`turns/turn-NNNNNN.jsonl`、receipt・検証のlog・`terminal-final.txt`、復旧jobの固定バイナリの節（build・依存先・入れ替え）の全体の`recovery-<alert>-<attempt>.binary.json`（task 1633））で、ファイルに無いもの（alertの事実、プロセスの一覧、過去のverdict）は`it is in no file you can read`と書き、読めない場所に退避しない。
 - **必須の節**: goal reviewのgoal、runのreviewのacceptance、復旧jobのtaskのdescription・acceptance・verification_commands、draftのdescription、findingの見立ては省かず、自分の上限で切って`over_limit`に何をどれだけ切ったかを書く。どの節の上限も足して全体に収まるように決めてあり、それでも全体（言語の指示の分`LANGUAGE_ROOM` 1,000 byteを除く）を超えるときだけ、promptの先頭と末尾8,000 byte（指示とverdictのschema）を残して中ほどを切り、`over_limit`に書く（`Fit::finish`）。復旧jobの固定バイナリの節（build・依存先・入れ替え。task 1633）はretryの判断の材料なので、alertの事実と同じく残る側に置く: alertの事実の直後（promptの先頭から節の上限の和で約31,500 byteまで）に置くので、中ほどを切っても先頭の側に残る。入れ替えは節の中で新しい順に残す。
-- **記録**（決定6）: どのjobも`PromptBytes`（`total`・`limit`・`sections`（節ごとのbyte。指示は`instructions`、言語の指示は`language`）・`omitted`（節ごとの省いた・切った件数）・`over_limit`）を`prompt_bytes`としてeventに記録する（plan reviewと同じ形で、observerの`prompt_bytes`・`prompt_limit`・`prompt_sections`と同じ中身を1つの欄に持つ）。
+- **記録**（決定6）: どのjobも`PromptBytes`（`total`・`limit`・`sections`（節ごとのbyte。指示は`instructions`、言語の指示は`language`）・`omitted`（節ごとの省いた・切った件数）・`over_limit`）を`prompt_bytes`としてeventに記録する（plan reviewと同じ形で、observerの`prompt_bytes`・`prompt_limit`・`prompt_sections`と同じ中身を1つの欄に持つ）。`Fit::lines`で選ぶ一覧では1項目を1回だけ数え、残した項目の切りだけを切りとして数え、省いた項目は切っていても省いた件数だけに数える。draft plannerの`origin`は節全体を1項目とし、内側の欄の切りと節全体の切りが重なっても、どれかを切ったときに1回だけ数える。この1回の数え方は`Fit::lines`と`origin`に限る。draft plannerの`drafts`、`planner_asks`、`planner_goals`では、内側の欄の切りと`pick`後の省略を別々に加算し、同じ項目を複数回数える場合がある。
 
 | job | event | 欄 |
 | --- | --- | --- |
