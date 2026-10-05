@@ -531,8 +531,6 @@ mod tests {
                 evidence: "the command ran past its 1800 s limit and was killed".to_owned(),
             }
         );
-        let error = anyhow::Error::new(timed_out).context("verification command \"x\"");
-        assert_eq!(error.downcast_ref::<CommandTimedOut>(), Some(&timed_out));
     }
 
     use super::*;

@@ -2166,6 +2166,16 @@ mod tests {
     const HEAD: &str = "2222222222222222222222222222222222222222";
     const RUN: &str = "00000000-0000-4000-8000-000000000001";
 
+    #[test]
+    fn a_command_timeout_can_be_identified_through_verification_context() {
+        let timed_out = verify_failure::CommandTimedOut { limit_secs: 1800 };
+        let error = anyhow::Error::new(timed_out).context("verification command \"x\"");
+        assert_eq!(
+            error.downcast_ref::<verify_failure::CommandTimedOut>(),
+            Some(&timed_out)
+        );
+    }
+
     /// A repository whose worktree is on `branch` at `head`, with `status`.
     /// For the migration renumbering: whether it is dagq's source, the paths
     /// the run added and changed, the rebased tree's paths, and the contents
