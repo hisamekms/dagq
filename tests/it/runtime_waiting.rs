@@ -250,8 +250,10 @@ fn a_returning_run_counts_toward_the_limit() {
         ..supervise_options(1, true)
     };
     let supervisor = supervise_in_thread(&db, &repo, &backend, options);
+    // The run is claimed before its run dir is recorded; the gate below
+    // needs the dir.
     wait_until(&db, Duration::from_secs(60), |queue| {
-        run_of(queue, 2).is_some()
+        run_of(queue, 2).is_some_and(|run| run.run_dir().is_some())
     });
     let mut queue = SqliteQueue::open(&db).unwrap();
     let first = run_of(&mut queue, 1).unwrap();
