@@ -143,6 +143,10 @@ It finds the log from the queue: never build the path yourself. An ended run's a
 
 `"$DAGQ" show ID` prints the task, only the latest run, the latest 10 events (`--events N` for more) with the gist of their payload, and long texts cut to 300 characters ending in `…` with `truncated: true`. `show ID --full` adds `run_dir`, earlier runs and whole event payloads such as a receipt. `"$DAGQ" list --status in_progress` finds the tasks worth a `show`: each entry's `latest_run` gives the newest run's `id` and `status`.
 
+## goal list
+
+When the person asks which goals go first, what moves now or what a theme holds, show them `"$DAGQ" goal list`: unclosed goals (draft goals with no task included), then closed ones, each by `priority` highest first, then ID; each with its `status`, `priority`, `tags` and task counts by status. `--tag TAG` (repeatable, any of them) narrows it to a theme, such as a tag's deferral goal next to that theme's other goals. Show the order as it prints, with each goal's title, priority and tags; never sort by ID or by your own reading. A goal's tasks and where each task's priority comes from (`priority_source`): `"$DAGQ" goal show ID`. Changing a goal's priority or tags is a planner's on the person's word (`request add`), not yours.
+
 ## Run states
 
 - `claimed` / `starting` / `running`: in progress. Events: `lease_acquired`, `workspace_created`, `agent_started`, `receipt_observed`, `session_idle_observed`, `exit_requested`.

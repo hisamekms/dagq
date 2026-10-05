@@ -42,7 +42,7 @@ It prints each open ask in full, oldest first. Take them one at a time:
 
 3. `{"error": "ask <id> is not open"}`: the runtime closed it first (the dialog went, the session moved on or exited); tell the person.
 
-A run waiting on an ask holds no `--parallel` slot. Context: `"$DAGQ" show <task_id>` (`--full` for a receipt). Leave open an ask the person will not answer yet.
+Context: `"$DAGQ" show <task_id>` (`--full` for a receipt). Leave open an ask the person will not answer yet.
 
 Before showing an ask whose kind, options or effect you are unsure of, read `reference/asks.md`: every kind (`approve_landing`, `decide`, `approve_release`, ...), its options, and the answers the runtime applies (`propose`, `dismiss`, a goal review's `approve_goal`). An answer the runtime does not apply comes back as `read the answer of ask <id> and close it` (step 4).
 
@@ -67,6 +67,6 @@ Report each in a short list (task, status, `next`, gist of `last_error`); act wi
 
 ## Where your authority ends
 
-Yourself: `status`, `watch`, `asks`, `show`, `answer` with the person's own words, and `ask close` after an answer was carried out. Only when the person says so: what `dagq-recover` describes (`up` / `down` / `install`, `integrate` after a review by hand, `recover`, a retry `ready`, `ready --bypass-review`, `cancel`, `run send` keys and `/exit`). Reach sessions only with `run screen` / `run log` / `run send` / `planner log` / `planner request`, never `cmux` (ADR-t1228-2). Never answer on the person's behalf, never pick a default, and never `add` or `goal add`: registering work is a runtime planner's, reached by `request add` on the person's word; `goal close` only on the person's word (a finished goal is its goal review's).
+Yourself: `status`, `watch`, `asks`, `show`, `goal list` (goal order: `reference/status.md`), `answer` with the person's own words, and `ask close` after an answer was carried out. Only when the person says so: what `dagq-recover` describes (`up` / `down` / `install`, `integrate` after a review by hand, `recover`, a retry `ready`, `ready --bypass-review`, `cancel`, `run send` keys and `/exit`). Reach sessions only with `run screen` / `run log` / `run send` / `planner log` / `planner request`, never `cmux` (ADR-t1228-2). Never answer on the person's behalf, never pick a default, and never `add` or `goal add`: registering work is a runtime planner's, reached by `request add` on the person's word; `goal close` only on the person's word (a finished goal is its goal review's).
 
 What you do is recorded as the inbox's, apart from the person's own: events carry actor `inbox`, answers `authority: delegated` (the person's own are `user`). A `!` command in this terminal counts as yours; if the person wants it recorded as theirs, they type it in a terminal without `DAGQ_ROLE`. `skills/dagq/reference/authority.md`.

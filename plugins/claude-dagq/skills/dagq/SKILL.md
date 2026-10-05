@@ -36,11 +36,14 @@ Skip the goal only for a one-shot task that finishes the problem by itself; when
 
 ### Register the goal
 
-Collect title, description, acceptance, constraints and doc (what each holds, and draft goals: `reference/register.md`).
+Collect title, description, acceptance, constraints, doc, priority and tags (what each holds, and draft goals: `reference/register.md`).
 
 ```sh
-"$DAGQ" goal add "TITLE" --description "..." --acceptance "..." --constraints "..." --doc PATH/TO/DECISION.md
+"$DAGQ" goal add "TITLE" --description "..." --acceptance "..." --constraints "..." --doc PATH/TO/DECISION.md \
+  --priority high --tag TAG
 ```
+
+`--priority` (default `normal`) is the goal's; its tasks without one of their own inherit it. `--tag` (repeatable) names what it is about, from `[goals] tags` of `dagq.toml` when listed. `goal list` orders goals by priority, `--tag` narrows them.
 
 No verification commands, draft goals (`goal add --draft`): `reference/register.md`. Findings and proposals: `reference/observer.md`.
 
@@ -58,7 +61,7 @@ Split the goal into tasks, each one session in one worktree. Per task: title, de
 "$DAGQ" candidates
 ```
 
-`add` makes a `draft`, never claimed; `submit` puts drafts in one proposal for plan review (`pass`, `revise`, `concern`). Only plan review readies a task (`ready --bypass-review` only on a person's explicit word). Proposals, withdrawing, editing, dependencies and `--priority`: `reference/register.md`.
+`add` makes a `draft`, never claimed; `submit` puts drafts in one proposal for plan review (`pass`, `revise`, `concern`). Only plan review readies a task (`ready --bypass-review` only on a person's explicit word). Proposals, withdrawing, editing, dependencies and `--priority` (a task's own; `set-priority TASK --inherit` gives it back to the goal's): `reference/register.md`.
 
 ## 3. Inspect
 
