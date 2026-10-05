@@ -68,19 +68,15 @@ pub fn handed_request_sentence(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infrastructure::run_files::LocalRunFiles;
+    use crate::application::memory_files::MemoryFiles;
 
     #[test]
     fn the_words_are_written_under_the_planners_directory_and_pointed_at() {
-        let dir = tempfile::tempdir().unwrap();
-        let planner = dir.path().join("planners").join("4");
-        let handed =
-            hand_request_to_planner(&LocalRunFiles, &planner, "request-2", "plan `it`\n").unwrap();
+        let files = MemoryFiles::default();
+        let planner = Path::new("planners").join("4");
+        let handed = hand_request_to_planner(&files, &planner, "request-2", "plan `it`\n").unwrap();
         assert_eq!(handed.path, planner.join("requests").join("request-2.md"));
-        assert_eq!(
-            std::fs::read_to_string(&handed.path).unwrap(),
-            "plan `it`\n"
-        );
+        assert_eq!(files.read_to_string(&handed.path).unwrap(), "plan `it`\n");
         assert_eq!(
             handed.sentence,
             format!(
@@ -89,16 +85,16 @@ mod tests {
             )
         );
         // Handing it again replaces the file.
-        hand_request_to_planner(&LocalRunFiles, &planner, "request-2", "again").unwrap();
-        assert_eq!(std::fs::read_to_string(&handed.path).unwrap(), "again");
+        hand_request_to_planner(&files, &planner, "request-2", "again").unwrap();
+        assert_eq!(files.read_to_string(&handed.path).unwrap(), "again");
     }
 
     #[test]
     fn a_name_that_is_not_one_plain_component_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
+        let files = MemoryFiles::default();
         for name in ["", "../x", "a/b", "a b", "x.md"] {
             assert!(
-                hand_request_to_planner(&LocalRunFiles, dir.path(), name, "w").is_err(),
+                hand_request_to_planner(&files, Path::new("planner"), name, "w").is_err(),
                 "{name:?}"
             );
         }

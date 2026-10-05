@@ -4,8 +4,8 @@ type: design
 title: レイヤーとコンテキストの境界（contextごとの所有・判断・操作・公開するport・依存の向き・境界をまたぐtransaction・検査できる規則・今の違反）
 status: current
 created: 2026-10-04
-updated: 2026-10-05 # task 1616: stats tests use domain fixtures, the L1 row removed; task 1618: the L4 row of jobs.rs and headless_session.rs removed, they read the injected Clock; task 1617: the L2 row of landing_branch removed; task 1564: ask --request reads RequestStore::request_planner; task 1551: domain::run::payload among the run modules, the C6 row no longer names run/history.rs; task 1550: the L4 row of broker_admin removed, AuditFiles among the host operations ports; task 1540: the revisit command and draft_revisits; task 1223: the observer on Codex; task 1641: domain::goal_tag among the planning modules; task 839: domain::broker_usage among the host operations modules; task 1662: the observation and analysis context points to the measurement design; task 1437; task 1632
-last_verified: 2026-10-05 # task 1616; task 1618; task 1617; task 1564; task 1551; task 1550; task 1540; task 1223; task 1641; task 839; task 1615; task 1437; task 1632
+updated: 2026-10-06 # task 1619: planner_handoff tests use MemoryFiles, the L3 row removed; task 1616: stats tests use domain fixtures, the L1 row removed; task 1618: the L4 row of jobs.rs and headless_session.rs removed, they read the injected Clock; task 1617: the L2 row of landing_branch removed; task 1564: ask --request reads RequestStore::request_planner; task 1551: domain::run::payload among the run modules, the C6 row no longer names run/history.rs; task 1550: the L4 row of broker_admin removed, AuditFiles among the host operations ports; task 1540: the revisit command and draft_revisits; task 1223: the observer on Codex; task 1641: domain::goal_tag among the planning modules; task 839: domain::broker_usage among the host operations modules; task 1662: the observation and analysis context points to the measurement design; task 1437; task 1632
+last_verified: 2026-10-06 # task 1619; task 1616; task 1618; task 1617; task 1564; task 1551; task 1550; task 1540; task 1223; task 1641; task 839; task 1615; task 1437; task 1632
 scope: system
 related:
   - adr-t1545-1
@@ -269,7 +269,6 @@ contextを1つに決められず、分ける先のtaskを持つもの。
 
 | 規則 | 場所 | 違反 | 行き先 |
 | --- | --- | --- | --- |
-| L3 | `src/application/planner_handoff.rs`の`#[cfg(test)]`（`crate::infrastructure::run_files::LocalRunFiles`） | applicationのtestがinfrastructureのadapterを使う | task 1619（`application::memory_files`に替える） |
 | L5 | `src/application`の`Instant::now`（2026-10-04で109箇所。多いのは`supervise/resume.rs`・`lifecycle.rs`・`supervise/session.rs`・`supervise/revise.rs`・`supervise/reopen.rs`・`supervise/adopt.rs`） | 判断が実時間を読む | task 1557（revise・reopen・resume・session）、task 1558（stall・stall_recovery・adopt）。残りは計測（task 1559）の後に判断 |
 | L6 | `src/infrastructure/queue_service.rs`（`crate::view::task_detail`） | infrastructureがレイヤーの外を呼ぶ | task 1620 |
 | C3 | `src/application/supervise/mod.rs`の`Supervisor`と、`impl Supervisor`を持つ`supervise/`の39のsubmodule（2026-10-04） | 全てのcontextの欄を1つのstructで共有し、submoduleが互いの欄を変える | task 1552・1553 |
