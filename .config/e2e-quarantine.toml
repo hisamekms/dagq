@@ -9,14 +9,15 @@
 # Each mark is one [[test]] with all four keys:
 #
 # [[test]]
-# name = "up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes"
+# name = "happy_path_runs_a_stub_agent_through_cmux_and_lands_on_main"
 # reason = "why the test is flaky and how often it failed the gate"
-# task = 1120          # the task that fixes the test
+# task = 1234          # example only; use the task that fixes the test
 # until = 2026-10-14   # the last day the mark holds (host-local date)
 #
 # A test of a module under tests/e2e/ is named with its module path, as cargo
 # prints it: broker::a_preferred_worker_does_its_task_through_the_broker_and_lands.
 # At most 3 marks; with more, the gate holds none.
 #
-# No marks now. The first planned mark (the test above, fixed by task 1120)
-# was not put: task 1120 had landed before this file was written.
+# No marks now. The example above only shows the format. The first planned
+# mark (the up --in-cmux case, fixed by task 1120) was not put: task 1120
+# had landed before this file was written.

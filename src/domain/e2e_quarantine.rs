@@ -4,9 +4,9 @@
 //!
 //! ```toml
 //! [[test]]
-//! name = "up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes"
-//! reason = "the workspace of down --wait is sometimes left open"
-//! task = 1120
+//! name = "happy_path_runs_a_stub_agent_through_cmux_and_lands_on_main"
+//! reason = "format example: why the test is flaky and how often it failed"
+//! task = 1234       # example only; use the task that fixes the test
 //! until = 2026-10-15   # or "2026-10-15"; the mark holds through that day
 //! ```
 //!

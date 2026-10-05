@@ -4,8 +4,8 @@ type: design
 title: "Auto-update"
 status: current
 created: 2026-09-26
-updated: 2026-10-05 # task 1189; task 1451; task 1156; task 1632; task 1481
-last_verified: 2026-10-05 # task 1189; task 1451; task 1156; task 1632; task 1481
+updated: 2026-10-05 # task 1189; task 1451; task 1156; task 1632; task 1481; task 1600
+last_verified: 2026-10-05 # task 1189; task 1451; task 1156; task 1632; task 1481; task 1600
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -47,9 +47,9 @@ related:
 
        ```toml
        [[test]]
-       name = "up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes"
-       reason = "down --wait の workspace がときどき閉じない"
-       task = 1120
+       name = "happy_path_runs_a_stub_agent_through_cmux_and_lands_on_main"
+       reason = "書式の例: 不安定な失敗の理由と頻度"
+       task = 1234 # 書式の例: 実際に直すtaskのIDを書く
        until = 2026-10-15
        ```
 
