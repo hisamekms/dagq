@@ -176,11 +176,15 @@ pub enum Resource {
         run: Option<RunId>,
     },
     /// An ask to open: its kind, and the run or the task it is about as
-    /// the command names them.
+    /// the command names them; for a `planner_question` on a planning
+    /// request (`--request`), the request and the planner of the runtime's
+    /// open for it, the only planner that asks on it (task 1564).
     NewAsk {
         kind: AskKind,
         run: Option<RunId>,
         task: Option<TaskId>,
+        request: Option<RequestId>,
+        planner: Option<PlannerId>,
     },
     /// A proposal and the actor id of the planner that submitted it.
     Proposal {
@@ -219,8 +223,21 @@ impl Resource {
             Self::Task { id, status } => json!({"kind": "task", "id": id, "status": status}),
             Self::Run { id, task } => json!({"kind": "run", "id": id, "task": task}),
             Self::Ask { id, run } => json!({"kind": "ask", "id": id, "run": run}),
-            Self::NewAsk { kind, run, task } => {
-                json!({"kind": "new_ask", "ask_kind": kind, "run": run, "task": task})
+            Self::NewAsk {
+                kind,
+                run,
+                task,
+                request,
+                planner,
+            } => {
+                let mut record =
+                    json!({"kind": "new_ask", "ask_kind": kind, "run": run, "task": task});
+                // An ask on a request names it and its planner.
+                if request.is_some() {
+                    record["request"] = json!(request);
+                    record["planner"] = json!(planner);
+                }
+                record
             }
             Self::Proposal { id, owner } => json!({"kind": "proposal", "id": id, "owner": owner}),
             Self::Finding(id) => json!({"kind": "finding", "id": id}),
@@ -558,10 +575,13 @@ fn planner_permits(actor: &ActorContext, capability: Capability, resource: &Reso
             owner.as_deref() == Some(actor.actor_id())
         }
         Resource::Planner(id) => actor.actor_id() == format!("planner:{id}"),
-        // Only the request's own planner declines it.
-        Resource::Request { planner, .. } => {
-            planner.is_some_and(|id| actor.actor_id() == format!("planner:{id}"))
-        }
+        // Only the request's own planner declines it, or asks on it.
+        Resource::Request { planner, .. }
+        | Resource::NewAsk {
+            request: Some(_),
+            planner,
+            ..
+        } => planner.is_some_and(|id| actor.actor_id() == format!("planner:{id}")),
         _ => true,
     }
 }
@@ -1056,6 +1076,8 @@ mod tests {
             kind,
             run: run.map(|id| RunId::new(id).unwrap()),
             task: task.map(TaskId::new),
+            request: None,
+            planner: None,
         }
     }
 
@@ -1227,6 +1249,51 @@ mod tests {
         assert_eq!(
             request(Some(7)).record(),
             serde_json::json!({"kind": "request", "id": 3, "planner": 7})
+        );
+    }
+
+    #[test]
+    fn only_a_requests_own_planner_asks_on_it() {
+        let on_request = |planner: Option<i64>| Resource::NewAsk {
+            kind: AskKind::PlannerQuestion,
+            run: None,
+            task: None,
+            request: Some(RequestId::new(3)),
+            planner: planner.map(PlannerId::new),
+        };
+        let planner = ActorContext::instance(ActorRole::Planner, 7);
+        assert!(allowed(&planner, C::AskOpen, &on_request(Some(7))));
+        // Another request's planner, or a draft's or a finding's, and any
+        // planner while the request has none open.
+        assert_eq!(
+            StaticPolicy.authorize(&planner, C::AskOpen, &on_request(Some(8))),
+            Err(AuthorizationError {
+                role: ActorRole::Planner,
+                capability: C::AskOpen,
+                reason: DenyReason::Resource,
+            })
+        );
+        assert!(!allowed(&planner, C::AskOpen, &on_request(None)));
+        // Without a request, a planner's question is as before.
+        assert!(allowed(
+            &planner,
+            C::AskOpen,
+            &new_ask(AskKind::PlannerQuestion, None, None)
+        ));
+        // The people's and the supervisor's asks keep no owner.
+        for role_ in [ActorRole::User, ActorRole::Inbox, ActorRole::Supervisor] {
+            assert!(allowed(&role(role_), C::AskOpen, &on_request(None)));
+        }
+        assert_eq!(
+            on_request(Some(7)).record(),
+            serde_json::json!({
+                "kind": "new_ask",
+                "ask_kind": "planner_question",
+                "run": null,
+                "task": null,
+                "request": 3,
+                "planner": 7,
+            })
         );
     }
 

@@ -380,6 +380,108 @@ fn only_the_requests_own_planner_declines_it_and_the_inbox_is_told() {
     );
 }
 
+/// Task 1564: `ask --request N` opens only for request N's open runtime
+/// planner, read from the queue; another planner (of another request, a
+/// draft or a finding) is refused and the refusal is recorded, and the
+/// request keeps no ask. Which roles may ask at all is
+/// domain::authorization's unit test only_a_requests_own_planner_asks_on_it.
+#[test]
+fn only_the_requests_own_planner_asks_a_planner_question_on_it() {
+    let fx = fixture();
+    let queue = SqliteQueue::open(&fx.db).unwrap();
+    let id = ok_as("inbox", &fx.db, &["request", "add", "--text", "add a tab"])["id"]
+        .as_i64()
+        .unwrap();
+    let id_text = id.to_string();
+    let reviewer = StubReviewer::new(&[]);
+    let backend = PlanWorkspace::default();
+    supervise(&fx, &backend, &reviewer);
+    let planner = request_planner(&queue, RequestId::new(id)).unwrap();
+    let ask = [
+        "ask",
+        "--kind",
+        "planner_question",
+        "--request",
+        &id_text,
+        "--because",
+        "scope",
+        "--question",
+        "a new goal for this?",
+        "--option",
+        "plan",
+        "--option",
+        "decline",
+    ];
+    let asks_on_request = || {
+        Connection::open(&fx.db)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM asks WHERE request_id = ?1",
+                [id],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+    };
+
+    let other = invoke_with(
+        &[("DAGQ_ROLE", "planner"), ("DAGQ_ACTOR_ID", "planner:99")],
+        &fx.db,
+        &ask,
+    );
+    assert!(!other.status.success());
+    let error: Value = serde_json::from_slice(&other.stderr).unwrap();
+    assert_eq!(error["denied"]["capability"], "ask.open");
+    assert_eq!(error["denied"]["reason"], "not on this resource");
+    let denied: Value = Connection::open(&fx.db)
+        .unwrap()
+        .query_row(
+            "SELECT payload FROM run_events WHERE kind='authorization_denied'
+             AND json_extract(payload,'$.capability')='ask.open'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .map(|payload| serde_json::from_str(&payload).unwrap())
+        .unwrap();
+    assert_eq!(denied["resource"]["request"], id);
+    assert_eq!(denied["resource"]["planner"], planner.as_i64());
+    assert_eq!(asks_on_request(), 0);
+
+    // Its own planner asks, and the ask names the request.
+    let own = format!("planner:{planner}");
+    let opened = invoke_with(
+        &[("DAGQ_ROLE", "planner"), ("DAGQ_ACTOR_ID", &own)],
+        &fx.db,
+        &ask,
+    );
+    assert!(
+        opened.status.success(),
+        "{}",
+        String::from_utf8_lossy(&opened.stderr)
+    );
+    assert_eq!(asks_on_request(), 1);
+    // A planner's question on no request is not tied to one.
+    let unbound = invoke_with(
+        &[("DAGQ_ROLE", "planner"), ("DAGQ_ACTOR_ID", "planner:99")],
+        &fx.db,
+        &[
+            "ask",
+            "--kind",
+            "planner_question",
+            "--task",
+            "1",
+            "--because",
+            "scope",
+            "--question",
+            "which goal?",
+        ],
+    );
+    assert!(
+        unbound.status.success(),
+        "{}",
+        String::from_utf8_lossy(&unbound.stderr)
+    );
+}
+
 #[test]
 fn a_planner_question_about_a_request_reaches_its_planner_or_a_new_one_and_three_exhaust_it() {
     let fx = fixture();

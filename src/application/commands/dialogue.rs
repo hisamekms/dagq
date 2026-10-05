@@ -17,7 +17,8 @@ use super::{DenialLog, Gate};
 use crate::domain::{
     ActorContext, Answerer, Ask, AskId, AskKind, AuthorizationError, Authorizer, Capability,
     EventId, Finding, FindingId, FindingOutcome, FindingStatus, FindingTarget, NewAsk, NewFinding,
-    NewNote, NoteTarget, Resource, RunEvent, authorization::DenyReason, stats::Cursor,
+    NewNote, NoteTarget, PlannerId, RequestId, Resource, RunEvent, authorization::DenyReason,
+    stats::Cursor,
 };
 
 /// A change mark to record, or one to retract.
@@ -35,6 +36,9 @@ pub enum MarkChange {
 pub trait DialogueStore: DenialLog {
     /// The ask; a missing ask is an error.
     fn read_ask(&self, id: AskId) -> Result<Ask>;
+    /// The planner of the runtime's open for `request`, if any: the only
+    /// planner that asks on it. A missing request is an error.
+    fn request_planner(&self, request: RequestId) -> Result<Option<PlannerId>>;
     /// Register the ask and notify the inbox of a new one.
     fn open_ask(&mut self, ask: NewAsk) -> Result<Value>;
     fn answer(&mut self, id: AskId, text: &str, answerer: Answerer) -> Result<Ask>;
@@ -67,7 +71,9 @@ impl<'a, S: DialogueStore> Dialogue<'a, S> {
 
     /// `ask`: a `blocked` ask on a finding raises that finding
     /// ([`Capability::FindingAsk`], the observer's); any other opens an ask
-    /// of its kind on the run or task it names. `asked_by` is the actor's.
+    /// of its kind on the run or task it names, and one on a planning
+    /// request (`--request`) a planner opens only as the request's own
+    /// planner, as it declines it (task 1564). `asked_by` is the actor's.
     /// A `blocked` ask without a recommendation is refused
     /// ([`NewAsk::check_asker`], ADR-t451-1 decision 2).
     pub fn ask(&mut self, mut ask: NewAsk) -> Result<Value> {
@@ -75,14 +81,27 @@ impl<'a, S: DialogueStore> Dialogue<'a, S> {
             Some(finding) if ask.kind == AskKind::Blocked => {
                 (Capability::FindingAsk, Resource::Finding(finding))
             }
-            _ => (
-                Capability::AskOpen,
-                Resource::NewAsk {
+            _ => {
+                let resource = |planner| Resource::NewAsk {
                     kind: ask.kind.clone(),
                     run: ask.run_id.clone(),
                     task: ask.task_id,
-                },
-            ),
+                    request: ask.request_id,
+                    planner,
+                };
+                let planner = match ask.request_id {
+                    Some(request) => {
+                        self.gate.refuse_ungranted(
+                            &*self.store,
+                            Capability::AskOpen,
+                            &resource(None),
+                        )?;
+                        self.store.request_planner(request)?
+                    }
+                    None => None,
+                };
+                (Capability::AskOpen, resource(planner))
+            }
         };
         self.gate.authorize(&*self.store, capability, &resource)?;
         ask.check_asker()?;
@@ -226,7 +245,17 @@ mod tests {
         }
     }
 
+    /// The request the store holds, and its planner of the runtime's.
+    const REQUEST: RequestId = RequestId::new(3);
+    const REQUEST_PLANNER: i64 = 7;
+
     impl DialogueStore for Store {
+        fn request_planner(&self, request: RequestId) -> Result<Option<PlannerId>> {
+            if request != REQUEST {
+                return Err(anyhow!("request {request} does not exist"));
+            }
+            Ok(Some(PlannerId::new(REQUEST_PLANNER)))
+        }
         fn read_ask(&self, id: AskId) -> Result<Ask> {
             if id != AskId::new(1) {
                 return Err(anyhow!("ask {id} does not exist"));
@@ -331,6 +360,12 @@ mod tests {
         }
     }
 
+    fn on_request(request: RequestId) -> NewAsk {
+        let mut ask = new_ask(AskKind::PlannerQuestion, None, None);
+        ask.request_id = Some(request);
+        ask
+    }
+
     fn note_on(target: NoteTarget) -> NewNote {
         NewNote {
             target,
@@ -349,6 +384,9 @@ mod tests {
             }),
             ("ask decide --task 1", |d| {
                 d.ask(new_ask(AskKind::Decide, None, Some(1))).map(drop)
+            }),
+            ("ask planner_question --request 3", |d| {
+                d.ask(on_request(REQUEST)).map(drop)
             }),
             ("ask blocked --finding", |d| {
                 let mut ask = new_ask(AskKind::Blocked, None, None);
@@ -471,6 +509,7 @@ mod tests {
             [
                 "ask worker_question --run r1",
                 "ask decide --task 1",
+                "ask planner_question --request 3",
                 "ask close",
                 "note --task 1",
                 "note --run r2",
@@ -494,6 +533,57 @@ mod tests {
                 "{role:?}"
             );
         }
+    }
+
+    /// Task 1564: a planner asks on a request only as the planner of the
+    /// runtime's open for it, as it declines it; another planner is refused
+    /// on the resource and the refusal names the request's planner.
+    #[test]
+    fn only_a_requests_own_planner_asks_on_it() {
+        let ask = |planner: i64| {
+            run(&ActorContext::instance(ActorRole::Planner, planner), |d| {
+                d.ask(on_request(REQUEST)).map(drop)
+            })
+        };
+        let (outcome, store) = ask(REQUEST_PLANNER);
+        assert!(matches!(outcome, Outcome::Allowed));
+        assert_eq!(store.writer.as_deref(), Some("planner"));
+        let (outcome, store) = ask(8);
+        let Outcome::Denied(error) = outcome else {
+            panic!("another planner asked on the request");
+        };
+        assert_eq!(error.reason, DenyReason::Resource);
+        assert!(store.writer.is_none());
+        assert_eq!(
+            store.denials.into_inner()[0]["resource"],
+            serde_json::json!({
+                "kind": "new_ask",
+                "ask_kind": "planner_question",
+                "run": null,
+                "task": null,
+                "request": 3,
+                "planner": REQUEST_PLANNER,
+            })
+        );
+        // A planner's question on no request opens as before.
+        let (outcome, _) = run(&ActorContext::instance(ActorRole::Planner, 8), |d| {
+            d.ask(new_ask(AskKind::PlannerQuestion, None, Some(1)))
+                .map(drop)
+        });
+        assert!(matches!(outcome, Outcome::Allowed));
+        // A role that opens no planner_question is refused before the
+        // request is read.
+        let (outcome, store) = run(&worker(), |d| {
+            d.ask(on_request(RequestId::new(9))).map(drop)
+        });
+        let Outcome::Denied(error) = outcome else {
+            panic!("a worker asked on a request");
+        };
+        assert_eq!(error.reason, DenyReason::AskKind);
+        assert_eq!(
+            store.denials.into_inner()[0]["resource"]["planner"],
+            Value::Null
+        );
     }
 
     #[test]

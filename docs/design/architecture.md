@@ -4,8 +4,8 @@ type: design
 title: レイヤーとコンテキストの境界（contextごとの所有・判断・操作・公開するport・依存の向き・境界をまたぐtransaction・検査できる規則・今の違反）
 status: current
 created: 2026-10-04
-updated: 2026-10-05 # task 1551: domain::run::payload among the run modules, the C6 row no longer names run/history.rs; task 1550: the L4 row of broker_admin removed, AuditFiles among the host operations ports; task 1540: the revisit command and draft_revisits; task 1223: the observer on Codex; task 1641: domain::goal_tag among the planning modules; task 839: domain::broker_usage among the host operations modules; task 1662: the observation and analysis context points to the measurement design; task 1437; task 1632
-last_verified: 2026-10-05 # task 1551; task 1550; task 1540; task 1223; task 1641; task 839; task 1615; task 1437; task 1632
+updated: 2026-10-05 # task 1564: ask --request reads RequestStore::request_planner; task 1551: domain::run::payload among the run modules, the C6 row no longer names run/history.rs; task 1550: the L4 row of broker_admin removed, AuditFiles among the host operations ports; task 1540: the revisit command and draft_revisits; task 1223: the observer on Codex; task 1641: domain::goal_tag among the planning modules; task 839: domain::broker_usage among the host operations modules; task 1662: the observation and analysis context points to the measurement design; task 1437; task 1632
+last_verified: 2026-10-05 # task 1564; task 1551; task 1550; task 1540; task 1223; task 1641; task 839; task 1615; task 1437; task 1632
 scope: system
 related:
   - adr-t1545-1
@@ -76,7 +76,7 @@ goal・task・proposalと、その検査と採否（plan review・goal review・
 - `TaskStore`の読み取り（`show`・`list`・`candidates`・`build_waits`（task 1632）・`predecessors`・`goal_predecessors`・`tasks_in_progress`・`graph_input`・`lint_input`・`show_goal`・`list_goals`）を全てのcontextに公開する。
 - `TaskStore::claim`（と`RunTransitions::claim_for_supervisor_in_order`）は実行と着地だけに公開し、越境のtransaction **T1**として扱う。
 - `DraftPlannerStore::register_follow_ups`を実行と着地に公開する（着地したrunのfollow_upsを計画管理のdraftとして渡す。transactionは着地と別）。
-- `PlanReviewStore`・`GoalReviewStore`・`PlanRequestStore`・残りの`DraftPlannerStore`・`TaskStore`の書き込みは内部のport（このcontextの操作とCLIだけが使う）。
+- `PlanReviewStore`・`GoalReviewStore`・`PlanRequestStore`・残りの`DraftPlannerStore`・`TaskStore`の書き込みは内部のport（このcontextの操作とCLIだけが使う）。CLIの`request add` / `request decline`のport `RequestStore`も内部で、その`request_planner`（依頼の閉じていないruntimeのplanner）は`ask --request`の判定も`DialogueStore::request_planner`から読む（task 1564）。
 
 **許す依存の向き**
 

@@ -52,7 +52,8 @@ use crate::domain::queue_service::{
 };
 use crate::domain::{
     ActorContext, ActorRole, Answerer, Ask, AskId, EventKind, Finding, FindingId, FindingOutcome,
-    FindingStatus, NewAsk, NewFinding, NewNote, ProposalId, RunEvent, RunId, RunStatus, TaskId,
+    FindingStatus, NewAsk, NewFinding, NewNote, PlannerId, ProposalId, RequestId, RunEvent, RunId,
+    RunStatus, TaskId,
 };
 
 /// The tokens' principals in [`SERVICE_DIR`].
@@ -837,6 +838,9 @@ impl DenialLog for ServiceSqlite {
 impl DialogueStore for ServiceSqlite {
     fn read_ask(&self, id: AskId) -> Result<Ask> {
         self.queue.read_ask(id)
+    }
+    fn request_planner(&self, request: RequestId) -> Result<Option<PlannerId>> {
+        crate::application::commands::requests::RequestStore::request_planner(&self.queue, request)
     }
     fn open_ask(&mut self, ask: NewAsk) -> Result<Value> {
         self.dialogue().open_ask(ask)

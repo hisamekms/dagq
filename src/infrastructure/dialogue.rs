@@ -17,7 +17,7 @@ use crate::application::commands::dialogue::{DialogueStore, MarkChange};
 use crate::application::{RunLog, TaskStore, WorkspaceBackend, marks};
 use crate::domain::{
     Answerer, Ask, AskId, Finding, FindingId, FindingOutcome, FindingStatus, NewAsk, NewFinding,
-    NewNote, RunEvent,
+    NewNote, PlannerId, RequestId, RunEvent,
 };
 
 /// A queue, with what opening an ask needs besides it.
@@ -36,6 +36,10 @@ impl DenialLog for DialogueQueue<'_> {
 impl DialogueStore for DialogueQueue<'_> {
     fn read_ask(&self, id: AskId) -> Result<Ask> {
         self.queue.read_ask(id)
+    }
+
+    fn request_planner(&self, request: RequestId) -> Result<Option<PlannerId>> {
+        crate::application::commands::requests::RequestStore::request_planner(&*self.queue, request)
     }
 
     fn open_ask(&mut self, ask: NewAsk) -> Result<Value> {

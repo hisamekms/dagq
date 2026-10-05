@@ -4,8 +4,8 @@ type: design
 title: Authorization
 status: current
 created: 2026-09-27
-updated: 2026-10-05 # task 1540: revisit is task.write; task 838: required turns add the built-in file tools to deny and permissions.allow; task 1509; task 1437; task 1609
-last_verified: 2026-10-05 # task 1540; task 838; task 1509; task 1437; task 1609
+updated: 2026-10-05 # task 1564: ask --request is the request's own planner's; task 1540: revisit is task.write; task 838: required turns add the built-in file tools to deny and permissions.allow; task 1509; task 1437; task 1609
+last_verified: 2026-10-05 # task 1564; task 1540; task 838; task 1509; task 1437; task 1609
 scope: runtime
 related:
   - adr-t1394-1
@@ -86,7 +86,7 @@ CLIのコマンドからcapabilityとresourceへの写しは`src/main.rs`の`req
 | --- | --- | --- |
 | user | 予約と`review.submit` `triage.submit` `landing.land` `landing.push` `request.decline`を除く全て | なし |
 | inbox | userと同じ（人の言葉での代行。[ADR-t728-3](../adr/2026-09-27-t728-3-answer-and-delegated-authority-of-the-inbox.md)の決定1） | なし。人自身の操作との区別は記録が持つ |
-| planner | 読み取り・`queue.watch`・`queue.export`・`goal.write`・`goal.close`・`task.write`・`follow_up.judge`・`task.cancel`・`proposal.submit`・`proposal.withdraw`・`note.write`・`mark.write`・`ask.open`・`session.run`・`session.record`・`finding.resolve`・`finding.dismiss`・`planner.open`・`request.decline`・`service.lifecycle`・`service.install`・`queue.admin` | runにはnote（`note --run`）だけを書け、ほかは何もできない（runに紐づくaskも開けない）。開けるaskは`planner_question`だけ。taskの変更（`task.write`・`task.cancel`）はdraft・submitted・readyのものだけ（状態が不明なら拒む）。`revisit`（draftの再検討の時刻、`task.write`）はdraftだけで（storeがどのroleにも求める）、`draft_planner_exhausted`のあるdraftには付けられない（人・inboxだけが付ける。[ADR-t1540-1](../adr/2026-10-05-t1540-1-a-kept-draft-returns-to-runtime-planners-at-its-revisit-time.md)）。`follow_up.judge`は全状態のfollow_upに記録でき、所属を動かすのはdraft・readyだけ。noteはどの状態のtaskにも書ける。`proposal.withdraw`は自分（actor id）が出したproposalだけ。`planner-session`は自分のplannerだけ。`request.decline`はそのplannerが立てられた依頼（依頼の閉じていないruntimeのplannerのactor idが自分）だけで、plannerが分からなければ拒む |
+| planner | 読み取り・`queue.watch`・`queue.export`・`goal.write`・`goal.close`・`task.write`・`follow_up.judge`・`task.cancel`・`proposal.submit`・`proposal.withdraw`・`note.write`・`mark.write`・`ask.open`・`session.run`・`session.record`・`finding.resolve`・`finding.dismiss`・`planner.open`・`request.decline`・`service.lifecycle`・`service.install`・`queue.admin` | runにはnote（`note --run`）だけを書け、ほかは何もできない（runに紐づくaskも開けない）。開けるaskは`planner_question`だけで、依頼に紐づくもの（`ask --request ID`）はその依頼の閉じていないruntimeのplannerのactor idが自分のときだけ（`request.decline`と同じ規則。plannerが分からなければ拒む、task 1564）。taskの変更（`task.write`・`task.cancel`）はdraft・submitted・readyのものだけ（状態が不明なら拒む）。`revisit`（draftの再検討の時刻、`task.write`）はdraftだけで（storeがどのroleにも求める）、`draft_planner_exhausted`のあるdraftには付けられない（人・inboxだけが付ける。[ADR-t1540-1](../adr/2026-10-05-t1540-1-a-kept-draft-returns-to-runtime-planners-at-its-revisit-time.md)）。`follow_up.judge`は全状態のfollow_upに記録でき、所属を動かすのはdraft・readyだけ。noteはどの状態のtaskにも書ける。`proposal.withdraw`は自分（actor id）が出したproposalだけ。`planner-session`は自分のplannerだけ。`request.decline`はそのplannerが立てられた依頼（依頼の閉じていないruntimeのplannerのactor idが自分）だけで、plannerが分からなければ拒む |
 | worker | 読み取り・`ask.open`・`note.write`・`session.run`・`session.record` | 読み取り以外は自分のrun（`DAGQ_RUN_ID`）・そのtask（`DAGQ_TASK_ID`）・自分のrunのaskだけ。開けるaskは`worker_question`だけで、`--run`なら自分のrun、`--task`だけなら自分のtask（`DAGQ_RUN_ID`の無いworkerは何も持たない）。`session`と`session-event`は自分のrunのものだけ（runtimeのwrapperとhookはworkerの環境のまま打つ） |
 | review-job | 読み取り・`review.submit` | `review.submit`は自分のrunだけ |
 | recovery-job | 読み取り・`triage.submit` | `triage.submit`は自分のrunだけ |
@@ -127,7 +127,7 @@ askのkindはroleごとに決まる（`opens_ask`）: userとinboxとsupervisor�
 
 policyは上の表のまま: plannerは今の権限（draft・submitted・readyのtaskの変更と`cancel`、goalの追加・編集・close、自分のproposalの取り下げ）を持ち、`ready`（`--bypass-review`を含む）・`goal ready`・`goal review`とin_progress以降のtaskの変更（follow_upの所属判断の記録を除く）は持たない。`ready`はuserとinbox（人の言葉での代行。区別はeventのactorが持つ）。worker・4つのjob・observer・wrapper・integratorは計画系を何もできない。supervisorはCLIからは`ready`・`cancel`・`goal close`だけ。capabilityをどのresourceにも持たないroleは、storeを読む前に拒む（taskやproposalが無くても拒否になり、記録のresourceは状態と持ち主が`null`）。capabilityを持つroleで、taskやproposalが見つからないときは拒否ではなく、そのerror（`task N does not exist`など）になる。
 
-拒んだときは、queueのevent `authorization_denied`（taskにもgoalにも紐づかないqueueのevent。actorの列は拒まれた呼び出し元）を記録し、`AuthorizationError`を返す。payloadは`role`・`capability`・`reason`（`not granted`・`reserved`・`not on this resource`）・`resource`（`kind`と`id`、taskなら`status`、proposalなら`owner`）。記録に失敗しても拒否は拒否のまま返す。observerのこのeventは、observerの次の起動を決める「自分以外のevent」に数えない。
+拒んだときは、queueのevent `authorization_denied`（taskにもgoalにも紐づかないqueueのevent。actorの列は拒まれた呼び出し元）を記録し、`AuthorizationError`を返す。payloadは`role`・`capability`・`reason`（`not granted`・`reserved`・`not on this resource`）・`resource`（`kind`と`id`、taskなら`status`、proposalなら`owner`、依頼なら`planner`。開くask（`new_ask`）はidの代わりに`ask_kind`・`run`・`task`を持ち、`--request`付きなら`request`と依頼の`planner`も持つ）。記録に失敗しても拒否は拒否のまま返す。observerのこのeventは、observerの次の起動を決める「自分以外のevent」に数えない。
 
 CLIのerrorは`{"error": ..., "denied": {"role", "capability", "reason"}}`で、`error`はobserverなら`observer may not change queue state`、4つのjob（と`reviewer`）なら`reviewer may not change queue state`（今までの文言）、それ以外は`<role> may not <capability> (<reason>)`。
 
@@ -138,14 +138,14 @@ CLIのerrorは`{"error": ..., "denied": {"role", "capability", "reason"}}`で、
 | コマンド | capability | resource |
 | --- | --- | --- |
 | `ask --kind blocked --finding ID` | `finding.ask` | finding |
-| `ask`（それ以外） | `ask.open` | `NewAsk`（kind、`--run`、`--task`） |
+| `ask`（それ以外） | `ask.open` | `NewAsk`（kind、`--run`、`--task`、`--request`とその依頼の閉じていないruntimeのplanner）。`--request`付きは、`ask.open`を持たないroleとkindの合わないroleを依頼を読む前に拒み、plannerはその依頼のplanner自身でなければ`not on this resource`で拒む（task 1564） |
 | `answer` / `ask close` | `ask.answer` / `ask.close` | ask（queueにあるrun）。capabilityを持たないroleはaskを読む前に拒む（記録のrunは`null`） |
 | `note` | `note.write` | `--task`のtask・`--run`のrun・`--goal`のgoal |
 | `mark` / `mark --retract` | `mark.write` | queue |
 | `finding record` | `finding.record` | 対象のtask・run・goal、`--queue`ならqueue |
 | `finding resolve` / `finding dismiss` | `finding.resolve` / `finding.dismiss` | finding |
 
-計画の依頼（[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)の決定3・6）の`request add`と`request decline`は、`src/application/commands/requests.rs`の`Requests`が全てのroleについて判定してからstoreを呼ぶ（task 1395。port `RequestStore`は`SqliteQueue`が実装し、拒否は同じ`authorization_denied`に残る）。`ask --request ID`（`planner_question`）は上の`ask`と同じ`ask.open`で判定する。`requests`は読み取り（`queue.read`）。
+計画の依頼（[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)の決定3・6）の`request add`と`request decline`は、`src/application/commands/requests.rs`の`Requests`が全てのroleについて判定してからstoreを呼ぶ（task 1395。port `RequestStore`は`SqliteQueue`が実装し、拒否は同じ`authorization_denied`に残る）。`ask --request ID`（`planner_question`）は上の`ask`と同じ`ask.open`で判定し、`request decline`と同じくその依頼のplannerをstoreから読んで（port `DialogueStore::request_planner`）、plannerにはその依頼のplanner自身だけを許す（task 1564）。`requests`は読み取り（`queue.read`）。
 
 | コマンド | capability | resource |
 | --- | --- | --- |

@@ -2158,6 +2158,7 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
             kind,
             task_id,
             run,
+            request,
             ..
         } => one(
             C::AskOpen,
@@ -2165,10 +2166,13 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
                 kind.as_deref().unwrap_or_default().parse::<AskKind>(),
                 run.as_deref().map(RunId::new).transpose(),
             ) {
+                // The request's planner is read from the queue.
                 (Ok(kind), Ok(run)) => Resource::NewAsk {
                     kind,
                     run,
                     task: task_id.map(TaskId::new),
+                    request: request.map(RequestId::new),
+                    planner: None,
                 },
                 _ => Resource::Unresolved,
             },

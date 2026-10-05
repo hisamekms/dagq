@@ -40,8 +40,8 @@ use crate::domain::queue_service::{
 use crate::domain::{
     ActorContext, Answerer, Ask, AskId, AskKind, AskReason, AuthorizationError, Capability,
     EventId, Finding, FindingId, FindingOutcome, FindingStatus, FindingTarget, GoalId, NewAsk,
-    NewFinding, NewNote, NoteTarget, ProposalId, Resource, RunEvent, RunId, RunStatus,
-    StaticPolicy, TaskId,
+    NewFinding, NewNote, NoteTarget, PlannerId, ProposalId, RequestId, Resource, RunEvent, RunId,
+    RunStatus, StaticPolicy, TaskId,
 };
 
 /// The queue as one use case of the service reads and changes it, written
@@ -480,6 +480,9 @@ impl DialogueStore for Store<'_> {
     fn read_ask(&self, id: AskId) -> Result<Ask> {
         self.0.read_ask(id)
     }
+    fn request_planner(&self, request: RequestId) -> Result<Option<PlannerId>> {
+        self.0.request_planner(request)
+    }
     fn open_ask(&mut self, ask: NewAsk) -> Result<Value> {
         self.0.open_ask(ask)
     }
@@ -620,6 +623,9 @@ mod tests {
     impl DialogueStore for Queue {
         fn read_ask(&self, _: AskId) -> Result<Ask> {
             Err(anyhow!("no ask"))
+        }
+        fn request_planner(&self, _: RequestId) -> Result<Option<PlannerId>> {
+            Err(anyhow!("no request"))
         }
         fn open_ask(&mut self, ask: NewAsk) -> Result<Value> {
             let value = json!({"opened": ask.kind.as_str(), "run": ask.run_id, "by": ask.asked_by});
