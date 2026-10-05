@@ -1551,3 +1551,65 @@ $read > left_out.json
     assert_eq!(latest["prompt_bytes"], prompt.len(), "{history}");
     assert_eq!(latest["prompt_sections"], started["prompt_sections"]);
 }
+
+/// `observe_finished` counts the observations that ended `error` or
+/// `failed` in a row, whatever their mode; a success or a skip ends the
+/// run of them, and `observe --history` gives the count (task 1574).
+#[test]
+fn observe_counts_its_failures_in_a_row_and_a_success_or_a_skip_ends_them() {
+    use dagq::application::observer::{ObserveMode, history};
+    let (_dir, _repo, db) = fixture();
+    let failing = ObserverProvider {
+        script: "exit 3".into(),
+    };
+    let succeeding = ObserverProvider {
+        script: "exit 0".into(),
+    };
+    let unavailable = dagq::application::observer::ObserveOptions {
+        unavailable: Some("--no-claude and Codex is not usable".into()),
+        ..observe_options(ObserveMode::Hourly)
+    };
+    let mut counts = Vec::new();
+    let mut run = |provider: &ObserverProvider,
+                   options: &dagq::application::observer::ObserveOptions,
+                   outcome: &str| {
+        let done = observe(&db, provider, options).unwrap();
+        assert_eq!(done["outcome"], outcome, "{done}");
+        counts.push(done["consecutive_failures"].as_i64().unwrap());
+    };
+    run(&failing, &observe_options(ObserveMode::Hourly), "failed");
+    run(&failing, &observe_options(ObserveMode::Daily), "failed");
+    run(&succeeding, &unavailable, "error");
+    run(
+        &succeeding,
+        &observe_options(ObserveMode::Hourly),
+        "succeeded",
+    );
+    run(&failing, &observe_options(ObserveMode::Daily), "failed");
+    // Nothing happened since the hourly one but the observer's own: a
+    // skip, which ends the daily one's run of failures.
+    run(
+        &succeeding,
+        &observe_options(ObserveMode::Hourly),
+        "skipped",
+    );
+    add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "more", &[]);
+    run(&failing, &observe_options(ObserveMode::Hourly), "failed");
+    assert_eq!(counts, [1, 2, 3, 0, 1, 0, 1]);
+    assert_eq!(
+        queue_events(&db, "observe_finished")
+            .iter()
+            .map(|finished| finished["consecutive_failures"].as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        counts
+    );
+    let listed = history(&SqliteQueue::open(&db).unwrap(), 10).unwrap();
+    let listed = listed["observations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["consecutive_failures"].as_i64().unwrap())
+        .rev()
+        .collect::<Vec<_>>();
+    assert_eq!(listed, counts);
+}

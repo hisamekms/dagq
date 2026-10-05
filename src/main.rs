@@ -839,6 +839,8 @@ enum Command {
     /// supervisor passes the provider it routed the observer to) reads stats past the cursor, the open
     /// findings, the latest notes, the open asks and the graph, and writes findings and blocked asks on
     /// them only, through the queue service (ADR-0044 decision 4, ADR-t1222-1). Records observe_started / observe_finished and saves the new cursor.
+    /// observe_finished counts the failures in a row (consecutive_failures); the second reaches the inbox
+    /// (next: check the failed observer).
     /// When no event but the observer's own came since the last observation, starts no agent and records
     /// observe_finished with outcome skipped (unless --since is given). The agent loads no MCP server.
     Observe {

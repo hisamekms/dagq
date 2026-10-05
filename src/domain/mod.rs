@@ -1934,6 +1934,13 @@ pub enum AttentionNext {
     /// (`provider_unusable`) is none: its period is reviewed again on the
     /// other provider (task 1220).
     CheckReview,
+    /// The observer ended `error` (it could not start, or ran past its
+    /// timeout) or `failed` (its agent exited non-zero) for the second time
+    /// in a row (`observe_finished` with `consecutive_failures` 2, task
+    /// 1574): a notice the inbox shows the person with the observation's
+    /// directory, whose log says why. One run of failures is told once;
+    /// nothing waits on it, and the next observation starts on its timer.
+    CheckObserver,
     /// The host's KPI push command failed on a message three times and the
     /// message was given up (`kpi_push_abandoned`, ADR-0051 decision 23):
     /// a person fixes the command or the service behind it. It ends with
@@ -2024,6 +2031,7 @@ impl fmt::Display for AttentionNext {
             Self::ReportUpdate => f.write_str("report the update"),
             Self::ReportReview => f.write_str("report the review"),
             Self::CheckReview => f.write_str("check the failed review"),
+            Self::CheckObserver => f.write_str("check the failed observer"),
             Self::FixPush => f.write_str("fix the push command"),
             Self::BrokerStatus => f.write_str("dagq broker status"),
             Self::QueueServiceStatus => f.write_str("dagq service status"),
@@ -2073,6 +2081,7 @@ pub const ATTENTION_KINDS: &[&str] = &[
     UPDATE_INSTALLED,
     event_kind::THROUGHPUT_REVIEW_REPORTED,
     event_kind::THROUGHPUT_REVIEW_FINISHED,
+    event_kind::OBSERVE_FINISHED,
     kpi::push::KPI_PUSH_ABANDONED,
     broker::BROKER_UNHEALTHY,
     broker::BROKER_CLAIMS_HELD,
@@ -2298,6 +2307,18 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         {
             Some(AttentionNext::CheckReview)
         }
+        // The observer failed twice in a row (task 1574): once is not told,
+        // and a longer run is told once, so an observer that stays down
+        // does not wake the inbox every hour.
+        (event_kind::OBSERVE_FINISHED, _)
+            if observer_failed(payload)
+                && payload
+                    .get(CONSECUTIVE_FAILURES)
+                    .and_then(serde_json::Value::as_i64)
+                    == Some(OBSERVER_FAILURES_TOLD) =>
+        {
+            Some(AttentionNext::CheckObserver)
+        }
         (kpi::push::KPI_PUSH_ABANDONED, _) => Some(AttentionNext::FixPush),
         (broker::BROKER_UNHEALTHY | broker::BROKER_CLAIMS_HELD, _) => {
             Some(AttentionNext::BrokerStatus)
@@ -2369,6 +2390,39 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         }
         _ => None,
     }
+}
+
+/// The key of `observe_finished` that counts the observations that ended
+/// `error` or `failed` in a row up to this one (task 1574).
+pub const CONSECUTIVE_FAILURES: &str = "consecutive_failures";
+/// The failure in a row that makes `observe_finished` an attention
+/// ([`AttentionNext::CheckObserver`]).
+pub const OBSERVER_FAILURES_TOLD: i64 = 2;
+
+/// Whether an `observe_finished` payload ended `error` or `failed`.
+fn observer_failed(payload: &serde_json::Value) -> bool {
+    matches!(
+        payload.get("outcome").and_then(serde_json::Value::as_str),
+        Some("error" | "failed")
+    )
+}
+
+/// The [`CONSECUTIVE_FAILURES`] of an observation that ended `outcome`,
+/// after `previous`, the payload of the queue's last `observe_finished`
+/// (of either mode): one more than the previous one's for an `error` or a
+/// `failed` one, 0 for a success or a skip. A previous failure recorded
+/// before the count was kept counts as one.
+pub fn consecutive_failures(previous: Option<&serde_json::Value>, outcome: &str) -> i64 {
+    if !matches!(outcome, "error" | "failed") {
+        return 0;
+    }
+    let before = previous.map_or(0, |previous| {
+        previous
+            .get(CONSECUTIVE_FAILURES)
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or_else(|| i64::from(observer_failed(previous)))
+    });
+    before + 1
 }
 
 /// Whether an attention event wakes the inbox's `watch` (ADR-t1418-1): the
@@ -3102,6 +3156,49 @@ mod attention_tests {
     }
 
     #[test]
+    fn the_observer_counts_its_failures_in_a_row_and_a_success_or_a_skip_ends_them() {
+        let mut previous: Option<serde_json::Value> = None;
+        let mut counts = Vec::new();
+        for outcome in [
+            "error",
+            "failed",
+            "error",
+            "succeeded",
+            "failed",
+            "skipped",
+            "failed",
+            "failed",
+        ] {
+            let count = consecutive_failures(previous.as_ref(), outcome);
+            counts.push(count);
+            previous = Some(json!({"outcome": outcome, "consecutive_failures": count}));
+        }
+        assert_eq!(counts, [1, 2, 3, 0, 1, 0, 1, 2]);
+        // A failure recorded before the count was kept counts as one; a
+        // success then is none.
+        assert_eq!(
+            consecutive_failures(Some(&json!({"outcome": "failed"})), "error"),
+            2
+        );
+        assert_eq!(
+            consecutive_failures(Some(&json!({"outcome": "succeeded"})), "error"),
+            1
+        );
+        assert_eq!(consecutive_failures(None, "failed"), 1);
+        assert_eq!(consecutive_failures(None, "succeeded"), 0);
+    }
+
+    #[test]
+    fn the_second_failure_of_the_observer_wakes_the_inbox() {
+        let payload = json!({"outcome": "error", "consecutive_failures": 2});
+        assert_eq!(
+            event_attention(event_kind::OBSERVE_FINISHED, &payload),
+            Some(AttentionNext::CheckObserver)
+        );
+        assert!(wakes_inbox(event_kind::OBSERVE_FINISHED, &payload));
+    }
+
+    #[test]
     fn event_attention_covers_every_kind_by_its_status() {
         use AttentionNext::*;
         let cases = [
@@ -3468,6 +3565,50 @@ mod attention_tests {
                 None,
             ),
             ("update_started", json!({"commit": "abc"}), None),
+            // The second failure in a row of the observer only (task 1574).
+            (
+                "observe_finished",
+                json!({"outcome": "error", "consecutive_failures": 2, "error": "Argument list too long"}),
+                Some(CheckObserver),
+            ),
+            (
+                "observe_finished",
+                json!({"outcome": "failed", "consecutive_failures": 2, "exit_code": 1}),
+                Some(CheckObserver),
+            ),
+            (
+                "observe_finished",
+                json!({"outcome": "error", "consecutive_failures": 1}),
+                None,
+            ),
+            (
+                "observe_finished",
+                json!({"outcome": "failed", "consecutive_failures": 3}),
+                None,
+            ),
+            (
+                "observe_finished",
+                json!({"outcome": "error", "consecutive_failures": 7}),
+                None,
+            ),
+            // Recorded before the count was kept.
+            ("observe_finished", json!({"outcome": "error"}), None),
+            (
+                "observe_finished",
+                json!({"outcome": "succeeded", "consecutive_failures": 0}),
+                None,
+            ),
+            (
+                "observe_finished",
+                json!({"outcome": "skipped", "consecutive_failures": 0}),
+                None,
+            ),
+            // A count of 2 on what is no failure is none either.
+            (
+                "observe_finished",
+                json!({"outcome": "succeeded", "consecutive_failures": 2}),
+                None,
+            ),
             (
                 "draft_planner_exhausted",
                 json!({"planners": 3}),
@@ -3573,6 +3714,7 @@ mod attention_tests {
         assert_eq!(ReportRequest.to_string(), "report the request's proposal");
         assert_eq!(RephraseRequest.to_string(), "rephrase or drop the request");
         assert_eq!(CheckReview.to_string(), "check the failed review");
+        assert_eq!(CheckObserver.to_string(), "check the failed observer");
         assert_eq!(FixPush.to_string(), "fix the push command");
         assert_eq!(BrokerStatus.to_string(), "dagq broker status");
         assert_eq!(QueueServiceStatus.to_string(), "dagq service status");

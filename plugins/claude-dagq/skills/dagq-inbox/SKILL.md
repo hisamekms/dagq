@@ -19,7 +19,7 @@ This session holds no state. After a restart, compaction or `/clear`, start agai
 "$DAGQ" status --role inbox
 ```
 
-`asks` lists the open asks; `attention` has everything that waits, each with a fixed `next`; `cursor` is where the next `watch` starts. Handle open asks first (step 3), then the rest (step 4). `${CLAUDE_PLUGIN_ROOT}/skills/dagq-inbox/reference/status.md` lists every field and `next`. If `inbox_guardrail.guardrail` is `false`, this inbox was opened without the settings that refuse `cmux`: tell the person, write your handoff, and have them close this inbox and open it again with `up` (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/up-down.md`, "Open the inbox again").
+`asks` lists the open asks; `attention` has everything that waits, each with a fixed `next`; `cursor` is where the next `watch` starts. Handle open asks first (step 3), then the rest (step 4). `reference/status.md` lists every field and `next`. If `inbox_guardrail.guardrail` is `false`, this inbox was opened without the settings that refuse `cmux`: tell the person, write your handoff, and have them close this inbox and open it again with `up` (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/up-down.md`, "Open the inbox again").
 
 ## 2. Watch in the background
 
@@ -31,7 +31,7 @@ Run `"$DAGQ" watch --role inbox --until-attention --after <cursor>` under `run_i
 "$DAGQ" asks --open --role inbox
 ```
 
-It prints each open ask in full, oldest first. Take them one at a time:
+It prints each open ask in full, oldest first. One at a time:
 
 1. Show the person the question as written, its `reason_category`, `asked_by`, the task and run, and the options. Use `AskUserQuestion` with the options as choices when available. Show the asker's `recommendation` and `confidence` when set. Add no recommendation of your own.
 2. Write the answer exactly as the person gave it: the option's text, or their own words.
@@ -56,7 +56,7 @@ Report each in a short list (task, status, `next`, gist of `last_error`); act wi
 - `request a plan for …` (the draft, the finding, the waiting tasks, the follow-ups of goal G): a request on the person's word (`reference/status.md`).
 - A new plan the person asks for: `"$DAGQ" request add --text '<the person's words>'` records it and a runtime planner takes it (`reference/requests.md`); `report the request's proposal`, `rephrase or drop the request` and a `planner_question` on a request: the same file. More words for an open runtime planner: `"$DAGQ" planner request <planner id> --text '<the person's words>'`, its next turn.
 - `check the planner`, `plan review by hand`: `dagq-recover` section 8.
-- `report the update` (`update_installed`), `report the review`, `check the failed review`: tell the person (`reference/watch.md`).
+- `report the update` (`update_installed`), `report the review`, `check the failed review`, `check the failed observer` (`observe_finished`): tell the person (`reference/watch.md`).
 - `install tool` (`run_env_program_missing`), `fix the push command` (`kpi_push_abandoned`), `check the e2e host` (`run_e2e_finished`): the person fixes it.
 - `stop the dead landing's processes` (`landing_release_stuck`): the person stops its pids.
 - `dagq service status` (`queue_service_down`): `service start` on the person's word.

@@ -292,3 +292,79 @@ fn the_supervisors_health_wakes_the_inbox_with_every_notice_held() {
     );
     assert_eq!(woken["cursor"], *notices.last().unwrap(), "{woken}");
 }
+
+/// The observer's second failure in a row is a notice that wakes the
+/// inbox's watch, with what the inbox shows the person, and `events`
+/// returns it; the first and the third are none, and `status` keeps none
+/// of them (task 1574).
+#[test]
+fn the_second_failure_of_the_observer_wakes_the_inbox_once() {
+    let (_dir, db) = queue();
+    let cursor = ok(&db, &["status", "--role", "inbox"])["cursor"]
+        .as_i64()
+        .unwrap();
+    let failure = |count: i64| {
+        record(
+            &db,
+            EventKind::ObserveFinished,
+            json!({
+                "mode": "hourly",
+                "outcome": "error",
+                "consecutive_failures": count,
+                "error": "failed to spawn the observer: Argument list too long (os error 7)",
+                "exit_code": null,
+                "dir": "/q/observer/1",
+            }),
+        )
+    };
+    failure(1);
+    let after = cursor.to_string();
+    // The first alone does not wake it.
+    let slept = watch(&db, &["--role", "inbox", "--after", &after]);
+    assert_eq!(slept["events"], json!([]), "{slept}");
+    let second = failure(2);
+    let woken = watch(&db, &["--role", "inbox", "--after", &after]);
+    assert_eq!(
+        kinds_and_ids(&woken),
+        [("observe_finished".to_owned(), second)],
+        "{woken}"
+    );
+    let notice = &woken["events"][0];
+    assert_eq!(notice["next"], "check the failed observer", "{notice}");
+    assert_eq!(notice["mode"], "hourly", "{notice}");
+    assert_eq!(notice["outcome"], "error", "{notice}");
+    assert_eq!(notice["consecutive_failures"], 2, "{notice}");
+    assert_eq!(notice["dir"], "/q/observer/1", "{notice}");
+    assert!(
+        notice["reason"]
+            .as_str()
+            .unwrap()
+            .contains("Argument list too long"),
+        "{notice}"
+    );
+    // `events` returns it as the only attention; `--all` has the first
+    // too, with no next.
+    let events = ok(&db, &["events", "--after", &after]);
+    assert_eq!(kinds_and_ids(&events), kinds_and_ids(&woken), "{events}");
+    assert_eq!(events["events"][0]["next"], "check the failed observer");
+    let all = ok(&db, &["events", "--all", "--after", &after]);
+    let nexts = all["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| event["next"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        nexts,
+        [Value::Null, json!("check the failed observer")],
+        "{all}"
+    );
+    // The third does not wake it again.
+    let after = second.to_string();
+    failure(3);
+    let slept = watch(&db, &["--role", "inbox", "--after", &after]);
+    assert_eq!(slept["events"], json!([]), "{slept}");
+    // `status` holds what is unsettled, and no notice is.
+    let status = ok(&db, &["status", "--role", "inbox"]);
+    assert!(!status.to_string().contains("observe_finished"), "{status}");
+}

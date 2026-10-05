@@ -31,8 +31,8 @@ use crate::{
         WorkspaceBackend, dependency_graph, lifecycle::OBSERVER_ROLE,
     },
     domain::{
-        ActorContext, ActorRole, AskId, EventId, FindingQuery, NewHold, NoteQuery, Provider,
-        RunEvent,
+        ActorContext, ActorRole, AskId, CONSECUTIVE_FAILURES, EventId, FindingQuery, NewHold,
+        NoteQuery, Provider, RunEvent,
         actor_model::ActorLaunch,
         headless_job::{JobAccess, JobFailure},
         language::Language,
@@ -352,6 +352,7 @@ pub fn observe<Q: Queue + ObserverLog>(
         written.asks.len(),
         written.without_ask.len(),
     );
+    let failures = consecutive_failures(queue, outcome)?;
     let saved = outcome == "succeeded" && options.mode == ObserveMode::Hourly;
     if saved {
         host.write_cursor(db, cursor)?;
@@ -359,6 +360,7 @@ pub fn observe<Q: Queue + ObserverLog>(
     let mut payload = json!({
         "mode": options.mode.as_str(),
         "outcome": outcome,
+        CONSECUTIVE_FAILURES: failures,
         "exit_code": exit_code,
         "error": error,
         "since": since,
@@ -441,7 +443,7 @@ fn read_failure(
 /// no agent started and no directory, and return its payload: an `error`,
 /// so the next observation reads its window again.
 fn unavailable(
-    queue: &dyn RunLog,
+    queue: &(impl RunLog + ObserverLog),
     mode: ObserveMode,
     since: Option<EventId>,
     cursor: EventId,
@@ -449,9 +451,11 @@ fn unavailable(
     why: &str,
 ) -> Result<Value> {
     let error = format!("the observer could not start: {why}");
+    let failures = consecutive_failures(queue, "error")?;
     let payload = json!({
         "mode": mode.as_str(),
         "outcome": "error",
+        CONSECUTIVE_FAILURES: failures,
         "exit_code": null,
         "error": error,
         "unavailable": true,
@@ -479,6 +483,16 @@ fn unavailable(
         mode.as_str()
     );
     Ok(payload)
+}
+
+/// The [`CONSECUTIVE_FAILURES`] of an observation that ended `outcome`,
+/// counted on from the queue's last `observe_finished` (task 1574).
+fn consecutive_failures(queue: &dyn ObserverLog, outcome: &str) -> Result<i64> {
+    let last = queue.observations(1)?;
+    Ok(crate::domain::consecutive_failures(
+        last.first().map(|(finished, _)| &finished.payload),
+        outcome,
+    ))
 }
 
 /// `extra`'s keys set on the object `payload`.
@@ -646,6 +660,7 @@ fn skip(
     let payload = json!({
         "mode": mode.as_str(),
         "outcome": "skipped",
+        CONSECUTIVE_FAILURES: 0,
         "reason": "no events but the observer's own and no new alert since the last observation",
         "previous_event_id": previous,
         "since": since,
@@ -698,6 +713,8 @@ fn history_entry(finished: &RunEvent, started: Option<&RunEvent>) -> Value {
         "mode": field("mode"),
         "outcome": outcome,
         "skipped": outcome == "skipped",
+        // Recorded since task 1574; null before.
+        CONSECUTIVE_FAILURES: field(CONSECUTIVE_FAILURES),
         "started_at": started.map_or(&finished.created_at, |started| &started.created_at),
         "finished_at": finished.created_at,
         "duration_secs": field("duration_secs"),

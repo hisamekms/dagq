@@ -4,8 +4,8 @@ type: design
 title: Agent provider lifecycle
 status: current
 created: 2026-09-21
-updated: 2026-10-05 # task 1223: the observer runs on Codex too; task 838: required turns of a worker; task 839: the session, resume and headless settings carry the PreToolUse hooks of a run with the broker's tools; task 1713: the wall and review-route judgments are pure functions with unit tests; claim and decision 5 follow the headless-only route of task 1437 (after task 1596, task 1486, task 1570)
-last_verified: 2026-10-05 # task 1223; task 838; task 839; task 1713
+updated: 2026-10-05 # task 1574: the observer's second failure in a row under --no-claude reaches the inbox (check the failed observer); task 1223: the observer runs on Codex too; task 838: required turns of a worker; task 839: the session, resume and headless settings carry the PreToolUse hooks of a run with the broker's tools; task 1713: the wall and review-route judgments are pure functions with unit tests; claim and decision 5 follow the headless-only route of task 1437 (after task 1596, task 1486, task 1570)
+last_verified: 2026-10-05 # task 1574; task 1223; task 838; task 839; task 1713
 scope: provider
 related:
   - adr-t1486-1
@@ -362,7 +362,7 @@ B3 / D3 で `~/.claude.json` に残った `projects` の key は repository root
 - **plan review**: `[roles.plan_review] provider = "codex"` なら Codex の read-only job を起動し、通常の `plan_review_finished` と verdict の適用へ進む（task 1218）。Codex が使えない・失敗したときも Claude へ戻さず、`plan_review_failed`（理由付き）で plan review by hand に渡す。未設定で Claude を選ぶ plan review は job を起動せず、`plan_review_failed`（`provider_disabled`）で plan review by hand に渡す。記録にある launch は要求した値であり、agent は実行されない。plan review の失敗は自動で再試行しない。認証・費用の障害としては扱わない。
 - **復旧**: 既存の job の開始手順が executor の `provider_disabled` によって拒まれ、既存の失敗時の手動対応へ渡る。記録にある launch は要求した値であり、agent は実行されない。復旧の失敗は既存の ask / attention になる。認証・費用の障害としては扱わない。
 - **スループットの見直し**: `[roles.throughput_review] provider = "codex"` なら Codex の read-only job を起動し、Claude の job と同じ保存・週次の finding・`throughput_review_reported` へ進む（task 1220）。Codex が使えない・利用上限などで止まったときも Claude へ戻さず、見直しの要る期間の `throughput_review_finished`（`outcome: error`、理由付き）で `check the failed review` に渡す。未設定で Claude を選ぶ見直しは今までどおり自動で起動しない。
-- **observer**: `[roles.observer] provider = "codex"` なら Codex の read-only job（queue service の job の profile）を起動し、job の `dagq` がクライアントモードで queue service 経由で finding と `blocked` の ask を書く（ADR-t1222-1、task 1223）。Codex が使えない・利用上限などで止まったときも Claude へ戻さず、skip されない observation の `observe_finished`（`outcome: error`、`unavailable: true`、理由付き）を記録する（attention にはしない）。未設定で Claude を選ぶ observer は今までどおり自動で起動しない（ADR-t1204-1 決定2）。
+- **observer**: `[roles.observer] provider = "codex"` なら Codex の read-only job（queue service の job の profile）を起動し、job の `dagq` がクライアントモードで queue service 経由で finding と `blocked` の ask を書く（ADR-t1222-1、task 1223）。Codex が使えない・利用上限などで止まったときも Claude へ戻さず、skip されない observation の `observe_finished`（`outcome: error`、`unavailable: true`、理由付き）を記録する。1 回だけの失敗は attention にしないが、`unavailable` の error も含めて `error` / `failed` が 2 回続くと、その `observe_finished`（`consecutive_failures` が 2）が inbox 宛ての attention `check the failed observer` になる（1 つの連続に 1 回。[`events` / `watch`](supervisor-lifecycle/events-watch.md)、[Observer](supervisor-lifecycle/observer.md)、task 1574）。未設定で Claude を選ぶ observer は今までどおり自動で起動しない（ADR-t1204-1 決定2）。
 - **planner・inbox**: 自動起動と既存の inbox への nudge を止め、手動代行する。Codex を設定済みの goal review は動き、Claude への fallback は拒む。
 - **表示**: supervisor の `providers` の Claude は `modes: []`、`error: provider_disabled`。`found` は実行ファイルの有無だけを表す。起動の mark に `no_claude` を残す。稼働中の `status` / `watch` は `provider_disabled` の attention（`handle disabled roles manually`）を出し、手動の役割と Codex が無い場合の待ちを示す。個々の review・plan review・復旧は既存の ask / attention も出す。
 

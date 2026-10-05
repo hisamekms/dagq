@@ -865,7 +865,8 @@ pub fn truncate_reason(text: &str) -> String {
 /// payload only `status`, `exit_code`, the reason `code`, a truncated `reason` (from
 /// `reason`, `message` or `error`) and, for a step of the automatic or the
 /// release update, its `commit` or `release`, `version`, `stage` and
-/// `plugin` (ADR-t618-2). Paths and receipts are left out.
+/// `plugin` (ADR-t618-2). Paths and receipts are left out but for the
+/// directory of a throughput review's or an observation's finish.
 /// An attention event also carries its `next`.
 pub fn compact_event(event: &RunEvent) -> Value {
     let mut value = json!({"id": event.id, "kind": event.kind});
@@ -928,6 +929,21 @@ pub fn compact_event(event: &RunEvent) -> Value {
         // Which review ended how, and the directory whose `output.out`
         // and `output.err` say why a failed one did (task 1099).
         for key in ["mode", "period", "outcome", "dir"] {
+            if let Some(value) = payload.get(key) {
+                object.insert(key.into(), value.clone());
+            }
+        }
+    }
+    if event.kind == crate::domain::event_kind::OBSERVE_FINISHED {
+        // Which observation ended how, how many in a row failed, and the
+        // directory whose `output.out` and `output.err` say why (task
+        // 1574); `reason` carries its error.
+        for key in [
+            "mode",
+            "outcome",
+            crate::domain::CONSECUTIVE_FAILURES,
+            "dir",
+        ] {
             if let Some(value) = payload.get(key) {
                 object.insert(key.into(), value.clone());
             }
