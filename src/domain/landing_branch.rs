@@ -79,13 +79,13 @@ impl PushTarget {
     /// An error when the landing is pushed to a remote `[repository]
     /// remote` names that the repository does not have; the default
     /// remote may be missing (the push is skipped).
-    pub fn check(&self) -> anyhow::Result<()> {
-        anyhow::ensure!(
+    pub fn check(&self) -> Result<(), DomainError> {
+        super::error::require(
             !self.push || self.remote_exists || self.remote_source == RemoteSource::Default,
-            "{}",
-            missing_remote(&self.remote)
-        );
-        Ok(())
+            || DomainError::PushRemoteMissing {
+                remote: self.remote.clone(),
+            },
+        )
     }
 }
 
@@ -136,19 +136,19 @@ impl LandingBranch {
 /// `remote` the push remote's name and `remote_head` the branch its HEAD
 /// names (`None` without
 /// the remote or its HEAD), and `exists(name)` whether `refs/heads/<name>`
-/// is a local branch. The error says what could not be resolved and how to
-/// set it.
+/// is a local branch, as observed: the caller handles a failure to look
+/// (task 1617). The error says what could not be resolved and how to set
+/// it.
 pub fn resolve(
     configured: Option<&str>,
     remote: &str,
     remote_head: Option<&str>,
-    exists: &mut dyn FnMut(&str) -> anyhow::Result<bool>,
-) -> anyhow::Result<LandingBranch> {
+    exists: &mut dyn FnMut(&str) -> bool,
+) -> Result<LandingBranch, DomainError> {
     if let Some(name) = configured {
-        anyhow::ensure!(
-            exists(name)?,
-            "the landing branch {name} that [repository] branch of dagq.toml names is not a local branch (refs/heads/{name}); {HINT}"
-        );
+        super::error::require(exists(name), || DomainError::LandingBranchMissing {
+            name: name.to_owned(),
+        })?;
         return Ok(LandingBranch {
             name: name.to_owned(),
             source: BranchSource::Config,
@@ -162,16 +162,16 @@ pub fn resolve(
             ("master", BranchSource::Master),
         ]);
     for (name, source) in candidates {
-        if exists(name)? {
+        if exists(name) {
             return Ok(LandingBranch {
                 name: name.to_owned(),
                 source,
             });
         }
     }
-    anyhow::bail!(
-        "cannot resolve the landing branch: {remote}'s HEAD names no local branch, and there is no local main or master; {HINT}"
-    )
+    Err(DomainError::LandingBranchUnresolved {
+        remote: remote.to_owned(),
+    })
 }
 
 /// What an unresolved landing branch tells the operator to do.
@@ -185,9 +185,9 @@ mod tests {
         configured: Option<&str>,
         remote_head: Option<&str>,
         local: &[&str],
-    ) -> anyhow::Result<LandingBranch> {
+    ) -> Result<LandingBranch, DomainError> {
         resolve(configured, DEFAULT_REMOTE, remote_head, &mut |name| {
-            Ok(local.contains(&name))
+            local.contains(&name)
         })
     }
 
@@ -218,6 +218,37 @@ mod tests {
         let error = resolved(None, None, &["feature"]).unwrap_err();
         assert!(error.to_string().contains("cannot resolve"), "{error}");
         assert!(error.to_string().contains("dagq.toml"), "{error}");
+    }
+
+    /// The messages the CLI prints are the ones the errors had
+    /// before task 1617.
+    #[test]
+    fn the_errors_keep_their_messages() {
+        assert_eq!(
+            resolved(Some("trunk"), None, &["main"])
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "the landing branch trunk that [repository] branch of dagq.toml names is not a local branch (refs/heads/trunk); {HINT}"
+            )
+        );
+        assert_eq!(
+            resolved(None, None, &[]).unwrap_err().to_string(),
+            format!(
+                "cannot resolve the landing branch: origin's HEAD names no local branch, and there is no local main or master; {HINT}"
+            )
+        );
+        let configured = RepositoryConfig {
+            remote: Some("upstream".into()),
+            ..RepositoryConfig::default()
+        };
+        assert_eq!(
+            PushTarget::new(&configured, false)
+                .check()
+                .unwrap_err()
+                .to_string(),
+            missing_remote("upstream")
+        );
     }
 
     #[test]

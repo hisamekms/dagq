@@ -1219,27 +1219,41 @@ impl GitRepository {
             .success()
             .then(|| stdout.trim().strip_prefix(&prefix).map(str::to_owned))
             .flatten();
-        landing_branch::resolve(
+        let local_branch = |name: &str| -> Result<bool> {
+            let (status, _, stderr) = capture(
+                self.git_root().args([
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/{name}"),
+                ]),
+                Duration::from_secs(30),
+            )?;
+            match status.code() {
+                Some(0) => Ok(true),
+                Some(1) => Ok(false),
+                _ => bail!("git show-ref failed ({status}): {stderr}"),
+            }
+        };
+        // The domain takes what was observed; the first failure to look
+        // stops the lookups and is the error, as before (task 1617).
+        let mut failure = None;
+        let resolved = landing_branch::resolve(
             config.branch.as_deref(),
             remote,
             remote_head.as_deref(),
             &mut |name| {
-                let (status, _, stderr) = capture(
-                    self.git_root().args([
-                        "show-ref",
-                        "--verify",
-                        "--quiet",
-                        &format!("refs/heads/{name}"),
-                    ]),
-                    Duration::from_secs(30),
-                )?;
-                match status.code() {
-                    Some(0) => Ok(true),
-                    Some(1) => Ok(false),
-                    _ => bail!("git show-ref failed ({status}): {stderr}"),
-                }
+                failure.is_none()
+                    && local_branch(name).unwrap_or_else(|error| {
+                        failure = Some(error);
+                        false
+                    })
             },
-        )
+        );
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(resolved?),
+        }
     }
 
     /// The landing branch and the push (ADR-t615-1), as `up`'s preflight

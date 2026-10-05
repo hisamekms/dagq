@@ -344,6 +344,21 @@ pub enum DomainError {
         min: i64,
         value: i64,
     },
+    /// `[repository] branch` of `dagq.toml` names no local branch
+    /// (ADR-t615-1).
+    LandingBranchMissing {
+        name: String,
+    },
+    /// No configured landing branch, and neither the push remote's HEAD
+    /// nor `main` or `master` is a local branch (ADR-t615-1).
+    LandingBranchUnresolved {
+        remote: String,
+    },
+    /// The landing is pushed to a remote `[repository] remote` names that
+    /// the repository does not have (ADR-t615-1).
+    PushRemoteMissing {
+        remote: String,
+    },
 }
 
 impl fmt::Display for DomainError {
@@ -670,6 +685,19 @@ impl fmt::Display for DomainError {
                 f,
                 "a request's --ref is ask:N, task:N, run:ID, event:N, finding:N or goal:N, not {value:?}"
             ),
+            Self::LandingBranchMissing { name } => write!(
+                f,
+                "the landing branch {name} that [repository] branch of dagq.toml names is not a local branch (refs/heads/{name}); {}",
+                super::landing_branch::HINT
+            ),
+            Self::LandingBranchUnresolved { remote } => write!(
+                f,
+                "cannot resolve the landing branch: {remote}'s HEAD names no local branch, and there is no local main or master; {}",
+                super::landing_branch::HINT
+            ),
+            Self::PushRemoteMissing { remote } => {
+                f.write_str(&super::landing_branch::missing_remote(remote))
+            }
         }
     }
 }
