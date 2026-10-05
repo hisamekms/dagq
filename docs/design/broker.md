@@ -2,10 +2,10 @@
 id: design-broker
 type: design
 title: Resource broker
-status: draft
+status: current
 created: 2026-09-28
-updated: 2026-10-05 # task 841: the e2e of required; task 840: package.install and [broker.package]; task 838; task 839; task 1451
-last_verified: 2026-10-05 # task 841; task 840; task 838; task 839; task 1451
+updated: 2026-10-05 # task 842: current, Phase 3の前提, pluginのreference; task 841: the e2e of required; task 840: package.install and [broker.package]; task 838; task 839; task 1451
+last_verified: 2026-10-05 # task 842; task 841; task 840; task 838; task 839; task 1451
 scope: runtime
 tags:
   - security
@@ -27,7 +27,7 @@ related:
 
 # Resource broker
 
-fs・process・git・package（packageはtask 840）を仲介するresource broker（`dagq-broker`）の設計。goal 58（Phase 1）が実装する。**この文書はまだ実装されていない姿（status: draft）を書き、goal 58の各taskが実装に合わせて直し、全体が着地したら`current`にする。** 決定の理由は[ADR-t827-1](../adr/2026-09-28-t827-1-broker-crates-binaries-and-version-alignment.md)（crateとバイナリと配布）、[ADR-t827-2](../adr/2026-09-28-t827-2-broker-transport-run-token-and-workspace-confinement.md)（transport・token・mountと閉じ込め・git）、[ADR-t827-3](../adr/2026-09-28-t827-3-supervisor-runs-the-broker-container-on-a-dedicated-podman-machine.md)（containerとPodman machine）、[ADR-t827-4](../adr/2026-09-28-t827-4-worker-mcp-tools-audit-mode-and-relations.md)（workerの道具・audit・mode・関係）、[ADR-t838-1](../adr/2026-10-05-t838-1-required-broker-mode-refuses-built-in-tools-and-holds-claims.md)（`required`。goal 59、Phase 2）、[ADR-t840-1](../adr/2026-10-05-t840-1-broker-package-backend-runs-only-configured-commands.md)（package backendと`package.install`。goal 59）。
+fs・process・git・package（packageはtask 840）を仲介するresource broker（`dagq-broker`）の設計。goal 58（Phase 1）が実装して着地し、goal 59（Phase 2）が`required`・互換の診断・package backendを足した。**この文書は今の姿を書く**（`status: current`）。まだ無いものは各節で「後のtask」と書き、Phase 3以降は下の「段階」が持つ。人とinboxとplannerの手順（modeの意味・使い捨てのrepositoryでの試し方・`status`と`doctor`の読み方・知らせへの対応）はpluginの`dagq`と`dagq-recover`の`reference/broker.md`が持ち、この文書は繰り返さない。 決定の理由は[ADR-t827-1](../adr/2026-09-28-t827-1-broker-crates-binaries-and-version-alignment.md)（crateとバイナリと配布）、[ADR-t827-2](../adr/2026-09-28-t827-2-broker-transport-run-token-and-workspace-confinement.md)（transport・token・mountと閉じ込め・git）、[ADR-t827-3](../adr/2026-09-28-t827-3-supervisor-runs-the-broker-container-on-a-dedicated-podman-machine.md)（containerとPodman machine）、[ADR-t827-4](../adr/2026-09-28-t827-4-worker-mcp-tools-audit-mode-and-relations.md)（workerの道具・audit・mode・関係）、[ADR-t838-1](../adr/2026-10-05-t838-1-required-broker-mode-refuses-built-in-tools-and-holds-claims.md)（`required`。goal 59、Phase 2）、[ADR-t840-1](../adr/2026-10-05-t840-1-broker-package-backend-runs-only-configured-commands.md)（package backendと`package.install`。goal 59）。
 
 名前: この文書の「broker」はresource brokerのこと。goal 38（draft）の「broker」は実行側からqueue serviceへの出口で、別物（ADR-t827-4決定6）。
 
@@ -352,6 +352,7 @@ Podman machineは既定でhostの`$HOME`をVMにmountするので、containerか
 ### 人が行うこと
 
 - podmanをhostに入れる: `brew install podman`（2026-09-28に人が入れた。`/opt/homebrew/bin/podman`）。dagqもworkerもpodmanを入れない。無ければ`dagq broker start`は`podman_missing`（「a person installs podman (brew install podman)」）で止まり、`broker status`と`doctor`の`broker`がそれを出す
+- 知らせ（`broker_unhealthy`・`broker_claims_held`）への対応、brokerの起動のし直し（`dagq broker stop`と`start`）、brokerのerrorで失敗したrunの扱いはpluginの`dagq-recover`の`reference/broker.md`
 - **machineの`init`は人が打たない。** dagq専用のmachine `dagq`は、必要になったとき（brokerの起動、podmanを要る`#[ignore]`のtestとスモーク）にruntimeが下の資源で`init`し、止まっていれば`start`する。人の既定のmachine（`podman-machine-default`など）と既定の接続には触らない
 
 ### 用意の手順（`dagq broker start`、`src/application/broker.rs`の`start`）
@@ -619,5 +620,15 @@ port = 0                      # 0 は空いている port
 ## 段階
 
 - Phase 1（goal 58）: この文書。workerはhostのまま、`preferred`で契約を証明する
-- Phase 2（goal 59）: `required`（上の「required」、task 838）、互換の診断（上の「組み込みの道具の数」、task 839）、package backend（上の「package.install」、task 840）、`required`の代表taskのe2e（上の「required」のtestの`tests/e2e/broker.rs`の2本、task 841）と実Claudeの手動スモーク（[手動スモーク](manual-smoke.md#required-の-broker-のスモーク)）
+- Phase 2（goal 59）: `required`（上の「required」、task 838）、互換の診断（上の「組み込みの道具の数」、task 839）、package backend（上の「package.install」、task 840）、`required`の代表taskのe2e（上の「required」のtestの`tests/e2e/broker.rs`の2本、task 841）と実Claudeの手動スモーク（[手動スモーク](manual-smoke.md#required-の-broker-のスモーク)）、pluginのskillとこの文書の今の姿（task 842）
 - Phase 3以降: workerのcontainer化（`PodmanActorExecutor`）、runごとのmountでの閉じ込め、containerのworkerのqueueの操作（goal 38か後のgoal）
+
+### Phase 3に進む前提
+
+goal 59は、その終わりでbrokerのAPIをworkerのcontainer化に進める安定点とみなす（goal 59の記述）。Phase 3はbrokerの側を変えずに、workerを動かす側を替える。
+
+- **安定させるもの**: protocolの型と`PROTOCOL_VERSION`（上の「protocolの型」）、MCPの道具の名前と形（`TOOLS`の13本（`package_install`を含む）と、`DAGQ_RECEIPT_FILE`があるときだけ出す`RECEIPT_TOOL`の`write_receipt`。上の「workerの道具（MCP）」）、tokenのclaimsとcapability（上の「token」）、auditの行（上の「audit」）、`mcp.json`のenvの名前（`the_configuration_names_the_variables_the_client_reads`が見る）。変えるときは`PROTOCOL_VERSION`を上げ、版の一致だけを許す（ADR-t827-1決定7）のは今のまま
+- **差し替える所**: AI actorの起動は全て`ActorExecutor::spawn`を通り（[Roles](supervisor-lifecycle/roles.md#actorの起動actorexecutor)）、今の実装は`HostActorExecutor`だけ（`backend: host`・`enforcement: advisory`）。`PodmanActorExecutor`はその別の実装として足し、`required`のturnの組み立て（上の「required」の印・`mcp.json`・`TurnTarget::broker_required`）を、clientとtoken fileとreceiptをcontainerの中から使える形に移す。claimの前のhold（`broker_holds_claims`）・tokenの発行と失効（`broker_grant`・sweep）・attentionはsupervisorの側でexecutorに依らないので、そのまま使う
+- **`required`が先に成り立っていること**: containerのworkerは組み込みの道具でhostに触れないので、`required`の代表taskがbrokerの道具と制御側の`dagq`の操作とreceiptの書き込みだけで完走すること（task 841のe2e）と、`preferred`のrunの`broker_tool_use`の`direct`（上の「組み込みの道具の数」）でbrokerに移っていない操作が把握されていることを前提にする
+- **Phase 3で決めること**（goal 59の範囲外、人の決定 2026-09-27）: containerの中のClaudeの認証（`required`の`--setting-sources ""`が利用者のsettingsの認証を読まないこととも関わる）、containerのworkerのqueueの操作（今は`Bash(dagq:*)`と`write_receipt`がhostで動く。goal 38か後のgoal、ADR-t827-4決定6）、runごとのmountでの閉じ込め（ADR-t827-2で退けた案に残した候補）、machineのvolume（`$HOME`のmountの見直し。ADR-t827-3決定6）、Phase 4のbackendごとのegressとcredentialの分離
+- **表示**: `status`と`doctor`の`actors`の`backend`・`enforcement`は、そのactorを起動するexecutorの`backend()`・`enforcement()`が出す（[Roles](supervisor-lifecycle/roles.md#実行のbackendとenforcement)）。hostのworkerは`host`・`advisory`のまま

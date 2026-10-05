@@ -4,7 +4,7 @@
 
 dagq は cmux と Git worktree で依存関係付きの開発タスクを実行する Rust runtime。この repository 自身の開発タスクも dagq で流す。文書の分類は [docs/README.md](docs/README.md)。
 
-この文書は、この repository の開発に要る短い案内だけを持つ。CLI の使い方は plugin の skill、規則の本文は `docs/development/`、実装は `docs/design/`、経緯は ADR、測定は `docs/plans/`、今の設定値は `dagq.toml` が持つ（[ADR-t1453-2](docs/adr/2026-10-03-t1453-2-ownership-of-agents-md-plugin-development-docs-and-config.md)）。タスクの一覧・状態・依存・run 履歴・完了はキューだけが持つ（文書に写さない）。
+この文書は、この repository の開発に要る短い案内だけを持つ。CLI の使い方は plugin の skill、規則の本文は `docs/development/`、実装は `docs/design/`、経緯は ADR、測定は `docs/plans/`、今の設定値は `dagq.toml` が持つ（ADR-t1453-2）。タスクの一覧・状態・依存・run 履歴・完了はキューだけが持つ（文書に写さない）。
 
 ## 本番 queue と開発環境の境界
 
@@ -12,6 +12,7 @@ dagq は cmux と Git worktree で依存関係付きの開発タスクを実行�
 
 - 本番 queue（この repository の queue DB）の登録と、状態を変えるコマンド・`migrate`・`up` / `down` / `install` は、どの session でも固定バイナリ `~/.local/bin/dagq` で打つ。`target/` の開発中のバイナリで本番の状態と schema を変えない。状態を変えないコマンド（`status`・`show`・`list`・`events`・`doctor` など）は読み取り専用で開くので、開発中のバイナリで本番を読むのはよい
 - 本番 queue の DB と `~/.local/bin/dagq` を作業成果で置き換えない。固定バイナリの入れ替えは `dagq install` か `up --auto-update` の自動更新だけで行う（手順は `dagq-recover` skill の `reference/update.md`）。DB は手で直さず（例外は無い）、CLI の外で状態を持たない
+- この repository の `dagq.toml` に `[broker]` を足さず、本番 queue の resource broker は既定の disabled のまま（理由は operations.md の「`dagq.toml`を変えるとき」）
 - 新しいビルドの確認とスモークは使い捨ての queue で、人か inbox が行う。worker は使い捨ての queue も操作できず、host にツールを入れない（実バイナリや実 queue での確認が要ると思ったら operations.md の「workerがhostと実queueでできないこと」）
 
 ## 開始時の短い制約
@@ -19,7 +20,7 @@ dagq は cmux と Git worktree で依存関係付きの開発タスクを実行�
 - session 開始時に `which dagq` が `~/.local/bin/dagq` に解決することを確かめ、コマンドは repository の中（どの worktree でもよい）で打つ
 - planner・inbox・人は `dagq list` と担当の `dagq show ID`、[docs/plans/current.md](docs/plans/current.md) の現在のステップと完了条件を読む（worker は読まない）
 - 人・inbox は `install`・`up` / `down`、host のツール（sccache・`d2`・TALA）、push と secret に、人・inbox・planner は `dagq.toml` と KPI の印に触る前に operations.md の該当の節（`up` は「`up`のコマンド」）を読む（planner は `up` / `down` / `install` を打たない）
-- inbox と planner は cmux を直接打たない（settings の `permissions.deny` の `Bash(cmux:*)`、[ADR-t1228-2](docs/adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)）
+- inbox と planner は cmux を直接打たない（settings の `permissions.deny` の `Bash(cmux:*)`、ADR-t1228-2）
 - AGENTS.md に規則の本文を足さず、正本に書いてここには案内だけを置く。大きさの上限は `scripts/check-agents-md-size.sh` と CI が検査する（値と決め方は [documents.md](docs/development/documents.md) の「AGENTS.md」）
 
 ## 役割と変更の範囲ごとの読む案内
@@ -36,7 +37,7 @@ runtime の worker の prompt が名指す「worker の部分」。作業の場�
 
 ### planner
 
-planner は runtime だけが立て、`dagq-planner` skill に従う。基本方針は skill の「Basic policy (ADR-t451-1)」: 推奨が出せる判断は自分で決めて進め、理由を note か context に残す。人に上げるのは人が要る理由に当たり材料で決めきれないものと確信度 low のものだけ（条件と権限は本文と「Where your authority ends」）。人が開く planner は廃止し、`dagq plan` は拒む（[ADR-t1394-1](docs/adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)）。task の `--verify`・`--paths`・`--evidence`・`--change` の取り方は [task-registration.md](docs/development/task-registration.md)（ADR を書く task は「ADRを書くtask」）。runtime・test・migration を変える task は「変更の範囲ごと」も読む。
+planner は runtime だけが立て、`dagq-planner` skill に従う。基本方針は skill の「Basic policy (ADR-t451-1)」: 推奨が出せる判断は自分で決めて進め、理由を note か context に残す。人に上げるのは人が要る理由に当たり材料で決めきれないものと確信度 low のものだけ（条件と権限は本文と「Where your authority ends」）。人が開く planner は廃止し、`dagq plan` は拒む（ADR-t1394-1）。task の `--verify`・`--paths`・`--evidence`・`--change` の取り方は [task-registration.md](docs/development/task-registration.md)（ADR を書く task は「ADRを書くtask」）。runtime・test・migration を変える task は「変更の範囲ごと」も読む。
 
 ### plan review
 
@@ -56,7 +57,7 @@ inbox は `dagq-inbox` skill に従い、復旧と手での操作は `dagq-recov
 
 ### 変更の範囲ごと
 
-- runtime（`src/`・`crates/`）: 触る範囲の `docs/design/*.md`。判断は unit test、境界は integration test（[testing.md](docs/development/testing.md) の「判断と境界のtest」）
+- runtime（`src/`・`crates/`）: 触る範囲の `docs/design/*.md`。判断は unit test、境界は integration test（[testing.md](docs/development/testing.md) の「判断と境界のtest」）。broker の crate の verify は task-registration.md の「推奨の組み合わせ」
 - tests（`tests/`・`#[cfg(test)]`・`.config/e2e-quarantine.toml`）: [testing.md](docs/development/testing.md)（macOS に固有の test は「macOSに固有のtest」）
 - migrations: [migrations.md](docs/development/migrations.md)
 - docs（ADR・design・plans）: [documents.md](docs/development/documents.md)

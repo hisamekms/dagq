@@ -4,8 +4,8 @@ type: design
 title: Claude Code and Codex plugin integration
 status: current
 created: 2026-09-21
-updated: 2026-10-04 # task 1468: the plugin test also checks for docs/design and docs/plans paths, relative links out of the plugin and "fixed binary"
-last_verified: 2026-10-04 # task 1468
+updated: 2026-10-05 # task 842: reference/broker.md of dagq and dagq-recover; task 1468: the plugin test also checks for docs/design and docs/plans paths, relative links out of the plugin and "fixed binary"
+last_verified: 2026-10-05 # task 842; task 1468
 scope: distribution
 related:
   - adr-t655-1
@@ -127,6 +127,7 @@ plugins/claude-dagq/
     reference/goal-close.md         goal の close（終わった goal は supervisor の goal review の job が判定して閉じる。ADR-0047。goal close は draft goal の破棄と人の言葉のときだけ）
     reference/observer.md           observer の finding の見方（findings・events・timeline・observe --history、kind: kpi の finding と改善の上限）と行き先（印からの runtime の planner、blocked の ask の propose / dismiss、人の言葉で inbox が記録する依頼（request add --ref finding:N）の planner での submit --finding / finding dismiss）
     reference/kpi.md                dagq kpi（期間・種類・層・比較・目標）、dagq mark / marks と kpi --compare での前後比較、dagq forecast の見込み（p50 / p90 と前提、流入を含まない）と forecast.* の答え合わせの KPI、dagq report と日次のレポートの場所、host.toml の [push] と送るもの・失敗の attention
+    reference/broker.md             resource broker の [broker] mode（disabled が既定・preferred・required）と host.toml で disabled に落とすこと、使い捨ての repository で試す手順、status / doctor の broker の欄と actors の backend: host・enforcement: advisory、dagq broker status / logs / audit
   skills/dagq-inbox/              inbox のループ: status --role inbox → watch --role inbox --until-attention を background で 1 本（shell ループなし） → open な ask を人に見せて answer → それ以外の attention（回答済みの ask、止まった supervisor、失敗した review / triage / plan review、応答しない planner、runtime の planner が決めきれなかった draft と finding、push の失敗。finding に紐づく blocked の ask の propose（提案にする）/ dismiss と stalled の ask の propose は runtime が適用する）を人に知らせ、人の指示があるときだけ dagq-recover の手順を実行 → 次の watch。自分では判断しない。人が頼んだ計画は request add で依頼として記録して runtime の planner に移譲する
     reference/status.md             status / watch / events / asks / show のフィールド、attention の next の一覧、stalled の ask（促しの後に開く条件、question の中身、wait / intervene / propose の扱いと runtime が閉じる条件）、run の状態一覧
     reference/asks.md               ask の kind ごとの意味と option（approve_landing・approve_plan・decide・stalled・worker_question・planner_question・answer_prompt・stuck_exit・blocked・queue_hold・update_failed / approve_update）、runtime が適用する answer（propose / dismiss）
@@ -142,6 +143,7 @@ plugins/claude-dagq/
     reference/stalled.md            stalled の ask の出どころ（receipt の無い idle の促しの後、復旧 job の long_background / idle_process の escalate）、wait（supervisor が適用して close し数え直す）/ propose / intervene の扱い、intervene の手順（画面を読む、background の処理を確かめて session に止めさせる、指示を打つ、/exit で run を止める、ask close）と runtime が閉じる条件
     reference/stuck-exit.md         stuck_exit の ask の answer の実行: 確認画面の読み方、Exit and stop tasks の前の worktree と receipt の確認、/exit
     reference/resume.md             runtime の resume が送るものと終わり方、3 回で解消しないときの decide の ask
+    reference/broker.md             broker_unhealthy と broker_claims_held の attention の読み方、status の code ごとの人の対応（podman・dagq の Podman machine・machine_busy）、broker stop / start での起動のし直し、host.toml で disabled に落とすこと、broker の error で failed になった run の retry
 ```
 
 各`SKILL.md`は手順だけを書き8 KB以下に収め（`tests/plugin.rs`が確かめる）、出力フィールドや状態の一覧は各skillの`reference/`に置いて本文から「必要な時に読む」と指す。skillは呼ぶたびに読み込まれcompaction後にも読み直されるので、読み込み単位を小さくする。descriptionはtriggerが重ならないように書き分ける: `dagq`は登録と参照、`dagq-planner`はruntimeが立てるplanner session（`DAGQ_ROLE=planner`）の依頼の計画・登録・draftの判断・goal close、`dagq-inbox`はinbox session（`DAGQ_ROLE=inbox`）のaskとattentionの中継と人が頼んだ計画の依頼（`request add`）、`dagq-recover`は人が手で行うこと（`recover run` / `triage by hand` / `review by hand` / `review and integrate` / `push main` / `restart supervisor`、回答済みの`stuck_exit` / `answer_prompt` / `stalled`のaskの実行、`up` / `down`）。

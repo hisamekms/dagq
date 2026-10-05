@@ -42,7 +42,7 @@ It prints each open ask in full, oldest first. Take them one at a time:
 
 3. `{"error": "ask <id> is not open"}`: the runtime closed it first (the dialog went, the session moved on or exited); tell the person.
 
-A run waiting on an ask holds no `--parallel` slot. For context: `"$DAGQ" show <task_id>` (`--full` for a receipt). Leave open an ask the person will not answer yet.
+A run waiting on an ask holds no `--parallel` slot. Context: `"$DAGQ" show <task_id>` (`--full` for a receipt). Leave open an ask the person will not answer yet.
 
 Before showing an ask whose kind, options or effect you are unsure of, read `reference/asks.md`: every kind (`approve_landing`, `decide`, `approve_release`, ...), its options, and the answers the runtime applies (`propose`, `dismiss`, a goal review's `approve_goal`). An answer the runtime does not apply comes back as `read the answer of ask <id> and close it` (step 4).
 
@@ -60,7 +60,7 @@ Report each in a short list (task, status, `next`, gist of `last_error`); act wi
 - `install tool` (`run_env_program_missing`), `fix the push command` (`kpi_push_abandoned`), `check the e2e host` (`run_e2e_finished`): the person fixes it.
 - `stop the dead landing's processes` (`landing_release_stuck`): the person stops its pids.
 - `dagq service status` (`queue_service_down`): `service start` on the person's word.
-- `dagq broker status` (`broker_unhealthy`): show it; it retries.
+- `dagq broker status` (`broker_unhealthy`, `broker_claims_held`): `dagq-recover` section 9.
 - `restart supervisor` (`supervisor_stopped`, `supervisor_stale`): `up` (`dagq-recover` section 5).
 - `review by hand`, `review and integrate`, `push main`: `${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/review-by-hand.md`.
 - `recover run`, `exit the session`: `dagq-recover`.

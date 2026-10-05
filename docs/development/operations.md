@@ -4,7 +4,7 @@ type: development
 title: このrepositoryの本番queueの運用（固定バイナリ・使い捨てのqueue・hostのツール・dagq.toml・upのコマンド・KPIの印・secret・人への報告）
 status: current
 created: 2026-10-03
-updated: 2026-10-04
+updated: 2026-10-05 # task 842: [broker] stays out of dagq.toml
 owners:
   - hisamekms
 tags:
@@ -59,6 +59,7 @@ hostのツールは人が入れ、miseのshimへのlinkを`~/.local/bin`に置�
 ## `dagq.toml`を変えるとき
 
 - main checkoutの`dagq.toml`は本番queueの全runに効く。変える前に、runtimeが読む場所・効く時点・壊れたときに止まるものを[Run environment](../design/supervisor-lifecycle/run-environment.md)の冒頭と「main checkoutの決め方」で、新しいtableや欄を足すなら旧バイナリとの順序をそのtableの項で確かめる。
+- `[broker]`（resource broker）は足さず、本番queueは既定の`disabled`のまま（goal 59の制約。AGENTS.mdの「本番 queue と開発環境の境界」）。理由: workerはhostのプロセスのままでbrokerは隔離ではなく（[Resource broker](../design/broker.md)の冒頭）、`preferred`・`required`は本番のsupervisorに`up`のpodmanの検査とPodman machine・imageの用意を足し、`required`はbrokerが使えない間claimとresumeを止める（同じ文書の「supervisorの統合」「required」）。modeの意味・試し方・`status`と`doctor`の読み方はpluginの`dagq`の`reference/broker.md`、知らせへの対応は`dagq-recover`の`reference/broker.md`。modeを試すのは使い捨てのrepository（上の「使い捨てのqueue」）で、人かinboxが行う。本番のmodeを変えるのは人の判断で、そのときは[Resource broker](../design/broker.md)の「mode と設定」と「Phase 3に進む前提」を読む。
 - 並列数と`runtime_planners`を変えるときは、`dagq.toml`の`[supervisor]`と`[run.env]`のコメント（値どうしの関係）と、[Run environment](../design/supervisor-lifecycle/run-environment.md)の`[supervisor]`の項（効く時点と`status`での確かめ方）を読む。
 
 ## `up`のコマンド
