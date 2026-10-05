@@ -13,6 +13,7 @@ mod thread_stacks;
 pub use crate::common::{Bounded, WithoutActor, shell_path};
 pub use anyhow::{Result, bail, ensure};
 use dagq::domain::LeaseToken;
+use dagq::domain::background_wrapper::HeadlessWrapper;
 pub use dagq::domain::headless_job::JobAccess;
 pub use dagq::{
     VERSION,
@@ -456,6 +457,18 @@ pub const VALID_AGENT: &str = "commit work; receipt \"$(git rev-parse HEAD)\"";
 /// The first workspace the test backend hands out; see `workspace_id`.
 pub const WORKSPACE_ID: &str = "01234567-89ab-4def-8123-000000000000";
 
+/// The handle of the background wrapper the run recorded as its first
+/// session (ADR-t1404-1), the fixture's default (task 1439): a pid and a
+/// start, not a workspace.
+pub fn background_session(run: &TaskRun) -> String {
+    let session = run.workspace_id().expect("the run's session").to_owned();
+    assert!(
+        dagq::domain::background_wrapper::is_background(&session),
+        "{session}"
+    );
+    session
+}
+
 pub fn workspace_id(n: usize) -> String {
     format!("01234567-89ab-4def-8123-{n:012x}")
 }
@@ -643,6 +656,10 @@ pub struct TestWorkspace {
     /// `launch_background` calls (ADR-t1404-1): the directory, the command
     /// and the environment of each ([`headless::launch_background`]).
     pub launched: Mutex<Vec<headless::Launch>>,
+    /// The processes of the background sessions `no_session` or
+    /// `resume_no_session` started without a wrapper, by handle, until
+    /// their close stops them as it stops a background wrapper.
+    pub stands: Mutex<Vec<(String, headless::Stand)>>,
     /// `send_text` calls: the workspace and the text.
     pub texts: Mutex<Vec<(String, String)>>,
     /// `exists` fails, as `cmux workspace list` does when cmux is gone.
@@ -701,6 +718,7 @@ impl TestWorkspace {
             resumes: Mutex::new(Vec::new()),
             resume_tags: Mutex::new(Vec::new()),
             launched: Mutex::new(Vec::new()),
+            stands: Mutex::new(Vec::new()),
             texts: Mutex::new(Vec::new()),
             exists_fails: false,
             listed: Mutex::new(Vec::new()),
@@ -1053,6 +1071,11 @@ impl WorkspaceBackend for TestWorkspace {
         if self.close_fail {
             bail!("injected workspace close failure");
         }
+        // A background session without a wrapper is stopped.
+        self.stands
+            .lock()
+            .unwrap()
+            .retain(|(handle, _)| handle != workspace_id);
         self.closed.lock().unwrap().push(workspace_id.into());
         Ok(())
     }
@@ -1390,7 +1413,22 @@ pub fn supervise_options(parallel: usize, once: bool) -> SuperviseOptions {
             cmux: Some(PathBuf::from("/usr/bin/true")),
             ..base.update.clone()
         },
+        // A worker's headless session wrapper runs in the background, as
+        // a process of its own without a workspace (ADR-t1404-1, task
+        // 1439); a test of the run workspaces chooses them with
+        // [`in_workspaces`].
+        worker_wrapper: Some(HeadlessWrapper::Background),
         ..base
+    }
+}
+
+/// `options` with the worker's session wrapper in a cmux workspace of its
+/// own (ADR-t813-1 decision 3), the path the tests of the run workspaces
+/// (their tags, group, close and sweep) choose until goal 92 removes it.
+pub fn in_workspaces(options: SuperviseOptions) -> SuperviseOptions {
+    SuperviseOptions {
+        worker_wrapper: Some(HeadlessWrapper::Workspace),
+        ..options
     }
 }
 
@@ -1699,12 +1737,13 @@ fn run_agent_with_review_retry(
         Path::new(run.worktree_path().unwrap()),
         run_dir.join("worktree")
     );
-    // Every outcome keeps the worktree; only an accepted run closes its workspace.
+    // Every outcome keeps the worktree; only an accepted run closes its
+    // session, a background wrapper's (task 1439).
     assert!(Path::new(run.worktree_path().unwrap()).exists());
-    assert_eq!(run.workspace_id(), Some(WORKSPACE_ID));
+    let session = background_session(run);
     let kinds: Vec<&str> = detail.events.iter().map(|e| e.kind.as_str()).collect();
     if run.status() == RunStatus::AwaitingIntegration && !close_fail {
-        assert_eq!(backend.closed(), vec![WORKSPACE_ID.to_owned()]);
+        assert_eq!(backend.closed(), vec![session.clone()]);
         assert!(run.workspace_closed_at().is_some());
         assert!(kinds.contains(&"workspace_closed"));
     } else {
@@ -1730,31 +1769,44 @@ fn run_agent_with_review_retry(
             .iter()
             .all(|n| n.0.ends_with("approve_landing"))
     );
-    // The run workspace carries its role, actor id, run and task in its
-    // environment (ADR-t728-1 decision 4), not the queue's path (its
-    // wrapper is named the queue, and its worker the queue service: goal
-    // 82's stage (3)), a description naming the run and task, and the
-    // queue's group.
-    let canonical = db.canonicalize().unwrap();
-    let hash = QueueLocation::explicit(&canonical).hash();
+    // The run's wrapper ran in the background (task 1439): no workspace and
+    // no group; it started in the run's worktree with its output in the
+    // run dir, its environment carrying its role, actor id, run and task
+    // (ADR-t728-1 decision 4), not the queue's path (its wrapper is named
+    // the queue, and its worker the queue service: goal 82's stage (3)).
+    // The handle's pid is the start the supervisor recorded and the
+    // wrapper that registered and heartbeat under it.
+    assert!(backend.tags.lock().unwrap().is_empty());
+    assert!(backend.groups.lock().unwrap().is_empty());
+    let launched = backend.launched.lock().unwrap().clone();
+    assert_eq!(launched.len(), 1, "{launched:?}");
     assert_eq!(
-        *backend.tags.lock().unwrap(),
-        vec![WorkspaceTags {
-            env: vec![
-                ("DAGQ_ROLE".into(), "worker".into()),
-                ("DAGQ_ACTOR_ID".into(), format!("worker:{}", run.id())),
-                ("DAGQ_RUN_ID".into(), run.id().to_string()),
-                ("DAGQ_TASK_ID".into(), run.task_id().to_string()),
-            ],
-            description: Some(format!(
-                "dagq role=worker queue={hash} run={} task={}",
-                run.id(),
-                run.task_id()
-            )),
-            group: Some(format!("group-{hash}")),
-        }]
+        launched[0].env,
+        vec![
+            ("DAGQ_ROLE".to_owned(), "worker".to_owned()),
+            ("DAGQ_ACTOR_ID".to_owned(), format!("worker:{}", run.id())),
+            ("DAGQ_RUN_ID".to_owned(), run.id().to_string()),
+            ("DAGQ_TASK_ID".to_owned(), run.task_id().to_string()),
+        ]
     );
-    assert_eq!(backend.groups.lock().unwrap().len(), 1);
+    assert_eq!(launched[0].cwd, Path::new(run.worktree_path().unwrap()));
+    assert_eq!(launched[0].log, run_dir.join("session.log"));
+    let pid = dagq::domain::background_wrapper::BackgroundHandle::parse(&session)
+        .unwrap()
+        .pid;
+    let launches = payloads(&detail, "wrapper_launched");
+    assert_eq!(launches.len(), 1, "{launches:?}");
+    assert_eq!(launches[0]["pid"], json!(pid));
+    let (wrapper, heartbeat): (u32, i64) = Connection::open(&db)
+        .unwrap()
+        .query_row(
+            "SELECT pid, heartbeat_at FROM run_processes WHERE run_id=?1 AND role='wrapper'",
+            [run.id()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(wrapper, pid);
+    assert!(heartbeat > 0);
     // The run came to rest: its lease is gone, and the task still owns it.
     assert!(kinds.contains(&"lease_acquired"));
     assert!(kinds.contains(&"lease_released"));
@@ -1848,8 +1900,8 @@ pub fn dead_pid() -> u32 {
 }
 
 /// Register a run the way `supervise` does under `token`, with the given PIDs
-/// as wrapper and agent, but with no supervisor loop watching it. Returns the
-/// running run.
+/// as wrapper (started in the background) and agent, but with no supervisor
+/// loop watching it. Returns the running run.
 pub fn orphan_run(repo: &Path, db: &Path, token: &str, wrapper: u32, agent: u32) -> TaskRun {
     use dagq::{
         domain::ClaimOutcome,
@@ -1887,13 +1939,13 @@ pub fn orphan_run(repo: &Path, db: &Path, token: &str, wrapper: u32, agent: u32)
         .unwrap();
     let run = queue.run(run.id()).unwrap();
     repository.create_worktree(&run).unwrap();
-    queue
-        .workspace_created(
-            run.id(),
-            &LeaseToken::new(token),
-            &format!("ws-{}", run.task_id()),
-        )
-        .unwrap();
+    // Its session is a background wrapper's (task 1439): the handle names
+    // the wrapper pid with its start, which a dead pid has none of.
+    let start = SystemProcesses
+        .start_identity(wrapper)
+        .unwrap_or_else(|| "Thu Jan  1 00:00:00 1970".to_owned());
+    let handle = dagq::domain::background_wrapper::BackgroundHandle::new(wrapper, &start);
+    record_background_start(&mut queue, &run, token, &handle.to_string());
     queue
         .register_wrapper(run.id(), &LeaseToken::new(token), wrapper)
         .unwrap();
@@ -2151,9 +2203,10 @@ pub fn payloads<'a>(detail: &'a dagq::domain::TaskDetail, kind: &str) -> Vec<&'a
 pub const IDLE_AGENT: &str = "commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit";
 
 /// Provision and start a run under `token` exactly as `supervise` does
-/// (claim, plan, prompt, worktree, workspace with the wrapper thread of the
-/// test backend), but with no loop or heartbeat behind the token: the state
-/// a supervisor leaves when it is killed after the session started. Returns
+/// (claim, plan, prompt, worktree, the session's wrapper started in the
+/// background by the test backend, its handle and start recorded: task
+/// 1439), but with no loop or heartbeat behind the token: the state a
+/// supervisor leaves when it is killed after the session started. Returns
 /// the `running` run once the wrapper registered its agent.
 pub fn start_run_under_dead_supervisor(
     repo: &Path,
@@ -2161,26 +2214,52 @@ pub fn start_run_under_dead_supervisor(
     backend: &TestWorkspace,
     token: &str,
 ) -> TaskRun {
-    use dagq::infrastructure::adapters::path_text;
     let mut queue = SqliteQueue::open(db).unwrap();
     let run = provision_under(repo, db, token);
-    let task = queue.show(run.task_id()).unwrap().task;
-    let command = shell_join(&[
-        "runner".into(),
-        "--db".into(),
-        path_text(db).unwrap(),
-        "session".into(),
-    ]);
-    let workspace = backend
-        .create(&task, &run, &command, &WorkspaceTags::default())
+    let handle = backend
+        .launch_background(
+            Path::new(run.worktree_path().unwrap()),
+            &shell_join(&[
+                "runner".into(),
+                "session".into(),
+                "--run".into(),
+                run.id().to_string(),
+                "--lease".into(),
+                token.into(),
+                "--background".into(),
+            ]),
+            &[],
+            &Path::new(run.run_dir().unwrap()).join("session.log"),
+        )
         .unwrap();
-    queue
-        .workspace_created(run.id(), &LeaseToken::new(token), &workspace)
-        .unwrap();
+    record_background_start(&mut queue, &run, token, &handle);
     wait_until(db, Duration::from_secs(10), |queue| {
         queue.run(run.id()).unwrap().status() == RunStatus::Running
     });
     queue.run(run.id()).unwrap()
+}
+
+/// Record the background wrapper `handle` as the session of `run` under
+/// `token`, and its start, as the supervisor records them
+/// (`workspace_created`, then `wrapper_launched`): the wrapper registers
+/// once it finds its start.
+pub fn record_background_start(queue: &mut SqliteQueue, run: &TaskRun, token: &str, handle: &str) {
+    let parsed = dagq::domain::background_wrapper::BackgroundHandle::parse(handle).unwrap();
+    queue
+        .workspace_created(run.id(), &LeaseToken::new(token), handle)
+        .unwrap();
+    queue
+        .record_runtime_event(
+            run.id(),
+            dagq::domain::EventKind::WrapperLaunched,
+            json!({
+                "pid": parsed.pid,
+                "start": parsed.start,
+                "workspace_id": handle,
+                "log": Path::new(run.run_dir().unwrap()).join("session.log").to_string_lossy(),
+            }),
+        )
+        .unwrap();
 }
 
 /// Claim the next task under `token` and provision its run as `supervise`

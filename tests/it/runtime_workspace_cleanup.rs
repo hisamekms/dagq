@@ -114,7 +114,9 @@ fn ended_runs_workspaces_are_listed_then_closed_by_run_task_or_all() {
         }
     }
     let backend = TestWorkspace::new(&db, false, "commit work; exit 7");
-    supervise(&db, &repo, &backend).unwrap();
+    // The runs open workspaces, which this command closes (task 1439).
+    let options = in_workspaces(supervise_options(4, true));
+    supervise_with(&db, &repo, &backend, &options).unwrap();
     backend.join();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let runs: Vec<TaskRun> = (1..=7)

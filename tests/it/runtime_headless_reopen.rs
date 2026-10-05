@@ -78,6 +78,7 @@ fn a_session_lost_during_its_wait_is_opened_again_and_takes_the_answer() {
     let (_reviewer, supervisor) =
         supervise_thread(&db, &repo, backend.clone(), Default::default(), &[]);
     let (run, ask) = waiting_run(&db);
+    let first = background_session(&run);
     end_wrapper(&db, &run);
     wait_until(&db, common::STEP_LIMIT, |queue| {
         !reopens(&queue.show(TASK).unwrap()).is_empty()
@@ -89,14 +90,12 @@ fn a_session_lost_during_its_wait_is_opened_again_and_takes_the_answer() {
     assert_eq!(reopened[0]["conditions"]["open_asks"], json!([ask.id]));
     assert_eq!(reopened[0]["detail"]["cause"], "exited");
     assert_eq!(reopened[0]["detail"]["exit_code"], 0);
-    assert_eq!(
-        reopened[0]["detail"]["previous_workspace"],
-        json!(workspace_id(0))
-    );
-    // The wait goes on in the reopened workspace, with the run running.
+    assert_eq!(reopened[0]["detail"]["previous_workspace"], json!(first));
+    // The wait goes on in the reopened session, with the run running.
     let now = detail(&db);
     assert_eq!(now.runs[0].status(), RunStatus::Running);
-    assert_eq!(now.runs[0].workspace_id(), Some(workspace_id(1).as_str()));
+    let reopened_session = background_session(&now.runs[0]);
+    assert_ne!(reopened_session, first);
     assert!(payloads(&now, "run_waiting_ended").is_empty());
     SqliteQueue::open(&db)
         .unwrap()
@@ -117,7 +116,7 @@ fn a_session_lost_during_its_wait_is_opened_again_and_takes_the_answer() {
     let created = payloads(&detail, "workspace_created");
     assert_eq!(created[1]["reopened"], 1, "{created:?}");
     assert_eq!(payloads(&detail, "wrapper_started").len(), 2);
-    assert!(backend.closed().contains(&workspace_id(0)));
+    assert!(backend.closed().contains(&first));
     let ended = payloads(&detail, "run_waiting_ended");
     assert_eq!(ended.len(), 1, "{ended:?}");
     assert_eq!(ended[0]["cause"], "answered");

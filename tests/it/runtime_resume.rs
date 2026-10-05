@@ -362,11 +362,12 @@ fn approved_needs_session_run_is_resumed_until_the_runtime_lands_it() {
     );
     assert!(!run_dir.join("runner").exists());
     assert!(run_dir.join("receipt.json").is_file());
-    // Same wrapper and runtime snapshot as the worker, under the resume name.
-    let resumes = backend.resumes.lock().unwrap().clone();
+    // Same wrapper and runtime snapshot as the worker, in its worktree.
+    let resumes = runtime_support::headless::resume_launches(&backend);
     assert_eq!(resumes.len(), 2);
-    for (name, command) in &resumes {
-        assert_eq!(name, "[repo's directory]worker#2 - second");
+    for launch in &resumes {
+        let command = &launch.command;
+        assert_eq!(launch.cwd, Path::new(run.worktree_path().unwrap()));
         assert!(
             command.contains(&shell_join(&[
                 "session".into(),
@@ -646,7 +647,7 @@ fn an_approved_run_resolved_by_an_earlier_resume_lands_without_a_session() {
     let detail = queue.show(TaskId::new(2)).unwrap();
     assert_landed(&repo, &detail.runs[0], "second", &first_landed);
     assert_eq!(detail.task.status(), TaskStatus::Completed);
-    assert!(backend.resumes.lock().unwrap().is_empty());
+    assert!(runtime_support::headless::resume_launches(&backend).is_empty());
     assert!(session_texts(&detail.runs[0]).is_empty());
     assert_eq!(payloads(&detail, "resume_started").len(), 1);
     assert_eq!(
@@ -719,7 +720,7 @@ fn an_unapproved_run_resolved_by_an_earlier_resume_is_validated_without_a_sessio
         Some(resolved.as_str())
     );
     assert_eq!(git_out(&repo, &["rev-parse", "main"]), first_landed);
-    assert!(backend.resumes.lock().unwrap().is_empty());
+    assert!(runtime_support::headless::resume_launches(&backend).is_empty());
     assert_eq!(payloads(&detail, "resume_started").len(), 1);
     assert_eq!(
         payloads(&detail, "resume_skipped"),
@@ -889,7 +890,7 @@ fn a_skipped_run_whose_supervisor_died_is_adopted() {
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let detail = queue.show(TaskId::new(2)).unwrap();
     assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
-    assert!(backend.resumes.lock().unwrap().is_empty());
+    assert!(runtime_support::headless::resume_launches(&backend).is_empty());
     let adopted = payloads(&detail, "run_adopted");
     assert_eq!(adopted.len(), 1, "{:?}", event_kinds(&detail));
     assert_eq!(adopted[0]["wrapper"], Value::Null);
@@ -907,7 +908,8 @@ fn a_skipped_run_whose_supervisor_died_is_adopted() {
 /// this one reads them from the real worktree, its dirty status here. The
 /// backend has no resume script, so the resume cannot start: it ends as an
 /// `error` with the failed cmux call recorded on the run (task 109), and
-/// `last_error` keeps why the run was parked.
+/// `last_error` keeps why the run was parked. The resume opens a workspace,
+/// whose `create_resume` is the call recorded (task 1439).
 #[test]
 fn a_run_with_a_dirty_worktree_is_resumed() {
     let (_dir, repo, db) = fixture();
@@ -920,7 +922,8 @@ fn a_run_with_a_dirty_worktree_is_resumed() {
     let worktree = Path::new(run.worktree_path().unwrap());
     fs::write(worktree.join("stray.txt"), "left over\n").unwrap();
 
-    let outcome = supervise(&db, &repo, &backend).unwrap();
+    let options = in_workspaces(supervise_options(4, true));
+    let outcome = supervise_with(&db, &repo, &backend, &options).unwrap();
     assert_eq!(outcome["errors"].as_array().unwrap().len(), 1, "{outcome}");
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(2)).unwrap();

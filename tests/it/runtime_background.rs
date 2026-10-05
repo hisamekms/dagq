@@ -36,13 +36,20 @@ fn has(queue: &mut SqliteQueue, id: &RunId, kind: &str) -> bool {
 /// in the run's worktree, with the worker's environment and its output in
 /// `session.log`, records the handle and the start, and the run lands; the
 /// wrapper that ended is stopped by its handle like a closed workspace.
+/// The supervisor reads the setting from `dagq.toml` here, not from the
+/// fixture's options, which choose the background for every runtime test
+/// (task 1439).
 #[test]
 fn a_background_headless_run_lands_without_a_workspace() {
     let (dir, repo, db, backend) = headless_fixture(&[]);
     wrappers_in_background(&repo);
     set_turns(dir.path(), FINISH);
     let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
-    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    let options = SuperviseOptions {
+        worker_wrapper: None,
+        ..supervise_options(4, true)
+    };
+    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
     let detail = detail(&db);
@@ -73,7 +80,10 @@ fn a_background_headless_run_lands_without_a_workspace() {
     assert!(is_background(handle), "{handle}");
     let launches = payloads(&detail, "wrapper_launched");
     assert_eq!(launches.len(), 1, "{launches:?}");
-    assert_eq!(launches[0]["pid"], json!(std::process::id()));
+    assert_eq!(
+        launches[0]["pid"],
+        json!(BackgroundHandle::parse(handle).unwrap().pid)
+    );
     assert_eq!(launches[0]["workspace_id"], handle);
     let kinds = kinds(&detail);
     let at = |kind: &str| kinds.iter().position(|k| *k == kind).unwrap();
@@ -194,6 +204,9 @@ esac"#,
             ),
             ..Default::default()
         },
+        // The resume reads `[headless] wrapper` from dagq.toml as it
+        // starts (task 1439).
+        worker_wrapper: None,
         ..supervise_options(4, true)
     };
     let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
@@ -211,9 +224,11 @@ esac"#,
     );
     let launches = payloads(&detail, "wrapper_launched");
     assert_eq!(launches.len(), 2, "{launches:?}");
-    // Both wrappers ran in this process, so their records name one pid;
-    // the resume's is recorded anew, after its own workspace record.
-    assert_eq!(launches[1]["pid"], json!(std::process::id()));
+    // Each wrapper goes by a process of its own: the resume's start is
+    // recorded anew, with its own pid, after its own workspace record.
+    let resumed = BackgroundHandle::parse(launches[1]["workspace_id"].as_str().unwrap()).unwrap();
+    assert_eq!(launches[1]["pid"], json!(resumed.pid));
+    assert_ne!(launches[0]["pid"], launches[1]["pid"]);
     let started = payloads(&detail, "turn_started");
     assert_eq!(started.len(), 2, "{started:?}");
 }
@@ -260,7 +275,7 @@ esac"#
             run.id(),
             EventKind::WrapperLaunched,
             json!({
-                "pid": std::process::id(),
+                "pid": BackgroundHandle::parse(&handle).unwrap().pid,
                 "start": BackgroundHandle::parse(&handle).unwrap().start,
                 "workspace_id": handle,
             }),

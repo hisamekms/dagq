@@ -788,3 +788,10 @@ task = 838
 name = "runtime_broker::a_disabled_supervisor_resumes_a_run_without_the_tools_left_to_it"
 reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: grant decision on resume"
 task = 838
+
+# 7.124s and 7.442s of three stress rounds under load (task 1439, 2.875s
+# in the third); the test keeps the run workspace path explicitly.
+[[test]]
+name = "runtime_sweep::the_sweep_closes_the_workspaces_of_failed_runs_the_triage_does_not_take"
+reason = "移し替えの予定: runのworkspaceの経路を消すtask 1440（goal 92）がこのworkspaceの掃除のtestを消すか背景のsessionへ移す。それまでin_workspacesでworkspaceを選ぶ"
+task = 1439

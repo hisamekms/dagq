@@ -109,7 +109,7 @@ fn a_passed_run_that_conflicts_with_main_is_rebased_by_its_live_session_and_land
     }
     assert_eq!(payloads(&detail, "integration_started").len(), 1);
     assert_exit_sent(&backend, &run, 1);
-    assert_eq!(backend.closed(), vec![WORKSPACE_ID.to_owned()]);
+    assert_eq!(backend.closed(), vec![background_session(&run)]);
     // The request is the resume's, for the live session.
     let texts = session_texts(&run);
     assert_eq!(texts.len(), 1);

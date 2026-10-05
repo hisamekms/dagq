@@ -1129,7 +1129,7 @@ fn a_skipped_resume_waits_for_the_cleanup_of_its_build_outputs() {
     let outcome = joined(supervisor, "the supervisor to finish").unwrap();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     assert!(!target.exists());
-    assert!(backend.resumes.lock().unwrap().is_empty());
+    assert!(runtime_support::headless::resume_launches(&backend).is_empty());
     assert_eq!(
         payloads_of(&queue, &run, "resume_started").len(),
         before[1],
@@ -2380,7 +2380,10 @@ fn a_drain_on_a_provisioning_failure_runs_the_rest_of_a_cleanup_for_room_before_
             joined(supervisor, "the rest of the cleanup and the drain").unwrap_err()
         );
         backend.join();
-        assert!(error.contains("injected workspace"), "{error}");
+        assert!(
+            error.contains("injected background launch failure"),
+            "{error}"
+        );
         assert!(error.contains("claiming stopped"), "{error}");
         assert_kept_but_the_build_outputs(&repo, &idle);
         let removed = payloads_of(&queue, &idle, "build_outputs_removed");
@@ -2549,7 +2552,10 @@ fn a_drain_on_a_provisioning_failure_takes_cleanup_requests_and_lets_the_job_fin
         joined(supervisor, "the drain on the provisioning failure").unwrap_err()
     );
     backend.join();
-    assert!(error.contains("injected workspace"), "{error}");
+    assert!(
+        error.contains("injected background launch failure"),
+        "{error}"
+    );
     assert!(error.contains("claiming stopped"), "{error}");
     assert_eq!(
         queue.run(second.id()).unwrap().status(),

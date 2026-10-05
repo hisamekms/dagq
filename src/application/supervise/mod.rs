@@ -292,6 +292,9 @@ pub struct LoopSettings {
     /// `[resume]`: the limit of a run's conflict-only attempts (ADR-0047
     /// decision 24).
     pub resume: ResumeConfig,
+    /// Where a worker's headless session wrapper runs; `None` reads
+    /// `[headless] wrapper` as each session starts (task 1439).
+    pub worker_wrapper: Option<crate::domain::background_wrapper::HeadlessWrapper>,
     /// Counts the loop's passes, one at the top of each; only read by
     /// tests, which wait for passes after a threshold instead of a fixed
     /// sleep (task 1046).
@@ -855,6 +858,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         triaged: Vec::new(),
         generators: ports.generators.clone(),
         stall: settings.stall,
+        worker_wrapper: settings.worker_wrapper,
         conflicts: settings.conflicts,
         conflicts_file: ports.conflicts_file.clone(),
         conflicts_error: settings.conflicts_error.clone(),
@@ -1021,6 +1025,8 @@ struct Supervisor<'a> {
     utc_offset: fn(i64) -> i64,
     /// The thresholds of the stalled-session checks (ADR-0043 decision 4).
     stall: StallConfig,
+    /// [`LoopSettings::worker_wrapper`].
+    worker_wrapper: Option<crate::domain::background_wrapper::HeadlessWrapper>,
     /// The `[conflicts]` thresholds the plan review's hotspots and the
     /// claims deferred on them are judged by, as last read (ADR-0080).
     conflicts: crate::domain::stats::ConflictConfigReport,

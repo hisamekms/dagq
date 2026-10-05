@@ -1417,8 +1417,9 @@ fn resume_taken_over_after_its_exit(handoff: bool) {
 }
 
 /// Start the wrapper of `run`'s resumed session the way the test backend's
-/// `create_resume` does, for a resume whose workspace that backend opened
-/// without a session (`resume_no_session`).
+/// background start does, for a resume that backend started without a
+/// wrapper (`resume_no_session`): as the process the backend started for
+/// it.
 fn start_resume_wrapper(
     backend: &TestWorkspace,
     run: &TaskRun,
@@ -1433,9 +1434,28 @@ fn start_resume_wrapper(
             |r| r.get(0),
         )
         .unwrap();
+    // The process of the resume's handle, its last session.
+    let handle = SqliteQueue::open(&backend.db)
+        .unwrap()
+        .run_events(run.id())
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|e| e.kind == "workspace_created")
+        .and_then(|e| e.payload["workspace_id"].as_str().map(str::to_owned))
+        .expect("the resume's handle");
+    let pid = backend
+        .stands
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(id, _)| *id == handle)
+        .expect("the resume's process")
+        .1
+        .pid;
     let (db, id) = (backend.db.clone(), run.id().clone());
     thread::spawn(move || {
-        runtime::session_with_providers(
+        runtime::session_in_background_as(
             &db,
             &id,
             &LeaseToken::new(&token),
@@ -1443,6 +1463,8 @@ fn start_resume_wrapper(
             Some(&other),
             &StubSpawner { db: db.clone() },
             true,
+            pid,
+            None,
         )
     })
 }
@@ -1459,8 +1481,7 @@ fn a_handoff_before_the_resume_request_lets_the_next_supervisor_send_it_once() {
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (run, first_landed) = parked_conflict(&repo, &db, &backend);
-    // The resume's workspace opens with no wrapper until the test starts
-    // one.
+    // The resume starts no wrapper until the test starts one.
     backend.resume_no_session = true;
     backend.resume_script_for(
         2,

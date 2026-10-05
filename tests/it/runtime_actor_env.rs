@@ -46,8 +46,10 @@ fn the_review_and_the_recovery_job_run_as_their_own_actors() {
             landed.id()
         )
     );
-    // Each run's worker is its own actor with its run.
-    let tags = backend.tags.lock().unwrap();
+    // Each run's worker is its own actor with its run, in the environment
+    // of its background wrapper.
+    let tags = backend.launched.lock().unwrap();
+    assert_eq!(tags.len(), 2, "{tags:?}");
     for (tags, run) in tags.iter().zip([failed, landed]) {
         let env = |name: &str| {
             tags.env

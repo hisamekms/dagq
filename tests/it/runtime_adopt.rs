@@ -174,7 +174,11 @@ fn independent_tasks_run_concurrently_and_a_dependent_starts_after_integration()
     }
     let mut closed = backend.closed();
     closed.sort();
-    assert_eq!(closed, [workspace_id(0), workspace_id(1), workspace_id(2)]);
+    let mut sessions: Vec<String> = [1, 2, 3]
+        .map(|task| background_session(&queue.show(TaskId::new(task)).unwrap().runs[0]))
+        .to_vec();
+    sessions.sort();
+    assert_eq!(closed, sessions);
     // The two runs not landed await integration with nobody holding them:
     // listed (goal 98), and not for `recover`.
     let doctor = runtime::doctor(&db, true).unwrap();
@@ -300,7 +304,7 @@ fn stale_lease_of_a_live_wrapper_is_adopted_and_driven_to_awaiting_integration()
     assert_eq!(outcome["runs"][0]["id"], json!(run.id()));
     assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
     assert_exit_sent(&backend, &run, 1);
-    assert_eq!(backend.closed(), vec![WORKSPACE_ID.to_owned()]);
+    assert_eq!(backend.closed(), vec![background_session(&run)]);
 
     let detail = queue.show(TaskId::new(1)).unwrap();
     let adopted_run = &detail.runs[0];
@@ -316,7 +320,12 @@ fn stale_lease_of_a_live_wrapper_is_adopted_and_driven_to_awaiting_integration()
     assert_eq!(payload["previous_pid"], json!(std::process::id()));
     let age = payload["previous_heartbeat_age_secs"].as_i64().unwrap();
     assert!(age >= 31, "{payload}");
-    assert_eq!(payload["wrapper"]["pid"], json!(std::process::id()));
+    // The wrapper is the background session's own process (task 1439).
+    let wrapper =
+        dagq::domain::background_wrapper::BackgroundHandle::parse(&background_session(&run))
+            .unwrap()
+            .pid;
+    assert_eq!(payload["wrapper"]["pid"], json!(wrapper));
     assert_eq!(payload["wrapper"]["alive"], true);
     assert_eq!(payload["wrapper"]["exited_at"], Value::Null);
     assert_eq!(payload["pid"], json!(std::process::id()));
@@ -1201,7 +1210,12 @@ fn exited_wrapper_and_validating_headless_runs_are_adopted_and_validated() {
     }
     let mut closed = backend.closed();
     closed.sort();
-    assert_eq!(closed, [workspace_id(0), workspace_id(1)]);
+    let mut sessions = runs
+        .iter()
+        .map(|run| background_session(run))
+        .collect::<Vec<_>>();
+    sessions.sort();
+    assert_eq!(closed, sessions);
     for run in runs {
         let detail = queue.show(run.task_id()).unwrap();
         let after = &detail.runs[0];

@@ -1,6 +1,7 @@
 //! Runtime tests: The `[run.env]` of `dagq.toml` and the programs it needs.
 use crate::runtime_support;
 
+use runtime_support::headless::resume_launches;
 use runtime_support::*;
 
 #[test]
@@ -55,9 +56,10 @@ fn dagq_toml_run_env_reaches_the_workspace_and_the_verification_commands() {
     let canonical = db.canonicalize().unwrap();
     let queue_dir = canonical.parent().unwrap().to_str().unwrap().to_owned();
     let run_dir = run.run_dir().unwrap().to_owned();
-    // The workspace gets the expanded table after the runtime's own names.
+    // The background wrapper gets the expanded table after the runtime's
+    // own names.
     assert_eq!(
-        backend.tags.lock().unwrap()[0].env,
+        backend.launched.lock().unwrap()[0].env,
         vec![
             // No queue path: the worker's dagq goes to the queue service
             // (goal 82's stage (3)).
@@ -85,7 +87,7 @@ fn dagq_toml_run_env_reaches_the_workspace_and_the_verification_commands() {
     assert_eq!(fs::read_to_string(&seen).unwrap(), line);
 }
 
-/// Task 303: the workspace a `needs_session` resume opens gets the same
+/// Task 303: the wrapper a `needs_session` resume starts gets the same
 /// `[run.env]` as the worker's, after the runtime's own names.
 #[test]
 fn a_resumed_session_gets_the_run_env_too() {
@@ -112,7 +114,7 @@ fn a_resumed_session_gets_the_run_env_too() {
     assert_landed(&repo, &detail.runs[0], "second", &first_landed);
     let canonical = db.canonicalize().unwrap();
     let queue_dir = canonical.parent().unwrap().to_str().unwrap().to_owned();
-    let tags = backend.resume_tags.lock().unwrap();
+    let tags = resume_launches(&backend);
     assert_eq!(tags.len(), 1);
     assert_eq!(
         tags[0].env,
@@ -148,7 +150,7 @@ fn a_missing_run_env_program_holds_resumes_until_it_is_found() {
     );
     let outcome = supervise(&db, &repo, &backend).unwrap();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert!(backend.resume_tags.lock().unwrap().is_empty());
+    assert!(resume_launches(&backend).is_empty());
     let detail = SqliteQueue::open(&db)
         .unwrap()
         .show(TaskId::new(2))
@@ -167,7 +169,7 @@ fn a_missing_run_env_program_holds_resumes_until_it_is_found() {
         .show(TaskId::new(2))
         .unwrap();
     assert_landed(&repo, &detail.runs[0], "second", &first_landed);
-    let tags = backend.resume_tags.lock().unwrap();
+    let tags = resume_launches(&backend);
     assert_eq!(tags.len(), 1);
     assert!(
         tags[0]
@@ -183,10 +185,10 @@ fn a_broken_dagq_toml_stops_provisioning_before_the_workspace() {
     let (_dir, repo, db) = fixture();
     fs::write(repo.join("dagq.toml"), "[build]\n").unwrap();
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    // Like any provisioning failure it stops claiming; no workspace opens.
+    // Like any provisioning failure it stops claiming; no wrapper starts.
     let error = format!("{:#}", supervise(&db, &repo, &backend).unwrap_err());
     assert!(error.contains("unknown table [build]"), "{error}");
-    assert!(backend.tags.lock().unwrap().is_empty());
+    assert!(backend.launched.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -221,7 +223,7 @@ fn a_missing_run_env_program_stops_claims_and_landings_until_it_is_found() {
         let outcome = supervise(&db, &repo, &backend).unwrap();
         assert_eq!(outcome["runs"], json!([]), "{outcome}");
     }
-    assert!(backend.tags.lock().unwrap().is_empty());
+    assert!(backend.launched.lock().unwrap().is_empty());
     assert_eq!(kinds(&db), ["run_env_program_missing"]);
     let status = runtime::status(&db).unwrap();
     let install = status["attention"]

@@ -328,6 +328,12 @@ pub struct SuperviseOptions {
     /// The limit of a run's conflict-only attempts (ADR-0047 decision
     /// 24); `None` reads `[resume]` of the main checkout's `dagq.toml`.
     pub resume: Option<crate::domain::resume::ResumeConfig>,
+    /// Where the wrapper of a worker's headless session runs (ADR-t1404-1
+    /// decision 7); `None` reads `[headless] wrapper` of the main
+    /// checkout's `dagq.toml` as each session starts. A planner's wrapper
+    /// always follows the file. The CLI has no flag for it; the tests set
+    /// it (task 1439).
+    pub worker_wrapper: Option<crate::domain::background_wrapper::HeadlessWrapper>,
     /// Reads the free bytes of the file system of a path; tests set it.
     pub free_space: fn(&Path) -> Option<u64>,
     /// The directories Claude Code keeps the sessions' scratchpads under,
@@ -561,6 +567,7 @@ impl SuperviseOptions {
             load_conflicts: load_conflict_config,
             disk: None,
             resume: None,
+            worker_wrapper: None,
             free_space: free_disk_bytes,
             scratchpad_roots: Some(Vec::new()),
             report_daily: false,
@@ -631,6 +638,7 @@ impl SuperviseOptions {
             max_load: self.max_load,
             disk,
             resume,
+            worker_wrapper: self.worker_wrapper,
             passes: self.passes.clone(),
         }
     }
@@ -2958,7 +2966,37 @@ pub fn session_in_background(
     spawner: &dyn Spawner,
     resume: bool,
 ) -> Result<Value> {
-    run_session(
+    session_in_background_as(
+        db,
+        id,
+        token,
+        provider,
+        other,
+        spawner,
+        resume,
+        std::process::id(),
+        None,
+    )
+}
+
+/// [`session_in_background`] whose wrapper is the process `pid` rather
+/// than this one, its environment naming `sccache` as `RUSTC_WRAPPER` when
+/// given ([`session_with_sccache`]): a test that runs each background
+/// wrapper on a thread names it by a process of its own, so that every
+/// session has a handle of its own (task 1439).
+#[allow(clippy::too_many_arguments)]
+pub fn session_in_background_as(
+    db: &Path,
+    id: &RunId,
+    token: &LeaseToken,
+    provider: &dyn AgentProvider,
+    other: Option<&dyn AgentProvider>,
+    spawner: &dyn Spawner,
+    resume: bool,
+    pid: u32,
+    sccache: Option<crate::domain::sccache::SccacheTarget>,
+) -> Result<Value> {
+    run_session_as(
         db,
         id,
         token,
@@ -2968,7 +3006,8 @@ pub fn session_in_background(
         resume,
         None,
         WrapperStart::Background,
-        None,
+        sccache,
+        pid,
     )
 }
 
@@ -3061,6 +3100,36 @@ fn run_session(
     start: WrapperStart,
     sccache: Option<crate::domain::sccache::SccacheTarget>,
 ) -> Result<Value> {
+    run_session_as(
+        db,
+        id,
+        token,
+        provider,
+        other,
+        spawner,
+        resume,
+        own_workspace,
+        start,
+        sccache,
+        std::process::id(),
+    )
+}
+
+/// [`run_session`] as the wrapper `pid`.
+#[allow(clippy::too_many_arguments)]
+fn run_session_as(
+    db: &Path,
+    id: &RunId,
+    token: &LeaseToken,
+    provider: &dyn AgentProvider,
+    other: Option<&dyn AgentProvider>,
+    spawner: &dyn Spawner,
+    resume: bool,
+    own_workspace: Option<OwnWorkspace<'_>>,
+    start: WrapperStart,
+    sccache: Option<crate::domain::sccache::SccacheTarget>,
+    pid: u32,
+) -> Result<Value> {
     // The wrapper's events are its own, not the worker's (ADR-t728-1).
     let mut queue = SqliteQueue::open(db)?.with_actor(
         crate::domain::actor::ActorContext::instance(crate::domain::actor::ActorRole::Wrapper, id),
@@ -3080,7 +3149,7 @@ fn run_session(
             queue_service: &crate::infrastructure::queue_service::SystemServiceAccess,
             processes: &SystemProcesses,
             files: &LocalRunFiles,
-            pid: std::process::id(),
+            pid,
             own_workspace,
             start,
             sccache: sccache

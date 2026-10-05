@@ -279,7 +279,9 @@ fn a_disabled_broker_calls_no_podman() {
             .unwrap()
             .contains("dagq-broker")
     );
-    for tags in backend.tags.lock().unwrap().iter() {
+    let launched = backend.launched.lock().unwrap().clone();
+    assert!(!launched.is_empty());
+    for tags in &launched {
         assert!(
             tags.env
                 .iter()
@@ -1057,7 +1059,9 @@ fn a_preferred_worker_gets_its_token_and_the_end_of_its_run_revokes_it() {
         &[queue.join("broker/tokens"), queue.join("broker/key")],
     );
     assert!(leaks.is_empty(), "the token leaked into {leaks:?}");
-    for tags in backend.tags.lock().unwrap().iter() {
+    let launched = backend.launched.lock().unwrap().clone();
+    assert!(!launched.is_empty());
+    for tags in &launched {
         assert!(tags.env.iter().all(|(_, value)| !value.contains(&token)));
     }
 

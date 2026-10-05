@@ -57,7 +57,8 @@ fn a_passing_review_exits_the_live_session_and_lands_it() {
     }
     assert!(!kinds.contains(&"integration_approved"), "{kinds:?}");
     assert_exit_sent(&backend, &run, 1);
-    assert_eq!(backend.closed(), vec![WORKSPACE_ID.to_owned()]);
+    let session = background_session(&run);
+    assert_eq!(backend.closed(), vec![session.clone()]);
     let supervised = payloads(&detail, "supervision_finished");
     assert_eq!(
         supervised[0],
@@ -70,7 +71,7 @@ fn a_passing_review_exits_the_live_session_and_lands_it() {
     assert_eq!(
         started,
         [
-            &json!({"attempt": 1, "workspace_id": WORKSPACE_ID, "session_live": true, "session_id": session_id,
+            &json!({"attempt": 1, "workspace_id": session, "session_live": true, "session_id": session_id,
                     "launch": {"role": "review", "provider": "claude", "model": null, "effort": null, "source": "default"},
                     "prompt_bytes": started[0]["prompt_bytes"]})
         ]
@@ -263,7 +264,7 @@ fn a_third_review_that_does_not_pass_asks_a_person_and_land_lands_it() {
     assert_eq!(payloads(&detail, "revise_finished").len(), 2);
     assert_eq!(payloads(&detail, "review_finished").len(), 3);
     assert_eq!(session_texts(&run).len(), 2);
-    assert_eq!(backend.closed(), vec![WORKSPACE_ID.to_owned()]);
+    assert_eq!(backend.closed(), vec![background_session(&run)]);
     assert!(queue.run_leases().unwrap().is_empty());
     let kinds = event_kinds(&detail);
     assert!(position(&kinds, "workspace_closed") < position(&kinds, "ask_opened"));
@@ -753,7 +754,7 @@ fn a_failed_review_closes_the_session_and_asks_a_person_in_the_same_step() {
     let detail = queue.show(TaskId::new(1)).unwrap();
     let run = detail.runs[0].clone();
     assert!(queue.run_leases().unwrap().is_empty());
-    assert_eq!(backend.closed(), vec![WORKSPACE_ID.to_owned()]);
+    assert_eq!(backend.closed(), vec![background_session(&run)]);
     let kinds = event_kinds(&detail);
     assert!(!kinds.contains(&"review_finished"), "{kinds:?}");
     assert!(!kinds.contains(&"concern_decided"), "{kinds:?}");
@@ -1064,7 +1065,7 @@ fn a_worker_question_asked_while_revising_is_answered_and_the_run_lands() {
     assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
     assert_eq!(
         payloads(&detail, "ask_delivered"),
-        vec![&json!({"ask_id": ask.id, "workspace_id": WORKSPACE_ID})]
+        vec![&json!({"ask_id": ask.id, "workspace_id": background_session(&detail.runs[0])})]
     );
     assert_eq!(payloads(&detail, "revise_finished").len(), 1);
     // Nothing waits for a person.

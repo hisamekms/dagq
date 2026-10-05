@@ -43,7 +43,12 @@ fn provisioning_failure_retains_the_run_and_stops_claiming_other_tasks() {
     let mut queue = SqliteQueue::open(&db).unwrap();
     add_ready_task(&mut queue, "untouched", &[]);
     let backend = TestWorkspace::new(&db, true, VALID_AGENT);
-    let error = format!("{:#}", supervise(&db, &repo, &backend).unwrap_err());
+    // The failure of a workspace's `create` (task 1439).
+    let options = in_workspaces(supervise_options(4, true));
+    let error = format!(
+        "{:#}",
+        supervise_with(&db, &repo, &backend, &options).unwrap_err()
+    );
     assert!(error.contains("injected workspace"), "{error}");
     assert!(error.contains("claiming stopped"), "{error}");
     let detail = queue.show(TaskId::new(1)).unwrap();
@@ -101,7 +106,7 @@ fn a_failed_workspace_close_is_recorded_before_the_cleanup_failure_with_its_code
     assert_backend_failure(
         failures[0],
         "close",
-        Some(WORKSPACE_ID),
+        Some(background_session(run).as_str()),
         "injected workspace close failure",
         run.id(),
     );
@@ -252,7 +257,8 @@ fn a_workspace_group_cmux_cannot_make_is_a_logged_warning() {
     add_ready_task(&mut queue, "grouped", &[]);
     let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
     backend.group_fails = true;
-    let options = supervise_options(1, true);
+    // A group is asked for only for a workspace (task 1439).
+    let options = in_workspaces(supervise_options(1, true));
     let (telemetry, captured) = Telemetry::capture();
     let outcome = telemetry
         .in_scope(|| supervise_with(&db, &repo, &backend, &options))
@@ -1260,7 +1266,8 @@ fn supervise_records_its_progress_as_json_lines() {
         .find(|r| {
             r["message"]
                 == format!(
-                    "task 1 running in workspace {WORKSPACE_ID}; run {}",
+                    "task 1 running in workspace {}; run {}",
+                    background_session(&run),
                     run.id()
                 )
         })
@@ -1427,7 +1434,7 @@ fn recover_requires_dead_processes_and_stale_lease_then_allows_a_new_run() {
     let health = &report["runs"][0];
     assert_eq!(health["run_id"], json!(run.id()));
     assert_eq!(health["status"], "running");
-    assert_eq!(health["workspace_id"], "ws-1");
+    assert_eq!(health["workspace_id"], json!(background_session(&run)));
     assert_eq!(health["lease"]["stale"], false);
     assert_eq!(health["lease"]["alive"], true);
     assert_eq!(health["worktree_exists"], true);

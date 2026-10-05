@@ -6,6 +6,8 @@ use dagq::infrastructure::git_binary::git_executable;
 use runtime_support::*;
 
 /// Supervisor options that sweep the workspaces of ended runs on every pass.
+/// The tests of the run workspaces themselves choose them with
+/// [`in_workspaces`] (task 1439).
 fn sweeping_options() -> SuperviseOptions {
     SuperviseOptions {
         sweep_interval: Duration::ZERO,
@@ -39,7 +41,13 @@ fn the_sweep_closes_the_workspaces_of_failed_runs_the_triage_does_not_take() {
         add_ready_task(&mut queue, "third task", &[]);
     }
     let backend = TestWorkspace::new(&db, false, "commit work; exit 7");
-    supervise(&db, &repo, &backend).unwrap();
+    supervise_with(
+        &db,
+        &repo,
+        &backend,
+        &in_workspaces(supervise_options(4, true)),
+    )
+    .unwrap();
     backend.join();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let first: Vec<TaskRun> = (1..=3)
@@ -60,7 +68,7 @@ fn the_sweep_closes_the_workspaces_of_failed_runs_the_triage_does_not_take() {
         .unwrap();
     queue.transition(TaskId::new(2), TaskAction::Ready).unwrap();
     backend.hidden.lock().unwrap().push(workspace(&first[1]));
-    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
+    supervise_with(&db, &repo, &backend, &in_workspaces(sweeping_options())).unwrap();
     backend.join();
     let closed = closes_of(&queue, &first[0]);
     assert_eq!(
@@ -83,7 +91,7 @@ fn the_sweep_closes_the_workspaces_of_failed_runs_the_triage_does_not_take() {
     // Listed again, the first run of task 2 is no longer its task's
     // latest: the next sweep closes it; the other runs are left alone.
     backend.hidden.lock().unwrap().clear();
-    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
+    supervise_with(&db, &repo, &backend, &in_workspaces(sweeping_options())).unwrap();
     backend.join();
     assert_eq!(
         closes_of(&queue, &first[1]),
@@ -117,7 +125,13 @@ fn the_sweep_closes_every_workspace_left_open_by_a_landed_run() {
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
-    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    let outcome = supervise_reviewed_with(
+        &db,
+        &repo,
+        &backend,
+        &reviewer,
+        &in_workspaces(supervise_options(4, true)),
+    );
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let mut queue = SqliteQueue::open(&db).unwrap();
     let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
@@ -145,7 +159,7 @@ fn the_sweep_closes_every_workspace_left_open_by_a_landed_run() {
     let before = closes_of(&queue, &run).len();
 
     backend.close_fail = true;
-    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
+    supervise_with(&db, &repo, &backend, &in_workspaces(sweeping_options())).unwrap();
     let failures = |run: &TaskRun| -> Vec<Value> {
         queue
             .run_events(run.id())
@@ -166,7 +180,7 @@ fn the_sweep_closes_every_workspace_left_open_by_a_landed_run() {
     assert_eq!(closes_of(&queue, &run).len(), before);
 
     backend.close_fail = false;
-    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
+    supervise_with(&db, &repo, &backend, &in_workspaces(sweeping_options())).unwrap();
     let closed = closes_of(&queue, &run);
     assert_eq!(
         closed[before..],
@@ -181,7 +195,7 @@ fn the_sweep_closes_every_workspace_left_open_by_a_landed_run() {
     assert!(!closed.iter().any(|c| c["workspace_id"] == "gone-ws"));
 
     // Nothing is listed any more: another sweep records nothing.
-    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
+    supervise_with(&db, &repo, &backend, &in_workspaces(sweeping_options())).unwrap();
     assert_eq!(closes_of(&queue, &run).len(), closed.len());
     assert_eq!(failures(&run).len(), 2);
 }

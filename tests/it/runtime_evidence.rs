@@ -92,9 +92,9 @@ fn missing_required_evidence_parks_the_run_for_a_resumed_session() {
             &json!({"code": "evidence_missing", "checks": ["tests"], "reason": "evidence missing: tests"})
         ]
     );
-    // The worker's workspace was closed: the resume opens its own.
+    // The worker's session was closed: the resume opens its own.
     assert!(event_kinds(&detail).contains(&"workspace_closed"));
-    assert!(backend.closed().contains(&WORKSPACE_ID.to_owned()));
+    assert!(backend.closed().contains(&background_session(run)));
     // The resume asked for the missing check, not a rebase.
     let text = &session_texts(run)[0];
     assert!(

@@ -405,7 +405,7 @@ fn a_failed_run_the_recovery_job_resumes_is_resumed_in_its_session_and_lands() {
             json!({"run_id": detail.runs[0].id(), "resume": true, "model": "claude-opus-5-5", "effort": "medium"}),
         ]
     );
-    assert_eq!(backend.closed()[0], WORKSPACE_ID);
+    assert_eq!(backend.closed()[0], background_session(&detail.runs[0]));
     let text = &session_texts(&detail.runs[0])[0];
     for expected in [
         "the supervisor's triage sent it back to this session to finish",
@@ -457,10 +457,10 @@ fn an_escalation_waits_for_a_person_and_the_supervisor_applies_the_answer() {
         assert!(ask.question.contains(part), "{part}: {}", ask.question);
     }
     assert_eq!(backend.notifications.lock().unwrap().len(), 1);
-    // The close failed: recorded, the workspace kept, the ask still made.
+    // The close failed: recorded, the session kept, the ask still made.
     let cleanup = payloads(&detail, "cleanup_failed");
     assert_eq!(cleanup.len(), 1);
-    assert_eq!(cleanup[0]["workspace_id"], WORKSPACE_ID);
+    assert_eq!(cleanup[0]["workspace_id"], background_session(&run));
     assert!(
         cleanup[0]["message"]
             .as_str()

@@ -190,7 +190,7 @@ fn valid_receipt_is_verified_and_awaits_integration() {
         .find(|e| e.kind == "workspace_closed")
         .unwrap();
     assert!(closed.id > finished.id);
-    assert_eq!(closed.payload["workspace_id"], WORKSPACE_ID);
+    assert_eq!(closed.payload["workspace_id"], background_session(run));
     assert_eq!(
         closed.payload["closed_at"],
         json!(run.workspace_closed_at().unwrap())
@@ -222,13 +222,14 @@ fn failed_workspace_close_is_recorded_without_changing_run_status() {
         error.contains("injected workspace close failure"),
         "{error}"
     );
-    assert!(error.contains(WORKSPACE_ID));
+    let session = background_session(run);
+    assert!(error.contains(&session));
     let failed = detail
         .events
         .iter()
         .find(|e| e.kind == "cleanup_failed")
         .unwrap();
-    assert_eq!(failed.payload["workspace_id"], WORKSPACE_ID);
+    assert_eq!(failed.payload["workspace_id"], session);
     assert_eq!(failed.payload["message"], json!(error));
     // Validation itself was accepted; the failure is confined to cleanup.
     let finished = detail

@@ -13,8 +13,9 @@ impl Supervisor<'_> {
     /// The log of `run`'s session wrapper when it is started in the
     /// background: a headless run under `[headless] wrapper =
     /// "background"`, read now, as the wrapper starts (ADR-t1404-1
-    /// decision 7). `resume` is the attempt of a resume or, with
-    /// `reopen`, of a reopening. `None` starts it in a workspace, as does
+    /// decision 7), unless `LoopSettings::worker_wrapper` chooses one
+    /// (task 1439). `resume` is the attempt of a resume or, with `reopen`,
+    /// of a reopening. `None` starts it in a workspace, as does
     /// a setting that cannot be read.
     pub(super) fn background_log(
         &self,
@@ -23,7 +24,11 @@ impl Supervisor<'_> {
         resume: Option<usize>,
         reopen: bool,
     ) -> Option<PathBuf> {
-        match self.verifier.headless_wrapper() {
+        let wrapper = match self.worker_wrapper {
+            Some(wrapper) => Ok(wrapper),
+            None => self.verifier.headless_wrapper(),
+        };
+        match wrapper {
             Ok(HeadlessWrapper::Background) => Some(run_dir.join(session_log_name(resume, reopen))),
             Ok(HeadlessWrapper::Workspace) => None,
             Err(error) => {

@@ -18,8 +18,8 @@ pub use crate::application::{
 pub use crate::compose::{
     OneShot, ProcessesPort, ReleaseIndexPort, RunE2eOptions, RunFilesPort, SccacheOptions,
     SuperviseOptions, ask, doctor, ended_run_material, integrate, rebind, recover,
-    resume_session_with_provider, review, session, session_in_background, session_with_provider,
-    session_with_providers, session_with_sccache, stats, status, status_for, supervise,
-    supervise_with_reviewer,
+    resume_session_with_provider, review, session, session_in_background, session_in_background_as,
+    session_with_provider, session_with_providers, session_with_sccache, stats, status, status_for,
+    supervise, supervise_with_reviewer,
 };
 pub use crate::infrastructure::claude::{PromptKind, detect_prompt};

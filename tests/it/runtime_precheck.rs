@@ -161,7 +161,7 @@ fn a_precheck_conflict_after_the_counted_resumes_asks_a_person() {
         .record_runtime_event(
             run.id(),
             EventKind::ResumeFinished,
-            json!({"attempt": 3, "status": "validating", "workspace_id": WORKSPACE_ID}),
+            json!({"attempt": 3, "status": "validating", "workspace_id": background_session(&run)}),
         )
         .unwrap();
     queue

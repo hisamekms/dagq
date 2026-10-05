@@ -314,7 +314,7 @@ esac"#,
     let detail = detail(&db);
     let run = &detail.runs[0];
     assert_landed_run(run, &repo, &base);
-    assert_eq!(backend.resumes.lock().unwrap().len(), 1);
+    assert_eq!(resume_launches(&backend).len(), 1);
     let calls = stub_calls(run);
     assert_eq!(calls.len(), 2, "{calls:?}");
     assert!(
@@ -1341,8 +1341,14 @@ while kill -0 "$pid" 2>/dev/null && [ $i -lt 1200 ]; do sleep 0.05; i=$((i + 1))
     } else {
         assert_eq!(child.ppid, parent);
         assert!(SystemProcesses.descendants(agent).contains(&outside.0));
-        let wrapper = processes.iter().find(|p| p.role == "wrapper").unwrap().pid;
-        assert!(SystemProcesses.descendants(wrapper).contains(&outside.0));
+        // The wrapper runs on a thread of this process, which starts the
+        // turns; its row names the process its background session goes by
+        // (task 1439), which starts none.
+        assert!(
+            SystemProcesses
+                .descendants(std::process::id())
+                .contains(&outside.0)
+        );
     }
     fs::write(run_dir.join("allow-repair"), "").unwrap();
     let detail = landed(&db, &repo, &base, &backend, supervisor);
