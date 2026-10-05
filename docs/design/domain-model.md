@@ -4,10 +4,11 @@ type: design
 title: Domain model
 status: current
 created: 2026-09-21
-updated: 2026-10-06 # task 1225: a triage_failed with provider_unusable is Pending; task 1850: the effective priority orders resumes and recovery jobs too; task 1851: set-priority on in_progress tasks; task 1811: tasks without own priority follow the goal in every status (ADR-t1811-1); task 1551: RunHistory reads typed restored payloads (run/payload.rs); task 1540: DraftRevisit, origin revisit; task 1641: goal tags, [goals] tags, goal list order and --tag; task 1660: AttentionNext::DecideFollowUps; task 1640; task 1386: show lists asks; task 839: show's latest run carries broker_tool_use; task 1594; task 1507, task 1506, task 1508, task 1509; tasks 1505, 1437; task 1609; task 1632; task 1440
+updated: 2026-10-06 # task 1225: a triage_failed with provider_unusable is Pending; task 1850: the effective priority orders resumes and recovery jobs too; task 1851: set-priority on in_progress tasks; task 1811: tasks without own priority follow the goal in every status (ADR-t1811-1); task 1551: RunHistory reads typed restored payloads (run/payload.rs); task 1540: DraftRevisit, origin revisit; task 1641: goal tags, [goals] tags, goal list order and --tag; task 1660: AttentionNext::DecideFollowUps; task 1640; task 1386: show lists asks; task 839: show's latest run carries broker_tool_use; task 1594; task 1507, task 1506, task 1508, task 1509; tasks 1505, 1437; task 1609; task 1632; task 1440; task 1704: planned human-answer wait accounting (unimplemented)
 last_verified: 2026-10-06 # task 1225; task 1850; task 1811; task 1551; task 1540; task 1641; task 1660; task 1640; task 1386; task 839; task 1594; task 1507, task 1506, task 1508, task 1509; tasks 1505, 1437; task 1609; task 1632; task 1440
 scope: domain
 related:
+  - adr-t1704-1
   - adr-t1811-1
   - adr-t1639-1
   - adr-t1394-1
@@ -489,3 +490,7 @@ domainの関数は業務上の拒否を`DomainError`（`src/domain/error.rs`）�
 コードを持たないもの: `resume_finished`の`resolved` / `unresolved`（runは`needs_session`のまま前の理由を保つ）、`triage_finished`の`retry` / `retry_inherit`（復旧jobのもの）/ `wait` / `ask`、それ以外の`recovery_requested`、過去の prompt_waiting（廃止した answer_prompt の ask が扱っていた）、`verification_command`（着地の結果は`integration_deferred`が持つ）。
 
 runの`last_error`のコードは列を持たず、`domain::reason::last_error_code`がrunのイベントから導く: `last_error`を書いたか中断したイベント（`supervision_finished`、`validation_finished`、`integration_deferred` / `integration_failed` / `integration_error` / `integration_held`、`runtime_error`、`interrupted`にした`run_recovered`、`landing_decided`、triageのもの（`by: triage`、`last_error`を変えない）を除く`cleanup_failed`、コードを持つ`triage_finished` / `triage_decided` / `recovery_requested`、`status: failed`の`resume_finished`）のうち最新のもののコード。そのイベントがコード以前のものならnull。`domain::reason::run_error_code`は`last_error`のあるrunと`interrupted`のrunにだけそれを返す。`status`（attentionと`runs`）と`show`の`last_error_code`、`stats`の`reason_codes`がこれを読む（[supervisor-lifecycle](supervisor-lifecycle/status.md#status)）。
+
+## 予定: plannerの人だけの答え待ちの記録と回数
+
+[ADR-t1704-1](../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定3・5（未実装）。上のplannerの回数・束の結末の型と永続化は実装前の形である。人だけの答え待ちで終了したことを決めずに終わったことと区別し、draft・finding・依頼の上限から除く。answerを持つplannerは決めずに終わったときだけ数え、再検討のplannerも人だけの待ちの終了を除く。質問・answerとnote・編集済みdraftを新しいplannerへ引き継ぐ条件は[予定: 人の答えだけを待つplannerの枠の解放](supervisor-lifecycle/plan-planners.md#予定-人の答えだけを待つplannerの枠の解放)に従う。型・欄・記録の具体的な変更は後続の実装taskがここに書く。

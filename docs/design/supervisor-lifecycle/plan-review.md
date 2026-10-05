@@ -4,10 +4,11 @@ type: design
 title: "Plan review (supervisor)"
 status: current
 created: 2026-09-26
-updated: 2026-10-04 # task 1596: a headless planner at the provider wall takes the provider retry before the requests behind it, and an answer is read only past the wall
+updated: 2026-10-05 # task 1596: a headless planner at the provider wall takes the provider retry before the requests behind it, and an answer is read only past the wall; task 1704: planned human-answer wait release (unimplemented)
 last_verified: 2026-10-04 # task 1596
 scope: runtime
 related:
+  - adr-t1704-1
   - adr-t1566-1
   - adr-t451-1
   - design-supervisor-lifecycle
@@ -102,3 +103,7 @@ task 1218（goal 80）。goal reviewの仕組み（[ADR-t1063-1](../../adr/2026-
 - **記録**: `concern`のverdictを適用したとき、`plan_review_finished`の後に`plan_concern_decided`（proposalのanchorのtaskに付け、`proposal_id`、`plan_review_id`、`recommendation`、`confidence`、`reason_category`、`applied`（runtimeが適用したか）、`decision`（適用した`pass` / `revise`、askならnull）、`escalated_because`、`ask_id`）を記録する。検査中の編集で捨てたverdictと失敗したjobには記録しない。`stats`の`recommendations.decided_without_ask`は`applied: true`のものを`approve_plan`に数える（[Stats](stats.md)）。
 - **prompt**: plan reviewのpromptは`concern`に推奨と確信度を付けさせ、`high`は記録（queue・repositoryの文書と決定・答えられたask）で決まるとき、`low`は決まらないか迷うとき、`scope` / `discard`の付け方と、何が人に残るかを示す。
 - **test**: `tests/it/plan_review_concern.rs`が、`high`の`ready`がactionsと改善のpriorityの引き下げを含めてpassとして適用され`decided_without_ask`に数えられること、`high`の`send_back`がreviseになり回数に数えられ上限で`revise_limit`のaskになること、`low`・`scope`・`discard`（`cancel`）・今の形がそれぞれの`escalated_because`と推奨を載せた`approve_plan`のaskになり、推奨どおりの人の答えが`by_kind.approve_plan.matched`に数えられること、許されないactionの`high`の`ready`がpassと同じく失敗することを確かめる。判定の順は`src/domain/plan_review.rs`の単体test。
+
+## 予定: 人の答え待ちでの終了とreviseの継続
+
+[ADR-t1704-1](../../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定1・2・4〜6（未実装）。上の9・10は実装前の挙動を記す。非対話のplannerは、進められる修正を済ませ、質問以外に仕事が無ければ記録を残して終了する。閉じた持ち主のreviseは既存の新規runtimeのplannerへの配送で扱うが、未回答の問いで止まった修正を答え無しで起動し続けない。answerとproposalの修正を同じ新しいplannerに引き継ぎ、二重に立てない。共通の終了・未読のanswerの保護は[予定: 人の答えだけを待つplannerの枠の解放](plan-planners.md#予定-人の答えだけを待つplannerの枠の解放)に従う。

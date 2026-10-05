@@ -32,6 +32,7 @@ amended_by:
   - adr-t1504-2
   - adr-t1818-2
   - adr-t1540-1
+  - adr-t1704-1
   - adr-t1850-1
 owners:
   - hisamekms

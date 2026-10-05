@@ -6,6 +6,8 @@ status: accepted
 created: 2026-10-05
 updated: 2026-10-05
 accepted_on: 2026-10-05
+amended_by:
+  - adr-t1704-1
 amends:
   - adr-0047 decision 13
   - adr-0047 decision 16

@@ -4,10 +4,11 @@ type: design
 title: "Finding planners (supervisor)"
 status: current
 created: 2026-09-27
-updated: 2026-10-05 # task 1640: an improvement task without --priority inherits its goal's; task 1596: a headless planner at the provider wall takes the provider retry before the requests behind it, and an answer is read only past the wall
+updated: 2026-10-05 # task 1640: an improvement task without --priority inherits its goal's; task 1596: a headless planner at the provider wall takes the provider retry before the requests behind it, and an answer is read only past the wall; task 1704: planned human-answer wait release (unimplemented)
 last_verified: 2026-10-05 # task 1640; task 1596
 scope: runtime
 related:
+  - adr-t1704-1
   - adr-t1394-1
   - adr-t1394-2
   - adr-t451-1
@@ -46,3 +47,7 @@ related:
 
 - 8の`finding_planner_exhausted`のattentionの行き先は、inboxの参照付きの依頼か人の自分のterminalに変えた（実装済み、8）。9の「runtimeのplannerが一度も立っていないfindingのanswerは人（人が開いたplannerの質問）」は、人が開くplannerの廃止（`dagq plan`は拒む）で廃止前に開いたplannerの質問だけになり、新しくは、inboxがそのfindingを参照（`--ref finding:N`）にした計画の依頼を記録し、依頼のplannerが`submit --finding`か`finding dismiss`で決める経路になる。人が`DAGQ_ROLE`の無いterminalで打つ`submit --finding` / `finding dismiss`は残る。依頼のplannerがsubmitしたproposalは、依頼とfindingの両方に結ばれる。
 - findingのplannerも`[roles.runtime_planner]`の経路に従う（実装済み、task 1396。[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)）。非対話では、9の答えの打ち込みと10の`/exit`が次のturnの依頼と終了の依頼になり（`Supervisor::send_to_planner`）、idleはturnの終わりで判断する。11の改善の上限は変えない（依頼のplannerはfindingを持たないかぎり改善に数えない）。予定（goal 92）: [ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定3・[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)決定1で経路を選ぶことは無くなり、findingのplannerは非対話でbackgroundのwrapperだけで動く（`[roles.runtime_planner]`の`route`は受け付けて無視する）。
+
+## 予定: 人の答え待ちでの終了
+
+[ADR-t1704-1](../../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定1〜6（未実装）。上の8〜10は実装前の挙動を記す。非対話のfindingのplannerも、人の答えだけを待つなら記録を保存して終了し、findingに結び付いた質問とanswerで新しいplannerが続ける。人だけの待ちによる終了を回数上限に含めず、answerを持つplannerは決めずに終わったときだけ数える。共通の条件・文脈・配送は[予定: 人の答えだけを待つplannerの枠の解放](plan-planners.md#予定-人の答えだけを待つplannerの枠の解放)に従う。改善の上限とanswerを運ぶ例外は変えない。

@@ -8,6 +8,7 @@ updated: 2026-09-28
 accepted_on: 2026-09-28
 amended_by:
   - adr-t1540-1
+  - adr-t1704-1
 amends:
   - adr-0047 decision 16
 owners:

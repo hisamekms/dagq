@@ -4,10 +4,11 @@ type: design
 title: SQLite persistence
 status: current
 created: 2026-09-21
-updated: 2026-10-05 # task 1564: ask --request reads request_planner; task 1540: draft_revisits (0068); task 1641: goals.tags (0067); task 1640; task 839; task 1709; task 1437; task 1609; task 1632; task 1481; task 1440
+updated: 2026-10-05 # task 1564: ask --request reads request_planner; task 1540: draft_revisits (0068); task 1641: goals.tags (0067); task 1640; task 839; task 1709; task 1437; task 1609; task 1632; task 1481; task 1440; task 1704: planned human-answer wait accounting (unimplemented)
 last_verified: 2026-10-05 # task 1564; task 1540; task 1641; task 1640; task 839; task 1509; task 1437; task 1609; task 1632; task 1481; task 1440
 scope: persistence
 related:
+  - adr-t1704-1
   - adr-t1639-1
   - adr-t1394-1
   - adr-t1632-1
@@ -403,3 +404,7 @@ SQLiteはCHECK制約を変更できないため、statusの追加はtableの作�
 receipt検証結果はイベントとtask_runsの列で足りたため、`run_artifacts`テーブルは追加しなかった。成果物hashが必要になった時点で検討する。一定時間heartbeatが更新されないrunは自動再実行せず、`doctor`で確認して`recover`で明示的に閉じる。`interrupted`は最初からCHECK制約に含まれていたため、復旧のためのmigrationは不要だった。leaseの列を`task_runs`に足す案は、解放済みをnullで表すことになり実行の記録と揮発する所有権が混ざるため採らなかった（[ADR-0007](../adr/0007-run-level-leases-parallel-execution.md)）。
 
 旧Python版の状態を読み込む移行コマンドは後続の配布段階で用意し、task ID、依存、run履歴、ログpathを保持する。
+
+## 予定: plannerの人だけの答え待ちの記録と回数
+
+[ADR-t1704-1](../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定3・5（未実装）。上のplannerの回数・束の結末の型と永続化は実装前の形である。人だけの答え待ちで終了したことを決めずに終わったことと区別し、draft・finding・依頼の上限から除く。answerを持つplannerは決めずに終わったときだけ数え、再検討のplannerも人だけの待ちの終了を除く。質問・answerとnote・編集済みdraftを新しいplannerへ引き継ぐ条件は[予定: 人の答えだけを待つplannerの枠の解放](supervisor-lifecycle/plan-planners.md#予定-人の答えだけを待つplannerの枠の解放)に従う。型・欄・記録の具体的な変更は後続の実装taskがここに書く。

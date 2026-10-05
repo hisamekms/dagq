@@ -4,10 +4,11 @@ type: design
 title: "Draft planners (supervisor)"
 status: current
 created: 2026-09-26
-updated: 2026-10-05 # task 1540: a draft's revisit time returns it to the runtime's planners (ADR-t1540-1)
+updated: 2026-10-05 # task 1540: a draft's revisit time returns it to the runtime's planners (ADR-t1540-1); task 1704: planned human-answer wait release (unimplemented)
 last_verified: 2026-10-05 # task 1540
 scope: runtime
 related:
+  - adr-t1704-1
   - adr-t1394-1
   - adr-t1394-2
   - adr-t451-1
@@ -81,3 +82,7 @@ related:
 `judge-follow-up`は採用・priorityとは別に元goalのacceptanceとの関係を記録する。required/out_of_scopeの所属変更は判断と同じtransactionで行い、set-goalによる食い違う変更は拒む。登録時の出どころ・状態と深さは移動しても変わらないので、開いたgoalへの移動で人のadoptを迂回できない。元goalのあるfollow_upのdraftは、今の判断が無い・`undecided`・要再確認ならsubmit（runtimeのplannerも人も）が拒み、人の`ready --bypass-review`もdraft / submittedのものを拒むので、plannerは採用するdraftの判断を先に記録する（人のadoptの上限とは別の検査で、判断を記録してもadoptにはならない）。`lint`は同じ欠けを`follow_up_membership_unjudged`で出し、plan reviewは判断の行を材料に検査する（[Plan review](plan-review.md)）。CLI、必須の欄、訂正とacceptanceの版、旧材料の移行は[所属の判断](../follow-up-membership.md)。
 
 - **prompt**（task 1508、ADR-t1504-1決定1〜3・5・6）: follow_upのdraftの節は`follow_up_proposal_line`で、材料の登録時の元goal（`goal <id> (<source_goal_state>, <source_goal_provenance>)`、`none`、材料に無ければ`unknown`。今のgoalではなくこのgoalのacceptanceに照らすこと）とworkerの`membership_proposal`（無ければ`(none)`）を載せる。「What to do」は3択の前に`follow_up_membership_step`の1段落を置く: 元goalがnoneでないfollow_upのdraftは、採否・priorityと別に、workerの提案を起点に意味を自分で判断する（そのdraftを実施しなくても元goalのacceptanceを満たせるか。満たせなければrequiredで元goal、満たせればout_of_scopeで別goal。別goalは`dagq search`で既存の適切なgoalを先に探し、無いときだけ作り、無関係な大きなgoalに詰めない。）。adopt・drop・askの前に`dagq judge-follow-up ID --classification ... --acceptance-item ... --reason ... --evidence ...`（out_of_scopeは`--destination-goal`、元goalが不明なら`--source-goal`）で判断を記録する。前の判断は`dagq show ID`の`membership_judgements`で読み、まだ成り立てば記録し直さず、required・out_of_scopeの間の変更は`--corrects <id>`で行い、undecidedへは戻さない。dropするdraftは、記録に新しいgoalが要るなら記録を省いてよい（cancelしたfollow-upはgoalの閉鎖を止めない）。決まらなければundecidedを理由つきで記録し、所属の問いを含めて3のaskにし、answerの後にrequiredかout_of_scopeを記録してから従う。別goalへの移動は採用でも優先でもない。follow_upを外すためにacceptanceを弱めず、人に聞く（`--because scope`）。goal_gapとreopenedのdraftにはこの段落も提案の行も出ない（ADR-t1504-2決定10）。testは`application::prompt`の`the_follow_up_draft_planner_records_membership_before_it_decides`。
+
+## 予定: 人の答え待ちでの終了
+
+[ADR-t1704-1](../../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定1〜5（未実装）。上の4・5・7と「再検討の時刻」の回数は実装前の挙動を記す。非対話の束のplannerは質問していないdraftの採否・依存・同梱を決め終え、残る仕事が人の答えだけなら終了する。質問したdraftは未回答のaskで起動を止め、answerでは既存の束ね直しで続ける。人だけの待ちと決めずに終わった結末をdraftごとに区別し、前者を上限に数えない。初期promptでの記録の引き継ぎ・終了と配送の競合・再検討の回数の扱いは[予定: 人の答えだけを待つplannerの枠の解放](plan-planners.md#予定-人の答えだけを待つplannerの枠の解放)に従う。

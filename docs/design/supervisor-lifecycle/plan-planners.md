@@ -4,10 +4,11 @@ type: design
 title: "`plan` / `planners`"
 status: current
 created: 2026-09-26
-updated: 2026-10-05 # task 1564: only the request's own planner asks with --request, and its tests in item 9; task 1540: a request waits for a draft planner of a draft it names, and a kept draft returns at its revisit time; task 1646: planner request takes the words from --text-file and --text - as request add does; task 1711: the tests of the headless planners' turns and of the planning requests name the unit tests their decisions moved to; task 1596: a headless planner at the provider wall takes the provider retry before the requests behind it, and an answer is read only past the wall; task 1437; task 1440: runs no longer create workspaces
+updated: 2026-10-05 # task 1564: only the request's own planner asks with --request, and its tests in item 9; task 1540: a request waits for a draft planner of a draft it names, and a kept draft returns at its revisit time; task 1646: planner request takes the words from --text-file and --text - as request add does; task 1711: the tests of the headless planners' turns and of the planning requests name the unit tests their decisions moved to; task 1596: a headless planner at the provider wall takes the provider retry before the requests behind it, and an answer is read only past the wall; task 1437; task 1440: runs no longer create workspaces; task 1704: planned human-answer wait release (unimplemented)
 last_verified: 2026-10-05 # task 1564; task 1540; task 1646; task 1711; task 1596; task 1437; task 1440
 scope: runtime
 related:
+  - adr-t1704-1
   - adr-t1582-1
   - design-supervisor-lifecycle
   - adr-0044
@@ -100,3 +101,13 @@ related:
 2. 人のplannerを前提にした行き先の読み替え: observerの古いdraft goal・goal closeの人の判断は、inboxがそのdraft・goalを参照にした依頼を記録するか、人が自分のterminalで決める。`draft_planner_exhausted`・`finding_planner_exhausted`・`dependency_stranded`のattention（`request a plan for the draft`・`request a plan for the finding`・`request a plan for the waiting tasks`）と`keep_draft`のdraftは、inboxがそのdraft・finding・taskを参照（`--ref task:N` / `--ref finding:N`）にした依頼を記録するか人が自分のterminalで決める案内に変えた（実装済み、[Draft planners](draft-planners.md)の4・5、[Finding planners](finding-planners.md)の8）。`keep_draft`のdraftには、この依頼の経路と並べて再検討の時刻の経路がある（実装済み、task 1540、[ADR-t1540-1](../../adr/2026-10-05-t1540-1-a-kept-draft-returns-to-runtime-planners-at-its-revisit-time.md)）: runtimeのplanner・人・inboxが`dagq revisit ID --at <時刻>`で時刻を付けたdraftは、その時刻にruntimeのplannerの対象に戻る（[Draft planners](draft-planners.md#再検討の時刻)）。時刻の無い`keep_draft`のdraftは今までどおり依頼を待つ。同じdraftに依頼と時刻の両方が来たら、`open`の依頼のplannerが先で、時刻はその後もdraftなら効く（上の3）。
 3. `status`のinbox向けの欄（仮: `requests`）に、plannerを待っている`open`の依頼を出す（`--no-claude`の間に待っている依頼を人に見せるため。ADR-t1394-1のConsequences）。今は`dagq requests`で読む。
 4. 開いているruntimeのplannerへの続きの依頼のCLI（`planner request`）は実装した（[ADR-t1533-1](../../adr/2026-10-03-t1533-1-follow-up-requests-go-to-headless-planners-by-planner-id-and-no-planner-close.md)、上の[続きの依頼と非対話のplannerのCLI](#続きの依頼と非対話のplannerのcli)）。宛先は生きている非対話のplannerだけで、対話のplannerには拒む。
+
+## 予定: 人の答えだけを待つplannerの枠の解放
+
+[ADR-t1704-1](../../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定1〜7（未実装）。この節は決定した変更であり、上の「状態」と「inboxからの計画の依頼」の3・5〜8は実装前の挙動を記す。
+
+- 非対話のplannerが自分の未回答・未closeの`planner_question`を持ち、turnを終え、ほかに進められる仕事が無ければ、noteとdraftの編集を保存して終了の依頼を送る。wrapperの終了を確認して行を閉じる。未処理の続きの依頼・未読のanswer・providerの復旧待ちは終了の対象から外す。
+- 終了の依頼後にはanswerを旧plannerへ届けず、askを残して新しいplannerへ届ける。生きた受取先への次のturnと、受取先が無いときの初期promptの経路は残し、終了と回答の競合でも未読のanswerを失わず二重配送しない。
+- 新しいplannerには元の質問・answer、前のplannerのnote（決めたこと・決めかけ・未決の理由・次の判断）と編集済みdraft、対象と関連goalの最新の記録を初期promptで引き継ぐ。収まらない材料は読む方法を示す。旧sessionのresumeには依存しない。
+- 依頼・draft・findingの回数上限では人だけの待ちによる終了を除く。answerを持つplannerは決めずに終わったときだけ数える。再検討のplannerにも待ちの除外を適用するが、通常の再検討の算入は残す。作業中の失敗・時間切れは質問の存在だけで除外しない。未回答のaskで通常の再起動を止める規則と、answerを上限を越えて運ぶ規則は残す。
+- 閉じたplannerは応答しない生きたplannerの検出対象から外れる。「答えを待つあいだは数えない」の規則は残す。対話の経路・Spikeの調査中の計画の枠と猶予は変更しない。
