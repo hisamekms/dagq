@@ -4,8 +4,8 @@ type: design
 title: Resource broker
 status: current
 created: 2026-09-28
-updated: 2026-10-05 # task 842: current, Phase 3の前提, pluginのreference; task 841: the e2e of required; task 840: package.install and [broker.package]; task 838; task 839; task 1451
-last_verified: 2026-10-05 # task 842; task 841; task 840; task 838; task 839; task 1451
+updated: 2026-10-05 # task 1550: the audit reads its day files through the AuditFiles port; task 842: current, Phase 3の前提, pluginのreference; task 841: the e2e of required; task 840: package.install and [broker.package]; task 838; task 839; task 1451
+last_verified: 2026-10-05 # task 1550; task 842; task 841; task 840; task 838; task 839; task 1451
 scope: runtime
 tags:
   - security
@@ -553,6 +553,7 @@ ADR-t838-1（goal 59、Phase 2）。`[broker] mode = "required"`のqueueでは�
   - `--since`・`--until`は`events`と同じUTCの`YYYY-MM-DD`（その日の0時）か`YYYY-MM-DDTHH:MM:SS[.fff]Z`。`--since`はその時刻を含み、`--until`は含まない。行の`ts`を時刻として比べる。日のファイルは、名前の日付が`--since`の日から`--until`の直前の時刻の日までのものだけを読む（`--until`がその日の0時ならその日のファイルは読まない。読む間に消えたファイルは無いものとする）（名前が`<YYYY-MM-DD>.jsonl`でないファイルは読まない）。`--run`は`run_id`、`--task`は`task_id`の一致
   - 出力: `{"entries": [...], "skipped": N, "dropped": M}`。`entries`は合う行を古い順に並べたJSONの配列で、各要素はbrokerが書いた行のJSONのobjectそのまま（欄を足さず削らない。objectの欄の順はJSONの表現で変わりうる）。`skipped`は読んだ日のファイルのうち、JSONのobjectとして読めない行か`ts`が時刻として読めない行（壊れた行と、書きかけで途中で切れた末尾の行）の数で、飛ばして続ける（空行は数えない）。`--limit`（既定1000、`DEFAULT_AUDIT_LIMIT`）は合う行のうち新しいN行を残し、`dropped`は残さなかった古い行の数
   - auditのdirが無ければ`{"entries": [], "skipped": 0, "dropped": 0}`
+  - 形（task 1550）: `application::broker_admin::audit`はファイルを直接読まず、port `AuditFiles`（同じmodule。`names`がdirのUTF-8の名前の一覧でdirが無ければ空、`read`が名前のファイルのbyte列で消えていれば`None`）から読む。adapterは`infrastructure::broker_audit::AuditDir`で、`compose::broker_audit`と`infrastructure::broker_token`の数え（下の「組み込みの道具の数」）が注入する。applicationは日のファイルの名前の選び方・行の解析・絞り込みを持ち、行は判断に使う欄（`ts`・`run_id`・`task_id`）だけをserdeのstructで読む（`run_id`が文字列でない・`task_id`が整数でない行は飛ばさず、runやtaskを名指さないものとして扱う）。出力の`entries`は今までどおり行のobjectそのまま
 
 ## 組み込みの道具の数
 

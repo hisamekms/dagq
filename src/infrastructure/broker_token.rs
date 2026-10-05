@@ -410,7 +410,7 @@ impl RunTokens for QueueRunTokens {
         };
         let dir = self.queue_dir.join(BROKER_DIR).join(AUDIT_DIR);
         let audit = crate::application::broker_admin::audit(
-            &dir,
+            &super::broker_audit::AuditDir::new(dir.clone()),
             &crate::application::broker_admin::AuditQuery {
                 run: Some(run.id().as_str().to_owned()),
                 // The day files from the run's start on.

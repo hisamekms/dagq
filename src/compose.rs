@@ -3772,7 +3772,8 @@ pub fn broker_audit(
     query: &crate::application::broker_admin::AuditQuery,
 ) -> Result<Value> {
     let dir = crate::application::broker::broker_dir(&location.queue_dir).join("audit");
-    let report = crate::application::broker_admin::audit(&dir, query)
+    let files = crate::infrastructure::broker_audit::AuditDir::new(dir.clone());
+    let report = crate::application::broker_admin::audit(&files, query)
         .with_context(|| format!("read the broker's audit in {}", dir.display()))?;
     Ok(serde_json::to_value(report)?)
 }

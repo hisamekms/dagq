@@ -4,8 +4,8 @@ type: design
 title: レイヤーとコンテキストの境界（contextごとの所有・判断・操作・公開するport・依存の向き・境界をまたぐtransaction・検査できる規則・今の違反）
 status: current
 created: 2026-10-04
-updated: 2026-10-05 # task 1540: the revisit command and draft_revisits; task 1223: the observer on Codex; task 1641: domain::goal_tag among the planning modules; task 839: domain::broker_usage among the host operations modules; task 1662: the observation and analysis context points to the measurement design; task 1437; task 1632
-last_verified: 2026-10-05 # task 1540; task 1223; task 1641; task 839; task 1615; task 1437; task 1632
+updated: 2026-10-05 # task 1550: the L4 row of broker_admin removed, AuditFiles among the host operations ports; task 1540: the revisit command and draft_revisits; task 1223: the observer on Codex; task 1641: domain::goal_tag among the planning modules; task 839: domain::broker_usage among the host operations modules; task 1662: the observation and analysis context points to the measurement design; task 1437; task 1632
+last_verified: 2026-10-05 # task 1550; task 1540; task 1223; task 1641; task 839; task 1615; task 1437; task 1632
 scope: system
 related:
   - adr-t1545-1
@@ -179,6 +179,7 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 - `RunCoordination`のsupervisorの登録と引き継ぎ（`register_supervisor`・`heartbeat`・`take_handoff`など）を実行と着地のループに公開する。
 - `HeadlessJobStore`（jobのprocessの台帳）を、jobを起動する各contextに公開する。
 - `QueueOpener`・`LaunchAgent`・`SccacheServer`・`ProcessControl`・`InstalledPlugin`、AIのactorの起動（`application::actor_executor`）を他のcontextに公開する。
+- `AuditFiles`（`application::broker_admin`。brokerのauditの日のファイルを読む。adapterは`infrastructure::broker_audit::AuditDir`。task 1550）は、このcontextの中だけで使う（`dagq broker audit`の`compose::broker_audit`と、tokenの失効の前の数え`infrastructure::broker_token`が注入する）。他のcontextには公開しない。
 - `WorkspaceBackend`はinboxのworkspaceのためのport（[ADR-t1433-1](../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)、goal 92で縮める）。
 
 **許す依存の向き**
@@ -271,7 +272,6 @@ contextを1つに決められず、分ける先のtaskを持つもの。
 | L3 | `src/application/planner_handoff.rs`の`#[cfg(test)]`（`crate::infrastructure::run_files::LocalRunFiles`） | applicationのtestがinfrastructureのadapterを使う | task 1619（`application::memory_files`に替える） |
 | L1 | `src/domain/stats.rs`・`src/domain/stats/thresholds.rs`・`src/domain/stats/conflicts.rs`の`#[cfg(test)]`（`crate::application::timestamp`） | domainのtestがapplicationの関数を使う | task 1616 |
 | L2 | `src/domain/landing_branch.rs`（`anyhow::Result`・`anyhow::ensure!`・`anyhow::bail!`） | domainが`anyhow`を返す（ADR-0013決定6） | task 1617 |
-| L4 | `src/application/broker_admin.rs`の`audit`（`std::fs::read_dir`・`std::fs::read`） | applicationが直接ファイルを読む | task 1550 |
 | L4 | `src/application/supervise/jobs.rs`（`SystemTime::now`）・`src/application/headless_session.rs`（`SystemTime::now`） | applicationが注入した`Clock`ではなく壁時計を読む | task 1618 |
 | L5 | `src/application`の`Instant::now`（2026-10-04で109箇所。多いのは`supervise/resume.rs`・`lifecycle.rs`・`supervise/session.rs`・`supervise/revise.rs`・`supervise/reopen.rs`・`supervise/adopt.rs`） | 判断が実時間を読む | task 1557（revise・reopen・resume・session）、task 1558（stall・stall_recovery・adopt）。残りは計測（task 1559）の後に判断 |
 | L6 | `src/infrastructure/queue_service.rs`（`crate::view::task_detail`） | infrastructureがレイヤーの外を呼ぶ | task 1620 |
