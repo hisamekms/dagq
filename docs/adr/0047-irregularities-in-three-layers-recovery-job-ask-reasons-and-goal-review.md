@@ -31,6 +31,7 @@ amended_by:
   - adr-t1504-1
   - adr-t1504-2
   - adr-t1818-2
+  - adr-t1540-1
 owners:
   - hisamekms
 tags:

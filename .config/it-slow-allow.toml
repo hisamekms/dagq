@@ -823,3 +823,15 @@ task = 1360
 name = "runtime_forecast::snapshots_are_recorded_at_the_day_a_moving_landing_and_a_start"
 reason = "B 境界（守る境界）: supervisor の配線が forecast の snapshot を日・着地・起動で記録する（representative snapshot recording in supervisor）"
 task = 1641
+
+# 5.4s to 7.8s in task 1540's stress (5 rounds), added by task 1540
+[[test]]
+name = "draft_revisit::a_kept_draft_gets_a_headless_planner_at_its_revisit_time_with_the_last_decision"
+reason = "B 境界（守る境界）: supervisor wiring and process: a draft's revisit time in SQLite opens a background headless planner whose first turn's prompt carries the last decision (the decisions are unit tests in infrastructure::draft_planners and application::prompt)"
+task = 1540
+
+# 4.9s to 6.6s in task 1540's stress (5 rounds), added by task 1540
+[[test]]
+name = "draft_revisit::a_persons_draft_gets_a_planner_only_at_its_revisit_time"
+reason = "B 境界（守る境界）: supervisor wiring and process: a person's draft without an origin gets a background headless planner only at its revisit time (the decisions are unit tests in infrastructure::draft_planners)"
+task = 1540

@@ -4,8 +4,8 @@ type: design
 title: "Prompt"
 status: current
 created: 2026-09-26
-updated: 2026-10-05 # task 1633: the recovery job's binary sections and their limits; task 1688 (after task 1572)
-last_verified: 2026-10-05 # task 1633; task 1688 (after task 1572)
+updated: 2026-10-05 # task 1540: the revisit section of the draft planner; task 1633: the recovery job's binary sections and their limits; task 1688 (after task 1572)
+last_verified: 2026-10-05 # task 1540; task 1633; task 1688 (after task 1572)
 scope: runtime
 related:
   - adr-t1566-1
@@ -178,9 +178,10 @@ task 1571。plan review（task 1561）とobserver（task 1567）と同じ形で�
 | `RECOVERY_BINARY_BYTES` / `RECOVERY_DEPENDENCIES_BYTES` / `RECOVERY_DEPENDENCY_BYTES` / `RECOVERY_REPLACEMENTS` / `RECOVERY_REPLACEMENTS_BYTES` / `RECOVERY_REPLACEMENT_BYTES` | 500 / 3,000 / 400 byte / 10件 / 3,000 / 400 byte | task 1633。buildは約100 byteの1行。依存先は1行約100 byte（commitの全文）で約30件、言えない理由のついた行も1件400に収める。入れ替えは1行約250 byte（build識別子2つとcommit）で、claimから復旧jobまでの数時間の入れ替えは数件なので新しい10件。節の上限の和は87,500になるが、unit testの最も大きな入力でも全体に収まるので`RECOVERY_PROMPT_LIMIT`は変えない。省いたものの全体は`recovery-<alert>-<attempt>.binary.json` |
 | `RECOVERY_PROCESSES_BYTES` / `RECOVERY_STATUS_BYTES` / `RECOVERY_ENDED_BYTES` | 4,000 / 4,000 / 24,000 byte | プロセスは1行に`command`の末尾300文字で約10件、`git status`は数十行。終わったrunの資料は各log・receipt・画面の末尾3,000（`TRIAGE_TAIL_BYTES`）がlog 8件まで並ぶので、その大半 |
 | `RUNTIME_PLANNER_PROMPT_LIMIT` / `RUNTIME_PLANNER_REASONS_BYTES` / `RUNTIME_PLANNER_REASON_BYTES` / `RUNTIME_PLANNER_TASKS_BYTES` | 32,000 / 12,000 / 4,000 / 8,000 byte | reviseのplannerは本番でp50 2,849・p90 5,084・最大10,976（指摘とtaskの行）。最大の約3倍 |
-| `DRAFT_PLANNER_PROMPT_LIMIT` | 80,000 byte | 本番はp50 18,021・p90 26,352・最大38,241（planner 828で、元のtaskのreceiptの`summary` 8,423、goal 7,398、goalの他のtask 4,303）。節の上限の和（約62,000）と指示（約6,000） |
+| `DRAFT_PLANNER_PROMPT_LIMIT` | 80,000 byte | 本番はp50 18,021・p90 26,352・最大38,241（planner 828で、元のtaskのreceiptの`summary` 8,423、goal 7,398、goalの他のtask 4,303）。節の上限の和（約62,000、task 1540の再検討の節を足して約70,000）と指示（約6,000）で約76,000 |
 | `DRAFT_RECEIPT_SUMMARY_BYTES` / `DRAFT_RECEIPT_FOLLOW_UPS_BYTES` / `DRAFT_ORIGIN_BYTES` / `DRAFT_SOURCE_TEXT_BYTES` | 12,000 / 6,000 / 20,000 / 3,000 byte | receiptの`summary`は本番で最大8,423で、12,000で収まる。出どころの節は元のtaskとreceiptと理由を合わせて20,000 |
 | `DRAFT_MEMBERS_BYTES` / `DRAFT_DESCRIPTION_BYTES` / `DRAFT_CONTEXT_BYTES` / `DRAFT_TITLE_BYTES` | 20,000 / 6,000 / 4,000 / 1,000 byte | draftはworkerのfollow_upの1件で、descriptionは数KB。束が大きいと伸びるので、入らないdraftは`dagq show ID --full` |
+| `DRAFT_REVISIT_BYTES` / `DRAFT_REVISIT_ITEM_BYTES` | 8,000 / 2,000 byte | task 1540（[ADR-t1540-1](../../adr/2026-10-05-t1540-1-a-kept-draft-returns-to-runtime-planners-at-its-revisit-time.md)）。再検討の時刻が来たdraftの`## Revisit of draft <id>`の節（前回の`planner_question`とnote、新しい順）。時刻付きで残したdraftの前回の判断は問い1〜2件とnote 1〜2件（draft 1537は問い1件・note 1件）で、1件の上限で問いかnote 4件は入る。全体の上限の中に収めるため、他の節の和（約62,000）と指示（約6,000）に足して約76,000にした。入らないものは`dagq show ID --full` |
 | `PLANNER_GOALS_BYTES` / `PLANNER_GOAL_TEXT_BYTES` / `PLANNER_GOAL_TASKS_BYTES` | 16,000 / 4,000 / 4,000 byte | goalは本番で最大7,398（draft）、goalの他のtaskは4,303。goalの欄（description・acceptanceは4,000、constraintsは2,000）とtaskの行で1件約14,000 |
 | `PLANNER_ASKS_BYTES` / `PLANNER_ASK_TEXT_BYTES` / `PLANNER_ANSWER_BYTES` | 8,000 / 1,000 / 3,000 byte | findingと依頼の前の質問は新しいものから。answerを運ぶplannerの元の質問と答えはそれぞれ3,000 |
 | `FINDING_PLANNER_PROMPT_LIMIT` / `FINDING_EVIDENCE_BYTES` / `FINDING_EVENT_BYTES` | 80,000 / 28,000 / 8,000 byte | 本番はp50 37,974・p90 156,358・最大276,417（planner 768、finding 44で、根拠が270,669）。根拠の節を28,000（全体のp50 37,974より小さい）にし、新しいeventから1件8,000まで。節の上限の和は約72,000。全部は`dagq findings ID --full` |

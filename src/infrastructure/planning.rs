@@ -71,6 +71,16 @@ impl PlanningStore for SqliteQueue {
         self.set_priority_authorized(task, priority, Some(authorized))
     }
 
+    fn revisit_draft(
+        &mut self,
+        task: TaskId,
+        change: crate::domain::follow_up::RevisitChange,
+        role: &str,
+        actor: &str,
+    ) -> Result<Option<crate::domain::DraftRevisit>> {
+        SqliteQueue::revisit_draft(self, task, change, role, actor)
+    }
+
     fn transition(
         &mut self,
         task: TaskId,

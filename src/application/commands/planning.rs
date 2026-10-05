@@ -11,9 +11,10 @@ use serde_json::Value;
 use tracing::warn;
 
 use crate::domain::{
-    ActorContext, AuthorizationError, Authorizer, Capability, FindingId, Goal, GoalEdit, GoalId,
-    GoalVerdict, NewGoal, NewTask, Priority, Proposal, ProposalId, Resource, Submission, Task,
-    TaskAction, TaskDetail, TaskEdit, TaskId, TaskStatus, authorization::DenyReason,
+    ActorContext, AuthorizationError, Authorizer, Capability, DraftRevisit, FindingId, Goal,
+    GoalEdit, GoalId, GoalVerdict, NewGoal, NewTask, Priority, Proposal, ProposalId, Resource,
+    Submission, Task, TaskAction, TaskDetail, TaskEdit, TaskId, TaskStatus,
+    authorization::DenyReason, follow_up::RevisitChange,
 };
 
 /// What the planning commands read and change of the queue.
@@ -57,6 +58,15 @@ pub trait PlanningStore {
         priority: Option<Priority>,
         authorized: TaskStatus,
     ) -> Result<Task>;
+    /// Set, change or clear the revisit time of the draft `task` as `role`
+    /// with actor id `actor` (ADR-t1540-1): the revisit time afterwards.
+    fn revisit_draft(
+        &mut self,
+        task: TaskId,
+        change: RevisitChange,
+        role: &str,
+        actor: &str,
+    ) -> Result<Option<DraftRevisit>>;
     fn transition(
         &mut self,
         task: TaskId,
@@ -165,6 +175,16 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
     pub fn set_priority(&mut self, task: TaskId, priority: Option<Priority>) -> Result<Task> {
         let status = self.authorize_task(Capability::TaskWrite, task)?;
         self.store.set_priority(task, priority, status)
+    }
+
+    /// `revisit`: the draft's revisit time set, changed or cleared
+    /// (ADR-t1540-1). It changes a task before it starts, as `task.write`:
+    /// the user's and the inbox's, and a planner's on a draft.
+    pub fn revisit(&mut self, task: TaskId, change: RevisitChange) -> Result<Option<DraftRevisit>> {
+        self.authorize_task(Capability::TaskWrite, task)?;
+        let (role, actor) = (self.actor.role(), self.actor.actor_id().to_owned());
+        self.store
+            .revisit_draft(task, change, role.as_str(), &actor)
     }
 
     pub fn draft(&mut self, task: TaskId) -> Result<Task> {
@@ -399,6 +419,15 @@ mod tests {
             self.authorized_as = Some(authorized);
             Err(reached("set-priority"))
         }
+        fn revisit_draft(
+            &mut self,
+            _: TaskId,
+            _: RevisitChange,
+            _: &str,
+            _: &str,
+        ) -> Result<Option<DraftRevisit>> {
+            Err(reached("revisit"))
+        }
         fn transition(
             &mut self,
             _: TaskId,
@@ -509,6 +538,13 @@ mod tests {
             }),
             ("set-priority", |p| {
                 p.set_priority(TASK, Some(Priority::High)).map(drop)
+            }),
+            ("revisit", |p| {
+                p.revisit(TASK, RevisitChange::Set { at: 1, note: None })
+                    .map(drop)
+            }),
+            ("revisit --clear", |p| {
+                p.revisit(TASK, RevisitChange::Clear).map(drop)
             }),
             ("draft", |p| p.draft(TASK).map(drop)),
             ("ready", |p| p.ready(TASK, false).map(drop)),
@@ -673,6 +709,8 @@ mod tests {
                 "set-goal",
                 "set-paths",
                 "set-priority",
+                "revisit",
+                "revisit --clear",
                 "draft",
                 "cancel",
                 "cancel --duplicate-of",
@@ -717,6 +755,7 @@ mod tests {
                 "edit",
                 "set-paths",
                 "set-priority",
+                "revisit",
                 "dependency add",
                 "draft",
             ] {

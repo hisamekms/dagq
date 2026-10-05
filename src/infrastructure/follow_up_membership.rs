@@ -629,7 +629,11 @@ pub(super) fn source_follow_ups(conn: &Connection, goal: GoalId) -> Result<Vec<S
 /// The source follow-ups of `goal` with no settled membership, each with
 /// what already shows or handles it (task 1660): a planner of the runtime's
 /// for the draft, its `draft_planner_exhausted`, an ask about it not closed.
-pub(super) fn waiting_follow_ups(conn: &Connection, goal: GoalId) -> Result<Vec<WaitingFollowUp>> {
+pub(super) fn waiting_follow_ups(
+    conn: &Connection,
+    goal: GoalId,
+    now: i64,
+) -> Result<Vec<WaitingFollowUp>> {
     source_follow_ups(conn, goal)?
         .into_iter()
         .filter(|f| f.unsettled_reason().is_some())
@@ -645,7 +649,7 @@ pub(super) fn waiting_follow_ups(conn: &Connection, goal: GoalId) -> Result<Vec<
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
             Ok(WaitingFollowUp {
-                draft_planned: super::draft_planners::draft_planned(conn, task)?,
+                draft_planned: super::draft_planners::draft_planned(conn, task, now)?,
                 exhausted,
                 open_ask,
                 follow_up,

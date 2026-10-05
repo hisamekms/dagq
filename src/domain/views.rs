@@ -165,6 +165,9 @@ pub struct TaskDetail {
     /// The follow_up drafts the receipts of this task's runs proposed, with
     /// their status now (ADR-t807-1).
     pub follow_up_drafts: Vec<FollowUpDraft>,
+    /// The draft's revisit time (ADR-t1540-1): when the runtime opens a
+    /// planner for it again, or when it did (`opened_at`); null without one.
+    pub revisit: Option<crate::domain::DraftRevisit>,
     /// The asks about the task (`task_id`) or one of its runs (`run_id`),
     /// open and closed, oldest first, with the asking AI's recommendation
     /// and confidence (ADR-t451-1 decision 1).

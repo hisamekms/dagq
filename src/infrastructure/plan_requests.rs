@@ -25,12 +25,19 @@ use crate::domain::{
 };
 
 /// The requests waiting for a planner of the runtime's: `open`, no planner
-/// of the runtime's open for it, and no `planner_question` about it nobody
-/// closed.
+/// of the runtime's open for it, no `planner_question` about it nobody
+/// closed, and no draft it names (`task:N`) taken by an open planner of
+/// the runtime's for drafts, such as one its revisit time opened: the
+/// request's planner waits for it to end (ADR-t1540-1).
 const TARGETS: &str = "SELECT r.id FROM plan_requests r WHERE r.status='open'
     AND NOT EXISTS(SELECT 1 FROM planners p WHERE p.request_id=r.id AND p.closed_at IS NULL)
     AND NOT EXISTS(SELECT 1 FROM asks a WHERE a.request_id=r.id
-        AND a.kind='planner_question' AND a.closed_at IS NULL)";
+        AND a.kind='planner_question' AND a.closed_at IS NULL)
+    AND NOT EXISTS(SELECT 1 FROM json_each(r.refs) j JOIN planners p ON p.closed_at IS NULL
+        AND p.origin='runtime' AND (p.draft_task_id=json_extract(j.value,'$.id')
+             OR EXISTS(SELECT 1 FROM draft_bundle_members m WHERE m.planner_id=p.id
+                 AND m.task_id=json_extract(j.value,'$.id')))
+        WHERE json_extract(j.value,'$.kind')='task')";
 
 impl SqliteQueue {
     /// Record `request` as `by_role` (`inbox`, `user`) with actor id

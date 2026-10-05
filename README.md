@@ -148,7 +148,7 @@ Every command prints JSON on stdout (except `graph --format d2|svg`, and `run lo
 | --- | --- |
 | Queue and runtime | `locate`, `init`, `migrate [--check]`, `up`, `down [--wait\|--force]`, `request add`, `requests`, `planners`, `install`, `rebind` |
 | Goals | `goal add`, `goal list`, `goal show`, `goal edit`, `goal ready` (open a draft goal), `goal close --verdict achieved\|abandoned`, `goal review` |
-| Tasks | `add`, `edit`, `list`, `show`, `search`, `related`, `draft`, `cancel`, `dependency add\|remove`, `set-goal`, `set-paths`, `set-priority` |
+| Tasks | `add`, `edit`, `list`, `show`, `search`, `related`, `draft`, `cancel`, `dependency add\|remove`, `set-goal`, `set-paths`, `set-priority`, `revisit` |
 | Plans | `lint`, `submit`, `proposal list\|show\|withdraw`, `ready ID --bypass-review` (a person only) |
 | Watching | `status [--role inbox]`, `doctor [--full]`, `watch [--role inbox] [--until-attention]`, `events`, `timeline RUN`, `candidates`, `graph`, `run screen\|send\|log`, `planner screen\|send\|log` |
 | Asks and notes | `asks [--open]`, `ask`, `answer ID --text TEXT`, `ask close`, `note`, `notes`, `findings`, `finding` |

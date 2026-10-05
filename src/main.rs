@@ -415,6 +415,23 @@ enum Command {
         #[arg(long, group = "setting")]
         inherit: bool,
     },
+    /// Give a draft a revisit time (ADR-t1540-1): when it comes, the runtime opens a planner for
+    /// the draft again, even one kept by a keep_draft answer or one a person added, with the last
+    /// decision about it in its prompt. Setting it again changes it; --clear removes it.
+    #[command(group = clap::ArgGroup::new("when").required(true))]
+    Revisit {
+        /// Draft task.
+        task: i64,
+        /// The time, in RFC 3339 (`2026-10-04T12:00:00Z`, `2026-10-04T21:00:00+09:00`).
+        #[arg(long, group = "when")]
+        at: Option<String>,
+        /// What the planner should look at then (shown in its prompt and by `show`).
+        #[arg(long, requires = "at")]
+        note: Option<String>,
+        /// Remove the draft's revisit time.
+        #[arg(long, group = "when")]
+        clear: bool,
+    },
     /// Record a note (an `observation` run event) on a task, a run or a goal.
     #[command(group = clap::ArgGroup::new("target").required(true))]
     Note {
@@ -2043,6 +2060,7 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
         | Command::SetGoal { task: id, .. }
         | Command::SetPaths { task: id, .. }
         | Command::SetPriority { task: id, .. }
+        | Command::Revisit { task: id, .. }
         | Command::Dependency {
             command:
                 DependencyCommand::Add { task: id, .. } | DependencyCommand::Remove { task: id, .. },
@@ -2308,6 +2326,7 @@ fn authorized_in_application(command: &Command) -> bool {
         | Command::SetGoal { .. }
         | Command::SetPaths { .. }
         | Command::SetPriority { .. }
+        | Command::Revisit { .. }
         | Command::Proposal {
             command: ProposalCommand::Withdraw { .. },
         } => true,
@@ -3437,6 +3456,25 @@ fn execute(cli: Cli) -> Result<Value> {
                     wait_for_build: (wait_for_build || no_wait_for_build).then_some(wait_for_build),
                 },
             )?)?
+        }
+        Command::Revisit {
+            task,
+            at,
+            note,
+            clear: _,
+        } => {
+            use dagq::domain::follow_up::{RevisitChange, revisit_seconds};
+            let change = match at {
+                Some(at) => RevisitChange::Set {
+                    at: revisit_seconds(&at).with_context(|| {
+                        format!("--at {at} is not an RFC 3339 time (2026-10-04T12:00:00Z)")
+                    })?,
+                    note,
+                },
+                None => RevisitChange::Clear,
+            };
+            let revisit = planning!().revisit(TaskId::new(task), change)?;
+            json!({"task_id": task, "revisit": revisit})
         }
         Command::SetPriority { task, level, .. } => {
             // Without a level, --inherit clears the task's own priority.
@@ -4686,6 +4724,8 @@ mod tests {
             ("set-goal", &["1", "1"]),
             ("set-paths", &["1", "--none"]),
             ("set-priority", &["1", "high"]),
+            ("revisit", &["1", "--at", "2026-10-04T12:00:00Z"]),
+            ("revisit", &["1", "--clear"]),
             ("dependency", &["add", "1", "2"]),
             ("cancel", &["1"]),
             ("ready", &["1"]),

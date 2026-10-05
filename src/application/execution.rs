@@ -291,6 +291,7 @@ pub const DAGQ_COMMANDS: &[(&str, &[Capability])] = &[
     ("set-goal", &[C::TaskWrite]),
     ("set-paths", &[C::TaskWrite]),
     ("set-priority", &[C::TaskWrite]),
+    ("revisit", &[C::TaskWrite]),
     ("dependency", &[C::TaskWrite]),
     ("cancel", &[C::TaskCancel]),
     ("ready", &[C::TaskReady, C::TaskReadyBypassReview]),

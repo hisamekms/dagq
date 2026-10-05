@@ -36,6 +36,7 @@ mod cli_status_runs;
 mod cli_tasks;
 mod cli_version;
 mod draft_bundles;
+mod draft_revisit;
 mod e2e_gate_podman;
 mod finding_planner;
 mod goal_review;

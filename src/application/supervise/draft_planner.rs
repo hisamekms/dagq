@@ -19,9 +19,12 @@ use crate::{
     application::{
         DraftPlannerStart, PlannerAnswerRoute,
         planner::{PlannerView, open_draft_planner},
-        prompt::{DraftPlannerMaterial, FittedPrompt, draft_planner_prompt},
+        prompt::{DraftPlannerMaterial, FittedPrompt, RevisitHistory, draft_planner_prompt},
     },
-    domain::{Ask, BundleKey, DraftOrigin, DraftTarget, follow_up::bundles, planner::answer_waits},
+    domain::{
+        Ask, AskKind, BundleKey, DraftOrigin, DraftTarget, follow_up::bundles,
+        planner::answer_waits,
+    },
 };
 
 impl Supervisor<'_> {
@@ -269,6 +272,27 @@ impl Supervisor<'_> {
                 .collect();
             goals.push((detail.goal, detail.closed, siblings));
         }
+        // The last decision about each draft whose revisit time came
+        // (ADR-t1540-1): its questions and its notes.
+        let mut revisits = Vec::new();
+        for (target, _) in members.iter().filter(|(t, _)| t.revisit.is_some()) {
+            let id = target.task.id();
+            let detail = self.queue.show(id)?;
+            revisits.push(RevisitHistory {
+                task: id,
+                asks: detail
+                    .asks
+                    .into_iter()
+                    .filter(|ask| ask.kind == AskKind::PlannerQuestion && ask.run_id.is_none())
+                    .collect(),
+                notes: detail
+                    .events
+                    .iter()
+                    .filter(|event| event.kind == event_kind::OBSERVATION && event.run_id.is_none())
+                    .filter_map(|event| event.payload["text"].as_str().map(str::to_owned))
+                    .collect(),
+            });
+        }
         draft_planner_prompt(&DraftPlannerMaterial {
             db: &self.layout.db,
             key,
@@ -277,6 +301,7 @@ impl Supervisor<'_> {
             receipt: receipt.as_ref(),
             goals: &goals,
             answer,
+            revisits: &revisits,
         })
     }
 }

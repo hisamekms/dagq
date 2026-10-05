@@ -1013,6 +1013,7 @@ impl TaskStore for SqliteQueue {
         let membership_judgements = super::follow_up_membership::judgements(&tx, task_id)?;
         let origin = super::draft_planners::task_origin(&tx, task_id)?;
         let follow_up_drafts = super::draft_planners::follow_up_drafts(&tx, task_id)?;
+        let revisit = super::draft_planners::read_revisit(&tx, task_id)?;
         let asks = tx
             .prepare(
                 "SELECT * FROM asks WHERE task_id=?1
@@ -1033,6 +1034,7 @@ impl TaskStore for SqliteQueue {
             processes,
             origin,
             follow_up_drafts,
+            revisit,
             asks,
         })
     }

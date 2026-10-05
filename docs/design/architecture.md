@@ -4,8 +4,8 @@ type: design
 title: レイヤーとコンテキストの境界（contextごとの所有・判断・操作・公開するport・依存の向き・境界をまたぐtransaction・検査できる規則・今の違反）
 status: current
 created: 2026-10-04
-updated: 2026-10-05 # task 1223: the observer on Codex; task 1641: domain::goal_tag among the planning modules; task 839: domain::broker_usage among the host operations modules; task 1662: the observation and analysis context points to the measurement design; task 1437; task 1632
-last_verified: 2026-10-05 # task 1223; task 1641; task 839; task 1615; task 1437; task 1632
+updated: 2026-10-05 # task 1540: the revisit command and draft_revisits; task 1223: the observer on Codex; task 1641: domain::goal_tag among the planning modules; task 839: domain::broker_usage among the host operations modules; task 1662: the observation and analysis context points to the measurement design; task 1437; task 1632
+last_verified: 2026-10-05 # task 1540; task 1223; task 1641; task 839; task 1615; task 1437; task 1632
 scope: system
 related:
   - adr-t1545-1
@@ -57,7 +57,7 @@ goal・task・proposalと、その検査と採否（plan review・goal review・
 
 **所有する状態**
 
-- table: `tasks`・`task_dependencies`・`task_goal_dependencies`・`goals`（`acceptance_version`を含む）・`follow_up_judgements`・`proposals`・`plan_reviews`・`goal_reviews`・`planners`・`draft_bundles`・`draft_bundle_members`・`draft_origins`・`draft_reopens`・`plan_requests`・`plan_request_proposals`・`search_index`・`landed_commits`（検索と関連の索引）。
+- table: `tasks`・`task_dependencies`・`task_goal_dependencies`・`goals`（`acceptance_version`を含む）・`follow_up_judgements`・`proposals`・`plan_reviews`・`goal_reviews`・`planners`・`draft_bundles`・`draft_bundle_members`・`draft_origins`・`draft_reopens`・`draft_revisits`・`plan_requests`・`plan_request_proposals`・`search_index`・`landed_commits`（検索と関連の索引）。
 - eventの種類: `task_*`（`task_created`・`task_edited`・`task_status_changed`・`task_submitted`・`task_reopened`・`task_goal_changed`・`task_paths_changed`・`task_priority_changed`・`task_weight_predicted`）、`dependency_*`、`goal_*`（`goal_review_*`を含む）、`proposal_*`、`plan_*`（`plan_review_*`・`plan_decided`・`plan_concern_decided`・`plan_revise_*`）、`planner_*`、`draft_*`、`follow_up_*`、`request_*`、`finding_planner_*`。
 - `Supervisor`の欄（`src/application/supervise/mod.rs`）: `plan_review`・`goal_review`・`planner_exits`・`max_improvement_proposals`。
 
@@ -68,7 +68,7 @@ goal・task・proposalと、その検査と採否（plan review・goal review・
 **操作**
 
 - application: `application::commands::planning`・`application::commands::requests`、`application::planner`・`application::planner_request`・`application::planner_handoff`、`application::supervise`の`plan_review`・`goal_review`・`draft_planner`・`finding_planner`・`request_planner`・`planner_turns`、`application::diagram`（依存図）。
-- CLI: `add`・`edit`・`ready`・`draft`・`cancel`・`dependency`・`goal`・`set-goal`・`judge-follow-up`・`set-paths`・`set-priority`・`submit`・`proposal`・`lint`・`request`・`requests`・`search`・`related`・`candidates`・`graph`・`plan`・`planners`・`planner`・`planner-session`、読み取りの`list`・`show`。
+- CLI: `add`・`edit`・`ready`・`draft`・`cancel`・`dependency`・`goal`・`set-goal`・`judge-follow-up`・`set-paths`・`set-priority`・`revisit`・`submit`・`proposal`・`lint`・`request`・`requests`・`search`・`related`・`candidates`・`graph`・`plan`・`planners`・`planner`・`planner-session`、読み取りの`list`・`show`。
 - infrastructure: `infrastructure::sqlite`（`TaskStore`の実装）、`proposals`・`plan_reviews`・`goal_reviews`・`draft_planners`・`follow_up_membership`（所属の判断とdraft/readyの移動を同じtransactionで記録し、achievedで閉じた元goalへのrequiredではそのtransactionで`correct_goal`のaskを開く。そのaskのanswerの適用（`decide_correction`）も1つのtransaction。[所属の判断](follow-up-membership.md)、下のT8・T9）・`finding_planners`・`plan_requests`・`planners`・`planning`・`search`・`related`・`stranded`。
 
 **公開するport**

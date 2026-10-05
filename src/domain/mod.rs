@@ -958,9 +958,9 @@ pub use finding::{
     NewFinding, PROPOSE_OPTION, improvement_running,
 };
 pub use follow_up::{
-    BundleKey, BundleKeyKind, DraftOrigin, DraftOutcome, DraftTarget, FOLLOW_UP_CATEGORIES,
-    MAX_DRAFT_PLANNERS, MEMBERSHIP_PROPOSAL_FIELD, PLANNER_QUESTION_OPTIONS, UNLABELED_CATEGORY,
-    follow_up_category, follow_up_membership_proposal,
+    BundleKey, BundleKeyKind, DraftOrigin, DraftOutcome, DraftRevisit, DraftTarget,
+    FOLLOW_UP_CATEGORIES, MAX_DRAFT_PLANNERS, MEMBERSHIP_PROPOSAL_FIELD, PLANNER_QUESTION_OPTIONS,
+    UNLABELED_CATEGORY, follow_up_category, follow_up_membership_proposal,
 };
 pub use goal::{Goal, StrandedDependency};
 pub use goal_tag::{GoalTag, TagSet};

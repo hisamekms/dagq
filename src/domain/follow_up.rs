@@ -9,7 +9,8 @@
 //! proposal of its own (ADR-0044 decision 14) that returns to `draft` when
 //! that proposal is withdrawn gets origin `reopened` (task 418). A draft a
 //! person registers with `add` has no origin, and no planner is opened for
-//! it.
+//! it unless a revisit time it was given comes (origin `revisit`,
+//! ADR-t1540-1).
 
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +21,7 @@ string_enum!(DraftOrigin {
     FollowUp => "follow_up",
     GoalGap => "goal_gap",
     Reopened => "reopened",
+    Revisit => "revisit",
 });
 
 /// The material of a `reopened` draft: why plan review reopened the task
@@ -43,7 +45,8 @@ pub fn reopened_material(
 /// it; `keep_draft` leaves the draft as it is until a person has the inbox
 /// record a planning request that names it (`request add --ref task:N`,
 /// ADR-t1394-1 decision 8), and no planner of the runtime's is opened for it
-/// again.
+/// again, unless it was given a revisit time (`revisit --at`, ADR-t1540-1):
+/// then one is opened at that time.
 pub const PLANNER_QUESTION_OPTIONS: &[&str] = &["adopt", "cancel", "keep_draft"];
 
 /// Planners the runtime opens for one draft that none of them decided
@@ -187,13 +190,95 @@ pub struct DraftTarget {
     pub origin: DraftOrigin,
     pub material: serde_json::Value,
     pub planners: usize,
+    /// The revisit time that came and made it a target again
+    /// (ADR-t1540-1), if one did.
+    pub revisit: Option<DraftRevisit>,
 }
 
 impl DraftTarget {
-    /// The bundle the draft is planned in (ADR-t807-1).
+    /// The bundle the draft is planned in (ADR-t807-1): a draft whose
+    /// revisit time came is a bundle of its own (ADR-t1540-1).
     pub fn bundle_key(&self) -> BundleKey {
+        if self.revisit.is_some() {
+            return BundleKey {
+                kind: BundleKeyKind::Task,
+                value: self.task.id().to_string(),
+            };
+        }
         BundleKey::of(self.origin, &self.material, self.task.id())
     }
+}
+
+/// A draft's revisit time (ADR-t1540-1): when it comes, the runtime opens a
+/// planner of its own for the draft again, past a `keep_draft` answer and
+/// for a draft without an origin. Set, changed and cleared by a planner of
+/// the runtime's, a person or the inbox; used once, as the planner opens.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DraftRevisit {
+    pub task_id: super::TaskId,
+    /// Unix seconds.
+    pub revisit_at: i64,
+    /// `revisit_at` in RFC 3339 (UTC).
+    pub revisit_at_utc: String,
+    pub note: Option<String>,
+    /// The role that set it: `planner`, `user` or `inbox`.
+    pub set_by: String,
+    pub set_by_id: String,
+    pub created_at: i64,
+    /// When the time came and the runtime opened the planner, which.
+    pub opened_at: Option<i64>,
+    pub planner_id: Option<super::PlannerId>,
+}
+
+impl DraftRevisit {
+    /// Its time came and no planner has taken it yet.
+    pub fn due(&self, now: i64) -> bool {
+        self.opened_at.is_none() && self.revisit_at <= now
+    }
+
+    /// Its time has not come yet: the draft waits for it.
+    pub fn waiting(&self, now: i64) -> bool {
+        self.opened_at.is_none() && self.revisit_at > now
+    }
+
+    /// Set by a person or the inbox at a person's word, so its planner is
+    /// opened past [`MAX_DRAFT_PLANNERS`].
+    pub fn by_person(&self) -> bool {
+        revisit_by_person(&self.set_by)
+    }
+}
+
+/// Whether a revisit set by `role` comes from a person (the user, or the
+/// inbox at a person's word): its planner is opened once even when the
+/// draft's planners are used up (ADR-t1540-1).
+pub fn revisit_by_person(role: &str) -> bool {
+    matches!(role, "user" | "inbox")
+}
+
+/// Why `role` may not give the draft a revisit time, or `None`: a planner
+/// of the runtime's may not revive a draft whose planners are used up (that
+/// is a person's word, through the inbox).
+pub fn revisit_refusal(role: &str, exhausted: bool) -> Option<String> {
+    (exhausted && !revisit_by_person(role)).then(|| {
+        format!(
+            "the runtime's planners for the draft are used up (at most {MAX_DRAFT_PLANNERS}), so only a person or the inbox gives it a revisit time"
+        )
+    })
+}
+
+/// What `revisit` does to a draft's revisit time (ADR-t1540-1): set or
+/// change it (`at` in Unix seconds, with what to look at then), or clear
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RevisitChange {
+    Set { at: i64, note: Option<String> },
+    Clear,
+}
+
+/// Unix seconds of a revisit time given in RFC 3339 (`2026-10-04T12:00:00Z`,
+/// `...+09:00`); `None` when it does not parse.
+pub fn revisit_seconds(text: &str) -> Option<i64> {
+    super::stats::rfc3339_millis(text.trim()).map(|millis| millis.div_euclid(1000))
 }
 
 // What makes drafts one bundle (ADR-t807-1): the one piece of work that made
@@ -225,6 +310,7 @@ impl BundleKey {
             DraftOrigin::FollowUp => BundleKeyKind::SourceRun,
             DraftOrigin::GoalGap => BundleKeyKind::GoalReview,
             DraftOrigin::Reopened => BundleKeyKind::ReviewedProposal,
+            DraftOrigin::Revisit => BundleKeyKind::Task,
         };
         match material.get(kind.as_str()) {
             Some(serde_json::Value::String(value)) if !value.is_empty() => Self {
@@ -364,7 +450,69 @@ mod tests {
             origin,
             material,
             planners: 0,
+            revisit: None,
         }
+    }
+
+    fn revisit(set_by: &str, at: i64, opened: Option<i64>) -> DraftRevisit {
+        DraftRevisit {
+            task_id: crate::domain::TaskId::new(7),
+            revisit_at: at,
+            revisit_at_utc: crate::domain::marks::utc_text(at * 1000),
+            note: None,
+            set_by: set_by.into(),
+            set_by_id: set_by.into(),
+            created_at: 0,
+            opened_at: opened,
+            planner_id: None,
+        }
+    }
+
+    /// ADR-t1540-1: a revisit is due once its time came and until a planner
+    /// took it; a person's (the user's, the inbox's) is carried past the
+    /// limit, and a planner of the runtime's may not revive a draft whose
+    /// planners are used up.
+    #[test]
+    fn a_revisit_comes_due_once_and_a_persons_one_passes_the_limit() {
+        let waiting = revisit("planner", 100, None);
+        assert!(waiting.waiting(99) && !waiting.due(99));
+        assert!(waiting.due(100) && !waiting.waiting(100));
+        let taken = revisit("planner", 100, Some(120));
+        assert!(!taken.due(200) && !taken.waiting(50));
+        assert!(!waiting.by_person());
+        assert!(revisit("inbox", 1, None).by_person());
+        assert!(revisit("user", 1, None).by_person());
+        assert!(revisit_refusal("planner", true).is_some());
+        assert_eq!(revisit_refusal("planner", false), None);
+        assert_eq!(revisit_refusal("inbox", true), None);
+        assert_eq!(revisit_refusal("user", true), None);
+        assert_eq!(revisit_seconds("2026-10-04T12:00:00Z"), Some(1_791_115_200));
+        assert_eq!(
+            revisit_seconds("2026-10-04T21:00:00+09:00"),
+            Some(1_791_115_200)
+        );
+        assert_eq!(revisit_seconds("tomorrow"), None);
+    }
+
+    /// ADR-t1540-1 (ADR-t807-1 decision 1 amended): a draft whose revisit
+    /// came is a bundle of its own, not one with the drafts of its run.
+    #[test]
+    fn a_revisited_draft_is_a_bundle_of_its_own() {
+        let material = serde_json::json!({"source_run_id": "r1"});
+        let mut first = target(7, DraftOrigin::FollowUp, material.clone());
+        let second = target(8, DraftOrigin::FollowUp, material);
+        assert_eq!(first.bundle_key(), second.bundle_key());
+        first.revisit = Some(revisit("planner", 1, None));
+        assert_eq!(
+            first.bundle_key(),
+            BundleKey {
+                kind: BundleKeyKind::Task,
+                value: "7".into()
+            }
+        );
+        assert_eq!(bundles(vec![first, second]).len(), 2);
+        let person = target(9, DraftOrigin::Revisit, serde_json::json!({}));
+        assert_eq!(person.bundle_key().kind, BundleKeyKind::Task);
     }
 
     /// The drafts one run's integrate, one goal review or one withdrawal

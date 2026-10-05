@@ -78,6 +78,9 @@ event_kinds! {
     DraftPlannerExhausted => "draft_planner_exhausted",
     DraftPlannerOpened => "draft_planner_opened",
     DraftPlannerSettled => "draft_planner_settled",
+    DraftRevisitCleared => "draft_revisit_cleared",
+    DraftRevisitDue => "draft_revisit_due",
+    DraftRevisitSet => "draft_revisit_set",
     EvidenceMissing => "evidence_missing",
     ExitRequestTimedOut => "exit_request_timed_out",
     ExitRequested => "exit_requested",
@@ -572,6 +575,12 @@ pub const DRAFT_ADOPTED: &str = EventKind::DraftAdopted.as_str();
 pub const DRAFT_PLANNER_EXHAUSTED: &str = EventKind::DraftPlannerExhausted.as_str();
 pub const DRAFT_PLANNER_OPENED: &str = EventKind::DraftPlannerOpened.as_str();
 pub const DRAFT_PLANNER_SETTLED: &str = EventKind::DraftPlannerSettled.as_str();
+/// A draft's revisit time set, changed or cleared by a planner of the
+/// runtime's, a person or the inbox, and come due as the runtime opens a
+/// planner for it again (ADR-t1540-1), with `revisit_at`, `note`, `set_by`.
+pub const DRAFT_REVISIT_CLEARED: &str = EventKind::DraftRevisitCleared.as_str();
+pub const DRAFT_REVISIT_DUE: &str = EventKind::DraftRevisitDue.as_str();
+pub const DRAFT_REVISIT_SET: &str = EventKind::DraftRevisitSet.as_str();
 pub const EVIDENCE_MISSING: &str = EventKind::EvidenceMissing.as_str();
 pub const EXIT_REQUESTED: &str = EventKind::ExitRequested.as_str();
 pub const EXIT_REQUEST_TIMED_OUT: &str = EventKind::ExitRequestTimedOut.as_str();
@@ -907,6 +916,9 @@ mod tests {
             (EventKind::DraftPlannerExhausted, "draft_planner_exhausted"),
             (EventKind::DraftPlannerOpened, "draft_planner_opened"),
             (EventKind::DraftPlannerSettled, "draft_planner_settled"),
+            (EventKind::DraftRevisitCleared, "draft_revisit_cleared"),
+            (EventKind::DraftRevisitDue, "draft_revisit_due"),
+            (EventKind::DraftRevisitSet, "draft_revisit_set"),
             (EventKind::EvidenceMissing, "evidence_missing"),
             (EventKind::ExitRequestTimedOut, "exit_request_timed_out"),
             (EventKind::ExitRequested, "exit_requested"),

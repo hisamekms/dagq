@@ -1091,6 +1091,96 @@ pub struct DraftPlannerMaterial<'a> {
     /// other than the bundle's.
     pub goals: &'a [(Goal, bool, Vec<GoalTask>)],
     pub answer: Option<&'a Ask>,
+    /// The last decision about each draft whose revisit time came
+    /// (ADR-t1540-1).
+    pub revisits: &'a [RevisitHistory],
+}
+
+/// The last decision about a draft whose revisit time came (ADR-t1540-1):
+/// its `planner_question` asks and its notes, oldest first.
+#[derive(Debug, Clone)]
+pub struct RevisitHistory {
+    pub task: TaskId,
+    pub asks: Vec<Ask>,
+    pub notes: Vec<String>,
+}
+
+/// The bytes of the last decisions about the drafts whose revisit time
+/// came, and of one question or note in them: a draft kept with a time
+/// has a question or two and a note or two (draft 1537: one question, one
+/// note), and the sections' limits with the instructions stay within
+/// [`DRAFT_PLANNER_PROMPT_LIMIT`].
+pub const DRAFT_REVISIT_BYTES: usize = 8_000;
+pub const DRAFT_REVISIT_ITEM_BYTES: usize = 2_000;
+
+/// The section of the drafts whose revisit time came (ADR-t1540-1): the
+/// time, who set it and why, and the last decision about each (its
+/// `planner_question` asks with their recommendation and answer, and its
+/// notes), the newest first; empty when none came.
+fn revisit_section(fit: &mut Fit, material: &DraftPlannerMaterial<'_>) -> String {
+    let mut out = String::new();
+    for (target, _) in material.members {
+        let Some(revisit) = &target.revisit else {
+            continue;
+        };
+        let id = target.task.id();
+        let read = format!("read it whole with `dagq show {id} --full`");
+        let mut text = format!(
+            "\n## Revisit of draft {id}\n\nIts revisit time came: {at} (set by {by} {actor}). What to look at then: {note}\nIt was kept as a draft (or added by a person) to be decided at this time; the time is used now. The last decision about it, the newest first:\n",
+            at = revisit.revisit_at_utc,
+            by = revisit.set_by,
+            actor = revisit.set_by_id,
+            note = revisit.note.as_deref().unwrap_or("(none)"),
+        );
+        let history = material.revisits.iter().find(|h| h.task == id);
+        let asks: Vec<&Ask> = history.map_or_else(Vec::new, |h| h.asks.iter().rev().collect());
+        let notes: Vec<&String> = history.map_or_else(Vec::new, |h| h.notes.iter().rev().collect());
+        text.push_str("\n### Its planner_question asks\n\n");
+        if asks.is_empty() {
+            text.push_str("(none)\n");
+        }
+        for ask in asks {
+            text.push_str(&format!(
+                "- ask {aid}: {question}\n  Recommended: {recommend} ({confidence}). Answer: {answer}\n",
+                aid = ask.id,
+                question = fit.text("revisit", &ask.question, DRAFT_REVISIT_ITEM_BYTES, Keep::Start, &read),
+                recommend = ask.recommendation.as_deref().unwrap_or("(none)"),
+                confidence = ask
+                    .confidence
+                    .map_or("no confidence", |confidence| confidence.as_str()),
+                answer = ask.answer.as_deref().unwrap_or("(not answered)"),
+            ));
+        }
+        text.push_str("\n### Its notes\n\n");
+        if notes.is_empty() {
+            text.push_str("(none)\n");
+        }
+        for note in notes {
+            text.push_str(&format!(
+                "- {}\n",
+                fit.text(
+                    "revisit",
+                    note,
+                    DRAFT_REVISIT_ITEM_BYTES,
+                    Keep::Start,
+                    &read
+                )
+            ));
+        }
+        out.push_str(&text);
+    }
+    if out.is_empty() {
+        return out;
+    }
+    let out = fit.text(
+        "revisit",
+        &out,
+        DRAFT_REVISIT_BYTES,
+        Keep::Start,
+        "`dagq show ID --full` for each draft",
+    );
+    fit.section("revisit", &out);
+    out
 }
 
 /// The line of a follow_up draft's section that shows the category its
@@ -1224,6 +1314,7 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Fitte
             "plan review took it back from ready and the proposal it was reopened into was withdrawn"
         }
         DraftOrigin::FollowUp | DraftOrigin::GoalGap => "the runtime or a job registered it",
+        DraftOrigin::Revisit => "a person added it and gave it a revisit time, which came",
     };
     let mut out = if single {
         format!(
@@ -1377,6 +1468,11 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Fitte
                 ));
             }
         }
+        DraftOrigin::Revisit => {
+            out.push_str(
+                "A person added it (the runtime and the jobs did not): no origin of theirs to read. It came to you because its revisit time came (below).\n",
+            );
+        }
         DraftOrigin::GoalGap => {
             out.push_str(if single {
                 "A job that judged the goal below against its acceptance found this gap. Its findings:\n"
@@ -1412,6 +1508,7 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Fitte
     );
     fit.section("origin", &whence_text);
     out.push_str(&whence_text);
+    out.push_str(&revisit_section(&mut fit, material));
     let goals = material
         .goals
         .iter()
@@ -1470,6 +1567,9 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Fitte
             "fix what plan review's reason points at with `dagq edit {t}` (its description, acceptance, `--verify`, `--paths`, `--evidence`, and a line in `--context` on the reopen of proposal {}), keeping the task's intent,",
             first.material["proposal_id"],
         ),
+        DraftOrigin::Revisit => format!(
+            "complete the draft with `dagq edit {t}` (acceptance, `--verify`, `--paths`, `--evidence`, and a line in `--context` that it was decided at its revisit time), keeping the person's intent,"
+        ),
     };
     out.push_str(&format!(
         "\n## What to do\n\n\
@@ -1477,7 +1577,7 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Fitte
          {membership}{each}Then do exactly one of these three{with_each}:\n\
          1. Adopt: {adopt} add its dependencies with `dagq dependency add`, check it with `dagq lint {t}` and submit it with `dagq submit {t}`. Say in its `--context` why you adopted it. Plan review checks it before it becomes ready.\n\
          2. Drop: when it is already done, duplicated or not worth doing, cancel it with `dagq cancel {t}` and record why with `dagq note --task {t} --text '<why>'`. When another task already covers it (a duplicate, or a completed task that already did it), cancel it with `dagq cancel {t} --duplicate-of <that task>` instead, so the queue records which task it duplicates, and still note why.\n\
-         3. Ask: only for a draft you cannot decide yourself: (a) it needs a person's judgement, `scope` (the acceptance, the scope or a goal's decision would change with their intent) or `discard` (whether to throw work away), that the queue, the repository (its code and the decisions it records) and a person's precedents cannot settle; (b) your confidence in the decision is low; or (c) it is a follow_up draft past the runtime's follow_up limit, {FOLLOW_UP_ASK_DEPTH} or more follow-ups from a person's judgement, a source goal that was missing, closed or unknown at registration (even if its current goal is open), or no current goal or a closed current goal. Run `dagq ask --task {t} --kind planner_question --because scope --recommend <adopt|cancel|keep_draft> --confidence <high|low> --question '<everything the person needs, with your recommendation and why>' --option adopt --option cancel --option keep_draft` (`--because discard` when the question is whether to throw work away; for (c), recommend what you would do on your own), report briefly and stop. The answer arrives in this terminal as `answer to ask <id>: ...`: on adopt do 1, on cancel do 2 (the note names the ask), on keep_draft leave the draft as it is, record why with `dagq note --task {t} --text '<why>'` (naming the ask) and stop. A draft kept so stays a draft until a person has the inbox record a planning request that names it; no planner of the runtime's is opened for it again.\n\
+         3. Ask: only for a draft you cannot decide yourself: (a) it needs a person's judgement, `scope` (the acceptance, the scope or a goal's decision would change with their intent) or `discard` (whether to throw work away), that the queue, the repository (its code and the decisions it records) and a person's precedents cannot settle; (b) your confidence in the decision is low; or (c) it is a follow_up draft past the runtime's follow_up limit, {FOLLOW_UP_ASK_DEPTH} or more follow-ups from a person's judgement, a source goal that was missing, closed or unknown at registration (even if its current goal is open), or no current goal or a closed current goal. Run `dagq ask --task {t} --kind planner_question --because scope --recommend <adopt|cancel|keep_draft> --confidence <high|low> --question '<everything the person needs, with your recommendation and why>' --option adopt --option cancel --option keep_draft` (`--because discard` when the question is whether to throw work away; for (c), recommend what you would do on your own), report briefly and stop. The answer arrives in this terminal as `answer to ask <id>: ...`: on adopt do 1, on cancel do 2 (the note names the ask), on keep_draft leave the draft as it is, record why with `dagq note --task {t} --text '<why>'` (naming the ask) and stop. A draft kept so stays a draft until a person has the inbox record a planning request that names it; no planner of the runtime's is opened for it again, unless it has a revisit time. When you can tell when it can be decided (after a task lands, after a period to measure), keep it with `dagq revisit {t} --at <RFC 3339 time, e.g. 2026-10-04T12:00:00Z> --note '<what to look at then>'`: at that time the runtime opens a planner for it again with this decision in its prompt. You may keep a draft so yourself, without asking, when that is your recommendation; record why with `dagq note --task {t}` too.\n\
          The runtime refuses your submit of a follow_up draft past that limit unless a person answered adopt or already adopted it: ask then, as (c) says. Membership changes (`set-goal` or `judge-follow-up`) do not count as adoption or reset depth; an existing person's adopt remains valid.\n\
          When you are done, report the outcome in one or two sentences and stop; the runtime ends this session. Do not work on anything but {this}. Never open the queue database directly; use the dagq CLI only.\n",
         membership = if origin == DraftOrigin::FollowUp {
@@ -4938,6 +5038,7 @@ mod tests {
             processes: Vec::new(),
             origin: None,
             follow_up_drafts: Vec::new(),
+            revisit: None,
             asks: Vec::new(),
         }
     }
@@ -6416,6 +6517,7 @@ mod tests {
                 origin: DraftOrigin::FollowUp,
                 material,
                 planners: 0,
+                revisit: None,
             },
             1,
         )];
@@ -6427,6 +6529,7 @@ mod tests {
             receipt: None,
             goals: &[],
             answer: None,
+            revisits: &[],
         })
         .unwrap()
         .text;
@@ -6441,7 +6544,9 @@ mod tests {
             "(c) it is a follow_up draft past the runtime's follow_up limit, 3 or more follow-ups from a person's judgement, a source goal that was missing, closed or unknown at registration (even if its current goal is open), or no current goal or a closed current goal",
             "dagq ask --task 9 --kind planner_question --because scope --recommend <adopt|cancel|keep_draft> --confidence <high|low>",
             "on keep_draft leave the draft as it is, record why with `dagq note --task 9",
-            "A draft kept so stays a draft until a person has the inbox record a planning request that names it; no planner of the runtime's is opened for it again.",
+            "A draft kept so stays a draft until a person has the inbox record a planning request that names it; no planner of the runtime's is opened for it again, unless it has a revisit time.",
+            "keep it with `dagq revisit 9 --at <RFC 3339 time, e.g. 2026-10-04T12:00:00Z> --note '<what to look at then>'`",
+            "You may keep a draft so yourself, without asking, when that is your recommendation",
             "The runtime refuses your submit of a follow_up draft past that limit unless a person answered adopt or already adopted it",
             "Membership changes (`set-goal` or `judge-follow-up`) do not count as adoption or reset depth; an existing person's adopt remains valid",
         ] {
@@ -6453,6 +6558,89 @@ mod tests {
         );
         // The runtime's prompts carry no rules of dagq's own repository.
         assert!(!prompt.contains("ADR"), "{prompt}");
+    }
+
+    /// ADR-t1540-1: the planner opened for a draft whose revisit time came
+    /// reads the time, who set it and why, and the last decision about it
+    /// (its question, recommendation and answer, and its notes); a draft a
+    /// person added reads where it came from as theirs.
+    #[test]
+    fn a_revisited_draft_s_planner_reads_the_last_decision() {
+        let draft = task(9, "measure again", TaskStatus::Draft);
+        let revisit = crate::domain::DraftRevisit {
+            task_id: draft.id(),
+            revisit_at: 1_791_115_200,
+            revisit_at_utc: "2026-10-04T12:00:00.000Z".into(),
+            note: Some("after task 1429 lands".into()),
+            set_by: "planner".into(),
+            set_by_id: "planner:815".into(),
+            created_at: 0,
+            opened_at: None,
+            planner_id: None,
+        };
+        let mut ask: Ask = serde_json::from_value(json!({
+            "id": 358, "kind": "planner_question", "task_id": 9, "run_id": null,
+            "question": "measure goal 90 again now?", "options": ["adopt", "cancel", "keep_draft"],
+            "answer": "keep_draft", "asked_by": "planner", "reason_category": "scope",
+            "recommendation": "keep_draft", "confidence": "high",
+            "created_at": 0, "answered_at": 1, "closed_at": 2,
+        }))
+        .unwrap();
+        ask.task_id = Some(draft.id());
+        let history = [RevisitHistory {
+            task: draft.id(),
+            asks: vec![ask],
+            notes: vec!["fill it in at noon UTC on 10-04".into()],
+        }];
+        for (origin, material, whence) in [
+            (
+                DraftOrigin::FollowUp,
+                json!({"source_run_id": RUN, "source_task_id": 3, "index": 0}),
+                "The receipt of run",
+            ),
+            (
+                DraftOrigin::Revisit,
+                json!({}),
+                "A person added it (the runtime and the jobs did not)",
+            ),
+        ] {
+            let members = [(
+                DraftTarget {
+                    task: draft.clone(),
+                    origin,
+                    material,
+                    planners: 1,
+                    revisit: Some(revisit.clone()),
+                },
+                2,
+            )];
+            let key = members[0].0.bundle_key();
+            assert_eq!(key.kind.as_str(), "task_id");
+            let fitted = draft_planner_prompt(&DraftPlannerMaterial {
+                db: Path::new("/q/queue.db"),
+                key: &key,
+                members: &members,
+                source: None,
+                receipt: None,
+                goals: &[],
+                answer: None,
+                revisits: &history,
+            })
+            .unwrap();
+            let prompt = fitted.text;
+            for part in [
+                whence,
+                "## Revisit of draft 9",
+                "Its revisit time came: 2026-10-04T12:00:00.000Z (set by planner planner:815). What to look at then: after task 1429 lands",
+                "- ask 358: measure goal 90 again now?\n  Recommended: keep_draft (high). Answer: keep_draft",
+                "- fill it in at noon UTC on 10-04",
+                "dagq revisit 9 --at",
+            ] {
+                assert!(prompt.contains(part), "{part} in {prompt}");
+            }
+            assert!(fitted.bytes.sections.contains_key("revisit"));
+            assert!(!prompt.contains("ADR"), "{prompt}");
+        }
     }
 
     /// Task 1508 (ADR-t1504-1, ADR-t1504-2): a follow_up draft's planner
@@ -6472,6 +6660,7 @@ mod tests {
                     origin,
                     material,
                     planners: 0,
+                    revisit: None,
                 },
                 1,
             )];
@@ -6483,6 +6672,7 @@ mod tests {
                 receipt: None,
                 goals: &[],
                 answer: None,
+                revisits: &[],
             })
             .unwrap()
             .text
@@ -7471,6 +7661,7 @@ mod tests {
                         origin: DraftOrigin::FollowUp,
                         material: json!({"source_run_id": RUN, "source_task_id": 3, "index": id}),
                         planners: 0,
+                        revisit: None,
                     },
                     1,
                 )
@@ -7495,6 +7686,7 @@ mod tests {
             receipt: Some(&receipt),
             goals: &goals,
             answer: Some(&answer),
+            revisits: &[],
         })
         .unwrap();
         within(&fitted, DRAFT_PLANNER_PROMPT_LIMIT);
@@ -7519,6 +7711,75 @@ mod tests {
         assert!(text.contains("read ask 9 whole with `dagq asks --all`"));
         assert!(text.contains("Apply this answer as step 3 says."));
         assert!(text.contains("## What to do"));
+    }
+
+    /// ADR-t1540-1: with every other section at its limit, a revisited
+    /// draft's long history (questions and notes far past their limits)
+    /// is cut to [`DRAFT_REVISIT_BYTES`], newest first, and the whole stays
+    /// within [`DRAFT_PLANNER_PROMPT_LIMIT`].
+    #[test]
+    fn a_long_revisit_history_stays_within_the_draft_planner_s_limits() {
+        let mut members: Vec<(DraftTarget, usize)> = (10..60)
+            .map(|id| {
+                (
+                    DraftTarget {
+                        task: big_task(id, 20_000),
+                        origin: DraftOrigin::FollowUp,
+                        material: json!({"source_run_id": RUN, "source_task_id": 3, "index": id}),
+                        planners: 0,
+                        revisit: None,
+                    },
+                    1,
+                )
+            })
+            .collect();
+        let lead = members[0].0.task.id();
+        members[0].0.revisit = Some(crate::domain::DraftRevisit {
+            task_id: lead,
+            revisit_at: 0,
+            revisit_at_utc: "1970-01-01T00:00:00.000Z".into(),
+            note: Some(big("note", 20_000)),
+            set_by: "inbox".into(),
+            set_by_id: "inbox:1".into(),
+            created_at: 0,
+            opened_at: None,
+            planner_id: None,
+        });
+        let history = [RevisitHistory {
+            task: lead,
+            asks: (1..=10).map(|id| asked(id, 20_000)).collect(),
+            notes: (0..10).map(|_| big("noted", 20_000)).collect(),
+        }];
+        let key = members[0].0.bundle_key();
+        let source = big_task(3, 50_000);
+        let receipt = json!({"summary": big("summary", 50_000), "follow_ups": (0..100).map(|n| json!({"title": format!("f{n}"), "description": big("d", 1_000)})).collect::<Vec<_>>()});
+        let goals: Vec<(Goal, bool, Vec<GoalTask>)> = (1..=10)
+            .map(|id| (goal_of(id, 20_000), false, goal_tasks(500)))
+            .collect();
+        let answer = asked(99, 20_000);
+        let fitted = draft_planner_prompt(&DraftPlannerMaterial {
+            db: Path::new("/q/queue.db"),
+            key: &key,
+            members: &members,
+            source: Some(&source),
+            receipt: Some(&receipt),
+            goals: &goals,
+            answer: Some(&answer),
+            revisits: &history,
+        })
+        .unwrap();
+        within(&fitted, DRAFT_PLANNER_PROMPT_LIMIT);
+        let bytes = &fitted.bytes;
+        assert!(
+            bytes.sections["revisit"] <= DRAFT_REVISIT_BYTES,
+            "{bytes:?}"
+        );
+        assert!(
+            bytes.omitted.get("revisit").is_some_and(|n| *n > 0),
+            "{bytes:?}"
+        );
+        assert!(fitted.text.contains("## Revisit of draft 10"));
+        assert!(fitted.text.contains("`dagq show 10 --full`"));
     }
 
     /// The planner opened for a finding whose evidence is huge (finding 44

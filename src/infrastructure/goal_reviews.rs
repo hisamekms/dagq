@@ -788,7 +788,11 @@ impl GoalReviewStore for SqliteQueue {
             .collect::<rusqlite::Result<_>>()?;
         let mut found = Vec::new();
         for goal in goals {
-            let follow_ups = follow_up_membership::waiting_follow_ups(&self.conn, goal)?;
+            let follow_ups = follow_up_membership::waiting_follow_ups(
+                &self.conn,
+                goal,
+                self.generators.clock.now(),
+            )?;
             if follow_ups.is_empty() {
                 continue;
             }

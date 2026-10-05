@@ -26,10 +26,10 @@ use crate::application::{
 };
 use crate::domain::{
     Ask, AskId, AskKind, BundleKey, DraftBundleMember, DraftBundleView, DraftOrigin, DraftOutcome,
-    DraftTarget, Finding, FindingId, FindingQuery, FindingStatus, FindingView, FollowUpDraft,
-    GoalId, MAX_DRAFT_PLANNERS, PlannerId, PlannerOrigin, PlannerSession, RegisteredFollowUp,
-    RunHistory, RunId, Task, TaskId, TaskOrigin, TaskStatus,
-    follow_up::{FollowUpFacts, adopt_needs_person},
+    DraftRevisit, DraftTarget, Finding, FindingId, FindingQuery, FindingStatus, FindingView,
+    FollowUpDraft, GoalId, MAX_DRAFT_PLANNERS, PlannerId, PlannerOrigin, PlannerSession,
+    RegisteredFollowUp, RunHistory, RunId, Task, TaskId, TaskOrigin, TaskStatus,
+    follow_up::{FollowUpFacts, RevisitChange, adopt_needs_person, revisit_refusal},
 };
 
 /// How long a claim on typing the answer of a `planner_question` holds
@@ -37,38 +37,76 @@ use crate::domain::{
 /// supervisor that ended before it typed, and another may take it over.
 pub const PLANNER_ANSWER_CLAIM_SECS: i64 = 120;
 
-/// The drafts waiting for a planner of the runtime's: `draft`, in no
-/// proposal (or in one withdrawn: a canceled proposal holds no draft), with an origin (in `draft_origins`, or `reopened` in `draft_reopens`), no planner of the runtime's open for it, no
-/// planner of the runtime's still open for the withdrawn proposal it was
-/// in, no `planner_question` about it nobody closed, not kept as a draft by an
-/// answer and not exhausted. (A draft whose bundle key an open planner's
-/// bundle has waits too: [`waiting`].) A `follow_up` ask the retired triage left
-/// holds a draft back only when answered `keep_draft`: nothing applies its
-/// other answers any more. Drafts registered before this existed match too (the
-/// migration gave them their origin).
-fn targets() -> String {
+/// The drafts waiting for a planner of the runtime's at `now` (Unix
+/// seconds): `draft`, in no proposal (or in one withdrawn: a canceled
+/// proposal holds no draft), with an origin (in `draft_origins`, or
+/// `reopened` in `draft_reopens`) or a revisit time that came, no planner of
+/// the runtime's open for it, no planner of the runtime's still open for the
+/// withdrawn proposal it was in, no `planner_question` about it nobody
+/// closed, not kept as a draft by an answer unless its revisit time came,
+/// not waiting for a revisit time still to come, named by no `open`
+/// planning request (its planner, or the one to come, decides it), and not
+/// exhausted unless a person's revisit time came (ADR-t1540-1). (A draft
+/// whose bundle key an open planner's bundle has waits too: [`waiting`].) A
+/// `follow_up` ask the retired triage left holds a draft back only when
+/// answered `keep_draft`: nothing applies its other answers any more.
+/// Drafts registered before this existed match too (the migration gave them
+/// their origin).
+fn targets(now: i64) -> String {
+    let due = revisit_due(now, None);
     format!(
         "SELECT t.id FROM tasks t
     WHERE (EXISTS(SELECT 1 FROM draft_origins o WHERE o.task_id=t.id)
         OR EXISTS(SELECT 1 FROM draft_reopens r WHERE r.task_id=t.id
-            AND json_extract(r.material,'$.proposal_id')=t.proposal_id))
+            AND json_extract(r.material,'$.proposal_id')=t.proposal_id)
+        OR {due})
     AND t.status='draft' AND NOT EXISTS(SELECT 1 FROM proposals x
         WHERE x.id=t.proposal_id AND x.status!='canceled')
     AND NOT EXISTS(SELECT 1 FROM planners p WHERE p.closed_at IS NULL
         AND (p.draft_task_id=t.id OR (t.proposal_id IS NOT NULL AND p.proposal_id=t.proposal_id)
              OR EXISTS(SELECT 1 FROM draft_bundle_members m WHERE m.planner_id=p.id AND m.task_id=t.id)))
     AND NOT EXISTS(SELECT 1 FROM asks a WHERE a.task_id=t.id AND a.run_id IS NULL
-        AND ((a.kind='planner_question' AND a.closed_at IS NULL)
-             OR (a.kind IN ('planner_question','follow_up') AND trim(a.answer)='keep_draft')))
-    AND NOT EXISTS(SELECT 1 FROM run_events e WHERE e.task_id=t.id
-        AND e.kind='{}')",
-        event_kind::DRAFT_PLANNER_EXHAUSTED
+        AND a.kind='planner_question' AND a.closed_at IS NULL)
+    AND ({due} OR NOT EXISTS(SELECT 1 FROM asks a WHERE a.task_id=t.id AND a.run_id IS NULL
+        AND a.kind IN ('planner_question','follow_up') AND trim(a.answer)='keep_draft'))
+    AND NOT EXISTS(SELECT 1 FROM draft_revisits v WHERE v.task_id=t.id
+        AND v.opened_at IS NULL AND v.revisit_at>{now})
+    AND NOT EXISTS(SELECT 1 FROM plan_requests q, json_each(q.refs) j WHERE q.status='open'
+        AND json_extract(j.value,'$.kind')='task' AND json_extract(j.value,'$.id')=t.id)
+    AND ({person} OR NOT EXISTS(SELECT 1 FROM run_events e WHERE e.task_id=t.id
+        AND e.kind='{exhausted}'))",
+        person = revisit_due(now, Some("('user','inbox')")),
+        exhausted = event_kind::DRAFT_PLANNER_EXHAUSTED
     )
 }
 
+/// Whether the draft `t` has a revisit time that came at `now` and no
+/// planner took yet (ADR-t1540-1), set by one of the roles `by` (an SQL
+/// list) when it names them.
+fn revisit_due(now: i64, by: Option<&str>) -> String {
+    format!(
+        "EXISTS(SELECT 1 FROM draft_revisits v WHERE v.task_id=t.id
+        AND v.opened_at IS NULL AND v.revisit_at<={now}{by})",
+        by = by.map_or_else(String::new, |roles| format!(" AND v.set_by IN {roles}"))
+    )
+}
+
+/// Whether an `open` planning request names the draft `task` (`task:N`):
+/// its planner decides it, and no planner of the runtime's for drafts is
+/// opened for it meanwhile (ADR-t1540-1).
+fn named_by_open_request(conn: &Connection, task: TaskId) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM plan_requests q, json_each(q.refs) j WHERE q.status='open'
+         AND json_extract(j.value,'$.kind')='task' AND json_extract(j.value,'$.id')=?1)",
+        [task],
+        |r| r.get(0),
+    )?)
+}
+
 /// Whether a planner of the runtime's is still to be opened for draft
-/// `task` ([`targets`]) or one is open for it.
-pub(super) fn draft_planned(conn: &Connection, task: TaskId) -> Result<bool> {
+/// `task` ([`targets`]) at `now` (the queue's clock, Unix seconds) or one
+/// is open for it.
+pub(super) fn draft_planned(conn: &Connection, task: TaskId, now: i64) -> Result<bool> {
     Ok(conn.query_row(
         &format!(
             "SELECT EXISTS({} AND t.id=?1) OR EXISTS(SELECT 1 FROM tasks t
@@ -78,7 +116,7 @@ pub(super) fn draft_planned(conn: &Connection, task: TaskId) -> Result<bool> {
                       OR EXISTS(SELECT 1 FROM draft_bundle_members m
                                 WHERE m.planner_id=p.id AND m.task_id=t.id))
                  WHERE t.id=?1 AND t.status='draft')",
-            targets()
+            targets(now)
         ),
         [task],
         |r| r.get(0),
@@ -219,6 +257,89 @@ impl SqliteQueue {
         draft_origin(&self.conn, task)
     }
 
+    /// Set, change or clear the revisit time of the draft `task`
+    /// (ADR-t1540-1) as `role` with actor id `actor`, with
+    /// `draft_revisit_set` / `draft_revisit_cleared`: the revisit time as it
+    /// is afterwards. Only a draft takes one; a planner of the runtime's may
+    /// not give one to a draft whose planners are used up; clearing a draft
+    /// without one is an error.
+    pub fn revisit_draft(
+        &mut self,
+        task: TaskId,
+        change: RevisitChange,
+        role: &str,
+        actor: &str,
+    ) -> Result<Option<DraftRevisit>> {
+        let now = self.generators.clock.now();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let status = read_task(&tx, task)?.status();
+        ensure!(
+            status == TaskStatus::Draft,
+            "task {task} is {}, not a draft: only a draft gets a revisit time",
+            status.as_str()
+        );
+        let before = read_revisit(&tx, task)?;
+        match change {
+            RevisitChange::Set { at, note } => {
+                let exhausted: bool = tx.query_row(
+                    &format!(
+                        "SELECT EXISTS(SELECT 1 FROM run_events WHERE task_id=?1 AND kind='{}')",
+                        event_kind::DRAFT_PLANNER_EXHAUSTED
+                    ),
+                    [task],
+                    |r| r.get(0),
+                )?;
+                if let Some(why) = revisit_refusal(role, exhausted) {
+                    anyhow::bail!("task {task} gets no revisit time from a {role}: {why}");
+                }
+                let note = note.filter(|note| !note.trim().is_empty());
+                tx.execute(
+                    "INSERT OR REPLACE INTO draft_revisits(task_id, revisit_at, note, set_by,
+                         set_by_id, created_at, opened_at, planner_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL)",
+                    params![task, at, note, role, actor, now],
+                )?;
+                let after = read_revisit(&tx, task)?.context("the revisit was just written")?;
+                event(
+                    &tx,
+                    task,
+                    None,
+                    EventKind::DraftRevisitSet,
+                    json!({
+                        "revisit_at": after.revisit_at_utc,
+                        "note": after.note,
+                        "set_by": role,
+                        "from": before
+                            .filter(|b| b.opened_at.is_none())
+                            .map(|b| b.revisit_at_utc),
+                        "due": at <= now,
+                    }),
+                )?;
+            }
+            RevisitChange::Clear => {
+                let before = before.with_context(|| format!("task {task} has no revisit time"))?;
+                tx.execute("DELETE FROM draft_revisits WHERE task_id=?1", [task])?;
+                event(
+                    &tx,
+                    task,
+                    None,
+                    EventKind::DraftRevisitCleared,
+                    json!({
+                        "revisit_at": before.revisit_at_utc,
+                        "note": before.note,
+                        "set_by": before.set_by,
+                        "opened_at": before.opened_at,
+                    }),
+                )?;
+            }
+        }
+        let after = read_revisit(&tx, task)?;
+        tx.commit()?;
+        Ok(after)
+    }
+
     /// Where every draft with an origin came from; an origin this binary
     /// does not know is left out.
     pub fn draft_origins(&self) -> Result<HashMap<TaskId, DraftOrigin>> {
@@ -233,15 +354,16 @@ impl SqliteQueue {
     }
 
     pub fn planner_drafts(&self) -> Result<Vec<DraftTarget>> {
+        let now = self.generators.clock.now();
         let ids: Vec<TaskId> = self
             .conn
-            .prepare(&format!("{} ORDER BY t.id", targets()))?
+            .prepare(&format!("{} ORDER BY t.id", targets(now)))?
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         let open = open_bundle_keys(&self.conn)?;
         Ok(ids
             .into_iter()
-            .map(|id| target(&self.conn, id))
+            .map(|id| target(&self.conn, id, now))
             .collect::<Result<Vec<_>>>()?
             .into_iter()
             .filter(|target| !open.contains(&target.bundle_key()))
@@ -257,6 +379,7 @@ impl SqliteQueue {
         drafts: &[TaskId],
         answer: Option<AskId>,
     ) -> Result<DraftPlannerStart> {
+        let now = self.generators.clock.now();
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -264,15 +387,18 @@ impl SqliteQueue {
             return Ok(DraftPlannerStart::Skipped);
         };
         let lead_target = match answer {
-            None => waiting(&tx, lead)?,
+            None => waiting(&tx, lead, now)?,
             Some(ask) => {
                 let ask = read_ask(&tx, ask)?;
+                // An answer about a draft an open planning request names
+                // waits for the request's planner (ADR-t1540-1).
                 if ask.task_id == Some(lead)
                     && route_of(&tx, &ask)? == PlannerAnswerRoute::NewPlanner
+                    && !named_by_open_request(&tx, lead)?
                 {
                     // One planner per bundle key: an answer about a draft
                     // of a key an open planner has waits for it to end.
-                    let target = target(&tx, lead)?;
+                    let target = target(&tx, lead, now)?;
                     (!open_bundle_keys(&tx)?.contains(&target.bundle_key())).then_some(target)
                 } else {
                     None
@@ -290,7 +416,7 @@ impl SqliteQueue {
             }
             // A draft that moved on, or is of another bundle now, is left
             // out; the rest are planned together.
-            if let Some(target) = waiting(&tx, other)?
+            if let Some(target) = waiting(&tx, other, now)?
                 && target.bundle_key() == key
             {
                 candidates.push(target);
@@ -298,13 +424,23 @@ impl SqliteQueue {
         }
         let mut members = Vec::new();
         let mut exhausted = Vec::new();
+        let mut revisits = Vec::new();
         for candidate in candidates {
             let id = candidate.task.id();
             let opened = planners_opened(&tx, id)?;
             // A person's answer is carried past the limit: it was promised
             // to the runtime (`runtime_delivers`), and the planner it opens
-            // has the person's decision to apply.
-            if opened >= MAX_DRAFT_PLANNERS && !(answer.is_some() && id == lead) {
+            // has the person's decision to apply. So is a revisit time a
+            // person or the inbox set (ADR-t1540-1).
+            let person_revisit = candidate
+                .revisit
+                .as_ref()
+                .is_some_and(DraftRevisit::by_person);
+            if let Some(revisit) = &candidate.revisit {
+                revisits.push(revisit.clone());
+            }
+            if opened >= MAX_DRAFT_PLANNERS && !(answer.is_some() && id == lead) && !person_revisit
+            {
                 event(
                     &tx,
                     id,
@@ -324,16 +460,24 @@ impl SqliteQueue {
             }
         }
         if members.is_empty() {
+            // A revisit time of a draft whose planners are used up is used
+            // too: no planner comes of it.
+            for revisit in &revisits {
+                use_revisit(&tx, revisit, None, now)?;
+            }
             tx.commit()?;
             return Ok(DraftPlannerStart::Exhausted { drafts: exhausted });
         }
-        let now = self.generators.clock.now();
         tx.execute(
             "INSERT INTO planners(origin, draft_task_id, created_at) VALUES (?1, ?2, ?3)",
             params![PlannerOrigin::Runtime.as_str(), members[0].0, now],
         )?;
         let planner = PlannerId::new(tx.last_insert_rowid());
-        let (origin, _) = draft_origin(&tx, members[0].0)?.context("the draft has no origin")?;
+        for revisit in &revisits {
+            let taken = members.iter().any(|(id, _)| *id == revisit.task_id);
+            use_revisit(&tx, revisit, taken.then_some(planner), now)?;
+        }
+        let (origin, _) = planned_origin(&tx, members[0].0)?.context("the draft has no origin")?;
         tx.execute(
             "INSERT INTO draft_bundles(planner_id, origin, key_kind, key_value, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -355,11 +499,21 @@ impl SqliteQueue {
                 "members": ids,
             });
             extend(&mut payload, origin_fields(&tx, id)?);
+            if let Some(revisit) = revisits.iter().find(|r| r.task_id == id) {
+                payload["revisit_at"] = json!(revisit.revisit_at_utc);
+                payload["revisit_set_by"] = json!(revisit.set_by);
+            }
             event(&tx, id, None, EventKind::DraftPlannerOpened, payload)?;
         }
+        // The targets as the planner takes them: with the revisit that
+        // brought each, which the prompt shows.
         let members = members
             .into_iter()
-            .map(|(id, attempt)| Ok((target(&tx, id)?, attempt)))
+            .map(|(id, attempt)| {
+                let mut target = target(&tx, id, now)?;
+                target.revisit = revisits.iter().find(|r| r.task_id == id).cloned();
+                Ok((target, attempt))
+            })
             .collect::<Result<Vec<_>>>()?;
         tx.commit()?;
         Ok(DraftPlannerStart::Opened {
@@ -656,9 +810,9 @@ impl DraftPlannerStore for SqliteQueue {
     }
 }
 
-fn is_target(conn: &Connection, draft: TaskId) -> Result<bool> {
+fn is_target(conn: &Connection, draft: TaskId, now: i64) -> Result<bool> {
     Ok(conn.query_row(
-        &format!("SELECT EXISTS({} AND t.id=?1)", targets()),
+        &format!("SELECT EXISTS({} AND t.id=?1)", targets(now)),
         [draft],
         |r| r.get(0),
     )?)
@@ -668,11 +822,11 @@ fn is_target(conn: &Connection, draft: TaskId) -> Result<bool> {
 /// open planner's bundle has its key (a draft of a piece of work whose
 /// other drafts a planner takes waits for it to end, and is then planned
 /// with what that planner left undecided).
-fn waiting(conn: &Connection, draft: TaskId) -> Result<Option<DraftTarget>> {
-    if !is_target(conn, draft)? {
+fn waiting(conn: &Connection, draft: TaskId, now: i64) -> Result<Option<DraftTarget>> {
+    if !is_target(conn, draft, now)? {
         return Ok(None);
     }
-    let target = target(conn, draft)?;
+    let target = target(conn, draft, now)?;
     Ok((!open_bundle_keys(conn)?.contains(&target.bundle_key())).then_some(target))
 }
 
@@ -713,7 +867,7 @@ pub(super) fn origin_fields(
     conn: &Connection,
     task: TaskId,
 ) -> Result<serde_json::Map<String, Value>> {
-    match draft_origin(conn, task)? {
+    match planned_origin(conn, task)? {
         Some((origin, material)) => material_fields(origin, &material, task),
         None => Ok(serde_json::Map::new()),
     }
@@ -766,9 +920,12 @@ pub(crate) fn settle_bundle(conn: &Connection, planner: PlannerId, now: i64) -> 
         )?;
         let (outcome, proposal, duplicate_of) = match task.status() {
             TaskStatus::Draft => {
+                // Kept by an answer, or with a revisit time to come
+                // (ADR-t1540-1).
                 let kept: bool = conn.query_row(
                     "SELECT EXISTS(SELECT 1 FROM asks WHERE task_id=?1 AND run_id IS NULL
-                     AND kind IN ('planner_question','follow_up') AND trim(answer)='keep_draft')",
+                     AND kind IN ('planner_question','follow_up') AND trim(answer)='keep_draft')
+                     OR EXISTS(SELECT 1 FROM draft_revisits WHERE task_id=?1 AND opened_at IS NULL)",
                     [task_id],
                     |r| r.get(0),
                 )?;
@@ -901,14 +1058,79 @@ pub(super) fn follow_up_drafts(conn: &Connection, task: TaskId) -> Result<Vec<Fo
         .collect::<rusqlite::Result<_>>()?)
 }
 
-fn target(conn: &Connection, draft: TaskId) -> Result<DraftTarget> {
-    let (origin, material) = draft_origin(conn, draft)?.context("the draft has no origin")?;
+fn target(conn: &Connection, draft: TaskId, now: i64) -> Result<DraftTarget> {
+    let (origin, material) = planned_origin(conn, draft)?.context("the draft has no origin")?;
     Ok(DraftTarget {
         task: read_task(conn, draft)?,
         origin,
         material,
         planners: planners_opened(conn, draft)?,
+        revisit: read_revisit(conn, draft)?.filter(|revisit| revisit.due(now)),
     })
+}
+
+/// Where a draft the runtime plans came from: its origin
+/// ([`draft_origin`]), or `revisit` for a draft without one that was given
+/// a revisit time (ADR-t1540-1), whose material is empty.
+fn planned_origin(conn: &Connection, task: TaskId) -> Result<Option<(DraftOrigin, Value)>> {
+    if let Some(origin) = draft_origin(conn, task)? {
+        return Ok(Some(origin));
+    }
+    Ok(read_revisit(conn, task)?.map(|_| (DraftOrigin::Revisit, json!({}))))
+}
+
+/// The revisit time of `task` (ADR-t1540-1), if it has one.
+pub(super) fn read_revisit(conn: &Connection, task: TaskId) -> Result<Option<DraftRevisit>> {
+    Ok(conn
+        .query_row(
+            "SELECT task_id, revisit_at, note, set_by, set_by_id, created_at, opened_at, planner_id
+             FROM draft_revisits WHERE task_id=?1",
+            [task],
+            |r| {
+                let revisit_at: i64 = r.get(1)?;
+                Ok(DraftRevisit {
+                    task_id: r.get(0)?,
+                    revisit_at,
+                    revisit_at_utc: crate::domain::marks::utc_text(revisit_at.saturating_mul(1000)),
+                    note: r.get(2)?,
+                    set_by: r.get(3)?,
+                    set_by_id: r.get(4)?,
+                    created_at: r.get(5)?,
+                    opened_at: r.get(6)?,
+                    planner_id: r.get(7)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// Use the revisit time that came for its draft, inside the caller's write
+/// transaction, as `planner` opens for it (`None`: its planners were used
+/// up), with `draft_revisit_due` (ADR-t1540-1).
+fn use_revisit(
+    conn: &Connection,
+    revisit: &DraftRevisit,
+    planner: Option<PlannerId>,
+    now: i64,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE draft_revisits SET opened_at=?2, planner_id=?3 WHERE task_id=?1",
+        params![revisit.task_id, now, planner],
+    )?;
+    event(
+        conn,
+        revisit.task_id,
+        None,
+        EventKind::DraftRevisitDue,
+        json!({
+            "revisit_at": revisit.revisit_at_utc,
+            "note": revisit.note,
+            "set_by": revisit.set_by,
+            "set_by_id": revisit.set_by_id,
+            "planner_id": planner,
+            "exhausted": planner.is_none(),
+        }),
+    )
 }
 
 /// Record that the draft `task` is a ready task plan review reopened and
@@ -977,7 +1199,8 @@ fn planners_opened(conn: &Connection, draft: TaskId) -> Result<usize> {
 /// that works on its task (opened for its bundle of drafts, or for its
 /// proposal);
 /// else closed by the supervisor for `keep_draft` (nothing to apply: the
-/// draft waits as it is for a planning request the inbox records) or a
+/// draft waits as it is for a planning request the inbox records, or for
+/// its revisit time, ADR-t1540-1) or a
 /// draft that moved on; else a new planner for a draft that still waits
 /// (unless its planners are used up); else a person's.
 pub(super) fn route_of(conn: &Connection, ask: &Ask) -> Result<PlannerAnswerRoute> {
@@ -1015,13 +1238,16 @@ pub(super) fn route_of(conn: &Connection, ask: &Ask) -> Result<PlannerAnswerRout
         )?)));
     }
     // A draft kept by the answer waits as it is for a planning request the
-    // inbox records (ADR-t1394-1 decision 8) and needs nothing more of the
-    // runtime's: nobody is left to tell.
+    // inbox records (ADR-t1394-1 decision 8), or for its revisit time
+    // (ADR-t1540-1), and needs nothing more of the runtime's: nobody is
+    // left to tell.
     if ask.answer.as_deref().map(str::trim) == Some("keep_draft") {
         return Ok(PlannerAnswerRoute::Close);
     }
     let task = read_task(conn, task_id)?;
-    if draft_origin(conn, task_id)?.is_none() {
+    // A draft without an origin is planned only by a revisit
+    // (ADR-t1540-1).
+    if planned_origin(conn, task_id)?.is_none() {
         return Ok(PlannerAnswerRoute::Person);
     }
     let exhausted: bool = conn.query_row(
@@ -1189,7 +1415,9 @@ pub(super) fn record_adoptions(conn: &Connection, adoptions: &[Adoption]) -> Res
         };
         let kind = match origin {
             DraftOrigin::FollowUp => EventKind::FollowUpAdopted,
-            DraftOrigin::GoalGap | DraftOrigin::Reopened => EventKind::DraftAdopted,
+            DraftOrigin::GoalGap | DraftOrigin::Reopened | DraftOrigin::Revisit => {
+                EventKind::DraftAdopted
+            }
         };
         let recorded: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM run_events WHERE task_id=?1 AND kind=?2)",
@@ -1572,6 +1800,247 @@ mod tests {
         assert!(matches!(
             queue.open_draft_planner(&[task], Some(asked.id)).unwrap(),
             DraftPlannerStart::Opened { members, .. } if members[0].1 == MAX_DRAFT_PLANNERS + 1
+        ));
+    }
+
+    fn set(queue: &mut SqliteQueue, task: TaskId, at: i64, role: &str) -> Result<DraftRevisit> {
+        let note = Some(format!("{role} set it"));
+        Ok(queue
+            .revisit_draft(
+                task,
+                RevisitChange::Set { at, note },
+                role,
+                &format!("{role}:1"),
+            )?
+            .unwrap())
+    }
+
+    fn kinds(queue: &mut SqliteQueue, task: TaskId, kind: &str) -> Vec<Value> {
+        queue
+            .show(task)
+            .unwrap()
+            .events
+            .into_iter()
+            .filter(|event| event.kind == kind)
+            .map(|event| event.payload)
+            .collect()
+    }
+
+    /// A time far past any test's clock: 2100-01-01T00:00:00Z.
+    const LATER: i64 = 4_102_444_800;
+
+    /// ADR-t1540-1: a draft kept by a `keep_draft` answer waits without a
+    /// revisit time, and with one still to come; once it came the draft is
+    /// a bundle of its own again, its planner uses the time, and after that
+    /// planner the draft waits again until a new time.
+    #[test]
+    fn a_kept_draft_waits_for_its_revisit_time_and_its_planner_uses_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let task = draft(&mut queue, "d");
+        let material = json!({"source_run_id": "r1", "source_task_id": 1, "index": 0});
+        queue
+            .record_draft_origin(task, DraftOrigin::FollowUp, &material)
+            .unwrap();
+        let kept = question(&mut queue, task, AskKind::PlannerQuestion);
+        queue.answer(kept.id, "keep_draft").unwrap();
+        queue.close_planner_answer(kept.id, "kept").unwrap();
+        // Kept without a time: it waits for a planning request.
+        assert!(queue.planner_drafts().unwrap().is_empty());
+        set(&mut queue, task, LATER, "planner").unwrap();
+        assert!(queue.planner_drafts().unwrap().is_empty(), "not yet");
+        let due = set(&mut queue, task, 1, "planner").unwrap();
+        assert_eq!(due.revisit_at_utc, "1970-01-01T00:00:01.000Z");
+        let set_events = kinds(&mut queue, task, event_kind::DRAFT_REVISIT_SET);
+        assert_eq!(set_events.len(), 2);
+        assert_eq!(set_events[1]["from"], set_events[0]["revisit_at"]);
+        assert_eq!(set_events[1]["set_by"], "planner");
+        let targets = queue.planner_drafts().unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].bundle_key().kind.as_str(), "task_id");
+        let DraftPlannerStart::Opened {
+            planner, members, ..
+        } = queue.open_draft_planner(&[task], None).unwrap()
+        else {
+            panic!("no planner opened");
+        };
+        assert_eq!(members[0].1, 1, "it counts as a planner of the draft");
+        assert!(members[0].0.revisit.is_some());
+        let used = queue.show(task).unwrap().revisit.unwrap();
+        assert_eq!(used.planner_id, Some(planner.id));
+        assert!(used.opened_at.is_some());
+        let opened = kinds(&mut queue, task, event_kind::DRAFT_PLANNER_OPENED);
+        assert_eq!(opened[0]["revisit_at"], "1970-01-01T00:00:01.000Z");
+        let came = kinds(&mut queue, task, event_kind::DRAFT_REVISIT_DUE);
+        assert_eq!(came.len(), 1);
+        assert_eq!(came[0]["planner_id"], planner.id.as_i64());
+        queue.close_planner(planner.id, None).unwrap();
+        assert!(
+            queue.planner_drafts().unwrap().is_empty(),
+            "the time was used once"
+        );
+        // A new time its planner set while it worked keeps it as such.
+        set(&mut queue, task, LATER, "planner").unwrap();
+        assert!(queue.planner_drafts().unwrap().is_empty());
+    }
+
+    /// ADR-t1540-1: a draft a person added gets a planner only at a revisit
+    /// time (origin `revisit`); a revisit time is set, cleared, and not
+    /// cleared twice, and only a draft takes one.
+    #[test]
+    fn a_persons_draft_is_planned_only_at_its_revisit_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let task = draft(&mut queue, "mine");
+        assert!(queue.planner_drafts().unwrap().is_empty());
+        set(&mut queue, task, LATER, "inbox").unwrap();
+        assert!(queue.planner_drafts().unwrap().is_empty());
+        assert_eq!(
+            queue
+                .revisit_draft(task, RevisitChange::Clear, "inbox", "inbox:1")
+                .unwrap(),
+            None
+        );
+        let cleared = kinds(&mut queue, task, event_kind::DRAFT_REVISIT_CLEARED);
+        assert_eq!(cleared.len(), 1);
+        assert!(
+            queue
+                .revisit_draft(task, RevisitChange::Clear, "inbox", "inbox:1")
+                .is_err()
+        );
+        set(&mut queue, task, 1, "user").unwrap();
+        let targets = queue.planner_drafts().unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].origin, DraftOrigin::Revisit);
+        let DraftPlannerStart::Opened { planner, .. } =
+            queue.open_draft_planner(&[task], None).unwrap()
+        else {
+            panic!("no planner opened");
+        };
+        let opened = kinds(&mut queue, task, event_kind::DRAFT_PLANNER_OPENED);
+        assert_eq!(opened[0]["origin"], "revisit");
+        assert_eq!(opened[0]["revisit_set_by"], "user");
+        assert_eq!(queue.task_origin(task).unwrap(), None, "still a person's");
+        queue.close_planner(planner.id, None).unwrap();
+        assert!(queue.planner_drafts().unwrap().is_empty());
+        queue
+            .transition(task, crate::domain::TaskAction::Cancel)
+            .unwrap();
+        assert!(set(&mut queue, task, 1, "inbox").is_err(), "not a draft");
+    }
+
+    /// ADR-t1540-1 (ADR-t807-1 decision 3 amended): a planner a revisit
+    /// opens counts toward the limit; a planner of the runtime's may not
+    /// give a revisit time to a draft whose planners are used up, and one a
+    /// person or the inbox gives opens one planner past the limit.
+    #[test]
+    fn the_limit_counts_a_revisit_and_a_persons_revisit_passes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let task = draft(&mut queue, "d");
+        queue
+            .record_draft_origin(task, DraftOrigin::GoalGap, &json!({}))
+            .unwrap();
+        for attempt in 1..=MAX_DRAFT_PLANNERS {
+            if attempt == 2 {
+                set(&mut queue, task, 1, "planner").unwrap();
+            }
+            let DraftPlannerStart::Opened {
+                planner, members, ..
+            } = queue.open_draft_planner(&[task], None).unwrap()
+            else {
+                panic!("no planner opened");
+            };
+            assert_eq!(members[0].1, attempt);
+            assert_eq!(members[0].0.revisit.is_some(), attempt == 2);
+            queue.close_planner(planner.id, None).unwrap();
+        }
+        assert!(matches!(
+            queue.open_draft_planner(&[task], None).unwrap(),
+            DraftPlannerStart::Exhausted { .. }
+        ));
+        assert!(queue.planner_drafts().unwrap().is_empty());
+        let refused = set(&mut queue, task, 1, "planner").unwrap_err();
+        assert!(refused.to_string().contains("used up"), "{refused:#}");
+        set(&mut queue, task, 1, "inbox").unwrap();
+        assert_eq!(queue.planner_drafts().unwrap().len(), 1);
+        let DraftPlannerStart::Opened {
+            planner, members, ..
+        } = queue.open_draft_planner(&[task], None).unwrap()
+        else {
+            panic!("a person's revisit opens one past the limit");
+        };
+        assert_eq!(members[0].1, MAX_DRAFT_PLANNERS + 1);
+        queue.close_planner(planner.id, None).unwrap();
+        assert!(queue.planner_drafts().unwrap().is_empty(), "once");
+    }
+
+    /// ADR-t1540-1 (with ADR-t1394-1 decision 8): a draft an `open` planning
+    /// request names waits for the request's planner, and a request whose
+    /// draft a planner of the runtime's works on waits for that one to end.
+    #[test]
+    fn a_request_and_a_revisit_never_plan_one_draft_at_once() {
+        use crate::application::PlanRequestStore;
+        use crate::domain::plan_request::{NewPlanRequest, RequestRef};
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let first = draft(&mut queue, "named first");
+        let second = draft(&mut queue, "named later");
+        set(&mut queue, first, 1, "inbox").unwrap();
+        set(&mut queue, second, 1, "inbox").unwrap();
+        let request = |task| NewPlanRequest {
+            text: "plan it".into(),
+            note: None,
+            refs: vec![RequestRef::Task(task)],
+        };
+        let named = queue
+            .record_plan_request(&request(first), "inbox", "inbox:1")
+            .unwrap();
+        let waiting: Vec<TaskId> = queue
+            .planner_drafts()
+            .unwrap()
+            .iter()
+            .map(|t| t.task.id())
+            .collect();
+        assert_eq!(waiting, [second], "the request's planner takes {first}");
+        let DraftPlannerStart::Opened { planner, .. } =
+            queue.open_draft_planner(&[second], None).unwrap()
+        else {
+            panic!("no planner opened");
+        };
+        let later_request = queue
+            .record_plan_request(&request(second), "inbox", "inbox:1")
+            .unwrap();
+        let requests: Vec<_> = queue
+            .planner_requests()
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(requests, [named.id], "waits for the revisit's planner");
+        queue.close_planner(planner.id, None).unwrap();
+        let requests: Vec<_> = queue
+            .planner_requests()
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(requests, [named.id, later_request.id]);
+        // An answer about the draft the open request names waits too.
+        queue
+            .record_draft_origin(first, DraftOrigin::GoalGap, &json!({}))
+            .unwrap();
+        let asked = question(&mut queue, first, AskKind::PlannerQuestion);
+        queue.answer(asked.id, "adopt").unwrap();
+        assert_eq!(
+            queue
+                .planner_answer_route(&queue.planner_answers().unwrap()[0])
+                .unwrap(),
+            PlannerAnswerRoute::NewPlanner
+        );
+        assert!(matches!(
+            queue.open_draft_planner(&[first], Some(asked.id)).unwrap(),
+            DraftPlannerStart::Skipped
         ));
     }
 }
