@@ -4,8 +4,8 @@ type: design
 title: Manual smoke of the paths that include real Claude and Codex
 status: current
 created: 2026-09-25
-updated: 2026-10-05 # task 841: the smoke of a required broker; task 1580: the e2e stub moved to tests/e2e/stub.rs (after task 1461); task 1437
-last_verified: 2026-10-05 # task 841; task 1580; task 1437
+updated: 2026-10-05 # task 1703: Codex run review argv checked against the current code; task 841: the smoke of a required broker; task 1580: the e2e stub moved to tests/e2e/stub.rs (after task 1461); task 1437
+last_verified: 2026-10-05 # task 1703: Codex run review argv checked against the current code; task 841; task 1580; task 1437
 scope: operations
 related:
   - adr-0036
@@ -454,7 +454,20 @@ file は Python の `pathlib.Path.read_text()` と `json.loads()` で JSONL を�
 
 1. [非対話の worker のスモーク](#非対話の-worker-のスモーク)の隔離に従い、`dagq-smoke` と bare の `origin`、開発中のバイナリのコピー、専用 queue を作る。`dagq.toml` に `[roles.review] provider = "codex"` を書いて commit する。
 2. Codex の headless task を 1 件、簡単なファイルの追加とその存在を確認する verify で登録し、使い捨て queue だけで `ready --bypass-review` にする。`supervise --no-claude --parallel 1 --once --codex <実体の path>` で流す。
-3. `events --run RUN --full` の `review_started.launch.provider` が `codex`、`review_finished.verdict` が `pass` で、`show ID` の task が `completed`、run が `integrated`、`origin/main` が進んだことを確かめる。run の dir の `review-<N>.out` は `codex exec --json` の JSONL で、起動引数は `--sandbox read-only` を含む。実 Codex が使えない権限環境では `review_failed` と `approve_landing` ask を確認し、権限を直して別 task で再試験する。
+3. `events --run RUN --full` の `review_started.launch.provider` が `codex`、`review_finished.verdict` が `pass` で、`show ID` の task が `completed`、run が `integrated`、`origin/main` が進んだことを確かめる。run の dir の `review-<N>.out` は `codex exec --json` の JSONL である。起動引数は `src/infrastructure/codex.rs` の `Codex::review_command`（`headless_command` に `distrust_config` の `-c projects={"<worktree>"={trust_level="untrusted"}}` を足す。[ADR-t1570-1](../adr/2026-10-04-t1570-1-codex-run-review-distrusts-the-worktree-project.md)）と照合する。この `supervise` の review は executor が queue service に接続させるため、`--sandbox read-only` は `job_service_config` の permission profile `dagq_job` の `-c` に置き換わる（[ADR-t1233-5](../adr/2026-10-02-t1233-5-read-use-cases-read-scope-by-role-and-codex-sandbox-reach.md) 決定 4）。起動中の process の argv を採取し、次の形を確かめる（`<socket>` は service の socket の実 path、model と effort は launch が指定したときだけ付く。prompt は stdin）。
+
+   ```text
+   codex exec --json --skip-git-repo-check -C <worktree>
+     -c projects={"<worktree>"={trust_level="untrusted"}}
+     [-m <model>] [-c model_reasoning_effort="<effort>"]
+     -c features.network_proxy=true
+     -c default_permissions="dagq_job"
+     -c permissions.dagq_job.extends=":read-only"
+     -c permissions.dagq_job.network.enabled=true
+     -c permissions.dagq_job.network.unix_sockets={"<socket>"="allow"}
+   ```
+
+   queue service 向けの置き換え前の `review_command` 単体は、上の profile の 5 つの `-c` の代わりに `--sandbox read-only` を持つが、worktree の `untrusted` の `-c` は同じである。実 Codex が使えない権限環境では `review_failed` と `approve_landing` ask を確認し、権限を直して別 task で再試験する。
 4. supervisor の終了と試験用 group の削除を確認する。group は人が `DAGQ_ROLE` の無い terminal で `cmux workspace-group delete <group> --close-workspaces` で anchor ごと消す。
 
 2026-10-01 の結果: 別 queue で実 Codex 0.159.2 の worker と review を実行し、task 2 の review が `pass`、run `ca586e69-4833-43c2-a269-f7d90fa2152f` が `908060719bbc3f599cbb061fe1e130827472595e` として main に着地・push した。最初の task 1 は実行側のホスト権限制約で Codex review の app-server 初期化が拒まれ、`review_failed` と ask になった。権限付きでの再試験は成功し、試験用の cmux group は削除した。
