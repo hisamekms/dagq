@@ -1,0 +1,5 @@
+run_id,task_id,field,compute,stats
+20a43f22-ab42-4d93-8af6-b6a758a089fa,1395,run,review 中,absent
+d4bed4c9-982e-4ba3-b763-95a7ea0554ca,1429,wait_to_land,未着地,949
+d4bed4c9-982e-4ba3-b763-95a7ea0554ca,1429,land_ask,未着地,0
+d4bed4c9-982e-4ba3-b763-95a7ea0554ca,1429,areas,,docs;plugin;runtime

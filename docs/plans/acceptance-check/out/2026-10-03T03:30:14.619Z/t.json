@@ -1,0 +1,144 @@
+{
+ "after": {
+  "claimed_before_t": 2,
+  "claimed_before_t_runs": [
+   "05efd4f3-2809-406d-aaa9-a2f239de5538",
+   "f7d0d744-913d-44fa-9cad-32ea792d10a2"
+  ],
+  "n": 76,
+  "name": "after",
+  "state": "short",
+  "taken": 7
+ },
+ "cutoff": "2026-10-03T03:30:14.619Z",
+ "evidence": {
+  "after_landing_of_1420": [
+   {
+    "created_at": "2026-10-03T00:35:36.974Z",
+    "handoff": null,
+    "holds": true,
+    "id": 69933,
+    "kind": "update_failed",
+    "stage": "e2e",
+    "version": "23c4fefd9d31a1db7ddccc8d23cec94dacaae697"
+   },
+   {
+    "created_at": "2026-10-03T01:28:15.711Z",
+    "handoff": true,
+    "holds": true,
+    "id": 70602,
+    "kind": "supervisor_started",
+    "stage": null,
+    "version": "0.4.0-dev+33cc04102ae9ad370e5cb30a93f2b0aa6bf81cb8"
+   },
+   {
+    "created_at": "2026-10-03T01:28:17.742Z",
+    "handoff": null,
+    "holds": true,
+    "id": 70612,
+    "kind": "update_installed",
+    "stage": null,
+    "version": "33cc04102ae9ad370e5cb30a93f2b0aa6bf81cb8"
+   },
+   {
+    "created_at": "2026-10-03T01:52:31.720Z",
+    "handoff": true,
+    "holds": true,
+    "id": 70869,
+    "kind": "supervisor_started",
+    "stage": null,
+    "version": "0.4.0-dev+036871ca82b4f4bb3b0872e0aa918466ce2b6578"
+   },
+   {
+    "created_at": "2026-10-03T01:52:33.757Z",
+    "handoff": null,
+    "holds": true,
+    "id": 70882,
+    "kind": "update_installed",
+    "stage": null,
+    "version": "036871ca82b4f4bb3b0872e0aa918466ce2b6578"
+   },
+   {
+    "created_at": "2026-10-03T03:10:29.678Z",
+    "handoff": true,
+    "holds": true,
+    "id": 71589,
+    "kind": "supervisor_started",
+    "stage": null,
+    "version": "0.4.0-dev+8b612b3a038b0f79a18c5bfb07f702f298c5a0df"
+   },
+   {
+    "created_at": "2026-10-03T03:10:31.777Z",
+    "handoff": null,
+    "holds": true,
+    "id": 71593,
+    "kind": "update_installed",
+    "stage": null,
+    "version": "8b612b3a038b0f79a18c5bfb07f702f298c5a0df"
+   }
+  ],
+  "last_supervisor_started": {
+   "created_at": "2026-10-03T03:10:29.678Z",
+   "dagq_version": "0.4.0-dev+8b612b3a038b0f79a18c5bfb07f702f298c5a0df",
+   "handoff": true,
+   "id": 71589,
+   "kind": "supervisor_started"
+  },
+  "update_asks": [
+   {
+    "ask_id": 352,
+    "ask_kind": "update_failed",
+    "created_at": "2026-10-03T00:35:36.974Z",
+    "id": 69932,
+    "kind": "ask_opened",
+    "option": null
+   },
+   {
+    "ask_id": 352,
+    "ask_kind": "update_failed",
+    "created_at": "2026-10-03T00:36:50.697Z",
+    "id": 69942,
+    "kind": "ask_answered",
+    "option": "skip"
+   },
+   {
+    "ask_id": 352,
+    "ask_kind": "update_failed",
+    "created_at": "2026-10-03T00:37:07.894Z",
+    "id": 69944,
+    "kind": "ask_closed",
+    "option": null
+   }
+  ]
+ },
+ "parts": [
+  {
+   "first_binary": {
+    "created_at": "2026-10-03T01:28:15.711Z",
+    "handoff": true,
+    "id": 70602,
+    "kind": "supervisor_started",
+    "version": "0.4.0-dev+33cc04102ae9ad370e5cb30a93f2b0aa6bf81cb8"
+   },
+   "landing": {
+    "commit": "23c4fefd9d31a1db7ddccc8d23cec94dacaae697",
+    "created_at": "2026-10-03T00:29:27.268Z",
+    "id": 69870,
+    "kind": "run_integrated"
+   },
+   "role": "binary holds the landing",
+   "task": 1420
+  },
+  {
+   "landing": {
+    "created_at": "2026-10-03T01:09:04.553Z",
+    "id": 70392,
+    "kind": "run_integrated"
+   },
+   "role": "landed",
+   "task": 1421
+  }
+ ],
+ "state": "determined",
+ "t": "2026-10-03T01:28:15.711Z"
+}
