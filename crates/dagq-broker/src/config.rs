@@ -1,7 +1,10 @@
 //! [`Config`]: what `dagq-broker serve` reads from its command line.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+
+use dagq_broker_protocol::package;
 
 /// The address the server listens on when `--listen` is not given.
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8750";
@@ -54,6 +57,9 @@ pub struct Limits {
     pub exec_allow: Vec<String>,
     /// The env names a request may pass to its process.
     pub exec_env: Vec<String>,
+    /// The commands `package.install` may run, by name (`--package`); empty
+    /// refuses every install.
+    pub packages: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for Limits {
@@ -65,6 +71,7 @@ impl Default for Limits {
             fs_limit_bytes: DEFAULT_FS_LIMIT_BYTES,
             exec_allow: Vec::new(),
             exec_env: Vec::new(),
+            packages: BTreeMap::new(),
         }
     }
 }
@@ -123,6 +130,12 @@ impl Config {
                 "--fs-limit-bytes" => limits.fs_limit_bytes = number(flag, &value)?,
                 "--exec-allow" => limits.exec_allow.push(value),
                 "--exec-env" => limits.exec_env.push(value),
+                "--package" => {
+                    let (name, argv) = package_command(&value)?;
+                    if limits.packages.insert(name.clone(), argv).is_some() {
+                        return Err(format!("`--package {name}` is given twice"));
+                    }
+                }
                 _ => return Err(format!("unknown flag `{flag}`")),
             }
         }
@@ -150,7 +163,7 @@ impl Config {
                 "`--exec-env {name}` changes what the child loads; `LD_*` and `DYLD_*` names are refused"
             ));
         }
-        let warnings = limits
+        let mut warnings: Vec<String> = limits
             .exec_allow
             .iter()
             .filter(|name| is_interpreter(name))
@@ -160,6 +173,7 @@ impl Config {
                 )
             })
             .collect();
+        warnings.extend(package_warnings(&limits.packages));
         if roots.is_empty() {
             return Err("`--root` is required (the mounted runs dir)".to_owned());
         }
@@ -177,6 +191,33 @@ impl Config {
             warnings,
         })
     }
+}
+
+/// The value of `--package`, `NAME=<argv as a JSON array of strings>`,
+/// checked as `dagq` checks `[broker.package]`.
+fn package_command(value: &str) -> Result<(String, Vec<String>), String> {
+    let (name, argv) = value
+        .split_once('=')
+        .ok_or_else(|| format!("`--package {value}` is not NAME=[\"PROGRAM\", ...]"))?;
+    let argv: Vec<String> = serde_json::from_str(argv)
+        .map_err(|_| format!("`--package {name}`: the argv is not a JSON array of strings"))?;
+    package::check_command(name, &argv)?;
+    Ok((name.to_owned(), argv))
+}
+
+/// One warning for each package command whose program is one of
+/// [`INTERPRETERS`]; a command without a program is not read past its end
+/// (`--package` refuses it, but [`Limits`] can be built without it).
+fn package_warnings(packages: &BTreeMap<String, Vec<String>>) -> Vec<String> {
+    packages
+        .iter()
+        .filter_map(|(name, argv)| {
+            let program = argv.first().filter(|program| is_interpreter(program))?;
+            Some(format!(
+                "warning: `--package {name}` runs {program}, which runs other programs"
+            ))
+        })
+        .collect()
 }
 
 /// Whether `name`'s basename is one of [`INTERPRETERS`].
@@ -279,6 +320,7 @@ mod tests {
                 fs_limit_bytes: 7,
                 exec_allow: vec!["ls".to_owned(), "cat".to_owned()],
                 exec_env: vec!["LANG".to_owned()],
+                packages: BTreeMap::new(),
             }
         );
         assert_eq!(config.roots.len(), 2);
@@ -331,6 +373,58 @@ mod tests {
         assert!(with(&[]).unwrap().warnings.is_empty());
         assert!(!is_interpreter("shell-check"));
         assert!(!is_interpreter("SH"));
+    }
+
+    #[test]
+    fn reads_the_package_commands_by_name() {
+        let config = with(&[
+            "--package",
+            r#"cargo-fetch=["cargo","fetch","--locked"]"#,
+            "--package",
+            r#"npm-install=["npm","install"]"#,
+        ])
+        .unwrap();
+        let argv = |words: &[&str]| words.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            config.limits.packages,
+            BTreeMap::from([
+                (
+                    "cargo-fetch".to_owned(),
+                    argv(&["cargo", "fetch", "--locked"])
+                ),
+                ("npm-install".to_owned(), argv(&["npm", "install"])),
+            ])
+        );
+        assert!(config.warnings.is_empty());
+        assert!(with(&[]).unwrap().limits.packages.is_empty());
+        let config = with(&["--package", r#"script=["sh","-c","true"]"#]).unwrap();
+        assert_eq!(
+            config.warnings,
+            ["warning: `--package script` runs sh, which runs other programs"]
+        );
+        let cases: [(&str, &str); 6] = [
+            ("cargo-fetch", "not NAME="),
+            ("x=cargo fetch", "not a JSON array"),
+            (r#"x=["cargo",1]"#, "not a JSON array"),
+            (r#"x=[]"#, "argv is empty"),
+            (r#"x=["git","fetch"]"#, "git operations"),
+            (r#"a b=["cargo"]"#, "the name"),
+        ];
+        for (value, expected) in cases {
+            let error = with(&["--package", value]).unwrap_err();
+            assert!(error.contains(expected), "{value}: {error}");
+        }
+        let packages = BTreeMap::from([
+            ("empty".to_owned(), Vec::new()),
+            ("script".to_owned(), argv(&["sh", "-c", "true"])),
+            ("fetch".to_owned(), argv(&["cargo", "fetch"])),
+        ]);
+        assert_eq!(
+            package_warnings(&packages),
+            ["warning: `--package script` runs sh, which runs other programs"]
+        );
+        let error = with(&["--package", r#"x=["a"]"#, "--package", r#"x=["b"]"#]).unwrap_err();
+        assert!(error.contains("given twice"), "{error}");
     }
 
     #[test]

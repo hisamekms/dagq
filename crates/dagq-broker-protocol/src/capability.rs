@@ -25,16 +25,19 @@ pub enum BrokerCapability {
     GitRead,
     #[serde(rename = "git.write")]
     GitWrite,
+    #[serde(rename = "package.install")]
+    PackageInstall,
 }
 
 impl BrokerCapability {
     /// Every capability, in order.
-    pub const ALL: [BrokerCapability; 5] = [
+    pub const ALL: [BrokerCapability; 6] = [
         Self::FsRead,
         Self::FsWrite,
         Self::ProcessExec,
         Self::GitRead,
         Self::GitWrite,
+        Self::PackageInstall,
     ];
 
     /// The name on the wire, `fs.read` and so on.
@@ -45,6 +48,7 @@ impl BrokerCapability {
             Self::ProcessExec => "process.exec",
             Self::GitRead => "git.read",
             Self::GitWrite => "git.write",
+            Self::PackageInstall => "package.install",
         }
     }
 }
@@ -114,7 +118,7 @@ mod tests {
         let set: BTreeSet<_> = BrokerCapability::ALL.into_iter().rev().collect();
         assert_eq!(
             serde_json::to_string(&set).unwrap(),
-            r#"["fs.read","fs.write","process.exec","git.read","git.write"]"#
+            r#"["fs.read","fs.write","process.exec","git.read","git.write","package.install"]"#
         );
     }
 }

@@ -26,7 +26,7 @@ pub enum ErrorCode {
     /// The output or the answer, or the content to write, was over the
     /// limit.
     OutputLimit,
-    /// fs, process or git failed.
+    /// fs, process, git or package failed.
     BackendError,
     /// An unknown path or field, a wrong type, another protocol version, a
     /// body over the limit, an edit that did not match.

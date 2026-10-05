@@ -4,8 +4,8 @@ type: design
 title: Queue service
 status: current
 created: 2026-10-02
-updated: 2026-10-05 # task 1352: a service a test started stops once the test's process is gone (DAGQ_SERVICE_OWNER_PID, owner_gone)
-last_verified: 2026-10-05 # task 1352
+updated: 2026-10-05 # task 840: broker package backend in the name note; task 1352: a service a test started stops once the test's process is gone (DAGQ_SERVICE_OWNER_PID, owner_gone)
+last_verified: 2026-10-05 # task 840; task 1352
 scope: runtime
 tags:
   - security
@@ -30,7 +30,7 @@ hostで動き、queue DBを開いてユースケース単位のAPIを、service�
 
 今の段（goal 82の段(2)・(3)、task 1234・1235・1242・1236）: serviceがあり、`hello`・`ask`・`show`・`note`（task 1234）と、`proposal_list`・`proposal_show`・`finding_record`・`finding_resolve`・`finding_dismiss`（task 1235。goal 80のCodexのobserverの書き込みの経路、[ADR-t1222-1](../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）と、読み取りのroleのjobとworkerが打つqueue全体の読み取り（task 1242。[読み取りのユースケース](#読み取りのユースケース)）のユースケースを答える。**worker（resumeを含む）・headlessのjob・observerのdagqはクライアントモードで動き、そのプロセスにはqueue DBのpathを渡さない**（task 1236。[クライアントモード](#クライアントモード)）。supervisor・session wrapperとhook・inbox・planner・人のCLIは、今までどおりDBを直接開く（段(5)まで。ADR-t1233-4決定6）。
 
-名前: この文書の「broker」はqueueのbroker（段(4)）のこと。fs・process・gitを仲介するresource broker（[Resource broker](broker.md)）とは別。
+名前: この文書の「broker」はqueueのbroker（段(4)）のこと。fs・process・git・packageを仲介するresource broker（[Resource broker](broker.md)）とは別。
 
 ## 置き場所と形
 

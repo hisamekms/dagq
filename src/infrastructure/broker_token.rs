@@ -108,8 +108,10 @@ fn read_key(path: &Path) -> Result<Option<SigningKey>> {
     Ok(Some(key))
 }
 
-/// What a token of `role` may do through the broker. Phase 1 grants all
-/// five to a worker and nothing to any other role (ADR-t827-4 decision 5).
+/// What a token of `role` may do through the broker: every capability to a
+/// worker (Phase 1's five and `package.install`, which runs only the
+/// commands of `[broker.package]`) and nothing to any other role
+/// (ADR-t827-4 decision 5).
 pub fn broker_grants(role: ActorRole) -> BTreeSet<BrokerCapability> {
     match role {
         ActorRole::Worker => BrokerCapability::ALL.into_iter().collect(),

@@ -320,6 +320,42 @@ fn the_configuration_names_the_variables_the_client_reads() {
     assert_eq!(broker_run::URL_ENV, dagq_broker_client::URL_ENV);
 }
 
+/// The workers' prompts list every tool the client serves, `package_install`
+/// (ADR-t840-1) included, so a worker is not left to find one by itself:
+/// each paragraph's list of tools, read between its markers, names exactly
+/// the client's tools, and `required`'s also names `write_receipt`.
+#[test]
+fn the_prompts_name_every_tool_the_client_serves() {
+    use dagq::application::prompt::{BROKER_REQUIRED, BROKER_TOOLS};
+    use dagq_broker_client::mcp::{RECEIPT_TOOL, TOOLS};
+    use std::collections::BTreeSet;
+    // The backquoted names between `from` and `to`, without the server's
+    // prefix.
+    let listed = |text: &str, from: &str, to: &str| -> BTreeSet<String> {
+        let start = text.find(from).expect(from) + from.len();
+        let end = start + text[start..].find(to).expect(to);
+        text[start..end]
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .map(|name| name.trim_start_matches("mcp__dagq-broker__").to_owned())
+            .collect()
+    };
+    let served: BTreeSet<String> = TOOLS.iter().map(|tool| tool.name.to_owned()).collect();
+    assert!(served.contains("package_install"));
+    assert_eq!(
+        listed(BROKER_TOOLS, "MCP server `dagq-broker` (", ")."),
+        served
+    );
+    assert_eq!(
+        listed(BROKER_REQUIRED, "MCP server `dagq-broker`: ", "; paths"),
+        served
+    );
+    assert!(BROKER_REQUIRED.contains(&format!("`mcp__dagq-broker__{}`", RECEIPT_TOOL.name)));
+    assert!(BROKER_TOOLS.contains("package commands the repository configured"));
+    assert!(BROKER_REQUIRED.contains("package commands the repository configured"));
+}
+
 fn claims_attention(db: &Path) -> Option<Value> {
     runtime::status(db).unwrap()["attention"]
         .as_array()
@@ -903,12 +939,7 @@ fn files_holding(dir: &Path, needle: &str, except: &[PathBuf]) -> Vec<PathBuf> {
 /// The queue's key and active marks served by the broker in process (no
 /// podman), over the runs' dir.
 fn serve_broker(queue: &Path, runs: &Path, audit: &Path) -> String {
-    use dagq_broker::{
-        backend::Backends,
-        backends::{fs::FsBackend, git::GitBackend, process::ProcessBackend},
-        config::Config,
-        server::Server,
-    };
+    use dagq_broker::{config::Config, server::Server};
     let text = |path: &Path| path.to_string_lossy().into_owned();
     let args = [
         "--listen".to_owned(),
@@ -923,11 +954,7 @@ fn serve_broker(queue: &Path, runs: &Path, audit: &Path) -> String {
         text(&runs.canonicalize().unwrap()),
     ];
     let config = Config::parse(&args).unwrap();
-    let backends = Backends {
-        fs: Arc::new(FsBackend::new(config.roots.clone())),
-        process: Arc::new(ProcessBackend::new(config.roots.clone())),
-        git: Arc::new(GitBackend::new(config.roots.clone())),
-    };
+    let backends = dagq_broker::backends(&config.roots);
     let server = Server::bind(&config, backends).unwrap();
     let addr = server.local_addr().unwrap();
     thread::spawn(move || server.serve());
@@ -1012,7 +1039,8 @@ fn a_preferred_worker_gets_its_token_and_the_end_of_its_run_revokes_it() {
             "fs.write",
             "process.exec",
             "git.read",
-            "git.write"
+            "git.write",
+            "package.install"
         ])
     );
     assert!(issued[0]["exp"].as_u64().unwrap() > 0);

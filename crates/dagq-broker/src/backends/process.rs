@@ -79,7 +79,7 @@ impl Backend for ProcessBackend {
             )));
         };
         let limits = call.limits;
-        let program = allowed_program(&request.argv, &limits.exec_allow)?;
+        allowed_program(&request.argv, &limits.exec_allow)?;
         let timeout = timeout(request.timeout_secs, limits)?;
         let stdin = request.stdin.unwrap_or_default().into_bytes();
         if stdin.len() as u64 > limits.output_limit_bytes {
@@ -92,54 +92,78 @@ impl Backend for ProcessBackend {
             ));
         }
         let env = request_env(&request.env, &limits.exec_env)?;
-        let resolved = lookup(program)?;
-        let workspace = open_workspace(&self.roots, Path::new(&call.claims.workspace))?;
-        let home = Home::new()?;
-
-        let started = Instant::now();
-        let child = spawn(&resolved, &request.argv, &env, &home, &workspace)?;
-        let ran = supervise(child, stdin, started + timeout, limits.output_limit_bytes)
-            .map_err(|error| backend(format!("run {program}: {error}")))?;
-        let duration_ms = started.elapsed().as_millis() as u64;
-        let (status, stdout, stderr) = match ran {
-            Ran::Exited {
-                status,
-                stdout,
-                stderr,
-            } => (status, stdout, stderr),
-            Ran::TimedOut => {
-                return Err(Failure::new(
-                    ErrorCode::Timeout,
-                    format!(
-                        "{program} ran past {} seconds and was stopped",
-                        timeout.as_secs()
-                    ),
-                ));
-            }
-            Ran::OverLimit => {
-                return Err(Failure::new(
-                    ErrorCode::OutputLimit,
-                    format!(
-                        "{program} wrote more than {} bytes and was stopped",
-                        limits.output_limit_bytes
-                    ),
-                ));
-            }
-        };
-        let exit_code = status.code();
-        let body = encode(&process::ExecResponse {
-            exit_code,
-            stdout: String::from_utf8_lossy(&stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&stderr).into_owned(),
-            duration_ms,
-        })
-        .map_err(|error| backend(error.to_string()))?;
-        Ok(Done { body, exit_code })
+        run_in_workspace(
+            &self.roots,
+            call,
+            &request.argv,
+            &env,
+            stdin,
+            timeout,
+            limits.output_limit_bytes,
+        )
     }
 }
 
+/// Run `argv` (its program already allowed) in the token's workspace with
+/// `env` (besides `HOME`), `stdin`, the `timeout` and the output `limit`:
+/// what `process.exec` and `package.install` share.
+pub(crate) fn run_in_workspace(
+    roots: &[PathBuf],
+    call: &Call<'_>,
+    argv: &[String],
+    env: &BTreeMap<String, String>,
+    stdin: Vec<u8>,
+    timeout: Duration,
+    limit: u64,
+) -> Result<Done, Failure> {
+    let program = argv[0].as_str();
+    let resolved = lookup(program)?;
+    let workspace = open_workspace(roots, Path::new(&call.claims.workspace))?;
+    let home = Home::new()?;
+
+    let started = Instant::now();
+    let child = spawn(&resolved, argv, env, &home, &workspace)?;
+    let ran = supervise(child, stdin, started + timeout, limit)
+        .map_err(|error| backend(format!("run {program}: {error}")))?;
+    let duration_ms = started.elapsed().as_millis() as u64;
+    let (status, stdout, stderr) = match ran {
+        Ran::Exited {
+            status,
+            stdout,
+            stderr,
+        } => (status, stdout, stderr),
+        Ran::TimedOut => {
+            return Err(Failure::new(
+                ErrorCode::Timeout,
+                format!(
+                    "{program} ran past {} seconds and was stopped",
+                    timeout.as_secs()
+                ),
+            ));
+        }
+        Ran::OverLimit => {
+            return Err(Failure::new(
+                ErrorCode::OutputLimit,
+                format!("{program} wrote more than {limit} bytes and was stopped"),
+            ));
+        }
+    };
+    let exit_code = status.code();
+    let body = encode(&process::ExecResponse {
+        exit_code,
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        duration_ms,
+    })
+    .map_err(|error| backend(error.to_string()))?;
+    Ok(Done { body, exit_code })
+}
+
 /// `argv[0]` when it may run: a name (no `/`) in `allow`, never `git`.
-fn allowed_program<'a>(argv: &'a [String], allow: &[String]) -> Result<&'a str, Failure> {
+pub(crate) fn allowed_program<'a>(
+    argv: &'a [String],
+    allow: &[String],
+) -> Result<&'a str, Failure> {
     let Some(program) = argv.first() else {
         return Err(invalid("argv is empty"));
     };
@@ -162,7 +186,10 @@ fn allowed_program<'a>(argv: &'a [String], allow: &[String]) -> Result<&'a str, 
 }
 
 /// The request's timeout (the default when absent) capped by the maximum.
-fn timeout(requested: Option<u64>, limits: &crate::config::Limits) -> Result<Duration, Failure> {
+pub(crate) fn timeout(
+    requested: Option<u64>,
+    limits: &crate::config::Limits,
+) -> Result<Duration, Failure> {
     let secs = match requested {
         Some(0) => return Err(invalid("timeout_secs must be at least 1")),
         Some(secs) => secs,
@@ -174,7 +201,7 @@ fn timeout(requested: Option<u64>, limits: &crate::config::Limits) -> Result<Dur
 /// The env besides `HOME`: [`PATH`], [`BASE_ENV`], and the request's names
 /// that `allow` lets through (never [`FIXED_ENV`]). Other names are dropped
 /// without a word, their values unread.
-fn request_env(
+pub(crate) fn request_env(
     requested: &BTreeMap<String, String>,
     allow: &[String],
 ) -> Result<BTreeMap<String, String>, Failure> {

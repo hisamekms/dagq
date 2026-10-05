@@ -4,13 +4,14 @@ type: design
 title: Resource broker
 status: draft
 created: 2026-09-28
-updated: 2026-10-05 # task 838; task 839; task 1451
-last_verified: 2026-10-05 # task 838; task 839; task 1451
+updated: 2026-10-05 # task 840: package.install and [broker.package]; task 838; task 839; task 1451
+last_verified: 2026-10-05 # task 840; task 838; task 839; task 1451
 scope: runtime
 tags:
   - security
   - broker
 related:
+  - adr-t840-1
   - adr-t838-1
   - adr-t1582-1
   - adr-t827-1
@@ -26,7 +27,7 @@ related:
 
 # Resource broker
 
-fs・process・gitを仲介するresource broker（`dagq-broker`）の設計。goal 58（Phase 1）が実装する。**この文書はまだ実装されていない姿（status: draft）を書き、goal 58の各taskが実装に合わせて直し、全体が着地したら`current`にする。** 決定の理由は[ADR-t827-1](../adr/2026-09-28-t827-1-broker-crates-binaries-and-version-alignment.md)（crateとバイナリと配布）、[ADR-t827-2](../adr/2026-09-28-t827-2-broker-transport-run-token-and-workspace-confinement.md)（transport・token・mountと閉じ込め・git）、[ADR-t827-3](../adr/2026-09-28-t827-3-supervisor-runs-the-broker-container-on-a-dedicated-podman-machine.md)（containerとPodman machine）、[ADR-t827-4](../adr/2026-09-28-t827-4-worker-mcp-tools-audit-mode-and-relations.md)（workerの道具・audit・mode・関係）、[ADR-t838-1](../adr/2026-10-05-t838-1-required-broker-mode-refuses-built-in-tools-and-holds-claims.md)（`required`。goal 59、Phase 2）。
+fs・process・git・package（packageはtask 840）を仲介するresource broker（`dagq-broker`）の設計。goal 58（Phase 1）が実装する。**この文書はまだ実装されていない姿（status: draft）を書き、goal 58の各taskが実装に合わせて直し、全体が着地したら`current`にする。** 決定の理由は[ADR-t827-1](../adr/2026-09-28-t827-1-broker-crates-binaries-and-version-alignment.md)（crateとバイナリと配布）、[ADR-t827-2](../adr/2026-09-28-t827-2-broker-transport-run-token-and-workspace-confinement.md)（transport・token・mountと閉じ込め・git）、[ADR-t827-3](../adr/2026-09-28-t827-3-supervisor-runs-the-broker-container-on-a-dedicated-podman-machine.md)（containerとPodman machine）、[ADR-t827-4](../adr/2026-09-28-t827-4-worker-mcp-tools-audit-mode-and-relations.md)（workerの道具・audit・mode・関係）、[ADR-t838-1](../adr/2026-10-05-t838-1-required-broker-mode-refuses-built-in-tools-and-holds-claims.md)（`required`。goal 59、Phase 2）、[ADR-t840-1](../adr/2026-10-05-t840-1-broker-package-backend-runs-only-configured-commands.md)（package backendと`package.install`。goal 59）。
 
 名前: この文書の「broker」はresource brokerのこと。goal 38（draft）の「broker」は実行側からqueue serviceへの出口で、別物（ADR-t827-4決定6）。
 
@@ -56,7 +57,7 @@ rootの`Cargo.toml`のpackageは`dagq`のまま（ADR-t827-1決定1）。workspa
 | crate | 種類 | 中身 | 依存（増える主なもの） | crates.io |
 | --- | --- | --- | --- | --- |
 | `dagq-broker-protocol`（`crates/dagq-broker-protocol`） | lib | 要求と応答のDTO、`BrokerCapability`、`ErrorCode`、`TokenClaims`、`sign` / `verify`（HMAC-SHA256）、pathの定数、protocolの版（`PROTOCOL_VERSION = 1`） | `serde`・`serde_json`・`sha2`（HMACとbase64urlは自前の小さな関数。`hmac` crateは足さない） | publishする（最初） |
-| `dagq-broker`（`crates/dagq-broker`） | lib + bin `dagq-broker`（`main`は薄い） | HTTPのserver（`std::net`の上の自前の小さな同期のserver。task 830）、fs・process・gitのbackend、tokenの検証、audit | protocol・`uuid`・`sha2`（HTTPのcrateは足さない） | publishする（最後。releaseのimageの材料） |
+| `dagq-broker`（`crates/dagq-broker`） | lib + bin `dagq-broker`（`main`は薄い） | HTTPのserver（`std::net`の上の自前の小さな同期のserver。task 830）、fs・process・git・packageのbackend、tokenの検証、audit | protocol・`uuid`・`sha2`（HTTPのcrateは足さない） | publishする（最後。releaseのimageの材料） |
 | `dagq-broker-client`（`crates/dagq-broker-client`） | lib + bin `dagq-broker-client` | HTTPのclient（`std::net`の上の自前の小さなclient、TLSなし。task 834）、subcommand `mcp`（stdioのMCP server。JSON-RPCは`serde_json`で自前）、診断のCLI | protocol・`serde`（HTTPのcrateは足さない。testだけがserverの`dagq-broker`にdev-dependencyで依存する） | publishする（dagqの後） |
 
 - `dagq`は`dagq-broker-protocol`だけに依存し（`version = "=<同じ版>"`と`path`）、HTTPの依存を持たない。brokerのhealthは`dagq-broker-client health --json`を子プロセスで呼んで見る（ADR-t827-1決定2）
@@ -82,6 +83,7 @@ rootの`Cargo.toml`のpackageは`dagq`のまま（ADR-t827-1決定1）。workspa
 - task 1141: `disabled`のsweepが印の無いtoken fileのrunも失効させ（`RunTokens::token_files`）、非対話のrunのturnの要求の前にも残ったものを消す（`Supervisor::broker_before_turn`、testは`tests/it/runtime_broker.rs`の`a_disabled_answer_turn_gets_no_unmarked_tools_and_token_file`・`a_disabled_answer_turn_gets_no_unmarked_tools`・`a_disabled_supervisor_removes_an_unmarked_token_file_of_no_run`）
 - task 1126: `ensure_machine`が、startの失敗か接続が答えない（`podman --connection dagq info`）dagqのmachineを1回だけstopとstartでやり直し、`MachineOutcome`の`restarted`・`restart_reason`に残す（unit testは`src/application/broker.rs`の`a_start_that_fails_with_eof_is_stopped_and_started_once_more`・`a_started_machine_that_does_not_answer_is_restarted_once`・`a_restart_that_does_not_help_is_machine_failed_after_one_try`）
 - task 839: 組み込みの道具の数（下の「組み込みの道具の数」）。`src/domain/broker_usage.rs`（`DIRECT_TOOLS`・`DIRECT_TOOLS_LOG`・`ToolUsage`）、workerのsettingsの`PreToolUse`のhook（`infrastructure::adapters::with_direct_tool_hooks`）、`RunTokens::usage`、sweepの`broker_tool_use`と`show`の`runs[0].broker_tool_use`
+- task 840: package backend（計画書の1.9）。protocolに`package.install`のcapabilityとop（`POST /v1/package/install`）、serverに`--package`と`PackageBackend`、clientに`package_install`・CLIの`package install`・MCPの道具`package_install`、dagqに`dagq.toml`の`[broker.package]`（下の「package.install」）
 
 ### protocolの型
 
@@ -89,7 +91,7 @@ rootの`Cargo.toml`のpackageは`dagq`のまま（ADR-t827-1決定1）。workspa
 
 | 型 | wire |
 | --- | --- |
-| `BrokerCapability` | `"fs.read"`・`"fs.write"`・`"process.exec"`・`"git.read"`・`"git.write"`（この順） |
+| `BrokerCapability` | `"fs.read"`・`"fs.write"`・`"process.exec"`・`"git.read"`・`"git.write"`・`"package.install"`（この順。`package.install`はtask 840） |
 | `TokenClaims` | 上の「token」の欄の順。`role`は`BrokerRole`（`"worker"`だけ）、`committer`は`Committer {name, email}`、`capabilities`は`BTreeSet<BrokerCapability>`、`task_id`・`iat`・`exp`は整数 |
 | `BrokerRequestId` | 文字列そのまま（serverが作るuuid） |
 | `ErrorCode` / `BrokerError` / `ErrorBody` | 下の「error」の7つのcodeとHTTP status、`{"error":{"code","message","request_id"}}` |
@@ -97,6 +99,7 @@ rootの`Cargo.toml`のpackageは`dagq`のまま（ADR-t827-1決定1）。workspa
 | `HealthResponse` | `{"status":"ok","build","protocol"}` |
 | `fs::{Read,List,Write,Edit}{Request,Response}` | 下の表の欄。`offset` / `limit`は無ければ省く。`create_dirs` / `replace_all`は既定`false`で常に出す。`List`の`entries`は`{name, kind, size}`で`kind`は`file` / `dir` / `symlink` / `other` |
 | `process::{ExecRequest,ExecResponse}` | `env`は`BTreeMap`で空なら省く。`stdin` / `timeout_secs`は無ければ省く。`exit_code`はsignalで終わったとき`null` |
+| `package::InstallRequest` / `package::InstallResponse` | 要求は`{name, timeout_secs?}`（task 840）で、`timeout_secs`は無ければ省く。argv・env・stdinの欄は無い（あれば未知の欄）。応答は`process::ExecResponse`の別名で、`process.exec`と同じ`{exit_code, stdout, stderr, duration_ms}` |
 | `git::*` | `status`の応答は`{branch, entries:[{path, status}]}`（`branch`はdetachedで`null`、`status`はporcelainの2文字）。`diff`の要求は`staged`（常に出す）と`paths`（空なら省く）。`log`の`commits`は`{commit, author, time, subject}`。`show`の要求は`commit`（無ければ省く）と`paths`（空なら省く）、応答は`{commit, show, truncated}`。`restore`の要求は`staged`（常に出す）と`paths`。`add`・`restore`の応答と`status`の要求は`{}` |
 
 ### workspaceと検証
@@ -168,10 +171,11 @@ resolver = "3"
 | `--exec-timeout-secs` / `--exec-max-timeout-secs` / `--output-limit-bytes` | 60 / 300 / 1048576 | 上限の既定値（backendに渡す） |
 | `--fs-limit-bytes` | 4194304 | fsの中身の上限（`fs.read`が返す中身、`fs.write`・`fs.edit`が書く中身、`fs.edit`が読むファイル、`fs.list`の応答）。超えれば`output_limit` |
 | `--exec-allow <name>` / `--exec-env <name>`（複数可） | 空 | execのallowlist（backendに渡す）。`--exec-allow`にinterpreterの一覧の名前（basenameで比べる）があれば、起動時にstderrへ名前つきのwarningを1行ずつ出して起動は続ける。`--exec-env`に`LD_`・`DYLD_`で始まる名前（大文字小文字を区別した前方一致）があれば名前つきのerrorで起動しない（exit 2）。どちらもenvの値やtokenを出さない（「process.exec」の注意） |
+| `--package <name>=<argvのJSON>`（複数可） | 空 | `package.install`が走らせるコマンド（下の「package.install」）。名前とargvの検査に通らないもの・同じ名前の2回目はexit 2で起動しない |
 
 - bindしたら`{"listening":"<addr>","build":"<build>"}`の1行をstdoutに出す（port 0で選ばれたportをtestと起動側が読む）
 - HTTPは`std::net`の上の自前の小さなserver（1接続1要求・1接続1 thread で同時に32接続まで（超えた接続は答えずに閉じる）、本体は`Content-Length`だけで`Transfer-Encoding`は拒む、本体は届いた分だけ伸ばして読む、応答は`Connection: close`、要求の全体を読む期限と書きのtimeoutは30秒、要求の頭は16 KiBまで）。以前の例の`tiny_http`はofflineのbuildで使えず、要るのはloopbackで自分のclientと話すことだけなので足さない
-- 判定の順（どれかで拒めば先を見ない）: (1) `GET /v1/health`だけはtokenなしで答える。(2) `Authorization: Bearer <token>`を`verify`（書式・署名・claims・期限）と`check_active`で確かめる（無い・Bearerでない・通らなければ`unauthorized`）。未知のpathもtokenより前には答えない（default deny）。(3) methodとpathを`Operation::route`で引き、無ければ`invalid_request`（`no such operation`。`POST /v1/health`も）。(4) `X-Dagq-Broker-Protocol`が`1`でない・無ければ`invalid_request`。(5) opの要るcapabilityをtokenが持たなければ`capability_denied`。(6) 本体をopの要求の型で読む（未知の欄は`invalid_request`。workerが本体に`run_id`などを書いても未知の欄で拒み、誰の要求かはtokenのclaimsだけで決める）。(7) tokenの`workspace`が`--root`の下か、要求のpath（fsの`path`、gitの`paths`）を`TokenClaims::confine`で字面で閉じ込める（外は`workspace_violation`。symlinkはbackendが解く）。(8) opのbackend（fs・process・git）に渡す
+- 判定の順（どれかで拒めば先を見ない）: (1) `GET /v1/health`だけはtokenなしで答える。(2) `Authorization: Bearer <token>`を`verify`（書式・署名・claims・期限）と`check_active`で確かめる（無い・Bearerでない・通らなければ`unauthorized`）。未知のpathもtokenより前には答えない（default deny）。(3) methodとpathを`Operation::route`で引き、無ければ`invalid_request`（`no such operation`。`POST /v1/health`も）。(4) `X-Dagq-Broker-Protocol`が`1`でない・無ければ`invalid_request`。(5) opの要るcapabilityをtokenが持たなければ`capability_denied`。(6) 本体をopの要求の型で読む（未知の欄は`invalid_request`。workerが本体に`run_id`などを書いても未知の欄で拒み、誰の要求かはtokenのclaimsだけで決める）。(7) tokenの`workspace`が`--root`の下か、要求のpath（fsの`path`、gitの`paths`）を`TokenClaims::confine`で字面で閉じ込める（外は`workspace_violation`。symlinkはbackendが解く）。(8) opのbackend（fs・process・git・package）に渡す
 - 読めない要求（HTTPでない・頭が長すぎる・本体の上限超え・chunked）と、途中で切れた・期限を過ぎた要求（`the request is incomplete`）は`invalid_request`で答え（届けば）、auditに残す。1 byteも送らずに切れた接続は要求ではないので、答えずauditにも残さない
 - auditの行は応答を送る前に書く。書けなければstderrに要求のIDと理由を出し、応答を`backend_error`（`the audit could not be written`）に替える（auditの無い答えを返さない）。backendに渡す前に、auditの日のファイルを追記で開けることを確かめ、開けなければopを走らせずに同じ`backend_error`で答える（書けないauditのままfsの書き込みなどを行わない。task 831）
 
@@ -190,6 +194,7 @@ resolver = "3"
 | `POST /v1/git/add` | `git.write` | `{paths}` | `{}` |
 | `POST /v1/git/commit` | `git.write` | `{message}` | `{commit}` |
 | `POST /v1/git/restore` | `git.write` | `{staged?, paths}` | `{}` |
+| `POST /v1/package/install` | `package.install` | `{name, timeout_secs?}` | `{exit_code, stdout, stderr, duration_ms}`（`process.exec`と同じ） |
 
 `fs.edit`は組み込みのEditと同じで、`old_string`が1つだけ見つかるとき（`replace_all`なら1つ以上）に置換し、見つからない・複数あるとき（messageに一致の数、中身は入れない）・`old_string`が空・`old_string`と`new_string`が同じときは`invalid_request`。`replacements`は置換した数。
 
@@ -209,11 +214,11 @@ fsのopの細部（task 831）:
 | code | HTTP status | 意味 |
 | --- | --- | --- |
 | `unauthorized` | 401 | tokenが無い・書式が違う・署名が合わない・期限切れ・有効な印が無い・未知のcapability・claimsの欠け |
-| `capability_denied` | 403 | tokenがopの要るcapabilityを持たない。execのallowlistの外のプログラム、`git`のexec |
+| `capability_denied` | 403 | tokenがopの要るcapabilityを持たない。execのallowlistの外のプログラム、`git`のexec、設定に無いpackageのコマンドの名前 |
 | `workspace_violation` | 403 | workspaceの外、`..`、symlinkの逃げ、worktreeの`.git`、run branchでないHEADでのcommit |
 | `timeout` | 504 | execのtimeout（プロセスは止めた） |
 | `output_limit` | 413 | execの出力かfs・gitの応答、`fs.write`・`fs.edit`が書く中身が上限を超えた（execはプロセスを止めた。fsは何も書かない） |
-| `backend_error` | 502 | fs・process・gitの失敗（存在しないファイル、gitのerror） |
+| `backend_error` | 502 | fs・process・git・packageの失敗（存在しないファイル、gitのerror、見つからないプログラム） |
 | `invalid_request` | 400 | 未知のpath・未知の欄・型の誤り・protocolの版の違い・本体の上限超え・Editの不一致 |
 
 ## token
@@ -231,12 +236,12 @@ fsのopの細部（task 831）:
 | `workspace` | runのworktreeの絶対パス（canonical） |
 | `branch` | `dagq/<run id>`（commitを許すbranch） |
 | `committer` | `{name, email}`。発行のときにrepositoryの`git config user.name` / `user.email`から入れる（containerにはhostの`~/.gitconfig`が無いため） |
-| `capabilities` | `["fs.read","fs.write","process.exec","git.read","git.write"]`の部分集合 |
+| `capabilities` | `["fs.read","fs.write","process.exec","git.read","git.write","package.install"]`の部分集合 |
 | `iat` / `exp` | 発行と期限（UNIX秒） |
 
 - 鍵: `<queue dir>/broker/key`（32 byteの乱数、mode 0600）。`broker::ensure`が無ければ作る。containerには読み取り専用でmountする。鍵を替えると全てのtokenが無効になる。Phase 1に定期の入れ替えは無く、入れ替えは人がbrokerを止めて鍵を消し、`broker start`で作り直す（生きているrunのtokenは次の更新のtickで新しい鍵で発行し直す）
 - 偽造: hostでは同じユーザーのプロセス（workerを含む）が鍵を読めるので、tokenを偽造できる。Phase 1の`process.exec`も鍵をmountから読めうる（下の「既知の制限」）。tokenは誤りと事故を止め、auditでrunを名指すためのもので、境界ではない
-- 発行: supervisorがclaimでworkerを起こすとき（`provision`）とresumeのとき、modeが`preferred`か`required`でbrokerが健康で版が一致するときだけ。capabilityはdagqの`broker_grants(role)`（Phase 1はworkerだけに上の5つ）から写す。書き先は`<queue dir>/broker/tokens/<run id>`（mode 0600、同じdirの一時ファイルとrenameで置く）。containerにmountしない場所に置き、`process.exec`から他のrunのtokenを読めないようにする
+- 発行: supervisorがclaimでworkerを起こすとき（`provision`）とresumeのとき、modeが`preferred`か`required`でbrokerが健康で版が一致するときだけ。capabilityはdagqの`broker_grants(role)`（workerだけに上の全て。Phase 1の5つと、task 840の`package.install`）から写す。書き先は`<queue dir>/broker/tokens/<run id>`（mode 0600、同じdirの一時ファイルとrenameで置く）。containerにmountしない場所に置き、`process.exec`から他のrunのtokenを読めないようにする
 - 有効な印: `<queue dir>/broker/active/<jti>`（中身はrun_id）。発行で作り、失効で消す。brokerは要求ごとに印の有無を見る
 - 期限: `exp = iat + 12時間`。supervisorは各pass（`Supervisor::broker_sweep`）で、残りが4時間（`RENEW_BEFORE_SECS`）を切った生きているrunのtokenを、brokerが使えるときに発行し直す（新しいjtiの印を作ってtoken fileと`mcp.json`を置き換え、古い印を消す。`broker_token_issued`に`renews`（古いjti）、`broker_token_revoked`に`reason: renewed`）。clientは要求ごとにtoken fileを読み直す
 - 失効: supervisorは各passのclaimの前（drainと引き継ぎの間も）と止まる直前（`supervise --once`の最後のpassで終わったrunのため）に有効な印を全て見て（`broker_sweep`）、runが終わっていれば（statusが`integrated`・`succeeded`・`failed`・`interrupted`。taskの`cancel`・leaseの喪失・`recover`もrunをこのどれかにする）そのrunの印を全て消し、`<queue dir>/broker/tokens/<run id>`と`<run dir>/broker/`を消して、印ごとに`broker_token_revoked`（`reason`はrunのstatus）を残す。queueが知らないrunの印はtoken fileとともに消し、eventは残さない。`preferred`と`disabled`のどちらも、runの読み取りが失敗したときは不在と区別し、warnを出してそのpassでは飛ばす（task 1142）。そのrunの印・token file・`<run dir>/broker/mcp.json`は消さず、`broker_token_revoked`も残さず、次のpassで読み直す。resumeの発行し直しも前の印を消す。supervisorが止まっている間に終わったrunの印は、次の起動の最初のpassか期限まで残る（その間そのtokenは使える）。modeが`disabled`のsupervisor（`preferred`から戻したqueue）はpodmanを探しも呼びもせず、fileだけを掃除する（task 1125）: 同じ時点に有効な印を全て見て、生きているrunのものも含めてそのrunの印・token file・`<run dir>/broker/`を消し、印ごとに`broker_token_revoked`（`reason: mode_disabled`）を残す（`Supervisor::broker_sweep_disabled`）。起動とresumeの前の`broker_grant`も、`disabled`ではそのrunに残ったものを同じく消す（`mode_disabled`）ので、executorが`mcp.json`を見つけて`--mcp-config`と`--allowedTools mcp__dagq-broker`を渡すことも、promptに`BROKER_TOOLS`の段落が載ることもない。印の無いものも残りうる（途中で失敗した失効、queueの知らないrunの`revoke`など）ので（task 1141）、`disabled`のsweepは有効な印に加えて`<queue dir>/broker/tokens/`のtoken file（印の有無に依らない。`RunTokens::token_files`）の名のrunも同じく失効させ（queueが知らないrunならtoken fileと印を消す）、非対話のrunのturnの要求（`worker_question`の答え・reviewの差し戻し・resumeなど、supervisorが`turns/`に書く全てのturn。`request_turn`）の前にも`broker_grant`と同じくそのrunに残ったものを消す（`Supervisor::broker_before_turn`）。印が無ければ`broker_token_revoked`は残さない。どちらもpodmanを探しも呼びもしない。`preferred`ではturnの前に何もしない（runは発行された道具を持ち続ける）。印の無い`disabled`のqueueでは何も書かず、workerの起動のenv・settings・引数は変わらない
@@ -250,7 +255,7 @@ fsのopの細部（task 831）:
 - 要求ごとの判定: `TokenClaims::require(capability)`（無ければ`CapabilityDenied`）と`TokenClaims::confine(path)`（相対はworkspaceから、絶対はworkspaceの下だけ。`..`はどこでも拒み、別のrunのworktreeも外になる。字面の判定だけで、symlinkはserverが解く）
 - `SigningKey`（32 byte）と`BrokerSessionToken`の`Debug`は`<redacted>`で、`Display`を持たない。tokenの値は`BrokerSessionToken::expose`（token fileと`Authorization`のためだけ）からしか出ない。`TokenError`の文言は理由だけで、token・署名・鍵を含まない
 - dagqの`ensure_key(queue dir)`は`<queue dir>/broker/key`を読み、無ければ`getrandom`の32 byteを同じdirの一時ファイル（mode 0600、`create_new`）に書き、`hard_link`で置く（読み手が半端な鍵を見ず、同時に作った2つのsupervisorは先に置かれた鍵にそろう）。modeが0600でなければ0600に絞り、長さが違えばpathだけを名指すerrorにする（人が消して作り直す）
-- dagqの`issue_run_token(key, actor, workspace, committer, now)`はworkerのactor（runとtaskを持つ）だけに発行し、workspaceは絶対パスをcanonicalにし、`jti`はuuid v4、`branch`は`dagq/<run id>`、capabilityは`broker_grants(role)`（workerは5つ、他のroleは空）、`exp = iat + TOKEN_TTL_SECS`（12時間）。返す`IssuedToken`はclaimsとtokenを持ち、eventにはclaimsの`jti`・`capabilities`・`exp`だけを書く
+- dagqの`issue_run_token(key, actor, workspace, committer, now)`はworkerのactor（runとtaskを持つ）だけに発行し、workspaceは絶対パスをcanonicalにし、`jti`はuuid v4、`branch`は`dagq/<run id>`、capabilityは`broker_grants(role)`（workerは全て、他のroleは空）、`exp = iat + TOKEN_TTL_SECS`（12時間）。返す`IssuedToken`はclaimsとtokenを持ち、eventにはclaimsの`jti`・`capabilities`・`exp`だけを書く
 
 ## mountと閉じ込め
 
@@ -322,13 +327,25 @@ Podman machineは既定でhostの`$HOME`をVMにmountするので、containerか
 - 応答は`{exit_code, stdout, stderr, duration_ms}`で、`exit_code`はsignalで終わったとき`null`。auditには`program`・`argc`・`argv_sha256`・`exit_code`・`duration_ms`・`bytes_in`・`bytes_out`を残し、引数・env・stdin・出力は残さない。errorのmessageにも出力・stdin・envの値を入れない
 - 走るのはcontainerの中で、containerのmemory・cpu・pidsの上限に入る。imageにはtoolchainが無く、軽いコマンド（`sh`・`ls`・`cat`・`grep`など、allowlistにあるもの）だけ。使い捨てのrepositoryの代表のtaskもそれで済むものにする（ADR-t827-3決定9）
 - `sh`をallowlistに入れると、shellからimageの中の`git`も走らせられる（containerに資格情報もremoteへの経路の設定も無いので上流へのpushは通らないが、同じrepositoryの他のrefは書き換えうる）。使い捨てのrepositoryの検証のためだけに使い、既定には入れない
-- allowlistが見るのは`argv[0]`だけなので、他のプログラムを走らせるもの（interpreter）を入れると、そこから`git`もworkspaceの外のcwdも走らせられる（誤りを止める仕組みで境界ではない）。serveのconfigの読み込み（`crates/dagq-broker/src/config.rs`の`INTERPRETERS`。`dagq.toml`の`[broker] exec_allow`・`exec_env`はdagqがserveのflagにして渡す予定（dagqはまだ読まない）なので、そうなれば両方に効く。task 917）は、`--exec-allow`の名前のbasenameが次の一覧にあれば拒まずに`dagq-broker serve: warning: `--exec-allow <name>` runs other programs; ...`を起動時にstderr（containerのlog）へ1行ずつ出す。使い捨てのrepositoryの検証が`sh`を使うので（ADR-t827-3決定9）拒まない
+- allowlistが見るのは`argv[0]`だけなので、他のプログラムを走らせるもの（interpreter）を入れると、そこから`git`もworkspaceの外のcwdも走らせられる（誤りを止める仕組みで境界ではない）。serveのconfigの読み込み（`crates/dagq-broker/src/config.rs`の`INTERPRETERS`。`dagq.toml`の`[broker] exec_allow`・`exec_env`はdagqがserveのflagにして渡す（`BrokerConfig::serve_args`、下の「mode と設定」）ので、両方に効く。task 917）は、`--exec-allow`の名前のbasenameが次の一覧にあれば拒まずに`dagq-broker serve: warning: `--exec-allow <name>` runs other programs; ...`を起動時にstderr（containerのlog）へ1行ずつ出す。使い捨てのrepositoryの検証が`sh`を使うので（ADR-t827-3決定9）拒まない
   - shell: `sh`・`bash`・`zsh`・`dash`・`ksh`・`mksh`・`ash`・`busybox`・`fish`・`csh`・`tcsh`
   - 引数のコマンドを走らせるもの: `env`・`xargs`・`find`・`nice`・`nohup`・`timeout`・`time`・`stdbuf`・`setsid`・`flock`・`chroot`・`sudo`・`doas`・`su`・`script`・`watch`・`parallel`・`make`
   - 言語のinterpreter: `python`・`python2`・`python3`・`perl`・`ruby`・`node`・`deno`・`bun`・`php`・`lua`・`tclsh`・`awk`・`gawk`・`mawk`・`nawk`
 - `exec_env`（`--exec-env`）に`LD_PRELOAD`・`LD_LIBRARY_PATH`・`LD_AUDIT`などの`LD_*`と、`DYLD_INSERT_LIBRARIES`などの`DYLD_*`（子の読み込みを変えるenv）の名前があれば、正当な用途が無いのでserveは``--exec-env <name>` changes what the child loads; ...`のerrorで起動しない（config.rsの`LOADER_ENV_PREFIXES`。大文字小文字を区別した前方一致で、`ld_preload`や`OLD_PATH`は当たらない）
 - 監視の1巡りで読むのはpipeごとに1回（64 KiB）までで、書く速さが読む速さを上回っても毎巡りで上限と期限を見る。期限の時点で子がもう終わっていれば`timeout`にせず、終わったものとして残りを読む
 - `process.shell`（shellの文字列を受けるop）は作らない。要るならADRが別のcapabilityとして決める
+
+## package.install
+
+計画書の1.9（task 840、[ADR-t840-1](../adr/2026-10-05-t840-1-broker-package-backend-runs-only-configured-commands.md)）。依存の取得のような、repositoryが決めた少数のコマンドだけをbroker経由で走らせる（`crates/dagq-broker/src/backends/package.rs`）。
+
+- 設定: `dagq.toml`の`[broker.package]`に、名前ごとにargvを書く（下の「mode と設定」）。dagqはそれを`serve`の`--package NAME=<argvのJSONの配列>`にして渡す（`BrokerConfig::serve_args`。書いた順。変えればcontainerの引数のhashが変わり、作り直される）。名前は英数字と`-`・`_`・`.`の64 byteまで。argvは1つ以上で、`argv[0]`は`/`を含まないプログラムの名前、`git`は拒む（gitはgitのbackendだけが走らせる）、空のプログラムとNULも拒む。dagqの`parse_config`と`serve`の`Config::parse`が同じ検査（protocolの`package::check_command`）をし、dagqは行番号付きのerror、`serve`は起動しない。同じ名前の2回目も拒む。既定は空で、installは全て`capability_denied`
+- 設定のargvが空なら（`Limits`を`--package`を通さずに作ったとき）、`argv[0]`を読む前に`backend_error`（`` `<name>` is configured without a program``）で拒み、起動時のwarningも空のargvを飛ばす（`config::package_warnings`）
+- 要求は`{name, timeout_secs?}`だけで、argv・env・stdin・cwdの欄は無い（あれば未知の欄で`invalid_request`）。名前が設定に無ければ走らせずに`capability_denied`（messageは設定できる形の名前だけを返し、他は「the name」）。`exec_allow`とは別で、`package.install`のコマンドの`argv[0]`を`exec_allow`に入れる必要は無く、`exec_allow`の名前を`package.install`で走らせることもできない
+- 実行は`process.exec`と同じ（`backends::process::run_in_workspace`）: shellを通さず、固定の`PATH`でプログラムを探し（無ければ`backend_error`）、cwdはworkspace、envは空から始めて`PATH`・execごとの`HOME`・`LANG=C.UTF-8`・`TERM=dumb`だけ（要求からもbrokerのプロセスからも何も継がない）、stdinは空。timeoutは要求の`timeout_secs`（無ければ`exec_timeout_secs`）と`exec_max_timeout_secs`の小さい方で、超えればprocess groupを止めて`timeout`。出力は`output_limit_bytes`を超えればprocess groupを止めて`output_limit`。応答は`process.exec`と同じ形
+- audit: `backend: package`・`op: package.install`・`capability: package.install`に、設定のargvの`program`（`argv[0]`のbasename）・`argc`・`argv_sha256`を残す。設定に無い名前は`program`などを`null`にする。名前・引数・出力は残さない
+- 限るのは`argv`だけで、コマンドが読むworkspaceの中身（workerが書ける）は限らない。`npm install`は`package.json`のlifecycle scriptを、cargoはworkspaceの`.cargo/config.toml`や`build.rs`（`fetch`では走らない）を読むので、そこからworkerの書いたもの（`git`も）が走りうる（誤りを止める仕組みで境界ではない）。scriptを走らせない形（`npm ci --ignore-scripts`など）を設定する。`argv[0]`が`exec_allow`と同じinterpreterの一覧（`INTERPRETERS`）にあれば、`serve`は起動時に``--package <name>` runs <program>, which runs other programs`のwarningをstderrに1行ずつ出して起動は続ける
+- 走るのはcontainerの中で、imageにはtoolchain（`cargo`・`npm`・`bun`など）が無い。使うにはimageかmountの用意が別に要る（このtaskは設定したコマンドに限ることだけ）。networkの制限を強めるのはPhase 4
 
 ## containerとPodman machine
 
@@ -484,17 +501,18 @@ task 836で測った（2026-09-28、podman 6.1.2、applehv）: 起点の値（CP
   | `git_add` | `git.add` | `paths`※ |
   | `git_commit` | `git.commit` | `message`※（string） |
   | `git_restore` | `git.restore` | `staged`（boolean）・`paths`※ |
+  | `package_install` | `package.install` | `name`※（string、`[broker.package]`の名前）・`timeout_secs`（integer） |
 
   設計の初めの案の`write_file`（`path`・`content`）に、protocolの`WriteRequest`にある`create_dirs`を足した（新しいdirのファイルを作るため）
 
-  envに`DAGQ_RECEIPT_FILE`（`RECEIPT_FILE_ENV`）があるとき（`required`）だけ、12本の後に`write_receipt`（入力: `receipt`※（object）。他の欄は`invalid_arguments`）を出す（`mcp::RECEIPT_TOOL`）。brokerを通さず、clientのプロセスがhostで、名指されたfileに同じdirの一時ファイル（`.<名前>.<pid>.tmp`）とrenameでreceiptを書く（brokerが答えなくても書ける）。成功は`{"written":<path>,"bytes":N}`、書けなければ`client_error`の`kind: receipt`。envが無ければ`tools/list`に出さず、呼べば`-32602`（未知の道具）
+  envに`DAGQ_RECEIPT_FILE`（`RECEIPT_FILE_ENV`）があるとき（`required`）だけ、上の表の13本（task 840の`package_install`を含む）の後に`write_receipt`（入力: `receipt`※（object）。他の欄は`invalid_arguments`）を出す（`mcp::RECEIPT_TOOL`）。brokerを通さず、clientのプロセスがhostで、名指されたfileに同じdirの一時ファイル（`.<名前>.<pid>.tmp`）とrenameでreceiptを書く（brokerが答えなくても書ける）。成功は`{"written":<path>,"bytes":N}`、書けなければ`client_error`の`kind: receipt`。envが無ければ`tools/list`に出さず、呼べば`-32602`（未知の道具）
 - 結果: 成功は`{"content":[{"type":"text","text":<opの応答のJSON>}],"isError":false}`。`exec`は子のexit codeに関わらず成功で、`exit_code`は応答の欄。brokerの拒否・失敗は`isError: true`で、textと`structuredContent`にbrokerのerror本体`{"error":{"code","message","request_id"}}`をそのまま入れる（codeは`unauthorized`・`capability_denied`・`workspace_violation`・`timeout`・`output_limit`・`backend_error`・`invalid_request`）。client側の失敗も`isError: true`で、`{"client_error":{"kind","message"}}`（`kind`は`invalid_arguments`（入力がschemaに合わずbrokerに送らない）・`config`・`transport`・`protocol`）。tokenの値はどこにも出さない
 - 切り詰め: 応答の最上位の文字列の欄（`read_file`の`content`、`git_diff`の`diff`、`git_show`の`show`、`exec`の`stdout`・`stderr`）は40000 byte（`TEXT_LIMIT_BYTES`、UTF-8の文字の境で切る）、最上位の配列（`list_dir`と`git_status`の`entries`、`git_log`の`commits`）は1000件（`ITEM_LIMIT`）で切り、切った欄を`mcp_cut`（`{"<欄>":{"kept":N,"total":M}}`、byteか件数）で示す。brokerの上限（`fs_limit_bytes`・`output_limit_bytes`）はそれより前にserverが強制し、`read_file`・`git_diff`・`git_show`の`truncated`はbroker側で切ったことを示す
 - server単位の`mcp__dagq-broker`を許す: settingsの`permissions.allow`ではなく、Claude Codeの引数`--allowedTools mcp__dagq-broker`で渡す（settingsの`permissions`は`mcp.json`の有無で変わらず、`disabled`のrunのsettingsは今までと同じ。`mcp.json`のあるrunのsettingsには組み込みの道具を数える`PreToolUse`のhookだけが足される。下の「組み込みの道具の数」）。`preferred`では組み込みの道具を拒まない（`required`のsettingsは下の「required」）
-- workerのpromptに、brokerの道具があるとき（runのproviderがClaude Codeで`mcp.json`がある）だけ、`required`の印があれば下の「required」の段落（`prompt::BROKER_REQUIRED`）を、無ければ「ファイルの読み書き・置換、許されたコマンド、run branchのgitはbrokerの道具を優先し、拒まれたか届かなければ組み込みの道具を使う」段落（`prompt::BROKER_TOOLS`）を末尾に足す。claimでは道具を渡せたときにpromptを書き直す。tokenの値もtoken fileの場所も書かない
+- workerのpromptに、brokerの道具があるとき（runのproviderがClaude Codeで`mcp.json`がある）だけ、`required`の印があれば下の「required」の段落（`prompt::BROKER_REQUIRED`）を、無ければ「ファイルの読み書き・置換、許されたコマンド、repositoryが設定したpackageのコマンド（`package_install`、task 840）、run branchのgitはbrokerの道具を優先し、拒まれたか届かなければ組み込みの道具を使う」段落（`prompt::BROKER_TOOLS`）を末尾に足す。claimでは道具を渡せたときにpromptを書き直す。tokenの値もtoken fileの場所も書かない
 - 人の診断のCLI（task 834）: `dagq-broker-client [--url URL] [--token-file FILE] <command>`。`--url`と`--token-file`が無ければ`DAGQ_BROKER_URL`と`DAGQ_BROKER_TOKEN_FILE`を読む。tokenの値は引数にもenvにも取らず、出力にも出さない。token fileは要求ごとに読み直す
   - URLは`http://<loopbackのaddress>:<port>`だけ（`localhost`は`127.0.0.1`、末尾の`/`は許す）。https・path・user・loopbackでないaddress・port 0は設定の誤りとして送らない（tokenをhostの外へ送らない）
-  - command: `health [--json]`（tokenを要らない。既定は`ok build <build> protocol 1`の1行）、`token inspect`（token fileのclaimsのJSONだけ。署名は確かめず、tokenと署名は出さない）、`fs read PATH [--offset N] [--limit N]`、`fs list PATH`、`fs write PATH [--content TEXT] [--create-dirs]`（`--content`が無ければstdin）、`fs edit PATH --old TEXT --new TEXT [--replace-all]`、`exec [--env NAME=VALUE]... [--stdin TEXT] [--timeout-secs N] -- PROGRAM [ARG]...`、`git status`、`git diff [--staged] [PATH]...`、`git log [--limit N]`、`git show [--commit REV] [PATH]...`、`git add PATH...`、`git commit --message TEXT`、`git restore [--staged] PATH...`（addとrestoreはpathが1つ以上）。token fileの中身が空白か制御文字を含めば送らない。push・fetch・remoteのcommandは無い
+  - command: `health [--json]`（tokenを要らない。既定は`ok build <build> protocol 1`の1行）、`token inspect`（token fileのclaimsのJSONだけ。署名は確かめず、tokenと署名は出さない）、`fs read PATH [--offset N] [--limit N]`、`fs list PATH`、`fs write PATH [--content TEXT] [--create-dirs]`（`--content`が無ければstdin）、`fs edit PATH --old TEXT --new TEXT [--replace-all]`、`exec [--env NAME=VALUE]... [--stdin TEXT] [--timeout-secs N] -- PROGRAM [ARG]...`、`git status`、`git diff [--staged] [PATH]...`、`git log [--limit N]`、`git show [--commit REV] [PATH]...`、`git add PATH...`、`git commit --message TEXT`、`git restore [--staged] PATH...`（addとrestoreはpathが1つ以上）、`package install NAME [--timeout-secs N]`（task 840）。token fileの中身が空白か制御文字を含めば送らない。push・fetch・remoteのcommandは無い
   - 出力と終了: 成功はopの応答のJSONをstdoutに1行で出してexit 0（`exec`は子のexit codeに関わらず0で、`exit_code`は応答の欄）。要求の本体が8 MiB（`MAX_REQUEST_BYTES`）を超えれば送らずにclient側の失敗にする。brokerの拒否・失敗はbrokerの`{"error":{"code","message","request_id"}}`をstderrに1行で出してexit 1。command lineの誤りはexit 2。client側の失敗（設定・接続・応答のprotocolの版の違いや形の違い）はstderrに理由を出してexit 3
   - 応答の`X-Dagq-Broker-Protocol`が`1`でないか無いときは、本体を解釈せずにprotocolの誤りにする（fail closed）
 
@@ -513,19 +531,19 @@ ADR-t838-1（goal 59、Phase 2）。`[broker] mode = "required"`のqueueでは�
   - hook: 非対話のturnは`Stop`のhookを持たない（idleの印はwrapperが書く）。`required`のrunはbrokerの道具を渡したrunなので、`headless_required_settings`にも組み込みの道具を数える`PreToolUse`のhook（下の「組み込みの道具の数」、task 839）が足され、`--settings`のfileにあるので`--setting-sources ""`でも読まれ、拒まれた試みも数える
   - Codexの`turn_command`は`broker_required`のturnを`BrokerRequiredRefused`で拒む（Codexに道具を渡す形は後のtask）
 - **receipt**: `mcp.json`のenvの`DAGQ_RECEIPT_FILE`で、clientの`write_receipt`（上の「workerの道具（MCP）」）がhostで書く。workerのpromptの「tmpとrename」の書き方の代わり
-- **prompt**（`prompt::BROKER_REQUIRED`）: 組み込みの道具が拒まれること、Bashは`dagq`だけ、brokerの道具の名前、receiptは`write_receipt`で書くこと、`exec`で流せないcheckは理由をreceiptに書くこと、brokerの道具が`unauthorized`・`transport`・`config`・`protocol`で失敗したら（brokerが答えない、tokenが無い）別の道を探さず、`write_receipt`で失敗のreceiptにするか`dagq ask`にすること
+- **prompt**（`prompt::BROKER_REQUIRED`）: 組み込みの道具が拒まれること、Bashは`dagq`だけ、brokerの道具の名前（設定したpackageのコマンドだけを名前で走らせる`package_install`を含む）、receiptは`write_receipt`で書くこと、`exec`で流せないcheckは理由をreceiptに書くこと、brokerの道具が`unauthorized`・`transport`・`config`・`protocol`で失敗したら（brokerが答えない、tokenが無い）別の道を探さず、`write_receipt`で失敗のreceiptにするか`dagq ask`にすること
 - **判断の関数**（`domain::broker`、unit test）: `hold_reason`（brokerの理由、次にtokenの`token_failed`）、`claims_record`（holdを記録するのは始まりと理由の変わったとき、resumeはholdが立っているときだけ）、`worker_refused`（`required`でgrantと印のどちらかが無ければ拒む）、`turn_refused`
 - **claimとresumeの前**（`Supervisor::broker_holds_claims`、`fill_slots`の中で、resumeとclaimの前に毎pass）: workerに今道具を渡せるか（`broker_usable`: brokerが用意できて最後のhealthが答え、dagqのbuildで、clientがある。用意の前は`running_port`。と`RunTokens::ready(repository)`: 鍵を読めるか作れ、`<queue dir>/broker/active`と`tokens`のdirを作れ、repository（main checkout）の`git config user.name`と`user.email`がある。どのrunのtokenにも要るものはここで`token_failed`になり、claimしてから拒むことはしない）を見る。できなければそのpassはresumeもclaimもしない（landing・review・triageは続く）
 - **attention**: 止めたときqueueのevent `broker_claims_held`（`reason`: `not_ready`・`unhealthy`・`version_mismatch`・`client_missing`・`token_failed`・`grant_failed`など、`message`、`supervisor`）をinbox宛てのattention（`kind: broker_claims_held`、`status`は`reason`、`next: dagq broker status`）にする。最新の`broker_claims_held` / `broker_claims_resumed`が`broker_claims_held`の間出る。`reason`が変われば書き直し、同じなら書かない。渡せるようになれば`broker_claims_resumed`で閉じる。`required`でないsupervisorは最初のpassで、前の`required`が残した`broker_claims_held`を`broker_claims_resumed`で閉じる。brokerそのものの不調は今までどおり`broker_unhealthy`も出る
 - **claimの後に渡せなかったrun**（passの見た後にbrokerが落ちた、Codexのrun、そのrunのworktreeだけがcommitterを名指さないなど、runごとの失敗）: `broker_grant_or_refuse`が`broker_unavailable`（今までと同じ`reason`）を残し、`broker_claims_held`（`reason: grant_failed`）を出して`BrokerRequiredRefused`を返す。claimの`provision`ではrunを`abandon`（`runtime_error`）してclaimのloopを抜け、`preferred`の`provision`の失敗と違ってclaimを止めない（次のpassの判定に任せる）。resumeでは`resume_finished`の`error`（`could not be resumed: broker_required: ...`）、reopenでは`session_reopen_failed`（`cause: open_failed`、`error`）になり、どちらもworkspaceを開かない。印を置けなかったrunも同じ。runごとの失敗（そのrunのtokenだけが発行できない）は次のpassの判定を止めないので、同じrunのresumeを次のpassでまた試す
 - **走っているrunでbrokerが落ちたとき**: 道具は構造化のerror（brokerの`error.code`かclientの`client_error`）を返し、workerはpromptに従って失敗のreceiptかaskにする。supervisorはrunを止めない
-- test: `src/application/actor_executor.rs`の`a_required_run_starts_only_with_the_brokers_tools`（印と`mcp.json`の組み合わせごとの起動と拒否、拒否で何も起動しないこと）、`src/infrastructure/adapters.rs`の`a_required_turn_has_only_the_brokers_tools_and_dagq`（新しいturnとresumeのsettingsと引数、`dagq ask`が拒まれないこと、印の無いturnが前と同じこと）、`src/infrastructure/codex.rs`の`a_turn_starts_or_resumes_the_thread_with_the_same_sandbox`（Codexの拒否）、`crates/dagq-broker-client/src/mcp.rs`の`write_receipt_is_served_only_with_the_receipt_file`、`src/infrastructure/broker_token.rs`の`ready_makes_what_an_issue_needs_and_refuses_a_bad_key_or_no_committer`、`crates/dagq-broker-client/src/cli.rs`の`mcp_serves_write_receipt_with_the_receipt_file_of_its_env`、`src/domain/broker.rs`の`a_claim_hold_is_recorded_when_it_starts_or_its_reason_changes`・`the_hold_reason_is_the_brokers_then_the_tokens`・`required_refuses_a_worker_without_its_tools_or_its_mark`、`tests/it/runtime_broker.rs`の`a_required_repository_without_a_committer_claims_nothing`（repositoryのcommitterが無ければ`token_failed`でclaimしない）・`a_required_run_refused_after_its_claim_fails_and_claims_go_on`（runのbranchだけがcommitterを名指さない（`includeIf "onbranch:dagq/**"`）ときのclaimの後のgrantの失敗: workspaceを開かず`runtime_error`、`grant_failed`、claimを止めない）・`a_required_resume_refused_its_tools_is_given_up`（resumeの拒否）・`a_required_reopen_refused_its_tools_opens_no_session`（reopenの拒否、`session_reopen_failed`）・`a_required_turn_whose_mark_cannot_be_written_is_not_requested`（`unmarked`）・`the_configuration_names_the_variables_the_client_reads`（envの名前がclientと同じ）・`a_required_broker_that_cannot_start_holds_the_claims_and_tells_the_inbox`（`machine_busy`でclaimせずworkspaceも開かずattention、`preferred`に戻すとclaimして閉じる）と`a_required_broker_without_a_token_holds_the_claims_until_one_can_be_issued`（`token_failed`で止め、直ればclaimして印・receiptの名指し・promptを見る）、`preferred`の`a_preferred_worker_gets_its_token_and_the_end_of_its_run_revokes_it`（印もreceiptの名指しも無い）
+- test: `src/application/actor_executor.rs`の`a_required_run_starts_only_with_the_brokers_tools`（印と`mcp.json`の組み合わせごとの起動と拒否、拒否で何も起動しないこと）、`src/infrastructure/adapters.rs`の`a_required_turn_has_only_the_brokers_tools_and_dagq`（新しいturnとresumeのsettingsと引数、`dagq ask`が拒まれないこと、印の無いturnが前と同じこと）、`src/infrastructure/codex.rs`の`a_turn_starts_or_resumes_the_thread_with_the_same_sandbox`（Codexの拒否）、`crates/dagq-broker-client/src/mcp.rs`の`write_receipt_is_served_only_with_the_receipt_file`、`src/infrastructure/broker_token.rs`の`ready_makes_what_an_issue_needs_and_refuses_a_bad_key_or_no_committer`、`crates/dagq-broker-client/src/cli.rs`の`mcp_serves_write_receipt_with_the_receipt_file_of_its_env`、`src/domain/broker.rs`の`a_claim_hold_is_recorded_when_it_starts_or_its_reason_changes`・`the_hold_reason_is_the_brokers_then_the_tokens`・`required_refuses_a_worker_without_its_tools_or_its_mark`、`tests/it/runtime_broker.rs`の`a_required_repository_without_a_committer_claims_nothing`（repositoryのcommitterが無ければ`token_failed`でclaimしない）・`a_required_run_refused_after_its_claim_fails_and_claims_go_on`（runのbranchだけがcommitterを名指さない（`includeIf "onbranch:dagq/**"`）ときのclaimの後のgrantの失敗: workspaceを開かず`runtime_error`、`grant_failed`、claimを止めない）・`a_required_resume_refused_its_tools_is_given_up`（resumeの拒否）・`a_required_reopen_refused_its_tools_opens_no_session`（reopenの拒否、`session_reopen_failed`）・`a_required_turn_whose_mark_cannot_be_written_is_not_requested`（`unmarked`）・`the_configuration_names_the_variables_the_client_reads`（envの名前がclientと同じ）・`the_prompts_name_every_tool_the_client_serves`（`BROKER_TOOLS`と`BROKER_REQUIRED`がclientの`TOOLS`の全ての道具を名指す。task 840）・`a_required_broker_that_cannot_start_holds_the_claims_and_tells_the_inbox`（`machine_busy`でclaimせずworkspaceも開かずattention、`preferred`に戻すとclaimして閉じる）と`a_required_broker_without_a_token_holds_the_claims_until_one_can_be_issued`（`token_failed`で止め、直ればclaimして印・receiptの名指し・promptを見る）、`preferred`の`a_preferred_worker_gets_its_token_and_the_end_of_its_run_revokes_it`（印もreceiptの名指しも無い）
 
 ## audit
 
 - 置き場所: `<queue dir>/broker/audit/<YYYY-MM-DD>.jsonl`（UTCの日付）。brokerが1要求1行で追記する。30日より古いファイルはbrokerの起動時に消す
 - auditは記録で、改ざんへの耐性は持たない（上の「既知の制限」と、hostのworkerが同じファイルを書けること）
-- 欄（この順。当てはまらない欄は`null`）: `ts`（RFC 3339のUTC、ミリ秒）・`request_id`・`jti`・`run_id`・`task_id`・`actor_id`・`backend`（`fs`・`process`・`git`。healthと未知のpathは`null`）・`op`（`fs.read`など。healthは`health`、未知のpathは`null`）・`capability`・`path`（workspaceからの相対で、workspaceそのものは`.`。要求のpathが1つのときだけ。字句の閉じ込めで拒んだpathは残さない。字句では中にありbackendがsymlinkなどで拒んだものは、その相対パスを残す）・`program`（execの`argv[0]`のbasename）・`argc`・`argv_sha256`（`argv[1..]`の各引数の後にNULを置いたbyte列のSHA-256、小文字の16進）・`result`（`ok`かerror code）・`exit_code`・`duration_ms`・`bytes_in`（要求の本体）・`bytes_out`（応答の本体）
+- 欄（この順。当てはまらない欄は`null`）: `ts`（RFC 3339のUTC、ミリ秒）・`request_id`・`jti`・`run_id`・`task_id`・`actor_id`・`backend`（`fs`・`process`・`git`・`package`。healthと未知のpathは`null`）・`op`（`fs.read`など。healthは`health`、未知のpathは`null`）・`capability`・`path`（workspaceからの相対で、workspaceそのものは`.`。要求のpathが1つのときだけ。字句の閉じ込めで拒んだpathは残さない。字句では中にありbackendがsymlinkなどで拒んだものは、その相対パスを残す）・`program`（execの`argv[0]`のbasename。`package.install`は設定のargvの`argv[0]`のbasename）・`argc`・`argv_sha256`（`argv[1..]`の各引数の後にNULを置いたbyte列のSHA-256、小文字の16進）・`result`（`ok`かerror code）・`exit_code`・`duration_ms`・`bytes_in`（要求の本体）・`bytes_out`（応答の本体）
 - healthの要求も1行残す（`op: health`）
 - `verify`が通らないtoken（書式・署名・claims・期限）の要求は`jti`・`run_id`などをnullにし、`result: unauthorized`だけを残す（claimsを信用しない）。署名の通ったtokenで有効な印だけが無いものは、claimsの`jti`・`run_id`・`task_id`・`actor_id`を残す
 - `argv_sha256`は照合用で、推測しやすい引数はhashから総当たりで戻せる
@@ -560,6 +578,10 @@ exec_timeout_secs = 60
 exec_max_timeout_secs = 300
 output_limit_bytes = 1048576
 fs_limit_bytes = 4194304       # serveの --fs-limit-bytes
+
+[broker.package]               # package.install が走らせるコマンド（既定は無し。task 840）
+cargo-fetch = ["cargo", "fetch", "--locked"]
+npm-ci = ["npm", "ci", "--ignore-scripts"]
 ```
 
 `host.toml`（`<queue dir>/host.toml`か`$XDG_CONFIG_HOME/dagq/host.toml`。hostの事情）:
@@ -578,7 +600,7 @@ port = 0                      # 0 は空いている port
 ```
 
 - `[broker]`が無ければ`disabled`。`required`は上の「required」（task 838より前の版は`required`をerrorにして起動しなかった）
-- `dagq.toml`の`[broker]`は他の表と同じく未知のkey・重複・型の違う値・`exec_timeout_secs`が`exec_max_timeout_secs`より大きいことを行番号付きのerrorにする（`parse_config`、`load_broker_config`）。`exec_*`・`output_limit_bytes`・`fs_limit_bytes`は`serve`の既定と違うものだけがcontainerの`serve`の引数になる（`BrokerConfig::serve_args`。変えればcontainerの引数のhashが変わり、作り直される）
+- `dagq.toml`の`[broker]`は他の表と同じく未知のkey・重複・型の違う値・`exec_timeout_secs`が`exec_max_timeout_secs`より大きいことを行番号付きのerrorにする（`parse_config`、`load_broker_config`）。`exec_*`・`output_limit_bytes`・`fs_limit_bytes`は`serve`の既定と違うものだけが、`[broker.package]`の各コマンドは書いた順に`--package`として、containerの`serve`の引数になる（`BrokerConfig::serve_args`。変えればcontainerの引数のhashが変わり、作り直される）
 - `host.toml`の`[broker]`は`[update]`と同じく、queueの`<queue dir>/host.toml`にあればそれが丸ごと勝ち、無ければhost全体の`$XDG_CONFIG_HOME/dagq/host.toml`（`load_host_broker`）。`mode`に`"disabled"`以外（`"preferred"`・`"required"`）を書いても上げず、読めない値と同じく警告にして既定のままにする（`dagq.toml`のmodeが効く）。警告はsupervisorのlogと`up`の出力の`broker.warnings`に出る。`port`が0か無ければ、前に使ったport、無ければ空いているport
 - `dagq.toml`の`[broker]`は[Run environment](supervisor-lifecycle/run-environment.md)の読み手（`parse_config`）が表として受け付ける（task 923）。`[broker]`を知らない固定バイナリは未知の表で止まるので、この repositoryの`dagq.toml`には置かない（本番queueはdisabled）。検証は使い捨てのrepositoryで行う
 
@@ -590,12 +612,12 @@ port = 0                      # 0 は空いている port
 
 ## capabilityの関係
 
-- brokerのcapability（`fs.read`・`fs.write`・`process.exec`・`git.read`・`git.write`）はprotocolの`BrokerCapability`で、queueの操作の`Capability`（[Authorization](authorization.md#capability)）とは別の名前空間
+- brokerのcapability（`fs.read`・`fs.write`・`process.exec`・`git.read`・`git.write`・`package.install`）はprotocolの`BrokerCapability`で、queueの操作の`Capability`（[Authorization](authorization.md#capability)）とは別の名前空間
 - `reserved.filesystem_read`・`reserved.filesystem_write`・`reserved.network`・`reserved.secret_read`は誰にも与えないまま（ADR-t827-4決定5）
 - tokenを発行できるのは信頼する制御側のsupervisorだけ。AI actorにtokenを作るコマンドは無い
 
 ## 段階
 
 - Phase 1（goal 58）: この文書。workerはhostのまま、`preferred`で契約を証明する
-- Phase 2（goal 59）: `required`（上の「required」、task 838）。互換の診断・package backend・`required`の代表taskのe2eは同じgoalの他のtask
+- Phase 2（goal 59）: `required`（上の「required」、task 838）、互換の診断（上の「組み込みの道具の数」、task 839）、package backend（上の「package.install」、task 840）。`required`の代表taskのe2eは同じgoalの他のtask
 - Phase 3以降: workerのcontainer化（`PodmanActorExecutor`）、runごとのmountでの閉じ込め、containerのworkerのqueueの操作（goal 38か後のgoal）

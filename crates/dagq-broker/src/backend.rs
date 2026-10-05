@@ -1,12 +1,12 @@
 //! [`Backend`]: what does an operation once the server has authenticated
 //! the token, checked its capability and read the request. The server holds
-//! one backend each for fs, process and git ([`Backends`]); until they are
+//! one backend each for fs, process, git and package ([`Backends`]); until they are
 //! written, [`Unimplemented`] answers every operation with `backend_error`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use dagq_broker_protocol::{ErrorCode, Operation, TokenClaims, decode, fs, git, process};
+use dagq_broker_protocol::{ErrorCode, Operation, TokenClaims, decode, fs, git, package, process};
 
 use crate::config::Limits;
 
@@ -16,6 +16,7 @@ pub enum BackendKind {
     Fs,
     Process,
     Git,
+    Package,
 }
 
 impl BackendKind {
@@ -34,6 +35,7 @@ impl BackendKind {
             | Operation::GitAdd
             | Operation::GitCommit
             | Operation::GitRestore => Some(Self::Git),
+            Operation::PackageInstall => Some(Self::Package),
         }
     }
 
@@ -42,6 +44,7 @@ impl BackendKind {
             Self::Fs => "fs",
             Self::Process => "process",
             Self::Git => "git",
+            Self::Package => "package",
         }
     }
 }
@@ -61,6 +64,7 @@ pub enum BackendRequest {
     GitAdd(git::AddRequest),
     GitCommit(git::CommitRequest),
     GitRestore(git::RestoreRequest),
+    PackageInstall(package::InstallRequest),
 }
 
 impl BackendRequest {
@@ -81,6 +85,7 @@ impl BackendRequest {
             Operation::GitAdd => Self::GitAdd(decode(body).ok()?),
             Operation::GitCommit => Self::GitCommit(decode(body).ok()?),
             Operation::GitRestore => Self::GitRestore(decode(body).ok()?),
+            Operation::PackageInstall => Self::PackageInstall(decode(body).ok()?),
         };
         Some(request)
     }
@@ -97,16 +102,21 @@ impl BackendRequest {
             Self::GitAdd(request) => request.paths.iter().map(String::as_str).collect(),
             Self::GitShow(request) => request.paths.iter().map(String::as_str).collect(),
             Self::GitRestore(request) => request.paths.iter().map(String::as_str).collect(),
-            Self::ProcessExec(_) | Self::GitStatus(_) | Self::GitLog(_) | Self::GitCommit(_) => {
-                Vec::new()
-            }
+            Self::ProcessExec(_)
+            | Self::GitStatus(_)
+            | Self::GitLog(_)
+            | Self::GitCommit(_)
+            | Self::PackageInstall(_) => Vec::new(),
         }
     }
 
-    /// The program's argv, for `process.exec`.
-    pub fn argv(&self) -> Option<&[String]> {
+    /// The program's argv: the request's for `process.exec`, the configured
+    /// command's for `package.install` (`None` when `limits` has no command
+    /// of its name).
+    pub fn argv<'a>(&'a self, limits: &'a Limits) -> Option<&'a [String]> {
         match self {
             Self::ProcessExec(request) => Some(&request.argv),
+            Self::PackageInstall(request) => limits.packages.get(&request.name).map(Vec::as_slice),
             _ => None,
         }
     }
@@ -176,6 +186,7 @@ pub struct Backends {
     pub fs: Arc<dyn Backend>,
     pub process: Arc<dyn Backend>,
     pub git: Arc<dyn Backend>,
+    pub package: Arc<dyn Backend>,
 }
 
 impl Backends {
@@ -185,6 +196,7 @@ impl Backends {
             fs: Arc::new(Unimplemented),
             process: Arc::new(Unimplemented),
             git: Arc::new(Unimplemented),
+            package: Arc::new(Unimplemented),
         }
     }
 
@@ -193,6 +205,7 @@ impl Backends {
             BackendKind::Fs => self.fs.as_ref(),
             BackendKind::Process => self.process.as_ref(),
             BackendKind::Git => self.git.as_ref(),
+            BackendKind::Package => self.package.as_ref(),
         }
     }
 }
@@ -229,6 +242,7 @@ mod tests {
                 Some("git"),
                 Some("git"),
                 Some("git"),
+                Some("package"),
             ]
         );
         for operation in Operation::ALL.into_iter().skip(1) {
@@ -239,7 +253,12 @@ mod tests {
 
     #[test]
     fn decodes_each_request_and_names_its_paths() {
-        let cases: [(Operation, &str, Vec<&str>); 12] = [
+        let mut limits = Limits::default();
+        limits.packages.insert(
+            "fetch".to_owned(),
+            vec!["cargo".to_owned(), "fetch".to_owned()],
+        );
+        let cases: [(Operation, &str, Vec<&str>); 14] = [
             (Operation::FsRead, r#"{"path":"a"}"#, vec!["a"]),
             (Operation::FsList, r#"{"path":"d"}"#, vec!["d"]),
             (
@@ -260,16 +279,21 @@ mod tests {
             (Operation::GitRestore, r#"{"paths":["t"]}"#, vec!["t"]),
             (Operation::GitAdd, r#"{"paths":["r"]}"#, vec!["r"]),
             (Operation::GitCommit, r#"{"message":"m"}"#, vec![]),
+            (Operation::PackageInstall, r#"{"name":"fetch"}"#, vec![]),
+            (Operation::PackageInstall, r#"{"name":"other"}"#, vec![]),
         ];
         for (operation, body, paths) in cases {
             let request = BackendRequest::decode(operation, body.as_bytes())
                 .unwrap_or_else(|| panic!("{operation}: {body}"));
             assert_eq!(request.paths(), paths, "{operation}");
-            assert_eq!(
-                request.argv().is_some(),
-                operation == Operation::ProcessExec,
-                "{operation}"
-            );
+            let argv = request.argv(&limits).map(<[String]>::to_vec);
+            match operation {
+                Operation::ProcessExec => assert_eq!(argv.unwrap(), ["ls", "-l"]),
+                Operation::PackageInstall if body.contains("fetch") => {
+                    assert_eq!(argv.unwrap(), ["cargo", "fetch"])
+                }
+                _ => assert_eq!(argv, None, "{operation}: {body}"),
+            }
         }
     }
 
@@ -292,7 +316,12 @@ mod tests {
         .unwrap();
         let limits = Limits::default();
         let backends = Backends::unimplemented();
-        for kind in [BackendKind::Fs, BackendKind::Process, BackendKind::Git] {
+        for kind in [
+            BackendKind::Fs,
+            BackendKind::Process,
+            BackendKind::Git,
+            BackendKind::Package,
+        ] {
             let call = Call {
                 operation: Operation::GitLog,
                 claims: &claims,

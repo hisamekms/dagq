@@ -170,7 +170,8 @@ fn each_tool_does_its_broker_operation_in_the_run_worktree() {
             "git_show",
             "git_add",
             "git_commit",
-            "git_restore"
+            "git_restore",
+            "package_install"
         ]
     );
 
@@ -341,4 +342,64 @@ fn the_mcp_server_does_not_start_without_a_broker_url() {
     assert_eq!(output.code, Some(3), "{}", output.stderr);
     assert!(output.stdout.is_empty());
     assert!(output.stderr.contains(URL_ENV), "{}", output.stderr);
+}
+
+#[test]
+fn package_install_runs_only_a_configured_command() {
+    let broker = Broker::start();
+    let token_file = broker.full_token_file("jti-package");
+    let mut mcp = Mcp::start(&broker, &token_file);
+    mcp.initialize();
+    let installed = mcp.ok(
+        "package_install",
+        json!({"name": "deps", "timeout_secs": 10}),
+    );
+    assert_eq!(installed["exit_code"], 0);
+    assert_eq!(installed["stdout"], "deps installed\n");
+    assert_eq!(
+        fs::read_to_string(broker.workspace().join("installed.txt")).unwrap(),
+        "installed\n"
+    );
+    for name in ["sh", "cargo-fetch"] {
+        mcp.refused(
+            "package_install",
+            json!({ "name": name }),
+            ErrorCode::CapabilityDenied,
+        );
+    }
+    // An argv is not an argument of the tool.
+    let (is_error, value) = mcp.call(
+        "package_install",
+        json!({"name": "deps", "argv": ["sh", "-c", "touch ran"]}),
+    );
+    assert!(is_error);
+    assert_eq!(value["client_error"]["kind"], "invalid_arguments");
+    assert_eq!(mcp.finish(), Some(0));
+
+    // A token without package.install runs nothing.
+    fs::remove_file(broker.workspace().join("installed.txt")).unwrap();
+    let no_package = broker.token_file(
+        &broker.claims(
+            "jti-no-package",
+            &[BrokerCapability::ProcessExec],
+            now() + 3600,
+        ),
+        true,
+    );
+    let mut mcp = Mcp::start(&broker, &no_package);
+    mcp.initialize();
+    mcp.refused(
+        "package_install",
+        json!({"name": "deps"}),
+        ErrorCode::CapabilityDenied,
+    );
+    assert_eq!(mcp.finish(), Some(0));
+    assert!(!fs::exists(broker.workspace().join("installed.txt")).unwrap());
+    assert!(!fs::exists(broker.workspace().join("ran")).unwrap());
+    let audit = broker.audit_text();
+    assert_eq!(
+        audit.matches("\"op\":\"package.install\"").count(),
+        4,
+        "{audit}"
+    );
 }

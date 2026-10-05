@@ -8,13 +8,9 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, mpsc};
+use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use dagq_broker::backend::Backends;
-use dagq_broker::backends::fs::FsBackend;
-use dagq_broker::backends::git::GitBackend;
-use dagq_broker::backends::process::ProcessBackend;
 use dagq_broker::config::Config;
 use dagq_broker::server::Server;
 use dagq_broker_client::{BrokerClient, ClientError, Endpoint, TOKEN_FILE_ENV, URL_ENV};
@@ -80,16 +76,14 @@ impl Broker {
             "sh",
             "--exec-allow",
             "git",
+            "--package",
+            r#"deps=["sh","-c","echo installed > installed.txt; echo deps installed"]"#,
         ]
         .iter()
         .map(|arg| (*arg).to_owned())
         .collect();
         let config = Config::parse(&args).unwrap();
-        let backends = Backends {
-            fs: Arc::new(FsBackend::new(config.roots.clone())),
-            process: Arc::new(ProcessBackend::new(config.roots.clone())),
-            git: Arc::new(GitBackend::new(config.roots.clone())),
-        };
+        let backends = dagq_broker::backends(&config.roots);
         let server = Server::bind(&config, backends).unwrap();
         let addr = server.local_addr().unwrap();
         std::thread::spawn(move || server.serve());

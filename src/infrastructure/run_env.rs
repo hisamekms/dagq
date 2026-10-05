@@ -109,6 +109,9 @@ const E2E_PATHS: &str = "paths";
 /// `[broker]`: the resource broker's mode and limits (ADR-t827-4
 /// decision 4).
 const BROKER_TABLE: &str = "broker";
+/// `[broker.package]`: the commands `package.install` may run, each a name
+/// and its argv (task 840).
+const BROKER_PACKAGE_TABLE: &str = "broker.package";
 /// `[review.subagents.<agent>]`: the globs that make a review's subagent
 /// required (ADR-t1453-1 decision 1), one table per agent.
 const REVIEW_SUBAGENTS_PREFIX: &str = "review.subagents.";
@@ -122,7 +125,7 @@ const REVIEW_SUBAGENT_PATHS: &str = "paths";
 const HEADLESS_TABLE: &str = "headless";
 /// The one key of `[headless]`.
 const HEADLESS_WRAPPER: &str = "wrapper";
-const TABLES: [&str; 16] = [
+const TABLES: [&str; 17] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
@@ -138,6 +141,7 @@ const TABLES: [&str; 16] = [
     TASKS_TABLE,
     E2E_TABLE,
     BROKER_TABLE,
+    BROKER_PACKAGE_TABLE,
     HEADLESS_TABLE,
 ];
 /// The one key of `[recheck]`.
@@ -315,7 +319,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{E2E_TABLE}], [{BROKER_TABLE}], [{HEADLESS_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{E2E_TABLE}], [{BROKER_TABLE}], [{BROKER_PACKAGE_TABLE}], [{HEADLESS_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -431,6 +435,24 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     }
                 }
                 broker_keys.push(key.to_owned());
+            }
+            Some(BROKER_PACKAGE_TABLE) => {
+                let with = || format!("{CONFIG_FILE_NAME}:{number}");
+                let name = parse_key(key).with_context(with)?;
+                ensure!(
+                    config
+                        .broker
+                        .packages
+                        .iter()
+                        .all(|(existing, _)| *existing != name),
+                    "{CONFIG_FILE_NAME}:{number}: {name} is defined twice"
+                );
+                let argv = parse_string_array(rest.trim())
+                    .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: value of {name}"))?;
+                dagq_broker_protocol::package::check_command(&name, &argv)
+                    .map_err(anyhow::Error::msg)
+                    .with_context(with)?;
+                config.broker.packages.push((name, argv));
             }
             Some(E2E_TABLE) => {
                 ensure!(
@@ -734,7 +756,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 stall_keys.push(key.to_owned());
             }
             None => bail!(
-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{BROKER_TABLE}], [{HEADLESS_TABLE}] or [{KPI_TABLE}]"
+                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{BROKER_TABLE}], [{BROKER_PACKAGE_TABLE}], [{HEADLESS_TABLE}] or [{KPI_TABLE}]"
             ),
         }
     }
@@ -1999,7 +2021,27 @@ LITERAL = 'no \n escapes # here'
                 exec_max_timeout_secs: 120,
                 output_limit_bytes: 2048,
                 fs_limit_bytes: 4096,
+                packages: Vec::new(),
             }
+        );
+        let packages = parse_config(
+            "[broker]\nmode = \"preferred\"\n[broker.package]\ncargo-fetch = [\"cargo\", \"fetch\"] # deps\n\"npm-install\" = [\"npm\", \"install\"]\n",
+        )
+        .unwrap()
+        .broker
+        .packages;
+        assert_eq!(
+            packages,
+            [
+                (
+                    "cargo-fetch".to_owned(),
+                    vec!["cargo".to_owned(), "fetch".to_owned()]
+                ),
+                (
+                    "npm-install".to_owned(),
+                    vec!["npm".to_owned(), "install".to_owned()]
+                ),
+            ]
         );
         for (text, error) in [
             ("[broker]\nmode = \"on\"\n", "dagq.toml:2: value of mode"),
@@ -2017,6 +2059,26 @@ LITERAL = 'no \n escapes # here'
                 "above exec_max_timeout_secs",
             ),
             ("[broker]\n[broker]\n", "[broker] is defined twice"),
+            (
+                "[broker.package]\nfetch = [\"cargo\"]\nfetch = [\"npm\"]\n",
+                "fetch is defined twice",
+            ),
+            (
+                "[broker.package]\npull = [\"git\", \"pull\"]\n",
+                "dagq.toml:2: package command pull: git runs through the git operations only",
+            ),
+            (
+                "[broker.package]\nfetch = []\n",
+                "dagq.toml:2: package command fetch: the argv is empty",
+            ),
+            (
+                "[broker.package]\nfetch = \"cargo fetch\"\n",
+                "dagq.toml:2: value of fetch",
+            ),
+            (
+                "[broker.package]\n[broker.package]\n",
+                "[broker.package] is defined twice",
+            ),
         ] {
             let message = format!("{:#}", parse_config(text).unwrap_err());
             assert!(message.contains(error), "{text}: {message}");
@@ -2483,7 +2545,9 @@ LITERAL = 'no \n escapes # here'
         fs::write(dir.path().join(CONFIG_FILE_NAME), "[supervisors]\n").unwrap();
         let error = format!("{:#}", load_supervisor_config(dir.path()).unwrap_err());
         assert!(
-            error.contains("[supervisor], [areas], [tasks], [e2e], [broker], [headless] and [kpi]"),
+            error.contains(
+                "[supervisor], [areas], [tasks], [e2e], [broker], [broker.package], [headless] and [kpi]"
+            ),
             "{error}"
         );
     }

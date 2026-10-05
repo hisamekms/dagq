@@ -12,7 +12,7 @@
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 
-use dagq_broker_protocol::{ErrorBody, fs as fs_ops, git, process};
+use dagq_broker_protocol::{ErrorBody, fs as fs_ops, git, package, process};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
@@ -55,7 +55,7 @@ const PATH_NOTE: &str = "Paths are relative to the run's worktree (the workspace
 path, `..` out of it, a symlink out of it and `.git` are refused.";
 
 /// The tools, in the order `tools/list` gives them.
-pub const TOOLS: [Tool; 12] = [
+pub const TOOLS: [Tool; 13] = [
     Tool {
         name: "read_file",
         description: "Read a text file of the run's worktree through the dagq broker. Paths are \
@@ -253,6 +253,28 @@ relative to the run's worktree.",
             )
         },
     },
+    Tool {
+        name: "package_install",
+        description: "Run one of the package commands the repository configured for the dagq \
+broker (`[broker.package]` of dagq.toml, such as `cargo fetch` or `npm ci --ignore-scripts`), by its `name`, \
+in the run's worktree. Only the configured commands run: a name the broker does not have is \
+refused (capability_denied), and no argv, env or stdin is given. `timeout_secs` is capped by \
+the broker's maximum (timeout past it); the broker refuses output over its limit \
+(output_limit), and stdout and stderr passed back are each cut at 40000 bytes (named in \
+`mcp_cut`). A non-zero exit is not an error: read `exit_code`.",
+        schema: || {
+            object(
+                &[
+                    ("name", string("The configured command's name.")),
+                    (
+                        "timeout_secs",
+                        integer("Seconds before the command is stopped, capped by the broker."),
+                    ),
+                ],
+                &["name"],
+            )
+        },
+    },
 ];
 
 /// The receipt's file the supervisor names with `required`.
@@ -418,8 +440,8 @@ fn initialize(params: &Value) -> Value {
         "protocolVersion": version,
         "capabilities": {"tools": {"listChanged": false}},
         "serverInfo": {"name": NAME, "version": BUILD},
-        "instructions": "The dagq resource broker's tools: files, allowed commands and git of \
-    this run's worktree. Paths are relative to the worktree. A refusal of the broker is a tool \
+        "instructions": "The dagq resource broker's tools: files, allowed commands, git and the \
+    configured package commands of this run's worktree. Paths are relative to the worktree. A refusal of the broker is a tool \
     error whose `error.code` says why (unauthorized, capability_denied, workspace_violation, \
     timeout, output_limit, backend_error, invalid_request)."
     })
@@ -470,6 +492,9 @@ fn tools_call(
         "git_add" => run(arguments, |q: git::AddRequest| client.git_add(&q)),
         "git_commit" => run(arguments, |q: git::CommitRequest| client.git_commit(&q)),
         "git_restore" => run(arguments, |q: git::RestoreRequest| client.git_restore(&q)),
+        "package_install" => run(arguments, |q: package::InstallRequest| {
+            client.package_install(&q)
+        }),
         "write_receipt" => match receipt {
             Some(file) => write_receipt(file, arguments),
             None => return Err("unknown tool `write_receipt`".to_owned()),
@@ -700,7 +725,8 @@ mod tests {
                 "git_show",
                 "git_add",
                 "git_commit",
-                "git_restore"
+                "git_restore",
+                "package_install"
             ]
         );
         for tool in tools {

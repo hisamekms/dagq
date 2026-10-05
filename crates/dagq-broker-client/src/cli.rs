@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
-use dagq_broker_protocol::{ErrorBody, fs as fs_ops, git, process};
+use dagq_broker_protocol::{ErrorBody, fs as fs_ops, git, package, process};
 use serde::Serialize;
 
 use crate::client::{BrokerClient, ClientError, Endpoint, TOKEN_FILE_ENV, URL_ENV};
@@ -55,6 +55,7 @@ pub enum Command {
     GitAdd(git::AddRequest),
     GitCommit(git::CommitRequest),
     GitRestore(git::RestoreRequest),
+    PackageInstall(package::InstallRequest),
     /// The worker's MCP server on stdio ([`crate::mcp`]).
     Mcp,
 }
@@ -228,6 +229,7 @@ fn execute(
         Command::GitAdd(request) => Ok(to_json(&client()?.git_add(&request)?)),
         Command::GitCommit(request) => Ok(to_json(&client()?.git_commit(&request)?)),
         Command::GitRestore(request) => Ok(to_json(&client()?.git_restore(&request)?)),
+        Command::PackageInstall(request) => Ok(to_json(&client()?.package_install(&request)?)),
         Command::Mcp => unreachable!("mcp is served by `run`"),
     }
 }
@@ -338,7 +340,7 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
     let words: Vec<&str> = args.iter().take(2).map(String::as_str).collect();
     let (name, rest): (&str, &[String]) = match words.as_slice() {
         [] => return Err("no command".to_owned()),
-        ["fs" | "git" | "token", sub, ..] => {
+        ["fs" | "git" | "token" | "package", sub, ..] => {
             let name = match (words[0], *sub) {
                 ("fs", "read") => "fs read",
                 ("fs", "list") => "fs list",
@@ -352,11 +354,12 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
                 ("git", "commit") => "git commit",
                 ("git", "restore") => "git restore",
                 ("token", "inspect") => "token inspect",
+                ("package", "install") => "package install",
                 (group, sub) => return Err(format!("unknown command `{group} {sub}`")),
             };
             (name, &args[2..])
         }
-        [group @ ("fs" | "git" | "token")] => {
+        [group @ ("fs" | "git" | "token" | "package")] => {
             return Err(format!("`{group}` needs a subcommand"));
         }
         [name, ..] => (*name, &args[1..]),
@@ -536,6 +539,20 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
                 message: message.ok_or("`git commit` needs --message")?,
             })
         }
+        "package install" => {
+            let mut timeout_secs = None;
+            while let Some(flag) = words.next_flag() {
+                match flag {
+                    "--timeout-secs" => timeout_secs = Some(words.number(flag)?),
+                    _ => return Err(unknown(flag)),
+                }
+            }
+            let name = match <[String; 1]>::try_from(words.positional) {
+                Ok([name]) => name,
+                Err(words) => return Err(format!("expected one command name, got {words:?}")),
+            };
+            Command::PackageInstall(package::InstallRequest { name, timeout_secs })
+        }
         other => return Err(format!("unknown command `{other}`")),
     };
     if matches!(command, Command::Version | Command::Help) && !rest.is_empty() {
@@ -570,6 +587,7 @@ Commands:
   git add PATH...
   git commit --message TEXT
   git restore [--staged] PATH...
+  package install NAME [--timeout-secs N]   a command of the broker's [broker.package]
   mcp                                 the worker's MCP server on stdio"
     )
 }
@@ -705,6 +723,13 @@ mod tests {
                 paths: args(&["a"])
             }))
         );
+        assert_eq!(
+            command(&["package", "install", "cargo-fetch", "--timeout-secs", "9"]),
+            Ok(Command::PackageInstall(package::InstallRequest {
+                name: "cargo-fetch".into(),
+                timeout_secs: Some(9)
+            }))
+        );
     }
 
     #[test]
@@ -751,6 +776,14 @@ mod tests {
                 "unexpected arguments",
             ),
             (&["git", "commit", "--x"][..], "unknown flag"),
+            (&["package"][..], "needs a subcommand"),
+            (
+                &["package", "remove", "x"][..],
+                "unknown command `package remove`",
+            ),
+            (&["package", "install"][..], "one command name"),
+            (&["package", "install", "a", "b"][..], "one command name"),
+            (&["package", "install", "--x"][..], "unknown flag"),
         ] {
             let error = command(words).unwrap_err();
             assert!(error.contains(why), "{words:?}: {error}");

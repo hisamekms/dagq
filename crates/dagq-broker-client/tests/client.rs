@@ -1,8 +1,8 @@
 //! The client against a broker started in the test (in process, on
 //! `127.0.0.1:0`, no podman): the library's typed calls and the
-//! `dagq-broker-client` binary do fs, process and git in a run's worktree,
-//! and the broker's refusals come back as its structured error (and exit 1).
-//! Also: the crate depends on no dagq.
+//! `dagq-broker-client` binary do fs, process, git and package in a run's
+//! worktree, and the broker's refusals come back as its structured error
+//! (and exit 1). Also: the crate depends on no dagq.
 
 mod common;
 
@@ -14,7 +14,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use dagq_broker_client::{BrokerClient, ClientError, TOKEN_FILE_ENV, URL_ENV};
-use dagq_broker_protocol::{BrokerCapability, ErrorCode, fs as fs_ops, git, process};
+use dagq_broker_protocol::{BrokerCapability, ErrorCode, fs as fs_ops, git, package, process};
 
 #[test]
 fn client_command_preserves_only_a_supplied_coverage_destination() {
@@ -386,6 +386,40 @@ fn the_cli_does_fs_process_and_git_and_exits_non_zero_on_a_refusal() {
         "",
     );
     assert!(output.json()["entries"].is_array());
+}
+
+#[test]
+fn the_library_and_the_cli_install_only_a_configured_package_command() {
+    let broker = Broker::start();
+    let token_file = broker.full_token_file("jti-package");
+    let client = broker.client(&token_file);
+    let install = |name: &str| {
+        client.package_install(&package::InstallRequest {
+            name: name.into(),
+            timeout_secs: Some(10),
+        })
+    };
+    let installed = install("deps").unwrap();
+    assert_eq!(installed.exit_code, Some(0));
+    assert_eq!(installed.stdout, "deps installed\n");
+    assert_eq!(
+        refusal(install("npm-install")),
+        (403, ErrorCode::CapabilityDenied)
+    );
+
+    let output = broker.cli(&token_file, &["package", "install", "deps"], "");
+    assert_eq!(output.code, Some(0), "{}", output.stderr);
+    assert_eq!(output.json()["stdout"], "deps installed\n");
+    broker
+        .cli(&token_file, &["package", "install", "other"], "")
+        .refused(ErrorCode::CapabilityDenied);
+    let no_package = broker.token_file(
+        &broker.claims("jti-no-package", &[BrokerCapability::FsRead], now() + 3600),
+        true,
+    );
+    broker
+        .cli(&no_package, &["package", "install", "deps"], "")
+        .refused(ErrorCode::CapabilityDenied);
 }
 
 #[test]

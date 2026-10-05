@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use dagq_broker_protocol::{
     BrokerError, BrokerSessionToken, ErrorBody, HealthResponse, MAX_REQUEST_BYTES, Operation,
-    PROTOCOL_HEADER, PROTOCOL_VERSION, decode, encode, fs as fs_ops, git, process,
+    PROTOCOL_HEADER, PROTOCOL_VERSION, decode, encode, fs as fs_ops, git, package, process,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -233,6 +233,13 @@ impl BrokerClient {
         request: &git::RestoreRequest,
     ) -> Result<git::RestoreResponse, ClientError> {
         self.call(Operation::GitRestore, request)
+    }
+
+    pub fn package_install(
+        &self,
+        request: &package::InstallRequest,
+    ) -> Result<package::InstallResponse, ClientError> {
+        self.call(Operation::PackageInstall, request)
     }
 
     /// `operation` with `request` as its body and the token.

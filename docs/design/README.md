@@ -5,7 +5,7 @@ title: Current design documents
 status: current
 created: 2026-09-21
 updated: 2026-10-05
-last_verified: 2026-10-04
+last_verified: 2026-10-05
 tags:
   - architecture
 ---
@@ -23,7 +23,7 @@ tags:
 - [Authorization](authorization.md)
 - [Security](security.md)（信頼の区分・actorとcapability・host実行は助言的で隔離ではないこと・Podmanとqueue serviceへの道筋）
 - [Queue service](queue-service.md)（hostで動きqueue DBを開くservice。unix socket・APIのversion・tokenによるprincipalとservice側の認可・ask・show・noteのユースケース・`up`・`down`・supervisorによる起動と停止・落ちたときのattention。goal 82）
-- [Resource broker](broker.md)（fs・process・gitを仲介するdagq-broker。crateと配布・transport・runごとのtoken・mountと閉じ込め・containerとPodman machine・workerのMCPの道具・audit・mode。goal 58で実装中のdraft）
+- [Resource broker](broker.md)（fs・process・git・packageを仲介するdagq-broker。crateと配布・transport・runごとのtoken・mountと閉じ込め・containerとPodman machine・workerのMCPの道具・audit・mode。goal 58で実装中のdraft）
 - [Supervisor lifecycle](supervisor-lifecycle.md)（目次。各節は[`supervisor-lifecycle/`](supervisor-lifecycle/)の下の別のファイルにある）
 - [Provider lifecycle](provider-lifecycle.md)
 - [Plugin integration](plugin-integration.md)

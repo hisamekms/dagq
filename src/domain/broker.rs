@@ -1,7 +1,7 @@
 //! The resource broker's settings and its attention ([Broker] mode and
 //! settings, ADR-t827-4 decision 4): the repository's policy is `[broker]`
-//! of `dagq.toml` ([`BrokerConfig`]: the mode, what `process.exec` may run
-//! and the server's limits), the host's circumstances are `[broker]` of
+//! of `dagq.toml` ([`BrokerConfig`]: the mode, what `process.exec` may run,
+//! the commands of `package.install` and the server's limits), the host's circumstances are `[broker]` of
 //! `host.toml` ([`HostBroker`]: podman, the machine's and the container's
 //! resources, the port). `host.toml` can lower the mode to `disabled` and
 //! never raise it ([`resolve_mode`]).
@@ -66,6 +66,9 @@ pub struct BrokerConfig {
     pub exec_max_timeout_secs: u64,
     pub output_limit_bytes: u64,
     pub fs_limit_bytes: u64,
+    /// `[broker.package]`: the commands `package.install` may run, by name
+    /// and in the order written; empty refuses every install.
+    pub packages: Vec<(String, Vec<String>)>,
 }
 
 impl Default for BrokerConfig {
@@ -78,6 +81,7 @@ impl Default for BrokerConfig {
             exec_max_timeout_secs: DEFAULT_EXEC_MAX_TIMEOUT_SECS,
             output_limit_bytes: DEFAULT_OUTPUT_LIMIT_BYTES,
             fs_limit_bytes: DEFAULT_FS_LIMIT_BYTES,
+            packages: Vec::new(),
         }
     }
 }
@@ -139,6 +143,10 @@ impl BrokerConfig {
         }
         for name in &self.exec_env {
             args.extend(["--exec-env".to_owned(), name.clone()]);
+        }
+        for (name, argv) in &self.packages {
+            let argv = serde_json::to_string(argv).expect("strings serialize");
+            args.extend(["--package".to_owned(), format!("{name}={argv}")]);
         }
         args
     }
@@ -427,6 +435,10 @@ mod tests {
             exec_env: vec!["LANG".into()],
             exec_timeout_secs: 30,
             fs_limit_bytes: 1024,
+            packages: vec![(
+                "cargo-fetch".into(),
+                vec!["cargo".into(), "fetch".into(), "a \"b\"".into()],
+            )],
             ..BrokerConfig::default()
         };
         assert_eq!(
@@ -441,7 +453,9 @@ mod tests {
                 "--exec-allow",
                 "cat",
                 "--exec-env",
-                "LANG"
+                "LANG",
+                "--package",
+                r#"cargo-fetch=["cargo","fetch","a \"b\""]"#
             ]
         );
         assert!(config.check().is_ok());

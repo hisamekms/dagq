@@ -21,11 +21,12 @@ pub enum Operation {
     GitAdd,
     GitCommit,
     GitRestore,
+    PackageInstall,
 }
 
 impl Operation {
     /// Every operation, in order.
-    pub const ALL: [Operation; 13] = [
+    pub const ALL: [Operation; 14] = [
         Self::Health,
         Self::FsRead,
         Self::FsList,
@@ -39,6 +40,7 @@ impl Operation {
         Self::GitAdd,
         Self::GitCommit,
         Self::GitRestore,
+        Self::PackageInstall,
     ];
 
     /// The name in the audit, `fs.read` and so on.
@@ -57,6 +59,7 @@ impl Operation {
             Self::GitAdd => "git.add",
             Self::GitCommit => "git.commit",
             Self::GitRestore => "git.restore",
+            Self::PackageInstall => "package.install",
         }
     }
 
@@ -84,6 +87,7 @@ impl Operation {
             Self::GitAdd => "/v1/git/add",
             Self::GitCommit => "/v1/git/commit",
             Self::GitRestore => "/v1/git/restore",
+            Self::PackageInstall => "/v1/package/install",
         }
     }
 
@@ -99,6 +103,7 @@ impl Operation {
                 Some(BrokerCapability::GitRead)
             }
             Self::GitAdd | Self::GitCommit | Self::GitRestore => Some(BrokerCapability::GitWrite),
+            Self::PackageInstall => Some(BrokerCapability::PackageInstall),
         }
     }
 
@@ -162,6 +167,7 @@ mod tests {
                 ("git.add", Some("git.write")),
                 ("git.commit", Some("git.write")),
                 ("git.restore", Some("git.write")),
+                ("package.install", Some("package.install")),
             ]
         );
     }

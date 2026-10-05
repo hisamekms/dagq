@@ -17,6 +17,7 @@ mod error;
 pub mod fs;
 pub mod git;
 mod operation;
+pub mod package;
 pub mod process;
 mod request_id;
 mod token;

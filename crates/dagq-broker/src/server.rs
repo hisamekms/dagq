@@ -257,7 +257,7 @@ impl Handler {
                 format!("the body is not a {operation} request"),
             )
         })?;
-        if let Some(argv) = decoded.argv() {
+        if let Some(argv) = decoded.argv(&self.limits) {
             record.program = argv.first().map(|program| basename(program));
             record.argc = Some(argv.len());
             record.argv_sha256 = Some(arguments_sha256(argv));

@@ -1,6 +1,6 @@
 //! `dagq-broker serve` as a host process (no podman) on `127.0.0.1:0`:
-//! health, the refusals of default deny, the fs, process and git backends
-//! and their audit lines.
+//! health, the refusals of default deny, the fs, process, git and package
+//! backends and their audit lines.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -357,6 +357,11 @@ fn default_deny_refuses_unknown_routes_missing_capabilities_and_foreign_fields()
         ),
         ("/v1/git/status", "{}", "git.read"),
         ("/v1/git/commit", r#"{"message":"m"}"#, "git.write"),
+        (
+            "/v1/package/install",
+            r#"{"name":"deps"}"#,
+            "package.install",
+        ),
     ] {
         let answer = broker.post(path, Some(&token), body);
         answer.assert_refused(ErrorCode::CapabilityDenied);
@@ -901,6 +906,112 @@ fn process_exec_runs_argv_in_the_workspace_within_the_limits_and_is_audited() {
     ] {
         assert!(!text.contains(secret), "{secret}");
     }
+}
+
+#[test]
+fn package_install_runs_only_the_configured_commands_within_the_limits_and_is_audited() {
+    let broker = Broker::start_with(&[
+        "--package",
+        r#"deps=["sh","-c","pwd; env; echo fetched > fetched","secret-arg"]"#,
+        "--package",
+        r#"slow=["sh","-c","sleep 60"]"#,
+        "--package",
+        r#"loud=["sh","-c","while :; do echo out; done"]"#,
+        "--exec-max-timeout-secs",
+        "2",
+        "--exec-timeout-secs",
+        "2",
+        "--output-limit-bytes",
+        "4096",
+    ]);
+    let claims = broker.claims("jti-package", &[BrokerCapability::PackageInstall]);
+    let token = broker.token(&claims, true);
+    let install = |body: Value| broker.post("/v1/package/install", Some(&token), &body.to_string());
+
+    // A configured command runs in the workspace with the clean env, and the
+    // audit names its program but none of its arguments or output.
+    let answer = install(serde_json::json!({"name": "deps"}));
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    let response: Value = serde_json::from_str(&answer.body).unwrap();
+    assert_eq!(response["exit_code"], 0);
+    let stdout = response["stdout"].as_str().unwrap();
+    assert!(
+        stdout.starts_with(&format!("{}\n", broker.workspace())),
+        "{stdout}"
+    );
+    assert!(!stdout.contains(HOST_SECRET_NAME), "{stdout}");
+    assert!(
+        stdout.contains("PATH=/usr/local/bin:/usr/bin:/bin"),
+        "{stdout}"
+    );
+    assert!(PathBuf::from(broker.workspace()).join("fetched").exists());
+    let line = broker.audit().pop().unwrap();
+    assert_eq!(line["result"], "ok");
+    assert_eq!(line["backend"], "package");
+    assert_eq!(line["op"], "package.install");
+    assert_eq!(line["capability"], "package.install");
+    assert_eq!(line["run_id"], "run-1");
+    assert_eq!(line["program"], "sh");
+    assert_eq!(line["argc"], 4);
+    assert_eq!(line["exit_code"], 0);
+
+    // A name that is not configured, and an argv in the request, run nothing.
+    let answer = install(serde_json::json!({"name": "npm-install"}));
+    answer.assert_refused(ErrorCode::CapabilityDenied);
+    let line = answer.audit_line(&broker);
+    assert_eq!(line["result"], "capability_denied");
+    assert_eq!(line["op"], "package.install");
+    assert_eq!(line["program"], Value::Null);
+    let answer = install(serde_json::json!({"name": "deps", "argv": ["sh", "-c", "touch ran"]}));
+    answer.assert_refused(ErrorCode::InvalidRequest);
+
+    // The server's maximum timeout wins over the request's.
+    let answer = install(serde_json::json!({"name": "slow", "timeout_secs": 3600}));
+    answer.assert_refused(ErrorCode::Timeout);
+    let line = answer.audit_line(&broker);
+    assert_eq!(line["result"], "timeout");
+    assert_eq!(line["exit_code"], Value::Null);
+
+    // Output past the limit.
+    let answer = install(serde_json::json!({"name": "loud"}));
+    answer.assert_refused(ErrorCode::OutputLimit);
+    assert_eq!(answer.audit_line(&broker)["result"], "output_limit");
+
+    // A token without package.install runs nothing, even with process.exec.
+    let exec_only = broker.claims("jti-exec-only", &[BrokerCapability::ProcessExec]);
+    let exec_token = broker.token(&exec_only, true);
+    fs::remove_file(PathBuf::from(broker.workspace()).join("fetched")).unwrap();
+    let answer = broker.post(
+        "/v1/package/install",
+        Some(&exec_token),
+        r#"{"name":"deps"}"#,
+    );
+    answer.assert_refused(ErrorCode::CapabilityDenied);
+    assert_eq!(answer.audit_line(&broker)["capability"], "package.install");
+    assert!(!PathBuf::from(broker.workspace()).join("fetched").exists());
+    assert!(!PathBuf::from(broker.workspace()).join("ran").exists());
+
+    let text = broker.audit_text();
+    for secret in [token.as_str(), "secret-arg", "fetched", HOST_SECRET_VALUE] {
+        assert!(!text.contains(secret), "{secret}");
+    }
+}
+
+#[test]
+fn refuses_to_start_with_a_package_command_that_runs_git() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = serve_output(
+        &[
+            "--listen",
+            "127.0.0.1:0",
+            "--package",
+            r#"pull=["git","pull"]"#,
+        ],
+        dir.path(),
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("git operations only"), "{stderr}");
 }
 
 /// `git <args>` in `dir` as a person would, outside the broker.

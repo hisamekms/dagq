@@ -1,11 +1,12 @@
 //! The dagq resource broker, `dagq-broker` ([Broker], ADR-t827-1): the HTTP
-//! server that does fs, process and git on behalf of a run, behind the run's
-//! token. `serve` listens on loopback, answers health without a token,
-//! refuses everything else without a valid, active token (default deny) and
-//! writes an audit line per request. The fs backend is
+//! server that does fs, process, git and package on behalf of a run, behind
+//! the run's token. `serve` listens on loopback, answers health without a
+//! token, refuses everything else without a valid, active token (default
+//! deny) and writes an audit line per request. The fs backend is
 //! [`backends::fs::FsBackend`], the process backend
-//! [`backends::process::ProcessBackend`] and the git backend
-//! [`backends::git::GitBackend`].
+//! [`backends::process::ProcessBackend`], the git backend
+//! [`backends::git::GitBackend`] and the package backend
+//! [`backends::package::PackageBackend`].
 //!
 //! [Broker]: https://github.com/hisamekms/dagq/blob/main/docs/design/broker.md
 
@@ -17,6 +18,7 @@ pub mod http;
 pub mod server;
 
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use dagq_broker_protocol::HealthResponse;
@@ -24,6 +26,7 @@ use dagq_broker_protocol::HealthResponse;
 use crate::backend::Backends;
 use crate::backends::fs::FsBackend;
 use crate::backends::git::GitBackend;
+use crate::backends::package::PackageBackend;
 use crate::backends::process::ProcessBackend;
 use crate::config::Config;
 use crate::server::Server;
@@ -41,6 +44,16 @@ pub const BUILD: &str = env!("DAGQ_BUILD_ID");
 /// What a healthy server answers on `GET /v1/health`.
 pub fn health() -> HealthResponse {
     HealthResponse::ok(BUILD)
+}
+
+/// The backends `serve` uses, over the mounted `roots`.
+pub fn backends(roots: &[PathBuf]) -> Backends {
+    Backends {
+        fs: Arc::new(FsBackend::new(roots.to_vec())),
+        process: Arc::new(ProcessBackend::new(roots.to_vec())),
+        git: Arc::new(GitBackend::new(roots.to_vec())),
+        package: Arc::new(PackageBackend::new(roots.to_vec())),
+    }
 }
 
 /// Run the command line `args` (without the program name), writing to `out`.
@@ -64,12 +77,7 @@ pub fn run(args: &[String], out: &mut impl Write) -> Result<(), String> {
             for warning in &config.warnings {
                 eprintln!("{NAME} serve: {warning}");
             }
-            let backends = Backends {
-                fs: Arc::new(FsBackend::new(config.roots.clone())),
-                process: Arc::new(ProcessBackend::new(config.roots.clone())),
-                git: Arc::new(GitBackend::new(config.roots.clone())),
-            };
-            let server = Server::bind(&config, backends)
+            let server = Server::bind(&config, backends(&config.roots))
                 .map_err(|error| format!("{NAME} serve: {error}"))?;
             let listening = server
                 .local_addr()
@@ -94,6 +102,7 @@ fn usage() -> String {
        {NAME} serve --key FILE --active DIR --audit DIR --root DIR... [--listen ADDR:PORT]
                     [--container] [--exec-timeout-secs N] [--exec-max-timeout-secs N]
                     [--output-limit-bytes N] [--fs-limit-bytes N] [--exec-allow NAME]... [--exec-env NAME]...
+                    [--package NAME=[\"PROGRAM\",\"ARG\",...]]...
                  listen (127.0.0.1:8750 by default; loopback only outside the container)
                  and print {{\"listening\":ADDR,\"build\":BUILD}} once bound"
     )
