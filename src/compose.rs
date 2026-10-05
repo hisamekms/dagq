@@ -328,12 +328,6 @@ pub struct SuperviseOptions {
     /// The limit of a run's conflict-only attempts (ADR-0047 decision
     /// 24); `None` reads `[resume]` of the main checkout's `dagq.toml`.
     pub resume: Option<crate::domain::resume::ResumeConfig>,
-    /// Where the wrapper of a worker's headless session runs (ADR-t1404-1
-    /// decision 7); `None` reads `[headless] wrapper` of the main
-    /// checkout's `dagq.toml` as each session starts. A planner's wrapper
-    /// always follows the file. The CLI has no flag for it; the tests set
-    /// it (task 1439).
-    pub worker_wrapper: Option<crate::domain::background_wrapper::HeadlessWrapper>,
     /// Reads the free bytes of the file system of a path; tests set it.
     pub free_space: fn(&Path) -> Option<u64>,
     /// The directories Claude Code keeps the sessions' scratchpads under,
@@ -571,7 +565,6 @@ impl SuperviseOptions {
             load_conflicts: load_conflict_config,
             disk: None,
             resume: None,
-            worker_wrapper: None,
             free_space: free_disk_bytes,
             scratchpad_roots: Some(Vec::new()),
             report_daily: false,
@@ -643,7 +636,6 @@ impl SuperviseOptions {
             max_load: self.max_load,
             disk,
             resume,
-            worker_wrapper: self.worker_wrapper,
             passes: self.passes.clone(),
         }
     }
@@ -2944,58 +2936,12 @@ fn own_workspace(cmux: &dyn WorkspaceBackend) -> Option<OwnWorkspace<'_>> {
         .map(|id| OwnWorkspace { backend: cmux, id })
 }
 
-/// The wrapper with `provider`'s agent started by `spawner`.
-pub fn session_with_provider(
-    db: &Path,
-    id: &RunId,
-    token: &LeaseToken,
-    provider: &dyn AgentProvider,
-    spawner: &dyn Spawner,
-) -> Result<Value> {
-    run_session(
-        db,
-        id,
-        token,
-        provider,
-        None,
-        spawner,
-        false,
-        None,
-        WrapperStart::Workspace,
-        None,
-    )
-}
-
-/// The wrapper (`resume` for `session --resume`) with `provider`'s agent
-/// and, for a headless run moved to the other provider (ADR-t813-2),
-/// `other`'s, started by `spawner`.
-pub fn session_with_providers(
-    db: &Path,
-    id: &RunId,
-    token: &LeaseToken,
-    provider: &dyn AgentProvider,
-    other: Option<&dyn AgentProvider>,
-    spawner: &dyn Spawner,
-    resume: bool,
-) -> Result<Value> {
-    run_session(
-        db,
-        id,
-        token,
-        provider,
-        other,
-        spawner,
-        resume,
-        None,
-        WrapperStart::Workspace,
-        None,
-    )
-}
-
-/// [`session_with_providers`] started in the background (ADR-t1404-1):
-/// without a terminal or a workspace of its own, it registers once the
-/// supervisor recorded its start (`wrapper_launched`) with this process's
-/// pid.
+/// The session wrapper (`resume` for `session --resume`) with `provider`'s
+/// agent and, for a headless run moved to the other provider (ADR-t813-2),
+/// `other`'s, started by `spawner` in the background (ADR-t1404-1, the
+/// only way a run's wrapper starts, ADR-t1433-3): without a terminal or a
+/// workspace of its own, it registers once the supervisor recorded its
+/// start (`wrapper_launched`) with this process's pid.
 pub fn session_in_background(
     db: &Path,
     id: &RunId,
@@ -3020,7 +2966,8 @@ pub fn session_in_background(
 
 /// [`session_in_background`] whose wrapper is the process `pid` rather
 /// than this one, its environment naming `sccache` as `RUSTC_WRAPPER` when
-/// given ([`session_with_sccache`]): a test that runs each background
+/// given (ADR-t1215-1: a Codex turn runs without it unless its server
+/// listens on the loopback port just before): a test that runs each background
 /// wrapper on a thread names it by a process of its own, so that every
 /// session has a handle of its own (task 1439).
 #[allow(clippy::too_many_arguments)]
@@ -3047,82 +2994,6 @@ pub fn session_in_background_as(
         WrapperStart::Background,
         sccache,
         pid,
-    )
-}
-
-/// [`session_with_providers`] whose environment names `sccache` as
-/// `RUSTC_WRAPPER` (ADR-t1215-1): a Codex turn runs without it unless its
-/// server listens on the loopback port just before.
-#[allow(clippy::too_many_arguments)]
-pub fn session_with_sccache(
-    db: &Path,
-    id: &RunId,
-    token: &LeaseToken,
-    provider: &dyn AgentProvider,
-    other: Option<&dyn AgentProvider>,
-    spawner: &dyn Spawner,
-    resume: bool,
-    sccache: crate::domain::sccache::SccacheTarget,
-) -> Result<Value> {
-    run_session(
-        db,
-        id,
-        token,
-        provider,
-        other,
-        spawner,
-        resume,
-        None,
-        WrapperStart::Workspace,
-        Some(sccache),
-    )
-}
-
-/// The wrapper of a resumed session: `session --resume`.
-pub fn resume_session_with_provider(
-    db: &Path,
-    id: &RunId,
-    token: &LeaseToken,
-    provider: &dyn AgentProvider,
-    spawner: &dyn Spawner,
-) -> Result<Value> {
-    run_session(
-        db,
-        id,
-        token,
-        provider,
-        None,
-        spawner,
-        true,
-        None,
-        WrapperStart::Workspace,
-        None,
-    )
-}
-
-/// The wrapper (`resume` for `session --resume`) running in the workspace
-/// `own`, which it closes when the run refuses it and records no such
-/// workspace (task 806).
-pub fn session_in_workspace(
-    db: &Path,
-    id: &RunId,
-    token: &LeaseToken,
-    provider: &dyn AgentProvider,
-    spawner: &dyn Spawner,
-    resume: bool,
-    own: OwnWorkspace<'_>,
-) -> Result<Value> {
-    run_session(
-        db,
-        id,
-        token,
-        provider,
-        None,
-        spawner,
-        resume,
-        Some(own),
-        WrapperStart::Workspace,
-        None,
     )
 }
 

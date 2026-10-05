@@ -12,7 +12,7 @@ use dagq::{
         AgentState, DetachedRefusal, LaunchAgent, ProcessControl, SupervisorEnvironment,
         WorkspaceBackend, WorkspaceTags,
     },
-    domain::{SupervisorMode, Task, TaskRun, recovery::ProcessInfo},
+    domain::{SupervisorMode, recovery::ProcessInfo},
     infrastructure::{location::QueueLocation, sqlite::SqliteQueue},
     lifecycle::{self, DownOptions, UpEnvironment, UpOptions},
 };
@@ -343,12 +343,6 @@ impl WorkspaceBackend for FakeCmux {
             bail!("\"/bin/sh\" did not finish within 60s")
         }
         Ok(())
-    }
-    fn create(&self, _: &Task, _: &TaskRun, _: &str, _: &WorkspaceTags) -> Result<String> {
-        bail!("up does not create run workspaces")
-    }
-    fn create_resume(&self, _: &Task, _: &TaskRun, _: &str, _: &WorkspaceTags) -> Result<String> {
-        bail!("up does not resume runs")
     }
     fn send_text(&self, _: &str, _: &str) -> Result<()> {
         bail!("up never types into a terminal")

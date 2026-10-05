@@ -1068,9 +1068,9 @@ impl Supervisor<'_> {
             Some(start),
         )?))
     }
-    /// Close the session's workspace after it exited: the worker's own
-    /// through [`close_workspace`], a resume's by recording
-    /// `workspace_closed` with its attempt.
+    /// Stop the session's wrapper after it exited ([`stop_run_session`]):
+    /// the worker's own through [`close_workspace`], a resume's by
+    /// recording `workspace_closed` with its attempt.
     pub(super) fn close_session(&mut self, run: &TaskRun, session: &SessionRef) -> Result<TaskRun> {
         match session.resume {
             None if run.workspace_closed_at().is_none() && run.workspace_id().is_some() => {
@@ -1078,7 +1078,7 @@ impl Supervisor<'_> {
             }
             None => Ok(run.clone()),
             Some(attempt) => {
-                match self.cmux.close(&session.workspace) {
+                match stop_run_session(self.cmux, &session.workspace) {
                     Ok(()) => self.queue.record_runtime_event(
                         run.id(),
                         EventKind::WorkspaceClosed,
@@ -1086,7 +1086,7 @@ impl Supervisor<'_> {
                     )?,
                     Err(error) => {
                         let message = format!(
-                            "resume workspace {} could not be closed: {error:#}",
+                            "the resume's session {} could not be stopped: {error:#}",
                             session.workspace
                         );
                         warn!(run_id = %run.id(), "run {}: {message}", run.id());

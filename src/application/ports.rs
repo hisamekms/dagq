@@ -1142,26 +1142,6 @@ pub trait WorkspaceBackend {
     /// admits such a process only by socket password). A refusal is a
     /// [`DetachedRefusal`]; any other error means cmux could not be asked.
     fn preflight_detached(&self, environment: &SupervisorEnvironment) -> Result<()>;
-    /// Open the workspace a run's session works in. `task` is the run's
-    /// task; the backend names the workspace after it (ADR-0018) and gives
-    /// it `tags`.
-    fn create(
-        &self,
-        task: &crate::domain::Task,
-        run: &crate::domain::TaskRun,
-        command: &str,
-        tags: &WorkspaceTags,
-    ) -> Result<String>;
-    /// Open the workspace a resumed session of a `needs_session` run works
-    /// in, in the run's worktree; the backend names it like the run's worker
-    /// workspace (ADR-0028; display only, ADR-0026) and gives it `tags`.
-    fn create_resume(
-        &self,
-        task: &crate::domain::Task,
-        run: &crate::domain::TaskRun,
-        command: &str,
-        tags: &WorkspaceTags,
-    ) -> Result<String>;
     /// Type one line at the session's prompt and submit it: the resolution
     /// request to a resumed session, the only text besides `/exit` the
     /// supervisor sends (ADR-0019). A long text is given time to be pasted
@@ -1204,20 +1184,22 @@ pub trait WorkspaceBackend {
     /// people may rename (ADR-0026).
     fn exists(&self, workspace_id: &str) -> Result<bool>;
     /// The stable IDs of every workspace cmux lists, in all its windows:
-    /// one listing for many checks, as the supervisor's sweep of ended
-    /// runs' workspaces makes.
+    /// one listing for many checks, as the supervisor's close of the
+    /// planners and session spans whose workspace is gone makes.
     fn listed_workspace_ids(&self) -> Result<Vec<String>>;
     /// The stable IDs of the workspaces cmux lists, in all its windows,
-    /// whose description is exactly `description`: a workspace a create
-    /// reported failed may have been made all the same (a create that
-    /// timed out, task 806), and its description is all that finds it. A
-    /// backend that keeps no descriptions finds none.
+    /// whose description is exactly `description`: a planner's workspace a
+    /// create reported failed may have been made all the same (a create
+    /// that timed out, task 806), and its description is all that finds
+    /// it. A backend that keeps no descriptions finds none.
     fn workspaces_described(&self, description: &str) -> Result<Vec<String>> {
         let _ = description;
         Ok(Vec::new())
     }
     /// Open a workspace that is not tied to a run (the inbox and planner
-    /// sessions, the in-cmux supervisor) and return its stable ID.
+    /// sessions, the in-cmux supervisor) and return its stable ID. A run's
+    /// session has no workspace: its wrapper starts in the background
+    /// ([`launch_background`](Self::launch_background), ADR-t1433-3).
     fn create_named(
         &self,
         name: &str,
@@ -1470,8 +1452,9 @@ pub struct Landing {
 
 pub use crate::domain::validation::Validation;
 
-/// A workspace an ended run opened (the worker's or a resume's), which the
-/// supervisor's sweep closes while cmux still lists it.
+/// A session an ended run opened (the worker's or a resume's), whose
+/// background wrapper the supervisor's sweep stops while it still runs; a
+/// workspace from before ADR-t1433-3 is left to a person.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EndedRunWorkspace {
     pub run_id: RunId,
@@ -2122,7 +2105,7 @@ pub trait RunLog {
         kind: EventKind,
         payload: serde_json::Value,
     ) -> Result<()>;
-    /// The workspaces of the ended runs the triage does not take, for the
+    /// The sessions of the ended runs the triage does not take, for the
     /// supervisor's sweep.
     fn ended_run_workspaces(&self) -> Result<Vec<EndedRunWorkspace>>;
     /// The worktrees of the runs nobody leases that ended or whose task is
@@ -3409,10 +3392,19 @@ pub trait Verifier {
         let _ = text;
         Ok(Vec::new())
     }
-    /// Where a headless session's wrapper runs (`[headless] wrapper` of
-    /// `dagq.toml`, ADR-t1404-1 decision 7); a workspace by default.
+    /// Where a runtime planner's headless wrapper runs (`[headless]
+    /// wrapper` of `dagq.toml`, ADR-t1404-1 decision 7); a workspace by
+    /// default. A worker's wrapper always starts in the background and
+    /// ignores the setting (ADR-t1433-3 decision 2).
     fn headless_wrapper(&self) -> Result<crate::domain::background_wrapper::HeadlessWrapper> {
         Ok(crate::domain::background_wrapper::HeadlessWrapper::default())
+    }
+    /// `[headless] wrapper` as `dagq.toml` writes it, `None` without the
+    /// key: only to tell that a worker ignores `"workspace"`.
+    fn headless_wrapper_setting(
+        &self,
+    ) -> Result<Option<crate::domain::background_wrapper::HeadlessWrapper>> {
+        Ok(None)
     }
     /// The model and effort of the roles other than the worker
     /// (`[roles.<role>]` of `dagq.toml`, ADR-0079 decision 7); none by

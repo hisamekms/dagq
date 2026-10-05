@@ -63,7 +63,7 @@ inbox は `dagq-inbox` skill に従い、復旧と手での操作は `dagq-recov
 - docs（ADR・design・plans）: [documents.md](docs/development/documents.md)
 - plugin: documents.md の「pluginの汎用性」「権限の表を写す文書」
 - config（`dagq.toml`・`.config/`・`.dagq/`）: operations.md の「`dagq.toml`を変えるとき」「`[run.env]`とtestの並列度の置き場」、[Run environment](docs/design/supervisor-lifecycle/run-environment.md)
-- 非対話の wrapper は `dagq.toml` の `[headless]` で background（出力は `run log`）
+- worker は常に background（`run log`）。`[headless]` は task 1441 まで planner だけが読む
 
 ## 検証と文書の規則
 

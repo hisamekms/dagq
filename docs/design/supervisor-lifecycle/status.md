@@ -4,8 +4,8 @@ type: design
 title: "`status`"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1661: recorded goal answer selection; task 1225: a triage_failed with provider_unusable stays triaging (runtime); task 1660: goal_follow_ups_unsettled; task 838: broker_claims_held attention; task 1632; task 1481
-last_verified: 2026-10-06 # task 1661; task 1225; task 1660; task 838; task 1632; task 1481
+updated: 2026-10-06 # task 1661: recorded goal answer selection; task 1225: a triage_failed with provider_unusable stays triaging (runtime); task 1660: goal_follow_ups_unsettled; task 838: broker_claims_held attention; task 1632; task 1481; task 1440
+last_verified: 2026-10-06 # task 1661; task 1225; task 1660; task 838; task 1632; task 1481; task 1440
 scope: runtime
 related:
   - adr-t1228-2
@@ -26,7 +26,7 @@ related:
 
 # `status`
 
-> **予定（goal 92）**: inboxのwatcherの記録と表示（ADR-t906-1決定1の(1)）は、ADR-t906-1を置き換えた[ADR-t1433-5](../../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)が引き継ぐ。in-cmux modeの表示（[ADR-t1433-4](../../adr/2026-10-03-t1433-4-supervisor-resides-without-cmux.md)）とrunのworkspaceの記述（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）は、後続のtaskが実装するまでの今の姿である。
+> **予定（goal 92）**: inboxのwatcherの記録と表示（ADR-t906-1決定1の(1)）は、ADR-t906-1を置き換えた[ADR-t1433-5](../../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)が引き継ぐ。in-cmux modeの表示（[ADR-t1433-4](../../adr/2026-10-03-t1433-4-supervisor-resides-without-cmux.md)）は、後続のtaskが実装するまでの今の姿である。runはtask 1440からworkspaceを開かない（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）。
 
 ユースケースはapplication層の`src/application/health.rs`の`status`（`doctor`・`recover`と、`status`と`watch`が使うattentionの導出`attention`も同じファイル）で、queueは`Queue`（`latest_event_id`・`latest_runs_in_progress`・`runs_with_pending_push`・`asks`を含む）、PIDの生死は`ProcessControl`、時刻は`Clock`から得る。入口は`compose::OneShot::status_for`（queueをpathから開く。自由関数の`compose::status_for`はsystemの`Generators`で呼ぶ）で、CLIは`src/main.rs`が開いて束縛を確かめたqueueを`OneShot::status_of`に渡し、queueを1回だけ開く（task 403）。
 

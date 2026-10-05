@@ -31,38 +31,43 @@ fn assert_backend_failure(
     assert_eq!(event.payload["parallel"], 4);
 }
 
-/// A workspace cmux fails to create leaves the run `starting` and stops
-/// claiming. The failure is recorded as `backend_call_failed` on the run
-/// before the supervisor's own `runtime_error`, which carries the call's
-/// code and op (ADR-0034) — moved from the interactive
+/// A session wrapper that cannot be started in the background leaves the
+/// run `starting` and stops claiming. The failure is recorded as
+/// `backend_call_failed` on the run before the supervisor's own
+/// `runtime_error`, which carries the call's code and op (ADR-0034) —
+/// moved from the interactive
 /// `failed_backend_calls_are_recorded_with_the_load_and_counted_by_stats`
-/// that task 1437 deleted.
+/// that task 1437 deleted, and from a workspace's `create` to the
+/// background launch (ADR-t1433-3).
 #[test]
 fn provisioning_failure_retains_the_run_and_stops_claiming_other_tasks() {
     let (_dir, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     add_ready_task(&mut queue, "untouched", &[]);
     let backend = TestWorkspace::new(&db, true, VALID_AGENT);
-    // The failure of a workspace's `create` (task 1439).
-    let options = in_workspaces(supervise_options(4, true));
+    let options = supervise_options(4, true);
     let error = format!(
         "{:#}",
         supervise_with(&db, &repo, &backend, &options).unwrap_err()
     );
-    assert!(error.contains("injected workspace"), "{error}");
+    assert!(error.contains("injected background launch"), "{error}");
     assert!(error.contains("claiming stopped"), "{error}");
     let detail = queue.show(TaskId::new(1)).unwrap();
     let run = &detail.runs[0];
     assert_eq!(run.status(), RunStatus::Starting);
-    assert!(run.last_error().unwrap().contains("injected workspace"));
+    assert!(
+        run.last_error()
+            .unwrap()
+            .contains("injected background launch")
+    );
     assert!(Path::new(run.worktree_path().unwrap()).exists());
     let failures = backend_failures(&detail);
     assert_eq!(failures.len(), 1, "{failures:?}");
     assert_backend_failure(
         failures[0],
-        "create",
+        "launch_background",
         None,
-        "injected workspace creation failure",
+        "injected background launch failure",
         run.id(),
     );
     assert_eq!(failures[0].payload["code"], "backend_failed");
@@ -73,7 +78,7 @@ fn provisioning_failure_retains_the_run_and_stops_claiming_other_tasks() {
         .unwrap();
     assert!(failures[0].id < abandoned.id);
     assert_eq!(abandoned.payload["code"], "backend_failed");
-    assert_eq!(abandoned.payload["op"], "create");
+    assert_eq!(abandoned.payload["op"], "launch_background");
     // The environment is suspect: the second candidate was left alone.
     assert!(queue.show(TaskId::new(2)).unwrap().runs.is_empty());
     assert_eq!(queue.candidates().unwrap()[0].id(), TaskId::new(2));
@@ -91,10 +96,10 @@ fn provisioning_failure_retains_the_run_and_stops_claiming_other_tasks() {
     assert_eq!(queue.show(TaskId::new(1)).unwrap().runs.len(), 1);
 }
 
-/// cmux failing to close an accepted run's workspace is recorded as
-/// `backend_call_failed` on the run before the supervisor's
-/// `cleanup_failed`, which carries the call's code and op beside its
-/// message and workspace — moved from the interactive
+/// A failed stop of an accepted run's background wrapper (`close` on its
+/// handle) is recorded as `backend_call_failed` on the run before the
+/// supervisor's `cleanup_failed`, which carries the call's code and op
+/// beside its message and the handle — moved from the interactive
 /// `failed_backend_calls_are_recorded_with_the_load_and_counted_by_stats`
 /// that task 1437 deleted.
 #[test]
@@ -107,7 +112,7 @@ fn a_failed_workspace_close_is_recorded_before_the_cleanup_failure_with_its_code
         failures[0],
         "close",
         Some(background_session(run).as_str()),
-        "injected workspace close failure",
+        "injected session stop failure",
         run.id(),
     );
     assert_eq!(failures[0].payload["code"], "backend_failed");
@@ -141,12 +146,6 @@ impl WorkspaceBackend for TimingOutCmux {
         unimplemented!()
     }
     fn preflight_detached(&self, _: &SupervisorEnvironment) -> Result<()> {
-        unimplemented!()
-    }
-    fn create(&self, _: &Task, _: &TaskRun, _: &str, _: &WorkspaceTags) -> Result<String> {
-        unimplemented!()
-    }
-    fn create_resume(&self, _: &Task, _: &TaskRun, _: &str, _: &WorkspaceTags) -> Result<String> {
         unimplemented!()
     }
     fn send_text(&self, _: &str, _: &str) -> Result<()> {
@@ -246,55 +245,6 @@ fn timed_out_effect_free_calls_are_retried_with_a_doubling_backoff_each_attempt_
             (json!("exists"), json!(3), json!(3), Value::Null),
         ]
     );
-}
-
-/// A workspace group cmux cannot make leaves a warning in the supervisor
-/// log, and the run opens outside any group (ADR-0026).
-#[test]
-fn a_workspace_group_cmux_cannot_make_is_a_logged_warning() {
-    let (_dir, repo, db) = fixture();
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    add_ready_task(&mut queue, "grouped", &[]);
-    let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    backend.group_fails = true;
-    // A group is asked for only for a workspace (task 1439).
-    let options = in_workspaces(supervise_options(1, true));
-    let (telemetry, captured) = Telemetry::capture();
-    let outcome = telemetry
-        .in_scope(|| supervise_with(&db, &repo, &backend, &options))
-        .unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(
-        queue.show(TaskId::new(1)).unwrap().runs[0].status(),
-        RunStatus::AwaitingIntegration
-    );
-    assert_eq!(backend.tags.lock().unwrap()[0].group, None);
-    let log = captured.text();
-    assert!(
-        log.contains("warning: cmux workspace group")
-            && log.contains("workspace-group create failed")
-            && log.contains("\"level\":\"WARN\""),
-        "{log}"
-    );
-    // The group belongs to no run, so its failure is recorded without one.
-    let failures: Vec<_> = queue
-        .all_events()
-        .unwrap()
-        .into_iter()
-        .filter(|e| e.kind == "backend_call_failed")
-        .collect();
-    // One per run workspace opened.
-    assert_eq!(failures.len(), backend.groups.lock().unwrap().len());
-    for failure in failures {
-        assert_eq!(
-            (failure.task_id, failure.run_id.as_ref().map(RunId::as_str)),
-            (None, None)
-        );
-        assert_eq!(failure.payload["op"], "ensure_group");
-        assert_eq!(failure.payload["slots"], 1);
-        assert_eq!(failure.payload["parallel"], 1);
-    }
 }
 
 /// With one slot the supervisor claims the candidate whose completion
@@ -871,8 +821,10 @@ fn workspace_close_is_recorded_once_and_only_for_accepted_runs() {
             },
         )
         .unwrap();
+    // The handle of the run's background wrapper, as the supervisor
+    // records it (a run opens no workspace, ADR-t1433-3).
     queue
-        .workspace_created(run.id(), &LeaseToken::new("owner"), WORKSPACE_ID)
+        .workspace_created(run.id(), &LeaseToken::new("owner"), "background:10:start")
         .unwrap();
     queue
         .register_wrapper(run.id(), &LeaseToken::new("owner"), 10)
@@ -1266,7 +1218,7 @@ fn supervise_records_its_progress_as_json_lines() {
         .find(|r| {
             r["message"]
                 == format!(
-                    "task 1 running in workspace {}; run {}",
+                    "task 1 running in the background as {}; run {}",
                     background_session(&run),
                     run.id()
                 )

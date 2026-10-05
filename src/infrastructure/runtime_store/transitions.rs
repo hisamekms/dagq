@@ -785,8 +785,10 @@ impl SqliteQueue {
         tx.commit()?;
         Ok(())
     }
-    /// Record a confirmed cmux close. Only an accepted run whose workspace is
-    /// still recorded as open qualifies; the worktree and branch stay for integration.
+    /// Record the stop of the run's session (its background wrapper; before
+    /// ADR-t1433-3, a confirmed cmux close). Only an accepted run whose
+    /// session is still recorded as open qualifies; the worktree and branch
+    /// stay for integration.
     pub fn workspace_closed(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun> {
         // The spans it closes read their transcripts first (task 543).
         let _read = read_before(

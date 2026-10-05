@@ -72,7 +72,6 @@ printf '{"type":"turn.completed","usage":{"input_tokens":13,"cached_input_tokens
 fn a_codex_worker_runs_its_turn_through_cmux_and_lands_on_main() {
     let fixture = fixture();
     let Fixture {
-        cmux,
         repo,
         base,
         env,
@@ -105,12 +104,8 @@ fn a_codex_worker_runs_its_turn_through_cmux_and_lands_on_main() {
         dagq(env, &["ready", &task_id, "--bypass-review"])["status"],
         "ready"
     );
-    let mut guard = WorkspaceGuard {
-        cmux: cmux.clone(),
-        ids: Vec::new(),
-    };
     let codex_arg = codex.to_str().unwrap();
-    let pass = supervise_once(&fixture, &["--codex", codex_arg], &[&task_id], &mut guard);
+    let pass = supervise_once(&fixture, &["--codex", codex_arg], &[&task_id]);
     let outcome = &pass.outcome;
     assert_eq!(outcome["errors"], Value::Array(vec![]), "{outcome}");
     assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
@@ -187,7 +182,7 @@ fn a_codex_worker_runs_its_turn_through_cmux_and_lands_on_main() {
     assert_eq!(finished["usage"]["input_tokens"], 13);
     assert_eq!(finished["usage"]["reasoning_output_tokens"], 1);
     assert_eq!(finished["message"], "committed e2e.txt");
-    wait_until_not_listed(cmux, &pass.workspaces[0].1);
+    crate::wait_until_wrapper_gone(&pass.sessions[0].1);
 }
 
 /// The production CLI flag through real cmux: no Claude executable is
@@ -197,9 +192,7 @@ fn a_codex_worker_runs_its_turn_through_cmux_and_lands_on_main() {
 #[ignore = "needs a running cmux; run with --ignored"]
 fn no_claude_runs_codex_through_cmux_and_allows_manual_landing() {
     let fixture = fixture();
-    let Fixture {
-        cmux, env, stub, ..
-    } = &fixture;
+    let Fixture { env, stub, .. } = &fixture;
     let codex = stub.with_file_name("codex-stub");
     fs::write(&codex, CODEX_STUB).unwrap();
     use std::os::unix::fs::PermissionsExt;
@@ -220,15 +213,10 @@ fn no_claude_runs_codex_through_cmux_and_allows_manual_landing() {
     )["id"]
         .to_string();
     dagq(env, &["ready", &task_id, "--bypass-review"]);
-    let mut guard = WorkspaceGuard {
-        cmux: cmux.clone(),
-        ids: Vec::new(),
-    };
     let pass = supervise_once(
         &fixture,
         &["--no-claude", "--codex", codex.to_str().unwrap()],
         &[&task_id],
-        &mut guard,
     );
     assert_eq!(pass.outcome["errors"], json!([]), "{}", pass.outcome);
     let detail = dagq(env, &["show", &task_id, "--full"]);
@@ -238,5 +226,5 @@ fn no_claude_runs_codex_through_cmux_and_allows_manual_landing() {
     assert!(!events.iter().any(|e| e["kind"] == "review_started"));
     let landed = dagq(env, &["integrate", &task_id]);
     assert_eq!(landed["outcome"], "integrated", "{landed}");
-    wait_until_not_listed(cmux, &pass.workspaces[0].1);
+    crate::wait_until_wrapper_gone(&pass.sessions[0].1);
 }

@@ -4,8 +4,8 @@ type: design
 title: "Landing recheck"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1850: resumes, recovery jobs and claims share one line by effective priority; task 1312; task 1311
-last_verified: 2026-10-06 # task 1850; task 1312; task 1311
+updated: 2026-10-06 # task 1850: resumes, recovery jobs and claims share one line by effective priority; task 1312; task 1311; task 1440: after a resume the wrapper is stopped, not a workspace closed
+last_verified: 2026-10-06 # task 1850; task 1312; task 1311; task 1440
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -19,7 +19,7 @@ related:
 
 # Landing recheck
 
-> **予定（goal 92）**: [ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)決定3で、resumeの後の「sessionに終了を依頼してworkspaceを閉じ」は、終了の依頼でbackgroundのwrapperを終わらせ、終わったことを確かめ、残っていれば止めてからleaseを手放すことになる（ADR-0068決定4をamends）。worker の打鍵と stuck_exit の監視は task 1437 で廃止した。workspace の撤去は task 1440 が行う。
+> [ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)決定3（ADR-0068決定4をamends）のとおり、resumeの後は終了の依頼でbackgroundのwrapperを終わらせ、終わったことを確かめ、残っていれば止めてからleaseを手放す（task 1440。runはworkspaceを開かない）。worker の打鍵と stuck_exit の監視は task 1437 で廃止した。
 
 supervisorが着地させたrunが`run_integrated`で終わるたびと、mainが最後にrecheckを終えたmainと違うとき（直接の`integrate`、handoffや再起動の間の着地、dagqを通さないpush）に、着地待ちのrunをそのmainに対して先回りして確かめる（[ADR-0068](../../adr/0068-recheck-waiting-runs-after-each-landing.md)、きっかけは[ADR-t1310-1](../../adr/2026-10-03-t1310-1-recheck-whenever-main-moves-past-the-last-recheck.md)が広げた）。着地しなくなったrunは、askの答えや`integrate`の順番を待たずにresumeへ回る。きれいに着地すると確かめたrunにもその結果を記録し、runの開いているaskは最新の結果を1つの段落で見せる（[ADR-t1311-1](../../adr/2026-10-05-t1311-1-record-clean-recheck-results-and-keep-one-recheck-paragraph-in-asks.md)）。実装は`src/application/supervise/recheck.rs`（supervisor側）と`src/domain/recheck.rs`（記録の形）。
 
@@ -53,7 +53,7 @@ recheckのthreadが対象を1件ずつ確かめる（`recheck_runs`）。
 - **askの段落**: 失敗でもきれいでも、runの閉じていないask（答えの有無を問わない）のquestionのrecheckの段落を最新の結果1つに置き換え、`ask_updated`（`ask_id`、`kind`、`why`）を記録する（`AskStore::note_on_asks`、置き換えは`recheck::noted_question`）。recheckの段落は`Landing recheck: `で始まる段落（空行で区切ったもの）で、置くときは前のものを全部除いてからquestionの末尾に置く（ADR-t1311-1以前のバイナリが積み重ねた段落も除く）。置き換えた結果が前のquestionと同じなら書き直さず、`ask_updated`も記録しない。askは閉じない。
   - 失敗（`why: landing_recheck_failed`、`recheck::ask_note`）: `Landing recheck: <reason>. The supervisor resumes the run …`（`held`なら`… parks the run for a resume instead of landing it once its session has exited.`）。
   - きれい（`why: landing_recheck_clean`、`recheck::clean_ask_note`）: `Landing recheck: after task <task> (run <run>) landed, the landing recheck found that the run still lands cleanly on main <mainの先頭12桁>: git merges it without a conflict and "<command>" passes on main with the run merged in.`。commandを流さなかったときは`…: git merges it without a conflict (no command was run).`、着地のrunの無い動きなら冒頭は`after main moved without a dagq landing, …`。
-- **resumeの後**: resumeが解決して`validating`を通ったrunに閉じていない`approve_landing`のaskがあれば、reviewをやり直さず、sessionに終了を依頼してworkspaceを閉じ、leaseを手放して`awaiting_integration`で答えを待つ（`AfterExit::Rest { close: true }`）。答えは`apply_landing_answers`がこれまでどおり適用する。`integration_approved`のあるrunはreviewを経ずに着地へ進む。
+- **resumeの後**: resumeが解決して`validating`を通ったrunに閉じていない`approve_landing`のaskがあれば、reviewをやり直さず、sessionに終了を依頼し（`turns/exit`）、wrapperが終わったことを確かめて残りをhandleで止め（`stop_run_session`。ADR-t1433-3より前にworkspaceで開いたsessionのIDは閉じずに人に任せる）、leaseを手放して`awaiting_integration`で答えを待つ（`AfterExit::Rest { close: true }`）。答えは`apply_landing_answers`がこれまでどおり適用する。`integration_approved`のあるrunはreviewを経ずに着地へ進む。
 - **resumeの数え方**（ADR-0068の決定5、`domain::resume`）: `action: resumed`の`landing_recheck_failed`はparkのイベントで、code `rebase_conflict`ならreviewのverdictを問わず衝突だけのresume（`MAX_RESUME_ATTEMPTS`に数えず`[resume] conflict_only_limit`（既定5）で止める）、`verification_failed`なら数えるresume。使い切ったときの引き継ぐretryは、reviewがpassしたかapproveされたrunだけ。
 
 ## 記録

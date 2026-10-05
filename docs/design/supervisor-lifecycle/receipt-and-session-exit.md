@@ -4,8 +4,8 @@ type: design
 title: "Receipt and session exit"
 status: current
 created: 2026-09-26
-updated: 2026-10-05 # task 1594; task 1508; task 1437
-last_verified: 2026-10-05 # task 1594; task 1508; task 1437
+updated: 2026-10-05 # task 1594; task 1508; task 1437; task 1440: the wrapper runs only in the background and is stopped by its handle
+last_verified: 2026-10-05 # task 1594; task 1508; task 1437; task 1440
 scope: runtime
 related:
   - adr-t1433-2
@@ -19,13 +19,13 @@ related:
 
 # Receipt and session exit
 
-worker の対話の run の処理は task 1437 で撤去した（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）。background だけの wrapper と workspace の撤去は task 1440 が実装する（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）。
+worker の対話の run の処理は task 1437 で撤去した（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）。task 1440 から wrapper は background だけで動き、run は workspace を開かない（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）。
 
 receipt の受領と wrapper の終了は別の事象である。worker は receipt を一時ファイルから rename して公開し、wrapper は turn の終わりを `turn_finished` と idle marker に記録する。
 
 1. **idle 判定**: turn の process が終わった後に wrapper が `idle.json` を書く。receipt より新しい idle marker を見て、session を開いたまま validation と review に進む。
 2. **終了要求**: verdict が終了を求めるとき、`exit_requested` を記録して `turns/exit` に終了依頼を書く。wrapper は走っている turn を止めて終了する。
-3. **終了確認**: wrapper の `session_exited` または失った wrapper の生死を確認して次へ進む。workspace を閉じる時点は既存の処理のまま（task 1440 の範囲）。run の画面は読み取らない。
+3. **終了確認**: wrapper の `session_exited` または失った wrapper の生死を確認して次へ進む。終わった後は wrapper の残りを handle で止め（`stop_run_session`。[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)決定3）、`workspace_closed`（`workspace_id` は handle）を記録する。ADR-t1433-3 より前に workspace で開いた session の ID は閉じず、cmux にも聞かずに人に任せる。run の画面は読み取らない。
 4. **idle より先に見た wrapper の終了**: turn が失敗して wrapper が終わった（exit code 1）のを idle marker より先に見たときは、その時点で receipt の有無を読む。receipt があれば終了コードによらず validation に進み（`supervision_finished` は `exit_code` と `receipt: true`、`last_error` は書かない）、receipt が無く非 0 なら `failed` にする。1 と同じ結果になり、見た順で変わらない（[ADR-t1594-1](../../adr/2026-10-05-t1594-1-a-receipt-left-by-a-failed-headless-turn-goes-to-validation.md)、手順は [supervise](supervise.md) の手順 8）。
 
 ### `/exit`の再試行<a id="exitの再試行"></a>

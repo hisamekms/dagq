@@ -1646,9 +1646,10 @@ enum BrokerCommand {
 
 #[derive(Subcommand, Clone)]
 enum RunCommand {
-    /// Name the directory of the run's turns: no worker run has a screen
-    /// since task 1437 (the reply's `screen` is null, with the reason).
-    /// Nothing is read or recorded, and cmux is not needed.
+    /// Refused for every run, with the reason: a run's session runs in the
+    /// background without a screen (ADR-t1433-3). Read its turns with
+    /// `run log RUN [--follow]`. Nothing is read or recorded, and cmux is
+    /// not needed.
     Screen {
         /// Run ID, or a task ID for the task's latest run.
         run: String,
@@ -1680,7 +1681,7 @@ enum RunCommand {
     /// start, the agent's text, its tools, its outcome) in the log of the
     /// session the run started last, an ended run's too. With --follow,
     /// keep printing what the wrapper appends until it ends. A run whose
-    /// session runs in a workspace is refused (`run screen`).
+    /// session ran in a workspace before ADR-t1433-3 has no log.
     Log {
         /// Run ID, or a task ID for the task's latest run.
         run: String,
@@ -1691,23 +1692,21 @@ enum RunCommand {
         #[arg(long, short = 'f')]
         follow: bool,
     },
-    /// List, or with --apply close, the workspaces ended runs (integrated, succeeded, failed,
-    /// interrupted) left open that cmux still lists, as the supervisor's sweep would; it needs
-    /// no supervisor. Without RUN or --task: every run the sweep takes. RUN or --task also takes
-    /// the run a triage left (triage by hand), once no live lease, wrapper or agent is behind it.
-    /// Never closes a live or waiting run's workspace, nor the inbox's, the supervisor's or a
-    /// planner's. Lists only (a dry run) unless --apply.
+    /// Refused: the runtime opens no workspace for a run any more and stops
+    /// a run's background wrapper itself (ADR-t1433-3). Close a workspace a
+    /// run opened before in your own terminal. The arguments are accepted
+    /// and ignored, and cmux is not needed.
     CloseWorkspaces {
-        /// Run ID: only this run's workspaces; refused unless it ended.
+        /// Accepted and ignored.
         #[arg(conflicts_with = "task")]
         run: Option<String>,
-        /// Task ID: the workspaces of every ended run of this task.
+        /// Accepted and ignored.
         #[arg(long)]
         task: Option<i64>,
-        /// Close them; without it, only list what would be closed.
+        /// Accepted and ignored.
         #[arg(long)]
         apply: bool,
-        /// cmux executable that lists and closes the workspaces.
+        /// Accepted and ignored: cmux is not used.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
     },
@@ -3960,7 +3959,6 @@ fn execute(cli: Cli) -> Result<Value> {
         }
         Command::Run { command } => {
             use dagq::application::screen::{self, RunTarget};
-            use dagq::infrastructure::adapters::{Cmux, executable};
             match command {
                 // Neither builds a cmux nor an agent adapter: they read only
                 // the queue (task 1437).
@@ -3977,32 +3975,8 @@ fn execute(cli: Cli) -> Result<Value> {
                 RunCommand::Send { run, .. } => {
                     screen::run_send(&mut queue, &RunTarget::parse(&run)?)?
                 }
-                RunCommand::CloseWorkspaces {
-                    run,
-                    task,
-                    apply,
-                    cmux,
-                } => {
-                    use dagq::application::workspace_cleanup::{
-                        CleanupTarget, close_ended_workspaces,
-                    };
-                    use dagq::infrastructure::adapters::SystemProcesses;
-                    let target = match (run, task) {
-                        (Some(run), _) => CleanupTarget::Run(RunId::new(run)?),
-                        (None, Some(task)) => CleanupTarget::Task(TaskId::new(task)),
-                        (None, None) => CleanupTarget::All,
-                    };
-                    serde_json::to_value(close_ended_workspaces(
-                        &mut queue,
-                        &Cmux {
-                            executable: executable(&cmux)?,
-                        },
-                        &SystemProcesses,
-                        &*generators.clock,
-                        &actor,
-                        &target,
-                        apply,
-                    )?)?
+                RunCommand::CloseWorkspaces { .. } => {
+                    bail!(dagq::application::screen::CLOSE_WORKSPACES_REFUSED)
                 }
             }
         }

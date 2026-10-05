@@ -16,11 +16,7 @@ fn a_task_lands_on_master_of_a_repository_without_origin_cargo_toml_or_agents_md
         &[("migrations/0001_x.sql", "CREATE TABLE x (id INTEGER);\n")],
     );
     let Fixture {
-        cmux,
-        repo,
-        base,
-        env,
-        ..
+        repo, base, env, ..
     } = &fixture;
     for absent in ["Cargo.toml", "AGENTS.md", "CLAUDE.md"] {
         assert!(!repo.join(absent).exists(), "{absent}");
@@ -42,11 +38,7 @@ fn a_task_lands_on_master_of_a_repository_without_origin_cargo_toml_or_agents_md
         &[],
         &[],
     );
-    let mut guard = WorkspaceGuard {
-        cmux: cmux.clone(),
-        ids: Vec::new(),
-    };
-    let pass = supervise_once(&fixture, &[], &[&task_id], &mut guard);
+    let pass = supervise_once(&fixture, &[], &[&task_id]);
     let outcome = &pass.outcome;
     assert_eq!(outcome["errors"], Value::Array(vec![]), "{outcome}");
     assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");

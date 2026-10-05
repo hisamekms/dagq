@@ -347,11 +347,11 @@ impl Supervisor<'_> {
         self.note_triaged(&failed);
         Ok(())
     }
-    /// Close the resume workspaces earlier attempts of this run left open
+    /// Stop the resume wrappers earlier attempts of this run left running
     /// (a session let go after the exit timeout, or one that might have
-    /// lived when a resume failed), found by the IDs recorded in its
+    /// lived when a resume failed), found by the handles recorded in its
     /// `workspace_created` / `resume_finished` events (ADR-0026), and
-    /// record each close as `workspace_closed` (`by: supervisor`). The
+    /// record each stop as `workspace_closed` (`by: supervisor`). The
     /// caller checked that no session of the run is alive.
     pub(super) fn close_left_resume_workspaces(&mut self, run: &TaskRun) -> Result<()> {
         let events = self.queue.run_events(run.id())?;
@@ -360,8 +360,8 @@ impl Supervisor<'_> {
             .filter(|w| w.resume_attempt.is_some() && !w.closed)
             .collect();
         for workspace in left {
-            if self.cmux.exists(&workspace.workspace_id)? {
-                info!(run_id = %run.id(), "run {}: closing resume workspace {} left by an earlier attempt; its session has ended", run.id(), workspace.workspace_id);
+            if self.run_session_open(&workspace.workspace_id)? {
+                info!(run_id = %run.id(), "run {}: stopping the resume wrapper {} left by an earlier attempt; its session has ended", run.id(), workspace.workspace_id);
                 self.cmux.close(&workspace.workspace_id)?;
                 self.queue.record_workspace_closed(
                     run.id(),
@@ -373,9 +373,9 @@ impl Supervisor<'_> {
         Ok(())
     }
     /// Write the resolution request, refresh the runtime snapshot (the one
-    /// the worker ran may predate `session --resume`) and open the resume
-    /// workspace with the same wrapper, settings and `run_env` as the
-    /// worker's.
+    /// the worker ran may predate `session --resume`) and start the resume
+    /// wrapper in the background with the same settings and `run_env` as
+    /// the worker's.
     pub(super) fn start_resume(
         &mut self,
         run: &TaskRun,
@@ -413,28 +413,25 @@ impl Supervisor<'_> {
         // The resumed worker's broker token is issued again; `required`
         // resumes no worker without the tools (ADR-t838-1).
         self.broker_grant_or_refuse(run)?;
-        let background = self.background_log(run, &run_dir, Some(attempt), false);
-        let command = background::wrapper_command(
-            vec![
-                path_text(&run_dir.join(RUN_RUNNER_FILE))?,
-                "--db".into(),
-                path_text(&self.layout.db)?,
-                "session".into(),
-                "--run".into(),
-                run.id().to_string(),
-                "--lease".into(),
-                self.token.to_string(),
-                "--claude".into(),
-                path_text(&self.layout.claude)?,
-                "--codex".into(),
-                path_text(&self.layout.codex)?,
-                "--resume".into(),
-            ],
-            background.as_deref(),
-        );
-        // The worker's env and group (the same session of the run) and the
-        // description `run <run-id> resume` (ADR-0028), then `[run.env]`
-        // after the runtime's own names, as in the worker's workspace.
+        self.warn_ignored_wrapper_setting();
+        let log = self.session_log(&run_dir, Some(attempt), false);
+        let command = background::wrapper_command(vec![
+            path_text(&run_dir.join(RUN_RUNNER_FILE))?,
+            "--db".into(),
+            path_text(&self.layout.db)?,
+            "session".into(),
+            "--run".into(),
+            run.id().to_string(),
+            "--lease".into(),
+            self.token.to_string(),
+            "--claude".into(),
+            path_text(&self.layout.claude)?,
+            "--codex".into(),
+            path_text(&self.layout.codex)?,
+            "--resume".into(),
+        ]);
+        // The worker's env (the same session of the run), then `[run.env]`
+        // after the runtime's own names, as for the worker's first session.
         let workspace = self
             .actors()
             .spawn(ActorExecutionSpec::new(
@@ -442,21 +439,17 @@ impl Supervisor<'_> {
                 WorkspaceAccess::Write(PathBuf::from(
                     run.worktree_path().context("missing worktree")?,
                 )),
-                ActorProgram::RunWorkspace {
-                    task: &task,
+                ActorProgram::RunSession {
                     run,
                     wrapper: command,
-                    resume: true,
-                    description: resume_workspace_description(run),
-                    group: self.session_group(background.as_deref()),
                     run_env,
-                    background: background.as_deref(),
+                    log: &log,
                 },
             ))?
             .workspace()?;
-        // Every workspace of the run is recorded, so whatever ends the run
-        // finds this one to close; one that cannot be is closed now (task
-        // 806).
+        // Every session of the run is recorded, so whatever ends the run
+        // finds this wrapper to stop; one that cannot be is stopped now
+        // (task 806).
         if let Err(error) = self.queue.record_runtime_event(
             run.id(),
             EventKind::WorkspaceCreated,
@@ -464,16 +457,16 @@ impl Supervisor<'_> {
         ) {
             return Err(match self.cmux.close(&workspace) {
                 Ok(()) => error.context(format!(
-                    "the resume workspace {workspace} of run {} could not be recorded and was closed",
+                    "the resume's background wrapper {workspace} of run {} could not be recorded and was stopped",
                     run.id()
                 )),
-                Err(close) => error.context(format!(
-                    "the resume workspace {workspace} of run {} could not be recorded, and closing it failed: {close:#}",
+                Err(stop) => error.context(format!(
+                    "the resume's background wrapper {workspace} of run {} could not be recorded, and stopping it failed: {stop:#}",
                     run.id()
                 )),
             });
         }
-        self.record_launch(run, &workspace, background.as_deref())?;
+        self.record_launch(run, &workspace, &log)?;
         Ok(ResumeWatch {
             workspace: workspace.clone(),
             attempt,
@@ -662,15 +655,15 @@ impl Supervisor<'_> {
             .has_run_event(slot.run.id(), event_kind::INTEGRATION_APPROVED)?;
         let reviewed = matches!(verdict.kind, ResumeOutcome::Resolved) && !approved;
         // A session let go after the exit timeout still runs: its
-        // workspace stays, and blocks the next attempt until it ends. A
+        // wrapper stays, and blocks the next attempt until it ends. A
         // session going on to review keeps it until the verdict.
         let closed = verdict.closed
             || !verdict.exit_timed_out
                 && !reviewed
-                && match self.cmux.close(workspace) {
+                && match stop_run_session(self.cmux, workspace) {
                     Ok(()) => true,
                     Err(error) => {
-                        warn!(run_id = %slot.run.id(), error = %format_args!("{error:#}"), "run {}: resume workspace {workspace} could not be closed: {error:#}", slot.run.id());
+                        warn!(run_id = %slot.run.id(), error = %format_args!("{error:#}"), "run {}: the resume's wrapper {workspace} could not be stopped: {error:#}", slot.run.id());
                         false
                     }
                 };

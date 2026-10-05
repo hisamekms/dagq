@@ -1,6 +1,8 @@
-//! Read and send to a planner's session by its id. Worker runs expose
-//! their turns directory through `run screen`; `run send` is refused and
-//! points to `answer`, whose answer the supervisor delivers as a turn.
+//! Read and send to a planner's session by its id. A run has no screen:
+//! `run screen` is refused with the reason and the turns' log CLI
+//! (`run log`, ADR-t1433-3), `run close-workspaces` is refused as there is
+//! no run workspace, and `run send` is refused and points to `answer`,
+//! whose answer the supervisor delivers as a turn.
 //! Only planner reads and sends use the workspace backend and record
 //! `screen_read` / `screen_input_sent`. Authorization remains the caller's
 //! responsibility (`screen.read`, `screen.send`).
@@ -202,28 +204,29 @@ fn read(cmux: &dyn WorkspaceBackend, workspace: &str, lines: usize) -> Result<(V
     Ok((output, record))
 }
 
-/// Why `run screen` reads no screen of a run recorded as interactive: its
-/// worker was retired with no screen left to read (task 1437).
-pub const RETIRED_SCREEN: &str =
-    "the interactive worker was retired (task 1437); the run has no screen to read";
+/// Why `run screen` is refused: no run's session has a screen to read
+/// (ADR-t1433-3 decision 4). The turns' log CLI takes its place.
+pub const RUN_SCREEN_REFUSED: &str = "run screen is refused: a run's session runs in the background without a screen (ADR-t1433-3; the interactive worker was retired, task 1437)";
 
-/// `run screen`: no worker run has a screen to read. Return its turns
-/// directory, and why: a headless run has none, and a run recorded as
-/// interactive had its worker retired.
+/// Why `run close-workspaces` is refused: the runtime opens no workspace
+/// for a run, so there is none to clean up (ADR-t1433-3 decision 3).
+pub const CLOSE_WORKSPACES_REFUSED: &str = "run close-workspaces is refused: the runtime opens no workspace for a run any more and stops a run's background wrapper itself (ADR-t1433-3); close a workspace a run opened before in your own terminal";
+
+/// `run screen`: refused for every run, with the reason and the turns' log
+/// CLI (`dagq run log`) that replaced it (ADR-t1433-3 decision 4). The run
+/// is resolved first, so that an unknown run or task is the queue's error.
+/// Nothing is read or recorded, and cmux is not needed.
 pub fn run_screen(queue: &mut dyn Queue, target: &RunTarget) -> Result<Value> {
     let run = resolve_run(queue, target)?;
-    let reason = match run.worker_mode() {
-        crate::domain::worker::WorkerMode::Interactive => RETIRED_SCREEN,
-        crate::domain::worker::WorkerMode::Headless => "a headless run has no screen",
-    };
-    Ok(json!({
-        "run_id": run.id(),
-        "task_id": run.task_id(),
-        "worker_mode": run.worker_mode(),
-        "screen": null,
-        "reason": reason,
-        "turns": run.run_dir().map(|dir| format!("{dir}/turns")),
-    }))
+    let turns = run
+        .run_dir()
+        .map(|dir| format!("; its turns are in {dir}/turns"))
+        .unwrap_or_default();
+    bail!(
+        "{RUN_SCREEN_REFUSED}; read the turns of run {} with `dagq run log {}` (`--follow` to keep reading){turns}",
+        run.id(),
+        run.id()
+    )
 }
 
 /// `planner screen`: the screen of `planner`'s session. A headless planner

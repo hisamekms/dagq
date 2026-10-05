@@ -53,7 +53,6 @@ pub mod supervise;
 pub mod throughput_review;
 pub mod update;
 pub mod watch;
-pub mod workspace_cleanup;
 
 pub use crate::domain::ClaimRank;
 pub use ports::*;

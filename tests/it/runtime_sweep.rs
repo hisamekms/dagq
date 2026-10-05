@@ -1,13 +1,12 @@
-//! Runtime tests: The sweep of workspaces, build outputs and worktrees.
+//! Runtime tests: The sweep of ended runs' background wrappers, build
+//! outputs and worktrees, and of the planners' records and runners.
 use crate::runtime_support;
 use dagq::domain::EventKind;
 use dagq::infrastructure::git_binary::git_executable;
 
 use runtime_support::*;
 
-/// Supervisor options that sweep the workspaces of ended runs on every pass.
-/// The tests of the run workspaces themselves choose them with
-/// [`in_workspaces`] (task 1439).
+/// Supervisor options that sweep the ended runs on every pass.
 fn sweeping_options() -> SuperviseOptions {
     SuperviseOptions {
         sweep_interval: Duration::ZERO,
@@ -26,14 +25,15 @@ fn closes_of(queue: &SqliteQueue, run: &TaskRun) -> Vec<Value> {
         .collect()
 }
 
-/// Task 180: the supervisor's sweep closes the worker workspace of a failed
-/// run the triage never takes: its task was canceled, or made ready and
-/// run again, or a newer run of the in-progress task took its place. The
-/// latest failed run of an in-progress task is the triage's and stays
-/// open, a workspace cmux does not list gets no event, and worktrees and
-/// branches stay.
+/// Task 180: the supervisor's sweep stops the background wrapper of a
+/// failed run the triage never takes while it still runs: its task was
+/// canceled, or made ready and run again, or a newer run of the
+/// in-progress task took its place (ADR-t1433-3 decision 3). The latest
+/// failed run of an in-progress task is the triage's and is left alone, a
+/// wrapper that no longer runs gets no event, and worktrees and branches
+/// stay.
 #[test]
-fn the_sweep_closes_the_workspaces_of_failed_runs_the_triage_does_not_take() {
+fn the_sweep_stops_the_wrappers_of_failed_runs_the_triage_does_not_take() {
     let (_dir, repo, db) = fixture();
     {
         let mut queue = SqliteQueue::open(&db).unwrap();
@@ -41,13 +41,7 @@ fn the_sweep_closes_the_workspaces_of_failed_runs_the_triage_does_not_take() {
         add_ready_task(&mut queue, "third task", &[]);
     }
     let backend = TestWorkspace::new(&db, false, "commit work; exit 7");
-    supervise_with(
-        &db,
-        &repo,
-        &backend,
-        &in_workspaces(supervise_options(4, true)),
-    )
-    .unwrap();
+    supervise_with(&db, &repo, &backend, &supervise_options(4, true)).unwrap();
     backend.join();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let first: Vec<TaskRun> = (1..=3)
@@ -59,16 +53,16 @@ fn the_sweep_closes_the_workspaces_of_failed_runs_the_triage_does_not_take() {
         assert!(run.workspace_closed_at().is_none());
     }
     assert!(backend.closed().is_empty());
-    let workspace = |run: &TaskRun| run.workspace_id().unwrap().to_owned();
+    let workspace = |run: &TaskRun| background_session(run);
 
     // A person cancels task 1 and runs task 2 again; task 3 waits. While
-    // cmux does not list task 2's first workspace, nothing is recorded of it.
+    // task 2's first wrapper does not run, nothing is recorded of it.
     queue
         .transition(TaskId::new(1), TaskAction::Cancel)
         .unwrap();
     queue.transition(TaskId::new(2), TaskAction::Ready).unwrap();
     backend.hidden.lock().unwrap().push(workspace(&first[1]));
-    supervise_with(&db, &repo, &backend, &in_workspaces(sweeping_options())).unwrap();
+    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
     backend.join();
     let closed = closes_of(&queue, &first[0]);
     assert_eq!(
@@ -88,10 +82,10 @@ fn the_sweep_closes_the_workspaces_of_failed_runs_the_triage_does_not_take() {
     assert_eq!(task2.runs.len(), 2);
     assert_eq!(task2.task.status(), TaskStatus::InProgress);
 
-    // Listed again, the first run of task 2 is no longer its task's
-    // latest: the next sweep closes it; the other runs are left alone.
+    // Running again, the first run of task 2 is no longer its task's
+    // latest: the next sweep stops it; the other runs are left alone.
     backend.hidden.lock().unwrap().clear();
-    supervise_with(&db, &repo, &backend, &in_workspaces(sweeping_options())).unwrap();
+    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
     backend.join();
     assert_eq!(
         closes_of(&queue, &first[1]),
@@ -115,30 +109,33 @@ fn the_sweep_closes_the_workspaces_of_failed_runs_the_triage_does_not_take() {
     assert!(!Path::new(first[0].worktree_path().unwrap()).exists());
 }
 
-/// Task 180: a landed run's workspaces are swept too, however it landed:
-/// a resume workspace the run's close left open, and the worker workspace
-/// of a run landed by hand without its close. A cmux failure records
-/// `cleanup_failed` and the sweep goes on to the next; a workspace cmux
-/// does not list gets no event.
+/// Task 180: a landed run's wrappers are swept too, however it landed: a
+/// resume's wrapper the run's close left running, and the worker's wrapper
+/// of a run landed by hand without its close. A failure to stop one
+/// records `cleanup_failed` and the sweep goes on to the next; a wrapper
+/// that no longer runs gets no event. A workspace a session opened before
+/// ADR-t1433-3 is not closed nor asked of cmux: a person closes it.
 #[test]
-fn the_sweep_closes_every_workspace_left_open_by_a_landed_run() {
+fn the_sweep_stops_every_wrapper_left_running_by_a_landed_run() {
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
-    let outcome = supervise_reviewed_with(
-        &db,
-        &repo,
-        &backend,
-        &reviewer,
-        &in_workspaces(supervise_options(4, true)),
-    );
+    let outcome =
+        supervise_reviewed_with(&db, &repo, &backend, &reviewer, &supervise_options(4, true));
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let mut queue = SqliteQueue::open(&db).unwrap();
     let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
     assert_eq!(run.status(), RunStatus::Integrated);
-    // A resume workspace left open, one cmux no longer lists, and the
-    // worker workspace nobody closed, as when a person integrated the run.
-    for (workspace, attempt) in [("resume-ws", 1), ("gone-ws", 2)] {
+    // A resume's wrapper left running, one that has ended, a workspace of
+    // a session from before ADR-t1433-3 that cmux still lists, and the
+    // worker's wrapper nobody stopped, as when a person integrated the run.
+    let (resume, gone, legacy, hand) = (
+        "background:4001:resume",
+        "background:4002:gone",
+        "legacy-ws",
+        "background:4003:hand",
+    );
+    for (workspace, attempt) in [(resume, 1), (gone, 2), (legacy, 3)] {
         queue
             .record_runtime_event(
                 run.id(),
@@ -147,19 +144,20 @@ fn the_sweep_closes_every_workspace_left_open_by_a_landed_run() {
             )
             .unwrap();
     }
-    backend.list("resume-ws");
+    backend.list(resume);
+    backend.list(legacy);
     Connection::open(&db)
         .unwrap()
         .execute(
-            "UPDATE task_runs SET workspace_id='hand-ws', workspace_closed_at=NULL WHERE id=?1",
-            [run.id()],
+            "UPDATE task_runs SET workspace_id=?2, workspace_closed_at=NULL WHERE id=?1",
+            [run.id().as_str(), hand],
         )
         .unwrap();
-    backend.list("hand-ws");
+    backend.list(hand);
     let before = closes_of(&queue, &run).len();
 
     backend.close_fail = true;
-    supervise_with(&db, &repo, &backend, &in_workspaces(sweeping_options())).unwrap();
+    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
     let failures = |run: &TaskRun| -> Vec<Value> {
         queue
             .run_events(run.id())
@@ -171,31 +169,30 @@ fn the_sweep_closes_every_workspace_left_open_by_a_landed_run() {
     };
     let failed = failures(&run);
     let workspaces: Vec<&Value> = failed.iter().map(|f| &f["workspace_id"]).collect();
-    assert_eq!(
-        workspaces,
-        [&json!("hand-ws"), &json!("resume-ws")],
-        "{failed:?}"
-    );
+    assert_eq!(workspaces, [&json!(hand), &json!(resume)], "{failed:?}");
     assert!(failed.iter().all(|f| f["by"] == "supervisor"));
     assert_eq!(closes_of(&queue, &run).len(), before);
 
     backend.close_fail = false;
-    supervise_with(&db, &repo, &backend, &in_workspaces(sweeping_options())).unwrap();
+    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
     let closed = closes_of(&queue, &run);
     assert_eq!(
         closed[before..],
         [
-            json!({"workspace_id": "hand-ws", "by": "supervisor", "reason": "ended"}),
-            json!({"workspace_id": "resume-ws", "by": "supervisor", "reason": "ended"}),
+            json!({"workspace_id": hand, "by": "supervisor", "reason": "ended"}),
+            json!({"workspace_id": resume, "by": "supervisor", "reason": "ended"}),
         ]
     );
     assert!(queue.run(run.id()).unwrap().workspace_closed_at().is_some());
-    assert!(backend.closed().contains(&"resume-ws".to_owned()));
-    assert!(backend.closed().contains(&"hand-ws".to_owned()));
-    assert!(!closed.iter().any(|c| c["workspace_id"] == "gone-ws"));
+    assert!(backend.closed().contains(&resume.to_owned()));
+    assert!(backend.closed().contains(&hand.to_owned()));
+    assert!(!closed.iter().any(|c| c["workspace_id"] == gone));
+    // The workspace from before is neither closed nor recorded.
+    assert!(!backend.closed().contains(&legacy.to_owned()));
+    assert!(!closed.iter().any(|c| c["workspace_id"] == legacy));
 
-    // Nothing is listed any more: another sweep records nothing.
-    supervise_with(&db, &repo, &backend, &in_workspaces(sweeping_options())).unwrap();
+    // Nothing runs any more: another sweep records nothing.
+    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
     assert_eq!(closes_of(&queue, &run).len(), closed.len());
     assert_eq!(failures(&run).len(), 2);
 }
@@ -427,8 +424,8 @@ fn build_outputs_that_cannot_be_removed_are_retried_by_the_sweep() {
 }
 
 /// Task 396: an ended run whose supervisor died before releasing its
-/// lease is swept as if nobody leased it: its workspace closes and its
-/// worktree is a cleanup candidate. A lease a live supervisor holds still
+/// lease is swept as if nobody leased it: its wrapper left running is
+/// stopped and its worktree is a cleanup candidate. A lease a live supervisor holds still
 /// keeps the sweep away, from its Claude Code scratchpad (task 1100) and
 /// its run's `tmp` (task 1290) too, which go once the lease is stale as
 /// its task is completed.
@@ -444,11 +441,11 @@ fn an_ended_run_with_a_stale_lease_is_swept_but_not_one_with_a_live_lease() {
     assert_eq!(run.status(), RunStatus::Integrated);
     let raw = Connection::open(&db).unwrap();
     raw.execute(
-        "UPDATE task_runs SET workspace_id='left-ws', workspace_closed_at=NULL WHERE id=?1",
+        "UPDATE task_runs SET workspace_id='background:4004:left', workspace_closed_at=NULL WHERE id=?1",
         [run.id()],
     )
     .unwrap();
-    backend.list("left-ws");
+    backend.list("background:4004:left");
     // A live supervisor's lease: its process is alive and its heartbeat
     // is not old.
     raw.execute(
@@ -491,7 +488,11 @@ fn an_ended_run_with_a_stale_lease_is_swept_but_not_one_with_a_live_lease() {
     );
     supervise_with(&db, &repo, &backend, &sweeping).unwrap();
     assert_eq!(closes_of(&queue, &run).len(), before);
-    assert!(!backend.closed().contains(&"left-ws".to_owned()));
+    assert!(
+        !backend
+            .closed()
+            .contains(&"background:4004:left".to_owned())
+    );
     assert!(scratchpad.join("session/scratchpad/notes").is_file());
     assert!(payloads_of(&queue, &run, "scratchpad_removed").is_empty());
     assert!(tmp.join("target/debug/big").is_file());
@@ -523,9 +524,13 @@ fn an_ended_run_with_a_stale_lease_is_swept_but_not_one_with_a_live_lease() {
     let closed = closes_of(&queue, &run);
     assert_eq!(
         closed[before..],
-        [json!({"workspace_id": "left-ws", "by": "supervisor", "reason": "ended"})]
+        [json!({"workspace_id": "background:4004:left", "by": "supervisor", "reason": "ended"})]
     );
-    assert!(backend.closed().contains(&"left-ws".to_owned()));
+    assert!(
+        backend
+            .closed()
+            .contains(&"background:4004:left".to_owned())
+    );
 
     // A heartbeat older than the limit is stale too.
     raw.execute(

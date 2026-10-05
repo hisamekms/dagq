@@ -168,7 +168,6 @@ pub(crate) fn supervise_real(
 /// the guard that stops what the run leaves.
 pub(crate) fn background_fixture(turns: &str) -> (Fixture, PathBuf, PathBuf, PathBuf, Leftovers) {
     let (dir, repo, db, backend) = headless_fixture(&[]);
-    wrappers_in_background(&repo);
     set_turns(dir.path(), turns);
     let claude = turns_only(dir.path(), &backend.headless.clone().unwrap());
     // Made before any supervisor (a child's too) looks for it.
@@ -436,13 +435,13 @@ kill "$pid" 2>/dev/null
 }
 
 /// Acceptance: the supervisor's sweep stops the background session of an
-/// ended run while cmux cannot list the workspaces (the stub's listing
-/// fails). The run opened a workspace before it, which the sweep's
-/// candidates keep (every workspace a run opened, closed or not): the
-/// failed listing leaves only that workspace alone, and the background
-/// session, judged by its wrapper's process, is closed: its wrapper and
-/// turn are stopped and the close of its handle is recorded, with nothing
-/// recorded or asked of cmux for the workspace.
+/// ended run without asking cmux (whose stub cannot list the workspaces).
+/// The run opened a workspace before it, which the sweep's candidates keep
+/// (every workspace a run opened, closed or not): a workspace from before
+/// ADR-t1433-3 is left to a person, and cmux is not listed for it, while
+/// the background session, judged by its wrapper's process, is stopped:
+/// its wrapper and turn are stopped and the stop of its handle is
+/// recorded, with nothing recorded or asked of cmux for the workspace.
 #[test]
 fn the_sweep_stops_an_ended_background_session_while_cmux_cannot_list() {
     let (_dir, repo, db, claude, _leftovers) = background_fixture("say slow; sleep 120");
@@ -521,6 +520,6 @@ fn the_sweep_stops_an_ended_background_session_while_cmux_cannot_list() {
         [&json!({"workspace_id": handle, "by": "supervisor", "reason": "superseded"})]
     );
     let calls = fs::read_to_string(cmux_stub(&db).with_file_name("calls")).unwrap();
-    assert!(calls.contains("list-windows"), "{calls}");
+    assert!(!calls.contains("list-windows"), "{calls}");
     assert!(!calls.contains("WS-EARLIER"), "{calls}");
 }

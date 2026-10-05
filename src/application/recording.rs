@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use std::{path::Path, sync::Arc, thread, time::Duration};
 
 use super::{QueueOpener, SupervisorEnvironment, WorkspaceBackend, WorkspaceTags};
-use crate::domain::{Reason, ReasonCode, RunId, Task, TaskRun};
+use crate::domain::{Reason, ReasonCode, RunId};
 
 /// `backend_call_failed` keeps this many leading characters of the error.
 pub const BACKEND_ERROR_CHARS: usize = 300;
@@ -354,26 +354,10 @@ impl WorkspaceBackend for RecordingBackend<'_> {
     fn preflight_detached(&self, environment: &SupervisorEnvironment) -> Result<()> {
         self.inner.preflight_detached(environment)
     }
-    fn create(
-        &self,
-        task: &Task,
-        run: &TaskRun,
-        command: &str,
-        tags: &WorkspaceTags,
-    ) -> Result<String> {
-        let result = self.inner.create(task, run, command, tags);
-        self.recorded("create", None, Some(run.id()), result)
-    }
-    fn create_resume(
-        &self,
-        task: &Task,
-        run: &TaskRun,
-        command: &str,
-        tags: &WorkspaceTags,
-    ) -> Result<String> {
-        let result = self.inner.create_resume(task, run, command, tags);
-        self.recorded("create_resume", None, Some(run.id()), result)
-    }
+    /// A run's wrapper that cannot be started is recorded as a failed call
+    /// on the run its environment names, as the workspace's create was
+    /// before ADR-t1433-3; a planner's, whose environment names no run, is
+    /// not recorded, as before.
     fn launch_background(
         &self,
         cwd: &std::path::Path,
@@ -381,7 +365,15 @@ impl WorkspaceBackend for RecordingBackend<'_> {
         env: &[(String, String)],
         log: &std::path::Path,
     ) -> Result<String> {
-        self.inner.launch_background(cwd, command, env, log)
+        let run = env
+            .iter()
+            .find(|(name, _)| name == crate::domain::actor::RUN_ID_ENV)
+            .and_then(|(_, id)| RunId::new(id.as_str()).ok());
+        let result = self.inner.launch_background(cwd, command, env, log);
+        match run {
+            Some(run) => self.recorded("launch_background", None, Some(&run), result),
+            None => result,
+        }
     }
     /// A text that timed out is typed again only while the screen shows no
     /// trace of it: one that got there is left to the submit check (task
@@ -574,18 +566,6 @@ mod tests {
         fn preflight_detached(&self, _: &SupervisorEnvironment) -> Result<()> {
             unimplemented!()
         }
-        fn create(&self, _: &Task, _: &TaskRun, _: &str, _: &WorkspaceTags) -> Result<String> {
-            unimplemented!()
-        }
-        fn create_resume(
-            &self,
-            _: &Task,
-            _: &TaskRun,
-            _: &str,
-            _: &WorkspaceTags,
-        ) -> Result<String> {
-            unimplemented!()
-        }
         fn send_text(&self, _: &str, _: &str) -> Result<()> {
             unimplemented!()
         }
@@ -708,6 +688,48 @@ mod tests {
             ReasonCode::BackendTimeout
         );
         assert!(timed_out_maybe_sent(&error));
+    }
+
+    /// A run's wrapper that cannot be started is handed back as a failed
+    /// `launch_background` of the run its environment names (recorded on
+    /// it), as the workspace's `create` was before ADR-t1433-3; a
+    /// planner's, whose environment names no run, is handed back as it
+    /// failed and is not recorded.
+    #[test]
+    fn a_failed_background_launch_is_a_backend_failure_only_for_a_run() {
+        let backend = Backend::failing("unused", 0);
+        let recording = recording(&backend);
+        let launch = |env: &[(&str, &str)]| {
+            let env: Vec<(String, String)> = env
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect();
+            recording
+                .launch_background(
+                    Path::new("/w"),
+                    "wrapper",
+                    &env,
+                    Path::new("/r/session.log"),
+                )
+                .unwrap_err()
+        };
+        let error = launch(&[
+            ("DAGQ_ROLE", "worker"),
+            (crate::domain::actor::RUN_ID_ENV, "r1"),
+        ]);
+        assert_eq!(failure(&error).op, "launch_background");
+        assert!(!failure(&error).effect_free);
+        assert_eq!(
+            reason_of_error(&error, ReasonCode::Other).code,
+            ReasonCode::BackendFailed
+        );
+        let error = launch(&[("DAGQ_ROLE", "planner")]);
+        assert!(error.downcast_ref::<BackendFailure>().is_none());
+        assert!(
+            format!("{error:#}").contains("starts no background wrapper"),
+            "{error:#}"
+        );
+        assert_eq!(backend.calls(), 0);
     }
 
     #[test]

@@ -60,9 +60,10 @@ pub enum Operation {
     /// `recover RUN`; `None` for a run id that cannot be read.
     Recover(Option<RunId>),
     Review(TaskId),
-    /// `run close-workspaces`: the workspaces ended runs left open, of one
-    /// run (`None` for a run id that cannot be read), of one task, or all
-    /// (ADR-t1228-1 decision 6).
+    /// `run close-workspaces`, of one run (`None` for a run id that cannot
+    /// be read), of one task, or all (ADR-t1228-1 decision 6): authorized
+    /// as before and then refused, since the runtime opens no workspace for
+    /// a run (ADR-t1433-3 decision 3).
     CloseWorkspaces(WorkspaceScope),
     /// The session wrapper of a run; `None` for a run id that cannot be read.
     Session(Option<RunId>),

@@ -149,7 +149,6 @@ mod tests {
     use super::*;
     use crate::application::{Queue, QueueOpener};
     use crate::application::{SupervisorEnvironment, WorkspaceTags};
-    use crate::domain::{Task, TaskRun};
     use std::sync::{
         Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -194,18 +193,6 @@ mod tests {
             unimplemented!()
         }
         fn preflight_detached(&self, _: &SupervisorEnvironment) -> Result<()> {
-            unimplemented!()
-        }
-        fn create(&self, _: &Task, _: &TaskRun, _: &str, _: &WorkspaceTags) -> Result<String> {
-            unimplemented!()
-        }
-        fn create_resume(
-            &self,
-            _: &Task,
-            _: &TaskRun,
-            _: &str,
-            _: &WorkspaceTags,
-        ) -> Result<String> {
             unimplemented!()
         }
         fn send_text(&self, _: &str, text: &str) -> Result<()> {

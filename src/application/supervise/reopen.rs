@@ -20,17 +20,17 @@ pub(super) const REOPEN_ATTEMPTS: usize = 3;
 /// The `repair` of the `auto_repaired` a reopened session records.
 pub(super) const REOPEN_REPAIR: &str = "headless_session_reopened";
 
-/// The `cause` of a `session_reopen_failed` whose workspace could not be
-/// opened (or recorded): an attempt of its own.
+/// The `cause` of a `session_reopen_failed` whose wrapper could not be
+/// started (or recorded): an attempt of its own.
 const OPEN_FAILED: &str = "open_failed";
 
-/// The `cause` of a `session_reopen_failed` whose previous workspace could
-/// not be closed (or cmux could not say whether it is open), so no new one
-/// was opened beside it: an attempt of its own.
+/// The `cause` of a `session_reopen_failed` whose previous wrapper could
+/// not be stopped (or not be told to run or not), so no new one was
+/// started beside it: an attempt of its own.
 const CLOSE_FAILED: &str = "close_failed";
 
-/// The `cause` of a `session_reopen_failed` whose wrapper did not register
-/// in the workspace an attempt opened: part of that attempt.
+/// The `cause` of a `session_reopen_failed` whose wrapper, started by an
+/// attempt, did not register: part of that attempt.
 const NOT_REGISTERED: &str = "registration_timeout";
 
 /// The reopen of one waiting run's lost session.
@@ -276,16 +276,18 @@ impl Supervisor<'_> {
         }
     }
 
-    /// Close `workspace` of the run's lost session when cmux lists it, and
-    /// record `workspace_closed` (with the `attempt` it is closed for);
-    /// whether nothing of it is left open.
+    /// Stop the wrapper `workspace` of the run's lost session while it
+    /// runs, and record `workspace_closed` (with the `attempt` it is
+    /// stopped for); whether nothing of it is left running. A workspace
+    /// of a session from before ADR-t1433-3 is left to a person
+    /// ([`Self::run_session_open`]).
     fn close_lost_workspace(
         &mut self,
         run: &TaskRun,
         workspace: &str,
         attempt: Option<usize>,
     ) -> bool {
-        match self.cmux.exists(workspace) {
+        match self.run_session_open(workspace) {
             Ok(true) => match self.cmux.close(workspace) {
                 Ok(()) => {
                     if let Err(error) = self.queue.record_workspace_closed(
@@ -298,22 +300,22 @@ impl Supervisor<'_> {
                     true
                 }
                 Err(error) => {
-                    warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: the workspace {workspace} of its lost session could not be closed: {error:#}", run.id());
+                    warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: the wrapper {workspace} of its lost session could not be stopped: {error:#}", run.id());
                     false
                 }
             },
             Ok(false) => true,
             Err(error) => {
-                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: cmux could not say whether workspace {workspace} is open: {error:#}", run.id());
+                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: whether the wrapper {workspace} runs could not be told: {error:#}", run.id());
                 false
             }
         }
     }
 
-    /// Forget the lost session's processes and open a workspace whose
-    /// wrapper resumes the run's session on the supervisor's request, with
+    /// Forget the lost session's processes and start a background wrapper
+    /// that resumes the run's session on the supervisor's request, with
     /// the worker's env, `[run.env]` and a fresh runtime snapshot; record
-    /// it as the run's workspace and the repair. The new workspace.
+    /// its handle as the run's session and the repair. The new handle.
     fn open_session_again(&mut self, run: &TaskRun, lost: &LostSession<'_>) -> Result<String> {
         // Only the lost wrapper's row (or none) is forgotten: one that
         // registered meanwhile refuses the attempt.
@@ -331,26 +333,23 @@ impl Supervisor<'_> {
         self.prepare_turns(run, &run_dir)?;
         self.broker_grant_or_refuse(run)?;
         let run_env = self.verifier.run_env(&run_dir)?;
-        let task = self.queue.show(run.task_id())?.task;
-        let background = self.background_log(run, &run_dir, Some(lost.attempt), true);
-        let command = background::wrapper_command(
-            vec![
-                path_text(&run_dir.join(RUN_RUNNER_FILE))?,
-                "--db".into(),
-                path_text(&self.layout.db)?,
-                "session".into(),
-                "--run".into(),
-                run.id().to_string(),
-                "--lease".into(),
-                self.token.to_string(),
-                "--claude".into(),
-                path_text(&self.layout.claude)?,
-                "--codex".into(),
-                path_text(&self.layout.codex)?,
-                "--resume".into(),
-            ],
-            background.as_deref(),
-        );
+        self.warn_ignored_wrapper_setting();
+        let log = self.session_log(&run_dir, Some(lost.attempt), true);
+        let command = background::wrapper_command(vec![
+            path_text(&run_dir.join(RUN_RUNNER_FILE))?,
+            "--db".into(),
+            path_text(&self.layout.db)?,
+            "session".into(),
+            "--run".into(),
+            run.id().to_string(),
+            "--lease".into(),
+            self.token.to_string(),
+            "--claude".into(),
+            path_text(&self.layout.claude)?,
+            "--codex".into(),
+            path_text(&self.layout.codex)?,
+            "--resume".into(),
+        ]);
         let workspace = self
             .actors()
             .spawn(ActorExecutionSpec::new(
@@ -358,15 +357,11 @@ impl Supervisor<'_> {
                 WorkspaceAccess::Write(PathBuf::from(
                     run.worktree_path().context("missing worktree")?,
                 )),
-                ActorProgram::RunWorkspace {
-                    task: &task,
+                ActorProgram::RunSession {
                     run,
                     wrapper: command,
-                    resume: true,
-                    description: resume_workspace_description(run),
-                    group: self.session_group(background.as_deref()),
                     run_env,
-                    background: background.as_deref(),
+                    log: &log,
                 },
             ))?
             .workspace()?;
@@ -394,19 +389,19 @@ impl Supervisor<'_> {
             self.queue
                 .session_reopened(run.id(), &self.token, &workspace, attempt_no, repaired)
         {
-            // Unrecorded, nothing would find the workspace to close it.
+            // Unrecorded, nothing would find the wrapper to stop it.
             return Err(match self.cmux.close(&workspace) {
                 Ok(()) => error.context(format!(
-                    "the reopened workspace {workspace} of run {} could not be recorded and was closed",
+                    "the reopened background wrapper {workspace} of run {} could not be recorded and was stopped",
                     run.id()
                 )),
-                Err(close) => error.context(format!(
-                    "the reopened workspace {workspace} of run {} could not be recorded, and closing it failed: {close:#}",
+                Err(stop) => error.context(format!(
+                    "the reopened background wrapper {workspace} of run {} could not be recorded, and stopping it failed: {stop:#}",
                     run.id()
                 )),
             });
         }
-        self.record_launch(run, &workspace, background.as_deref())?;
+        self.record_launch(run, &workspace, &log)?;
         Ok(workspace)
     }
 

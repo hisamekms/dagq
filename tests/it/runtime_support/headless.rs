@@ -246,8 +246,7 @@ pub struct Launch {
 /// lists a workspace (the cmux adapter asks the process instead), and
 /// sends it no signal. Each session the supervisor starts (with an
 /// environment) has the worker's environment without the queue's path,
-/// and the database path's apostrophe quoted in its command, as `create`
-/// and `create_resume` check for a workspace.
+/// and the database path's apostrophe quoted in its command.
 pub fn launch_background(
     backend: &TestWorkspace,
     cwd: &Path,
@@ -413,20 +412,17 @@ pub fn resume_launches(backend: &TestWorkspace) -> Vec<Launch> {
         .collect()
 }
 
-/// Put `[headless] wrapper = "background"` in the main checkout's
-/// `dagq.toml`, committed, so that the supervisor starts every headless
-/// session in the background (ADR-t1404-1 decision 7).
-pub fn wrappers_in_background(repo: &Path) {
+/// Put `[headless] wrapper = "workspace"` in the main checkout's
+/// `dagq.toml`, committed: a worker accepts and ignores it, and its session
+/// wrapper starts in the background all the same (ADR-t1433-3 decision 2).
+pub fn workspace_wrapper_setting(repo: &Path) {
     fs::write(
         repo.join("dagq.toml"),
-        "[headless]\nwrapper = \"background\"\n",
+        "[headless]\nwrapper = \"workspace\"\n",
     )
     .unwrap();
     git(repo, &["add", "dagq.toml"]);
-    git(
-        repo,
-        &["commit", "-qm", "headless wrappers in the background"],
-    );
+    git(repo, &["commit", "-qm", "the workspace wrapper setting"]);
 }
 
 /// Write `prompt` as the next request (`what`) of the headless session of

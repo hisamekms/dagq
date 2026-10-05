@@ -4,7 +4,7 @@ type: development
 title: このrepositoryの本番queueの運用（固定バイナリ・使い捨てのqueue・hostのツール・dagq.toml・upのコマンド・KPIの印・secret・人への報告）
 status: current
 created: 2026-10-03
-updated: 2026-10-05 # task 842: [broker] stays out of dagq.toml
+updated: 2026-10-05 # task 842: [broker] stays out of dagq.toml; task 1440: the up section points to naming for workspaces and to run-workspaces for run sessions
 owners:
   - hisamekms
 tags:
@@ -73,7 +73,7 @@ dagq up --in-cmux --claude ~/.local/bin/claude --codex ~/.local/bin/codex --plug
 - `--parallel`を付けない規則とその理由は`dagq.toml`の`[supervisor]`の`parallel`のコメントが持つ。`--runtime-planners`も同じ理由で付けない（`runtime_planners`は`[supervisor]`で決める）。flagが`[supervisor]`より優先して残る仕組みと、付けて起動したsupervisorを`[supervisor]`に従わせる手順は[Run environment](../design/supervisor-lifecycle/run-environment.md)の`[supervisor]`の項（「優先順」と「起動し直すときの引き継ぎ」）。
 - このrepositoryは自動更新を使う（上のコマンドの`--auto-update`）。打ち直す`up`にも付け続けることとその理由はpluginの`dagq-recover`の`reference/update.md`の「Automatic updates (`up --auto-update`)」が持つ。
 - `--claude`と`--codex`の値は上のコマンドのpath。pathで渡す理由、Claude CodeやCodexを更新したときの解決し直し、`codex`が無いときの振る舞いはpluginの`dagq-recover`の`reference/up-down.md`の「up」、`install --allow-breaking`のdrainが起動し直す`up`に渡すものは同じskillの`reference/update.md`の「install」が持つ。
-- `up` / `down`の仕組みは[up / down](../design/supervisor-lifecycle/up-down.md)と[Auto-update](../design/supervisor-lifecycle/auto-update.md)、workspaceの識別と名前は[run-workspaces](../design/supervisor-lifecycle/run-workspaces.md)と[naming](../design/supervisor-lifecycle/naming.md)が持つ。
+- `up` / `down`の仕組みは[up / down](../design/supervisor-lifecycle/up-down.md)と[Auto-update](../design/supervisor-lifecycle/auto-update.md)、workspace（inboxなど）の識別と名前は[naming](../design/supervisor-lifecycle/naming.md)、runのsessionの記録と停止（runはworkspaceを開かない）は[run-workspaces](../design/supervisor-lifecycle/run-workspaces.md)が持つ。
 
 ## KPIの読み方と印
 

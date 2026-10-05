@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use crate::domain::{Ask, PlannerId, ProposalId, RunId, SessionRole, TaskId, TaskRun};
+use crate::domain::{Ask, PlannerId, ProposalId, RunId, SessionRole, TaskId};
 
 /// Shell boundaries are cmux's terminal startup command and Claude's hook command.
 /// Quote every argument independently, including paths containing apostrophes.
@@ -45,13 +45,6 @@ pub fn workspace_description(
 /// `[<repo>]`: the name of the workspace group a queue's workspaces join.
 pub fn workspace_group_name(repo_root: &Path) -> String {
     format!("[{}]", repository_name(repo_root))
-}
-
-/// `run <run-id> resume`: the description of the workspace the supervisor
-/// resumes a `needs_session` run's session in; its title is the worker's
-/// (`run_workspace_name`, ADR-0028).
-pub fn resume_workspace_description(run: &TaskRun) -> String {
-    format!("run {} resume", run.id())
 }
 
 /// `[<repo>] ask #<id> <kind>`: the title of the notification `ask` sends

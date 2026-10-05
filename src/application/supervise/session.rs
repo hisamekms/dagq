@@ -48,7 +48,8 @@ impl Supervisor<'_> {
         }
     }
     /// The executor every AI actor the supervisor starts goes through: its
-    /// workspaces through cmux, its agents through the review provider and
+    /// session wrappers and planner workspaces through the workspace
+    /// backend, its agents through the review provider and
     /// the spawner, on the queue's environment.
     pub(super) fn actors(&self) -> HostActorExecutor<'_> {
         self.actors_on(self.reviewer)
@@ -62,24 +63,6 @@ impl Supervisor<'_> {
             .with_provider(agent)
             .with_spawner(self.spawner)
             .with_queue_service(self.service_access)
-    }
-    /// Plan paths, create the run directory, worktree and workspace. Any
-    /// error leaves what was created for inspection.
-    /// The queue's workspace group, asked for with every run workspace:
-    /// the call is idempotent by external ID, and cmux removes a group whose
-    /// last workspace closes, so a handle kept from an earlier run could
-    /// name a group that is gone. A group cmux cannot make is a warning in
-    /// the log, and the run opens outside it.
-    pub(super) fn workspace_group(&self) -> Option<String> {
-        let name = workspace_group_name(&self.layout.repo_root);
-        match self.cmux.ensure_group(&self.layout.queue_hash, &name) {
-            Ok(group) => Some(group),
-            Err(error) => {
-                warn!(error = %format_args!("{error:#}"), "warning: cmux workspace group {name:?} (external ID {}) could not be made, \
-so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
-                None
-            }
-        }
     }
     /// What `run` inherits from an earlier run of its task that was retried
     /// with its branch carried over (ADR-0047 decision 24): the latest such
@@ -171,6 +154,9 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
         )?;
         Ok(inherited)
     }
+    /// Plan paths, create the run directory and worktree, and start the
+    /// session wrapper in the background (ADR-t1433-3). Any error leaves
+    /// what was created for inspection.
     pub(super) fn provision(&mut self, claimed: &TaskRun) -> Result<SessionWatch> {
         let state_dir = &self.layout.runs_dir;
         let paths = RunPaths::new(state_dir, claimed.id());
@@ -226,67 +212,53 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
         if granted {
             self.write_prompt(&task, &run, &run_dir)?;
         }
-        let background = self.background_log(&run, &run_dir, None, false);
-        let command = background::wrapper_command(
-            vec![
-                path_text(&run_dir.join(RUN_RUNNER_FILE))?,
-                "--db".into(),
-                path_text(&self.layout.db)?,
-                "session".into(),
-                "--run".into(),
-                run.id().to_string(),
-                "--lease".into(),
-                self.token.to_string(),
-                "--claude".into(),
-                path_text(&self.layout.claude)?,
-                "--codex".into(),
-                path_text(&self.layout.codex)?,
-            ],
-            background.as_deref(),
-        );
-        let workspace = self
+        self.warn_ignored_wrapper_setting();
+        let log = self.session_log(&run_dir, None, false);
+        let command = background::wrapper_command(vec![
+            path_text(&run_dir.join(RUN_RUNNER_FILE))?,
+            "--db".into(),
+            path_text(&self.layout.db)?,
+            "session".into(),
+            "--run".into(),
+            run.id().to_string(),
+            "--lease".into(),
+            self.token.to_string(),
+            "--claude".into(),
+            path_text(&self.layout.claude)?,
+            "--codex".into(),
+            path_text(&self.layout.codex)?,
+        ]);
+        let handle = self
             .actors()
             .spawn(ActorExecutionSpec::new(
                 ActorContext::worker(run.id(), run.task_id()),
                 WorkspaceAccess::Write(paths.worktree.clone()),
-                ActorProgram::RunWorkspace {
-                    task: &task,
+                ActorProgram::RunSession {
                     run: &run,
                     wrapper: command,
-                    resume: false,
-                    description: workspace_description(
-                        SessionRole::Worker,
-                        &self.layout.queue_hash,
-                        Some(run.id()),
-                        Some(run.task_id()),
-                    ),
-                    group: self.session_group(background.as_deref()),
                     run_env,
-                    background: background.as_deref(),
+                    log: &log,
                 },
             ))?
             .workspace()?;
-        if let Err(error) = self
-            .queue
-            .workspace_created(run.id(), &self.token, &workspace)
-        {
-            // Unrecorded, the workspace would be left open with nothing to
-            // find it by, and its wrapper is refused (task 806).
-            return Err(match self.cmux.close(&workspace) {
+        if let Err(error) = self.queue.workspace_created(run.id(), &self.token, &handle) {
+            // Unrecorded, the wrapper would run on with nothing to find it
+            // by, and its registration is refused (task 806).
+            return Err(match self.cmux.close(&handle) {
                 Ok(()) => error.context(format!(
-                    "the workspace {workspace} of run {} could not be recorded and was closed",
+                    "the background wrapper {handle} of run {} could not be recorded and was stopped",
                     run.id()
                 )),
-                Err(close) => error.context(format!(
-                    "the workspace {workspace} of run {} could not be recorded, and closing it failed: {close:#}",
+                Err(stop) => error.context(format!(
+                    "the background wrapper {handle} of run {} could not be recorded, and stopping it failed: {stop:#}",
                     run.id()
                 )),
             });
         }
-        self.record_launch(&run, &workspace, background.as_deref())?;
-        info!(task_id = %run.task_id(), run_id = %run.id(), "task {} running in workspace {}; run {}", run.task_id(), workspace, run.id());
+        self.record_launch(&run, &handle, &log)?;
+        info!(task_id = %run.task_id(), run_id = %run.id(), "task {} running in the background as {}; run {}", run.task_id(), handle, run.id());
         Ok(SessionWatch {
-            workspace,
+            workspace: handle,
             run_dir,
             receipt_path: PathBuf::from(plan.receipt_path),
             idle_marker: run.idle_marker_path()?,

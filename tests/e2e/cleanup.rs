@@ -143,7 +143,7 @@ pub(crate) fn workspace_listed(cmux: &Path, id: &str) -> bool {
 /// return the entry. A failed listing or a workspace not listed yet is "not
 /// yet"; past [`crate::WAIT_LIMIT`] the test fails with `what` and the last
 /// entry or failure.
-// Used only by the e2e cases out under ADR-t1582-1; goes with tasks 1440, 1443.
+// Used only by the e2e case out under ADR-t1582-1; goes with task 1443.
 #[cfg(any())]
 pub(crate) fn wait_for_listed(
     cmux: &Path,
@@ -171,6 +171,8 @@ pub(crate) fn wait_for_listed(
 /// cmux confirms a `workspace close` before the workspace leaves its
 /// listing, so "gone" is waited for rather than asserted on the first look.
 /// A failed listing is "not yet", like in `wait_for_listed`.
+// Used only by the e2e cases out under ADR-t1582-1; goes with tasks 1441, 1443.
+#[cfg(any())]
 pub(crate) fn wait_until_not_listed(cmux: &Path, id: &str) {
     let deadline = Instant::now() + crate::WAIT_LIMIT;
     loop {
@@ -191,7 +193,7 @@ pub(crate) fn wait_until_not_listed(cmux: &Path, id: &str) {
 /// Run `cmux args` once: what it printed when it succeeded, else the whole
 /// output (status, stdout, stderr) for a wait to retry on and show when its
 /// deadline passes. Under load cmux can fail a call with `Command timed out`.
-// Used only by the e2e cases out under ADR-t1582-1; goes with tasks 1440, 1443.
+// Used only by the e2e case out under ADR-t1582-1; goes with task 1443.
 #[cfg(any())]
 pub(crate) fn cmux_attempt(cmux: &Path, args: &[&str]) -> Result<String, String> {
     match Command::new(cmux).args(args).bounded_output() {
@@ -394,8 +396,8 @@ pub(crate) fn claim_fixture_dir(dir: &Path) -> fs::File {
 ///
 /// - For a fixture directory that is still there but abandoned: the
 ///   processes running from or on it, the workspace groups named after its
-///   queue hashes, the cmux workspaces whose `DAGQ_QUEUE` or `E2E_SHARED`
-///   points into it, and the directory itself, unless one of those groups
+///   queue hashes, the cmux workspaces whose `DAGQ_QUEUE` points into it
+///   (the inbox `up` opened), and the directory itself, unless one of those groups
 ///   could not be deleted (cmux did not list the groups, or the delete
 ///   failed): then the directory stays, with the queue hashes that name
 ///   the groups, and the next sweep tries again. A directory counts as
@@ -404,14 +406,13 @@ pub(crate) fn claim_fixture_dir(dir: &Path) -> fs::File {
 ///   than [`UNMARKED_SWEEP_AGE`]. The sweep holds that lock while it works,
 ///   so concurrent sweeps never take the same directory.
 /// - For a directory that is already gone: the workspaces whose `DAGQ_QUEUE`
-///   or `E2E_SHARED` points into a `$TMPDIR/.tmp*` directory that no longer
-///   exists (pinned ones included), and the group of the queue their
-///   `DAGQ_QUEUE` names. Nothing else can find them once the directory is
-///   removed.
+///   points into a `$TMPDIR/.tmp*` directory that no longer exists (pinned
+///   ones included), and the group of the queue it names. Nothing else can
+///   find them once the directory is removed.
 ///
 /// Workspaces are looked for in every cmux window. Nothing else is touched:
-/// the production queue's workspaces (the inbox, the supervisor, planners,
-/// runs) do carry `DAGQ_QUEUE`, but it is under the data home, not
+/// the production queue's workspaces (the inbox, the supervisor, planners)
+/// do carry `DAGQ_QUEUE`, but it is under the data home, not
 /// `$TMPDIR` (see `the_sweep_leaves_live_and_production_queues_alone`), a
 /// live fixture's directory exists, and the production group has another
 /// external ID.
@@ -646,12 +647,13 @@ fn delete_group(cmux: &Path, external_id: &str, who: &str) -> bool {
     }
 }
 
-/// Unpin and close each workspace of every window whose `DAGQ_QUEUE` or
-/// `E2E_SHARED` is `left_behind`, and return the queue hashes (the group
-/// external IDs) their `DAGQ_QUEUE` names. A workspace without those
-/// variables is skipped, and so is one whose variables point anywhere else,
-/// like every workspace of the production queue (its `DAGQ_QUEUE` is under
-/// the data home). When a window cannot be listed nothing is closed.
+/// Unpin and close each workspace of every window whose `DAGQ_QUEUE` is
+/// `left_behind`, and return the queue hashes (the group external IDs) it
+/// names. A workspace without it is skipped, and so is one whose queue is
+/// anywhere else, like every workspace of the production queue (its
+/// `DAGQ_QUEUE` is under the data home). A run opens no workspace
+/// (ADR-t1433-3), so its `[run.env]` is not looked at. When a window
+/// cannot be listed nothing is closed.
 fn close_workspaces_left_behind(cmux: &Path, left_behind: &dyn Fn(&str) -> bool) -> Vec<String> {
     let workspaces = match all_workspaces(cmux) {
         Ok(workspaces) => workspaces,
@@ -668,21 +670,16 @@ fn close_workspaces_left_behind(cmux: &Path, left_behind: &dyn Fn(&str) -> bool)
         let Some(env) = cmux_json(cmux, &["workspace", "env", id, "--json"]) else {
             continue;
         };
-        let points_inside = ["DAGQ_QUEUE", "E2E_SHARED"]
-            .iter()
-            .any(|key| env["env"][key].as_str().is_some_and(left_behind));
-        if !points_inside {
+        let Some(queue) = env["env"]["DAGQ_QUEUE"]
+            .as_str()
+            .filter(|queue| left_behind(queue))
+        else {
             continue;
-        }
+        };
         let title = workspace["title"].as_str().unwrap_or_default();
         eprintln!("e2e sweep: workspace {id} {title} was left by an e2e");
         close_workspace(cmux, id, "e2e sweep: ");
-        // Only a queue that is itself left behind names a group to delete:
-        // a live fixture's group stays even if `E2E_SHARED` matched.
-        if let Some(queue) = env["env"]["DAGQ_QUEUE"].as_str()
-            && left_behind(queue)
-            && let Some(hash) = Path::new(queue).parent().and_then(Path::file_name)
-        {
+        if let Some(hash) = Path::new(queue).parent().and_then(Path::file_name) {
             let hash = hash.to_string_lossy().into_owned();
             if !hashes.contains(&hash) {
                 hashes.push(hash);

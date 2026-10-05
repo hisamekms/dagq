@@ -7,7 +7,7 @@ use crate::{
         stats::WorkspaceListing,
     },
     domain::{
-        ActorRole, CommitSha, PlannerOrigin, Task, TaskId, TaskRun,
+        ActorRole, CommitSha, PlannerOrigin, TaskId, TaskRun,
         disk::ProcessExecutable,
         headless_job::JobAccess,
         landing_branch::{self, LandingBranch, PushTarget, RepositoryConfig, RepositorySettings},
@@ -36,13 +36,11 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use crate::application::naming::repository_name;
 pub use crate::application::{
     SOCKET_PASSWORD_ENV,
     naming::{
-        ask_notification_title, inbox_workspace_name, planner_workspace_name,
-        resume_workspace_description, shell_join, shell_quote, supervisor_workspace_name,
-        workspace_description, workspace_group_name,
+        ask_notification_title, inbox_workspace_name, planner_workspace_name, shell_join,
+        shell_quote, supervisor_workspace_name, workspace_description, workspace_group_name,
     },
     path_text,
 };
@@ -2577,45 +2575,6 @@ impl WorkspaceBackend for Cmux {
         OUTPUT_TIMEOUT
     }
 
-    fn create(
-        &self,
-        task: &Task,
-        run: &TaskRun,
-        command: &str,
-        tags: &WorkspaceTags,
-    ) -> Result<String> {
-        let raw = self.create_workspace(
-            &run_workspace_name(task, run)?,
-            Path::new(run.worktree_path().context("missing worktree")?),
-            command,
-            tags,
-        )?;
-        // Persist the returned handle before resolving its stable UUID.
-        crate::application::RunFiles::write(
-            &super::run_files::LocalRunFiles,
-            &Path::new(run.run_dir().context("missing run directory")?)
-                .join("workspace-create.txt"),
-            raw.as_bytes(),
-        )?;
-        self.identify_created(workspace_handle(&raw)?)
-    }
-
-    fn create_resume(
-        &self,
-        task: &Task,
-        run: &TaskRun,
-        command: &str,
-        tags: &WorkspaceTags,
-    ) -> Result<String> {
-        let raw = self.create_workspace(
-            &run_workspace_name(task, run)?,
-            Path::new(run.worktree_path().context("missing worktree")?),
-            command,
-            tags,
-        )?;
-        self.identify_created(workspace_handle(&raw)?)
-    }
-
     /// `cmux send` reads `\n`, `\r` and `\t` as keys, so the text goes as
     /// one line with backslashes replaced; Enter submits it once the agent
     /// had [`paste_settle`] to take the paste in (an Enter in the middle of
@@ -3035,27 +2994,6 @@ pub fn created_group_id(reply: &Value) -> Result<&str> {
         .context("cmux did not return the workspace group's ID")
 }
 
-/// Workspaces are named per repository because one cmux serves several
-/// queues, and every name is `[<repo>]<role>` with no space after the
-/// bracket, where `<repo>` is the basename of the repository root (the path
-/// itself when it has none). A worker is
-/// `[<repo>]worker#<task-id> - <task title>`, `<repo>` being the root the run
-/// was planned from and the title the task's, unabridged (ADR-0028, which
-/// replaces the name ADR-0018 chose).
-/// The resume workspace of a `needs_session` run (goal 8's automatic resume)
-/// takes this same name, with `run <run-id> resume` as its description.
-/// Names are for people only: the runtime identifies workspaces by UUID
-/// (ADR-0026).
-pub fn run_workspace_name(task: &Task, run: &TaskRun) -> Result<String> {
-    let repo = Path::new(run.repo_path().context("missing repository path")?);
-    Ok(format!(
-        "[{}]worker#{} - {}",
-        repository_name(repo),
-        run.task_id(),
-        task.title()
-    ))
-}
-
 /// `text` as one line for `cmux send`: line breaks and tabs become spaces
 /// and backslashes slashes, so nothing in it reads as a key.
 /// How long the agent is given to take in `chars` typed characters
@@ -3078,7 +3016,7 @@ pub fn workspace_handle(raw: &str) -> Result<&str> {
     let handle = raw
         .lines()
         .find_map(|line| line.strip_prefix("OK "))
-        .context("unrecognized cmux workspace creation response; inspect workspace-create.txt")?
+        .with_context(|| format!("unrecognized cmux workspace response: {}", raw.trim()))?
         .trim();
     let suffix = handle
         .strip_prefix("workspace:")
@@ -5457,10 +5395,6 @@ mod tests {
         );
     }
 
-    fn run(repo_path: Option<&str>) -> TaskRun {
-        TaskRun::restore(record(repo_path)).unwrap()
-    }
-
     /// A run whose worktree and run directory are under `dir`.
     fn run_in(dir: &Path) -> TaskRun {
         let run_dir = dir.join("run");
@@ -5494,58 +5428,10 @@ mod tests {
         }
     }
 
-    fn task(title: &str) -> Task {
-        Task::restore(crate::domain::TaskRecord {
-            goal_priority: None,
-            id: TaskId::new(15),
-            title: title.into(),
-            description: String::new(),
-            acceptance: String::new(),
-            verification_commands: Vec::new(),
-            required_evidence: Vec::new(),
-            paths: Vec::new(),
-            priority: Default::default(),
-            change: None,
-            status: crate::domain::TaskStatus::InProgress,
-            goal_id: None,
-            context: String::new(),
-            created_at: "2026-09-22 00:00:00".into(),
-            updated_at: "2026-09-22 00:00:00".into(),
-            worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
-            named_mode: None,
-            wait_for_build: false,
-        })
-        .unwrap()
-    }
-
     /// One cmux serves several repositories, so every workspace name
-    /// carries the repository (the basename of its root). A worker's name
-    /// carries the task and its title as is; the run ID goes to the
-    /// description instead (ADR-0018, ADR-0028).
+    /// carries the repository (the basename of its root) (ADR-0028).
     #[test]
-    fn workspace_names_carry_the_repository_and_the_task() {
-        let title = "Set last_error when a run fails";
-        assert_eq!(
-            run_workspace_name(&task(title), &run(Some("/home/u/ghq/dagq"))).unwrap(),
-            "[dagq]worker#15 - Set last_error when a run fails"
-        );
-        // The title is neither trimmed nor shortened.
-        let long = format!("  {}  ", "x".repeat(200));
-        assert_eq!(
-            run_workspace_name(&task(&long), &run(Some("/tmp/my repo/"))).unwrap(),
-            format!("[my repo]worker#15 - {long}")
-        );
-        assert!(
-            !run_workspace_name(&task(title), &run(Some("/home/u/ghq/dagq")))
-                .unwrap()
-                .contains("0d8e3f1a")
-        );
-        assert!(
-            run_workspace_name(&task(title), &run(None))
-                .unwrap_err()
-                .to_string()
-                .contains("missing repository path")
-        );
+    fn workspace_names_carry_the_repository() {
         // A root with no basename falls back to the path itself.
         assert_eq!(
             planner_workspace_name(Path::new("/"), PlannerId::new(1), None),
@@ -5733,12 +5619,12 @@ esac
         assert!(merged_workspace_listing(&windows, |_| Ok(serde_json::json!({}))).is_err());
     }
 
-    /// `create` passes the run's name and its tags (description, env,
-    /// group) to `cmux workspace create`, keeps the raw reply in the run directory and returns the
-    /// UUID `identify` resolves.
+    /// `create_named` passes the name and the tags (description, env,
+    /// group) to `cmux workspace create` and returns the UUID `identify`
+    /// resolves. A run opens no workspace (ADR-t1433-3); the inbox does.
     #[cfg(unix)]
     #[test]
-    fn create_names_the_run_workspace_and_tags_it() {
+    fn create_named_names_the_workspace_and_tags_it() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("args.log");
@@ -5759,35 +5645,19 @@ esac
         )
         .unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
-        let run_dir = dir.path().join("run");
-        fs::create_dir(&run_dir).unwrap();
-        let mut record = record(Some("/home/u/ghq/dagq"));
-        record.status = RunStatus::Starting;
-        record.worktree_path = Some(dir.path().display().to_string());
-        record.run_dir = Some(run_dir.display().to_string());
-        let run = TaskRun::restore(record).unwrap();
         let cmux = Cmux { executable };
         let tags = WorkspaceTags {
             env: vec![
-                ("DAGQ_ROLE".into(), "worker".into()),
+                ("DAGQ_ROLE".into(), "inbox".into()),
                 ("DAGQ_QUEUE".into(), "/q/queue.db".into()),
             ],
-            description: Some("dagq role=worker queue=abc".into()),
+            description: Some("dagq role=inbox queue=abc".into()),
             group: Some("G-1".into()),
         };
         let id = cmux
-            .create(
-                &task("Set last_error when a run fails"),
-                &run,
-                "true",
-                &tags,
-            )
+            .create_named("[dagq]inbox", dir.path(), "true", &tags)
             .unwrap();
         assert_eq!(id, "4AC63CB7-3BE1-40A1-BCC4-CA0461685F01");
-        assert_eq!(
-            fs::read_to_string(run_dir.join("workspace-create.txt")).unwrap(),
-            "OK workspace:7\n"
-        );
         let calls = fs::read_to_string(&log).unwrap();
         let create: Vec<&str> = calls.split("--\n").next().unwrap().lines().collect();
         assert_eq!(
@@ -5796,11 +5666,11 @@ esac
                 "workspace",
                 "create",
                 "--name",
-                "[dagq]worker#15 - Set last_error when a run fails",
+                "[dagq]inbox",
                 "--description",
-                "dagq role=worker queue=abc",
+                "dagq role=inbox queue=abc",
                 "--env",
-                "DAGQ_ROLE=worker",
+                "DAGQ_ROLE=inbox",
                 "--env",
                 "DAGQ_QUEUE=/q/queue.db",
                 "--group",

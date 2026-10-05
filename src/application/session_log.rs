@@ -47,7 +47,7 @@ pub fn run_log(queue: &mut dyn Queue, target: &RunTarget) -> Result<SessionLog> 
     match last_background_session(&queue.run_events(run.id())?) {
         Some(session) => Ok(SessionLog { session }),
         None if run.workspace_id().is_some() => bail!(
-            "run {} started no session in the background: its session runs in a workspace (read it with `run screen`; a headless run's turns are in {}/turns)",
+            "run {} started no session in the background: its session ran in a workspace before ADR-t1433-3 and has no log (its turns are in {}/turns)",
             run.id(),
             run.run_dir().unwrap_or("its run directory")
         ),

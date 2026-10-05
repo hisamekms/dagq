@@ -1,4 +1,4 @@
-//! Worker screen/send commands return turns or refuse typing without
+//! Worker screen/send/close-workspaces commands are refused without
 //! touching cmux. Planner screen/send commands keep their screen, key,
 //! answer delivery and actor authorization behavior.
 
@@ -145,8 +145,13 @@ fn answered_ask(db: &Path, run: &str, answer: &str) -> String {
     id
 }
 
+/// `run screen` is refused for every run, with the reason and the turns'
+/// log CLI that replaced it (ADR-t1433-3 decision 4), by run or task id,
+/// for a run recorded as interactive too; `run send` refuses typing; and
+/// `run close-workspaces` is refused with its reason (decision 3). None of
+/// them reads, types or needs cmux.
 #[test]
-fn runs_return_their_turns_directory_and_refuse_typing_without_cmux() {
+fn runs_refuse_their_screen_and_typing_without_cmux() {
     let (_dir, db) = queue();
     // Include the old stored mode: historical interactive records no
     // longer grant access to a terminal, either by run or task id.
@@ -154,39 +159,22 @@ fn runs_return_their_turns_directory_and_refuse_typing_without_cmux() {
     let headless = run_in(&db, "headless", false, "WS-H");
     let cmux = stub_cmux(&db, READY);
     let cmux = cmux.to_str().unwrap();
-    // The run dirs resolve through the queue's canonical directory
-    // (`/private/var` for a macOS temp dir).
-    let turns = std::fs::canonicalize(db.parent().unwrap())
-        .unwrap()
-        .join("runs");
-    for (run, task, mode, reason) in [
-        (
-            &interactive,
-            "1",
-            "interactive",
-            dagq::application::screen::RETIRED_SCREEN,
-        ),
-        (&headless, "2", "headless", "a headless run has no screen"),
-    ] {
+    for (run, task) in [(&interactive, "1"), (&headless, "2")] {
         let ask = answered_ask(&db, run, "continue");
         // Asking can notify the inbox; compare only screen/send calls.
         let before = calls(Path::new(cmux));
         for target in [run.as_str(), task] {
-            let read = ok_as(
-                "inbox",
+            let refused = failed_with(
+                &[("DAGQ_ROLE", "inbox")],
                 &db,
                 &["run", "screen", target, "--lines", "1000", "--cmux", cmux],
             );
-            assert_eq!(
-                read,
-                serde_json::json!({
-                    "run_id": run,
-                    "task_id": task.parse::<i64>().unwrap(),
-                    "worker_mode": mode,
-                    "screen": null,
-                    "reason": reason,
-                    "turns": turns.join(run).join("turns").to_str().unwrap(),
-                })
+            let error = refused["error"].as_str().unwrap();
+            assert!(
+                error.contains(dagq::application::screen::RUN_SCREEN_REFUSED)
+                    && error.contains(&format!("`dagq run log {run}`"))
+                    && error.contains(&format!("/runs/{run}/turns")),
+                "{refused}"
             );
             for input in [
                 vec!["--key", "enter"],
@@ -212,14 +200,32 @@ fn runs_return_their_turns_directory_and_refuse_typing_without_cmux() {
             "worker commands must not read or type"
         );
     }
-    // Neither needs cmux: a host without it gets the same replies.
+    // None needs cmux: a host without it gets the same replies.
     let missing = "/nonexistent/cmux";
-    let read = ok_as(
-        "inbox",
+    let refused = failed_with(
+        &[("DAGQ_ROLE", "inbox")],
         &db,
         &["run", "screen", &headless, "--cmux", missing],
     );
-    assert_eq!(read["screen"], serde_json::Value::Null, "{read}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains(dagq::application::screen::RUN_SCREEN_REFUSED),
+        "{refused}"
+    );
+    for args in [
+        vec!["run", "close-workspaces", "--apply", "--cmux", missing],
+        vec!["run", "close-workspaces", headless.as_str()],
+        vec!["run", "close-workspaces", "--task", "2"],
+    ] {
+        let refused = failed_with(&[], &db, &args);
+        assert_eq!(
+            refused["error"],
+            dagq::application::screen::CLOSE_WORKSPACES_REFUSED,
+            "{args:?}: {refused}"
+        );
+    }
     let failed = failed_with(
         &[],
         &db,

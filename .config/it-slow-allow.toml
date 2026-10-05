@@ -768,12 +768,6 @@ name = "runtime_waiting_stages::a_resume_question_past_the_limit_waits_in_its_sl
 reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: limit -> deferred decision (15s)"
 task = 1707
 
-# 5.786s, class G
-[[test]]
-name = "runtime_workspace_cleanup::ended_runs_workspaces_are_listed_then_closed_by_run_task_or_all"
-reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: cmux run workspaces cleanup"
-task = 1707
-
 # 5.179s, class B
 [[test]]
 name = "worker_escalation::a_raised_resume_starts_the_session_higher_and_stats_reads_it"
@@ -790,7 +784,7 @@ task = 1707
 # setup (a supervisor run and two integrations) before the resume
 [[test]]
 name = "runtime_broker::a_required_resume_refused_its_tools_is_given_up"
-reason = "B 境界（守る境界）: supervisor の配線（resume の起動）。[broker] mode = required の resume が broker の道具を渡せないとき workspace を開かず resume_finished の broker_required になる（fail closed、ADR-t838-1）"
+reason = "B 境界（守る境界）: supervisor の配線（resume の起動）。[broker] mode = required の resume が broker の道具を渡せないとき wrapper を起動せず resume_finished の broker_required になる（fail closed、ADR-t838-1）"
 task = 838
 
 # task 838: 5.8s to 7.4s under the worker's stress (5.17s, class D, in
@@ -801,12 +795,32 @@ name = "runtime_broker::a_disabled_supervisor_resumes_a_run_without_the_tools_le
 reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: grant decision on resume"
 task = 838
 
-# 7.124s and 7.442s of three stress rounds under load (task 1439, 2.875s
-# in the third); the test keeps the run workspace path explicitly.
+# task 1440: 8.5s under the worker's stress, class R in
+# docs/plans/it-reduction/it-tests.tsv; the resume's background launch after
+# a failed e2e (task 1439's test, now with the ignored workspace setting)
 [[test]]
-name = "runtime_sweep::the_sweep_closes_the_workspaces_of_failed_runs_the_triage_does_not_take"
-reason = "移し替えの予定: runのworkspaceの経路を消すtask 1440（goal 92）がこのworkspaceの掃除のtestを消すか背景のsessionへ移す。それまでin_workspacesでworkspaceを選ぶ"
-task = 1439
+name = "runtime_background::a_parked_background_run_is_resumed_in_the_background"
+reason = "R 移し替えの予定（代表がある、goal 119 か 120）: wrapper spawn covered by runtime_background::a_turn_left_by_a_killed_background_wrapper_is_stopped_and_a_resumed_wrapper_registers and the runtime_resume tests; ignored [headless] setting and resume choice decision"
+task = 1440
+
+# task 1440: 5.8s under the worker's stress; the body changed only from the
+# deleted workspace tags to the background launches
+[[test]]
+name = "runtime_broker::a_required_reopen_refused_its_tools_opens_no_session"
+reason = "B 境界（守る境界）: supervisor の配線（broker の道具を渡せない reopen が wrapper を起動しない。ADR-t838-1）"
+task = 1440
+
+# task 1440: 6.9s under the worker's stress, most of it parked_conflict's setup
+[[test]]
+name = "runtime_resume::a_run_with_a_dirty_worktree_is_resumed"
+reason = "B 境界（守る境界）: Git（実 worktree の dirty の判定）と supervisor の配線（起動できない resume の wrapper が backend_call_failed と resume_finished の error になる）"
+task = 1440
+
+# task 1440: 6.9s under the worker's stress; three supervisor passes
+[[test]]
+name = "runtime_sweep::the_sweep_stops_the_wrappers_of_failed_runs_the_triage_does_not_take"
+reason = "B 境界（守る境界）: supervisor の配線（終わった run の background の wrapper を掃除が止め、triage の run は残す）と Git（worktree と branch が残る）"
+task = 1440
 
 # 9.694s alone; 29.890s to 37.669s (median 32.627s) in 24 stress rounds
 # under load 24 to 104 (task 1360). The test waits out its 6 s resume

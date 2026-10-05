@@ -308,8 +308,8 @@ else
 fi
 [ -n "$required" ] || write_receipt 'test -f seed.txt exited 0' 'added e2e.txt'
 # While a test watches the pass (`supervise_once`), the turn stays until
-# the test has seen its workspace listed (every task's at once), not for a
-# fixed time a loaded host may outlast (task 641).
+# the test has seen its background wrapper run (every task's at once), not
+# for a fixed time a loaded host may outlast (task 641).
 shared=${E2E_SHARED:-/nonexistent}
 while [ -f "$shared/watching" ] && [ ! -f "$shared/listed" ]; do sleep 0.2; done
 end_turn 'committed e2e.txt'

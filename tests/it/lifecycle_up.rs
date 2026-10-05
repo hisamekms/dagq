@@ -14,7 +14,7 @@ use anyhow::{Result, bail};
 use dagq::{
     VERSION,
     application::{SupervisorEnvironment, TaskStore, WorkspaceBackend, WorkspaceTags},
-    domain::{NewTask, SessionRole, Task, TaskAction, TaskRun},
+    domain::{NewTask, SessionRole, TaskAction},
     infrastructure::{
         adapters::{GitRepository, SOCKET_PASSWORD_ENV},
         location::QueueLocation,
@@ -1460,18 +1460,6 @@ fn up_requires_cmux_claude_and_an_initialized_queue() {
             bail!("cmux ping failed")
         }
         fn preflight_detached(&self, _: &SupervisorEnvironment) -> Result<()> {
-            unreachable!()
-        }
-        fn create(&self, _: &Task, _: &TaskRun, _: &str, _: &WorkspaceTags) -> Result<String> {
-            unreachable!()
-        }
-        fn create_resume(
-            &self,
-            _: &Task,
-            _: &TaskRun,
-            _: &str,
-            _: &WorkspaceTags,
-        ) -> Result<String> {
             unreachable!()
         }
         fn send_text(&self, _: &str, _: &str) -> Result<()> {

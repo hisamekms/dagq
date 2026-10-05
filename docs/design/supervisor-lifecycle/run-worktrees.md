@@ -4,8 +4,8 @@ type: design
 title: "Run worktrees"
 status: current
 created: 2026-09-26
-updated: 2026-10-05 # task 1605; task 1590; task 1627; task 1482; task 1478; task 1427
-last_verified: 2026-10-05 # task 1605, task 1590, task 1627, task 1482, task 1478, task 1427
+updated: 2026-10-06 # task 1605; task 1590; task 1627; task 1482; task 1478; task 1427; task 1440: the sweep stops leftover background wrappers instead of closing workspaces
+last_verified: 2026-10-06 # task 1605, task 1590, task 1627, task 1482, task 1478, task 1427; task 1440
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -67,6 +67,6 @@ related:
 - stopかhandoffでは、空き容量のためのjobは選んだ最後のworktreeまで処理し、通常のjobは今のworktreeを終えたところで止まる。溜めた頼みは捨て、新しいjobは始めない（残りは次のsupervisorの最初の掃除が拾う）。ただし、空き容量のための掃除を別のjobに乗せた残り（`Request::counted`）だけは捨てず、走っているjobの後に1回だけjobとして始め、停止の印（`cleanup.stop`）で止めずに選んだ最後のworktreeまで処理する（task 1426）。stopかhandoffの後に来た新しい頼みは受けない。handoffのexecはjobの終わりを、残りのjobがあればその終わりも待つ。loopが終わるときは、走っているjobと溜めた頼みのjobを待ってeventを記録する（errorで終わったときも同じ規則でjobを待って記録する）。handoffの要求がdrain中に取り消されて通常のclaimに戻ると、掃除も通常に戻る（task 1427）: 頼みを再び受け、停止の印を下ろし（走っている通常のjobがまだ見ていなければ最後まで進む）、終わったrun全部の掃除をすぐ頼み直して、drainのあいだ捨てた頼みと、今のworktreeの後に止まったjobの残りを拾う。drainのあいだ受けなかった空き容量の掃除の頼みは掃除の間隔に数えない。要求が別のbinaryに置き換わったとき（task 1286）とstopでは戻さない
 - provisioningの失敗でclaimを止めたsupervisor（`claiming`が`false`）もdrainするが、stopやhandoffと違って掃除はdrainの扱いにしない: 頼みを受け、通常のjobも止めず、溜めた頼みのjobも始める。空き容量のための掃除とその残りのjob（`Request::counted`）は`CleanupWatch::for_disk`が`ending`によらず数えるので、空きが着地の閾値を下回るrunはこのdrainでも残りのjobが終わるまでleaseを持って待ち、その後に読み直した空きで判定する（task 1482。[空き容量を確かめる](disk-space.md)の着地）。loopは`for_disk`のjobを待ってから終わる
 
-消す契機は、supervisorのslotが終わったとき（`integrated`・`failed`・`interrupted`）、triageが終わったとき、triageの`decide` askとlandingの`approve_landing` askのanswer（`cancel`を含む）を適用したとき（そのtaskのrunだけ）と、上の掃除と同じ回（`sweep_ended_runs`、workspaceを閉じた後、全runを見直す）。手での`integrate`は着地したrunのworktreeを自分で消し、手での`recover`・人の`ready` / `cancel`・supervisorの外で終わったrunは次の掃除が拾う。失敗は`cleanup_failed`（`path`、`message`、`by: supervisor`）にして残りを続け、次の掃除で再び試す（supervisorのプロセスごとにworktreeあたり1回だけ記録する）。
+消す契機は、supervisorのslotが終わったとき（`integrated`・`failed`・`interrupted`）、triageが終わったとき、triageの`decide` askとlandingの`approve_landing` askのanswer（`cancel`を含む）を適用したとき（そのtaskのrunだけ）と、上の掃除と同じ回（`sweep_ended_runs`。終わったrunに残ったbackgroundのwrapperを止めるのと同じ回で、全runを見直す）。手での`integrate`は着地したrunのworktreeを自分で消し、手での`recover`・人の`ready` / `cancel`・supervisorの外で終わったrunは次の掃除が拾う。失敗は`cleanup_failed`（`path`、`message`、`by: supervisor`）にして残りを続け、次の掃除で再び試す（supervisorのプロセスごとにworktreeあたり1回だけ記録する）。
 
-closeの成否は`task_runs.workspace_closed_at`で表す。nullは「閉じたことを確認していない」で、closeの失敗だけでなく、cmuxが閉じた後にDBへ書けなかった場合も含む。closeの失敗は`cleanup_failed`イベントと`last_error`に残るが、run状態は変えない。閉じていないworkspaceをcleaned扱いにせず、再試行は`doctor`/`recover`で扱う。
+runのsessionの停止（backgroundのwrapperのhandleの`close`。cmuxを呼ばない。[Run workspaces](run-workspaces.md#run-workspaces)）の成否は`task_runs.workspace_closed_at`で表す。nullは「止めたことを確かめていない」で、停止の失敗だけでなく、wrapperを止めた後にDBへ書けなかった場合も含む。停止の失敗は`cleanup_failed`イベントと`last_error`に残るが、run状態は変えない。止めていないsessionをcleaned扱いにせず、再試行は`doctor`/`recover`で扱う。

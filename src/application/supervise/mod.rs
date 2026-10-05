@@ -60,9 +60,7 @@ use super::{
     ask, dependency_graph,
     health::{lease_health, run_health},
     integrate::{self as integration, Integration, IntegrationRequest, Integrator, check_receipt},
-    naming::{
-        resume_workspace_description, shell_join, workspace_description, workspace_group_name,
-    },
+    naming::shell_join,
     or_none, path_text,
     prompt::{
         GoalPredecessorSummary, HEADLESS_NEVER, Inheritance, PredecessorSummary, RecoveryMaterial,
@@ -150,7 +148,7 @@ mod triage;
 mod update;
 mod waiting;
 
-pub(crate) use self::background::{left_planner_turn, left_turn, still_open, stop_left_turn};
+pub(crate) use self::background::{left_planner_turn, left_turn, stop_left_turn, stop_run_session};
 use self::broker::broker_refused;
 pub use self::broker::{BROKER_FAILURES, BROKER_HEALTH_INTERVAL, BrokerPort};
 pub use self::claim_defer::read_conflicts_at_start;
@@ -320,9 +318,6 @@ pub struct LoopSettings {
     /// `[resume]`: the limit of a run's conflict-only attempts (ADR-0047
     /// decision 24).
     pub resume: ResumeConfig,
-    /// Where a worker's headless session wrapper runs; `None` reads
-    /// `[headless] wrapper` as each session starts (task 1439).
-    pub worker_wrapper: Option<crate::domain::background_wrapper::HeadlessWrapper>,
     /// Counts the loop's passes, one at the top of each; only read by
     /// tests, which wait for passes after a threshold instead of a fixed
     /// sleep (task 1046).
@@ -888,7 +883,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         triaged: Vec::new(),
         generators: ports.generators.clone(),
         stall: settings.stall,
-        worker_wrapper: settings.worker_wrapper,
+        wrapper_setting_warned: false,
         conflicts: settings.conflicts,
         conflicts_file: ports.conflicts_file.clone(),
         conflicts_error: settings.conflicts_error.clone(),
@@ -1063,8 +1058,9 @@ struct Supervisor<'a> {
     utc_offset: fn(i64) -> i64,
     /// The thresholds of the stalled-session checks (ADR-0043 decision 4).
     stall: StallConfig,
-    /// [`LoopSettings::worker_wrapper`].
-    worker_wrapper: Option<crate::domain::background_wrapper::HeadlessWrapper>,
+    /// Whether `[headless] wrapper = "workspace"`, which a worker ignores,
+    /// was warned of (ADR-t1433-3 decision 2).
+    wrapper_setting_warned: bool,
     /// The `[conflicts]` thresholds the plan review's hotspots and the
     /// claims deferred on them are judged by, as last read (ADR-0080).
     conflicts: crate::domain::stats::ConflictConfigReport,
@@ -2738,19 +2734,23 @@ impl Supervisor<'_> {
     /// the session kept open through validation, review, revise or its
     /// `/exit` would otherwise be left open with nobody watching it, the
     /// run without a lease. `None` when the slot holds no such session, it
-    /// ended already, its workspace is gone, or the lease is not known to
-    /// be this supervisor's; else the `session` of the `runtime_error`:
+    /// ended already, its background wrapper is gone, or the lease is not
+    /// known to be this supervisor's; else the `session` of the
+    /// `runtime_error`:
     /// `exit` is `sent`, `requested_before` (the `/exit` was typed already
     /// and is never typed twice) or `failed` with the `error`, which
     /// leaves the session to a person (`AttentionNext::ExitSession`).
     fn exit_abandoned_session(&mut self, slot: &Slot) -> Option<Value> {
         let (workspace, requested) = open_session(&slot.phase)?;
         let workspace = workspace.to_owned();
-        // Nothing is typed into a session this supervisor may no longer own
-        // (the lease check itself failed), nor into one that ended already.
+        // Nothing is asked of a session this supervisor may no longer own
+        // (the lease check itself failed), nor of one that ended already; a
+        // workspace from before ADR-t1433-3 is not asked of cmux, and its
+        // wrapper's registration alone says whether it ended
+        // (`run_session_gone`).
         if !matches!(self.queue.holds_lease(slot.run.id(), &self.token), Ok(true))
             || matches!(session_alive(self, slot.run.id()), Ok(false))
-            || matches!(self.cmux.exists(&workspace), Ok(false))
+            || matches!(self.run_session_gone(&workspace), Ok(true))
         {
             return None;
         }
@@ -2817,8 +2817,8 @@ impl Supervisor<'_> {
         if let Some(workspace) = workspace {
             if session_may_live {
                 info!(run_id = %run.id(), "run {}: resume workspace {workspace} is kept; its session may still run", run.id());
-            } else if let Err(error) = self.cmux.close(&workspace) {
-                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: resume workspace {workspace} could not be closed: {error:#}", run.id());
+            } else if let Err(error) = stop_run_session(self.cmux, &workspace) {
+                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: the resume's session {workspace} could not be stopped: {error:#}", run.id());
             }
         }
         self.errors.push(RunError {
@@ -3601,9 +3601,10 @@ fn spawn_validation(
     })
 }
 
-/// Close the cmux workspace of an accepted run. The worktree and branch stay
-/// until integration. A close failure is recorded but does not change the run
-/// status; `workspace_closed_at` stays null so nothing treats it as cleaned.
+/// Stop the session wrapper of an accepted run ([`stop_run_session`]). The
+/// worktree and branch stay until integration. A failure is recorded but
+/// does not change the run status; `workspace_closed_at` stays null so
+/// nothing treats it as cleaned.
 fn close_workspace(
     queue: &mut dyn Queue,
     cmux: &dyn WorkspaceBackend,
@@ -3611,10 +3612,10 @@ fn close_workspace(
     run: &TaskRun,
 ) -> Result<TaskRun> {
     let workspace = run.workspace_id().context("missing workspace")?;
-    match cmux.close(workspace) {
+    match stop_run_session(cmux, workspace) {
         Ok(()) => queue.workspace_closed(run.id(), token),
         Err(error) => {
-            let message = format!("workspace {workspace} could not be closed: {error:#}");
+            let message = format!("session {workspace} could not be stopped: {error:#}");
             warn!(run_id = %run.id(), "run {}: {message}", run.id());
             queue.cleanup_failed(
                 run.id(),

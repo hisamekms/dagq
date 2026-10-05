@@ -1,12 +1,13 @@
-//! The workspaces and worktrees of ended runs: what the triage or a
-//! landing closes of a run's workspaces, and the supervisor's sweep that
-//! closes whatever cmux still lists of the runs the triage never takes
-//! (task 180); the build outputs an ended run's worktree holds, and the
-//! worktree and branch once its task is over (task 376).
+//! The sessions and worktrees of ended runs: what the triage or a landing
+//! stops of a run's session wrappers, and the supervisor's sweep that
+//! stops the background wrappers still running of the runs the triage
+//! never takes (task 180, ADR-t1433-3 decision 3); the build outputs an
+//! ended run's worktree holds, and the worktree and branch once its task
+//! is over (task 376). cmux is not called for a run: a workspace of a
+//! session from before ADR-t1433-3 is left to a person.
 
 use super::*;
 use crate::domain::EventKind;
-use crate::domain::background_wrapper::is_background;
 use crate::{
     application::{EndedRunWorkspace, planner},
     domain::run::{RunWorkspace, run_workspaces},
@@ -18,7 +19,7 @@ use crate::{
 /// otherwise.
 pub(super) const BUILD_OUTPUT_DIRS: &[&str] = &["target", "llvm-cov-target"];
 
-/// Who closes a run's workspaces through
+/// Who stops a run's session wrappers through
 /// [`Supervisor::close_open_workspaces`]: the triage of a `failed` /
 /// `interrupted` run, or the supervisor once a run it landed ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,7 +49,7 @@ impl WorkspaceCloser {
     }
 }
 
-/// Why the sweep closes a workspace of an ended run: a `failed` /
+/// Why the sweep stops a wrapper of an ended run: a `failed` /
 /// `interrupted` run the triage does not take was superseded (its task
 /// moved on, or a later run took its place); a landed one just ended.
 fn sweep_reason(status: RunStatus) -> &'static str {
@@ -59,11 +60,11 @@ fn sweep_reason(status: RunStatus) -> &'static str {
 }
 
 impl Supervisor<'_> {
-    /// Close the workspaces a run left open, each only while cmux still
-    /// lists it: its worker workspace and each resume's, unless its close
-    /// is recorded ([`run_workspaces`]). A close records `workspace_closed`
-    /// (`by` the closer); a cmux failure records `cleanup_failed` and the
-    /// others go on. A `stuck_exit` ask of the run is closed with its
+    /// Stop the session wrappers a run left running, each only while it
+    /// runs ([`Self::run_session_open`]): its worker's and each resume's,
+    /// unless its stop is recorded ([`run_workspaces`]). A stop records
+    /// `workspace_closed` (`by` the closer); a failure records
+    /// `cleanup_failed` and the others go on. A `stuck_exit` ask of the run is closed with its
     /// workspace, and its `answer_prompt` and `stalled` asks in any case;
     /// its stalled detections with no end get `stall_resolved` (`run_ended`).
     pub(super) fn close_open_workspaces(
@@ -79,11 +80,11 @@ impl Supervisor<'_> {
         let mut closed = false;
         for workspace in open {
             let id = workspace.workspace_id;
-            let result = self.cmux.exists(&id).and_then(|listed| {
-                if listed {
+            let result = self.run_session_open(&id).and_then(|open| {
+                if open {
                     self.cmux.close(&id)?;
                 }
-                Ok(listed)
+                Ok(open)
             });
             match result {
                 Ok(true) => {
@@ -113,18 +114,20 @@ impl Supervisor<'_> {
             .end_stalled_detections(run.id(), closer.answer())?;
         Ok(())
     }
-    /// Close what cmux still lists of the workspaces of ended runs the
-    /// triage never takes (task 180): runs superseded in their task,
-    /// runs of a task that moved on, and landed runs, however they ended
-    /// (a hand `integrate` or `recover` included). At most once per
-    /// `interval`, and at once on the first pass. cmux's one listing of all windows decides, not
-    /// the recorded closes; a workspace it does not list gets no event. A
-    /// close records `workspace_closed` (`by: supervisor`, `reason`
+    /// Stop the background wrappers still running of ended runs the triage
+    /// never takes (task 180, ADR-t1404-1 decision 3): runs superseded in
+    /// their task, runs of a task that moved on, and landed runs, however
+    /// they ended (a hand `integrate` or `recover` included). At most once
+    /// per `interval`, and at once on the first pass. Whether a wrapper
+    /// runs decides ([`Self::run_session_open`]), not the recorded stops;
+    /// one that does not run gets no event, and a workspace of a session
+    /// from before ADR-t1433-3 is not asked of cmux (a person closes it).
+    /// A stop records `workspace_closed` (`by: supervisor`, `reason`
     /// `superseded` or `ended`) and closes the run's `stuck_exit`,
     /// `answer_prompt` and `stalled` asks, ending its stalled detections
-    /// with no end (`stall_resolved`, `run_ended`); a cmux failure records
-    /// `cleanup_failed` (once per workspace and process; the close is
-    /// retried on every sweep) and the others go on. Worktrees, branches and run
+    /// with no end (`stall_resolved`, `run_ended`); a failure records
+    /// `cleanup_failed` (once per wrapper and process; the stop is retried
+    /// on every sweep) and the others go on. Worktrees, branches and run
     /// directories stay for a person.
     ///
     /// The same pass asks for the disk of the ended runs to be freed
@@ -144,7 +147,7 @@ impl Supervisor<'_> {
         self.clean_ended_worktrees(None);
         self.close_abandoned_planners();
         self.remove_unused_planner_runners();
-        self.sweep_ended_workspaces()
+        self.sweep_ended_sessions()
     }
     /// Remove the runners (the binary snapshots) of the planners whose
     /// wrapper is done ([`planner::remove_unused_planner_runners`]); a
@@ -199,40 +202,22 @@ impl Supervisor<'_> {
             }
         }
     }
-    fn sweep_ended_workspaces(&mut self) -> Result<()> {
+    fn sweep_ended_sessions(&mut self) -> Result<()> {
         let candidates: Vec<EndedRunWorkspace> = self
             .queue
             .ended_run_workspaces()?
             .into_iter()
             .filter(|w| !self.slots.iter().any(|slot| *slot.run.id() == w.run_id))
             .collect();
-        if candidates.is_empty() {
-            return Ok(());
-        }
-        // Only a workspace's ID is looked for in cmux's list: a background
-        // wrapper's handle is judged by its process (ADR-t1404-1), so a
-        // listing that fails skips the workspaces only and the background
-        // sessions are still swept.
-        let listed = if candidates.iter().all(|w| is_background(&w.workspace_id)) {
-            Some(Vec::new())
-        } else {
-            match self.cmux.listed_workspace_ids() {
-                Ok(listed) => Some(listed),
-                Err(error) => {
-                    warn!(error = %format_args!("{error:#}"), "the workspaces of ended runs could not be swept: {error:#}");
-                    None
-                }
-            }
-        };
         let mut closed_runs: Vec<RunId> = Vec::new();
         for candidate in candidates {
-            if !still_open(self.cmux, listed.as_deref(), &candidate.workspace_id) {
+            if !matches!(self.run_session_open(&candidate.workspace_id), Ok(true)) {
                 continue;
             }
             let workspace = &candidate.workspace_id;
             match self.cmux.close(workspace) {
                 Ok(()) => {
-                    info!(run_id = %candidate.run_id, "run {} is {}; closed its workspace {workspace} cmux still listed", candidate.run_id, candidate.status.as_str());
+                    info!(run_id = %candidate.run_id, "run {} is {}; stopped its background wrapper {workspace} that still ran", candidate.run_id, candidate.status.as_str());
                     self.queue.record_workspace_closed(
                         &candidate.run_id,
                         workspace,
@@ -244,7 +229,7 @@ impl Supervisor<'_> {
                 }
                 // Retried on the next sweep; recorded once.
                 Err(error) if self.sweep_failures.contains(workspace) => {
-                    warn!(run_id = %candidate.run_id, "run {}: workspace {workspace} still could not be closed: {error:#}", candidate.run_id);
+                    warn!(run_id = %candidate.run_id, "run {}: the wrapper {workspace} still could not be stopped: {error:#}", candidate.run_id);
                 }
                 Err(error) => {
                     self.sweep_failures.push(workspace.clone());
@@ -258,7 +243,7 @@ impl Supervisor<'_> {
             }
         }
         for run_id in closed_runs {
-            let answer = "the run ended; the runtime closed its workspace";
+            let answer = "the run ended; the runtime stopped its session";
             self.queue.close_stuck_exit_asks(&run_id, answer)?;
             self.queue.close_answer_prompt_asks(&run_id, answer)?;
             self.queue.end_stalled_detections(&run_id, answer)?;
@@ -308,8 +293,8 @@ impl Supervisor<'_> {
     pub(super) fn clean_task_worktrees(&mut self, task: TaskId) {
         self.clean_ended_worktrees(Some(task));
     }
-    /// Record `cleanup_failed` for a workspace of the run cmux could not
-    /// close.
+    /// Record `cleanup_failed` for a session wrapper of the run that could
+    /// not be stopped.
     fn record_close_failure(
         &mut self,
         run_id: &RunId,
@@ -317,7 +302,7 @@ impl Supervisor<'_> {
         closer: WorkspaceCloser,
         error: &anyhow::Error,
     ) -> Result<()> {
-        let message = format!("workspace {workspace} could not be closed: {error:#}");
+        let message = format!("session {workspace} could not be stopped: {error:#}");
         warn!(run_id = %run_id, "run {run_id}: {message}");
         self.queue.record_runtime_event(
             run_id,

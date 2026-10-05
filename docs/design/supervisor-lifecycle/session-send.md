@@ -4,8 +4,8 @@ type: design
 title: "sessionへの送信と確認"
 status: current
 created: 2026-09-26
-updated: 2026-10-04 # task 1437
-last_verified: 2026-10-04 # task 1437
+updated: 2026-10-05 # task 1440: run screenをturnのlogのCLIへの案内とともに拒む
+last_verified: 2026-10-05 # task 1440
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -32,7 +32,7 @@ worker の session への打ち込み・入力欄の確認・Enter の送り直�
 
 | コマンド | すること |
 | --- | --- |
-| `run screen RUN [--lines N]` | `screen: null`・`reason: "a headless run has no screen"`・run dirの`turns/`の場所を返す。過去の`worker_mode: interactive`のrunにも同じ形で返し、保存されたmodeをそのまま返して、`reason`は対話のworkerを廃止したこと（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）を示す（`"the interactive worker was retired (task 1437); the run has no screen to read"`）。画面もworkspaceの出力も読まず、`screen_read`を残さない |
+| `run screen RUN [--lines N]` | どのrunにも、理由と代わりを示して拒む（非0で終わり、JSONのerror）。理由はrunのsessionが画面なしのbackgroundで動くこと（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）と対話のworkerを廃止したこと（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)、task 1437）で、代わりはturnのlogを読む`dagq run log RUN`（`--follow`で追う。task 1406）とrun dirの`turns/`の場所。先にrunを引き（知らないrun・taskはqueueのerror）、画面も出力も読まず、`screen_read`を残さない |
 | `planner screen ID [--lines N]` | 画面（cmuxの`read-screen`）の末尾のN行（末尾の空行を除く）を返す。既定40行、最大200行で、超える指定は200に切る（`lines_requested`・`lines_limit`・`lines`・`truncated`・`screen`） |
 | `run send RUN --key K [--key K ...]` | どのrunにも、対話の入力が無い理由と代わりを示して拒む。答えは`answer`で記録し、supervisorが次のturnとして届ける |
 | `planner send ID --key K ...` | 決めたキーの集合だけを順に送る（cmuxの`send-key`）。集合は`enter`・`escape`・`up`・`down`・`1`〜`9`（ダイアログの番号）・`exit`。1回に10個まで。`exit`は単独でだけ送れ、`/exit`をsupervisorと同じ`submit_input`（`Input::Exit`。打ち直さない）で打つ |
@@ -40,7 +40,7 @@ worker の session への打ち込み・入力欄の確認・Enter の送り直�
 | `planner send ID --answer ASK` | 答えられた`planner_question`のうち、答えがそのplannerに届くもの（`planner_answer_route`が同じplanner）の答えを同じ形で打つ。supervisorと同じく先に`claim_planner_answer`（`planner_answer_claimed`）で打つ権利を取り（取れなければ拒む）、打った後に`ask_delivered`を記録してaskを閉じる。ほかのaskは拒む |
 
 - 自由な文・集合の外のキー・`--key`と`--answer`の両方・どちらも無い送信は、cmuxを呼ぶ前に拒む。workerのaskへの答えは`answer`に記録し、supervisorが次のturnとして届ける
-- runの画面は読まない。`run screen`は上の既存の非対話の応答を、閉じたrun・workspaceの無いrun・過去の対話のrunにも返す。`run send`はどのrunにも拒む。どちらもqueueだけを読み、cmuxもagentのadapterも作らない（`--cmux`・`--lines`・`--key`・`--answer`は受け付けて使わないので、cmuxの無いhostでも同じ応答になる）。閉じたplanner（`closed_at`）・workspaceの無いplannerは従来どおり拒む
+- runの画面は読まない。`run screen`は上の拒否を、閉じたrun・過去にworkspaceで開いたrun・過去の対話のrunにも返す。`run send`はどのrunにも拒む。どちらもqueueだけを読み、cmuxもagentのadapterも作らない（`--cmux`・`--lines`・`--key`・`--answer`は受け付けて使わないので、cmuxの無いhostでも同じ応答になる）。閉じたplanner（`closed_at`）・workspaceの無いplannerは従来どおり拒む
 - backgroundで動く非対話のsession（[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)）のturnの要約は、画面の代わりに`run log RUN [--lines N] [--follow]` / `planner log ID [--lines N] [--follow]`でそのlogを読む（終わったrun・閉じたplannerも。capabilityは`screen.read`で、何も記録しないのでqueueを読み取りで開く。[非対話のworker](headless-worker.md#workspaceなしのbackgroundのwrapper)の「logを読むCLI」）
 - 記録: plannerの画面を読むと`screen_read`、送ると`screen_input_sent`を残す。plannerはqueueのevent（`planner_id`）で、eventのactor（呼び出し元のroleとid）を持つ。payloadは`target: planner`・`workspace_id`と、読み取りは行数、送信は`input`（`keys` / `answer`）・`keys`か`ask_id`・`outcome`（キーは`sent`、打った文と`/exit`は`submitted` / `dialog` / `stuck` / `unsent`）・`retries`。画面の中身はeventに載せない。どちらもattentionにはしない
 - 判定: capabilityは`screen.read`・`screen.send`で、userとinboxだけが持つ（[Authorization](../authorization.md)）。`Operation`の入口で判定し、拒めば`authorization_denied`を残す。plannerの読み取りと送信はeventを残すので、どちらも状態を変えるコマンドとしてqueueを書き込みで開く（本番queueでは固定バイナリで打つ）

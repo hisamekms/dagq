@@ -907,9 +907,10 @@ fn a_skipped_run_whose_supervisor_died_is_adopted() {
 /// `supervise::resume::tests::a_run_is_skipped_only_when_every_condition_of_the_skip_holds`;
 /// this one reads them from the real worktree, its dirty status here. The
 /// backend has no resume script, so the resume cannot start: it ends as an
-/// `error` with the failed cmux call recorded on the run (task 109), and
-/// `last_error` keeps why the run was parked. The resume opens a workspace,
-/// whose `create_resume` is the call recorded (task 1439).
+/// `error` with the failed call recorded on the run (task 109), and
+/// `last_error` keeps why the run was parked. The resume starts its
+/// wrapper in the background, whose `launch_background` is the call
+/// recorded (ADR-t1433-3).
 #[test]
 fn a_run_with_a_dirty_worktree_is_resumed() {
     let (_dir, repo, db) = fixture();
@@ -922,7 +923,7 @@ fn a_run_with_a_dirty_worktree_is_resumed() {
     let worktree = Path::new(run.worktree_path().unwrap());
     fs::write(worktree.join("stray.txt"), "left over\n").unwrap();
 
-    let options = in_workspaces(supervise_options(4, true));
+    let options = supervise_options(4, true);
     let outcome = supervise_with(&db, &repo, &backend, &options).unwrap();
     assert_eq!(outcome["errors"].as_array().unwrap().len(), 1, "{outcome}");
     let mut queue = SqliteQueue::open(&db).unwrap();
@@ -941,7 +942,7 @@ fn a_run_with_a_dirty_worktree_is_resumed() {
     let failures = backend_failures(&detail);
     assert_eq!(failures.len(), 1, "{:?}", event_kinds(&detail));
     assert_eq!(failures[0].run_id.as_ref(), Some(run.id()));
-    assert_eq!(failures[0].payload["op"], "create_resume");
+    assert_eq!(failures[0].payload["op"], "launch_background");
     assert_eq!(detail.runs[0].status(), RunStatus::NeedsSession);
     assert_eq!(detail.runs[0].last_error(), Some(reason.as_str()));
     assert!(queue.run_leases().unwrap().is_empty());

@@ -20,8 +20,7 @@ use dagq::{
     },
     domain::{
         AskKind, DraftOrigin, NewAsk, NewGoal, NewTask, PlannerOrigin, PlannerOwner, Priority,
-        ProposalId, ProposalStatus, Submission, Task, TaskAction, TaskEdit, TaskId, TaskRun,
-        TaskStatus,
+        ProposalId, ProposalStatus, Submission, TaskAction, TaskEdit, TaskId, TaskRun, TaskStatus,
     },
     infrastructure::{
         clock,
@@ -357,12 +356,6 @@ impl WorkspaceBackend for PlanWorkspace {
     }
     fn preflight_detached(&self, _: &SupervisorEnvironment) -> Result<()> {
         Ok(())
-    }
-    fn create(&self, _: &Task, _: &TaskRun, _: &str, _: &WorkspaceTags) -> Result<String> {
-        bail!("no run starts in these tests")
-    }
-    fn create_resume(&self, _: &Task, _: &TaskRun, _: &str, _: &WorkspaceTags) -> Result<String> {
-        bail!("no run resumes in these tests")
     }
     fn send_text(&self, workspace_id: &str, text: &str) -> Result<()> {
         self.texts

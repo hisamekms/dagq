@@ -1,7 +1,7 @@
-//! A headless session's wrapper started without a workspace (ADR-t1404-1):
-//! whether the session of a run is started in the background, the flag
-//! that tells the wrapper so, and the record of its start the wrapper
-//! waits for before it registers.
+//! A headless session's wrapper started without a workspace (ADR-t1404-1,
+//! ADR-t1433-3): the log of a run's session, the flag that tells the
+//! wrapper it starts in the background, and the record of its start the
+//! wrapper waits for before it registers.
 
 use super::*;
 use crate::domain::background_wrapper::{
@@ -10,31 +10,37 @@ use crate::domain::background_wrapper::{
 };
 
 impl Supervisor<'_> {
-    /// The log of `run`'s session wrapper when it is started in the
-    /// background: a headless run under `[headless] wrapper =
-    /// "background"`, read now, as the wrapper starts (ADR-t1404-1
-    /// decision 7), unless `LoopSettings::worker_wrapper` chooses one
-    /// (task 1439). `resume` is the attempt of a resume or, with `reopen`,
-    /// of a reopening. `None` starts it in a workspace, as does
-    /// a setting that cannot be read.
-    pub(super) fn background_log(
+    /// The log of a run's session wrapper, which always starts in the
+    /// background (ADR-t1433-3 decision 1): `session.log` in `run_dir`, or
+    /// the log of the resume or, with `reopen`, the reopening `resume`.
+    /// `[headless] wrapper` of `dagq.toml` is accepted and ignored for a
+    /// worker (decision 2); [`Self::warn_ignored_wrapper_setting`] says so.
+    pub(super) fn session_log(
         &self,
-        run: &TaskRun,
         run_dir: &Path,
         resume: Option<usize>,
         reopen: bool,
-    ) -> Option<PathBuf> {
-        let wrapper = match self.worker_wrapper {
-            Some(wrapper) => Ok(wrapper),
-            None => self.verifier.headless_wrapper(),
-        };
-        match wrapper {
-            Ok(HeadlessWrapper::Background) => Some(run_dir.join(session_log_name(resume, reopen))),
-            Ok(HeadlessWrapper::Workspace) => None,
-            Err(error) => {
-                warn!(run_id = %run.id(), "[headless] of dagq.toml could not be read, so the session of run {} opens in a workspace: {error:#}", run.id());
-                None
-            }
+    ) -> PathBuf {
+        run_dir.join(session_log_name(resume, reopen))
+    }
+
+    /// Warn once per supervisor that `[headless] wrapper = "workspace"` of
+    /// `dagq.toml` does not open a worker's session in a workspace any
+    /// more: the setting is accepted and ignored, so that a `dagq.toml`
+    /// that still has it keeps loading (ADR-t1433-3 decision 2). Until the
+    /// warning is given, the setting is read as each session starts, so a
+    /// `dagq.toml` that comes to say `"workspace"` later is warned of too.
+    /// A runtime planner still follows it until its own workspace route
+    /// goes.
+    pub(super) fn warn_ignored_wrapper_setting(&mut self) {
+        let warn = warns_of_ignored_setting(self.wrapper_setting_warned, || {
+            self.verifier.headless_wrapper_setting()
+        });
+        if warn {
+            self.wrapper_setting_warned = true;
+            warn!(
+                "[headless] wrapper = \"workspace\" of dagq.toml is ignored for workers: a worker's session wrapper always starts in the background (ADR-t1433-3)"
+            );
         }
     }
 
@@ -56,27 +62,26 @@ impl Supervisor<'_> {
             }
     }
 
-    /// The group of a session's workspace: none for one started in the
-    /// background, which cmux is not asked for.
-    pub(super) fn session_group(&self, background: Option<&Path>) -> Option<String> {
-        match background {
-            Some(_) => None,
-            None => self.workspace_group(),
-        }
+    /// Whether the session `id` a run recorded still runs
+    /// ([`run_session_open`]).
+    pub(super) fn run_session_open(&self, id: &str) -> Result<bool> {
+        run_session_open(self.cmux, id)
+    }
+
+    /// Whether the session `id` a run recorded is known to have ended
+    /// ([`run_session_gone`]).
+    pub(super) fn run_session_gone(&self, id: &str) -> Result<bool> {
+        run_session_gone(self.cmux, id)
     }
 
     /// Record `wrapper_launched` for the background wrapper `handle` of
-    /// `run`, after the run recorded the handle as its session's
-    /// workspace: the wrapper registers once it finds this record with its
-    /// own pid. A record that cannot be made stops the wrapper, which
-    /// nothing would find. Nothing for a workspace.
-    pub(super) fn record_launch(
-        &mut self,
-        run: &TaskRun,
-        handle: &str,
-        log: Option<&Path>,
-    ) -> Result<()> {
-        let (Some(log), Some(parsed)) = (log, BackgroundHandle::parse(handle)) else {
+    /// `run`, after the run recorded the handle as its session: the
+    /// wrapper registers once it finds this record with its own pid. A
+    /// record that cannot be made stops the wrapper, which nothing would
+    /// find. Nothing for a handle that is not a background wrapper's (a
+    /// test backend's).
+    pub(super) fn record_launch(&mut self, run: &TaskRun, handle: &str, log: &Path) -> Result<()> {
+        let Some(parsed) = BackgroundHandle::parse(handle) else {
             return Ok(());
         };
         let recorded = self.queue.record_runtime_event(
@@ -106,12 +111,23 @@ impl Supervisor<'_> {
     }
 }
 
+/// Whether `[headless] wrapper` as `dagq.toml` writes it (`setting`, read
+/// only while nothing was `warned` yet) calls for the warning that a worker
+/// ignores it (ADR-t1433-3 decision 2): once per supervisor, and only for
+/// `"workspace"`. No key, `"background"` and a setting that cannot be read
+/// warn nothing here (an unreadable `dagq.toml` is reported where it is
+/// read for `[run.env]`).
+fn warns_of_ignored_setting(
+    warned: bool,
+    setting: impl FnOnce() -> Result<Option<HeadlessWrapper>>,
+) -> bool {
+    !warned && matches!(setting(), Ok(Some(HeadlessWrapper::Workspace)))
+}
+
 /// `args`, the session wrapper's command, with the flag of a background
-/// start when there is a `background` log, as one shell command line.
-pub(super) fn wrapper_command(mut args: Vec<String>, background: Option<&Path>) -> String {
-    if background.is_some() {
-        args.push(BACKGROUND_FLAG.into());
-    }
+/// start, as one shell command line.
+pub(super) fn wrapper_command(mut args: Vec<String>) -> String {
+    args.push(BACKGROUND_FLAG.into());
     shell_join(&args)
 }
 
@@ -195,16 +211,179 @@ pub(crate) fn stop_left_turn(
 /// given to be gone.
 const TURN_STOP_WAIT: Duration = Duration::from_secs(5);
 
-/// Whether the session `id` a run recorded is still open: a workspace
-/// while cmux lists it in `listed`, a background wrapper's handle while
-/// its process runs (`exists` on the handle; one that cannot be judged
-/// counts as gone, as a workspace missing from the list does). A
-/// background handle is judged without the list, so a listing that
-/// failed (`None`) leaves only the workspaces unjudged, counted as not
-/// open for the caller to report.
-pub(crate) fn still_open(cmux: &dyn WorkspaceBackend, listed: Option<&[String]>, id: &str) -> bool {
-    if is_background(id) {
-        return matches!(cmux.exists(id), Ok(true));
+/// Whether the session `id` a run recorded still runs: a background
+/// wrapper's handle while its process runs (`exists` on the handle, which
+/// asks no cmux). A workspace ID, a session opened in a workspace before
+/// ADR-t1433-3, counts as not open: cmux is not asked for a run's session
+/// any more, and a person closes such a workspace in their own terminal
+/// (decision 3).
+pub(crate) fn run_session_open(sessions: &dyn WorkspaceBackend, id: &str) -> Result<bool> {
+    if !is_background(id) {
+        return Ok(false);
     }
-    listed.is_some_and(|listed| listed.iter().any(|listed| listed.eq_ignore_ascii_case(id)))
+    sessions.exists(id)
+}
+
+/// Whether the session `id` a run recorded is known to have ended, for an
+/// exit to be asked of it: a background wrapper's handle whose process no
+/// longer runs (`exists` on the handle, which asks no cmux). A workspace
+/// ID, a session opened in a workspace before ADR-t1433-3, is not asked of
+/// cmux and is not known to have ended: its wrapper's registration says
+/// whether it runs, and the exit asked is a file in the run dir that the
+/// wrapper reads wherever it runs.
+pub(crate) fn run_session_gone(sessions: &dyn WorkspaceBackend, id: &str) -> Result<bool> {
+    if !is_background(id) {
+        return Ok(false);
+    }
+    Ok(!sessions.exists(id)?)
+}
+
+/// Stop the session `id` a run recorded: its background wrapper and what
+/// it started (`close` on the handle, which asks no cmux, ADR-t1404-1
+/// decision 3). A workspace ID, a session opened in a workspace before
+/// ADR-t1433-3, is not closed: cmux is not called for a run's session any
+/// more, and a person closes the workspace in their own terminal
+/// (decision 3); it counts as stopped.
+pub(crate) fn stop_run_session(sessions: &dyn WorkspaceBackend, id: &str) -> Result<()> {
+    if !is_background(id) {
+        info!(
+            "the workspace {id} of a session opened before ADR-t1433-3 is left to a person to close"
+        );
+        return Ok(());
+    }
+    sessions.close(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::{SupervisorEnvironment, WorkspaceTags};
+    use std::sync::Mutex;
+
+    /// A backend that records the `exists` and `close` it is asked, says a
+    /// session is open (ended with `ended`), and refuses every other call:
+    /// a run's session asks nothing else of it.
+    #[derive(Default)]
+    struct Sessions {
+        calls: Mutex<Vec<String>>,
+        ended: bool,
+    }
+
+    impl Sessions {
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl WorkspaceBackend for Sessions {
+        fn preflight(&self) -> Result<()> {
+            unimplemented!()
+        }
+        fn preflight_detached(&self, _: &SupervisorEnvironment) -> Result<()> {
+            unimplemented!()
+        }
+        fn send_text(&self, _: &str, _: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn send_enter(&self, _: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn capture(&self, _: &str) -> Result<String> {
+            unimplemented!()
+        }
+        fn close(&self, id: &str) -> Result<()> {
+            self.calls.lock().unwrap().push(format!("close {id}"));
+            Ok(())
+        }
+        fn set_color(&self, _: &str, _: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn set_status(&self, _: &str, _: &str, _: &str, _: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn pin(&self, _: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn send_exit(&self, _: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn exists(&self, id: &str) -> Result<bool> {
+            self.calls.lock().unwrap().push(format!("exists {id}"));
+            Ok(!self.ended)
+        }
+        fn listed_workspace_ids(&self) -> Result<Vec<String>> {
+            unimplemented!()
+        }
+        fn create_named(&self, _: &str, _: &Path, _: &str, _: &WorkspaceTags) -> Result<String> {
+            unimplemented!()
+        }
+        fn ensure_group(&self, _: &str, _: &str) -> Result<String> {
+            unimplemented!()
+        }
+        fn notify(&self, _: &str, _: &str, _: Option<&str>) -> Result<()> {
+            unimplemented!()
+        }
+    }
+
+    /// A run's background handle is judged and stopped through the
+    /// backend's `exists` and `close` on the handle (which ask no cmux);
+    /// a workspace ID from before ADR-t1433-3 is never asked of the
+    /// backend: it counts as not open, and as stopped, left to a person
+    /// (decision 3).
+    #[test]
+    fn a_pre_adr_workspace_of_a_run_is_never_asked_of_the_backend() {
+        let sessions = Sessions::default();
+        let handle = "background:4242:Mon_Oct__5_10:00:00_2026";
+        assert!(run_session_open(&sessions, handle).unwrap());
+        stop_run_session(&sessions, handle).unwrap();
+        assert_eq!(
+            sessions.calls(),
+            [format!("exists {handle}"), format!("close {handle}")]
+        );
+        let sessions = Sessions::default();
+        let workspace = "01234567-89AB-4DEF-8123-000000000000";
+        assert!(!run_session_open(&sessions, workspace).unwrap());
+        stop_run_session(&sessions, workspace).unwrap();
+        assert!(sessions.calls().is_empty(), "{:?}", sessions.calls());
+    }
+
+    /// A session given up on is asked to exit unless it is known to have
+    /// ended: a background handle whose process is gone. A workspace ID
+    /// from before ADR-t1433-3 is not asked of the backend and is not known
+    /// to have ended, so its still registered wrapper is asked to exit
+    /// through the run dir.
+    #[test]
+    fn only_a_background_session_is_known_to_have_ended_without_its_registration() {
+        let handle = "background:4242:Mon_Oct__5_10:00:00_2026";
+        let sessions = Sessions::default();
+        assert!(!run_session_gone(&sessions, handle).unwrap());
+        let ended = Sessions {
+            ended: true,
+            ..Sessions::default()
+        };
+        assert!(run_session_gone(&ended, handle).unwrap());
+        assert_eq!(ended.calls(), [format!("exists {handle}")]);
+        let workspace = "01234567-89AB-4DEF-8123-000000000000";
+        assert!(!run_session_gone(&ended, workspace).unwrap());
+        assert_eq!(ended.calls(), [format!("exists {handle}")]);
+    }
+
+    /// Only `"workspace"` is warned of, and only once: a supervisor that
+    /// warned does not read the setting again (ADR-t1433-3 decision 2).
+    #[test]
+    fn only_a_workspace_setting_is_warned_of_and_only_once() {
+        assert!(warns_of_ignored_setting(false, || Ok(Some(
+            HeadlessWrapper::Workspace
+        ))));
+        for setting in [
+            Ok(Some(HeadlessWrapper::Background)),
+            Ok(None),
+            Err(anyhow::anyhow!("dagq.toml:3: value of wrapper")),
+        ] {
+            assert!(!warns_of_ignored_setting(false, || setting));
+        }
+        assert!(!warns_of_ignored_setting(true, || unreachable!(
+            "the setting is not read again once warned"
+        )));
+    }
 }

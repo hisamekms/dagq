@@ -49,7 +49,9 @@ pub struct TaskRun {
     repo_path: Option<String>,
     run_dir: Option<String>,
     last_error: Option<String>,
-    /// Set once cmux confirmed the close; null keeps the run out of any cleaned state.
+    /// Set once the run's session was stopped (its background wrapper's
+    /// handle closed; before ADR-t1433-3, once cmux confirmed its
+    /// workspace's close); null keeps the run out of any cleaned state.
     workspace_closed_at: Option<i64>,
     created_at: String,
 }
@@ -648,8 +650,9 @@ pub fn resume_after_triage(mut run: TaskRun, instruction: String) -> Result<Task
     Ok(run)
 }
 
-/// cmux confirmed the close of the workspace of a run that came to rest
-/// (awaiting integration or a session) at `closed_at`.
+/// The session of a run that came to rest (awaiting integration or a
+/// session) was stopped at `closed_at`: its background wrapper, or before
+/// ADR-t1433-3 the cmux workspace whose close cmux confirmed.
 pub fn workspace_closed(mut run: TaskRun, closed_at: i64) -> Result<TaskRun, DomainError> {
     require_open_workspace_at_rest(&run, "close the workspace of")?;
     require(run.workspace_id.is_some(), || {
@@ -662,8 +665,9 @@ pub fn workspace_closed(mut run: TaskRun, closed_at: i64) -> Result<TaskRun, Dom
     Ok(run)
 }
 
-/// A cmux workspace a run opened: the worker's own (`resume_attempt`
-/// `None`) or a resume's, and whether its close is recorded.
+/// A session a run opened (a background wrapper's handle, or a cmux
+/// workspace before ADR-t1433-3): the worker's own (`resume_attempt`
+/// `None`) or a resume's, and whether its stop is recorded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunWorkspace {
     pub workspace_id: String,

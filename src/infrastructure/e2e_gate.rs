@@ -4,11 +4,13 @@
 //! the cmux the queue uses and a `TMPDIR` of its own under the gate's
 //! scratch directory. Past its timeout its process group is stopped. After
 //! it, whatever it left is cleaned up by where it lives: the processes
-//! whose command line names that `TMPDIR`, the cmux workspace groups of the
-//! throwaway queues its fixtures made there (their external ID is the queue
-//! hash, the directory under `<fixture>/data/dagq/`), and the directory
-//! itself. Groups are chosen by those hashes, never by the `[dagq-e2e]`
-//! name a worker's e2e gives its groups too.
+//! whose command line names that `TMPDIR`, the cmux workspaces and
+//! workspace groups of the throwaway queues its fixtures made there (the
+//! inbox `up` opens; a group's external ID is the queue hash, the
+//! directory under `<fixture>/data/dagq/`), and the directory itself.
+//! Groups are chosen by those hashes, never by the `[dagq-e2e]` name a
+//! worker's e2e gives its groups too. A run opens no workspace
+//! (ADR-t1433-3), so nothing of a run's is looked for in cmux.
 //!
 //! The e2e runs code a worker wrote (`build.rs`, proc-macros, tests) on the
 //! host, so it is not given the environment of the process that starts it
@@ -774,24 +776,21 @@ fn workspaces_inside(root: &Path, cmux: &Path, hashes: &mut Vec<String>) -> Resu
     let mut selected = Vec::new();
     for workspace in listing["workspaces"].as_array().unwrap() {
         let id = workspace["id"].as_str().context("workspace has no ID")?;
-        // A workspace may close between the listing and its env (runs close
-        // theirs all the time); it is gone, so there is nothing to close.
+        // A workspace may close between the listing and its env (another
+        // e2e's guard closing it); it is gone, so there is nothing to close.
         let Ok(env) = query(&["workspace", "env", id, "--json"]) else {
             continue;
         };
-        if !["DAGQ_QUEUE", "E2E_SHARED"]
-            .iter()
-            .any(|key| env["env"][key].as_str().is_some_and(inside))
-        {
-            continue;
-        }
-        selected.push(id.to_owned());
-        // E2E_SHARED alone must not select a different queue's group.
-        if let Some(queue) = env["env"]["DAGQ_QUEUE"]
+        // The queue the workspace was opened for (the inbox's): only a
+        // fixture's queue under `root` selects it and names its group.
+        let Some(queue) = env["env"]["DAGQ_QUEUE"]
             .as_str()
             .filter(|queue| inside(queue))
-            && let Some(hash) = Path::new(queue).parent().and_then(Path::file_name)
-        {
+        else {
+            continue;
+        };
+        selected.push(id.to_owned());
+        if let Some(hash) = Path::new(queue).parent().and_then(Path::file_name) {
             hashes.push(hash.to_string_lossy().into_owned());
         }
     }
@@ -1728,11 +1727,9 @@ echo 'test result: FAILED. 0 passed; 2 failed'; exit 101";
         script.push_str("esac\n");
         fs::write(cmux, script).unwrap();
         let cleanup = clean_up(&current, Some(cmux));
-        assert_eq!(
-            cleanup["workspaces"],
-            json!(["current", "shared"]),
-            "{cleanup}"
-        );
+        // A run's `[run.env]` names no workspace any more (ADR-t1433-3):
+        // only the queue a workspace was opened for selects it.
+        assert_eq!(cleanup["workspaces"], json!(["current"]), "{cleanup}");
         assert_eq!(cleanup["groups"], json!(["G1"]));
         assert_eq!(cleanup["removed"], true);
         assert!(run(dir, None, &settings).unwrap().passed);
@@ -1744,7 +1741,14 @@ echo 'test result: FAILED. 0 passed; 2 failed'; exit 101";
             calls.contains("workspace-group delete G2 --close-workspaces"),
             "{calls}"
         );
-        for id in ["live", "production", "outside", "prefix", "parent"] {
+        for id in [
+            "live",
+            "production",
+            "shared",
+            "outside",
+            "prefix",
+            "parent",
+        ] {
             assert!(!calls.contains(&format!("workspace close {id}")), "{calls}");
         }
         for id in ["LIVE", "PROD"] {

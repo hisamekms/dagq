@@ -1131,15 +1131,22 @@ pub fn load_e2e_paths(root: &Path) -> Result<Vec<String>> {
 
 /// `[headless] wrapper` of the `dagq.toml` in `root` (ADR-t1404-1
 /// decision 7); no file, no table or no key is the default, a workspace.
+/// Only a runtime planner follows it; a worker ignores it (ADR-t1433-3
+/// decision 2).
 pub fn load_headless_wrapper(root: &Path) -> Result<HeadlessWrapper> {
+    Ok(load_headless_wrapper_setting(root)?.unwrap_or_default())
+}
+
+/// `[headless] wrapper` of the `dagq.toml` in `root` as written: `None`
+/// for no file, no table or no key.
+pub fn load_headless_wrapper_setting(root: &Path) -> Result<Option<HeadlessWrapper>> {
     let path = root.join(CONFIG_FILE_NAME);
     let Some(text) = read_config(&path)? else {
-        return Ok(HeadlessWrapper::default());
+        return Ok(None);
     };
     Ok(parse_config(&text)
         .with_context(|| format!("parse {}", path.display()))?
-        .headless_wrapper
-        .unwrap_or_default())
+        .headless_wrapper)
 }
 
 /// `[roles.<role>]` of the `dagq.toml` in `root` (ADR-0079 decision 7);
@@ -1455,6 +1462,9 @@ impl Verifier for ShellVerifier {
     fn headless_wrapper(&self) -> Result<HeadlessWrapper> {
         load_headless_wrapper(&self.checkout)
     }
+    fn headless_wrapper_setting(&self) -> Result<Option<HeadlessWrapper>> {
+        load_headless_wrapper_setting(&self.checkout)
+    }
     fn role_models(&self) -> Result<RoleModels> {
         load_role_models(&self.checkout)
     }
@@ -1746,6 +1756,7 @@ mod tests {
             load_headless_wrapper(dir.path()).unwrap(),
             HeadlessWrapper::Workspace
         );
+        assert_eq!(load_headless_wrapper_setting(dir.path()).unwrap(), None);
         fs::write(
             dir.path().join(CONFIG_FILE_NAME),
             "[headless]\nwrapper = 'background'\n",
@@ -1754,6 +1765,17 @@ mod tests {
         assert_eq!(
             load_headless_wrapper(dir.path()).unwrap(),
             HeadlessWrapper::Background
+        );
+        // Written as it is, so that a worker can tell `"workspace"` it
+        // ignores from no key (ADR-t1433-3 decision 2).
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[headless]\nwrapper = 'workspace'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            load_headless_wrapper_setting(dir.path()).unwrap(),
+            Some(HeadlessWrapper::Workspace)
         );
         fs::write(
             dir.path().join(CONFIG_FILE_NAME),

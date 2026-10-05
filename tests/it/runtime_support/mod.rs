@@ -455,9 +455,6 @@ await_exit() { await_file "$EXIT"; }
 
 pub const VALID_AGENT: &str = "commit work; receipt \"$(git rev-parse HEAD)\"";
 
-/// The first workspace the test backend hands out; see `workspace_id`.
-pub const WORKSPACE_ID: &str = "01234567-89ab-4def-8123-000000000000";
-
 /// The handle of the background wrapper the run recorded as its first
 /// session (ADR-t1404-1), the fixture's default (task 1439): a pid and a
 /// start, not a workspace.
@@ -468,10 +465,6 @@ pub fn background_session(run: &TaskRun) -> String {
         "{session}"
     );
     session
-}
-
-pub fn workspace_id(n: usize) -> String {
-    format!("01234567-89ab-4def-8123-{n:012x}")
 }
 
 /// Shell prelude for a resumed session: `await_message` blocks until the
@@ -605,19 +598,22 @@ pub fn resume_message_path(run_dir: &str) -> PathBuf {
     Path::new(run_dir).join("resume-message")
 }
 
-/// One session the test backend started, keyed by its workspace id.
+/// One session the test backend started, keyed by its background handle.
 pub struct TestSession {
     pub run_id: RunId,
     pub run_dir: String,
     pub worker: Option<thread::JoinHandle<Result<Value>>>,
 }
 
-/// Starts the session wrapper on a thread per workspace, with the agent
-/// script chosen per task, and records exits and closes per workspace.
+/// Starts each run's session wrapper on a thread as a background session
+/// with a process of its own ([`headless::launch_background`]; a run opens
+/// no workspace, ADR-t1433-3), with the agent script chosen per task, and
+/// records the stops per handle. Planner and inbox workspaces are only
+/// listed and closed.
 pub struct TestWorkspace {
     pub db: PathBuf,
     pub fail: bool,
-    /// The tasks whose `create` fails as with `fail` (task 1482).
+    /// The tasks whose background launch fails as with `fail` (task 1482).
     pub fail_tasks: Mutex<Vec<TaskId>>,
     pub close_fail: bool,
     pub script: String,
@@ -627,11 +623,11 @@ pub struct TestWorkspace {
     /// How long after an attempt to reopen a headless run's lost session
     /// the supervisor makes the next one (task 1372).
     pub reopen_interval: Duration,
-    /// `create` opens the workspace but starts no session, so its wrapper
+    /// The background launch of a first session starts no wrapper, so it
     /// never registers.
     pub no_session: bool,
-    /// `create_resume` opens the workspace but starts no session, so its
-    /// wrapper never registers (a reopen whose wrapper does not start).
+    /// The background launch of a resume starts no wrapper, so it never
+    /// registers (a reopen whose wrapper does not start).
     pub resume_no_session: bool,
     pub resume_timeout: Duration,
     /// How often supervision attempted a screen read through this backend
@@ -642,18 +638,10 @@ pub struct TestWorkspace {
     /// `notify` calls as (title, body, workspace); the supervisor sends
     /// none, `ask` one per new ask (ADR-0022).
     pub notifications: Mutex<Vec<(String, String, Option<String>)>>,
-    /// The tags each run workspace was opened with.
-    pub tags: Mutex<Vec<WorkspaceTags>>,
     /// Every `ensure_group` call, as (external ID, name).
     pub groups: Mutex<Vec<(String, String)>>,
-    /// `workspace-group create` fails.
-    pub group_fails: bool,
     /// Resumed-session script per task; a resume of any other task fails.
     pub resume_scripts: Mutex<HashMap<TaskId, String>>,
-    /// `create_resume` calls: the workspace name and the command.
-    pub resumes: Mutex<Vec<(String, String)>>,
-    /// The tags of every `create_resume` call.
-    pub resume_tags: Mutex<Vec<WorkspaceTags>>,
     /// `launch_background` calls (ADR-t1404-1): the directory, the command
     /// and the environment of each ([`headless::launch_background`]).
     pub launched: Mutex<Vec<headless::Launch>>,
@@ -661,20 +649,20 @@ pub struct TestWorkspace {
     /// `resume_no_session` started without a wrapper, by handle, until
     /// their close stops them as it stops a background wrapper.
     pub stands: Mutex<Vec<(String, headless::Stand)>>,
-    /// `send_text` calls: the workspace and the text.
+    /// `send_text` calls: the session and the text.
     pub texts: Mutex<Vec<(String, String)>>,
-    /// `exists` fails, as `cmux workspace list` does when cmux is gone.
+    /// `exists` (and the listing) fails, as asking about a session can.
     pub exists_fails: bool,
-    /// Workspaces cmux lists although this backend did not open them (a
-    /// run's workspace from an earlier supervisor), until they are closed.
+    /// Sessions the backend reports open although it did not start them (a
+    /// run's wrapper from an earlier supervisor, a workspace from before
+    /// ADR-t1433-3, a planner's workspace), until they are stopped.
     pub listed: Mutex<Vec<String>>,
-    /// Workspaces cmux does not list for now although they are open.
+    /// Sessions the backend reports gone for now although they run.
     pub hidden: Mutex<Vec<String>>,
-    /// `close` ends the session in the workspace, as closing a cmux
-    /// workspace kills its terminal, instead of requiring it gone.
+    /// `close` ends the session, as stopping a background wrapper does,
+    /// instead of requiring it gone.
     pub close_ends_session: bool,
-    /// `close` times out and leaves the workspace and its session as they
-    /// are, as cmux does under load.
+    /// `close` times out and leaves the session as it is.
     pub close_times_out: bool,
     /// The `claude` a headless run's wrapper calls for its turns
     /// ([`headless_claude`]); a headless run fails its wrapper without one.
@@ -688,7 +676,7 @@ pub struct TestWorkspace {
     /// as `RUSTC_WRAPPER` (ADR-t1215-1); `None` names none.
     pub sccache: Option<dagq::domain::sccache::SccacheTarget>,
     /// With `sccache`: what the turns inherit as if the wrapper's
-    /// environment held it (the workspace's `[run.env]` in production),
+    /// environment held it (the wrapper's `[run.env]` in production),
     /// set before each turn's own variables ([`headless::InheritingSpawner`]).
     pub inherited_env: Vec<(String, String)>,
 }
@@ -712,12 +700,8 @@ impl TestWorkspace {
             sessions: Mutex::new(Vec::new()),
             closed: Mutex::new(Vec::new()),
             notifications: Mutex::new(Vec::new()),
-            tags: Mutex::new(Vec::new()),
             groups: Mutex::new(Vec::new()),
-            group_fails: false,
             resume_scripts: Mutex::new(HashMap::new()),
-            resumes: Mutex::new(Vec::new()),
-            resume_tags: Mutex::new(Vec::new()),
             launched: Mutex::new(Vec::new()),
             stands: Mutex::new(Vec::new()),
             texts: Mutex::new(Vec::new()),
@@ -733,9 +717,9 @@ impl TestWorkspace {
             inherited_env: Vec::new(),
         }
     }
-    /// Let cmux list `workspace` as if an earlier supervisor opened it.
-    pub fn list(&self, workspace: &str) {
-        self.listed.lock().unwrap().push(workspace.into());
+    /// Report `session` open as if an earlier supervisor started it.
+    pub fn list(&self, session: &str) {
+        self.listed.lock().unwrap().push(session.into());
     }
     /// Resumed-session script for one task.
     pub fn resume_script_for(&self, task_id: i64, script: &str) {
@@ -772,11 +756,11 @@ impl TestWorkspace {
         for (id, worker) in workers {
             let returned = joined(
                 worker,
-                format!("the session wrapper of workspace {id} to return (its stub agent to exit)"),
+                format!("the session wrapper of {id} to return (its stub agent to exit)"),
             );
             if let Err(error) = returned {
                 print_queue_events(&self.db);
-                panic!("the session wrapper of workspace {id} failed: {error:#}");
+                panic!("the session wrapper of {id} failed: {error:#}");
             }
         }
     }
@@ -787,7 +771,7 @@ impl TestWorkspace {
             .iter()
             .find(|(id, _)| id == workspace_id)
             .map(|(_, s)| s.run_dir.clone())
-            .expect("workspace was created")
+            .expect("the session was started")
     }
 }
 
@@ -797,186 +781,6 @@ impl WorkspaceBackend for TestWorkspace {
     }
     fn preflight_detached(&self, _: &SupervisorEnvironment) -> Result<()> {
         unreachable!("only up preflights the detached connection")
-    }
-    fn create(
-        &self,
-        task: &Task,
-        run: &TaskRun,
-        command: &str,
-        tags: &WorkspaceTags,
-    ) -> Result<String> {
-        assert_eq!(task.id(), run.task_id());
-        self.tags.lock().unwrap().push(tags.clone());
-        assert!(
-            Path::new(run.worktree_path().unwrap())
-                .join("seed.txt")
-                .exists()
-        );
-        assert!(command.contains("'\"'\"'")); // Database path contains an apostrophe.
-        if self.fail || self.fail_tasks.lock().unwrap().contains(&task.id()) {
-            bail!("injected workspace creation failure");
-        }
-        let token: String = Connection::open(&self.db)?.query_row(
-            "SELECT token FROM run_leases WHERE run_id=?1",
-            [&run.id()],
-            |r| r.get(0),
-        )?;
-        let db = self.db.clone();
-        let id = run.id().clone();
-        let mut sessions = self.sessions.lock().unwrap();
-        let workspace = workspace_id(sessions.len());
-        if self.no_session {
-            sessions.push((
-                workspace.clone(),
-                TestSession {
-                    run_id: run.id().clone(),
-                    run_dir: run.run_dir().unwrap().to_owned(),
-                    worker: None,
-                },
-            ));
-            return Ok(workspace);
-        }
-        let claude = self.claude_for(run, false)?;
-        let headless = headless_provider(run, claude.as_deref(), self.codex.as_deref());
-        let ready = self.headless_ready.clone();
-        let sccache = self.sccache.clone();
-        let inherited_env = self.inherited_env.clone();
-        let worker = thread::spawn(move || {
-            let spawner = StubSpawner { db: db.clone() };
-            let (provider, other) = headless;
-            let spawner = headless::ReadySpawner {
-                inner: spawner,
-                ready,
-            };
-            if let Some(sccache) = sccache {
-                let spawner = headless::InheritingSpawner {
-                    inner: spawner,
-                    env: inherited_env,
-                };
-                return runtime::session_with_sccache(
-                    &db,
-                    &id,
-                    &LeaseToken::new(&token),
-                    &provider,
-                    Some(&other),
-                    &spawner,
-                    false,
-                    sccache,
-                );
-            }
-            runtime::session_with_providers(
-                &db,
-                &id,
-                &LeaseToken::new(&token),
-                &provider,
-                Some(&other),
-                &spawner,
-                false,
-            )
-        });
-        sessions.push((
-            workspace.clone(),
-            TestSession {
-                run_id: run.id().clone(),
-                run_dir: run.run_dir().unwrap().to_owned(),
-                worker: Some(worker),
-            },
-        ));
-        Ok(workspace)
-    }
-    fn create_resume(
-        &self,
-        task: &Task,
-        run: &TaskRun,
-        command: &str,
-        tags: &WorkspaceTags,
-    ) -> Result<String> {
-        assert_eq!(task.id(), run.task_id());
-        assert!(command.ends_with(" '--resume'"), "{command}");
-        // The worker's env (ADR-0026) and `run <run-id> resume` (ADR-0028).
-        assert!(
-            tags.env
-                .iter()
-                .any(|(k, v)| k == "DAGQ_ROLE" && v == "worker"),
-            "{:?}",
-            tags.env
-        );
-        // Not the queue's path: the worker's `dagq` goes to the queue
-        // service (goal 82's stage (3)).
-        assert!(!tags.env.iter().any(|(k, _)| k == "DAGQ_QUEUE"));
-        // The same actor as the run's worker (ADR-t728-1 decision 4).
-        for (name, value) in [
-            ("DAGQ_ACTOR_ID", format!("worker:{}", run.id())),
-            ("DAGQ_RUN_ID", run.id().to_string()),
-            ("DAGQ_TASK_ID", run.task_id().to_string()),
-        ] {
-            assert!(
-                tags.env.iter().any(|(k, v)| k == name && *v == value),
-                "{name}={value} in {:?}",
-                tags.env
-            );
-        }
-        assert_eq!(
-            tags.description.as_deref(),
-            Some(format!("run {} resume", run.id()).as_str())
-        );
-        let claude = self.claude_for(run, true)?;
-        let headless = headless_provider(run, claude.as_deref(), self.codex.as_deref());
-        let token: String = Connection::open(&self.db)?.query_row(
-            "SELECT token FROM run_leases WHERE run_id=?1",
-            [&run.id()],
-            |r| r.get(0),
-        )?;
-        let run_dir = run.run_dir().unwrap().to_owned();
-        // The worker's session left its exit request and any earlier
-        // resume its message behind.
-        let _ = fs::remove_file(exit_request_path(&run_dir));
-        let _ = fs::remove_file(resume_message_path(&run_dir));
-        self.resumes.lock().unwrap().push((
-            dagq::infrastructure::adapters::run_workspace_name(task, run)?,
-            command.into(),
-        ));
-        self.resume_tags.lock().unwrap().push(tags.clone());
-        let db = self.db.clone();
-        let id = run.id().clone();
-        let mut sessions = self.sessions.lock().unwrap();
-        let workspace = workspace_id(sessions.len());
-        if self.resume_no_session {
-            let session = TestSession {
-                run_id: id,
-                run_dir,
-                worker: None,
-            };
-            sessions.push((workspace.clone(), session));
-            return Ok(workspace);
-        }
-        let ready = self.headless_ready.clone();
-        let worker = thread::spawn(move || {
-            let spawner = StubSpawner { db: db.clone() };
-            let (provider, other) = headless;
-            let spawner = headless::ReadySpawner {
-                inner: spawner,
-                ready,
-            };
-            runtime::session_with_providers(
-                &db,
-                &id,
-                &LeaseToken::new(&token),
-                &provider,
-                Some(&other),
-                &spawner,
-                true,
-            )
-        });
-        sessions.push((
-            workspace.clone(),
-            TestSession {
-                run_id: run.id().clone(),
-                run_dir,
-                worker: Some(worker),
-            },
-        ));
-        Ok(workspace)
     }
     fn launch_background(
         &self,
@@ -1022,8 +826,8 @@ impl WorkspaceBackend for TestWorkspace {
             "cmux close-workspace failed: Command timed out"
         );
         // The session must have exited (or died, its wrapper's pid gone)
-        // before the supervisor gives up the workspace. A workspace this
-        // backend did not create (an orphan's) has no session here.
+        // before the supervisor stops its handle. A handle this backend did
+        // not start (an orphan's) has no session here.
         let run_id = self
             .sessions
             .lock()
@@ -1044,13 +848,13 @@ impl WorkspaceBackend for TestWorkspace {
             )? {
                 ensure!(
                     started.elapsed() < Duration::from_secs(30),
-                    "session did not end with its workspace"
+                    "session did not end with its wrapper's stop"
                 );
                 thread::sleep(Duration::from_millis(20));
             }
         }
         if let Some(run_id) = &run_id {
-            // A reopen's workspace whose wrapper never registered has no row.
+            // A reopen's session whose wrapper never registered has no row.
             let row: Option<(bool, u32)> = connection
                 .query_row(
                     "SELECT exited_at IS NOT NULL, pid FROM run_processes WHERE run_id=?1 AND role='wrapper'",
@@ -1070,7 +874,7 @@ impl WorkspaceBackend for TestWorkspace {
             assert!(live.into_iter().all(|pid| !pid_alive(pid)));
         }
         if self.close_fail {
-            bail!("injected workspace close failure");
+            bail!("injected session stop failure");
         }
         // A background session without a wrapper is stopped.
         self.stands
@@ -1102,17 +906,18 @@ impl WorkspaceBackend for TestWorkspace {
     fn reopen_interval(&self) -> Duration {
         self.reopen_interval
     }
-    // A workspace is listed from its creation until it is closed, as cmux
-    // does; one this backend never opened is not.
+    // A session is open from its start until it is stopped, as a background
+    // wrapper runs until its stop; one this backend never started is not,
+    // unless `list` names it.
     fn exists(&self, workspace_id: &str) -> Result<bool> {
-        ensure!(!self.exists_fails, "injected workspace list failure");
+        ensure!(!self.exists_fails, "injected session list failure");
         Ok(self
             .listed_workspace_ids()?
             .iter()
             .any(|listed| listed == workspace_id))
     }
     fn listed_workspace_ids(&self) -> Result<Vec<String>> {
-        ensure!(!self.exists_fails, "injected workspace list failure");
+        ensure!(!self.exists_fails, "injected session list failure");
         let closed = self.closed();
         let mut listed: Vec<String> = self
             .sessions
@@ -1134,9 +939,6 @@ impl WorkspaceBackend for TestWorkspace {
             .lock()
             .unwrap()
             .push((external_id.into(), name.into()));
-        if self.group_fails {
-            bail!("workspace-group create failed")
-        }
         Ok(format!("group-{external_id}"))
     }
     fn notify(&self, title: &str, body: &str, workspace: Option<&str>) -> Result<()> {
@@ -1414,22 +1216,7 @@ pub fn supervise_options(parallel: usize, once: bool) -> SuperviseOptions {
             cmux: Some(PathBuf::from("/usr/bin/true")),
             ..base.update.clone()
         },
-        // A worker's headless session wrapper runs in the background, as
-        // a process of its own without a workspace (ADR-t1404-1, task
-        // 1439); a test of the run workspaces chooses them with
-        // [`in_workspaces`].
-        worker_wrapper: Some(HeadlessWrapper::Background),
         ..base
-    }
-}
-
-/// `options` with the worker's session wrapper in a cmux workspace of its
-/// own (ADR-t813-1 decision 3), the path the tests of the run workspaces
-/// (their tags, group, close and sweep) choose until goal 92 removes it.
-pub fn in_workspaces(options: SuperviseOptions) -> SuperviseOptions {
-    SuperviseOptions {
-        worker_wrapper: Some(HeadlessWrapper::Workspace),
-        ..options
     }
 }
 
@@ -1777,7 +1564,6 @@ fn run_agent_with_review_retry(
     // the queue, and its worker the queue service: goal 82's stage (3)).
     // The handle's pid is the start the supervisor recorded and the
     // wrapper that registered and heartbeat under it.
-    assert!(backend.tags.lock().unwrap().is_empty());
     assert!(backend.groups.lock().unwrap().is_empty());
     let launched = backend.launched.lock().unwrap().clone();
     assert_eq!(launched.len(), 1, "{launched:?}");

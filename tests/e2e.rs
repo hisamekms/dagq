@@ -13,7 +13,7 @@
 //! `DAGQ_E2E_LAUNCHD=1` is set; the in-cmux `up` / `down` test is out for
 //! now under ADR-t1582-1 (see the last paragraph).
 //!
-//! ADR-t1582-1 keeps three cases, and the helpers only they use, out under `#[cfg(any())]`.
+//! ADR-t1582-1 keeps two cases, and the helpers only they use, out under `#[cfg(any())]`.
 #[path = "e2e/broker.rs"]
 mod broker;
 #[path = "e2e/cleanup.rs"]
@@ -32,11 +32,16 @@ mod planner;
 
 use cleanup::{
     GroupGuard, WorkspaceGuard, claim_fixture_dir, cmux_retrying, listed_group,
-    sweep_abandoned_fixtures, try_listed_workspace, wait_until_not_listed, workspace_listed,
+    sweep_abandoned_fixtures, workspace_listed,
 };
-#[cfg(any())] // Goes with tasks 1440, 1441, 1443 (ADR-t1582-1).
-use cleanup::{all_workspaces, cmux_attempt, listed_workspace, wait_for_listed};
+#[cfg(any())] // Goes with tasks 1441, 1443 (ADR-t1582-1).
+use cleanup::{
+    cmux_attempt, listed_workspace, try_listed_workspace, wait_for_listed, wait_until_not_listed,
+};
 use common::{Bounded, Cleanup, Waiting, WithoutActor};
+use dagq::application::ProcessControl;
+use dagq::domain::background_wrapper::BackgroundHandle;
+use dagq::infrastructure::adapters::SystemProcesses;
 use dagq::infrastructure::git_binary::git_executable;
 use serde_json::{Value, json};
 use std::{
@@ -311,6 +316,9 @@ const E2E_REPO_NAME: &str = "dagq-e2e";
 
 /// Disposable repository, queue and stub agent, all outside this repository.
 struct Fixture {
+    /// Declared first so that it drops first, while the run directories
+    /// its wrappers run from are still there.
+    wrappers: WrapperGuard,
     group: GroupGuard,
     _dir: tempfile::TempDir,
     cmux: PathBuf,
@@ -374,6 +382,7 @@ fn fixture_on(branch: &str, files: &[(&str, &str)]) -> Fixture {
     assert!(db.starts_with(env.data_home.join("dagq")));
     assert_eq!(dagq(&env, &["locate"])["db_exists"], true);
     Fixture {
+        wrappers: WrapperGuard::default(),
         // A repository queue's directory is named after the queue hash,
         // which is the external ID of its workspace group.
         group: GroupGuard::new(
@@ -462,13 +471,104 @@ fn add_ready_task_described(
 struct Pass {
     outcome: Value,
     stderr: String,
-    /// Workspace id per task, in the order they were first seen.
-    workspaces: Vec<(String, String)>,
-    /// Whether every workspace was listed by cmux at one moment; for one task
-    /// this is simply "it was listed".
-    listed_together: bool,
-    /// Each workspace's cmux listing entry from the moment they were listed together.
-    listings: Vec<Value>,
+    /// The background wrapper's handle per task, in the order they were
+    /// first seen: a run opens no workspace (ADR-t1433-3).
+    sessions: Vec<(String, String)>,
+    /// Whether every wrapper ran at one moment; for one task this is
+    /// simply "it ran".
+    running_together: bool,
+}
+
+/// The handle `id` a run recorded as its session: a run's session wrapper
+/// starts in the background, never in a workspace (ADR-t1433-3).
+pub(crate) fn wrapper_handle(id: &str) -> BackgroundHandle {
+    BackgroundHandle::parse(id)
+        .unwrap_or_else(|| panic!("the run's session {id} is not a background wrapper's handle"))
+}
+
+/// Whether the background wrapper `id` runs: its pid shows the start the
+/// supervisor recorded for it (ADR-t1404-1 decision 2).
+pub(crate) fn wrapper_running(id: &str) -> bool {
+    let handle = wrapper_handle(id);
+    handle.is(
+        handle.pid,
+        SystemProcesses.start_identity(handle.pid).as_deref(),
+    )
+}
+
+/// Wait until the background wrapper `id` has ended: the runtime has it end
+/// after its session and stops what is left of it (ADR-t1404-1 decision 3).
+pub(crate) fn wait_until_wrapper_gone(id: &str) {
+    let deadline = Instant::now() + WAIT_LIMIT;
+    while wrapper_running(id) {
+        assert!(
+            Instant::now() < deadline,
+            "the background wrapper {id} still runs {WAIT_LIMIT:?} after its session ended"
+        );
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Stops, when the test ends, the background wrappers of the runs it saw
+/// that still run: a run opens no workspace for [`WorkspaceGuard`] to
+/// close (ADR-t1433-3). Each recorded wrapper is also stopped when a wait
+/// times out and the test binary exits without unwinding (the hook of
+/// [`common::on_timeout`], as for the supervisor child and the group).
+#[derive(Default)]
+pub(crate) struct WrapperGuard(std::sync::Mutex<Vec<(String, Cleanup)>>);
+
+impl WrapperGuard {
+    /// Stop the background wrapper `id` when the test ends or times out;
+    /// an ID that is no background wrapper's handle is left alone.
+    pub(crate) fn record(&self, id: &str) {
+        if BackgroundHandle::parse(id).is_none() {
+            return;
+        }
+        let mut ids = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if !ids.iter().any(|(known, _)| known == id) {
+            let owned = id.to_owned();
+            let cleanup = common::on_timeout(
+                CLEANUP_LIMIT,
+                format!("stop the background wrapper {id}"),
+                move || stop_wrapper(&owned),
+            );
+            ids.push((id.to_owned(), cleanup));
+        }
+    }
+}
+
+impl Drop for WrapperGuard {
+    fn drop(&mut self) {
+        let ids = std::mem::take(self.0.get_mut().unwrap_or_else(|e| e.into_inner()));
+        for (id, _cleanup) in &ids {
+            stop_wrapper(id);
+        }
+    }
+}
+
+/// Stop the background wrapper `id` while it still runs: SIGTERM first,
+/// which the wrapper passes on to the groups of its turns, then SIGKILL to
+/// its group and itself after 3 seconds.
+fn stop_wrapper(id: &str) {
+    if !wrapper_running(id) {
+        return;
+    }
+    eprintln!("stopping the background wrapper {id} the test left running");
+    let pid = wrapper_handle(id).pid as libc::pid_t;
+    // SAFETY: kill(2) takes no pointers; the pid shows the start the
+    // supervisor recorded for this wrapper.
+    unsafe { libc::kill(pid, libc::SIGTERM) };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while wrapper_running(id) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(100));
+    }
+    if wrapper_running(id) {
+        // SAFETY: as above; the wrapper leads its own group.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+            libc::kill(pid, libc::SIGKILL);
+        }
+    }
 }
 
 /// Stops the queue's service [`supervise_once`] started when it goes.
@@ -481,17 +581,12 @@ impl Drop for ServiceGuard<'_> {
 }
 
 /// Run `supervise --once` with the given extra arguments and watch the runs of
-/// `tasks` until it exits: their workspace ids must appear in the queue and in
-/// cmux's own list before the sessions end. The stub agents of the pass keep
-/// their sessions until the test has seen that (the `watching` and `listed`
-/// files in the run env's `E2E_SHARED`), so it does not depend on how fast
-/// the host is (task 641).
-fn supervise_once(
-    fixture: &Fixture,
-    extra: &[&str],
-    tasks: &[&str],
-    guard: &mut WorkspaceGuard,
-) -> Pass {
+/// `tasks` until it exits: the handles of their background wrappers must
+/// appear in the queue and the wrappers run before the sessions end. The
+/// stub agents of the pass keep their sessions until the test has seen that
+/// (the `watching` and `listed` files in the run env's `E2E_SHARED`), so it
+/// does not depend on how fast the host is (task 641).
+fn supervise_once(fixture: &Fixture, extra: &[&str], tasks: &[&str]) -> Pass {
     let shared = fixture.db.with_file_name("shared");
     fs::create_dir_all(&shared).unwrap();
     let watching = shared.join("watching");
@@ -529,9 +624,8 @@ fn supervise_once(
     );
     let stdout = reader(child.0.stdout.take().unwrap());
     let stderr = reader(child.0.stderr.take().unwrap());
-    let mut workspaces: Vec<(String, String)> = Vec::new();
-    let mut listed_together = false;
-    let mut listings = Vec::new();
+    let mut sessions: Vec<(String, String)> = Vec::new();
+    let mut running_together = false;
     let status = loop {
         if let Some(status) = child.0.try_wait().unwrap() {
             child.reaped();
@@ -545,7 +639,7 @@ fn supervise_once(
             panic!("supervise did not finish within {SUPERVISE_TIMEOUT:?}; its stderr:\n{stderr}");
         }
         for task in tasks {
-            if workspaces.iter().any(|(t, _)| t == task) {
+            if sessions.iter().any(|(t, _)| t == task) {
                 continue;
             }
             let detail = dagq(&fixture.env, &["show", task, "--full"]);
@@ -555,30 +649,18 @@ fn supervise_once(
                 .last()
                 .and_then(|r| r["workspace_id"].as_str())
             {
-                guard.record(id);
-                uuid::Uuid::parse_str(id).expect("workspace id is a UUID");
+                wrapper_handle(id);
+                fixture.wrappers.record(id);
                 eprintln!(
-                    "task {task} workspace {id} registered after {:?}",
+                    "task {task} background wrapper {id} registered after {:?}",
                     started.elapsed()
                 );
-                workspaces.push((task.to_string(), id.to_owned()));
+                sessions.push((task.to_string(), id.to_owned()));
             }
         }
-        if workspaces.len() == tasks.len() && !listed_together {
-            let entries: Vec<Value> = workspaces
-                .iter()
-                // A failed listing is "not yet": the loop looks again, and
-                // the failure is left on stderr for a test that times out.
-                .filter_map(|(_, id)| {
-                    try_listed_workspace(&fixture.cmux, id)
-                        .inspect_err(|error| eprintln!("listing {id} failed: {error:#}"))
-                        .ok()
-                        .flatten()
-                })
-                .collect();
-            listed_together = entries.len() == workspaces.len();
-            if listed_together {
-                listings = entries;
+        if sessions.len() == tasks.len() && !running_together {
+            running_together = sessions.iter().all(|(_, id)| wrapper_running(id));
+            if running_together {
                 fs::write(&listed, "").unwrap();
             }
         }
@@ -595,9 +677,8 @@ fn supervise_once(
     Pass {
         outcome,
         stderr,
-        workspaces,
-        listed_together,
-        listings,
+        sessions,
+        running_together,
     }
 }
 
@@ -606,7 +687,6 @@ fn supervise_once(
 fn happy_path_runs_a_stub_agent_through_cmux_and_lands_on_main() {
     let fixture = fixture();
     let Fixture {
-        cmux,
         repo,
         base,
         db,
@@ -637,15 +717,11 @@ fn happy_path_runs_a_stub_agent_through_cmux_and_lands_on_main() {
     );
     git(repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
 
-    let mut guard = WorkspaceGuard {
-        cmux: cmux.clone(),
-        ids: Vec::new(),
-    };
-    let pass = supervise_once(&fixture, &[], &[&task_id], &mut guard);
-    let workspace = pass.workspaces[0].1.clone();
+    let pass = supervise_once(&fixture, &[], &[&task_id]);
+    let workspace = pass.sessions[0].1.clone();
     assert!(
-        pass.listed_together,
-        "workspace {workspace} never appeared in cmux workspace list"
+        pass.running_together,
+        "the background wrapper {workspace} was never seen running"
     );
     let outcome = &pass.outcome;
     assert_eq!(outcome["runs"].as_array().unwrap().len(), 1, "{outcome}");
@@ -668,30 +744,13 @@ fn happy_path_runs_a_stub_agent_through_cmux_and_lands_on_main() {
     assert_eq!(run["workspace_id"], workspace.as_str());
     assert_eq!(run["base_commit"], base);
     assert!(run["last_error"].is_null());
-    // ADR-0018: the name carries the repository, task and title; the run
-    // ID lives in the description.
-    let listing = &pass.listings[0];
-    assert_eq!(
-        listing["custom_title"],
-        format!(
-            "[{}]worker#{task_id} - e2e stub task",
-            repo.file_name().unwrap().to_string_lossy()
-        ),
-        "{listing}"
-    );
-    assert_eq!(
-        listing["description"],
-        format!(
-            "dagq role=worker queue={} run={run_id} task={task_id}",
-            fixture.group.external_id
-        ),
-        "{listing}"
-    );
+    // A run opens no workspace: its session is a background wrapper
+    // (`wrapper_handle` above) whose output goes to the run directory's
+    // `session.log` (ADR-t1433-3).
     assert_eq!(run["branch"], format!("dagq/{run_id}"));
     let run_dir = Path::new(run["run_dir"].as_str().unwrap());
     assert!(run["workspace_closed_at"].is_number(), "{run}");
-    // cmux accepted the close; its list can lag behind it for a moment.
-    wait_until_not_listed(cmux, &workspace);
+    wait_until_wrapper_gone(&workspace);
     assert!(stderr.contains("review 1: pass"), "{stderr}");
     assert!(stderr.contains("integrated"), "{stderr}");
 
@@ -759,9 +818,9 @@ fn happy_path_runs_a_stub_agent_through_cmux_and_lands_on_main() {
         log.contains("model: claude-opus-5-5 effort: medium"),
         "{log}"
     );
-    // The run workspace's `--env` reached the agent through its shell,
-    // and the wrapper gave the agent the queue service's socket rather than
-    // the queue's path (goal 82's stage (3)).
+    // The worker's variables in the background wrapper's environment
+    // reached the agent, and the wrapper gave the agent the queue
+    // service's socket rather than the queue's path (goal 82's stage (3)).
     let socket = dagq::infrastructure::queue_service::socket_path(
         fixture.db.canonicalize().unwrap().parent().unwrap(),
     );
@@ -812,10 +871,24 @@ fn happy_path_runs_a_stub_agent_through_cmux_and_lands_on_main() {
         !review_session.is_empty() && review_session != run_id,
         "{review_log}"
     );
-    // The run workspace joined the queue's group, made by its external ID.
+    // A run opens no workspace, so the supervisor asks cmux for no
+    // workspace group of the queue (ADR-t1433-3).
     assert!(
-        fixture.group().is_some(),
-        "no workspace group for the queue"
+        fixture.group().is_none(),
+        "a run made the queue's workspace group"
+    );
+    // The wrapper's output went to the run directory's log, which
+    // `run log` reads.
+    let launched = detail["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "wrapper_launched")
+        .expect("the background wrapper's start is recorded");
+    assert_eq!(launched["payload"]["workspace_id"], workspace.as_str());
+    assert_eq!(
+        Path::new(launched["payload"]["log"].as_str().unwrap()),
+        run_dir.join("session.log")
     );
 
     let events = detail["events"].as_array().unwrap();
@@ -949,9 +1022,7 @@ fn happy_path_runs_a_stub_agent_through_cmux_and_lands_on_main() {
 #[ignore = "needs a running cmux; run with --ignored"]
 fn a_worker_question_is_answered_as_the_next_turn_and_the_run_lands() {
     let fixture = fixture();
-    let Fixture {
-        cmux, repo, env, ..
-    } = &fixture;
+    let Fixture { repo, env, .. } = &fixture;
     let task_id = dagq(
         env,
         &[
@@ -972,10 +1043,6 @@ fn a_worker_question_is_answered_as_the_next_turn_and_the_run_lands() {
         dagq(env, &["ready", &task_id, "--bypass-review"])["status"],
         "ready"
     );
-    let mut guard = WorkspaceGuard {
-        cmux: cmux.clone(),
-        ids: Vec::new(),
-    };
     // Answers the ask as the inbox would, once the worker registered it
     // and the run waits for it out of its slot: a wait starts only from an
     // open ask, so an answer before the supervisor's tick saw it would
@@ -1014,7 +1081,7 @@ fn a_worker_question_is_answered_as_the_next_turn_and_the_run_lands() {
             }
         })
     };
-    let pass = supervise_once(&fixture, &[], &[&task_id], &mut guard);
+    let pass = supervise_once(&fixture, &[], &[&task_id]);
     let ask_id = joined(answerer, "the answering thread");
     assert_eq!(
         pass.outcome["errors"],
@@ -1085,41 +1152,28 @@ fn a_worker_question_is_answered_as_the_next_turn_and_the_run_lands() {
     assert_eq!(open["asks"], json!([]), "{open}");
 }
 
-/// Two independent tasks run in two cmux workspaces at once; the task that
-/// depends on one of them waits for its integration and then starts from
-/// the main that contains it.
+/// Two independent tasks run in two background wrappers at once; the task
+/// that depends on one of them waits for its integration and then starts
+/// from the main that contains it.
 #[test]
 #[ignore = "needs a running cmux; run with --ignored"]
 fn two_independent_tasks_run_concurrently_and_a_dependent_follows_integration() {
     let fixture = fixture();
     let Fixture {
-        cmux,
-        repo,
-        base,
-        env,
-        ..
+        repo, base, env, ..
     } = &fixture;
     let first = add_ready_task(env, "e2e first", &[]);
     let second = add_ready_task(env, "e2e second", &[]);
     let third = add_ready_task(env, "e2e dependent", &[&first]);
     assert_eq!(dagq(env, &["candidates"]).as_array().unwrap().len(), 2);
 
-    let mut guard = WorkspaceGuard {
-        cmux: cmux.clone(),
-        ids: Vec::new(),
-    };
-    let pass = supervise_once(
-        &fixture,
-        &["--parallel", "2"],
-        &[&first, &second],
-        &mut guard,
-    );
+    let pass = supervise_once(&fixture, &["--parallel", "2"], &[&first, &second]);
     assert!(
-        pass.listed_together,
-        "both workspaces were never open at the same time: {:?}",
-        pass.workspaces
+        pass.running_together,
+        "both wrappers were never running at the same time: {:?}",
+        pass.sessions
     );
-    assert_ne!(pass.workspaces[0].1, pass.workspaces[1].1);
+    assert_ne!(pass.sessions[0].1, pass.sessions[1].1);
     let outcome = &pass.outcome;
     assert_eq!(outcome["errors"], Value::Array(vec![]), "{outcome}");
     let runs = outcome["runs"].as_array().unwrap();
@@ -1175,7 +1229,7 @@ fn two_independent_tasks_run_concurrently_and_a_dependent_follows_integration() 
     assert_ne!(first_landed, first_commit);
     assert_eq!(git(repo, &["rev-parse", "main^"]), base.as_str());
     assert_eq!(dagq(env, &["candidates"])[0]["id"].to_string(), third);
-    let pass = supervise_once(&fixture, &["--parallel", "2"], &[&third], &mut guard);
+    let pass = supervise_once(&fixture, &["--parallel", "2"], &[&third]);
     // The same pass rechecks the second task's waiting run against the main
     // the direct integrate moved (ADR-t1310-1): it rewrote the same file as
     // the first, so the recheck resumes its session without waiting for its
@@ -1225,7 +1279,7 @@ fn two_independent_tasks_run_concurrently_and_a_dependent_follows_integration() 
         .find(|e| e["kind"] == "resume_finished")
         .unwrap();
     if let Some(id) = resumed["payload"]["workspace_id"].as_str() {
-        guard.record(id);
+        fixture.wrappers.record(id);
     }
     assert_eq!(resumed["payload"]["outcome"], "resolved", "{resumed}");
 
@@ -1273,7 +1327,7 @@ fn two_independent_tasks_run_concurrently_and_a_dependent_follows_integration() 
         .cloned()
         .unwrap();
     assert_eq!(attention["next"], "resuming (runtime)", "{status}");
-    let pass = supervise_once(&fixture, &["--parallel", "2"], &[], &mut guard);
+    let pass = supervise_once(&fixture, &["--parallel", "2"], &[]);
     let outcome = &pass.outcome;
     assert_eq!(outcome["errors"], Value::Array(vec![]), "{outcome}");
     assert!(
@@ -1312,12 +1366,12 @@ fn two_independent_tasks_run_concurrently_and_a_dependent_follows_integration() 
         .find(|e| e["kind"] == "resume_finished")
         .unwrap();
     if let Some(id) = finished["payload"]["workspace_id"].as_str() {
-        guard.record(id);
+        fixture.wrappers.record(id);
     }
     assert_eq!(finished["payload"]["outcome"], "resolved", "{finished}");
     assert_eq!(finished["payload"]["workspace_closed"], true, "{finished}");
     let resume_workspace = finished["payload"]["workspace_id"].as_str().unwrap();
-    wait_until_not_listed(cmux, resume_workspace);
+    wait_until_wrapper_gone(resume_workspace);
     assert_eq!(git(repo, &["rev-parse", "main^"]), second_landed);
     assert_eq!(
         git(repo, &["rev-list", "--count", &format!("{base}..main")]),
@@ -1356,9 +1410,7 @@ fn two_independent_tasks_run_concurrently_and_a_dependent_follows_integration() 
 #[ignore = "needs a running cmux; run with --ignored"]
 fn killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands() {
     let fixture = fixture();
-    let Fixture {
-        cmux, repo, env, ..
-    } = &fixture;
+    let Fixture { repo, env, .. } = &fixture;
     // The worker holds until the supervisor is killed: a stub that wrote
     // its receipt at once left the run `running` only for the moments
     // before its validation, which a loaded host's slower polls of `show`
@@ -1371,10 +1423,6 @@ fn killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands() {
         &[],
         &[],
     );
-    let mut guard = WorkspaceGuard {
-        cmux: cmux.clone(),
-        ids: Vec::new(),
-    };
 
     // A resident supervisor starts the run; it is killed once the worker runs.
     let mut victim = ChildGuard::new(
@@ -1425,7 +1473,7 @@ fn killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands() {
     let victim_stderr = victim_stderr.take().unwrap();
     let run_id = run["id"].as_str().unwrap().to_owned();
     let workspace = run["workspace_id"].as_str().unwrap().to_owned();
-    guard.record(&workspace);
+    fixture.wrappers.record(&workspace);
     eprintln!(
         "worker of run {run_id} started after {:?}; killing supervisor {victim_pid}",
         started.elapsed()
@@ -1471,10 +1519,10 @@ fn killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands() {
         .unwrap()
         .clone();
     assert_eq!(wrapper["alive"], true, "{doctor}");
-    assert!(workspace_listed(cmux, &workspace));
+    assert!(wrapper_running(&workspace));
 
     // The next supervisor adopts the run instead of leaving it to recover.
-    let pass = supervise_once(&fixture, &["--parallel", "1"], &[&task_id], &mut guard);
+    let pass = supervise_once(&fixture, &["--parallel", "1"], &[&task_id]);
     let outcome = &pass.outcome;
     assert_eq!(outcome["errors"], Value::Array(vec![]), "{outcome}");
     assert_eq!(outcome["runs"].as_array().unwrap().len(), 1, "{outcome}");
@@ -1486,7 +1534,7 @@ fn killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands() {
         "{}",
         pass.stderr
     );
-    assert_eq!(pass.workspaces, vec![(task_id.clone(), workspace.clone())]);
+    assert_eq!(pass.sessions, vec![(task_id.clone(), workspace.clone())]);
 
     let detail = dagq(env, &["show", &task_id, "--full"]);
     assert_eq!(detail["runs"].as_array().unwrap().len(), 1); // Not rerun.
@@ -1495,8 +1543,7 @@ fn killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands() {
     assert_eq!(run["workspace_id"], workspace.as_str());
     assert!(run["last_error"].is_null(), "{run}");
     assert!(run["workspace_closed_at"].is_number(), "{run}");
-    // cmux accepted the close; its list can lag behind it for a moment.
-    wait_until_not_listed(cmux, &workspace);
+    wait_until_wrapper_gone(&workspace);
     let events = detail["events"].as_array().unwrap();
     let kinds: Vec<&str> = events.iter().map(|e| e["kind"].as_str().unwrap()).collect();
     let count = |kind: &str| kinds.iter().filter(|k| **k == kind).count();
@@ -2161,10 +2208,6 @@ fn install_hands_the_supervisor_over_while_a_session_works_and_the_run_lands() {
         &[],
         &[],
     );
-    let mut guard = WorkspaceGuard {
-        cmux: cmux.clone(),
-        ids: Vec::new(),
-    };
     // The fixed binary the supervisor runs and `install` replaces.
     let fixed = fixture._dir.path().join("bin").join("dagq");
     fs::create_dir_all(fixed.parent().unwrap()).unwrap();
@@ -2210,7 +2253,7 @@ fn install_hands_the_supervisor_over_while_a_session_works_and_the_run_lands() {
     };
     let run_id = run["id"].as_str().unwrap().to_owned();
     let workspace = run["workspace_id"].as_str().unwrap().to_owned();
-    guard.record(&workspace);
+    fixture.wrappers.record(&workspace);
     let run_dir = PathBuf::from(run["run_dir"].as_str().unwrap());
 
     let installed = dagq(
@@ -2243,7 +2286,7 @@ fn install_hands_the_supervisor_over_while_a_session_works_and_the_run_lands() {
     assert_eq!(supervisors[0]["binary_version"], VERSION);
     assert_eq!(status["runs"][0]["run_id"], run_id.as_str(), "{status}");
     assert_eq!(status["runs"][0]["status"], "running", "{status}");
-    assert!(workspace_listed(cmux, &workspace));
+    assert!(wrapper_running(&workspace));
 
     // Let the worker finish: the continued supervisor lands the run.
     fs::write(run_dir.join("go"), "").unwrap();
@@ -2345,10 +2388,6 @@ fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands
         &[],
         &[],
     );
-    let mut guard = WorkspaceGuard {
-        cmux: cmux.clone(),
-        ids: Vec::new(),
-    };
     // The automatic update builds only dagq's source (ADR-t614-1).
     fs::write(repo.join("Cargo.toml"), "[package]\nname = \"dagq\"\n").unwrap();
     git(repo, &["add", "Cargo.toml"]);
@@ -2417,7 +2456,7 @@ fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands
     };
     let run_id = run["id"].as_str().unwrap().to_owned();
     let workspace = run["workspace_id"].as_str().unwrap().to_owned();
-    guard.record(&workspace);
+    fixture.wrappers.record(&workspace);
     let run_dir = PathBuf::from(run["run_dir"].as_str().unwrap());
 
     // A change of the runtime lands on main while the worker works.
@@ -2449,7 +2488,7 @@ fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands
     assert_eq!(supervisors[0]["auto_update"], true);
     assert_eq!(status["runs"][0]["run_id"], run_id.as_str(), "{status}");
     assert_eq!(status["runs"][0]["status"], "running", "{status}");
-    assert!(workspace_listed(cmux, &workspace));
+    assert!(wrapper_running(&workspace));
 
     // The worker finishes; the continued supervisor lands its run.
     fs::write(run_dir.join("go"), "").unwrap();
@@ -2499,264 +2538,4 @@ fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands
     let stderr = joined(stderr.take().unwrap(), "the supervisor's stderr reader");
     assert!(exit.success(), "{exit}\n{stderr}");
     assert!(!stderr.contains("could not exec"), "{stderr}");
-}
-
-/// Run `cmux args`, which must succeed, and return what it printed.
-#[cfg(any())] // Goes with task 1440 (ADR-t1582-1).
-fn cmux_ok(cmux: &Path, args: &[&str]) -> String {
-    let output = Command::new(cmux).args(args).bounded_output().unwrap();
-    assert!(output.status.success(), "cmux {args:?}: {output:?}");
-    String::from_utf8(output.stdout).unwrap()
-}
-
-/// A cmux window the test opened, closed with whatever is left in it when
-/// the test ends.
-#[cfg(any())] // Goes with task 1440 (ADR-t1582-1).
-struct WindowGuard {
-    cmux: PathBuf,
-    id: String,
-    /// The workspaces the window may be closed with: the one cmux opened in
-    /// it and those the test moved there.
-    own: Vec<String>,
-}
-
-#[cfg(any())] // Goes with task 1440 (ADR-t1582-1).
-impl Drop for WindowGuard {
-    fn drop(&mut self) {
-        // Workspaces opened elsewhere without `--window` (another e2e, a
-        // supervisor's run) can land in this window while it is focused:
-        // leave it open rather than close them with it.
-        let others: Vec<String> = Command::new(&self.cmux)
-            .args(["--json", "--id-format", "uuids", "workspace", "list"])
-            .args(["--window", &self.id])
-            .bounded_output()
-            .ok()
-            .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
-            .and_then(|list| list["workspaces"].as_array().cloned())
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|w| w["id"].as_str().map(str::to_owned))
-            .filter(|id| !self.own.iter().any(|own| own.eq_ignore_ascii_case(id)))
-            .collect();
-        if !others.is_empty() {
-            eprintln!(
-                "left window {} open: it holds workspaces the test did not open: {others:?}",
-                self.id
-            );
-            return;
-        }
-        match Command::new(&self.cmux)
-            .args(["close-window", "--window", &self.id])
-            .bounded_output()
-        {
-            Ok(output) if output.status.success() => eprintln!("closed window {}", self.id),
-            Ok(output) => eprintln!("closing window {} failed: {output:?}", self.id),
-            Err(error) => eprintln!("closing window {} failed: {error}", self.id),
-        }
-    }
-}
-
-/// Move `ids` to `window` and wait until its listing shows them: cmux
-/// confirms a move before its listing does.
-#[cfg(any())] // Goes with task 1440 (ADR-t1582-1).
-fn move_to_window(cmux: &Path, ids: &[&String], window: &str) {
-    for id in ids {
-        cmux_ok(
-            cmux,
-            &[
-                "move-workspace-to-window",
-                "--workspace",
-                id,
-                "--window",
-                window,
-            ],
-        );
-    }
-    let deadline = Instant::now() + WAIT_LIMIT;
-    loop {
-        // A failed listing is "not yet", like a move not listed yet.
-        let in_window = cmux_attempt(
-            cmux,
-            &[
-                "--json",
-                "--id-format",
-                "uuids",
-                "workspace",
-                "list",
-                "--window",
-                window,
-            ],
-        )
-        .and_then(|out| serde_json::from_str::<Value>(&out).map_err(|e| format!("{e}: {out}")));
-        let moved = |id: &&String| {
-            in_window.as_ref().is_ok_and(|listing| {
-                listing["workspaces"].as_array().is_some_and(|ws| {
-                    ws.iter()
-                        .any(|w| w["id"].as_str().is_some_and(|w| w.eq_ignore_ascii_case(id)))
-                })
-            })
-        };
-        if ids.iter().all(moved) {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "not moved to window {window}: {in_window:?}"
-        );
-        thread::sleep(Duration::from_millis(200));
-    }
-}
-
-/// Whether the sweep e2e moves its workspaces to a window of its own. It is
-/// off unless `DAGQ_E2E_WINDOWS=1`: while a window opens or closes, cmux
-/// answers `workspace list --window` for it with "TabManager not available",
-/// and the runtime's listing of every window (`planners`, `up`, the
-/// supervisor) fails on that, so a default e2e that opens a window would
-/// break the other e2e tests and runs on the host that list at that moment.
-#[cfg(any())] // Goes with task 1440 (ADR-t1582-1).
-fn window_e2e_enabled() -> bool {
-    if env::var("DAGQ_E2E_WINDOWS").as_deref() == Ok("1") {
-        return true;
-    }
-    eprintln!(
-        "the sweep e2e keeps its workspaces in this window; set DAGQ_E2E_WINDOWS=1 to \
-         move them to a new window (only when nothing else on the host lists cmux)"
-    );
-    false
-}
-
-/// What an e2e leaves in cmux when a workspace escaped its guard and the
-/// fixture's temporary directory is gone (2026-09-25: a pinned inbox and
-/// planner pointing into a removed `$TMPDIR/.tmp…`) is found by the next
-/// sweep: it unpins and closes the workspace and deletes its queue's group.
-/// A workspace of a live fixture, whose directory exists, is left alone.
-/// With `DAGQ_E2E_WINDOWS=1` both sit in another window, where
-/// `listed_workspace` and the sweep still find them.
-// Out until task 1440 deletes this case and this cfg (ADR-t1582-1).
-#[cfg(any())]
-#[test]
-#[ignore = "needs a running cmux; run with --ignored"]
-fn the_sweep_closes_workspaces_left_in_any_window_after_their_fixture_dir_is_gone() {
-    let fixture = fixture();
-    let cmux = &fixture.cmux;
-    // Declared first so it drops last, after the guard below has unpinned
-    // and closed the workspaces in it.
-    let mut window = window_e2e_enabled().then(|| {
-        // cmux 0.64 prints `OK <window UUID>`, `--json` or not.
-        let created = cmux_ok(cmux, &["--json", "--id-format", "uuids", "new-window"]);
-        let id = created
-            .split(|c: char| !(c.is_ascii_hexdigit() || c == '-'))
-            .find(|word| uuid::Uuid::parse_str(word).is_ok())
-            .unwrap_or_else(|| panic!("new-window printed no window UUID: {created}"))
-            .to_owned();
-        let own = serde_json::from_str::<Value>(&cmux_ok(
-            cmux,
-            &[
-                "--json",
-                "--id-format",
-                "uuids",
-                "workspace",
-                "list",
-                "--window",
-                &id,
-            ],
-        ))
-        .unwrap()["workspaces"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|w| w["id"].as_str().map(str::to_owned))
-            .collect();
-        WindowGuard {
-            cmux: cmux.clone(),
-            id,
-            own,
-        }
-    });
-    let mut guard = WorkspaceGuard {
-        cmux: cmux.clone(),
-        ids: Vec::new(),
-    };
-    // A fixture directory of a dead e2e, with its queue's group, and one
-    // workspace of each: the dead one's and the live fixture's.
-    let gone = tempfile::tempdir().unwrap();
-    let hash = format!("e2esweep{}", uuid::Uuid::new_v4().simple());
-    let _group = GroupGuard::new(cmux.clone(), hash.clone());
-    let group: Value = serde_json::from_str(&cmux_ok(
-        cmux,
-        &[
-            "--json",
-            "--id-format",
-            "uuids",
-            "workspace-group",
-            "create",
-            "--name",
-            "[dagq-e2e-sweep]",
-            "--external-id",
-            &hash,
-        ],
-    ))
-    .unwrap();
-    let group_id = group["group"]["id"].as_str().unwrap();
-    let queue = gone
-        .path()
-        .canonicalize()
-        .unwrap()
-        .join("data/dagq")
-        .join(&hash)
-        .join("queue.db");
-    let shared = fixture._dir.path().join("data/dagq/shared");
-    let mut create = |name: &str, env: String, group: Option<&str>| {
-        let mut args = vec!["--json", "--id-format", "uuids", "workspace", "create"];
-        args.extend(["--name", name, "--env", &env, "--focus", "false"]);
-        if let Some(group) = group {
-            args.extend(["--group", group]);
-        }
-        let output = Command::new(cmux).args(&args).bounded_output().unwrap();
-        guard.record_opened(&output.stdout);
-        assert!(output.status.success(), "{output:?}");
-        let created: Value = serde_json::from_slice(&output.stdout).unwrap();
-        created["workspace_id"].as_str().unwrap().to_owned()
-    };
-    let left = create(
-        "e2e-sweep-left",
-        format!("DAGQ_QUEUE={}", queue.display()),
-        Some(group_id),
-    );
-    let live = create(
-        "e2e-sweep-live",
-        format!("E2E_SHARED={}", shared.display()),
-        None,
-    );
-    for id in [&left, &live] {
-        cmux_ok(
-            cmux,
-            &["workspace-action", "--action", "pin", "--workspace", id],
-        );
-    }
-    if let Some(window) = &mut window {
-        window.own.extend([left.clone(), live.clone()]);
-        move_to_window(cmux, &[&left, &live], &window.id);
-    }
-    for id in [&left, &live] {
-        // As in assert_look, cmux can acknowledge pin before listing it.
-        wait_for_listed(cmux, id, "never became pinned", |listed| {
-            listed["pinned"] == true
-        });
-    }
-    eprintln!(
-        "{} workspaces in {} windows",
-        all_workspaces(cmux).unwrap().len(),
-        cmux_ok(cmux, &["--json", "list-windows"])
-            .matches("\"id\"")
-            .count()
-    );
-    assert!(listed_group(cmux, &hash).is_some());
-
-    drop(gone);
-    sweep_abandoned_fixtures(cmux);
-    wait_until_not_listed(cmux, &left);
-    assert_eq!(listed_group(cmux, &hash), None, "the group was not deleted");
-    let live = listed_workspace(cmux, &live).expect("the live fixture's workspace is left alone");
-    assert_eq!(live["pinned"], true, "{live}");
 }

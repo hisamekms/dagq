@@ -546,7 +546,7 @@ fn an_escalation_waits_for_a_person_and_the_supervisor_applies_the_answer() {
         cleanup[0]["message"]
             .as_str()
             .unwrap()
-            .contains("injected workspace close failure")
+            .contains("injected session stop failure")
     );
     assert!(run.workspace_closed_at().is_none());
     assert!(!event_kinds(&detail).contains(&"workspace_closed"));

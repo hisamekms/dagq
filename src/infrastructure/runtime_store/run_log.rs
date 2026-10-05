@@ -646,14 +646,15 @@ impl SqliteQueue {
             .optional()?)
     }
 
-    /// The workspaces of the runs that ended (`integrated`, `succeeded`,
+    /// The sessions of the runs that ended (`integrated`, `succeeded`,
     /// `failed`, `interrupted`) and that no live supervisor leases (a stale
     /// lease, [`lease_is_stale`], counts as none: its holder died between
     /// ending the run and releasing the lease, task 396), except the runs the
     /// triage takes (the latest `failed` / `interrupted` run of an
-    /// `in_progress` task): the worker's workspace and every workspace a
+    /// `in_progress` task): the worker's session and every session a
     /// `workspace_created` or `resume_finished` of the run names, whether
-    /// or not its close is recorded (cmux's list decides), ordered by run.
+    /// or not its stop is recorded (whether its wrapper still runs decides),
+    /// ordered by run.
     pub fn ended_run_workspaces(&self) -> Result<Vec<EndedRunWorkspace>> {
         let mut statement = self.conn.prepare(
             &format!("WITH ended AS (

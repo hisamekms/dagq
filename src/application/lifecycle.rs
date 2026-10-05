@@ -72,7 +72,7 @@ use std::{
 pub const ROLE_ENV: &str = crate::domain::actor::ROLE_ENV;
 /// The queue database the workspace belongs to.
 pub const QUEUE_ENV: &str = "DAGQ_QUEUE";
-/// `DAGQ_ROLE` of a run's workspace (and of the resume workspace of its run).
+/// `DAGQ_ROLE` of a run's session wrapper (and of its resumes').
 pub const WORKER_ROLE: &str = ActorRole::Worker.as_str();
 /// `DAGQ_ROLE` of a planner session, which writes goals and tasks and
 /// submits them as a proposal. The runtime opens one in a workspace

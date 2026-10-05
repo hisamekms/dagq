@@ -389,7 +389,7 @@ fn a_required_broker_that_cannot_start_holds_the_claims_and_tells_the_inbox() {
             .is_empty()
     );
     assert!(backend.sessions.lock().unwrap().is_empty());
-    assert!(backend.tags.lock().unwrap().is_empty());
+    assert!(backend.launched.lock().unwrap().is_empty());
     let held = kinds(&db, "broker_claims_%");
     assert_eq!(held.len(), 1, "{held:?}");
     assert_eq!(held[0].0, "broker_claims_held");
@@ -1869,7 +1869,7 @@ fn a_required_repository_without_a_committer_claims_nothing() {
     );
     assert!(kinds(&db, "runtime_error").is_empty());
     assert_eq!(grant_failed_holds(&db), 0);
-    assert!(backend.tags.lock().unwrap().is_empty());
+    assert!(backend.launched.lock().unwrap().is_empty());
     git(&repo, &["config", "user.name", &name]);
     wait_until(&db, Duration::from_secs(60), |queue| {
         !queue.show(task).unwrap().runs.is_empty()
@@ -1925,7 +1925,7 @@ fn a_required_run_refused_after_its_claim_fails_and_claims_go_on() {
     // Claiming did not stop: a stop ends the supervisor without the error
     // of a provisioning failure.
     let outcome = joined(supervisor, "the supervisor to stop").unwrap();
-    assert!(backend.tags.lock().unwrap().is_empty());
+    assert!(backend.launched.lock().unwrap().is_empty());
     assert!(backend.sessions.lock().unwrap().is_empty());
     let run = SqliteQueue::open(&db).unwrap().show(task).unwrap().runs[0].clone();
     let errors = events_of(&db, run.id(), "runtime_error");
@@ -1971,7 +1971,7 @@ fn a_required_resume_refused_its_tools_is_given_up() {
     let stop = Arc::new(AtomicBool::new(false));
     let options = required_options(fixture.dir.path(), &podman, &repo, &stop);
     let backend = Arc::new(backend);
-    let resumes_before = backend.tags.lock().unwrap().len();
+    let resumes_before = backend.launched.lock().unwrap().len();
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
         thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
@@ -1983,7 +1983,7 @@ fn a_required_resume_refused_its_tools_is_given_up() {
     });
     stop.store(true, Ordering::SeqCst);
     joined(supervisor, "the supervisor to stop").unwrap();
-    assert_eq!(backend.tags.lock().unwrap().len(), resumes_before);
+    assert_eq!(backend.launched.lock().unwrap().len(), resumes_before);
     let finished = events_of(&db, run.id(), "resume_finished");
     assert!(
         finished[0]["error"]
@@ -2090,7 +2090,7 @@ fn a_required_reopen_refused_its_tools_opens_no_session() {
         supervisor,
         run,
     } = required_headless_waiting();
-    let workspaces = backend.tags.lock().unwrap().len();
+    let workspaces = backend.launched.lock().unwrap().len();
     no_committer_on_run_branches(&repo);
     fs::write(
         dagq::domain::turn::exit_path(Path::new(run.run_dir().unwrap())),
@@ -2107,7 +2107,7 @@ fn a_required_reopen_refused_its_tools_opens_no_session() {
     backend.join();
     let failed = events_of(&db, run.id(), "session_reopen_failed");
     assert_eq!(failed[0]["cause"], "open_failed", "{failed:?}");
-    assert_eq!(backend.tags.lock().unwrap().len(), workspaces);
+    assert_eq!(backend.launched.lock().unwrap().len(), workspaces);
     assert_eq!(stub_calls(&run).len(), 1);
     assert!(
         grant_failed_holds(&db) >= 1,

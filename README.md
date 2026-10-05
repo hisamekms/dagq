@@ -1,13 +1,13 @@
 # dagq
 
-dagq is a dependency DAG queue: a Rust task orchestrator for running dependency-aware development tasks in cmux workspaces and isolated Git worktrees. The name is the shape of the work — tasks form a dependency DAG, and the queue runs the ones whose predecessors have landed. (It is unrelated to DAQ, data acquisition.)
+dagq is a dependency DAG queue: a Rust task orchestrator for running dependency-aware development tasks as background worker sessions in isolated Git worktrees, with a resident inbox session in cmux. The name is the shape of the work — tasks form a dependency DAG, and the queue runs the ones whose predecessors have landed. (It is unrelated to DAQ, data acquisition.)
 
 You describe a problem to a planner session, which writes it down as a goal and tasks. A headless plan review checks the plan and makes the tasks ready. A resident supervisor runs each ready task as a Claude Code (or Codex) worker in its own Git worktree, has a headless review check the result, and lands it on your default branch as one squash commit. Everything that needs a person reaches one resident inbox session.
 
 ## Requirements
 
 - **macOS on Apple Silicon (`aarch64-apple-darwin`).** No other platform is built, released, or tested.
-- **cmux.** The inbox, planners and workers each get a cmux workspace.
+- **cmux.** The inbox and the planners get a cmux workspace. Workers run in the background without one, and their output is read with `dagq run log`.
 - **Claude Code**, signed in, on PATH. The inbox, the planners and the headless jobs (plan review, run review, recovery, goal review, observer) are Claude Code sessions, and workers are too unless a task asks for Codex. The Codex CLI is optional (`up --codex`, `add --provider codex`).
 - **Git.** The repository needs at least one commit on the branch dagq lands on ([Landing branch, remote and push](#landing-branch-remote-and-push)).
 - **Rust and a C compiler** for `cargo install` (the crate's `rust-version`, now 1.98; the C compiler builds the bundled SQLite). The release update also runs `cargo install` ([Update](#update)).
@@ -41,7 +41,7 @@ The plugin holds the skills the inbox and planner sessions follow, the launcher 
 **5. Decide what workers may do, in Claude Code's settings.** dagq has no permission policy of its own for workers. It adds only a few deny rules to each run: no signalling processes by name (`pkill`, `killall`), no `dagq` commands outside the worker's role, and no setting or unsetting the variables that name the worker's role and queue (`DAGQ_ROLE` and the like). Everything else comes from Claude Code:
 
 - A Claude worker runs headless by default, one `claude -p` call per turn, in Claude Code's auto mode (`--permission-mode auto`). Auto mode and your `permissions` rules (`allow` / `deny` in `~/.claude/settings.json` or the repository's `.claude/settings.json`) decide what a worker may do without a person. If the session does not start in auto mode (for example, a model that does not support it), dagq stops the turn as a launch failure instead of running it in another mode.
-- A task added with `--interactive` runs Claude's interactive session in its cmux workspace. dagq does not override the permission mode there, so the session starts in the mode your Claude Code settings give it (`permissions.defaultMode`). Its permission prompts wait in that workspace.
+- A task added with `--interactive` keeps that mark, but its runs are headless like every other worker's: the interactive worker was retired, and no run gets a cmux workspace. Read a run's session with `dagq run log`.
 
 Codex workers run in Codex's own sandbox ([provider lifecycle](docs/design/provider-lifecycle.md)). Set these up before the first run.
 
@@ -150,9 +150,9 @@ Every command prints JSON on stdout (except `graph --format d2|svg`, and `run lo
 | Goals | `goal add`, `goal list`, `goal show`, `goal edit`, `goal ready` (open a draft goal), `goal close --verdict achieved\|abandoned`, `goal review` |
 | Tasks | `add`, `edit`, `list`, `show`, `search`, `related`, `draft`, `cancel`, `dependency add\|remove`, `set-goal`, `set-paths`, `set-priority`, `revisit` |
 | Plans | `lint`, `submit`, `proposal list\|show\|withdraw`, `ready ID --bypass-review` (a person only) |
-| Watching | `status [--role inbox]`, `doctor [--full]`, `watch [--role inbox] [--until-attention]`, `events`, `timeline RUN`, `candidates`, `graph`, `run screen\|send\|log`, `planner screen\|send\|log` |
+| Watching | `status [--role inbox]`, `doctor [--full]`, `watch [--role inbox] [--until-attention]`, `events`, `timeline RUN`, `candidates`, `graph`, `run send\|log`, `planner screen\|send\|log` (`run screen` is refused: a run's session has no screen, so read it with `run log`) |
 | Asks and notes | `asks [--open]`, `ask`, `answer ID --text TEXT`, `ask close`, `note`, `notes`, `findings`, `finding` |
-| Landing and recovery | `review ID`, `integrate ID\|--next`, `recover RUN_ID`, `run close-workspaces` |
+| Landing and recovery | `review ID`, `integrate ID\|--next`, `recover RUN_ID` (`run close-workspaces` is refused: the runtime opens no workspace for a run and stops a run's background wrapper itself) |
 | Measuring | `stats`, `kpi`, `forecast`, `report`, `mark`, `marks` |
 
 The supervisor and its jobs run some of these for you (`supervise`, `observe`, `throughput-review`); you do not need to run them by hand.

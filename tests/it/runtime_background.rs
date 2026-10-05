@@ -1,8 +1,8 @@
 //! Runtime tests: a headless worker's session wrapper started in the
-//! background, without a cmux workspace (ADR-t1404-1). With `[headless]
-//! wrapper = "background"` the supervisor starts the wrapper detached
-//! (the test backend runs it on a thread), records its handle as the run's
-//! workspace and its start (`wrapper_launched`), and the wrapper registers
+//! background, without a cmux workspace (ADR-t1404-1), the only place it
+//! starts (ADR-t1433-3). The supervisor starts the wrapper detached (the
+//! test backend runs it on a thread), records its handle as the run's
+//! session and its start (`wrapper_launched`), and the wrapper registers
 //! once it finds that record with its own pid. The wrapper itself
 //! (`session --background`) runs without a terminal.
 use crate::common;
@@ -31,30 +31,32 @@ fn has(queue: &mut SqliteQueue, id: &RunId, kind: &str) -> bool {
         .any(|event| event.kind == kind)
 }
 
-/// Acceptance: under `[headless] wrapper = "background"` a headless run
-/// opens no workspace: the supervisor starts its wrapper in the background
-/// in the run's worktree, with the worker's environment and its output in
-/// `session.log`, records the handle and the start, and the run lands; the
-/// wrapper that ended is stopped by its handle like a closed workspace.
-/// The supervisor reads the setting from `dagq.toml` here, not from the
-/// fixture's options, which choose the background for every runtime test
-/// (task 1439).
+/// Acceptance: a headless run opens no workspace: the supervisor starts its
+/// wrapper in the background in the run's worktree, with the worker's
+/// environment and its output in `session.log`, records the handle and the
+/// start, and the run lands; the wrapper that ended is stopped by its
+/// handle. cmux is asked for no workspace group. `[headless] wrapper =
+/// "workspace"` in `dagq.toml` is accepted and ignored, with a warning
+/// (ADR-t1433-3 decision 2).
 #[test]
 fn a_background_headless_run_lands_without_a_workspace() {
     let (dir, repo, db, backend) = headless_fixture(&[]);
-    wrappers_in_background(&repo);
+    workspace_wrapper_setting(&repo);
     set_turns(dir.path(), FINISH);
     let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
-    let options = SuperviseOptions {
-        worker_wrapper: None,
-        ..supervise_options(4, true)
-    };
-    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+    let options = supervise_options(4, true);
+    let (telemetry, captured) = Telemetry::capture();
+    let outcome =
+        telemetry.in_scope(|| supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options));
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
+    let log = captured.text();
+    assert!(
+        log.contains("[headless] wrapper = \\\"workspace\\\" of dagq.toml is ignored for workers"),
+        "{log}"
+    );
     let detail = detail(&db);
     let run = &detail.runs[0];
-    assert!(backend.tags.lock().unwrap().is_empty(), "no workspace");
     assert!(backend.groups.lock().unwrap().is_empty(), "no cmux group");
     let launched = backend.launched.lock().unwrap().clone();
     assert_eq!(launched.len(), 1, "{launched:?}");
@@ -100,7 +102,6 @@ fn a_background_headless_run_lands_without_a_workspace() {
 #[test]
 fn a_background_session_takes_the_answer_of_its_question() {
     let (dir, repo, db, backend) = headless_fixture(&[]);
-    wrappers_in_background(&repo);
     set_turns(
         dir.path(),
         &format!(
@@ -154,7 +155,6 @@ esac"#
 #[test]
 fn a_background_session_takes_a_revise() {
     let (dir, repo, db, backend) = headless_fixture(&[]);
-    wrappers_in_background(&repo);
     set_turns(
         dir.path(),
         &format!(
@@ -182,11 +182,13 @@ esac"#
 }
 
 /// Acceptance: a run parked `needs_session` is resumed by a new background
-/// wrapper (`--resume`, its own log) whose start is recorded anew.
+/// wrapper (`--resume`, its own log) whose start is recorded anew, the
+/// ignored `[headless] wrapper = "workspace"` notwithstanding
+/// (ADR-t1433-3).
 #[test]
 fn a_parked_background_run_is_resumed_in_the_background() {
     let (dir, repo, db, backend) = headless_fixture(&[EvidenceCheck::E2e]);
-    wrappers_in_background(&repo);
+    workspace_wrapper_setting(&repo);
     set_turns(
         dir.path(),
         r#"case "$MODE" in
@@ -204,9 +206,6 @@ esac"#,
             ),
             ..Default::default()
         },
-        // The resume reads `[headless] wrapper` from dagq.toml as it
-        // starts (task 1439).
-        worker_wrapper: None,
         ..supervise_options(4, true)
     };
     let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
@@ -214,7 +213,6 @@ esac"#,
     let detail = detail(&db);
     let run = &detail.runs[0];
     assert_eq!(run.status(), RunStatus::Integrated);
-    assert!(backend.resumes.lock().unwrap().is_empty(), "no workspace");
     let launched = backend.launched.lock().unwrap().clone();
     assert_eq!(launched.len(), 2, "{launched:?}");
     assert!(launched[1].command.contains("'--resume'"));
@@ -239,7 +237,6 @@ esac"#,
 #[test]
 fn a_new_supervisor_adopts_a_background_session() {
     let (dir, repo, db, backend) = headless_fixture(&[]);
-    wrappers_in_background(&repo);
     set_turns(
         dir.path(),
         &format!(
@@ -593,291 +590,6 @@ esac"#,
     assert!(status.success(), "{status}");
 }
 
-/// Acceptance: `run close-workspaces` of an ended background run whose
-/// wrapper was killed in the middle of a turn is not refused for the turn
-/// it left (the run's agent, alive): the turn is the one the session
-/// recorded (pid and start), so the dry run lists the session and the
-/// close stops the turn and records the close.
-#[test]
-fn close_workspaces_stops_the_turn_a_killed_background_wrapper_left() {
-    let (dir, repo, db, backend) = headless_fixture(&[]);
-    set_turns(dir.path(), "say slow; sleep 120");
-    let run = provision_under(&repo, &db, "owner");
-    let claude = backend.headless.clone().unwrap();
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let mut wrapper = Wrapper(
-        wrapper_command(&db, &run, &claude, true, false)
-            .spawn()
-            .unwrap(),
-    );
-    let handle = handle_of(wrapper.0.id());
-    let handle_id = handle.to_string();
-    queue
-        .workspace_created(run.id(), &LeaseToken::new("owner"), &handle_id)
-        .unwrap();
-    record_launch(&mut queue, &run, &handle);
-    wait_until(&db, common::STEP_LIMIT, |queue| {
-        has(queue, run.id(), "turn_started")
-    });
-    let started = payloads(&detail(&db), "turn_started")[0].clone();
-    let turn = u32::try_from(started["pid"].as_u64().unwrap()).unwrap();
-    let _turn = TurnGuard::of(turn);
-    wrapper.0.kill().unwrap();
-    exited(&mut wrapper, "the killed wrapper to be reaped");
-    // The run ended with no supervisor behind it; its agent, the turn,
-    // is alive.
-    Connection::open(&db)
-        .unwrap()
-        .execute(
-            "UPDATE task_runs SET status='interrupted' WHERE id=?1",
-            [run.id().as_str()],
-        )
-        .unwrap();
-    age_lease(&db, &run, 31);
-    assert!(SystemProcesses.alive(turn));
-    let cmux = db.parent().unwrap().join("bin/cmux");
-    let cleanup = |apply: bool| {
-        let mut args = vec![
-            "run",
-            "close-workspaces",
-            "--cmux",
-            cmux.to_str().unwrap(),
-            run.id().as_str(),
-        ];
-        if apply {
-            args.push("--apply");
-        }
-        let output = common::cli::invoke_with(&[], &db, &args);
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        serde_json::from_slice::<Value>(&output.stdout).unwrap()
-    };
-    let listed = cleanup(false);
-    assert_eq!(
-        listed["workspaces"][0]["workspace_id"],
-        json!(handle_id),
-        "{listed}"
-    );
-    assert_eq!(
-        listed["workspaces"][0]["outcome"], "would_close",
-        "{listed}"
-    );
-    assert!(SystemProcesses.alive(turn) && !zombie(turn));
-    let closed = cleanup(true);
-    assert_eq!(closed["workspaces"][0]["outcome"], "closed", "{closed}");
-    assert!(!SystemProcesses.alive(turn) || zombie(turn));
-    let closes = payloads(&detail(&db), "workspace_closed")
-        .into_iter()
-        .filter(|p| p["workspace_id"] == json!(handle_id))
-        .count();
-    assert_eq!(closes, 1);
-    // Nothing is left to close.
-    assert_eq!(cleanup(true)["workspaces"], json!([]));
-}
-
-/// A stub `cmux` under `dir` that cannot list the workspaces (its
-/// `list-windows` fails) and records every call in `calls` next to it.
-fn unlisting_cmux(dir: &Path) -> PathBuf {
-    let stub = dir.join("unlisting-cmux").join("cmux");
-    fs::create_dir_all(stub.parent().unwrap()).unwrap();
-    common::template::script(
-        &stub,
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${0%/*}/calls\"\ncase \"$*\" in *list-windows*) echo 'cmux: cannot list' >&2; exit 1 ;; esac\n",
-    );
-    stub
-}
-
-/// Acceptance: `run close-workspaces` of an ended run whose earlier
-/// session was a workspace and whose last one is a background session
-/// whose wrapper was killed in the middle of a turn, while cmux cannot list
-/// the workspaces: the background session is judged by its processes, not
-/// by cmux's list, so the close stops the turn it left and records the
-/// close of its handle, and only then does the command fail for the
-/// workspace it could not judge, of which nothing is closed or recorded.
-#[test]
-fn close_workspaces_stops_a_background_session_while_cmux_cannot_list_the_workspaces() {
-    let (dir, repo, db, backend) = headless_fixture(&[]);
-    set_turns(dir.path(), "say slow; sleep 120");
-    let run = provision_under(&repo, &db, "owner");
-    let claude = backend.headless.clone().unwrap();
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    // The run's earlier session, in a workspace.
-    queue
-        .record_runtime_event(
-            run.id(),
-            EventKind::WorkspaceCreated,
-            json!({"workspace_id": "WS-EARLIER"}),
-        )
-        .unwrap();
-    let mut wrapper = Wrapper(
-        wrapper_command(&db, &run, &claude, true, false)
-            .spawn()
-            .unwrap(),
-    );
-    let handle = handle_of(wrapper.0.id());
-    let handle_id = handle.to_string();
-    queue
-        .workspace_created(run.id(), &LeaseToken::new("owner"), &handle_id)
-        .unwrap();
-    record_launch(&mut queue, &run, &handle);
-    wait_until(&db, common::STEP_LIMIT, |queue| {
-        has(queue, run.id(), "turn_started")
-    });
-    let started = payloads(&detail(&db), "turn_started")[0].clone();
-    let turn = u32::try_from(started["pid"].as_u64().unwrap()).unwrap();
-    let _turn = TurnGuard::of(turn);
-    wrapper.0.kill().unwrap();
-    exited(&mut wrapper, "the killed wrapper to be reaped");
-    Connection::open(&db)
-        .unwrap()
-        .execute(
-            "UPDATE task_runs SET status='interrupted' WHERE id=?1",
-            [run.id().as_str()],
-        )
-        .unwrap();
-    age_lease(&db, &run, 31);
-    let cmux = unlisting_cmux(dir.path());
-    let cleanup = |apply: bool| {
-        let mut args = vec![
-            "run",
-            "close-workspaces",
-            "--cmux",
-            cmux.to_str().unwrap(),
-            run.id().as_str(),
-        ];
-        if apply {
-            args.push("--apply");
-        }
-        let output = common::cli::invoke_with(&[], &db, &args);
-        assert!(
-            !output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stdout)
-        );
-        String::from_utf8_lossy(&output.stderr).into_owned()
-    };
-    // The dry run fails as well, and closes nothing.
-    let error = cleanup(false);
-    assert!(
-        error.contains("cmux could not list the workspaces of the ended runs"),
-        "{error}"
-    );
-    assert!(SystemProcesses.alive(turn) && !zombie(turn));
-    assert!(payloads(&detail(&db), "workspace_closed").is_empty());
-    let error = cleanup(true);
-    assert!(
-        error.contains("only their background sessions were closed"),
-        "{error}"
-    );
-    assert!(!SystemProcesses.alive(turn) || zombie(turn));
-    let detail = detail(&db);
-    let closes = payloads(&detail, "workspace_closed");
-    assert_eq!(closes.len(), 1, "{closes:?}");
-    assert_eq!(closes[0]["workspace_id"], json!(handle_id));
-    assert_eq!(closes[0]["reason"], "cleanup");
-    let calls = fs::read_to_string(cmux.with_file_name("calls")).unwrap();
-    assert!(calls.contains("list-windows"), "{calls}");
-    assert!(!calls.contains("WS-EARLIER"), "{calls}");
-}
-
-/// Acceptance: a run resumed in a workspace after a background session,
-/// whose live wrapper and agent took the pids that session's wrapper and
-/// turn had: `run close-workspaces` judges them as a workspace session's,
-/// by their pids, and refuses while they live, as it did before the
-/// background wrappers. The earlier session's records (another start) do
-/// not make the wrapper dead, nor the agent a turn left to stop.
-#[test]
-fn close_workspaces_refuses_a_live_workspace_session_with_a_background_sessions_pids() {
-    let (_dir, repo, db, _backend) = headless_fixture(&[]);
-    let run = provision_under(&repo, &db, "owner");
-    let owner = LeaseToken::new("owner");
-    // The resume's wrapper and agent: live processes.
-    let wrapper = Wrapper(Command::new("sleep").arg("30").spawn().unwrap());
-    let mut agent = Wrapper(Command::new("sleep").arg("30").spawn().unwrap());
-    let (wrapper_pid, agent_pid) = (wrapper.0.id(), agent.0.id());
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    // The earlier background session, whose wrapper and turn had the pids.
-    let earlier = BackgroundHandle {
-        pid: wrapper_pid,
-        start: "Thu_Jan_1_00:00:00_1970".into(),
-    };
-    queue
-        .workspace_created(run.id(), &owner, &earlier.to_string())
-        .unwrap();
-    record_launch(&mut queue, &run, &earlier);
-    queue
-        .record_runtime_event(
-            run.id(),
-            EventKind::TurnStarted,
-            json!({"turn": 1, "pid": agent_pid, "start": earlier.start}),
-        )
-        .unwrap();
-    // The resume, in a workspace.
-    queue
-        .record_runtime_event(
-            run.id(),
-            EventKind::WorkspaceCreated,
-            json!({"workspace_id": "WS-RESUME", "resume_attempt": 1}),
-        )
-        .unwrap();
-    queue
-        .register_wrapper(run.id(), &owner, wrapper_pid)
-        .unwrap();
-    queue
-        .register_agent(run.id(), wrapper_pid, agent_pid)
-        .unwrap();
-    Connection::open(&db)
-        .unwrap()
-        .execute(
-            "UPDATE task_runs SET status='interrupted' WHERE id=?1",
-            [run.id().as_str()],
-        )
-        .unwrap();
-    age_lease(&db, &run, 31);
-    let refused = || {
-        let cmux = db.parent().unwrap().join("bin/cmux");
-        let output = common::cli::invoke_with(
-            &[],
-            &db,
-            &[
-                "run",
-                "close-workspaces",
-                "--cmux",
-                cmux.to_str().unwrap(),
-                run.id().as_str(),
-                "--apply",
-            ],
-        );
-        assert!(!output.status.success());
-        String::from_utf8_lossy(&output.stderr).into_owned()
-    };
-    // The run's processes are checked agent first: the agent is no turn
-    // left by the earlier session.
-    let error = refused();
-    assert!(
-        error.contains(&format!(
-            "the agent of run {} (pid {agent_pid}) is alive",
-            run.id()
-        )),
-        "{error}"
-    );
-    // With the agent gone, the wrapper is alive by its pid.
-    agent.0.kill().unwrap();
-    agent.0.wait().unwrap();
-    let error = refused();
-    assert!(
-        error.contains(&format!(
-            "the wrapper of run {} (pid {wrapper_pid}) is alive",
-            run.id()
-        )),
-        "{error}"
-    );
-    assert!(payloads(&detail(&db), "workspace_closed").is_empty());
-}
-
 /// Kills the process group of a turn a test left running when the test
 /// ends, a failing one included, while its pid shows the start it had.
 struct TurnGuard(u32, Option<String>);
@@ -905,47 +617,4 @@ fn zombie(pid: u32) -> bool {
     String::from_utf8_lossy(&stat.stdout)
         .trim()
         .starts_with('Z')
-}
-
-/// Acceptance: a wrapper started in a workspace still waits for the run's
-/// workspace, whatever start the run records, and registers once the
-/// workspace is recorded.
-#[test]
-fn a_workspace_wrapper_still_waits_for_its_workspace() {
-    let (_dir, repo, db, backend) = headless_fixture(&[]);
-    let run = provision_under(&repo, &db, "owner");
-    let (provider, other) =
-        headless_provider(&run, backend.headless.as_deref(), backend.codex.as_deref());
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    queue
-        .record_runtime_event(
-            run.id(),
-            EventKind::WrapperLaunched,
-            json!({"pid": std::process::id()}),
-        )
-        .unwrap();
-    let wrapper = {
-        let (db, id) = (db.clone(), run.id().clone());
-        thread::spawn(move || {
-            runtime::session_with_providers(
-                &db,
-                &id,
-                &LeaseToken::new("owner"),
-                &provider,
-                Some(&other),
-                &StubSpawner { db: db.clone() },
-                false,
-            )
-        })
-    };
-    thread::sleep(Duration::from_millis(500));
-    assert!(!has(&mut queue, run.id(), "wrapper_started"));
-    queue
-        .workspace_created(run.id(), &LeaseToken::new("owner"), "w1")
-        .unwrap();
-    wait_until(&db, common::STEP_LIMIT, |queue| {
-        has(queue, run.id(), "turn_finished")
-    });
-    fs::write(exit_path(Path::new(run.run_dir().unwrap())), "").unwrap();
-    joined(wrapper, "the workspace wrapper to exit").unwrap();
 }

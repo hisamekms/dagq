@@ -1,10 +1,9 @@
 //! The real cmux adapter against stub `cmux` executables: the detached
-//! environment and ping, `notify`, one-line sends and the resume workspace,
+//! environment and ping, `notify`, one-line sends and a named workspace,
 //! and the marks and unpin before a close.
 
 use dagq::{
     application::{DetachedRefusal, SupervisorEnvironment, WorkspaceBackend, WorkspaceTags},
-    domain::{Task, TaskRun},
     infrastructure::adapters::{Cmux, SOCKET_PASSWORD_ENV, detach, process_alive},
 };
 use std::{ffi::OsString, fs, process::Command, thread, time::Duration};
@@ -104,13 +103,13 @@ fn the_cmux_adapter_notifies_with_title_body_and_an_optional_workspace() {
     assert!(cmux.notify("fail", "body", None).is_err());
 }
 
-/// The real adapter types a resolution request as one line (line breaks
-/// and tabs, which `cmux send` would read as keys, become spaces, and
-/// backslashes slashes) and submits it with Enter, and opens a resume
-/// workspace in the run's worktree named like the run's worker workspace
-/// (`[<repo>]worker#<task-id> - <task title>`, ADR-0028).
+/// The real adapter types a text as one line (line breaks and tabs, which
+/// `cmux send` would read as keys, become spaces, and backslashes slashes)
+/// and submits it with Enter, and opens a named workspace (the inbox's) in
+/// its directory with its name, description, env and group. A run's
+/// session opens no workspace (ADR-t1433-3).
 #[test]
-fn the_cmux_adapter_sends_one_line_and_names_the_resume_workspace() {
+fn the_cmux_adapter_sends_one_line_and_opens_a_named_workspace() {
     let dir = tempfile::tempdir().unwrap();
     let dump = dir.path().join("args.txt");
     let stub = dir.path().join("cmux-stub");
@@ -127,57 +126,14 @@ fn the_cmux_adapter_sends_one_line_and_names_the_resume_workspace() {
         "send\n--workspace\nWS\n--\nline one line two/n\nsend-key\n--workspace\nWS\n--\nenter\n"
     );
     fs::remove_file(&dump).unwrap();
-    let run = TaskRun::restore(dagq::domain::RunRecord {
-        id: dagq::domain::RunId::new("run-1").unwrap(),
-        task_id: dagq::domain::TaskId::new(3),
-        status: dagq::domain::RunStatus::NeedsSession,
-        requested_provider: dagq::domain::Provider::Claude,
-        actual_provider: dagq::domain::Provider::Claude,
-        worker_mode: dagq::domain::worker::WorkerMode::Interactive,
-        base_commit: dagq::domain::CommitSha::try_from("0".repeat(40)).unwrap(),
-        repo_path: Some("/src/my-repo".into()),
-        run_dir: Some(dir.path().to_string_lossy().into_owned()),
-        worktree_path: Some(dir.path().to_string_lossy().into_owned()),
-        branch: None,
-        workspace_id: None,
-        receipt_path: None,
-        log_path: None,
-        result_commit: None,
-        last_error: None,
-        workspace_closed_at: None,
-        created_at: String::new(),
-    })
-    .unwrap();
     assert_eq!(
-        cmux.create_resume(
-            &Task::restore(dagq::domain::TaskRecord {
-                goal_priority: None,
-                id: dagq::domain::TaskId::new(3),
-                title: "fix it".into(),
-                description: String::new(),
-                acceptance: String::new(),
-                verification_commands: Vec::new(),
-                required_evidence: Vec::new(),
-                paths: Vec::new(),
-                priority: Default::default(),
-                change: None,
-                status: dagq::domain::TaskStatus::InProgress,
-                goal_id: None,
-                context: String::new(),
-                created_at: String::new(),
-                updated_at: String::new(),
-                worker: dagq::domain::worker::Worker::CLAUDE_INTERACTIVE,
-                named_mode: None,
-                wait_for_build: false,
-            })
-            .unwrap(),
-            &run,
-            "runner session --resume",
+        cmux.create_named(
+            "[my-repo]inbox",
+            dir.path(),
+            "agent",
             &WorkspaceTags {
-                env: vec![("DAGQ_ROLE".into(), "worker".into())],
-                description: Some(
-                    dagq::infrastructure::adapters::resume_workspace_description(&run)
-                ),
+                env: vec![("DAGQ_ROLE".into(), "inbox".into())],
+                description: Some("dagq role=inbox queue=abc".into()),
                 group: Some("group:1".into()),
             },
         )
@@ -187,7 +143,7 @@ fn the_cmux_adapter_sends_one_line_and_names_the_resume_workspace() {
     let args = fs::read_to_string(&dump).unwrap();
     assert!(
         args.starts_with(&format!(
-            "workspace\ncreate\n--name\n[my-repo]worker#3 - fix it\n--description\nrun run-1 resume\n--env\nDAGQ_ROLE=worker\n--group\ngroup:1\n--command\nrunner session --resume\n--focus\nfalse\n--cwd\n{}\n",
+            "workspace\ncreate\n--name\n[my-repo]inbox\n--description\ndagq role=inbox queue=abc\n--env\nDAGQ_ROLE=inbox\n--group\ngroup:1\n--command\nagent\n--focus\nfalse\n--cwd\n{}\n",
             dir.path().display()
         )),
         "{args}"

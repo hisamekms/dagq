@@ -220,9 +220,7 @@ fn assert_required_run_landed(fixture: &Fixture, task_id: &str) -> String {
 #[ignore = "needs a running cmux and podman; builds the broker's image; run with --ignored"]
 fn a_preferred_worker_does_its_task_through_the_broker_and_lands() {
     let fixture = fixture();
-    let Fixture {
-        cmux, repo, env, ..
-    } = &fixture;
+    let Fixture { repo, env, .. } = &fixture;
     let client = client_next_to_dagq();
     fs::write(
         repo.join("dagq.toml"),
@@ -245,11 +243,7 @@ fn a_preferred_worker_does_its_task_through_the_broker_and_lands() {
         &[],
         &["test -f exec.txt"],
     );
-    let mut guard = WorkspaceGuard {
-        cmux: cmux.clone(),
-        ids: Vec::new(),
-    };
-    let pass = supervise_once(&fixture, &[], &[&task_id], &mut guard);
+    let pass = supervise_once(&fixture, &[], &[&task_id]);
     let outcome = &pass.outcome;
     // What the stub's calls of the client answered, for a failure to show.
     if outcome["runs"][0]["run_dir"].is_string() {
@@ -310,7 +304,7 @@ fn a_preferred_worker_does_its_task_through_the_broker_and_lands() {
     assert_eq!(status["broker"]["health"]["state"], "healthy", "{status}");
     assert_eq!(status["broker"]["active_tokens"], 0, "{status}");
     assert!(client.exists());
-    wait_until_not_listed(cmux, &pass.workspaces[0].1);
+    crate::wait_until_wrapper_gone(&pass.sessions[0].1);
 }
 
 /// `[broker] mode = "required"` (ADR-t838-1, goal 59): the stub worker's
@@ -326,9 +320,7 @@ fn a_preferred_worker_does_its_task_through_the_broker_and_lands() {
 #[ignore = "needs a running cmux and podman; builds the broker's image; run with --ignored"]
 fn a_required_worker_does_its_task_only_through_the_broker_and_lands() {
     let fixture = fixture();
-    let Fixture {
-        cmux, repo, env, ..
-    } = &fixture;
+    let Fixture { repo, env, .. } = &fixture;
     client_next_to_dagq();
     fs::write(repo.join("dagq.toml"), required_dagq_toml()).unwrap();
     git(repo, &["add", "dagq.toml"]);
@@ -338,11 +330,7 @@ fn a_required_worker_does_its_task_only_through_the_broker_and_lands() {
     let _broker = BrokerGuard(env);
     broker_start(env);
     let task_id = add_required_task(env, "e2e required broker task");
-    let mut guard = WorkspaceGuard {
-        cmux: cmux.clone(),
-        ids: Vec::new(),
-    };
-    let pass = supervise_once(&fixture, &[], &[&task_id], &mut guard);
+    let pass = supervise_once(&fixture, &[], &[&task_id]);
     let outcome = &pass.outcome;
     print_broker_files(outcome["runs"][0]["run_dir"].as_str(), &pass.stderr);
     assert_eq!(outcome["errors"], Value::Array(vec![]), "{outcome}");
@@ -352,7 +340,7 @@ fn a_required_worker_does_its_task_only_through_the_broker_and_lands() {
     // held.
     let held = dagq(env, &["events", "--kind", "broker_claims_held"]);
     assert_eq!(held["events"], json!([]), "{held}");
-    wait_until_not_listed(cmux, &pass.workspaces[0].1);
+    crate::wait_until_wrapper_gone(&pass.sessions[0].1);
 }
 
 /// `[broker] mode = "required"` with the queue's broker stopped (ADR-t838-1,
@@ -366,9 +354,7 @@ fn a_required_worker_does_its_task_only_through_the_broker_and_lands() {
 #[ignore = "needs a running cmux and podman; builds the broker's image; run with --ignored"]
 fn a_required_queue_claims_nothing_while_its_broker_is_stopped_and_tells_the_inbox() {
     let fixture = fixture();
-    let Fixture {
-        cmux, repo, env, ..
-    } = &fixture;
+    let Fixture { repo, env, .. } = &fixture;
     client_next_to_dagq();
     fs::write(repo.join("dagq.toml"), required_dagq_toml()).unwrap();
     git(repo, &["add", "dagq.toml"]);
@@ -378,10 +364,10 @@ fn a_required_queue_claims_nothing_while_its_broker_is_stopped_and_tells_the_inb
     let before = dagq(env, &["broker", "status"]);
     assert_ne!(before["state"], "running", "{before}");
     let task_id = add_required_task(env, "e2e required broker stopped");
-    let mut guard = WorkspaceGuard {
-        cmux: cmux.clone(),
-        ids: Vec::new(),
-    };
+    // The background wrappers of the run's sessions (a run opens no
+    // workspace, ADR-t1433-3), each stopped by the fixture if a failure
+    // leaves it running.
+    let mut sessions: Vec<String> = Vec::new();
 
     let mut supervisor = ChildGuard::new(
         Command::new(BIN)
@@ -456,8 +442,11 @@ fn a_required_queue_claims_nothing_while_its_broker_is_stopped_and_tells_the_inb
             .unwrap()
             .last()
             .and_then(|run| run["workspace_id"].as_str())
+            && !sessions.iter().any(|known| known == id)
         {
-            guard.record(id);
+            crate::wrapper_handle(id);
+            fixture.wrappers.record(id);
+            sessions.push(id.to_owned());
         }
         if dagq(env, &["show", &task_id])["task"]["status"] == "completed" {
             break;
@@ -529,7 +518,7 @@ fn a_required_queue_claims_nothing_while_its_broker_is_stopped_and_tells_the_inb
             .any(|entry| entry["kind"] == "broker_claims_held"),
         "{status}"
     );
-    for id in guard.ids.clone() {
-        wait_until_not_listed(cmux, &id);
+    for id in &sessions {
+        crate::wait_until_wrapper_gone(id);
     }
 }

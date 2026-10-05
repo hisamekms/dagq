@@ -41,7 +41,7 @@ use super::{
     path_text,
 };
 use crate::domain::{
-    ActorContext, ActorRole, PlannerId, PlannerOrigin, RunId, Task, TaskId, TaskRun, TrustLevel,
+    ActorContext, ActorRole, PlannerId, PlannerOrigin, RunId, TaskId, TaskRun, TrustLevel,
     actor::{ACTOR_ENV, ACTOR_ID_ENV, ROLE_ENV, RUN_ID_ENV, TASK_ID_ENV},
     actor_model::ActorLaunch,
     authorization::{Capability, grants},
@@ -156,21 +156,17 @@ pub enum HeadlessProgram<'a> {
 
 /// What to start for the actor.
 pub enum ActorProgram<'a> {
-    /// The workspace of a run's worker (or of its resume), running the
-    /// session wrapper `wrapper`, with the repository's `[run.env]` after
-    /// the runtime's own names. With `background` (the log the wrapper
-    /// writes to), the wrapper is started without a workspace, as a
-    /// process detached from the supervisor with that environment
-    /// (ADR-t1404-1 decisions 1 and 5); its handle is the workspace's ID.
-    RunWorkspace {
-        task: &'a Task,
+    /// The session wrapper `wrapper` of a run's worker (or of its resume
+    /// or reopening), started without a workspace as a process detached
+    /// from the supervisor, in the run's worktree, with the repository's
+    /// `[run.env]` after the runtime's own names and its output in `log`
+    /// (ADR-t1404-1 decisions 1 and 5, ADR-t1433-3 decision 1); its handle
+    /// is what the run records as its session.
+    RunSession {
         run: &'a TaskRun,
         wrapper: String,
-        resume: bool,
-        description: String,
-        group: Option<String>,
         run_env: Vec<(String, String)>,
-        background: Option<&'a Path>,
+        log: &'a Path,
     },
     /// A workspace of its own: the inbox, a planner. `planner` names the
     /// planner and its origin, `launch` the model its agent starts with.
@@ -215,7 +211,7 @@ impl ActorProgram<'_> {
     fn provider(&self) -> crate::domain::Provider {
         use crate::domain::Provider;
         match self {
-            Self::RunWorkspace { run, .. } => run.actual_provider(),
+            Self::RunSession { run, .. } => run.actual_provider(),
             Self::SessionAgent { agent, .. } => match agent {
                 SessionAgent::Worker { run, .. }
                 | SessionAgent::Resume { run }
@@ -231,7 +227,7 @@ impl ActorProgram<'_> {
     /// The roles this program is started for: any other is refused.
     fn roles(&self) -> &'static [ActorRole] {
         match self {
-            Self::RunWorkspace { .. }
+            Self::RunSession { .. }
             | Self::SessionAgent {
                 agent:
                     SessionAgent::Worker { .. }
@@ -270,7 +266,7 @@ impl ActorProgram<'_> {
 
     fn run(&self) -> Option<&TaskRun> {
         match self {
-            Self::RunWorkspace { run, .. }
+            Self::RunSession { run, .. }
             | Self::SessionAgent {
                 agent:
                     SessionAgent::Worker { run, .. }
@@ -584,8 +580,8 @@ impl<'a> HostActorExecutor<'a> {
 /// A create cmux reported failed may have made the workspace all the same
 /// (a create that timed out while cmux went on, task 806). Nothing records
 /// its UUID and its wrapper is refused, so it would be left open: the
-/// workspaces listed with `description`, which names only this run's or
-/// planner's workspace, are closed, and the create's `error` says what
+/// workspaces listed with `description`, which names only this planner's
+/// workspace, are closed, and the create's `error` says what
 /// became of them. A listing that fails leaves the error as it was; the
 /// wrapper closes its own workspace when refused.
 fn close_unrecorded(
@@ -653,48 +649,29 @@ impl ActorExecutor for HostActorExecutor<'_> {
             ..
         } = spec;
         match program {
-            ActorProgram::RunWorkspace {
-                task,
-                run,
+            ActorProgram::RunSession {
+                run: _,
                 wrapper,
-                resume,
-                description,
-                group,
                 run_env,
-                background,
+                log,
             } => {
                 let cmux = self.workspaces()?;
                 // The worker's token, issued at the claim and the resume
                 // (ADR-t1233-4 decision 4); the wrapper hands its file to
-                // the agent. The workspace itself is the wrapper's, which
-                // opens the queue: it gets neither the token nor the
-                // socket.
+                // the agent. The wrapper itself opens the queue: it gets
+                // neither the token nor the socket.
                 self.service()?
                     .issue(self.queue, &Principal::of(&actor))
                     .context("issue the worker's token for the queue service")?;
                 let mut env = actor_env(self.queue, &actor, None, None)?;
                 env.extend(run_env);
                 // In the run's worktree, which the worker writes.
-                if let Some(log) = background {
-                    return Ok(ActorHandle::Workspace(cmux.launch_background(
-                        workspace.path(),
-                        &wrapper,
-                        &env,
-                        log,
-                    )?));
-                }
-                let tags = WorkspaceTags {
-                    env,
-                    description: Some(description.clone()),
-                    group,
-                };
-                let created = if resume {
-                    cmux.create_resume(task, run, &wrapper, &tags)
-                } else {
-                    cmux.create(task, run, &wrapper, &tags)
-                };
-                let id = created.map_err(|error| close_unrecorded(cmux, &description, error))?;
-                Ok(ActorHandle::Workspace(id))
+                Ok(ActorHandle::Workspace(cmux.launch_background(
+                    workspace.path(),
+                    &wrapper,
+                    &env,
+                    log,
+                )?))
             }
             ActorProgram::NamedWorkspace {
                 name,
@@ -927,10 +904,10 @@ pub fn command_line(command: &CommandSpec) -> Result<String> {
 mod tests {
     use super::*;
     use crate::application::{Exit, SupervisorEnvironment};
-    use crate::domain::{CommitSha, NewTask, task};
+    use crate::domain::{CommitSha, NewTask, Task, task};
     use std::sync::Mutex;
 
-    fn claimed_run(id: &str) -> (Task, TaskRun) {
+    fn claimed_run(id: &str) -> TaskRun {
         let ready = Task::new(
             TaskId::new(3),
             NewTask {
@@ -956,8 +933,7 @@ mod tests {
         let ready = task::transition(ready, task::TaskAction::BypassReview, false).unwrap();
         let claimed = task::claim(ready).unwrap();
         let base = CommitSha::parse("0123456789abcdef0123456789abcdef01234567", "base").unwrap();
-        let run = TaskRun::new(RunId::new(id).unwrap(), &claimed, &base, "t0".into()).unwrap();
-        (claimed, run)
+        TaskRun::new(RunId::new(id).unwrap(), &claimed, &base, "t0".into()).unwrap()
     }
 
     /// Records what it was asked to make and start.
@@ -1133,34 +1109,6 @@ mod tests {
         }
         fn preflight_detached(&self, _: &SupervisorEnvironment) -> Result<()> {
             Ok(())
-        }
-        fn create(
-            &self,
-            _: &Task,
-            run: &TaskRun,
-            command: &str,
-            tags: &WorkspaceTags,
-        ) -> Result<String> {
-            self.workspaces.lock().unwrap().push((
-                format!("run {}", run.id()),
-                command.to_owned(),
-                tags.clone(),
-            ));
-            self.made("w-run", tags)
-        }
-        fn create_resume(
-            &self,
-            _: &Task,
-            run: &TaskRun,
-            command: &str,
-            tags: &WorkspaceTags,
-        ) -> Result<String> {
-            self.workspaces.lock().unwrap().push((
-                format!("resume {}", run.id()),
-                command.to_owned(),
-                tags.clone(),
-            ));
-            self.made("w-resume", tags)
         }
         fn launch_background(
             &self,
@@ -1437,7 +1385,7 @@ mod tests {
         let error = executor.spawn(spec).err().unwrap();
         assert!(error.to_string().contains("are not its role's"));
         // A worker of another run.
-        let (_, run) = claimed_run("r2");
+        let run = claimed_run("r2");
         let error = executor
             .spawn(ActorExecutionSpec::new(
                 ActorContext::worker(&RunId::new("r1").unwrap(), TaskId::new(3)),
@@ -1460,7 +1408,7 @@ mod tests {
     /// it, and never given the queue's path instead (goal 82's stage (3)).
     #[test]
     fn a_worker_or_a_job_without_the_queue_service_is_not_started() {
-        let (task, run) = claimed_run("r1");
+        let run = claimed_run("r1");
         let fake = Fake::default();
         let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
             .with_workspaces(&fake)
@@ -1472,15 +1420,11 @@ mod tests {
             ActorExecutionSpec::new(
                 worker(),
                 WorkspaceAccess::Write("/w".into()),
-                ActorProgram::RunWorkspace {
-                    task: &task,
+                ActorProgram::RunSession {
                     run: &run,
                     wrapper: "wrapper".into(),
-                    resume: false,
-                    description: "d".into(),
-                    group: None,
                     run_env: Vec::new(),
-                    background: None,
+                    log: Path::new("/r/session.log"),
                 },
             ),
             ActorExecutionSpec::new(
@@ -1506,20 +1450,16 @@ mod tests {
 
     #[test]
     fn a_program_needs_the_part_that_starts_it() {
-        let (task, run) = claimed_run("r1");
+        let run = claimed_run("r1");
         let executor = HostActorExecutor::new(Path::new("/q/queue.db"));
         let spec = ActorExecutionSpec::new(
             ActorContext::worker(run.id(), run.task_id()),
             WorkspaceAccess::Write("/w".into()),
-            ActorProgram::RunWorkspace {
-                task: &task,
+            ActorProgram::RunSession {
                 run: &run,
                 wrapper: "wrapper".into(),
-                resume: false,
-                description: "d".into(),
-                group: None,
                 run_env: Vec::new(),
-                background: None,
+                log: Path::new("/r/session.log"),
             },
         );
         assert_eq!(spec.run_id(), Some(run.id()));
@@ -1550,110 +1490,59 @@ mod tests {
         assert!(error.to_string().contains("starts no process"));
     }
 
+    /// A run's session opens no workspace (ADR-t1433-3): its wrapper
+    /// starts in the background in the run's worktree with the worker's
+    /// variables and `[run.env]` after them, and the claim and the resume
+    /// each issue the worker's token.
     #[test]
-    fn a_run_workspace_carries_the_worker_and_the_run_env_after_it() {
-        let (task, run) = claimed_run("r1");
+    fn a_run_session_starts_its_wrapper_in_the_background_with_the_worker_env() {
+        let run = claimed_run("r1");
         let fake = Fake::default();
         let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
             .with_workspaces(&fake)
             .with_queue_service(&fake);
-        for resume in [false, true] {
+        for log in ["/r/session.log", "/r/session-resume-1.log"] {
             let handle = executor
                 .spawn(ActorExecutionSpec::new(
                     ActorContext::worker(run.id(), run.task_id()),
                     WorkspaceAccess::Write("/w".into()),
-                    ActorProgram::RunWorkspace {
-                        task: &task,
+                    ActorProgram::RunSession {
                         run: &run,
-                        wrapper: "wrapper".into(),
-                        resume,
-                        description: "d".into(),
-                        group: Some("g".into()),
+                        wrapper: "wrapper --background".into(),
                         run_env: pairs(&[("SHARED", "x")]),
-                        background: None,
+                        log: Path::new(log),
                     },
                 ))
                 .unwrap();
-            assert!(handle.process().is_err());
+            assert_eq!(handle.workspace().unwrap(), "background:7:start");
         }
         let made = fake.workspaces.lock().unwrap();
-        assert_eq!(made[0].0, "run r1");
-        assert_eq!(made[1].0, "resume r1");
+        assert_eq!(made.len(), 2);
+        assert_eq!(made[0].0, "background /w /r/session.log");
+        assert_eq!(made[1].0, "background /w /r/session-resume-1.log");
         for (_, command, tags) in made.iter() {
-            assert_eq!(command, "wrapper");
+            assert_eq!(command, "wrapper --background");
             assert_eq!(
-                *tags,
-                WorkspaceTags {
-                    // Neither the queue's path nor the service: the
-                    // workspace runs the wrapper, which opens the queue.
-                    env: pairs(&[
-                        ("DAGQ_ROLE", "worker"),
-                        ("DAGQ_ACTOR_ID", "worker:r1"),
-                        ("DAGQ_RUN_ID", "r1"),
-                        ("DAGQ_TASK_ID", "3"),
-                        ("SHARED", "x"),
-                    ]),
-                    description: Some("d".into()),
-                    group: Some("g".into()),
-                }
+                tags.env,
+                pairs(&[
+                    ("DAGQ_ROLE", "worker"),
+                    ("DAGQ_ACTOR_ID", "worker:r1"),
+                    ("DAGQ_RUN_ID", "r1"),
+                    ("DAGQ_TASK_ID", "3"),
+                    ("SHARED", "x"),
+                ])
             );
         }
-        // The claim and the resume each issue the worker's token.
         assert_eq!(*fake.issued.lock().unwrap(), ["worker:r1", "worker:r1"]);
-    }
-
-    /// A run's session started in the background (ADR-t1404-1) opens no
-    /// workspace: its wrapper starts in the run's worktree with the same
-    /// environment, the worker's token issued as for a workspace.
-    #[test]
-    fn a_background_session_starts_its_wrapper_with_the_workspace_env() {
-        let (task, run) = claimed_run("r1");
-        let fake = Fake::default();
-        let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
-            .with_workspaces(&fake)
-            .with_queue_service(&fake);
-        let handle = executor
-            .spawn(ActorExecutionSpec::new(
-                ActorContext::worker(run.id(), run.task_id()),
-                WorkspaceAccess::Write("/w".into()),
-                ActorProgram::RunWorkspace {
-                    task: &task,
-                    run: &run,
-                    wrapper: "wrapper --background".into(),
-                    resume: false,
-                    description: "d".into(),
-                    group: None,
-                    run_env: pairs(&[("SHARED", "x")]),
-                    background: Some(Path::new("/r/session.log")),
-                },
-            ))
-            .unwrap();
-        assert_eq!(handle.workspace().unwrap(), "background:7:start");
-        let made = fake.workspaces.lock().unwrap();
-        assert_eq!(made.len(), 1);
-        assert_eq!(made[0].0, "background /w /r/session.log");
-        assert_eq!(made[0].1, "wrapper --background");
-        assert_eq!(
-            made[0].2.env,
-            pairs(&[
-                ("DAGQ_ROLE", "worker"),
-                ("DAGQ_ACTOR_ID", "worker:r1"),
-                ("DAGQ_RUN_ID", "r1"),
-                ("DAGQ_TASK_ID", "3"),
-                ("SHARED", "x"),
-            ])
-        );
-        assert_eq!(*fake.issued.lock().unwrap(), ["worker:r1"]);
     }
 
     /// Task 806: a create that reports failing although cmux made the
     /// workspace (a create that timed out) closes the workspaces listed
-    /// with the description of the run's or planner's workspace, and the
-    /// error says so; another workspace, and the inbox's, whose
-    /// description is the queue's, are left open.
+    /// with the description of the planner's workspace, and the error says
+    /// so; another workspace, and the inbox's, whose description is the
+    /// queue's, are left open.
     #[test]
     fn a_workspace_cmux_made_although_its_create_failed_is_closed() {
-        let (task, run) = claimed_run("r1");
         let fake = Fake {
             create_times_out: true,
             ..Fake::default()
@@ -1666,31 +1555,6 @@ mod tests {
             .with_workspaces(&fake)
             .with_provider(&fake)
             .with_queue_service(&fake);
-        for resume in [false, true] {
-            let error = executor
-                .spawn(ActorExecutionSpec::new(
-                    ActorContext::worker(run.id(), run.task_id()),
-                    WorkspaceAccess::Write("/w".into()),
-                    ActorProgram::RunWorkspace {
-                        task: &task,
-                        run: &run,
-                        wrapper: "wrapper".into(),
-                        resume,
-                        description: "dagq role=worker run=r1".into(),
-                        group: None,
-                        run_env: Vec::new(),
-                        background: None,
-                    },
-                ))
-                .err()
-                .unwrap();
-            let text = format!("{error:#}");
-            assert!(text.contains("Command timed out"), "{text}");
-            assert!(
-                text.contains("although the create failed") && text.contains("was closed"),
-                "{text}"
-            );
-        }
         let planner = |planner: Option<(PlannerOrigin, PlannerId)>, description: &str| {
             executor.spawn(ActorExecutionSpec::new(
                 match planner {
@@ -1725,10 +1589,7 @@ mod tests {
         assert!(format!("{error:#}").contains("was closed"), "{error:#}");
         let error = planner(None, "dagq role=inbox").err().unwrap();
         assert!(!format!("{error:#}").contains("closed"), "{error:#}");
-        assert_eq!(
-            *fake.closed.lock().unwrap(),
-            ["w-run-1", "w-resume-1", "w-named-1"]
-        );
+        assert_eq!(*fake.closed.lock().unwrap(), ["w-named-1"]);
         let listed: Vec<String> = fake
             .listed
             .lock()
@@ -1861,7 +1722,7 @@ mod tests {
     /// not set, and a job with a run gets its run and task (task 902).
     #[test]
     fn a_headless_job_inherits_no_actor_it_is_not() {
-        let (_, run) = claimed_run("r1");
+        let run = claimed_run("r1");
         let fake = Fake::default();
         let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
             .with_provider(&fake)
@@ -1947,7 +1808,7 @@ mod tests {
     /// workspace removes none: cmux gives it the env (task 902).
     #[test]
     fn the_actor_env_names_every_variable_actor_env_sets() {
-        let (_, run) = claimed_run("r1");
+        let run = claimed_run("r1");
         let queue = Path::new("/q/queue.db");
         let planner = actor_env(
             queue,
@@ -1978,7 +1839,7 @@ mod tests {
 
     #[test]
     fn the_session_agent_is_its_actor_with_its_model() {
-        let (_, run) = claimed_run("r1");
+        let run = claimed_run("r1");
         let fake = Fake::default();
         let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
             .with_provider(&fake)
@@ -2039,7 +1900,7 @@ mod tests {
     #[test]
     fn a_worker_gets_the_brokers_tools_only_with_its_mcp_configuration() {
         let dir = tempfile::tempdir().unwrap();
-        let (_, run) = claimed_run("r1");
+        let run = claimed_run("r1");
         let run_dir = dir.path().join("r1");
         let text = |name: &str| run_dir.join(name).to_string_lossy().into_owned();
         let run = crate::domain::run::start_provisioning(
@@ -2121,7 +1982,7 @@ mod tests {
         };
         use crate::domain::turn::TurnSession;
         let dir = tempfile::tempdir().unwrap();
-        let (_, run) = claimed_run("r1");
+        let run = claimed_run("r1");
         let run_dir = dir.path().join("r1");
         let text = |name: &str| run_dir.join(name).to_string_lossy().into_owned();
         let run = crate::domain::run::start_provisioning(
@@ -2244,7 +2105,7 @@ mod tests {
 
     #[test]
     fn an_actor_configured_for_podman_is_refused_not_run_on_the_host() {
-        let (_, run) = claimed_run("r1");
+        let run = claimed_run("r1");
         let fake = Fake::default();
         let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
             .with_provider(&fake)
