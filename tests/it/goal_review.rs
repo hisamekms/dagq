@@ -325,8 +325,10 @@ fn a_fourth_gaps_in_a_row_asks_a_person() {
     queue.answer(asks[0].id, "gaps").unwrap();
     assert!(
         queue
-            .applies_goal_answer(&queue.read_ask(asks[0].id).unwrap())
+            .goal_answers()
             .unwrap()
+            .iter()
+            .any(|answer| answer.id == asks[0].id)
     );
     supervise(&fx, &StubReviewer::new(&[json!({"verdict": "achieved"})]));
     let mut queue = SqliteQueue::open(&fx.db).unwrap();
@@ -377,8 +379,10 @@ fn an_ask_waits_for_a_person_whose_answer_is_applied() {
     queue.answer(ask.id, "lower_target").unwrap();
     assert!(
         !queue
-            .applies_goal_answer(&queue.read_ask(ask.id).unwrap())
+            .goal_answers()
             .unwrap()
+            .iter()
+            .any(|answer| answer.id == ask.id)
     );
     assert_eq!(queue.decide_goal(ask.id).unwrap().map(|d| d.goal_id), None);
     assert!(queue.read_ask(ask.id).unwrap().closed_at.is_none());
@@ -830,4 +834,66 @@ fn the_supervisor_applies_a_reopen_answer_to_a_correction() {
     assert_eq!(queue.show(follow_up).unwrap().task.goal_id(), Some(goal));
     // The goal now waits for its follow-up, so it is not reviewed.
     assert!(idle.prompts().is_empty());
+}
+
+/// Status uses the same recorded selection as the supervisor, even after
+/// a goal changes from permitting the answer to refusing it, or vice versa.
+#[test]
+fn goal_answer_attention_uses_the_recorded_delivery_decision() {
+    for runtime_delivers in [false, true] {
+        let fx = fixture();
+        let (goal, anchor) = goal_done(&fx);
+        supervise(&fx, &StubReviewer::new(&[json!({"verdict": "ask"})]));
+        let mut queue = SqliteQueue::open(&fx.db).unwrap();
+        let ask = queue.asks(Default::default()).unwrap().remove(0);
+        set_status(
+            &fx,
+            anchor,
+            if runtime_delivers {
+                TaskStatus::Completed
+            } else {
+                TaskStatus::Ready
+            },
+        );
+        queue.answer(ask.id, "achieved").unwrap();
+        assert_eq!(
+            goal_answered(&mut queue, anchor)["runtime_delivers"],
+            runtime_delivers
+        );
+        // A true answer still belongs to the runtime if the goal closes;
+        // a false answer stays with the inbox if its tasks later finish.
+        if runtime_delivers {
+            queue.close_goal(goal, GoalVerdict::Achieved).unwrap();
+        } else {
+            set_status(&fx, anchor, TaskStatus::Completed);
+        }
+        assert_eq!(
+            queue.goal_answers().unwrap().iter().any(|a| a.id == ask.id),
+            runtime_delivers
+        );
+        let status = dagq::runtime::status(&fx.db).unwrap();
+        let entry = status["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["ask_id"] == json!(ask.id))
+            .unwrap();
+        assert_eq!(
+            entry["next"],
+            if runtime_delivers {
+                format!("applying the answer of ask {} (runtime)", ask.id)
+            } else {
+                format!("read the answer of ask {} and close it", ask.id)
+            }
+        );
+        queue.close_ask(ask.id).unwrap();
+        assert!(queue.goal_answers().unwrap().is_empty());
+        assert!(
+            dagq::runtime::status(&fx.db).unwrap()["attention"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|a| a["ask_id"] != json!(ask.id))
+        );
+    }
 }

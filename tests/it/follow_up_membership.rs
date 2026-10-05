@@ -1109,11 +1109,6 @@ fn each_answer_to_a_correction_is_applied_and_keeps_the_history() {
         let follow_up = l.follow_up("missed requirement");
         let (ask, dependent, _) = l.corrected_after_achieved(follow_up);
         l.q.answer(ask.id, answer).unwrap();
-        let answered = l.q.read_ask(ask.id).unwrap();
-        assert!(
-            l.q.applies_correction_answer(&answered).unwrap(),
-            "{answer}"
-        );
         assert_eq!(l.q.correction_answers().unwrap()[0].id, ask.id);
         let decided = l.q.decide_correction(ask.id).unwrap().unwrap();
         assert_eq!(decided["decision"], answer);
@@ -1183,10 +1178,6 @@ fn each_answer_to_a_correction_is_applied_and_keeps_the_history() {
     let follow_up = l.follow_up("missed requirement");
     let (ask, ..) = l.corrected_after_achieved(follow_up);
     l.q.answer(ask.id, "split it").unwrap();
-    assert!(
-        !l.q.applies_correction_answer(&l.q.read_ask(ask.id).unwrap())
-            .unwrap()
-    );
     assert!(l.q.correction_answers().unwrap().is_empty());
     assert_eq!(l.q.decide_correction(ask.id).unwrap(), None);
     assert!(l.q.read_ask(ask.id).unwrap().closed_at.is_none());
@@ -1504,4 +1495,83 @@ fn follow_ups_the_runtime_or_another_item_covers_are_not_shown_again() {
             .any(|a| a["kind"] == "goal_review_failed")
     );
     assert!(l.unsettled_attention().is_empty());
+}
+
+/// SQLite's recorded selection and status agree after the goal changes;
+/// current applicability cannot take an inbox answer back for the runtime.
+#[test]
+fn correction_answer_attention_uses_the_recorded_delivery_decision() {
+    use dagq::application::GoalReviewStore;
+    for runtime_delivers in [false, true] {
+        let mut l = landed();
+        let follow_up = l.follow_up("missed requirement");
+        let (ask, ..) = l.corrected_after_achieved(follow_up);
+        let db = l.dir.path().join("queue.db");
+        let set_closed = |closed: bool| {
+            Connection::open(&db)
+                .unwrap()
+                .execute(
+                    "UPDATE goals SET status=?2, closed_at=?3, verdict=?4 WHERE id=?1",
+                    params![
+                        l.source.as_i64(),
+                        "open",
+                        if closed {
+                            Some("2026-10-05T00:00:00Z")
+                        } else {
+                            None
+                        },
+                        if closed { Some("achieved") } else { None }
+                    ],
+                )
+                .unwrap();
+        };
+        if !runtime_delivers {
+            set_closed(false);
+        }
+        l.q.answer(ask.id, "keep_achieved").unwrap();
+        let answered =
+            l.q.show(follow_up)
+                .unwrap()
+                .events
+                .into_iter()
+                .rev()
+                .find(|e| e.kind == "ask_answered")
+                .unwrap()
+                .payload;
+        assert_eq!(answered["runtime_delivers"], runtime_delivers);
+        // Simulate a reopened goal closing again (false), and a goal
+        // reopening before the supervisor applies a recorded true answer.
+        set_closed(!runtime_delivers);
+        assert_eq!(
+            l.q.correction_answers()
+                .unwrap()
+                .iter()
+                .any(|a| a.id == ask.id),
+            runtime_delivers
+        );
+        let status = dagq::runtime::status(&db).unwrap();
+        let entry = status["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["ask_id"] == json!(ask.id))
+            .unwrap();
+        assert_eq!(
+            entry["next"],
+            if runtime_delivers {
+                format!("applying the answer of ask {} (runtime)", ask.id)
+            } else {
+                format!("read the answer of ask {} and close it", ask.id)
+            }
+        );
+        l.q.close_ask(ask.id).unwrap();
+        assert!(l.q.correction_answers().unwrap().is_empty());
+        assert!(
+            dagq::runtime::status(&db).unwrap()["attention"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|a| a["ask_id"] != json!(ask.id))
+        );
+    }
 }

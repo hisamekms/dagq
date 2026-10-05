@@ -1447,6 +1447,10 @@ pub fn attention(
             next: AttentionNext::DecideFollowUps { goal_id: goal.goal },
         });
     }
+    // Use the supervisor's selection: the recorded delivery decision survives
+    // changes to the goal after the answer. Closed asks are excluded by the store.
+    let goal_answers = queue.goal_answers()?;
+    let correction_answers = queue.correction_answers()?;
     for ask in asks.iter().cloned() {
         let (status, kind, next) = if ask.is_open() {
             (
@@ -1570,7 +1574,9 @@ pub fn attention(
                 event_kind::ASK_ANSWERED,
                 AttentionNext::ApplyingAnswer { ask_id: ask.id },
             )
-        } else if ask.kind == AskKind::ApproveGoal && queue.applies_goal_answer(&ask)? {
+        } else if ask.kind == AskKind::ApproveGoal
+            && goal_answers.iter().any(|answer| answer.id == ask.id)
+        {
             // The supervisor closes the goal, registers its gaps or leaves
             // it open (ADR-0047 decision 43).
             (
@@ -1578,7 +1584,9 @@ pub fn attention(
                 event_kind::ASK_ANSWERED,
                 AttentionNext::ApplyingAnswer { ask_id: ask.id },
             )
-        } else if ask.kind == AskKind::CorrectGoal && queue.applies_correction_answer(&ask)? {
+        } else if ask.kind == AskKind::CorrectGoal
+            && correction_answers.iter().any(|answer| answer.id == ask.id)
+        {
             // The supervisor reopens the goal, records that its achieved
             // verdict was wrong, or keeps it (ADR-t1504-2 decision 9).
             (
