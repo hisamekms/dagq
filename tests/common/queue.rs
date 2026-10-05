@@ -37,6 +37,7 @@ pub fn new_task(title: &str) -> NewTask {
         context: String::new(),
         provider: None,
         worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
+        wait_for_build: false,
     }
 }
 
@@ -162,6 +163,7 @@ pub fn runtime_draft(
             context: String::new(),
             provider: None,
             worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
+            wait_for_build: false,
         })
         .unwrap()
         .id();

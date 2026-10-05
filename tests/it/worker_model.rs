@@ -290,6 +290,7 @@ fn a_codex_run_is_outside_the_trial() {
             context: String::new(),
             provider: Some(dagq::domain::Provider::Codex),
             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
+            wait_for_build: false,
         })
         .unwrap();
     queue

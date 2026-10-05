@@ -1251,6 +1251,7 @@ mod tests {
                 context: String::new(),
                 provider: None,
                 worker_mode: None,
+                wait_for_build: false,
             })
             .unwrap()
             .id()
@@ -1312,6 +1313,7 @@ mod tests {
                     context: String::new(),
                     provider: None,
                     worker_mode: None,
+                    wait_for_build: false,
                 })
                 .unwrap()
                 .id();

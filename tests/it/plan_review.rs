@@ -111,6 +111,7 @@ pub(crate) fn add(
             provider: None,
             // Headless: the fixture has no interactive workers (task 1437).
             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
+            wait_for_build: false,
         })
         .unwrap()
         .id()
@@ -2244,6 +2245,7 @@ fn add_text(queue: &mut SqliteQueue, title: &str, description: &str, acceptance:
             context: String::new(),
             provider: None,
             worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
+            wait_for_build: false,
         })
         .unwrap()
         .id()
@@ -2425,6 +2427,7 @@ fn add_paths(queue: &mut SqliteQueue, title: &str, paths: &[&str]) -> TaskId {
             context: String::new(),
             provider: None,
             worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
+            wait_for_build: false,
         })
         .unwrap()
         .id()
@@ -2537,6 +2540,7 @@ fn an_in_progress_tasks_expected_files_are_what_its_run_changed() {
             context: String::new(),
             provider: None,
             worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
+            wait_for_build: false,
         })
         .unwrap()
         .id();

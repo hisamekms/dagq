@@ -270,6 +270,12 @@ name = "runtime_claim_defer::a_run_waiting_for_its_owner_past_the_grace_lets_the
 reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: grace time judgment"
 task = 1707
 
+# 7.677s, the median of 5 stress runs at load 13-45 (5.447s alone), class B
+[[test]]
+name = "runtime_claim_build::a_task_waits_for_a_build_that_contains_its_dependencies_landings"
+reason = "B 境界（守る境界）: the supervisor's wiring of its build identifier (Layout.version) through git is-ancestor against real landings to claim_deferred / claim_deferral_ended, status and show, across two supervisors (the judgement itself is in domain::build_wait unit tests)"
+task = 1632
+
 # 7.688s, class D
 [[test]]
 name = "runtime_claim_defer::a_task_meeting_a_run_on_a_hotspot_waits_and_the_next_one_is_claimed"
@@ -443,6 +449,12 @@ task = 1707
 name = "runtime_integrate::a_refused_renumbering_commit_is_undone_and_needs_a_session"
 reason = "B 境界（守る境界）: git commit refusal and undo"
 task = 1707
+
+# 5.224s, the median of 5 stress runs at load 15-18 (task 1632 only added a field to its NewTask literal), class D
+[[test]]
+name = "runtime_landing_answers::a_land_answer_is_applied_while_another_run_integrates"
+reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: integration slot rule"
+task = 1632
 
 # 5.943s, class D
 [[test]]

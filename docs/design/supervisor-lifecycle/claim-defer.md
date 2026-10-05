@@ -4,13 +4,14 @@ type: design
 title: "claimを控える（衝突の多いファイル）"
 status: current
 created: 2026-09-26
-updated: 2026-10-05 # task 1634
-last_verified: 2026-10-05 # task 1634
+updated: 2026-10-05 # task 1634; task 1632
+last_verified: 2026-10-05 # task 1634; task 1632
 scope: runtime
 related:
   - adr-0080
   - adr-t1484-1
   - adr-t1634-1
+  - adr-t1632-1
   - adr-t813-2
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-supervise
@@ -22,7 +23,7 @@ related:
 
 # claimを控える（衝突の多いファイル）
 
-候補のtaskが触ると予想するファイルと、進行中のrunのファイルが、衝突の多いファイル（hotspot）で重なるとき、supervisorはそのpassでそのtaskをclaimせずに次の候補をclaimする（[ADR-0080](../../adr/0080-supervisor-rereads-conflicts-config.md)、ADR-0069を統合。goal 45、task 463・585）。queue全体のclaimを止める[load averageの控え](claim-hold.md)とは別で、1つのtaskだけを飛ばす。判定は`domain::claim_defer`、supervisorの側は`application/supervise/claim_defer.rs`（`Supervisor::claimable`）。
+候補のtaskが触ると予想するファイルと、進行中のrunのファイルが、衝突の多いファイル（hotspot）で重なるとき、supervisorはそのpassでそのtaskをclaimせずに次の候補をclaimする（[ADR-0080](../../adr/0080-supervisor-rereads-conflicts-config.md)、ADR-0069を統合。goal 45、task 463・585）。queue全体のclaimを止める[load averageの控え](claim-hold.md)とは別で、1つのtaskだけを飛ばす。判定は`domain::claim_defer`、supervisorの側は`application/supervise/claim_defer.rs`（`Supervisor::claimable`）。同じ候補のloopで、[workerを動かせないtask](#workerを動かせないtask)と[依存先の着地を含むbuildを待つtask](#依存先の着地を含むbuildを待つtask)も1つのtaskを飛ばし、同じeventで記録する。
 
 ## 判定の入力
 
@@ -72,12 +73,27 @@ supervisorは、どのproviderでも動かせないworker（providerと経路の
 - 起動して最初の判定で、taskごとの最新のeventがこの理由の`claim_deferred`なら控えの途中として組み立て直す（`worker_deferrals_in_place`）。hotspotの控え（`deferrals_in_place`）は`reason`が`hot_files`のもの（`reason`の無い古いeventを含む）だけを読む
 - 同じpassで`claim_for_supervisor_in_order`にも経路の一覧を渡し、順に無いtaskを取る後戻りでも経路の無いworkerのtaskは取らない。経路がもう一方のproviderなら、runはそのproviderの非対話で始まり、`provider_switched`（`phase: start`）を記録する
 
+## 依存先の着地を含むbuildを待つtask
+
+supervisorは、`wait_for_build`を宣言したtask（`add --wait-for-build`。[Domain model](../domain-model.md)の`Task`）を、自分のbuild識別子のcommitが依存先の着地commitを全て含むまでclaimせずに飛ばす（[ADR-t1632-1](../../adr/2026-10-05-t1632-1-claim-waits-for-a-build-that-contains-the-dependencies-landings.md)。task 1632）。判定は`domain::build_wait`、supervisorの側は`Supervisor::lacking_from_build`。
+
+- **入力**: passごとに`TaskStore::build_waits`が、`ready`で`wait_for_build`のtaskごとに、直接の依存先（`task_dependencies`）の着地commit（`landed_commits`。`run_integrated`の`result_commit`）を1回のqueryで読む（宣言したtaskが無ければ空）。依存先が何も着地させていなければ待つものは無い。build識別子はsupervisorの`Layout::version`（`dagq::VERSION`、[Build identifier](build-identifier.md)。testは`SuperviseOptions::build`で差し替える）で、そのcommit（共有の`build_id::named_commit`）と着地commitを`git merge-base --is-ancestor <着地> <buildのcommit>`（`Repository::is_ancestor`）で比べる
+- **判定の順**: workerの判定の後、hotspotの判定より前。効く優先度が`interrupt`でも待つ（宣言は落ちる関門を避けるためで、急ぎでも同じに落ちる）。待つtaskはhotspotの判定にかけない
+- **判定**（`build_wait::judge`の`Verdict`。build識別子のcommitは共有の`build_id::named_commit`）: 全てを含めば`Contains`でclaimへ進む。1つでも含まない（`Lacks`）か、含むかを読めない（gitのerror。passごとに問い直し、warnは着地commitごとに1回）ならclaimしない。`.dirty`のbuildはそのcommitで判定する（そのcommitからlocalの変更を足して作ったbuildなので）。commitを名乗らないbuild（リリースの`X.Y.Z`、`+unknown`）は判定できず（`Unjudged`）、待たずにclaimし、taskごとに1回warnを出す（来ないかもしれないbuildを待ち続けないため）。verdictからclaimするか・待つ着地・warnを出すかを決めるのは純粋関数`build_wait::claim_step`
+- 理由は`not_in_build`。最初に飛ばしたときだけ`claim_deferred`（`build_wait::deferred`）を書く
+- 上限は無く、hotspotの控えと違って`defer_max_secs`で期限切れにならない。自動更新はruntimeのpath（`RUNTIME_PATHS`）を変える着地でだけbuildする（[Auto-update](auto-update.md)の「きっかけ」）ので、依存先の着地がruntimeのpathを変えなければ、その着地を含むbuildは後でruntimeを変える別の着地のbuildが引き継ぐまで来ず、それまで待つ。含むbuildのsupervisorは`claim_deferral_ended`（`why: cleared`）を書いてclaimする。宣言を外したtask（`edit --no-wait-for-build`。draft / submittedに戻してから）も、候補に戻ったときに控えの途中なら`cleared`で終える。候補から外れたtaskは`why: not_candidate`で終える
+- **見直し**: 含むかの答えは着地commitごとにprocessの中でcacheする（`DeferWatch::in_build`）。build識別子はprocessの間変わらず、変わるのは自動更新（[Auto-update](auto-update.md)）や`install`の引き継ぎ（[Handoff](handoff.md)）でexecした新しいprocessだけなので、cacheは`supervisor_handed_off`の後に空から始まり、その最初のpassで全ての待ちを新しいbuildで判定し直す。`update_installed`が固定バイナリを入れ替えても、引き継がなかったsupervisor（`up --auto-update`でない、引き継ぎに失敗した）のbuildは変わらず、待ちも変わらない
+- **claimの後戻り**: `claim_for_supervisor_in_order`は、渡した順のtaskがどれもreadyでなくなった（他のsupervisorがclaimした、cancel）ときにclaimの順へ後戻りするが、そこでは`wait_for_build`のtaskを取らない（取れるtaskが他に無ければ`NoReadyTask`。`claim_task`）。そのtaskは判定したsupervisorが順に名指したときだけclaimされる。順を渡さない`TaskStore::claim`も同じで取らない。hotspotで控えたtaskは後戻りで取られうる（従来どおり）
+- **重なり**（1つの候補の待ちの始まり・続き・終わりと他の控えとの重なりは純粋関数`build_wait::decide`、候補から外れた待ちの`not_candidate`は`build_wait::left`）: taskの最新の控えのeventが今の控えを表すように、workerの控えを`cleared`で終えたtaskがまだbuildを待てば、buildの`claim_deferred`を書き直す。hotspotで控えている途中（期限切れでない）のtaskがbuildを待ち始めたら、hotspotの控えはbuildの`claim_deferred`に置き換わり（`stats`の`superseded`）、buildが含んだ後に重なりが残ればhotspotの判定が新しく控える
+- 起動して最初の判定で、taskごとの最新のeventがこの理由の`claim_deferred`なら控えの途中として組み立て直す（`build_wait::deferrals_in_place`）。`worker_deferrals_in_place`はこの理由を読まない
+
 ## 記録
 
-- `claim_deferred`（taskのevent）: `reason: hot_files`、`files`（重なったhotspot）、`runs`（`[{run_id, task_id}]`、重なった進行中のrun）、`max_secs`、`message`、`supervisor`。supervisorのlogにwarnで出る。workerを動かせないtaskの`claim_deferred`は`reason`（`provider_unavailable` / `mode_unavailable`）、`provider`、`worker_mode`、`message`、`supervisor`
-- `claim_deferral_ended`（taskのevent）: `reason`、`why`（`cleared` / `owner_waiting` / `no_commit` / `expired` / `not_candidate`）、`deferred_secs`、`supervisor`。logにinfoで出る
+- `claim_deferred`（taskのevent）: `reason: hot_files`、`files`（重なったhotspot）、`runs`（`[{run_id, task_id}]`、重なった進行中のrun）、`max_secs`、`message`、`supervisor`。supervisorのlogにwarnで出る。workerを動かせないtaskの`claim_deferred`は`reason`（`provider_unavailable` / `mode_unavailable`）、`provider`、`worker_mode`、`message`、`supervisor`。buildを待つtaskの`claim_deferred`は`reason: not_in_build`、`build`（そのsupervisorのbuild識別子）、`missing`（`[{task_id, commit}]`、含まない依存先の着地）、`message`、`supervisor`
+- `claim_deferral_ended`（taskのevent）: `reason`、`why`（`cleared` / `owner_waiting` / `no_commit` / `expired` / `not_candidate`。`owner_waiting` / `no_commit` / `expired`はhotspotの控えだけ、workerとbuildの控えは`cleared` / `not_candidate`だけ）、`deferred_secs`、`supervisor`。logにinfoで出る
 
 ## `status`と`stats`
 
-- `status`: `claim_deferrals`に、今控えているtask（taskの最新の`claim_deferred` / `claim_deferral_ended` / `run_claimed`が`claim_deferred`のもの）を`{task_id, reason, since, files, runs, supervisor}`で並べる（[`status`](status.md)）
+- `status`: `claim_deferrals`に、今控えているtask（taskの最新の`claim_deferred` / `claim_deferral_ended` / `run_claimed`が`claim_deferred`のもの）を`{task_id, reason, since, files, runs, supervisor}`で並べる。buildを待つtask（`reason: not_in_build`）は`files` / `runs`がnullで、`build`と`missing`を足す（他の理由では出さない。`domain::claim_defer::OpenDeferral`。[`status`](status.md)）
+- `show`: 既定の（圧縮した）出力は、今控えているtaskなら同じ形を`claim_deferral`に出す（控えていなければこのキーは無い。`view::task_detail`）。`show --full`は`TaskDetail`をそのまま出すのでこのキーを持たず、控えはeventsの`claim_deferred` / `claim_deferral_ended`で読む。`wait_for_build`を宣言したtaskはtaskの`wait_for_build: true`でも分かる
 - `stats`: `claim_deferrals`に、windowの中で始まった控えの`count`と`secs`、終わり方ごとの`by_end: {<why>: {count, secs}}`（`cleared` / `owner_waiting` / `no_commit` / `expired` / `not_candidate`、`claim_deferral_ended`の前にclaimされた`claimed`、まだ終わっていない`open`、同じtaskの`claim_deferred`で置き換わった`superseded`）、hotspotごとの控えた回数`by_file`、今の控え`deferred`を出す。控えは次の`claim_deferral_ended`かそのtaskの`run_claimed`で終わり、まだ終わっていない控えはwindowの終わりまでを数える。空きslotがあり控えているtaskがあれば、alert `claim_deferred`（`value`は控えているtaskの数）を`idle_slots`の代わりに出す（[`stats`](stats.md)）

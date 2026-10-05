@@ -1056,6 +1056,34 @@ impl TaskStore for SqliteQueue {
         Ok(ready)
     }
 
+    fn build_waits(
+        &self,
+    ) -> Result<std::collections::HashMap<TaskId, Vec<crate::domain::Landing>>> {
+        let mut waits: std::collections::HashMap<TaskId, Vec<_>> = Default::default();
+        let mut statement = self.conn.prepare(
+            "SELECT t.id, c.task_id, c.commit_sha FROM tasks t
+             LEFT JOIN task_dependencies d ON d.task_id = t.id
+             LEFT JOIN landed_commits c ON c.task_id = d.predecessor_id
+             WHERE t.status = 'ready' AND t.wait_for_build != 0
+             ORDER BY t.id, c.id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, TaskId>(0)?,
+                row.get::<_, Option<TaskId>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (task, predecessor, commit) = row?;
+            let landings = waits.entry(task).or_default();
+            if let (Some(task_id), Some(commit)) = (predecessor, commit) {
+                landings.push(crate::domain::Landing { task_id, commit });
+            }
+        }
+        Ok(waits)
+    }
+
     fn graph_input(&self) -> Result<GraphInput> {
         let tx = self.conn.unchecked_transaction()?;
         read_graph_input(&tx)
@@ -1483,10 +1511,16 @@ impl TaskStore for SqliteQueue {
         };
         let new_json = serde_json::to_value(&new)?;
         let (mut from, mut to) = (serde_json::Map::new(), serde_json::Map::new());
+        // The JSON leaves out a wait for the build not declared: recorded
+        // as false (ADR-t1632-1).
+        let value = |json: &serde_json::Value, field: &str| match field {
+            "wait_for_build" => json!(json[field].as_bool().unwrap_or(false)),
+            _ => json[field].clone(),
+        };
         for field in EDITABLE_TASK_FIELDS {
             if old_json[field] != new_json[field] {
-                from.insert(field.to_owned(), old_json[field].clone());
-                to.insert(field.to_owned(), new_json[field].clone());
+                from.insert(field.to_owned(), value(&old_json, field));
+                to.insert(field.to_owned(), value(&new_json, field));
             }
         }
         // Naming the mode the default already resolves to (`--headless` on a
@@ -1500,8 +1534,8 @@ impl TaskStore for SqliteQueue {
             tx.execute(
                 "UPDATE tasks SET title=?1, description=?2, acceptance=?3,
                  verification_commands=?4, required_evidence=?5, paths=?6, context=?7,
-                 worker_provider=?10, worker_mode=?11, change=?12, updated_at=?8
-                 WHERE id=?9",
+                 worker_provider=?10, worker_mode=?11, change=?12, wait_for_build=?13,
+                 updated_at=?8 WHERE id=?9",
                 params![
                     new.title(),
                     new.description(),
@@ -1515,6 +1549,7 @@ impl TaskStore for SqliteQueue {
                     new.worker().provider.as_str(),
                     new.stored_worker_mode().map(WorkerMode::as_str),
                     new.change().map(TaskChange::as_str),
+                    new.wait_for_build(),
                 ],
             )?;
             event(
@@ -1537,7 +1572,7 @@ impl TaskStore for SqliteQueue {
 
 /// The fields `dagq edit` replaces, as the task JSON names them; `task_edited`
 /// records the ones that changed.
-const EDITABLE_TASK_FIELDS: [&str; 10] = [
+const EDITABLE_TASK_FIELDS: [&str; 11] = [
     "title",
     "description",
     "acceptance",
@@ -1548,6 +1583,7 @@ const EDITABLE_TASK_FIELDS: [&str; 10] = [
     "change",
     "provider",
     "worker_mode",
+    "wait_for_build",
 ];
 
 /// `error` with [`crate::application::QueueBusy`] as its context when a
@@ -1587,15 +1623,15 @@ pub(super) fn insert_task(tx: &Connection, new: NewTask, now: &str) -> Result<Ta
     tx.execute(
             "INSERT INTO tasks(id, title, description, acceptance, verification_commands, status, goal_id,
                                context, required_evidence, paths, priority, created_at,
-                               updated_at, worker_provider, worker_mode, change)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+                               updated_at, worker_provider, worker_mode, change, wait_for_build)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
             params![id, task.title(), task.description(), task.acceptance(),
                 serde_json::to_string(task.verification_commands())?, task.status().as_str(),
                 task.goal_id(), task.context(), serde_json::to_string(task.required_evidence())?,
                 serde_json::to_string(task.paths())?, task.own_priority().map(Priority::as_i64),
                 task.created_at(), task.updated_at(),
                 task.worker().provider.as_str(), task.stored_worker_mode().map(WorkerMode::as_str),
-                task.change().map(TaskChange::as_str)],
+                task.change().map(TaskChange::as_str), task.wait_for_build()],
         )?;
     event(
         tx,
@@ -1983,7 +2019,24 @@ pub(super) fn claim_task(
     };
     let preferred = match position(order) {
         Some(index) => index,
-        None => position(&claim_order(tx)?).unwrap_or(0),
+        // Back to the claim order when none of `order` is ready any more
+        // (claimed elsewhere, canceled): never a task that waits for a
+        // build containing its dependencies' landings, which only the
+        // supervisor that judged it may claim (ADR-t1632-1).
+        None => {
+            let fallback = claim_order(tx)?
+                .iter()
+                .find_map(|id| {
+                    ready
+                        .iter()
+                        .position(|task| task.id() == *id && !task.wait_for_build())
+                })
+                .or_else(|| ready.iter().position(|task| !task.wait_for_build()));
+            match fallback {
+                Some(index) => index,
+                None => return Ok(ClaimOutcome::NoReadyTask),
+            }
+        }
     };
     let task = task::claim(ready.swap_remove(preferred))?;
     let route = provider_switch::route_of(routes, task.worker())
@@ -2497,6 +2550,8 @@ fn task_row(row: &Row<'_>) -> rusqlite::Result<Task> {
         change: row
             .get::<_, Option<String>>("change")?
             .and_then(|change| change.parse().ok()),
+        // Any value but 0 is declared (ADR-t1632-1); the column has no CHECK.
+        wait_for_build: row.get::<_, i64>("wait_for_build")? != 0,
         // NULL is the provider's default (Claude, headless: ADR-t1340-1): a
         // task that names no mode, and one from before the worker existed;
         // the columns' CHECK keeps any other value out.

@@ -967,6 +967,7 @@ pub fn register_follow_ups<Q: Queue + ?Sized>(
                     ),
                     provider: None,
                     worker_mode: None,
+                    wait_for_build: false,
                 });
             FollowUpRegistration {
                 index,
@@ -2345,6 +2346,7 @@ mod tests {
             updated_at: String::new(),
             worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
             named_mode: None,
+            wait_for_build: false,
         })
         .unwrap()
     }

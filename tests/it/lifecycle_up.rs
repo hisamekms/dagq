@@ -833,6 +833,7 @@ fn up_prunes_dead_registrations_and_keeps_live_ones_and_leases() {
             context: String::new(),
             provider: None,
             worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
+            wait_for_build: false,
         })
         .unwrap();
     queue
@@ -1013,6 +1014,7 @@ fn up_reports_runs_that_wait_for_a_person_or_the_supervisor() {
                 context: String::new(),
                 provider: None,
                 worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
+                wait_for_build: false,
             })
             .unwrap();
         queue

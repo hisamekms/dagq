@@ -34,6 +34,7 @@ fn add_task(
             context: String::new(),
             provider,
             worker_mode: mode,
+            wait_for_build: false,
         })
         .unwrap();
     queue

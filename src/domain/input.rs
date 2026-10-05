@@ -47,6 +47,10 @@ pub struct NewTask {
     /// provider's default (headless for both Claude and Codex).
     #[serde(default)]
     pub worker_mode: Option<WorkerMode>,
+    /// Claim it only once the supervisor's own build contains the landed
+    /// commits of every task it depends on (ADR-t1632-1).
+    #[serde(default)]
+    pub wait_for_build: bool,
 }
 
 impl NewTask {
@@ -170,6 +174,10 @@ pub struct TaskEdit {
     pub provider: Option<Provider>,
     #[serde(default)]
     pub worker_mode: Option<WorkerMode>,
+    /// Declare (`true`) or withdraw (`false`) the wait for a build that
+    /// contains the dependencies' landings (ADR-t1632-1).
+    #[serde(default)]
+    pub wait_for_build: Option<bool>,
 }
 
 impl TaskEdit {
@@ -185,6 +193,7 @@ impl TaskEdit {
             && self.change.is_none()
             && self.provider.is_none()
             && self.worker_mode.is_none()
+            && self.wait_for_build.is_none()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -198,6 +207,7 @@ impl TaskEdit {
             && self.change.is_none()
             && self.provider.is_none()
             && self.worker_mode.is_none()
+            && self.wait_for_build.is_none()
     }
 
     /// The rules of [`NewTask::validate`] for the fields it replaces.
@@ -236,6 +246,7 @@ pub struct TaskRecord {
     /// The priority of the goal the task belongs to, if any.
     pub goal_priority: Option<Priority>,
     pub change: Option<TaskChange>,
+    pub wait_for_build: bool,
     pub worker: Worker,
     /// The mode the store keeps: none is the provider's default.
     pub named_mode: Option<WorkerMode>,

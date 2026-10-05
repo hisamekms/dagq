@@ -8,7 +8,7 @@ use serde_json::{Map, Value, json};
 
 use crate::domain::{
     GoalDetail, OBSERVATION_KIND, RunEvent, TaskDetail,
-    background_wrapper::current_background_session, broker_usage, reason,
+    background_wrapper::current_background_session, broker_usage, claim_defer, reason,
 };
 
 /// The one key of a command's value that is printed as is instead of as
@@ -114,7 +114,15 @@ pub fn task_detail(detail: &TaskDetail, events: usize) -> Value {
         .iter()
         .map(event_gist)
         .collect();
-    json!({
+    // The claim deferred now, whatever the reason (a hotspot, the worker,
+    // the build, ADR-t1632-1): from the task's latest deferral event.
+    let deferral = detail
+        .events
+        .iter()
+        .rev()
+        .find(|event| claim_defer::DEFERRAL_KINDS.contains(&event.kind.as_str()))
+        .and_then(claim_defer::OpenDeferral::of);
+    let mut shown = json!({
         "task": task,
         "dependencies": detail.dependencies,
         "goal_dependencies": detail.goal_dependencies,
@@ -131,7 +139,11 @@ pub fn task_detail(detail: &TaskDetail, events: usize) -> Value {
         "processes": processes,
         "asks": asks(detail),
         "asks_total": detail.asks.len(),
-    })
+    });
+    if let Some(deferral) = deferral {
+        shown["claim_deferral"] = json!(deferral);
+    }
+    shown
 }
 
 /// The latest [`DEFAULT_ASKS`] asks of the task, oldest first, with the
@@ -263,6 +275,7 @@ mod tests {
             updated_at: "u".into(),
             worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
             named_mode: None,
+            wait_for_build: false,
         })
         .unwrap()
     }

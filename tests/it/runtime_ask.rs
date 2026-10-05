@@ -30,6 +30,7 @@ fn receipt_follow_ups_appear_as_one_atomic_planner_bundle() {
             context: String::new(),
             provider: None,
             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
+            wait_for_build: false,
         })
         .unwrap();
     queue
@@ -664,6 +665,7 @@ fn a_follow_up_draft_records_its_origin_and_its_planner_question_is_delivered_by
             context: String::new(),
             provider: None,
             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
+            wait_for_build: false,
         })
         .unwrap();
     queue

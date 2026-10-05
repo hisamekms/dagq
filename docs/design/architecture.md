@@ -4,8 +4,8 @@ type: design
 title: レイヤーとコンテキストの境界（contextごとの所有・判断・操作・公開するport・依存の向き・境界をまたぐtransaction・検査できる規則・今の違反）
 status: current
 created: 2026-10-04
-updated: 2026-10-05 # task 839: domain::broker_usage among the host operations modules; task 1662: the observation and analysis context points to the measurement design; task 1437
-last_verified: 2026-10-05 # task 839; task 1615; task 1437
+updated: 2026-10-05 # task 839: domain::broker_usage among the host operations modules; task 1662: the observation and analysis context points to the measurement design; task 1437; task 1632
+last_verified: 2026-10-05 # task 839; task 1615; task 1437; task 1632
 scope: system
 related:
   - adr-t1545-1
@@ -39,7 +39,8 @@ reviewのsubagentと禁止依存の検査のscriptは、この文書の節（「
 
 どのcontextにも属さず、全てのcontextが使ってよいもの。業務の判断を持たせない（ADR-t1545-1決定1）。
 
-- IDと値: `domain::ids`（`TaskId`・`GoalId`・`RunId`・`CommitSha`・`EventId`ほか）、`domain::error`（`DomainError`）、`domain::reason`（理由の分類コード）、`domain::views`・`domain::input`の共通の型。
+- IDと値: `domain::ids`（`TaskId`・`GoalId`・`RunId`・`CommitSha`・`EventId`ほか）、`domain::error`（`DomainError`）、`domain::reason`（理由の分類コード）、`domain::views`・`domain::input`の共通の型（taskの着地commit`Landing`を含む。計画管理の`TaskStore::build_waits`が返し、実行と着地のclaimの`domain::build_wait`が読む。task 1632）。
+- build識別子: `build_id`（`crates/dagq-broker-protocol`の`build_id`の再export）。識別子の規則（`build_identifier`・`is_prerelease`・`UNKNOWN_COMMIT`）と、それが名乗るcommitを読む`named_commit`はI/Oを持たない関数で、host運用の自動更新（`application::update::build_commit`）と実行と着地の`domain::build_wait`が使うのはこの部分だけ。同じmoduleの`emit`・`compute`はgitを呼ぶbuild scriptの側で、runtimeのcontextからは呼ばない。
 - 時刻とID生成: `application::ports`の`Clock`・`IdGenerator`（組は`Generators`）、実装は`infrastructure::clock`。
 - eventの記録と種類: `run_events`表への追記（`RunLog::record_runtime_event`・`RunLog::record_queue_event`、`infrastructure::runtime_store`の`run_event`と`infrastructure::sqlite`の`event`）と、種類の定数`domain::event_kind::EventKind`。各contextは自分の種類のeventだけを書く（下の各contextの「所有する状態」）。どの種類も所有するcontextは1つで、接頭辞で書いた種類（末尾が`*`）は、他のcontextが名前で書いた種類を含まない。共有の部品の種類は`ask_*`・`authorization_denied`と、どのcontextの自動修正も数える`auto_repaired`（ADR-0047）。
 - 人への問い合わせ: `asks`表と`AskStore`（`infrastructure::asks`）、CLIの`ask`・`answer`・`asks`。askを開くのと、answerを自分の状態に適用するのは、そのaskの`kind`を持つcontextが行う（例: `worker_question`と`approve_landing`は実行と着地、`plan_review`は計画管理、`blocked`のfindingは観測と分析、`update`はhost運用）。
@@ -72,7 +73,7 @@ goal・task・proposalと、その検査と採否（plan review・goal review・
 
 **公開するport**
 
-- `TaskStore`の読み取り（`show`・`list`・`candidates`・`predecessors`・`goal_predecessors`・`tasks_in_progress`・`graph_input`・`lint_input`・`show_goal`・`list_goals`）を全てのcontextに公開する。
+- `TaskStore`の読み取り（`show`・`list`・`candidates`・`build_waits`（task 1632）・`predecessors`・`goal_predecessors`・`tasks_in_progress`・`graph_input`・`lint_input`・`show_goal`・`list_goals`）を全てのcontextに公開する。
 - `TaskStore::claim`（と`RunTransitions::claim_for_supervisor_in_order`）は実行と着地だけに公開し、越境のtransaction **T1**として扱う。
 - `DraftPlannerStore::register_follow_ups`を実行と着地に公開する（着地したrunのfollow_upsを計画管理のdraftとして渡す。transactionは着地と別）。
 - `PlanReviewStore`・`GoalReviewStore`・`PlanRequestStore`・残りの`DraftPlannerStore`・`TaskStore`の書き込みは内部のport（このcontextの操作とCLIだけが使う）。
@@ -96,7 +97,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 
 **判断**（domain）
 
-`domain::run`（`TaskRun`と遷移）・`domain::run::history`（`RunHistory`）・`domain::run::recorded`、`domain::resume`・`domain::recovery`・`domain::receipt`・`domain::validation`・`domain::verify_failure`・`domain::concern`・`domain::review_reason`・`domain::review_subagents`、`domain::claim_defer`・`domain::claim_hold`・`domain::queue_hold`・`domain::slot_limits`・`domain::waiting`・`domain::recheck`・`domain::stall`・`domain::exit`・`domain::idle_process`・`domain::sessions`・`domain::turn`・`domain::worker`・`domain::worker_question`・`domain::provider_switch`・`domain::run_e2e`・`domain::e2e_quarantine`・`domain::landing_branch`・`domain::landing_release`・`domain::scope`・`domain::run_env`・`domain::headless_job`・`domain::background_wrapper`・`domain::worker_model`（plan reviewの重さの予測とtrialからclaimのときにworkerのmodelを選ぶ）。
+`domain::run`（`TaskRun`と遷移）・`domain::run::history`（`RunHistory`）・`domain::run::recorded`、`domain::resume`・`domain::recovery`・`domain::receipt`・`domain::validation`・`domain::verify_failure`・`domain::concern`・`domain::review_reason`・`domain::review_subagents`、`domain::claim_defer`・`domain::build_wait`・`domain::claim_hold`・`domain::queue_hold`・`domain::slot_limits`・`domain::waiting`・`domain::recheck`・`domain::stall`・`domain::exit`・`domain::idle_process`・`domain::sessions`・`domain::turn`・`domain::worker`・`domain::worker_question`・`domain::provider_switch`・`domain::run_e2e`・`domain::e2e_quarantine`・`domain::landing_branch`・`domain::landing_release`・`domain::scope`・`domain::run_env`・`domain::headless_job`・`domain::background_wrapper`・`domain::worker_model`（plan reviewの重さの予測とtrialからclaimのときにworkerのmodelを選ぶ）。
 
 **操作**
 

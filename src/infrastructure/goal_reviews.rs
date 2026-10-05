@@ -213,6 +213,7 @@ fn register_gaps(
                 ),
                 provider: None,
                 worker_mode: None,
+                wait_for_build: false,
             },
             stamp,
         )?;

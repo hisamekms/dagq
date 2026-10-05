@@ -332,6 +332,7 @@ mod tests {
                 change: None,
                 provider: None,
                 worker_mode: None,
+                wait_for_build: false,
             },
             "t".into(),
         )
@@ -527,6 +528,7 @@ mod tests {
             updated_at: task.updated_at().into(),
             worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
             named_mode: None,
+            wait_for_build: false,
         };
         edit(&mut record);
         Task::restore(record).unwrap()

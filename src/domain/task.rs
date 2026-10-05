@@ -114,6 +114,11 @@ pub struct Task {
     /// The kind of change it makes, as the registrant declared it
     /// (ADR-t980-1); null for a task registered without one.
     change: Option<TaskChange>,
+    /// Claimed only once the supervisor's own build contains the landed
+    /// commits of every task it depends on (ADR-t1632-1); shown only when
+    /// declared.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    wait_for_build: bool,
     /// The provider and mode its worker runs on (ADR-t813-2 decision 1,
     /// ADR-t1340-1): Claude headless unless it asks for another; shown as
     /// `provider` and `worker_mode`, resolved.
@@ -151,6 +156,7 @@ impl Task {
             own_priority: new.priority,
             goal_priority: None,
             change: new.change,
+            wait_for_build: new.wait_for_build,
             title: new.title,
             description: new.description,
             acceptance: new.acceptance,
@@ -188,6 +194,7 @@ impl Task {
             own_priority: record.priority,
             goal_priority: record.goal_priority,
             change: record.change,
+            wait_for_build: record.wait_for_build,
             worker: record.worker,
             named_mode: record.named_mode,
             status: record.status,
@@ -242,6 +249,12 @@ impl Task {
 
     pub fn change(&self) -> Option<&TaskChange> {
         self.change.as_ref()
+    }
+
+    /// Whether its claim waits for a build that contains the landings of
+    /// its dependencies (ADR-t1632-1).
+    pub fn wait_for_build(&self) -> bool {
+        self.wait_for_build
     }
 
     pub fn worker(&self) -> Worker {
@@ -395,6 +408,9 @@ pub fn edit(mut task: Task, edit: TaskEdit) -> Result<Task, DomainError> {
     if let Some(change) = edit.change {
         task.change = Some(change);
     }
+    if let Some(wait) = edit.wait_for_build {
+        task.wait_for_build = wait;
+    }
     task.worker = task.worker.with(edit.provider, edit.worker_mode)?;
     // A new provider without a mode goes back to its default; a mode given
     // is named. Neither keeps what the task named.
@@ -525,6 +541,7 @@ mod tests {
             context: "c".into(),
             provider: None,
             worker_mode: None,
+            wait_for_build: false,
         }
     }
 
@@ -547,6 +564,7 @@ mod tests {
             updated_at: "u".into(),
             worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
             named_mode: None,
+            wait_for_build: false,
         }
     }
 
@@ -917,9 +935,31 @@ mod tests {
                 context: Some("c2".into()),
                 provider: None,
                 worker_mode: None,
+                wait_for_build: Some(true),
             },
         )
         .unwrap();
+        assert!(edited.wait_for_build());
+        // Shown only when declared (ADR-t1632-1).
+        assert_eq!(
+            serde_json::to_value(&edited).unwrap()["wait_for_build"],
+            true
+        );
+        assert!(
+            serde_json::to_value(&kept)
+                .unwrap()
+                .get("wait_for_build")
+                .is_none()
+        );
+        let withdrawn = edit(
+            edited.clone(),
+            TaskEdit {
+                wait_for_build: Some(false),
+                ..TaskEdit::default()
+            },
+        )
+        .unwrap();
+        assert!(!withdrawn.wait_for_build());
         assert_eq!(
             (edited.title(), edited.description(), edited.acceptance()),
             ("t2", "d2", "a2")

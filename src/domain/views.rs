@@ -71,6 +71,15 @@ pub struct GoalDetail {
     pub events: Vec<RunEvent>,
 }
 
+/// A task's landed commit (its `run_integrated`'s `result_commit`, the
+/// `landed_commits` row): what `TaskStore::build_waits` gives the claim's
+/// wait for a build that contains the dependencies' landings (ADR-t1632-1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Landing {
+    pub task_id: TaskId,
+    pub commit: String,
+}
+
 /// A direct dependency of a task as the worker's prompt describes it: the
 /// predecessor and the run that landed it on `main`. A claimed task's
 /// predecessors are all completed, so the run is absent only when the task

@@ -9,6 +9,9 @@
 //! answer stops holding the claims back past
 //! `[conflicts] waiting_owner_grace_secs` (ADR-t1484-1), and a failed run
 //! with no commit of its own does not hold them back at all (ADR-t1634-1).
+//! A task that waits for a build containing its dependencies' landings is
+//! passed over while this supervisor's own build lacks one (ADR-t1632-1;
+//! the judgement is [`crate::domain::build_wait`]).
 use crate::domain::EventKind;
 use std::collections::{HashMap, HashSet};
 
@@ -18,7 +21,7 @@ use tracing::{info, warn};
 use super::Supervisor;
 use crate::application::DependencyGraph;
 use crate::domain::{
-    Priority, RunId, TaskId,
+    Priority, RunId, TaskId, build_wait,
     claim_defer::{
         self, DEFERRAL_KINDS, Decision, Deferral, InFlight, RELATED_TASKS, deferrals_in_place,
         expected_files, failed_without_commit, owner_waiting_since, worker_deferral_ended,
@@ -58,6 +61,19 @@ pub(super) struct DeferWatch {
     /// The deferrals for a worker this supervisor cannot run (ADR-t813-2),
     /// with their reason and since when; `None` until read from the queue.
     worker_deferrals: Option<HashMap<TaskId, (String, i64)>>,
+    /// The waits for a build that contains the dependencies' landings
+    /// (ADR-t1632-1), since when; `None` until read from the queue.
+    build_deferrals: Option<HashMap<TaskId, i64>>,
+    /// Whether this process's build contains each landed commit, as read:
+    /// the build is the process's own, so the answer holds until a handoff
+    /// starts another process with another build.
+    in_build: HashMap<String, bool>,
+    /// The tasks warned of as claimed because the build names no commit.
+    unjudged: HashSet<TaskId>,
+    /// The landed commits warned of as not placeable against the build:
+    /// git is asked again each pass (a fetch may resolve it), the warning
+    /// is given once.
+    unreadable: HashSet<String>,
 }
 
 impl DeferWatch {
@@ -227,7 +243,10 @@ impl Supervisor<'_> {
             now,
             self.conflicts.config.waiting_owner_grace_secs,
         );
-        let latest = if self.defer.deferrals.is_none() || self.defer.worker_deferrals.is_none() {
+        let latest = if self.defer.deferrals.is_none()
+            || self.defer.worker_deferrals.is_none()
+            || self.defer.build_deferrals.is_none()
+        {
             self.queue.latest_task_events(&DEFERRAL_KINDS)?
         } else {
             Vec::new()
@@ -240,6 +259,13 @@ impl Supervisor<'_> {
             Some(deferrals) => deferrals,
             None => worker_deferrals_in_place(&latest),
         };
+        let mut build_deferrals = match self.defer.build_deferrals.take() {
+            Some(deferrals) => deferrals,
+            None => build_wait::deferrals_in_place(&latest),
+        };
+        // The tasks that wait for the build and the landings they wait for
+        // (ADR-t1632-1); none is read unless one declares it.
+        let waits = self.queue.build_waits()?;
         // Every worker runs here, on its own provider or the other one: no
         // candidate is read for its worker (ADR-t813-2).
         let routes = self.routes();
@@ -258,6 +284,7 @@ impl Supervisor<'_> {
         let mut order = Vec::new();
         let mut events = Vec::new();
         for &id in &graph.candidates {
+            let mut worker_cleared = false;
             let reason = workers.get(&id).and_then(|&worker| {
                 route_of(&routes, worker).is_none().then(|| {
                     // Held rather than missing, it is its provider that
@@ -280,8 +307,31 @@ impl Supervisor<'_> {
                             worker_deferral_ended(&why, "cleared", since, now, &self.token),
                         ));
                     }
+                    worker_cleared = true;
                 }
                 (None, None) => {}
+            }
+            // Before the hotspots: a task this build cannot serve waits
+            // whatever its files meet, interrupt or not.
+            let lacking = match waits.get(&id) {
+                Some(landings) => self.lacking_from_build(id, landings),
+                None => None,
+            };
+            match build_wait::decide(
+                id,
+                lacking,
+                worker_cleared,
+                &mut build_deferrals,
+                &mut deferrals,
+                &self.layout.version,
+                now,
+                &self.token,
+            ) {
+                Decision::Defer { event } => {
+                    events.extend(event.map(|event| (id, event)));
+                    continue;
+                }
+                Decision::Claim { event } => events.extend(event.map(|event| (id, event))),
             }
             let interrupt = graph
                 .tasks
@@ -334,6 +384,13 @@ impl Supervisor<'_> {
             false
         });
         self.defer.worker_deferrals = Some(worker_deferrals);
+        events.extend(build_wait::left(
+            &mut build_deferrals,
+            &candidates,
+            now,
+            &self.token,
+        ));
+        self.defer.build_deferrals = Some(build_deferrals);
         deferrals.retain(|id, deferral| {
             if candidates.contains(id) {
                 return true;
@@ -358,6 +415,39 @@ impl Supervisor<'_> {
             self.queue.record_task_event(id, kind, payload)?;
         }
         Ok(order)
+    }
+
+    /// The landings of `task`'s dependencies this supervisor's build lacks
+    /// (ADR-t1632-1); `None` when it may be claimed: the build contains
+    /// them all, or names no commit to tell by (warned of once a task).
+    fn lacking_from_build(
+        &mut self,
+        task: TaskId,
+        landings: &[build_wait::Landing],
+    ) -> Option<Vec<build_wait::Landing>> {
+        let build = self.layout.version.clone();
+        let verdict = build_wait::judge(&build, landings, |landing, commit| {
+            if let Some(&contained) = self.defer.in_build.get(landing) {
+                return Some(contained);
+            }
+            match self.repository.is_ancestor(landing, commit) {
+                Ok(contained) => {
+                    self.defer.in_build.insert(landing.to_owned(), contained);
+                    Some(contained)
+                }
+                Err(error) => {
+                    if self.defer.unreadable.insert(landing.to_owned()) {
+                        warn!(task_id = %task, error = %format_args!("{error:#}"), "whether build {build} contains {landing} could not be read: {error:#}; task {task} waits");
+                    }
+                    None
+                }
+            }
+        });
+        let (lacking, warn) = build_wait::claim_step(verdict, task, &mut self.defer.unjudged);
+        if warn {
+            warn!(task_id = %task, "task {task} waits for a build that contains its dependencies' landings, and build {build} names no commit: claimed without the wait");
+        }
+        lacking
     }
 
     /// The hotspots some run in flight touches, and the runs in flight;

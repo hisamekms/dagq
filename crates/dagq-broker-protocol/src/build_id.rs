@@ -71,6 +71,16 @@ pub fn build_identifier(version: &str, commit: Option<&str>, dirty: bool) -> Str
     }
 }
 
+/// The commit a build identifier names: `<commit>` of
+/// `X.Y.Z-dev+<commit>[.dirty]`, a dirty build taken as its commit (it was
+/// built from that commit with local changes on top). `None` for a release
+/// (`X.Y.Z`) or a build that did not know its commit (`+unknown`).
+pub fn named_commit(build: &str) -> Option<&str> {
+    let (_, metadata) = build.split_once('+')?;
+    let commit = metadata.strip_suffix(".dirty").unwrap_or(metadata);
+    (commit != UNKNOWN_COMMIT && !commit.is_empty()).then_some(commit)
+}
+
 /// Whether `version` has a SemVer pre-release, such as `0.4.0-dev`. Build
 /// metadata is not part of the version Cargo gives, so any `-` is one.
 pub fn is_prerelease(version: &str) -> bool {
@@ -222,6 +232,20 @@ fn git(dir: &Path, args: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_build_names_its_commit_dirty_or_not_and_a_release_names_none() {
+        assert_eq!(named_commit("0.4.0-dev+abc123"), Some("abc123"));
+        assert_eq!(named_commit("0.4.0-dev+abc123.dirty"), Some("abc123"));
+        for build in [
+            "0.4.0",
+            "0.4.0-dev+unknown",
+            "0.4.0-dev+",
+            "0.4.0-dev+.dirty",
+        ] {
+            assert_eq!(named_commit(build), None, "{build}");
+        }
+    }
 
     #[test]
     fn a_given_identifier_is_taken_only_for_its_own_version() {

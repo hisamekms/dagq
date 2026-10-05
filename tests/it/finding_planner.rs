@@ -103,6 +103,7 @@ fn draft_at(
             context: String::new(),
             provider: None,
             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
+            wait_for_build: false,
         })
         .unwrap()
         .id()

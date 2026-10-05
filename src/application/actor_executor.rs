@@ -948,6 +948,7 @@ mod tests {
                 change: None,
                 provider: None,
                 worker_mode: None,
+                wait_for_build: false,
             },
             "now".into(),
         )

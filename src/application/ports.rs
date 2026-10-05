@@ -47,6 +47,12 @@ pub trait TaskStore {
     /// Dependency-ready tasks in claim order (ADR-0040 decision 4); each
     /// task is limited to one unfinished run.
     fn candidates(&self) -> Result<Vec<Task>>;
+    /// The ready tasks that wait for a build containing their
+    /// dependencies' landings (ADR-t1632-1), each with the landed commits
+    /// of its direct predecessors (none for a predecessor that landed
+    /// nothing).
+    fn build_waits(&self)
+    -> Result<std::collections::HashMap<TaskId, Vec<crate::domain::Landing>>>;
     /// The unfinished tasks with their direct predecessors and the IDs of
     /// `candidates`, read in one snapshot.
     fn graph_input(&self) -> Result<GraphInput>;

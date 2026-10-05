@@ -380,6 +380,10 @@ pub struct SuperviseOptions {
     /// The build identifier the release check takes as the supervisor's;
     /// `None` is this binary's. Tests set it (a release build looks).
     pub release_current: Option<String>,
+    /// The build identifier the supervisor names itself by (registration,
+    /// log, the claim's wait for a build, ADR-t1632-1); `None` is this
+    /// binary's. Tests set it (a build that lacks or contains a landing).
+    pub build: Option<String>,
     /// The Codex CLI a Codex worker starts (`supervise --codex`, ADR-t813-2):
     /// resolved on PATH when found; a supervisor without it runs no Codex
     /// worker and no Codex job.
@@ -581,6 +585,7 @@ impl SuperviseOptions {
             processes: None,
             release_index: None,
             release_current: None,
+            build: None,
             codex: PathBuf::from("codex"),
             codex_home: None,
             host_metrics: None,
@@ -813,7 +818,10 @@ pub fn supervise_with_reviewer(
         providers,
         runner: runner.into(),
         pid,
-        version: crate::VERSION.to_owned(),
+        version: options
+            .build
+            .clone()
+            .unwrap_or_else(|| crate::VERSION.to_owned()),
         // The observe command's environment drops the supervisor's actor
         // variables, and the supervisor sets its own when it starts it
         // (`supervisor:<pid>`); its agent is the observer. It drops a

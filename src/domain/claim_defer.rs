@@ -390,7 +390,9 @@ pub fn worker_deferrals_in_place(latest: &[RunEvent]) -> HashMap<TaskId, (String
         .filter(|event| event.kind == CLAIM_DEFERRED)
         .filter_map(|event| {
             let reason = text(event, "reason")?;
-            if reason == HOT_FILES {
+            // The wait for a build is kept apart too
+            // ([`super::build_wait::deferrals_in_place`]).
+            if reason == HOT_FILES || reason == super::build_wait::NOT_IN_BUILD {
                 return None;
             }
             let since = timestamp_millis(&event.created_at)? / 1000;
@@ -426,7 +428,8 @@ pub fn worker_deferred(
 }
 
 /// The end of a deferral for the worker: `why` is `cleared` (the
-/// supervisor can run it now) or `not_candidate`.
+/// supervisor can run it now) or `not_candidate`. The wait for a build
+/// ends the same way ([`super::build_wait::ended`]).
 pub fn worker_deferral_ended(
     reason: &str,
     why: &str,
@@ -468,6 +471,12 @@ pub struct OpenDeferral {
     pub files: Value,
     pub runs: Value,
     pub supervisor: Option<String>,
+    /// For a wait for the build (ADR-t1632-1): the build that lacks the
+    /// landings, and those it lacks (`[{task_id, commit}]`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missing: Option<Value>,
 }
 
 impl OpenDeferral {
@@ -479,6 +488,8 @@ impl OpenDeferral {
             files: event.payload.get("files").cloned().unwrap_or(Value::Null),
             runs: event.payload.get("runs").cloned().unwrap_or(Value::Null),
             supervisor: text(event, "supervisor").map(str::to_owned),
+            build: text(event, "build").map(str::to_owned),
+            missing: event.payload.get("missing").cloned(),
         })
     }
 }

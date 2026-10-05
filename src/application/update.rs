@@ -83,9 +83,7 @@ pub fn changes_runtime(paths: &[String]) -> bool {
 /// `X.Y.Z-dev+<commit>[.dirty]`. `None` for a release (`X.Y.Z`) or a build
 /// that did not know its commit (`+unknown`).
 pub fn build_commit(version: &str) -> Option<&str> {
-    let (_, metadata) = version.split_once('+')?;
-    let commit = metadata.strip_suffix(".dirty").unwrap_or(metadata);
-    (commit != crate::build_id::UNKNOWN_COMMIT && !commit.is_empty()).then_some(commit)
+    crate::build_id::named_commit(version)
 }
 
 /// Where the update keeps its checkout, target and a build waiting for a

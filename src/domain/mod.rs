@@ -870,6 +870,7 @@ pub mod authorization;
 pub mod background_wrapper;
 pub mod broker;
 pub mod broker_usage;
+pub mod build_wait;
 pub mod change;
 pub mod claim_defer;
 pub mod claim_hold;
@@ -983,7 +984,7 @@ pub use run::{
 pub use task::{Task, TaskAction};
 pub use views::{
     ClaimOutcome, DraftBundleMember, DraftBundleView, EventActor, EventFilter, FollowUpDraft,
-    GoalDetail, GoalPredecessor, GoalSummary, GoalTask, IntegrationOutcome, Predecessor,
+    GoalDetail, GoalPredecessor, GoalSummary, GoalTask, IntegrationOutcome, Landing, Predecessor,
     RegisteredFollowUp, RunEvent, RunLease, RunPaths, RunProcess, SupervisorRegistration,
     TaskDetail, TaskOrigin, TaskStatusCounts,
 };
@@ -1746,6 +1747,7 @@ mod tests {
             context: String::new(),
             provider: None,
             worker_mode: None,
+            wait_for_build: false,
         };
         assert_eq!(
             task.validate().unwrap_err().to_string(),
@@ -1782,6 +1784,7 @@ mod tests {
             context: String::new(),
             provider: None,
             worker_mode: None,
+            wait_for_build: false,
         };
         assert_eq!(
             task.required_evidence(),

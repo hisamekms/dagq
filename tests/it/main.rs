@@ -93,6 +93,7 @@ mod runtime_background_process;
 mod runtime_broker;
 mod runtime_candidates;
 mod runtime_claim;
+mod runtime_claim_build;
 mod runtime_claim_defer;
 mod runtime_claim_hold;
 mod runtime_claim_spacing;

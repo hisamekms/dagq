@@ -346,6 +346,7 @@ pub fn add_ready_task(queue: &mut SqliteQueue, title: &str, dependencies: &[Task
             context: String::new(),
             provider: None,
             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
+            wait_for_build: false,
         })
         .unwrap();
     queue
@@ -2148,6 +2149,7 @@ fn awaiting_run_with_review_retry(retry: bool) -> (Fixture, PathBuf, PathBuf, Ta
             context: String::new(),
             provider: None,
             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
+            wait_for_build: false,
         })
         .unwrap();
     queue

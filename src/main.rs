@@ -175,6 +175,12 @@ enum Command {
         /// refused with --provider codex), for a task a person wants to watch or step into.
         #[arg(long)]
         interactive: bool,
+        /// Claim the task only once the supervisor's own build (its build identifier's commit)
+        /// contains the landed commits of every task it --depends-on (ADR-t1632-1): for a task
+        /// whose work needs the fixed binary to carry them. Until then `status` lists it under
+        /// `claim_deferrals` (reason not_in_build).
+        #[arg(long)]
+        wait_for_build: bool,
     },
     /// List one page of tasks, newest first: unfinished ones unless --status or --all says otherwise.
     /// Prints {"tasks", "next", "total"}; pass `next` to --before for the following page (null: none).
@@ -378,6 +384,13 @@ enum Command {
         /// Run the worker in the agent's interactive session (`add --interactive`; Claude only).
         #[arg(long, group = "field")]
         interactive: bool,
+        /// Claim it only once the supervisor's build contains its dependencies' landings
+        /// (`add --wait-for-build`).
+        #[arg(long, group = "field", conflicts_with = "no_wait_for_build")]
+        wait_for_build: bool,
+        /// Withdraw --wait-for-build: claim it as soon as its dependencies are completed.
+        #[arg(long, group = "field")]
+        no_wait_for_build: bool,
     },
     /// Give a draft or ready task a priority of its own (`add --priority`), or with --inherit
     /// let it inherit its goal's again (ADR-t1639-1); it takes effect at the next claim and never
@@ -3103,6 +3116,7 @@ fn execute(cli: Cli) -> Result<Value> {
             provider,
             headless,
             interactive,
+            wait_for_build,
         } => serde_json::to_value(
             planning!().add(NewTask {
                 title,
@@ -3126,6 +3140,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     (_, true) => Some(WorkerMode::Interactive),
                     _ => None,
                 },
+                wait_for_build,
             })?,
         )?,
         Command::Show { id, full, events } => {
@@ -3309,6 +3324,8 @@ fn execute(cli: Cli) -> Result<Value> {
             provider,
             headless,
             interactive,
+            wait_for_build,
+            no_wait_for_build,
         } => {
             // A list flag replaces the list; its --no- flag empties it.
             let replaced =
@@ -3333,6 +3350,7 @@ fn execute(cli: Cli) -> Result<Value> {
                         (_, true) => Some(WorkerMode::Interactive),
                         _ => None,
                     },
+                    wait_for_build: (wait_for_build || no_wait_for_build).then_some(wait_for_build),
                 },
             )?)?
         }

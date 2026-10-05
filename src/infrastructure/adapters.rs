@@ -5428,6 +5428,7 @@ mod tests {
             updated_at: "2026-09-22 00:00:00".into(),
             worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
             named_mode: None,
+            wait_for_build: false,
         })
         .unwrap()
     }
