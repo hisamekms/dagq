@@ -408,17 +408,12 @@ fn where_now(
 mod tests {
     use super::*;
     use crate::domain::RunId;
+    use crate::domain::stats::tests::at;
     use serde_json::json;
 
     const R1: &str = "11111111-1111-4111-8111-111111111111";
     const R2: &str = "22222222-2222-4222-8222-222222222222";
     const T: i64 = 1_800_000_000;
-
-    fn at(secs: i64) -> String {
-        crate::application::timestamp(
-            std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64),
-        )
-    }
 
     fn event(id: i64, run: &str, task: i64, kind: &str, payload: Value, secs: i64) -> RunEvent {
         RunEvent {

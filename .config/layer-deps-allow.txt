@@ -4,8 +4,5 @@
 # whose reference is gone fails the check.
 #
 # rule | path | reference | task | reason
-L1 | src/domain/stats.rs | crate::application | 1616 | domainのtestがapplication::timestampで時刻の文字列を作る
-L1 | src/domain/stats/conflicts.rs | crate::application | 1616 | domainのtestがapplication::timestampで時刻の文字列を作る
-L1 | src/domain/stats/thresholds.rs | crate::application | 1616 | domainのtestがapplication::timestampで時刻の文字列を作る
 L3 | src/application/planner_handoff.rs | crate::infrastructure | 1619 | testがinfrastructure::run_files::LocalRunFilesを使う（application::memory_filesに替える）
 L6 | src/infrastructure/queue_service.rs | crate::view | 1620 | view::task_detailを呼ぶ

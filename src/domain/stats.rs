@@ -2216,10 +2216,18 @@ mod tests {
     const R2: &str = "22222222-2222-4222-8222-222222222222";
     const R3: &str = "33333333-3333-4333-8333-333333333333";
 
-    fn at(secs: i64) -> String {
-        crate::application::timestamp(
-            std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64),
-        )
+    pub(super) fn at(secs: i64) -> String {
+        // These fixtures stay on 2027-01-15; T is 08:00:00 UTC that day.
+        let day_secs = secs - T + 8 * 3600;
+        assert!((0..86_400).contains(&day_secs));
+        let text = format!(
+            "2027-01-15T{:02}:{:02}:{:02}.000Z",
+            day_secs / 3600,
+            day_secs % 3600 / 60,
+            day_secs % 60,
+        );
+        assert_eq!(timestamp_millis(&text), Some(secs * 1000));
+        text
     }
 
     fn run_event(id: i64, run: &str, kind: &str, payload: Value, secs: i64) -> RunEvent {

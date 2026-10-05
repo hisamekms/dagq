@@ -813,6 +813,7 @@ pub fn thresholds(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::stats::tests::at;
     use serde_json::json;
 
     const T: i64 = 1_800_000_000;
@@ -827,9 +828,7 @@ mod tests {
             run_id: Some(RunId::new(run).unwrap()),
             kind: kind.to_owned(),
             payload,
-            created_at: crate::application::timestamp(
-                std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64),
-            ),
+            created_at: at(secs),
             actor: None,
         }
     }
