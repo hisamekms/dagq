@@ -4,8 +4,8 @@ type: design
 title: Slow tests summary from nextest output
 status: current
 created: 2026-09-30
-updated: 2026-10-05
-last_verified: 2026-10-05
+updated: 2026-10-05 # task 1736
+last_verified: 2026-10-05 # task 1736
 scope: operations
 tags:
   - testing
@@ -96,6 +96,8 @@ task = 1707
 
 keyの欠けた項目・知らないkey・1つの項目の中で2回書いたkey・同じ`name`の2つの項目は読めない一覧として扱う（exit 2）。初期値（task 1707）は、本番の関門の直近10本（2026-10-04T20:32〜2026-10-05T00:06 +0900、Summaryを含む`integrate-*-verify-*.log`）を`scripts/slow-tests.sh`で集計し、中央値が5秒を超えた`dagq::it`のtest 129本。理由は[it-reduction](../plans/it-reduction.md)の`it-tests.tsv`のclassとreasonで、完全な名前の先頭の要素がTSVの`module`、末尾の要素が`test`と一致する行が1つのときだけ使い、0行か2行以上ならclassを`unknown`にする（TSVの`module`は入れ子のmodを落とし秒も当てにならないので、名前と秒はlogから取る）。各項目の上のcommentに中央値とclassを書く。
 
+HEADの`tests/it`に同じ完全な名前の`#[test]`が無い項目は、差分の対象と同じ名前の求め方で検出し、名前ごとにstderrへ警告する。警告だけでexit statusは変えないので、CIやworkerの手元でほかのtaskを止めない。testを消す・移すtaskは、消えた完全な名前の項目を同じ変更で外す。残したままだと、後で同じ名前のtestを足したときに関門を素通りする。task 1736で初期値のうち消えた23項目を外した。
+
 ### 名前
 
 対象のtestと許可の一覧とlogは、同じ完全なnextestの名前で照合する。
@@ -120,9 +122,9 @@ sh scripts/check-it-test-time.sh --self-test
 | `--threshold SECS` | 閾値の秒（既定5） |
 | `--allow FILE` | 許可の一覧（既定`.config/it-slow-allow.toml`） |
 | `LOG...` | nextestの出力のfile（複数可、`-`はstdin）。無ければstdin |
-| `--self-test` | `scripts/check-it-test-time-fixtures/`のbaseとheadから一時dirに2つのcommitを作り、超過・許可・変えていない遅いtest・logに無いtest・色の付いた行・入れ子のmodの中の既存のtestの本文の変更（と2行と1行の`#[path]`、signatureの`;`、testの直後のhelperを消すこと、閾値の内のexit 0、引数の誤り・読めないlog・理由の無い項目・2回書いたkeyのexit 2、このrepositoryの許可の一覧が読めること）を確かめる |
+| `--self-test` | `scripts/check-it-test-time-fixtures/`のbaseとheadから一時dirに2つのcommitを作り、超過・許可・変えていない遅いtest・logに無いtest・色の付いた行・入れ子のmodの中の既存のtestの本文の変更（と2行と1行の`#[path]`、signatureの`;`、testの直後のhelperを消すこと、閾値の内のexit 0、引数の誤り・読めないlog・理由の無い項目・2回書いたkeyのexit 2、このrepositoryの許可の一覧が読めること、HEADに無い許可項目の名前つき警告とexit statusの不変（0/1/2）、入れ子のmodの完全な名前の項目には警告しないこと）を確かめる |
 
-exit statusは、閾値を超え許可の一覧に無い対象が無ければ0、あれば1（1本ずつ名前・秒・file:行をstderrに出す）、引数の誤り・読めないlogか許可の一覧・書式の誤り・gitの失敗は2。logに秒の無い対象（流さなかったtest、`#[ignore]`）は警告をstderrに出すだけ。最後の1行（stdout）に対象・超過・閾値の内か許可・秒の無いものの本数を出す。
+exit statusは、閾値を超え許可の一覧に無い対象が無ければ0、あれば1（1本ずつ名前・秒・file:行をstderrに出す）、引数の誤り・読めないlogか許可の一覧・書式の誤り・gitの失敗は2。logに秒の無い対象（流さなかったtest、`#[ignore]`）と、HEADの`tests/it`に同じ完全な名前の`#[test]`が無い許可項目は警告をstderrに出すだけ（上の「許可の一覧」）。最後の1行（stdout）に対象・超過・閾値の内か許可・秒の無いものの本数を出す。
 
 ### CI
 

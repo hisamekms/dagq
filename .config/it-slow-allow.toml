@@ -192,12 +192,6 @@ name = "request_planner::a_planner_question_about_a_request_reaches_its_planner_
 reason = "B 境界（SQLite・supervisor の配線）: answer の行き先と planner を開く・使い切る SQLite の transaction と、answer を planner に渡す配線の代表。判断は domain::plan_request の unit test（task 1711）"
 task = 1711
 
-# 6.696s, class D; not in tests/it at the base of task 1707
-[[test]]
-name = "review_subagents::an_agents_concern_a_person_decides_under_a_pass_asks_a_person"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: concern rule routing loop (7s)"
-task = 1707
-
 # 6.122s, class B
 [[test]]
 name = "review_subagents::the_worker_cannot_change_or_drop_its_required_review"
@@ -366,46 +360,16 @@ name = "runtime_evidence::the_e2e_a_run_needs_is_recorded_and_its_receipt_backs_
 reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: e2e need from diff paths; pure"
 task = 1707
 
-# 5.232s, class G; not in tests/it at the base of task 1707
-[[test]]
-name = "runtime_handoff::a_handoff_before_the_resume_request_lets_the_next_supervisor_send_it"
-reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive input box"
-task = 1707
-
 # 5.087s, class R
 [[test]]
 name = "runtime_handoff::a_handoff_during_a_resume_goes_on_watching_the_resumed_session"
 reason = "R 移し替えの予定（代表がある、goal 119 か 120）: handoff.json carryover; covered by continuation test"
 task = 1707
 
-# 6.493s, class G; not in tests/it at the base of task 1707
-[[test]]
-name = "runtime_handoff::a_handoff_without_its_state_after_the_resumed_session_ended_gives_the_lease_back"
-reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive resume"
-task = 1707
-
 # 5.338s, class D
 [[test]]
 name = "runtime_handoff::a_handoff_without_its_state_during_a_resume_still_watches_the_session"
 reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: rebuild resume from events"
-task = 1707
-
-# 5.282s, class G; not in tests/it at the base of task 1707
-[[test]]
-name = "runtime_handoff::a_resume_handoff_before_exit_does_not_answer_background_work"
-reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive background-work dialog"
-task = 1707
-
-# 6.196s, class G; not in tests/it at the base of task 1707
-[[test]]
-name = "runtime_handoff::a_resume_handoff_preserves_the_exit_for_its_background_dialog"
-reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive dialog /exit"
-task = 1707
-
-# 6.149s, class G; not in tests/it at the base of task 1707
-[[test]]
-name = "runtime_handoff::a_resume_without_a_snapshot_recovers_the_exit_for_its_background_dialog"
-reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive dialog /exit"
 task = 1707
 
 # 5.577s, class B
@@ -504,12 +468,6 @@ name = "runtime_recheck::a_run_held_in_its_slot_for_its_e2e_that_a_landing_confl
 reason = "unknown: TSV と一意に対応しない（TSV に 0 行）。class と行き先は移し替えの goal（119・120）が決める"
 task = 1707
 
-# 5.641s, class G; not in tests/it at the base of task 1707
-[[test]]
-name = "runtime_recheck::a_run_held_in_its_slot_that_a_landing_conflicts_with_is_parked_before_it_lands"
-reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive held /exit"
-task = 1707
-
 # 5.544s, class B
 [[test]]
 name = "runtime_recheck::a_waiting_run_that_a_landing_conflicts_with_is_resumed_before_its_answer"
@@ -528,34 +486,10 @@ name = "runtime_repair::a_live_escalation_is_recorded_at_the_recovery_jobs_reque
 reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: attribution of events"
 task = 1707
 
-# 5.034s, class G; not in tests/it at the base of task 1707
-[[test]]
-name = "runtime_resume::a_request_lost_twice_is_asked_to_the_inbox"
-reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive send confirmation"
-task = 1707
-
-# 5.036s, class G; not in tests/it at the base of task 1707
-[[test]]
-name = "runtime_resume::a_request_stuck_in_the_input_box_is_asked_to_the_inbox"
-reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: cmux input box send confirmation"
-task = 1707
-
 # 7.486s, class R
 [[test]]
 name = "runtime_resume::a_resume_whose_lease_moved_is_resumed_again_only_after_its_slot_is_dropped"
 reason = "R 移し替えの予定（代表がある、goal 100 の task 1557・1558）: same lease/slot race as runtime_adopt takes_back"
-task = 1707
-
-# 6.921s, class G; not in tests/it at the base of task 1707
-[[test]]
-name = "runtime_resume::a_resumed_session_gets_its_request_only_once_its_input_box_is_ready"
-reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: cmux input box readiness"
-task = 1707
-
-# 6.833s, class G; not in tests/it at the base of task 1707
-[[test]]
-name = "runtime_resume::a_resumed_session_that_ignores_exit_is_let_go"
-reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive /exit timeout"
 task = 1707
 
 # 10.391s, class unknown
@@ -618,54 +552,6 @@ name = "runtime_resume::unapproved_resumed_run_is_validated_and_reviewed_with_it
 reason = "R 移し替えの予定（代表がある、goal 100 の task 1557・1558）: resume wiring covered; approval branching decision"
 task = 1707
 
-# 5.739s, class G; not in tests/it at the base of task 1707
-[[test]]
-name = "runtime_resume_adopt::a_resume_taken_over_after_a_handoff_in_its_slot_does_not_record_its_dialog_again"
-reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive screen watch"
-task = 1707
-
-# 5.925s, class G; not in tests/it at the base of task 1707
-[[test]]
-name = "runtime_resume_adopt::a_resume_taken_over_after_a_handoff_keeps_its_dialog_and_clears_it_at_its_end"
-reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive dialog carryover (module says goal 92)"
-task = 1707
-
-# 5.290s, class G; not in tests/it at the base of task 1707
-[[test]]
-name = "runtime_resume_adopt::an_adopted_resume_in_its_slot_does_not_record_its_dialog_again"
-reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive dialog"
-task = 1707
-
-# 5.909s, class G; not in tests/it at the base of task 1707
-[[test]]
-name = "runtime_resume_adopt::an_adopted_resume_keeps_its_dialog_and_clears_it_at_its_end"
-reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive dialog"
-task = 1707
-
-# 6.181s, class G; not in tests/it at the base of task 1707
-[[test]]
-name = "runtime_resume_exit_retry::a_resumed_sessions_held_exit_is_typed_again_into_a_ready_input_box"
-reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive exit typing"
-task = 1707
-
-# 5.701s, class G; not in tests/it at the base of task 1707
-[[test]]
-name = "runtime_resume_exit_retry::used_up_retries_of_an_unreviewed_resume_go_to_the_stuck_exit_ask"
-reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive exit retries"
-task = 1707
-
-# 6.696s, class G; not in tests/it at the base of task 1707
-[[test]]
-name = "runtime_resume_exit_retry::used_up_retries_over_a_dialog_close_a_reviewed_resume_and_judge_it"
-reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive exit retries"
-task = 1707
-
-# 5.268s, class G; not in tests/it at the base of task 1707
-[[test]]
-name = "runtime_review_background::background_work_holds_the_resumed_session_until_it_ends"
-reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive resumed session"
-task = 1707
-
 # 5.362s, class unknown
 [[test]]
 name = "runtime_review_conflict::a_conflict_request_that_cannot_be_written_is_withdrawn_and_the_run_lands"
@@ -676,12 +562,6 @@ task = 1707
 [[test]]
 name = "runtime_run_env::a_missing_run_env_program_holds_resumes_until_it_is_found"
 reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: hold decision on missing program"
-task = 1707
-
-# 6.375s, class G; not in tests/it at the base of task 1707
-[[test]]
-name = "runtime_screen_idle_input::a_markerless_resumed_session_gets_its_answer_once_its_screen_rests"
-reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: cmux screen"
 task = 1707
 
 # 5.317s, class D
@@ -708,18 +588,6 @@ name = "runtime_stale_receipt::a_stale_receipt_rewritten_during_a_wait_is_rewrit
 reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: outcome judgement across wait"
 task = 1707
 
-# 7.697s, class G; not in tests/it at the base of task 1707
-[[test]]
-name = "runtime_stall::an_input_the_supervisor_did_not_send_holds_the_nudge_and_is_preempted"
-reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: person typing into cmux session"
-task = 1707
-
-# 6.404s, class G; not in tests/it at the base of task 1707
-[[test]]
-name = "runtime_stall_recovery::a_stall_past_its_three_recovery_jobs_is_asked_without_a_fourth"
-reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive stall recovery (limit decision)"
-task = 1707
-
 # 5.627s, class B
 [[test]]
 name = "runtime_support::thread_stacks::supervise_timeout_prints_stacks_before_cleanup"
@@ -736,12 +604,6 @@ task = 1707
 [[test]]
 name = "runtime_triage::a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited"
 reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: round limit decision"
-task = 1707
-
-# 5.119s, class G; not in tests/it at the base of task 1707
-[[test]]
-name = "runtime_triage::a_silent_wrapper_after_the_review_waits_for_the_exit_with_an_ask"
-reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive /exit"
 task = 1707
 
 # 5.510s, class B

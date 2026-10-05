@@ -44,7 +44,8 @@
 # Exit status: 0 when no target is over the threshold without an item, 1 when
 # one is (each with its name, seconds and file on stderr), 2 on a usage error,
 # an unreadable log or allow list, a malformed allow list or a git error. A
-# target the log does not time is only warned about.
+# target the log does not time, or an allow-list item absent from HEAD, is
+# only warned about.
 set -eu
 
 me=check-it-test-time
@@ -57,9 +58,9 @@ usage() {
   exit 2
 }
 
-# targets prints one line per test the diff added or changed:
-# "name<TAB>path<TAB>line", from the git repository of the current directory.
-targets() {
+# tests_at_head prints every test using the same parser for membership and
+# diff targets: "name<TAB>path<TAB>line<TAB>changed" (changed is 0 or 1).
+tests_at_head() {
   top=$(git rev-parse --show-toplevel) || return 2
   git -C "$top" rev-parse --verify --quiet "$base^{commit}" >/dev/null || {
     echo "$me: not a commit: $base" >&2
@@ -86,7 +87,6 @@ targets() {
   if (count == 0) { print file "\t" start "d"; next }
   for (i = 0; i < count; i++) print file "\t" (start + i)
 }')
-  [ -n "$changed" ] || return 0
   # The #[path] attributes of tests/it/main.rs: "path<TAB>mod".
   paths=$(git -C "$top" show "HEAD:tests/it/main.rs" 2>/dev/null | LC_ALL=C awk '
 /#\[path *= *"/ {
@@ -106,7 +106,8 @@ p != "" && /mod +[A-Za-z_][A-Za-z0-9_]* *;/ {
   next
 }
 /[^ \t]/ { p = "" }') || paths=""
-  for file in $(printf '%s\n' "$changed" | cut -f1 | LC_ALL=C sort -u); do
+  files=$(git -C "$top" ls-tree -r --name-only HEAD -- tests/it) || return 2
+  for file in $(printf '%s\n' "$files" | LC_ALL=C awk '/\.rs$/'); do
     lines=$(printf '%s\n' "$changed" | awk -F'\t' -v f="$file" '$1 == f { printf "%s ", $2 }')
     prefix=$(printf '%s\n' "$paths" | awk -F'\t' -v f="$file" '$1 == f { print $2; exit }')
     if [ -z "$prefix" ]; then
@@ -147,7 +148,7 @@ function structural(c,    name, i, m, found) {
       found = 0
       for (i = begin[depth]; i <= NR; i++)
         if ((i in hit) || (i < NR && (i in del))) { found = 1; break }
-      if (found) print name "\t" file "\t" begin[depth]
+      print name "\t" file "\t" begin[depth] "\t" found
     }
     depth--
   }
@@ -213,8 +214,8 @@ BEGIN {
   done
 }
 
-# check reads the targets on stdin and the logs and the allow list as files,
-# and reports.
+# check reads all HEAD tests (with the diff target flag), logs and allow list
+# as files, and reports.
 check() {
   tfile=$1; shift
   LC_ALL=C awk -v me="$me" -v threshold="$threshold" -v allowfile="$allow" -v tfile="$tfile" '
@@ -225,7 +226,7 @@ function close_item() {
   else if (ireason == "") fail_allow("item " iname " has no reason")
   else if (itask == "") fail_allow("item " iname " has no task")
   else if (iname in allowed) fail_allow("item " iname " is listed twice")
-  else allowed[iname] = 1
+  else { allowed[iname] = 1; anames[++na] = iname }
   initem = 0
 }
 function strval(v) {
@@ -251,7 +252,8 @@ FILENAME == allowfile {
 FILENAME == tfile {
   if (!allowdone) { close_item(); allowdone = 1 }
   split($0, t, "\t")
-  if (!(t[1] in tpath)) { tnames[++nt] = t[1]; tpath[t[1]] = t[2] ":" t[3] }
+  existing[t[1]] = 1
+  if (t[4] == 1 && !(t[1] in tpath)) { tnames[++nt] = t[1]; tpath[t[1]] = t[2] ":" t[3] }
   next
 }
 {
@@ -278,6 +280,9 @@ FILENAME == tfile {
 END {
   if (!allowdone) close_item()
   if (bad) exit 2
+  for (x = 1; x <= na; x++)
+    if (!(anames[x] in existing))
+      printf "%s: warning: allow-list item %s has no #[test] in HEAD tests/it\n", me, anames[x] > "/dev/stderr"
   over = 0; missing = 0; ok = 0
   for (x = 1; x <= nt; x++) {
     name = tnames[x]
@@ -349,6 +354,40 @@ self_test() {
   expect semicolon_in_the_signature present "dagq::it gate_fixture::an_array_test took 9.000s"
   cat "$tmp/err" >&2
 
+  # Membership is checked even without a diff or timings. A full nested
+  # name exists; the shorter name deliberately does not.
+  cat > "$tmp/membership.toml" <<'EOF'
+[[test]]
+name = "nested_fixture::review_verdicts::inner::a_nested_test_whose_body_changed"
+reason = "B: nested fixture boundary"
+task = 1736
+
+[[test]]
+name = "nested_fixture::inner::a_nested_test_whose_body_changed"
+reason = "B: absent fixture"
+task = 1736
+EOF
+  for want in 0 1 2; do
+    set +e
+    case "$want" in
+      0) (cd "$repo" && sh "$script" --base HEAD --allow "$tmp/membership.toml" /dev/null) ;;
+      1) (cd "$repo" && sh "$script" --base HEAD~1 --allow "$tmp/membership.toml" "$tmp/nextest.log") ;;
+      2) (cd "$repo" && sh "$script" --base HEAD --allow "$tmp/membership.toml" "$tmp/no-such.log") ;;
+    esac > "$tmp/out" 2> "$tmp/err"
+    status=$?
+    set -e
+    if [ "$status" -eq "$want" ]; then
+      echo "$me --self-test: absent_allow_item_exit_$want: ok"
+    else
+      echo "$me --self-test: absent_allow_item_exit_$want: exit $status, want $want" >&2
+      fail=1
+    fi
+    if [ "$want" -ne 2 ]; then
+      expect absent_allow_item_warning present "warning: allow-list item nested_fixture::inner::a_nested_test_whose_body_changed has no #[test]"
+      expect nested_allow_item_no_warning absent "warning: allow-list item nested_fixture::review_verdicts::inner::a_nested_test_whose_body_changed"
+    fi
+  done
+
   # Within a higher threshold nothing is over: exit 0.
   set +e
   (cd "$repo" && sh "$script" --base HEAD~1 --threshold 60 --allow "$tmp/allow.toml" "$tmp/nextest.log") > /dev/null 2>&1
@@ -417,7 +456,7 @@ done
 work=$(mktemp -d "${TMPDIR:-/tmp}/$me.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 set +e
-targets > "$work/targets"
+tests_at_head > "$work/targets"
 status=$?
 set -e
 [ "$status" -eq 0 ] || exit 2
