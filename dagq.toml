@@ -59,6 +59,15 @@ parallel = 3
 # [tasks] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 982 を含んでから足した。
 changes = ["feature", "fix", "refactor", "test", "measure", "docs", "config"]
 
+# goal のラベル（tag）の語彙（ADR-t1639-1 決定 6、task 1643。task 1642 の
+# docs/plans/goal-priority-inventory.md「1. ラベルの語彙の案」を採用）。
+# 書式は docs/design/supervisor-lifecycle/run-environment.md、各ラベルの意味と付け方は
+# docs/development/task-registration.md の「goal の優先度とラベル」。
+# [goals] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが
+# task 1640（優先度）・1641（この欄とラベル）を含んでから足した。着地の verify でも確かめる。
+[goals]
+tags = ["headless", "codex", "cmux", "throughput", "enterprise", "planning", "observability", "architecture", "reliability", "review", "docs"]
+
 [roles.goal_review]
 # goal review の job を Codex（codex exec の読み取りだけの sandbox）で動かし、Claude の goal review と
 # provider・model で並べて比べる（goal 73、ADR-t1063-1、task 1067。書式と振る舞いは

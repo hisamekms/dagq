@@ -4,13 +4,15 @@ type: development
 title: このrepositoryのtaskの登録（verify・paths・evidence・changeの選び方、固定バイナリを待つ宣言、負荷の下で落ちるtestを直すtask、ADRを書くtask、plan reviewが当てはめる規則）
 status: current
 created: 2026-10-03
-updated: 2026-10-05 # task 842; task 1480; task 1635
+updated: 2026-10-05 # task 842; task 1480; task 1635; task 1643: goal の優先度とラベル
 owners:
   - hisamekms
 tags:
   - planning
   - conventions
 related:
+  - adr-t1639-1
+  - adr-t1639-2
   - adr-t1453-2
   - adr-t1504-1
   - adr-t1504-2
@@ -25,7 +27,7 @@ related:
 
 # このrepositoryのtaskの登録
 
-このrepositoryでtaskを`dagq add`するときの`--verify`・`--paths`・`--evidence`・`--change`の今の選び方。読むのは、taskを登録・修正するplannerと、proposalを見るplan review job（AGENTS.mdの「plan review」から辿る）。登録の汎用の手順（flagの意味、宣言外のpathを変えたrunの扱い、pathsの変え方）はpluginの`dagq`の`reference/scope.md`と`reference/register.md`、workerが手元で流すものは[手元の検証](local-checks.md)、testの規則は[testの制約](testing.md)が持つ。
+このrepositoryでtaskを`dagq add`するときの`--verify`・`--paths`・`--evidence`・`--change`と、goal の優先度・ラベルの今の選び方。読むのは、taskを登録・修正するplannerと、proposalを見るplan review job（AGENTS.mdの「plan review」から辿る）。登録の汎用の手順（flagの意味、宣言外のpathを変えたrunの扱い、pathsの変え方）はpluginの`dagq`の`reference/scope.md`と`reference/register.md`、workerが手元で流すものは[手元の検証](local-checks.md)、testの規則は[testの制約](testing.md)が持つ。
 
 ## 推奨の組み合わせ
 
@@ -88,6 +90,40 @@ runtimeのtaskは`--paths`を宣言しない（上の「推奨の組み合わせ
 - `dagq.toml`の`[supervisor] light_changes`に置いたchange（このrepositoryではdocsとconfigを置く予定で、置くのはtask 1593）のtaskは、着地の順番を待つだけのrunが空けた枠でもclaimされうるが、そこでclaimされるのは`--paths`を宣言したtaskだけなので、docs・configのtaskには`--paths`の宣言が要る（[ADR-t1591-1](../adr/2026-10-04-t1591-1-landing-queue-leaves-room-for-light-changes.md)決定2・3、判定は[claimを控える](../design/supervisor-lifecycle/claim-hold.md#着地待ちが空けた軽い枠)）。軽い枠に重い変更が紛れると、`parallel`と`[run.env]`が前提にする重いbuildの同時数を超えるため。宣言の外を変えたrunは軽い枠のものも上の「pathsと軽い検証」のとおり止まる。
 - 混ざるときは主な目的の1つを選ぶ（例: 不具合の修正にtestを足すなら`fix`、新しい機能のdocsを同じtaskで書くなら`feature`）。changeは検証を決めない（検証は上の推奨の組み合わせのとおり、変更の対象で選ぶ）。
 - 作業時間の前後比較で読む層は[運用](operations.md)の「KPIの読み方と印」。
+
+## goal の優先度とラベル
+
+この repository のラベルの語彙は `dagq.toml` の `[goals] tags` が正本で、[棚卸しの案](../plans/goal-priority-inventory.md#1-ラベルの語彙の案)（task 1642）の 11 語を採用する。ラベルはテーマを表し、優先度は表さない。goal の主題に合うものを 1 つ以上付け、主なラベルを先頭に置く。複数のテーマに関わるときは該当するものを添える。変更するファイルの種類は `[areas]`、task の変更の種類は `change` が持つので、それだけを理由にラベルを選ばない。
+
+| ラベル | 意味 | 付ける基準 |
+|---|---|---|
+| `headless` | worker・planner・job を非対話（turn ごとの呼び出し）と background の wrapper で動かすこと | 非対話の経路・wrapper・その評価と測定を作るか変える goal。非対話の run の stall や待ちの改善が主題なら `reliability` を主にして `headless` を添える |
+| `codex` | Codex の provider（worker・job・planner・inbox）を使えるようにし、Claude と比べること | provider を Codex に広げるか切り替える goal。レビュー系かどうかでラベルを分けず、優先度は goal ごとに判断する |
+| `cmux` | cmux への依存（backend の呼び出し・対話の経路・workspace・it と e2e の cmux の fake）を減らすか安定させること | cmux を呼ぶ箇所を消すか、その呼び出しの失敗を扱う goal と、その案内の整理 |
+| `throughput` | 着地の速度・着地の検証と test の時間・slot と claim・CPU の取り合い | 着地までの時間か着地の件数を直接動かす goal。数えるだけのものは `observability` |
+| `enterprise` | 他の repository・隔離環境・認可・Linux とコンテナ・配布とリリースで dagq を使えるようにすること | dogfooding の前提を取り除く goal |
+| `planning` | planner・plan review・goal・follow-up の所属・依頼（request）・Spike・再計画の流れ | 計画を立てる・検査する・goal を開閉する仕組みを変える goal |
+| `observability` | 計測・stats・kpi・日次と毎時の見直し・finding・トークンの記録 | 数えて読めるようにすることが主題の goal |
+| `architecture` | レイヤーとコンテキストの責務の分割・境界の検査・refactor | 振る舞いを変えずに構造を変える goal |
+| `reliability` | supervisor・自動更新・復旧 job・inbox の届け・host の後片付けが止まらず残さないこと | 運用の停止・取りこぼし・資源の漏れを直す goal |
+| `review` | run の review・plan review・goal review の判定とその差し戻しの減らし方 | review 系の actor の判定や入力を変える goal（provider の切り替えは `codex`） |
+| `docs` | 文書と skill の整合（link・AGENTS.md の大きさ・リリースの文） | 文書だけを直す goal |
+
+`test`・`security`・`plugin` は語彙に足さない。test の時間は `throughput`、隔離と後片付けは `reliability`、認可と隔離環境は `enterprise` を使い、plugin というファイルの範囲は `[areas]` で表す。
+
+goal の優先度を正本にし、task は個別の指定が無ければ所属の goal から継ぐ（[ADR-t1639-1](../adr/2026-10-04-t1639-1-goal-priority-is-the-source-tasks-inherit-and-goals-carry-tags.md)）。同じ goal の task を個別の指定で一括して揃えず、goal の優先度で決める。この repository で段を選ぶ目安は次のとおり。人の明示した優先順と、goal 全体を待たせたときの影響を根拠に選ぶ。
+
+| 段 | この repository での目安 |
+|---|---|
+| `interrupt` | 通常の順に待たせられず、人が割り込みを必要とする例外。非対話化や Codex 化というテーマだけで選ばず、常用しない |
+| `urgent` | supervisor の停止など、運用を止めている不具合の解消 |
+| `high` | 他の開発を進める前提や、効果の大きい着地・検証のスループットの改善。効果と先に要る理由を書く |
+| `normal` | 通常の機能開発・整理。エンタープライズ対応も、割り込みや先行が要る根拠が無ければこの段を目安にする |
+| `low` | 後回しの改善、大きな拡張や条件待ち。テーマごとの受け皿の goal はこの段にする |
+
+2026-10-02 の段と 2026-10-03 の方針は棚卸しの初期値の案の材料で、テーマと段を恒久的に結び付ける規則ではない。既存の goal ごとの優先度案と今の task の値とのずれは[棚卸しの「2. goal ごとの表」](../plans/goal-priority-inventory.md#2-goal-ごとの表)にあり、値の適用と今の並びとの調整は人が別に決める。この設定と文書の変更では既存の goal・task の値や所属を変えない。
+
+受け皿は元の goal ごとの積み残しではなく、同じラベルのテーマごとにまとめ、優先度を `low` にする（[ADR-t1639-2](../adr/2026-10-04-t1639-2-defer-improvements-outside-acceptance-to-a-low-goal-per-tag.md)）。goal・task の優先度の付け方と継承、後回しの判定・所属の記録・受け皿の選択と移動の汎用の手順は plugin の `dagq` の `reference/register.md` が持つ。
 
 ## 負荷の下で落ちるtestを直すtask
 
