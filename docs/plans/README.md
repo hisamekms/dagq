@@ -24,6 +24,7 @@ tags:
 - [新しいrunのworktreeに温まったtargetをAPFSのcloneで入れたときのbuildの短縮の見積もり](worktree-seed.md)（goal 65、task 968）
 - [build scriptのrerun-if-changedをworktreeに依らない形にしたときの、cloneしたtargetでのdagqのcrateのbuildの短縮の測定](build-script-rerun-paths.md)（goal 36、task 1359）
 - [着地をまとめて検証する（batching）効果の、着地の枠を分ける案と合わせた見積もりと方式の候補](landing-batching.md)（goal 65、task 969）
+- [landing recheckのきっかけを広げた（ADR-t1310-1）前後の本番のrecheckの件数・時間・commandの回数と、hostの負荷への影響](landing-recheck-trigger-measurement.md)（goal 139、task 1514）
 - [sccache導入前後のintegrateのllvm-covの所要時間とhit率](sccache-measurement.md)（ADR-0049決定10の導入後の測定、task 460）
 - [NEXTEST_TEST_THREADSとRUST_TEST_THREADSが4の期間の基準値と、8への変更後の比べ方](nextest-test-threads.md)（task 566の前後の比較）
 - [遅いintegration testの時間が使われている待ちの内訳と、修正の候補の見積もり](slow-test-waits.md)（goal 68、task 975）
