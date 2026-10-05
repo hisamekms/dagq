@@ -4,8 +4,8 @@ type: design
 title: "変更の印（`mark` / `marks`）"
 status: current
 created: 2026-09-26
-updated: 2026-10-04 # task 1548: mark and mark --retract are application::marks
-last_verified: 2026-10-04 # task 1548
+updated: 2026-10-05 # task 663: pruned marks use the last heartbeat
+last_verified: 2026-10-05 # task 663
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -62,3 +62,5 @@ inbox・planner・人のsessionから打てる。observer（許可の一覧に�
 ## `dagq marks`
 
 `dagq marks [--since <cursor>] [--until <cursor>]`は記録する印と導く印を`{"marks": [...]}`で、効いた時刻（`at`）の順に出す。読むだけのコマンドで（read-onlyの接続）、observerとjobも読める。各印は`id`（記録する印のevent ID、導く印はnull）、`kind`、`at`、`recorded_at`（eventの時刻）、`label`（人が読む1行）、`retracted_by`、`detail`（記録する印はpayload、導く印は上の項目）を持つ。`--since`は`at`がその時刻より後、`--until`はその時刻以前の印に絞る。event IDのcursorはそのID以前の最新のeventの時刻と読む。
+
+`supervisor_stopped`の`outcome: pruned`で整数の`last_heartbeat_at`（unix秒）を持つ印は、その時刻を`utc_text`でqueueのUTC時刻の書式にしたものを`at`にする。`recorded_at`は後からpruneを記録したeventの`created_at`のまま。絞り込みと並び順もこの`at`を使う。`stopped` / `failed`、または`last_heartbeat_at`が無い・整数でないprunedの印は、従来どおり`created_at`を`at`にする。

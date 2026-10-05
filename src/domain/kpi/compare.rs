@@ -194,7 +194,8 @@ pub(super) fn compare(
     let (split, before, after) = match spec {
         CompareSpec::At(cursor) => {
             let time = match cursor {
-                // A person's mark of an earlier time splits where it took effect.
+                // Split at the mark's effective time: a person's --at, or a
+                // pruned supervisor stop's last heartbeat, may precede recording.
                 Cursor::Event(id) => context
                     .marks
                     .iter()

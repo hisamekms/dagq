@@ -4,8 +4,8 @@ type: design
 title: "`kpi`"
 status: current
 created: 2026-09-26
-updated: 2026-10-04 # task 1381: routine marks are confounders, not overlapping changes
-last_verified: 2026-10-04 # task 1381
+updated: 2026-10-05 # task 663: compare pruned stops at the last heartbeat
+last_verified: 2026-10-05 # task 663
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -173,7 +173,7 @@ dagq kpi --compare <mark> --area runtime --change fix --by provider --by route -
 
 ## 前後比較（`compare`）
 
-- `--compare <event id>`はその印（`dagq mark`の`--at`の印は効いた時刻。導く印はそれを読んだclaimの`run_claimed`のevent ID（`marks`の`detail.claim_event`）で指す）、`--compare <時刻のcursor>`はその時刻を境に、前後に`--window`日（既定7）の窓を作る。`--compare A..B,C..D`は2つの窓を明示する（前の窓が後の窓より前で、どちらも始まりが終わりより前）。
+- `--compare <event id>`はその印（`dagq mark`の`--at`の印は効いた時刻、`outcome: pruned`で整数の`last_heartbeat_at`を持つ`supervisor_stopped`の印はその最後のheartbeatの時刻。導く印はそれを読んだclaimの`run_claimed`のevent ID（`marks`の`detail.claim_event`）で指す）、`--compare <時刻のcursor>`はその時刻を境に、前後に`--window`日（既定7）の窓を作る。`--compare A..B,C..D`は2つの窓を明示する（前の窓が後の窓より前で、どちらも始まりが終わりより前）。
 - 印の並び（取り消された印と取り消しの印を除く、記録する印と導く印）を時刻の順にたどり、前の印からその印までに終わったrunが`min_samples`に満たなければ同じ「重なった変更」にまとめる（3つ以上も1つに。`domain::kpi::compare::overlapping_groups`）。境の印がまとまった変更に入っていれば、その最初の印の前と最後の印の後で比べ、`split.separable: false`で「含まれる印を分けられない」ことを示す。
 - 日常の印（supervisorのbuildを記録するだけの印: 時刻の順で直前の`supervisor_started`と`parallel`が同じ`supervisor_started`、`supervisor_stopped`、`derived:dagq_version`。印のkindとdetailで判定し、最初の起動と`parallel`の記録の無い起動は日常の印にしない）はまとまりに入らず、つながず、境の変更にも入らず、`confounders`に並ぶだけ（buildの違いは`build=`の層で読む。[ADR-t1381-1](../../adr/2026-10-04-t1381-1-routine-build-marks-are-confounders-not-overlapping-changes.md)）。まとめるときの「間に終わったrun」は日常の印を飛ばした前の印から数える。`--compare`が日常の印（`supervisor_started`のevent ID、`derived:dagq_version`だけを導いたclaimのevent ID、日常の印だけが効いた時刻）を指せば、その印1つを境に`separable: true`で比べる。claimが`derived:dagq_version`と日常でない導く印（`derived:parallel`など）を同時に導いたときは日常でない印のまとまりを指し、同じclaimの`derived:dagq_version`は`split.marks`に入れず`confounders`に`position: "after"`で並べる。
 - 出力は`split`（境の時刻と印）、`before` / `after`（窓と、そこで終わったrunの数、`partial`、窓の`host`（[hostの負荷](#hostの負荷)））、`confounders`（境の変更以外で、2つの窓の中と間にある印を時刻の順に、`position`: `before` / `between` / `after`）、`overlapping`（範囲にかかる重なった変更のまとまり）、`strata`（KPI→層→`before`・`after`の値（`n`・中央値・p90・範囲）と`comparison`と同じ差と判定。層は`all`と`change=`・`area=`（`[areas]`のあるとき）・`parallel=`・`load=`・`build=`と、`--by`で選んだ軸（`--by group`なら`group=`など）。後の窓が今を越えていれば`partial`で判定しない）、`change_summary`（change→`change=`の層の`lead_time`・`phase.*`・`land_phase.*`。changeは`--change`で選んだもの、無ければ`strata`に現れたchangeすべて（`unknown`を含む、名前の順）。runtimeは特定のchangeを既定に持たない（ADR-t980-1の決定6(b)）。層が無ければ出さない）、`area_summary`（area→`area=`の層の同じKPI。areaは`--area`で選んだもの、無ければ`strata`に現れたareaすべて（`unknown`・`other`を含む、名前の順）。`[areas]`が無ければ出さない（ADR-t980-1の決定6(b)）。選び方は`domain::kpi::compare`）。kindごとの`summary`はkindと一緒に消した（task 984）。区間は自動では縮めない。

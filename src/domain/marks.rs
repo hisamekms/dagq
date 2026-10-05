@@ -29,8 +29,8 @@ use super::{
 /// whether it updates itself.
 pub const SUPERVISOR_STARTED: &str =
     crate::domain::event_kind::EventKind::SupervisorStarted.as_str();
-/// A supervisor stopped and removed its registration. One that went stale
-/// records none: its interval ends at its last heartbeat or the next start.
+/// A supervisor stopped and removed its registration, or a later prune
+/// recorded its stop at the last heartbeat.
 pub const SUPERVISOR_STOPPED: &str =
     crate::domain::event_kind::EventKind::SupervisorStopped.as_str();
 /// The normalized `[run.env]` of the main checkout's `dagq.toml` hashes
@@ -203,7 +203,8 @@ pub struct Mark {
     /// The event kind, or `derived:<attribute>`.
     pub kind: String,
     /// When the change took effect: the event's time, the `--at` of a
-    /// person's mark, or the claim a derived mark was read off.
+    /// person's mark, a pruned supervisor's last heartbeat, or the claim a
+    /// derived mark was read off.
     pub at: String,
     /// When the event was written (the claim's, for a derived mark).
     pub recorded_at: String,
@@ -225,13 +226,21 @@ pub fn marks(events: &[RunEvent], since: Option<Cursor>, until: Option<Cursor>) 
         .map(|event| Mark {
             id: Some(event.id),
             kind: event.kind.clone(),
-            at: event
-                .payload
-                .get("at")
-                .and_then(Value::as_str)
-                .filter(|_| event.kind == MARK_RECORDED)
-                .unwrap_or(&event.created_at)
-                .to_owned(),
+            at: match event.kind.as_str() {
+                MARK_RECORDED => event
+                    .payload
+                    .get("at")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                SUPERVISOR_STOPPED if event.payload["outcome"] == "pruned" => event
+                    .payload
+                    .get("last_heartbeat_at")
+                    .and_then(Value::as_i64)
+                    .and_then(|secs| secs.checked_mul(1000))
+                    .map(utc_text),
+                _ => None,
+            }
+            .unwrap_or_else(|| event.created_at.clone()),
             recorded_at: event.created_at.clone(),
             label: recorded_label(event),
             retracted_by: retracted.get(&event.id).copied(),
@@ -647,6 +656,53 @@ mod tests {
                 "supervisor stopped: 0.4.0+a",
             ]
         );
+    }
+
+    #[test]
+    fn pruned_marks_use_the_heartbeat_for_time_order_and_window() {
+        let heartbeat = "2026-09-26T01:00:00.000Z";
+        let between = "2026-09-26T02:00:00.000Z";
+        let recorded = "2026-09-26T05:00:00.000Z";
+        let events = vec![
+            queue_event(1, SUPERVISOR_STARTED, json!({}), between),
+            queue_event(
+                2,
+                SUPERVISOR_STOPPED,
+                json!({"outcome": "pruned", "last_heartbeat_at": timestamp_millis(heartbeat).unwrap() / 1000}),
+                recorded,
+            ),
+        ];
+        let listed = marks(&events, None, None);
+        assert_eq!(
+            listed.iter().map(|mark| mark.id).collect::<Vec<_>>(),
+            [Some(EventId::new(2)), Some(EventId::new(1))]
+        );
+        assert_eq!(listed[0].at, heartbeat);
+        assert_eq!(listed[0].recorded_at, recorded);
+        let middle = Cursor::Time(timestamp_millis(between).unwrap());
+        assert!(marks(&events, Some(middle), None).is_empty());
+        let boundary = Cursor::Time(timestamp_millis(heartbeat).unwrap());
+        assert_eq!(marks(&events, None, Some(boundary)), listed[..1]);
+        assert_eq!(marks(&events, Some(boundary), None), listed[1..]);
+        assert_eq!(marks(&events, None, Some(middle)), listed);
+    }
+
+    #[test]
+    fn other_stop_marks_keep_the_event_time() {
+        let recorded = "2026-09-26T05:00:00.000Z";
+        for payload in [
+            json!({"outcome": "stopped", "last_heartbeat_at": 0}),
+            json!({"outcome": "failed", "last_heartbeat_at": 0}),
+            json!({"outcome": "pruned"}),
+            json!({"outcome": "pruned", "last_heartbeat_at": "0"}),
+            json!({"outcome": "pruned", "last_heartbeat_at": null}),
+            json!({"outcome": "pruned", "last_heartbeat_at": i64::MAX}),
+        ] {
+            let events = [queue_event(1, SUPERVISOR_STOPPED, payload, recorded)];
+            let listed = marks(&events, None, None);
+            assert_eq!(listed[0].at, recorded, "{:?}", events[0].payload);
+            assert_eq!(listed[0].recorded_at, recorded);
+        }
     }
 
     #[test]
