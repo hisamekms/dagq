@@ -522,6 +522,165 @@ fn install_hands_a_running_supervisor_over_under_its_pid_and_rolls_back() {
     assert!(registered().is_empty());
 }
 
+/// A person's `install` of a build whose supervisor dies at its start
+/// (ADR-0073 decisions 13 and 14): with a real supervisor process, the
+/// handoff fails, the binary it replaced is put back, the command exits
+/// non-zero with the `update_failed` it recorded on stdout, and the inbox
+/// is asked; the automatic update's state is left alone.
+#[test]
+fn install_of_a_build_that_dies_puts_the_binary_back_and_asks_the_inbox() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("queue").join("queue.db");
+    ok(&db, &["init"]);
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "seed",
+        ],
+    ] {
+        assert!(
+            Command::new(git_executable().expect("git executable"))
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .bounded_status()
+                .unwrap()
+                .success()
+        );
+    }
+    let stub = |name: &str, text: &str| {
+        let path = dir.path().join(name);
+        crate::common::template::script(&path, text);
+        path
+    };
+    let (cmux, claude) = (
+        stub("cmux", "#!/bin/sh\nprintf 'PONG\\n'\n"),
+        stub("claude", "#!/bin/sh\nprintf 'stub 1.0\\n'\n"),
+    );
+    let bin = env!("CARGO_BIN_EXE_dagq");
+    let quoted_bin = crate::common::shell_path(bin);
+    // Like the real binary for every check `install` makes, but a
+    // supervisor it runs dies at once.
+    let broken = stub(
+        "broken-dagq",
+        &format!(
+            "#!/bin/sh\ncase \" $* \" in *\" --handoff-token probe \"*) exec {quoted_bin} \"$@\";; esac\n\
+for a in \"$@\"; do if [ \"$a\" = supervise ]; then echo 'broken build' >&2; exit 3; fi; done\n\
+exec {quoted_bin} \"$@\"\n"
+        ),
+    );
+    let fixed = dir.path().join("bin").join("dagq");
+    std::fs::create_dir_all(fixed.parent().unwrap()).unwrap();
+    std::fs::copy(bin, &fixed).unwrap();
+    let mut supervisor = common::KillOnDrop::new(
+        Command::new(&fixed)
+            .without_actor_env()
+            .owned_by_test()
+            .arg("--db")
+            .arg(&db)
+            .args(["supervise", "--observe-interval", "0", "--repo"])
+            .arg(&repo)
+            .arg("--cmux")
+            .arg(&cmux)
+            .arg("--claude")
+            .arg(&claude)
+            .args(FAST_SUPERVISOR)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+        "the supervisor",
+    );
+    let registered = || SqliteQueue::open(&db).unwrap().supervisors().unwrap();
+    let started = std::time::Instant::now();
+    while registered().is_empty() {
+        assert!(
+            started.elapsed().as_secs() < 30,
+            "the supervisor never registered"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    let done = std::sync::atomic::AtomicBool::new(false);
+    /// Ends the reaping loop below however the install ends, a panic
+    /// included.
+    struct Done<'a>(&'a std::sync::atomic::AtomicBool);
+    impl Drop for Done<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let output = std::thread::scope(|scope| {
+        let install = scope.spawn(|| {
+            let _done = Done(&done);
+            invoke(
+                &db,
+                &[
+                    "install",
+                    "--from",
+                    broken.to_str().unwrap(),
+                    "--to",
+                    fixed.to_str().unwrap(),
+                    "--handoff-timeout",
+                    "60",
+                    "--poll-ms",
+                    "50",
+                    "--watch-timeout",
+                    "5",
+                ],
+            )
+        });
+        // Reaps the supervisor once the broken build's exec ended it.
+        let _waiting = common::within(common::STEP_LIMIT, "the install of the broken build");
+        while !done.load(std::sync::atomic::Ordering::SeqCst) {
+            let _ = supervisor.child().try_wait();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        install.join().unwrap()
+    });
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("update_failed"), "{stderr}");
+    let report: Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stdout)));
+    assert_eq!(report["source"], "install", "{report}");
+    assert_eq!(report["stage"], "install", "{report}");
+    assert_eq!(report["kept"], false, "{report}");
+    assert_eq!(report["restored"]["restored"], true, "{report}");
+    assert_eq!(
+        std::fs::read(&fixed).unwrap(),
+        std::fs::read(bin).unwrap(),
+        "the binary in place is not the one the broken build replaced"
+    );
+    let asks = ok(&db, &["asks"]);
+    let ask = asks["asks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|ask| ask["kind"] == "update_failed")
+        .unwrap_or_else(|| panic!("no update_failed ask: {asks}"));
+    assert_eq!(ask["id"], report["ask_id"], "{ask}");
+    assert!(
+        ask["question"]
+            .as_str()
+            .unwrap()
+            .contains("A person's `dagq install`"),
+        "{ask}"
+    );
+    let status = ok(&db, &["status"]);
+    assert_eq!(status["auto_update"]["state"], "idle", "{status}");
+}
+
 /// `supervise --auto-update` builds and installs the runtime of every
 /// landing on main that changes it (ADR-0045 decision 17): its job builds
 /// the commit in the queue's own checkout (a stub build copies a binary),

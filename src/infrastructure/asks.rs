@@ -360,7 +360,11 @@ impl SqliteQueue {
                 .optional()?
                 .flatten();
             let release = source.as_deref() == Some(crate::application::update::RELEASE_SOURCE);
-            let applied = UPDATE_FAILED_OPTIONS.contains(&text.trim())
+            // A person's install's failure: no supervisor applies its
+            // answer (ADR-0073 decision 14).
+            let install = source.as_deref() == Some(crate::application::update::INSTALL_SOURCE);
+            let applied = !install
+                && UPDATE_FAILED_OPTIONS.contains(&text.trim())
                 && super::runtime_store::supervisors_of(&tx)?
                     .iter()
                     .any(|registration| {
@@ -487,7 +491,29 @@ impl SqliteQueue {
             )?
             .query_map([kind.as_str()], ask_row)?
             .collect::<rusqlite::Result<_>>()?;
+        // A person's install's failure and a job's are about different
+        // things: neither supersedes the other (ADR-0073 decision 14).
+        let source_of = |details: &serde_json::Value| {
+            details.get("source").and_then(serde_json::Value::as_str)
+                == Some(crate::application::update::INSTALL_SOURCE)
+        };
+        let by_install = source_of(&details);
         for ask in open {
+            let opened: Option<String> = tx
+                .query_row(
+                    "SELECT payload FROM run_events WHERE kind=?1
+                     AND json_extract(payload,'$.ask_id')=?2 ORDER BY id DESC LIMIT 1",
+                    params![EventKind::AskOpened.as_str(), ask.id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let opened: serde_json::Value = match opened {
+                Some(payload) => serde_json::from_str(&payload)?,
+                None => serde_json::Value::Null,
+            };
+            if source_of(&opened) != by_install {
+                continue;
+            }
             let mut payload = json!({"ask_id": ask.id, "kind": ask.kind, "runtime_closed": true});
             write_answer(
                 &tx,
@@ -1327,6 +1353,18 @@ mod tests {
             ),
             (false, false)
         );
+        // Nor of a person's install, whose answer is the inbox's to read
+        // (ADR-0073 decision 14).
+        assert_eq!(
+            answer_update_of(
+                &mut queue,
+                AskKind::UpdateFailed,
+                UPDATE_FAILED_OPTIONS,
+                "retry",
+                Some("install"),
+            ),
+            (false, false)
+        );
         queue.deregister_supervisor(&token).unwrap();
 
         // The queue's host.toml wins over the host-wide one.
@@ -1364,6 +1402,41 @@ mod tests {
         assert!(!queue.release_updates_on());
         assert_eq!(release(&mut queue, "install"), (false, false));
         assert_eq!(release_failed(&mut queue, "retry"), (false, false));
+    }
+
+    /// A person's install's `update_failed` ask and a job's do not
+    /// supersede each other; each supersedes the older one of its own.
+    #[test]
+    fn a_persons_install_ask_and_a_jobs_do_not_supersede_each_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let open = |queue: &mut SqliteQueue, details: serde_json::Value| {
+            let subject = details["source"].as_str().map(str::to_owned);
+            queue
+                .open_update_ask(
+                    AskKind::UpdateFailed,
+                    "failed",
+                    UPDATE_FAILED_OPTIONS,
+                    "supervisor",
+                    subject.as_deref(),
+                    details,
+                )
+                .unwrap()
+                .id
+        };
+        let install = json!({"source": crate::application::update::INSTALL_SOURCE});
+        let job = open(&mut queue, serde_json::Value::Null);
+        let by_hand = open(&mut queue, install.clone());
+        let is_open = |queue: &SqliteQueue, id: AskId| read_ask(&queue.conn, id).unwrap().is_open();
+        assert!(is_open(&queue, job));
+        assert!(is_open(&queue, by_hand));
+        let next_job = open(&mut queue, json!({"plugin_only": false}));
+        assert!(!is_open(&queue, job));
+        assert!(is_open(&queue, by_hand));
+        let next_by_hand = open(&mut queue, install);
+        assert!(!is_open(&queue, by_hand));
+        assert!(is_open(&queue, next_job));
+        assert!(is_open(&queue, next_by_hand));
     }
 
     /// The details an update ask is opened with are written into its

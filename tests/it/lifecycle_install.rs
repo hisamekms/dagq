@@ -601,22 +601,29 @@ fn slot_limits(source: SettingSource, max_waiting: usize) -> SlotLimits {
 /// [`Binaries`] for the automatic update's job: the build leaves a real
 /// file (or fails), everything under `old` (the fixed binary and its
 /// `.previous`) is the old build `0.0.1`, anything else this build.
-struct UpdateBinaries {
+pub(crate) struct UpdateBinaries {
     old: PathBuf,
-    built: PathBuf,
+    pub(crate) built: PathBuf,
     build_fails: bool,
     replace_fails: std::sync::atomic::AtomicBool,
     pending: Vec<(i64, bool)>,
     calls: Mutex<Vec<String>>,
+    /// What the binary kept as `.previous` reports, when not the old
+    /// build's.
+    pub(crate) previous_version: Option<String>,
     /// How the build's e2e goes: passes unless set; an `Err` could not
     /// start.
     e2e: Mutex<Option<Result<E2eOutcome, String>>>,
     /// The version the client built beside dagq reports: dagq's unless set.
     client_version: Option<String>,
+    /// Run when the install probes the binary, after a person's install
+    /// took its record of the registrations and before it reads the live
+    /// ones (a supervisor registering while a checkout builds).
+    pub(crate) on_probe: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl UpdateBinaries {
-    fn new(dir: &Path, build_fails: bool, pending: &[(i64, bool)]) -> Self {
+    pub(crate) fn new(dir: &Path, build_fails: bool, pending: &[(i64, bool)]) -> Self {
         let built = dir.join("built").join("dagq");
         fs::create_dir_all(built.parent().unwrap()).unwrap();
         fs::write(&built, "new build").unwrap();
@@ -629,6 +636,8 @@ impl UpdateBinaries {
             calls: Mutex::default(),
             e2e: Mutex::default(),
             client_version: None,
+            previous_version: None,
+            on_probe: None,
         }
     }
     fn with_e2e(self, e2e: Result<E2eOutcome, String>) -> Self {
@@ -638,7 +647,7 @@ impl UpdateBinaries {
     fn note(&self, call: String) {
         self.calls.lock().unwrap().push(call);
     }
-    fn calls(&self) -> Vec<String> {
+    pub(crate) fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
     }
 }
@@ -648,6 +657,11 @@ impl dagq::application::install::Binaries for UpdateBinaries {
         bail!("the job builds into its own target")
     }
     fn version(&self, binary: &Path) -> Result<String> {
+        if let Some(previous) = &self.previous_version
+            && binary.ends_with("dagq.previous")
+        {
+            return Ok(previous.clone());
+        }
         Ok(if binary.starts_with(&self.old) {
             "0.0.1".into()
         } else if binary.ends_with("dagq-broker-client") {
@@ -657,6 +671,9 @@ impl dagq::application::install::Binaries for UpdateBinaries {
         })
     }
     fn probe(&self, _: &Path) -> Result<()> {
+        if let Some(on_probe) = &self.on_probe {
+            on_probe();
+        }
         Ok(())
     }
     fn takes_handoff(&self, _: &Path) -> bool {
@@ -727,7 +744,7 @@ impl dagq::application::install::Binaries for UpdateBinaries {
 
 /// The supervisor the job updates: registered under a pid of its own, which
 /// the fake process control keeps alive until the test says otherwise.
-const UPDATED_PID: u32 = 424_242;
+pub(crate) const UPDATED_PID: u32 = 424_242;
 
 fn run_update_job(
     fixture: &Fixture,
@@ -796,7 +813,7 @@ fn run_update_job_with_handoff_timeout(
     .unwrap()
 }
 
-fn auto_supervisor(fixture: &Fixture) -> SqliteQueue {
+pub(crate) fn auto_supervisor(fixture: &Fixture) -> SqliteQueue {
     let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
     queue
         .register_supervisor(&LeaseToken::new("auto"), UPDATED_PID, 2, "0.0.1")
@@ -824,7 +841,7 @@ fn auto_supervisor(fixture: &Fixture) -> SqliteQueue {
 /// heartbeat it waits to see pass. Three looks cover the handoff's two and
 /// the watch's first (task 1048). Stands in for a sleep past the next unix
 /// second.
-fn until_watched(processes: &FakeProcesses, pid: u32) {
+pub(crate) fn until_watched(processes: &FakeProcesses, pid: u32) {
     let before = processes.looks_at(pid);
     wait_until(processes, pid, || processes.looks_at(pid) >= before + 3);
 }
@@ -832,7 +849,7 @@ fn until_watched(processes: &FakeProcesses, pid: u32) {
 /// The supervisor's next heartbeat, written a second later than now: the
 /// watch compares unix seconds, and this stands in for the beat a live
 /// supervisor writes in the next second (task 1048).
-fn heartbeat_later(fixture: &Fixture, token: &str) {
+pub(crate) fn heartbeat_later(fixture: &Fixture, token: &str) {
     struct Later;
     impl dagq::application::Clock for Later {
         fn system_time(&self) -> std::time::SystemTime {
@@ -1419,11 +1436,11 @@ fn the_update_job_names_the_e2e_it_did_not_run_for_want_of_podman() {
 }
 
 /// The second supervisor of the queue in the watch tests.
-const OTHER_PID: u32 = 434_343;
+pub(crate) const OTHER_PID: u32 = 434_343;
 
 /// What a handed-over supervisor does after it took the handoff.
 #[derive(Clone, Copy)]
-enum Afterwards {
+pub(crate) enum Afterwards {
     Heartbeat,
     Die,
     /// Deregister, the same pid registering again under the new build and
@@ -1450,6 +1467,10 @@ enum Afterwards {
     Hang,
     /// Die while asked, before taking the handoff.
     DieBeforeTaking,
+    /// Take the handoff under the new build, then stop heartbeating, the
+    /// process living on (the new binary hangs once it registered); it
+    /// dies once terminated.
+    Freeze,
     /// Record its stop request (`supervisor_draining`, task 1277) while
     /// asked and drain on under the old build, heartbeating.
     Stop,
@@ -1468,7 +1489,13 @@ fn stale_row(fixture: &Fixture, token: &str, pid: u32) {
         .unwrap();
 }
 
-fn take_as(fixture: &Fixture, processes: &FakeProcesses, token: &str, pid: u32, then: Afterwards) {
+pub(crate) fn take_as(
+    fixture: &Fixture,
+    processes: &FakeProcesses,
+    token: &str,
+    pid: u32,
+    then: Afterwards,
+) {
     if matches!(
         then,
         Afterwards::ReregisterOverStale
@@ -1556,6 +1583,7 @@ fn take_as(fixture: &Fixture, processes: &FakeProcesses, token: &str, pid: u32, 
                 .deregister_supervisor(&LeaseToken::new(token))
                 .unwrap();
         }
+        Afterwards::Freeze => {}
         _ => {
             heartbeat_later(fixture, &serving);
         }

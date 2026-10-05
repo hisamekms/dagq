@@ -970,6 +970,11 @@ fn update_failure_applied(
 ) -> Result<bool> {
     let updates = queue.update_events(super::update::UPDATE_HISTORY)?;
     let alive = |pid| control.alive(pid);
+    // A person's install's failure is the inbox's to read and close
+    // (ADR-0073 decision 14).
+    if super::update::failed_step(&updates, ask.id).is_some_and(super::update::step_install) {
+        return Ok(false);
+    }
     Ok(
         if super::update::failed_release(&updates, ask.id).is_some() {
             let releases = queue.release_updates_on();

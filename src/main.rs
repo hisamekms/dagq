@@ -88,16 +88,20 @@ enum Command {
         /// Seconds the supervisor may take to come back under the new binary.
         #[arg(long, default_value_t = 1800)]
         handoff_timeout: u64,
-        /// cmux executable: stops an in-cmux supervisor for the drain, and its restart uses it.
+        /// cmux executable: stops an in-cmux supervisor for the drain, and its restart uses it, as
+        /// does the restart of an in-cmux supervisor after a failed watch (it closes its workspace).
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
-        /// Claude Code executable the restarted supervisor uses after a drain.
+        /// Claude Code executable the restarted supervisor uses after a drain, or after a failed
+        /// watch of the handed-over supervisors.
         #[arg(long)]
         claude: Option<PathBuf>,
-        /// Codex CLI the restarted supervisor's Codex workers use after a drain.
+        /// Codex CLI the restarted supervisor's Codex workers use after a drain, or after a failed
+        /// watch of the handed-over supervisors.
         #[arg(long)]
         codex: Option<PathBuf>,
-        /// Plugin directory of the restarted `up` after a drain.
+        /// Plugin directory of the restarted `up` after a drain, or after a failed watch of the
+        /// handed-over supervisors.
         #[arg(long)]
         plugin_dir: Option<PathBuf>,
         /// Install a checkout of dagq's source without first running its e2e (`cargo test --locked
@@ -116,6 +120,11 @@ enum Command {
         /// it, task 1048).
         #[arg(long, hide = true, default_value_t = 500)]
         poll_ms: u64,
+        /// Seconds each supervisor handed over may take to heartbeat on under the new binary
+        /// before the install puts the old one back and tells the inbox (ADR-0073 decision 13;
+        /// tests shorten it).
+        #[arg(long, hide = true, default_value_t = dagq::application::update::WATCH_TIMEOUT.as_secs())]
+        watch_timeout: u64,
     },
     /// Show which queue this directory resolves to, without opening it.
     Locate,
@@ -2833,6 +2842,7 @@ fn execute(cli: Cli) -> Result<Value> {
         e2e_command,
         e2e_timeout,
         poll_ms,
+        watch_timeout,
     } = cli.command
     {
         use dagq::application::install::{E2eGate, E2eSettings, InstallOptions, Source};
@@ -2916,19 +2926,27 @@ fn execute(cli: Cli) -> Result<Value> {
         if let Some(release) = release {
             return one_shot.install_release(
                 &location,
-                &Cmux { executable: cmux },
+                &Cmux {
+                    executable: cmux.clone(),
+                },
+                &cmux,
                 &Launchctl { uid: current_uid() },
                 &dagq::infrastructure::release_update::CurlIndex::default(),
                 &executable(&cargo).unwrap_or(cargo),
                 Some(release.as_str()).filter(|version| !version.is_empty()),
                 &options,
+                Duration::from_secs(watch_timeout),
             );
         }
         return one_shot.install(
             &location,
-            &Cmux { executable: cmux },
+            &Cmux {
+                executable: cmux.clone(),
+            },
+            &cmux,
             &Launchctl { uid: current_uid() },
             &options,
+            Duration::from_secs(watch_timeout),
         );
     }
     // A repository queue already resolved the working directory; `--repo`
@@ -4429,7 +4447,13 @@ fn main() -> ExitCode {
         Err(error) => {
             // An install that kept the new binary for some supervisors
             // reports what it did as well (ADR-t632-1).
-            if let Some(kept) = dagq::application::install::KeptBinary::of(&error) {
+            // So does one whose handoff or watch failed and told the inbox
+            // (ADR-0073 decision 14), in place of the install's report.
+            if let Some(failed) = dagq::application::update::InstallFailed::of(&error) {
+                let mut stdout = io::stdout().lock();
+                let _ = serde_json::to_writer_pretty(&mut stdout, &failed.report);
+                let _ = writeln!(stdout);
+            } else if let Some(kept) = dagq::application::install::KeptBinary::of(&error) {
                 let mut stdout = io::stdout().lock();
                 let _ = serde_json::to_writer_pretty(&mut stdout, &kept.report);
                 let _ = writeln!(stdout);

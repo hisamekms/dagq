@@ -1898,16 +1898,30 @@ same in one step",
     }
 
     /// `install`: replace the fixed binary and hand the queue's supervisor
-    /// over to it (see [`installation::install`]). `cmux` stops an in-cmux
-    /// supervisor when a breaking migration needs the drain.
+    /// over to it (see [`installation::install`]), then watch the
+    /// supervisors heartbeat on under it for `watch_timeout` and, when they
+    /// do not, put the old binary back, start them again and ask the inbox
+    /// (see [`update::install_watched`], ADR-0073 decisions 13 and 14).
+    /// `cmux` stops an in-cmux supervisor when a breaking migration needs
+    /// the drain; `executable` is the cmux an in-cmux supervisor is
+    /// started again with.
     pub fn install(
         &self,
         location: &QueueLocation,
         cmux: &dyn WorkspaceBackend,
+        executable: &Path,
         launchd: &dyn LaunchAgent,
         options: &InstallOptions,
+        watch_timeout: Duration,
     ) -> Result<Value> {
         let queues = |db: &Path| self.queues(db);
+        // A supervisor gone after a failed watch is started again with the
+        // binary in place, as after the automatic update's.
+        let db = location
+            .db
+            .canonicalize()
+            .unwrap_or_else(|_| location.db.clone());
+        let restart = restarter(&db, executable, &options.target, &options.restart);
         let down = || {
             self.down(
                 location,
@@ -1921,17 +1935,19 @@ same in one step",
                 },
             )
         };
-        installation::install(
-            &installation::Ports {
+        update::install_watched(
+            &update::JobPorts {
                 binaries: &LocalBinaries,
                 files: &LocalRunFiles,
                 processes: &SystemProcesses,
                 clock: &*self.generators.clock,
                 queues: &queues,
-                down: &down,
+                restart: &restart,
             },
+            &down,
             Some(&location.db),
             options,
+            watch_timeout,
         )
     }
 
@@ -2069,11 +2085,13 @@ same in one step",
         &self,
         location: &QueueLocation,
         cmux: &dyn WorkspaceBackend,
+        executable: &Path,
         launchd: &dyn LaunchAgent,
         index: &dyn crate::application::release_update::ReleaseIndex,
         cargo: &Path,
         requested: Option<&str>,
         options: &InstallOptions,
+        watch_timeout: Duration,
     ) -> Result<Value> {
         let version = crate::application::release_update::resolve_version(index, requested)?;
         let paths = update::UpdatePaths::under(&location.queue_dir);
@@ -2096,11 +2114,13 @@ same in one step",
         let mut report = self.install(
             location,
             cmux,
+            executable,
             launchd,
             &InstallOptions {
                 source: installation::Source::Built(binary),
                 ..options.clone()
             },
+            watch_timeout,
         )?;
         report["release"] = json!(version);
         report["log"] = json!(log);

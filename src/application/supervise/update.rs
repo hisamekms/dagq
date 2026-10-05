@@ -244,8 +244,13 @@ to wait for the next landing that changes the runtime.",
     fn apply_update_answers(&mut self) -> Result<()> {
         let updates = self.queue.update_events(UPDATE_HISTORY)?;
         for ask in self.queue.update_answers(&AskKind::UpdateFailed)? {
-            // The failure of a release's job is the release pass's.
-            if failed_release(&updates, ask.id).is_some() {
+            // The failure of a release's job is the release pass's, and
+            // a person's install's the inbox's alone: its answer builds
+            // nothing (ADR-0073 decision 14).
+            if failed_release(&updates, ask.id).is_some()
+                || crate::application::update::failed_step(&updates, ask.id)
+                    .is_some_and(crate::application::update::step_install)
+            {
                 continue;
             }
             let answer = ask.answer.as_deref().map(str::trim).unwrap_or_default();

@@ -38,6 +38,11 @@ pub struct UpdateStats {
     /// The e2e gate a build of main passes before it is put in place
     /// (ADR-t963-1 decision 1).
     pub e2e: E2eGateStats,
+    /// The failures of a person's `dagq install` (`update_failed` with
+    /// `source: "install"`, ADR-0073 decision 14) by `stage`: no job's,
+    /// so they count under [`INSTALL_FAILED`] in `by_kind` and not in
+    /// `failed_by_stage`.
+    pub install_failed_by_stage: BTreeMap<String, i64>,
 }
 
 /// How the e2e gate of the automatic update went in a window: the
@@ -169,6 +174,15 @@ pub const E2E_STAGE: &str = "e2e";
 /// brought the plugin to a release without replacing the binary.
 pub const PLUGIN_ONLY_INSTALLED: &str = "update_installed_plugin_only";
 
+/// The `by_kind` key of the `update_failed` of a person's `dagq install`
+/// (`source: "install"`), apart from the jobs' failures.
+pub const INSTALL_FAILED: &str = "update_failed_install";
+
+/// Whether `event` was written by a person's `dagq install`.
+fn by_install(event: &RunEvent) -> bool {
+    event.payload.get("source").and_then(Value::as_str) == Some(super::super::INSTALL_SOURCE)
+}
+
 /// Whether `event` is a plugin-only job's step (`plugin_only: true`).
 pub fn plugin_only(event: &RunEvent) -> bool {
     event
@@ -196,14 +210,24 @@ pub fn updates(
     }) {
         stats.count += 1;
         let plugin_only = event.kind == UPDATE_INSTALLED && plugin_only(event);
+        let install = event.kind == UPDATE_FAILED && by_install(event);
         let kind = if plugin_only {
             PLUGIN_ONLY_INSTALLED
+        } else if install {
+            INSTALL_FAILED
         } else {
             event.kind.as_str()
         };
         *stats.by_kind.entry(kind.to_owned()).or_default() += 1;
         let text = |key: &str| event.payload.get(key).and_then(Value::as_str);
         match event.kind.as_str() {
+            UPDATE_FAILED if install => {
+                let stage = text("stage").unwrap_or(UNKNOWN);
+                *stats
+                    .install_failed_by_stage
+                    .entry(stage.to_owned())
+                    .or_default() += 1;
+            }
             UPDATE_FAILED => {
                 let stage = text("stage").unwrap_or(UNKNOWN);
                 *stats.failed_by_stage.entry(stage.to_owned()).or_default() += 1;
@@ -287,6 +311,34 @@ mod tests {
             task.is_some()
         });
         assert_eq!(goal, UpdateStats::default());
+    }
+
+    /// A person's install's failure counts apart from the jobs': under its
+    /// own kind and stages, not in `failed_by_stage`.
+    #[test]
+    fn a_persons_install_failure_counts_apart_from_the_jobs() {
+        let events = [
+            event(1, "update_failed", json!({"stage": "watch"})),
+            event(
+                2,
+                "update_failed",
+                json!({"stage": "watch", "source": "install"}),
+            ),
+            event(
+                3,
+                "update_failed",
+                json!({"stage": "handoff", "source": "install"}),
+            ),
+        ];
+        let stats = updates(&events, EventId::new(0), EventId::new(3), |_| true);
+        assert_eq!(stats.count, 3);
+        assert_eq!(stats.by_kind["update_failed"], 1);
+        assert_eq!(stats.by_kind[INSTALL_FAILED], 2);
+        assert_eq!(stats.failed_by_stage, BTreeMap::from([("watch".into(), 1)]));
+        assert_eq!(
+            stats.install_failed_by_stage,
+            BTreeMap::from([("handoff".into(), 1), ("watch".into(), 1)])
+        );
     }
 
     /// The e2e gate counts its passes, failures and timeouts, with their

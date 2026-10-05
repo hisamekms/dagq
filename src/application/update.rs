@@ -33,8 +33,9 @@ use crate::domain::{
 };
 use crate::domain::{EventKind, LeaseToken};
 pub use crate::domain::{
-    UPDATE_ANSWERED, UPDATE_AWAITING_APPROVAL, UPDATE_BUILT, UPDATE_DROPPED, UPDATE_E2E_PASSED,
-    UPDATE_FAILED, UPDATE_INSTALLED, UPDATE_RESTORED, UPDATE_RETRY, UPDATE_STARTED,
+    INSTALL_SOURCE, UPDATE_ANSWERED, UPDATE_AWAITING_APPROVAL, UPDATE_BUILT, UPDATE_DROPPED,
+    UPDATE_E2E_PASSED, UPDATE_FAILED, UPDATE_INSTALLED, UPDATE_RESTORED, UPDATE_RETRY,
+    UPDATE_STARTED,
 };
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
@@ -167,7 +168,9 @@ fn is_answer_step(update: &RunEvent) -> bool {
 /// the asks (`update_answered`, `update_retry`, `update_dropped`) are
 /// skipped, so an answer written while a job still works does not hide it.
 pub fn latest_job_step(updates: &[RunEvent]) -> Option<&RunEvent> {
-    updates.iter().find(|update| !is_answer_step(update))
+    updates
+        .iter()
+        .find(|update| !is_answer_step(update) && !step_install(update))
 }
 
 /// The `update_failed` that opened the ask `ask_id`, if it is among
@@ -205,9 +208,11 @@ pub fn failure_plugin_only(step: &RunEvent) -> Option<bool> {
 /// one that tells whether a job of that kind was interrupted, even when a
 /// job of the other kind ran after it.
 pub fn latest_job_step_of(updates: &[RunEvent], release: bool) -> Option<&RunEvent> {
-    updates
-        .iter()
-        .find(|update| step_release(update).is_some() == release && !is_answer_step(update))
+    updates.iter().find(|update| {
+        step_release(update).is_some() == release
+            && !is_answer_step(update)
+            && !step_install(update)
+    })
 }
 
 /// The pid of the job that wrote `update`, if it recorded one.
@@ -239,6 +244,14 @@ pub fn status(
             && processes.alive(registration.pid)
             && now - registration.heartbeat_at <= HEARTBEAT_TIMEOUT_SECS
     });
+    // A person's install is no step of the update (ADR-0073 decision 14):
+    // its failure is its own ask's.
+    let updates: Vec<RunEvent> = updates
+        .iter()
+        .filter(|update| !step_install(update))
+        .cloned()
+        .collect();
+    let updates = updates.as_slice();
     let Some(latest) = updates.first() else {
         return json!({"enabled": enabled, "state": "idle"});
     };
@@ -311,7 +324,7 @@ pub fn base_commit(updates: &[RunEvent], version: &str, fallback: Option<&str>) 
 pub fn retry_requested(updates: &[RunEvent]) -> bool {
     updates
         .iter()
-        .filter(|update| step_release(update).is_none())
+        .filter(|update| step_release(update).is_none() && !step_install(update))
         .find(|update| matches!(update.kind.as_str(), UPDATE_STARTED | UPDATE_RETRY))
         .is_some_and(|update| update.kind == UPDATE_RETRY)
 }
@@ -373,10 +386,10 @@ pub fn run(ports: &JobPorts, db: &Path, options: &JobOptions) -> Result<Value> {
     let queue: &mut dyn Queue = &mut *queue;
     let job = Job {
         subject: Subject::Commit(&options.commit),
-        token: &options.token,
+        token: Some(&options.token),
         target: &options.target,
         staged: &options.paths.staged,
-        log: &options.log,
+        log: Some(&options.log),
         restart: &options.restart,
         handoff_timeout: options.handoff_timeout,
         watch_timeout: options.watch_timeout,
@@ -528,10 +541,10 @@ pub fn run_release(
     let queue: &mut dyn Queue = &mut *queue;
     let job = Job {
         subject: Subject::Release(&options.version),
-        token: &options.token,
+        token: Some(&options.token),
         target: &options.target,
         staged: &options.paths.staged,
-        log: &options.log,
+        log: Some(&options.log),
         restart: &options.restart,
         handoff_timeout: options.handoff_timeout,
         watch_timeout: options.watch_timeout,
@@ -657,11 +670,14 @@ fn plugin_only(queue: &mut dyn Queue, job: &Job, version: &str, step: PluginStep
 }
 
 /// What a job puts in place: a build of main's commit (the automatic
-/// update) or a release of crates.io (the release update).
+/// update) or a release of crates.io (the release update); or what a
+/// person's `dagq install` put in place, whose watch and failures go the
+/// same way (ADR-0073 decisions 13 and 14).
 #[derive(Debug, Clone, Copy)]
 enum Subject<'a> {
     Commit(&'a str),
     Release(&'a str),
+    Install,
 }
 
 impl Subject<'_> {
@@ -672,6 +688,10 @@ impl Subject<'_> {
             Self::Release(version) => {
                 payload["source"] = json!(RELEASE_SOURCE);
                 payload["release"] = json!(version);
+                record(queue, kind, None, payload)
+            }
+            Self::Install => {
+                payload["source"] = json!(INSTALL_SOURCE);
                 record(queue, kind, None, payload)
             }
         }
@@ -685,6 +705,7 @@ impl Subject<'_> {
                 value["source"] = json!(RELEASE_SOURCE);
                 value["release"] = json!(version);
             }
+            Self::Install => value["source"] = json!(INSTALL_SOURCE),
         }
     }
 
@@ -693,12 +714,19 @@ impl Subject<'_> {
         match self {
             Self::Commit(commit) => format!("main's {}", &commit[..commit.len().min(12)]),
             Self::Release(version) => format!("release {version}"),
+            Self::Install => "a person's `dagq install`".to_owned(),
         }
     }
 }
 
 /// `source` of the steps of the release update.
 pub const RELEASE_SOURCE: &str = "release";
+
+/// Whether `update` was written by a person's `dagq install` rather than
+/// by a job.
+pub fn step_install(update: &RunEvent) -> bool {
+    update.payload.get("source").and_then(Value::as_str) == Some(INSTALL_SOURCE)
+}
 
 /// The release a step of the release update is about, if it is one.
 pub fn step_release(update: &RunEvent) -> Option<&str> {
@@ -710,10 +738,12 @@ pub fn step_release(update: &RunEvent) -> Option<&str> {
 /// One job's settings, whatever it puts in place.
 struct Job<'a> {
     subject: Subject<'a>,
-    token: &'a LeaseToken,
+    /// The supervisor that started the job; none for a person's install.
+    token: Option<&'a LeaseToken>,
     target: &'a Path,
     staged: &'a Path,
-    log: &'a Path,
+    /// The job's log; a person's install has none of its own.
+    log: Option<&'a Path>,
     restart: &'a [String],
     handoff_timeout: Duration,
     watch_timeout: Duration,
@@ -754,10 +784,12 @@ fn put_in_place(
         };
     }
     let registered = queue.supervisors()?;
-    let before = registered
-        .iter()
-        .find(|registration| registration.token == *job.token)
-        .cloned();
+    let before = job.token.and_then(|token| {
+        registered
+            .iter()
+            .find(|registration| registration.token == *token)
+            .cloned()
+    });
     // The handoff is asked for within the install: a registration made
     // before it is not a handed-over supervisor's successor.
     let handoff_from = ports.clock.now();
@@ -783,152 +815,19 @@ fn put_in_place(
             e2e: E2eGate::NotApplicable,
         },
     );
-    // An install that handed some of the supervisors over but not all kept
-    // the new binary for them (ADR-t632-1): the ones handed over are
-    // watched, and the ones that did not take it fail as a watch would.
-    let (report, refused) = match installed {
-        Ok(report) => (report, Vec::new()),
-        Err(error) => match install::KeptBinary::of(&error) {
-            Some(kept) => (kept.report.clone(), refused(&kept.report)),
-            None => {
-                // `install` put the old binary back itself if it had
-                // replaced it; the supervisors it handed over may be gone
-                // or stuck with the new one, each brought back as after a
-                // failed watch.
-                if let Some(handoff) = install::HandoffFailed::of(&error) {
-                    let mut supervisors = Vec::new();
-                    for failed in &handoff.supervisors {
-                        let (Some(token), Some(pid)) = (
-                            failed["token"].as_str().map(LeaseToken::new),
-                            failed["pid"]
-                                .as_u64()
-                                .and_then(|pid| u32::try_from(pid).ok()),
-                        ) else {
-                            continue;
-                        };
-                        let before = registered_before(&registered, &token, pid);
-                        let mut entry = json!({
-                            "token": token,
-                            "pid": pid,
-                            "error": failed["error"],
-                            "supervisor": bring_back(ports, &*queue, before, Some(&token))?,
-                        });
-                        if stopping(failed) {
-                            entry["stopping"] = json!(true);
-                        }
-                        supervisors.push(entry);
-                    }
-                    let mut details = json!({
-                        "restored": handoff.restored.clone(),
-                        "kept": false,
-                        "supervisors": supervisors,
-                    });
-                    // The job's own supervisor is brought back even when it
-                    // was not handed over (not live when the install looked).
-                    if let Some(before) = before.as_ref().filter(|before| {
-                        !handoff
-                            .supervisors
-                            .iter()
-                            .any(|s| s["token"] == before.token.as_str() || s["pid"] == before.pid)
-                    }) {
-                        details["supervisor"] =
-                            bring_back(ports, &*queue, Some(before), Some(&before.token))?;
-                    }
-                    return failed(queue, job, "install", &error, details);
-                }
-                // It failed before any handoff: only the job's own
-                // supervisor can be in doubt.
-                let serving = before.as_ref().map(|before| before.token.clone());
-                let supervisor = bring_back(ports, &*queue, before.as_ref(), serving.as_ref())?;
-                return failed(
-                    queue,
-                    job,
-                    "install",
-                    &error,
-                    json!({"supervisor": supervisor}),
-                );
-            }
-        },
+    let report = match settle(
+        ports,
+        queue,
+        job,
+        &registered,
+        before.as_ref(),
+        handoff_from,
+        installed,
+    )? {
+        Settled::Taken { report, .. } => report,
+        Settled::Failed(failure) => return Ok(failure),
     };
     let version = report["version"].as_str().unwrap_or_default().to_owned();
-    let handed = handed_over(&report, before.as_ref());
-    let stage = if refused.is_empty() {
-        "watch"
-    } else {
-        "handoff"
-    };
-    let mut watched = refused;
-    watched.extend(watch(ports, &*queue, &handed, &version, handoff_from, job)?);
-    let failures: Vec<&Watched> = watched.iter().filter(|w| w.error.is_some()).collect();
-    if !failures.is_empty() {
-        // The binary is one file for every supervisor: it goes back only
-        // when none of them runs the new build, and a supervisor that does
-        // keeps it.
-        let everyone = failures.len() == watched.len();
-        let restored = if everyone {
-            restore(ports, job, report["previous_version"].as_str())
-        } else {
-            json!({
-                "restored": false,
-                "reason": format!(
-                    "{} of the {} supervisors handed over run {version}, so it stays in place",
-                    watched.len() - failures.len(),
-                    watched.len()
-                ),
-            })
-        };
-        let mut supervisors = Vec::new();
-        for watched in &watched {
-            let mut entry = json!({
-                "token": watched.token,
-                "pid": watched.pid,
-                "now": watched.now,
-                "error": watched.error,
-            });
-            if watched.stopping {
-                entry["stopping"] = json!(true);
-            }
-            if watched.error.is_some() {
-                let before = registered_before(&registered, &watched.token, watched.pid);
-                entry["supervisor"] = bring_back(ports, &*queue, before, Some(&watched.now))?;
-            }
-            supervisors.push(entry);
-        }
-        if restored["restored"] == true {
-            // A step of the job still working (it goes on to its
-            // `update_failed`); it must not keep the supervisor from
-            // being brought back or the ask from opening.
-            let _ = job.subject.record(
-                &*queue,
-                EventKind::UpdateRestored,
-                json!({
-                    "pid": pid,
-                    "version": version,
-                    "restored_version": restored["version"],
-                }),
-            );
-        }
-        let error = anyhow::anyhow!(
-            "{}",
-            failures
-                .iter()
-                .filter_map(|w| w.error.as_deref())
-                .collect::<Vec<_>>()
-                .join("; ")
-        );
-        return failed(
-            queue,
-            job,
-            stage,
-            &error,
-            json!({
-                "restored": restored,
-                "kept": !everyone,
-                "supervisors": supervisors,
-                "version": version,
-            }),
-        );
-    }
     let mut payload = json!({
         "pid": pid,
         "version": version,
@@ -970,6 +869,389 @@ fn put_in_place(
     value["outcome"] = json!("installed");
     job.subject.tag(&mut value);
     Ok(value)
+}
+
+/// How an install went once [`settle`] watched and, on a failure, brought
+/// the supervisors back.
+enum Settled {
+    /// Every supervisor handed over heartbeats on under the new build:
+    /// `install`'s report, and what the watch saw of each.
+    Taken {
+        report: Value,
+        watched: Vec<Watched>,
+    },
+    /// The `update_failed` recorded (its ask opened), as the job's value.
+    Failed(Value),
+}
+
+/// After `installed`, the outcome of `install` (ADR-0073 decisions 13 and
+/// 14, ADR-t632-1): watch the supervisors it handed over heartbeat on under
+/// the new build; when none does (or every handoff failed), put the old
+/// binary back if `.previous` is the build it replaced; bring each one that
+/// failed back; and record `update_failed` with its ask. `registered` is
+/// the queue's registrations before the install, `before` the job's own
+/// supervisor among them (none for a person's install). A person's install
+/// that failed before any handoff is its own error, unchanged.
+#[allow(clippy::too_many_arguments)]
+fn settle(
+    ports: &JobPorts,
+    queue: &mut dyn Queue,
+    job: &Job,
+    registered: &[SupervisorRegistration],
+    before: Option<&SupervisorRegistration>,
+    handoff_from: i64,
+    installed: Result<Value>,
+) -> Result<Settled> {
+    // An install that handed some of the supervisors over but not all kept
+    // the new binary for them (ADR-t632-1): the ones handed over are
+    // watched, and the ones that did not take it fail as a watch would.
+    let (report, refused) = match installed {
+        Ok(report) => (report, Vec::new()),
+        Err(error) => match install::KeptBinary::of(&error) {
+            Some(kept) => (kept.report.clone(), refused(&kept.report)),
+            None => {
+                // `install` put the old binary back itself if it had
+                // replaced it; the supervisors it handed over may be gone
+                // or stuck with the new one, each brought back as after a
+                // failed watch.
+                if let Some(handoff) = install::HandoffFailed::of(&error) {
+                    let mut supervisors = Vec::new();
+                    for failed in &handoff.supervisors {
+                        let (Some(token), Some(pid)) = (
+                            failed["token"].as_str().map(LeaseToken::new),
+                            failed["pid"]
+                                .as_u64()
+                                .and_then(|pid| u32::try_from(pid).ok()),
+                        ) else {
+                            continue;
+                        };
+                        let before = registered_before(registered, &token, pid);
+                        let mut entry = json!({
+                            "token": token,
+                            "pid": pid,
+                            "error": failed["error"],
+                            "supervisor": bring_back(ports, &*queue, before, Some(&token))?,
+                        });
+                        if stopping(failed) {
+                            entry["stopping"] = json!(true);
+                        }
+                        supervisors.push(entry);
+                    }
+                    let mut details = json!({
+                        "restored": handoff.restored.clone(),
+                        "kept": false,
+                        "supervisors": supervisors,
+                    });
+                    // The job's own supervisor is brought back even when it
+                    // was not handed over (not live when the install looked).
+                    if let Some(before) = before.filter(|before| {
+                        !handoff
+                            .supervisors
+                            .iter()
+                            .any(|s| s["token"] == before.token.as_str() || s["pid"] == before.pid)
+                    }) {
+                        details["supervisor"] =
+                            bring_back(ports, &*queue, Some(before), Some(&before.token))?;
+                    }
+                    return failed(queue, job, "install", &error, details).map(Settled::Failed);
+                }
+                // A person's install that failed before any handoff
+                // replaced nothing, or put it back: its error says so.
+                if matches!(job.subject, Subject::Install) {
+                    return Err(error);
+                }
+                // It failed before any handoff: only the job's own
+                // supervisor can be in doubt.
+                let serving = before.map(|before| before.token.clone());
+                let supervisor = bring_back(ports, &*queue, before, serving.as_ref())?;
+                return failed(
+                    queue,
+                    job,
+                    "install",
+                    &error,
+                    json!({"supervisor": supervisor}),
+                )
+                .map(Settled::Failed);
+            }
+        },
+    };
+    let version = report["version"].as_str().unwrap_or_default().to_owned();
+    let handed = handed_over(&report, before);
+    let stage = if refused.is_empty() {
+        "watch"
+    } else {
+        "handoff"
+    };
+    let mut watched = refused;
+    watched.extend(watch(ports, &*queue, &handed, &version, handoff_from, job)?);
+    let failures: Vec<&Watched> = watched.iter().filter(|w| w.error.is_some()).collect();
+    if failures.is_empty() {
+        return Ok(Settled::Taken { report, watched });
+    }
+    // The binary is one file for every supervisor: it goes back only when
+    // none of them runs the new build, and a supervisor that does keeps it.
+    let everyone = failures.len() == watched.len();
+    let restored = if everyone {
+        restore(ports, job, report["previous_version"].as_str())
+    } else {
+        json!({
+            "restored": false,
+            "reason": format!(
+                "{} of the {} supervisors handed over run {version}, so it stays in place",
+                watched.len() - failures.len(),
+                watched.len()
+            ),
+        })
+    };
+    let mut supervisors = Vec::new();
+    for watched in &watched {
+        let mut entry = json!({
+            "token": watched.token,
+            "pid": watched.pid,
+            "now": watched.now,
+            "error": watched.error,
+        });
+        if watched.stopping {
+            entry["stopping"] = json!(true);
+        }
+        if watched.error.is_some() {
+            let before = registered_before(registered, &watched.token, watched.pid);
+            entry["supervisor"] = bring_back(ports, &*queue, before, Some(&watched.now))?;
+        }
+        supervisors.push(entry);
+    }
+    // A step of the job still working (it goes on to its `update_failed`);
+    // it must not keep the supervisor from being brought back or the ask
+    // from opening. A person's install is no job, and writes no step.
+    if restored["restored"] == true && !matches!(job.subject, Subject::Install) {
+        let _ = job.subject.record(
+            &*queue,
+            EventKind::UpdateRestored,
+            json!({
+                "pid": job.pid,
+                "version": version,
+                "restored_version": restored["version"],
+            }),
+        );
+    }
+    let error = anyhow::anyhow!(
+        "{}",
+        failures
+            .iter()
+            .filter_map(|w| w.error.as_deref())
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+    failed(
+        queue,
+        job,
+        stage,
+        &error,
+        json!({
+            "restored": restored,
+            "kept": !everyone,
+            "supervisors": supervisors,
+            "version": version,
+        }),
+    )
+    .map(Settled::Failed)
+}
+
+/// The error of a person's `dagq install` whose handoff or watch failed
+/// (ADR-0073 decisions 13 and 14): `report` is the `update_failed` it
+/// recorded, with the ask it opened for the inbox, for the command to
+/// print beside the error.
+#[derive(Debug)]
+pub struct InstallFailed {
+    pub message: String,
+    pub report: Value,
+}
+
+impl std::fmt::Display for InstallFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for InstallFailed {}
+
+impl InstallFailed {
+    /// The [`InstallFailed`] `error` is or wraps.
+    pub fn of(error: &anyhow::Error) -> Option<&Self> {
+        error.chain().find_map(|cause| cause.downcast_ref::<Self>())
+    }
+}
+
+/// The registrations a person's install brings a supervisor back from:
+/// `before`, the record taken before the install, then each row of `now`
+/// (read after it) whose token the record lacks, a supervisor that
+/// registered while the install built and checked its binary (`up`, or
+/// launchd starting one again) included. Such a row was read after the
+/// handoff, so where `installed` reports the pid it takes the build, mode
+/// and workspace reported, the ones the registration had when it was
+/// handed over (the row the same pid made again under the new build has
+/// no mode of its own).
+fn registered_since(
+    before: Vec<SupervisorRegistration>,
+    now: Vec<SupervisorRegistration>,
+    installed: &Result<Value>,
+) -> Vec<SupervisorRegistration> {
+    let reported: Vec<Value> = match installed {
+        Ok(report) => report["supervisors"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default(),
+        Err(error) => match (
+            install::KeptBinary::of(error),
+            install::HandoffFailed::of(error),
+        ) {
+            (Some(kept), _) => kept.report["supervisors"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+            (None, Some(handoff)) => handoff.supervisors.clone(),
+            (None, None) => Vec::new(),
+        },
+    };
+    let mut registered = before;
+    for mut row in now {
+        if registered.iter().any(|r| r.token == row.token) {
+            continue;
+        }
+        if let Some(handed) = reported.iter().find(|handed| handed["pid"] == row.pid) {
+            row.binary_version = handed["version"].as_str().map(str::to_owned);
+            row.mode = handed["mode"].as_str().and_then(|mode| mode.parse().ok());
+            row.workspace_id = handed["workspace_id"].as_str().map(str::to_owned);
+        }
+        registered.push(row);
+    }
+    registered
+}
+
+/// How long a person's install watches the supervisors it handed over by
+/// default, as the automatic update's job does (ADR-0073 decision 13).
+pub const WATCH_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// A person's `dagq install` (ADR-0073 decision 14): [`install::install`],
+/// then the watch of decision 13 as the automatic update's job does it
+/// ([`settle`]): each supervisor handed over must heartbeat on under the
+/// new build within `watch_timeout`, and the install succeeds only once
+/// they all do, its report naming what the watch saw of each (`watch`).
+/// When every one fails, the old binary goes back if `.previous` is the
+/// build it replaced; when some do, it stays (ADR-t632-1); either way the
+/// failed ones are brought back with `ports.restart`, `update_failed`
+/// (`source: "install"`) is recorded and its ask opens for the inbox, and
+/// the error is an [`InstallFailed`]. With no queue, no supervisor handed
+/// over, or the drain of a breaking migration (`up` starts the
+/// supervisor), nothing is watched.
+pub fn install_watched(
+    ports: &JobPorts,
+    down: &dyn Fn() -> Result<Value>,
+    db: Option<&Path>,
+    options: &InstallOptions,
+    watch_timeout: Duration,
+) -> Result<Value> {
+    let db = db.filter(|db| ports.files.is_file(db));
+    // What each supervisor was, for its mode when it is brought back; one
+    // that registers while the install builds and checks (a long while for
+    // a checkout and its e2e) is added after it ([`registered_since`]).
+    let registered = db
+        .and_then(|db| (ports.queues)(db).open().ok())
+        .and_then(|queue| queue.supervisors().ok())
+        .unwrap_or_default();
+    let handoff_from = ports.clock.now();
+    let installed = install::install(
+        &install::Ports {
+            binaries: ports.binaries,
+            files: ports.files,
+            processes: ports.processes,
+            clock: ports.clock,
+            queues: ports.queues,
+            down,
+        },
+        db,
+        options,
+    );
+    let Some(db) = db else {
+        return installed;
+    };
+    match &installed {
+        Err(error)
+            if install::KeptBinary::of(error).is_none()
+                && install::HandoffFailed::of(error).is_none() =>
+        {
+            return installed;
+        }
+        // Nothing handed over (no live supervisor, or the drain of a
+        // breaking migration, whose `up` started the supervisor and after
+        // which this binary may not open the queue): nothing to watch.
+        Ok(report)
+            if report["supervisors"]
+                .as_array()
+                .is_none_or(|supervisors| supervisors.is_empty()) =>
+        {
+            let mut report = report.clone();
+            report["watch"] = json!([]);
+            return Ok(report);
+        }
+        _ => {}
+    }
+    let mut queue = (ports.queues)(db).open()?;
+    let queue: &mut dyn Queue = &mut *queue;
+    let registered = registered_since(registered, queue.supervisors()?, &installed);
+    let staged = UpdatePaths::under(db.parent().unwrap_or(Path::new("."))).staged;
+    let job = Job {
+        subject: Subject::Install,
+        token: None,
+        target: &options.target,
+        staged: &staged,
+        log: None,
+        restart: &options.restart,
+        handoff_timeout: options.handoff_timeout,
+        watch_timeout,
+        poll: options.poll,
+        pid: std::process::id(),
+        e2e_skipped: Default::default(),
+    };
+    match settle(
+        ports,
+        queue,
+        &job,
+        &registered,
+        None,
+        handoff_from,
+        installed,
+    )? {
+        Settled::Taken {
+            mut report,
+            watched,
+        } => {
+            report["watch"] = json!(
+                watched
+                    .iter()
+                    .map(|watched| json!({
+                        "token": watched.token,
+                        "pid": watched.pid,
+                        "now": watched.now,
+                        "heartbeat": true,
+                    }))
+                    .collect::<Vec<_>>()
+            );
+            Ok(report)
+        }
+        Settled::Failed(report) => Err(InstallFailed {
+            message: format!(
+                "the install failed at its {}: {}. The binary: {}. The inbox was told by the \
+`update_failed` ask {}; each supervisor's state is in the result",
+                report["stage"].as_str().unwrap_or_default(),
+                report["error"].as_str().unwrap_or_default(),
+                report["restored"],
+                report["ask_id"]
+            ),
+            report,
+        }
+        .into()),
+    }
 }
 
 fn registration(
@@ -1314,6 +1596,13 @@ fn bring_back(
     })
 }
 
+/// How a question names the job's log.
+fn job_log(job: &Job) -> String {
+    job.log
+        .map(|log| log.display().to_string())
+        .unwrap_or_else(|| "(none)".to_owned())
+}
+
 /// Record `update_failed` and open the `update_failed` ask with what
 /// failed and what became of the binary and the supervisor.
 fn failed(
@@ -1360,7 +1649,7 @@ said otherwise below.",
 job's log is {}.\n\nAnswer `retry` to have the supervisor run `claude {}` and `claude {}` again at \
 its next check (after fixing what failed), or `skip` to leave the plugin as it is. By hand, run the \
 two commands, then reopen the inbox and planner sessions to load the new plugin.",
-            job.log.display(),
+            job_log(job),
             lifecycle::PLUGIN_UPDATE_ARGUMENTS[0].join(" "),
             lifecycle::PLUGIN_UPDATE_ARGUMENTS[1].join(" "),
             plugin = lifecycle::DAGQ_PLUGIN,
@@ -1371,7 +1660,18 @@ log is {}.\n\nAnswer `retry` to build main's head again at the supervisor's next
 fixing what failed), or `skip` to wait for the next landing that changes the runtime. If no \
 supervisor serves the queue now, `up` starts one.",
             job.subject.describe(),
-            job.log.display()
+            job_log(job)
+        ),
+        Subject::Install => format!(
+            "A person's `dagq install` of {version} into {target} failed at its {stage} (it was \
+not the automatic update): {error}\n\n{situation}\n\nNothing applies the answer of this ask: no \
+supervisor builds or installs anything for it. By hand, run the same `dagq install` again after \
+fixing what failed, `dagq install --rollback` to put the binary it replaced back for every \
+supervisor, or `dagq down --force` and `dagq up` to start the supervisors with the binary in place. \
+Answer `retry` when the person will run the install again, or `skip` to leave it as it is; either \
+way the inbox closes the ask.",
+            version = details["version"].as_str().unwrap_or("the new binary"),
+            target = job.target.display(),
         ),
         Subject::Release(version) => format!(
             "The update to {} failed at its {stage}: {error}\n\n{situation} The job's log is \
@@ -1383,7 +1683,7 @@ again). By hand, `dagq install --release {version}` explicitly installs that rel
 <binary>` puts a dagq {version} installed another way in place. If no supervisor serves the queue \
 now, `up` starts one.",
             job.subject.describe(),
-            job.log.display()
+            job_log(job)
         ),
     };
     // What a `retry` of a release's job asks for: after a plugin failure
@@ -1392,6 +1692,8 @@ now, `up` starts one.",
     let purpose = match job.subject {
         Subject::Release(_) => json!({"plugin_only": stage == "plugin"}),
         Subject::Commit(_) => Value::Null,
+        // Its ask supersedes only an earlier install's, not a job's.
+        Subject::Install => json!({"source": INSTALL_SOURCE}),
     };
     let ask = queue
         .open_update_ask(
@@ -1399,7 +1701,8 @@ now, `up` starts one.",
             &question,
             UPDATE_FAILED_OPTIONS,
             UPDATE_ASKER,
-            None,
+            // Open beside a job's, which it does not supersede.
+            matches!(job.subject, Subject::Install).then_some(INSTALL_SOURCE),
             purpose,
         )?
         .id;
@@ -1448,7 +1751,9 @@ fn awaiting_approval(
         .join(", ");
     let built = match job.subject {
         Subject::Commit(_) => format!("{} built as {version}", job.subject.describe()),
-        Subject::Release(_) => format!("{} (installed as {version})", job.subject.describe()),
+        Subject::Release(_) | Subject::Install => {
+            format!("{} (installed as {version})", job.subject.describe())
+        }
     };
     let question = format!(
         "{built}, and it brings breaking migration(s) {migrations}: the running supervisor and its \
@@ -1605,6 +1910,37 @@ mod tests {
         let status = status(&[], &[plugin], &NoneAlive, 0);
         assert_eq!(status["last"]["plugin_only"], true);
         assert_eq!(status["enabled"], false);
+    }
+
+    /// A person's install's failure is no step of the automatic update:
+    /// `status` shows the job before it, no interrupted job hides behind it
+    /// and no `retry` is read from it.
+    #[test]
+    fn a_persons_install_failure_is_no_step_of_the_update() {
+        let started = update(1, UPDATE_STARTED, json!({"pid": 7, "commit": "abc"}));
+        let installed = update(2, UPDATE_INSTALLED, json!({"pid": 7, "commit": "abc"}));
+        let manual = update(
+            3,
+            UPDATE_FAILED,
+            json!({"pid": 9, "source": INSTALL_SOURCE, "stage": "watch", "ask_id": 4}),
+        );
+        assert!(step_install(&manual));
+        let updates = [manual.clone(), installed.clone(), started.clone()];
+        let status = status(&[], &updates, &NoneAlive, 0);
+        assert_eq!(status["state"], "installed", "{status}");
+        assert_eq!(status["event_id"], 2, "{status}");
+        assert_eq!(latest_job_step(&updates).unwrap().id, installed.id);
+        let interrupted = [manual.clone(), started];
+        assert_eq!(
+            latest_job_step_of(&interrupted, false).unwrap().kind,
+            UPDATE_STARTED
+        );
+        assert!(!retry_requested(&interrupted));
+        assert_eq!(status_of_only(&manual)["state"], "idle");
+    }
+
+    fn status_of_only(update: &RunEvent) -> Value {
+        status(&[], std::slice::from_ref(update), &NoneAlive, 0)
     }
 
     /// A dropped request shows as `dropped`, and is no job's step: the
