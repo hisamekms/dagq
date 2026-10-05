@@ -14,7 +14,7 @@ Read this when `up` or `down` returns something the `dagq-recover` skill (sectio
 - `up` pins the inbox's workspace (ADR-0031), and cmux refuses `cmux workspace close` on a pinned workspace (`Error: protected: ...`). The unpin and the close are the person's, typed in their own terminal without `DAGQ_ROLE` (ADR-t1228-1 decision 1; the inbox's settings refuse `cmux`): `cmux workspace-action --action unpin --workspace <id>`, then `cmux workspace close <id>`. The unpin succeeds on an unpinned workspace too. The supervisor's, the planners' and the workers' workspaces are not pinned.
 - A workspace the queue recorded for a role `up` no longer opens (the resident sessions ADR-0024 and ADR-0044 retired, including the old `[<repo>]planner`) is forgotten by `up`, which leaves the workspace itself open: the person closes it in their own terminal without `DAGQ_ROLE` with `cmux workspace close <id>`.
 - `warnings`: why the queue's workspace group (`[<repo>]`, external ID the queue hash) could not be made; the workspace opened outside it. Report it; nothing else failed.
-- `pruned_supervisors`: dead registrations `up` removed.
+- `pruned_supervisors`: dead registrations `up` removed, and those with `"reason": "pid_reused"`: a live PID whose heartbeat is older than 30 seconds and that another process has taken (see `down` below for the check).
 - `doctor`: `unfinished_runs` (with `lease_stale`), `awaiting_integration`, `needs_session`: the open work to report.
 
 ### Explicitly run without Claude
@@ -62,6 +62,8 @@ If `up` fails because cmux refuses a connection from outside its own terminals, 
 - `--force` loses the active runs: their leases go stale after 30 seconds and the runs are handled with the `dagq-recover` skill. Only with the person's explicit word.
 
 The `outcome` is `draining` (plain `down`), `stopped` (`--wait`), `killed` (`--force`), or `not_running` when no live supervisor was registered; a lingering agent is unloaded in that case too, and `--force` also drops the dead registrations.
+
+A registration whose PID is alive but whose heartbeat is older than 30 seconds, and whose PID another process has taken (the same check as `up`'s: the PID is not among this user's processes, or its process started after the registration), gets no signal (no SIGINT or SIGTERM, no SIGKILL under `--force`): `down` drops it and lists it under `pruned_supervisors` with `"reason": "pid_reused"`, in any outcome. It does not count as a supervisor to signal, so with nothing else to signal the outcome is `not_running`. When the process list cannot be read, such a registration is signalled as before.
 
 An `in_cmux` supervisor has no launchd agent, so `down` sends it SIGINT and closes its `[<repo>]supervisor` workspace once it has seen the stop through (after the drain with `--wait`, after the kill with `--force`). Plain `down` returns while it still drains, leaves the workspace open and reports it under `supervisor_workspaces` as `left_open`; run `down --wait` (or have the person close it) before the next `up --in-cmux`, which refuses to open a second supervisor workspace while the one it recorded for the queue is still open.
 
