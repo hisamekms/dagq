@@ -3193,6 +3193,7 @@ fn run_session_as(
             start,
             sccache: sccache
                 .map(|target| (target, &looker as &dyn crate::application::SccacheServer)),
+            clock: &crate::infrastructure::clock::SystemClock,
         },
         id,
         token,
@@ -3317,6 +3318,7 @@ pub fn planner_session_with_provider(
             pid: std::process::id(),
             own_workspace: own,
             terminal,
+            clock: &crate::infrastructure::clock::SystemClock,
         },
         id,
         &planner::planner_dir(&planners_dir(db), id),

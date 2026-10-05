@@ -475,6 +475,8 @@ pub struct PlannerWrapper<'a> {
     /// The workspace's terminal (stderr), where the wrapper of a person's
     /// planner says when its workspace closes (ADR-t1300-1).
     pub terminal: &'a mut dyn std::io::Write,
+    /// The clock a headless planner's turns read their times on.
+    pub clock: &'a dyn Clock,
 }
 
 /// The session wrapper of planner `id` (`planner-session`): register this
@@ -502,6 +504,7 @@ pub fn run_planner_session(
         pid,
         own_workspace,
         terminal,
+        clock,
     } = ctx;
     // A wrapper started for a planner already given up (its create
     // reported failing although cmux made the workspace, task 806) closes
@@ -565,6 +568,7 @@ pub fn run_planner_session(
             resume: false,
             sccache: None,
             background,
+            clock,
         }
         .drive(&mut child_may_be_alive);
         let code = match driven {

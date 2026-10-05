@@ -166,6 +166,8 @@ pub struct Session<'a> {
         crate::domain::sccache::SccacheTarget,
         &'a dyn super::SccacheServer,
     )>,
+    /// The clock the wrapper's turns read their times on.
+    pub clock: &'a dyn super::Clock,
 }
 
 /// Wrap the agent of run `id` under the lease `token` until it exits; the
@@ -190,6 +192,7 @@ pub fn run_session(
         own_workspace,
         start,
         sccache,
+        clock,
     } = ctx;
     // A background wrapper finds its start among the run's records by its
     // pid and the start the system shows for it (ADR-t1404-1 decision 2).
@@ -231,6 +234,7 @@ pub fn run_session(
         resume,
         sccache: sccache.as_ref().map(|(target, server)| (target, *server)),
         background: start == WrapperStart::Background,
+        clock,
     }
     .drive(&mut child_may_be_alive);
     match result {

@@ -36,8 +36,8 @@ use std::{
 };
 
 use super::{
-    AgentProvider, ProcessControl, Queue, RunFiles, SccacheServer, Spawned, Spawner, TurnReader,
-    TurnTarget,
+    AgentProvider, Clock, ProcessControl, Queue, RunFiles, SccacheServer, Spawned, Spawner,
+    TurnReader, TurnTarget,
     actor_executor::{
         ActorExecutionSpec, ActorExecutor, ActorProgram, HostActorExecutor, SessionAgent,
         WorkspaceAccess,
@@ -57,14 +57,23 @@ use crate::domain::{
     worker_model::WorkerSession,
 };
 
-/// Unix milliseconds now: when the wrapper read the lines of a turn's
-/// output it reads next ([`TurnReader::stamp`]).
-fn now_millis() -> i64 {
-    std::time::SystemTime::now()
+/// Unix milliseconds on `clock`: when the wrapper read the lines of a
+/// turn's output it reads next ([`TurnReader::stamp`]).
+fn now_millis(clock: &dyn Clock) -> i64 {
+    clock
+        .system_time()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
         .and_then(|since| i64::try_from(since.as_millis()).ok())
         .unwrap_or(0)
+}
+
+/// Unix seconds on `clock`, the `at` of `sccache_wrapper_removed`.
+fn unix_secs(clock: &dyn Clock) -> u64 {
+    clock
+        .system_time()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
 }
 
 /// Whose turns [`Turns`] drives.
@@ -117,6 +126,8 @@ pub(super) struct Turns<'a> {
     /// stdout is the session's log, not a terminal, and takes the `[dagq]`
     /// summary of the turns all the same, for `run log` / `planner log`.
     pub(super) background: bool,
+    /// The clock the turns' stamps and the recorded times are read on.
+    pub(super) clock: &'a dyn Clock,
 }
 
 /// The session of the provider a run is on, as its events since it last
@@ -666,9 +677,7 @@ impl<'a> Turns<'a> {
             Err(error) => format!("the sccache server could not be looked at: {error:#}"),
         };
         tracing::warn!(run_id = %run.id(), "run {}: turn {turn} runs without {WRAPPER_VAR}: {why}", run.id());
-        let at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |since| since.as_secs());
+        let at = unix_secs(self.clock);
         if let Err(error) = self.queue.record_runtime_event(
             run.id(),
             EventKind::SccacheWrapperRemoved,
@@ -870,7 +879,7 @@ impl<'a> Turns<'a> {
         let (exit, stop, mut tail) =
             self.follow(run_dir, turn, on, child, reader, stdout, limits)?;
         // What it wrote after the last look.
-        reader.stamp(now_millis());
+        reader.stamp(now_millis(self.clock));
         for line in tail.read(self.files, stdout, true) {
             for signal in reader.line(&line) {
                 if let TurnSignal::Started {
@@ -1209,7 +1218,7 @@ impl<'a> Turns<'a> {
             TurnOwner::Planner { .. } => false,
         };
         loop {
-            reader.stamp(now_millis());
+            reader.stamp(now_millis(self.clock));
             let lines = tail.read(self.files, stdout, false);
             if !lines.is_empty() {
                 last_output = Instant::now();
@@ -1548,5 +1557,28 @@ mod tests {
         assert_eq!(tail.read(&files, path, false), ["two"]);
         assert_eq!(tail.read(&files, path, true), ["thr"]);
         assert!(tail.read(&files, path, true).is_empty());
+    }
+
+    /// A clock stopped at a fixed time.
+    struct At(std::time::SystemTime);
+
+    impl Clock for At {
+        fn system_time(&self) -> std::time::SystemTime {
+            self.0
+        }
+    }
+
+    /// The turns' stamps (milliseconds) and the `at` of
+    /// `sccache_wrapper_removed` (seconds) come from the injected clock,
+    /// not the wall clock (architecture.md L4).
+    #[test]
+    fn stamps_and_the_sccache_removal_time_come_from_the_injected_clock() {
+        let clock = At(std::time::UNIX_EPOCH + Duration::from_millis(1_700_000_000_123));
+        assert_eq!(now_millis(&clock), 1_700_000_000_123);
+        assert_eq!(unix_secs(&clock), 1_700_000_000);
+        // A clock before the epoch reads as zero, as before.
+        let before = At(std::time::UNIX_EPOCH - Duration::from_secs(1));
+        assert_eq!(now_millis(&before), 0);
+        assert_eq!(unix_secs(&before), 0);
     }
 }

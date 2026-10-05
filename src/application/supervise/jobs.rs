@@ -175,6 +175,16 @@ impl Drop for HeadlessJob {
     }
 }
 
+/// Unix milliseconds on `clock`, a job's `started_at`; `None` before the
+/// epoch.
+fn started_at_ms(clock: &dyn crate::application::Clock) -> Option<i64> {
+    clock
+        .system_time()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|since| i64::try_from(since.as_millis()).ok())
+}
+
 impl Supervisor<'_> {
     /// The job whose process `child` just started, recorded in
     /// `headless_jobs` with its pid and the start of its process. A record
@@ -217,10 +227,7 @@ impl Supervisor<'_> {
             processes: self.processes.clone(),
             record,
             provider: subject.provider,
-            started_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .and_then(|since| i64::try_from(since.as_millis()).ok()),
+            started_at: started_at_ms(&*self.generators.clock),
         }
     }
 
@@ -692,5 +699,24 @@ mod tests {
             .unwrap()
             .unwrap_err();
         assert!(failed.contains("it broke"), "{failed}");
+    }
+
+    /// A clock stopped at a fixed time.
+    struct At(std::time::SystemTime);
+
+    impl crate::application::Clock for At {
+        fn system_time(&self) -> std::time::SystemTime {
+            self.0
+        }
+    }
+
+    /// A job's `started_at` is the injected clock's time in Unix
+    /// milliseconds, not the wall clock's (architecture.md L4).
+    #[test]
+    fn a_jobs_started_at_comes_from_the_injected_clock() {
+        let clock = At(std::time::UNIX_EPOCH + Duration::from_millis(1_700_000_000_123));
+        assert_eq!(started_at_ms(&clock), Some(1_700_000_000_123));
+        let before = At(std::time::UNIX_EPOCH - Duration::from_secs(1));
+        assert_eq!(started_at_ms(&before), None);
     }
 }
