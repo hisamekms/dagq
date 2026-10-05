@@ -4,8 +4,8 @@ type: design
 title: レイヤーとコンテキストの境界（contextごとの所有・判断・操作・公開するport・依存の向き・境界をまたぐtransaction・検査できる規則・今の違反）
 status: current
 created: 2026-10-04
-updated: 2026-10-06 # task 1619: planner_handoff tests use MemoryFiles, the L3 row removed; task 1616: stats tests use domain fixtures, the L1 row removed; task 1618: the L4 row of jobs.rs and headless_session.rs removed, they read the injected Clock; task 1617: the L2 row of landing_branch removed; task 1564: ask --request reads RequestStore::request_planner; task 1551: domain::run::payload among the run modules, the C6 row no longer names run/history.rs; task 1550: the L4 row of broker_admin removed, AuditFiles among the host operations ports; task 1540: the revisit command and draft_revisits; task 1223: the observer on Codex; task 1641: domain::goal_tag among the planning modules; task 839: domain::broker_usage among the host operations modules; task 1662: the observation and analysis context points to the measurement design; task 1437; task 1632
-last_verified: 2026-10-06 # task 1619; task 1616; task 1618; task 1617; task 1564; task 1551; task 1550; task 1540; task 1223; task 1641; task 839; task 1615; task 1437; task 1632
+updated: 2026-10-06 # task 1637: nested comments and test-required cfg; task 1619: planner_handoff tests use MemoryFiles, the L3 row removed; task 1616: stats tests use domain fixtures, the L1 row removed; task 1618: the L4 row of jobs.rs and headless_session.rs removed, they read the injected Clock; task 1617: the L2 row of landing_branch removed; task 1564: ask --request reads RequestStore::request_planner; task 1551: domain::run::payload among the run modules, the C6 row no longer names run/history.rs; task 1550: the L4 row of broker_admin removed, AuditFiles among the host operations ports; task 1540: the revisit command and draft_revisits; task 1223: the observer on Codex; task 1641: domain::goal_tag among the planning modules; task 839: domain::broker_usage among the host operations modules; task 1662: the observation and analysis context points to the measurement design; task 1437; task 1632
+last_verified: 2026-10-06 # task 1637; task 1619; task 1616; task 1618; task 1617; task 1564; task 1551; task 1550; task 1540; task 1223; task 1641; task 839; task 1615; task 1437; task 1632
 scope: system
 related:
   - adr-t1545-1
@@ -226,9 +226,9 @@ contextを1つに決められず、分ける先のtaskを持つもの。
 ### レイヤーの規則
 
 - **L1** `src/domain`のコードは`crate::application`・`crate::infrastructure`・`crate::compose`と、レイヤーの外のmodule（`crate::view`・`crate::runtime`・`crate::lifecycle`）を参照しない。`#[cfg(test)]`の中も同じ（domainのtestはdomainの値と関数だけで組む）。検査: script。
-- **L2** `src/domain`の本番のコード（`#[cfg(test)]`の外）は`rusqlite`・`std::fs`・`std::process`・`std::net`・`SystemTime::now`・`Instant::now`・`Uuid::new_v4`・`anyhow`を参照しない（ADR-0013のAlternativesの検査の機械化）。検査: script。
+- **L2** `src/domain`の本番のコード（`test=false`のビルドに残りうるコード）は`rusqlite`・`std::fs`・`std::process`・`std::net`・`SystemTime::now`・`Instant::now`・`Uuid::new_v4`・`anyhow`を参照しない（ADR-0013のAlternativesの検査の機械化）。検査: script。
 - **L3** `src/application`のコードは`crate::infrastructure`・`crate::compose`とレイヤーの外のmoduleを参照しない。`#[cfg(test)]`の中も同じ（testはapplicationのtest double、たとえば`application::memory_files`を使う）。例外は共有の部品の`crate::migration_numbers`だけ。検査: script。
-- **L4** `src/application`の本番のコードは`rusqlite`・`std::fs`・`std::process::Command`・`SystemTime::now`・`Uuid::new_v4`を直接使わず、portを通す。`#[cfg(test)]`の中でfixtureを作る`std::fs`と`tempfile`はよい。検査: script。
+- **L4** `src/application`の本番のコード（`test=false`のビルドに残りうるコード）は`rusqlite`・`std::fs`・`std::process::Command`・`SystemTime::now`・`Uuid::new_v4`を直接使わず、portを通す。`#[cfg(test)]`の中でfixtureを作る`std::fs`と`tempfile`はよい。検査: script。
 - **L5** `src/application`の状態の判断（遷移・回数と上限・送るかどうか・待つかどうかを決めるもの）は、時刻を`Clock`か値の引数で受け、`Instant::now`・`SystemTime::now`を判断の中で読まない（[ADR-t1410-1](../adr/2026-10-03-t1410-1-decisions-in-unit-tests-boundaries-in-integration-tests.md)）。検査: review（今の`Instant::now`は数が多く、task 1557・1558が減らすまでscriptには入れない）。
 - **L6** `src/infrastructure`のコードは`crate::compose`とレイヤーの外のmoduleを参照しない。検査: script。
 - **L7** 起動部分（`src/compose.rs`と、task 1556が作るその下のmodule）はadapterを作ってuse caseに注入する配線だけを持ち、判断・時刻の読み取り・eventのpayloadの組み立てを持たない。検査: review（task 1556の後にscript）。
@@ -256,9 +256,10 @@ contextを1つに決められず、分ける先のtaskを持つもの。
 - コメントの行（`//`・`//!`・`///`）とdocのlinkは数えない（docのlinkの`crate::application::...`は依存ではない）。
 - `#[cfg(test)]`の中は、L1・L3・L6（参照の向き）では数え、L2・L4（I/Oと時刻）では数えない。
 - 今ある違反は、理由と行き先のtaskを持つ許可の一覧にだけ置き、直したtaskが同じ変更で一覧から外す（ADR-t1545-1決定4）。
-- scriptは`scripts/check-layer-deps.sh`で、L1・L2・L3・L4・L6を`src/domain`・`src/application`・`src/infrastructure`の`.rs`に当てる。CIが流し、`src/`を変えるtaskのverifyに付ける（[taskの登録](../development/task-registration.md)の「推奨の組み合わせ」）。`sh scripts/check-layer-deps.sh --self-test`は`target/`の下の一時directoryに小さなfixture（違反なし・一覧に無い違反・古い項目・task IDの無い項目・コメントと文字列だけの参照）を作って判定を確かめ、終わったら消す。
-- 数えるのはpath（`crate::application::timestamp`・`std::time::SystemTime::now`など）で、`use crate::{infrastructure::sqlite, ...}`のような組の`use`も展開して数える。コメント（`//`・`//!`・`///`・`/* */`）と文字列・文字のliteralの中は数えない。
-- `#[cfg(test)]`の中は、その属性が付いた項目（`mod tests { ... }`・関数・`use`など）の終わりまでと、`#[cfg(test)] mod name;`が宣言するファイル（`name.rs`と`name/`の下）。上のとおりL1・L3・L6では数え、L2・L4では数えない。
+- scriptは`scripts/check-layer-deps.sh`で、L1・L2・L3・L4・L6を`src/domain`・`src/application`・`src/infrastructure`の`.rs`に当てる。CIが流し、`src/`を変えるtaskのverifyに付ける（[taskの登録](../development/task-registration.md)の「推奨の組み合わせ」）。`sh scripts/check-layer-deps.sh --self-test`は`TMPDIR`（未設定なら`target/`）の下の一時directoryに小さなfixture（違反なし・一覧に無い違反・古い項目・task IDの無い項目・コメントと文字列だけの参照・入れ子のブロックコメント・複数行のcfg・testが必須のcfg・本番に残りうるcfg・inline modの中のtestの範囲と終わり）を作って判定を確かめ、終わったら消す。
+- 数えるのはpath（`crate::application::timestamp`・`std::time::SystemTime::now`など）で、`use crate::{infrastructure::sqlite, ...}`のような組の`use`も展開して数える。コメント（`//`・`//!`・`///`・入れ子も含む`/* */`）と文字列・文字のliteralの中は数えない。
+- testとして扱うcfgは、条件が`test`そのもの、`all(...)`の引数のどれかがtestを必須とするもの、`any(...)`の引数のすべてがtestを必須とするもの。`#[cfg(test)]`（複数行も含む）・`cfg(any(test))`・`cfg(all(test, unix))`・`cfg(all(unix, any(test)))`はtestとして扱う。`cfg(any(test, unix))`・`cfg(any(test, feature = "x"))`は`test=false`でも成立しうるため本番として数える。`cfg(not(test))`と、`not`を含むものや判定できない形も本番として数える（安全側）。
+- このcfgの範囲は、属性が付いた項目（`mod tests { ... }`・関数・`use`など）の終わりまでと、testの範囲で`mod name;`が宣言するファイル（inline modの名前を含むmoduleの位置の`name.rs`と`name/`の下）。inline modの中にあるtestのmodも扱い、範囲の終わりでは元の扱いに戻る。ファイル先頭の`#![cfg(test)]`などtestが必須の内側の属性はファイル全体をtestとして扱う。上のとおりL1・L3・L6では数え、L2・L4では数えない。
 - 許可の一覧は`.config/layer-deps-allow.txt`。1行が1項目で、`規則 | path | 参照 | 行き先のtask | 理由`の5つを`|`で区切る（`#`で始まる行と空行は読まない）。規則はL1・L2・L3・L4・L6のどれか、pathは`src/`からのファイル、参照はscriptが出す参照（`crate::application`・`std::fs`・`SystemTime::now`・`anyhow`など、規則が禁止する形の先頭）、行き先のtaskはtask IDか`,`で区切った複数のtask ID、理由は空でない。同じファイルの同じ参照は何箇所あっても1項目。一覧に無い参照（新しい違反）、一覧にあるのにもう無い参照（古い項目）、書式の誤りと重複はどれもexit 1。
 - 違反を直すtaskは、同じ変更で一覧の項目と下の「今の違反と行き先」の行を消す。
 - 「検査: review」の規則と、境界を変えた差分がこの文書と許可の一覧を直しているかは、`src/**`・`crates/**`の差分で選ばれるreviewのsubagent `architecture-boundaries`（`.dagq/review-agents/architecture-boundaries.md`、[Review](supervisor-lifecycle/review.md#reviewのsubagent)）が見て、scriptが見る規則は見ない。

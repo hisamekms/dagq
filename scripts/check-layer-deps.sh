@@ -14,7 +14,7 @@
 # When run from anywhere else it changes to the repository root found from the
 # script's own location. LAYER_DEPS_ROOT names another tree to check (its
 # src/ is read); --self-test checks the script itself on small fixtures in a
-# temporary directory under target/ and removes them.
+# temporary directory under ${TMPDIR:-target/} and removes them.
 #
 # Exit 0 when every occurrence is allowed and no item is stale, 1 when an
 # occurrence is not allowed, an item is stale or the allow list is malformed
@@ -61,6 +61,7 @@ function load(lst, test,   m, i, it) {
 function reset_file() {
   depth = 0; in_block = 0; in_str = 0; raw = -1
   in_test = 0; pending = 0; item_depth = 0; whole_test = 0
+  attr = ""; attr_sq = 0; hash = 0; inner_attr = 0; modprefix = ""
   path = ""; path_line = 0; path_test = 0; path_dot = 0
   prev = ""; gtop = 0; bk_n = 0; pending_mod = 0; sq = 0; item_sq = 0
   layer = FILENAME; sub(/^.*src\//, "", layer); sub(/\/.*/, "", layer)
@@ -79,8 +80,68 @@ function check(p, ln, t, dot,   i, hit) {
   }
 }
 function end_path() { check(path, path_line, path_test, path_dot); path = "" }
+# Prove only the supported predicates require test. Unknown/not predicates
+# stay production. Empty any is always false; empty all requires no test.
+function requires_test(expr,   op, body, level, start, j, c, child, result) {
+  if (expr == "test") return 1
+  if (expr !~ /^(all|any)\(/ || substr(expr, length(expr)) != ")") return 0
+  op = substr(expr, 1, 3)
+  body = substr(expr, 5, length(expr) - 5)
+  level = 0; start = 1; result = (op == "any")
+  for (j = 1; j <= length(body) + 1; j++) {
+    c = substr(body, j, 1)
+    if (c == "(") level++
+    if (c == ")") level--
+    if (level < 0) return 0
+    if ((c == "," && level == 0) || j == length(body) + 1) {
+      child = substr(body, start, j - start); start = j + 1
+      if (child == "" && j == length(body) + 1) break
+      if (child == "") return 0
+      if (op == "all") result = result || requires_test(child)
+      else result = result && requires_test(child)
+    }
+  }
+  return level == 0 && result
+}
+function finish_attribute(   expr, rest, part) {
+  expr = attr; gsub(/[ \t]/, "", expr)
+  if (expr ~ /^cfg\(.*\)$/ && expr !~ /not\(/ && requires_test(substr(expr, 5, length(expr) - 5))) {
+    if (inner_attr) {
+      # Only file-level inner attributes classify the entire file.
+      if (depth == 0) whole_test = 1
+    } else if (!in_test && !whole_test) {
+      in_test = 1; pending = 1; item_depth = depth; item_sq = sq
+    }
+  }
+  # Other attributes can contain paths used by procedural macros. Preserve
+  # their references rather than dropping code while collecting attributes.
+  if (expr !~ /^cfg\(/) {
+    rest = attr
+    code_token("[")
+    while (match(rest, /[A-Za-z_][A-Za-z0-9_]*|::|[^ \t]/)) {
+      part = substr(rest, RSTART, RLENGTH); rest = substr(rest, RSTART + RLENGTH)
+      if (part != "\"") code_token(part)
+    }
+    code_token("]")
+  }
+  attr = ""; prev = ""; pending_mod = 0
+}
 # token handles one token of code (strings and comments already removed).
-function token(tk,   is_ident) {
+function token(tk) {
+  if (attr_sq) {
+    if (tk == "[") attr_sq++
+    if (tk == "]") attr_sq--
+    if (!attr_sq) finish_attribute()
+    else attr = attr " " tk
+    return
+  }
+  if (tk == "#") { end_path(); hash = 1; inner_attr = 0; return }
+  if (hash && tk == "!") { inner_attr = 1; return }
+  if (hash && tk == "[") { hash = 0; attr_sq = 1; attr = ""; return }
+  hash = 0
+  code_token(tk)
+}
+function code_token(tk,   is_ident) {
   is_ident = (tk ~ /^[A-Za-z_][A-Za-z0-9_]*$/)
   if (is_ident) {
     if (prev == "::" && path != "") path = path "::" tk
@@ -101,14 +162,16 @@ function token(tk,   is_ident) {
     bk[++bk_n] = "g"; prev = "{"; return
   }
   end_path()
-  if (tk == ";" && pending_mod == 2 && (in_test || whole_test)) print "testmod\t" FILENAME "\t" modname "\t" FNR
-  pending_mod = 0
+  if (tk == ";" && pending_mod == 2 && (in_test || whole_test)) print "testmod\t" FILENAME "\t" modprefix modname "\t" FNR
   if (tk == "{") {
     bk[++bk_n] = "b"; depth++
+    bk_prefix[bk_n] = modprefix
+    if (pending_mod == 2) modprefix = modprefix modname "/"
     if (pending) pending = 0
   } else if (tk == "}") {
     if (bk_n > 0 && bk[bk_n] == "g") gtop--
     else {
+      modprefix = bk_prefix[bk_n]
       depth--
       if (in_test && (depth < item_depth || (!pending && depth == item_depth))) { in_test = 0; pending = 0 }
     }
@@ -118,6 +181,7 @@ function token(tk,   is_ident) {
   else if (tk == ";") {
     if (in_test && pending && depth == item_depth && sq == item_sq) { in_test = 0; pending = 0 }
   }
+  pending_mod = 0
   prev = tk
 }
 FNR == 1 { if (NR > 1) end_path(); reset_file() }
@@ -125,9 +189,12 @@ FNR == 1 { if (NR > 1) end_path(); reset_file() }
   line = $0; code = ""
   while (line != "") {
     if (in_block) {
-      i = index(line, "*/")
-      if (i == 0) { line = ""; break }
-      line = substr(line, i + 2); in_block = 0; continue
+      if (!match(line, /\/\*|\*\//)) { line = ""; break }
+      tk = substr(line, RSTART, RLENGTH)
+      line = substr(line, RSTART + RLENGTH)
+      if (tk == "/*") in_block++
+      else in_block--
+      continue
     }
     if (in_str) {
       if (raw >= 0) {
@@ -143,7 +210,7 @@ FNR == 1 { if (NR > 1) end_path(); reset_file() }
     code = code substr(line, 1, RSTART - 1)
     tk = substr(line, RSTART, RLENGTH); line = substr(line, RSTART + RLENGTH)
     if (tk == "//") { line = ""; break }
-    if (tk == "/*") { in_block = 1; continue }
+    if (tk == "/*") { in_block = 1; code = code " "; continue }
     if (tk == "'\''") {
       if (match(line, /^(\\.[^'\'']*|[\200-\377]+|[^'\''\\])'\''/)) { line = substr(line, RLENGTH + 1); code = code " " }
       else code = code " "
@@ -152,9 +219,6 @@ FNR == 1 { if (NR > 1) end_path(); reset_file() }
     if (tk ~ /r/) { raw = gsub(/#/, "#", tk); in_str = 1; continue }
     in_str = 1; raw = -1
   }
-  if (code ~ /#!\[cfg\(test\)\]/) whole_test = 1
-  if (code ~ /#\[cfg\(test\)\]/ && !in_test && !whole_test) { in_test = 1; pending = 1; item_depth = depth; item_sq = sq }
-  sub(/#\[cfg\(test\)\]/, "", code)
   while (code != "") {
     if (!match(code, /[A-Za-z_][A-Za-z0-9_]*|::|[{};,.]|[^ \t]/)) break
     tk = substr(code, RSTART, RLENGTH); code = substr(code, RSTART + RLENGTH)
@@ -235,8 +299,9 @@ check_tree() {
 }
 
 self_test() {
-  mkdir -p "$repo/target"
-  tmp=$(mktemp -d "$repo/target/$me-self-test.XXXXXX")
+  tmp_parent=${TMPDIR:-$repo/target}
+  mkdir -p "$tmp_parent"
+  tmp=$(mktemp -d "$tmp_parent/$me-self-test.XXXXXX")
   trap 'rm -rf "$tmp"' EXIT INT TERM
   fail=0
   expect() { # expect <want-exit> <name> <tree> [<text the output must have>]
@@ -315,6 +380,119 @@ pub enum E { A, #[cfg(test)] Fake, }
 pub fn k(c: char) -> bool { let _ = std::time::SystemTime::now(); c == 'é' }
 EOF
   expect 1 "the #[cfg(test)] region ends with its enclosing item" "$tmp/cfgend" "src/domain/run.rs:13: L2 forbids SystemTime::now"
+
+  base nested_comments
+  cat >>"$tmp/nested_comments/src/domain/run.rs" <<'EOF'
+/* outer /* inner */ std::fs::read("hidden");
+   /* another /* deeper */ crate::application::timestamp(); */ still outer */
+EOF
+  expect 0 "nested_comments" "$tmp/nested_comments"
+
+  base nested_comments_end
+  cat >>"$tmp/nested_comments_end/src/domain/run.rs" <<'EOF'
+/* outer /* inner */ hidden */ std::fs::read("production");
+EOF
+  expect 1 "nested_comments_end" "$tmp/nested_comments_end" "L2 forbids std::fs"
+
+  base multiline_cfg
+  cat >>"$tmp/multiline_cfg/src/domain/run.rs" <<'EOF'
+#[cfg(
+    /* a nested /* comment */ here */ test
+)]
+fn multiline() { std::fs::read("test"); }
+EOF
+  expect 0 "multiline_cfg" "$tmp/multiline_cfg"
+
+  base required_cfg
+  cat >>"$tmp/required_cfg/src/domain/run.rs" <<'EOF'
+#[cfg(any())]
+fn unreachable() { std::fs::read("unreachable"); }
+#[cfg(any(test))]
+fn single_any() { std::fs::read("test"); }
+#[cfg(all(test, unix))]
+fn all_test() { std::fs::read("test"); }
+#[cfg(all(unix, any(test)))]
+fn nested() { std::fs::read("test"); }
+#[cfg(any(all(test, unix), all(test, feature = "x"),))]
+fn every_branch() { std::fs::read("test"); }
+#[cfg(any(test))]
+use std::fs;
+EOF
+  cat >>"$tmp/required_cfg/src/application/use_case.rs" <<'EOF'
+#[cfg(all(test, unix))]
+fn test_io() { std::fs::read("test"); }
+EOF
+  expect 0 "required_cfg (L2 and L4)" "$tmp/required_cfg"
+
+  for predicate in 'any(test, unix)' 'any(test, feature = "x")' 'not(test)' 'all(unix, any(test, unix))' 'all(test, not(unix))' 'all()' 'feature = "test"'; do
+    base production_cfg
+    printf '#[cfg(%s)]\nfn production() { std::fs::read("production"); }\n' "$predicate" >>"$tmp/production_cfg/src/domain/run.rs"
+    expect 1 "production_cfg: $predicate" "$tmp/production_cfg" "L2 forbids std::fs"
+  done
+
+  base inline_test_mod
+  cat >>"$tmp/inline_test_mod/src/domain/run.rs" <<'EOF'
+mod outer { #[cfg(test)] mod tests {
+    fn io() { std::fs::read("test"); }
+    #[cfg(test)] mod nested { fn io() { std::fs::read("test"); } }
+    fn still_test() { std::fs::read("test"); }
+} }
+EOF
+  expect 0 "inline_test_mod" "$tmp/inline_test_mod"
+
+  base inline_test_mod_end
+  cat >>"$tmp/inline_test_mod_end/src/domain/run.rs" <<'EOF'
+mod outer { #[cfg(test)] mod tests { fn io() { std::fs::read("test"); } }
+    fn production() { std::fs::read("production"); }
+}
+EOF
+  expect 1 "inline_test_mod_end" "$tmp/inline_test_mod_end" "src/domain/run.rs:13: L2 forbids std::fs"
+
+  base inline_test_file
+  cat >>"$tmp/inline_test_file/src/domain/run.rs" <<'EOF'
+mod outer { mod inner { #[cfg(test)] mod helpers; } }
+EOF
+  mkdir -p "$tmp/inline_test_file/src/domain/run/outer/inner/helpers"
+  echo 'fn io() { std::fs::read("test"); }' >"$tmp/inline_test_file/src/domain/run/outer/inner/helpers.rs"
+  echo 'fn io() { std::fs::read("test"); }' >"$tmp/inline_test_file/src/domain/run/outer/inner/helpers/child.rs"
+  expect 0 "inline_test_file" "$tmp/inline_test_file"
+
+  base inline_test_file_neighbor
+  cat >>"$tmp/inline_test_file_neighbor/src/domain/run.rs" <<'EOF'
+mod outer { #[cfg(test)] mod helpers; }
+mod helpers;
+EOF
+  echo 'fn io() { std::fs::read("production"); }' >"$tmp/inline_test_file_neighbor/src/domain/run/helpers.rs"
+  expect 1 "inline_test_file_neighbor" "$tmp/inline_test_file_neighbor" "src/domain/run/helpers.rs:1: L2 forbids std::fs"
+
+  base multiline_cfg_end
+  cat >>"$tmp/multiline_cfg_end/src/domain/run.rs" <<'EOF'
+#[cfg(
+    test
+)]
+fn test_io() { std::fs::read("test"); } fn production() { std::fs::read("production"); }
+EOF
+  expect 1 "multiline_cfg_end" "$tmp/multiline_cfg_end" "src/domain/run.rs:15: L2 forbids std::fs"
+
+  base required_cfg_end
+  cat >>"$tmp/required_cfg_end/src/domain/run.rs" <<'EOF'
+#[cfg(all(test, unix))] use std::fs;
+fn production() { std::fs::read("production"); }
+EOF
+  expect 1 "required_cfg_end" "$tmp/required_cfg_end" "src/domain/run.rs:13: L2 forbids std::fs"
+
+  base required_cfg_ref
+  cat >>"$tmp/required_cfg_ref/src/application/use_case.rs" <<'EOF'
+#[cfg(any(test))] mod tests { use crate::infrastructure::sqlite; }
+EOF
+  expect 1 "required_cfg_ref (L3 still counts tests)" "$tmp/required_cfg_ref" "L3 forbids crate::infrastructure"
+
+  base attribute_ref
+  cat >>"$tmp/attribute_ref/src/domain/run.rs" <<'EOF'
+#[crate::application::custom_attribute]
+fn production() {}
+EOF
+  expect 1 "attribute_ref" "$tmp/attribute_ref" "L1 forbids crate::application"
 
   base infra
   cat >>"$tmp/infra/src/infrastructure/store.rs" <<'EOF'
