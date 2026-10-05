@@ -1,10 +1,10 @@
 ---
 id: development-task-registration
 type: development
-title: このrepositoryのtaskの登録（verify・paths・evidence・changeの選び方、負荷の下で落ちるtestを直すtask、ADRを書くtask、plan reviewが当てはめる規則）
+title: このrepositoryのtaskの登録（verify・paths・evidence・changeの選び方、固定バイナリを待つ宣言、負荷の下で落ちるtestを直すtask、ADRを書くtask、plan reviewが当てはめる規則）
 status: current
 created: 2026-10-03
-updated: 2026-10-05 # task 842; task 1480
+updated: 2026-10-05 # task 842; task 1480; task 1635
 owners:
   - hisamekms
 tags:
@@ -48,6 +48,12 @@ llvm-covとcargo testの重ね方:
 
 - llvm-covをverificationに含めるtaskでは`cargo test --locked`をverificationに重ねない。llvm-covは`cargo test`と同じtest binary群を全部実行し1件でも落ちれば失敗するので（[testの制約](testing.md)の「test binary」）、両方を並べてもintegrateの直列の検証で同じtestが2回走る（約100秒）だけで検出力は増えない。
 - llvm-covを含めないtask（docs・pluginの文書など）は、必要なら`cargo test --locked`をverificationに残す。
+
+## 固定バイナリがtask Xを含んでから行うtask
+
+固定バイナリがtask Xの着地を含むことを要するtask（新しいflagの登録案内や、新しいkeyを使うconfigなど）は、`dagq add ... --wait-for-build --depends-on X`で登録する。必要な依存先が複数なら`--depends-on`を繰り返す。宣言は`wait_for_build`で、supervisorは自分のbuild識別子のcommitが直接の依存先の着地commitを全て含むまでclaimしない（[claimを控える](../design/supervisor-lifecycle/claim-defer.md#依存先の着地を含むbuildを待つtask)、[Domain model](../design/domain-model.md)）。draft / submittedのtaskは`edit TASK --wait-for-build`で宣言し、`--no-wait-for-build`で外せる。
+
+verifyの1本目に、`~/.local/bin/dagq --version`のbuild識別子と依存先の着地を`git merge-base --is-ancestor`で比べる手書きのscriptを置かない。verifyはclaimの後にしか効かないため、早すぎるclaimを止めるのはこの宣言と`--depends-on`にする。自動更新はruntimeを変える着地でだけbuildするので、runtimeを変えない依存先だけを待つtaskには宣言しない（[ADR-t1632-1](../adr/2026-10-05-t1632-1-claim-waits-for-a-build-that-contains-the-dependencies-landings.md)）。
 
 ## pathsと軽い検証
 
@@ -99,6 +105,7 @@ runtimeのtaskは`--paths`を宣言しない（上の「推奨の組み合わせ
 
 この repository のplan review jobは、proposalのtaskに次を当てはめる（読む文書はAGENTS.mdの「plan review」が名指す）。
 
+- 固定バイナリが依存先の着地を含むことを要するtaskは、上の「固定バイナリがtask Xを含んでから行うtask」のとおり`--wait-for-build`の宣言と必要な`--depends-on`を持ち、verifyの手書きの関門で代用していないこと。宣言や依存が欠けている、または手書きの関門で代用していれば`revise`にする。
 - verify・paths・evidenceは上の「推奨の組み合わせ」（llvm-covと`cargo test`の重ね方を含む）と「e2e」に合い、changeは上の「change」のとおりtaskの主な目的に合う1つであること。runtimeのtaskに一律の`--evidence e2e`は求めないが、上の「e2e」の目安（runをまたぐsupervisorの振る舞いを変え、`tests/e2e.rs`の複数passの筋書きを変えうる）に当たるtaskに`--evidence e2e`が無ければ`revise`にする。`--evidence e2e`が付いていれば、`[e2e] paths`の外でも実cmuxで確かめる理由（目安に当たることを含む）がdescriptionにあるかを見る。
 - changeが`docs`か`config`のtaskは`--paths`を宣言し、そのglobがruntimeのpath（`src/`・`tests/`・`migrations/`・`crates/`と、buildの設定の`Cargo.toml`・`Cargo.lock`・`build.rs`）に当たらないこと。`docs`は上の「推奨の組み合わせ」のdocs・pluginの文書の行のpaths、`config`は同じ節のconfigの行のpathsの範囲に収める。`--paths`が無い・runtimeのpathを含む（`**`のような広いglobを含む）・descriptionやacceptanceがruntimeのpathの変更を求める、といった食い違いは`revise`にし、主な目的に合うchange（`feature`・`fix`・`refactor`など）に直すか`--paths`を絞らせる。上の「change」の軽い枠で重いbuildが走らないようにするため（[ADR-t1591-1](../adr/2026-10-04-t1591-1-landing-queue-leaves-room-for-light-changes.md)決定3。軽い枠でclaimしてよいかの判定はruntimeが持ち、この規則は登録の時にpathsの中身を見る）。
 - 測定のtask（changeが`measure`のtaskと、受け入れ条件に測定を含むtask）は、周回数（と交互に流すか）、表の列、値の計算式（何を何で割るか、待ちを引くときの区間）、証拠の所在（文書の節・CSV・script・コマンドと時刻の区切り）をacceptanceかdescriptionに書くこと（測定の形に当たらない項目、例えば1回だけ読む測定の周回数は、当たらない理由を書く）。条件の範囲を「同じ形のもの」で広げるtaskは、範囲を決めるgrepか一覧を書くこと。欠けていれば`revise`（workerはこれらを根拠に受け入れ条件の各項目を対応づける。[ADR-t1420-1](../adr/2026-10-03-t1420-1-worker-maps-each-acceptance-criterion-before-the-receipt.md)）。
