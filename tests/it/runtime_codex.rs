@@ -9,7 +9,9 @@ use crate::common;
 use crate::runtime_support;
 
 use dagq::domain::{AskReason, Provider, queue_hold::USAGE_LIMIT_SUBJECT, worker::WorkerMode};
+use dagq::{application::RunFiles, runtime::RunFilesPort};
 use runtime_support::*;
+use std::io;
 
 pub(crate) const TASK: TaskId = TaskId::new(2);
 
@@ -433,6 +435,170 @@ fn a_codex_review_whose_codex_does_not_start_moves_to_claude() {
     let held = queue_events(&db, "provider_held");
     assert_eq!(held.len(), 1, "{held:?}");
     assert_eq!(held[0]["provider"], "codex");
+}
+
+/// The run's files, which remove the run's worktree as the prompt of
+/// review 1 is written: after its receipt was accepted, before its review
+/// starts.
+#[derive(Default)]
+struct WorktreeGoneAtReview {
+    removed: Mutex<Option<PathBuf>>,
+}
+
+impl RunFiles for WorktreeGoneAtReview {
+    fn create_dir_all(&self, dir: &Path) -> io::Result<()> {
+        LocalRunFiles.create_dir_all(dir)
+    }
+    fn create_new_dir(&self, dir: &Path) -> io::Result<()> {
+        LocalRunFiles.create_new_dir(dir)
+    }
+    fn write(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
+        if path
+            .file_name()
+            .is_some_and(|name| name == "review-prompt-1.txt")
+        {
+            let worktree = path.with_file_name("worktree");
+            fs::remove_dir_all(&worktree)?;
+            *self.removed.lock().unwrap() = Some(worktree);
+        }
+        LocalRunFiles.write(path, contents)
+    }
+    fn copy(&self, from: &Path, to: &Path) -> io::Result<()> {
+        LocalRunFiles.copy(from, to)
+    }
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        LocalRunFiles.read(path)
+    }
+    fn read_from(&self, path: &Path, offset: u64) -> io::Result<Vec<u8>> {
+        LocalRunFiles.read_from(path, offset)
+    }
+    fn read_range(&self, path: &Path, offset: u64, len: u64) -> io::Result<Vec<u8>> {
+        LocalRunFiles.read_range(path, offset, len)
+    }
+    fn read_tail(&self, path: &Path, bytes: u64) -> io::Result<Vec<u8>> {
+        LocalRunFiles.read_tail(path, bytes)
+    }
+    fn size(&self, path: &Path) -> io::Result<u64> {
+        LocalRunFiles.size(path)
+    }
+    fn read_to_string(&self, path: &Path) -> io::Result<String> {
+        LocalRunFiles.read_to_string(path)
+    }
+    fn try_lock(&self, path: &Path) -> io::Result<Option<Box<dyn std::any::Any + Send>>> {
+        LocalRunFiles.try_lock(path)
+    }
+    fn modified(&self, path: &Path) -> io::Result<SystemTime> {
+        LocalRunFiles.modified(path)
+    }
+    fn read_stamped(&self, path: &Path) -> Result<Option<(SystemTime, Vec<u8>)>> {
+        LocalRunFiles.read_stamped(path)
+    }
+    fn is_file(&self, path: &Path) -> bool {
+        LocalRunFiles.is_file(path)
+    }
+    fn is_dir(&self, path: &Path) -> bool {
+        LocalRunFiles.is_dir(path)
+    }
+    fn exists(&self, path: &Path) -> bool {
+        LocalRunFiles.exists(path)
+    }
+    fn read_dir(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
+        LocalRunFiles.read_dir(dir)
+    }
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        LocalRunFiles.rename(from, to)
+    }
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        LocalRunFiles.remove_file(path)
+    }
+    fn tree_size(&self, dir: &Path) -> io::Result<Option<u64>> {
+        LocalRunFiles.tree_size(dir)
+    }
+    fn remove_dir_all(&self, dir: &Path) -> io::Result<()> {
+        LocalRunFiles.remove_dir_all(dir)
+    }
+    fn append_line(&self, path: &Path, line: &str) -> io::Result<()> {
+        LocalRunFiles.append_line(path, line)
+    }
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        LocalRunFiles.canonicalize(path)
+    }
+    fn write_fenced(&self, path: &Path, text: &str, info: &str, body: &Path) -> Result<()> {
+        LocalRunFiles.write_fenced(path, text, info, body)
+    }
+    fn now(&self) -> SystemTime {
+        LocalRunFiles.now()
+    }
+}
+
+/// A Codex review whose run's worktree is gone before it starts fails as
+/// the review's own preparation, not as its provider's start
+/// (ADR-t1063-1 decision 4, ADR-t1207-1): Codex is not held, the review
+/// does not move to Claude, and `review_failed` opens the
+/// `approve_landing` ask. Without the check, the spawn in a missing
+/// directory would read as Codex's missing executable, as in
+/// [`a_codex_review_whose_codex_does_not_start_moves_to_claude`].
+#[test]
+fn a_review_whose_worktree_is_gone_fails_without_holding_its_provider() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, repo, db) = fixture();
+    select_codex_review(&repo);
+    // Passes the supervisor's preflight; no review reaches it.
+    let codex = dir.path().join("codex-unused");
+    fs::write(
+        &codex,
+        "#!/bin/sh\n[ \"$1\" = --version ] && { echo 'codex-cli 0.46.0'; exit 0; }\nexit 2\n",
+    )
+    .unwrap();
+    fs::set_permissions(&codex, fs::Permissions::from_mode(0o755)).unwrap();
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let files = Arc::new(WorktreeGoneAtReview::default());
+    let options = SuperviseOptions {
+        codex,
+        files: Some(RunFilesPort(files.clone())),
+        ..supervise_options(1, true)
+    };
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "from Claude")]);
+    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
+    assert!(reviewer.prompts().is_empty(), "Claude reviewed the run");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let run = &detail.runs[0];
+    let worktree = PathBuf::from(run.worktree_path().unwrap());
+    assert_eq!(files.removed.lock().unwrap().as_ref(), Some(&worktree));
+    let kinds = event_kinds(&detail);
+    assert!(
+        position(&kinds, "receipt_observed") < position(&kinds, "review_started"),
+        "{kinds:?}"
+    );
+    let started = payloads(&detail, "review_started");
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert_eq!(started[0]["launch"]["provider"], "codex");
+    assert!(
+        started[0]["launch"]["switch_reason"].is_null(),
+        "{started:?}"
+    );
+    let failed = payloads(&detail, "review_failed");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0]["attempt"], 1);
+    let error = failed[0]["error"].as_str().unwrap();
+    assert!(
+        error.contains(&format!(
+            "the run's worktree {} is gone",
+            worktree.display()
+        )),
+        "{error}"
+    );
+    // Neither held nor switched: the provider was never tried.
+    assert!(payloads(&detail, "review_retried").is_empty(), "{kinds:?}");
+    assert!(queue_events(&db, "provider_held").is_empty());
+    let asks = queue.asks(AskQuery::default()).unwrap();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    assert_eq!(asks[0].kind, AskKind::ApproveLanding);
+    assert_eq!(asks[0].run_id.as_ref(), Some(run.id()));
+    assert_eq!(failed[0]["ask_id"], json!(asks[0].id));
 }
 
 /// The queue's events of `kind` (a provider's hold is the queue's).
