@@ -25,6 +25,7 @@ amended_by:
   - adr-t1433-2
   - adr-t1433-3
   - adr-t1594-1
+  - adr-t1818-2
 owners:
   - hisamekms
 tags:
