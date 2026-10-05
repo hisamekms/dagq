@@ -4,7 +4,7 @@ type: plan
 title: worker が受け入れ条件を根拠と照合する変更の前の、run の review の差し戻しの基準値と、前後比較の script
 status: active
 created: 2026-10-03
-updated: 2026-10-05 # task 1537
+updated: 2026-10-05 # task 1689: shared pre-review receipt extraction
 owners:
   - hisamekms
 tags:
@@ -806,3 +806,11 @@ run の review の prompt と判定の基準を変える着地は [T, C) に無�
 - **同じ時期の他の変更**: 後の区間の run は 1420 と 1428 の両方の worker の指示を受け、goal 94 の AGENTS.md の整理（2dc9638c・3759e252）の途中の base で動いた。どの変化がどれの効果かは分けられない。
 - **対応の判定**: task 1423 の限界のとおり、記載の長さと手がかりを見る機械的な規則で、根拠の正しさは見ない。後の区間は判定できた run が 4 本だけ。
 - task 1422・1423 の限界（area の重なり、項目数の数え方、change の unknown、`review_failed_only` の数え方）はそのまま当てはまる。
+
+## 初回 review の receipt 取得の再利用（2026-10-05）
+
+[docs-candidate-search](docs-candidate-search.md) が、`compute.py` の
+`validation_receipt_before(evs, review)` を共有する。ID 順の event から、
+review より前の最後の receipt dict を持つ validation_finished を返す。
+既存の `mapping()` もこの関数で同じ receipt.summary を読む。既存の判定・CSV・JSON は変えず、
+同じ snapshot の旧 script と新 script の全出力の一致を確認した。

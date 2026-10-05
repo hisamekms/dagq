@@ -4,8 +4,8 @@ type: design
 title: 計測（SSOTとビュー・区間とタグ・台帳の形・畳む関数・台帳を作る係・送る口・コマンドの形と分類）
 status: draft
 created: 2026-10-04
-updated: 2026-10-04 # task 1662
-last_verified: 2026-10-04 # task 1662: nothing is implemented yet
+updated: 2026-10-05 # task 1689: measurement view inventory
+last_verified: 2026-10-05 # task 1689: view inventory; runtime redesign remains unimplemented
 scope: runtime
 related:
   - adr-t1662-1
@@ -47,6 +47,7 @@ related:
 | LedgerStore | 台帳（run・task・session・queue・nodeの行）。旧方式の行のlegacyのJSONは凍結して捨てない | ビュー | 未実装（queue.dbの新しい表の予定） |
 | ReportStore | 統計の出力（日次・週次のレポート） | ビュー | queueのdirの`reports/`のファイルと`report_written`のevent |
 | （材料） | run dir（receipt・prompt・`worktime.jsonl`ほか）・log・hostのCSV・Claude Codeのtranscript・Codexのrollout | 材料 | queueのdirとrun dirのファイル、`~/.claude`。台帳と統計は読まない（取り込んだ値はEventStoreかSessionStepStoreに入る） |
+| 文書候補探索の比較出力 | `docs/plans/docs-candidate-search/out/` の run・層の CSV、選択 event の ID、ページ取得記録・定義/並行変更の一覧 | ビュー | `docs/plans/docs-candidate-search/` の Python script。既存 acceptance-check fetch を介して queue service の読み取り CLI（events/show/stats 等）と git を読み、初回 review 前の validation receipt を既存 compute と共有して集計。原文 snapshot は一時的な材料として TMPDIR のみ（台帳は読まない） |
 
 **新しいストアやビューを足すときはこの節に区分を書く。** 新しい表・ファイル・外の記録を計測が読む・書くようにするtaskは、同じ変更でこの表に行（中身・区分・今のアダプタ）を足すか直す（ADR-t1662-2決定9、[文書の規則](../development/documents.md)の「design」）。
 

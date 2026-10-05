@@ -1,0 +1,15 @@
+interval,run_id,task_id,stage,kind
+before,3d21d841-867f-4a87-873e-0e95cd5a83e9,1437,first,rereview_unfinished_or_failed
+before,3d21d841-867f-4a87-873e-0e95cd5a83e9,1437,additional,excluded
+before,76c5dd97-fde3-4a96-8784-4f4e3ad22fb0,1354,first,rereview_unfinished_or_failed
+before,76c5dd97-fde3-4a96-8784-4f4e3ad22fb0,1354,additional,excluded
+before,56dfaeaa-897d-47c2-b6b8-6907f23c7f0d,1487,first,rereview_unfinished_or_failed
+before,56dfaeaa-897d-47c2-b6b8-6907f23c7f0d,1487,additional,excluded
+after,8db1a6cd-f914-40d3-9709-893408d1b449,838,additional,not_sent
+after,8db1a6cd-f914-40d3-9709-893408d1b449,838,additional,excluded
+after,d97216b8-eb3a-415f-8716-b087c588f086,1451,first,rereview_unfinished_or_failed
+after,d97216b8-eb3a-415f-8716-b087c588f086,1451,additional,excluded
+after,1dc0d5cf-fe32-4579-ba47-616af532ec57,1632,additional,not_sent
+after,1dc0d5cf-fe32-4579-ba47-616af532ec57,1632,additional,excluded
+after,068c08e3-eb24-4437-b01f-de7f6dd028c1,1481,additional,not_sent
+after,068c08e3-eb24-4437-b01f-de7f6dd028c1,1481,additional,excluded

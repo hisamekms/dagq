@@ -1,0 +1,6 @@
+commit,committed_at,landing_at,tree,title
+9384cb2599062a51742dd5dd8cbf719601924872,2026-10-03T13:12:16+09:00,2026-10-03T04:12:16.449Z,03e8845aba911957a464cd5365db5a6e706625b5,config: この repository の review の subagent の定義（検査項目と開発文書への参照）を置き、dagq.toml で path ごとに有効にする
+00493c308584c062cdc58c52ae346d690140eaa3,2026-10-04T19:45:19+09:00,2026-10-04T10:45:19.400Z,9549e5225f899e8da1b15350a6eec51389c01571,test-rules の review subagent に、判断と境界の test と shell_path の検査項目を足す
+64ef873dfc94caeb8aa931b80f55aac894ed20fc,2026-10-04T20:18:10+09:00,2026-10-04T11:18:10.851Z,76dd9a0d152fd81db67cde84f354eaf89a00ab70,config: レイヤーとコンテキストの境界を確かめる review の subagent の定義（検査項目と設計文書への参照だけ）を .dagq/review-agents/ に置き、dagq.toml で src と crates の差分に有効にする
+adda99a602531acae52738f39601f418a423fb84,2026-10-04T22:03:45+09:00,2026-10-04T13:03:45.267Z,3562351ba77b91e25b42658676f77f49ca64b1f4,feature: worker の prompt の文書の照合（DOCS_CHECK）に、変えた名前で文書の候補を探して summary に探した名前を書く句を足し、この repository の探す範囲を documents.md に、確かめ方を design-consistency の review の subagent に書き、ADR で ADR-t1428-1 決定 4 を amends する
+cfe2fd07eed13953fe3cfc79c8fc569e7c6c568e,2026-10-05T01:58:44+09:00,2026-10-04T16:58:44.985Z,2e8f2dd397d8e0e0a2af8526eda301255685deeb,config: scripts/slow-tests.sh に test binary ごとの本数と時間の合計を足し、throughput-review の日次の見直しで本番の関門の dagq::it の本数と合計を前の 7 日と並べ、test-rules の review に it の時間の関門の検査項目を足す

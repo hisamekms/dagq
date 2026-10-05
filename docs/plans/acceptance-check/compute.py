@@ -228,6 +228,21 @@ def evidence_of(segment):
     return chars, [name for name, rx in EVIDENCE if rx.search(segment)]
 
 
+def validation_receipt_before(evs, review):
+    """Last validation_finished carrying a receipt before this review event.
+
+    Shared with docs-candidate-search; does not substitute the final receipt.
+    Events must be in ID order, as in run_rows.
+    """
+    found = None
+    for e in evs:
+        if e["id"] > review["id"]:
+            break
+        if e["kind"] == "validation_finished" and isinstance((e["payload"] or {}).get("receipt"), dict):
+            found = e
+    return found
+
+
 def mapping(task, evs, verdicts):
     """Whether the receipt summary the first review read gives each numbered
     acceptance item its own evidence (task 1423): every number `(k)` or `（k）`
@@ -236,13 +251,8 @@ def mapping(task, evs, verdicts):
     EVIDENCE. The receipt is the one of the last validation_finished before
     the first verdict. Whether the evidence is right is not judged."""
     numbers = task.get("item_numbers")
-    receipt = None
-    if verdicts:
-        for e in evs:
-            if e["id"] > verdicts[0]["id"]:
-                break
-            if e["kind"] == "validation_finished" and isinstance((e["payload"] or {}).get("receipt"), dict):
-                receipt = e["payload"]["receipt"]
+    validation = validation_receipt_before(evs, verdicts[0]) if verdicts else None
+    receipt = validation["payload"]["receipt"] if validation else None
     summary = (receipt or {}).get("summary")
     segments = item_segments(summary) if summary else {}
     items = []
