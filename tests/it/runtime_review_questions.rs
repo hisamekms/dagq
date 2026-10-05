@@ -76,6 +76,16 @@ fn unix_now() -> i64 {
         .as_secs() as i64
 }
 
+fn unix_millis() -> i64 {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
+}
+
 /// Waits for the revise request and checks that `ask` was created in an
 /// earlier second than it was sent.
 fn await_revise_after(db: &std::path::Path, ask: AskId) {
@@ -363,12 +373,23 @@ fn a_question_passed_by_a_rewritten_receipt_does_not_hold_its_fix() {
     );
 }
 
+/// How long [`an_open_question_without_a_rewritten_receipt_holds_past_the_resume_timeout`]
+/// gives the revise without its receipt rewritten. Its turn has to ask
+/// within it, and its turn of the answer to rewrite the receipt: with 1 s,
+/// under load (load 75 to 90, 4 nextest -j 16 at once) the ask opened 2.4 s
+/// after the revise request, after the timeout had ended the revise, and
+/// the turn of the answer ran out of it too (task 1360).
+const QUESTION_RESUME_TIMEOUT: Duration = Duration::from_secs(6);
+
 /// A session idle at a question it asked during its revise, its receipt
 /// not rewritten, still waits for the answer past the resume timeout (task
-/// 238): answered, it rewrites the receipt and the run lands.
+/// 238): answered, it rewrites the receipt and the run lands. The question
+/// opens before the timeout runs out, and the checks that nothing ended the
+/// revise come after it ran out (task 1360).
 #[test]
 fn an_open_question_without_a_rewritten_receipt_holds_past_the_resume_timeout() {
     let (_dir, repo, db) = fixture();
+    let _dump = EventsOnPanic(db.clone());
     let base = git_out(&repo, &["rev-parse", "main"]);
     let mut backend = TestWorkspace::new(
         &db,
@@ -379,7 +400,7 @@ fn an_open_question_without_a_rewritten_receipt_holds_past_the_resume_timeout() 
              receipt \"$(git rev-parse HEAD)\"",
         ),
     );
-    backend.resume_timeout = Duration::from_secs(1);
+    backend.resume_timeout = QUESTION_RESUME_TIMEOUT;
     let backend = Arc::new(backend);
     let reviewer = Arc::new(TestReviewer::new(&[
         verdict("revise", &["add a line"], "one gap"),
@@ -395,9 +416,24 @@ fn an_open_question_without_a_rewritten_receipt_holds_past_the_resume_timeout() 
     });
     let mut queue = SqliteQueue::open(&db).unwrap();
     let ask = open_question(&mut queue);
-    // Idle at its question past the resume timeout, which runs from the
-    // revise request before the question, and passes after it.
-    thread::sleep(backend.resume_timeout);
+    // The timeout runs from the turn of the revise request (its watch
+    // starts after `turn_requested`): a question opened past it would come
+    // after the revise ended, which is the test outrun by its load, not a
+    // question that did not hold.
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let timeout_ms = i64::try_from(QUESTION_RESUME_TIMEOUT.as_millis()).unwrap();
+    let requested = first_event_millis(&detail, "turn_requested");
+    let opened = first_event_millis(&detail, "ask_opened");
+    assert!(
+        opened < requested + timeout_ms,
+        "the question opened {} ms after the revise request, past its timeout",
+        opened - requested
+    );
+    // Idle at its question past the resume timeout, and passes after it.
+    await_written_after(&detail.runs[0].idle_marker_path().unwrap(), opened);
+    let left = requested + timeout_ms - unix_millis();
+    thread::sleep(Duration::from_millis(u64::try_from(left.max(0)).unwrap()));
+    thread::sleep(Duration::from_secs(1));
     await_passes(&passes, SOME_PASSES);
     let detail = queue.show(TaskId::new(1)).unwrap();
     let kinds = event_kinds(&detail);
