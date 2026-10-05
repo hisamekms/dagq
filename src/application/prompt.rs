@@ -2733,6 +2733,8 @@ pub struct RecoveryMaterial<'a> {
     pub history: &'a [Value],
     /// The actions that apply to this alert.
     pub allowed: &'a [&'a str],
+    /// The binary the supervisor runs and its replacements (task 1633).
+    pub binary: &'a BinaryFacts,
 }
 
 /// What each allowed action does, for the recovery prompt of a worker
@@ -2802,6 +2804,274 @@ pub const RECOVERY_HISTORY_ITEM_BYTES: usize = 2_000;
 /// error, receipt, logs, final screen, turns and events).
 pub const RECOVERY_ENDED_BYTES: usize = 24_000;
 
+/// The bytes of the supervisor's build identifier and its commit (task
+/// 1633): one line of about 100 bytes.
+pub const RECOVERY_BINARY_BYTES: usize = 500;
+
+/// The bytes of the task's dependencies with their landing commit and
+/// whether the build holds it (task 1633), and of one of them: a line takes
+/// about 100 bytes (a full commit), or up to the item's limit with why it
+/// cannot be told, so about 30 lines fit. Those the build does not hold (or
+/// cannot be told to) are kept first.
+pub const RECOVERY_DEPENDENCIES_BYTES: usize = 3_000;
+pub const RECOVERY_DEPENDENCY_BYTES: usize = 400;
+
+/// The count and bytes of the binary's replacements since the run was
+/// claimed (`update_installed`, `supervisor_handed_off`; task 1633), newest
+/// first, and the bytes of one: a line takes about 250 bytes (two build
+/// identifiers and a commit).
+pub const RECOVERY_REPLACEMENTS: usize = 10;
+pub const RECOVERY_REPLACEMENTS_BYTES: usize = 3_000;
+pub const RECOVERY_REPLACEMENT_BYTES: usize = 400;
+
+/// The file in the run directory that holds a recovery job's whole
+/// [`BinaryFacts`] (task 1633), next to its `prompt.txt`.
+pub fn recovery_binary_file(alert: RecoveryAlert, attempt: usize) -> String {
+    format!("recovery-{}-{attempt}.binary.json", alert.as_str())
+}
+
+/// A dependency of the task and its landing, for the recovery job (task
+/// 1633).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DependencyLanding {
+    pub task: TaskId,
+    /// The commit its latest `run_integrated` landed; `None` when it has
+    /// not landed.
+    pub landed: Option<String>,
+    /// Whether the supervisor's build holds `landed`; `None` when that
+    /// cannot be told, with `why`.
+    pub held: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+}
+
+/// What the recovery job reads of the binary the supervisor runs (task
+/// 1633): its build identifier and commit now, whether that build holds
+/// the landing of each of the task's dependencies, and the binary's
+/// replacements since the run was claimed, oldest first. A run that failed
+/// because the fixed binary did not yet hold a landing can then be retried
+/// once it does, without a person.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct BinaryFacts {
+    /// The supervisor's build identifier (`dagq::VERSION` of its binary).
+    pub version: String,
+    /// The commit `version` names ([`super::update::build_commit`]).
+    pub commit: Option<String>,
+    pub dependencies: Vec<DependencyLanding>,
+    /// `update_installed` (of the binary, not of the plugin only) and the
+    /// run's `supervisor_handed_off`: `event_id`, `kind`, `at`,
+    /// `previous_version`, `version` and, for `update_installed`, `commit`.
+    pub replacements: Vec<Value>,
+}
+
+/// The [`BinaryFacts`] of `run` for a supervisor of build `version`:
+/// `events` are the task's (the run's among them), `updates` the queue's
+/// `update_*` events, `landings` each dependency with the commit it landed,
+/// and `holds(commit, build)` whether `build` contains `commit`.
+pub fn binary_facts(
+    version: &str,
+    run: &TaskRun,
+    events: &[RunEvent],
+    updates: &[RunEvent],
+    landings: &[(TaskId, Option<String>)],
+    holds: &dyn Fn(&str, &str) -> Result<bool>,
+) -> BinaryFacts {
+    let commit = super::update::build_commit(version).map(str::to_owned);
+    let own = |e: &&RunEvent| e.run_id.as_ref() == Some(run.id());
+    // The run's first event is its claim.
+    let claimed = events.iter().filter(own).map(|e| e.id).min();
+    let after_claim = |e: &RunEvent| match claimed {
+        Some(id) => e.id > id,
+        None => e.created_at.as_str() >= run.created_at(),
+    };
+    let mut replaced: Vec<&RunEvent> = updates
+        .iter()
+        .filter(|e| {
+            e.kind == crate::domain::UPDATE_INSTALLED
+                && !crate::domain::stats::updates::plugin_only(e)
+                && after_claim(e)
+        })
+        .chain(
+            events
+                .iter()
+                .filter(own)
+                .filter(|e| e.kind == event_kind::EventKind::SupervisorHandedOff.as_str()),
+        )
+        .collect();
+    replaced.sort_by_key(|e| e.id);
+    replaced.dedup_by_key(|e| e.id);
+    let replacements = replaced
+        .into_iter()
+        .map(|e| {
+            let mut line = serde_json::json!({
+                "event_id": e.id,
+                "kind": e.kind,
+                "at": e.created_at,
+                "previous_version": e.payload.get("previous_version").cloned().unwrap_or(Value::Null),
+                "version": e.payload.get("version").cloned().unwrap_or(Value::Null),
+            });
+            if let Some(commit) = e.payload.get("commit") {
+                line["commit"] = commit.clone();
+            }
+            line
+        })
+        .collect();
+    let dependencies = landings
+        .iter()
+        .map(|(task, landed)| {
+            let (held, why) = match (landed, &commit) {
+                (None, _) => (None, Some("it has not landed".to_owned())),
+                (Some(_), None) => (
+                    None,
+                    Some("the build names no commit (a release or an unknown build)".to_owned()),
+                ),
+                (Some(landed), Some(build)) => match holds(landed, build) {
+                    Ok(held) => (Some(held), None),
+                    Err(error) => (None, Some(format!("{error:#}").trim().to_owned())),
+                },
+            };
+            DependencyLanding {
+                task: *task,
+                landed: landed.clone(),
+                held,
+                why,
+            }
+        })
+        .collect();
+    BinaryFacts {
+        version: version.to_owned(),
+        commit,
+        dependencies,
+        replacements,
+    }
+}
+
+/// How the recovery job judges a run the fixed binary failed (task 1633),
+/// for the jobs that may retry.
+const RECOVERY_BINARY_RULE: &str = "A run that failed because the fixed binary did not yet hold a task's landing (its error, receipt or a verification gate says the build identifier's commit does not contain that landing) is fixed by the binary's replacement: when the current build above holds that landing (held true, or the replacements above show a build at or after it), choose retry (retry_inherit for a run with commits of its own) with confidence high and do not ask a person, unless the rules above say the runtime does not apply retry (then recommend it in an escalation); while the current build does not hold it, a retry fails the same way, so choose wait or escalate.";
+
+/// The recovery prompt's part on the supervisor's binary (task 1633): the
+/// build now (section `binary`), the dependencies' landings (section
+/// `dependencies`, those the build does not hold or cannot be told to
+/// first) and the replacements since the claim (section `replacements`,
+/// newest first), each within its limit, what is left out counted and
+/// named with the run directory's file that holds it all
+/// ([`recovery_binary_file`]); for a job that may retry, the rule on a run
+/// the binary failed. It comes right after the alert's facts, so a prompt
+/// cut in its middle at the whole limit keeps it.
+fn binary_sections(
+    fit: &mut Fit,
+    material: &RecoveryMaterial<'_>,
+    attempt: usize,
+) -> Result<String> {
+    let facts = material.binary;
+    let read = format!(
+        "read {} of the run directory",
+        recovery_binary_file(material.alert, attempt)
+    );
+    let build = fit.text(
+        "binary",
+        &format!(
+            "{} ({})",
+            facts.version,
+            facts.commit.as_deref().map_or_else(
+                || "it names no commit: a release or an unknown build".to_owned(),
+                |commit| format!("commit {commit}")
+            )
+        ),
+        RECOVERY_BINARY_BYTES,
+        Keep::Start,
+        &read,
+    );
+    fit.section("binary", &build);
+    let deps = &facts.dependencies;
+    let values = deps
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()?;
+    let unheld = |index: &usize| deps[*index].held != Some(true);
+    let order: Vec<usize> = (0..deps.len())
+        .filter(unheld)
+        .chain((0..deps.len()).filter(|index| !unheld(index)))
+        .collect();
+    let (kept, left_out) = fit.lines(
+        "dependencies",
+        &values,
+        order,
+        (
+            usize::MAX,
+            RECOVERY_DEPENDENCIES_BYTES,
+            RECOVERY_DEPENDENCY_BYTES,
+        ),
+        &read,
+    );
+    let mut dependencies = if deps.is_empty() {
+        "none".to_owned()
+    } else {
+        kept.join("\n")
+    };
+    if !left_out.is_empty() {
+        let ids: Vec<String> = left_out
+            .iter()
+            .map(|&index| format!("task {}", deps[index].task))
+            .collect();
+        dependencies.push('\n');
+        dependencies.push_str(&left_out_note(
+            "of them (those the build does not hold were chosen first)",
+            &ids,
+            &read,
+        ));
+    }
+    fit.section("dependencies", &dependencies);
+    let lines = &facts.replacements;
+    let (kept, left_out) = fit.lines(
+        "replacements",
+        lines,
+        (0..lines.len()).rev(),
+        (
+            RECOVERY_REPLACEMENTS,
+            RECOVERY_REPLACEMENTS_BYTES,
+            RECOVERY_REPLACEMENT_BYTES,
+        ),
+        &read,
+    );
+    let mut replacements = if kept.is_empty() {
+        "none".to_owned()
+    } else {
+        kept.join("\n")
+    };
+    if !left_out.is_empty() {
+        let ids: Vec<String> = left_out
+            .iter()
+            .map(|&index| {
+                lines[index]
+                    .get("event_id")
+                    .map_or_else(|| format!("#{}", index + 1), Value::to_string)
+            })
+            .collect();
+        replacements.push('\n');
+        replacements.push_str(&left_out_note("of them (the oldest)", &ids, &read));
+    }
+    fit.section("replacements", &replacements);
+    let rule = if material
+        .allowed
+        .iter()
+        .any(|action| matches!(*action, "retry" | "retry_inherit"))
+    {
+        format!("{RECOVERY_BINARY_RULE}\n")
+    } else {
+        String::new()
+    };
+    Ok(format!(
+        "Binary of the supervisor (the fixed binary the runtime runs) now: {build}\n\
+         Dependencies of the task, the commit each landed and whether the current build holds it (held null when that cannot be told, with why), one JSON line each:\n{}\n\n\
+         Replacements of the binary since the run was claimed (update_installed and supervisor_handed_off, oldest first; version is the build it put in place), one JSON line each:\n{}\n\n\
+         {rule}\n",
+        dependencies.trim_end(),
+        replacements.trim_end(),
+    ))
+}
+
 /// What the recovery job of an alert is asked (ADR-0047 decisions 39 and
 /// 40): the alert, the task, the screen, the run's processes, the
 /// worktree's state and the run's earlier repairs, for a run that ended
@@ -2859,6 +3129,7 @@ pub fn recovery_prompt(
         fenced("json", &pretty)
     };
     fit.section("facts", &facts);
+    let binary = binary_sections(&mut fit, material, attempt)?;
     // Every worker run is headless since task 1437, a historical
     // interactive one too: its material is its last turns, newest first.
     let screen = fenced(
@@ -2973,6 +3244,7 @@ pub fn recovery_prompt(
          Acceptance criteria:\n{acceptance}\n\n\
          Current task verification commands (use these, including after a person's correction):\n{verification}\n\n\
          Alert facts:\n{facts}\n\n\
+         {binary}\
          {ended}\
          Last turns of the headless session (it has no screen):\n{screen}\n\n\
          Processes of the run (working directory in the worktree, or under the session's wrapper; the wrapper and the agent themselves are not listed):\n{processes}\n\n\
@@ -5938,6 +6210,7 @@ mod tests {
     fn a_headless_recovery_job_is_never_offered_a_dialog() {
         let task = task(7, "work", TaskStatus::InProgress);
         let facts = json!({});
+        let binary = no_binary();
         let recovery = |run: &TaskRun, alert| {
             recovery_prompt(
                 &task,
@@ -5960,6 +6233,7 @@ mod tests {
                         "close_and_proceed",
                         "wait",
                     ],
+                    binary: &binary,
                 },
             )
             .unwrap()
@@ -6632,6 +6906,15 @@ mod tests {
         .unwrap()
     }
 
+    fn no_binary() -> BinaryFacts {
+        BinaryFacts {
+            version: "0.1.0".into(),
+            commit: None,
+            dependencies: Vec::new(),
+            replacements: Vec::new(),
+        }
+    }
+
     fn event_of(id: i64, bytes: usize) -> RunEvent {
         RunEvent {
             id: crate::domain::EventId::new(id),
@@ -6828,6 +7111,21 @@ mod tests {
             })
             .collect();
         let status = big(" M src/a.rs", 50_000);
+        let binary = BinaryFacts {
+            version: format!("0.1.0-dev+{SHA}"),
+            commit: Some(SHA.into()),
+            dependencies: (1..=500)
+                .map(|id| DependencyLanding {
+                    task: TaskId::new(id),
+                    landed: Some(SHA.into()),
+                    held: Some(id % 2 == 0),
+                    why: None,
+                })
+                .collect(),
+            replacements: (1..=500)
+                .map(|id| json!({"event_id": id, "kind": "update_installed", "at": "t", "previous_version": format!("0.1.0-dev+{SHA}"), "version": format!("0.1.0-dev+{SHA}"), "commit": SHA}))
+                .collect(),
+        };
         for (run, ended) in [
             (run_on(Provider::Claude, WorkerMode::Headless), None),
             (
@@ -6851,6 +7149,7 @@ mod tests {
                     receipt_commit: None,
                     history: &history,
                     allowed: &["wait", "stop_processes"],
+                    binary: &binary,
                 },
             )
             .unwrap();
@@ -6863,6 +7162,8 @@ mod tests {
                 "processes",
                 "git_status",
                 "history",
+                "dependencies",
+                "replacements",
             ] {
                 assert!(
                     bytes.omitted.get(section).is_some_and(|n| *n > 0),
@@ -6882,6 +7183,28 @@ mod tests {
             assert!(text.contains("of them (the oldest) left out by this section's limit"));
             assert!(text.contains("read the files of the worktree at /runs/run/worktree"));
             assert!(text.contains("Answer with one JSON object and nothing else"));
+            // The binary's sections (task 1633) keep their limits, the
+            // newest replacements and the dependencies the build does not
+            // hold first, and name the run directory's file for the rest.
+            assert!(bytes.sections["binary"] <= RECOVERY_BINARY_BYTES);
+            assert!(bytes.sections["dependencies"] <= RECOVERY_DEPENDENCIES_BYTES + 600);
+            assert!(bytes.sections["replacements"] <= RECOVERY_REPLACEMENTS_BYTES + 600);
+            assert_eq!(
+                bytes.omitted["replacements"],
+                500 - RECOVERY_REPLACEMENTS,
+                "{bytes:?}"
+            );
+            assert!(text.contains(&format!(
+                "{} of them (the oldest) left out by this section's limit: 1, 2,",
+                500 - RECOVERY_REPLACEMENTS
+            )));
+            assert!(text.contains("\"event_id\":500,"));
+            assert!(!text.contains("\"event_id\":490,"));
+            assert!(text.contains("of them (those the build does not hold were chosen first) left out by this section's limit: task 2, task 4,"));
+            assert!(text.contains("\"task\":1}"));
+            assert!(text.contains(
+                "To read them: read recovery-idle_process-1.binary.json of the run directory."
+            ));
             if ended.is_some() {
                 assert_eq!(bytes.omitted.get("ended"), Some(&1));
                 assert!(text.contains("the run directory has the receipt, the verification logs"));
@@ -6891,6 +7214,213 @@ mod tests {
                 ));
             }
         }
+    }
+
+    fn binary_event(id: i64, run: Option<&str>, kind: &str, payload: Value) -> RunEvent {
+        RunEvent {
+            id: crate::domain::EventId::new(id),
+            task_id: run.map(|_| TaskId::new(7)),
+            goal_id: None,
+            run_id: run.map(|run| RunId::new(run).unwrap()),
+            kind: kind.into(),
+            payload,
+            created_at: format!("t{id}"),
+            actor: None,
+        }
+    }
+
+    /// The recovery job's binary facts (task 1633) name the build now, the
+    /// binary's replacements since the run's claim (not before it, not of
+    /// the plugin only, not another run's handoff) and whether the build
+    /// holds each dependency's landing.
+    #[test]
+    fn binary_facts_name_the_build_its_replacements_since_the_claim_and_what_it_holds() {
+        const OTHER: &str = "00000000-0000-4000-8000-000000000002";
+        let run = run(7, RunStatus::Failed, None);
+        let events = vec![
+            binary_event(10, Some(RUN), "run_claimed", json!({})),
+            binary_event(
+                11,
+                Some(OTHER),
+                "supervisor_handed_off",
+                json!({"version": "x"}),
+            ),
+            binary_event(
+                21,
+                Some(RUN),
+                "supervisor_handed_off",
+                json!({"previous_version": "0.1.0-dev+aaa", "version": "0.1.0-dev+bbb", "status": "running"}),
+            ),
+        ];
+        // Newest first, as the queue reads them.
+        let updates = vec![
+            binary_event(
+                20,
+                None,
+                "update_installed",
+                json!({"previous_version": "0.1.0-dev+aaa", "version": "0.1.0-dev+bbb", "commit": "bbb"}),
+            ),
+            binary_event(
+                15,
+                None,
+                "update_installed",
+                json!({"plugin_only": true, "version": "0.1.0"}),
+            ),
+            binary_event(12, None, "update_started", json!({"commit": "bbb"})),
+            binary_event(
+                5,
+                None,
+                "update_installed",
+                json!({"version": "0.1.0-dev+aaa"}),
+            ),
+        ];
+        let landings = vec![
+            (TaskId::new(1), Some("aaa".to_owned())),
+            (TaskId::new(2), Some("ccc".to_owned())),
+            (TaskId::new(3), None),
+            (TaskId::new(4), Some("zzz".to_owned())),
+        ];
+        let holds = |commit: &str, build: &str| -> Result<bool> {
+            assert_eq!(build, "bbb");
+            match commit {
+                "aaa" => Ok(true),
+                "ccc" => Ok(false),
+                _ => anyhow::bail!("unknown commit {commit}"),
+            }
+        };
+        let facts = binary_facts(
+            "0.1.0-dev+bbb.dirty",
+            &run,
+            &events,
+            &updates,
+            &landings,
+            &holds,
+        );
+        assert_eq!(facts.version, "0.1.0-dev+bbb.dirty");
+        assert_eq!(facts.commit.as_deref(), Some("bbb"));
+        assert_eq!(
+            facts.replacements,
+            vec![
+                json!({"event_id": 20, "kind": "update_installed", "at": "t20", "previous_version": "0.1.0-dev+aaa", "version": "0.1.0-dev+bbb", "commit": "bbb"}),
+                json!({"event_id": 21, "kind": "supervisor_handed_off", "at": "t21", "previous_version": "0.1.0-dev+aaa", "version": "0.1.0-dev+bbb"}),
+            ]
+        );
+        let held: Vec<(Option<bool>, Option<&str>)> = facts
+            .dependencies
+            .iter()
+            .map(|d| (d.held, d.why.as_deref()))
+            .collect();
+        assert_eq!(
+            held,
+            vec![
+                (Some(true), None),
+                (Some(false), None),
+                (None, Some("it has not landed")),
+                (None, Some("unknown commit zzz")),
+            ]
+        );
+        assert_eq!(
+            serde_json::to_value(&facts.dependencies[0]).unwrap(),
+            json!({"task": 1, "landed": "aaa", "held": true})
+        );
+    }
+
+    /// Without a replacement since the claim, and for a build that names
+    /// no commit, the facts say so rather than guess.
+    #[test]
+    fn binary_facts_of_a_build_without_a_commit_cannot_tell_what_it_holds() {
+        let run = run(7, RunStatus::Failed, None);
+        let events = vec![binary_event(10, Some(RUN), "run_claimed", json!({}))];
+        let updates = vec![binary_event(
+            5,
+            None,
+            "update_installed",
+            json!({"version": "0.1.0"}),
+        )];
+        let landings = vec![(TaskId::new(1), Some("aaa".to_owned()))];
+        let holds = |_: &str, _: &str| -> Result<bool> { panic!("nothing to ask git") };
+        let facts = binary_facts("0.1.0", &run, &events, &updates, &landings, &holds);
+        assert_eq!(facts.commit, None);
+        assert!(facts.replacements.is_empty());
+        assert_eq!(facts.dependencies[0].held, None);
+        assert!(
+            facts.dependencies[0]
+                .why
+                .as_deref()
+                .unwrap()
+                .contains("names no commit")
+        );
+        // A run with no event of its own yet counts from its claim time.
+        let facts = binary_facts("0.1.0", &run, &[], &updates, &[], &holds);
+        assert_eq!(facts.replacements.len(), 1);
+    }
+
+    /// The recovery prompt carries the binary's facts right after the
+    /// alert's, counted in their own sections, and tells a job that may
+    /// retry that a run the binary failed is retried once the build holds
+    /// the landing it waited for (task 1633).
+    #[test]
+    fn a_recovery_prompt_carries_the_binary_and_when_a_replacement_lets_it_retry() {
+        let task = task(7, "work", TaskStatus::InProgress);
+        let facts = json!({"alert": "failed"});
+        let binary = BinaryFacts {
+            version: format!("0.1.0-dev+{SHA}"),
+            commit: Some(SHA.into()),
+            dependencies: vec![DependencyLanding {
+                task: TaskId::new(1065),
+                landed: Some("338d7a5".into()),
+                held: Some(true),
+                why: None,
+            }],
+            replacements: vec![json!({"event_id": 9, "kind": "update_installed", "version": "v2"})],
+        };
+        let prompt = |allowed: &[&str], binary: &BinaryFacts| {
+            recovery_prompt(
+                &task,
+                &run(7, RunStatus::Failed, None),
+                2,
+                &RecoveryMaterial {
+                    alert: RecoveryAlert::Failed,
+                    ended: Some("Last error of the run: ...".into()),
+                    facts: &facts,
+                    workspace: "ws",
+                    screen: "",
+                    processes: Ok(Vec::new()),
+                    git_status: "",
+                    head: SHA,
+                    receipt_commit: None,
+                    history: &[],
+                    allowed,
+                    binary,
+                },
+            )
+            .unwrap()
+        };
+        let fitted = prompt(&crate::domain::recovery::ENDED_ACTIONS, &binary);
+        let text = &fitted.text;
+        assert!(text.contains(&format!(
+            "Binary of the supervisor (the fixed binary the runtime runs) now: 0.1.0-dev+{SHA} (commit {SHA})"
+        )));
+        assert!(text.contains("{\"held\":true,\"landed\":\"338d7a5\",\"task\":1065}"));
+        assert!(text.contains("\"event_id\":9"));
+        assert!(text.contains(RECOVERY_BINARY_RULE));
+        let facts_at = text.find("Alert facts:").unwrap();
+        let binary_at = text.find("Binary of the supervisor").unwrap();
+        assert!(facts_at < binary_at && binary_at < text.find("Last error of the run").unwrap());
+        for section in ["binary", "dependencies", "replacements"] {
+            assert!(fitted.bytes.sections[section] > 0, "{section}");
+        }
+        assert!(fitted.bytes.omitted.is_empty(), "{:?}", fitted.bytes);
+        // A live session's job that may not retry gets no such rule, and
+        // a task without dependencies or replacements says none.
+        let fitted = prompt(&["wait", "stop_processes"], &no_binary());
+        assert!(!fitted.text.contains(RECOVERY_BINARY_RULE));
+        assert!(
+            fitted
+                .text
+                .contains("0.1.0 (it names no commit: a release or an unknown build)")
+        );
+        assert!(fitted.text.contains("one JSON line each:\nnone\n"));
     }
 
     /// The planner opened for a revise of a proposal with many long tasks

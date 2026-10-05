@@ -115,6 +115,87 @@ fn a_failed_run_without_commits_is_retried_by_its_recovery_job_and_lands() {
     assert!(position(&kinds, "triage_started") < position(&kinds, "recovery_prompt_written"));
 }
 
+/// Task 1633: the recovery job of a failed run reads the build the
+/// supervisor runs, the commit each dependency of the task landed and
+/// whether that build holds it, and the binary's replacements since the
+/// claim, in their own sections of `recovery_prompt_written`, and the whole
+/// of it in the run directory's `recovery-<alert>-<attempt>.binary.json`.
+#[test]
+fn the_recovery_job_reads_the_supervisors_build_and_the_dependencies_it_holds() {
+    let (_dir, repo, db) = fixture();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let dependent = add_ready_task(&mut queue, "dependent task", &[TaskId::new(1)]);
+    assert_eq!(dependent, TaskId::new(2));
+    drop(queue);
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    backend.script_for(2, &fails_once(db.parent().unwrap()));
+    let reviewer = TestReviewer::new(&[
+        verdict("pass", &[], "meets the acceptance"),
+        verdict("pass", &[], "meets the acceptance"),
+    ])
+    .with_triages(&[repair(
+        json!({"action": "retry"}),
+        "the session died on its own",
+    )]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let landed_run = queue.show(TaskId::new(1)).unwrap().runs[0].id().clone();
+    let landed = queue
+        .run_events(&landed_run)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == "run_integrated")
+        .unwrap()
+        .payload["commit"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let detail = queue.show(dependent).unwrap();
+    assert_eq!(detail.runs.len(), 2);
+    let first = &detail.runs[0];
+    assert_eq!(first.status(), RunStatus::Failed);
+
+    let prompts = reviewer.triage_prompts();
+    assert_eq!(prompts.len(), 1);
+    let (prompt, dir) = &prompts[0];
+    let version = dagq::VERSION;
+    for expected in [
+        format!("Binary of the supervisor (the fixed binary the runtime runs) now: {version}"),
+        format!("\"landed\":\"{landed}\""),
+        "\"task\":1".to_owned(),
+        "Replacements of the binary since the run was claimed (update_installed and supervisor_handed_off, oldest first; version is the build it put in place), one JSON line each:\nnone".to_owned(),
+        "is fixed by the binary's replacement".to_owned(),
+    ] {
+        assert!(prompt.contains(&expected), "{expected:?} in {prompt}");
+    }
+    let file: Value =
+        serde_json::from_slice(&fs::read(dir.join("recovery-failed-1.binary.json")).unwrap())
+            .unwrap();
+    assert_eq!(file["version"], version);
+    assert_eq!(file["dependencies"][0]["task"], 1);
+    assert_eq!(file["dependencies"][0]["landed"], landed.as_str());
+    // The build of this test binary is not a commit of the fixture's
+    // repository (or names none): whether it holds the landing cannot be
+    // told, and the job reads why.
+    assert!(file["dependencies"][0]["held"].is_null(), "{file}");
+    assert!(file["dependencies"][0]["why"].is_string(), "{file}");
+    assert!(prompt.contains("\"held\":null"), "{prompt}");
+    assert_eq!(file["replacements"], json!([]));
+    let events = queue.run_events(first.id()).unwrap();
+    let written = events
+        .iter()
+        .find(|e| e.kind == "recovery_prompt_written")
+        .unwrap();
+    let sections = &written.payload["prompt_bytes"]["sections"];
+    for section in ["binary", "dependencies", "replacements"] {
+        assert!(
+            sections[section].as_u64().unwrap() > 0,
+            "{section}: {sections}"
+        );
+    }
+}
+
 /// Task 572 (ADR-t883-1): a run whose `integrate` verification fails on a
 /// broken verify command, and whose resumed session gives up, goes to the
 /// recovery job. Its `decide` asks offer the verify fix; a person answers

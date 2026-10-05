@@ -3,7 +3,7 @@
 //! escalate to an ask. Historical alert kinds remain readable in the domain.
 
 use super::*;
-use crate::application::prompt::FittedPrompt;
+use crate::application::prompt::{BinaryFacts, FittedPrompt, binary_facts, recovery_binary_file};
 use crate::domain::ActorContext;
 use crate::domain::EventKind;
 use crate::domain::actor_model::{ActorLaunch, ModelRole};
@@ -813,6 +813,7 @@ fn spawn_live(
     launch: &ActorLaunch,
 ) -> Result<HeadlessJob> {
     let detail = sv.queue.show(run.task_id())?;
+    let binary = binary_facts_of(sv, run, &detail)?;
     let task = detail.task;
     // A headless session has no screen: its last turns stand in for it.
     let screen = { turns_excerpt(sv, run) };
@@ -839,6 +840,7 @@ fn spawn_live(
         receipt_commit: receipt.as_deref(),
         history: &history,
         allowed: live.allowed,
+        binary: &binary,
     };
     let prompt = recovery_prompt(&task, run, attempt, &material)?
         .with_language(sv.verifier.language().as_ref());
@@ -846,12 +848,44 @@ fn spawn_live(
         sv,
         run.id(),
         live.run_dir,
-        alert,
-        attempt,
-        &prompt,
+        (alert, attempt),
+        (&prompt, &binary),
         None,
         launch,
     )
+}
+
+/// The queue's `update_*` events the recovery job's [`BinaryFacts`] reads
+/// at most, newest first: a few days of landings.
+const BINARY_UPDATE_EVENTS: usize = 200;
+
+/// What the recovery job of `run` reads of the binary the supervisor runs
+/// (task 1633): this process's build identifier, the replacements since
+/// the claim, and whether the build holds the landing commit of each of
+/// the task's dependencies (`detail`).
+pub(super) fn binary_facts_of(
+    sv: &mut Supervisor<'_>,
+    run: &TaskRun,
+    detail: &crate::domain::TaskDetail,
+) -> Result<BinaryFacts> {
+    let updates = sv.queue.update_events(BINARY_UPDATE_EVENTS)?;
+    let mut landings = Vec::new();
+    for dependency in &detail.dependencies {
+        let events = sv.queue.show(*dependency)?.events;
+        let landed = crate::domain::areas::landed_commits(&events)
+            .pop()
+            .map(|(_, commit)| commit);
+        landings.push((*dependency, landed));
+    }
+    let repository = sv.repository.clone();
+    Ok(binary_facts(
+        &sv.layout.version,
+        run,
+        &detail.events,
+        &updates,
+        &landings,
+        &|commit, build| repository.is_ancestor(commit, build),
+    ))
 }
 
 /// The worktree's `git status`, HEAD and the receipt's `commit`, for the
@@ -909,9 +943,8 @@ pub(super) fn start_job(
     sv: &mut Supervisor<'_>,
     run: &RunId,
     dir: &Path,
-    alert: RecoveryAlert,
-    attempt: usize,
-    prompt: &FittedPrompt,
+    (alert, attempt): (RecoveryAlert, usize),
+    (prompt, binary): (&FittedPrompt, &BinaryFacts),
     session_id: Option<&str>,
     launch: &ActorLaunch,
 ) -> Result<HeadlessJob> {
@@ -921,6 +954,12 @@ pub(super) fn start_job(
     sv.files.write(
         &dir.join(job_file(alert, attempt, "prompt.txt")),
         prompt.text.as_bytes(),
+    )?;
+    // All of what the prompt's binary sections hold to their limits, for
+    // the job to read (task 1633).
+    sv.files.write(
+        &dir.join(recovery_binary_file(alert, attempt)),
+        &serde_json::to_vec_pretty(binary)?,
     )?;
     // What the prompt takes (task 1571, ADR-t1566-1 decision 6).
     sv.queue.record_runtime_event(

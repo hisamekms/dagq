@@ -593,6 +593,7 @@ impl Supervisor<'_> {
                 .collect::<Result<Vec<_>, _>>()?,
         );
         let workspace = run.workspace_id().unwrap_or("none").to_owned();
+        let binary = super::recovery::binary_facts_of(self, run, &detail)?;
         let material = RecoveryMaterial {
             alert,
             ended: Some(ended),
@@ -605,6 +606,7 @@ impl Supervisor<'_> {
             receipt_commit: receipt.as_deref(),
             history: &history,
             allowed: &ENDED_ACTIONS,
+            binary: &binary,
         };
         let prompt = recovery_prompt(&detail.task, run, attempt, &material)?
             .with_language(self.verifier.language().as_ref());
@@ -625,9 +627,8 @@ impl Supervisor<'_> {
             self,
             run.id(),
             &dir,
-            alert,
-            attempt,
-            &prompt,
+            (alert, attempt),
+            (&prompt, &binary),
             session_id.as_deref(),
             &launch,
         )?;
