@@ -4,8 +4,8 @@ type: design
 title: Manual smoke of the paths that include real Claude and Codex
 status: current
 created: 2026-09-25
-updated: 2026-10-05 # task 1703: Codex run review argv checked against the current code; task 841: the smoke of a required broker; task 1580: the e2e stub moved to tests/e2e/stub.rs (after task 1461); task 1437; task 1440: runs open no workspace, scenario 4 no longer runs
-last_verified: 2026-10-05 # task 1703: Codex run review argv checked against the current code; task 841; task 1580; task 1437; task 1440
+updated: 2026-10-05 # task 1703: Codex run review argv checked against the current code; task 841: the smoke of a required broker; task 1580: the e2e stub moved to tests/e2e/stub.rs (after task 1461); task 1437; task 1440: runs open no workspace, scenario 4 no longer runs; task 1205
+last_verified: 2026-10-05 # task 1703: Codex run review argv checked against the current code; task 841; task 1580; task 1437; task 1440; task 1205
 scope: operations
 related:
   - adr-0036
@@ -237,6 +237,85 @@ Codex の run の確認点ごとの観察と結論:
 - 手順 4 の `status` の `supervisors[].providers`（run の当時の値は記録に残らない）。
 - run の当時の `~/.codex/config.toml` の中身（前後を比べていない。更新時刻と今の中身だけ）。
 
+### 結果（2026-10-05、task 1174 後の本番の Codex の記録から、task 1205）
+
+ask 214 の方針に従い、本番の既存記録を読み取った。worker は実 Codex を起動せず、queue・runtime・`~/.codex/config.toml` を変更していない。以下の時刻は UTC。観測する event の窓は **2026-09-30T05:27:31Z 以上、2026-10-05T08:00:00Z 未満**に固定した（53,379 event、最後は 2026-10-05T07:59:54.965Z）。測定時の `stat` は 2026-10-05T10:04Z 頃の値で、task context の 2026-09-30T12:27:29Z から変わっていたため、新しい更新時刻を含む期間で照合した。
+
+読んだコマンド（`dagq` は `which dagq` で確認した固定バイナリ `~/.local/bin/dagq`）:
+
+```sh
+dagq events --full --kind update_installed --all --since 2026-09-30T05:27:31Z --limit 100000
+dagq events --full --kind turn_started --all --since 2026-09-30T05:27:31Z
+dagq events --full --all --since 2026-09-30T05:27:31Z --until 2026-10-05T08:00:00Z --limit 1000 --after <cursor>
+dagq status
+stat -f '%m %Sm' -t '%Y-%m-%dT%H:%M:%S%z' ~/.codex/config.toml
+rg -A1 '^\[projects' ~/.codex/config.toml
+```
+
+`--all` は件数の上限を外さない。2 行目の既定 100 件だけでは窓を覆わないので、3 行目を `--after 0` から返された `cursor` で繰り返し、1000 件未満の最後の page まで取得した。全 event を `--limit 100000` で一度に読む試みは queue service の応答の 16 MiB 境界で失敗したため、集計には使っていない。取得した JSON を Python で読み、worker は `kind: turn_started`・`payload.provider: codex`・`run_id` 有り、job は `*_started` の `payload.launch.provider: codex` を選んだ。終了は run・turn、または job ID・attempt を対応づけた。
+
+| 確認点 | 観察 | 結論 |
+| --- | --- | --- |
+| 固定バイナリの更新 | `update_installed` event 49415、2026-09-30T05:27:31.861Z、commit `fddd507508fb4e7862a1931d98720384c742c57a`、version `0.4.0-dev+fddd507508fb4e7862a1931d98720384c742c57a` | task 1174 の trust override を含む更新の後を読んだ |
+| Codex CLI の版 | `status.supervisors[].providers` の codex は `found: true`、`modes: [headless]`、executable `/Users/shinnosukeooyama/.codex/packages/standalone/releases/0.160.0-aarch64-apple-darwin/bin/codex` | 現在は 0.160.0。task 1174 の source 調査は 0.155.1。窓内の Codex の `run_claimed.codex_version` は 0.155.1 が 95 件、0.159.2 が 1 件、0.160.0 が 4 件（resume や窓の前に claim された run の版はこの件数に含めない） |
+| config の更新時刻 | `stat`: epoch `1790953911`、`2026-10-03T00:11:51+0900` = **2026-10-02T15:11:51Z**。窓内の同じ秒の event は 0 件 | Codex の exec・resume・job の開始と一致しない。書いた process はこの記録だけでは特定できない |
+| worker の開始 | 104 run・168 turn（`resume: false` 102、`true` 66）。最初は下表の task 1142、最後は task 1437 turn 5 | 更新時刻と同じ秒の exec・resume は 0。更新後にも 7 exec・10 resume があり、その開始・終了より config の mtime は古い |
+| job の開始 | Codex は plan review 395、run review 206、goal review 48、throughput review 14。config の更新後はそれぞれ 346・132・41・12 件 | 同じ秒の job 開始は 0。ただし plan review 617 の実行区間は更新時刻を含む（下表）。開始との不一致だけで、その実行中に書かなかったとは判定しない |
+
+読んだ worker の具体例を以下に示す。先頭 3 行は更新後の最初の exec・最初の resume・mtime 直前の最後の worker 開始で、それ以降は **mtime 後の 17 turn 全件**。`resume: false` を exec、`true` を resume とした（turn 番号が 2 以上でも新 thread の exec がある）。task 705 のこの turn には終了 event が無く、成功した resume の証拠には使わない。
+
+| task | run ID | turn / 起動 | 開始 → 終了（UTC） | event ID |
+| --- | --- | --- | --- | --- |
+| 1142 | `e94e23b4-ff84-451a-85fc-e0589f18e82b` | 1 / exec | 2026-09-30T05:31:22.148Z → 2026-09-30T05:38:28.597Z | 49442 → 49478 |
+| 705 | `86e8a830-ddef-4f8e-92d9-e775f50c225a` | 2 / resume | 2026-09-30T09:12:22.832Z → 終了 event 無し | 51430 → — |
+| 955 | `0ce0d8a2-a1d4-49e1-a173-3fc90086c562` | 8 / resume | 2026-10-02T00:04:27.886Z → 2026-10-02T00:08:57.188Z | 58854 → 58923 |
+| 1460 | `30d8c537-bc04-4589-a9ad-ecc7f0c97d1a` | 1 / exec | 2026-10-03T03:30:38.796Z → 2026-10-03T04:00:32.145Z | 72173 → 72434 |
+| 1437 | `3307f9a3-948a-4530-b597-e8b1cd1c2996` | 2 / exec | 2026-10-04T02:18:08.140Z → 2026-10-04T02:31:59.767Z | 81234 → 81335 |
+| 1408 | `7caa494a-1516-4edf-b56c-899f9366b9cf` | 1 / exec | 2026-10-04T02:19:02.233Z → 2026-10-04T02:22:33.281Z | 81263 → 81267 |
+| 1505 | `0de6cd72-bb17-45b8-815a-67df22a1101b` | 1 / exec | 2026-10-04T02:30:20.069Z → 2026-10-04T03:06:15.901Z | 81309 → 81638 |
+| 1520 | `e9536c58-fd75-45ad-a56f-142528c22ca6` | 3 / exec | 2026-10-04T02:30:32.401Z → 2026-10-04T02:43:53.591Z | 81332 → 81425 |
+| 1583 | `6357a771-18de-44db-a425-e73f6efbaead` | 1 / exec | 2026-10-04T02:33:23.079Z → 2026-10-04T02:38:58.770Z | 81357 → 81389 |
+| 1189 | `9874facf-b0e8-47dd-9d93-5d4052d079a2` | 1 / exec | 2026-10-04T02:38:34.804Z → 2026-10-04T02:47:26.123Z | 81387 → 81464 |
+| 1437 | `3307f9a3-948a-4530-b597-e8b1cd1c2996` | 3 / resume | 2026-10-04T02:44:16.513Z → 2026-10-04T02:50:14.141Z | 81458 → 81506 |
+| 1520 | `e9536c58-fd75-45ad-a56f-142528c22ca6` | 4 / resume | 2026-10-04T02:47:54.292Z → 2026-10-04T02:52:07.426Z | 81492 → 81548 |
+| 1583 | `6357a771-18de-44db-a425-e73f6efbaead` | 2 / resume | 2026-10-04T02:50:09.841Z → 2026-10-04T02:50:44.993Z | 81505 → 81513 |
+| 1189 | `9874facf-b0e8-47dd-9d93-5d4052d079a2` | 2 / resume | 2026-10-04T02:51:12.926Z → 2026-10-04T02:51:46.072Z | 81541 → 81543 |
+| 1189 | `9874facf-b0e8-47dd-9d93-5d4052d079a2` | 3 / resume | 2026-10-04T02:53:48.566Z → 2026-10-04T02:55:58.217Z | 81563 → 81579 |
+| 1437 | `3307f9a3-948a-4530-b597-e8b1cd1c2996` | 4 / resume | 2026-10-04T03:06:07.742Z → 2026-10-04T04:06:08.536Z | 81634 → 81955 |
+| 1505 | `0de6cd72-bb17-45b8-815a-67df22a1101b` | 2 / resume | 2026-10-04T03:09:36.242Z → 2026-10-04T03:17:07.756Z | 81691 → 81723 |
+| 1505 | `0de6cd72-bb17-45b8-815a-67df22a1101b` | 3 / resume | 2026-10-04T03:19:32.376Z → 2026-10-04T03:31:32.944Z | 81757 → 81832 |
+| 1583 | `6357a771-18de-44db-a425-e73f6efbaead` | 3 / resume | 2026-10-04T03:28:05.737Z → 2026-10-04T03:50:48.003Z | 81821 → 81894 |
+| 1437 | `3307f9a3-948a-4530-b597-e8b1cd1c2996` | 5 / resume | 2026-10-04T04:09:27.090Z → 2026-10-04T04:47:46.592Z | 81985 → 82197 |
+
+job の時刻の照合（開始・終了の event を読む）:
+
+| job / task・goal | 開始 → 終了（UTC） | event ID | mtime との関係 |
+| --- | --- | --- | --- |
+| plan review 616 / task 1411 | 2026-10-02T15:06:42.718Z → 15:09:48.273Z | 64429 → 64467 | 更新前に終了 |
+| plan review 617 / task 1418 | 2026-10-02T15:09:48.615Z → 15:13:14.789Z | 64470 → 64522 | 開始は一致しないが、実行中に更新時刻がある |
+| plan review 618 / task 1420 | 2026-10-02T15:13:15.327Z → 15:17:27.576Z | 64525 → 64592 | 更新後に開始・終了 |
+| goal review 18 / goal 75 | 2026-10-01T18:31:35.474Z → 18:33:12.503Z | 56080 → 56104 | task 1174 の更新後の最初の Codex goal review、mtime より前 |
+| goal review 24 / goal 58 | 2026-10-02T09:39:40.609Z → 09:44:28.945Z | 61726 → 61745 | mtime に最も近い goal review の開始、更新前に終了 |
+
+plan review 617 と goal review 24 は `<queue>/plan-reviews/617/review.out`・`<queue>/goal-reviews/24/review.out` の `thread.started` から rollout を探して読んだ（`<queue>` は `~/.local/share/dagq/77067154921b9014`）。thread は順に `01a0fd2a-247e-7351-a195-c2046852f855`・`01a0fbfb-d9f8-7950-81b2-08f38ec2ab18`。`~/.codex/sessions/2026/10/03/rollout-2026-10-03T00-09-52-01a0fd2a-247e-7351-a195-c2046852f855.jsonl` と `2026/10/02/rollout-2026-10-02T18-39-42-01a0fbfb-d9f8-7950-81b2-08f38ec2ab18.jsonl` の `session_meta` はともに `originator: codex_exec`・`cli_version: 0.159.2`、最初の `turn_context`（15:09:55.302Z / 09:39:45.389Z）は `sandbox_policy: {type: read-only, network_access: true}`・`approval_policy: never`・cwd は main checkout。これは job の設定の観察であり、job 617 と config 更新の因果関係の証拠にはしない。
+
+`[projects]` の現在の一覧（path の先頭の `~` は `/Users/shinnosukeooyama`）:
+
+| project | trust_level |
+| --- | --- |
+| `~/.anyenv` | untrusted |
+| `~/.local/share/chezmoi` | trusted |
+| `~/ghq/github.com/hisamekms/wt-playground` | trusted |
+| `~/ghq/github.com/hisamekms/formula` | untrusted |
+| `~/work/nightingale` | trusted |
+| `~/ghq/github.com/hisamekms/toma-app` | trusted |
+| `~/ghq/github.com/hisamekms/cmux-taskq` | trusted |
+| `/private/tmp/claude-501/-Users-shinnosukeooyama-ghq-github-com-hisamekms-dagq/35ae56f1-3752-4068-afbd-1559abe9ad3e/scratchpad/hl/repo` | trusted |
+| `~/.local/share/dagq/77067154921b9014/runs/7cf22aa5-ed53-4e47-9956-322c0a18daa9/spike/main` | trusted |
+| `~/ghq/github.com/hisamekms/dagq`（main checkout） | trusted |
+
+**結論**: task 1174 後の起動と同じ秒に config が更新された観察は無く、少なくとも最後の更新より後に実行された worker の exec 7 件・resume 10 件は config を書き直していない。更新後に始まった job も同様に、測定時点まで mtime を進めていない。現在の `[projects]` に上表の実測 run の worktree の trust は無く、queue の `runs/` 配下の key は spike の `spike/main` 1 件だけだった。main checkout の trust は存在するが、更新前の config の snapshot が無いため、これら 2 欄がいつ足されたか・task 1174 後に追加や同じ内容の書き直しがあったかは判定できない。mtime より前の turn・job は後の更新に隠れるため、全期間の前後不変を証明したとはしない。job 617 の実行中の更新も書き込み元・追加された欄は未特定で、exec・resume・job による書き込みが残っているという defect の証拠は得られなかった。task 1102 の開始と同じ秒の更新という観察は、今回の worker の記録では再現されなかった。
+
 ### 結果（2026-09-30、本番の Claude の記録から、task 1175）
 
 task 1102 の後、ask 224 で人が了承して planner が `--headless` を付けた次の 7 task が着地した。ask 214 と同じく使い捨ての queue は作らず、本番の記録に手順 6 を当てた。固定バイナリ `~/.local/bin/dagq`（`0.4.0-dev+0e8c4020daa113cddac40504c1a2980d3ea56649`）で、各 task の `show <ID> --full`、各 run の `events --run <RUN> --full --all`・`timeline <RUN>`、`stats --full`、`kpi --since 2026-09-30T00:00:00Z --until 2026-09-30T03:00:00Z --by provider` と `--by route` を読んだ。加えて run dir（`~/.local/share/dagq/77067154921b9014/runs/<RUN>/`）の `turns/`・`claude-headless-settings.json` と Git の記録を読んだ。queue の状態は変えていない。以下の時刻は UTC。
@@ -447,6 +526,10 @@ file は Python の `pathlib.Path.read_text()` と `json.loads()` で JSONL を�
 - 書き込みの拒否: 人か inbox が使い捨て queue の read-only job に無害な file の書き込みを試させ、拒否の出力を採取する必要がある。今回の成功した読み取りだけでは拒否の挙動は分からない。
 - argv と config の前後比較: 人か inbox が使い捨て queue の job の実行中に `ps` で引数を採取し、`~/.codex/config.toml` の更新時刻を起動前・終了後に控える必要がある。rollout の read-only 設定は argv の全体や config の不変性の代わりにはならない。
 - 手順 7 の使い捨て queue の後始末は今回は対象外（作成していない）。次に手作業のスモークを行った場合は手順どおりに行う。
+
+#### 2026-10-05: task 1174 後の config 更新時刻の照合（task 1205）
+
+[非対話の worker の結果（task 1205）](#結果2026-10-05task-1174-後の本番の-codex-の記録からtask-1205)で、更新後の本番の Codex goal review 48 件を含む job の開始を config の mtime（2026-10-02T15:11:51Z）と照合した。同じ秒に始まった goal review は無く、最も近い job 24（goal 58、codex-cli 0.159.2）は 09:39:40.609Z → 09:44:28.945Z に終了している。mtime 後に始まった 41 件の goal review は測定時点まで config の更新時刻を進めていない。job 24 の rollout も read-only・never を持つ。task 1114 の job 16・17 の起動前後の snapshot が無いという制限は残る。今回も各 job の前後の中身は採取しておらず、main checkout の既存の trust の追加時期は分からない。観察のコマンド・job ID・時刻・現在の `[projects]` 一覧と結論はリンク先にある。
 
 ## Codex の run review のスモーク
 
