@@ -54,7 +54,15 @@ task 1237 の後の main の run（例 run 37230895149、`2736 tests run: 2732 p
 
 ## macOSに固有として分けたtest
 
-今は無い。足すときは [testの制約](../development/testing.md) の「macOSに固有のtest」に従い、test の名前と、何が macOS にしか無いかをここに書く。
+| test | 場所 | macOS に固有として分けた理由 |
+| --- | --- | --- |
+| `infrastructure::adapters::tests::proc_pidinfo_reads_a_childs_directory_and_none_for_a_pid_that_runs_nothing` | `src/infrastructure/adapters.rs` | macOS 固有の `proc_pidinfo(PROC_PIDVNODEPATHINFO)` による process の作業ディレクトリの読み取りを検証するため、`#[cfg(target_os = "macos")]` で分ける。子 process の起動時の作業ディレクトリが読め、終了した process や無効な pid では `None` になることを確かめる。Linux は `/proc/<pid>/cwd` を読む別の実装 |
+
+runtime の実装だけを分ける cfg（`src/infrastructure/adapters.rs` の `process_cwd` / `process_executable`、`crates/dagq-broker/src/backends/fs.rs` の `set_errno`、`src/infrastructure/launchd.rs` の `HAS_LAUNCHD`）は test を分けていないので、この一覧に含めない。`tests/it/runtime_headless.rs` と `tests/it/runtime_support/thread_stacks.rs` の `cfg!(target_os = "macos")` は test とその helper 内の分岐で、test 自体は両方の OS で流れるため、同じく含めない。
+
+macOS の外だけで流れる逆向きの test は上の一覧とは別: `src/infrastructure/launchd.rs` の `install_off_macos_says_launchd_mode_needs_macos` は `#[cfg(not(target_os = "macos"))]` で、launchd mode が使えないと分かる error を確かめる（上の「task 1238 で扱った Linux の失敗」）。
+
+足すときは [testの制約](../development/testing.md) の「macOSに固有のtest」に従い、test の名前・場所と、何が macOS にしか無いかをここに書く。
 
 ## summary の書式
 
