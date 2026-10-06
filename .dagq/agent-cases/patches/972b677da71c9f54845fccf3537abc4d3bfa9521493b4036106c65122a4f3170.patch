@@ -1,0 +1,450 @@
+diff --git a/docs/design/supervisor-lifecycle/auto-update.md b/docs/design/supervisor-lifecycle/auto-update.md
+index e9906f9d..087df822 100644
+--- a/docs/design/supervisor-lifecycle/auto-update.md
++++ b/docs/design/supervisor-lifecycle/auto-update.md
+@@ -4,8 +4,8 @@ type: design
+ title: "Auto-update"
+ status: current
+ created: 2026-09-26
+-updated: 2026-10-04 # task 1582
+-last_verified: 2026-10-04 # task 1582
++updated: 2026-10-04 # task 1269 (after task 1582)
++last_verified: 2026-10-04 # task 1269
+ scope: runtime
+ related:
+   - design-supervisor-lifecycle
+@@ -36,7 +36,7 @@ related:
+   - supervisorの着地でも、人が手で打った`integrate`でも、mainが進めば同じように拾う。ビルド中に次の着地があっても積まず、jobが終わった後の最初の見直しで、そのときのheadを1回ビルドする。
+ - **job**（`dagq --db <db> auto-update --commit <head> --token <supervisor> --to <supervisorのbinary> --repo <checkout> --log <build log> --claude … --codex … [--cmux …] [--plugin-dir …] [--build-command …] [--e2e-command …] [--e2e-timeout …] [--poll-ms …]`。`--claude`と`--codex`はsupervisorの`Layout`の値で、jobがsupervisorを起動し直す`up`にも渡す）: supervisorが自分のbinary（`current_exe`）で起動する。setsidで新しいsessionとprocess groupに入れる（supervisorのexecにも、in-cmuxのworkspaceが閉じられることにも巻き込まれないため）。stdoutは`<queue dir>/logs/update-<unix時刻>-<commit 12桁>.json`（結果）、stderrは同じ名前の`.log`、ビルドの出力は`.build.log`、jobのtracingは`auto-update-*.jsonl`（どれも最後の書き込みから14日で消える。[Logs](logs.md#logs)）。hiddenの`--poll-ms`（既定500）は3の引き継ぎの待ちと4の見張りがqueueを見る間隔で、supervisorはhiddenの`supervise --update-poll-ms`を渡されたときだけそれを付ける（testが短くする。task 1048）。起動したら、supervisorが`update_started`（`pid`・`base`・`supervisor`・`version`・logのpath）を書く。
+   1. **ビルド**: `<queue dir>/update/checkout`をheadに合わせる（無ければ`git worktree add --detach --force`、あれば`checkout --detach --force`と`clean -fdx`）。`CARGO_TARGET_DIR=<queue dir>/update/target`で`cargo build --release --locked -p dagq -p dagq-broker-client`を走らせる（workerのbrokerのclientも同じbuildで`release/dagq`の隣に作る。[ADR-t827-1](../../adr/2026-09-28-t827-1-broker-crates-binaries-and-version-alignment.md)決定5。`--update-build-command`で渡したshellのコマンドに置き換えられる。testが使う）。brokerのimageはここではbuildしない（brokerを起動するときにtagが無ければbuildする。決定6、[Broker](../broker.md#配布と版)）。人のmainのcheckoutと`target/`は使わない。成功すれば`update_built`。
+-     - **e2eの関門**（ADR-t963-1決定1、`e2e_gate`）: 続けて同じcheckoutで、`CARGO_TARGET_DIR=<queue dir>/update/target`のまま全部のe2e（`cargo test --locked --test e2e -- --ignored`。`--e2e-command`で渡したshellのコマンドに置き換えられる。testが使う）を流す。`Binaries::e2e`の実装は`src/infrastructure/e2e_gate.rs`。envはmain checkoutの`dagq.toml`の`[run.env]`（[Run environment](run-environment.md)。`${DAGQ_QUEUE_DIR}`はqueueのdir、`${DAGQ_RUN_DIR}`は`<queue dir>/update/e2e`）に、`DAGQ_E2E_CMUX=<--cmux>`と、1回ごとの`TMPDIR=<queue dir>/update/e2e/<unix時刻>-<pid>`を足す。流す前に、hostで1本ずつ流すためのlock（[ADR-t1233-2](../../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)決定4。`E2eSettings::lock`、`<data dir>/e2e.lock`＝`install::e2e_lock_path`でqueueのdirの親。`flock`で、流し直しが終わるまで持つ）を取る。runtimeがreviewのpassの後に流すrunのe2e（[Review](review.md#着地の前のe2e)）と`install`の関門も同じlockを取るので、先に取ったものが流し、後のものは空くまで待つ（待った秒は`E2eOutcome::lock_wait_secs`）。続けて`cmux ping`を打ち、通らなければ（cmuxが無い・動いていない）e2eを始めずに失敗にする。続けてpodmanを確かめる（[ADR-t1162-1](../../adr/2026-09-30-t1162-1-e2e-gate-skips-podman-e2e-only-when-podman-is-unreachable.md)、`E2eSettings::podman`の`PodmanCheck`）: `PATH`の`podman`で、brokerの用意と同じhost全体のlock（[Broker](../broker.md)の`machine_lock_home`）の中でdagqのmachineを用意し（`application::broker::connect`。`ensure_machine`と`podman --connection dagq info`）、接続が切れていれば`Reconnecting`の上限（`broker::RECONNECT`: 3秒おきに10回まで`info`を聞き、答えたらやり直す。やり直しは3回まで）で待つ。それでも繋がらなければ（`podman_missing`・`machine_busy`・`machine_failed`・`podman_failed`）、podmanに頼るe2e（`install::PODMAN_E2E`、今は`broker::`）を流さない: cargoに`--skip broker::`を足し、`--e2e-command`には`DAGQ_E2E_SKIP=broker::`（空白区切り）を渡し、e2eのlogに`== the e2e did not run broker:: because podman could not be reached: <理由>`の行を書き、`E2eOutcome::skipped`（`E2eSkip`の`tests`・`reason`）に残す。残りのe2eで判定する。cmuxの`ping`が通らないときは今までどおり始めずに失敗。`--e2e-command`でe2eを置き換えたとき（test）はbrokerのe2eが無いので、podmanを確かめない（`PodmanCheck`を`None`にし、hostのpodmanとlockに触れない）。出力は`logs/update-<unix時刻>-<commit 12桁>.e2e.log`（build logの`.build.log`を`.e2e.log`にした名前。他のlogと同じく14日で消える）。上限は`--e2e-timeout`（既定1800秒。supervisorには隠しflagの`--update-e2e-timeout`と`--update-e2e-command`があり、jobにそのまま渡す）で、超えたらprocess groupにSIGTERMを送り、leader（cargoかshell）が終わる（`try_wait`でreapして見る。zombieを生きていると見ない）か10秒たったところでgroupにSIGKILLを送って落ちた扱いにする（`stop_group`。SIGTERMで終わるleaderは10秒を待たない）。落ちたtestはlogの`test <name> ... FAILED`の行から読む。
++     - **e2eの関門**（ADR-t963-1決定1、`e2e_gate`）: 続けて同じcheckoutで、`CARGO_TARGET_DIR=<queue dir>/update/target`のまま全部のe2e（`cargo test --locked --test e2e -- --ignored`。`--e2e-command`で渡したshellのコマンドに置き換えられる。testが使う）を流す。`Binaries::e2e`の実装は`src/infrastructure/e2e_gate.rs`。envはjobのprocessのenvを引き継がず（`env_clear`）、そのうち許す名前（資格情報を除く）だけにmain checkoutの`dagq.toml`の`[run.env]`（[Run environment](run-environment.md)。`${DAGQ_QUEUE_DIR}`はqueueのdir、`${DAGQ_RUN_DIR}`は`<queue dir>/update/e2e`）と、`DAGQ_E2E_CMUX=<--cmux>`と、1回ごとの`TMPDIR=<queue dir>/update/e2e/<unix時刻>-<pid>`を重ね、logの冒頭に渡した名前（値は書かない）を書く。許す名前・資格情報を除く規則・足りないときの見え方と`dagq install --rollback`での戻し方は、runのe2eと同じで[Review](review.md#着地の前のe2e)の「環境」が持つ。流す前に、hostで1本ずつ流すためのlock（[ADR-t1233-2](../../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)決定4。`E2eSettings::lock`、`<data dir>/e2e.lock`＝`install::e2e_lock_path`でqueueのdirの親。`flock`で、流し直しが終わるまで持つ）を取る。runtimeがreviewのpassの後に流すrunのe2e（[Review](review.md#着地の前のe2e)）と`install`の関門も同じlockを取るので、先に取ったものが流し、後のものは空くまで待つ（待った秒は`E2eOutcome::lock_wait_secs`）。続けて`cmux ping`を打ち、通らなければ（cmuxが無い・動いていない）e2eを始めずに失敗にする。続けてpodmanを確かめる（[ADR-t1162-1](../../adr/2026-09-30-t1162-1-e2e-gate-skips-podman-e2e-only-when-podman-is-unreachable.md)、`E2eSettings::podman`の`PodmanCheck`）: `PATH`の`podman`で、brokerの用意と同じhost全体のlock（[Broker](../broker.md)の`machine_lock_home`）の中でdagqのmachineを用意し（`application::broker::connect`。`ensure_machine`と`podman --connection dagq info`）、接続が切れていれば`Reconnecting`の上限（`broker::RECONNECT`: 3秒おきに10回まで`info`を聞き、答えたらやり直す。やり直しは3回まで）で待つ。それでも繋がらなければ（`podman_missing`・`machine_busy`・`machine_failed`・`podman_failed`）、podmanに頼るe2e（`install::PODMAN_E2E`、今は`broker::`）を流さない: cargoに`--skip broker::`を足し、`--e2e-command`には`DAGQ_E2E_SKIP=broker::`（空白区切り）を渡し、e2eのlogに`== the e2e did not run broker:: because podman could not be reached: <理由>`の行を書き、`E2eOutcome::skipped`（`E2eSkip`の`tests`・`reason`）に残す。残りのe2eで判定する。cmuxの`ping`が通らないときは今までどおり始めずに失敗。`--e2e-command`でe2eを置き換えたとき（test）はbrokerのe2eが無いので、podmanを確かめない（`PodmanCheck`を`None`にし、hostのpodmanとlockに触れない）。出力は`logs/update-<unix時刻>-<commit 12桁>.e2e.log`（build logの`.build.log`を`.e2e.log`にした名前。他のlogと同じく14日で消える）。上限は`--e2e-timeout`（既定1800秒。supervisorには隠しflagの`--update-e2e-timeout`と`--update-e2e-command`があり、jobにそのまま渡す）で、超えたらprocess groupにSIGTERMを送り、leader（cargoかshell）が終わる（`try_wait`でreapして見る。zombieを生きていると見ない）か10秒たったところでgroupにSIGKILLを送って落ちた扱いにする（`stop_group`。SIGTERMで終わるleaderは10秒を待たない）。落ちたtestはlogの`test <name> ... FAILED`の行から読む。
+        - **期間限定で外したケース**（[ADR-t1582-1](../../adr/2026-10-04-t1582-1-temporarily-leave-broker-and-cmux-only-e2e-cases-out.md)）: 関門の「全部のe2e」から、`#[cfg(any())]`で登録から外した4ケースが抜ける。`broker::a_preferred_worker_does_its_task_through_the_broker_and_lands`（task 1451で復帰）、`the_sweep_closes_workspaces_left_in_any_window_after_their_fixture_dir_is_gone`（task 1440で削除）、`planner::the_runtime_opens_planners_side_by_side_that_submit_go_idle_and_exit`（task 1441で削除か非対話への置換で復帰）、`up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes`（task 1443で削除）。上のpodmanに繋がらないときの`broker::`の省略とは別で、`update_e2e_passed`の`skipped`には出ない（podmanの確認はこの間も動き、繋がらなければ`skipped`を書くが、省くbrokerのtestは登録に無い）。一覧と規則は[testの制約](../../development/testing.md#e2e)。
+      - **後始末**: 通っても落ちても、そのe2eの`TMPDIR`を使い捨ての場所として片付ける。command lineの引数にその`TMPDIR`の中のpathを持つprocess（e2eが起動したsupervisorやstubのagent。時間切れで止めたときに残る）をSIGTERM（3秒でSIGKILL）で止める。続けて全windowのworkspaceを一覧し、`cmux workspace env <id> --json`の`DAGQ_QUEUE`または`E2E_SHARED`がその`TMPDIR`の中を指すworkspaceをunpinして閉じる。fixtureが自分のdirを消した後に残ったworkspaceも拾い、本番のdata homeや別の関門を指すものは対象外にする。queueのhashは、残ったfixtureの`<TMPDIR>/<fixture>/data/dagq/<hash>`と、その`TMPDIR`内を指す`DAGQ_QUEUE`の両方から取り、そのhashをexternal IDに持つgroupだけを`cmux workspace-group delete <id> --close-workspaces`で消す。`[dagq-e2e]`の名前ではworkerの手元のe2eと区別できないので、名前では選ばない。`E2E_SHARED`だけが一致しても別のqueueのgroupは消さない。
+        - 全windowの一覧を取れなければcmuxのものは閉じず、次の関門に任せる。一覧の後に閉じられてenvを読めないworkspaceは、もう無いものとして飛ばす。workspaceを閉じる前にhashを`TMPDIR/.cleanup-queue-hashes.json`に保存するので、groupの削除だけが失敗しても次回に拾える。後始末に成功したら`TMPDIR`を消し、失敗したら残す。次の関門が始まる前に`<queue dir>/update/e2e`の下の残りを同じ手順で片付ける（名前の`<pid>`のprocessが生きているdir、つまり並んで走る`install`の関門のものは片付けない）。e2eが終わった後もそのprocess groupに残ったもの（stubの`sleep`など）はSIGKILLで止める。何をしたかは`cleanup`（`processes`・`workspaces`（閉じたworkspaceのID）・`groups`・`removed`・`errors`）に残す。
+diff --git a/docs/design/supervisor-lifecycle/install.md b/docs/design/supervisor-lifecycle/install.md
+index 7ccc766c..85853c21 100644
+--- a/docs/design/supervisor-lifecycle/install.md
++++ b/docs/design/supervisor-lifecycle/install.md
+@@ -4,8 +4,8 @@ type: design
+ title: "`install`"
+ status: current
+ created: 2026-09-26
+-updated: 2026-10-04 # task 1582
+-last_verified: 2026-10-04 # task 1582
++updated: 2026-10-04 # task 1269 (after task 1582)
++last_verified: 2026-10-04 # task 1269
+ scope: runtime
+ related:
+   - design-supervisor-lifecycle
+@@ -25,7 +25,7 @@ related:
+ `dagq install [--from PATH | --release [VERSION]] [--to PATH] [--rollback] [--allow-breaking] [--handoff-timeout SECS] [--cmux EXE] [--claude EXE] [--codex EXE] [--plugin-dir PATH] [--skip-e2e]`は固定バイナリを入れ替えて、このqueueのsupervisorを引き継がせる人の入口（ADR-0045の決定11・12・14）。use caseは`src/application/install.rs`、binaryのビルド・起動・置き換えは`src/infrastructure/binaries.rs`（`Binaries` port）。queueを開く前に処理するので、queueがこのbinaryより古くても新しくても動く。
+ 
+ 1. **元**: `--from`がfileならそのbinary、dirならそのcheckout、省略時はcwdのrepositoryのmain checkout（[Run environment](run-environment.md#main-checkoutの決め方)。無ければ`--from`を求めるerror）を`cargo build --release --locked -p dagq -p dagq-broker-client`でビルドする（`CARGO_TARGET_DIR`があればそこ、無ければ`<checkout>/target`の`release/dagq`と、隣の`release/dagq-broker-client`。workerのbrokerのclientはdagqと同じbuildで作って隣に置く。[ADR-t827-1](../../adr/2026-09-28-t827-1-broker-crates-binaries-and-version-alignment.md)決定5、[Broker](../broker.md#配布と版)）。`--rollback`は`<to>.previous`（無ければerror）。`--release [VERSION]`はcrates.ioのリリース（下の「リリースから」）。
+-   - **e2eの関門**（[ADR-t963-1](../../adr/2026-09-29-t963-1-e2e-required-by-diff-and-run-in-full-before-auto-update.md)決定1）: 元がcheckout（`--from <dir>`か省略時のmain checkout）で、そのcheckoutがdagqのソース（[Source repository](source-repository.md)）のとき、ビルドの後、2の確認の前に、そのcheckoutと同じtarget（`CARGO_TARGET_DIR`はそのまま）で全部のe2e（`cargo test --locked --test e2e -- --ignored`）を[自動更新](auto-update.md#auto-update)と同じ`Binaries::e2e`（`src/infrastructure/e2e_gate.rs`）で流す: envはそのcheckoutの`dagq.toml`の`[run.env]`に`DAGQ_E2E_CMUX=<--cmux>`と1回ごとの`TMPDIR=<queue dir>/update/e2e/<unix時刻>-<pid>`を足し、hostで1本ずつ流すlock（`<data dir>/e2e.lock`、自動更新の関門とruntimeがrunに流すe2eと共通。[ADR-t1233-2](../../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)決定4。他が流していれば空くまで待つ）を取り、先に`cmux ping`を打ち、podmanを自動更新と同じく確かめて、上限つきで待っても繋がらなければpodmanに頼るe2e（`broker::`）を流さずに残りで判定する（[ADR-t1162-1](../../adr/2026-09-30-t1162-1-e2e-gate-skips-podman-e2e-only-when-podman-is-unreachable.md)。CLIが`E2eSettings::podman`に`PATH`の`podman`と`machine_lock_home`を渡す。隠しflagの`--e2e-command`を渡したときはpodmanを確かめない）。上限は隠しflagの`--e2e-timeout`（既定1800秒）、出力は`<queue dir>/logs/install-<unix時刻>.e2e.log`、後始末（そのe2eの`TMPDIR`の中のprocess、使い捨てのqueueのhashのcmuxのgroup、`TMPDIR`）も自動更新と同じ。落ちたe2eの1回の流し直しと`.config/e2e-quarantine.toml`の印（[ADR-t1165-1](../../adr/2026-09-30-t1165-1-e2e-gate-reruns-failed-e2e-once-and-records-quarantined-failures.md)、書式と判定は[自動更新](auto-update.md#auto-update)）も自動更新と同じ（`e2e_verdict::judge`。流し直しのlogは`<queue dir>/logs/install-<unix時刻>.e2e.rerun.log`。印の続けての失敗は、queueがあれば自動更新の関門とruntimeがrunに流したe2eのevent（`e2e_gate_events`）から数え、queueが無いか開けなければ数えない。`install`の関門はeventを書かないので、数える元はそれらだけ）。落ちれば（流し直しでも落ちたtestに効いている印の無いものがある、上限切れ、始められない）何も置き換えずに、落ちたtestかその理由（流し直したなら流し直しでも落ちたtest・効かなかった印の理由・流し直しのlogのpathも）とlogのpathを載せたerrorで止まる（`--skip-e2e`を案内する）。人が明示したときだけ`--skip-e2e`で飛ばし、結果の`e2e`に`{"status":"skipped"}`を書く（通れば`{"status":"passed","secs","log"}`、podmanに繋がらず流さなかったe2eがあれば`skipped`（`tests`・`reason`）を足す。自動更新の関門の欄の`flaky`・`quarantined`と、あれば`rerun`・`quarantine`も同じ形で足す）。`--from <binary file>`（自動更新の`approve_update`の`staged`のbinaryは、jobの関門を通ったもの）・`--rollback`・`--release`とdagqのソースでないcheckoutは関門を持たず、結果の`e2e`は`{"status":"not_applicable"}`。`E2eGate`（`Run` / `Skip` / `NotApplicable`）はCLI（`src/main.rs`）が決めて`InstallOptions::e2e`で渡す。隠しflagの`--e2e-command`はtestがe2eの代わりに流すshellのコマンド。testは`tests/it/lifecycle_install.rs`の`install_of_a_checkout_replaces_nothing_unless_its_e2e_passes`（fakeのe2eで、失敗・上限切れで何も置き換えないこと、`--skip-e2e`と、binaryの`not_applicable`、podmanのe2eを流さずに通った`skipped`が結果に出ること、flakyと印で通したtestが結果の`e2e`の`flaky`・`quarantined`・`rerun`に出ること、印の無い流し直しの失敗で何も置き換えないこと）。
++   - **e2eの関門**（[ADR-t963-1](../../adr/2026-09-29-t963-1-e2e-required-by-diff-and-run-in-full-before-auto-update.md)決定1）: 元がcheckout（`--from <dir>`か省略時のmain checkout）で、そのcheckoutがdagqのソース（[Source repository](source-repository.md)）のとき、ビルドの後、2の確認の前に、そのcheckoutと同じtarget（`CARGO_TARGET_DIR`はそのまま）で全部のe2e（`cargo test --locked --test e2e -- --ignored`）を[自動更新](auto-update.md#auto-update)と同じ`Binaries::e2e`（`src/infrastructure/e2e_gate.rs`）で流す: envは人のshellのenvを引き継がず（`env_clear`）、そのうち許す名前（資格情報を除く。`GH_TOKEN`・`SSH_AUTH_SOCK`などは渡らない。規則は[Review](review.md#着地の前のe2e)の「環境」）だけにそのcheckoutの`dagq.toml`の`[run.env]`と`DAGQ_E2E_CMUX=<--cmux>`と1回ごとの`TMPDIR=<queue dir>/update/e2e/<unix時刻>-<pid>`を重ね（logの冒頭に渡した名前を書き、値は書かない）、hostで1本ずつ流すlock（`<data dir>/e2e.lock`、自動更新の関門とruntimeがrunに流すe2eと共通。[ADR-t1233-2](../../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)決定4。他が流していれば空くまで待つ）を取り、先に`cmux ping`を打ち、podmanを自動更新と同じく確かめて、上限つきで待っても繋がらなければpodmanに頼るe2e（`broker::`）を流さずに残りで判定する（[ADR-t1162-1](../../adr/2026-09-30-t1162-1-e2e-gate-skips-podman-e2e-only-when-podman-is-unreachable.md)。CLIが`E2eSettings::podman`に`PATH`の`podman`と`machine_lock_home`を渡す。隠しflagの`--e2e-command`を渡したときはpodmanを確かめない）。上限は隠しflagの`--e2e-timeout`（既定1800秒）、出力は`<queue dir>/logs/install-<unix時刻>.e2e.log`、後始末（そのe2eの`TMPDIR`の中のprocess、使い捨てのqueueのhashのcmuxのgroup、`TMPDIR`）も自動更新と同じ。落ちたe2eの1回の流し直しと`.config/e2e-quarantine.toml`の印（[ADR-t1165-1](../../adr/2026-09-30-t1165-1-e2e-gate-reruns-failed-e2e-once-and-records-quarantined-failures.md)、書式と判定は[自動更新](auto-update.md#auto-update)）も自動更新と同じ（`e2e_verdict::judge`。流し直しのlogは`<queue dir>/logs/install-<unix時刻>.e2e.rerun.log`。印の続けての失敗は、queueがあれば自動更新の関門とruntimeがrunに流したe2eのevent（`e2e_gate_events`）から数え、queueが無いか開けなければ数えない。`install`の関門はeventを書かないので、数える元はそれらだけ）。落ちれば（流し直しでも落ちたtestに効いている印の無いものがある、上限切れ、始められない）何も置き換えずに、落ちたtestかその理由（流し直したなら流し直しでも落ちたtest・効かなかった印の理由・流し直しのlogのpathも）とlogのpathを載せたerrorで止まる（`--skip-e2e`を案内する）。人が明示したときだけ`--skip-e2e`で飛ばし、結果の`e2e`に`{"status":"skipped"}`を書く（通れば`{"status":"passed","secs","log"}`、podmanに繋がらず流さなかったe2eがあれば`skipped`（`tests`・`reason`）を足す。自動更新の関門の欄の`flaky`・`quarantined`と、あれば`rerun`・`quarantine`も同じ形で足す）。`--from <binary file>`（自動更新の`approve_update`の`staged`のbinaryは、jobの関門を通ったもの）・`--rollback`・`--release`とdagqのソースでないcheckoutは関門を持たず、結果の`e2e`は`{"status":"not_applicable"}`。`E2eGate`（`Run` / `Skip` / `NotApplicable`）はCLI（`src/main.rs`）が決めて`InstallOptions::e2e`で渡す。隠しflagの`--e2e-command`はtestがe2eの代わりに流すshellのコマンド。testは`tests/it/lifecycle_install.rs`の`install_of_a_checkout_replaces_nothing_unless_its_e2e_passes`（fakeのe2eで、失敗・上限切れで何も置き換えないこと、`--skip-e2e`と、binaryの`not_applicable`、podmanのe2eを流さずに通った`skipped`が結果に出ること、flakyと印で通したtestが結果の`e2e`の`flaky`・`quarantined`・`rerun`に出ること、印の無い流し直しの失敗で何も置き換えないこと）。
+      - **期間限定で外したケース**（[ADR-t1582-1](../../adr/2026-10-04-t1582-1-temporarily-leave-broker-and-cmux-only-e2e-cases-out.md)）: この関門の「全部のe2e」からも、`#[cfg(any())]`で`tests/e2e.rs`の登録から外した4ケースが抜ける: `broker::a_preferred_worker_does_its_task_through_the_broker_and_lands`（task 1451で復帰）、`the_sweep_closes_workspaces_left_in_any_window_after_their_fixture_dir_is_gone`（task 1440で削除）、`planner::the_runtime_opens_planners_side_by_side_that_submit_go_idle_and_exit`（task 1441で削除か非対話への置換で復帰）、`up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes`（task 1443で削除）。上のpodmanに繋がらないときの`broker::`の省略とは別の除外で、登録に無いので結果の`e2e`の`skipped`には出ない（podmanに繋がらなければ`skipped`は今までどおり書かれるが、省くbrokerのtestは登録に無い）。終了条件はADRと[testの制約](../../development/testing.md#e2e)が持つ。
+ 2. **確認**（決定12）: 元の`--version`でbuild識別子を読み、使い捨てのqueue（tmpdirの`--db`）で`init`と`list`が通ることを確かめる。通らなければ何も置き換えない。元の隣に`dagq-broker-client`があれば（`--rollback`では`<to>`の隣の`dagq-broker-client.previous`）、その`--version`が元のbuild識別子と同じことも確かめる（`install::Client::check`）。違えば（読めなければ）、dagqがclientと一緒に作ったもの（checkoutのbuild、自動更新のbuild、`--release`。`Source::Checkout`・`Source::Built`）ではdagqも含めて何も置き換えずにerrorで止まり、人が渡したbinary（`--from <file>`。前のbuildが`target/`に残したclientが隣にあることがある）と`--rollback`ではそのclientを置かずに（元にclientが無いものとして4で置き場のclientを退け）、結果の`client`の`ignored`（`path`・`reason`）に書く。元が`<to>`そのもの（`--release`で`<to>`がすでにその版）なら確かめない。引き継ぎを受けるliveな登録があるのに、元が`supervise --handoff-token`を知らない（`supervise --handoff-token probe --help`が通らない。引き継ぎより前のbinary）ときも、execしたsupervisorが引数で止まるので、何も置き換えずに`down --wait`と`up`を案内するerrorで止まる（`--rollback`で引き継ぎより前のbinaryに戻すときも同じ）。
+ 3. **schema**: queueのDBがあれば元の`migrate --check`を読む。非互換のmigrationがあれば、`--allow-breaking`が無ければ何も置き換えずにerror、あればdrain（下記6）。元がqueueを開けず（floorより古い。非互換のmigrationの後の`--rollback`）、適用するものも無ければ、`backups/`を案内するerror。互換のmigrationがあれば元の`migrate`で適用する。
+diff --git a/docs/design/supervisor-lifecycle/review.md b/docs/design/supervisor-lifecycle/review.md
+index bbeafb44..de60723c 100644
+--- a/docs/design/supervisor-lifecycle/review.md
++++ b/docs/design/supervisor-lifecycle/review.md
+@@ -4,8 +4,8 @@ type: design
+ title: "Review (supervisor)"
+ status: current
+ created: 2026-09-26
+-updated: 2026-10-04 # task 1582: four e2e cases are temporarily out of the e2e the runtime runs before landing
+-last_verified: 2026-10-04 # task 1582
++updated: 2026-10-04 # task 1269: the e2e is given only the allowed env and the [run.env] (after task 1582)
++last_verified: 2026-10-04 # task 1269
+ scope: runtime
+ related:
+   - adr-t1566-1
+@@ -78,7 +78,14 @@ related:
+ - **落ちたとき**（決定3）: e2eが上限の内に終わり、流し直しでも落ちたtestが印で通らない（流し直せるtestの名前が無い・libtestのまとめの無い失敗も含む）ときは、runを`needs_session`にする（`park_e2e_failed`。`run_e2e_failed`に上と同じ欄と`code: e2e_failed`・`status`・`reason`。`reason`は関門の失敗の文で、落ちたtestの名前とlogの場所を含む）。leaseを外し、supervisorが[`needs_session`](needs-session.md#needs_session)のresumeを開く。resumeの依頼（`ResumeKind::E2e`）は、reasonのlogを読んで落ちたtestを直してcommitすること（再現は名前で絞った1本だけで、全体のe2eは流さない）を頼む。直したrunはもう一度validating・reviewを経てこの工程に戻り、新しいcommitにe2eを流す。resumeの回数と使い切ったときの扱いは今までの`needs_session`と同じ（[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)）。
+ - **流せないとき**: e2eが始められない（cmuxが`ping`に答えない、`[run.env]`が読めない、lockのファイルを開けない、起動できない）とき、e2eが上限（`E2E_TIMEOUT`）を過ぎて止められたとき、落ちたtestの名前での流し直しが上限を過ぎたか始められなかったときは、変更について何も分からず変更のせいとは言えないので（決定3の「上限切れ」）、workerに返さず`run_e2e_finished`（`outcome: unavailable`、`error`、`in_a_row`、`retry_secs`。止めたe2eでは`secs`・`lock_wait_secs`・`timed_out`・`failed_tests`・`cleanup`と、流し直したなら`rerun`も）を記録し、runはslotとleaseを持ったまま`RunE2ePort::retry`（既定`RETRY_SECS`の300秒。testは`RunE2eOptions::retry`で縮める）待って流し直す。続けて`UNAVAILABLE_ATTENTION`（3）回流せなかったら、その`run_e2e_finished`に`attention: true`を付け、`status`のattentionに`check the e2e host`（`AttentionNext::CheckE2e`）が出る。runtimeは流し直し続け、次に流せたら（通っても落ちても）attentionは消える。新しいaskは作らない。流し直しを待つ間にsupervisorがdrainか引き継ぎに入ったら、`[run.env]`のプログラムの不足のときと同じく待たずにleaseを外し、runは`awaiting_integration`のまま人の`review and integrate`に残る。
+ - **引き継ぎ**: 流している`Phase::E2e`は引き継ぎで組み立て直せない段なので、handoffはvalidatingや着地と同じく終わるのを待つ。引き継ぎを頼まれたsupervisorは新しいe2eを始めず、始まっていないrun（他のrunのe2eや流し直しを待つものも）は`Phase::AwaitingE2e`（組み立て直せる段）に置いて引き継ぎを進め、次のプロセスがadoptと同じく組み立て直して流す。supervisorが死んで流している途中のe2eが残ったrunは、adoptした次のsupervisorが`Phase::AwaitingSlot`から同じcommitのe2eをもう一度流す（`run_e2e_started`だけで終わったattemptは数に入るが結果は無い）。残ったfixtureは次のe2eが`<queue dir>/e2e/`の持ち主の居ないdirとして掃除する。
+-- **環境（未決）**: この工程はworkerが書いたコード（`build.rs`・proc-macro・test）を、supervisorのprocessのenvに`[run.env]`を足したenvでhostで動かす（関門と同じ）。ADR-t1233-2のConsequencesが実装のtaskに任せたe2eの環境を絞ること（hostの秘密・pushの資格情報・tokenを渡さない、envを許すものだけにする）はtask 1239では行っておらず、hostの秘密やpushの権限に届きうる危険が残る。reviewのpassの後に限ることで受け入れている。続くtaskで扱う。
++- **環境**（ADR-t1233-2のConsequences、task 1269）: この工程はworkerが書いたコード（`build.rs`・proc-macro・test）をhostで動かすので、起こしたprocess（supervisor。自動更新の関門はそのjob、`install`の関門は人のshell）のenvを渡さない。`e2e_gate::pass`はe2eのCommandを`env_clear`し、渡すenvを次の順に重ねて組み立てる（同じ名前は後のものが勝つ）。三つの関門（このe2e・[自動更新](auto-update.md#auto-update)・[`install`](install.md)）は同じ`e2e_gate::run`の同じ`pass`を通るので、絞り方も同じになる（流し直しも同じenv）。
++  - **起こしたprocessのenvのうち許すもの**（`e2e_gate::passed`）: 名前で`PATH`・`HOME`・`USER`・`LOGNAME`・`SHELL`（cargo・rustup・Git・shellが道具・home・userを見つける）、`XDG_CONFIG_HOME`（cmuxのCLIがSettingsに保存したsocket passwordを読む場所。[`up` / `down`](up-down.md)の前提）、`LANG`・`TERM`・`TZ`と接頭辞の`LC_*`（locale・端末・時刻）、`CARGO_HOME`・`RUSTUP_HOME`・`RUSTUP_TOOLCHAIN`（toolchainの場所と選び方）、`SDKROOT`・`DEVELOPER_DIR`（macOSのSDKを見つける）、`DAGQ_E2E_LAUNCHD`・`DAGQ_E2E_WINDOWS`（人がe2eのケースを足すopt-in）。接頭辞の`CMUX_*`（e2eが実cmuxのsocketに繋ぐ`CMUX_SOCKET_PATH`など）。ほかの`DAGQ_*`（supervisorの`DAGQ_QUEUE`など。e2eのfixtureが自分のものを置く）、`GIT_*`、`SSH_*`、クラウドの資格情報、そのほかの名前は渡さない。
++  - **資格情報は渡さない**（`e2e_gate::credential`）: 名前に`TOKEN`・`SECRET`・`PASSWORD`・`PASSWD`・`CREDENTIAL`・`KEY`を含むもの（大文字小文字を問わない）と、`SSH_AUTH_SOCK`・`SSH_ASKPASS`・`GIT_ASKPASS`・`SUDO_ASKPASS`は、許す名前や接頭辞に当たっても渡さない（`CMUX_API_TOKEN`・`LC_SECRET`なども渡らない）。例外は`CMUX_SOCKET_PASSWORD`の1つだけで、socketにpasswordを求めるcmuxはそれが無いとe2eのcmuxの呼び出しを全部拒むので渡す（launchdが起動するsupervisorにも同じ理由で渡している。[`up` / `down`](up-down.md)）。
++  - **`[run.env]`**: main checkout（関門はそのcheckout）の`dagq.toml`の`[run.env]`の全部のkey。repositoryに置いた値で、hostのshellの値ではないので、上の規則で絞らない。
++  - **関門が置くもの**: `TMPDIR`（1回ごとのdir）、`CARGO_TARGET_DIR`（関門のtargetがあるとき）、`DAGQ_E2E_CMUX`、`DAGQ_E2E_SKIP`・`DAGQ_E2E_RERUN`（あるとき）。
++  - **log**: e2eのlog（流し直しのlogも）の冒頭の`== the e2e of …`の行の次に`== the env passed (names only): <名前>…`（名前の順）を書く。値は書かない。
++  - **足りないときの見え方と戻し方**: 許すものが足りないと、その版が着地して固定バイナリが入れ替わった後に、runのe2eが始められず（`unavailable`が続いて`check the e2e host`のask）か、cargoやcmuxが見つからず落ち（`e2e_failed`でworkerに返る）、自動更新の関門（とそのjobが置き換える次の版）も同じく落ちうる。このとき人かinboxはe2eのlogの`== the env passed`の行と、e2eの出力（見つからない道具・繋がらないsocket）で足りない名前を見て、`dagq install --rollback`で前の固定バイナリに戻し、許す名前を足すtaskを登録する。資格情報でない値ならrepositoryの`[run.env]`に置いても渡せる（hostのshellの値は引き継がず、書いた値が渡る）。追加で渡す名前を`dagq.toml`に書くkeyは持たない（足すときは、固定バイナリがそのkeyを読めるようになってから`dagq.toml`に書く。読めない旧バイナリは`dagq.toml`を読めなくなるので）。
++  - **test**: `src/infrastructure/e2e_gate.rs`の`only_the_passed_names_and_no_credential_are_given`（名前ごとの判定）と`the_e2e_and_its_rerun_are_given_only_the_passed_env_and_the_run_env`（受け取ったenvを書き出すstubで、1回目と流し直しの両方に許すものと`[run.env]`と`CMUX_SOCKET_PASSWORD`が渡り、`GITHUB_TOKEN`・`SSH_AUTH_SOCK`・`GIT_ASKPASS`・`CMUX_API_TOKEN`・`AWS_SECRET_ACCESS_KEY`・任意の名前・`DAGQ_QUEUE`とtestのprocessのenvが渡らないこと、logに名前が出て値が出ないこと）。
+ - **見え方**: `stats`の`land_phases`に`e2e_wait`（`run_e2e_waiting`から）と`e2e`（`run_e2e_started`から`run_e2e_finished`まで。`run_e2e_failed`は`resume`に移る）の工程（[Stats](stats.md)）、`timeline`の空白の理由に`waiting_e2e`と`e2e`（[Timeline](timeline.md)）。
+ - **test**: `tests/it/runtime_e2e.rs`（通って着地・要らないrunとe2eの無いrepository・落ちてresumeと直したcommitの着地・mainの印で通る・1本ずつ・上限切れと流し直しの上限切れは流し直して3回目でattention）、`tests/it/runtime_headless.rs`の`a_parked_run_is_resumed_with_a_turn_of_the_same_session`、`src/infrastructure/e2e_gate.rs`の`e2e_that_take_the_host_lock_run_one_at_a_time`、`src/domain/run_e2e.rs`。
+ 
+diff --git a/src/infrastructure/e2e_gate.rs b/src/infrastructure/e2e_gate.rs
+index a7839d62..88740bd3 100644
+--- a/src/infrastructure/e2e_gate.rs
++++ b/src/infrastructure/e2e_gate.rs
+@@ -9,10 +9,20 @@
+ //! hash, the directory under `<fixture>/data/dagq/`), and the directory
+ //! itself. Groups are chosen by those hashes, never by the `[dagq-e2e]`
+ //! name a worker's e2e gives its groups too.
++//!
++//! The e2e runs code a worker wrote (`build.rs`, proc-macros, tests) on the
++//! host, so it is not given the environment of the process that starts it
++//! (the supervisor, or the shell of `install`): its environment is cleared
++//! and only [`PASSED_ENV`] and [`PASSED_PREFIXES`] of it are given back,
++//! never a credential ([`credential`]), with the `[run.env]` and the gate's
++//! own over them (ADR-t1233-2's Consequences). The log names what was
++//! passed, never the values.
+ 
+ use anyhow::{Context, Result, bail, ensure};
+ use serde_json::{Value, json};
+ use std::{
++    collections::BTreeMap,
++    ffi::OsString,
+     fs,
+     io::{Read, Seek, SeekFrom, Write},
+     os::unix::process::CommandExt,
+@@ -38,6 +48,80 @@ const CALL_LIMIT: Duration = Duration::from_secs(20);
+ /// SIGTERM before SIGKILL.
+ const STOP_GRACE: Duration = Duration::from_secs(10);
+ 
++/// The variables of the starting process's environment the e2e is given
++/// by name: what cargo, rustup, Git and a shell need to find their tools,
++/// home and locale, the directory cmux's CLI reads its saved socket
++/// password from (`XDG_CONFIG_HOME`), and the e2e's own opt-ins (`DAGQ_E2E_LAUNCHD`,
++/// `DAGQ_E2E_WINDOWS`). `TMPDIR`, `CARGO_TARGET_DIR`, `DAGQ_E2E_CMUX`,
++/// `DAGQ_E2E_SKIP` and `DAGQ_E2E_RERUN` are the gate's own.
++pub const PASSED_ENV: &[&str] = &[
++    "PATH",
++    "HOME",
++    "XDG_CONFIG_HOME",
++    "USER",
++    "LOGNAME",
++    "SHELL",
++    "LANG",
++    "TERM",
++    "TZ",
++    "CARGO_HOME",
++    "RUSTUP_HOME",
++    "RUSTUP_TOOLCHAIN",
++    "SDKROOT",
++    "DEVELOPER_DIR",
++    "DAGQ_E2E_LAUNCHD",
++    "DAGQ_E2E_WINDOWS",
++];
++
++/// The prefixes of the variables given too: the locale (`LC_*`) and
++/// cmux's (`CMUX_*`, the socket the e2e's real cmux calls reach).
++pub const PASSED_PREFIXES: &[&str] = &["LC_", "CMUX_"];
++
++/// The one credential given: the password of cmux's socket, without which
++/// a cmux whose socket asks for it refuses every call of the e2e (the
++/// supervisor's launchd job is given it for the same reason).
++pub const CMUX_SOCKET_PASSWORD: &str = "CMUX_SOCKET_PASSWORD";
++
++/// The words that make a variable's name a credential's.
++const CREDENTIAL_WORDS: &[&str] = &["TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "KEY"];
++
++/// The credentials named without one of [`CREDENTIAL_WORDS`].
++const CREDENTIAL_NAMES: &[&str] = &[
++    "SSH_AUTH_SOCK",
++    "SSH_ASKPASS",
++    "GIT_ASKPASS",
++    "SUDO_ASKPASS",
++];
++
++/// Whether `name` names a credential, which the e2e is never given from
++/// the starting process, though it be passed by name or prefix.
++pub fn credential(name: &str) -> bool {
++    let upper = name.to_ascii_uppercase();
++    CREDENTIAL_NAMES.contains(&upper.as_str())
++        || CREDENTIAL_WORDS.iter().any(|word| upper.contains(word))
++}
++
++/// Whether the starting process's `name` is given to the e2e.
++pub fn passed(name: &str) -> bool {
++    name == CMUX_SOCKET_PASSWORD
++        || ((PASSED_ENV.contains(&name)
++            || PASSED_PREFIXES
++                .iter()
++                .any(|prefix| name.starts_with(prefix)))
++            && !credential(name))
++}
++
++/// What of `inherited` the e2e is given, as [`passed`] says; a name that is
++/// not UTF-8 is not.
++fn passed_env(
++    inherited: impl IntoIterator<Item = (OsString, OsString)>,
++) -> BTreeMap<OsString, OsString> {
++    inherited
++        .into_iter()
++        .filter(|(name, _)| name.to_str().is_some_and(passed))
++        .collect()
++}
++
+ /// Run the e2e of `checkout` as the module says; an error is an e2e that
+ /// could not start.
+ pub fn run(
+@@ -45,6 +129,17 @@ pub fn run(
+     target_dir: Option<&Path>,
+     settings: &E2eSettings,
+ ) -> Result<E2eOutcome> {
++    run_inheriting(checkout, target_dir, settings, std::env::vars_os())
++}
++
++/// [`run`], with `inherited` as the starting process's environment.
++fn run_inheriting(
++    checkout: &Path,
++    target_dir: Option<&Path>,
++    settings: &E2eSettings,
++    inherited: impl IntoIterator<Item = (OsString, OsString)>,
++) -> Result<E2eOutcome> {
++    let inherited = passed_env(inherited);
+     let env = match &settings.run_env_root {
+         Some(root) => super::run_env::load_run_env(
+             root,
+@@ -82,6 +177,7 @@ pub fn run(
+         checkout,
+         target_dir,
+         settings,
++        &inherited,
+         &env,
+         &Pass {
+             log: &settings.log,
+@@ -106,6 +202,7 @@ pub fn run(
+             checkout,
+             target_dir,
+             settings,
++            &inherited,
+             &env,
+             &Pass {
+                 log: &rerun_log,
+@@ -208,6 +305,7 @@ fn pass(
+     checkout: &Path,
+     target_dir: Option<&Path>,
+     settings: &E2eSettings,
++    inherited: &BTreeMap<OsString, OsString>,
+     env: &[(String, String)],
+     how: &Pass,
+ ) -> Result<Ran> {
+@@ -250,14 +348,40 @@ fn pass(
+             );
+         }
+     }
+-    if let Some(skipped) = how.skipped {
+-        let _ = writeln!(log, "== {}", skipped.sentence());
+-    }
+     let skip_filters: Vec<&str> = how
+         .skipped
+         .iter()
+         .flat_map(|skipped| skipped.tests.iter().map(String::as_str))
+         .collect();
++    // What the e2e is given: the passed of the starting process's, the
++    // `[run.env]` over them and the gate's own over both.
++    let mut given = inherited.clone();
++    given.extend(env.iter().map(|(key, value)| (key.into(), value.into())));
++    given.insert("TMPDIR".into(), root.clone().into());
++    if let Some(dir) = target_dir {
++        given.insert("CARGO_TARGET_DIR".into(), dir.into());
++    }
++    if let Some(cmux) = &settings.cmux {
++        given.insert("DAGQ_E2E_CMUX".into(), cmux.into());
++    }
++    if !skip_filters.is_empty() {
++        given.insert(SKIP_ENV.into(), skip_filters.join(" ").into());
++    }
++    if let Some(tests) = how.rerun {
++        given.insert(RERUN_ENV.into(), tests.join(" ").into());
++    }
++    let _ = writeln!(
++        log,
++        "== the env passed (names only): {}",
++        given
++            .keys()
++            .map(|name| name.to_string_lossy())
++            .collect::<Vec<_>>()
++            .join(" ")
++    );
++    if let Some(skipped) = how.skipped {
++        let _ = writeln!(log, "== {}", skipped.sentence());
++    }
+     let mut command = match &settings.command {
+         Some(command) => {
+             let mut shell = Command::new("/bin/sh");
+@@ -284,26 +408,14 @@ fn pass(
+             cargo
+         }
+     };
+-    if !skip_filters.is_empty() {
+-        command.env(SKIP_ENV, skip_filters.join(" "));
+-    }
+-    if let Some(tests) = how.rerun {
+-        command.env(RERUN_ENV, tests.join(" "));
+-    }
+     command
+         .current_dir(checkout)
+-        .envs(env.iter().map(|(key, value)| (key, value)))
+-        .env("TMPDIR", &root)
++        .env_clear()
++        .envs(&given)
+         .stdin(Stdio::null())
+         .stdout(log.try_clone()?)
+         .stderr(log.try_clone()?)
+         .process_group(0);
+-    if let Some(dir) = target_dir {
+-        command.env("CARGO_TARGET_DIR", dir);
+-    }
+-    if let Some(cmux) = &settings.cmux {
+-        command.env("DAGQ_E2E_CMUX", cmux);
+-    }
+     let started = Instant::now();
+     let spawned = command.spawn();
+     let mut child = match spawned {
+@@ -1098,6 +1210,149 @@ exit 125"
+         assert!(!calls.contains("G-2"), "{calls}");
+     }
+ 
++    /// Which names of the starting process's environment the e2e is given:
++    /// those passed by name or prefix, but never a credential, but cmux's
++    /// socket password.
++    #[test]
++    fn only_the_passed_names_and_no_credential_are_given() {
++        for name in [
++            "PATH",
++            "HOME",
++            "LC_ALL",
++            "CMUX_SOCKET_PATH",
++            "CMUX_WORKSPACE_ID",
++            "CMUX_SOCKET_PASSWORD",
++            "RUSTUP_TOOLCHAIN",
++            "DAGQ_E2E_LAUNCHD",
++        ] {
++            assert!(passed(name), "{name}");
++        }
++        for name in [
++            "GITHUB_TOKEN",
++            "GH_TOKEN",
++            "SSH_AUTH_SOCK",
++            "GIT_ASKPASS",
++            "AWS_SECRET_ACCESS_KEY",
++            "CMUX_API_TOKEN",
++            "CMUX_SIGNING_KEY",
++            "LC_SECRET",
++            "DAGQ_QUEUE",
++            "DAGQ_BROKER_TOKEN_FILE",
++            "ANY_NAME",
++            "path",
++        ] {
++            assert!(!passed(name), "{name}");
++        }
++        assert!(credential("gh_token") && credential("SSH_AUTH_SOCK"));
++        assert!(!credential("PATH"));
++    }
++
++    /// The e2e and its rerun are given the passed of the starting process's
++    /// environment, the `[run.env]` and the gate's own, and nothing else;
++    /// the log names them without their values.
++    #[test]
++    fn the_e2e_and_its_rerun_are_given_only_the_passed_env_and_the_run_env() {
++        let dir = tempfile::tempdir().unwrap();
++        let dir = dir.path();
++        fs::create_dir_all(dir.join("repo")).unwrap();
++        fs::write(
++            dir.join("repo").join("dagq.toml"),
++            "[run.env]\nGATE_ENV = 'run-env-value'\n",
++        )
++        .unwrap();
++        let received = dir.join("received");
++        let received_arg = format!("'{}'", received.display());
++        let settings = settings(
++            dir,
++            &format!(
++                "/usr/bin/env >> {received_arg}; echo ---- >> {received_arg}; \
++                 if [ -n \"${{DAGQ_E2E_RERUN:-}}\" ]; then echo 'test e2e::a ... ok'; exit 0; fi; \
++                 echo 'test e2e::a ... FAILED'; echo 'test result: FAILED. 0 passed; 1 failed'; exit 101"
++            ),
++            Duration::from_secs(30),
++        );
++        let inherited = [
++            ("PATH", "/usr/bin:/bin"),
++            ("HOME", "/home/someone"),
++            ("LC_ALL", "C"),
++            ("CMUX_SOCKET_PATH", "/tmp/cmux.sock"),
++            ("CMUX_SOCKET_PASSWORD", "socket-password-value"),
++            ("CMUX_API_TOKEN", "cmux-token-value"),
++            ("GITHUB_TOKEN", "github-token-value"),
++            ("SSH_AUTH_SOCK", "/tmp/agent.sock"),
++            ("GIT_ASKPASS", "/usr/bin/askpass"),
++            ("AWS_SECRET_ACCESS_KEY", "aws-value"),
++            ("ANY_NAME", "any-value"),
++            ("DAGQ_QUEUE", "/q/queue.db"),
++            ("DAGQ_E2E_WINDOWS", "1"),
++        ]
++        .map(|(name, value)| (OsString::from(name), OsString::from(value)));
++        let outcome = run_inheriting(dir, Some(&dir.join("target")), &settings, inherited).unwrap();
++        let rerun = outcome.rerun.as_ref().expect("the failed test is rerun");
++        assert!(rerun.failed.is_empty(), "{outcome:?}");
++        let received = fs::read_to_string(&received).unwrap();
++        let passes: Vec<&str> = received.split("----\n").filter(|p| !p.is_empty()).collect();
++        assert_eq!(passes.len(), 2, "{received}");
++        for given in passes {
++            for line in [
++                "PATH=/usr/bin:/bin",
++                "HOME=/home/someone",
++                "LC_ALL=C",
++                "CMUX_SOCKET_PATH=/tmp/cmux.sock",
++                "CMUX_SOCKET_PASSWORD=socket-password-value",
++                "DAGQ_E2E_WINDOWS=1",
++                "GATE_ENV=run-env-value",
++            ] {
++                assert!(given.lines().any(|l| l == line), "{line}: {given}");
++            }
++            for name in [
++                "CMUX_API_TOKEN",
++                "GITHUB_TOKEN",
++                "SSH_AUTH_SOCK",
++                "GIT_ASKPASS",
++                "AWS_SECRET_ACCESS_KEY",
++                "ANY_NAME",
++                "DAGQ_QUEUE",
++            ] {
++                assert!(
++                    !given.lines().any(|l| l.starts_with(&format!("{name}="))),
++                    "{name}: {given}"
++                );
++            }
++            // The test process's own environment is not given either.
++            assert!(
++                !given.lines().any(|l| l.starts_with("CARGO_MANIFEST_DIR=")),
++                "{given}"
++            );
++        }
++        for log in [settings.log.clone(), settings.rerun_log()] {
++            let log = fs::read_to_string(log).unwrap();
++            let names = log
++                .lines()
++                .find_map(|line| line.strip_prefix("== the env passed (names only): "))
++                .unwrap_or_else(|| panic!("{log}"));
++            let names: Vec<&str> = names.split(' ').collect();
++            for name in [
++                "CARGO_TARGET_DIR",
++                "CMUX_SOCKET_PASSWORD",
++                "DAGQ_E2E_CMUX",
++                "GATE_ENV",
++                "PATH",
++                "TMPDIR",
++            ] {
++                assert!(names.contains(&name), "{name}: {log}");
++            }
++            assert!(!names.contains(&"GITHUB_TOKEN"), "{log}");
++            for value in [
++                "socket-password-value",
++                "run-env-value",
++                "github-token-value",
++            ] {
++                assert!(!log.contains(value), "{value}: {log}");
++            }
++        }
++    }
++
+     /// A failing e2e names its failed tests; one past its timeout is
+     /// stopped, and what it left (a process in its `TMPDIR`) cleaned up.
+     #[test]

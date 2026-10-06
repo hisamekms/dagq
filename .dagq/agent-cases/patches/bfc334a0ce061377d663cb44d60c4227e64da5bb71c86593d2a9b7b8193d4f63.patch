@@ -1,0 +1,22 @@
+diff --git a/docs/development/local-checks.md b/docs/development/local-checks.md
+index 25d36ae8..0858f3a2 100644
+--- a/docs/development/local-checks.md
++++ b/docs/development/local-checks.md
+@@ -4,7 +4,7 @@ type: development
+ title: このrepositoryの手元の検証（人とworkerが流すもの、testの範囲、stress、e2eを流さないこと、resumeでの再現、受け入れ条件の対応づけ、askにしないもの）
+ status: current
+ created: 2026-10-03
+-updated: 2026-10-04 # task 1463
++updated: 2026-10-05
+ owners:
+   - hisamekms
+ tags:
+@@ -105,4 +105,8 @@ receiptの前に受け入れ条件の各項目を根拠へ対応づける（[ADR
+ 
+ ## askにしないもの
+ 
++### ADRの番号衝突を直したときのsummary
++
++予約済みの4桁番号がmainで埋まっていたら、workerは`dagq ask`を使わず、自分のtask IDの新しい形へファイル名とfrontmatterの`id`を書き直す。日付を`accepted_on`に合わせ、自分の変更内の参照と索引も直し、mainの既存ADRは変更しない。receiptの`summary`には新しいIDだけを書き、使わなくなった元の4桁番号は省略する。
++
+ workerが`dagq ask`にしてよいのは、人が要る理由（[ADR-0047](../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)決定41の`reason_category`。workerでは主に受け入れ条件や範囲が変わる`scope`と、成果を捨てるかどうかの`discard`）に当たるときだけ。当たらないもの（実装の選び方、ADRやmigrationの番号の衝突など）は自分で決めてreceiptの`summary`に書き、taskの範囲の外に出るなら`failed`のreceiptに理由（必要なパスや作業）を書く。ADRの番号の衝突の直し方は[文書の規則](documents.md)の「ADRのID」、migrationは[migrationの規則](migrations.md)の「番号」、cargo-nextestが無いときは上の「hostに触らない」。askの打ち方・`--topic`の分類コード・follow_upsの`category`はworkerのpromptと[ask](../design/supervisor-lifecycle/ask.md#worker_questionの分類コード)・[Receipt and session exit](../design/supervisor-lifecycle/receipt-and-session-exit.md#follow_upsの分類コード)が持つ。

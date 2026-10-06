@@ -1,0 +1,64 @@
+diff --git a/docs/adr/2026-10-05-t1903-1-human-controlled-support-bundles.md b/docs/adr/2026-10-05-t1903-1-human-controlled-support-bundles.md
+new file mode 100644
+index 00000000..61b9f65c
+--- /dev/null
++++ b/docs/adr/2026-10-05-t1903-1-human-controlled-support-bundles.md
+@@ -0,0 +1,37 @@
++---
++id: adr-t1903-1
++type: adr
++title: 診断資料の生成から外部共有までを人の管理下に置く
++status: accepted
++created: 2026-10-05
++updated: 2026-10-05
++accepted_on: 2026-10-05
++owners:
++  - hisamekms
++tags:
++  - operations
++related: []
++---
++
++# ADR-t1903-1: 診断資料の生成から外部共有までを人の管理下に置く
++
++## Context
++
++障害の問い合わせに添付する診断資料の機能を検討している。運用情報を外部へ渡してよいかは人が判断する必要があり、生成から共有までの境界を一緒に定める。
++
++## Decision
++
++1. 診断資料は手元で生成し、生成しただけでは外部へ送らない。
++2. 人が共有する内容を確認し、共有したくない情報を除けるようにする。
++3. 外部への共有は確認を終えた人が行い、agentによる自動送信は設けない。
++
++これらは、人が判断する前に診断資料が外部へ出ないという一つの境界を構成する。
++
++## Alternatives
++
++- 自動送信は、共有範囲を人が判断する機会を失うので採らない。
++- 確認できない資料を人に送信させる案も、共有する内容を判断できないので採らない。
++
++## Consequences
++
++問い合わせの準備に人の操作が必要になる。生成と共有を分けることで、人が内容を確認してから共有できる。
+diff --git a/docs/adr/README.md b/docs/adr/README.md
+index 02f045e2..6fc9dafc 100644
+--- a/docs/adr/README.md
++++ b/docs/adr/README.md
+@@ -4,7 +4,7 @@ type: design
+ title: Architecture decision records
+ status: current
+ created: 2026-09-21
+-updated: 2026-10-04
++updated: 2026-10-05
+ last_verified: 2026-09-30
+ tags:
+   - architecture
+@@ -160,6 +160,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由
+ | [ADR-t1662-2](2026-10-04-t1662-2-measurement-stores-ssot-and-views.md) | 記録を論理ストア（SSOTのStateStore・EventStore・SessionStepStore・NodeSampleStore、ビューのLedgerStore・ReportStore）と消えてよい材料（run dir・log・CSV・transcript）に分け、今のアダプタはqueue.dbの表にし、StateStoreとEventStoreは今どおり同時に確定して計測はStateStoreを読まず、sessionのstepは90日だけ重複を除き抜けを検出して持ち、hostの負荷はNodeSampleStoreを恒久の記録にしてCSVを写しにし（保持の期間のCSVは一度取り込む）、`RunLog`・`EventReads`・`TaskStore`をEventStore・StateStoreにまとめ直してgoal 100のmoduleに置き、台帳と恒久の入力のストアを「新しい表は持たない」の例外にする（ADR-0049決定5をamends） | 2026-10-04 |
+ | [ADR-t1662-3](2026-10-04-t1662-3-executors-send-telemetry-and-commands-are-classified-by-shape.md) | sessionのstepはagentではなくexecutor（session wrapper・runner・非対話のjobを起動するプロセス・`integrate`とe2eの検証）がTelemetrySink（queue serviceの`telemetry_report`）に30秒ごとに送り、executorには`telemetry_report`だけを呼べるtelemetry専用のprincipal（対象はrunか、runを持たないplanner・plan review・goal review・throughput review。supervisorが発行・失効）を与え、runを持たない対象のstepはSessionStepStoreに90日だけ持ち、実行環境・資源・送る口を差し替えられる口にし、資源の単位・`blocker: infra`・適合test・OpenTelemetryのspanとの対応を決め、コマンドは汎用の形（shape: flagの名前は平文、値とwordはdigest）だけを持って台帳を作るときに`[[telemetry.commands]]`の規則で分類する（ADR-t614-1決定2・ADR-t1233-4決定4・6をamends） | 2026-10-04 |
+ | [ADR-t1688-1](2026-10-04-t1688-1-worker-searches-documents-by-changed-names.md) | workerは文書の候補を、taskが名指すものと作業中に見つけたものに加え、変えた名前（コマンド・flag・設定のkey・役割・fileのpath）でrepositoryの文書を探して拾い、summaryに照合したpath・節か不要の理由と探した名前を書く。探す手段は名指さず検査の工程にしない。repository固有の範囲は開発文書、確かめはreviewのsubagent（ADR-t1428-1決定4をamends） | 2026-10-04 |
++| [ADR-t1903-1](2026-10-05-t1903-1-human-controlled-support-bundles.md) | 診断資料の生成から外部共有までを人の管理下に置く | 2026-10-05 |
+ 
+ goal 82（goal 38の段(1)〜(3)）のADRはtask 1233が書いた5本で、決定の置き場所は次のとおり。制御側と実行側の分け方・queue service・ユースケース単位のAPIとservice側の認可・unix socket・broker・クライアントモード・段の順と置き場所はADR-t1233-1、serviceの起動・停止の責任・落ちたときの知らせ方・brokerより前のprincipalの認証（token）はADR-t1233-4、読み取りのユースケースとroleごとの読める範囲・workerの読める範囲・Codexのsandboxからの到達はADR-t1233-5、e2eをreviewのpassの後のhostの工程に移すことはADR-t1233-2、このrepositoryを先にLinuxで通すことはADR-t1233-3にある。
+ 

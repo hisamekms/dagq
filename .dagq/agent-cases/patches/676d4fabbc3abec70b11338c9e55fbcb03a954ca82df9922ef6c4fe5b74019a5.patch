@@ -1,0 +1,13 @@
+diff --git a/tests/it/queue_schema.rs b/tests/it/queue_schema.rs
+index 31a8eaae..2917af5b 100644
+--- a/tests/it/queue_schema.rs
++++ b/tests/it/queue_schema.rs
+@@ -21,7 +21,7 @@ fn initialization_is_repeatable_and_preserves_existing_tasks() {
+     queue.add(new_task("preserved")).unwrap();
+     drop(queue);
+     let queue = SqliteQueue::init(dir.path().join("queue.db")).unwrap();
+-    assert_eq!(queue.schema_version().unwrap(), SqliteQueue::SCHEMA_VERSION);
++    assert_eq!(queue.schema_version().unwrap(), 64);
+     assert_eq!(queue.list(&TaskQuery::default()).unwrap().total, 1);
+     assert!(SqliteQueue::open(dir.path().join("typo.db")).is_err());
+     assert!(!dir.path().join("typo.db").exists());

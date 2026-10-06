@@ -1,0 +1,2167 @@
+diff --git a/docs/design/README.md b/docs/design/README.md
+index d7903f00..91a5253e 100644
+--- a/docs/design/README.md
++++ b/docs/design/README.md
+@@ -18,6 +18,7 @@ tags:
+ - [Architecture](architecture.md)（レイヤーとコンテキスト（計画管理・実行と着地・観測と分析・host運用）の2軸の境界。contextごとの所有する状態・判断・操作・公開するport・依存の向き、境界をまたぐtransactionの一覧、検査できる規則と今の違反。ADR-t1545-1）
+ - [Domain model](domain-model.md)
+ - [Persistence](persistence.md)
++- [Follow-up membership judgements](follow-up-membership.md)（所属の分類と必須の欄・acceptanceの版・出どころと深さ・所属の変更と人のadopt・旧schemaの移行）
+ - [Authorization](authorization.md)
+ - [Security](security.md)（信頼の区分・actorとcapability・host実行は助言的で隔離ではないこと・Podmanとqueue serviceへの道筋）
+ - [Queue service](queue-service.md)（hostで動きqueue DBを開くservice。unix socket・APIのversion・tokenによるprincipalとservice側の認可・ask・show・noteのユースケース・`up`・`down`・supervisorによる起動と停止・落ちたときのattention。goal 82）
+diff --git a/docs/design/architecture.md b/docs/design/architecture.md
+index e4b64282..91a4cb3b 100644
+--- a/docs/design/architecture.md
++++ b/docs/design/architecture.md
+@@ -4,8 +4,8 @@ type: design
+ title: レイヤーとコンテキストの境界（contextごとの所有・判断・操作・公開するport・依存の向き・境界をまたぐtransaction・検査できる規則・今の違反）
+ status: current
+ created: 2026-10-04
+-updated: 2026-10-04 # task 1549
+-last_verified: 2026-10-04 # task 1549
++updated: 2026-10-04 # task 1505
++last_verified: 2026-10-04 # task 1505
+ scope: system
+ related:
+   - adr-t1545-1
+@@ -26,7 +26,7 @@ runtime（`src/`と`crates/`）の責務を、レイヤーとコンテキスト
+ 
+ reviewのsubagentと禁止依存の検査のscriptは、この文書の節（「[検査できる規則](#検査できる規則)」の規則のIDと「[境界をまたぐtransaction](#境界をまたぐtransaction)」の一覧）を参照し、規則の本文を写さない（ADR-t1545-1決定4）。
+ 
+-この文書の事実は2026-10-04のmain（base `e465d467`）を読んで確かめたもの。goal 92の削除（対話の経路とcmuxの依存）と、goal 100・goal 3の後続のtaskが進むと変わるので、それらのtaskは同じ変更でこの文書を直す。
++この文書の事実は2026-10-04のmain（base `e465d467`）を読んで確かめたものに、follow_upの所属の判断（task 1505）を反映している。goal 92の削除（対話の経路とcmuxの依存）と、goal 100・goal 3の後続のtaskが進むと変わるので、それらのtaskは同じ変更でこの文書を直す。
+ 
+ ## 2つの軸
+ 
+@@ -55,7 +55,7 @@ goal・task・proposalと、その検査と採否（plan review・goal review・
+ 
+ **所有する状態**
+ 
+-- table: `tasks`・`task_dependencies`・`task_goal_dependencies`・`goals`・`proposals`・`plan_reviews`・`goal_reviews`・`planners`・`draft_bundles`・`draft_bundle_members`・`draft_origins`・`draft_reopens`・`plan_requests`・`plan_request_proposals`・`search_index`・`landed_commits`（検索と関連の索引）。
++- table: `tasks`・`task_dependencies`・`task_goal_dependencies`・`goals`（`acceptance_version`を含む）・`follow_up_judgements`・`proposals`・`plan_reviews`・`goal_reviews`・`planners`・`draft_bundles`・`draft_bundle_members`・`draft_origins`・`draft_reopens`・`plan_requests`・`plan_request_proposals`・`search_index`・`landed_commits`（検索と関連の索引）。
+ - eventの種類: `task_*`（`task_created`・`task_edited`・`task_status_changed`・`task_submitted`・`task_reopened`・`task_goal_changed`・`task_paths_changed`・`task_priority_changed`・`task_weight_predicted`）、`dependency_*`、`goal_*`（`goal_review_*`を含む）、`proposal_*`、`plan_*`（`plan_review_*`・`plan_decided`・`plan_concern_decided`・`plan_revise_*`）、`planner_*`、`draft_*`、`follow_up_*`、`request_*`、`finding_planner_*`。
+ - `Supervisor`の欄（`src/application/supervise/mod.rs`）: `plan_review`・`goal_review`・`planner_exits`・`max_improvement_proposals`。
+ 
+@@ -66,8 +66,8 @@ goal・task・proposalと、その検査と採否（plan review・goal review・
+ **操作**
+ 
+ - application: `application::commands::planning`・`application::commands::requests`、`application::planner`・`application::planner_request`・`application::planner_handoff`、`application::supervise`の`plan_review`・`goal_review`・`draft_planner`・`finding_planner`・`request_planner`・`planner_turns`、`application::diagram`（依存図）。
+-- CLI: `add`・`edit`・`ready`・`draft`・`cancel`・`dependency`・`goal`・`set-goal`・`set-paths`・`set-priority`・`submit`・`proposal`・`lint`・`request`・`requests`・`search`・`related`・`candidates`・`graph`・`plan`・`planners`・`planner`・`planner-session`、読み取りの`list`・`show`。
+-- infrastructure: `infrastructure::sqlite`（`TaskStore`の実装）、`proposals`・`plan_reviews`・`goal_reviews`・`draft_planners`・`finding_planners`・`plan_requests`・`planners`・`planning`・`search`・`related`・`stranded`。
++- CLI: `add`・`edit`・`ready`・`draft`・`cancel`・`dependency`・`goal`・`set-goal`・`judge-follow-up`・`set-paths`・`set-priority`・`submit`・`proposal`・`lint`・`request`・`requests`・`search`・`related`・`candidates`・`graph`・`plan`・`planners`・`planner`・`planner-session`、読み取りの`list`・`show`。
++- infrastructure: `infrastructure::sqlite`（`TaskStore`の実装）、`proposals`・`plan_reviews`・`goal_reviews`・`draft_planners`・`follow_up_membership`（所属の判断とdraft/readyの移動を同じtransactionで記録。[所属の判断](follow-up-membership.md)）・`finding_planners`・`plan_requests`・`planners`・`planning`・`search`・`related`・`stranded`。
+ 
+ **公開するport**
+ 
+diff --git a/docs/design/authorization.md b/docs/design/authorization.md
+index badb9ec0..47b20940 100644
+--- a/docs/design/authorization.md
++++ b/docs/design/authorization.md
+@@ -4,8 +4,8 @@ type: design
+ title: Authorization
+ status: current
+ created: 2026-09-27
+-updated: 2026-10-04
+-last_verified: 2026-10-04
++updated: 2026-10-04 # task 1505
++last_verified: 2026-10-04 # task 1505
+ scope: runtime
+ related:
+   - adr-t1394-1
+@@ -85,7 +85,7 @@ CLIのコマンドからcapabilityとresourceへの写しは`src/main.rs`の`req
+ | --- | --- | --- |
+ | user | 予約と`review.submit` `triage.submit` `landing.land` `landing.push` `request.decline`を除く全て | なし |
+ | inbox | userと同じ（人の言葉での代行。[ADR-t728-3](../adr/2026-09-27-t728-3-answer-and-delegated-authority-of-the-inbox.md)の決定1） | なし。人自身の操作との区別は記録が持つ |
+-| planner | 読み取り・`queue.watch`・`queue.export`・`goal.write`・`goal.close`・`task.write`・`task.cancel`・`proposal.submit`・`proposal.withdraw`・`note.write`・`mark.write`・`ask.open`・`session.run`・`session.record`・`finding.resolve`・`finding.dismiss`・`planner.open`・`request.decline`・`service.lifecycle`・`service.install`・`queue.admin` | runにはnote（`note --run`）だけを書け、ほかは何もできない（runに紐づくaskも開けない）。開けるaskは`planner_question`だけ。taskの変更（`task.write`・`task.cancel`）はdraft・submitted・readyのものだけ（状態が不明なら拒む）。noteはどの状態のtaskにも書ける。`proposal.withdraw`は自分（actor id）が出したproposalだけ。`planner-session`は自分のplannerだけ。`request.decline`はそのplannerが立てられた依頼（依頼の閉じていないruntimeのplannerのactor idが自分）だけで、plannerが分からなければ拒む |
++| planner | 読み取り・`queue.watch`・`queue.export`・`goal.write`・`goal.close`・`task.write`・`follow_up.judge`・`task.cancel`・`proposal.submit`・`proposal.withdraw`・`note.write`・`mark.write`・`ask.open`・`session.run`・`session.record`・`finding.resolve`・`finding.dismiss`・`planner.open`・`request.decline`・`service.lifecycle`・`service.install`・`queue.admin` | runにはnote（`note --run`）だけを書け、ほかは何もできない（runに紐づくaskも開けない）。開けるaskは`planner_question`だけ。taskの変更（`task.write`・`task.cancel`）はdraft・submitted・readyのものだけ（状態が不明なら拒む）。`follow_up.judge`は全状態のfollow_upに記録でき、所属を動かすのはdraft・readyだけ。noteはどの状態のtaskにも書ける。`proposal.withdraw`は自分（actor id）が出したproposalだけ。`planner-session`は自分のplannerだけ。`request.decline`はそのplannerが立てられた依頼（依頼の閉じていないruntimeのplannerのactor idが自分）だけで、plannerが分からなければ拒む |
+ | worker | 読み取り・`ask.open`・`note.write`・`session.run`・`session.record` | 読み取り以外は自分のrun（`DAGQ_RUN_ID`）・そのtask（`DAGQ_TASK_ID`）・自分のrunのaskだけ。開けるaskは`worker_question`だけで、`--run`なら自分のrun、`--task`だけなら自分のtask（`DAGQ_RUN_ID`の無いworkerは何も持たない）。`session`と`session-event`は自分のrunのものだけ（runtimeのwrapperとhookはworkerの環境のまま打つ） |
+ | review-job | 読み取り・`review.submit` | `review.submit`は自分のrunだけ |
+ | recovery-job | 読み取り・`triage.submit` | `triage.submit`は自分のrunだけ |
+@@ -120,7 +120,9 @@ askのkindはroleごとに決まる（`opens_ask`）: userとinboxとsupervisor
+ 
+ 終了runのverifyだけはuserとinboxが`task.verify_edit`で直せる（[ADR-t883-1](../adr/2026-09-30-t883-1-edit-ended-run-verification-before-inherited-retry.md)）。planner・worker・jobはこの権限を持たない。`required_evidence`と`paths`は変更できず、`task_edited`の`from`/`to`とactorに修正が残る。`edit`のcapabilityは`Planning`がtransactionの外で読んだtaskの状態から選ぶので、`Planning`はその状態をstoreの`edit_task`に渡し、storeは同じtransactionで読んだ状態と照合する。食い違えば（例: `ready`で`task.write`を通った後にclaimされ、runが失敗して`in_progress`になった）、taskも`task_edited`も変えずに状態が変わったことを理由に拒む（task 1247）。
+ 
+-policyは上の表のまま: plannerは今の権限（draft・submitted・readyのtaskの変更と`cancel`、goalの追加・編集・close、自分のproposalの取り下げ）を持ち、`ready`（`--bypass-review`を含む）・`goal ready`・`goal review`とin_progress以降のtaskの変更は持たない。`ready`はuserとinbox（人の言葉での代行。区別はeventのactorが持つ）。worker・4つのjob・observer・wrapper・integratorは計画系を何もできない。supervisorはCLIからは`ready`・`cancel`・`goal close`だけ。capabilityをどのresourceにも持たないroleは、storeを読む前に拒む（taskやproposalが無くても拒否になり、記録のresourceは状態と持ち主が`null`）。capabilityを持つroleで、taskやproposalが見つからないときは拒否ではなく、そのerror（`task N does not exist`など）になる。
++`judge-follow-up`は`follow_up.judge`をtask resourceで判定し、user・inbox・plannerだけに許す。taskの状態による制限は無く、submitted以降の訂正も記録できる（所属を動かすのはdraft/readyだけ。[所属の判断](follow-up-membership.md)）。
++
++policyは上の表のまま: plannerは今の権限（draft・submitted・readyのtaskの変更と`cancel`、goalの追加・編集・close、自分のproposalの取り下げ）を持ち、`ready`（`--bypass-review`を含む）・`goal ready`・`goal review`とin_progress以降のtaskの変更（follow_upの所属判断の記録を除く）は持たない。`ready`はuserとinbox（人の言葉での代行。区別はeventのactorが持つ）。worker・4つのjob・observer・wrapper・integratorは計画系を何もできない。supervisorはCLIからは`ready`・`cancel`・`goal close`だけ。capabilityをどのresourceにも持たないroleは、storeを読む前に拒む（taskやproposalが無くても拒否になり、記録のresourceは状態と持ち主が`null`）。capabilityを持つroleで、taskやproposalが見つからないときは拒否ではなく、そのerror（`task N does not exist`など）になる。
+ 
+ 拒んだときは、queueのevent `authorization_denied`（taskにもgoalにも紐づかないqueueのevent。actorの列は拒まれた呼び出し元）を記録し、`AuthorizationError`を返す。payloadは`role`・`capability`・`reason`（`not granted`・`reserved`・`not on this resource`）・`resource`（`kind`と`id`、taskなら`status`、proposalなら`owner`）。記録に失敗しても拒否は拒否のまま返す。observerのこのeventは、observerの次の起動を決める「自分以外のevent」に数えない。
+ 
+diff --git a/docs/design/domain-model.md b/docs/design/domain-model.md
+index 59055b14..d959da32 100644
+--- a/docs/design/domain-model.md
++++ b/docs/design/domain-model.md
+@@ -4,8 +4,8 @@ type: design
+ title: Domain model
+ status: current
+ created: 2026-09-21
+-updated: 2026-10-04 # task 1406
+-last_verified: 2026-10-04 # task 1406
++updated: 2026-10-04 # task 1505
++last_verified: 2026-10-04 # task 1505
+ scope: domain
+ related:
+   - adr-t1394-1
+@@ -45,6 +45,7 @@ related:
+ 
+ ## Entities
+ 
++- `MembershipClassification` / `MembershipJudgement`: follow_upの所属の分類（`required` / `out_of_scope` / `undecided`）と必須の欄・訂正の遷移を持つ。判断は追記の行で、元goalのacceptanceの版・判断者・時刻を保存する。版・出どころ・CLIは[所属の判断](follow-up-membership.md)。
+ - `Goal`: 複数のtaskが解く上位の課題。title、description、acceptance、constraints（命名・境界・やらないこと）、doc（repository内の参照文書のpath、任意）を持つ。verification_commandsは持たず、進捗は所属taskのstatusから導出する。状態は`status`（`GoalStatus`: `draft` | `open`）の1点だけで（ADR-0044の決定5がADR-0009の「状態機械を持たない」をこの1点に限って改めた）、`draft`のgoalのtaskは`candidates`に出ずclaimされない。閉じたことは`status`と独立に`closed_at`と`verdict`（`achieved` | `abandoned`）で1回だけ記録する。
+ - note（observation）: task / run / goalのいずれかに紐づく自由記述。独立のentityにせず、`RunEvent`のkind `observation`（payload `{text, kind, by}`）で表す。`kind`は小文字・数字・`-`・`_`のslug（既定`note`）、`by`は書いた環境の`DAGQ_ROLE`で、無ければ`human`。
+ - `Finding`: observerが見つけた問題の記録（[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定18、`src/domain/finding.rs`）。種類`kind`（小文字・数字・`-`・`_`のslug。`stall`、`failure`、`wait`、`capacity`、`threshold`、`conflict_hotspot`など）、対象（`FindingTarget`: `run`（そのtaskも持つ） / `task` / `goal` / `queue`）、対象の中で問題を見分ける`subject`（空でよい）、`summary`と`detail`、影響`impact`（`Impact`: `high` / `normal` / `low`）、最初と最後に見た時刻、発生回数`occurrences`、根拠のevent IDの配列`evidence`、状態（`FindingStatus`: `open` / `proposed` / `resolved` / `dismissed`）とその理由`status_reason`、紐づいたproposal、proposalを求める印（`propose_reason`とその時刻）、書いたrole`recorded_by`を持つ。同じ`kind`・対象・`subject`は1つの問題で、`finding::merge`が既存のfindingへの2回目の記録を決める: 持っていない根拠があれば1回の発生として回数を足し、根拠を足し、最後に見た時刻を今にする。`resolved`のfindingはそこで`open`に戻る（手当てが効かなかった）。`dismissed`のfindingは回数と根拠だけを足し、文面・影響・印は変えない。新しい根拠が無くても`summary` / `detail` / `impact`の変化と、`open`で印の無いfindingへの`--propose`は書く。何も変わらなければ書かない（決定21）。人手の遷移は`finding::check_transition`が決める: `resolved`は`open` / `proposed`から、`dismissed`は`dismissed`以外から。`proposed`への遷移とproposalの紐付けは`finding::check_link`（`open`だけが`proposed`になり、同じproposalで`proposed`のものはそのまま）、proposalの終わりによる遷移は`finding::settle`（taskがすべて終わり1つ以上`completed`なら`resolved`、proposalかtaskのすべてが`canceled`なら印とproposalを消して`open`）、人の`propose`のanswerの印は`finding::mark_for_proposal`（`resolved` / `dismissed`も`open`に戻して印を付ける）、answerの読み取りは`FindingAnswer::parse`（`propose` / `dismiss`と`: <理由>`）が決める。runtimeが立てるplannerの流れは[Finding planners](supervisor-lifecycle/finding-planners.md)。
+@@ -344,7 +345,7 @@ domainの関数は業務上の拒否を`DomainError`（`src/domain/error.rs`）
+ - **出どころ**: `DraftOrigin`（`follow_up` | `goal_gap`）と材料（JSON object）を`record_draft_origin`でdraftごとに1回記録する。`reopened`（task 418）は、plan reviewがreadyから戻して自分のproposalに入れたtask（ADR-0044の決定14）が、そのproposalのwithdrawで`draft`に戻ったときにwithdrawが記録する出どころで、材料は`reopened_material`の`{"reason"（verdictのreopenのreason）, "proposal_id"（withdrawしたproposal）, "reviewed_proposal_id"（reopenしたplan reviewのproposal）}`。`record_draft_origin`では書けない。readyには戻さず（食い違いを見つけたgateを飛ばさないため）、runtimeのplannerが直してsubmitするか、cancelするか、決めきれなければ`planner_question`にする。`DraftTarget`は対象のdraft（`Task`、出どころ、材料、それまでに立てたplannerの数）。`PlannerSession.draft_task_id`はplannerが立てられた束の最も古いdraft。
+ - **束**（ADR-t807-1）: `BundleKey { kind: BundleKeyKind, value }`は束の鍵。`BundleKey::of(origin, material, task)`が、`follow_up`は材料の`source_run_id`（`BundleKeyKind::SourceRun`）、`goal_gap`は`goal_review_id`（`GoalReview`）、`reopened`は`reviewed_proposal_id`（`ReviewedProposal`）を鍵にし、値は文字列（数は10進）。材料に無いか空なら`BundleKeyKind::Task`とtask IDで1件の束にする。`DraftTarget::bundle_key`が同じ。`follow_up::bundles(targets)`は対象（ID順）を鍵で束に分け、束の最も古いdraftの順に並べる。作成時刻では束ねない。`DraftOutcome`（`submitted` | `canceled` | `duplicate` | `keep_draft` | `undecided`）はplannerが終わったときの束のdraftの結末。読む側の型は`TaskOrigin`（`show`のtaskの`origin`: 出どころ、材料、`source_task_id`・`source_run_id`・`index`、`bundle_key`、`bundles`）、`DraftBundleView`（束: `planner_id`、`origin`、`key_kind`・`key_value`、`created_at`、`members`）、`DraftBundleMember`（`task_id`、`attempt`、`outcome`（生きている束ではnull）、`proposal_id`、`duplicate_of`、今の`status`）、`FollowUpDraft`（元のtaskの`show`の`follow_up_drafts`: `run_id`、`index`、`task_id`、title、今の`status`）で、どれも`src/domain/views.rs`。
+ - **上限**: `MAX_DRAFT_PLANNERS`（3）件のplannerが決めずに終わったdraftには立てない（`draft_planner_exhausted`、`AttentionNext::DecideDraft` = `request a plan for the draft`。inboxがそのdraftを参照（`--ref task:N`）にした計画の依頼を記録するか、人が自分のterminalで決める。`keep_draft`で残したdraftも同じく依頼を待つ）。findingの上限（`finding_planner_exhausted`）は`AttentionNext::DecideFinding` = `request a plan for the finding`（`--ref finding:N`）。draftごとに数え（そのdraftを含む束のplannerの数）、達したdraftは束から外す。runtimeのplannerの同時の数の上限は束1つを1と数える。
+-- **人を経ない採用の上限**: `adopt_needs_person(FollowUpFacts { goal_open, depth })`が、goalがnullか閉じている、`follow_up_depth`が`FOLLOW_UP_ASK_DEPTH`（3、[ADR-t808-1](../adr/2026-09-28-t808-1-runtime-planners-submit-follow-ups-up-to-depth-two.md)）以上、の順に理由を返す。runtimeのplannerのsubmitは、そのdraftへの`planner_question`（旧`follow_up`）に人が`adopt`と答えていなければこれで拒否される。
++- **人を経ない採用の上限**: `adopt_needs_person(FollowUpFacts { source_goal_open, goal_open, depth })`が、登録時の元goalが無い・閉じていた・不明、今のgoalがnullか閉じている、`follow_up_depth`が`FOLLOW_UP_ASK_DEPTH`（3、[ADR-t808-1](../adr/2026-09-28-t808-1-runtime-planners-submit-follow-ups-up-to-depth-two.md)）以上、の順に理由を返す。runtimeのplannerのsubmitは、そのdraftへの`planner_question`（旧`follow_up`）に人が`adopt`と答えていなければこれで拒否される。
+ - **深さ**: `tasks.follow_up_depth`はdomainの`Task`に持たせず、storeの列として`follow_up_depth` / `set_follow_up_depth`で読み書きする。`add`は0、`integrate`の登録は元のtask+1、runtimeのplannerが人を経ずにsubmitしたtaskはそのまま、人のsubmit（origin `person`: 廃止前に人が`dagq plan`で開いたplannerか、人が`DAGQ_ROLE`の無い自分のterminalで打った`submit`）、人の`adopt`を経たsubmit、`ready --bypass-review`（`TaskAction::BypassReview`）は0。
+ - **ask**: `AskKind`は知っているkindに加えて`Other(String)`を持つ（[ADR-0073](../adr/0073-kind-additions-are-compatible.md)の決定21）。queueから読むとき（`AskKind::read`・serde）は知らないkindを`Other`にし、`status` / `watch` / `show`は人に見せるだけの汎用のaskとして出し、`answer`は記録するがruntimeは適用しない（attentionは`read the answer`）。CLIの`parse`と書き込み口（`check_ask_kind`）は知っているkindだけを受け付ける。
+ - **ask**: `AskKind::PlannerQuestion`（`planner_question`）はruntimeのplannerが人に聞くask（options `PLANNER_QUESTION_OPTIONS` = `adopt` / `cancel` / `keep_draft`）。answerの行き先（`PlannerAnswerRoute`: `Planner` / `NewPlanner` / `Close` / `Person`）はstoreが決め、`Person`以外は`runtime_delivers: true`でattentionにしない。`AskKind::FollowUp`は退役したtriageのaskで、もう作られない。
+diff --git a/docs/design/follow-up-membership.md b/docs/design/follow-up-membership.md
+new file mode 100644
+index 00000000..1c212769
+--- /dev/null
++++ b/docs/design/follow-up-membership.md
+@@ -0,0 +1,91 @@
++---
++id: design-follow-up-membership
++type: design
++title: Follow-up membership judgements
++status: current
++created: 2026-10-04
++updated: 2026-10-04
++last_verified: 2026-10-04
++scope: runtime
++related:
++  - adr-t1504-2
++  - design-domain-model
++  - design-persistence
++  - design-supervisor-lifecycle-draft-planners
++---
++
++# Follow-up membership judgements
++
++`judge-follow-up TASK --classification required|out_of_scope|undecided --reason TEXT`
++はfollow_upの所属を記録する。user、inbox（人の代行）、runtimeのplannerだけが
++`follow_up.judge`を持つ。worker、job、supervisorは持たない。taskの状態は問わない。
++分類の意味の正しさはplannerとplan reviewが判断する（ADR-t1504-2）。
++
++## CLIと行
++
++`--acceptance-item TEXT`と`--evidence REF`は繰り返せる。requiredは1項目以上、
++requiredとout_of_scopeは1参照以上が要る。理由と各項目・参照は空白だけではいけない。
++out_of_scopeは`--destination-goal ID`で元と別の、閉じていないgoalを名指す。
++requiredの所属先は元goalで、別の所属先は拒む。undecidedは調べても決まらない理由を残せる。
++未知の分類、follow_up以外、元goalが無いと確定しているfollow_upは拒む。
++
++`follow_up_judgements`は追記の行で、id、task_id、source_goal_id、source_kind、
++classification、acceptance_items、reason、evidence、destination_goal_id、
++acceptance_version、corrects、actor_role、created_atを持つ。最後の行が今の判断。
++分類・必須の欄・遷移はdomainの`MembershipJudgement::validate`とstoreが検査する。
++UPDATEとDELETEはtriggerで拒む。判断が無い状態から3分類へ、undecidedから
++required/out_of_scopeへ進める。同じ分類の確かめ直しも許す。requiredとout_of_scopeの
++間の訂正は理由と`--corrects <最後の行のid>`を要し、undecidedへ戻すのは拒む。
++
++登録時の元goalが不明なら、`--source-goal ID`と証拠で照らしたgoalを名指す。
++これは行の`source_kind: named_by_judge`に残し、登録時の材料を変更しない。
++以後の判断は同じ元goalを使う。復元した元goalは`restored`、登録時に記録したものは
++`recorded`で区別する。
++
++## transactionと所属
++
++判断は`BEGIN IMMEDIATE`で最新の行・task・goalを読み、版を取得し、行と
++`follow_up_judged` event（taskと元goalに同じ内容）を一緒に書く。
++requiredは元goalへ、out_of_scopeは所属先へ、draft/readyのtaskだけを
++同じtransactionで移す。閉じた元goalへのrequiredとsubmitted以降は判断だけを記録し、
++taskを移さない。移動は`set_goal_in`の閉じたgoalと依存の循環の検査を通す。
++失敗すれば判断も移動もrollbackする。undecidedは所属を変えない。
++
++required/out_of_scopeの判断を持つtaskの`set-goal`は、最後の判断の所属先と
++違うgoal（`--none`も）へ移すのを拒み、訂正を促す。未判定の移動は判断にならない。
++元のtask/run/goal、登録時の状態、provenanceと`follow_up_depth`はどの所属変更でも保つ。
++登録時に元goalが無い・閉じていた・不明、現在の所属goalが無い・閉じている、
++深さ3以上のいずれかなら、runtimeのplannerのsubmitは人のadoptなしに拒む。
++既存の人のadoptは聞き直さず、adopt後のsubmitは今までどおり深さを0に戻す。
++
++## acceptanceの版と読み取り
++
++`goals.acceptance_version`は初期値1で、acceptanceの文が変わったときだけtriggerが
++1増やす。`goal_updated`は`old_acceptance_version`と`new_acceptance_version`を残す。
++判断はtransactionの版を保存する。`needs_recheck`は保存した版と現在の版の比較で導く。
++`show`は`membership_judgements`に履歴と現在の版・要再確認を載せる。
++`goal show`は`acceptance_version`と`follow_up_memberships`に元goal・現在の所属・
++判断の履歴・材料・深さを載せる（移動したfollow_upも含む）。`events`は
++`follow_up_registered`の登録時の材料と`follow_up_judged`の判断を読める。
++
++このtaskが実装したのは記録・所属・登録時のadopt制限と移行。
++判断をsubmitの必須条件にする検査とplan reviewの資料、goal review/closeの条件と
++fingerprint、achieved後のaskと訂正の適用はADR-t1504-2の後続の実装範囲である。
++閉じた元goalへのrequiredの記録は達成のeventや閉じた状態を変更しない。
++
++## 旧schemaの移行
++
++migration 0064は既存のfollow_upを未判定のまま残す。現在の所属と深さと
++`follow_up_adopted` / `draft_adopted`のpersonの記録は変えない。
++材料のtask/run/indexに一致する一意の`follow_up_registered`を登録の出どころとし、
++source taskとdraft双方の、その登録の後の`task_goal_changed`を新しい順に巻き戻す。
++各変更のtoが次の値（最後は現在の所属）と一致すること、from/toが整数かnullで
++あることを検査する。同時刻のeventもid順で区別する。
++復元した元goalと、`goal_closed`・goalの`closed_at`と登録時刻の比較、draftの
++登録時の所属が一致すれば、材料に`source_goal_id`、`source_goal_state`
++（open/closed/none）、`source_goal_provenance: restored`と登録event id・時刻を残す。
++
++eventの欠落・複数の登録、履歴の矛盾、時刻の不明、閉じた状態の食い違いは
++`source_goal_id: null`、`source_goal_state: unknown`、provenance unknownにする。
++今の所属を元の所属と確定しない。unknownは人のadoptを要する側に倒し、判断した者の
++元goalの名指しでも登録時のunknownを解消しない。migrationは判断の行を作らない。
+diff --git a/docs/design/persistence.md b/docs/design/persistence.md
+index 62f9339a..e260a56e 100644
+--- a/docs/design/persistence.md
++++ b/docs/design/persistence.md
+@@ -4,8 +4,8 @@ type: design
+ title: SQLite persistence
+ status: current
+ created: 2026-09-21
+-updated: 2026-10-04 # task 655: the hook intake's queries use events_by_opened_event
+-last_verified: 2026-10-04 # task 655
++updated: 2026-10-04 # task 1505
++last_verified: 2026-10-04 # task 1505
+ scope: persistence
+ related:
+   - adr-t1394-1
+@@ -77,6 +77,8 @@ supervisors          -- 0007: 常駐superviseプロセスの登録（token主キ
+ goals                -- 0008: 複数taskが解く課題（title、description、acceptance、constraints、doc、closed_at、verdict）
+                      -- 0013: status（'draft' | 'open'、既定'open'）
+                      -- 0021: proposal_id（所属するproposal、null可）
++                     -- 0064: acceptance_version（INTEGER NOT NULL DEFAULT 1）。trigger goal_acceptance_versionはacceptanceの文が変わったときだけ版を1増やす（非互換、ADR-t1504-2）
++follow_up_judgements -- 0064: 所属の判断と訂正（task_id、source_goal_id、source_kind、classification、acceptance_items、reason、evidence、destination_goal_id、acceptance_version、corrects、actor_role、created_at）。index judgements_by_task / judgements_by_source。trigger judgement_no_update / judgement_no_deleteで追記だけにする
+ session_workspaces   -- 0011: up が開いた常駐sessionのworkspace UUID（role主キー。supervisor / inbox。退役したrole（maintainer、常駐のplanner）の行はupが消す）
+ asks                 -- 0014（0016、0017、0022、0025、0027、0028で作り直し）: 人に答えを求める相談（kind、task / run、question、options、answer、asked_by、各時刻。0038: answered_by、option_index）
+                      -- 0030: finding_id（`blocked`のaskが上げるfinding、null可）
+@@ -84,6 +86,7 @@ asks                 -- 0014（0016、0017、0022、0025、0027、0028で作り
+                      -- 0059: recommendation、confidence（AIの推奨のoptionの文と'high' | 'low'、どちらもnull可、CHECKなし。ADR-t451-1）
+ findings             -- 0030: observerの検出 1件に1行（kind、target、task_id / run_id / goal_id、subject、summary、detail、impact、first_seen_at、last_seen_at、occurrences、evidence、status、status_reason、proposal_id、propose_reason、propose_requested_at、recorded_by、updated_at）
+ draft_origins        -- 0028: runtimeやjobが作ったdraftの出どころ（task_id主キー、origin（'follow_up' | 'goal_gap'）、material（JSON object）、created_at）
++                     -- 0064: follow_upのmaterialに登録時のsource_goal_id / source_goal_state / source_goal_provenanceと復元の出どころを足す。復元不能・矛盾はunknown、既存の所属・深さ・人のadoptを保ち、判断は作らない（-- dagq-schema: breaking。理由は下の「follow-upの所属の判断」）
+ draft_reopens        -- 0041: 出どころ`reopened`のdraft（task_id主キー、material（JSON）、created_at）。plan reviewがreopenしたtaskのproposalのwithdrawが書く
+ draft_bundles        -- 0052: runtimeのplannerが立てられたdraftの束（planner_id主キー、origin、key_kind（'source_run_id' | 'goal_review_id' | 'reviewed_proposal_id' | 'task_id'）、key_value、created_at）。ADR-t807-1
+ draft_bundle_members -- 0052: 束のdraft（(planner_id, task_id)主キー、attempt、outcome（null = plannerが生きている。'submitted' | 'canceled' | 'duplicate' | 'keep_draft' | 'undecided'）、proposal_id、duplicate_of、settled_at）
+@@ -157,7 +160,7 @@ runtimeやjobが作ったdraftに立てるplanner（[ADR-0044](../adr/0044-findi
+ - **結末**（`close_planner`の中、同じトランザクション）: plannerの行を閉じたとき、そのplannerの`draft_bundle_members`で`outcome`の無い行ごとに、taskの今の状態から結末を決めて`outcome`・`proposal_id`・`duplicate_of`・`settled_at`を書き、taskに`draft_planner_settled`（`planner_id`、`outcome`、`proposal_id`、`duplicate_of`、`status`と出どころの欄）を記録する（`settle_bundle`）。`draft`なら`keep_draft`のanswerがあれば`keep_draft`、無ければ`undecided`、`canceled`なら`duplicate_target`があれば`duplicate`、無ければ`canceled`、それ以外（submitted以降）は`submitted`（`tasks.proposal_id`）。
+ - **出どころを読む**（`show`、ADR-t807-1）: `TaskDetail.origin`は`task_origin`（`draft_origin`の出どころと材料、材料の`source_task_id`・`source_run_id`・`index`、`BundleKey`、そのtaskを持つ束ごとの`bundle_view`（`draft_bundles`と`draft_bundle_members`に、memberの今の`tasks.status`を足したもの））、`TaskDetail.follow_up_drafts`は`follow_up_drafts`（`draft_origins`の`follow_up`で材料の`source_task_id`がそのtaskのもの。`run_id`・`index`・title・今のstatus、ID順）。`planners`の一覧の`bundle`は`draft_bundle`（`bundle_view`）。`events --run RUN`は`run_id`が同じeventに加えて、payloadの`source_run_id`が同じevent（そのrunのreceiptから作ったdraftの`draft_planner_opened`・`draft_planner_settled`・`follow_up_adopted`・cancelの`task_status_changed`）も返す。
+ - **answerの行き先**（`planner_answer_route`、`answer`も同じ判定で`runtime_delivers`を書く）: 回答済み・未closeの`planner_question`について、taskの`draft_task_id`か、taskを`draft_bundle_members`に持つか、taskのproposalの`proposal_id`を持つ閉じていないruntimeのplannerがあれば`Planner`、answerが`keep_draft`なら`Close`、出どころが無ければ`Person`、`draft`でproposalに無く使い切っていなければ`NewPlanner`、`draft`以外に進んでいれば`Close`、それ以外は`Person`。`planner_answers`は回答済み・未closeの`planner_question`を古い順に返し、`close_planner_answer`は`closed_at`と`planner_answer_closed`（`ask_id`、`reason`）を書く（打ち込んだものは`ask_delivered`）。`claim_planner_answer`は打ち込みの前に`BEGIN IMMEDIATE`で、askが未closeで行き先が同じplannerの`Planner`であり、同じ`ask_id`の`planner_answer_claimed`が`PLANNER_ANSWER_CLAIM_SECS`（120秒）以内に無いときだけ`planner_answer_claimed`（`ask_id`、`planner_id`、`workspace_id`、`claimed_at`）を書いて`true`を返す（task 406）。`exhausted_drafts`は`draft`のまま`draft_planner_exhausted`のあるtask（`status`のattention）。
+-- **submit**（`proposals::submit`の中、同じトランザクション）: `check_adoptions`がsubmitする`draft`のtaskを見て、出どころが`follow_up`のdraftを持ち主が`runtime`のsubmitで出すとき、そのtaskへの`planner_question` / `follow_up`のaskに`adopt`のanswerが無く、goalがnullか閉じているか`follow_up_depth`が`FOLLOW_UP_ASK_DEPTH`（3、[ADR-t808-1](../adr/2026-09-28-t808-1-runtime-planners-submit-follow-ups-up-to-depth-two.md)）以上ならerrorで拒否する（taskは動かない。人が一度採用した（`by: person`の`follow_up_adopted`がある）taskのreviseの出し直しは拒否しない）。`record_adoptions`は持ち主が`person`か`adopt`のanswerがあるtaskの`follow_up_depth`を0にし、出どころのあるtaskにまだ無ければ`follow_up_adopted`（goal_gapとreopenedは`draft_adopted`。`planner_id`（taskを持つ生きている束のplanner）、`bundle_key`と出どころの欄も載せる）を書く。`transition_task`は出どころのあるtaskを`draft`から`canceled`にするとき、`task_status_changed`に出どころの欄（`origin`、`bundle_key`、`source_run_id`など）を足す。
++- **submit**（`proposals::submit`の中、同じトランザクション）: `check_adoptions`がsubmitする`draft`のtaskを見て、出どころが`follow_up`のdraftを持ち主が`runtime`のsubmitで出すとき、そのtaskへの`planner_question` / `follow_up`のaskに`adopt`のanswerが無く、登録時の元goalが無い・閉じていた・不明か、今のgoalがnullか閉じているか`follow_up_depth`が`FOLLOW_UP_ASK_DEPTH`（3、[ADR-t808-1](../adr/2026-09-28-t808-1-runtime-planners-submit-follow-ups-up-to-depth-two.md)）以上ならerrorで拒否する（taskは動かない。人が一度採用した（`by: person`の`follow_up_adopted`がある）taskのreviseの出し直しは拒否しない）。`record_adoptions`は持ち主が`person`か`adopt`のanswerがあるtaskの`follow_up_depth`を0にし、出どころのあるtaskにまだ無ければ`follow_up_adopted`（goal_gapとreopenedは`draft_adopted`。`planner_id`（taskを持つ生きている束のplanner）、`bundle_key`と出どころの欄も載せる）を書く。`transition_task`は出どころのあるtaskを`draft`から`canceled`にするとき、`task_status_changed`に出どころの欄（`origin`、`bundle_key`、`source_run_id`など）を足す。
+ 
+ ### planning requests（`plan_requests.rs`）
+ 
+@@ -208,6 +211,10 @@ runtimeやjobが作ったdraftに立てるplanner（[ADR-0044](../adr/0044-findi
+ 
+ queue service（[Queue service](queue-service.md)、ADR-t1233-1決定2）も queue DBを開くプロセスの1つで、要求ごとに`SqliteQueue::open`で接続を開き、要求のprincipalのactor（`with_actor`）で書く。goal 82の段(2)ではsupervisor・inbox・planner・人のCLI・workerとjobのdagqもDBを直接開くので、serviceとそれらの書き込みは今までどおりSQLiteのtransactionとleaseの規則で並ぶ（ADR-t1233-1のConsequences）。serviceのファイル（socket・lock・`state.json`・token）はqueueのディレクトリの`service/`に置き、DBには置かない（migrationは要らない）。最終の姿（段(5)）ではserviceがDBを開く唯一のプロセスになり、互換はschemaではなくAPIのversionで判定する。
+ 
++## follow-upの所属の判断
++
++migration `0064_follow_up_membership.sql`は`goals.acceptance_version`（acceptance変更だけで増加）と追記の`follow_up_judgements`を足す。`-- dagq-schema: breaking`で非互換を宣言する。古いbinaryは登録時の元goalと状態を保存せず、submit時の所属だけでadoptの要否を決め、判断と矛盾する`set-goal`も拒まないため、列と表の追加でも古い書き手を許すと新しい契約を破る。判断・訂正とdraft/readyの所属変更は同じIMMEDIATE transaction。登録のtransactionで元taskのgoalと状態を読み直し、`draft_origins.material`に`source_goal_id`・`source_goal_state`・`source_goal_provenance`を記録する。旧材料は登録eventとsource/draftの所属変更の履歴から復元し、矛盾・欠落はunknown。深さとpersonのadoptと今の所属を変えず、判断は自動で埋めない。行・遷移・必須情報・移行・読み取りの詳細は[所属の判断](follow-up-membership.md)。
++
+ ## Transactions and constraints
+ 
+ - `BEGIN IMMEDIATE`で状態変更、依存グラフ検証、claimを直列化する。ロック待機は最大5秒で、タイムアウトはエラーとして呼び出し元へ返す。
+diff --git a/docs/design/security.md b/docs/design/security.md
+index f01ad376..0dc8eb41 100644
+--- a/docs/design/security.md
++++ b/docs/design/security.md
+@@ -4,8 +4,8 @@ type: design
+ title: Security
+ status: current
+ created: 2026-09-28
+-updated: 2026-10-04
+-last_verified: 2026-10-04
++updated: 2026-10-04 # task 1505
++last_verified: 2026-10-04 # task 1505
+ scope: runtime
+ tags:
+   - security
+@@ -53,7 +53,7 @@ AI actorの出力は全てデータで、制御側が決定的に遷移へ写す
+ | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+ | user | ○ | ○ | ○ / ○ | ○ | ○ | ○ / ○ | ○ | ○ / — | ○ | ○ | ○ | ○ | — |
+ | inbox | ○ | ○ | ○ / ○ | ○ | ○ | ○ / ○ | ○ | ○ / — | ○ | ○ | ○ | ○ | — |
+-| planner | ○ | △ draft・submitted・readyのtask、自分のproposalの取り下げ。`goal ready`・`goal review`は— | — / — | ○（runにはnoteだけ） | △ `planner_question`だけ、runに紐づくものは— | — / — | resolve・dismiss（recordは—） | — / △ 自分が立てられた依頼だけ | △ 自分のplannerだけ | ○ | — | — | — |
++| planner | ○ | △ draft・submitted・readyのtask、全状態のfollow_upの所属判断、自分のproposalの取り下げ。`goal ready`・`goal review`は— | — / — | ○（runにはnoteだけ） | △ `planner_question`だけ、runに紐づくものは— | — / — | resolve・dismiss（recordは—） | — / △ 自分が立てられた依頼だけ | △ 自分のplannerだけ | ○ | — | — | — |
+ | worker | 読み取り（`watch`と`queue.export`は—） | — | — / — | △ noteだけ、自分のrunとtask | △ 自分のrunかtaskの`worker_question`だけ | — / — | — | — / — | △ 自分のrunだけ | — | — | — | — |
+ | review-job | 読み取り | — | — / — | — | — | — / — | — | — / — | — | — | — | — | — |
+ | recovery-job | 読み取り | — | — / — | — | — | — / — | — | — / — | — | — | — | — | — |
+@@ -65,6 +65,7 @@ AI actorの出力は全てデータで、制御側が決定的に遷移へ写す
+ 
+ - review-jobとrecovery-jobの`review.submit` / `triage.submit`は自分のrunだけのcapabilityだが、CLIのコマンドは無く、verdictはsupervisorがデータとして読む。jobの環境には`DAGQ_RUN_ID`が無いので、今は持ち主が分からず拒まれる
+ - observerの`queue.export`（`graph --out`・`report`）は—。4つのjob・worker・wrapper・integratorは`watch`も`queue.export`も持たず、状態を変えないコマンド（`watch`・`graph --out`・`report`）も全roleで`StaticPolicy`が判定するので（下の「判定の場所」）拒まれる（task 859）。読み取り（`queue.read`）は全roleが持つ
++- `judge-follow-up`（`follow_up.judge`）はuser・inbox・plannerだけが全状態のfollow_upに記録でき、worker・job・supervisorは拒む。所属変更はdraft/readyだけ。表のplannerのtask変更の例外はこの判断の記録だけである。
+ - user・inboxの計画権限には、最新runが終了し生きているrunの無い`in_progress` taskの`--verify` / `--no-verify`だけを直す`task.verify_edit`も含む（ADR-t883-1）。planner・worker・jobは持たない。
+ - plannerの行は[ADR-t728-1](../adr/2026-09-27-t728-1-trust-domains-actors-and-default-deny-capability-authorization.md)の決定7のとおり、この段で運用の権限を変えていない（`dagq-planner` skillの「Where your authority ends」はこの行と一致させる。規則は[文書の規則](../development/documents.md)の「権限の表を写す文書」）
+ - sessionの画面を読む・送る`screen.read`・`screen.send`（`run screen` / `run send`、`planner screen` / `planner send`。backgroundのsessionのlogを読む`run log` / `planner log`も`screen.read`。[ADR-t1228-1](../adr/2026-10-02-t1228-1-inbox-and-planner-reach-sessions-through-the-dagq-cli.md)の決定7）はuserとinboxだけが持つ。表のsessionの列のplannerの△とsupervisorの○はこれを含まない（plannerは自分のplannerのものも拒まれ、supervisorは自分の送信の経路を使う）
+diff --git a/docs/design/supervisor-lifecycle/draft-planners.md b/docs/design/supervisor-lifecycle/draft-planners.md
+index 706a2f56..ed52e18b 100644
+--- a/docs/design/supervisor-lifecycle/draft-planners.md
++++ b/docs/design/supervisor-lifecycle/draft-planners.md
+@@ -4,8 +4,8 @@ type: design
+ title: "Draft planners (supervisor)"
+ status: current
+ created: 2026-09-26
+-updated: 2026-10-04 # task 1461: the AGENTS.md section that points at the dagq-planner skill is renamed
+-last_verified: 2026-10-03
++updated: 2026-10-04 # task 1505
++last_verified: 2026-10-04 # task 1505
+ scope: runtime
+ related:
+   - adr-t1394-1
+@@ -24,13 +24,13 @@ related:
+ 
+ [ADR-0044](../../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定13・16（task 282）と[ADR-t807-1](../../adr/2026-09-28-t807-1-bundle-drafts-of-one-piece-of-work-for-one-runtime-planner.md)（task 807）。runtimeやjobが作ったdraftを、同じきっかけで作られ同時に待っているものの束にし、束ごとにsupervisorがruntimeのplannerを1つ立て、plannerがdraftごとに採用・不採用・askのどれかを選ぶ（2026-09-27の人の決定で、goal 29のconstraintの「follow_upのdraft 1件ごとにplannerを1つ」を置き換えた）。人の決定（2026-09-25）で、対象はfollow_upのdraftに限らず、runtimeやjobが作ったdraft全般（follow_up、goalの判断jobのgap）にした。goal 22のfollow-up triage job（[ADR-0037](../../adr/0037-follow-up-triage-job-decides-follow-up-drafts.md)、task 205）はこれに置き換え、jobのverdictと適用、`follow_up`のaskのanswerの適用、`task_leases`を消した（`follow_up_depth`と、人の判断を経ずにsubmitしない上限は残す）。use caseは`src/application/supervise/draft_planner.rs`、storeは`src/infrastructure/draft_planners.rs`（port `DraftPlannerStore`）、規則と型は`src/domain/follow_up.rs`、promptは`application::prompt::draft_planner_prompt`。run slotは使わず、[Plan review (supervisor)](plan-review.md#plan-review-supervisor)の`tend_planners`の中で、reviseの配送の後に進める（drain中は立てない）。
+ 
+-1. **出どころ**（schema v28、`migrations/0028_draft_planners.sql`）: runtimeやjobがdraftを作るときに`draft_origins`の行（`task_id`、`origin` = `follow_up` / `goal_gap`、`material`（JSON object）、`created_at`）を`record_draft_origin`で書く。`integrate`の`register_follow_ups`はfollow_upのdraftに`{"source_task_id", "source_run_id", "index", "category"}`を書く（`category`はworkerが付けた種類、無ければ`unlabeled`。ADR-t947-3、[follow_upsの分類コード](receipt-and-session-exit.md#follow_upsの分類コード)）。task 954より前に登録したdraftの材料には`category`が無く、promptと集計は`unlabeled`として扱う。`goal_gap`は、[goal review](goal-review.md)のjobの`gaps`のverdict（と人の`approve_goal`の`gaps`のanswer）からruntimeが登録するdraftに、`{"goal_id", "goal_review_id", "criterion", "summary"}`を書く（task 375）。人が`add`で作ったdraftとobserverのdraft goalのtaskには行が無く、plannerは立たない。migrationは導入前の`follow_up_registered`（`task_id`のあるもの）から行を埋めるので、導入前のfollow_upのdraftも対象になる。出どころ`reopened`（task 418）は、plan reviewがreadyから戻して自分のproposalに入れたtask（ADR-0044の決定14、`task_reopened`）が、そのproposalのwithdraw（`dagq proposal withdraw`）で`draft`に戻ったときにwithdrawが表`draft_reopens`（`migrations/0041_draft_reopens.sql`）に書く（材料は`reason`（verdictのreopenのreason）、`proposal_id`、`reviewed_proposal_id`）。人が作ったtaskで`draft_origins`の行が無くても、これで誰かが拾う。行が効くのはtaskがまだそのproposalのものであるあいだだけで、後で別のproposalに入ったtaskのwithdrawには古い行が効かない。同じproposalの他のmember（plannerがsubmitしたdraft）には書かず、今までどおり`draft`に戻るだけ。readyに直接戻す経路は作らない（reopenはplan reviewが食い違いを見つけた結果なので、gateを通さずにreadyに戻すと食い違ったままclaimされうる）。withdrawとreopenの繰り返しは下の4の上限（`draft_planner_exhausted`）で止まる。
++1. **出どころ**（schema v28、`migrations/0028_draft_planners.sql`）: runtimeやjobがdraftを作るときに`draft_origins`の行（`task_id`、`origin` = `follow_up` / `goal_gap`、`material`（JSON object）、`created_at`）を`record_draft_origin`で書く。`integrate`の`register_follow_ups`はfollow_upのdraftに`{"source_task_id", "source_run_id", "source_goal_id", "source_goal_state", "source_goal_provenance", "index", "category"}`を書く（`category`はworkerが付けた種類、無ければ`unlabeled`。ADR-t947-3、[follow_upsの分類コード](receipt-and-session-exit.md#follow_upsの分類コード)）。task 954より前に登録したdraftの材料には`category`が無く、promptと集計は`unlabeled`として扱う。`goal_gap`は、[goal review](goal-review.md)のjobの`gaps`のverdict（と人の`approve_goal`の`gaps`のanswer）からruntimeが登録するdraftに、`{"goal_id", "goal_review_id", "criterion", "summary"}`を書く（task 375）。人が`add`で作ったdraftとobserverのdraft goalのtaskには行が無く、plannerは立たない。migrationは導入前の`follow_up_registered`（`task_id`のあるもの）から行を埋めるので、導入前のfollow_upのdraftも対象になる。出どころ`reopened`（task 418）は、plan reviewがreadyから戻して自分のproposalに入れたtask（ADR-0044の決定14、`task_reopened`）が、そのproposalのwithdraw（`dagq proposal withdraw`）で`draft`に戻ったときにwithdrawが表`draft_reopens`（`migrations/0041_draft_reopens.sql`）に書く（材料は`reason`（verdictのreopenのreason）、`proposal_id`、`reviewed_proposal_id`）。人が作ったtaskで`draft_origins`の行が無くても、これで誰かが拾う。行が効くのはtaskがまだそのproposalのものであるあいだだけで、後で別のproposalに入ったtaskのwithdrawには古い行が効かない。同じproposalの他のmember（plannerがsubmitしたdraft）には書かず、今までどおり`draft`に戻るだけ。readyに直接戻す経路は作らない（reopenはplan reviewが食い違いを見つけた結果なので、gateを通さずにreadyに戻すと食い違ったままclaimされうる）。withdrawとreopenの繰り返しは下の4の上限（`draft_planner_exhausted`）で止まる。
+ 2. **対象**（`planner_drafts`、ID昇順）: statusが`draft`でproposalに入っておらず（withdrawで`canceled`になったproposalは持たない）、`draft_origins`か（有効な）`draft_reopens`の行があり、閉じていないruntimeのplanner（`planners.draft_task_id`か、taskのwithdrawされたproposalのplanner）が無く、closeされていない`planner_question`のaskが無く、answerが`keep_draft`のask（旧`follow_up`を含む）が無く、`draft_planner_exhausted`の無いdraft。ただし閉じていないplannerの束と同じ束の鍵を持つdraftは、そのplannerが終わるまで待つ（同じきっかけのdraftが作業中に増えたとき。integrateは1つのreceiptの未登録follow_upsを1つの`BEGIN IMMEDIATE` transactionで登録するので、passはそのreceiptのdraftを全件見るか1件も見ない。束のplannerが`planner_unresponsive`で開いたまま人を待つあいだも、同じ鍵のdraftは待つ）。
+    - **束**（ADR-t807-1）: 対象を束の鍵（`BundleKey::of`）で分ける。follow_upは材料の`source_run_id`（同じintegrateが登録したもの）、goal_gapは`goal_review_id`（同じgoal reviewが作ったもの）、reopenedは`reviewed_proposal_id`（同じwithdrawが戻したもの、reopenしたplan reviewのproposal）。人の言う「作成タイミングが同じ」をこう読んだ（plannerの解釈。根拠は2026-09-27の人の依頼の言葉）。作成時刻の近さでは束ねず、材料に鍵の無いdraft（`source_run_id`がnullなど）は1件で1つの束（鍵の種類`task_id`）。束の順は束の最も古いdraftのID順。
+ 3. **立てる**（`open_draft_planners`）: runtimeが立てたplannerで生きているものが上限`runtime_planners`（`supervise --runtime-planners`の明示 > main checkoutの`dagq.toml`の`[supervisor] runtime_planners` > 既定1。各passで読み直す。[Run environment](run-environment.md)の`[supervisor]`、task 941。revise・finding・計画の依頼（[inboxからの計画の依頼](plan-planners.md#inboxからの計画の依頼)。依頼のplannerはdraftより先に立てる）のplannerと共有、run slotとは別、人が開いたplannerは数えない）未満のあいだ、束ごとに`open_draft_planner`で立てる（束1つで1と数える）。storeは`BEGIN IMMEDIATE`で束の全てのdraftの対象の条件を再検査し、条件を外れたdraftは束から落として残りで、`planners`の行（`origin: runtime`、`draft_task_id`は束の最も古いdraft）、`draft_bundles`と`draft_bundle_members`の行、draftごとの`draft_planner_opened`（`planner_id`、`attempt`、`origin`、`ask_id`、`goal_id`、`members`、`bundle_key`と出どころの欄。[Persistence](../persistence.md#draft-plannersdraft_plannersrs)）を書くので、2つのsupervisorが同じdraftに立てない。workspaceは`[<repo>]planner#<id> - draft task <束の最も古いdraftのID>`で、初期prompt（`prompt.txt`）は`draft_planner_prompt`（verify・paths・evidenceを決める順の`prompt::repository_rules`を含む。[Prompt](prompt.md#repositoryの規則を読む順)）: draftごとのtitle・description・context（束が2件以上なら`## Draft <id> (planner <attempt> for it)`の見出しごと）、出どころ（1回だけ。follow_upなら元のtaskのtitle・description・acceptance・verification・paths・evidenceと、元のrunの`integration_receipt`のreceiptの`summary`と`follow_ups`、束のdraftがreceiptの何番目か。goal_gapならdraftごとのmaterialのJSON、reopenedならdraftごとのreopenしたplan reviewのproposal、withdrawしたproposalとreopenのreason）、goal（束のdraftのgoalごとに1回。title・description・acceptance・constraints・doc、閉じているか）と同じgoalの束の外のtask、束が2件以上なら束の中の重複（`dagq cancel ID --duplicate-of <残す方>`）・依存（`dagq dependency add`）・採用するものを1つのproposalで出すこと（`dagq submit ID ID ...`）を先に考える手順、draftごとの3択の手順（採用: `dagq edit`でacceptance・verify・paths・evidence・contextの冒頭の出自を補い（reopenedは、taskの意図を保ってreasonの指す所を直し、contextにreopenの一行を足す）、依存を足し、`dagq lint`してから`dagq submit`。不採用: `dagq cancel`と`dagq note --task`で理由。他のtaskの重複か、completedのtaskで実装済みなら`dagq cancel ID --duplicate-of X`で重複先を記録する（[ADR-0063](../../adr/0063-full-text-search-related-with-mentions-and-search-strength-and-duplicate-of.md)の決定5。ADR-0041で廃止したfollow-upのtriageに代わり、draftを重複で閉じるのはこのplanner）。自分で決めきれない（[推奨が出せればplannerが決める](#推奨が出せればplannerが決める未実装)の3つの条件）: `dagq ask --task ID --kind planner_question --because scope --recommend ... --confidence ... --option adopt --option cancel --option keep_draft`して止まり、answerに従う。決めた理由は採用ならcontext、不採用と`keep_draft`ならnoteに書く）、`dagq search`で重複と実装済みを探すこと、記録を読むCLI（`prompt::RECORD_READING`、ADR-0044の決定22、task 420: `dagq events --full --task ID`と絞り込み（`--run` / `--goal` / `--kind` / `--since` / `--until`。`--kind`が無ければattentionだけなので、全種類は`--all`を足す）と`dagq timeline RUN`）、AGENTS.mdの規則を読むこと、自動でsubmitできない上限。
+ 4. **3回まで**: plannerがdraftを決めずに終わった（sessionが終わった、idleで`/exit`された）draftは次のpassで再び対象になり、残りのdraft（とその間に増えた同じきっかけのdraft）で束を作り直して次のplannerが立つ。回数はdraftごとに数える（そのdraftを含む束のplannerの数、`draft_bundle_members.attempt`）。`draft_planner_opened`が`MAX_DRAFT_PLANNERS`（3）件あるdraftは（人のanswerを運ぶとき以外は）束から外して`draft_planner_exhausted`（`planners`、`ask_id`、`reason`）を記録し、束の残りで立てる。attentionは`request a plan for the draft`（`AttentionNext::DecideDraft`。`status`でもdraftのまま残っているあいだ出る。`watch`も同じ文面）で、人の言葉を受けたinboxがそのdraftを参照にした計画の依頼（`dagq request add --ref task:N`、[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)の決定8）を記録し、依頼のruntimeのplanner（[inboxからの計画の依頼](plan-planners.md#inboxからの計画の依頼)）が決めるか、人が`DAGQ_ROLE`の無い自分のterminalで決める。
+ 5. **planner_question**（ADR-0044の決定13）: askのkindに`planner_question`を足した（CLIの`ask --kind`で作れる）。束の中でも`--task ID`でdraftごとに開く。`answer`は`planner_answer_route`で行き先を決め、`Person`以外なら`ask_answered`に`runtime_delivers: true`を書いてattentionにしない（`status`は`delivering the answer of ask N (runtime)`）。行き先は、(a) そのtaskで働く閉じていないruntimeのplanner（draftを持つ束のplannerか、taskのproposalのplanner）: supervisorがplannerの`idle`（idle markerがaskより新しい）を待ち、打ち込む前に`claim_planner_answer`で配送をclaimしてから（task 406。`BEGIN IMMEDIATE`で、askが未closeで行き先が今もそのplannerであり、同じaskの`planner_answer_claimed`が`PLANNER_ANSWER_CLAIM_SECS`（120秒）以内に無いことを確かめ、`planner_answer_claimed`（`ask_id`、`planner_id`、`workspace_id`、`claimed_at`）をtaskに書く。revise の`claim_revise`と同じ形。claimできなければ送らない）、`answer to ask <id>: <answer>`を`submit_input`で打ち込み、`ask_delivered`でaskを閉じる。これで引き継ぎの間に同じqueueを扱う2つのsupervisorが重なっても、answerは1回しか打ち込まれない。打ち込みの失敗は今までどおり`ask_delivery_failed`（taskに記録）でinboxに任せる（claimは残るので打ち直さない）。claimの後、打ち込む前にsupervisorが落ちたaskは、claimが120秒より古くなった後の周回で別のsupervisorがclaimし直して打ち込む（打ち込みは数秒で終わるので、生きているsupervisorのclaimを奪わない）。(b) plannerが居ないdraft: 上限の中で新しいplannerを立て（そのdraftを先頭に、同じ束の鍵で対象のdraftを束に加える。同じ鍵の束のplannerが開いていれば、それが終わるまで待つ）、初期promptに元の質問とanswerを載せ（先頭のdraftの`draft_planner_opened`の`ask_id`）、askを閉じる。(c) `keep_draft`のanswerでplannerが居ない、またはdraftが先に進んだ（submit、cancel）: supervisorが`planner_answer_closed`（`ask_id`、`reason`）でaskを閉じる。`keep_draft`で残したdraftにはruntimeのplannerを立て直さず、人の言葉を受けたinboxがそのdraftを参照（`--ref task:N`）にした計画の依頼を記録するまでdraftのまま待つ（`PLANNER_QUESTION_OPTIONS`のdoc comment、draftのplannerのpromptの3の`keep_draft`の説明）。(d) それ以外（出どころの無いtask、使い切ったdraft）: inboxが届ける（`send the answer of ask N to the worker and close it`）。closeされていない`planner_question`（束のどれかのdraftについて）があるplannerと、そのworkspaceに打ち込んだanswer（`ask_delivered`）の後にまだidleになっていないplannerには`/exit`を送らない（打ち込まずに閉じたaskは引き止めない。`question_wait`）。打ち込みの後かは、打ち込む前に取った配送のclaimの時刻（`planner_answer_claimed`の`claimed_at`）と`idle_since`で決め、`idle_since`がclaimの秒以下なら答えをまだ読んでいない。askの`closed_at`（打ち込みの後に`ask_delivered`が書く）とは比べない: answerを読んで仕事を終え、askのcloseより前にidleになったplannerを答えの処理中とみなして`/exit`せず、`--runtime-planners`の枠をふさいだため（task 884。2026-09-27のask 150とplanner 338）。(b)で初期promptに載せたanswerはplannerを立てた時刻と比べる。plannerが自分で作ったaskはplannerがaskの後に止まってから、他の人が作ったaskはplannerがidleなら打ち込む。
+-6. **採用の記録と上限**（`submit`の中、[persistence](../persistence.md)）: submitが出どころのあるdraftを初めて出すとき`follow_up_adopted`（goal_gapとreopenedは`draft_adopted`。`task_id`、`origin`、`source_task_id`、`source_run_id`、`by: "planner" | "person"`、`ask_id`、`depth`、`planner_id`（draftを持つ生きている束のplanner）、`bundle_key`と出どころの欄）を書く。上限はdraftごとで、束の中の1件が人の`adopt`を要しても、他のdraftは出せる。runtimeのplanner（`DAGQ_PLANNER_ORIGIN=runtime`）は、goalが閉じているか無い、または`follow_up_depth`が`FOLLOW_UP_ASK_DEPTH`（3、[ADR-t808-1](../../adr/2026-09-28-t808-1-runtime-planners-submit-follow-ups-up-to-depth-two.md)）以上のfollow_upのdraft（深さ2まではgoalが開いていれば人を経ずにsubmitできる）を、そのdraftへの`planner_question`（旧`follow_up`）に人が`adopt`と答えていなければsubmitできない（errorで`planner_question`を促す）。人のsubmit（origin `person`: 廃止前に人が`dagq plan`で開いたplannerか、人が`DAGQ_ROLE`の無い自分のterminalで打った`submit`）、人の`adopt`を経たsubmit、`ready --bypass-review`は深さを0に戻す。
++6. **採用の記録と上限**（`submit`の中、[persistence](../persistence.md)）: submitが出どころのあるdraftを初めて出すとき`follow_up_adopted`（goal_gapとreopenedは`draft_adopted`。`task_id`、`origin`、`source_task_id`、`source_run_id`、`by: "planner" | "person"`、`ask_id`、`depth`、`planner_id`（draftを持つ生きている束のplanner）、`bundle_key`と出どころの欄）を書く。上限はdraftごとで、束の中の1件が人の`adopt`を要しても、他のdraftは出せる。runtimeのplanner（`DAGQ_PLANNER_ORIGIN=runtime`）は、登録時の元goalが無い・閉じていた・不明か、現在のgoalが閉じているか無い、または`follow_up_depth`が`FOLLOW_UP_ASK_DEPTH`（3、[ADR-t808-1](../../adr/2026-09-28-t808-1-runtime-planners-submit-follow-ups-up-to-depth-two.md)）以上のfollow_upのdraft（深さ2までは登録時の元goalと現在のgoalがともに開いていれば人を経ずにsubmitできる）を、そのdraftへの`planner_question`（旧`follow_up`）に人が`adopt`と答えていなければsubmitできない（errorで`planner_question`を促す）。人のsubmit（origin `person`: 廃止前に人が`dagq plan`で開いたplannerか、人が`DAGQ_ROLE`の無い自分のterminalで打った`submit`）、人の`adopt`を経たsubmit、`ready --bypass-review`は深さを0に戻す。
+ 7. **終わり**: runtimeのplannerは束のdraftをsubmitしたか、cancelしたか、`keep_draft`で残したら（決めずに残したものがあっても）、idleになったところで`/exit`され、終わったworkspaceは閉じられる（[Plan review (supervisor)](plan-review.md#plan-review-supervisor)の`end_runtime_planners`）。idleはStop hookのidle markerで判断し、markerが書けなかった（ディスク満杯などでhookが失敗した）ときや最後の入力より古いときは画面からの推定で判断するので（ADR-t803-1、[画面からのidleの推定](receipt-and-session-exit.md#画面からのidleの推定)）、markerが無くても仕事を終えたplannerは`/exit`される。画面にbackgroundの処理の表示（`1 shell`など）があるうちは、markerの`running`と同じく`working`として`/exit`を送らず、表示が消えてから推定でidleになったところで送る（task 823）。`planner_question`のanswerを打ち込まれたplannerも、それを読んでidleになれば（5）`/exit`される。持ち主の居ないreviseが上限で`--planner-timeout`を過ぎて待つときは、人の答えを待っていないidleのplannerが`/exit`されて枠を空ける（`planner_released`。[Plan review (supervisor)](plan-review.md)の9）。対話のplannerで、画面も読めないまま`--planner-timeout`（既定3600秒）のあいだ入力・marker・推定のidleのどれも見えなければ、plannerごとに1回`planner_unresponsive`（`subject: "planner"`、`draft_task_id`）がinboxに届き、attention `check the planner`が束の最も古いdraftのtaskに出る。束のplannerも1つで1回で、plannerは閉じない（[Planner sessions](plan-planners.md)の「runtimeのplannerの時間切れ」、task 805）。非対話のplanner（`route: headless`）は画面を読まず、idleはwrapperがturnの終わりに書くidle markerで判じ、この期限でも見ない: wrapperがturnを`[stall]`の上限で止めたときに、plannerごとに1回`planner_unresponsive`（`subject: "planner"`、`draft_task_id`、`route`・`turn`・`outcome`）が届き、止めたturnでsessionが終わるので、plannerは`runtime_exited`で閉じられ、決めずに終わったplannerに数える（`tell_of_stopped_planner_turns`）。最後のturnがClaudeのログイン切れ・利用上限・起動の失敗で終わった非対話のplannerは、Claudeを待って`/exit`されず、決めずに終わったplannerにも数えない（`provider_wall`）。どちらも[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)の「状態」と「使えないとき」。submitしたproposalはplan reviewを通り、reviseは持ち主（閉じていれば新しいruntimeのplanner）に返る。
+ 8. **記録と読み方**（ADR-t807-1）: plannerの行が閉じるとき（`close_planner`）、束のdraftごとの結末（`submitted`（proposal）、`canceled`、`duplicate`（重複先）、`keep_draft`、`undecided`）を`draft_bundle_members`に書き、draftに`draft_planner_settled`を記録する。出どころのあるdraftの`draft_planner_opened`・`draft_planner_settled`・`follow_up_adopted` / `draft_adopted`・`draft`からのcancelの`task_status_changed`は、束の鍵（`bundle_key`）と出どころの欄（`source_task_id`・`source_run_id`・`index`・`category`・`goal_review_id`・`reviewed_proposal_id`のうち材料にあるもの）を載せ、`events --task ID`と、payloadの`source_run_id`も見る`events --run RUN`で、元のrunから各draftの結末まで引ける。`dagq show ID`（`--full`でなくても）はtaskの`origin`（種類、material、元のtaskとrun、receiptの`follow_ups`の何番目か、束の鍵、そのdraftを持った束ごとのplannerと他のdraftと結末。人が`add`したtaskとobserverのdraft goalのtaskはnull。導入前のdraftも`draft_origins`の行があれば出す）と、元のtaskなら`follow_up_drafts`（そのrunのreceiptが出したdraftのIDと今の状態）を出す。`dagq planners`はruntimeのplannerの`bundle`（鍵とdraftと結末）を出す。`dagq stats`の`draft_flow`は窓の中の`bundles`（`draft_planner_opened`の`planner_id`の数）と`bundle_sizes`（draftの数ごとの束の数）を出す。
+ 9. **test**: `tests/it/plan_review.rs`がcmuxのdoubleで、follow_upとgoal_gapのdraftに上限の中で古い順にplannerが立ち、人のdraftには立たないこと、promptの中身、決めたplannerの`/exit`、決めずに終わったplannerの後に次のplannerが立ち3回で`draft_planner_exhausted`とattentionになること、`planner_question`のanswerが生きているplannerに打ち込まれ（`planner_answer_claimed`が1件）、別のsupervisorがclaimしたanswerは2回目のclaimが拒まれて打ち込まれず、古くなったclaimは引き継がれて1回だけ打ち込まれ、plannerの居ないdraftでは新しいplannerがanswerを持って立ち、`keep_draft`は閉じられること、を確かめる。`tests/it/planner_slots.rs`は、answerを打ち込んだ後でaskのcloseより前にidleになったplannerが`/exit`されて行が閉じ、打ち込みより前のidleのplannerは残ることを確かめる（task 884）。`tests/it/draft_bundles.rs`は束（ADR-t807-1）を確かめる: 1つのrunのfollow_ups 3件にplannerが1つだけ立ちpromptに3件と元のtaskが1回載ること、別のrunのfollow_upとgoal_gapが別の束になること、作業中に増えた同じrunのfollow_upが待つこと、一部だけ決めて終わった束の結末（`duplicate`・`submitted`・`undecided`）と残りと増えた分で次の束が立ちdraftごとに3回目の後に`draft_planner_exhausted`になること、深さ3のdraftは束の中でも人の`adopt`無しにsubmitできないこと、`show`の`origin`・`follow_up_drafts`、`planners`の`bundle`、`events --run`、`stats`の`bundles` / `bundle_sizes`、束の2件目のdraftへの`planner_question`のanswerが束のplannerに打ち込まれること。`src/domain/follow_up.rs`のunit testが鍵の分け方を、`src/domain/stats/drafts.rs`のunit testが束の数え方を確かめる。`tests/it/runtime_ask.rs`は`register_follow_ups`の出どころ、runtimeのplannerのsubmitの上限と人の`adopt`の後のsubmit、`status`の表示を、`tests/it/queue_migration.rs`は導入前のfollow_upのdraftがmigrationで対象になることを確かめる。reopenedは、`src/infrastructure/draft_planners.rs`のunit testがwithdrawでreopenのmemberにだけ出どころが付き他のmemberには付かないこと、`tests/it/plan_review.rs`の`a_withdrawn_reopen_gets_a_planner_of_the_runtimes_with_the_reason`がplan reviewのreopen・withdrawの後にplannerが立ち、promptにreasonと3択が載り、readyにならないことを確かめる。
+@@ -47,7 +47,7 @@ related:
+ 
+ [ADR-t451-1](../../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)の決定5（ADR-0047決定13・16・20をamends、task 1320）。基本方針の文言はdagq-planner skillの「Basic policy (ADR-t451-1)」に揃え（task 450。AGENTS.mdの「### planner」は今はそのskillを指すだけ）、promptは`prompt::DECIDE_YOURSELF`でその要約を持つ。
+ 
+-- **prompt**（`draft_planner_prompt`の「What to do」）: runtimeのplannerは、推奨が出せるdraftの採否を自分で決める（採用はsubmit、不採用はcancel）。理由は、採用ならtaskの`--context`に、不採用（`--duplicate-of`を含む）・`keep_draft`ならdraftの`note`に書く。`planner_question`にするのは、(a) ADR-0047決定41の`scope`・`discard`に当たりqueue・repository・ADR・人の先例で決めきれないもの、(b) 確信度が`low`のもの、(c) [ADR-t808-1](../../adr/2026-09-28-t808-1-runtime-planners-submit-follow-ups-up-to-depth-two.md)の自動で採用しない上限（深さ`FOLLOW_UP_ASK_DEPTH`（3）以上と、goalが無いか閉じたgoalのfollow_up）に当たるdraftだけで（repositoryの規則でverify・paths・evidenceが決まらないこと自体は理由にならず、source・ADR・人の先例から決め、それでも(a)か(b)に当たるときだけ聞く。`prompt::RUNTIME_PLANNER_ASK`）、問いには推奨（`--recommend <adopt|cancel|keep_draft>`）と確信度（`--confidence <high|low>`）を載せる（[ask](ask.md#aiの推奨と確信度未実装)）。`--because`は`scope`（成果を捨てるかどうかの問いは`discard`）。
++- **prompt**（`draft_planner_prompt`の「What to do」）: runtimeのplannerは、推奨が出せるdraftの採否を自分で決める（採用はsubmit、不採用はcancel）。理由は、採用ならtaskの`--context`に、不採用（`--duplicate-of`を含む）・`keep_draft`ならdraftの`note`に書く。`planner_question`にするのは、(a) ADR-0047決定41の`scope`・`discard`に当たりqueue・repository・ADR・人の先例で決めきれないもの、(b) 確信度が`low`のもの、(c) [ADR-t808-1](../../adr/2026-09-28-t808-1-runtime-planners-submit-follow-ups-up-to-depth-two.md)の自動で採用しない上限（深さ`FOLLOW_UP_ASK_DEPTH`（3）以上と、登録時の元goalが無い・閉じていた・不明か、現在のgoalが無い・閉じているfollow_up）に当たるdraftだけで（repositoryの規則でverify・paths・evidenceが決まらないこと自体は理由にならず、source・ADR・人の先例から決め、それでも(a)か(b)に当たるときだけ聞く。`prompt::RUNTIME_PLANNER_ASK`）、問いには推奨（`--recommend <adopt|cancel|keep_draft>`）と確信度（`--confidence <high|low>`）を載せる（[ask](ask.md#aiの推奨と確信度未実装)）。`--because`は`scope`（成果を捨てるかどうかの問いは`discard`）。
+ - **上限**: CLIの`submit`が上限のdraftを人の`adopt`なしに拒む規則（6）は変えない。
+ - **集計**: [follow_upの種類と判断の集計](#follow_upの種類と判断の集計未実装)の結末で、plannerが自分で決めたものと`planner_question`を経たものは`follow_up_adopted`の`by`と、draftの`planner_question`の有無で分かる。
+ - **test**: `application::prompt`のunit test（`the_draft_planner_decides_what_it_can_recommend`）がpromptの方針・理由の書き場所・askの3つの条件・`--recommend`と`--confidence`を確かめる。
+@@ -58,3 +58,7 @@ related:
+ 
+ - **人が開いたplannerからのsubmit、の行き先**: 4の`draft_planner_exhausted`のattentionと5の`keep_draft`で残したdraftの行き先は、inboxの参照付きの依頼か人の自分のterminalに変えた（実装済み、4と5）。6の「人が開いたplannerからのsubmit」は、人が開くplannerの廃止（`dagq plan`は拒む）で、廃止前に開いた人のplannerのsubmitのほかは、依頼のruntimeのplannerのsubmitか、人が`DAGQ_ROLE`の無い自分のterminalで打つ`submit`になった。依頼のplannerはruntimeのplannerなので、6の自動で採用しない上限は効き、上限のdraftは`planner_question`の`adopt`を経る。人のterminalからのsubmitは「人が開いたplanner」と同じく人の判断を経たものとして扱う（`by: "person"`、深さを0に戻す）。
+ - **非対話の経路**（実装済み、task 1396）: draftのplannerも`[roles.runtime_planner]`の経路に従う。非対話のplannerでは、5の答えの打ち込みと7の`/exit`が次のturnの依頼と終了の依頼になり（`Supervisor::send_to_planner`）、7のidleはStop hookのmarkerと画面からの推定でなくturnの終わりのidle markerで判断する。束・3回の上限・結末の記録（8）は変えない（[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)）。予定（goal 92）: [ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定3・[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)決定1で経路を選ぶことは無くなり、draftのplannerは非対話でbackgroundのwrapperだけで動く（`[roles.runtime_planner]`の`route`は受け付けて無視する）。
++
++## 所属の判断
++
++`judge-follow-up`は採用・priorityとは別に元goalのacceptanceとの関係を記録する。required/out_of_scopeの所属変更は判断と同じtransactionで行い、set-goalによる食い違う変更は拒む。登録時の出どころ・状態と深さは移動しても変わらないので、開いたgoalへの移動で人のadoptを迂回できない。CLI、必須の欄、訂正とacceptanceの版、旧材料の移行は[所属の判断](../follow-up-membership.md)。
+diff --git a/docs/design/supervisor-lifecycle/integrate.md b/docs/design/supervisor-lifecycle/integrate.md
+index 2cafe2ef..7d01fd8d 100644
+--- a/docs/design/supervisor-lifecycle/integrate.md
++++ b/docs/design/supervisor-lifecycle/integrate.md
+@@ -4,8 +4,8 @@ type: design
+ title: "`integrate`"
+ status: current
+ created: 2026-09-26
+-updated: 2026-10-04 # task 1345
+-last_verified: 2026-10-04 # task 1345
++updated: 2026-10-04 # task 1505
++last_verified: 2026-10-04 # task 1505
+ scope: runtime
+ related:
+   - adr-t728-2
+@@ -37,7 +37,7 @@ related:
+ 7. **完了**: 1トランザクションでrunを`integrated`、`result_commit`を着地commit、`last_error`をnull、Taskを`completed`にし、lease行を消して`run_integrated`（`result_commit`、`source_commit`、`main_before`、`history_ref`、`message`、`verification_skipped`、`git_common_dir`）、`lease_released`、`task_status_changed`を記録する（`finish_integration`）。
+ 8. **後始末**: そのrunのcloseされていない`approve_landing`のask（開いたままのものも、回答済みで適用されていないものも）を`close_approve_landing_asks`で閉じる（task 425。supervisorの着地でも手の`integrate`でも同じ`land_integrating`が行う。未回答なら`answer`に`the run was integrated; closed by the runtime`を書き`runtime_closed: true`の`ask_answered`、回答済みなら`ask_closed`を記録し、閉じたaskごとにinfoのlogを出す。mainはもう進んでいるので、閉じられなくてもwarnのlogだけで着地は変わらない）。同じ後始末が、そのrunか、runを名指さないそのtaskの`blocked`のask（observerが開いたもの）も`close_blocked_asks`で同じ`answer`と記録で閉じる（task 329。着地した後に残ると`ask_unanswered`のalertを出し続けるため）。`ask_answered` / `ask_closed`はaskの`ask_opened`と同じrun・taskに記録する（task だけのaskはrunを持たない）。askに紐づくfindingは変えない。続いて`git worktree remove --force <worktree>`と`git branch -D dagq/<run-id>`（`worktree_removed`）。失敗は`cleanup_failed`イベントと`last_error`に残し、statusは変えない。
+ 9. **push**（ADR-0019の決定3、ADR-t615-1）: 着地したbranchを`dagq.toml`の`[repository] remote`（既定`origin`）へ`git push <remote> refs/heads/<branch>:refs/heads/<branch>`で送る。`push = false`ならremoteを見ずにpushしない。Gitはapplication層のport `MainRemote`（`push_config`、`has_remote`、`push_main`。`push_main`はIntegratorだけが作れる`PushGrant`を取る）を通して呼び（どのremoteへpushするか・結果・記録するeventのkindとpayloadは`decide_push`が決め、`push_main`がlogに出して記録する）、adapterは`GitRepository`（run worktreeは消えている場合があるのでcommon directoryを`--git-dir`にし、`GIT_TERMINAL_PROMPT=0`、timeout 300秒）。成功は`push_finished`（`remote`、`branch`、`commit`、`already_delivered`。通常のpush成功は`false`）、`--no-push`・`push = false`・`remote`を書かずに`origin`が無いときは`push_skipped`（`remote`、`branch`、`commit`、`reason`は順に`--no-push`・`push = false in dagq.toml`・`the repository has no remote origin`。`--no-push`でもremoteの有無は見ずに、`remote`には着地の後にapplication層のport `Repository`の`repository_config`で読んだ`[repository] remote`（既定`origin`。読めなければ`origin`で、着地は成功のまま）を記録する）、Gitのpushが失敗しても、`MainRemote::contains_landed_commit`でremoteのbranch先端を照会し、着地したcommitがその祖先（先端自身を含む）なら、すでに届いているとして`push_finished`（`already_delivered: true`）を記録する。照会が失敗するか、remoteが着地commitを含まないとき、および明示した`remote`が無い・`[repository]`が読めないときは`push_failed`（`code`、`remote`、`branch`、`commit`、`error`）を着地したrunに記録する。どの場合もrunは`integrated`、taskは`completed`のままで、`integrate`は成功（exit 0）で終わる。`push_failed`はattention（`push main`）になり、人がinboxから原因を直して`git push <remote> <branch>`を打つ。
+-10. **follow_upsの登録**（ADR-0019の決定4）: 着地したreceipt（ステップ3で読んだもの）の`follow_ups`の未登録項目を、1つの`BEGIN IMMEDIATE`トランザクションでまとめてdraft taskとして登録する（`application::integrate::register_follow_ups`。`runtime::register_follow_ups`として再公開）。titleとdescriptionはfollow_upのもの、acceptance・`verification_commands`・dependenciesは空、goalは元のtaskと同じ（無ければgoalなし）、`context`は`follow_up proposed by the receipt of run <run-id> of task <id> (<title>)`（task 625より前の着地は日本語の「task <id>（<title>）の run <run-id> の receipt が提案した follow_up」）。登録ごとに着地したrunへ`follow_up_registered`（`task_id`、`title`、配列内の位置`index`、種類の`category`）を記録する。`category`は項目の`category`をworkerが書いたまま（前後の空白は落とし、一覧に無い値もそのまま）、空でない文字列でなければ`unlabeled`にする（`domain::follow_up_category`、[ADR-t947-3](../../adr/2026-09-28-t947-3-follow-ups-carry-category-codes.md)、一覧は[follow_upsの分類コード](receipt-and-session-exit.md#follow_upsの分類コード)）。goalが閉じていればgoalなしで登録し、payloadに`goal_closed: true`を書く。同じrunの`follow_up_registered`が既に持つ`index`は登録しないので、同じrunについて2回呼んでも二重に登録しない（`needs_session`で着地しなかった`integrate`は登録しないので、再着地で登録されるのは1回だけ）。`title`が空でない文字列でないか`description`が文字列でない項目は登録せず、`follow_up_registered`に`task_id: null`、`skipped`（理由）、`follow_up`（項目そのもの）と`category`を書く。各draftのtask作成・`follow_up_depth`・`draft_origins`と、登録した項目・skippedの項目の`follow_up_registered`を同じトランザクションで書く。途中で書き込みに失敗したらその呼び出しの未登録項目は全件rollbackされ、次の`integrate`のやり直しでまとめて登録できる。supervisorのpassには、同じreceiptの新しいdraftが全件見えるか1件も見えないかのどちらかになる。登録の失敗はstderrに出すだけで、着地とexit codeは変えない。draftの`follow_up_depth`は元のtaskの値+1にし、出どころ（`draft_origins`の`follow_up`と材料`{"source_task_id", "source_run_id", "index", "category"}`。`category`は`follow_up_registered`と同じ値）を記録する。draftなのでsupervisorのclaimは拾わず、補ってsubmitするか、cancelするか、人に聞くかは、supervisorが同じrunのfollow_upの束ごとに立てるplannerが決める（plannerのpromptはdraftの`category`を見せる）（[Draft planners (supervisor)](draft-planners.md#draft-planners-supervisor)）。`follow_up_registered`はattentionにしない。
++10. **follow_upsの登録**（ADR-0019の決定4）: 着地したreceipt（ステップ3で読んだもの）の`follow_ups`の未登録項目を、1つの`BEGIN IMMEDIATE`トランザクションでまとめてdraft taskとして登録する（`application::integrate::register_follow_ups`。`runtime::register_follow_ups`として再公開）。titleとdescriptionはfollow_upのもの、acceptance・`verification_commands`・dependenciesは空、goalは登録のtransactionで読み直した元のtaskと同じ（無いか閉じていればgoalなし）、`context`は`follow_up proposed by the receipt of run <run-id> of task <id> (<title>)`（task 625より前の着地は日本語の「task <id>（<title>）の run <run-id> の receipt が提案した follow_up」）。登録ごとに着地したrunへ`follow_up_registered`（`task_id`、`title`、配列内の位置`index`、種類の`category`）を記録する。`category`は項目の`category`をworkerが書いたまま（前後の空白は落とし、一覧に無い値もそのまま）、空でない文字列でなければ`unlabeled`にする（`domain::follow_up_category`、[ADR-t947-3](../../adr/2026-09-28-t947-3-follow-ups-carry-category-codes.md)、一覧は[follow_upsの分類コード](receipt-and-session-exit.md#follow_upsの分類コード)）。goalが閉じていればgoalなしで登録し、payloadに`goal_closed: true`を書く。同じrunの`follow_up_registered`が既に持つ`index`は登録しないので、同じrunについて2回呼んでも二重に登録しない（`needs_session`で着地しなかった`integrate`は登録しないので、再着地で登録されるのは1回だけ）。`title`が空でない文字列でないか`description`が文字列でない項目は登録せず、`follow_up_registered`に`task_id: null`、`skipped`（理由）、`follow_up`（項目そのもの）と`category`を書く。各draftのtask作成・`follow_up_depth`・`draft_origins`と、登録した項目・skippedの項目の`follow_up_registered`を同じトランザクションで書く。途中で書き込みに失敗したらその呼び出しの未登録項目は全件rollbackされ、次の`integrate`のやり直しでまとめて登録できる。supervisorのpassには、同じreceiptの新しいdraftが全件見えるか1件も見えないかのどちらかになる。登録の失敗はstderrに出すだけで、着地とexit codeは変えない。draftの`follow_up_depth`は元のtaskの値+1にし、出どころ（`draft_origins`の`follow_up`と材料`{"source_task_id", "source_run_id", "source_goal_id", "source_goal_state", "source_goal_provenance", "index", "category"}`。`category`は`follow_up_registered`と同じ値）を記録する。draftなのでsupervisorのclaimは拾わず、補ってsubmitするか、cancelするか、人に聞くかは、supervisorが同じrunのfollow_upの束ごとに立てるplannerが決める（plannerのpromptはdraftの`category`を見せる）（[Draft planners (supervisor)](draft-planners.md#draft-planners-supervisor)）。元goalと登録時の状態（`open` / `closed` / `none`）、`source_goal_provenance: recorded`は登録のtransactionで読み、材料と登録eventに残す。所属を移しても変えず、登録時に元goalが無い・閉じていたfollow_upは人のadoptなしでruntimeのplannerがsubmitできない（[所属の判断](../follow-up-membership.md)）。`follow_up_registered`はattentionにしない。
+ 
+ **hostの失敗のやり直し**（task 639、[ADR-t639-1](../../adr/2026-09-27-t639-1-retry-verification-failures-of-the-host-once.md)、goal 37）: 検証コマンドの失敗の`class`が`disk_full`・`killed`・`timeout`なら、コードではなくhostの原因として、workerのsessionをresumeせず、同じ試行（同じ`attempt`）の中でそのコマンドを1回だけやり直す。
+ 
+diff --git a/migrations/0064_follow_up_membership.sql b/migrations/0064_follow_up_membership.sql
+new file mode 100644
+index 00000000..267a3205
+--- /dev/null
++++ b/migrations/0064_follow_up_membership.sql
+@@ -0,0 +1,95 @@
++-- dagq-schema: breaking
++-- ADR-t1504-2: immutable registration facts and append-only judgements.
++ALTER TABLE goals ADD COLUMN acceptance_version INTEGER NOT NULL DEFAULT 1;
++CREATE TRIGGER goal_acceptance_version AFTER UPDATE OF acceptance ON goals
++WHEN old.acceptance IS NOT new.acceptance BEGIN
++ UPDATE goals SET acceptance_version=old.acceptance_version+1 WHERE id=new.id;
++END;
++CREATE TABLE follow_up_judgements (
++ id INTEGER PRIMARY KEY AUTOINCREMENT,
++ task_id INTEGER NOT NULL REFERENCES tasks(id),
++ source_goal_id INTEGER NOT NULL REFERENCES goals(id),
++ source_kind TEXT NOT NULL,
++ classification TEXT NOT NULL,
++ acceptance_items TEXT NOT NULL,
++ reason TEXT NOT NULL,
++ evidence TEXT NOT NULL,
++ destination_goal_id INTEGER REFERENCES goals(id),
++ acceptance_version INTEGER NOT NULL,
++ corrects INTEGER REFERENCES follow_up_judgements(id),
++ actor_role TEXT NOT NULL,
++ created_at TEXT NOT NULL
++);
++CREATE INDEX judgements_by_task ON follow_up_judgements(task_id,id);
++CREATE INDEX judgements_by_source ON follow_up_judgements(source_goal_id,task_id,id);
++-- Rewind BOTH the source and draft's membership histories. Validate every
++-- link against its successor (including the current task row). Missing or
++-- conflicting evidence is unknown, never inferred from today's membership.
++CREATE TEMP TABLE restored_follow_up AS
++WITH RECURSIVE
++registrations AS (
++ SELECT o.task_id, json_extract(o.material,'$.source_task_id') source_task,
++        e.id event_id,e.created_at registered_at,e.payload,
++        count(*) OVER(PARTITION BY o.task_id) registrations
++ FROM draft_origins o JOIN run_events e
++ ON e.kind='follow_up_registered' AND json_extract(e.payload,'$.task_id')=o.task_id
++ AND e.task_id=json_extract(o.material,'$.source_task_id')
++ AND e.run_id=json_extract(o.material,'$.source_run_id')
++ AND json_extract(e.payload,'$.index')=json_extract(o.material,'$.index')
++ WHERE o.origin='follow_up'
++),
++rewind(draft_id,which,task_id,event_id,cursor,goal_id,valid) AS (
++ SELECT r.task_id,'source',t.id,r.event_id,9223372036854775807,t.goal_id,1
++ FROM registrations r JOIN tasks t ON t.id=r.source_task WHERE r.registrations=1
++ UNION ALL
++ SELECT r.task_id,'draft',t.id,r.event_id,9223372036854775807,t.goal_id,1
++ FROM registrations r JOIN tasks t ON t.id=r.task_id WHERE r.registrations=1
++ UNION ALL
++ SELECT w.draft_id,w.which,w.task_id,w.event_id,e.id,json_extract(e.payload,'$.from'),
++        w.valid AND json_type(e.payload,'$.from') IN ('integer','null')
++        AND json_type(e.payload,'$.to') IN ('integer','null')
++        AND json_extract(e.payload,'$.to') IS w.goal_id
++ FROM rewind w JOIN run_events e ON e.id=(
++  SELECT max(id) FROM run_events WHERE task_id=w.task_id AND kind='task_goal_changed'
++  AND id>w.event_id AND id<w.cursor)
++),
++original AS (
++ SELECT * FROM rewind w WHERE NOT EXISTS(
++ SELECT 1 FROM run_events WHERE task_id=w.task_id AND kind='task_goal_changed'
++ AND id>w.event_id AND id<w.cursor)
++)
++SELECT r.task_id,s.goal_id,
++ CASE WHEN s.goal_id IS NULL THEN 'none' WHEN g.closed_at IS NULL OR julianday(g.closed_at)>julianday(r.registered_at) THEN 'open' ELSE 'closed' END registration_state,
++ r.event_id,r.registered_at,
++ s.valid AND d.valid AND julianday(r.registered_at) IS NOT NULL
++ AND (s.goal_id IS NULL OR g.id IS NOT NULL)
++ AND (g.closed_at IS NULL OR julianday(g.closed_at) IS NOT NULL)
++ AND coalesce(json_extract(r.payload,'$.goal_closed'),0)=
++     CASE WHEN g.closed_at IS NOT NULL AND julianday(g.closed_at)<=julianday(r.registered_at) THEN 1 ELSE 0 END
++ AND d.goal_id IS CASE WHEN g.closed_at IS NOT NULL AND julianday(g.closed_at)<=julianday(r.registered_at) THEN NULL ELSE s.goal_id END valid
++FROM registrations r JOIN original s ON s.draft_id=r.task_id AND s.which='source'
++ JOIN original d ON d.draft_id=r.task_id AND d.which='draft'
++ LEFT JOIN goals g ON g.id=s.goal_id WHERE r.registrations=1;
++UPDATE draft_origins SET material=json_set(material,
++ '$.source_goal_id',NULL,'$.source_goal_state','unknown','$.source_goal_provenance','unknown',
++ '$.source_goal_recovery_reason','missing_or_ambiguous_registration')
++WHERE origin='follow_up';
++UPDATE draft_origins SET material=json_set(material,
++ '$.source_goal_recovery_reason','inconsistent_history',
++ '$.registration_event_id',(SELECT event_id FROM restored_follow_up r WHERE r.task_id=draft_origins.task_id),
++ '$.registered_at',(SELECT registered_at FROM restored_follow_up r WHERE r.task_id=draft_origins.task_id))
++WHERE origin='follow_up' AND task_id IN (SELECT task_id FROM restored_follow_up WHERE valid IS NOT 1);
++UPDATE draft_origins SET material=json_set(material,
++ '$.source_goal_id',(SELECT goal_id FROM restored_follow_up r WHERE r.task_id=draft_origins.task_id),
++ '$.source_goal_state',(SELECT registration_state FROM restored_follow_up r WHERE r.task_id=draft_origins.task_id),
++ '$.source_goal_provenance','restored', '$.source_goal_recovery_reason',NULL,
++ '$.registration_event_id',(SELECT event_id FROM restored_follow_up r WHERE r.task_id=draft_origins.task_id),
++ '$.registered_at',(SELECT registered_at FROM restored_follow_up r WHERE r.task_id=draft_origins.task_id))
++WHERE origin='follow_up' AND task_id IN (SELECT task_id FROM restored_follow_up WHERE valid=1);
++DROP TABLE restored_follow_up;
++CREATE TRIGGER judgement_no_update BEFORE UPDATE ON follow_up_judgements BEGIN
++ SELECT RAISE(ABORT,'follow_up judgements are append-only');
++END;
++CREATE TRIGGER judgement_no_delete BEFORE DELETE ON follow_up_judgements BEGIN
++ SELECT RAISE(ABORT,'follow_up judgements are append-only');
++END;
+diff --git a/plugins/claude-dagq/skills/dagq-planner/SKILL.md b/plugins/claude-dagq/skills/dagq-planner/SKILL.md
+index 98f9cf3e..3b14f117 100644
+--- a/plugins/claude-dagq/skills/dagq-planner/SKILL.md
++++ b/plugins/claude-dagq/skills/dagq-planner/SKILL.md
+@@ -50,4 +50,6 @@ Not yours (ADR-0047). Once every task of an open goal is `completed` or `cancele
+ 
+ ## Where your authority ends
+ 
+-The CLI checks this (`skills/dagq/reference/authority.md`); a refusal is recorded, so take it as the answer. Within the Basic policy and your prompt's choices: `goal add`, `add`, `edit`, `lint`, `submit`, `dependency`, `set-goal`, `set-paths`, `set-priority`, `draft`, `proposal withdraw` of your own proposal, `cancel` (`--duplicate-of X`) of a draft, submitted or ready task, `goal edit`, `goal close`, `finding dismiss` / `resolve`, `request decline` of your own request, `note` (on a run too), `mark`, `search`, `related`, `ask --kind planner_question` (on a task, finding or request, never a run). Never `ready` (with or without `--bypass-review`), `goal ready`, `goal review` or `request add`: the CLI refuses them from a planner. Never: `integrate`, `review`, `answer`, `ask close`, `recover`, `supervise`, `observe`, `finding record`, `up` / `down` / `install` (allowed, not yours), a change to a task once it is `in_progress`, or anything in a run's worktree or workspace; those are the inbox's, on the person's word (`skills/dagq-recover/SKILL.md`).
++The CLI checks this (`skills/dagq/reference/authority.md`); a refusal is recorded, so take it as the answer. Within the Basic policy and your prompt's choices: `goal add`, `add`, `edit`, `lint`, `submit`, `dependency`, `set-goal`, `judge-follow-up`, `set-paths`, `set-priority`, `draft`, `proposal withdraw` of your own proposal, `cancel` (`--duplicate-of X`) of a draft, submitted or ready task, `goal edit`, `goal close`, `finding dismiss` / `resolve`, `request decline` of your own request, `note` (on a run too), `mark`, `search`, `related`, `ask --kind planner_question` (on a task, finding or request, never a run). Never `ready` (with or without `--bypass-review`), `goal ready`, `goal review` or `request add`: the CLI refuses them from a planner. Never: `integrate`, `review`, `answer`, `ask close`, `recover`, `supervise`, `observe`, `finding record`, `up` / `down` / `install` (allowed, not yours), a change to a task once it is `in_progress` (except recording a follow_up membership judgement), or anything in a run's worktree or workspace; those are the inbox's, on the person's word (`skills/dagq-recover/SKILL.md`).
++
++`judge-follow-up` records a follow_up membership judgement in any task state; it moves membership only in `draft` / `ready`. It grants no adoption and keeps source task/run/goal and depth (`skills/dagq/reference/register.md`).
+diff --git a/plugins/claude-dagq/skills/dagq/reference/authority.md b/plugins/claude-dagq/skills/dagq/reference/authority.md
+index e3788baf..0cf95856 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/authority.md
++++ b/plugins/claude-dagq/skills/dagq/reference/authority.md
+@@ -23,8 +23,10 @@ The runtime gives the worker (and its resume), the review, recovery, plan review
+ 
+ ## What each role is refused
+ 
+-- **worker**: `integrate`, `answer`, `ask close`, `ready`, `cancel`, `add` / `edit` / `submit` and every other planning command, `goal ...` (but `goal list` / `goal show`), `request add` / `request decline`, `recover`, `review`, `supervise`, `observe`, `plan`, `up` / `down` / `install` / `auto-update`, `init` / `migrate` / `rebind`, `mark`, `session` (in client mode: `no_use_case`); `finding ...`, and `ask` and `note` on any run or task but its own (`authorization_denied`). It opens only `worker_question` asks.
+-- **planner**: `ready` (with or without `--bypass-review`), `goal ready`, `goal review`, `integrate`, `review`, `recover`, `supervise`, `observe`, `answer`, `ask close`, `finding record`, `request add` (the inbox's and the person's), `request decline` of a request it was not opened for, a session's screen and log (`run screen` / `run log` / `run send`, `planner screen` / `planner log` / `planner send` / `planner request`), `session` / `session-event` of a run; any ask on a run (it opens only `planner_question`, on a task, a finding or its request); changing or canceling a task once it is `in_progress`; withdrawing another planner's proposal. On a run it may only write a `note`.
++`judge-follow-up` (`follow_up.judge`) is granted only to the person (`user`), inbox and runtime planner, for follow_up tasks in any state. It moves membership only in `draft` / `ready`; workers, jobs and the supervisor may not judge. Judgement and movement grant no adoption and preserve source task/run/goal and depth.
++
++- **worker**: `integrate`, `answer`, `ask close`, `ready`, `cancel`, `add` / `edit` / `submit` / `judge-follow-up` and every other planning command, `goal ...` (but `goal list` / `goal show`), `request add` / `request decline`, `recover`, `review`, `supervise`, `observe`, `plan`, `up` / `down` / `install` / `auto-update`, `init` / `migrate` / `rebind`, `mark`, `session` (in client mode: `no_use_case`); `finding ...`, and `ask` and `note` on any run or task but its own (`authorization_denied`). It opens only `worker_question` asks.
++- **planner**: `ready` (with or without `--bypass-review`), `goal ready`, `goal review`, `integrate`, `review`, `recover`, `supervise`, `observe`, `answer`, `ask close`, `finding record`, `request add` (the inbox's and the person's), `request decline` of a request it was not opened for, a session's screen and log (`run screen` / `run log` / `run send`, `planner screen` / `planner log` / `planner send` / `planner request`), `session` / `session-event` of a run; any ask on a run (it opens only `planner_question`, on a task, a finding or its request); changing or canceling a task once it is `in_progress` (except recording a follow_up membership judgement with `judge-follow-up`); withdrawing another planner's proposal. On a run it may only write a `note`.
+ - **review, recovery, plan review, goal review and throughput review jobs**: every command that changes state (in client mode: `no_use_case`, and `authorization_denied` for `note`, `ask` and finding writes). Their verdict is data the supervisor applies.
+ - **observer**: every state change but `finding record`, `finding resolve` and `ask --kind blocked --finding ID` (in client mode: `finding dismiss`, `note` and other asks are `authorization_denied`, the rest `no_use_case`).
+ - **inbox**: nothing a person may do (it acts on the person's word); landing and pushing themselves are the integrator's, reached through `integrate`. It registers no work itself: a plan the person asks for goes to a runtime planner as a request (`request add`, `skills/dagq-inbox/reference/requests.md`).
+diff --git a/plugins/claude-dagq/skills/dagq/reference/register.md b/plugins/claude-dagq/skills/dagq/reference/register.md
+index 304010db..0e8c3018 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/register.md
++++ b/plugins/claude-dagq/skills/dagq/reference/register.md
+@@ -66,7 +66,7 @@ People no longer open planners (ADR-t1394-1: `dagq plan` is refused). A person's
+ 
+ A ready task plan review must change is moved back to `submitted` (never claimed) into a proposal of its own for a runtime planner, with the reasons: fix it and `submit --proposal N`. A person's concern (`approve_plan`) goes to the inbox, never to a planner; its `send_back` returns as a revise.
+ 
+-**A runtime planner for a draft** first runs `related ID` on it (and `search`), then does one of what its prompt lists: adopt (complete it with `edit`, `lint`, `submit`), drop (`cancel` and `note`; `cancel --duplicate-of X` when a candidate already covers it), or ask (`planner_question` with `adopt` / `cancel` / `keep_draft` and its recommendation) only for what the Basic policy raises: a person's `scope` or `discard` it cannot settle, a call it is not confident of, or a follow_up past ADR-t808-1's limit (depth 3 or more, or no goal or a closed goal), which always waits for the person's adopt. Record why it adopted or dropped in a `note` or the task's `context`. It reports briefly and stops; the runtime ends the session. A draft kept with `keep_draft` or left undecided (`request a plan for the draft`) stays a draft until the inbox, on the person's word, records a planning request that names it (`request add --ref task:N`); that request's runtime planner decides it the same way, asking the person only what the Basic policy raises. The person may instead decide it in their own terminal (no `DAGQ_ROLE`).
++**A runtime planner for a draft** first runs `related ID` on it (and `search`), then does one of what its prompt lists: adopt (complete it with `edit`, `lint`, `submit`), drop (`cancel` and `note`; `cancel --duplicate-of X` when a candidate already covers it), or ask (`planner_question` with `adopt` / `cancel` / `keep_draft` and its recommendation) only for what the Basic policy raises: a person's `scope` or `discard` it cannot settle, a call it is not confident of, or a follow_up past ADR-t808-1's limit (depth 3 or more; a missing, closed or unknown source goal at registration; or no current goal or a closed current goal), which always waits for the person's adopt. `set-goal` and `judge-follow-up` keep registration facts and depth, and never count as adoption. An existing person's adopt remains valid. Record why it adopted or dropped in a `note` or the task's `context`. It reports briefly and stops; the runtime ends the session. A draft kept with `keep_draft` or left undecided (`request a plan for the draft`) stays a draft until the inbox, on the person's word, records a planning request that names it (`request add --ref task:N`); that request's runtime planner decides it the same way, asking the person only what the Basic policy raises. The person may instead decide it in their own terminal (no `DAGQ_ROLE`).
+ 
+ **A runtime planner for a request** (the person's words the inbox recorded with `request add`, ADR-t1394-1) reads the words, the inbox's note, what they refer to (asks, tasks, runs, events, findings, goals) and the goals they lead to, looks for work that already covers them, and does one: plans it, declines it (`request decline N --reason '<why>'`: done already, a duplicate in flight, or not plannable as asked), or asks (`ask --request N --kind planner_question` with `plan` / `decline` and its recommendation) only for what the Basic policy raises. Up to 3 planners are opened for a request before it is `exhausted`; the inbox tells the person each outcome (`skills/dagq-inbox/reference/requests.md`).
+ 
+diff --git a/src/application/commands/planning.rs b/src/application/commands/planning.rs
+index aa6d0e05..441d2565 100644
+--- a/src/application/commands/planning.rs
++++ b/src/application/commands/planning.rs
+@@ -30,6 +30,12 @@ pub trait PlanningStore {
+     /// `authorized` is the status the edit was authorized with; the store
+     /// refuses the edit when the task has another one in its transaction.
+     fn edit_task(&mut self, task: TaskId, edit: TaskEdit, authorized: TaskStatus) -> Result<Task>;
++    fn judge_follow_up(
++        &mut self,
++        task: TaskId,
++        judgement: crate::domain::follow_up::MembershipJudgement,
++        role: &str,
++    ) -> Result<Value>;
+     fn set_goal(&mut self, task: TaskId, goal: Option<GoalId>) -> Result<Task>;
+     fn set_paths(&mut self, task: TaskId, paths: Vec<String>) -> Result<Task>;
+     fn set_priority(&mut self, task: TaskId, priority: Priority) -> Result<Task>;
+@@ -98,6 +104,16 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
+         self.store.edit_task(task, edit, status)
+     }
+ 
++    pub fn judge_follow_up(
++        &mut self,
++        task: TaskId,
++        judgement: crate::domain::follow_up::MembershipJudgement,
++    ) -> Result<Value> {
++        self.authorize(Capability::FollowUpJudge, Resource::task(task))?;
++        self.store
++            .judge_follow_up(task, judgement, self.actor.role().as_str())
++    }
++
+     pub fn set_goal(&mut self, task: TaskId, goal: Option<GoalId>) -> Result<Task> {
+         self.authorize_task(Capability::TaskWrite, task)?;
+         self.store.set_goal(task, goal)
+@@ -310,6 +326,14 @@ mod tests {
+             self.edited_as = Some(authorized);
+             Err(reached("edit"))
+         }
++        fn judge_follow_up(
++            &mut self,
++            _: TaskId,
++            _: crate::domain::follow_up::MembershipJudgement,
++            _: &str,
++        ) -> Result<Value> {
++            unreachable!()
++        }
+         fn set_goal(&mut self, _: TaskId, _: Option<GoalId>) -> Result<Task> {
+             Err(reached("set-goal"))
+         }
+diff --git a/src/application/execution.rs b/src/application/execution.rs
+index 7ae1325b..12e539fc 100644
+--- a/src/application/execution.rs
++++ b/src/application/execution.rs
+@@ -287,6 +287,7 @@ pub const DAGQ_COMMANDS: &[(&str, &[Capability])] = &[
+     ("add", &[C::TaskWrite]),
+     ("draft", &[C::TaskWrite]),
+     ("edit", &[C::TaskWrite]),
++    ("judge-follow-up", &[C::FollowUpJudge]),
+     ("set-goal", &[C::TaskWrite]),
+     ("set-paths", &[C::TaskWrite]),
+     ("set-priority", &[C::TaskWrite]),
+diff --git a/src/application/integrate.rs b/src/application/integrate.rs
+index 3d943011..cccaeee5 100644
+--- a/src/application/integrate.rs
++++ b/src/application/integrate.rs
+@@ -910,21 +910,10 @@ pub fn register_follow_ups<Q: Queue + ?Sized>(
+     let Some(entries) = follow_ups.and_then(Value::as_array) else {
+         return Vec::new();
+     };
+-    let goal_closed = match task.goal_id() {
+-        Some(goal_id) => match queue.show_goal(goal_id) {
+-            Ok(detail) => detail.closed,
+-            Err(error) => {
+-                warn!(
+-                    op = "follow_up",
+-                    run_id = %run_id,
+-                    error = %format_args!("{error:#}"),
+-                    "run {run_id}: follow_ups not registered: {error:#}"
+-                );
+-                return Vec::new();
+-            }
+-        },
+-        None => false,
+-    };
++    // The store reads the source task and goal again inside its registration
++    // transaction. Draft membership and immutable origin facts come from that
++    // snapshot, including a close that won the race with registration.
++    let goal_closed = false;
+     // A draft is one follow-up further from a person's judgement than the
+     // task that proposed it (ADR-0037 decision 6).
+     // An unreadable depth counts as the deepest that still asks, so the
+diff --git a/src/application/prompt.rs b/src/application/prompt.rs
+index 4ef2e93c..83909841 100644
+--- a/src/application/prompt.rs
++++ b/src/application/prompt.rs
+@@ -3644,6 +3644,7 @@ mod tests {
+     /// A task of the proposal as plan review reads it.
+     fn proposal_task(task: Task, dependencies: Vec<TaskId>) -> TaskDetail {
+         TaskDetail {
++            membership_judgements: Vec::new(),
+             task,
+             dependencies,
+             goal_dependencies: Vec::new(),
+diff --git a/src/domain/authorization.rs b/src/domain/authorization.rs
+index 5de35f46..30277234 100644
+--- a/src/domain/authorization.rs
++++ b/src/domain/authorization.rs
+@@ -29,6 +29,7 @@ string_enum!(Capability {
+     GoalClose => "goal.close",
+     GoalReviewRequest => "goal.review_request",
+     TaskWrite => "task.write",
++    FollowUpJudge => "follow_up.judge",
+     TaskVerifyEdit => "task.verify_edit",
+     TaskCancel => "task.cancel",
+     TaskReady => "task.ready",
+@@ -87,7 +88,7 @@ string_enum!(Capability {
+ });
+ 
+ impl Capability {
+-    pub const ALL: [Self; 48] = [
++    pub const ALL: [Self; 49] = [
+         Self::QueueRead,
+         Self::QueueWatch,
+         Self::ExportFile,
+@@ -96,6 +97,7 @@ impl Capability {
+         Self::GoalClose,
+         Self::GoalReviewRequest,
+         Self::TaskWrite,
++        Self::FollowUpJudge,
+         Self::TaskVerifyEdit,
+         Self::TaskCancel,
+         Self::TaskReady,
+@@ -339,6 +341,7 @@ const USER: &[Capability] = &[
+     C::GoalClose,
+     C::GoalReviewRequest,
+     C::TaskWrite,
++    C::FollowUpJudge,
+     C::TaskVerifyEdit,
+     C::TaskCancel,
+     C::TaskReady,
+@@ -384,6 +387,7 @@ const PLANNER: &[Capability] = &[
+     C::GoalWrite,
+     C::GoalClose,
+     C::TaskWrite,
++    C::FollowUpJudge,
+     C::TaskCancel,
+     C::ProposalSubmit,
+     C::ProposalWithdraw,
+@@ -879,6 +883,7 @@ mod tests {
+             C::TaskReadyBypassReview,
+             C::TaskCancel,
+             C::TaskWrite,
++            C::FollowUpJudge,
+             C::NoteWrite,
+             C::MarkWrite,
+             C::GoalClose,
+@@ -953,6 +958,7 @@ mod tests {
+             C::MarkWrite,
+             C::GoalWrite,
+             C::TaskWrite,
++            C::FollowUpJudge,
+             C::IntegrationRequest,
+             C::ObserveRun,
+             C::ExportFile,
+@@ -1203,3 +1209,38 @@ mod tests {
+         ));
+     }
+ }
++
++#[cfg(test)]
++mod membership_policy_tests {
++    use super::*;
++    #[test]
++    fn only_people_and_runtime_planners_judge_even_after_a_task_started() {
++        for role in ActorRole::ALL {
++            let actor = ActorContext::instance(role, 1);
++            for status in [
++                TaskStatus::Draft,
++                TaskStatus::Submitted,
++                TaskStatus::Ready,
++                TaskStatus::InProgress,
++                TaskStatus::Completed,
++            ] {
++                let result = StaticPolicy.authorize(
++                    &actor,
++                    Capability::FollowUpJudge,
++                    &Resource::Task {
++                        id: TaskId::new(1),
++                        status: Some(status),
++                    },
++                );
++                assert_eq!(
++                    result.is_ok(),
++                    matches!(
++                        role,
++                        ActorRole::User | ActorRole::Inbox | ActorRole::Planner
++                    ),
++                    "{role:?} {status:?}"
++                );
++            }
++        }
++    }
++}
+diff --git a/src/domain/event_kind.rs b/src/domain/event_kind.rs
+index 3fc23849..b6cf4eaf 100644
+--- a/src/domain/event_kind.rs
++++ b/src/domain/event_kind.rs
+@@ -86,6 +86,7 @@ event_kinds! {
+     FindingStatusChanged => "finding_status_changed",
+     FindingUpdated => "finding_updated",
+     FirstCommitObserved => "first_commit_observed",
++    FollowUpJudged => "follow_up_judged",
+     FollowUpAdopted => "follow_up_adopted",
+     FollowUpRegistered => "follow_up_registered",
+     ForecastRecorded => "forecast_recorded",
+@@ -898,6 +899,7 @@ mod tests {
+             (EventKind::FindingStatusChanged, "finding_status_changed"),
+             (EventKind::FindingUpdated, "finding_updated"),
+             (EventKind::FirstCommitObserved, "first_commit_observed"),
++            (EventKind::FollowUpJudged, "follow_up_judged"),
+             (EventKind::FollowUpAdopted, "follow_up_adopted"),
+             (EventKind::FollowUpRegistered, "follow_up_registered"),
+             (EventKind::ForecastRecorded, "forecast_recorded"),
+diff --git a/src/domain/follow_up.rs b/src/domain/follow_up.rs
+index f5e9ba80..3cbbf8a8 100644
+--- a/src/domain/follow_up.rs
++++ b/src/domain/follow_up.rs
+@@ -118,12 +118,25 @@ pub fn follow_up_category(entry: &serde_json::Value) -> String {
+         .to_owned()
+ }
+ 
++/// Only a complete recorded/restored registration establishes an open source.
++/// Missing or conflicting registration information requires a person.
++pub fn source_goal_was_open(material: &serde_json::Value) -> bool {
++    material["source_goal_state"].as_str() == Some("open")
++        && material["source_goal_id"].as_i64().is_some_and(|id| id > 0)
++        && matches!(
++            material["source_goal_provenance"].as_str(),
++            Some("recorded" | "restored")
++        )
++}
++
+ /// Where a follow_up draft stands when a planner of the runtime's submits
+ /// it.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub struct FollowUpFacts {
+     /// The draft belongs to a goal that is not closed.
+     pub goal_open: bool,
++    /// The immutable registration establishes that the source goal was open.
++    pub source_goal_open: bool,
+     /// The draft's `follow_up_depth`.
+     pub depth: i64,
+ }
+@@ -133,7 +146,9 @@ pub struct FollowUpFacts {
+ /// goal is closed or missing, or the draft is [`FOLLOW_UP_ASK_DEPTH`] or
+ /// more follow-ups from a person.
+ pub fn adopt_needs_person(facts: FollowUpFacts) -> Option<String> {
+-    if !facts.goal_open {
++    if !facts.source_goal_open {
++        Some("its source goal was missing, closed or unknown at registration, so a person must adopt it".into())
++    } else if !facts.goal_open {
+         Some("its goal is closed (or it has none), so a person decides whether it belongs to a new goal".to_owned())
+     } else if facts.depth >= FOLLOW_UP_ASK_DEPTH {
+         Some(format!(
+@@ -264,6 +279,7 @@ mod tests {
+     fn a_follow_up_needs_a_person_for_a_closed_goal_or_depth_three() {
+         let open = FollowUpFacts {
+             goal_open: true,
++            source_goal_open: true,
+             depth: 1,
+         };
+         assert_eq!(adopt_needs_person(open), None);
+@@ -379,3 +395,189 @@ mod tests {
+         );
+     }
+ }
++
++string_enum!(MembershipClassification {
++    Required => "required",
++    OutOfScope => "out_of_scope",
++    Undecided => "undecided",
++});
++
++/// The judge supplies evidence; the store snapshots the acceptance version.
++#[derive(Debug, Clone)]
++pub struct MembershipJudgement {
++    pub classification: MembershipClassification,
++    pub acceptance_items: Vec<String>,
++    pub reason: String,
++    pub evidence: Vec<String>,
++    pub destination_goal_id: Option<super::GoalId>,
++    /// Required when the registration history cannot name the source.
++    pub source_goal_id: Option<super::GoalId>,
++    pub corrects: Option<i64>,
++}
++
++impl MembershipJudgement {
++    pub fn validate(
++        &self,
++        previous: Option<(i64, MembershipClassification)>,
++        source: super::GoalId,
++    ) -> Result<(), String> {
++        use MembershipClassification::*;
++        if self.reason.trim().is_empty()
++            || self
++                .acceptance_items
++                .iter()
++                .chain(&self.evidence)
++                .any(|s| s.trim().is_empty())
++        {
++            return Err("reason and each supplied item/reference must be non-blank".into());
++        }
++        if self.classification == Required && self.acceptance_items.is_empty() {
++            return Err("required needs at least one acceptance item".into());
++        }
++        if self.classification != Undecided && self.evidence.is_empty() {
++            return Err("required and out_of_scope need evidence".into());
++        }
++        if self.classification == OutOfScope
++            && (self.destination_goal_id.is_none() || self.destination_goal_id == Some(source))
++        {
++            return Err("out_of_scope needs a destination different from the source goal".into());
++        }
++        if self.classification == Required && self.destination_goal_id.is_some_and(|g| g != source)
++        {
++            return Err("required belongs to the source goal".into());
++        }
++        if let Some((id, class)) = previous {
++            if class != Undecided && self.classification == Undecided {
++                return Err("a decided judgement cannot return to undecided".into());
++            }
++            if class != Undecided && class != self.classification && self.corrects != Some(id) {
++                return Err("a correction must name the previous judgement with --corrects".into());
++            }
++        }
++        if self.corrects.is_some() && self.corrects != previous.map(|p| p.0) {
++            return Err("--corrects must name the latest judgement".into());
++        }
++        Ok(())
++    }
++}
++
++#[cfg(test)]
++mod membership_tests {
++    use super::*;
++    use crate::domain::GoalId;
++    fn required() -> MembershipJudgement {
++        MembershipJudgement {
++            classification: MembershipClassification::Required,
++            acceptance_items: vec!["(1)".into()],
++            reason: "cannot satisfy (1) without it".into(),
++            evidence: vec!["receipt:r".into()],
++            destination_goal_id: None,
++            source_goal_id: None,
++            corrects: None,
++        }
++    }
++    #[test]
++    fn membership_requires_fields_and_allows_only_documented_transitions() {
++        use MembershipClassification::*;
++        let source = GoalId::new(1);
++        let valid = required();
++        assert!(valid.validate(None, source).is_ok());
++        for invalid in [
++            MembershipJudgement {
++                reason: " ".into(),
++                ..valid.clone()
++            },
++            MembershipJudgement {
++                acceptance_items: vec![],
++                ..valid.clone()
++            },
++            MembershipJudgement {
++                evidence: vec![],
++                ..valid.clone()
++            },
++            MembershipJudgement {
++                evidence: vec![" ".into()],
++                ..valid.clone()
++            },
++            MembershipJudgement {
++                classification: OutOfScope,
++                ..valid.clone()
++            },
++            MembershipJudgement {
++                classification: OutOfScope,
++                destination_goal_id: Some(source),
++                ..valid.clone()
++            },
++        ] {
++            assert!(invalid.validate(None, source).is_err());
++        }
++        assert!("tiny".parse::<MembershipClassification>().is_err());
++        let undecided = MembershipJudgement {
++            classification: Undecided,
++            acceptance_items: vec![],
++            evidence: vec![],
++            ..valid.clone()
++        };
++        assert!(undecided.validate(None, source).is_ok());
++        assert!(valid.validate(Some((1, Undecided)), source).is_ok());
++        assert!(valid.validate(Some((1, Required)), source).is_ok());
++        assert!(undecided.validate(Some((1, Required)), source).is_err());
++        assert!(undecided.validate(Some((1, OutOfScope)), source).is_err());
++        let outside = MembershipJudgement {
++            classification: OutOfScope,
++            destination_goal_id: Some(GoalId::new(2)),
++            ..valid.clone()
++        };
++        assert!(outside.validate(Some((1, Required)), source).is_err());
++        assert!(
++            MembershipJudgement {
++                corrects: Some(1),
++                ..outside.clone()
++            }
++            .validate(Some((1, Required)), source)
++            .is_ok()
++        );
++        assert!(
++            MembershipJudgement {
++                corrects: Some(2),
++                ..outside
++            }
++            .validate(Some((1, Required)), source)
++            .is_err()
++        );
++        assert!(
++            MembershipJudgement {
++                corrects: Some(1),
++                ..valid
++            }
++            .validate(Some((1, OutOfScope)), source)
++            .is_ok()
++        );
++    }
++    #[test]
++    fn registration_facts_cannot_be_overridden_by_current_membership() {
++        for provenance in ["recorded", "restored", "unknown"] {
++            for goal in [None, Some(1), Some(-1)] {
++                let material = serde_json::json!({"source_goal_state":"open", "source_goal_id":goal, "source_goal_provenance":provenance});
++                assert_eq!(
++                    source_goal_was_open(&material),
++                    goal == Some(1) && provenance != "unknown"
++                );
++            }
++        }
++        assert!(!source_goal_was_open(&serde_json::json!({})));
++        for depth in [0, 1, 2, 3, 4] {
++            for current in [false, true] {
++                for source in [false, true] {
++                    let needs = adopt_needs_person(FollowUpFacts {
++                        goal_open: current,
++                        source_goal_open: source,
++                        depth,
++                    })
++                    .is_some();
++                    assert_eq!(needs, !source || !current || depth >= 3);
++                }
++            }
++        }
++    }
++}
+diff --git a/src/domain/views.rs b/src/domain/views.rs
+index c86e3ffe..03e83f35 100644
+--- a/src/domain/views.rs
++++ b/src/domain/views.rs
+@@ -58,6 +58,8 @@ pub struct GoalTask {
+ 
+ #[derive(Debug, Clone, Serialize)]
+ pub struct GoalDetail {
++    pub acceptance_version: i64,
++    pub follow_up_memberships: Vec<serde_json::Value>,
+     pub goal: Goal,
+     pub closed: bool,
+     pub tasks: Vec<GoalTask>,
+@@ -128,6 +130,7 @@ pub struct EventFilter {
+ 
+ #[derive(Debug, Clone, Serialize)]
+ pub struct TaskDetail {
++    pub membership_judgements: Vec<serde_json::Value>,
+     pub task: Task,
+     pub dependencies: Vec<TaskId>,
+     /// Goals the task depends on (ADR-0038), ascending.
+diff --git a/src/infrastructure/draft_planners.rs b/src/infrastructure/draft_planners.rs
+index b972a170..247fbe89 100644
+--- a/src/infrastructure/draft_planners.rs
++++ b/src/infrastructure/draft_planners.rs
+@@ -72,7 +72,7 @@ impl SqliteQueue {
+         run: &RunId,
+         entries: Vec<FollowUpRegistration>,
+         depth: i64,
+-        goal_closed: bool,
++        _goal_closed: bool,
+     ) -> Result<Vec<RegisteredFollowUp>> {
+         ensure!(depth >= 0, "follow_up_depth must not be negative");
+         let tx = self
+@@ -82,6 +82,9 @@ impl SqliteQueue {
+             tx.query_row("SELECT task_id FROM task_runs WHERE id=?1", [run], |row| {
+                 row.get(0)
+             })?;
++        let source_goal = read_task(&tx, source)?.goal_id();
++        let source_open = goal_open(&tx, source_goal)?;
++        let goal_closed = source_goal.is_some() && !source_open;
+         let registered: HashSet<u64> =
+             RunHistory::from_events(&super::runtime_store::run_events_of(&tx, run)?)
+                 .registered_follow_ups()
+@@ -92,7 +95,8 @@ impl SqliteQueue {
+             if registered.contains(&(entry.index as u64)) {
+                 continue;
+             }
+-            let payload = if let Some(new) = entry.draft {
++            let payload = if let Some(mut new) = entry.draft {
++                new.goal_id = source_goal.filter(|_| source_open);
+                 new.validate()?;
+                 if let (Some(changes), Some(change)) = (&self.changes, &new.change) {
+                     changes.check(change)?;
+@@ -104,6 +108,9 @@ impl SqliteQueue {
+                 )?;
+                 let material = json!({
+                     "source_task_id": source, "source_run_id": run,
++                    "source_goal_id": source_goal,
++                    "source_goal_state": if source_goal.is_none() { "none" } else if source_open { "open" } else { "closed" },
++                    "source_goal_provenance": "recorded",
+                     "index": entry.index, "category": entry.category,
+                 });
+                 tx.execute(
+@@ -123,6 +130,9 @@ impl SqliteQueue {
+                 let mut payload = json!({
+                     "task_id": created.id(), "title": created.title(),
+                     "index": entry.index, "category": entry.category,
++                    "source_task_id": source, "source_run_id": run,
++                    "source_goal_id": source_goal, "source_goal_state": material["source_goal_state"],
++                    "source_goal_provenance": "recorded", "follow_up_depth": depth,
+                 });
+                 if goal_closed {
+                     payload["goal_closed"] = json!(true);
+@@ -1107,6 +1117,7 @@ pub(super) fn check_adoptions(
+             && draft_origin == DraftOrigin::FollowUp
+             && let Some(why) = adopt_needs_person(FollowUpFacts {
+                 goal_open: goal_open(conn, task.goal_id())?,
++                source_goal_open: crate::domain::follow_up::source_goal_was_open(&material),
+                 depth,
+             })
+         {
+@@ -1288,7 +1299,7 @@ mod tests {
+                 .record_draft_origin(
+                     task,
+                     DraftOrigin::FollowUp,
+-                    &json!({"source_task_id": 1, "source_run_id": "r"}),
++                    &json!({"source_task_id": 1, "source_run_id": "r", "source_goal_id": goal_id, "source_goal_state": if goal_id.is_some() {"open"} else {"none"}, "source_goal_provenance": "recorded"}),
+                 )
+                 .unwrap();
+             queue.set_follow_up_depth(task, depth).unwrap();
+@@ -1320,7 +1331,7 @@ mod tests {
+         );
+         let orphan = follow_up(&mut queue, None, 1);
+         let error = submit(&mut queue, orphan).unwrap_err().to_string();
+-        assert!(error.contains("goal is closed"), "{error}");
++        assert!(error.contains("at registration"), "{error}");
+     }
+ 
+     #[test]
+diff --git a/src/infrastructure/follow_up_membership.rs b/src/infrastructure/follow_up_membership.rs
+new file mode 100644
+index 00000000..e54430b1
+--- /dev/null
++++ b/src/infrastructure/follow_up_membership.rs
+@@ -0,0 +1,194 @@
++//! Append-only membership decisions and transactional membership changes.
++use anyhow::{Result, anyhow, ensure};
++use rusqlite::{Connection, OptionalExtension, params};
++use serde_json::{Value, json};
++
++use super::sqlite::{SqliteQueue, event, goal_event, read_goal, read_task, set_goal_in};
++use crate::domain::follow_up::{MembershipClassification as Class, MembershipJudgement};
++use crate::domain::{DraftOrigin, EventKind, GoalId, TaskId, TaskStatus};
++
++pub(super) fn acceptance_version(conn: &Connection, goal: GoalId) -> Result<i64> {
++    Ok(conn.query_row(
++        "SELECT acceptance_version FROM goals WHERE id=?1",
++        [goal],
++        |r| r.get(0),
++    )?)
++}
++
++fn json_array_column(row: &rusqlite::Row<'_>, name: &str) -> rusqlite::Result<Value> {
++    let text: String = row.get(name)?;
++    let parsed: Vec<String> = serde_json::from_str(&text).map_err(|e| {
++        rusqlite::Error::FromSqlConversionFailure(
++            row.as_ref().column_index(name).unwrap_or(0),
++            rusqlite::types::Type::Text,
++            Box::new(e),
++        )
++    })?;
++    Ok(json!(parsed))
++}
++
++pub(super) fn judgements(conn: &Connection, task: TaskId) -> Result<Vec<Value>> {
++    let mut stmt =
++        conn.prepare("SELECT * FROM follow_up_judgements WHERE task_id=?1 ORDER BY id")?;
++    let rows = stmt.query_map([task], |r| {
++        Ok(json!({
++            "id": r.get::<_,i64>("id")?, "task_id": r.get::<_,i64>("task_id")?,
++            "source_goal_id": r.get::<_,i64>("source_goal_id")?,
++            "source_kind": r.get::<_,String>("source_kind")?,
++            "classification": r.get::<_,String>("classification")?,
++            "acceptance_items": json_array_column(r, "acceptance_items")?,
++            "reason": r.get::<_,String>("reason")?,
++            "evidence": json_array_column(r, "evidence")?,
++            "destination_goal_id": r.get::<_,Option<i64>>("destination_goal_id")?,
++            "acceptance_version": r.get::<_,i64>("acceptance_version")?,
++            "corrects": r.get::<_,Option<i64>>("corrects")?,
++            "actor_role": r.get::<_,String>("actor_role")?,
++            "created_at": r.get::<_,String>("created_at")?
++        }))
++    })?;
++    let mut result = Vec::new();
++    for row in rows {
++        let mut row = row?;
++        let _: Class = row["classification"].as_str().unwrap().parse()?;
++        let version =
++            acceptance_version(conn, GoalId::new(row["source_goal_id"].as_i64().unwrap()))?;
++        row["current_acceptance_version"] = json!(version);
++        row["needs_recheck"] = json!(row["acceptance_version"].as_i64() != Some(version));
++        result.push(row);
++    }
++    Ok(result)
++}
++
++pub(super) fn check_set_goal(conn: &Connection, task: TaskId, goal: Option<GoalId>) -> Result<()> {
++    if let Some(last) = judgements(conn, task)?.last()
++        && last["classification"] != "undecided"
++    {
++        ensure!(
++            last["destination_goal_id"].as_i64() == goal.map(GoalId::as_i64),
++            "task {task} has a membership judgement for a different goal; record a correction with judge-follow-up"
++        );
++    }
++    Ok(())
++}
++
++impl SqliteQueue {
++    pub fn judge_follow_up(
++        &mut self,
++        task: TaskId,
++        judgement: MembershipJudgement,
++        role: &str,
++    ) -> Result<Value> {
++        ensure!(
++            ["user", "inbox", "planner"].contains(&role),
++            "{role} may not judge follow_up membership"
++        );
++        let tx = self
++            .conn
++            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
++        let origin: Option<(String, String)> = tx
++            .query_row(
++                "SELECT origin,material FROM draft_origins WHERE task_id=?1",
++                [task],
++                |r| Ok((r.get(0)?, r.get(1)?)),
++            )
++            .optional()?;
++        let (origin, material) =
++            origin.ok_or_else(|| anyhow!("task {task} has no follow_up origin"))?;
++        ensure!(
++            origin == DraftOrigin::FollowUp.as_str(),
++            "only follow_up tasks have membership judgements"
++        );
++        let material: Value = serde_json::from_str(&material)?;
++        let history = judgements(&tx, task)?;
++        let last = history.last();
++        let recorded_source = material["source_goal_id"].as_i64().map(GoalId::new);
++        let source = recorded_source.or_else(|| last.and_then(|l| l["source_goal_id"].as_i64()).map(GoalId::new)).or(judgement.source_goal_id)
++            .ok_or_else(|| anyhow!("source goal is unknown; name --source-goal with evidence (a known absent goal cannot be judged)"))?;
++        ensure!(
++            material["source_goal_state"] != "none",
++            "a follow_up registered without a source goal has no acceptance to judge"
++        );
++        ensure!(
++            judgement.source_goal_id.is_none_or(|g| g == source),
++            "source goal does not match its immutable origin or previous judgement"
++        );
++        if recorded_source.is_none() {
++            ensure!(
++                !judgement.evidence.is_empty(),
++                "naming an unknown source goal requires evidence"
++            );
++        }
++        let previous = last
++            .map(|l| {
++                Ok::<_, anyhow::Error>((
++                    l["id"].as_i64().unwrap(),
++                    l["classification"].as_str().unwrap().parse()?,
++                ))
++            })
++            .transpose()?;
++        judgement
++            .validate(previous, source)
++            .map_err(anyhow::Error::msg)?;
++        let source_goal = read_goal(&tx, source)?;
++        let destination = match judgement.classification {
++            Class::Required => Some(source),
++            Class::OutOfScope => judgement.destination_goal_id,
++            Class::Undecided => judgement.destination_goal_id,
++        };
++        if let Some(goal) = destination {
++            let goal = read_goal(&tx, goal)?;
++            if judgement.classification == Class::OutOfScope {
++                crate::domain::goal::check_accepts_tasks(&goal)?;
++            }
++        }
++        let task_row = read_task(&tx, task)?;
++        if judgement.classification != Class::Undecided
++            && matches!(task_row.status(), TaskStatus::Draft | TaskStatus::Ready)
++            && !(judgement.classification == Class::Required && source_goal.is_closed())
++            && destination != task_row.goal_id()
++        {
++            set_goal_in(&tx, task, destination, &self.generators.clock.timestamp())?;
++        }
++        let version = acceptance_version(&tx, source)?;
++        let source_kind = if recorded_source.is_none() {
++            "named_by_judge"
++        } else {
++            material["source_goal_provenance"]
++                .as_str()
++                .unwrap_or("recorded")
++        };
++        tx.execute("INSERT INTO follow_up_judgements(task_id,source_goal_id,source_kind,classification,acceptance_items,reason,evidence,destination_goal_id,acceptance_version,corrects,actor_role,created_at)
++            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)", params![task,source,source_kind,judgement.classification.as_str(),serde_json::to_string(&judgement.acceptance_items)?,judgement.reason,serde_json::to_string(&judgement.evidence)?,destination,version,judgement.corrects,role,self.generators.clock.timestamp()])?;
++        let row = judgements(&tx, task)?.pop().unwrap();
++        event(&tx, task, None, EventKind::FollowUpJudged, row.clone())?;
++        goal_event(&tx, source, EventKind::FollowUpJudged, row.clone())?;
++        tx.commit()?;
++        Ok(row)
++    }
++}
++
++pub(super) fn goal_memberships(conn: &Connection, goal: GoalId) -> Result<Vec<Value>> {
++    let ids = conn.prepare("SELECT o.task_id FROM draft_origins o JOIN tasks t ON t.id=o.task_id
++        WHERE o.origin='follow_up' AND (json_extract(o.material,'$.source_goal_id')=?1 OR t.goal_id=?1
++        OR EXISTS(SELECT 1 FROM follow_up_judgements j WHERE j.task_id=o.task_id AND j.source_goal_id=?1)) ORDER BY o.task_id")?
++        .query_map([goal], |r| r.get::<_,TaskId>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
++    ids.into_iter()
++        .map(|id| {
++            let task = read_task(conn, id)?;
++            let material: String = conn.query_row(
++                "SELECT material FROM draft_origins WHERE task_id=?1",
++                [id],
++                |r| r.get(0),
++            )?;
++            let depth: i64 =
++                conn.query_row("SELECT follow_up_depth FROM tasks WHERE id=?1", [id], |r| {
++                    r.get(0)
++                })?;
++            Ok(
++                json!({"task_id": id, "goal_id": task.goal_id(), "status": task.status(),
++            "follow_up_depth": depth, "material": serde_json::from_str::<Value>(&material)?,
++            "judgements": judgements(conn,id)?}),
++            )
++        })
++        .collect()
++}
+diff --git a/src/infrastructure/mod.rs b/src/infrastructure/mod.rs
+index bf1c4047..50b72928 100644
+--- a/src/infrastructure/mod.rs
++++ b/src/infrastructure/mod.rs
+@@ -21,6 +21,7 @@ pub mod e2e_gate;
+ pub mod event_actor;
+ mod finding_planners;
+ mod findings;
++mod follow_up_membership;
+ pub mod git_binary;
+ mod goal_reviews;
+ mod headless_jobs;
+diff --git a/src/infrastructure/planning.rs b/src/infrastructure/planning.rs
+index 8164c19e..e16cbaf7 100644
+--- a/src/infrastructure/planning.rs
++++ b/src/infrastructure/planning.rs
+@@ -35,6 +35,15 @@ impl PlanningStore for SqliteQueue {
+         TaskStore::edit_task(self, task, edit, authorized)
+     }
+ 
++    fn judge_follow_up(
++        &mut self,
++        task: TaskId,
++        judgement: crate::domain::follow_up::MembershipJudgement,
++        role: &str,
++    ) -> Result<Value> {
++        SqliteQueue::judge_follow_up(self, task, judgement, role)
++    }
++
+     fn set_goal(&mut self, task: TaskId, goal: Option<GoalId>) -> Result<Task> {
+         TaskStore::set_goal(self, task, goal)
+     }
+diff --git a/src/infrastructure/sqlite.rs b/src/infrastructure/sqlite.rs
+index dc106ea5..a9e62a21 100644
+--- a/src/infrastructure/sqlite.rs
++++ b/src/infrastructure/sqlite.rs
+@@ -754,10 +754,12 @@ impl TaskStore for SqliteQueue {
+         let processes = super::runtime_store::processes_for_task(&tx, task_id)?;
+         let duplicate_of = duplicate_target(&tx, task_id)?;
+         let duplicates = duplicates_of(&tx, task_id)?;
++        let membership_judgements = super::follow_up_membership::judgements(&tx, task_id)?;
+         let origin = super::draft_planners::task_origin(&tx, task_id)?;
+         let follow_up_drafts = super::draft_planners::follow_up_drafts(&tx, task_id)?;
+         tx.commit()?;
+         Ok(TaskDetail {
++            membership_judgements,
+             task,
+             dependencies,
+             goal_dependencies,
+@@ -1001,6 +1003,8 @@ impl TaskStore for SqliteQueue {
+     fn show_goal(&mut self, goal_id: GoalId) -> Result<GoalDetail> {
+         let tx = self.conn.transaction()?;
+         let goal = read_goal(&tx, goal_id)?;
++        let acceptance_version = super::follow_up_membership::acceptance_version(&tx, goal_id)?;
++        let follow_up_memberships = super::follow_up_membership::goal_memberships(&tx, goal_id)?;
+         let tasks = tx
+             .prepare("SELECT id, title, status FROM tasks WHERE goal_id=?1 ORDER BY id")?
+             .query_map([goal_id], goal_task_row)?
+@@ -1019,6 +1023,8 @@ impl TaskStore for SqliteQueue {
+             .collect::<rusqlite::Result<_>>()?;
+         tx.commit()?;
+         Ok(GoalDetail {
++            acceptance_version,
++            follow_up_memberships,
+             closed: goal.is_closed(),
+             goal,
+             tasks,
+@@ -1035,6 +1041,7 @@ impl TaskStore for SqliteQueue {
+         let old = read_goal(&tx, goal_id)?;
+         // The event keeps the goal before the edit, which consumes it.
+         let old_json = serde_json::to_value(&old)?;
++        let old_version = super::follow_up_membership::acceptance_version(&tx, goal_id)?;
+         let new = goal::edit(old, edit)?;
+         tx.execute(
+             "UPDATE goals SET title=?1, description=?2, acceptance=?3, constraints=?4, doc=?5,
+@@ -1053,7 +1060,8 @@ impl TaskStore for SqliteQueue {
+             &tx,
+             goal_id,
+             EventKind::GoalUpdated,
+-            json!({"old": old_json, "new": new}),
++            json!({"old": old_json, "new": new, "old_acceptance_version": old_version,
++                "new_acceptance_version": super::follow_up_membership::acceptance_version(&tx, goal_id)?}),
+         )?;
+         let result = read_goal(&tx, goal_id)?;
+         tx.commit()?;
+@@ -1234,38 +1242,8 @@ impl TaskStore for SqliteQueue {
+         let tx = self
+             .conn
+             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+-        let task = read_task(&tx, task_id)?;
+-        let from = task.goal_id();
+-        let task = task::set_goal(task, goal_id)?;
+-        if let Some(goal_id) = task.goal_id() {
+-            goal::check_accepts_tasks(&read_goal(&tx, goal_id)?)?;
+-            if from != Some(goal_id) {
+-                // The goal would wait for the task: the task must not wait
+-                // for the goal (ADR-0038).
+-                let direct: bool = tx.query_row(
+-                    "SELECT EXISTS(SELECT 1 FROM task_goal_dependencies
+-                     WHERE task_id=?1 AND goal_id=?2)",
+-                    params![task_id, goal_id],
+-                    |r| r.get(0),
+-                )?;
+-                let cycle = waits_for(&tx, Node::Task(task_id), Node::Goal(goal_id))?;
+-                task::check_membership_acyclic(&task, goal_id, direct, cycle)?;
+-            }
+-        }
+-        if from != task.goal_id() {
+-            tx.execute(
+-                "UPDATE tasks SET goal_id=?1, updated_at=?2 WHERE id=?3",
+-                params![task.goal_id(), self.generators.clock.timestamp(), task_id],
+-            )?;
+-            event(
+-                &tx,
+-                task_id,
+-                None,
+-                EventKind::TaskGoalChanged,
+-                json!({"from": from, "to": task.goal_id()}),
+-            )?;
+-        }
+-        let result = read_task(&tx, task_id)?;
++        super::follow_up_membership::check_set_goal(&tx, task_id, goal_id)?;
++        let result = set_goal_in(&tx, task_id, goal_id, &self.generators.clock.timestamp())?;
+         tx.commit()?;
+         Ok(result)
+     }
+@@ -2418,3 +2396,44 @@ pub(super) fn event_row(row: &Row<'_>) -> rusqlite::Result<RunEvent> {
+         actor: event_actor(row)?,
+     })
+ }
++
++pub(super) fn set_goal_in(
++    conn: &Connection,
++    task_id: TaskId,
++    goal_id: Option<GoalId>,
++    timestamp: &str,
++) -> Result<Task> {
++    let task = read_task(conn, task_id)?;
++    let from = task.goal_id();
++    let task = task::set_goal(task, goal_id)?;
++    if let Some(goal_id) = task.goal_id() {
++        goal::check_accepts_tasks(&read_goal(conn, goal_id)?)?;
++        if from != Some(goal_id) {
++            // The goal would wait for the task: the task must not wait
++            // for the goal (ADR-0038).
++            let direct: bool = conn.query_row(
++                "SELECT EXISTS(SELECT 1 FROM task_goal_dependencies
++                     WHERE task_id=?1 AND goal_id=?2)",
++                params![task_id, goal_id],
++                |r| r.get(0),
++            )?;
++            let cycle = waits_for(conn, Node::Task(task_id), Node::Goal(goal_id))?;
++            task::check_membership_acyclic(&task, goal_id, direct, cycle)?;
++        }
++    }
++    if from != task.goal_id() {
++        conn.execute(
++            "UPDATE tasks SET goal_id=?1, updated_at=?2 WHERE id=?3",
++            params![task.goal_id(), timestamp, task_id],
++        )?;
++        event(
++            conn,
++            task_id,
++            None,
++            EventKind::TaskGoalChanged,
++            json!({"from": from, "to": task.goal_id()}),
++        )?;
++    }
++    let result = read_task(conn, task_id)?;
++    Ok(result)
++}
+diff --git a/src/main.rs b/src/main.rs
+index a0b5c68c..2c52e468 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -278,6 +278,24 @@ enum Command {
+         #[command(subcommand)]
+         command: GoalCommand,
+     },
++    /// Record or correct a follow-up membership judgement against its source goal acceptance.
++    JudgeFollowUp {
++        task: i64,
++        #[arg(long)]
++        classification: String,
++        #[arg(long = "acceptance-item")]
++        acceptance_items: Vec<String>,
++        #[arg(long)]
++        reason: String,
++        #[arg(long = "evidence")]
++        evidence: Vec<String>,
++        #[arg(long = "destination-goal")]
++        destination_goal: Option<i64>,
++        #[arg(long = "source-goal")]
++        source_goal: Option<i64>,
++        #[arg(long)]
++        corrects: Option<i64>,
++    },
+     /// Move a draft or ready task to an open goal, or out of its goal with --none.
+     SetGoal {
+         /// Draft or ready task to move.
+@@ -1937,6 +1955,7 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
+             },
+             task_resource(*id),
+         ),
++        Command::JudgeFollowUp { task, .. } => one(C::FollowUpJudge, task_resource(*task)),
+         Command::Draft { id }
+         | Command::Edit { task: id, .. }
+         | Command::SetGoal { task: id, .. }
+@@ -2196,7 +2215,8 @@ fn finding_target(
+ /// from it, and records what it refuses (task 732).
+ fn authorized_in_application(command: &Command) -> bool {
+     match command {
+-        Command::Add { .. }
++        Command::JudgeFollowUp { .. }
++        | Command::Add { .. }
+         | Command::Edit { .. }
+         | Command::Submit { .. }
+         | Command::Draft { .. }
+@@ -3218,6 +3238,27 @@ fn execute(cli: Cli) -> Result<Value> {
+             )?,
+             GoalCommand::Review { id } => planning!().review_goal(GoalId::new(id))?,
+         },
++        Command::JudgeFollowUp {
++            task,
++            classification,
++            acceptance_items,
++            reason,
++            evidence,
++            destination_goal,
++            source_goal,
++            corrects,
++        } => planning!().judge_follow_up(
++            TaskId::new(task),
++            dagq::domain::follow_up::MembershipJudgement {
++                classification: classification.parse()?,
++                acceptance_items,
++                reason,
++                evidence,
++                destination_goal_id: destination_goal.map(GoalId::new),
++                source_goal_id: source_goal.map(GoalId::new),
++                corrects,
++            },
++        )?,
+         Command::SetGoal {
+             task,
+             goal,
+@@ -4493,6 +4534,10 @@ mod tests {
+             ("add", &["t"]),
+             ("draft", &["1"]),
+             ("edit", &["1", "--title", "t"]),
++            (
++                "judge-follow-up",
++                &["1", "--classification", "required", "--reason", "r"],
++            ),
+             ("set-goal", &["1", "1"]),
+             ("set-paths", &["1", "--none"]),
+             ("set-priority", &["1", "high"]),
+diff --git a/src/view.rs b/src/view.rs
+index 322345f5..fa179c4b 100644
+--- a/src/view.rs
++++ b/src/view.rs
+@@ -114,6 +114,7 @@ pub fn task_detail(detail: &TaskDetail, events: usize) -> Value {
+         "duplicates": detail.duplicates,
+         "origin": detail.origin,
+         "follow_up_drafts": detail.follow_up_drafts,
++        "membership_judgements": detail.membership_judgements,
+         "runs": runs,
+         "runs_total": detail.runs.len(),
+         "events": events,
+@@ -200,6 +201,8 @@ pub fn goal_detail(detail: &GoalDetail) -> Value {
+     json!({
+         "goal": goal,
+         "closed": detail.closed,
++        "acceptance_version": detail.acceptance_version,
++        "follow_up_memberships": detail.follow_up_memberships,
+         "tasks": detail.tasks,
+         "dependents": detail.dependents,
+         "events": events,
+@@ -296,6 +299,7 @@ mod tests {
+     #[test]
+     fn task_detail_keeps_the_latest_run_and_events_without_paths() {
+         let detail = TaskDetail {
++            membership_judgements: Vec::new(),
+             task: task(&"d".repeat(TEXT_LIMIT + 5)),
+             dependencies: vec![TaskId::new(3)],
+             goal_dependencies: vec![GoalId::new(4)],
+@@ -362,6 +366,7 @@ mod tests {
+     #[test]
+     fn task_detail_without_runs_is_empty() {
+         let detail = TaskDetail {
++            membership_judgements: Vec::new(),
+             task: task("short"),
+             dependencies: vec![],
+             goal_dependencies: vec![],
+@@ -382,6 +387,8 @@ mod tests {
+     #[test]
+     fn goal_detail_truncates_texts_and_keeps_kinds_of_latest_events() {
+         let detail = GoalDetail {
++            acceptance_version: 1,
++            follow_up_memberships: Vec::new(),
+             goal: Goal::restore(crate::domain::GoalRecord {
+                 id: GoalId::new(1),
+                 title: "g".into(),
+@@ -440,6 +447,7 @@ mod tests {
+             ..note(9, &"n".repeat(TEXT_LIMIT + 1))
+         });
+         let detail = TaskDetail {
++            membership_judgements: Vec::new(),
+             task: task("short"),
+             dependencies: vec![],
+             goal_dependencies: vec![],
+diff --git a/tests/common/queue.rs b/tests/common/queue.rs
+index 2459cc9c..995e3970 100644
+--- a/tests/common/queue.rs
++++ b/tests/common/queue.rs
+@@ -2,12 +2,17 @@
+ 
+ use std::path::Path;
+ 
++use dagq::{
++    application::TaskStore,
++    domain::{DraftOrigin, Priority, TaskId},
++};
+ use dagq::{
+     domain::search::{SearchQuery, SearchRef},
+     domain::{CommitSha, NewGoal, NewTask},
+     infrastructure::{schema::MIGRATIONS, sqlite::SqliteQueue},
+ };
+ use rusqlite::Connection;
++use serde_json::{Value, json};
+ use tempfile::TempDir;
+ 
+ pub const BASE: &str = "0123456789abcdef0123456789abcdef01234567";
+@@ -131,3 +136,43 @@ pub fn search(
+         })
+         .collect()
+ }
++
++/// A draft as the runtime or a job registers it: `origin` with `material`.
++pub fn runtime_draft(
++    queue: &mut SqliteQueue,
++    title: &str,
++    goal: Option<dagq::domain::GoalId>,
++    origin: DraftOrigin,
++    mut material: Value,
++) -> TaskId {
++    let id = queue
++        .add(NewTask {
++            title: title.into(),
++            description: format!("{title}: found outside the task"),
++            acceptance: String::new(),
++            verification_commands: Vec::new(),
++            required_evidence: Vec::new(),
++            paths: Vec::new(),
++            priority: Priority::Normal,
++            change: None,
++            dependencies: Vec::new(),
++            goal_dependencies: Vec::new(),
++            goal_id: goal,
++            context: String::new(),
++            provider: None,
++            worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
++        })
++        .unwrap()
++        .id();
++    if origin == DraftOrigin::FollowUp {
++        material["source_goal_id"] = json!(goal);
++        material["source_goal_state"] = json!(match goal {
++            None => "none",
++            Some(goal) if queue.show_goal(goal).unwrap().closed => "closed",
++            Some(_) => "open",
++        });
++        material["source_goal_provenance"] = json!("recorded");
++    }
++    queue.record_draft_origin(id, origin, &material).unwrap();
++    id
++}
+diff --git a/tests/it/follow_up_membership.rs b/tests/it/follow_up_membership.rs
+new file mode 100644
+index 00000000..01ad839f
+--- /dev/null
++++ b/tests/it/follow_up_membership.rs
+@@ -0,0 +1,399 @@
++//! Membership, immutable provenance, adoption and migration at the SQLite/CLI boundary.
++use crate::common::{self, queue::*};
++use dagq::domain::follow_up::{MembershipClassification as Class, MembershipJudgement};
++use dagq::{
++    application::TaskStore,
++    domain::{
++        ClaimOutcome, DraftOrigin, GoalEdit, GoalId, PlannerOrigin, PlannerOwner, Submission,
++        TaskAction, TaskId,
++    },
++    infrastructure::{schema::MIGRATIONS, sqlite::SqliteQueue},
++};
++use rusqlite::{Connection, params};
++use serde_json::json;
++
++fn judgement(classification: Class, destination: Option<GoalId>) -> MembershipJudgement {
++    MembershipJudgement {
++        classification,
++        acceptance_items: vec!["(1)".into()],
++        reason: "receipt demonstrates the relation to (1)".into(),
++        evidence: vec!["receipt:r".into()],
++        destination_goal_id: destination,
++        source_goal_id: None,
++        corrects: None,
++    }
++}
++fn submit(queue: &mut SqliteQueue, id: TaskId) -> anyhow::Result<dagq::domain::Proposal> {
++    queue.submit(Submission {
++        tasks: vec![id],
++        goals: vec![],
++        proposal: None,
++        owner: PlannerOwner {
++            origin: PlannerOrigin::Runtime,
++            workspace_id: None,
++        },
++    })
++}
++
++#[test]
++fn judgement_moves_membership_atomically_and_show_keeps_version_and_origin() {
++    let (_dir, mut q) = fixture();
++    let source = q.add_goal(new_goal("source")).unwrap().id();
++    let other = q.add_goal(new_goal("destination")).unwrap().id();
++    let source_task = q
++        .add(dagq::domain::NewTask {
++            goal_id: Some(source),
++            ..new_task("source task")
++        })
++        .unwrap()
++        .id();
++    q.transition(source_task, TaskAction::BypassReview).unwrap();
++    let ClaimOutcome::Claimed { run, .. } = q.claim(&base()).unwrap() else {
++        panic!("claim")
++    };
++    // Registration reads the source task and goal in its transaction.
++    let added = dagq::application::integrate::register_follow_ups(
++        &mut q,
++        &q_task(source_task, source),
++        run.id(),
++        Some(&json!([{"title":"follow up","description":"new work"}])),
++    );
++    let draft = added[0].task_id;
++    let original = q.draft_origin(draft).unwrap().unwrap().1;
++    assert_eq!(original["source_goal_id"], source.as_i64());
++    assert_eq!(original["source_goal_state"], "open");
++    let closed = q.add_goal(new_goal("closed destination")).unwrap().id();
++    q.close_goal(closed, dagq::domain::GoalVerdict::Achieved)
++        .unwrap();
++    assert!(
++        q.judge_follow_up(draft, judgement(Class::OutOfScope, Some(closed)), "planner")
++            .is_err()
++    );
++    assert!(q.show(draft).unwrap().membership_judgements.is_empty());
++    assert_eq!(q.show(draft).unwrap().task.goal_id(), Some(source));
++    let row = q
++        .judge_follow_up(draft, judgement(Class::OutOfScope, Some(other)), "planner")
++        .unwrap();
++    assert_eq!(q.show(draft).unwrap().task.goal_id(), Some(other));
++    assert_eq!(q.follow_up_depth(draft).unwrap(), 1);
++    assert_eq!(q.draft_origin(draft).unwrap().unwrap().1, original);
++    assert_eq!(original["source_task_id"], source_task.as_i64());
++    assert_eq!(original["source_run_id"], run.id().as_str());
++    assert!(q.set_goal(draft, Some(source)).is_err());
++    let detail = q.show(draft).unwrap();
++    assert_eq!(detail.membership_judgements[0]["acceptance_version"], 1);
++    assert_eq!(
++        detail
++            .events
++            .iter()
++            .filter(|e| e.kind.as_str() == "follow_up_judged")
++            .count(),
++        1
++    );
++    assert_eq!(
++        q.show_goal(source).unwrap().follow_up_memberships[0]["judgements"][0]["id"],
++        row["id"]
++    );
++    q.edit_goal(
++        source,
++        GoalEdit {
++            title: Some("renamed".into()),
++            ..Default::default()
++        },
++    )
++    .unwrap();
++    assert_eq!(q.show_goal(source).unwrap().acceptance_version, 1);
++    q.edit_goal(
++        source,
++        GoalEdit {
++            acceptance: Some("changed criteria".into()),
++            ..Default::default()
++        },
++    )
++    .unwrap();
++    assert_eq!(q.show_goal(source).unwrap().acceptance_version, 2);
++    assert_eq!(
++        q.show(draft).unwrap().membership_judgements[0]["needs_recheck"],
++        true
++    );
++    // A rejected move rolls back its judgement, and a correction is explicit.
++    let invalid = judgement(Class::Required, None);
++    assert!(q.judge_follow_up(draft, invalid, "planner").is_err());
++    let mut correction = judgement(Class::Required, None);
++    correction.corrects = row["id"].as_i64();
++    q.judge_follow_up(draft, correction, "planner").unwrap();
++    assert_eq!(q.show(draft).unwrap().task.goal_id(), Some(source));
++    assert_eq!(
++        q.show(draft).unwrap().membership_judgements[1]["acceptance_version"],
++        2
++    );
++    assert_eq!(q.draft_origin(draft).unwrap().unwrap().1, original);
++    submit(&mut q, draft).unwrap();
++}
++
++fn q_task(id: TaskId, goal: GoalId) -> dagq::domain::Task {
++    dagq::domain::Task::new(
++        id,
++        dagq::domain::NewTask {
++            goal_id: Some(goal),
++            ..new_task("source task")
++        },
++        "2026-10-04T00:00:00.000Z".into(),
++    )
++    .unwrap()
++}
++
++#[test]
++fn cli_records_judgements_and_denies_workers_and_jobs() {
++    use common::cli::{invoke, invoke_as, ok};
++    let (dir, mut q) = fixture();
++    let db = dir.path().join("queue.db");
++    let goal = q.add_goal(new_goal("source")).unwrap().id();
++    let id = q
++        .add(dagq::domain::NewTask {
++            goal_id: Some(goal),
++            ..new_task("follow up")
++        })
++        .unwrap()
++        .id();
++    q.record_draft_origin(id,DraftOrigin::FollowUp,&json!({"source_goal_id":goal,"source_goal_state":"open","source_goal_provenance":"recorded"})).unwrap();
++    let args = [
++        "judge-follow-up",
++        "1",
++        "--classification",
++        "required",
++        "--reason",
++        "needed for acceptance (1)",
++        "--acceptance-item",
++        "(1)",
++        "--evidence",
++        "task:1",
++    ];
++    for role in [
++        "worker",
++        "review-job",
++        "recovery-job",
++        "plan-review-job",
++        "goal-review-job",
++        "throughput-review-job",
++    ] {
++        let out = invoke_as(Some(role), &db, &args);
++        assert!(!out.status.success(), "{role}");
++        let refusal: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
++        assert_eq!(
++            refusal["denied"]["capability"], "follow_up.judge",
++            "{role}: {refusal}"
++        );
++    }
++    assert!(q.show(id).unwrap().membership_judgements.is_empty());
++    let row = ok(&db, &args);
++    assert_eq!(row["classification"], "required");
++    assert_eq!(
++        ok(&db, &["show", "1"])["membership_judgements"][0]["acceptance_version"],
++        1
++    );
++    assert_eq!(
++        ok(&db, &["goal", "show", "1"])["follow_up_memberships"][0]["material"]["source_goal_id"],
++        1
++    );
++    assert!(
++        !invoke(
++            &db,
++            &[
++                "judge-follow-up",
++                "1",
++                "--classification",
++                "unknown",
++                "--reason",
++                "x"
++            ]
++        )
++        .status
++        .success()
++    );
++}
++
++#[test]
++fn migrated_histories_preserve_adopts_and_require_them_only_for_unsafe_registration_facts() {
++    let dir = tempfile::tempdir().unwrap();
++    let db = dir.path().join("old.db");
++    let raw = Connection::open(&db).unwrap();
++    let previous = MIGRATIONS.len() - 1;
++    for m in &MIGRATIONS[..previous] {
++        raw.execute_batch(m).unwrap();
++    }
++    raw.pragma_update(None, "application_id", 0x43545131)
++        .unwrap();
++    raw.pragma_update(None, "user_version", previous as i64)
++        .unwrap();
++    raw.execute_batch("INSERT INTO goals(id,title,description,acceptance,constraints,status) VALUES (1,'source','','criteria','','open'),(2,'destination','','criteria','','open');
++        INSERT INTO goals(id,title,description,acceptance,constraints,status,closed_at,verdict) VALUES (3,'closed','','criteria','','open','2026-10-01T00:00:00.000Z','achieved');").unwrap();
++    // 0=open at registration, 1=closed, 2=no goal, 3=missing event,
++    // 4=conflicting source chain, 5=depth 3, 6=already adopted,
++    // 7=conflicting closed_at, 8=source and draft moved several times,
++    // 9=conflicting draft chain, 10=closed only AFTER registration.
++    for case in 0..11i64 {
++        let source = 10 + case;
++        let draft = 100 + case;
++        let original = match case {
++            1 | 6 | 7 | 10 => Some(3),
++            2 => None,
++            _ => Some(1),
++        };
++        raw.execute("INSERT INTO tasks(id,title,description,acceptance,verification_commands,status,goal_id) VALUES (?1,'source','','criteria','[]','completed',?2)",params![source,original]).unwrap();
++        raw.execute("INSERT INTO task_runs(id,task_id,status,requested_provider,actual_provider,base_commit) VALUES (?1,?2,'integrated','claude','claude',?3)",params![format!("r{case}"),source,BASE]).unwrap();
++        let initial_draft = if case == 1 || case == 6 {
++            None
++        } else {
++            original
++        };
++        raw.execute("INSERT INTO tasks(id,title,description,acceptance,verification_commands,status,goal_id,follow_up_depth) VALUES (?1,'follow up','work','criteria','[\"true\"]','draft',?2,?3)",params![draft,initial_draft,if case==5 {3} else if case==6 {0} else {2}]).unwrap();
++        let material =
++            json!({"source_task_id":source,"source_run_id":format!("r{case}"),"index":0});
++        raw.execute("INSERT INTO draft_origins(task_id,origin,material,created_at) VALUES (?1,'follow_up',?2,1)",params![draft,material.to_string()]).unwrap();
++        if case != 3 {
++            let closed = case == 1 || case == 6;
++            let date = if case == 10 {
++                "2026-09-30T00:00:00.000Z"
++            } else {
++                "2026-10-02T00:00:00.000Z"
++            };
++            raw.execute("INSERT INTO run_events(task_id,run_id,kind,payload,created_at) VALUES (?1,?2,'follow_up_registered',?3,?4)",params![source,format!("r{case}"),json!({"task_id":draft,"index":0,"goal_closed":closed}).to_string(),date]).unwrap();
++        }
++        for (task, from, to) in if case == 8 {
++            vec![
++                (source, original, Some(2)),
++                (source, Some(2), Some(1)),
++                (source, Some(1), Some(2)),
++                (draft, initial_draft, Some(1)),
++                (draft, Some(1), Some(2)),
++            ]
++        } else {
++            vec![
++                (source, if case == 4 { None } else { original }, Some(2)),
++                (draft, if case == 9 { None } else { initial_draft }, Some(2)),
++            ]
++        } {
++            raw.execute("UPDATE tasks SET goal_id=?2 WHERE id=?1", params![task, to])
++                .unwrap();
++            raw.execute("INSERT INTO run_events(task_id,kind,payload,created_at) VALUES (?1,'task_goal_changed',?2,'2026-10-03T00:00:00.000Z')",params![task,json!({"from":from,"to":to}).to_string()]).unwrap();
++        }
++        if case == 6 {
++            raw.execute("INSERT INTO run_events(task_id,kind,payload) VALUES (?1,'follow_up_adopted','{\"by\":\"person\"}')",[draft]).unwrap();
++        }
++    }
++    drop(raw);
++    let mut q = migrated(&db);
++    for case in 0..11i64 {
++        let id = TaskId::new(100 + case);
++        let origin = q.draft_origin(id).unwrap().unwrap().1;
++        let state = match case {
++            1 | 6 => "closed",
++            2 => "none",
++            3 | 4 | 7 | 9 => "unknown",
++            _ => "open",
++        };
++        assert_eq!(origin["source_goal_state"], state, "case {case}");
++        assert_eq!(
++            origin["source_goal_id"],
++            match case {
++                1 | 6 | 10 => json!(3),
++                2 | 3 | 4 | 7 | 9 => json!(null),
++                _ => json!(1),
++            },
++            "case {case}"
++        );
++        assert_eq!(
++            origin["source_goal_provenance"],
++            if state == "unknown" {
++                "unknown"
++            } else {
++                "restored"
++            }
++        );
++        assert_eq!(q.show(id).unwrap().task.goal_id(), Some(GoalId::new(2)));
++        assert!(q.show(id).unwrap().membership_judgements.is_empty());
++        if [0, 5, 6, 8, 10].contains(&case) {
++            q.judge_follow_up(
++                id,
++                judgement(Class::OutOfScope, Some(GoalId::new(2))),
++                "planner",
++            )
++            .unwrap();
++        }
++        if [0, 6, 8, 10].contains(&case) {
++            submit(&mut q, id).unwrap();
++            assert_eq!(
++                q.follow_up_depth(id).unwrap(),
++                if case == 6 { 0 } else { 2 }
++            );
++        } else {
++            let error = submit(&mut q, id).unwrap_err().to_string();
++            assert!(error.contains("without a person"), "case {case}: {error}");
++            assert_eq!(
++                q.show(id).unwrap().task.status(),
++                dagq::domain::TaskStatus::Draft
++            );
++            // An adopt answer permits the same runtime submission.
++            let raw = Connection::open(&db).unwrap();
++            raw.execute("INSERT INTO asks(kind,task_id,question,options,answer,asked_by,reason_category,answered_at) VALUES ('planner_question',?1,'adopt?','[]','adopt','planner','scope',1)",[id.as_i64()]).unwrap();
++            drop(raw);
++            submit(&mut q, id).unwrap();
++            assert_eq!(q.follow_up_depth(id).unwrap(), 0);
++        }
++    }
++}
++
++#[test]
++fn membership_changes_never_adopt_missing_closed_unknown_or_deep_follow_ups() {
++    let (dir, mut q) = fixture();
++    let source = q.add_goal(new_goal("source")).unwrap().id();
++    let destination = q.add_goal(new_goal("destination")).unwrap().id();
++    for (index, state, depth) in [
++        (0, "none", 1),
++        (1, "closed", 1),
++        (2, "unknown", 2),
++        (3, "open", 3),
++    ] {
++        let id = q.add(new_task(&format!("follow {index}"))).unwrap().id();
++        let material = json!({"source_task_id":99,"source_run_id":"r","source_goal_id":if state=="none" || state=="unknown" {None} else {Some(source)},"source_goal_state":state,"source_goal_provenance":if state=="unknown" {"unknown"} else {"recorded"}});
++        q.record_draft_origin(id, DraftOrigin::FollowUp, &material)
++            .unwrap();
++        q.set_follow_up_depth(id, depth).unwrap();
++        q.set_goal(id, Some(destination)).unwrap();
++        assert!(
++            submit(&mut q, id)
++                .unwrap_err()
++                .to_string()
++                .contains("without a person")
++        );
++        if state != "none" {
++            let mut judge = judgement(Class::OutOfScope, Some(destination));
++            if state == "unknown" {
++                judge.source_goal_id = Some(source);
++            }
++            let row = q.judge_follow_up(id, judge, "planner").unwrap();
++            assert_eq!(
++                row["source_kind"],
++                if state == "unknown" {
++                    "named_by_judge"
++                } else {
++                    "recorded"
++                }
++            );
++            assert!(
++                submit(&mut q, id)
++                    .unwrap_err()
++                    .to_string()
++                    .contains("without a person")
++            );
++        }
++        assert_eq!(q.draft_origin(id).unwrap().unwrap().1, material);
++        assert_eq!(q.follow_up_depth(id).unwrap(), depth);
++        let raw = Connection::open(dir.path().join("queue.db")).unwrap();
++        raw.execute("INSERT INTO asks(kind,task_id,question,options,answer,asked_by,reason_category,answered_at) VALUES ('planner_question',?1,'adopt?','[]','adopt','planner','scope',1)",[id.as_i64()]).unwrap();
++        drop(raw);
++        submit(&mut q, id).unwrap();
++        assert_eq!(q.follow_up_depth(id).unwrap(), 0);
++    }
++}
+diff --git a/tests/it/main.rs b/tests/it/main.rs
+index 8620ce2d..081ae884 100644
+--- a/tests/it/main.rs
++++ b/tests/it/main.rs
+@@ -166,3 +166,5 @@ mod worker_escalation;
+ mod worker_model;
+ 
+ mod stub_templates;
++
++mod follow_up_membership;
+diff --git a/tests/it/plan_review.rs b/tests/it/plan_review.rs
+index e057f71b..58109078 100644
+--- a/tests/it/plan_review.rs
++++ b/tests/it/plan_review.rs
+@@ -1593,36 +1593,7 @@ fn a_withdrawn_reopen_gets_a_planner_of_the_runtimes_with_the_reason() {
+     assert_eq!(status(&mut queue, ready), TaskStatus::Draft);
+ }
+ 
+-/// A draft as the runtime or a job registers it: `origin` with `material`.
+-pub(crate) fn runtime_draft(
+-    queue: &mut SqliteQueue,
+-    title: &str,
+-    goal: Option<dagq::domain::GoalId>,
+-    origin: DraftOrigin,
+-    material: Value,
+-) -> TaskId {
+-    let id = queue
+-        .add(NewTask {
+-            title: title.into(),
+-            description: format!("{title}: found outside the task"),
+-            acceptance: String::new(),
+-            verification_commands: Vec::new(),
+-            required_evidence: Vec::new(),
+-            paths: Vec::new(),
+-            priority: Priority::Normal,
+-            change: None,
+-            dependencies: Vec::new(),
+-            goal_dependencies: Vec::new(),
+-            goal_id: goal,
+-            context: String::new(),
+-            provider: None,
+-            worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
+-        })
+-        .unwrap()
+-        .id();
+-    queue.record_draft_origin(id, origin, &material).unwrap();
+-    id
+-}
++pub(crate) use crate::common::queue::runtime_draft;
+ 
+ pub(crate) fn open_goal(queue: &mut SqliteQueue) -> dagq::domain::GoalId {
+     queue
+diff --git a/tests/it/queue_migration.rs b/tests/it/queue_migration.rs
+index e7c6ca86..7629aa63 100644
+--- a/tests/it/queue_migration.rs
++++ b/tests/it/queue_migration.rs
+@@ -718,10 +718,14 @@ fn migration_to_v28_gives_the_follow_up_drafts_already_queued_their_origin() {
+     // person's draft does not.
+     let (origin, material) = queue.draft_origin(TaskId::new(2)).unwrap().unwrap();
+     assert_eq!(origin, dagq::domain::DraftOrigin::FollowUp);
+-    assert_eq!(
+-        material,
+-        serde_json::json!({"source_task_id": 1, "source_run_id": "run-1", "index": 0})
+-    );
++    assert_eq!(material["source_task_id"], 1);
++    assert_eq!(material["source_run_id"], "run-1");
++    assert_eq!(material["index"], 0);
++    assert_eq!(material["source_goal_id"], serde_json::Value::Null);
++    assert_eq!(material["source_goal_state"], "none");
++    assert_eq!(material["source_goal_provenance"], "restored");
++    assert_eq!(material["registration_event_id"], 1);
++    assert!(material["registered_at"].is_string());
+     assert!(queue.draft_origin(TaskId::new(3)).unwrap().is_none());
+     let targets: Vec<TaskId> = queue
+         .planner_drafts()
+diff --git a/tests/it/runtime_integrate.rs b/tests/it/runtime_integrate.rs
+index ecc7e665..dee63c5a 100644
+--- a/tests/it/runtime_integrate.rs
++++ b/tests/it/runtime_integrate.rs
+@@ -1619,13 +1619,13 @@ fn integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once() {
+     assert_eq!(
+         events_of(&db, run.id(), "follow_up_registered"),
+         vec![
+-            json!({"task_id": 2, "title": "later work", "index": 0, "category": "defect"}),
++            json!({"task_id": 2, "title": "later work", "index": 0, "category": "defect", "source_task_id": 1, "source_run_id": run.id(), "source_goal_id": goal.id(), "source_goal_state": "open", "source_goal_provenance": "recorded", "follow_up_depth": 1}),
+             json!({
+                 "task_id": null, "title": "  ", "index": 1, "category": "ops",
+                 "skipped": "title is not a non-blank string",
+                 "follow_up": {"title": "  ", "description": "no title, not a task", "category": "ops"},
+             }),
+-            json!({"task_id": 3, "title": "more work", "index": 2, "category": "unlabeled"}),
++            json!({"task_id": 3, "title": "more work", "index": 2, "category": "unlabeled", "source_task_id": 1, "source_run_id": run.id(), "source_goal_id": goal.id(), "source_goal_state": "open", "source_goal_provenance": "recorded", "follow_up_depth": 1}),
+             json!({
+                 "task_id": null, "title": "no description", "index": 3, "category": "unlabeled",
+                 "skipped": "description is not a string",
+@@ -1684,7 +1684,7 @@ fn integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once() {
+     assert_eq!(detail.task.goal_id(), None);
+     assert_eq!(
+         events_of(&db, run.id(), "follow_up_registered")[4],
+-        json!({"task_id": added[0].task_id, "title": "after the goal", "index": 4, "category": "unlabeled", "goal_closed": true})
++        json!({"task_id": added[0].task_id, "title": "after the goal", "index": 4, "category": "unlabeled", "goal_closed": true, "source_task_id": 1, "source_run_id": run.id(), "source_goal_id": goal.id(), "source_goal_state": "closed", "source_goal_provenance": "recorded", "follow_up_depth": 1})
+     );
+     // Nothing to register without follow_ups.
+     assert!(runtime::register_follow_ups(&mut queue, &task, run.id(), None).is_empty());

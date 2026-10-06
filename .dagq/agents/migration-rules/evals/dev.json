@@ -1,0 +1,225 @@
+{
+  "agent": "migration-rules",
+  "role": "review",
+  "codes": [
+    "A-139",
+    "A-140",
+    "A-141",
+    "A-144",
+    "A-145"
+  ],
+  "k": 3,
+  "cases": [
+    {
+      "id": "gen-extend-declaration-parser-regression-test",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "60b2bd152eca9a191a586d924d84387aec9537469b6b5f09ad2dd9beca2ac484",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "A-139's schema.rs restriction concerns adding migrations, as ADR-0067 decision 1 states. Extending an existing declaration-parser test adds no migration and changes no database schema or migration listing, so this schema.rs edit follows all listed rules.",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "gen-manually-bump-binary-schema-for-new-index",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "151005ffe34f6f8179d363721dab2b65906903358cfce45c3655b6ed6805c691",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-139"
+          ],
+          "note": "Adding a migration must require only a migrations/NNNN_<name>.sql file, with no schema.rs edit. Manually bumping BINARY_SCHEMA breaks A-139; the migration uses the next available number and leaves released files unchanged, and the numeric literal is outside tests.",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "gen-derive-applied-count-from-migration-list",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "39a876fb5039cfb14eae3b388d049c8f8077567474b8867ac9e3a0f0f83f2ef5",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "The applied count derives its latest endpoint from MIGRATIONS.len(); 23 remains the historical fixture version before the floor table. This follows A-140 and ADR-0067 decision 4 without fixing the latest schema number.",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "gen-cap-pending-migrations-at-current-version",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "ae4607a85f4ad3e64711b4c6037f04bd7b5240b06b7bab4083a0f7a57139a4a9",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-140"
+          ],
+          "note": "The expected pending list now ends at the hardcoded latest version, 64, even though compatibility still comes from MIGRATIONS. ADR-0067 decision 4 requires lists from an older version through the latest to be assembled dynamically.",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "gen-add-two-consecutive-data-cleanups",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "25e7446a95012e97b4ae94a077c713421d69c831e49edab8b543126e2089e4bb",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "追加migrationが2つでも、mainの次の空き0065から0066へ欠けなく番号を付ければ規則を守ります。ADR-0067の複数追加によるmigration_number_takenは番号が埋まっている場合の扱いであり、この変更には重複がありません。",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "gen-give-two-cleanups-the-same-number",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "32867d5016d88a5aaf27da8f0395f38f6eb4a613c6889d6beeb16ac3378daeeb",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-141"
+          ],
+          "note": "別々のデータ補正migrationに同じ0065を付けており、ADR-0067の番号の重複禁止に違反します。追加が2つなので単一migrationの自動振り直しの条件にも当てはまらず、番号を直す必要があります。",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "gen-add-run-kind-index-in-next-migration",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "0a8456d4b5dee12f443e8a39051e49550f14cb9a81f51d1eb16eb402f8ae5bb6",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "ADR-t614-2 requires schema improvements to use a new migration instead of rewriting an existing one. Adding 0065 uses the next available number, preserves every existing migration, and lets build.rs discover it without editing schema.rs.",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "gen-add-run-kind-index-in-next-migration-2",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "244fa2e438bf0569f619f757b2c6bdb59910dd5b4a0c6d2f88444e5830fd7da6",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "The index changes the schema through a new 0065 migration, the next unused number after 0064, as A-145 requires. Its compatible declaration matches the additive index, and build.rs discovers the file without edits to schema.rs or existing migrations.",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "gen-change-column-default-in-existing-migration",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "9ecc359ed684e6ee9f7cfaf0159c019e86797c87229bcc24986950a729175f36",
+      "adjudicated": null,
+      "disputed": {
+        "date": "2026-10-05",
+        "kind": "verifier_split",
+        "by": "runner/generate_cases.py",
+        "reason": "同じケースで検証の Codex の判定が割れた（1 回目の build は『migration は未リリースで変えてよい』と clean にして落とし、2 回目は A-145 の違反として通した）。この repository のリリースの tag は v0.2.0 だけ"
+      },
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-145"
+          ],
+          "note": "A-145 requires schema fixes to use a new migration with the next number; changing an existing column definition in 0063 leaves databases that already applied it unchanged. This migration is absent from the checkout's only release tag, v0.2.0, so the edit does not violate A-144.",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "gen-simplify-historical-migration-fixture",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "2ab570b57b06f358e7eb092cc586de82da2be9c78a71ee02e2df1e474b0de5aa",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "Builds the existing schema-3 fixture from MIGRATIONS instead of three explicit include_str calls. The literal 3 describes a fixed historical version, rather than the latest schema, as allowed by ADR-0067 decision 4.",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "gen-include-generated-list-path-in-write-error",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "ef71d7e9b5775c5396d8385ae78691b665b9bf075a9e85d05caf61192633f71b",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "Improves the build diagnostic when writing the generated migration list fails. build.rs still discovers and validates migrations in number order, and neither schema.rs nor any migration file changes.",
+          "near_miss": false
+        }
+      }
+    }
+  ]
+}

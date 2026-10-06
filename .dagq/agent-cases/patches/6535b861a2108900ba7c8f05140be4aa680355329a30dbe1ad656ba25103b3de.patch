@@ -1,0 +1,65 @@
+diff --git a/docs/adr/2026-10-05-t1801-1-translation-keeps-source-authority.md b/docs/adr/2026-10-05-t1801-1-translation-keeps-source-authority.md
+new file mode 100644
+index 00000000..a86b3231
+--- /dev/null
++++ b/docs/adr/2026-10-05-t1801-1-translation-keeps-source-authority.md
+@@ -0,0 +1,31 @@
++---
++id: adr-t1801-1
++type: adr
++title: 文書の翻訳は原文の正本を置き換えない
++status: proposed
++created: 2026-10-05
++updated: 2026-10-05
++owners:
++  - hisamekms
++tags:
++  - documentation
++related: []
++---
++
++# ADR-t1801-1: 文書の翻訳は原文の正本を置き換えない
++
++## Context
++
++repositoryの文書を別の言語で読むための翻訳を追加すると、原文と翻訳のどちらを判断の根拠にするかが曖昧になる。
++
++## Decision
++
++文書の翻訳は読むための補助とし、原文の正本を置き換えない。内容が食い違うときは原文を根拠にし、翻訳を直す。
++
++## Alternatives
++
++両方を同格の正本にする案は、食い違いの解決に別の判断を要するため採らない。
++
++## Consequences
++
++翻訳を追加しても正本の所在は変わらない。翻訳には原文を辿れる案内が必要になる。この提案は採用されるまで現行の規則を変えない。
+diff --git a/docs/adr/README.md b/docs/adr/README.md
+index 02f045e2..f6241bfc 100644
+--- a/docs/adr/README.md
++++ b/docs/adr/README.md
+@@ -4,7 +4,7 @@ type: design
+ title: Architecture decision records
+ status: current
+ created: 2026-09-21
+-updated: 2026-10-04
++updated: 2026-10-05
+ last_verified: 2026-09-30
+ tags:
+   - architecture
+@@ -163,6 +163,14 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由
+ 
+ goal 82（goal 38の段(1)〜(3)）のADRはtask 1233が書いた5本で、決定の置き場所は次のとおり。制御側と実行側の分け方・queue service・ユースケース単位のAPIとservice側の認可・unix socket・broker・クライアントモード・段の順と置き場所はADR-t1233-1、serviceの起動・停止の責任・落ちたときの知らせ方・brokerより前のprincipalの認証（token）はADR-t1233-4、読み取りのユースケースとroleごとの読める範囲・workerの読める範囲・Codexのsandboxからの到達はADR-t1233-5、e2eをreviewのpassの後のhostの工程に移すことはADR-t1233-2、このrepositoryを先にLinuxで通すことはADR-t1233-3にある。
+ 
++## 検討中のADR
++
++`status: proposed`のADR。決定はまだ有効ではない。
++
++| ADR | Title | Status |
++| --- | --- | --- |
++| [ADR-t1801-1](2026-10-05-t1801-1-translation-keeps-source-authority.md) | 文書の翻訳は原文の正本を置き換えない | proposed |
++
+ ## 置き換え・廃止されたADR
+ 
+ `status: superseded` / `deprecated`のADRと後継の対応。`deprecated`の行は`superseded_by`を空にし、日付の列に`deprecated_on`を書く。0001〜0034の棚卸しの旧組A〜CはADR-0052〜0054への置き換え済みの記録で、組D〜Jの統合ADR計画は取り消された（[対応表](../plans/adr-inventory.md#統合adrの組過去の記録)）。

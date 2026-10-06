@@ -1,0 +1,9 @@
+diff --git a/migrations/0066_clear_empty_worker_mode.sql b/migrations/0066_clear_empty_worker_mode.sql
+new file mode 100644
+index 00000000..10f6b550
+--- /dev/null
++++ b/migrations/0066_clear_empty_worker_mode.sql
+@@ -0,0 +1,3 @@
++-- dagq-schema: compatible
++-- Treat an empty legacy worker mode as unspecified.
++UPDATE tasks SET worker_mode = NULL WHERE worker_mode = '';

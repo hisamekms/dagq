@@ -1,0 +1,1553 @@
+diff --git a/docs/design/provider-lifecycle.md b/docs/design/provider-lifecycle.md
+index 298015a3..2551ccad 100644
+--- a/docs/design/provider-lifecycle.md
++++ b/docs/design/provider-lifecycle.md
+@@ -4,8 +4,8 @@ type: design
+ title: Agent provider lifecycle
+ status: current
+ created: 2026-09-21
+-updated: 2026-10-03 # task 1398: a headless runtime planner's span from its turns
+-last_verified: 2026-10-03 # task 1398
++updated: 2026-10-03 # task 1397: a headless planner's provider_waiting is the queue's (after task 1398's span from turns)
++last_verified: 2026-10-03 # task 1397
+ scope: provider
+ related:
+   - adr-t1340-1
+@@ -243,7 +243,7 @@ workerのproviderと経路はtaskが選ぶ（[ADR-t813-2](../adr/2026-09-28-t813
+ - **使えないの判定**（`SwitchReason`、[domain-model](domain-model.md#providerの切り替えの理由switchreason)）: 実行ファイルが無い（`executable_missing`。supervisorの表にそのproviderの組が無い、つまりpreflightで見つからないか動かない）、起動できない（`launch_failed`。wrapperがturnのagentの実行ファイルを実行できない（起動のerrorの連鎖に`NotFound`か`PermissionDenied`のio errorがある。settingsの書き込みなどほかのerrorは今までどおりwrapperの失敗）、またはagentがsignalでなく非0で終わり、出力に1行も出さず、読み手も`other`以外の分類をしなかった。turnの`failure`は`launch`）、認証（`authentication`）、利用上限・rate limit（`usage_limit`）。認証と利用上限は読み手の分類（Claudeは`ClaudeTurnReader`、Codexは`CodexTurnReader`の`classify`）で決める。Claudeの読み手はstreamの印（401の再試行、`rate_limit_event`、`api_error_status`など）の後に、結果の文とstderrを`infrastructure::claude::job_wall`（headlessのjobの出力から控えのaskを開く判定と同じ1か所の文言、task 438）でも読む。`model`・`sandbox`・`other`の失敗、止めたturn（`silent`・`timed_out`・`launch_mismatch`）、receiptの`failed`やtestの失敗は切り替えない（決定3。今までどおり復旧jobにかかる）。
+ - **控え**（決定6）: Claudeの控えはqueueの`queue_hold`のask（開いている間）そのもの。Codexの控え（どの理由でも）と、Claudeのagentが起動できない控え（`launch_failed`）は`ProviderHold`（`provider`・`reason`・`since`・`retry_at`）で、queueイベント`provider_held`（`run_id`・`reset_read`・`supervisor`も）に記録し、askは開かない（Claudeの`launch_failed`の控えもclaimの経路とturnの切り替えではClaudeを使えないものにする）。控えは`retry_at`の後のpassで`provider_released`（`why: retry_due`）になり、次のそのproviderの呼び出しが確かめ直す（また使えなければまた控える）。`retry_at`は、利用上限でturnの文が解ける時刻を言えばその時刻（`provider_switch::reset_at`: `|`か`resets at`の後のunix時刻、`in 2 hours 13 minutes`・`in 45s`のような`in`の後の長さ。`Try again at 3pm`のような時計の時刻はproviderのtime zoneが分からないので読まない。過去か7日（`MAX_RESET_SECS`）より先なら読まない。読めたかは`reset_read`）、読めなければ`SwitchReason::hold_secs`（`usage_limit` 1800秒、`authentication` 900秒、`launch_failed` 600秒）の後。人が控えのaskに`done`と答えたときは、askを閉じるsupervisorが全ての控えを解く（`why: done`）。supervisorは毎pass、最新の`provider_held` / `provider_released`から控えを読み直す（`check_provider_holds`、`check_queue_hold`の後。起動・exec・他のsupervisorの記録もこれで揃う）。`status`の`supervisors[].provider_hold`が控えを出す。
+ - **claim**（決定6）: `routes`は、taskのworkerを、そのproviderに組があり控えられていなければそのまま、そうでなければもう一方のproviderの非対話で（組があり控えられていないとき）動かし、どちらでもなければ経路なしにする。対話のClaudeのtaskもClaudeが控えられていれば非対話のCodexで始まる。経路が変わったrunは`run_claimed`と同じ取引で`provider_switched`（`phase: start`、`turn: null`、`count: 1`、`reason`はそのproviderの控えの理由か`executable_missing`）を記録する。全workerに経路が無い（Claudeが控えられ、Codexが無いか控えられている）ときだけ、Claudeのaskが新しいclaimを止め（`claim_held`）、候補は`provider_unavailable`で控える。
+-- **turnの途中**（決定2・4）: 非対話のturnの`failure`が`authentication` / `usage_limit` / `launch`なら、wrapperはsessionを終えずに次の依頼を待つ（`TurnOutcome::goes_on`）。supervisorは最初のsession・revise・resumeのどの段でも（`StallWatch::observe_turn`と、reviseとresumeの`SessionWatch::provider_wall`）、そのturnを見るたびに`Supervisor::turn_at_wall`を当てる（そのturnの後に切り替えか依頼があれば済んだものとして何もしない）。最初に見たとき、Claudeの認証と利用上限でなければそのproviderを`ProviderHold`で控え、もう一方のproviderの非対話が使え、runの切り替えが上限（`MAX_PROVIDER_SWITCHES` = 2。一度離れて、離れた先も使えないときに一度戻る）に達していなければ、`Queue::switch_provider`でrunの`actual_provider`と`worker_mode`（`headless`）を書き換えて`provider_switched`を記録し、失敗したturnの呼び出しをもう一方のproviderへの依頼（`turn_requested`の`what: provider switch`）にする。文は`switch_text`: 切り替えの理由、会話が引き継がれないこと、`git log --oneline <base>..HEAD`と`git status`で今までのcommitと変更を見て続けること、失敗したturnの依頼（`request-NNNNNN.taken.json`の`what`と`prompt`: answer・revise・催促など）。`phase`は失敗したturnの依頼から決める（`SwitchPhase::of_request`: 依頼なしは`start`、`answer of ask N`は`answer`、`revise request`は`revise`、`nudge`は`nudge`、ほか（解消依頼・復旧jobの指示・控えの「続けて」）は`resume`）。ClaudeからCodexへ移ったときは、Claudeで動く役割（`provider`を書かないreview・goal reviewと、復旧・plan reviewのjob、observer）のためにClaudeの控えのaskを開き（runは`affected`に入れない）、runに`auth_required` / `usage_limited`（`switched_to: codex`）を書く。reviewはそのaskが閉じるまで待つ。切り替えられないとき（もう一方も使えない、切り替えの上限）、runは失敗にせず待つ。最初に見たときにrunに`provider_waiting`（`turn`・`provider`・`reason`・`other`・`blocked`（移れない理由）・`retry_at`）を記録し、sessionは次の依頼を待ったまま残る（最初のturnのagentが起動できなかったrunは、agentが一度も登録されないので`starting`のまま）。その後に見るたびに、もう一方が使えるようになり切り替えが残っていれば切り替え、自分のproviderの控えが解け（`retry_at`、または`done`）控えのaskにも入っていなければ、同じproviderの同じsessionへ失敗したturnの呼び出しをもう一度送る（`retry_text`、`turn_requested`の`what: provider retry`）。人に届けるのは（`wall_to_raise`）、Claudeの認証と利用上限（Claudeだけの役割も止まるので常に）と、両方使えないとき（もう一方も控えられているか表に無い）で、runは`raise_wall`で控えのaskに入る。壁は、開いている控えのaskがあればその理由、無ければ失敗の理由か、もう一方の控えの理由の認証・利用上限。`done`で全ての控えが解け、「続けて」が今のproviderに行き、また使えなければそのturnでまた判定する。両方が起動できない（`launch_failed`か実行ファイルが無い）ときはaskを開かず、控えの時刻ごとに確かめ直して待つ（claimの候補は`provider_unavailable`で控えられ`status`に出る）。切り替えの上限でCodexの壁から移れず、Claudeが使えるときもaskは開かず（人を待つものが無い）、Codexの控えの時刻（解ける時刻が読めればその時刻）の後に同じthreadへもう一度送る。切り替えたときは`write_prompt`がtaskのpromptを新しいproviderの文面で書き直し（Codexはsubagent reviewをしない、など）、wrapperは新しいsessionでそれを読み直す。
++- **turnの途中**（決定2・4）: 非対話のturnの`failure`が`authentication` / `usage_limit` / `launch`なら、wrapperはsessionを終えずに次の依頼を待つ（`TurnOutcome::goes_on`）。supervisorは最初のsession・revise・resumeのどの段でも（`StallWatch::observe_turn`と、reviseとresumeの`SessionWatch::provider_wall`）、そのturnを見るたびに`Supervisor::turn_at_wall`を当てる（そのturnの後に切り替えか依頼があれば済んだものとして何もしない）。最初に見たとき、Claudeの認証と利用上限でなければそのproviderを`ProviderHold`で控え、もう一方のproviderの非対話が使え、runの切り替えが上限（`MAX_PROVIDER_SWITCHES` = 2。一度離れて、離れた先も使えないときに一度戻る）に達していなければ、`Queue::switch_provider`でrunの`actual_provider`と`worker_mode`（`headless`）を書き換えて`provider_switched`を記録し、失敗したturnの呼び出しをもう一方のproviderへの依頼（`turn_requested`の`what: provider switch`）にする。文は`switch_text`: 切り替えの理由、会話が引き継がれないこと、`git log --oneline <base>..HEAD`と`git status`で今までのcommitと変更を見て続けること、失敗したturnの依頼（`request-NNNNNN.taken.json`の`what`と`prompt`: answer・revise・催促など）。`phase`は失敗したturnの依頼から決める（`SwitchPhase::of_request`: 依頼なしは`start`、`answer of ask N`は`answer`、`revise request`は`revise`、`nudge`は`nudge`、ほか（解消依頼・復旧jobの指示・控えの「続けて」）は`resume`）。ClaudeからCodexへ移ったときは、Claudeで動く役割（`provider`を書かないreview・goal reviewと、復旧・plan reviewのjob、observer）のためにClaudeの控えのaskを開き（runは`affected`に入れない）、runに`auth_required` / `usage_limited`（`switched_to: codex`）を書く。reviewはそのaskが閉じるまで待つ。切り替えられないとき（もう一方も使えない、切り替えの上限）、runは失敗にせず待つ。最初に見たときにrunに`provider_waiting`（`turn`・`provider`・`reason`・`other`・`blocked`（移れない理由）・`retry_at`）を記録し、sessionは次の依頼を待ったまま残る（最初のturnのagentが起動できなかったrunは、agentが一度も登録されないので`starting`のまま）。その後に見るたびに、もう一方が使えるようになり切り替えが残っていれば切り替え、自分のproviderの控えが解け（`retry_at`、または`done`）控えのaskにも入っていなければ、同じproviderの同じsessionへ失敗したturnの呼び出しをもう一度送る（`retry_text`、`turn_requested`の`what: provider retry`）。人に届けるのは（`wall_to_raise`）、Claudeの認証と利用上限（Claudeだけの役割も止まるので常に）と、両方使えないとき（もう一方も控えられているか表に無い）で、runは`raise_wall`で控えのaskに入る。壁は、開いている控えのaskがあればその理由、無ければ失敗の理由か、もう一方の控えの理由の認証・利用上限。`done`で全ての控えが解け、「続けて」が今のproviderに行き、また使えなければそのturnでまた判定する。両方が起動できない（`launch_failed`か実行ファイルが無い）ときはaskを開かず、控えの時刻ごとに確かめ直して待つ（claimの候補は`provider_unavailable`で控えられ`status`に出る）。切り替えの上限でCodexの壁から移れず、Claudeが使えるときもaskは開かず（人を待つものが無い）、Codexの控えの時刻（解ける時刻が読めればその時刻）の後に同じthreadへもう一度送る。切り替えたときは`write_prompt`がtaskのpromptを新しいproviderの文面で書き直し（Codexはsubagent reviewをしない、など）、wrapperは新しいsessionでそれを読み直す。非対話のruntimeのplannerのturnも同じ失敗で同じsessionが次の依頼を待ち、supervisorは同じ`retry_text`の`provider retry`で続けるが、providerの切り替えは無い。plannerの`provider_waiting`はrunのeventでなく、`planner_id`を持つqueueのevent（`EventKind::is_queue`、`planner_turn_events`が読む）で、Claudeの認証と利用上限ではrunもjobも名指さない控えのaskを開くか加わり（`ask_id`）、起動の失敗ではClaudeの`provider_held`を記録する（`tend_planner_walls`、[`plan` / `planners`](supervisor-lifecycle/plan-planners.md#runtimeのplannerの経路)の「使えないとき」、ADR-t1394-2決定5）。
+ - **wrapperの新しいsession**: wrapperは依頼を取るたびにrunの`actual_provider`を読み直し、変わっていればもう一方のproviderの非対話のagentで新しいsessionを始める（resumeせず、依頼の前にtaskのpromptを付ける）。sessionの状態（modelが答えたか、名乗ったthread）は最後の`provider_switched`より後のeventだけから読む（`provider_switch::since_switch`）。Claudeのsessionの名前は`turn::session_name`で、切り替えの無いrunはrunのid、切り替えの後は`<run id>/<切り替えの回数>`のSHA-256から作るUUID（Claude Codeは使われた`--session-id`を拒み、切り替えの後のsessionは新しいため）。`turn_started`に`provider`が載る。supervisorのslotのrunの写しは、切り替えたstepの後に新しいworkerになる。
+ - **対話のClaude**（決定5）: 対話のworkerのsessionの画面が認証か利用上限の壁を示したとき（最初のsessionの段の、受領の無いidleの判定とdialogの確認）、非対話のCodexが使え上限に達していなければ、`interactive_switch`がClaudeの控えのaskを開き、sessionの監視がrunを`park_live`で`needs_session`にする（`recovery_parked`に`provider_switch`（`to`・`reason`・`message`）、`instruction`が切り替えの文）。sessionは対話のsessionのまま`/exit`を頼まれ、worktreeは残る。resumeが始まるとき（`begin_resume`の後、`Supervisor::switch_parked`）にrunを非対話のCodexに切り替え（`phase: resume`。表に非対話のCodexが無いか切り替えの上限なら対話のClaudeのままresumeする。Codexがその間に控えられていれば、最初のturnが壁に当たり、両方使えないrunとしてaskで待つ）、resumeが非対話のCodexのwrapperを開いて、解消依頼（切り替えの文を理由に持つ）を新しいthreadの最初のturnにする。使えなければ今までどおり控えのaskで待つ。reviseとresumeの段の対話のsessionは切り替えない。
+ - **記録と集計**: runの`provider_switched`（`from`・`to`・`worker_mode`・`reason`・`phase`（`start` / `answer` / `revise` / `resume` / `nudge`）・`turn`・`count`・`message`）は`show`と`events`に出る。`timeline`は`requested_provider`・`actual_provider`・`worker_mode`と`provider_switches`（切り替えごとのpayloadに`event_id`と`at`）を出す。`stats`の`provider_switches`は窓の切り替えの`count`・`runs`・`by_reason`・`by_direction`（`<from>-><to>`）・`by_phase`と、Codexの控えの`holds_by_reason`を出す。runごとには、`stats`の`runs`が`provider`（requested）・`actual_provider`（最後の`provider_switched`の`to`、無ければclaimの`provider`）・`provider_switches`（切り替えの回数）と、`turns.by_provider`（`turn_finished`の`provider`ごとのturnの数・失敗・時間・トークン数）を出し、`versions`の`provider`の群と`kpi`の`provider=`の層はactualのproviderで数える（task 898。[stats](supervisor-lifecycle/stats.md)・[kpi](supervisor-lifecycle/kpi.md)）。
+diff --git a/docs/design/supervisor-lifecycle/draft-planners.md b/docs/design/supervisor-lifecycle/draft-planners.md
+index 6327998f..548fa684 100644
+--- a/docs/design/supervisor-lifecycle/draft-planners.md
++++ b/docs/design/supervisor-lifecycle/draft-planners.md
+@@ -31,7 +31,7 @@ related:
+ 4. **3回まで**: plannerがdraftを決めずに終わった（sessionが終わった、idleで`/exit`された）draftは次のpassで再び対象になり、残りのdraft（とその間に増えた同じきっかけのdraft）で束を作り直して次のplannerが立つ。回数はdraftごとに数える（そのdraftを含む束のplannerの数、`draft_bundle_members.attempt`）。`draft_planner_opened`が`MAX_DRAFT_PLANNERS`（3）件あるdraftは（人のanswerを運ぶとき以外は）束から外して`draft_planner_exhausted`（`planners`、`ask_id`、`reason`）を記録し、束の残りで立てる。attentionは`request a plan for the draft`（`AttentionNext::DecideDraft`。`status`でもdraftのまま残っているあいだ出る。`watch`も同じ文面）で、人の言葉を受けたinboxがそのdraftを参照にした計画の依頼（`dagq request add --ref task:N`、[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)の決定8）を記録し、依頼のruntimeのplanner（[inboxからの計画の依頼](plan-planners.md#inboxからの計画の依頼)）が決めるか、人が`DAGQ_ROLE`の無い自分のterminalで決める。
+ 5. **planner_question**（ADR-0044の決定13）: askのkindに`planner_question`を足した（CLIの`ask --kind`で作れる）。束の中でも`--task ID`でdraftごとに開く。`answer`は`planner_answer_route`で行き先を決め、`Person`以外なら`ask_answered`に`runtime_delivers: true`を書いてattentionにしない（`status`は`delivering the answer of ask N (runtime)`）。行き先は、(a) そのtaskで働く閉じていないruntimeのplanner（draftを持つ束のplannerか、taskのproposalのplanner）: supervisorがplannerの`idle`（idle markerがaskより新しい）を待ち、打ち込む前に`claim_planner_answer`で配送をclaimしてから（task 406。`BEGIN IMMEDIATE`で、askが未closeで行き先が今もそのplannerであり、同じaskの`planner_answer_claimed`が`PLANNER_ANSWER_CLAIM_SECS`（120秒）以内に無いことを確かめ、`planner_answer_claimed`（`ask_id`、`planner_id`、`workspace_id`、`claimed_at`）をtaskに書く。revise の`claim_revise`と同じ形。claimできなければ送らない）、`answer to ask <id>: <answer>`を`submit_input`で打ち込み、`ask_delivered`でaskを閉じる。これで引き継ぎの間に同じqueueを扱う2つのsupervisorが重なっても、answerは1回しか打ち込まれない。打ち込みの失敗は今までどおり`ask_delivery_failed`（taskに記録）でinboxに任せる（claimは残るので打ち直さない）。claimの後、打ち込む前にsupervisorが落ちたaskは、claimが120秒より古くなった後の周回で別のsupervisorがclaimし直して打ち込む（打ち込みは数秒で終わるので、生きているsupervisorのclaimを奪わない）。(b) plannerが居ないdraft: 上限の中で新しいplannerを立て（そのdraftを先頭に、同じ束の鍵で対象のdraftを束に加える。同じ鍵の束のplannerが開いていれば、それが終わるまで待つ）、初期promptに元の質問とanswerを載せ（先頭のdraftの`draft_planner_opened`の`ask_id`）、askを閉じる。(c) `keep_draft`のanswerでplannerが居ない、またはdraftが先に進んだ（submit、cancel）: supervisorが`planner_answer_closed`（`ask_id`、`reason`）でaskを閉じる。`keep_draft`で残したdraftにはruntimeのplannerを立て直さず、人の言葉を受けたinboxがそのdraftを参照（`--ref task:N`）にした計画の依頼を記録するまでdraftのまま待つ（`PLANNER_QUESTION_OPTIONS`のdoc comment、draftのplannerのpromptの3の`keep_draft`の説明）。(d) それ以外（出どころの無いtask、使い切ったdraft）: inboxが届ける（`send the answer of ask N to the worker and close it`）。closeされていない`planner_question`（束のどれかのdraftについて）があるplannerと、そのworkspaceに打ち込んだanswer（`ask_delivered`）の後にまだidleになっていないplannerには`/exit`を送らない（打ち込まずに閉じたaskは引き止めない。`question_wait`）。打ち込みの後かは、打ち込む前に取った配送のclaimの時刻（`planner_answer_claimed`の`claimed_at`）と`idle_since`で決め、`idle_since`がclaimの秒以下なら答えをまだ読んでいない。askの`closed_at`（打ち込みの後に`ask_delivered`が書く）とは比べない: answerを読んで仕事を終え、askのcloseより前にidleになったplannerを答えの処理中とみなして`/exit`せず、`--runtime-planners`の枠をふさいだため（task 884。2026-09-27のask 150とplanner 338）。(b)で初期promptに載せたanswerはplannerを立てた時刻と比べる。plannerが自分で作ったaskはplannerがaskの後に止まってから、他の人が作ったaskはplannerがidleなら打ち込む。
+ 6. **採用の記録と上限**（`submit`の中、[persistence](../persistence.md)）: submitが出どころのあるdraftを初めて出すとき`follow_up_adopted`（goal_gapとreopenedは`draft_adopted`。`task_id`、`origin`、`source_task_id`、`source_run_id`、`by: "planner" | "person"`、`ask_id`、`depth`、`planner_id`（draftを持つ生きている束のplanner）、`bundle_key`と出どころの欄）を書く。上限はdraftごとで、束の中の1件が人の`adopt`を要しても、他のdraftは出せる。runtimeのplanner（`DAGQ_PLANNER_ORIGIN=runtime`）は、goalが閉じているか無い、または`follow_up_depth`が`FOLLOW_UP_ASK_DEPTH`（3、[ADR-t808-1](../../adr/2026-09-28-t808-1-runtime-planners-submit-follow-ups-up-to-depth-two.md)）以上のfollow_upのdraft（深さ2まではgoalが開いていれば人を経ずにsubmitできる）を、そのdraftへの`planner_question`（旧`follow_up`）に人が`adopt`と答えていなければsubmitできない（errorで`planner_question`を促す）。人のsubmit（origin `person`: 廃止前に人が`dagq plan`で開いたplannerか、人が`DAGQ_ROLE`の無い自分のterminalで打った`submit`）、人の`adopt`を経たsubmit、`ready --bypass-review`は深さを0に戻す。
+-7. **終わり**: runtimeのplannerは束のdraftをsubmitしたか、cancelしたか、`keep_draft`で残したら（決めずに残したものがあっても）、idleになったところで`/exit`され、終わったworkspaceは閉じられる（[Plan review (supervisor)](plan-review.md#plan-review-supervisor)の`end_runtime_planners`）。idleはStop hookのidle markerで判断し、markerが書けなかった（ディスク満杯などでhookが失敗した）ときや最後の入力より古いときは画面からの推定で判断するので（ADR-t803-1、[画面からのidleの推定](receipt-and-session-exit.md#画面からのidleの推定)）、markerが無くても仕事を終えたplannerは`/exit`される。画面にbackgroundの処理の表示（`1 shell`など）があるうちは、markerの`running`と同じく`working`として`/exit`を送らず、表示が消えてから推定でidleになったところで送る（task 823）。`planner_question`のanswerを打ち込まれたplannerも、それを読んでidleになれば（5）`/exit`される。持ち主の居ないreviseが上限で`--planner-timeout`を過ぎて待つときは、人の答えを待っていないidleのplannerが`/exit`されて枠を空ける（`planner_released`。[Plan review (supervisor)](plan-review.md)の9）。画面も読めないまま`--planner-timeout`（既定3600秒）のあいだ入力・marker・推定のidleのどれも見えなければ、plannerごとに1回`planner_unresponsive`（`subject: "planner"`、`draft_task_id`）がinboxに届き、attention `check the planner`が束の最も古いdraftのtaskに出る。束のplannerも1つで1回で、plannerは閉じない（[Planner sessions](plan-planners.md)の「runtimeのplannerの時間切れ」、task 805）。submitしたproposalはplan reviewを通り、reviseは持ち主（閉じていれば新しいruntimeのplanner）に返る。
++7. **終わり**: runtimeのplannerは束のdraftをsubmitしたか、cancelしたか、`keep_draft`で残したら（決めずに残したものがあっても）、idleになったところで`/exit`され、終わったworkspaceは閉じられる（[Plan review (supervisor)](plan-review.md#plan-review-supervisor)の`end_runtime_planners`）。idleはStop hookのidle markerで判断し、markerが書けなかった（ディスク満杯などでhookが失敗した）ときや最後の入力より古いときは画面からの推定で判断するので（ADR-t803-1、[画面からのidleの推定](receipt-and-session-exit.md#画面からのidleの推定)）、markerが無くても仕事を終えたplannerは`/exit`される。画面にbackgroundの処理の表示（`1 shell`など）があるうちは、markerの`running`と同じく`working`として`/exit`を送らず、表示が消えてから推定でidleになったところで送る（task 823）。`planner_question`のanswerを打ち込まれたplannerも、それを読んでidleになれば（5）`/exit`される。持ち主の居ないreviseが上限で`--planner-timeout`を過ぎて待つときは、人の答えを待っていないidleのplannerが`/exit`されて枠を空ける（`planner_released`。[Plan review (supervisor)](plan-review.md)の9）。対話のplannerで、画面も読めないまま`--planner-timeout`（既定3600秒）のあいだ入力・marker・推定のidleのどれも見えなければ、plannerごとに1回`planner_unresponsive`（`subject: "planner"`、`draft_task_id`）がinboxに届き、attention `check the planner`が束の最も古いdraftのtaskに出る。束のplannerも1つで1回で、plannerは閉じない（[Planner sessions](plan-planners.md)の「runtimeのplannerの時間切れ」、task 805）。非対話のplanner（`route: headless`）は画面を読まず、idleはwrapperがturnの終わりに書くidle markerで判じ、この期限でも見ない: wrapperがturnを`[stall]`の上限で止めたときに、plannerごとに1回`planner_unresponsive`（`subject: "planner"`、`draft_task_id`、`route`・`turn`・`outcome`）が届き、止めたturnでsessionが終わるので、plannerは`runtime_exited`で閉じられ、決めずに終わったplannerに数える（`tell_of_stopped_planner_turns`）。最後のturnがClaudeのログイン切れ・利用上限・起動の失敗で終わった非対話のplannerは、Claudeを待って`/exit`されず、決めずに終わったplannerにも数えない（`provider_wall`）。どちらも[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)の「状態」と「使えないとき」。submitしたproposalはplan reviewを通り、reviseは持ち主（閉じていれば新しいruntimeのplanner）に返る。
+ 8. **記録と読み方**（ADR-t807-1）: plannerの行が閉じるとき（`close_planner`）、束のdraftごとの結末（`submitted`（proposal）、`canceled`、`duplicate`（重複先）、`keep_draft`、`undecided`）を`draft_bundle_members`に書き、draftに`draft_planner_settled`を記録する。出どころのあるdraftの`draft_planner_opened`・`draft_planner_settled`・`follow_up_adopted` / `draft_adopted`・`draft`からのcancelの`task_status_changed`は、束の鍵（`bundle_key`）と出どころの欄（`source_task_id`・`source_run_id`・`index`・`category`・`goal_review_id`・`reviewed_proposal_id`のうち材料にあるもの）を載せ、`events --task ID`と、payloadの`source_run_id`も見る`events --run RUN`で、元のrunから各draftの結末まで引ける。`dagq show ID`（`--full`でなくても）はtaskの`origin`（種類、material、元のtaskとrun、receiptの`follow_ups`の何番目か、束の鍵、そのdraftを持った束ごとのplannerと他のdraftと結末。人が`add`したtaskとobserverのdraft goalのtaskはnull。導入前のdraftも`draft_origins`の行があれば出す）と、元のtaskなら`follow_up_drafts`（そのrunのreceiptが出したdraftのIDと今の状態）を出す。`dagq planners`はruntimeのplannerの`bundle`（鍵とdraftと結末）を出す。`dagq stats`の`draft_flow`は窓の中の`bundles`（`draft_planner_opened`の`planner_id`の数）と`bundle_sizes`（draftの数ごとの束の数）を出す。
+ 9. **test**: `tests/it/plan_review.rs`がcmuxのdoubleで、follow_upとgoal_gapのdraftに上限の中で古い順にplannerが立ち、人のdraftには立たないこと、promptの中身、決めたplannerの`/exit`、決めずに終わったplannerの後に次のplannerが立ち3回で`draft_planner_exhausted`とattentionになること、`planner_question`のanswerが生きているplannerに打ち込まれ（`planner_answer_claimed`が1件）、別のsupervisorがclaimしたanswerは2回目のclaimが拒まれて打ち込まれず、古くなったclaimは引き継がれて1回だけ打ち込まれ、plannerの居ないdraftでは新しいplannerがanswerを持って立ち、`keep_draft`は閉じられること、を確かめる。`tests/it/planner_slots.rs`は、answerを打ち込んだ後でaskのcloseより前にidleになったplannerが`/exit`されて行が閉じ、打ち込みより前のidleのplannerは残ることを確かめる（task 884）。`tests/it/draft_bundles.rs`は束（ADR-t807-1）を確かめる: 1つのrunのfollow_ups 3件にplannerが1つだけ立ちpromptに3件と元のtaskが1回載ること、別のrunのfollow_upとgoal_gapが別の束になること、作業中に増えた同じrunのfollow_upが待つこと、一部だけ決めて終わった束の結末（`duplicate`・`submitted`・`undecided`）と残りと増えた分で次の束が立ちdraftごとに3回目の後に`draft_planner_exhausted`になること、深さ3のdraftは束の中でも人の`adopt`無しにsubmitできないこと、`show`の`origin`・`follow_up_drafts`、`planners`の`bundle`、`events --run`、`stats`の`bundles` / `bundle_sizes`、束の2件目のdraftへの`planner_question`のanswerが束のplannerに打ち込まれること。`src/domain/follow_up.rs`のunit testが鍵の分け方を、`src/domain/stats/drafts.rs`のunit testが束の数え方を確かめる。`tests/it/runtime_ask.rs`は`register_follow_ups`の出どころ、runtimeのplannerのsubmitの上限と人の`adopt`の後のsubmit、`status`の表示を、`tests/it/queue_migration.rs`は導入前のfollow_upのdraftがmigrationで対象になることを確かめる。reopenedは、`src/infrastructure/draft_planners.rs`のunit testがwithdrawでreopenのmemberにだけ出どころが付き他のmemberには付かないこと、`tests/it/plan_review.rs`の`a_withdrawn_reopen_gets_a_planner_of_the_runtimes_with_the_reason`がplan reviewのreopen・withdrawの後にplannerが立ち、promptにreasonと3択が載り、readyにならないことを確かめる。
+ 
+@@ -54,7 +54,7 @@ related:
+ 
+ ## 人のplannerの廃止と非対話の経路（ADR-t1394-1の`dagq plan`の拒否とADR-t1394-2の経路は実装済み）<a id="予定-人のplannerの廃止と非対話の経路"></a>
+ 
+-[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)と[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)（goal 87）。人が開くplannerは廃止した（ADR-t1394-1）: `dagq plan`は何も開かず、inboxへの計画の依頼の案内を付けて拒み（task 1399）、計画の依頼のruntimeのplannerはtask 1395で実装した。廃止前から開いている人のplannerは、今はADR-t1394-1決定9のとおり終わるまで動いてsupervisorが閉じる。それを閉じた行として扱いcmuxを呼ばないこと（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定5、goal 92）だけが**まだ実装していない**。非対話の経路（ADR-t1394-2の決定1・2）は実装した。綴りは仮で、残りの予定は[予定: inboxからの依頼と非対話のplanner](plan-planners.md#予定-inboxからの依頼と非対話のplanner)にある。
++[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)と[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)（goal 87）。人が開くplannerは廃止した（ADR-t1394-1）: `dagq plan`は何も開かず、inboxへの計画の依頼の案内を付けて拒み（task 1399）、計画の依頼のruntimeのplannerはtask 1395で実装した。廃止前から開いている人のplannerは、今はADR-t1394-1決定9のとおり終わるまで動いてsupervisorが閉じる。それを閉じた行として扱いcmuxを呼ばないこと（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定5、goal 92）だけが**まだ実装していない**。非対話の経路（ADR-t1394-2の決定1・2・3・5）は実装した（task 1396・1397）: answerは次のturnの依頼として届き、読み終えたかはその依頼を取ったturnの`turn_finished`で判じ（`headless_answer_taken`）、最後のturnがClaudeのログイン切れ・利用上限・起動の失敗で終わってClaudeを待つplanner（`busy`の`provider_wall`）は終わらせず、控えが解けて続きの`provider retry`のturnが終わるまでanswerを置かない（[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)）。綴りは仮で、残りの予定は[予定: inboxからの依頼と非対話のplanner](plan-planners.md#予定-inboxからの依頼と非対話のplanner)にある。
+ 
+ - **人が開いたplannerからのsubmit、の行き先**: 4の`draft_planner_exhausted`のattentionと5の`keep_draft`で残したdraftの行き先は、inboxの参照付きの依頼か人の自分のterminalに変えた（実装済み、4と5）。6の「人が開いたplannerからのsubmit」は、人が開くplannerの廃止（`dagq plan`は拒む）で、廃止前に開いた人のplannerのsubmitのほかは、依頼のruntimeのplannerのsubmitか、人が`DAGQ_ROLE`の無い自分のterminalで打つ`submit`になった。依頼のplannerはruntimeのplannerなので、6の自動で採用しない上限は効き、上限のdraftは`planner_question`の`adopt`を経る。人のterminalからのsubmitは「人が開いたplanner」と同じく人の判断を経たものとして扱う（`by: "person"`、深さを0に戻す）。
+ - **非対話の経路**（実装済み、task 1396）: draftのplannerも`[roles.runtime_planner]`の経路に従う。非対話のplannerでは、5の答えの打ち込みと7の`/exit`が次のturnの依頼と終了の依頼になり（`Supervisor::send_to_planner`）、7のidleはStop hookのmarkerと画面からの推定でなくturnの終わりのidle markerで判断する。束・3回の上限・結末の記録（8）は変えない（[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)）。予定（goal 92）: [ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定3・[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)決定1で経路を選ぶことは無くなり、draftのplannerは非対話でbackgroundのwrapperだけで動く（`[roles.runtime_planner]`の`route`は受け付けて無視する）。
+diff --git a/docs/design/supervisor-lifecycle/finding-planners.md b/docs/design/supervisor-lifecycle/finding-planners.md
+index 77a0dd71..52621a18 100644
+--- a/docs/design/supervisor-lifecycle/finding-planners.md
++++ b/docs/design/supervisor-lifecycle/finding-planners.md
+@@ -32,7 +32,7 @@ related:
+ 7. **終わったproposal**（`settle_findings`、各passで立てる前）: `proposed`のfindingの紐づいたproposalが`canceled`になったか、そのtaskがすべて`completed` / `canceled`になったら、1つ以上`completed`なら`resolved`（`its proposal ended: N of M tasks completed`）、1つも無ければ`open`に戻す（`every task of its proposal was canceled` / `its proposal was canceled`）。`open`に戻すときは`proposal_id`と印を消すので、もう一度proposalにするには新しい印が要る。`finding_status_changed`は`proposal_id`と`by: runtime`を持つ。
+ 8. **3回まで**: plannerがfindingを決めずに終わった（sessionが終わった、idleで`/exit`された）findingは次のpassで再び対象になる。今の印の後に立てたplannerが`MAX_FINDING_PLANNERS`（3）件あるfindingは（人のanswerを運ぶとき以外は）立てずに`finding_planner_exhausted`（`finding_id`、`planners`、`marked_at`、`reason`）を記録する。attentionは`request a plan for the finding`（`AttentionNext::DecideFinding`。kind `finding_planner_exhausted`、findingの対象のtask / run、`last_error`に`finding N: <summary>`。印のある`open`のあいだ`status`に出る。`watch`も同じ文面）で、人の言葉を受けたinboxがそのfindingを参照にした計画の依頼（`dagq request add --ref finding:N`、[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)の決定8）を記録し、依頼のruntimeのplanner（[inboxからの計画の依頼](plan-planners.md#inboxからの計画の依頼)）が決めるか、人が`DAGQ_ROLE`の無い自分のterminalで`submit --finding`するか`finding dismiss`する。
+ 9. **planner_question**: `planner_question`は`--finding ID`を持てる（taskもrunも無くてよい。`NewAsk::validate`と`check_ask_kind`）。answerの行き先（`planner_answer_route`）はfindingで決める: runtimeのplannerが一度も立っていないfindingなら人（runtimeのplanner以外の質問。廃止前に人が開いたplannerのものなど）。閉じていないそのfindingのruntimeのplannerがあれば、plannerが自分で作ったaskはplannerがaskの後にidleになってから、他の人が作ったaskはplannerがidleなら、draftと同じく`claim_planner_answer`で配送を取ってから（`planner_answer_claimed`はfindingの対象に付く）`answer to ask <id>: <answer>`を打ち込み`ask_delivered`で閉じる。無ければ、findingがまだ対象（`open`、印あり、使い切っていない）なら上限の中で新しいplannerがanswerを持って立ち、そうでなければsupervisorが`planner_answer_closed`で閉じる。打ち込みの失敗は`ask_delivery_failed`（findingの対象に記録）でinboxに任せる。askとanswerの配送のevent（`ask_opened`・`ask_answered`・`ask_delivered`・`ask_delivery_failed`・`planner_answer_closed`）は、queueが対象のfindingではqueueのeventになる（`EventKind::is_queue`）。
+-10. **終わり**: runtimeのplannerは、closeされていない自分のfindingの`planner_question`があるあいだと、打ち込んだanswerの後にまだidleになっていないあいだは`/exit`されない。それ以外でidleになれば`/exit`され、終わったworkspaceは閉じられる（`end_runtime_planners`）。idleは印が無くても画面から推定するが（ADR-t803-1）、画面も読めないまま`--planner-timeout`（既定3600秒）のあいだ入力・marker・推定のidleのどれも見えなければ、plannerごとに1回`planner_unresponsive`（`subject: "planner"`、`finding_id`）がinboxに届き、attention `check the planner`が出る。`planner_question`を待っているあいだは数えない。plannerは閉じない（[Planner sessions](plan-planners.md)の「runtimeのplannerの時間切れ」、task 805）。
++10. **終わり**: runtimeのplannerは、closeされていない自分のfindingの`planner_question`があるあいだと、打ち込んだanswerの後にまだidleになっていないあいだは`/exit`されない。それ以外でidleになれば`/exit`され、終わったworkspaceは閉じられる（`end_runtime_planners`）。対話のplannerのidleは印が無くても画面から推定するが（ADR-t803-1）、画面も読めないまま`--planner-timeout`（既定3600秒）のあいだ入力・marker・推定のidleのどれも見えなければ、plannerごとに1回`planner_unresponsive`（`subject: "planner"`、`finding_id`）がinboxに届き、attention `check the planner`が出る。`planner_question`を待っているあいだは数えない。plannerは閉じない（[Planner sessions](plan-planners.md)の「runtimeのplannerの時間切れ」、task 805）。非対話のplanner（`route: headless`）は画面を読まず、idleはwrapperがturnの終わりに書くidle markerで判じ、この期限でも見ない: wrapperがturnを`[stall]`の上限で止めたときに、plannerごとに1回`planner_unresponsive`（`subject: "planner"`、`finding_id`、`route`・`turn`・`outcome`）が届き、止めたturnでsessionが終わるので、plannerは`runtime_exited`で閉じられ、決めずに終わったplannerに数える（`tell_of_stopped_planner_turns`）。最後のturnがClaudeのログイン切れ・利用上限・起動の失敗で終わった非対話のplannerは、Claudeを待って`/exit`されず、決めずに終わったplannerにも数えない（`provider_wall`）。どちらも[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)の「状態」と「使えないとき」。
+ 11. **改善の上限**（ADR-0051の決定25、task 433）: 動いている改善（`ImprovementLimit`、`SqliteQueue::improvements`）は、`findings.proposal_id`が指す別々のproposalで持ち主がruntimeのplanner（`owner_origin: runtime`）のもののうち`finding::improvement_running`（`settle`がまだ決めない: `canceled`でなく、終わっていないtaskがある）のものと、閉じていないruntimeのplannerのうちfindingが`open`のもの（submitすればfindingが`proposed`になり、そのproposalの方を数える）の合計。ADR-0051の決定25は数え方をproposalで書くが、runtimeのplannerも数えるのは、同時に立ったplannerがそれぞれsubmitして上限を超えないため（決定25の「plannerがすでに立った後に上限を超えることはない」）。上限は`dagq.toml`の`[kpi]`の`max_improvement_proposals`（既定2、host.tomlでは変えない。supervisorは`Ports::max_improvement_proposals`で毎回読み直し、読めなければ既定値でwarnを出す）。合計が上限以上のあいだ、`open_finding_planner`は（人のanswerを運ぶとき以外は）plannerを立てず、findingは`open`のまま待つ。eventは書かない。人のanswerを運ぶplannerは、質問したplannerが数えられていたことと人の判断であることから上限を超えて立つ。人が`submit --finding`したproposal（持ち主が`person`: 廃止前に人が`dagq plan`で開いたplannerか、人が`DAGQ_ROLE`の無い自分のterminalで打った`submit`。runtimeのproposalを人が出し直すと持ち主が替わり、数えなくなる）とfollow_upのdraftの採否は数えず止めない。`dagq findings`は`improvements`（`running`・`limit`・`reached`・`waiting`: 上限に達しているときの対象のfindingの`finding_id`と`reason: improvement_limit`）を返し、observerの入力にも同じものが載る。
+ 12. **test**: `tests/it/finding_planner.rs`がcmuxのdoubleとstubのplan reviewで、印のあるfindingにだけplannerが1つ立ち（次のpass、上限を上げたpass、直接の`open_finding_planner`でも2つ目は立たない）、promptの中身、plannerのworkspaceからのsubmitでfindingが`proposed`になりproposalに紐づくこと、他のproposalで`proposed`のfindingを名指したsubmitの失敗、plan reviewのpassでtaskが`ready`になりplannerに`/exit`が送られること、taskのcancelでfindingが印なしの`open`に戻ること、`blocked`のaskのoptionsと`propose` / `dismiss`のanswerの適用（askが閉じ、attentionにならない）、`stalled`のaskの`propose`でfindingが作られること、findingへの`planner_question`のanswerがplannerに打ち込まれること、決めずに終わったplannerの後に次が立ち3回で`finding_planner_exhausted`とattentionになること、人の`submit --finding`でそれが消えることを確かめる。`improvement_planners_wait_at_the_limit_and_their_tasks_are_normal_at_most`は、`dagq.toml`の上限1で2つ目のfindingにplannerが立たず（直接の`open_finding_planner`は`AtLimit`）、`improvements_of`が待つfindingを出し、submitした`high`のtaskがplan reviewのpassで`normal`に下がり（`by: plan_review`）、proposalが終わるまで待ち、終われば立ち、人が`submit --finding`したproposalは数えないことを確かめる。規則は`src/domain/finding.rs`のunit test。
+ 
+@@ -42,7 +42,7 @@ related:
+ 
+ ## 人のplannerの廃止と非対話の経路（ADR-t1394-1の`dagq plan`の拒否とADR-t1394-2の経路は実装済み）<a id="予定-人のplannerの廃止と非対話の経路"></a>
+ 
+-[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)と[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)（goal 87）。人が開くplannerは廃止した（ADR-t1394-1）: `dagq plan`は何も開かず、inboxへの計画の依頼の案内を付けて拒み（task 1399）、計画の依頼のruntimeのplannerはtask 1395で実装した。廃止前から開いている人のplannerは、今はADR-t1394-1決定9のとおり終わるまで動いてsupervisorが閉じる。それを閉じた行として扱いcmuxを呼ばないこと（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定5、goal 92）だけが**まだ実装していない**。非対話の経路（ADR-t1394-2の決定1・2）は実装した。残りの予定は[予定: inboxからの依頼と非対話のplanner](plan-planners.md#予定-inboxからの依頼と非対話のplanner)にある。
++[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)と[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)（goal 87）。人が開くplannerは廃止した（ADR-t1394-1）: `dagq plan`は何も開かず、inboxへの計画の依頼の案内を付けて拒み（task 1399）、計画の依頼のruntimeのplannerはtask 1395で実装した。廃止前から開いている人のplannerは、今はADR-t1394-1決定9のとおり終わるまで動いてsupervisorが閉じる。それを閉じた行として扱いcmuxを呼ばないこと（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定5、goal 92）だけが**まだ実装していない**。非対話の経路（ADR-t1394-2の決定1・2・3・5）は実装した（task 1396・1397）: answerは次のturnの依頼として届き、読み終えたかはその依頼を取ったturnの`turn_finished`で判じ（`headless_answer_taken`）、最後のturnがClaudeのログイン切れ・利用上限・起動の失敗で終わってClaudeを待つplanner（`busy`の`provider_wall`）は終わらせず、控えが解けて続きの`provider retry`のturnが終わるまでanswerを置かない（[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)）。残りの予定は[予定: inboxからの依頼と非対話のplanner](plan-planners.md#予定-inboxからの依頼と非対話のplanner)にある。
+ 
+ - 8の`finding_planner_exhausted`のattentionの行き先は、inboxの参照付きの依頼か人の自分のterminalに変えた（実装済み、8）。9の「runtimeのplannerが一度も立っていないfindingのanswerは人（人が開いたplannerの質問）」は、人が開くplannerの廃止（`dagq plan`は拒む）で廃止前に開いたplannerの質問だけになり、新しくは、inboxがそのfindingを参照（`--ref finding:N`）にした計画の依頼を記録し、依頼のplannerが`submit --finding`か`finding dismiss`で決める経路になる。人が`DAGQ_ROLE`の無いterminalで打つ`submit --finding` / `finding dismiss`は残る。依頼のplannerがsubmitしたproposalは、依頼とfindingの両方に結ばれる。
+ - findingのplannerも`[roles.runtime_planner]`の経路に従う（実装済み、task 1396。[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)）。非対話では、9の答えの打ち込みと10の`/exit`が次のturnの依頼と終了の依頼になり（`Supervisor::send_to_planner`）、idleはturnの終わりで判断する。11の改善の上限は変えない（依頼のplannerはfindingを持たないかぎり改善に数えない）。予定（goal 92）: [ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定3・[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)決定1で経路を選ぶことは無くなり、findingのplannerは非対話でbackgroundのwrapperだけで動く（`[roles.runtime_planner]`の`route`は受け付けて無視する）。
+diff --git a/docs/design/supervisor-lifecycle/headless-worker.md b/docs/design/supervisor-lifecycle/headless-worker.md
+index 359e7e56..f48ca012 100644
+--- a/docs/design/supervisor-lifecycle/headless-worker.md
++++ b/docs/design/supervisor-lifecycle/headless-worker.md
+@@ -83,7 +83,7 @@ workspaceのterminalにはwrapperがturnの要約（turnの開始、agentの文
+ 
+ ## wrapperがturnを止めるとき
+ 
+-wrapperはturnの出力を`turn_*.jsonl`から読みながら（wait interval、既定1秒ごと）、次のどれかでturnを止める。止めるときは、先にturnのprocessの子孫をpidで集め（`ProcessControl::descendants`）、turnのprocess groupにSIGKILLを送り（`Spawned::kill_group`）、集めた子孫にも1つずつpidでSIGKILLを送る（`headless_session.rs`の`stop_turn`、task 1085）。Codexは実行するコマンドをcodexと別のprocess group（pgidがコマンド自身のpid）で走らせるので、groupへのsignalだけではコマンド（`cargo test`など）が親1のまま残る（task 1061の測定、[codex-headless-jobs-spike](../../plans/codex-headless-jobs-spike.md)の4.）。Claude Code（2.1.285）もBash toolの1回ごとにshellを別のprocess group（pgidがそのshellのpid）で起動し、turnのgroupには`claude`自身しか居ないので、groupへのSIGKILLだけではtoolのshellとその子が親1のまま残る（task 864の測定、[manual-smoke](../manual-smoke.md#非対話の-claude-の前提の確認)の1.）。子孫はgroupを止める前に集める（止めた後は親が1になって辿れない）。signalはSIGINTでなくSIGKILLにする: 子孫をpidで直接止めるのでproviderに片付けを任せる必要がなく、応答しないproviderを待たない。Claudeの非対話のturnにも同じ経路を使う。
++wrapperはturnの出力を`turn_*.jsonl`から読みながら（wait interval、既定1秒ごと）、次のどれかでturnを止める。止めるときは、先にturnのprocessの子孫をpidで集め（`ProcessControl::descendants`）、turnのprocess groupにSIGKILLを送り（`Spawned::kill_group`）、集めた子孫にも1つずつpidでSIGKILLを送る（`headless_session.rs`の`stop_turn`、task 1085）。Codexは実行するコマンドをcodexと別のprocess group（pgidがコマンド自身のpid）で走らせるので、groupへのsignalだけではコマンド（`cargo test`など）が親1のまま残る（task 1061の測定、[codex-headless-jobs-spike](../../plans/codex-headless-jobs-spike.md)の4.）。Claude Code（2.1.285）もBash toolの1回ごとにshellを別のprocess group（pgidがそのshellのpid）で起動し、turnのgroupには`claude`自身しか居ないので、groupへのSIGKILLだけではtoolのshellとその子が親1のまま残る（task 864の測定、[manual-smoke](../manual-smoke.md#非対話の-claude-の前提の確認)の1.）。子孫はgroupを止める前に集める（止めた後は親が1になって辿れない）。signalはSIGINTでなくSIGKILLにする: 子孫をpidで直接止めるのでproviderに片付けを任せる必要がなく、応答しないproviderを待たない。Claudeの非対話のturnにも同じ経路を使う。groupが無い（`ESRCH`）か、turnのprocessが終わって刈り取られる前で、groupにzombieしか居ないためにmacOSが拒んだ（`EPERM`）ときは、止めるものが無いとして失敗にしない（turnが壁を言った直後に自分で終わっていると、wrapperが止める時点でzombieになっている。task 1397）。
+ 
+ | 理由 | `outcome` | 条件 |
+ | --- | --- | --- |
+@@ -160,12 +160,13 @@ task 1372（goal 86の暫定の対応）。2026-09-30T08:42にtask 681・695の
+ 
+ - **持ち主ごとの違い**（`TurnOwner`）: 依頼と`turns/`と`prompt.txt`とidle markerはplannerのディレクトリ（`<queue dir>/planners/<id>/`）、turnの作業ディレクトリはrepositoryのcheckout、turnのeventはrunでなくqueueのevent（`turn_requested` / `turn_started` / `turn_finished` / `turn_session_identified`をqueueの種類に足し、payloadの`planner_id`で名指す。読むのは`planner_turn_events`）、heartbeatは`heartbeat_planner`、turnのagentは`register_planner_agent`で毎turn登録する。providerはClaudeだけで切り替えない（ADR-t1394-2決定5）。sessionの名前は`planner_session_name`（plannerのディレクトリと開いた時刻から作るUUID。同じIDのplannerを作り直したqueueと共有しない）。modelとeffortは開く側が決めたもの（wrapperのargvの`--model` / `--effort`）。sccacheの扱いとqueue serviceのtokenは無い（plannerの`dagq`はqueueを自分で開く）。
+ - **turnのcommand**: `AgentProvider::turn_command`は`TurnTarget`（actorのrole・ディレクトリ・作業ディレクトリ・debug log・plugin dir）を取り、runのturnは`TurnTarget::of_run`、plannerのturnは`SessionAgent::PlannerTurn`（roleは`planner`、debug logは`claude.log`、`--plugin-dir`を足す）。providerにplanner固有の分岐は無い（決定6）。Claudeのsettings（`claude-headless-settings.json`）の`permissions.deny`はplannerのroleのもの。
+-- **初期promptが最初のturn**。reviseの指摘（`plan_revise_sent`の配送）・`planner_question`のanswer（draftとfindingのplanner）・`end_runtime_planners`と`release_runtime_planner`の`/exit`は、`Supervisor::send_to_planner`が打ち込みでなく`turns/`への依頼（`what`は`revise` / `answer of ask <id>`）と終了の依頼にする。依頼の前に`supervisor-input.json`の印を書くので、それより古いidle markerは使われない。
+-- **状態**（`planner_view`）: 非対話のplannerには画面を読まない。wrapperがturnの終わりに書くidle markerが最後の入力より新しければ`idle`、無いか古ければ`working`。生死はworkspace（またはbackgroundのhandle）とwrapperで、対話と同じ`PlannerSession::state`。
++- **初期promptが最初のturn**。reviseの指摘（`plan_revise_sent`の配送。生きている持ち主のplannerへのもの）・`planner_question`のanswer（draft・finding・依頼のplanner）・Claudeが使えなかったturnの続き（`provider retry`）・`end_runtime_planners`と`release_runtime_planner`の`/exit`は、`Supervisor::send_to_planner`が打ち込みでなく`turns/`への依頼（`what`は`revise` / `answer of ask <id>` / `provider retry`）と終了の依頼にする。依頼の前に`supervisor-input.json`の印を書くので、それより古いidle markerは使われない。
++- **状態**（`planner_view`）: 非対話のplannerには画面を読まない。wrapperがturnの終わりに書くidle markerが最後の入力より新しければ`idle`、無いか古ければ`working`。生死はworkspace（またはbackgroundのhandle）とwrapperで、対話と同じ`PlannerSession::state`。届けたanswerを読み終えたかは、その依頼を取ったturnの`turn_finished`で判じる（`headless_answer_taken`）。`--planner-timeout`の時間切れ（`tell_of_silent_planners`）は当てず、wrapperがturnを`[stall]`の上限で止めたとき（markerの`outcome`が`silent` / `timed_out`）にplannerごとに1回`planner_unresponsive`（`subject: "planner"`）を出す（`tell_of_stopped_planner_turns`。掃除が先に行を閉じたときも出す。ADR-t1394-2決定3）。
++- **使えないとき**（ADR-t1394-2決定5、`tend_planner_walls`）: 最後のturnがClaudeのログイン切れ・利用上限・起動の失敗で終わったidleのplannerは、終わらせず（`busy`の`provider_wall`）決めずに終わった回数にも数えない。最初に見たときqueueの控えのask（ログイン切れと利用上限）かClaudeの`provider_held`（起動の失敗）を開き、queueのevent `provider_waiting`（`planner_id`付き。`planner_turn_events`が読む）を残す。控えが解けたら、失敗したturnが取った依頼を載せた続き（workerと同じ`retry_text`）を`provider retry`の依頼として置く。待つあいだはreviseとanswerも置かない。詳しくは[`plan` / `planners`](plan-planners.md#runtimeのplannerの経路)の「使えないとき」。
+ - **起動の前**: `prepare_planner_turns`が`turns/limits.json`（`[stall]`のturnの上限）を書き、前のDBの同じIDのplannerが残した取られていない依頼と終了の依頼を捨てる。
+ - **wrapperの置き場所**: `[headless] wrapper`が`background`なら、`ActorProgram::NamedWorkspace`の`background`（`<planner dir>/session.log`）で`launch_background`に渡し、handle（`background:<pid>:<起動時刻>`）を`planners.workspace_id`に記録する。色とpillは付けない。`workspace`ならplannerのworkspaceの中でwrapperが動く（端末はturnの要約を見せるだけ）。backgroundのplannerはcmuxのworkspaceを持たないので、`dagq submit`はplannerの記録（`DAGQ_PLANNER_ID`）からhandleを読んでproposalの持ち主にする。wrapperは最初のturnの前に、行に`workspace_id`（workspaceかhandle）が記録されるまで45秒まで待つ（最初のturnのsubmitが持ち主の無いproposalにならないように）。
+ - **終わり**: 終了の依頼でwrapperはexit code 0で終わり、`planner_exited`を記録して`runner`を消す。turnが失敗か止められて終わったsessionはexit code 1で終わる。backgroundのwrapperが終わればhandleはもう無いので、agentの終了が記録された行は、supervisorの`end_runtime_planners`と掃除の`close_abandoned_planners`のどちらが閉じても`runtime_exited`になる。掃除はbackgroundのhandleをcmuxの一覧でなくprocessの識別（`exists`）で判じ、生きているwrapperの行はheartbeatが遅れても閉じない。
+ - **wrapperが死んだときのturn**（ADR-t1404-1決定3・8）: turnは自分のprocess groupで走るので、wrapperが殺されても残る。`RecordingBackend`の`left_turn`は、runの無いhandleなら`left_planner_turn`でplannerの最後の`turn_started`（`last_planner_turn`。`pid`と`start`）を読み、そのpidが記録した起動時刻のまま居れば、handleを`exists`とし、`close`でwrapperの後にそのturnを止める（`stop_left_turn`）。plannerは`lost`になり、`end_runtime_planners`がhandleを閉じてturnを止めてから行を閉じる（`runtime_lost`）。
+ - **区間と経路ごとの集計**（決定4、task 1398）: 最初の`turn_started`がkind `runtime_planner`・`route: headless`の区間を開き、`planner_closed`（または行の`close_planner`）が閉じる。稼働時間とtokenはturnから取る（[provider-lifecycle](../provider-lifecycle.md#claude-sessionの区間)）。wrapperはplannerのturnの`turn_started`に起動の`launch`（`{model, effort}`）を書く。`stats`の`sessions.by_route`と`planner_routes`、`kpi`の`session_*`の`route=`の層と`health.planner_routes`で経路ごとに読む（[stats](stats.md)、[kpi](kpi.md)）。workerの経路の集計（`domain::stats::routes`）はrunの無い`turn_finished`を数えず、plannerのturnは`planner_routes`が数える。
+-- **まだ無いもの**（goal 87の後続task）: 利用上限・認証でqueueの控えを待つこと（決定5）、ADR-t1228-1のCLI（`planner screen` / `send` / `close`）の非対話の扱い（決定7）。
+-- **test**: `tests/it/planner_headless.rs`（stubの`claude`で、reviseで開いたbackgroundの非対話のplannerが初期promptを最初のturnにして`turns/`に出力を残しturnの記録に`planner_id`を持ち、終了の依頼で終わること、draftのplannerの`planner_question`のanswerが次のturnの依頼として届くこと、wrapperを殺したplannerのturnがplannerの閉じで止まること（`the_turn_a_killed_background_planner_wrapper_left_is_stopped_as_the_planner_closes`）、掃除が生きているbackgroundのplannerをheartbeatの遅れで閉じず終わったものを`runtime_exited`で閉じること（`the_sweep_keeps_a_live_background_planner_and_closes_an_ended_one_as_exited`）、`route`の無いときと`interactive`ではworkspaceで開いて打ち込むこと、`doctor`の`route`）と`tests/it/planner_headless_stats.rs`（区間がturnから開いてtokenとmodelを持って閉じ、`stats`の`sessions.by_route`・`planner_routes`と`kpi`の`route=headless`の層に出ること）。
++- **まだ無いもの**（goal 87の後続task）: ADR-t1228-1のCLI（`planner screen` / `send` / `close`）の非対話の扱い（決定7）。
++- **test**: `tests/it/planner_headless.rs`（stubの`claude`で、reviseで開いたbackgroundの非対話のplannerが初期promptを最初のturnにして`turns/`に出力を残しturnの記録に`planner_id`を持ち、終了の依頼で終わること、draftのplannerの`planner_question`のanswerが次のturnの依頼として届くこと、wrapperを殺したplannerのturnがplannerの閉じで止まること（`the_turn_a_killed_background_planner_wrapper_left_is_stopped_as_the_planner_closes`）、掃除が生きているbackgroundのplannerをheartbeatの遅れで閉じず終わったものを`runtime_exited`で閉じること（`the_sweep_keeps_a_live_background_planner_and_closes_an_ended_one_as_exited`）、`route`の無いときと`interactive`ではworkspaceで開いて打ち込むこと、`doctor`の`route`）と`tests/it/planner_headless_stats.rs`（区間がturnから開いてtokenとmodelを持って閉じ、`stats`の`sessions.by_route`・`planner_routes`と`kpi`の`route=headless`の層に出ること）、`tests/it/planner_headless_turns.rs`（利用上限で控えを待って`provider retry`で同じ依頼を続けること、上限で止めたturnの`planner_unresponsive`、生きているplannerへの次のreviseが次のturnの依頼になること、findingのplannerのanswer、依頼のplannerの`proposed`と`exhausted`。名前は[`plan` / `planners`](plan-planners.md#runtimeのplannerの経路)の「test」）。
+diff --git a/docs/design/supervisor-lifecycle/plan-planners.md b/docs/design/supervisor-lifecycle/plan-planners.md
+index 1a282cad..544f46f3 100644
+--- a/docs/design/supervisor-lifecycle/plan-planners.md
++++ b/docs/design/supervisor-lifecycle/plan-planners.md
+@@ -25,7 +25,7 @@ related:
+ 
+ > **予定（goal 92）**: runtimeのplannerの対話の経路は廃止し（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）、非対話のplannerはbackgroundのwrapperだけで動く（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）。`[roles.runtime_planner]`の経路の欄と画面からのidleの推定（ADR-t803-1。置き換え済み）、plannerのworkspace、`planner screen` / `planner send`の記述は、後続のtaskが実装するまでの今の姿である（[runtimeのplannerの経路](#runtimeのplannerの経路)の予定の注記も見る）。廃止前から開いている人のplannerは、新しいバイナリが行を閉じた扱いにし、そのworkspaceにcmuxを呼ばない（ADR-t1433-2決定5）。末尾の予定の節はこれらの決定に合わせてある。
+ 
+-> 人が開くplannerは[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)で廃止し、計画の入口をinboxからの依頼にする。依頼の記録・CLI・依頼ごとのruntimeのplanner・結末・`planner_question`の行き先は実装した（task 1395、[inboxからの計画の依頼](#inboxからの計画の依頼)）。`dagq plan`は案内を付けて拒む（task 1399、下の`dagq plan`）。人のplannerを前提にした行き先の読み替えは実装した（末尾の[予定: inboxからの依頼と非対話のplanner](#予定-inboxからの依頼と非対話のplanner)の2）。廃止前から開いている人のplannerは、今はADR-t1394-1決定9のとおり終わるまで動き、下の「人のplannerの終わり」で閉じる（ADR-t1433-2決定5の、行を閉じた扱いにすることは**まだ実装していない**。末尾の予定の1）。runtimeのplannerの経路（対話・非対話）は[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)の決定1・2と、区間と`stats` / `kpi`の経路ごとの集計の決定4（task 1398）を実装した（下の[runtimeのplannerの経路](#runtimeのplannerの経路)。控え・ADR-t1228-1のCLIの非対話の扱いはまだ）。
++> 人が開くplannerは[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)で廃止し、計画の入口をinboxからの依頼にする。依頼の記録・CLI・依頼ごとのruntimeのplanner・結末・`planner_question`の行き先は実装した（task 1395、[inboxからの計画の依頼](#inboxからの計画の依頼)）。`dagq plan`は案内を付けて拒む（task 1399、下の`dagq plan`）。人のplannerを前提にした行き先の読み替えは実装した（末尾の[予定: inboxからの依頼と非対話のplanner](#予定-inboxからの依頼と非対話のplanner)の2）。廃止前から開いている人のplannerは、今はADR-t1394-1決定9のとおり終わるまで動き、下の「人のplannerの終わり」で閉じる（ADR-t1433-2決定5の、行を閉じた扱いにすることは**まだ実装していない**。末尾の予定の1）。runtimeのplannerの経路（対話・非対話）は[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)の決定1・2・3・5（task 1396・1397）と、区間と`stats` / `kpi`の経路ごとの集計の決定4（task 1398）を実装した（下の[runtimeのplannerの経路](#runtimeのplannerの経路)。ADR-t1228-1のCLIの非対話の扱いはまだ）。
+ 
+ [ADR-0044](../../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定1・6・12・13。plannerは常駐せず、proposalごとにオンデマンドのworkspaceを開く。use caseは`src/application/planner.rs`、entry pointは`compose::planners` / `compose::planner_session`（`dagq plan`は`main.rs`で拒む）。
+ 
+@@ -36,7 +36,7 @@ related:
+ - **session wrapper（`planner-session`、hidden）**: runの`session`と同じく、自分を`register_planner_wrapper`で登録し（1つのplannerに1回だけ。閉じたplannerは拒む）、`AgentProvider::planner_command`（Claudeでは`claude --debug-file <dir>/claude.log --add-dir <dir> --settings <dir>/claude-settings.json [--plugin-dir PATH] -- '<prompt>'`をrepository rootで。settingsはworkerと同じ`stop_hook_settings`で、`Stop` hookが`<dir>/idle.json`を書く。runtimeが立てたplanner（origin `runtime`）はworkerと同じく入力欄のサジェストを止める`promptSuggestionEnabled: false`も持ち（`runtime_session_settings`、[Agent provider lifecycle](../provider-lifecycle.md)）、人が開いたplannerは持たない。wrapperはoriginを`planners`の行から読んで`PlannerCommand`に渡す）でagentを起動し（argvに`--model` / `--effort`があれば`AgentProvider::select_model`で渡す）、`register_planner_agent`し、agentが終わるまで`wait_interval`ごとに`heartbeat_planner`し、終了コードを`planner_exited`で記録する。人が開いたplanner（origin `person`）では、記録の後にterminal（stderr）へ`dagq closes this workspace in 60 seconds (planner <id>, exit code <code>, log at <planner dir>/claude.log)`の1行を出し（`exited_notice`。書き先は`PlannerWrapper::terminal`で、`planner-session`ではstderr）、結果のJSONにも`notice`として載せる。workspaceを閉じるのは下の「人のplannerの終わり」のsupervisorで、wrapperは閉じない（ADR-t1300-1）。logは`<queue dir>/logs/planner-session-*.jsonl`。**登録を断られたwrapper**（task 806）: 閉じた行か、別のwrapperが登録済みの行で`register_planner_wrapper`が断ると、wrapperは断られたことをlog（`warn`）に書き、自分のworkspace（cmuxが渡す`CMUX_WORKSPACE_ID`）を行が記録していなければ（`workspace_id`が無いか別のもの）そのworkspaceを`cmux workspace close`で閉じてから（`application::session::wrapper_refused`）errorで終わる。createが失敗扱いになって行が閉じた後にcmuxが作ったworkspaceは、UUIDがどこにも無いので他に見つける手段が無いため。行が記録している自分のworkspace（同じplannerの2つ目のwrapperなど）は閉じない（そのplannerのものなので、終わらせる側に任せる）。行が読めなければ閉じない。閉じるcmuxはhiddenの`--cmux`（既定`cmux`、PATHで解決。launcherはargvに付けない）で、`CMUX_WORKSPACE_ID`が無ければ（cmuxの外）閉じずにlogだけ書く。
+ - **非対話のplannerのwrapper**: `route`が`headless`の行のwrapper（`planner-session --headless`、backgroundなら`--background`も）は、agentを1つ起動する代わりに非対話のworkerと同じ`Turns`でturnを動かす（下の[runtimeのplannerの経路](#runtimeのplannerの経路)、[非対話のworker](headless-worker.md#非対話のruntimeのplanner)）。端末は要らず（`--headless`の無いwrapperだけが端末を確かめる）、終了の依頼で0、sessionを終わらせたturnの後は1で`planner_exited`を記録する。
+ - **生存とidleの判定**（`planner_view`、`PlannerSession::state`）: workerと同じ材料で決める。非対話のplannerは画面を読まず、idle markerが最後の入力より新しければ`idle`、そうでなければ`working`（下の[runtimeのplannerの経路](#runtimeのplannerの経路)）。対話のplannerは次のとおり。閉じた行か、workspaceのUUIDが`cmux workspace list`に居なければ`closed`。workspaceかwrapperの登録がまだなら`opening`、行を作ってから120秒（`PLANNER_STARTUP_SECS`）たってもそのままなら`lost`（cmuxがwrapperを起動できなかった、開いたプロセスがworkspaceを記録する前に死んだ）。agentの終了が記録されていれば`exited`。wrapperのPIDが死んでいるかheartbeatが30秒（`HEARTBEAT_TIMEOUT_SECS`）より古ければ`lost`。wrapperが生きていてもagentのPID（`agent_pid`）をまだ記録していなければ、markerや画面に依らず`opening`（agentの起動前の画面をidleと推定して、agentの居ないplannerに文面を送らない。originに依らない。task 1329）。それ以外は動いているsessionで、idle markerがplannerの最後の入力（`prompt-submit.json`、`supervisor-input.json`、行の`created_at`の遅い方）より新しければ、画面（`capture`）が作業中（`AgentSignals::working`）なら`working`、markerにbackgroundの作業が残っていなければ（`AgentSignals::idle_hook`）`idle`、残っていれば`working`。markerが無いか最後の入力より古ければ、画面からの推定（[画面からのidleの推定](receipt-and-session-exit.md#画面からのidleの推定)、ADR-t803-1）でidleで、画面にbackgroundの処理の表示（Claude Codeのstatus lineの`1 shell`など、`AgentSignals::screen_background`）が無ければ`idle`、そうでなければ（captureの失敗と、markerの`running`と同じく扱うbackgroundの表示を含む。task 823）`working`。`alive`は`opening` / `working` / `idle`。`idle_since`はidleのときのmarkerの書かれた時刻か、推定した区間の最初のcaptureの時刻（Unix秒）で、送った文面より後にidleになったかの比較に使える。推定でidleのときと、推定の区間にbackgroundの表示があって`working`のときは`idle_inferred`（`source`・`marker`・`since`・`observed_secs`・`captures`・`background_running`）も持つ。supervisorの`planner_views`は区間を持ち、区間ごとに1回queueのevent `idle_inferred`を記録する。これでStop hookが印を書けなかったruntimeのplannerも、仕事を終えれば`end_runtime_planners`が`/exit`を送り、終われば行を閉じる。backgroundの処理を残してturnを終えたplannerには、表示が消えて新しい区間が`screen_idle_secs`続くまで`/exit`を送らない（「Background work is running」の確認で止めてexit timeoutで閉じることを避ける）。`planner_question`の答えを打ち込まれたplannerは、`idle_since`が配送を取った時刻（`planner_answer_claimed`）より後なら答えを読み終えたとみなし、askが閉じた時刻とは比べない（askの`closed_at`は打ち込みの後に書くので、その前にidleになったplannerを待ち続けて枠をふさいだ。task 884）。上限で持ち主の居ないreviseが期限を過ぎて待つときは、何も待たないidleのruntimeのplannerを`/exit`して枠を空ける（`planner_released`。[Plan review (supervisor)](plan-review.md)の9）。人が開いたplannerには今までどおり`/exit`を送らず、`state`だけが直る（agentが終わった後は下の「人のplannerの終わり」で閉じる）。
+-- **runtimeのplannerの時間切れ**（`tell_of_silent_planners`、`tend_planners`の各pass、task 805）: 画面からの推定も効かない（captureが失敗し続ける、画面が見慣れない状態）ときのbackstop。runtimeが立てたplanner（draft・finding・reviseのどれも）で、`alive`かつ`idle`でないもののうち、最後に動きが見えた時刻（`planner_last_activity`: 最後の入力（`prompt-submit.json`・`supervisor-input.json`・行の`created_at`の遅い方）と、idle markerの書かれた時刻（最後の入力より古いものも）の遅い方）から`--planner-timeout`（既定3600秒、`PLANNER_TIMEOUT`。reviseの時間切れと同じ値）を過ぎたものについて、inbox宛てのattentionを出す。推定でidleのplannerは`idle`なのでこの対象にならず、`/exit`で終わる。kindは新しく作らず`planner_unresponsive`を広げた（attentionは同じ`check the planner`で、人がすることもそのplannerのworkspaceを見ることで同じため）。reviseの`planner_unresponsive`とはpayloadの`subject: "planner"`で分かれ、queueのevent（task・goal・runに付かない）として`planner_id`・`origin`・`workspace_id`・`draft_task_id`・`finding_id`・`state`・`last_activity`・`waited_secs`・`reason`を持つ（proposalの`proposal_id`は持たない）。plannerごとに1回だけで（`planner_silent`が同じトランザクションで既存のeventを確かめる）、その後に動いても消さず、もう一度は出さない。`status`のattention（`silent_planners`）はそのplannerの行が閉じるまで出て（その後にreviseを渡されたplannerはreviseの時間切れに任せて外す）、draftのplannerならdraftのtaskに付く。attentionのeventなのでKPIの`attentions_per_landing`にも数えられる。plannerは閉じず`/exit`も送らない。reviseを渡されたplanner（`revise_planner_id`がそのplanner）はreviseの`planner_unresponsive`（出し直されないまま`revised_at` / `sent_at`から期限）が見るので対象から外し、reviseの振る舞いは変えない。自分の`planner_question`を待っているplanner（`question_wait`。[Plan review (supervisor)](plan-review.md)の10）は人を待っているので対象から外す。人が開いたplannerは対象にしない。testは`tests/it/planner_timeout.rs`（入力とmarkerが期限を延ばすこと、期限を過ぎると1回だけ出て`status`と`watch`に`check the planner`で出ること、`/exit`も閉じもしないこと、人のplannerには出ないこと、行が閉じるとattentionが消えること、findingのplannerにも`finding_id`付きで1回だけ出ること、markerが無く画面で推定のidleになったplannerは`/exit`され期限を過ぎても出ないこと）。
++- **runtimeのplannerの時間切れ**（`tell_of_silent_planners`、`tend_planners`の各pass、task 805）: 画面からの推定も効かない（captureが失敗し続ける、画面が見慣れない状態）ときのbackstop。runtimeが立てたplanner（draft・finding・reviseのどれも）で、`alive`かつ`idle`でないもののうち、最後に動きが見えた時刻（`planner_last_activity`: 最後の入力（`prompt-submit.json`・`supervisor-input.json`・行の`created_at`の遅い方）と、idle markerの書かれた時刻（最後の入力より古いものも）の遅い方）から`--planner-timeout`（既定3600秒、`PLANNER_TIMEOUT`。reviseの時間切れと同じ値）を過ぎたものについて、inbox宛てのattentionを出す。推定でidleのplannerは`idle`なのでこの対象にならず、`/exit`で終わる。kindは新しく作らず`planner_unresponsive`を広げた（attentionは同じ`check the planner`で、人がすることもそのplannerのworkspaceを見ることで同じため）。reviseの`planner_unresponsive`とはpayloadの`subject: "planner"`で分かれ、queueのevent（task・goal・runに付かない）として`planner_id`・`origin`・`workspace_id`・`draft_task_id`・`finding_id`・`state`・`last_activity`・`waited_secs`・`reason`を持つ（proposalの`proposal_id`は持たない）。plannerごとに1回だけで（`planner_silent`が同じトランザクションで既存のeventを確かめる）、その後に動いても消さず、もう一度は出さない。`status`のattention（`silent_planners`）はそのplannerの行が閉じるまで出て（その後にreviseを渡されたplannerはreviseの時間切れに任せて外す）、draftのplannerならdraftのtaskに付く。attentionのeventなのでKPIの`attentions_per_landing`にも数えられる。plannerは閉じず`/exit`も送らない。reviseを渡されたplanner（`revise_planner_id`がそのplanner）はreviseの`planner_unresponsive`（出し直されないまま`revised_at` / `sent_at`から期限）が見るので対象から外し、reviseの振る舞いは変えない。自分の`planner_question`を待っているplanner（`question_wait`。[Plan review (supervisor)](plan-review.md)の10）は人を待っているので対象から外す。人が開いたplannerは対象にしない。非対話のplanner（`route: headless`）も対象にせず、turnの上限で止められたturnで知らせる（下の[runtimeのplannerの経路](#runtimeのplannerの経路)の「状態」）。testは`tests/it/planner_timeout.rs`（入力とmarkerが期限を延ばすこと、期限を過ぎると1回だけ出て`status`と`watch`に`check the planner`で出ること、`/exit`も閉じもしないこと、人のplannerには出ないこと、行が閉じるとattentionが消えること、findingのplannerにも`finding_id`付きで1回だけ出ること、markerが無く画面で推定のidleになったplannerは`/exit`され期限を過ぎても出ないこと）。
+ - **人のplannerの終わり**（`close_exited_person_planners`、`PlannerSession::person_exit_closes`、[ADR-t1300-1](../../adr/2026-10-02-t1300-1-runtime-closes-exited-person-planners-after-a-grace.md)）: 人が開いたplanner（origin `person`）で、閉じていず、workspaceとwrapperが記録され、agentの終了（`exited_at`）から60秒（`PERSON_PLANNER_CLOSE_GRACE_SECS`。人が最後の画面を読むための猶予）を過ぎたものを閉じる。状態でいえば`exited`だけで、wrapperが死んだ`lost`（原因を見るために画面を残す）と生きているplannerは閉じない。cmuxの全windowの一覧（`listed_workspace_ids`を1回）に居るworkspaceを、runtimeのplannerと同じ閉じ方（`WorkspaceBackend::close`。cmuxのadapterはピンを外してから閉じる。task 184）で閉じ、行を閉じて`planner_closed`（`code: person_exited`、`workspace_closed: true`）を記録する。一覧に居ないworkspaceの行は下の行の片付けに任せる。一覧が取れなければ何も閉じず、closeが失敗した行は閉じずに残し（次の回で再試行）、どちらもlog（`warn`）に残す。行うのはsupervisorの`tend_planners`の各passの初め（`--no-claude`でも。`tend_planners`そのものを行わない回、つまり止める途中・claimを止めた間・queueの控え（`queue_hold`）の間は行わない）。supervisorが居ないあいだは閉じない（前は`plan`の実行時にも行ったが、`dagq plan`は何もしなくなった）。
+ - **plannerの終わりの記録**（`planner_closed`、ADR-t1300-1）: runtimeがplannerの行を閉じるとき、originに依らず、行を閉じるのと同じトランザクションでqueueのevent（task・goal・runに付かない）`planner_closed`を1回記録する（port `end_planner`。行がすでに閉じていれば何も記録しない）。payloadは`planner_id`・`origin`・`workspace_id`・`proposal_id`・`draft_task_id`・`finding_id`・`code`（理由の分類）・`reason`（文）・`exit_code`・`exited_at`・`workspace_closed`（そのときworkspaceを閉じたか）で、画面の中身は載せない（`planner_closed_payload`）。`code`は`person_exited`（上の人のplannerの猶予切れ）、`runtime_exited` / `runtime_lost` / `runtime_session_gone` / `runtime_exit_timed_out`（runtimeのplannerの`end_runtime_planners`で、agentの終了・wrapperの消失・workspaceが一覧に居ずwrapperも終わった・`/exit`の時間切れ。[Plan review (supervisor)](plan-review.md)の10）、`abandoned`（下の行の片付け）。`dagq events --full --kind planner_closed`で読める。workspaceを開けずに`error`付きで閉じる行（`open_planner`の失敗）は今までどおり`close_planner`で閉じ、このeventを記録しない。
+ - **行の片付け**（`close_abandoned_planners`、`PlannerSession::abandoned`、goal 54の(1)）: 人が開いたものも含め、閉じていない行のうち、workspaceのUUIDが記録されていて、cmuxの全windowの一覧（`listed_workspace_ids`を1回。[Naming](naming.md#naming)）に居らず、wrapperが終わっている行を（`error`なしで）閉じ、`planner_closed`（`code: abandoned`、`workspace_closed: false`）を記録する。閉じた行は`planners`に出なくなる。wrapperが終わっているとは、agentの終了が記録されている、wrapperのPIDが死んでいる、heartbeatが30秒（`HEARTBEAT_TIMEOUT_SECS`）より古い、のどれかで、wrapperがまだ登録されていない行は行を作ってから120秒（`PLANNER_STARTUP_SECS`）たったとき。一覧に居ないだけでは閉じない（wrapperが生きている行と、まだ起動の猶予の中の行は残す）。一覧が取れないときは何も閉じない（一時的な失敗で閉じない）。行は一覧の前に読むので、一覧の後に開いたworkspaceを消えたと取らない。workspaceは閉じない（一覧に居ないものだけが対象）。行うのはsupervisorのsweep（`sweep_ended_runs`と同じ間隔。失敗はlogだけ）。runtimeのplannerは生きている間は従来どおり`end_runtime_planners`が`/exit`を頼んでworkspaceを閉じてから行を閉じ、片付けはsupervisorが止まっていた間にworkspaceとwrapperが消えた分も拾う。非対話のplannerのbackgroundのhandle（一覧に居ない）は一覧でなく`exists`（pidと記録した起動時刻、wrapperが残したturnが走る間も真）で判じ、agentの終了が記録された行は`runtime_exited`で閉じる。backgroundのhandleしか無ければ一覧を取らない（[runtimeのplannerの経路](#runtimeのplannerの経路)）。
+@@ -51,15 +51,16 @@ related:
+ > **予定（goal 92）**: [ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定3で対話の経路を廃止し、[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)決定1・2でwrapperはbackgroundだけになる。下の「選ぶ欄」の`route`は受け付けて無視し（値に関わらず`headless`）、後で`dagq.toml`から消す。`planners.route`は過去の対話のplannerを読むために残し、新しい行は`headless`になる。「非対話のplanner」の`[headless] wrapper`によるworkspaceの中かbackgroundかの選択は無くなり、backgroundだけになる。下の記述は、goal 92の後続のtaskが実装するまでの今の姿である。
+ 
+ - **選ぶ欄**: `[roles.runtime_planner]`の`route = "interactive" | "headless"`（既定`interactive`。[Actor model](actor-model.md#runtimeのplannerの経路)）。supervisorはplannerを開くたび（reviseの`open_runtime_planner`、draftとfindingの`open_draft_planner`）に`PlannerLaunch::roles`から読み、`headless`なら行の`route`に残す（`launch_planner`。書けなければ行をerror付きで閉じる）。動いているplannerの経路は変えない。人が開くplannerは常に対話。`dagq doctor`の`roles.runtime_planner`が`route`と`route_source`を出す。
+-- **非対話のplanner**: plannerのディレクトリに`turns/`（[非対話のworker](headless-worker.md#run-dirのturns)と同じ`request-NNNNNN.json`・`.taken.json`・`exit`・`limits.json`・`turn-NNNNNN.jsonl` / `.err`）を置き、wrapperが非対話のworkerと同じ`Turns`（`TurnOwner::Planner`）で動く。初期prompt（`prompt.txt`）が最初のturn。`turn_started` / `turn_finished` / `turn_session_identified`と、supervisorが書く`turn_requested`はqueueのevent（`planner_id`付き）。reviseの配送（`plan_revise_sent`）、`planner_question`のanswer（`ask_delivered`）、`end_runtime_planners`と`release_runtime_planner`の`/exit`は、`Supervisor::send_to_planner`が次のturnの依頼（`what`は`revise` / `answer of ask <id>`）と終了の依頼にし、`submit_input`・Stop hook・画面からのidleの推定を使わない。wrapperはworkspaceの中かbackgroundかを[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)の`[headless] wrapper`で選ぶ（backgroundのhandleは`workspace_id`に入り、`dagq submit`はplannerの記録からそのhandleを持ち主にする）。
+-- **状態**: `planner_view`は非対話のplannerで、wrapperがturnの終わりに書くidle markerが最後の入力（supervisorの入力の印を含む）より新しければ`idle`（`idle_since`はmarkerの時刻）、そうでなければ`working`、wrapperが死ねば`lost`。`question_wait`（自分の`planner_question`を待つ）の間は`/exit`しないのは対話と同じ。`planner_unresponsive`（`subject: "planner"`）は対話と同じく`--planner-timeout`で出る（turnの上限で止めたときに出すことは後続task）。
++- **非対話のplanner**: plannerのディレクトリに`turns/`（[非対話のworker](headless-worker.md#run-dirのturns)と同じ`request-NNNNNN.json`・`.taken.json`・`exit`・`limits.json`・`turn-NNNNNN.jsonl` / `.err`）を置き、wrapperが非対話のworkerと同じ`Turns`（`TurnOwner::Planner`）で動く。初期prompt（`prompt.txt`）が最初のturn。`turn_started` / `turn_finished` / `turn_session_identified`と、supervisorが書く`turn_requested`はqueueのevent（`planner_id`付き）。reviseの配送（`plan_revise_sent`）、`planner_question`のanswer（`ask_delivered`）、Claudeが使えなかったturnの続き（`tend_planner_walls`、下の「使えないとき」）、`end_runtime_planners`と`release_runtime_planner`の`/exit`は、`Supervisor::send_to_planner`が次のturnの依頼（`what`は`revise` / `answer of ask <id>` / `provider retry`）と終了の依頼にし、`submit_input`・Stop hook・画面からのidleの推定を使わない。wrapperはworkspaceの中かbackgroundかを[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)の`[headless] wrapper`で選ぶ（backgroundのhandleは`workspace_id`に入り、`dagq submit`はplannerの記録からそのhandleを持ち主にする）。
++- **状態**: `planner_view`は非対話のplannerで、wrapperがturnの終わりに書くidle markerが最後の入力（supervisorの入力の印を含む）より新しければ`idle`（`idle_since`はmarkerの時刻）、そうでなければ`working`、wrapperが死ねば`lost`。`question_wait`（自分の`planner_question`を待つ）の間は`/exit`しないのは対話と同じ。届けたanswerを読み終えたかは、idle markerの秒と配送を取った秒の比べでなく、そのanswerの依頼（`turn_requested`の`what`が`answer of ask <id>`）を取ったturnの`turn_finished`があるかで判じる（`headless_answer_taken`。秒の比べでは、同じ秒のうちに終わったturnの後も待ち続けて`/exit`されなかった）。依頼の記録が無いときは対話と同じ秒の比べ。`planner_unresponsive`（`subject: "planner"`）は`--planner-timeout`でなく、wrapperがturnを`[stall]`の上限（`turn_silence_secs`の沈黙か`turn_limit_secs`）で止めたとき（idle markerの`outcome`が`silent` / `timed_out`）に、plannerごとに1回出る（`tell_of_stopped_planner_turns`。payloadは対話の時間切れの欄に`route`・`turn`・`outcome`を足し、`last_activity`と`waited_secs`は持たない）。止めたturnでsessionは終わるので、plannerは`runtime_exited`で閉じられ、決めずに終わったplannerに数える。掃除がpassより先に行を閉じたときも、掃除が同じ知らせを出す（ADR-t1394-2決定3）。idleで仕事が終わらないまま期限を過ぎるものは、reviseを渡されたplannerのreviseの時間切れ（`planner_unresponsive`、proposalのもの）が見る。
+ - **終わり**: 終了の依頼でwrapperが終わると、backgroundではhandleも無くなる。agentの終了が記録された行は、`end_runtime_planners`と行の片付けのどちらが閉じても`runtime_exited`。行の片付け（`close_abandoned_planners`）はbackgroundのhandleをcmuxの一覧でなく`exists`（pidと起動時刻）で判じ、生きているwrapperの行はheartbeatが遅れても閉じない。wrapperが殺されて残ったturnは、handleを閉じるときに止める（[非対話のworker](headless-worker.md#非対話のruntimeのplanner)）。
+ - **区間**: kind `runtime_planner`の区間を最初のturnから開いて`planner_closed`で閉じ（[非対話のworkerの区間](../provider-lifecycle.md#非対話のworkerの区間)と同じくturnから稼働時間とtokenを取る）、区間に`route: headless`を持たせる。`stats`の`sessions.by_route`・`planner_routes`と`kpi`の`session_*`の`route=`の層・`health.planner_routes`で経路ごとに読む（task 1398。runのclaim時の経路の`--by route`とは別に常に出す）。goal 92の後は新しい区間はすべて`headless`で、`route`は過去の対話の区間と比べるために残す。
+-- **test**: `tests/it/planner_headless.rs`（[非対話のworker](headless-worker.md#非対話のruntimeのplanner)のtest）と`tests/it/planner_headless_stats.rs`（区間と経路ごとの集計）。
++- **使えないとき**（ADR-t1394-2決定5、`tend_planner_walls`）: idleの非対話のplannerの最後のturnが`failed`で`failure`が`authentication` / `usage_limit` / `launch`なら、plannerを終わらせず（`busy`に`provider_wall`。`end_runtime_planners`の終了の依頼も`release_runtime_planner`の解放もしない）、決めずに終わったplannerにも数えない。最初に見たとき、ログイン切れと利用上限はqueueの控えのask（`queue_hold`。runもjobも名指さない`NewHold::wall`）を開くか加わり、起動の失敗はClaudeの`provider_held`を記録し、queueのevent `provider_waiting`（`planner_id`・`turn`・`provider`・`reason`・`message`・`ask_id`）を残す。控えのあいだは`tend_planners`自体が動かない。Claudeの控えが解けたら、失敗したturnが取った依頼（`turn_started`の`request`の`.taken.json`）を載せた続きの依頼（workerと同じ`retry_text`、`what`は`provider retry`）を次のturnとして置く。待つあいだはreviseとanswerもそのplannerに置かず（失敗した依頼が後の依頼に隠れて続きに載らなくならないように）、続きのturnが終わった後に置く。turnの後に別の依頼が置かれていれば（supervisorが止まる前に置いたものなど）、それが続きになる。providerの切り替えは無い。`--no-claude`では今までどおりplannerを立てない。
++- **turnの依頼の経路**: supervisorが非対話のplannerに置く依頼はすべて`Supervisor::send_to_planner`（`src/application/supervise/headless.rs`。対話なら`submit_input`での打ち込み）を通る。runの`request_turn`と同じ`turns/request-NNNNNN.json`の書き方（`write_request`）で、`turn_requested`（`planner_id`・`seq`・`what`・`workspace_id`）をqueueのeventに残し、`Input::Exit`は終了の依頼になる。依頼の前に`stamp_planner_input`で入力の印を書く（終了の依頼を除く）。続きの依頼のCLI（task 1533）もこの経路で置く。
++- **test**: `tests/it/planner_headless.rs`（[非対話のworker](headless-worker.md#非対話のruntimeのplanner)のtest）と`tests/it/planner_headless_stats.rs`（区間と経路ごとの集計）、`tests/it/planner_headless_turns.rs`: `a_headless_planner_at_the_usage_limit_waits_in_the_hold_and_makes_the_same_call_again`（draftのplannerのanswerのturnが利用上限で失敗すると控えのaskと`provider_waiting`で待ち、終了の依頼も2つ目のplannerも無く、控えのanswerの後に同じanswerを載せた`provider retry`のturnでdraftを片付けて閉じる）、`a_headless_planner_at_a_login_failure_waits_in_the_hold_and_goes_on`（最初のturnがClaudeのログイン切れで失敗すると`authentication`の控えのaskと`provider_waiting`で待ち、答えの後の`provider retry`のturnで続ける）、`a_headless_planners_turn_stopped_at_its_limit_tells_the_inbox_and_the_planner_closes`（上限で止めたturnで`planner_unresponsive`が1回出て`runtime_exited`で閉じる）、`the_sweep_tells_of_a_headless_planners_turn_stopped_at_its_limit_as_it_closes_it`（`--no-claude`でpassがplannerを見ないときも、掃除が行を閉じるときに止めたturnを1回知らせる）、`a_live_headless_planner_takes_the_next_revise_of_its_proposal_as_its_next_turn`（出し直した後も生きている持ち主のplannerに、次のreviseが新しいplannerでなく次のturnの依頼（`what: revise`、`turn_requested`）として届き、そのturnのsubmitでproposalが通って終了の依頼で閉じる）、`a_headless_finding_planner_takes_the_answer_as_its_next_turn_and_closes_with_its_finding`（findingのplannerの`planner_question`（taskなし）のanswerが次のturnの依頼になり、そのturnのsubmitでfindingが`proposed`になり、終了の依頼で`finding_id`付きの`runtime_exited`で閉じる）、`a_headless_request_planners_submission_proposes_the_request_and_its_end_closes_it`、`a_headless_request_planners_answer_reaches_a_new_one_and_undecided_ends_exhaust_the_request`（下の[inboxからの計画の依頼](#inboxからの計画の依頼)の9）。
+ 
+ ### 予定（後続task）
+ 
+-- **使えないとき**: turnの`failure`が`authentication` / `usage_limit` / `launch`なら、plannerを決めずに終わったものに数えず、workerと同じqueueの控え（`queue_hold`のask）で待つ。providerの切り替えは無い。
+ - **ADR-t1228-1のCLI**: 非対話のplannerには、plannerへの依頼は決まった文を次のturnの依頼として置き（作業中のturnがあれば、その後に取られる）、閉じた・`lost`・`exit`を置いたplannerには拒む。`planner screen`は、画面を持つplannerが無くなるので、turnのlogを読むCLIに置き換える（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)決定4、[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定5）。`planner send`は拒む（`--answer`も。answerはsupervisorがturnとして届ける）。`planner close`は`exit`を置いてwrapperの終わりを待ち、終わらなければADR-t1404-1決定3の手順で止めてから行を閉じ、`planner_closed`（仮: `code: closed_by_request`）を記録する。
+ 
+ ## inboxからの計画の依頼<a id="inboxからの計画の依頼"></a>
+@@ -73,8 +74,8 @@ related:
+ 5. **初期prompt**（`request_planner_prompt`）: 依頼のファイルを指す文、inboxの補足（人の言葉と分けて）、参照先の中身（askの問いと答え、taskのtitle・description・acceptanceと最後の`integration_receipt`の`summary`と`follow_ups`、runのtaskと着地したreceipt、eventのkindとpayload、findingの種類・状態・見立て。読めない参照はそう書く）、参照から引けるgoal（`goal_led_to`: goalの参照、taskとrunのtaskのgoal、findingのgoalかそのtaskのgoal、askのtaskのgoalかそのfindingのgoal、eventのgoalかそのtaskのgoal。title・description・acceptance・constraints・task。どれも引けなければ`dagq goal list`を読む手順）、前のplannerの`planner_question`とanswer、AGENTS.md（無ければCLAUDE.md）と名指す文書を先に読むこと、`prompt::repository_rules`、`dagq search` / `related` / `show` / `goal list`で既存のtaskと実装済みを確かめる手順、記録を読むCLI（`prompt::RECORD_READING`）、[ADR-t451-1](../../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)の上げる基準（`prompt::DECIDE_YOURSELF`）と3択（計画して`--context`の冒頭を`from request <id>`にしてsubmit、`dagq request decline ID --reason`、決めきれないものだけ`dagq ask --request ID --kind planner_question --because scope --recommend <plan|decline> --confidence <high|low> --option plan --option decline`）。人のanswerを運ぶplannerには元の質問とanswerを載せる。
+ 6. **結末**: plannerが自分のworkspace（`CMUX_WORKSPACE_ID`。backgroundの非対話のplannerはplannerの記録のhandle）から`dagq submit`すると、submitが同じトランザクション（`submit_linking`の`link_requests`）でproposalを依頼に結ぶ（`plan_request_proposals`。1件の依頼から複数のproposalを出してよい）。最初のsubmitで依頼は`proposed`になり、`request_proposed`（`request_id`・`proposal_id`・`planner_id`）を記録する。その後はproposalの通常の流れ（plan review、revise、concernの`approve_plan`）で進み、依頼の状態はproposalの結末で変えない。手当てしないと決めたら、plannerは`dagq request decline ID --reason '...'`で`declined`にし、`request_declined`（`request_id`・`planner_id`・`reason`・`by`）を記録する（capability `request.decline`。打てるのはその依頼に立てられたplanner自身だけで、他のplanner・inbox・人は拒まれる。`open`でない依頼は`RequestNotOpen`で拒む。判定に使った依頼のplannerが却下のトランザクションの中で変わっていれば拒む）。決めずに終わったplanner（sessionが終わった、idleで`/exit`された）の依頼は次のpassで再び対象になり、依頼の`planners`の行が`MAX_REQUEST_PLANNERS`（3）に達していれば（人のanswerを運ぶとき以外は）立てずに`exhausted`にして`request_planner_exhausted`（`request_id`・`planners`・`reason`）を記録する。inboxの`watch`は`request_proposed`を知らせ（`report the request's proposal`）として、`request_declined`と`request_planner_exhausted`をattention（`rephrase or drop the request`。人が言い直すか取り下げる）として受け、依頼した人に結末を伝える。どれもqueueのeventで、`dagq events --kind request_proposed`のように読める。
+ 7. **`planner_question`**: `ask --request ID`は`planner_question`だけが持て、task・run・findingを名指さない（他のkindと、それらを名指すものは`AskRequestNotPlannerQuestion`）、`asks.request_id`に依頼を、`subject`に`request:<id>`を書く（openなaskを1件に限る`asks_open`が依頼ごとに分かれるように。[Persistence](../persistence.md#asks)）。answerの行き先（`planner_answer_route`、`plan_requests::route_of`）は、その依頼の閉じていないruntimeのplannerがあれば`Planner`（[Draft planners](draft-planners.md)の5と同じく、plannerが自分で作ったaskはaskの後にidleになってから、他の人が作ったaskはidleなら、`claim_planner_answer`で配送を取ってから`answer to ask <id>: <answer>`を打ち込み（非対話のplannerには`send_to_planner`が次のturnの依頼にする）`ask_delivered`で閉じる。打ち込みの失敗はqueueのevent `ask_delivery_failed`（`request_id`付き）でinboxに任せる）、居なければ依頼がまだ`open`なら上限の中でanswerを持った新しいplannerを立てて渡し（`NewPlanner`。依頼の3回の上限を越えて運ぶ。立てる前に同じトランザクションでaskが回答済み・未closeであることも確かめ直し、閉じられたanswerでは立てない）、`open`でなければ（submit・却下・上限の後）`planner_answer_closed`で閉じる（`Close`）。`Person`にはならない。answerの`ask_answered`は`runtime_delivers: true`を持ちattentionにしない。依頼のaskの配送のevent（`planner_answer_claimed`・`planner_answer_closed`）はqueueのevent。依頼の`planner_question`が閉じていないあいだと、打ち込んだanswerの後にまだidleになっていないあいだは、そのplannerに`/exit`を送らない（`question_wait`）。
+-8. **終わりと時間切れ**: 依頼のplannerは、draft・findingのplannerと同じく、仕事を終えてidleになれば`end_runtime_planners`で`/exit`され（非対話のplannerでは終了の依頼）、`planner_closed`（payloadに`request_id`）を残す。画面も読めないまま`--planner-timeout`を過ぎれば、plannerごとに1回`planner_unresponsive`（`subject: "planner"`、`request_id`）がinboxに届く（上の「runtimeのplannerの時間切れ」）。`dagq planners`の行は`request_id`を持つ。
+-9. **test**: `tests/it/request_planner.rs`がcmuxのdoubleとstubのplan reviewで確かめる。`a_request_the_inbox_records_gets_one_planner_whose_submission_proposes_it`: inboxの`request add`（`--file`・`--note`・`--ref`）が記録と`request_recorded`を残し、次のpassで依頼にplannerが1つだけ立ち（次のpass、上限を上げたpass、直接の`open_request_planner`でも2つ目は立たない）、依頼のファイルがplannerのディレクトリに書かれpromptがそれを指して人の言葉を載せないこと、promptの中身、workspaceからのsubmitで依頼が`proposed`になりproposalが結ばれ（2つ目のproposalも結ばれ、知らせは1回）`watch`の知らせになり、idleのplannerに`/exit`が送られること。`only_the_requests_own_planner_declines_it_and_the_inbox_is_told`: 他のplanner・inbox・人の`request decline`が拒まれて`authorization_denied`が残り、依頼のplanner自身の却下で`declined`と`rephrase or drop the request`のattentionになり、2回目の却下は拒まれ、その後plannerが立たないこと。`a_planner_question_about_a_request_reaches_its_planner_or_a_new_one_and_three_exhaust_it`: 依頼の`planner_question`のanswerが生きているplannerに打ち込まれ、plannerが居ないあいだのanswerは新しいplannerがpromptに持って立ち、決めずに終わったplannerの後に3つ目まで立ち`exhausted`とattentionになり、その後のanswerは閉じられること。`requests_share_the_limit_of_the_runtimes_planners_and_come_first`: 依頼がfindingのplannerと上限を共有し先に立つこと。`questions_about_two_requests_stay_apart_and_a_closed_answer_opens_no_planner`: 2つの依頼の`planner_question`が同時に開け、未回答・closeされたanswer・別の依頼のanswerではanswerを持つplannerが立たないこと。`an_ask_or_an_event_alone_leads_the_prompt_to_its_goal`: goalのtaskのask、goalのfindingのask、goal自身のevent、goalのtaskのeventのどれか1つだけを参照にした依頼のpromptに、そのgoalのacceptance・constraints・taskが載ること。`only_the_inbox_and_a_person_record_a_request`: planner・worker・observer・5つのjobの`request add`が拒まれ`authorization_denied`に残り、inboxと人の記録はそれぞれの`requested_by`になり、空の言葉と知らない参照が拒まれること。`tests/it/planner_headless.rs`の`a_headless_request_planner_takes_the_answer_as_its_next_turn_and_declines`は非対話（background）の依頼のplannerで、`planner_question`のanswerが次のturnの依頼になり、そのturnの`request decline`で依頼が`declined`になることを確かめる。規則は`src/domain/plan_request.rs`、判定は`src/application/commands/requests.rs`と`src/domain/authorization.rs`、受け渡しは`src/application/planner_handoff.rs`のunit test。
++8. **終わりと時間切れ**: 依頼のplannerは、draft・findingのplannerと同じく、仕事を終えてidleになれば`end_runtime_planners`で`/exit`され（非対話のplannerでは終了の依頼）、`planner_closed`（payloadに`request_id`）を残す。画面も読めないまま`--planner-timeout`を過ぎれば（非対話のplannerではturnが上限で止められれば）、plannerごとに1回`planner_unresponsive`（`subject: "planner"`、`request_id`）がinboxに届く（上の「runtimeのplannerの時間切れ」と[runtimeのplannerの経路](#runtimeのplannerの経路)の「状態」）。非対話のplannerは、submit・却下・決めずに終わったことをturnの終わり（idle marker）とwrapperの終わりから同じ規則で判じ、Claudeが使えないあいだは待って回数に数えない（同じ節の「使えないとき」）。`dagq planners`の行は`request_id`を持つ。
++9. **test**: `tests/it/request_planner.rs`がcmuxのdoubleとstubのplan reviewで確かめる。`a_request_the_inbox_records_gets_one_planner_whose_submission_proposes_it`: inboxの`request add`（`--file`・`--note`・`--ref`）が記録と`request_recorded`を残し、次のpassで依頼にplannerが1つだけ立ち（次のpass、上限を上げたpass、直接の`open_request_planner`でも2つ目は立たない）、依頼のファイルがplannerのディレクトリに書かれpromptがそれを指して人の言葉を載せないこと、promptの中身、workspaceからのsubmitで依頼が`proposed`になりproposalが結ばれ（2つ目のproposalも結ばれ、知らせは1回）`watch`の知らせになり、idleのplannerに`/exit`が送られること。`only_the_requests_own_planner_declines_it_and_the_inbox_is_told`: 他のplanner・inbox・人の`request decline`が拒まれて`authorization_denied`が残り、依頼のplanner自身の却下で`declined`と`rephrase or drop the request`のattentionになり、2回目の却下は拒まれ、その後plannerが立たないこと。`a_planner_question_about_a_request_reaches_its_planner_or_a_new_one_and_three_exhaust_it`: 依頼の`planner_question`のanswerが生きているplannerに打ち込まれ、plannerが居ないあいだのanswerは新しいplannerがpromptに持って立ち、決めずに終わったplannerの後に3つ目まで立ち`exhausted`とattentionになり、その後のanswerは閉じられること。`requests_share_the_limit_of_the_runtimes_planners_and_come_first`: 依頼がfindingのplannerと上限を共有し先に立つこと。`questions_about_two_requests_stay_apart_and_a_closed_answer_opens_no_planner`: 2つの依頼の`planner_question`が同時に開け、未回答・closeされたanswer・別の依頼のanswerではanswerを持つplannerが立たないこと。`an_ask_or_an_event_alone_leads_the_prompt_to_its_goal`: goalのtaskのask、goalのfindingのask、goal自身のevent、goalのtaskのeventのどれか1つだけを参照にした依頼のpromptに、そのgoalのacceptance・constraints・taskが載ること。`only_the_inbox_and_a_person_record_a_request`: planner・worker・observer・5つのjobの`request add`が拒まれ`authorization_denied`に残り、inboxと人の記録はそれぞれの`requested_by`になり、空の言葉と知らない参照が拒まれること。`tests/it/planner_headless.rs`の`a_headless_request_planner_takes_the_answer_as_its_next_turn_and_declines`は非対話（background）の依頼のplannerで、`planner_question`のanswerが次のturnの依頼になり、そのturnの`request decline`で依頼が`declined`になることを確かめる。`tests/it/planner_headless_turns.rs`の`a_headless_request_planners_submission_proposes_the_request_and_its_end_closes_it`はturnのsubmitで依頼が`proposed`になり、終了の依頼でplannerが`request_id`付きの`planner_closed`で閉じること、`a_headless_request_planners_answer_reaches_a_new_one_and_undecided_ends_exhaust_the_request`は終わったplannerのあいだに答えられた（findingもtaskも無い）`planner_question`のanswerが新しい非対話のplannerの最初のturnのpromptに載り、決めずにturnを終えたplannerが3つで`exhausted`になることを確かめる。規則は`src/domain/plan_request.rs`、判定は`src/application/commands/requests.rs`と`src/domain/authorization.rs`、受け渡しは`src/application/planner_handoff.rs`のunit test。
+ 
+ ## 予定: inboxからの依頼と非対話のplanner<a id="予定-inboxからの依頼と非対話のplanner"></a>
+ 
+diff --git a/docs/design/supervisor-lifecycle/plan-review.md b/docs/design/supervisor-lifecycle/plan-review.md
+index 57d8188a..ecd204c0 100644
+--- a/docs/design/supervisor-lifecycle/plan-review.md
++++ b/docs/design/supervisor-lifecycle/plan-review.md
+@@ -45,8 +45,8 @@ execの[引き継ぎ](handoff.md)を待つあいだに終わったjobと、`prep
+    - **重さの予測**（ADR-0079の決定2、task 575）: `pass` / `revise` / `concern`のどれでも、適用の前にproposalの`submitted`だったtaskに対して`predictions`を検査する。無い、配列として読めない、taskが足りない・余る・重なる、`size` / `nature`が知らない値、`uncertainty` / `rework_probability`が0〜1の外、`expected_output_tokens`が正の整数でない、のどれかなら予測は1件も記録せず、理由を`plan_review_finished`の`prediction_error`に残す（通れば`null`）。verdictの適用はそのまま行う。通れば`plan_review_finished`の後に、taskごとに`task_weight_predicted`（taskに付け、`proposal_id`、`plan_review_id`、`attempt`、`prediction`（`size`、`nature`、`uncertainty`、`expected_output_tokens`、`rework_probability`、`reason`）、`model`、`effort`）を記録する。`model` / `effort`は`plan_review_finished`が閉じたjobのsessionの`session_closed`のもの（transcriptから読めなければnull）。出し直しや`reopen`でかけ直したtaskには新しい予測を上書きせず追記し、読む側は最後のものを使う（[stats](stats.md#重さの予測と実績)）。検査中の編集で捨てたverdict（`plan_review_discarded`）と失敗したjobの予測は記録しない。claimは予測を作らず、workerの起動のmodel / effortも変えない。
+ 7. **失敗**（`fail_plan_review`）: 行がまだ自分の未完了の行でなければ何もせず、proposalがもう`submitted`でないか保留されていれば行を`interrupted`で閉じる（6と同じ）。jobの開始より後にproposalのいずれかのtaskに`task_edited`があれば（6と同じ判定。ADR-0041の決定9、task 596）、編集後の内容はまだ検査されていないので人に渡さず、行を`interrupted`で閉じて（`error`に失敗の理由と`task N of the proposal was edited during its review`）、保留を付けず、`plan_review_failed`の代わりに`plan_review_discarded`（`proposal_id`、`plan_review_id`、`attempt`、`verdict: null`、`edited`、`error`）を記録する。proposalは`submitted`のままで、次のpassで編集後の内容をかけ直す（`interrupted`は`attempt`に数えない）。検査中でない編集（jobの開始の前）と他のproposalのtaskの編集では、下のとおり`failed`にする。`[roles.plan_review]`に`provider`を書いた役割で、jobのproviderが使えなかった（起動できない・認証・利用上限。`provider_unusable`）ときは、行を`interrupted`で閉じ、保留もattentionも付けず、次のpassでもう一方のproviderでかけ直す（下の[Codexで動かす](#codexで動かす)の「使えないprovider」。`--no-claude`ではClaudeに切り替えないので、次のpassで行き先が無くjobを起動せずに下のとおり`failed`で保留する）。それ以外で、起動できない、非0終了、timeout、stdoutにverdictが無い、verdictを適用できない（許されないaction、proposal内のtaskの`reopen`）は、行を`failed`で閉じ、`review_hold = failed`にして`plan_review_failed`（`code: job_failed`、`proposal_id`、`attempt`、`error`、`duration_secs`、`status: submitted`、`prompt_bytes`（4の「byte数の記録」。promptを組み立てる前の失敗と`--no-claude`で行き先が人のときはnull））を記録する。proposalは`submitted`のまま動かさず、supervisorは同じproposalを自分では取り直さない。`plan_review_failed`はattention（`plan review by hand`）で、`status`の`attention`にも保留が解けるまで出る（`concern`で保留したのに`approve_plan`のaskが自由記述の回答で閉じられたproposalも同じattentionになる）。人の指示で、inboxがtaskを`ready --bypass-review`にするか、plannerかinboxが`dagq submit --proposal N`を打つ。保留中のproposalはtaskとgoalを足さずにそのまま出し直せ（`proposal_resubmitted`、submitの時刻が新しくなる）、plan reviewにかけ直される。
+ 8. **片付け**（`settle_proposals`、各pass）: `submitted`なのに`submitted`のtaskが1つも無くなったproposal（人がbypassで`ready`にした、cancelした）は、jobが走っていなければ、cancelされていないtaskが残れば`accepted`、無ければ`canceled`にし、保留を消して`proposal_settled`を記録する。goalとtaskが他のproposalに入れるようになり、attentionも消える。
+-9. **reviseの配送**（`tend_planners`、各pass）: plannerが終わったかは`planner_view`で決め、`exited`か`lost`（wrapperのheartbeatが止まった）、または`cmux workspace list`に居ない上でwrapperも死んでいるものだけを終わったとみなす（居ないだけでは証拠にせず、workerと同じくwrapperで判定する）。まず差し戻し中のproposalを見て、渡した相手のplannerが終わっていれば`plan_revise_lost`を記録して未配送に戻し、終わっていないのに`--planner-timeout`（既定3600秒）を過ぎても出し直されていなければ`planner_unresponsive`（`planner_id`、`waited_secs`）を記録する。まだ誰にも渡せていないreviseも、`revised_at`から期限を過ぎれば`planner_unresponsive`（`planner_id: null`）にする。このeventは待っている理由として、上限を埋めているruntimeのplanner（生きているもの）を`holders`（`planner_id`、`state`、`busy`、`proposal_id`、`draft_task_id`、`finding_id`、`request_id`）に載せ、`reason`にも`planner N (理由)`で並べる（`PlannerHold`、`Supervisor::planner_holds`。task 884）。`busy`はそのplannerを10で終わらせない理由（`busy_reasons`）で、`at_work`（idleでない）、`revise`（自分宛てのreviseを出し直していない）、`revise_pending`（自分のworkspaceが持ち主のreviseがidle待ち）、`planner_question_open`（`planner_question`が人の答え待ち）、`planner_answer_undelivered`（答えがまだ打ち込まれていない）、`planner_answer_typed`（答えを打ち込んだ後にまだ止まっていない）、`exiting`（`/exit`を送った）のどれか。空ならidleで終わる番のもの。どちらも1回だけで、attentionは`check the planner`、workspaceは閉じない。これとは別に、runtimeが立てたplannerで入力・idle marker・推定のidleのどれも期限のあいだ見えないもの（reviseを渡されたものを除く）は、plannerごとに1回`planner_unresponsive`（`subject: "planner"`）になる（`tell_of_silent_planners`、[Planner sessions](plan-planners.md)の「runtimeのplannerの時間切れ」、task 805）。配送を取ったまま記録の無いもの（supervisorが間で死んだ）は30秒後に未配送に戻す。次に未配送のreviseをproposalのID順に配る。持ち主のworkspace（`owner_workspace_id`）のplannerが生きていれば、`idle`になるのを待ち、`claim_revise`（`revise_sent_at`がnullの行だけを条件付きUPDATEで取る。2つのsupervisorが同じreviseを二重に配らない）で取ってから`plan_revise_request`（指摘、先例、`dagq submit --proposal N`で出し直すこと、意図の変わる修正は人に聞くこと）を`submit_input`で打ち込み、`plan_revise_sent`（`planner_id`、`workspace_id`、`opened: false`、`launch: null`、`effort_raised: false`、上げなかった理由の`effort_not_raised`）を記録する（生きているsessionのmodel / effortは切り替えない。[Actor model](actor-model.md#差し戻しで開き直すplannerの段上げ)）。打ち込みが失敗すれば取った配送を戻す。持ち主が居ないか終わっていれば、runtimeが立てたplannerで生きているものが`--runtime-planners`（既定1、run slotとは別。人が開いたplannerは数えない）未満のときだけ、配送を取って`open_runtime_planner`で新しいplannerを立て（初期promptに指摘。agentのeffortは`[roles.runtime_planner]`の値か`medium`から1段上げ、`xhigh`が上限。ADR-0079の決定7の(c)、task 580）、`plan_revise_sent`（`opened: true`、起動した`launch`（`source: revise_escalation`、`escalated_from`、`escalation_reason: plan_review_revise`）、`effort_raised: true`）を記録する。上限に達していれば待つ。上限で待つ持ち主の居ないreviseが`revised_at`から`--planner-timeout`を過ぎたら、そのpassの終わりに枠を1つ空ける（`release_runtime_planner`。task 884）: runtimeのplannerで生きていて`idle`、`busy`が空でなく（空なら10が終わらせる）`planner_question_open`（人の答え待ち）も`planner_answer_undelivered`（打ち込みに失敗した答えはinboxがそのworkspaceに手で届ける）も含まず、`planner_last_activity`（入力・supervisorの打ち込みの印・idle marker）が期限より古いものの1つに`/exit`を送り、`planner_released`（queueのevent。`planner_id`、`workspace_id`、`proposal_id`、`busy`、`last_activity`、`idle_since`、`reason`）を記録する。runtimeのplannerに`/exit`を送ってまだ終わっていないものがあれば、それが枠を空けるので送らない。終わったplannerは10のとおり閉じ、次のpassでreviseにruntimeのplannerが立つ（自分宛てのreviseを持っていたplannerなら、そのreviseは`plan_revise_lost`で未配送に戻り、同じ上限を並んで待つ）。上限の外でplannerを立てる形は取らない: idleで何も待たないplannerは仕事をしておらず、残すと上限を埋め続けるため。人の答えを待つplannerは閉じない（答えが届く先が要る）ので、そのときreviseは待ち続け、inboxは`holders`で理由を読む。持ち主のworkspaceが一覧に居ないのにwrapperが生きているときも待つ（期限でinboxに届く）。reviseを配った後、同じ上限の残りで、人がinboxに頼んだ計画の依頼のplanner（[inboxからの計画の依頼](plan-planners.md#inboxからの計画の依頼)）、runtimeやjobが作ったdraftのplanner（[Draft planners (supervisor)](draft-planners.md#draft-planners-supervisor)）の順に立てる。
+-10. **runtimeが立てたplannerの終わり**: runtimeが立てたplannerのうち、終わったものはworkspaceが`cmux workspace list`に居れば閉じ、行を閉じて`planner_closed`を記録する（`end_planner`。理由の`code`は`runtime_exited` / `runtime_lost` / `runtime_session_gone` / `runtime_exit_timed_out`。[`plan` / `planners`](plan-planners.md)の「plannerの終わりの記録」、ADR-t1300-1）。`idle`で、9の`busy`が空のもの（自分宛てのreviseが残っていない（proposalを出し直した）、自分のworkspaceが持ち主の未配送のreviseが無い、`planner_question`を待っていない）には1回だけ`/exit`を送り、終了が記録された後のpassで上のとおり閉じる。`/exit`から`WorkspaceBackend::exit_timeout`を過ぎても終わらなければworkspaceを閉じて行を閉じる。`planner_question`を待っているかは`Supervisor::question_wait`で決める（[Draft planners (supervisor)](draft-planners.md#draft-planners-supervisor)の5）: 閉じていないaskがあれば待っている。答えを打ち込んだaskは、打ち込んだ時刻の下限として配送を取った時刻（`planner_answer_claimed`の`claimed_at`。同じaskとworkspaceの最新のもの。port `answer_claimed_at`）とplannerの`idle_since`を比べ、`idle_since`がそれ以下（同じ秒を含む。passのviewは打ち込みの前に取るので）なら答えをまだ読んでいないとして待っている。askの`closed_at`は打ち込みの後に書くので比べない（打ち込みの後でcloseより前にidleになったplannerを待っているとみなし、枠を持ち続けた。task 884）。配送を取らずに新しいplannerの初期promptに載せた答えは、plannerを立てた時刻と比べる。人が開いたplannerは`/exit`を送らず、agentの終了が記録されて猶予（60秒）を過ぎたものだけを同じpassの初めに閉じる（[`plan` / `planners`](plan-planners.md)の「人のplannerの終わり」、[ADR-t1300-1](../../adr/2026-10-02-t1300-1-runtime-closes-exited-person-planners-after-a-grace.md)）。
++9. **reviseの配送**（`tend_planners`、各pass）: plannerが終わったかは`planner_view`で決め、`exited`か`lost`（wrapperのheartbeatが止まった）、または`cmux workspace list`に居ない上でwrapperも死んでいるものだけを終わったとみなす（居ないだけでは証拠にせず、workerと同じくwrapperで判定する）。まず差し戻し中のproposalを見て、渡した相手のplannerが終わっていれば`plan_revise_lost`を記録して未配送に戻し、終わっていないのに`--planner-timeout`（既定3600秒）を過ぎても出し直されていなければ`planner_unresponsive`（`planner_id`、`waited_secs`）を記録する。まだ誰にも渡せていないreviseも、`revised_at`から期限を過ぎれば`planner_unresponsive`（`planner_id: null`）にする。このeventは待っている理由として、上限を埋めているruntimeのplanner（生きているもの）を`holders`（`planner_id`、`state`、`busy`、`proposal_id`、`draft_task_id`、`finding_id`、`request_id`）に載せ、`reason`にも`planner N (理由)`で並べる（`PlannerHold`、`Supervisor::planner_holds`。task 884）。`busy`はそのplannerを10で終わらせない理由（`busy_reasons`）で、`at_work`（idleでない）、`revise`（自分宛てのreviseを出し直していない）、`revise_pending`（自分のworkspaceが持ち主のreviseがidle待ち）、`planner_question_open`（`planner_question`が人の答え待ち）、`planner_answer_undelivered`（答えがまだ打ち込まれていない）、`planner_answer_typed`（答えを打ち込んだ後にまだ止まっていない）、`provider_wall`（非対話のplannerの最後のturnがClaudeのログイン切れ・利用上限・起動の失敗で終わり、Claudeを待っている。[`plan` / `planners`](plan-planners.md#runtimeのplannerの経路)の「使えないとき」、ADR-t1394-2決定5）、`exiting`（`/exit`を送った）のどれか。空ならidleで終わる番のもの。どちらも1回だけで、attentionは`check the planner`、workspaceは閉じない。これとは別に、runtimeが立てた対話のplannerで入力・idle marker・推定のidleのどれも期限のあいだ見えないもの（reviseを渡されたものを除く）は、plannerごとに1回`planner_unresponsive`（`subject: "planner"`）になる（`tell_of_silent_planners`、[Planner sessions](plan-planners.md)の「runtimeのplannerの時間切れ」、task 805）。非対話のplanner（`route: headless`）はこの期限で見ず、wrapperがturnを`[stall]`の上限で止めたときに、plannerごとに1回同じ`planner_unresponsive`になる（`tell_of_stopped_planner_turns`、ADR-t1394-2決定3）。配送を取ったまま記録の無いもの（supervisorが間で死んだ）は30秒後に未配送に戻す。次に未配送のreviseをproposalのID順に配る。持ち主のworkspace（`owner_workspace_id`。非対話のbackgroundのplannerはそのhandle）のplannerが生きていれば、`idle`になるのを待ち（Claudeを待つ非対話のplanner（`provider_wall`）には、続きのturnが終わるまで置かない）、`claim_revise`（`revise_sent_at`がnullの行だけを条件付きUPDATEで取る。2つのsupervisorが同じreviseを二重に配らない）で取ってから`plan_revise_request`（指摘、先例、`dagq submit --proposal N`で出し直すこと、意図の変わる修正は人に聞くこと）を`send_to_planner`で届け（対話のplannerには`submit_input`で打ち込み、非対話のplannerには次のturnの依頼（`what: revise`、queueのevent `turn_requested`）として置く）、`plan_revise_sent`（`planner_id`、`workspace_id`、`opened: false`、`launch: null`、`effort_raised: false`、上げなかった理由の`effort_not_raised`）を記録する（生きているsessionのmodel / effortは切り替えない。[Actor model](actor-model.md#差し戻しで開き直すplannerの段上げ)）。打ち込みが失敗すれば取った配送を戻す。持ち主が居ないか終わっていれば、runtimeが立てたplannerで生きているものが`--runtime-planners`（既定1、run slotとは別。人が開いたplannerは数えない）未満のときだけ、配送を取って`open_runtime_planner`で新しいplannerを立て（初期promptに指摘。agentのeffortは`[roles.runtime_planner]`の値か`medium`から1段上げ、`xhigh`が上限。ADR-0079の決定7の(c)、task 580）、`plan_revise_sent`（`opened: true`、起動した`launch`（`source: revise_escalation`、`escalated_from`、`escalation_reason: plan_review_revise`）、`effort_raised: true`）を記録する。上限に達していれば待つ。上限で待つ持ち主の居ないreviseが`revised_at`から`--planner-timeout`を過ぎたら、そのpassの終わりに枠を1つ空ける（`release_runtime_planner`。task 884）: runtimeのplannerで生きていて`idle`、`busy`が空でなく（空なら10が終わらせる）`planner_question_open`（人の答え待ち）も`planner_answer_undelivered`（打ち込みに失敗した答えはinboxがそのworkspaceに手で届ける）も`provider_wall`（Claudeを待つ非対話のplannerを解くと、待ちが決めずに終わった回数に入る）も含まず、`planner_last_activity`（入力・supervisorの打ち込みの印・idle marker）が期限より古いものの1つに`/exit`を送り、`planner_released`（queueのevent。`planner_id`、`workspace_id`、`proposal_id`、`busy`、`last_activity`、`idle_since`、`reason`）を記録する。runtimeのplannerに`/exit`を送ってまだ終わっていないものがあれば、それが枠を空けるので送らない。終わったplannerは10のとおり閉じ、次のpassでreviseにruntimeのplannerが立つ（自分宛てのreviseを持っていたplannerなら、そのreviseは`plan_revise_lost`で未配送に戻り、同じ上限を並んで待つ）。上限の外でplannerを立てる形は取らない: idleで何も待たないplannerは仕事をしておらず、残すと上限を埋め続けるため。人の答えを待つplannerは閉じない（答えが届く先が要る）ので、そのときreviseは待ち続け、inboxは`holders`で理由を読む。持ち主のworkspaceが一覧に居ないのにwrapperが生きているときも待つ（期限でinboxに届く）。reviseを配った後、同じ上限の残りで、人がinboxに頼んだ計画の依頼のplanner（[inboxからの計画の依頼](plan-planners.md#inboxからの計画の依頼)）、runtimeやjobが作ったdraftのplanner（[Draft planners (supervisor)](draft-planners.md#draft-planners-supervisor)）の順に立てる。
++10. **runtimeが立てたplannerの終わり**: runtimeが立てたplannerのうち、終わったものはworkspaceが`cmux workspace list`に居れば閉じ、行を閉じて`planner_closed`を記録する（`end_planner`。理由の`code`は`runtime_exited` / `runtime_lost` / `runtime_session_gone` / `runtime_exit_timed_out`。[`plan` / `planners`](plan-planners.md)の「plannerの終わりの記録」、ADR-t1300-1）。`idle`で、9の`busy`が空のもの（自分宛てのreviseが残っていない（proposalを出し直した）、自分のworkspaceが持ち主の未配送のreviseが無い、`planner_question`を待っていない）には1回だけ`/exit`を送り、終了が記録された後のpassで上のとおり閉じる。`/exit`から`WorkspaceBackend::exit_timeout`を過ぎても終わらなければworkspaceを閉じて行を閉じる。`planner_question`を待っているかは`Supervisor::question_wait`で決める（[Draft planners (supervisor)](draft-planners.md#draft-planners-supervisor)の5）: 閉じていないaskがあれば待っている。答えを打ち込んだaskは、打ち込んだ時刻の下限として配送を取った時刻（`planner_answer_claimed`の`claimed_at`。同じaskとworkspaceの最新のもの。port `answer_claimed_at`）とplannerの`idle_since`を比べ、`idle_since`がそれ以下（同じ秒を含む。passのviewは打ち込みの前に取るので）なら答えをまだ読んでいないとして待っている。askの`closed_at`は打ち込みの後に書くので比べない（打ち込みの後でcloseより前にidleになったplannerを待っているとみなし、枠を持ち続けた。task 884）。非対話のplannerは秒で比べず、その答えの依頼（`turn_requested`の`what`が`answer of ask <id>`）を取ったturnの`turn_finished`があれば読み終えたとする（`headless_answer_taken`。同じ秒のうちに終わったturnの後も待ち続けて`/exit`されなかった）。依頼の記録が無ければ秒で比べる。非対話のplannerへの`/exit`は終了の依頼（`turns/exit`）として置く。配送を取らずに新しいplannerの初期promptに載せた答えは、plannerを立てた時刻と比べる。人が開いたplannerは`/exit`を送らず、agentの終了が記録されて猶予（60秒）を過ぎたものだけを同じpassの初めに閉じる（[`plan` / `planners`](plan-planners.md)の「人のplannerの終わり」、[ADR-t1300-1](../../adr/2026-10-02-t1300-1-runtime-closes-exited-person-planners-after-a-grace.md)）。
+ 11. **answer**（`decide_plan`、1トランザクション）: 回答済み・未closeの`approve_plan`のask（`plan_answers`）のうち、回答が`ready` / `send_back` / `send_back: <理由>` / `cancel`で、askのtaskのproposalがまだ`submitted`で`review_hold = concern`のものに適用する。`ready`はproposalを`accepted`にしてtaskを`ready`、`send_back`は`revising`にして`revise_reasons`を「人がask Nで差し戻した: <理由>」と直近のverdictのreasonsにし（配送は9）、`cancel`はproposalを`canceled`にしてsubmittedのtaskをcancelする。askを閉じ、proposalの直近のverdictのある行がconcernなら`plan_review_outcome`（[差し戻しの分類コード](#差し戻しの分類コード)）を、続けて`plan_decided`（`proposal_id`、`ask_id`、`answer`、`status`）を記録する。proposalが動いていればaskを閉じ、`ask_closed`（`ask_id`、`kind`。task 568）だけを記録する。それ以外の回答は適用せず、`ask_answered`の`runtime_delivers`が`false`なので`read the answer of ask N and close it`のattentionになる。適用できる回答は`runtime_delivers: true`で、`status`では`applying the answer of ask N (runtime)`。
+ 12. **設定**: runtimeが同時に立てるplannerの上限`runtime_planners`（`supervise --runtime-planners N`の明示 > main checkoutの`dagq.toml`の`[supervisor] runtime_planners` > 既定1。supervisorが各passで読み直し、`up`し直さずに次のpassから効く。`up --runtime-planners N`は明示されたときだけsupervisorに渡す。[Run environment](run-environment.md)の`[supervisor]`、task 941）、`--planner-timeout SECS`（既定3600）、`--plugin-dir PATH`（runtimeが立てるplannerが読むplugin）。`up`は自分の`--plugin-dir`をsupervisorにも渡す。
+ 13. **test**: Codexで動かすtestは下の[Codexで動かす](#codexで動かす)。`tests/it/plan_review.rs`がstubのheadless provider（台本のverdictを印字する）とcmuxのdoubleで、pass（actionの適用とprompt）、`cancel_duplicate`が`cancel --duplicate-of`と同じ記録になり`show`・`list`・`stats`に出ることと、自分自身・存在しない・canceled・重複としてcancelされた重複先の拒否（task 402）、生きているplannerへのrevise（acceptanceとdescriptionの食い違いの指摘と、先例の回答が載ること）と期限切れのinboxへの通知、閉じたplannerの代わりにruntimeが立てるplannerと同時の数の上限（上限で待つreviseの期限切れを含む）、`tests/it/planner_slots.rs`が、答えを打ち込んだ後でaskのcloseより前にidleになったdraftのplannerが`/exit`されて行が閉じることと打ち込みより前のidleのplannerが残ること、上限で期限を過ぎた持ち主の居ないreviseの`planner_unresponsive`が`holders`と理由を載せ、答え待ちでないidleのplannerが`planner_released`で`/exit`されて終わった後にreviseにruntimeのplannerが立つこと、人の答えを待つplannerは`planner_question_open`として残ること（task 884）、concernのaskとanswer（`ready` / `send_back: 理由` / `cancel`）の適用、reviseの上限超え、jobの失敗と適用できないverdict、保留したproposalの出し直しとbypassによる片付け、interruptの先行、readyのtaskの`reopen`（claimされず、runtimeのplannerが直して出し直す。検査中のproposalのtaskは動かさない）、promptの`ready`のtaskの要約と全文の付き方（同じhotspotを触る`ready`のtaskがあるqueueでは、hotspotの行に両方のtaskが並びそのtaskだけ全文が付き、無いqueueでは`queued_tasks`が空で全文が付かない。`src/application/prompt.rs`の単体testは、落とした件数の表示と、長いfield（約3KB）のreadyのtask 170件で全文の約58万byteに対しpromptが約4.7万byte（8分の1未満）に収まることを確かめる）、promptの上限（task 1561。`src/application/prompt.rs`の単体test: `plan_review_gives_in_full_the_most_related_tasks_first_within_its_limit`が全文の件数の上限と選ぶ順（依存 → 共有するhotspotの数 → 重複の候補の位置 → 新しい順）と、省いたIDと`dagq show ID --full`の注記を、`a_huge_task_is_left_out_of_the_full_text_and_the_next_ones_fill_its_bytes`が巨大な1件を飛ばして次のtaskで全文のbyteを埋めることを、`plan_review_prompt_of_hundreds_of_ready_tasks_on_a_shared_hotspot_keeps_to_its_limit`が全てhotspotで重なる600件のqueueで要約・人が答えたask・全文が上限で切られ、件数と読む方法が載り、言語の指示を含めて全体の上限に収まることを、`required_sections_over_their_limit_are_read_with_the_commands_the_job_may_run`が必須の節（1MBのtask、300KBのgoal、3000件のtask）を読むコマンドの案内に替え、理由をpromptと`over_limit`に書いて全体の上限に収めることを、`the_optional_sections_share_the_room_the_required_ones_leave`が必須の節が上限に近いとき省いてよい節が残りを順に分けることを確かめる。`src/main.rs`の`tests::the_plan_review_job_may_run_each_read_its_prompt_names`は、`PLAN_REVIEW_READS`の各コマンドが`queue.read`だけを要し、`plan-review-job`のroleでCLIの権限の検査を通り、queue serviceのユースケースがあることを確かめる。`tests/it/plan_review_prompt_bytes.rs`は、`plan_review_finished`と`plan_review_failed`の`prompt_bytes`の`total`がjobが受けたprompt（`prompt.txt`）のbyte数と等しく、節ごとの`sections`の合計が`total`になることを確かめる）、promptに載る重複と実装済みの候補（relatedのcompletedのtask、searchのcompleted・canceledのtaskと着地したcommitが載り、proposal自身のtaskは載らず、似たもののないtaskは空）、空白の無い日本語のtitleのproposalのtaskのsearchの候補に、語を共有する日本語のtitleの`completed`のtaskが載ること（task 600。`src/infrastructure/search.rs`の単体testは、日本語だけのtitleから作ったqueryがtitleかdescriptionで語を共有するtaskに当たり、共有しないtaskに当たらないことを確かめる）、検査中に編集されたtaskのproposalのverdict（pass / revise / concern）を適用せずに編集後の内容でかけ直すこと（stubのjobが実行中に`edit_task`する。検査の前の編集と他のproposalのtaskの編集は適用を妨げない）、実行中に`edit_task`してから非0終了したjobが`failed`にならず`interrupted`で閉じ、保留も`plan_review_failed`も無く`plan_review_discarded`（`verdict: null`）を残して編集後の内容でかけ直されること、検査の前の編集や他のproposalのtaskの編集の後の失敗は今までどおり`failed`・`review_hold = failed`・`plan_review_failed`になること（task 596）、重さの予測がtaskごとに記録され、足りない予測と形の崩れた予測は記録されずに`prediction_error`が残ってverdictは適用されること（promptに予測の指示と対象のtaskが載ること）、jobとplannerのmodel / effort（表が無ければ何も渡さず`default`を記録、`[roles.plan_review]`があれば渡す、開き直したplannerは1段上がり`xhigh`で止まる、生きているplannerは上げない。`role_tables_set_the_plan_review_and_raise_the_revise_planner_from_them`ほか）、promptが記録を読むCLI（`events --full --task ID`と絞り込み、`timeline RUN`）と読むコマンドを打てることを示し、stubが受けた権限の意図が`read_files_and_queue_cli`（`PLAN_REVIEW_ACCESS`と`GOAL_REVIEW_ACCESS`）であることを確かめる（Claude Codeの`--allowedTools`への訳は`src/infrastructure/adapters.rs`のunit test）。`tests/it/cli_roles.rs`の`reviewer_may_only_read_the_queue`は、`DAGQ_ROLE=reviewer`で`events --full`（絞り込み付き）・`search`・`related`・`observe --history`・`timeline`が役割で拒まれず、書き込むコマンドが拒まれることを確かめる（task 420）。
+diff --git a/docs/design/supervisor-lifecycle/queue-hold.md b/docs/design/supervisor-lifecycle/queue-hold.md
+index 9c7626d0..f6a9f764 100644
+--- a/docs/design/supervisor-lifecycle/queue-hold.md
++++ b/docs/design/supervisor-lifecycle/queue-hold.md
+@@ -4,8 +4,8 @@ type: design
+ title: "認証と利用上限のaskの待ちとanswer"
+ status: current
+ created: 2026-09-27
+-updated: 2026-10-02
+-last_verified: 2026-10-02
++updated: 2026-10-03 # task 1397: a headless runtime planner's turn opens or joins the hold ask
++last_verified: 2026-10-03 # task 1397
+ scope: runtime
+ related:
+   - adr-0047
+@@ -43,7 +43,7 @@ Claude Codeのログインが切れるか利用上限に達すると、新しい
+ [ADR-t813-2](../../adr/2026-09-28-t813-2-provider-per-task-and-mutual-fallback.md)の決定6（ADR-0047決定42をamends、task 818）で、控えの単位はproviderごとになった。このページの`queue_hold`のaskはClaudeの控えで、Codexの控えはaskを開かないqueueイベント（`provider_held` / `provider_released`、[provider-lifecycle](../provider-lifecycle.md#使えないproviderからの切り替え)）。
+ 
+ - **workerのclaimとturn**: 使えるproviderがあれば止めない。askが開いていても（Claudeが控えられていても）Codexのworkerが動かせれば、新しいclaimは控えず（`claim_held`を書かない）、taskは非対話のCodexで始まる。Codexが控えられていればCodexのtaskは非対話のClaudeで始まる。両方が使えない（Claudeのaskが開き、Codexが無いか控えられている）ときだけ、下の「控え」のとおりaskが新しいclaimを止め、候補は`claim_deferred`（`provider_unavailable`）で控える
+-- **askを開くとき**: Claudeが止まったとき（workerのsessionの画面、headlessのjobの出力、Claudeの非対話のturn）は、Codexが使えても開く（Claudeで動く役割のjob（復旧と、`provider`を書かないreview・goal review・plan review）とobserverは人を待つ）。Claudeの非対話のturnからCodexへ移ったrunはaskの`affected`に入れず、runに`auth_required` / `usage_limited`（`switched_to: codex`）を書く。Codexだけが止まったときは開かない。止まったrunがもう一方へも移れないときはrunを失敗にせず待たせ（`provider_waiting`）、Claudeの認証と利用上限か、両方使えないときは、providerに関わらずrunが`raise_wall`でaskに入る（壁は開いている控えのaskの理由か、認証・利用上限の側の理由）。切り替えの上限でCodexから移れずClaudeが使えるときはaskを開かず、Codexの控えが解けた後に同じthreadへもう一度送る
++- **askを開くとき**: Claudeが止まったとき（workerのsessionの画面、headlessのjobの出力、Claudeの非対話のturn、非対話のruntimeのplannerのturn）は、Codexが使えても開く（Claudeで動く役割のjob（復旧と、`provider`を書かないreview・goal review・plan review）とobserverは人を待つ）。Claudeの非対話のturnからCodexへ移ったrunはaskの`affected`に入れず、runに`auth_required` / `usage_limited`（`switched_to: codex`）を書く。非対話のruntimeのplannerのturnがClaudeのログイン切れ・利用上限で止まったときは、runもjobも名指さないaskを開くか開いているaskに加わり（`affected`に入らない）、queueのevent `provider_waiting`（`planner_id`・`turn`・`reason`・`ask_id`）を残す。plannerは終わらずに待ち、答えで控えが解けた後のpassで、失敗したturnの依頼を載せた`provider retry`のturnで続ける（`tend_planner_walls`、[`plan` / `planners`](plan-planners.md#runtimeのplannerの経路)の「使えないとき」、ADR-t1394-2決定5）。Codexだけが止まったときは開かない。止まったrunがもう一方へも移れないときはrunを失敗にせず待たせ（`provider_waiting`）、Claudeの認証と利用上限か、両方使えないときは、providerに関わらずrunが`raise_wall`でaskに入る（壁は開いている控えのaskの理由か、認証・利用上限の側の理由）。切り替えの上限でCodexから移れずClaudeが使えるときはaskを開かず、Codexの控えが解けた後に同じthreadへもう一度送る
+ - **`done`**: 下の適用に加え、askを閉じるsupervisorがCodexの控えも解く（`provider_released`の`why: done`。どのsupervisorも毎passでqueueの控えを読み直す）。控えのaskに入って待つrunへの「続けて」は、runの今のproviderに行く
+ - **Claudeで動く役割**: 復旧・observerと、`[roles.review]`に`provider`を書かないrunのreview、`[roles.goal_review]`に`provider`を書かないgoal review、`[roles.plan_review]`に`provider`を書かないplan review、`[roles.throughput_review]`に`provider`を書かないスループットの見直し（askのあいだ始めない）の控えは今までどおりaskに従う
+ - **providerを書いた役割のjob**（[ADR-t1063-1](../../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)の決定5がADR-t813-2の決定6をamends、task 1065。今はgoal review・plan review（task 1218。[Plan review](plan-review.md#codexで動かす)）・スループットの見直し（task 1220。[Throughput review](throughput-review.md#codexで動かす)。Codexが止まると終わりの`provider_unusable`を見てsupervisorが`ProviderHold`で控え、その期間をもう一方で始め直す）とrunのreview。runのreviewは[ADR-t1207-1](../../adr/2026-09-30-t1207-1-codex-run-review.md)）: jobを止めるのは、その役割のproviderと切り替え先（その役割を動かす実装を持つもう一方のprovider）の両方が控えられているか、supervisorに無いときだけ。Claudeの控えのaskが開いていても、Codexで動けるgoal reviewはCodexで起動し、Codexが控えられていればClaudeで起動する（[Goal review](goal-review.md)の3）。Codexのgoal reviewが認証・利用上限・起動の失敗で止まったときはaskを開かず`ProviderHold`で控え（`provider_held`の`run_id`はnull）、Claudeのgoal reviewが止まったときは今までどおりaskを開いてjobを`affected`に足す。どちらもgoal reviewの行は`interrupted`で閉じ、次のpassでもう一方のproviderで起動し直す（両方控えられていれば起動しない）。runのreviewも同じく、Codexが止まればaskを開かず`ProviderHold`で控え、`review_retried`を記録して同じpassでもう一方で起動し直し、両方使えなければ`Phase::ReviewHeld`で待つ。`--no-claude`では切り替え先が無いので待たず、`review_failed`としてleaseを放し`approve_landing`のaskで人を待つ（ADR-t1207-1 決定 4）。Claudeの控えでaskを開く条件（Claudeでしか動けない役割があること）は変えない。runtimeのplannerと復旧・observer（と`provider = "codex"`を書かないreview・plan review）はClaudeで動くので、Claudeの止まりは今までどおりaskを開く
+@@ -99,4 +99,5 @@ runのeventかleaseが読めなかったpassは閉じず、次のpassで読み
+ - queueイベント: `claim_held` / `claim_resumed`（理由`authentication` / `usage_limit`、`ask_id`）、`queue_hold_applied`、runの無いjobの`ask_updated`・`auth_required`・`usage_limited`（`EventKind::is_queue`）
+ - runイベント: `hold_answer_applied`、`hold_continue_sent`、`job_restarted`、`runtime_error`（`hold_canceled`）、`auth_required` / `usage_limited`（画面のものと、`job`を持つjobのもの、Codexへ移ったrunの`switched_to`を持つもの）、`provider_switched`
+ - queueイベント（Codexの控え）: `provider_held`、`provider_released`
+-- test: `tests/it/runtime_queue_hold.rs`（利用上限のaskの控えでclaimとreviewが待ち、`done`で再開する／`cancel_affected`でrunを手放す／`done`で失敗したtriageを起動し直す）、`tests/it/runtime_queue_hold_shared.rs`（2つのsupervisorが1件のaskのrunを1つずつ持ち、`cancel_affected`で両方が手放され、`done`でどちらのsessionにも文面が1回ずつ届く／別の生きているsupervisorがleaseを持つrunを待ってから閉じ、leaseの無いrunを`unwatched`にする）、`tests/it/runtime_stall.rs`の`an_idle_session_at_a_login_that_ran_out_waits_in_the_authentication_ask`（ログインの切れで控え、`done`で続きの文面を送る）、`tests/it/runtime_queue_hold_detect.rs`（利用上限の画面で`cost`のaskに入る／2つのreviewがログインの切れで1件のaskにjobとしてまとまり、`done`でやり直して着地する／runとjobが1件のaskに並ぶ）、`tests/it/plan_review.rs`の`a_plan_review_at_the_usage_limit_joins_the_cost_ask_and_starts_again_after_done`、`infrastructure::claude`（`auth_required`・`usage_limited`・`job_wall`）・`domain::queue_hold`・`domain::claim_hold`のunit test
++- queueイベント（非対話のruntimeのplanner）: `provider_waiting`（`planner_id`・`turn`・`provider`・`reason`・`message`・`ask_id`。runの`provider_waiting`はrunイベント）
++- test: `tests/it/runtime_queue_hold.rs`（利用上限のaskの控えでclaimとreviewが待ち、`done`で再開する／`cancel_affected`でrunを手放す／`done`で失敗したtriageを起動し直す）、`tests/it/runtime_queue_hold_shared.rs`（2つのsupervisorが1件のaskのrunを1つずつ持ち、`cancel_affected`で両方が手放され、`done`でどちらのsessionにも文面が1回ずつ届く／別の生きているsupervisorがleaseを持つrunを待ってから閉じ、leaseの無いrunを`unwatched`にする）、`tests/it/runtime_stall.rs`の`an_idle_session_at_a_login_that_ran_out_waits_in_the_authentication_ask`（ログインの切れで控え、`done`で続きの文面を送る）、`tests/it/runtime_queue_hold_detect.rs`（利用上限の画面で`cost`のaskに入る／2つのreviewがログインの切れで1件のaskにjobとしてまとまり、`done`でやり直して着地する／runとjobが1件のaskに並ぶ）、`tests/it/plan_review.rs`の`a_plan_review_at_the_usage_limit_joins_the_cost_ask_and_starts_again_after_done`、`tests/it/planner_headless_turns.rs`の`a_headless_planner_at_a_login_failure_waits_in_the_hold_and_goes_on`（非対話のplannerの最初のturnがログインの切れで`authentication`のaskを開き、`provider_waiting`で待ち、`done`の後に`provider retry`のturnで続ける）と`a_headless_planner_at_the_usage_limit_waits_in_the_hold_and_makes_the_same_call_again`（answerのturnが利用上限で`cost`のaskを開き、`done`の後に同じanswerを載せた`provider retry`のturnで続ける）、`infrastructure::claude`（`auth_required`・`usage_limited`・`job_wall`）・`domain::queue_hold`・`domain::claim_hold`のunit test
+diff --git a/docs/design/supervisor-lifecycle/session-send.md b/docs/design/supervisor-lifecycle/session-send.md
+index f703ff91..2b52494e 100644
+--- a/docs/design/supervisor-lifecycle/session-send.md
++++ b/docs/design/supervisor-lifecycle/session-send.md
+@@ -18,7 +18,7 @@ related:
+ task 285。supervisorが生きているsessionに打つもの（resumeの解消依頼、workerへの回答、reviseと衝突の依頼、receiptの書き直しの依頼、`/exit`）は、すべて`application::supervise::deliver`の`submit`を通る。2026-09-24のtask 205のrun 68a96a60では、長い解消依頼が入力欄に貼り付けられたままEnterが送信として扱われず（貼り付けの処理中のEnter）、後の`/exit`も入力欄に追記されただけで`stuck_exit`になった。画面の判定（`input_ready` / `input_pending` / `working`）は`detect_prompt`と同じく`infrastructure::claude`の純粋関数で、`AgentSignals`から呼ぶ。
+ 
+ 1. **送信**: workerのsessionへの`submit`は、打つ前に画面を1回読み、Settingsのパネル（[既知のダイアログ](prompt-waiting.md#既知のダイアログ)）が開いていればEscで閉じてから打つ（ADR-0047の決定29・31、task 480。パネルに打つと入力を吸われる）。`send_text`（文面）または`send_exit`（`/exit`）で打つ。cmux adapterは打った後`paste_settle`（300 msと10文字ごとに1 ms、最大3秒。13 KBで約1.6秒）待ってからEnterを送る。cmuxの時間切れで届いたかが分からない送信は失敗にせず、2の確認に進む（task 326。[backendの呼び出しの失敗](backend-call-failures.md#backendの呼び出しの失敗)のtimeoutのretry）。時間切れ以外の失敗でも、画面を1回読み、ダイアログが無く打ったものが入力欄に残って見えれば（多くはadapterの後段のEnterだけが失敗した場合。`input_pending`は入力欄に残った前の文面とも区別しないので、そのEnterは前の文面を送ることもあるが、打ち直しもダイアログへのEnterも起きない）、失敗にせず2の確認に進んでEnterを送り直す。残っていなければ、またはダイアログがあれば、失敗のまま返す（task 353）。
+-2. **確認**: `submit_check_interval`（既定1秒）ごとに画面を読む。`submit`ではSettingsのパネルが出ていればEscで閉じて読み取りを続ける（1回の送信でキーは1回まで、段ごとに1回の数えは既知のダイアログのとおり。task 480）。ダイアログ（`detect_prompt`）が出ていればそれ以上何も送らない。入力欄に打ったものが残っていれば（`input_pending`: 入力欄の英数字が、打った文面の末尾24文字の英数字を含む、またはClaude Codeが畳んだ`[Pasted text #N ...]`がある）、`send_enter`でEnterだけを送り直す（`SUBMIT_RETRIES`、3回まで）。文面も`/exit`も打ち直さない（`/exit`の再送はダイアログの選択肢を選びうる）。`/exit`を送る経路（receipt後にidleになったworkerのsession、reviewとreviseの後の`ExitWatch`、wrapperのheartbeatが止まったsession、resumeのsessionの3か所（入力欄が準備できないままresume timeout、wrapperの沈黙、解消後のidleか時間切れ）、runtimeが立てたplannerの終了）は、すべて`submit`か`submit_input`を通り、`send_exit`を直接呼ぶ箇所が他に無いことはunit test（`every_exit_goes_through_submit_input`）が確かめる（task 353）。送り直したら`submit_retried`（`workspace_id`、`input`: `text` / `exit`、`what`: 何を送ったか、`retries`、`submitted`）を記録する。3回送り直しても残れば`submit_unconfirmed`（`workspace_id`、`input`、`what`、`retries`、`excerpt`）を記録し、文面ならそのsessionの[復旧job](background-recovery-job.md#生きているsessionの復旧job)が`stalled`のalert（`reason: send_unconfirmed`）で見る（ADR-0047の決定31、task 442。下の6）。`/exit`は従来どおり`exit_timeout`（120秒）の後の`stuck_exit`のaskに任せる。画面が読めなければ確認をやめ、送れたものとして扱う。Enterの送り直しに失敗すれば入力欄に残ったものとして扱う。`submit`のerrorは打つこと自体の失敗だけで、打った後の記録の失敗はlogに書くだけにする（回答を`ask_delivery_failed`と取り違えないため）。
++2. **確認**: `submit_check_interval`（既定1秒）ごとに画面を読む。`submit`ではSettingsのパネルが出ていればEscで閉じて読み取りを続ける（1回の送信でキーは1回まで、段ごとに1回の数えは既知のダイアログのとおり。task 480）。ダイアログ（`detect_prompt`）が出ていればそれ以上何も送らない。入力欄に打ったものが残っていれば（`input_pending`: 入力欄の英数字が、打った文面の末尾24文字の英数字を含む、またはClaude Codeが畳んだ`[Pasted text #N ...]`がある）、`send_enter`でEnterだけを送り直す（`SUBMIT_RETRIES`、3回まで）。文面も`/exit`も打ち直さない（`/exit`の再送はダイアログの選択肢を選びうる）。`/exit`を送る経路（receipt後にidleになったworkerのsession、reviewとreviseの後の`ExitWatch`、wrapperのheartbeatが止まったsession、resumeのsessionの3か所（入力欄が準備できないままresume timeout、wrapperの沈黙、解消後のidleか時間切れ）、runtimeが立てた対話のplannerの終了）は、すべて`submit`か`submit_input`を通り、`send_exit`を直接呼ぶ箇所が他に無いことはunit test（`every_exit_goes_through_submit_input`）が確かめる（task 353）。送り直したら`submit_retried`（`workspace_id`、`input`: `text` / `exit`、`what`: 何を送ったか、`retries`、`submitted`）を記録する。3回送り直しても残れば`submit_unconfirmed`（`workspace_id`、`input`、`what`、`retries`、`excerpt`）を記録し、文面ならそのsessionの[復旧job](background-recovery-job.md#生きているsessionの復旧job)が`stalled`のalert（`reason: send_unconfirmed`）で見る（ADR-0047の決定31、task 442。下の6）。`/exit`は従来どおり`exit_timeout`（120秒）の後の`stuck_exit`のaskに任せる。画面が読めなければ確認をやめ、送れたものとして扱う。Enterの送り直しに失敗すれば入力欄に残ったものとして扱う。`submit`のerrorは打つこと自体の失敗だけで、打った後の記録の失敗はlogに書くだけにする（回答を`ask_delivery_failed`と取り違えないため）。
+ 3. **作業の兆候**（`StartCheck`。解消依頼・回答・revise・衝突の依頼・receiptの書き直しの依頼・促し）: 送ってから`[stall].send_confirm_secs`（既定60秒。supervisorが起動時に読んだ[閾値の設定](stall-thresholds.md)の値。ADR-0043の決定2、task 409）経ったら、まずidle marker・入力のmarker（`prompt-submit.json`。下の5。agentが自分で差し込んだ通知（`Agent`）は除く）・receiptのどれかが送信より新しいかを見て、あれば処理されたとして終える（画面は読まず、Enterの送り直しもaskもしない）。無ければ、画面にagentの作業中の表示（`esc to interrupt`）がある、transcriptの領域（入力欄の上の罫線より上の行。`AgentSignals::transcript`）が送信直後に読んだものから変わった、のどれかを兆候とする。入力欄とその下（ステータス行の時計やコスト、ヒント、通知、スラッシュコマンドのメニュー）の変化は兆候にしない（task 319）。入力欄が描かれていない画面は全体をtranscriptとして比べる。兆候を見る前に、画面の[既知のダイアログ](prompt-waiting.md#既知のダイアログ)は決まった規則で閉じ、2の確認（Enterだけの送り直し）をやり直して兆候の待ちを最初から数え直す（task 480）。どれも無く、ダイアログが出ていれば`submit_not_started`（`dialog`にその種類）を記録する。入力欄が空（準備できていて文面が残っていない）なら依頼が消えたとみなし、`submit_resent`（`workspace_id`、`what`、`waited_secs`）を記録して1回だけ同じ文面を送り直す。送り直しても兆候が無い、または文面が入力欄に残っているなら`submit_not_started`（`workspace_id`、`what`、`waited_secs`、`resent`、`excerpt`）を記録し、以後は見ない（兆候から次の一手（処理された・ダイアログ・送り直し・`submit_not_started`）を選ぶのは副作用のない`on_sign`。task 1412）。どちらも下の6の復旧jobが見る。`resume_timeout`（1時間）まで黙って待たない。adoptしたsupervisorは引き継いだ依頼の兆候を見ない。入力欄より上に自分で変わり続ける表示があれば依頼の消失を見逃し、従来どおり`resume_timeout`に頼る（保守的な側に倒す）。
+ 4. **待ち時間の既定値**: `resume_prompt_delay` 5秒、`registration_timeout` 45秒、`submit_check_interval` 1秒（いずれも`WorkspaceBackend`の既定メソッド）。作業の兆候を待つ時間は`WorkspaceBackend`の`start_wait`をやめて`[stall].send_confirm_secs`にした（task 409。`stats`の`stall_thresholds`が送信の検知を集計する値と同じ）。追加したrun_eventsのkindは`input_not_ready`、`submit_retried`、`submit_unconfirmed`、`submit_resent`、`submit_not_started`で、どれもattentionにはしない（人に届くのは下の6の`stalled`のask）。
+ 5. **入力のmarker**（ADR-0043の決定2、task 409）: Claude adapterはrunごとの`claude-settings.json`に`Stop` hookと並べて`UserPromptSubmit` hookを書く。hookはsessionが入力を受けるたびに、そのstdinのJSONをidle markerの隣の`prompt-submit.json`（`application::stats::PROMPT_SUBMIT_MARKER`）へ一時ファイル + renameで書き、何も出力せず（`UserPromptSubmit` hookの出力はagentのcontextに入る）、失敗しても0で終わる（入力を止めない）。runtimeが立てるplannerの設定も同じhookを持つ。markerの中身は`AgentSignals::input_source`が読み、入力の出どころを`Typed`（打たれた文。人かsupervisorかは時刻で分ける）・`Agent`（agentが自分で差し込んだもの）・`Unknown`（markerが言わない）で返す。Claude Code 2.1.283のhookの入力は`session_id`・`transcript_path`・`cwd`・`prompt_id`・`permission_mode`・`hook_event_name`・`prompt`で、出どころを示すfieldは無い。backgroundの処理の完了の通知でもhookは発火し、`prompt`が`<task-notification>`で始まるので、それを`Agent`とする。`prompt`の無い入力は`Unknown`。markerを書かないproviderでは、処理された印はidle markerとreceiptだけになる。入力のmarkerは、この確認のほかに次の3つで最後の入力に数える（task 409・672）。(a) [receiptの無いidleの検知](idle-without-receipt.md#receiptの無いidleの検知)（`StallWatch`）。(b) resumeとrevise・衝突の依頼の段の終わり（`ResumeWatch`・`ReviseWatch`）: idle markerより新しい入力のmarker（出どころを問わない）があれば、そのturnが終わるidle markerまで段を終えず`/exit`も送らない（[Needs session](needs-session.md#needs-session)の4、[Review](review.md#review-supervisor)の4）。(c) 復旧jobの`send_instruction`の前提（`SessionWatch::at_prompt`）: idle markerが入力のmarkerより新しいこと、またはEscで中断されたturn（[復旧jobの適用](background-recovery-job.md#適用)の`send_instruction`）。
+@@ -40,3 +40,4 @@ task 285。supervisorが生きているsessionに打つもの（resumeの解消
+ - 記録: 読むと`screen_read`、送ると`screen_input_sent`を残す。runはそのrunのevent、plannerはqueueのevent（`planner_id`）で、どちらもeventのactor（呼び出し元のroleとid）を持つ。payloadは`target`（`run` / `planner`）・`workspace_id`と、読み取りは行数、送信は`input`（`keys` / `answer`）・`keys`か`ask_id`・`outcome`（キーは`sent`、打った文と`/exit`は`submitted` / `dialog` / `stuck` / `unsent`）・`retries`。画面の中身はeventに載せない。どちらもattentionにはしない
+ - 判定: capabilityは`screen.read`・`screen.send`で、userとinboxだけが持つ（[Authorization](../authorization.md)）。`Operation`の入口で判定し、拒めば`authorization_denied`を残す。読むこともeventを残すので、どちらも状態を変えるコマンドとしてqueueを書き込みで開く（本番queueでは固定バイナリで打つ）
+ - 送信の判定（`AgentSignals`）はClaude Codeの画面のもの（`ClaudeCode`）を使う。画面を持つsessionはClaude Codeだけのため
++- 非対話のruntimeのplanner（`route: headless`）には、supervisorはこの文書の送信と確認を使わない。reviseの指摘・`planner_question`のanswer・Claudeが使えなかったturnの続き（`provider retry`）・終了は、`Supervisor::send_to_planner`が次のturnの依頼と終了の依頼としてplannerのディレクトリの`turns/`に置く（[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)、ADR-t1394-2決定2）。`planner screen` / `planner send`の非対話の扱い（画面が無いことを返す・送信を拒む）はtask 1533が足す
+diff --git a/src/application/ports.rs b/src/application/ports.rs
+index c1632dcf..f720b5ec 100644
+--- a/src/application/ports.rs
++++ b/src/application/ports.rs
+@@ -2011,7 +2011,8 @@ pub trait SessionRegistry {
+     /// Record the route the planner's agent runs on (ADR-t1394-2), before
+     /// its session starts.
+     fn set_planner_route(&self, id: PlannerId, route: crate::domain::PlannerRoute) -> Result<()>;
+-    /// The `turn_*` events of headless planner `id`, oldest first.
++    /// The `turn_*` events of headless planner `id` and its
++    /// `provider_waiting`, oldest first.
+     fn planner_turn_events(&self, id: PlannerId) -> Result<Vec<RunEvent>>;
+     /// The planner's session wrapper registers itself, once.
+     fn register_planner_wrapper(&self, id: PlannerId, pid: u32) -> Result<()>;
+diff --git a/src/application/supervise/draft_planner.rs b/src/application/supervise/draft_planner.rs
+index 1079f3a9..81ddf2e7 100644
+--- a/src/application/supervise/draft_planner.rs
++++ b/src/application/supervise/draft_planner.rs
+@@ -59,6 +59,9 @@ impl Supervisor<'_> {
+                     // its draft waits only for it to be idle.
+                     let asked_by_planner = ask.asked_by == SessionRole::Planner.as_str();
+                     if view.state != PlannerState::Idle
++                        // One that waits for Claude gets it after its retry
++                        // (ADR-t1394-2 decision 5).
++                        || self.planner_at_wall(view).is_some()
+                         || (asked_by_planner
+                             && view.idle_since.is_none_or(|since| since < ask.created_at))
+                     {
+diff --git a/src/application/supervise/finding_planner.rs b/src/application/supervise/finding_planner.rs
+index fca6f0ec..659de0fb 100644
+--- a/src/application/supervise/finding_planner.rs
++++ b/src/application/supervise/finding_planner.rs
+@@ -77,6 +77,9 @@ impl Supervisor<'_> {
+                 // to be idle.
+                 let asked_by_planner = ask.asked_by == SessionRole::Planner.as_str();
+                 if view.state != PlannerState::Idle
++                    // One that waits for Claude gets it after its retry
++                    // (ADR-t1394-2 decision 5).
++                    || self.planner_at_wall(view).is_some()
+                     || (asked_by_planner
+                         && view.idle_since.is_none_or(|since| since < ask.created_at))
+                 {
+diff --git a/src/application/supervise/mod.rs b/src/application/supervise/mod.rs
+index 6ab0898c..8a054e5c 100644
+--- a/src/application/supervise/mod.rs
++++ b/src/application/supervise/mod.rs
+@@ -123,6 +123,7 @@ mod inbox_nudge;
+ mod jobs;
+ mod landing;
+ mod plan_review;
++mod planner_turns;
+ mod provider;
+ mod push;
+ mod queue_hold;
+diff --git a/src/application/supervise/plan_review.rs b/src/application/supervise/plan_review.rs
+index 8587c401..da0bc705 100644
+--- a/src/application/supervise/plan_review.rs
++++ b/src/application/supervise/plan_review.rs
+@@ -811,7 +811,10 @@ impl Supervisor<'_> {
+             match owner {
+                 Some(view) if view.alive => {
+                     // A planner at work gets the revise once it is idle.
++                    // One that waits for Claude gets it after its retry
++                    // (ADR-t1394-2 decision 5).
+                     if view.state != PlannerState::Idle
++                        || self.planner_at_wall(view).is_some()
+                         || !self.queue.claim_revise(proposal.id())?
+                     {
+                         continue;
+@@ -893,6 +896,11 @@ impl Supervisor<'_> {
+         // settled.
+         self.settle_findings()?;
+         self.open_finding_planners(&mut runtime_open)?;
++        // A headless planner's turn that failed at Claude waits for it, and
++        // one its wrapper stopped at its limit tells the inbox
++        // (ADR-t1394-2 decisions 3 and 5).
++        self.tend_planner_walls(&views)?;
++        self.tell_of_stopped_planner_turns(&views)?;
+         self.tell_of_silent_planners(timeout, &views)?;
+         self.end_runtime_planners(&views)?;
+         if let Some(proposal) = starved {
+@@ -961,9 +969,12 @@ impl Supervisor<'_> {
+             let busy = self.busy_reasons(view, &revising)?;
+             // An answer not typed yet may be left to the inbox (its typing
+             // failed), which types it into this workspace by hand.
++            // One that waits for Claude is not done either (ADR-t1394-2
++            // decision 5).
+             if busy.is_empty()
+                 || busy.contains(&PlannerBusy::QuestionOpen)
+                 || busy.contains(&PlannerBusy::AnswerUndelivered)
++                || busy.contains(&PlannerBusy::ProviderWall)
+             {
+                 continue;
+             }
+@@ -1025,6 +1036,9 @@ impl Supervisor<'_> {
+         if let Some(wait) = self.question_wait(view)? {
+             busy.push(wait);
+         }
++        if self.planner_at_wall(view).is_some() {
++            busy.push(PlannerBusy::ProviderWall);
++        }
+         if self.planner_exits.iter().any(|(sent, _)| *sent == id) {
+             busy.push(PlannerBusy::Exiting);
+         }
+@@ -1039,12 +1053,15 @@ impl Supervisor<'_> {
+     /// cmux cannot read, or reads in a state it does not know. It is not
+     /// closed: a person looks at it. A planner a revise went to is timed by
+     /// its revise, and one that waits on its `planner_question` waits on a
+-    /// person; a person's planner is never timed.
++    /// person; a person's planner is never timed. A headless planner is
++    /// timed by its turn's limits instead
++    /// ([`Self::tell_of_stopped_planner_turns`], ADR-t1394-2 decision 3).
+     fn tell_of_silent_planners(&mut self, timeout: i64, views: &[PlannerView]) -> Result<()> {
+         let now = self.generators.clock.now();
+         let revising = self.queue.revising_proposals()?;
+         for view in views.iter().filter(|view| {
+             view.planner.origin == PlannerOrigin::Runtime
++                && view.planner.route != crate::domain::PlannerRoute::Headless
+                 && view.alive
+                 && view.state != PlannerState::Idle
+         }) {
+@@ -1370,6 +1387,9 @@ enum PlannerBusy {
+     AnswerTyped,
+     /// It was asked to exit.
+     Exiting,
++    /// Headless, its last turn failed at Claude's login, usage limit or
++    /// start, and it waits for Claude (ADR-t1394-2 decision 5).
++    ProviderWall,
+ }
+ 
+ impl PlannerBusy {
+@@ -1382,6 +1402,7 @@ impl PlannerBusy {
+             Self::AnswerUndelivered => "planner_answer_undelivered",
+             Self::AnswerTyped => "planner_answer_typed",
+             Self::Exiting => "exiting",
++            Self::ProviderWall => "provider_wall",
+         }
+     }
+ }
+@@ -1448,6 +1469,15 @@ impl Supervisor<'_> {
+             if !self.queue.ask_delivered_to(ask.id, workspace)? {
+                 continue;
+             }
++            // A headless planner took the answer up once the turn of its
++            // request finished: its turns are recorded, and a stub's turn
++            // may end within the second the answer was claimed.
++            if let Some(taken) = self.headless_answer_taken(view, ask.id)? {
++                if !taken {
++                    return Ok(Some(PlannerBusy::AnswerTyped));
++                }
++                continue;
++            }
+             // An agent idle since before the typing has not taken the
+             // answer up yet. Its second counts as before: the views of a
+             // pass are taken before the pass types, and an agent does not
+diff --git a/src/application/supervise/planner_turns.rs b/src/application/supervise/planner_turns.rs
+new file mode 100644
+index 00000000..fee50628
+--- /dev/null
++++ b/src/application/supervise/planner_turns.rs
+@@ -0,0 +1,238 @@
++//! How the turns of a headless planner of the runtime's ended, as the
++//! supervisor acts on them (ADR-t1394-2 decisions 3 and 5): a turn that
++//! failed at Claude's login, usage limit or start leaves the planner
++//! waiting in the queue's hold, neither ended nor counted as a planner that
++//! ended undecided, and once the hold is gone the call it failed at is made
++//! again as its next turn; a turn its wrapper stopped at the `[stall]`
++//! limits tells the inbox, as an interactive planner nothing was seen of
++//! does.
++
++use super::headless::{last_turn, provider_failure};
++use super::provider::{PROVIDER_RETRY, retry_text};
++use super::*;
++use crate::application::{planner::PlannerView, planner_idle_marker};
++use crate::domain::{
++    EventKind, PlannerOrigin, PlannerRoute, PlannerSession, PlannerState,
++    provider_switch::{self, SwitchReason},
++    turn::{TurnFailure, TurnMark, TurnOutcome, TurnRequest, taken_path},
++};
++
++/// Whether the planner of `view` is a headless planner of the runtime's.
++fn headless_runtime(view: &PlannerView) -> bool {
++    view.planner.route == PlannerRoute::Headless && view.planner.origin == PlannerOrigin::Runtime
++}
++
++impl Supervisor<'_> {
++    /// How the last turn of the planner of `view` ended, if it is a
++    /// headless planner of the runtime's whose wrapper wrote it.
++    fn planner_last_turn(&self, view: &PlannerView) -> Option<TurnMark> {
++        headless_runtime(view)
++            .then(|| last_turn(self, &planner_idle_marker(&view.dir)))
++            .flatten()
++    }
++
++    /// Whether the headless planner of `view` took up the answer of `ask`
++    /// written as its request: the turn that took the request finished.
++    /// `None` for an interactive planner, and when no request of the answer
++    /// is recorded (its record failed), which leave it to the idle marker's
++    /// time.
++    pub(super) fn headless_answer_taken(
++        &self,
++        view: &PlannerView,
++        ask: AskId,
++    ) -> Result<Option<bool>> {
++        if !headless_runtime(view) {
++            return Ok(None);
++        }
++        let events = self.queue.planner_turn_events(view.planner.id)?;
++        let what = format!("answer of ask {ask}");
++        let Some(seq) = events
++            .iter()
++            .rfind(|e| e.kind == event_kind::TURN_REQUESTED && e.payload["what"] == what.as_str())
++            .and_then(|e| e.payload["seq"].as_u64())
++        else {
++            return Ok(None);
++        };
++        let turn = events
++            .iter()
++            .find(|e| e.kind == event_kind::TURN_STARTED && e.payload["request"] == seq)
++            .and_then(|e| e.payload["turn"].as_u64());
++        Ok(Some(turn.is_some_and(|turn| {
++            events
++                .iter()
++                .any(|e| e.kind == event_kind::TURN_FINISHED && e.payload["turn"] == turn)
++        })))
++    }
++
++    /// The provider failure the idle headless planner of `view` stopped at
++    /// in its last turn, if it did: it waits for Claude rather than being
++    /// done (ADR-t1394-2 decision 5).
++    pub(super) fn planner_at_wall(&self, view: &PlannerView) -> Option<TurnFailure> {
++        if view.state != PlannerState::Idle {
++            return None;
++        }
++        provider_failure(self.planner_last_turn(view))
++    }
++
++    /// Hold or go on with each idle headless planner of the runtime's whose
++    /// last turn failed at Claude's login, usage limit or start: at first
++    /// sight the queue's hold ask (a login or a usage limit) or Claude's
++    /// provider hold (a start) is raised and `provider_waiting` recorded
++    /// with the planner's ID; once Claude is no longer held, the call the
++    /// turn failed at is written as the planner's next request (`provider
++    /// retry`), as a worker's is.
++    pub(super) fn tend_planner_walls(&mut self, views: &[PlannerView]) -> Result<()> {
++        for view in views {
++            let Some(failure) = self.planner_at_wall(view) else {
++                continue;
++            };
++            if let Err(error) = self.planner_wall(view, failure) {
++                warn!(error = %format_args!("{error:#}"), "planner {}: its turn at {} could not be tended: {error:#}", view.planner.id, failure.as_str());
++            }
++        }
++        Ok(())
++    }
++
++    fn planner_wall(&mut self, view: &PlannerView, failure: TurnFailure) -> Result<()> {
++        let id = view.planner.id;
++        let Some(reason) = SwitchReason::of_failure(failure) else {
++            return Ok(());
++        };
++        let Some(workspace) = view.planner.workspace_id.clone() else {
++            return Ok(());
++        };
++        let events = self.queue.planner_turn_events(id)?;
++        let Some((finished_at, finished)) = events
++            .iter()
++            .enumerate()
++            .rfind(|(_, e)| e.kind == event_kind::TURN_FINISHED)
++            .map(|(at, e)| (at, e.payload.clone()))
++        else {
++            return Ok(());
++        };
++        // A request after the turn (the retry) answers it.
++        if events[finished_at..]
++            .iter()
++            .any(|e| e.kind == event_kind::TURN_REQUESTED)
++        {
++            return Ok(());
++        }
++        let turn = finished["turn"].as_u64().unwrap_or(0);
++        let message = finished["message"].as_str().unwrap_or("no message");
++        if !provider_switch::waiting_on(&events, turn) {
++            let ask_id = match reason {
++                SwitchReason::Authentication | SwitchReason::UsageLimit => {
++                    let wall = if reason == SwitchReason::Authentication {
++                        Wall::Authentication
++                    } else {
++                        Wall::UsageLimit
++                    };
++                    let (outcome, _) = ask::hold(
++                        &mut *self.queue,
++                        &self.layout.main_checkout,
++                        NewHold::wall(wall, None, None),
++                        self.cmux,
++                    )?;
++                    Some(outcome.ask.id)
++                }
++                _ => {
++                    self.hold_provider(Provider::Claude, reason, None, message)?;
++                    None
++                }
++            };
++            self.queue.record_queue_event(
++                EventKind::ProviderWaiting,
++                json!({
++                    "planner_id": id,
++                    "turn": turn,
++                    "provider": Provider::Claude,
++                    "reason": reason,
++                    "message": message,
++                    "ask_id": ask_id,
++                }),
++            )?;
++            warn!(
++                "planner {id} of the runtime: its turn {turn} failed on claude ({}); it waits for claude: {message}",
++                reason.as_str()
++            );
++            return Ok(());
++        }
++        if self.provider_held(Provider::Claude).is_some() {
++            return Ok(());
++        }
++        let started = events
++            .iter()
++            .rfind(|e| e.kind == event_kind::TURN_STARTED && e.payload["turn"] == turn)
++            .map(|e| e.payload.clone())
++            .unwrap_or_default();
++        let undelivered = started["request"].as_u64().and_then(|seq| {
++            let text = self
++                .files
++                .read_to_string(&taken_path(&view.dir, seq))
++                .ok()?;
++            serde_json::from_str::<TurnRequest>(&text).ok()
++        });
++        let text = retry_text(Provider::Claude, reason, undelivered.as_ref());
++        self.stamp_planner_input(view);
++        self.send_to_planner(view, &workspace, Input::Text(&text), PROVIDER_RETRY)?;
++        info!(
++            "planner {id} of the runtime: claude can be used again; the call of turn {turn} is made again"
++        );
++        Ok(())
++    }
++
++    /// Tell the inbox, once per planner, of a headless planner of the
++    /// runtime's whose wrapper stopped its last turn at the `[stall]`
++    /// limits (silent past `turn_silence_secs`, or running past
++    /// `turn_limit_secs`): the turn's own limit stands in for the planner
++    /// timeout of an interactive one (ADR-t1394-2 decision 3).
++    pub(super) fn tell_of_stopped_planner_turns(&mut self, views: &[PlannerView]) -> Result<()> {
++        for view in views {
++            self.tell_of_stopped_planner_turn(&view.planner, &view.dir, view.state.as_str())?;
++        }
++        Ok(())
++    }
++
++    /// [`Self::tell_of_stopped_planner_turns`] for `planner`, whose
++    /// directory is `dir` and state `state`: also for one the sweep closed
++    /// before a pass saw it, its session over after the stopped turn.
++    pub(super) fn tell_of_stopped_planner_turn(
++        &mut self,
++        planner: &PlannerSession,
++        dir: &Path,
++        state: &str,
++    ) -> Result<()> {
++        if planner.route != PlannerRoute::Headless || planner.origin != PlannerOrigin::Runtime {
++            return Ok(());
++        }
++        let Some(mark) = last_turn(self, &planner_idle_marker(dir))
++            .filter(|mark| matches!(mark.outcome, TurnOutcome::TimedOut | TurnOutcome::Silent))
++        else {
++            return Ok(());
++        };
++        let id = planner.id;
++        let reason = format!(
++            "turn {} of planner {id} of the runtime was stopped at its limit ({}); the planner ends undecided",
++            mark.turn,
++            mark.outcome.as_str()
++        );
++        let payload = json!({
++            "subject": "planner",
++            "planner_id": id,
++            "origin": planner.origin.as_str(),
++            "route": planner.route.as_str(),
++            "workspace_id": planner.workspace_id,
++            "draft_task_id": planner.draft_task_id,
++            "finding_id": planner.finding_id,
++            "request_id": planner.request_id,
++            "state": state,
++            "turn": mark.turn,
++            "outcome": mark.outcome.as_str(),
++            "reason": reason,
++        });
++        if self.queue.planner_silent(id, payload)? {
++            warn!("{reason}; the inbox is told");
++        }
++        Ok(())
++    }
++}
+diff --git a/src/application/supervise/provider.rs b/src/application/supervise/provider.rs
+index dac8adad..99f20492 100644
+--- a/src/application/supervise/provider.rs
++++ b/src/application/supervise/provider.rs
+@@ -447,7 +447,7 @@ const HOLD_EVENTS_READ: usize = 20;
+ 
+ /// The request that makes a failed call again on `provider` once its hold
+ /// ended: the call it failed at (`undelivered`), or a request to go on.
+-fn retry_text(
++pub(super) fn retry_text(
+     provider: Provider,
+     reason: SwitchReason,
+     undelivered: Option<&TurnRequest>,
+diff --git a/src/application/supervise/request_planner.rs b/src/application/supervise/request_planner.rs
+index 6955f572..bf35e535 100644
+--- a/src/application/supervise/request_planner.rs
++++ b/src/application/supervise/request_planner.rs
+@@ -51,6 +51,9 @@ impl Supervisor<'_> {
+                 // to be idle.
+                 let asked_by_planner = ask.asked_by == SessionRole::Planner.as_str();
+                 if view.state != PlannerState::Idle
++                    // One that waits for Claude gets it after its retry
++                    // (ADR-t1394-2 decision 5).
++                    || self.planner_at_wall(view).is_some()
+                     || (asked_by_planner
+                         && view.idle_since.is_none_or(|since| since < ask.created_at))
+                 {
+diff --git a/src/application/supervise/sweep.rs b/src/application/supervise/sweep.rs
+index e55279e4..a6e7d60b 100644
+--- a/src/application/supervise/sweep.rs
++++ b/src/application/supervise/sweep.rs
+@@ -181,6 +181,17 @@ impl Supervisor<'_> {
+                 for id in closed {
+                     self.planner_exits.retain(|(sent, _)| *sent != id);
+                     info!("planner {id}: its workspace and wrapper are gone; closed its record");
++                    // A headless planner whose turn was stopped at its
++                    // limit, closed before a pass told of it (ADR-t1394-2
++                    // decision 3).
++                    let dir = planner::planner_dir(&self.layout.planners_dir, id);
++                    if let Err(error) = self
++                        .queue
++                        .planner(id)
++                        .and_then(|row| self.tell_of_stopped_planner_turn(&row, &dir, "closed"))
++                    {
++                        warn!(error = %format_args!("{error:#}"), "planner {id}: its stopped turn could not be told of: {error:#}");
++                    }
+                 }
+             }
+             Err(error) => {
+diff --git a/src/domain/event_kind.rs b/src/domain/event_kind.rs
+index b6d33bd8..0ee24b3f 100644
+--- a/src/domain/event_kind.rs
++++ b/src/domain/event_kind.rs
+@@ -462,6 +462,10 @@ impl EventKind {
+                 // A provider's hold and its end (ADR-t813-2 decision 6).
+                 | ProviderHeld
+                 | ProviderReleased
++                // A headless planner of the runtime's that waits for its
++                // provider names it by `planner_id` (ADR-t1394-2 decision
++                // 5); a run's wait is on the run.
++                | ProviderWaiting
+                 // The queue service (ADR-t1233-4) is the queue's.
+                 | QueueServiceDown
+                 | QueueServiceRunning
+diff --git a/src/infrastructure/planners.rs b/src/infrastructure/planners.rs
+index f522ef63..274158ba 100644
+--- a/src/infrastructure/planners.rs
++++ b/src/infrastructure/planners.rs
+@@ -96,18 +96,20 @@ impl SqliteQueue {
+     }
+ 
+     /// The turns of headless planner `id` (ADR-t1394-2 decision 2): the
+-    /// queue's `turn_*` events that name it, oldest first.
++    /// queue's `turn_*` events that name it, and its waits for a provider
++    /// (`provider_waiting`, decision 5), oldest first.
+     pub fn planner_turn_events(&self, id: PlannerId) -> Result<Vec<RunEvent>> {
+         Ok(self
+             .conn
+             .prepare(&format!(
+                 "SELECT * FROM run_events WHERE run_id IS NULL
+-                   AND kind IN ('{}','{}','{}','{}')
++                   AND kind IN ('{}','{}','{}','{}','{}')
+                    AND json_extract(payload, '$.planner_id')=?1 ORDER BY id",
+                 event_kind::TURN_REQUESTED,
+                 event_kind::TURN_STARTED,
+                 event_kind::TURN_FINISHED,
+                 event_kind::TURN_SESSION_IDENTIFIED,
++                event_kind::PROVIDER_WAITING,
+             ))?
+             .query_map([id], super::sqlite::event_row)?
+             .collect::<rusqlite::Result<_>>()?)
+diff --git a/src/infrastructure/process.rs b/src/infrastructure/process.rs
+index 427c9250..e753da4b 100644
+--- a/src/infrastructure/process.rs
++++ b/src/infrastructure/process.rs
+@@ -171,8 +171,15 @@ impl Spawned for LocalChild {
+         let signaled = unsafe { libc::kill(-(self.0.id() as libc::pid_t), libc::SIGKILL) };
+         if signaled == -1 {
+             let error = std::io::Error::last_os_error();
+-            // A group that is gone has nothing left to stop.
+-            if error.raw_os_error() != Some(libc::ESRCH) {
++            // A group that is gone has nothing left to stop. On macOS a
++            // group left with only its leader that exited and is not reaped
++            // yet (a zombie) refuses the signal with EPERM: a headless turn
++            // that said its login ran out and ended before the wrapper
++            // stopped it (task 1397).
++            let gone = error.raw_os_error() == Some(libc::ESRCH)
++                || (error.raw_os_error() == Some(libc::EPERM)
++                    && matches!(self.0.try_wait(), Ok(Some(_))));
++            if !gone {
+                 return Err(error.into());
+             }
+         }
+@@ -355,6 +362,34 @@ mod tests {
+         assert!(!alone.wait().unwrap().success);
+     }
+ 
++    /// Task 1397: a group whose leader exited and is not reaped yet is
++    /// nothing left to stop, wherever the system refuses the signal to a
++    /// group of zombies (macOS: EPERM); the exit is read after.
++    #[test]
++    fn a_group_whose_leader_exited_unreaped_is_no_error_to_kill() {
++        let mut spec = CommandSpec::new("/bin/sh");
++        spec.args(["-c", "exit 3"]).new_session();
++        let mut child = LocalSpawner.spawn(&spec, Streams::Null).unwrap();
++        let pid = child.id().to_string();
++        let started = std::time::Instant::now();
++        loop {
++            let stat = std::process::Command::new("ps")
++                .args(["-o", "stat=", "-p", &pid])
++                .output()
++                .unwrap();
++            if String::from_utf8_lossy(&stat.stdout)
++                .trim()
++                .starts_with('Z')
++            {
++                break;
++            }
++            assert!(started.elapsed() < std::time::Duration::from_secs(10));
++            std::thread::sleep(std::time::Duration::from_millis(10));
++        }
++        child.kill_group().unwrap();
++        assert_eq!(child.wait().unwrap().code, Some(3));
++    }
++
+     #[test]
+     fn a_log_takes_both_streams() {
+         let dir = tempfile::tempdir().unwrap();
+diff --git a/tests/it/main.rs b/tests/it/main.rs
+index 7cf6110d..83b236db 100644
+--- a/tests/it/main.rs
++++ b/tests/it/main.rs
+@@ -59,6 +59,7 @@ mod plan_review_reasons;
+ mod planner_close;
+ mod planner_headless;
+ mod planner_headless_stats;
++mod planner_headless_turns;
+ mod planner_screen_idle;
+ mod planner_slots;
+ mod planner_timeout;
+diff --git a/tests/it/planner_headless.rs b/tests/it/planner_headless.rs
+index 3252bfa6..99e16264 100644
+--- a/tests/it/planner_headless.rs
++++ b/tests/it/planner_headless.rs
+@@ -37,7 +37,7 @@ fn configure(repo: &Path, text: &str) {
+ }
+ 
+ /// The queue's events of `kind`, oldest first.
+-fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
++pub(crate) fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
+     let mut events: Vec<Value> = SqliteQueue::open(db)
+         .unwrap()
+         .latest_events_of(kind, 50)
+@@ -79,7 +79,7 @@ fn diagnose(db: &Path, proposal: dagq::domain::ProposalId) -> String {
+ }
+ 
+ /// What planner 1 of a headless test that did not end left.
+-fn diagnose_planner(db: &Path) -> String {
++pub(crate) fn diagnose_planner(db: &Path) -> String {
+     let dir = planners_dir(db).join("1");
+     let read = |name: &str| fs::read_to_string(dir.join(name)).unwrap_or_default();
+     format!(
+@@ -101,7 +101,7 @@ fn revise(reasons: &[&str]) -> Value {
+ /// A fixture whose runtime's planners run headless in the background, and
+ /// whose planner's agent is the stub of [`headless_claude`] running `turns`
+ /// (with `$DB` naming the queue, which is not the checkout's).
+-fn headless_fixture(turns: &str) -> crate::plan_review::Fixture {
++pub(crate) fn headless_fixture(turns: &str) -> crate::plan_review::Fixture {
+     let mut fx = fixture();
+     configure(
+         &fx.repo,
+@@ -123,7 +123,7 @@ fn headless_fixture(turns: &str) -> crate::plan_review::Fixture {
+ 
+ /// Supervise, one pass at a time, until `done` holds; the diagnosis of
+ /// planner 1 when it does not in time.
+-fn supervise_until(
++pub(crate) fn supervise_until(
+     fx: &crate::plan_review::Fixture,
+     backend: &PlanWorkspace,
+     reviewer: &StubReviewer,
+diff --git a/tests/it/planner_headless_turns.rs b/tests/it/planner_headless_turns.rs
+new file mode 100644
+index 00000000..ce812c89
+--- /dev/null
++++ b/tests/it/planner_headless_turns.rs
+@@ -0,0 +1,731 @@
++//! How the turns of a headless planner of the runtime's end, as the
++//! supervisor acts on them (ADR-t1394-2 decisions 3 and 5): a turn that
++//! failed at Claude's usage limit waits in the queue's hold and goes on
++//! with the same call once the hold is answered, a turn stopped at its
++//! limit tells the inbox, and a planning request's planner (ADR-t1394-1)
++//! ends in `proposed`, or, ending undecided, is followed by another (the
++//! one after an answer carrying it) until the request is `exhausted`, all
++//! judged from the end of its turns; a finding's planner takes its answer
++//! as its next turn, and a live one the next revise of its proposal; the
++//! sweep tells of a stopped turn of a planner it closes.
++
++use crate::plan_review::{
++    PlanWorkspace, StubReviewer, add, open_goal, options, runtime_draft, supervise_with,
++};
++use crate::planner_headless::{diagnose_planner, headless_fixture, queue_events, supervise_until};
++use dagq::application::{PlanRequestStore, TaskStore};
++use dagq::{
++    domain::{
++        AskKind, DraftOrigin, PlannerId, PlannerRoute, Priority, RequestId, TaskId, TaskStatus,
++        plan_request::{NewPlanRequest, RequestStatus},
++    },
++    infrastructure::{location::planners_dir, sqlite::SqliteQueue},
++};
++use serde_json::{Value, json};
++use std::{
++    fs,
++    path::Path,
++    thread,
++    time::{Duration, Instant},
++};
++
++/// A request the inbox recorded.
++fn record(queue: &mut SqliteQueue, text: &str) -> RequestId {
++    queue
++        .record_plan_request(
++            &NewPlanRequest {
++                text: text.into(),
++                note: None,
++                refs: Vec::new(),
++            },
++            "inbox",
++            "inbox",
++        )
++        .unwrap()
++        .id
++}
++
++/// The turn requests planner `id` took, in order.
++fn taken(db: &Path, id: PlannerId) -> Vec<Value> {
++    let turns = planners_dir(db).join(id.to_string()).join("turns");
++    let mut names: Vec<String> = fs::read_dir(&turns)
++        .unwrap()
++        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
++        .filter(|name| name.ends_with(".taken.json"))
++        .collect();
++    names.sort();
++    names
++        .iter()
++        .map(|name| serde_json::from_str(&fs::read_to_string(turns.join(name)).unwrap()).unwrap())
++        .collect()
++}
++
++/// Acceptance (ADR-t1394-2 decision 5): a headless draft planner whose
++/// turn fails at Claude's usage limit is neither ended nor followed by
++/// another: it joins the queue's hold ask, `provider_waiting` names it, and
++/// once a person answers the hold the call it failed at (the answer of its
++/// question) is its next turn, which finishes the draft; then it is closed.
++#[test]
++fn a_headless_planner_at_the_usage_limit_waits_in_the_hold_and_makes_the_same_call_again() {
++    let fx = headless_fixture(
++        r#"case "$TURN" in
++1) "$DAGQ" --db "$DB" ask --kind planner_question --because scope --task 2 --question "in the goal?" --cmux true >> "$RUN_DIR/ask.log" 2>&1 ;;
++2) fail "Claude AI usage limit reached|1790535600" ;;
++*) "$DAGQ" --db "$DB" cancel 2 >> "$RUN_DIR/cancel.log" 2>&1 ;;
++esac
++say "turn $TURN""#,
++    );
++    let mut queue = SqliteQueue::open(&fx.db).unwrap();
++    let goal = open_goal(&mut queue);
++    let draft = runtime_draft(
++        &mut queue,
++        "gap",
++        Some(goal),
++        DraftOrigin::FollowUp,
++        json!({"source_task_id": 1, "source_run_id": null, "index": 0}),
++    );
++    assert_eq!(draft, TaskId::new(2));
++    let reviewer = StubReviewer::new(&[]);
++    let backend = PlanWorkspace::default();
++    let open_ask = |kind: AskKind| {
++        SqliteQueue::open(&fx.db)
++            .unwrap()
++            .asks(Default::default())
++            .unwrap()
++            .into_iter()
++            .find(|ask| ask.kind == kind)
++    };
++    supervise_until(
++        &fx,
++        &backend,
++        &reviewer,
++        || open_ask(AskKind::PlannerQuestion).is_some(),
++        || diagnose_planner(&fx.db),
++    );
++    let asked = open_ask(AskKind::PlannerQuestion).unwrap();
++    queue.answer(asked.id, "keep it").unwrap();
++    // The answer's turn hits the usage limit: the planner waits in the
++    // queue's hold.
++    supervise_until(
++        &fx,
++        &backend,
++        &reviewer,
++        || open_ask(AskKind::QueueHold).is_some(),
++        || diagnose_planner(&fx.db),
++    );
++    for _ in 0..3 {
++        supervise_with(
++            &fx,
++            &backend,
++            &reviewer,
++            &options(1, Duration::from_secs(3600)),
++        );
++    }
++    let planners = queue.planners(true).unwrap();
++    assert_eq!(planners.len(), 1, "{planners:?}");
++    let planner = planners[0].clone();
++    assert_eq!(planner.route, PlannerRoute::Headless);
++    assert!(planner.closed_at.is_none(), "{planner:?}");
++    let dir = planners_dir(&fx.db).join(planner.id.to_string());
++    assert!(!dir.join("turns").join("exit").exists(), "not ended");
++    let waiting = queue_events(&fx.db, "provider_waiting");
++    assert_eq!(waiting.len(), 1, "{waiting:?}");
++    assert_eq!(waiting[0]["planner_id"], planner.id.as_i64());
++    assert_eq!(waiting[0]["turn"], 2);
++    assert_eq!(waiting[0]["reason"], "usage_limit");
++    let hold = open_ask(AskKind::QueueHold).unwrap();
++    assert_eq!(waiting[0]["ask_id"], hold.id.as_i64());
++
++    queue.answer(hold.id, "done").unwrap();
++    supervise_until(
++        &fx,
++        &backend,
++        &reviewer,
++        || !queue_events(&fx.db, "planner_closed").is_empty(),
++        || diagnose_planner(&fx.db),
++    );
++    let requests = taken(&fx.db, planner.id);
++    assert_eq!(requests.len(), 2, "{requests:?}");
++    assert_eq!(requests[0]["what"], format!("answer of ask {}", asked.id));
++    assert_eq!(requests[1]["what"], "provider retry");
++    let retry = requests[1]["prompt"].as_str().unwrap();
++    assert!(retry.contains("can be used again"), "{retry}");
++    assert!(
++        retry.contains(&format!("answer to ask {}: keep it", asked.id)),
++        "{retry}"
++    );
++    assert_eq!(
++        queue.show(draft).unwrap().task.status(),
++        TaskStatus::Canceled
++    );
++    // One planner all along, ended as it exited, never told of as silent.
++    assert_eq!(queue.planners(true).unwrap().len(), 1);
++    let closed = queue_events(&fx.db, "planner_closed");
++    assert_eq!(closed.len(), 1, "{closed:?}");
++    assert_eq!(closed[0]["code"], "runtime_exited");
++    assert!(queue_events(&fx.db, "planner_unresponsive").is_empty());
++    assert!(backend.texts().is_empty(), "nothing typed");
++}
++
++/// Acceptance (ADR-t1394-2 decision 3): a headless planner's turn that runs
++/// past `[stall].turn_limit_secs` is stopped by its wrapper, the inbox is
++/// told once with `planner_unresponsive` naming the planner and the turn,
++/// and the planner, its session over, is closed as exited.
++#[test]
++fn a_headless_planners_turn_stopped_at_its_limit_tells_the_inbox_and_the_planner_closes() {
++    let fx = headless_fixture(
++        r#"if [ ! -e "$DB.slept" ]; then : > "$DB.slept"; sleep 30; fi
++say "turn $TURN""#,
++    );
++    let mut queue = SqliteQueue::open(&fx.db).unwrap();
++    let request = record(&mut queue, "plan the landing rate back");
++    let reviewer = StubReviewer::new(&[]);
++    let backend = PlanWorkspace::default();
++    let settings = dagq::runtime::SuperviseOptions {
++        stall: Some(
++            dagq::domain::stall::StallConfig::default().with_millis("turn_limit_secs", 500),
++        ),
++        ..options(1, Duration::from_secs(3600))
++    };
++    let deadline = Instant::now() + Duration::from_secs(120);
++    let first_closed = || {
++        queue_events(&fx.db, "planner_closed")
++            .iter()
++            .any(|closed| closed["planner_id"] == 1)
++    };
++    while !first_closed() {
++        supervise_with(&fx, &backend, &reviewer, &settings);
++        assert!(Instant::now() < deadline, "{}", diagnose_planner(&fx.db));
++        thread::sleep(Duration::from_millis(50));
++    }
++    let finished = queue_events(&fx.db, "turn_finished");
++    assert_eq!(finished[0]["planner_id"], 1);
++    assert_eq!(finished[0]["outcome"], "timed_out", "{finished:?}");
++    let told = queue_events(&fx.db, "planner_unresponsive");
++    assert_eq!(told.len(), 1, "{told:?}");
++    assert_eq!(told[0]["subject"], "planner");
++    assert_eq!(told[0]["planner_id"], 1);
++    assert_eq!(told[0]["route"], "headless");
++    assert_eq!(told[0]["request_id"], request.as_i64());
++    assert_eq!(told[0]["turn"], 1);
++    assert_eq!(told[0]["outcome"], "timed_out");
++    let closed = queue_events(&fx.db, "planner_closed");
++    let closed = closed.iter().find(|c| c["planner_id"] == 1).unwrap();
++    assert_eq!(closed["code"], "runtime_exited", "{closed}");
++    assert_eq!(closed["request_id"], request.as_i64());
++    // Its request is still open: the planner ended undecided.
++    assert_ne!(
++        queue.plan_request(request).unwrap().status,
++        RequestStatus::Exhausted
++    );
++}
++
++/// Acceptance (ADR-t1394-1 decision 6 on the headless route): a request's
++/// headless planner that submits a proposal in its turn makes the request
++/// `proposed` with the proposal linked, and, idle with nothing left, gets
++/// the exit request and is closed with the request's ID.
++#[test]
++fn a_headless_request_planners_submission_proposes_the_request_and_its_end_closes_it() {
++    let fx = headless_fixture(
++        r#""$DAGQ" --db "$DB" submit 2 >> "$RUN_DIR/submit.log" 2>&1
++say "turn $TURN""#,
++    );
++    let mut queue = SqliteQueue::open(&fx.db).unwrap();
++    let task = add(
++        &mut queue,
++        "bring it back",
++        &[TaskId::new(1)],
++        Priority::Normal,
++    );
++    assert_eq!(task, TaskId::new(2));
++    let request = record(&mut queue, "bring the landing rate back");
++    let reviewer = StubReviewer::new(&[json!({"verdict": "pass", "reasons": [], "summary": "ok"})]);
++    let backend = PlanWorkspace::default();
++    supervise_until(
++        &fx,
++        &backend,
++        &reviewer,
++        || !queue_events(&fx.db, "planner_closed").is_empty(),
++        || diagnose_planner(&fx.db),
++    );
++    let proposed = queue.plan_request(request).unwrap();
++    assert_eq!(
++        proposed.status,
++        RequestStatus::Proposed,
++        "{}",
++        diagnose_planner(&fx.db)
++    );
++    let told = queue_events(&fx.db, "request_proposed");
++    assert_eq!(told.len(), 1, "{told:?}");
++    assert_eq!(told[0]["planner_id"], 1);
++    let planner = queue.planner(PlannerId::new(1)).unwrap();
++    assert_eq!(planner.route, PlannerRoute::Headless);
++    assert_eq!(planner.request_id, Some(request));
++    assert_eq!(planner.exit_code, Some(0));
++    let turns = planners_dir(&fx.db).join("1").join("turns");
++    assert!(turns.join("exit").is_file());
++    assert!(turns.join("turn-000001.jsonl").is_file());
++    assert!(!turns.join("turn-000002.jsonl").exists());
++    let closed = queue_events(&fx.db, "planner_closed");
++    assert_eq!(closed.len(), 1, "{closed:?}");
++    assert_eq!(closed[0]["code"], "runtime_exited");
++    assert_eq!(closed[0]["request_id"], request.as_i64());
++    assert_eq!(queue.planners(true).unwrap().len(), 1, "no second planner");
++    assert!(backend.texts().is_empty(), "nothing typed");
++}
++
++/// Acceptance (ADR-t1394-1 decisions 6 and 7 on the headless route): the
++/// answer of a `planner_question` about a request (no finding, no task)
++/// whose headless planner ended before it is handed to a new headless
++/// planner that carries it in its first turn; planners that end undecided
++/// at the end of their turns are followed by another until three, and
++/// then the request is `exhausted`.
++#[test]
++fn a_headless_request_planners_answer_reaches_a_new_one_and_undecided_ends_exhaust_the_request() {
++    let fx = headless_fixture(
++        r#"if [ ! -e "$DB.asked" ]; then : > "$DB.asked"; "$DAGQ" --db "$DB" ask --kind planner_question --because scope --request 1 --question "which part?" --option plan --option decline --cmux true >> "$RUN_DIR/ask.log" 2>&1; fi
++say "turn $TURN""#,
++    );
++    let mut queue = SqliteQueue::open(&fx.db).unwrap();
++    let request = record(&mut queue, "plan the landing rate back");
++    let reviewer = StubReviewer::new(&[]);
++    let backend = PlanWorkspace::default();
++    let open_question = || {
++        SqliteQueue::open(&fx.db)
++            .unwrap()
++            .asks(Default::default())
++            .unwrap()
++            .into_iter()
++            .find(|ask| ask.request_id == Some(request))
++    };
++    supervise_until(
++        &fx,
++        &backend,
++        &reviewer,
++        || open_question().is_some() && !queue_events(&fx.db, "turn_finished").is_empty(),
++        || diagnose_planner(&fx.db),
++    );
++    let asked = open_question().unwrap();
++    assert_eq!(asked.task_id, None);
++    assert_eq!(asked.finding_id, None);
++    // It waits for the answer, then its session ends before it comes.
++    for _ in 0..3 {
++        supervise_with(
++            &fx,
++            &backend,
++            &reviewer,
++            &options(1, Duration::from_secs(3600)),
++        );
++    }
++    let first_dir = planners_dir(&fx.db).join("1");
++    assert!(!first_dir.join("turns").join("exit").exists(), "waits");
++    fs::write(first_dir.join("turns").join("exit"), b"").unwrap();
++    supervise_until(
++        &fx,
++        &backend,
++        &reviewer,
++        || !queue_events(&fx.db, "planner_closed").is_empty(),
++        || diagnose_planner(&fx.db),
++    );
++    assert_eq!(
++        queue.planners(true).unwrap().len(),
++        1,
++        "waits for the answer"
++    );
++    queue.answer(asked.id, "plan").unwrap();
++    supervise_until(
++        &fx,
++        &backend,
++        &reviewer,
++        || queue.plan_request(request).unwrap().status == RequestStatus::Exhausted,
++        || diagnose_planner(&fx.db),
++    );
++
++    let planners = queue.planners(true).unwrap();
++    assert_eq!(planners.len(), 3, "{planners:?}");
++    for planner in &planners {
++        assert_eq!(planner.route, PlannerRoute::Headless);
++        assert_eq!(planner.request_id, Some(request));
++        assert!(planner.closed_at.is_some(), "{planner:?}");
++    }
++    // The second carried the answer in its first turn.
++    let second = planners_dir(&fx.db).join(planners[1].id.to_string());
++    let prompt = fs::read_to_string(second.join("prompt.txt")).unwrap();
++    assert!(
++        prompt.contains(&format!("answer to ask {}: plan", asked.id)),
++        "{prompt}"
++    );
++    let calls = fs::read_to_string(second.join("stub-calls.log")).unwrap();
++    assert_eq!(calls.lines().count(), 1, "{calls}");
++    let opened: Vec<Value> = queue_events(&fx.db, "request_planner_opened");
++    assert_eq!(opened.len(), 3, "{opened:?}");
++    assert_eq!(opened[1]["ask_id"], asked.id.as_i64());
++    // Each ended at the end of its turns: the exit request, closed as
++    // exited with the request's ID.
++    let closed = queue_events(&fx.db, "planner_closed");
++    assert_eq!(closed.len(), 3, "{closed:?}");
++    for closed in &closed {
++        assert_eq!(closed["code"], "runtime_exited", "{closed}");
++        assert_eq!(closed["request_id"], request.as_i64());
++    }
++    let exhausted = queue_events(&fx.db, "request_planner_exhausted");
++    assert_eq!(exhausted.len(), 1, "{exhausted:?}");
++    assert_eq!(exhausted[0]["planners"], 3);
++    assert!(queue.asks(Default::default()).unwrap().is_empty());
++    assert!(backend.texts().is_empty(), "nothing typed");
++}
++
++/// Acceptance (ADR-t1394-2 decision 2 for a finding's planner, ADR-0044
++/// decision 19): a finding marked for a proposal gets a headless planner;
++/// its `planner_question` about the finding (no task) waits for the answer
++/// without an exit request, the answer comes as its next turn, whose
++/// submission makes the finding `proposed`, and the exit request ends it,
++/// closed as exited with the finding's ID.
++#[test]
++fn a_headless_finding_planner_takes_the_answer_as_its_next_turn_and_closes_with_its_finding() {
++    let fx = headless_fixture(
++        r#"case "$TURN" in
++1) "$DAGQ" --db "$DB" ask --kind planner_question --because scope --finding 1 --question "a new goal for this?" --option propose --option dismiss --cmux true >> "$RUN_DIR/ask.log" 2>&1 ;;
++*) "$DAGQ" --db "$DB" submit 2 >> "$RUN_DIR/submit.log" 2>&1 ;;
++esac
++say "turn $TURN""#,
++    );
++    let mut queue = SqliteQueue::open(&fx.db).unwrap();
++    let task = add(
++        &mut queue,
++        "split x.rs",
++        &[TaskId::new(1)],
++        Priority::Normal,
++    );
++    assert_eq!(task, TaskId::new(2));
++    let found = queue
++        .record_finding(dagq::domain::NewFinding {
++            kind: "conflict_hotspot".into(),
++            target: dagq::domain::FindingTarget::Queue,
++            subject: "src/x.rs".into(),
++            summary: "src/x.rs conflicts in most landings".into(),
++            detail: None,
++            impact: None,
++            evidence: Vec::new(),
++            propose: Some("recurs daily".into()),
++            by: "observer".into(),
++        })
++        .unwrap()
++        .finding
++        .id;
++    assert_eq!(found.as_i64(), 1);
++    let reviewer = StubReviewer::new(&[json!({"verdict": "pass", "reasons": [], "summary": "ok"})]);
++    let backend = PlanWorkspace::default();
++    let open_question = || {
++        SqliteQueue::open(&fx.db)
++            .unwrap()
++            .asks(Default::default())
++            .unwrap()
++            .into_iter()
++            .find(|ask| ask.kind == AskKind::PlannerQuestion && ask.finding_id == Some(found))
++    };
++    supervise_until(
++        &fx,
++        &backend,
++        &reviewer,
++        || open_question().is_some() && !queue_events(&fx.db, "turn_finished").is_empty(),
++        || diagnose_planner(&fx.db),
++    );
++    for _ in 0..3 {
++        supervise_with(
++            &fx,
++            &backend,
++            &reviewer,
++            &options(1, Duration::from_secs(3600)),
++        );
++    }
++    let planner = queue.planners(false).unwrap()[0].clone();
++    assert_eq!(planner.route, PlannerRoute::Headless);
++    assert_eq!(planner.finding_id, Some(found));
++    let dir = planners_dir(&fx.db).join(planner.id.to_string());
++    assert!(
++        !dir.join("turns").join("exit").exists(),
++        "waits for its answer"
++    );
++    let asked = open_question().unwrap();
++    assert_eq!(asked.task_id, None);
++    queue.answer(asked.id, "propose").unwrap();
++    supervise_until(
++        &fx,
++        &backend,
++        &reviewer,
++        || !queue_events(&fx.db, "planner_closed").is_empty(),
++        || diagnose_planner(&fx.db),
++    );
++
++    let requests = taken(&fx.db, planner.id);
++    assert_eq!(requests.len(), 1, "{requests:?}");
++    assert_eq!(requests[0]["what"], format!("answer of ask {}", asked.id));
++    assert_eq!(
++        requests[0]["prompt"],
++        format!("answer to ask {}: propose", asked.id)
++    );
++    let requested = queue_events(&fx.db, "turn_requested");
++    assert_eq!(requested.len(), 1, "{requested:?}");
++    assert_eq!(requested[0]["planner_id"], planner.id.as_i64());
++    let started = queue_events(&fx.db, "turn_started");
++    assert_eq!(started.len(), 2, "{started:?}");
++    assert_eq!(started[1]["resume"], true);
++    assert_eq!(started[1]["request"], 1);
++    let proposed = queue
++        .findings(&dagq::domain::FindingQuery {
++            id: Some(found),
++            ..Default::default()
++        })
++        .unwrap()
++        .remove(0)
++        .finding;
++    assert_eq!(
++        proposed.status,
++        dagq::domain::FindingStatus::Proposed,
++        "{}",
++        diagnose_planner(&fx.db)
++    );
++    assert!(dir.join("turns").join("exit").is_file());
++    let closed = queue_events(&fx.db, "planner_closed");
++    assert_eq!(closed.len(), 1, "{closed:?}");
++    assert_eq!(closed[0]["code"], "runtime_exited");
++    assert_eq!(closed[0]["finding_id"], found.as_i64());
++    assert_eq!(queue.planner(planner.id).unwrap().exit_code, Some(0));
++    assert!(backend.texts().is_empty(), "nothing typed");
++    assert!(backend.opened().is_empty(), "no workspace");
++}
++
++/// Acceptance (ADR-t1394-2 decision 2 for a revise to a live planner): a
++/// headless planner that submitted its proposal again and is still alive
++/// gets the next revise of that proposal as its next turn's request
++/// (`what: revise`, recorded as `turn_requested`), not a new planner: its
++/// first turn waits until plan review sent the proposal back, so it is
++/// alive and at work when the revise comes, and idle when it is delivered.
++/// Its second turn submits again, plan review accepts, and the exit
++/// request ends it.
++#[test]
++fn a_live_headless_planner_takes_the_next_revise_of_its_proposal_as_its_next_turn() {
++    let fx = headless_fixture(
++        r#""$DAGQ" --db "$DB" submit --proposal 1 >> "$RUN_DIR/submit.log" 2>&1
++if [ "$TURN" = 1 ]; then
++  i=0
++  while [ $i -lt 600 ]; do
++    "$DAGQ" --db "$DB" proposal show 1 2>> "$RUN_DIR/show.log" | grep -q '"revising"' && break
++    sleep 0.1; i=$((i + 1))
++  done
++fi
++say "turn $TURN""#,
++    );
++    let mut queue = SqliteQueue::open(&fx.db).unwrap();
++    let task = add(&mut queue, "change", &[TaskId::new(1)], Priority::Normal);
++    let proposal = crate::plan_review::submit(&mut queue, &[task], None);
++    assert_eq!(proposal.as_i64(), 1);
++    let reviewer = StubReviewer::new(&[
++        json!({"verdict": "revise", "reasons": ["split it"], "summary": "not yet"}),
++        json!({"verdict": "revise", "reasons": ["name the test"], "summary": "not yet"}),
++        json!({"verdict": "pass", "reasons": [], "summary": "ok"}),
++    ]);
++    let backend = PlanWorkspace::default();
++    supervise_until(
++        &fx,
++        &backend,
++        &reviewer,
++        || {
++            !queue_events(&fx.db, "planner_closed").is_empty()
++                && queue.show_proposal(proposal).unwrap().status()
++                    == dagq::domain::ProposalStatus::Accepted
++        },
++        || diagnose_planner(&fx.db),
++    );
++
++    // One planner took both revises: the first in its prompt, the second
++    // as the request of its next turn.
++    let planners = queue.planners(true).unwrap();
++    assert_eq!(planners.len(), 1, "{planners:?}");
++    let planner = planners[0].clone();
++    assert_eq!(planner.route, PlannerRoute::Headless);
++    let dir = planners_dir(&fx.db).join(planner.id.to_string());
++    let prompt = fs::read_to_string(dir.join("prompt.txt")).unwrap();
++    assert!(prompt.contains("split it"), "{prompt}");
++    let requests = taken(&fx.db, planner.id);
++    assert_eq!(requests.len(), 1, "{requests:?}");
++    assert_eq!(requests[0]["what"], "revise");
++    let revise = requests[0]["prompt"].as_str().unwrap();
++    assert!(revise.contains("name the test"), "{revise}");
++    let requested = queue_events(&fx.db, "turn_requested");
++    assert_eq!(requested.len(), 1, "{requested:?}");
++    assert_eq!(requested[0]["planner_id"], planner.id.as_i64());
++    assert_eq!(requested[0]["what"], "revise");
++    assert_eq!(
++        requested[0]["workspace_id"],
++        planner.workspace_id.clone().unwrap()
++    );
++    let started = queue_events(&fx.db, "turn_started");
++    assert_eq!(started.len(), 2, "{started:?}");
++    assert_eq!(started[1]["resume"], true);
++    assert_eq!(started[1]["request"], 1);
++    let sent = crate::plan_review::events(&mut queue, task, "plan_revise_sent");
++    assert_eq!(sent.len(), 2, "{sent:?}");
++    assert_eq!(sent[0]["opened"], true);
++    assert_ne!(sent[1]["opened"], true, "{sent:?}");
++    assert_eq!(sent[1]["planner_id"], planner.id.as_i64());
++    // Then the exit request ended it.
++    assert!(dir.join("turns").join("exit").is_file());
++    let closed = queue_events(&fx.db, "planner_closed");
++    assert_eq!(closed.len(), 1, "{closed:?}");
++    assert_eq!(closed[0]["code"], "runtime_exited");
++    assert_eq!(queue.planner(planner.id).unwrap().exit_code, Some(0));
++    assert!(backend.texts().is_empty(), "nothing typed");
++    assert!(backend.opened().is_empty(), "no workspace");
++}
++
++/// Acceptance (ADR-t1394-2 decision 5, a login): a headless draft planner
++/// whose first turn fails at Claude's login waits in the queue's
++/// `authentication` hold ask, with `provider_waiting` naming it and no
++/// exit request; once a person answers the hold, the `provider retry`
++/// request goes on with the task, which finishes the draft.
++#[test]
++fn a_headless_planner_at_a_login_failure_waits_in_the_hold_and_goes_on() {
++    let fx = headless_fixture(
++        r#"case "$TURN" in
++1) printf '%s\n' '{"type":"assistant","error":"authentication_failed","message":{"model":"<synthetic>","content":[{"type":"text","text":"Not logged in"}]}}'; fail "Not logged in" ;;
++*) "$DAGQ" --db "$DB" cancel 2 >> "$RUN_DIR/cancel.log" 2>&1 ;;
++esac
++say "turn $TURN""#,
++    );
++    let mut queue = SqliteQueue::open(&fx.db).unwrap();
++    let goal = open_goal(&mut queue);
++    let draft = runtime_draft(
++        &mut queue,
++        "gap",
++        Some(goal),
++        DraftOrigin::FollowUp,
++        json!({"source_task_id": 1, "source_run_id": null, "index": 0}),
++    );
++    assert_eq!(draft, TaskId::new(2));
++    let reviewer = StubReviewer::new(&[]);
++    let backend = PlanWorkspace::default();
++    let hold = || {
++        SqliteQueue::open(&fx.db)
++            .unwrap()
++            .asks(Default::default())
++            .unwrap()
++            .into_iter()
++            .find(|ask| ask.kind == AskKind::QueueHold)
++    };
++    supervise_until(
++        &fx,
++        &backend,
++        &reviewer,
++        || hold().is_some(),
++        || diagnose_planner(&fx.db),
++    );
++    for _ in 0..3 {
++        supervise_with(
++            &fx,
++            &backend,
++            &reviewer,
++            &options(1, Duration::from_secs(3600)),
++        );
++    }
++    let asked = hold().unwrap();
++    assert_eq!(
++        asked.reason_category,
++        dagq::domain::AskReason::Authentication
++    );
++    let planners = queue.planners(true).unwrap();
++    assert_eq!(planners.len(), 1, "{planners:?}");
++    let planner = planners[0].clone();
++    assert!(planner.closed_at.is_none(), "{planner:?}");
++    let dir = planners_dir(&fx.db).join(planner.id.to_string());
++    assert!(!dir.join("turns").join("exit").exists(), "not ended");
++    let waiting = queue_events(&fx.db, "provider_waiting");
++    assert_eq!(waiting.len(), 1, "{waiting:?}");
++    assert_eq!(waiting[0]["planner_id"], planner.id.as_i64());
++    assert_eq!(waiting[0]["turn"], 1);
++    assert_eq!(waiting[0]["reason"], "authentication");
++    assert_eq!(waiting[0]["ask_id"], asked.id.as_i64());
++
++    queue.answer(asked.id, "done").unwrap();
++    supervise_until(
++        &fx,
++        &backend,
++        &reviewer,
++        || !queue_events(&fx.db, "planner_closed").is_empty(),
++        || diagnose_planner(&fx.db),
++    );
++    let requests = taken(&fx.db, planner.id);
++    assert_eq!(requests.len(), 1, "{requests:?}");
++    assert_eq!(requests[0]["what"], "provider retry");
++    let retry = requests[0]["prompt"].as_str().unwrap();
++    assert!(retry.contains("can be used again"), "{retry}");
++    assert_eq!(
++        queue.show(draft).unwrap().task.status(),
++        TaskStatus::Canceled
++    );
++    assert_eq!(queue.planners(true).unwrap().len(), 1);
++    let closed = queue_events(&fx.db, "planner_closed");
++    assert_eq!(closed[0]["code"], "runtime_exited", "{closed:?}");
++    assert!(queue_events(&fx.db, "planner_unresponsive").is_empty());
++}
++
++/// Acceptance (ADR-t1394-2 decision 3, the sweep's path): a headless
++/// planner whose wrapper stopped its last turn at its limit and ended is
++/// closed by the supervisor's sweep, and the sweep tells the inbox of the
++/// stopped turn once. Under `--no-claude` the pass tends no planner, so
++/// only the sweep can tell.
++#[test]
++fn the_sweep_tells_of_a_headless_planners_turn_stopped_at_its_limit_as_it_closes_it() {
++    use dagq::application::WorkspaceBackend;
++    let fx = crate::plan_review::fixture();
++    let queue = SqliteQueue::open(&fx.db).unwrap();
++    let backend = PlanWorkspace::default();
++    let log = fx.db.parent().unwrap().join("wrapper.log");
++    let handle = backend
++        .launch_background(fx.db.parent().unwrap(), "sleep 600", &[], &log)
++        .unwrap();
++    let wrapper = dagq::domain::background_wrapper::BackgroundHandle::parse(&handle)
++        .unwrap()
++        .pid;
++    let planner = queue
++        .open_planner(dagq::domain::PlannerOrigin::Runtime, None)
++        .unwrap();
++    queue
++        .set_planner_route(planner.id, PlannerRoute::Headless)
++        .unwrap();
++    queue
++        .planner_workspace_created(planner.id, &handle)
++        .unwrap();
++    queue.register_planner_wrapper(planner.id, wrapper).unwrap();
++    // Its turn 1 was stopped past its limit, and its wrapper ended.
++    let dir = planners_dir(&fx.db).join(planner.id.to_string());
++    fs::create_dir_all(&dir).unwrap();
++    fs::write(
++        dir.join("idle.json"),
++        json!({"dagq_turn": {"turn": 1, "outcome": "timed_out", "failure": null, "permission_denials": 0}})
++            .to_string(),
++    )
++    .unwrap();
++    backend.close(&handle).unwrap();
++    queue.planner_exited(planner.id, wrapper, 1).unwrap();
++    let reviewer = StubReviewer::new(&[]);
++    let settings = dagq::runtime::SuperviseOptions {
++        no_claude: true,
++        ..options(1, Duration::from_secs(3600))
++    };
++    supervise_with(&fx, &backend, &reviewer, &settings);
++    let closed = queue_events(&fx.db, "planner_closed");
++    assert_eq!(closed.len(), 1, "{closed:?}");
++    assert_eq!(closed[0]["code"], "runtime_exited");
++    let told = queue_events(&fx.db, "planner_unresponsive");
++    assert_eq!(told.len(), 1, "{told:?}");
++    assert_eq!(told[0]["subject"], "planner");
++    assert_eq!(told[0]["planner_id"], planner.id.as_i64());
++    assert_eq!(told[0]["state"], "closed");
++    assert_eq!(told[0]["turn"], 1);
++    assert_eq!(told[0]["outcome"], "timed_out");
++    // Once only.
++    supervise_with(&fx, &backend, &reviewer, &settings);
++    assert_eq!(queue_events(&fx.db, "planner_unresponsive").len(), 1);
++}

@@ -1,0 +1,22 @@
+diff --git a/docs/adr/2026-09-30-t1091-1-amend-or-replace-by-number-of-decisions.md b/docs/adr/2026-09-30-t1091-1-amend-or-replace-by-number-of-decisions.md
+index 04ae3303..5e4c247f 100644
+--- a/docs/adr/2026-09-30-t1091-1-amend-or-replace-by-number-of-decisions.md
++++ b/docs/adr/2026-09-30-t1091-1-amend-or-replace-by-number-of-decisions.md
+@@ -4,7 +4,7 @@ type: adr
+ title: ADRをamendsで直すか丸ごと置き換えるかを、IDの形でなく元のADRの決定の数と変える範囲で決め、決定を複数持つ新しい形のADRもamendsで直せるようにする（ADR-t598-1決定5をamends）
+ status: accepted
+ created: 2026-09-30
+-updated: 2026-09-30
++updated: 2026-10-05
+ accepted_on: 2026-09-30
+ amends:
+   - adr-t598-1 decision 5
+@@ -29,7 +29,7 @@ related:
+ 
+ [ADR-t598-1](2026-09-26-t598-1-adr-id-is-task-id-small-adrs-and-design-holds-current-state.md)決定5は、ADRの決定を変えるときは丸ごと置き換え、amendsで直してよいのは既存の4桁のADRのうち決定が多く丸ごとの書き直しが1 taskに収まらないもの（ADR-0047・0044・0073など）だけとした。frontmatter仕様・ADRの索引・template・AGENTS.mdも「新しい形の小さなADRはamendsせず丸ごと置き換える」と書いている。
+ 
+-実際には、決定を複数持つ新しい形のADRがamendsで直されている。
++実際の運用では、新しい形のADRでも、複数の決定の一部がamendsで変更されている。
+ 
+ - [ADR-t828-1](2026-09-28-t828-1-coverage-gate-covers-the-workspace-with-workspace-flag.md)が[ADR-t827-1](2026-09-28-t827-1-broker-crates-binaries-and-version-alignment.md)の決定3をamendsした。
+ - [ADR-t1063-1](2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)が[ADR-t813-2](2026-09-28-t813-2-provider-per-task-and-mutual-fallback.md)（決定7つ）の決定6をamendsした。これはgoal 73のacceptance (1)で、人が「ADR-t813-2の『worker以外の役割はClaudeだけ』をamendsするADR」と決めたものである。

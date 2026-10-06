@@ -1,0 +1,30 @@
+diff --git a/docs/plans/adr-new-task-registration.md b/docs/plans/adr-new-task-registration.md
+new file mode 100644
+index 00000000..a2c4ca33
+--- /dev/null
++++ b/docs/plans/adr-new-task-registration.md
+@@ -0,0 +1,24 @@
++---
++id: plan-adr-new-task-registration
++type: plan
++title: 次のADR taskの登録手順
++status: proposed
++created: 2026-10-05
++updated: 2026-10-05
++related:
++  - adr-t598-1
++---
++
++# 次のADR taskの登録手順
++
++## 対象
++
++これから新しく登録するADR専用taskを対象にする。移行前から登録済みのtaskや、その予約番号の引き継ぎではない。
++
++## 登録手順
++
++plannerはmainのADR一覧から未使用の4桁の番号を1つ選び、新規taskのdescriptionにその番号を予約として記載する。descriptionにはADRの本数と各決定の中身、既存の決定を変更する場合は置き換えかamendsかも記載し、plan reviewで確認する。
++
++## 完了条件
++
++新規taskのdescriptionに4桁の予約番号が記載されていること。この変更の範囲は登録手順の整理までとし、ADRはまだ作成しない。

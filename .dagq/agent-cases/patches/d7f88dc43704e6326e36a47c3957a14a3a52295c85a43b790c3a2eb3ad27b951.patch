@@ -1,0 +1,130 @@
+diff --git a/docs/design/supervisor-lifecycle/headless-job-processes.md b/docs/design/supervisor-lifecycle/headless-job-processes.md
+index f5dc8646..bc9e163a 100644
+--- a/docs/design/supervisor-lifecycle/headless-job-processes.md
++++ b/docs/design/supervisor-lifecycle/headless-job-processes.md
+@@ -30,6 +30,7 @@ task 443。supervisorが起動するheadlessのjob（runのreview、終わった
+ - jobのプロセスを起動した直後に、`Supervisor::headless_job`が`headless_jobs`（schema v43、[Persistence](../persistence.md)）に1行書く: `kind`（`review` / `recovery` / `plan_review` / `goal_review`）、`label`（復旧jobのalert）、`run_id` / `proposal_id` / `goal_id`、`attempt`、`pid`、`process_start`（`ProcessControl::start_identity`。`LC_ALL=C`の`ps -o lstart= -p <pid>`の秒までの起動時刻）、`supervisor_token`、`started_at`、`provider`（jobを起動したprovider（`JobSubject::provider`）。schema v55、task 1062。goal review（task 1065）・runのreview（ADR-t1207-1）・plan review（task 1218）は行き先で実際に起動したprovider（launchの`provider`。使えないproviderから切り替えた後ならその先）、他のjob（復旧）は`claude`（`domain::actor_model::ROLE_PROVIDER`）で、列の既定も`claude`なので、それより前の行と古いバイナリが書く行は`claude`と読める。値の集合はworkerのrunの`requested_provider` / `actual_provider`と同じ）。書けなくてもjobはそのまま走る（logだけ）。
+ - jobの終わりで`ended_at`と`outcome`を書く: 自分で終わったjob（exitを読んだ）は`ended`、自分のsupervisorが止めたjob（timeout、見るのをやめたslot、handoffの前）は`stopped`。jobが終わる場所はqueueを持たないので、終わりは`JobEnds`に積み、次のpassの先頭（と、ループを抜けた直後）に書く。終わりを読む前に捨てられたjob（途中のerror、失敗したループ）は`Drop`で止めて`stopped`にするので、走ったまま見られなくなるjobは無い。
+ - timeoutの停止（`HeadlessJob::stop`）は、killの前に`ProcessControl::descendants`（`ps -U <uid> -o pid=,ppid=,…`の親子の連なり）でjobの子孫を集め、jobをSIGKILLしてwaitした後、子孫もSIGKILLする。`claude -p`のBashとその子がjobより長く残らない。
++- この`ps`の一覧（`ProcessControl::list`・`descendants`・`executables`が共有する`user_ps_listing`）はstdoutをbytesで受け、`parse_ps`が`String::from_utf8_lossy`で読む（task 1794）。hostのどれか1つのprocessのcommandにUTF-8でないbyteがあっても一覧全体は失敗せず、その行もpid・ppidのまま残り（commandのそのbyteだけが置換文字になる）、子孫の連なりが切れない。行を飛ばさないのは、飛ばすとその下の子孫が停止と孤児の検出から漏れるため。brokerの`SystemProcesses`（[Broker](../broker.md)）の一覧も前から同じくlossyに読む。
+ 
+ ## 起動と終わりのinterface
+ 
+diff --git a/src/infrastructure/adapters.rs b/src/infrastructure/adapters.rs
+index 443ca196..66e23336 100644
+--- a/src/infrastructure/adapters.rs
++++ b/src/infrastructure/adapters.rs
+@@ -185,15 +185,7 @@ impl ProcessControl for SystemProcesses {
+     }
+ 
+     fn list(&self) -> Result<Vec<ProcessInfo>> {
+-        // SAFETY: getuid(2) has no failure and no memory effects.
+-        let uid = unsafe { libc::getuid() }.to_string();
+-        let listing = output(Command::new("ps").args([
+-            "-U",
+-            &uid,
+-            "-o",
+-            "pid=,ppid=,etime=,time=,command=",
+-        ]))?;
+-        let processes = parse_ps(&listing);
++        let processes = parse_ps(&user_ps_listing()?);
+         // Linux's `ps` prints CPU time in whole seconds, too coarse to see a
+         // process make progress between two samples: read the clock ticks.
+         #[cfg(target_os = "linux")]
+@@ -222,15 +214,7 @@ impl ProcessControl for SystemProcesses {
+     fn executables(&self) -> Result<Vec<ProcessExecutable>> {
+         // One `ps` for the pids and parents, then one cheap read per pid
+         // for its executable (task 1590); no working directories.
+-        // SAFETY: getuid(2) has no failure and no memory effects.
+-        let uid = unsafe { libc::getuid() }.to_string();
+-        let listing = output(Command::new("ps").args([
+-            "-U",
+-            &uid,
+-            "-o",
+-            "pid=,ppid=,etime=,time=,command=",
+-        ]))?;
+-        Ok(parse_ps(&listing)
++        Ok(parse_ps(&user_ps_listing()?)
+             .into_iter()
+             .map(|p| ProcessExecutable {
+                 pid: p.pid,
+@@ -242,9 +226,7 @@ impl ProcessControl for SystemProcesses {
+ 
+     fn descendants(&self, pid: u32) -> Vec<u32> {
+         // Only the parents are needed: no working directories.
+-        // SAFETY: getuid(2) has no failure and no memory effects.
+-        let uid = unsafe { libc::getuid() }.to_string();
+-        output(Command::new("ps").args(["-U", &uid, "-o", "pid=,ppid=,etime=,time=,command="]))
++        user_ps_listing()
+             .map(|listing| crate::domain::headless_job::descendants(&parse_ps(&listing), pid))
+             .unwrap_or_default()
+     }
+@@ -262,10 +244,26 @@ pub fn process_started_at(pid: u32) -> Option<i64> {
+     Some(i64::try_from(now).ok()? - age)
+ }
+ 
++/// `ps -U <uid> -o pid=,ppid=,etime=,time=,command=` for this user's
++/// processes, as the bytes `ps` printed: a command line need not be UTF-8
++/// (task 1794), so [`parse_ps`] reads them, not [`output`].
++fn user_ps_listing() -> Result<Vec<u8>> {
++    // SAFETY: getuid(2) has no failure and no memory effects.
++    let uid = unsafe { libc::getuid() }.to_string();
++    let mut command = Command::new("ps");
++    command.args(["-U", &uid, "-o", "pid=,ppid=,etime=,time=,command="]);
++    let (status, stdout, stderr) = capture_bytes(&mut command, OUTPUT_TIMEOUT)?;
++    ensure!(status.success(), "\"ps\" failed ({status}): {stderr}");
++    Ok(stdout)
++}
++
+ /// The lines of `ps -o pid=,ppid=,etime=,time=,command=`; a line that does
+-/// not read is skipped.
+-fn parse_ps(listing: &str) -> Vec<ProcessInfo> {
+-    listing
++/// not read is skipped. The listing is read lossily (task 1794): a command
++/// with bytes that are not UTF-8 keeps its process, pid and parent, with
++/// U+FFFD in place of those bytes, so one process's name neither fails the
++/// whole list nor cuts a descendant out of the parent chain.
++fn parse_ps(listing: &[u8]) -> Vec<ProcessInfo> {
++    String::from_utf8_lossy(listing)
+         .lines()
+         .filter_map(|line| {
+             let mut fields = line.split_whitespace();
+@@ -4173,7 +4171,7 @@ mod tests {
+         assert_eq!(proc_stat_cpu_ticks("42 (x) S 1 2"), None);
+         assert_eq!(proc_stat_cpu_ticks("no command"), None);
+         let processes = parse_ps(
+-            "  1     0  3-00:00:00 12:00.50 /sbin/launchd\n 42  1 01:05 bad sleep 600 --x\nbad line\n",
++            b"  1     0  3-00:00:00 12:00.50 /sbin/launchd\n 42  1 01:05 bad sleep 600 --x\nbad line\n",
+         );
+         assert_eq!(processes.len(), 2);
+         assert_eq!(processes[0].cpu_ms, Some(720_500));
+@@ -4182,6 +4180,20 @@ mod tests {
+         assert_eq!(processes[1].elapsed_secs, 65);
+         assert_eq!(processes[1].cpu_ms, None);
+         assert_eq!(processes[1].command, "sleep 600 --x");
++        // Task 1794: a byte that is not UTF-8 in one command keeps that
++        // process and every other line.
++        let processes = parse_ps(
++            b"  7  1 00:05 0:00.01 a\n  8  7 00:05 0:00.01 b\xff c\n  9  8 00:05 0:00.01 d\n",
++        );
++        assert_eq!(
++            processes
++                .iter()
++                .map(|p| (p.pid, p.ppid))
++                .collect::<Vec<_>>(),
++            [(7, 1), (8, 7), (9, 8)]
++        );
++        assert_eq!(processes[1].command, "b\u{fffd} c");
++        assert_eq!(processes[2].command, "d");
+     }
+ 
+     /// Task 1581: the directories are read one pid at a time, once for
+@@ -4191,7 +4203,7 @@ mod tests {
+     #[test]
+     fn each_listed_pid_is_read_once_and_one_unread_stays_listed_without_a_cwd() {
+         let processes =
+-            parse_ps("  7  1 00:05 0:00.01 a\n  8  7 00:05 0:00.01 b\n  9  7 00:05 0:00.01 c\n");
++            parse_ps(b"  7  1 00:05 0:00.01 a\n  8  7 00:05 0:00.01 b\n  9  7 00:05 0:00.01 c\n");
+         let mut reads = Vec::new();
+         let read = |pid: u32| {
+             reads.push(pid);

@@ -1,0 +1,10 @@
+diff --git a/docs/adr/0008-merge-queue-squash-landing.md b/docs/adr/0008-merge-queue-squash-landing.md
+index 8fb68eb2..7e731eb6 100644
+--- a/docs/adr/0008-merge-queue-squash-landing.md
++++ b/docs/adr/0008-merge-queue-squash-landing.md
+@@ -58,4 +58,4 @@ related:
+ - 着地はGitのidentityと、mainをcheckoutしているworktreeのclean（少なくとも着地ファイルと重ならない）を前提にする。SVはmain checkoutに未commitの変更を溜めない。
+ - schema v6（migration 0006）。v5のバイナリはv6のDBを拒否する。
+ - mainを進めた後にDBの更新が失敗した場合、runは`integrating`のまま残る。`recover` → `integrate`ではrebaseでcommitが空になり`needs_session`になる（既知の限界。実機で起きたら[010](../journal/010-failure-path-smoke.md)で扱う）。
+-- pushはSVが行う。承認なしの自動着地と`needs_session`の自動resumeは後回し。
++- pushはSVが行う。承認なしの自動着地と`needs_session`の自動resumeは後回し（自動着地はその後に実装され、今はreviewのpassで着地する）。

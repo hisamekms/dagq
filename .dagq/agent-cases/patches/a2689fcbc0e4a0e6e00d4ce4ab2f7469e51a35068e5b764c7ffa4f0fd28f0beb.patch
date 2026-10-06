@@ -1,0 +1,26 @@
+diff --git a/docs/plans/worker-document-search-follow-up.md b/docs/plans/worker-document-search-follow-up.md
+new file mode 100644
+index 00000000..9a1f609d
+--- /dev/null
++++ b/docs/plans/worker-document-search-follow-up.md
+@@ -0,0 +1,20 @@
++---
++id: plan-worker-document-search-follow-up
++type: plan
++title: workerの文書検索の記録を確かめる後続task案
++status: proposed
++created: 2026-10-05
++updated: 2026-10-05
++---
++
++# workerの文書検索の記録を確かめる後続task案
++
++## 後続taskのdescription案
++
++workerのreceiptから、探した名前と照合した文書の記録を確認する。現在のpromptの仕様は[ADR-t1688-1](../adr/2026-10-04-t1688-1-worker-searches-documents-by-changed-names.md)を参照する。
++
++探した名前をsummaryに残す理由もADR-t1688-1を参照する。
++
++## 受け入れ条件案
++
++探した名前と照合した文書が記録されているreceiptの例を示す。記録に不足があれば、改善候補として報告する。

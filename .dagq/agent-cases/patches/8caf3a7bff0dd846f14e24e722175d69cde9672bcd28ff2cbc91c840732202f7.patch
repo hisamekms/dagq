@@ -1,0 +1,13 @@
+diff --git a/tests/it/queue_schema.rs b/tests/it/queue_schema.rs
+index 31a8eaae..d0f76170 100644
+--- a/tests/it/queue_schema.rs
++++ b/tests/it/queue_schema.rs
+@@ -146,6 +146,8 @@ fn queue_before_the_floor(dir: &TempDir) -> std::path::PathBuf {
+     raw.pragma_update(None, "application_id", 0x43545131)
+         .unwrap();
+     raw.pragma_update(None, "user_version", 23).unwrap();
++    // Migration 0024 introduced the floor table and is itself breaking.
++    assert_eq!(floor_for(24), 24);
+     path
+ }
+ 

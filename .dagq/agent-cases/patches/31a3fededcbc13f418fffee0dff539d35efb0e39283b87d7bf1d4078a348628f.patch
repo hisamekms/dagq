@@ -1,0 +1,652 @@
+diff --git a/docs/design/supervisor-lifecycle/handoff.md b/docs/design/supervisor-lifecycle/handoff.md
+index 58e3e139..f058e27c 100644
+--- a/docs/design/supervisor-lifecycle/handoff.md
++++ b/docs/design/supervisor-lifecycle/handoff.md
+@@ -4,8 +4,8 @@ type: design
+ title: "Handoff"
+ status: current
+ created: 2026-09-26
+-updated: 2026-10-04 # task 1437
+-last_verified: 2026-10-04 # task 1437
++updated: 2026-10-04 # task 1437; task 1683
++last_verified: 2026-10-04 # task 1437; task 1683
+ scope: runtime
+ related:
+   - design-supervisor-lifecycle
+@@ -25,7 +25,7 @@ related:
+ - **要求の受け取りと取り消し**: drain中のsupervisorは各passで`handoff_request(token)`を読み直し、取り消されていれば（None）保持した要求を捨ててdrainを解き、同じpassで通常のclaimに戻る。別のbinaryの要求に置き換わっていれば（`request_handoff`は`handoff_binary`を上書きするので、`install`と自動更新が重なると起きうる）、claimを挟まずに新しいbinaryを保持してdrainを続け、そのbinaryでexecする（task 1286。logは「置き換わった」と「取り消された」を分けて出す）。execの直前には`take_handoff(token, binary)`の条件付きUPDATEで要求の列を原子的に消し、`handoff_accepted`を0にする（取り戻しの`resume_registration`が1に戻すまで次の要求を受けない。task 824）。`hand_off`はこの「要求が無く`handoff_accepted`が0の同じtokenの行」をexecの途中と見て待ち、プロセスが死ねば失敗、新しいbuild識別子で戻れば成功、前のbuild識別子で戻ればexecの失敗とする。tokenとbinaryが一致して受け取れたときだけ`prepare_handoff`を行って`handoff`を返す。受け取れなければexecせず、`handoff_request`を読み直して、別のbinaryの要求があればそれを保持してdrainを続け（次のpassでそのbinaryの受け取りを試みる）、無ければdrainを解いて通常のclaimに戻る（task 1286）。取り消しでdrainを解くとき（各passの読み直しとexec直前の受け取りのどちらでも）は、終わったrunの掃除も通常に戻す（`resume_cleanup`。task 1427）: 頼みを再び受け、共有の停止の印（`cleanup.stop`）を下ろし、終わったrun全部の掃除をすぐ頼み直して、drainのあいだ捨てた頼みと、停止の印で今のworktreeの後に止まったjobの残りを拾う。空き容量の掃除はdrainで受けられなかった頼みを掃除の間隔（`CLEANUP_INTERVAL`）に数えないので、戻った後の容量不足はすぐ掃除のjobを走らせ、それでも足りないときだけdiskのaskになる。置き換え（task 1286）と停止要求でのdrainでは掃除を戻さない。受け取り後の`cancel_handoff`はfalseを返すので、呼び出し側は`HANDOFF_GRACE`のあいだ新しいbinaryで戻ったかを見直す。
+ - **停止要求の記録と引き継ぎの待ち**（task 1277）: supervisorは停止要求（SIGINT/SIGTERM。`down`・`up`や`install --allow-breaking`のdrain・launchdのbootoutのどれから来ても）に最初に気づいたpassで、queueのevent `supervisor_draining`（`EventKind::is_queue`。`supervisor`（token）・`pid`・`build`（build識別子）・`reason: stop_requested`・`handoff_binary`（保留中の引き継ぎのbinary、無ければnull）・`runs`（進行中のslotのrun ID））をプロセスごとに1回だけ記録する（書けなければlogに残して次のpassで書き直す）。停止要求は引き継ぎに勝つので、drainを続けてexecしない。`hand_off`の待ち（`wait_for_handoff`とtask 715の`look_again`）は各`poll`で最新の`supervisor_draining`を読み、待っているsupervisorがまだ引き継いでいない（`look_at_handoff`が成功を返さない）のにそのtokenの`supervisor_draining`があれば（要求の前の記録も同じく、その停止はexecせずに終わる。drainを終えて登録が消えた後も同じ）。1回の見直しは停止の記録・登録・停止の記録の順に読む（`Stops::around`）: まだ要求を持つsupervisorは登録より前に読んだ停止だけで停止中とし（新しいbuildで戻った直後に止められたsupervisorを停止中と取り違えない）、登録が消えた・heartbeatが古くなったsupervisorは登録の後に読んだ停止でも停止中とする（supervisorは登録を消す前に停止を記録するので、2つの読み取りのあいだに停止して登録を消したsupervisorも停止中と分かる）、上限を待たずにそのsupervisorを失敗にし、要求を`cancel_handoff`で取り消す。errorは`supervisor <token> (pid <pid>) is stopping (a stop request wins over the handoff) and was not handed off to <path>; …`で、`Handed`の`stopping`がtrueになり、`Handed::report`（`up`の`replaced[]`、`install`の`supervisors[]`、`update_failed`の`supervisors[]`）の要素に`stopping: true`が付く。全員の失敗で前のbinaryに戻し、一部なら新しいbinaryを残す規則（ADR-t632-1）とaskの形は変えない。上限切れのerrorの`it still finishes its validation or landing in progress`は、停止中でないsupervisorにだけ出る。
+ - **exec**: `main`は`supervise`の結果が`handoff`なら、queueの接続がすべて閉じた後で、自分の引数から`--handoff-token`（と`--mode`）を除いて`--handoff-token <token>`を足し（要求されたbinaryが`supervise --codex`を知らなければ、`supervise --codex probe --help`が失敗するので`--codex`とその値も除く。`install --rollback`で`--codex`より前のbinaryへ戻るとき。`HANDOFF_OPTIONAL`、ADR-t813-2）、要求されたbinaryを`CommandExt::exec`で同じpidのまま起動する（SQLiteのfdはclose-on-execで開かれる）。execが失敗したら（fileが無い、実行できない）logに残し、同じbinaryのまま同じ引数で`supervise`をやり直すので、登録は前のbuild識別子で取り戻され、頼んだ側は「別のbuild識別子で戻った」として失敗を知る。in-cmux modeのsupervisorは同じcmux workspaceの同じプロセスのままで、launchd modeのsupervisorは同じpidなので`KeepAlive`は何もしない。
+-- **取り戻し**: exec 後は同じ token と pid の登録を取り戻し、version と heartbeat を更新する。lease と開始時刻を保ち、supervisor_handed_off を記録して slot を復元する。handoff.json の resume と終了要求、送った依頼を復元し、依頼を二重に送らない。古い対話用の exit_typed / not_ready_asked 等の欄は互換のため読めるが監視には使わない。exit_retried とダイアログによる timeout の数え直しは廃止した。snapshot が無ければ生きている wrapper の run を adopt と同じ条件で復元する。復元した resume は resume_adopted を記録する。既に他の supervisor が取った lease には触れない。
++- **取り戻し**: exec 後は同じ token と pid の登録を取り戻し、version と heartbeat を更新する。lease と開始時刻を保ち、supervisor_handed_off を記録して slot を復元する。handoff.json の resume と終了要求、送った依頼を復元し、依頼を二重に送らない。古い対話用の exit_typed / not_ready_asked 等の欄は互換のため読めるが監視には使わない。exit_retried とダイアログによる timeout の数え直しは廃止した。snapshot が無ければ生きている wrapper の run を adopt と同じ条件で復元する。復元した resume は resume_adopted を記録する。review 中（`awaiting_integration`）の run は adopt と同じ `adopt_review` で組み立て直すので、記録した revise・衝突の依頼が `turns/` に無ければ、その試行の依頼だけを照合して 1 回だけ書く（[Review](review.md) の 7、task 1683）。既に他の supervisor が取った lease には触れない。
+ - **resumeの依頼を送る前**: resumeを始めて（`resume_started`・`session_opened`）から`resume_request_sent`までの待ち（wrapperとagentの登録、入力欄が`resume_prompt_delay`のあいだ準備できていること）は、登録の待ちはqueueのprocessの行を、入力欄の待ちは画面をpassごとに1回読むだけで、passを塞がない（`ResumeWatch::poll`と`send_when_ready`。task 1161）。passを塞ぐのは依頼の送信（`submit`）だけで、`submit_check_interval`ごとの確認と`SUBMIT_RETRIES`回のEnterに、cmuxの各コマンドの時間切れが上限を付ける。resumeのslotは組み立て直せるので、この間に頼まれた引き継ぎは次のpassの先頭で受け取られ、`handoff.json`は`message_sent_at`なしで書かれ、次のプロセスは同じsessionの入力欄が準備でき次第、依頼を1回だけ送る（runをresumeし直さない。登録・`input_not_ready`・resume timeoutの時計は引き継いだときから数え直す）。
+ - **待ち**: 人の答えを待つrun（[人の答えを待つrun](waiting.md)）のslotは組み立て直せるので、引き継ぎはそれを待たない。次のプロセスはslotを組み立て直した後、runのイベントから待ちと戻り待ちを戻す（`run_waiting_started`を記録し直さず、上限を超えていても待ちのまま。[ADR-0062](../../adr/0062-runs-waiting-for-a-person-leave-the-slot.md)の決定11）。
+ - 走っているrunのwrapperはclaim時の`runner`（前のbinaryのコピー）で動き続ける。互換の範囲のschemaならそのまま動く。
+diff --git a/docs/design/supervisor-lifecycle/review.md b/docs/design/supervisor-lifecycle/review.md
+index b4cc0b57..47d68a60 100644
+--- a/docs/design/supervisor-lifecycle/review.md
++++ b/docs/design/supervisor-lifecycle/review.md
+@@ -4,8 +4,8 @@ type: design
+ title: "Review (supervisor)"
+ status: current
+ created: 2026-09-26
+-updated: 2026-10-04 # task 1547: the definitions also refer to design documents (architecture-boundaries); task 1437
+-last_verified: 2026-10-04 # task 1547; task 1437
++updated: 2026-10-04 # task 1547: the definitions also refer to design documents (architecture-boundaries); task 1437; task 1683
++last_verified: 2026-10-04 # task 1547; task 1437; task 1683
+ scope: runtime
+ related:
+   - adr-t1570-1
+@@ -43,7 +43,7 @@ related:
+    - **concern**（とreviseの打ち切り）: concernはまず下の[AIが決めるconcern](#aiが決めるconcern未実装)で決め、`land`を適用するものはpassと同じ衝突の事前判定と着地へ、`send_back`を適用するものは4のreviseの往復へ進む。askにするものは、`runtime::ask`（CLIの`ask`と同じ。新しいaskならinboxのworkspaceへ`cmux notify`する）で`approve_landing`のask（`--option land --option send_back --option cancel`、`asked_by: supervisor`、questionにverdict、打ち切りの理由、`summary`、`reasons`、`review.md`のpath）を作り、leaseを外す。askを作る前に、下の「reviewの失敗」と同じく、そのrunのcloseされていない`approve_landing`のask（前のreviewのもの）を閉じる（task 425）。残すと同じrun・kindの開いたaskに重複として畳まれて新しいreviewの理由が人に届かず、回答済みで未適用の古い回答が新しいreviewに適用されうるため。
+    - **reviewの失敗**（task 328）: `review_failed`を記録するのと同じstepで、concernと同じ経路（`runtime::ask`）で`approve_landing`のask（同じoptions、`asked_by: supervisor`、questionに失敗したreviewの`attempt`と`error`、`review.md`のpath、そのattemptのjobが走ったときは`review-<attempt>.out` / `.err`のpath）を開く。jobが起動できなかった失敗（promptの書き込み・materialの取得・spawnの失敗）ではそのattemptの出力は書かれていないので名指しせず、読めないverdictのretryが起動できなかったときは、走った前のattemptの`review-<attempt-1>.out` / `.err`を`Review output of the earlier review N`として載せる。どのattemptの出力があるかは`AfterExit::ReviewFailed`の`output`が持ち、fileの有無からは推測しない（task 426）。もう1回reviewするかの判定（読めないverdictだけを、retryでないとき1回）は`landing::retries_review`、questionの文面は`landing::failed_review_question`、起動できなかったreviewの`output`は`landing::unstarted_review_output`で、どれも`src/application/supervise/landing.rs`のunit testが確かめ、`tests/it/runtime_review.rs`は失敗したjob（`a_failed_review_closes_the_session_and_asks_a_person_in_the_same_step`）と、読めないverdictのretryが起動できなかった場合（`a_failed_review_span_ends_with_its_job_not_with_the_exit`）の配線を代表で確かめる（task 1414）。その前に、そのrunのcloseされていない`approve_landing`のask（`send_back`や手の`integrate`でrunが動く前の、前のreviewのask）を`close_approve_landing_asks`で閉じる（concernと共通の`ask_approve_landing`が行う。未回答なら`answer`に`a later review of the run asks again; closed by the runtime`を書き`runtime_closed: true`の`ask_answered`、回答済みなら`ask_closed`を記録し、閉じたaskごとにinfoのlogを出す。attentionではない）。runが`integrated`になったときも、着地の後始末がそのrunの`approve_landing`のaskを閉じる（[integrate](integrate.md)の8。task 425）。askを開いてから`review_failed`（`attempt`、`error`、`duration_secs`、`status`、開いたaskの`ask_id`、Codexのjobが走ったときはthreadの`session_id`と`model` / `model_unknown`）を記録してleaseを外す。askと`review_failed`はworkerのsessionの終了の後だが、reviewのsessionの区間はjobが終わった（起動できなかった）時点で`job_finished`で閉じ、終了の待ちを含めない（[provider-lifecycle](../provider-lifecycle.md#claude-sessionの区間)の「失敗したreview」。task 541）。runは`awaiting_integration`のままで、`ask_id`を持つ`review_failed`はattentionではなく、askの`ask_opened`がattentionになる。回答は6のとおりsupervisorが適用する（`send_back`の`reason`は`the headless review failed: <error>`）。askを開けなかったときは`ask_id`なしの`review_failed`を記録し、attentionは`review by hand`で、人がinboxから`dagq-recover`の`reference/review-by-hand.md`に従ってreviewし、`integrate`を手で呼ぶ。askが適用されずに閉じられた（自由記述の回答など）runも`review by hand`になる。
+ 6. **askの回答**: supervisorはループの各回で、adoptの後、resumeの前に、回答済みでcloseされていない`approve_landing`のaskのうち、runが`awaiting_integration`でleaseが無いものを見る（`apply_landing_answers`）。slotの空き・`integrating`のrunの有無・`[run.env]`のプログラムの不足・landing branchの未解決・空き容量の不足に関わらず、次の回でその場で適用してaskをcloseする（task 949。以前は`land`を着地スロットと空きslotがそろうまで適用せず、`send_back` / `cancel`もslotが埋まっている間は適用しなかったので、答えたaskが閉じずに残った）。`land`なら`integration_approved`（`ask_id`付き、`push: true`）と`landing_queued`（`via: approve`、`ask_id`）を記録してaskをcloseし、runは`awaiting_integration`・leaseなしのまま着地の列に並ぶ（同じaskの承認が記録済みなら記録し直さない。`status`は`queued to land (runtime)`、`kind: landing_queued`）。着地の開始は別の段（`start_approved_landings`）で、答えの適用の後、resume・triage・新しいclaimより先に、列のrun（`awaiting_integration`でleaseが無く、`RunHistory::queued_to_land`がある: 最後の`ask_id`付きの`integration_approved`の後に`integration_started`・`review_started`・`resume_started`・`landing_decided`・`approve_landing`の`ask_opened`が無い（`queued_approval`）か、着地の途中で持ち主が死んで`integrating`から戻された承認済みかpass済みのrunで、その`run_recovered`の後に同じものが無い（`recovered_landing`。task 1118、[supervise](supervise.md#supervise)の12と[recover](recover.md#recover-run_id)の4））を、`[run.env]`のプログラムがそろい、landing branchが解決し、空き容量が足り、空きslotがあり、`integrating`のrunが無いときに、承認の古い順（`integration_approved`か`run_recovered`のイベントID順）に1本ずつ`begin_integration`から着地させる。列はイベントから読むので、supervisorが入れ替わっても（exec・死亡・別のsupervisor）次のsupervisorが同じ段で拾い、askを開き直さず、leaseの無いrunはadoptの対象でもないので二重に着地しない（`tests/it/runtime_landing_answers.rs`）。着地が失敗すれば`integration_started`の後なので列から外れ、今までどおり人の`review and integrate`か`needs_session`になる。人の`integrate`は今までどおり列のrunも着地させられる。持ち主が死んで戻されたrunのうち承認もpassも無いものは列に並ばず、`review_recovered_runs`がleaseを取ってreviewにかける（そのrunの`approve_landing`のaskが開いていれば待つ）。着地の開始の失敗（確かめた後に`integrate`が着地スロットを取った、mainが読めないなど）は記録だけしてsupervisorを止めず、runは列に残って次の回に試す。task 949より前のバイナリに`install --rollback`で戻すと、前のバイナリは閉じたaskの列を読まないので、列のrunは人の`integrate`まで着地しない（`status`は`review and integrate`）。`send_back`なら`landing_decided`（`ask_id`、`answer: send_back`、`status: needs_session`、`reason`: 最後の`review_finished`の`reasons`、その後に`review_failed`があればその`error`）でrunを`needs_session`にし、[`needs_session`](needs-session.md#needs_session)のresumeが`reason`を解消依頼に含める（冒頭は「reviewの指摘を人が差し戻した」、手順1は「reasonの指摘を直してcommit、mainが進んでいればrebase」）。人が理由を足した`send_back: <理由>`（`:`の後の前後の空白を除く。空なら理由なしの`send_back`）も同じく適用し（task 1424。approve_planの`PlanAnswer`と同じ形）、`landing_decided`の`answer`は`send_back`のまま人の理由を`person_reason`に持ち、`reason`は「a person sent the run back in ask <N>: <理由>; the review's findings: <reasons>」と人の理由をreviewの指摘より先に載せる（resumeはこの`reason`をそのまま解消依頼に含める。理由の有無で`RunHistory`とresumeの読み方は変わらない）。`review_outcome`は理由の有無に依らず`deviation_rejected`。`cancel`なら`landing_decided`（`status: failed`）でrunを`failed`、taskを`cancel`する。どれもaskをcloseする。答えの読み方は`domain::LandingAnswer::parse`（`land` / `cancel` / `send_back` / `send_back: <理由>`。`land: x`・`cancel: x`・`send_backwards`・`send_back reason`などは読まない）で、`apply_landing_answers`・`answer`の`runtime_delivers`（`infrastructure::asks`）・`status`の`applying the answer`（`application::health`）の3か所が同じものを使う。`send_back`と`cancel`の`reason`の文面は`sent_back_reason`・`canceled_reason`で、`domain`と`landing.rs`のunit testが確かめ、`tests/it/runtime_review.rs`の`a_concern_sent_back_is_resumed_reviewed_again_and_landed`が理由つきの`send_back`の適用・`runtime_delivers`・`applying the answer`・`review_outcome`・resumeの依頼文を、`tests/it/runtime_review_concern.rs`の`a_discard_concern_asks_a_person_with_the_recommendation`が`land: x`を適用しないことを確かめる（task 1414・1424）。それ以外の回答はinboxが読んで人に返す。askの問いの文（concernと失敗したreviewのもの）の`send_back`の行は、`send_back: <your reason>`で理由を足せると書く。
+-7. **引き継ぎ**: review中のsupervisorが死ぬと、`awaiting_integration`のrunはleaseがstaleになり、wrapperが生きているか終了を記録していれば他のsupervisorがadoptする（`runs_leased_by_others`は`awaiting_integration`も見る）。最後の`revise_requested`の後に`revise_finished`も`review_started`も無く、sessionが生きていればreviseの待ちに戻る。最後が`revise_unsent`なら、その前の`review_finished`のverdictで終了の依頼の後にaskにする。最後が送信済みの`conflict_precheck`で、sessionが生きていれば、その前の`review_finished`のverdictで衝突解消の待ちに戻る。依頼は書く前に記録するので（4）、引き継いだ依頼がsessionの`turns/`に書かれていないことがある。どちらの待ちも依頼を書き直さず、payloadの`sent_at`より後のミリ秒に書かれたidle markerとreceiptだけを依頼の後のものとして（同じミリ秒のものは依頼の前のもの。`file_time::written_after`、task 1197）、引き継いだ時点から`resume_timeout`まで待つ（書かれていなかった依頼はturnを生まないので、4のとおり`resume_timeout`の後に人に聞く）。取り込みの画面の確認（`StartCheck::adopted`、`[stall].send_confirm_secs`）と送り直し（`submit_resent`）・`submit_not_started`の復旧jobは対話のworkerとともに廃止した（task 1437。前のsupervisorが残したこれらの記録は履歴として読める）。最後が送らなかった（`unsent: true`で取り消したものを含む）`conflict_precheck`なら、`exit_requested`がまだなら事前判定からやり直し、送った後なら`asked`があればそのaskへ、無ければ（`exhausted: true`のものを含む）着地へ終了の待ちから続ける（終了の依頼は書き直さない）。最後が`review_finished`ならそのverdictのまま（passは終了の依頼がまだなら事前判定から、依頼した後なら着地、concernは[AIが決めるconcern](#aiが決めるconcern未実装)の引き継ぎのとおり決め直し、それ以外はask）、`integration_approved`があり最後の`validation_finished`の後にreviewが無ければ着地へ、どちらも終了の待ちから続け、`exit_requested`が記録済みなら終了の依頼を書き直さない。このように引き継ぎがaskにする（`revise_unsent`、passでも適用する`land`のconcernでもない`review_finished`、`asked`のある`conflict_precheck`）runで、その錨の後に`asked_by: supervisor`の`approve_landing`の`ask_opened`があり、そのaskがcloseされていなければ（askを開いてからleaseを外す前にsupervisorが死んだ。task 425）、askを開き直さず（開き直すと5の古いaskの始末でそのaskを閉じ、inboxに2回知らせ、止まっていた間の回答を捨てる）、終了の待ちからworkspaceを閉じてleaseを外し、そのaskを待つ。未回答なら人を待ち、回答済みなら6の`apply_landing_answers`が適用する（`tests/it/runtime_triage.rs`の`an_adopted_run_whose_concern_was_asked_waits_for_the_ask`）。最後が`review_started`で、その後に`asked_by: supervisor`の`approve_landing`の`ask_opened`があり、そのaskがcloseされていなければ（5の「reviewの失敗」でaskを開いてから`review_failed`を記録する前にsupervisorが死んだ。task 424）、reviewはやり直さずそのaskを待つ: その後に`review_failed`が無ければ、`review_started`の`attempt`、`ask_id`、`adopted: true`、`error`（askのquestionの1行目にある失敗の理由。読めなければaskを開いた後にsupervisorが止まった旨。`send_back`の`reason`になる）を持つ`review_failed`を記録し、終了の待ち（記録済みなら依頼を書き直さない）からworkspaceを閉じてleaseを外す。未回答ならaskは開いたまま人を待ち、回答済みなら6の`apply_landing_answers`がその回答を適用する。askが無いかcloseされていれば下のとおりやり直す（`tests/it/runtime_triage.rs`の`an_adopted_run_whose_failed_review_*`）。それ以外はreviewを最初からやり直す。review・revise・exitの途中のerrorはrunをabandonし（leaseを外して`runtime_error`、headlessのreviewのプロセスはkillする。sessionには終了を依頼しない）、runはleaseの無い`awaiting_integration`として`review and integrate`のattentionになる。reviseの回数はreviewの回ごとに数える（[ADR-0050](../../adr/0050-revise-count-scope-per-review-round.md)、task 781）: `decide_revise`は最後の区切り（`resume_started`、`status: needs_session`の`landing_decided`（人の`send_back`）、`conflict_resolved`）の後の`revise_requested`から`revise_unsent`を引いたもの（`RunHistory::round_revise_attempts`）だけを数え、回ごとに2回までreviseを返す。区切りの無いrunは今までどおりrun全体で2回。`resume_skipped`・`revise_finished`・reviewの失敗のやり直しは区切りにしない。run全体の往復は`MAX_RESUME_ATTEMPTS`と`[resume] conflict_only_limit`で抑え、run全体の上限は置かない。plan reviewの`MAX_PLAN_REVISES`はproposalの全期間で数えたまま。`revise_requested`の`attempt`と`revise-<attempt>.txt`はrun全体で一意で、runの`revise_requested`の件数（取り消したものも含む）に1を足した番号にする（区切りの後も前の回の番号と重ならず、取り消した依頼の番号も使い直さない）。依頼の文面の`revise N of MAX`のNは回の中の何回目か（`ReviseDecision::Request`の`round`）。引き継ぎはpayloadの`attempt`で文面のファイルを読み、書き直されたreceiptの次のreviewの判定は同じ`decide_revise`がイベントから数えるので、supervisorが替わっても同じ数になる（`src/domain/run/history.rs`の`revises_are_counted_again_after_a_boundary`）。reviseと衝突の依頼の間も、sessionが`dagq ask`で止まれば最初のsessionと同じく回答を送り、次の turn に質問の答えを届ける。sessionのworkspaceは、`validating`で`resume_finished`したresumeのworkspace（その後に閉じていなければ）、それ以外はworkerのworkspace（閉じていなければ）。supervisorが死に、sessionもwrapperの終了を記録せずに消えた（heartbeatが30秒より古くpidが死んでいる）runも引き継ぐ（task 236）: sessionは終わったものとして扱い、`review_started`の`session_live`はfalse、reviseはsessionが無いので`approve_landing`のaskになり、終了は依頼せず、workspaceは閉じてから着地・askに進む。引き継いだ後やreviseの待ちの途中でwrapperが死んだ場合も同じで、abandonしない。supervisorが居ないときは人の`recover`がstaleなleaseを外し（runは`awaiting_integration`のまま）、`integrate`で着地できる。sessionのprocessが生きていれば`recover`は他の状態と同じく拒否するので、sessionを終えるかsupervisorを起こして引き継がせる。
++7. **引き継ぎ**: review中のsupervisorが死ぬと、`awaiting_integration`のrunはleaseがstaleになり、wrapperが生きているか終了を記録していれば他のsupervisorがadoptする（`runs_leased_by_others`は`awaiting_integration`も見る）。最後の`revise_requested`の後に`revise_finished`も`review_started`も無く、sessionが生きていればreviseの待ちに戻る。最後が`revise_unsent`なら、その前の`review_finished`のverdictで終了の依頼の後にaskにする。最後が送信済みの`conflict_precheck`で、sessionが生きていれば、その前の`review_finished`のverdictで衝突解消の待ちに戻る。依頼は書く前に記録するので（4）、記録の後・`turns/`に書く前に前のsupervisorが止まると（自動の更新のhandoff・異常終了）、引き継いだ依頼がsessionの`turns/`に無いことがある。そのため引き取ったsupervisorは、錨（その`revise_requested`か`conflict_precheck`）の試行の依頼が`turns/`にあるかを照合し、無ければ1回だけ書く（配送の回復、task 1683）: 錨のpayloadの`attempt`の文面のファイル（`revise-<attempt>.txt`・`conflict-<attempt>.txt`。記録の前に書き、依頼の本文と同じ文）を読み、`turns/`の依頼（待っている`request-<seq>.json`、取られた`.taken.json`、取られずに落とした`.dropped`）のうち、`what`（どの試行も`revise request`・`conflict request`で同じ）が一致し、本文（`TurnRequest.prompt`）が文面と一致し、錨より前に記録された最後の`turn_requested`の`seq`より大きいもの（錨より前に`turn_requested`が無ければ`seq`で絞らない）を対象の試行の依頼とする。対象の依頼が待っているか取られていれば届いているので書かない。`.dropped`は前のsessionが取らなかった依頼なので届いたとみなさず、過去の試行の同じ`what`の依頼は待っていても取られていても落とされていても配送を抑えない。対象の依頼が無ければ文面から1回だけ書いて`turn_requested`を記録する。判断は副作用の無い`domain::turn::adopted_delivery`、`turns/`の読み出しは`headless::listed_requests`、書くのは`Supervisor::adopted_start`。文面のファイルが読めなければ書かずにwarnを残して待つだけにし、`turns/`が読めなければ書かずに待つ。書き込みが失敗したときもwarnを残して待つだけにし、`revise_unsent`・`unsent`は記録しない（依頼は前のsupervisorが記録済みなので、4のとおり`resume_timeout`の後に人に聞く）。stallの答えの照合（`requested`。`what`にaskのidが入り一意）はこの照合と別で変えていない。どちらの待ちも、payloadの`sent_at`より後のミリ秒に書かれたidle markerとreceiptだけを依頼の後のものとして（同じミリ秒のものは依頼の前のもの。`file_time::written_after`、task 1197）、引き継いだ時点から`resume_timeout`まで待つ（依頼がturnを生まなければ、4のとおり`resume_timeout`の後に人に聞く。test は`tests/it/runtime_review_conflict.rs`の`an_adopted_revise_recorded_but_not_written_is_written_once`）。取り込みの画面の確認（`StartCheck::adopted`、`[stall].send_confirm_secs`）と送り直し（`submit_resent`）・`submit_not_started`の復旧jobは対話のworkerとともに廃止した（task 1437。前のsupervisorが残したこれらの記録は履歴として読める）。最後が送らなかった（`unsent: true`で取り消したものを含む）`conflict_precheck`なら、`exit_requested`がまだなら事前判定からやり直し、送った後なら`asked`があればそのaskへ、無ければ（`exhausted: true`のものを含む）着地へ終了の待ちから続ける（終了の依頼は書き直さない）。最後が`review_finished`ならそのverdictのまま（passは終了の依頼がまだなら事前判定から、依頼した後なら着地、concernは[AIが決めるconcern](#aiが決めるconcern未実装)の引き継ぎのとおり決め直し、それ以外はask）、`integration_approved`があり最後の`validation_finished`の後にreviewが無ければ着地へ、どちらも終了の待ちから続け、`exit_requested`が記録済みなら終了の依頼を書き直さない。このように引き継ぎがaskにする（`revise_unsent`、passでも適用する`land`のconcernでもない`review_finished`、`asked`のある`conflict_precheck`）runで、その錨の後に`asked_by: supervisor`の`approve_landing`の`ask_opened`があり、そのaskがcloseされていなければ（askを開いてからleaseを外す前にsupervisorが死んだ。task 425）、askを開き直さず（開き直すと5の古いaskの始末でそのaskを閉じ、inboxに2回知らせ、止まっていた間の回答を捨てる）、終了の待ちからworkspaceを閉じてleaseを外し、そのaskを待つ。未回答なら人を待ち、回答済みなら6の`apply_landing_answers`が適用する（`tests/it/runtime_triage.rs`の`an_adopted_run_whose_concern_was_asked_waits_for_the_ask`）。最後が`review_started`で、その後に`asked_by: supervisor`の`approve_landing`の`ask_opened`があり、そのaskがcloseされていなければ（5の「reviewの失敗」でaskを開いてから`review_failed`を記録する前にsupervisorが死んだ。task 424）、reviewはやり直さずそのaskを待つ: その後に`review_failed`が無ければ、`review_started`の`attempt`、`ask_id`、`adopted: true`、`error`（askのquestionの1行目にある失敗の理由。読めなければaskを開いた後にsupervisorが止まった旨。`send_back`の`reason`になる）を持つ`review_failed`を記録し、終了の待ち（記録済みなら依頼を書き直さない）からworkspaceを閉じてleaseを外す。未回答ならaskは開いたまま人を待ち、回答済みなら6の`apply_landing_answers`がその回答を適用する。askが無いかcloseされていれば下のとおりやり直す（`tests/it/runtime_triage.rs`の`an_adopted_run_whose_failed_review_*`）。それ以外はreviewを最初からやり直す。review・revise・exitの途中のerrorはrunをabandonし（leaseを外して`runtime_error`、headlessのreviewのプロセスはkillする。sessionには終了を依頼しない）、runはleaseの無い`awaiting_integration`として`review and integrate`のattentionになる。reviseの回数はreviewの回ごとに数える（[ADR-0050](../../adr/0050-revise-count-scope-per-review-round.md)、task 781）: `decide_revise`は最後の区切り（`resume_started`、`status: needs_session`の`landing_decided`（人の`send_back`）、`conflict_resolved`）の後の`revise_requested`から`revise_unsent`を引いたもの（`RunHistory::round_revise_attempts`）だけを数え、回ごとに2回までreviseを返す。区切りの無いrunは今までどおりrun全体で2回。`resume_skipped`・`revise_finished`・reviewの失敗のやり直しは区切りにしない。run全体の往復は`MAX_RESUME_ATTEMPTS`と`[resume] conflict_only_limit`で抑え、run全体の上限は置かない。plan reviewの`MAX_PLAN_REVISES`はproposalの全期間で数えたまま。`revise_requested`の`attempt`と`revise-<attempt>.txt`はrun全体で一意で、runの`revise_requested`の件数（取り消したものも含む）に1を足した番号にする（区切りの後も前の回の番号と重ならず、取り消した依頼の番号も使い直さない）。依頼の文面の`revise N of MAX`のNは回の中の何回目か（`ReviseDecision::Request`の`round`）。引き継ぎはpayloadの`attempt`で文面のファイルを読み、書き直されたreceiptの次のreviewの判定は同じ`decide_revise`がイベントから数えるので、supervisorが替わっても同じ数になる（`src/domain/run/history.rs`の`revises_are_counted_again_after_a_boundary`）。reviseと衝突の依頼の間も、sessionが`dagq ask`で止まれば最初のsessionと同じく回答を送り、次の turn に質問の答えを届ける。sessionのworkspaceは、`validating`で`resume_finished`したresumeのworkspace（その後に閉じていなければ）、それ以外はworkerのworkspace（閉じていなければ）。supervisorが死に、sessionもwrapperの終了を記録せずに消えた（heartbeatが30秒より古くpidが死んでいる）runも引き継ぐ（task 236）: sessionは終わったものとして扱い、`review_started`の`session_live`はfalse、reviseはsessionが無いので`approve_landing`のaskになり、終了は依頼せず、workspaceは閉じてから着地・askに進む。引き継いだ後やreviseの待ちの途中でwrapperが死んだ場合も同じで、abandonしない。supervisorが居ないときは人の`recover`がstaleなleaseを外し（runは`awaiting_integration`のまま）、`integrate`で着地できる。sessionのprocessが生きていれば`recover`は他の状態と同じく拒否するので、sessionを終えるかsupervisorを起こして引き継がせる。
+ 8. **reviseの間のask**（task 238）: `ReviseWatch`は最初のsessionの`SessionWatch`を依頼の時刻から持ち（`SessionWatch::fixing`）、その`deliver_answers`をreviseの待ちでも回す。対象の`worker_question`は、依頼の送信時刻（`revise_requested`・`conflict_precheck`の`sent_at`。`SessionWatch::asks_from`、ミリ秒を切り捨てた秒で比べ、同じ秒のaskは含む）以後に作られたものだけにする（task 582）: それより前（validatingやreviewの間、receiptより前）に作られたaskは、回答済みでも自動では送らず（`ask_delivered`を記録しない。`ask_answered`の`runtime_delivers`はfalse、`status`は`deliver the answer`で、inboxが手で配送する）、未closeでもreviseの待ちを止めず（idleなら判定し、`resume_timeout`も数える）、slotの外の待ち（[人の答えを待つrun](waiting.md)）にも入れない（`tests/it/runtime_review_questions.rs`）。worker自身のsessionとresumeの待ちは今までどおり、runのすべての`worker_question`を対象にする。対象のcloseされていない`worker_question`がある間は、idleになってもreceiptを書き直さないidleとは見ず（concernにしない）、`resume_timeout`も数えない。ただしsessionが止まらずに依頼より後にreceiptを書き直し、その後にidleになったときは（`idle_after_receipt`）、質問のcloseを待たずに書き直したreceiptで判定する（書き直しか不一致。worker自身のsessionでreceiptがあれば未closeの質問があっても進むのと揃える。task 583）。止めるのは書き直さずにidleになったときのconcernと`resume_timeout`だけで、書き直していないうちはidleの判定もしない。書き直したreceiptを見たら、sessionはそれより前の質問を越えて進んだものとし（`ReviseWatch::questions_from`をreceiptの更新の秒の次の秒にし、`resume_timeout`をそこから数え直す）、以後はその秒以後に作られた`worker_question`だけが段を止める。そのため、不一致でreceiptの直し依頼を送った後も、越えた質問は直しの待ちを止めず、直さずにidleになれば`went idle without rewriting the receipt`になる（越えた質問の答えは今までどおり配送する）。slotの外の待ち（[人の答えを待つrun](waiting.md)）も、依頼より後に書き直されたreceiptで`session_moved`として終える（[ADR-t583-1](../../adr/2026-09-28-t583-1-revise-judges-a-rewritten-receipt-past-an-open-question.md)。`tests/it/runtime_review_questions.rs`の`a_*receipt_rewritten_after_an_open_question_is_judged`・`a_question_passed_by_a_rewritten_receipt_does_not_hold_its_fix`・`an_open_question_without_a_rewritten_receipt_holds_past_the_resume_timeout`）。回答はworkerがaskでturnを終えてから`answer to ask <id>: ...`を次のturnの依頼として書き（`ask_delivered`）、書いた時刻から待ち直す: その時刻より古いidle markerはその後の判定に使わず、`resume_timeout`もそこから数え直す。人が手で届けた回答や、引き継ぐ前のsupervisorが送った回答も、そのrunの`worker_question`が最後に閉じた秒（最後の入力より後の秒のとき）を入力の時刻として同じく待ち直す。ただしこのreviseが自分で届けた回答のclose（`ask_delivered`は依頼を書いた後に記録するので、秒をまたげば依頼の秒より後になる）は、その回答の入力そのものなので手の配送とみなさず、入力の時刻も`resume_timeout`も動かさない（`ReviseWatch::delivered_closed`にそのcloseの秒を持ち、それより後のcloseだけを手の配送とする。resumeの`ResumeWatch::delivered_closed`と同じ。動かすと答えの直後に書かれたidle markerが古いとみなされ、reviseが`resume_timeout`まで決着しない。task 971、`tests/it/runtime_review_questions.rs`の`an_answer_whose_send_outlasts_the_turn_settles_the_revise_at_its_idle`）。`worker_question`の`ask_answered`の`runtime_delivers`と`status`の`delivering the answer`は、runが`running`のときに加えて、leaseを持つ`awaiting_integration`のrunで最後のreviewの段が送った`revise_requested`か`conflict_precheck`（`requested: true`）で、その後に`exit_requested`が無いとき（`domain::session_takes_answers`）もtrueになる。ただしこの場合はaskの`created_at`がその依頼の`sent_at`（`domain::fix_requested_at`。ミリ秒を切り捨てた秒）以後のときだけで、それより前のaskはfalse（task 582）。idle markerは依頼（か最後に送った回答・receiptの直し依頼）より新しいものだけを見る。reviseが終わるとき（書き直し・sessionの終了など。receiptの不一致は直し依頼を送って続くので除く）は、復旧jobを止め、取らなかった依頼の`stalled`の待ちを終える。引き継いだrevise・衝突の依頼（7）は、復旧jobの状態を`RecoveryWatch::adopt`で組み立て直す（`stalled`の`wait`）。その`worker_question`を待つrunはslotから外れる（[人の答えを待つrun](waiting.md)の「差し戻しと解消依頼の段」、[ADR-0071](../../adr/0071-runs-waiting-in-revise-and-resume-leave-the-slot.md)の決定1・15）。待ちのあいだ段の計時は止まり、slotに戻ると`resume_timeout`を戻った時点から数え直す。
+ 
+ `integrate`はreview中のrun（supervisorのleaseがある）を拒否する。
+diff --git a/src/application/supervise/adopt.rs b/src/application/supervise/adopt.rs
+index a7a8a43b..d9aadfe3 100644
+--- a/src/application/supervise/adopt.rs
++++ b/src/application/supervise/adopt.rs
+@@ -6,6 +6,7 @@ use super::*;
+ use crate::domain::EventKind;
+ use crate::domain::RunEvent;
+ use crate::domain::concern::{ConcernDecision, EscalatedBecause};
++use crate::domain::turn;
+ 
+ impl Supervisor<'_> {
+     /// Take over `running` / `validating` runs whose lease went stale under
+@@ -268,8 +269,9 @@ impl Supervisor<'_> {
+     }
+     /// Rebuild an adopted `awaiting_integration` run under review from its
+     /// events: a `revise_requested` with nothing after it waits for the live
+-    /// session again (it is recorded before it is typed, so it is typed a
+-    /// second time only when its request was not queued), with the recovery jobs the
++    /// session again (it is recorded before it is written, so it is written
++    /// once more only when its attempt's request is not in `turns/`,
++    /// [`Supervisor::adopted_start`]), with the recovery jobs the
+     /// previous supervisor recorded during it ([`SessionWatch::adopt`]), and
+     /// a `revise_unsent` asks a person; a verdict already recorded (`review_finished` with
+     /// nothing after it), or an approved run not reviewed since its
+@@ -307,14 +309,16 @@ impl Supervisor<'_> {
+                 {
+                     let attempt = anchor.payload["attempt"].as_u64().unwrap_or(1) as usize;
+                     let sent_at = adopted_sent_at(&anchor.payload);
+-                    let start = self.adopted_start(
+-                        run,
+-                        &events,
+-                        anchor.id,
+-                        "revise request",
+-                        &format!("revise-{attempt}.txt"),
+-                        sent_at,
+-                    );
++                    let start = self
++                        .adopted_start(
++                            run,
++                            &events,
++                            anchor.id,
++                            &live.workspace,
++                            "revise request",
++                            &format!("revise-{attempt}.txt"),
++                        )
++                        .then_some(sent_at);
+                     let mut watch = ReviseWatch::new(
+                         run,
+                         live,
+@@ -342,14 +346,16 @@ impl Supervisor<'_> {
+                 {
+                     let attempt = anchor.payload["attempt"].as_u64().unwrap_or(1) as usize;
+                     let sent_at = adopted_sent_at(&anchor.payload);
+-                    let start = self.adopted_start(
+-                        run,
+-                        &events,
+-                        anchor.id,
+-                        "conflict request",
+-                        &format!("conflict-{attempt}.txt"),
+-                        sent_at,
+-                    );
++                    let start = self
++                        .adopted_start(
++                            run,
++                            &events,
++                            anchor.id,
++                            &live.workspace,
++                            "conflict request",
++                            &format!("conflict-{attempt}.txt"),
++                        )
++                        .then_some(sent_at);
+                     let mut watch = ReviseWatch::new(
+                         run,
+                         live,
+@@ -620,32 +626,60 @@ fn adopted_sent_at(payload: &Value) -> SystemTime {
+ }
+ 
+ impl Supervisor<'_> {
+-    /// The start check of an adopted request (task 546): the request was
+-    /// recorded before it was typed, so the supervisor adopted from may have
+-    /// stopped in between. Its text is the one written to `file` in the run
+-    /// directory before the record; without it the request is only waited
+-    /// for, up to the resume timeout.
+-    /// What the checks of earlier supervisors recorded after the request
+-    /// (event `anchor`) carries over: one that sent it again leaves no
+-    /// second resend, and one that recorded `submit_not_started` leaves
+-    /// nothing to check (its recovery job has it).
++    /// The delivery of an adopted request (`what`, event `anchor`): the
++    /// request was recorded before it was written to the session's
++    /// `turns/`, so the supervisor adopted from may have stopped in
++    /// between. Its text is the one written to `file` in the run directory
++    /// before the record. The attempt's request is looked for among the
++    /// requests numbered after the last `turn_requested` before the record
++    /// ([`turn::adopted_delivery`]); when it is neither waiting nor taken
++    /// it is written once to the session in `workspace` and recorded as
++    /// `turn_requested`. Without the text the request is only waited for,
++    /// up to the resume timeout. Whether its text was read.
+     fn adopted_start(
+-        &self,
++        &mut self,
+         run: &TaskRun,
+-        _events: &[crate::domain::RunEvent],
+-        _anchor: EventId,
++        events: &[crate::domain::RunEvent],
++        anchor: EventId,
++        workspace: &str,
+         what: &str,
+         file: &str,
+-        sent_at: SystemTime,
+-    ) -> Option<SystemTime> {
+-        let path = Path::new(run.run_dir()?).join(file);
+-        match self.files.read_to_string(&path) {
+-            Ok(_text) => Some(sent_at),
++    ) -> bool {
++        let Some(run_dir) = run.run_dir().map(Path::new) else {
++            return false;
++        };
++        let path = run_dir.join(file);
++        let text = match self.files.read_to_string(&path) {
++            Ok(text) => text,
+             Err(error) => {
+-                warn!(run_id = %run.id(), error = %error, "the adopted {what} of {} cannot be checked for a start: {} could not be read: {error}", run.id(), path.display());
+-                None
++                warn!(run_id = %run.id(), error = %error, "the adopted {what} of {} cannot be delivered: {} could not be read: {error}", run.id(), path.display());
++                return false;
++            }
++        };
++        let after = events
++            .iter()
++            .filter(|e| e.id < anchor && e.kind == event_kind::TURN_REQUESTED)
++            .filter_map(|e| e.payload["seq"].as_u64())
++            .next_back();
++        let requests = match listed_requests(&*self.files, run_dir) {
++            Ok(requests) => requests,
++            Err(error) => {
++                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "the adopted {what} of {} cannot be delivered: {error:#}", run.id());
++                return true;
++            }
++        };
++        match turn::adopted_delivery(&requests, what, &text, after) {
++            turn::AdoptedDelivery::Delivered(seq) => {
++                info!(run_id = %run.id(), "the adopted {what} of {} was written as request {seq}; it is not written again", run.id());
++            }
++            turn::AdoptedDelivery::Write => {
++                info!(run_id = %run.id(), "the adopted {what} of {} was recorded but not written; writing it once", run.id());
++                if let Err(error) = request_turn(self, run, workspace, Input::Text(&text), what) {
++                    warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "the adopted {what} of {} could not be written: {error:#}", run.id());
++                }
+             }
+         }
++        true
+     }
+ }
+ 
+diff --git a/src/application/supervise/headless.rs b/src/application/supervise/headless.rs
+index 4be90390..426e4b46 100644
+--- a/src/application/supervise/headless.rs
++++ b/src/application/supervise/headless.rs
+@@ -14,8 +14,8 @@ use crate::domain::EventKind;
+ use crate::domain::PlannerRoute;
+ use crate::domain::recovery::PERMISSION_DENIED;
+ use crate::domain::turn::{
+-    self, LIMITS_FILE, TurnFailure, TurnMark, TurnOutcome, TurnRequest, exit_path, next_seq,
+-    request_path, turns_dir,
++    self, LIMITS_FILE, ListedRequest, RequestState, TurnFailure, TurnMark, TurnOutcome,
++    TurnRequest, exit_path, next_seq, request_path, turns_dir,
+ };
+ 
+ /// Write `input` for the headless session of `run` (in `workspace`, for
+@@ -209,6 +209,43 @@ pub(super) fn requested(sv: &Supervisor<'_>, run: &TaskRun, what: &str) -> Resul
+     Ok(None)
+ }
+ 
++/// Every request in the `turns/` of the run directory `run_dir`, waiting,
++/// taken or dropped (none when it has no `turns/`). A request taken between
++/// the listing and the read is read under its taken name; one that cannot
++/// be parsed is skipped.
++pub(super) fn listed_requests(files: &dyn RunFiles, run_dir: &Path) -> Result<Vec<ListedRequest>> {
++    let paths = match files.read_dir(&turns_dir(run_dir)) {
++        Ok(paths) => paths,
++        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
++        Err(error) => return Err(error).context("read the requests of the headless session"),
++    };
++    let mut listed = Vec::new();
++    for path in paths {
++        let Some((seq, mut state)) = path
++            .file_name()
++            .and_then(|name| name.to_str())
++            .and_then(turn::request_state)
++        else {
++            continue;
++        };
++        let content = match files.read(&path) {
++            Err(error)
++                if error.kind() == std::io::ErrorKind::NotFound
++                    && state == RequestState::Pending =>
++            {
++                state = RequestState::Taken;
++                files.read(&turn::taken_path(run_dir, seq))
++            }
++            read => read,
++        }
++        .context("read a request of the headless session")?;
++        if let Ok(request) = serde_json::from_slice::<TurnRequest>(&content) {
++            listed.push(ListedRequest { state, request });
++        }
++    }
++    Ok(listed)
++}
++
+ impl Supervisor<'_> {
+     /// Before a headless session of `run` starts in its run directory: its
+     /// turn limits from the `[stall]` settings, and neither the exit request
+diff --git a/src/domain/turn.rs b/src/domain/turn.rs
+index 9143bf40..e92716d0 100644
+--- a/src/domain/turn.rs
++++ b/src/domain/turn.rs
+@@ -420,6 +420,70 @@ pub fn pending<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<u64> {
+     pending
+ }
+ 
++/// Where a request file stands: waiting to be taken, taken by the wrapper,
++/// or dropped untaken when a later session started.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum RequestState {
++    Pending,
++    Taken,
++    Dropped,
++}
++
++/// The sequence number and state of a request file named `name`; `None`
++/// for any other file.
++pub fn request_state(name: &str) -> Option<(u64, RequestState)> {
++    let rest = name.strip_prefix("request-")?;
++    let (seq, state) = if let Some(seq) = rest.strip_suffix(".taken.json") {
++        (seq, RequestState::Taken)
++    } else if let Some(seq) = rest.strip_suffix(".dropped") {
++        (seq, RequestState::Dropped)
++    } else {
++        (rest.strip_suffix(".json")?, RequestState::Pending)
++    };
++    seq.parse().ok().map(|seq| (seq, state))
++}
++
++/// A request found in a session's `turns/`, with its state.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct ListedRequest {
++    pub state: RequestState,
++    pub request: TurnRequest,
++}
++
++/// Whether an adopted revise or conflict request (`what`, whose text is
++/// `text`) reached the session.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum AdoptedDelivery {
++    /// It waits or was taken as request `seq`: it is not written again.
++    Delivered(u64),
++    /// It was recorded and the supervisor stopped before writing it: it is
++    /// written once.
++    Write,
++}
++
++/// Whether the request of an adopted attempt is among `requests`: one of
++/// the same `what` and the attempt's `text`, numbered after `after` (the
++/// last `turn_requested` recorded before the attempt's record, which an
++/// earlier attempt's request cannot be numbered after), waiting or taken.
++/// `what` is the same for every attempt, so it alone names none; a dropped
++/// request never ran and does not count.
++pub fn adopted_delivery(
++    requests: &[ListedRequest],
++    what: &str,
++    text: &str,
++    after: Option<u64>,
++) -> AdoptedDelivery {
++    requests
++        .iter()
++        .filter(|listed| listed.state != RequestState::Dropped)
++        .map(|listed| &listed.request)
++        .filter(|request| after.is_none_or(|after| request.seq > after))
++        .find(|request| request.what == what && request.prompt == text)
++        .map_or(AdoptedDelivery::Write, |request| {
++            AdoptedDelivery::Delivered(request.seq)
++        })
++}
++
+ /// What one line of a turn's output said, as the runtime reads it whatever
+ /// the provider.
+ #[derive(Debug, Clone, PartialEq)]
+@@ -877,6 +941,118 @@ mod tests {
+         assert_eq!(exit_path(dir), Path::new("/r/turns/exit"));
+     }
+ 
++    #[test]
++    fn request_files_name_their_state() {
++        assert_eq!(
++            request_state("request-000002.json"),
++            Some((2, RequestState::Pending))
++        );
++        assert_eq!(
++            request_state("request-000001.taken.json"),
++            Some((1, RequestState::Taken))
++        );
++        assert_eq!(
++            request_state("request-000004.dropped"),
++            Some((4, RequestState::Dropped))
++        );
++        assert_eq!(request_state("request-x.json"), None);
++        assert_eq!(request_state("turn-000001.jsonl"), None);
++        assert_eq!(request_state("exit"), None);
++    }
++
++    fn listed(seq: u64, state: RequestState, what: &str, prompt: &str) -> ListedRequest {
++        ListedRequest {
++            state,
++            request: TurnRequest {
++                seq,
++                what: what.to_owned(),
++                prompt: prompt.to_owned(),
++            },
++        }
++    }
++
++    #[test]
++    fn an_adopted_request_is_matched_by_its_attempts_text_and_numbers() {
++        const WHAT: &str = "revise request";
++        let first = "revise 1: fix the test";
++        let second = "revise 2: fix the docs";
++        // Nothing written: write it.
++        assert_eq!(
++            adopted_delivery(&[], WHAT, second, Some(1)),
++            AdoptedDelivery::Write
++        );
++        // An earlier attempt's request of the same what, in any state,
++        // does not hold back the attempt's own.
++        for state in [
++            RequestState::Pending,
++            RequestState::Taken,
++            RequestState::Dropped,
++        ] {
++            assert_eq!(
++                adopted_delivery(&[listed(1, state, WHAT, first)], WHAT, second, Some(1)),
++                AdoptedDelivery::Write
++            );
++        }
++        // Nor does one with the attempt's text numbered no later than the
++        // last request recorded before the attempt (the same text sent by
++        // an earlier attempt).
++        assert_eq!(
++            adopted_delivery(
++                &[listed(1, RequestState::Taken, WHAT, second)],
++                WHAT,
++                second,
++                Some(1)
++            ),
++            AdoptedDelivery::Write
++        );
++        // The attempt's request waiting or taken is not written twice.
++        for state in [RequestState::Pending, RequestState::Taken] {
++            assert_eq!(
++                adopted_delivery(
++                    &[
++                        listed(1, RequestState::Taken, WHAT, first),
++                        listed(2, state, WHAT, second)
++                    ],
++                    WHAT,
++                    second,
++                    Some(1)
++                ),
++                AdoptedDelivery::Delivered(2)
++            );
++        }
++        // A dropped one never ran: it is written.
++        assert_eq!(
++            adopted_delivery(
++                &[listed(2, RequestState::Dropped, WHAT, second)],
++                WHAT,
++                second,
++                Some(1)
++            ),
++            AdoptedDelivery::Write
++        );
++        // Another what with the same text is not the attempt's request.
++        assert_eq!(
++            adopted_delivery(
++                &[listed(2, RequestState::Pending, "nudge", second)],
++                WHAT,
++                second,
++                Some(1)
++            ),
++            AdoptedDelivery::Write
++        );
++        // Without a request recorded before the attempt, no number is
++        // ruled out.
++        assert_eq!(
++            adopted_delivery(
++                &[listed(1, RequestState::Taken, WHAT, first)],
++                WHAT,
++                first,
++                None
++            ),
++            AdoptedDelivery::Delivered(1)
++        );
++    }
++
+     fn turn_event(kind: &str, payload: Value) -> RunEvent {
+         RunEvent {
+             id: super::super::EventId::new(1),
+diff --git a/tests/it/runtime_review_conflict.rs b/tests/it/runtime_review_conflict.rs
+index 7728a6af..3ec03e79 100644
+--- a/tests/it/runtime_review_conflict.rs
++++ b/tests/it/runtime_review_conflict.rs
+@@ -3,7 +3,7 @@
+ use crate::{common, runtime_support};
+ use dagq::domain::EventKind;
+ 
+-use runtime_support::headless::request_turn_left_by_a_dead_supervisor;
++use runtime_support::headless::{request_turn_left_by_a_dead_supervisor, write_turn_request};
+ use runtime_support::*;
+ 
+ /// A reviewer script that moves main in the main checkout with a change to
+@@ -209,6 +209,7 @@ fn an_adopted_run_with_a_withdrawn_revise_asks_a_person_without_sending_it() {
+         },
+         String::new,
+         false,
++        &[],
+     );
+     let texts = session_texts(&detail.runs[0]);
+     assert!(texts.is_empty(), "{texts:?}");
+@@ -278,6 +279,7 @@ fn an_adopted_headless_run_with_a_pending_conflict_request_waits_without_sending
+         },
+         || format!("main is now {moved} (your base commit was {seed})."),
+         true,
++        &[],
+     );
+     let run = detail.runs[0].clone();
+     assert_landed(&repo, &run, "test task", &moved);
+@@ -338,6 +340,7 @@ fn an_adopted_headless_run_with_a_pending_revise_waits_without_sending_it_again(
+         },
+         || "dagq: the supervisor's review asks for changes (revise 1 of 2).".to_owned(),
+         true,
++        &[],
+     );
+     let run = detail.runs[0].clone();
+     assert_landed(&repo, &run, "test task", &base);
+@@ -352,6 +355,93 @@ fn an_adopted_headless_run_with_a_pending_revise_waits_without_sending_it_again(
+     assert_exit_sent(&backend, &run, 1);
+ }
+ 
++/// A headless run whose supervisor stopped after it recorded its second
++/// revise request (`revise_requested` of attempt 2) and before it wrote it
++/// to the session's `turns/` has the request written once by the
++/// supervisor that adopts it (task 1683): the first attempt's request,
++/// taken with the same `what`, is no delivery of the second. The session
++/// runs it as its next turn, and the rewritten receipt is reviewed again
++/// and landed.
++#[test]
++fn an_adopted_revise_recorded_but_not_written_is_written_once() {
++    const FIRST: &str = "dagq: the supervisor's review asks for changes (revise 1 of 2).";
++    const SECOND: &str = "dagq: the supervisor's review asks for changes (revise 2 of 2).";
++    let (_dir, repo, db) = fixture();
++    let base = git_out(&repo, &["rev-parse", "main"]);
++    let backend = TestWorkspace::new(&db, false, &crate::runtime_review::revising_agent(1));
++    let reviewer = TestReviewer::new(&[verdict("pass", &[], "fixed")]);
++    let detail = adopt_pending_request(
++        &repo,
++        &db,
++        &backend,
++        &reviewer,
++        |_, sent_at| {
++            let review = |attempt: u64| {
++                [
++                    ("review_started", json!({"attempt": attempt})),
++                    (
++                        "review_finished",
++                        json!({"verdict": "revise", "reasons": ["add a line"], "summary": "one gap", "attempt": attempt}),
++                    ),
++                    (
++                        "revise_requested",
++                        json!({"attempt": attempt, "reasons": ["add a line"], "sent_at": sent_at}),
++                    ),
++                ]
++            };
++            let mut events = vec![(
++                "validation_finished",
++                json!({"status": "awaiting_integration"}),
++            )];
++            events.extend(review(1));
++            events.push((
++                "turn_requested",
++                json!({"seq": 1, "what": "revise request", "workspace_id": "w"}),
++            ));
++            events.push(("revise_finished", json!({"attempt": 1})));
++            events.extend(review(2));
++            events
++        },
++        || SECOND.to_owned(),
++        false,
++        &[(FIRST, "revise request")],
++    );
++    let run = detail.runs[0].clone();
++    assert_landed(&repo, &run, "test task", &base);
++    assert_eq!(
++        fs::read_to_string(repo.join("change.txt")).unwrap(),
++        format!("change by {}\nfix 1\n", run.id())
++    );
++    // The adopter wrote the second attempt's request once, after the
++    // first, and the session ran it as its second turn.
++    let requested: Vec<&Value> = payloads(&detail, "turn_requested")
++        .into_iter()
++        .filter(|p| p["what"] == "revise request")
++        .collect();
++    assert_eq!(
++        requested
++            .iter()
++            .map(|p| p["seq"].clone())
++            .collect::<Vec<_>>(),
++        [json!(1), json!(2)]
++    );
++    let run_dir = Path::new(run.run_dir().unwrap());
++    let written: dagq::domain::turn::TurnRequest = serde_json::from_str(
++        &fs::read_to_string(dagq::domain::turn::taken_path(run_dir, 2)).unwrap(),
++    )
++    .unwrap();
++    assert_eq!(written.prompt, SECOND);
++    assert!(!dagq::domain::turn::request_path(run_dir, 3).exists());
++    assert!(
++        !dagq::domain::turn::taken_path(run_dir, 3).exists(),
++        "written twice"
++    );
++    assert_eq!(stub_calls(&run).len(), 2);
++    assert_eq!(payloads(&detail, "revise_requested").len(), 2);
++    assert_eq!(reviewer.prompts().len(), 1);
++    assert_exit_sent(&backend, &run, 1);
++}
++
+ /// The adopted request `what` was taken as one turn and never written
+ /// again: the session ran its first turn and the turn of the dead
+ /// supervisor's request, one request file holds it, and only the dead
+@@ -448,7 +538,11 @@ fn a_conflict_request_that_cannot_be_written_is_withdrawn_and_the_run_lands() {
+ /// directory (`revise-1.txt` or `conflict-1.txt`, after the request's
+ /// event), and with `typed` the dead supervisor also wrote it as the
+ /// headless session's next request, which the session takes and runs as
+-/// its turn. Returns the adopted run's detail once the supervisor returns.
++/// its turn. Each of `taken` (a prompt and what it is) is left in `turns/`
++/// as a request an earlier attempt wrote and the session took, before the
++/// events are recorded. Returns the adopted run's detail once the
++/// supervisor returns.
++#[allow(clippy::too_many_arguments)]
+ fn adopt_pending_request(
+     repo: &Path,
+     db: &Path,
+@@ -457,6 +551,7 @@ fn adopt_pending_request(
+     events: impl FnOnce(&str, i64) -> Vec<(&'static str, Value)>,
+     message: impl FnOnce() -> String,
+     typed: bool,
++    taken: &[(&str, &str)],
+ ) -> dagq::domain::TaskDetail {
+     let run = start_run_under_dead_supervisor(repo, db, backend, "dead-supervisor");
+     let idle = run.idle_marker_path().unwrap();
+@@ -476,25 +571,37 @@ fn adopt_pending_request(
+     // then predates it.
+     await_second_after(modified_second(&idle));
+     let sent_at = unix_second_now();
++    let run_dir = Path::new(run.run_dir().unwrap());
++    for (prompt, what) in taken {
++        let seq = write_turn_request(&run, prompt, what);
++        let path = dagq::domain::turn::request_path(run_dir, seq);
++        fs::rename(&path, dagq::domain::turn::taken_path(run_dir, seq)).unwrap();
++    }
+     let mut queue = SqliteQueue::open(db).unwrap();
+     let events = events(&head, sent_at);
+-    let file = events.iter().rev().find_map(|(kind, _)| match *kind {
+-        "revise_requested" => Some("revise-1.txt"),
+-        "conflict_precheck" => Some("conflict-1.txt"),
+-        _ => None,
++    // The request's file is the one of the last request's attempt.
++    let file = events.iter().rev().find_map(|(kind, payload)| {
++        let attempt = payload["attempt"].as_u64().unwrap_or(1);
++        match *kind {
++            "revise_requested" => Some(format!("revise-{attempt}.txt")),
++            "conflict_precheck" => Some(format!("conflict-{attempt}.txt")),
++            _ => None,
++        }
+     });
+     for (kind, payload) in events {
+         queue
+             .record_runtime_event(run.id(), EventKind::from_name(kind).unwrap(), payload)
+             .unwrap();
+     }
+-    let run_dir = Path::new(run.run_dir().unwrap());
+     let message = message();
+-    if let Some(file) = file {
++    if let Some(file) = &file {
+         fs::write(run_dir.join(file), &message).unwrap();
+     }
+     if typed {
+-        let what = if file == Some("conflict-1.txt") {
++        let what = if file
++            .as_deref()
++            .is_some_and(|file| file.starts_with("conflict-"))
++        {
+             "conflict request"
+         } else {
+             "revise request"

@@ -1,0 +1,1274 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index 69bd537c..6e15962a 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -60,6 +60,7 @@ commit メッセージの規則は [docs/development/documents.md](docs/developm
+ ### 起動と停止（`up` / `down`）
+ 
+ - 人・inbox・planner が `up` / `down` / `install` を打つ前に、[docs/development/operations.md](docs/development/operations.md) の「`up`のコマンド」を読む（この repository の `up` のコマンドと、付ける flag・付けない flag の規則とその正本への案内）
++- inbox を閉じて `up` で開き直す手順（`status` / `doctor` の `inbox_guardrail` が false のとき。引き継ぎを先に書き、pin された inbox の unpin と close は人が `DAGQ_ROLE` の無い terminal で打つ）の正本は plugin の `dagq-recover` skill の `reference/up-down.md` の「Open the inbox again」。inbox と planner は cmux を直接打たない（settings の `permissions.deny` の `Bash(cmux:*)`、[ADR-t1228-2](docs/adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)）
+ - `up` / `down` の汎用の操作と出力は plugin の `dagq-recover` skill の `reference/up-down.md`、自動更新とその ask は同じ skill の `reference/update.md`、仕組みは [up / down](docs/design/supervisor-lifecycle/up-down.md) と [Auto-update](docs/design/supervisor-lifecycle/auto-update.md)、workspace の識別と名前は [run-workspaces](docs/design/supervisor-lifecycle/run-workspaces.md) と [naming](docs/design/supervisor-lifecycle/naming.md) が持つ。並列数と `runtime_planners` は `dagq.toml` の `[supervisor]`（値と理由はそのコメント）
+ 
+ ### 着地と人の判断
+diff --git a/docs/design/authorization.md b/docs/design/authorization.md
+index ec518fbd..94fdb2a0 100644
+--- a/docs/design/authorization.md
++++ b/docs/design/authorization.md
+@@ -4,8 +4,8 @@ type: design
+ title: Authorization
+ status: current
+ created: 2026-09-27
+-updated: 2026-10-03
+-last_verified: 2026-10-03
++updated: 2026-10-04
++last_verified: 2026-10-04
+ scope: runtime
+ related:
+   - adr-t1394-1
+@@ -14,6 +14,7 @@ related:
+   - adr-t728-2
+   - adr-t728-3
+   - adr-t1228-1
++  - adr-t1228-2
+   - design-supervisor-lifecycle-roles
+   - design-security
+ ---
+@@ -194,6 +195,7 @@ runtimeの操作系のコマンドは、`src/application/commands/operations.rs`
+ - plannerは人に頼まれた`up`・`down`・`install`と、`init`・`migrate`・`rebind`・`plan`、自分のplannerの`planner-session`と`session-event`を打てる（ADR-t728-1の決定7のとおり今の権限のまま）。`integrate`・`recover`・`review`・`supervise`・`observe`・`session`は拒む
+ - worker・4つのjob・observerは`integrate`・`recover`・`install`・`auto-update`・`up`・`down`・`init`・`migrate`・`rebind`・`plan`・`supervise`・`observe`・`review`を拒む。workerは自分のrunの`session`と`session-event`だけを打てる。別のrunのもの、inboxやplannerのspanを名乗るもの（`DAGQ_SESSION_KIND`）、`planner-session`は拒む
+ - 拒否は`authorization_denied`として、拒まれた呼び出し元をactorにしてqueueに記録する（`src/infrastructure/denials.rs`の`QueueDenials`が、判定の後でだけqueueを開く）。queueが無い・このバイナリが開けない（`init`の前、`migrate`の前）ときは記録できず、拒否は拒否のまま返す。errorの形は計画系と同じ
++- 生の`cmux`はこのpolicyの外にある（dagqのCLIを通らない）。inboxとplannerには、Claudeのsettingsの`permissions.deny`の`Bash(cmux:*)`（`permission_deny(Inbox|Planner)`の最後の規則）を置き、上の`run` / `planner`のCLIを使わせる（[ADR-t1228-2](../adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)）。これは**guardrailであってenforcementではない**: hostの判定は助言的なまま（ADR-t728-1決定6）で、絶対pathやscriptからの`cmux`は通り、`up`が`reused`で使い続けるinboxと`claude`を打ち直したsessionには効かない。拒むのはあくまでCLIの判定で、cmuxを拒んだことでCLIの権限は変わらない。workerとjobの`cmux`は拒まない（隔離が扱う）。Codexのinboxは同じ趣旨をCodexの手段で持たせ、無ければguardrailが無いと[Security](security.md#判定の場所)に書く（決定6。今のinboxはClaudeだけ）。settingsの場所・中身と`status` / `doctor`の`inbox_guardrail`は[`up` / `down`](supervisor-lifecycle/up-down.md)と[Security](security.md)が持つ
+ 
+ #### 制御側の起動としての`supervise`と`auto-update`
+ 
+diff --git a/docs/design/provider-lifecycle.md b/docs/design/provider-lifecycle.md
+index 0ef6e2e4..2b3e7ff4 100644
+--- a/docs/design/provider-lifecycle.md
++++ b/docs/design/provider-lifecycle.md
+@@ -4,8 +4,8 @@ type: design
+ title: Agent provider lifecycle
+ status: current
+ created: 2026-09-21
+-updated: 2026-10-03 # task 1397: a headless planner's provider_waiting is the queue's (after task 1560's job prompts on stdin)
+-last_verified: 2026-10-03 # task 1397
++updated: 2026-10-04 # task 1232: the inbox's settings (permissions.deny only) through inbox_command
++last_verified: 2026-10-04 # task 1232
+ scope: provider
+ related:
+   - adr-t1340-1
+@@ -37,7 +37,8 @@ AgentProvider
+   job_reply(stdout)        -- 実装済み: jobの出力から取り出した最終の返答のtext（既定とClaude Codeはstdoutそのまま）
+   review_timeout()         -- 実装済み: headless reviewの上限（既定600秒）
+   assign_session_id(command, session_id) -- 実装済み: headless jobのsessionにruntimeが決めたsession_idを付ける（既定は何もしない）
+-  inbox_command(prompt, plugin_dir) -- 実装済み: inboxのworkspaceが動かすagent（settingsなし）
++  inbox_command(prompt, plugin_dir, queue_dir) -- 実装済み: inboxのworkspaceが動かすagent（settingsはqueue_dirに書くpermissions.denyだけ。ADR-t1228-2）
++  inbox_settings(queue_dir) -- 実装済み: そのsettingsのpath（Claudeは`claude-inbox-settings.json`、既定はNone＝guardrailなし）
+   inspect / interrupt / collect_result  -- 後続
+ 
+ AgentSignals
+@@ -61,7 +62,7 @@ Claude Code adapter（`src/infrastructure/adapters.rs`）はworktreeをcwdにし
+ 
+ 加えて`command()`は`<run-dir>/claude-settings.json`を書いて`--settings`で渡す。内容は`Stop` hook 1件で、hookのstdin（イベントJSON）を`<run-dir>/idle.json`（`TaskRun::idle_marker_path`）へ一時ファイル + renameで書く。supervisorはこのmarkerをidle判定に使う（[supervisor-lifecycle](supervisor-lifecycle.md)）。`SessionEnd` hookは使わず、セッション終了はwrapperの終了コードで確認する。他のproviderは同じmarkerを自分の仕組みで書けばよく、書かなければ手動終了待ちになる（plannerはmarkerが無くても画面から推定したidleで判断する。markerが書けなかったことは`AgentSignals::idle_hook_failure`がdebug logから読み、`idle_inferred`の`hook_error`に入る。[画面からのidleの推定](supervisor-lifecycle/receipt-and-session-exit.md#画面からのidleの推定)、ADR-t803-1）。同じ設定に`autoMode.environment: ["$defaults"]`も入れ、auto modeの初回案内（Teach auto mode）を抑止する（[起動時のダイアログ](#起動時のダイアログ)）。さらに`permissions.deny`に`Bash(pkill:*)`と`Bash(killall:*)`（`SIGNAL_BY_NAME_DENIED`）を入れ、sessionが名前やパターンでプロセスを選んでsignalを送るのを拒む（Claude Codeは`;`や`&&`でつないだ各コマンドにdenyを当てる。2026-09-27に`claude -p --settings`で確認。同じ設定を書く`resume_command()`と`planner_command()`のsessionも拒む。拒めるのはコマンドの先頭が`pkill` / `killall`のものだけで、`/usr/bin/pkill`・`sh -c 'pkill ...'`・`kill $(pgrep ...)`・`pgrep ... | xargs kill`は通るので、それはpromptの規則に頼る。`pgrep`は診断に使うので拒まない）。その後にroleのpolicyが拒む`dagq`のコマンドとactorの変数の書き換えの規則（`permission_deny`。guardrailでありenforcementではない。[Authorization](authorization.md#claudeのpermissionsdenyguardrail)）が続き、reviewの設定（`claude-review-settings.json`）もreview jobの分を持つ（reviewは`--disallowedTools`で`Bash`を持たないので、今は効く場面が無い）。理由: どのrunのsessionもpromptを位置引数で持つので、そのcommand lineは検証コマンドの名前（`cargo test`、`cargo llvm-cov`）を含む。2026-09-23〜26に、workerが自分の検証を止めるつもりで打った`pkill -f llvm-cov` / `pkill -f "cargo test"`が、他のrunのClaude（exit 143、`session_killed`）と`integrate`・validatingの検証の`cargo`をSIGTERMで止めた（task 359。打った本人のClaudeは`pkill`が祖先を除くので残った。`--resume`のsessionはpromptを引数に持たないので当たらなかった）。止めてよいのは自分が起動したものをpidかtaskで、という規則は`STOP_BACKGROUND`の一文（[Prompt](supervisor-lifecycle/prompt.md)）でもworkerに伝える。
+ 
+-workerの`command()`と`resume_command()`、runtimeが立てるplanner（`PlannerCommand::origin`が`runtime`）の`planner_command()`は、この設定に`"promptSuggestionEnabled": false`を足したもの（`runtime_session_settings`）を書き、Claude Codeの入力欄のサジェスト（次に打ちそうな文の灰色の表示）を止める（goal 48、task 499）。理由: 誰も打たないsessionで、サジェストが画面上は打ちかけの文と見分けにくく、inboxが取り違えた。環境変数`CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION`ではなくsettingsで出し分けるのは、役割ごとに分けられてtestで確かめやすいため。人が触るsession、つまり`up`が開くinbox（`--settings`を渡さない）と、廃止前に人が`dagq plan`で開いたplanner（origin `person`。`stop_hook_settings`のまま。`dagq plan`はADR-t1394-1で何も開かずに拒むようになったので、新しくは開かない）には入れない。
++workerの`command()`と`resume_command()`、runtimeが立てるplanner（`PlannerCommand::origin`が`runtime`）の`planner_command()`は、この設定に`"promptSuggestionEnabled": false`を足したもの（`runtime_session_settings`）を書き、Claude Codeの入力欄のサジェスト（次に打ちそうな文の灰色の表示）を止める（goal 48、task 499）。理由: 誰も打たないsessionで、サジェストが画面上は打ちかけの文と見分けにくく、inboxが取り違えた。環境変数`CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION`ではなくsettingsで出し分けるのは、役割ごとに分けられてtestで確かめやすいため。人が触るsession、つまり`up`が開くinbox（`--settings`は`permissions.deny`だけの`claude-inbox-settings.json`で、サジェストの設定を含まない。[`up` / `down`](supervisor-lifecycle/up-down.md)）と、廃止前に人が`dagq plan`で開いたplanner（origin `person`。`stop_hook_settings`のまま。`dagq plan`はADR-t1394-1で何も開かずに拒むようになったので、新しくは開かない）には入れない。
+ 
+ `review_command()`（[ADR-0040](../adr/0040-verify-once-review-run-env-graph-stats-and-task-priority-in-claim-order.md)の決定2、[ADR-0027](../adr/0027-keep-worker-session-through-review-revise-verdict-and-merge-tree-precheck.md)）はsupervisorが受理したrunをreviewさせる非対話のコマンドを返す。Claude Code adapterは`claude -p --debug-file <run-dir>/claude-review.log --add-dir <run-dir> --settings <run-dir>/claude-review-settings.json --allowedTools Read,Grep,Glob --disallowedTools Bash,Edit,Write,NotebookEdit --setting-sources ""`をworktreeで起動し、promptはargvでなくstdinで渡す（worktreeは生きているworkerのsessionのものなので、reviewは読むだけ。渡し方は[headless jobのinterface](#headless-jobのinterface)の「promptの渡し方」）。`--setting-sources ""`でworkerが変えられるworktreeの`.claude`の設定・agent・skill、`.mcp.json`、`CLAUDE.md`とuserの設定を読まない（[ADR-t1470-1](../adr/2026-10-03-t1470-1-all-claude-run-reviews-load-no-setting-sources.md)。repositoryの規則はpromptが名指して読ませる）。`claude-review-settings.json`はroleの`permissions.deny`・`autoMode.environment`・`autoMemoryEnabled: false`（cwdのauto memoryは`--setting-sources ""`でも読まれるため）で、`Stop` hookを持たない: reviewの間もworkerのsessionは開いたままなので、reviewがidle markerを書くとsupervisorのidle判定（reviseの往復）を誤らせる。cmux workspaceは作らず、stdin / stdout / stderrはruntimeが繋ぐ（stdinはprompt、stdoutとstderrは`<run-dir>/review-<attempt>.out` / `.err`）。runtimeは`review_timeout()`を過ぎたらkillし、stdoutの`{"verdict": "pass" | "revise" | "concern", "reasons": [..], "summary": ".."}`を読む（[supervisor-lifecycle](supervisor-lifecycle/review.md#review-supervisor)）。`headless_command()`と1つのportにしないのは、reviewがrunに属し、そのrun directoryの設定・debug file・`--add-dir`と禁止するtoolを要るのに対し、observerのjobにはrunが無いため。reviewの子プロセスにはruntimeが`DAGQ_ROLE=review-job`・`DAGQ_ACTOR_ID`と、queue serviceのsocket（`DAGQ_SERVICE_SOCKET`）とjobのtokenのfile（`DAGQ_SERVICE_CREDENTIAL_FILE`）を渡し、`DAGQ_QUEUE`は渡さない。その`dagq`はクライアントモードで動き、serviceがreview jobのprincipalに読むコマンドだけを許す（[Roles](supervisor-lifecycle/roles.md#actors)、[Queue service](queue-service.md#クライアントモード)）。print mode（`-p`）はfolder trustの判定を飛ばす（[binary から読める判定](#binary-から読める判定)の1）ので、reviewはtrust dialogで止まらない。
+ 
+diff --git a/docs/design/security.md b/docs/design/security.md
+index 7dcd55a3..d6fcd18f 100644
+--- a/docs/design/security.md
++++ b/docs/design/security.md
+@@ -4,13 +4,14 @@ type: design
+ title: Security
+ status: current
+ created: 2026-09-28
+-updated: 2026-10-03
+-last_verified: 2026-10-03
++updated: 2026-10-04
++last_verified: 2026-10-04
+ scope: runtime
+ tags:
+   - security
+ related:
+   - adr-t728-1
++  - adr-t1228-2
+   - adr-t1533-1
+   - adr-t1394-1
+   - adr-t728-2
+@@ -81,7 +82,9 @@ AI actorの出力は全てデータで、制御側が決定的に遷移へ写す
+ - 着地とpushは`Integrator`がもう一度判定する（下の「reviewのpassとIntegrator」）
+ - queue service（[Queue service](queue-service.md)）は、`ask`・`show`・`note`・findingと読み取りのユースケースを、tokenから決めたprincipalのactorで同じ`Dialogue`・`Gate`と`StaticPolicy`に通す（service側の判定。`DAGQ_ROLE`は使わない）。拒否は同じ`authorization_denied`に、principalの無い要求は`queue_service_unauthenticated`に残す。worker（resumeを含む）・headlessのjob・observerのプロセスにはqueue DBのpathを渡さず、socketとtokenのfileを渡すので、その`dagq`はクライアントモードでserviceだけを使い、serviceのユースケースでないコマンドと`--db`は拒まれ、serviceに届かなくてもDBを開かない（goal 82の段(3)、[クライアントモード](queue-service.md#クライアントモード)）。閉じたのはCLIを通る経路で、同じユーザーのプロセスはDBのファイルもtokenのファイルも探して読めるので、host構成では助言的なまま（ADR-t1233-1のConsequences）
+ - 状態を変えないコマンド（読み取り・`watch`・`graph --out`・`report`）は、roleを問わず`check_access`が`StaticPolicy`に通す（default deny、task 859）。拒否は同じ`denied`のJSONを返し、queueがあれば拒まれた呼び出し元をactorにした`authorization_denied`に記録する（task 1151。queueが無いときは記録せずに拒む）。通った読み取りはqueueに書かない
+-- runtimeがClaudeの設定を書くactor（worker・planner・review job）の`permissions.deny`には、roleが持たないcommand（状態を変えるものと`watch`・`report`。`graph`は`--out`なしが読み取りなので除く）の`Bash(dagq <command>:*)`と、`DAGQ_ROLE`などactorを名指す変数の書き換えを入れる（`permission_deny(role)`）。これは誤りを早く止めるguardrailで、pathやscriptからの呼び出しは通るので、拒むのはCLIの判定
++- runtimeがClaudeの設定を書くactor（worker・planner・review job・inbox）の`permissions.deny`には、roleが持たないcommand（状態を変えるものと`watch`・`report`。`graph`は`--out`なしが読み取りなので除く）の`Bash(dagq <command>:*)`と、`DAGQ_ROLE`などactorを名指す変数の書き換えを入れる（`permission_deny(role)`）。これは誤りを早く止めるguardrailで、pathやscriptからの呼び出しは通るので、拒むのはCLIの判定
++- inboxとplannerの`permissions.deny`には`Bash(cmux:*)`も入れる（`execution::RAW_CMUX_DENIED`、[ADR-t1228-2](../adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)）。sessionへの操作（画面を読む・決めたキーと答えを送る・終わったrunのworkspaceの片付け・plannerへの続きの依頼）は判定と記録を通る`run` / `planner`のCLIで行い、記録の残らない生のcmuxにふだん流れないようにする。plannerはruntimeが書くsettings（非対話のturnの`claude-headless-settings.json`と、対話のsessionの`claude-settings.json`）に、inboxは`up`が開くときにqueueのディレクトリに書く`claude-inbox-settings.json`（`permissions.deny`だけ。[`up` / `down`](supervisor-lifecycle/up-down.md)）に持つ。これは**guardrailであってenforcementではない**: denyはClaude Codeのtoolの呼び出しの綴りで照合する助言的な抑止で、絶対pathの`cmux`・scriptの中の呼び出し・別のshellからの実行を止めず、`up`が`reused`で使い続けるinboxと、workspaceで`claude`を打ち直したsessionには効かない（前者は`status` / `doctor`の`inbox_guardrail`が見せる）。hostの判定は助言的なまま（ADR-t728-1決定6）。workerとjobの`cmux`は拒まず、隔離（goal 38・goal 82）に任せる（決定7）。人自身のterminal（`DAGQ_ROLE`なし）はsettingsを持たず、ADR-t1228-1が人に残したcmuxの操作をそこで打つ
++- Codexのinbox（goal 77）は、同じ趣旨（`cmux`で始まるコマンドを拒み、dagqのCLIを使わせる）をCodexの手段で持たせる（ADR-t1228-2決定6）。今のproviderの口（`AgentProvider::inbox_command`）でinboxを持つのはClaudeだけで（`up`は`--claude`でinboxを開く）、Codexはinboxを持たない（`inbox_command`は拒み、`inbox_settings`の既定は`None`。settingsを持たないproviderのinboxが入れば`inbox_opened`の`guardrail`は`false`で記録され、`inbox_guardrail`が見せる）。Codexのinboxを作るtaskが手段を持たせるか、手段が無ければこのguardrailが無いことをここに書き、skillの手順をCLIだけにすることで足りるとする
+ 
+ roleごとに拒まれる主なコマンド（skillとAGENTS.mdはこれを説明する）:
+ 
+@@ -97,7 +100,7 @@ roleごとに拒まれる主なコマンド（skillとAGENTS.mdはこれを説
+ 
+ 同じhostの敵対的なプロセスは次で迂回できる:
+ 
+-- envの偽装: `DAGQ_ROLE`を外せばuser、`DAGQ_ROLE=inbox`にすればinboxとして判定される。`DAGQ_RUN_ID`も書き換えられる。`permissions.deny`はClaude Codeのコマンドの先頭の形しか見ないので、pathや`sh -c`やscriptからは通る
++- envの偽装: `DAGQ_ROLE`を外せばuser、`DAGQ_ROLE=inbox`にすればinboxとして判定される。`DAGQ_RUN_ID`も書き換えられる。`permissions.deny`はClaude Codeのコマンドの先頭の形しか見ないので、pathや`sh -c`やscriptからは通る（inboxとplannerの`Bash(cmux:*)`も同じ）
+ - DBの直接操作: queueのSQLiteファイルはこのユーザーが読み書きでき、CLIを通らずに状態とeventを書き換えられる
+ - Gitとファイル: worktree・main checkout・`runs/`・固定バイナリを直接書き換えられ、pushの資格情報もこのユーザーのもの
+ - プロセス: 他のactorのプロセスにsignalを送れる（`pkill`・`killall`を拒むのもguardrail）
+diff --git a/docs/design/supervisor-lifecycle/up-down.md b/docs/design/supervisor-lifecycle/up-down.md
+index caa3ff0f..71952528 100644
+--- a/docs/design/supervisor-lifecycle/up-down.md
++++ b/docs/design/supervisor-lifecycle/up-down.md
+@@ -4,8 +4,8 @@ type: design
+ title: "`up` / `down`"
+ status: current
+ created: 2026-09-26
+-updated: 2026-10-03
+-last_verified: 2026-10-03
++updated: 2026-10-04
++last_verified: 2026-10-04
+ scope: runtime
+ related:
+   - design-supervisor-lifecycle
+@@ -23,6 +23,7 @@ related:
+   - adr-t632-1
+   - design-provider-lifecycle
+   - design-persistence
++  - adr-t1228-2
+ ---
+ 
+ # `up` / `down`
+@@ -56,9 +57,12 @@ related:
+    - plist: `~/Library/LaunchAgents/com.dagq.<queue hash>.plist`。`Label`は同名、`ProgramArguments`は`[up自身の絶対path, --db <db>, supervise, --log-dir <queue dir>/logs, --cmux <resolved>, --claude <resolved>, --codex <resolved>, ...]`（`--parallel N`は明示されたときだけ後ろに付く）（cmuxとclaudeは`up`がpreflightした実行ファイルの絶対path。launchdのPATHに頼らないため。`--codex`（既定`codex`）は見つかれば実体の絶対pathにし、見つからなければ与えた値のまま渡して止まらない。supervisorはCodexのtaskをclaimせず、`status`の`supervisors[].providers`が見つからなかったことを出す。[Provider lifecycle](../provider-lifecycle.md#workerのproviderと経路)。in-cmux modeのsupervisorのcommandも同じ引数）、`WorkingDirectory`はrepository root、`EnvironmentVariables`は`PATH`（`up`を叩いたshellのPATH）と、そのshellが`CMUX_SOCKET_PASSWORD`をexportしていたとき（空でないとき）だけ`CMUX_SOCKET_PASSWORD`（Settingsに保存したpasswordは読まないし書かない）、そのshellが`XDG_CONFIG_HOME`をexportしていたとき（空でないとき）だけ`XDG_CONFIG_HOME`（shellの値のまま。launchdのsupervisorが利用者の`config.toml`（[言語](language.md)）とhost全体の`host.toml`（[push](push.md)・[レポート](report.md)・[KPI](kpi.md)・[リリースの更新](release-update.md)・broker）を、`up`を打ったshellと同じ`$XDG_CONFIG_HOME/dagq/`から読むため（`up`がpreflightで読む`config.toml`とずれない）。exportしていなければ入れず、supervisorは`~/.config/dagq/`を読む。task 749。testは`tests/it/lifecycle_up.rs`の`up_stores_the_exported_config_home_in_the_plist`と、無いときにPATHだけであることを`up_starts_the_agent_and_the_sessions_once_and_reuses_them_after`）、`KeepAlive` true、`RunAtLoad` true、`StandardOutPath` / `StandardErrorPath`は`<queue dir>/logs/launchd.log`、`ExitTimeOut` 86400（launchdの既定20秒ではdrainが待てない）。生成は`src/infrastructure/launchd.rs`の`LaunchAgentSpec::xml`。passwordを持ちうるので、plistは0600で書く。
+    - 起動: `launchctl bootout gui/<uid>/<label>`（未loadなら無視）の後に`launchctl bootstrap gui/<uid> <plist>`。既にbootstrap済みでも定義を差し替えるためbootoutしてからbootstrapし直す。bootoutは即返り、serviceは旧プロセスが終わるまで`launchctl print`に残り、その間のbootstrapはexit 5で失敗する（実機確認）ので、`print`が消えるまで0.5秒ごとに待つ。60秒で消えなければ`launchctl kill SIGKILL`を送り、さらに60秒待って諦める（hangしたsupervisorがlabelを`ExitTimeOut`の間占有しないため）。
+    - 登録が30秒以内に現れなければerrorで止め、agentはそのまま残す（`launchd.log`を見る）。preflightに通らない環境ではKeepAliveで再起動を繰り返すので、`down`で外す。
+-4. **inbox workspace**: まず`session_workspaces`のうちsupervisor・inbox以外のroleの行を消す（`forget_retired_session_workspaces`。ADR-0024で退役した常駐sessionの行と、ADR-0044の決定6でやめた常駐plannerの`planner`行。workspace自体は閉じず、人が閉じる。消した行数は結果の`retired_sessions`）。続けてinboxを`application::lifecycle`の`Sessions::open`で開く。`up`はplannerを開かない（plannerはruntimeが立てる。人が開く`dagq plan`は廃止し、inboxへの計画の依頼の案内を付けて拒む。[`plan` / `planners`](plan-planners.md#plan--planners)）。`up`自身の環境に`DAGQ_ROLE=inbox`があり`DAGQ_QUEUE`が同じqueue DB（正規化して比較）なら`skipped`（inbox sessionのskillから`up`を呼んでも二重にならない。workspaceは作らず、記録したUUIDがlistに居れば下記の見た目とピンだけを当てる）。そうでなければ`session_workspaces`の`inbox`行のUUIDが全windowの`workspace list`（下記[Naming](naming.md#naming)）に居れば`reused`（別のwindowへ移したworkspaceも`reused`）（titleは見ないので、人がrenameしても、同じtitleのworkspaceを別に開いても判定は変わらない）。行が無いか、UUIDがlistに居なければ（閉じられた、cmuxが再起動した）行を消して`cmux workspace create --name "[<repo>]inbox" --description "dagq role=inbox queue=<queue hash>" --env DAGQ_ROLE=inbox --env DAGQ_QUEUE=<db> --env DAGQ_SESSION_KIND=inbox [--group <queueのgroup>] --command "<claude> [--plugin-dir PATH] -- '<inbox prompt>'" --focus false --cwd <repository root>`で作り、`identify`でUUIDを得て`inbox`行に書き`created`。`DAGQ_ROLE` / `DAGQ_QUEUE`はcommandの前置きではなくworkspaceの`--env`なので、そのworkspaceで`claude`を打ち直しても引き継がれる。引数は`shell_join`で個別にquoteする（promptの改行はquoteの中に収まり、cmuxがログインシェルに打ち込んでも1コマンドになる）。plannerのsessionやほかのroleの環境（workerなど）からの`up`は何もskipしない。
++4. **inbox workspace**: まず`session_workspaces`のうちsupervisor・inbox以外のroleの行を消す（`forget_retired_session_workspaces`。ADR-0024で退役した常駐sessionの行と、ADR-0044の決定6でやめた常駐plannerの`planner`行。workspace自体は閉じず、人が閉じる。消した行数は結果の`retired_sessions`）。続けてinboxを`application::lifecycle`の`Sessions::open`で開く。`up`はplannerを開かない（plannerはruntimeが立てる。人が開く`dagq plan`は廃止し、inboxへの計画の依頼の案内を付けて拒む。[`plan` / `planners`](plan-planners.md#plan--planners)）。`up`自身の環境に`DAGQ_ROLE=inbox`があり`DAGQ_QUEUE`が同じqueue DB（正規化して比較）なら`skipped`（inbox sessionのskillから`up`を呼んでも二重にならない。workspaceは作らず、記録したUUIDがlistに居れば下記の見た目とピンだけを当てる）。そうでなければ`session_workspaces`の`inbox`行のUUIDが全windowの`workspace list`（下記[Naming](naming.md#naming)）に居れば`reused`（別のwindowへ移したworkspaceも`reused`）（titleは見ないので、人がrenameしても、同じtitleのworkspaceを別に開いても判定は変わらない）。行が無いか、UUIDがlistに居なければ（閉じられた、cmuxが再起動した）行を消して`cmux workspace create --name "[<repo>]inbox" --description "dagq role=inbox queue=<queue hash>" --env DAGQ_ROLE=inbox --env DAGQ_QUEUE=<db> --env DAGQ_SESSION_KIND=inbox [--group <queueのgroup>] --command "<claude> --settings <queueのディレクトリ>/claude-inbox-settings.json [--plugin-dir PATH] -- '<inbox prompt>'" --focus false --cwd <repository root>`で作り、`identify`でUUIDを得て`inbox`行に書き`created`。`DAGQ_ROLE` / `DAGQ_QUEUE`はcommandの前置きではなくworkspaceの`--env`なので、そのworkspaceで`claude`を打ち直しても引き継がれる。引数は`shell_join`で個別にquoteする（promptの改行はquoteの中に収まり、cmuxがログインシェルに打ち込んでも1コマンドになる）。plannerのsessionやほかのroleの環境（workerなど）からの`up`は何もskipしない。
++   - **inboxのsettingsとguardrail**（[ADR-t1228-2](../../adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)決定3・4）: `created`のときだけ、providerの`AgentProvider::inbox_command`（Claudeは`ClaudeCode::inbox_command`）がqueueのディレクトリ（DBの親）に`claude-inbox-settings.json`（`adapters::INBOX_SETTINGS`）を書き直し、`--settings <その絶対path>`をcommandに渡す。中身は`{"permissions": {"deny": [...]}}`だけで（`adapters::inbox_settings`）、denyは`execution::permission_deny(Inbox)`、すなわちinboxのroleのpolicyが許さないdagqのコマンド（`Bash(dagq <command>:*)`）・身元の環境変数（`DAGQ_ROLE`・`DAGQ_ACTOR_ID`・`DAGQ_RUN_ID`・`DAGQ_TASK_ID`の`X=*`・`export X*`・`env X=*`・`env -u X*`・`unset X*`）・`Bash(cmux:*)`（`execution::RAW_CMUX_DENIED`）。Stop hook・`UserPromptSubmit` hook・idle marker・`promptSuggestionEnabled`・`autoMode`は入れない（inboxはidleで判定せず、人が打つ）。pluginは今までどおり`--plugin-dir`かinstall済みのものを読む。作った直後に、queueのevent `inbox_opened`（`workspace_id`・`guardrail`（providerがsettingsを持てば`true`。`AgentProvider::inbox_settings`）・`settings`（そのpathかnull））を残し、結果の`inbox`に`guardrail`を足す。`reused`の結果にも、下の判定の`guardrail`と、無いときの`next`を載せる。`skipped`には載せない。
++     - **見せる欄**: `status`（role無しと`--role inbox`）と`doctor`は`inbox_guardrail`を出す（`application::inbox_guardrail::judge`、`compose::inbox_guardrail`）。`session_workspaces`の`inbox`行のUUIDと最新の`inbox_opened`を比べ、同じUUIDで`guardrail: true`なら`{"workspace_id", "guardrail": true, "settings"}`、同じUUIDで`false`なら`{"guardrail": false, "reason": "opened_without_guardrail", "next"}`、`inbox_opened`が無いか別のUUIDのもの（この実装より前に開いたinbox）なら`{"guardrail": false, "reason": "no_record", "next"}`、行が無ければ`{"workspace_id": null, "guardrail": null}`。`next`は引き継ぎを書き、人が`DAGQ_ROLE`の無いterminalでinboxをunpinしてcloseし、`up`で開き直すこと（手順の正本はpluginの`dagq-recover`の`reference/up-down.md`の「Open the inbox again」）。
++     - **限界**: settingsはClaude Codeの起動の引数なので、`up`が`reused`で使い続けるinbox（会話を捨てないよう起動し直さない）と、workspaceで`claude`を打ち直したsessionには効かない。前者は上の欄が`false`で見せ、人が区切りで開き直す。後者は見えず、防がない（guardrailの限界として受け入れる。決定4）。denyはtoolの呼び出しの綴りでの照合で、絶対pathの`cmux`・scriptの中・別のshellからの呼び出しは止めないguardrailで、enforcementではない（[Security](../security.md)）。
+    - **見た目とピン**（[ADR-0031](../../adr/0031-color-pill-and-pin-for-inbox-and-planner-and-unpin-before-close.md)）: `created`と`reused`のworkspaceには、続けて役割の色・status pill・ピンを当てる（`Sessions::mark`。`application::lifecycle::session_look`）。inboxは`cmux workspace-action --action set-color --color Amber --workspace <uuid>`、`cmux set-status dagq_role inbox --icon tray --workspace <uuid>`、`cmux workspace-action --action pin --workspace <uuid>`（plannerの色`Blue`とpill`dagq_role planner --icon map`はplannerを開く`open_planner`が当てる。ピンは付けない）。cmuxのworkspaceにはアイコンの属性が無いので、アイコンはsidebarのstatus pill（SF Symbolの名前）で出す。pillのkey `dagq_role`（`ROLE_STATUS_KEY`）はdagq固有で、Claude Codeの`claude_code`など他のpillを上書きしない。毎回の`up`で当て直す（冪等）ので、以前の`up`が開いたworkspaceや人が外したピンにも付く。`skipped`でも、記録した`inbox`行のUUIDがlistに居ればそのworkspaceに当てる（inboxの中から`up`を打つのが固定バイナリ更新の手順なので）。3つの呼び出しはそれぞれ独立で、失敗は`up`を失敗にせず`warnings`に`cmux could not set the <color|status pill|pin> of the <role> workspace <uuid>: …`として載り、`backend_call_failed`（op `set_color` / `set_status` / `pin`）にも残る。supervisorとrunのworkspaceには当てない。
+-5. **結果**: `{"supervisor": {"outcome": "started"|"reused"|"restarted"（引き継ぎの一部か全員が失敗したときはerrorの`report`で`partially_handed_off`|`handoff_failed`）, "mode": "launchd"|"in_cmux"|null, "version", "pid", "token", "workspace_id", "plist", "log_dir"}（in-cmux modeで起動したときは`name`も、`restarted`のときは`previous_version` / `replaced` / `supervisor_workspaces`も、引き継ぎなら`handoff: true`も）, "migrated": <適用した互換のmigrationの`migrate`の報告、無ければnull>, "inbox": {"outcome": "created"|"reused"|"skipped", "workspace_id", "name"}, "retired_sessions": <忘れたsession_workspacesの行数>, "pruned_supervisors": [{"token","pid","reason"?}], "warnings": [<workspace groupを作れなかった理由、色・pill・ピンを当てられなかった理由>], "doctor": {"unfinished_runs": [{"run_id","task_id","status","lease_stale"}], "awaiting_integration": [{"run_id","task_id","last_error"}], "needs_session": [...]}}`。`lease_stale`はleaseのPIDが死んでいるかheartbeatが30秒より古いとき`true`、leaseがなければnull。
++5. **結果**: `{"supervisor": {"outcome": "started"|"reused"|"restarted"（引き継ぎの一部か全員が失敗したときはerrorの`report`で`partially_handed_off`|`handoff_failed`）, "mode": "launchd"|"in_cmux"|null, "version", "pid", "token", "workspace_id", "plist", "log_dir"}（in-cmux modeで起動したときは`name`も、`restarted`のときは`previous_version` / `replaced` / `supervisor_workspaces`も、引き継ぎなら`handoff: true`も）, "migrated": <適用した互換のmigrationの`migrate`の報告、無ければnull>, "inbox": {"outcome": "created"|"reused"|"skipped", "workspace_id", "name", "guardrail"?, "next"?}, "retired_sessions": <忘れたsession_workspacesの行数>, "pruned_supervisors": [{"token","pid","reason"?}], "warnings": [<workspace groupを作れなかった理由、色・pill・ピンを当てられなかった理由>], "doctor": {"unfinished_runs": [{"run_id","task_id","status","lease_stale"}], "awaiting_integration": [{"run_id","task_id","last_error"}], "needs_session": [...]}}`。`lease_stale`はleaseのPIDが死んでいるかheartbeatが30秒より古いとき`true`、leaseがなければnull。
+ 
+ 前提: launchdが起動したsupervisorはcmuxのterminalの外で動くので、cmuxのsocketがcmux外のプロセスからの接続を受け付ける必要がある。開発環境のcmux 0.64.25は既定では「アクセスが拒否されました。cmux内で起動されたプロセスのみ接続できます」で`cmux ping`を拒み、supervisorはpreflightで落ちて登録に現れなかった（`launchd.log`にそのerrorが残り、`up`は30秒でerrorになり、KeepAliveで再起動が続いた。2026-09-22の実機）。`cmux --help`のSocket Authはpasswordによる認証（`--password`、`CMUX_SOCKET_PASSWORD`、Settingsに保存したpassword）を載せている。cmuxは接続元をプロセスの系譜で判定するので（上記）、`up`はplistを書く前にcmuxのプロセスツリーの外からのpreflightを通し、拒まれたらplistを書かずに止まる。ユーザーの用意はcmuxのSettingsにsocket passwordを保存する（`~/.config/cmux/cmux.json`の`automation.socketControlMode: "password"`と`automation.socketPassword`。既定は`cmuxOnly`。推奨。plistに何も残らない）か、`up`を叩くshellで`CMUX_SOCKET_PASSWORD`をexportする（そのときだけplistに書かれる）かのどちらか。どちらもなければ`up --in-cmux`を使う（launchdを使わず、supervisorをcmux workspaceの中で動かす。自動再起動はない）。cmuxのterminalで`supervise`を手で起動して`up`にreuseさせてもよい。
+ 
+diff --git a/docs/development/operations.md b/docs/development/operations.md
+index e9c980f2..2ff5c65f 100644
+--- a/docs/development/operations.md
++++ b/docs/development/operations.md
+@@ -32,7 +32,7 @@ AGENTS.mdの「作業中」の固定バイナリ・開発中のバイナリ・
+ 
+ ## 使い捨てのqueue
+ 
+-- 使い捨てのrepositoryのディレクトリ名（人かinboxが手で作るものは`dagq-smoke`、e2eのfixtureは`dagq-e2e`）と、確かめる手順と、スモークの後にworkspace groupを`cmux workspace-group delete <group> --close-workspaces`でanchorごと消す手順は[manual-smoke](../design/manual-smoke.md)が持つ。workerが使い捨てのqueueを操作できない理由は次の節。
++- 使い捨てのrepositoryのディレクトリ名（人かinboxが手で作るものは`dagq-smoke`、e2eのfixtureは`dagq-e2e`）と、確かめる手順と、スモークの後にworkspace groupを`cmux workspace-group delete <group> --close-workspaces`でanchorごと消す手順（inboxはcmuxを拒まれるので、人が`DAGQ_ROLE`の無いterminalで打つ。[ADR-t1228-1](../adr/2026-10-02-t1228-1-inbox-and-planner-reach-sessions-through-the-dagq-cli.md)決定1）は[manual-smoke](../design/manual-smoke.md)が持つ。workerが使い捨てのqueueを操作できない理由は次の節。
+ 
+ ## workerがhostと実queueでできないこと
+ 
+diff --git a/plugins/claude-dagq/skills/dagq-inbox/SKILL.md b/plugins/claude-dagq/skills/dagq-inbox/SKILL.md
+index b671aeb9..500db6c2 100644
+--- a/plugins/claude-dagq/skills/dagq-inbox/SKILL.md
++++ b/plugins/claude-dagq/skills/dagq-inbox/SKILL.md
+@@ -19,7 +19,7 @@ This session holds no state of its own. After a restart, compaction or `/clear`,
+ "$DAGQ" status --role inbox
+ ```
+ 
+-`asks` lists the open asks; `attention` has everything that waits, each with a fixed `next`; `cursor` is where the next `watch` starts. Handle open asks first (step 3), then the rest (step 4). `${CLAUDE_PLUGIN_ROOT}/skills/dagq-inbox/reference/status.md` lists every field and `next`.
++`asks` lists the open asks; `attention` has everything that waits, each with a fixed `next`; `cursor` is where the next `watch` starts. Handle open asks first (step 3), then the rest (step 4). `${CLAUDE_PLUGIN_ROOT}/skills/dagq-inbox/reference/status.md` lists every field and `next`. If `inbox_guardrail.guardrail` is `false`, this inbox was opened without the settings that refuse `cmux`: tell the person, write your handoff, and have them close this inbox and open it again with `up` (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/up-down.md`, "Open the inbox again").
+ 
+ ## 2. Watch in the background
+ 
+@@ -54,6 +54,7 @@ Report each in a short list (task, status, `next`, gist of `last_error`); act wi
+ - `triage by hand` (`triage_failed`), `recover by hand` (`recovery_failed`): `dagq-recover` section 4.
+ - `goal review by hand` (`goal_review_failed`): on the person's word, `goal review ID` reruns it, or the person closes the goal (`dagq-recover` section 8).
+ - `request a plan for the draft`, `request a plan for the finding`, `request a plan for the waiting tasks`: a request on the person's word (`reference/status.md`).
++- A new plan the person asks for: `"$DAGQ" request add --text '<the person's words>'` records it and a runtime planner takes it (the full steps come with a later task). More words for an open runtime planner: `"$DAGQ" planner request <planner id> --text '<the person's words>'`, its next turn.
+ - `check the planner`, `plan review by hand`: the person, in a planner (`dagq-recover` section 8).
+ - `report the update` (`update_installed`), `report the review`, `check the failed review`: tell the person (`reference/watch.md`).
+ - `install tool` (`run_env_program_missing`), `fix the push command` (`kpi_push_abandoned`), `check the e2e host` (`run_e2e_finished`): the person fixes it.
+@@ -66,6 +67,6 @@ Report each in a short list (task, status, `next`, gist of `last_error`); act wi
+ 
+ ## Where your authority ends
+ 
+-Yourself: `status`, `watch`, `asks`, `show`, `answer` with the person's own words, and `ask close` after an answer was carried out. Only when the person says so: what `dagq-recover` describes (`up` / `down` / `install`, `integrate` after a review by hand, `recover`, a retry `ready`, `ready --bypass-review`, `cancel`, keys and `/exit` in a run's workspace). Never answer on the person's behalf, never pick a default, and never `add` or `goal add`: registering work is the planner's; `goal close` only on the person's word (a finished goal is its goal review's).
++Yourself: `status`, `watch`, `asks`, `show`, `answer` with the person's own words, and `ask close` after an answer was carried out. Only when the person says so: what `dagq-recover` describes (`up` / `down` / `install`, `integrate` after a review by hand, `recover`, a retry `ready`, `ready --bypass-review`, `cancel`, `run send` keys and `/exit`). Reach sessions only with `run screen` / `run send` / `planner request`, never `cmux` (your settings refuse it, ADR-t1228-2). Never answer on the person's behalf, never pick a default, and never `add` or `goal add`: registering work is the planner's; `goal close` only on the person's word (a finished goal is its goal review's).
+ 
+ What you do is recorded as the inbox's, apart from the person's own: events carry actor `inbox`, answers `authority: delegated` (the person's own are `user`). A `!` command in this terminal counts as yours; if the person wants it recorded as theirs, they type it in a terminal without `DAGQ_ROLE`. `skills/dagq/reference/authority.md`.
+diff --git a/plugins/claude-dagq/skills/dagq-inbox/reference/asks.md b/plugins/claude-dagq/skills/dagq-inbox/reference/asks.md
+index 5980ea91..0fad934c 100644
+--- a/plugins/claude-dagq/skills/dagq-inbox/reference/asks.md
++++ b/plugins/claude-dagq/skills/dagq-inbox/reference/asks.md
+@@ -9,7 +9,7 @@ An ask an AI opened (a review's `approve_landing`, plan review's `approve_plan`,
+ - `approve_goal`: the goal review job's question about a goal whose tasks are all finished (ADR-0047 decision 43; it closes an achieved goal and turns gaps into drafts itself, and asks only when a person is needed: the acceptance changes, abandoning or splitting it, it cannot judge, or a fourth `gaps` in a row). On the goal's first task, no run; the question starts `Goal <ID>:` and lists the criteria not met and the gaps. Options: `achieved` (close it; refused while a task is unfinished), `abandoned` (close it given up; its `dependents` are never released), `gaps` (register the review's gaps as drafts on the goal) or `gaps: <what is missing>` (one gap in the person's words), `keep_open` (leave it open until its tasks change), plus the job's own. The supervisor applies the first four (`goal_decided`) and closes the ask; an answer it cannot apply (the job's own option, other words) comes back to be carried out by hand. To have it reviewed again later: `goal review ID` on the person's word (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/goal-review-by-hand.md`).
+ - `decide`: a failed, interrupted or resume-exhausted run the recovery job could not fix: `retry` / `resume` / `cancel`, no `resume` once resumes are used up, plus the job's options, which send the run back to the job.
+   When the run's integrate verification failed, the runtime adds the option `edit the task's --verify, then retry_inherit` (also to the ask that opens once the job's three tries are used up). If the verify itself is broken, show it to the person. On their instruction, use `dagq show ID --full` and the failed verify log, run `dagq edit ID --verify '...'` (repeat for every command to retain, or `--no-verify`), then answer with that exact option. The recovery job runs once more, even past its three tries, sees the current verify and the `task_edited` event and can carry the commit forward. Do not answer before editing: without the edit the answer counts like any other and the ask reopens once the tries are used up.
+-- `stalled`: a session idle without a receipt after one nudge (`reason: idle_without_receipt`), a typed text the session did not take (`reason: send_unconfirmed`), or a job's escalation; the question lists background work and screen: `wait` (the supervisor closes it, counts again), `intervene` (a person steps in), `propose`. It closes itself once the session moves on (`reference/status.md` of this skill).
++- `stalled`: a session idle without a receipt after one nudge (`reason: idle_without_receipt`), a typed text the session did not take (`reason: send_unconfirmed`), or a job's escalation; the question lists background work and screen: `wait` (the supervisor closes it, counts again), `intervene` (a person steps in; an instruction or text to send to the session goes in the answer as `intervene: <text>`, since only an ask's answer can be typed into it), `propose`. It closes itself once the session moves on (`reference/status.md` of this skill).
+ - `worker_question`: typed into the worker's terminal, or sent as the next turn of a headless run (answered the same way). Its `topics` (in `status`' `asks` and the ask; the first is the primary) say what the worker left undecided, next to `reason_category`: show them with the question.
+ - `planner_question`: `adopt` / `cancel` / `keep_draft`.
+ - `answer_prompt`: a dialog the runtime and the job could not answer, or a resumed session's input box not ready (`input_not_ready`). No options: the answer is what to send, e.g. `enter`; the question ends with its screen.
+diff --git a/plugins/claude-dagq/skills/dagq-inbox/reference/status.md b/plugins/claude-dagq/skills/dagq-inbox/reference/status.md
+index ba08a815..028c38bc 100644
+--- a/plugins/claude-dagq/skills/dagq-inbox/reference/status.md
++++ b/plugins/claude-dagq/skills/dagq-inbox/reference/status.md
+@@ -10,6 +10,7 @@ Read this when a field of `status`, `watch` or `show` is unclear.
+   - `registered: false`: not a supervisor but a process holding a lease, normally an `integrate` landing a run.
+   - Empty: nothing serves this queue; run `up`.
+   - A registered entry also has `slots: {used, parallel}` and `waiting: {count, returning, limit}` (see "Runs waiting for a person" below). `used` leaves out waiting and returning runs, and can exceed `parallel` for a moment after a person moved a session on.
++- `inbox_guardrail` (also in `doctor`): whether the inbox `up` recorded was opened with the settings that refuse `cmux` (ADR-t1228-2): `guardrail` `true`, `false` with `reason` (`no_record`: opened before them; `opened_without_guardrail`) and `next`, or `null` with no inbox recorded. On `false`, tell the person and, after your handoff, have them reopen the inbox (`dagq-recover`'s `reference/up-down.md`, "Open the inbox again"). A `claude` typed again in the workspace has no settings whatever this says.
+ - `inbox_watcher` (also in `doctor`): whether this inbox has a `watch --role inbox` running (ADR-t906-1). Each such watch writes a record under the queue's directory and renews its heartbeat at every read of the queue; the judgment uses the heartbeat, not the process.
+   - `watching`: the watches with a fresh heartbeat now (not older than three `--interval`s plus 10 seconds, and not past their own `--timeout`; a `--until-attention` watch has none and counts by its heartbeat alone). `0` means no watch is running: start the watch of `watch.md`. The Stop hook blocks your turn while it is `0`, once; start the watch, then end the turn.
+   - `state`: `alive` while a watch is watching or one returned less than `grace_secs` (120) ago (the gap while you report and start the next one); `absent` otherwise. A watch that hangs or cannot read the queue counts as absent though its process is there.
+@@ -20,7 +21,7 @@ Read this when a field of `status`, `watch` or `show` is unclear.
+ - `attention`: each with `run_id`, `task_id`, `status`, `kind` (the run event that brought it there), `last_error` and a fixed `next`:
+   - `reviewing (runtime)`: `awaiting_integration` under the supervisor's lease: its headless review and what follows from the verdict (ADR-0027); nothing to do.
+   - `review by hand`: `awaiting_integration` after `review_failed` (the headless review failed) with no open `approve_landing` ask; the person reviews it and has it integrated (the `dagq-recover` skill, section 6). A failed review normally opens that ask in the same step (with the failure and the `review.md` path), and then shows only as the ask.
+-  - `review and integrate`: `awaiting_integration` without a lease and without a failed review: a run accepted before the supervisor reviewed runs, or one whose supervisor gave it up mid-review on an error (`kind` `runtime_error`; its session may still be open, so read its screen and `/exit` it first).
++  - `review and integrate`: `awaiting_integration` without a lease and without a failed review: a run accepted before the supervisor reviewed runs, or one whose supervisor gave it up mid-review on an error (`kind` `runtime_error`; its session may still be open, so read its screen and `/exit` it first: `dagq-recover`, `run screen RUN`, `run send RUN --key exit`).
+   - A run whose review raised a concern shows only as its `approve_landing` ask (`answer ask <id>`, for the inbox); once answered `land`, `send_back` or `cancel`, the ask shows `applying the answer of ask <id> (runtime)` until the supervisor's next pass, which applies it whatever the slots and closes the ask, first recording `review_outcome` (`land` → `deviation_accepted`, `send_back` → `deviation_rejected`, `cancel` → `canceled`) when the last review was a `revise` or `concern`. After `land` the run shows `queued to land (runtime)` (`kind` `landing_queued`) until a slot and the integration slot are free; nothing to do.
+   - `resuming (runtime)`: `needs_session`. The supervisor resumes it, or waits for a session still alive to end first. Once its resumes are used up, a run parked only by rebase conflicts after a passed review is retried on its old branch without asking (`auto_repaired`, `repair: inherit_retry`); any other run becomes `failed` with the `resume_exhausted` alert (`recovery_requested`) for the recovery job (`triaging (runtime)`). Nothing to do.
+   - `triaging (runtime)`: `failed` / `interrupted` (or `resume_exhausted`), before the supervisor's headless recovery job acted (ADR-0047 decisions 39 and 40; its rounds keep the `triage_*` event names). The job picks one action: `retry` (only for a run with no commit of its own and fewer than two failed runs of the task), `retry_inherit` (once per task: a retry that carries the run's commits over), `resume` (while resumes are left) or `wait` (look again later). The runtime applies it only when the verdict is `repair` with `confidence: high` and its preconditions still hold (`triage_finished`, `auto_repaired` with `layer: recovery`, `recovery_finished`), then closes the run's workspace. Otherwise (`escalate`, low confidence, a broken precondition, or the alert's three tries used up) it opens a `decide` ask: options `retry` / `resume` / `cancel` (`retry` / `cancel` once resumes are used up) plus any the job added. The supervisor applies an answer that is one of the options (`applying the answer of ask <id> (runtime)`): `retry` readies the task (with or without commits: the person decided), `resume` makes the run `needs_session`, `cancel` cancels the task, and an option the job added hands the run back to the recovery job with the answer. Nothing to do.
+@@ -34,14 +35,14 @@ Read this when a field of `status`, `watch` or `show` is unclear.
+   - `request a plan for the finding` (`kind` `finding_planner_exhausted`, the finding's task or run if any, `last_error` `finding N: <summary>`): the runtime opened its planners for a finding marked for a proposal (the observer's mark, or a person's `propose` answer) and none submitted, dismissed or asked about it. Tell the person; on their word record a planning request that names it, `"$DAGQ" request add --text '<the person's words>' --ref finding:N`, whose runtime planner submits a remedy (`submit ... --finding N`) or declines. Or the person decides it in their own terminal (no `DAGQ_ROLE`): `submit ... --finding N`, or `finding dismiss N --reason`.
+   - `request a plan for the waiting tasks` (`kind` `dependency_stranded`, `status` `stranded`, on the stranded task, `last_error` `task A of goal G (closed abandoned) will not complete; tasks B, C wait on it`): a task of a closed goal was left `draft` / `submitted` / `ready` (approve withheld it, or the goal was abandoned) while `ready` / `submitted` tasks of open goals wait on it, directly or through other unfinished tasks. It never completes, so they are never claimed. The runtime does not hold them. Tell the person; on their word record a planning request that names the stranded task, `"$DAGQ" request add --text '<the person's words>' --ref task:A`, whose runtime planner decides whether to remove the dependency, cancel the waiting tasks or take the work up again in an open goal; or the person decides that in their own terminal (no `DAGQ_ROLE`). `watch` tells it once per set of waiting tasks; `status` shows it until nothing waits.
+   - `install tool` (`kind` `run_env_program_missing`, `status` `missing`, no run or task, `last_error` the variable, its value and the PATH): a program the `[run.env]` of `dagq.toml` names cannot be executed on the supervisor's PATH. The supervisor claims no task and lands no run until it can (the runs in flight go on); the person installs the program where that PATH finds it, or has a planner register a task that takes the variable out of `dagq.toml`. It disappears when the supervisor finds it (`run_env_program_found`). `up` refuses to start a supervisor while it is missing, and `doctor`'s `run_env` shows what resolved where.
+-  - `check the e2e host` (`kind` `run_e2e_finished` with `attention: true`, an `awaiting_integration` run, `last_error` the e2e's error): the runtime could not run the e2e a reviewed run needs before landing `run_e2e::UNAVAILABLE_ATTENTION` (3) times in a row (each `run_e2e_finished` with `outcome: unavailable`: it or the rerun of its failed tests could not start or passed its time limit; ADR-t1233-2, `docs/design/supervisor-lifecycle/review.md`, "流せないとき"). The person checks the host: whether cmux answers `cmux ping`, whether the `[run.env]` of `dagq.toml` can be read (`dagq doctor`'s `run_env`), and whether the host's e2e lock file (`<data dir>/e2e.lock`) can be opened. The runtime keeps the run's slot and lease and keeps retrying (every 300 seconds); the attention clears by itself once an e2e runs (passed or failed), so the person does not close it and no ask opens. If the supervisor drains or hands off while the run waits to retry, it releases the lease without waiting, and the run stays `awaiting_integration` as `review and integrate` for the person (`dagq-recover`, section 6; check its `run_e2e_finished` before integrating by hand). A failed e2e is no attention: the run is `needs_session` (`run_e2e_failed`, code `e2e_failed`) and resumed.
++  - `check the e2e host` (`kind` `run_e2e_finished` with `attention: true`, an `awaiting_integration` run, `last_error` the e2e's error): the runtime could not run the e2e a reviewed run needs before landing `run_e2e::UNAVAILABLE_ATTENTION` (3) times in a row (each `run_e2e_finished` with `outcome: unavailable`: it or the rerun of its failed tests could not start or passed its time limit; ADR-t1233-2, `docs/design/supervisor-lifecycle/review.md`, "流せないとき"). The person checks the host in their own terminal without `DAGQ_ROLE`: whether cmux answers `cmux ping`, whether the `[run.env]` of `dagq.toml` can be read (`dagq doctor`'s `run_env`), and whether the host's e2e lock file (`<data dir>/e2e.lock`) can be opened. The runtime keeps the run's slot and lease and keeps retrying (every 300 seconds); the attention clears by itself once an e2e runs (passed or failed), so the person does not close it and no ask opens. If the supervisor drains or hands off while the run waits to retry, it releases the lease without waiting, and the run stays `awaiting_integration` as `review and integrate` for the person (`dagq-recover`, section 6; check its `run_e2e_finished` before integrating by hand). A failed e2e is no attention: the run is `needs_session` (`run_e2e_failed`, code `e2e_failed`) and resumed.
+   - `stop the dead landing's processes` (`kind` `landing_release_stuck`, an `integrating` run, `last_error` the pids left): a landing whose supervisor died left processes in the run's worktree that the runtime, after waiting their grace (30 minutes), could not stop by pid (or could not list for an hour). The run holds the integration slot until they end. Show the person the pids (`dagq show TASK --full` has the event's `processes`); the person stops those pids, never by name or pattern (after `survived_stop` the runtime no longer tries), and the next supervisor pass releases the run to `awaiting_integration`: a run whose review passed or that was approved queues to land again without a person, any other is reviewed again (`docs/design/supervisor-lifecycle/supervise.md`, step 12). It clears once the run leaves `integrating`.
+   - `push main`: an `integrated` run (its task `completed`) whose push of `main` to `origin` failed (`kind` `push_failed`, `last_error` the Git error) with no successful push since.
+   - `fix the push command` (`kind` `kpi_push_abandoned`, no run or task, `reason_category` `recovery_failed`): the KPI push command of `host.toml`'s `[push]` (a daily or weekly summary, or a target breach; `${CLAUDE_PLUGIN_ROOT}/skills/dagq/reference/kpi.md`) failed one message three times (`kpi_push_failed` has each exit code and the stderr tail) and the message was dropped. Claims, landings and the reports go on. The person fixes the command or its service; it clears only when a later push succeeds (`kpi_push_sent`), usually the next day's summary, and cannot be closed by hand.
+   - `dagq service status` (`kind` `queue_service_down`, no run or task): the supervisor could not keep the queue service running (`status` `start_failed`: it did not start, `last_error` says why; `restart_limit`: it was started again 3 times in 10 minutes and still stopped). New claims and the queue's jobs wait meanwhile; runs in flight go on. Show the person `dagq service status` and `<queue dir>/service/service.log`; at their word, run `dagq service start` (or `up` again). It clears once the service runs (`queue_service_started` or `queue_service_running`).
+   - `dagq broker status` (`kind` `broker_unhealthy`, no run or task): with `[broker]` mode `preferred`, the supervisor could not make the queue's resource broker ready (`status` is the failure's code: `machine_busy` when a Podman machine of the person's runs, `podman_missing`, `image_build_failed`, ...) or its health failed again after the automatic restart (`status` `unhealthy`; the restart itself is an `auto_repaired` with `repair: broker_restart`). Claims and landings go on without the broker. Show the person `dagq broker status`; the supervisor tries again by itself, and it clears once the broker runs (`broker_started` or `broker_healthy`).
+   - `recover run`: a `claimed` / `starting` / `running` / `validating` / `integrating` run without a lease, given up by its supervisor (`kind` `runtime_error` with `lease_released: true`). Nothing adopts it; once its session's processes are gone the supervisor recovers it and hands it to the recovery job, and while they live, handle it with the `dagq-recover` skill. It disappears once recovered. If `watch` reported it but `status` shows the run at rest, `status` wins.
+-  - `exit the session` (`kind` `runtime_error`, the run `awaiting_integration` or unfinished without a lease): the supervisor gave the run up while it kept the worker's session open through validation, review, revise or its `/exit`, and could not send that session `/exit` (the event's `session.exit` is `failed`, with the `error`). A run given up whose `/exit` did get there (`session.exit` `sent` or `requested_before`) shows its own attention at once. The person sends `/exit` in the run's workspace (the `dagq-recover` skill, section 2); once the session exited, the run shows `review and integrate` or `recover run` again.
++  - `exit the session` (`kind` `runtime_error`, the run `awaiting_integration` or unfinished without a lease): the supervisor gave the run up while it kept the worker's session open through validation, review, revise or its `/exit`, and could not send that session `/exit` (the event's `session.exit` is `failed`, with the `error`). A run given up whose `/exit` did get there (`session.exit` `sent` or `requested_before`) shows its own attention at once. On the person's word, `"$DAGQ" run send RUN --key exit` sends it `/exit` (the `dagq-recover` skill, section 2); once the session exited, the run shows `review and integrate` or `recover run` again.
+   - `report the update` (`update_installed`, a queue event with no task; it does not stay in `status`): the supervisor replaced the pinned binary by itself (`--auto-update`). Tell the person its `version`, `commit` (or `release`) and any `reason` / `message`, and that sessions reopened after it load the updated plugin (`watch.md`). Nothing to do; a failed update is an `update_failed` ask instead.
+   - `report the review`, `check the failed review`: the throughput review's notices (`watch.md`, "The throughput review's notice").
+   - A worker provider that cannot be used is no attention of its own: its runs move to the other provider by themselves (`provider_switched`). The person acts only on a `queue_hold` ask (log in, or wait for the limit; `asks.md`). Codex's hold opens no ask: `status`'s `supervisors[].provider_hold` shows it until its `retry_at`. A headless run's workspace has no screen and takes no keys (`${CLAUDE_PLUGIN_ROOT}/skills/dagq/reference/provider.md`).
+@@ -76,7 +77,7 @@ The supervisor's detection of a worker's session that stopped without a receipt
+ - The question: run, task, workspace, `reason: idle_without_receipt`, `phase: session`, the idle seconds and the seconds since the nudge, the background tasks left running (`- <description> (<id>): <command>`, or none), and the last lines of the screen. Show all of it to the person.
+ - A recovery job that escalates a live run's `long_background` or `idle_process` alert opens a `stalled` ask too (`alert: ...` in the question, the job's diagnosis and `reason_category`, and its own options after `wait` / `intervene`); it is answered and closed the same way.
+ - A text the supervisor typed that the session did not take opens a `stalled` ask too, with `reason: send_unconfirmed` (below, "A text or a request the session did not take").
+-- Options: `wait` leaves the session alone. The supervisor applies it (`applying the answer of ask <id> (runtime)`), closes the ask and counts the idle again from then; if the session stays idle another threshold a new `stalled` ask opens, without another nudge. With no supervisor holding the run it comes back as `read the answer of ask <id> and close it`: `ask close <id>`. `intervene` (or other text) means a person steps in: it comes back as `read the answer of ask <id> and close it`, carried out on the person's word with `dagq-recover` (read the screen, check or stop the background work through the session, type an instruction, or `/exit` the run so the recovery job takes it), then `ask close <id>`; no new `stalled` ask opens until the session ends a turn after that. `propose` records a finding for the stall and a runtime planner takes it; the session is left alone as for `wait`. It shows `read the answer of ask <id> and close it` until the supervisor closes it; with no supervisor holding the run, `ask close <id>` (read as `wait`).
++- Options: `wait` leaves the session alone. The supervisor applies it (`applying the answer of ask <id> (runtime)`), closes the ask and counts the idle again from then; if the session stays idle another threshold a new `stalled` ask opens, without another nudge. With no supervisor holding the run it comes back as `read the answer of ask <id> and close it`: `ask close <id>`. `intervene` (or other text) means a person steps in: it comes back as `read the answer of ask <id> and close it`, carried out on the person's word with `dagq-recover` (read the screen, check or stop the background work through the session, send an instruction as the ask's answer, or `/exit` the run so the recovery job takes it, all with `run send`), then `ask close <id>`; no new `stalled` ask opens until the session ends a turn after that. `propose` records a finding for the stall and a runtime planner takes it; the session is left alone as for `wait`. It shows `read the answer of ask <id> and close it` until the supervisor closes it; with no supervisor holding the run, `ask close <id>` (read as `wait`).
+ - The supervisor closes the ask itself (`the session moved on; closed by the runtime` / `the session exited; closed by the runtime`) once the session ends a new turn, writes its receipt, opens a `worker_question`, or exits, and when its recovery job takes the ended run (`the run was triaged; closed by the runtime`); after `intervene`, once the session ends a turn after the answer. `answer` then reports the ask is not open. `recover` does not close it.
+ - Each detection's outcome is a `stall_resolved` event (`resolved_by_nudge`, `escalated`, `answered_wait`, `answered_intervene`, `resolved_by_itself`, `run_ended`), counted by `stats`' `stall_thresholds`.
+ 
+@@ -90,8 +91,8 @@ Everything the supervisor types into a live session (a resolution request, a wor
+ 
+ Who asks the person:
+ 
+-- `submit_unconfirmed` of a text and `submit_not_started` (first session, send-back or resume) go to the session's recovery job first (alert `stalled`, `reason: send_unconfirmed`). Only when it cannot fix them does a `stalled` ask open: the question names the workspace, says what happened to which text (for example `the resolution request the supervisor typed stays in the input box after 4 Enters, not submitted`), gives the job's diagnosis and ends with the screen; options `wait` / `intervene` / `propose` plus the job's. `wait` leaves the session alone and, unlike an idle, is not counted again: there is one job and one ask per send. `intervene` means a person presses Enter or types the text again in that workspace (`dagq-recover`'s `reference/session.md`).
+-- `input_not_ready` opens an `answer_prompt` ask at once (`asked_by` `supervisor`, `reason_category` `recovery_failed`, no options): the question says the resolution request is not sent, asks what to send (for example `enter` to press Enter, or the text to type) and ends with the screen. Write the person's words as the answer; it comes back as `read the answer of ask <id> and close it` and is carried out in that workspace with `dagq-recover`'s `reference/session.md`. The supervisor closes the ask itself once the box gets ready, just before it types the request (`the input box got ready and the request was sent; closed by the runtime`) or the session exits.
++- `submit_unconfirmed` of a text and `submit_not_started` (first session, send-back or resume) go to the session's recovery job first (alert `stalled`, `reason: send_unconfirmed`). Only when it cannot fix them does a `stalled` ask open: the question names the workspace, says what happened to which text (for example `the resolution request the supervisor typed stays in the input box after 4 Enters, not submitted`), gives the job's diagnosis and ends with the screen; options `wait` / `intervene` / `propose` plus the job's. `wait` leaves the session alone and, unlike an idle, is not counted again: there is one job and one ask per send. `intervene` means a person presses Enter (`run send RUN --key enter`) or has the text (the person's words, or the lost text typed again) sent as the ask's answer (`run send RUN --answer <id>`), so write that text into the answer (`intervene: <text>`) (`dagq-recover`'s `reference/session.md`).
++- `input_not_ready` opens an `answer_prompt` ask at once (`asked_by` `supervisor`, `reason_category` `recovery_failed`, no options): the question says the resolution request is not sent, asks what to send (for example `enter` to press Enter, or the text to type) and ends with the screen. Write the person's words as the answer; it comes back as `read the answer of ask <id> and close it` and is carried out with `run screen` / `run send` as `dagq-recover`'s `reference/session.md` says. The supervisor closes the ask itself once the box gets ready, just before it types the request (`the input box got ready and the request was sent; closed by the runtime`) or the session exits.
+ 
+ ## watch and events
+ 
+diff --git a/plugins/claude-dagq/skills/dagq-recover/SKILL.md b/plugins/claude-dagq/skills/dagq-recover/SKILL.md
+index f8212eb7..b651272c 100644
+--- a/plugins/claude-dagq/skills/dagq-recover/SKILL.md
++++ b/plugins/claude-dagq/skills/dagq-recover/SKILL.md
+@@ -1,11 +1,11 @@
+ ---
+ name: dagq-recover
+-description: What a person does by hand in a dagq queue, from the inbox or a planner, only on the person's word, once the runtime and the recovery job could not fix it. Recover a run no supervisor serves; decide on a run whose recovery job failed; review and integrate a run whose headless review failed, or push main; carry out a stuck_exit, answer_prompt or stalled (intervene) answer in a run's cmux workspace; bypass or resubmit a plan review; start, stop or update the runtime (up, down, install). Use when status or watch shows "recover run", "exit the session", "triage by hand", "recover by hand", "review by hand", "plan review by hand", "goal review by hand", "review and integrate", "push main", "restart supervisor", "send the answer of ask <id> to the worker", an answered stuck_exit, answer_prompt or stalled ask, or when the person asks to start, stop, update or recover. Entries ending in "(runtime)" need nothing.
++description: What a person does by hand in a dagq queue, from the inbox or a planner, only on the person's word, once the runtime and the recovery job could not fix it. Recover a run no supervisor serves; decide on a run whose recovery job failed; review and integrate a run whose headless review failed, or push main; carry out a stuck_exit, answer_prompt or stalled (intervene) answer with run screen / run send; bypass or resubmit a plan review; start, stop or update the runtime (up, down, install). Use when status or watch shows "recover run", "exit the session", "triage by hand", "recover by hand", "review by hand", "plan review by hand", "goal review by hand", "review and integrate", "push main", "restart supervisor", "send the answer of ask <id> to the worker", an answered stuck_exit, answer_prompt or stalled ask, or when the person asks to start, stop, update or recover. Entries ending in "(runtime)" need nothing.
+ ---
+ 
+ # dagq: what a person does by hand
+ 
+-Prerequisite: `DAGQ="${CLAUDE_PLUGIN_ROOT}/bin/dagq"` as in the `dagq` skill; the reference files below sit in `${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/`. Never touch the queue database; never work around the binary's refusals. All of it is done on the person's word: `up` / `down` / `install` from the inbox or a planner, the rest (`integrate`, `review`, `recover`, `ready`, `cancel`, `answer`, `ask close`, keys in a run's workspace) from the inbox, which the CLI records as delegated (actor `inbox`), or by the person in a terminal without `DAGQ_ROLE` (actor `user`). A planner is refused them (`skills/dagq/reference/authority.md`). Write for the person in the language your prompt or the status's `language.instruction` names (`dagq` skill, section 5).
++Prerequisite: `DAGQ="${CLAUDE_PLUGIN_ROOT}/bin/dagq"` as in the `dagq` skill; the reference files below sit in `${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/`. Never touch the queue database; never work around the binary's refusals. All of it is done on the person's word: `up` / `down` / `install` from the inbox or a planner, the rest (`integrate`, `review`, `recover`, `ready`, `cancel`, `answer`, `ask close`, `run send`) from the inbox, which the CLI records as delegated (actor `inbox`), or by the person in a terminal without `DAGQ_ROLE` (actor `user`). A planner is refused them (`skills/dagq/reference/authority.md`). Write for the person in the language your prompt or the status's `language.instruction` names (`dagq` skill, section 5).
+ 
+ Three layers: the runtime fixes what fixed rules prove safe (`auto_repaired`), the headless recovery job fixes what it can of the rest, and only what neither could, or a person's call (scope, discarding work, login, cost), reaches the person. The next supervisor pass recovers a run without a lease whose processes are gone. Every `failed` / `interrupted` run, and one whose resumes ran out (`resume_exhausted`), goes to the recovery job (`triaging (runtime)`): it retries (carrying the commits over or not), resumes or waits; a `decide` ask opens only when it escalates, is not sure or used its three tries. A live run's alert (`long_background`, `idle_process`, `stuck_exit`, `prompt_waiting`) goes to the job too; its `stalled`, `stuck_exit` or `answer_prompt` ask opens only when the job cannot fix it (an idle session without a receipt is nudged once, then asked `stalled`). Also, a `needs_session` run is resumed (`resuming (runtime)`). Do not recover, `ready`, type into or close these runs. `status` beats `watch`.
+ 
+@@ -19,7 +19,7 @@ It shows the supervisors, each unfinished run's lease, processes and `blockers`
+ 
+ ## 2. Stop what is still running
+ 
+-Recovery is refused while a run process lives or its lease is fresh. The person ends them (`/exit` in its workspace, also for `exit the session`, or stop a hung supervisor); never kill them.
++Recovery is refused while a run process lives or its lease is fresh. The person ends them (`"$DAGQ" run send RUN --key exit`, also for `exit the session`, or stop a hung supervisor); never kill them.
+ 
+ ## 3. Recover (only without a supervisor)
+ 
+@@ -47,7 +47,7 @@ Attention `triage by hand` (`triage_failed`): an ended run's recovery job failed
+ 
+ `--plugin-dir`: only a path the repository names, never `$CLAUDE_PLUGIN_ROOT`. `up --no-claude` forbids Claude (Codex workers; unsupported roles by hand); drain before changing it.
+ 
+-`up` is idempotent: one resident supervisor and the inbox workspace, no planner (a person opens each with `dagq plan`). `restart supervisor` is answered with `up` (nothing else restarts an in-cmux supervisor). Update the binary with `install` (or `--rollback`), never `cp`: supervisors take it over without waiting; only a breaking migration drains (`--allow-breaking`). `up --auto-update` does it per runtime landing; it and the `update_failed` / `approve_update` asks: `reference/update.md`. A drain waits for runs waiting on an ask too. `down --force` kills the supervisor and loses its active runs: only on the person's explicit word. `--claude` and `--codex` (Codex workers) are fixed on the supervisor as real paths: from a cmux terminal pass `~/.local/bin/claude` and `~/.local/bin/codex`, and after updating either, `down --wait` and `up` again. `reference/up-down.md`: outcomes, the in-cmux case, logs.
++`up` is idempotent: one resident supervisor and the inbox workspace. `inbox_guardrail` false (`status`, `doctor`): `reference/up-down.md`, "Open the inbox again". `restart supervisor` is answered with `up` (nothing else restarts an in-cmux supervisor). Update the binary with `install` (or `--rollback`), never `cp`; only a breaking migration drains (`--allow-breaking`). `up --auto-update` does it per runtime landing; it and the `update_failed` / `approve_update` asks: `reference/update.md`. A drain waits for runs waiting on an ask too. `down --force` loses the active runs: only on the person's explicit word. `--claude` and `--codex` (Codex workers) are fixed on the supervisor as real paths: from a cmux terminal pass `~/.local/bin/claude` and `~/.local/bin/codex`, and after updating either, `down --wait` and `up` again. `reference/up-down.md`: outcomes, the in-cmux case, logs.
+ 
+ ## 6. Review by hand, and a failed push
+ 
+@@ -55,12 +55,12 @@ Attention `review by hand` (`review_failed`: the supervisor's headless review fa
+ 
+ ## 7. A run's session: dialogs, stalls, stuck exits, undelivered answers
+ 
+-A `stuck_exit`, `answer_prompt` or `stalled` ask means the runtime (known dialogs, `/exit` retries, a nudge) or, for a live alert, the recovery job could not fix it. Its answer, and `send the answer of ask <id> to the worker and close it`, are carried out in the run's cmux workspace with keys and text, never by `recover` while a supervisor runs. Follow `reference/session.md` (also an option-less `answer_prompt`, `input_not_ready`, a `stalled` `send_unconfirmed`: Enter or the text; `reference/stuck-exit.md` for `stuck_exit`; `reference/stalled.md` for a `stalled` `intervene`: the screen, background work, an instruction or `/exit`, then `ask close`). A headless run (`worker_mode: headless`) has no screen or keys: only its `stalled` ask applies (`reference/stalled.md`). What the runtime's resume sends and when it ends: `reference/resume.md`; never open a resume workspace yourself.
++A `stuck_exit`, `answer_prompt` or `stalled` ask means the runtime (known dialogs, `/exit` retries, a nudge) or, for a live alert, the recovery job could not fix it. Its answer, and `send the answer of ask <id> to the worker and close it`, are carried out with `"$DAGQ" run screen RUN` and `run send RUN --key K` / `--answer ASK` (never `cmux`), never by `recover` while a supervisor runs. Follow `reference/session.md` (also `input_not_ready` and a `stalled` `send_unconfirmed`; `reference/stuck-exit.md` for `stuck_exit`; `reference/stalled.md` for a `stalled` `intervene`: the screen, background work, an instruction or `/exit`, then `ask close`). A headless run (`worker_mode: headless`) has no screen or keys: only its `stalled` ask applies (`reference/stalled.md`). What the runtime's resume sends and when it ends: `reference/resume.md`; never open a resume workspace yourself.
+ 
+ ## 8. Bypass plan review; a failed plan or goal review
+ 
+ Only plan review makes a task `ready`. A person may skip it with `"$DAGQ" ready ID --bypass-review` (a draft or submitted task; `review_bypassed`): on their explicit word only, per task, for an urgent fix, a failed plan review, or a concern they already decided. Never bypass as a habit or on a planner's judgment; a retry needs none (section 4).
+ 
+-Attention `plan review by hand` (`plan_review_failed`): a proposal's headless plan review failed; it stays `submitted` and held. `check the planner` (`planner_unresponsive`): the person looks at that planner's workspace. What to read and the person's choices: `reference/plan-review-by-hand.md`.
++Attention `plan review by hand` (`plan_review_failed`): a proposal's headless plan review failed; it stays `submitted` and held. `check the planner` (`planner_unresponsive`): the person looks at that planner (`planner screen ID`). What to read and the person's choices: `reference/plan-review-by-hand.md`.
+ 
+ Attention `goal review by hand` (`goal_review_failed`): a goal review job failed; `reference/goal-review-by-hand.md`.
+diff --git a/plugins/claude-dagq/skills/dagq-recover/reference/doctor.md b/plugins/claude-dagq/skills/dagq-recover/reference/doctor.md
+index 72ce0126..aab94768 100644
+--- a/plugins/claude-dagq/skills/dagq-recover/reference/doctor.md
++++ b/plugins/claude-dagq/skills/dagq-recover/reference/doctor.md
+@@ -8,6 +8,7 @@ Plain `doctor` is the compact form, one line's worth per supervisor and per run
+ 
+ - `supervisors`: one entry per registered `supervise` process (`registered: true`, with `pid`, `alive` (`kill -0`), `parallel`, `started_at`, `heartbeat_at`, `heartbeat_age_secs`, `run_ids`, and `stale` when the PID is dead or the heartbeat is older than 30 seconds), plus one per process that holds leases without a registration, such as a running `integrate` (`registered: false`). A resident supervisor is listed even with an empty `run_ids`; empty `supervisors` means no supervisor is registered and no run is owned by anyone. A stale registration is left by a killed or hung supervisor; the runtime never deletes it, so report it to the person rather than trying to remove it, and `recover` works on runs regardless of it.
+ - `runs`: every run in `claimed`, `starting`, `running`, `validating`, or `integrating` with `task_id`, `workspace_id`, `worktree_exists`, `run_dir_exists`, `receipt_exists`, `last_error`, its own `lease` (`pid`, `alive`, heartbeat age, `stale`; `null` when no supervisor owns it), and each registered `wrapper` / `agent` process with `pid`, `alive`, heartbeat age, and `exit_code` (`alive` is null once an exit is recorded).
++- `inbox_guardrail`: whether the recorded inbox was opened with the settings that refuse `cmux`; on `false`, `reference/up-down.md`, "Open the inbox again".
+ - `blockers`: per run, what still prevents recovery. `recoverable: true` when empty. Only the run's own lease and processes count; other runs, healthy or not, never block it.
+ 
+ ## Common cases
+@@ -18,10 +19,10 @@ Plain `doctor` is the compact form, one line's worth per supervisor and per run
+ - The supervisor is alive but its heartbeat stopped (the person stops it with `down --force`).
+ - An `integrate` process died while landing a run (the run is `integrating` with a stale lease and no wrapper/agent processes).
+ 
+-A `running` or `validating` run whose lease is stale while its wrapper is alive (heartbeat within 30 seconds) or has recorded its exit is not a case for `recover`: the next supervisor with a free slot adopts it (a `run_adopted` event; the lease and `supervisor_token` move to that supervisor) and finishes it. Start or wait for a supervisor (`up` reuses a live one) and watch `show ID`. Likewise a run with `exit_request_timed_out` and a live lease is not given up: its supervisor still watches it, and its `stuck_exit` ask, once answered, leads to `/exit` in its workspace (`reference/stuck-exit.md`). An `awaiting_integration` run whose lease is stale is adopted whatever its wrapper, and a run whose supervisor and wrapper both died (lease PID dead, no live process) is recovered by the next supervisor itself. Only a run whose wrapper is dead or silent, a `claimed` / `starting` run, an `integrating` run, or a run without a lease needs `recover`, and only while no supervisor runs.
++A `running` or `validating` run whose lease is stale while its wrapper is alive (heartbeat within 30 seconds) or has recorded its exit is not a case for `recover`: the next supervisor with a free slot adopts it (a `run_adopted` event; the lease and `supervisor_token` move to that supervisor) and finishes it. Start or wait for a supervisor (`up` reuses a live one) and watch `show ID`. Likewise a run with `exit_request_timed_out` and a live lease is not given up: its supervisor still watches it, and its `stuck_exit` ask, once answered, leads to `/exit` by `run send RUN --key exit` (`reference/stuck-exit.md`). An `awaiting_integration` run whose lease is stale is adopted whatever its wrapper, and a run whose supervisor and wrapper both died (lease PID dead, no live process) is recovered by the next supervisor itself. Only a run whose wrapper is dead or silent, a `claimed` / `starting` run, an `integrating` run, or a run without a lease needs `recover`, and only while no supervisor runs.
+ 
+ ## recover
+ 
+ `"$DAGQ" recover RUN_ID` prints `{"outcome": "recovered", "run": ...}` on success: the run is `interrupted` (an `integrating` run goes back to `awaiting_integration` instead, because its validated result is intact, and an `awaiting_integration` run that a dead supervisor still leases keeps its status and only loses the lease; land either as in `reference/review-by-hand.md`), a `run_recovered` event records what was checked, and that run's lease (if any) is deleted. Other runs, their leases and processes are untouched. The worktree, branch, cmux workspace, and run directory are kept, and the task stays `in_progress`. The next supervisor's recovery job takes the `interrupted` run.
+ 
+-Recovery is refused while any process registered for that run is alive, its lease heartbeat is fresh, or its lease PID is alive. The person ends those first: `/exit` in the task's cmux workspace (`cmux workspace list` shows it by `workspace_id`), and stopping a hung supervisor process. Do not kill processes unless the person asks. Runs owned by a live supervisor are not orphans; leave them to it.
++Recovery is refused while any process registered for that run is alive, its lease heartbeat is fresh, or its lease PID is alive. The person ends those first: `"$DAGQ" run send RUN --key exit` sends `/exit` to the run's session (it finds the workspace from the queue; `show`'s `workspace_id` is only to read), and stopping a hung supervisor process. Do not kill processes unless the person asks. Runs owned by a live supervisor are not orphans; leave them to it.
+diff --git a/plugins/claude-dagq/skills/dagq-recover/reference/plan-review-by-hand.md b/plugins/claude-dagq/skills/dagq-recover/reference/plan-review-by-hand.md
+index 699d4494..a8be8a76 100644
+--- a/plugins/claude-dagq/skills/dagq-recover/reference/plan-review-by-hand.md
++++ b/plugins/claude-dagq/skills/dagq-recover/reference/plan-review-by-hand.md
+@@ -2,4 +2,4 @@
+ 
+ Read this when the attention `plan review by hand` or `check the planner` reaches the person (the `dagq-recover` skill, section 8). Act only on the person's word; `ready --bypass-review` follows the rules of section 8.
+ 
+-Attention `plan review by hand` (`kind` `plan_review_failed`): the headless plan review of a proposal could not start, timed out or printed no valid verdict; the proposal stays `submitted` and held, and is not reviewed again by itself. Read `last_error` and the job's files under `<queue dir>/plan-reviews/<plan review id>/` (the job's ID, not the proposal's), `"$DAGQ" proposal show ID` and the tasks, and bring the choice to the person: `ready --bypass-review` each task, have a planner (theirs, `dagq plan`) run `"$DAGQ" submit --proposal ID` to send it through plan review again as it is, or `cancel` the tasks. `check the planner` (`planner_unresponsive`): the person looks at that planner's workspace (`dagq planners`); nothing is closed or readied for it. Without a proposal (`status` `working`, `last_error` naming the planner) it is a runtime planner nothing was seen of: the person looks at its workspace and sends it `/exit` if it is stuck, or leaves it.
++Attention `plan review by hand` (`kind` `plan_review_failed`): the headless plan review of a proposal could not start, timed out or printed no valid verdict; the proposal stays `submitted` and held, and is not reviewed again by itself. Read `last_error` and the job's files under `<queue dir>/plan-reviews/<plan review id>/` (the job's ID, not the proposal's), `"$DAGQ" proposal show ID` and the tasks, and bring the choice to the person: `ready --bypass-review` each task, have a planner (theirs, `dagq plan`) run `"$DAGQ" submit --proposal ID` to send it through plan review again as it is, or `cancel` the tasks. `check the planner` (`planner_unresponsive`): the person looks at that planner (`dagq planners`, `"$DAGQ" planner screen ID`; a headless planner has no screen and the reply names its `turns/`); nothing is closed or readied for it. Without a proposal (`status` `working`, `last_error` naming the planner) it is a runtime planner nothing was seen of: the person looks at it the same way and, for an interactive one that is stuck, sends it `/exit` (`"$DAGQ" planner send ID --key exit`), or leaves it; the supervisor closes runtime planners (there is no `planner close`).
+diff --git a/plugins/claude-dagq/skills/dagq-recover/reference/session.md b/plugins/claude-dagq/skills/dagq-recover/reference/session.md
+index c9b79eb7..1da5e82f 100644
+--- a/plugins/claude-dagq/skills/dagq-recover/reference/session.md
++++ b/plugins/claude-dagq/skills/dagq-recover/reference/session.md
+@@ -1,28 +1,30 @@
+ # A run's session: dialogs, stalls, stuck exits and undelivered answers
+ 
+-Read this to carry out, on the person's word, an answer that has to reach a run's Claude session in its cmux workspace (the `dagq-recover` skill, section 7). A run's session works only in its own worktree; never edit that worktree, merge or push for it, and never `recover` a run whose session only waits at a dialog.
++Read this to carry out, on the person's word, an answer that has to reach a run's Claude session in its cmux workspace (the `dagq-recover` skill, section 7). Reach the session only through the `dagq run` commands below, never with `cmux` itself: they find the workspace from the queue, are judged by the actor's policy and are recorded with the actor (ADR-t1228-1); the inbox's settings refuse `cmux` (ADR-t1228-2). A run's session works only in its own worktree; never edit that worktree, merge or push for it, and never `recover` a run whose session only waits at a dialog.
+ 
+-Take `workspace_id`, `worktree_path`, the run `id` and `last_error` from `"$DAGQ" show ID` (add `--full` when `last_error` is cut at 300 characters). A run's workspace is named `[<repo>]worker#<task-id> - <task title>` with the description `dagq role=worker queue=<queue hash> run=<run-id> task=<id>`; a resumed session's is titled the same with the description `run <run-id> resume`. Names are for people; the runtime finds workspaces by `workspace_id`.
++Take the run `id`, `worktree_path` and `last_error` from `"$DAGQ" show ID` (add `--full` when `last_error` is cut at 300 characters); the commands take the run id (or the task id, for its latest run), never a workspace UUID. A run's workspace is named `[<repo>]worker#<task-id> - <task title>` with the description `dagq role=worker queue=<queue hash> run=<run-id> task=<id>`; a resumed session's is titled the same with the description `run <run-id> resume`. Names are for people; the runtime finds workspaces by `workspace_id`.
+ 
+-A run on the headless route (`worker_mode: headless` in `show`: Codex, or Claude registered with `--headless`) has no agent screen: its workspace runs only the session wrapper, and each turn is one non-interactive call. Nothing in this file applies to it: no key or text is sent to its workspace, no `answer_prompt` or `stuck_exit` ask opens for it, and the supervisor sends a worker's answer as the next turn. Its `stalled` ask is `reference/stalled.md`, "A headless run's `stalled` ask"; the route and fallbacks are `skills/dagq/reference/provider.md`.
++A run on the headless route (`worker_mode: headless` in `show`: Codex, or Claude registered with `--headless`) has no agent screen: its workspace runs only the session wrapper, and each turn is one non-interactive call. Nothing in this file applies to it: `run screen` names its `turns/` directory instead of a screen, `run send` refuses it, no `answer_prompt` or `stuck_exit` ask opens for it, and the supervisor sends a worker's answer as the next turn. Its `stalled` ask is `reference/stalled.md`, "A headless run's `stalled` ask"; the route and fallbacks are `skills/dagq/reference/provider.md`.
+ 
+-## cmux commands
++## The commands
+ 
+ ```sh
+-cmux read-screen --workspace <workspace_id> --lines 40   # read before sending anything
+-cmux send-key --workspace <workspace_id> down            # move to the choice you want
+-cmux send-key --workspace <workspace_id> enter           # confirm a dialog, or submit text
+-cmux send --workspace <workspace_id> "<text>"            # type an answer or /exit, then send-key enter
++"$DAGQ" run screen RUN --lines 40                # read before sending anything (at most 200 lines)
++"$DAGQ" run send RUN --key down --key enter      # keys of the set: enter, escape, up, down, 1-9
++"$DAGQ" run send RUN --key exit                  # /exit, alone
++"$DAGQ" run send RUN --answer ASK_ID             # types `answer to ask <id>: <answer>` of an answered ask on this run
++"$DAGQ" run close-workspaces [RUN] [--apply]     # ended runs' workspaces; a dry run without --apply
+ ```
+ 
+-- A dialog is answered with keys, not with text: send `down` only until the choice you want is highlighted, then `enter`.
+-- The runtime closes the workspaces of accepted runs and of runs its recovery job handled itself, and the supervisor sweeps whatever cmux still lists of ended runs (landed by hand, superseded, or whose task moved on) within a minute; `cmux workspace close <workspace_id>` is only for a run whose recovery job failed (`triage by hand`) while its task is still in progress, or when no supervisor runs.
++- `run send` types no free text: only the keys of the set, `/exit`, or the answer of an answered ask on that run. A person's own words reach the session as an ask's answer: write them with `answer` first, then `--answer`.
++- A dialog is answered with keys, not with text: `down` only until the choice you want is highlighted, then `enter` (or the choice's number).
++- The runtime closes the workspaces of accepted runs and of runs its recovery job handled itself, and the supervisor sweeps whatever cmux still lists of ended runs (landed by hand, superseded, or whose task moved on) within a minute; `run close-workspaces` lists what it would close and closes it with `--apply`, also without a supervisor; `run close-workspaces RUN --apply` also closes a run whose recovery job failed (`triage by hand`) once nothing lives behind it. It never closes a live run's workspace.
+ - The folder-trust prompt is decided by the repository root, not the worktree. Running `claude` once in the repository root before the first run avoids it.
+ - Never open a resume workspace yourself; in a resumed session only a dialog, an `input_not_ready` answer or a `send_unconfirmed` `intervene` is carried out here.
+ 
+ ## An `answer_prompt` ask (a dialog)
+ 
+-When a run has been `running` for 90 seconds with no receipt and no idle marker, the supervisor reads its screen. A known dialog it answers itself when its conditions hold (the Settings panel; "Background work is running" only after its `/exit`, with the worktree clean and the receipt at HEAD), recorded as `auto_repaired` (`repair: dialog_answered`). Any other dialog (trust, an LSP plugin recommendation, the auto mode notice, any `❯`-marked numbered choice or `Enter to confirm` / `Esc to cancel` footer) is recorded once as `prompt_waiting` and handed to the recovery job (alert `prompt_waiting`), which may answer a known dialog, stop the run's processes or wait. Only when the job escalates, is not sure, finds its preconditions broken or used its three tries is it raised as an `answer_prompt` ask (`asked_by` `supervisor`, `reason_category` `recovery_failed` unless the job named `scope` or `discard`) whose question names the workspace, the job's diagnosis and suggested actions, and ends with the last 15 lines of the screen. From then on the supervisor sends no key. Once the person answered it (`read the answer of ask <id> and close it`), read the screen of the named workspace, send the chosen key or text as the answer says, and `"$DAGQ" ask close <id>`. When the dialog leaves the screen, the receipt arrives or the session exits, the supervisor closes the ask itself (`answer` then reports it is not open). A run with an unclosed `worker_question` is not read for a dialog: it waits for its answer.
++When a run has been `running` for 90 seconds with no receipt and no idle marker, the supervisor reads its screen. A known dialog it answers itself when its conditions hold (the Settings panel; "Background work is running" only after its `/exit`, with the worktree clean and the receipt at HEAD), recorded as `auto_repaired` (`repair: dialog_answered`). Any other dialog (trust, an LSP plugin recommendation, the auto mode notice, any `❯`-marked numbered choice or `Enter to confirm` / `Esc to cancel` footer) is recorded once as `prompt_waiting` and handed to the recovery job (alert `prompt_waiting`), which may answer a known dialog, stop the run's processes or wait. Only when the job escalates, is not sure, finds its preconditions broken or used its three tries is it raised as an `answer_prompt` ask (`asked_by` `supervisor`, `reason_category` `recovery_failed` unless the job named `scope` or `discard`) whose question names the workspace, the job's diagnosis and suggested actions, and ends with the last 15 lines of the screen. From then on the supervisor sends no key. Once the person answered it (`read the answer of ask <id> and close it`), read the run's screen (`run screen`), send the chosen keys as the answer says (`run send RUN --key ...`; a text only as the ask's answer, `run send RUN --answer <id>`), and `"$DAGQ" ask close <id>`. When the dialog leaves the screen, the receipt arrives or the session exits, the supervisor closes the ask itself (`answer` then reports it is not open). A run with an unclosed `worker_question` is not read for a dialog: it waits for its answer.
+ 
+ While either ask is open the run usually holds no `--parallel` slot (`status`'s `waiting`, ADR-0071), and keys you send reach its session as usual. A dialog you answered ends an `answer_prompt` wait at once (`dialog_cleared`, or `session_moved` when the session wrote a new idle marker, prompt or receipt); while `/exit` waits, or while a send-back or resume also holds an unanswered `worker_question`, the screen is not checked and only a new marker (not during that `worker_question`) or the session's exit ends it; an answered `worker_question` makes the run `returning` until a slot is free, and the supervisor types the answer only then. Do not type a worker's answer yourself while its entry shows `returning`: that is the runtime's delivery, not an undelivered answer.
+ 
+@@ -33,19 +35,19 @@ The supervisor checks the screen after everything it types (the runtime's side:
+ - **`answer_prompt` with no options, `input_not_ready`**: a resumed session's input box did not get ready for the resolution request within the agent's registration timeout, often because a dialog holds it (the question then says `a <kind> dialog holds the resumed session`). The request is not typed yet: once the box has been ready for a few seconds the supervisor closes the ask (`the input box got ready and the request was sent; closed by the runtime`) and types the request itself. The answer says what to send, for example `enter`, a dialog's choice, or a text.
+ - **`stalled` with `reason: send_unconfirmed`, answered `intervene`**: a text the supervisor typed (a resolution request, a worker's answer, a send-back, a nudge) stayed in the input box after four Enters (`submit_unconfirmed`), or the session showed no sign of work `[stall].send_confirm_secs` after it (`submit_not_started`: a dialog came up, the text stays in the box, or it was lost), and the recovery job could not fix it. A dialog that came up is answered under this ask; no `answer_prompt` opens for it. `wait` here leaves the session alone without counting again: no new `stalled` ask follows for the same send. The question names the text (`the resolution request ...`, `the answer ...`) and ends with the screen.
+ 
+-Carry out the answer on the person's word, in the workspace the question names:
++Carry out the answer on the person's word, on the run the question names:
+ 
+-1. Read the screen: `cmux read-screen --workspace <workspace_id> --lines 40`. If the session is already at work, or the dialog or the text is gone, send nothing: the supervisor closes the ask itself (`answer` or `ask close` then reports it is not open).
++1. Read the screen: `"$DAGQ" run screen RUN --lines 40`. If the session is already at work, or the dialog or the text is gone, send nothing: the supervisor closes the ask itself (`answer` or `ask close` then reports it is not open).
+ 2. Send what the answer says, and nothing else:
+-   - `enter`: the text sits in the input line; `cmux send-key --workspace <workspace_id> enter` once.
+-   - a dialog's choice: answer it with keys as for an `answer_prompt` dialog above (`down` until it is highlighted, then `enter`).
+-   - a text (the person's own, or the supervisor's text typed again when it was lost): `cmux send --workspace <workspace_id> "<text>"`, then `cmux send-key --workspace <workspace_id> enter`. A worker's answer is typed as `answer to ask <id>: <answer>`. Never type the resolution request for `input_not_ready`: the supervisor sends it itself.
+-3. Read the screen again (`--lines 20`): the text left the input line and the session works. If it still sits there, send `enter` once more; if a dialog came up, show it to the person.
++   - `enter`: the text sits in the input line; `"$DAGQ" run send RUN --key enter` once.
++   - a dialog's choice: answer it with keys as for an `answer_prompt` dialog above (`--key down` until it is highlighted, then `--key enter`).
++   - a text: only the person's own words written as this ask's answer, `"$DAGQ" run send RUN --answer <id>` (it types `answer to ask <id>: <answer>` and Enter, and checks it was taken). A text of the supervisor's that was lost is typed the same way: the person's answer to this ask is that text (written with `answer` when answering), then `run send RUN --answer <id>`. An answer without the text (`intervene` alone) has nothing to send: stop the run (`run send RUN --key exit`) or leave it, on the person's word. Never type the resolution request for `input_not_ready`: the supervisor sends it itself.
++3. Read the screen again (`run screen RUN --lines 20`): the text left the input line and the session works. If it still sits there, `run send RUN --key enter` once more; if a dialog came up, show it to the person.
+ 4. `"$DAGQ" ask close <id>`, unless the supervisor closed it first. The supervisor takes a person's input as the session's input and watches the session from there.
+ 
+ ## An undelivered worker answer
+ 
+-A worker's `worker_question` is answered by the person in the inbox; the supervisor types `answer to ask <id>: <answer>` and Enter into the worker's terminal once the worker went idle after asking, closes the ask and records `ask_delivered` (`delivering the answer of ask <id> (runtime)` meanwhile). Attention `send the answer of ask <id> to the worker and close it` (`kind` `ask_delivery_failed`, or `ask_answered` on a run whose session no longer takes answers: not `running`, and not in a review's send-back or a resume): the supervisor could not type it (it tries once), or the session is gone. When the session still works (`running`, a send-back, a resume), read the worker's screen, send the text `answer to ask <id>: <answer>` followed by `enter`, then `"$DAGQ" ask close <id>`. When the run is at rest, the answer has nobody to reach: tell the person and close the ask.
++A worker's `worker_question` is answered by the person in the inbox; the supervisor types `answer to ask <id>: <answer>` and Enter into the worker's terminal once the worker went idle after asking, closes the ask and records `ask_delivered` (`delivering the answer of ask <id> (runtime)` meanwhile). Attention `send the answer of ask <id> to the worker and close it` (`kind` `ask_delivery_failed`, or `ask_answered` on a run whose session no longer takes answers: not `running`, and not in a review's send-back or a resume): the supervisor could not type it (it tries once), or the session is gone. When the session still works (`running`, a send-back, a resume), read the worker's screen (`run screen RUN`) and `"$DAGQ" run send RUN --answer <id>`: it types `answer to ask <id>: <answer>` with Enter and closes a `worker_question` as delivered; close any other with `"$DAGQ" ask close <id>`. When the run is at rest, the answer has nobody to reach: tell the person and close the ask.
+ 
+ ## A `stuck_exit` ask
+ 
+@@ -53,10 +55,10 @@ The answer `exit` is carried out as `reference/stuck-exit.md` says; `wait` needs
+ 
+ ## A `stalled` ask
+ 
+-A session idle without a receipt after the supervisor's one nudge, or a `long_background` / `idle_process` alert its recovery job escalated. The supervisor applies and closes `wait` itself, and closes the ask once the session moves on or exits. `intervene` is carried out as `reference/stalled.md` says: read the screen, check the background work, type the person's instruction or `/exit` the session, then `ask close <id>`.
++A session idle without a receipt after the supervisor's one nudge, or a `long_background` / `idle_process` alert its recovery job escalated. The supervisor applies and closes `wait` itself, and closes the ask once the session moves on or exits. `intervene` is carried out as `reference/stalled.md` says: read the screen, check the background work, send the person's instruction (as the ask's answer) or `/exit` the session, then `ask close <id>`.
+ 
+ ## A live run's recovery job failed
+ 
+ When the recovery job for a live run's alert (`long_background`, `idle_process`, `stuck_exit`, `prompt_waiting`, `stalled`) could not start, exited non-zero, timed out or printed no verdict, the supervisor opens the alert's own ask (`stalled`, `stuck_exit` or `answer_prompt`, with its usual options), with `reason_category` `recovery_failed` and `the recovery job failed (<error>)` in the question (ADR-t609-1). Carry out its answer as for that kind above; no job runs for the alert while it is open, and it closes as that kind does.
+ 
+-Attention `recover by hand` (`kind` `recovery_failed`) is such a failure a runtime from before ADR-t609-1 recorded: no ask opened and the job does not run again for that alert; the session is left as it is. Read the screen, show it to the person with `last_error` and the job's files in the run directory (`recovery-<alert>-<attempt>.prompt.txt`, `.out`, `.err`), and do what they say: answer a dialog as for `answer_prompt` above, or for a `stuck_exit` follow the `exit` steps of `reference/stuck-exit.md`. The attention clears once the session exits or its workspace closes (a `prompt_waiting` one also when the dialog goes, a `long_background` one when the receipt arrives).
++Attention `recover by hand` (`kind` `recovery_failed`) is such a failure a runtime from before ADR-t609-1 recorded: no ask opened and the job does not run again for that alert; the session is left as it is. Read the screen (`run screen RUN`), show it to the person with `last_error` and the job's files in the run directory (`recovery-<alert>-<attempt>.prompt.txt`, `.out`, `.err`), and do what they say: answer a dialog as for `answer_prompt` above, or for a `stuck_exit` follow the `exit` steps of `reference/stuck-exit.md`. The attention clears once the session exits or its workspace closes (a `prompt_waiting` one also when the dialog goes, a `long_background` one when the receipt arrives).
+diff --git a/plugins/claude-dagq/skills/dagq-recover/reference/stalled.md b/plugins/claude-dagq/skills/dagq-recover/reference/stalled.md
+index c795c751..2a2ab2aa 100644
+--- a/plugins/claude-dagq/skills/dagq-recover/reference/stalled.md
++++ b/plugins/claude-dagq/skills/dagq-recover/reference/stalled.md
+@@ -22,25 +22,24 @@ Whatever the answer, the supervisor closes the ask itself (`the session moved on
+ 
+ ## Stepping in (`intervene`)
+ 
+-Take `workspace_id`, `worktree_path` and the run `id` from `"$DAGQ" show ID` (`--full` for `run_dir`). Never edit the worktree, commit, merge or push for the run, and never signal processes yourself.
++Take `worktree_path` and the run `id` from `"$DAGQ" show ID` (`--full` for `run_dir`). Reach the session only with `"$DAGQ" run screen` / `run send` (`reference/session.md`), never with `cmux` itself. Never edit the worktree, commit, merge or push for the run, and never signal processes yourself.
+ 
+-1. **Read the screen**: `cmux read-screen --workspace <workspace_id> --lines 60`. See what the session last said: waiting on a background task, a question it wrote to the terminal instead of asking, a failure it gave up on, or a dialog (an `answer_prompt` case, `reference/session.md`; under a `send_unconfirmed` ask answer it under this ask, as `reference/session.md` says).
+-2. **Check the background work** the question listed: `"$DAGQ" doctor --full` shows the run's processes (read only). A test or build still making progress may only need time: tell the person and, on their word, `ask close <id>`; no new `stalled` ask opens until the session ends a turn after the close, and the idle is counted again from that turn. One that hangs is stopped by the session itself: type an instruction naming the task (below), never `kill` / `pkill` by name.
+-3. **Type an instruction** the person gave or approved, for example "stop the background task <id>, then commit and write the receipt" or "ask your question with `dagq ask --run <run-id> --kind worker_question --because scope --topic <code>`":
++1. **Read the screen**: `"$DAGQ" run screen RUN --lines 60`. See what the session last said: waiting on a background task, a question it wrote to the terminal instead of asking, a failure it gave up on, or a dialog (an `answer_prompt` case, `reference/session.md`; under a `send_unconfirmed` ask answer it under this ask, as `reference/session.md` says).
++2. **Check the background work** the question listed: `"$DAGQ" doctor --full` shows the run's processes (read only). A test or build still making progress may only need time: tell the person and, on their word, `ask close <id>`; no new `stalled` ask opens until the session ends a turn after the close, and the idle is counted again from that turn. One that hangs is stopped by the session itself: send an instruction naming the task (below), never `kill` / `pkill` by name.
++3. **Send an instruction** the person gave or approved, for example "stop the background task <id>, then commit and write the receipt" or "ask your question with `dagq ask --run <run-id> --kind worker_question --because scope --topic <code>`". No free text is typed: the instruction is this ask's answer, so write it as `intervene: <instruction>` when answering (`"$DAGQ" answer <id> --text 'intervene: <instruction>'`), then:
+ 
+    ```sh
+-   cmux send --workspace <workspace_id> "<instruction>"
+-   cmux send-key --workspace <workspace_id> enter
+-   cmux read-screen --workspace <workspace_id> --lines 20   # the text left the input line and the session works
++   "$DAGQ" run send RUN --answer <id>       # types `answer to ask <id>: intervene: <instruction>` and Enter
++   "$DAGQ" run screen RUN --lines 20         # the text left the input line and the session works
+    ```
+ 
+-   If the text still sits in the input line, send `enter` once more. The supervisor takes this input as a person's and closes the ask once the session ends that turn.
+-4. **Stop the run, if the person says so**: type `/exit` and `enter` in the workspace (answer a "Background work is running" confirmation with the person's choice). The session exits without a receipt, the supervisor closes the ask, the run is validated, fails for the missing receipt and goes to the recovery job (`triaging (runtime)`); nothing more to do. Without a supervisor, `up`: it recovers the run once the session's processes are gone (or `"$DAGQ" recover RUN_ID`, section 3, on the person's word). A supervisor holding the lease refuses `recover`; `down --force` only on the person's explicit word.
++   If the ask was answered `intervene` alone, there is no instruction to send (`run send` types no free text): on the person's word stop the run (step 4), or close the ask and leave the session to the next nudge and `stalled` ask, whose answer can carry the instruction. If the text still sits in the input line, `run send RUN --key enter` once more. The supervisor takes this input as a person's and closes the ask once the session ends that turn.
++4. **Stop the run, if the person says so**: `"$DAGQ" run send RUN --key exit` (answer a "Background work is running" confirmation with the person's choice, `run send RUN --key ...`). The session exits without a receipt, the supervisor closes the ask, the run is validated, fails for the missing receipt and goes to the recovery job (`triaging (runtime)`); nothing more to do. Without a supervisor, `up`: it recovers the run once the session's processes are gone (or `"$DAGQ" recover RUN_ID`, section 3, on the person's word). A supervisor holding the lease refuses `recover`; `down --force` only on the person's explicit word.
+ 5. **Close the ask**: after the instruction was taken or the run stopped, `"$DAGQ" ask close <id>`. If the supervisor closed it first (the session moved on or exited), there is nothing to close. A person's close counts as `intervene`: no new `stalled` ask until the session ends a turn after it.
+ 
+ ## A headless run's `stalled` ask
+ 
+-A run on the headless route (`worker_mode: headless` in `show`, `skills/dagq/reference/provider.md`) has no screen and takes no keys: its workspace runs only the session wrapper, so none of the `cmux` steps above apply to it. Its ask comes from a turn that ended without a receipt or a `worker_question` after the runtime's nudges (`reason: turn_without_receipt`), or from a turn whose tools were refused three times or more (`permission_denied`), once the recovery job could not fix it, or from a recovery job's escalation of a `long_background` or `idle_process` alert; the question ends with the last turns instead of a screen.
++A run on the headless route (`worker_mode: headless` in `show`, `skills/dagq/reference/provider.md`) has no screen and takes no keys: its workspace runs only the session wrapper, so none of the `run screen` / `run send` steps above apply to it (`run screen` names its `turns/` instead, `run send` refuses it). Its ask comes from a turn that ended without a receipt or a `worker_question` after the runtime's nudges (`reason: turn_without_receipt`), or from a turn whose tools were refused three times or more (`permission_denied`), once the recovery job could not fix it, or from a recovery job's escalation of a `long_background` or `idle_process` alert; the question ends with the last turns instead of a screen.
+ 
+ Its options are `wait`, `stop` and `propose` (and any the job added), with no `intervene`: nobody can step into a headless session. Before answering, read what the turns did (the question's last turns, `"$DAGQ" timeline RUN`, `"$DAGQ" events --run RUN --full` for `turn_finished` and `permission_denials`, the turns' output under the run dir's `turns/`) and bring it to the person; then answer with one of these or an instruction.
+ 
+diff --git a/plugins/claude-dagq/skills/dagq-recover/reference/stuck-exit.md b/plugins/claude-dagq/skills/dagq-recover/reference/stuck-exit.md
+index 335fd8f1..bde6025d 100644
+--- a/plugins/claude-dagq/skills/dagq-recover/reference/stuck-exit.md
++++ b/plugins/claude-dagq/skills/dagq-recover/reference/stuck-exit.md
+@@ -2,27 +2,27 @@
+ 
+ The supervisor sends `/exit` once, after its review's verdict (ADR-0027: the session stays open through validation and review), or, for a run an older supervisor started, after the receipt when the worker goes idle; a resumed session gets it once it goes idle or its resume timeout passes. A session is idle only when its Stop hook's marker (`idle.json` in the run directory) lists no background work `running` (task 147): the supervisor holds `/exit` while it does, and Claude Code writes a new marker when the work ends. So "Background work is running" now means the work outlived that wait (the resume timeout, counted from the receipt or from the start of the wait for `/exit`) or started after the idle. When the session has not exited within the exit timeout (120 seconds with cmux), the supervisor records `exit_request_timed_out` and keeps the run where it is with its lease (`awaiting_integration`, `needs_session` or `failed` after a verdict; `running` on the older path). The runtime fixes what it can first: it retries a `/exit` cmux never delivered, answers "Background work is running" once the worktree is clean and the receipt names its HEAD, and closes the workspace and lands a reviewed run whose receipt still holds when its `/exit` never got through (`auto_repaired`). What is left goes to the recovery job (alert `stuck_exit`), which may answer a known dialog, stop the run's stray processes, close and proceed for a run that lands next, or wait. Only when the job escalates, is not sure, finds its preconditions broken or used its three tries does the supervisor register a `stuck_exit` ask on the run (`asked_by` `supervisor`); a failed job opens it too, with `reason_category` `recovery_failed` and the job's failure in the question (ADR-t609-1). The question names the run, the task, the timeout, the workspace, what follows once the session exits, why a person is needed and the job's diagnosis, and ends with the last 15 non-empty lines of the screen. The options are `exit` (answer the dialog so that the session exits, then send `/exit`) and `wait` (leave the session as it is). The supervisor also sends that `/exit` when a session's wrapper stops heartbeating while its process lives on (a `wrapper_heartbeat_expired` event, task 170), whether or not the session finished; the question then begins its sentence on what follows with "Its wrapper stopped heartbeating while its process lived on (wrapper_heartbeat_expired)". Carry out such an ask the same way: the session may be mid-work rather than at a dialog, so read the screen before answering anything. The inbox shows it to the person; its answer is carried out here, on the person's word. Once the ask is open the supervisor types nothing more into the workspace, and a drain (`down --wait`, `install --allow-breaking`, an `up` replacing a supervisor from before the handoff) waits for this run until its session exits.
+ 
+-Take `workspace_id`, `worktree_path` and `receipt_path` from `"$DAGQ" show <task_id> --full`, and the answer from `"$DAGQ" asks --role inbox`. The cmux commands are in `reference/session.md`.
++Take the run `id`, `worktree_path` and `receipt_path` from `"$DAGQ" show <task_id> --full`, and the answer from `"$DAGQ" asks --role inbox`. The session is reached only with `"$DAGQ" run screen` / `run send` (`reference/session.md`), never with `cmux` itself.
+ 
+ ## When the session already exited
+ 
+-Judge it by the session, never by the run's status: after a verdict the run is already `awaiting_integration`, `needs_session` or `failed` while its session still runs. The session is gone when `"$DAGQ" show <task_id> --full` lists the `wrapper` process with `exited_at` set (or a `session_exited` event after the `exit_request_timed_out`), or `cmux read-screen` shows a shell prompt instead of Claude Code. The supervisor closed the ask when it saw the exit (an unanswered ask gets the answer `the session exited; closed by the runtime`) and moved the run on (see "What follows the exit"). There is nothing to do. If the ask is still listed as answered and not closed, `"$DAGQ" ask close <id>`. While the wrapper still runs, the session is alive: act on the answer below.
++Judge it by the session, never by the run's status: after a verdict the run is already `awaiting_integration`, `needs_session` or `failed` while its session still runs. The session is gone when `"$DAGQ" show <task_id> --full` lists the `wrapper` process with `exited_at` set (or a `session_exited` event after the `exit_request_timed_out`), or `run screen RUN` shows a shell prompt instead of Claude Code. The supervisor closed the ask when it saw the exit (an unanswered ask gets the answer `the session exited; closed by the runtime`) and moved the run on (see "What follows the exit"). There is nothing to do. If the ask is still listed as answered and not closed, `"$DAGQ" ask close <id>`. While the wrapper still runs, the session is alive: act on the answer below.
+ 
+ ## Answer `exit`
+ 
+-1. Read the screen: `cmux read-screen --workspace <workspace_id> --lines 40`. The excerpt in the question may be old.
++1. Read the screen: `"$DAGQ" run screen RUN --lines 40`. The excerpt in the question may be old.
+ 2. **"Background work is running"** (Claude Code's confirmation for `/exit` while a `run_in_background` shell, a wait loop or a watch the worker started is still running; its choices are "Exit and stop tasks", "Move to background and exit" and "Stay"). The runtime already selects "Exit and stop tasks" itself when the checks below hold, so seeing it here usually means one of them failed. "Exit and stop tasks" kills that work, so first make sure the run's result does not depend on it:
+    - `git -C <worktree_path> status --porcelain` prints nothing (the worktree is clean), and
+    - the receipt's `commit` is the worktree's HEAD: `jq -r .commit <receipt_path>` equals `git -C <worktree_path> rev-parse HEAD`.
+ 
+-   When both hold, select "Exit and stop tasks" (`down` until it is highlighted, then `enter`). The session exits by itself, so no second `/exit` is needed. When either does not hold, the background work may still be changing the result: choose nothing, tell the person what you found, and do what they say instead.
+-3. **Any other dialog** (a permission prompt, a `❯` numbered choice): show it to the person and send the key they choose. Then send `/exit` and `enter`.
+-4. **No dialog**, and the prompt is idle: send `/exit` and `enter`.
+-5. Read the screen again until the session is gone. The supervisor then closes the ask and moves the run on (see "What follows the exit"), so do not `ask close` it yourself. If the session still does not exit, show the person the screen, then `ask close <id>`.
++   When both hold, select "Exit and stop tasks" (`"$DAGQ" run send RUN --key down` until it is highlighted, then `--key enter`). The session exits by itself, so no second `/exit` is needed. When either does not hold, the background work may still be changing the result: choose nothing, tell the person what you found, and do what they say instead.
++3. **Any other dialog** (a permission prompt, a `❯` numbered choice): show it to the person and send the key they choose (`run send RUN --key ...`). Then `"$DAGQ" run send RUN --key exit`.
++4. **No dialog**, and the prompt is idle: `"$DAGQ" run send RUN --key exit`.
++5. Read the screen again (`run screen RUN`) until the session is gone. The supervisor then closes the ask and moves the run on (see "What follows the exit"), so do not `ask close` it yourself. If the session still does not exit, show the person the screen, then `ask close <id>`.
+ 
+ ## Answer `wait`, or anything else
+ 
+-Do only what the answer says, on the person's word. `wait` means: leave the session and its dialog alone; the person handles it in the workspace. Then `"$DAGQ" ask close <id>` to mark the answer read. The run stays where it is, under the supervisor's lease, until its session exits.
++Do only what the answer says, on the person's word. `wait` means: leave the session and its dialog alone; the person handles it later with these commands. Then `"$DAGQ" ask close <id>` to mark the answer read. The run stays where it is, under the supervisor's lease, until its session exits.
+ 
+ ## What follows the exit
+ 
+diff --git a/plugins/claude-dagq/skills/dagq-recover/reference/triage-by-hand.md b/plugins/claude-dagq/skills/dagq-recover/reference/triage-by-hand.md
+index e8b285b8..7c575cf6 100644
+--- a/plugins/claude-dagq/skills/dagq-recover/reference/triage-by-hand.md
++++ b/plugins/claude-dagq/skills/dagq-recover/reference/triage-by-hand.md
+@@ -4,7 +4,7 @@ Read this when the attention `triage by hand` or `recover by hand` reaches the p
+ 
+ ## `triage by hand`
+ 
+-Attention `triage by hand` (`kind` `triage_failed`): the recovery job of a `failed` / `interrupted` (or `resume_exhausted`) run could not start, timed out, printed no verdict, or its verdict could not be applied; the run stays as it is and is not tried again. Read `last_error` and the run directory's `recovery-<alert>-<attempt>.prompt.txt`, `.out`, `.err`, and bring the choice to the person. On their answer: `"$DAGQ" ready ID` runs the task again as a new run (unchanged: no plan review; to change it, use a planner), `cancel ID` drops it. Its workspaces stay open until then, so read the screen first; close one by hand only while no supervisor runs.
++Attention `triage by hand` (`kind` `triage_failed`): the recovery job of a `failed` / `interrupted` (or `resume_exhausted`) run could not start, timed out, printed no verdict, or its verdict could not be applied; the run stays as it is and is not tried again. Read `last_error` and the run directory's `recovery-<alert>-<attempt>.prompt.txt`, `.out`, `.err`, and bring the choice to the person. On their answer: `"$DAGQ" ready ID` runs the task again as a new run (unchanged: no plan review; to change it, use a planner), `cancel ID` drops it. Its workspaces stay open until then, so read the screen first (`"$DAGQ" run screen RUN`); `"$DAGQ" run close-workspaces RUN --apply` closes its workspace once nothing lives behind it (never `cmux` itself).
+ 
+ ## `recover by hand`
+ 
+diff --git a/plugins/claude-dagq/skills/dagq-recover/reference/up-down.md b/plugins/claude-dagq/skills/dagq-recover/reference/up-down.md
+index 94c05099..430a941f 100644
+--- a/plugins/claude-dagq/skills/dagq-recover/reference/up-down.md
++++ b/plugins/claude-dagq/skills/dagq-recover/reference/up-down.md
+@@ -9,9 +9,10 @@ Read this when `up` or `down` returns something the `dagq-recover` skill (sectio
+ `--claude EXE` and `--codex EXE` (the CLI of Codex workers, `skills/dagq/reference/provider.md`) are resolved to the real file and fixed on the supervisor, which passes both to every run's session wrapper. Pass them as paths (`--claude ~/.local/bin/claude --codex ~/.local/bin/codex`) from a cmux terminal: there a bare `claude` resolves to cmux's per-surface shim (`$TMPDIR/cmux-cli-shims/<surface>/claude`), which `up` would fix on the supervisor (for `codex` the runtime skips the shim directory itself, but the explicit path keeps the choice independent of PATH). Both links end in a versioned file (`~/.local/share/claude/versions/<version>`, `~/.codex/packages/standalone/releases/<version>/bin/codex`), so after updating Claude Code or Codex, `down --wait` and the same `up` fix the new one. A missing `codex` does not stop `up` or the supervisor: it runs no Codex worker, and Codex tasks start on headless Claude (`provider_switched`, `executable_missing`). `status`'s `supervisors[].providers` shows what each supervisor resolved.
+ 
+ - `supervisor`: `{"outcome": "started" | "reused" | "restarted", "mode", "version", "pid", "token", "workspace_id", "plist", "log_dir", "auto_update"}`. `reused` means a live, heartbeating supervisor of this binary's own build already served this queue and nothing was touched but its `auto_update`, which follows this `up`'s `--auto-update`. `mode` is `launchd`, or `in_cmux` with the `workspace_id` it runs in; it is null for a supervisor someone started by hand.
+-- `inbox`: `{"outcome": "created" | "reused" | "skipped", "workspace_id", "name"}`. `up` finds the workspace by the UUID it recorded in the queue, never by its title: `reused` while cmux still lists it (renaming it changes nothing), `created` when it is gone. `skipped` is the normal answer when `up` is called from the inbox: the workspace carries `DAGQ_ROLE=inbox` and `DAGQ_QUEUE` in its own environment (`cmux workspace env <id> --json`), so `up` does not open a second one. `down` closes neither the inbox nor any planner.
+-- `up` pins the inbox's workspace (ADR-0031), and cmux refuses `cmux workspace close` on a pinned workspace (`Error: protected: ...`). To close one by hand, unpin it first: `cmux workspace-action --action unpin --workspace <id>`, then `cmux workspace close <id>`. The unpin succeeds on an unpinned workspace too. The supervisor's, the planners' and the workers' workspaces are not pinned.
+-- A workspace the queue recorded for a role `up` no longer opens (the resident sessions ADR-0024 and ADR-0044 retired, including the old `[<repo>]planner`) is forgotten by `up`, which leaves the workspace itself open: the person closes it with `cmux workspace close <id>`.
++- `inbox`: `{"outcome": "created" | "reused" | "skipped", "workspace_id", "name", "guardrail"}`. `up` finds the workspace by the UUID it recorded in the queue, never by its title: `reused` while cmux still lists it (renaming it changes nothing), `created` when it is gone. `skipped` is the normal answer when `up` is called from the inbox: the workspace carries `DAGQ_ROLE=inbox` and `DAGQ_QUEUE` in its own environment (a person checks it in their own terminal with `cmux workspace env <id> --json`), so `up` does not open a second one. `down` closes neither the inbox nor any planner. `guardrail` (on `created` and `reused`) says whether the inbox was started with its settings (below); a `reused` one without them also carries `next`.
++- The inbox's settings: `up` starts a created inbox with `--settings <queue dir>/claude-inbox-settings.json`, which holds only `permissions.deny` (the `dagq` commands the inbox's role may not run, rewriting `DAGQ_ROLE` and the other identity variables, and `Bash(cmux:*)`; ADR-t1228-2). So the inbox reaches sessions only through the `dagq run` / `planner` commands. It is a guardrail, not enforcement. `up` does not start a `reused` inbox again (its conversation stays), and a `claude` typed again in the workspace starts without them, so an inbox opened before them has none until it is opened again.
++- `up` pins the inbox's workspace (ADR-0031), and cmux refuses `cmux workspace close` on a pinned workspace (`Error: protected: ...`). The unpin and the close are the person's, typed in their own terminal without `DAGQ_ROLE` (ADR-t1228-1 decision 1; the inbox's settings refuse `cmux`): `cmux workspace-action --action unpin --workspace <id>`, then `cmux workspace close <id>`. The unpin succeeds on an unpinned workspace too. The supervisor's, the planners' and the workers' workspaces are not pinned.
++- A workspace the queue recorded for a role `up` no longer opens (the resident sessions ADR-0024 and ADR-0044 retired, including the old `[<repo>]planner`) is forgotten by `up`, which leaves the workspace itself open: the person closes it in their own terminal without `DAGQ_ROLE` with `cmux workspace close <id>`.
+ - `warnings`: why the queue's workspace group (`[<repo>]`, external ID the queue hash) could not be made; the workspace opened outside it. Report it; nothing else failed.
+ - `pruned_supervisors`: dead registrations `up` removed.
+ - `doctor`: `unfinished_runs` (with `lease_stale`), `awaiting_integration`, `needs_session`: the open work to report.
+@@ -42,7 +43,15 @@ A waiting run keeps its lease and session, so a drain (plain `down`, `down --wai
+ 
+ ### cmux refuses the connection (launchd mode)
+ 
+-If `up` fails because cmux refuses a connection from outside its own terminals, no LaunchAgent was installed: the supervisor launchd would start cannot reach cmux. Report the message to the person with the remedies it names: a socket password saved in cmux's Settings, or `CMUX_SOCKET_PASSWORD` exported in the shell that runs `up` (both are theirs to do). The third remedy is `up --in-cmux`, which you may run once they have chosen it: it runs the supervisor in a cmux workspace named `[<repo>]supervisor` and needs no password, but launchd no longer restarts it, so run `up --in-cmux` again whenever `status` shows nothing serving the queue (`restart supervisor`, which the inbox's `watch` reports). cmux does not close the workspace of a stopped in-cmux supervisor, and `up --in-cmux` stops with an error naming it while it is still listed: read its screen for why the supervisor stopped and report that, close it with `cmux workspace close <id>`, then run the same `up` again.
++If `up` fails because cmux refuses a connection from outside its own terminals, no LaunchAgent was installed: the supervisor launchd would start cannot reach cmux. Report the message to the person with the remedies it names: a socket password saved in cmux's Settings, or `CMUX_SOCKET_PASSWORD` exported in the shell that runs `up` (both are theirs to do). The third remedy is `up --in-cmux`, which you may run once they have chosen it: it runs the supervisor in a cmux workspace named `[<repo>]supervisor` and needs no password, but launchd no longer restarts it, so run `up --in-cmux` again whenever `status` shows nothing serving the queue (`restart supervisor`, which the inbox's `watch` reports). cmux does not close the workspace of a stopped in-cmux supervisor, and `up --in-cmux` stops with an error naming it while it is still listed: ask the person to read its screen for why the supervisor stopped and to close it in their own terminal without `DAGQ_ROLE` (`cmux workspace close <id>`), then run the same `up` again.
++
++### Open the inbox again (the guardrail)
++
++`status` (also `status --role inbox`) and `doctor` show `inbox_guardrail` for the inbox `up` recorded: `{"workspace_id", "guardrail": true, "settings"}` when `up` opened it with the settings above (its `inbox_opened` event says so); `{"guardrail": false, "reason", "next"}` when it did not (`opened_without_guardrail`) or nothing records how it was opened (`no_record`: opened before the guardrail existed); `guardrail: null` when no inbox is recorded. A session in which `claude` was typed again is not seen: it has no settings whatever this says. To give the inbox the guardrail, open it again, on the person's word:
++
++1. The inbox writes its handoff first (the open items, the watch's cursor, anything the person said to keep), where the repository's instructions keep it.
++2. The person, in their own terminal without `DAGQ_ROLE` (the inbox refuses `cmux` and cannot close itself): `cmux workspace-action --action unpin --workspace <id>`, then `cmux workspace close <id>` (`<id>` is `inbox_guardrail.workspace_id`).
++3. `"$DAGQ" up` from that terminal (or any session that is not the closed inbox): the inbox is `created` with `guardrail: true`. The new inbox reads the handoff and starts its watch.
+ 
+ ## down
+ 
+diff --git a/src/application/actor_executor.rs b/src/application/actor_executor.rs
+index 689d0613..e00b35f2 100644
+--- a/src/application/actor_executor.rs
++++ b/src/application/actor_executor.rs
+@@ -709,7 +709,11 @@ impl ActorExecutor for HostActorExecutor<'_> {
+                 let command = match command {
+                     WorkspaceCommand::Wrapper(command) => command,
+                     WorkspaceCommand::Agent { prompt, plugin_dir } => {
+-                        command_line(&self.provider()?.inbox_command(&prompt, plugin_dir)?)?
++                        command_line(&self.provider()?.inbox_command(
++                            &prompt,
++                            plugin_dir,
++                            self.queue.parent().unwrap_or(Path::new(".")),
++                        )?)?
+                     }
+                 };
+                 let env = actor_env(self.queue, &actor, planner, launch)?;
+@@ -1027,7 +1031,12 @@ mod tests {
+             command.current_dir(cwd).arg(access.as_str()).arg(prompt);
+             Ok(command)
+         }
+-        fn inbox_command(&self, prompt: &str, plugin_dir: Option<&Path>) -> Result<CommandSpec> {
++        fn inbox_command(
++            &self,
++            prompt: &str,
++            plugin_dir: Option<&Path>,
++            _queue_dir: &Path,
++        ) -> Result<CommandSpec> {
+             let mut command = CommandSpec::new("/opt/claude");
+             if let Some(dir) = plugin_dir {
+                 command.arg("--plugin-dir").arg(dir);
+diff --git a/src/application/execution.rs b/src/application/execution.rs
+index ba9ec961..cfc9b258 100644
+--- a/src/application/execution.rs
++++ b/src/application/execution.rs
+@@ -314,10 +314,21 @@ pub const DAGQ_COMMANDS: &[(&str, &[Capability])] = &[
+ /// run the CLI as another role.
+ const IDENTITY_ENV: [&str; 4] = [ROLE_ENV, ACTOR_ID_ENV, RUN_ID_ENV, TASK_ID_ENV];
+ 
++/// The rule that refuses `cmux` to the inbox and the planners
++/// ([`RAW_CMUX_DENIED_ROLES`]): they reach sessions through the dagq CLI,
++/// which judges and records (ADR-t1228-2 decisions 2 and 3).
++pub const RAW_CMUX_DENIED: &str = "Bash(cmux:*)";
++
++/// The roles refused raw `cmux` (ADR-t1228-2): the inbox and the planners.
++/// The worker's and the jobs' `cmux` is left to their isolation (decision
++/// 7).
++pub const RAW_CMUX_DENIED_ROLES: [ActorRole; 2] = [ActorRole::Inbox, ActorRole::Planner];
++
+ /// The Claude Code `permissions.deny` rules of `role`, made from its
+ /// policy ([`grants`]): each [`DAGQ_COMMANDS`] entry it has no capability
+-/// for (`Bash(dagq integrate:*)`), and setting, exporting or unsetting the
+-/// variables that name the actor. A guardrail against a mistake, not
++/// for (`Bash(dagq integrate:*)`), setting, exporting or unsetting the
++/// variables that name the actor, and for the inbox and the planners
++/// [`RAW_CMUX_DENIED`]. A guardrail against a mistake, not
+ /// enforcement: the same command by a path, through another shell or a
+ /// script is not matched, and the CLI's own check stays the one that
+ /// refuses (ADR-t728-1 decision 6).
+@@ -337,6 +348,9 @@ pub fn permission_deny(role: ActorRole) -> Vec<String> {
+             format!("Bash(unset {name}*)"),
+         ]);
+     }
++    if RAW_CMUX_DENIED_ROLES.contains(&role) {
++        rules.push(RAW_CMUX_DENIED.to_owned());
++    }
+     rules
+ }
+ 
+@@ -581,6 +595,16 @@ mod tests {
+         for role in ActorRole::ALL {
+             assert!(permission_deny(role).contains(&"Bash(DAGQ_ROLE=*)".to_owned()));
+         }
++        // Raw cmux is the inbox's and the planners' alone to be refused
++        // (ADR-t1228-2): the worker's and the jobs' stay as they were.
++        for role in ActorRole::ALL {
++            assert_eq!(
++                permission_deny(role).contains(&RAW_CMUX_DENIED.to_owned()),
++                matches!(role, ActorRole::Inbox | ActorRole::Planner),
++                "{role:?}"
++            );
++        }
++        assert_eq!(RAW_CMUX_DENIED, "Bash(cmux:*)");
+         // Every rule a role gets is one the policy refuses.
+         for role in ActorRole::ALL {
+             for (command, needs) in DAGQ_COMMANDS {
+diff --git a/src/application/inbox_guardrail.rs b/src/application/inbox_guardrail.rs
+new file mode 100644
+index 00000000..9635664e
+--- /dev/null
++++ b/src/application/inbox_guardrail.rs
+@@ -0,0 +1,87 @@
++//! Whether the inbox `up` recorded was opened with the guardrail that
++//! refuses raw `cmux` (ADR-t1228-2 decision 4): the one judgment `status`
++//! and `doctor` show as `inbox_guardrail`. `up` writes `inbox_opened` when
++//! it opens the inbox's workspace, with the workspace and whether the
++//! settings went with it. An inbox `up` reuses keeps whatever it was
++//! opened with, and one opened before the record existed has none, so it
++//! counts as without the guardrail. A `claude` typed again in the
++//! workspace is not seen (the guardrail's limit).
++
++use serde_json::{Value, json};
++
++/// What a person does to get an inbox with the guardrail: the procedure is
++/// in the `dagq-recover` skill's `reference/up-down.md`.
++pub const REOPEN: &str = "write the inbox's handoff, then close the inbox (a person, in a terminal without DAGQ_ROLE) and open it again with `dagq up`; see the dagq-recover skill's reference/up-down.md";
++
++/// The guardrail of the inbox recorded as `recorded` (its workspace), by
++/// the payload of the newest `inbox_opened`: `guardrail` is `null` when no
++/// inbox is recorded, `true` when the newest open of that workspace had the
++/// guardrail, and `false` otherwise, with why (`reason`) and `next`.
++pub fn judge(recorded: Option<&str>, opened: Option<&Value>) -> Value {
++    let Some(workspace) = recorded else {
++        return json!({"workspace_id": null, "guardrail": null});
++    };
++    let same = opened.filter(|payload| payload["workspace_id"].as_str() == Some(workspace));
++    match same {
++        Some(payload) if payload["guardrail"] == true => json!({
++            "workspace_id": workspace,
++            "guardrail": true,
++            "settings": payload["settings"],
++        }),
++        Some(_) => json!({
++            "workspace_id": workspace,
++            "guardrail": false,
++            "reason": "opened_without_guardrail",
++            "next": REOPEN,
++        }),
++        None => json!({
++            "workspace_id": workspace,
++            "guardrail": false,
++            "reason": "no_record",
++            "next": REOPEN,
++        }),
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn an_inbox_opened_with_the_settings_has_the_guardrail() {
++        let opened = json!({"workspace_id": "w1", "guardrail": true, "settings": "/q/claude-inbox-settings.json"});
++        let view = judge(Some("w1"), Some(&opened));
++        assert_eq!(view["guardrail"], true);
++        assert_eq!(view["settings"], "/q/claude-inbox-settings.json");
++        assert!(view.get("next").is_none());
++    }
++
++    #[test]
++    fn an_inbox_without_a_record_of_its_open_has_none_and_says_to_reopen() {
++        // Opened before the record existed, or the record is of another
++        // workspace (an earlier inbox).
++        for opened in [None, Some(json!({"workspace_id": "w0", "guardrail": true}))] {
++            let view = judge(Some("w1"), opened.as_ref());
++            assert_eq!(view["guardrail"], false);
++            assert_eq!(view["reason"], "no_record");
++            assert_eq!(view["next"], REOPEN);
++        }
++        assert!(REOPEN.contains("dagq up") && REOPEN.contains("up-down.md"));
++    }
++
++    #[test]
++    fn an_inbox_opened_without_the_settings_has_none() {
++        let opened = json!({"workspace_id": "w1", "guardrail": false, "settings": null});
++        let view = judge(Some("w1"), Some(&opened));
++        assert_eq!(view["guardrail"], false);
++        assert_eq!(view["reason"], "opened_without_guardrail");
++        assert_eq!(view["next"], REOPEN);
++    }
++
++    #[test]
++    fn no_recorded_inbox_has_nothing_to_judge() {
++        let view = judge(None, None);
++        assert_eq!(view["guardrail"], Value::Null);
++        assert!(view.get("next").is_none());
++    }
++}
+diff --git a/src/application/lifecycle.rs b/src/application/lifecycle.rs
+index a0036ce5..a32e0e2f 100644
+--- a/src/application/lifecycle.rs
++++ b/src/application/lifecycle.rs
+@@ -738,7 +738,24 @@ impl Sessions<'_> {
+         }
+         if let Some(id) = recorded_workspace(self.queue, cmux, role)? {
+             self.mark(role, &id);
+-            return Ok(json!({"outcome": "reused", "workspace_id": id, "name": name}));
++            let mut report = json!({"outcome": "reused", "workspace_id": id, "name": name});
++            if role == SessionRole::Inbox {
++                // `up` does not start a reused inbox again (its
++                // conversation stays): it keeps the guardrail it was opened
++                // with, or none (ADR-t1228-2 decision 4).
++                let opened = self
++                    .queue
++                    .latest_event_of(EventKind::InboxOpened.as_str())?;
++                let view = super::inbox_guardrail::judge(
++                    Some(&id),
++                    opened.as_ref().map(|event| &event.payload),
++                );
++                report["guardrail"] = view["guardrail"].clone();
++                if let Some(next) = view.get("next") {
++                    report["next"] = next.clone();
++                }
++            }
++            return Ok(report);
+         }
+         let id = HostActorExecutor::new(self.db)
+             .with_workspaces(cmux)
+@@ -762,8 +779,22 @@ impl Sessions<'_> {
+             ))?
+             .workspace()?;
+         self.queue.register_session_workspace(role, &id)?;
++        let mut report = json!({"outcome": "created", "workspace_id": id, "name": name});
++        if role == SessionRole::Inbox {
++            // Whether this inbox refuses raw cmux (ADR-t1228-2 decision 4):
++            // `status` and `doctor` judge the recorded inbox by it.
++            let settings = self
++                .agent
++                .inbox_settings(self.db.parent().unwrap_or(Path::new(".")));
++            let guardrail = settings.is_some();
++            self.queue.record_queue_event(
++                EventKind::InboxOpened,
++                json!({"workspace_id": id, "guardrail": guardrail, "settings": settings}),
++            )?;
++            report["guardrail"] = json!(guardrail);
++        }
+         self.mark(role, &id);
+-        Ok(json!({"outcome": "created", "workspace_id": id, "name": name}))
++        Ok(report)
+     }
+ 
+     /// Color the workspace, put the role's status pill on it and pin it
+diff --git a/src/application/mod.rs b/src/application/mod.rs
+index 4fab1d41..07d1e0db 100644
+--- a/src/application/mod.rs
++++ b/src/application/mod.rs
+@@ -19,6 +19,7 @@ pub mod execution;
+ pub mod forecast;
+ mod headless_session;
+ pub mod health;
++pub mod inbox_guardrail;
+ pub mod inbox_watcher;
+ pub mod install;
+ pub mod integrate;
+diff --git a/src/application/ports.rs b/src/application/ports.rs
+index b136c7df..44937987 100644
+--- a/src/application/ports.rs
++++ b/src/application/ports.rs
+@@ -630,16 +630,29 @@ pub trait AgentProvider {
+     }
+     /// The agent of the inbox (ADR-0022): an interactive agent with
+     /// `prompt` as its first message that loads `plugin_dir`, run as the
+-    /// command of its workspace, with no settings of dagq's (a person works
+-    /// in it). A provider without one refuses.
++    /// command of its workspace. Its settings, if the provider has a way
++    /// to give them, are only the inbox's denials (ADR-t1228-2 decision 3),
++    /// written under `queue_dir`: no hook, no idle marker, the prompt
++    /// suggestions as they are (a person works in it). A provider without
++    /// one refuses.
+     fn inbox_command(
+         &self,
+         prompt: &str,
+         plugin_dir: Option<&std::path::Path>,
++        queue_dir: &std::path::Path,
+     ) -> Result<CommandSpec> {
+-        let _ = (prompt, plugin_dir);
++        let _ = (prompt, plugin_dir, queue_dir);
+         anyhow::bail!("this provider has no inbox session")
+     }
++    /// The settings file [`AgentProvider::inbox_command`] writes under
++    /// `queue_dir` and starts the inbox with, which refuse raw `cmux`
++    /// (ADR-t1228-2 decisions 3 and 6); `None` for a provider whose inbox
++    /// has no such guardrail. `up` records whether there is one, and
++    /// `status` and `doctor` show it.
++    fn inbox_settings(&self, queue_dir: &std::path::Path) -> Option<std::path::PathBuf> {
++        let _ = queue_dir;
++        None
++    }
+     /// Start the worker session `command` (from [`AgentProvider::command`]
+     /// or [`AgentProvider::resume_command`]) with `model` at `effort`
+     /// (ADR-0079 decision 3): given explicitly, so neither the provider's
+diff --git a/src/compose.rs b/src/compose.rs
+index 7e1fe4f7..a92895a9 100644
+--- a/src/compose.rs
++++ b/src/compose.rs
+@@ -1388,6 +1388,7 @@ impl OneShot {
+             status["language"] = serde_json::to_value(self.language_report(queue)?)?;
+         }
+         if matches!(role, None | Some(SessionRole::Inbox)) {
++            status["inbox_guardrail"] = inbox_guardrail(queue)?;
+             status["inbox_watcher"] = self.inbox_watcher(db);
+             status["broker"] = status_broker(db, queue);
+             status["queue_service"] = queue_service_view(db, Some(queue));
+@@ -1462,6 +1463,9 @@ impl OneShot {
+                     report["repository"] = repository;
+                 }
+                 report["roles"] = doctor_roles(&queue);
++                // Whether the recorded inbox refuses raw cmux (ADR-t1228-2
++                // decision 4).
++                report["inbox_guardrail"] = inbox_guardrail(&queue)?;
+                 report["language"] = serde_json::to_value(self.language_report(&queue)?)?;
+                 report
+             }
+@@ -2319,8 +2323,10 @@ a person installs it (brew install podman), or sets [broker] mode = \"disabled\"
+ }
+ 
+ /// The inbox workspace's command as `up` opens it: `claude` with the
+-/// inbox's prompt (see [`lifecycle::inbox_session_prompt`]) and the plugin
+-/// directory, made by the provider the executor starts the inbox with.
++/// inbox's settings (written under the queue's directory, ADR-t1228-2
++/// decision 3), its prompt (see [`lifecycle::inbox_session_prompt`]) and
++/// the plugin directory, made by the provider the executor starts the
++/// inbox with.
+ pub fn inbox_command(
+     db: &Path,
+     claude: &Path,
+@@ -2331,10 +2337,22 @@ pub fn inbox_command(
+     let command = ClaudeCode {
+         executable: claude.to_owned(),
+     }
+-    .inbox_command(&prompt, plugin_dir)?;
++    .inbox_command(&prompt, plugin_dir, db.parent().unwrap_or(Path::new(".")))?;
+     crate::application::actor_executor::command_line(&command)
+ }
+ 
++/// Whether the inbox `up` recorded was opened with the guardrail that
++/// refuses raw `cmux` ([`crate::application::inbox_guardrail::judge`]), by
++/// its newest `inbox_opened`.
++fn inbox_guardrail(queue: &SqliteQueue) -> Result<Value> {
++    let recorded = queue.session_workspace(SessionRole::Inbox)?;
++    let opened = queue.latest_event_of(EventKind::InboxOpened.as_str())?;
++    Ok(crate::application::inbox_guardrail::judge(
++        recorded.as_deref(),
++        opened.as_ref().map(|event| &event.payload),
++    ))
++}
++
+ /// `integrate` on the system clock and IDs: see [`OneShot::integrate`].
+ pub fn integrate(
+     db: &Path,
+diff --git a/src/domain/event_kind.rs b/src/domain/event_kind.rs
+index b8b52027..3fc23849 100644
+--- a/src/domain/event_kind.rs
++++ b/src/domain/event_kind.rs
+@@ -107,6 +107,7 @@ event_kinds! {
+     IdleInferred => "idle_inferred",
+     InboxNudgeFailed => "inbox_nudge_failed",
+     InboxNudged => "inbox_nudged",
++    InboxOpened => "inbox_opened",
+     InboxWatcherAbsent => "inbox_watcher_absent",
+     InboxWatcherReturned => "inbox_watcher_returned",
+     InputNotReady => "input_not_ready",
+@@ -369,6 +370,9 @@ impl EventKind {
+                 // (ADR-t906-1 decision 1 (3)).
+                 | InboxNudged
+                 | InboxNudgeFailed
++                // The inbox `up` opened, with whether its settings deny raw
++                // cmux (ADR-t1228-2 decision 4).
++                | InboxOpened
+                 // The inbox's watcher gone and back, for the KPI of how long
+                 // an ask waits to be seen (task 1021).
+                 | InboxWatcherAbsent
+@@ -587,6 +591,9 @@ pub const IDLE_INFERRED: &str = EventKind::IdleInferred.as_str();
+ /// person by `cmux notify` (ADR-t906-1 decision 1 (3)): its claim, once per
+ /// absence and attempt.
+ pub const INBOX_NUDGED: &str = EventKind::InboxNudged.as_str();
++/// `up` opened the inbox's workspace, with whether it started the inbox
++/// with the settings that deny raw cmux (ADR-t1228-2 decision 4).
++pub const INBOX_OPENED: &str = EventKind::InboxOpened.as_str();
+ /// A nudge of the inbox the supervisor could not deliver.
+ pub const INBOX_NUDGE_FAILED: &str = EventKind::InboxNudgeFailed.as_str();
+ /// The supervisor judged the inbox's watcher absent after it was alive, or
+@@ -912,6 +919,7 @@ mod tests {
+             (EventKind::IdleInferred, "idle_inferred"),
+             (EventKind::InboxNudgeFailed, "inbox_nudge_failed"),
+             (EventKind::InboxNudged, "inbox_nudged"),
++            (EventKind::InboxOpened, "inbox_opened"),
+             (EventKind::InboxWatcherAbsent, "inbox_watcher_absent"),
+             (EventKind::InboxWatcherReturned, "inbox_watcher_returned"),
+             (EventKind::InputNotReady, "input_not_ready"),
+diff --git a/src/infrastructure/adapters.rs b/src/infrastructure/adapters.rs
+index c0fc2cc7..f71d436d 100644
+--- a/src/infrastructure/adapters.rs
++++ b/src/infrastructure/adapters.rs
+@@ -3277,17 +3277,36 @@ impl AgentProvider for ClaudeCode {
+         ]);
+         Ok(())
+     }
+-    /// `claude [--plugin-dir <dir>] -- <prompt>`: the inbox's workspace
+-    /// keeps its role and queue in its own environment (ADR-0026), so a
+-    /// `claude` started again there still has them.
+-    fn inbox_command(&self, prompt: &str, plugin_dir: Option<&Path>) -> Result<CommandSpec> {
++    /// `claude --settings <queue dir>/claude-inbox-settings.json
++    /// [--plugin-dir <dir>] -- <prompt>`: the settings are only the
++    /// inbox's `permissions.deny` ([`inbox_settings`], ADR-t1228-2 decision
++    /// 3), written again at each open. The inbox's workspace keeps its role
++    /// and queue in its own environment (ADR-0026), so a `claude` started
++    /// again there still has them, though not the settings (decision 4).
++    fn inbox_command(
++        &self,
++        prompt: &str,
++        plugin_dir: Option<&Path>,
++        queue_dir: &Path,
++    ) -> Result<CommandSpec> {
++        let settings = queue_dir.join(INBOX_SETTINGS);
++        crate::application::RunFiles::write(
++            &super::run_files::LocalRunFiles,
++            &settings,
++            inbox_settings(&permission_deny(ActorRole::Inbox))?.as_bytes(),
++        )
++        .with_context(|| format!("write {}", settings.display()))?;
+         let mut command = CommandSpec::new(&self.executable);
++        command.arg("--settings").arg(&settings);
+         if let Some(dir) = plugin_dir {
+             command.arg("--plugin-dir").arg(dir);
+         }
+         command.arg("--").arg(prompt);
+         Ok(command)
+     }
++    fn inbox_settings(&self, queue_dir: &Path) -> Option<PathBuf> {
++        Some(queue_dir.join(INBOX_SETTINGS))
++    }
+     /// `--model <model> --effort <effort>` among the options, before the
+     /// prompt.
+     fn select_model(&self, command: &mut CommandSpec, model: &str, effort: &str) {
+@@ -3371,6 +3390,24 @@ impl AgentProvider for ClaudeCode {
+     }
+ }
+ 
++/// The settings file of the inbox `up` opens, in the queue's directory
++/// (ADR-t1228-2 decision 3).
++pub const INBOX_SETTINGS: &str = "claude-inbox-settings.json";
++
++/// Settings of the inbox (ADR-t1228-2 decision 3): `permissions.deny`
++/// only, `deny` being the inbox's ([`permission_deny`]: the `dagq`
++/// commands its role may not run, the variables naming the actor and
++/// `Bash(cmux:*)`). No hook and no idle marker (the inbox is not judged
++/// idle), no suggestion setting (a person types in it), no `autoMode`.
++/// A guardrail, not enforcement (decision 5).
++pub fn inbox_settings(deny: &[String]) -> Result<String> {
++    Ok(serde_json::to_string_pretty(&serde_json::json!({
++        "permissions": {
++            "deny": deny
++        }
++    }))?)
++}
++
+ /// The settings file of a headless worker's turns, in the run directory.
+ pub const HEADLESS_SETTINGS: &str = "claude-headless-settings.json";
+ 
+@@ -3400,8 +3437,10 @@ pub fn headless_worker_settings(deny: &[String]) -> Result<String> {
+ /// mechanism or none.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub enum AgentSettings {
+-    /// None of dagq's: the inbox, and the headless jobs other than the
+-    /// review, which their allowed tools ([`claude_tools`]) restrict.
++    /// None of these: the inbox, whose settings are its denials alone
++    /// ([`inbox_settings`], written when `up` opens it), and the headless
++    /// jobs other than the review, which their allowed tools
++    /// ([`claude_tools`]) restrict.
+     None,
+     /// The review's: no hooks, so it never writes the live worker session's
+     /// idle marker.
+@@ -4694,6 +4733,89 @@ mod tests {
+         assert_eq!(claude.job_reply(stdout), stdout);
+     }
+ 
++    /// The planners' settings (a planner session's and a headless
++    /// planner's turns) and the inbox's refuse raw cmux beside their role's
++    /// denials and the identity variables; a worker's, its turns' and the
++    /// review's do not (ADR-t1228-2 decisions 2, 3 and 7).
++    #[test]
++    fn raw_cmux_is_denied_to_the_planners_and_the_inbox_only() {
++        let claude = ClaudeCode {
++            executable: "/bin/claude".into(),
++        };
++        let dir = tempfile::tempdir().unwrap();
++        let deny_of = |path: &Path| -> Vec<String> {
++            let settings: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
++            serde_json::from_value(settings["permissions"]["deny"].clone()).unwrap()
++        };
++        let cmux = crate::application::execution::RAW_CMUX_DENIED.to_owned();
++        let identity = "Bash(export DAGQ_ROLE*)".to_owned();
++        let turn = |role: ActorRole, sub: &str| {
++            let target_dir = dir.path().join(sub);
++            fs::create_dir_all(&target_dir).unwrap();
++            let log = target_dir.join("turn.log");
++            claude
++                .turn_command(
++                    &TurnTarget {
++                        role,
++                        dir: &target_dir,
++                        cwd: &target_dir,
++                        debug_log: Some(&log),
++                        plugin_dir: None,
++                    },
++                    "go",
++                    crate::domain::turn::TurnSession::New("s"),
++                )
++                .unwrap();
++            deny_of(&target_dir.join(HEADLESS_SETTINGS))
++        };
++        let planner_turn = turn(ActorRole::Planner, "planner");
++        assert!(planner_turn.contains(&cmux), "{planner_turn:?}");
++        assert!(planner_turn.contains(&identity));
++        assert!(planner_turn.contains(&"Bash(dagq integrate:*)".to_owned()));
++        let worker_turn = turn(ActorRole::Worker, "worker");
++        assert!(!worker_turn.contains(&cmux), "{worker_turn:?}");
++        assert!(worker_turn.contains(&identity));
++
++        let planner_dir = dir.path().join("session");
++        fs::create_dir_all(&planner_dir).unwrap();
++        let planner = PlannerCommand {
++            origin: PlannerOrigin::Runtime,
++            dir: &planner_dir,
++            cwd: &planner_dir,
++            prompt: "plan",
++            plugin_dir: None,
++        };
++        claude.planner_command(&planner).unwrap();
++        let session = deny_of(&planner_dir.join("claude-settings.json"));
++        assert!(session.contains(&cmux) && session.contains(&identity));
++
++        let run = run_in(dir.path());
++        fs::create_dir_all(run.run_dir().unwrap()).unwrap();
++        claude
++            .review_command(&run, "review", crate::application::prompt::REVIEW_ACCESS)
++            .unwrap();
++        let review =
++            deny_of(&Path::new(run.run_dir().unwrap()).join("claude-review-settings.json"));
++        assert!(!review.contains(&cmux) && review.contains(&identity));
++
++        let queue_dir = dir.path().join("queue");
++        fs::create_dir_all(&queue_dir).unwrap();
++        let command = claude.inbox_command("inbox", None, &queue_dir).unwrap();
++        let path = queue_dir.join(INBOX_SETTINGS);
++        assert_eq!(claude.inbox_settings(&queue_dir), Some(path.clone()));
++        let args: Vec<_> = command.get_args().collect();
++        assert_eq!(
++            args[..2],
++            [std::ffi::OsStr::new("--settings"), path.as_os_str()]
++        );
++        let settings: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
++        assert_eq!(
++            settings,
++            serde_json::json!({"permissions": {"deny": permission_deny(ActorRole::Inbox)}})
++        );
++        assert!(deny_of(&path).contains(&cmux));
++    }
++
+     #[test]
+     fn every_role_gets_its_settings_from_one_table() {
+         for role in ActorRole::ALL {
+diff --git a/tests/it/lifecycle_plan.rs b/tests/it/lifecycle_plan.rs
+index 4b9b54b4..2af75b04 100644
+--- a/tests/it/lifecycle_plan.rs
++++ b/tests/it/lifecycle_plan.rs
+@@ -54,13 +54,24 @@ fn the_inbox_prompt_names_the_queue_and_its_one_job() {
+     assert!(!inbox.contains("/exit"));
+     assert!(inbox.contains("Never open the queue database directly"));
+ 
++    // The inbox's command writes its settings in the queue's directory.
++    let temp = tempfile::tempdir().unwrap();
++    let db = &temp.path().join("queue.db");
+     let command = inbox_command(db, Path::new("/opt/claude"), Some(Path::new("/p")), None).unwrap();
+     assert!(command.starts_with("'/opt/claude' '"), "{command}");
+     assert!(command.contains("'--' 'You are the inbox of"), "{command}");
+-    // A person works in the inbox: it has no settings of the runtime's, so
+-    // Claude Code's prompt suggestions stay on (goal 48).
+-    assert!(!command.contains("--settings"), "{command}");
+-    assert!(!command.contains("promptSuggestion"), "{command}");
++    // A person works in the inbox: its settings are only the denials
++    // (ADR-t1228-2 decision 3), so Claude Code's prompt suggestions stay on
++    // (goal 48).
++    let settings = db.parent().unwrap().join("claude-inbox-settings.json");
++    assert!(
++        command.contains(&format!("'--settings' {}", common::shell_path(&settings))),
++        "{command}"
++    );
++    let written = fs::read_to_string(&settings).unwrap();
++    assert!(written.contains("Bash(cmux:*)"), "{written}");
++    assert!(!written.contains("promptSuggestion"), "{written}");
++    assert!(!written.contains("hooks"), "{written}");
+     assert_eq!(ROLE_ENV, "DAGQ_ROLE");
+     assert_eq!(QUEUE_ENV, "DAGQ_QUEUE");
+     assert!(
+diff --git a/tests/it/lifecycle_up.rs b/tests/it/lifecycle_up.rs
+index be0aea9d..7498e4f0 100644
+--- a/tests/it/lifecycle_up.rs
++++ b/tests/it/lifecycle_up.rs
+@@ -361,7 +361,7 @@ fn up_starts_the_agent_and_the_sessions_once_and_reuses_them_after() {
+         assert_eq!(cwd, &root);
+         assert_eq!(
+             first[key],
+-            json!({"outcome": "created", "workspace_id": id, "name": name})
++            json!({"outcome": "created", "workspace_id": id, "name": name, "guardrail": true})
+         );
+         assert!(
+             command.starts_with(&format!("'{}'", fixture.options.claude.display())),
+@@ -406,6 +406,7 @@ fn up_starts_the_agent_and_the_sessions_once_and_reuses_them_after() {
+         first["inbox"]["workspace_id"]
+     );
+     assert_eq!(second["inbox"]["name"], first["inbox"]["name"]);
++    assert_eq!(second["inbox"]["guardrail"], true, "{second}");
+     assert_eq!(second["pruned_supervisors"], json!([]));
+     assert_eq!(launchd.installs.lock().unwrap().len(), 1);
+     assert!(launchd.uninstalls.lock().unwrap().is_empty());
+@@ -424,6 +425,97 @@ fn up_starts_the_agent_and_the_sessions_once_and_reuses_them_after() {
+     );
+ }
+ 
++/// `up` opens the inbox with settings of `permissions.deny` only, which
++/// refuse raw cmux, under the queue's directory, records that it did, and
++/// `status` and `doctor` say whether the recorded inbox has them: an inbox
++/// with no record of its open (one from before) has none, with the way to
++/// open it again (ADR-t1228-2 decisions 3 and 4).
++#[test]
++fn up_opens_the_inbox_with_the_cmux_guardrail_and_status_shows_whether_it_has_it() {
++    let fixture = fixture();
++    let cmux = FakeCmux::default();
++    let launchd = FakeLaunchd::new(&fixture.location.db);
++    let processes = FakeProcesses::default();
++    let report = up(&fixture, &cmux, &launchd, &processes);
++    assert_eq!(report["inbox"]["outcome"], "created", "{report}");
++    assert_eq!(report["inbox"]["guardrail"], true, "{report}");
++    let id = report["inbox"]["workspace_id"].as_str().unwrap().to_owned();
++
++    // Under the queue's directory, as `up` names it (canonical).
++    let settings = fixture
++        .location
++        .db
++        .canonicalize()
++        .unwrap()
++        .with_file_name("claude-inbox-settings.json");
++    let command = cmux.workspaces.lock().unwrap()[0].3.clone();
++    assert!(
++        command.contains(&format!("'--settings' {}", common::shell_path(&settings))),
++        "{command}"
++    );
++    assert!(command.contains("'--plugin-dir'"), "{command}");
++    let written: Value = serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
++    // Only `permissions.deny`: no hook, no idle marker, no suggestion
++    // setting, no autoMode.
++    assert_eq!(
++        written.as_object().unwrap().keys().collect::<Vec<_>>(),
++        ["permissions"]
++    );
++    assert_eq!(
++        written["permissions"]
++            .as_object()
++            .unwrap()
++            .keys()
++            .collect::<Vec<_>>(),
++        ["deny"]
++    );
++    let deny: Vec<&str> = written["permissions"]["deny"]
++        .as_array()
++        .unwrap()
++        .iter()
++        .map(|rule| rule.as_str().unwrap())
++        .collect();
++    for rule in [
++        "Bash(cmux:*)",
++        "Bash(DAGQ_ROLE=*)",
++        "Bash(unset DAGQ_ACTOR_ID*)",
++        // The inbox's role is refused what its policy does not grant.
++        "Bash(dagq request decline:*)",
++    ] {
++        assert!(deny.contains(&rule), "{rule}: {deny:?}");
++    }
++    assert!(!deny.contains(&"Bash(dagq answer:*)"), "{deny:?}");
++
++    let queue = SqliteQueue::open(&fixture.location.db).unwrap();
++    let opened = queue.latest_event_of("inbox_opened").unwrap().unwrap();
++    assert_eq!(opened.payload["workspace_id"], id.as_str());
++    assert_eq!(opened.payload["guardrail"], true);
++    assert_eq!(opened.payload["settings"], settings.to_str().unwrap());
++    let status = dagq::compose::status_for(&fixture.location.db, Some(SessionRole::Inbox)).unwrap();
++    assert_eq!(
++        status["inbox_guardrail"]["workspace_id"],
++        id.as_str(),
++        "{status}"
++    );
++    assert_eq!(status["inbox_guardrail"]["guardrail"], true, "{status}");
++    let doctor = dagq::compose::doctor(&fixture.location.db, false).unwrap();
++    assert_eq!(doctor["inbox_guardrail"]["guardrail"], true, "{doctor}");
++
++    // An inbox recorded with no record of its open: opened before the
++    // guardrail, so it has none and says how to open it again.
++    queue
++        .register_session_workspace(SessionRole::Inbox, "older-inbox")
++        .unwrap();
++    let status = dagq::compose::status_for(&fixture.location.db, Some(SessionRole::Inbox)).unwrap();
++    let guardrail = &status["inbox_guardrail"];
++    assert_eq!(guardrail["guardrail"], false, "{status}");
++    assert_eq!(guardrail["reason"], "no_record", "{status}");
++    assert!(
++        guardrail["next"].as_str().unwrap().contains("dagq up"),
++        "{status}"
++    );
++}
++
+ #[test]
+ fn up_fails_when_the_started_supervisor_never_registers() {
+     let fixture = fixture();

@@ -1,0 +1,20 @@
+diff --git a/tests/it/queue_migration.rs b/tests/it/queue_migration.rs
+index 7629aa63..adf19749 100644
+--- a/tests/it/queue_migration.rs
++++ b/tests/it/queue_migration.rs
+@@ -28,12 +28,9 @@ fn migration_to_v5_rebuilds_runs_moves_the_lease_and_keeps_foreign_keys() {
+     let dir = tempfile::tempdir().unwrap();
+     let path = dir.path().join("v3.db");
+     let raw = Connection::open(&path).unwrap();
+-    raw.execute_batch(include_str!("../../migrations/0001_queue.sql"))
+-        .unwrap();
+-    raw.execute_batch(include_str!("../../migrations/0002_supervisor.sql"))
+-        .unwrap();
+-    raw.execute_batch(include_str!("../../migrations/0003_workspace_close.sql"))
+-        .unwrap();
++    for migration in &MIGRATIONS[..3] {
++        raw.execute_batch(migration).unwrap();
++    }
+     raw.pragma_update(None, "application_id", 0x43545131)
+         .unwrap();
+     raw.pragma_update(None, "user_version", 3).unwrap();

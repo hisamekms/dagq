@@ -1,0 +1,1014 @@
+diff --git a/docs/adr/0048-record-claude-sessions-by-kind-with-open-and-active-time.md b/docs/adr/0048-record-claude-sessions-by-kind-with-open-and-active-time.md
+index dd5c200e..1a3c9200 100644
+--- a/docs/adr/0048-record-claude-sessions-by-kind-with-open-and-active-time.md
++++ b/docs/adr/0048-record-claude-sessions-by-kind-with-open-and-active-time.md
+@@ -9,6 +9,7 @@ accepted_on: 2026-09-26
+ amended_by:
+   - adr-t1404-1
+   - adr-t1433-3
++  - adr-t655-1
+ owners:
+   - hisamekms
+ tags:
+diff --git a/docs/adr/2026-10-04-t655-1-hook-close-defers-transcript-intake-to-the-supervisor.md b/docs/adr/2026-10-04-t655-1-hook-close-defers-transcript-intake-to-the-supervisor.md
+new file mode 100644
+index 00000000..5bdc53c1
+--- /dev/null
++++ b/docs/adr/2026-10-04-t655-1-hook-close-defers-transcript-intake-to-the-supervisor.md
+@@ -0,0 +1,53 @@
++---
++id: adr-t655-1
++type: adr
++title: hookで閉じるinbox・plannerの区間はtranscriptを読まずに先に閉じ、残りのturnと計測はsupervisorの取り込みが最終のsession_turnsに1回だけ書く。workspaceの無いhookの区間は同じkindの次の別sessionの開始で推定で閉じる（ADR-0048決定2・7・8・9をamends）
++status: accepted
++created: 2026-10-04
++updated: 2026-10-04
++accepted_on: 2026-10-04
++amends:
++  - adr-0048 decision 2
++  - adr-0048 decision 7
++  - adr-0048 decision 8
++  - adr-0048 decision 9
++owners:
++  - hisamekms
++tags:
++  - runtime
++  - supervisor
++  - plugin
++related:
++  - adr-0048
++  - adr-t1091-1
++  - design-provider-lifecycle
++  - design-plugin-integration
++  - design-supervisor-lifecycle-stats
++---
++
++# ADR-t655-1: hookで閉じる区間はtranscriptを読まずに先に閉じ、計測はsupervisorの取り込みに任せる（ADR-0048決定2・7・8・9をamends）
++
++## Context
++
++[ADR-0048](0048-record-claude-sessions-by-kind-with-open-and-active-time.md)決定8は、区間を閉じる記録（決定2の`session_closed`と同じ処理）が残りのturnを全部取り込むと決め、決定2・9は稼働時間の結果（`active`）と読めない理由のコードを`session_closed`に載せると決めた。inbox・plannerの区間を閉じるのはpluginの`SessionEnd` hook（`dagq session-event close`）と、同じworkspaceの次の`SessionStart`（`next_span`）で、どちらも閉じる前にtranscriptを読んでいた。
++
++Claude Codeは`SessionEnd` hookに短い時間しか与えない。transcriptが長い（本番のinboxで9 MB超）かDBが混んでいると、hookが打ち切られて区間が開いたまま残り、次の`SessionStart`かworkspaceの消失（決定7）まで閉じない。`CMUX_WORKSPACE_ID`の無いhookの区間はworkspaceで辿れないので、決定7の推定でも閉じず永久に開いたままになる（task 655）。
++
++## Decision
++
++1. **hookが閉じる区間は、transcriptを読まずに先に閉じる。** `SessionEnd`と`next_span`（と決定3の推定）で閉じる`inbox` / `planner` / `runtime_planner`の区間は、transcriptを読まずに`session_closed`を書き、`active: unavailable`・`active_unavailable: hook_intake_pending`（取り込み待ち）を載せる。ADR-0048決定2・9の「`session_closed`に稼働時間の結果と理由のコードを載せる」は、hookで閉じる区間についてはこの印に改める。runとjobの区間、supervisorがworkspaceの消失で閉じる区間は従来どおり閉じるときに取り込む。
++2. **残りのturnと計測は、supervisorの取り込みが閉じた後に1回だけ書く。** ADR-0048決定8の取り込み（既定10分ごとと、observerを起動する前）は、開いている区間に加えて、取り込み待ちの印を持つ閉じたhookの区間も対象にする。transcriptは書き込みのロックの外で読み、ロックの中で最終の取り込みが済んでいないことを確かめてから、記録済みの`through`より後のturn（最後のturnも含む）を`session_closed`の時刻で切って`session_turns`に書き、同じトランザクションで`final: true`の`session_turns`に計測（`active` / `active_secs`、`tokens`、`model` / `effort`、読めなければ`active: unavailable`と理由のコード）を載せる。最終の`session_turns`は区間に1つだけで、それがある区間は二度と読まない。`session_closed`とその時刻は書き換えない。決定8の「区間を閉じるときに残りのturnを全部取り込む」と「閉じるときに読めなければ`session_closed`を`active: unavailable`で書く」は、hookで閉じる区間についてはこの最終の取り込みに改める。読めなくても区間は閉じたままで、取り込みのDBへの書き込みに失敗したらその区間だけ次の取り込みで再試行する。
++3. **workspaceの無いhookの区間は、同じkindの次の別sessionの開始で推定で閉じる。** ADR-0048決定7に、`CMUX_WORKSPACE_ID`の無い`SessionStart`が、workspaceの無い同じkindの開いている区間のうちsession_idの違うものを`reason: inferred`で閉じる契機を足す。同じsession_idの`resume`・`compact`、別のkind、workspaceのある区間は閉じない。閾値は経過時間ではなく次の別sessionの開始1回で、常駐sessionの長いidleを終了と取り違えない。時刻はその開始を記録した時刻で、閉じるときtranscriptを読まないので決定7の「transcriptの最後のレコードの時刻」には寄せない。workspaceの無い同じkindの同時sessionは区別できず、後の開始が前の区間を閉じる。次の開始が来なければ閉じる契機は無い。
++4. **`stats`は最終の`session_turns`の計測を閉じた区間の計測として読み、出力項目を変えない。** 閉じる前に来た`final`は読まない。取り込みが済むまでは、その区間は稼働時間の無い区間（`active_unavailable`）として数える。
++
++## Alternatives
++
++- **`SessionEnd`の中で読む時間に上限を付ける**: 上限を超えたら結局読まずに閉じることになり、計測が抜ける区間と抜けない区間の規則が2つになる。
++- **transcriptの最終更新から一定時間で閉じる**: 常駐のinboxは何時間もidleでいるので、時間の閾値は生きているsessionを閉じる。
++- **`session_closed`を取り込みの後に書き換える**: run_eventsはappend-onlyで、過去のeventを書き換えない。
++
++## Consequences
++
++- `SessionEnd` hookの所要時間はtranscriptの大きさに依らない（9,249,259 byteのfixtureで0.0077秒、task 655）。DBの書き込み待ちは残る。
++- hookの区間の稼働時間・トークン数・modelは、閉じてから最大で取り込みの間隔（10分）遅れて`stats`に出る。supervisorが居なければ出ない。
++- 今の姿は[provider-lifecycle](../design/provider-lifecycle.md#transcriptと稼働時間)・[plugin-integration](../design/plugin-integration.md)・[stats](../design/supervisor-lifecycle/stats.md)が持つ。
+diff --git a/docs/adr/README.md b/docs/adr/README.md
+index b50731f0..623db89e 100644
+--- a/docs/adr/README.md
++++ b/docs/adr/README.md
+@@ -142,6 +142,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由
+ | [ADR-t1582-1](2026-10-04-t1582-1-temporarily-leave-broker-and-cmux-only-e2e-cases-out.md) | brokerのe2e 1ケース（task 1451で復帰）とcmux固有のe2e 3ケース（sweepはtask 1440、plannerはtask 1441、`up --in-cmux`はtask 1443で削除か置換）を、本文を残したまま`#[cfg(any())]`で期間限定でe2eの登録から外し、着地の前のe2eと自動更新・`install`の関門の「全部のe2e」から除く（ADR-t963-1決定1・3、ADR-t1233-2決定2をamends） | 2026-10-04 |
+ | [ADR-t1545-1](2026-10-04-t1545-1-split-the-runtime-by-layer-and-context.md) | runtimeの責務をレイヤーとコンテキスト（計画管理・実行と着地・観測と分析・host運用）の2軸で分け、contextの間を公開したportと値（ID・型付きのevent）だけでつなぎ、観測と分析は読むだけにし、境界をまたぐtransactionは設計文書の一覧で名指しした例外だけにし、規則の本文は設計文書の1か所に置いてreviewのsubagentと検査は参照と検査項目だけを持ち、crateやdirectoryを増やすことを目的にしない（ADR-0013決定1をamends） | 2026-10-04 |
+ | [ADR-t1479-1](2026-10-04-t1479-1-space-new-claims-while-the-load-hold-is-on.md) | loadの保留が有効なsupervisorは新しいclaimの間を空け（1つのpassで新しくclaimするのは1本）、間隔をqueueの最新のclaimから測り、間隔が過ぎたpassでloadを判定し直してから次をclaimする。保留を切ると間を空けず、対象は新しいclaimだけ | 2026-10-04 |
++| [ADR-t655-1](2026-10-04-t655-1-hook-close-defers-transcript-intake-to-the-supervisor.md) | hookで閉じるinbox・plannerの区間はtranscriptを読まずに`hook_intake_pending`で先に閉じ、残りのturnと計測はsupervisorの取り込みが最終の`session_turns`（`final: true`）に1回だけ書く。`CMUX_WORKSPACE_ID`の無いhookの区間は、同じkindでworkspaceの無い次の別sessionの`SessionStart`で`inferred`に閉じる（ADR-0048決定2・7・8・9をamends） | 2026-10-04 |
+ 
+ goal 82（goal 38の段(1)〜(3)）のADRはtask 1233が書いた5本で、決定の置き場所は次のとおり。制御側と実行側の分け方・queue service・ユースケース単位のAPIとservice側の認可・unix socket・broker・クライアントモード・段の順と置き場所はADR-t1233-1、serviceの起動・停止の責任・落ちたときの知らせ方・brokerより前のprincipalの認証（token）はADR-t1233-4、読み取りのユースケースとroleごとの読める範囲・workerの読める範囲・Codexのsandboxからの到達はADR-t1233-5、e2eをreviewのpassの後のhostの工程に移すことはADR-t1233-2、このrepositoryを先にLinuxで通すことはADR-t1233-3にある。
+ 
+diff --git a/docs/design/persistence.md b/docs/design/persistence.md
+index f05cda7f..62f9339a 100644
+--- a/docs/design/persistence.md
++++ b/docs/design/persistence.md
+@@ -4,8 +4,8 @@ type: design
+ title: SQLite persistence
+ status: current
+ created: 2026-09-21
+-updated: 2026-10-04 # task 1479: supervisors.claim_spacing, claim_spacing_source and max_load (0063)
+-last_verified: 2026-10-04 # task 1479
++updated: 2026-10-04 # task 655: the hook intake's queries use events_by_opened_event
++last_verified: 2026-10-04 # task 655
+ scope: persistence
+ related:
+   - adr-t1394-1
+@@ -342,7 +342,7 @@ queueを開いただけではmigrateしない（[ADR-0045](../adr/0045-build-ide
+ 
+ SQLiteはCHECK制約を変更できないため、statusの追加はtableの作り直し（`CREATE ... _vN` → `INSERT ... SELECT`（rowidも複写） → `DROP` → `RENAME` → index再作成）で行う。`DROP TABLE`はforeign keyが有効だと参照元の行があるとき失敗するので、migration実行中はトランザクションの外で`foreign_keys=OFF`にし、commit前に`pragma_foreign_key_check`が0件であることを確認してからONに戻す。`0004_integration.sql`がこの形の最初の例。`0005_run_leases.sql`は`run_leases`を作り、v4の`supervisor_leases`の行を`supervisor_token`が一致する実行中runへ移してから`supervisor_leases`と`one_executing_run_per_queue`を落とす（tableの作り直しは不要）。`0006_merge_queue.sql`は0004と同じ手順で`task_runs`を作り直して`integrating`と`needs_session`をCHECKに加え、`one_unfinished_run_per_task`を2状態込みで作り直し、`one_integrating_run_per_queue`を足す。`run_leases`の外部キーは`task_runs`を名前で参照しているので作り直し後もそのまま有効で、`foreign_key_check`で確認する。`0007_supervisors.sql`は`supervisors`を作るだけで、既存の行には触れない。`0009_supervisor_mode.sql`は`supervisors`に`mode`（CHECK `mode IN ('launchd','in_cmux')`、既定null）と`workspace_id`を`ALTER TABLE ADD COLUMN`で足す（既定がnullなので作り直し不要）。migration中に動いているsupervisorの行は`mode`がnullになり、次の`up`まで手で起動したものと同じ扱いになる。v6のsupervisorが動いている最中にmigrationが走っても、そのsupervisorは登録を持たないままleaseだけで`status`/`doctor`に並ぶ。`0010_supervisor_binary_version.sql`は`supervisors`に`binary_version`を`ALTER TABLE ADD COLUMN`で足す（既定がnullなので作り直し不要。CHECKも置かない——versionはbinaryが名乗る文字列で、runtimeが列挙できない）。migration中に動いているsupervisorの行は`binary_version`がnullになり、次の`up`が「自分のversionではない」として入れ替える（[ADR-0014](../adr/0014-up-replaces-a-supervisor-of-another-binary-version.md)）。`0008_goals.sql`は`goals`を作り、`tasks`に`goal_id`と`context`を`ALTER TABLE ADD COLUMN`で足し（既定がnull / `''`なので作り直し不要）、`run_events`を0004と同じ手順で作り直す（`id`（AUTOINCREMENT）も複写するので、イベントIDと順序、`sqlite_sequence`の続きが保たれる）。`0012_queue_events.sql`は`run_events`を0008と同じ手順で作り直し、CHECKを`task_id IS NOT NULL OR goal_id IS NOT NULL OR kind = 'backend_call_failed'`に緩める（`run_id`があれば`task_id`も非null、の CHECK と複合外部キーはそのまま）。runに紐づかないcmuxの呼び出し（`up`のworkspace、queueのworkspace group、`down`のclose）の失敗をqueue単位のイベントとして残すためで、ほかのkindの規則は変えない。`0013_goal_draft.sql`は`goals`に`status`を`ALTER TABLE ADD COLUMN`で足す（既定`'open'`があるので作り直し不要。CHECKは列の定義に置く）。`0014_asks.sql`は`asks`と部分UNIQUE index `asks_open`を作るだけで、既存の表には触れない（schema version 14）。`0015_task_required_evidence.sql`は`tasks`に`required_evidence`を`ALTER TABLE ADD COLUMN`で足す（既定`'[]'`があるので作り直し不要。schema version 15）。`0018_task_paths.sql`は`tasks`に`paths`を同じく`ALTER TABLE ADD COLUMN`で足す（既定`'[]'`、schema version 18）。`0019_task_goal_dependencies.sql`は`task_goal_dependencies`とindex `goal_dependencies_by_goal`を作るだけで、既存の表には触れない（schema version 19）。`0021_proposals.sql`は`proposals`を作り、`goals`に`proposal_id`を`ALTER TABLE ADD COLUMN`で足し、`tasks`を0004と同じ手順で作り直してstatusのCHECKに`submitted`を加え`proposal_id`を足す（0008・0015・0018・0020で足した列も複写する）。`tasks`は`AUTOINCREMENT`なので、作り直しの前の`sqlite_sequence`の`seq`を一時表に取り、作り直し後に`seq`と`max(id)`の大きい方で入れ直す（消したtaskのIDを再び払い出さない）。`tasks_by_goal`を作り直し、`tasks_by_proposal`を足す。既存の行のstatusは変えないので、既存のdraftはdraftのまま残る（schema version 21）。`0016_observer.sql`は0012と同じ手順で`asks`と`run_events`を作り直す（idを複写する）。`asks`はkindのCHECKに`blocked`を足し、`task_id`をnull可にして`asks_open`をtaskの無い行も数える形で作り直す。`run_events`はtaskにもgoalにも紐づかない行を許すkindを`backend_call_failed`、`observe_started`、`observe_finished`、`ask_opened`、`ask_answered`に広げ、supervisorのtimerが毎pass引く最後の`observe_*`のためにindex `events_by_kind (kind, id)`を足す（schema version 16）。`SqliteQueue::SCHEMA_VERSION`（`MIGRATIONS`の長さ）が最新の`user_version`で、testはこの定数と比較し、最新のschemaの番号を数字で書かない。「ある版から最新まで」の一覧（`migrate`の`applied`、`--check`の`pending`）は`MIGRATIONS`と`schema::is_compatible`から組み立てる（ADR-0067の決定4。migrationを足すたびにtestが書き換わって衝突しないため）。古いschemaのqueueを作って確かめるtestは、`open`が`dagq migrate`を案内して`user_version`を変えないことを確かめてから`SqliteQueue::migrate`で上げる。
+ 
+-`run_events`のindex `events_by_opened_event`（0058、task 1333）は`(kind, json_extract(payload,'$.opened_event_id'))`の式のindexで、`session_closed`と`session_turns`を、それが閉じる・属する区間の`session_opened`のidで引く（`sessions`の`open_spans`の相関`NOT EXISTS`、turnの取り込みの「閉じたか」、`recorded_turns`）。これが無いあいだは`events_by_kind`でそのkindの全行を辿り、開いている区間を探すたびにsessionの数の2乗の`json_extract`を書き込みのlockの中で行っていた（2,565区間・`run_events`約5.9万行のfixtureで`open_spans`の全区間の1回が5.5〜8.8秒から2ミリ秒、`recorded_turns`の1回が9ミリ秒から1ミリ秒未満、indexの作成は87ミリ秒）。queryがこのindexを引くのは、indexと同じ式を`kind`の等号と並べて書き、比べる相手にaffinityが掛からないときだけなので、bindした値か`+o.id`（列の`o.id`のままではINTEGERのaffinityが式に掛かってindexを使わない）と比べる。`sessions`の`the_searches_by_the_opened_event_use_its_index`がEXPLAIN QUERY PLANでこれを確かめる。`run_events`を作り直すmigrationは、`events_by_task`・`events_by_goal`・`events_by_kind`と同じくこのindexも作り直す。
++`run_events`のindex `events_by_opened_event`（0058、task 1333）は`(kind, json_extract(payload,'$.opened_event_id'))`の式のindexで、`session_closed`と`session_turns`を、それが閉じる・属する区間の`session_opened`のidで引く（`sessions`の`open_spans`の相関`NOT EXISTS`、turnの取り込みの「閉じたか」、`recorded_turns`、閉じたhookの区間の取り込み待ちを探す`pending_hook_intakes_sql`の相関`NOT EXISTS`と、最終の取り込みが済んだかの`hook_intake_finished_sql`（task 655））。これが無いあいだは`events_by_kind`でそのkindの全行を辿り、開いている区間を探すたびにsessionの数の2乗の`json_extract`を書き込みのlockの中で行っていた（2,565区間・`run_events`約5.9万行のfixtureで`open_spans`の全区間の1回が5.5〜8.8秒から2ミリ秒、`recorded_turns`の1回が9ミリ秒から1ミリ秒未満、indexの作成は87ミリ秒）。queryがこのindexを引くのは、indexと同じ式を`kind`の等号と並べて書き、比べる相手にaffinityが掛からないときだけなので、bindした値か`+o.id`（列の`o.id`のままではINTEGERのaffinityが式に掛かってindexを使わない）と比べる。`sessions`の`the_searches_by_the_opened_event_use_its_index`がEXPLAIN QUERY PLANでこれを確かめる。`run_events`を作り直すmigrationは、`events_by_task`・`events_by_goal`・`events_by_kind`と同じくこのindexも作り直す。
+ 
+ `run_events`のindex `events_by_run`（0062、goal 103）は`(run_id, id)`で、`WHERE run_id=?1`で始まるrunのイベントの検索（`SqliteQueue::run_events`と`run_events_of`、`has_run_event`、resumeの`resume_started`の最大、`sessions`のrunのturnとイベントの数）を引く。これが無いあいだは`run_events`の全行を走査するか（`run_events`）、kindのindex（`events_by_kind`・`events_by_opened_event`）でそのkindの全runの行を辿っていた。`run_id IS NULL`で絞るplannerのturnの検索（`planner_turns_sql`・`planner_turn_events_sql`）は、runの無いイベント全部をこのindexで辿らないよう`+run_id IS NULL`と書いてkindのindexを引く。`sessions`の`the_searches_by_the_run_use_an_index`がEXPLAIN QUERY PLANでこれを確かめる。`run_events`を作り直すmigrationは、このindexも作り直す。
+ 
+diff --git a/docs/design/plugin-integration.md b/docs/design/plugin-integration.md
+index 1f676532..a6ade5f7 100644
+--- a/docs/design/plugin-integration.md
++++ b/docs/design/plugin-integration.md
+@@ -4,10 +4,11 @@ type: design
+ title: Claude Code and Codex plugin integration
+ status: current
+ created: 2026-09-21
+-updated: 2026-10-03 # task 1398: the hook skips a headless planner
+-last_verified: 2026-10-03 # task 1398
++updated: 2026-10-04 # task 655: the hook's close reads no transcript
++last_verified: 2026-10-04 # task 655
+ scope: distribution
+ related:
++  - adr-t655-1
+   - adr-0005
+   - adr-0006
+   - adr-0010
+@@ -172,6 +173,7 @@ runtimeがheadlessで起動しないinbox・planner（runtimeが立てるもの
+ - `session-event.sh`は`DAGQ_ROLE`が`inbox` / `planner`で`DAGQ_QUEUE`があるときだけ、hookのstdin（`session_id`・`transcript_path`・`cwd`・`source` / `reason`）をそのまま`bin/dagq session-event open|close`（隠しコマンド）に渡す。`DAGQ_DB`が無ければ`DAGQ_QUEUE`を`DAGQ_DB`にする。それ以外のsession（workerを含む。workerの区間はruntimeが書く）では何もしない。
+ - 区間のkindはworkspaceの`--env`の`DAGQ_SESSION_KIND`（`up`がinboxに`inbox`、supervisorが立てるplannerに`runtime_planner`を置く。廃止前の`dagq plan`は`planner`を置いた）で、無い古いworkspaceは`DAGQ_ROLE`（plannerは`DAGQ_PLANNER_ORIGIN=runtime`なら`runtime_planner`）から決める。workspaceは`CMUX_WORKSPACE_ID`、plannerは`DAGQ_PLANNER_ID`から取る。
+ - `/clear`とcompactionで二重に数えない: 同じsession_idの`SessionStart`（`resume`・`compact`）は開いている区間を続け、別のsession_idの`SessionStart`は同じworkspaceの開いている区間を`next_span`で閉じてから開き、閉じた区間への2回目の`SessionEnd`は何も書かない。
++- closeはtranscriptを読まない（task 655）: `SessionEnd` と次の `SessionStart` によるcloseは先に `session_closed` をcommitし、残りの稼働時間・tokens・modelの取り込みはsupervisorの10分ごととobserver前に任せる。最終 `session_turns` の印で一度だけ取り込み、読めなくても区間は閉じたまま。`CMUX_WORKSPACE_ID` が無い場合は、workspace IDの無い同kindの次の別sessionの開始で前を `inferred` に閉じる（時間の閾値は使わない。次の開始1回が契機）。同じIDのresume・compactや別kind、workspace IDのある区間には影響しない。詳細と同時sessionの制約は[provider-lifecycle](provider-lifecycle.md#claude-sessionの区間)。
+ - 失敗してもsessionを止めない: 何も出力せず（`SessionStart`のstdoutはcontextに入るので）、`dagq`が無い・実行できない、queueが開けない、入力にsession_idが無い、記録に失敗した、のどれでもexit 0する。記録のCLIは区間のeventだけを書き、run・proposal・plannerの状態を変えない。
+ 
+ ### launcher
+diff --git a/docs/design/provider-lifecycle.md b/docs/design/provider-lifecycle.md
+index 9f964a60..12417c89 100644
+--- a/docs/design/provider-lifecycle.md
++++ b/docs/design/provider-lifecycle.md
+@@ -4,10 +4,11 @@ type: design
+ title: Agent provider lifecycle
+ status: current
+ created: 2026-09-21
+-updated: 2026-10-04 # task 251
+-last_verified: 2026-10-04 # task 251
++updated: 2026-10-04 # task 655
++last_verified: 2026-10-04 # task 655
+ scope: provider
+ related:
++  - adr-t655-1
+   - adr-t1228-2
+   - adr-t1340-1
+   - adr-0004
+@@ -124,12 +125,13 @@ runtimeが起動するClaude sessionは、kindごとの区間（`session_opened`
+ 
+ - **推定で閉じる（`inferred`）**: runのsessionの区間（`worker` / `resume` / `revise`）は、`session_exited`の無いまま次の`agent_started`が来たとき、`workspace_closed`・`run_recovered`・`triage_started`で閉じる（`run_recovered`と`triage_started`は開いている`review`も閉じる）。`record_runtime_event`はeventと区間を1つの書き込みトランザクション（`BEGIN IMMEDIATE`）で書く。jobの区間は、終わりのeventの無いまま同じkindの次の開始（別のsupervisorが引き継いだreviewの`review_started`、triageの`triage_started`、次の`observe_started`）で閉じ、plan reviewは行を`interrupted`で閉じたとき（supervisorが居ない行は`inferred`、proposalが動いたときは`job_finished`）に、goal reviewも行を`interrupted`で閉じたとき（supervisorが居ない行は`inferred`、goalかtaskが変わったときは`job_finished`）に閉じる。時刻は、transcriptが読めればその最後のレコードの時刻（区間の開始と閉じたeventの時刻の間に収める）、読めなければ閉じたeventの時刻。
+ - **失敗したreview**（task 541）: headlessのreviewのjobがverdictを返さずに終わった（非0・timeout・やり直しでも読めないverdict）か起動できなかったとき、`review_failed`はworkerのsessionの`/exit`の後に記録する（[review](supervisor-lifecycle/review.md)の5）ので、supervisorはjobの終わった時点で`SessionRegistry::close_review_session`（`infrastructure::sessions::close_review`）を呼び、そのrunの開いている`review`の区間を`job_finished`で閉じる（時刻はそのとき。書くのは`session_closed`（と`session_turns`）だけで、runtimeのeventは足さない）。区間には`/exit`の待ち（`stuck_exit`を含む）が入らない。後の`review_failed`は閉じる区間が無いので何も書かない。閉じるのに失敗してもlogだけで、その区間は従来どおり`review_failed`で閉じる。過去のeventから作る区間は変わらない。
+-- `session_opened`のpayloadは`kind`、`session_id`、`cwd`（runのsessionとreviewはworktree、triageはrun directory、observerは観測のdirectory、plan reviewは`plan_review_started`の`cwd`＝jobを起動したrepositoryのcheckout。`cwd`を持たない過去の`plan_review_started`からの区間はnull）、`transcript_path`（null）、`attempt`、`workspace_id`（`worker`はrunのworkspace、`revise`は`revise_requested`のもの）、runのsessionの区間（`worker` / `resume` / `revise`）はrunの経路`route`（`interactive` / `headless`。runの`worker_mode`）と`provider`（runの`actual_provider`。ADR-t813-2の決定7。それより前の区間には無い）、plan reviewは`proposal_id`・`plan_review_id`・`goal_ids`（その時のproposalのtaskのgoal）、goal reviewは`goal_id`・`goal_ids`（`[goal_id]`）・`goal_review_id`（`cwd`は`goal_review_started`の`cwd`）、headlessのjobは開始のeventが持てば起動の`launch`（[Actor model](supervisor-lifecycle/actor-model.md)）。`session_closed`は`opened_event_id`・`kind`・`session_id`・`reason`と、稼働時間を記録したか（`active`: `recorded`なら`active_secs`、`unavailable`なら理由のコード`active_unavailable`。下の[transcriptと稼働時間](#transcriptと稼働時間)）。runのsessionの区間（`worker` / `resume` / `revise`）は、transcriptが読めれば作業の内訳`work`も持つ（下の[作業の内訳](#作業の内訳)）。どの区間も、transcriptが読めれば区間のトークン数`tokens`と、使ったmodel / effort（`model`・`effort`、変わったなら`models`）を持つ（下の[トークン数とコスト](#トークン数とコスト)と[modelとeffort](#modelとeffort)）。1つの区間は1回だけ閉じる（閉じた区間への2回目の終了は何も書かない）。Claude以外のproviderのjobの区間（`launch.provider`が`codex`。`OpenSpan::provider`はrunの区間の`provider`、無ければ`launch.provider`を読む）はtranscriptを読まず（`active_unavailable`は`transcript_not_claude`）、閉じるeventのpayloadから、区間の`session_id`が無ければその`session_id`を、`model`・`model_unknown`があればそれを`session_closed`に写す（`infrastructure::sessions::close_with`。task 1065）。
+-- **inbox・plannerの区間（hook）**（ADR-0048の決定6・7、task 387）: runtimeがheadlessで起動しないinbox・runtimeが立てるplanner・廃止前に人が`dagq plan`で開いたplannerの区間は、pluginの`SessionStart`（matcherなしで`startup` / `resume` / `clear` / `compact`の全部）と`SessionEnd`のhook（`hooks/session-event.sh open|close`、[plugin-integration](plugin-integration.md#sessionの区間hookadr-0048)）が隠しコマンド`dagq session-event open|close`で記録する。CLIはhookのstdin（`session_id`・`transcript_path`・`cwd`・`source` / `reason`）と環境変数（kindの`DAGQ_SESSION_KIND`、無い古いworkspaceは`DAGQ_ROLE`から`inbox` / `planner`、`DAGQ_PLANNER_ORIGIN=runtime`なら`runtime_planner`。workspaceの`CMUX_WORKSPACE_ID`、plannerの`DAGQ_PLANNER_ID`）を`domain::sessions::SessionHook`にし、`domain::sessions::hook_changes`（純粋関数）が開いている3つのkindの区間から開き閉じるものを決め、`infrastructure::sessions::record_hook`が1つの書き込みトランザクションで書く（閉じる区間のtranscriptはその前に読む）。`up`はinboxのworkspaceに`DAGQ_SESSION_KIND=inbox`、runtimeが立てるplannerは`runtime_planner`を`--env`で置く（廃止前の`dagq plan`は`planner`を置いた）。
++- `session_opened`のpayloadは`kind`、`session_id`、`cwd`（runのsessionとreviewはworktree、triageはrun directory、observerは観測のdirectory、plan reviewは`plan_review_started`の`cwd`＝jobを起動したrepositoryのcheckout。`cwd`を持たない過去の`plan_review_started`からの区間はnull）、`transcript_path`（null）、`attempt`、`workspace_id`（`worker`はrunのworkspace、`revise`は`revise_requested`のもの）、runのsessionの区間（`worker` / `resume` / `revise`）はrunの経路`route`（`interactive` / `headless`。runの`worker_mode`）と`provider`（runの`actual_provider`。ADR-t813-2の決定7。それより前の区間には無い）、plan reviewは`proposal_id`・`plan_review_id`・`goal_ids`（その時のproposalのtaskのgoal）、goal reviewは`goal_id`・`goal_ids`（`[goal_id]`）・`goal_review_id`（`cwd`は`goal_review_started`の`cwd`）、headlessのjobは開始のeventが持てば起動の`launch`（[Actor model](supervisor-lifecycle/actor-model.md)）。`session_closed`は`opened_event_id`・`kind`・`session_id`・`reason`と、稼働時間を記録したか（`active`: `recorded`なら`active_secs`、`unavailable`なら理由のコード`active_unavailable`。下の[transcriptと稼働時間](#transcriptと稼働時間)）。runのsessionの区間（`worker` / `resume` / `revise`）は、transcriptが読めれば作業の内訳`work`も持つ（下の[作業の内訳](#作業の内訳)）。どの区間も、transcriptが読めれば区間のトークン数`tokens`と、使ったmodel / effort（`model`・`effort`、変わったなら`models`）を持つ（下の[トークン数とコスト](#トークン数とコスト)と[modelとeffort](#modelとeffort)）。ただしhookで閉じた区間は、稼働時間・`tokens`・model / effortを`session_closed`でなく、閉じた後の最終取り込みの`session_turns`（`final: true`）に持つ（task 655）。1つの区間は1回だけ閉じる（閉じた区間への2回目の終了は何も書かない）。Claude以外のproviderのjobの区間（`launch.provider`が`codex`。`OpenSpan::provider`はrunの区間の`provider`、無ければ`launch.provider`を読む）はtranscriptを読まず（`active_unavailable`は`transcript_not_claude`）、閉じるeventのpayloadから、区間の`session_id`が無ければその`session_id`を、`model`・`model_unknown`があればそれを`session_closed`に写す（`infrastructure::sessions::close_with`。task 1065）。
++- **inbox・plannerの区間（hook）**（ADR-0048の決定6・7、task 387）: runtimeがheadlessで起動しないinbox・runtimeが立てるplanner・廃止前に人が`dagq plan`で開いたplannerの区間は、pluginの`SessionStart`（matcherなしで`startup` / `resume` / `clear` / `compact`の全部）と`SessionEnd`のhook（`hooks/session-event.sh open|close`、[plugin-integration](plugin-integration.md#sessionの区間hookadr-0048)）が隠しコマンド`dagq session-event open|close`で記録する。CLIはhookのstdin（`session_id`・`transcript_path`・`cwd`・`source` / `reason`）と環境変数（kindの`DAGQ_SESSION_KIND`、無い古いworkspaceは`DAGQ_ROLE`から`inbox` / `planner`、`DAGQ_PLANNER_ORIGIN=runtime`なら`runtime_planner`。workspaceの`CMUX_WORKSPACE_ID`、plannerの`DAGQ_PLANNER_ID`）を`domain::sessions::SessionHook`にし、`domain::sessions::hook_changes`（純粋関数）が開いている3つのkindの区間から開き閉じるものを決め、`infrastructure::sessions::record_hook`が1つの書き込みトランザクションで書く（hookはtranscriptを読まず、閉じる記録を先に確定する。task 655）。`up`はinboxのworkspaceに`DAGQ_SESSION_KIND=inbox`、runtimeが立てるplannerは`runtime_planner`を`--env`で置く（廃止前の`dagq plan`は`planner`を置いた）。
+   - 同じsession_idの区間が開いていれば（`resume`・`compact`・session_idの変わらない`clear`）何も書かず、その区間を続ける。別のsession_idの`SessionStart`なら、同じworkspaceで開いている区間を`next_span`で閉じてから新しい区間を開く（`/clear`の新しいsession_id。`SessionEnd`（`reason: clear`）が先に来ればそれが閉じる）。`SessionEnd`はそのsession_idの区間を閉じ、`reason`は`clear` / `logout`はそのまま、ほか（`prompt_input_exit` / `other`など）は`exited`。閉じた区間への2回目の終了は何も書かないので、`/clear`の`SessionEnd`と次の`SessionStart`の両方が来ても区間は1回だけ閉じ、二重に数えない。
+   - `session_opened`のpayloadは`kind`・`session_id`・`cwd`・`transcript_path`（hookが渡したもの。稼働時間はこのtranscriptから読む）・`workspace_id`・`provider`（`claude`）・`source`、plannerは`planner_id`とworkspaceの`DAGQ_LAUNCH`から起動の`launch`（[Actor model](supervisor-lifecycle/actor-model.md)）、`runtime_planner`はそのplannerの`proposal_id`と`goal_ids`（`stats`の`--goal`に使う）。proposalの無いruntimeのplanner（draftのplanner）とinbox・廃止前に開いた人のplannerはtaskの無いevent。
+-  - hookのCLIは区間のeventだけを書き、run・proposal・plannerの状態を変えない。開いている区間の完了したturnはsupervisorの取り込み（下の[transcriptと稼働時間](#transcriptと稼働時間)）が記録し、閉じるときに残りを記録して`active_secs`を持つ。
++  - hookのCLIは区間のeventだけを書き、run・proposal・plannerの状態を変えない。開いている区間の完了したturnはsupervisorの取り込み（下の[transcriptと稼働時間](#transcriptと稼働時間)）が記録し、閉じた後の最終取り込みで残りを記録し、`session_turns`に`active_secs`を持つ（task 655）。
+   - **推定で閉じる**: supervisorは取り込みのたび（既定10分ごとと、observerの起動前）に、hookが記録した開いている区間のworkspaceが`cmux workspace list`（`listed_workspace_ids`）に居るかを見て、居なければ`inferred`で閉じる（`SessionRegistry::close_gone_sessions`）。区間は一覧を取る前に読むので、その後に開いた区間を消えたものと取り違えない。時刻はtranscriptの最後のレコード（読めなければ閉じた時刻）。workspaceを持たない区間と、一覧を取れなかったときは閉じない。失敗はlogだけ。
++- **workspace ID の無いhook**（ADR-t655-1の決定3、task 655）: `CMUX_WORKSPACE_ID` が無い区間の `SessionEnd` を取り逃したときは、同じqueueでworkspace IDの無い同じkind（roleから解決済みの `inbox` / `planner` / `runtime_planner`）の別sessionの `SessionStart` が来た時点で `inferred` に閉じる。同じsessionのresume・compactは閉じない。workspace IDのある区間や別kindは閉じない。閾値は経過時間ではなく「次の別sessionの開始」1回で、終了時刻はその開始を記録した時刻（closeはtranscriptを読まないので、ほかの`inferred`と違ってtranscriptの最後のレコードに寄せない）。常駐sessionの長いidleを終了と誤認しないため、transcriptのmtimeによるtimeoutは設けない。workspace IDの無い同kindの同時sessionは区別できず、後の開始で前を閉じる。次の開始が一度も来なければ回復の契機は無い。
+ - queueのeventとして`session_opened` / `session_closed` / `session_turns`を書けるよう、migration 0035がrun_eventsのCHECKにこの3つを足した（breaking）。このADRが入る前のrunには区間が無く、埋め直さない。
+ 
+ Claude providerは、対話の経路を選んだtaskではcmux内の通常セッションを起動し（既定の非対話の経路は[非対話のworker](supervisor-lifecycle/headless-worker.md)）、実装、unit test、subagent review、完了レポートを実行させる。e2eはどのproviderのworkerも流さず、e2eが要るrunにはreviewのpassの後にruntimeがhostで流す（[ADR-t1233-2](../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)、[Review](supervisor-lifecycle/review.md#着地の前のe2e)）。Codexのworkspace-writeのsandboxで走らないe2eを名前で除外する規則（ADR-t963-1決定5、task 1206）は無くなった。Codex providerはCodexの対応するセッション方式を使う。provider capabilityとしてinteractive、subagents、stream events、structured resultを表現する。
+@@ -147,11 +149,14 @@ requested providerとactual providerと経路をTaskRunに保存する（下の[
+ - **turn**: 実際の入力から、次の実際の入力の前の最後の出力まで（出力が無ければ0秒）。tool・subagent（sidechain）の時間はturnに入り、sidechainの入力はturnを区切らない。turnは入力の時刻が入っている区間に属し、区間の終わりで切る。
+ - **読めない**: `Transcripts::read`は、session_idが無い（`session_unknown`）、ファイルが無い（`transcript_missing`）、どの行もJSONでない・UTF-8でない（`transcript_unparsable`）、必要なフィールドを持つレコードが無い（`transcript_unsupported`）、`sessionId`が区間のものと違う（`session_mismatch`）とき`Unreadable`を返す。JSONでない行（書きかけの最後の行など）は飛ばし、数をtracingに書く。
+ - **reviseの切り替え**: reviseの文面はtask 241より前は`revise_requested`を書く前にsessionへ送っていた（今は送る直前に`sent_at`を取って記録してから送る）ので、`revise_requested`が閉じる区間の`session_closed`と、開く`revise`の区間の`session_opened`は、payloadの`sent_at`（送った時刻。ミリ秒まで、task 1197より前の記録は秒。`domain::request_sent_at_millis`で読む）の時刻で書く（`revise_requested`より前のときだけ）。これでreviseの入力のturnは`revise`の区間に属する。送れずに`revise_unsent`で取り消したreviseは、`revise`の区間を閉じ、その前のsessionの区間（送った前のreviseがあれば`revise`、無ければ`resume`か`worker`）を同じ`session_id`で開き直す。`revise`の`attempt`は`revise_unsent`で取り消した分を数えない。
+-- **閉じるとき**: `sessions::close`は区間のtranscriptから、まだ記録していないturn（前の`session_turns`の`through`より後に始まったもの。区間の終わりで切る）を`session_turns`（`opened_event_id`・`kind`・`session_id`・`turns: [[開始, 終了], ...]`・`through`（最後のturnの終わり））として書き、記録済みのturnと合わせた秒を`session_closed`の`active_secs`にする。読めなければ`session_turns`を書かず、`active: unavailable`とコードを書き、理由とClaude Codeのversionを`info`のtracingに書く。どちらでも区間を閉じたevent・run・jobの結果は変わらない。
++- **run・job、workspace消失の推定で閉じるとき**: `sessions::close`は区間のtranscriptから、まだ記録していないturn（前の`session_turns`の`through`より後に始まったもの。区間の終わりで切る）を`session_turns`（`opened_event_id`・`kind`・`session_id`・`turns: [[開始, 終了], ...]`・`through`（最後のturnの終わり））として書き、記録済みのturnと合わせた秒を`session_closed`の`active_secs`にする。読めなければ`session_turns`を書かず、`active: unavailable`とコードを書き、理由とClaude Codeのversionを`info`のtracingに書く。どちらでも区間を閉じたevent・run・jobの結果は変わらない。
++- **hookで閉じるとき**（[ADR-t655-1](../adr/2026-10-04-t655-1-hook-close-defers-transcript-intake-to-the-supervisor.md)、task 655）: `record_hook` の `SessionEnd` と `next_span`（workspace IDなしの次の開始による `inferred` も）はtranscriptを一切読まず、`session_closed` を `active: unavailable` / `active_unavailable: hook_intake_pending` で先にcommitする。短いSessionEndの実行枠をファイルの読み取りに使わない。DBの書き込み待ちは残る。
++  - supervisorの同じ10分ごと・observer前の取り込み（`record_open_turns` → `record_closed_hook_turns`）が、この印のある閉じたhook区間も対象にする。write lockの外でtranscriptを読み、lockの中で最終取り込み済みでないことを確かめ、記録済みの `through` より後の全turn（最後のturnも）を元の終了時刻で切って書く。同じトランザクションで `session_turns` の `final: true`・空の `turns` と計測結果（`active` / `active_secs`、tokens・model・effort、または `active_unavailable`）を追記する。取り込み済みの区間は二度と読まず、二重に数えない。過去のeventや終了時刻を書き換えず、2つ目のcloseも書かない。
++  - 読めなければ最終eventに理由を書くだけで閉じたまま。DBへの書き込みが失敗したときはその区間のトランザクションだけが戻り（logに書く）、ほかの区間の取り込みは続け、その区間は次回に再試行する。旧来の同期closeとrun・jobは対象外。`stats::sessions::spans` は最終 `session_turns` の計測をcloseの計測と同じ形で読み、既存の出力項目は変わらない。取り込み前は稼働時間未取得として見える。
+ - **書き込みのロックの外で読む**（task 543、ADR-0048決定10）: transcriptは書き込みトランザクション（`BEGIN IMMEDIATE`からcommit / rollbackまで）の中では読まない（workerのtranscriptは10 MBほどになり、読んでいる間ほかのprocessの書き込みがbusy timeoutの5秒を超えて`SQLITE_BUSY`になりうるため）。区間を閉じうる書き込みは、トランザクションを開く前に`sessions::read_before`で、閉じうる開いている区間のtranscriptを読んでおき、`close`はトランザクションの中でその結果だけを使う。読む範囲は`Closing`で渡す: runのevent（`record_runtime_event`・`register_agent` / `register_resume_agent`・`wrapper_exited`・`recover_run`・`workspace_closed` / `record_workspace_closed`・`begin_triage`・`finish_triage`・`exhaust_resumes`・`close_review_session`）はそのrunで書くeventのkindが`domain::sessions::changes`で閉じる区間、queueのevent（`record_queue_event`）はそのkindとpayloadが閉じるobserverの区間、plan review（`begin_plan_review`は開いている全plan review、`finish_plan_review` / `fail_plan_review`はそのjobのもの）は`plan_review`の区間。読んだ結果はthread-localに置き、返したguardを落とすと消える。前もって読めなかった区間（読んだ後、トランザクションまでの間に開いたものなど）はトランザクションの中で読まずに`active: unavailable`・`transcript_not_read_before`で閉じ、`session_turns`・`work`・`tokens`を書かない。区間を閉じたeventと遷移は変わらない。トランザクションの外（autocommit）で書くevent（testなど）はその場で読む。読んでからトランザクションを開くまでに終わったturnは閉じる区間に入らないが、閉じる区間の多くはsessionかjobが終わった後で、差はその間（ふつう数ミリ秒、busyで待てば最大5秒）に限られる
+ - **解析もロックの外で**（task 1334）: `read_before`は読んだtranscriptをその場で解析もしておく（`ReadTranscript`）。中身は、turnの切り分け（`transcript::turns`）、最後のレコードの時刻、区間が閉じるはずの終わり（ただし全てのレコードより後。下）までの区間のturn（`span_turns`）・トークン（`tokens::span_usage`）・model（`tokens::span_models`）・runのsessionの作業の内訳（`worktime::breakdown`。runのdirectoryとtaskの検証コマンドとソースの判定もここで読む。区間を区切った窓ごとの分類とコマンドごとの数える種類（`Breakdown::windows`・`Breakdown::runs`）も持つ）と、どの切れ目までのトークンとmodelかの表（`tokens::SpanTokens`。トークンとmodelはassistantのレコードの時刻でしか変わらないので、その時刻ごとに、そこまでのレコードの`span_usage`・`span_models`と同じ結果を持つ。レコードを時刻の順に1回ずつ足し、messageごとのcountの最大・transcriptの順で最後のcost・transcriptの順で最初にmodelを書いたレコードを保ち、costの和は`span_usage`と同じ順で足す）。終わり（`Want`）は、閉じる理由と時刻を前もって分かるように渡して決める: runのeventは`record_runtime_event`がeventのpayloadごと渡し（`Closing::Event`）、`revise_requested`はreviseを送った時刻（`sent_at`）で閉じると予測する。hookの区間はその閉じる理由を渡す（`Closing::Spans`）。plan reviewとgoal reviewの区間は、閉じる書き込みが`inferred`（supervisorが居なくなったreviewの行を閉じ、新しいreviewを始める書き込み）か`job_finished`かを渡す（`Closing::PlanReviews`・`Closing::GoalReviews`の2つ目の値）。`inferred`で閉じる区間の終わりは最後のレコード、ほかは今（transcriptを読んだ後の時刻）。どちらも解析は、予測した終わりとトークンの切れ目を最後のレコードの直後より前にしないで作る（全てのレコードより後で作った解析は、閉じる時のどの終わりにも動かせる）。トランザクションの中の`close`（`close_with`・`close_headless`）は、DBの今の状態（区間の開始の時刻、記録済みのturn（`recorded_turns`）、runのdirectoryと検証コマンド）を読み直し、前もって切り出した区間のturnのうち記録済みのturnより後に始まるものを選ぶ。検証コマンドが変わっていれば、前もって分けたコマンドごとの分類から`verification_repeats`だけを数え直す（`Breakdown::verify`）。前もった解析は閉じの実際の終わりへ動かす（`Analysis::to`）。transcriptを解析し直さず、閉じの終わりで解析したのと同じになる: 前もった終わりより前で閉じるとき（`inferred`の閉じ、reviseを送った時刻、時計が戻ってレコードが今より後にあるとき）は、turnをその終わりで切り、トークンとmodelはその切れ目までのものを表から選び（`SpanTokens::at`。数え直さない）、作業の内訳を窓とコマンドごとに終わりで切る（終わりより前に始まるコマンドとその終わり、窓の分類は終わりで作ったものと同じになる。`Breakdown::retarget`）。後で閉じるときは、全てのレコードが前もった終わりより前なので、turn・トークン・modelは変わらず、作業の内訳は最後の窓と終わりの見えないコマンドの終わりだけが伸びる。あとは`session_turns`と`session_closed`をINSERTするだけにする。動かせないのは、区間の開始やトークンの種類やソースの判定が前もったものと違うときと、前もった終わりの後にレコードがあるのに後で閉じるときだけで（全てのレコードより後で作るので起きない）、そのときトランザクションの中では解析せず、前もって読めなかった区間と同じく`active: unavailable`・`transcript_not_read_before`で閉じ、infoのlogを残す。トランザクションの外（autocommit）で閉じるときはその場で解析する。開いているかと記録済みのturnは中で読んだ値が正なので、外で解析した後にほかのprocessが区間を閉じた・turnを書いたときも、二重に閉じず、turnを二重に書かない。`worktime.jsonl`の明細はトランザクションの中では書かない。閉じを書いたトランザクションがcommitされたかは、queueの接続（`SqliteQueue`が開く全ての接続。`sessions::watch_commits`）に付けたSQLiteのcommit・rollback・updateのhookとauthorizer（rusqliteの`hooks`）で追い、`read_before`のguardを落とすとき（呼び出し元はトランザクションの終わりまでguardを持つ）に、commitされたトランザクションの閉じの行だけを追記する。行はthread-localに接続の番号（接続ごとのSQLの関数`dagq_sessions_connection()`が返す）と状態（未決・commit中・commit済み）つきで置く: commitのhookで未決がcommit中に、rollbackのhookで未決とcommit中が捨てられ（commitがhookの後に失敗するとSQLiteはその場でrollbackする）、同じ接続が次に文を準備する（authorizerが呼ばれる。後のトランザクションの`BEGIN`や`ROLLBACK`も）か、行を書くか、commitすると、commit中がcommit済みになる（後のトランザクションのrollbackで捨てない）。どれもcommitの文が戻った後にしか起きず、hookの後に失敗したcommitのrollbackとのあいだには起きない。閉じをeventのIDで見分けないのは、SQLiteがrollbackされたIDを次の書き込みに振り直すので、rollbackの後にほかの書き手が同じ区間を閉じると同じIDになり、行が二重に書かれうるため。rollbackされた閉じの行と、guardを落とすときにcommitもrollbackもされていない（commitが失敗したまま開いている）トランザクションの閉じの行、hookの無い接続の閉じの行は書かず、後の二つはinfoのlogに残す（rollbackされた閉じは後の書き込みが行ごと閉じ直すので、書けば重なりうる）。トランザクションの外で閉じたときはその場で書く。4.7 MBのtranscriptの閉じがlockを握る時間は約80ミリ秒から約6ミリ秒になった（6.2 MB・6,000コマンドのtranscriptでは、変更前の約115〜163ミリ秒が約16〜63ミリ秒になり、レコードより前で閉じる閉じも同じ程度。残りは大きな`work`のpayloadの組み立てとINSERTとcommit。lockの外の`read_before`（読み取りと解析と表）は約160〜215ミリ秒。どれもhostの負荷が高い中で測った）
+ - **lockの中の区間の検索**（task 1333）: 開いている区間（`open_spans`）、閉じたかの確かめ直し、記録済みのturn（`recorded_turns`）は`session_closed`・`session_turns`を区間の`session_opened`のidでindex `events_by_opened_event`から引くので（[Persistence](persistence.md)）、書き込みトランザクションの中で走ってもsessionの数に比例して長くならない。トランザクションの外で前もって探すのは、transcriptを読む`read_before`の対象のほか、`close_gone_hook_spans`（外で見つけた区間を、中で1つずつ閉じたかを確かめ直し、ほかのprocessが先に閉じた区間は閉じない）。`record_hook`はhookの判断（同じsession_idの区間を続けるか、`/clear`で置き換わった区間を閉じるか）が今開いている区間の全体に依るので、`follow`（`record_queue_event`を含む）・`close_plan_review`・`close_goal_review`・`close_review`は呼び出し元のトランザクションの中で状態の変化と一緒に閉じる区間を決めるので、どれも中で探す
+-- **開いている間**: supervisorはループの各passで、前回から`SESSION_TURNS_INTERVAL`（10分）経っていれば、またobserverを起動する前に、`SessionRegistry::record_session_turns`で開いている全区間の完了したturn（次の入力が来たもの）を`session_turns`として区間と同じtask・runに書く。transcriptは書き込みのロックの外で読み、区間ごとに`BEGIN IMMEDIATE`の中で、まだ開いているかと記録済みのturnを確かめ直してから書く（同時に区間を閉じたwrapperと同じturnを二重に書かない）。進行中のturnは書かない。読めない・書けないときはtracingにだけ書き、次の回に読み直す。
++- **開いている間**: supervisorはループの各passで、前回から`SESSION_TURNS_INTERVAL`（10分）経っていれば、またobserverを起動する前に、`SessionRegistry::record_session_turns`で閉じたhookの未取り込み分と、開いている全区間の完了したturn（次の入力が来たもの）を`session_turns`として区間と同じtask・runに書く。transcriptは書き込みのロックの外で読み、区間ごとに`BEGIN IMMEDIATE`の中で、まだ開いているかと記録済みのturnを確かめ直してから書く（同時に区間を閉じたwrapperと同じturnを二重に書かない）。進行中のturnは書かない。読めない・書けないときはtracingにだけ書き、次の回に読み直す。
+ - **headlessのjob**: runtimeが`--session-id`を付けるので、reviewとtriageとplan reviewとobserverのtranscriptも同じ規則で読む。
+ - **非対話のworker**（`route: headless`の区間。ADR-t813-2の決定7）: 稼働時間とトークン数はtranscriptではなくrunのturnから取る（下の[非対話のworkerの区間](#非対話のworkerの区間)）。`provider`がClaude以外の区間はClaude Codeのtranscriptを読まない（`read`が`transcript_not_claude`を返し、ファイルを探さない）。
+ - **非対話のruntimeのplanner**（[ADR-t1394-2](../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)の決定4、task 1398）: pluginのhookは非対話のplannerに走らないので、区間はそのplannerのturn（`planner_id`を持つqueueの`turn_started` / `turn_finished`）から記録する（`domain::sessions::changes`の`turn_started` / `planner_closed`、`Scope::Planner`）。`session_opened`は`kind: runtime_planner`・`route: headless`・`planner_id`・`session_id`・`provider`・`cwd: null`と、wrapperが`turn_started`に書いた起動の`launch`（`{model, effort}`）、proposalがあれば`proposal_id`・`goal_ids`。稼働時間・token・`session_turns`は[非対話のworkerの区間](#非対話のworkerの区間)と同じくturnから取る（`infrastructure::sessions`の`TurnEvents::Planner`）。worktreeが無くtranscriptを探さないので、`model`は`turn_finished`の`model`の最も多いもの、`effort`は`launch.effort`（無ければ`unknown`）。turnの`claude -p`がpluginのhookを走らせても、`record_hook`はplannerの行の`route`が`headless`なら何も書かず（`skipped: headless_planner`）、hookの開いている区間（`open_hook_spans`）は`route: headless`の区間を含まないので、hookが2つ目の区間を開くこともturnごとに区間を閉じることも無い。
+diff --git a/docs/design/supervisor-lifecycle/stats.md b/docs/design/supervisor-lifecycle/stats.md
+index 81afce8e..192d2076 100644
+--- a/docs/design/supervisor-lifecycle/stats.md
++++ b/docs/design/supervisor-lifecycle/stats.md
+@@ -4,10 +4,11 @@ type: design
+ title: "`stats`"
+ status: current
+ created: 2026-09-26
+-updated: 2026-10-04 # task 1479: claim_holds does not count the claim spacing's waits
+-last_verified: 2026-10-04 # task 1479
++updated: 2026-10-04 # task 655: a hook span's measurements come from its final session_turns
++last_verified: 2026-10-04 # task 655
+ scope: runtime
+ related:
++  - adr-t655-1
+   - adr-t639-1
+   - design-supervisor-lifecycle
+   - design-supervisor-lifecycle-claim-hold
+@@ -197,7 +198,7 @@ goal 21（task 197）で足した集計。runごとの値は上の`runs`の`dagq
+ runtimeが記録したClaude sessionの区間（`session_opened` / `session_closed`。書き方は[provider-lifecycle](../provider-lifecycle.md#claude-sessionの区間)）を、kindごとに数える（[ADR-0048](../../adr/0048-record-claude-sessions-by-kind-with-open-and-active-time.md)の決定3・11・12）。集計は`domain::stats::sessions`がrun_eventsから再導出し、transcriptは読まない。既存の項目は変えず、足すだけにする。
+ 
+ - **区間**: `session_opened`と、その`opened_event_id`を持つ最初の`session_closed`の対。開いている時間はその`created_at`の差（ミリ秒を秒に切り捨て）。閉じていない区間は、runの行では`stats`を読んだ時刻まで、`sessions`ではwindowの終わりまでの長さにする。どの`session_opened`も指さない`session_closed`と、2回目の`session_closed`は数えない。
+-- **稼働時間**（`active`）: 区間のtranscriptのturn（`session_turns`。書き方は[provider-lifecycle](../provider-lifecycle.md#transcriptと稼働時間)）の長さの合計。閉じた区間は`session_closed`が`active: "recorded"`（`active_secs`）のものだけ、閉じていない区間はそれまでに記録したturnがあるものだけを数える。runの行は閉じた区間の`active_secs`（閉じていなければ記録済みのturnの合計）で、どれも無ければnull。`active: "unavailable"`で閉じた区間は`active_unavailable`に数える。`active_ratio`は稼働時間の合計を、稼働時間を数えた区間の開いている時間の合計で割った値（小数3桁、そのような区間が無ければnull）。
++- **稼働時間**（`active`）: 区間のtranscriptのturn（`session_turns`。書き方は[provider-lifecycle](../provider-lifecycle.md#transcriptと稼働時間)）の長さの合計。閉じた区間は`session_closed`が`active: "recorded"`（`active_secs`）のものだけ、閉じていない区間はそれまでに記録したturnがあるものだけを数える。hookで閉じたinbox・plannerの区間は、`session_closed`が`active: "unavailable"`・`active_unavailable: "hook_intake_pending"`で、計測（`active`・`active_secs`・`tokens`・`model` / `effort`）はsupervisorの取り込みが閉じた後に書く最終の`session_turns`（`final: true`）から読み、`session_closed`のものと同じ欄に置く（[ADR-t655-1](../../adr/2026-10-04-t655-1-hook-close-defers-transcript-intake-to-the-supervisor.md)。閉じる前の`final`は読まない）。runの行は閉じた区間の`active_secs`（閉じていなければ記録済みのturnの合計）で、どれも無ければnull。`active: "unavailable"`で閉じた区間は`active_unavailable`に数える。取り込み前のhookの区間（最大で取り込みの間隔の10分、supervisorが居なければその間ずっと）もここに数える。`active_ratio`は稼働時間の合計を、稼働時間を数えた区間の開いている時間の合計で割った値（小数3桁、そのような区間が無ければnull）。
+ - **`sessions`**: kindは`worker` / `resume` / `revise` / `review` / `triage` / `observer` / `plan_review` / `goal_review`（task 1062） / `throughput_review`（スループットの見直しのjob。task 1086、[スループットの見直し](throughput-review.md#sessionの区間task-1086)） / `runtime_planner` / `inbox` / `planner`の12個で、記録が0でも必ず出す。`window`の`after` / `upto`は`backend_failures`と同じwindowのevent id。`upto`以前に開き、`after`より後に閉じたか閉じていない区間を数え、長さはwindowで切る: 始まりは`after`のeventの時刻（0なら切らない）、終わりは`--until`があれば`upto`のeventの時刻、無ければ今の時刻（`upto`はpageの`next_cursor`ではなく窓の終わり。task 1379）。`open`と`active`は`{count, total, median, p90, max}`（`median`と`p90`は他と同じ規則）。`active`は区間ごとに、turnとwindowの重なりの秒を数える。`open_now`はwindowの終わりまでに閉じていない区間、`inferred`はwindowの中で`reason: inferred`で閉じた区間の数。`--goal`があれば、runの区間はそのgoalのtaskのものだけ、`plan_review`と`runtime_planner`は`goal_ids`にそのgoalを含むものだけにし、`observer` / `throughput_review` / `inbox` / `planner`などrunもproposalも持たない区間は0にする。`inbox` / `planner` / `runtime_planner`はrunを持たないので、`runs`・`goals`・`overall`の`sessions`には出ず、この期間集計にだけ出る（pluginのhookが記録する。[provider-lifecycle](../provider-lifecycle.md#claude-sessionの区間)、task 387。非対話の`runtime_planner`はhookが走らないのでturnから記録する。task 1398）。
+ - **`sessions.by_route`**: `{<kind>: {<route>: <by_kindと同じ形>}}`（[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)の決定4、task 1398）。`by_kind`と同じwindow・`--goal`・数え方で、区間を経路ごとにも数える。経路は`session_opened`の`route`（runのsessionの区間はrunの`worker_mode`、非対話の`runtime_planner`は`headless`）で、`route`の無い区間はhookが記録するkind（`inbox` / `planner` / `runtime_planner`）なら`interactive`、ほかのkind（jobや`route`を記録する前のrunの区間）は経路に数えない。区間の無いkindと経路は出さない。対話と非対話のruntimeのplannerの`open` / `active` / `active_ratio` / `tokens` / `models`を並べて比べるための読み口。
+ - **`runs`の`sessions`**: `{<kind>: {count, open, active}}`で、`open` / `active`はそのrunの区間の秒の合計（`active`は記録が無ければnull）。windowで切らない。区間の無いkindは出さない（区間の無い過去のrunは`{}`）。
+diff --git a/plugins/claude-dagq/skills/dagq/reference/inspect.md b/plugins/claude-dagq/skills/dagq/reference/inspect.md
+index 21eaae8c..f5bf202d 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/inspect.md
++++ b/plugins/claude-dagq/skills/dagq/reference/inspect.md
+@@ -67,7 +67,7 @@ Load bands are `0-4` / `4-8` / `8-16` / `16-32` / `32-64` / `64+` (1-minute load
+ 
+ The runtime records each Claude session it uses as a span from open to close (ADR-0048): `worker` (a run's first session), `resume`, `revise` (a review's send-back), `review`, `triage` (the recovery job), `observer`, `plan_review`, `goal_review`, `throughput_review`, and, through the plugin's hooks, `inbox`, `planner` (one a person opened with `plan` before it was retired) and `runtime_planner` (a planner the supervisor opened; a headless one's span comes from its turns instead, with `route: headless`, and the hook records nothing for it). A span has two times: `open` (wall clock from open to close) and `active` (the time Claude spent on turns, from the session's transcript). `open` much longer than `active` means the session sat idle: waiting for a review, a person or `/exit`.
+ 
+-- `sessions` (the window): `{window: {after, upto}, by_kind, by_route}`, same window and `--goal` as `backend_failures`. `by_kind` always lists all twelve kinds, each `{count, open, active, active_ratio, open_now, inferred, active_unavailable, tokens, models}`: `open` and `active` are `{count, total, median, p90, max}` in seconds, cut to the window; `active_ratio` is active over open for the spans with an active time (null without one); `open_now` counts spans still open at the window's end, `inferred` spans closed without a seen end (e.g. the next session or job of that kind started, the run was recovered or triaged, or the workspace was gone), `active_unavailable` spans whose transcript could not be read (they have `open` but no `active`); `tokens` and `models` (`"<model> <effort>"` counts) cover the spans closed in the window. Use `--since` / `--until` for a period: `inbox`, `planner` and `runtime_planner` have no run, so they appear only here.
++- `sessions` (the window): `{window: {after, upto}, by_kind, by_route}`, same window and `--goal` as `backend_failures`. `by_kind` always lists all twelve kinds, each `{count, open, active, active_ratio, open_now, inferred, active_unavailable, tokens, models}`: `open` and `active` are `{count, total, median, p90, max}` in seconds, cut to the window; `active_ratio` is active over open for the spans with an active time (null without one); `open_now` counts spans still open at the window's end, `inferred` spans closed without a seen end (e.g. the next session or job of that kind started, the run was recovered or triaged, or the workspace was gone), `active_unavailable` spans whose transcript could not be read, or an inbox or planner span closed by its hook whose transcript the supervisor has not taken in yet (up to its intake interval, about 10 minutes) (they have `open` but no `active`); `tokens` and `models` (`"<model> <effort>"` counts) cover the spans closed in the window. Use `--since` / `--until` for a period: `inbox`, `planner` and `runtime_planner` have no run, so they appear only here.
+ - `sessions.by_route`: `{<kind>: {<route>: <same shape as by_kind>}}` for the spans with a route (`interactive` / `headless`; a hook's span without one is `interactive`). Compare the interactive and headless `runtime_planner` here; `kpi`'s `session_*` KPIs carry the same split as `route=` strata.
+ - `planner_routes`: the runtime's planners per route, as `worker_routes` is the workers': `opened` (`revise` / `draft` / `finding` / `request`), seconds `revise_to_review`, `draft_settle`, `finding_settle` and `request_settle` (`{count, total, median, p90, max}`, counted when the end is in the window), `planner_questions`, the headless `turns` with `turn_outcomes` / `turn_failures`, and `tokens`. A planner with neither turns nor a hook span is `unknown`. `kpi` shows it in each period's `health.planner_routes`.
+ - Per run, `runs[].sessions`: `{<kind>: {count, open, active}}` with that run's total seconds (`active` null when not recorded), not cut to the window; kinds without a span are left out (`{}` for runs from before the recording).
+diff --git a/plugins/claude-dagq/skills/dagq/reference/observer.md b/plugins/claude-dagq/skills/dagq/reference/observer.md
+index 3cecd00f..bf8e6425 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/observer.md
++++ b/plugins/claude-dagq/skills/dagq/reference/observer.md
+@@ -24,7 +24,7 @@ The supervisor detects stalled sessions by the `[stall]` settings (ADR-0043); th
+ 
+ ## Session time: reading `sessions`
+ 
+-The `stats` the observer reads carry the Claude session time per kind (`sessions.by_kind`, and `sessions` per run and goal; fields in `reference/inspect.md`, "Claude session time"). A kind whose `open` grows while its `active_ratio` falls spends its time waiting, not working; many `active_unavailable` spans mean the transcript could not be read (the active time is missing, not zero); many `inferred` spans mean sessions ended without a seen exit (recovered, triaged, or the workspace was gone). Read them with the user when deciding a `capacity` or `wait` finding.
++The `stats` the observer reads carry the Claude session time per kind (`sessions.by_kind`, and `sessions` per run and goal; fields in `reference/inspect.md`, "Claude session time"). A kind whose `open` grows while its `active_ratio` falls spends its time waiting, not working; many `active_unavailable` spans mean the transcript could not be read, or inbox and planner spans just closed wait for the supervisor's intake (the active time is missing, not zero); many `inferred` spans mean sessions ended without a seen exit (recovered, triaged, or the workspace was gone). Read them with the user when deciding a `capacity` or `wait` finding.
+ 
+ ## KPI findings: kind `kpi` and the improvement limit
+ 
+diff --git a/src/application/ports.rs b/src/application/ports.rs
+index 34999c2e..1a026a2d 100644
+--- a/src/application/ports.rs
++++ b/src/application/ports.rs
+@@ -2107,7 +2107,8 @@ pub trait SessionRegistry {
+     /// each with that event: the inbox's attention.
+     fn silent_planners(&self) -> Result<Vec<(PlannerSession, RunEvent)>>;
+     /// Record the finished transcript turns of the Claude session spans
+-    /// still open (ADR-0048 decision 8); returns how many spans got turns.
++    /// still open, and finalize closed hook spans awaiting intake (ADR-0048
++    /// decision 8); returns how many spans got turns or final measurements.
+     fn record_session_turns(&self) -> Result<usize>;
+     /// Record what the plugin's hook reported of an inbox or planner
+     /// session (ADR-0048 decision 6): its span opened, gone on with or
+diff --git a/src/application/supervise/mod.rs b/src/application/supervise/mod.rs
+index eb36aae9..3bee68ba 100644
+--- a/src/application/supervise/mod.rs
++++ b/src/application/supervise/mod.rs
+@@ -2311,7 +2311,7 @@ impl Supervisor<'_> {
+         self.close_gone_sessions();
+         match self.queue.record_session_turns() {
+             Ok(0) => {}
+-            Ok(spans) => info!("recorded the transcript turns of {spans} open session span(s)"),
++            Ok(spans) => info!("recorded the transcript turns of {spans} session span(s)"),
+             Err(error) => {
+                 warn!(error = %format_args!("{error:#}"), "transcript turns could not be recorded: {error:#}")
+             }
+diff --git a/src/domain/sessions.rs b/src/domain/sessions.rs
+index b9e12397..2aab3f9d 100644
+--- a/src/domain/sessions.rs
++++ b/src/domain/sessions.rs
+@@ -616,7 +616,10 @@ pub fn end_reason(reason: &str) -> &'static str {
+ /// open goes on with it (`resume`, `compact`, a `clear` that kept the
+ /// session id); one of a new session id closes the spans open in the same
+ /// workspace as `next_span` (a `/clear` gave the session a new id) and
+-/// opens its own. An end closes the session's span; one already closed
++/// opens its own. Without a workspace, it closes the spans of its kind
++/// open without one as `inferred` (ADR-t655-1 decision 3): their
++/// `SessionEnd` was missed, and two such sessions of a kind at once cannot
++/// be told apart. An end closes the session's span; one already closed
+ /// changes nothing. `context` is added to the opened payload (a runtime
+ /// planner's proposal and goals).
+ pub fn hook_changes(hook: &SessionHook, open: &[OpenSpan], context: &Value) -> Vec<SpanChange> {
+@@ -638,12 +641,23 @@ pub fn hook_changes(hook: &SessionHook, open: &[OpenSpan], context: &Value) -> V
+                 .iter()
+                 .filter(|span| {
+                     HOOK_KINDS.contains(&span.kind())
+-                        && hook.workspace_id.is_some()
+-                        && span.payload["workspace_id"].as_str() == hook.workspace_id.as_deref()
++                        && match hook.workspace_id.as_deref() {
++                            Some(workspace) => {
++                                span.payload["workspace_id"].as_str() == Some(workspace)
++                            }
++                            None => {
++                                span.payload["workspace_id"].as_str().is_none()
++                                    && span.kind() == hook.kind
++                            }
++                        }
+                 })
+                 .map(|span| SpanChange::Close {
+                     span: span.clone(),
+-                    reason: NEXT_SPAN,
++                    reason: if hook.workspace_id.is_some() {
++                        NEXT_SPAN
++                    } else {
++                        INFERRED
++                    },
+                 })
+                 .collect();
+             let mut payload = json!({
+@@ -1271,9 +1285,27 @@ mod tests {
+         assert_eq!(replaced.len(), 2);
+         assert_eq!(closed(&replaced[0]), (1, NEXT_SPAN));
+         assert_eq!(opened(&replaced[1])["session_id"], "s-2");
+-        // No workspace: closes nothing.
++        // No workspace, and no span of its kind open without one: closes
++        // nothing.
+         let alone = hook_changes(&start("s-3", None), &open, &Value::Null);
+         assert_eq!(alone.len(), 1);
++        // No workspace: a span of its kind open without one missed its
++        // `SessionEnd` and closes as inferred (ADR-t655-1 decision 3); its
++        // own session's span, another kind's and one with a workspace
++        // do not.
++        let unscoped = [
++            span(1, payload.clone()),
++            span(4, json!({"kind": INBOX, "session_id": "s-5"})),
++            span(5, json!({"kind": PLANNER, "session_id": "s-6"})),
++            span(6, json!({"kind": INBOX, "session_id": "s-7"})),
++        ];
++        let next = hook_changes(&start("s-7", None), &unscoped, &Value::Null);
++        assert!(next.is_empty(), "its own session goes on: {next:?}");
++        let next = hook_changes(&start("s-8", None), &unscoped, &Value::Null);
++        assert_eq!(next.len(), 3);
++        assert_eq!(closed(&next[0]), (4, INFERRED));
++        assert_eq!(closed(&next[1]), (6, INFERRED));
++        assert_eq!(opened(&next[2])["session_id"], "s-8");
+         let end = |session| {
+             hook(
+                 HookEvent::End {
+diff --git a/src/domain/stats/sessions.rs b/src/domain/stats/sessions.rs
+index d04dd262..13692e09 100644
+--- a/src/domain/stats/sessions.rs
++++ b/src/domain/stats/sessions.rs
+@@ -132,6 +132,9 @@ pub fn spans(events: &[RunEvent]) -> Vec<Span> {
+                 else {
+                     continue;
+                 };
++                if event.payload["final"] == true && span.closed.is_some() {
++                    measurements(span, &event.payload);
++                }
+                 let turns = event.payload["turns"].as_array().into_iter().flatten();
+                 span.turns.extend(turns.filter_map(|turn| {
+                     let time = |at: usize| turn.get(at)?.as_str().and_then(rfc3339_millis);
+@@ -155,18 +158,7 @@ pub fn spans(events: &[RunEvent]) -> Vec<Span> {
+                 span.closed = Some(event.id);
+                 span.end = timestamp_millis(&event.created_at).map(|end| end.max(span.start));
+                 span.inferred = event.payload["reason"] == INFERRED;
+-                span.active = event.payload["active_secs"].as_i64();
+-                span.active_unavailable = event.payload["active"] == "unavailable";
+-                span.work = event.payload.get("work").filter(|w| w.is_object()).cloned();
+-                span.tokens = event
+-                    .payload
+-                    .get("tokens")
+-                    .filter(|t| t.is_object())
+-                    .cloned();
+-                span.model = event.payload["model"].as_str().map(|model| {
+-                    let effort = event.payload["effort"].as_str().unwrap_or("unknown");
+-                    format!("{model} {effort}")
+-                });
++                measurements(span, &event.payload);
+             }
+             _ => {}
+         }
+@@ -174,6 +166,18 @@ pub fn spans(events: &[RunEvent]) -> Vec<Span> {
+     spans
+ }
+ 
++/// Deferred hook intake carries the same measurements as a synchronous close.
++fn measurements(span: &mut Span, payload: &Value) {
++    span.active = payload["active_secs"].as_i64();
++    span.active_unavailable = payload["active"] == "unavailable";
++    span.work = payload.get("work").filter(|w| w.is_object()).cloned();
++    span.tokens = payload.get("tokens").filter(|t| t.is_object()).cloned();
++    span.model = payload["model"].as_str().map(|model| {
++        let effort = payload["effort"].as_str().unwrap_or("unknown");
++        format!("{model} {effort}")
++    });
++}
++
+ /// Count, sum, median, 90th percentile and maximum of seconds.
+ #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+ pub struct TimeSummary {
+@@ -523,6 +527,63 @@ mod tests {
+         )
+     }
+ 
++    /// A hook span's measurements are its final `session_turns`', in place
++    /// of its pending close's (ADR-t655-1 decision 4); a final one before
++    /// its close is not read.
++    #[test]
++    fn a_hook_spans_final_turns_carry_its_measurements() {
++        let pending = |id, opened, secs| {
++            event(
++                id,
++                None,
++                SESSION_CLOSED,
++                json!({"opened_event_id": opened, "reason": "exited",
++                    "active": "unavailable", "active_unavailable": "hook_intake_pending"}),
++                secs,
++            )
++        };
++        let turns = |id, opened, payload: Value, secs| {
++            let mut payload = payload;
++            payload["opened_event_id"] = json!(opened);
++            event(id, None, SESSION_TURNS, payload, secs)
++        };
++        let finished = json!({"final": true, "turns": [], "active": "recorded",
++            "active_secs": 40, "tokens": {"input": 10}, "model": "claude-sonnet-4-6",
++            "effort": "high"});
++        let events = vec![
++            opened(1, None, "inbox", 0),
++            turns(
++                2,
++                1,
++                json!({"turns": [["1970-01-01T00:00:10.000Z", "1970-01-01T00:00:50.000Z"]]}),
++                50,
++            ),
++            pending(3, 1, 100),
++            turns(4, 1, finished.clone(), 600),
++            // Not yet taken in: counted as unavailable.
++            opened(5, None, "planner", 0),
++            pending(6, 5, 100),
++            // A final one before its close is not read.
++            opened(7, None, "inbox", 0),
++            turns(8, 7, finished, 50),
++            pending(9, 7, 100),
++        ];
++        let spans = spans(&events);
++        let taken = &spans[0];
++        assert_eq!(taken.end, Some(100_000));
++        assert_eq!(taken.active, Some(40));
++        assert!(!taken.active_unavailable);
++        assert_eq!(taken.tokens, Some(json!({"input": 10})));
++        assert_eq!(taken.model.as_deref(), Some("claude-sonnet-4-6 high"));
++        assert_eq!(taken.turns.len(), 1);
++        for span in &spans[1..] {
++            assert_eq!(span.active, None);
++            assert!(span.active_unavailable);
++            assert_eq!(span.tokens, None);
++            assert_eq!(span.model, None);
++        }
++    }
++
+     fn fixture() -> Vec<RunEvent> {
+         let run = Some("r1");
+         vec![
+diff --git a/src/infrastructure/sessions.rs b/src/infrastructure/sessions.rs
+index 3d970323..8d891397 100644
+--- a/src/infrastructure/sessions.rs
++++ b/src/infrastructure/sessions.rs
+@@ -3,8 +3,9 @@
+ //! `session_closed` events [`crate::domain::sessions::changes`] decides are
+ //! written in the same transaction, at the same time as that event. A span
+ //! that closes takes its transcript's turns with it (its active time,
+-//! decision 8), and the supervisor records the finished turns of the spans
+-//! still open ([`record_open_turns`]). No transcript is read under a write
++//! decision 8), except a hook's close: the supervisor finishes its intake
++//! after it closes, alongside the finished turns of spans still open
++//! ([`record_open_turns`]). No transcript is read under a write
+ //! lock (task 543): a write that may close spans reads theirs first
+ //! ([`read_before`]), and the close takes what was read. The close's
+ //! analysis of it (its turns, tokens, models and work breakdown) is made
+@@ -978,11 +979,10 @@ fn close_with(
+             }
+         }
+     }
+-    let mut closed_at = now.to_owned();
+-    let mut closed = RunSessionClosed::default();
+-    let mut worktime = None;
+     if span.headless() {
+-        worktime = close_headless(
++        let closed_at = now.to_owned();
++        let mut closed = RunSessionClosed::default();
++        let worktime = close_headless(
+             conn,
+             now,
+             (task_id, run_id),
+@@ -1002,6 +1002,39 @@ fn close_with(
+         write_worktime(conn, worktime);
+         return Ok(Some(closed).filter(|closed| closed.work.is_some() || closed.tokens.is_some()));
+     }
++    let (closed_at, closed, worktime) =
++        fill_transcript(conn, now, (task_id, run_id), span, reason, &mut payload)?;
++    insert_at(
++        conn,
++        task_id,
++        run_id,
++        EventKind::SessionClosed,
++        &payload,
++        &closed_at,
++    )?;
++    write_worktime(conn, worktime);
++    Ok(run_id
++        .filter(|_| RUN_SESSION.contains(&span.kind()))
++        .filter(|_| closed.work.is_some() || closed.tokens.is_some())
++        .map(|_| closed))
++}
++
++/// Fill a close's `payload` (or its deferred hook intake's, task 655) with
++/// what the transcript of `span` measures to `now`, recording its turns
++/// not recorded yet. Returns when the close ends, what a run session's
++/// close carries, and its work's `worktime.jsonl` lines. Under a write
++/// lock it reads nothing: it takes what [`read_before`] read.
++fn fill_transcript(
++    conn: &Connection,
++    now: &str,
++    (task_id, run_id): (Option<TaskId>, Option<&RunId>),
++    span: &OpenSpan,
++    reason: &str,
++    payload: &mut Value,
++) -> Result<(String, RunSessionClosed, Option<WorktimeLines>)> {
++    let mut closed_at = now.to_owned();
++    let mut closed = RunSessionClosed::default();
++    let mut worktime = None;
+     match (transcript_for_close(conn, span), times(conn, span, now)?) {
+         (Ok(mut read), Some((start, now_ms))) => {
+             let mut end = now_ms;
+@@ -1030,15 +1063,7 @@ fn close_with(
+             let Some(analysis) = read.analysis(conn, want) else {
+                 payload["active"] = json!("unavailable");
+                 payload["active_unavailable"] = json!(TRANSCRIPT_NOT_READ_BEFORE);
+-                insert_at(
+-                    conn,
+-                    task_id,
+-                    run_id,
+-                    EventKind::SessionClosed,
+-                    &payload,
+-                    &closed_at,
+-                )?;
+-                return Ok(None);
++                return Ok((closed_at, closed, None));
+             };
+             if Some(end) != rfc3339_millis(now) {
+                 closed_at = millis_text(end);
+@@ -1082,7 +1107,7 @@ fn close_with(
+             }
+             // The model and effort its messages used (task 579), none when
+             // no message names a model.
+-            tokens::models_payload(&analysis.models, &mut payload);
++            tokens::models_payload(&analysis.models, payload);
+             if let (Some(inputs), Some(breakdown)) = (analysis.want.work, analysis.work) {
+                 let (work, lines) = work_breakdown(span, inputs, breakdown);
+                 closed.work = Some(exited_work(&work, span.kind(), &span.payload["attempt"]));
+@@ -1100,19 +1125,7 @@ fn close_with(
+             payload["active_unavailable"] = json!("span_time_unparsable");
+         }
+     }
+-    insert_at(
+-        conn,
+-        task_id,
+-        run_id,
+-        EventKind::SessionClosed,
+-        &payload,
+-        &closed_at,
+-    )?;
+-    write_worktime(conn, worktime);
+-    Ok(run_id
+-        .filter(|_| RUN_SESSION.contains(&span.kind()))
+-        .filter(|_| closed.work.is_some() || closed.tokens.is_some())
+-        .map(|_| closed))
++    Ok((closed_at, closed, worktime))
+ }
+ 
+ /// Fill the `session_closed` of a headless worker's `span` at `now`
+@@ -1508,16 +1521,125 @@ fn turns_payload(span: &OpenSpan, turns: &[Turn]) -> Value {
+     })
+ }
+ 
++/// Why a closed hook span's transcript is read after its close (task
++/// 655): its end is the close's, never moved to the transcript's last
++/// record.
++const DEFERRED: &str = "deferred";
++
++/// The `active_unavailable` of a hook's `session_closed` whose transcript
++/// the supervisor has not taken in yet (task 655).
++const HOOK_INTAKE_PENDING: &str = "hook_intake_pending";
++
++/// The query of the closed hook spans whose transcript the supervisor has
++/// not taken in yet, with when each closed (task 655). Its `NOT EXISTS`
++/// finds their final `session_turns` by `events_by_opened_event`.
++fn pending_hook_intakes_sql() -> String {
++    let kinds = HOOK_KINDS.map(|kind| format!("'{kind}'")).join(",");
++    format!(
++        "SELECT o.id, o.payload, o.created_at, c.created_at AS closed_at
++             FROM run_events c JOIN run_events o
++               ON o.id=json_extract(c.payload,'$.opened_event_id')
++             WHERE c.kind='{SESSION_CLOSED}' AND c.run_id IS NULL
++               AND json_extract(c.payload,'$.active_unavailable')='{HOOK_INTAKE_PENDING}'
++               AND o.kind='{SESSION_OPENED}'
++               AND json_extract(o.payload,'$.kind') IN ({kinds})
++               AND NOT EXISTS (SELECT 1 FROM run_events t WHERE t.kind='{SESSION_TURNS}'
++                 AND json_extract(t.payload,'$.opened_event_id')=+o.id
++                 AND json_extract(t.payload,'$.final')=1)
++             ORDER BY o.id"
++    )
++}
++
++/// The query of whether the closed hook span opened by `?1` has its final
++/// `session_turns`, by `events_by_opened_event`.
++fn hook_intake_finished_sql() -> String {
++    format!(
++        "SELECT EXISTS (SELECT 1 FROM run_events WHERE kind='{SESSION_TURNS}'
++           AND json_extract(payload,'$.opened_event_id')=?1
++           AND json_extract(payload,'$.final')=1)"
++    )
++}
++
++/// Finish closed hook spans once, including their last (not necessarily
++/// followed by another input) turn. An append-only final session_turns event
++/// carries the measurements; even an unreadable transcript gets a final marker.
++fn record_closed_hook_turns(conn: &Connection) -> Result<usize> {
++    let pending = |conn: &Connection| -> Result<Vec<(OpenSpan, String)>> {
++        Ok(conn
++            .prepare(&pending_hook_intakes_sql())?
++            .query_map([], |r| {
++                Ok((
++                    OpenSpan {
++                        opened_event_id: r.get("id")?,
++                        payload: json_col(r, "payload")?,
++                        opened_ms: rfc3339_millis(&r.get::<_, String>("created_at")?),
++                    },
++                    r.get("closed_at")?,
++                ))
++            })?
++            .collect::<rusqlite::Result<_>>()?)
++    };
++    let mut recorded = 0;
++    for (span, end) in pending(conn)? {
++        // One span that cannot be finalized does not hold back the others
++        // nor the open spans' turns: it is tried again next time.
++        match finalize_hook_intake(conn, &span, &end) {
++            Ok(true) => recorded += 1,
++            Ok(false) => {}
++            Err(error) => info!(
++                "session span {} ({}): hook intake not recorded now: {error:#}",
++                span.opened_event_id,
++                span.kind(),
++            ),
++        }
++    }
++    Ok(recorded)
++}
++
++/// Take in the transcript of the closed hook `span` that ended at `end`:
++/// its remaining turns and its final `session_turns` with its
++/// measurements. `false` when another intake finished it first.
++fn finalize_hook_intake(conn: &Connection, span: &OpenSpan, end: &str) -> Result<bool> {
++    let _read = read_before(conn, Closing::Spans(&[(span.clone(), DEFERRED)]))?;
++    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
++    // Another intake may have finished while this one read the transcript.
++    let finished: bool =
++        tx.query_row(&hook_intake_finished_sql(), [span.opened_event_id], |r| {
++            r.get(0)
++        })?;
++    if finished {
++        return Ok(false);
++    }
++    let task = span_task(&tx, span)?;
++    let mut payload = turns_payload(span, &[]);
++    // The hook fixed the end already, including an inferred next-start
++    // fallback. Do not move that boundary while enriching measurements.
++    let (_, _, worktime) = fill_transcript(&tx, end, (task, None), span, DEFERRED, &mut payload)?;
++    payload["final"] = json!(true);
++    insert_at(
++        &tx,
++        task,
++        None,
++        EventKind::SessionTurns,
++        &payload,
++        &now(&tx)?,
++    )?;
++    write_worktime(&tx, worktime);
++    tx.commit()?;
++    Ok(true)
++}
++
+ /// Record the finished turns (those the next input followed) of every span
+ /// still open that are not recorded yet, one `session_turns` per span, on
+ /// the task and run of its `session_opened` (ADR-0048 decision 8). A
+ /// transcript that cannot be read now is left for the next time. Returns
+-/// how many spans got turns. The transcript is read outside the write lock;
++/// how many spans got turns or a final hook intake. Closed hook spans are
++/// finalized too, once. The transcript is read outside the write lock;
+ /// the span is checked again under it, since the process that closes it
+ /// (a session's wrapper) records its remaining turns itself.
+ pub(super) fn record_open_turns(conn: &Connection) -> Result<usize> {
+     let open = open_spans(conn, "1=1", "1=1", params![])?;
+-    let mut recorded = 0;
++    let mut recorded = record_closed_hook_turns(conn)?;
+     for span in open {
+         // A headless span's turns are its run's (ADR-t813-2 decision 7).
+         let read = (!span.headless()).then(|| read(conn, &span));
+@@ -1726,15 +1848,6 @@ pub(super) fn record_hook(conn: &Connection, hook: &SessionHook) -> Result<Value
+             "skipped": "headless_planner",
+         }));
+     }
+-    let closing: Vec<(OpenSpan, &'static str)> =
+-        hook_changes(hook, &open_hook_spans(conn)?, &Value::Null)
+-            .into_iter()
+-            .filter_map(|change| match change {
+-                SpanChange::Close { span, reason } => Some((span, reason)),
+-                SpanChange::Open(_) => None,
+-            })
+-            .collect();
+-    let _read = read_before(conn, Closing::Spans(&closing))?;
+     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+     let (task_id, context) = planner_context(&tx, hook)?;
+     let changes = hook_changes(hook, &open_hook_spans(&tx)?, &context);
+@@ -1745,7 +1858,10 @@ pub(super) fn record_hook(conn: &Connection, hook: &SessionHook) -> Result<Value
+         match change {
+             SpanChange::Close { span, reason } => {
+                 let task = span_task(&tx, &span)?;
+-                close(&tx, &now, task, None, &span, reason)?;
++                let mut payload = SpanChange::closed_payload(&span, reason);
++                payload["active"] = json!("unavailable");
++                payload["active_unavailable"] = json!(HOOK_INTAKE_PENDING);
++                insert_at(&tx, task, None, EventKind::SessionClosed, &payload, &now)?;
+                 closed.push(span.opened_event_id);
+             }
+             SpanChange::Open(payload) => {
+@@ -2052,6 +2168,8 @@ mod tests {
+         };
+         uses(&recorded_turns_sql());
+         uses(&span_closed_sql());
++        uses(&hook_intake_finished_sql());
++        uses(&pending_hook_intakes_sql());
+         // Every `closed` condition its callers give open_spans.
+         for (opened, closed) in [
+             ("1=1", "1=1"),
+@@ -4037,14 +4155,17 @@ mod tests {
+         assert_eq!(compacted["closed"], json!([]));
+         // A /clear whose SessionStart comes first: the new session id
+         // closes the span of its workspace as the next span.
++        READS.set(0);
+         let cleared =
+             record_hook(conn, &hook(dir.path(), Some("clear"), INBOX, "s-2", "W")).unwrap();
++        assert_eq!(READS.get(), 0);
+         assert_eq!(cleared["closed"], json!([opened]));
+         let closed = &of_kind(&queue, SESSION_CLOSED)[0];
+         assert_eq!(closed.payload["reason"], crate::domain::sessions::NEXT_SPAN);
+-        assert_eq!(closed.payload["active"], "recorded");
+-        assert_eq!(closed.payload["active_secs"], 30);
++        assert_eq!(closed.payload["active_unavailable"], "hook_intake_pending");
+         assert_eq!(closed.task_id, None);
++        assert_eq!(record_open_turns(conn).unwrap(), 1);
++        assert_eq!(record_open_turns(conn).unwrap(), 0);
+         // Its SessionEnd, late, and a second one: closed once.
+         for _ in 0..2 {
+             let ended = record_hook(conn, &hook(dir.path(), None, INBOX, "s-1", "W")).unwrap();
+@@ -4082,6 +4203,136 @@ mod tests {
+         assert_eq!(sessions.by_kind["planner"].count, 0);
+     }
+ 
++    #[test]
++    fn hook_close_defers_the_last_turn_and_measurements_once() {
++        use crate::domain::{sessions::INBOX, stats::sessions::spans};
++        let dir = tempfile::tempdir().unwrap();
++        ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
++        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
++        let conn = &queue.conn;
++        let start_hook = hook(dir.path(), Some("startup"), INBOX, "s", "W");
++        record_hook(conn, &start_hook).unwrap();
++        let start = retime(conn, 0, 100);
++        hook_transcript(dir.path(), "s", start, &[(5, 25), (40, 50)], 60);
++        assert_eq!(record_open_turns(conn).unwrap(), 1);
++        // Append the final assistant without another input: open intake
++        // must leave this turn for the close, clipping it at that boundary.
++        let path = dir.path().join("s.jsonl");
++        let mut text = std::fs::read_to_string(&path).unwrap();
++        let assistant = |offset| {
++            json!({"type":"assistant", "sessionId":"s",
++            "version":"2.1.283", "timestamp":millis_text(start + offset),
++            "message":{"id":"m-final", "model":"claude-sonnet-4-6",
++                "content":[{"type":"text","text":"done"}],
++                "usage":{"input_tokens":10,"output_tokens":5}}})
++        };
++        text.push_str(&format!("\n{}\n{}", assistant(80_000), assistant(150_000)));
++        std::fs::write(&path, text).unwrap();
++        READS.set(0);
++        record_hook(conn, &hook(dir.path(), None, INBOX, "s", "W")).unwrap();
++        assert_eq!(READS.get(), 0);
++        let closed = of_kind(&queue, SESSION_CLOSED)[0].clone();
++        let end = start + 100_000;
++        conn.execute(
++            "UPDATE run_events SET created_at=?1 WHERE id=?2",
++            params![millis_text(end), closed.id],
++        )
++        .unwrap();
++        assert_eq!(record_open_turns(conn).unwrap(), 1);
++        assert_eq!(READS.get(), 1);
++        assert_eq!(record_open_turns(conn).unwrap(), 0);
++        assert_eq!(READS.get(), 1);
++        let opened = of_kind(&queue, SESSION_OPENED)[0].id;
++        let recorded = recorded_turns(conn, opened).unwrap();
++        assert_eq!(
++            recorded.iter().map(|turn| turn.millis()).sum::<i64>(),
++            70_000
++        );
++        assert_eq!(recorded.last().unwrap().end, end);
++        let events: Vec<RunEvent> = conn
++            .prepare("SELECT * FROM run_events ORDER BY id")
++            .unwrap()
++            .query_map([], event_row)
++            .unwrap()
++            .collect::<rusqlite::Result<_>>()
++            .unwrap();
++        let spans = spans(&events);
++        assert_eq!(spans[0].active, Some(70));
++        assert!(spans[0].tokens.is_some());
++        assert_eq!(spans[0].model.as_deref(), Some("claude-sonnet-4-6 unknown"));
++        assert!(!spans[0].active_unavailable);
++        assert_eq!(spans[0].end, Some(end));
++        // Finalized even if intake is called again or SessionEnd is duplicated.
++        record_hook(conn, &hook(dir.path(), None, INBOX, "s", "W")).unwrap();
++        assert_eq!(of_kind(&queue, SESSION_CLOSED).len(), 1);
++        assert_eq!(
++            of_kind(&queue, SESSION_TURNS)
++                .iter()
++                .filter(|e| e.payload["final"] == true)
++                .count(),
++            1
++        );
++    }
++
++    #[test]
++    fn missing_hook_transcript_stays_closed_and_is_finalized_once() {
++        use crate::domain::sessions::INBOX;
++        let dir = tempfile::tempdir().unwrap();
++        ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
++        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
++        let conn = &queue.conn;
++        record_hook(
++            conn,
++            &hook(dir.path(), Some("startup"), INBOX, "missing", "W"),
++        )
++        .unwrap();
++        READS.set(0);
++        record_hook(conn, &hook(dir.path(), None, INBOX, "missing", "W")).unwrap();
++        assert_eq!(READS.get(), 0);
++        assert!(open_hook_spans(conn).unwrap().is_empty());
++        assert_eq!(record_open_turns(conn).unwrap(), 1);
++        let final_turns = of_kind(&queue, SESSION_TURNS);
++        assert_eq!(final_turns.len(), 1);
++        assert_eq!(final_turns[0].payload["active"], "unavailable");
++        assert_eq!(
++            final_turns[0].payload["active_unavailable"],
++            "transcript_missing"
++        );
++        assert_eq!(record_open_turns(conn).unwrap(), 0);
++        assert_eq!(READS.get(), 1);
++        assert!(open_hook_spans(conn).unwrap().is_empty());
++    }
++
++    #[test]
++    fn next_start_without_workspace_infers_only_the_same_kind() {
++        use crate::domain::sessions::{INBOX, PLANNER, RUNTIME_PLANNER};
++        let dir = tempfile::tempdir().unwrap();
++        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
++        let conn = &queue.conn;
++        let no_workspace = |kind, session| SessionHook {
++            workspace_id: None,
++            ..hook(dir.path(), Some("startup"), kind, session, "unused")
++        };
++        for (kind, session) in [(INBOX, "i"), (PLANNER, "p"), (RUNTIME_PLANNER, "r")] {
++            record_hook(conn, &no_workspace(kind, session)).unwrap();
++        }
++        record_hook(
++            conn,
++            &hook(dir.path(), Some("startup"), INBOX, "with-w", "W"),
++        )
++        .unwrap();
++        READS.set(0);
++        record_hook(conn, &no_workspace(INBOX, "i")).unwrap();
++        assert!(of_kind(&queue, SESSION_CLOSED).is_empty());
++        record_hook(conn, &no_workspace(INBOX, "i-next")).unwrap();
++        assert_eq!(READS.get(), 0);
++        let closed = of_kind(&queue, SESSION_CLOSED);
++        assert_eq!(closed.len(), 1);
++        assert_eq!(closed[0].payload["session_id"], "i");
++        assert_eq!(closed[0].payload["reason"], INFERRED);
++        assert_eq!(open_hook_spans(conn).unwrap().len(), 4);
++    }
++
+     /// A runtime planner's span is on the first task of its proposal, with
+     /// the proposal and its goals, as a plan review's; a person's planner
+     /// and one without a proposal are on no task.
+diff --git a/tests/it/cli_session_event.rs b/tests/it/cli_session_event.rs
+new file mode 100644
+index 00000000..78bfe81e
+--- /dev/null
++++ b/tests/it/cli_session_event.rs
+@@ -0,0 +1,84 @@
++//! SessionEnd latency is measured only against a disposable fixture queue.
++use crate::common::{self, WithoutActor};
++use serde_json::{Value, json};
++use std::{
++    io::Write,
++    process::{Command, Stdio},
++    time::Instant,
++};
++
++fn event(db: &std::path::Path, action: &str, input: &Value) -> Value {
++    let _waiting = common::within(common::STEP_LIMIT, "session-event fixture command");
++    let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
++    command
++        .without_actor_env()
++        .env("DAGQ_ROLE", "inbox")
++        .env_remove("CMUX_WORKSPACE_ID")
++        .args(["--db", db.to_str().unwrap(), "session-event", action])
++        .stdin(Stdio::piped())
++        .stdout(Stdio::piped())
++        .stderr(Stdio::piped());
++    let mut child = command.spawn().unwrap();
++    child
++        .stdin
++        .take()
++        .unwrap()
++        .write_all(input.to_string().as_bytes())
++        .unwrap();
++    let output = child.wait_with_output().unwrap();
++    assert!(
++        output.status.success(),
++        "{}",
++        String::from_utf8_lossy(&output.stderr)
++    );
++    serde_json::from_slice(&output.stdout).unwrap()
++}
++
++#[test]
++fn close_with_a_production_sized_transcript() {
++    let (dir, db) = common::cli::queue();
++    // Same size as the long main-checkout inbox transcript observed for
++    // task 655 (2026-09-30); generated data, never private transcript text.
++    const BYTES: usize = 9_249_259;
++    let path = dir.path().join("long.jsonl");
++    let line = json!({"type":"assistant", "sessionId":"long",
++        "version":"2.1.283", "timestamp":"2026-09-30T00:00:00Z",
++        "message":{"content":[{"type":"text","text":"fixture"}]}})
++    .to_string()
++        + "\n";
++    let mut transcript = line.repeat(BYTES / line.len());
++    transcript.extend(std::iter::repeat_n(' ', BYTES - transcript.len()));
++    std::fs::write(&path, transcript).unwrap();
++    let input = json!({"session_id":"long", "transcript_path":path,
++        "cwd":dir.path(), "reason":"prompt_input_exit", "source":"startup"});
++    let opened = event(&db, "open", &input)["opened"].clone();
++    let start = Instant::now();
++    let closed = event(&db, "close", &input);
++    let elapsed = start.elapsed();
++    eprintln!(
++        "session-event close: {BYTES} bytes, {:.6} seconds",
++        elapsed.as_secs_f64()
++    );
++    assert_eq!(closed["closed"], json!([opened]));
++    let conn = rusqlite::Connection::open(&db).unwrap();
++    let payload: String = conn
++        .query_row(
++            "SELECT payload FROM run_events WHERE kind='session_closed'",
++            [],
++            |r| r.get(0),
++        )
++        .unwrap();
++    assert_eq!(
++        serde_json::from_str::<Value>(&payload).unwrap()["active_unavailable"],
++        "hook_intake_pending"
++    );
++    let turns: i64 = conn
++        .query_row(
++            "SELECT count(*) FROM run_events WHERE kind='session_turns'",
++            [],
++            |r| r.get(0),
++        )
++        .unwrap();
++    assert_eq!(turns, 0);
++    assert_eq!(event(&db, "close", &input)["closed"], json!([]));
++}
+diff --git a/tests/it/main.rs b/tests/it/main.rs
+index db494ac1..9d5ad5f8 100644
+--- a/tests/it/main.rs
++++ b/tests/it/main.rs
+@@ -28,6 +28,7 @@ mod cli_proposals;
+ mod cli_read;
+ mod cli_roles;
+ mod cli_screen;
++mod cli_session_event;
+ mod cli_stats;
+ mod cli_tasks;
+ mod cli_version;
+diff --git a/tests/plugin.rs b/tests/plugin.rs
+index 22ef0700..56867d52 100644
+--- a/tests/plugin.rs
++++ b/tests/plugin.rs
+@@ -696,11 +696,11 @@ fn session_event_hook_records_the_spans_of_the_inbox_and_planners_only() {
+     let events = span_events(binary, &db, &data_home, &repo);
+     assert_eq!(events[0]["payload"]["workspace_id"], "W-INBOX");
+     assert_eq!(events[0]["task_id"], Value::Null);
+-    // No transcript: the spans closed without their active time.
++    // Hook closes first; the supervisor has not attempted intake yet.
+     assert_eq!(events[1]["payload"]["active"], "unavailable");
+     assert_eq!(
+         events[1]["payload"]["active_unavailable"],
+-        "transcript_missing"
++        "hook_intake_pending"
+     );
+ 
+     // stats counts them in its window, per kind.

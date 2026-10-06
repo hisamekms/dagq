@@ -1,0 +1,4 @@
+diff --git a/migrations/0064_follow_up_membership.sql b/migrations/0064_follow_up_membership_history.sql
+similarity index 100%
+rename from migrations/0064_follow_up_membership.sql
+rename to migrations/0064_follow_up_membership_history.sql

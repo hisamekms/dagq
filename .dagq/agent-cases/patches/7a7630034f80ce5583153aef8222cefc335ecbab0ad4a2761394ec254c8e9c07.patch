@@ -1,0 +1,1989 @@
+diff --git a/crates/dagq-broker-client/src/cli.rs b/crates/dagq-broker-client/src/cli.rs
+index de128de3..0617b954 100644
+--- a/crates/dagq-broker-client/src/cli.rs
++++ b/crates/dagq-broker-client/src/cli.rs
+@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
+ use std::io::{Read, Write};
+ use std::path::PathBuf;
+ 
+-use dagq_broker_protocol::{ErrorBody, fs as fs_ops, git, process};
++use dagq_broker_protocol::{ErrorBody, fs as fs_ops, git, package, process};
+ use serde::Serialize;
+ 
+ use crate::client::{BrokerClient, ClientError, Endpoint, TOKEN_FILE_ENV, URL_ENV};
+@@ -55,6 +55,7 @@ pub enum Command {
+     GitAdd(git::AddRequest),
+     GitCommit(git::CommitRequest),
+     GitRestore(git::RestoreRequest),
++    PackageInstall(package::InstallRequest),
+     /// The worker's MCP server on stdio ([`crate::mcp`]).
+     Mcp,
+ }
+@@ -219,6 +220,7 @@ fn execute(
+         Command::GitAdd(request) => Ok(to_json(&client()?.git_add(&request)?)),
+         Command::GitCommit(request) => Ok(to_json(&client()?.git_commit(&request)?)),
+         Command::GitRestore(request) => Ok(to_json(&client()?.git_restore(&request)?)),
++        Command::PackageInstall(request) => Ok(to_json(&client()?.package_install(&request)?)),
+         Command::Mcp => unreachable!("mcp is served by `run`"),
+     }
+ }
+@@ -329,7 +331,7 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
+     let words: Vec<&str> = args.iter().take(2).map(String::as_str).collect();
+     let (name, rest): (&str, &[String]) = match words.as_slice() {
+         [] => return Err("no command".to_owned()),
+-        ["fs" | "git" | "token", sub, ..] => {
++        ["fs" | "git" | "token" | "package", sub, ..] => {
+             let name = match (words[0], *sub) {
+                 ("fs", "read") => "fs read",
+                 ("fs", "list") => "fs list",
+@@ -343,11 +345,12 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
+                 ("git", "commit") => "git commit",
+                 ("git", "restore") => "git restore",
+                 ("token", "inspect") => "token inspect",
++                ("package", "install") => "package install",
+                 (group, sub) => return Err(format!("unknown command `{group} {sub}`")),
+             };
+             (name, &args[2..])
+         }
+-        [group @ ("fs" | "git" | "token")] => {
++        [group @ ("fs" | "git" | "token" | "package")] => {
+             return Err(format!("`{group}` needs a subcommand"));
+         }
+         [name, ..] => (*name, &args[1..]),
+@@ -527,6 +530,20 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
+                 message: message.ok_or("`git commit` needs --message")?,
+             })
+         }
++        "package install" => {
++            let mut timeout_secs = None;
++            while let Some(flag) = words.next_flag() {
++                match flag {
++                    "--timeout-secs" => timeout_secs = Some(words.number(flag)?),
++                    _ => return Err(unknown(flag)),
++                }
++            }
++            let name = match <[String; 1]>::try_from(words.positional) {
++                Ok([name]) => name,
++                Err(words) => return Err(format!("expected one command name, got {words:?}")),
++            };
++            Command::PackageInstall(package::InstallRequest { name, timeout_secs })
++        }
+         other => return Err(format!("unknown command `{other}`")),
+     };
+     if matches!(command, Command::Version | Command::Help) && !rest.is_empty() {
+@@ -561,6 +578,7 @@ Commands:
+   git add PATH...
+   git commit --message TEXT
+   git restore [--staged] PATH...
++  package install NAME [--timeout-secs N]   a command of the broker's [broker.package]
+   mcp                                 the worker's MCP server on stdio"
+     )
+ }
+@@ -696,6 +714,13 @@ mod tests {
+                 paths: args(&["a"])
+             }))
+         );
++        assert_eq!(
++            command(&["package", "install", "cargo-fetch", "--timeout-secs", "9"]),
++            Ok(Command::PackageInstall(package::InstallRequest {
++                name: "cargo-fetch".into(),
++                timeout_secs: Some(9)
++            }))
++        );
+     }
+ 
+     #[test]
+@@ -742,6 +767,14 @@ mod tests {
+                 "unexpected arguments",
+             ),
+             (&["git", "commit", "--x"][..], "unknown flag"),
++            (&["package"][..], "needs a subcommand"),
++            (
++                &["package", "remove", "x"][..],
++                "unknown command `package remove`",
++            ),
++            (&["package", "install"][..], "one command name"),
++            (&["package", "install", "a", "b"][..], "one command name"),
++            (&["package", "install", "--x"][..], "unknown flag"),
+         ] {
+             let error = command(words).unwrap_err();
+             assert!(error.contains(why), "{words:?}: {error}");
+diff --git a/crates/dagq-broker-client/src/client.rs b/crates/dagq-broker-client/src/client.rs
+index f9db6c35..453a8748 100644
+--- a/crates/dagq-broker-client/src/client.rs
++++ b/crates/dagq-broker-client/src/client.rs
+@@ -10,7 +10,7 @@ use std::time::Duration;
+ 
+ use dagq_broker_protocol::{
+     BrokerError, BrokerSessionToken, ErrorBody, HealthResponse, MAX_REQUEST_BYTES, Operation,
+-    PROTOCOL_HEADER, PROTOCOL_VERSION, decode, encode, fs as fs_ops, git, process,
++    PROTOCOL_HEADER, PROTOCOL_VERSION, decode, encode, fs as fs_ops, git, package, process,
+ };
+ use serde::Serialize;
+ use serde::de::DeserializeOwned;
+@@ -235,6 +235,13 @@ impl BrokerClient {
+         self.call(Operation::GitRestore, request)
+     }
+ 
++    pub fn package_install(
++        &self,
++        request: &package::InstallRequest,
++    ) -> Result<package::InstallResponse, ClientError> {
++        self.call(Operation::PackageInstall, request)
++    }
++
+     /// `operation` with `request` as its body and the token.
+     pub fn call<Q: Serialize, A: DeserializeOwned>(
+         &self,
+diff --git a/crates/dagq-broker-client/src/mcp.rs b/crates/dagq-broker-client/src/mcp.rs
+index f92af794..8447a79c 100644
+--- a/crates/dagq-broker-client/src/mcp.rs
++++ b/crates/dagq-broker-client/src/mcp.rs
+@@ -5,7 +5,7 @@
+ 
+ use std::io::{self, BufRead, Write};
+ 
+-use dagq_broker_protocol::{ErrorBody, fs as fs_ops, git, process};
++use dagq_broker_protocol::{ErrorBody, fs as fs_ops, git, package, process};
+ use serde::Serialize;
+ use serde::de::DeserializeOwned;
+ use serde_json::{Map, Value, json};
+@@ -48,7 +48,7 @@ const PATH_NOTE: &str = "Paths are relative to the run's worktree (the workspace
+ path, `..` out of it, a symlink out of it and `.git` are refused.";
+ 
+ /// The tools, in the order `tools/list` gives them.
+-pub const TOOLS: [Tool; 12] = [
++pub const TOOLS: [Tool; 13] = [
+     Tool {
+         name: "read_file",
+         description: "Read a text file of the run's worktree through the dagq broker. Paths are \
+@@ -246,6 +246,28 @@ relative to the run's worktree.",
+             )
+         },
+     },
++    Tool {
++        name: "package_install",
++        description: "Run one of the package commands the repository configured for the dagq \
++broker (`[broker.package]` of dagq.toml, such as `cargo fetch` or `npm install`), by its `name`, \
++in the run's worktree. Only the configured commands run: a name the broker does not have is \
++refused (capability_denied), and no argv, env or stdin is given. `timeout_secs` is capped by \
++the broker's maximum (timeout past it); the broker refuses output over its limit \
++(output_limit), and stdout and stderr passed back are each cut at 40000 bytes (named in \
++`mcp_cut`). A non-zero exit is not an error: read `exit_code`.",
++        schema: || {
++            object(
++                &[
++                    ("name", string("The configured command's name.")),
++                    (
++                        "timeout_secs",
++                        integer("Seconds before the command is stopped, capped by the broker."),
++                    ),
++                ],
++                &["name"],
++            )
++        },
++    },
+ ];
+ 
+ fn object(properties: &[(&str, Value)], required: &[&str]) -> Value {
+@@ -370,8 +392,8 @@ fn initialize(params: &Value) -> Value {
+         "protocolVersion": version,
+         "capabilities": {"tools": {"listChanged": false}},
+         "serverInfo": {"name": NAME, "version": BUILD},
+-        "instructions": "The dagq resource broker's tools: files, allowed commands and git of \
+-    this run's worktree. Paths are relative to the worktree. A refusal of the broker is a tool \
++        "instructions": "The dagq resource broker's tools: files, allowed commands, git and the \
++    configured package commands of this run's worktree. Paths are relative to the worktree. A refusal of the broker is a tool \
+     error whose `error.code` says why (unauthorized, capability_denied, workspace_violation, \
+     timeout, output_limit, backend_error, invalid_request)."
+     })
+@@ -417,6 +439,9 @@ fn tools_call(client: &BrokerClient, params: &Value) -> Result<Value, String> {
+         "git_add" => run(arguments, |q: git::AddRequest| client.git_add(&q)),
+         "git_commit" => run(arguments, |q: git::CommitRequest| client.git_commit(&q)),
+         "git_restore" => run(arguments, |q: git::RestoreRequest| client.git_restore(&q)),
++        "package_install" => run(arguments, |q: package::InstallRequest| {
++            client.package_install(&q)
++        }),
+         other => return Err(format!("unknown tool `{other}`")),
+     };
+     Ok(match answer {
+@@ -601,7 +626,8 @@ mod tests {
+                 "git_show",
+                 "git_add",
+                 "git_commit",
+-                "git_restore"
++                "git_restore",
++                "package_install"
+             ]
+         );
+         for tool in tools {
+diff --git a/crates/dagq-broker-client/tests/client.rs b/crates/dagq-broker-client/tests/client.rs
+index f9f023e3..2845be03 100644
+--- a/crates/dagq-broker-client/tests/client.rs
++++ b/crates/dagq-broker-client/tests/client.rs
+@@ -14,7 +14,7 @@ use std::sync::mpsc;
+ use std::time::Duration;
+ 
+ use dagq_broker_client::{BrokerClient, ClientError, TOKEN_FILE_ENV, URL_ENV};
+-use dagq_broker_protocol::{BrokerCapability, ErrorCode, fs as fs_ops, git, process};
++use dagq_broker_protocol::{BrokerCapability, ErrorCode, fs as fs_ops, git, package, process};
+ 
+ #[test]
+ fn client_command_preserves_only_a_supplied_coverage_destination() {
+@@ -388,6 +388,40 @@ fn the_cli_does_fs_process_and_git_and_exits_non_zero_on_a_refusal() {
+     assert!(output.json()["entries"].is_array());
+ }
+ 
++#[test]
++fn the_library_and_the_cli_install_only_a_configured_package_command() {
++    let broker = Broker::start();
++    let token_file = broker.full_token_file("jti-package");
++    let client = broker.client(&token_file);
++    let install = |name: &str| {
++        client.package_install(&package::InstallRequest {
++            name: name.into(),
++            timeout_secs: Some(10),
++        })
++    };
++    let installed = install("deps").unwrap();
++    assert_eq!(installed.exit_code, Some(0));
++    assert_eq!(installed.stdout, "deps installed\n");
++    assert_eq!(
++        refusal(install("npm-install")),
++        (403, ErrorCode::CapabilityDenied)
++    );
++
++    let output = broker.cli(&token_file, &["package", "install", "deps"], "");
++    assert_eq!(output.code, Some(0), "{}", output.stderr);
++    assert_eq!(output.json()["stdout"], "deps installed\n");
++    broker
++        .cli(&token_file, &["package", "install", "other"], "")
++        .refused(ErrorCode::CapabilityDenied);
++    let no_package = broker.token_file(
++        &broker.claims("jti-no-package", &[BrokerCapability::FsRead], now() + 3600),
++        true,
++    );
++    broker
++        .cli(&no_package, &["package", "install", "deps"], "")
++        .refused(ErrorCode::CapabilityDenied);
++}
++
+ #[test]
+ fn the_cli_exits_2_on_a_bad_command_line_and_3_when_it_cannot_ask() {
+     let output = cli(&["--version"], &[], "");
+diff --git a/crates/dagq-broker-client/tests/common/mod.rs b/crates/dagq-broker-client/tests/common/mod.rs
+index 829b790b..83a4eee2 100644
+--- a/crates/dagq-broker-client/tests/common/mod.rs
++++ b/crates/dagq-broker-client/tests/common/mod.rs
+@@ -8,13 +8,9 @@ use std::fs;
+ use std::io::Write;
+ use std::path::{Path, PathBuf};
+ use std::process::{Command, Stdio};
+-use std::sync::{Arc, mpsc};
++use std::sync::mpsc;
+ use std::time::{Duration, SystemTime, UNIX_EPOCH};
+ 
+-use dagq_broker::backend::Backends;
+-use dagq_broker::backends::fs::FsBackend;
+-use dagq_broker::backends::git::GitBackend;
+-use dagq_broker::backends::process::ProcessBackend;
+ use dagq_broker::config::Config;
+ use dagq_broker::server::Server;
+ use dagq_broker_client::{BrokerClient, ClientError, Endpoint, TOKEN_FILE_ENV, URL_ENV};
+@@ -80,16 +76,14 @@ impl Broker {
+             "sh",
+             "--exec-allow",
+             "git",
++            "--package",
++            r#"deps=["sh","-c","echo installed > installed.txt; echo deps installed"]"#,
+         ]
+         .iter()
+         .map(|arg| (*arg).to_owned())
+         .collect();
+         let config = Config::parse(&args).unwrap();
+-        let backends = Backends {
+-            fs: Arc::new(FsBackend::new(config.roots.clone())),
+-            process: Arc::new(ProcessBackend::new(config.roots.clone())),
+-            git: Arc::new(GitBackend::new(config.roots.clone())),
+-        };
++        let backends = dagq_broker::backends(&config.roots);
+         let server = Server::bind(&config, backends).unwrap();
+         let addr = server.local_addr().unwrap();
+         std::thread::spawn(move || server.serve());
+diff --git a/crates/dagq-broker-client/tests/mcp.rs b/crates/dagq-broker-client/tests/mcp.rs
+index 5f2f1ecd..6662f998 100644
+--- a/crates/dagq-broker-client/tests/mcp.rs
++++ b/crates/dagq-broker-client/tests/mcp.rs
+@@ -170,7 +170,8 @@ fn each_tool_does_its_broker_operation_in_the_run_worktree() {
+             "git_show",
+             "git_add",
+             "git_commit",
+-            "git_restore"
++            "git_restore",
++            "package_install"
+         ]
+     );
+ 
+@@ -342,3 +343,63 @@ fn the_mcp_server_does_not_start_without_a_broker_url() {
+     assert!(output.stdout.is_empty());
+     assert!(output.stderr.contains(URL_ENV), "{}", output.stderr);
+ }
++
++#[test]
++fn package_install_runs_only_a_configured_command() {
++    let broker = Broker::start();
++    let token_file = broker.full_token_file("jti-package");
++    let mut mcp = Mcp::start(&broker, &token_file);
++    mcp.initialize();
++    let installed = mcp.ok(
++        "package_install",
++        json!({"name": "deps", "timeout_secs": 10}),
++    );
++    assert_eq!(installed["exit_code"], 0);
++    assert_eq!(installed["stdout"], "deps installed\n");
++    assert_eq!(
++        fs::read_to_string(broker.workspace().join("installed.txt")).unwrap(),
++        "installed\n"
++    );
++    for name in ["sh", "cargo-fetch"] {
++        mcp.refused(
++            "package_install",
++            json!({ "name": name }),
++            ErrorCode::CapabilityDenied,
++        );
++    }
++    // An argv is not an argument of the tool.
++    let (is_error, value) = mcp.call(
++        "package_install",
++        json!({"name": "deps", "argv": ["sh", "-c", "touch ran"]}),
++    );
++    assert!(is_error);
++    assert_eq!(value["client_error"]["kind"], "invalid_arguments");
++    assert_eq!(mcp.finish(), Some(0));
++
++    // A token without package.install runs nothing.
++    fs::remove_file(broker.workspace().join("installed.txt")).unwrap();
++    let no_package = broker.token_file(
++        &broker.claims(
++            "jti-no-package",
++            &[BrokerCapability::ProcessExec],
++            now() + 3600,
++        ),
++        true,
++    );
++    let mut mcp = Mcp::start(&broker, &no_package);
++    mcp.initialize();
++    mcp.refused(
++        "package_install",
++        json!({"name": "deps"}),
++        ErrorCode::CapabilityDenied,
++    );
++    assert_eq!(mcp.finish(), Some(0));
++    assert!(!fs::exists(broker.workspace().join("installed.txt")).unwrap());
++    assert!(!fs::exists(broker.workspace().join("ran")).unwrap());
++    let audit = broker.audit_text();
++    assert_eq!(
++        audit.matches("\"op\":\"package.install\"").count(),
++        4,
++        "{audit}"
++    );
++}
+diff --git a/crates/dagq-broker-protocol/src/capability.rs b/crates/dagq-broker-protocol/src/capability.rs
+index 31172f22..d75b5704 100644
+--- a/crates/dagq-broker-protocol/src/capability.rs
++++ b/crates/dagq-broker-protocol/src/capability.rs
+@@ -25,16 +25,19 @@ pub enum BrokerCapability {
+     GitRead,
+     #[serde(rename = "git.write")]
+     GitWrite,
++    #[serde(rename = "package.install")]
++    PackageInstall,
+ }
+ 
+ impl BrokerCapability {
+     /// Every capability, in order.
+-    pub const ALL: [BrokerCapability; 5] = [
++    pub const ALL: [BrokerCapability; 6] = [
+         Self::FsRead,
+         Self::FsWrite,
+         Self::ProcessExec,
+         Self::GitRead,
+         Self::GitWrite,
++        Self::PackageInstall,
+     ];
+ 
+     /// The name on the wire, `fs.read` and so on.
+@@ -45,6 +48,7 @@ impl BrokerCapability {
+             Self::ProcessExec => "process.exec",
+             Self::GitRead => "git.read",
+             Self::GitWrite => "git.write",
++            Self::PackageInstall => "package.install",
+         }
+     }
+ }
+@@ -114,7 +118,7 @@ mod tests {
+         let set: BTreeSet<_> = BrokerCapability::ALL.into_iter().rev().collect();
+         assert_eq!(
+             serde_json::to_string(&set).unwrap(),
+-            r#"["fs.read","fs.write","process.exec","git.read","git.write"]"#
++            r#"["fs.read","fs.write","process.exec","git.read","git.write","package.install"]"#
+         );
+     }
+ }
+diff --git a/crates/dagq-broker-protocol/src/lib.rs b/crates/dagq-broker-protocol/src/lib.rs
+index ec814577..c4755a50 100644
+--- a/crates/dagq-broker-protocol/src/lib.rs
++++ b/crates/dagq-broker-protocol/src/lib.rs
+@@ -17,6 +17,7 @@ mod error;
+ pub mod fs;
+ pub mod git;
+ mod operation;
++pub mod package;
+ pub mod process;
+ mod request_id;
+ mod token;
+diff --git a/crates/dagq-broker-protocol/src/operation.rs b/crates/dagq-broker-protocol/src/operation.rs
+index 5cad1e78..9d96cd5a 100644
+--- a/crates/dagq-broker-protocol/src/operation.rs
++++ b/crates/dagq-broker-protocol/src/operation.rs
+@@ -21,11 +21,12 @@ pub enum Operation {
+     GitAdd,
+     GitCommit,
+     GitRestore,
++    PackageInstall,
+ }
+ 
+ impl Operation {
+     /// Every operation, in order.
+-    pub const ALL: [Operation; 13] = [
++    pub const ALL: [Operation; 14] = [
+         Self::Health,
+         Self::FsRead,
+         Self::FsList,
+@@ -39,6 +40,7 @@ impl Operation {
+         Self::GitAdd,
+         Self::GitCommit,
+         Self::GitRestore,
++        Self::PackageInstall,
+     ];
+ 
+     /// The name in the audit, `fs.read` and so on.
+@@ -57,6 +59,7 @@ impl Operation {
+             Self::GitAdd => "git.add",
+             Self::GitCommit => "git.commit",
+             Self::GitRestore => "git.restore",
++            Self::PackageInstall => "package.install",
+         }
+     }
+ 
+@@ -84,6 +87,7 @@ impl Operation {
+             Self::GitAdd => "/v1/git/add",
+             Self::GitCommit => "/v1/git/commit",
+             Self::GitRestore => "/v1/git/restore",
++            Self::PackageInstall => "/v1/package/install",
+         }
+     }
+ 
+@@ -99,6 +103,7 @@ impl Operation {
+                 Some(BrokerCapability::GitRead)
+             }
+             Self::GitAdd | Self::GitCommit | Self::GitRestore => Some(BrokerCapability::GitWrite),
++            Self::PackageInstall => Some(BrokerCapability::PackageInstall),
+         }
+     }
+ 
+@@ -162,6 +167,7 @@ mod tests {
+                 ("git.add", Some("git.write")),
+                 ("git.commit", Some("git.write")),
+                 ("git.restore", Some("git.write")),
++                ("package.install", Some("package.install")),
+             ]
+         );
+     }
+diff --git a/crates/dagq-broker-protocol/src/package.rs b/crates/dagq-broker-protocol/src/package.rs
+new file mode 100644
+index 00000000..078ef277
+--- /dev/null
++++ b/crates/dagq-broker-protocol/src/package.rs
+@@ -0,0 +1,117 @@
++//! The package operation `package.install`: one of the few commands the
++//! repository configured (`[broker.package]` of `dagq.toml`, `--package` of
++//! `serve`), chosen by its name. The request names the command and never
++//! its argv, so nothing else runs through it.
++
++use serde::{Deserialize, Serialize};
++
++/// `POST /v1/package/install`.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct InstallRequest {
++    /// The configured command's name, `cargo-fetch` and so on.
++    pub name: String,
++    /// Capped by the server's maximum, as for `process.exec`.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub timeout_secs: Option<u64>,
++}
++
++/// The answer is `process.exec`'s.
++pub type InstallResponse = crate::process::ExecResponse;
++
++/// Whether `name` may name a configured command: ASCII letters, digits,
++/// `-`, `_` and `.`, at most 64 bytes.
++pub fn valid_name(name: &str) -> bool {
++    !name.is_empty()
++        && name.len() <= 64
++        && name
++            .bytes()
++            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
++}
++
++/// Why the command `name` = `argv` cannot be configured, or `Ok`: a valid
++/// name, a program name (no `/`) other than `git` (only the git backend
++/// runs git), and no empty program or NUL byte. `dagq` checks
++/// `[broker.package]` and `serve` checks `--package` with it.
++pub fn check_command(name: &str, argv: &[String]) -> Result<(), String> {
++    if !valid_name(name) {
++        return Err(format!(
++            "package command {name:?}: the name is letters, digits, `-`, `_` and `.` (at most 64)"
++        ));
++    }
++    let Some(program) = argv.first() else {
++        return Err(format!("package command {name}: the argv is empty"));
++    };
++    if program.is_empty() || argv.iter().any(|arg| arg.contains('\0')) {
++        return Err(format!(
++            "package command {name}: the argv holds an empty program or a NUL byte"
++        ));
++    }
++    if program.contains('/') {
++        return Err(format!(
++            "package command {name}: argv[0] must be a program name, not a path"
++        ));
++    }
++    if program == "git" {
++        return Err(format!(
++            "package command {name}: git runs through the git operations only"
++        ));
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::{decode, encode};
++
++    fn argv(words: &[&str]) -> Vec<String> {
++        words.iter().map(|word| (*word).to_owned()).collect()
++    }
++
++    #[test]
++    fn the_request_names_the_command_only() {
++        let request = InstallRequest {
++            name: "cargo-fetch".to_owned(),
++            timeout_secs: Some(9),
++        };
++        let json = r#"{"name":"cargo-fetch","timeout_secs":9}"#;
++        assert_eq!(String::from_utf8(encode(&request).unwrap()).unwrap(), json);
++        assert_eq!(decode::<InstallRequest>(json.as_bytes()).unwrap(), request);
++        assert_eq!(
++            decode::<InstallRequest>(br#"{"name":"n"}"#).unwrap(),
++            InstallRequest {
++                name: "n".to_owned(),
++                timeout_secs: None
++            }
++        );
++        for body in [
++            r#"{"name":"n","argv":["sh"]}"#,
++            r#"{"name":"n","env":{}}"#,
++            r#"{"timeout_secs":1}"#,
++        ] {
++            assert!(decode::<InstallRequest>(body.as_bytes()).is_err(), "{body}");
++        }
++    }
++
++    #[test]
++    fn a_command_is_a_named_program_other_than_git() {
++        assert!(check_command("cargo-fetch", &argv(&["cargo", "fetch"])).is_ok());
++        assert!(check_command("npm_install.1", &argv(&["npm", "install"])).is_ok());
++        let cases: [(&str, &[&str], &str); 8] = [
++            ("", &["cargo"], "the name"),
++            ("a b", &["cargo"], "the name"),
++            (&"x".repeat(65), &["cargo"], "the name"),
++            ("empty", &[], "argv is empty"),
++            ("blank", &[""], "empty program"),
++            ("nul", &["cargo", "a\0b"], "NUL"),
++            ("path", &["/usr/bin/cargo"], "not a path"),
++            ("git", &["git", "fetch"], "git operations"),
++        ];
++        for (name, words, expected) in cases {
++            let error = check_command(name, &argv(words)).unwrap_err();
++            assert!(error.contains(expected), "{name}: {error}");
++        }
++        assert!(valid_name(&"x".repeat(64)));
++    }
++}
+diff --git a/crates/dagq-broker/src/backend.rs b/crates/dagq-broker/src/backend.rs
+index 05078004..1a3a3e98 100644
+--- a/crates/dagq-broker/src/backend.rs
++++ b/crates/dagq-broker/src/backend.rs
+@@ -1,12 +1,12 @@
+ //! [`Backend`]: what does an operation once the server has authenticated
+ //! the token, checked its capability and read the request. The server holds
+-//! one backend each for fs, process and git ([`Backends`]); until they are
++//! one backend each for fs, process, git and package ([`Backends`]); until they are
+ //! written, [`Unimplemented`] answers every operation with `backend_error`.
+ 
+ use std::path::PathBuf;
+ use std::sync::Arc;
+ 
+-use dagq_broker_protocol::{ErrorCode, Operation, TokenClaims, decode, fs, git, process};
++use dagq_broker_protocol::{ErrorCode, Operation, TokenClaims, decode, fs, git, package, process};
+ 
+ use crate::config::Limits;
+ 
+@@ -16,6 +16,7 @@ pub enum BackendKind {
+     Fs,
+     Process,
+     Git,
++    Package,
+ }
+ 
+ impl BackendKind {
+@@ -34,6 +35,7 @@ impl BackendKind {
+             | Operation::GitAdd
+             | Operation::GitCommit
+             | Operation::GitRestore => Some(Self::Git),
++            Operation::PackageInstall => Some(Self::Package),
+         }
+     }
+ 
+@@ -42,6 +44,7 @@ impl BackendKind {
+             Self::Fs => "fs",
+             Self::Process => "process",
+             Self::Git => "git",
++            Self::Package => "package",
+         }
+     }
+ }
+@@ -61,6 +64,7 @@ pub enum BackendRequest {
+     GitAdd(git::AddRequest),
+     GitCommit(git::CommitRequest),
+     GitRestore(git::RestoreRequest),
++    PackageInstall(package::InstallRequest),
+ }
+ 
+ impl BackendRequest {
+@@ -81,6 +85,7 @@ impl BackendRequest {
+             Operation::GitAdd => Self::GitAdd(decode(body).ok()?),
+             Operation::GitCommit => Self::GitCommit(decode(body).ok()?),
+             Operation::GitRestore => Self::GitRestore(decode(body).ok()?),
++            Operation::PackageInstall => Self::PackageInstall(decode(body).ok()?),
+         };
+         Some(request)
+     }
+@@ -97,16 +102,21 @@ impl BackendRequest {
+             Self::GitAdd(request) => request.paths.iter().map(String::as_str).collect(),
+             Self::GitShow(request) => request.paths.iter().map(String::as_str).collect(),
+             Self::GitRestore(request) => request.paths.iter().map(String::as_str).collect(),
+-            Self::ProcessExec(_) | Self::GitStatus(_) | Self::GitLog(_) | Self::GitCommit(_) => {
+-                Vec::new()
+-            }
++            Self::ProcessExec(_)
++            | Self::GitStatus(_)
++            | Self::GitLog(_)
++            | Self::GitCommit(_)
++            | Self::PackageInstall(_) => Vec::new(),
+         }
+     }
+ 
+-    /// The program's argv, for `process.exec`.
+-    pub fn argv(&self) -> Option<&[String]> {
++    /// The program's argv: the request's for `process.exec`, the configured
++    /// command's for `package.install` (`None` when `limits` has no command
++    /// of its name).
++    pub fn argv<'a>(&'a self, limits: &'a Limits) -> Option<&'a [String]> {
+         match self {
+             Self::ProcessExec(request) => Some(&request.argv),
++            Self::PackageInstall(request) => limits.packages.get(&request.name).map(Vec::as_slice),
+             _ => None,
+         }
+     }
+@@ -176,6 +186,7 @@ pub struct Backends {
+     pub fs: Arc<dyn Backend>,
+     pub process: Arc<dyn Backend>,
+     pub git: Arc<dyn Backend>,
++    pub package: Arc<dyn Backend>,
+ }
+ 
+ impl Backends {
+@@ -185,6 +196,7 @@ impl Backends {
+             fs: Arc::new(Unimplemented),
+             process: Arc::new(Unimplemented),
+             git: Arc::new(Unimplemented),
++            package: Arc::new(Unimplemented),
+         }
+     }
+ 
+@@ -193,6 +205,7 @@ impl Backends {
+             BackendKind::Fs => self.fs.as_ref(),
+             BackendKind::Process => self.process.as_ref(),
+             BackendKind::Git => self.git.as_ref(),
++            BackendKind::Package => self.package.as_ref(),
+         }
+     }
+ }
+@@ -229,6 +242,7 @@ mod tests {
+                 Some("git"),
+                 Some("git"),
+                 Some("git"),
++                Some("package"),
+             ]
+         );
+         for operation in Operation::ALL.into_iter().skip(1) {
+@@ -239,7 +253,12 @@ mod tests {
+ 
+     #[test]
+     fn decodes_each_request_and_names_its_paths() {
+-        let cases: [(Operation, &str, Vec<&str>); 12] = [
++        let mut limits = Limits::default();
++        limits.packages.insert(
++            "fetch".to_owned(),
++            vec!["cargo".to_owned(), "fetch".to_owned()],
++        );
++        let cases: [(Operation, &str, Vec<&str>); 14] = [
+             (Operation::FsRead, r#"{"path":"a"}"#, vec!["a"]),
+             (Operation::FsList, r#"{"path":"d"}"#, vec!["d"]),
+             (
+@@ -260,16 +279,21 @@ mod tests {
+             (Operation::GitRestore, r#"{"paths":["t"]}"#, vec!["t"]),
+             (Operation::GitAdd, r#"{"paths":["r"]}"#, vec!["r"]),
+             (Operation::GitCommit, r#"{"message":"m"}"#, vec![]),
++            (Operation::PackageInstall, r#"{"name":"fetch"}"#, vec![]),
++            (Operation::PackageInstall, r#"{"name":"other"}"#, vec![]),
+         ];
+         for (operation, body, paths) in cases {
+             let request = BackendRequest::decode(operation, body.as_bytes())
+                 .unwrap_or_else(|| panic!("{operation}: {body}"));
+             assert_eq!(request.paths(), paths, "{operation}");
+-            assert_eq!(
+-                request.argv().is_some(),
+-                operation == Operation::ProcessExec,
+-                "{operation}"
+-            );
++            let argv = request.argv(&limits).map(<[String]>::to_vec);
++            match operation {
++                Operation::ProcessExec => assert_eq!(argv.unwrap(), ["ls", "-l"]),
++                Operation::PackageInstall if body.contains("fetch") => {
++                    assert_eq!(argv.unwrap(), ["cargo", "fetch"])
++                }
++                _ => assert_eq!(argv, None, "{operation}: {body}"),
++            }
+         }
+     }
+ 
+@@ -292,7 +316,12 @@ mod tests {
+         .unwrap();
+         let limits = Limits::default();
+         let backends = Backends::unimplemented();
+-        for kind in [BackendKind::Fs, BackendKind::Process, BackendKind::Git] {
++        for kind in [
++            BackendKind::Fs,
++            BackendKind::Process,
++            BackendKind::Git,
++            BackendKind::Package,
++        ] {
+             let call = Call {
+                 operation: Operation::GitLog,
+                 claims: &claims,
+diff --git a/crates/dagq-broker/src/backends.rs b/crates/dagq-broker/src/backends.rs
+index f6bcb7a1..1040090d 100644
+--- a/crates/dagq-broker/src/backends.rs
++++ b/crates/dagq-broker/src/backends.rs
+@@ -1,6 +1,7 @@
+ //! The backends that do the operations behind the [`crate::backend::Backend`]
+-//! trait: fs, process and git.
++//! trait: fs, process, git and package.
+ 
+ pub mod fs;
+ pub mod git;
++pub mod package;
+ pub mod process;
+diff --git a/crates/dagq-broker/src/backends/package.rs b/crates/dagq-broker/src/backends/package.rs
+new file mode 100644
+index 00000000..024fe30e
+--- /dev/null
++++ b/crates/dagq-broker/src/backends/package.rs
+@@ -0,0 +1,239 @@
++//! The package backend ([Broker] "package.install"): `package.install`
++//! runs one of the commands the repository configured (`--package`, from
++//! `[broker.package]` of `dagq.toml`), chosen by its name. The request
++//! carries the name and a timeout only, never an argv, env or stdin, so
++//! nothing but the configured commands runs through it.
++//!
++//! It runs as `process.exec` does ([`super::process`]): without a shell, in
++//! the token's workspace, the program looked up on the fixed `PATH`, with
++//! the env starting empty (`PATH`, a `HOME` of its own, `LANG`, `TERM`;
++//! nothing of the request's or the broker's), the timeout capped by the
++//! server's maximum and the output limit, the process group killed past
++//! either. A name that is not configured is `capability_denied`. The
++//! network is not narrowed here (Phase 4).
++//!
++//! [Broker]: https://github.com/hisamekms/dagq/blob/main/docs/design/broker.md
++
++use std::collections::BTreeMap;
++use std::path::PathBuf;
++
++use dagq_broker_protocol::ErrorCode;
++
++use crate::backend::{Backend, BackendRequest, Call, Done, Failure};
++use crate::backends::process::{allowed_program, request_env, run_in_workspace, timeout};
++
++/// The package backend over the server's mounted roots.
++#[derive(Debug, Clone)]
++pub struct PackageBackend {
++    roots: Vec<PathBuf>,
++}
++
++impl PackageBackend {
++    /// A backend that runs the configured commands in workspaces under
++    /// `roots` (`--root`).
++    pub fn new(roots: Vec<PathBuf>) -> Self {
++        Self { roots }
++    }
++}
++
++impl Backend for PackageBackend {
++    fn call(&self, call: &Call<'_>, request: BackendRequest) -> Result<Done, Failure> {
++        let BackendRequest::PackageInstall(request) = request else {
++            return Err(Failure::new(
++                ErrorCode::InvalidRequest,
++                format!("{} is not a package operation", call.operation),
++            ));
++        };
++        let limits = call.limits;
++        let Some(argv) = limits.packages.get(&request.name) else {
++            return Err(Failure::new(
++                ErrorCode::CapabilityDenied,
++                format!(
++                    "{} is not a configured package command",
++                    printable(&request.name)
++                ),
++            ));
++        };
++        // The configuration was checked when read; the same check as
++        // `process.exec`'s stays here (no path, never git).
++        allowed_program(argv, std::slice::from_ref(&argv[0]))?;
++        let timeout = timeout(request.timeout_secs, limits)?;
++        let env = request_env(&BTreeMap::new(), &[])?;
++        run_in_workspace(
++            &self.roots,
++            call,
++            argv,
++            &env,
++            Vec::new(),
++            timeout,
++            limits.output_limit_bytes,
++        )
++    }
++}
++
++/// `name` for a message: as it is when it could be configured, else a
++/// placeholder (the request's text is not echoed back).
++fn printable(name: &str) -> String {
++    if dagq_broker_protocol::package::valid_name(name) {
++        format!("`{name}`")
++    } else {
++        "the name".to_owned()
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use std::time::Duration;
++
++    use dagq_broker_protocol::{Operation, TokenClaims, git, package, process};
++    use serde_json::json;
++
++    use super::*;
++    use crate::config::Limits;
++
++    fn argv(words: &[&str]) -> Vec<String> {
++        words.iter().map(|word| (*word).to_owned()).collect()
++    }
++
++    struct Fixture {
++        _dir: tempfile::TempDir,
++        workspace: PathBuf,
++        backend: PackageBackend,
++        claims: TokenClaims,
++        limits: Limits,
++    }
++
++    impl Fixture {
++        fn new() -> Self {
++            let dir = tempfile::tempdir().unwrap();
++            let root = dir.path().canonicalize().unwrap().join("runs");
++            let workspace = root.join("run-1/worktree");
++            std::fs::create_dir_all(&workspace).unwrap();
++            let claims: TokenClaims = serde_json::from_value(json!({
++                "v": 1, "jti": "j", "actor_id": "worker:run-1", "role": "worker",
++                "task_id": 840, "run_id": "run-1", "workspace": workspace,
++                "branch": "dagq/run-1", "committer": {"name": "n", "email": "e"},
++                "capabilities": ["package.install"], "iat": 0, "exp": 1
++            }))
++            .unwrap();
++            let mut limits = Limits {
++                exec_timeout_secs: 1,
++                exec_max_timeout_secs: 1,
++                output_limit_bytes: 64,
++                ..Limits::default()
++            };
++            for (name, words) in [
++                (
++                    "fetch",
++                    &["sh", "-c", "pwd; env; echo fetched > fetched"][..],
++                ),
++                ("slow", &["sh", "-c", "sleep 30"][..]),
++                ("loud", &["sh", "-c", "while :; do echo out; done"][..]),
++                ("git", &["git", "fetch"][..]),
++                ("path", &["/bin/sh", "-c", "true"][..]),
++            ] {
++                limits.packages.insert(name.to_owned(), argv(words));
++            }
++            Self {
++                _dir: dir,
++                workspace,
++                backend: PackageBackend::new(vec![root]),
++                claims,
++                limits,
++            }
++        }
++
++        fn install(&self, name: &str, timeout_secs: Option<u64>) -> Result<Done, Failure> {
++            let call = Call {
++                operation: Operation::PackageInstall,
++                claims: &self.claims,
++                confined: Vec::new(),
++                limits: &self.limits,
++            };
++            let request = BackendRequest::PackageInstall(package::InstallRequest {
++                name: name.to_owned(),
++                timeout_secs,
++            });
++            self.backend.call(&call, request)
++        }
++    }
++
++    #[test]
++    fn a_configured_command_runs_in_the_workspace_with_a_clean_env() {
++        let mut fixture = Fixture::new();
++        fixture.limits.output_limit_bytes = 64 * 1024;
++        let done = fixture.install("fetch", None).unwrap();
++        assert_eq!(done.exit_code, Some(0));
++        let answer: process::ExecResponse = serde_json::from_slice(&done.body).unwrap();
++        let stdout = answer.stdout;
++        assert!(
++            stdout.starts_with(&format!("{}\n", fixture.workspace.display())),
++            "{stdout}"
++        );
++        assert!(
++            stdout.contains("PATH=/usr/local/bin:/usr/bin:/bin"),
++            "{stdout}"
++        );
++        assert!(stdout.contains("LANG=C.UTF-8"), "{stdout}");
++        assert!(!stdout.contains("CARGO"), "{stdout}");
++        assert_eq!(
++            std::fs::read_to_string(fixture.workspace.join("fetched")).unwrap(),
++            "fetched\n"
++        );
++    }
++
++    #[test]
++    fn a_name_that_is_not_configured_runs_nothing() {
++        let fixture = Fixture::new();
++        for name in ["other", "sh", "a b"] {
++            let failure = fixture.install(name, None).unwrap_err();
++            assert_eq!(failure.code, ErrorCode::CapabilityDenied, "{name}");
++            assert!(failure.message.contains("not a configured"), "{name}");
++        }
++        assert!(
++            fixture
++                .install("a b", None)
++                .unwrap_err()
++                .message
++                .starts_with("the name")
++        );
++        // A configuration that went around the check still never runs git
++        // or a path.
++        for name in ["git", "path"] {
++            let failure = fixture.install(name, None).unwrap_err();
++            assert_eq!(failure.code, ErrorCode::CapabilityDenied, "{name}");
++        }
++    }
++
++    #[test]
++    fn the_timeout_and_the_output_limit_stop_the_command() {
++        let fixture = Fixture::new();
++        let started = std::time::Instant::now();
++        let failure = fixture.install("slow", Some(3600)).unwrap_err();
++        assert_eq!(failure.code, ErrorCode::Timeout);
++        assert!(started.elapsed() < Duration::from_secs(20));
++        let failure = fixture.install("loud", None).unwrap_err();
++        assert_eq!(failure.code, ErrorCode::OutputLimit);
++        let failure = fixture.install("slow", Some(0)).unwrap_err();
++        assert_eq!(failure.code, ErrorCode::InvalidRequest);
++    }
++
++    #[test]
++    fn another_operation_is_refused() {
++        let fixture = Fixture::new();
++        let call = Call {
++            operation: Operation::GitLog,
++            claims: &fixture.claims,
++            confined: Vec::new(),
++            limits: &fixture.limits,
++        };
++        let failure = fixture
++            .backend
++            .call(
++                &call,
++                BackendRequest::GitLog(git::LogRequest { limit: None }),
++            )
++            .unwrap_err();
++        assert_eq!(failure.code, ErrorCode::InvalidRequest);
++    }
++}
+diff --git a/crates/dagq-broker/src/backends/process.rs b/crates/dagq-broker/src/backends/process.rs
+index 73e9d6c9..d899f15c 100644
+--- a/crates/dagq-broker/src/backends/process.rs
++++ b/crates/dagq-broker/src/backends/process.rs
+@@ -79,7 +79,7 @@ impl Backend for ProcessBackend {
+             )));
+         };
+         let limits = call.limits;
+-        let program = allowed_program(&request.argv, &limits.exec_allow)?;
++        allowed_program(&request.argv, &limits.exec_allow)?;
+         let timeout = timeout(request.timeout_secs, limits)?;
+         let stdin = request.stdin.unwrap_or_default().into_bytes();
+         if stdin.len() as u64 > limits.output_limit_bytes {
+@@ -92,54 +92,78 @@ impl Backend for ProcessBackend {
+             ));
+         }
+         let env = request_env(&request.env, &limits.exec_env)?;
+-        let resolved = lookup(program)?;
+-        let workspace = open_workspace(&self.roots, Path::new(&call.claims.workspace))?;
+-        let home = Home::new()?;
+-
+-        let started = Instant::now();
+-        let child = spawn(&resolved, &request.argv, &env, &home, &workspace)?;
+-        let ran = supervise(child, stdin, started + timeout, limits.output_limit_bytes)
+-            .map_err(|error| backend(format!("run {program}: {error}")))?;
+-        let duration_ms = started.elapsed().as_millis() as u64;
+-        let (status, stdout, stderr) = match ran {
+-            Ran::Exited {
+-                status,
+-                stdout,
+-                stderr,
+-            } => (status, stdout, stderr),
+-            Ran::TimedOut => {
+-                return Err(Failure::new(
+-                    ErrorCode::Timeout,
+-                    format!(
+-                        "{program} ran past {} seconds and was stopped",
+-                        timeout.as_secs()
+-                    ),
+-                ));
+-            }
+-            Ran::OverLimit => {
+-                return Err(Failure::new(
+-                    ErrorCode::OutputLimit,
+-                    format!(
+-                        "{program} wrote more than {} bytes and was stopped",
+-                        limits.output_limit_bytes
+-                    ),
+-                ));
+-            }
+-        };
+-        let exit_code = status.code();
+-        let body = encode(&process::ExecResponse {
+-            exit_code,
+-            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+-            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+-            duration_ms,
+-        })
+-        .map_err(|error| backend(error.to_string()))?;
+-        Ok(Done { body, exit_code })
++        run_in_workspace(
++            &self.roots,
++            call,
++            &request.argv,
++            &env,
++            stdin,
++            timeout,
++            limits.output_limit_bytes,
++        )
+     }
+ }
+ 
++/// Run `argv` (its program already allowed) in the token's workspace with
++/// `env` (besides `HOME`), `stdin`, the `timeout` and the output `limit`:
++/// what `process.exec` and `package.install` share.
++pub(crate) fn run_in_workspace(
++    roots: &[PathBuf],
++    call: &Call<'_>,
++    argv: &[String],
++    env: &BTreeMap<String, String>,
++    stdin: Vec<u8>,
++    timeout: Duration,
++    limit: u64,
++) -> Result<Done, Failure> {
++    let program = argv[0].as_str();
++    let resolved = lookup(program)?;
++    let workspace = open_workspace(roots, Path::new(&call.claims.workspace))?;
++    let home = Home::new()?;
++
++    let started = Instant::now();
++    let child = spawn(&resolved, argv, env, &home, &workspace)?;
++    let ran = supervise(child, stdin, started + timeout, limit)
++        .map_err(|error| backend(format!("run {program}: {error}")))?;
++    let duration_ms = started.elapsed().as_millis() as u64;
++    let (status, stdout, stderr) = match ran {
++        Ran::Exited {
++            status,
++            stdout,
++            stderr,
++        } => (status, stdout, stderr),
++        Ran::TimedOut => {
++            return Err(Failure::new(
++                ErrorCode::Timeout,
++                format!(
++                    "{program} ran past {} seconds and was stopped",
++                    timeout.as_secs()
++                ),
++            ));
++        }
++        Ran::OverLimit => {
++            return Err(Failure::new(
++                ErrorCode::OutputLimit,
++                format!("{program} wrote more than {limit} bytes and was stopped"),
++            ));
++        }
++    };
++    let exit_code = status.code();
++    let body = encode(&process::ExecResponse {
++        exit_code,
++        stdout: String::from_utf8_lossy(&stdout).into_owned(),
++        stderr: String::from_utf8_lossy(&stderr).into_owned(),
++        duration_ms,
++    })
++    .map_err(|error| backend(error.to_string()))?;
++    Ok(Done { body, exit_code })
++}
++
+ /// `argv[0]` when it may run: a name (no `/`) in `allow`, never `git`.
+-fn allowed_program<'a>(argv: &'a [String], allow: &[String]) -> Result<&'a str, Failure> {
++pub(crate) fn allowed_program<'a>(
++    argv: &'a [String],
++    allow: &[String],
++) -> Result<&'a str, Failure> {
+     let Some(program) = argv.first() else {
+         return Err(invalid("argv is empty"));
+     };
+@@ -162,7 +186,10 @@ fn allowed_program<'a>(argv: &'a [String], allow: &[String]) -> Result<&'a str,
+ }
+ 
+ /// The request's timeout (the default when absent) capped by the maximum.
+-fn timeout(requested: Option<u64>, limits: &crate::config::Limits) -> Result<Duration, Failure> {
++pub(crate) fn timeout(
++    requested: Option<u64>,
++    limits: &crate::config::Limits,
++) -> Result<Duration, Failure> {
+     let secs = match requested {
+         Some(0) => return Err(invalid("timeout_secs must be at least 1")),
+         Some(secs) => secs,
+@@ -174,7 +201,7 @@ fn timeout(requested: Option<u64>, limits: &crate::config::Limits) -> Result<Dur
+ /// The env besides `HOME`: [`PATH`], [`BASE_ENV`], and the request's names
+ /// that `allow` lets through (never [`FIXED_ENV`]). Other names are dropped
+ /// without a word, their values unread.
+-fn request_env(
++pub(crate) fn request_env(
+     requested: &BTreeMap<String, String>,
+     allow: &[String],
+ ) -> Result<BTreeMap<String, String>, Failure> {
+diff --git a/crates/dagq-broker/src/config.rs b/crates/dagq-broker/src/config.rs
+index d021da44..5121fdb0 100644
+--- a/crates/dagq-broker/src/config.rs
++++ b/crates/dagq-broker/src/config.rs
+@@ -1,8 +1,11 @@
+ //! [`Config`]: what `dagq-broker serve` reads from its command line.
+ 
++use std::collections::BTreeMap;
+ use std::net::SocketAddr;
+ use std::path::PathBuf;
+ 
++use dagq_broker_protocol::package;
++
+ /// The address the server listens on when `--listen` is not given.
+ pub const DEFAULT_LISTEN: &str = "127.0.0.1:8750";
+ 
+@@ -54,6 +57,9 @@ pub struct Limits {
+     pub exec_allow: Vec<String>,
+     /// The env names a request may pass to its process.
+     pub exec_env: Vec<String>,
++    /// The commands `package.install` may run, by name (`--package`); empty
++    /// refuses every install.
++    pub packages: BTreeMap<String, Vec<String>>,
+ }
+ 
+ impl Default for Limits {
+@@ -65,6 +71,7 @@ impl Default for Limits {
+             fs_limit_bytes: DEFAULT_FS_LIMIT_BYTES,
+             exec_allow: Vec::new(),
+             exec_env: Vec::new(),
++            packages: BTreeMap::new(),
+         }
+     }
+ }
+@@ -123,6 +130,12 @@ impl Config {
+                 "--fs-limit-bytes" => limits.fs_limit_bytes = number(flag, &value)?,
+                 "--exec-allow" => limits.exec_allow.push(value),
+                 "--exec-env" => limits.exec_env.push(value),
++                "--package" => {
++                    let (name, argv) = package_command(&value)?;
++                    if limits.packages.insert(name.clone(), argv).is_some() {
++                        return Err(format!("`--package {name}` is given twice"));
++                    }
++                }
+                 _ => return Err(format!("unknown flag `{flag}`")),
+             }
+         }
+@@ -150,7 +163,7 @@ impl Config {
+                 "`--exec-env {name}` changes what the child loads; `LD_*` and `DYLD_*` names are refused"
+             ));
+         }
+-        let warnings = limits
++        let mut warnings: Vec<String> = limits
+             .exec_allow
+             .iter()
+             .filter(|name| is_interpreter(name))
+@@ -160,6 +173,18 @@ impl Config {
+                 )
+             })
+             .collect();
++        warnings.extend(
++            limits
++                .packages
++                .iter()
++                .filter(|(_, argv)| is_interpreter(&argv[0]))
++                .map(|(name, argv)| {
++                    format!(
++                        "warning: `--package {name}` runs {}, which runs other programs",
++                        argv[0]
++                    )
++                }),
++        );
+         if roots.is_empty() {
+             return Err("`--root` is required (the mounted runs dir)".to_owned());
+         }
+@@ -179,6 +204,18 @@ impl Config {
+     }
+ }
+ 
++/// The value of `--package`, `NAME=<argv as a JSON array of strings>`,
++/// checked as `dagq` checks `[broker.package]`.
++fn package_command(value: &str) -> Result<(String, Vec<String>), String> {
++    let (name, argv) = value
++        .split_once('=')
++        .ok_or_else(|| format!("`--package {value}` is not NAME=[\"PROGRAM\", ...]"))?;
++    let argv: Vec<String> = serde_json::from_str(argv)
++        .map_err(|_| format!("`--package {name}`: the argv is not a JSON array of strings"))?;
++    package::check_command(name, &argv)?;
++    Ok((name.to_owned(), argv))
++}
++
+ /// Whether `name`'s basename is one of [`INTERPRETERS`].
+ pub fn is_interpreter(name: &str) -> bool {
+     let base = name.rsplit('/').next().unwrap_or(name);
+@@ -279,6 +316,7 @@ mod tests {
+                 fs_limit_bytes: 7,
+                 exec_allow: vec!["ls".to_owned(), "cat".to_owned()],
+                 exec_env: vec!["LANG".to_owned()],
++                packages: BTreeMap::new(),
+             }
+         );
+         assert_eq!(config.roots.len(), 2);
+@@ -333,6 +371,49 @@ mod tests {
+         assert!(!is_interpreter("SH"));
+     }
+ 
++    #[test]
++    fn reads_the_package_commands_by_name() {
++        let config = with(&[
++            "--package",
++            r#"cargo-fetch=["cargo","fetch","--locked"]"#,
++            "--package",
++            r#"npm-install=["npm","install"]"#,
++        ])
++        .unwrap();
++        let argv = |words: &[&str]| words.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>();
++        assert_eq!(
++            config.limits.packages,
++            BTreeMap::from([
++                (
++                    "cargo-fetch".to_owned(),
++                    argv(&["cargo", "fetch", "--locked"])
++                ),
++                ("npm-install".to_owned(), argv(&["npm", "install"])),
++            ])
++        );
++        assert!(config.warnings.is_empty());
++        assert!(with(&[]).unwrap().limits.packages.is_empty());
++        let config = with(&["--package", r#"script=["sh","-c","true"]"#]).unwrap();
++        assert_eq!(
++            config.warnings,
++            ["warning: `--package script` runs sh, which runs other programs"]
++        );
++        let cases: [(&str, &str); 6] = [
++            ("cargo-fetch", "not NAME="),
++            ("x=cargo fetch", "not a JSON array"),
++            (r#"x=["cargo",1]"#, "not a JSON array"),
++            (r#"x=[]"#, "argv is empty"),
++            (r#"x=["git","fetch"]"#, "git operations"),
++            (r#"a b=["cargo"]"#, "the name"),
++        ];
++        for (value, expected) in cases {
++            let error = with(&["--package", value]).unwrap_err();
++            assert!(error.contains(expected), "{value}: {error}");
++        }
++        let error = with(&["--package", r#"x=["a"]"#, "--package", r#"x=["b"]"#]).unwrap_err();
++        assert!(error.contains("given twice"), "{error}");
++    }
++
+     #[test]
+     fn refuses_loader_env_names_by_name() {
+         for name in [
+diff --git a/crates/dagq-broker/src/lib.rs b/crates/dagq-broker/src/lib.rs
+index ccd6516f..0fa9f330 100644
+--- a/crates/dagq-broker/src/lib.rs
++++ b/crates/dagq-broker/src/lib.rs
+@@ -4,8 +4,9 @@
+ //! refuses everything else without a valid, active token (default deny) and
+ //! writes an audit line per request. The fs backend is
+ //! [`backends::fs::FsBackend`], the process backend
+-//! [`backends::process::ProcessBackend`] and the git backend
+-//! [`backends::git::GitBackend`].
++//! [`backends::process::ProcessBackend`], the git backend
++//! [`backends::git::GitBackend`] and the package backend
++//! [`backends::package::PackageBackend`].
+ //!
+ //! [Broker]: https://github.com/hisamekms/dagq/blob/main/docs/design/broker.md
+ 
+@@ -17,6 +18,7 @@ pub mod http;
+ pub mod server;
+ 
+ use std::io::Write;
++use std::path::PathBuf;
+ use std::sync::Arc;
+ 
+ use dagq_broker_protocol::HealthResponse;
+@@ -24,6 +26,7 @@ use dagq_broker_protocol::HealthResponse;
+ use crate::backend::Backends;
+ use crate::backends::fs::FsBackend;
+ use crate::backends::git::GitBackend;
++use crate::backends::package::PackageBackend;
+ use crate::backends::process::ProcessBackend;
+ use crate::config::Config;
+ use crate::server::Server;
+@@ -43,6 +46,16 @@ pub fn health() -> HealthResponse {
+     HealthResponse::ok(BUILD)
+ }
+ 
++/// The backends `serve` uses, over the mounted `roots`.
++pub fn backends(roots: &[PathBuf]) -> Backends {
++    Backends {
++        fs: Arc::new(FsBackend::new(roots.to_vec())),
++        process: Arc::new(ProcessBackend::new(roots.to_vec())),
++        git: Arc::new(GitBackend::new(roots.to_vec())),
++        package: Arc::new(PackageBackend::new(roots.to_vec())),
++    }
++}
++
+ /// Run the command line `args` (without the program name), writing to `out`.
+ /// `Err` is the message for stderr, and the exit status is then 2. `serve`
+ /// returns only on an error.
+@@ -64,12 +77,7 @@ pub fn run(args: &[String], out: &mut impl Write) -> Result<(), String> {
+             for warning in &config.warnings {
+                 eprintln!("{NAME} serve: {warning}");
+             }
+-            let backends = Backends {
+-                fs: Arc::new(FsBackend::new(config.roots.clone())),
+-                process: Arc::new(ProcessBackend::new(config.roots.clone())),
+-                git: Arc::new(GitBackend::new(config.roots.clone())),
+-            };
+-            let server = Server::bind(&config, backends)
++            let server = Server::bind(&config, backends(&config.roots))
+                 .map_err(|error| format!("{NAME} serve: {error}"))?;
+             let listening = server
+                 .local_addr()
+@@ -94,6 +102,7 @@ fn usage() -> String {
+        {NAME} serve --key FILE --active DIR --audit DIR --root DIR... [--listen ADDR:PORT]
+                     [--container] [--exec-timeout-secs N] [--exec-max-timeout-secs N]
+                     [--output-limit-bytes N] [--fs-limit-bytes N] [--exec-allow NAME]... [--exec-env NAME]...
++                    [--package NAME=[\"PROGRAM\",\"ARG\",...]]...
+                  listen (127.0.0.1:8750 by default; loopback only outside the container)
+                  and print {{\"listening\":ADDR,\"build\":BUILD}} once bound"
+     )
+diff --git a/crates/dagq-broker/src/server.rs b/crates/dagq-broker/src/server.rs
+index bf1b0427..c7851754 100644
+--- a/crates/dagq-broker/src/server.rs
++++ b/crates/dagq-broker/src/server.rs
+@@ -257,7 +257,7 @@ impl Handler {
+                 format!("the body is not a {operation} request"),
+             )
+         })?;
+-        if let Some(argv) = decoded.argv() {
++        if let Some(argv) = decoded.argv(&self.limits) {
+             record.program = argv.first().map(|program| basename(program));
+             record.argc = Some(argv.len());
+             record.argv_sha256 = Some(arguments_sha256(argv));
+diff --git a/crates/dagq-broker/tests/serve.rs b/crates/dagq-broker/tests/serve.rs
+index 4bdbe326..ec910459 100644
+--- a/crates/dagq-broker/tests/serve.rs
++++ b/crates/dagq-broker/tests/serve.rs
+@@ -357,6 +357,11 @@ fn default_deny_refuses_unknown_routes_missing_capabilities_and_foreign_fields()
+         ),
+         ("/v1/git/status", "{}", "git.read"),
+         ("/v1/git/commit", r#"{"message":"m"}"#, "git.write"),
++        (
++            "/v1/package/install",
++            r#"{"name":"deps"}"#,
++            "package.install",
++        ),
+     ] {
+         let answer = broker.post(path, Some(&token), body);
+         answer.assert_refused(ErrorCode::CapabilityDenied);
+@@ -903,6 +908,112 @@ fn process_exec_runs_argv_in_the_workspace_within_the_limits_and_is_audited() {
+     }
+ }
+ 
++#[test]
++fn package_install_runs_only_the_configured_commands_within_the_limits_and_is_audited() {
++    let broker = Broker::start_with(&[
++        "--package",
++        r#"deps=["sh","-c","pwd; env; echo fetched > fetched","secret-arg"]"#,
++        "--package",
++        r#"slow=["sh","-c","sleep 60"]"#,
++        "--package",
++        r#"loud=["sh","-c","while :; do echo out; done"]"#,
++        "--exec-max-timeout-secs",
++        "2",
++        "--exec-timeout-secs",
++        "2",
++        "--output-limit-bytes",
++        "4096",
++    ]);
++    let claims = broker.claims("jti-package", &[BrokerCapability::PackageInstall]);
++    let token = broker.token(&claims, true);
++    let install = |body: Value| broker.post("/v1/package/install", Some(&token), &body.to_string());
++
++    // A configured command runs in the workspace with the clean env, and the
++    // audit names its program but none of its arguments or output.
++    let answer = install(serde_json::json!({"name": "deps"}));
++    assert_eq!(answer.status, 200, "{}", answer.body);
++    let response: Value = serde_json::from_str(&answer.body).unwrap();
++    assert_eq!(response["exit_code"], 0);
++    let stdout = response["stdout"].as_str().unwrap();
++    assert!(
++        stdout.starts_with(&format!("{}\n", broker.workspace())),
++        "{stdout}"
++    );
++    assert!(!stdout.contains(HOST_SECRET_NAME), "{stdout}");
++    assert!(
++        stdout.contains("PATH=/usr/local/bin:/usr/bin:/bin"),
++        "{stdout}"
++    );
++    assert!(PathBuf::from(broker.workspace()).join("fetched").exists());
++    let line = broker.audit().pop().unwrap();
++    assert_eq!(line["result"], "ok");
++    assert_eq!(line["backend"], "package");
++    assert_eq!(line["op"], "package.install");
++    assert_eq!(line["capability"], "package.install");
++    assert_eq!(line["run_id"], "run-1");
++    assert_eq!(line["program"], "sh");
++    assert_eq!(line["argc"], 4);
++    assert_eq!(line["exit_code"], 0);
++
++    // A name that is not configured, and an argv in the request, run nothing.
++    let answer = install(serde_json::json!({"name": "npm-install"}));
++    answer.assert_refused(ErrorCode::CapabilityDenied);
++    let line = answer.audit_line(&broker);
++    assert_eq!(line["result"], "capability_denied");
++    assert_eq!(line["op"], "package.install");
++    assert_eq!(line["program"], Value::Null);
++    let answer = install(serde_json::json!({"name": "deps", "argv": ["sh", "-c", "touch ran"]}));
++    answer.assert_refused(ErrorCode::InvalidRequest);
++
++    // The server's maximum timeout wins over the request's.
++    let answer = install(serde_json::json!({"name": "slow", "timeout_secs": 3600}));
++    answer.assert_refused(ErrorCode::Timeout);
++    let line = answer.audit_line(&broker);
++    assert_eq!(line["result"], "timeout");
++    assert_eq!(line["exit_code"], Value::Null);
++
++    // Output past the limit.
++    let answer = install(serde_json::json!({"name": "loud"}));
++    answer.assert_refused(ErrorCode::OutputLimit);
++    assert_eq!(answer.audit_line(&broker)["result"], "output_limit");
++
++    // A token without package.install runs nothing, even with process.exec.
++    let exec_only = broker.claims("jti-exec-only", &[BrokerCapability::ProcessExec]);
++    let exec_token = broker.token(&exec_only, true);
++    fs::remove_file(PathBuf::from(broker.workspace()).join("fetched")).unwrap();
++    let answer = broker.post(
++        "/v1/package/install",
++        Some(&exec_token),
++        r#"{"name":"deps"}"#,
++    );
++    answer.assert_refused(ErrorCode::CapabilityDenied);
++    assert_eq!(answer.audit_line(&broker)["capability"], "package.install");
++    assert!(!PathBuf::from(broker.workspace()).join("fetched").exists());
++    assert!(!PathBuf::from(broker.workspace()).join("ran").exists());
++
++    let text = broker.audit_text();
++    for secret in [token.as_str(), "secret-arg", "fetched", HOST_SECRET_VALUE] {
++        assert!(!text.contains(secret), "{secret}");
++    }
++}
++
++#[test]
++fn refuses_to_start_with_a_package_command_that_runs_git() {
++    let dir = tempfile::tempdir().unwrap();
++    let output = serve_output(
++        &[
++            "--listen",
++            "127.0.0.1:0",
++            "--package",
++            r#"pull=["git","pull"]"#,
++        ],
++        dir.path(),
++    );
++    assert!(!output.status.success());
++    let stderr = String::from_utf8_lossy(&output.stderr);
++    assert!(stderr.contains("git operations only"), "{stderr}");
++}
++
+ /// `git <args>` in `dir` as a person would, outside the broker.
+ fn host_git(dir: &Path, args: &[&str]) -> String {
+     let output = Command::new("git")
+diff --git a/docs/design/broker.md b/docs/design/broker.md
+index bc69348b..45cc7836 100644
+--- a/docs/design/broker.md
++++ b/docs/design/broker.md
+@@ -80,6 +80,7 @@ rootの`Cargo.toml`のpackageは`dagq`のまま（ADR-t827-1決定1）。workspa
+ - task 1125: `disabled`に戻したqueueのsupervisorが、`preferred`で残った全てのtoken・token file・`mcp.json`をpodmanなしで`mode_disabled`で失効させ、resumeに道具を渡さない（`Ports::broker_leftovers`、`Supervisor::broker_sweep_disabled`、testは`tests/it/runtime_broker.rs`の`a_disabled_supervisor_revokes_the_tokens_an_earlier_mode_left`と`a_disabled_supervisor_resumes_a_run_without_the_tools_left_to_it`）
+ - task 1141: `disabled`のsweepが印の無いtoken fileのrunも失効させ（`RunTokens::token_files`）、非対話のrunのturnの要求の前にも残ったものを消す（`Supervisor::broker_before_turn`、testは`tests/it/runtime_broker.rs`の`a_disabled_answer_turn_gets_no_unmarked_tools_and_token_file`・`a_disabled_answer_turn_gets_no_unmarked_tools`・`a_disabled_supervisor_removes_an_unmarked_token_file_of_no_run`）
+ - task 1126: `ensure_machine`が、startの失敗か接続が答えない（`podman --connection dagq info`）dagqのmachineを1回だけstopとstartでやり直し、`MachineOutcome`の`restarted`・`restart_reason`に残す（unit testは`src/application/broker.rs`の`a_start_that_fails_with_eof_is_stopped_and_started_once_more`・`a_started_machine_that_does_not_answer_is_restarted_once`・`a_restart_that_does_not_help_is_machine_failed_after_one_try`）
++- task 840: package backend（計画書の1.9）。protocolに`package.install`のcapabilityとop（`POST /v1/package/install`）、serverに`--package`と`PackageBackend`、clientに`package_install`・CLIの`package install`・MCPの道具`package_install`、dagqに`dagq.toml`の`[broker.package]`（下の「package.install」）
+ 
+ ### protocolの型
+ 
+@@ -87,7 +88,7 @@ rootの`Cargo.toml`のpackageは`dagq`のまま（ADR-t827-1決定1）。workspa
+ 
+ | 型 | wire |
+ | --- | --- |
+-| `BrokerCapability` | `"fs.read"`・`"fs.write"`・`"process.exec"`・`"git.read"`・`"git.write"`（この順） |
++| `BrokerCapability` | `"fs.read"`・`"fs.write"`・`"process.exec"`・`"git.read"`・`"git.write"`・`"package.install"`（この順。`package.install`はtask 840） |
+ | `TokenClaims` | 上の「token」の欄の順。`role`は`BrokerRole`（`"worker"`だけ）、`committer`は`Committer {name, email}`、`capabilities`は`BTreeSet<BrokerCapability>`、`task_id`・`iat`・`exp`は整数 |
+ | `BrokerRequestId` | 文字列そのまま（serverが作るuuid） |
+ | `ErrorCode` / `BrokerError` / `ErrorBody` | 下の「error」の7つのcodeとHTTP status、`{"error":{"code","message","request_id"}}` |
+@@ -166,6 +167,7 @@ resolver = "3"
+ | `--exec-timeout-secs` / `--exec-max-timeout-secs` / `--output-limit-bytes` | 60 / 300 / 1048576 | 上限の既定値（backendに渡す） |
+ | `--fs-limit-bytes` | 4194304 | fsの中身の上限（`fs.read`が返す中身、`fs.write`・`fs.edit`が書く中身、`fs.edit`が読むファイル、`fs.list`の応答）。超えれば`output_limit` |
+ | `--exec-allow <name>` / `--exec-env <name>`（複数可） | 空 | execのallowlist（backendに渡す）。`--exec-allow`にinterpreterの一覧の名前（basenameで比べる）があれば、起動時にstderrへ名前つきのwarningを1行ずつ出して起動は続ける。`--exec-env`に`LD_`・`DYLD_`で始まる名前（大文字小文字を区別した前方一致）があれば名前つきのerrorで起動しない（exit 2）。どちらもenvの値やtokenを出さない（「process.exec」の注意） |
++| `--package <name>=<argvのJSON>`（複数可） | 空 | `package.install`が走らせるコマンド（下の「package.install」）。名前とargvの検査に通らないもの・同じ名前の2回目はexit 2で起動しない |
+ 
+ - bindしたら`{"listening":"<addr>","build":"<build>"}`の1行をstdoutに出す（port 0で選ばれたportをtestと起動側が読む）
+ - HTTPは`std::net`の上の自前の小さなserver（1接続1要求・1接続1 thread で同時に32接続まで（超えた接続は答えずに閉じる）、本体は`Content-Length`だけで`Transfer-Encoding`は拒む、本体は届いた分だけ伸ばして読む、応答は`Connection: close`、要求の全体を読む期限と書きのtimeoutは30秒、要求の頭は16 KiBまで）。以前の例の`tiny_http`はofflineのbuildで使えず、要るのはloopbackで自分のclientと話すことだけなので足さない
+@@ -188,6 +190,7 @@ resolver = "3"
+ | `POST /v1/git/add` | `git.write` | `{paths}` | `{}` |
+ | `POST /v1/git/commit` | `git.write` | `{message}` | `{commit}` |
+ | `POST /v1/git/restore` | `git.write` | `{staged?, paths}` | `{}` |
++| `POST /v1/package/install` | `package.install` | `{name, timeout_secs?}` | `{exit_code, stdout, stderr, duration_ms}`（`process.exec`と同じ） |
+ 
+ `fs.edit`は組み込みのEditと同じで、`old_string`が1つだけ見つかるとき（`replace_all`なら1つ以上）に置換し、見つからない・複数あるとき（messageに一致の数、中身は入れない）・`old_string`が空・`old_string`と`new_string`が同じときは`invalid_request`。`replacements`は置換した数。
+ 
+@@ -211,7 +214,7 @@ fsのopの細部（task 831）:
+ | `workspace_violation` | 403 | workspaceの外、`..`、symlinkの逃げ、worktreeの`.git`、run branchでないHEADでのcommit |
+ | `timeout` | 504 | execのtimeout（プロセスは止めた） |
+ | `output_limit` | 413 | execの出力かfs・gitの応答、`fs.write`・`fs.edit`が書く中身が上限を超えた（execはプロセスを止めた。fsは何も書かない） |
+-| `backend_error` | 502 | fs・process・gitの失敗（存在しないファイル、gitのerror） |
++| `backend_error` | 502 | fs・process・git・packageの失敗（存在しないファイル、gitのerror、見つからないプログラム） |
+ | `invalid_request` | 400 | 未知のpath・未知の欄・型の誤り・protocolの版の違い・本体の上限超え・Editの不一致 |
+ 
+ ## token
+@@ -229,12 +232,12 @@ fsのopの細部（task 831）:
+ | `workspace` | runのworktreeの絶対パス（canonical） |
+ | `branch` | `dagq/<run id>`（commitを許すbranch） |
+ | `committer` | `{name, email}`。発行のときにrepositoryの`git config user.name` / `user.email`から入れる（containerにはhostの`~/.gitconfig`が無いため） |
+-| `capabilities` | `["fs.read","fs.write","process.exec","git.read","git.write"]`の部分集合 |
++| `capabilities` | `["fs.read","fs.write","process.exec","git.read","git.write","package.install"]`の部分集合 |
+ | `iat` / `exp` | 発行と期限（UNIX秒） |
+ 
+ - 鍵: `<queue dir>/broker/key`（32 byteの乱数、mode 0600）。`broker::ensure`が無ければ作る。containerには読み取り専用でmountする。鍵を替えると全てのtokenが無効になる。Phase 1に定期の入れ替えは無く、入れ替えは人がbrokerを止めて鍵を消し、`broker start`で作り直す（生きているrunのtokenは次の更新のtickで新しい鍵で発行し直す）
+ - 偽造: hostでは同じユーザーのプロセス（workerを含む）が鍵を読めるので、tokenを偽造できる。Phase 1の`process.exec`も鍵をmountから読めうる（下の「既知の制限」）。tokenは誤りと事故を止め、auditでrunを名指すためのもので、境界ではない
+-- 発行: supervisorがclaimでworkerを起こすとき（`provision`）とresumeのとき、modeが`preferred`でbrokerが健康で版が一致するときだけ。capabilityはdagqの`broker_grants(role)`（Phase 1はworkerだけに上の5つ）から写す。書き先は`<queue dir>/broker/tokens/<run id>`（mode 0600、同じdirの一時ファイルとrenameで置く）。containerにmountしない場所に置き、`process.exec`から他のrunのtokenを読めないようにする
++- 発行: supervisorがclaimでworkerを起こすとき（`provision`）とresumeのとき、modeが`preferred`でbrokerが健康で版が一致するときだけ。capabilityはdagqの`broker_grants(role)`（workerだけに上の全て。Phase 1の5つと、task 840の`package.install`）から写す。書き先は`<queue dir>/broker/tokens/<run id>`（mode 0600、同じdirの一時ファイルとrenameで置く）。containerにmountしない場所に置き、`process.exec`から他のrunのtokenを読めないようにする
+ - 有効な印: `<queue dir>/broker/active/<jti>`（中身はrun_id）。発行で作り、失効で消す。brokerは要求ごとに印の有無を見る
+ - 期限: `exp = iat + 12時間`。supervisorは各pass（`Supervisor::broker_sweep`）で、残りが4時間（`RENEW_BEFORE_SECS`）を切った生きているrunのtokenを、brokerが使えるときに発行し直す（新しいjtiの印を作ってtoken fileと`mcp.json`を置き換え、古い印を消す。`broker_token_issued`に`renews`（古いjti）、`broker_token_revoked`に`reason: renewed`）。clientは要求ごとにtoken fileを読み直す
+ - 失効: supervisorは各passのclaimの前（drainと引き継ぎの間も）と止まる直前（`supervise --once`の最後のpassで終わったrunのため）に有効な印を全て見て（`broker_sweep`）、runが終わっていれば（statusが`integrated`・`succeeded`・`failed`・`interrupted`。taskの`cancel`・leaseの喪失・`recover`もrunをこのどれかにする）そのrunの印を全て消し、`<queue dir>/broker/tokens/<run id>`と`<run dir>/broker/`を消して、印ごとに`broker_token_revoked`（`reason`はrunのstatus）を残す。queueが知らないrunの印はtoken fileとともに消し、eventは残さない。`preferred`と`disabled`のどちらも、runの読み取りが失敗したときは不在と区別し、warnを出してそのpassでは飛ばす（task 1142）。そのrunの印・token file・`<run dir>/broker/mcp.json`は消さず、`broker_token_revoked`も残さず、次のpassで読み直す。resumeの発行し直しも前の印を消す。supervisorが止まっている間に終わったrunの印は、次の起動の最初のpassか期限まで残る（その間そのtokenは使える）。modeが`disabled`のsupervisor（`preferred`から戻したqueue）はpodmanを探しも呼びもせず、fileだけを掃除する（task 1125）: 同じ時点に有効な印を全て見て、生きているrunのものも含めてそのrunの印・token file・`<run dir>/broker/`を消し、印ごとに`broker_token_revoked`（`reason: mode_disabled`）を残す（`Supervisor::broker_sweep_disabled`）。起動とresumeの前の`broker_grant`も、`disabled`ではそのrunに残ったものを同じく消す（`mode_disabled`）ので、executorが`mcp.json`を見つけて`--mcp-config`と`--allowedTools mcp__dagq-broker`を渡すことも、promptに`BROKER_TOOLS`の段落が載ることもない。印の無いものも残りうる（途中で失敗した失効、queueの知らないrunの`revoke`など）ので（task 1141）、`disabled`のsweepは有効な印に加えて`<queue dir>/broker/tokens/`のtoken file（印の有無に依らない。`RunTokens::token_files`）の名のrunも同じく失効させ（queueが知らないrunならtoken fileと印を消す）、非対話のrunのturnの要求（`worker_question`の答え・reviewの差し戻し・resumeなど、supervisorが`turns/`に書く全てのturn。`request_turn`）の前にも`broker_grant`と同じくそのrunに残ったものを消す（`Supervisor::broker_before_turn`）。印が無ければ`broker_token_revoked`は残さない。どちらもpodmanを探しも呼びもしない。`preferred`ではturnの前に何もしない（runは発行された道具を持ち続ける）。印の無い`disabled`のqueueでは何も書かず、workerの起動のenv・settings・引数は変わらない
+@@ -248,7 +251,7 @@ fsのopの細部（task 831）:
+ - 要求ごとの判定: `TokenClaims::require(capability)`（無ければ`CapabilityDenied`）と`TokenClaims::confine(path)`（相対はworkspaceから、絶対はworkspaceの下だけ。`..`はどこでも拒み、別のrunのworktreeも外になる。字面の判定だけで、symlinkはserverが解く）
+ - `SigningKey`（32 byte）と`BrokerSessionToken`の`Debug`は`<redacted>`で、`Display`を持たない。tokenの値は`BrokerSessionToken::expose`（token fileと`Authorization`のためだけ）からしか出ない。`TokenError`の文言は理由だけで、token・署名・鍵を含まない
+ - dagqの`ensure_key(queue dir)`は`<queue dir>/broker/key`を読み、無ければ`getrandom`の32 byteを同じdirの一時ファイル（mode 0600、`create_new`）に書き、`hard_link`で置く（読み手が半端な鍵を見ず、同時に作った2つのsupervisorは先に置かれた鍵にそろう）。modeが0600でなければ0600に絞り、長さが違えばpathだけを名指すerrorにする（人が消して作り直す）
+-- dagqの`issue_run_token(key, actor, workspace, committer, now)`はworkerのactor（runとtaskを持つ）だけに発行し、workspaceは絶対パスをcanonicalにし、`jti`はuuid v4、`branch`は`dagq/<run id>`、capabilityは`broker_grants(role)`（workerは5つ、他のroleは空）、`exp = iat + TOKEN_TTL_SECS`（12時間）。返す`IssuedToken`はclaimsとtokenを持ち、eventにはclaimsの`jti`・`capabilities`・`exp`だけを書く
++- dagqの`issue_run_token(key, actor, workspace, committer, now)`はworkerのactor（runとtaskを持つ）だけに発行し、workspaceは絶対パスをcanonicalにし、`jti`はuuid v4、`branch`は`dagq/<run id>`、capabilityは`broker_grants(role)`（workerは全て、他のroleは空）、`exp = iat + TOKEN_TTL_SECS`（12時間）。返す`IssuedToken`はclaimsとtokenを持ち、eventにはclaimsの`jti`・`capabilities`・`exp`だけを書く
+ 
+ ## mountと閉じ込め
+ 
+@@ -328,6 +331,17 @@ Podman machineは既定でhostの`$HOME`をVMにmountするので、containerか
+ - 監視の1巡りで読むのはpipeごとに1回（64 KiB）までで、書く速さが読む速さを上回っても毎巡りで上限と期限を見る。期限の時点で子がもう終わっていれば`timeout`にせず、終わったものとして残りを読む
+ - `process.shell`（shellの文字列を受けるop）は作らない。要るならADRが別のcapabilityとして決める
+ 
++## package.install
++
++計画書の1.9（task 840）。依存の取得のような、repositoryが決めた少数のコマンドだけをbroker経由で走らせる（`crates/dagq-broker/src/backends/package.rs`）。
++
++- 設定: `dagq.toml`の`[broker.package]`に、名前ごとにargvを書く（下の「mode と設定」）。dagqはそれを`serve`の`--package NAME=<argvのJSONの配列>`にして渡す（`BrokerConfig::serve_args`。書いた順。変えればcontainerの引数のhashが変わり、作り直される）。名前は英数字と`-`・`_`・`.`の64 byteまで。argvは1つ以上で、`argv[0]`は`/`を含まないプログラムの名前、`git`は拒む（gitはgitのbackendだけが走らせる）、空のプログラムとNULも拒む。dagqの`parse_config`と`serve`の`Config::parse`が同じ検査（protocolの`package::check_command`）をし、dagqは行番号付きのerror、`serve`は起動しない。同じ名前の2回目も拒む。既定は空で、installは全て`capability_denied`
++- 要求は`{name, timeout_secs?}`だけで、argv・env・stdin・cwdの欄は無い（あれば未知の欄で`invalid_request`）。名前が設定に無ければ走らせずに`capability_denied`（messageは設定できる形の名前だけを返し、他は「the name」）。`exec_allow`とは別で、`package.install`のコマンドの`argv[0]`を`exec_allow`に入れる必要は無く、`exec_allow`の名前を`package.install`で走らせることもできない
++- 実行は`process.exec`と同じ（`backends::process::run_in_workspace`）: shellを通さず、固定の`PATH`でプログラムを探し（無ければ`backend_error`）、cwdはworkspace、envは空から始めて`PATH`・execごとの`HOME`・`LANG=C.UTF-8`・`TERM=dumb`だけ（要求からもbrokerのプロセスからも何も継がない）、stdinは空。timeoutは要求の`timeout_secs`（無ければ`exec_timeout_secs`）と`exec_max_timeout_secs`の小さい方で、超えればprocess groupを止めて`timeout`。出力は`output_limit_bytes`を超えればprocess groupを止めて`output_limit`。応答は`process.exec`と同じ形
++- audit: `backend: package`・`op: package.install`・`capability: package.install`に、設定のargvの`program`（`argv[0]`のbasename）・`argc`・`argv_sha256`を残す。設定に無い名前は`program`などを`null`にする。名前・引数・出力は残さない
++- 限るのは`argv`だけで、コマンドが読むworkspaceの中身（workerが書ける）は限らない。`npm install`は`package.json`のlifecycle scriptを、cargoはworkspaceの`.cargo/config.toml`や`build.rs`（`fetch`では走らない）を読むので、そこからworkerの書いたもの（`git`も）が走りうる（誤りを止める仕組みで境界ではない）。scriptを走らせない形（`npm ci --ignore-scripts`など）を設定する。`argv[0]`が`exec_allow`と同じinterpreterの一覧（`INTERPRETERS`）にあれば、`serve`は起動時に``--package <name>` runs <program>, which runs other programs`のwarningをstderrに1行ずつ出して起動は続ける
++- 走るのはcontainerの中で、imageにはtoolchain（`cargo`・`npm`・`bun`など）が無い。使うにはimageかmountの用意が別に要る（このtaskは設定したコマンドに限ることだけ）。networkの制限を強めるのはPhase 4
++
+ ## containerとPodman machine
+ 
+ ### 人が行うこと
+@@ -479,6 +493,7 @@ task 836で測った（2026-09-28、podman 6.1.2、applehv）: 起点の値（CP
+   | `git_add` | `git.add` | `paths`※ |
+   | `git_commit` | `git.commit` | `message`※（string） |
+   | `git_restore` | `git.restore` | `staged`（boolean）・`paths`※ |
++  | `package_install` | `package.install` | `name`※（string、`[broker.package]`の名前）・`timeout_secs`（integer） |
+ 
+   設計の初めの案の`write_file`（`path`・`content`）に、protocolの`WriteRequest`にある`create_dirs`を足した（新しいdirのファイルを作るため）
+ - 結果: 成功は`{"content":[{"type":"text","text":<opの応答のJSON>}],"isError":false}`。`exec`は子のexit codeに関わらず成功で、`exit_code`は応答の欄。brokerの拒否・失敗は`isError: true`で、textと`structuredContent`にbrokerのerror本体`{"error":{"code","message","request_id"}}`をそのまま入れる（codeは`unauthorized`・`capability_denied`・`workspace_violation`・`timeout`・`output_limit`・`backend_error`・`invalid_request`）。client側の失敗も`isError: true`で、`{"client_error":{"kind","message"}}`（`kind`は`invalid_arguments`（入力がschemaに合わずbrokerに送らない）・`config`・`transport`・`protocol`）。tokenの値はどこにも出さない
+@@ -487,7 +502,7 @@ task 836で測った（2026-09-28、podman 6.1.2、applehv）: 起点の値（CP
+ - workerのpromptに、brokerの道具があるとき（runのproviderがClaude Codeで`mcp.json`がある）だけ「ファイルの読み書き・置換、許されたコマンド、run branchのgitはbrokerの道具を優先し、拒まれたか届かなければ組み込みの道具を使う」段落（`prompt::BROKER_TOOLS`）を末尾に足す。claimでは道具を渡せたときにpromptを書き直す。tokenの値もtoken fileの場所も書かない
+ - 人の診断のCLI（task 834）: `dagq-broker-client [--url URL] [--token-file FILE] <command>`。`--url`と`--token-file`が無ければ`DAGQ_BROKER_URL`と`DAGQ_BROKER_TOKEN_FILE`を読む。tokenの値は引数にもenvにも取らず、出力にも出さない。token fileは要求ごとに読み直す
+   - URLは`http://<loopbackのaddress>:<port>`だけ（`localhost`は`127.0.0.1`、末尾の`/`は許す）。https・path・user・loopbackでないaddress・port 0は設定の誤りとして送らない（tokenをhostの外へ送らない）
+-  - command: `health [--json]`（tokenを要らない。既定は`ok build <build> protocol 1`の1行）、`token inspect`（token fileのclaimsのJSONだけ。署名は確かめず、tokenと署名は出さない）、`fs read PATH [--offset N] [--limit N]`、`fs list PATH`、`fs write PATH [--content TEXT] [--create-dirs]`（`--content`が無ければstdin）、`fs edit PATH --old TEXT --new TEXT [--replace-all]`、`exec [--env NAME=VALUE]... [--stdin TEXT] [--timeout-secs N] -- PROGRAM [ARG]...`、`git status`、`git diff [--staged] [PATH]...`、`git log [--limit N]`、`git show [--commit REV] [PATH]...`、`git add PATH...`、`git commit --message TEXT`、`git restore [--staged] PATH...`（addとrestoreはpathが1つ以上）。token fileの中身が空白か制御文字を含めば送らない。push・fetch・remoteのcommandは無い
++  - command: `health [--json]`（tokenを要らない。既定は`ok build <build> protocol 1`の1行）、`token inspect`（token fileのclaimsのJSONだけ。署名は確かめず、tokenと署名は出さない）、`fs read PATH [--offset N] [--limit N]`、`fs list PATH`、`fs write PATH [--content TEXT] [--create-dirs]`（`--content`が無ければstdin）、`fs edit PATH --old TEXT --new TEXT [--replace-all]`、`exec [--env NAME=VALUE]... [--stdin TEXT] [--timeout-secs N] -- PROGRAM [ARG]...`、`git status`、`git diff [--staged] [PATH]...`、`git log [--limit N]`、`git show [--commit REV] [PATH]...`、`git add PATH...`、`git commit --message TEXT`、`git restore [--staged] PATH...`（addとrestoreはpathが1つ以上）、`package install NAME [--timeout-secs N]`（task 840）。token fileの中身が空白か制御文字を含めば送らない。push・fetch・remoteのcommandは無い
+   - 出力と終了: 成功はopの応答のJSONをstdoutに1行で出してexit 0（`exec`は子のexit codeに関わらず0で、`exit_code`は応答の欄）。要求の本体が8 MiB（`MAX_REQUEST_BYTES`）を超えれば送らずにclient側の失敗にする。brokerの拒否・失敗はbrokerの`{"error":{"code","message","request_id"}}`をstderrに1行で出してexit 1。command lineの誤りはexit 2。client側の失敗（設定・接続・応答のprotocolの版の違いや形の違い）はstderrに理由を出してexit 3
+   - 応答の`X-Dagq-Broker-Protocol`が`1`でないか無いときは、本体を解釈せずにprotocolの誤りにする（fail closed）
+ 
+@@ -495,7 +510,7 @@ task 836で測った（2026-09-28、podman 6.1.2、applehv）: 起点の値（CP
+ 
+ - 置き場所: `<queue dir>/broker/audit/<YYYY-MM-DD>.jsonl`（UTCの日付）。brokerが1要求1行で追記する。30日より古いファイルはbrokerの起動時に消す
+ - auditは記録で、改ざんへの耐性は持たない（上の「既知の制限」と、hostのworkerが同じファイルを書けること）
+-- 欄（この順。当てはまらない欄は`null`）: `ts`（RFC 3339のUTC、ミリ秒）・`request_id`・`jti`・`run_id`・`task_id`・`actor_id`・`backend`（`fs`・`process`・`git`。healthと未知のpathは`null`）・`op`（`fs.read`など。healthは`health`、未知のpathは`null`）・`capability`・`path`（workspaceからの相対で、workspaceそのものは`.`。要求のpathが1つのときだけ。字句の閉じ込めで拒んだpathは残さない。字句では中にありbackendがsymlinkなどで拒んだものは、その相対パスを残す）・`program`（execの`argv[0]`のbasename）・`argc`・`argv_sha256`（`argv[1..]`の各引数の後にNULを置いたbyte列のSHA-256、小文字の16進）・`result`（`ok`かerror code）・`exit_code`・`duration_ms`・`bytes_in`（要求の本体）・`bytes_out`（応答の本体）
++- 欄（この順。当てはまらない欄は`null`）: `ts`（RFC 3339のUTC、ミリ秒）・`request_id`・`jti`・`run_id`・`task_id`・`actor_id`・`backend`（`fs`・`process`・`git`・`package`。healthと未知のpathは`null`）・`op`（`fs.read`など。healthは`health`、未知のpathは`null`）・`capability`・`path`（workspaceからの相対で、workspaceそのものは`.`。要求のpathが1つのときだけ。字句の閉じ込めで拒んだpathは残さない。字句では中にありbackendがsymlinkなどで拒んだものは、その相対パスを残す）・`program`（execの`argv[0]`のbasename。`package.install`は設定のargvの`argv[0]`のbasename）・`argc`・`argv_sha256`（`argv[1..]`の各引数の後にNULを置いたbyte列のSHA-256、小文字の16進）・`result`（`ok`かerror code）・`exit_code`・`duration_ms`・`bytes_in`（要求の本体）・`bytes_out`（応答の本体）
+ - healthの要求も1行残す（`op: health`）
+ - `verify`が通らないtoken（書式・署名・claims・期限）の要求は`jti`・`run_id`などをnullにし、`result: unauthorized`だけを残す（claimsを信用しない）。署名の通ったtokenで有効な印だけが無いものは、claimsの`jti`・`run_id`・`task_id`・`actor_id`を残す
+ - `argv_sha256`は照合用で、推測しやすい引数はhashから総当たりで戻せる
+@@ -518,6 +533,10 @@ exec_timeout_secs = 60
+ exec_max_timeout_secs = 300
+ output_limit_bytes = 1048576
+ fs_limit_bytes = 4194304       # serveの --fs-limit-bytes
++
++[broker.package]               # package.install が走らせるコマンド（既定は無し。task 840）
++cargo-fetch = ["cargo", "fetch", "--locked"]
++npm-ci = ["npm", "ci", "--ignore-scripts"]
+ ```
+ 
+ `host.toml`（`<queue dir>/host.toml`か`$XDG_CONFIG_HOME/dagq/host.toml`。hostの事情）:
+@@ -548,7 +567,7 @@ port = 0                      # 0 は空いている port
+ 
+ ## capabilityの関係
+ 
+-- brokerのcapability（`fs.read`・`fs.write`・`process.exec`・`git.read`・`git.write`）はprotocolの`BrokerCapability`で、queueの操作の`Capability`（[Authorization](authorization.md#capability)）とは別の名前空間
++- brokerのcapability（`fs.read`・`fs.write`・`process.exec`・`git.read`・`git.write`・`package.install`）はprotocolの`BrokerCapability`で、queueの操作の`Capability`（[Authorization](authorization.md#capability)）とは別の名前空間
+ - `reserved.filesystem_read`・`reserved.filesystem_write`・`reserved.network`・`reserved.secret_read`は誰にも与えないまま（ADR-t827-4決定5）
+ - tokenを発行できるのは信頼する制御側のsupervisorだけ。AI actorにtokenを作るコマンドは無い
+ 
+diff --git a/docs/design/supervisor-lifecycle/run-environment.md b/docs/design/supervisor-lifecycle/run-environment.md
+index d116adf7..7165730f 100644
+--- a/docs/design/supervisor-lifecycle/run-environment.md
++++ b/docs/design/supervisor-lifecycle/run-environment.md
+@@ -26,7 +26,7 @@ related:
+ 
+ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)の決定3。ADR-0040の決定3を引き継ぐ）が、runごとの環境変数になる。読み込みは`src/infrastructure/run_env.rs`の純粋関数（`parse_run_env`と`expand`、fileを読む`load_run_env`）で、ファイルが無ければ空。
+ 
+-- 書式はTOMLの部分集合: 表は`[run.env]`・`[stall]`・`[conflicts]`・`[recheck]`・`[disk]`・`[resume]`・`[exit]`・`[repository]`（[Landing branch](landing-branch.md)）・`[worker.trial]`・`[roles.<role>]`・`[language]`・`[supervisor]`・`[areas]`・`[tasks]`・`[e2e]`・`[broker]`（[Broker](../broker.md#mode-と設定)）・`[review.subagents.<agent>]`（下の項）・`[headless]`（[非対話のworker](headless-worker.md#workspaceなしのbackgroundのwrapper)）・`[kpi]`（と`[kpi.targets."<KPI>"]`）だけを持ち（`[language]`はここでは表として受け付けるだけで中を見ず、[Language](language.md)の読み手が検査する。誤りでclaimや着地を止めないため）、`[run.env]`の各行は`KEY = 'literal'`か`KEY = "basic"`（`\\` `\"` `\n` `\t`のescape）。`#`以降はcomment。ほかの表、表の外のkey、環境変数名でないkey、重複したkey、`DAGQ_`で始まるkey（runtimeが`DAGQ_ROLE` / `DAGQ_QUEUE`に使う）はエラーにする。
++- 書式はTOMLの部分集合: 表は`[run.env]`・`[stall]`・`[conflicts]`・`[recheck]`・`[disk]`・`[resume]`・`[exit]`・`[repository]`（[Landing branch](landing-branch.md)）・`[worker.trial]`・`[roles.<role>]`・`[language]`・`[supervisor]`・`[areas]`・`[tasks]`・`[e2e]`・`[broker]`と`[broker.package]`（[Broker](../broker.md#mode-と設定)）・`[review.subagents.<agent>]`（下の項）・`[headless]`（[非対話のworker](headless-worker.md#workspaceなしのbackgroundのwrapper)）・`[kpi]`（と`[kpi.targets."<KPI>"]`）だけを持ち（`[language]`はここでは表として受け付けるだけで中を見ず、[Language](language.md)の読み手が検査する。誤りでclaimや着地を止めないため）、`[run.env]`の各行は`KEY = 'literal'`か`KEY = "basic"`（`\\` `\"` `\n` `\t`のescape）。`#`以降はcomment。ほかの表、表の外のkey、環境変数名でないkey、重複したkey、`DAGQ_`で始まるkey（runtimeが`DAGQ_ROLE` / `DAGQ_QUEUE`に使う）はエラーにする。
+ - 値の`${DAGQ_QUEUE_DIR}`はqueue directory（DBのある directory）、`${DAGQ_RUN_DIR}`はそのrunのrun directoryに展開する。ほかの`$`は書いたまま残す（shellの展開はしない）。`${DAGQ_RUN_DIR}`はtask 91で加えた（ADR-0040の決定3、ADR-0049の決定3が引き継ぐ）。
+ - 読むのはrepositoryのmain checkout（下の「main checkoutの決め方」）の作業ファイルで、run worktreeのものではない。`integrate`をどのworktreeから呼んでも同じファイルを読む。検証コマンドが1件も無ければ読まない。
+ - 渡し先: (a) `provision`がworkerのworkspaceを作るとき、`DAGQ_ROLE`ほかのworkerの変数の後ろに`--env KEY=VALUE`で並べる（ADR-0026の仕組み）。worktreeを作る前に読むので、壊れた`dagq.toml`はprovisioningの失敗になり、workspaceは開かずsupervisorはclaimを止める。(b) `integrate`の`verification_commands`を`Command`のenvに足す（validatingは検証コマンドを実行しない）。読めないファイルは着地処理のエラーで、runは元の状態に戻る。(c) reviewのheadless実行（ADR-0049の決定2）のコマンドのenvに足す。(d) `needs_session`のresumeが開くworkspaceに、(a)と同じくworkerのenv（`DAGQ_ROLE` / `DAGQ_QUEUE`とworkerのactorの名前）の後ろに並べる（task 303）。resumeのsessionはworkerと同じ手元の検証（fmt・clippy・関係するtest・e2e）を回すので、workerと同じ`[run.env]`（sccache、buildとtestの並列度）が要るため。ADR-0049の決定3（ADR-0040の決定3を引き継ぐ）は渡し先をworkerのworkspace・`integrate`の検証・reviewの3つと書くが、resumeのsessionはrunのworkerのsessionの続きで、その「workerのworkspace」に含まれると読む。値は`begin_resume`の前に読み（`start_resume`に渡す）、landing branchと同じく読めなければ試行を使わずrunは`needs_session`のまま（landing branchの読み込みが同じfileを先に検査するので、壊れた`dagq.toml`はそこで止まる）。`[run.env]`が名指すプログラムが見つからない間は、claimと同じくresumeも始めない（下の「`[run.env]`が名指すプログラムの検査」。始めるとsessionのcargoがすべて失敗して試行を使うため）。resumeの時点のmain checkoutの`dagq.toml`を読むので、workerの起動の後に変えた値はresumeのsessionで効く。
+diff --git a/src/domain/broker.rs b/src/domain/broker.rs
+index 9de8383d..a4316d78 100644
+--- a/src/domain/broker.rs
++++ b/src/domain/broker.rs
+@@ -1,7 +1,7 @@
+ //! The resource broker's settings and its attention ([Broker] mode and
+ //! settings, ADR-t827-4 decision 4): the repository's policy is `[broker]`
+-//! of `dagq.toml` ([`BrokerConfig`]: the mode, what `process.exec` may run
+-//! and the server's limits), the host's circumstances are `[broker]` of
++//! of `dagq.toml` ([`BrokerConfig`]: the mode, what `process.exec` may run,
++//! the commands of `package.install` and the server's limits), the host's circumstances are `[broker]` of
+ //! `host.toml` ([`HostBroker`]: podman, the machine's and the container's
+ //! resources, the port). `host.toml` can lower the mode to `disabled` and
+ //! never raise it ([`resolve_mode`]).
+@@ -72,6 +72,9 @@ pub struct BrokerConfig {
+     pub exec_max_timeout_secs: u64,
+     pub output_limit_bytes: u64,
+     pub fs_limit_bytes: u64,
++    /// `[broker.package]`: the commands `package.install` may run, by name
++    /// and in the order written; empty refuses every install.
++    pub packages: Vec<(String, Vec<String>)>,
+ }
+ 
+ impl Default for BrokerConfig {
+@@ -84,6 +87,7 @@ impl Default for BrokerConfig {
+             exec_max_timeout_secs: DEFAULT_EXEC_MAX_TIMEOUT_SECS,
+             output_limit_bytes: DEFAULT_OUTPUT_LIMIT_BYTES,
+             fs_limit_bytes: DEFAULT_FS_LIMIT_BYTES,
++            packages: Vec::new(),
+         }
+     }
+ }
+@@ -146,6 +150,10 @@ impl BrokerConfig {
+         for name in &self.exec_env {
+             args.extend(["--exec-env".to_owned(), name.clone()]);
+         }
++        for (name, argv) in &self.packages {
++            let argv = serde_json::to_string(argv).expect("strings serialize");
++            args.extend(["--package".to_owned(), format!("{name}={argv}")]);
++        }
+         args
+     }
+ }
+@@ -319,6 +327,10 @@ mod tests {
+             exec_env: vec!["LANG".into()],
+             exec_timeout_secs: 30,
+             fs_limit_bytes: 1024,
++            packages: vec![(
++                "cargo-fetch".into(),
++                vec!["cargo".into(), "fetch".into(), "a \"b\"".into()],
++            )],
+             ..BrokerConfig::default()
+         };
+         assert_eq!(
+@@ -333,7 +345,9 @@ mod tests {
+                 "--exec-allow",
+                 "cat",
+                 "--exec-env",
+-                "LANG"
++                "LANG",
++                "--package",
++                r#"cargo-fetch=["cargo","fetch","a \"b\""]"#
+             ]
+         );
+         assert!(config.check().is_ok());
+diff --git a/src/infrastructure/broker_token.rs b/src/infrastructure/broker_token.rs
+index 3f6cd96c..1ed5e7de 100644
+--- a/src/infrastructure/broker_token.rs
++++ b/src/infrastructure/broker_token.rs
+@@ -105,8 +105,10 @@ fn read_key(path: &Path) -> Result<Option<SigningKey>> {
+     Ok(Some(key))
+ }
+ 
+-/// What a token of `role` may do through the broker. Phase 1 grants all
+-/// five to a worker and nothing to any other role (ADR-t827-4 decision 5).
++/// What a token of `role` may do through the broker: every capability to a
++/// worker (Phase 1's five and `package.install`, which runs only the
++/// commands of `[broker.package]`) and nothing to any other role
++/// (ADR-t827-4 decision 5).
+ pub fn broker_grants(role: ActorRole) -> BTreeSet<BrokerCapability> {
+     match role {
+         ActorRole::Worker => BrokerCapability::ALL.into_iter().collect(),
+diff --git a/src/infrastructure/run_env.rs b/src/infrastructure/run_env.rs
+index 266e2463..69e1f599 100644
+--- a/src/infrastructure/run_env.rs
++++ b/src/infrastructure/run_env.rs
+@@ -109,6 +109,9 @@ const E2E_PATHS: &str = "paths";
+ /// `[broker]`: the resource broker's mode and limits (ADR-t827-4
+ /// decision 4).
+ const BROKER_TABLE: &str = "broker";
++/// `[broker.package]`: the commands `package.install` may run, each a name
++/// and its argv (task 840).
++const BROKER_PACKAGE_TABLE: &str = "broker.package";
+ /// `[review.subagents.<agent>]`: the globs that make a review's subagent
+ /// required (ADR-t1453-1 decision 1), one table per agent.
+ const REVIEW_SUBAGENTS_PREFIX: &str = "review.subagents.";
+@@ -122,7 +125,7 @@ const REVIEW_SUBAGENT_PATHS: &str = "paths";
+ const HEADLESS_TABLE: &str = "headless";
+ /// The one key of `[headless]`.
+ const HEADLESS_WRAPPER: &str = "wrapper";
+-const TABLES: [&str; 16] = [
++const TABLES: [&str; 17] = [
+     RUN_ENV_TABLE,
+     STALL_TABLE,
+     CONFLICTS_TABLE,
+@@ -138,6 +141,7 @@ const TABLES: [&str; 16] = [
+     TASKS_TABLE,
+     E2E_TABLE,
+     BROKER_TABLE,
++    BROKER_PACKAGE_TABLE,
+     HEADLESS_TABLE,
+ ];
+ /// The one key of `[recheck]`.
+@@ -315,7 +319,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
+             }
+             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
+                 format!(
+-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{E2E_TABLE}], [{BROKER_TABLE}], [{HEADLESS_TABLE}] and [{KPI_TABLE}] are supported"
++                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{E2E_TABLE}], [{BROKER_TABLE}], [{BROKER_PACKAGE_TABLE}], [{HEADLESS_TABLE}] and [{KPI_TABLE}] are supported"
+                 )
+             })?;
+             ensure!(
+@@ -432,6 +436,24 @@ pub fn parse_config(text: &str) -> Result<Config> {
+                 }
+                 broker_keys.push(key.to_owned());
+             }
++            Some(BROKER_PACKAGE_TABLE) => {
++                let with = || format!("{CONFIG_FILE_NAME}:{number}");
++                let name = parse_key(key).with_context(with)?;
++                ensure!(
++                    config
++                        .broker
++                        .packages
++                        .iter()
++                        .all(|(existing, _)| *existing != name),
++                    "{CONFIG_FILE_NAME}:{number}: {name} is defined twice"
++                );
++                let argv = parse_string_array(rest.trim())
++                    .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: value of {name}"))?;
++                dagq_broker_protocol::package::check_command(&name, &argv)
++                    .map_err(anyhow::Error::msg)
++                    .with_context(with)?;
++                config.broker.packages.push((name, argv));
++            }
+             Some(E2E_TABLE) => {
+                 ensure!(
+                     key == E2E_PATHS,
+@@ -734,7 +756,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
+                 stall_keys.push(key.to_owned());
+             }
+             None => bail!(
+-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{BROKER_TABLE}], [{HEADLESS_TABLE}] or [{KPI_TABLE}]"
++                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{BROKER_TABLE}], [{BROKER_PACKAGE_TABLE}], [{HEADLESS_TABLE}] or [{KPI_TABLE}]"
+             ),
+         }
+     }
+@@ -1999,8 +2021,28 @@ LITERAL = 'no \n escapes # here'
+                 exec_max_timeout_secs: 120,
+                 output_limit_bytes: 2048,
+                 fs_limit_bytes: 4096,
++                packages: Vec::new(),
+             }
+         );
++        let packages = parse_config(
++            "[broker]\nmode = \"preferred\"\n[broker.package]\ncargo-fetch = [\"cargo\", \"fetch\"] # deps\n\"npm-install\" = [\"npm\", \"install\"]\n",
++        )
++        .unwrap()
++        .broker
++        .packages;
++        assert_eq!(
++            packages,
++            [
++                (
++                    "cargo-fetch".to_owned(),
++                    vec!["cargo".to_owned(), "fetch".to_owned()]
++                ),
++                (
++                    "npm-install".to_owned(),
++                    vec!["npm".to_owned(), "install".to_owned()]
++                ),
++            ]
++        );
+         for (text, error) in [
+             ("[broker]\nmode = \"on\"\n", "dagq.toml:2: value of mode"),
+             ("[broker]\nport = 1\n", "unknown key port in [broker]"),
+@@ -2017,6 +2059,26 @@ LITERAL = 'no \n escapes # here'
+                 "above exec_max_timeout_secs",
+             ),
+             ("[broker]\n[broker]\n", "[broker] is defined twice"),
++            (
++                "[broker.package]\nfetch = [\"cargo\"]\nfetch = [\"npm\"]\n",
++                "fetch is defined twice",
++            ),
++            (
++                "[broker.package]\npull = [\"git\", \"pull\"]\n",
++                "dagq.toml:2: package command pull: git runs through the git operations only",
++            ),
++            (
++                "[broker.package]\nfetch = []\n",
++                "dagq.toml:2: package command fetch: the argv is empty",
++            ),
++            (
++                "[broker.package]\nfetch = \"cargo fetch\"\n",
++                "dagq.toml:2: value of fetch",
++            ),
++            (
++                "[broker.package]\n[broker.package]\n",
++                "[broker.package] is defined twice",
++            ),
+         ] {
+             let message = format!("{:#}", parse_config(text).unwrap_err());
+             assert!(message.contains(error), "{text}: {message}");
+@@ -2483,7 +2545,9 @@ LITERAL = 'no \n escapes # here'
+         fs::write(dir.path().join(CONFIG_FILE_NAME), "[supervisors]\n").unwrap();
+         let error = format!("{:#}", load_supervisor_config(dir.path()).unwrap_err());
+         assert!(
+-            error.contains("[supervisor], [areas], [tasks], [e2e], [broker], [headless] and [kpi]"),
++            error.contains(
++                "[supervisor], [areas], [tasks], [e2e], [broker], [broker.package], [headless] and [kpi]"
++            ),
+             "{error}"
+         );
+     }
+diff --git a/tests/it/runtime_broker.rs b/tests/it/runtime_broker.rs
+index 8fba702f..3198ed10 100644
+--- a/tests/it/runtime_broker.rs
++++ b/tests/it/runtime_broker.rs
+@@ -747,12 +747,7 @@ fn files_holding(dir: &Path, needle: &str, except: &[PathBuf]) -> Vec<PathBuf> {
+ /// The queue's key and active marks served by the broker in process (no
+ /// podman), over the runs' dir.
+ fn serve_broker(queue: &Path, runs: &Path, audit: &Path) -> String {
+-    use dagq_broker::{
+-        backend::Backends,
+-        backends::{fs::FsBackend, git::GitBackend, process::ProcessBackend},
+-        config::Config,
+-        server::Server,
+-    };
++    use dagq_broker::{config::Config, server::Server};
+     let text = |path: &Path| path.to_string_lossy().into_owned();
+     let args = [
+         "--listen".to_owned(),
+@@ -767,11 +762,7 @@ fn serve_broker(queue: &Path, runs: &Path, audit: &Path) -> String {
+         text(&runs.canonicalize().unwrap()),
+     ];
+     let config = Config::parse(&args).unwrap();
+-    let backends = Backends {
+-        fs: Arc::new(FsBackend::new(config.roots.clone())),
+-        process: Arc::new(ProcessBackend::new(config.roots.clone())),
+-        git: Arc::new(GitBackend::new(config.roots.clone())),
+-    };
++    let backends = dagq_broker::backends(&config.roots);
+     let server = Server::bind(&config, backends).unwrap();
+     let addr = server.local_addr().unwrap();
+     thread::spawn(move || server.serve());
+@@ -856,7 +847,8 @@ fn a_preferred_worker_gets_its_token_and_the_end_of_its_run_revokes_it() {
+             "fs.write",
+             "process.exec",
+             "git.read",
+-            "git.write"
++            "git.write",
++            "package.install"
+         ])
+     );
+     assert!(issued[0]["exp"].as_u64().unwrap() > 0);

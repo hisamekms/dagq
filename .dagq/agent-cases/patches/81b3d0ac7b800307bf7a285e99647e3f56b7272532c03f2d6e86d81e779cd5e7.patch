@@ -1,0 +1,30 @@
+diff --git a/docs/plans/adr-reservation-retention.md b/docs/plans/adr-reservation-retention.md
+new file mode 100644
+index 00000000..cc99ac2d
+--- /dev/null
++++ b/docs/plans/adr-reservation-retention.md
+@@ -0,0 +1,24 @@
++---
++id: plan-adr-reservation-retention
++type: plan
++title: 移行前に予約したADR番号の維持
++status: proposed
++created: 2026-10-05
++updated: 2026-10-05
++related:
++  - adr-t598-1
++---
++
++# 移行前に予約したADR番号の維持
++
++## 対象
++
++ADR-t598-1によるID形式の移行前から登録済みで、4桁のADR番号を予約しているtaskを対象にする。予約番号はmainで未使用であり、ADRはまだ作成されていない。
++
++## 手順
++
++plannerは登録済みtaskのdescriptionにある4桁の予約番号を維持する。task ID形式への統一を理由に予約を変更しない。これから新しく登録するADR taskには、そのtask自身のIDによるADR-t<ID>-1を指定する。
++
++## 完了条件
++
++既存の予約番号が維持され、新規登録の説明にはtask ID形式が指定されていること。この変更ではADRファイルの作成・変更は行わない。

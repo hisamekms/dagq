@@ -1,0 +1,99 @@
+diff --git a/docs/adr/2026-09-28-t813-2-provider-per-task-and-mutual-fallback.md b/docs/adr/2026-09-28-t813-2-provider-per-task-and-mutual-fallback.md
+index 0475950a..adb212fe 100644
+--- a/docs/adr/2026-09-28-t813-2-provider-per-task-and-mutual-fallback.md
++++ b/docs/adr/2026-09-28-t813-2-provider-per-task-and-mutual-fallback.md
+@@ -13,6 +13,7 @@ amended_by:
+   - adr-t1204-1
+   - adr-t1063-1
+   - adr-t1433-2
++  - adr-t1801-1
+ owners:
+   - hisamekms
+ tags:
+diff --git a/docs/adr/2026-10-05-t1801-1-preserve-pending-work-before-provider-switch.md b/docs/adr/2026-10-05-t1801-1-preserve-pending-work-before-provider-switch.md
+new file mode 100644
+index 00000000..70ea3ad7
+--- /dev/null
++++ b/docs/adr/2026-10-05-t1801-1-preserve-pending-work-before-provider-switch.md
+@@ -0,0 +1,34 @@
++---
++id: adr-t1801-1
++type: adr
++title: provider切り替え前に未完了の作業と依頼の保存を必須にする
++status: accepted
++created: 2026-10-05
++updated: 2026-10-05
++accepted_on: 2026-10-05
++amends:
++  - adr-t813-2 decision 4
++owners:
++  - hisamekms
++related:
++  - adr-t813-2
++  - design-provider-lifecycle
++---
++
++# ADR-t1801-1: provider切り替え前に未完了の作業と依頼の保存を必須にする
++
++## Context
++
++providerを切り替えると会話を引き継げないため、未完了の作業と依頼が保存されていなければ再開で失われうる。plannerはtask 1801のdescriptionにADR-t813-2の決定4だけをamendsすると書き、plan reviewもその選択を確認した。
++
++## Decision
++
++ADR-t813-2の決定4に、切り替え前に未完了の作業と依頼を保存できたことを確認する条件を加える。保存できなければ切り替え先のsessionを始めず、元の作業状態を保持して復旧を待つ。同じworktreeとbranchで新しいsessionを始め、会話を引き継がない方針は維持する。
++
++## Alternatives
++
++保存の成否を問わず切り替える案は、依頼や作業状態を失うおそれがあるため採らない。
++
++## Consequences
++
++保存に失敗したrunの再開は遅れるが、切り替えによる作業の喪失を防ぐ。
+diff --git a/docs/adr/README.md b/docs/adr/README.md
+index 02f045e2..3223c41d 100644
+--- a/docs/adr/README.md
++++ b/docs/adr/README.md
+@@ -4,8 +4,8 @@ type: design
+ title: Architecture decision records
+ status: current
+ created: 2026-09-21
+-updated: 2026-10-04
+-last_verified: 2026-09-30
++updated: 2026-10-05
++last_verified: 2026-10-05
+ tags:
+   - architecture
+   - documentation
+@@ -160,6 +160,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由
+ | [ADR-t1662-2](2026-10-04-t1662-2-measurement-stores-ssot-and-views.md) | 記録を論理ストア（SSOTのStateStore・EventStore・SessionStepStore・NodeSampleStore、ビューのLedgerStore・ReportStore）と消えてよい材料（run dir・log・CSV・transcript）に分け、今のアダプタはqueue.dbの表にし、StateStoreとEventStoreは今どおり同時に確定して計測はStateStoreを読まず、sessionのstepは90日だけ重複を除き抜けを検出して持ち、hostの負荷はNodeSampleStoreを恒久の記録にしてCSVを写しにし（保持の期間のCSVは一度取り込む）、`RunLog`・`EventReads`・`TaskStore`をEventStore・StateStoreにまとめ直してgoal 100のmoduleに置き、台帳と恒久の入力のストアを「新しい表は持たない」の例外にする（ADR-0049決定5をamends） | 2026-10-04 |
+ | [ADR-t1662-3](2026-10-04-t1662-3-executors-send-telemetry-and-commands-are-classified-by-shape.md) | sessionのstepはagentではなくexecutor（session wrapper・runner・非対話のjobを起動するプロセス・`integrate`とe2eの検証）がTelemetrySink（queue serviceの`telemetry_report`）に30秒ごとに送り、executorには`telemetry_report`だけを呼べるtelemetry専用のprincipal（対象はrunか、runを持たないplanner・plan review・goal review・throughput review。supervisorが発行・失効）を与え、runを持たない対象のstepはSessionStepStoreに90日だけ持ち、実行環境・資源・送る口を差し替えられる口にし、資源の単位・`blocker: infra`・適合test・OpenTelemetryのspanとの対応を決め、コマンドは汎用の形（shape: flagの名前は平文、値とwordはdigest）だけを持って台帳を作るときに`[[telemetry.commands]]`の規則で分類する（ADR-t614-1決定2・ADR-t1233-4決定4・6をamends） | 2026-10-04 |
+ | [ADR-t1688-1](2026-10-04-t1688-1-worker-searches-documents-by-changed-names.md) | workerは文書の候補を、taskが名指すものと作業中に見つけたものに加え、変えた名前（コマンド・flag・設定のkey・役割・fileのpath）でrepositoryの文書を探して拾い、summaryに照合したpath・節か不要の理由と探した名前を書く。探す手段は名指さず検査の工程にしない。repository固有の範囲は開発文書、確かめはreviewのsubagent（ADR-t1428-1決定4をamends） | 2026-10-04 |
++| [ADR-t1801-1](2026-10-05-t1801-1-preserve-pending-work-before-provider-switch.md) | provider切り替え前に未完了の作業と依頼の保存を必須にする（ADR-t813-2決定4をamends） | 2026-10-05 |
+ 
+ goal 82（goal 38の段(1)〜(3)）のADRはtask 1233が書いた5本で、決定の置き場所は次のとおり。制御側と実行側の分け方・queue service・ユースケース単位のAPIとservice側の認可・unix socket・broker・クライアントモード・段の順と置き場所はADR-t1233-1、serviceの起動・停止の責任・落ちたときの知らせ方・brokerより前のprincipalの認証（token）はADR-t1233-4、読み取りのユースケースとroleごとの読める範囲・workerの読める範囲・Codexのsandboxからの到達はADR-t1233-5、e2eをreviewのpassの後のhostの工程に移すことはADR-t1233-2、このrepositoryを先にLinuxで通すことはADR-t1233-3にある。
+ 
+diff --git a/docs/design/provider-lifecycle.md b/docs/design/provider-lifecycle.md
+index d51cd818..03ba6605 100644
+--- a/docs/design/provider-lifecycle.md
++++ b/docs/design/provider-lifecycle.md
+@@ -4,8 +4,8 @@ type: design
+ title: Agent provider lifecycle
+ status: current
+ created: 2026-09-21
+-updated: 2026-10-04 # task 1596: a headless planner at the wall takes the provider retry before the requests behind it (after task 1486, task 1570)
+-last_verified: 2026-10-04 # task 1596
++updated: 2026-10-05 # task 1801
++last_verified: 2026-10-05 # task 1801
+ scope: provider
+ related:
+   - adr-t1486-1
+@@ -271,6 +271,8 @@ workerのproviderと経路はtaskが選ぶ（[ADR-t813-2](../adr/2026-09-28-t813
+ 
+ ## 使えないproviderからの切り替え
+ 
++切り替え前に未完了の作業と依頼を保存できたことを確認する。保存できなければ切り替え先のsessionを始めず、元の作業状態を保持して復旧を待つ。保存できた場合は同じworktreeとbranchで新しいsessionを始め、会話は引き継がない。理由は[ADR-t1801-1](../adr/2026-10-05-t1801-1-preserve-pending-work-before-provider-switch.md)にある。
++
+ [ADR-t813-2](../adr/2026-09-28-t813-2-provider-per-task-and-mutual-fallback.md)の決定2〜6の実装（task 818）。型と規則は`src/domain/provider_switch.rs`、supervisorの側は`src/application/supervise/provider.rs`。
+ 
+ - **使えないの判定**（`SwitchReason`、[domain-model](domain-model.md#providerの切り替えの理由switchreason)）: 実行ファイルが無い（`executable_missing`。supervisorの表にそのproviderの組が無い、つまりpreflightで見つからないか動かない）、起動できない（`launch_failed`。wrapperがturnのagentの実行ファイルを実行できない（起動のerrorの連鎖に`NotFound`か`PermissionDenied`のio errorがある。settingsの書き込みなどほかのerrorは今までどおりwrapperの失敗）、またはagentがsignalでなく非0で終わり、出力に1行も出さず、読み手も`other`以外の分類をしなかった。turnの`failure`は`launch`）、認証（`authentication`）、利用上限・rate limit（`usage_limit`）。認証と利用上限は読み手の分類（Claudeは`ClaudeTurnReader`、Codexは`CodexTurnReader`の`classify`）で決める。Claudeの読み手はstreamの印（401の再試行、`rate_limit_event`、`api_error_status`など）の後に、結果の文とstderrを`infrastructure::claude::job_wall`（headlessのjobの出力から控えのaskを開く判定と同じ1か所の文言、task 438）でも読む。`model`・`sandbox`・`other`の失敗、止めたturn（`silent`・`timed_out`・`launch_mismatch`）、receiptの`failed`やtestの失敗は切り替えない（決定3。今までどおり復旧jobにかかる）。

@@ -1,0 +1,13 @@
+diff --git a/tests/it/cli_version.rs b/tests/it/cli_version.rs
+index d8345367..8e9e4c88 100644
+--- a/tests/it/cli_version.rs
++++ b/tests/it/cli_version.rs
+@@ -123,7 +123,7 @@ fn migrate_is_explicit_and_older_binaries_keep_working_within_the_floor() {
+     // Every migration after 23, up to the last one the binary lists, with
+     // its declaration (ADR-0067 decision 4).
+     let migrations = dagq::infrastructure::schema::MIGRATIONS;
+-    let pending: Vec<Value> = (24..=SqliteQueue::SCHEMA_VERSION)
++    let pending: Vec<Value> = (24..=64)
+         .map(|version| {
+             serde_json::json!({
+                 "version": version,

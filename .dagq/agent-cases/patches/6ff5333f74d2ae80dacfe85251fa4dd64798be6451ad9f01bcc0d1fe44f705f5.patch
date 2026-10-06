@@ -1,0 +1,23 @@
+diff --git a/docs/design/follow-up-membership.md b/docs/design/follow-up-membership.md
+index 552bb6d8..567ab04a 100644
+--- a/docs/design/follow-up-membership.md
++++ b/docs/design/follow-up-membership.md
+@@ -4,7 +4,7 @@ type: design
+ title: Follow-up membership judgements
+ status: current
+ created: 2026-10-04
+-updated: 2026-10-04 # task 1509
++updated: 2026-10-05
+ last_verified: 2026-10-04 # task 1509
+ scope: runtime
+ related:
+@@ -49,7 +49,8 @@ required/out_of_scopeへ進める。同じ分類の確かめ直しも許す。re
+ requiredは元goalへ、out_of_scopeは所属先へ、draft/readyのtaskだけを
+ 同じtransactionで移す。閉じた元goalへのrequiredとsubmitted以降は判断だけを記録し、
+ taskを移さない。移動は`set_goal_in`の閉じたgoalと依存の循環の検査を通す。
+-失敗すれば判断も移動もrollbackする。undecidedは所属を変えない。
++失敗すれば判断も移動もrollbackし、判断の行だけが残ることはない。
++undecidedは所属を変えない。
+ 
+ required/out_of_scopeの判断を持つtaskの`set-goal`は、最後の判断の所属先と
+ 違うgoal（`--none`も）へ移すのを拒み、訂正を促す。未判定の移動は判断にならない。

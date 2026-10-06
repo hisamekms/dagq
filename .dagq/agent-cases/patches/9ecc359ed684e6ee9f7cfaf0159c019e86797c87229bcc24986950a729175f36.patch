@@ -1,0 +1,12 @@
+diff --git a/migrations/0063_supervisor_claim_spacing.sql b/migrations/0063_supervisor_claim_spacing.sql
+index 181af073..dab428a7 100644
+--- a/migrations/0063_supervisor_claim_spacing.sql
++++ b/migrations/0063_supervisor_claim_spacing.sql
+@@ -7,6 +7,6 @@
+ -- registration back after an exec. `status` reads them for the time of the
+ -- next claim. NULL in the first two is a supervisor of an older binary. A
+ -- nullable addition only: an older binary ignores it.
+-ALTER TABLE supervisors ADD COLUMN claim_spacing INTEGER;
++ALTER TABLE supervisors ADD COLUMN claim_spacing INTEGER DEFAULT 0;
+ ALTER TABLE supervisors ADD COLUMN claim_spacing_source TEXT;
+ ALTER TABLE supervisors ADD COLUMN max_load REAL;

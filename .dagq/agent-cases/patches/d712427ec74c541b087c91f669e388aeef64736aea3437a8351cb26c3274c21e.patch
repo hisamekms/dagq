@@ -1,0 +1,491 @@
+diff --git a/docs/development/documents.md b/docs/development/documents.md
+index f08e09c5..6b81b36d 100644
+--- a/docs/development/documents.md
++++ b/docs/development/documents.md
+@@ -4,7 +4,7 @@ type: development
+ title: このrepositoryの文書の規則（判断の記録・ADR・design・plans・frontmatter・workerの文書の照合・commit）
+ status: current
+ created: 2026-10-03
+-updated: 2026-10-03
++updated: 2026-10-04
+ owners:
+   - hisamekms
+ tags:
+@@ -65,7 +65,7 @@ pluginの`dagq-planner`の`SKILL.md`の「Where your authority ends」と`dagq`
+ 
+ ## pluginの汎用性
+ 
+-pluginとrepositoryの規則・値・経緯の受け持ちは[ADR-t1453-2](../adr/2026-10-03-t1453-2-ownership-of-agents-md-plugin-development-docs-and-config.md)決定1の表、runtimeとの境界は決定5。検査する記述の一覧は[棚卸し](../plans/agents-slim-inventory.md)「4. pluginの固有の記述の項目」。
++pluginとrepositoryの規則・値・経緯の受け持ちは[ADR-t1453-2](../adr/2026-10-03-t1453-2-ownership-of-agents-md-plugin-development-docs-and-config.md)決定1の表、runtimeとの境界は決定5。検査する記述の一覧は[棚卸し](../plans/agents-slim-inventory.md)「4. pluginの固有の記述の項目」。固有の印（このrepositoryのtest・coverageのコマンド、`tests/it`、task・goal・askの番号の逸話、日付など）の戻りは`tests/plugin.rs`の`no_skill_carries_this_repository_s_rules`が検査し、印の語の一覧はそのtestが持つ。
+ 
+ ## workerの文書の照合
+ 
+diff --git a/docs/development/task-registration.md b/docs/development/task-registration.md
+index b3beead6..fce30e99 100644
+--- a/docs/development/task-registration.md
++++ b/docs/development/task-registration.md
+@@ -4,7 +4,7 @@ type: development
+ title: このrepositoryのtaskの登録（verify・paths・evidence・changeの選び方、ADRを書くtask、plan reviewが当てはめる規則）
+ status: current
+ created: 2026-10-03
+-updated: 2026-10-03
++updated: 2026-10-04
+ owners:
+   - hisamekms
+ tags:
+@@ -46,6 +46,10 @@ llvm-covとcargo testの重ね方:
+ 
+ 変更の対象でverificationを軽くしてよい。条件は`--paths`で変えてよいパスを宣言すること（[ADR-0029](../adr/0029-task-declares-paths-and-verification-follows-the-kind-of-change.md)）。宣言外のパスを変えたrunはvalidatingで`needs_session`（`scope_violation`）になり、`integrate`もrebase後の差分を同じく検査して着地させないので、軽い検証のまま`src/`の変更が入ることはない。`--paths`を付けないtaskは制限されない。宣言外のパスが本当に要るときのworkerとplannerの手順はpluginの`dagq`の`reference/scope.md`の「What happens outside the paths」「Change the paths」が持つ。
+ 
++## runtimeのtaskの主なファイル
++
++runtimeのtaskは`--paths`を宣言しない（上の「推奨の組み合わせ」）ので、主に触るファイルをdescriptionに書く（例: 「主に`src/application/supervise/plan_review.rs`と`tests/it/plan_review.rs`を触る」）。読み手（plan reviewの衝突の検出と`related`）、予想で制限でないこと、`--paths`に書かない理由はpluginの`dagq`の`reference/scope.md`の「Name the files a task without paths mainly touches」が持つ。
++
+ ## coverageの関門
+ 
+ - 登録済みのtaskの`cargo llvm-cov nextest --locked --fail-under-lines 80`と`cargo llvm-cov --locked --fail-under-lines 80`は書き換えず、同じ関門としてそのまま有効（ADR-0076決定4、[ADR-t828-1](../adr/2026-09-28-t828-1-coverage-gate-covers-the-workspace-with-workspace-flag.md)決定2。dagqのcoverageと全てのcrateのtestの成否は見るが、brokerのcrateの行はcoverageに数えない）。
+diff --git a/docs/plans/agents-slim-inventory.md b/docs/plans/agents-slim-inventory.md
+index ae694db3..3f911fb9 100644
+--- a/docs/plans/agents-slim-inventory.md
++++ b/docs/plans/agents-slim-inventory.md
+@@ -4,7 +4,7 @@ type: plan
+ title: AGENTS.mdとpluginのdagq repository固有の記述の棚卸しの表と、整理の前の役割ごとの読む量
+ status: active
+ created: 2026-10-03
+-updated: 2026-10-03
++updated: 2026-10-04
+ owners:
+   - hisamekms
+ tags:
+@@ -413,35 +413,36 @@ git grep -noE "(task|goal|ask|proposal|finding|note|run|mark)s? [0-9]{1,4}" 7fea
+ 
+ | ID | 元の場所 | 要旨 | 種類 | 印 | 既存の重複 | 移し先 | 検査 | 移すtask | 移した後の場所 |
+ | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+-| P-01 | dagq/reference/scope.md「Recommended combinations」 | 「for this repository」の推奨表（docs・plugin・runtime（fmt・clippy・`cargo llvm-cov nextest --locked --workspace --fail-under-lines 80`、`cargo test`を重ねない）・scripts） | 値 | ★ | A-098・A-102〜A-106 | dev/task-registration.md「推奨の組み合わせ」（A-102〜A-106と1つに）。plugin dagq/reference/scope.md「## Recommended combinations」はrepositoryの規則を参照する汎用の説明に | plugin-generic | 1462 |  |
+-| P-02 | dagq/reference/scope.md「Recommended combinations」 | 対象が混ざるtaskは最も重い行の検証、行はchangeでなく変える対象で選ぶ | 手順 | ★ | A-107 | plugin dagq/reference/scope.md「## Recommended combinations」に汎用の原則として残す（このrepositoryの表はdev/task-registration.md「推奨の組み合わせ」） | — | 1462 |  |
+-| P-03 | dagq/reference/scope.md `--change`の段落 | 値と選び方の例として「this repository's AGENTS.md」 | 手順 |  | A-109 | plugin dagq/reference/scope.md「## Recommended combinations」（`--change`の段落）は「repositoryの規則」とだけ書く。このrepositoryの値はdev/task-registration.md「change」 | plugin-generic | 1462 |  |
+-| P-04 | dagq/reference/scope.md `--verify`の段落 | 「In this repository a worker runs fmt, clippy, `cargo test --locked --test it <file>::`・`--lib`…」、coverageの関門と旧`cargo llvm-cov`、全体の`cargo test --locked`を流さない、resumeの再現は例外 | 手順 | ★ | A-057〜A-066・A-080・A-091 | dev/local-checks.md「workerの手元の検証」「testの範囲」「resumeでの再現」。plugin dagq/reference/scope.md「## Recommended combinations」（`--verify`の段落）は「verifyは`integrate`の関門で、workerはrepositoryの指示に従う」の汎用の部分だけ残す | plugin-generic | 1462 |  |
+-| P-05 | dagq/reference/scope.md `--verify`の段落 | 「Decided by a person with the planner on 2026-09-26 (task 528)…（median 1439 s）」 | 経緯 |  | A-083 | 新ADR `docs/adr/<accepted_on>-t1457-1-history-of-local-checks-and-test-rules.md`（予定）「## Context」（A-083と1つに）。pluginの元の場所は削除 | plugin-generic | 1462 |  |
+-| P-06 | dagq/reference/scope.md「E2E」 | 「In this repository the paths are the cmux adapter, process and sessions, launchd, lifecycle, integrate, install, update and the actors' start, plus `tests/e2e.rs`」 | 値 |  | dagq.toml `[e2e]`のコメント | 削除（重複）。正本はdagq.toml `[e2e]`（pathsとコメント） | plugin-generic | 1462 |  |
+-| P-07 | dagq/reference/scope.md「Name the files a runtime task mainly touches」 | 「A runtime task (`src/`, `tests/`, `migrations/`) registers no `--paths`」と例`src/application/supervise/plan_review.rs`・`tests/it/plan_review.rs`、「the repository gives runtime tasks no `--paths`」 | 手順 | ★ | A-105 | dev/task-registration.md「runtimeのtaskの主なファイル」。plugin dagq/reference/scope.md「## Name the files a runtime task mainly touches」は「`--paths`を宣言しないtask」の汎用の例に | plugin-generic | 1462 |  |
+-| P-08 | dagq/SKILL.md §2 コード例 | `--verify "cargo fmt --all --check" --verify "cargo test --locked"` | 値 |  | — | plugin dagq/SKILL.md「### Register the tasks」の同じ例を汎用の置き字に置き換える（このrepositoryの値はdev/task-registration.md「推奨の組み合わせ」） | plugin-generic | 1462 |  |
+-| P-09 | dagq/SKILL.md §2 コード例 | `--doc docs/adr/NNNN-name.md`（このrepositoryの旧い4桁のADRの形） | 値 |  | A-156 | plugin dagq/SKILL.md「### Register the goal」の同じ例を汎用の形に置き換える（このrepositoryのADRの形はdev/documents.md「ADRのID」） | plugin-generic | 1462 |  |
+-| P-10 | dagq/reference/inspect.md 優先度の表 | `interrupt`の例「goal 28, which added priorities」 | 経緯 |  | — | 削除。plugin dagq/reference/inspect.md「## Priority and claim order」の例を番号の無い汎用の文に | plugin-generic | 1462 |  |
+-| P-11 | dagq/reference/inspect.md `edit`の例 | `--verify 'cargo fmt --all --check' --verify 'cargo test --locked --test plugin'` | 値 |  | A-104 | plugin dagq/reference/inspect.md「## Edit a draft or submitted task」の同じ例を汎用の置き字に置き換える（このrepositoryの値はdev/task-registration.md「推奨の組み合わせ」） | plugin-generic | 1462 |  |
+-| P-12 | dagq-planner/SKILL.md §1 | 「`--paths`, `--evidence`, `--change` per AGENTS.md; `e2e` comes from the diff …, not a blanket `--evidence e2e`; no throwaway-queue hand steps in a worker's acceptance」 | 手順 | ★ | A-094〜A-111、A-017 | plugin dagq-planner/SKILL.md「## 1. Plan with the person and submit」の同じ文を「per the repository's rules」に置き換える。このrepositoryの規則の正本はdev/task-registration.md「推奨の組み合わせ」「change」「e2e」 | plugin-generic | 1462 |  |
+-| P-13 | dagq-inbox/reference/watch.md `check the failed review` | 「task 1099」「(task 1220)」 | 経緯 |  | design sl/throughput-review.md | 削除（番号を消す）。経緯の正本はdesign sl/throughput-review.md「## promptの入力（task 1099）」「## Codexで動かす（task 1220）」 | plugin-generic | 1462 |  |
+-| P-14 | dagq-recover/reference/stuck-exit.md 冒頭 | 「(task 147)」「task 170」 | 経緯 |  | design sl/receipt-and-session-exit.md・session-wrapper.md | 削除（番号を消す）。経緯の正本はdesign sl/receipt-and-session-exit.md「### `/exit`の再試行」とsl/session-wrapper.md 冒頭（`#`の節） | plugin-generic | 1462 |  |
+-| P-15 | dagq/reference/kpi.md `kpis`の箇条 | 「(in this repository `area=runtime` for runtime work)」 | 手順 | ★ | A-047 | dev/operations.md「KPIの読み方」（A-047と1つに）。plugin dagq/reference/kpi.md「## `dagq kpi`: periods, strata, targets」は「1つの層の中で比べる」だけ | plugin-generic | 1462 |  |
+-| P-16 | dagq/reference/kpi.md「## Raising throughput: the weekly review」の箇条5「One change, one mark」 | 「(in this repository `--area runtime` for runtime work)」 | 手順 | ★ | A-047・A-114 | dev/operations.md「KPIの読み方」（A-047と1つに）。plugin dagq/reference/kpi.md「## Raising throughput: the weekly review」の箇条5は「1つの層の中で比べる」だけ | plugin-generic | 1462 |  |
+-| P-17 | dagq-recover/reference/triage-by-hand.md 箇条 | 「For the task 572 / ask 154, 159, 160 case」「(where ask 160 stood)」とhostの`python3`に`tomllib`が無い例 | 経緯 |  | ADR-t883-1 | 削除（番号を消す）。経緯の正本はADR-t883-1「## Context」。pluginの「## Broken verification command with committed work」は汎用の文に | plugin-generic | 1462 |  |
+-| P-18 | dagq/reference/provider.md 箇条 | 「(task 1218)」「(task 1220)」 | 経緯 |  | ADR-t1207-1、design sl/actor-model.md | 削除（番号を消す）。経緯の正本はADR-t1207-1「## Context」とdesign sl/actor-model.md「## provider」 | plugin-generic | 1462 |  |
+-| P-19a | dagq-inbox/reference/status.md 「## status」（sl/plan-review.md・sl/review.md・sl/supervise.md）と「## A text or a request the session did not take」（sl/session-send.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq-inbox/reference/status.md 「## status」（sl/plan-review.md・sl/review.md・sl/supervise.md）と「## A text or a request the session did not take」（sl/session-send.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 |  |
+-| P-19b | dagq-recover/reference/review-by-hand.md 「## The supervisor reviews first」（sl/review.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq-recover/reference/review-by-hand.md 「## The supervisor reviews first」（sl/review.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 |  |
+-| P-19c | dagq-recover/reference/session.md 「## An ask about a text the session did not take (`input_not_ready`, `send_unconfirmed`)」（sl/session-send.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq-recover/reference/session.md 「## An ask about a text the session did not take (`input_not_ready`, `send_unconfirmed`)」（sl/session-send.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 |  |
+-| P-19d | dagq-recover/reference/stalled.md 冒頭（`# A stalled ask: …`の節。sl/idle-without-receipt.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq-recover/reference/stalled.md 冒頭（`# A stalled ask: …`の節。sl/idle-without-receipt.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 |  |
+-| P-19e | dagq/reference/authority.md 冒頭（`# Who may run what, and how it is recorded`の節。security.md・authorization.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq/reference/authority.md 冒頭（`# Who may run what, and how it is recorded`の節。security.md・authorization.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 |  |
+-| P-19f | dagq/reference/goal-close.md 冒頭（`# Closing a goal`の節。sl/goal-review.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq/reference/goal-close.md 冒頭（`# Closing a goal`の節。sl/goal-review.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 |  |
+-| P-19g | dagq/reference/inspect.md 冒頭（`# Inspect commands and their fields`の節。sl/stats.md）と「## Decide what to run first with `graph`」（sl/dependency-diagram.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq/reference/inspect.md 冒頭（`# Inspect commands and their fields`の節。sl/stats.md）と「## Decide what to run first with `graph`」（sl/dependency-diagram.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 |  |
+-| P-19h | dagq/reference/kpi.md 冒頭（`# KPIs, change marks, …`の節。sl/kpi.md・marks.md・stats.md・report.md・push.md、「of the dagq repository」）、「## Raising throughput: the weekly review」（sl/kpi.md）、「## Reports」（sl/report.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq/reference/kpi.md 冒頭（`# KPIs, change marks, …`の節。sl/kpi.md・marks.md・stats.md・report.md・push.md、「of the dagq repository」）、「## Raising throughput: the weekly review」（sl/kpi.md）、「## Reports」（sl/report.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 |  |
+-| P-19i | dagq/reference/observer.md 「## Threshold findings: reading `stall_thresholds` and `running_alerts`」（sl/stall-thresholds.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq/reference/observer.md 「## Threshold findings: reading `stall_thresholds` and `running_alerts`」（sl/stall-thresholds.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 |  |
+-| P-19j | dagq/reference/provider.md 冒頭（`# A worker's provider and route, and falling back`の節。provider-lifecycle.md・sl/headless-worker.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq/reference/provider.md 冒頭（`# A worker's provider and route, and falling back`の節。provider-lifecycle.md・sl/headless-worker.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 |  |
+-| P-20 | dagq/reference/inspect.md「## Decide what to run first with `graph`」 | 「When one task blocks many (goal 8 had five tasks waiting on one)」 | 経緯 |  | — | 削除（番号を消す）。plugin dagq/reference/inspect.md「## Decide what to run first with `graph`」の文を番号の無い汎用の文に | plugin-generic | 1462 |  |
++| P-01 | dagq/reference/scope.md「Recommended combinations」 | 「for this repository」の推奨表（docs・plugin・runtime（fmt・clippy・`cargo llvm-cov nextest --locked --workspace --fail-under-lines 80`、`cargo test`を重ねない）・scripts） | 値 | ★ | A-098・A-102〜A-106 | dev/task-registration.md「推奨の組み合わせ」（A-102〜A-106と1つに）。plugin dagq/reference/scope.md「## Recommended combinations」はrepositoryの規則を参照する汎用の説明に | plugin-generic | 1462 | docs/development/task-registration.md「## 推奨の組み合わせ」（A-102〜A-106と同じ箇条。task 1457が移していた）。plugin dagq/reference/scope.md「## Recommended combinations」は、規則をrepositoryの指示（AGENTS.md、無ければCLAUDE.md、README・CI・build、人）から読む汎用の手順と、汎用の行の例の表にした |
++| P-02 | dagq/reference/scope.md「Recommended combinations」 | 対象が混ざるtaskは最も重い行の検証、行はchangeでなく変える対象で選ぶ | 手順 | ★ | A-107 | plugin dagq/reference/scope.md「## Recommended combinations」に汎用の原則として残す（このrepositoryの表はdev/task-registration.md「推奨の組み合わせ」） | — | 1462 | plugin dagq/reference/scope.md「## Recommended combinations」の表の後の段落に汎用の原則として残した（このrepositoryの表はdocs/development/task-registration.md「## 推奨の組み合わせ」箇条8） |
++| P-03 | dagq/reference/scope.md `--change`の段落 | 値と選び方の例として「this repository's AGENTS.md」 | 手順 |  | A-109 | plugin dagq/reference/scope.md「## Recommended combinations」（`--change`の段落）は「repositoryの規則」とだけ書く。このrepositoryの値はdev/task-registration.md「change」 | plugin-generic | 1462 | plugin dagq/reference/scope.md「## Recommended combinations」（`--change`の段落）は「the repository's rules」とだけ書く。このrepositoryの値はdocs/development/task-registration.md「## change」 |
++| P-04 | dagq/reference/scope.md `--verify`の段落 | 「In this repository a worker runs fmt, clippy, `cargo test --locked --test it <file>::`・`--lib`…」、coverageの関門と旧`cargo llvm-cov`、全体の`cargo test --locked`を流さない、resumeの再現は例外 | 手順 | ★ | A-057〜A-066・A-080・A-091 | dev/local-checks.md「workerの手元の検証」「testの範囲」「resumeでの再現」。plugin dagq/reference/scope.md「## Recommended combinations」（`--verify`の段落）は「verifyは`integrate`の関門で、workerはrepositoryの指示に従う」の汎用の部分だけ残す | plugin-generic | 1462 | docs/development/local-checks.md「## workerの手元の検証」「## testの範囲」「## resumeでの再現」（task 1457が移していた）。plugin dagq/reference/scope.md「## Recommended combinations」の`--verify`の段落は、verifyが`integrate`の関門で、workerの手元のtestはrepositoryの規則に従いreceiptに範囲を書くことだけ |
++| P-05 | dagq/reference/scope.md `--verify`の段落 | 「Decided by a person with the planner on 2026-09-26 (task 528)…（median 1439 s）」 | 経緯 |  | A-083 | 新ADR `docs/adr/<accepted_on>-t1457-1-history-of-local-checks-and-test-rules.md`（予定）「## Context」（A-083と1つに）。pluginの元の場所は削除 | plugin-generic | 1462 | docs/plans/local-checks-history.md「## workerの手元のtestを関係する範囲に絞った（A-083）」（task 1457が書いていた）。pluginの元の場所は削除 |
++| P-06 | dagq/reference/scope.md「E2E」 | 「In this repository the paths are the cmux adapter, process and sessions, launchd, lifecycle, integrate, install, update and the actors' start, plus `tests/e2e.rs`」 | 値 |  | dagq.toml `[e2e]`のコメント | 削除（重複）。正本はdagq.toml `[e2e]`（pathsとコメント） | plugin-generic | 1462 | 削除（重複）。正本はdagq.toml `[e2e]`（pathsとコメント） |
++| P-07 | dagq/reference/scope.md「Name the files a runtime task mainly touches」 | 「A runtime task (`src/`, `tests/`, `migrations/`) registers no `--paths`」と例`src/application/supervise/plan_review.rs`・`tests/it/plan_review.rs`、「the repository gives runtime tasks no `--paths`」 | 手順 | ★ | A-105 | dev/task-registration.md「runtimeのtaskの主なファイル」。plugin dagq/reference/scope.md「## Name the files a runtime task mainly touches」は「`--paths`を宣言しないtask」の汎用の例に | plugin-generic | 1462 | docs/development/task-registration.md「## runtimeのtaskの主なファイル」（新しい節）。plugin dagq/reference/scope.md「## Name the files a task without paths mainly touches」（節の名前を変えた）と dagq/reference/register.md「For a planner」の「Before and after `add`」は`--paths`を宣言しないtaskの汎用の文に |
++| P-08 | dagq/SKILL.md §2 コード例 | `--verify "cargo fmt --all --check" --verify "cargo test --locked"` | 値 |  | — | plugin dagq/SKILL.md「### Register the tasks」の同じ例を汎用の置き字に置き換える（このrepositoryの値はdev/task-registration.md「推奨の組み合わせ」） | plugin-generic | 1462 | plugin dagq/SKILL.md「### Register the tasks」の例を`--verify "CHECK" --verify "TEST"`に。このrepositoryの値はdocs/development/task-registration.md「## 推奨の組み合わせ」 |
++| P-09 | dagq/SKILL.md §2 コード例 | `--doc docs/adr/NNNN-name.md`（このrepositoryの旧い4桁のADRの形） | 値 |  | A-156 | plugin dagq/SKILL.md「### Register the goal」の同じ例を汎用の形に置き換える（このrepositoryのADRの形はdev/documents.md「ADRのID」） | plugin-generic | 1462 | plugin dagq/SKILL.md「### Register the goal」の例を`--doc PATH/TO/DECISION.md`に。このrepositoryのADRの形はdocs/development/documents.md「## ADRのID」 |
++| P-10 | dagq/reference/inspect.md 優先度の表 | `interrupt`の例「goal 28, which added priorities」 | 経緯 |  | — | 削除。plugin dagq/reference/inspect.md「## Priority and claim order」の例を番号の無い汎用の文に | plugin-generic | 1462 | 削除。plugin dagq/reference/inspect.md「## Priority and claim order」の`interrupt`の例は番号の無い文に |
++| P-11 | dagq/reference/inspect.md `edit`の例 | `--verify 'cargo fmt --all --check' --verify 'cargo test --locked --test plugin'` | 値 |  | A-104 | plugin dagq/reference/inspect.md「## Edit a draft or submitted task」の同じ例を汎用の置き字に置き換える（このrepositoryの値はdev/task-registration.md「推奨の組み合わせ」） | plugin-generic | 1462 | plugin dagq/reference/inspect.md「## Edit a draft or submitted task」の例を`--verify 'CHECK' --verify 'TEST'`に。このrepositoryの値はdocs/development/task-registration.md「## 推奨の組み合わせ」 |
++| P-12 | dagq-planner/SKILL.md §1 | 「`--paths`, `--evidence`, `--change` per AGENTS.md; `e2e` comes from the diff …, not a blanket `--evidence e2e`; no throwaway-queue hand steps in a worker's acceptance」 | 手順 | ★ | A-094〜A-111、A-017 | plugin dagq-planner/SKILL.md「## 1. Plan with the person and submit」の同じ文を「per the repository's rules」に置き換える。このrepositoryの規則の正本はdev/task-registration.md「推奨の組み合わせ」「change」「e2e」 | plugin-generic | 1462 | plugin dagq-planner/SKILL.md「## 1. Plan with the person and submit」は「per the repository's rules」に。このrepositoryの規則の正本はdocs/development/task-registration.md「## 推奨の組み合わせ」「## change」「## e2e」。使い捨てのqueueの手作業をacceptanceに入れないことは、workerに`queue.admin`が無いという製品の権限から来る汎用の規則としてpluginに残した（このrepositoryの側はdocs/development/operations.md「## workerがhostと実queueでできないこと」） |
++| P-13 | dagq-inbox/reference/watch.md `check the failed review` | 「task 1099」「(task 1220)」 | 経緯 |  | design sl/throughput-review.md | 削除（番号を消す）。経緯の正本はdesign sl/throughput-review.md「## promptの入力（task 1099）」「## Codexで動かす（task 1220）」 | plugin-generic | 1462 | 削除（番号を消した）。経緯の正本はdesign sl/throughput-review.md |
++| P-14 | dagq-recover/reference/stuck-exit.md 冒頭 | 「(task 147)」「task 170」 | 経緯 |  | design sl/receipt-and-session-exit.md・session-wrapper.md | 削除（番号を消す）。経緯の正本はdesign sl/receipt-and-session-exit.md「### `/exit`の再試行」とsl/session-wrapper.md 冒頭（`#`の節） | plugin-generic | 1462 | 削除（番号を消した）。経緯の正本はdesign sl/receipt-and-session-exit.md「idle判定」（task 147）とsl/silent-wrapper.md（task 170。移し先の予定のsl/session-wrapper.mdには無かった） |
++| P-15 | dagq/reference/kpi.md `kpis`の箇条 | 「(in this repository `area=runtime` for runtime work)」 | 手順 | ★ | A-047 | dev/operations.md「KPIの読み方」（A-047と1つに）。plugin dagq/reference/kpi.md「## `dagq kpi`: periods, strata, targets」は「1つの層の中で比べる」だけ | plugin-generic | 1462 | docs/development/operations.md「## KPIの読み方と印」段落1（A-114。task 1457が移していた）。plugin dagq/reference/kpi.md「## `dagq kpi`: periods, strata, targets」は「1つの層の中で比べる（どの層かはrepositoryの規則）」だけ |
++| P-16 | dagq/reference/kpi.md「## Raising throughput: the weekly review」の箇条5「One change, one mark」 | 「(in this repository `--area runtime` for runtime work)」 | 手順 | ★ | A-047・A-114 | dev/operations.md「KPIの読み方」（A-047と1つに）。plugin dagq/reference/kpi.md「## Raising throughput: the weekly review」の箇条5は「1つの層の中で比べる」だけ | plugin-generic | 1462 | docs/development/operations.md「## KPIの読み方と印」段落1。plugin dagq/reference/kpi.md「## Raising throughput: the weekly review」の箇条5は「1つの層の中で比べる（どの層かはrepositoryの規則）」だけ |
++| P-17 | dagq-recover/reference/triage-by-hand.md 箇条 | 「For the task 572 / ask 154, 159, 160 case」「(where ask 160 stood)」とhostの`python3`に`tomllib`が無い例 | 経緯 |  | ADR-t883-1 | 削除（番号を消す）。経緯の正本はADR-t883-1「## Context」。pluginの「## Broken verification command with committed work」は汎用の文に | plugin-generic | 1462 | 削除（番号と`tomllib`の例を消した）。経緯の正本はADR-t883-1「## Context」。plugin dagq-recover/reference/triage-by-hand.md「## Broken verification command with committed work」は汎用の文に |
++| P-18 | dagq/reference/provider.md 箇条 | 「(task 1218)」「(task 1220)」 | 経緯 |  | ADR-t1207-1、design sl/actor-model.md | 削除（番号を消す）。経緯の正本はADR-t1207-1「## Context」とdesign sl/actor-model.md「## provider」 | plugin-generic | 1462 | 削除（番号を消した）。経緯の正本はADR-t1207-1「## Context」とdesign sl/actor-model.md「## provider」 |
++| P-19a | dagq-inbox/reference/status.md 「## status」（sl/plan-review.md・sl/review.md・sl/supervise.md）と「## A text or a request the session did not take」（sl/session-send.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq-inbox/reference/status.md 「## status」（sl/plan-review.md・sl/review.md・sl/supervise.md）と「## A text or a request the session did not take」（sl/session-send.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 | 移さない（dagqの製品の設計の文書を名指す参照で、固有の規則を指していないことを確かめた） |
++| P-19b | dagq-recover/reference/review-by-hand.md 「## The supervisor reviews first」（sl/review.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq-recover/reference/review-by-hand.md 「## The supervisor reviews first」（sl/review.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 | 移さない（dagqの製品の設計の文書を名指す参照で、固有の規則を指していないことを確かめた） |
++| P-19c | dagq-recover/reference/session.md 「## An ask about a text the session did not take (`input_not_ready`, `send_unconfirmed`)」（sl/session-send.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq-recover/reference/session.md 「## An ask about a text the session did not take (`input_not_ready`, `send_unconfirmed`)」（sl/session-send.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 | 移さない（dagqの製品の設計の文書を名指す参照で、固有の規則を指していないことを確かめた） |
++| P-19d | dagq-recover/reference/stalled.md 冒頭（`# A stalled ask: …`の節。sl/idle-without-receipt.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq-recover/reference/stalled.md 冒頭（`# A stalled ask: …`の節。sl/idle-without-receipt.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 | 移さない（dagqの製品の設計の文書を名指す参照で、固有の規則を指していないことを確かめた） |
++| P-19e | dagq/reference/authority.md 冒頭（`# Who may run what, and how it is recorded`の節。security.md・authorization.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq/reference/authority.md 冒頭（`# Who may run what, and how it is recorded`の節。security.md・authorization.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 | 移さない（dagqの製品の設計の文書を名指す参照で、固有の規則を指していないことを確かめた） |
++| P-19f | dagq/reference/goal-close.md 冒頭（`# Closing a goal`の節。sl/goal-review.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq/reference/goal-close.md 冒頭（`# Closing a goal`の節。sl/goal-review.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 | 移さない（dagqの製品の設計の文書を名指す参照で、固有の規則を指していないことを確かめた） |
++| P-19g | dagq/reference/inspect.md 冒頭（`# Inspect commands and their fields`の節。sl/stats.md）と「## Decide what to run first with `graph`」（sl/dependency-diagram.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq/reference/inspect.md 冒頭（`# Inspect commands and their fields`の節。sl/stats.md）と「## Decide what to run first with `graph`」（sl/dependency-diagram.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 | 移さない（dagqの製品の設計の文書を名指す参照で、固有の規則を指していないことを確かめた） |
++| P-19h | dagq/reference/kpi.md 冒頭（`# KPIs, change marks, …`の節。sl/kpi.md・marks.md・stats.md・report.md・push.md、「of the dagq repository」）、「## Raising throughput: the weekly review」（sl/kpi.md）、「## Reports」（sl/report.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq/reference/kpi.md 冒頭（`# KPIs, change marks, …`の節。sl/kpi.md・marks.md・stats.md・report.md・push.md、「of the dagq repository」）、「## Raising throughput: the weekly review」（sl/kpi.md）、「## Reports」（sl/report.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 | 移さない（dagqの製品の設計の文書を名指す参照で、固有の規則を指していないことを確かめた） |
++| P-19i | dagq/reference/observer.md 「## Threshold findings: reading `stall_thresholds` and `running_alerts`」（sl/stall-thresholds.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq/reference/observer.md 「## Threshold findings: reading `stall_thresholds` and `running_alerts`」（sl/stall-thresholds.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 | 移さない（dagqの製品の設計の文書を名指す参照で、固有の規則を指していないことを確かめた） |
++| P-19j | dagq/reference/provider.md 冒頭（`# A worker's provider and route, and falling back`の節。provider-lifecycle.md・sl/headless-worker.md） | dagqのsourceのdesignの文書を指す参照 | 設計 |  | — | 移さない。plugin dagq/reference/provider.md 冒頭（`# A worker's provider and route, and falling back`の節。provider-lifecycle.md・sl/headless-worker.md）のまま（dagqの製品の文書を名指す形で、配布の前提はtask 627の範囲）。1462は固有の規則を指していないことだけ確かめる | plugin-generic | 1462 | 移さない（dagqの製品の設計の文書を名指す参照で、固有の規則を指していないことを確かめた） |
++| P-20 | dagq/reference/inspect.md「## Decide what to run first with `graph`」 | 「When one task blocks many (goal 8 had five tasks waiting on one)」 | 経緯 |  | — | 削除（番号を消す）。plugin dagq/reference/inspect.md「## Decide what to run first with `graph`」の文を番号の無い汎用の文に | plugin-generic | 1462 | 削除（番号を消した）。plugin dagq/reference/inspect.md「## Decide what to run first with `graph`」の文は番号の無い汎用の文に |
++| P-21 | dagq/reference/inspect.md「## A run that needs paths outside its task」の「Next:」の段落 | 「the verification those paths need (a `src/` path takes the runtime checks)」（`src/`はruntimeの検証を取るというこのrepositoryのverifyの規則。task 1462のreviewの revise 1 で見つけて足した） | 値 | ★ | A-105、P-01 | dev/task-registration.md「推奨の組み合わせ」。pluginは「per the repository's rules: `reference/scope.md`」に | plugin-generic | 1462 | docs/development/task-registration.md「## 推奨の組み合わせ」箇条4（runtimeの行。task 1457が移していた）。plugin dagq/reference/inspect.md の同じ段落は「per the repository's rules: `reference/scope.md`」に |
+ 
+ ### 4.1 固有でないと判断したもの（grepに当たったが項目にしない）
+ 
+@@ -455,7 +456,9 @@ git grep -noE "(task|goal|ask|proposal|finding|note|run|mark)s? [0-9]{1,4}" 7fea
+ | dagq-planner/SKILL.md §1 | 「`e2e` comes from the diff and `dagq.toml`'s `[e2e] paths`」 | 製品の振る舞い（`[e2e] paths`は利用者が書く設定） |
+ | dagq/SKILL.md §2、dagq/reference/inspect.md（`graph`と`Priority and claim order`の節のコード例） | `--goal 1`、`--goal 2`、`--depends-on-goal 1` | コマンドの書き方を示す置き字のIDで、このrepositoryの逸話ではない |
+ | .claude-plugin/plugin.json | `hisamekms` | 作者のmetadata |
+-| plugin全体 | `ADR-…`の参照109か所 | dagqの製品の決定への参照で、このrepositoryの開発の規則ではない。残すかはtask 627・1462が配布の前提として扱う |
++| dagq/reference/inspect.md「## Edit a draft or submitted task」のコード例 | `--paths 'src/**'` | flagの書き方を示すglobの例で、このrepositoryの規則を述べない（task 1462が確かめた） |
++| dagq-recover/reference/update.md「## Automatic updates (`up --auto-update`)」 | `src/`・`migrations/`・`Cargo.toml`・`Cargo.lock`・`build.rs` | dagqのsourceのqueueの自動更新が何の着地でbuildするかという製品の振る舞い（design sl/auto-update.md） |
++| plugin全体 | `ADR-…`の参照109か所 | dagqの製品の決定への参照で、このrepositoryの開発の規則ではない。task 1462は製品の決定への参照として残した（このrepositoryの開発の規則を指さない） |
+ 
+ ## 5. 禁止事項と例外（`★`）の一覧
+ 
+diff --git a/plugins/claude-dagq/skills/dagq-inbox/reference/watch.md b/plugins/claude-dagq/skills/dagq-inbox/reference/watch.md
+index 0f75747e..74201ff6 100644
+--- a/plugins/claude-dagq/skills/dagq-inbox/reference/watch.md
++++ b/plugins/claude-dagq/skills/dagq-inbox/reference/watch.md
+@@ -26,5 +26,5 @@ Keep exactly one watch running: start a new one only after the previous one has
+ 
+ - Show the person its `mode`, `period` and `conclusion` lines as they are, with `path` (the whole review, `review.md` under `<queue dir>/reports/reviews/`). An hourly one also has `reasons`: `deviation` (the hour's landings far off the 6 hours before), `sustained_drop` (the 3-hour average well below the 24-hour one for 3 hours) or `no_landing`.
+ - A weekly one with `finding_id` proposed one change: it is a finding marked for a proposal, which a runtime planner takes up. Tell the person its ID; nothing is yours to do.
+-- Only an hour the runtime's rules flag reaches you, and only along with the next event that wakes the watch (above). Say nothing about the quiet hours, and run no hourly, daily or weekly review of your own (a cron of the inbox's that did it before the runtime did is to be stopped).
+-- `check the failed review` (`throughput_review_finished` with `outcome` `failed` or `error`, task 1099) is a review of any mode that reached no conclusion. Show the person its `mode`, `period`, `outcome`, `reason` (the error) or `exit_code`, and `dir` (its `output.out` and `output.err` say why; older jobs have `output.log`). It asks nothing and holds no claim nor landing; the period is not reviewed again, and you run none of your own in its place unless the person says so. A Codex review that stopped because Codex could not be used (its finish has `provider_unusable`) is no notice: the supervisor holds Codex and reviews that period again on the other provider, and only under `--no-claude` does that second try end as a `check the failed review` saying why (task 1220).
++- Only an hour the runtime's rules flag reaches you, and only along with the next event that wakes the watch (above). Say nothing about the quiet hours, and run no hourly, daily or weekly review of your own.
++- `check the failed review` (`throughput_review_finished` with `outcome` `failed` or `error`) is a review of any mode that reached no conclusion. Show the person its `mode`, `period`, `outcome`, `reason` (the error) or `exit_code`, and `dir` (its `output.out` and `output.err` say why; older jobs have `output.log`). It asks nothing and holds no claim nor landing; the period is not reviewed again, and you run none of your own in its place unless the person says so. A Codex review that stopped because Codex could not be used (its finish has `provider_unusable`) is no notice: the supervisor holds Codex and reviews that period again on the other provider, and only under `--no-claude` does that second try end as a `check the failed review` saying why.
+diff --git a/plugins/claude-dagq/skills/dagq-planner/SKILL.md b/plugins/claude-dagq/skills/dagq-planner/SKILL.md
+index f0444298..7d0e4113 100644
+--- a/plugins/claude-dagq/skills/dagq-planner/SKILL.md
++++ b/plugins/claude-dagq/skills/dagq-planner/SKILL.md
+@@ -17,7 +17,7 @@ Every planner decides what it can recommend and goes on, asking no one: adopting
+ 
+ ## 1. Plan with the person and submit
+ 
+-Hear the problem, then follow the `dagq` skill's section 2: a goal (`goal add`) unless it is a one-shot task, and tasks with `add --goal` (acceptance, verification, dependencies, context, `--paths`, `--evidence`, `--change` per AGENTS.md; `e2e` comes from the diff and `dagq.toml`'s `[e2e] paths`, not a blanket `--evidence e2e`; no throwaway-queue hand steps in a worker's acceptance, which a worker cannot run: a test, or a check for the person or inbox outside the task). Before each `add`, `"$DAGQ" search`; after it, `"$DAGQ" related ID`; cancel a duplicate or done work with `cancel ID --duplicate-of X`. Files to name, goal dependencies, `set-paths`: `skills/dagq/reference/register.md`, "For a planner". Check the order with `"$DAGQ" graph --goal ID`, then lint and submit once the person agrees:
++Hear the problem, then follow the `dagq` skill's section 2: a goal unless it is a one-shot task, and tasks with `add --goal` (acceptance, verification, dependencies, context, `--paths`, `--evidence`, `--change` per the repository's rules; `e2e` comes from the diff and `dagq.toml`'s `[e2e] paths`, not a blanket `--evidence e2e`; no throwaway-queue hand steps in a worker's acceptance, which a worker cannot run: a test, or a check for the person or inbox outside the task). Before each `add`, `"$DAGQ" search`; after it, `"$DAGQ" related ID`; cancel a duplicate or done work with `cancel ID --duplicate-of X`. Files to name, goal dependencies, `set-paths`: `skills/dagq/reference/register.md`, "For a planner". Check the order with `"$DAGQ" graph --goal ID`, then lint and submit once the person agrees:
+ 
+ ```sh
+ "$DAGQ" lint TASK...            # or --proposal ID; fix every violation first
+diff --git a/plugins/claude-dagq/skills/dagq-recover/reference/stuck-exit.md b/plugins/claude-dagq/skills/dagq-recover/reference/stuck-exit.md
+index bde6025d..57aff80b 100644
+--- a/plugins/claude-dagq/skills/dagq-recover/reference/stuck-exit.md
++++ b/plugins/claude-dagq/skills/dagq-recover/reference/stuck-exit.md
+@@ -1,6 +1,6 @@
+ # Carry out the answer of a `stuck_exit` ask
+ 
+-The supervisor sends `/exit` once, after its review's verdict (ADR-0027: the session stays open through validation and review), or, for a run an older supervisor started, after the receipt when the worker goes idle; a resumed session gets it once it goes idle or its resume timeout passes. A session is idle only when its Stop hook's marker (`idle.json` in the run directory) lists no background work `running` (task 147): the supervisor holds `/exit` while it does, and Claude Code writes a new marker when the work ends. So "Background work is running" now means the work outlived that wait (the resume timeout, counted from the receipt or from the start of the wait for `/exit`) or started after the idle. When the session has not exited within the exit timeout (120 seconds with cmux), the supervisor records `exit_request_timed_out` and keeps the run where it is with its lease (`awaiting_integration`, `needs_session` or `failed` after a verdict; `running` on the older path). The runtime fixes what it can first: it retries a `/exit` cmux never delivered, answers "Background work is running" once the worktree is clean and the receipt names its HEAD, and closes the workspace and lands a reviewed run whose receipt still holds when its `/exit` never got through (`auto_repaired`). What is left goes to the recovery job (alert `stuck_exit`), which may answer a known dialog, stop the run's stray processes, close and proceed for a run that lands next, or wait. Only when the job escalates, is not sure, finds its preconditions broken or used its three tries does the supervisor register a `stuck_exit` ask on the run (`asked_by` `supervisor`); a failed job opens it too, with `reason_category` `recovery_failed` and the job's failure in the question (ADR-t609-1). The question names the run, the task, the timeout, the workspace, what follows once the session exits, why a person is needed and the job's diagnosis, and ends with the last 15 non-empty lines of the screen. The options are `exit` (answer the dialog so that the session exits, then send `/exit`) and `wait` (leave the session as it is). The supervisor also sends that `/exit` when a session's wrapper stops heartbeating while its process lives on (a `wrapper_heartbeat_expired` event, task 170), whether or not the session finished; the question then begins its sentence on what follows with "Its wrapper stopped heartbeating while its process lived on (wrapper_heartbeat_expired)". Carry out such an ask the same way: the session may be mid-work rather than at a dialog, so read the screen before answering anything. The inbox shows it to the person; its answer is carried out here, on the person's word. Once the ask is open the supervisor types nothing more into the workspace, and a drain (`down --wait`, `install --allow-breaking`, an `up` replacing a supervisor from before the handoff) waits for this run until its session exits.
++The supervisor sends `/exit` once, after its review's verdict (ADR-0027: the session stays open through validation and review), or, for a run an older supervisor started, after the receipt when the worker goes idle; a resumed session gets it once it goes idle or its resume timeout passes. A session is idle only when its Stop hook's marker (`idle.json` in the run directory) lists no background work `running`: the supervisor holds `/exit` while it does, and Claude Code writes a new marker when the work ends. So "Background work is running" now means the work outlived that wait (the resume timeout, counted from the receipt or from the start of the wait for `/exit`) or started after the idle. When the session has not exited within the exit timeout (120 seconds with cmux), the supervisor records `exit_request_timed_out` and keeps the run where it is with its lease (`awaiting_integration`, `needs_session` or `failed` after a verdict; `running` on the older path). The runtime fixes what it can first: it retries a `/exit` cmux never delivered, answers "Background work is running" once the worktree is clean and the receipt names its HEAD, and closes the workspace and lands a reviewed run whose receipt still holds when its `/exit` never got through (`auto_repaired`). What is left goes to the recovery job (alert `stuck_exit`), which may answer a known dialog, stop the run's stray processes, close and proceed for a run that lands next, or wait. Only when the job escalates, is not sure, finds its preconditions broken or used its three tries does the supervisor register a `stuck_exit` ask on the run (`asked_by` `supervisor`); a failed job opens it too, with `reason_category` `recovery_failed` and the job's failure in the question (ADR-t609-1). The question names the run, the task, the timeout, the workspace, what follows once the session exits, why a person is needed and the job's diagnosis, and ends with the last 15 non-empty lines of the screen. The options are `exit` (answer the dialog so that the session exits, then send `/exit`) and `wait` (leave the session as it is). The supervisor also sends that `/exit` when a session's wrapper stops heartbeating while its process lives on (a `wrapper_heartbeat_expired` event), whether or not the session finished; the question then begins its sentence on what follows with "Its wrapper stopped heartbeating while its process lived on (wrapper_heartbeat_expired)". Carry out such an ask the same way: the session may be mid-work rather than at a dialog, so read the screen before answering anything. The inbox shows it to the person; its answer is carried out here, on the person's word. Once the ask is open the supervisor types nothing more into the workspace, and a drain (`down --wait`, `install --allow-breaking`, an `up` replacing a supervisor from before the handoff) waits for this run until its session exits.
+ 
+ Take the run `id`, `worktree_path` and `receipt_path` from `"$DAGQ" show <task_id> --full`, and the answer from `"$DAGQ" asks --role inbox`. The session is reached only with `"$DAGQ" run screen` / `run send` (`reference/session.md`), never with `cmux` itself.
+ 
+diff --git a/plugins/claude-dagq/skills/dagq-recover/reference/triage-by-hand.md b/plugins/claude-dagq/skills/dagq-recover/reference/triage-by-hand.md
+index 7c575cf6..fdfb98d6 100644
+--- a/plugins/claude-dagq/skills/dagq-recover/reference/triage-by-hand.md
++++ b/plugins/claude-dagq/skills/dagq-recover/reference/triage-by-hand.md
+@@ -12,4 +12,4 @@ Attention `recover by hand` (`kind` `recovery_failed`): a live run's recovery jo
+ 
+ ## Broken verification command with committed work
+ 
+-For the task 572 / ask 154, 159, 160 case, first read `dagq show ID --full` and the run's `integrate-<attempt>-verify-N.log`. If the failed command itself is wrong (for example, host `python3` lacks `tomllib`), ask the person for the corrected command. User or inbox may run `dagq edit ID --verify 'correct command'` on an `in_progress` task only after its latest run has ended and no live run remains. Repeat `--verify` for every command to keep; `--no-verify` clears all. Check the `task_edited` old/new values and actor with `show --full`, then answer the open `decide` ask with the exact option `edit the task's --verify, then retry_inherit`. The runtime offers it on every `decide` ask of a run whose integrate verification failed, including the ask that opens after the job's three tries are used up (where ask 160 stood). This returns the run to the recovery job, with one more round even past those three tries because the verify was edited since the run began; it reads the corrected verify and chooses `retry_inherit`, retaining the branch's commits for the next integration. If you answer it without editing first, it counts like any other option, and once the tries are used up the same ask opens again: edit, then answer that one. Never use `retry` to discard committed work for this correction. The recovery job itself does not edit tasks.
++First read `dagq show ID --full` and the run's `integrate-<attempt>-verify-N.log`. If the failed command itself is wrong (for example, it needs a tool or module the host lacks), ask the person for the corrected command. User or inbox may run `dagq edit ID --verify 'correct command'` on an `in_progress` task only after its latest run has ended and no live run remains. Repeat `--verify` for every command to keep; `--no-verify` clears all. Check the `task_edited` old/new values and actor with `show --full`, then answer the open `decide` ask with the exact option `edit the task's --verify, then retry_inherit`. The runtime offers it on every `decide` ask of a run whose integrate verification failed, including the ask that opens after the job's three tries are used up. This returns the run to the recovery job, with one more round even past those three tries because the verify was edited since the run began; it reads the corrected verify and chooses `retry_inherit`, retaining the branch's commits for the next integration. If you answer it without editing first, it counts like any other option, and once the tries are used up the same ask opens again: edit, then answer that one. Never use `retry` to discard committed work for this correction. The recovery job itself does not edit tasks.
+diff --git a/plugins/claude-dagq/skills/dagq/SKILL.md b/plugins/claude-dagq/skills/dagq/SKILL.md
+index c94fe178..7b3d43ef 100644
+--- a/plugins/claude-dagq/skills/dagq/SKILL.md
++++ b/plugins/claude-dagq/skills/dagq/SKILL.md
+@@ -39,7 +39,7 @@ Skip the goal only for a one-shot task that finishes the problem by itself; when
+ Collect title, description, acceptance, constraints and doc (what each holds, and draft goals: `reference/register.md`).
+ 
+ ```sh
+-"$DAGQ" goal add "TITLE" --description "..." --acceptance "..." --constraints "..." --doc docs/adr/NNNN-name.md
++"$DAGQ" goal add "TITLE" --description "..." --acceptance "..." --constraints "..." --doc PATH/TO/DECISION.md
+ ```
+ 
+ A goal has no verification commands; a goal-level check is a final task depending on the others. `goal add --draft` makes a draft goal, adopted by `submit --goal ID` or rejected by `goal close ID --verdict abandoned`. Findings and proposals: `reference/observer.md`.
+@@ -51,7 +51,7 @@ Split the goal into tasks, each one session in one worktree. Per task: title, de
+ ```sh
+ "$DAGQ" add "TITLE" --goal 1 \
+   --description "..." --acceptance "..." --context "..." \
+-  --verify "cargo fmt --all --check" --verify "cargo test --locked" \
++  --verify "CHECK" --verify "TEST" \
+   --change feature --depends-on 3
+ "$DAGQ" lint ID...               # the fixed rules; each violation {code, task_id, reason}
+ "$DAGQ" submit ID...             # or --goal GOAL; prints the proposal
+diff --git a/plugins/claude-dagq/skills/dagq/reference/inspect.md b/plugins/claude-dagq/skills/dagq/reference/inspect.md
+index 21eaae8c..1af8222c 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/inspect.md
++++ b/plugins/claude-dagq/skills/dagq/reference/inspect.md
+@@ -106,7 +106,7 @@ When planning a goal or deciding what to submit next, read `"$DAGQ" graph --goal
+ 
+ 1. `critical` is the chain that holds back the most work. Its first task should be `ready` and running; if it is `draft`, complete it and `submit` it for plan review before tasks with small `unblocks` (only plan review, or a person's explicit `ready --bypass-review`, makes it `ready`).
+ 2. A task with a large `unblocks` that is not in `candidates` waits on its `ready_after`; those predecessors are what to finish (or to review and land) first.
+-3. When one task blocks many (goal 8 had five tasks waiting on one), consider splitting it or removing a dependency that is not real (`dependency remove`) so more tasks run in parallel.
++3. When one task blocks many, consider splitting it or removing a dependency that is not real (`dependency remove`) so more tasks run in parallel.
+ 4. `candidates` is the order the supervisor will claim in, so there is no need to register or submit tasks in a particular order to get the releasing ones first. To put a task ahead of the others, give it a priority (below).
+ 
+ `graph [--goal ID] [--format json|d2|svg] [--out PATH]` keeps `json` as the default and returns the same dependency graph as before. `d2` writes D2 source and `svg` writes the rendered SVG directly; with `--out` (only for `d2` / `svg`) it writes the file and returns its format, path and drawn task IDs as JSON. The diagram selects tasks that are in progress, have effective priority `high` or above, or lie on `critical`, plus one level of their unfinished task or goal prerequisites. With `--goal`, those first two roots stay inside the goal, while its critical chain and prerequisites may cross goal boundaries. D2 source needs no host tool; SVG needs executable `d2` and `d2plugin-tala` on PATH and fails with the reason if either is missing. `doctor`'s `d2` field shows both resolved paths. Full selection and rendering rules: [the dependency-diagram design](../../../../../docs/design/supervisor-lifecycle/dependency-diagram.md).
+@@ -117,7 +117,7 @@ Every task has one of five priorities. Pick it by what waiting costs, not by how
+ 
+ | Level | Use for | Example |
+ | --- | --- | --- |
+-| `interrupt` | An exceptional cut-in that must run before every other ready task. Not for routine use: when many tasks are `interrupt`, it orders nothing | A goal the person decided to put ahead of the whole queue (goal 28, which added priorities) |
++| `interrupt` | An exceptional cut-in that must run before every other ready task. Not for routine use: when many tasks are `interrupt`, it orders nothing | A goal the person decided to put ahead of the whole queue |
+ | `urgent` | A defect that is stopping operation now | The supervisor or landing is broken |
+ | `high` | Work to do early, because other work builds on it | A cleanup or refactor several planned tasks assume |
+ | `normal` | Everything else (the default) | |
+@@ -140,7 +140,7 @@ Fix a draft or submitted task in place instead of canceling it and registering i
+ 
+ ```sh
+ "$DAGQ" edit TASK --description "..." --acceptance "..."   # also --title, --context
+-"$DAGQ" edit TASK --verify 'cargo fmt --all --check' --verify 'cargo test --locked --test plugin'
++"$DAGQ" edit TASK --verify 'CHECK' --verify 'TEST'
+ "$DAGQ" edit TASK --evidence e2e --paths 'src/**'          # --no-verify / --no-evidence / --no-paths empty a list
+ "$DAGQ" edit TASK --change fix                              # one of dagq.toml's [tasks] changes (reference/scope.md)
+ ```
+@@ -170,7 +170,7 @@ A task registered with `--paths` may change only what they match (`reference/sco
+ - **`scope_violation`.** Validation parked the run as `needs_session` (`events --run RUN --kind scope_violation --full` has `paths`, the changed paths no glob matches, and `allowed`), or `integrate` deferred it (`integration_deferred` with `scope_violation`). The supervisor resumes the session to restore those paths; nothing is needed while the task's paths are right.
+ - **A `failed` receipt naming paths.** The worker found the task truly needs a path outside its globs and stopped; its `summary` names the path and the work.
+ 
+-Next: while the task is `draft`, `submitted` or `ready`, widen its globs with `set-paths TASK --paths ...` (every glob it should keep) or remove the limit with `--none`. A run already claimed keeps the paths it started with, so after a failed run register the task again with wider `--paths` and the verification those paths need (a `src/` path takes the runtime checks).
++Next: while the task is `draft`, `submitted` or `ready`, widen its globs with `set-paths TASK --paths ...` (every glob it should keep) or remove the limit with `--none`. A run already claimed keeps the paths it started with, so after a failed run register the task again with wider `--paths` and the verification those paths need (per the repository's rules: `reference/scope.md`).
+ 
+ ## Change a goal or a task's goal
+ 
+diff --git a/plugins/claude-dagq/skills/dagq/reference/kpi.md b/plugins/claude-dagq/skills/dagq/reference/kpi.md
+index 2802a12e..c22dcaab 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/kpi.md
++++ b/plugins/claude-dagq/skills/dagq/reference/kpi.md
+@@ -14,7 +14,7 @@ The KPIs are derived from the queue's events by fixed rules, never by a model: n
+ 
+ - **Periods.** `--period day|week` (a day from midnight in the host's local timezone; an ISO week from Monday), `--last N` (default 7), `--at <cursor>` (the latest period is the one holding it). `--since` / `--until` give one `window` instead. A cursor is an event ID, `@<unix seconds>` or an RFC 3339 time. `--goal ID` counts only that goal's runs, asks and findings.
+ - **Each period** has `label`, `start` / `end`, `partial` (not over yet: values so far, never judged), `runs`, `kpis`, `details`, `unavailable` (a KPI with no record and why, e.g. `candidates` `no_samples`), `marks` (the change marks in it) and `comparison`.
+-- **`kpis`** is KPI → stratum → value. Strata, always shown: `all`, `change=<label>` (the change the task declared; `unknown` without one, never guessed from the diff), `area=<name>` (when the main checkout's `dagq.toml` has `[areas]`: each area the landed commit's diff touched through that map, so one run counts in several; `other` for a file no area matches, `unknown` for a run with no readable landed commit; read from git each time, never stored, so editing `[areas]` reclassifies every past run). `--change` / `--area` keep only those values of their stratum. The task's `kind` and its `kind=` strata and `--kind` were removed (ADR-t980-1). With `--by`: `build=`, `parallel=`, `slot=`, `load=`, `toolchain=` (only when the queue's repository is the dagq source), `claude=`, `provider=` (`claude` / `codex`), `route=` (`interactive` / `headless`), `codex=` (Codex's version), `group=` / `model=` / `effort=` (the worker model trial's group, `none` outside it, and the worker's model and effort, all of the run's first claim; a run that worked on Codex at any point, claimed there or moved there, is `claude=none` and `group=none`, and its `model=` is the model Codex used, read from its turns), `nature=` (the task's weight prediction) (the claim's attributes; `unknown` when not recorded). `--compare` splits by `--by` too. The `plan.*` KPIs always have their own strata (`model=`, `effort=`, `origin=`, `follow_up_depth=`, `related=`, `revise_count=`), whatever `--by` says; `plan.revise_rate` also has `code=<primary code>` (ADR-t947-1); `plan.follow_up_adoption_rate`, `plan.follow_up_duplicate_rate` and `plan.follow_up_draft_secs` have `category=<code>` (the worker's category of each follow_up, `unlabeled` without one; ADR-t947-3). The `session_open.<kind>`, `session_active.<kind>` and `session_active_ratio.<kind>` KPIs always have `route=<interactive|headless>` for the kinds whose spans have a route (the session's own route from `stats`' `sessions.by_route`; `session_active_ratio.worker` too), whatever `--by` says: it is not the run layer's `--by route` (the worker's route at claim), which leaves `session_*` untouched (ADR-t1394-2). A value has `n` (samples) and `value` (rates, counts) or `median` / `p90` / `min` / `max` (durations in seconds). `null` means no record, not zero. Compare work time only within one `area=` or `change=` stratum (in this repository `area=runtime` for runtime work): tasks differ by an order of magnitude, so `all` moves with the mix of tasks.
++- **`kpis`** is KPI → stratum → value. Strata, always shown: `all`, `change=<label>` (the change the task declared; `unknown` without one, never guessed from the diff), `area=<name>` (when the main checkout's `dagq.toml` has `[areas]`: each area the landed commit's diff touched through that map, so one run counts in several; `other` for a file no area matches, `unknown` for a run with no readable landed commit; read from git each time, never stored, so editing `[areas]` reclassifies every past run). `--change` / `--area` keep only those values of their stratum. The task's `kind` and its `kind=` strata and `--kind` were removed (ADR-t980-1). With `--by`: `build=`, `parallel=`, `slot=`, `load=`, `toolchain=` (only when the queue's repository is the dagq source), `claude=`, `provider=` (`claude` / `codex`), `route=` (`interactive` / `headless`), `codex=` (Codex's version), `group=` / `model=` / `effort=` (the worker model trial's group, `none` outside it, and the worker's model and effort, all of the run's first claim; a run that worked on Codex at any point, claimed there or moved there, is `claude=none` and `group=none`, and its `model=` is the model Codex used, read from its turns), `nature=` (the task's weight prediction) (the claim's attributes; `unknown` when not recorded). `--compare` splits by `--by` too. The `plan.*` KPIs always have their own strata (`model=`, `effort=`, `origin=`, `follow_up_depth=`, `related=`, `revise_count=`), whatever `--by` says; `plan.revise_rate` also has `code=<primary code>` (ADR-t947-1); `plan.follow_up_adoption_rate`, `plan.follow_up_duplicate_rate` and `plan.follow_up_draft_secs` have `category=<code>` (the worker's category of each follow_up, `unlabeled` without one; ADR-t947-3). The `session_open.<kind>`, `session_active.<kind>` and `session_active_ratio.<kind>` KPIs always have `route=<interactive|headless>` for the kinds whose spans have a route (the session's own route from `stats`' `sessions.by_route`; `session_active_ratio.worker` too), whatever `--by` says: it is not the run layer's `--by route` (the worker's route at claim), which leaves `session_*` untouched (ADR-t1394-2). A value has `n` (samples) and `value` (rates, counts) or `median` / `p90` / `min` / `max` (durations in seconds). `null` means no record, not zero. Compare work time only within one `area=` or `change=` stratum (which one is the repository's rule): tasks differ by an order of magnitude, so `all` moves with the mix of tasks.
+ - **Main KPIs.** Flow: `landings`, `lead_time` (first `ready` to landing), `phase.startup|work|validate|wait_to_land`, `land_phase.*`, `slot_usage`. Constraints: `landing_utilization` (the one landing slot's busy share; `max` / `landing_utilization.peak` the busiest whole hour), `landing_attempt`, `landing_queue_depth`, `cpu_per_landing` (host CPU seconds ÷ `landings`; `.<cargo|rustc|claude|dagq|other>`), `load_per_core` (`load1` ÷ logical cores: `median` / `p90` / `max`); only `kpi`, `--compare` and the reports read the host records, so push and the observer never judge the last two. Rework: `first_pass_rate`, `revise_rate`, `review.sendback_rate` (`all`, `code=<primary code>`, `change=`), `conflict_rate`, `verification_failed_rate`, `resumes_per_run`, `failed_rate`. People: `asks_per_landing`, `attentions_per_landing`, `ask_wait`, `ask_apply_wait`, `ask_seen_wait` (seconds from an ask's opening to the inbox's watcher seeing it: 0 while a `watch --role inbox` was alive, else to its return; asks opened before the supervisor first recorded the watcher are no samples). Infrastructure: `backend_failures_per_run`, `max_load_avg`, `auto_repairs`, `verify_command.<command>`. Improvements: `findings_open`, `finding_resolve_time`, `drafts_per_landing`, `draft_backlog`. Sessions: `session_open|active.<kind>` and `session_active_ratio.<kind>`, each split by the session's `route=` (compare `session_*.runtime_planner` at `route=interactive` and `route=headless` for the runtime's planners; each period's `health.planner_routes` has `stats`' `planner_routes` beside it: planners opened, revise and settle times, `planner_question` asks, headless turns and tokens per route, not judged). Plan quality: `plan.*`. Headless jobs: `job.count|failed_rate|secs.<kind>` and `job.verdict.<kind>.<verdict>` (the share of each verdict among the jobs that gave one) for `review`, `recovery`, `plan_review`, `goal_review`, `observer` and `throughput_review` (the throughput review job; no verdicts).
+ - **Headless jobs by provider and model.** The `job.*` KPIs always have `all`, `provider=<claude|codex>` (the provider the job was launched on; a job recorded before launches named one counts as `claude`) and `model=<model>` (the model its session actually used, `unknown` without a record), whatever `--by` says; they are not the worker's `--by provider` / `--by model`. `throughput_review` also has `mode=<hourly|daily|weekly>` (an hour no rule met and no agent ran is no job); read `job.secs.throughput_review` and `job.failed_rate.throughput_review` at `mode=hourly` for the hourly job's cost, before and after a change with `--compare`. To compare Claude's and Codex's goal reviews, read `job.count.goal_review`, `job.failed_rate.goal_review`, `job.secs.goal_review` and `job.verdict.goal_review.<verdict>` side by side across the `provider=` strata; `details.jobs` has the counts. `stats` has the same as `jobs.<kind>` (`count`, `failed`, `failed_rate`, `secs`, `verdicts`, `by_provider`, `by_model`, and `by_mode` for `throughput_review`), and the report's "Headless jobs" section lists each kind per provider (and the throughput review per mode).
+ - **`comparison`**: per KPI and stratum, `previous`, `delta`, `ratio`, a day's `baseline_7d` (the median of the 7 days before), `judged` with `reason` (`partial`, `small_sample` below `[kpi] min_samples`, `no_value`) and `verdict` (`improved` / `worsened` / `unchanged`). Do not read a trend from an unjudged period.
+@@ -48,7 +48,7 @@ Any queue, once a week, in this order (`kpi --period week --last 4` for the numb
+ 2. **Find the one constraint.** Look for what sits at 1: `slot_usage` (every slot busy), `load_per_core` (`p90` at 1 or above: the CPU is saturated; `max_load_avg` is only a peak of sampled moments), `landing_utilization` (the serial landing slot: near 1, or `landing_utilization.peak` at 1 with `landing_queue_depth` above 0, means landings are capped by one verify at a time), `ask_wait` (runs held by people). Only the constraint is worth fixing; a faster non-constraint lands nothing more. Slots full and CPU saturated: do not add slots, lower `cpu_per_landing` (its per-process split says where the CPU goes).
+ 3. **Pareto of slot time.** Sort `phase.work|validate|wait_to_land` by median × count, largest first, then split the top one (`land_phase.*` breaks down `wait_to_land`; `phase.startup` is part of `work`), never adding a part to its whole; fix only the top one or two. With the landing slot as the constraint, `land_phase.*` and `landing_attempt` are the list.
+ 4. **Outliers.** Read `p90` and `max`, not only the median. Take the longest runs in `stats --full` (by `work` + `validate` + `wait_to_land`, which still hold the time a run waited for a person) and read each with `timeline RUN` (the gaps and their reasons, a person's wait among them); a few long runs often cost more than every median together. `first_pass_rate` and `verification_failed_rate` tell how much slot time is rework; `review.sendback_rate` and `plan.revise_rate` split the send-backs by their primary code (`code=`), and `details.review_reasons` has each code's time and answers (`docs/design/supervisor-lifecycle/kpi.md`, section "差し戻しの分類コードごとの系列").
+-5. **One change, one mark, a fair comparison.** Make a single change, `mark` it when it takes effect (not needed for a build, `--parallel`, Claude Code or `[run.env]`), wait `--window` days, then `kpi --compare <mark>` within one stratum: `--area <name>` (in this repository `--area runtime` for runtime work) or `--change <change>`, never `all`, which moves with the mix of tasks. Name the `confounders`, drop the result when `split.separable` is false, and do not read a verdict below `[kpi] min_samples` or from a `partial` period.
++5. **One change, one mark, a fair comparison.** Make a single change, `mark` it when it takes effect (not needed for a build, `--parallel`, Claude Code or `[run.env]`), wait `--window` days, then `kpi --compare <mark>` within one stratum: `--area <name>` or `--change <change>` (which one is the repository's rule), never `all`, which moves with the mix of tasks. Name the `confounders`, drop the result when `split.separable` is false, and do not read a verdict below `[kpi] min_samples` or from a `partial` period.
+ 6. **Cadence.** Hourly: only whether it has stopped (landings per hour on a 3–6 hour moving average; do not react to one hour's rise or fall). Daily: the outliers (4) and the target `breach`es. Weekly: 1 to 5.
+ 
+ ## `dagq forecast`: when the open work will finish
+diff --git a/plugins/claude-dagq/skills/dagq/reference/provider.md b/plugins/claude-dagq/skills/dagq/reference/provider.md
+index 40d0666e..76a8a751 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/provider.md
++++ b/plugins/claude-dagq/skills/dagq/reference/provider.md
+@@ -4,7 +4,7 @@ Read this to choose which agent runs a task's worker and how, to read which one
+ 
+ ## Provider and route
+ 
+-A task's worker has a **provider** (`claude` or `codex`) and a **route** (`worker_mode`): `interactive` (a Claude Code session in the run's cmux terminal, read from its screen and idle marker, ended with `/exit`) or `headless` (one non-interactive call per turn; the call's exit and output are the turn's result, and an answer, a send-back or a resume is the next call on the same session id). Claude runs either way; Codex runs headless only. The task's provider changes only its worker. Four jobs can run on Codex, each only when its table in `dagq.toml` says `provider = "codex"` (a model, if given, is Codex's), and all run `codex exec --json` in the read-only sandbox. Each moves to Claude (`switched_from` and `switch_reason` in their start event's `launch`) while Codex cannot be used: Codex is missing, does not start, or is held after a job stopped at its login or usage limit (Codex's hold opens no ask). The goal review is `[roles.goal_review]` (ADR-t1063-1), the run's review `[roles.review]` (ADR-t1207-1), whose stopped Codex review records `review_retried` with `provider` and `switch_reason` and starts again on Claude, and the plan review `[roles.plan_review]` (task 1218), whose stopped Codex plan review records `plan_review_failed` with `provider_unusable` (no `plan review by hand`: the proposal is not held) and starts again on Claude, and the throughput review `[roles.throughput_review]` (task 1220), whose stopped Codex review records `throughput_review_finished` with `provider_unusable` (no `check the failed review`) and starts its period again on Claude. A Codex review or plan review does not wait for Claude's `queue_hold` ask. Under `--no-claude` none of them falls back to Claude: a run review with no provider left goes to a person in an `approve_landing` ask instead of waiting (`review_failed`), a plan review with no provider left goes to `plan review by hand` with why (`plan_review_failed`), and a throughput review with no provider left records why in its `throughput_review_finished` (`check the failed review`). `provider = "codex"` for any other role is an error in `dagq.toml`. Recovery jobs, the observer, planners and the inbox stay on Claude. `dagq doctor`'s `roles` shows each role's provider and where it comes from.
++A task's worker has a **provider** (`claude` or `codex`) and a **route** (`worker_mode`): `interactive` (a Claude Code session in the run's cmux terminal, read from its screen and idle marker, ended with `/exit`) or `headless` (one non-interactive call per turn; the call's exit and output are the turn's result, and an answer, a send-back or a resume is the next call on the same session id). Claude runs either way; Codex runs headless only. The task's provider changes only its worker. Four jobs can run on Codex, each only when its table in `dagq.toml` says `provider = "codex"` (a model, if given, is Codex's), and all run `codex exec --json` in the read-only sandbox. Each moves to Claude (`switched_from` and `switch_reason` in their start event's `launch`) while Codex cannot be used: Codex is missing, does not start, or is held after a job stopped at its login or usage limit (Codex's hold opens no ask). The goal review is `[roles.goal_review]` (ADR-t1063-1), the run's review `[roles.review]` (ADR-t1207-1), whose stopped Codex review records `review_retried` with `provider` and `switch_reason` and starts again on Claude, and the plan review `[roles.plan_review]`, whose stopped Codex plan review records `plan_review_failed` with `provider_unusable` (no `plan review by hand`: the proposal is not held) and starts again on Claude, and the throughput review `[roles.throughput_review]`, whose stopped Codex review records `throughput_review_finished` with `provider_unusable` (no `check the failed review`) and starts its period again on Claude. A Codex review or plan review does not wait for Claude's `queue_hold` ask. Under `--no-claude` none of them falls back to Claude: a run review with no provider left goes to a person in an `approve_landing` ask instead of waiting (`review_failed`), a plan review with no provider left goes to `plan review by hand` with why (`plan_review_failed`), and a throughput review with no provider left records why in its `throughput_review_finished` (`check the failed review`). `provider = "codex"` for any other role is an error in `dagq.toml`. Recovery jobs, the observer, planners and the inbox stay on Claude. `dagq doctor`'s `roles` shows each role's provider and where it comes from.
+ 
+ | registered with | provider | route |
+ | --- | --- | --- |
+diff --git a/plugins/claude-dagq/skills/dagq/reference/register.md b/plugins/claude-dagq/skills/dagq/reference/register.md
+index 0daf12eb..a5ed617f 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/register.md
++++ b/plugins/claude-dagq/skills/dagq/reference/register.md
+@@ -54,7 +54,7 @@ Claim order, and urgency without drafting or bending dependencies: `reference/in
+ 
+ What the `dagq-planner` skill's sections 1 to 3 name in short.
+ 
+-**Before and after `add`.** Name in a runtime task's description the files it mainly touches: a forecast plan review and `related` match, not a limit, never `--paths` (`reference/scope.md`). To wait for another goal, depend on the goal (`--depends-on-goal ID`), not its last task, which follow-up drafts outlive; inside a goal, task dependencies (`reference/inspect.md`). A task needing paths outside its `--paths` (a `failed` receipt names them): `set-paths` before a claim, else add it again wider. Before each `add`, `"$DAGQ" search` the problem's file and test names and title words; after it, `"$DAGQ" related ID`, reading only the top candidates in full (`show ID --full`). Cancel a duplicate or work already done: `"$DAGQ" cancel ID --duplicate-of X`.
++**Before and after `add`.** Name in the description of a task without `--paths` the files it mainly touches: a forecast plan review and `related` match, not a limit, never `--paths` (`reference/scope.md`). To wait for another goal, depend on the goal (`--depends-on-goal ID`), not its last task, which follow-up drafts outlive; inside a goal, task dependencies (`reference/inspect.md`). A task needing paths outside its `--paths` (a `failed` receipt names them): `set-paths` before a claim, else add it again wider. Before each `add`, `"$DAGQ" search` the problem's file and test names and title words; after it, `"$DAGQ" related ID`, reading only the top candidates in full (`show ID --full`). Cancel a duplicate or work already done: `"$DAGQ" cancel ID --duplicate-of X`.
+ 
+ **Traffic control is plan review's.** It checks the proposal against other proposals and ready tasks (duplicates, done work, conflicts, same-file dependencies) and adds dependencies, lowers priorities or cancels an obvious duplicate itself. Beyond `search` / `related`, a planner does not take stock of other drafts, or re-wire or park other tasks. Set a priority only when the person says a task goes first or can wait (`add --priority`, `set-priority`); never draft other tasks or bend dependencies to hurry one.
+ 
+diff --git a/plugins/claude-dagq/skills/dagq/reference/scope.md b/plugins/claude-dagq/skills/dagq/reference/scope.md
+index 78bcaa58..22f4d917 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/scope.md
++++ b/plugins/claude-dagq/skills/dagq/reference/scope.md
+@@ -8,39 +8,39 @@
+ 
+ ## Recommended combinations
+ 
+-Follow the repository instructions first; for this repository:
++The checks and paths each kind of change takes are the repository's own rules. Read them from the repository's instructions (`AGENTS.md`, or `CLAUDE.md` when there is none) and the documents they name; when those say nothing, from its README, CI and build settings; and when that still decides nothing, ask the person. A typical set of rows:
+ 
+ | What the task changes | `--paths` | `--verify` | `--evidence` |
+ | --- | --- | --- | --- |
+-| Docs only (ADRs included) | `'docs/**'`, `'*.md'` | `'cargo fmt --all --check'` (or none) | none |
+-| Plugin docs and skills | `'plugins/**'`, `'docs/**'`, `'*.md'` | `'cargo test --locked --test plugin'` (`tests/plugin.rs` checks the skills) | none |
+-| Runtime (`src/`, `tests/`, `migrations/`, `crates/`) | none | fmt, clippy, `cargo llvm-cov nextest --locked --workspace --fail-under-lines 80` (it runs every test, so no separate `cargo test`) | none (the diff decides `e2e`, below) |
++| Docs only | the docs' globs | the cheapest check the repository names for docs (or none) | none |
++| The plugin's or tool's own docs, when a test reads them | their globs plus the docs' | that test | none |
++| Code | none (it may touch anything) | the repository's format, lint and full test or coverage gate (one command that runs every test, so no second whole test run) | none (the diff decides `e2e`, below) |
+ | Scripts and CI | as the repository says | as the repository says | none |
+ 
+-A task that changes several of these takes the heaviest row's verification. The row is chosen by what the task changes, not by its `--change`: the same `src/` change may be a feature, a fix or a refactor.
++A task that changes several of these takes the heaviest row's verification. The row is chosen by what the task changes, not by its `--change`: the same code change may be a feature, a fix or a refactor.
+ 
+-`--change CHANGE` declares the kind of change the task makes (ADR-t980-1: a feature, a fix, a test, a measurement; a lowercase label of the repository's own, one per task; the values and when to pick each are in the repository's rules, e.g. this repository's AGENTS.md). It decides no check: `stats` (`runs[].change`, `changes`), `kpi` (`change=` strata, `--change`, the `change_summary` of `--compare`, targets with `change = "..."`) and `forecast` (a distribution per change) group runs by it. When `dagq.toml` has `[tasks] changes = [...]`, only those values are accepted, and `lint` and `submit` refuse a task that declares none; without it any label or none is accepted. Change it with `edit TASK --change CHANGE` while the task is `draft` or `submitted`.
++`--change CHANGE` declares the kind of change the task makes (ADR-t980-1: a feature, a fix, a test, a measurement; a lowercase label of the repository's own, one per task; the values and when to pick each are in the repository's rules). It decides no check: `stats` (`runs[].change`, `changes`), `kpi` (`change=` strata, `--change`, the `change_summary` of `--compare`, targets with `change = "..."`) and `forecast` (a distribution per change) group runs by it. When `dagq.toml` has `[tasks] changes = [...]`, only those values are accepted, and `lint` and `submit` refuse a task that declares none; without it any label or none is accepted. Change it with `edit TASK --change CHANGE` while the task is `draft` or `submitted`.
+ 
+ What a run changed (its areas) is not declared: `stats` and `kpi` read it from the landed commit's diff through the `[areas]` map of `dagq.toml` (`area=` strata, `--area`; `reference/kpi.md`). The task's `--kind` and the `tasks.kind` column were removed (ADR-t980-1); tasks no longer show a `kind`.
+ 
+-The `--verify` commands are integrate's gate, not the worker's checklist: the worker prompt shows them as what integrate runs once after its rebase and tells the session to run the checks the repository's instructions ask of a worker (the `--verify` commands only when the instructions name none). In this repository a worker runs fmt, clippy, `cargo test` for only the tests related to its change (`cargo test --locked --test it <file>::`, e.g. `--test it runtime_claim::` for `tests/it/runtime_claim.rs`, since the integration tests other than e2e and plugin are modules of one test binary `it` (ADR-0078); `cargo test --locked --lib <module>`: the unit tests of the changed module, the feature's `tests/it/*.rs`, and the test files that use a changed `tests/common` or `tests/it/runtime_support` helper) and the task's `--verify` commands other than the coverage gate (`cargo llvm-cov nextest`, or `cargo llvm-cov` in tasks registered before ADR-0076, which stay valid) and a whole `cargo test --locked`, and writes the range it ran into the receipt's `tests` evidence. It never runs the whole `cargo test --locked`: integrate's verification runs every test once after its rebase (`cargo llvm-cov nextest` for a runtime task) (a run resumed because integrate's verification failed may rerun the failing command to reproduce it). No worker runs e2e: it reports `e2e` `not_applicable` with a reason, and the runtime runs the e2e of a run that needs it after the review passes (below). Decided by a person with the planner on 2026-09-26 (task 528): the worker's whole `cargo test` repeated the tests llvm-cov runs, and the extra test binaries made build and link heavy (ADR-0078 later put the integration tests in one binary), raising host load and the worker's work time (median 1439 s).
++The `--verify` commands are integrate's gate, not the worker's checklist: the worker prompt shows them as what integrate runs once after its rebase and tells the session to run the checks the repository's instructions ask of a worker (the `--verify` commands only when the instructions name none). Which tests a worker runs by hand, and whether it may skip a slow gate and leave it to integrate, are the repository's rules; the worker writes the range it ran into the receipt's `tests` evidence. A run resumed because integrate's verification failed may rerun the failing command to reproduce it. No worker runs e2e: it reports `e2e` `not_applicable` with a reason, and the runtime runs the e2e of a run that needs it after the review passes (below).
+ 
+ ## E2E: the diff decides, the runtime runs it
+ 
+-Whether a run needs e2e comes from its diff, not from the task (ADR-t963-1): `dagq.toml`'s `[e2e] paths` (globs in the `--paths` syntax) lists what only the real cmux, processes and Git check, and validating records in `validation_finished`'s `e2e_requirement` that the run needs e2e when its diff (merge-base to the receipt's commit) touches one of them. Give `--evidence e2e` only when a task must check the real cmux although its diff may stay outside `[e2e] paths`, and say why in the description; it then needs e2e whatever the diff. In this repository the paths are the cmux adapter, process and sessions, launchd, lifecycle, integrate, install, update and the actors' start, plus `tests/e2e.rs` (the comment in `dagq.toml` gives the reasons).
++Whether a run needs e2e comes from its diff, not from the task (ADR-t963-1): `dagq.toml`'s `[e2e] paths` (globs in the `--paths` syntax) lists what only the real cmux, processes and Git check, and validating records in `validation_finished`'s `e2e_requirement` that the run needs e2e when its diff (merge-base to the receipt's commit) touches one of them. Give `--evidence e2e` only when a task must check the real cmux although its diff may stay outside `[e2e] paths`, and say why in the description; it then needs e2e whatever the diff.
+ 
+ No worker runs e2e, whatever its provider (ADR-t1233-2): the prompt says so in one line, the receipt's `e2e` is `not_applicable` with that reason, and validating asks the receipt for no `e2e` evidence. Nor does a Codex worker exclude any test: there are no exclusions. After the review passes (or a person answers `land` to `approve_landing`), before asking to land, the supervisor runs the whole e2e suite on the host in the run's worktree at the reviewed commit, one at a time per host (one lock shared with the auto-update and `install` gates; a run waiting for it keeps its slot, `run_e2e_waiting`). Events `run_e2e_started` and `run_e2e_finished`; the log is the run dir's `e2e-<attempt>.log`. A failed test is rerun once by name; one that passes then is recorded as flaky. When tests still fail and no mark holds them, the run parks `needs_session` (`run_e2e_failed`, code `e2e_failed`) and the resume hands the worker the failed tests and the log to fix (it may rerun a failed test by name to reproduce it, never the whole suite); the fixed run goes through validating and review back to this step. When the e2e cannot run (cmux not answering, past its time limit), the run is not sent back: `run_e2e_finished` `outcome: unavailable`, retried later, and after 3 in a row the inbox sees `check the e2e host`. A repository that is not dagq's source has no e2e the runtime knows (`outcome: not_configured`). Landing's rebase does not run it again and `integrate` never runs e2e, so a person who lands such a run by hand checks `run_e2e_finished` first.
+ 
+-The marks of `.config/e2e-quarantine.toml` (ADR-t1165-1) hold for this step too, read from the landing branch's committed blob (only landed marks that passed plan review and the review job; no worker edits or uncommitted main checkout edits): a test failing its rerun passes under a mark in date (at most 3) unless the run's diff changes that test's file or the task is the one fixing it (`marks_left_out`). The whole suite also runs before the fixed binary is replaced (auto-update and `install` from the source checkout) under the same marks; a failure replaces nothing: auto-update opens an `update_failed` ask (`stage: e2e`), `install` stops with an error naming the failed tests and the log, and a planner registers the fix.
++The marks of `.config/e2e-quarantine.toml` (ADR-t1165-1) hold for this step too, read from the landing branch's committed blob (only landed marks that passed plan review and the review job; no worker edits or uncommitted main checkout edits): a test failing its rerun passes under a mark in date (at most 3) unless the run's diff changes that test's file or the task is the one fixing it (`marks_left_out`). The whole suite also runs before the installed binary is replaced (auto-update and `install` from the source checkout) under the same marks; a failure replaces nothing: auto-update opens an `update_failed` ask (`stage: e2e`), `install` stops with an error naming the failed tests and the log, and a planner registers the fix.
+ 
+-## Name the files a runtime task mainly touches
++## Name the files a task without paths mainly touches
+ 
+-A runtime task (`src/`, `tests/`, `migrations/`) registers no `--paths`, so without help nothing says which files it will change. Write them in its `--description`, e.g. "mainly touches `src/application/supervise/plan_review.rs` and `tests/it/plan_review.rs`". Two readers use them:
++A task that registers no `--paths` (code, per the repository's rules) has nothing that says which files it will change. Write them in its `--description`, e.g. "mainly touches `src/parser.rs` and `tests/parser.rs`". Two readers use them:
+ 
+ - plan review, to find tasks that touch the same files, especially the stats' conflict hotspots, and add the dependency that keeps them from running side by side;
+ - `related`, whose clues include file names in a task's text (ADR-0063 decision 4), so `related` ranks the right completed tasks higher, and their landed files are what ADR-0069 forecasts this task will touch.
+ 
+-The list is a forecast, not a limit: the worker may change other files as the work needs, and nothing checks the list (`lint` does not require it). Do not write it as `--paths` instead: `--paths` declares what a run may change, and a path outside it parks the run (`scope_violation`, ADR-0029); the repository gives runtime tasks no `--paths`; and ADR-0069 forecasts from declared `--paths` instead of `related` when a task has them, so a wide glob matches more hot files and the supervisor defers claiming the task more often.
++The list is a forecast, not a limit: the worker may change other files as the work needs, and nothing checks the list (`lint` does not require it). Do not write it as `--paths` instead: `--paths` declares what a run may change, and a path outside it parks the run (`scope_violation`, ADR-0029); and ADR-0069 forecasts from declared `--paths` instead of `related` when a task has them, so a wide glob matches more hot files and the supervisor defers claiming the task more often.
+ 
+ ## What happens outside the paths
+ 
+diff --git a/tests/plugin.rs b/tests/plugin.rs
+index 22ef0700..bf3c3388 100644
+--- a/tests/plugin.rs
++++ b/tests/plugin.rs
+@@ -193,6 +193,137 @@ fn skills_point_at_their_reference_files() {
+     assert!(review.contains("git push origin main"));
+ }
+ 
++/// Where a word like `task` is followed by its number (`task 528`,
++/// `ask #160`), outside a flag's placeholder (`--goal 1`).
++fn numbered_anecdote(text: &str) -> Option<&str> {
++    const WORDS: [&str; 8] = [
++        "task", "goal", "ask", "proposal", "finding", "note", "run", "mark",
++    ];
++    let lower = text.to_ascii_lowercase();
++    for word in WORDS {
++        for (start, _) in lower.match_indices(word) {
++            let before = lower[..start].chars().next_back();
++            if before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
++                continue;
++            }
++            let rest = lower[start + word.len()..]
++                .strip_prefix('s')
++                .unwrap_or(&lower[start + word.len()..]);
++            let Some(rest) = rest.strip_prefix(' ') else {
++                continue;
++            };
++            let rest = rest.strip_prefix('#').unwrap_or(rest);
++            if rest.starts_with(|c: char| c.is_ascii_digit()) {
++                let end = text.len() - rest.len()
++                    + rest
++                        .find(|c: char| !c.is_ascii_digit())
++                        .unwrap_or(rest.len());
++                return Some(&text[start..end]);
++            }
++        }
++    }
++    None
++}
++
++/// Where a date (`2026-09-26`) stands.
++fn dated(text: &str) -> Option<&str> {
++    let bytes = text.as_bytes();
++    (0..bytes.len().saturating_sub(9)).find_map(|start| {
++        let date = &bytes[start..start + 10];
++        let digits = |range: std::ops::Range<usize>| date[range].iter().all(u8::is_ascii_digit);
++        (date.starts_with(b"20")
++            && digits(0..4)
++            && date[4] == b'-'
++            && digits(5..7)
++            && date[7] == b'-'
++            && digits(8..10))
++        .then(|| &text[start..start + 10])
++    })
++}
++
++/// ADR-t1453-2 decision 1: the plugin is dagq's generic procedure for any
++/// repository and refers to that repository's rules, so no skill or
++/// reference carries this repository's rules, values or history. The marks:
++/// this repository's check and test commands (the coverage gate and its
++/// threshold, the test binaries and helpers, which paths take the runtime
++/// checks), its host tools, the old ADR
++/// file form, wording that speaks for "this repository", a task's, goal's or
++/// ask's number told as an anecdote, and a date. Where each rule lives now
++/// is in `docs/plans/agents-slim-inventory.md` section 4.
++#[test]
++fn no_skill_carries_this_repository_s_rules() {
++    assert_eq!(
++        numbered_anecdote("decided in task 528 by"),
++        Some("task 528")
++    );
++    assert_eq!(numbered_anecdote("(Asks #160)"), Some("Asks #160"));
++    assert_eq!(
++        numbered_anecdote("add --goal 1 and --depends-on-goal 2"),
++        None
++    );
++    assert_eq!(numbered_anecdote("ask <id>, the task's goal"), None);
++    assert_eq!(dated("on 2026-09-26 (median"), Some("2026-09-26"));
++    assert_eq!(dated("version 0.4.0-dev"), None);
++    const MARKS: [&str; 19] = [
++        "llvm-cov",
++        "nextest",
++        "fail-under-lines",
++        "tests/it",
++        "tests/common",
++        "tests/plugin.rs",
++        "--test it",
++        "--test plugin",
++        "cargo fmt",
++        "clippy",
++        "RUSTC_WRAPPER",
++        "sccache",
++        "docs/adr/NNNN",
++        "runtime checks",
++        "For this repository",
++        "for this repository",
++        "in this repository",
++        "In this repository",
++        "this repository's AGENTS.md",
++    ];
++    let mut files = Vec::new();
++    let mut dirs = vec![plugin_root().join("skills")];
++    while let Some(dir) = dirs.pop() {
++        for entry in fs::read_dir(dir).unwrap() {
++            let path = entry.unwrap().path();
++            if path.is_dir() {
++                dirs.push(path);
++            } else if path.extension().is_some_and(|extension| extension == "md") {
++                files.push(path);
++            }
++        }
++    }
++    assert!(files.len() > 4, "{files:?}");
++    let mut found = Vec::new();
++    for file in files {
++        let text = fs::read_to_string(&file).unwrap();
++        let name = file
++            .strip_prefix(plugin_root())
++            .unwrap()
++            .display()
++            .to_string();
++        for (number, line) in text.lines().enumerate() {
++            let at = |what: &str| format!("{name}:{}: {what}", number + 1);
++            found.extend(
++                MARKS
++                    .iter()
++                    .filter(|mark| line.contains(*mark))
++                    .map(|mark| at(mark)),
++            );
++            found.extend(numbered_anecdote(line).map(at));
++            found.extend(dated(line).map(at));
++        }
++    }
++    assert!(
++        found.is_empty(),
++        "this repository's rules in the plugin: {found:#?}"
++    );
++}
++
+ /// ADR-0024: the roles are the supervisor, the worker, the planner, the
+ /// inbox and the observer. Every attention reaches the person through the
+ /// inbox, which decides nothing and acts only on the person's word through

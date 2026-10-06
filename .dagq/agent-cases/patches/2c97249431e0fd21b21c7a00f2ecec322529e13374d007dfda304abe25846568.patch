@@ -1,0 +1,22 @@
+diff --git a/docs/adr/README.md b/docs/adr/README.md
+index 02f045e2..7590a265 100644
+--- a/docs/adr/README.md
++++ b/docs/adr/README.md
+@@ -4,7 +4,7 @@ type: design
+ title: Architecture decision records
+ status: current
+ created: 2026-09-21
+-updated: 2026-10-04
++updated: 2026-10-05
+ last_verified: 2026-09-30
+ tags:
+   - architecture
+@@ -19,6 +19,8 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由
+ 
+ 状態の意味は[frontmatter仕様](../frontmatter.md)の「ADR fields」の表。新しいADRの作り方は[文書の規則](../development/documents.md)の「ADR」。
+ 
++現在の挙動を調べるときは[designの案内](../design/README.md)から該当文書を読む。判断の理由を調べるときは、この索引からADRを読む。
++
+ ## 有効なADR
+ 
+ `status: accepted`のADR。`accepted_on`はgit logで`status: accepted`が入ったcommitの日（ADR-0009はgoal 1で実装済みのため、ADRの棚卸しの変更で`accepted`にした日）。0001〜0034の決定の判定・後継ADR・今の姿を持つdesignの参照先は[ADRの対応表](../plans/adr-inventory.md)にある。ADR-t598-1決定4に従い、今の姿をまとめる統合ADRは作らない。

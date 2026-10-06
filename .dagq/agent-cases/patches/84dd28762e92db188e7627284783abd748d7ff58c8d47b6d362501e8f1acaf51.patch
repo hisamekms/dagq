@@ -1,0 +1,2199 @@
+diff --git a/docs/design/domain-model.md b/docs/design/domain-model.md
+index d2af9bf6..24f3ce24 100644
+--- a/docs/design/domain-model.md
++++ b/docs/design/domain-model.md
+@@ -4,8 +4,8 @@ type: design
+ title: Domain model
+ status: current
+ created: 2026-09-21
+-updated: 2026-10-05 # task 1660: AttentionNext::DecideFollowUps; task 1640; task 1386: show lists asks; task 839: show's latest run carries broker_tool_use; task 1594; task 1507, task 1506, task 1508, task 1509; tasks 1505, 1437; task 1609; task 1632
+-last_verified: 2026-10-05 # task 1660; task 1640; task 1386; task 839; task 1594; task 1507, task 1506, task 1508, task 1509; tasks 1505, 1437; task 1609; task 1632
++updated: 2026-10-05 # task 1641: goal tags, [goals] tags, goal list order and --tag; task 1660: AttentionNext::DecideFollowUps; task 1640; task 1386: show lists asks; task 839: show's latest run carries broker_tool_use; task 1594; task 1507, task 1506, task 1508, task 1509; tasks 1505, 1437; task 1609; task 1632
++last_verified: 2026-10-05 # task 1641; task 1660; task 1640; task 1386; task 839; task 1594; task 1507, task 1506, task 1508, task 1509; tasks 1505, 1437; task 1609; task 1632
+ scope: domain
+ related:
+   - adr-t1639-1
+@@ -48,7 +48,7 @@ related:
+ ## Entities
+ 
+ - `MembershipClassification` / `MembershipJudgement`: follow_upの所属の分類（`required` / `out_of_scope` / `undecided`）と必須の欄・訂正の遷移を持つ。判断は追記の行で、元goalのacceptanceの版・判断者・時刻を保存する。版・出どころ・CLIは[所属の判断](follow-up-membership.md)。
+-- `Goal`: 複数のtaskが解く上位の課題。title、description、acceptance、constraints（命名・境界・やらないこと）、doc（repository内の参照文書のpath、任意）を持つ。保存したacceptanceは`acceptance_version`（初期値1）で版を持ち、文が変わったときだけtriggerが1増やす。版は集約`Goal`のフィールドではなく`GoalDetail`の欄として読み、所属の判断が判定時の版を保存する。verification_commandsは持たず、進捗は所属taskのstatusから導出する。状態は`status`（`GoalStatus`: `draft` | `open`）の1点だけで（ADR-0044の決定5がADR-0009の「状態機械を持たない」をこの1点に限って改めた）、`draft`のgoalのtaskは`candidates`に出ずclaimされない。閉じたことは`status`と独立に`closed_at`と`verdict`（`achieved` | `abandoned`）で記録する。閉じたgoalは閉じ直せず、例外は1つだけ: `achieved`で閉じたgoalのfollow_upに後からrequiredが記録されて開いた`correct_goal`のaskに人が`reopen`と答えたとき、`goal::reopen`が`closed_at`と`verdict`を消して開き直し（ADR-t1504-2決定9。ADR-0009の閉じたgoalの例外）、goalはまた閉じられる。前の`goal_closed`は残り、`goal_reopened`が足される。
++- `Goal`: 複数のtaskが解く上位の課題。title、description、acceptance、constraints（命名・境界・やらないこと）、doc（repository内の参照文書のpath、任意）、priority（所属taskが継ぐ優先度）、tags（何に関わるかのラベル、0個以上）を持つ。tagsは`GoalTag`（`src/domain/goal_tag.rs`、[ADR-t1639-1](../adr/2026-10-04-t1639-1-goal-priority-is-the-source-tasks-inherit-and-goals-carry-tags.md)の決定6）の並びで、形はtaskの`change`と同じ1〜64 byteの小文字の英字・数字・`-`・`_`（合わなければ`DomainError::InvalidGoalTag`。`change`と違い`unknown`と`all`も使える）、同じgoalの中で重複を許さない（`GoalTagRepeated`。与えた順に保つ）。runtimeは値の集合を持たず、repositoryが`dagq.toml`の`[goals] tags`に書いた集合（`TagSet`。[Run environment](supervisor-lifecycle/run-environment.md)）があれば、`goal add` / `goal edit`は集合の外を`GoalTagNotInSet`で拒み（`TagSet::check`）、`lint`と`submit`はラベルの無いdraftのgoalを拒む（下の`lint`と`submit`の段落、`TagSet::check_declared`）。集合が無ければ形だけを検査し、ラベルの無いgoalも通る。保存したacceptanceは`acceptance_version`（初期値1）で版を持ち、文が変わったときだけtriggerが1増やす。版は集約`Goal`のフィールドではなく`GoalDetail`の欄として読み、所属の判断が判定時の版を保存する。verification_commandsは持たず、進捗は所属taskのstatusから導出する。状態は`status`（`GoalStatus`: `draft` | `open`）の1点だけで（ADR-0044の決定5がADR-0009の「状態機械を持たない」をこの1点に限って改めた）、`draft`のgoalのtaskは`candidates`に出ずclaimされない。閉じたことは`status`と独立に`closed_at`と`verdict`（`achieved` | `abandoned`）で記録する。閉じたgoalは閉じ直せず、例外は1つだけ: `achieved`で閉じたgoalのfollow_upに後からrequiredが記録されて開いた`correct_goal`のaskに人が`reopen`と答えたとき、`goal::reopen`が`closed_at`と`verdict`を消して開き直し（ADR-t1504-2決定9。ADR-0009の閉じたgoalの例外）、goalはまた閉じられる。前の`goal_closed`は残り、`goal_reopened`が足される。
+ - note（observation）: task / run / goalのいずれかに紐づく自由記述。独立のentityにせず、`RunEvent`のkind `observation`（payload `{text, kind, by}`）で表す。`kind`は小文字・数字・`-`・`_`のslug（既定`note`）、`by`は書いた環境の`DAGQ_ROLE`で、無ければ`human`。
+ - `Finding`: observerが見つけた問題の記録（[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定18、`src/domain/finding.rs`）。種類`kind`（小文字・数字・`-`・`_`のslug。`stall`、`failure`、`wait`、`capacity`、`threshold`、`conflict_hotspot`など）、対象（`FindingTarget`: `run`（そのtaskも持つ） / `task` / `goal` / `queue`）、対象の中で問題を見分ける`subject`（空でよい）、`summary`と`detail`、影響`impact`（`Impact`: `high` / `normal` / `low`）、最初と最後に見た時刻、発生回数`occurrences`、根拠のevent IDの配列`evidence`、状態（`FindingStatus`: `open` / `proposed` / `resolved` / `dismissed`）とその理由`status_reason`、紐づいたproposal、proposalを求める印（`propose_reason`とその時刻）、書いたrole`recorded_by`を持つ。同じ`kind`・対象・`subject`は1つの問題で、`finding::merge`が既存のfindingへの2回目の記録を決める: 持っていない根拠があれば1回の発生として回数を足し、根拠を足し、最後に見た時刻を今にする。`resolved`のfindingはそこで`open`に戻る（手当てが効かなかった）。`dismissed`のfindingは回数と根拠だけを足し、文面・影響・印は変えない。新しい根拠が無くても`summary` / `detail` / `impact`の変化と、`open`で印の無いfindingへの`--propose`は書く。何も変わらなければ書かない（決定21）。人手の遷移は`finding::check_transition`が決める: `resolved`は`open` / `proposed`から、`dismissed`は`dismissed`以外から。`proposed`への遷移とproposalの紐付けは`finding::check_link`（`open`だけが`proposed`になり、同じproposalで`proposed`のものはそのまま）、proposalの終わりによる遷移は`finding::settle`（taskがすべて終わり1つ以上`completed`なら`resolved`、proposalかtaskのすべてが`canceled`なら印とproposalを消して`open`）、人の`propose`のanswerの印は`finding::mark_for_proposal`（`resolved` / `dismissed`も`open`に戻して印を付ける）、answerの読み取りは`FindingAnswer::parse`（`propose` / `dismiss`と`: <理由>`）が決める。runtimeが立てるplannerの流れは[Finding planners](supervisor-lifecycle/finding-planners.md)。
+ - `Proposal`: plannerがplan reviewに出すgoal（0個以上）とtaskの束に、持ち主のplanner（`PlannerOwner`: 人のもの（`person`。廃止前に人が`dagq plan`で開いたplannerか、人が`DAGQ_ROLE`の無い自分のterminalで打った`submit`。`dagq plan`はADR-t1394-1で拒む）かruntimeが立てたか（`runtime`）の`PlannerOrigin`と、cmux workspaceのUUID）を結び付けたもの（[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定7）。`status`（`ProposalStatus`: `submitted`（plan review待ち） | `revising`（plannerに差し戻し中） | `accepted`（passしてtaskがreadyになった） | `canceled`（人のanswerでtaskごとcancel、またはplannerが`proposal withdraw`で取り下げた））、最後にsubmitした時刻`submitted_at`、差し戻しの回数`revise_count`を持つ。taskとgoalは同時に1つのactive（`submitted` / `revising`）なproposalにだけ属する（`proposal::check_task_joins` / `check_goal_joins`。`accepted` / `canceled`のproposalはmemberを縛らない）。集約は`src/domain/proposal.rs`。
+@@ -78,8 +78,8 @@ related:
+   - `cancel TASK --duplicate-of X`（[ADR-0063](../adr/0063-full-text-search-related-with-mentions-and-search-strength-and-duplicate-of.md)の決定5、`TaskStore::cancel_duplicate`）は`Cancel`と同じ遷移で、`task_status_changed`のpayloadに`duplicate_of`（X）を書く。Xは存在し、TASKと違い、`canceled`でないこと（`completed`なら「Xで実装済み」）。Xが重複としてcancelされていれば、その重複先を示して拒否する。重複先は`canceled`でないので、記録が連鎖も循環もしない。`show`は`duplicate_of`（TASKの重複先、無ければnull）と`duplicates`（TASKを重複先とするcanceledのtask、昇順）を、`list`はcancelされたtaskの行に`duplicate_of`を出す。
+   - supervisorは`submitted`のtaskをclaimしない（`READY_QUERY`は`ready`だけを見る）。`list`の既定（未完了）、`graph`、goalの件数（`TaskStatusCounts.submitted`）は`submitted`を含み、`goal close --verdict achieved`は`submitted`のtaskが残っていれば拒否する。
+   - migration 0021は既存のtaskのstatusを変えない。既存のdraftはdraftのまま残り、submitしない限りreadyにならない。
+-- `submit [TASK...] [--goal GOAL...] [--proposal ID]`は、与えたdraftのtaskと、与えたgoal（閉じていないもの）とそのdraftのtaskを1つのproposalにしてsubmitする（`TaskStore::submit`、入力は`Submission`）。memberのtaskは`submitted`になり、`task_status_changed`と`task_submitted`（`proposal_id`）を、goalは`goal_submitted`を記録する。持ち主はsubmitしたsessionの`CMUX_WORKSPACE_ID`（無ければnull）と`DAGQ_PLANNER_ORIGIN`（`person` | `runtime`、無ければ`person`）。draftが1件も無ければ`EmptyProposal`、draftでないtaskは`TransitionNotAllowed`（`cannot apply Submit to task in ready state`）、他のactiveなproposalのmemberは`TaskInOtherProposal` / `GoalInOtherProposal`で拒否する。`--proposal ID`は差し戻された（`revising`の）proposalを出し直し、それが持つdraftのtaskと新しく与えたものをsubmitする（持ち主はsubmitしたsessionに替わる。`revising`でなければ`ProposalNotInStatus`）。`submit`は機械的な検査（`lint`）をまだ行わない。ただし元goalのあるfollow_upのdraftは、今の所属の判断が無い・`undecided`・要再確認（判断の版がgoalの今の版より古い）なら、持ち主に依らず全体を拒み、taskごとの理由と`judge-follow-up`を示す（[ADR-t1504-2](../adr/2026-10-04-t1504-2-runtime-records-and-enforces-follow-up-membership-judgements.md)決定7。登録時に元goalが無い（`source_goal_state: none`）ものと、元goalが`abandoned`で閉じたものは求めない。元goalが不明なものは求める。判定は[所属の判断](follow-up-membership.md)の「submit・lint・plan review」）。人の`ready --bypass-review`もdraft / submittedのfollow_upに同じ検査をする（plan reviewを飛ばすので、submitの後に要再確認になったものも拒む）。observerとreviewerの環境からは拒否する。
+-- `lint [TASK...] [--proposal ID...]`は、与えたtaskと各proposalのmemberのtaskに、repositoryに依存しない決まった規則を当てる（ADR-0044の決定10の機械的な検査。純粋関数`domain::lint::lint`、入力は`TaskStore::lint_input`が1スナップショットで読む`LintInput`: 対象のtask、全taskのstatusと依存、全goalのverdict）。結果は`{"tasks": [...], "violations": [{"code", "task_id", "reason"}]}`で、違反が無ければ`violations`は空。並びは対象の順、同じtaskの中はcodeの順、同じcodeの中は依存・globの順。codeは`dependency_cycle`（taskの依存と、goalへの依存をそのgoalの全taskへの依存と見て、自分に戻る。依存を足すときにqueueが拒否する循環と同じ辺で、goalから`canceled`の所属taskへの辺は外し、verdictでは辺を外さない）、`depends_on_completed`、`depends_on_canceled`、`depends_on_draft`（対象の外のdraft。同じ対象のdraftは一緒にsubmitされるので数えない）、`depends_on_abandoned_goal`、`unscoped_without_verification`（`paths`もverificationも無い）、`no_verification`（`paths`はあるがverificationが無い）、`invalid_path_glob`（`validate_path_globs`が拒否するglob）、`blank_acceptance`、`missing_change` / `change_outside_set`（`[tasks] changes`のあるqueueだけ。changeの無いtask / 集合の外のchange。[ADR-t980-1](../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)）、`duplicate_title`（対象の中で大文字小文字と前後の空白を無視して同じtitle）、`follow_up_membership_unjudged`（draft / submittedのfollow_upで、submitが拒む所属の判断の欠け。`LintInput.membership_gaps`をstoreが同じスナップショットで読み、reasonは欠けの種類（判断が無い・`undecided`・要再確認）を書く）。AGENTS.mdのverificationの規則やADR番号のようなrepository固有の規則は入れない（plan reviewのpromptが文書から読む）。読むだけなのでobserverとreviewerも打てる。
++- `submit [TASK...] [--goal GOAL...] [--proposal ID]`は、与えたdraftのtaskと、与えたgoal（閉じていないもの）とそのdraftのtaskを1つのproposalにしてsubmitする（`TaskStore::submit`、入力は`Submission`）。memberのtaskは`submitted`になり、`task_status_changed`と`task_submitted`（`proposal_id`）を、goalは`goal_submitted`を記録する。持ち主はsubmitしたsessionの`CMUX_WORKSPACE_ID`（無ければnull）と`DAGQ_PLANNER_ORIGIN`（`person` | `runtime`、無ければ`person`）。repositoryが`[goals] tags`を持てば、与えたgoalと動かすtaskの所属のgoalのうち閉じていないdraftのgoalが、ラベルを持たないか集合の外のラベルを持つと`GoalTagMissing` / `GoalTagNotInSet`で何も動かさずに拒む（ADR-t1639-1の決定6。`TagSet::check_declared`、`proposals::submit`）。draftが1件も無ければ`EmptyProposal`、draftでないtaskは`TransitionNotAllowed`（`cannot apply Submit to task in ready state`）、他のactiveなproposalのmemberは`TaskInOtherProposal` / `GoalInOtherProposal`で拒否する。`--proposal ID`は差し戻された（`revising`の）proposalを出し直し、それが持つdraftのtaskと新しく与えたものをsubmitする（持ち主はsubmitしたsessionに替わる。`revising`でなければ`ProposalNotInStatus`）。`submit`は機械的な検査（`lint`）をまだ行わない。ただし元goalのあるfollow_upのdraftは、今の所属の判断が無い・`undecided`・要再確認（判断の版がgoalの今の版より古い）なら、持ち主に依らず全体を拒み、taskごとの理由と`judge-follow-up`を示す（[ADR-t1504-2](../adr/2026-10-04-t1504-2-runtime-records-and-enforces-follow-up-membership-judgements.md)決定7。登録時に元goalが無い（`source_goal_state: none`）ものと、元goalが`abandoned`で閉じたものは求めない。元goalが不明なものは求める。判定は[所属の判断](follow-up-membership.md)の「submit・lint・plan review」）。人の`ready --bypass-review`もdraft / submittedのfollow_upに同じ検査をする（plan reviewを飛ばすので、submitの後に要再確認になったものも拒む）。observerとreviewerの環境からは拒否する。
++- `lint [TASK...] [--proposal ID...]`は、与えたtaskと各proposalのmemberのtaskに、repositoryに依存しない決まった規則を当てる（ADR-0044の決定10の機械的な検査。純粋関数`domain::lint::lint`、入力は`TaskStore::lint_input`が1スナップショットで読む`LintInput`: 対象のtask、全taskのstatusと依存、全goalのverdict）。結果は`{"tasks": [...], "violations": [{"code", "task_id", "reason"}]}`で、違反が無ければ`violations`は空。並びは対象の順、同じtaskの中はcodeの順、同じcodeの中は依存・globの順。codeは`dependency_cycle`（taskの依存と、goalへの依存をそのgoalの全taskへの依存と見て、自分に戻る。依存を足すときにqueueが拒否する循環と同じ辺で、goalから`canceled`の所属taskへの辺は外し、verdictでは辺を外さない）、`depends_on_completed`、`depends_on_canceled`、`depends_on_draft`（対象の外のdraft。同じ対象のdraftは一緒にsubmitされるので数えない）、`depends_on_abandoned_goal`、`unscoped_without_verification`（`paths`もverificationも無い）、`no_verification`（`paths`はあるがverificationが無い）、`invalid_path_glob`（`validate_path_globs`が拒否するglob）、`blank_acceptance`、`missing_change` / `change_outside_set`（`[tasks] changes`のあるqueueだけ。changeの無いtask / 集合の外のchange。[ADR-t980-1](../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)）、`missing_goal_tag` / `goal_tag_outside_set`（`[goals] tags`のあるqueueだけ。taskの所属のgoalが閉じていないdraftで、ラベルが無い / 集合の外のラベルを持つ。submitが拒むものと同じ。`LintInput.draft_goal_tags`をstoreが同じスナップショットで読む。ADR-t1639-1の決定6）、`duplicate_title`（対象の中で大文字小文字と前後の空白を無視して同じtitle）、`follow_up_membership_unjudged`（draft / submittedのfollow_upで、submitが拒む所属の判断の欠け。`LintInput.membership_gaps`をstoreが同じスナップショットで読み、reasonは欠けの種類（判断が無い・`undecided`・要再確認）を書く）。AGENTS.mdのverificationの規則やADR番号のようなrepository固有の規則は入れない（plan reviewのpromptが文書から読む）。読むだけなのでobserverとreviewerも打てる。
+ - plan reviewの経路は`TaskStore::approve_proposal(id)`（`proposal::accept`。`submitted`のproposalを`accepted`にし、memberの`submitted`のtaskを`Approve`で`ready`に、draftのgoalを`open`にする。所属goalがsubmitの後に閉じた（`abandoned`は未着手のtaskを止めない）`submitted`のtaskは`ready`にせず`draft`に戻し、`approve_withheld`（`proposal_id`、`goal_id`、`verdict`）を記録する。閉じたgoalのtaskがclaimされないため）と`send_back_proposal(id)`（`proposal::send_back`。`revising`にして`revise_count`を1増やし、memberの`submitted`のtaskを`draft`に戻す）。どちらも1トランザクション。これを呼ぶplan review jobはgoal 29の後続taskが実装する。`proposal list [--all]`は`submitted` / `revising`のproposalをsubmitの古い順（plan reviewの順）に、`proposal show ID`は1件をmemberのIDとともに返す。`proposal withdraw ID`（`TaskStore::withdraw_proposal`、`proposal::withdraw`、1トランザクション）は`submitted` / `revising`のproposalをplan reviewを通さずに`canceled`にし、plan reviewの保留と未配送のreviseを消し、memberの`submitted`のtaskを`draft`に戻して、memberのtaskとgoalに`proposal_withdrawn`（`proposal_id`、`from`）を記録する。concernで保留中の`approve_plan`のaskで閉じていないものは閉じる（未回答なら`withdrawn`と回答し、`ask_answered`に`runtime_closed: true`を付ける。開いたままだと、taskが次に入ったproposalにその回答が当たるため。回答済みで未適用のaskは`ask_closed`（`ask_id`、`kind`。task 568）を記録して閉じる）。出どころを持つdraftは、runtimeのplannerの対象（`planner_drafts`）に戻る（`canceled`のproposalを指すdraftは、どのproposalにも入っていないと数える）。memberは`proposal_id`を履歴として残すが、`canceled`のproposalは縛らないので、別のproposalにsubmitできる（残ったdraftがbypassやcancelで消え、出し直せないrevisingのproposalを解くため）。それ以外のstatusは拒否する。observerとreviewerは打てない。`status`も`proposals`に同じ一覧を載せる。
+ - `claim`だけが`ready → in_progress`へ遷移させる（`task::claim`。readyでなければ`TaskNotClaimable`）。同じトランザクションで`TaskRun::new`がclaimed状態のTaskRunを作り、イベントを記録し、supervisorからのclaimはそのrunの`RunLease`も作る。キュー全体の実行枠はなく、依存が解けたtaskは`supervise --parallel N`の上限まで同時に実行される。
+ - supervisorはrunを（遷移の判断は[集約: TaskRun](#集約-taskrun)のコマンド）`claimed → starting`（path計画）→ `running`（agent起動）→ `validating`または`failed`（wrapper終了。非0でreceiptが無いときだけ`failed`）→ `awaiting_integration`または`failed`（receipt検証）へ進め、`awaiting_integration`のworkspaceを閉じて`workspace_closed_at`を記録し、休止したrunの`RunLease`を解放する。各遷移はそのrunのleaseまたはwrapperの所有を要求する。runtime errorではsupervisorがそのrunだけを手放す（statusは変えず、`last_error`を書き、leaseを消す）。
+@@ -94,12 +94,12 @@ related:
+ - canceled、失敗、中断、統合待ち、着地中、セッション待ちは依存の完了条件を満たさない。awaiting_integration / integrating / needs_sessionのTaskはin_progressのまま保持し、integratedになった時点でcompletedになる。
+ - `RunEvent.run_id`はtask登録・依存変更などrun作成前のイベントではnullになる。goal単位のイベント（`goal_created`、`goal_updated`、`goal_closed`）は`task_id`がnullで`goal_id`を持ち、`goal show`に並ぶ。`task_goal_changed`はtaskのイベントで、`from`と`to`にgoal IDを持つ。goal依存の追加・削除はtaskのイベント`goal_dependency_added` / `goal_dependency_removed`（`goal_id`）で、task依存の`dependency_added` / `dependency_removed`（`predecessor_id`）とは別のkindにする。
+ - `goal add`でgoalを作り、`add --goal ID`と`set-goal TASK GOAL`でtaskを所属させ、`set-goal TASK --none`で外す。所属の変更は依存の追加・削除と同じくdraft/readyのtaskだけに許し、閉じたgoalへの追加と付け替えは拒否する。follow_upにrequired/out_of_scopeの判断があれば、最後の判断の所属先と違うgoal（`--none`も）への`set-goal`も拒否し、`judge-follow-up`による訂正を促す。未判定の移動は所属の判断にならず、登録時の出どころと深さを変えない（[所属の判断](follow-up-membership.md)）。`task_created`のpayloadは`goal_id`を持ち、`set-goal`は変化があったときだけ`task_goal_changed`を記録する。
+-- `goal add`は`--priority LEVEL`でgoalの優先度（5段階の名前、既定`normal`。ADR-t1639-1の決定1）を付ける。`goal edit`はtitle、description、acceptance、constraints、doc、priority（`--priority LEVEL`。draftとopenのgoalだけで、閉じたgoalは`GoalClosed`で拒む。`domain::goal::edit`）を差し替え、`goal_updated`のpayloadに`old`と`new`のgoal全体と、`old_acceptance_version` / `new_acceptance_version`を残す。acceptanceの文が変わったときだけ版が増え、他の欄の編集や同じ文への更新では増えない。閉じたgoalも優先度の他は編集できる（記録の訂正のため）。goalの優先度を変えると、そのgoalの個別の指定の無いdraft・submitted・readyのtaskの基の優先度と効く優先度が次の読み出しから変わる（taskの行は書き換えず、読むときに`goals.priority`を継ぐ）。`goal show`はgoalの`priority`と、`tasks` / `dependents`の各taskの基の`priority`と`priority_source`を出す。走行中のrunは`prompt.txt`のスナップショットのままで、次のclaimから新しい記述が使われる。
++- `goal add`は`--priority LEVEL`でgoalの優先度（5段階の名前、既定`normal`。ADR-t1639-1の決定1）を、`--tag TAG`（繰り返し）でラベルを付ける。`goal edit`はtitle、description、acceptance、constraints、doc、priority（`--priority LEVEL`。draftとopenのgoalだけで、閉じたgoalは`GoalClosed`で拒む。`domain::goal::edit`）、tags（`--tag TAG`の繰り返しで全体を置き換え、`--no-tags`で全て外す。2つは同時に与えられない。閉じたgoalのラベルも変えられる）を差し替え、`goal_updated`のpayloadに`old`と`new`のgoal全体と、`old_acceptance_version` / `new_acceptance_version`を残す。acceptanceの文が変わったときだけ版が増え、他の欄の編集や同じ文への更新では増えない。閉じたgoalも優先度の他は編集できる（記録の訂正のため）。goalの優先度を変えると、そのgoalの個別の指定の無いdraft・submitted・readyのtaskの基の優先度と効く優先度が次の読み出しから変わる（taskの行は書き換えず、読むときに`goals.priority`を継ぐ）。`goal show`はgoalの`priority`と、`tasks` / `dependents`の各taskの基の`priority`と`priority_source`を出す。走行中のrunは`prompt.txt`のスナップショットのままで、次のclaimから新しい記述が使われる。
+ - `edit TASK`はdraftとsubmittedのtaskのtitle、description、acceptance、verification_commands（`--verify`、繰り返しで配列全体を置き換え、`--no-verify`で空）、required_evidence（`--evidence` / `--no-evidence`）、paths（`--paths` / `--no-paths`）、context、change（`--change`。nullには戻さない。`[tasks] changes`があればその集合の中だけ）、wait_for_build（`--wait-for-build` / `--no-wait-for-build`）を差し替える（[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定9。titleはgoal 29のtaskで足した。入力は`TaskEdit`、判断は`task::edit`）。与えた値は`add`と同じ規則で検査し（空白のtitleとverification command、不正なglobを拒否。required_evidenceとpathsは重複を除く）、編集できるかは`TaskStatus::content_editable`が決める。draftとsubmittedだけが通常の編集を受ける。最新runがfailed / interruptedで未完了runが無いin_progress taskは、userまたはinboxのverifyだけを同一transactionで変更できる（ADR-t883-1）。他の編集は拒否する（readyなどは`TaskContentNotEditable`。`in_progress`の例外の前提が欠けると、終了した最新runと生きているrunが無いという条件をerrorに示す）（readyのtaskはsubmittedに戻してから直す。決定14）。submittedのtaskを編集したときにproposalをplan reviewにかけ直すのは、plan review jobのtaskが実装する。値が変わったフィールドだけを`task_edited`の`from`と`to`（task JSONのキー名）に残し、何も変わらなければ記録しない。`show`のcompactな表示は`from` / `to`がobjectのとき、その中の文字列も300文字で切る（`view::event_gist`）。priority・goal・依存はそれぞれ`set-priority`・`set-goal`・`dependency`で変える。走行中のrunは`prompt.txt`のスナップショットのままになる。
+ - `goal close ID --verdict achieved|abandoned`はverdictを1回だけ記録する。`achieved`は所属taskに`completed` / `canceled`以外があれば拒否し、`abandoned`は`in_progress`があれば拒否する（`GoalVerdict::allows`、判断の入口は`domain::goal::close`）。`achieved`はさらに、元goalがそのgoalのfollow_up（所属は問わない）のうち`completed` / `canceled`でないものが、判断が無い・`undecided`・要再確認（判定の後にacceptanceが変わった）・`required`なのにgoalの外、のどれかなら拒否する（`domain::goal::check_follow_ups`、ADR-t1504-2決定8。`out_of_scope`の判断を持つものの未完了は妨げない）。検査は`close_goal_in`のtransactionの中で行い、`goal close`・goal reviewの`achieved`・`approve_goal`のanswerの`achieved`のすべてが通る（[Follow-up membership judgements](follow-up-membership.md)の「閉じる条件」）。閉じたgoalを再び閉じることはできず、続きは新しいgoalに登録する。例外は`correct_goal`のaskへの人の`reopen`で開き直したgoalだけで（`goal::reopen`、ADR-t1504-2決定9。[Goal review](supervisor-lifecycle/goal-review.md)の9）、開き直したgoalは同じ規則でもう一度閉じられる（`goal_closed`が2件になる）。所属taskがすべて終わったopenのgoalは、supervisorのgoal review jobがacceptanceと照合して閉じる（`achieved`）か、足りないものを出どころ`goal_gap`のdraftにするか、人に`approve_goal`のaskで聞く（[Goal review](supervisor-lifecycle/goal-review.md)、ADR-0047の決定43）。`goal review ID`はreviewを取り直させる。`goal_closed`のpayloadはverdictとclose時点のstatus別件数を持つ。
+ - 閉じたgoalに残った未完了のtask（`draft` / `submitted` / `ready`）に、開いたgoal（か無所属）の`ready` / `submitted`のtaskが直接または推移的に（未完了のtaskを通って）依存していると、そのtaskは完了しないので依存するtaskは永久にclaimされない（**取り残された依存**、`domain::StrandedDependency`、task 421）。閉じたgoalの未完了のtaskが鎖になっているときは、他のそのようなtaskを（推移的に）待っていない根のtaskだけを取り残された依存とし、同じ待っているtaskを鎖のtaskごとに重ねて知らせない。approveが閉じたgoalのtaskを`draft`に戻したとき（`approve_withheld`の後、全memberの遷移を終えてから）と、goalを`abandoned`で閉じたとき（`close_goal_in`。goal review jobの`abandoned`も同じ経路）に、そのtaskに`dependency_stranded`（`goal_id`、`verdict`、待っているtaskのID`waiting`、`cause`: `approve_withheld` / `goal_abandoned` / `approve_readied`、approveなら`proposal_id`）を同じトランザクションで記録する。approveが`ready`にしたtaskが（推移的に）取り残されたtaskを待っていれば、そのtaskにも記録する（`cause: approve_readied`）。`abandoned`で閉じた時点で他のgoalの`draft`だったtaskは、まだ出していない計画なので数えず、plan reviewを通って`ready`になったときに知らせる（待っているtaskの集合が変わるので、重ねたことにはならない）。`submitted`をsubmitする時点では知らせない（`submitted`のtaskはabandonedのcloseかapproveのどちらかで数えられる）。inboxの`watch`に届くattentionで、nextは`request a plan for the waiting tasks`。同じtaskの直近の`dependency_stranded`と`waiting`が同じなら記録しない（同じ詰まりを重ねて知らせない）。`status`のattentionはqueueの今の状態から導き（`stranded_dependencies`）、取り残されたtask 1件につき1つ（`task_id`はそのtask、`status: stranded`、`last_error`にtask・goal・verdict・待っているtaskのID）を出し、待っているtaskが無くなれば（依存を外す・cancelする）消える。goalへの依存（`task_goal_dependencies`）は見ない。**依存するtaskを自動で保留（`draft`・`submitted`に戻す）にはしない**。依存を外すか、待っているtaskをcancelするか、閉じたgoalのtaskを新しいgoalで取り直すかは計画の判断で、runtimeが決まった規則で選べるものではないため。runtimeは知らせるだけで、attention（`AttentionNext::DecideWaiting` = `request a plan for the waiting tasks`）を受けた人の言葉でinboxがそのtaskを参照（`dagq request add --ref task:N`）にした計画の依頼を記録して依頼のruntimeのplannerが決めるか、人が`DAGQ_ROLE`の無い自分のterminalで決める（[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)の決定8の読み替えを同じく当てる）。
+ - `list`は既定で終端状態（`TaskStatus::is_terminal`）でないtaskを新しい順（ID降順）に最大20件、`{"tasks", "next", "total"}`で返す。要素はid/status/title/goal_id/dependencies/goal_dependencies（依存先goalのID昇順）/latest_run（最新runのidとstatus）に縮約し、`--full`で残りの全項目を足す。`next`は次ページの先頭task ID（`--before`に渡す。`--before ID`はID以下のtaskを返す）で、続きがなければnull。`total`はフィルタ後の件数。フィルタとページの条件はapplication層の`TaskQuery`、出力は`TaskPage` / `TaskListItem`で、domainの`Task`は変えない。
+-- `goal list`はgoalごとに`status`（`draft` | `open`）、`closed`、`verdict`、所属taskのstatus別件数（`TaskStatusCounts`）を返し、`goal show`はgoal（`status`を含む）、所属taskのid/title/status、そのgoalに依存している未完了task（`dependents`、id/title/status）、goalのイベントに加え、`acceptance_version`と`follow_up_memberships`（元goal・現在の所属・出どころの材料・深さ・判断の履歴。別goalに移動したfollow_upも含む）を返す。`show`は`dependencies`の隣に`goal_dependencies`（goal ID昇順）と、`membership_judgements`（判定時と現在のacceptanceの版、`needs_recheck`を含む履歴）を返す。これらの欄は既定と`--full`の両方に載る。
++- `goal list`はgoalごとに`status`（`draft` | `open`）、`priority`、`tags`、`closed`、`verdict`、所属taskのstatus別件数（`TaskStatusCounts`）を返す。並びは閉じていないgoal（`open`と`draft`。taskが0件のdraftも出る）を閉じたgoalより先にし、それぞれの中を優先度の降順 → IDの昇順にする（ADR-t1639-1の決定7、純粋関数`domain::goal::list`）。`--tag TAG`（繰り返しはOR）は与えたラベルのどれかを持つgoalだけに絞り、形の合わないラベルは拒む（queue serviceの`goal_list`の`tag`も同じ）。`goal show`は`goal`の`tags`を出し、`search`のgoalのhitは`tags`（無ければ空の配列。他の種類のhitには出ない）を出す。`goal show`はgoal（`status`を含む）、所属taskのid/title/status、そのgoalに依存している未完了task（`dependents`、id/title/status）、goalのイベントに加え、`acceptance_version`と`follow_up_memberships`（元goal・現在の所属・出どころの材料・深さ・判断の履歴。別goalに移動したfollow_upも含む）を返す。`show`は`dependencies`の隣に`goal_dependencies`（goal ID昇順）と、`membership_judgements`（判定時と現在のacceptanceの版、`needs_recheck`を含む履歴）を返す。これらの欄は既定と`--full`の両方に載る。
+ - `goal add --draft`はdraftのgoalを作り、`goal ready ID`がdraftを`open`にして`goal_status_changed`（`from: draft`、`to: open`）を記録する。`goal ready`は閉じていないdraftにだけ許す（`domain::goal::ready`）。draftのgoalにも`add --goal`と`set-goal`でtaskを所属させられ、`goal close`もできる（採らない提案は`abandoned`で閉じる）。draftのgoalのtaskは`ready`にしても`candidates`・`graph`の`candidates`・supervisorのclaimに出ない（`READY_QUERY`がgoalの`status = 'draft'`を除く）。`graph`は所属goalのあるtaskに`goal_status`を添える。
+ - `note --task ID | --run RUN_ID | --goal ID --text TEXT [--kind SLUG]`はkind `observation`のrun_eventを1件書いて返す。`--task`はtaskのイベント、`--run`はそのrunのtaskとrunのイベント、`--goal`はgoal単位のイベントになる。`notes [--goal ID] [--task ID] [--since CURSOR] [--limit N]`はobservationだけを古い順に返し（`{"notes", "cursor"}`）、`--since`なしは直近`--limit`件（既定20）、`--since`ありはcursorより後の最初の`--limit`件。`--goal`はgoalのnoteに加えて所属taskとそのrunのnoteを、`--task`はtaskとそのrunのnoteを含む。`cursor`は最後のnoteのイベントID（空なら`--since`の値、それも無ければ0）。
+ - `finding record --kind SLUG (--task ID | --run RUN_ID | --goal ID | --queue) [--subject S] --summary S [--detail D] [--impact high|normal|low] [--evidence EVENT_ID]... [--propose REASON]`はfindingを記録する。同じ`kind`・対象・`subject`の`open` / `proposed`のfinding（無ければ最後の`resolved` / `dismissed`のもの）があればそれに`finding::merge`を当て、無ければ新しく作る。返すのはfindingと`created`、変えたフィールドの`changed`（空なら何も書いていない）。根拠のeventと対象が存在しなければ拒否する。`finding resolve ID --reason R`と`finding dismiss ID --reason R`は状態を変え、理由を`status_reason`に持つ。`findings [ID] [--all | --status S,...] [--kind K,...] [--task ID | --run RUN_ID | --goal ID | --queue] [--full]`は`open` / `proposed`のfindingを影響の大きい順（`impact`、発生回数、最後に見た時刻の新しい順、IDの新しい順。`finding::by_impact`）に`{"findings"}`で返し、各行に紐づいたproposalの状態`proposal_status`と、findingに紐づいたopenなaskのID`open_asks`を付ける。`--full`は根拠のeventを`evidence_events`として全文で付ける。IDを渡すとその1件を状態に関わらず返す。出力には改善のproposalの上限の`improvements`（`running`・`limit`・`reached`・`waiting`。ADR-0051の決定25、[Finding planners](supervisor-lifecycle/finding-planners.md)の11）も並ぶ。`findings`は読み取りで、reviewerもobserverも打てる。`ask --kind blocked --finding ID`はaskをfindingに紐づけ、openなaskの一意性（task、run、kind）にfindingを足す（決定23）。taskの無い`blocked`のaskもfindingごとに1件ずつ開ける。`blocked`以外のaskにfindingを付けると`AskFindingNotBlocked`で拒否する。
+diff --git a/docs/design/persistence.md b/docs/design/persistence.md
+index e756a6f2..d4f31779 100644
+--- a/docs/design/persistence.md
++++ b/docs/design/persistence.md
+@@ -4,8 +4,8 @@ type: design
+ title: SQLite persistence
+ status: current
+ created: 2026-09-21
+-updated: 2026-10-05 # task 1640; task 839; task 1709; task 1437; task 1609; task 1632
+-last_verified: 2026-10-05 # task 1640; task 839; task 1509; task 1437; task 1609; task 1632
++updated: 2026-10-05 # task 1641: goals.tags (0067); task 1640; task 839; task 1709; task 1437; task 1609; task 1632
++last_verified: 2026-10-05 # task 1641; task 1640; task 839; task 1509; task 1437; task 1609; task 1632
+ scope: persistence
+ related:
+   - adr-t1639-1
+@@ -46,7 +46,7 @@ related:
+ 
+ > **予定（goal 92）**: workerの経路はADR-t1340-1を置き換えた[ADR-t1433-2](../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)で非対話だけになる。保存した経路の列はmigrationで書き換えず（migrationを足さない）、`interactive`はclaimとresumeのときに非対話として読む。これはtask 1437が実装した: claimはrunの`worker_mode`を`headless`にし、resumeは過去の`interactive`のrunの`worker_mode`を同じトランザクションで`headless`に更新し、変えたときだけ`worker_mode_converted`（`phase`・`from`・`to`・`reason`）を記録する（[非対話のworker](supervisor-lifecycle/headless-worker.md#対話と記録されたtaskのclaimとresume)）。in-cmux modeのsupervisorの登録の列（[ADR-t1433-4](../adr/2026-10-03-t1433-4-supervisor-resides-without-cmux.md)）も消さない。in-cmux modeなど残りは後続のtaskが実装するまでの今の姿である。
+ 
+-SQLiteはキューの正本であり、プロセス間共有と再起動後の復旧に使う。stdoutは正本にしない。ステップ2で4テーブル、ステップ3で3テーブル、ステップ4で`task_runs.workspace_closed_at`列を実装し、ステップ4の統合確認で`task_runs`を作り直して`integrated`を加え（schema version 4）、ステップ6でleaseをrun単位の`run_leases`に移してqueue全体の実行枠を外し（schema version 5、[ADR-0007](../adr/0007-run-level-leases-parallel-execution.md)）、ステップ7で`task_runs`を再び作り直して`integrating`と`needs_session`を加え、統合スロットの部分UNIQUE indexを足した（schema version 6、[ADR-0008](../adr/0008-merge-queue-squash-landing.md)）。`0007_supervisors.sql`は常駐supervisorの登録表`supervisors`を足した（schema version 7）。`0008_goals.sql`は`goals`、`tasks.goal_id` / `tasks.context`を足し、`run_events`を作り直してgoal単位のイベントを持てるようにした（schema version 8、[ADR-0009](../adr/0009-goal-groups-tasks.md)。ADRの「schema v6」は7がsupervisorsに使われたためv8と読み替える）。`0009_supervisor_mode.sql`は`supervisors`に`mode`と`workspace_id`を足した（schema version 9、[ADR-0011](../adr/0011-cmux-socket-password-and-in-cmux-fallback.md)）。`0012_queue_events.sql`は`run_events`を作り直し、`backend_call_failed`だけはtaskにもgoalにも紐づかない行を持てるようにした（schema version 12、task 109）。`0016_observer.sql`は`asks`と`run_events`を作り直し、observerの`blocked`のaskとその事象、observer自身の`observe_started` / `observe_finished`をtaskの無い行として持てるようにした（schema version 16、task 99）。`0017_stuck_exit_ask.sql`は`asks`を0016と同じ手順で作り直し、kindのCHECKに`stuck_exit`（supervisorが`/exit`のtimeoutで作るask。task 104）を足した（schema version 17）。`0018_task_paths.sql`は`tasks.paths`を足した（schema version 18、[ADR-0029](../adr/0029-task-declares-paths-and-verification-follows-the-kind-of-change.md)）。`0019_task_goal_dependencies.sql`は`task_goal_dependencies`を足した（schema version 19）。`0020_task_priority.sql`は`tasks.priority`を足した（schema version 20、[ADR-0040](../adr/0040-verify-once-review-run-env-graph-stats-and-task-priority-in-claim-order.md)の決定4）。`0021_proposals.sql`は`proposals`、`tasks.proposal_id` / `goals.proposal_id`とtaskのstatus `submitted`を足した（schema version 21、[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定7、8）。`0022_follow_up_triage.sql`は`task_leases`と`tasks.follow_up_depth`を足し、`asks`を0017と同じ手順で作り直してkindに`follow_up`を足した（schema version 22、[ADR-0037](../adr/0037-follow-up-triage-job-decides-follow-up-drafts.md)）。`0024_schema_floor.sql`は受け入れるバイナリの下限`schema_floor`を足した（schema version 24、[ADR-0045](../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の決定7）。`0025_stalled_ask.sql`（breaking）は`asks`を0022と同じ手順で作り直し、kindに`stalled`（supervisorが促しの後もreceiptの無いidleが続くworkerのsessionで作るask。[ADR-0043](../adr/0043-detect-stalled-worker-sessions-nudge-once-then-ask.md)の決定1、task 288）を足し、`run_events`を0016と同じ手順で作り直してtaskの無い行に`stall_config_loaded`（supervisorが起動時に記録する閾値）を足した（schema version 25。古いbinaryは`stalled`のaskを読めないのでfloorも25になる）。`0026_search.sql`は全文検索の索引`search_index`（FTS5）、着地したcommitの表`landed_commits`と、両者を保つtriggerを足した（schema version 26、互換で、下限は25のまま。[ADR-0063](../adr/0063-full-text-search-related-with-mentions-and-search-strength-and-duplicate-of.md)の決定1〜3。下の[全文検索](#全文検索search)）。`0027_plan_review.sql`はplan review jobの表`plan_reviews`（部分unique index `plan_reviews_running`で未完了の行を1つまでにする）と`proposals`の`review_hold` / `revise_reasons` / `revised_at` / `revise_sent_at` / `revise_planner_id` / `unresponsive_at`を足し、`asks`を0025と同じ手順で作り直してkindに`approve_plan`を足した（schema version 27、非互換、ADR-0044の決定11〜15・17。読み書きは`src/infrastructure/plan_reviews.rs`、流れは[supervisor-lifecycle](supervisor-lifecycle/plan-review.md#plan-review-supervisor)）。`0028_draft_planners.sql`はruntimeやjobが作ったdraftの出どころの表`draft_origins`（導入前の`follow_up_registered`から埋める）と`planners.draft_task_id`（index `planners_by_draft`）を足し、follow-up triageの`task_leases`を消し、`asks`を0027と同じ手順で作り直してkindに`planner_question`を足した（schema version 28、非互換、ADR-0044の決定13・16。読み書きは`src/infrastructure/draft_planners.rs`、下の[draft planners](#draft-plannersdraft_plannersrs)）。`0030_findings.sql`はobserverの検出の表`findings`（部分unique index `findings_unsettled`で、同じ`kind`・対象・`subject`の`open` / `proposed`の行を1つまでにする）と`asks.finding_id`を足し、`asks_open`を作り直して（0029の鍵に）findingを加え、`run_events`を0025と同じ手順で作り直して、taskにもgoalにも紐づかない行を持てるkindに`finding_recorded` / `finding_updated` / `finding_status_changed`を足した（0026の`run_events`の3つのtriggerと、`run_events`を読む`tasks`のtrigger `search_task_moved`も作り直す。schema version 30、非互換、[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定18・23。読み書きは`src/infrastructure/findings.rs`、下の[findings](#findings)）。`0031_supervisor_handoff.sql`（compatible）は`supervisors`に`handoff_accepted` / `handoff_binary` / `handoff_requested_at`を`ALTER TABLE ADD COLUMN`で足した（schema version 31、[ADR-0045](../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の決定10、task 309。null可の列を足すだけなので互換で、floorは30のまま）。`0032_run_env_program_events.sql`（breaking）は`run_events`を0030と同じ手順で作り直し（0026のtriggerと`search_task_moved`も作り直す）、taskにもgoalにも紐づかない行を持てるkindに`run_env_program_missing` / `run_env_program_found`（supervisorが`[run.env]`の名指すプログラムの検査の答えが変わったときに記録する。[ADR-0049](../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)の決定9、task 395）を足した（schema version 32。CHECKを作り直すので非互換で、floorは32になる）。`0033_auto_update.sql`（compatible）は`supervisors.auto_update`を足し、自動更新の経過の表`binary_updates`（`kind`・`commit_sha`・`payload`・`created_at`。kindは`update_started` / `update_built` / `update_installed` / `update_failed` / `update_awaiting_approval` / `update_answered` / `update_retry`）を作った（schema version 33、[ADR-0045](../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の決定17、task 310。列と表を足すだけなので互換で、floorは32のまま。`run_events`のkindを足すのは非互換になるので、自動更新は自分の表に経過を置き、inboxにはtaskの無い`blocked`のask（`subject`が`update_failed` / `approve_update`）で知らせる。[Auto-update](supervisor-lifecycle/auto-update.md#auto-update)）。`0034_task_kind.sql`（compatible）は`tasks.kind`（TEXT、null可、CHECKなし）を足した（schema version 34、goal 21。列を足すだけなので互換で、floorは32のまま。古いbinaryは列を読まず、その`INSERT`はnullを残す）。kindを4値から自由なlabelにした[ADR-t624-1](../adr/2026-09-27-t624-1-task-kind-is-a-free-label.md)は、列にCHECKが無いのでmigrationを足していない（4値だけを読むbinaryは他のlabelをnullと読む）。`0035_session_events.sql`（breaking）は`run_events`を0032と同じ手順で作り直し（0026のtriggerと`search_task_moved`も作り直す）、taskにもgoalにも紐づかない行を持てるkindに`session_opened` / `session_closed` / `session_turns`（Claude sessionの区間とtranscriptのturn。observerのjobと後続taskのinbox・plannerのsessionはtaskを持たない。[ADR-0048](../adr/0048-record-claude-sessions-by-kind-with-open-and-active-time.md)の決定2・8、task 385。書き方は[provider-lifecycle](provider-lifecycle.md#claude-sessionの区間)）を足した（schema version 35。CHECKを作り直すので非互換で、floorは35になる）。`0036_change_marks.sql`（breaking）は`run_events`を0035と同じ手順で作り直し（0026のtriggerと`search_task_moved`も作り直す）、taskにもgoalにも紐づかない行を持てるkindに変更の印の`supervisor_started` / `supervisor_stopped` / `run_env_changed` / `mark_recorded` / `mark_retracted`を足した（schema version 36、[ADR-0051](../adr/0051-kpi-time-series-report-and-push.md)の決定10〜13、task 429。[変更の印](supervisor-lifecycle/marks.md)。CHECKを作り直すので非互換で、floorは36になる）。`0037_supervisor_max_waiting.sql`（compatible）は`supervisors.max_waiting`（supervisorの`--max-waiting`。登録と引き継ぎの取り戻しの直後に`set_max_waiting`が書く）を足した（schema version 37、[ADR-0062](../adr/0062-runs-waiting-for-a-person-leave-the-slot.md)の決定7。null可の列を足すだけなので互換で、floorは変わらない）。人の答えを待つrunの`run_waiting_started` / `run_waiting_ask_added` / `run_waiting_ended` / `run_slot_regained` / `run_waiting_deferred`はrunに紐づくrun_eventsのkindなので、CHECKを変えない（[人の答えを待つrun](supervisor-lifecycle/waiting.md)）。`0038_ask_answerers.sql`（compatible）は`asks`に`answered_by`（TEXT、null可）と`option_index`（INTEGER、null可）を`ALTER TABLE ADD COLUMN`で足した（schema version 38、task 325。下の[asks](#asks)。列を足すだけなので互換で、floorは変わらない。古いbinaryは列を読まず、その回答はどちらもnullを残す）。`0039_open_kinds.sql`（breaking）は`asks`と`run_events`を0029・0036と同じ手順で作り直し（idと0038の`answered_by` / `option_index`を保ち、`asks_open`、0026のtriggerと`search_task_moved`も作り直す）、kindを名指すCHECKをすべて外した（schema version 39、[ADR-0073](../adr/0073-kind-additions-are-compatible.md)の決定19〜23、task 495。`asks.kind`は空でないことだけをCHECKする）。外したCHECKが持っていた規則（知っているkindだけを書く、taskの無いaskは`blocked`か`queue_hold`でrunも無い、`queue_hold`のaskとだけ`reason_category`が`authentication` / `cost`、task・goal・runのどれにも属さないeventは`EventKind::is_queue`が真のkind）は書き込み口の`check_ask_kind` / `check_event_target`（`src/domain/mod.rs`）が書く前に検査する。書き込み口（queueのportとその`SqliteQueue`の実装の`record_runtime_event` / `record_queue_event` / `record_task_event` / `record_finding_event` / `record_kpi_breach` / `prune_supervisor`と、`run_events`に`INSERT`する内部の関数）はeventのkindを文字列ではなく`EventKind`（`src/domain/event_kind.rs`。このバイナリの知るkindの列挙）で受け取り、`as_str`の文字列を書く（ADR-0073の決定20、task 552。DBの値は変わらないのでmigrationは要らない）。kindを足すときは`EventKind`に値を足し、queueのeventなら`is_queue`にも足す。読む側（`RunEvent.kind`、show・watch・events・timeline・statsの表示と集計）は文字列のまま寛容に読む（決定21）。読むときは知らないkindのaskを`AskKind::Other`にし、知らないkindのeventも落とさずに出す。これ以後はaskとeventのkindを足すのにmigrationは要らない。`schema.rs`の`kind_enumerations`がkindの値を名指すCHECKを見つけ、`compatibility_violations`はそれを互換の違反に数え、schemaのtestは0039より後のmigrationにそれが無いことを検査する（非互換の宣言でも）。CHECKを外すので非互換で、floorは39になる）。自動更新の経過は、0039の後にtask 496で`run_events`のqueue単位のkind `update_*`とaskのkind `update_failed` / `approve_update`（taskもrunも持たない）に移し、0033の`binary_updates`は残したまま書きも読みもしない（migrationは要らない。[Auto-update](supervisor-lifecycle/auto-update.md#auto-update)）。`0041_draft_reopens.sql`（compatible）は出どころ`reopened`のdraftの表`draft_reopens`を足した（schema version 41、task 418。表を足すだけなので互換で、floorは39のまま。下の[draft planners](#draft-plannersdraft_plannersrs)）。`0042_goal_reviews.sql`（compatible）はgoal review jobの表`goal_reviews`を足した（schema version 42、[ADR-0047](../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定43、task 375。表とindexを足すだけなので互換で、floorは39のまま。互換のmigrationは外部キーとunique indexを持てないので、未完了の行を1つまでにするのは`begin_goal_review`の`BEGIN IMMEDIATE`の中の検査。askのkind `approve_goal`とeventのkind `goal_review_*` / `goal_decided`はmigrationを要らない。読み書きは`src/infrastructure/goal_reviews.rs`、流れは[Goal review](supervisor-lifecycle/goal-review.md#goal-review-supervisor)）。`0043_headless_jobs.sql`（compatible）はheadless job（review・復旧job・plan review・goal review）のプロセスの表`headless_jobs`（kind、label、run_id / proposal_id / goal_id、attempt、pid、process_start、supervisor_token、started_at、ended_at、outcome）と未完了の行の部分index `headless_jobs_unfinished`を足した（schema version 43、task 443。表とindexを足すだけなので互換で、floorは39のまま。eventのkind `headless_job_stopped`はmigrationを要らない。読み書きは`src/infrastructure/headless_jobs.rs`、流れは[Headless job processes](supervisor-lifecycle/headless-job-processes.md)）。`0044_event_actors.sql`（compatible）は`run_events`に`actor_role`・`actor_id`・`requested_by`（どれもnull可）を足した（schema version 44、task 730、ADR-t728-1の決定4）。新しいバイナリは全てのeventに書いたactorのroleとid、headless jobのverdictを適用したときはそのjobのidを書き（仕組みは[Roles](supervisor-lifecycle/roles.md)のeventのactor）、それより前の行と古いバイナリが書く行はnullのまま読める。列を足すだけなので互換で、floorは変えない。後で`run_events`を作り直すmigrationは、この3列も写すこと（列を並べて写す今までの作り直しのままだと消える）。`0046_proposal_owner_actor.sql`（compatible）は`proposals.owner_actor_id`（null可）を足した（schema version 46、task 732）。`submit`が出したactorのid（`planner:<id>`など）を書き、plannerの`proposal withdraw`を自分のproposalに限る判定が読む（[Authorization](authorization.md)）。`0047_answer_authority.sql`（compatible）は`asks.answer_authority`と`asks.answer_approval`（どちらもnull可）を足した（schema version 47、task 733）。answerを書くときに、権限の出どころ（`user`・`delegated`・`runtime`）と承認に当たるか（1 / 0）を書く。`answered_by`の値は変えない（[Authorization](authorization.md#answerの権限の出どころと承認の分類)）。それより前のproposalと古いバイナリが出したものはnullで、plannerは取り下げられない。列を足すだけなので互換で、floorは変えない。`0048_worker_provider.sql`（compatible）は`tasks.worker_provider`・`tasks.worker_mode`・`task_runs.worker_mode`（null可、値はCHECKで列挙）と`supervisors.providers`（null可のJSON）を足した（schema version 48、task 814、ADR-t813-2）。taskのworkerのproviderと経路、runの経路、supervisorが解決したproviderの実行ファイルを持つ（下の`tasks.worker_provider`の段落）。列を足すだけなので互換で、floorは変えない。`0049_open_run_providers.sql`（breaking）は`task_runs`をCHECKなしで作り直した（schema version 49、task 816）。`0050_no_check_constraints.sql`（breaking）は残りの全ての表からCHECKを外した（schema version 50、task 878、[ADR-t876-1](../adr/2026-09-28-t876-1-no-sqlite-check-constraints-until-schema-is-stable.md)。下の[CHECK制約を使わない](#check制約を使わない)）。`0052_draft_bundles.sql`（compatible）はdraftの束の表`draft_bundles`と`draft_bundle_members`を足した（schema version 52、task 807、[ADR-t807-1](../adr/2026-09-28-t807-1-bundle-drafts-of-one-piece-of-work-for-one-runtime-planner.md)。表とindexを足すだけなので互換で、floorは変えない。古いbinaryはこの表を読まず、束の2件目以降のdraftにもplannerを立てうる。下の[draft planners](#draft-plannersdraft_plannersrs)）。`0053_task_change.sql`（compatible）は`tasks.change`（TEXT、null可）を足した（schema version 53、task 982、[ADR-t980-1](../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)。列を足すだけなので互換で、floorは変えない。古いbinaryは列を読まず、その`INSERT`はnullを残す。読むときは形の合わない値をnullと読む寛容な側）。`0054_ask_topics.sql`（compatible）は`asks.topics`（TEXT、null可、CHECKなし）を足した（schema version 54、task 953、[ADR-t947-2](../adr/2026-09-28-t947-2-worker-questions-carry-topic-codes.md)。`worker_question`の分類コードのJSON配列で、先頭が主。他のkindとそれより前のaskはnullで、埋めない。列を足すだけなので互換で、floorは変えない。古いbinaryは列を読まず、その`INSERT`はnullを残す。読むときは配列でない値を無いものと読む）。`0055_headless_job_provider.sql`（compatible）は`headless_jobs.provider`（TEXT NOT NULL DEFAULT 'claude'）を足した（schema version 55、task 1062、goal 73。jobを起動したproviderで、値の集合はrunの`requested_provider` / `actual_provider`と同じ。それより前の行と、列を知らない古いbinaryの`INSERT`は既定の`claude`になる。列を足すだけなので互換で、floorは変えない。[Headless job processes](supervisor-lifecycle/headless-job-processes.md)）。`0056_drop_task_kind.sql`（breaking）は`tasks.kind`を`ALTER TABLE tasks DROP COLUMN kind`で落とした（schema version 56、task 984、[ADR-t980-1](../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)の決定1。taskのkindを廃止し、分類はchangeとareaが引き継ぐ。列を名指すtrigger・index・viewは無い。列を落とすので非互換で、floorは56に上がり、migrateは退避を取る。[ADR-0073](../adr/0073-kind-additions-are-compatible.md)の非互換のmigrationの手順に従う）。`0059_ask_recommendation.sql`（compatible）は`asks.recommendation`と`asks.confidence`（どちらもTEXT、null可、CHECKなし）を足した（schema version 59、task 1318、[ADR-t451-1](../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)の決定1。既存のaskはnullのまま。列を足すだけなので互換で、floorは変えない。古いbinaryは列を読まず、その`INSERT`はnullを残す）。`0060_planner_route.sql`（compatible）は`planners.route`（TEXT、null可、CHECKなし）を足した（schema version 60、task 1396、[ADR-t1394-2](../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)の決定1。`headless`はplannerのagentを1 turnずつ動かす経路で、nullは対話。既存の行はnullのまま。列を足すだけなので互換で、floorは変えない。古いbinaryは列を読まず、その`INSERT`はnullを残す。[`plan` / `planners`](supervisor-lifecycle/plan-planners.md#runtimeのplannerの経路)）。`0061_plan_requests.sql`（compatible）は計画の依頼の表`plan_requests`と、依頼から出たproposalの表`plan_request_proposals`、`planners.request_id`（index `planners_by_request`）と`asks.request_id`（index `asks_by_request`）を足した（schema version 61、task 1395、[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)。表とindexとnull可の列を足すだけなので互換で、floorは変えない。古いbinaryは表を読まず、列を名指さないので、依頼のplannerを何のためでもないruntimeのplannerと読み、依頼にplannerを立てない。下の[planning requests](#planning-requestsplan_requestsrs)）。`0065_goal_priority.sql`（breaking）は`goals.priority`（既定1＝`normal`）を足し、`tasks.priority`をnull可の個別の指定に作り替えた（schema version 65、task 1640、[ADR-t1639-1](../adr/2026-10-04-t1639-1-goal-priority-is-the-source-tasks-inherit-and-goals-carry-tags.md)。下の`tasks.priority`の段落。古いbinaryは`tasks.priority`をNOT NULLの整数と読み、nullの行で読み込みが止まるので非互換）。`0066_task_wait_for_build.sql`（compatible）は`tasks.wait_for_build`（INTEGER NOT NULL DEFAULT 0、CHECKなし）を足した（schema version 66、task 1632、[ADR-t1632-1](../adr/2026-10-05-t1632-1-claim-waits-for-a-build-that-contains-the-dependencies-landings.md)。taskが固定バイナリに依存先の着地を含むことを要するかの宣言で、0は宣言しない。既存のtaskは0のまま。既定のある列を足すだけなので互換で、floorは変えない。古いbinaryは列を読まず、その`INSERT`は0を残す。書くのは`Task::wait_for_build`のboolだけで、読むときは0以外を宣言と読む。[claimを控える](supervisor-lifecycle/claim-defer.md#依存先の着地を含むbuildを待つtask)）。
++SQLiteはキューの正本であり、プロセス間共有と再起動後の復旧に使う。stdoutは正本にしない。ステップ2で4テーブル、ステップ3で3テーブル、ステップ4で`task_runs.workspace_closed_at`列を実装し、ステップ4の統合確認で`task_runs`を作り直して`integrated`を加え（schema version 4）、ステップ6でleaseをrun単位の`run_leases`に移してqueue全体の実行枠を外し（schema version 5、[ADR-0007](../adr/0007-run-level-leases-parallel-execution.md)）、ステップ7で`task_runs`を再び作り直して`integrating`と`needs_session`を加え、統合スロットの部分UNIQUE indexを足した（schema version 6、[ADR-0008](../adr/0008-merge-queue-squash-landing.md)）。`0007_supervisors.sql`は常駐supervisorの登録表`supervisors`を足した（schema version 7）。`0008_goals.sql`は`goals`、`tasks.goal_id` / `tasks.context`を足し、`run_events`を作り直してgoal単位のイベントを持てるようにした（schema version 8、[ADR-0009](../adr/0009-goal-groups-tasks.md)。ADRの「schema v6」は7がsupervisorsに使われたためv8と読み替える）。`0009_supervisor_mode.sql`は`supervisors`に`mode`と`workspace_id`を足した（schema version 9、[ADR-0011](../adr/0011-cmux-socket-password-and-in-cmux-fallback.md)）。`0012_queue_events.sql`は`run_events`を作り直し、`backend_call_failed`だけはtaskにもgoalにも紐づかない行を持てるようにした（schema version 12、task 109）。`0016_observer.sql`は`asks`と`run_events`を作り直し、observerの`blocked`のaskとその事象、observer自身の`observe_started` / `observe_finished`をtaskの無い行として持てるようにした（schema version 16、task 99）。`0017_stuck_exit_ask.sql`は`asks`を0016と同じ手順で作り直し、kindのCHECKに`stuck_exit`（supervisorが`/exit`のtimeoutで作るask。task 104）を足した（schema version 17）。`0018_task_paths.sql`は`tasks.paths`を足した（schema version 18、[ADR-0029](../adr/0029-task-declares-paths-and-verification-follows-the-kind-of-change.md)）。`0019_task_goal_dependencies.sql`は`task_goal_dependencies`を足した（schema version 19）。`0020_task_priority.sql`は`tasks.priority`を足した（schema version 20、[ADR-0040](../adr/0040-verify-once-review-run-env-graph-stats-and-task-priority-in-claim-order.md)の決定4）。`0021_proposals.sql`は`proposals`、`tasks.proposal_id` / `goals.proposal_id`とtaskのstatus `submitted`を足した（schema version 21、[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定7、8）。`0022_follow_up_triage.sql`は`task_leases`と`tasks.follow_up_depth`を足し、`asks`を0017と同じ手順で作り直してkindに`follow_up`を足した（schema version 22、[ADR-0037](../adr/0037-follow-up-triage-job-decides-follow-up-drafts.md)）。`0024_schema_floor.sql`は受け入れるバイナリの下限`schema_floor`を足した（schema version 24、[ADR-0045](../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の決定7）。`0025_stalled_ask.sql`（breaking）は`asks`を0022と同じ手順で作り直し、kindに`stalled`（supervisorが促しの後もreceiptの無いidleが続くworkerのsessionで作るask。[ADR-0043](../adr/0043-detect-stalled-worker-sessions-nudge-once-then-ask.md)の決定1、task 288）を足し、`run_events`を0016と同じ手順で作り直してtaskの無い行に`stall_config_loaded`（supervisorが起動時に記録する閾値）を足した（schema version 25。古いbinaryは`stalled`のaskを読めないのでfloorも25になる）。`0026_search.sql`は全文検索の索引`search_index`（FTS5）、着地したcommitの表`landed_commits`と、両者を保つtriggerを足した（schema version 26、互換で、下限は25のまま。[ADR-0063](../adr/0063-full-text-search-related-with-mentions-and-search-strength-and-duplicate-of.md)の決定1〜3。下の[全文検索](#全文検索search)）。`0027_plan_review.sql`はplan review jobの表`plan_reviews`（部分unique index `plan_reviews_running`で未完了の行を1つまでにする）と`proposals`の`review_hold` / `revise_reasons` / `revised_at` / `revise_sent_at` / `revise_planner_id` / `unresponsive_at`を足し、`asks`を0025と同じ手順で作り直してkindに`approve_plan`を足した（schema version 27、非互換、ADR-0044の決定11〜15・17。読み書きは`src/infrastructure/plan_reviews.rs`、流れは[supervisor-lifecycle](supervisor-lifecycle/plan-review.md#plan-review-supervisor)）。`0028_draft_planners.sql`はruntimeやjobが作ったdraftの出どころの表`draft_origins`（導入前の`follow_up_registered`から埋める）と`planners.draft_task_id`（index `planners_by_draft`）を足し、follow-up triageの`task_leases`を消し、`asks`を0027と同じ手順で作り直してkindに`planner_question`を足した（schema version 28、非互換、ADR-0044の決定13・16。読み書きは`src/infrastructure/draft_planners.rs`、下の[draft planners](#draft-plannersdraft_plannersrs)）。`0030_findings.sql`はobserverの検出の表`findings`（部分unique index `findings_unsettled`で、同じ`kind`・対象・`subject`の`open` / `proposed`の行を1つまでにする）と`asks.finding_id`を足し、`asks_open`を作り直して（0029の鍵に）findingを加え、`run_events`を0025と同じ手順で作り直して、taskにもgoalにも紐づかない行を持てるkindに`finding_recorded` / `finding_updated` / `finding_status_changed`を足した（0026の`run_events`の3つのtriggerと、`run_events`を読む`tasks`のtrigger `search_task_moved`も作り直す。schema version 30、非互換、[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定18・23。読み書きは`src/infrastructure/findings.rs`、下の[findings](#findings)）。`0031_supervisor_handoff.sql`（compatible）は`supervisors`に`handoff_accepted` / `handoff_binary` / `handoff_requested_at`を`ALTER TABLE ADD COLUMN`で足した（schema version 31、[ADR-0045](../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の決定10、task 309。null可の列を足すだけなので互換で、floorは30のまま）。`0032_run_env_program_events.sql`（breaking）は`run_events`を0030と同じ手順で作り直し（0026のtriggerと`search_task_moved`も作り直す）、taskにもgoalにも紐づかない行を持てるkindに`run_env_program_missing` / `run_env_program_found`（supervisorが`[run.env]`の名指すプログラムの検査の答えが変わったときに記録する。[ADR-0049](../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)の決定9、task 395）を足した（schema version 32。CHECKを作り直すので非互換で、floorは32になる）。`0033_auto_update.sql`（compatible）は`supervisors.auto_update`を足し、自動更新の経過の表`binary_updates`（`kind`・`commit_sha`・`payload`・`created_at`。kindは`update_started` / `update_built` / `update_installed` / `update_failed` / `update_awaiting_approval` / `update_answered` / `update_retry`）を作った（schema version 33、[ADR-0045](../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の決定17、task 310。列と表を足すだけなので互換で、floorは32のまま。`run_events`のkindを足すのは非互換になるので、自動更新は自分の表に経過を置き、inboxにはtaskの無い`blocked`のask（`subject`が`update_failed` / `approve_update`）で知らせる。[Auto-update](supervisor-lifecycle/auto-update.md#auto-update)）。`0034_task_kind.sql`（compatible）は`tasks.kind`（TEXT、null可、CHECKなし）を足した（schema version 34、goal 21。列を足すだけなので互換で、floorは32のまま。古いbinaryは列を読まず、その`INSERT`はnullを残す）。kindを4値から自由なlabelにした[ADR-t624-1](../adr/2026-09-27-t624-1-task-kind-is-a-free-label.md)は、列にCHECKが無いのでmigrationを足していない（4値だけを読むbinaryは他のlabelをnullと読む）。`0035_session_events.sql`（breaking）は`run_events`を0032と同じ手順で作り直し（0026のtriggerと`search_task_moved`も作り直す）、taskにもgoalにも紐づかない行を持てるkindに`session_opened` / `session_closed` / `session_turns`（Claude sessionの区間とtranscriptのturn。observerのjobと後続taskのinbox・plannerのsessionはtaskを持たない。[ADR-0048](../adr/0048-record-claude-sessions-by-kind-with-open-and-active-time.md)の決定2・8、task 385。書き方は[provider-lifecycle](provider-lifecycle.md#claude-sessionの区間)）を足した（schema version 35。CHECKを作り直すので非互換で、floorは35になる）。`0036_change_marks.sql`（breaking）は`run_events`を0035と同じ手順で作り直し（0026のtriggerと`search_task_moved`も作り直す）、taskにもgoalにも紐づかない行を持てるkindに変更の印の`supervisor_started` / `supervisor_stopped` / `run_env_changed` / `mark_recorded` / `mark_retracted`を足した（schema version 36、[ADR-0051](../adr/0051-kpi-time-series-report-and-push.md)の決定10〜13、task 429。[変更の印](supervisor-lifecycle/marks.md)。CHECKを作り直すので非互換で、floorは36になる）。`0037_supervisor_max_waiting.sql`（compatible）は`supervisors.max_waiting`（supervisorの`--max-waiting`。登録と引き継ぎの取り戻しの直後に`set_max_waiting`が書く）を足した（schema version 37、[ADR-0062](../adr/0062-runs-waiting-for-a-person-leave-the-slot.md)の決定7。null可の列を足すだけなので互換で、floorは変わらない）。人の答えを待つrunの`run_waiting_started` / `run_waiting_ask_added` / `run_waiting_ended` / `run_slot_regained` / `run_waiting_deferred`はrunに紐づくrun_eventsのkindなので、CHECKを変えない（[人の答えを待つrun](supervisor-lifecycle/waiting.md)）。`0038_ask_answerers.sql`（compatible）は`asks`に`answered_by`（TEXT、null可）と`option_index`（INTEGER、null可）を`ALTER TABLE ADD COLUMN`で足した（schema version 38、task 325。下の[asks](#asks)。列を足すだけなので互換で、floorは変わらない。古いbinaryは列を読まず、その回答はどちらもnullを残す）。`0039_open_kinds.sql`（breaking）は`asks`と`run_events`を0029・0036と同じ手順で作り直し（idと0038の`answered_by` / `option_index`を保ち、`asks_open`、0026のtriggerと`search_task_moved`も作り直す）、kindを名指すCHECKをすべて外した（schema version 39、[ADR-0073](../adr/0073-kind-additions-are-compatible.md)の決定19〜23、task 495。`asks.kind`は空でないことだけをCHECKする）。外したCHECKが持っていた規則（知っているkindだけを書く、taskの無いaskは`blocked`か`queue_hold`でrunも無い、`queue_hold`のaskとだけ`reason_category`が`authentication` / `cost`、task・goal・runのどれにも属さないeventは`EventKind::is_queue`が真のkind）は書き込み口の`check_ask_kind` / `check_event_target`（`src/domain/mod.rs`）が書く前に検査する。書き込み口（queueのportとその`SqliteQueue`の実装の`record_runtime_event` / `record_queue_event` / `record_task_event` / `record_finding_event` / `record_kpi_breach` / `prune_supervisor`と、`run_events`に`INSERT`する内部の関数）はeventのkindを文字列ではなく`EventKind`（`src/domain/event_kind.rs`。このバイナリの知るkindの列挙）で受け取り、`as_str`の文字列を書く（ADR-0073の決定20、task 552。DBの値は変わらないのでmigrationは要らない）。kindを足すときは`EventKind`に値を足し、queueのeventなら`is_queue`にも足す。読む側（`RunEvent.kind`、show・watch・events・timeline・statsの表示と集計）は文字列のまま寛容に読む（決定21）。読むときは知らないkindのaskを`AskKind::Other`にし、知らないkindのeventも落とさずに出す。これ以後はaskとeventのkindを足すのにmigrationは要らない。`schema.rs`の`kind_enumerations`がkindの値を名指すCHECKを見つけ、`compatibility_violations`はそれを互換の違反に数え、schemaのtestは0039より後のmigrationにそれが無いことを検査する（非互換の宣言でも）。CHECKを外すので非互換で、floorは39になる）。自動更新の経過は、0039の後にtask 496で`run_events`のqueue単位のkind `update_*`とaskのkind `update_failed` / `approve_update`（taskもrunも持たない）に移し、0033の`binary_updates`は残したまま書きも読みもしない（migrationは要らない。[Auto-update](supervisor-lifecycle/auto-update.md#auto-update)）。`0041_draft_reopens.sql`（compatible）は出どころ`reopened`のdraftの表`draft_reopens`を足した（schema version 41、task 418。表を足すだけなので互換で、floorは39のまま。下の[draft planners](#draft-plannersdraft_plannersrs)）。`0042_goal_reviews.sql`（compatible）はgoal review jobの表`goal_reviews`を足した（schema version 42、[ADR-0047](../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定43、task 375。表とindexを足すだけなので互換で、floorは39のまま。互換のmigrationは外部キーとunique indexを持てないので、未完了の行を1つまでにするのは`begin_goal_review`の`BEGIN IMMEDIATE`の中の検査。askのkind `approve_goal`とeventのkind `goal_review_*` / `goal_decided`はmigrationを要らない。読み書きは`src/infrastructure/goal_reviews.rs`、流れは[Goal review](supervisor-lifecycle/goal-review.md#goal-review-supervisor)）。`0043_headless_jobs.sql`（compatible）はheadless job（review・復旧job・plan review・goal review）のプロセスの表`headless_jobs`（kind、label、run_id / proposal_id / goal_id、attempt、pid、process_start、supervisor_token、started_at、ended_at、outcome）と未完了の行の部分index `headless_jobs_unfinished`を足した（schema version 43、task 443。表とindexを足すだけなので互換で、floorは39のまま。eventのkind `headless_job_stopped`はmigrationを要らない。読み書きは`src/infrastructure/headless_jobs.rs`、流れは[Headless job processes](supervisor-lifecycle/headless-job-processes.md)）。`0044_event_actors.sql`（compatible）は`run_events`に`actor_role`・`actor_id`・`requested_by`（どれもnull可）を足した（schema version 44、task 730、ADR-t728-1の決定4）。新しいバイナリは全てのeventに書いたactorのroleとid、headless jobのverdictを適用したときはそのjobのidを書き（仕組みは[Roles](supervisor-lifecycle/roles.md)のeventのactor）、それより前の行と古いバイナリが書く行はnullのまま読める。列を足すだけなので互換で、floorは変えない。後で`run_events`を作り直すmigrationは、この3列も写すこと（列を並べて写す今までの作り直しのままだと消える）。`0046_proposal_owner_actor.sql`（compatible）は`proposals.owner_actor_id`（null可）を足した（schema version 46、task 732）。`submit`が出したactorのid（`planner:<id>`など）を書き、plannerの`proposal withdraw`を自分のproposalに限る判定が読む（[Authorization](authorization.md)）。`0047_answer_authority.sql`（compatible）は`asks.answer_authority`と`asks.answer_approval`（どちらもnull可）を足した（schema version 47、task 733）。answerを書くときに、権限の出どころ（`user`・`delegated`・`runtime`）と承認に当たるか（1 / 0）を書く。`answered_by`の値は変えない（[Authorization](authorization.md#answerの権限の出どころと承認の分類)）。それより前のproposalと古いバイナリが出したものはnullで、plannerは取り下げられない。列を足すだけなので互換で、floorは変えない。`0048_worker_provider.sql`（compatible）は`tasks.worker_provider`・`tasks.worker_mode`・`task_runs.worker_mode`（null可、値はCHECKで列挙）と`supervisors.providers`（null可のJSON）を足した（schema version 48、task 814、ADR-t813-2）。taskのworkerのproviderと経路、runの経路、supervisorが解決したproviderの実行ファイルを持つ（下の`tasks.worker_provider`の段落）。列を足すだけなので互換で、floorは変えない。`0049_open_run_providers.sql`（breaking）は`task_runs`をCHECKなしで作り直した（schema version 49、task 816）。`0050_no_check_constraints.sql`（breaking）は残りの全ての表からCHECKを外した（schema version 50、task 878、[ADR-t876-1](../adr/2026-09-28-t876-1-no-sqlite-check-constraints-until-schema-is-stable.md)。下の[CHECK制約を使わない](#check制約を使わない)）。`0052_draft_bundles.sql`（compatible）はdraftの束の表`draft_bundles`と`draft_bundle_members`を足した（schema version 52、task 807、[ADR-t807-1](../adr/2026-09-28-t807-1-bundle-drafts-of-one-piece-of-work-for-one-runtime-planner.md)。表とindexを足すだけなので互換で、floorは変えない。古いbinaryはこの表を読まず、束の2件目以降のdraftにもplannerを立てうる。下の[draft planners](#draft-plannersdraft_plannersrs)）。`0053_task_change.sql`（compatible）は`tasks.change`（TEXT、null可）を足した（schema version 53、task 982、[ADR-t980-1](../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)。列を足すだけなので互換で、floorは変えない。古いbinaryは列を読まず、その`INSERT`はnullを残す。読むときは形の合わない値をnullと読む寛容な側）。`0054_ask_topics.sql`（compatible）は`asks.topics`（TEXT、null可、CHECKなし）を足した（schema version 54、task 953、[ADR-t947-2](../adr/2026-09-28-t947-2-worker-questions-carry-topic-codes.md)。`worker_question`の分類コードのJSON配列で、先頭が主。他のkindとそれより前のaskはnullで、埋めない。列を足すだけなので互換で、floorは変えない。古いbinaryは列を読まず、その`INSERT`はnullを残す。読むときは配列でない値を無いものと読む）。`0055_headless_job_provider.sql`（compatible）は`headless_jobs.provider`（TEXT NOT NULL DEFAULT 'claude'）を足した（schema version 55、task 1062、goal 73。jobを起動したproviderで、値の集合はrunの`requested_provider` / `actual_provider`と同じ。それより前の行と、列を知らない古いbinaryの`INSERT`は既定の`claude`になる。列を足すだけなので互換で、floorは変えない。[Headless job processes](supervisor-lifecycle/headless-job-processes.md)）。`0056_drop_task_kind.sql`（breaking）は`tasks.kind`を`ALTER TABLE tasks DROP COLUMN kind`で落とした（schema version 56、task 984、[ADR-t980-1](../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)の決定1。taskのkindを廃止し、分類はchangeとareaが引き継ぐ。列を名指すtrigger・index・viewは無い。列を落とすので非互換で、floorは56に上がり、migrateは退避を取る。[ADR-0073](../adr/0073-kind-additions-are-compatible.md)の非互換のmigrationの手順に従う）。`0059_ask_recommendation.sql`（compatible）は`asks.recommendation`と`asks.confidence`（どちらもTEXT、null可、CHECKなし）を足した（schema version 59、task 1318、[ADR-t451-1](../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)の決定1。既存のaskはnullのまま。列を足すだけなので互換で、floorは変えない。古いbinaryは列を読まず、その`INSERT`はnullを残す）。`0060_planner_route.sql`（compatible）は`planners.route`（TEXT、null可、CHECKなし）を足した（schema version 60、task 1396、[ADR-t1394-2](../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)の決定1。`headless`はplannerのagentを1 turnずつ動かす経路で、nullは対話。既存の行はnullのまま。列を足すだけなので互換で、floorは変えない。古いbinaryは列を読まず、その`INSERT`はnullを残す。[`plan` / `planners`](supervisor-lifecycle/plan-planners.md#runtimeのplannerの経路)）。`0061_plan_requests.sql`（compatible）は計画の依頼の表`plan_requests`と、依頼から出たproposalの表`plan_request_proposals`、`planners.request_id`（index `planners_by_request`）と`asks.request_id`（index `asks_by_request`）を足した（schema version 61、task 1395、[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)。表とindexとnull可の列を足すだけなので互換で、floorは変えない。古いbinaryは表を読まず、列を名指さないので、依頼のplannerを何のためでもないruntimeのplannerと読み、依頼にplannerを立てない。下の[planning requests](#planning-requestsplan_requestsrs)）。`0065_goal_priority.sql`（breaking）は`goals.priority`（既定1＝`normal`）を足し、`tasks.priority`をnull可の個別の指定に作り替えた（schema version 65、task 1640、[ADR-t1639-1](../adr/2026-10-04-t1639-1-goal-priority-is-the-source-tasks-inherit-and-goals-carry-tags.md)。下の`tasks.priority`の段落。古いbinaryは`tasks.priority`をNOT NULLの整数と読み、nullの行で読み込みが止まるので非互換）。`0066_task_wait_for_build.sql`（compatible）は`tasks.wait_for_build`（INTEGER NOT NULL DEFAULT 0、CHECKなし）を足した（schema version 66、task 1632、[ADR-t1632-1](../adr/2026-10-05-t1632-1-claim-waits-for-a-build-that-contains-the-dependencies-landings.md)。taskが固定バイナリに依存先の着地を含むことを要するかの宣言で、0は宣言しない。既存のtaskは0のまま。既定のある列を足すだけなので互換で、floorは変えない。古いbinaryは列を読まず、その`INSERT`は0を残す。書くのは`Task::wait_for_build`のboolだけで、読むときは0以外を宣言と読む。[claimを控える](supervisor-lifecycle/claim-defer.md#依存先の着地を含むbuildを待つtask)）。`0067_goal_tags.sql`（compatible）は`goals.tags`（TEXT NOT NULL DEFAULT '[]'、CHECKなし）を足した（schema version 67、task 1641、[ADR-t1639-1](../adr/2026-10-04-t1639-1-goal-priority-is-the-source-tasks-inherit-and-goals-carry-tags.md)の決定6。goalのラベルのJSON配列で、既存のgoalは`[]`のまま。既定のある列を足すだけなので互換で、floorは変えない。古いbinaryは列を読まず、その`INSERT`は`[]`を残す。下の`goals`（0008）の段落）。
+ 
+ ```text
+ tasks                -- 0020: priority（INTEGER、low=0 … interrupt=4、既定1、CHECK 0〜4）
+@@ -83,6 +83,7 @@ goals                -- 0008: 複数taskが解く課題（title、description、
+                      -- 0021: proposal_id（所属するproposal、null可）
+                      -- 0064: acceptance_version（INTEGER NOT NULL DEFAULT 1）。trigger goal_acceptance_versionはacceptanceの文が変わったときだけ版を1増やす（非互換、ADR-t1504-2）
+                      -- 0065: priority（INTEGER NOT NULL DEFAULT 1、low=0 … interrupt=4。個別の指定の無いtaskが継ぐ。ADR-t1639-1）
++                     -- 0067: tags（TEXT NOT NULL DEFAULT '[]'、CHECKなし。ラベルのJSON配列。ADR-t1639-1）
+ follow_up_judgements -- 0064: 所属の判断と訂正（task_id、source_goal_id、source_kind、classification、acceptance_items、reason、evidence、destination_goal_id、acceptance_version、corrects、actor_role、created_at）。index judgements_by_task / judgements_by_source。trigger judgement_no_update / judgement_no_deleteで追記だけにする
+ session_workspaces   -- 0011: up が開いた常駐sessionのworkspace UUID（role主キー。supervisor / inbox。退役したrole（maintainer、常駐のplanner）の行はupが消す）
+ asks                 -- 0014（0016、0017、0022、0025、0027、0028で作り直し）: 人に答えを求める相談（kind、task / run、question、options、answer、asked_by、各時刻。0038: answered_by、option_index）
+@@ -110,7 +111,7 @@ planners             -- 0023: plannerのsession 1つに1行（origin、proposal_
+ `tasks.worker_provider`と`tasks.worker_mode`（0048、[ADR-t813-2](../adr/2026-09-28-t813-2-provider-per-task-and-mutual-fallback.md)の決定1）はtaskのworkerのproviderと経路（[domain-model](domain-model.md)の`Worker`）を持つ。どちらもnull可で、0047以前のtaskと古いbinaryがinsertしたtaskはnullのまま、`task_row`が`Worker::resolve`でclaude・providerの既定（Claudeは非対話、[ADR-t1340-1](../adr/2026-10-02-t1340-1-claude-worker-defaults-to-headless.md)。それより前のbinaryは対話）と読む。値はstatusと同じくCHECKで列挙する（`IS NULL OR ... IN (...)`）ので、providerや経路を足すのは非互換のmigrationになる（[ADR-0073](../adr/0073-kind-additions-are-compatible.md)の決定6）。`add`（`insert_task`）はproviderを書き、`worker_mode`はtaskが経路を指定したときだけ値を、指定しないときはNULLを書く（`Task::stored_worker_mode`。Codexは`headless`）。`edit_task`は`EDITABLE_TASK_FIELDS`に`provider`と`worker_mode`を含めて同じ`UPDATE`で書く。0048〜0056の`add`は解決した組を書いたので、0057（互換）がまだclaimされていない既定のClaudeのtaskの`interactive`をNULLに戻した（[provider-lifecycle](provider-lifecycle.md#workerのproviderと経路)）。`search`はtaskのhitにだけ、`search_index`の`ref`で`tasks`を引いて`provider`と`worker_mode`を足す。`task_runs.worker_mode`（0048）はclaimが書くrunの経路で、nullは`interactive`と読む。`task_runs`の`requested_provider` / `actual_provider`は0001から`CHECK (… = 'claude')`で値を列挙していたが、0049（非互換、task 816）が`task_runs`を作り直して、この2つと`status`・`worker_mode`のCHECKを外した（[ADR-t876-1](../adr/2026-09-28-t876-1-no-sqlite-check-constraints-until-schema-is-stable.md)。新しいmigrationにCHECKは書かない）。行・rowidの順・全列・NOT NULL・`UNIQUE (id, task_id)`・4つのindexは保つ。規則は書き込み口と読みが持つ: runは型付きの`RunStatus`・`Provider`・`WorkerMode`を持つ`TaskRun`からだけinsertとsaveされ、それらの外の値の行はそのtaskの読み込みを`enum_col`のerrorで止める（fail closed。`tests/it/queue_migration.rs`の`migration_opening_the_run_providers_keeps_runs_and_takes_a_codex_run`）。Codexのrunを古いbinaryは読めないので非互換。`claim_task`は受け取ったworkerの一覧（supervisorはadapterの表にあるworker、`TaskStore::claim`と`claim_for_supervisor`はClaudeの対話と非対話）に入らないtaskを候補から外す。`supervisors.providers`（0048）はsupervisorが起動（exec の引き継ぎを含む）のたびに書く`ProviderCheck`の配列のJSONで、`status`と`doctor`の`supervisors[].providers`が読む（形の読めないJSONはnullと読む）。4つとも古いbinaryは名前を出さない列の追加なので、migrationは互換と宣言する。
+ 
+ `proposals`（0021、ADR-0044の決定7）はplannerがplan reviewに出した束を1行で持つ: `status`（CHECK `'submitted' | 'revising' | 'accepted' | 'canceled'`）、持ち主のplanner（`owner_origin`（CHECK `'person' | 'runtime'`）と`owner_workspace_id`（cmux workspaceのUUID、null可））、最後にsubmitした`submitted_at`、差し戻しの回数`revise_count`（0以上）、`created_at` / `updated_at`。memberは表を分けず、`tasks.proposal_id`と`goals.proposal_id`（`REFERENCES proposals(id)`）が今属するproposalを指す（taskとgoalは同時に1つだけ。`accepted` / `canceled`になったproposalを指したままのmemberは、次のsubmitで別のproposalに移れる。`proposal withdraw`も同じく`proposal_id`を残して`canceled`にする）。index `proposals_by_status (status, submitted_at)`がplan reviewの順（submitの古い順）の読み出しに、`tasks_by_proposal`がmemberの読み出しに効く。書き込みは`src/infrastructure/proposals.rs`で、どれも呼び出し側の`BEGIN IMMEDIATE`の中で行う。
+-- `submit`: `Submission::validate`、`--proposal`があればそのproposalが`revising`であることを確かめ、goal（閉じていないこと、他のactiveなproposalのmemberでないこと）ごとにそのdraftのtaskを、出し直しならproposalが持つdraftのtaskを集め、各taskが他のactiveなproposalのmemberでないことを`proposal::check_task_joins`で確かめる。新しいproposalは`next_id(proposals)`で採番して`Proposal::submit`、出し直しは`proposal::resubmit`を通して行を`INSERT ... ON CONFLICT(id) DO UPDATE`で書き、memberのtaskを`transition_task`（`TaskAction::Submit`）で`submitted`にして`proposal_id`を書き、`task_submitted`（`proposal_id`）を、新しく入ったgoalに`goal_submitted`を記録する。1件でも拒否されればトランザクションごと巻き戻る（IDも消費しない）。
++- `submit`: `Submission::validate`、`--proposal`があればそのproposalが`revising`であることを確かめ、goal（閉じていないこと、他のactiveなproposalのmemberでないこと）ごとにそのdraftのtaskを、出し直しならproposalが持つdraftのtaskを集め、各taskが他のactiveなproposalのmemberでないことを`proposal::check_task_joins`で確かめる。`SqliteQueue::with_changes`で受けた`[tasks] changes`があれば動かす各taskのchangeを、`with_goal_tags`で受けた`[goals] tags`があれば与えたgoalと動かすtaskの所属のgoalのうち閉じていないdraftのgoalのラベルを`TagSet::check_declared`で確かめ、ラベルが無いか集合の外なら`GoalTagMissing` / `GoalTagNotInSet`で拒んで何も動かさない（ADR-t1639-1の決定6）。新しいproposalは`next_id(proposals)`で採番して`Proposal::submit`、出し直しは`proposal::resubmit`を通して行を`INSERT ... ON CONFLICT(id) DO UPDATE`で書き、memberのtaskを`transition_task`（`TaskAction::Submit`）で`submitted`にして`proposal_id`を書き、`task_submitted`（`proposal_id`）を、新しく入ったgoalに`goal_submitted`を記録する。1件でも拒否されればトランザクションごと巻き戻る（IDも消費しない）。
+ - `approve_proposal`（plan reviewの経路）: `proposal::accept`、memberの`submitted`のtaskを`TaskAction::Approve`で`ready`に、draftで閉じていないmemberのgoalを`goal::ready`で`open`にして`goal_status_changed`を記録する。`send_back_proposal`: `proposal::send_back`（`revising`、`revise_count`+1）、memberの`submitted`のtaskを`draft`に戻す。
+ - `proposals(all)`はactive（`submitted` / `revising`）なもの（`all`なら全部）を`submitted_at, id`の順に、`show_proposal`は1件を、memberのtask / goal IDの昇順とともに返す。`status`は`proposals(false)`を`proposals`に載せる。
+ - bypassの`ready`（`TaskAction::BypassReview`）は`transition_task`が`task_status_changed`に続けて`review_bypassed`（`from`）を書く。
+@@ -136,7 +137,7 @@ planners             -- 0023: plannerのsession 1つに1行（origin、proposal_
+ 
+ `task_dependencies(task_id, predecessor_id)`は依存関係を保存する。`task_goal_dependencies(task_id, goal_id)`（0019、[ADR-0038](../adr/0038-task-depends-on-a-goal-until-it-is-achieved.md)）はtaskからgoalへの依存を保存する（主キー`(task_id, goal_id)`、両列に外部キー、index `goal_dependencies_by_goal`）。自分の属するgoalへの依存はgoalがtaskの列なのでCHECKに置けず、domainが拒否する。0019は表を作るだけで`task_dependencies`には触れないので、既存queueのtask依存は移行後もそのまま残り、goal依存は空になる。TaskRunは試行ごとに新しい行を作り、Taskに履歴を持たせる。workspace、worktree、receipt、log、repo、run directory、supervisor token、last errorの参照列をtask_runsに置き、claim時点ではnullにする。`result_commit`は検証で確認したcommitで、着地後は`main`に積んだsquash commitに置き換わる（rebase後のrun headは`refs/dagq/runs/<run-id>`と`run_integrated`イベントの`source_commit`が持つ）。`last_error`は検証の拒否理由、`needs_session`の理由、cleanup失敗、またはruntime errorを持ち、着地で消える。`workspace_closed_at`（0003）はcmuxがcloseを確認した時刻で、nullの間はworkspaceを開いているものとして扱う。成果物hashは未実装。
+ 
+-`goals`（0008）はgoalを1行で持つ。`title`は空でなく、`description` / `acceptance` / `constraints`は既定`''`、`doc`はnull可。0064の`acceptance_version`は初期値1で、acceptanceの文が変わったときだけ`goal_acceptance_version` triggerが増やす。0065の`priority`（`INTEGER NOT NULL DEFAULT 1`、`low`=0 … `interrupt`=4）はgoalの優先度で、個別の指定の無いtaskが読むときに継ぐ（ADR-t1639-1の決定1・2）。既存のgoalは移行後に1（`normal`）になる。`add_goal`は`goal add --priority`の値（既定`normal`）を書き、`goal_row`は`Priority::from_i64`で復元する。`edit_goal`は`goal edit --priority`の値を`goal::edit`（閉じたgoalの優先度の変更を拒む）を通して書き、taskの行は書き換えない。`edit_goal`は更新前後のgoal全体（`old` / `new`の`priority`を含む）と版を`goal_updated`に残し、`show_goal`は`GoalDetail`の別欄で版を返す。`verdict`は`'achieved'` | `'abandoned'` | nullで、CHECK `(closed_at IS NULL) = (verdict IS NULL)`により閉じたgoalだけがverdictを持つ。`tasks.goal_id`は`goals(id)`への外部キー（null可、index `tasks_by_goal`）、`tasks.context`は`TEXT NOT NULL DEFAULT ''`で、v7以前のtaskは移行後に`goal_id = NULL`、`context = ''`になる。`run_events`は0008で作り直し、`task_id`をnull可にして`goal_id`（`goals(id)`への外部キー、index `events_by_goal`）を足した。CHECKで`task_id`と`goal_id`の少なくとも一方が非null、`run_id`があれば`task_id`も非nullとし、`(run_id, task_id) → task_runs(id, task_id)`の複合外部キーは残す。goal単位のイベント（`goal_created`、`goal_updated`、`goal_closed`）は`goal_id`だけを持ち、`task_goal_changed`はtaskのイベントとして`task_id`を持つ。goalの操作（`add_goal` / `edit_goal` / `close_goal` / `set_goal`と`add --goal`）は他の状態変更と同じく`BEGIN IMMEDIATE`で直列化し、closeの判定（status別件数）とverdictの書き込み、set-goalのtask statusとgoalの開閉、最新の所属の判断との整合の確認を同じトランザクションで行う（[follow-upの所属の判断](#follow-upの所属の判断)）。
++`goals`（0008）はgoalを1行で持つ。`title`は空でなく、`description` / `acceptance` / `constraints`は既定`''`、`doc`はnull可。0064の`acceptance_version`は初期値1で、acceptanceの文が変わったときだけ`goal_acceptance_version` triggerが増やす。0065の`priority`（`INTEGER NOT NULL DEFAULT 1`、`low`=0 … `interrupt`=4）はgoalの優先度で、個別の指定の無いtaskが読むときに継ぐ（ADR-t1639-1の決定1・2）。既存のgoalは移行後に1（`normal`）になる。`add_goal`は`goal add --priority`の値（既定`normal`）を書き、`goal_row`は`Priority::from_i64`で復元する。`edit_goal`は`goal edit --priority`の値を`goal::edit`（閉じたgoalの優先度の変更を拒む）を通して書き、taskの行は書き換えない。0067の`tags`（`TEXT NOT NULL DEFAULT '[]'`）はgoalのラベルを重複の無いJSON配列（与えた順）で持ち（ADR-t1639-1の決定6）、`add_goal`は`goal add --tag`の値を、`edit_goal`は`goal edit --tag` / `--no-tags`の値を`goal::edit`を通して書く。どちらも書く前に、`SqliteQueue::with_goal_tags`で受けたrepositoryの`[goals] tags`があれば集合の外のラベルを`GoalTagNotInSet`で拒む。`goal_row`はJSON配列を`GoalTag`の並びとして読み、形の合わない値や重複は復元の誤りにする。形と重複はruntimeが書くときに検査するのでCHECKは置かない。`list_goals`はgoalごとに`priority`と`tags`を返し、`goal list`の並び（閉じていないgoalを先に、優先度の降順 → IDの昇順）と`--tag`の絞り込みはapplicationが`domain::goal::list`で行う（storeはIDの順に返す）。`search`のgoalのhitは`goals.tags`をsubqueryで読んで`tags`に出す。`edit_goal`は更新前後のgoal全体（`old` / `new`の`priority`と`tags`を含む）と版を`goal_updated`に残し、`show_goal`は`GoalDetail`の別欄で版を返す。`verdict`は`'achieved'` | `'abandoned'` | nullで、CHECK `(closed_at IS NULL) = (verdict IS NULL)`により閉じたgoalだけがverdictを持つ。`tasks.goal_id`は`goals(id)`への外部キー（null可、index `tasks_by_goal`）、`tasks.context`は`TEXT NOT NULL DEFAULT ''`で、v7以前のtaskは移行後に`goal_id = NULL`、`context = ''`になる。`run_events`は0008で作り直し、`task_id`をnull可にして`goal_id`（`goals(id)`への外部キー、index `events_by_goal`）を足した。CHECKで`task_id`と`goal_id`の少なくとも一方が非null、`run_id`があれば`task_id`も非nullとし、`(run_id, task_id) → task_runs(id, task_id)`の複合外部キーは残す。goal単位のイベント（`goal_created`、`goal_updated`、`goal_closed`）は`goal_id`だけを持ち、`task_goal_changed`はtaskのイベントとして`task_id`を持つ。goalの操作（`add_goal` / `edit_goal` / `close_goal` / `set_goal`と`add --goal`）は他の状態変更と同じく`BEGIN IMMEDIATE`で直列化し、closeの判定（status別件数）とverdictの書き込み、set-goalのtask statusとgoalの開閉、最新の所属の判断との整合の確認を同じトランザクションで行う（[follow-upの所属の判断](#follow-upの所属の判断)）。
+ 
+ `goals.status`（0013、ADR-0044の決定5）は`'draft'` | `'open'`（CHECK、`NOT NULL DEFAULT 'open'`）で、v12以前のgoalは移行後すべて`open`になる。`closed_at` / `verdict`とは独立で、閉じたdraftもありうる。`goal add --draft`が`draft`で挿入し、`goal ready`（`ready_goal`）が`BEGIN IMMEDIATE`の中でdraftかつ未closeを確かめて`open`に更新し、`goal_status_changed`を書く。候補の問い合わせ`READY_QUERY`（`candidates`、`graph_input`、`claim_task`が共有する）は、`goal_id`の指す`goals`の行が`status = 'draft'`のtaskを除く。0019からは、`task_goal_dependencies`の先のgoalに`closed_at IS NOT NULL AND verdict = 'achieved'`でないものが1つでもあるtaskも除く（goalの所属taskのstatusは見ない）。`list` / `show`は`task_goal_dependencies`からgoal IDの昇順を`goal_dependencies`に、`goal show`は未完了（completed / canceled以外）でそのgoalに依存しているtaskを`dependents`に、`graph_input`は依存先goalのIDとverdictを読む。workerのprompt用の`goal_predecessors`は依存先goalごとに、そのgoalの`completed`のtaskを`predecessors`と同じ形（integratedのrun付き）で返す。
+ 
+diff --git a/docs/design/queue-service.md b/docs/design/queue-service.md
+index fe4eb5f5..1625df6d 100644
+--- a/docs/design/queue-service.md
++++ b/docs/design/queue-service.md
+@@ -4,8 +4,8 @@ type: design
+ title: Queue service
+ status: current
+ created: 2026-10-02
+-updated: 2026-10-05 # task 840: broker package backend in the name note; task 1352: a service a test started stops once the test's process is gone (DAGQ_SERVICE_OWNER_PID, owner_gone)
+-last_verified: 2026-10-05 # task 840; task 1352
++updated: 2026-10-05 # task 1641: goal_list's tag; task 840: broker package backend in the name note; task 1352: a service a test started stops once the test's process is gone (DAGQ_SERVICE_OWNER_PID, owner_gone)
++last_verified: 2026-10-05 # task 1641; task 840; task 1352
+ scope: runtime
+ tags:
+   - security
+@@ -115,7 +115,7 @@ queue全体の読み取り（ADR-t1233-5決定1〜3、task 1242）。1つの読
+ | `findings` | `findings` | `id`・`all`・`status`・`kind`（配列）・対象を高々1つ（`task`・`run`・`goal`か`queue: true`）・`full` |
+ | `search` | `search QUERY` | `query`・`status`・`kind`・`goal`・`limit`（20）・`full` |
+ | `related` | `related TASK` | `task`・`status`・`limit`（10） |
+-| `goal_list` | `goal list` | なし |
++| `goal_list` | `goal list` | `tag`（配列。どれかを持つgoalだけ、形の合わないものはbad request） |
+ | `goal_show` | `goal show ID` | `id`・`full` |
+ | `lint` | `lint` | `tasks`・`proposals`（どちらかは要る） |
+ | `observe_history` | `observe --history` | `limit`（`observer::HISTORY_LIMIT`） |
+diff --git a/docs/design/supervisor-lifecycle/run-environment.md b/docs/design/supervisor-lifecycle/run-environment.md
+index 85d5b7cc..637b37fe 100644
+--- a/docs/design/supervisor-lifecycle/run-environment.md
++++ b/docs/design/supervisor-lifecycle/run-environment.md
+@@ -4,8 +4,8 @@ type: design
+ title: "Run environment"
+ status: current
+ created: 2026-09-26
+-updated: 2026-10-05 # task 840: [broker.package]; task 1591; task 1437
+-last_verified: 2026-10-05 # task 840
++updated: 2026-10-05 # task 1641: [goals] tags; task 840: [broker.package]; task 1591; task 1437
++last_verified: 2026-10-05 # task 1641; task 840
+ scope: runtime
+ related:
+   - adr-t963-1
+@@ -26,7 +26,7 @@ related:
+ 
+ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)の決定3。ADR-0040の決定3を引き継ぐ）が、runごとの環境変数になる。読み込みは`src/infrastructure/run_env.rs`の純粋関数（`parse_run_env`と`expand`、fileを読む`load_run_env`）で、ファイルが無ければ空。
+ 
+-- 書式はTOMLの部分集合: 表は`[run.env]`・`[stall]`・`[conflicts]`・`[recheck]`・`[disk]`・`[resume]`・`[exit]`・`[repository]`（[Landing branch](landing-branch.md)）・`[worker.trial]`・`[roles.<role>]`・`[language]`・`[supervisor]`・`[areas]`・`[tasks]`・`[e2e]`・`[broker]`と`[broker.package]`（[Broker](../broker.md#mode-と設定)）・`[review.subagents.<agent>]`（下の項）・`[headless]`（[非対話のworker](headless-worker.md#workspaceなしのbackgroundのwrapper)）・`[kpi]`（と`[kpi.targets."<KPI>"]`）だけを持ち（`[language]`はここでは表として受け付けるだけで中を見ず、[Language](language.md)の読み手が検査する。誤りでclaimや着地を止めないため）、`[run.env]`の各行は`KEY = 'literal'`か`KEY = "basic"`（`\\` `\"` `\n` `\t`のescape）。`#`以降はcomment。ほかの表、表の外のkey、環境変数名でないkey、重複したkey、`DAGQ_`で始まるkey（runtimeが`DAGQ_ROLE` / `DAGQ_QUEUE`に使う）はエラーにする。
++- 書式はTOMLの部分集合: 表は`[run.env]`・`[stall]`・`[conflicts]`・`[recheck]`・`[disk]`・`[resume]`・`[exit]`・`[repository]`（[Landing branch](landing-branch.md)）・`[worker.trial]`・`[roles.<role>]`・`[language]`・`[supervisor]`・`[areas]`・`[tasks]`・`[goals]`・`[e2e]`・`[broker]`と`[broker.package]`（[Broker](../broker.md#mode-と設定)）・`[review.subagents.<agent>]`（下の項）・`[headless]`（[非対話のworker](headless-worker.md#workspaceなしのbackgroundのwrapper)）・`[kpi]`（と`[kpi.targets."<KPI>"]`）だけを持ち（`[language]`はここでは表として受け付けるだけで中を見ず、[Language](language.md)の読み手が検査する。誤りでclaimや着地を止めないため）、`[run.env]`の各行は`KEY = 'literal'`か`KEY = "basic"`（`\\` `\"` `\n` `\t`のescape）。`#`以降はcomment。ほかの表、表の外のkey、環境変数名でないkey、重複したkey、`DAGQ_`で始まるkey（runtimeが`DAGQ_ROLE` / `DAGQ_QUEUE`に使う）はエラーにする。
+ - 値の`${DAGQ_QUEUE_DIR}`はqueue directory（DBのある directory）、`${DAGQ_RUN_DIR}`はそのrunのrun directoryに展開する。ほかの`$`は書いたまま残す（shellの展開はしない）。`${DAGQ_RUN_DIR}`はtask 91で加えた（ADR-0040の決定3、ADR-0049の決定3が引き継ぐ）。
+ - 読むのはrepositoryのmain checkout（下の「main checkoutの決め方」）の作業ファイルで、run worktreeのものではない。`integrate`をどのworktreeから呼んでも同じファイルを読む。検証コマンドが1件も無ければ読まない。
+ - 渡し先: (a) `provision`がworkerのworkspaceを作るとき、`DAGQ_ROLE`ほかのworkerの変数の後ろに`--env KEY=VALUE`で並べる（ADR-0026の仕組み）。worktreeを作る前に読むので、壊れた`dagq.toml`はprovisioningの失敗になり、workspaceは開かずsupervisorはclaimを止める。(b) `integrate`の`verification_commands`を`Command`のenvに足す（validatingは検証コマンドを実行しない）。読めないファイルは着地処理のエラーで、runは元の状態に戻る。(c) reviewのheadless実行（ADR-0049の決定2）のコマンドのenvに足す。(d) `needs_session`のresumeが開くworkspaceに、(a)と同じくworkerのenv（`DAGQ_ROLE` / `DAGQ_QUEUE`とworkerのactorの名前）の後ろに並べる（task 303）。resumeのsessionはworkerと同じ手元の検証（fmt・clippy・関係するtest・e2e）を回すので、workerと同じ`[run.env]`（sccache、buildとtestの並列度）が要るため。ADR-0049の決定3（ADR-0040の決定3を引き継ぐ）は渡し先をworkerのworkspace・`integrate`の検証・reviewの3つと書くが、resumeのsessionはrunのworkerのsessionの続きで、その「workerのworkspace」に含まれると読む。値は`begin_resume`の前に読み（`start_resume`に渡す）、landing branchと同じく読めなければ試行を使わずrunは`needs_session`のまま（landing branchの読み込みが同じfileを先に検査するので、壊れた`dagq.toml`はそこで止まる）。`[run.env]`が名指すプログラムが見つからない間は、claimと同じくresumeも始めない（下の「`[run.env]`が名指すプログラムの検査」。始めるとsessionのcargoがすべて失敗して試行を使うため）。resumeの時点のmain checkoutの`dagq.toml`を読むので、workerの起動の後に変えた値はresumeのsessionで効く。
+@@ -49,6 +49,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
+   - 起動し直すときの引き継ぎ: `install --allow-breaking`のdrainと自動更新の見張りがsupervisorを`up`で起動し直すときは、止めた登録の値のうち出どころが`flag`のもの（と、出どころの列より古いbinaryの登録の値）だけを`--parallel` / `--max-waiting` / `--runtime-planners`で渡し、`dagq.toml`か既定から決めた値は渡さない（`SupervisorRegistration::flag_arguments`。`runtime_planners`は値を記録しない古いbinaryの登録からは渡さない）。引き継ぎのexecは元のargvのまま続くので、この変更より前の`up`が`--parallel N`を付けて起動したsupervisorは、入れ替わっても`flag`のままで`[supervisor]`を読まない。`[supervisor]`に従わせるには、`down --wait`の後にflagなしの`up`で起動し直す。
+   - `[recheck]`と同じく、旧バイナリは未知の表を拒むので、固定バイナリを`[supervisor]`を知るものに入れ替えてから足す。この repositoryの`dagq.toml`には、固定バイナリがtask 941を含んでから`[supervisor]`に`runtime_planners = 2`を足した（task 942、goal 63。2026-09-28に`planner_question`の答えを待つplannerが1枠を約5.5時間ふさぎ、draftとreviseが詰まったことへの当面の緩和。経緯は[運用の規則の経緯](../../plans/operation-rules-history.md)）。続けて、固定バイナリがtask 698を含んでから`parallel = 3`を足し、AGENTS.mdの`up`のコマンドから`--parallel 3`を外した（task 699。`[run.env]`の`CARGO_BUILD_JOBS`などが並列3を前提にする）。`max_waiting`は既定の4のままなので置かない。`claim_spacing`も既定の180秒が効くので置かない（`claim_spacing`を知らない固定バイナリは、置くと`dagq.toml`を読めなくなる）。`light_changes`もtask 1591の時点では置かない。旧バイナリは未知のkeyで`dagq.toml`全体を読めなくなるので、固定バイナリがtask 1591を含んでから後続のconfigのtaskが足す（goal 104）。
+ - `[tasks]`は`changes`だけを持ち、taskが宣言する変更の種類（change）の値の集合を1行の配列で書く（`changes = ["feature", "fix"]`。[ADR-t980-1](../../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)、task 982。`load_change_set`、`domain::ChangeSet`）。値は`TaskChange`の形（[domain-model](../domain-model.md)）で、空の配列・同じ値の重複・形の合わない値・他のkeyは行番号付きのエラーにする。書いてあれば`add`と`edit`は集合の外の`--change`を拒み（`DomainError::ChangeNotInSet`）、`lint`はchangeの無いtaskを`missing_change`、集合の外のchangeを`change_outside_set`にし、`submit`は動かすtaskのどれかがchangeを持たないか集合の外なら何も動かさずに拒む（`ChangeMissing` / `ChangeNotInSet`）。読むのはqueueが束縛されたmain checkoutの`dagq.toml`で、`add` / `edit` / `submit` / `lint`のたびに読む（`compose::task_changes`、`SqliteQueue::with_changes`）。`dagq.toml`のどこかが解析できなければ、この4つのコマンドもそのerrorで止まる。書いてなければ形だけを検査し、changeは省略できる。runtimeが自分で登録するdraft（follow_upなど）は検査しないので、planは`lint`と`submit`で揃える。旧バイナリは未知の表を拒むので、固定バイナリが対応してから足す。
++- `[goals]`は`tags`だけを持ち、goalのラベル（tag）の値の集合を1行の配列で書く（`tags = ["codex", "throughput"]`。[ADR-t1639-1](../../adr/2026-10-04-t1639-1-goal-priority-is-the-source-tasks-inherit-and-goals-carry-tags.md)の決定6、task 1641。`load_goal_tags`、`domain::TagSet`）。値は`GoalTag`の形（[domain-model](../domain-model.md)の`Goal`）で、空の配列・同じ値の重複・形の合わない値・他のkeyは行番号付きのエラーにする。書いてあれば`goal add`と`goal edit`は集合の外の`--tag`を拒み（`DomainError::GoalTagNotInSet`）、`lint`は所属のgoalがラベルの無いdraftのtaskを`missing_goal_tag`、集合の外のラベルを持つdraftのtaskを`goal_tag_outside_set`にし、`submit`は与えたgoalと動かすtaskの所属のgoalのうち閉じていないdraftのgoalがラベルを持たないか集合の外なら何も動かさずに拒む（`GoalTagMissing` / `GoalTagNotInSet`）。読み方は`[tasks] changes`と同じで、queueが束縛されたmain checkoutの`dagq.toml`を`goal add` / `goal edit` / `submit` / `lint`のたびに読む（`compose::goal_tags`、`SqliteQueue::with_goal_tags`）。`dagq.toml`のどこかが解析できなければ、この4つのコマンドもそのerrorで止まる。書いてなければ形だけを検査し、goalはラベルを持たなくてよい。旧バイナリは未知の表を拒むので、固定バイナリが対応してから足す（この repositoryの語彙は、固定バイナリがtask 1641を含んでからconfigのtaskが足す）。
+ - `[e2e]`は`paths`だけを持ち、変えるとrunに`e2e`のevidenceを求めるpathをglobの1行の配列で書く（`paths = ["src/infrastructure/process.rs", "tests/e2e.rs"]`。[ADR-t963-1](../../adr/2026-09-29-t963-1-e2e-required-by-diff-and-run-in-full-before-auto-update.md)の決定2、task 965。`load_e2e_paths`、`Verifier::e2e_paths`）。globの書式は`add --paths`と同じ（`domain::scope`。repository rootから、`*`は1階層、`**`は任意の深さ）で、同じglobの重複は1つにまとめる。配列でない値・`--paths`の受け付けないglob（空、`/`始まり、`.`や`..`の段、空の段）・keyの重複・他のkeyは行番号付きのエラーにする。無ければ空で、差分からは何も求めない（taskの`--evidence`だけ）。読むのはsupervisorがvalidatingとworkerのpromptを作るたびのmain checkoutの作業ファイルで、読めなければ警告を出して空として扱う（本番を守るのは[Auto-update](auto-update.md)の入れ替え前のe2eの関門）。使い方は[Validation](validation.md)の8。旧バイナリは未知の表を拒むので、固定バイナリが対応してから足す（この repository の`dagq.toml`にはtask 966が、固定バイナリの対応を確かめてからAGENTS.mdの運用の変更と一緒に足した。範囲は[Validation](validation.md)の「この repository で置く範囲」）。
+ - `[areas]`は`stats`と`kpi`がrunを分けるareaの名前→globの1行の配列（`name = ["src/**", "migrations/**"]`。[ADR-t980-1](../../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)、task 981。`load_area_map`、`domain::areas::AreaMap`）。名前の形、空の配列、`--paths`の受け付けないglob、重複は行番号付きのエラーにする。書式と求め方は[kpi](kpi.md#area)。旧バイナリは未知の表を拒むので、固定バイナリが対応してから足す。
+ 
+diff --git a/migrations/0067_goal_tags.sql b/migrations/0067_goal_tags.sql
+new file mode 100644
+index 00000000..79296f8d
+--- /dev/null
++++ b/migrations/0067_goal_tags.sql
+@@ -0,0 +1,8 @@
++-- dagq-schema: compatible
++-- A goal's tags (ADR-t1639-1 decision 6; `goal add --tag`, `goal edit
++-- --tag` / `--no-tags`): a JSON array of distinct lowercase slugs, '[]'
++-- for a goal without one, every goal before this migration included. No
++-- CHECK: the runtime checks the form and the repository's set (`[goals]
++-- tags` of dagq.toml) when it writes. An addition with a default only: an
++-- older binary never names the column, and its inserts leave it '[]'.
++ALTER TABLE goals ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';
+diff --git a/src/application/commands/planning.rs b/src/application/commands/planning.rs
+index f3b42e22..654d4497 100644
+--- a/src/application/commands/planning.rs
++++ b/src/application/commands/planning.rs
+@@ -553,6 +553,7 @@ mod tests {
+             constraints: String::new(),
+             doc: None,
+             draft: false,
++            tags: Vec::new(),
+         }
+     }
+ 
+diff --git a/src/application/prompt.rs b/src/application/prompt.rs
+index b9781756..760ba160 100644
+--- a/src/application/prompt.rs
++++ b/src/application/prompt.rs
+@@ -4658,6 +4658,7 @@ mod tests {
+         );
+         let goal = Goal::restore(GoalRecord {
+             priority: Default::default(),
++            tags: Vec::new(),
+             id: GoalId::new(4),
+             title: "upstream goal".into(),
+             description: String::new(),
+@@ -5510,6 +5511,7 @@ mod tests {
+         case.goals = vec![
+             Goal::restore(GoalRecord {
+                 priority: Default::default(),
++                tags: Vec::new(),
+                 id: GoalId::new(4),
+                 title: "a huge goal".into(),
+                 description: "g".repeat(300_000),
+@@ -6688,6 +6690,7 @@ mod tests {
+     fn prompt_describes_the_goal_the_context_and_its_company_and_keeps_one_shape_without_them() {
+         let goal = Goal::restore(GoalRecord {
+             priority: Default::default(),
++            tags: Vec::new(),
+             id: GoalId::new(3),
+             title: "goal title".into(),
+             description: "goal description\nsecond line".into(),
+@@ -6869,6 +6872,7 @@ mod tests {
+     fn goal_of(id: i64, bytes: usize) -> Goal {
+         Goal::restore(GoalRecord {
+             priority: Default::default(),
++            tags: Vec::new(),
+             id: GoalId::new(id),
+             title: big("goal title", 2_000),
+             description: big("goal description", bytes),
+diff --git a/src/application/queue_reads.rs b/src/application/queue_reads.rs
+index 142e4955..9f7a6e03 100644
+--- a/src/application/queue_reads.rs
++++ b/src/application/queue_reads.rs
+@@ -51,7 +51,7 @@ pub enum QueueRead {
+     Findings(FindingsRead),
+     Search(SearchRead),
+     Related(RelatedRead),
+-    GoalList,
++    GoalList(GoalListRead),
+     GoalShow(GoalShowRead),
+     Lint(LintRead),
+     ObserveHistory(ObserveHistoryRead),
+@@ -280,6 +280,25 @@ pub struct RelatedRead {
+     pub limit: u32,
+ }
+ 
++/// `goal list`'s options: the tags a goal must carry one of (ADR-t1639-1
++/// decision 7), none for every goal.
++#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct GoalListRead {
++    #[serde(default)]
++    pub tag: Vec<String>,
++}
++
++impl GoalListRead {
++    fn tags(&self) -> Result<Vec<crate::domain::GoalTag>> {
++        Ok(self
++            .tag
++            .iter()
++            .map(|tag| tag.parse())
++            .collect::<Result<_, _>>()?)
++    }
++}
++
+ /// `goal show`'s options.
+ #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+ #[serde(deny_unknown_fields)]
+@@ -526,10 +545,7 @@ impl QueueRead {
+             UseCase::Findings => Self::Findings(read(use_case, params)?),
+             UseCase::Search => Self::Search(read(use_case, params)?),
+             UseCase::Related => Self::Related(read(use_case, params)?),
+-            UseCase::GoalList => {
+-                none(use_case, params)?;
+-                Self::GoalList
+-            }
++            UseCase::GoalList => Self::GoalList(read(use_case, params)?),
+             UseCase::GoalShow => Self::GoalShow(read(use_case, params)?),
+             UseCase::Lint => Self::Lint(read(use_case, params)?),
+             UseCase::ObserveHistory => Self::ObserveHistory(read(use_case, params)?),
+@@ -651,10 +667,13 @@ impl QueueRead {
+                 crate::application::observer::check_read(&read.observation, read.limit)
+                     .map_err(|error| bad(format!("{error:#}")))?;
+             }
++            Self::GoalList(read) => {
++                read.tags()
++                    .map_err(|error| bad(format!("goal list's tag: {error}")))?;
++            }
+             Self::Candidates
+             | Self::Stats(_)
+             | Self::Marks(_)
+-            | Self::GoalList
+             | Self::GoalShow(_)
+             | Self::ObserveHistory(_) => {}
+         }
+@@ -741,7 +760,10 @@ impl QueueRead {
+                 UseCase::Related,
+                 json!({"task": read.task, "status": read.status, "limit": read.limit}),
+             ),
+-            Self::GoalList => (UseCase::GoalList, json!({})),
++            // No `tag` without one, so a service from before `--tag`,
++            // which takes no params, still answers a plain `goal list`.
++            Self::GoalList(read) if read.tag.is_empty() => (UseCase::GoalList, json!({})),
++            Self::GoalList(read) => (UseCase::GoalList, json!({"tag": read.tag})),
+             Self::GoalShow(read) => (UseCase::GoalShow, json!({"id": read.id, "full": read.full})),
+             Self::Lint(read) => (
+                 UseCase::Lint,
+@@ -773,6 +795,9 @@ pub trait QueueReadSources<Q: ?Sized> {
+     /// The repository's set of changes (ADR-t980-1), none without a
+     /// checkout.
+     fn changes(&self, queue: &Q) -> Result<Option<ChangeSet>>;
++    /// The repository's set of goal tags (ADR-t1639-1 decision 6), none
++    /// without a checkout.
++    fn goal_tags(&self, queue: &Q) -> Result<Option<crate::domain::TagSet>>;
+     /// The SVG the host's d2 draws from `source`.
+     fn render_svg(&self, source: &str) -> Result<String>;
+     /// A page of an observation's input (`observe --input`).
+@@ -935,7 +960,10 @@ where
+                 usize::try_from(read.limit)?,
+             )?)?
+         }
+-        QueueRead::GoalList => serde_json::to_value(queue.list_goals()?)?,
++        QueueRead::GoalList(read) => serde_json::to_value(crate::domain::goal::list(
++            queue.list_goals()?,
++            &read.tags()?,
++        ))?,
+         QueueRead::GoalShow(read) => {
+             let detail = queue.show_goal(GoalId::new(read.id))?;
+             if read.full {
+@@ -954,6 +982,7 @@ where
+             // (ADR-t980-1).
+             let mut input = queue.lint_input(&targets)?;
+             input.changes = sources.changes(queue)?;
++            input.goal_tags = sources.goal_tags(queue)?;
+             json!({"tasks": targets, "violations": crate::domain::lint::lint(&input)})
+         }
+         QueueRead::ObserveHistory(read) => observer::history(queue, read.limit)?,
+@@ -1091,7 +1120,11 @@ mod tests {
+         assert_eq!(kpi.changes, ["fix"]);
+         assert_eq!(
+             QueueRead::parse(UseCase::GoalList, &json!({})).unwrap(),
+-            Some(QueueRead::GoalList)
++            Some(QueueRead::GoalList(GoalListRead::default()))
++        );
++        assert_eq!(
++            QueueRead::GoalList(GoalListRead::default()).request(),
++            (UseCase::GoalList, json!({}))
+         );
+         assert_eq!(
+             QueueRead::parse(UseCase::ObserveHistory, &Value::Null).unwrap(),
+@@ -1152,6 +1185,7 @@ mod tests {
+                 json!({"task": 4, "status": ["ready"], "limit": 3}),
+             ),
+             (UseCase::GoalList, json!({})),
++            (UseCase::GoalList, json!({"tag": ["codex", "cmux"]})),
+             (UseCase::GoalShow, json!({"id": 2, "full": true})),
+             (UseCase::Lint, json!({"tasks": [1], "proposals": [2]})),
+             (UseCase::ObserveHistory, json!({"limit": 4})),
+@@ -1179,6 +1213,8 @@ mod tests {
+             (UseCase::List, json!({"sql": "x"})),
+             (UseCase::Candidates, json!({"x": 1})),
+             (UseCase::GoalList, json!([1])),
++            (UseCase::GoalList, json!({"tag": ["Codex"]})),
++            (UseCase::GoalList, json!({"tags": ["codex"]})),
+             (UseCase::Graph, json!({"format": "png"})),
+             (UseCase::Graph, json!({"format": "svg"})),
+             (UseCase::Kpi, json!({"change": ["Bad Change!"]})),
+diff --git a/src/application/queue_service.rs b/src/application/queue_service.rs
+index d774f73c..8da0d16f 100644
+--- a/src/application/queue_service.rs
++++ b/src/application/queue_service.rs
+@@ -1030,7 +1030,10 @@ mod tests {
+             assert!(read.starts_with("Events(EventsRead"), "{read}");
+             assert!(read.contains("full: true"), "{read}");
+             let response = service.handle(&request(Some(token), UseCase::GoalList, Value::Null));
+-            assert_eq!(response.result.unwrap()["read"], "GoalList");
++            assert_eq!(
++                response.result.unwrap()["read"],
++                "GoalList(GoalListRead { tag: [] })"
++            );
+         }
+         for (use_case, params) in [
+             (UseCase::Stats, json!({"cmux": "/bin/sh"})),
+diff --git a/src/compose.rs b/src/compose.rs
+index 5b9b24f8..1dde653a 100644
+--- a/src/compose.rs
++++ b/src/compose.rs
+@@ -2658,6 +2658,17 @@ pub fn task_changes(queue: &SqliteQueue) -> Result<Option<crate::domain::ChangeS
+     }
+ }
+ 
++/// The `[goals] tags` of the `dagq.toml` of the main checkout `queue` is
++/// bound to (ADR-t1639-1 decision 6), which `goal add`, `goal edit`,
++/// `submit` and `lint` hold the goals to; none for a queue bound to no
++/// checkout or without them.
++pub fn goal_tags(queue: &SqliteQueue) -> Result<Option<crate::domain::TagSet>> {
++    match bound_checkout(queue)? {
++        Some(checkout) => crate::infrastructure::run_env::load_goal_tags(&checkout),
++        None => Ok(None),
++    }
++}
++
+ /// The `[areas]` of `checkout`'s `dagq.toml` and its Git for the landed
+ /// commits' changes (ADR-t980-1); no checkout or no `[areas]` gives no run
+ /// areas.
+@@ -3398,6 +3409,9 @@ impl crate::application::queue_reads::QueueReadSources<SqliteQueue> for HostRead
+     fn changes(&self, queue: &SqliteQueue) -> Result<Option<crate::domain::ChangeSet>> {
+         task_changes(queue)
+     }
++    fn goal_tags(&self, queue: &SqliteQueue) -> Result<Option<crate::domain::TagSet>> {
++        goal_tags(queue)
++    }
+     fn render_svg(&self, source: &str) -> Result<String> {
+         render_svg(source)
+     }
+diff --git a/src/domain/error.rs b/src/domain/error.rs
+index 80195016..9262c004 100644
+--- a/src/domain/error.rs
++++ b/src/domain/error.rs
+@@ -209,6 +209,26 @@ pub enum DomainError {
+         task_id: TaskId,
+         changes: Vec<String>,
+     },
++    /// A goal's tag is not a lowercase slug (ADR-t1639-1 decision 6).
++    InvalidGoalTag {
++        tag: String,
++    },
++    /// A goal names the same tag twice.
++    GoalTagRepeated {
++        tag: String,
++    },
++    /// A tag outside the repository's set, `[goals] tags` of dagq.toml
++    /// (ADR-t1639-1 decision 6).
++    GoalTagNotInSet {
++        tag: String,
++        tags: Vec<String>,
++    },
++    /// The repository names a set of tags and a draft goal submitted for
++    /// plan review has none (ADR-t1639-1 decision 6).
++    GoalTagMissing {
++        goal_id: GoalId,
++        tags: Vec<String>,
++    },
+     /// A worker provider that has no such mode (ADR-t813-1 decision 7:
+     /// Codex runs headless only).
+     WorkerModeUnsupported {
+@@ -568,6 +588,21 @@ impl fmt::Display for DomainError {
+                 "task {task_id} declares no change; [tasks] changes of dagq.toml requires one of {} (edit {task_id} --change CHANGE)",
+                 changes.join(", ")
+             ),
++            Self::InvalidGoalTag { tag } => write!(
++                f,
++                "goal tag {tag:?} must be a slug of lowercase letters, digits, '-' and '_' of at most 64 bytes"
++            ),
++            Self::GoalTagRepeated { tag } => write!(f, "goal tag {tag:?} is given twice"),
++            Self::GoalTagNotInSet { tag, tags } => write!(
++                f,
++                "tag {tag:?} is not one of [goals] tags of dagq.toml: {}",
++                tags.join(", ")
++            ),
++            Self::GoalTagMissing { goal_id, tags } => write!(
++                f,
++                "draft goal {goal_id} has no tag; [goals] tags of dagq.toml requires one of {} (goal edit {goal_id} --tag TAG)",
++                tags.join(", ")
++            ),
+             Self::WorkerModeUnsupported { provider, mode } => write!(
+                 f,
+                 "the {} worker has no {} mode (codex runs headless only)",
+diff --git a/src/domain/goal.rs b/src/domain/goal.rs
+index 73194790..7a1c07db 100644
+--- a/src/domain/goal.rs
++++ b/src/domain/goal.rs
+@@ -5,8 +5,8 @@
+ use serde::Serialize;
+ 
+ use super::{
+-    DomainError, GoalEdit, GoalId, GoalRecord, GoalStatus, GoalVerdict, NewGoal, Priority, TaskId,
+-    TaskStatus, TaskStatusCounts, require,
++    DomainError, GoalEdit, GoalId, GoalRecord, GoalStatus, GoalSummary, GoalTag, GoalVerdict,
++    NewGoal, Priority, TaskId, TaskStatus, TaskStatusCounts, require,
+ };
+ 
+ impl GoalVerdict {
+@@ -37,6 +37,9 @@ pub struct Goal {
+     /// What the goal's tasks without a priority of their own inherit
+     /// (ADR-t1639-1 decisions 1 and 2).
+     priority: Priority,
++    /// What the goal is about, each once, in the order given (ADR-t1639-1
++    /// decision 6).
++    tags: Vec<GoalTag>,
+     status: GoalStatus,
+     /// Set together with `verdict` by the one close.
+     closed_at: Option<String>,
+@@ -63,6 +66,7 @@ impl Goal {
+             constraints: new.constraints,
+             doc: new.doc.filter(|d| !d.trim().is_empty()),
+             priority: new.priority,
++            tags: new.tags,
+             status: if new.draft {
+                 GoalStatus::Draft
+             } else {
+@@ -76,10 +80,12 @@ impl Goal {
+     }
+ 
+     /// A stored goal as it was saved. Checked: a positive ID, a title that
+-    /// is not blank, and a close time exactly when there is a verdict.
++    /// is not blank, tags given once, and a close time exactly when there
++    /// is a verdict.
+     pub fn restore(record: GoalRecord) -> Result<Self, DomainError> {
+         require_positive(record.id)?;
+         require(!record.title.trim().is_empty(), || GOAL_TITLE_BLANK)?;
++        super::goal_tag::check_distinct(&record.tags)?;
+         require(
+             record.closed_at.is_some() == record.verdict.is_some(),
+             || DomainError::GoalCloseInconsistent { goal_id: record.id },
+@@ -92,6 +98,7 @@ impl Goal {
+             constraints: record.constraints,
+             doc: record.doc,
+             priority: record.priority,
++            tags: record.tags,
+             status: record.status,
+             closed_at: record.closed_at,
+             verdict: record.verdict,
+@@ -128,6 +135,10 @@ impl Goal {
+         self.priority
+     }
+ 
++    pub fn tags(&self) -> &[GoalTag] {
++        &self.tags
++    }
++
+     pub fn status(&self) -> GoalStatus {
+         self.status
+     }
+@@ -195,12 +206,18 @@ pub fn check_accepts_dependents(goal: &Goal) -> Result<(), DomainError> {
+ /// `goal` with the fields of `edit` replaced; a title must stay non-blank
+ /// and an empty `doc` clears the reference. The priority changes only while
+ /// the goal is a draft or open (ADR-t1639-1 decision 1): a closed goal has
+-/// no tasks left to claim.
++/// no tasks left to claim. The tags replace the whole list, each once; an
++/// empty list removes them, and a closed goal's tags change too, so `goal
++/// list --tag` still finds it.
+ pub fn edit(mut goal: Goal, edit: GoalEdit) -> Result<Goal, DomainError> {
+     if let Some(priority) = edit.priority {
+         check_accepts_tasks(&goal)?;
+         goal.priority = priority;
+     }
++    if let Some(tags) = edit.tags {
++        super::goal_tag::check_distinct(&tags)?;
++        goal.tags = tags;
++    }
+     if let Some(title) = edit.title {
+         require(!title.trim().is_empty(), || GOAL_TITLE_BLANK)?;
+         goal.title = title;
+@@ -220,6 +237,18 @@ pub fn edit(mut goal: Goal, edit: GoalEdit) -> Result<Goal, DomainError> {
+     Ok(goal)
+ }
+ 
++/// `goal list` (ADR-t1639-1 decision 7): the goals that carry one of
++/// `tags` (all of them when `tags` is empty), the unclosed ones (open and
++/// draft, a draft without tasks included) before the closed ones, each part
++/// by priority, highest first, then by ID.
++pub fn list(mut goals: Vec<GoalSummary>, tags: &[GoalTag]) -> Vec<GoalSummary> {
++    if !tags.is_empty() {
++        goals.retain(|goal| goal.tags.iter().any(|tag| tags.contains(tag)));
++    }
++    goals.sort_by_key(|goal| (goal.closed, std::cmp::Reverse(goal.priority), goal.id));
++    goals
++}
++
+ /// `goal ready`: a draft that is not closed opens, so its tasks become
+ /// candidates.
+ pub fn ready(mut goal: Goal) -> Result<Goal, DomainError> {
+@@ -345,6 +374,7 @@ mod tests {
+             constraints: String::new(),
+             doc: None,
+             priority: Priority::Normal,
++            tags: Vec::new(),
+             status,
+             closed_at: verdict.map(|_| "2026-09-23T00:00:00Z".into()),
+             verdict,
+@@ -435,7 +465,8 @@ mod tests {
+             serde_json::to_value(&draft).unwrap(),
+             serde_json::json!({
+                 "id": 1, "title": "g", "description": "", "acceptance": "",
+-                "constraints": "", "doc": "docs/g.md", "priority": "normal", "status": "draft",
++                "constraints": "", "doc": "docs/g.md", "priority": "normal", "tags": [],
++                "status": "draft",
+                 "closed_at": null, "verdict": null,
+                 "created_at": "now", "updated_at": "now"
+             })
+@@ -475,6 +506,106 @@ mod tests {
+         );
+     }
+ 
++    fn tag(value: &str) -> GoalTag {
++        value.parse().unwrap()
++    }
++
++    /// ADR-t1639-1 decision 6: the tags replace the whole list, each once,
++    /// and change on a closed goal too.
++    #[test]
++    fn an_edit_replaces_the_tags_given_once() {
++        let tagged = edit(
++            goal(None),
++            GoalEdit {
++                tags: Some(vec![tag("codex"), tag("cmux")]),
++                ..GoalEdit::default()
++            },
++        )
++        .unwrap();
++        assert_eq!(tagged.tags(), [tag("codex"), tag("cmux")]);
++        let cleared = edit(
++            tagged,
++            GoalEdit {
++                tags: Some(Vec::new()),
++                ..GoalEdit::default()
++            },
++        )
++        .unwrap();
++        assert!(cleared.tags().is_empty());
++        assert_eq!(
++            edit(
++                cleared,
++                GoalEdit {
++                    tags: Some(vec![tag("a"), tag("a")]),
++                    ..GoalEdit::default()
++                },
++            )
++            .unwrap_err(),
++            DomainError::GoalTagRepeated { tag: "a".into() }
++        );
++        let closed = edit(
++            goal(Some(GoalVerdict::Abandoned)),
++            GoalEdit {
++                tags: Some(vec![tag("codex")]),
++                ..GoalEdit::default()
++            },
++        )
++        .unwrap();
++        assert_eq!(closed.tags(), [tag("codex")]);
++        assert!(
++            Goal::restore(GoalRecord {
++                tags: vec![tag("a"), tag("a")],
++                ..record(GoalStatus::Open, None)
++            })
++            .is_err()
++        );
++        let new = NewGoal {
++            title: "g".into(),
++            description: String::new(),
++            acceptance: String::new(),
++            constraints: String::new(),
++            doc: None,
++            draft: false,
++            priority: Priority::Normal,
++            tags: vec![tag("b"), tag("b")],
++        };
++        assert!(Goal::new(GoalId::new(1), new, "now".into()).is_err());
++    }
++
++    /// ADR-t1639-1 decision 7: unclosed goals first, then priority
++    /// descending, then ID ascending; `--tag` keeps the goals with any.
++    #[test]
++    fn the_list_puts_unclosed_goals_first_by_priority_then_id() {
++        let summary = |id: i64, priority: Priority, closed: bool, tags: &[&str]| GoalSummary {
++            id: GoalId::new(id),
++            title: format!("g{id}"),
++            status: GoalStatus::Open,
++            priority,
++            tags: tags.iter().map(|t| tag(t)).collect(),
++            closed,
++            verdict: closed.then_some(GoalVerdict::Achieved),
++            tasks: TaskStatusCounts::default(),
++        };
++        let goals = vec![
++            summary(1, Priority::Low, false, &["codex"]),
++            summary(2, Priority::Interrupt, true, &["codex"]),
++            summary(3, Priority::High, false, &[]),
++            summary(4, Priority::Normal, false, &["cmux", "throughput"]),
++            summary(5, Priority::High, false, &["throughput"]),
++            summary(6, Priority::Low, true, &[]),
++        ];
++        let ids = |listed: Vec<GoalSummary>| -> Vec<i64> {
++            listed.iter().map(|goal| goal.id.as_i64()).collect()
++        };
++        assert_eq!(ids(list(goals.clone(), &[])), [3, 5, 4, 1, 2, 6]);
++        assert_eq!(ids(list(goals.clone(), &[tag("codex")])), [1, 2]);
++        assert_eq!(
++            ids(list(goals.clone(), &[tag("throughput"), tag("codex")])),
++            [5, 4, 1, 2]
++        );
++        assert!(list(goals, &[tag("enterprise")]).is_empty());
++    }
++
+     #[test]
+     fn only_an_unclosed_draft_goal_becomes_ready() {
+         let draft = Goal::restore(record(GoalStatus::Draft, None)).unwrap();
+@@ -527,6 +658,7 @@ mod tests {
+                 constraints: Some("c".into()),
+                 doc: Some("x.md".into()),
+                 priority: None,
++                tags: None,
+             },
+         )
+         .unwrap();
+diff --git a/src/domain/goal_tag.rs b/src/domain/goal_tag.rs
+new file mode 100644
+index 00000000..8d58f8c6
+--- /dev/null
++++ b/src/domain/goal_tag.rs
+@@ -0,0 +1,185 @@
++//! The tags of a goal (ADR-t1639-1 decision 6): labels of the repository's
++//! own naming what the goal is about, zero or more per goal, each once. The
++//! runtime holds no set of values; a repository names its own in `[goals]
++//! tags` of `dagq.toml`, and then `goal add` and `goal edit` refuse a tag
++//! outside it and `lint` and `submit` refuse a draft goal without one.
++//! Without a set any tag of the right form is accepted and a goal may have
++//! none. `goal list --tag` narrows the goals by them.
++
++use std::fmt;
++
++use serde::{Deserialize, Serialize};
++
++use super::{DomainError, GoalId, require};
++
++/// A goal's tag: a lowercase slug of letters, digits, '-' and '_' (at most
++/// 64 bytes), the form of a task's change.
++#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
++#[serde(try_from = "String", into = "String")]
++pub struct GoalTag(String);
++
++impl GoalTag {
++    /// The longest tag, in bytes.
++    pub const MAX_LEN: usize = 64;
++
++    pub fn as_str(&self) -> &str {
++        &self.0
++    }
++}
++
++impl std::str::FromStr for GoalTag {
++    type Err = DomainError;
++    fn from_str(value: &str) -> Result<Self, DomainError> {
++        require(
++            !value.is_empty()
++                && value.len() <= Self::MAX_LEN
++                && value.bytes().all(|b| {
++                    b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_'
++                }),
++            || DomainError::InvalidGoalTag {
++                tag: value.to_owned(),
++            },
++        )?;
++        Ok(Self(value.to_owned()))
++    }
++}
++
++impl TryFrom<String> for GoalTag {
++    type Error = DomainError;
++    fn try_from(value: String) -> Result<Self, DomainError> {
++        value.parse()
++    }
++}
++
++impl From<GoalTag> for String {
++    fn from(tag: GoalTag) -> Self {
++        tag.0
++    }
++}
++
++impl fmt::Display for GoalTag {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.write_str(&self.0)
++    }
++}
++
++/// A goal's tags as given, refused when one is given twice.
++pub fn check_distinct(tags: &[GoalTag]) -> Result<(), DomainError> {
++    for (index, tag) in tags.iter().enumerate() {
++        require(!tags[..index].contains(tag), || {
++            DomainError::GoalTagRepeated {
++                tag: tag.as_str().to_owned(),
++            }
++        })?;
++    }
++    Ok(())
++}
++
++/// The repository's set of goal tags, `[goals] tags` of `dagq.toml`, in
++/// the order written, each once.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct TagSet(Vec<GoalTag>);
++
++impl TagSet {
++    /// The set of `tags`; an empty set or a value twice is refused.
++    pub fn new(tags: Vec<GoalTag>) -> Result<Self, String> {
++        if tags.is_empty() {
++            return Err("names no tag".to_owned());
++        }
++        for (index, tag) in tags.iter().enumerate() {
++            if tags[..index].contains(tag) {
++                return Err(format!("names {tag} twice"));
++            }
++        }
++        Ok(Self(tags))
++    }
++
++    pub fn values(&self) -> &[GoalTag] {
++        &self.0
++    }
++
++    fn names(&self) -> Vec<String> {
++        self.0.iter().map(|tag| tag.as_str().to_owned()).collect()
++    }
++
++    /// Each of `tags` when it is one of the set (`goal add` and `goal
++    /// edit`); none is fine.
++    pub fn check(&self, tags: &[GoalTag]) -> Result<(), DomainError> {
++        for tag in tags {
++            require(self.0.contains(tag), || DomainError::GoalTagNotInSet {
++                tag: tag.as_str().to_owned(),
++                tags: self.names(),
++            })?;
++        }
++        Ok(())
++    }
++
++    /// A draft goal's tags on its way to plan review: at least one, each
++    /// of the set (`lint` and `submit`).
++    pub fn check_declared(&self, goal_id: GoalId, tags: &[GoalTag]) -> Result<(), DomainError> {
++        require(!tags.is_empty(), || DomainError::GoalTagMissing {
++            goal_id,
++            tags: self.names(),
++        })?;
++        self.check(tags)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn tag(value: &str) -> GoalTag {
++        value.parse().unwrap()
++    }
++
++    #[test]
++    fn a_tag_is_a_lowercase_slug() {
++        for label in ["codex", "throughput", "a-b_1", "unknown"] {
++            assert_eq!(tag(label).as_str(), label);
++            let read: GoalTag = serde_json::from_value(serde_json::json!(label)).unwrap();
++            assert_eq!(read.to_string(), label);
++        }
++        let long = "a".repeat(GoalTag::MAX_LEN + 1);
++        for bad in ["", "Codex", "a b", long.as_str()] {
++            assert!(
++                matches!(
++                    bad.parse::<GoalTag>(),
++                    Err(DomainError::InvalidGoalTag { .. })
++                ),
++                "{bad:?}"
++            );
++        }
++        assert!(serde_json::from_value::<GoalTag>(serde_json::json!("Upper")).is_err());
++        assert_eq!(String::from(tag("cmux")), "cmux");
++        check_distinct(&[tag("a"), tag("b")]).unwrap();
++        assert_eq!(
++            check_distinct(&[tag("a"), tag("b"), tag("a")]).unwrap_err(),
++            DomainError::GoalTagRepeated { tag: "a".into() }
++        );
++    }
++
++    #[test]
++    fn a_set_checks_values_and_declarations() {
++        let set = TagSet::new(vec![tag("codex"), tag("throughput")]).unwrap();
++        assert_eq!(set.values().len(), 2);
++        set.check(&[]).unwrap();
++        set.check(&[tag("codex"), tag("throughput")]).unwrap();
++        let refused = set.check(&[tag("codex"), tag("cmux")]).unwrap_err();
++        assert!(matches!(refused, DomainError::GoalTagNotInSet { ref tag, .. } if tag == "cmux"));
++        assert!(
++            refused.to_string().contains("codex, throughput"),
++            "{refused}"
++        );
++        set.check_declared(GoalId::new(3), &[tag("codex")]).unwrap();
++        let missing = set.check_declared(GoalId::new(3), &[]).unwrap_err();
++        assert!(matches!(missing, DomainError::GoalTagMissing { .. }));
++        assert!(missing.to_string().contains("draft goal 3"), "{missing}");
++        assert!(matches!(
++            set.check_declared(GoalId::new(3), &[tag("cmux")]),
++            Err(DomainError::GoalTagNotInSet { .. })
++        ));
++        assert!(TagSet::new(Vec::new()).is_err());
++        assert!(TagSet::new(vec![tag("a"), tag("a")]).is_err());
++    }
++}
+diff --git a/src/domain/input.rs b/src/domain/input.rs
+index 173922df..0911cc92 100644
+--- a/src/domain/input.rs
++++ b/src/domain/input.rs
+@@ -6,8 +6,8 @@
+ use serde::{Deserialize, Serialize};
+ 
+ use super::{
+-    CommitSha, DomainError, EvidenceCheck, GoalId, GoalStatus, GoalVerdict, Priority, Provider,
+-    RunId, RunStatus, TaskChange, TaskId, TaskStatus, require, scope,
++    CommitSha, DomainError, EvidenceCheck, GoalId, GoalStatus, GoalTag, GoalVerdict, Priority,
++    Provider, RunId, RunStatus, TaskChange, TaskId, TaskStatus, require, scope,
+     worker::{Worker, WorkerMode},
+ };
+ 
+@@ -118,11 +118,15 @@ pub struct NewGoal {
+     /// What its tasks inherit (ADR-t1639-1 decision 1).
+     #[serde(default)]
+     pub priority: Priority,
++    /// Its tags, each once (ADR-t1639-1 decision 6).
++    #[serde(default)]
++    pub tags: Vec<GoalTag>,
+ }
+ 
+ impl NewGoal {
+     pub fn validate(&self) -> Result<(), DomainError> {
+-        require(!self.title.trim().is_empty(), || GOAL_TITLE_BLANK)
++        require(!self.title.trim().is_empty(), || GOAL_TITLE_BLANK)?;
++        super::goal_tag::check_distinct(&self.tags)
+     }
+ }
+ 
+@@ -141,11 +145,15 @@ pub struct GoalEdit {
+     pub doc: Option<String>,
+     #[serde(default)]
+     pub priority: Option<Priority>,
++    /// The tags that replace the goal's; an empty list removes every one.
++    #[serde(default)]
++    pub tags: Option<Vec<GoalTag>>,
+ }
+ 
+ impl GoalEdit {
+     pub fn is_empty(&self) -> bool {
+         self.priority.is_none()
++            && self.tags.is_none()
+             && self.title.is_none()
+             && self.description.is_none()
+             && self.acceptance.is_none()
+@@ -267,6 +275,7 @@ pub struct GoalRecord {
+     pub constraints: String,
+     pub doc: Option<String>,
+     pub priority: Priority,
++    pub tags: Vec<GoalTag>,
+     pub status: GoalStatus,
+     pub closed_at: Option<String>,
+     pub verdict: Option<GoalVerdict>,
+diff --git a/src/domain/lint.rs b/src/domain/lint.rs
+index 96d2befd..e8faea1b 100644
+--- a/src/domain/lint.rs
++++ b/src/domain/lint.rs
+@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
+ use serde::Serialize;
+ 
+ use super::{
+-    ChangeSet, GoalId, GoalVerdict, Task, TaskId, TaskStatus, follow_up::MembershipGap,
+-    scope::validate_path_globs,
++    ChangeSet, GoalId, GoalTag, GoalVerdict, TagSet, Task, TaskId, TaskStatus,
++    follow_up::MembershipGap, scope::validate_path_globs,
+ };
+ 
+ /// A rule [`lint`] checks; the snake-case name is the `code` it reports.
+@@ -45,6 +45,13 @@ pub enum LintCode {
+     /// The task's change is not one of the repository's set, which changed
+     /// since it was declared.
+     ChangeOutsideSet,
++    /// The repository names a set of goal tags (`[goals] tags`, ADR-t1639-1
++    /// decision 6) and the task's goal is a draft without a tag: submitting
++    /// it for plan review is refused.
++    MissingGoalTag,
++    /// The task's goal is a draft with a tag the repository's set of goal
++    /// tags no longer names.
++    GoalTagOutsideSet,
+     /// Another task of the linted set has the same title (ignoring case
+     /// and surrounding whitespace).
+     DuplicateTitle,
+@@ -86,6 +93,11 @@ pub struct LintInput {
+     pub goals: BTreeMap<GoalId, Option<GoalVerdict>>,
+     /// The repository's set of changes (ADR-t980-1); none checks no change.
+     pub changes: Option<ChangeSet>,
++    /// The repository's set of goal tags (ADR-t1639-1 decision 6); none
++    /// checks no goal's tags.
++    pub goal_tags: Option<TagSet>,
++    /// The tags of every draft goal that is not closed.
++    pub draft_goal_tags: BTreeMap<GoalId, Vec<GoalTag>>,
+     /// The follow_up targets whose membership judgement is missing,
+     /// undecided or needs a recheck (ADR-t1504-2 decision 7).
+     pub membership_gaps: BTreeMap<TaskId, MembershipGap>,
+@@ -129,6 +141,17 @@ pub fn lint(input: &LintInput) -> Vec<LintViolation> {
+         if let Some(changes) = &input.changes {
+             change_rule(task, changes, &mut found);
+         }
++        if let (Some(set), Some(goal_id)) = (&input.goal_tags, task.goal_id())
++            && let Some(tags) = input.draft_goal_tags.get(&goal_id)
++            && let Err(error) = set.check_declared(goal_id, tags)
++        {
++            let code = if tags.is_empty() {
++                LintCode::MissingGoalTag
++            } else {
++                LintCode::GoalTagOutsideSet
++            };
++            found.push(violation(code, task, error.to_string()));
++        }
+         if let Some(gap) = input.membership_gaps.get(&task.id())
+             && matches!(task.status(), TaskStatus::Draft | TaskStatus::Submitted)
+         {
+@@ -360,6 +383,8 @@ mod tests {
+             nodes,
+             goals: BTreeMap::new(),
+             changes: None,
++            goal_tags: None,
++            draft_goal_tags: BTreeMap::new(),
+             membership_gaps: BTreeMap::new(),
+         }
+     }
+@@ -557,6 +582,43 @@ mod tests {
+         assert!(found[1].reason.contains("declares no change"), "{found:?}");
+     }
+ 
++    /// With the repository's set of goal tags (ADR-t1639-1 decision 6), a
++    /// task of a draft goal needs the goal to have a tag of the set; a task
++    /// of an open goal or of none is not checked, nor anything without a set.
++    #[test]
++    fn a_set_of_goal_tags_requires_one_on_a_draft_goal() {
++        let codex: GoalTag = "codex".parse().unwrap();
++        let cmux: GoalTag = "cmux".parse().unwrap();
++        let of = |id: i64, goal: i64| {
++            with(task(id, &format!("t{id}")), |r| {
++                r.goal_id = Some(GoalId::new(goal))
++            })
++        };
++        let mut input = input(
++            vec![of(1, 7), of(2, 8), of(3, 9), of(4, 10), task(5, "alone")],
++            vec![],
++        );
++        input.draft_goal_tags = BTreeMap::from([
++            (GoalId::new(7), vec![codex.clone()]),
++            (GoalId::new(8), vec![]),
++            (GoalId::new(9), vec![cmux]),
++        ]);
++        assert_eq!(codes(&input), []);
++        input.goal_tags = Some(TagSet::new(vec![codex]).unwrap());
++        assert_eq!(
++            codes(&input),
++            [
++                (2, LintCode::MissingGoalTag),
++                (3, LintCode::GoalTagOutsideSet)
++            ]
++        );
++        let found = lint(&input);
++        assert!(
++            found[0].reason.contains("draft goal 8 has no tag"),
++            "{found:?}"
++        );
++    }
++
+     #[test]
+     fn verification_missing_with_and_without_paths() {
+         let unscoped = with(task(1, "a"), |r| r.verification_commands.clear());
+diff --git a/src/domain/mod.rs b/src/domain/mod.rs
+index 4e84324c..f103724f 100644
+--- a/src/domain/mod.rs
++++ b/src/domain/mod.rs
+@@ -887,6 +887,7 @@ pub mod follow_up;
+ pub mod forecast;
+ pub mod goal;
+ pub mod goal_review;
++pub mod goal_tag;
+ pub mod headless_job;
+ pub mod host_metrics;
+ pub mod idle_process;
+@@ -962,6 +963,7 @@ pub use follow_up::{
+     follow_up_category, follow_up_membership_proposal,
+ };
+ pub use goal::{Goal, StrandedDependency};
++pub use goal_tag::{GoalTag, TagSet};
+ pub use ids::{
+     AskId, CommitSha, EventId, FindingId, GoalId, LeaseToken, PlannerId, ProposalId, RequestId,
+     RunId, TaskId,
+diff --git a/src/domain/search.rs b/src/domain/search.rs
+index c185aed8..729a7ad0 100644
+--- a/src/domain/search.rs
++++ b/src/domain/search.rs
+@@ -256,6 +256,10 @@ pub struct SearchHit {
+     /// the other kinds.
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub change: Option<super::TaskChange>,
++    /// A goal's tags (ADR-t1639-1 decision 6), empty for a goal without
++    /// one; none for the other kinds.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub tags: Option<Vec<super::GoalTag>>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub score: Option<f64>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+diff --git a/src/domain/views.rs b/src/domain/views.rs
+index 69c18de4..fab84d5e 100644
+--- a/src/domain/views.rs
++++ b/src/domain/views.rs
+@@ -5,7 +5,7 @@
+ use serde::{Deserialize, Serialize};
+ 
+ use super::{
+-    Ask, CommitSha, EventId, Goal, GoalId, GoalStatus, GoalVerdict, LeaseToken, Priority,
++    Ask, CommitSha, EventId, Goal, GoalId, GoalStatus, GoalTag, GoalVerdict, LeaseToken, Priority,
+     PrioritySource, PushReport, RunId, SupervisorMode, Task, TaskId, TaskRun, TaskStatus,
+ };
+ 
+@@ -43,6 +43,11 @@ pub struct GoalSummary {
+     pub id: GoalId,
+     pub title: String,
+     pub status: GoalStatus,
++    /// What its tasks without one of their own inherit (ADR-t1639-1
++    /// decision 1).
++    pub priority: Priority,
++    /// Its tags (ADR-t1639-1 decision 6).
++    pub tags: Vec<GoalTag>,
+     pub closed: bool,
+     pub verdict: Option<GoalVerdict>,
+     pub tasks: TaskStatusCounts,
+diff --git a/src/infrastructure/draft_planners.rs b/src/infrastructure/draft_planners.rs
+index 03d4a508..b8ce8601 100644
+--- a/src/infrastructure/draft_planners.rs
++++ b/src/infrastructure/draft_planners.rs
+@@ -1293,6 +1293,7 @@ mod tests {
+                 constraints: String::new(),
+                 doc: None,
+                 draft: false,
++                tags: Vec::new(),
+             })
+             .unwrap()
+             .id();
+diff --git a/src/infrastructure/finding_planners.rs b/src/infrastructure/finding_planners.rs
+index ab9d0778..46f28503 100644
+--- a/src/infrastructure/finding_planners.rs
++++ b/src/infrastructure/finding_planners.rs
+@@ -65,6 +65,7 @@ impl SqliteQueue {
+             &tx,
+             submission,
+             self.changes.as_ref(),
++            self.goal_tags.as_ref(),
+             &self.generators.clock.timestamp(),
+         )?;
+         link_findings(&tx, proposal.id(), workspace.as_deref(), findings, by, now)?;
+diff --git a/src/infrastructure/proposals.rs b/src/infrastructure/proposals.rs
+index a93c309f..b2273ebe 100644
+--- a/src/infrastructure/proposals.rs
++++ b/src/infrastructure/proposals.rs
+@@ -13,8 +13,8 @@ use serde_json::json;
+ use super::sqlite::{enum_col, event, goal_event, read_goal, transition_task};
+ use crate::domain::{
+     Ask, ChangeSet, DomainError, GoalStatus, PlannerOwner, Proposal, ProposalId, ProposalRecord,
+-    ProposalStatus, Submission, TaskAction, TaskId, TaskStatus, follow_up::reopened_material, goal,
+-    proposal,
++    ProposalStatus, Submission, TagSet, TaskAction, TaskId, TaskStatus,
++    follow_up::reopened_material, goal, proposal,
+ };
+ 
+ /// Submit `submission` inside the caller's write transaction: its tasks
+@@ -22,11 +22,14 @@ use crate::domain::{
+ /// the proposal already holds) move from `draft` to `submitted` and join
+ /// the proposal, recording `task_status_changed` and `task_submitted`
+ /// (`goal_submitted` for a goal). With the repository's set of changes,
+-/// every task that moves must declare one of them (ADR-t980-1).
++/// every task that moves must declare one of them (ADR-t980-1); with its
++/// set of goal tags, every draft goal submitted, or of a task that moves,
++/// must have one and only tags of the set (ADR-t1639-1 decision 6).
+ pub(super) fn submit(
+     conn: &Connection,
+     submission: Submission,
+     changes: Option<&ChangeSet>,
++    goal_tags: Option<&TagSet>,
+     now: &str,
+ ) -> Result<Proposal> {
+     submission.validate()?;
+@@ -114,6 +117,20 @@ pub(super) fn submit(
+             changes.check_declared(task_id, task.change())?;
+         }
+     }
++    if let Some(goal_tags) = goal_tags {
++        let mut drafts = goals.clone();
++        for &task_id in &tasks {
++            drafts.extend(super::sqlite::read_task(conn, task_id)?.goal_id());
++        }
++        drafts.sort();
++        drafts.dedup();
++        for goal_id in drafts {
++            let goal = read_goal(conn, goal_id)?;
++            if goal.is_draft() {
++                goal_tags.check_declared(goal_id, goal.tags())?;
++            }
++        }
++    }
+     // Whoever submits, a follow_up draft goes only with a current decided
+     // membership judgement (ADR-t1504-2 decision 7).
+     super::follow_up_membership::check_judged(conn, &tasks, false)?;
+diff --git a/src/infrastructure/run_env.rs b/src/infrastructure/run_env.rs
+index 69e1f599..19e6f4f9 100644
+--- a/src/infrastructure/run_env.rs
++++ b/src/infrastructure/run_env.rs
+@@ -40,7 +40,7 @@ use std::{
+ use crate::{
+     application::{Exit, Verifier},
+     domain::{
+-        ChangeSet, TaskChange,
++        ChangeSet, GoalTag, TagSet, TaskChange,
+         actor_model::{ModelRole, RoleModel, RoleModels, check_effort},
+         areas::AreaMap,
+         background_wrapper::HeadlessWrapper,
+@@ -101,6 +101,11 @@ const AREAS_TABLE: &str = "areas";
+ const TASKS_TABLE: &str = "tasks";
+ /// The one key of `[tasks]`.
+ const TASKS_CHANGES: &str = "changes";
++/// `[goals]`: `tags`, the repository's set of goal tags (ADR-t1639-1
++/// decision 6).
++const GOALS_TABLE: &str = "goals";
++/// The one key of `[goals]`.
++const GOALS_TAGS: &str = "tags";
+ /// `[e2e]`: `paths`, the globs whose change requires `e2e` of a run
+ /// (ADR-t963-1 decision 2).
+ const E2E_TABLE: &str = "e2e";
+@@ -125,7 +130,7 @@ const REVIEW_SUBAGENT_PATHS: &str = "paths";
+ const HEADLESS_TABLE: &str = "headless";
+ /// The one key of `[headless]`.
+ const HEADLESS_WRAPPER: &str = "wrapper";
+-const TABLES: [&str; 17] = [
++const TABLES: [&str; 18] = [
+     RUN_ENV_TABLE,
+     STALL_TABLE,
+     CONFLICTS_TABLE,
+@@ -139,6 +144,7 @@ const TABLES: [&str; 17] = [
+     SUPERVISOR_TABLE,
+     AREAS_TABLE,
+     TASKS_TABLE,
++    GOALS_TABLE,
+     E2E_TABLE,
+     BROKER_TABLE,
+     BROKER_PACKAGE_TABLE,
+@@ -208,6 +214,8 @@ pub struct Config {
+     pub areas: Option<AreaMap>,
+     /// `[tasks] changes` (ADR-t980-1); `None` without it.
+     pub changes: Option<ChangeSet>,
++    /// `[goals] tags` (ADR-t1639-1 decision 6); `None` without it.
++    pub goal_tags: Option<TagSet>,
+     /// `[e2e] paths` (ADR-t963-1 decision 2); empty without it.
+     pub e2e_paths: Vec<String>,
+     /// `[broker]` (ADR-t827-4 decision 4), the defaults (mode `disabled`)
+@@ -319,7 +327,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
+             }
+             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
+                 format!(
+-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{E2E_TABLE}], [{BROKER_TABLE}], [{BROKER_PACKAGE_TABLE}], [{HEADLESS_TABLE}] and [{KPI_TABLE}] are supported"
++                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{BROKER_TABLE}], [{BROKER_PACKAGE_TABLE}], [{HEADLESS_TABLE}] and [{KPI_TABLE}] are supported"
+                 )
+             })?;
+             ensure!(
+@@ -394,6 +402,28 @@ pub fn parse_config(text: &str) -> Result<Config> {
+                         .with_context(with)?,
+                 );
+             }
++            Some(GOALS_TABLE) => {
++                ensure!(
++                    key == GOALS_TAGS,
++                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{GOALS_TABLE}]; the key is {GOALS_TAGS}"
++                );
++                ensure!(
++                    config.goal_tags.is_none(),
++                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
++                );
++                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
++                let tags = parse_string_array(rest.trim())
++                    .with_context(with)?
++                    .iter()
++                    .map(|tag| tag.parse::<GoalTag>())
++                    .collect::<Result<Vec<_>, _>>()
++                    .with_context(with)?;
++                config.goal_tags = Some(
++                    TagSet::new(tags)
++                        .map_err(anyhow::Error::msg)
++                        .with_context(with)?,
++                );
++            }
+             Some(BROKER_TABLE) => {
+                 ensure!(
+                     BrokerConfig::KEYS.contains(&key),
+@@ -756,7 +786,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
+                 stall_keys.push(key.to_owned());
+             }
+             None => bail!(
+-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{BROKER_TABLE}], [{BROKER_PACKAGE_TABLE}], [{HEADLESS_TABLE}] or [{KPI_TABLE}]"
++                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{BROKER_TABLE}], [{BROKER_PACKAGE_TABLE}], [{HEADLESS_TABLE}] or [{KPI_TABLE}]"
+             ),
+         }
+     }
+@@ -1071,6 +1101,20 @@ pub fn load_change_set(root: &Path) -> Result<Option<ChangeSet>> {
+     })
+ }
+ 
++/// `[goals] tags` of the `dagq.toml` in `root` (ADR-t1639-1 decision 6),
++/// `None` when there is no file or no such key.
++pub fn load_goal_tags(root: &Path) -> Result<Option<TagSet>> {
++    let path = root.join(CONFIG_FILE_NAME);
++    Ok(match read_config(&path)? {
++        Some(text) => {
++            parse_config(&text)
++                .with_context(|| format!("parse {}", path.display()))?
++                .goal_tags
++        }
++        None => None,
++    })
++}
++
+ /// `[e2e] paths` of the `dagq.toml` in `root` (ADR-t963-1 decision 2);
+ /// no file, no table or no key is none.
+ pub fn load_e2e_paths(root: &Path) -> Result<Vec<String>> {
+@@ -1717,6 +1761,49 @@ mod tests {
+         assert!(load_headless_wrapper(dir.path()).is_err());
+     }
+ 
++    /// `[goals] tags` names the repository's set of goal tags (ADR-t1639-1
++    /// decision 6).
++    #[test]
++    fn parses_the_tags_of_the_goals_table() {
++        let config = parse_config("[goals]\ntags = [\"codex\", 'cmux'] # set\n").unwrap();
++        let tags = config.goal_tags.unwrap();
++        assert_eq!(
++            tags.values()
++                .iter()
++                .map(GoalTag::as_str)
++                .collect::<Vec<_>>(),
++            ["codex", "cmux"]
++        );
++        assert_eq!(parse_config("[goals]\n").unwrap().goal_tags, None);
++        assert_eq!(parse_config("").unwrap().goal_tags, None);
++        let error = |text: &str| format!("{:#}", parse_config(text).unwrap_err());
++        for (text, expected) in [
++            ("[goals]\nlabels = [\"a\"]\n", "unknown key labels"),
++            ("[goals]\ntags = [\"a\"]\ntags = [\"b\"]\n", "defined twice"),
++            ("[goals]\ntags = \"a\"\n", "expected an array"),
++            ("[goals]\ntags = [\"Codex\"]\n", "goal tag"),
++            ("[goals]\ntags = []\n", "names no tag"),
++            ("[goals]\ntags = [\"a\", \"a\"]\n", "twice"),
++            ("[goals]\ntags = [\"a\"]\n[goals]\n", "defined twice"),
++        ] {
++            let got = error(text);
++            assert!(got.contains(expected), "{text}: {got}");
++        }
++        let dir = tempfile::tempdir().unwrap();
++        assert_eq!(load_goal_tags(dir.path()).unwrap(), None);
++        fs::write(
++            dir.path().join(CONFIG_FILE_NAME),
++            "[goals]\ntags = [\"codex\"]\n",
++        )
++        .unwrap();
++        assert_eq!(
++            load_goal_tags(dir.path()).unwrap().unwrap().values().len(),
++            1
++        );
++        fs::write(dir.path().join(CONFIG_FILE_NAME), "[goals]\ntags = 1\n").unwrap();
++        assert!(load_goal_tags(dir.path()).is_err());
++    }
++
+     /// `[tasks] changes` names the repository's set of changes (ADR-t980-1).
+     #[test]
+     fn parses_the_changes_of_the_tasks_table() {
+@@ -2546,7 +2633,7 @@ LITERAL = 'no \n escapes # here'
+         let error = format!("{:#}", load_supervisor_config(dir.path()).unwrap_err());
+         assert!(
+             error.contains(
+-                "[supervisor], [areas], [tasks], [e2e], [broker], [broker.package], [headless] and [kpi]"
++                "[supervisor], [areas], [tasks], [goals], [e2e], [broker], [broker.package], [headless] and [kpi]"
+             ),
+             "{error}"
+         );
+diff --git a/src/infrastructure/search.rs b/src/infrastructure/search.rs
+index 71008765..5599c806 100644
+--- a/src/infrastructure/search.rs
++++ b/src/infrastructure/search.rs
+@@ -118,7 +118,9 @@ impl SqliteQueue {
+                     (SELECT t.worker_mode FROM tasks t
+                      WHERE search_index.kind = 'task' AND t.id = search_index.ref) AS worker_mode,
+                     (SELECT t.change FROM tasks t
+-                     WHERE search_index.kind = 'task' AND t.id = search_index.ref) AS change
++                     WHERE search_index.kind = 'task' AND t.id = search_index.ref) AS change,
++                    (SELECT g.tags FROM goals g
++                     WHERE search_index.kind = 'goal' AND g.id = search_index.ref) AS goal_tags
+              FROM search_index WHERE {filter} ORDER BY {order} LIMIT ?"
+         );
+         let words: Vec<String> = terms.long.iter().chain(&terms.short).cloned().collect();
+@@ -269,6 +271,10 @@ fn hit(row: &Row<'_>, terms: &[String], full: bool) -> rusqlite::Result<SearchHi
+         change: row
+             .get::<_, Option<String>>("change")?
+             .and_then(|change| change.parse().ok()),
++        // A goal's tags as stored; none for the other kinds.
++        tags: row
++            .get::<_, Option<String>>("goal_tags")?
++            .map(|tags| serde_json::from_str(&tags).unwrap_or_default()),
+         score: if full { row.get("score")? } else { None },
+         fields,
+     })
+diff --git a/src/infrastructure/sessions.rs b/src/infrastructure/sessions.rs
+index f8cfc5c3..29a490fe 100644
+--- a/src/infrastructure/sessions.rs
++++ b/src/infrastructure/sessions.rs
+@@ -3932,6 +3932,7 @@ mod tests {
+                 constraints: String::new(),
+                 doc: None,
+                 draft: false,
++                tags: Vec::new(),
+             })
+             .unwrap()
+             .id();
+@@ -4148,6 +4149,7 @@ mod tests {
+                 constraints: String::new(),
+                 doc: None,
+                 draft: false,
++                tags: Vec::new(),
+             })
+             .unwrap()
+             .id();
+@@ -4257,6 +4259,7 @@ mod tests {
+                 constraints: String::new(),
+                 doc: None,
+                 draft: false,
++                tags: Vec::new(),
+             })
+             .unwrap()
+             .id();
+@@ -4777,6 +4780,7 @@ mod tests {
+                 constraints: String::new(),
+                 doc: None,
+                 draft: false,
++                tags: Vec::new(),
+             })
+             .unwrap();
+         let first = task(&mut queue);
+diff --git a/src/infrastructure/sqlite.rs b/src/infrastructure/sqlite.rs
+index 4b9559ec..f99acbb7 100644
+--- a/src/infrastructure/sqlite.rs
++++ b/src/infrastructure/sqlite.rs
+@@ -23,9 +23,9 @@ use crate::{
+         ChangeSet, ClaimOutcome, CommitSha, DomainError, EventId, Goal, GoalDetail, GoalEdit,
+         GoalId, GoalPredecessor, GoalRecord, GoalSummary, GoalTask, GoalVerdict, LintInput,
+         LintNode, NewGoal, NewNote, NewTask, NotePage, NoteQuery, NoteTarget, OBSERVATION_KIND,
+-        Predecessor, Priority, Proposal, ProposalId, RunEvent, RunId, RunRecord, Submission, Task,
+-        TaskAction, TaskChange, TaskDetail, TaskEdit, TaskId, TaskRecord, TaskRun, TaskStatus,
+-        TaskStatusCounts,
++        Predecessor, Priority, Proposal, ProposalId, RunEvent, RunId, RunRecord, Submission,
++        TagSet, Task, TaskAction, TaskChange, TaskDetail, TaskEdit, TaskId, TaskRecord, TaskRun,
++        TaskStatus, TaskStatusCounts,
+         actor::ActorContext,
+         goal,
+         provider_switch::{self, SwitchPhase, WorkerRoute},
+@@ -98,6 +98,10 @@ pub struct SqliteQueue {
+     /// ADR-t980-1) that `add`, `edit`, `submit` and `lint` hold the tasks
+     /// to; none accepts any change and a task without one.
+     pub(super) changes: Option<ChangeSet>,
++    /// The repository's set of goal tags (`[goals] tags` of dagq.toml,
++    /// ADR-t1639-1 decision 6) that `goal add`, `goal edit`, `submit` and
++    /// `lint` hold the goals to; none accepts any tag and a goal without one.
++    pub(super) goal_tags: Option<TagSet>,
+ }
+ 
+ impl SqliteQueue {
+@@ -192,6 +196,7 @@ impl SqliteQueue {
+             generators: queue.generators.clone(),
+             actors,
+             changes: queue.changes.clone(),
++            goal_tags: queue.goal_tags.clone(),
+         };
+         copy.apply(state.version, None)?;
+         Ok((schema, ReadOnlyQueue::Readable(copy)))
+@@ -289,6 +294,13 @@ impl SqliteQueue {
+         self
+     }
+ 
++    /// The queue holding the goals to the repository's set of tags
++    /// (ADR-t1639-1 decision 6); `None` holds them to none.
++    pub fn with_goal_tags(mut self, tags: Option<TagSet>) -> Self {
++        self.goal_tags = tags;
++        self
++    }
++
+     pub fn generators(&self) -> &Generators {
+         &self.generators
+     }
+@@ -343,6 +355,7 @@ impl SqliteQueue {
+             generators: clock::system(),
+             actors,
+             changes: None,
++            goal_tags: None,
+         })
+     }
+ 
+@@ -1163,6 +1176,9 @@ impl TaskStore for SqliteQueue {
+     fn add_goal(&mut self, new: NewGoal) -> Result<Goal> {
+         // Rejected before taking the write lock; `new` checks it again.
+         new.validate()?;
++        if let Some(tags) = &self.goal_tags {
++            tags.check(&new.tags)?;
++        }
+         let tx = self
+             .conn
+             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+@@ -1174,8 +1190,8 @@ impl TaskStore for SqliteQueue {
+         let id = goal.id();
+         tx.execute(
+             "INSERT INTO goals(id, title, description, acceptance, constraints, doc, status,
+-                               created_at, updated_at, priority)
+-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
++                               created_at, updated_at, priority, tags)
++             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+             params![
+                 id,
+                 goal.title(),
+@@ -1186,7 +1202,8 @@ impl TaskStore for SqliteQueue {
+                 goal.status().as_str(),
+                 goal.created_at(),
+                 goal.updated_at(),
+-                goal.priority().as_i64()
++                goal.priority().as_i64(),
++                serde_json::to_string(goal.tags())?
+             ],
+         )?;
+         let result = read_goal(&tx, id)?;
+@@ -1207,6 +1224,8 @@ impl TaskStore for SqliteQueue {
+                 Ok(GoalSummary {
+                     id: goal.id(),
+                     status: goal.status(),
++                    priority: goal.priority(),
++                    tags: goal.tags().to_vec(),
+                     closed: goal.is_closed(),
+                     verdict: goal.verdict(),
+                     tasks: task_counts(&self.conn, goal.id())?,
+@@ -1255,6 +1274,9 @@ impl TaskStore for SqliteQueue {
+ 
+     fn edit_goal(&mut self, goal_id: GoalId, edit: GoalEdit) -> Result<Goal> {
+         ensure!(!edit.is_empty(), "goal edit changes nothing");
++        if let (Some(set), Some(tags)) = (&self.goal_tags, &edit.tags) {
++            set.check(tags)?;
++        }
+         let tx = self
+             .conn
+             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+@@ -1265,7 +1287,7 @@ impl TaskStore for SqliteQueue {
+         let new = goal::edit(old, edit)?;
+         tx.execute(
+             "UPDATE goals SET title=?1, description=?2, acceptance=?3, constraints=?4, doc=?5,
+-             updated_at=?6, priority=?8 WHERE id=?7",
++             updated_at=?6, priority=?8, tags=?9 WHERE id=?7",
+             params![
+                 new.title(),
+                 new.description(),
+@@ -1274,7 +1296,8 @@ impl TaskStore for SqliteQueue {
+                 new.doc(),
+                 self.generators.clock.timestamp(),
+                 goal_id,
+-                new.priority().as_i64()
++                new.priority().as_i64(),
++                serde_json::to_string(new.tags())?
+             ],
+         )?;
+         goal_event(
+@@ -1355,6 +1378,7 @@ impl TaskStore for SqliteQueue {
+         let tx = self.conn.unchecked_transaction()?;
+         let mut input = read_lint_input(&tx, tasks)?;
+         input.changes = self.changes.clone();
++        input.goal_tags = self.goal_tags.clone();
+         Ok(input)
+     }
+ 
+@@ -1954,11 +1978,19 @@ fn read_lint_input(conn: &Connection, targets: &[TaskId]) -> Result<LintInput> {
+             node.goal_dependencies.push(goal_id);
+         }
+     }
+-    let goals = conn
++    let all_goals: Vec<Goal> = conn
+         .prepare("SELECT * FROM goals")?
+         .query_map([], goal_row)?
+-        .map(|goal| goal.map(|goal| (goal.id(), goal.verdict())))
+         .collect::<rusqlite::Result<_>>()?;
++    let goals = all_goals
++        .iter()
++        .map(|goal| (goal.id(), goal.verdict()))
++        .collect();
++    let draft_goal_tags = all_goals
++        .iter()
++        .filter(|goal| goal.is_draft())
++        .map(|goal| (goal.id(), goal.tags().to_vec()))
++        .collect();
+     let mut membership_gaps = BTreeMap::new();
+     for task in &targets {
+         if let Some(gap) = super::follow_up_membership::membership_gap(conn, task.id())? {
+@@ -1970,6 +2002,8 @@ fn read_lint_input(conn: &Connection, targets: &[TaskId]) -> Result<LintInput> {
+         nodes,
+         goals,
+         changes: None,
++        goal_tags: None,
++        draft_goal_tags,
+         membership_gaps,
+     })
+ }
+@@ -2599,6 +2633,9 @@ fn goal_row(row: &Row<'_>) -> rusqlite::Result<Goal> {
+         constraints: row.get("constraints")?,
+         doc: row.get("doc")?,
+         priority: Priority::from_i64(row.get("priority")?).map_err(restore_error)?,
++        tags: serde_json::from_str(&row.get::<_, String>("tags")?).map_err(|error| {
++            rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
++        })?,
+         status: enum_col(row, "status")?,
+         closed_at: row.get("closed_at")?,
+         verdict: verdict
+diff --git a/src/main.rs b/src/main.rs
+index 66ee1a33..b998ace8 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1794,11 +1794,20 @@ enum GoalCommand {
+         /// urgent, high, normal or low.
+         #[arg(long, default_value = "normal", value_parser = PRIORITIES)]
+         priority: String,
++        /// A tag naming what the goal is about (ADR-t1639-1); repeatable. With `[goals] tags` in
++        /// dagq.toml, one of them.
++        #[arg(long = "tag")]
++        tags: Vec<String>,
+     },
+     /// Open a draft goal so the supervisor may claim its ready tasks.
+     Ready { id: i64 },
+-    /// List goals with their status and task counts by status.
+-    List,
++    /// List goals with their status, priority, tags and task counts by status: the open and draft
++    /// goals first, then by priority (highest first), then by ID.
++    List {
++        /// Only the goals with this tag; repeatable, any of them.
++        #[arg(long = "tag")]
++        tags: Vec<String>,
++    },
+     /// Show a goal, its tasks, and the kinds of its latest 10 events; long
+     /// texts are cut to 300 characters (ending in `…`, with `truncated: true`).
+     Show {
+@@ -1826,6 +1835,13 @@ enum GoalCommand {
+         /// of their own take it at their next claim (ADR-t1639-1).
+         #[arg(long, group = "field", value_parser = PRIORITIES)]
+         priority: Option<String>,
++        /// The tags that replace the goal's (ADR-t1639-1); repeatable. With `[goals] tags` in
++        /// dagq.toml, each one of them.
++        #[arg(long = "tag", group = "field", conflicts_with = "no_tags")]
++        tags: Vec<String>,
++        /// Remove every tag of the goal.
++        #[arg(long, group = "field")]
++        no_tags: bool,
+     },
+     /// Record the verdict once. `achieved` needs every task completed or canceled; `abandoned` needs no task in progress.
+     Close {
+@@ -1882,6 +1898,15 @@ fn request_words(
+     Ok(Some(words))
+ }
+ 
++/// The goal tags given on the command line (`--tag`), each checked for its
++/// form (ADR-t1639-1 decision 6).
++fn goal_tags(tags: &[String]) -> Result<Vec<dagq::domain::GoalTag>> {
++    Ok(tags
++        .iter()
++        .map(|tag| tag.parse())
++        .collect::<Result<_, _>>()?)
++}
++
+ /// A run named on the command line, or [`Resource::Unresolved`] when its
+ /// id cannot be read: no owner matches it (fail closed).
+ fn run_resource(run: &str) -> Resource {
+@@ -1933,7 +1958,7 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
+         | Command::Planners { .. }
+         | Command::Lint { .. }
+         | Command::Goal {
+-            command: GoalCommand::List | GoalCommand::Show { .. },
++            command: GoalCommand::List { .. } | GoalCommand::Show { .. },
+         }
+         | Command::Observe { history: true, .. }
+         | Command::Observe { input: Some(_), .. } => queue(C::QueueRead),
+@@ -2017,7 +2042,7 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
+             GoalCommand::Review { id } => {
+                 one(C::GoalReviewRequest, Resource::Goal(GoalId::new(*id)))
+             }
+-            GoalCommand::List | GoalCommand::Show { .. } => queue(C::QueueRead),
++            GoalCommand::List { .. } | GoalCommand::Show { .. } => queue(C::QueueRead),
+         },
+         Command::Note {
+             task, run, goal, ..
+@@ -2257,7 +2282,7 @@ fn authorized_in_application(command: &Command) -> bool {
+             command: ProposalCommand::Withdraw { .. },
+         } => true,
+         Command::Goal { command } => {
+-            !matches!(command, GoalCommand::List | GoalCommand::Show { .. })
++            !matches!(command, GoalCommand::List { .. } | GoalCommand::Show { .. })
+         }
+         // The asks, answers, notes, marks and findings (task 733).
+         Command::Ask { .. }
+@@ -2545,8 +2570,8 @@ fn queue_read(command: &Command) -> Option<QueueRead> {
+             limit,
+         }),
+         Command::Goal {
+-            command: GoalCommand::List,
+-        } => QueueRead::GoalList,
++            command: GoalCommand::List { tags },
++        } => QueueRead::GoalList(reads::GoalListRead { tag: tags }),
+         Command::Goal {
+             command: GoalCommand::Show { id, full },
+         } => QueueRead::GoalShow(reads::GoalShowRead { id, full }),
+@@ -3029,6 +3054,17 @@ fn execute(cli: Cli) -> Result<Value> {
+         let changes = dagq::compose::task_changes(&queue)?;
+         queue = queue.with_changes(changes);
+     }
++    // The repository's set of goal tags holds the goals the planning
++    // commands register, edit and submit (ADR-t1639-1 decision 6).
++    if matches!(
++        cli.command,
++        Command::Goal {
++            command: GoalCommand::Add { .. } | GoalCommand::Edit { .. }
++        } | Command::Submit { .. }
++    ) {
++        let tags = dagq::compose::goal_tags(&queue)?;
++        queue = queue.with_goal_tags(tags);
++    }
+     // The planning commands run as the caller through the application,
+     // which authorizes each before it changes the queue (task 732).
+     macro_rules! planning {
+@@ -3238,6 +3274,7 @@ fn execute(cli: Cli) -> Result<Value> {
+                 doc,
+                 draft,
+                 priority,
++                tags,
+             } => serde_json::to_value(planning!().add_goal(NewGoal {
+                 title,
+                 description,
+@@ -3246,11 +3283,12 @@ fn execute(cli: Cli) -> Result<Value> {
+                 doc,
+                 draft,
+                 priority: priority.parse()?,
++                tags: goal_tags(&tags)?,
+             })?)?,
+             GoalCommand::Ready { id } => {
+                 serde_json::to_value(planning!().ready_goal(GoalId::new(id))?)?
+             }
+-            GoalCommand::List | GoalCommand::Show { .. } => {
++            GoalCommand::List { .. } | GoalCommand::Show { .. } => {
+                 unreachable!("a read is answered above")
+             }
+             GoalCommand::Edit {
+@@ -3261,17 +3299,24 @@ fn execute(cli: Cli) -> Result<Value> {
+                 constraints,
+                 doc,
+                 priority,
+-            } => serde_json::to_value(planning!().edit_goal(
+-                GoalId::new(id),
+-                GoalEdit {
+-                    title,
+-                    description,
+-                    acceptance,
+-                    constraints,
+-                    doc,
+-                    priority: priority.as_deref().map(str::parse).transpose()?,
+-                },
+-            )?)?,
++                tags,
++                no_tags,
++            } => serde_json::to_value(
++                planning!().edit_goal(
++                    GoalId::new(id),
++                    GoalEdit {
++                        title,
++                        description,
++                        acceptance,
++                        constraints,
++                        doc,
++                        priority: priority.as_deref().map(str::parse).transpose()?,
++                        tags: (!tags.is_empty() || no_tags)
++                            .then(|| goal_tags(&tags))
++                            .transpose()?,
++                    },
++                )?,
++            )?,
+             GoalCommand::Close { id, verdict } => serde_json::to_value(
+                 planning!().close_goal(GoalId::new(id), verdict.parse::<GoalVerdict>()?)?,
+             )?,
+diff --git a/src/view.rs b/src/view.rs
+index 2379de71..cc0d86b1 100644
+--- a/src/view.rs
++++ b/src/view.rs
+@@ -571,6 +571,7 @@ mod tests {
+             follow_up_memberships: Vec::new(),
+             goal: Goal::restore(crate::domain::GoalRecord {
+                 priority: Default::default(),
++                tags: Vec::new(),
+                 id: GoalId::new(1),
+                 title: "g".into(),
+                 description: "x".repeat(TEXT_LIMIT * 2),
+diff --git a/tests/common/queue.rs b/tests/common/queue.rs
+index 7358dd52..ebdebe60 100644
+--- a/tests/common/queue.rs
++++ b/tests/common/queue.rs
+@@ -50,6 +50,7 @@ pub fn new_goal(title: &str) -> NewGoal {
+         constraints: "Keep the module boundary".into(),
+         doc: Some("docs/adr/0009-goal-groups-tasks.md".into()),
+         draft: false,
++        tags: Vec::new(),
+     }
+ }
+ 
+diff --git a/tests/it/cli_goals.rs b/tests/it/cli_goals.rs
+index 0003a975..cd0ba0aa 100644
+--- a/tests/it/cli_goals.rs
++++ b/tests/it/cli_goals.rs
+@@ -508,3 +508,300 @@ fn a_goal_takes_a_priority_by_name_while_it_is_not_closed() {
+         "normal"
+     );
+ }
++
++/// The queue at `db` bound to `repo`, so the commands read the `dagq.toml`
++/// of `repo` (ADR-t980-1, ADR-t1639-1 decision 6).
++fn bind(db: &Path, repo: &Path) {
++    let repository = dagq::infrastructure::adapters::GitRepository::inspect(repo).unwrap();
++    SqliteQueue::open(db)
++        .unwrap()
++        .bind_repository(
++            &dagq::infrastructure::adapters::path_text(&repository.common_dir).unwrap(),
++        )
++        .unwrap();
++}
++
++/// ADR-t1639-1 decision 6 without a set of tags: `goal add --tag` and
++/// `goal edit --tag` take any tag of the form, `--tag` replaces the whole
++/// list, `--no-tags` removes it, `goal_updated` records both, and `goal
++/// show` and `search` print them.
++#[test]
++fn a_goal_takes_tags_that_an_edit_replaces_or_removes() {
++    let (_dir, db) = queue();
++    let added = ok(
++        &db,
++        &[
++            "goal",
++            "add",
++            "tagged",
++            "--tag",
++            "codex",
++            "--tag",
++            "front-end_2",
++        ],
++    );
++    assert_eq!(added["tags"], serde_json::json!(["codex", "front-end_2"]));
++    assert_eq!(
++        ok(&db, &["goal", "add", "plain"])["tags"],
++        serde_json::json!([])
++    );
++    let long = "t".repeat(65);
++    for args in [
++        vec!["goal", "add", "bad", "--tag", "Codex"],
++        vec!["goal", "add", "bad", "--tag", "two words"],
++        vec!["goal", "add", "bad", "--tag", &long],
++        vec!["goal", "edit", "1", "--tag", "Codex"],
++    ] {
++        let error = refused(&db, &args);
++        assert!(error.contains("must be a slug"), "{args:?}: {error}");
++    }
++    assert_eq!(
++        refused(&db, &["goal", "add", "bad", "--tag", "a", "--tag", "a"]),
++        "goal tag \"a\" is given twice"
++    );
++    assert!(
++        !invoke(&db, &["goal", "edit", "1", "--tag", "a", "--no-tags"])
++            .status
++            .success()
++    );
++    assert_eq!(
++        ok(&db, &["goal", "show", "1"])["goal"]["tags"],
++        serde_json::json!(["codex", "front-end_2"])
++    );
++
++    let edited = ok(&db, &["goal", "edit", "1", "--tag", "cmux"]);
++    assert_eq!(edited["tags"], serde_json::json!(["cmux"]));
++    assert_eq!(edited["title"], "tagged");
++    let cleared = ok(&db, &["goal", "edit", "1", "--no-tags"]);
++    assert_eq!(cleared["tags"], serde_json::json!([]));
++    let updated: Vec<Value> = ok(&db, &["goal", "show", "1", "--full"])["events"]
++        .as_array()
++        .unwrap()
++        .iter()
++        .filter(|event| event["kind"] == "goal_updated")
++        .map(|event| {
++            serde_json::json!([
++                event["payload"]["old"]["tags"],
++                event["payload"]["new"]["tags"]
++            ])
++        })
++        .collect();
++    assert_eq!(
++        updated,
++        [
++            serde_json::json!([["codex", "front-end_2"], ["cmux"]]),
++            serde_json::json!([["cmux"], []])
++        ]
++    );
++
++    // A closed goal's tags change too, and a search hit of a goal shows them.
++    ok(&db, &["goal", "edit", "2", "--tag", "throughput"]);
++    ok(&db, &["goal", "close", "2", "--verdict", "abandoned"]);
++    ok(
++        &db,
++        &["goal", "edit", "2", "--tag", "throughput", "--tag", "codex"],
++    );
++    let found = ok(&db, &["search", "plain"]);
++    assert_eq!(found["hits"][0]["kind"], "goal", "{found}");
++    assert_eq!(
++        found["hits"][0]["tags"],
++        serde_json::json!(["throughput", "codex"])
++    );
++    let untagged = ok(&db, &["search", "tagged"]);
++    assert_eq!(untagged["hits"][0]["tags"], serde_json::json!([]));
++    ok(&db, &["add", "tagged task"]);
++    let task_hit = ok(&db, &["search", "task", "--kind", "task"]);
++    assert!(task_hit["hits"][0].get("tags").is_none(), "{task_hit}");
++}
++
++/// ADR-t1639-1 decision 6 with `[goals] tags` in the bound checkout's
++/// dagq.toml: `goal add` and `goal edit` refuse a tag outside it, and
++/// `lint` and `submit` refuse a draft goal without a tag, moving nothing,
++/// until it has one.
++#[test]
++fn the_set_of_goal_tags_of_dagq_toml_holds_goal_add_edit_lint_and_submit() {
++    let (_fixture, repo, db) = crate::runtime_support::fixture();
++    bind(&db, &repo);
++    std::fs::write(
++        repo.join("dagq.toml"),
++        "[goals]\ntags = [\"codex\", \"throughput\"]\n",
++    )
++    .unwrap();
++    let outside = refused(&db, &["goal", "add", "outside", "--tag", "cmux"]);
++    assert!(outside.contains("not one of [goals] tags"), "{outside}");
++    assert!(outside.contains("codex, throughput"), "{outside}");
++    let draft = ok(&db, &["goal", "add", "untagged", "--draft"])["id"].to_string();
++    let refused_edit = refused(&db, &["goal", "edit", &draft, "--tag", "cmux"]);
++    assert!(
++        refused_edit.contains("not one of [goals] tags"),
++        "{refused_edit}"
++    );
++    let open = ok(&db, &["goal", "add", "open goal"])["id"].to_string();
++    let sound = ["--acceptance", "works", "--verify", "x"];
++    let member = ok(
++        &db,
++        &[&["add", "member", "--goal", &draft][..], &sound].concat(),
++    )["id"]
++        .to_string();
++    let other = ok(
++        &db,
++        &[&["add", "other", "--goal", &open][..], &sound].concat(),
++    )["id"]
++        .to_string();
++
++    // Only the task of the draft goal without a tag is linted.
++    let linted = ok(&db, &["lint", &member, &other]);
++    let violations = linted["violations"].as_array().unwrap();
++    assert_eq!(violations.len(), 1, "{linted}");
++    assert_eq!(violations[0]["code"], "missing_goal_tag");
++    assert_eq!(violations[0]["task_id"].to_string(), member);
++    let submitted = submit_from(&db, None, None, &["--goal", &draft]);
++    assert!(!submitted.status.success());
++    let stderr = String::from_utf8_lossy(&submitted.stderr);
++    assert!(
++        stderr.contains(&format!("draft goal {draft} has no tag")),
++        "{stderr}"
++    );
++    assert_eq!(ok(&db, &["show", &member])["task"]["status"], "draft");
++    assert_eq!(
++        ok(&db, &["proposal", "list", "--all"])["proposals"],
++        serde_json::json!([])
++    );
++
++    ok(&db, &["goal", "edit", &draft, "--tag", "codex"]);
++    assert_eq!(
++        ok(&db, &["lint", &member, &other])["violations"],
++        serde_json::json!([])
++    );
++    // A tag the set no longer names is linted as outside it.
++    std::fs::write(repo.join("dagq.toml"), "[goals]\ntags = [\"throughput\"]\n").unwrap();
++    assert_eq!(
++        ok(&db, &["lint", &member])["violations"][0]["code"],
++        "goal_tag_outside_set"
++    );
++    std::fs::write(
++        repo.join("dagq.toml"),
++        "[goals]\ntags = [\"codex\", \"throughput\"]\n",
++    )
++    .unwrap();
++    assert!(
++        submit_from(&db, None, None, &["--goal", &draft])
++            .status
++            .success()
++    );
++    assert_eq!(ok(&db, &["show", &member])["task"]["status"], "submitted");
++
++    // Without the key, any tag of the form again, and a draft goal may
++    // have none.
++    std::fs::write(repo.join("dagq.toml"), "[goals]\n").unwrap();
++    assert_eq!(
++        ok(&db, &["goal", "add", "free", "--tag", "cmux"])["tags"],
++        serde_json::json!(["cmux"])
++    );
++    let bare = ok(&db, &["goal", "add", "bare", "--draft"])["id"].to_string();
++    let bare_task = ok(
++        &db,
++        &[&["add", "bare task", "--goal", &bare][..], &sound].concat(),
++    )["id"]
++        .to_string();
++    assert_eq!(
++        ok(&db, &["lint", &bare_task])["violations"],
++        serde_json::json!([])
++    );
++    assert!(
++        submit_from(&db, None, None, &["--goal", &bare])
++            .status
++            .success()
++    );
++}
++
++/// ADR-t1639-1 decision 7: `goal list` puts the open and draft goals
++/// before the closed ones, each part by priority (highest first) then ID,
++/// prints each goal's priority and tags, keeps a draft goal without tasks,
++/// and `--tag` keeps the goals with any of the tags given.
++#[test]
++fn goal_list_orders_by_priority_and_narrows_by_tag() {
++    let (_dir, db) = queue();
++    for args in [
++        &[
++            "goal",
++            "add",
++            "low codex",
++            "--priority",
++            "low",
++            "--tag",
++            "codex",
++        ][..],
++        &[
++            "goal",
++            "add",
++            "closed interrupt",
++            "--priority",
++            "interrupt",
++            "--tag",
++            "codex",
++        ][..],
++        &["goal", "add", "high plain", "--priority", "high"][..],
++        &[
++            "goal",
++            "add",
++            "normal two",
++            "--tag",
++            "cmux",
++            "--tag",
++            "throughput",
++        ][..],
++        &[
++            "goal",
++            "add",
++            "empty draft",
++            "--draft",
++            "--priority",
++            "high",
++            "--tag",
++            "throughput",
++        ][..],
++    ] {
++        ok(&db, args);
++    }
++    ok(&db, &["goal", "close", "2", "--verdict", "abandoned"]);
++    ok(&db, &["add", "a task", "--goal", "1"]);
++    let ids = |listed: &Value| -> Vec<i64> {
++        listed
++            .as_array()
++            .unwrap()
++            .iter()
++            .map(|goal| goal["id"].as_i64().unwrap())
++            .collect()
++    };
++    let listed = ok(&db, &["goal", "list"]);
++    assert_eq!(ids(&listed), [3, 5, 4, 1, 2]);
++    let draft = &listed[1];
++    assert_eq!(
++        (&draft["status"], &draft["priority"], &draft["tags"]),
++        (
++            &serde_json::json!("draft"),
++            &serde_json::json!("high"),
++            &serde_json::json!(["throughput"])
++        )
++    );
++    assert_eq!(draft["tasks"]["total"], 0);
++    assert_eq!(listed[0]["tags"], serde_json::json!([]));
++    assert_eq!(listed[4]["priority"], "interrupt");
++    assert_eq!(listed[4]["closed"], true);
++
++    assert_eq!(ids(&ok(&db, &["goal", "list", "--tag", "codex"])), [1, 2]);
++    assert_eq!(
++        ids(&ok(
++            &db,
++            &["goal", "list", "--tag", "throughput", "--tag", "codex"]
++        )),
++        [5, 4, 1, 2]
++    );
++    assert_eq!(
++        ok(&db, &["goal", "list", "--tag", "enterprise"]),
++        serde_json::json!([])
++    );
++    let error = refused(&db, &["goal", "list", "--tag", "Codex"]);
++    assert!(error.contains("must be a slug"), "{error}");
++}
+diff --git a/tests/it/cli_read.rs b/tests/it/cli_read.rs
+index 94a17f47..1ed5ffbf 100644
+--- a/tests/it/cli_read.rs
++++ b/tests/it/cli_read.rs
+@@ -678,7 +678,7 @@ fn search_prints_hits_with_excerpts_and_checks_its_filters() {
+         goal["hits"][0],
+         serde_json::json!({
+             "kind": "goal", "id": 1, "status": "open", "title": "重複を見つける",
+-            "field": "acceptance", "excerpt": "«上位» 5 件に出る",
++            "field": "acceptance", "excerpt": "«上位» 5 件に出る", "tags": [],
+         })
+     );
+     let full = ok(
+diff --git a/tests/it/goal_review.rs b/tests/it/goal_review.rs
+index 8cd18fc2..fee5fd10 100644
+--- a/tests/it/goal_review.rs
++++ b/tests/it/goal_review.rs
+@@ -43,6 +43,7 @@ pub(crate) fn goal_done(fx: &Fixture) -> (GoalId, TaskId) {
+             constraints: String::new(),
+             doc: None,
+             draft: false,
++            tags: Vec::new(),
+         })
+         .unwrap()
+         .id();
+diff --git a/tests/it/plan_review.rs b/tests/it/plan_review.rs
+index 7b67e780..349a8223 100644
+--- a/tests/it/plan_review.rs
++++ b/tests/it/plan_review.rs
+@@ -1611,6 +1611,7 @@ pub(crate) fn open_goal(queue: &mut SqliteQueue) -> dagq::domain::GoalId {
+             constraints: "no new tables".into(),
+             doc: None,
+             draft: false,
++            tags: Vec::new(),
+         })
+         .unwrap()
+         .id()
+diff --git a/tests/it/related.rs b/tests/it/related.rs
+index 5ee0cb48..30ab6339 100644
+--- a/tests/it/related.rs
++++ b/tests/it/related.rs
+@@ -424,6 +424,7 @@ fn build(dir: &TempDir) -> (SqliteQueue, HashMap<i64, i64>, std::path::PathBuf)
+                         constraints: String::new(),
+                         doc: None,
+                         draft: false,
++                        tags: Vec::new(),
+                     })
+                     .unwrap()
+                     .id()
+diff --git a/tests/it/runtime_forecast.rs b/tests/it/runtime_forecast.rs
+index 833906fa..8cb316fa 100644
+--- a/tests/it/runtime_forecast.rs
++++ b/tests/it/runtime_forecast.rs
+@@ -82,6 +82,7 @@ fn snapshots_are_recorded_at_the_day_a_moving_landing_and_a_start() {
+                 constraints: "c".into(),
+                 doc: None,
+                 draft: false,
++                tags: Vec::new(),
+             })
+             .unwrap()
+             .id();
+diff --git a/tests/it/runtime_integrate.rs b/tests/it/runtime_integrate.rs
+index a8b5bb70..e566f766 100644
+--- a/tests/it/runtime_integrate.rs
++++ b/tests/it/runtime_integrate.rs
+@@ -441,6 +441,7 @@ fn review_writes_the_run_material_to_review_md_and_returns_only_its_size() {
+             constraints: "goal constraints".into(),
+             doc: None,
+             draft: false,
++            tags: Vec::new(),
+         })
+         .unwrap();
+     queue.set_goal(TaskId::new(1), Some(goal.id())).unwrap();
+@@ -1572,6 +1573,7 @@ fn integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once() {
+             constraints: String::new(),
+             doc: None,
+             draft: false,
++            tags: Vec::new(),
+         })
+         .unwrap();
+     queue.set_goal(TaskId::new(1), Some(goal.id())).unwrap();
+diff --git a/tests/it/runtime_observer.rs b/tests/it/runtime_observer.rs
+index a1292d51..01e4f330 100644
+--- a/tests/it/runtime_observer.rs
++++ b/tests/it/runtime_observer.rs
+@@ -605,6 +605,7 @@ fn supervisor_starts_the_observer_on_its_interval_without_a_run_slot() {
+                 constraints: String::new(),
+                 doc: None,
+                 draft: false,
++                tags: Vec::new(),
+             })
+             .unwrap();
+     }

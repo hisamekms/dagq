@@ -1,0 +1,159 @@
+diff --git a/docs/adr/2026-09-27-t616-1-runtime-fixed-strings-are-english.md b/docs/adr/2026-09-27-t616-1-runtime-fixed-strings-are-english.md
+index c3e00c85..7913d65b 100644
+--- a/docs/adr/2026-09-27-t616-1-runtime-fixed-strings-are-english.md
++++ b/docs/adr/2026-09-27-t616-1-runtime-fixed-strings-are-english.md
+@@ -2,10 +2,12 @@
+ id: adr-t616-1
+ type: adr
+ title: runtimeが出す固定の文字列（prompt・ask・error・event・contextの見出し・commitの定型部分・pushのメッセージ）は英語にする
+-status: accepted
++status: superseded
+ created: 2026-09-27
+ updated: 2026-09-27
+ accepted_on: 2026-09-27
++superseded_by: adr-t1800-1
++superseded_on: 2026-10-05
+ owners:
+   - hisamekms
+ tags:
+@@ -18,6 +20,7 @@ related:
+ ---
+ 
+ # ADR-t616-1: runtimeが出す固定の文字列（prompt・ask・error・event・contextの見出し・commitの定型部分・pushのメッセージ）は英語にする
++> **置き換え済み（2026-10-05）**: このADRの決定は現在有効ではない。現行の決定は[ADR-t1800-1](2026-10-05-t1800-1-runtime-output-translation.md)を読む。
+ 
+ ## Context
+ 
+diff --git a/docs/adr/2026-10-05-t1800-1-runtime-output-translation.md b/docs/adr/2026-10-05-t1800-1-runtime-output-translation.md
+new file mode 100644
+index 00000000..778be7b7
+--- /dev/null
++++ b/docs/adr/2026-10-05-t1800-1-runtime-output-translation.md
+@@ -0,0 +1,38 @@
++---
++id: adr-t1800-1
++type: adr
++title: 人向けの固定出力に翻訳表示を認める
++status: accepted
++created: 2026-10-05
++updated: 2026-10-05
++accepted_on: 2026-10-05
++supersedes:
++  - adr-t616-1
++owners:
++  - hisamekms
++tags:
++  - runtime
++  - language
++related:
++  - design-supervisor-lifecycle-language
++---
++
++# ADR-t1800-1: 人向けの固定出力に翻訳表示を認める
++
++## Context
++
++英語の固定出力だけでは、人が運転状況を読み取る負担がある。ADR-t616-1の決定1だけを変え、決定2・3は引き継ぐ。
++
++## Decision
++
++1. runtimeの固定文字列は英語を正本とするが、人向けの画面では、人が明示的に求めた場合に翻訳表示を認める。機械が読む記録とagentへの指示は英語のままにする。
++2. 人やAIが書いた文はそのまま運び、埋め込む場合も翻訳しない。入力の言語は制限しない。
++3. 記録済みの文字列は書き換えない。新しい表示方針は実装後に適用する。
++
++## Alternatives
++
++英語だけの表示を続ける案は、機械向けと人向けを分けて改善できる余地を捨てるため採らない。
++
++## Consequences
++
++翻訳表示を保守する負担が増える。現在の実装と実装待ちの境界は[Language](../design/supervisor-lifecycle/language.md)に書く。
+diff --git a/docs/adr/README.md b/docs/adr/README.md
+index 02f045e2..5d8e6dd8 100644
+--- a/docs/adr/README.md
++++ b/docs/adr/README.md
+@@ -4,8 +4,8 @@ type: design
+ title: Architecture decision records
+ status: current
+ created: 2026-09-21
+-updated: 2026-10-04
+-last_verified: 2026-09-30
++updated: 2026-10-05
++last_verified: 2026-10-05
+ tags:
+   - architecture
+   - documentation
+@@ -67,7 +67,6 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由
+ | [ADR-t614-1](2026-09-27-t614-1-dagq-source-only-features-by-one-check.md) | dagqの開発でだけ要る機能を、queueのrepositoryがdagqのソースかの判定1つで有効にし、ソースでないrepositoryではmigrationの振り直し・--fromなしのinstall・source buildの自動更新・cargo専用の計測を動かさない（ADR-0067決定3・ADR-0073決定14・17をamends） | 2026-09-27 |
+ | [ADR-t614-2](2026-09-27-t614-2-released-migrations-are-immutable.md) | リリース済み（最新のv*のtagに含まれる）のmigrationは中身も名前も変えず消さず、それを検査のscriptとCIとreleaseで止める | 2026-09-27 |
+ | [ADR-t615-1](2026-09-27-t615-1-landing-branch-and-push-remote-per-repository.md) | 着地先のbranchとpushのremoteとpushするかをrepositoryごとにdagq.tomlで決められるようにし、指定が無ければdefault branchを推定し、解決できなければupで止める（ADR-0008決定3・4・6・7・8、ADR-0047決定26、ADR-0054決定7をamends） | 2026-09-27 |
+-| [ADR-t616-1](2026-09-27-t616-1-runtime-fixed-strings-are-english.md) | runtimeが出す固定の文字列（prompt・ask・error・event・contextの見出し・commitの定型部分・pushのメッセージ）は英語にする | 2026-09-27 |
+ | [ADR-t616-2](2026-09-27-t616-2-language-of-text-ai-writes-for-people-is-configurable.md) | AIが人に向けて書く文の言語を、利用者ごとの設定を既定にrepositoryのdagq.tomlで上書きして指定でき、runtimeがすべてのsessionとjobのpromptに指示を足す | 2026-09-27 |
+ | [ADR-t617-1](2026-09-27-t617-1-plugin-marketplace-pinned-to-release-tag.md) | pluginはこのrepositoryのmarketplaceからClaude Codeの公式の手順で配り、marketplaceのentryを最新のリリースのtagに固定して、pluginのversionをバイナリのリリースと合わせる | 2026-09-27 |
+ | [ADR-t617-2](2026-09-27-t617-2-installed-plugin-by-default-plugin-dir-for-development.md) | runtimeが開くsessionはinstallしたpluginを使い、upとplanに--plugin-dirを付けるのはpluginを開発するとき（dagqのrepository）だけにする | 2026-09-27 |
+@@ -160,6 +159,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由
+ | [ADR-t1662-2](2026-10-04-t1662-2-measurement-stores-ssot-and-views.md) | 記録を論理ストア（SSOTのStateStore・EventStore・SessionStepStore・NodeSampleStore、ビューのLedgerStore・ReportStore）と消えてよい材料（run dir・log・CSV・transcript）に分け、今のアダプタはqueue.dbの表にし、StateStoreとEventStoreは今どおり同時に確定して計測はStateStoreを読まず、sessionのstepは90日だけ重複を除き抜けを検出して持ち、hostの負荷はNodeSampleStoreを恒久の記録にしてCSVを写しにし（保持の期間のCSVは一度取り込む）、`RunLog`・`EventReads`・`TaskStore`をEventStore・StateStoreにまとめ直してgoal 100のmoduleに置き、台帳と恒久の入力のストアを「新しい表は持たない」の例外にする（ADR-0049決定5をamends） | 2026-10-04 |
+ | [ADR-t1662-3](2026-10-04-t1662-3-executors-send-telemetry-and-commands-are-classified-by-shape.md) | sessionのstepはagentではなくexecutor（session wrapper・runner・非対話のjobを起動するプロセス・`integrate`とe2eの検証）がTelemetrySink（queue serviceの`telemetry_report`）に30秒ごとに送り、executorには`telemetry_report`だけを呼べるtelemetry専用のprincipal（対象はrunか、runを持たないplanner・plan review・goal review・throughput review。supervisorが発行・失効）を与え、runを持たない対象のstepはSessionStepStoreに90日だけ持ち、実行環境・資源・送る口を差し替えられる口にし、資源の単位・`blocker: infra`・適合test・OpenTelemetryのspanとの対応を決め、コマンドは汎用の形（shape: flagの名前は平文、値とwordはdigest）だけを持って台帳を作るときに`[[telemetry.commands]]`の規則で分類する（ADR-t614-1決定2・ADR-t1233-4決定4・6をamends） | 2026-10-04 |
+ | [ADR-t1688-1](2026-10-04-t1688-1-worker-searches-documents-by-changed-names.md) | workerは文書の候補を、taskが名指すものと作業中に見つけたものに加え、変えた名前（コマンド・flag・設定のkey・役割・fileのpath）でrepositoryの文書を探して拾い、summaryに照合したpath・節か不要の理由と探した名前を書く。探す手段は名指さず検査の工程にしない。repository固有の範囲は開発文書、確かめはreviewのsubagent（ADR-t1428-1決定4をamends） | 2026-10-04 |
++| [ADR-t1800-1](2026-10-05-t1800-1-runtime-output-translation.md) | 人向けの固定出力に翻訳表示を認める（ADR-t616-1を置き換え） | 2026-10-05 |
+ 
+ goal 82（goal 38の段(1)〜(3)）のADRはtask 1233が書いた5本で、決定の置き場所は次のとおり。制御側と実行側の分け方・queue service・ユースケース単位のAPIとservice側の認可・unix socket・broker・クライアントモード・段の順と置き場所はADR-t1233-1、serviceの起動・停止の責任・落ちたときの知らせ方・brokerより前のprincipalの認証（token）はADR-t1233-4、読み取りのユースケースとroleごとの読める範囲・workerの読める範囲・Codexのsandboxからの到達はADR-t1233-5、e2eをreviewのpassの後のhostの工程に移すことはADR-t1233-2、このrepositoryを先にLinuxで通すことはADR-t1233-3にある。
+ 
+@@ -169,6 +169,7 @@ goal 82（goal 38の段(1)〜(3)）のADRはtask 1233が書いた5本で、決
+ 
+ | ADR | Status | superseded_by | superseded_on / deprecated_on |
+ | --- | --- | --- | --- |
++| [ADR-t616-1](2026-09-27-t616-1-runtime-fixed-strings-are-english.md) | superseded | [ADR-t1800-1](2026-10-05-t1800-1-runtime-output-translation.md) | 2026-10-05 |
+ | [ADR-0001](0001-rust-runtime.md) | superseded | [ADR-0052](0052-rust-single-binary-and-plugin-with-cmux-first.md) | 2026-09-26 |
+ | [ADR-0002](0002-cmux-first.md) | superseded | [ADR-0052](0052-rust-single-binary-and-plugin-with-cmux-first.md) | 2026-09-26 |
+ | [ADR-0003](0003-supervisor-owns-lifecycle.md) | superseded | [ADR-0054](0054-run-lease-ownership-parallel-supervisors-and-recover.md) | 2026-09-26 |
+diff --git a/docs/design/supervisor-lifecycle/language.md b/docs/design/supervisor-lifecycle/language.md
+index a8568b41..e3b3c0d6 100644
+--- a/docs/design/supervisor-lifecycle/language.md
++++ b/docs/design/supervisor-lifecycle/language.md
+@@ -4,8 +4,8 @@ type: design
+ title: "Language"
+ status: current
+ created: 2026-09-27
+-updated: 2026-10-04 # task 251
+-last_verified: 2026-10-04 # task 251
++updated: 2026-10-05
++last_verified: 2026-10-05
+ scope: runtime
+ related:
+   - design-supervisor-lifecycle
+@@ -20,7 +20,9 @@ related:
+ 
+ # Language
+ 
+-runtimeが出す固定の文字列は英語だけで持ち（[ADR-t616-1](../../adr/2026-09-27-t616-1-runtime-fixed-strings-are-english.md)）、AIが人に向けて書く文の言語は`[language]`の設定で指定できる（[ADR-t616-2](../../adr/2026-09-27-t616-2-language-of-text-ai-writes-for-people-is-configurable.md)）。
++採用した方針は、人が明示的に求めた場合に、人向けの固定出力を翻訳表示できるようにすること。機械向けの記録とagentへの指示は英語を維持し、人やAIが書いた文は翻訳せず、記録済みの文字列も書き換えない。理由は[ADR-t1800-1](../../adr/2026-10-05-t1800-1-runtime-output-translation.md)にある。
++
++翻訳表示は未実装で、以下の実装状況と固定文字列の節は現在の英語だけの実装を説明する。AIが人に向けて書く文の言語を`[language]`で指定する仕組み（[ADR-t616-2](../../adr/2026-09-27-t616-2-language-of-text-ai-writes-for-people-is-configurable.md)）は変更しない。
+ 
+ **実装状況**: ADR-t616-1は実装した（task 625。下の「日本語が残っていた固定の文字列」をすべて英語にした）。ADR-t616-2も実装した（task 626。読むのは`src/infrastructure/language.rs`、指示の文面と足し方は`src/domain/language.rs`）。
+ 
+diff --git a/docs/plans/runtime-output-translation.md b/docs/plans/runtime-output-translation.md
+new file mode 100644
+index 00000000..8c0b31b2
+--- /dev/null
++++ b/docs/plans/runtime-output-translation.md
+@@ -0,0 +1,18 @@
++---
++id: plan-runtime-output-translation
++type: plan
++title: 出力の翻訳方針を記録する
++status: active
++created: 2026-10-05
++updated: 2026-10-05
++---
++
++# 出力の翻訳方針を記録する
++
++## plannerがtask 1800のdescriptionに書く内容
++
++ADR-t616-1の決定1だけを変更し、決定2・3を引き継いだADR-t1800-1で丸ごと置き換える。Languageに採用方針と未実装の境界を書く。翻訳表示の実装は後続のtaskに分ける。
++
++## plan reviewの確認
++
++元の決定の数と変更範囲に対して、descriptionの置き換えの選択が文書の規則に合うかを見る。

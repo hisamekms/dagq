@@ -1,0 +1,30 @@
+diff --git a/docs/plans/adr-reservation-refresh.md b/docs/plans/adr-reservation-refresh.md
+new file mode 100644
+index 00000000..eb3d5ead
+--- /dev/null
++++ b/docs/plans/adr-reservation-refresh.md
+@@ -0,0 +1,24 @@
++---
++id: plan-adr-reservation-refresh
++type: plan
++title: 登録済みADR taskの予約形式の整理
++status: proposed
++created: 2026-10-05
++updated: 2026-10-05
++related:
++  - adr-t598-1
++---
++
++# 登録済みADR taskの予約形式の整理
++
++## 対象
++
++ID形式の移行前に登録済みのtaskが予約した4桁の番号を対象にする。対象のADRはまだ作成されておらず、予約番号はmainでも未使用である。
++
++## 手順
++
++形式を統一するため、plannerは対象taskのdescriptionにある4桁の予約を取り消し、そのtask自身のIDによるADR-t<ID>-1へ変更する。決定の中身と本数は変えない。
++
++## 完了条件
++
++対象taskのdescriptionから4桁の予約がなくなり、task ID形式に揃っていること。この変更ではADRファイルの作成・変更は行わない。

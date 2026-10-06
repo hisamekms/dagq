@@ -1,0 +1,13 @@
+diff --git a/build.rs b/build.rs
+index de813f3e..2763677f 100644
+--- a/build.rs
++++ b/build.rs
+@@ -100,5 +100,7 @@ fn list_migrations(manifest_dir: &Path) {
+     }
+     source.push_str("]\n");
+     let out = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
+-    std::fs::write(out.join("migrations.rs"), source).expect("write migrations.rs");
++    let destination = out.join("migrations.rs");
++    std::fs::write(&destination, source)
++        .unwrap_or_else(|error| panic!("cannot write {}: {error}", destination.display()));
+ }

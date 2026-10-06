@@ -1,0 +1,385 @@
+diff --git a/docs/adr/0080-supervisor-rereads-conflicts-config.md b/docs/adr/0080-supervisor-rereads-conflicts-config.md
+index 1fee9b85..83014ea5 100644
+--- a/docs/adr/0080-supervisor-rereads-conflicts-config.md
++++ b/docs/adr/0080-supervisor-rereads-conflicts-config.md
+@@ -6,6 +6,8 @@ status: accepted
+ created: 2026-09-27
+ updated: 2026-09-27
+ accepted_on: 2026-09-27
++amended_by:
++  - adr-t774-1
+ supersedes:
+   - adr-0069
+ owners:
+diff --git a/docs/adr/2026-10-04-t774-1-confirm-conflicts-config-on-consecutive-passes.md b/docs/adr/2026-10-04-t774-1-confirm-conflicts-config-on-consecutive-passes.md
+new file mode 100644
+index 00000000..960217d0
+--- /dev/null
++++ b/docs/adr/2026-10-04-t774-1-confirm-conflicts-config-on-consecutive-passes.md
+@@ -0,0 +1,39 @@
++---
++id: adr-t774-1
++type: adr
++title: conflictsの変更は2 pass続けて同じ値を読んでから適用する
++status: accepted
++created: 2026-10-04
++updated: 2026-10-04
++accepted_on: 2026-10-04
++amends:
++  - adr-0080 decision 11
++  - adr-0080 decision 12
++  - adr-0080 decision 13
++owners:
++  - hisamekms
++tags:
++  - runtime
++  - supervisor
++related:
++  - design-supervisor-lifecycle-conflict-thresholds
++---
++
++# ADR-t774-1: conflictsの変更は2 pass続けて同じ値を読んでから適用する
++
++## Context
++
++ADR-0080の決定11〜13では、supervisorはmain checkoutの`dagq.toml`をpassごとに読み、変更を即時に適用する。非原子的な書き込みの途中で空のファイルや表の無い内容を読むと、parserは既定値を返す。表の途中で切れたparse可能な内容も、欠けたkeyが既定値になる。その一瞬の値への変更と元への復帰で、eventが2回残りhotspotのcacheも2回捨てられる（task 774、goal 45）。表を意図的に消して既定値に戻す操作は残したい。
++
++## Decision
++
++1. ADR-0080の決定11〜13の読み直しに確認待ちを加える。起動後、使用中と違う3つの値の組を読んだら候補として保持し、続くpassでも同じ組を読んだときだけ適用する。候補の段階では使用中の値、hotspotのcache、`conflicts_config_changed`を変えない。適用時にcacheを捨て、以後の判定と進行中の控えの上限に反映し、従来のeventの重複抑止を使って記録する。
++2. 使用中の値に戻ったら候補を捨てる。候補と違う値ならその値を新しい候補にする。ファイルの欠落、読み取りエラー、parseや値の検証のエラーでも候補を捨て、使用中の値を保つ。これらを挟んだ読みは連続と数えない。warnの扱いは変えない。
++3. 表やkeyの削除はparserが返す既定値として扱う。表の無いファイルを2回続けて読めば既定値への変更を適用して記録する。空やparse可能な書きかけも同じ規則で、1 passだけ現れた値は適用しない。
++4. 起動時の値は従来どおり即時に使う。`SuperviseOptions.conflicts`で上書きされていれば読み直さない。起動時の値と最後のeventの`to`の比較、および起動時のwarnの重複（task 775）はこの変更に含めない。
++
++## Consequences
++
++- 通常の設定変更の反映は1 pass遅れる。使用中と同じ値は待たない。
++- 書きかけが同じ値のまま2 pass以上続けば適用される。完全な書き込みの保証ではないため、別のファイルに書いてrenameする方法は引き続き有効。
++- 現在の読み直しの仕様は[Conflict thresholds](../design/supervisor-lifecycle/conflict-thresholds.md#読み直し)に置く。
+diff --git a/docs/adr/README.md b/docs/adr/README.md
+index 8638a2b7..0e7539f6 100644
+--- a/docs/adr/README.md
++++ b/docs/adr/README.md
+@@ -141,6 +141,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由
+ | [ADR-t1533-1](2026-10-03-t1533-1-follow-up-requests-go-to-headless-planners-by-planner-id-and-no-planner-close.md) | 開いているruntimeのplannerへの続きの依頼は、plannerのIDで生きている非対話のplannerだけに次のturnとして届け（作業中のturnの後に取られる）、対話・人の・閉じた・`lost`・`exited`・終了の依頼を置いたplannerには理由付きで拒んでcmuxで送らず、userとinboxだけに許してactor付きで記録する。plannerを閉じるCLI（`planner close`）は作らず、runtimeのplannerはsupervisorが閉じる（ADR-t1228-1決定2・3、ADR-t1394-2決定7をamends） | 2026-10-03 |
+ | [ADR-t1582-1](2026-10-04-t1582-1-temporarily-leave-broker-and-cmux-only-e2e-cases-out.md) | brokerのe2e 1ケース（task 1451で復帰）とcmux固有のe2e 3ケース（sweepはtask 1440、plannerはtask 1441、`up --in-cmux`はtask 1443で削除か置換）を、本文を残したまま`#[cfg(any())]`で期間限定でe2eの登録から外し、着地の前のe2eと自動更新・`install`の関門の「全部のe2e」から除く（ADR-t963-1決定1・3、ADR-t1233-2決定2をamends） | 2026-10-04 |
+ | [ADR-t1545-1](2026-10-04-t1545-1-split-the-runtime-by-layer-and-context.md) | runtimeの責務をレイヤーとコンテキスト（計画管理・実行と着地・観測と分析・host運用）の2軸で分け、contextの間を公開したportと値（ID・型付きのevent）だけでつなぎ、観測と分析は読むだけにし、境界をまたぐtransactionは設計文書の一覧で名指しした例外だけにし、規則の本文は設計文書の1か所に置いてreviewのsubagentと検査は参照と検査項目だけを持ち、crateやdirectoryを増やすことを目的にしない（ADR-0013決定1をamends） | 2026-10-04 |
++| [ADR-t774-1](2026-10-04-t774-1-confirm-conflicts-config-on-consecutive-passes.md) | conflictsの変更は2 pass続けて同じ値を読んでから適用する（ADR-0080決定11〜13をamends） | 2026-10-04 |
+ 
+ goal 82（goal 38の段(1)〜(3)）のADRはtask 1233が書いた5本で、決定の置き場所は次のとおり。制御側と実行側の分け方・queue service・ユースケース単位のAPIとservice側の認可・unix socket・broker・クライアントモード・段の順と置き場所はADR-t1233-1、serviceの起動・停止の責任・落ちたときの知らせ方・brokerより前のprincipalの認証（token）はADR-t1233-4、読み取りのユースケースとroleごとの読める範囲・workerの読める範囲・Codexのsandboxからの到達はADR-t1233-5、e2eをreviewのpassの後のhostの工程に移すことはADR-t1233-2、このrepositoryを先にLinuxで通すことはADR-t1233-3にある。
+ 
+diff --git a/docs/design/supervisor-lifecycle/conflict-thresholds.md b/docs/design/supervisor-lifecycle/conflict-thresholds.md
+index 1d83f44c..7669f681 100644
+--- a/docs/design/supervisor-lifecycle/conflict-thresholds.md
++++ b/docs/design/supervisor-lifecycle/conflict-thresholds.md
+@@ -4,13 +4,14 @@ type: design
+ title: "Conflict thresholds"
+ status: current
+ created: 2026-09-26
+-updated: 2026-09-27
+-last_verified: 2026-09-27
++updated: 2026-10-04
++last_verified: 2026-10-04
+ scope: runtime
+ related:
+   - design-supervisor-lifecycle
+   - design-supervisor-lifecycle-claim-defer
+   - adr-0080
++  - adr-t774-1
+ ---
+ 
+ # Conflict thresholds
+@@ -28,9 +29,9 @@ related:
+ 
+ ## 読み直し
+ 
+-supervisorはloopのpassごとに、`[run.env]`の変更の印（`run_env_changed`）に続けてclaimの前に、main checkoutの`dagq.toml`の`[conflicts]`を読み直す（`Supervisor::reread_conflicts`、`src/application/supervise/claim_defer.rs`。読むのは`Ports::conflicts_file`で、`src/compose.rs`が`load_conflict_config`を渡す。ADR-0080）。`SuperviseOptions.conflicts`で値を与えたとき（test）は`conflicts_file`が`None`で、読み直さない。
++supervisorはloopのpassごとに、`[run.env]`の変更の印（`run_env_changed`）に続けてclaimの前に、main checkoutの`dagq.toml`の`[conflicts]`を読み直す（`Supervisor::reread_conflicts`、`src/application/supervise/claim_defer.rs`。読むのは`Ports::conflicts_file`で、`src/compose.rs`が`load_conflict_config`を渡す。ADR-0080、ADR-t774-1）。`SuperviseOptions.conflicts`で値を与えたとき（test）は`conflicts_file`が`None`で、読み直さない。
+ 
+-- **変わったとき**: 3つの値のどれかが使っている値と違えば、新しい値（`source: file`）に替え、cacheしたhotspot（[claimを控える](claim-defer.md#判定の入力)の10分のcache）を捨てる。次のclaimの判定から、新しい閾値のhotspot・新しい`defer_max_secs`（進行中の控えにも効き、数え始めは最初の`claim_deferred`のまま）・plan reviewのpromptの`alert`がその値を使う。queue event `conflicts_config_changed`（`from`・`to`（どちらも`hotspot_conflicts`・`hotspot_ratio_percent`・`defer_max_secs`）・`source`・`supervisor`）を1回記録し、supervisorのlogにinfoで出す。queueの最新の`conflicts_config_changed`の`to`が新しい値と同じなら（同じqueueの別のsupervisorが記録した）記録しない（`domain::stats::conflicts::conflicts_change`）。起動時に読んだ値は記録しない
+-- **読めない・不正なとき**: 使っている値を保ち（起動の後は既定値に戻さない）、warn `[conflicts] of dagq.toml not read: ...; keeping the values in use`を出す。同じエラーのwarnは、読めるようになるかエラーが変わるまで繰り返さない。直して前と同じ値に戻したときは変更ではないので記録しない。なお`dagq.toml`の書式は1つのparserが全体を検査するので、不正な`[conflicts]`の間は着地先のbranch（[Landing branch](landing-branch.md)）も解決できず、claimと着地、headlessのreviewの起動も止まる
+-- **`dagq.toml`が無いとき**: checkoutの書き換えの途中でありうるので、使っている値を保つ（`[run.env]`の印と同じ）
+-- **`[conflicts]`の表やkeyを消したとき**: 消したkeyは既定値として読み（`source: file`）、既定値への変更として記録する。空のファイルや書きかけのファイルも同じく既定値に読めるので、main checkoutの`dagq.toml`はgitの着地（checkout）か、別のファイルに書いてrenameで置き換える
++- **変わったとき**: 3つの値のどれかが使っている値と違えば、その組を候補として保持する。続くpassでも同じ3つの値を読んだときだけ、新しい値（`source: file`）に替え、cacheしたhotspot（[claimを控える](claim-defer.md#判定の入力)の10分のcache）を捨てる。次のclaimの判定から、新しい閾値のhotspot・新しい`defer_max_secs`（進行中の控えにも効き、数え始めは最初の`claim_deferred`のまま）・plan reviewのpromptの`alert`がその値を使う。queue event `conflicts_config_changed`（`from`・`to`（どちらも`hotspot_conflicts`・`hotspot_ratio_percent`・`defer_max_secs`）・`source`・`supervisor`）を1回記録し、supervisorのlogにinfoで出す。queueの最新の`conflicts_config_changed`の`to`が新しい値と同じなら（同じqueueの別のsupervisorが記録した）記録しない（`domain::stats::conflicts::conflicts_change`）。候補を保持するだけのpassでは、使用中の値・hotspotのcache・eventを変えない。使用中の値に戻れば候補を捨て、別の値なら候補を入れ替えてそこから2回を数える。起動時は即時に適用し、読んだ値は記録しない
++- **読めない・不正なとき**: 候補を捨て、使っている値を保ち（起動の後は既定値に戻さない）、warn `[conflicts] of dagq.toml not read: ...; keeping the values in use`を出す。同じエラーのwarnは、読めるようになるかエラーが変わるまで繰り返さない。直して前と同じ値に戻したときは変更ではないので記録しない。なお`dagq.toml`の書式は1つのparserが全体を検査するので、不正な`[conflicts]`の間は着地先のbranch（[Landing branch](landing-branch.md)）も解決できず、claimと着地、headlessのreviewの起動も止まる
++- **`dagq.toml`が無いとき**: checkoutの書き換えの途中でありうるので、候補を捨て、使っている値を保つ（`[run.env]`の印と同じ）。欠落やエラーを挟んだ読みは連続とは数えない
++- **`[conflicts]`の表やkeyを消したとき**: 消したkeyは既定値として読み（`source: file`）、同じ値を2回続けて読んだときに既定値への変更として適用・記録する。空のファイルやparseできる書きかけも同じ扱いなので、1 passだけの一時的な値は適用しない。ただし2 pass以上同じ書きかけが残れば適用されるため、書き込みは別のファイルからrenameで置き換えるのが確実。この確認待ちは変更の反映を1 pass遅らせる（[ADR-t774-1](../../adr/2026-10-04-t774-1-confirm-conflicts-config-on-consecutive-passes.md)）
+diff --git a/docs/design/supervisor-lifecycle/supervise.md b/docs/design/supervisor-lifecycle/supervise.md
+index 4a9cefa5..f5d08b09 100644
+--- a/docs/design/supervisor-lifecycle/supervise.md
++++ b/docs/design/supervisor-lifecycle/supervise.md
+@@ -4,11 +4,12 @@ type: design
+ title: "`supervise`"
+ status: current
+ created: 2026-09-26
+-updated: 2026-10-03
+-last_verified: 2026-10-03
++updated: 2026-10-04
++last_verified: 2026-10-04
+ scope: runtime
+ related:
+   - design-supervisor-lifecycle
++  - adr-t774-1
+   - adr-0013
+   - adr-0054
+   - adr-0053
+@@ -34,7 +35,7 @@ related:
+ 2. cmux（`ping`）とClaude（`--version`）のpreflightを行う。
+ 3. queueをrepositoryに束縛する（`bind_repository`）。別repositoryに束縛済みなら開始しない。queue全体の排他はなく、同じqueueに別のsupervisorがいても構わない。
+ 4. supervisorプロセスのtoken（UUID）を作り、`supervisors`表に自分を登録し（`register_supervisor`: token、PID、`parallel`、`started_at`）、引き継ぎを受けられる印を付ける（`accept_handoff`）。hiddenの`--handoff-token TOKEN`で起動されたとき（引き継ぎのexecの後）は新しく登録せず、そのtokenの登録を同じPIDのまま取り戻し（`resume_registration`）、そのtokenのleaseを持つrunのslotを組み立て直す（[Handoff](handoff.md#handoff)）。runを1つも持たない常駐supervisorも、この登録で`status`/`doctor`に並ぶ。続けて別スレッドで2秒（`HEARTBEAT_INTERVAL`）ごとにそのtokenの登録と全leaseのheartbeatを1トランザクションで更新する（`heartbeat(token)`）。testはhiddenの`--heartbeat-interval-ms`で間隔を短くする（引き継ぎの後の[Auto-update](auto-update.md)の見張りが次のheartbeatを待つため。task 1048）。heartbeatの書き込みが他の接続の書き込みのlockでSQLiteのbusy / locked（busy timeoutの5秒、`QUEUE_BUSY_TIMEOUT`を待っても取れない）で失敗したときは止めず、次の間隔で書き直す（task 1119）。heartbeatのthreadは失敗のたびにWARNの`supervisor heartbeat busy (N failures, Xs since the last write); trying again`をlogに書き、書き直せたら失敗の回数と時間をINFOのlogと`supervisor_heartbeat_retried`のqueue event（`token`、`failures`、`secs`（最初の失敗から書き直せるまで）、`error`（最後の失敗））に残す。busyのまま書き直さないのは、最後に書けた時刻からの時間に次の間隔と次の書き込みの待ち（5秒）を足すと、leaseがstaleと見なされる30秒（`HEARTBEAT_TIMEOUT_SECS`）に届くときで（既定の2秒の間隔では最後に書けてから23秒）、そこで諦めれば最後に書いたheartbeatがstaleになる前に止まるので、他のsupervisorが引き継ぐ前に自分から退く（`HeartbeatPolicy::retries`）。busy / locked でない失敗（書き込みの拒否、I/O errorなど）はこれまでどおりその場で止める。書き込みが通っても登録の行が無かったとき（PIDが死んだかstaleと見なされて`up`や`down --force`に消された）はleaseを失ったとして止める（登録を持たない`integrate`のheartbeatはこの判定をしない）。runのlease行が他のtokenに移ったことは、これまでどおり下の7の各tickの確認がrunごとに見て、そのrunだけをslotから外す。止めるときはループで検知し、全runに`runtime_error`（`lease_lost`、文に失敗の回数と時間を含む）を記録してleaseと登録を残したまま終了する（プロセス終了後にstaleになる）。`parallel`・`max_waiting`・`runtime_planners`はそれぞれflag（`--parallel` / `--max-waiting` / `--runtime-planners`）の明示 > main checkoutの`dagq.toml`の`[supervisor]` > 既定（`parallel`と`max_waiting`は4、`runtime_planners`は1。task 941）で決め（`SlotLimits::resolve`）、登録（と引き継ぎの取り戻し）の直後に値と出どころ（`flag` / `dagq.toml` / `default`）を登録に書く（`set_slot_limits`。[Run environment](run-environment.md)の`[supervisor]`、task 698）。
+-   登録の後、`stall_config_loaded`に続けて変更の印`supervisor_started`（build識別子・`parallel`・`mode`（`up`が渡すhiddenの`--mode`）・`auto_update`・`handoff`）を1件記録する。停止要求（SIGINT/SIGTERM）に最初に気づいたpassでは、drainに入ったことをqueueのevent `supervisor_draining`（`supervisor`・`pid`・`build`・`reason: stop_requested`・`handoff_binary`・`runs`）で1回だけ記録する（task 1277。[Handoff](handoff.md#handoff)の停止要求の記録と引き継ぎの待ち）。loopが終わって登録を消すとき（execするときを除く）は`supervisor_stopped`を記録する。ループの各passでは`[run.env]`のプログラムの検査に続けて、`RUSTC_WRAPPER`がsccacheならsccacheのserverを確かめて居なければsandboxの外から起動し（10秒に1回、[Run environment](run-environment.md#sccacheのserver)、ADR-t1215-1）、main checkoutの`[run.env]`の正規化したhashがqueueの最新の`run_env_changed`と違えば`run_env_changed`を記録する（`Verifier::run_env_table`、hashの鍵はqueueのsaltの`Verifier::run_env_salt`。[変更の印](marks.md)、ADR-0051の決定10・11）。続けてmain checkoutの`[conflicts]`を読み直し、値が変われば以後の判定に使って`conflicts_config_changed`を記録する（[Conflict thresholds](conflict-thresholds.md#読み直し)、ADR-0080）。続けて、flagで明示されなかった`parallel` / `max_waiting` / `runtime_planners`のために`[supervisor]`を読み直し、値が変われば以後のclaimと待ちとruntimeのplannerを立てる判定に使い、登録に書いて`supervisor_config_changed`を記録する（[Run environment](run-environment.md)の`[supervisor]`、task 698・task 941）。
++   登録の後、`stall_config_loaded`に続けて変更の印`supervisor_started`（build識別子・`parallel`・`mode`（`up`が渡すhiddenの`--mode`）・`auto_update`・`handoff`）を1件記録する。停止要求（SIGINT/SIGTERM）に最初に気づいたpassでは、drainに入ったことをqueueのevent `supervisor_draining`（`supervisor`・`pid`・`build`・`reason: stop_requested`・`handoff_binary`・`runs`）で1回だけ記録する（task 1277。[Handoff](handoff.md#handoff)の停止要求の記録と引き継ぎの待ち）。loopが終わって登録を消すとき（execするときを除く）は`supervisor_stopped`を記録する。ループの各passでは`[run.env]`のプログラムの検査に続けて、`RUSTC_WRAPPER`がsccacheならsccacheのserverを確かめて居なければsandboxの外から起動し（10秒に1回、[Run environment](run-environment.md#sccacheのserver)、ADR-t1215-1）、main checkoutの`[run.env]`の正規化したhashがqueueの最新の`run_env_changed`と違えば`run_env_changed`を記録する（`Verifier::run_env_table`、hashの鍵はqueueのsaltの`Verifier::run_env_salt`。[変更の印](marks.md)、ADR-0051の決定10・11）。続けてmain checkoutの`[conflicts]`を読み直し、使用中と違う同じ値を2 pass続けて読んだときだけ以後の判定に使い、hotspotのcacheを捨てて`conflicts_config_changed`を記録する。表の削除も2回の読みで既定値を適用し、欠落・parseエラーでは使用中の値を保って変更候補を捨てる。起動時は即時に適用し、`SuperviseOptions.conflicts`の上書き時は読み直さない（[Conflict thresholds](conflict-thresholds.md#読み直し)、ADR-0080・ADR-t774-1）。続けて、flagで明示されなかった`parallel` / `max_waiting` / `runtime_planners`のために`[supervisor]`を読み直し、値が変われば以後のclaimと待ちとruntimeのplannerを立てる判定に使い、登録に書いて`supervisor_config_changed`を記録する（[Run environment](run-environment.md)の`[supervisor]`、task 698・task 941）。
+ 
+ ループ（1秒ごと）: 各passの先頭で、待ちの終わったrunを新しい仕事より先にslotへ戻し（drain中も）、各tickの先頭で人の答えを待つrunを待ちに移す（[人の答えを待つrun](waiting.md)）。待ちのrunのslotは下の監視の代わりにsessionへ何も送らない見張りだけを受ける。
+ 
+diff --git a/src/application/supervise/claim_defer.rs b/src/application/supervise/claim_defer.rs
+index b54c6faf..b39118d2 100644
+--- a/src/application/supervise/claim_defer.rs
++++ b/src/application/supervise/claim_defer.rs
+@@ -22,7 +22,7 @@ use crate::domain::{
+     },
+     provider_switch::route_of,
+     stats::{
+-        ConflictConfigReport,
++        ConflictConfig, ConflictConfigReport,
+         conflicts::{CONFLICTS_CONFIG_CHANGED, conflicts_change},
+     },
+     worker::{PROVIDER_UNAVAILABLE, Worker, unavailable},
+@@ -37,6 +37,8 @@ const IN_FLIGHT_REFRESH_SECS: i64 = 60;
+ /// What the supervisor keeps between passes.
+ #[derive(Default)]
+ pub(super) struct DeferWatch {
++    /// A changed value read on the preceding pass, awaiting confirmation.
++    pending_conflicts: Option<ConflictConfig>,
+     /// The alerted hotspots, and when they were read.
+     hot: Option<(i64, Vec<String>)>,
+     /// The expected files of each task read since the hotspots were.
+@@ -51,6 +53,26 @@ pub(super) struct DeferWatch {
+ }
+ 
+ impl DeferWatch {
++    /// Confirm a change only after two consecutive reads (ADR-t774-1).
++    /// Missing or invalid input breaks the streak without touching the cache.
++    fn confirm_conflicts(
++        &mut self,
++        config: Option<ConflictConfig>,
++        current: ConflictConfig,
++    ) -> bool {
++        let Some(config) = config.filter(|config| *config != current) else {
++            self.pending_conflicts = None;
++            return false;
++        };
++        if self.pending_conflicts != Some(config) {
++            self.pending_conflicts = Some(config);
++            return false;
++        }
++        self.pending_conflicts = None;
++        self.hot = None;
++        true
++    }
++
+     /// A claim just made: the next judgement reads the runs in flight
+     /// again, with the claimed one.
+     pub(super) fn claimed(&mut self) {
+@@ -60,7 +82,8 @@ impl DeferWatch {
+ 
+ impl Supervisor<'_> {
+     /// Read `[conflicts]` of the main checkout's `dagq.toml` again
+-    /// (ADR-0080). Values that differ from those in use replace them, drop
++    /// (ADR-0080, amended by ADR-t774-1). Two consecutive reads of the
++    /// same changed values replace those in use, drop
+     /// the cached hotspots and are recorded as `conflicts_config_changed`,
+     /// once for the queue. A file that cannot be read or holds invalid
+     /// values keeps those in use, warned of once per error; so does a
+@@ -74,10 +97,14 @@ impl Supervisor<'_> {
+                 self.conflicts_error = None;
+                 match config {
+                     Some(config) => config,
+-                    None => return Ok(()),
++                    None => {
++                        self.defer.confirm_conflicts(None, self.conflicts.config);
++                        return Ok(());
++                    }
+                 }
+             }
+             Err(error) => {
++                self.defer.confirm_conflicts(None, self.conflicts.config);
+                 let message = format!("{error:#}");
+                 if self.conflicts_error.as_ref() != Some(&message) {
+                     warn!(error = %message, "[conflicts] of dagq.toml not read: {message}; keeping the values in use");
+@@ -87,14 +114,17 @@ impl Supervisor<'_> {
+             }
+         };
+         let from = self.conflicts.config;
++        let confirmed = self.defer.confirm_conflicts(Some(config), from);
++        if from == config {
++            self.conflicts.source = "file";
++        }
++        if !confirmed {
++            return Ok(());
++        }
+         self.conflicts = ConflictConfigReport {
+             config,
+             source: "file",
+         };
+-        if from == config {
+-            return Ok(());
+-        }
+-        self.defer.hot = None;
+         let last = self.queue.latest_queue_event(&[CONFLICTS_CONFIG_CHANGED])?;
+         if let Some(mut payload) =
+             conflicts_change(from, config, last.as_ref().map(|event| &event.payload))
+@@ -371,3 +401,41 @@ impl Supervisor<'_> {
+         Ok(files)
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn only_consecutive_changed_values_invalidate_the_hotspot_cache() {
++        let current = ConflictConfig {
++            defer_max_secs: 7200,
++            ..ConflictConfig::default()
++        };
++        let changed = ConflictConfig::default();
++        let partial = ConflictConfig {
++            hotspot_conflicts: 4,
++            ..changed
++        };
++        let cached = Some((123, vec!["cached.md".to_owned()]));
++        let mut watch = DeferWatch {
++            hot: cached.clone(),
++            ..DeferWatch::default()
++        };
++        // A restored file, a missing/invalid file, or a different partial
++        // table breaks confirmation. None may discard the cached hotspots.
++        for interruption in [Some(current), None, Some(partial)] {
++            assert!(!watch.confirm_conflicts(Some(changed), current));
++            assert!(!watch.confirm_conflicts(interruption, current));
++            assert!(!watch.confirm_conflicts(Some(changed), current));
++            assert_eq!(watch.hot, cached);
++            assert!(!watch.confirm_conflicts(Some(current), current));
++        }
++        assert!(!watch.confirm_conflicts(Some(changed), current));
++        assert!(watch.confirm_conflicts(Some(changed), current));
++        assert!(watch.hot.is_none());
++        watch.hot = cached.clone();
++        assert!(!watch.confirm_conflicts(Some(changed), changed));
++        assert_eq!(watch.hot, cached);
++    }
++}
+diff --git a/tests/it/runtime_claim_defer.rs b/tests/it/runtime_claim_defer.rs
+index 7adb6407..bfcc1022 100644
+--- a/tests/it/runtime_claim_defer.rs
++++ b/tests/it/runtime_claim_defer.rs
+@@ -223,8 +223,7 @@ fn a_task_meeting_a_run_on_a_hotspot_waits_and_the_next_one_is_claimed() {
+ fn a_changed_conflicts_table_is_read_again_without_a_restart() {
+     let (_dir, repo, db) = hot_fixture();
+     let config = repo.join("dagq.toml");
+-    // Written whole by a rename: the supervisor reads it every pass, and a
+-    // file caught half written would read as the defaults.
++    // Written whole by a rename; changes take effect after two reads.
+     let conflicts = |table: &str| {
+         let staged = repo.join("dagq.toml.new");
+         fs::write(&staged, format!("[conflicts]\n{table}")).unwrap();
+@@ -327,3 +326,97 @@ fn a_changed_conflicts_table_is_read_again_without_a_restart() {
+     assert_eq!(ended.len(), 2, "{ended:?}");
+     assert!(ended.iter().all(|(_, payload)| payload["why"] == "expired"));
+ }
++
++/// Drive file writes at the claim-load check, after this pass read conflicts
++/// and before the next pass. No sleeps or races with the config reader: the
++/// callback runs on the supervisor thread, and this queue has no ready task.
++#[test]
++fn transient_conflicts_tables_are_ignored_and_stable_changes_are_confirmed() {
++    use std::cell::RefCell;
++
++    struct Script {
++        config: PathBuf,
++        db: PathBuf,
++        stop: Arc<AtomicBool>,
++        step: usize,
++    }
++    thread_local! {
++        static SCRIPT: RefCell<Option<Script>> = const { RefCell::new(None) };
++    }
++    const ORIGINAL: &str = "[conflicts]\nhotspot_conflicts = 4\ndefer_max_secs = 7200\n";
++    const PARTIAL: &str = "[conflicts]\nhotspot_conflicts = 4\n";
++    const CHANGED: &str = "[conflicts]\nhotspot_conflicts = 5\ndefer_max_secs = 8000\n";
++    fn after_read() -> Option<f64> {
++        SCRIPT.with(|script| {
++            let mut script = script.borrow_mut();
++            let script = script.as_mut().unwrap();
++            // Each pair is the number of applied changes *this* pass and
++            // the file the next pass will read. Empty files, missing tables,
++            // and a parseable partial table all go through the real loader.
++            let steps = [
++                (0, ""),
++                (0, ORIGINAL),
++                (0, PARTIAL),
++                (0, ORIGINAL),
++                (0, "[run.env]\n"),
++                (0, "[run.env]\n"),
++                (1, "[run.env]\n"),
++                (1, CHANGED),
++                (1, CHANGED),
++                (2, CHANGED),
++                (2, CHANGED),
++            ];
++            let (count, next) = steps[script.step];
++            let changed = events(&script.db, "conflicts_config_changed");
++            assert_eq!(
++                changed.len(),
++                count,
++                "pass {}: {changed:?}",
++                script.step + 1
++            );
++            if count >= 1 {
++                assert_eq!(changed[0].1["from"]["defer_max_secs"], 7200);
++                assert_eq!(changed[0].1["to"], json!(ConflictConfig::default()));
++            }
++            if count == 2 {
++                assert_eq!(changed[1].1["from"], json!(ConflictConfig::default()));
++                assert_eq!(changed[1].1["to"]["hotspot_conflicts"], 5);
++                assert_eq!(changed[1].1["to"]["defer_max_secs"], 8000);
++            }
++            fs::write(&script.config, next).unwrap();
++            script.step += 1;
++            if script.step == steps.len() {
++                script.stop.store(true, Ordering::SeqCst);
++            }
++        });
++        Some(0.0)
++    }
++
++    let (_dir, repo, db) = fixture();
++    SqliteQueue::open(&db)
++        .unwrap()
++        .transition(TaskId::new(1), TaskAction::Cancel)
++        .unwrap();
++    let config = repo.join("dagq.toml");
++    fs::write(&config, ORIGINAL).unwrap();
++    let stop = Arc::new(AtomicBool::new(false));
++    SCRIPT.with(|script| {
++        *script.borrow_mut() = Some(Script {
++            config,
++            db: db.clone(),
++            stop: stop.clone(),
++            step: 0,
++        });
++    });
++    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
++    let options = SuperviseOptions {
++        stop,
++        load_average: after_read,
++        ..supervise_options(1, false)
++    };
++    let outcome = supervise_with(&db, &repo, &backend, &options).unwrap();
++    backend.join();
++    SCRIPT.with(|script| assert_eq!(script.borrow_mut().take().unwrap().step, 11));
++    assert_eq!(outcome["errors"], json!([]), "{outcome}");
++    assert_eq!(events(&db, "conflicts_config_changed").len(), 2);
++}

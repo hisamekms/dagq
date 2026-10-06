@@ -1,0 +1,867 @@
+diff --git a/docs/design/domain-model.md b/docs/design/domain-model.md
+index 0194bbc3..9633950f 100644
+--- a/docs/design/domain-model.md
++++ b/docs/design/domain-model.md
+@@ -4,8 +4,8 @@ type: design
+ title: Domain model
+ status: current
+ created: 2026-09-21
+-updated: 2026-10-05 # task 1640; task 1386: show lists asks; task 839: show's latest run carries broker_tool_use; task 1594; task 1507, task 1506, task 1508, task 1509; tasks 1505, 1437; task 1609
+-last_verified: 2026-10-05 # task 1640; task 1386; task 839; task 1594; task 1507, task 1506, task 1508, task 1509; tasks 1505, 1437; task 1609
++updated: 2026-10-05 # task 1660: AttentionNext::DecideFollowUps; task 1640; task 1386: show lists asks; task 839: show's latest run carries broker_tool_use; task 1594; task 1507, task 1506, task 1508, task 1509; tasks 1505, 1437; task 1609
++last_verified: 2026-10-05 # task 1660; task 1640; task 1386; task 839; task 1594; task 1507, task 1506, task 1508, task 1509; tasks 1505, 1437; task 1609
+ scope: domain
+ related:
+   - adr-t1639-1
+@@ -85,7 +85,7 @@ related:
+ - `integrate`だけが`awaiting_integration | needs_session → integrating`と、そこからの`→ integrated`（Taskは`in_progress → completed`、`result_commit`は`main`に積んだsquash commit）、`→ needs_session`（rebaseの衝突、再検証の失敗）、`→ failed`（セッションが書き直したreceiptが`failed`）、`→ 元のstatus`（mainを進める前のerror）を行う。`integrating`はqueue全体で1件。結果は`IntegrationOutcome`（`integrated` / `needs_session` / `failed` / `no_run_awaiting`）で返す。`integrate --next`は`awaiting_integration`のrunを検証完了の古い順に取り、`needs_session`は`integrate ID`で明示的に再開する。
+ - `in_progress`のTaskは、未完了run（claimed/starting/running/validating/awaiting_integration/integrating/needs_session）がある間は手動変更できない。すべてのrunが`failed`または`interrupted`になった`in_progress`は`ready`/`draft`/`canceled`へ手動で戻せる。再試行は新しいTaskRunになる。終端状態は変更できない。依存の追加・削除はdraft / submitted / readyだけに許可する（plan reviewは`submitted`のtaskに依存を足し、優先度を下げる。ADR-0044の決定11）。
+ - `recover`は未完了runを、そのrunの登録プロセスとleaseの所有者が停止していることを確認してから`interrupted`にする（`integrating`なら`awaiting_integration`へ戻す）。他のrunには触れない。Taskは`in_progress`のままで、`ready`への復帰は別操作。
+-- attention（人の判断で止まっている遷移か、supervisorが動かしている遷移。ADR-0016）の判定はdomainが持つ。`event_attention(kind, payload)`はrun_eventsの1件を、`run_attention(status, exit_pending, push_pending, leased)`はrunの今のstatus（と、過去の `/exit` の timeout、pushの失敗、lease行の有無）を、`supervisor_attention(pulses)`は`supervisors`表から導出した`SupervisorPulse`（token、pid、alive、stale）の並びを判定し、`AttentionNext`（`review and integrate` / `resuming (runtime)` / `triaging (runtime)` / `triage by hand` / `recover by hand` / `restart supervisor`など）を返す（`send /exit`はtask 104で消え、`/exit`のtimeoutはsupervisorの`stuck_exit`のaskになった。`inspect and close workspace`はtask 98で消え、`failed` / `interrupted`のrunはsupervisorのtriageになった。`resume session`と`answer the prompt in workspace <id>`はtask 100で消え、3回resumeして解消しない`needs_session`はsupervisorが`failed`にしてtriageの`decide`のask（`retry` / `cancel`）に、当時の `running` の run の dialog（`prompt_waiting`）は `answer_prompt` の ask になった。task 1437 でこの worker のダイアログ待ちと、`/exit`の timeout・`stuck_exit`の ask は廃止した。`needs_session`のrunはどの場合も`resuming (runtime)`。ADR-0044の決定3・17）。`AttentionNext`は文字列としてserializeする。attentionはすべてinboxのもの（`ATTENTION_ROLE`、ADR-0044の決定17）で、plannerのものは無い。staleの規則`heartbeat_stale(alive, age)`と`HEARTBEAT_TIMEOUT_SECS`（30秒）もdomainにある。supervisorの起動・引き継ぎ・停止はattentionの判定には使わず、KPIの区切りの変更の印（`supervisor_started` / `supervisor_stopped`。`src/domain/marks.rs`、[変更の印](supervisor-lifecycle/marks.md)、ADR-0051の決定10）としてだけrun_eventsに載る。読み口は[supervisor-lifecycle](supervisor-lifecycle/events-watch.md#events--watch)の`status` / `events` / `watch`。
++- attention（人の判断で止まっている遷移か、supervisorが動かしている遷移。ADR-0016）の判定はdomainが持つ。`event_attention(kind, payload)`はrun_eventsの1件を、`run_attention(status, exit_pending, push_pending, leased)`はrunの今のstatus（と、過去の `/exit` の timeout、pushの失敗、lease行の有無）を、`supervisor_attention(pulses)`は`supervisors`表から導出した`SupervisorPulse`（token、pid、alive、stale）の並びを判定し、`AttentionNext`（`review and integrate` / `resuming (runtime)` / `triaging (runtime)` / `triage by hand` / `recover by hand` / `restart supervisor`など）を返す（`send /exit`はtask 104で消え、`/exit`のtimeoutはsupervisorの`stuck_exit`のaskになった。`inspect and close workspace`はtask 98で消え、`failed` / `interrupted`のrunはsupervisorのtriageになった。`resume session`と`answer the prompt in workspace <id>`はtask 100で消え、3回resumeして解消しない`needs_session`はsupervisorが`failed`にしてtriageの`decide`のask（`retry` / `cancel`）に、当時の `running` の run の dialog（`prompt_waiting`）は `answer_prompt` の ask になった。task 1437 でこの worker のダイアログ待ちと、`/exit`の timeout・`stuck_exit`の ask は廃止した。`needs_session`のrunはどの場合も`resuming (runtime)`。ADR-0044の決定3・17）。`AttentionNext`は文字列としてserializeする。所属taskが終わりfollow-upの所属の判断だけでgoal reviewが起動しないgoal（`goal_follow_ups_unsettled`、run_eventsに書かない導出値。task 1660）は`AttentionNext::DecideFollowUps { goal_id }`（`request a plan for the follow-ups of goal G`）で、どのfollow-upを理由（`follow_up::UnsettledReason`）とともに数えるかは`follow_up::unshown_unsettled`が決める（[`status`](supervisor-lifecycle/status.md)のattentionの一覧）。attentionはすべてinboxのもの（`ATTENTION_ROLE`、ADR-0044の決定17）で、plannerのものは無い。staleの規則`heartbeat_stale(alive, age)`と`HEARTBEAT_TIMEOUT_SECS`（30秒）もdomainにある。supervisorの起動・引き継ぎ・停止はattentionの判定には使わず、KPIの区切りの変更の印（`supervisor_started` / `supervisor_stopped`。`src/domain/marks.rs`、[変更の印](supervisor-lifecycle/marks.md)、ADR-0051の決定10）としてだけrun_eventsに載る。読み口は[supervisor-lifecycle](supervisor-lifecycle/events-watch.md#events--watch)の`status` / `events` / `watch`。
+ - `succeeded`（統合を待たずに成功とする運用）への遷移はまだ公開していない。
+ - `candidates`は全依存がcompletedで、goal依存のgoalがすべて`achieved`で閉じた（`closed_at IS NOT NULL AND verdict = 'achieved'`）ready taskをclaim順（下記`graph`の`candidates`と同じ）で返す（条件は`READY_QUERY`、順は`claim_order`。supervisorのclaimも同じ条件と順）。CLIの`candidates`はtaskのJSON（基の`priority`と`priority_source`を含む）に`effective_priority`を足す（`application::claim_candidates`）。claimはTaskごとの未完了run 1件の制約だけを再確認する。
+ - `graph [--goal ID]`は未完了（draft / submitted / ready / in_progress）のtaskの依存の見取り図を返す（[ADR-0040](../adr/0040-verify-once-review-run-env-graph-stats-and-task-priority-in-claim-order.md)の決定4）。storeの`graph_input`が未完了taskと直接の依存元（完了済みも含む）、`candidates`のIDを1つのsnapshotで読み、application層の純粋関数`dependency_graph`が`DependencyGraph`を作る。taskごとに`depends_on`（直接の依存元すべて）、`goal_dependencies`（依存先goalのIDすべて）、`ready_after`（未完了の依存元のID、続けて`achieved`で閉じていない依存先goalを`{"goal": ID}`で。`abandoned`で閉じたgoalも残る）、`blocks`（直接依存している未完了taskと、自分の属する閉じていないgoalに依存している未完了task）、`unblocks`（`blocks`を辿った推移閉包の未完了taskの数。canceledと完了済みは数えない）、`priority`（基の値）と`priority_source`、`effective_priority`（名前）を持つ。`effective_priority`は自分の基の優先度（goalから継いだ値も起点になる。[ADR-t1639-1](../adr/2026-10-04-t1639-1-goal-priority-is-the-source-tasks-inherit-and-goals-carry-tags.md)の決定4）と、同じ推移閉包のうち`ready`でdraftのgoalに属さないtaskの優先度の最大値（`application::effective_priority`）で、draft・submitted・canceled・completedのtask、draftのgoalのtask、`abandoned`で閉じたgoalに依存するtask（永久にclaimされない。[ADR-t791-1](../adr/2026-09-28-t791-1-effective-priority-ignores-tasks-waiting-on-abandoned-goals.md)）からは継承しない（閉包を辿る途中のdraftのtaskは通り抜ける。継承するかは待っている側のtask自身（status、所属goal、依存先goalのverdict）だけで決まり、間のtaskには左右されない）。goal依存は`graph_input`が`GraphGoalDependency`（goal IDとverdict）で渡す。`candidates`はclaim順（`ClaimRank`: `effective_priority`の降順 → `unblocks`の降順 → IDの昇順。goal間のrankは作らず、goalの順はgoalの優先度が基の値として担う。ADR-t1639-1の決定8）、`critical`は`unblocks`が最大のtask（同数なら小さいID）から`blocks`のうち`unblocks`が最大のものを辿った鎖で、どのtaskも他を塞いでいなければ空。`--goal`は`tasks`・`candidates`・`critical`の起点をそのgoalに絞るだけで、数は全goalの未完了taskで数える（鎖はgoalの外へ出てよい）。循環（goal依存と所属を経由するものも）は依存の追加時に拒否済みなので前提にする。`--format d2|svg`は同じ結果から当面の依存図を出す（[当面の依存図](supervisor-lifecycle/dependency-diagram.md)、ADR-0077）。
+@@ -115,7 +115,7 @@ IDとcommitはドメインプリミティブのnewtype（`src/domain/ids.rs`、`
+ | 型 | 包む値 | 生成と検証 | trait | 使う場所 |
+ | --- | --- | --- | --- | --- |
+ | `TaskId` | `i64`（`tasks.id`） | `TaskId::new`（検証なし。正であることは`NewTask::validate`などが`NonPositiveId`で確かめる） | `Copy`、`Eq`、`Ord`、`Hash`、`Display` | `Task.id`、`TaskRun.task_id`、`GoalTask.id`、`RunEvent.task_id`、`Ask` / `NewAsk`の`task_id`、`NoteTarget::Task`、`NoteQuery.task_id`、`TaskDetail.dependencies`、`NewTask.dependencies`、`RegisteredFollowUp.task_id`、`Attention.task_id`、`stats`の`RunStats` / `Alert`、`TaskStore`の引数、`TaskQuery.before` / `TaskPage.next`、graphの型 |
+-| `GoalId` | `i64`（`goals.id`） | `GoalId::new`（検証なし） | `TaskId`と同じ | `Goal.id`、`GoalSummary.id`、`Task.goal_id`、`NewTask.goal_id`、`RunEvent.goal_id`、`NoteTarget::Goal`、`NoteQuery` / `StatsQuery` / `TaskQuery`の`goal_id`、`DomainError`のgoal ID、`TaskStore`の引数 |
++| `GoalId` | `i64`（`goals.id`） | `GoalId::new`（検証なし） | `TaskId`と同じ | `Goal.id`、`GoalSummary.id`、`Task.goal_id`、`NewTask.goal_id`、`RunEvent.goal_id`、`NoteTarget::Goal`、`NoteQuery` / `StatsQuery` / `TaskQuery`の`goal_id`、`DomainError`のgoal ID、`AttentionNext::DecideFollowUps`の`goal_id`、`TaskStore`の引数 |
+ | `AskId` | `i64`（`asks.id`） | `AskId::new`（検証なし） | `TaskId`と同じ | `Ask.id`、`AttentionNext`の`ask_id`（`answer ask N`などの表示）、`Attention.ask_id`、`TriageAction::Ask`、`AskStore`の`answer` / `close_ask` / `ask_delivered`、`RunRecovery`の`decide_triage` / `exhaust_resumes`、`asks`の`read_ask`、supervisorの`open_landing_ask` / `open_triage_ask`の戻り値、observerの`ObserverLog::ask_high_water` / `ObserverLog::written_by`のaskの境界 |
+ | `EventId` | `i64`（`run_events.id`） | `EventId::new`（検証なし。0は最初のeventより前のcursor） | `TaskId`と同じ | `RunEvent.id`と、eventの順に読むcursor: `RunLog::latest_event_id`、`events_between` / `event_id_before` / `record_queue_event`、`NoteQuery.since` / `NotePage.cursor`、`StatsQuery.since` / `RunStats.finished_event_id` / `Stats.next_cursor`、`compose::events`（`application::watch::events_in`）の`after`と`WatchOptions.after`、`ObserveOptions.since`とobserverのcursorファイル、`written_by`のeventの境界 |
+ | `RunId` | `String`（UUID） | `RunId::new` / `TryFrom<String>` / `TryFrom<&str>`。空白だけの値は`Blank { field: "run ID" }` | `Clone`、`Eq`、`Ord`、`Hash`、`Display`、`AsRef<str>`、文字列との`PartialEq` | `TaskRun.id`、`RunEvent` / `Ask` / `NewAsk` / `Attention`の`run_id`、`RunLease.run_id`、`RunProcess.run_id`、`NoteTarget::Run`、`RunPaths::new`、`Receipt::check`の引数、`runtime_store` / `asks`のrun ID引数 |
+diff --git a/docs/design/follow-up-membership.md b/docs/design/follow-up-membership.md
+index 552bb6d8..6f68a31d 100644
+--- a/docs/design/follow-up-membership.md
++++ b/docs/design/follow-up-membership.md
+@@ -4,8 +4,8 @@ type: design
+ title: Follow-up membership judgements
+ status: current
+ created: 2026-10-04
+-updated: 2026-10-04 # task 1509
+-last_verified: 2026-10-04 # task 1509
++updated: 2026-10-05 # task 1660
++last_verified: 2026-10-05 # task 1660
+ scope: runtime
+ related:
+   - adr-t1504-2
+@@ -90,6 +90,17 @@ acceptanceを変えると判定時の版が古くなり、同じ分類を記録
+ answerの`achieved`が同じtransactionで同じ条件を使う。goal reviewの起動の条件と
+ fingerprintにも入る（[Goal review](supervisor-lifecycle/goal-review.md)の2・5）。
+ 
++所属taskが全て終わり（`goal_review::tasks_done`）、この検査だけでgoal reviewが起動しないopenのGは、
++`status`のattentionに`goal_follow_ups_unsettled`（`next: request a plan for the
++follow-ups of goal G`）として1件出る（task 1660）。止めているfollow-upのtask IDと
++理由の分類（`unjudged`・`undecided`・`needs_recheck`・`required_outside`。
++`SourceFollowUp::unsettled_reason`）を並べ、runtimeのplannerが扱う途中の判断の無い
++follow_upのdraft、`draft_planner_exhausted`のdraft、openなaskのあるtaskは数えず、
++`goal_review_failed`で人を待つGには出さない（判定は`follow_up::unshown_unsettled`）。
++inboxはplanning requestでplannerに`judge-follow-up`を頼み、判断を記録すれば消える。
++runtimeは所属を判定も移動もしない（ADR-t1504-1決定5）。項目の全体は
++[`status`](supervisor-lifecycle/status.md)のattentionの一覧。
++
+ ## submit・lint・plan review
+ 
+ `follow_up_membership::membership_gap`がfollow_upのtaskの欠けを読み、domainの
+diff --git a/docs/design/supervisor-lifecycle/goal-review.md b/docs/design/supervisor-lifecycle/goal-review.md
+index ad717aca..0bb0d3de 100644
+--- a/docs/design/supervisor-lifecycle/goal-review.md
++++ b/docs/design/supervisor-lifecycle/goal-review.md
+@@ -4,8 +4,8 @@ type: design
+ title: "Goal review (supervisor)"
+ status: current
+ created: 2026-09-27
+-updated: 2026-10-04 # task 1712: the goal review's decisions are free functions with unit tests
+-last_verified: 2026-10-04 # task 1712
++updated: 2026-10-05 # task 1660: how a goal held only by follow-up membership shows; task 1712
++last_verified: 2026-10-05 # task 1660; task 1712
+ scope: runtime
+ related:
+   - adr-t1504-2
+@@ -28,7 +28,7 @@ execの[引き継ぎ](handoff.md)を待つあいだに終わったjobと、`prep
+ [ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定43（task 375）。所属taskがすべて終わったopenのgoalを、supervisorが起動するheadlessのgoal review jobがacceptanceと照合し、そのverdictと人のanswerをruntimeが適用する。use caseは`src/application/supervise/goal_review.rs`、storeは`src/infrastructure/goal_reviews.rs`（port `GoalReviewStore`）、verdict・answer・起動の条件の型は`src/domain/goal_review.rs`、promptは`prompt::goal_review_prompt`。plan reviewと同じくrun slotは使わず、loopの各passで進める（`goal_review_pass`。`--once`のloopは走っているgoal reviewを待つ）。drain中（`stop`、provisioningの失敗）は新しいgoal reviewを始めない（走っているjobとanswerの適用は続ける）。exec の引き継ぎを待つあいだも`goal_review_pass(false)`で終わったjobを回収して適用し、`prepare_handoff`は終わったjobを先に回収してから走っているjobだけを止め、その未完了の行は次のプロセスが`interrupted`で閉じて取り直す（task 1425）。
+ 
+ 1. **記録**（schema v42、`migrations/0042_goal_reviews.sql`、compatible）: jobは`goal_reviews`の1行（`goal_id`、`attempt`、`supervisor_token`、`fingerprint`、`dir`、`started_at`、`finished_at`、`outcome` = `achieved` / `gaps` / `ask` / `failed` / `interrupted`、`verdict`のJSON、`error`、`ask_id`、`rearmed_at`）。互換のmigrationは外部キーとunique indexを持てないので、同時に1つは`begin_goal_review`が`BEGIN IMMEDIATE`の中で生きているsupervisorの未完了の行が無いことを確かめてから行を書くことで守る（queue全体で1つ。plan reviewとは別に数える）。行の無いsupervisorの未完了の行は`interrupted`で閉じる。eventはgoalに記録する（`run_events.goal_id`）。askのkindに`approve_goal`を足した（kindにmigrationは要らない）。jobのpromptと出力はqueueの`goal-reviews/<行のID>/`（`prompt.txt`、`review.out`、`review.err`）。
+-2. **起動の条件**（`goal_review_candidates`、ID順の先頭を取る）: goalが`open`で閉じておらず、所属taskが1件以上あり、すべて`completed`か`canceled`で`completed`が1件以上（`goal_review::tasks_done`。`draft` / `submitted`のtask、つまりruntimeのplannerの待ち・`keep_draft`で残ったdraft・閉じていない`planner_question`の対象は、これで除かれる）、元goalがこのgoalのfollow_up（所属は問わない）に所属の判断が済まないもの（`completed` / `canceled`でなく、判断が無い・undecided・要再確認・requiredなのにgoalの外。[Follow-up membership judgements](../follow-up-membership.md)の「閉じる条件」、ADR-t1504-2決定8）が無く、goalのreviewが開いた`approve_goal`のaskで閉じていないものが無く、前回のgoal review（`interrupted`を除く最新の行）の後に入力が変わっている。out_of_scopeと判断して別のgoalへ移したfollow_upの未完了は起動を妨げない。入力は`fingerprint`（`goal_review::review_fingerprint`。taskのIDとstatusをID順に並べた文字列に、acceptanceの版が1でなければ`;acceptance:<版>`を、元goalがこのgoalのfollow_upがあれば`;follow_ups:`とその`<task>:<最後の判断の行のid>-<分類>`（判断が無ければ`-`）をtask順に足したもの。どちらも無いgoalは所属taskだけの今までの文字列のまま。follow_upのある（終わったものを含む）goalとacceptanceの版が1でないgoalは、この形になった後に一度取り直される）で比べ、同じなら起動しない。follow_upの登録、判断の記録・訂正、acceptanceの変更は入力を変える。goalの外のfollow_upのstatusは入れない（範囲外の作業が進んでもreviewを無効にしない。終わったかは閉じる条件が見る）。人の`goal review ID`（`rearm_goal_review`）は最新の行に`rearmed_at`を書き、状態が同じでも起動させる（`goal_review_rearmed`）。openでないgoalには打てない（`goal_review::rearmable`）。取るかどうかは副作用の無い`goal_review::reviewable`、失敗の後に人を待つかは`goal_review::waits_for_a_person`が決め、storeは行から読んだ値を渡す。
++2. **起動の条件**（`goal_review_candidates`、ID順の先頭を取る）: goalが`open`で閉じておらず、所属taskが1件以上あり、すべて`completed`か`canceled`で`completed`が1件以上（`goal_review::tasks_done`。`draft` / `submitted`のtask、つまりruntimeのplannerの待ち・`keep_draft`で残ったdraft・閉じていない`planner_question`の対象は、これで除かれる）、元goalがこのgoalのfollow_up（所属は問わない）に所属の判断が済まないもの（`completed` / `canceled`でなく、判断が無い・undecided・要再確認・requiredなのにgoalの外。[Follow-up membership judgements](../follow-up-membership.md)の「閉じる条件」、ADR-t1504-2決定8）が無く、goalのreviewが開いた`approve_goal`のaskで閉じていないものが無く、前回のgoal review（`interrupted`を除く最新の行）の後に入力が変わっている。out_of_scopeと判断して別のgoalへ移したfollow_upの未完了は起動を妨げない。所属taskの条件を満たし、follow_upの所属の判断だけで起動しないgoalは、`status`のattentionに`goal_follow_ups_unsettled`（`next: request a plan for the follow-ups of goal G`、止めているfollow_upのtask IDと理由の分類`unjudged` / `undecided` / `needs_recheck` / `required_outside`）として1件出る。runtimeのplannerが扱う途中の判断の無いdraft、`draft_planner_exhausted`のdraft、openなaskのあるtaskはそれぞれの項目に任せて数えず、6の`goal_review_failed`で人を待つgoalには出さない。判断が記録されれば消える（[`status`](status.md)のattentionの一覧、task 1660）。入力は`fingerprint`（`goal_review::review_fingerprint`。taskのIDとstatusをID順に並べた文字列に、acceptanceの版が1でなければ`;acceptance:<版>`を、元goalがこのgoalのfollow_upがあれば`;follow_ups:`とその`<task>:<最後の判断の行のid>-<分類>`（判断が無ければ`-`）をtask順に足したもの。どちらも無いgoalは所属taskだけの今までの文字列のまま。follow_upのある（終わったものを含む）goalとacceptanceの版が1でないgoalは、この形になった後に一度取り直される）で比べ、同じなら起動しない。follow_upの登録、判断の記録・訂正、acceptanceの変更は入力を変える。goalの外のfollow_upのstatusは入れない（範囲外の作業が進んでもreviewを無効にしない。終わったかは閉じる条件が見る）。人の`goal review ID`（`rearm_goal_review`）は最新の行に`rearmed_at`を書き、状態が同じでも起動させる（`goal_review_rearmed`）。openでないgoalには打てない（`goal_review::rearmable`）。取るかどうかは副作用の無い`goal_review::reviewable`、失敗の後に人を待つかは`goal_review::waits_for_a_person`が決め、storeは行から読んだ値を渡す。
+ 3. **起動**（`start_goal_review`）: `[roles.goal_review]`から起動の`launch`を決め（[Actor model](actor-model.md)。表が無ければ今までと同じくmodel / effortを渡さない）、`goal_review_started`（`goal_review_id`、`attempt`、`dir`、`tasks`（fingerprint）、`gaps_in_a_row`、`session_id`、`cwd`、`launch`）を書き、jobをactor executor（[Roles](roles.md#actorの起動actorexecutor)）の`HeadlessProgram::Job`（`repo_root`、権限の意図`GOAL_REVIEW_ACCESS`＝`read_files_and_queue_cli`。Claude Codeは`--allowedTools Read Grep Glob Bash(dagq:*)`に訳す。[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)）で起動する。`session_id`は`begin_goal_review`が行と同じトランザクションで作るUUIDで、jobにそのまま渡す（ADR-0048の決定4、Claude Codeには`--session-id`）。`cwd`はjobを起動したrepositoryのcheckout、`launch`は`{"role": "goal_review", "provider": "claude", "model", "effort", "source"}`（task 1062）。jobの区間（kind `goal_review`）は`goal_review_started`で開き、同じ`goal_review_id`の`goal_review_finished` / `goal_review_failed`で閉じ（`job_finished`）、行を`interrupted`で閉じたとき（supervisorが居ない行は`inferred`、goalかtaskが変わったときは`job_finished`）にも閉じる。区間のeventはgoalの最初のtask（approve_goalのaskと同じ）に記録し、payloadに`goal_id`・`goal_ids`（`[goal_id]`。`stats --goal`の絞り込み）・`goal_review_id`・`launch`を持つ。`session_closed`はtranscriptから読んだ実際の`model` / `effort`を持つ（[Agent provider lifecycle](../provider-lifecycle.md#claude-sessionの区間)）。task 1062より前のgoal reviewは`session_id`も`launch`も無く、区間も無い。envは`actor_env`の`DAGQ_ROLE=goal-review-job`・`DAGQ_ACTOR_ID=goal-review-job:<goal id>:<attempt>`と、queue serviceのsocketとjobのtokenのfile（`DAGQ_QUEUE`は渡さず、jobの`dagq`はクライアントモードでserviceに送る。[Queue service](../queue-service.md#クライアントモード)。CLIは読み取りだけを許す。[Roles](roles.md#actors)）。時間の上限はreviewの`review_timeout`。起動できなければ下の6の失敗にする。
+    - **provider**（[ADR-t1063-1](../../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)、task 1065）: 行き先は`Supervisor::goal_review_route`が`starting`のpassごとに、supervisorの状態を値で渡した副作用の無い`goal_review_route_of`（providerの控えは`provider_held_of`、使えない理由は`job_unusable_of`、失敗したjobの壁と控えは`job_failure_route`）で決める。`[roles.goal_review]`に`provider`が無ければ今までどおりClaudeで、Claudeの控えのaskが開いている間は起動しない。`provider`があれば`domain::actor_model::job_route`で、そのproviderが使えれば（supervisorにagentがあり、`Supervisor::provider_held`が控えを言わない）そこで、使えなければもう一方のprovider（goal reviewはClaudeでもCodexでも動く）が使えればそこで（launchに`switched_from`・`switch_reason`。modelとeffortは渡さない）、どちらも使えなければ起動しない。Codexのjobは`Ports::codex_jobs`（supervisorが見つけて`--version`の通ったCodex）で`codex exec --json --skip-git-repo-check --sandbox read-only -C <repo_root> [-m <model>] [-c model_reasoning_effort="<effort>"]`として組み（promptはargvでなくstdin。task 1560。[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)の「promptの渡し方」）、executorが`--sandbox read-only`を、`:read-only`を継いでqueue serviceのsocketだけを許すpermission profile `dagq_job`の`-c`に置き換えて起動する（[Agent provider lifecycle](../provider-lifecycle.md#codexのheadless-job)、[Queue service](../queue-service.md#codexのsandboxからの到達adr-t1233-5決定4)）。envは同じ`actor_env`で、sandboxの中の`dagq`も`goal-review-job`のroleで読むだけ。Codexのjobは`session_id`を受け取らないので、`goal_review_started`の`session_id`はnullで、`launch`は`{"role": "goal_review", "provider": "codex", "model", "effort", "source"}`。`headless_jobs.provider`も行き先のprovider
+ 4. **入力**（`goal_review_material`）: goalのtitle・description・acceptance・constraints・doc、goalのfollow_up（`goal show`の`follow_up_memberships`: 元goalかgoalの所属のfollow_upごとの今の所属・status・材料・深さ・判断の履歴（分類・項目・理由・証拠・判定時と今の版・`needs_recheck`））、所属taskのそれぞれのid・title・status・description・acceptance・`duplicate_of`（重複でcancelした先）、`integrated`のrunがあればその`run_id`・`result_commit`とreceiptの`summary`・`tests` / `e2e` / `subagent_review`の`status`と`evidence_or_reason`・`follow_ups`（読めなければ`(receipt unavailable)`）、goalのevent（`observation`（note）、`goal_updated`、`goal_decided`、`goal_review_rearmed`）、前回までのgoal review（`goal_reviews`: 行ごとのattempt・outcome・verdict・error）、`gaps`が続いた回数。jobはmain checkoutの文書とsource、`dagq show` / `dagq goal show --full` / `dagq findings` / `dagq events --goal` / `dagq search`で残りを読む。 promptの渡し方・節ごとと全体の上限・省いたことの明示・byte数の記録は[Prompt](prompt.md#headlessのjobのprompt)の「headlessのjobのprompt」の節が持つ（[ADR-t1566-1](../../adr/2026-10-03-t1566-1-headless-job-prompts-carry-decision-material-within-limits.md)。ADR-0047決定43の入力の列挙をamendsした）。今はstdinで渡し（task 1560。[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)の「promptの渡し方」）、全体と節ごとの上限を持つ（task 1571。`goal_review_prompt`）: 全体`GOAL_REVIEW_PROMPT_LIMIT`（200,000 byte、言語の指示を含む）、goal（必須。超えたら長い欄から切り、`over_limit`に書く）、所属task（着地したtaskを新しい順に、続けて残りを新しい順に選び、1件ずつも切る。省いたtaskはID・title・status・着地したかの要約の行にして、件数と`dagq show ID --full`・`dagq events --full --task ID --kind integration_receipt`を書く）、follow_up・note・前回のreview（新しい順）。値と理由は[Prompt](prompt.md#goal-reviewrunのreview復旧jobruntimeのplannerの上限)、読むコマンドは`prompt::GOAL_REVIEW_READS`。切った項目は`cut`に省いたbyte数と読み方を持つ。promptのbyte数は6・下の`goal_review_finished` / `goal_review_failed`の`prompt_bytes`（plan reviewと同じ形）に記録する。promptは、out_of_scopeと判断したfollow_upを達成の判定に含めず（その作業を待たず、gapにもしない）、requiredと判断したものは所属taskと同じく判定に含めるよう指示する（ADR-t1504-2）。
+diff --git a/docs/design/supervisor-lifecycle/status.md b/docs/design/supervisor-lifecycle/status.md
+index 09499f25..4448fdc5 100644
+--- a/docs/design/supervisor-lifecycle/status.md
++++ b/docs/design/supervisor-lifecycle/status.md
+@@ -4,8 +4,8 @@ type: design
+ title: "`status`"
+ status: current
+ created: 2026-09-26
+-updated: 2026-10-05 # task 838: broker_claims_held attention
+-last_verified: 2026-10-05 # task 838
++updated: 2026-10-05 # task 1660: goal_follow_ups_unsettled; task 838: broker_claims_held attention
++last_verified: 2026-10-05 # task 1660; task 838
+ scope: runtime
+ related:
+   - adr-t1228-2
+@@ -54,6 +54,7 @@ related:
+ - broker: queueの最新の`broker_unhealthy` / `broker_healthy` / `broker_started` / `broker_stopped`が`broker_unhealthy`なら、`kind: broker_unhealthy`、`status`にその`reason`（`unhealthy`・`machine_busy`・`podman_missing`など）、`next: dagq broker status`、`last_error`にその`message`（`run_id` / `task_id`はnull）。brokerが動けば（`broker_started`・`broker_healthy`）消える（[Broker](../broker.md#supervisorの統合)）。
+ - broker（`required`）: queueの最新の`broker_claims_held` / `broker_claims_resumed`が`broker_claims_held`なら、`kind: broker_claims_held`、`status`にその`reason`（`not_ready`・`token_failed`など）、`next: dagq broker status`、`last_error`にその`message`（`run_id` / `task_id`はnull）。workerにbrokerの道具を渡せるようになれば（`broker_claims_resumed`）消える（[Broker](../broker.md#required)、ADR-t838-1）
+ - KPIのpush: queueの最新の`kpi_push_sent` / `kpi_push_abandoned`が`kpi_push_abandoned`なら、`kind: kpi_push_abandoned`、`status: failed`、`reason_category: recovery_failed`、`next: fix the push command`、`last_error`にその`message`（`run_id` / `task_id`はnull）。次のpushが成功すると消える（[push](push.md#実行再試行失敗)）。
++- follow-upの所属の判断待ちのgoal（task 1660）: openのgoalで、goal reviewの候補の判定（`goal_reviews::candidate`）のうちfollow-upの所属以外の条件（goalのtaskが全て`completed` / `canceled`で1件以上`completed`。`domain::goal_review::tasks_done`）を満たし、元goalがそのgoalのfollow-up（材料の`source_goal_id`がそのgoal。別のgoalに移したものも含む）に所属の判断が済んでいないもの（`domain::follow_up::SourceFollowUp::unsettled_reason`）が残るものを、goalごとに1件出す。判定はdomainの`follow_up::unshown_unsettled`、読み出しは`GoalReviewStore::goal_follow_ups`。理由の分類は`unjudged`（判断が無い）・`undecided`・`needs_recheck`（acceptanceの変更の後に確かめ直していない）・`required_outside`（`required`なのにgoalの外）で、`completed` / `canceled`のものと`out_of_scope`と判断したもの（未完了でも閉じるのを妨げない。ADR-t1504-1の決定4）は数えない。runtimeが扱っているか別の項目で出ているものも数えない: `draft`で判断の無いfollow-upのうちruntimeのplannerが開かれる前か開いているもの（[Draft planners](draft-planners.md)の対象で上限に達していない）、`draft_planner_exhausted`を記録した`draft`、closeされていないaskのあるtask。数えるものが無いgoalと、`goal_review_failed`で人を待つgoal（`goal_review_holds`）は出さない。項目は`kind: goal_follow_ups_unsettled`（run_eventsに書かない導出値。`ATTENTION_KINDS`と`event_attention`に対応はあるが記録されないので`watch`は起こさない）、`status: open`、`run_id`はnull、`task_id`は数えたfollow-upのうち最小のID、`last_error`は`goal G: its goal review waits for the membership of follow-ups N (unjudged), M (needs_recheck)`の形（300文字で切る）、`next: request a plan for the follow-ups of goal G`。inboxは`request add --ref goal:G`か`--ref task:N`でplannerに所属の判断（`judge-follow-up`）を頼む。判断を記録する（要再確認なら判定し直す）か、`required`のfollow-upがgoalに入るか、follow-upが`completed` / `canceled`になれば次の`status`で消える（[follow-upの所属](../follow-up-membership.md#閉じる条件)）。runtimeは所属を判定も移動もしない（ADR-t1504-1の決定5）。
+ - ask（[ADR-0022](../../adr/0022-ask-answer-inbox-planner-and-landing-on-doubt.md)、[ask / answer](ask.md#ask--answer--asks)）: closeされていないaskを`asks`表の順に並べる。未回答のものは`kind: ask_opened`、`status: open`、`next: answer ask <id>`、回答済みのものは`kind: ask_answered`、`status: answered`、`next: read the answer of ask <id> and close it`。ただし回答済みの`worker_question`は`delivering the answer of ask <id> (runtime)`か`send the answer of ask <id> to the worker and close it`（[workerの質問への回答の送信](worker-question-answer.md#workerの質問への回答の送信)）。回答済みの`approve_landing`で、runが`awaiting_integration`で回答が`land` / `send_back` / `cancel`か`send_back: <理由>`のどれか（`LandingAnswer::parse`、task 1424）なら`applying the answer of ask <id> (runtime)`（supervisorが適用する。[Review](review.md#review-supervisor)の6）。回答済みの`approve_goal`と`correct_goal`も、supervisorが今適用できる答え（`applies_goal_answer` / `applies_correction_answer`）なら同じ`applying the answer of ask <id> (runtime)`（[Goal review](goal-review.md)の7・9）。項目は`ask_id`を持ち、`run_id`はaskのrun（taskだけのaskはnull）、`last_error`はnull。
+ 
+ `status --role <inbox|planner>`は`attention`をそのroleに宛てたものだけにする（省略時は全部）。attentionはすべてinbox宛て（`domain::ATTENTION_ROLE`、ADR-0044の決定17）で、`--role inbox`は全部、`--role planner`は空になる。`asks`はroleに関わらずopenなask（未回答でcloseされていないもの）の一覧で、各項目は`id`、`kind`、`question`（先頭200文字。切ったときは末尾に`…`）、`task_id`、`run_id`、`asked_by`、`reason_category`、`affected`、`age_secs`（登録からの秒数）、AIの推奨と確信度の`recommendation`と`confidence`（無ければnull。[ask](ask.md#aiの推奨と確信度未実装)、ADR-t451-1）と、分類コードのある`worker_question`なら`topics`（先頭が主。[ask](ask.md#worker_questionの分類コード)、ADR-t947-2。無いaskは欄ごと省く）。
+diff --git a/plugins/claude-dagq/skills/dagq-inbox/SKILL.md b/plugins/claude-dagq/skills/dagq-inbox/SKILL.md
+index 7a183f1b..0dc77070 100644
+--- a/plugins/claude-dagq/skills/dagq-inbox/SKILL.md
++++ b/plugins/claude-dagq/skills/dagq-inbox/SKILL.md
+@@ -53,7 +53,7 @@ Report each in a short list (task, status, `next`, gist of `last_error`); act wi
+ - `read the answer of ask <id> and close it` (`ask_answered`), `send the answer of ask <id> to the worker and close it`: carry it out (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/session.md`), then `"$DAGQ" ask close <id>`.
+ - `triage by hand` (`triage_failed`), `recover by hand` (`recovery_failed`): `dagq-recover` section 4.
+ - `goal review by hand` (`goal_review_failed`): on the person's word, `goal review ID` reruns it, or the person closes the goal (`dagq-recover` section 8).
+-- `request a plan for the draft`, `request a plan for the finding`, `request a plan for the waiting tasks`: a request on the person's word (`reference/status.md`).
++- `request a plan for …` (the draft, the finding, the waiting tasks, the follow-ups of goal G): a request on the person's word (`reference/status.md`).
+ - A new plan the person asks for: `"$DAGQ" request add --text '<the person's words>'` records it and a runtime planner takes it (`reference/requests.md`); `report the request's proposal`, `rephrase or drop the request` and a `planner_question` on a request: the same file. More words for an open runtime planner: `"$DAGQ" planner request <planner id> --text '<the person's words>'`, its next turn.
+ - `check the planner`, `plan review by hand`: `dagq-recover` section 8.
+ - `report the update` (`update_installed`), `report the review`, `check the failed review`: tell the person (`reference/watch.md`).
+diff --git a/plugins/claude-dagq/skills/dagq-inbox/reference/status.md b/plugins/claude-dagq/skills/dagq-inbox/reference/status.md
+index 7b1ac6ae..546026ac 100644
+--- a/plugins/claude-dagq/skills/dagq-inbox/reference/status.md
++++ b/plugins/claude-dagq/skills/dagq-inbox/reference/status.md
+@@ -35,6 +35,7 @@ Read this when a field of `status`, `watch` or `show` is unclear.
+   - A submitted proposal's plan review shows only while it needs a person, on the proposal's first task: `plan review by hand` (`kind` `plan_review_failed`, `status` `submitted`, `last_error` the job's failure): the headless plan review failed and holds the proposal, which is not reviewed again by itself; the person readies it with the bypass or submits it again in their own terminal (the `dagq-recover` skill, section 8). `check the planner` (`kind` `planner_unresponsive`, `status` `revising`): the planner a revise went to did not submit the proposal again within `supervise --planner-timeout` (default 3600 seconds), or the revise waited that long for a runtime planner to take it; the person looks at that planner, whose workspace nothing closes. The same `check the planner` (`status` `working`, on its draft's task or on none) also says a runtime planner (for a draft, a finding or a revise) showed no input, no idle marker and no idle screen for that long; it shows until the planner's row closes. A concern shows only as its `approve_plan` ask; once answered `ready`, `send_back[: reason]` or `cancel`, the supervisor applies it (`applying the answer of ask <id> (runtime)`), recording `plan_review_outcome` (`ready` → `deviation_accepted`, `send_back` → `deviation_rejected`, `cancel` → `canceled`) for the concern. `plan_review_finished` carries `reason_codes` and `primary_code` like `review_finished` (ADR-t947-1).
+   - `goal review by hand` (`kind` `goal_review_failed`, on the goal's first task, `reason_category` `recovery_failed`, `last_error` `goal <ID>: <error>`): the headless goal review of a goal whose tasks are all finished could not start, exited non-zero, timed out or printed no valid verdict; the goal stays open and is not reviewed again by itself until its input changes (its tasks' statuses, its acceptance, its follow-ups or their membership judgements). On the person's word, `goal review ID` rearms it, or the person closes the goal (`goal close`) or asks for tasks through a planning request (the `dagq-recover` skill, section 8). Failures of the provider itself skip it only in part: with a `provider` in `[roles.goal_review]`, a provider that cannot be used (missing executable, failed launch, login, usage limit) is held and the review moves to the other provider, no attention; without one, only Claude's login or usage limit is spared (the review waits in the `queue_hold` ask, whose `done` reviews it again), while a missing executable or a failed launch shows as `goal review by hand` and needs `goal review ID` once fixed. A goal review's `approve_goal` ask is an ask (`reference/asks.md`); while the supervisor applies its answer it shows as `applying the answer of ask <id> (runtime)`. So does an answered `correct_goal` ask (a follow-up judged required after its goal closed as achieved, `reference/asks.md`) whose answer is `reopen`, `correct_verdict` or `keep_achieved` while the goal is still closed as achieved.
+   - `request a plan for the draft` (`kind` `draft_planner_exhausted`): the runtime opened its planners for a draft the runtime or a job registered (a receipt's follow_up, a goal's gap) and none adopted, dropped or asked about it; no runtime planner opens for it again. Tell the person; on their word record a planning request that names it, `"$DAGQ" request add --text '<the person's words>' --ref task:N`, whose runtime planner adopts or drops it (or asks). Or the person decides it in their own terminal (no `DAGQ_ROLE`): `edit`, `lint` and `submit`, or `cancel` and `note`. A draft a planner kept with `keep_draft` shows no attention and waits as a draft the same way until the person asks for such a request.
++  - `request a plan for the follow-ups of goal G` (`kind` `goal_follow_ups_unsettled`, `status` `open`, on the lowest of the follow-ups it counts, `last_error` `goal G: its goal review waits for the membership of follow-ups N (unjudged), M (needs_recheck)`): every task of open goal G is `completed` or `canceled`, but follow-ups registered from it (wherever they belong now) are unfinished and have no settled membership, so its goal review does not start and it stays open. The reasons: `unjudged` (no judgement), `undecided`, `needs_recheck` (judged before G's acceptance changed), `required_outside` (`required` but outside G). One judged `out_of_scope` never counts. What another item or the runtime already covers is left out: an unjudged follow_up draft its runtime planners still handle, a draft shown as `request a plan for the draft`, a task with an open ask; a goal shown as `goal review by hand` gets none. Tell the person; on their word record a planning request that names the goal or the follow-ups, `"$DAGQ" request add --text '<the person's words>' --ref goal:G` (or `--ref task:N`), whose runtime planner judges each with `judge-follow-up`. It goes at the next `status` once each is judged against the current acceptance, a required one joins G, or it ends. The runtime itself never judges or moves them.
+   - `request a plan for the finding` (`kind` `finding_planner_exhausted`, the finding's task or run if any, `last_error` `finding N: <summary>`): the runtime opened its planners for a finding marked for a proposal (the observer's mark, or a person's `propose` answer) and none submitted, dismissed or asked about it. Tell the person; on their word record a planning request that names it, `"$DAGQ" request add --text '<the person's words>' --ref finding:N`, whose runtime planner submits a remedy (`submit ... --finding N`) or declines. Or the person decides it in their own terminal (no `DAGQ_ROLE`): `submit ... --finding N`, or `finding dismiss N --reason`.
+   - `request a plan for the waiting tasks` (`kind` `dependency_stranded`, `status` `stranded`, on the stranded task, `last_error` `task A of goal G (closed abandoned) will not complete; tasks B, C wait on it`): a task of a closed goal was left `draft` / `submitted` / `ready` (approve withheld it, or the goal was abandoned) while `ready` / `submitted` tasks of open goals wait on it, directly or through other unfinished tasks. It never completes, so they are never claimed. The runtime does not hold them. Tell the person; on their word record a planning request that names the stranded task, `"$DAGQ" request add --text '<the person's words>' --ref task:A`, whose runtime planner decides whether to remove the dependency, cancel the waiting tasks or take the work up again in an open goal; or the person decides that in their own terminal (no `DAGQ_ROLE`). `watch` tells it once per set of waiting tasks; `status` shows it until nothing waits.
+   - `install tool` (`kind` `run_env_program_missing`, `status` `missing`, no run or task, `last_error` the variable, its value and the PATH): a program the `[run.env]` of `dagq.toml` names cannot be executed on the supervisor's PATH. The supervisor claims no task and lands no run until it can (the runs in flight go on); the person installs the program where that PATH finds it, or asks, through a planning request (`reference/requests.md`), for a task that takes the variable out of `dagq.toml`. It disappears when the supervisor finds it (`run_env_program_found`). `up` refuses to start a supervisor while it is missing, and `doctor`'s `run_env` shows what resolved where.
+diff --git a/plugins/claude-dagq/skills/dagq/reference/goal-close.md b/plugins/claude-dagq/skills/dagq/reference/goal-close.md
+index ef6c3bf1..bcf81af6 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/goal-close.md
++++ b/plugins/claude-dagq/skills/dagq/reference/goal-close.md
+@@ -10,6 +10,8 @@ The supervisor starts it (one at a time, needing no run slot) for an `open` goal
+ - **gaps**: each gap becomes a `draft` task on the goal (context `goal_gap: goal review N of goal ID found this missing`; `draft_origins` origin `goal_gap`), which a runtime planner adopts, drops or asks about like a follow_up draft (`reference/register.md`, "A runtime planner for a draft"). The goal stays open; once those drafts finish, the review starts again. A fourth `gaps` in a row turns into an ask.
+ - **ask**: only when a person is needed (the acceptance changes, abandoning or splitting it, or the job cannot judge it): an `approve_goal` ask in the inbox, on the goal's first task, with `reason_category` `scope` or `discard`. Options: `achieved`, `abandoned`, `gaps` (or `gaps: <what is missing>`), `keep_open`, plus the job's own. The supervisor applies the first four (`goal_decided`): it closes the goal, registers the gaps as drafts, or leaves it open until its input changes (its tasks, its acceptance or its follow-ups' judgements). An answer it does not apply (the job's own option, free text) comes back to the inbox to carry out and `ask close`.
+ 
++A goal whose tasks are all done but that waits only for an unsettled follow-up (one not judged, `undecided`, judged before the acceptance changed, or `required` outside the goal) shows in `status`'s attention as `request a plan for the follow-ups of goal G` (`goal_follow_ups_unsettled`), naming each follow-up and its reason, unless a runtime planner still handles it, it is shown as `draft_planner_exhausted` or an open ask, or the goal is shown as `goal_review_failed`. A planner's `judge-follow-up` clears it; the runtime never judges or moves a follow-up itself.
++
+ A failed job (non-zero exit, timeout, no verdict) leaves the goal open and is not tried again by itself until its input changes as above: the inbox shows `goal review by hand` (`goal_review_failed`, on the goal's first task). On the person's word, `goal review ID` starts it again (also after a `keep_open` answer, once there is a reason to look again):
+ 
+ ```sh
+diff --git a/src/application/health.rs b/src/application/health.rs
+index 3dcc5058..e72b83fb 100644
+--- a/src/application/health.rs
++++ b/src/application/health.rs
+@@ -1377,7 +1377,8 @@ pub fn attention(
+     // A goal whose goal review failed waits for a person until its tasks
+     // change or `goal review ID` (ADR-0047 decision 43); it is shown on the
+     // goal's first task.
+-    for hold in queue.goal_review_holds()? {
++    let goal_holds = queue.goal_review_holds()?;
++    for hold in &goal_holds {
+         if held(HoldJob::GoalReview(hold.goal_id)) {
+             continue;
+         }
+@@ -1398,6 +1399,33 @@ pub fn attention(
+             next: AttentionNext::GoalReviewByHand,
+         });
+     }
++    // A goal whose own work is done but whose goal review waits for the
++    // membership of its follow-ups nothing else shows waits for a planning
++    // request the inbox records (task 1660, ADR-t1504-2 decision 8); it is
++    // shown on the first of those follow-ups.
++    for goal in queue.goal_follow_ups()? {
++        if goal_holds.iter().any(|hold| hold.goal_id == goal.goal) {
++            continue;
++        }
++        let unsettled = crate::domain::follow_up::unshown_unsettled(&goal);
++        let Some(&(anchor, _)) = unsettled.first() else {
++            continue;
++        };
++        attention.push(Attention {
++            run_id: None,
++            task_id: Some(anchor),
++            pid: None,
++            ask_id: None,
++            reason_category: None,
++            status: "open".into(),
++            kind: crate::domain::follow_up::GOAL_FOLLOW_UPS_UNSETTLED.into(),
++            last_error: Some(truncate_reason(
++                &crate::domain::follow_up::unsettled_summary(goal.goal, &unsettled),
++            )),
++            last_error_code: None,
++            next: AttentionNext::DecideFollowUps { goal_id: goal.goal },
++        });
++    }
+     for ask in asks.iter().cloned() {
+         let (status, kind, next) = if ask.is_open() {
+             (
+diff --git a/src/application/ports.rs b/src/application/ports.rs
+index 54493724..dece8d2c 100644
+--- a/src/application/ports.rs
++++ b/src/application/ports.rs
+@@ -3075,6 +3075,10 @@ pub trait GoalReviewStore {
+     fn applies_correction_answer(&self, ask: &Ask) -> Result<bool>;
+     /// The goals whose review failed, held for a person.
+     fn goal_review_holds(&self) -> Result<Vec<GoalReviewHold>>;
++    /// Each open goal with a follow-up whose source it is that has no
++    /// settled membership, with its tasks and those follow-ups and what
++    /// already shows or handles each (task 1660), in goal order.
++    fn goal_follow_ups(&self) -> Result<Vec<crate::domain::follow_up::GoalFollowUps>>;
+     /// `goal review ID`: let the supervisor review the open goal again
+     /// although its tasks did not change (`goal_review_rearmed`).
+     fn rearm_goal_review(&mut self, goal: GoalId) -> Result<serde_json::Value>;
+diff --git a/src/domain/follow_up.rs b/src/domain/follow_up.rs
+index 9a6db01b..eb013ee1 100644
+--- a/src/domain/follow_up.rs
++++ b/src/domain/follow_up.rs
+@@ -519,6 +519,11 @@ impl SourceFollowUp {
+     /// not wait for its work; a required one in the goal waits as a task of
+     /// the goal (the goal's own rule), outside the goal it waits here.
+     pub fn unsettled(&self) -> Option<&'static str> {
++        self.unsettled_reason().map(UnsettledReason::explain)
++    }
++
++    /// The class of [`Self::unsettled`], as the attention names it.
++    pub fn unsettled_reason(&self) -> Option<UnsettledReason> {
+         use MembershipClassification::*;
+         if matches!(
+             self.status,
+@@ -527,10 +532,10 @@ impl SourceFollowUp {
+             return None;
+         }
+         match self.judgement {
+-            None => Some("not judged"),
+-            Some((_, Undecided, _)) => Some("undecided"),
+-            Some((_, _, true)) => Some("judged before the acceptance changed"),
+-            Some((_, Required, false)) if !self.in_goal => Some("required but outside the goal"),
++            None => Some(UnsettledReason::Unjudged),
++            Some((_, Undecided, _)) => Some(UnsettledReason::Undecided),
++            Some((_, _, true)) => Some(UnsettledReason::NeedsRecheck),
++            Some((_, Required, false)) if !self.in_goal => Some(UnsettledReason::RequiredOutside),
+             Some(_) => None,
+         }
+     }
+@@ -557,6 +562,101 @@ pub fn unsettled_follow_ups(follow_ups: &[SourceFollowUp]) -> Vec<(super::TaskId
+     unsettled
+ }
+ 
++// Why a source follow-up keeps its goal from closing as achieved
++// (ADR-t1504-2 decision 8).
++string_enum!(UnsettledReason {
++    Unjudged => "unjudged",
++    Undecided => "undecided",
++    NeedsRecheck => "needs_recheck",
++    RequiredOutside => "required_outside",
++});
++
++impl UnsettledReason {
++    /// What it means, for a refused close.
++    pub fn explain(self) -> &'static str {
++        match self {
++            Self::Unjudged => "not judged",
++            Self::Undecided => "undecided",
++            Self::NeedsRecheck => "judged before the acceptance changed",
++            Self::RequiredOutside => "required but outside the goal",
++        }
++    }
++}
++
++/// The attention of an open goal whose goal review waits only for the
++/// membership of its follow-ups (task 1660). Derived on each read, never a
++/// `run_events` kind.
++pub const GOAL_FOLLOW_UPS_UNSETTLED: &str = "goal_follow_ups_unsettled";
++
++/// A source follow-up as that attention reads it, with what already shows
++/// or handles it.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct WaitingFollowUp {
++    pub follow_up: SourceFollowUp,
++    /// A planner of the runtime's is still to be opened for it or is open
++    /// (its draft planners are not used up).
++    pub draft_planned: bool,
++    /// It recorded `draft_planner_exhausted`.
++    pub exhausted: bool,
++    /// An ask about it is not closed.
++    pub open_ask: bool,
++}
++
++impl WaitingFollowUp {
++    /// Whether the runtime or another attention item already covers it: an
++    /// unjudged follow_up draft its planners handle, a draft shown as
++    /// `draft_planner_exhausted`, or one with an open ask.
++    fn covered(&self) -> bool {
++        let draft = self.follow_up.status == super::TaskStatus::Draft;
++        self.open_ask
++            || (draft && self.exhausted)
++            || (draft && self.follow_up.judgement.is_none() && self.draft_planned)
++    }
++}
++
++/// An open goal with its tasks and the follow-ups whose source it is.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct GoalFollowUps {
++    pub goal: super::GoalId,
++    pub tasks: Vec<(super::TaskId, super::TaskStatus)>,
++    pub follow_ups: Vec<WaitingFollowUp>,
++}
++
++/// The follow-ups that alone keep the goal review from starting and that
++/// nothing else shows, with why, in task order: none unless the goal's own
++/// work is done (the rest of the goal review's candidate check). An
++/// out-of-scope one judged as such never counts (ADR-t1504-1 decision 4).
++pub fn unshown_unsettled(goal: &GoalFollowUps) -> Vec<(super::TaskId, UnsettledReason)> {
++    if !super::goal_review::tasks_done(&goal.tasks) {
++        return Vec::new();
++    }
++    let mut found: Vec<_> = goal
++        .follow_ups
++        .iter()
++        .filter(|f| !f.covered())
++        .filter_map(|f| {
++            f.follow_up
++                .unsettled_reason()
++                .map(|why| (f.follow_up.task, why))
++        })
++        .collect();
++    found.sort_by_key(|(task, _)| *task);
++    found
++}
++
++/// The attention's `last_error`: the goal and each follow-up with why.
++pub fn unsettled_summary(
++    goal: super::GoalId,
++    follow_ups: &[(super::TaskId, UnsettledReason)],
++) -> String {
++    let list = follow_ups
++        .iter()
++        .map(|(task, why)| format!("{task} ({})", why.as_str()))
++        .collect::<Vec<_>>()
++        .join(", ");
++    format!("goal {goal}: its goal review waits for the membership of follow-ups {list}")
++}
++
+ // Why a follow_up draft has no membership judgement plan review can rely
+ // on (ADR-t1504-2 decision 7): none recorded, the latest is `undecided`,
+ // or it predates the source goal's current acceptance version.
+@@ -865,6 +965,133 @@ mod membership_tests {
+         assert_eq!(follow_up(open, true, None).fingerprint(), "5:-");
+     }
+ 
++    /// Task 1660: an open goal whose own work is done shows each
++    /// follow-up that alone keeps its goal review from starting, with its
++    /// reason, unless the runtime or another attention item covers it.
++    #[test]
++    fn a_done_goal_shows_the_unsettled_follow_ups_nothing_else_covers() {
++        use super::super::{GoalId, TaskId, TaskStatus};
++        use MembershipClassification::*;
++        use UnsettledReason as Why;
++        let follow_up = |task, status, in_goal, judgement| WaitingFollowUp {
++            follow_up: SourceFollowUp {
++                task: TaskId::new(task),
++                status,
++                in_goal,
++                judgement,
++            },
++            draft_planned: false,
++            exhausted: false,
++            open_ask: false,
++        };
++        let done = vec![
++            (TaskId::new(1), TaskStatus::Completed),
++            (TaskId::new(2), TaskStatus::Canceled),
++        ];
++        let goal = |tasks: Vec<_>, follow_ups| GoalFollowUps {
++            goal: GoalId::new(7),
++            tasks,
++            follow_ups,
++        };
++        let ready = TaskStatus::Ready;
++        // The four reasons, in task order.
++        let all = vec![
++            follow_up(
++                14,
++                TaskStatus::InProgress,
++                false,
++                Some((4, Required, false)),
++            ),
++            follow_up(11, ready, false, None),
++            follow_up(12, ready, false, Some((2, Undecided, false))),
++            follow_up(13, ready, false, Some((3, OutOfScope, true))),
++        ];
++        let shown = unshown_unsettled(&goal(done.clone(), all.clone()));
++        assert_eq!(
++            shown,
++            [
++                (TaskId::new(11), Why::Unjudged),
++                (TaskId::new(12), Why::Undecided),
++                (TaskId::new(13), Why::NeedsRecheck),
++                (TaskId::new(14), Why::RequiredOutside),
++            ]
++        );
++        assert_eq!(
++            unsettled_summary(GoalId::new(7), &shown),
++            "goal 7: its goal review waits for the membership of follow-ups \
++             11 (unjudged), 12 (undecided), 13 (needs_recheck), 14 (required_outside)"
++        );
++        // The goal's own work is not done: its review waits for that.
++        for tasks in [
++            vec![
++                (TaskId::new(1), TaskStatus::Completed),
++                (TaskId::new(2), ready),
++            ],
++            vec![(TaskId::new(1), TaskStatus::Canceled)],
++            vec![],
++        ] {
++            assert!(unshown_unsettled(&goal(tasks, all.clone())).is_empty());
++        }
++        // Settled or ended follow-ups never count; out of scope does not
++        // wait for its work (ADR-t1504-1 decision 4).
++        assert!(
++            unshown_unsettled(&goal(
++                done.clone(),
++                vec![
++                    follow_up(11, ready, false, Some((1, OutOfScope, false))),
++                    follow_up(12, ready, true, Some((2, Required, false))),
++                    follow_up(13, TaskStatus::Canceled, false, None),
++                ]
++            ))
++            .is_empty()
++        );
++        // What the runtime or another attention item covers.
++        let draft = TaskStatus::Draft;
++        let covered = vec![
++            WaitingFollowUp {
++                draft_planned: true,
++                ..follow_up(11, draft, false, None)
++            },
++            WaitingFollowUp {
++                exhausted: true,
++                ..follow_up(12, draft, false, Some((2, Undecided, false)))
++            },
++            WaitingFollowUp {
++                open_ask: true,
++                ..follow_up(13, ready, false, Some((3, Required, true)))
++            },
++        ];
++        assert!(unshown_unsettled(&goal(done.clone(), covered)).is_empty());
++        // A planner of the runtime's covers only an unjudged draft, and
++        // an exhausted mark only a draft.
++        let uncovered = vec![
++            WaitingFollowUp {
++                draft_planned: true,
++                ..follow_up(11, draft, false, Some((1, Undecided, false)))
++            },
++            WaitingFollowUp {
++                draft_planned: true,
++                ..follow_up(12, ready, false, None)
++            },
++            WaitingFollowUp {
++                exhausted: true,
++                ..follow_up(13, ready, false, None)
++            },
++        ];
++        assert_eq!(
++            unshown_unsettled(&goal(done, uncovered)),
++            [
++                (TaskId::new(11), Why::Undecided),
++                (TaskId::new(12), Why::Unjudged),
++                (TaskId::new(13), Why::Unjudged),
++            ]
++        );
++        assert_eq!(
++            "required_outside".parse::<UnsettledReason>().unwrap(),
++            Why::RequiredOutside
++        );
++    }
++
+     /// ADR-t1504-2 decision 9: only a required judgement after an achieved
+     /// close asks a person; the ask names the judgement and every released
+     /// task with its runs, and offers the three answers.
+diff --git a/src/domain/mod.rs b/src/domain/mod.rs
+index 8866924d..c4c1bfa8 100644
+--- a/src/domain/mod.rs
++++ b/src/domain/mod.rs
+@@ -1880,6 +1880,17 @@ pub enum AttentionNext {
+     /// add --ref finding:N`, ADR-t1394-1 decision 8), or a person decides it
+     /// in their own terminal.
+     DecideFinding,
++    /// An open goal's own work is done, but follow-ups whose source it is
++    /// have no settled membership (none, `undecided`, judged before the
++    /// acceptance changed, or required but outside it) and nothing else
++    /// shows them, so its goal review does not start
++    /// (`goal_follow_ups_unsettled`, task 1660): the inbox records a
++    /// planning request that names the goal or the follow-ups (`request add
++    /// --ref goal:G` or `--ref task:N`), whose planner judges them
++    /// (`judge-follow-up`).
++    DecideFollowUps {
++        goal_id: GoalId,
++    },
+     /// A planning request's planner submitted a proposal of it
+     /// (`request_proposed`, ADR-t1394-1 decision 6): a notice the inbox
+     /// passes on to the person who asked, who acts on nothing.
+@@ -1998,6 +2009,9 @@ impl fmt::Display for AttentionNext {
+             Self::CheckPlanner => f.write_str("check the planner"),
+             Self::DecideDraft => f.write_str("request a plan for the draft"),
+             Self::DecideFinding => f.write_str("request a plan for the finding"),
++            Self::DecideFollowUps { goal_id } => {
++                write!(f, "request a plan for the follow-ups of goal {goal_id}")
++            }
+             Self::ReportRequest => f.write_str("report the request's proposal"),
+             Self::RephraseRequest => f.write_str("rephrase or drop the request"),
+             Self::DecideWaiting => f.write_str("request a plan for the waiting tasks"),
+@@ -2043,6 +2057,9 @@ pub const ATTENTION_KINDS: &[&str] = &[
+     "planner_unresponsive",
+     "draft_planner_exhausted",
+     "finding_planner_exhausted",
++    // Never recorded: `status` and `doctor` derive it on each read, so no
++    // event wakes `watch` with it (task 1660).
++    follow_up::GOAL_FOLLOW_UPS_UNSETTLED,
+     event_kind::REQUEST_PROPOSED,
+     event_kind::REQUEST_DECLINED,
+     event_kind::REQUEST_PLANNER_EXHAUSTED,
+@@ -2228,6 +2245,14 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
+         ("planner_unresponsive", _) => Some(AttentionNext::CheckPlanner),
+         ("draft_planner_exhausted", _) => Some(AttentionNext::DecideDraft),
+         ("finding_planner_exhausted", _) => Some(AttentionNext::DecideFinding),
++        // Derived on each read and never recorded (task 1660); mapped for
++        // a reader that names it.
++        (follow_up::GOAL_FOLLOW_UPS_UNSETTLED, _) => payload
++            .get("goal_id")
++            .and_then(serde_json::Value::as_i64)
++            .map(|goal| AttentionNext::DecideFollowUps {
++                goal_id: GoalId::new(goal),
++            }),
+         (event_kind::REQUEST_PROPOSED, _) => Some(AttentionNext::ReportRequest),
+         (event_kind::REQUEST_DECLINED | event_kind::REQUEST_PLANNER_EXHAUSTED, _) => {
+             Some(AttentionNext::RephraseRequest)
+@@ -3443,6 +3468,13 @@ mod attention_tests {
+                 json!({"finding_id": 2, "planners": 3}),
+                 Some(DecideFinding),
+             ),
++            (
++                "goal_follow_ups_unsettled",
++                json!({"goal_id": 108}),
++                Some(DecideFollowUps {
++                    goal_id: GoalId::new(108),
++                }),
++            ),
+             (
+                 "dependency_stranded",
+                 json!({"goal_id": 2, "verdict": "abandoned", "waiting": [5]}),
+@@ -3536,6 +3568,13 @@ mod attention_tests {
+         assert_eq!(QueueServiceStatus.to_string(), "dagq service status");
+         assert_eq!(DecideDraft.to_string(), "request a plan for the draft");
+         assert_eq!(DecideFinding.to_string(), "request a plan for the finding");
++        assert_eq!(
++            DecideFollowUps {
++                goal_id: GoalId::new(108)
++            }
++            .to_string(),
++            "request a plan for the follow-ups of goal 108"
++        );
+         assert_eq!(
+             DecideWaiting.to_string(),
+             "request a plan for the waiting tasks"
+diff --git a/src/infrastructure/draft_planners.rs b/src/infrastructure/draft_planners.rs
+index 7f9748de..a9935434 100644
+--- a/src/infrastructure/draft_planners.rs
++++ b/src/infrastructure/draft_planners.rs
+@@ -66,6 +66,25 @@ fn targets() -> String {
+     )
+ }
+ 
++/// Whether a planner of the runtime's is still to be opened for draft
++/// `task` ([`targets`]) or one is open for it.
++pub(super) fn draft_planned(conn: &Connection, task: TaskId) -> Result<bool> {
++    Ok(conn.query_row(
++        &format!(
++            "SELECT EXISTS({} AND t.id=?1) OR EXISTS(SELECT 1 FROM tasks t
++                 JOIN planners p ON p.closed_at IS NULL
++                 AND (p.draft_task_id=t.id
++                      OR (t.proposal_id IS NOT NULL AND p.proposal_id=t.proposal_id)
++                      OR EXISTS(SELECT 1 FROM draft_bundle_members m
++                                WHERE m.planner_id=p.id AND m.task_id=t.id))
++                 WHERE t.id=?1 AND t.status='draft')",
++            targets()
++        ),
++        [task],
++        |r| r.get(0),
++    )?)
++}
++
+ impl SqliteQueue {
+     pub fn register_follow_ups(
+         &mut self,
+diff --git a/src/infrastructure/follow_up_membership.rs b/src/infrastructure/follow_up_membership.rs
+index c1e0f493..589279ef 100644
+--- a/src/infrastructure/follow_up_membership.rs
++++ b/src/infrastructure/follow_up_membership.rs
+@@ -7,7 +7,8 @@ use super::asks::{insert_ask, read_ask};
+ use super::sqlite::{SqliteQueue, enum_col, event, goal_event, read_goal, read_task, set_goal_in};
+ use crate::domain::follow_up::{
+     self, CorrectionAnswer, MembershipClassification as Class, MembershipFacts, MembershipGap,
+-    MembershipJudgement, ReleasedDependent, SourceFollowUp, membership_gap as membership_gap_of,
++    MembershipJudgement, ReleasedDependent, SourceFollowUp, WaitingFollowUp,
++    membership_gap as membership_gap_of,
+ };
+ use crate::domain::{
+     Ask, AskId, AskKind, AskReason, DraftOrigin, EventKind, GoalId, GoalVerdict, NewAsk, TaskId,
+@@ -624,3 +625,31 @@ pub(super) fn source_follow_ups(conn: &Connection, goal: GoalId) -> Result<Vec<S
+         })
+         .collect()
+ }
++
++/// The source follow-ups of `goal` with no settled membership, each with
++/// what already shows or handles it (task 1660): a planner of the runtime's
++/// for the draft, its `draft_planner_exhausted`, an ask about it not closed.
++pub(super) fn waiting_follow_ups(conn: &Connection, goal: GoalId) -> Result<Vec<WaitingFollowUp>> {
++    source_follow_ups(conn, goal)?
++        .into_iter()
++        .filter(|f| f.unsettled_reason().is_some())
++        .map(|follow_up| {
++            let task = follow_up.task;
++            let (exhausted, open_ask) = conn.query_row(
++                &format!(
++                    "SELECT EXISTS(SELECT 1 FROM run_events WHERE task_id=?1 AND kind='{}'),
++                            EXISTS(SELECT 1 FROM asks WHERE task_id=?1 AND closed_at IS NULL)",
++                    crate::domain::event_kind::DRAFT_PLANNER_EXHAUSTED
++                ),
++                [task],
++                |r| Ok((r.get(0)?, r.get(1)?)),
++            )?;
++            Ok(WaitingFollowUp {
++                draft_planned: super::draft_planners::draft_planned(conn, task)?,
++                exhausted,
++                open_ask,
++                follow_up,
++            })
++        })
++        .collect()
++}
+diff --git a/src/infrastructure/goal_reviews.rs b/src/infrastructure/goal_reviews.rs
+index ca08bc1d..ff7e0d84 100644
+--- a/src/infrastructure/goal_reviews.rs
++++ b/src/infrastructure/goal_reviews.rs
+@@ -779,6 +779,27 @@ impl GoalReviewStore for SqliteQueue {
+         Ok(holds)
+     }
+ 
++    fn goal_follow_ups(&self) -> Result<Vec<follow_up::GoalFollowUps>> {
++        let goals: Vec<GoalId> = self
++            .conn
++            .prepare("SELECT id FROM goals WHERE status='open' AND closed_at IS NULL ORDER BY id")?
++            .query_map([], |r| r.get(0))?
++            .collect::<rusqlite::Result<_>>()?;
++        let mut found = Vec::new();
++        for goal in goals {
++            let follow_ups = follow_up_membership::waiting_follow_ups(&self.conn, goal)?;
++            if follow_ups.is_empty() {
++                continue;
++            }
++            found.push(follow_up::GoalFollowUps {
++                goal,
++                tasks: goal_tasks(&self.conn, goal)?,
++                follow_ups,
++            });
++        }
++        Ok(found)
++    }
++
+     fn rearm_goal_review(&mut self, goal: GoalId) -> Result<Value> {
+         let now = self.generators.clock.now();
+         let tx = self
+diff --git a/tests/it/follow_up_membership.rs b/tests/it/follow_up_membership.rs
+index 18cf62c0..23eae263 100644
+--- a/tests/it/follow_up_membership.rs
++++ b/tests/it/follow_up_membership.rs
+@@ -1317,3 +1317,188 @@ fn a_reopen_closes_the_goals_other_questions_and_keeps_a_follow_up_it_cannot_mov
+         "{refused}"
+     );
+ }
++
++impl Landed {
++    /// The `goal_follow_ups_unsettled` items `status` shows (task 1660).
++    fn unsettled_attention(&self) -> Vec<serde_json::Value> {
++        let status = dagq::runtime::status(&self.dir.path().join("queue.db")).unwrap();
++        status["attention"]
++            .as_array()
++            .unwrap()
++            .iter()
++            .filter(|a| a["kind"] == "goal_follow_ups_unsettled")
++            .cloned()
++            .collect()
++    }
++
++    /// The one item of the source goal, naming `anchor` and each follow-up
++    /// with its reason.
++    fn assert_unsettled(&self, anchor: TaskId, follow_ups: &str) {
++        let shown = self.unsettled_attention();
++        assert_eq!(shown.len(), 1, "{shown:?}");
++        let item = &shown[0];
++        assert_eq!(item["run_id"], json!(null));
++        assert_eq!(item["task_id"], json!(anchor.as_i64()));
++        assert_eq!(item["status"], "open");
++        assert_eq!(
++            item["next"],
++            format!("request a plan for the follow-ups of goal {}", self.source)
++        );
++        assert_eq!(
++            item["last_error"],
++            format!(
++                "goal {}: its goal review waits for the membership of follow-ups {follow_ups}",
++                self.source
++            )
++        );
++    }
++
++    /// A follow-up moved out of the source goal past `draft`, where no
++    /// planner of the runtime's is opened for it.
++    fn submitted_outside(&mut self, title: &str) -> TaskId {
++        let task = self.follow_up(title);
++        self.q.set_goal(task, Some(self.other)).unwrap();
++        self.set_status(task, "submitted");
++        task
++    }
++}
++
++/// Task 1660: an open goal whose own work is done and whose goal review
++/// waits only for the membership of its follow-ups is shown once in the
++/// attention, with each follow-up and its reason, until each is judged
++/// (against the current acceptance), joins the goal or ends.
++#[test]
++fn a_goal_waiting_for_follow_up_membership_is_shown_until_judged() {
++    let mut l = landed();
++    assert!(l.unsettled_attention().is_empty());
++    // Not judged, then undecided, then judged out of scope.
++    let first = l.submitted_outside("first improvement");
++    assert!(!l.reviewable());
++    l.assert_unsettled(first, &format!("{first} (unjudged)"));
++    let mut undecided = judgement(Class::Undecided, None);
++    undecided.acceptance_items.clear();
++    l.q.judge_follow_up(first, undecided, "planner").unwrap();
++    l.assert_unsettled(first, &format!("{first} (undecided)"));
++    l.out_of_scope(first);
++    // Out of scope does not wait for its work.
++    assert!(l.reviewable());
++    assert!(l.unsettled_attention().is_empty());
++
++    // Required but outside the goal, listed with a stale judgement.
++    let second = l.submitted_outside("required outside");
++    l.q.judge_follow_up(second, judgement(Class::Required, None), "planner")
++        .unwrap();
++    assert_eq!(l.q.show(second).unwrap().task.goal_id(), Some(l.other));
++    l.assert_unsettled(second, &format!("{second} (required_outside)"));
++    l.change_acceptance("a stricter acceptance");
++    l.assert_unsettled(
++        first,
++        &format!("{first} (needs_recheck), {second} (needs_recheck)"),
++    );
++    // Rechecked, the required one still waits outside the goal.
++    l.out_of_scope(first);
++    l.q.judge_follow_up(second, judgement(Class::Required, None), "planner")
++        .unwrap();
++    l.assert_unsettled(second, &format!("{second} (required_outside)"));
++    // The goal's own work not done: its review waits for that.
++    l.set_status(l.task, "ready");
++    assert!(l.unsettled_attention().is_empty());
++    l.set_status(l.task, "completed");
++    l.assert_unsettled(second, &format!("{second} (required_outside)"));
++    // An ended follow-up never waits.
++    l.set_status(second, "completed");
++    assert!(l.reviewable());
++    assert!(l.unsettled_attention().is_empty());
++}
++
++/// Task 1660: what the runtime already handles or another attention item
++/// shows is not counted again: an unjudged follow_up draft its planners
++/// handle, a draft shown as `draft_planner_exhausted`, a follow-up with an
++/// open ask, and a goal held by `goal_review_failed`.
++#[test]
++fn follow_ups_the_runtime_or_another_item_covers_are_not_shown_again() {
++    use dagq::application::{DraftPlannerStore, GoalReviewFailure, GoalReviewStore};
++    let mut l = landed();
++    let status = |l: &Landed| dagq::runtime::status(&l.dir.path().join("queue.db")).unwrap();
++    let has = |status: &serde_json::Value, kind: &str, task: TaskId| {
++        status["attention"]
++            .as_array()
++            .unwrap()
++            .iter()
++            .any(|a| a["kind"] == kind && a["task_id"] == json!(task.as_i64()))
++    };
++    // An unjudged draft outside the goal: its planners are still to open.
++    let draft = l.follow_up("draft improvement");
++    l.q.set_goal(draft, Some(l.other)).unwrap();
++    assert!(!l.reviewable());
++    assert!(l.unsettled_attention().is_empty());
++    // A planner open for it handles it too.
++    assert!(matches!(
++        l.q.open_draft_planner(&[draft], None).unwrap(),
++        dagq::application::DraftPlannerStart::Opened { .. }
++    ));
++    assert!(l.unsettled_attention().is_empty());
++    // Its planners used up, it is shown as `draft_planner_exhausted` only.
++    l.q.record_task_event(
++        draft,
++        dagq::domain::EventKind::DraftPlannerExhausted,
++        json!({"planners": 3}),
++    )
++    .unwrap();
++    let now = status(&l);
++    assert!(has(&now, "draft_planner_exhausted", draft));
++    assert!(l.unsettled_attention().is_empty());
++    l.out_of_scope(draft);
++
++    // A follow-up with an open ask is shown as the ask only.
++    let asked = l.submitted_outside("asked improvement");
++    let ask =
++        l.q.ask(dagq::domain::NewAsk {
++            recommendation: None,
++            confidence: None,
++            topics: Vec::new(),
++            kind: dagq::domain::AskKind::PlannerQuestion,
++            task_id: Some(asked),
++            run_id: None,
++            question: "is it in the goal?".into(),
++            options: vec!["adopt".into(), "cancel".into()],
++            asked_by: "planner".into(),
++            reason_category: dagq::domain::AskReason::Scope,
++            finding_id: None,
++            request_id: None,
++        })
++        .unwrap();
++    let now = status(&l);
++    assert!(has(&now, "ask_opened", asked), "{ask:?}");
++    assert!(l.unsettled_attention().is_empty());
++    l.set_status(asked, "canceled");
++    let ended = l.submitted_outside("ended improvement");
++    l.set_status(ended, "canceled");
++    assert!(l.reviewable());
++
++    // A goal held by its failed review is shown as `goal_review_failed`
++    // only, even when a follow-up it saw ended comes back unjudged (its
++    // status is not the review's input).
++    let job = l.begin_review();
++    l.q.fail_goal_review(
++        &job,
++        &dagq::domain::LeaseToken::new(REVIEW_OWNER),
++        &GoalReviewFailure {
++            error: "no verdict".into(),
++            ..Default::default()
++        },
++    )
++    .unwrap();
++    assert!(l.held());
++    l.set_status(ended, "submitted");
++    assert!(l.held());
++    let now = status(&l);
++    assert!(
++        now["attention"]
++            .as_array()
++            .unwrap()
++            .iter()
++            .any(|a| a["kind"] == "goal_review_failed")
++    );
++    assert!(l.unsettled_attention().is_empty());
++}

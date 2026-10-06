@@ -1,0 +1,15 @@
+diff --git a/src/infrastructure/schema.rs b/src/infrastructure/schema.rs
+index f64b87c9..182d6bbb 100644
+--- a/src/infrastructure/schema.rs
++++ b/src/infrastructure/schema.rs
+@@ -374,6 +374,10 @@ mod tests {
+         assert!(!is_compatible("-- dagq-schema: maybe\n"));
+         assert!(!is_compatible("-- note\n-- dagq-schema: compatible\n"));
+         assert_eq!(declaration(""), None);
++        assert_eq!(
++            declaration("-- dagq-schema: compatible\r\nCREATE TABLE t(x);"),
++            Some("compatible")
++        );
+     }
+ 
+     #[test]

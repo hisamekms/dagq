@@ -1,0 +1,13 @@
+diff --git a/docs/adr/0042-adr-is-superseded-whole-and-deprecation-date-is-deprecated-on.md b/docs/adr/0042-adr-is-superseded-whole-and-deprecation-date-is-deprecated-on.md
+index f7b0deff..eb723f1d 100644
+--- a/docs/adr/0042-adr-is-superseded-whole-and-deprecation-date-is-deprecated-on.md
++++ b/docs/adr/0042-adr-is-superseded-whole-and-deprecation-date-is-deprecated-on.md
+@@ -25,7 +25,7 @@ related:
+ 
+ # ADR-0042: ADRは丸ごと置き換え、置き換えの日付はsuperseded_on、廃止の日付はdeprecated_onに分けてfrontmatterと本文冒頭の注記に残す
+ 
+-> **置き換え済み（2026-09-26）**: このADRの決定は現在有効ではない。現行の決定は[ADR-t598-1](2026-09-26-t598-1-adr-id-is-task-id-small-adrs-and-design-holds-current-state.md)を読む。
++> **置き換え済み（2026-09-26）**: このADRの決定は現在有効ではない。現行の決定は[ADR-t598-1](2026-09-26-t598-1-adr-id-is-task-id-small-adrs-and-design-holds-current-state.md)を読む。この記録は経緯の参照用に残す。
+ 
+ ## Context
+ 

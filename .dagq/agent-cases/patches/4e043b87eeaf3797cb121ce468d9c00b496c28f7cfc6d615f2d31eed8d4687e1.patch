@@ -1,0 +1,21 @@
+diff --git a/docs/adr/2026-09-30-t1091-1-amend-or-replace-by-number-of-decisions.md b/docs/adr/2026-09-30-t1091-1-amend-or-replace-by-number-of-decisions.md
+index 04ae3303..924d624b 100644
+--- a/docs/adr/2026-09-30-t1091-1-amend-or-replace-by-number-of-decisions.md
++++ b/docs/adr/2026-09-30-t1091-1-amend-or-replace-by-number-of-decisions.md
+@@ -4,7 +4,7 @@ type: adr
+ title: ADRをamendsで直すか丸ごと置き換えるかを、IDの形でなく元のADRの決定の数と変える範囲で決め、決定を複数持つ新しい形のADRもamendsで直せるようにする（ADR-t598-1決定5をamends）
+ status: accepted
+ created: 2026-09-30
+-updated: 2026-09-30
++updated: 2026-10-05
+ accepted_on: 2026-09-30
+ amends:
+   - adr-t598-1 decision 5
+@@ -13,6 +13,7 @@ owners:
+ tags:
+   - documentation
+   - conventions
++  - adr-maintenance
+ related:
+   - adr-t598-1
+   - adr-t828-1

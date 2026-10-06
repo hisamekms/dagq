@@ -1,0 +1,15 @@
+diff --git a/docs/design/overview.md b/docs/design/overview.md
+index 4fa5054a..22a123c2 100644
+--- a/docs/design/overview.md
++++ b/docs/design/overview.md
+@@ -4,9 +4,8 @@ type: design
+ title: System overview
+ status: current
+ created: 2026-09-21
+-updated: 2026-10-04 # task 1662: points to the measurement design
++updated: 2026-10-05
+ last_verified: 2026-10-04 # task 1615
+-scope: system
+ related:
+   - adr-t1545-1
+   - design-architecture

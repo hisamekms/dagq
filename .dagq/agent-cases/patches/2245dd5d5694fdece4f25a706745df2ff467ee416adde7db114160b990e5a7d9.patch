@@ -1,0 +1,310 @@
+diff --git a/docs/design/supervisor-lifecycle/supervise.md b/docs/design/supervisor-lifecycle/supervise.md
+index 4a9cefa5..2e35ce0f 100644
+--- a/docs/design/supervisor-lifecycle/supervise.md
++++ b/docs/design/supervisor-lifecycle/supervise.md
+@@ -38,7 +38,7 @@ related:
+ 
+ ループ（1秒ごと）: 各passの先頭で、待ちの終わったrunを新しい仕事より先にslotへ戻し（drain中も）、各tickの先頭で人の答えを待つrunを待ちに移す（[人の答えを待つrun](waiting.md)）。待ちのrunのslotは下の監視の代わりにsessionへ何も送らない見張りだけを受ける。
+ 
+-5. **adopt**（[ADR-0039](../../adr/0039-adopt-stale-lease-of-live-wrapper-and-renew-own-stale-lease.md)の決定1〜4）: active runが上限未満なら（イベントの上で人の答えを待っているrunは、待ちの数が`--max-waiting`未満なら空きを要さずに待ちとして。[人の答えを待つrun](waiting.md)）、claimの前に、他のtokenのleaseを持つ`running` / `validating` / `awaiting_integration` / `needs_session`のrunを`runs_leased_by_others`で読み、leaseがstale（pidが死んでいるかheartbeatが30秒より古い）で、wrapperが生きていてheartbeatが30秒以内か`exited_at`が記録済みのもの、または`awaiting_integration`のもの（wrapperを問わない。reviewはheadlessでsessionを要らず、wrapperが終了を記録せずに死んだsessionは終わったsessionとして扱う。task 236）、またはresumeの途中の`needs_session`のもの（最後のresumeのイベントが`resume_started`でその試行の`workspace_created`が記録済み、wrapperが終了を記録しておらずプロセスが生きている。heartbeatは問わない。task 356。[`needs_session`](needs-session.md#supervisorの入れ替わり)）を`adopt_run`で引き継ぐ。`adopt_run`は`BEGIN IMMEDIATE`の中でstatusとstaleを再検査し、lease行の`token` / `pid` / `heartbeat_at`と`task_runs.supervisor_token`を自分のものにして`run_adopted`を書く（同じrunを2つのsupervisorが取ろうとしても1つしか通らない。負けた方は何もしない）。引き継いだrunのslotはDBから組み立てる: pathは`run_planned`のもの、`receipt_seen`はreceiptファイルと`receipt_observed`イベントの有無、`exit_requested`イベントがあれば`/exit`を再送せず、exit timeoutは最後の`exit_requested`（その後に既知のダイアログへ規則で応答した`auto_repaired`（`repair: dialog_answered`）があればその時刻）から数え（`exit_request_timed_out`が記録済みなら再記録しない）、receiptの後のbackgroundの処理の待ち（`resume_timeout`）は最後の`receipt_observed`の時刻から数える（引き継いだ時刻から数え直さない。task 879。resumeの途中のrunと`handoff.json`の`exit`の段の`/exit`も同じくその記録から数え、`stuck_exit`の復旧jobがダイアログに応答した・プロセスを止めた`auto_repaired`（`answer_known_dialog` / `stop_processes`）も数え直しの起点にする。task 894。reviewの後に引き継いだrun（`adopt_review`と`adopt_failed_review_ask`）の`/exit`も、reviewの錨か`review_started`より後の記録から数える。task 959。`resume_timeout`より短い間隔で引き継ぎが続くと、以前は待ちが終わらなかった）。記録の時刻は`RunFiles`の壁時計との差を今の`Instant`から引いて戻す、wrapperの登録待ちは持たない。`validating`のrunは9の検証をはじめから行う。`claimed` / `starting`（wrapperの登録にclaimしたtokenが要る）、leaseのないrun（abandon済み・`recover`済み）、`integrating`、wrapperが死んでいるか黙っている`running` / `validating`のrunは引き継がず、[`recover`](recover.md#recover-run_id)に残す（leaseのpidが死んでいてprocessが止まっていれば12の自動recoverが拾う。`integrating`のrunは12が着地スロットを解放する。task 1118）。引き継ぎはlogに1行で残す。
++5. **adopt**（[ADR-0039](../../adr/0039-adopt-stale-lease-of-live-wrapper-and-renew-own-stale-lease.md)の決定1〜4）: active runが上限未満なら（イベントの上で人の答えを待っているrunは、待ちの数が`--max-waiting`未満なら空きを要さずに待ちとして。[人の答えを待つrun](waiting.md)）、claimの前に、他のtokenのleaseを持つ`running` / `validating` / `awaiting_integration` / `needs_session`のrunを`runs_leased_by_others`で読み、leaseがstale（pidが死んでいるかheartbeatが30秒より古い）で、wrapperが生きていてheartbeatが30秒以内か`exited_at`が記録済みのもの、または`awaiting_integration`のもの（wrapperを問わない。reviewはheadlessでsessionを要らず、wrapperが終了を記録せずに死んだsessionは終わったsessionとして扱う。task 236）、またはresumeの途中の`needs_session`のもの（最後のresumeのイベントが`resume_started`でその試行の`workspace_created`が記録済み、wrapperが終了を記録しておらずプロセスが生きている。heartbeatは問わない。task 356。[`needs_session`](needs-session.md#supervisorの入れ替わり)）を`adopt_run`で引き継ぐ。`adopt_run`は`BEGIN IMMEDIATE`の中でstatusとstaleを再検査し、lease行の`token` / `pid` / `heartbeat_at`と`task_runs.supervisor_token`を自分のものにして`run_adopted`を書く（同じrunを2つのsupervisorが取ろうとしても1つしか通らない。負けた方は何もしない）。自分がまだslotで進めているrunは、leaseが他のtokenに変わってstaleでも引き継がない（resumeとtriageも取らない）: そのslotは7で外れ、その後のpassでだけ他のrunと同じく引き継ぐ（同じrunを2つのslotで進めない。passはslotを進める7より前にadoptするので、前のpassの7の後にleaseが動くと、leaseを失ったrunを引き継ぎ直して2つのslotで進めていた。task 1361）。引き継いだrunのslotはDBから組み立てる: pathは`run_planned`のもの、`receipt_seen`はreceiptファイルと`receipt_observed`イベントの有無、`exit_requested`イベントがあれば`/exit`を再送せず、exit timeoutは最後の`exit_requested`（その後に既知のダイアログへ規則で応答した`auto_repaired`（`repair: dialog_answered`）があればその時刻）から数え（`exit_request_timed_out`が記録済みなら再記録しない）、receiptの後のbackgroundの処理の待ち（`resume_timeout`）は最後の`receipt_observed`の時刻から数える（引き継いだ時刻から数え直さない。task 879。resumeの途中のrunと`handoff.json`の`exit`の段の`/exit`も同じくその記録から数え、`stuck_exit`の復旧jobがダイアログに応答した・プロセスを止めた`auto_repaired`（`answer_known_dialog` / `stop_processes`）も数え直しの起点にする。task 894。reviewの後に引き継いだrun（`adopt_review`と`adopt_failed_review_ask`）の`/exit`も、reviewの錨か`review_started`より後の記録から数える。task 959。`resume_timeout`より短い間隔で引き継ぎが続くと、以前は待ちが終わらなかった）。記録の時刻は`RunFiles`の壁時計との差を今の`Instant`から引いて戻す、wrapperの登録待ちは持たない。`validating`のrunは9の検証をはじめから行う。`claimed` / `starting`（wrapperの登録にclaimしたtokenが要る）、leaseのないrun（abandon済み・`recover`済み）、`integrating`、wrapperが死んでいるか黙っている`running` / `validating`のrunは引き継がず、[`recover`](recover.md#recover-run_id)に残す（leaseのpidが死んでいてprocessが止まっていれば12の自動recoverが拾う。`integrating`のrunは12が着地スロットを解放する。task 1118）。引き継ぎはlogに1行で残す。
+    **claim**: 続けて、`graph_input`から`dependency_graph`でcandidatesをclaim順（効く優先度`effective_priority`の降順 → 解放数`unblocks`の降順 → IDの昇順。[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)の決定4、`candidates`・`graph`と同じ順。効く優先度は自分と、自分を推移的に待っている`ready`のtask（draftのgoalのものを除く）の優先度の最大値）に並べ、空でなければ`refs/heads/<branch>`を読み直してbase commitにし、`claim_for_supervisor_in_order`でその順の先頭からまだclaim可能なtaskを取り、run・`supervisor_token`・lease行を1トランザクションで作る。順序は`graph`で再現できるので`claim_reordered`は記録しない。ただし、衝突の多いファイル（`conflict_hotspots`のalert）で進行中のrunと予想するファイルが重なる候補は、interruptのものと上限を過ぎたものを除いてそのpassの順から外し、控えた理由を`claim_deferred`に書く（[claimを控える（衝突の多いファイル）](claim-defer.md)、ADR-0080）。supervisorのadapterの表に無いworker（taskの`provider`と`worker_mode`の組。今はClaudeの対話だけがある）の候補も順から外し、`claim_deferred`（`provider_unavailable` / `mode_unavailable`）に書く（[workerを動かせないtask](claim-defer.md#workerを動かせないtask)、ADR-t813-2）。runはtaskのworkerのproviderを`requested_provider` / `actual_provider`に、経路を`worker_mode`に持つ。`run_claimed`のpayloadには、遷移（`from` / `to` / `provider` / `worker_mode`）に加えてclaimの時点の属性（goal 21、task 197。`domain::measure::ClaimAttributes`）を書く: `dagq_version`（このバイナリのbuild識別子。[Build identifier](build-identifier.md)）、`claude_version`（`--claude`が解決する実体が`.../versions/<version>`ならその`<version>`、それ以外のpathならnull）、`codex_version`（supervisorの表にCodexの組があるときだけ。`--codex`の`codex --version`が出すversion、実行できなければnull。ADR-t813-2の決定7）、`provider_version`（そのrunのproviderの`claude_version`か`codex_version`）、`rustc_release` / `rustc_host`（main checkoutで`rustc -vV`を10秒の上限で実行した`release`と`host`。toolchain fileが効くのでworkerと同じtoolchainを指す。cargo専用の計測なので、queueのrepositoryがdagqのソースのとき（`Repository::is_dagq_source`をpassごとに読む。[Source repository](source-repository.md)、ADR-t614-1）だけ実行する。実行しない・実行できなければ欄ごと書かない）、`parallel`（supervisorの`--parallel`）、`slots`（このclaimの前に使っていたslotの数）、`load_avg`（1分のload average。読めなければnull）。path・pidは載せない（ADR-0032の分類でドメインevent）。versionの取得は`Ports::host_versions`（`infrastructure::adapters::host_versions`）で、手の`claim`（supervisorの無いclaim）の`run_claimed`はこれらを持たない。`integrate`で依存が解けたtaskは次のループで、先行taskを含む`main`から始まる。
+    **candidatesの標本**（ADR-0051の決定3）: claimを止めておらず停止要求も無いpassでは、このfill pass（claimを控えたpassも含む）の後に、`dependency_graph`の`candidates`の数（`candidates`。`graph`の`candidates`と同じ規則で、衝突の多いファイルで控えた候補も数える）、`--parallel`から使っているslotを引いた数（`free_slots`）、`ready`のtaskの数（`ready`）を数え、このプロセスが前に記録した標本と1つでも違えば`candidates_sampled`（`candidates`・`free_slots`・`ready`・`supervisor`）をqueueのeventとして1件記録する（`domain::kpi::CandidatesSample::transition`）。同じ値の間は書かない。前の標本はプロセスのメモリにだけ持つので、起動とexecの引き継ぎの直後の最初のpassは値が変わっていなくても1件記録する。読み書きの失敗はlogに出すだけで、次のpassでやり直す。`kpi`の`candidates`がこれを読む（[`kpi`](kpi.md)）。
+ 6. **provision**: run管理領域（DBと同じdirの`runs/<run-id>/`）のpath、branch `dagq/<run-id>`、worktree（`runs/<run-id>/worktree`）、receipt、logのpathを`run_planned`として先にDBへ保存し、ディレクトリ、`prompt.txt`、runtimeバイナリのスナップショット`runner`、worktreeを作り、cmux workspaceを`--name "[<repo>]worker#<task-id> - <task title>" --description "dagq role=worker queue=<queue hash> run=<run-id> task=<id>" --env DAGQ_ROLE=worker --env DAGQ_ACTOR_ID=worker:<run-id> --env DAGQ_RUN_ID=<run-id> --env DAGQ_TASK_ID=<id> [--group <queueのgroup>] --command '<runner> --db ... session --run ... --lease <token> --claude ...' --focus false --cwd worktree`で作成して、`identify`で解決したUUIDを`workspace_created`として保存する。workspaceの環境にqueue DBのpathは無く、作る前にworkerのqueue serviceのtokenを発行し、wrapperがagentの起動でそのfileとserviceのsocketを渡す（goal 82の段(3)、[Queue service](../queue-service.md#クライアントモード)）。wrapperにはDBのpathを`--db`で明示的に渡す。provisioningの失敗は環境要因とみなし、そのrunをabandon（下記）した上で以後のclaimを止め、active runをdrainしてから非0で終了する。`prompt.txt`の内容は下記[Prompt](prompt.md#prompt)。
+diff --git a/src/application/supervise/adopt.rs b/src/application/supervise/adopt.rs
+index e95b5a35..ecbab871 100644
+--- a/src/application/supervise/adopt.rs
++++ b/src/application/supervise/adopt.rs
+@@ -27,6 +27,9 @@ impl Supervisor<'_> {
+                 lease,
+                 wrapper,
+             } = candidate;
++            if self.in_slot(run.id()) {
++                continue;
++            }
+             if !self.lease_stale(&lease, now) {
+                 continue;
+             }
+diff --git a/src/application/supervise/mod.rs b/src/application/supervise/mod.rs
+index d6b539db..11c459e0 100644
+--- a/src/application/supervise/mod.rs
++++ b/src/application/supervise/mod.rs
+@@ -2346,6 +2346,14 @@ impl Supervisor<'_> {
+             }
+         }
+     }
++    /// Whether this process still drives `id` in a slot. Such a run whose
++    /// lease another token holds now, stale or not, is adopted, resumed or
++    /// triaged by none of the claims of a pass: its slot is dropped on its
++    /// next step ([`Self::disown`]), and only a later pass may take the run
++    /// like any other, never into a second slot (task 1361).
++    fn in_slot(&self, id: &RunId) -> bool {
++        self.slots.iter().any(|slot| slot.run.id() == id)
++    }
+     /// Drop a slot whose lease another process holds now, writing nothing
+     /// about the run: the new owner's record is the record.
+     fn disown(&mut self, slot: &Slot) {
+diff --git a/src/application/supervise/resume.rs b/src/application/supervise/resume.rs
+index fbbcb6c3..9beeab9f 100644
+--- a/src/application/supervise/resume.rs
++++ b/src/application/supervise/resume.rs
+@@ -46,6 +46,9 @@ impl Supervisor<'_> {
+                 wrapper,
+                 resumes,
+             } = candidate;
++            if self.in_slot(run.id()) {
++                continue;
++            }
+             if self.no_claude && run.actual_provider() == crate::domain::Provider::Claude {
+                 // Do not spend resume attempts trying to launch a forbidden provider.
+                 continue;
+diff --git a/src/application/supervise/triage.rs b/src/application/supervise/triage.rs
+index 7d169190..d7f1ea90 100644
+--- a/src/application/supervise/triage.rs
++++ b/src/application/supervise/triage.rs
+@@ -431,6 +431,7 @@ impl Supervisor<'_> {
+                 TriageState::Failed | TriageState::Finished => false,
+             };
+             if !due
++                || self.in_slot(run.id())
+                 || self
+                     .queue
+                     .run_lease(run.id())?
+diff --git a/tests/it/runtime_adopt.rs b/tests/it/runtime_adopt.rs
+index a33bb6eb..ad1403ea 100644
+--- a/tests/it/runtime_adopt.rs
++++ b/tests/it/runtime_adopt.rs
+@@ -1563,10 +1563,14 @@ fn two_supervisors_racing_for_one_stale_lease_adopt_it_once() {
+ 
+ /// A resident supervisor whose lease was taken over (here by hand, as an
+ /// adopter or `recover` would) drops the run from its slots without writing
+-/// anything more about it, while the adopter drives the run to the end.
++/// anything more about it or starting its next turn, while the adopter
++/// drives the run to the end. The lease moves right after the stop, so a
++/// pass that began before it may still adopt: it must not take back the
++/// run it still drives into a second slot (task 1361).
+ #[test]
+ fn a_supervisor_that_lost_its_lease_stops_touching_the_run() {
+     let (_dir, repo, db) = fixture();
++    let _dump = EventsOnPanic(db.clone());
+     // The session works until the test lets it finish (`$EXIT.go`), after
+     // the lease changed hands and the original returned: a session that
+     // finished as soon as the lease moved let the run reach validation
+@@ -1578,41 +1582,35 @@ fn a_supervisor_that_lost_its_lease_stops_touching_the_run() {
+             (db.clone(), repo.clone(), backend.clone(), options.clone());
+         thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
+     };
+-    wait_until(&db, Duration::from_secs(20), |queue| {
+-        queue
+-            .active_runs()
+-            .unwrap()
+-            .first()
+-            .is_some_and(|r| r.status() == RunStatus::Running)
+-    });
++    let run = turn_in_progress(&db);
+     let mut queue = SqliteQueue::open(&db).unwrap();
+-    let run = queue.active_runs().unwrap().remove(0);
+-    // Draining: the original keeps driving its run but adopts and claims
+-    // nothing more, so it cannot take the lease back once it loses it.
++    // Draining: the original keeps driving its run but claims nothing more.
+     options.stop.store(true, Ordering::SeqCst);
+-    // A pass already under way may still adopt: move the lease only once
+-    // the original drains.
+-    wait_until(&db, Duration::from_secs(20), |queue| {
+-        queue
+-            .all_events()
+-            .unwrap()
+-            .iter()
+-            .any(|event| event.kind == "supervisor_draining")
+-    });
+-    // The lease changes hands: another token, stale, as a killed
+-    // supervisor's would look to an adopter.
+-    Connection::open(&db)
+-        .unwrap()
+-        .execute(
+-            "UPDATE run_leases SET token='taken', heartbeat_at=unixepoch()-31 WHERE run_id=?1",
+-            [&run.id()],
+-        )
+-        .unwrap();
++    let moved = take_lease(&db, &run);
+     // The original notices within a tick, drops the run and, draining with
+     // nothing active, exits.
+     let outcome = joined(original, "the first supervisor thread to return").unwrap();
+     assert_eq!(queue.run(run.id()).unwrap().status(), RunStatus::Running);
+     assert_eq!(queue.run_lease(run.id()).unwrap().unwrap().token, "taken");
++    // It wrote nothing about the run once the lease moved.
++    assert_eq!(run_events_after(&queue, &run, moved), Vec::<String>::new());
++    let draining = queue
++        .all_events()
++        .unwrap()
++        .into_iter()
++        .find(|event| event.kind == "supervisor_draining")
++        .unwrap();
++    assert!(
++        draining.payload["runs"]
++            .as_array()
++            .unwrap()
++            .iter()
++            .filter(|id| **id == json!(run.id()))
++            .count()
++            <= 1,
++        "{}",
++        draining.payload
++    );
+     // Only now may the session finish, for the adopter to drive.
+     fs::write(
+         Path::new(run.run_dir().unwrap()).join("exit-requested.go"),
+@@ -1626,6 +1624,9 @@ fn a_supervisor_that_lost_its_lease_stops_touching_the_run() {
+         "{adopter}"
+     );
+     assert_exit_sent(&backend, &run, 1);
++    // The worker had its first turn only: neither supervisor started another.
++    assert_eq!(session_texts(&backend, &run), Vec::<String>::new());
++    assert_eq!(turn_models(&db).len(), 1, "{:?}", turn_models(&db));
+     assert_eq!(outcome["outcome"], "stopped");
+     assert_eq!(outcome["runs"], json!([]));
+     assert_eq!(outcome["errors"][0]["run_id"], json!(run.id()));
+@@ -1647,3 +1648,143 @@ fn a_supervisor_that_lost_its_lease_stops_touching_the_run() {
+     assert_eq!(adopted[0]["previous_token"], "taken");
+     assert!(queue.supervisors().unwrap().is_empty());
+ }
++
++/// A supervisor at work whose lease of a run it drives went stale under
++/// another token adopts nothing into a second slot: it drops its slot
++/// first, and only a later pass adopts the run, once, like any adopter,
++/// which then drives it to the end (task 1361).
++#[test]
++fn a_supervisor_takes_back_a_run_it_lost_only_after_dropping_its_slot() {
++    let (_dir, repo, db) = fixture();
++    let _dump = EventsOnPanic(db.clone());
++    let backend = Arc::new(TestWorkspace::new(&db, false, PROMPTED_AGENT));
++    // A long tick: the lease most likely moves while the supervisor sleeps
++    // between passes, so the next pass judges adoption before it steps the
++    // slot that lost the lease.
++    let options = SuperviseOptions {
++        tick: Duration::from_millis(500),
++        ..supervise_options(2, false)
++    };
++    let original = {
++        let (db, repo, backend, options) =
++            (db.clone(), repo.clone(), backend.clone(), options.clone());
++        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
++    };
++    let run = turn_in_progress(&db);
++    let token = supervisor_token_of(&db, &run);
++    // Not draining: every pass adopts before it steps the slots.
++    take_lease(&db, &run);
++    wait_until(&db, Duration::from_secs(20), |queue| {
++        queue.has_run_event(run.id(), "run_adopted").unwrap()
++    });
++    let mut queue = SqliteQueue::open(&db).unwrap();
++    assert_eq!(queue.run_lease(run.id()).unwrap().unwrap().token, token);
++    options.stop.store(true, Ordering::SeqCst);
++    wait_until(&db, Duration::from_secs(20), |queue| {
++        queue
++            .all_events()
++            .unwrap()
++            .iter()
++            .any(|event| event.kind == "supervisor_draining")
++    });
++    // One slot drives the run, not the dropped one beside the adopted one.
++    let draining = queue
++        .all_events()
++        .unwrap()
++        .into_iter()
++        .find(|event| event.kind == "supervisor_draining")
++        .unwrap();
++    assert_eq!(draining.payload["runs"], json!([run.id()]));
++    fs::write(
++        Path::new(run.run_dir().unwrap()).join("exit-requested.go"),
++        "",
++    )
++    .unwrap();
++    let outcome = joined(original, "the supervisor thread to return").unwrap();
++    backend.join();
++    assert_eq!(outcome["outcome"], "stopped");
++    assert_eq!(
++        outcome["runs"][0]["status"], "awaiting_integration",
++        "{outcome}"
++    );
++    assert_eq!(outcome["errors"].as_array().unwrap().len(), 1, "{outcome}");
++    assert!(
++        outcome["errors"][0]["message"]
++            .as_str()
++            .unwrap()
++            .contains("held by another process"),
++        "{outcome}"
++    );
++    assert_exit_sent(&backend, &run, 1);
++    assert_eq!(session_texts(&backend, &run), Vec::<String>::new());
++    let detail = queue.show(TaskId::new(1)).unwrap();
++    let kinds = event_kinds(&detail);
++    assert!(!kinds.contains(&"runtime_error"), "{kinds:?}");
++    assert_eq!(kinds.iter().filter(|k| **k == "exit_requested").count(), 1);
++    assert_eq!(
++        kinds.iter().filter(|k| **k == "receipt_observed").count(),
++        1
++    );
++    let adopted = adoption_events(&detail);
++    assert_eq!(adopted.len(), 1);
++    assert_eq!(adopted[0]["previous_token"], "taken");
++    assert_eq!(adopted[0]["token"], token);
++}
++
++/// The fixture's run once its worker's first turn is under way (the
++/// wrapper recorded `turn_started`), so that nothing about it is left to
++/// record but what a supervisor does. The turn starts only once the queue
++/// service answers, which a loaded host may take its 10 s for.
++fn turn_in_progress(db: &Path) -> TaskRun {
++    wait_until(db, Duration::from_secs(30), |queue| {
++        queue.active_runs().unwrap().first().is_some_and(|r| {
++            r.status() == RunStatus::Running && queue.has_run_event(r.id(), "turn_started").unwrap()
++        })
++    });
++    SqliteQueue::open(db)
++        .unwrap()
++        .active_runs()
++        .unwrap()
++        .remove(0)
++}
++
++/// Move `run`'s lease to another token, stale, as a killed supervisor's
++/// would look to an adopter; the id of the last event before it.
++fn take_lease(db: &Path, run: &TaskRun) -> i64 {
++    let connection = Connection::open(db).unwrap();
++    let last = connection
++        .query_row("SELECT COALESCE(MAX(id), 0) FROM run_events", [], |r| {
++            r.get(0)
++        })
++        .unwrap();
++    connection
++        .execute(
++            "UPDATE run_leases SET token='taken', heartbeat_at=unixepoch()-31 WHERE run_id=?1",
++            [&run.id()],
++        )
++        .unwrap();
++    last
++}
++
++/// The kinds of `run`'s events after the event `after`.
++fn run_events_after(queue: &SqliteQueue, run: &TaskRun, after: i64) -> Vec<String> {
++    queue
++        .all_events()
++        .unwrap()
++        .into_iter()
++        .filter(|event| event.run_id.as_ref() == Some(run.id()) && event.id.as_i64() > after)
++        .map(|event| event.kind)
++        .collect()
++}
++
++/// A failed assert prints the queue's events and open asks, to read who did
++/// what to the run and when.
++struct EventsOnPanic(PathBuf);
++
++impl Drop for EventsOnPanic {
++    fn drop(&mut self) {
++        if thread::panicking() {
++            print_queue_events(&self.0);
++        }
++    }
++}

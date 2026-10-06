@@ -1,0 +1,21 @@
+diff --git a/tests/it/queue_schema.rs b/tests/it/queue_schema.rs
+index 31a8eaae..1f119923 100644
+--- a/tests/it/queue_schema.rs
++++ b/tests/it/queue_schema.rs
+@@ -196,9 +196,14 @@ fn opening_or_initializing_an_older_queue_never_migrates_it() {
+     std::fs::write(dir.path().join("backups/queue-23-5.sqlite3"), "earlier").unwrap();
+     let report = SqliteQueue::migrate(&path, Some(&|_| false), 5).unwrap();
+     assert_eq!(report.floor, floor_for(SqliteQueue::SCHEMA_VERSION));
++    assert_eq!(report.schema_version, SqliteQueue::SCHEMA_VERSION);
+     assert_eq!(
+-        report.applied.len(),
+-        usize::try_from(SqliteQueue::SCHEMA_VERSION - 23).unwrap()
++        report
++            .applied
++            .iter()
++            .map(|m| (m.version, m.compatible))
++            .collect::<Vec<_>>(),
++        pending_after(23)
+     );
+     let backup = report.backup.unwrap();
+     assert!(

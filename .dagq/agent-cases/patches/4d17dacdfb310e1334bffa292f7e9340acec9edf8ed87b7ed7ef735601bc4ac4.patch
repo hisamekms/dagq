@@ -1,0 +1,13 @@
+diff --git a/docs/adr/0008-merge-queue-squash-landing.md b/docs/adr/0008-merge-queue-squash-landing.md
+index 8fb68eb2..e43bb094 100644
+--- a/docs/adr/0008-merge-queue-squash-landing.md
++++ b/docs/adr/0008-merge-queue-squash-landing.md
+@@ -25,6 +25,8 @@ related:
+ 
+ # ADR-0008: runtimeのmerge queueが最新mainへrebase・再検証し、1 task = 1 commitにsquashしてmainへ着地させる
+ 
++> **注記**: 自動着地と自動resumeのその後の決定は[ADRの索引](README.md)から辿る。
++
+ ## Context
+ 
+ ステップ4（[008](../journal/008-integration-confirm.md)）の`integrate`は、人がrun branchをmainへmerge（merge commitまたはfast-forward）した後に`result_commit`がmainの祖先であることを確認するだけだった。並列実行（[ADR-0007](0007-run-level-leases-parallel-execution.md)）では複数のrunが同じbase commitから同時に`awaiting_integration`になり、2件目以降は最新mainへのrebaseと再検証が要る。人がworktreeでこれを繰り返すのはドッグフーディング（ステップ9）の趣旨に反し、merge commitやfast-forwardが混ざるとmainの履歴がtask単位に読めなくなる。

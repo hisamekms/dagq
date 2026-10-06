@@ -1,0 +1,29 @@
+diff --git a/migrations/0065_tasks_by_title.sql b/migrations/0065_tasks_by_title.sql
+new file mode 100644
+index 00000000..3975b4a9
+--- /dev/null
++++ b/migrations/0065_tasks_by_title.sql
+@@ -0,0 +1,2 @@
++-- dagq-schema: compatible
++CREATE INDEX tasks_by_title ON tasks(title);
+diff --git a/src/infrastructure/schema.rs b/src/infrastructure/schema.rs
+index f64b87c9..03360d25 100644
+--- a/src/infrastructure/schema.rs
++++ b/src/infrastructure/schema.rs
+@@ -365,6 +365,16 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn task_title_index_is_compatible() {
++        let migration = MIGRATIONS
++            .iter()
++            .find(|migration| migration.contains("CREATE INDEX tasks_by_title ON tasks(title)"))
++            .expect("task title index migration");
++        assert!(is_compatible(migration));
++        assert!(compatibility_violations(migration).is_empty());
++    }
++
+     #[test]
+     fn declarations_are_read_from_the_first_line_only() {
+         assert!(is_compatible(

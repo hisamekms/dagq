@@ -1,0 +1,8 @@
+diff --git a/migrations/0065_tasks_by_title.sql b/migrations/0065_tasks_by_title.sql
+new file mode 100644
+index 00000000..3975b4a9
+--- /dev/null
++++ b/migrations/0065_tasks_by_title.sql
+@@ -0,0 +1,2 @@
++-- dagq-schema: compatible
++CREATE INDEX tasks_by_title ON tasks(title);

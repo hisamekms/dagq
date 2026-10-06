@@ -1,0 +1,2238 @@
+diff --git a/docs/adr/2026-10-05-t1632-1-claim-waits-for-a-build-that-contains-the-dependencies-landings.md b/docs/adr/2026-10-05-t1632-1-claim-waits-for-a-build-that-contains-the-dependencies-landings.md
+new file mode 100644
+index 00000000..a0902511
+--- /dev/null
++++ b/docs/adr/2026-10-05-t1632-1-claim-waits-for-a-build-that-contains-the-dependencies-landings.md
+@@ -0,0 +1,53 @@
++---
++id: adr-t1632-1
++type: adr
++title: 固定バイナリが依存先の着地を含むことを要するtaskは登録で宣言し、supervisorは自分のbuildが依存先の着地commitを全て含むまでclaimしない
++status: accepted
++created: 2026-10-05
++updated: 2026-10-05
++accepted_on: 2026-10-05
++owners:
++  - hisamekms
++tags:
++  - runtime
++  - supervisor
++related:
++  - adr-0038
++  - adr-0045
++  - adr-0080
++  - adr-t813-2
++  - design-supervisor-lifecycle-claim-defer
++  - design-supervisor-lifecycle-auto-update
++  - design-domain-model
++---
++
++# ADR-t1632-1: 固定バイナリが依存先の着地を含むことを要するtaskは登録で宣言し、supervisorは自分のbuildが依存先の着地commitを全て含むまでclaimしない
++
++## Context
++
++taskの依存は、依存先が`completed`になれば満たされ、taskはclaimの候補になる（依存の満たし方。goalへの依存はADR-0038）。依存先の着地から、自動更新（ADR-0045）がそれをbuildしてe2eを流し、固定バイナリを入れ替えてsupervisorを引き継がせるまでには数分かかる。
++
++この間に、固定バイナリが依存先を含むことを前提にするtask（固定バイナリで新しいflagを打つ、新しい挙動を本番のqueueで確かめる、など）がclaimされると、そのrunは古いバイナリで動いて落ちる。2026-09-29、task 1067はverifyの1本目に「固定バイナリのbuild識別子のcommitがtask 1065の着地を含む」の関門を手で書いていたが、1065の着地の10秒後、`update_installed`の約4分前にclaimされ、関門で`failed`になった（finding 76、goal 105）。verifyの関門はclaimの後にしか効かないので、claimを止められない。同じ形の関門は1208・1219・1221・1402などで繰り返された。
++
++## Decision
++
++1. **taskの宣言**: taskは「固定バイナリが依存先（`--depends-on`の直接の依存先）の着地を全て含むこと」をclaimの条件として持てる。登録で宣言し、draft / submittedの間は宣言し直し・外せる。既定は宣言しないで、宣言しないtaskのclaimは今と変わらない。依存の満たし方（いつ候補になるか）は変えず、候補を選ぶときの条件として足す。
++2. **判定はsupervisor自身のbuild**: supervisorは候補を選ぶとき、自分のbuild識別子が名乗るcommitが、依存先の着地commit（`run_integrated`のcommit）を全てgitの祖先として含むかを見て、含まなければclaimせずに待つ。queueの記録（`update_installed`）ではなく自分のbuildを見るのは、自動更新の引き継ぎで入れ替わったsupervisorのbuildは固定バイナリと同じで、記録の有無や引き継ぎの成否に依らず確かな値だから。
++3. **1つのtaskの控えとして記録する**: 待ちはhotspotの控え（ADR-0080）・workerを動かせないtask（ADR-t813-2）と同じ、候補を順に見て1つのtaskだけを飛ばす控えとし、同じ始まりと終わりのeventに理由を分けて記録する。`status`と`show`は待っているtaskと、含まない依存先の着地を示す。上限は無く（入れ替わるまで待つのが目的）、`interrupt`の優先度でも待つ（急いでも同じに落ちる）。
++4. **判定できないbuild**: `.dirty`のbuildはそのcommitで判定する（そのcommitに手元の変更を足して作ったもの）。commitを名乗らないbuild（リリース、`+unknown`）は判定できないので、待たずにclaimし、logに残す（来ないbuildを待ち続けない。dagqのソースでないrepositoryでは宣言に意味が無い）。gitが祖先かを答えられない着地は、含むと分からないので待つ。
++5. **見直し**: build識別子はprocessの間変わらない。引き継ぎ（`supervisor_handed_off`）でexecした新しいprocessの最初のpassで、全ての待ちを新しいbuildで判定し直し、含めばclaimする。
++
++## Alternatives
++
++- **verifyの手書きの関門を続ける**: claimの後にしか効かず、落ちたrunがtriage・復旧・askと人の時間を使う（finding 76では約1時間）。採らない。
++- **queueの`update_installed`を見る**: 固定バイナリのfileが入れ替わっても、そのsupervisorが引き継いだとは限らない（`up --auto-update`でない、引き継ぎに失敗した）。走っているbuildが着地を含むかは自分のbuild識別子が直接言う。採らない。
++- **依存の満たし方を変える（着地を含むbuildが入るまで`completed`を依存の充足と見ない）**: 全てのtaskの依存に効き、宣言しないtaskまで遅らせる。必要なのは一部のtaskだけ。採らない。
++- **判定できないbuildでは待つ**: リリースのバイナリや`+unknown`のbuildでは待ちが終わらず、taskが黙って止まる。採らない。
++- **待ちを専用のevent kindで記録する**: 1つのtaskを飛ばす控えの記録・`status`・`stats`・起動時の組み立て直しを二重に持つことになる。理由で分ければ足りる。採らない。
++
++## Consequences
++
++- 固定バイナリの関門を要するtaskは、verifyの手書きのscriptでなく宣言で書ける（登録の案内はgoal 105のconstraintsにより、宣言を知るバイナリが固定バイナリに入ってから別のtaskが書く）。
++- 宣言したtaskは、依存先の着地の後、自動更新の引き継ぎまでclaimされない。自動更新が止まっている間（ビルドやe2eの関門の失敗、`approve_update`待ち）は待ち続け、`status`の待ちの理由に出る。
++- 宣言を知らない古いバイナリは列を読まないので、宣言したtaskを待たずにclaimする（互換のmigration）。
++- 判定は依存先の着地commitがsupervisorのrepositoryにあることを前提にする。別のcloneのbuildなどで祖先を答えられなければ待ち、人が宣言を外すか入れ替えるまで続く。
+diff --git a/docs/adr/README.md b/docs/adr/README.md
+index de4ae3e1..18d8d9fb 100644
+--- a/docs/adr/README.md
++++ b/docs/adr/README.md
+@@ -163,6 +163,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由
+ | [ADR-t1707-1](2026-10-05-t1707-1-time-gate-for-added-or-changed-integration-tests.md) | 差分で足した・変えたtests/itのtestの1本の時間を、本番の関門の1本の平均を基準にした閾値と比べ、超えたものは許可の一覧（守る境界か移し替えの行き先のtaskを理由に持つ項目）に無ければ落とす関門を、CIのpushとpull_request・workerの手元・reviewのtestの規則の検査に置き、`integrate`に段を足さない（ADR-t1410-1の規則を守らせる関門） | 2026-10-05 |
+ | [ADR-t1594-1](2026-10-05-t1594-1-a-receipt-left-by-a-failed-headless-turn-goes-to-validation.md) | 非対話のworkerのturnがreceiptを書いた後に非0で終わったら、supervisorはreceiptとwrapperの終了を見た順に依らず、runをreceiptのvalidationにかけ（`last_error`は書かない）、turnの失敗はturnの記録に残す。receiptの無い失敗のturnは`failed`と復旧jobのまま（ADR-t813-1決定9をamends） | 2026-10-05 |
+ | [ADR-t1634-1](2026-10-05-t1634-1-failed-runs-without-their-own-commit-hold-no-claims.md) | 最新のrunがfailedで自分のcommitを持たない（headがbaseから何のファイルも変えていない）進行中のrunは、triage・復旧・askを待つ間、猶予を待たずにhotspotの控えで進行中のrunに数えず、邪魔なrunが全てそれなら控えを`no_commit`で終えてclaimする（ADR-t1484-1決定2・3をamends） | 2026-10-05 |
++| [ADR-t1632-1](2026-10-05-t1632-1-claim-waits-for-a-build-that-contains-the-dependencies-landings.md) | 固定バイナリが依存先の着地を含むことを要するtaskは登録で宣言し、supervisorは自分のbuild識別子のcommitが依存先の着地commitを全て含むまでclaimせず（1つのtaskの控えとして記録し、上限なし、`interrupt`でも待つ）、引き継ぎの後の最初のpassで判定し直す。`.dirty`はそのcommitで判定し、commitを名乗らないbuildでは待たない | 2026-10-05 |
+ 
+ goal 82（goal 38の段(1)〜(3)）のADRはtask 1233が書いた5本で、決定の置き場所は次のとおり。制御側と実行側の分け方・queue service・ユースケース単位のAPIとservice側の認可・unix socket・broker・クライアントモード・段の順と置き場所はADR-t1233-1、serviceの起動・停止の責任・落ちたときの知らせ方・brokerより前のprincipalの認証（token）はADR-t1233-4、読み取りのユースケースとroleごとの読める範囲・workerの読める範囲・Codexのsandboxからの到達はADR-t1233-5、e2eをreviewのpassの後のhostの工程に移すことはADR-t1233-2、このrepositoryを先にLinuxで通すことはADR-t1233-3にある。
+ 
+diff --git a/docs/design/architecture.md b/docs/design/architecture.md
+index e5d1b8e1..dc921714 100644
+--- a/docs/design/architecture.md
++++ b/docs/design/architecture.md
+@@ -4,8 +4,8 @@ type: design
+ title: レイヤーとコンテキストの境界（contextごとの所有・判断・操作・公開するport・依存の向き・境界をまたぐtransaction・検査できる規則・今の違反）
+ status: current
+ created: 2026-10-04
+-updated: 2026-10-05 # task 839: domain::broker_usage among the host operations modules; task 1662: the observation and analysis context points to the measurement design; task 1437
+-last_verified: 2026-10-05 # task 839; task 1615; task 1437
++updated: 2026-10-05 # task 839: domain::broker_usage among the host operations modules; task 1662: the observation and analysis context points to the measurement design; task 1437; task 1632
++last_verified: 2026-10-05 # task 839; task 1615; task 1437; task 1632
+ scope: system
+ related:
+   - adr-t1545-1
+@@ -72,7 +72,7 @@ goal・task・proposalと、その検査と採否（plan review・goal review・
+ 
+ **公開するport**
+ 
+-- `TaskStore`の読み取り（`show`・`list`・`candidates`・`predecessors`・`goal_predecessors`・`tasks_in_progress`・`graph_input`・`lint_input`・`show_goal`・`list_goals`）を全てのcontextに公開する。
++- `TaskStore`の読み取り（`show`・`list`・`candidates`・`build_waits`（task 1632）・`predecessors`・`goal_predecessors`・`tasks_in_progress`・`graph_input`・`lint_input`・`show_goal`・`list_goals`）を全てのcontextに公開する。
+ - `TaskStore::claim`（と`RunTransitions::claim_for_supervisor_in_order`）は実行と着地だけに公開し、越境のtransaction **T1**として扱う。
+ - `DraftPlannerStore::register_follow_ups`を実行と着地に公開する（着地したrunのfollow_upsを計画管理のdraftとして渡す。transactionは着地と別）。
+ - `PlanReviewStore`・`GoalReviewStore`・`PlanRequestStore`・残りの`DraftPlannerStore`・`TaskStore`の書き込みは内部のport（このcontextの操作とCLIだけが使う）。
+@@ -96,7 +96,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim
+ 
+ **判断**（domain）
+ 
+-`domain::run`（`TaskRun`と遷移）・`domain::run::history`（`RunHistory`）・`domain::run::recorded`、`domain::resume`・`domain::recovery`・`domain::receipt`・`domain::validation`・`domain::verify_failure`・`domain::concern`・`domain::review_reason`・`domain::review_subagents`、`domain::claim_defer`・`domain::claim_hold`・`domain::queue_hold`・`domain::slot_limits`・`domain::waiting`・`domain::recheck`・`domain::stall`・`domain::exit`・`domain::idle_process`・`domain::sessions`・`domain::turn`・`domain::worker`・`domain::worker_question`・`domain::provider_switch`・`domain::run_e2e`・`domain::e2e_quarantine`・`domain::landing_branch`・`domain::landing_release`・`domain::scope`・`domain::run_env`・`domain::headless_job`・`domain::background_wrapper`・`domain::worker_model`（plan reviewの重さの予測とtrialからclaimのときにworkerのmodelを選ぶ）。
++`domain::run`（`TaskRun`と遷移）・`domain::run::history`（`RunHistory`）・`domain::run::recorded`、`domain::resume`・`domain::recovery`・`domain::receipt`・`domain::validation`・`domain::verify_failure`・`domain::concern`・`domain::review_reason`・`domain::review_subagents`、`domain::claim_defer`・`domain::build_wait`・`domain::claim_hold`・`domain::queue_hold`・`domain::slot_limits`・`domain::waiting`・`domain::recheck`・`domain::stall`・`domain::exit`・`domain::idle_process`・`domain::sessions`・`domain::turn`・`domain::worker`・`domain::worker_question`・`domain::provider_switch`・`domain::run_e2e`・`domain::e2e_quarantine`・`domain::landing_branch`・`domain::landing_release`・`domain::scope`・`domain::run_env`・`domain::headless_job`・`domain::background_wrapper`・`domain::worker_model`（plan reviewの重さの予測とtrialからclaimのときにworkerのmodelを選ぶ）。
+ 
+ **操作**
+ 
+diff --git a/docs/design/domain-model.md b/docs/design/domain-model.md
+index 01a089a0..99d9245a 100644
+--- a/docs/design/domain-model.md
++++ b/docs/design/domain-model.md
+@@ -4,11 +4,12 @@ type: design
+ title: Domain model
+ status: current
+ created: 2026-09-21
+-updated: 2026-10-05 # task 839: show's latest run carries broker_tool_use; task 1594; task 1507, task 1506, task 1508, task 1509; tasks 1505, 1437; task 1609
+-last_verified: 2026-10-05 # task 839; task 1594; task 1507, task 1506, task 1508, task 1509; tasks 1505, 1437; task 1609
++updated: 2026-10-05 # task 839: show's latest run carries broker_tool_use; task 1594; task 1507, task 1506, task 1508, task 1509; tasks 1505, 1437; task 1609; task 1632
++last_verified: 2026-10-05 # task 839; task 1594; task 1507, task 1506, task 1508, task 1509; tasks 1505, 1437; task 1609; task 1632
+ scope: domain
+ related:
+   - adr-t1394-1
++  - adr-t1632-1
+   - adr-t1340-1
+   - adr-t946-1
+   - adr-t807-1
+@@ -63,7 +64,7 @@ related:
+ - `RunEvent`: 実行中に発生した永続イベント。
+ - `Receipt`: agentが提出する完了レシート。run ID、結果、commit、tests/e2e/subagent_reviewの状態と証跡または理由、要約と、任意の`follow_ups`（workerが提案する後続task。`{"title", "description", "category", "membership_proposal"}`の配列。`category`は種類の分類コードで、欠けは`unlabeled`、一覧に無い値は書かれたまま記録し、どちらでもreceiptを拒まない。一覧と付け方は[follow_upsの分類コード](supervisor-lifecycle/receipt-and-session-exit.md#follow_upsの分類コード)、ADR-t947-3。任意の`membership_proposal`は元goalのacceptanceとの関係のworkerの提案で、書いたまま記録し、欠けても形が違ってもreceiptを拒まない。[follow_upsの所属の提案](supervisor-lifecycle/receipt-and-session-exit.md#follow_upsの所属の提案)、ADR-t1504-2決定11）を持つ。`Receipt`と`ReceiptCheck`のフィールドは非公開で`Deserialize`を持たず、作る入口は`Receipt::parse(text)`だけ（`src/domain/receipt.rs`。task 250）。`parse`はファイルのJSONを非公開の型に読み（必須の欄、`result`と各checkの`status`の値。合わなければ`MalformedReceipt`）、値は`run_id()`・`result()`・`commit()`・`names_commit(head)`（commitを小文字にしてGitのheadと比べる）・`summary()`・`tests()` / `e2e()` / `subagent_review()`（`status()`・`evidence_or_reason()`）・`follow_ups()` / `into_follow_ups()`で読む。`Serialize`の欄名と順序は従来どおり。receiptがrunを裏付けるか（構造の整合性）は`Receipt::check` / `check_requiring`のクエリ、Gitと検証コマンドの確認はsupervisorが行う。`follow_ups`は配列であることだけを確認し、検証には使わない。`integrate`が着地後に各項目（titleのあるもの）を元のtaskと同じgoalのdraft taskとして登録し（goalが閉じていればgoalなし）、runに`follow_up_registered`（`category`と`membership_proposal`を含む）を記録する（ADR-0019の決定4）。draftの`follow_up_depth`は元のtaskの値+1にする。出どころ（`follow_up`、元のtaskとrun）も記録し、補ってsubmitするか、cancelするか、人に聞くかは、supervisorが同じrunのfollow_upの束ごとに立てるplannerが決める（[Draft planners](#draft-planners)）。
+ 
+-`Task.id`と`Goal.id`はSQLiteの整数ID、`TaskRun.id`はUUID。Taskはtitle、description、acceptance、verification_commands、required_evidence、paths、priority、change、worker、goal_id、contextを保持する。`change`は登録する者が宣言する変更の種類（[ADR-t980-1](../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)の決定2、task 982）の`TaskChange`（`src/domain/change.rs`）で、形は1〜64 byteの小文字の英字・数字・`-`・`_`で、`unknown`（`TaskChange::NONE`）と`all`（`TaskChange::ALL`）は使えない（合わなければ`DomainError::InvalidTaskChange`）。runtimeは値の集合を持たず、repositoryが`dagq.toml`の`[tasks] changes`に書いた集合（`ChangeSet`。[Run environment](supervisor-lifecycle/run-environment.md)）があれば、`add` / `edit`は集合の外を`ChangeNotInSet`で拒み（`ChangeSet::check`）、`lint`はchangeの無いtaskを`missing_change`、集合の外のchangeを`change_outside_set`にし、`submit`は動かすtaskがchangeを持たないか集合の外なら`ChangeMissing` / `ChangeNotInSet`で何も動かさずに拒む（`ChangeSet::check_declared`、`proposals::submit`）。集合が無ければ形だけを検査し、省略できる（null）。`add --change CHANGE`で与え、draft / submittedの間は`edit TASK --change CHANGE`で変える（`task_edited`の`from` / `to`に`change`が載る。nullには戻さない）。DBから読むときは形の合わない値をnullと読む（`task_row`・`task_changes`）。changeは検証とscopeを決めず、`show` / `list` / `search`（taskのhit）に出て、`stats`の`runs[].change`と`changes`、`kpi`の`change=`の層、`forecast`の分布の分け方に使う。以前のtaskの`kind`（自由なlabel、ADR-t624-1）はtask 984で消した（ADR-t980-1の決定1。`add` / `edit` / `kpi`に`--kind`は無く、`tasks.kind`の列はmigration 0056が落とす）。`worker`はworkerのproviderと経路の組`Worker`（`src/domain/worker.rs`。[ADR-t813-2](../adr/2026-09-28-t813-2-provider-per-task-and-mutual-fallback.md)の決定1、[ADR-t813-1](../adr/2026-09-28-t813-1-headless-worker-path.md)の決定7）で、`provider`は`Provider`（`claude` / `codex`）、経路`mode`は`WorkerMode`（`interactive`: cmuxのterminalでagentの対話のsession / `headless`: 1 turnを1回の非対話の呼び出し）。JSONでは`provider`と`worker_mode`の2つの欄に出る。指定の無いtaskと導入前のtaskは`Worker::DEFAULT`（`Worker::CLAUDE_HEADLESS`、claude・headless。[ADR-t1340-1](../adr/2026-10-02-t1340-1-claude-worker-defaults-to-headless.md)。対話は`Worker::CLAUDE_INTERACTIVE`）。Codexは非対話だけで、`Worker::new`は`codex`・`interactive`を`DomainError::WorkerModeUnsupported`で拒否する（作れる組は`Worker::ALL`の3つ）。経路を省いたときは`Worker::default_mode`（ClaudeもCodexも非対話）。`Task`は解いた`worker`に加えて、taskが指定した経路`named_mode`（無ければNone＝providerの既定。表示しない）を持ち、storeは`Task::stored_worker_mode`（Claudeは`named_mode`、Codexは`headless`）を保存する。`add --provider claude|codex [--interactive|--headless]`で与え（`NewTask`の`provider` / `worker_mode`、`Worker::resolve`）、draft / submittedの間は`edit TASK --provider P` / `--headless` / `--interactive`で変える（`Worker::with`: providerだけを変えればそのproviderの既定の経路になり、`named_mode`はNoneに戻る。経路を与えれば`named_mode`になる。`task_edited`の`from` / `to`に`provider`・`worker_mode`が載る）。`show` / `list` / `search`（taskのhitだけ）が出す。どのworkerのtaskをclaimするかはsupervisorのadapterの表が決める（[Provider lifecycle](provider-lifecycle.md#workerのproviderと経路)）。`priority`は[ADR-0040](../adr/0040-verify-once-review-run-env-graph-stats-and-task-priority-in-claim-order.md)の決定4の5段階の`Priority`（`low` < `normal` < `high` < `urgent` < `interrupt`の順の`Ord`、既定`normal`）で、`add --priority LEVEL`で与え、draft / submitted / readyの間は`set-priority TASK LEVEL`で変える（`task::set_priority`。それ以外のstatusは`TaskNotEditable`で拒否し、変化があったときだけ`task_priority_changed`（`from`、`to`）を記録する）。CLIとJSONは名前（小文字）だけを扱い、数値は受け付けない（`Priority::from_str`、clapの`value_parser`）。走っているrunは止めず、次のclaimにだけ効く。`paths`はrunが変えてよいパスのglobの配列（[ADR-0029](../adr/0029-task-declares-paths-and-verification-follows-the-kind-of-change.md)）で、`add --paths`で与え、draft / submitted / readyの間は`set-paths TASK --paths GLOB... | --none`で置き換える（変化があったときだけ`task_paths_changed`（`from`、`to`）を記録する）。空なら制限しない。globの規則と判定は`domain::scope`が持つ: repository root起点のパス全体に合わせ、`*`と`?`は1つのsegmentの中、segment全体が`**`なら0個以上のsegmentに合い、ほかは字義どおり。`validate_path_globs`が空・`/`始まり・`.` / `..` / 空のsegmentを拒否し（`DomainError::InvalidPathGlob`）、`out_of_scope(globs, changed)`がどのglobにも合わない変更パスを返し、`scope_violation_reason`が`changed paths outside the task's --paths: <paths>`の形にする。`required_evidence`はvalidationがreceiptに要求するcheckの配列（`EvidenceCheck`: `tests` | `e2e` | `subagent_review`。receiptのcheck名と同じ）で、`add --evidence`で与え、`NewTask::required_evidence()`が与えた順に重複を除いて保存する。無ければ空配列で、従来どおり何も要求しない。`Receipt::missing_evidence(required)`は要求されたcheckのうち`status`が`passed`でないか`evidence_or_reason`が空白のものを要求の順に返し、`evidence_missing_reason`がそれを`evidence missing: e2e`（複数は`, `区切り）の形にする。TaskRunはprovider、base commitと、branch/worktree/workspace/receipt/log/result commitの任意参照を持ち、idle marker `idle.json`のpathは`run_dir`から導出する。`run_dir`・worktree・receipt・logの配置は`RunPaths`（`<runs dir>/<run-id>/`の`worktree/`、`receipt.json`、`claude.debug.log`）が決め、storeは読み出しのたびに`TaskRun::relocated`でqueueの今の`runs/`から解決し直す（[ADR-0017](../adr/0017-resolve-run-paths-from-the-queue-directory.md)）。claimはtaskの`worker`のproviderを`requested_provider`と`actual_provider`に、経路を`worker_mode`（`WorkerMode`。導入前のrunは`interactive`と読む）に書き、`run_claimed`のpayloadも`provider`と`worker_mode`を持つ。`actual_provider`は今は`requested_provider`と同じで、使えないproviderからの切り替え（ADR-t813-2の決定2）で変わるのは後続のtask。リソース参照は作成前のためnullになる。
++`Task.id`と`Goal.id`はSQLiteの整数ID、`TaskRun.id`はUUID。Taskはtitle、description、acceptance、verification_commands、required_evidence、paths、priority、change、wait_for_build、worker、goal_id、contextを保持する。`change`は登録する者が宣言する変更の種類（[ADR-t980-1](../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)の決定2、task 982）の`TaskChange`（`src/domain/change.rs`）で、形は1〜64 byteの小文字の英字・数字・`-`・`_`で、`unknown`（`TaskChange::NONE`）と`all`（`TaskChange::ALL`）は使えない（合わなければ`DomainError::InvalidTaskChange`）。runtimeは値の集合を持たず、repositoryが`dagq.toml`の`[tasks] changes`に書いた集合（`ChangeSet`。[Run environment](supervisor-lifecycle/run-environment.md)）があれば、`add` / `edit`は集合の外を`ChangeNotInSet`で拒み（`ChangeSet::check`）、`lint`はchangeの無いtaskを`missing_change`、集合の外のchangeを`change_outside_set`にし、`submit`は動かすtaskがchangeを持たないか集合の外なら`ChangeMissing` / `ChangeNotInSet`で何も動かさずに拒む（`ChangeSet::check_declared`、`proposals::submit`）。集合が無ければ形だけを検査し、省略できる（null）。`add --change CHANGE`で与え、draft / submittedの間は`edit TASK --change CHANGE`で変える（`task_edited`の`from` / `to`に`change`が載る。nullには戻さない）。DBから読むときは形の合わない値をnullと読む（`task_row`・`task_changes`）。changeは検証とscopeを決めず、`show` / `list` / `search`（taskのhit）に出て、`stats`の`runs[].change`と`changes`、`kpi`の`change=`の層、`forecast`の分布の分け方に使う。以前のtaskの`kind`（自由なlabel、ADR-t624-1）はtask 984で消した（ADR-t980-1の決定1。`add` / `edit` / `kpi`に`--kind`は無く、`tasks.kind`の列はmigration 0056が落とす）。`wait_for_build`は、固定バイナリが依存先の着地を含むことを要するtaskの宣言（[ADR-t1632-1](../adr/2026-10-05-t1632-1-claim-waits-for-a-build-that-contains-the-dependencies-landings.md)、task 1632）のbool。真なら、依存先が全て`completed`でもsupervisorは自分のbuild識別子のcommitが依存先（`--depends-on`の直接の依存先）の着地commit（`landed_commits`）を全て含むまでclaimしない（判定は`domain::build_wait`、待ちの見え方は[claimを控える](supervisor-lifecycle/claim-defer.md#依存先の着地を含むbuildを待つtask)）。既定は偽（宣言しない。migration前のtaskも）で、偽のtaskのclaimは変わらない。`add --wait-for-build`で与え（`NewTask.wait_for_build`）、draft / submittedの間は`edit TASK --wait-for-build`で宣言し`--no-wait-for-build`で外す（`TaskEdit.wait_for_build`、`task_edited`の`from` / `to`に`wait_for_build`が真偽で載る）。task JSON（`show` / `list` / `add` / `edit`）は宣言したときだけ`wait_for_build: true`を出す。`worker`はworkerのproviderと経路の組`Worker`（`src/domain/worker.rs`。[ADR-t813-2](../adr/2026-09-28-t813-2-provider-per-task-and-mutual-fallback.md)の決定1、[ADR-t813-1](../adr/2026-09-28-t813-1-headless-worker-path.md)の決定7）で、`provider`は`Provider`（`claude` / `codex`）、経路`mode`は`WorkerMode`（`interactive`: cmuxのterminalでagentの対話のsession / `headless`: 1 turnを1回の非対話の呼び出し）。JSONでは`provider`と`worker_mode`の2つの欄に出る。指定の無いtaskと導入前のtaskは`Worker::DEFAULT`（`Worker::CLAUDE_HEADLESS`、claude・headless。[ADR-t1340-1](../adr/2026-10-02-t1340-1-claude-worker-defaults-to-headless.md)。対話は`Worker::CLAUDE_INTERACTIVE`）。Codexは非対話だけで、`Worker::new`は`codex`・`interactive`を`DomainError::WorkerModeUnsupported`で拒否する（作れる組は`Worker::ALL`の3つ）。経路を省いたときは`Worker::default_mode`（ClaudeもCodexも非対話）。`Task`は解いた`worker`に加えて、taskが指定した経路`named_mode`（無ければNone＝providerの既定。表示しない）を持ち、storeは`Task::stored_worker_mode`（Claudeは`named_mode`、Codexは`headless`）を保存する。`add --provider claude|codex [--interactive|--headless]`で与え（`NewTask`の`provider` / `worker_mode`、`Worker::resolve`）、draft / submittedの間は`edit TASK --provider P` / `--headless` / `--interactive`で変える（`Worker::with`: providerだけを変えればそのproviderの既定の経路になり、`named_mode`はNoneに戻る。経路を与えれば`named_mode`になる。`task_edited`の`from` / `to`に`provider`・`worker_mode`が載る）。`show` / `list` / `search`（taskのhitだけ）が出す。どのworkerのtaskをclaimするかはsupervisorのadapterの表が決める（[Provider lifecycle](provider-lifecycle.md#workerのproviderと経路)）。`priority`は[ADR-0040](../adr/0040-verify-once-review-run-env-graph-stats-and-task-priority-in-claim-order.md)の決定4の5段階の`Priority`（`low` < `normal` < `high` < `urgent` < `interrupt`の順の`Ord`、既定`normal`）で、`add --priority LEVEL`で与え、draft / submitted / readyの間は`set-priority TASK LEVEL`で変える（`task::set_priority`。それ以外のstatusは`TaskNotEditable`で拒否し、変化があったときだけ`task_priority_changed`（`from`、`to`）を記録する）。CLIとJSONは名前（小文字）だけを扱い、数値は受け付けない（`Priority::from_str`、clapの`value_parser`）。走っているrunは止めず、次のclaimにだけ効く。`paths`はrunが変えてよいパスのglobの配列（[ADR-0029](../adr/0029-task-declares-paths-and-verification-follows-the-kind-of-change.md)）で、`add --paths`で与え、draft / submitted / readyの間は`set-paths TASK --paths GLOB... | --none`で置き換える（変化があったときだけ`task_paths_changed`（`from`、`to`）を記録する）。空なら制限しない。globの規則と判定は`domain::scope`が持つ: repository root起点のパス全体に合わせ、`*`と`?`は1つのsegmentの中、segment全体が`**`なら0個以上のsegmentに合い、ほかは字義どおり。`validate_path_globs`が空・`/`始まり・`.` / `..` / 空のsegmentを拒否し（`DomainError::InvalidPathGlob`）、`out_of_scope(globs, changed)`がどのglobにも合わない変更パスを返し、`scope_violation_reason`が`changed paths outside the task's --paths: <paths>`の形にする。`required_evidence`はvalidationがreceiptに要求するcheckの配列（`EvidenceCheck`: `tests` | `e2e` | `subagent_review`。receiptのcheck名と同じ）で、`add --evidence`で与え、`NewTask::required_evidence()`が与えた順に重複を除いて保存する。無ければ空配列で、従来どおり何も要求しない。`Receipt::missing_evidence(required)`は要求されたcheckのうち`status`が`passed`でないか`evidence_or_reason`が空白のものを要求の順に返し、`evidence_missing_reason`がそれを`evidence missing: e2e`（複数は`, `区切り）の形にする。TaskRunはprovider、base commitと、branch/worktree/workspace/receipt/log/result commitの任意参照を持ち、idle marker `idle.json`のpathは`run_dir`から導出する。`run_dir`・worktree・receipt・logの配置は`RunPaths`（`<runs dir>/<run-id>/`の`worktree/`、`receipt.json`、`claude.debug.log`）が決め、storeは読み出しのたびに`TaskRun::relocated`でqueueの今の`runs/`から解決し直す（[ADR-0017](../adr/0017-resolve-run-paths-from-the-queue-directory.md)）。claimはtaskの`worker`のproviderを`requested_provider`と`actual_provider`に、経路を`worker_mode`（`WorkerMode`。導入前のrunは`interactive`と読む）に書き、`run_claimed`のpayloadも`provider`と`worker_mode`を持つ。`actual_provider`は今は`requested_provider`と同じで、使えないproviderからの切り替え（ADR-t813-2の決定2）で変わるのは後続のtask。リソース参照は作成前のためnullになる。
+ 
+ ## Current operations
+ 
+@@ -93,7 +94,7 @@ related:
+ - `RunEvent.run_id`はtask登録・依存変更などrun作成前のイベントではnullになる。goal単位のイベント（`goal_created`、`goal_updated`、`goal_closed`）は`task_id`がnullで`goal_id`を持ち、`goal show`に並ぶ。`task_goal_changed`はtaskのイベントで、`from`と`to`にgoal IDを持つ。goal依存の追加・削除はtaskのイベント`goal_dependency_added` / `goal_dependency_removed`（`goal_id`）で、task依存の`dependency_added` / `dependency_removed`（`predecessor_id`）とは別のkindにする。
+ - `goal add`でgoalを作り、`add --goal ID`と`set-goal TASK GOAL`でtaskを所属させ、`set-goal TASK --none`で外す。所属の変更は依存の追加・削除と同じくdraft/readyのtaskだけに許し、閉じたgoalへの追加と付け替えは拒否する。follow_upにrequired/out_of_scopeの判断があれば、最後の判断の所属先と違うgoal（`--none`も）への`set-goal`も拒否し、`judge-follow-up`による訂正を促す。未判定の移動は所属の判断にならず、登録時の出どころと深さを変えない（[所属の判断](follow-up-membership.md)）。`task_created`のpayloadは`goal_id`を持ち、`set-goal`は変化があったときだけ`task_goal_changed`を記録する。
+ - `goal edit`はtitle、description、acceptance、constraints、docを差し替え、`goal_updated`のpayloadに`old`と`new`のgoal全体と、`old_acceptance_version` / `new_acceptance_version`を残す。acceptanceの文が変わったときだけ版が増え、他の欄の編集や同じ文への更新では増えない。閉じたgoalも編集できる（記録の訂正のため）。走行中のrunは`prompt.txt`のスナップショットのままで、次のclaimから新しい記述が使われる。
+-- `edit TASK`はdraftとsubmittedのtaskのtitle、description、acceptance、verification_commands（`--verify`、繰り返しで配列全体を置き換え、`--no-verify`で空）、required_evidence（`--evidence` / `--no-evidence`）、paths（`--paths` / `--no-paths`）、context、change（`--change`。nullには戻さない。`[tasks] changes`があればその集合の中だけ）を差し替える（[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定9。titleはgoal 29のtaskで足した。入力は`TaskEdit`、判断は`task::edit`）。与えた値は`add`と同じ規則で検査し（空白のtitleとverification command、不正なglobを拒否。required_evidenceとpathsは重複を除く）、編集できるかは`TaskStatus::content_editable`が決める。draftとsubmittedだけが通常の編集を受ける。最新runがfailed / interruptedで未完了runが無いin_progress taskは、userまたはinboxのverifyだけを同一transactionで変更できる（ADR-t883-1）。他の編集は拒否する（readyなどは`TaskContentNotEditable`。`in_progress`の例外の前提が欠けると、終了した最新runと生きているrunが無いという条件をerrorに示す）（readyのtaskはsubmittedに戻してから直す。決定14）。submittedのtaskを編集したときにproposalをplan reviewにかけ直すのは、plan review jobのtaskが実装する。値が変わったフィールドだけを`task_edited`の`from`と`to`（task JSONのキー名）に残し、何も変わらなければ記録しない。`show`のcompactな表示は`from` / `to`がobjectのとき、その中の文字列も300文字で切る（`view::event_gist`）。priority・goal・依存はそれぞれ`set-priority`・`set-goal`・`dependency`で変える。走行中のrunは`prompt.txt`のスナップショットのままになる。
++- `edit TASK`はdraftとsubmittedのtaskのtitle、description、acceptance、verification_commands（`--verify`、繰り返しで配列全体を置き換え、`--no-verify`で空）、required_evidence（`--evidence` / `--no-evidence`）、paths（`--paths` / `--no-paths`）、context、change（`--change`。nullには戻さない。`[tasks] changes`があればその集合の中だけ）、wait_for_build（`--wait-for-build` / `--no-wait-for-build`）を差し替える（[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定9。titleはgoal 29のtaskで足した。入力は`TaskEdit`、判断は`task::edit`）。与えた値は`add`と同じ規則で検査し（空白のtitleとverification command、不正なglobを拒否。required_evidenceとpathsは重複を除く）、編集できるかは`TaskStatus::content_editable`が決める。draftとsubmittedだけが通常の編集を受ける。最新runがfailed / interruptedで未完了runが無いin_progress taskは、userまたはinboxのverifyだけを同一transactionで変更できる（ADR-t883-1）。他の編集は拒否する（readyなどは`TaskContentNotEditable`。`in_progress`の例外の前提が欠けると、終了した最新runと生きているrunが無いという条件をerrorに示す）（readyのtaskはsubmittedに戻してから直す。決定14）。submittedのtaskを編集したときにproposalをplan reviewにかけ直すのは、plan review jobのtaskが実装する。値が変わったフィールドだけを`task_edited`の`from`と`to`（task JSONのキー名）に残し、何も変わらなければ記録しない。`show`のcompactな表示は`from` / `to`がobjectのとき、その中の文字列も300文字で切る（`view::event_gist`）。priority・goal・依存はそれぞれ`set-priority`・`set-goal`・`dependency`で変える。走行中のrunは`prompt.txt`のスナップショットのままになる。
+ - `goal close ID --verdict achieved|abandoned`はverdictを1回だけ記録する。`achieved`は所属taskに`completed` / `canceled`以外があれば拒否し、`abandoned`は`in_progress`があれば拒否する（`GoalVerdict::allows`、判断の入口は`domain::goal::close`）。`achieved`はさらに、元goalがそのgoalのfollow_up（所属は問わない）のうち`completed` / `canceled`でないものが、判断が無い・`undecided`・要再確認（判定の後にacceptanceが変わった）・`required`なのにgoalの外、のどれかなら拒否する（`domain::goal::check_follow_ups`、ADR-t1504-2決定8。`out_of_scope`の判断を持つものの未完了は妨げない）。検査は`close_goal_in`のtransactionの中で行い、`goal close`・goal reviewの`achieved`・`approve_goal`のanswerの`achieved`のすべてが通る（[Follow-up membership judgements](follow-up-membership.md)の「閉じる条件」）。閉じたgoalを再び閉じることはできず、続きは新しいgoalに登録する。例外は`correct_goal`のaskへの人の`reopen`で開き直したgoalだけで（`goal::reopen`、ADR-t1504-2決定9。[Goal review](supervisor-lifecycle/goal-review.md)の9）、開き直したgoalは同じ規則でもう一度閉じられる（`goal_closed`が2件になる）。所属taskがすべて終わったopenのgoalは、supervisorのgoal review jobがacceptanceと照合して閉じる（`achieved`）か、足りないものを出どころ`goal_gap`のdraftにするか、人に`approve_goal`のaskで聞く（[Goal review](supervisor-lifecycle/goal-review.md)、ADR-0047の決定43）。`goal review ID`はreviewを取り直させる。`goal_closed`のpayloadはverdictとclose時点のstatus別件数を持つ。
+ - 閉じたgoalに残った未完了のtask（`draft` / `submitted` / `ready`）に、開いたgoal（か無所属）の`ready` / `submitted`のtaskが直接または推移的に（未完了のtaskを通って）依存していると、そのtaskは完了しないので依存するtaskは永久にclaimされない（**取り残された依存**、`domain::StrandedDependency`、task 421）。閉じたgoalの未完了のtaskが鎖になっているときは、他のそのようなtaskを（推移的に）待っていない根のtaskだけを取り残された依存とし、同じ待っているtaskを鎖のtaskごとに重ねて知らせない。approveが閉じたgoalのtaskを`draft`に戻したとき（`approve_withheld`の後、全memberの遷移を終えてから）と、goalを`abandoned`で閉じたとき（`close_goal_in`。goal review jobの`abandoned`も同じ経路）に、そのtaskに`dependency_stranded`（`goal_id`、`verdict`、待っているtaskのID`waiting`、`cause`: `approve_withheld` / `goal_abandoned` / `approve_readied`、approveなら`proposal_id`）を同じトランザクションで記録する。approveが`ready`にしたtaskが（推移的に）取り残されたtaskを待っていれば、そのtaskにも記録する（`cause: approve_readied`）。`abandoned`で閉じた時点で他のgoalの`draft`だったtaskは、まだ出していない計画なので数えず、plan reviewを通って`ready`になったときに知らせる（待っているtaskの集合が変わるので、重ねたことにはならない）。`submitted`をsubmitする時点では知らせない（`submitted`のtaskはabandonedのcloseかapproveのどちらかで数えられる）。inboxの`watch`に届くattentionで、nextは`request a plan for the waiting tasks`。同じtaskの直近の`dependency_stranded`と`waiting`が同じなら記録しない（同じ詰まりを重ねて知らせない）。`status`のattentionはqueueの今の状態から導き（`stranded_dependencies`）、取り残されたtask 1件につき1つ（`task_id`はそのtask、`status: stranded`、`last_error`にtask・goal・verdict・待っているtaskのID）を出し、待っているtaskが無くなれば（依存を外す・cancelする）消える。goalへの依存（`task_goal_dependencies`）は見ない。**依存するtaskを自動で保留（`draft`・`submitted`に戻す）にはしない**。依存を外すか、待っているtaskをcancelするか、閉じたgoalのtaskを新しいgoalで取り直すかは計画の判断で、runtimeが決まった規則で選べるものではないため。runtimeは知らせるだけで、attention（`AttentionNext::DecideWaiting` = `request a plan for the waiting tasks`）を受けた人の言葉でinboxがそのtaskを参照（`dagq request add --ref task:N`）にした計画の依頼を記録して依頼のruntimeのplannerが決めるか、人が`DAGQ_ROLE`の無い自分のterminalで決める（[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)の決定8の読み替えを同じく当てる）。
+ - `list`は既定で終端状態（`TaskStatus::is_terminal`）でないtaskを新しい順（ID降順）に最大20件、`{"tasks", "next", "total"}`で返す。要素はid/status/title/goal_id/dependencies/goal_dependencies（依存先goalのID昇順）/latest_run（最新runのidとstatus）に縮約し、`--full`で残りの全項目を足す。`next`は次ページの先頭task ID（`--before`に渡す。`--before ID`はID以下のtaskを返す）で、続きがなければnull。`total`はフィルタ後の件数。フィルタとページの条件はapplication層の`TaskQuery`、出力は`TaskPage` / `TaskListItem`で、domainの`Task`は変えない。
+@@ -104,7 +105,7 @@ related:
+ - `search QUERY [--status S,...] [--kind task|goal|note|commit,...] [--goal ID] [--limit N] [--full]`はtask（title・description・acceptance・context）、goal（title・description・acceptance・constraints）、note、着地したcommitのmessageを、すべての状態から全文検索する（[ADR-0063](../adr/0063-full-text-search-related-with-mentions-and-search-strength-and-duplicate-of.md)の決定1）。`{"hits", "total"}`を返し、hitは良い順に`kind`、`id`（task・goalのID、noteのイベントID、commitのSHA）、`status`、`title`、一致した列の名前`field`と、一致を`«` `»`で囲んだ前後の抜粋`excerpt`を持ち、note・commitは`task_id` / `run_id`、task・note・commitは`goal_id`を添える。`--full`は検索した列の全文`fields`と`score`（`bm25`）を足す。3文字以上の語はtrigramの索引で部分一致し（日本語も語の途中で一致する）、3文字未満の語はすべて含むことを求める。`--status`はtaskの状態かgoalの状態（`draft` / `open` / `achieved` / `abandoned`）で、noteとcommitは属するtaskかgoalの状態で絞られる。`--limit`の既定は20。索引とtriggerは[persistence](persistence.md#全文検索search)。
+ - `related TASK [--status S,...] [--limit N]`は、TASKとすべての状態の他のtaskとの関連を、決まった規則の手がかり（宣言した`paths`の重なり、本文と着地したcommitのmessageに出るファイル名・テスト名・ADR番号・task番号、同じrunのfollow_up、同じgoal、titleの検索の一致の強さ）で点数にして並べる（[ADR-0063](../adr/0063-full-text-search-related-with-mentions-and-search-strength-and-duplicate-of.md)の決定4）。`{"task_id", "related", "total"}`を返し、各候補は`id` / `status` / `title` / `score`と、点数に効いた手がかり`clues`（`{"clue","value","weight"}`）、重複でcancelされていれば`duplicate_of`を持つ。draftのtaskにも使える。`--limit`の既定は10。手がかりと重みは[persistence](persistence.md#関連related)。
+ - `DAGQ_ROLE=observer`の環境からは、CLIの入口（`main.rs`の`check_access`が`StaticPolicy`に問う。計画系と対話・記録系（ask・answer・note・mark・finding）のコマンドはapplicationの層が判定して拒否を`authorization_denied`に記録する。policyの表は[Authorization](authorization.md)）が許可の一覧にないコマンドを`{"error": "observer may not change queue state", "denied": {...}}`で拒否する（[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定4、task 292）。許すのは読み取り（`locate` / `list` / `show` / `candidates` / `graph` / `status` / `asks` / `events` / `timeline` / `watch` / `stats` / `doctor` / `goal list` / `goal show` / `notes` / `marks` / `kpi` / `forecast` / `findings` / `search` / `related` / `proposal list` / `proposal show` / `planners` / `lint` / `observe --history` / `observe --input`（promptが省いた入力を読む。task 1567））、`finding record`、`finding resolve`、`ask --kind blocked`（taskにもrunにも紐づかなくてよい唯一のkind。`--finding`で根拠のfindingに紐づける）だけ。`note`、`mark`、`goal add`（`--draft`を含む）、`add`（draftのgoalへの追加を含む）、`finding dismiss`、`ready` / `draft` / `cancel` / `integrate` / `recover` / `goal ready` / `goal close` / `goal edit` / `dependency` / `set-goal` / `review` / `init` / `up` / `down`、ほかのkindの`ask`、`answer`、`ask close`、`observe`（`--history`と`--input`を除く）、`supervise`などは拒否する。一覧に載せない限り後から足したコマンドも拒否される。判定は`DAGQ_ROLE`の申告に依存する柵で、悪意ある実行は防がない。
+-- `show`と`goal show`の既定出力は`src/view.rs`が`TaskDetail` / `GoalDetail`から作る圧縮形で、全文は`--full`（ADR-0016の決定4）。キー名は全文と同じで、省くか切り詰めるだけ。長い文字列（taskの`description`/`acceptance`/`context`、goalの`title`/`description`/`acceptance`/`constraints`、runの`last_error`、eventの要点の値）は300文字で切って`…`を付け、それを持つobjectに`truncated: true`を足す。`show`は最新runの`id`/`status`/`branch`/`result_commit`/`last_error`/`worktree_path`/`workspace_id`と、あれば`last_error_code`（[理由の分類コード](#理由の分類コードcode)）と、runが最後に開いたsessionがbackgroundなら`background`（`handle`・`pid`・`start`・`log`。[非対話のworker](supervisor-lifecycle/headless-worker.md#workspaceなしのbackgroundのwrapper)）と、runの`broker_tool_use`があればその最新のpayload（`broker_tool_use`。[Broker](broker.md#組み込みの道具の数)）だけを`runs`に1件、そのrunの`processes`、直近10件（`--events N`で変更）のイベントを`id`/`kind`/`created_at`、runに属するイベントなら`run_id`、payloadの`status`/`reason`/`last_error`/`from`/`to`/`code`だけで返し、pathは出さない。`goal show`はイベントを直近10件の`kind`/`created_at`だけにする。どちらも全件数を`runs_total` / `events_total`で添える。どちらも`observations`に、自分に紐づくnote（`show`はtaskとそのrun、`goal show`はgoal自身）の直近5件を`id`/`created_at`/`run_id`（あれば）/`text`（300文字で切る）/`kind`/`by`で古い順に添える。
++- `show`と`goal show`の既定出力は`src/view.rs`が`TaskDetail` / `GoalDetail`から作る圧縮形で、全文は`--full`（ADR-0016の決定4）。キー名は全文と同じで、省くか切り詰めるだけ。長い文字列（taskの`description`/`acceptance`/`context`、goalの`title`/`description`/`acceptance`/`constraints`、runの`last_error`、eventの要点の値）は300文字で切って`…`を付け、それを持つobjectに`truncated: true`を足す。`show`は最新runの`id`/`status`/`branch`/`result_commit`/`last_error`/`worktree_path`/`workspace_id`と、あれば`last_error_code`（[理由の分類コード](#理由の分類コードcode)）と、runが最後に開いたsessionがbackgroundなら`background`（`handle`・`pid`・`start`・`log`。[非対話のworker](supervisor-lifecycle/headless-worker.md#workspaceなしのbackgroundのwrapper)）と、runの`broker_tool_use`があればその最新のpayload（`broker_tool_use`。[Broker](broker.md#組み込みの道具の数)）だけを`runs`に1件、そのrunの`processes`、直近10件（`--events N`で変更）のイベントを`id`/`kind`/`created_at`、runに属するイベントなら`run_id`、payloadの`status`/`reason`/`last_error`/`from`/`to`/`code`だけで返し、pathは出さない。taskのclaimを今控えていれば（taskの最新の`claim_deferred` / `claim_deferral_ended` / `run_claimed`が`claim_deferred`。hotspot・worker・buildのどの理由でも）、`claim_deferral`に`status`の`claim_deferrals`の要素と同じ形で添え、控えていなければこのキーを出さない（task 1632。[claimを控える](supervisor-lifecycle/claim-defer.md#statusとstats)）。`goal show`はイベントを直近10件の`kind`/`created_at`だけにする。どちらも全件数を`runs_total` / `events_total`で添える。どちらも`observations`に、自分に紐づくnote（`show`はtaskとそのrun、`goal show`はgoal自身）の直近5件を`id`/`created_at`/`run_id`（あれば）/`text`（300文字で切る）/`kind`/`by`で古い順に添える。
+ - scheduling（`candidates`、`claim`）が見るgoalの性質は、draftのgoalのtaskを除くことと、goal依存の先のgoalが`achieved`で閉じたかだけ。supervisorのclaim順は効く優先度・解放数・IDで決まり（goalのrankはまだ無い）、goalをまたぐ依存も許す。
+ 
+ ## IDとcommitのnewtype
+@@ -143,6 +144,7 @@ IDとcommitはドメインプリミティブのnewtype（`src/domain/ids.rs`、`
+ | `goal.rs` | 集約`Goal`、`GoalVerdict::allows`、goalのコマンドとクエリ |
+ | `input.rs` | 入力型`NewTask`・`NewGoal`・`GoalEdit`・`RunPlan`と、復元用の`TaskRecord`・`GoalRecord`・`RunRecord`（公開フィールドのplain data） |
+ | `run.rs` | 集約`TaskRun`とrunのコマンドとクエリ（[集約: TaskRun](#集約-taskrun)） |
++| `build_wait.rs` | `wait_for_build`のtaskの判定（ADR-t1632-1）: build識別子のcommit`build_commit`、依存先の着地`Landing`、`judge`の`Verdict`（`Contains` / `Lacks` / `Unjudged`）とそれからclaimを決める`claim_step`、待ちの記録（`deferred` / `ended` / `deferrals_in_place`） |
+ | `views.rs` | 集約でない読み取り用の型（`TaskDetail`、`GoalSummary`、`GoalDetail`、`GoalTask`、`Predecessor`、`GoalPredecessor`、`RunEvent`、`RunProcess`、`RunLease`、`SupervisorRegistration`、`TaskStatusCounts`）、`ClaimOutcome`・`IntegrationOutcome`・`RegisteredFollowUp`、runのファイル配置`RunPaths` |
+ | `receipt.rs` | 完了レシート`Receipt`と`ReceiptCheck`（非公開フィールド。入口は`Receipt::parse`だけ）、受理の検査`check` / `check_requiring`、`missing_evidence`、`evidence_missing_reason` |
+ | `scope.rs`、`stats.rs` | pathのglob、`stats`の集計（従来どおり） |
+@@ -154,7 +156,7 @@ IDとcommitはドメインプリミティブのnewtype（`src/domain/ids.rs`、`
+ - `Serialize`は残し、フィールド名と順序は従来と同じなのでCLIのJSON出力は変わらない。`Deserialize`は集約から外した（`TaskDetail`・`GoalDetail`・`Predecessor`・`IntegrationOutcome`も集約を含むので外した）。入力型の`NewTask` / `NewGoal` / `GoalEdit`は`Deserialize`を持つ。
+ - taskのコマンド（所有権を受け取り、成功時に更新後のtaskを返す）: `task::transition(task, action, unfinished_run)`（遷移の判断は`TaskStatus::transition`）、`task::set_goal(task, goal_id)`（draft / readyのtaskだけ。移し先のgoalが開いているかは`goal::check_accepts_tasks`）、`task::set_paths(task, paths)`（globを検査し重複を除く。draft / readyだけ）。依存の辺はtaskの外なので判断だけを持つ: `task::check_not_self`（自己依存）、`task::check_dependencies_editable`（draft / readyだけ）、`task::check_acyclic(task_id, predecessor_id, creates_cycle)`（循環はSQLの再帰CTEが全依存グラフから見つけ、その結果を渡す）。goal依存（ADR-0038）も同じ形で判断だけを持つ: `task::check_not_own_goal(&task, goal_id)`（自分の属するgoalへの依存）、`task::check_goal_acyclic(task_id, goal_id, creates_cycle)`（`dependency add --goal`と`add --depends-on-goal`）、`task::check_membership_acyclic(&task, goal_id, depends_on_goal, creates_cycle)`（`set-goal`で移し先のgoalにtaskが直接依存していれば自分のgoalへの依存、間接に待っていれば循環）。循環の検出はstoreの`waits_for`が、task→predecessor、task→依存先goal、goal→所属taskの3種の辺を合わせた再帰CTEで行い、task依存の`check_acyclic`もこのグラフで判定する。`add`はtaskを所属goalごと保存してから辺を1本ずつ同じ検査で足すので、`add --goal G --depends-on-goal H`も同じ規則で拒否される（`NewTask::validate`は`G = H`を先に`OwnGoalDependency`で拒否する）。
+ - goalのコマンド: `goal::edit(goal, GoalEdit)`、`goal::ready(goal)`、`goal::close(goal, verdict, &counts, closed_at)`（閉じたgoalは閉じられない、verdictが所属taskのstatusを許すか。成功すると`closed_at`・`verdict`・`updated_at`を設定する）、`goal::reopen(goal, reopened_at)`（`achieved`で閉じたgoalだけ。statusを`open`にし、`closed_at`・`verdict`を消して`updated_at`を設定する。ほかは`GoalNotReopenable`。呼ぶのは`correct_goal`のaskの`reopen`を適用する`decide_correction`だけ）。クエリは`goal::check_accepts_tasks(&goal)`、`Goal::is_closed` / `is_draft`。
+-- 値の取り出しは`Task`・`Goal`のメソッド（`id()`、`title()`、`status()`、`goal_id()`、`paths()`、`verdict()`など。文字列と配列は借用で返す）と`task::dependencies_editable(&task)`。`into_title()`はtitleだけを所有権ごと取り出す。
++- 値の取り出しは`Task`・`Goal`のメソッド（`id()`、`title()`、`status()`、`goal_id()`、`paths()`、`wait_for_build()`、`verdict()`など。文字列と配列は借用で返す）と`task::dependencies_editable(&task)`。`into_title()`はtitleだけを所有権ごと取り出す。
+ - `updated_at`はDBの`strftime(...,'now')`が更新のたびに書き（schemaの一部）、storeは保存後に読み直して返す。`goal::close`だけは`closed_at`と`updated_at`を同じ値にするため時刻を引数に取る。
+ 
+ ## cancelの理由の分類コード（未実装）
+diff --git a/docs/design/persistence.md b/docs/design/persistence.md
+index f264eac0..6af49492 100644
+--- a/docs/design/persistence.md
++++ b/docs/design/persistence.md
+@@ -4,11 +4,12 @@ type: design
+ title: SQLite persistence
+ status: current
+ created: 2026-09-21
+-updated: 2026-10-05 # task 839; task 1709; task 1437; task 1609
+-last_verified: 2026-10-05 # task 839; task 1509; task 1437; task 1609
++updated: 2026-10-05 # task 839; task 1709; task 1437; task 1609; task 1632
++last_verified: 2026-10-05 # task 839; task 1509; task 1437; task 1609; task 1632
+ scope: persistence
+ related:
+   - adr-t1394-1
++  - adr-t1632-1
+   - adr-t1340-1
+   - adr-t807-1
+   - adr-0067
+@@ -44,12 +45,13 @@ related:
+ 
+ > **予定（goal 92）**: workerの経路はADR-t1340-1を置き換えた[ADR-t1433-2](../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)で非対話だけになる。保存した経路の列はmigrationで書き換えず（migrationを足さない）、`interactive`はclaimとresumeのときに非対話として読む。これはtask 1437が実装した: claimはrunの`worker_mode`を`headless`にし、resumeは過去の`interactive`のrunの`worker_mode`を同じトランザクションで`headless`に更新し、変えたときだけ`worker_mode_converted`（`phase`・`from`・`to`・`reason`）を記録する（[非対話のworker](supervisor-lifecycle/headless-worker.md#対話と記録されたtaskのclaimとresume)）。in-cmux modeのsupervisorの登録の列（[ADR-t1433-4](../adr/2026-10-03-t1433-4-supervisor-resides-without-cmux.md)）も消さない。in-cmux modeなど残りは後続のtaskが実装するまでの今の姿である。
+ 
+-SQLiteはキューの正本であり、プロセス間共有と再起動後の復旧に使う。stdoutは正本にしない。ステップ2で4テーブル、ステップ3で3テーブル、ステップ4で`task_runs.workspace_closed_at`列を実装し、ステップ4の統合確認で`task_runs`を作り直して`integrated`を加え（schema version 4）、ステップ6でleaseをrun単位の`run_leases`に移してqueue全体の実行枠を外し（schema version 5、[ADR-0007](../adr/0007-run-level-leases-parallel-execution.md)）、ステップ7で`task_runs`を再び作り直して`integrating`と`needs_session`を加え、統合スロットの部分UNIQUE indexを足した（schema version 6、[ADR-0008](../adr/0008-merge-queue-squash-landing.md)）。`0007_supervisors.sql`は常駐supervisorの登録表`supervisors`を足した（schema version 7）。`0008_goals.sql`は`goals`、`tasks.goal_id` / `tasks.context`を足し、`run_events`を作り直してgoal単位のイベントを持てるようにした（schema version 8、[ADR-0009](../adr/0009-goal-groups-tasks.md)。ADRの「schema v6」は7がsupervisorsに使われたためv8と読み替える）。`0009_supervisor_mode.sql`は`supervisors`に`mode`と`workspace_id`を足した（schema version 9、[ADR-0011](../adr/0011-cmux-socket-password-and-in-cmux-fallback.md)）。`0012_queue_events.sql`は`run_events`を作り直し、`backend_call_failed`だけはtaskにもgoalにも紐づかない行を持てるようにした（schema version 12、task 109）。`0016_observer.sql`は`asks`と`run_events`を作り直し、observerの`blocked`のaskとその事象、observer自身の`observe_started` / `observe_finished`をtaskの無い行として持てるようにした（schema version 16、task 99）。`0017_stuck_exit_ask.sql`は`asks`を0016と同じ手順で作り直し、kindのCHECKに`stuck_exit`（supervisorが`/exit`のtimeoutで作るask。task 104）を足した（schema version 17）。`0018_task_paths.sql`は`tasks.paths`を足した（schema version 18、[ADR-0029](../adr/0029-task-declares-paths-and-verification-follows-the-kind-of-change.md)）。`0019_task_goal_dependencies.sql`は`task_goal_dependencies`を足した（schema version 19）。`0020_task_priority.sql`は`tasks.priority`を足した（schema version 20、[ADR-0040](../adr/0040-verify-once-review-run-env-graph-stats-and-task-priority-in-claim-order.md)の決定4）。`0021_proposals.sql`は`proposals`、`tasks.proposal_id` / `goals.proposal_id`とtaskのstatus `submitted`を足した（schema version 21、[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定7、8）。`0022_follow_up_triage.sql`は`task_leases`と`tasks.follow_up_depth`を足し、`asks`を0017と同じ手順で作り直してkindに`follow_up`を足した（schema version 22、[ADR-0037](../adr/0037-follow-up-triage-job-decides-follow-up-drafts.md)）。`0024_schema_floor.sql`は受け入れるバイナリの下限`schema_floor`を足した（schema version 24、[ADR-0045](../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の決定7）。`0025_stalled_ask.sql`（breaking）は`asks`を0022と同じ手順で作り直し、kindに`stalled`（supervisorが促しの後もreceiptの無いidleが続くworkerのsessionで作るask。[ADR-0043](../adr/0043-detect-stalled-worker-sessions-nudge-once-then-ask.md)の決定1、task 288）を足し、`run_events`を0016と同じ手順で作り直してtaskの無い行に`stall_config_loaded`（supervisorが起動時に記録する閾値）を足した（schema version 25。古いbinaryは`stalled`のaskを読めないのでfloorも25になる）。`0026_search.sql`は全文検索の索引`search_index`（FTS5）、着地したcommitの表`landed_commits`と、両者を保つtriggerを足した（schema version 26、互換で、下限は25のまま。[ADR-0063](../adr/0063-full-text-search-related-with-mentions-and-search-strength-and-duplicate-of.md)の決定1〜3。下の[全文検索](#全文検索search)）。`0027_plan_review.sql`はplan review jobの表`plan_reviews`（部分unique index `plan_reviews_running`で未完了の行を1つまでにする）と`proposals`の`review_hold` / `revise_reasons` / `revised_at` / `revise_sent_at` / `revise_planner_id` / `unresponsive_at`を足し、`asks`を0025と同じ手順で作り直してkindに`approve_plan`を足した（schema version 27、非互換、ADR-0044の決定11〜15・17。読み書きは`src/infrastructure/plan_reviews.rs`、流れは[supervisor-lifecycle](supervisor-lifecycle/plan-review.md#plan-review-supervisor)）。`0028_draft_planners.sql`はruntimeやjobが作ったdraftの出どころの表`draft_origins`（導入前の`follow_up_registered`から埋める）と`planners.draft_task_id`（index `planners_by_draft`）を足し、follow-up triageの`task_leases`を消し、`asks`を0027と同じ手順で作り直してkindに`planner_question`を足した（schema version 28、非互換、ADR-0044の決定13・16。読み書きは`src/infrastructure/draft_planners.rs`、下の[draft planners](#draft-plannersdraft_plannersrs)）。`0030_findings.sql`はobserverの検出の表`findings`（部分unique index `findings_unsettled`で、同じ`kind`・対象・`subject`の`open` / `proposed`の行を1つまでにする）と`asks.finding_id`を足し、`asks_open`を作り直して（0029の鍵に）findingを加え、`run_events`を0025と同じ手順で作り直して、taskにもgoalにも紐づかない行を持てるkindに`finding_recorded` / `finding_updated` / `finding_status_changed`を足した（0026の`run_events`の3つのtriggerと、`run_events`を読む`tasks`のtrigger `search_task_moved`も作り直す。schema version 30、非互換、[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定18・23。読み書きは`src/infrastructure/findings.rs`、下の[findings](#findings)）。`0031_supervisor_handoff.sql`（compatible）は`supervisors`に`handoff_accepted` / `handoff_binary` / `handoff_requested_at`を`ALTER TABLE ADD COLUMN`で足した（schema version 31、[ADR-0045](../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の決定10、task 309。null可の列を足すだけなので互換で、floorは30のまま）。`0032_run_env_program_events.sql`（breaking）は`run_events`を0030と同じ手順で作り直し（0026のtriggerと`search_task_moved`も作り直す）、taskにもgoalにも紐づかない行を持てるkindに`run_env_program_missing` / `run_env_program_found`（supervisorが`[run.env]`の名指すプログラムの検査の答えが変わったときに記録する。[ADR-0049](../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)の決定9、task 395）を足した（schema version 32。CHECKを作り直すので非互換で、floorは32になる）。`0033_auto_update.sql`（compatible）は`supervisors.auto_update`を足し、自動更新の経過の表`binary_updates`（`kind`・`commit_sha`・`payload`・`created_at`。kindは`update_started` / `update_built` / `update_installed` / `update_failed` / `update_awaiting_approval` / `update_answered` / `update_retry`）を作った（schema version 33、[ADR-0045](../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の決定17、task 310。列と表を足すだけなので互換で、floorは32のまま。`run_events`のkindを足すのは非互換になるので、自動更新は自分の表に経過を置き、inboxにはtaskの無い`blocked`のask（`subject`が`update_failed` / `approve_update`）で知らせる。[Auto-update](supervisor-lifecycle/auto-update.md#auto-update)）。`0034_task_kind.sql`（compatible）は`tasks.kind`（TEXT、null可、CHECKなし）を足した（schema version 34、goal 21。列を足すだけなので互換で、floorは32のまま。古いbinaryは列を読まず、その`INSERT`はnullを残す）。kindを4値から自由なlabelにした[ADR-t624-1](../adr/2026-09-27-t624-1-task-kind-is-a-free-label.md)は、列にCHECKが無いのでmigrationを足していない（4値だけを読むbinaryは他のlabelをnullと読む）。`0035_session_events.sql`（breaking）は`run_events`を0032と同じ手順で作り直し（0026のtriggerと`search_task_moved`も作り直す）、taskにもgoalにも紐づかない行を持てるkindに`session_opened` / `session_closed` / `session_turns`（Claude sessionの区間とtranscriptのturn。observerのjobと後続taskのinbox・plannerのsessionはtaskを持たない。[ADR-0048](../adr/0048-record-claude-sessions-by-kind-with-open-and-active-time.md)の決定2・8、task 385。書き方は[provider-lifecycle](provider-lifecycle.md#claude-sessionの区間)）を足した（schema version 35。CHECKを作り直すので非互換で、floorは35になる）。`0036_change_marks.sql`（breaking）は`run_events`を0035と同じ手順で作り直し（0026のtriggerと`search_task_moved`も作り直す）、taskにもgoalにも紐づかない行を持てるkindに変更の印の`supervisor_started` / `supervisor_stopped` / `run_env_changed` / `mark_recorded` / `mark_retracted`を足した（schema version 36、[ADR-0051](../adr/0051-kpi-time-series-report-and-push.md)の決定10〜13、task 429。[変更の印](supervisor-lifecycle/marks.md)。CHECKを作り直すので非互換で、floorは36になる）。`0037_supervisor_max_waiting.sql`（compatible）は`supervisors.max_waiting`（supervisorの`--max-waiting`。登録と引き継ぎの取り戻しの直後に`set_max_waiting`が書く）を足した（schema version 37、[ADR-0062](../adr/0062-runs-waiting-for-a-person-leave-the-slot.md)の決定7。null可の列を足すだけなので互換で、floorは変わらない）。人の答えを待つrunの`run_waiting_started` / `run_waiting_ask_added` / `run_waiting_ended` / `run_slot_regained` / `run_waiting_deferred`はrunに紐づくrun_eventsのkindなので、CHECKを変えない（[人の答えを待つrun](supervisor-lifecycle/waiting.md)）。`0038_ask_answerers.sql`（compatible）は`asks`に`answered_by`（TEXT、null可）と`option_index`（INTEGER、null可）を`ALTER TABLE ADD COLUMN`で足した（schema version 38、task 325。下の[asks](#asks)。列を足すだけなので互換で、floorは変わらない。古いbinaryは列を読まず、その回答はどちらもnullを残す）。`0039_open_kinds.sql`（breaking）は`asks`と`run_events`を0029・0036と同じ手順で作り直し（idと0038の`answered_by` / `option_index`を保ち、`asks_open`、0026のtriggerと`search_task_moved`も作り直す）、kindを名指すCHECKをすべて外した（schema version 39、[ADR-0073](../adr/0073-kind-additions-are-compatible.md)の決定19〜23、task 495。`asks.kind`は空でないことだけをCHECKする）。外したCHECKが持っていた規則（知っているkindだけを書く、taskの無いaskは`blocked`か`queue_hold`でrunも無い、`queue_hold`のaskとだけ`reason_category`が`authentication` / `cost`、task・goal・runのどれにも属さないeventは`EventKind::is_queue`が真のkind）は書き込み口の`check_ask_kind` / `check_event_target`（`src/domain/mod.rs`）が書く前に検査する。書き込み口（queueのportとその`SqliteQueue`の実装の`record_runtime_event` / `record_queue_event` / `record_task_event` / `record_finding_event` / `record_kpi_breach` / `prune_supervisor`と、`run_events`に`INSERT`する内部の関数）はeventのkindを文字列ではなく`EventKind`（`src/domain/event_kind.rs`。このバイナリの知るkindの列挙）で受け取り、`as_str`の文字列を書く（ADR-0073の決定20、task 552。DBの値は変わらないのでmigrationは要らない）。kindを足すときは`EventKind`に値を足し、queueのeventなら`is_queue`にも足す。読む側（`RunEvent.kind`、show・watch・events・timeline・statsの表示と集計）は文字列のまま寛容に読む（決定21）。読むときは知らないkindのaskを`AskKind::Other`にし、知らないkindのeventも落とさずに出す。これ以後はaskとeventのkindを足すのにmigrationは要らない。`schema.rs`の`kind_enumerations`がkindの値を名指すCHECKを見つけ、`compatibility_violations`はそれを互換の違反に数え、schemaのtestは0039より後のmigrationにそれが無いことを検査する（非互換の宣言でも）。CHECKを外すので非互換で、floorは39になる）。自動更新の経過は、0039の後にtask 496で`run_events`のqueue単位のkind `update_*`とaskのkind `update_failed` / `approve_update`（taskもrunも持たない）に移し、0033の`binary_updates`は残したまま書きも読みもしない（migrationは要らない。[Auto-update](supervisor-lifecycle/auto-update.md#auto-update)）。`0041_draft_reopens.sql`（compatible）は出どころ`reopened`のdraftの表`draft_reopens`を足した（schema version 41、task 418。表を足すだけなので互換で、floorは39のまま。下の[draft planners](#draft-plannersdraft_plannersrs)）。`0042_goal_reviews.sql`（compatible）はgoal review jobの表`goal_reviews`を足した（schema version 42、[ADR-0047](../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定43、task 375。表とindexを足すだけなので互換で、floorは39のまま。互換のmigrationは外部キーとunique indexを持てないので、未完了の行を1つまでにするのは`begin_goal_review`の`BEGIN IMMEDIATE`の中の検査。askのkind `approve_goal`とeventのkind `goal_review_*` / `goal_decided`はmigrationを要らない。読み書きは`src/infrastructure/goal_reviews.rs`、流れは[Goal review](supervisor-lifecycle/goal-review.md#goal-review-supervisor)）。`0043_headless_jobs.sql`（compatible）はheadless job（review・復旧job・plan review・goal review）のプロセスの表`headless_jobs`（kind、label、run_id / proposal_id / goal_id、attempt、pid、process_start、supervisor_token、started_at、ended_at、outcome）と未完了の行の部分index `headless_jobs_unfinished`を足した（schema version 43、task 443。表とindexを足すだけなので互換で、floorは39のまま。eventのkind `headless_job_stopped`はmigrationを要らない。読み書きは`src/infrastructure/headless_jobs.rs`、流れは[Headless job processes](supervisor-lifecycle/headless-job-processes.md)）。`0044_event_actors.sql`（compatible）は`run_events`に`actor_role`・`actor_id`・`requested_by`（どれもnull可）を足した（schema version 44、task 730、ADR-t728-1の決定4）。新しいバイナリは全てのeventに書いたactorのroleとid、headless jobのverdictを適用したときはそのjobのidを書き（仕組みは[Roles](supervisor-lifecycle/roles.md)のeventのactor）、それより前の行と古いバイナリが書く行はnullのまま読める。列を足すだけなので互換で、floorは変えない。後で`run_events`を作り直すmigrationは、この3列も写すこと（列を並べて写す今までの作り直しのままだと消える）。`0046_proposal_owner_actor.sql`（compatible）は`proposals.owner_actor_id`（null可）を足した（schema version 46、task 732）。`submit`が出したactorのid（`planner:<id>`など）を書き、plannerの`proposal withdraw`を自分のproposalに限る判定が読む（[Authorization](authorization.md)）。`0047_answer_authority.sql`（compatible）は`asks.answer_authority`と`asks.answer_approval`（どちらもnull可）を足した（schema version 47、task 733）。answerを書くときに、権限の出どころ（`user`・`delegated`・`runtime`）と承認に当たるか（1 / 0）を書く。`answered_by`の値は変えない（[Authorization](authorization.md#answerの権限の出どころと承認の分類)）。それより前のproposalと古いバイナリが出したものはnullで、plannerは取り下げられない。列を足すだけなので互換で、floorは変えない。`0048_worker_provider.sql`（compatible）は`tasks.worker_provider`・`tasks.worker_mode`・`task_runs.worker_mode`（null可、値はCHECKで列挙）と`supervisors.providers`（null可のJSON）を足した（schema version 48、task 814、ADR-t813-2）。taskのworkerのproviderと経路、runの経路、supervisorが解決したproviderの実行ファイルを持つ（下の`tasks.worker_provider`の段落）。列を足すだけなので互換で、floorは変えない。`0049_open_run_providers.sql`（breaking）は`task_runs`をCHECKなしで作り直した（schema version 49、task 816）。`0050_no_check_constraints.sql`（breaking）は残りの全ての表からCHECKを外した（schema version 50、task 878、[ADR-t876-1](../adr/2026-09-28-t876-1-no-sqlite-check-constraints-until-schema-is-stable.md)。下の[CHECK制約を使わない](#check制約を使わない)）。`0052_draft_bundles.sql`（compatible）はdraftの束の表`draft_bundles`と`draft_bundle_members`を足した（schema version 52、task 807、[ADR-t807-1](../adr/2026-09-28-t807-1-bundle-drafts-of-one-piece-of-work-for-one-runtime-planner.md)。表とindexを足すだけなので互換で、floorは変えない。古いbinaryはこの表を読まず、束の2件目以降のdraftにもplannerを立てうる。下の[draft planners](#draft-plannersdraft_plannersrs)）。`0053_task_change.sql`（compatible）は`tasks.change`（TEXT、null可）を足した（schema version 53、task 982、[ADR-t980-1](../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)。列を足すだけなので互換で、floorは変えない。古いbinaryは列を読まず、その`INSERT`はnullを残す。読むときは形の合わない値をnullと読む寛容な側）。`0054_ask_topics.sql`（compatible）は`asks.topics`（TEXT、null可、CHECKなし）を足した（schema version 54、task 953、[ADR-t947-2](../adr/2026-09-28-t947-2-worker-questions-carry-topic-codes.md)。`worker_question`の分類コードのJSON配列で、先頭が主。他のkindとそれより前のaskはnullで、埋めない。列を足すだけなので互換で、floorは変えない。古いbinaryは列を読まず、その`INSERT`はnullを残す。読むときは配列でない値を無いものと読む）。`0055_headless_job_provider.sql`（compatible）は`headless_jobs.provider`（TEXT NOT NULL DEFAULT 'claude'）を足した（schema version 55、task 1062、goal 73。jobを起動したproviderで、値の集合はrunの`requested_provider` / `actual_provider`と同じ。それより前の行と、列を知らない古いbinaryの`INSERT`は既定の`claude`になる。列を足すだけなので互換で、floorは変えない。[Headless job processes](supervisor-lifecycle/headless-job-processes.md)）。`0056_drop_task_kind.sql`（breaking）は`tasks.kind`を`ALTER TABLE tasks DROP COLUMN kind`で落とした（schema version 56、task 984、[ADR-t980-1](../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)の決定1。taskのkindを廃止し、分類はchangeとareaが引き継ぐ。列を名指すtrigger・index・viewは無い。列を落とすので非互換で、floorは56に上がり、migrateは退避を取る。[ADR-0073](../adr/0073-kind-additions-are-compatible.md)の非互換のmigrationの手順に従う）。`0059_ask_recommendation.sql`（compatible）は`asks.recommendation`と`asks.confidence`（どちらもTEXT、null可、CHECKなし）を足した（schema version 59、task 1318、[ADR-t451-1](../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)の決定1。既存のaskはnullのまま。列を足すだけなので互換で、floorは変えない。古いbinaryは列を読まず、その`INSERT`はnullを残す）。`0060_planner_route.sql`（compatible）は`planners.route`（TEXT、null可、CHECKなし）を足した（schema version 60、task 1396、[ADR-t1394-2](../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)の決定1。`headless`はplannerのagentを1 turnずつ動かす経路で、nullは対話。既存の行はnullのまま。列を足すだけなので互換で、floorは変えない。古いbinaryは列を読まず、その`INSERT`はnullを残す。[`plan` / `planners`](supervisor-lifecycle/plan-planners.md#runtimeのplannerの経路)）。`0061_plan_requests.sql`（compatible）は計画の依頼の表`plan_requests`と、依頼から出たproposalの表`plan_request_proposals`、`planners.request_id`（index `planners_by_request`）と`asks.request_id`（index `asks_by_request`）を足した（schema version 61、task 1395、[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)。表とindexとnull可の列を足すだけなので互換で、floorは変えない。古いbinaryは表を読まず、列を名指さないので、依頼のplannerを何のためでもないruntimeのplannerと読み、依頼にplannerを立てない。下の[planning requests](#planning-requestsplan_requestsrs)）。
++SQLiteはキューの正本であり、プロセス間共有と再起動後の復旧に使う。stdoutは正本にしない。ステップ2で4テーブル、ステップ3で3テーブル、ステップ4で`task_runs.workspace_closed_at`列を実装し、ステップ4の統合確認で`task_runs`を作り直して`integrated`を加え（schema version 4）、ステップ6でleaseをrun単位の`run_leases`に移してqueue全体の実行枠を外し（schema version 5、[ADR-0007](../adr/0007-run-level-leases-parallel-execution.md)）、ステップ7で`task_runs`を再び作り直して`integrating`と`needs_session`を加え、統合スロットの部分UNIQUE indexを足した（schema version 6、[ADR-0008](../adr/0008-merge-queue-squash-landing.md)）。`0007_supervisors.sql`は常駐supervisorの登録表`supervisors`を足した（schema version 7）。`0008_goals.sql`は`goals`、`tasks.goal_id` / `tasks.context`を足し、`run_events`を作り直してgoal単位のイベントを持てるようにした（schema version 8、[ADR-0009](../adr/0009-goal-groups-tasks.md)。ADRの「schema v6」は7がsupervisorsに使われたためv8と読み替える）。`0009_supervisor_mode.sql`は`supervisors`に`mode`と`workspace_id`を足した（schema version 9、[ADR-0011](../adr/0011-cmux-socket-password-and-in-cmux-fallback.md)）。`0012_queue_events.sql`は`run_events`を作り直し、`backend_call_failed`だけはtaskにもgoalにも紐づかない行を持てるようにした（schema version 12、task 109）。`0016_observer.sql`は`asks`と`run_events`を作り直し、observerの`blocked`のaskとその事象、observer自身の`observe_started` / `observe_finished`をtaskの無い行として持てるようにした（schema version 16、task 99）。`0017_stuck_exit_ask.sql`は`asks`を0016と同じ手順で作り直し、kindのCHECKに`stuck_exit`（supervisorが`/exit`のtimeoutで作るask。task 104）を足した（schema version 17）。`0018_task_paths.sql`は`tasks.paths`を足した（schema version 18、[ADR-0029](../adr/0029-task-declares-paths-and-verification-follows-the-kind-of-change.md)）。`0019_task_goal_dependencies.sql`は`task_goal_dependencies`を足した（schema version 19）。`0020_task_priority.sql`は`tasks.priority`を足した（schema version 20、[ADR-0040](../adr/0040-verify-once-review-run-env-graph-stats-and-task-priority-in-claim-order.md)の決定4）。`0021_proposals.sql`は`proposals`、`tasks.proposal_id` / `goals.proposal_id`とtaskのstatus `submitted`を足した（schema version 21、[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定7、8）。`0022_follow_up_triage.sql`は`task_leases`と`tasks.follow_up_depth`を足し、`asks`を0017と同じ手順で作り直してkindに`follow_up`を足した（schema version 22、[ADR-0037](../adr/0037-follow-up-triage-job-decides-follow-up-drafts.md)）。`0024_schema_floor.sql`は受け入れるバイナリの下限`schema_floor`を足した（schema version 24、[ADR-0045](../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の決定7）。`0025_stalled_ask.sql`（breaking）は`asks`を0022と同じ手順で作り直し、kindに`stalled`（supervisorが促しの後もreceiptの無いidleが続くworkerのsessionで作るask。[ADR-0043](../adr/0043-detect-stalled-worker-sessions-nudge-once-then-ask.md)の決定1、task 288）を足し、`run_events`を0016と同じ手順で作り直してtaskの無い行に`stall_config_loaded`（supervisorが起動時に記録する閾値）を足した（schema version 25。古いbinaryは`stalled`のaskを読めないのでfloorも25になる）。`0026_search.sql`は全文検索の索引`search_index`（FTS5）、着地したcommitの表`landed_commits`と、両者を保つtriggerを足した（schema version 26、互換で、下限は25のまま。[ADR-0063](../adr/0063-full-text-search-related-with-mentions-and-search-strength-and-duplicate-of.md)の決定1〜3。下の[全文検索](#全文検索search)）。`0027_plan_review.sql`はplan review jobの表`plan_reviews`（部分unique index `plan_reviews_running`で未完了の行を1つまでにする）と`proposals`の`review_hold` / `revise_reasons` / `revised_at` / `revise_sent_at` / `revise_planner_id` / `unresponsive_at`を足し、`asks`を0025と同じ手順で作り直してkindに`approve_plan`を足した（schema version 27、非互換、ADR-0044の決定11〜15・17。読み書きは`src/infrastructure/plan_reviews.rs`、流れは[supervisor-lifecycle](supervisor-lifecycle/plan-review.md#plan-review-supervisor)）。`0028_draft_planners.sql`はruntimeやjobが作ったdraftの出どころの表`draft_origins`（導入前の`follow_up_registered`から埋める）と`planners.draft_task_id`（index `planners_by_draft`）を足し、follow-up triageの`task_leases`を消し、`asks`を0027と同じ手順で作り直してkindに`planner_question`を足した（schema version 28、非互換、ADR-0044の決定13・16。読み書きは`src/infrastructure/draft_planners.rs`、下の[draft planners](#draft-plannersdraft_plannersrs)）。`0030_findings.sql`はobserverの検出の表`findings`（部分unique index `findings_unsettled`で、同じ`kind`・対象・`subject`の`open` / `proposed`の行を1つまでにする）と`asks.finding_id`を足し、`asks_open`を作り直して（0029の鍵に）findingを加え、`run_events`を0025と同じ手順で作り直して、taskにもgoalにも紐づかない行を持てるkindに`finding_recorded` / `finding_updated` / `finding_status_changed`を足した（0026の`run_events`の3つのtriggerと、`run_events`を読む`tasks`のtrigger `search_task_moved`も作り直す。schema version 30、非互換、[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定18・23。読み書きは`src/infrastructure/findings.rs`、下の[findings](#findings)）。`0031_supervisor_handoff.sql`（compatible）は`supervisors`に`handoff_accepted` / `handoff_binary` / `handoff_requested_at`を`ALTER TABLE ADD COLUMN`で足した（schema version 31、[ADR-0045](../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の決定10、task 309。null可の列を足すだけなので互換で、floorは30のまま）。`0032_run_env_program_events.sql`（breaking）は`run_events`を0030と同じ手順で作り直し（0026のtriggerと`search_task_moved`も作り直す）、taskにもgoalにも紐づかない行を持てるkindに`run_env_program_missing` / `run_env_program_found`（supervisorが`[run.env]`の名指すプログラムの検査の答えが変わったときに記録する。[ADR-0049](../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)の決定9、task 395）を足した（schema version 32。CHECKを作り直すので非互換で、floorは32になる）。`0033_auto_update.sql`（compatible）は`supervisors.auto_update`を足し、自動更新の経過の表`binary_updates`（`kind`・`commit_sha`・`payload`・`created_at`。kindは`update_started` / `update_built` / `update_installed` / `update_failed` / `update_awaiting_approval` / `update_answered` / `update_retry`）を作った（schema version 33、[ADR-0045](../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の決定17、task 310。列と表を足すだけなので互換で、floorは32のまま。`run_events`のkindを足すのは非互換になるので、自動更新は自分の表に経過を置き、inboxにはtaskの無い`blocked`のask（`subject`が`update_failed` / `approve_update`）で知らせる。[Auto-update](supervisor-lifecycle/auto-update.md#auto-update)）。`0034_task_kind.sql`（compatible）は`tasks.kind`（TEXT、null可、CHECKなし）を足した（schema version 34、goal 21。列を足すだけなので互換で、floorは32のまま。古いbinaryは列を読まず、その`INSERT`はnullを残す）。kindを4値から自由なlabelにした[ADR-t624-1](../adr/2026-09-27-t624-1-task-kind-is-a-free-label.md)は、列にCHECKが無いのでmigrationを足していない（4値だけを読むbinaryは他のlabelをnullと読む）。`0035_session_events.sql`（breaking）は`run_events`を0032と同じ手順で作り直し（0026のtriggerと`search_task_moved`も作り直す）、taskにもgoalにも紐づかない行を持てるkindに`session_opened` / `session_closed` / `session_turns`（Claude sessionの区間とtranscriptのturn。observerのjobと後続taskのinbox・plannerのsessionはtaskを持たない。[ADR-0048](../adr/0048-record-claude-sessions-by-kind-with-open-and-active-time.md)の決定2・8、task 385。書き方は[provider-lifecycle](provider-lifecycle.md#claude-sessionの区間)）を足した（schema version 35。CHECKを作り直すので非互換で、floorは35になる）。`0036_change_marks.sql`（breaking）は`run_events`を0035と同じ手順で作り直し（0026のtriggerと`search_task_moved`も作り直す）、taskにもgoalにも紐づかない行を持てるkindに変更の印の`supervisor_started` / `supervisor_stopped` / `run_env_changed` / `mark_recorded` / `mark_retracted`を足した（schema version 36、[ADR-0051](../adr/0051-kpi-time-series-report-and-push.md)の決定10〜13、task 429。[変更の印](supervisor-lifecycle/marks.md)。CHECKを作り直すので非互換で、floorは36になる）。`0037_supervisor_max_waiting.sql`（compatible）は`supervisors.max_waiting`（supervisorの`--max-waiting`。登録と引き継ぎの取り戻しの直後に`set_max_waiting`が書く）を足した（schema version 37、[ADR-0062](../adr/0062-runs-waiting-for-a-person-leave-the-slot.md)の決定7。null可の列を足すだけなので互換で、floorは変わらない）。人の答えを待つrunの`run_waiting_started` / `run_waiting_ask_added` / `run_waiting_ended` / `run_slot_regained` / `run_waiting_deferred`はrunに紐づくrun_eventsのkindなので、CHECKを変えない（[人の答えを待つrun](supervisor-lifecycle/waiting.md)）。`0038_ask_answerers.sql`（compatible）は`asks`に`answered_by`（TEXT、null可）と`option_index`（INTEGER、null可）を`ALTER TABLE ADD COLUMN`で足した（schema version 38、task 325。下の[asks](#asks)。列を足すだけなので互換で、floorは変わらない。古いbinaryは列を読まず、その回答はどちらもnullを残す）。`0039_open_kinds.sql`（breaking）は`asks`と`run_events`を0029・0036と同じ手順で作り直し（idと0038の`answered_by` / `option_index`を保ち、`asks_open`、0026のtriggerと`search_task_moved`も作り直す）、kindを名指すCHECKをすべて外した（schema version 39、[ADR-0073](../adr/0073-kind-additions-are-compatible.md)の決定19〜23、task 495。`asks.kind`は空でないことだけをCHECKする）。外したCHECKが持っていた規則（知っているkindだけを書く、taskの無いaskは`blocked`か`queue_hold`でrunも無い、`queue_hold`のaskとだけ`reason_category`が`authentication` / `cost`、task・goal・runのどれにも属さないeventは`EventKind::is_queue`が真のkind）は書き込み口の`check_ask_kind` / `check_event_target`（`src/domain/mod.rs`）が書く前に検査する。書き込み口（queueのportとその`SqliteQueue`の実装の`record_runtime_event` / `record_queue_event` / `record_task_event` / `record_finding_event` / `record_kpi_breach` / `prune_supervisor`と、`run_events`に`INSERT`する内部の関数）はeventのkindを文字列ではなく`EventKind`（`src/domain/event_kind.rs`。このバイナリの知るkindの列挙）で受け取り、`as_str`の文字列を書く（ADR-0073の決定20、task 552。DBの値は変わらないのでmigrationは要らない）。kindを足すときは`EventKind`に値を足し、queueのeventなら`is_queue`にも足す。読む側（`RunEvent.kind`、show・watch・events・timeline・statsの表示と集計）は文字列のまま寛容に読む（決定21）。読むときは知らないkindのaskを`AskKind::Other`にし、知らないkindのeventも落とさずに出す。これ以後はaskとeventのkindを足すのにmigrationは要らない。`schema.rs`の`kind_enumerations`がkindの値を名指すCHECKを見つけ、`compatibility_violations`はそれを互換の違反に数え、schemaのtestは0039より後のmigrationにそれが無いことを検査する（非互換の宣言でも）。CHECKを外すので非互換で、floorは39になる）。自動更新の経過は、0039の後にtask 496で`run_events`のqueue単位のkind `update_*`とaskのkind `update_failed` / `approve_update`（taskもrunも持たない）に移し、0033の`binary_updates`は残したまま書きも読みもしない（migrationは要らない。[Auto-update](supervisor-lifecycle/auto-update.md#auto-update)）。`0041_draft_reopens.sql`（compatible）は出どころ`reopened`のdraftの表`draft_reopens`を足した（schema version 41、task 418。表を足すだけなので互換で、floorは39のまま。下の[draft planners](#draft-plannersdraft_plannersrs)）。`0042_goal_reviews.sql`（compatible）はgoal review jobの表`goal_reviews`を足した（schema version 42、[ADR-0047](../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定43、task 375。表とindexを足すだけなので互換で、floorは39のまま。互換のmigrationは外部キーとunique indexを持てないので、未完了の行を1つまでにするのは`begin_goal_review`の`BEGIN IMMEDIATE`の中の検査。askのkind `approve_goal`とeventのkind `goal_review_*` / `goal_decided`はmigrationを要らない。読み書きは`src/infrastructure/goal_reviews.rs`、流れは[Goal review](supervisor-lifecycle/goal-review.md#goal-review-supervisor)）。`0043_headless_jobs.sql`（compatible）はheadless job（review・復旧job・plan review・goal review）のプロセスの表`headless_jobs`（kind、label、run_id / proposal_id / goal_id、attempt、pid、process_start、supervisor_token、started_at、ended_at、outcome）と未完了の行の部分index `headless_jobs_unfinished`を足した（schema version 43、task 443。表とindexを足すだけなので互換で、floorは39のまま。eventのkind `headless_job_stopped`はmigrationを要らない。読み書きは`src/infrastructure/headless_jobs.rs`、流れは[Headless job processes](supervisor-lifecycle/headless-job-processes.md)）。`0044_event_actors.sql`（compatible）は`run_events`に`actor_role`・`actor_id`・`requested_by`（どれもnull可）を足した（schema version 44、task 730、ADR-t728-1の決定4）。新しいバイナリは全てのeventに書いたactorのroleとid、headless jobのverdictを適用したときはそのjobのidを書き（仕組みは[Roles](supervisor-lifecycle/roles.md)のeventのactor）、それより前の行と古いバイナリが書く行はnullのまま読める。列を足すだけなので互換で、floorは変えない。後で`run_events`を作り直すmigrationは、この3列も写すこと（列を並べて写す今までの作り直しのままだと消える）。`0046_proposal_owner_actor.sql`（compatible）は`proposals.owner_actor_id`（null可）を足した（schema version 46、task 732）。`submit`が出したactorのid（`planner:<id>`など）を書き、plannerの`proposal withdraw`を自分のproposalに限る判定が読む（[Authorization](authorization.md)）。`0047_answer_authority.sql`（compatible）は`asks.answer_authority`と`asks.answer_approval`（どちらもnull可）を足した（schema version 47、task 733）。answerを書くときに、権限の出どころ（`user`・`delegated`・`runtime`）と承認に当たるか（1 / 0）を書く。`answered_by`の値は変えない（[Authorization](authorization.md#answerの権限の出どころと承認の分類)）。それより前のproposalと古いバイナリが出したものはnullで、plannerは取り下げられない。列を足すだけなので互換で、floorは変えない。`0048_worker_provider.sql`（compatible）は`tasks.worker_provider`・`tasks.worker_mode`・`task_runs.worker_mode`（null可、値はCHECKで列挙）と`supervisors.providers`（null可のJSON）を足した（schema version 48、task 814、ADR-t813-2）。taskのworkerのproviderと経路、runの経路、supervisorが解決したproviderの実行ファイルを持つ（下の`tasks.worker_provider`の段落）。列を足すだけなので互換で、floorは変えない。`0049_open_run_providers.sql`（breaking）は`task_runs`をCHECKなしで作り直した（schema version 49、task 816）。`0050_no_check_constraints.sql`（breaking）は残りの全ての表からCHECKを外した（schema version 50、task 878、[ADR-t876-1](../adr/2026-09-28-t876-1-no-sqlite-check-constraints-until-schema-is-stable.md)。下の[CHECK制約を使わない](#check制約を使わない)）。`0052_draft_bundles.sql`（compatible）はdraftの束の表`draft_bundles`と`draft_bundle_members`を足した（schema version 52、task 807、[ADR-t807-1](../adr/2026-09-28-t807-1-bundle-drafts-of-one-piece-of-work-for-one-runtime-planner.md)。表とindexを足すだけなので互換で、floorは変えない。古いbinaryはこの表を読まず、束の2件目以降のdraftにもplannerを立てうる。下の[draft planners](#draft-plannersdraft_plannersrs)）。`0053_task_change.sql`（compatible）は`tasks.change`（TEXT、null可）を足した（schema version 53、task 982、[ADR-t980-1](../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)。列を足すだけなので互換で、floorは変えない。古いbinaryは列を読まず、その`INSERT`はnullを残す。読むときは形の合わない値をnullと読む寛容な側）。`0054_ask_topics.sql`（compatible）は`asks.topics`（TEXT、null可、CHECKなし）を足した（schema version 54、task 953、[ADR-t947-2](../adr/2026-09-28-t947-2-worker-questions-carry-topic-codes.md)。`worker_question`の分類コードのJSON配列で、先頭が主。他のkindとそれより前のaskはnullで、埋めない。列を足すだけなので互換で、floorは変えない。古いbinaryは列を読まず、その`INSERT`はnullを残す。読むときは配列でない値を無いものと読む）。`0055_headless_job_provider.sql`（compatible）は`headless_jobs.provider`（TEXT NOT NULL DEFAULT 'claude'）を足した（schema version 55、task 1062、goal 73。jobを起動したproviderで、値の集合はrunの`requested_provider` / `actual_provider`と同じ。それより前の行と、列を知らない古いbinaryの`INSERT`は既定の`claude`になる。列を足すだけなので互換で、floorは変えない。[Headless job processes](supervisor-lifecycle/headless-job-processes.md)）。`0056_drop_task_kind.sql`（breaking）は`tasks.kind`を`ALTER TABLE tasks DROP COLUMN kind`で落とした（schema version 56、task 984、[ADR-t980-1](../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)の決定1。taskのkindを廃止し、分類はchangeとareaが引き継ぐ。列を名指すtrigger・index・viewは無い。列を落とすので非互換で、floorは56に上がり、migrateは退避を取る。[ADR-0073](../adr/0073-kind-additions-are-compatible.md)の非互換のmigrationの手順に従う）。`0059_ask_recommendation.sql`（compatible）は`asks.recommendation`と`asks.confidence`（どちらもTEXT、null可、CHECKなし）を足した（schema version 59、task 1318、[ADR-t451-1](../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)の決定1。既存のaskはnullのまま。列を足すだけなので互換で、floorは変えない。古いbinaryは列を読まず、その`INSERT`はnullを残す）。`0060_planner_route.sql`（compatible）は`planners.route`（TEXT、null可、CHECKなし）を足した（schema version 60、task 1396、[ADR-t1394-2](../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)の決定1。`headless`はplannerのagentを1 turnずつ動かす経路で、nullは対話。既存の行はnullのまま。列を足すだけなので互換で、floorは変えない。古いbinaryは列を読まず、その`INSERT`はnullを残す。[`plan` / `planners`](supervisor-lifecycle/plan-planners.md#runtimeのplannerの経路)）。`0061_plan_requests.sql`（compatible）は計画の依頼の表`plan_requests`と、依頼から出たproposalの表`plan_request_proposals`、`planners.request_id`（index `planners_by_request`）と`asks.request_id`（index `asks_by_request`）を足した（schema version 61、task 1395、[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)。表とindexとnull可の列を足すだけなので互換で、floorは変えない。古いbinaryは表を読まず、列を名指さないので、依頼のplannerを何のためでもないruntimeのplannerと読み、依頼にplannerを立てない。下の[planning requests](#planning-requestsplan_requestsrs)）。`0065_task_wait_for_build.sql`（compatible）は`tasks.wait_for_build`（INTEGER NOT NULL DEFAULT 0、CHECKなし）を足した（schema version 65、task 1632、[ADR-t1632-1](../adr/2026-10-05-t1632-1-claim-waits-for-a-build-that-contains-the-dependencies-landings.md)。taskが固定バイナリに依存先の着地を含むことを要するかの宣言で、0は宣言しない。既存のtaskは0のまま。既定のある列を足すだけなので互換で、floorは変えない。古いbinaryは列を読まず、その`INSERT`は0を残す。書くのは`Task::wait_for_build`のboolだけで、読むときは0以外を宣言と読む。[claimを控える](supervisor-lifecycle/claim-defer.md#依存先の着地を含むbuildを待つtask)）。
+ 
+ ```text
+ tasks                -- 0020: priority（INTEGER、low=0 … interrupt=4、既定1、CHECK 0〜4）
+                      -- 0021: statusに'submitted'、proposal_id（所属するproposal、null可）
+                      -- 0053: change（TEXT、null可、CHECKなし。taskが宣言する変更の種類のlabel。ADR-t980-1）
++                     -- 0065: wait_for_build（INTEGER NOT NULL DEFAULT 0、CHECKなし。0以外 = 依存先の着地を含むbuildまでclaimしない。ADR-t1632-1）
+                      -- 0048: worker_provider（'claude' | 'codex'）とworker_mode（'interactive' | 'headless'）（TEXT、null可、CHECK。null = claude・providerの既定。ADR-t813-2）
+                      -- 0057: 経路を指定せずに登録された未claimのClaudeのtaskのworker_mode 'interactive'をNULLに戻す（値はtaskが経路を指定したときだけ、NULLはproviderの既定＝Claudeは非対話。互換、ADR-t1340-1）
+ proposals            -- 0021: plan reviewに出したgoalとtaskの束（status、owner_origin、owner_workspace_id、submitted_at、revise_count、各時刻）
+diff --git a/docs/design/supervisor-lifecycle/auto-update.md b/docs/design/supervisor-lifecycle/auto-update.md
+index 815d34aa..18b85161 100644
+--- a/docs/design/supervisor-lifecycle/auto-update.md
++++ b/docs/design/supervisor-lifecycle/auto-update.md
+@@ -4,8 +4,8 @@ type: design
+ title: "Auto-update"
+ status: current
+ created: 2026-09-26
+-updated: 2026-10-05 # task 1189; task 1451
+-last_verified: 2026-10-05 # task 1189; task 1451
++updated: 2026-10-05 # task 1189; task 1451; task 1632
++last_verified: 2026-10-05 # task 1189; task 1451; task 1632
+ scope: runtime
+ related:
+   - design-supervisor-lifecycle
+@@ -20,6 +20,7 @@ related:
+   - adr-t1165-1
+   - adr-t1233-2
+   - adr-t1582-1
++  - adr-t1632-1
+   - design-persistence
+ ---
+ 
+@@ -69,6 +70,7 @@ related:
+ - **inboxに知らせる**: 失敗と非互換のビルドは、task・runの無い専用のkindのask（`update_failed` / `approve_update`。`AskKind::UpdateFailed` / `ApproveUpdate`で、`check_ask_kind`がtaskとrunを持たないことを検査する）で知らせる（askは`ask_opened`を書くので`watch --role inbox`が起きる）。同じkindの開いたaskは古いビルドのものなので、新しいaskを開く前に`superseded`と答えて閉じる（`open_update_ask`）。`reason_category`は`scope`、`asked_by`は`supervisor`で、`subject`は持たない。task 310の、`blocked`のaskの`subject`で区別する形は使わない（その形で開いたaskが残っていれば、他の`blocked`のaskと同じく人が読んで閉じる）。
+   - `update_failed`（options `retry` / `skip`）: 何が失敗し、binaryとsupervisorがどうなったかとlogを問う。答えはsupervisorが適用する（`answer`は`runtime_delivers: true`を書き、`status`は`applying the answer`にする。どちらも`auto_update`のliveな登録（pidが生きていてheartbeatが`HEARTBEAT_TIMEOUT_SECS`以内）が居るときだけで、判定は`SupervisorRegistration::applies_updates`の1つ（リリースのjobの失敗の`update_failed`は[Release update](release-update.md)の`applies_releases`で決める）。居なければ`answer`は`runtime_delivers: false`を書き、人がinboxで読む答えとして残る。task 498）: `retry`は`update_retry`を書いて次の見直しでheadをビルドし直し、`skip`は`update_answered`を書いて次のruntimeの着地を待つ。どちらもaskを閉じる。リリースのjobの失敗が開いた`update_failed`（その`update_failed`のeventが`source: "release"`を持つ）の答えはリリースのpassが適用するので、このpassは飛ばす（`application::update::failed_release`）。リリースのjobの段は`base_commit`と`retry_requested`も数えない。
+   - `approve_update`（options `install` / `skip`）: 非互換のmigrationを含むビルドのversionとmigrationを示す。drainはsupervisor自身を止め、in-cmux modeの起動し直しは人のcmuxの端末からでないと通らないので、runtimeは適用しない。`install`なら人がinboxから問いに書かれた`dagq --db <db> install --from <queue dir>/update/staged/dagq --to <binary> --allow-breaking --cmux … --claude …`を打つ（[`install`](install.md#install)の6）。drainが起動し直すsupervisorには止めた登録の`--auto-update`と`--max-waiting`が引き継がれるので、その後に`up --auto-update`を打ち直す必要はない。どちらもinboxが閉じる。
++- **待ちの見直し**: 引き継いだsupervisorは、execした新しいprocessの最初のpassで、`wait_for_build`のtaskの待ち（[claimを控える](claim-defer.md#依存先の着地を含むbuildを待つtask)、ADR-t1632-1）を自分の新しいbuild識別子で判定し直し、依存先の着地を含めばclaimする（含むかの答えはprocessの中だけでcacheするので、`supervisor_handed_off`の後は空から読む）。`update_installed`そのものは待ちを変えない: 待ちを決めるのは固定バイナリのfileではなくsupervisorの走っているbuildで、引き継いだsupervisorのbuildはそのfileと同じになる。
+ - **status**: `status`は`version`（打った`dagq`のbuild識別子）と`auto_update`（`enabled`: liveな登録のどれかが有効か、`state`: `idle` / `building` / `testing`（mainのビルドの`update_built`の後、e2eの最中）/ `installing`（`update_e2e_passed`か、リリースの`update_built`の後）/ `restoring` / `interrupted`（jobが途中で死んだ）/ `installed` / `plugin_installed`（最新が[Release update](release-update.md)のpluginだけのjobの`update_installed`で、バイナリは入れ替えていない）/ `failed` / `awaiting_approval` / `retry_requested` / `skipped` / `dropped`（最新が[Release update](release-update.md)の実行しなかったpluginだけの頼みの`update_dropped`）、`commit`、`event_id`と`at`: 最新の`update_*`のidと時刻、`last`: そのpayload）を出し、`supervisors[].auto_update`に登録ごとの設定を出す。supervisorごとの今のbuild識別子は従来どおり`supervisors[].binary_version`。
+ - **test**: `src/domain/mod.rs`のunit testがupdateのaskのkindの規則と`update_installed`のattentionを、`src/domain/stats/updates.rs`が`stats`の`updates`（pluginだけのjobの`update_installed`を`installed`に入れず`plugin_installed`と`update_installed_plugin_only`で数えることを含む）を、`src/domain/timeline.rs`がrunのeventへの`update_*`の差し込みを、`src/application/update.rs`のunit testがruntimeのpathの判定とbuild識別子のcommitと、`status`の`plugin_installed`と`installed`の区別と`testing`を、`src/domain/e2e_quarantine.rs`のunit testが印のファイルの読み取り（欄・commentと文字列・日付・読めないときの理由）と判定（期限・上限・続けての失敗）を、`src/application/e2e_verdict.rs`のunit testが関門の判定（flakyで通す、印で通す、hostのlocalの日付での期限、印の無い失敗・期限切れ・読めないファイルの理由、流し直しの上限切れと始められない、直前の関門のeventからの続けての失敗の数え方）と流し直しのlogの名前を、`src/infrastructure/e2e_gate.rs`のunit testが関門の実行（`[run.env]`・`DAGQ_E2E_CMUX`・`CARGO_TARGET_DIR`が渡ること、落ちたtestの読み取り、上限切れでの停止、cmuxが無いと始めないこと、fakeのcmuxでそのqueueのhashのgroupだけを消して`TMPDIR`を消すこと、fakeのpodmanで、繋がれば全部を流し、接続が切れたまま・podmanが無いときは`broker::`だけを`DAGQ_E2E_SKIP`で外して`skipped`とlogに残すこと（`podman_that_cannot_be_reached_skips_only_the_podman_e2e_and_says_so`）、落ちたtestだけを`DAGQ_E2E_RERUN`で1回流し直して自分の`TMPDIR`で後始末し`.rerun.log`に書くこと、流し直しで`ok`と出なかったtest（上限切れ・何も出さない・途中で切れた）を落ちとし、上限切れ・名前の無い失敗・まとめの行の無い失敗は流し直さないこと（`a_failing_e2e_reruns_its_failed_tests_by_name_once`）、checkoutの印を読むこと（`the_marks_are_read_from_the_checkout`））を、`tests/it/lifecycle_install.rs`の`the_update_job_passes_flaky_and_quarantined_e2e_and_fails_the_rest`がfakeのe2eで、flakyと印で通したtestが`update_e2e_passed`に載って入れ替わること、印の無い失敗・期限切れ・上限超え・3回続けての失敗で`update_failed`（`stage: e2e`）になり`error`とaskの問いに理由が載ることを、`tests/it/lifecycle_install.rs`の`the_update_job_names_the_e2e_it_did_not_run_for_want_of_podman`が流さなかったe2eが`update_e2e_passed`の`skipped`と`update_installed`の`e2e_skipped`・`message`に載ることを、`src/domain/stats/updates.rs`が関門の`e2e`の集計（testごとの`tests`は`counts_the_e2e_gate_by_test`）を、`tests/it/lifecycle_install.rs`の`the_update_job_replaces_nothing_unless_the_build_passes_its_e2e`がfakeのe2eで関門の失敗・上限切れ・始められないときに何も置き換えず`update_failed`（`stage: e2e`）のaskを開くこと、非互換のビルドでも落ちれば`staged`にも`approve_update`にも進まないこと、通れば`update_e2e_passed`の後に入れ替わることと`stats`の`e2e`を、`tests/it/lifecycle_install.rs`がjobの各分岐（成功、非互換のask、ビルドの失敗、見張りの失敗での`restore`とsupervisorの起動し直し、2つのsupervisorを引き継がせたときの全員の成功・一部の失敗（戻さず失敗した方だけ起動し直す）・全員の失敗（戻す）・登録が消えて同じpidが新しいbuild識別子で登録し直した場合と、登録し直した後に死んだsupervisorをその新しい登録で起動し直す場合、同じpidとbuild識別子の古い行（引き継ぎより前の`started_at`）が残っていても引き継ぎの後の登録を後継とし、古い行だけなら登録が消えたとして失敗にする場合（引き継ぎの待ちと見張りの両方。task 633）、上限の直後に登録し直したsupervisor（取り消しが要求を見つけない）を見直して、新しいbuild識別子で戻れば`install`が成功に数えて戻さずjobも起動し直さず、戻らなければ失敗にする場合（`hand_off`の直接の呼び出しを含む。task 715）、引き継ぎの一部の失敗（`handoff`のstageで戻さず`kept: true`）と全員の失敗（`install`が戻し、jobがsupervisorのそれぞれを戻す: 旧buildのままheartbeatするものはそのまま、execの中で固まったものは止めて起動し直し、居なくなったものは起動し直し、askの`supervisors`に載る。task 716）、引き継ぎより前の`install`の失敗（差し替えの失敗）ではjobを起動したsupervisorだけを戻すこと）をfakeのbinaryで、同じfileの`the_update_job_puts_the_client_built_beside_dagq_in_place_with_it`がビルドの隣のclient（版の違うclientでは何も置き換えないこと、clientを先にdagqを後に置くこと、見張りの失敗で両方を戻すこと、非互換のビルドでclientも`staged`に置き、clientの無いビルドでは前の`staged`のclientを消すこと）を、`tests/it/runtime_*.rs`がin-processのsupervisorのきっかけ（docsだけのcommitでは起動せず、runtimeのcommitで起動し、`retry`の答えで同じheadをビルドし直す）を、`tests/it/cli_version.rs`の`auto_update_installs_each_runtime_landing_and_puts_a_broken_build_back`が実プロセスのsupervisorで、着地のたびの入れ替え（同じpidとtoken）と、起動で死ぬビルドの`restore`と`update_failed`のaskと、`events` / `watch` / `stats`の`update_*`と`binary_updates`が空のままであることを、`tests/e2e.rs`の`auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands`が実cmuxのworkerの作業中にruntimeのcommitが着地して自動で入れ替わり、そのrunが着地し、その`timeline`に`update_installed`が出ることを確かめる。
+ 
+diff --git a/docs/design/supervisor-lifecycle/claim-defer.md b/docs/design/supervisor-lifecycle/claim-defer.md
+index a8722772..25465990 100644
+--- a/docs/design/supervisor-lifecycle/claim-defer.md
++++ b/docs/design/supervisor-lifecycle/claim-defer.md
+@@ -4,13 +4,14 @@ type: design
+ title: "claimを控える（衝突の多いファイル）"
+ status: current
+ created: 2026-09-26
+-updated: 2026-10-05 # task 1634
+-last_verified: 2026-10-05 # task 1634
++updated: 2026-10-05 # task 1634; task 1632
++last_verified: 2026-10-05 # task 1634; task 1632
+ scope: runtime
+ related:
+   - adr-0080
+   - adr-t1484-1
+   - adr-t1634-1
++  - adr-t1632-1
+   - adr-t813-2
+   - design-supervisor-lifecycle
+   - design-supervisor-lifecycle-supervise
+@@ -22,7 +23,7 @@ related:
+ 
+ # claimを控える（衝突の多いファイル）
+ 
+-候補のtaskが触ると予想するファイルと、進行中のrunのファイルが、衝突の多いファイル（hotspot）で重なるとき、supervisorはそのpassでそのtaskをclaimせずに次の候補をclaimする（[ADR-0080](../../adr/0080-supervisor-rereads-conflicts-config.md)、ADR-0069を統合。goal 45、task 463・585）。queue全体のclaimを止める[load averageの控え](claim-hold.md)とは別で、1つのtaskだけを飛ばす。判定は`domain::claim_defer`、supervisorの側は`application/supervise/claim_defer.rs`（`Supervisor::claimable`）。
++候補のtaskが触ると予想するファイルと、進行中のrunのファイルが、衝突の多いファイル（hotspot）で重なるとき、supervisorはそのpassでそのtaskをclaimせずに次の候補をclaimする（[ADR-0080](../../adr/0080-supervisor-rereads-conflicts-config.md)、ADR-0069を統合。goal 45、task 463・585）。queue全体のclaimを止める[load averageの控え](claim-hold.md)とは別で、1つのtaskだけを飛ばす。判定は`domain::claim_defer`、supervisorの側は`application/supervise/claim_defer.rs`（`Supervisor::claimable`）。同じ候補のloopで、[workerを動かせないtask](#workerを動かせないtask)と[依存先の着地を含むbuildを待つtask](#依存先の着地を含むbuildを待つtask)も1つのtaskを飛ばし、同じeventで記録する。
+ 
+ ## 判定の入力
+ 
+@@ -72,12 +73,27 @@ supervisorは、どのproviderでも動かせないworker（providerと経路の
+ - 起動して最初の判定で、taskごとの最新のeventがこの理由の`claim_deferred`なら控えの途中として組み立て直す（`worker_deferrals_in_place`）。hotspotの控え（`deferrals_in_place`）は`reason`が`hot_files`のもの（`reason`の無い古いeventを含む）だけを読む
+ - 同じpassで`claim_for_supervisor_in_order`にも経路の一覧を渡し、順に無いtaskを取る後戻りでも経路の無いworkerのtaskは取らない。経路がもう一方のproviderなら、runはそのproviderの非対話で始まり、`provider_switched`（`phase: start`）を記録する
+ 
++## 依存先の着地を含むbuildを待つtask
++
++supervisorは、`wait_for_build`を宣言したtask（`add --wait-for-build`。[Domain model](../domain-model.md)の`Task`）を、自分のbuild識別子のcommitが依存先の着地commitを全て含むまでclaimせずに飛ばす（[ADR-t1632-1](../../adr/2026-10-05-t1632-1-claim-waits-for-a-build-that-contains-the-dependencies-landings.md)。task 1632）。判定は`domain::build_wait`、supervisorの側は`Supervisor::lacking_from_build`。
++
++- **入力**: passごとに`TaskStore::build_waits`が、`ready`で`wait_for_build`のtaskごとに、直接の依存先（`task_dependencies`）の着地commit（`landed_commits`。`run_integrated`の`result_commit`）を1回のqueryで読む（宣言したtaskが無ければ空）。依存先が何も着地させていなければ待つものは無い。build識別子はsupervisorの`Layout::version`（`dagq::VERSION`、[Build identifier](build-identifier.md)。testは`SuperviseOptions::build`で差し替える）で、そのcommit（`build_wait::build_commit`）と着地commitを`git merge-base --is-ancestor <着地> <buildのcommit>`（`Repository::is_ancestor`）で比べる
++- **判定の順**: workerの判定の後、hotspotの判定より前。効く優先度が`interrupt`でも待つ（宣言は落ちる関門を避けるためで、急ぎでも同じに落ちる）。待つtaskはhotspotの判定にかけない
++- **判定**（`build_wait::judge`の`Verdict`）: 全てを含めば`Contains`でclaimへ進む。1つでも含まない（`Lacks`）か、含むかを読めない（gitのerror。passごとに問い直し、warnは着地commitごとに1回）ならclaimしない。`.dirty`のbuildはそのcommitで判定する（そのcommitからlocalの変更を足して作ったbuildなので）。commitを名乗らないbuild（リリースの`X.Y.Z`、`+unknown`）は判定できず（`Unjudged`）、待たずにclaimし、taskごとに1回warnを出す（来ないかもしれないbuildを待ち続けないため）。verdictからclaimするか・待つ着地・warnを出すかを決めるのは純粋関数`build_wait::claim_step`
++- 理由は`not_in_build`。最初に飛ばしたときだけ`claim_deferred`（`build_wait::deferred`）を書く
++- 上限は無く、hotspotの控えと違って`defer_max_secs`で期限切れにならない。含むbuildのsupervisorは`claim_deferral_ended`（`why: cleared`）を書いてclaimする。宣言を外したtask（`edit --no-wait-for-build`。draft / submittedに戻してから）も、候補に戻ったときに控えの途中なら`cleared`で終える。候補から外れたtaskは`why: not_candidate`で終える
++- **見直し**: 含むかの答えは着地commitごとにprocessの中でcacheする（`DeferWatch::in_build`）。build識別子はprocessの間変わらず、変わるのは自動更新（[Auto-update](auto-update.md)）や`install`の引き継ぎ（[Handoff](handoff.md)）でexecした新しいprocessだけなので、cacheは`supervisor_handed_off`の後に空から始まり、その最初のpassで全ての待ちを新しいbuildで判定し直す。`update_installed`が固定バイナリを入れ替えても、引き継がなかったsupervisor（`up --auto-update`でない、引き継ぎに失敗した）のbuildは変わらず、待ちも変わらない
++- **claimの後戻り**: `claim_for_supervisor_in_order`は、渡した順のtaskがどれもreadyでなくなった（他のsupervisorがclaimした、cancel）ときにclaimの順へ後戻りするが、そこでは`wait_for_build`のtaskを取らない（取れるtaskが他に無ければ`NoReadyTask`。`claim_task`）。そのtaskは判定したsupervisorが順に名指したときだけclaimされる。順を渡さない`TaskStore::claim`も同じで取らない。hotspotで控えたtaskは後戻りで取られうる（従来どおり）
++- **重なり**: taskの最新の控えのeventが今の控えを表すように、workerの控えを`cleared`で終えたtaskがまだbuildを待てば、buildの`claim_deferred`を書き直す。hotspotで控えている途中（期限切れでない）のtaskがbuildを待ち始めたら、hotspotの控えはbuildの`claim_deferred`に置き換わり（`stats`の`superseded`）、buildが含んだ後に重なりが残ればhotspotの判定が新しく控える
++- 起動して最初の判定で、taskごとの最新のeventがこの理由の`claim_deferred`なら控えの途中として組み立て直す（`build_wait::deferrals_in_place`）。`worker_deferrals_in_place`はこの理由を読まない
++
+ ## 記録
+ 
+-- `claim_deferred`（taskのevent）: `reason: hot_files`、`files`（重なったhotspot）、`runs`（`[{run_id, task_id}]`、重なった進行中のrun）、`max_secs`、`message`、`supervisor`。supervisorのlogにwarnで出る。workerを動かせないtaskの`claim_deferred`は`reason`（`provider_unavailable` / `mode_unavailable`）、`provider`、`worker_mode`、`message`、`supervisor`
+-- `claim_deferral_ended`（taskのevent）: `reason`、`why`（`cleared` / `owner_waiting` / `no_commit` / `expired` / `not_candidate`）、`deferred_secs`、`supervisor`。logにinfoで出る
++- `claim_deferred`（taskのevent）: `reason: hot_files`、`files`（重なったhotspot）、`runs`（`[{run_id, task_id}]`、重なった進行中のrun）、`max_secs`、`message`、`supervisor`。supervisorのlogにwarnで出る。workerを動かせないtaskの`claim_deferred`は`reason`（`provider_unavailable` / `mode_unavailable`）、`provider`、`worker_mode`、`message`、`supervisor`。buildを待つtaskの`claim_deferred`は`reason: not_in_build`、`build`（そのsupervisorのbuild識別子）、`missing`（`[{task_id, commit}]`、含まない依存先の着地）、`message`、`supervisor`
++- `claim_deferral_ended`（taskのevent）: `reason`、`why`（`cleared` / `owner_waiting` / `no_commit` / `expired` / `not_candidate`。`owner_waiting` / `no_commit` / `expired`はhotspotの控えだけ、workerとbuildの控えは`cleared` / `not_candidate`だけ）、`deferred_secs`、`supervisor`。logにinfoで出る
+ 
+ ## `status`と`stats`
+ 
+-- `status`: `claim_deferrals`に、今控えているtask（taskの最新の`claim_deferred` / `claim_deferral_ended` / `run_claimed`が`claim_deferred`のもの）を`{task_id, reason, since, files, runs, supervisor}`で並べる（[`status`](status.md)）
++- `status`: `claim_deferrals`に、今控えているtask（taskの最新の`claim_deferred` / `claim_deferral_ended` / `run_claimed`が`claim_deferred`のもの）を`{task_id, reason, since, files, runs, supervisor}`で並べる。buildを待つtask（`reason: not_in_build`）は`files` / `runs`がnullで、`build`と`missing`を足す（他の理由では出さない。`domain::claim_defer::OpenDeferral`。[`status`](status.md)）
++- `show`: 今控えているtaskは同じ形を`claim_deferral`に出す（控えていなければこのキーは無い。`view::task_detail`）。`wait_for_build`を宣言したtaskはtaskの`wait_for_build: true`でも分かる
+ - `stats`: `claim_deferrals`に、windowの中で始まった控えの`count`と`secs`、終わり方ごとの`by_end: {<why>: {count, secs}}`（`cleared` / `owner_waiting` / `no_commit` / `expired` / `not_candidate`、`claim_deferral_ended`の前にclaimされた`claimed`、まだ終わっていない`open`、同じtaskの`claim_deferred`で置き換わった`superseded`）、hotspotごとの控えた回数`by_file`、今の控え`deferred`を出す。控えは次の`claim_deferral_ended`かそのtaskの`run_claimed`で終わり、まだ終わっていない控えはwindowの終わりまでを数える。空きslotがあり控えているtaskがあれば、alert `claim_deferred`（`value`は控えているtaskの数）を`idle_slots`の代わりに出す（[`stats`](stats.md)）
+diff --git a/docs/design/supervisor-lifecycle/status.md b/docs/design/supervisor-lifecycle/status.md
+index 70bdf701..99940798 100644
+--- a/docs/design/supervisor-lifecycle/status.md
++++ b/docs/design/supervisor-lifecycle/status.md
+@@ -4,8 +4,8 @@ type: design
+ title: "`status`"
+ status: current
+ created: 2026-09-26
+-updated: 2026-10-04 # task 1591: slots.landing_queue and the landing_queue slot; task 1437
+-last_verified: 2026-10-04 # task 1591; task 1437
++updated: 2026-10-05 # task 1591: slots.landing_queue and the landing_queue slot; task 1437; task 1632
++last_verified: 2026-10-05 # task 1591; task 1437; task 1632
+ scope: runtime
+ related:
+   - adr-t1228-2
+@@ -30,7 +30,7 @@ related:
+ 
+ ユースケースはapplication層の`src/application/health.rs`の`status`（`doctor`・`recover`と、`status`と`watch`が使うattentionの導出`attention`も同じファイル）で、queueは`Queue`（`latest_event_id`・`latest_runs_in_progress`・`runs_with_pending_push`・`asks`を含む）、PIDの生死は`ProcessControl`、時刻は`Clock`から得る。入口は`compose::OneShot::status_for`（queueをpathから開く。自由関数の`compose::status_for`はsystemの`Generators`で呼ぶ）で、CLIは`src/main.rs`が開いて束縛を確かめたqueueを`OneShot::status_of`に渡し、queueを1回だけ開く（task 403）。
+ 
+-`dagq status`はrunのprocessを調べずに登録とleaseだけを返す。引き継がれたrunは引き継いだsupervisorのtokenのleaseを持つので、他のrunと同じくそのsupervisorの`run_ids`に並ぶ。`supervisors`は`supervisors`表の登録を`started_at`順に、続けて登録のないtokenのlease保持者（着地中の`integrate`プロセス、または登録表以前のsupervisor）をlease順に並べ、leaseはtokenで登録に結び付ける。各項目は`pid`、`alive`（`kill -0`）、`registered`、`mode`と`workspace_id`、`binary_version`（そのプロセスが動いているdagqのversion。登録がなければnull、列より古いbinaryの登録もnull。[ADR-0014](../../adr/0014-up-replaces-a-supervisor-of-another-binary-version.md)）、`parallel`・`parallel_source`・`max_waiting`・`max_waiting_source`・`runtime_planners`・`runtime_planners_source`（runtimeのplannerの上限と出どころ。task 941。列より古いbinaryの登録はnull）と`started_at`（登録がなければnull。出どころは列より古いbinaryの登録もnull）、`heartbeat_at`、`heartbeat_age_secs`、`stale`（PIDが死んでいるかheartbeatが30秒より古い）、`run_ids`（そのtokenのlease）と、登録が持てば`providers`（supervisorが起動とexecの引き継ぎのたびに書くworkerのproviderごとの`{provider, executable, found, error?, modes}`: `--claude` / `--codex`の解決先、見つかったか、そのsupervisorが動かせる経路。列より古いbinaryの登録と登録の無い項目は省く。[Provider lifecycle](../provider-lifecycle.md#workerのproviderと経路)、ADR-t813-2）。登録のある項目は、さらに`slots: {used, landing_queue, parallel, source}`（`source`は`parallel`の出どころ: `flag` / `dagq.toml` / `default`、出どころの列より古いbinaryの登録はnull。[Run environment](run-environment.md)の`[supervisor]`。`landing_queue`はそのtokenのleaseを持つrunのうち、待ちでも戻り待ちでもなく、reviewとe2eを終えて着地の順番を待つだけのもの（下の`progress.slot`の`landing_queue`）の数で、`parallel`件までを数える（超える分は`used`に数える）。`used`はそのtokenのleaseを持つrunのうち、待ちでも戻り待ちでもないものから`landing_queue`を引いた数で、着地中（`integrating`）のrunとreview・revise・e2e・resumeの途中のrunも数える。`used`と`landing_queue`の和はsupervisorの`used_slots()`と同じ値で、和が`parallel`に達していれば戻り待ちのrunも`needs_session`のresumeも重いtaskのclaimも待つ。`used`だけが`parallel`未満なら、`[supervisor] light_changes`の軽いtaskだけをclaimできる（軽い枠。`parallel`−`used`のうち`parallel`−`used`−`landing_queue`を超える分。`light_changes`が空のsupervisorは使わない。[claimを控える](claim-hold.md#着地待ちが空けた軽い枠)、[ADR-t1591-1](../../adr/2026-10-04-t1591-1-landing-queue-leaves-room-for-light-changes.md)）。軽い枠のrunが走るあいだと、人が動かしたsessionが戻るあいだは和が`parallel`を超えうる。[ADR-t610-1](../../adr/2026-09-27-t610-1-landing-runs-fill-the-slot-in-status-and-stats.md)）と`waiting: {count, returning, limit, source}`（`source`は`limit`の出どころで`slots.source`と同じ値の集合。`count`は待ちのrunと戻り待ちのrunの合計で、supervisorが`--max-waiting`の判定に使う数と同じ。`returning`はそのうちの戻り待ちの数。`limit`は登録の`max_waiting`で、列より古いbinaryの登録はnull。数え方は`src/domain/waiting.rs`の`WaitCount`を`status`とsupervisorが共有する）を持つ（[ADR-0071](../../adr/0071-runs-waiting-in-revise-and-resume-leave-the-slot.md)の決定12と(f2)、ADR-t610-1）。登録が`claim_spacing`を持つ（列より古いbinaryの登録は持たない）項目は、loadの保留が有効なときの新しいclaimの間隔`claim_spacing: {secs, source, max_load, in_effect, last_claim_at, next_claim_at, waiting}`も持つ（[claimを控える](claim-hold.md#claimの間隔)、ADR-t1479-1）。`secs`と`source`は登録の`claim_spacing`と出どころ（`slots.source`と同じ値の集合）、`max_load`は登録の`--max-load`（無効ならnull）、`in_effect`は間隔が効いているか（`max_load`があり`secs`が0より大きい）、`last_claim_at`はqueueの最新の`run_claimed`の時刻（どのsupervisorのものでも。無ければnull）、`next_claim_at`は間隔が効いていて最新のclaimがあるときの次にclaimできる時刻（`last_claim_at` + `secs`。それ以外はnull）、`waiting`は`next_claim_at`が今より後か。新しいclaimを控えているsupervisorは`claim_hold`（最新の`claim_held`のpayloadと`since`。[claimを控える](claim-hold.md)）も持ち、空き容量の不足で着地の検証を控えているsupervisorは同じ形の`landing_hold`（最新の`landing_held`のpayloadと`since`。[空き容量を確かめる](disk-space.md)）も持つ。衝突の多いファイルと、supervisorが動かせないworker（`provider_unavailable` / `mode_unavailable`）でclaimを控えているtaskはsupervisorの項目ではなくtop levelの`claim_deferrals`（`[{task_id, reason, since, files, runs, supervisor}]`、taskごとの最新の`claim_deferred` / `claim_deferral_ended` / `run_claimed`が`claim_deferred`のもの。[claimを控える（衝突の多いファイル）](claim-defer.md)）に並ぶ。runを持たない常駐supervisorは`run_ids: []`で並ぶ。`waiting`（配列）はleaseを持つrunのうち、イベントの上で人の答えを待つか（`state: waiting`）slotへ戻るのを待つ（`state: returning`）runを1件ずつ、`run_id`、`task_id`、`asks`（`[{id, kind}]`）、`phase`（`session` / `exit` / `revise` / `resume`）、`status`（runの今のstatus）、`state`、`since`（待ちに入った時刻）、`waited_secs`（戻り待ちは終わりまで）と、戻り待ちなら`ended_at`と`cause`で返す（[人の答えを待つrun](waiting.md)）。待ちはattentionを増やさない。`runs`は表示と診断のためのrunの一覧で（goal 98、task 1520。`application::health::listed_runs`）、次の和を重複なく作られた順（`created_at`）に並べる: (1) 未完了run（`claimed`/`starting`/`running`/`validating`/`integrating`。leaseの有無を問わず今までどおり）、(2) `in_progress`のtaskの最新runのうち`awaiting_integration`と`needs_session`のもの（review・revise・衝突の修正・e2e・終了・着地待ちと、resume中・resume待ち。leaseの無い答え待ち・着地の列待ち・再開待ちも含む）、(3) leaseを持つ全てのrun（`supervisors[].run_ids`に並ぶrun。復旧jobが動く`failed` / `interrupted`や、着地を終えて後始末中のleaseが残る`integrated`も含む）。leaseの無い完了・cancelのrun（履歴）と、再試行されたtaskの古いleaseの無いrunは並ばない。この選び方は一覧のためだけのもので、自動のrecover・adopt・`stats`は今までどおり`active_runs`を使う。各項目は`run_id`、`task_id`、`status`（永続のstatusのまま）、`workspace_id`、`worktree_path`（queueの今の`runs/`から解決したpath。[ADR-0017](../../adr/0017-resolve-run-paths-from-the-queue-directory.md)）、`lease`（なければnull。`pid`でどのsupervisorが持つかが分かる）、補助欄の`progress`と、`last_error`か中断の理由の分類コードが分かるrunだけ`last_error_code`（[domain-model](../domain-model.md#理由の分類コードcode)）、runが最後に開いたsessionがbackgroundのwrapperのrunだけ`background`（`handle`・`pid`・`start`・`log`。`dagq run log`で読むlog。[非対話のworker](headless-worker.md#workspaceなしのbackgroundのwrapper)の「pidとlogの場所」）。
++`dagq status`はrunのprocessを調べずに登録とleaseだけを返す。引き継がれたrunは引き継いだsupervisorのtokenのleaseを持つので、他のrunと同じくそのsupervisorの`run_ids`に並ぶ。`supervisors`は`supervisors`表の登録を`started_at`順に、続けて登録のないtokenのlease保持者（着地中の`integrate`プロセス、または登録表以前のsupervisor）をlease順に並べ、leaseはtokenで登録に結び付ける。各項目は`pid`、`alive`（`kill -0`）、`registered`、`mode`と`workspace_id`、`binary_version`（そのプロセスが動いているdagqのversion。登録がなければnull、列より古いbinaryの登録もnull。[ADR-0014](../../adr/0014-up-replaces-a-supervisor-of-another-binary-version.md)）、`parallel`・`parallel_source`・`max_waiting`・`max_waiting_source`・`runtime_planners`・`runtime_planners_source`（runtimeのplannerの上限と出どころ。task 941。列より古いbinaryの登録はnull）と`started_at`（登録がなければnull。出どころは列より古いbinaryの登録もnull）、`heartbeat_at`、`heartbeat_age_secs`、`stale`（PIDが死んでいるかheartbeatが30秒より古い）、`run_ids`（そのtokenのlease）と、登録が持てば`providers`（supervisorが起動とexecの引き継ぎのたびに書くworkerのproviderごとの`{provider, executable, found, error?, modes}`: `--claude` / `--codex`の解決先、見つかったか、そのsupervisorが動かせる経路。列より古いbinaryの登録と登録の無い項目は省く。[Provider lifecycle](../provider-lifecycle.md#workerのproviderと経路)、ADR-t813-2）。登録のある項目は、さらに`slots: {used, landing_queue, parallel, source}`（`source`は`parallel`の出どころ: `flag` / `dagq.toml` / `default`、出どころの列より古いbinaryの登録はnull。[Run environment](run-environment.md)の`[supervisor]`。`landing_queue`はそのtokenのleaseを持つrunのうち、待ちでも戻り待ちでもなく、reviewとe2eを終えて着地の順番を待つだけのもの（下の`progress.slot`の`landing_queue`）の数で、`parallel`件までを数える（超える分は`used`に数える）。`used`はそのtokenのleaseを持つrunのうち、待ちでも戻り待ちでもないものから`landing_queue`を引いた数で、着地中（`integrating`）のrunとreview・revise・e2e・resumeの途中のrunも数える。`used`と`landing_queue`の和はsupervisorの`used_slots()`と同じ値で、和が`parallel`に達していれば戻り待ちのrunも`needs_session`のresumeも重いtaskのclaimも待つ。`used`だけが`parallel`未満なら、`[supervisor] light_changes`の軽いtaskだけをclaimできる（軽い枠。`parallel`−`used`のうち`parallel`−`used`−`landing_queue`を超える分。`light_changes`が空のsupervisorは使わない。[claimを控える](claim-hold.md#着地待ちが空けた軽い枠)、[ADR-t1591-1](../../adr/2026-10-04-t1591-1-landing-queue-leaves-room-for-light-changes.md)）。軽い枠のrunが走るあいだと、人が動かしたsessionが戻るあいだは和が`parallel`を超えうる。[ADR-t610-1](../../adr/2026-09-27-t610-1-landing-runs-fill-the-slot-in-status-and-stats.md)）と`waiting: {count, returning, limit, source}`（`source`は`limit`の出どころで`slots.source`と同じ値の集合。`count`は待ちのrunと戻り待ちのrunの合計で、supervisorが`--max-waiting`の判定に使う数と同じ。`returning`はそのうちの戻り待ちの数。`limit`は登録の`max_waiting`で、列より古いbinaryの登録はnull。数え方は`src/domain/waiting.rs`の`WaitCount`を`status`とsupervisorが共有する）を持つ（[ADR-0071](../../adr/0071-runs-waiting-in-revise-and-resume-leave-the-slot.md)の決定12と(f2)、ADR-t610-1）。登録が`claim_spacing`を持つ（列より古いbinaryの登録は持たない）項目は、loadの保留が有効なときの新しいclaimの間隔`claim_spacing: {secs, source, max_load, in_effect, last_claim_at, next_claim_at, waiting}`も持つ（[claimを控える](claim-hold.md#claimの間隔)、ADR-t1479-1）。`secs`と`source`は登録の`claim_spacing`と出どころ（`slots.source`と同じ値の集合）、`max_load`は登録の`--max-load`（無効ならnull）、`in_effect`は間隔が効いているか（`max_load`があり`secs`が0より大きい）、`last_claim_at`はqueueの最新の`run_claimed`の時刻（どのsupervisorのものでも。無ければnull）、`next_claim_at`は間隔が効いていて最新のclaimがあるときの次にclaimできる時刻（`last_claim_at` + `secs`。それ以外はnull）、`waiting`は`next_claim_at`が今より後か。新しいclaimを控えているsupervisorは`claim_hold`（最新の`claim_held`のpayloadと`since`。[claimを控える](claim-hold.md)）も持ち、空き容量の不足で着地の検証を控えているsupervisorは同じ形の`landing_hold`（最新の`landing_held`のpayloadと`since`。[空き容量を確かめる](disk-space.md)）も持つ。衝突の多いファイルと、supervisorが動かせないworker（`provider_unavailable` / `mode_unavailable`）と、依存先の着地を含まないsupervisorのbuild（`not_in_build`。`wait_for_build`を宣言したtask、ADR-t1632-1）でclaimを控えているtaskはsupervisorの項目ではなくtop levelの`claim_deferrals`（`[{task_id, reason, since, files, runs, supervisor}]`、taskごとの最新の`claim_deferred` / `claim_deferral_ended` / `run_claimed`が`claim_deferred`のもの。`not_in_build`の要素は`files` / `runs`がnullで、待っているbuild識別子`build`と、そのbuildが含まない依存先の着地`missing`（`[{task_id, commit}]`）を足す。[claimを控える（衝突の多いファイル）](claim-defer.md)）に並ぶ。同じ要素は`show TASK`の`claim_deferral`にも出る。runを持たない常駐supervisorは`run_ids: []`で並ぶ。`waiting`（配列）はleaseを持つrunのうち、イベントの上で人の答えを待つか（`state: waiting`）slotへ戻るのを待つ（`state: returning`）runを1件ずつ、`run_id`、`task_id`、`asks`（`[{id, kind}]`）、`phase`（`session` / `exit` / `revise` / `resume`）、`status`（runの今のstatus）、`state`、`since`（待ちに入った時刻）、`waited_secs`（戻り待ちは終わりまで）と、戻り待ちなら`ended_at`と`cause`で返す（[人の答えを待つrun](waiting.md)）。待ちはattentionを増やさない。`runs`は表示と診断のためのrunの一覧で（goal 98、task 1520。`application::health::listed_runs`）、次の和を重複なく作られた順（`created_at`）に並べる: (1) 未完了run（`claimed`/`starting`/`running`/`validating`/`integrating`。leaseの有無を問わず今までどおり）、(2) `in_progress`のtaskの最新runのうち`awaiting_integration`と`needs_session`のもの（review・revise・衝突の修正・e2e・終了・着地待ちと、resume中・resume待ち。leaseの無い答え待ち・着地の列待ち・再開待ちも含む）、(3) leaseを持つ全てのrun（`supervisors[].run_ids`に並ぶrun。復旧jobが動く`failed` / `interrupted`や、着地を終えて後始末中のleaseが残る`integrated`も含む）。leaseの無い完了・cancelのrun（履歴）と、再試行されたtaskの古いleaseの無いrunは並ばない。この選び方は一覧のためだけのもので、自動のrecover・adopt・`stats`は今までどおり`active_runs`を使う。各項目は`run_id`、`task_id`、`status`（永続のstatusのまま）、`workspace_id`、`worktree_path`（queueの今の`runs/`から解決したpath。[ADR-0017](../../adr/0017-resolve-run-paths-from-the-queue-directory.md)）、`lease`（なければnull。`pid`でどのsupervisorが持つかが分かる）、補助欄の`progress`と、`last_error`か中断の理由の分類コードが分かるrunだけ`last_error_code`（[domain-model](../domain-model.md#理由の分類コードcode)）、runが最後に開いたsessionがbackgroundのwrapperのrunだけ`background`（`handle`・`pid`・`start`・`log`。`dagq run log`で読むlog。[非対話のworker](headless-worker.md#workspaceなしのbackgroundのwrapper)の「pidとlogの場所」）。
+ 
+ `progress`は`{phase, since, elapsed_secs, slot}`で、runのstatusもschemaも増やさず既存のイベントから導く（`domain::run_progress::Progress::of`。`stats`の`watched_phase`はsessionの監視専用なので使わない）。`phase`は工程を始めるイベントの最後のもの（前から順に畳むので、後の工程が前の工程を置き換える）で、次のどれか。
+ 
+diff --git a/migrations/0065_task_wait_for_build.sql b/migrations/0065_task_wait_for_build.sql
+new file mode 100644
+index 00000000..44cfb86f
+--- /dev/null
++++ b/migrations/0065_task_wait_for_build.sql
+@@ -0,0 +1,9 @@
++-- dagq-schema: compatible
++-- A task's claim waits until the supervisor's own build contains the
++-- landed commits of every task it depends on (ADR-t1632-1; `add
++-- --wait-for-build`, `edit --wait-for-build` / `--no-wait-for-build`).
++-- 0 for a task that does not declare it, every task before this migration
++-- included. No CHECK: the runtime reads any other value than 0 as declared.
++-- An addition with a default only: an older binary never names the column,
++-- and its inserts leave it 0.
++ALTER TABLE tasks ADD COLUMN wait_for_build INTEGER NOT NULL DEFAULT 0;
+diff --git a/src/application/actor_executor.rs b/src/application/actor_executor.rs
+index e00b35f2..3ce2800d 100644
+--- a/src/application/actor_executor.rs
++++ b/src/application/actor_executor.rs
+@@ -923,6 +923,7 @@ mod tests {
+                 change: None,
+                 provider: None,
+                 worker_mode: None,
++                wait_for_build: false,
+             },
+             "now".into(),
+         )
+diff --git a/src/application/commands/planning.rs b/src/application/commands/planning.rs
+index 0ed42a6c..cafc4c40 100644
+--- a/src/application/commands/planning.rs
++++ b/src/application/commands/planning.rs
+@@ -477,6 +477,7 @@ mod tests {
+             change: None,
+             provider: None,
+             worker_mode: None,
++            wait_for_build: false,
+         }
+     }
+ 
+diff --git a/src/application/integrate.rs b/src/application/integrate.rs
+index 81183171..b1b3b172 100644
+--- a/src/application/integrate.rs
++++ b/src/application/integrate.rs
+@@ -967,6 +967,7 @@ pub fn register_follow_ups<Q: Queue + ?Sized>(
+                     ),
+                     provider: None,
+                     worker_mode: None,
++                    wait_for_build: false,
+                 });
+             FollowUpRegistration {
+                 index,
+@@ -2344,6 +2345,7 @@ mod tests {
+             updated_at: String::new(),
+             worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
+             named_mode: None,
++            wait_for_build: false,
+         })
+         .unwrap()
+     }
+diff --git a/src/application/mod.rs b/src/application/mod.rs
+index b68ad195..c45dee8d 100644
+--- a/src/application/mod.rs
++++ b/src/application/mod.rs
+@@ -762,6 +762,7 @@ mod tests {
+                 updated_at: String::new(),
+                 worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
+                 named_mode: None,
++                wait_for_build: false,
+             })
+             .unwrap()
+         };
+diff --git a/src/application/ports.rs b/src/application/ports.rs
+index 1de74a04..d0f1b749 100644
+--- a/src/application/ports.rs
++++ b/src/application/ports.rs
+@@ -47,6 +47,13 @@ pub trait TaskStore {
+     /// Dependency-ready tasks in claim order (ADR-0040 decision 4); each
+     /// task is limited to one unfinished run.
+     fn candidates(&self) -> Result<Vec<Task>>;
++    /// The ready tasks that wait for a build containing their
++    /// dependencies' landings (ADR-t1632-1), each with the landed commits
++    /// of its direct predecessors (none for a predecessor that landed
++    /// nothing).
++    fn build_waits(
++        &self,
++    ) -> Result<std::collections::HashMap<TaskId, Vec<crate::domain::build_wait::Landing>>>;
+     /// The unfinished tasks with their direct predecessors and the IDs of
+     /// `candidates`, read in one snapshot.
+     fn graph_input(&self) -> Result<GraphInput>;
+diff --git a/src/application/prompt.rs b/src/application/prompt.rs
+index 9dd91ba5..7c4cbb3b 100644
+--- a/src/application/prompt.rs
++++ b/src/application/prompt.rs
+@@ -4302,6 +4302,7 @@ mod tests {
+             updated_at: String::new(),
+             worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
+             named_mode: None,
++            wait_for_build: false,
+         })
+         .unwrap()
+     }
+@@ -4324,6 +4325,7 @@ mod tests {
+             updated_at: String::new(),
+             worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
+             named_mode: None,
++            wait_for_build: false,
+         })
+         .unwrap()
+     }
+@@ -4579,6 +4581,7 @@ mod tests {
+             updated_at: String::new(),
+             worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
+             named_mode: None,
++            wait_for_build: false,
+         })
+         .unwrap()
+     }
+@@ -4964,6 +4967,7 @@ mod tests {
+             updated_at: String::new(),
+             worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
+             named_mode: None,
++            wait_for_build: false,
+         })
+         .unwrap()
+     }
+@@ -5481,6 +5485,7 @@ mod tests {
+             updated_at: String::new(),
+             worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
+             named_mode: None,
++            wait_for_build: false,
+         })
+         .unwrap();
+         for provider in [Provider::Claude, Provider::Codex] {
+@@ -5821,6 +5826,7 @@ mod tests {
+             updated_at: String::new(),
+             worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
+             named_mode: None,
++            wait_for_build: false,
+         })
+         .unwrap();
+         for mode in [WorkerMode::Interactive, WorkerMode::Headless] {
+@@ -6343,6 +6349,7 @@ mod tests {
+             updated_at: String::new(),
+             worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
+             named_mode: None,
++            wait_for_build: false,
+         })
+         .unwrap()
+     }
+@@ -6631,6 +6638,7 @@ mod tests {
+             updated_at: String::new(),
+             worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
+             named_mode: None,
++            wait_for_build: false,
+         })
+         .unwrap()
+     }
+diff --git a/src/application/review.rs b/src/application/review.rs
+index 0c215d07..b3cc4801 100644
+--- a/src/application/review.rs
++++ b/src/application/review.rs
+@@ -472,6 +472,7 @@ mod tests {
+             updated_at: String::new(),
+             worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
+             named_mode: None,
++            wait_for_build: false,
+         })
+         .unwrap()
+     }
+diff --git a/src/application/supervise/claim_defer.rs b/src/application/supervise/claim_defer.rs
+index a9158dbd..c6261261 100644
+--- a/src/application/supervise/claim_defer.rs
++++ b/src/application/supervise/claim_defer.rs
+@@ -9,6 +9,9 @@
+ //! answer stops holding the claims back past
+ //! `[conflicts] waiting_owner_grace_secs` (ADR-t1484-1), and a failed run
+ //! with no commit of its own does not hold them back at all (ADR-t1634-1).
++//! A task that waits for a build containing its dependencies' landings is
++//! passed over while this supervisor's own build lacks one (ADR-t1632-1;
++//! the judgement is [`crate::domain::build_wait`]).
+ use crate::domain::EventKind;
+ use std::collections::{HashMap, HashSet};
+ 
+@@ -18,7 +21,7 @@ use tracing::{info, warn};
+ use super::Supervisor;
+ use crate::application::DependencyGraph;
+ use crate::domain::{
+-    Priority, RunId, TaskId,
++    Priority, RunId, TaskId, build_wait,
+     claim_defer::{
+         self, DEFERRAL_KINDS, Decision, Deferral, InFlight, RELATED_TASKS, deferrals_in_place,
+         expected_files, failed_without_commit, owner_waiting_since, worker_deferral_ended,
+@@ -58,6 +61,19 @@ pub(super) struct DeferWatch {
+     /// The deferrals for a worker this supervisor cannot run (ADR-t813-2),
+     /// with their reason and since when; `None` until read from the queue.
+     worker_deferrals: Option<HashMap<TaskId, (String, i64)>>,
++    /// The waits for a build that contains the dependencies' landings
++    /// (ADR-t1632-1), since when; `None` until read from the queue.
++    build_deferrals: Option<HashMap<TaskId, i64>>,
++    /// Whether this process's build contains each landed commit, as read:
++    /// the build is the process's own, so the answer holds until a handoff
++    /// starts another process with another build.
++    in_build: HashMap<String, bool>,
++    /// The tasks warned of as claimed because the build names no commit.
++    unjudged: HashSet<TaskId>,
++    /// The landed commits warned of as not placeable against the build:
++    /// git is asked again each pass (a fetch may resolve it), the warning
++    /// is given once.
++    unreadable: HashSet<String>,
+ }
+ 
+ impl DeferWatch {
+@@ -227,7 +243,10 @@ impl Supervisor<'_> {
+             now,
+             self.conflicts.config.waiting_owner_grace_secs,
+         );
+-        let latest = if self.defer.deferrals.is_none() || self.defer.worker_deferrals.is_none() {
++        let latest = if self.defer.deferrals.is_none()
++            || self.defer.worker_deferrals.is_none()
++            || self.defer.build_deferrals.is_none()
++        {
+             self.queue.latest_task_events(&DEFERRAL_KINDS)?
+         } else {
+             Vec::new()
+@@ -240,6 +259,13 @@ impl Supervisor<'_> {
+             Some(deferrals) => deferrals,
+             None => worker_deferrals_in_place(&latest),
+         };
++        let mut build_deferrals = match self.defer.build_deferrals.take() {
++            Some(deferrals) => deferrals,
++            None => build_wait::deferrals_in_place(&latest),
++        };
++        // The tasks that wait for the build and the landings they wait for
++        // (ADR-t1632-1); none is read unless one declares it.
++        let waits = self.queue.build_waits()?;
+         // Every worker runs here, on its own provider or the other one: no
+         // candidate is read for its worker (ADR-t813-2).
+         let routes = self.routes();
+@@ -280,6 +306,38 @@ impl Supervisor<'_> {
+                             worker_deferral_ended(&why, "cleared", since, now, &self.token),
+                         ));
+                     }
++                    // Its end is now the task's latest deferral event: a
++                    // wait for the build still in place is recorded again
++                    // below, so `status` and `show` keep showing it.
++                    build_deferrals.remove(&id);
++                }
++                (None, None) => {}
++            }
++            // Before the hotspots: a task this build cannot serve waits
++            // whatever its files meet, interrupt or not.
++            let lacking = match waits.get(&id) {
++                Some(landings) => self.lacking_from_build(id, landings),
++                None => None,
++            };
++            match (lacking, build_deferrals.get(&id)) {
++                (Some(_), Some(_)) => continue,
++                (Some(missing), None) => {
++                    // The wait's event replaces an open deferral on a
++                    // hotspot as the task's latest; the hotspot judgement
++                    // records it again once the build serves the task.
++                    if deferrals.get(&id).is_some_and(|deferral| !deferral.expired) {
++                        deferrals.remove(&id);
++                    }
++                    events.push((
++                        id,
++                        build_wait::deferred(&self.layout.version, &missing, &self.token),
++                    ));
++                    build_deferrals.insert(id, now);
++                    continue;
++                }
++                (None, Some(&since)) => {
++                    build_deferrals.remove(&id);
++                    events.push((id, build_wait::ended("cleared", since, now, &self.token)));
+                 }
+                 (None, None) => {}
+             }
+@@ -334,6 +392,17 @@ impl Supervisor<'_> {
+             false
+         });
+         self.defer.worker_deferrals = Some(worker_deferrals);
++        build_deferrals.retain(|id, since| {
++            if candidates.contains(id) {
++                return true;
++            }
++            events.push((
++                *id,
++                build_wait::ended("not_candidate", *since, now, &self.token),
++            ));
++            false
++        });
++        self.defer.build_deferrals = Some(build_deferrals);
+         deferrals.retain(|id, deferral| {
+             if candidates.contains(id) {
+                 return true;
+@@ -360,6 +429,39 @@ impl Supervisor<'_> {
+         Ok(order)
+     }
+ 
++    /// The landings of `task`'s dependencies this supervisor's build lacks
++    /// (ADR-t1632-1); `None` when it may be claimed: the build contains
++    /// them all, or names no commit to tell by (warned of once a task).
++    fn lacking_from_build(
++        &mut self,
++        task: TaskId,
++        landings: &[build_wait::Landing],
++    ) -> Option<Vec<build_wait::Landing>> {
++        let build = self.layout.version.clone();
++        let verdict = build_wait::judge(&build, landings, |landing, commit| {
++            if let Some(&contained) = self.defer.in_build.get(landing) {
++                return Some(contained);
++            }
++            match self.repository.is_ancestor(landing, commit) {
++                Ok(contained) => {
++                    self.defer.in_build.insert(landing.to_owned(), contained);
++                    Some(contained)
++                }
++                Err(error) => {
++                    if self.defer.unreadable.insert(landing.to_owned()) {
++                        warn!(task_id = %task, error = %format_args!("{error:#}"), "whether build {build} contains {landing} could not be read: {error:#}; task {task} waits");
++                    }
++                    None
++                }
++            }
++        });
++        let (lacking, warn) = build_wait::claim_step(verdict, task, &mut self.defer.unjudged);
++        if warn {
++            warn!(task_id = %task, "task {task} waits for a build that contains its dependencies' landings, and build {build} names no commit: claimed without the wait");
++        }
++        lacking
++    }
++
+     /// The hotspots some run in flight touches, and the runs in flight;
+     /// both empty when no hotspot is alerted.
+     fn hot_in_flight(&mut self, now: i64) -> Result<(Vec<String>, Vec<InFlight>)> {
+diff --git a/src/application/update.rs b/src/application/update.rs
+index 51130a72..247ca077 100644
+--- a/src/application/update.rs
++++ b/src/application/update.rs
+@@ -83,9 +83,7 @@ pub fn changes_runtime(paths: &[String]) -> bool {
+ /// `X.Y.Z-dev+<commit>[.dirty]`. `None` for a release (`X.Y.Z`) or a build
+ /// that did not know its commit (`+unknown`).
+ pub fn build_commit(version: &str) -> Option<&str> {
+-    let (_, metadata) = version.split_once('+')?;
+-    let commit = metadata.strip_suffix(".dirty").unwrap_or(metadata);
+-    (commit != crate::build_id::UNKNOWN_COMMIT && !commit.is_empty()).then_some(commit)
++    crate::domain::build_wait::build_commit(version)
+ }
+ 
+ /// Where the update keeps its checkout, target and a build waiting for a
+diff --git a/src/compose.rs b/src/compose.rs
+index c9bc53df..17d2b8cd 100644
+--- a/src/compose.rs
++++ b/src/compose.rs
+@@ -374,6 +374,10 @@ pub struct SuperviseOptions {
+     /// The build identifier the release check takes as the supervisor's;
+     /// `None` is this binary's. Tests set it (a release build looks).
+     pub release_current: Option<String>,
++    /// The build identifier the supervisor names itself by (registration,
++    /// log, the claim's wait for a build, ADR-t1632-1); `None` is this
++    /// binary's. Tests set it (a build that lacks or contains a landing).
++    pub build: Option<String>,
+     /// The Codex CLI a Codex worker starts (`supervise --codex`, ADR-t813-2):
+     /// resolved on PATH when found; a supervisor without it runs no Codex
+     /// worker and no Codex job.
+@@ -574,6 +578,7 @@ impl SuperviseOptions {
+             processes: None,
+             release_index: None,
+             release_current: None,
++            build: None,
+             codex: PathBuf::from("codex"),
+             codex_home: None,
+             host_metrics: None,
+@@ -805,7 +810,10 @@ pub fn supervise_with_reviewer(
+         providers,
+         runner: runner.into(),
+         pid,
+-        version: crate::VERSION.to_owned(),
++        version: options
++            .build
++            .clone()
++            .unwrap_or_else(|| crate::VERSION.to_owned()),
+         // The observe command's environment drops the supervisor's actor
+         // variables, and the supervisor sets its own when it starts it
+         // (`supervisor:<pid>`); its agent is the observer. It drops a
+diff --git a/src/domain/build_wait.rs b/src/domain/build_wait.rs
+new file mode 100644
+index 00000000..8bafaa4b
+--- /dev/null
++++ b/src/domain/build_wait.rs
+@@ -0,0 +1,298 @@
++//! Waiting with the claim of a task until the supervisor's own build
++//! contains the landings of the tasks it depends on (ADR-t1632-1). A task
++//! that declares it (`add --wait-for-build`) is a candidate once its
++//! dependencies are completed, like any other; the supervisor passes over
++//! it while the commit of its build identifier lacks one of their landed
++//! commits, and claims it from the first pass of a build that has them all
++//! (after an automatic update hands the supervisor over to it). The wait is
++//! recorded like the other deferrals of one task ([`super::claim_defer`]):
++//! `claim_deferred` with the reason [`NOT_IN_BUILD`] when it starts, and
++//! `claim_deferral_ended` when it ends. It has no limit.
++
++use std::collections::{HashMap, HashSet};
++
++use serde::Serialize;
++use serde_json::{Value, json};
++
++use super::{
++    EventKind, LeaseToken, RunEvent, TaskId,
++    claim_defer::{CLAIM_DEFERRED, worker_deferral_ended},
++    stats::timestamp_millis,
++};
++
++/// The reason of the `claim_deferred` of a task waiting for a build that
++/// contains its dependencies' landings.
++pub const NOT_IN_BUILD: &str = "not_in_build";
++
++/// The commit a build identifier names: `<commit>` of
++/// `X.Y.Z-dev+<commit>[.dirty]`. A dirty build is taken as its commit: it
++/// was built from that commit with local changes on top. `None` for a
++/// release (`X.Y.Z`) or a build that did not know its commit (`+unknown`).
++pub fn build_commit(build: &str) -> Option<&str> {
++    let (_, metadata) = build.split_once('+')?;
++    let commit = metadata.strip_suffix(".dirty").unwrap_or(metadata);
++    (commit != crate::build_id::UNKNOWN_COMMIT && !commit.is_empty()).then_some(commit)
++}
++
++/// A dependency's landed commit (its `run_integrated`).
++#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
++pub struct Landing {
++    pub task_id: TaskId,
++    pub commit: String,
++}
++
++/// What the build says of a task that waits for it.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum Verdict {
++    /// The build contains every landing: the task may be claimed.
++    Contains,
++    /// The build lacks these landings, or whether it contains them could
++    /// not be read: the task waits.
++    Lacks(Vec<Landing>),
++    /// The build names no commit (a release, `+unknown`): nothing tells
++    /// whether it contains them, and the task is claimed as if it declared
++    /// nothing, rather than wait for a build that may never come.
++    Unjudged,
++}
++
++/// Judge the landings of a task's dependencies against `build`, the
++/// supervisor's build identifier. `contains(landing, commit)` says whether
++/// the build's commit has the landed commit among its ancestors; `None`
++/// (it could not be read) counts as lacking it.
++pub fn judge(
++    build: &str,
++    landings: &[Landing],
++    mut contains: impl FnMut(&str, &str) -> Option<bool>,
++) -> Verdict {
++    let Some(commit) = build_commit(build) else {
++        return Verdict::Unjudged;
++    };
++    let missing: Vec<Landing> = landings
++        .iter()
++        .filter(|landing| contains(&landing.commit, commit) != Some(true))
++        .cloned()
++        .collect();
++    if missing.is_empty() {
++        Verdict::Contains
++    } else {
++        Verdict::Lacks(missing)
++    }
++}
++
++/// What a pass does with a task that waits for the build, from its
++/// `verdict`: the landings it waits for, `None` to claim it (the build
++/// contains them all, or names no commit), and whether to warn that it is
++/// claimed without the wait, the first time `warned` meets the task.
++pub fn claim_step(
++    verdict: Verdict,
++    task: TaskId,
++    warned: &mut HashSet<TaskId>,
++) -> (Option<Vec<Landing>>, bool) {
++    match verdict {
++        Verdict::Contains => (None, false),
++        Verdict::Lacks(missing) => (Some(missing), false),
++        Verdict::Unjudged => (None, warned.insert(task)),
++    }
++}
++
++/// The `claim_deferred` of a task whose dependencies' landings `build`
++/// lacks: `build`, the landings it lacks (`missing`), `message`,
++/// `supervisor`.
++pub fn deferred(build: &str, missing: &[Landing], token: &LeaseToken) -> (EventKind, Value) {
++    let lacking: Vec<String> = missing
++        .iter()
++        .map(|landing| format!("task {} ({})", landing.task_id, landing.commit))
++        .collect();
++    let message = format!(
++        "this supervisor's build {build} does not contain the landing of {}: not claimed until a build that does takes over",
++        lacking.join(", ")
++    );
++    (
++        EventKind::ClaimDeferred,
++        json!({
++            "reason": NOT_IN_BUILD,
++            "build": build,
++            "missing": missing,
++            "message": message,
++            "supervisor": token,
++        }),
++    )
++}
++
++/// The end of the wait: `why` is `cleared` (the build contains the
++/// landings, or the task no longer declares the wait) or `not_candidate`.
++pub fn ended(why: &str, since: i64, now: i64, token: &LeaseToken) -> (EventKind, Value) {
++    worker_deferral_ended(NOT_IN_BUILD, why, since, now, token)
++}
++
++/// The waits in place from each task's latest deferral event (an open
++/// `claim_deferred` of the reason [`NOT_IN_BUILD`]), with since when (unix
++/// seconds): what a supervisor starts from, after a handoff too.
++pub fn deferrals_in_place(latest: &[RunEvent]) -> HashMap<TaskId, i64> {
++    latest
++        .iter()
++        .filter(|event| {
++            event.kind == CLAIM_DEFERRED
++                && event.payload.get("reason").and_then(Value::as_str) == Some(NOT_IN_BUILD)
++        })
++        .filter_map(|event| {
++            let since = timestamp_millis(&event.created_at)? / 1000;
++            Some((event.task_id?, since))
++        })
++        .collect()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::domain::{EventId, claim_defer::worker_deferrals_in_place};
++
++    const LANDED: &str = "1111111111111111111111111111111111111111";
++    const OTHER: &str = "2222222222222222222222222222222222222222";
++    const BUILD: &str = "3333333333333333333333333333333333333333";
++
++    fn landings() -> Vec<Landing> {
++        vec![
++            Landing {
++                task_id: TaskId::new(1),
++                commit: LANDED.into(),
++            },
++            Landing {
++                task_id: TaskId::new(2),
++                commit: OTHER.into(),
++            },
++        ]
++    }
++
++    /// The build's history as a set of the commits it contains.
++    fn history<'h>(contained: &'h [&str]) -> impl FnMut(&str, &str) -> Option<bool> + 'h {
++        move |landing, commit| {
++            assert_eq!(commit, BUILD, "judged against the build's commit");
++            Some(contained.contains(&landing))
++        }
++    }
++
++    #[test]
++    fn a_build_that_contains_every_landing_lets_the_task_be_claimed() {
++        let build = format!("0.4.0-dev+{BUILD}");
++        assert_eq!(
++            judge(&build, &landings(), history(&[LANDED, OTHER])),
++            Verdict::Contains
++        );
++        // A task with no landing to wait for is claimed.
++        assert_eq!(judge(&build, &[], history(&[])), Verdict::Contains);
++    }
++
++    #[test]
++    fn a_build_that_lacks_a_landing_or_cannot_tell_holds_the_task() {
++        let build = format!("0.4.0-dev+{BUILD}");
++        assert_eq!(
++            judge(&build, &landings(), history(&[LANDED])),
++            Verdict::Lacks(vec![landings()[1].clone()])
++        );
++        // A landing the repository cannot place is not taken as contained.
++        assert_eq!(
++            judge(&build, &landings(), |landing, _| (landing == LANDED)
++                .then_some(true)),
++            Verdict::Lacks(vec![landings()[1].clone()])
++        );
++    }
++
++    #[test]
++    fn a_dirty_build_is_judged_by_its_commit_and_one_without_a_commit_is_not_judged() {
++        let dirty = format!("0.4.0-dev+{BUILD}.dirty");
++        assert_eq!(build_commit(&dirty), Some(BUILD));
++        assert_eq!(
++            judge(&dirty, &landings(), history(&[LANDED, OTHER])),
++            Verdict::Contains
++        );
++        assert_eq!(
++            judge(&dirty, &landings(), history(&[OTHER])),
++            Verdict::Lacks(vec![landings()[0].clone()])
++        );
++        for build in ["0.4.0", "0.4.0-dev+unknown", "0.4.0-dev+"] {
++            assert_eq!(build_commit(build), None, "{build}");
++            assert_eq!(
++                judge(build, &landings(), |_, _| unreachable!()),
++                Verdict::Unjudged
++            );
++        }
++    }
++
++    #[test]
++    fn a_task_is_claimed_unless_the_build_lacks_a_landing_and_warned_of_once_without_a_commit() {
++        let mut warned = HashSet::new();
++        let task = TaskId::new(7);
++        assert_eq!(
++            claim_step(Verdict::Contains, task, &mut warned),
++            (None, false)
++        );
++        let missing = vec![landings()[0].clone()];
++        assert_eq!(
++            claim_step(Verdict::Lacks(missing.clone()), task, &mut warned),
++            (Some(missing), false)
++        );
++        // A build with no commit claims it; the warning is the first pass's.
++        let unjudged = judge("0.4.0", &landings(), |_, _| unreachable!());
++        assert_eq!(
++            claim_step(unjudged.clone(), task, &mut warned),
++            (None, true)
++        );
++        assert_eq!(
++            claim_step(unjudged.clone(), task, &mut warned),
++            (None, false)
++        );
++        assert_eq!(
++            claim_step(unjudged, TaskId::new(8), &mut warned),
++            (None, true)
++        );
++    }
++
++    #[test]
++    fn the_wait_is_recorded_apart_from_the_deferrals_for_the_worker() {
++        let token = LeaseToken::new("s");
++        let missing = vec![landings()[1].clone()];
++        let (kind, payload) = deferred("0.4.0-dev+abc", &missing, &token);
++        assert_eq!(kind, EventKind::ClaimDeferred);
++        assert_eq!(payload["reason"], NOT_IN_BUILD);
++        assert_eq!(payload["build"], "0.4.0-dev+abc");
++        assert_eq!(payload["missing"], json!([{"task_id": 2, "commit": OTHER}]));
++        assert!(payload["message"].as_str().unwrap().contains("task 2"));
++        let event = |id, task, kind: &str, payload: Value| RunEvent {
++            id: EventId::new(id),
++            task_id: Some(TaskId::new(task)),
++            goal_id: None,
++            run_id: None,
++            kind: kind.into(),
++            payload,
++            created_at: "2026-10-05T01:00:00.000Z".into(),
++            actor: None,
++        };
++        let latest = [
++            event(1, 7, CLAIM_DEFERRED, payload),
++            event(
++                2,
++                8,
++                CLAIM_DEFERRED,
++                json!({"reason": "provider_unavailable"}),
++            ),
++        ];
++        let place = deferrals_in_place(&latest);
++        assert_eq!(place.keys().copied().collect::<Vec<_>>(), [TaskId::new(7)]);
++        // Not taken for a deferral for the worker.
++        let workers = worker_deferrals_in_place(&latest);
++        assert_eq!(
++            workers.keys().copied().collect::<Vec<_>>(),
++            [TaskId::new(8)]
++        );
++        let since = place[&TaskId::new(7)];
++        let (kind, end) = ended("cleared", since, since + 9, &token);
++        assert_eq!(kind, EventKind::ClaimDeferralEnded);
++        assert_eq!(
++            (&end["reason"], &end["why"], &end["deferred_secs"]),
++            (&json!(NOT_IN_BUILD), &json!("cleared"), &json!(9))
++        );
++        let latest = [event(3, 7, "claim_deferral_ended", end)];
++        assert!(deferrals_in_place(&latest).is_empty());
++    }
++}
+diff --git a/src/domain/claim_defer.rs b/src/domain/claim_defer.rs
+index 6f60f038..fd86efc4 100644
+--- a/src/domain/claim_defer.rs
++++ b/src/domain/claim_defer.rs
+@@ -390,7 +390,9 @@ pub fn worker_deferrals_in_place(latest: &[RunEvent]) -> HashMap<TaskId, (String
+         .filter(|event| event.kind == CLAIM_DEFERRED)
+         .filter_map(|event| {
+             let reason = text(event, "reason")?;
+-            if reason == HOT_FILES {
++            // The wait for a build is kept apart too
++            // ([`super::build_wait::deferrals_in_place`]).
++            if reason == HOT_FILES || reason == super::build_wait::NOT_IN_BUILD {
+                 return None;
+             }
+             let since = timestamp_millis(&event.created_at)? / 1000;
+@@ -426,7 +428,8 @@ pub fn worker_deferred(
+ }
+ 
+ /// The end of a deferral for the worker: `why` is `cleared` (the
+-/// supervisor can run it now) or `not_candidate`.
++/// supervisor can run it now) or `not_candidate`. The wait for a build
++/// ends the same way ([`super::build_wait::ended`]).
+ pub fn worker_deferral_ended(
+     reason: &str,
+     why: &str,
+@@ -468,6 +471,12 @@ pub struct OpenDeferral {
+     pub files: Value,
+     pub runs: Value,
+     pub supervisor: Option<String>,
++    /// For a wait for the build (ADR-t1632-1): the build that lacks the
++    /// landings, and those it lacks (`[{task_id, commit}]`).
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub build: Option<String>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub missing: Option<Value>,
+ }
+ 
+ impl OpenDeferral {
+@@ -479,6 +488,8 @@ impl OpenDeferral {
+             files: event.payload.get("files").cloned().unwrap_or(Value::Null),
+             runs: event.payload.get("runs").cloned().unwrap_or(Value::Null),
+             supervisor: text(event, "supervisor").map(str::to_owned),
++            build: text(event, "build").map(str::to_owned),
++            missing: event.payload.get("missing").cloned(),
+         })
+     }
+ }
+diff --git a/src/domain/follow_up.rs b/src/domain/follow_up.rs
+index 9a6db01b..80a304aa 100644
+--- a/src/domain/follow_up.rs
++++ b/src/domain/follow_up.rs
+@@ -354,6 +354,7 @@ mod tests {
+                 context: String::new(),
+                 provider: None,
+                 worker_mode: None,
++                wait_for_build: false,
+             },
+             "2026-09-28T00:00:00.000Z".into(),
+         )
+diff --git a/src/domain/input.rs b/src/domain/input.rs
+index 3531abea..cd55b1ad 100644
+--- a/src/domain/input.rs
++++ b/src/domain/input.rs
+@@ -46,6 +46,10 @@ pub struct NewTask {
+     /// provider's default (headless for both Claude and Codex).
+     #[serde(default)]
+     pub worker_mode: Option<WorkerMode>,
++    /// Claim it only once the supervisor's own build contains the landed
++    /// commits of every task it depends on (ADR-t1632-1).
++    #[serde(default)]
++    pub wait_for_build: bool,
+ }
+ 
+ impl NewTask {
+@@ -163,6 +167,10 @@ pub struct TaskEdit {
+     pub provider: Option<Provider>,
+     #[serde(default)]
+     pub worker_mode: Option<WorkerMode>,
++    /// Declare (`true`) or withdraw (`false`) the wait for a build that
++    /// contains the dependencies' landings (ADR-t1632-1).
++    #[serde(default)]
++    pub wait_for_build: Option<bool>,
+ }
+ 
+ impl TaskEdit {
+@@ -178,6 +186,7 @@ impl TaskEdit {
+             && self.change.is_none()
+             && self.provider.is_none()
+             && self.worker_mode.is_none()
++            && self.wait_for_build.is_none()
+     }
+ 
+     pub fn is_empty(&self) -> bool {
+@@ -191,6 +200,7 @@ impl TaskEdit {
+             && self.change.is_none()
+             && self.provider.is_none()
+             && self.worker_mode.is_none()
++            && self.wait_for_build.is_none()
+     }
+ 
+     /// The rules of [`NewTask::validate`] for the fields it replaces.
+@@ -226,6 +236,7 @@ pub struct TaskRecord {
+     pub paths: Vec<String>,
+     pub priority: Priority,
+     pub change: Option<TaskChange>,
++    pub wait_for_build: bool,
+     pub worker: Worker,
+     /// The mode the store keeps: none is the provider's default.
+     pub named_mode: Option<WorkerMode>,
+diff --git a/src/domain/lint.rs b/src/domain/lint.rs
+index 5144fc70..66e0e9ab 100644
+--- a/src/domain/lint.rs
++++ b/src/domain/lint.rs
+@@ -332,6 +332,7 @@ mod tests {
+                 change: None,
+                 provider: None,
+                 worker_mode: None,
++                wait_for_build: false,
+             },
+             "t".into(),
+         )
+@@ -526,6 +527,7 @@ mod tests {
+             updated_at: task.updated_at().into(),
+             worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
+             named_mode: None,
++            wait_for_build: false,
+         };
+         edit(&mut record);
+         Task::restore(record).unwrap()
+diff --git a/src/domain/mod.rs b/src/domain/mod.rs
+index 0a5350ec..951eaf12 100644
+--- a/src/domain/mod.rs
++++ b/src/domain/mod.rs
+@@ -850,6 +850,7 @@ pub mod authorization;
+ pub mod background_wrapper;
+ pub mod broker;
+ pub mod broker_usage;
++pub mod build_wait;
+ pub mod change;
+ pub mod claim_defer;
+ pub mod claim_hold;
+@@ -1706,6 +1707,7 @@ mod tests {
+             context: String::new(),
+             provider: None,
+             worker_mode: None,
++            wait_for_build: false,
+         };
+         assert_eq!(
+             task.validate().unwrap_err().to_string(),
+@@ -1742,6 +1744,7 @@ mod tests {
+             context: String::new(),
+             provider: None,
+             worker_mode: None,
++            wait_for_build: false,
+         };
+         assert_eq!(
+             task.required_evidence(),
+diff --git a/src/domain/run.rs b/src/domain/run.rs
+index 7c006b7d..b5ff34d7 100644
+--- a/src/domain/run.rs
++++ b/src/domain/run.rs
+@@ -846,6 +846,7 @@ mod tests {
+                 change: None,
+                 provider: None,
+                 worker_mode: None,
++                wait_for_build: false,
+             },
+             "now".into(),
+         )
+diff --git a/src/domain/task.rs b/src/domain/task.rs
+index e0164c58..bd3c7ada 100644
+--- a/src/domain/task.rs
++++ b/src/domain/task.rs
+@@ -104,6 +104,11 @@ pub struct Task {
+     /// The kind of change it makes, as the registrant declared it
+     /// (ADR-t980-1); null for a task registered without one.
+     change: Option<TaskChange>,
++    /// Claimed only once the supervisor's own build contains the landed
++    /// commits of every task it depends on (ADR-t1632-1); shown only when
++    /// declared.
++    #[serde(skip_serializing_if = "std::ops::Not::not")]
++    wait_for_build: bool,
+     /// The provider and mode its worker runs on (ADR-t813-2 decision 1,
+     /// ADR-t1340-1): Claude headless unless it asks for another; shown as
+     /// `provider` and `worker_mode`, resolved.
+@@ -137,6 +142,7 @@ impl Task {
+             paths: dedup_globs(&new.paths),
+             priority: new.priority,
+             change: new.change,
++            wait_for_build: new.wait_for_build,
+             title: new.title,
+             description: new.description,
+             acceptance: new.acceptance,
+@@ -170,6 +176,7 @@ impl Task {
+             paths: record.paths,
+             priority: record.priority,
+             change: record.change,
++            wait_for_build: record.wait_for_build,
+             worker: record.worker,
+             named_mode: record.named_mode,
+             status: record.status,
+@@ -216,6 +223,12 @@ impl Task {
+         self.change.as_ref()
+     }
+ 
++    /// Whether its claim waits for a build that contains the landings of
++    /// its dependencies (ADR-t1632-1).
++    pub fn wait_for_build(&self) -> bool {
++        self.wait_for_build
++    }
++
+     pub fn worker(&self) -> Worker {
+         self.worker
+     }
+@@ -365,6 +378,9 @@ pub fn edit(mut task: Task, edit: TaskEdit) -> Result<Task, DomainError> {
+     if let Some(change) = edit.change {
+         task.change = Some(change);
+     }
++    if let Some(wait) = edit.wait_for_build {
++        task.wait_for_build = wait;
++    }
+     task.worker = task.worker.with(edit.provider, edit.worker_mode)?;
+     // A new provider without a mode goes back to its default; a mode given
+     // is named. Neither keeps what the task named.
+@@ -495,6 +511,7 @@ mod tests {
+             context: "c".into(),
+             provider: None,
+             worker_mode: None,
++            wait_for_build: false,
+         }
+     }
+ 
+@@ -516,6 +533,7 @@ mod tests {
+             updated_at: "u".into(),
+             worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
+             named_mode: None,
++            wait_for_build: false,
+         }
+     }
+ 
+@@ -835,9 +853,31 @@ mod tests {
+                 context: Some("c2".into()),
+                 provider: None,
+                 worker_mode: None,
++                wait_for_build: Some(true),
++            },
++        )
++        .unwrap();
++        assert!(edited.wait_for_build());
++        // Shown only when declared (ADR-t1632-1).
++        assert_eq!(
++            serde_json::to_value(&edited).unwrap()["wait_for_build"],
++            true
++        );
++        assert!(
++            serde_json::to_value(&kept)
++                .unwrap()
++                .get("wait_for_build")
++                .is_none()
++        );
++        let withdrawn = edit(
++            edited.clone(),
++            TaskEdit {
++                wait_for_build: Some(false),
++                ..TaskEdit::default()
+             },
+         )
+         .unwrap();
++        assert!(!withdrawn.wait_for_build());
+         assert_eq!(
+             (edited.title(), edited.description(), edited.acceptance()),
+             ("t2", "d2", "a2")
+diff --git a/src/infrastructure/adapters.rs b/src/infrastructure/adapters.rs
+index 0ee97384..05d1148f 100644
+--- a/src/infrastructure/adapters.rs
++++ b/src/infrastructure/adapters.rs
+@@ -5110,6 +5110,7 @@ mod tests {
+             updated_at: "2026-09-22 00:00:00".into(),
+             worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
+             named_mode: None,
++            wait_for_build: false,
+         })
+         .unwrap()
+     }
+diff --git a/src/infrastructure/asks.rs b/src/infrastructure/asks.rs
+index 4a6be07d..656cae8d 100644
+--- a/src/infrastructure/asks.rs
++++ b/src/infrastructure/asks.rs
+@@ -1467,6 +1467,7 @@ mod tests {
+                 change: None,
+                 provider: None,
+                 worker_mode: None,
++                wait_for_build: false,
+             })
+             .unwrap()
+             .id();
+diff --git a/src/infrastructure/draft_planners.rs b/src/infrastructure/draft_planners.rs
+index 64af40fa..c136c63f 100644
+--- a/src/infrastructure/draft_planners.rs
++++ b/src/infrastructure/draft_planners.rs
+@@ -1232,6 +1232,7 @@ mod tests {
+                 context: String::new(),
+                 provider: None,
+                 worker_mode: None,
++                wait_for_build: false,
+             })
+             .unwrap()
+             .id()
+@@ -1292,6 +1293,7 @@ mod tests {
+                     context: String::new(),
+                     provider: None,
+                     worker_mode: None,
++                    wait_for_build: false,
+                 })
+                 .unwrap()
+                 .id();
+diff --git a/src/infrastructure/goal_reviews.rs b/src/infrastructure/goal_reviews.rs
+index ca08bc1d..06374d7d 100644
+--- a/src/infrastructure/goal_reviews.rs
++++ b/src/infrastructure/goal_reviews.rs
+@@ -213,6 +213,7 @@ fn register_gaps(
+                 ),
+                 provider: None,
+                 worker_mode: None,
++                wait_for_build: false,
+             },
+             stamp,
+         )?;
+diff --git a/src/infrastructure/plan_reviews.rs b/src/infrastructure/plan_reviews.rs
+index 9cbea744..b3699f99 100644
+--- a/src/infrastructure/plan_reviews.rs
++++ b/src/infrastructure/plan_reviews.rs
+@@ -1439,6 +1439,7 @@ mod tests {
+                 change: None,
+                 provider: None,
+                 worker_mode: None,
++                wait_for_build: false,
+             })
+             .unwrap()
+             .id();
+@@ -1506,6 +1507,7 @@ mod tests {
+             change: None,
+             provider: None,
+             worker_mode: None,
++            wait_for_build: false,
+         }
+     }
+ 
+diff --git a/src/infrastructure/search.rs b/src/infrastructure/search.rs
+index bcf8da94..38049eb1 100644
+--- a/src/infrastructure/search.rs
++++ b/src/infrastructure/search.rs
+@@ -298,6 +298,7 @@ mod tests {
+                 context: String::new(),
+                 provider: None,
+                 worker_mode: None,
++                wait_for_build: false,
+             })
+             .unwrap()
+             .id()
+diff --git a/src/infrastructure/sessions.rs b/src/infrastructure/sessions.rs
+index 99bd52eb..53798504 100644
+--- a/src/infrastructure/sessions.rs
++++ b/src/infrastructure/sessions.rs
+@@ -2258,6 +2258,7 @@ mod tests {
+                 change: None,
+                 provider: None,
+                 worker_mode: None,
++                wait_for_build: false,
+             })
+             .unwrap()
+             .id()
+diff --git a/src/infrastructure/sqlite.rs b/src/infrastructure/sqlite.rs
+index 0b1e376e..402fe83c 100644
+--- a/src/infrastructure/sqlite.rs
++++ b/src/infrastructure/sqlite.rs
+@@ -1032,6 +1032,34 @@ impl TaskStore for SqliteQueue {
+         Ok(ready)
+     }
+ 
++    fn build_waits(
++        &self,
++    ) -> Result<std::collections::HashMap<TaskId, Vec<crate::domain::build_wait::Landing>>> {
++        let mut waits: std::collections::HashMap<TaskId, Vec<_>> = Default::default();
++        let mut statement = self.conn.prepare(
++            "SELECT t.id, c.task_id, c.commit_sha FROM tasks t
++             LEFT JOIN task_dependencies d ON d.task_id = t.id
++             LEFT JOIN landed_commits c ON c.task_id = d.predecessor_id
++             WHERE t.status = 'ready' AND t.wait_for_build != 0
++             ORDER BY t.id, c.id",
++        )?;
++        let rows = statement.query_map([], |row| {
++            Ok((
++                row.get::<_, TaskId>(0)?,
++                row.get::<_, Option<TaskId>>(1)?,
++                row.get::<_, Option<String>>(2)?,
++            ))
++        })?;
++        for row in rows {
++            let (task, predecessor, commit) = row?;
++            let landings = waits.entry(task).or_default();
++            if let (Some(task_id), Some(commit)) = (predecessor, commit) {
++                landings.push(crate::domain::build_wait::Landing { task_id, commit });
++            }
++        }
++        Ok(waits)
++    }
++
+     fn graph_input(&self) -> Result<GraphInput> {
+         let tx = self.conn.unchecked_transaction()?;
+         read_graph_input(&tx)
+@@ -1444,10 +1472,16 @@ impl TaskStore for SqliteQueue {
+         };
+         let new_json = serde_json::to_value(&new)?;
+         let (mut from, mut to) = (serde_json::Map::new(), serde_json::Map::new());
++        // The JSON leaves out a wait for the build not declared: recorded
++        // as false (ADR-t1632-1).
++        let value = |json: &serde_json::Value, field: &str| match field {
++            "wait_for_build" => json!(json[field].as_bool().unwrap_or(false)),
++            _ => json[field].clone(),
++        };
+         for field in EDITABLE_TASK_FIELDS {
+             if old_json[field] != new_json[field] {
+-                from.insert(field.to_owned(), old_json[field].clone());
+-                to.insert(field.to_owned(), new_json[field].clone());
++                from.insert(field.to_owned(), value(&old_json, field));
++                to.insert(field.to_owned(), value(&new_json, field));
+             }
+         }
+         // Naming the mode the default already resolves to (`--headless` on a
+@@ -1461,8 +1495,8 @@ impl TaskStore for SqliteQueue {
+             tx.execute(
+                 "UPDATE tasks SET title=?1, description=?2, acceptance=?3,
+                  verification_commands=?4, required_evidence=?5, paths=?6, context=?7,
+-                 worker_provider=?10, worker_mode=?11, change=?12, updated_at=?8
+-                 WHERE id=?9",
++                 worker_provider=?10, worker_mode=?11, change=?12, wait_for_build=?13,
++                 updated_at=?8 WHERE id=?9",
+                 params![
+                     new.title(),
+                     new.description(),
+@@ -1476,6 +1510,7 @@ impl TaskStore for SqliteQueue {
+                     new.worker().provider.as_str(),
+                     new.stored_worker_mode().map(WorkerMode::as_str),
+                     new.change().map(TaskChange::as_str),
++                    new.wait_for_build(),
+                 ],
+             )?;
+             event(
+@@ -1498,7 +1533,7 @@ impl TaskStore for SqliteQueue {
+ 
+ /// The fields `dagq edit` replaces, as the task JSON names them; `task_edited`
+ /// records the ones that changed.
+-const EDITABLE_TASK_FIELDS: [&str; 10] = [
++const EDITABLE_TASK_FIELDS: [&str; 11] = [
+     "title",
+     "description",
+     "acceptance",
+@@ -1509,6 +1544,7 @@ const EDITABLE_TASK_FIELDS: [&str; 10] = [
+     "change",
+     "provider",
+     "worker_mode",
++    "wait_for_build",
+ ];
+ 
+ /// `error` with [`crate::application::QueueBusy`] as its context when a
+@@ -1548,15 +1584,15 @@ pub(super) fn insert_task(tx: &Connection, new: NewTask, now: &str) -> Result<Ta
+     tx.execute(
+             "INSERT INTO tasks(id, title, description, acceptance, verification_commands, status, goal_id,
+                                context, required_evidence, paths, priority, created_at,
+-                               updated_at, worker_provider, worker_mode, change)
+-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
++                               updated_at, worker_provider, worker_mode, change, wait_for_build)
++             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+             params![id, task.title(), task.description(), task.acceptance(),
+                 serde_json::to_string(task.verification_commands())?, task.status().as_str(),
+                 task.goal_id(), task.context(), serde_json::to_string(task.required_evidence())?,
+                 serde_json::to_string(task.paths())?, task.priority().as_i64(),
+                 task.created_at(), task.updated_at(),
+                 task.worker().provider.as_str(), task.stored_worker_mode().map(WorkerMode::as_str),
+-                task.change().map(TaskChange::as_str)],
++                task.change().map(TaskChange::as_str), task.wait_for_build()],
+         )?;
+     event(
+         tx,
+@@ -1934,7 +1970,24 @@ pub(super) fn claim_task(
+     };
+     let preferred = match position(order) {
+         Some(index) => index,
+-        None => position(&claim_order(tx)?).unwrap_or(0),
++        // Back to the claim order when none of `order` is ready any more
++        // (claimed elsewhere, canceled): never a task that waits for a
++        // build containing its dependencies' landings, which only the
++        // supervisor that judged it may claim (ADR-t1632-1).
++        None => {
++            let fallback = claim_order(tx)?
++                .iter()
++                .find_map(|id| {
++                    ready
++                        .iter()
++                        .position(|task| task.id() == *id && !task.wait_for_build())
++                })
++                .or_else(|| ready.iter().position(|task| !task.wait_for_build()));
++            match fallback {
++                Some(index) => index,
++                None => return Ok(ClaimOutcome::NoReadyTask),
++            }
++        }
+     };
+     let task = task::claim(ready.swap_remove(preferred))?;
+     let route = provider_switch::route_of(routes, task.worker())
+@@ -2442,6 +2495,8 @@ fn task_row(row: &Row<'_>) -> rusqlite::Result<Task> {
+         change: row
+             .get::<_, Option<String>>("change")?
+             .and_then(|change| change.parse().ok()),
++        // Any value but 0 is declared (ADR-t1632-1); the column has no CHECK.
++        wait_for_build: row.get::<_, i64>("wait_for_build")? != 0,
+         // NULL is the provider's default (Claude, headless: ADR-t1340-1): a
+         // task that names no mode, and one from before the worker existed;
+         // the columns' CHECK keeps any other value out.
+diff --git a/src/main.rs b/src/main.rs
+index 3e7cad70..ba399d1c 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -173,6 +173,12 @@ enum Command {
+         /// refused with --provider codex), for a task a person wants to watch or step into.
+         #[arg(long)]
+         interactive: bool,
++        /// Claim the task only once the supervisor's own build (its build identifier's commit)
++        /// contains the landed commits of every task it --depends-on (ADR-t1632-1): for a task
++        /// whose work needs the fixed binary to carry them. Until then `status` lists it under
++        /// `claim_deferrals` (reason not_in_build).
++        #[arg(long)]
++        wait_for_build: bool,
+     },
+     /// List one page of tasks, newest first: unfinished ones unless --status or --all says otherwise.
+     /// Prints {"tasks", "next", "total"}; pass `next` to --before for the following page (null: none).
+@@ -376,6 +382,13 @@ enum Command {
+         /// Run the worker in the agent's interactive session (`add --interactive`; Claude only).
+         #[arg(long, group = "field")]
+         interactive: bool,
++        /// Claim it only once the supervisor's build contains its dependencies' landings
++        /// (`add --wait-for-build`).
++        #[arg(long, group = "field", conflicts_with = "no_wait_for_build")]
++        wait_for_build: bool,
++        /// Withdraw --wait-for-build: claim it as soon as its dependencies are completed.
++        #[arg(long, group = "field")]
++        no_wait_for_build: bool,
+     },
+     /// Give a draft or ready task another priority (`add --priority`); it takes effect at the
+     /// next claim and never stops a running run.
+@@ -3084,6 +3097,7 @@ fn execute(cli: Cli) -> Result<Value> {
+             provider,
+             headless,
+             interactive,
++            wait_for_build,
+         } => serde_json::to_value(
+             planning!().add(NewTask {
+                 title,
+@@ -3107,6 +3121,7 @@ fn execute(cli: Cli) -> Result<Value> {
+                     (_, true) => Some(WorkerMode::Interactive),
+                     _ => None,
+                 },
++                wait_for_build,
+             })?,
+         )?,
+         Command::Show { id, full, events } => {
+@@ -3286,6 +3301,8 @@ fn execute(cli: Cli) -> Result<Value> {
+             provider,
+             headless,
+             interactive,
++            wait_for_build,
++            no_wait_for_build,
+         } => {
+             // A list flag replaces the list; its --no- flag empties it.
+             let replaced =
+@@ -3310,6 +3327,7 @@ fn execute(cli: Cli) -> Result<Value> {
+                         (_, true) => Some(WorkerMode::Interactive),
+                         _ => None,
+                     },
++                    wait_for_build: (wait_for_build || no_wait_for_build).then_some(wait_for_build),
+                 },
+             )?)?
+         }
+diff --git a/src/view.rs b/src/view.rs
+index d625d2cb..1483090a 100644
+--- a/src/view.rs
++++ b/src/view.rs
+@@ -8,7 +8,7 @@ use serde_json::{Map, Value, json};
+ 
+ use crate::domain::{
+     GoalDetail, OBSERVATION_KIND, RunEvent, TaskDetail,
+-    background_wrapper::current_background_session, broker_usage, reason,
++    background_wrapper::current_background_session, broker_usage, claim_defer, reason,
+ };
+ 
+ /// The one key of a command's value that is printed as is instead of as
+@@ -111,7 +111,15 @@ pub fn task_detail(detail: &TaskDetail, events: usize) -> Value {
+         .iter()
+         .map(event_gist)
+         .collect();
+-    json!({
++    // The claim deferred now, whatever the reason (a hotspot, the worker,
++    // the build, ADR-t1632-1): from the task's latest deferral event.
++    let deferral = detail
++        .events
++        .iter()
++        .rev()
++        .find(|event| claim_defer::DEFERRAL_KINDS.contains(&event.kind.as_str()))
++        .and_then(claim_defer::OpenDeferral::of);
++    let mut shown = json!({
+         "task": task,
+         "dependencies": detail.dependencies,
+         "goal_dependencies": detail.goal_dependencies,
+@@ -126,7 +134,11 @@ pub fn task_detail(detail: &TaskDetail, events: usize) -> Value {
+         "events_total": detail.events.len(),
+         "observations": observations(&detail.events),
+         "processes": processes,
+-    })
++    });
++    if let Some(deferral) = deferral {
++        shown["claim_deferral"] = json!(deferral);
++    }
++    shown
+ }
+ 
+ /// The events of `run` among the task's.
+@@ -242,6 +254,7 @@ mod tests {
+             updated_at: "u".into(),
+             worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
+             named_mode: None,
++            wait_for_build: false,
+         })
+         .unwrap()
+     }
+diff --git a/tests/common/queue.rs b/tests/common/queue.rs
+index 995e3970..fd886efe 100644
+--- a/tests/common/queue.rs
++++ b/tests/common/queue.rs
+@@ -37,6 +37,7 @@ pub fn new_task(title: &str) -> NewTask {
+         context: String::new(),
+         provider: None,
+         worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
++        wait_for_build: false,
+     }
+ }
+ 
+@@ -161,6 +162,7 @@ pub fn runtime_draft(
+             context: String::new(),
+             provider: None,
+             worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
++            wait_for_build: false,
+         })
+         .unwrap()
+         .id();
+diff --git a/tests/it/finding_planner.rs b/tests/it/finding_planner.rs
+index 2ead31c8..4078eae7 100644
+--- a/tests/it/finding_planner.rs
++++ b/tests/it/finding_planner.rs
+@@ -103,6 +103,7 @@ fn draft_at(
+             context: String::new(),
+             provider: None,
+             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
++            wait_for_build: false,
+         })
+         .unwrap()
+         .id()
+diff --git a/tests/it/lifecycle_cmux.rs b/tests/it/lifecycle_cmux.rs
+index 982aa4e1..41715254 100644
+--- a/tests/it/lifecycle_cmux.rs
++++ b/tests/it/lifecycle_cmux.rs
+@@ -167,6 +167,7 @@ fn the_cmux_adapter_sends_one_line_and_names_the_resume_workspace() {
+                 updated_at: String::new(),
+                 worker: dagq::domain::worker::Worker::CLAUDE_INTERACTIVE,
+                 named_mode: None,
++                wait_for_build: false,
+             })
+             .unwrap(),
+             &run,
+diff --git a/tests/it/lifecycle_plan.rs b/tests/it/lifecycle_plan.rs
+index e101bc36..536a7788 100644
+--- a/tests/it/lifecycle_plan.rs
++++ b/tests/it/lifecycle_plan.rs
+@@ -349,6 +349,7 @@ fn the_runtime_opens_a_planner_for_a_proposal_with_its_reasons() {
+             context: String::new(),
+             provider: None,
+             worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
++            wait_for_build: false,
+         })
+         .unwrap();
+     let proposal = queue
+diff --git a/tests/it/lifecycle_replace.rs b/tests/it/lifecycle_replace.rs
+index 94012fb2..d1f7dba2 100644
+--- a/tests/it/lifecycle_replace.rs
++++ b/tests/it/lifecycle_replace.rs
+@@ -50,6 +50,7 @@ fn claim_a_run(fixture: &Fixture, queue: &mut SqliteQueue, token: &str) -> Strin
+             context: String::new(),
+             provider: None,
+             worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
++            wait_for_build: false,
+         })
+         .unwrap();
+     queue
+diff --git a/tests/it/lifecycle_up.rs b/tests/it/lifecycle_up.rs
+index 4cf11724..540df074 100644
+--- a/tests/it/lifecycle_up.rs
++++ b/tests/it/lifecycle_up.rs
+@@ -829,6 +829,7 @@ fn up_prunes_dead_registrations_and_keeps_live_ones_and_leases() {
+             context: String::new(),
+             provider: None,
+             worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
++            wait_for_build: false,
+         })
+         .unwrap();
+     queue
+@@ -1009,6 +1010,7 @@ fn up_reports_runs_that_wait_for_a_person_or_the_supervisor() {
+                 context: String::new(),
+                 provider: None,
+                 worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
++                wait_for_build: false,
+             })
+             .unwrap();
+         queue
+diff --git a/tests/it/main.rs b/tests/it/main.rs
+index 3262d475..25734990 100644
+--- a/tests/it/main.rs
++++ b/tests/it/main.rs
+@@ -93,6 +93,7 @@ mod runtime_background_process;
+ mod runtime_broker;
+ mod runtime_candidates;
+ mod runtime_claim;
++mod runtime_claim_build;
+ mod runtime_claim_defer;
+ mod runtime_claim_hold;
+ mod runtime_claim_spacing;
+diff --git a/tests/it/plan_review.rs b/tests/it/plan_review.rs
+index 0fc5c3d1..158ea368 100644
+--- a/tests/it/plan_review.rs
++++ b/tests/it/plan_review.rs
+@@ -111,6 +111,7 @@ pub(crate) fn add(
+             provider: None,
+             // Headless: the fixture has no interactive workers (task 1437).
+             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
++            wait_for_build: false,
+         })
+         .unwrap()
+         .id()
+@@ -2243,6 +2244,7 @@ fn add_text(queue: &mut SqliteQueue, title: &str, description: &str, acceptance:
+             context: String::new(),
+             provider: None,
+             worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
++            wait_for_build: false,
+         })
+         .unwrap()
+         .id()
+@@ -2424,6 +2426,7 @@ fn add_paths(queue: &mut SqliteQueue, title: &str, paths: &[&str]) -> TaskId {
+             context: String::new(),
+             provider: None,
+             worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
++            wait_for_build: false,
+         })
+         .unwrap()
+         .id()
+@@ -2536,6 +2539,7 @@ fn an_in_progress_tasks_expected_files_are_what_its_run_changed() {
+             context: String::new(),
+             provider: None,
+             worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
++            wait_for_build: false,
+         })
+         .unwrap()
+         .id();
+diff --git a/tests/it/related.rs b/tests/it/related.rs
+index a4e0f8ad..e16165c7 100644
+--- a/tests/it/related.rs
++++ b/tests/it/related.rs
+@@ -444,6 +444,7 @@ fn build(dir: &TempDir) -> (SqliteQueue, HashMap<i64, i64>, std::path::PathBuf)
+                 change: None,
+                 provider: None,
+                 worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
++                wait_for_build: false,
+             })
+             .unwrap();
+         assert_eq!(task.id().as_i64(), ids[&fixture.real]);
+diff --git a/tests/it/request_planner.rs b/tests/it/request_planner.rs
+index cdb7ad79..23842d7f 100644
+--- a/tests/it/request_planner.rs
++++ b/tests/it/request_planner.rs
+@@ -99,6 +99,7 @@ fn draft(queue: &mut SqliteQueue, goal: dagq::domain::GoalId, title: &str) -> Ta
+             context: String::new(),
+             provider: None,
+             worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
++            wait_for_build: false,
+         })
+         .unwrap()
+         .id()
+diff --git a/tests/it/runtime_ask.rs b/tests/it/runtime_ask.rs
+index 11dc3898..3dd5fd82 100644
+--- a/tests/it/runtime_ask.rs
++++ b/tests/it/runtime_ask.rs
+@@ -30,6 +30,7 @@ fn receipt_follow_ups_appear_as_one_atomic_planner_bundle() {
+             context: String::new(),
+             provider: None,
+             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
++            wait_for_build: false,
+         })
+         .unwrap();
+     queue
+@@ -664,6 +665,7 @@ fn a_follow_up_draft_records_its_origin_and_its_planner_question_is_delivered_by
+             context: String::new(),
+             provider: None,
+             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
++            wait_for_build: false,
+         })
+         .unwrap();
+     queue
+diff --git a/tests/it/runtime_claim_build.rs b/tests/it/runtime_claim_build.rs
+new file mode 100644
+index 00000000..68a4f699
+--- /dev/null
++++ b/tests/it/runtime_claim_build.rs
+@@ -0,0 +1,207 @@
++//! Runtime tests: a task that waits for a build containing its
++//! dependencies' landings (ADR-t1632-1) is not claimed while the
++//! supervisor's own build lacks one, and is claimed by a supervisor whose
++//! build has them; a task that declares nothing is claimed as before.
++use crate::common::cli::{ok, queue};
++use crate::runtime_support;
++
++use dagq::domain::{ClaimOutcome, LeaseToken, provider_switch::WorkerRoute, worker::Worker};
++use runtime_support::*;
++
++fn add_waiting_task(queue: &mut SqliteQueue, title: &str, dependencies: &[TaskId]) -> TaskId {
++    let task = queue
++        .add(NewTask {
++            title: title.into(),
++            description: "small change".into(),
++            acceptance: "works".into(),
++            verification_commands: vec!["test -f seed.txt".into()],
++            required_evidence: Vec::new(),
++            paths: Vec::new(),
++            priority: Priority::Interrupt,
++            change: None,
++            dependencies: dependencies.to_vec(),
++            goal_dependencies: Vec::new(),
++            goal_id: None,
++            context: String::new(),
++            provider: None,
++            worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
++            wait_for_build: true,
++        })
++        .unwrap();
++    queue
++        .transition(task.id(), TaskAction::BypassReview)
++        .unwrap();
++    task.id()
++}
++
++fn events(db: &Path, kind: &str) -> Vec<(Option<TaskId>, Value)> {
++    SqliteQueue::open(db)
++        .unwrap()
++        .all_events()
++        .unwrap()
++        .into_iter()
++        .filter(|event| event.kind == kind)
++        .map(|event| (event.task_id, event.payload))
++        .collect()
++}
++
++fn runs_of(db: &Path, task: TaskId) -> usize {
++    SqliteQueue::open(db)
++        .unwrap()
++        .show(task)
++        .unwrap()
++        .runs
++        .len()
++}
++
++/// Supervise once as a supervisor built from `commit`, passing the review
++/// of every run so it lands.
++fn supervise_built_from(db: &Path, repo: &Path, commit: &str) -> Value {
++    let backend = TestWorkspace::new(db, false, VALID_AGENT);
++    let reviewer = TestReviewer::new(&vec![verdict("pass", &[], "meets the acceptance"); 4]);
++    let options = SuperviseOptions {
++        build: Some(format!("0.0.0-dev+{commit}")),
++        ..supervise_options(3, true)
++    };
++    supervise_reviewed_with(db, repo, &backend, &reviewer, &options)
++}
++
++/// The fixture's task 1 lands under a supervisor built from main before
++/// it: the task that waits for the build of that landing is passed over
++/// (even at interrupt priority) and `status` and `show` say why, while the
++/// task that declares nothing is claimed. A supervisor built from the
++/// landing (the build an automatic update hands over to) claims it on its
++/// first pass and ends the wait.
++#[test]
++fn a_task_waits_for_a_build_that_contains_its_dependencies_landings() {
++    let (_dir, repo, db) = fixture();
++    let before = git_out(&repo, &["rev-parse", "main"]);
++    let (waiting, plain) = {
++        let mut queue = SqliteQueue::open(&db).unwrap();
++        let waiting = add_waiting_task(&mut queue, "needs the build", &[TaskId::new(1)]);
++        let plain = add_ready_task(&mut queue, "needs the landing only", &[TaskId::new(1)]);
++        (waiting, plain)
++    };
++
++    let outcome = supervise_built_from(&db, &repo, &before);
++    assert_eq!(outcome["errors"], json!([]), "{outcome}");
++    let landed = events(&db, "run_integrated")
++        .into_iter()
++        .find(|(task, _)| *task == Some(TaskId::new(1)))
++        .map(|(_, payload)| payload["result_commit"].as_str().unwrap().to_owned())
++        .expect("task 1 landed");
++    assert_eq!(runs_of(&db, plain), 1, "a task that declares nothing");
++    assert_eq!(runs_of(&db, waiting), 0, "the build lacks the landing");
++    let deferred = events(&db, "claim_deferred");
++    assert_eq!(deferred.len(), 1, "{deferred:?}");
++    let (task, payload) = &deferred[0];
++    assert_eq!(*task, Some(waiting));
++    assert_eq!(payload["reason"], "not_in_build");
++    assert_eq!(payload["build"], format!("0.0.0-dev+{before}"));
++    assert_eq!(
++        payload["missing"],
++        json!([{"task_id": 1, "commit": landed}])
++    );
++    let status = runtime::status(&db).unwrap();
++    let open = status["claim_deferrals"].as_array().unwrap();
++    assert_eq!(open.len(), 1, "{status}");
++    assert_eq!(open[0]["task_id"], json!(waiting));
++    assert_eq!(open[0]["reason"], "not_in_build");
++    assert_eq!(open[0]["missing"][0]["commit"], json!(landed));
++    let shown = SqliteQueue::open(&db).unwrap().show(waiting).unwrap();
++    assert!(shown.task.wait_for_build());
++    assert!(
++        shown.events.iter().any(
++            |event| event.kind == "claim_deferred" && event.payload["reason"] == "not_in_build"
++        ),
++        "show carries the wait"
++    );
++    let shown = ok(&db, &["show", &waiting.to_string()]);
++    assert_eq!(shown["claim_deferral"]["reason"], "not_in_build", "{shown}");
++    assert_eq!(shown["claim_deferral"]["missing"][0]["task_id"], 1);
++
++    // A build of the landing claims it and ends the wait.
++    let outcome = supervise_built_from(&db, &repo, &landed);
++    assert_eq!(outcome["errors"], json!([]), "{outcome}");
++    assert_eq!(runs_of(&db, waiting), 1, "the build contains the landing");
++    // Recorded once over the passes it waited.
++    assert_eq!(events(&db, "claim_deferred").len(), 1);
++    let ended = events(&db, "claim_deferral_ended");
++    assert_eq!(ended.len(), 1, "{ended:?}");
++    assert_eq!(ended[0].0, Some(waiting));
++    assert_eq!(ended[0].1["reason"], "not_in_build");
++    assert_eq!(ended[0].1["why"], "cleared");
++    let status = runtime::status(&db).unwrap();
++    assert_eq!(status["claim_deferrals"], json!([]), "{status}");
++}
++
++/// The claim falls back to the claim order when none of the tasks the
++/// supervisor chose is ready any more (claimed elsewhere, canceled), and
++/// that fallback never takes a task that waits for the build: only the
++/// supervisor that judged its build may claim it.
++#[test]
++fn the_claims_fallback_never_takes_a_task_that_waits_for_the_build() {
++    let (_dir, _repo, db) = fixture();
++    let mut queue = SqliteQueue::open(&db).unwrap();
++    let waiting = add_waiting_task(&mut queue, "needs the build", &[]);
++    let base = CommitSha::parse("0123456789abcdef0123456789abcdef01234567", "base").unwrap();
++    let claim = |queue: &mut SqliteQueue, order: &[TaskId]| {
++        queue
++            .claim_for_supervisor_in_order(
++                &base,
++                &LeaseToken::new("t"),
++                order,
++                None,
++                &Default::default(),
++                &WorkerRoute::direct(&Worker::ALL),
++            )
++            .unwrap()
++    };
++    // An order whose task is gone: the fallback takes task 1, though the
++    // waiting task comes first by its interrupt priority.
++    let ClaimOutcome::Claimed { run } = claim(&mut queue, &[TaskId::new(99)]) else {
++        panic!("the task that declares nothing is claimed")
++    };
++    assert_eq!(run.task_id(), TaskId::new(1));
++    assert!(matches!(
++        claim(&mut queue, &[TaskId::new(99)]),
++        ClaimOutcome::NoReadyTask
++    ));
++    // Named in the order, as a supervisor whose build serves it names it.
++    let ClaimOutcome::Claimed { run } = claim(&mut queue, &[waiting]) else {
++        panic!("the waiting task is claimed when ordered")
++    };
++    assert_eq!(run.task_id(), waiting);
++}
++
++/// `add --wait-for-build` declares the wait and `show` prints it;
++/// `edit --no-wait-for-build` withdraws it, recorded as a change of
++/// `wait_for_build`, and a task that declares nothing shows no such field.
++#[test]
++fn the_wait_for_the_build_is_declared_shown_and_withdrawn() {
++    let (_dir, db) = queue();
++    let sound = ["--acceptance", "works", "--verify", "cargo test"];
++    let added = ok(
++        &db,
++        &[&["add", "needs the build", "--wait-for-build"][..], &sound].concat(),
++    );
++    assert_eq!(added["wait_for_build"], true);
++    let id = added["id"].to_string();
++    assert_eq!(ok(&db, &["show", &id])["task"]["wait_for_build"], true);
++    assert!(ok(&db, &["show", &id]).get("claim_deferral").is_none());
++    let edited = ok(&db, &["edit", &id, "--no-wait-for-build"]);
++    assert!(edited.get("wait_for_build").is_none(), "{edited}");
++    let event = ok(&db, &["show", &id, "--full"])["events"]
++        .as_array()
++        .unwrap()
++        .iter()
++        .rfind(|e| e["kind"] == "task_edited")
++        .cloned()
++        .unwrap();
++    assert_eq!(event["payload"]["from"], json!({"wait_for_build": true}));
++    assert_eq!(event["payload"]["to"], json!({"wait_for_build": false}));
++    let edited = ok(&db, &["edit", &id, "--wait-for-build"]);
++    assert_eq!(edited["wait_for_build"], true);
++    let plain = ok(&db, &[&["add", "needs nothing"][..], &sound].concat());
++    assert!(plain.get("wait_for_build").is_none(), "{plain}");
++}
+diff --git a/tests/it/runtime_claim_defer.rs b/tests/it/runtime_claim_defer.rs
+index 8ac1c420..25d5cec4 100644
+--- a/tests/it/runtime_claim_defer.rs
++++ b/tests/it/runtime_claim_defer.rs
+@@ -31,6 +31,7 @@ fn add_task(queue: &mut SqliteQueue, title: &str, paths: &[&str], priority: Prio
+             context: String::new(),
+             provider: None,
+             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
++            wait_for_build: false,
+         })
+         .unwrap();
+     queue
+@@ -95,6 +96,7 @@ fn hot_fixture() -> (Fixture, PathBuf, PathBuf) {
+             context: String::new(),
+             provider: None,
+             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
++            wait_for_build: false,
+         })
+         .unwrap()
+         .id();
+diff --git a/tests/it/runtime_claim_worker.rs b/tests/it/runtime_claim_worker.rs
+index 5ac79e2c..5bf7d6a6 100644
+--- a/tests/it/runtime_claim_worker.rs
++++ b/tests/it/runtime_claim_worker.rs
+@@ -34,6 +34,7 @@ fn add_task(
+             context: String::new(),
+             provider,
+             worker_mode: mode,
++            wait_for_build: false,
+         })
+         .unwrap();
+     queue
+diff --git a/tests/it/runtime_codex.rs b/tests/it/runtime_codex.rs
+index ecc493ec..efb02685 100644
+--- a/tests/it/runtime_codex.rs
++++ b/tests/it/runtime_codex.rs
+@@ -42,6 +42,7 @@ pub(crate) fn codex_fixture() -> (Fixture, PathBuf, PathBuf, TestWorkspace, Path
+             context: String::new(),
+             provider: Some(Provider::Codex),
+             worker_mode: Some(WorkerMode::Headless),
++            wait_for_build: false,
+         })
+         .unwrap();
+     assert_eq!(task.id(), TASK);
+diff --git a/tests/it/runtime_evidence.rs b/tests/it/runtime_evidence.rs
+index 2e2bbe4d..8cb645e2 100644
+--- a/tests/it/runtime_evidence.rs
++++ b/tests/it/runtime_evidence.rs
+@@ -26,6 +26,7 @@ fn evidence_fixture(evidence: &[EvidenceCheck]) -> (Fixture, PathBuf, PathBuf) {
+             context: String::new(),
+             provider: None,
+             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
++            wait_for_build: false,
+         })
+         .unwrap();
+     assert_eq!(task.id(), TaskId::new(2));
+@@ -336,6 +337,7 @@ fn scope_fixture(paths: &[&str]) -> (Fixture, PathBuf, PathBuf) {
+             context: String::new(),
+             provider: None,
+             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
++            wait_for_build: false,
+         })
+         .unwrap();
+     assert_eq!(task.id(), TaskId::new(2));
+diff --git a/tests/it/runtime_integrate.rs b/tests/it/runtime_integrate.rs
+index c2989e1d..92b3a821 100644
+--- a/tests/it/runtime_integrate.rs
++++ b/tests/it/runtime_integrate.rs
+@@ -413,6 +413,7 @@ fn add_file_task(
+             context: String::new(),
+             provider: None,
+             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
++            wait_for_build: false,
+         })
+         .unwrap();
+     queue
+@@ -959,6 +960,7 @@ fn add_ready_task_in(
+             context: context.into(),
+             provider: None,
+             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
++            wait_for_build: false,
+         })
+         .unwrap();
+     queue
+@@ -1223,6 +1225,7 @@ fn verification_failure_after_rebase_needs_a_session_and_keeps_the_rebased_tree(
+             context: String::new(),
+             provider: None,
+             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
++            wait_for_build: false,
+         })
+         .unwrap()
+         .id();
+@@ -1854,6 +1857,7 @@ fn add_script_task(
+             context: String::new(),
+             provider: None,
+             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
++            wait_for_build: false,
+         })
+         .unwrap();
+     queue
+diff --git a/tests/it/runtime_landing_answers.rs b/tests/it/runtime_landing_answers.rs
+index 4f291bde..306a10de 100644
+--- a/tests/it/runtime_landing_answers.rs
++++ b/tests/it/runtime_landing_answers.rs
+@@ -341,6 +341,7 @@ fn a_land_answer_is_applied_while_another_run_integrates() {
+             context: String::new(),
+             provider: None,
+             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
++            wait_for_build: false,
+         })
+         .unwrap()
+         .id();
+diff --git a/tests/it/runtime_light_slots.rs b/tests/it/runtime_light_slots.rs
+index 343cc2e4..2198840c 100644
+--- a/tests/it/runtime_light_slots.rs
++++ b/tests/it/runtime_light_slots.rs
+@@ -28,6 +28,7 @@ fn add_task(db: &Path, title: &str, change: &str, paths: &[&str], priority: Prio
+             context: String::new(),
+             provider: None,
+             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
++            wait_for_build: false,
+         })
+         .unwrap();
+     queue
+diff --git a/tests/it/runtime_provider_switch.rs b/tests/it/runtime_provider_switch.rs
+index 275ef074..9ea9d64a 100644
+--- a/tests/it/runtime_provider_switch.rs
++++ b/tests/it/runtime_provider_switch.rs
+@@ -49,6 +49,7 @@ fn add_task(db: &Path, provider: Provider, dependencies: &[TaskId]) -> TaskId {
+             context: String::new(),
+             provider: Some(provider),
+             worker_mode: Some(WorkerMode::Headless),
++            wait_for_build: false,
+         })
+         .unwrap();
+     queue
+diff --git a/tests/it/runtime_report.rs b/tests/it/runtime_report.rs
+index 4d554773..7edb76e4 100644
+--- a/tests/it/runtime_report.rs
++++ b/tests/it/runtime_report.rs
+@@ -219,6 +219,7 @@ fn the_reports_carry_the_dependency_diagram_or_why_not() {
+                 context: String::new(),
+                 provider: None,
+                 worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
++                wait_for_build: false,
+             })
+             .unwrap()
+             .id()
+diff --git a/tests/it/runtime_run_env.rs b/tests/it/runtime_run_env.rs
+index 4111cd22..70be80f6 100644
+--- a/tests/it/runtime_run_env.rs
++++ b/tests/it/runtime_run_env.rs
+@@ -32,6 +32,7 @@ fn dagq_toml_run_env_reaches_the_workspace_and_the_verification_commands() {
+             context: String::new(),
+             provider: None,
+             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
++            wait_for_build: false,
+         })
+         .unwrap();
+     queue
+diff --git a/tests/it/runtime_support/headless.rs b/tests/it/runtime_support/headless.rs
+index 541e65a6..15884f14 100644
+--- a/tests/it/runtime_support/headless.rs
++++ b/tests/it/runtime_support/headless.rs
+@@ -31,6 +31,7 @@ pub fn headless_fixture(evidence: &[EvidenceCheck]) -> (Fixture, PathBuf, PathBu
+             context: String::new(),
+             provider: Some(Provider::Claude),
+             worker_mode: Some(WorkerMode::Headless),
++            wait_for_build: false,
+         })
+         .unwrap();
+     assert_eq!(task.id(), TASK);
+diff --git a/tests/it/runtime_support/mod.rs b/tests/it/runtime_support/mod.rs
+index 74cc4d02..d3a87804 100644
+--- a/tests/it/runtime_support/mod.rs
++++ b/tests/it/runtime_support/mod.rs
+@@ -345,6 +345,7 @@ pub fn add_ready_task(queue: &mut SqliteQueue, title: &str, dependencies: &[Task
+             context: String::new(),
+             provider: None,
+             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
++            wait_for_build: false,
+         })
+         .unwrap();
+     queue
+@@ -2096,6 +2097,7 @@ fn awaiting_run_with_review_retry(retry: bool) -> (Fixture, PathBuf, PathBuf, Ta
+             context: String::new(),
+             provider: None,
+             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
++            wait_for_build: false,
+         })
+         .unwrap();
+     queue
+diff --git a/tests/it/worker_model.rs b/tests/it/worker_model.rs
+index 2d3c4d73..7a439e1e 100644
+--- a/tests/it/worker_model.rs
++++ b/tests/it/worker_model.rs
+@@ -290,6 +290,7 @@ fn a_codex_run_is_outside_the_trial() {
+             context: String::new(),
+             provider: Some(dagq::domain::Provider::Codex),
+             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
++            wait_for_build: false,
+         })
+         .unwrap();
+     queue

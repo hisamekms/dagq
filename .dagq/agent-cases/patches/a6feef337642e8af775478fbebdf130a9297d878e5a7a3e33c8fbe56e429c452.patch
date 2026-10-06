@@ -1,0 +1,1284 @@
+diff --git a/docs/design/manual-smoke.md b/docs/design/manual-smoke.md
+index 06ac4da3..bf95c1b0 100644
+--- a/docs/design/manual-smoke.md
++++ b/docs/design/manual-smoke.md
+@@ -4,8 +4,8 @@ type: design
+ title: Manual smoke of the paths that include real Claude and Codex
+ status: current
+ created: 2026-09-25
+-updated: 2026-10-03 # task 1399: dagq plan opens nothing (ADR-t1394-1)
+-last_verified: 2026-10-03 # task 1399
++updated: 2026-10-03 # task 1560: the Codex goal review smoke expects no prompt on the command line (after task 1399)
++last_verified: 2026-10-03 # task 1560
+ scope: operations
+ related:
+   - adr-0036
+@@ -383,7 +383,7 @@ env -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR=<scratch>/cfg-empty \
+ 5. 確かめる。
+    - `tq events --goal GOAL --full`: `goal_review_started` の `launch` が `{"role": "goal_review", "provider": "codex", "model": null, "effort": "low", "source": "dagq.toml"}` で `session_id` が null。`goal_review_finished` の `decision`（`achieved` のはず）、`session_id`（Codex の thread の id）、`model`（Codex が実際に使った model。読めなければ `model_unknown` の理由）。
+    - goal の `goal-reviews/<id>/review.out` が `codex exec --json` の JSONL（`thread.started` … `turn.completed`）で、`command_execution` に `dagq show` などの読み取りがあり、書き込みのコマンドがあれば sandbox に拒まれている。`review.err` に `--dangerously` の類の警告が無い。
+-   - `ps` で見た job の process（`codex exec --json -C <checkout> -c model_reasoning_effort="low" -c features.network_proxy=true -c default_permissions="dagq_job" -c permissions.dagq_job.extends=":read-only" ... -- ...`。task 1236 から `--sandbox read-only` の代わりに queue service の socket だけを許す profile）に bypass の flag が無く、job の `dagq show` などが `queue_service` の `unreachable` で失敗していない（job が短ければ `review.out` の `thread.started` と `tq status` の時刻で代える）。
++   - `ps` で見た job の process（`codex exec --json --skip-git-repo-check -C <checkout> -c model_reasoning_effort="low" -c features.network_proxy=true -c default_permissions="dagq_job" -c permissions.dagq_job.extends=":read-only" ...`。`--` も prompt も無く、prompt は stdin で渡る（task 1560）。task 1236 から `--sandbox read-only` の代わりに queue service の socket だけを許す profile）に bypass の flag が無く、job の `dagq show` などが `queue_service` の `unreachable` で失敗していない（job が短ければ `review.out` の `thread.started` と `tq status` の時刻で代える）。
+    - `~/.codex/sessions/YYYY/MM/DD/rollout-*-<thread>.jsonl` の `turn_context` の `model` が `goal_review_finished` の `model` と同じ。
+    - `tq stats --full` の `jobs.goal_review.by_provider.codex` と `by_model.<model>` に 1 件。
+    - `~/.codex/config.toml` の更新時刻が変わっていない。
+diff --git a/docs/design/provider-lifecycle.md b/docs/design/provider-lifecycle.md
+index c275d732..641f2562 100644
+--- a/docs/design/provider-lifecycle.md
++++ b/docs/design/provider-lifecycle.md
+@@ -4,8 +4,8 @@ type: design
+ title: Agent provider lifecycle
+ status: current
+ created: 2026-09-21
+-updated: 2026-10-03 # task 1399: dagq plan opens nothing (ADR-t1394-1)
+-last_verified: 2026-10-03 # task 1399
++updated: 2026-10-03 # task 1560: headless jobs get their prompt on stdin; an E2BIG or stdin start failure holds no provider (after task 1399)
++last_verified: 2026-10-03 # task 1560
+ scope: provider
+ related:
+   - adr-t1340-1
+@@ -55,7 +55,7 @@ providerのメソッドはapplicationのユースケースが直接呼ばず、`
+ 
+ `AgentSignals`はsupervisorが生きているsessionのagentについて読むもの（画面とidle marker）で、形式がagent固有なのでproviderのadapterが実装する（Claude Codeは`src/infrastructure/claude.rs`）。applicationはkindの名前・画面の抜粋・background workの有無（idle markerからと画面から）だけを受け取り、それがrunにとって何を意味するか（askにする、`/exit`を待つ）を決める。
+ 
+-コマンドを返すメソッドは`std::process::Command`ではなくapplicationの`CommandSpec`（program、引数、環境変数の設定と削除、cwdだけを持つ値。`Command`と同じ名前のbuilderを持つ）を返す。起動はapplicationの`Spawner` portが行い、標準入出力の行き先（wrapperの端末を継承、null、`<run-dir>`のファイル）は呼び出す側が`Streams`で決める。実装は`infrastructure::process::LocalSpawner`で、`CommandSpec`を`Command`に変えて子プロセスとして起動する（`infrastructure::process::command`）。observerとスループットの見直しのagentも`LocalSpawner`で起動し、stdoutを`output.out`、stderrを`output.err`に分けて書く（`Streams::Files`、入力はnull）。`Streams::Log`は両streamを1つのファイルに書く行き先として残る。こうしてsupervisorとsession wrapperのユースケース（`application::supervise` / `application::session`）はプロセスを直接扱わない（[supervisor-lifecycle](supervisor-lifecycle/supervise.md#supervise)）。
++コマンドを返すメソッドは`std::process::Command`ではなくapplicationの`CommandSpec`（program、引数、環境変数の設定と削除、cwd、自分のsessionで起動するか、stdinに渡すtextを持つ値。`Command`と同じ名前のbuilderを持つ）を返す。起動はapplicationの`Spawner` portが行い、標準入出力の行き先（wrapperの端末を継承、null、`<run-dir>`のファイル）は呼び出す側が`Streams`で決める。ただし`CommandSpec`がstdinのtext（`CommandSpec::stdin`）を持てば、spawnerは`Streams`に依らずそのtextを子のstdinにする（headless jobのprompt。[headless jobのinterface](#headless-jobのinterface)の「promptの渡し方」）。実装は`infrastructure::process::LocalSpawner`で、`CommandSpec`を`Command`に変えて子プロセスとして起動する（`infrastructure::process::command`）。observerとスループットの見直しのagentも`LocalSpawner`で起動し、stdoutを`output.out`、stderrを`output.err`に分けて書く（`Streams::Files`。stdinはpromptで、[headless jobのinterface](#headless-jobのinterface)の「promptの渡し方」のとおり）。`Streams::Log`は両streamを1つのファイルに書く行き先として残る。こうしてsupervisorとsession wrapperのユースケース（`application::supervise` / `application::session`）はプロセスを直接扱わない（[supervisor-lifecycle](supervisor-lifecycle/supervise.md#supervise)）。
+ 
+ Claude Code adapter（`src/infrastructure/adapters.rs`）はworktreeをcwdにし、`--session-id`にrun IDを渡し、`--debug-file`をrun管理領域に置き、`--add-dir`でrun管理領域への書き込みを許可し、promptを位置引数で渡す。workerとresumeのsessionには、session wrapperがclaimの決めたmodelとeffortを`--model` / `--effort`で明示して足す（`AgentProvider::select_model`、既定は`claude-opus-5-5`・`medium`。[Worker model](supervisor-lifecycle/worker-model.md)、ADR-0079の決定3）。stdin/stdout/stderrはwrapperのTTYを継承する。permission modeは上書きしない。
+ 
+@@ -63,9 +63,9 @@ Claude Code adapter（`src/infrastructure/adapters.rs`）はworktreeをcwdにし
+ 
+ workerの`command()`と`resume_command()`、runtimeが立てるplanner（`PlannerCommand::origin`が`runtime`）の`planner_command()`は、この設定に`"promptSuggestionEnabled": false`を足したもの（`runtime_session_settings`）を書き、Claude Codeの入力欄のサジェスト（次に打ちそうな文の灰色の表示）を止める（goal 48、task 499）。理由: 誰も打たないsessionで、サジェストが画面上は打ちかけの文と見分けにくく、inboxが取り違えた。環境変数`CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION`ではなくsettingsで出し分けるのは、役割ごとに分けられてtestで確かめやすいため。人が触るsession、つまり`up`が開くinbox（`--settings`を渡さない）と、廃止前に人が`dagq plan`で開いたplanner（origin `person`。`stop_hook_settings`のまま。`dagq plan`はADR-t1394-1で何も開かずに拒むようになったので、新しくは開かない）には入れない。
+ 
+-`review_command()`（[ADR-0040](../adr/0040-verify-once-review-run-env-graph-stats-and-task-priority-in-claim-order.md)の決定2、[ADR-0027](../adr/0027-keep-worker-session-through-review-revise-verdict-and-merge-tree-precheck.md)）はsupervisorが受理したrunをreviewさせる非対話のコマンドを返す。Claude Code adapterは`claude -p --debug-file <run-dir>/claude-review.log --add-dir <run-dir> --settings <run-dir>/claude-review-settings.json --allowedTools Read,Grep,Glob --disallowedTools Bash,Edit,Write,NotebookEdit --setting-sources "" -- <prompt>`をworktreeで起動する（worktreeは生きているworkerのsessionのものなので、reviewは読むだけ）。`--setting-sources ""`でworkerが変えられるworktreeの`.claude`の設定・agent・skill、`.mcp.json`、`CLAUDE.md`とuserの設定を読まない（[ADR-t1470-1](../adr/2026-10-03-t1470-1-all-claude-run-reviews-load-no-setting-sources.md)。repositoryの規則はpromptが名指して読ませる）。`claude-review-settings.json`はroleの`permissions.deny`・`autoMode.environment`・`autoMemoryEnabled: false`（cwdのauto memoryは`--setting-sources ""`でも読まれるため）で、`Stop` hookを持たない: reviewの間もworkerのsessionは開いたままなので、reviewがidle markerを書くとsupervisorのidle判定（reviseの往復）を誤らせる。cmux workspaceは作らず、stdin / stdout / stderrはruntimeが繋ぐ（stdinはnull、stdoutとstderrは`<run-dir>/review-<attempt>.out` / `.err`）。runtimeは`review_timeout()`を過ぎたらkillし、stdoutの`{"verdict": "pass" | "revise" | "concern", "reasons": [..], "summary": ".."}`を読む（[supervisor-lifecycle](supervisor-lifecycle/review.md#review-supervisor)）。`headless_command()`と1つのportにしないのは、reviewがrunに属し、そのrun directoryの設定・debug file・`--add-dir`と禁止するtoolを要るのに対し、observerのjobにはrunが無いため。reviewの子プロセスにはruntimeが`DAGQ_ROLE=review-job`・`DAGQ_ACTOR_ID`と、queue serviceのsocket（`DAGQ_SERVICE_SOCKET`）とjobのtokenのfile（`DAGQ_SERVICE_CREDENTIAL_FILE`）を渡し、`DAGQ_QUEUE`は渡さない。その`dagq`はクライアントモードで動き、serviceがreview jobのprincipalに読むコマンドだけを許す（[Roles](supervisor-lifecycle/roles.md#actors)、[Queue service](queue-service.md#クライアントモード)）。print mode（`-p`）はfolder trustの判定を飛ばす（[binary から読める判定](#binary-から読める判定)の1）ので、reviewはtrust dialogで止まらない。
++`review_command()`（[ADR-0040](../adr/0040-verify-once-review-run-env-graph-stats-and-task-priority-in-claim-order.md)の決定2、[ADR-0027](../adr/0027-keep-worker-session-through-review-revise-verdict-and-merge-tree-precheck.md)）はsupervisorが受理したrunをreviewさせる非対話のコマンドを返す。Claude Code adapterは`claude -p --debug-file <run-dir>/claude-review.log --add-dir <run-dir> --settings <run-dir>/claude-review-settings.json --allowedTools Read,Grep,Glob --disallowedTools Bash,Edit,Write,NotebookEdit --setting-sources ""`をworktreeで起動し、promptはargvでなくstdinで渡す（worktreeは生きているworkerのsessionのものなので、reviewは読むだけ。渡し方は[headless jobのinterface](#headless-jobのinterface)の「promptの渡し方」）。`--setting-sources ""`でworkerが変えられるworktreeの`.claude`の設定・agent・skill、`.mcp.json`、`CLAUDE.md`とuserの設定を読まない（[ADR-t1470-1](../adr/2026-10-03-t1470-1-all-claude-run-reviews-load-no-setting-sources.md)。repositoryの規則はpromptが名指して読ませる）。`claude-review-settings.json`はroleの`permissions.deny`・`autoMode.environment`・`autoMemoryEnabled: false`（cwdのauto memoryは`--setting-sources ""`でも読まれるため）で、`Stop` hookを持たない: reviewの間もworkerのsessionは開いたままなので、reviewがidle markerを書くとsupervisorのidle判定（reviseの往復）を誤らせる。cmux workspaceは作らず、stdin / stdout / stderrはruntimeが繋ぐ（stdinはprompt、stdoutとstderrは`<run-dir>/review-<attempt>.out` / `.err`）。runtimeは`review_timeout()`を過ぎたらkillし、stdoutの`{"verdict": "pass" | "revise" | "concern", "reasons": [..], "summary": ".."}`を読む（[supervisor-lifecycle](supervisor-lifecycle/review.md#review-supervisor)）。`headless_command()`と1つのportにしないのは、reviewがrunに属し、そのrun directoryの設定・debug file・`--add-dir`と禁止するtoolを要るのに対し、observerのjobにはrunが無いため。reviewの子プロセスにはruntimeが`DAGQ_ROLE=review-job`・`DAGQ_ACTOR_ID`と、queue serviceのsocket（`DAGQ_SERVICE_SOCKET`）とjobのtokenのfile（`DAGQ_SERVICE_CREDENTIAL_FILE`）を渡し、`DAGQ_QUEUE`は渡さない。その`dagq`はクライアントモードで動き、serviceがreview jobのprincipalに読むコマンドだけを許す（[Roles](supervisor-lifecycle/roles.md#actors)、[Queue service](queue-service.md#クライアントモード)）。print mode（`-p`）はfolder trustの判定を飛ばす（[binary から読める判定](#binary-から読める判定)の1）ので、reviewはtrust dialogで止まらない。
+ 
+-headlessのjob（review・triage・plan review・goal review・observer）のsessionには、runtimeが起動前にUUIDを作って`assign_session_id()`で付ける（[ADR-0048](../adr/0048-record-claude-sessions-by-kind-with-open-and-active-time.md)の決定4）。Claude Code adapterは`--session-id <uuid>`をoptionの最後（promptの前の`--`の前）に足す。jobのtranscriptはjobが終わる前から`<session_id>.jsonl`として特定でき、`-p`のstdout（verdictのJSON）の形は変わらない。session_idはjobを始めるevent（`review_started`・`triage_started`・`plan_review_started`・`goal_review_started`・`observe_started`）のpayloadの`session_id`に記録し、同じ値がjobのsessionの区間（`session_opened`）に載る。reviewとobserverはsupervisorとobserverが、triage・plan review・goal reviewはその開始を記録するqueueが作る。jobのsettingsにhookは足さない。session_idを付けられないproviderは既定の実装（何もしない）のままでよく、区間は`session_id`を持つが、transcriptと突き合わせられない。
++headlessのjob（review・triage・plan review・goal review・observer）のsessionには、runtimeが起動前にUUIDを作って`assign_session_id()`で付ける（[ADR-0048](../adr/0048-record-claude-sessions-by-kind-with-open-and-active-time.md)の決定4）。Claude Code adapterは`--session-id <uuid>`をoptionの最後に足す（promptはstdinなので、argvに`--`もpromptも無い）。jobのtranscriptはjobが終わる前から`<session_id>.jsonl`として特定でき、`-p`のstdout（verdictのJSON）の形は変わらない。session_idはjobを始めるevent（`review_started`・`triage_started`・`plan_review_started`・`goal_review_started`・`observe_started`）のpayloadの`session_id`に記録し、同じ値がjobのsessionの区間（`session_opened`）に載る。reviewとobserverはsupervisorとobserverが、triage・plan review・goal reviewはその開始を記録するqueueが作る。jobのsettingsにhookは足さない。session_idを付けられないproviderは既定の実装（何もしない）のままでよく、区間は`session_id`を持つが、transcriptと突き合わせられない。
+ 
+ ## headless jobのinterface
+ 
+@@ -81,9 +81,11 @@ headlessのjob（review・triage・plan review・goal review・observer）のses
+ 
+   Claude Codeの訳は`claude_tools(access)`（ファイルを読むなら`Read`・`Grep`・`Glob`、CLIを打てるなら`Bash(dagq:*)`）で、reviewはそれを`,`でつないで`--allowedTools`に、`Edit`・`Write`・`NotebookEdit`（CLIを打てなければ`Bash`も）を`--disallowedTools`に渡す。訳の結果はtask 1064より前の道具名の一覧と同じで、`src/infrastructure/adapters.rs`のunit test（`each_jobs_intent_starts_claude_with_the_tools_it_had`・`the_review_starts_claude_with_the_tools_it_had`）と`tests/e2e.rs`のreviewのstubが引数を確かめる。Codexはどの意図も読み取りだけのsandbox（`--sandbox read-only`）に訳す（[Codexのheadless job](#codexのheadless-job)）。
+ 
++- **promptの渡し方**（task 1560）: `headless_command`と`review_command`はpromptをargvに載せず、`CommandSpec::stdin`に持たせる。spawner（`infrastructure::process::LocalSpawner`）はそのtextを、`TMPDIR`に本人だけが読める（0600）一時ファイルとして作ってすぐunlinkし、子のstdinにする（pipeでないので、書き手が子の読みを待たない）。作る・書く・消すのに失敗すれば`StdinUnprepared`のerrorで起動を失敗させる（`a_stdin_that_cannot_be_prepared_is_no_providers_failure`）。Claude Codeは`claude -p`、Codexは`codex exec`（`-`も位置引数のpromptも無し）で、どちらもpromptの引数が無ければstdinから読む（codex-cli 0.160.0の`codex exec --help`が`If not provided as an argument (or if - is used), instructions are read from stdin`と言い、2026-10-03にClaude Code 2.1.288の`claude -p < file`とcodex-cli 0.160.0の`codex exec --skip-git-repo-check -s read-only < file`で返答が返ることを確かめた）。引数とenvの合計はhostの`ARG_MAX`（macOSで約1MiB）を超えられず、promptを位置引数で渡していたときは、2026-10-03に約1.1MBのplan reviewのpromptが`Argument list too long (os error 7)`で起動できなかった。unit test（`a_claude_job_starts_with_a_prompt_past_the_argument_limit`・`a_codex_job_starts_with_a_prompt_past_the_argument_limit`）が2MiBのpromptでstubのagentを起動し、stdinに全部届き引数に無いことを確かめる。workerとplannerのsessionとturn（`command`・`planner_command`・`turn_command`）は今もpromptを位置引数で渡す（task 643の範囲）。
++
+ - **最終の返答のtext**（`AgentProvider::job_reply(stdout)`）: jobはverdictや結果を、providerの実装が出力から取り出した最終の返答のtextから読む（`HeadlessJob::poll`がjobを起動したprovider（`HeadlessJob::provider`の`Supervisor::job_agent`。Claudeはsupervisorの`reviewer`、Codexは`codex_jobs`）の`job_reply`を通し、スループットの見直しはstdoutだけの`output.out`を通す）。既定とClaude Codeは`claude -p`がtextの出力で最終の返答だけを印字するので、stdoutをそのまま返す（今までと同じ結果）。stderr（`output.err`）は`job_reply`に渡さず、結果には混ざらない。observerは返答をparseせず、queueに書いたfindingとaskを結果として集める。verdictの検査と適用はproviderによらず同じ。
+ 
+-- **失敗の共通の分類**（`domain::headless_job::JobFailure`）: `executable_missing`（実行ファイルが無い）、`launch_failed`（起動できない）、`authentication`（loginが切れた）、`usage_limit`（利用上限・rate limit）、`other`（非0の終了、時間切れ、読めないverdictなどの一般の失敗）。最初の4つはworkerの`SwitchReason`（[domain-model](domain-model.md#providerの切り替えの理由switchreason)、task 818）と同じ値で、`JobFailure::switch_reason`で写せる。`other`はproviderを切り替えない。起動のerrorは`application::job_start_failure`が分類する（errorの連なりに`NotFound`のio errorがあれば`executable_missing`、他は`launch_failed`。goal reviewの起動の失敗が使う）。失敗したjobの出力（stdoutとstderr）はprovider（`Supervisor::job_failure`）が分類する: Claude Codeは`AgentSignals::job_failure`（`infrastructure::claude::job_failure`。`job_wall`の壁を`authentication` / `usage_limit`に、それ以外を`other`に）、Codexは`AgentProvider::job_failure`（JSONLをworkerのturnと同じ`CodexTurnReader`で読み、`codex_turns::classify`の`authentication` / `usage_limit`をそのまま、`launch`を`launch_failed`に、他を`other`に）。人しか動かせない壁（[Queue hold](supervisor-lifecycle/queue-hold.md)）は`JobFailure::wall`で読む。
++- **失敗の共通の分類**（`domain::headless_job::JobFailure`）: `executable_missing`（実行ファイルが無い）、`launch_failed`（起動できない）、`authentication`（loginが切れた）、`usage_limit`（利用上限・rate limit）、`other`（非0の終了、時間切れ、読めないverdictなどの一般の失敗）。最初の4つはworkerの`SwitchReason`（[domain-model](domain-model.md#providerの切り替えの理由switchreason)、task 818）と同じ値で、`JobFailure::switch_reason`で写せる。`other`はproviderを切り替えない。起動のerrorは`application::job_start_failure`が分類する（errorの連なりに`NotFound`のio errorがあれば`executable_missing`、`ArgumentListTooLong`（`E2BIG`、os error 7。引数かenvが上限を超えた）か、promptをstdinに渡す一時ファイルを用意できない（`application::StdinUnprepared`。`TMPDIR`が無い・書けない・一杯。io errorが`NotFound`でも）なら`other`、他は`launch_failed`。goal review・plan review・runのreview・スループットの見直しの起動の失敗が使う）。`E2BIG`と`StdinUnprepared`はproviderでなくjobの入力かsupervisorの環境の問題なので、そのjobの失敗（`plan_review_failed`など今の失敗の扱い）にだけ数え、providerを控えず、他のjobと他のproviderを止めない（task 1560。`tests/it/plan_review_launch.rs`の`a_job_past_the_argument_limit_fails_alone_and_holds_no_provider`。実行ファイルが無い起動の失敗が今どおり控えることは`a_missing_executable_still_holds_its_provider`）。失敗したjobの出力（stdoutとstderr）はprovider（`Supervisor::job_failure`）が分類する: Claude Codeは`AgentSignals::job_failure`（`infrastructure::claude::job_failure`。`job_wall`の壁を`authentication` / `usage_limit`に、それ以外を`other`に）、Codexは`AgentProvider::job_failure`（JSONLをworkerのturnと同じ`CodexTurnReader`で読み、`codex_turns::classify`の`authentication` / `usage_limit`をそのまま、`launch`を`launch_failed`に、他を`other`に）。人しか動かせない壁（[Queue hold](supervisor-lifecycle/queue-hold.md)）は`JobFailure::wall`で読む。
+ 
+   observerの失敗は、起動したproviderと組の`AgentSignals`をcomposition（`main`）から`observe`に渡して分類する。失敗時だけ`output.out`と`output.err`の両方を読み、改行でつないで`job_failure`に渡す。Claudeの認証・利用上限の診断はどちらのstreamにあっても従来どおり控えになる。両streamの書き込み順序は保存しない。observerのCodex対応はこの変更には含まない（スループットの見直しはtask 1220で[Throughput review](supervisor-lifecycle/throughput-review.md#codexで動かす)のとおりCodexで動く）。
+ 
+@@ -95,8 +97,8 @@ headlessのjob（review・triage・plan review・goal review・observer）のses
+ 
+ ADR-t1063-1の決定2・3・6（task 1065）。`[roles.<role>]`の`provider = "codex"`の役割（今はgoal review・runのreview・plan review・スループットの見直し。runのreviewは[ADR-t1207-1](../adr/2026-09-30-t1207-1-codex-run-review.md)、plan reviewはtask 1218（[Plan review](supervisor-lifecycle/plan-review.md#codexで動かす)）、スループットの見直しはtask 1220（[Throughput review](supervisor-lifecycle/throughput-review.md#codexで動かす)。supervisorの子processの`dagq throughput-review`が、supervisorの渡したlaunchと`--codex`で同じ`Codex`を作って起動する））のjobは、supervisorが見つけて`--version`の通ったCodex（`supervise --codex`、workerと同じ実行ファイル。cmuxのshimを避けて実体に解決して固定する。`Ports::codex_jobs`）の`infrastructure::codex::Codex`で起動する。spike（[codex-headless-jobs-spike](../plans/codex-headless-jobs-spike.md)）の最小の設定のとおり:
+ 
+-- **起動**（`headless_command`）: `codex exec --json --skip-git-repo-check --sandbox read-only -C <cwd> [-m <model>] [-c model_reasoning_effort="<effort>"] -- <prompt>`をcwdで起動する。`--skip-git-repo-check`はどのjobにも付ける（task 1378）: `codex exec`はcwd（`-C`）がGitのrepositoryの中か、trustしたdirでないと`Not inside a trusted directory and --skip-git-repo-check was not specified.`をstderrに出してexit 1で起動を拒む。スループットの見直しとobserver（`observer::run_agent`）のcwdはjobのdir（`<queue dir>/reports/reviews/<mode>-<period>/`、`<queue dir>/observer/<started_at>/`）、復旧job（`recovery::start_job`）のcwdはrunのdir（`runs/<run-id>/`）で、どれもGitの外なので、flagが無いとこの検査で落ちる（2026-10-02の本番の最初のCodexの毎時の見直しが`exit_code` 1・0秒で落ちた）。goal review・plan review（main checkout）とrunのreview（worktree）はflagが無くても通るが、同じ引数にそろえる。このflagはGitのrepositoryの検査を飛ばすだけで（codex-cli 0.160.0の`codex exec --help`の`Allow running Codex outside a Git repository`。`exec`は、flagが無く、cwdのprojectがtrustされておらず、cwdからGitのrootが見つからないときだけ拒む）、sandbox（`--sandbox read-only`と、その`dagq_job`のprofileへの置き換え）・承認・projectのtrust・人の`~/.codex/config.toml`は変えない。jobには今までどおりtrust（`codex::trust_config`）を渡さない（下の「projectのtrust」）。jobのcwdをmain checkoutに変えないのは、jobのdirの相対の読み書きと出力の置き場を変えずに済むため。unit test（`a_job_runs_in_the_read_only_sandbox`ほか）が引数を丸ごと比べ、`tests/it/throughput_review_codex.rs`のstubのcodexは実物と同じくGitのwork treeの外でflagが無ければ拒む。stdinはnull、stdoutとstderrはjobのファイル（goal reviewとplan reviewはjobのdirの`review.out` / `review.err`、runのreviewはrunのdirの`review-<N>.out` / `.err`）。runのreviewのcwdはrunのworktree（`AgentProvider::review_command`）。`--sandbox read-only`（`codex::JOB_SANDBOX`）はどの`JobAccess`でも同じで、ファイルの読み取りは全域で許し、書き込みを拒む。`dagq`の読み取りのコマンドは、sandboxの中のshellが起動したprocessのenv（`actor_env`の`DAGQ_ROLE`・`DAGQ_ACTOR_ID`と、queue serviceの`DAGQ_SERVICE_SOCKET`・`DAGQ_SERVICE_CREDENTIAL_FILE`）を継ぎ、クライアントモードでserviceに送られて、Claudeのjobと同じroleのpolicyでservice側で判定される（spike 1.・2.、goal 82の段(3)）。serviceのsocketに届くよう、executorが`reach_queue_service`を呼ぶと`--sandbox read-only`は`:read-only`を継いでそのsocketだけを許すpermission profile `dagq_job`の`-c`に置き換わる（goal review・runのreview・plan review・スループットの見直しも同じ。[Queue service](queue-service.md#codexのsandboxからの到達adr-t1233-5決定4)）。writable roots・`shell_environment_policy`・承認の設定・`--dangerously-bypass-approvals-and-sandbox`などのbypassのflagは付けない。人の`~/.codex/config.toml`・`auth.json`・`CODEX_HOME`は変えない（設定は起動の引数だけ。ADR-t813-3の決定6と同じ）。`assign_session_id`は何もしない（Codexはthreadを自分で名付ける）
+-- **modelとeffort**（`apply_launch`）: launchの`model`がClaudeのもの（`claude`で始まる）でなければ`-m <model>`、`effort`があれば`-c model_reasoning_effort="<effort>"`（`max`は`xhigh`。`codex::reasoning_effort`）を`--`の前に足す。Codexのlaunchは`model`を省けばCodexの既定のmodel、`effort`は省けば`medium`（[Actor model](supervisor-lifecycle/actor-model.md#provider)）
++- **起動**（`headless_command`）: `codex exec --json --skip-git-repo-check --sandbox read-only -C <cwd> [-m <model>] [-c model_reasoning_effort="<effort>"]`をcwdで起動し、promptはstdinで渡す（[headless jobのinterface](#headless-jobのinterface)の「promptの渡し方」）。`--skip-git-repo-check`はどのjobにも付ける（task 1378）: `codex exec`はcwd（`-C`）がGitのrepositoryの中か、trustしたdirでないと`Not inside a trusted directory and --skip-git-repo-check was not specified.`をstderrに出してexit 1で起動を拒む。スループットの見直しとobserver（`observer::run_agent`）のcwdはjobのdir（`<queue dir>/reports/reviews/<mode>-<period>/`、`<queue dir>/observer/<started_at>/`）、復旧job（`recovery::start_job`）のcwdはrunのdir（`runs/<run-id>/`）で、どれもGitの外なので、flagが無いとこの検査で落ちる（2026-10-02の本番の最初のCodexの毎時の見直しが`exit_code` 1・0秒で落ちた）。goal review・plan review（main checkout）とrunのreview（worktree）はflagが無くても通るが、同じ引数にそろえる。このflagはGitのrepositoryの検査を飛ばすだけで（codex-cli 0.160.0の`codex exec --help`の`Allow running Codex outside a Git repository`。`exec`は、flagが無く、cwdのprojectがtrustされておらず、cwdからGitのrootが見つからないときだけ拒む）、sandbox（`--sandbox read-only`と、その`dagq_job`のprofileへの置き換え）・承認・projectのtrust・人の`~/.codex/config.toml`は変えない。jobには今までどおりtrust（`codex::trust_config`）を渡さない（下の「projectのtrust」）。jobのcwdをmain checkoutに変えないのは、jobのdirの相対の読み書きと出力の置き場を変えずに済むため。unit test（`a_job_runs_in_the_read_only_sandbox`ほか）が引数を丸ごと比べ、`tests/it/throughput_review_codex.rs`のstubのcodexは実物と同じくGitのwork treeの外でflagが無ければ拒む。stdinはprompt、stdoutとstderrはjobのファイル（goal reviewとplan reviewはjobのdirの`review.out` / `review.err`、runのreviewはrunのdirの`review-<N>.out` / `.err`）。runのreviewのcwdはrunのworktree（`AgentProvider::review_command`）。`--sandbox read-only`（`codex::JOB_SANDBOX`）はどの`JobAccess`でも同じで、ファイルの読み取りは全域で許し、書き込みを拒む。`dagq`の読み取りのコマンドは、sandboxの中のshellが起動したprocessのenv（`actor_env`の`DAGQ_ROLE`・`DAGQ_ACTOR_ID`と、queue serviceの`DAGQ_SERVICE_SOCKET`・`DAGQ_SERVICE_CREDENTIAL_FILE`）を継ぎ、クライアントモードでserviceに送られて、Claudeのjobと同じroleのpolicyでservice側で判定される（spike 1.・2.、goal 82の段(3)）。serviceのsocketに届くよう、executorが`reach_queue_service`を呼ぶと`--sandbox read-only`は`:read-only`を継いでそのsocketだけを許すpermission profile `dagq_job`の`-c`に置き換わる（goal review・runのreview・plan review・スループットの見直しも同じ。[Queue service](queue-service.md#codexのsandboxからの到達adr-t1233-5決定4)）。writable roots・`shell_environment_policy`・承認の設定・`--dangerously-bypass-approvals-and-sandbox`などのbypassのflagは付けない。人の`~/.codex/config.toml`・`auth.json`・`CODEX_HOME`は変えない（設定は起動の引数だけ。ADR-t813-3の決定6と同じ）。`assign_session_id`は何もしない（Codexはthreadを自分で名付ける）
++- **modelとeffort**（`apply_launch`）: launchの`model`がClaudeのもの（`claude`で始まる）でなければ`-m <model>`、`effort`があれば`-c model_reasoning_effort="<effort>"`（`max`は`xhigh`。`codex::reasoning_effort`）をoptionに足す（`--`があればその前、jobのようにpromptをstdinで渡して`--`が無ければ最後）。Codexのlaunchは`model`を省けばCodexの既定のmodel、`effort`は省けば`medium`（[Actor model](supervisor-lifecycle/actor-model.md#provider)）
+ - **返答**（`job_reply`）: JSONLの最後の`item.completed`の`agent_message`の`text`（`codex::last_message`。省略しない全文）。無ければ空で、verdictが読めない失敗になる
+ - **session**（`job_session`）: JSONLを`CodexTurnReader::reading_since(<Codexのhomeのsessions>, <jobの開始の時刻>)`で読み、`thread.started`の`thread_id`をsession idに、threadのrolloutのうちjobの開始以降の`turn_context`の`payload.model`を実際のmodelにする（workerのturnと同じ`codex_turns::rollout_model`。読めなければ`model_unknown`に理由）。Codexのhomeは`$CODEX_HOME`、無ければ`~/.codex`で、testは`SuperviseOptions::codex_home`でstubのものを指す。rolloutは読むだけ
+ - **失敗**（`job_failure`）: 上の「失敗の共通の分類」。時間の上限は他のjobと同じ`HeadlessJob::stop`（子孫をpidで集めてからjobのprocessをkillし、子孫をpidで止める）で、codexのコマンドはcodexの子なので残らない見込み（spike 4.。実物では未測定）
+@@ -238,7 +240,7 @@ workerのproviderと経路はtaskが選ぶ（[ADR-t813-2](../adr/2026-09-28-t813
+ [ADR-t813-2](../adr/2026-09-28-t813-2-provider-per-task-and-mutual-fallback.md)の決定2〜6の実装（task 818）。型と規則は`src/domain/provider_switch.rs`、supervisorの側は`src/application/supervise/provider.rs`。
+ 
+ - **使えないの判定**（`SwitchReason`、[domain-model](domain-model.md#providerの切り替えの理由switchreason)）: 実行ファイルが無い（`executable_missing`。supervisorの表にそのproviderの組が無い、つまりpreflightで見つからないか動かない）、起動できない（`launch_failed`。wrapperがturnのagentの実行ファイルを実行できない（起動のerrorの連鎖に`NotFound`か`PermissionDenied`のio errorがある。settingsの書き込みなどほかのerrorは今までどおりwrapperの失敗）、またはagentがsignalでなく非0で終わり、出力に1行も出さず、読み手も`other`以外の分類をしなかった。turnの`failure`は`launch`）、認証（`authentication`）、利用上限・rate limit（`usage_limit`）。認証と利用上限は読み手の分類（Claudeは`ClaudeTurnReader`、Codexは`CodexTurnReader`の`classify`）で決める。Claudeの読み手はstreamの印（401の再試行、`rate_limit_event`、`api_error_status`など）の後に、結果の文とstderrを`infrastructure::claude::job_wall`（headlessのjobの出力から控えのaskを開く判定と同じ1か所の文言、task 438）でも読む。`model`・`sandbox`・`other`の失敗、止めたturn（`silent`・`timed_out`・`launch_mismatch`）、receiptの`failed`やtestの失敗は切り替えない（決定3。今までどおり復旧jobにかかる）。
+-- **控え**（決定6）: Claudeの控えはqueueの`queue_hold`のask（開いている間）そのもの。Codexの控え（どの理由でも）と、Claudeのagentが起動できない控え（`launch_failed`）は`ProviderHold`（`provider`・`reason`・`since`・`retry_at`）で、queueイベント`provider_held`（`run_id`・`reset_read`・`supervisor`も）に記録し、askは開かない（Claudeの`launch_failed`の控えもclaimの経路とturnの切り替えではClaudeを使えないものにする）。控えは`retry_at`の後のpassで`provider_released`（`why: retry_due`）になり、次のそのproviderの呼び出しが確かめ直す（また使えなければまた控える）。`retry_at`は、利用上限でturnの文が解ける時刻を言えばその時刻（`provider_switch::reset_at`: `|`か`resets at`の後のunix時刻、`in 2 hours 13 minutes`・`in 45s`のような`in`の後の長さ。`Try again at 3pm`のような時計の時刻はproviderのtime zoneが分からないので読まない。過去か7日（`MAX_RESET_SECS`）より先なら読まない。読めたかは`reset_read`）、読めなければ`SwitchReason::hold_secs`（`usage_limit` 1800秒、`authentication` 900秒、`launch_failed` 600秒）の後。人が控えのaskに`done`と答えたときは、askを閉じるsupervisorが全ての控えを解く（`why: done`）。supervisorは毎pass、最新の`provider_held` / `provider_released`から控えを読み直す（`check_provider_holds`、`check_queue_hold`の後。起動・exec・他のsupervisorの記録もこれで揃う）。`status`の`supervisors[].provider_hold`が控えを出す。
++- **控え**（決定6）: Claudeの控えはqueueの`queue_hold`のask（開いている間）そのもの。Codexの控え（どの理由でも）と、Claudeのagentが起動できない控え（`launch_failed`）は`ProviderHold`（`provider`・`reason`・`since`・`retry_at`）で、queueイベント`provider_held`（`run_id`・`reset_read`・`supervisor`も）に記録し、askは開かない（Claudeの`launch_failed`の控えもclaimの経路とturnの切り替えではClaudeを使えないものにする）。worker以外のheadless jobの起動の失敗は`application::job_start_failure`が分類し、引数・envの大きさによる失敗（`E2BIG`）とstdinの一時ファイルを用意できない失敗（`StdinUnprepared`）は`launch_failed`にせず控えない（task 1560、[headless jobのinterface](#headless-jobのinterface)の失敗の分類）。実行ファイルが無い・実行の権限が無いなどproviderそのものの起動の失敗は今までどおり控える。控えは`retry_at`の後のpassで`provider_released`（`why: retry_due`）になり、次のそのproviderの呼び出しが確かめ直す（また使えなければまた控える）。`retry_at`は、利用上限でturnの文が解ける時刻を言えばその時刻（`provider_switch::reset_at`: `|`か`resets at`の後のunix時刻、`in 2 hours 13 minutes`・`in 45s`のような`in`の後の長さ。`Try again at 3pm`のような時計の時刻はproviderのtime zoneが分からないので読まない。過去か7日（`MAX_RESET_SECS`）より先なら読まない。読めたかは`reset_read`）、読めなければ`SwitchReason::hold_secs`（`usage_limit` 1800秒、`authentication` 900秒、`launch_failed` 600秒）の後。人が控えのaskに`done`と答えたときは、askを閉じるsupervisorが全ての控えを解く（`why: done`）。supervisorは毎pass、最新の`provider_held` / `provider_released`から控えを読み直す（`check_provider_holds`、`check_queue_hold`の後。起動・exec・他のsupervisorの記録もこれで揃う）。`status`の`supervisors[].provider_hold`が控えを出す。
+ - **claim**（決定6）: `routes`は、taskのworkerを、そのproviderに組があり控えられていなければそのまま、そうでなければもう一方のproviderの非対話で（組があり控えられていないとき）動かし、どちらでもなければ経路なしにする。対話のClaudeのtaskもClaudeが控えられていれば非対話のCodexで始まる。経路が変わったrunは`run_claimed`と同じ取引で`provider_switched`（`phase: start`、`turn: null`、`count: 1`、`reason`はそのproviderの控えの理由か`executable_missing`）を記録する。全workerに経路が無い（Claudeが控えられ、Codexが無いか控えられている）ときだけ、Claudeのaskが新しいclaimを止め（`claim_held`）、候補は`provider_unavailable`で控える。
+ - **turnの途中**（決定2・4）: 非対話のturnの`failure`が`authentication` / `usage_limit` / `launch`なら、wrapperはsessionを終えずに次の依頼を待つ（`TurnOutcome::goes_on`）。supervisorは最初のsession・revise・resumeのどの段でも（`StallWatch::observe_turn`と、reviseとresumeの`SessionWatch::provider_wall`）、そのturnを見るたびに`Supervisor::turn_at_wall`を当てる（そのturnの後に切り替えか依頼があれば済んだものとして何もしない）。最初に見たとき、Claudeの認証と利用上限でなければそのproviderを`ProviderHold`で控え、もう一方のproviderの非対話が使え、runの切り替えが上限（`MAX_PROVIDER_SWITCHES` = 2。一度離れて、離れた先も使えないときに一度戻る）に達していなければ、`Queue::switch_provider`でrunの`actual_provider`と`worker_mode`（`headless`）を書き換えて`provider_switched`を記録し、失敗したturnの呼び出しをもう一方のproviderへの依頼（`turn_requested`の`what: provider switch`）にする。文は`switch_text`: 切り替えの理由、会話が引き継がれないこと、`git log --oneline <base>..HEAD`と`git status`で今までのcommitと変更を見て続けること、失敗したturnの依頼（`request-NNNNNN.taken.json`の`what`と`prompt`: answer・revise・催促など）。`phase`は失敗したturnの依頼から決める（`SwitchPhase::of_request`: 依頼なしは`start`、`answer of ask N`は`answer`、`revise request`は`revise`、`nudge`は`nudge`、ほか（解消依頼・復旧jobの指示・控えの「続けて」）は`resume`）。ClaudeからCodexへ移ったときは、Claudeで動く役割（`provider`を書かないreview・goal reviewと、復旧・plan reviewのjob、observer）のためにClaudeの控えのaskを開き（runは`affected`に入れない）、runに`auth_required` / `usage_limited`（`switched_to: codex`）を書く。reviewはそのaskが閉じるまで待つ。切り替えられないとき（もう一方も使えない、切り替えの上限）、runは失敗にせず待つ。最初に見たときにrunに`provider_waiting`（`turn`・`provider`・`reason`・`other`・`blocked`（移れない理由）・`retry_at`）を記録し、sessionは次の依頼を待ったまま残る（最初のturnのagentが起動できなかったrunは、agentが一度も登録されないので`starting`のまま）。その後に見るたびに、もう一方が使えるようになり切り替えが残っていれば切り替え、自分のproviderの控えが解け（`retry_at`、または`done`）控えのaskにも入っていなければ、同じproviderの同じsessionへ失敗したturnの呼び出しをもう一度送る（`retry_text`、`turn_requested`の`what: provider retry`）。人に届けるのは（`wall_to_raise`）、Claudeの認証と利用上限（Claudeだけの役割も止まるので常に）と、両方使えないとき（もう一方も控えられているか表に無い）で、runは`raise_wall`で控えのaskに入る。壁は、開いている控えのaskがあればその理由、無ければ失敗の理由か、もう一方の控えの理由の認証・利用上限。`done`で全ての控えが解け、「続けて」が今のproviderに行き、また使えなければそのturnでまた判定する。両方が起動できない（`launch_failed`か実行ファイルが無い）ときはaskを開かず、控えの時刻ごとに確かめ直して待つ（claimの候補は`provider_unavailable`で控えられ`status`に出る）。切り替えの上限でCodexの壁から移れず、Claudeが使えるときもaskは開かず（人を待つものが無い）、Codexの控えの時刻（解ける時刻が読めればその時刻）の後に同じthreadへもう一度送る。切り替えたときは`write_prompt`がtaskのpromptを新しいproviderの文面で書き直し（Codexはsubagent reviewをしない、など）、wrapperは新しいsessionでそれを読み直す。
+ - **wrapperの新しいsession**: wrapperは依頼を取るたびにrunの`actual_provider`を読み直し、変わっていればもう一方のproviderの非対話のagentで新しいsessionを始める（resumeせず、依頼の前にtaskのpromptを付ける）。sessionの状態（modelが答えたか、名乗ったthread）は最後の`provider_switched`より後のeventだけから読む（`provider_switch::since_switch`）。Claudeのsessionの名前は`turn::session_name`で、切り替えの無いrunはrunのid、切り替えの後は`<run id>/<切り替えの回数>`のSHA-256から作るUUID（Claude Codeは使われた`--session-id`を拒み、切り替えの後のsessionは新しいため）。`turn_started`に`provider`が載る。supervisorのslotのrunの写しは、切り替えたstepの後に新しいworkerになる。
+diff --git a/docs/design/supervisor-lifecycle/goal-review.md b/docs/design/supervisor-lifecycle/goal-review.md
+index 796dcc7f..93515cdd 100644
+--- a/docs/design/supervisor-lifecycle/goal-review.md
++++ b/docs/design/supervisor-lifecycle/goal-review.md
+@@ -4,8 +4,8 @@ type: design
+ title: "Goal review (supervisor)"
+ status: current
+ created: 2026-09-27
+-updated: 2026-10-03 # task 1399: dagq plan opens nothing (ADR-t1394-1)
+-last_verified: 2026-10-03 # task 1399
++updated: 2026-10-03 # task 1560: the job gets its prompt on stdin; an E2BIG or stdin start failure is the job's own, holding no provider (after task 1399)
++last_verified: 2026-10-03 # task 1560
+ scope: runtime
+ related:
+   - adr-t1566-1
+@@ -28,7 +28,7 @@ execの[引き継ぎ](handoff.md)を待つあいだに終わったjobと、`prep
+ 1. **記録**（schema v42、`migrations/0042_goal_reviews.sql`、compatible）: jobは`goal_reviews`の1行（`goal_id`、`attempt`、`supervisor_token`、`fingerprint`、`dir`、`started_at`、`finished_at`、`outcome` = `achieved` / `gaps` / `ask` / `failed` / `interrupted`、`verdict`のJSON、`error`、`ask_id`、`rearmed_at`）。互換のmigrationは外部キーとunique indexを持てないので、同時に1つは`begin_goal_review`が`BEGIN IMMEDIATE`の中で生きているsupervisorの未完了の行が無いことを確かめてから行を書くことで守る（queue全体で1つ。plan reviewとは別に数える）。行の無いsupervisorの未完了の行は`interrupted`で閉じる。eventはgoalに記録する（`run_events.goal_id`）。askのkindに`approve_goal`を足した（kindにmigrationは要らない）。jobのpromptと出力はqueueの`goal-reviews/<行のID>/`（`prompt.txt`、`review.out`、`review.err`）。
+ 2. **起動の条件**（`goal_review_candidates`、ID順の先頭を取る）: goalが`open`で閉じておらず、所属taskが1件以上あり、すべて`completed`か`canceled`で`completed`が1件以上（`goal_review::tasks_done`。`draft` / `submitted`のtask、つまりruntimeのplannerの待ち・`keep_draft`で残ったdraft・閉じていない`planner_question`の対象は、これで除かれる）、goalのreviewが開いた`approve_goal`のaskで閉じていないものが無く、前回のgoal review（`interrupted`を除く最新の行）の後に所属taskの状態が変わっている。状態は`fingerprint`（taskのIDとstatusをID順に並べた文字列）で比べ、同じなら起動しない。人の`goal review ID`（`rearm_goal_review`）は最新の行に`rearmed_at`を書き、状態が同じでも起動させる（`goal_review_rearmed`）。openでないgoalには打てない。
+ 3. **起動**（`start_goal_review`）: `[roles.goal_review]`から起動の`launch`を決め（[Actor model](actor-model.md)。表が無ければ今までと同じくmodel / effortを渡さない）、`goal_review_started`（`goal_review_id`、`attempt`、`dir`、`tasks`（fingerprint）、`gaps_in_a_row`、`session_id`、`cwd`、`launch`）を書き、jobをactor executor（[Roles](roles.md#actorの起動actorexecutor)）の`HeadlessProgram::Job`（`repo_root`、権限の意図`GOAL_REVIEW_ACCESS`＝`read_files_and_queue_cli`。Claude Codeは`--allowedTools Read Grep Glob Bash(dagq:*)`に訳す。[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)）で起動する。`session_id`は`begin_goal_review`が行と同じトランザクションで作るUUIDで、jobにそのまま渡す（ADR-0048の決定4、Claude Codeには`--session-id`）。`cwd`はjobを起動したrepositoryのcheckout、`launch`は`{"role": "goal_review", "provider": "claude", "model", "effort", "source"}`（task 1062）。jobの区間（kind `goal_review`）は`goal_review_started`で開き、同じ`goal_review_id`の`goal_review_finished` / `goal_review_failed`で閉じ（`job_finished`）、行を`interrupted`で閉じたとき（supervisorが居ない行は`inferred`、goalかtaskが変わったときは`job_finished`）にも閉じる。区間のeventはgoalの最初のtask（approve_goalのaskと同じ）に記録し、payloadに`goal_id`・`goal_ids`（`[goal_id]`。`stats --goal`の絞り込み）・`goal_review_id`・`launch`を持つ。`session_closed`はtranscriptから読んだ実際の`model` / `effort`を持つ（[Agent provider lifecycle](../provider-lifecycle.md#claude-sessionの区間)）。task 1062より前のgoal reviewは`session_id`も`launch`も無く、区間も無い。envは`actor_env`の`DAGQ_ROLE=goal-review-job`・`DAGQ_ACTOR_ID=goal-review-job:<goal id>:<attempt>`と、queue serviceのsocketとjobのtokenのfile（`DAGQ_QUEUE`は渡さず、jobの`dagq`はクライアントモードでserviceに送る。[Queue service](../queue-service.md#クライアントモード)。CLIは読み取りだけを許す。[Roles](roles.md#actors)）。時間の上限はreviewの`review_timeout`。起動できなければ下の6の失敗にする。
+-   - **provider**（[ADR-t1063-1](../../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)、task 1065）: 行き先は`Supervisor::goal_review_route`が`starting`のpassごとに決める。`[roles.goal_review]`に`provider`が無ければ今までどおりClaudeで、Claudeの控えのaskが開いている間は起動しない。`provider`があれば`domain::actor_model::job_route`で、そのproviderが使えれば（supervisorにagentがあり、`Supervisor::provider_held`が控えを言わない）そこで、使えなければもう一方のprovider（goal reviewはClaudeでもCodexでも動く）が使えればそこで（launchに`switched_from`・`switch_reason`。modelとeffortは渡さない）、どちらも使えなければ起動しない。Codexのjobは`Ports::codex_jobs`（supervisorが見つけて`--version`の通ったCodex）で`codex exec --json --sandbox read-only -C <repo_root> [-m <model>] [-c model_reasoning_effort="<effort>"] -- <prompt>`として組み、executorが`--sandbox read-only`を、`:read-only`を継いでqueue serviceのsocketだけを許すpermission profile `dagq_job`の`-c`に置き換えて起動する（[Agent provider lifecycle](../provider-lifecycle.md#codexのheadless-job)、[Queue service](../queue-service.md#codexのsandboxからの到達adr-t1233-5決定4)）。envは同じ`actor_env`で、sandboxの中の`dagq`も`goal-review-job`のroleで読むだけ。Codexのjobは`session_id`を受け取らないので、`goal_review_started`の`session_id`はnullで、`launch`は`{"role": "goal_review", "provider": "codex", "model", "effort", "source"}`。`headless_jobs.provider`も行き先のprovider
++   - **provider**（[ADR-t1063-1](../../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)、task 1065）: 行き先は`Supervisor::goal_review_route`が`starting`のpassごとに決める。`[roles.goal_review]`に`provider`が無ければ今までどおりClaudeで、Claudeの控えのaskが開いている間は起動しない。`provider`があれば`domain::actor_model::job_route`で、そのproviderが使えれば（supervisorにagentがあり、`Supervisor::provider_held`が控えを言わない）そこで、使えなければもう一方のprovider（goal reviewはClaudeでもCodexでも動く）が使えればそこで（launchに`switched_from`・`switch_reason`。modelとeffortは渡さない）、どちらも使えなければ起動しない。Codexのjobは`Ports::codex_jobs`（supervisorが見つけて`--version`の通ったCodex）で`codex exec --json --skip-git-repo-check --sandbox read-only -C <repo_root> [-m <model>] [-c model_reasoning_effort="<effort>"]`として組み（promptはargvでなくstdin。task 1560。[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)の「promptの渡し方」）、executorが`--sandbox read-only`を、`:read-only`を継いでqueue serviceのsocketだけを許すpermission profile `dagq_job`の`-c`に置き換えて起動する（[Agent provider lifecycle](../provider-lifecycle.md#codexのheadless-job)、[Queue service](../queue-service.md#codexのsandboxからの到達adr-t1233-5決定4)）。envは同じ`actor_env`で、sandboxの中の`dagq`も`goal-review-job`のroleで読むだけ。Codexのjobは`session_id`を受け取らないので、`goal_review_started`の`session_id`はnullで、`launch`は`{"role": "goal_review", "provider": "codex", "model", "effort", "source"}`。`headless_jobs.provider`も行き先のprovider
+ 4. **入力**（`goal_review_material`）: goalのtitle・description・acceptance・constraints・doc、所属taskのそれぞれのid・title・status・description・acceptance・`duplicate_of`（重複でcancelした先）、`integrated`のrunがあればその`run_id`・`result_commit`とreceiptの`summary`・`tests` / `e2e` / `subagent_review`の`status`と`evidence_or_reason`・`follow_ups`（読めなければ`(receipt unavailable)`）、goalのevent（`observation`（note）、`goal_updated`、`goal_decided`、`goal_review_rearmed`）、前回までのgoal review（`goal_reviews`: 行ごとのattempt・outcome・verdict・error）、`gaps`が続いた回数。jobはmain checkoutの文書とsource、`dagq show` / `dagq goal show --full` / `dagq findings` / `dagq events --goal` / `dagq search`で残りを読む。 promptの渡し方・節ごとと全体の上限・省いたことの明示・byte数の記録は[Prompt](prompt.md#headlessのjobのprompt)の「headlessのjobのprompt」の節が持つ（[ADR-t1566-1](../../adr/2026-10-03-t1566-1-headless-job-prompts-carry-decision-material-within-limits.md)。ADR-0047決定43の入力の列挙をamendsした）。今は引数で渡し上限が無く（150〜220KB）、上限を入れるtaskはまだ登録されていない。
+ 5. **verdict**（`GoalReviewVerdict`、stdoutの最後のJSON object）: `{"verdict": "achieved" | "gaps" | "ask", "criteria": [{"criterion", "met", "evidence": [...]}], "gaps": [{"title", "description", "criterion"}], "summary", "question", "options": [...], "reason_category": "scope" | "discard"}`。`gaps`はgapが1件以上で、titleが空でないこと（満たさなければ失敗）。runtimeは`goal_review::decide`で、同じgoalで`achieved` / `gaps` / `ask`のうち直近から続いた`gaps`の数（`gaps_in_a_row`）が`MAX_GOAL_GAPS`（3）以上の`gaps`を`ask`に変える（`overridden`に理由）。適用（`finish_goal_review`）は1トランザクションで、jobの行がまだ自分のもので、goalがopenのままで、所属taskのfingerprintが起動時と同じで、まだすべて終わっていることを再検査し、崩れていれば`interrupted`（`the goal or its tasks changed during its review`）で閉じて何もしない（次の起動を待つ）。
+    - **achieved**: `goal close --verdict achieved`と同じ`goal::close`でgoalを閉じる（`close_goal_in`）。`goal_closed`のpayloadに`by: "goal_review"`、`goal_review_id`、`reason`（verdictの`summary`）を足す。
+@@ -36,7 +36,7 @@ execの[引き継ぎ](handoff.md)を待つあいだに終わったjobと、`prep
+    - **ask**: inbox宛ての`approve_goal`のaskを、goalの最初のtask（IDの最小）について作る（runは無い）。`reason_category`はverdictの`discard`ならそれ、ほかは`scope`。questionは`Goal <ID>: <question（空ならsummary）>`に、`overridden`の理由、`met: false`の項目、verdictのgapのtitleを足したもの。optionsは`GOAL_OPTIONS`（`achieved` / `abandoned` / `gaps` / `keep_open`）にverdictの`options`を重ならないように足す。askのIDを行の`ask_id`に書く。作ったaskはplan reviewと同じくinboxに通知する。
+    - どのverdictも`goal_review_finished`（`goal_review_id`、`attempt`、`verdict`、`decision`、`overridden`、`criteria`、`summary`、`gaps`、`gap_tasks`（登録したdraftのID）、`ask_id`、`duration_secs`）を記録する。Codexのjobは加えて`session_id`（`thread.started`のthreadのid）・`model`（threadのrolloutのjobの開始以降の`turn_context`の`model`）・読めなければ`model_unknown`（理由）を持つ（`AgentProvider::job_session`、`JobSession::record`）。verdictはproviderによらず、providerの実装が取り出した最終の返答のtext（Codexは最後の`agent_message`）を同じ`GoalReviewVerdict::parse`と同じ`finish_goal_review`の再検査で適用する。ADR-0047の決定43の「`criteria`を`goal_reviewed`のpayloadに記録」は、このeventの`criteria`で持つ。
+ 6. **失敗**（非0の終了、時間切れ、JSONが無い・形が合わない、起動できない）: goalを動かさず、行を`failed`にして`goal_review_failed`（`code: job_failed`、`goal_review_id`、`attempt`、`error`、`duration_secs`、`reason_category: recovery_failed`）を記録する。2のfingerprintが同じなので、所属taskの状態が変わるか人が`goal review ID`を打つまで起動しない。そのあいだ`goal_review_holds`がそのgoalを返し、`status`（inbox）のattentionに`kind: goal_review_failed`、`next: goal review by hand`、`reason_category: recovery_failed`、goalの最初のtaskとして出る（`last_error`は`goal <ID>: <error>`）。人はgoalを`goal close`で閉じるか、plannerでtaskを足すか、`goal review ID`で取り直させる。
+-   - **使えないprovider**（ADR-t1063-1の決定4・5、task 1065）: `[roles.goal_review]`に`provider`を書いたときだけ。jobの起動の失敗（`job_start_failure`: `executable_missing` / `launch_failed`）か、verdictの無い失敗のjobの出力の分類（`Supervisor::job_failure`: `authentication` / `usage_limit` / `launch_failed`）がproviderを使えないと言えば、Claudeの認証・利用上限は今までどおり控えのaskを開いてjobを`affected`に足し、それ以外（Codexのどれも、Claudeの起動の失敗）は`hold_provider`で`ProviderHold`に控える（`provider_held`、`run_id`はnull）。その上で`goal_review_failed`に`provider_unusable`（`{"provider", "reason"}`）を足し、行を`failed`でなく`interrupted`で閉じる。`interrupted`の行は2の「前回のgoal review」に数えないので、goalはすぐ候補に戻り、次のpassで3の行き先（もう一方のprovider、両方控えられていれば起動しない）で起動し直す（新しい行、同じ`attempt`）。`goal review by hand`のattentionにもならない（`status`は`goal_review_holds`が`interrupted`の行を返さず、`watch` / `events`は`event_attention`が`provider_unusable`を持つ`goal_review_failed`をattentionにしない）。起動の失敗のうちjob自身の用意（directory、promptの組み立てと書き込み）の失敗はproviderの判定に使わず、一般の失敗にする。利用上限の控えの解ける時刻は、失敗の文とjobのstdout（Codexの`turn.failed`）から読む。一般の失敗（非0の終了、時間切れ、verdictが読めない、modelの誤り）は切り替えず、上のとおり`failed`で人を待つ。`provider`を書かないgoal reviewは今までどおりで、Claudeの壁ではaskに足され、`failed`で閉じる（askの`done`がrearmする）
++   - **使えないprovider**（ADR-t1063-1の決定4・5、task 1065）: `[roles.goal_review]`に`provider`を書いたときだけ。jobの起動の失敗（`job_start_failure`: `executable_missing` / `launch_failed`。引数・envの大きさによる`E2BIG`と、promptをstdinに渡す一時ファイルを用意できない`StdinUnprepared`は、jobの入力かsupervisorの環境の問題として`other`にし、providerを控えずにそのjobの一般の失敗にする。task 1560）か、verdictの無い失敗のjobの出力の分類（`Supervisor::job_failure`: `authentication` / `usage_limit` / `launch_failed`）がproviderを使えないと言えば、Claudeの認証・利用上限は今までどおり控えのaskを開いてjobを`affected`に足し、それ以外（Codexのどれも、Claudeの起動の失敗）は`hold_provider`で`ProviderHold`に控える（`provider_held`、`run_id`はnull）。その上で`goal_review_failed`に`provider_unusable`（`{"provider", "reason"}`）を足し、行を`failed`でなく`interrupted`で閉じる。`interrupted`の行は2の「前回のgoal review」に数えないので、goalはすぐ候補に戻り、次のpassで3の行き先（もう一方のprovider、両方控えられていれば起動しない）で起動し直す（新しい行、同じ`attempt`）。`goal review by hand`のattentionにもならない（`status`は`goal_review_holds`が`interrupted`の行を返さず、`watch` / `events`は`event_attention`が`provider_unusable`を持つ`goal_review_failed`をattentionにしない）。起動の失敗のうちjob自身の用意（directory、promptの組み立てと書き込み）の失敗はproviderの判定に使わず、一般の失敗にする。利用上限の控えの解ける時刻は、失敗の文とjobのstdout（Codexの`turn.failed`）から読む。一般の失敗（非0の終了、時間切れ、verdictが読めない、modelの誤り）は切り替えず、上のとおり`failed`で人を待つ。`provider`を書かないgoal reviewは今までどおりで、Claudeの壁ではaskに足され、`failed`で閉じる（askの`done`がrearmする）
+    - Codexのjobの`goal_review_failed`も、読めれば`session_id`・`model`・`model_unknown`を持つ
+ 7. **answer**（`goal_answers` → `decide_goal`、1トランザクション）: `GoalAnswer::parse`で`achieved` / `abandoned` / `keep_open` / `gaps` / `gaps: <足りないもの>`を読む。適用できるのは、goalが閉じておらず、`achieved`は所属taskがすべて終わり、`abandoned`は`in_progress`が無く、`gaps`はreviewのverdictにgapがあるとき（`gaps: <text>`はtextの1行目（100文字まで）をtitle、全文をdescriptionにした1件のgap）。適用するとaskを閉じ、`goal_decided`（`ask_id`、`goal_review_id`、`answer`、`decision`、`verdict`（閉じたとき）、`gap_tasks`）を記録する。`achieved` / `abandoned`はgoalを閉じ（`goal_closed`に`by: "person"`、`ask_id`、`goal_review_id`）、`gaps`は5と同じ手順でdraftを登録し、`keep_open`は何もしない（2のfingerprintが同じなので、所属taskの状態が変わるまで起動しない）。goalが先に閉じていたらaskを閉じ、`ask_closed`（`ask_id`、`kind`。task 568）だけを記録する。適用できないanswer（verdictが足した独自のoption、書き足しの自由文、条件の崩れた`achieved`など）は閉じずに残し、inboxの人が読んで`ask close`する。`goal_answers`は答えた時点の`ask_answered`が`runtime_delivers: true`のaskだけを返すので、inboxに渡したanswerを後で条件がそろってからruntimeが適用することはない。`keep_open`はgoalの行の`rearmed_at`を消す（askの前に打たれた`goal review ID`で直ちに取り直さないため）。`ask_answered`の`runtime_delivers`と`status`のattention（`applying the answer of ask N (runtime)`）は同じ判定（`goal_answer_applies` / `applies_goal_answer`）で決まる。
+ 8. **plannerの役割**: plannerはgoalの完了を見てcloseする役を持たない（ADR-0047の決定16の最後の項）。`goal close`は人の判断（askのanswer、inboxに頼んだ計画の依頼のplanner、人が`DAGQ_ROLE`の無い自分のterminalで打つ`goal close`。人が開くplannerでの対話は[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)決定8で廃止した）のために残る。
+diff --git a/docs/design/supervisor-lifecycle/observer.md b/docs/design/supervisor-lifecycle/observer.md
+index 8e1eff5d..94caa8cd 100644
+--- a/docs/design/supervisor-lifecycle/observer.md
++++ b/docs/design/supervisor-lifecycle/observer.md
+@@ -4,8 +4,8 @@ type: design
+ title: "Observer"
+ status: current
+ created: 2026-09-26
+-updated: 2026-10-03 # task 1379: the hourly cursor stays next_cursor while stats' period aggregates span the window
+-last_verified: 2026-10-03 # task 1379
++updated: 2026-10-03 # task 1560: the observer gets its prompt on stdin (after task 1379)
++last_verified: 2026-10-03 # task 1560
+ scope: runtime
+ related:
+   - adr-t1566-1
+@@ -24,7 +24,7 @@ related:
+ 
+ # Observer
+ 
+-[ADR-0044](../../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定4・18・23（task 292）。observerはnoteとdraft goalを書かず、findingを記録・更新し、見立てが人を要るfindingにだけ`blocked`のaskを上げる（`--because`は`scope` / `discard` / `recovery_failed`から選び、見立てを`--recommend`と`--confidence`で載せる。下の「人が要る見立てだけをblockedにする」）。前回から自分以外のeventが無ければagentを起動しないこと、MCPを読まないこと、`observe --history`はtask 294が実装した。同じADRの決定19〜22のうち、既定の間隔を3時間にすること、proposalを求める印からplannerを立てることはgoal 31の他のtaskが持つ。`events --full` / `timeline`はtask 293が足し、promptに示すのはtask 420。dagqが回っているかを観察して継続的改善の材料を残すjobで、個々の詰まりは解消しない。cmux workspaceを持たず、`AgentProvider::headless_command`に`assign_session_id`と`without_mcp`を足して起動する（Claudeでは`claude -p --allowedTools 'Bash(dagq:*)' --session-id <id> --strict-mcp-config -- <prompt>`。`--mcp-config`を渡さない`--strict-mcp-config`で、user・project・plugin・claude.aiのどのMCP serverも読み込まない）。実装は`src/observer.rs`。
++[ADR-0044](../../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定4・18・23（task 292）。observerはnoteとdraft goalを書かず、findingを記録・更新し、見立てが人を要るfindingにだけ`blocked`のaskを上げる（`--because`は`scope` / `discard` / `recovery_failed`から選び、見立てを`--recommend`と`--confidence`で載せる。下の「人が要る見立てだけをblockedにする」）。前回から自分以外のeventが無ければagentを起動しないこと、MCPを読まないこと、`observe --history`はtask 294が実装した。同じADRの決定19〜22のうち、既定の間隔を3時間にすること、proposalを求める印からplannerを立てることはgoal 31の他のtaskが持つ。`events --full` / `timeline`はtask 293が足し、promptに示すのはtask 420。dagqが回っているかを観察して継続的改善の材料を残すjobで、個々の詰まりは解消しない。cmux workspaceを持たず、`AgentProvider::headless_command`に`assign_session_id`と`without_mcp`を足して起動する（Claudeでは`claude -p --allowedTools 'Bash(dagq:*)' --session-id <id> --strict-mcp-config`でpromptはstdin（task 1560）。`--mcp-config`を渡さない`--strict-mcp-config`で、user・project・plugin・claude.aiのどのMCP serverも読み込まない）。実装は`src/observer.rs`。
+ 
+ Codexのobserverは、jobのdagqをクライアントモードにしてqueue service経由でfindingとfindingに紐づく`blocked`のaskを書き、Claudeのobserverも同じ経路にする（[ADR-t1222-1](../../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）。serviceの側のユースケース（`finding_record`・`finding_resolve`、findingに紐づく`blocked`の`ask`、読み取りの`proposal_list`・`proposal_show`など）はtask 1235が足した（[Queue service](../queue-service.md#ユースケース)）。serviceはobserverのprincipal（tokenのrole `observer`とjobのactor id）をactorにしてCLIと同じ`Dialogue`で書くので、`finding_recorded` / `finding_updated` / `finding_status_changed`の`by`と`ask_opened`の`asked_by`は`observer`、eventのactorはjobのactor idになり、拒否の`authorization_denied`もactorのroleが`observer`で残る。そのため下の0の「observer自身のeventを数えない」判定（`SqliteQueue::events_besides`）はCLIで書いたときと同じに成り立つ（ADR-t1222-1決定4）。jobのdagqのクライアントモードはまだ無く、今のobserverはClaudeだけで動き、agentのdagqがqueueのDBに直接書く。jobへのtokenの渡し方・sandboxに足す設定はtask 1223がここに書く。
+ 
+@@ -49,7 +49,7 @@ Codexのobserverは、jobのdagqをクライアントモードにしてqueue ser
+ [ADR-t1566-1](../../adr/2026-10-03-t1566-1-headless-job-prompts-carry-decision-material-within-limits.md)の決定2〜6（task 1567）。`observer::observer_prompt`が指示の後に入力を節ごとに載せる。実装は`src/observer/input.rs`の`fit`、値はその定数。
+ 
+ - **上限を決めた内訳**: 本番の`<queue dir>/observer/1791005872/prompt.md`（started_at 2026-10-03T05:37:52Z）は1,226,750 byteで、入力を整形したJSONで丸ごと載せていた。`stats` 624,452 byte（50.9%。うち`runs` 193,135・`goals` 108,125・`versions` 99,396）、`kpi` 383,233（31.2%。うち`trend` 190,486・`forecast` 118,562・`breaches` 36,058（1件の`marks`が154件））、`findings` 104,120（8.5%、52件）、`notes` 14,692（20件）、指示 10,912、`open_asks` 3,796（3件）、`graph` 1,398、`improvements` 802。
+-- **全体の上限**: `PROMPT_LIMIT` 160,000 byte（言語の指示を含み、そのために`LANGUAGE_RESERVE` 1,000 byteを取っておく）。hostの`ARG_MAX`（macOSで1 MiB）の約15%で、上の入力を下の規則で載せた推定（約127KB）が全体の上限では切られずに収まる値。渡し方がファイルかstdinになっても（task 1560）同じ上限を持つ。
++- **全体の上限**: `PROMPT_LIMIT` 160,000 byte（言語の指示を含み、そのために`LANGUAGE_RESERVE` 1,000 byteを取っておく）。hostの`ARG_MAX`（macOSで1 MiB）の約15%で、上の入力を下の規則で載せた推定（約127KB）が全体の上限では切られずに収まる値。渡し方がstdinになった今（task 1560）も同じ上限を持つ（上限はagentの文脈のため）。
+ - **必須の節**（切らない）: 指示（役割・windowとcursor・書けるものと禁止・読み方・読むコマンド）と、`observe --input`の読む先のobservationの名前。指示と節の見出し・省いた注記だけで上限を超えるときも指示と見出しは切らず、全ての資料を省いてそれぞれの読む方法を書く（このときだけpromptは上限を超える。2026-10-03の指示は約11KBで、見出しと注記を足しても上限の1割に満たない）。
+ - **必須の資料**（自分の上限を持たず、全体の上限だけで切られる。他の節より先に場所を取る）: 順に`kpi.breaches`（findingにする目標割れ）、`open_asks`（同じfindingにaskを重ねない）、`stats.alerts`と`stats.running_alerts`（observationを起こしたalert）。これだけで全体を超えるときも黙って切らず、他の節と同じく省いた件数と読む方法を書く。
+ - **省いてよい節**（必須の資料の残りを順に分け合い、それぞれの上限の中）:
+diff --git a/docs/design/supervisor-lifecycle/plan-review.md b/docs/design/supervisor-lifecycle/plan-review.md
+index 57d8188a..5b0e52ec 100644
+--- a/docs/design/supervisor-lifecycle/plan-review.md
++++ b/docs/design/supervisor-lifecycle/plan-review.md
+@@ -4,8 +4,8 @@ type: design
+ title: "Plan review (supervisor)"
+ status: current
+ created: 2026-09-26
+-updated: 2026-10-03 # task 1561: the prompt's limits, selection order, omission notes and prompt_bytes
+-last_verified: 2026-10-03 # task 1561
++updated: 2026-10-03 # task 1560: the plan review gets its prompt on stdin; an E2BIG or stdin start failure holds no provider
++last_verified: 2026-10-03 # task 1560
+ scope: runtime
+ related:
+   - adr-t1566-1
+@@ -27,7 +27,7 @@ execの[引き継ぎ](handoff.md)を待つあいだに終わったjobと、`prep
+ 
+ 1. **記録**（schema v27、`migrations/0027_plan_review.sql`）: jobは`plan_reviews`の1行（`proposal_id`、`attempt`、`supervisor_token`、`dir`、`started_at`、`finished_at`、`outcome` = `pass` / `revise` / `concern` / `failed` / `interrupted`、`verdict`のJSON、`error`）。未完了の行は部分unique indexで1つまでなので、queue全体で同時に1つ。`proposals`に`review_hold`（`failed` / `concern`: plan reviewが自分では取り直さない）、`revise_reasons`（plannerに渡す指摘のJSON配列）と`revised_at`（差し戻した時刻）、`revise_sent_at` / `revise_planner_id`（配送を取った時刻と渡した相手。nullならまだ渡していない）、`unresponsive_at`を足した。`submit`（出し直しを含む）はこれらをすべて消す。askのkindに`approve_plan`を足した。eventはrun_eventsがtaskかgoalを要るので、proposalの最初のtask（ID最小）に`proposal_id`付きで記録する。
+ 2. **順序**（`next_to_review`）: 対象は`submitted`で`review_hold`が無く、`submitted`のtaskを持つproposal。`interrupt`の優先度のsubmittedのtaskを持つものが先、次にsubmitの古い順、次にID順。gateは飛ばさない。
+-3. **開始**（`begin_plan_review`、`BEGIN IMMEDIATE`）: 未完了の行があり、そのsupervisorの登録が生きていれば（heartbeatが30秒以内）始めない。そうでない行は`interrupted`で閉じる（supervisorが死んだjobの引き継ぎ）。対象であることを再検査し、行を作って`<queue dir>/plan-reviews/<行のID>/`を`dir`にし、`plan_review_started`（`proposal_id`、`plan_review_id`、`attempt`、`dir`、`session_id`、jobを起動するrepositoryのcheckoutの`cwd`、proposalの特徴の`features`（`{origin, follow_up_depth, related_score, related, revise_count}`。task 579、書き込みのロックの前に読み、読めなければnull。規則は[kpi](kpi.md#計画の品質)）、jobを起動するmodel / effortと出どころの`launch`（`[roles.plan_review]`から。無ければ`source: default`で何も渡さない。[Actor model](actor-model.md)、task 580。区間の`session_opened`にも写る））を記録する。promptを`prompt.txt`に書き、`AgentProvider::headless_command`（権限の意図`PLAN_REVIEW_ACCESS`＝`read_files_and_queue_cli`。Claudeでは`claude -p --allowedTools Read Grep Glob 'Bash(dagq:*)' -- <prompt>`、`launch`がmodel / effortを持てば`--model` / `--effort`も）をrepositoryのcheckoutで、`DAGQ_ROLE=plan-review-job`・`DAGQ_ACTOR_ID=plan-review-job:<proposal id>:<attempt>`と、queue serviceのsocketとjobのtokenのfile付き（`DAGQ_QUEUE`は渡さず、jobの`dagq`はクライアントモードでserviceに送る。[Queue service](../queue-service.md#クライアントモード)）で起動し、stdout / stderrを`review.out` / `review.err`に書く。timeoutは`AgentProvider::review_timeout`。
++3. **開始**（`begin_plan_review`、`BEGIN IMMEDIATE`）: 未完了の行があり、そのsupervisorの登録が生きていれば（heartbeatが30秒以内）始めない。そうでない行は`interrupted`で閉じる（supervisorが死んだjobの引き継ぎ）。対象であることを再検査し、行を作って`<queue dir>/plan-reviews/<行のID>/`を`dir`にし、`plan_review_started`（`proposal_id`、`plan_review_id`、`attempt`、`dir`、`session_id`、jobを起動するrepositoryのcheckoutの`cwd`、proposalの特徴の`features`（`{origin, follow_up_depth, related_score, related, revise_count}`。task 579、書き込みのロックの前に読み、読めなければnull。規則は[kpi](kpi.md#計画の品質)）、jobを起動するmodel / effortと出どころの`launch`（`[roles.plan_review]`から。無ければ`source: default`で何も渡さない。[Actor model](actor-model.md)、task 580。区間の`session_opened`にも写る））を記録する。promptを`prompt.txt`に書き、`AgentProvider::headless_command`（権限の意図`PLAN_REVIEW_ACCESS`＝`read_files_and_queue_cli`。Claudeでは`claude -p --allowedTools Read Grep Glob 'Bash(dagq:*)'`でpromptはargvでなくstdin（task 1560。[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)の「promptの渡し方」）、`launch`がmodel / effortを持てば`--model` / `--effort`も）をrepositoryのcheckoutで、`DAGQ_ROLE=plan-review-job`・`DAGQ_ACTOR_ID=plan-review-job:<proposal id>:<attempt>`と、queue serviceのsocketとjobのtokenのfile付き（`DAGQ_QUEUE`は渡さず、jobの`dagq`はクライアントモードでserviceに送る。[Queue service](../queue-service.md#クライアントモード)）で起動し、stdout / stderrを`review.out` / `review.err`に書く。timeoutは`AgentProvider::review_timeout`。
+ 4. **prompt**（`plan_review_prompt`）: 最初にrepositoryの指示（AGENTS.md / CLAUDE.md）と、それが名指す文書と規則（とくにplan review向けの記述）、taskが名指す文書を読んで反映せよと指示する（verificationの規則や、ADRの索引・IDの形などrepositoryの記録の規則をruntimeに埋め込まない。dagqのrepositoryではAGENTS.mdの「plan review」の節が`docs/development/task-registration.md`の「plan reviewが当てはめる規則」を名指し、そこが`docs/adr/README.md`とADRのIDの規則を名指す。task 625）。AGENTS.mdが無いrepositoryでは、taskのverify・paths・evidenceをCLAUDE.md → README・CIの設定・buildの設定の順で判断し、どれでも決まらなければ人が要るので`concern`にさせる（[Prompt](prompt.md#repositoryの規則を読む順)）。矛盾の検査は「ADR」ではなく「repositoryが記録した決定（指示とそれが名指す決定の記録）」との矛盾と書く。jobは`dagq`の読むコマンド（`show`・`proposal show`・`search`・`related`・`findings`・`stats`・`events`・`timeline`など）を打て（`Bash(dagq:*)`）、書き込むコマンドはenvの`DAGQ_ROLE=plan-review-job`でCLIが拒む（reviewと同じ形。task 420）。promptはそれと、記録を読むCLI（`prompt::RECORD_READING`、ADR-0044の決定22、task 420: `dagq events --full --task ID`と絞り込み（`--run` / `--goal` / `--kind` / `--since` / `--until`。`--kind`が無ければattentionだけなので、全種類は`--all`を足す）と`dagq timeline RUN`）を示す。promptはdagqのADR番号を含まない。材料はproposalのtask（全field、依存、goalへの依存）、関係するgoal（description・acceptance・constraints。constraintsがtaskのdescriptionより優先）、`dagq lint`の結果（`domain::lint::lint`）、他の`submitted` / `revising`のproposalとそのtask（このproposalより前に出されたか後か）、`ready` / `in_progress`のtaskの要約（task 591。ID降順に200件（`QUEUED_TASKS`）まで読み、超えて落とした件数をpromptに書く。promptに載せる行は下の「上限と選ぶ順」で選ぶ。1taskにつき1行のJSONで`id`・`status`・`priority`・`goal_id`・`title`・`paths`・`dependencies`・`goal_dependencies`・予想するファイルの`expected_files`（`SUMMARY_EXPECTED_FILES`（10）件まで、超えた数は`more_expected_files`）。description・acceptance・contextなどの全文は、proposalの各taskの重複の候補（下の`related`と`search`）に載ったtaskと、proposalのtaskと同じhotspotを触ると予想されるtaskにだけ、別の節に付け（下の上限で選んだものだけ）、要約に`full_text_below`を付ける）、proposalの各taskの予想するファイル（1taskにつき1行）、人が答えたask（新しい順に20件（`PRECEDENT_ASKS`）を読む。先例の候補）、衝突の多いファイル（`stats`の既定のwindowの`conflict_hotspots`のうち`deleted`でないもの15件まで。renameされたものは今の名前で、`conflicts`・`tasks`・`landings`・`ratio`・`last_conflict_at`・`alert`。supervisorは`LoopSettings.conflicts`（起動時にmain checkoutの`dagq.toml`の`[conflicts]`を読み、passごとに読み直す。[Conflict thresholds](conflict-thresholds.md#読み直し)）とsupervisorの`Repository::main_history`で数える。goal 31。各ファイルに、触ると予想されるproposalのtaskの`proposal_tasks`と`ready` / `in_progress`のtaskの`queued_tasks`を並べる。task 591）、proposalの各taskの重複と実装済みの候補（goal 29、task 401。taskごとに1行のJSONで、`related`は`dagq related`と同じ`SqliteQueue::related`（port `QueueRecords::related_tasks`）が返す関連の強いtaskを状態を問わず理由（`clues`）・`score`・`status`付きで、`search`は`dagq search`と同じ`SqliteQueue::search`（port `QueueRecords::search_documents`）でtaskのtitleの語（3文字以上の英数字と`_ - . /`の並びと、空白で区切らない日本語（漢字・かな）の並びの3文字ずつのtrigram（`related`のtrigramのclueと同じ考え方。ひらがなだけのtrigramは助詞や語尾なので除く。task 600）を、重複なくtitleの順に20語（`MAX_QUERY_WORDS`）まで、`domain::search::any_word_query`でORに組む。`dagq search`のCLIのqueryの解釈（`parse_terms`）は変えない）を引いたtaskと着地したcommitのhitを`status`・excerpt付きで。どちらも`DUPLICATE_CANDIDATES`（5）件までで、proposal自身のtaskとそのcommitは除き、候補が無ければ空の配列）。重さの予測（ADR-0079の決定2、task 575）として、verdictに関わらずproposalの`submitted`のtaskごとに`size`・`nature`・`uncertainty`・`expected_output_tokens`・`rework_probability`・`reason`を出せと指示し、対象のtaskのIDと目安（worker 1 runの出力tokenは小さいもので5千、大きいもので25万、中央値3.5万。スパイクの`scripts/spikes/predictor-replay/predict.py`のもの）を書く。予測のために別のmodelは呼ばない。**予想するファイル**は[claimを控える](claim-defer.md#判定の入力)と同じ規則と関数（ADR-0080の決定1・2）で求める: 宣言`paths`、無ければ`dagq related`で最も似た`completed`のtask 3件の着地commitが変えたファイル（`Supervisor::expected`、`domain::claim_defer::expected_files`。cacheを共有し、proposalのtaskはplannerが`paths`を変えうるのでcacheを捨てて読み直す）、`in_progress`のtaskはさらにそのrunのbaseからheadまでの差分（`Supervisor::runs_in_flight`）。hotspotに当たるかは`domain::claim_defer::touches`（globのまま）。意味の検査として、重複と実装済み（候補を手がかりに、completed・canceledのものも見てLLMが判断する。明らかな重複だけを`cancel_duplicate`にし、疑わしいもの・実装済みに見えるものは`concern`）、repositoryが記録した決定・constraintsとの矛盾、**acceptanceとdescription・兄弟taskのacceptanceの食い違い**（型を変える変更なのに「tests/cli.rsは変えない」など）、同じファイルを触るtaskの間の依存（とくに衝突の多いファイル。`proposal_tasks`と`queued_tasks`がどちらも空でないhotspotには、依存の追加（`add_dependency`）か要らない理由をsummaryに書かせ、proposalのtaskが触るファイルはsourceから確かめてよいとする）、`ready` / `in_progress`のtaskと一部だけ重なるtask（片方の範囲を削れば済むもの）は`pass`にせず`revise`にし、どの範囲を削るか・どちらに寄せるかをreasonに書く（疑わしい重複は`concern`、明らかな重複は`cancel_duplicate`のまま。ADR-0044の決定11）、先に出されたproposalとの食い違い（後に出されたものとの食い違いならこちらは通す）、変える必要のあるreadyのtask（`reopen`）、`in_progress`のtaskは直さず着地後に直すtaskを求める`revise`、lintの指摘を挙げる。同じ種類の指摘に人が答えたaskがあれば、そのIDを`precedents`に入れ、reasonに人の答えを書く。 promptの渡し方・節ごとと全体の上限・選ぶ順・省いたことの明示・byte数の記録は[Prompt](prompt.md#headlessのjobのprompt)の「headlessのjobのprompt」の節が持つ（[ADR-t1566-1](../../adr/2026-10-03-t1566-1-headless-job-prompts-carry-decision-material-within-limits.md)。ADR-0047決定10の材料の列挙をamendsした）。**上限と選ぶ順**（task 1561。2026-10-03のplan review 724のpromptは1,148,345 byteで、`ARG_MAX`を超えて起動できなかった）: `plan_review_prompt`は`PlanReviewPrompt`（promptの文と`PromptBytes`）を返し、promptの節を必須の節と省いてよい節に分けて上限の中に収める。上限の値と理由は[Prompt](prompt.md#plan-reviewの上限)が持つ。
+    - **必須の節**（指示と検査とverdictの形、proposalのtaskの全field、proposalのtaskの予想するファイル、goal、`lint`、最後の言語の指示）は省かない。合わせて`PLAN_REVIEW_REQUIRED_LIMIT`を超えるとき（proposalのtaskが多い、1つのtaskやgoalの本文が巨大など）だけ、黙って切らずに、1,000 byte（`STUB_BYTES`）より大きいものを大きい順に（同じ大きさなら節の順・節の中の順）1行の代わり（`{"id", "title", "left_out_bytes", "read_with"}`、予想するファイルの代わりは`title`なし。`read_with`はtaskなら`dagq show ID --full`、goalなら`dagq goal show ID --full`、予想するファイルなら`dagq show ID --full`の宣言pathと、無ければ`dagq related ID`。`lint`は節ごと`dagq lint --proposal ID`の案内）に替えて収める。代わりの行だけでも収まらなければ、task・予想するファイル・goalの節をそれぞれ1行の案内（`dagq proposal show ID`で一覧、`dagq show ID --full`・`dagq goal show ID --full`で中身）に替え、重さの予測の対象のIDの並びも`dagq proposal show ID`への案内にする。替えたことと理由（必須の節のbyte数と上限）はtaskの節の頭に書き、`PromptBytes.over_limit`に残す。読む経路はplan reviewのjobの今の権限（`read_files_and_queue_cli`で、roleの`plan-review-job`は`queue.read`だけ）で打てる読むだけの`dagq`のコマンドに限り（ADR-t1566-1決定3）、jobのdirのファイルには退避しない（Claudeの`Read`がrepositoryの外のjobのdirを読めるかに頼らない）。
+    - **省いてよい節**（CLIで読み直せるもの）は、残す順に衝突の多いファイル、重複と実装済みの候補（proposalのtaskの順）、他のproposal（proposal単位）、人が答えたask（新しい順）、全文、要約。どれも自分の上限と、全体の上限`PLAN_REVIEW_PROMPT_LIMIT`から必須の節と前の節が使った残りの小さい方に収まる行だけを順に載せ、収まらない行は飛ばして次の行を試す（1つの巨大な行が残りを塞がない）。省いてよい6節それぞれの注記の分（`OMISSION_NOTE_BYTES`×6）を全体の上限から先に空けておくので、promptは全体の上限を超えない。
+@@ -43,7 +43,7 @@ execの[引き継ぎ](handoff.md)を待つあいだに終わったjobと、`prep
+    - `reopen`（verdictに関わらず）: proposalに無く、`submitted` / `revising`の他のproposalにも属さない`ready`のtaskを`submitted`に戻し（`TaskAction::Reopen`。claimされない）、そのtaskだけの新しいproposal（`revising`、`owner_origin: runtime`、workspaceなし、`revise_count` 0）に入れ、理由を`revise_reasons`に置き、`task_reopened`（`proposal_id`、`reviewed_proposal_id`、`reason`）を記録する。`ready`でないtask（`in_progress`など）と、検査中・差し戻し中のproposalのtaskは変えず、`plan_review_finished`の`reopen_skipped`に理由を残す。出し直し（`submit --proposal`）はproposalの`submitted`のtaskもそのまま持って出す。
+    - 最後に行を閉じ、`plan_review_finished`（`proposal_id`、`plan_review_id`、`attempt`、`verdict`、`decision`、`overridden`、`reasons`、`reason_codes`、`primary_code`、`summary`、`actions`、`reopened`、`reopen_skipped`、`precedents`、`ask_id`、`duration_secs`、`prediction_error`、`prompt_bytes`（4の「byte数の記録」））を記録する。`concern`のverdictなら続けて`plan_concern_decided`を記録する（[AIが決めるconcern](#aiが決めるconcern未実装)）。
+    - **重さの予測**（ADR-0079の決定2、task 575）: `pass` / `revise` / `concern`のどれでも、適用の前にproposalの`submitted`だったtaskに対して`predictions`を検査する。無い、配列として読めない、taskが足りない・余る・重なる、`size` / `nature`が知らない値、`uncertainty` / `rework_probability`が0〜1の外、`expected_output_tokens`が正の整数でない、のどれかなら予測は1件も記録せず、理由を`plan_review_finished`の`prediction_error`に残す（通れば`null`）。verdictの適用はそのまま行う。通れば`plan_review_finished`の後に、taskごとに`task_weight_predicted`（taskに付け、`proposal_id`、`plan_review_id`、`attempt`、`prediction`（`size`、`nature`、`uncertainty`、`expected_output_tokens`、`rework_probability`、`reason`）、`model`、`effort`）を記録する。`model` / `effort`は`plan_review_finished`が閉じたjobのsessionの`session_closed`のもの（transcriptから読めなければnull）。出し直しや`reopen`でかけ直したtaskには新しい予測を上書きせず追記し、読む側は最後のものを使う（[stats](stats.md#重さの予測と実績)）。検査中の編集で捨てたverdict（`plan_review_discarded`）と失敗したjobの予測は記録しない。claimは予測を作らず、workerの起動のmodel / effortも変えない。
+-7. **失敗**（`fail_plan_review`）: 行がまだ自分の未完了の行でなければ何もせず、proposalがもう`submitted`でないか保留されていれば行を`interrupted`で閉じる（6と同じ）。jobの開始より後にproposalのいずれかのtaskに`task_edited`があれば（6と同じ判定。ADR-0041の決定9、task 596）、編集後の内容はまだ検査されていないので人に渡さず、行を`interrupted`で閉じて（`error`に失敗の理由と`task N of the proposal was edited during its review`）、保留を付けず、`plan_review_failed`の代わりに`plan_review_discarded`（`proposal_id`、`plan_review_id`、`attempt`、`verdict: null`、`edited`、`error`）を記録する。proposalは`submitted`のままで、次のpassで編集後の内容をかけ直す（`interrupted`は`attempt`に数えない）。検査中でない編集（jobの開始の前）と他のproposalのtaskの編集では、下のとおり`failed`にする。`[roles.plan_review]`に`provider`を書いた役割で、jobのproviderが使えなかった（起動できない・認証・利用上限。`provider_unusable`）ときは、行を`interrupted`で閉じ、保留もattentionも付けず、次のpassでもう一方のproviderでかけ直す（下の[Codexで動かす](#codexで動かす)の「使えないprovider」。`--no-claude`ではClaudeに切り替えないので、次のpassで行き先が無くjobを起動せずに下のとおり`failed`で保留する）。それ以外で、起動できない、非0終了、timeout、stdoutにverdictが無い、verdictを適用できない（許されないaction、proposal内のtaskの`reopen`）は、行を`failed`で閉じ、`review_hold = failed`にして`plan_review_failed`（`code: job_failed`、`proposal_id`、`attempt`、`error`、`duration_secs`、`status: submitted`、`prompt_bytes`（4の「byte数の記録」。promptを組み立てる前の失敗と`--no-claude`で行き先が人のときはnull））を記録する。proposalは`submitted`のまま動かさず、supervisorは同じproposalを自分では取り直さない。`plan_review_failed`はattention（`plan review by hand`）で、`status`の`attention`にも保留が解けるまで出る（`concern`で保留したのに`approve_plan`のaskが自由記述の回答で閉じられたproposalも同じattentionになる）。人の指示で、inboxがtaskを`ready --bypass-review`にするか、plannerかinboxが`dagq submit --proposal N`を打つ。保留中のproposalはtaskとgoalを足さずにそのまま出し直せ（`proposal_resubmitted`、submitの時刻が新しくなる）、plan reviewにかけ直される。
++7. **失敗**（`fail_plan_review`）: 行がまだ自分の未完了の行でなければ何もせず、proposalがもう`submitted`でないか保留されていれば行を`interrupted`で閉じる（6と同じ）。jobの開始より後にproposalのいずれかのtaskに`task_edited`があれば（6と同じ判定。ADR-0041の決定9、task 596）、編集後の内容はまだ検査されていないので人に渡さず、行を`interrupted`で閉じて（`error`に失敗の理由と`task N of the proposal was edited during its review`）、保留を付けず、`plan_review_failed`の代わりに`plan_review_discarded`（`proposal_id`、`plan_review_id`、`attempt`、`verdict: null`、`edited`、`error`）を記録する。proposalは`submitted`のままで、次のpassで編集後の内容をかけ直す（`interrupted`は`attempt`に数えない）。検査中でない編集（jobの開始の前）と他のproposalのtaskの編集では、下のとおり`failed`にする。`[roles.plan_review]`に`provider`を書いた役割で、jobのproviderが使えなかった（起動できない・認証・利用上限。`provider_unusable`。引数・envの大きさによる起動の失敗（`E2BIG`、os error 7）と、promptをstdinに渡す一時ファイルを用意できない失敗（`StdinUnprepared`。`TMPDIR`が無い・書けない・一杯）はproviderでなくjobの入力かsupervisorの環境の問題なので含まない。task 1560）ときは、行を`interrupted`で閉じ、保留もattentionも付けず、次のpassでもう一方のproviderでかけ直す（下の[Codexで動かす](#codexで動かす)の「使えないprovider」。`--no-claude`ではClaudeに切り替えないので、次のpassで行き先が無くjobを起動せずに下のとおり`failed`で保留する）。それ以外で、起動できない（上の`E2BIG`と`StdinUnprepared`を含む。`provider_held`も`provider_unusable`も付かない）、非0終了、timeout、stdoutにverdictが無い、verdictを適用できない（許されないaction、proposal内のtaskの`reopen`）は、行を`failed`で閉じ、`review_hold = failed`にして`plan_review_failed`（`code: job_failed`、`proposal_id`、`attempt`、`error`、`duration_secs`、`status: submitted`、`prompt_bytes`（4の「byte数の記録」。promptを組み立てる前の失敗と`--no-claude`で行き先が人のときはnull））を記録する。proposalは`submitted`のまま動かさず、supervisorは同じproposalを自分では取り直さない。`plan_review_failed`はattention（`plan review by hand`）で、`status`の`attention`にも保留が解けるまで出る（`concern`で保留したのに`approve_plan`のaskが自由記述の回答で閉じられたproposalも同じattentionになる）。人の指示で、inboxがtaskを`ready --bypass-review`にするか、plannerかinboxが`dagq submit --proposal N`を打つ。保留中のproposalはtaskとgoalを足さずにそのまま出し直せ（`proposal_resubmitted`、submitの時刻が新しくなる）、plan reviewにかけ直される。
+ 8. **片付け**（`settle_proposals`、各pass）: `submitted`なのに`submitted`のtaskが1つも無くなったproposal（人がbypassで`ready`にした、cancelした）は、jobが走っていなければ、cancelされていないtaskが残れば`accepted`、無ければ`canceled`にし、保留を消して`proposal_settled`を記録する。goalとtaskが他のproposalに入れるようになり、attentionも消える。
+ 9. **reviseの配送**（`tend_planners`、各pass）: plannerが終わったかは`planner_view`で決め、`exited`か`lost`（wrapperのheartbeatが止まった）、または`cmux workspace list`に居ない上でwrapperも死んでいるものだけを終わったとみなす（居ないだけでは証拠にせず、workerと同じくwrapperで判定する）。まず差し戻し中のproposalを見て、渡した相手のplannerが終わっていれば`plan_revise_lost`を記録して未配送に戻し、終わっていないのに`--planner-timeout`（既定3600秒）を過ぎても出し直されていなければ`planner_unresponsive`（`planner_id`、`waited_secs`）を記録する。まだ誰にも渡せていないreviseも、`revised_at`から期限を過ぎれば`planner_unresponsive`（`planner_id: null`）にする。このeventは待っている理由として、上限を埋めているruntimeのplanner（生きているもの）を`holders`（`planner_id`、`state`、`busy`、`proposal_id`、`draft_task_id`、`finding_id`、`request_id`）に載せ、`reason`にも`planner N (理由)`で並べる（`PlannerHold`、`Supervisor::planner_holds`。task 884）。`busy`はそのplannerを10で終わらせない理由（`busy_reasons`）で、`at_work`（idleでない）、`revise`（自分宛てのreviseを出し直していない）、`revise_pending`（自分のworkspaceが持ち主のreviseがidle待ち）、`planner_question_open`（`planner_question`が人の答え待ち）、`planner_answer_undelivered`（答えがまだ打ち込まれていない）、`planner_answer_typed`（答えを打ち込んだ後にまだ止まっていない）、`exiting`（`/exit`を送った）のどれか。空ならidleで終わる番のもの。どちらも1回だけで、attentionは`check the planner`、workspaceは閉じない。これとは別に、runtimeが立てたplannerで入力・idle marker・推定のidleのどれも期限のあいだ見えないもの（reviseを渡されたものを除く）は、plannerごとに1回`planner_unresponsive`（`subject: "planner"`）になる（`tell_of_silent_planners`、[Planner sessions](plan-planners.md)の「runtimeのplannerの時間切れ」、task 805）。配送を取ったまま記録の無いもの（supervisorが間で死んだ）は30秒後に未配送に戻す。次に未配送のreviseをproposalのID順に配る。持ち主のworkspace（`owner_workspace_id`）のplannerが生きていれば、`idle`になるのを待ち、`claim_revise`（`revise_sent_at`がnullの行だけを条件付きUPDATEで取る。2つのsupervisorが同じreviseを二重に配らない）で取ってから`plan_revise_request`（指摘、先例、`dagq submit --proposal N`で出し直すこと、意図の変わる修正は人に聞くこと）を`submit_input`で打ち込み、`plan_revise_sent`（`planner_id`、`workspace_id`、`opened: false`、`launch: null`、`effort_raised: false`、上げなかった理由の`effort_not_raised`）を記録する（生きているsessionのmodel / effortは切り替えない。[Actor model](actor-model.md#差し戻しで開き直すplannerの段上げ)）。打ち込みが失敗すれば取った配送を戻す。持ち主が居ないか終わっていれば、runtimeが立てたplannerで生きているものが`--runtime-planners`（既定1、run slotとは別。人が開いたplannerは数えない）未満のときだけ、配送を取って`open_runtime_planner`で新しいplannerを立て（初期promptに指摘。agentのeffortは`[roles.runtime_planner]`の値か`medium`から1段上げ、`xhigh`が上限。ADR-0079の決定7の(c)、task 580）、`plan_revise_sent`（`opened: true`、起動した`launch`（`source: revise_escalation`、`escalated_from`、`escalation_reason: plan_review_revise`）、`effort_raised: true`）を記録する。上限に達していれば待つ。上限で待つ持ち主の居ないreviseが`revised_at`から`--planner-timeout`を過ぎたら、そのpassの終わりに枠を1つ空ける（`release_runtime_planner`。task 884）: runtimeのplannerで生きていて`idle`、`busy`が空でなく（空なら10が終わらせる）`planner_question_open`（人の答え待ち）も`planner_answer_undelivered`（打ち込みに失敗した答えはinboxがそのworkspaceに手で届ける）も含まず、`planner_last_activity`（入力・supervisorの打ち込みの印・idle marker）が期限より古いものの1つに`/exit`を送り、`planner_released`（queueのevent。`planner_id`、`workspace_id`、`proposal_id`、`busy`、`last_activity`、`idle_since`、`reason`）を記録する。runtimeのplannerに`/exit`を送ってまだ終わっていないものがあれば、それが枠を空けるので送らない。終わったplannerは10のとおり閉じ、次のpassでreviseにruntimeのplannerが立つ（自分宛てのreviseを持っていたplannerなら、そのreviseは`plan_revise_lost`で未配送に戻り、同じ上限を並んで待つ）。上限の外でplannerを立てる形は取らない: idleで何も待たないplannerは仕事をしておらず、残すと上限を埋め続けるため。人の答えを待つplannerは閉じない（答えが届く先が要る）ので、そのときreviseは待ち続け、inboxは`holders`で理由を読む。持ち主のworkspaceが一覧に居ないのにwrapperが生きているときも待つ（期限でinboxに届く）。reviseを配った後、同じ上限の残りで、人がinboxに頼んだ計画の依頼のplanner（[inboxからの計画の依頼](plan-planners.md#inboxからの計画の依頼)）、runtimeやjobが作ったdraftのplanner（[Draft planners (supervisor)](draft-planners.md#draft-planners-supervisor)）の順に立てる。
+ 10. **runtimeが立てたplannerの終わり**: runtimeが立てたplannerのうち、終わったものはworkspaceが`cmux workspace list`に居れば閉じ、行を閉じて`planner_closed`を記録する（`end_planner`。理由の`code`は`runtime_exited` / `runtime_lost` / `runtime_session_gone` / `runtime_exit_timed_out`。[`plan` / `planners`](plan-planners.md)の「plannerの終わりの記録」、ADR-t1300-1）。`idle`で、9の`busy`が空のもの（自分宛てのreviseが残っていない（proposalを出し直した）、自分のworkspaceが持ち主の未配送のreviseが無い、`planner_question`を待っていない）には1回だけ`/exit`を送り、終了が記録された後のpassで上のとおり閉じる。`/exit`から`WorkspaceBackend::exit_timeout`を過ぎても終わらなければworkspaceを閉じて行を閉じる。`planner_question`を待っているかは`Supervisor::question_wait`で決める（[Draft planners (supervisor)](draft-planners.md#draft-planners-supervisor)の5）: 閉じていないaskがあれば待っている。答えを打ち込んだaskは、打ち込んだ時刻の下限として配送を取った時刻（`planner_answer_claimed`の`claimed_at`。同じaskとworkspaceの最新のもの。port `answer_claimed_at`）とplannerの`idle_since`を比べ、`idle_since`がそれ以下（同じ秒を含む。passのviewは打ち込みの前に取るので）なら答えをまだ読んでいないとして待っている。askの`closed_at`は打ち込みの後に書くので比べない（打ち込みの後でcloseより前にidleになったplannerを待っているとみなし、枠を持ち続けた。task 884）。配送を取らずに新しいplannerの初期promptに載せた答えは、plannerを立てた時刻と比べる。人が開いたplannerは`/exit`を送らず、agentの終了が記録されて猶予（60秒）を過ぎたものだけを同じpassの初めに閉じる（[`plan` / `planners`](plan-planners.md)の「人のplannerの終わり」、[ADR-t1300-1](../../adr/2026-10-02-t1300-1-runtime-closes-exited-person-planners-after-a-grace.md)）。
+@@ -57,10 +57,10 @@ task 1218（goal 80）。goal reviewの仕組み（[ADR-t1063-1](../../adr/2026-
+ 
+ - **設定**: main checkoutの`dagq.toml`の`[roles.plan_review]`に`provider = "codex"`（`model` / `effort`も書ける）。`provider`を書かない表と表の無いqueueは今までどおりClaudeで動く（`domain::actor_model::CODEX_ROLES`が`plan_review`を含む）。この repositoryの`dagq.toml`は`[roles.plan_review]`に`provider = "codex"`だけを置き（`model` / `effort`は書かずCodexの既定に任せる。人の2026-10-01の決定、goal 80、task 1219）、本番のplan reviewはCodexで動く。足したのは固定バイナリがtask 1218を含んだ後（task 1219のverifyの関門が確かめる。task 1218を含まないバイナリは`CODEX_ROLES`に無い役割の`codex`を設定の誤りとして拒む）。
+ - **行き先**（`Supervisor::plan_review_route`）: `provider`を書かない役割はClaudeで起動し、queueの控えのaskが開いている間は待ち、`--no-claude`ではjobを起動せずに`plan_review_failed`（`error`は`provider_disabled: Claude is disabled by --no-claude; handle this role manually`を含む）でplan review by handに渡す。`provider`を書いた役割は`job_route`で、そのproviderが使えればそこで、使えなければ（supervisorにagentが無い＝`executable_missing`、控えられている）もう一方で起動し（launchに`switched_from` / `switch_reason`）、両方使えなければ待つ。Claudeの控えのaskが開いていても、Codexで動けるplan reviewはCodexで起動する（`plan_review_pass`は控えでjobの開始を止めず、行き先が決める。runtimeのplannerへのreviseの配送（`tend_planners`）は控えの間止める）。`--no-claude`ではClaudeに切り替えず、Codexも使えなければ`plan_review_failed`（`... and codex cannot be used (<理由>)`）でplan review by handに渡す。
+-- **起動**: `codex exec --json -C <repository root> [-m <model>] [-c model_reasoning_effort="<effort>"] <permission profile dagq_jobの-c> -- <prompt>`（goal reviewと同じ`HeadlessProgram::Job`。`PLAN_REVIEW_ACCESS` = `ReadFilesAndQueueCli`はCodexでは`--sandbox read-only`を、executorの`reach_queue_service`が`:read-only`を継いでqueue serviceのsocketだけを許す`dagq_job`に置き換えたもので表す（[Agent provider lifecycle](../provider-lifecycle.md#codexのheadless-job)、[Queue service](../queue-service.md#codexのsandboxからの到達adr-t1233-5決定4)）。sandboxの中の`dagq`はjobの環境（`DAGQ_ROLE=plan-review-job`、`DAGQ_SERVICE_SOCKET`・`DAGQ_SERVICE_CREDENTIAL_FILE`。`DAGQ_QUEUE`は無い）でクライアントモードになり、serviceがplan-review-jobのpolicyで読むコマンドだけを通す（goal 82の段(3)。Claudeのjobと同じ）。promptは今のまま（AGENTS.md / CLAUDE.mdと名指しの文書を読ませる）で、Claudeのplugin・skill・hookに頼らない。stdout / stderrは今までどおりjobのdirの`review.out` / `review.err`。時間の上限は`HeadlessJob`の上限で、過ぎればjobのprocessとその子孫をpidで止める（task 1085・1115。Codexが別のprocess groupで走らせたコマンドも含む）。
++- **起動**: `codex exec --json --skip-git-repo-check -C <repository root> [-m <model>] [-c model_reasoning_effort="<effort>"] <permission profile dagq_jobの-c>`、promptはstdin（task 1560。argvに載せないので、promptの大きさで起動が`E2BIG`にならない）（goal reviewと同じ`HeadlessProgram::Job`。`PLAN_REVIEW_ACCESS` = `ReadFilesAndQueueCli`はCodexでは`--sandbox read-only`を、executorの`reach_queue_service`が`:read-only`を継いでqueue serviceのsocketだけを許す`dagq_job`に置き換えたもので表す（[Agent provider lifecycle](../provider-lifecycle.md#codexのheadless-job)、[Queue service](../queue-service.md#codexのsandboxからの到達adr-t1233-5決定4)）。sandboxの中の`dagq`はjobの環境（`DAGQ_ROLE=plan-review-job`、`DAGQ_SERVICE_SOCKET`・`DAGQ_SERVICE_CREDENTIAL_FILE`。`DAGQ_QUEUE`は無い）でクライアントモードになり、serviceがplan-review-jobのpolicyで読むコマンドだけを通す（goal 82の段(3)。Claudeのjobと同じ）。promptは今のまま（AGENTS.md / CLAUDE.mdと名指しの文書を読ませる）で、Claudeのplugin・skill・hookに頼らない。stdout / stderrは今までどおりjobのdirの`review.out` / `review.err`。時間の上限は`HeadlessJob`の上限で、過ぎればjobのprocessとその子孫をpidで止める（task 1085・1115。Codexが別のprocess groupで走らせたコマンドも含む）。
+ - **verdict**: Codexのstdout（JSONL）の最後のagentの返答の文（`AgentProvider::job_reply`）から、Claudeと同じ`PlanReviewVerdict::parse`で読み、上の6の適用（`plan_review_finished`・差し戻し・`approve_plan`）にそのまま入る。
+ - **記録**: `plan_review_started`の`launch.provider`は`codex`、`session_id`はnull（Codexはthreadを自分で名付ける）。終わりのevent（`plan_review_finished` / `plan_review_failed`）に`session_id`（threadのid）・`model`（rolloutから読んだ実際のmodel）・`model_unknown`（読めなかった理由）を写し（`JobSession::record`）、区間の`session_closed`も同じ値を持つ。`headless_jobs.provider`は起動したprovider。`stats`の`jobs.plan_review`の`by_provider` / `by_model`と`kpi`の`job.*.plan_review`の`provider=<provider>`の層でClaudeとCodexを並べて読める。重さの予測（`task_weight_predicted`）の`model`は、Codexのjobでは終わりのeventの`model`。
+-- **使えないprovider**: 起動できない・認証・利用上限で失敗したjob（`JobFailure::switch_reason`）は、`provider`を書いた役割ならそのproviderを控え（Claudeの認証と利用上限は今までどおり控えのaskも開く）、`plan_review_failed`に`provider_unusable`（`provider`・`reason`）を付けて行を`interrupted`で閉じ、proposalを保留しない。次のpassでもう一方のproviderで同じattemptとしてやり直す（goal reviewと同じ）。それ以外の失敗（非0の終了、時間切れ、読めないverdict）は今までどおり保留してplan review by handに渡し、Claudeに戻さない。
++- **使えないprovider**: 起動できない・認証・利用上限で失敗したjob（`JobFailure::switch_reason`。引数・envの大きさによる起動の失敗（`E2BIG`、os error 7）と、promptをstdinに渡す一時ファイルを用意できない失敗（`StdinUnprepared`。`TMPDIR`が無い・書けない・一杯）は`job_start_failure`が`other`にするので含まない。task 1560）は、`provider`を書いた役割ならそのproviderを控え（Claudeの認証と利用上限は今までどおり控えのaskも開く）、`plan_review_failed`に`provider_unusable`（`provider`・`reason`）を付けて行を`interrupted`で閉じ、proposalを保留しない。次のpassでもう一方のproviderで同じattemptとしてやり直す（goal reviewと同じ）。それ以外の失敗（非0の終了、時間切れ、読めないverdict、`E2BIG`と`StdinUnprepared`の起動の失敗）は今までどおり保留してplan review by handに渡し（`plan_review_failed`と`review_hold = failed`。`provider_held`も`provider_unusable`も付けない）、Claudeに戻さない。
+ - **test**: `tests/it/plan_review_codex.rs`。
+ 
+ ## 差し戻しの分類コード<a id="差し戻しの分類コード未実装"></a>
+diff --git a/docs/design/supervisor-lifecycle/prompt.md b/docs/design/supervisor-lifecycle/prompt.md
+index 57490f34..1beba719 100644
+--- a/docs/design/supervisor-lifecycle/prompt.md
++++ b/docs/design/supervisor-lifecycle/prompt.md
+@@ -4,8 +4,8 @@ type: design
+ title: "Prompt"
+ status: current
+ created: 2026-09-26
+-updated: 2026-10-03 # task 1399: dagq plan opens nothing (ADR-t1394-1; after task 1567's observer limits)
+-last_verified: 2026-10-03 # task 1399
++updated: 2026-10-03 # task 1560: the headless jobs pass their prompt on stdin (after tasks 1567 and 1399)
++last_verified: 2026-10-03 # task 1560
+ scope: runtime
+ related:
+   - adr-t1566-1
+@@ -107,7 +107,7 @@ follow_up・goal gap・findingのdraftの`context`の見出しは英語（`follo
+ 
+ [ADR-t1566-1](../../adr/2026-10-03-t1566-1-headless-job-prompts-carry-decision-material-within-limits.md)（task 1566）。supervisorが起動するheadlessのjobとruntimeのplannerのpromptの共通の方針で、この節がjobごとの今の姿の正本。各jobの文書（[Headless job processes](headless-job-processes.md)、[Plan review](plan-review.md)、[Observer](observer.md)、[Goal review](goal-review.md)、[スループットの見直し](throughput-review.md)、[Review](review.md)、[復旧job](background-recovery-job.md)、[Session prompts](session-prompts.md)）はpromptの大きさと渡し方についてここを指す。
+ 
+-- **渡し方**（決定1）: 大きさに関係なくファイルかstdinで渡し、引数で渡さない。今はどのjobも引数（Claudeは`claude -p … -- <prompt>`、Codexは`codex exec --json … -- <prompt>`の位置引数。[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)）で渡し、引数とenvの合計がhostの`ARG_MAX`（macOSで1MiB）を超えると`Argument list too long (os error 7)`で起動できない（2026-10-03のplan review、2026-10-01T13:54Zからのobserver）。ファイルかstdinへの切り替えはtask 1560が行い、決まった形はそのtaskがここと[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)に書く。
++- **渡し方**（決定1）: 大きさに関係なくファイルかstdinで渡し、引数で渡さない。今はどのjob（下の表のruntimeのplannerを除く）もstdinで渡す（task 1560）。`AgentProvider::headless_command`と`review_command`はpromptを`CommandSpec::stdin`に持たせ、spawnerがそれを本人だけが読める一時ファイルに書いてすぐunlinkし、子のstdinにする。argvに`--`もpromptも無く、Claudeは`claude -p`、Codexは`codex exec`が引数の無いpromptをstdinから読む（形と確かめ方は[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)の「promptの渡し方」）。前は引数（`claude -p … -- <prompt>`、`codex exec --json … -- <prompt>`の位置引数）で渡し、引数とenvの合計がhostの`ARG_MAX`（macOSで1MiB）を超えると`Argument list too long (os error 7)`で起動できなかった（2026-10-03のplan review、2026-10-01T13:54Zからのobserver）。今もこの起動の失敗（`E2BIG`）と一時ファイルを用意できない失敗（`StdinUnprepared`）は`job_start_failure`が`other`にし、そのjobの失敗にだけ数えてproviderを控えない。
+ - **載せるもの**（決定2）: 判断の材料だけ。一覧・全文の大量のデータはIDと要約にし、中身は下の表の「取りに行く経路」で必要なものだけ読ませる。
+ - **取りに行く経路**（決定3）: jobの権限の意図（`JobAccess`、[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)）と許す道具で実際に読める経路だけを読む方法として書く。`queue_cli`のjob（observer・スループットの見直し）はファイルを読めないので、jobのdirの`input.json`をファイルとして読む方法にしない（人が読み、observerの`input.json`はqueue serviceの`observe --input`を通してだけ読む。[Observer](observer.md#promptの入力の上限と選ぶ順)）。`read_files`のjob（runのreview・復旧job）は意図として`dagq`を打てないので（Codexのreviewはsandboxの都合で読むコマンドを打てても、promptはそれを読む方法にしない）、省いてよいのはそのjobが読めるファイル（worktreeとrun directory）にあるものだけ。
+ - **上限と選ぶ順**（決定4）: 節ごとの件数かbyteの上限と全体の上限を持ち、超えたときに残す順（関連の強さ、新しさ）は決まった規則で決める。
+@@ -116,13 +116,13 @@ follow_up・goal gap・findingのdraftの`context`の見出しは英語（`follo
+ 
+ | job | 今の渡し方 | 権限の意図 | 今の節（材料） | 今の上限 | 取りに行く経路 |
+ | --- | --- | --- | --- | --- | --- |
+-| plan review（[Plan review](plan-review.md)の4） | 引数（Claude・Codex。task 1560が替える） | `read_files_and_queue_cli`（読むだけの`dagq`とファイルの読み取り） | proposalのtaskの全field、関係するgoal、`lint`、他の`submitted` / `revising`のproposal、`ready` / `in_progress`のtaskの要約と一部の全文、予想するファイル、人が答えたask、衝突の多いファイル、重複と実装済みの候補（2026-10-03のplan review 724で1,148,345 byte。`ready` / `in_progress`のtaskの全文が72%、要約が12%、人が答えたask・hotspot・重複の候補が合わせて8%（人が答えたaskだけでは20,712 byte、約2%）。内訳は下の「plan reviewの上限」） | 全体400,000 byte（`PLAN_REVIEW_PROMPT_LIMIT`）、必須の節200,000 byte、全文20件・100,000 byte、要約64,000 byte、人が答えたask 20件・16,000 byte、hotspot 16,000 byte、重複の候補48,000 byte、他のproposal 48,000 byte（task 1561。値・理由・選ぶ順・必須の節は下の「plan reviewの上限」）。読む件数は要約200件（`QUEUED_TASKS`）、hotspot 15件、重複の候補はtaskごとに5件、要約の行の`expected_files`は10件（`SUMMARY_EXPECTED_FILES`）。byte数は`plan_review_finished` / `plan_review_failed`の`prompt_bytes` | `dagq show`・`proposal show`・`search`・`related`・`findings`・`stats`・`events --full`・`timeline`、上限で省いたものを読む方法として`dagq show ID --full`・`goal show ID --full`・`proposal show ID`・`lint --proposal ID`・`related ID`・`search`・`asks --all`・`stats`・`list --status ready,in_progress --limit 200`（`prompt::PLAN_REVIEW_READS`。task 1561）、repositoryのファイル |
+-| observer（[Observer](observer.md)） | 引数（`prompt.md`はjobのdirに書くが、渡すのは引数。task 1560が替える） | `queue_cli`（`Bash(dagq:*)`だけ） | 指示（必須の節）と入力の節: 必須の資料の`kpi.breaches`・`open_asks`・`stats.alerts`・`stats.running_alerts`、省いてよい`stats`・`kpi`（`trend`・`forecast`は要約）・`findings`・`improvements`・`notes`・`graph.critical`・`graph.candidates`（2026-10-03の本番は1,226,750 byteで`stats`が51%・`kpi`が31%・`findings`が8.5%。上限の後の推定は約127KB） | 全体`PROMPT_LIMIT` 160,000 byte。必須の資料は全体の上限だけで切られ、他の節は節ごとの件数とbyteの上限（例: `stats` 40,000 byte・1 key 8,000、`findings` 100件・48,000）。選ぶ順・必須の節・項目の縮め方は[Observer](observer.md#promptの入力の上限と選ぶ順)（task 1567）。byte数は`observe_started`の`prompt_bytes`・`prompt_limit`・`prompt_sections`と`observe --history` | 省いたものはobservationの時点の入力を`observe --input <observation> --section <節>`、今の状態を`stats`・`kpi`・`findings`・`notes`・`asks --open`・`graph`・`candidates`。ほかに`forecast`・`events --full`・`timeline`・`observe --history` |
+-| goal review（[Goal review](goal-review.md)の4） | 引数（task 1560が替える） | `read_files_and_queue_cli` | goal、所属taskのdescription・acceptance、着地したrunのreceipt、goalのevent、前回までのgoal review（150〜220KB） | 無い。上限を入れるtaskが決めてここに書く（まだ登録されていない） | `dagq show`・`goal show --full`・`findings`・`events --goal`・`search`、repositoryのファイル |
+-| スループットの見直し（[スループットの見直し](throughput-review.md#promptの入力task-1099)） | 引数（上限で`ARG_MAX`に当たらない。task 1560が替える） | `queue_cli` | 指示・手順（pluginの`reference/kpi.md`の節）と入力の要約 | prompt全体が`PROMPT_LIMIT`（128KiB）、入力が`PROMPT_INPUT_LIMIT`（96KiB）。超えたら`DROP_ORDER`で落として`omitted_to_fit`に名を残し、promptが細部を読むコマンドを示す（task 1099）。byte数の記録は無い | `kpi`・`stats --full`・`timeline`・`events --full` |
+-| runのreview（[Review](review.md)） | 引数（task 1560が替える） | `read_files`（worktreeとrun directoryのファイルだけ） | taskの記述・context、`review.md`の資料（約10KB） | 無い。上限を入れるtaskが決めてここに書く（まだ登録されていない） | worktreeとrun directoryのファイル |
+-| 復旧job（[復旧job](background-recovery-job.md)） | 引数（task 1560が替える） | `read_files` | taskのdescription・acceptance・verification_commandsと`task_edited`、alertの意味と事実、`capture`した画面の末尾、runのプロセスの一覧、worktreeのHEADとreceiptの`commit`と`git status`、そのrunの過去の自動修正とverdict（[復旧job](background-recovery-job.md)の`recovery_prompt`） | 無い。上限を入れるtaskが決めてここに書く（まだ登録されていない） | run directoryのファイル |
+-| runtimeのplanner（[Session prompts](session-prompts.md)、[非対話のworker](headless-worker.md)） | 非対話のturnの`claude -p … -- <prompt>`の引数（[非対話のworker](headless-worker.md)。task 1560が替えるかは同taskが決める） | plannerのrole（読むコマンドと計画のコマンド。[Authorization](../authorization.md)） | `runtime_planner_prompt`・`draft_planner_prompt`・`finding_planner_prompt`の指摘とtaskの行 | 無い。上限を入れるtaskが決めてここに書く（まだ登録されていない） | `dagq show`・`proposal show`・`search`・`related`・`findings`・`events --full`、repositoryのファイル |
++| plan review（[Plan review](plan-review.md)の4） | stdin（Claude・Codex。task 1560） | `read_files_and_queue_cli`（読むだけの`dagq`とファイルの読み取り） | proposalのtaskの全field、関係するgoal、`lint`、他の`submitted` / `revising`のproposal、`ready` / `in_progress`のtaskの要約と一部の全文、予想するファイル、人が答えたask、衝突の多いファイル、重複と実装済みの候補（2026-10-03のplan review 724で1,148,345 byte。`ready` / `in_progress`のtaskの全文が72%、要約が12%、人が答えたask・hotspot・重複の候補が合わせて8%（人が答えたaskだけでは20,712 byte、約2%）。内訳は下の「plan reviewの上限」） | 全体400,000 byte（`PLAN_REVIEW_PROMPT_LIMIT`）、必須の節200,000 byte、全文20件・100,000 byte、要約64,000 byte、人が答えたask 20件・16,000 byte、hotspot 16,000 byte、重複の候補48,000 byte、他のproposal 48,000 byte（task 1561。値・理由・選ぶ順・必須の節は下の「plan reviewの上限」）。読む件数は要約200件（`QUEUED_TASKS`）、hotspot 15件、重複の候補はtaskごとに5件、要約の行の`expected_files`は10件（`SUMMARY_EXPECTED_FILES`）。byte数は`plan_review_finished` / `plan_review_failed`の`prompt_bytes` | `dagq show`・`proposal show`・`search`・`related`・`findings`・`stats`・`events --full`・`timeline`、上限で省いたものを読む方法として`dagq show ID --full`・`goal show ID --full`・`proposal show ID`・`lint --proposal ID`・`related ID`・`search`・`asks --all`・`stats`・`list --status ready,in_progress --limit 200`（`prompt::PLAN_REVIEW_READS`。task 1561）、repositoryのファイル |
++| observer（[Observer](observer.md)） | stdin（`prompt.md`はjobのdirに書き、同じtextをstdinで渡す。task 1560） | `queue_cli`（`Bash(dagq:*)`だけ） | 指示（必須の節）と入力の節: 必須の資料の`kpi.breaches`・`open_asks`・`stats.alerts`・`stats.running_alerts`、省いてよい`stats`・`kpi`（`trend`・`forecast`は要約）・`findings`・`improvements`・`notes`・`graph.critical`・`graph.candidates`（2026-10-03の本番は1,226,750 byteで`stats`が51%・`kpi`が31%・`findings`が8.5%。上限の後の推定は約127KB） | 全体`PROMPT_LIMIT` 160,000 byte。必須の資料は全体の上限だけで切られ、他の節は節ごとの件数とbyteの上限（例: `stats` 40,000 byte・1 key 8,000、`findings` 100件・48,000）。選ぶ順・必須の節・項目の縮め方は[Observer](observer.md#promptの入力の上限と選ぶ順)（task 1567）。byte数は`observe_started`の`prompt_bytes`・`prompt_limit`・`prompt_sections`と`observe --history` | 省いたものはobservationの時点の入力を`observe --input <observation> --section <節>`、今の状態を`stats`・`kpi`・`findings`・`notes`・`asks --open`・`graph`・`candidates`。ほかに`forecast`・`events --full`・`timeline`・`observe --history` |
++| goal review（[Goal review](goal-review.md)の4） | stdin（Claude・Codex。task 1560） | `read_files_and_queue_cli` | goal、所属taskのdescription・acceptance、着地したrunのreceipt、goalのevent、前回までのgoal review（150〜220KB） | 無い。上限を入れるtaskが決めてここに書く（まだ登録されていない） | `dagq show`・`goal show --full`・`findings`・`events --goal`・`search`、repositoryのファイル |
++| スループットの見直し（[スループットの見直し](throughput-review.md#promptの入力task-1099)） | stdin（Claude・Codex。task 1560） | `queue_cli` | 指示・手順（pluginの`reference/kpi.md`の節）と入力の要約 | prompt全体が`PROMPT_LIMIT`（128KiB）、入力が`PROMPT_INPUT_LIMIT`（96KiB）。超えたら`DROP_ORDER`で落として`omitted_to_fit`に名を残し、promptが細部を読むコマンドを示す（task 1099）。byte数の記録は無い | `kpi`・`stats --full`・`timeline`・`events --full` |
++| runのreview（[Review](review.md)） | stdin（Claude・Codex。task 1560） | `read_files`（worktreeとrun directoryのファイルだけ） | taskの記述・context、`review.md`の資料（約10KB） | 無い。上限を入れるtaskが決めてここに書く（まだ登録されていない） | worktreeとrun directoryのファイル |
++| 復旧job（[復旧job](background-recovery-job.md)） | stdin（Claude。task 1560） | `read_files` | taskのdescription・acceptance・verification_commandsと`task_edited`、alertの意味と事実、`capture`した画面の末尾、runのプロセスの一覧、worktreeのHEADとreceiptの`commit`と`git status`、そのrunの過去の自動修正とverdict（[復旧job](background-recovery-job.md)の`recovery_prompt`） | 無い。上限を入れるtaskが決めてここに書く（まだ登録されていない） | run directoryのファイル |
++| runtimeのplanner（[Session prompts](session-prompts.md)、[非対話のworker](headless-worker.md)） | 非対話のturnの`claude -p … -- <prompt>`の引数（[非対話のworker](headless-worker.md)）。task 1560はjobの`headless_command`と`review_command`だけを替え、plannerとworkerのturnの`turn_command`は替えていない（task 643の範囲） | plannerのrole（読むコマンドと計画のコマンド。[Authorization](../authorization.md)） | `runtime_planner_prompt`・`draft_planner_prompt`・`finding_planner_prompt`の指摘とtaskの行 | 無い。上限を入れるtaskが決めてここに書く（まだ登録されていない） | `dagq show`・`proposal show`・`search`・`related`・`findings`・`events --full`、repositoryのファイル |
+ 
+ ### plan reviewの上限
+ 
+@@ -130,7 +130,7 @@ task 1561。仕組み（必須の節の替え方、選ぶ順、省いたこと
+ 
+ | 定数 | 値 | 理由 |
+ | --- | --- | --- |
+-| `PLAN_REVIEW_PROMPT_LIMIT`（全体、言語の指示を含む） | 400,000 byte | macOSの`ARG_MAX`（1,048,576 byte）の4割未満で、引数で渡す今（task 1560の前）もenvを足して余裕がある。724の必須の節（約107KB）と省いてよい節の上限の和に近く、724は全体の上限に当たらずに約335KBに収まる |
++| `PLAN_REVIEW_PROMPT_LIMIT`（全体、言語の指示を含む） | 400,000 byte | macOSの`ARG_MAX`（1,048,576 byte）の4割未満で、引数で渡していたとき（task 1560の前）もenvを足して余裕があった。今はstdinで渡すので、上限はagentの文脈のため。724の必須の節（約107KB）と省いてよい節の上限の和に近く、724は全体の上限に当たらずに約335KBに収まる |
+ | `PLAN_REVIEW_REQUIRED_LIMIT`（必須の節） | 200,000 byte | 全体の半分。724の必須の節（約107KB）の2倍弱で、普通のproposalでは替えが起きず、超えても省いてよい節に半分が残る |
+ | `QUEUED_FULL_TASKS` / `QUEUED_FULL_BYTES`（全文） | 20件 / 100,000 byte | 全文が724の72%を占めた。重なりの強い上位20件（平均4.6KBで約92KB）を読めば依存の判断に足り、残りは`dagq show ID --full`で読める。byteの上限は1件の巨大なtaskが節を塞がないため |
+ | `QUEUED_SUMMARY_BYTES`（要約） | 64,000 byte | 724の要約（約133KB）の半分弱で、平均の行で約96件。重なるものから載せ、残りは`dagq list`で読める |
+diff --git a/docs/design/supervisor-lifecycle/review.md b/docs/design/supervisor-lifecycle/review.md
+index e2e466c5..d4119508 100644
+--- a/docs/design/supervisor-lifecycle/review.md
++++ b/docs/design/supervisor-lifecycle/review.md
+@@ -4,8 +4,8 @@ type: design
+ title: "Review (supervisor)"
+ status: current
+ created: 2026-09-26
+-updated: 2026-10-03 # task 1566: the prompt follows the common limits
+-last_verified: 2026-10-03 # task 1566
++updated: 2026-10-03 # task 1560: the review gets its prompt on stdin; an E2BIG or stdin start failure holds no provider
++last_verified: 2026-10-03 # task 1560
+ scope: runtime
+ related:
+   - adr-t1566-1
+@@ -25,14 +25,14 @@ related:
+ 
+ # Review (supervisor)
+ 
+-`[roles.review] provider = "codex"` を設定した repository では、同じ `review.md` と prompt を worktree の `codex exec --json` に渡す（読み取りだけの job で、`--sandbox read-only` の代わりに、`:read-only` を継いで queue service の socket だけを許す permission profile `dagq_job` の `-c` で動く。[Queue service](../queue-service.md#codexのsandboxからの到達adr-t1233-5決定4)）。最後の agent message の JSON verdict を既存の `review_finished` と差し戻し・着地の経路へ渡す。行き先は `Supervisor::review_route` が review を始めるたびに決める。`[roles.review]` に `provider` を書いた review は goal review と同じく ADR-t1063-1 決定 4・5 に従い（`domain::actor_model::job_route`）、その provider が使えない（supervisor に agent が無い＝`executable_missing`、または控えられている）ときはもう一方の provider で起動し、`review_started` の `launch` に `switched_from` と `switch_reason` を残す。Codex の review は Claude の `queue_hold` の ask が開いていても待たずに起動する（ask は Claude の控え）。起動の後に Codex が使えないと分かった review（起動できない、認証・利用上限で止まった）は、Codex を `ProviderHold` で控え（`provider_held`。ask は開かず、壁で queue を止めるのは Claude の job だけ。`job_wall`）、`review_retried`（`attempt`・`error`・`provider`・`switch_reason`）を記録して同じ pass でもう一方の provider で起動し直す。両方が使えなければ `Phase::ReviewHeld` で session を開いたまま待ち、毎 pass 行き先を見直す。行き先が同じ provider のまま（控えを書けなかった）なら起動し直さずに手動 review に渡す（`move_review`）。worktree が無いことは run の側の失敗で、provider を控えない。一般の失敗（verdict が読めない・非 0 の終了・時間の上限）は切り替えず、今までどおり。`--no-claude` では Claude に戻さず、切り替え先の無い review（Codex が無い・控えられた・止まった）は待たずに `review_failed` で手動 review（`approve_landing`）に渡す。止まった Codex の review は（読めない verdict もやり直さずに）`code: job_failed` とその error と出力を、始める前から行き先の無い review は `code: provider_disabled` と理由（`provider_disabled: Claude is disabled by --no-claude`、Codex の理由があれば ` and codex cannot be used (<理由>)` を足す。`landing::REVIEW_PROVIDER_DISABLED`）を残し、ask は no review agent ran と書く。`provider` を書かない review は Claude で動き、Claude の控えの ask の間は待ち、`--no-claude` では手動 review に渡す。job の時間の上限は review を動かす provider の `review_timeout` で決める（[ADR-t1207-1](../../adr/2026-09-30-t1207-1-codex-run-review.md) 決定 3・4）。
++`[roles.review] provider = "codex"` を設定した repository では、同じ `review.md` と prompt を worktree の `codex exec --json` に渡す（読み取りだけの job で、`--sandbox read-only` の代わりに、`:read-only` を継いで queue service の socket だけを許す permission profile `dagq_job` の `-c` で動く。[Queue service](../queue-service.md#codexのsandboxからの到達adr-t1233-5決定4)）。最後の agent message の JSON verdict を既存の `review_finished` と差し戻し・着地の経路へ渡す。行き先は `Supervisor::review_route` が review を始めるたびに決める。`[roles.review]` に `provider` を書いた review は goal review と同じく ADR-t1063-1 決定 4・5 に従い（`domain::actor_model::job_route`）、その provider が使えない（supervisor に agent が無い＝`executable_missing`、または控えられている）ときはもう一方の provider で起動し、`review_started` の `launch` に `switched_from` と `switch_reason` を残す。Codex の review は Claude の `queue_hold` の ask が開いていても待たずに起動する（ask は Claude の控え）。起動の後に Codex が使えないと分かった review（起動できない、認証・利用上限で止まった。引数・envの大きさによる起動の失敗（`E2BIG`、os error 7）と、promptをstdinに渡す一時ファイルを用意できない失敗（`StdinUnprepared`。`TMPDIR`が無い・書けない・一杯）は provider でなく job の入力か supervisor の環境の問題なので含まず、`provider_held` も `review_retried` も作らずに下の一般の失敗と同じく `review_failed` で手動 review に渡す。task 1560）は、Codex を `ProviderHold` で控え（`provider_held`。ask は開かず、壁で queue を止めるのは Claude の job だけ。`job_wall`）、`review_retried`（`attempt`・`error`・`provider`・`switch_reason`）を記録して同じ pass でもう一方の provider で起動し直す。両方が使えなければ `Phase::ReviewHeld` で session を開いたまま待ち、毎 pass 行き先を見直す。行き先が同じ provider のまま（控えを書けなかった）なら起動し直さずに手動 review に渡す（`move_review`）。worktree が無いことは run の側の失敗で、provider を控えない。一般の失敗（verdict が読めない・非 0 の終了・時間の上限）は切り替えず、今までどおり。`--no-claude` では Claude に戻さず、切り替え先の無い review（Codex が無い・控えられた・止まった）は待たずに `review_failed` で手動 review（`approve_landing`）に渡す。止まった Codex の review は（読めない verdict もやり直さずに）`code: job_failed` とその error と出力を、始める前から行き先の無い review は `code: provider_disabled` と理由（`provider_disabled: Claude is disabled by --no-claude`、Codex の理由があれば ` and codex cannot be used (<理由>)` を足す。`landing::REVIEW_PROVIDER_DISABLED`）を残し、ask は no review agent ran と書く。`provider` を書かない review は Claude で動き、Claude の控えの ask の間は待ち、`--no-claude` では手動 review に渡す。job の時間の上限は review を動かす provider の `review_timeout` で決める（[ADR-t1207-1](../../adr/2026-09-30-t1207-1-codex-run-review.md) 決定 3・4）。
+ 
+ この repository の `dagq.toml` は `[roles.review] provider = "codex"`（model と effort は書かず Codex の既定）を持ち、run の review を Codex で動かす（task 1208、goal 80。固定バイナリが task 1207 を含んでから足した）。
+ 
+ [ADR-0040](../../adr/0040-verify-once-review-run-env-graph-stats-and-task-priority-in-claim-order.md)の決定2と[ADR-0027](../../adr/0027-keep-worker-session-through-review-revise-verdict-and-merge-tree-precheck.md)の決定1–4。validationを通った（`awaiting_integration`になった）runを、supervisorがleaseとslotを持ったまま、sessionを開いたままheadlessでreviewする。runのstatusは`awaiting_integration`のままで新しいstatusは足さず、進行は`review_started` / `review_finished`などのイベントで読む。
+ 
+ 1. **開始**: `review_started`（`attempt`: そのrunの何回目のreviewか、`workspace_id`、`session_live`）を記録し、[`review`](review-command.md#review)と同じ関数で`<run-dir>/review.md`を書く。
+-2. **headless実行**: `AgentProvider::review_command(run, prompt, access)`（application層のport。`access`は権限の意図`REVIEW_ACCESS`＝`read_files`。[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)）のコマンドを起動する。Claude Codeでは`read_files`を次の`--allowedTools` / `--disallowedTools`に訳し、`claude -p --debug-file <run-dir>/claude-review.log --add-dir <run-dir> --settings <run-dir>/claude-review-settings.json --allowedTools Read,Grep,Glob --disallowedTools Bash,Edit,Write,NotebookEdit --setting-sources "" -- <prompt>`をworktreeで（worktreeは生きているsessionのものなので、reviewは読むだけ）。settingsは`Stop` hookを持たない（生きているsessionのidle markerを書かないため）。必須のagentの有無に依らず`--setting-sources ""`でworktreeの`.claude/settings.json`・`.claude/settings.local.json`・`.claude/agents`・`.claude/skills`・`.mcp.json`のserver・`CLAUDE.md`とuserの設定を読まず、settingsの`autoMemoryEnabled: false`でworktreeのcwdのauto memoryも読まない（[ADR-t1470-1](../../adr/2026-10-03-t1470-1-all-claude-run-reviews-load-no-setting-sources.md)。実CLIでの確かめは[review-subagents-spike](../../plans/review-subagents-spike.md)の6.）。cmux workspaceは作らない。promptは`<run-dir>/review-prompt-<attempt>.txt`に残し（`runtime::review_prompt`: `review.md`のpath、worktreeのrootのinstructions（`AGENTS.md`・`CLAUDE.md`）とそれが名指す文書を読んで変更に当たる規則で判定すること（`REVIEW_RULES`。Claudeのreviewは`CLAUDE.md`をmemoryとして読まないため。providerに依らず同じ文で、資料の行の直後、文書の照合の前）、変えた挙動を説明する文書の照合（[文書の照合](#文書の照合)）、taskのacceptance、verdictのJSON schema `{"verdict": "pass" | "revise" | "concern", "reasons": [{"text": string, "codes": [string]}], "summary": string, "recommendation": "land" | "send_back" | null, "confidence": "high" | "low" | null, "reason_category": "scope" | "discard" | null}`、reviseとconcernの境界（concernは機械的な修正でなく判断の要るfindingで、それだけでは人に回らず、jobが推奨と確信度を付けて判断し、`high`で`reason_category`がnullのものはruntimeが適用して、残り（`low`・`scope`・`discard`）だけが人に届く）、concernの推奨と確信度の付け方と`scope` / `discard`を人に残す基準（[AIが決めるconcern](#aiが決めるconcern未実装)）、[差し戻しの分類コード](#差し戻しの分類コード)の一覧と定義と主の選び方）、`[run.env]`をenvに足す。envには`DAGQ_ROLE=review-job`・`DAGQ_ACTOR_ID=review-job:<run id>:<attempt>`と、queue serviceのsocketとjobのtokenのfileも渡す（`DAGQ_QUEUE`は渡さない。[Queue service](../queue-service.md#クライアントモード)）（[Roles](roles.md#actors)）（observerと同じく、CLIはこのroleに読むコマンドだけを許す）。stdoutは`<run-dir>/review-<attempt>.out`、stderrは`review-<attempt>.err`。observerの`AgentProvider::headless_command`とは別のportにしている: reviewはrunに属し、そのrun directoryの設定（idle markerを書かない`Stop` hookなしのsettings、debug file、`--add-dir`）と、生きているworkerがworktreeを持つので禁止するtoolを要るが、observerのjobにはrunが無い。timeoutは`AgentProvider::review_timeout`（既定600秒）で、過ぎればkillする。ループはプロセスを`try_wait`で見るだけで止まらない。 promptの渡し方・上限・省いたことの明示・byte数の記録は[Prompt](prompt.md#headlessのjobのprompt)の「headlessのjobのprompt」の節が持つ（[ADR-t1566-1](../../adr/2026-10-03-t1566-1-headless-job-prompts-carry-decision-material-within-limits.md)）。今は引数で渡し（約10KB）上限は無く、jobは意図としてworktreeとrun directoryのファイルだけを読める。
++2. **headless実行**: `AgentProvider::review_command(run, prompt, access)`（application層のport。`access`は権限の意図`REVIEW_ACCESS`＝`read_files`。[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)）のコマンドを起動する。Claude Codeでは`read_files`を次の`--allowedTools` / `--disallowedTools`に訳し、`claude -p --debug-file <run-dir>/claude-review.log --add-dir <run-dir> --settings <run-dir>/claude-review-settings.json --allowedTools Read,Grep,Glob --disallowedTools Bash,Edit,Write,NotebookEdit --setting-sources ""`をworktreeで、promptはargvでなくstdinで渡して（task 1560。[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)の「promptの渡し方」。worktreeは生きているsessionのものなので、reviewは読むだけ）。settingsは`Stop` hookを持たない（生きているsessionのidle markerを書かないため）。必須のagentの有無に依らず`--setting-sources ""`でworktreeの`.claude/settings.json`・`.claude/settings.local.json`・`.claude/agents`・`.claude/skills`・`.mcp.json`のserver・`CLAUDE.md`とuserの設定を読まず、settingsの`autoMemoryEnabled: false`でworktreeのcwdのauto memoryも読まない（[ADR-t1470-1](../../adr/2026-10-03-t1470-1-all-claude-run-reviews-load-no-setting-sources.md)。実CLIでの確かめは[review-subagents-spike](../../plans/review-subagents-spike.md)の6.）。cmux workspaceは作らない。promptは`<run-dir>/review-prompt-<attempt>.txt`に残し（`runtime::review_prompt`: `review.md`のpath、worktreeのrootのinstructions（`AGENTS.md`・`CLAUDE.md`）とそれが名指す文書を読んで変更に当たる規則で判定すること（`REVIEW_RULES`。Claudeのreviewは`CLAUDE.md`をmemoryとして読まないため。providerに依らず同じ文で、資料の行の直後、文書の照合の前）、変えた挙動を説明する文書の照合（[文書の照合](#文書の照合)）、taskのacceptance、verdictのJSON schema `{"verdict": "pass" | "revise" | "concern", "reasons": [{"text": string, "codes": [string]}], "summary": string, "recommendation": "land" | "send_back" | null, "confidence": "high" | "low" | null, "reason_category": "scope" | "discard" | null}`、reviseとconcernの境界（concernは機械的な修正でなく判断の要るfindingで、それだけでは人に回らず、jobが推奨と確信度を付けて判断し、`high`で`reason_category`がnullのものはruntimeが適用して、残り（`low`・`scope`・`discard`）だけが人に届く）、concernの推奨と確信度の付け方と`scope` / `discard`を人に残す基準（[AIが決めるconcern](#aiが決めるconcern未実装)）、[差し戻しの分類コード](#差し戻しの分類コード)の一覧と定義と主の選び方）、`[run.env]`をenvに足す。envには`DAGQ_ROLE=review-job`・`DAGQ_ACTOR_ID=review-job:<run id>:<attempt>`と、queue serviceのsocketとjobのtokenのfileも渡す（`DAGQ_QUEUE`は渡さない。[Queue service](../queue-service.md#クライアントモード)）（[Roles](roles.md#actors)）（observerと同じく、CLIはこのroleに読むコマンドだけを許す）。stdoutは`<run-dir>/review-<attempt>.out`、stderrは`review-<attempt>.err`。observerの`AgentProvider::headless_command`とは別のportにしている: reviewはrunに属し、そのrun directoryの設定（idle markerを書かない`Stop` hookなしのsettings、debug file、`--add-dir`）と、生きているworkerがworktreeを持つので禁止するtoolを要るが、observerのjobにはrunが無い。timeoutは`AgentProvider::review_timeout`（既定600秒）で、過ぎればkillする。ループはプロセスを`try_wait`で見るだけで止まらない。 promptの渡し方・上限・省いたことの明示・byte数の記録は[Prompt](prompt.md#headlessのjobのprompt)の「headlessのjobのprompt」の節が持つ（[ADR-t1566-1](../../adr/2026-10-03-t1566-1-headless-job-prompts-carry-decision-material-within-limits.md)）。今は引数で渡し（約10KB）上限は無く、jobは意図としてworktreeとrun directoryのファイルだけを読める。
+ 3. **verdict**: 終了コード0でstdoutから`ReviewVerdict`が読めれば（全体か、最初の`{`から最後の`}`まで。未知のフィールドは拒否）`review_finished`（`verdict`、`reasons`、`reason_codes`、`primary_code`、`summary`、`duration_secs`、`attempt`、`recommendation`、`confidence`、`reason_category`）を記録する（`reason_codes`と`primary_code`は[差し戻しの分類コード](#差し戻しの分類コード)、後の3つはconcernのもので、passとreviseと持たないconcernではnull。[AIが決めるconcern](#aiが決めるconcern未実装)）。非0とtimeoutはreviewの失敗（5の「reviewの失敗」）。終了コード0でもverdictのJSONが読めない（stdoutにJSONが無い、閉じていない引用符、必須フィールドの欠落など）ときは、そのreviewが読めないverdictをやり直したものでなければ、`review_retried`（`attempt`: 読めなかったreview、`error`）を記録して同じ入力（同じ`review.md`とprompt）でreviewを1回だけやり直す（task 328。次の`review_started`の`attempt`は1つ進む）。やり直しでも読めなければreviewの失敗。やり直しはsupervisorが持つ状態（`ReviewWatch::retried`）で数え、引き継いだreviewは最初からやり直す。
+ 4. **reviseの往復**: `revise`と、jobの推奨を適用する`send_back`のconcern（[AIが決めるconcern](#aiが決めるconcern未実装)）で、そのreviewの回の`revise_requested`（7の区切りの後のもの。`revise_unsent`で取り消したものを引く）が2件（`MAX_REVISE_ATTEMPTS`）未満（domainの`decide_revise`）、sessionが生きていれば、`reasons`と手順（直してcommit、repositoryの指示がworkerに求める検証（指示が無ければ`verification_commands`。[Prompt](prompt.md)の`local_checks`）を実行、worktreeをcleanに保つ、`STOP_BACKGROUND`、receiptを新しいheadで一時ファイルとrenameで書き直し、その前に直した受け入れ条件の項目の対応を、差分と照合した文書とともに書き直す（[Prompt](prompt.md#受け入れ条件の対応づけ)の`ACCEPTANCE_REMAP`、[文書の照合](prompt.md#文書の照合)）、mergeもpushもしない、短く報告して止まり`/exit`は打たない）の定型文（`revise_request`）を`<run-dir>/revise-<attempt>.txt`に残し、`revise_requested`（`attempt`、`reasons`、`sent_at`。`sent_at`はunix秒で、小数にミリ秒まで持つ。task 1197より前の記録は整数の秒）を記録してから`WorkspaceBackend::send_text`で生きているsessionに送る（task 241。送った後・記録の前にsupervisorが落ちると、引き継いだsupervisorが同じ依頼をもう一度送っていた。記録を先にしたので、記録と送信の間で落ちたときは送られていない依頼を引き継ぎが引き継ぐ。引き継ぎは依頼を取り込みの確認（`StartCheck`）にかけ、sessionに兆候が無ければ1回だけ送り直す（7。task 546）。打たれていた依頼は二重には送らない）。送信に失敗したら`revise_unsent`（`attempt`、`error`）で取り消す（`revise_requested`の件数から引く）。送った後、receiptが送信時刻より新しくなり、idle markerがそのreceipt以上に新しくなり（`running`のbackgroundの処理が無いこと。idle markerはreceiptより先に読み、読んだ後に書き直されたreceiptは次のpollで判定する。idle markerより新しい入力のmarker（`prompt-submit.json`。idle markerの後に読む。出どころを問わず、backgroundの処理の完了の通知（`Agent`）も含む）があれば、sessionはその入力で始めたturnを作業中とみなし、そのidle markerでは段を終えない（`IdleMarker::turn_open_after`、task 672）。そのturnを終えたidle markerで段を終える。Escで中断されて印が書かれないturnは、印が入力より古いので画面から推定したidleで終える（[画面からのidleの推定](receipt-and-session-exit.md#workerのsession)）。markerが無いか最後の入力（依頼・回答・書き直されたreceipt）より古ければ、画面から推定したidleをmarkerと同じに扱う。[画面からのidleの推定](receipt-and-session-exit.md#workerのsession)、ADR-t803-1、task 804）、receiptの`commit`がcleanなworktreeのHEADに一致したら（receiptが`failed`ならそのまま）`revise_finished`（`attempt`、`head`: worktreeのHEAD）を記録し、`restart_validation`でrunを`validating`に戻して[Validation](validation.md#validation)からやり直す（書き直したreceiptの照合はvalidationが行う）。receiptがHEADと一致しない（古いcommitのまま書いた、receiptの後にcommitした、commitしていない変更がある、parseできない）ときはvalidationに渡さず（渡すと`failed`になり作業を失う）、`revise_receipt_rejected`（`attempt`、`reason`）を記録して、HEADでreceiptを書き直すよう定型文（`revise_mismatch_request`）を生きているsessionに送り、送信時刻から待ち直す（`resume_timeout`は最初の依頼から数える）。receiptを書き直さないままidleになった（backgroundの処理が`running`のmarkerはidleではない）、sessionが終わった、`resume_timeout`（既定1時間）を過ぎた、送信に失敗した場合は、`approve_landing`のaskで人に聞く。回の中の3回目のreviewがpassでなければ（`revise`でも、推奨が`send_back`のconcernでも）人に聞く（推奨が`land`で適用できるconcernは着地へ進む）。
+ 5. **`/exit`とclose**: pass（下の衝突の事前判定で衝突しなかったもの）とjobの推奨を適用する`land`のconcern（着地の直前）、askにするconcern・reviewの失敗（askを作る前）では、sessionが生きていれば`exit_requested`を記録して`/exit`を1回送り、wrapperの`session_exited`を待つ（`exit_timeout`を過ぎれば`exit_request_timed_out`を1回記録し、`stuck_exit`のaskを1回だけ開いて（`ask_in`。引き継いだrunは`has_stuck_exit_ask`で二重に開かない）待ち続け、sessionが終わったら`close_stuck_exit_asks`で閉じる。[Receipt and session exit](receipt-and-session-exit.md#receipt-and-session-exit)の3と同じ）。終わったら画面を`terminal-final.txt`（resumeしたsessionは`terminal-resume-<attempt>.txt`）に保存し、workspaceを閉じる（workerのworkspaceは`workspace_closed`、resumeのworkspaceは`workspace_closed`に`resume_attempt`を付けて記録する）。
+@@ -55,7 +55,7 @@ related:
+ - **選び方**: `domain::review_subagents::select`（副作用なし）。reviewする範囲は`review.md`と同じ`<base>...<head>`（`application::review::review_range`。receiptのcommitと、runのbaseか、sessionがrebase済みなら今のmain）で、そのmerge baseから`head`までの`Repository::changed_paths`（`git diff --name-only --no-renames`。renameは旧と新の両方、削除は旧のpath）を各agentのglobに照らし、1つでも当たるagentを設定の順に1回だけ、当たったpathとともに選ぶ。範囲は設定があるときだけ求める。試行の範囲は、設定を読んだlanding branchのcommit（`main_head`を試行ごとに1回だけ読む）で`review_range_at`が一度だけ決め（`SubagentSnapshot::range`）、その試行の`review.md`も同じ範囲で書く（`review_material`に渡し、`compose::review_in`が使う。receiptのcommitで終わらない範囲は拒む）。途中でmainが進んでも、選んだ差分と資料の差分は食い違わない。設定の無いreviewは今までどおり`review.md`が自分で範囲を求める。
+ - **jobへの受け渡し**: 選ばれたagentが1つ以上あれば、`<run-dir>/review-subagents-<attempt>.json`（`commit`・`base`・`head`と、agentごとの`agent`・`paths`・`definition`（path）・`digest`（定義のSHA-256）・`text`（定義の本文））を書き、reviewのpromptの末尾に、そのfileのpathとagentごとの当たったpathを並べた段落（`review_subagents_prompt`）を足す。`review.md`は変えない。
+ - **promptの指示**: 選ばれたagentがあるときだけ、上の段落の後に`application::review::SUBAGENTS_INSTRUCTION`を足す。中身は、各agentを同じ名前のsubagentとして基本のreviewと別に全部実行し、全部の終わりを待ち、1つのverdictに集約すること（verdictはどのagentの判定より軽くせず、agentの理由・推奨・確信度・`reason_category`を落とさない。動かせなかった・終わらなかったagentは`failed`と書き、省かない）と、verdictのJSONに足す`agents`の配列の形（選ばれたagentごとにちょうど1件、`agent`・`status`（`completed` / `failed`）・`verdict`・`reasons`・`summary`、`concern`なら`recommendation`・`confidence`・`reason_category`）である。
+-- **Claudeへの渡し方**: `ClaudeCode::review_subagents`（`AgentProvider::review_subagents`）が`review_command`のargvのpromptの前に`--agents <json>`（`claude_review_agents`。agentごとに定義のfrontmatterの`description`と本文の`prompt`、`tools`は定義に依らず`domain::review_subagents::SUBAGENT_TOOLS`（`Read`・`Grep`・`Glob`））と`--allowedTools Agent`を足す。`review_command`の`--setting-sources ""`（全てのreview。ADR-t1470-1）でworktreeの`.claude/agents`と`.claude/settings.json`を読まない。reviewの`--settings`（roleの`permissions.deny`・`autoMode.environment`・`autoMemoryEnabled: false`。hookは無い）と`--allowedTools Read,Grep,Glob`・`--disallowedTools Bash,Edit,Write,NotebookEdit`は残り、親の`--disallowedTools`はsubagentにも効く（spike）。定義は`domain::review_subagents::AgentDefinition::read`が読む（frontmatterが無いか`description`が空なら`The review subagent <agent>`、frontmatterが無ければ本文は定義の全体）。必須のagentの無いreviewのargvはこの2つを持たない（`HeadlessProgram::Review`の`subagents`が空なら`review_subagents`を呼ばない）。unit test（`the_review_hands_claude_its_subagents_and_no_worktree_settings`）はargvを確かめる。実CLIでの振る舞いは、自動のtestでは実Claudeを動かさないので、`#[ignore]`の`review_subagents::the_real_claude_review_runs_its_subagents_without_the_worktrees_settings`（`DAGQ_REAL_CLAUDE`に実行ファイルを渡して人が流す。[手動スモーク](../manual-smoke.md#reviewのsubagentの実cliの確認)）が、この argv を組み立てる同じ関数で確かめる。2026-10-03にClaude Code 2.1.288（Haiku）で通った（task 1455、task 1470）。確かめたのは次の4点。worktreeの`.claude/settings.json`の`SessionStart`のhookは、既定のsetting sourcesのreview（対照。argvから`--setting-sources ""`を除いたもの）では動き、dagqのargvではsubagentの有無に依らず動かない（ADR-t1470-1）。Agentのtoolが受けるのは`checker`（渡した定義）で、worktreeの`.claude/agents`の`planted`は出ない。reviewの`--settings`に足したdeny（`Read(./secret.txt)`）は親とsubagentの両方で拒まれ、denyを足さなければ読める。2つ目の`--allowedTools Agent`は1つ目を置き換えずに足され、subagentが動き、1つ目の`Read`だけが許すworktreeとrun dirの外のfileが読め、1つ目を外すと拒まれる。
++- **Claudeへの渡し方**: `ClaudeCode::review_subagents`（`AgentProvider::review_subagents`）が`review_command`のargvの最後（promptはstdinで、argvに無い）に`--agents <json>`（`claude_review_agents`。agentごとに定義のfrontmatterの`description`と本文の`prompt`、`tools`は定義に依らず`domain::review_subagents::SUBAGENT_TOOLS`（`Read`・`Grep`・`Glob`））と`--allowedTools Agent`を足す。`review_command`の`--setting-sources ""`（全てのreview。ADR-t1470-1）でworktreeの`.claude/agents`と`.claude/settings.json`を読まない。reviewの`--settings`（roleの`permissions.deny`・`autoMode.environment`・`autoMemoryEnabled: false`。hookは無い）と`--allowedTools Read,Grep,Glob`・`--disallowedTools Bash,Edit,Write,NotebookEdit`は残り、親の`--disallowedTools`はsubagentにも効く（spike）。定義は`domain::review_subagents::AgentDefinition::read`が読む（frontmatterが無いか`description`が空なら`The review subagent <agent>`、frontmatterが無ければ本文は定義の全体）。必須のagentの無いreviewのargvはこの2つを持たない（`HeadlessProgram::Review`の`subagents`が空なら`review_subagents`を呼ばない）。unit test（`the_review_hands_claude_its_subagents_and_no_worktree_settings`）はargvを確かめる。実CLIでの振る舞いは、自動のtestでは実Claudeを動かさないので、`#[ignore]`の`review_subagents::the_real_claude_review_runs_its_subagents_without_the_worktrees_settings`（`DAGQ_REAL_CLAUDE`に実行ファイルを渡して人が流す。[手動スモーク](../manual-smoke.md#reviewのsubagentの実cliの確認)）が、この argv を組み立てる同じ関数で確かめる。2026-10-03にClaude Code 2.1.288（Haiku）で通った（task 1455、task 1470）。確かめたのは次の4点。worktreeの`.claude/settings.json`の`SessionStart`のhookは、既定のsetting sourcesのreview（対照。argvから`--setting-sources ""`を除いたもの）では動き、dagqのargvではsubagentの有無に依らず動かない（ADR-t1470-1）。Agentのtoolが受けるのは`checker`（渡した定義）で、worktreeの`.claude/agents`の`planted`は出ない。reviewの`--settings`に足したdeny（`Read(./secret.txt)`）は親とsubagentの両方で拒まれ、denyを足さなければ読める。2つ目の`--allowedTools Agent`は1つ目を置き換えずに足され、subagentが動き、1つ目の`Read`だけが許すworktreeとrun dirの外のfileが読め、1つ目を外すと拒まれる。
+ - **Codexとproviderの切り替え**: Codexの`runs_review_subagents`は`false`（`exec`でsub-agentが実際に動くこと・sandboxを継ぐことが未確認のため。決定8）。worktreeの`.codex`は効かないどころか、main checkoutが人の`~/.codex/config.toml`で信頼されていれば、そのworktreeの`.codex/config.toml`がCodexのreviewに効くと確かめた（codex-cli 0.160.0。[ADR-t1470-1](../../adr/2026-10-03-t1470-1-all-claude-run-reviews-load-no-setting-sources.md)決定3、[review-subagents-spike](../../plans/review-subagents-spike.md)の6.）。これを塞ぐことはtask 1470のreceiptのfollow_up（defect）に残した。`Supervisor::begin_review`は選ばれたagentがあると、起動の前に`subagent_launch`で行き先のproviderが動かせるかを見て、動かせなければ、もう一方のproviderがreviewを動かせ、使え（`job_unusable`が無い）、subagentも動かせるときだけ`ActorLaunch::switched`で切り替え、`review_started`の`launch`に`switched_from`と`switch_reason: subagents_unsupported`を残す。providerは控え（`ProviderHold`）にしない。切り替え先が無い（`--no-claude`、Claudeの控えなど）ときは待たず、jobを起動せず`review_started`も記録せずに、`review_failed`（`error`が`subagents_unsupported: the review requires the subagents ...`で始まる）と`approve_landing`のaskにする。起動の後の失敗は一般の失敗で切り替えない。
+ - **結果のそろいの検査**: `ReviewWatch`は試行の必須のagentの名前（`required`）を持ち、verdictが読めたら`jobs::review_end`が`domain::review_subagents::incomplete`で、選ばれた全てのagentにちょうど1件の`status: completed`で`verdict`のある結果があり、選ばれていないagentの結果が無いことを確かめる。欠け・失敗（`completed`以外）・判定なし・重複・知らないagentは、読めないverdictと同じ`ReviewEnd::Unreadable`（理由は`the verdict lacks the completed results of the review's required subagents: ...`）にして同じ入力で1回だけやり直し（`review_retried`）、なおそろわなければ`review_failed`と`approve_landing`のaskにする。必須のagentの無いreviewで`agents`を書いたverdictも同じく読めないものになり、今の`deny_unknown_fields`で読めなかったときと同じ扱いになる。jobの失敗（非0の終了・時間切れ）は今までどおりやり直さずに`review_failed`になる。
+ - **判定ごとの行き先**: `ReviewVerdict::route`（`domain::review_subagents::route`）が親の判定とagentごとの判定の1つずつを`concern`の規則（`domain::review_subagents::destination`、`concern::decide`）で着地（`land`）・差し戻し（`send_back`）・人の判断（`ask`）に直し、最も重いものを取る。`Supervisor::act_on_verdict`は、行き先が着地か、その行き先を求めたのが親だけ（`VerdictRoute::deciding`が空）なら今までどおり親のverdictで進む。agentがその行き先を求めたときは`act_on_agents`が、差し戻しなら差し戻しを求めた判定の理由（親の理由と、agentの理由に`<agent>: `を前置したもの。理由の無いagentは`summary`）を1つの`revise`として`send_revise`に渡し（reviseの上限に1回と数え、超えれば人の判断）、人の判断なら`approve_landing`のaskを開き、問いの理由（`agents_escalation`）に人の判断を求めた判定ごとの判定・推奨・確信度・`scope` / `discard`と、親が軽かったことを載せる。askの`reason_category`は`discard`がどれかにあれば`discard`、なければ`scope`。行き先を親も求めた`concern`なら親の`concern_decided`を記録する。
+diff --git a/docs/design/supervisor-lifecycle/throughput-review.md b/docs/design/supervisor-lifecycle/throughput-review.md
+index c318220e..2d331619 100644
+--- a/docs/design/supervisor-lifecycle/throughput-review.md
++++ b/docs/design/supervisor-lifecycle/throughput-review.md
+@@ -4,8 +4,8 @@ type: design
+ title: "スループットの見直し（`throughput-review`）"
+ status: current
+ created: 2026-09-29
+-updated: 2026-10-03 # task 1566: the common rules of the headless jobs' prompts
+-last_verified: 2026-10-03 # task 1566
++updated: 2026-10-03 # task 1560: the prompt goes on stdin; its limits are for the context
++last_verified: 2026-10-03 # task 1560
+ scope: runtime
+ related:
+   - adr-t1566-1
+@@ -73,9 +73,9 @@ jobのsessionは、他のheadlessのjob（review・triage・plan review・goal r
+ 
+ ## promptの入力（task 1099）
+ 
+-Claudeのheadlessのjobは、promptを`claude -p`の位置引数で受ける（Codexのjobも`codex exec --json ... -- <prompt>`の位置引数で受けるので、同じ上限で足りる。task 1220）（[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)）。引数とenvの合計はhostの`ARG_MAX`（macOSで1MiB）を超えられないが、日次・週次の入力の全体は数MB（2026-09-28の日次で2.75MB、2026-W39の週次で1.27MB。大きいのは`kpi.periods`の各期間の全KPIの全層・比較・marks、`stats`の`runs`・`versions`・`goals`、`timelines`）で、起動が`Argument list too long (os error 7)`で失敗していた。stdinで渡してもこの大きさはagentの文脈に収まらないので、promptに載せる入力を要約して上限を設ける（providerのinterfaceは変えない）。
++task 1099のとき、Claudeのheadlessのjobはpromptを`claude -p`の位置引数で受けていた（Codexのjobも`codex exec`の位置引数。task 1220）。今はどのheadless jobもpromptをstdinで受け、引数の上限には当たらない（task 1560。[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)の「promptの渡し方」）。引数とenvの合計はhostの`ARG_MAX`（macOSで1MiB）を超えられず、日次・週次の入力の全体は数MB（2026-09-28の日次で2.75MB、2026-W39の週次で1.27MB。大きいのは`kpi.periods`の各期間の全KPIの全層・比較・marks、`stats`の`runs`・`versions`・`goals`、`timelines`）で、起動が`Argument list too long (os error 7)`で失敗していた。stdinで渡してもこの大きさはagentの文脈に収まらないので、promptに載せる入力を要約して上限を設ける（providerのinterfaceは変えない）。
+ 
+-- 上限: prompt全体が`PROMPT_LIMIT`（128KiB）以下、そのうち入力（pretty JSON）が`PROMPT_INPUT_LIMIT`（96KiB）以下。残りは指示・手順・言語の行。`ARG_MAX`の1/8で、envを足しても当たらない。2026-09-28の日次の入力は要約で約62KB、2026-W39の週次は約70KBで、どれも落とさずに収まる
++- 上限: prompt全体が`PROMPT_LIMIT`（128KiB）以下、そのうち入力（pretty JSON）が`PROMPT_INPUT_LIMIT`（96KiB）以下。残りは指示・手順・言語の行。`ARG_MAX`の1/8で、promptを位置引数で渡していたときもenvを足して当たらなかった（今はstdinなので、上限はagentの文脈のため）。2026-09-28の日次の入力は要約で約62KB、2026-W39の週次は約70KBで、どれも落とさずに収まる
+ - 要約（`prompt_input`）: `period`、`landings`（`events`を除く）、`hourly`、`health`（そのまま。小さいので、上限を超えたときの`DROP_ORDER`では`asks`の後に落とす）、`kpi`（`cores`、`periods`は各期間の`label`・`partial`・`runs`だけ、`latest`は見直す期間（最後の期間）の各KPIの`all`層と、その`comparison`の`all`層（`judged`・`delta`を除く）と`unavailable`、`targets`は各目標から`periods`を除き、最後の期間の判定を`latest`に置いたもの）、`stats`（`parts`に`overall`・`landing_utilization`・`waiting`・`claim_deferrals`・`claim_holds`・`landing_holds`・`escalations`・`backend_failures`・`verification_failures`・`provider_switches`（`PROMPT_STATS`）、`omitted`に残りのkeyの名前）、`claim_deferred`、`asks`、`timelines`（`run_id`と`secs`だけ）。読めなかった部分の`{"error": ...}`はそのまま載せる。kpi.mdの手順のCadenceが日次（外れ値と目標割れ）・週次（手順1〜5）で見る数値は`latest`と`targets`と`stats.parts`にあり、層ごとの値・過去の期間の値・runごとの値・timelineはjobが読むコマンドで取りに行く
+ - 切り詰め: 要約がなお`PROMPT_INPUT_LIMIT`を超えるときは、`stats` → `kpi.latest` → `timelines` → `kpi.targets` → `kpi.periods` → `asks` → `claim_deferred` → `landings` → `kpi`（形の分からない`kpi`は丸ごと載るので最後）の順（`DROP_ORDER`。大きく、コマンドで読み直しやすいものから）に、収まるまで丸ごと落とし、落としたものを`omitted_to_fit`に名前で残す。`period`と`hourly`は落とさない
+ - promptは要約だと明かし、入力の全体が見直しのdirの`input.json`にあること（人が読むためのもの）と、細部は`kpi`（他の期間・層・host）・`stats --since <入力のstatsの始め（毎時は期間の終わりの6時間前、日次・週次は期間の始め）> --until <期間の終わり> --full`（run）・`timeline RUN`（長いrun）・`events --full`（着地は`--kind run_integrated`）で取りに行くことを指示する。dry runはdirを作らず、作るはずのdirの`input.json`を名指す
+@@ -88,7 +88,7 @@ Claudeのheadlessのjobは、promptを`claude -p`の位置引数で受ける（C
+ 
+ - 行き先（`Supervisor::throughput_review_route`）: providerを書かない役割は今までどおりClaudeで、queueのholdのあいだと`--no-claude`では始めない（[ADR-t1204-1](../../adr/2026-09-30-t1204-1-explicit-no-claude-operation.md)の決定2）。providerを書いた役割は`job_route`で、そのproviderが使えれば（supervisorにagentがあり控えられていない）そこで、使えなければもう一方のproviderで（launchに`switched_from`・`switch_reason`）始め、どちらも使えなければ待つ。`--no-claude`ではClaudeは使えないので、Codexを設定した見直しはCodexで始まり、Codexも使えなければ子processに`--unavailable`で理由（`provider_disabled: Claude is disabled by --no-claude and codex cannot be used (<理由>); handle this role manually`）を渡す。子processは期間を決めて毎時の判定をした後（判定に当たらない時間はskippedのまま）、agentを起動せずに`throughput_review_finished`（`outcome: error`、`error`に理由）を記録し、inboxの`check the failed review`になる
+ - 子process: supervisorは行き先のlaunchを`--launch`で渡し、コマンドはその`provider`のagent（`ClaudeCode`か`Codex`）で起動する。`--launch`が無い（人が手で打つ）ときは束縛されたcheckoutの`[roles.throughput_review]`（`throughput_review::configured_launch`）。実行ファイルを解決できない（supervisorが見つけた後に消えた）ときもコマンドは`review`の前で失敗せず、与えられたpathのまま起動を試み、起動の失敗を下の`provider_unusable`（`executable_missing`）として終わりに記録する（期間の記録が残らずにこのprocessで期間が落ちることがないように）。Codexのjobは`session_id`をnullで始め（`--session-id`を渡さない）、終わりにproviderの`job_session`（`thread.started`のthreadと、rolloutの実際のmodel）を`throughput_review_finished`の`session_id`・`model`・`model_unknown`に書く（`JobSession::record`）。結論はproviderの`job_reply`（Codexは最後の`agent_message`）を`parse_output`で読み、保存・週次のfinding・`throughput_review_reported`はClaudeと同じ
+-- Codexが使えなかったとき: `--switchable`（役割がproviderを書いた）でCodexのjobが成功しなかったとき、providerの`job_failure`（`output.out` / `output.err`。agentが起動しなかったときは出力が無いので起動のerrorを`application::job_start_failure`で分類する）が使えないこと（認証・利用上限・起動の失敗・実行ファイルが無い）を示せば、`throughput_review_finished`に`provider_unusable`（`provider`・`reason`）を書く。これはattentionにならず（`domain::event_attention`）、その期間は`reviewed`に数えない。supervisorは自分の子のその終わりを見てCodexを控え（`hold_provider`。利用上限はCodexの出力から再開の時刻を読む）、このprocessが始めた期間の記録から外すので、次のpassでその期間はもう一方のproviderで始まる。execの引き継ぎで前のprocessから渡った見直し（`reap_handed_over_reviews`が回収するもの）の終わりも同じく`provider_unusable`を見てCodexを控える（`hold_codex_for`）ので、引き継ぎの間に止まったCodexの見直しの期間も、もう一度Codexでは始まらない。`--no-claude`ではClaudeに行かず、上の`--unavailable`で理由を記録する。控えを書けなかったときは期間をやり直さない（同じCodexをすぐ起動し直さないため）。ClaudeのjobはClaudeの壁に当たっても今までどおり失敗として記録する（queueのhold askには入れない）
++- Codexが使えなかったとき: `--switchable`（役割がproviderを書いた）でCodexのjobが成功しなかったとき、providerの`job_failure`（`output.out` / `output.err`。agentが起動しなかったときは出力が無いので起動のerrorを`application::job_start_failure`で分類する。引数・envの大きさによる`E2BIG`とstdinの一時ファイルを用意できない`StdinUnprepared`は`other`で、使えないことを示さない。task 1560）が使えないこと（認証・利用上限・起動の失敗・実行ファイルが無い）を示せば、`throughput_review_finished`に`provider_unusable`（`provider`・`reason`）を書く。これはattentionにならず（`domain::event_attention`）、その期間は`reviewed`に数えない。supervisorは自分の子のその終わりを見てCodexを控え（`hold_provider`。利用上限はCodexの出力から再開の時刻を読む）、このprocessが始めた期間の記録から外すので、次のpassでその期間はもう一方のproviderで始まる。execの引き継ぎで前のprocessから渡った見直し（`reap_handed_over_reviews`が回収するもの）の終わりも同じく`provider_unusable`を見てCodexを控える（`hold_codex_for`）ので、引き継ぎの間に止まったCodexの見直しの期間も、もう一度Codexでは始まらない。`--no-claude`ではClaudeに行かず、上の`--unavailable`で理由を記録する。控えを書けなかったときは期間をやり直さない（同じCodexをすぐ起動し直さないため）。ClaudeのjobはClaudeの壁に当たっても今までどおり失敗として記録する（queueのhold askには入れない）
+ - 起動の引数: jobのcwdはjobのdir（Gitの外）なので、`codex exec`の起動に`--skip-git-repo-check`を付ける（無いとCodexがGitのrepositoryの外での起動を拒み、jobは`exit_code` 1で落ちる。task 1378、[Codexのheadless job](../provider-lifecycle.md#codexのheadless-job)）。`tests/it/throughput_review_codex.rs`のstubのcodexは実物と同じく、Gitのwork treeの外でflagが無ければ拒む
+ - 時間の上限: Claudeと同じく`--timeout`を過ぎたらjobと子孫をpidで止める（`observer::run_agent`。Codexが別のprocess groupで走らせたコマンドも、killの前に列挙した子孫として止まる）
+ - 記録: `throughput_review_started`の`launch.provider`が`codex`、終わりのevent・区間の`session_closed`にthreadのidとmodel（読めなければ`model_unknown`）。`stats`の`jobs.throughput_review`の`by_provider`・`by_model`と`kpi`の`job.*.throughput_review`の`provider=`の層でClaudeと分けて読める（jobの始まりと終わりは`mode`・`period`・`dir`で結ぶ。`domain::stats::jobs`）
+diff --git a/docs/design/supervisor-lifecycle/triage.md b/docs/design/supervisor-lifecycle/triage.md
+index d0296d83..32c479a1 100644
+--- a/docs/design/supervisor-lifecycle/triage.md
++++ b/docs/design/supervisor-lifecycle/triage.md
+@@ -4,8 +4,8 @@ type: design
+ title: "Triage (supervisor)"
+ status: current
+ created: 2026-09-26
+-updated: 2026-10-03
+-last_verified: 2026-10-03
++updated: 2026-10-03 # task 1560: the recovery job gets its prompt on stdin
++last_verified: 2026-10-03 # task 1560
+ scope: runtime
+ related:
+   - design-supervisor-lifecycle
+@@ -20,7 +20,7 @@ related:
+ 
+ 1. **自動recover**: fill passごとに、`active_runs`のうち`integrating`以外でlease行の無いrunについて`doctor`と同じ判定（`run_health`）を行い、`blockers`が空（登録されたwrapper / agentのprocessが無いか、`exited_at`が記録済みか、PIDが死んでいる）なら`recover_run`で`interrupted`にする。`run_recovered`のpayloadは`recover`と同じで、`by: "supervisor"`が付く。taskは`ready`にしない（再実行は復旧jobに委ねる。ADR-0003・ADR-0007の「孤児runは自動再実行しない」は維持し、ADR-0012の「wrapperが死んだrunの`recover`は手動」を`recover`の実行だけ自動に改める）。staleなleaseを持つrunは、leaseのpidが死んでいて、adoptの対象（wrapperが生きているか終了を記録した`running` / `validating`、`resume_skipped`の後のrun、`awaiting_integration`）でなければ対象にする（task 236。supervisorとwrapperが両方死んだrun）。`run_recovered`の`lease_deleted`はtrueになる。leaseのpidが生きている（heartbeatが止まったまま生きているsupervisor）runは対象外。
+ 2. **alert**: `in_progress`のtaskの最新runで`failed` / `interrupted`のもののうち、最後の`resume_started`より後に`triage_finished`も`triage_failed`も無いもの、または最後のラウンドが`wait`でその`recheck_at`を過ぎたもの（`domain::triage_state`が`Pending` / `Waiting`）。alertは、最後の`triage_started` / `resume_started`より後に記録された`recovery_requested`があればその`alert`（resumeを使い切ったrunの`resume_exhausted`。[`needs_session`](needs-session.md#needs_session)の6）、無ければrunのstatusで`failed` / `interrupted`。resumeの後にもう一度`failed`になったrunはもう一度ラウンドを持つ。新鮮なleaseのあるrun（verdictの後の`/exit`を待っているsessionなど）は待つ。active runが上限未満のときだけ始め、jobの間はrun slotを1つ使う。
+-3. **開始**: 同じrunでそのalertの`recovery_requested`が`MAX_RECOVERY_ATTEMPTS`（3）件に達していなければ、`begin_triage`が`BEGIN IMMEDIATE`の中で上の条件（runがtaskの最新runであることを含む）を再検査し（staleなleaseは置き換える）、runにleaseを取って`lease_acquired`（`reason: triage`）、`recovery_requested`（`alert`、`attempt`（alertごとの通し番号）、`status`、`evidence`（runをそのstatusにしたeventのID）、`last_error`。`resume_exhausted`はruntimeが記録済みなので書かない）と`triage_started`（`attempt`はラウンドの通し番号、`status`、`session_id`）を記録する。同じrunを2つのsupervisorが取ろうとしても1つしか通らない。runのdirectory（無ければ`runs/<run-id>/`）に`recovery-<alert>-<attempt>.prompt.txt`を書き、`AgentProvider::headless_command`（Claudeでは`claude -p --allowedTools Read Grep Glob -- <prompt>`、`triage_started`の`session_id`付き）をそのdirectoryで、`DAGQ_ROLE=recovery-job`・`DAGQ_ACTOR_ID=recovery-job:<run id>:<alert>:<attempt>`（CLIはreviewと同じく読み取りだけを許す。[Roles](roles.md#actors)）と、queue serviceのsocketとjobのtokenのfile付き（`DAGQ_QUEUE`は渡さない。[Queue service](../queue-service.md#クライアントモード)）で起動し、stdout / stderrを`recovery-<alert>-<attempt>.out` / `.err`に書く。timeoutはreviewと同じ`AgentProvider::review_timeout`（既定600秒）。3件に達していれば、jobを起動せずに`begin_triage`（`recovery_requested`なし）の後すぐ5のescalateにする（4の後の6。使い切りとjobの番号の判断は`triage::recovery_round`）。例外は、最後のラウンドの後の人の回答が`edit the task's --verify, then retry_inherit`（`VERIFY_FIX_OPTION`）で、runの最初のeventより後にtaskの`verification_commands`を変えた`task_edited`があるとき（`domain::recovery::verify_fix_round`）で、3件に達していてもjobをもう1回起動する（ADR-t883-1。直したverifyをjobが読んで`retry_inherit`を選べるように）。その`recovery_requested`は通し番号4以降になる。editの無い回答は他のoptionと同じで、3件に達していればすぐescalateになり、同じ選択肢のaskがまた開く（人が直して答えるまで進まない）。
++3. **開始**: 同じrunでそのalertの`recovery_requested`が`MAX_RECOVERY_ATTEMPTS`（3）件に達していなければ、`begin_triage`が`BEGIN IMMEDIATE`の中で上の条件（runがtaskの最新runであることを含む）を再検査し（staleなleaseは置き換える）、runにleaseを取って`lease_acquired`（`reason: triage`）、`recovery_requested`（`alert`、`attempt`（alertごとの通し番号）、`status`、`evidence`（runをそのstatusにしたeventのID）、`last_error`。`resume_exhausted`はruntimeが記録済みなので書かない）と`triage_started`（`attempt`はラウンドの通し番号、`status`、`session_id`）を記録する。同じrunを2つのsupervisorが取ろうとしても1つしか通らない。runのdirectory（無ければ`runs/<run-id>/`）に`recovery-<alert>-<attempt>.prompt.txt`を書き、`AgentProvider::headless_command`（Claudeでは`claude -p --allowedTools Read Grep Glob`でpromptはstdin（task 1560）、`triage_started`の`session_id`付き）をそのdirectoryで、`DAGQ_ROLE=recovery-job`・`DAGQ_ACTOR_ID=recovery-job:<run id>:<alert>:<attempt>`（CLIはreviewと同じく読み取りだけを許す。[Roles](roles.md#actors)）と、queue serviceのsocketとjobのtokenのfile付き（`DAGQ_QUEUE`は渡さない。[Queue service](../queue-service.md#クライアントモード)）で起動し、stdout / stderrを`recovery-<alert>-<attempt>.out` / `.err`に書く。timeoutはreviewと同じ`AgentProvider::review_timeout`（既定600秒）。3件に達していれば、jobを起動せずに`begin_triage`（`recovery_requested`なし）の後すぐ5のescalateにする（4の後の6。使い切りとjobの番号の判断は`triage::recovery_round`）。例外は、最後のラウンドの後の人の回答が`edit the task's --verify, then retry_inherit`（`VERIFY_FIX_OPTION`）で、runの最初のeventより後にtaskの`verification_commands`を変えた`task_edited`があるとき（`domain::recovery::verify_fix_round`）で、3件に達していてもjobをもう1回起動する（ADR-t883-1。直したverifyをjobが読んで`retry_inherit`を選べるように）。その`recovery_requested`は通し番号4以降になる。editの無い回答は他のoptionと同じで、3件に達していればすぐescalateになり、同じ選択肢のaskがまた開く（人が直して答えるまで進まない）。
+ 4. **prompt**（`prompt::recovery_prompt`に`prompt::ended_run_material`を足したもの。決定39の入力）: alertとその事実（`recovery_requested`のpayload）、taskのtitle・description・acceptance、runの`last_error`、receipt（末尾3000 byte）、run directoryの最新の`integrate`試行の`integrate-<attempt>-verify-N.log`（N順）とvalidatingが以前書いた`verify-N.log`（あわせて8つまで、各末尾3000 byte。それより前の試行のlogはpathだけ並べる。試行番号の無い旧名`integrate-verify-N.log`は最初の番号付きの試行より前の試行として読む）、`terminal-final.txt`の末尾、そのrunのevent（`events`と同じ圧縮形の直近40件）、同じtaskの他のrun（status、`last_error`、ラウンドの`action`）、worktreeに残るプロセス（cwdがworktreeの下のもの）、worktreeの`git status`とHEADとreceiptの`commit`、そのrunの過去の`recovery_finished` / `auto_repaired`、許された操作（`retry` / `retry_inherit` / `resume` / `wait`）とverdictのschema、許されない操作の一覧、規則（taskの`failed` / `interrupted`のrunが`TRIAGE_RETRY_FAILURES`（2）以上ならretryは適用されない、resumeを使い切っていればresumeを選ばない）。
+ 5. **verdictの適用**（`act_on_recovery`）: stdoutから`RecoveryVerdict`を読む（全体か、最外の`{...}`、未知のfieldは拒否）。`confidence: high`の`repair`で、`actions`がちょうど1つ、かつその前提が今成り立つときだけ適用する（`plan_ended`）。前提:
+    - `retry`: taskの`failed` / `interrupted`のrunが2未満で、runのbranchに自分のcommitが無い（`result_commit`、無ければworktreeのHEAD、worktreeを作る前に止まったrunなら無し、がmainの祖先。worktreeが消えていて`result_commit`も無ければ判断できないので崩れとする）。commitのあるrunを最初からやり直すのは成果の破棄なので適用しない。適用するとtaskを`in_progress`から`ready`に戻す（`task_status_changed`）。
+diff --git a/src/application/ports.rs b/src/application/ports.rs
+index c1632dcf..83684f8e 100644
+--- a/src/application/ports.rs
++++ b/src/application/ports.rs
+@@ -133,6 +133,10 @@ pub struct CommandSpec {
+     /// signal to the starter's group nor the close of its terminal reaches
+     /// it (the automatic update's job, ADR-0045 decision 13).
+     new_session: bool,
++    /// What the process reads on its standard input, whatever the
++    /// [`Streams`] say: a headless job's prompt, which on the command line
++    /// could pass the system's limit on the arguments (`E2BIG`, task 1560).
++    stdin: Option<String>,
+ }
+ 
+ impl CommandSpec {
+@@ -231,6 +235,18 @@ impl CommandSpec {
+         self.new_session
+     }
+ 
++    /// See [`Self::get_stdin`].
++    pub fn stdin(&mut self, text: impl Into<String>) -> &mut Self {
++        self.stdin = Some(text.into());
++        self
++    }
++
++    /// What the process reads on its standard input instead of the input
++    /// its [`Streams`] give; `None` leaves it to them.
++    pub fn get_stdin(&self) -> Option<&str> {
++        self.stdin.as_deref()
++    }
++
+     pub fn get_program(&self) -> &OsStr {
+         &self.program
+     }
+@@ -251,6 +267,29 @@ impl CommandSpec {
+     }
+ }
+ 
++/// The standard input of a process ([`CommandSpec::get_stdin`]) could not
++/// be prepared (its file not made, written or removed): the starter's
++/// environment (its `TMPDIR` missing, unwritable or full), not the program,
++/// so [`job_start_failure`] takes it for no provider's (task 1560). `what`
++/// says which step and file, `source` why.
++#[derive(Debug)]
++pub struct StdinUnprepared {
++    pub what: String,
++    pub source: io::Error,
++}
++
++impl fmt::Display for StdinUnprepared {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.write_str(&self.what)
++    }
++}
++
++impl std::error::Error for StdinUnprepared {
++    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
++        Some(&self.source)
++    }
++}
++
+ /// Where the standard streams of a started process go.
+ #[derive(Debug, Clone, Copy)]
+ pub enum Streams<'a> {
+@@ -258,7 +297,9 @@ pub enum Streams<'a> {
+     Inherit,
+     /// Nowhere.
+     Null,
+-    /// No input; stdout and stderr to these files, created or truncated.
++    /// No input (unless the command has its own,
++    /// [`CommandSpec::get_stdin`]); stdout and stderr to these files,
++    /// created or truncated.
+     Files { stdout: &'a Path, stderr: &'a Path },
+     /// No input; stdout and stderr both to this one file, created or
+     /// truncated.
+@@ -711,16 +752,30 @@ pub trait AgentProvider {
+ /// Why a headless job's process could not be started, in the classes
+ /// shared by every provider (ADR-t1063-1 decision 4): an executable that is
+ /// not there is `executable_missing`, any other refusal of the start
+-/// `launch_failed`.
++/// `launch_failed`, except arguments or an environment past the system's
++/// limit (`E2BIG`, os error 7), or a standard input that could not be
++/// prepared ([`StdinUnprepared`], whatever its io error): that is the job's
++/// own input or the starter's environment, not its provider, so it is
++/// `other`, a failure of the job alone that holds no provider (task 1560).
+ pub fn job_start_failure(error: &anyhow::Error) -> crate::domain::headless_job::JobFailure {
+     use crate::domain::headless_job::JobFailure;
+-    let missing = error.chain().any(|cause| {
+-        cause
+-            .downcast_ref::<io::Error>()
+-            .is_some_and(|io| io.kind() == io::ErrorKind::NotFound)
+-    });
+-    if missing {
++    if error
++        .chain()
++        .any(|cause| cause.downcast_ref::<StdinUnprepared>().is_some())
++    {
++        return JobFailure::Other;
++    }
++    let kind = |kind: io::ErrorKind| {
++        error.chain().any(|cause| {
++            cause
++                .downcast_ref::<io::Error>()
++                .is_some_and(|io| io.kind() == kind)
++        })
++    };
++    if kind(io::ErrorKind::NotFound) {
+         JobFailure::ExecutableMissing
++    } else if kind(io::ErrorKind::ArgumentListTooLong) {
++        JobFailure::Other
+     } else {
+         JobFailure::LaunchFailed
+     }
+@@ -3325,5 +3380,27 @@ mod tests {
+             job_start_failure(&anyhow::anyhow!("no provider")),
+             JobFailure::LaunchFailed
+         );
++        // Arguments past the system's limit are the job's input: a failure
++        // of the job alone, which names no reason to hold its provider.
++        let too_long =
++            anyhow::Error::new(io::Error::from_raw_os_error(libc::E2BIG)).context("launch agent");
++        assert_eq!(job_start_failure(&too_long), JobFailure::Other);
++        assert_eq!(JobFailure::Other.switch_reason(), None);
++        // A standard input that could not be prepared is the starter's
++        // environment, even when its io error says `NotFound` (a `TMPDIR`
++        // that is gone) or anything else (a full disk).
++        for kind in [io::ErrorKind::NotFound, io::ErrorKind::StorageFull] {
++            let unprepared = anyhow::Error::new(StdinUnprepared {
++                what: "create the standard input /gone/dagq-stdin-1".into(),
++                source: io::Error::from(kind),
++            })
++            .context("launch agent");
++            assert_eq!(
++                job_start_failure(&unprepared),
++                JobFailure::Other,
++                "{kind:?}"
++            );
++            assert!(format!("{unprepared:#}").contains("/gone/dagq-stdin-1"));
++        }
+     }
+ }
+diff --git a/src/infrastructure/adapters.rs b/src/infrastructure/adapters.rs
+index 1741cdf5..f99527d3 100644
+--- a/src/infrastructure/adapters.rs
++++ b/src/infrastructure/adapters.rs
+@@ -3159,7 +3159,10 @@ impl AgentProvider for ClaudeCode {
+     /// `claude -p` (print mode): no terminal, no trust dialog, no settings
+     /// of dagq's ([`AgentSettings::None`]); a tool that needs permission
+     /// and is not among the tools of `access` ([`claude_tools`]) is
+-    /// refused.
++    /// refused. The prompt is its standard input, never an argument: `-p`
++    /// with no prompt reads it there, and a prompt of any size starts
++    /// (task 1560; on the command line one past the system's limit on the
++    /// arguments fails with `E2BIG`).
+     fn headless_command(&self, cwd: &Path, prompt: &str, access: JobAccess) -> Result<CommandSpec> {
+         let mut command = CommandSpec::new(&self.executable);
+         command.current_dir(cwd).arg("-p");
+@@ -3167,7 +3170,7 @@ impl AgentProvider for ClaudeCode {
+         if !tools.is_empty() {
+             command.arg("--allowedTools").args(tools);
+         }
+-        command.arg("--").arg(prompt);
++        command.stdin(prompt);
+         Ok(command)
+     }
+     /// `claude -p` prints the final reply of the job only (its default
+@@ -3187,7 +3190,8 @@ impl AgentProvider for ClaudeCode {
+     /// `.mcp.json` and `CLAUDE.md`, which the worker may change, and the
+     /// user's settings do not shape the review (ADR-t1470-1 decision 1);
+     /// the prompt names the repository's instructions to read instead
+-    /// (decision 2).
++    /// (decision 2). The prompt is its standard input, as a headless job's
++    /// ([`AgentProvider::headless_command`], task 1560).
+     fn review_command(
+         &self,
+         run: &TaskRun,
+@@ -3221,8 +3225,7 @@ impl AgentProvider for ClaudeCode {
+             .arg(review_disallowed_tools(access).join(","))
+             .arg("--setting-sources")
+             .arg("")
+-            .arg("--")
+-            .arg(prompt);
++            .stdin(prompt);
+         Ok(command)
+     }
+     fn runs_review_subagents(&self) -> bool {
+@@ -4379,8 +4382,10 @@ mod tests {
+         assert_eq!(command.get_current_dir(), Some(Path::new("/tmp/obs")));
+         assert_eq!(
+             command.get_args().collect::<Vec<_>>(),
+-            ["-p", "--allowedTools", "Bash(dagq:*)", "--", "observe"]
++            ["-p", "--allowedTools", "Bash(dagq:*)"]
+         );
++        // The prompt is its standard input, never an argument (task 1560).
++        assert_eq!(command.get_stdin(), Some("observe"));
+         // A job's session id goes among the options (ADR-0048 decision 4).
+         let mut named = claude
+             .headless_command(Path::new("/tmp"), "p", JobAccess::QueueCli)
+@@ -4394,8 +4399,6 @@ mod tests {
+                 "Bash(dagq:*)",
+                 "--session-id",
+                 "s-1",
+-                "--",
+-                "p"
+             ]
+         );
+         // The observer loads no MCP server (ADR-0044).
+@@ -4409,8 +4412,6 @@ mod tests {
+                 "--session-id",
+                 "s-1",
+                 "--strict-mcp-config",
+-                "--",
+-                "p"
+             ]
+         );
+         let mut plain = CommandSpec::new("x");
+@@ -4456,8 +4457,8 @@ mod tests {
+                 .unwrap();
+             let mut expected = vec!["-p", "--allowedTools"];
+             expected.extend(tools);
+-            expected.extend(["--", "p"]);
+             assert_eq!(command.get_args().collect::<Vec<_>>(), expected, "{job}");
++            assert_eq!(command.get_stdin(), Some("p"), "{job}");
+         }
+     }
+ 
+@@ -4493,10 +4494,10 @@ mod tests {
+                 "Bash,Edit,Write,NotebookEdit",
+                 "--setting-sources",
+                 "",
+-                "--",
+-                "review it",
+             ]
+         );
++        // The prompt is its standard input, never an argument (task 1560).
++        assert_eq!(command.get_stdin(), Some("review it"));
+         // The review's settings carry no hook (it never writes the live
+         // session's idle marker).
+         let settings: Value = serde_json::from_str(
+@@ -4551,10 +4552,9 @@ mod tests {
+         };
+         let before = args(&plain);
+         let after = args(&command);
+-        let prompt_at = before.len() - 2;
+-        assert_eq!(after[..prompt_at], before[..prompt_at]);
+-        assert_eq!(after[after.len() - 2..], ["--", "review it"]);
+-        let added = &after[prompt_at..after.len() - 2];
++        assert_eq!(after[..before.len()], before[..]);
++        assert_eq!(command.get_stdin(), Some("review it"));
++        let added = &after[before.len()..];
+         assert_eq!(added[0], "--agents");
+         assert_eq!(added[2..], ["--allowedTools", "Agent"]);
+         let handed: Value = serde_json::from_str(&added[1]).unwrap();
+@@ -4585,6 +4585,33 @@ mod tests {
+         }
+     }
+ 
++    /// A prompt past the system's limit on the arguments (about 1 MB on
++    /// macOS) starts a headless job and a review: the stub `claude` reads it
++    /// whole on its standard input, and its arguments do not carry it (task
++    /// 1560).
++    #[test]
++    fn a_claude_job_starts_with_a_prompt_past_the_argument_limit() {
++        use crate::infrastructure::process::stub_agent;
++        let dir = tempfile::tempdir().unwrap();
++        let run = run_in(dir.path());
++        fs::create_dir_all(dir.path().join("worktree")).unwrap();
++        let claude = ClaudeCode {
++            executable: stub_agent::write(dir.path()),
++        };
++        let prompt = "p".repeat(2 << 20);
++        let job = claude
++            .headless_command(dir.path(), &prompt, JobAccess::ReadFilesAndQueueCli)
++            .unwrap();
++        let review = claude
++            .review_command(&run, &prompt, crate::application::prompt::REVIEW_ACCESS)
++            .unwrap();
++        for command in [job, review] {
++            let (args, stdin) = stub_agent::run(&command, dir.path());
++            assert_eq!(stdin, prompt.len());
++            assert!(args < 4096, "{args} bytes of arguments");
++        }
++    }
++
+     #[test]
+     fn a_claude_jobs_reply_is_its_stdout() {
+         let claude = ClaudeCode {
+diff --git a/src/infrastructure/codex.rs b/src/infrastructure/codex.rs
+index 2d2a6f3c..c23b9da5 100644
+--- a/src/infrastructure/codex.rs
++++ b/src/infrastructure/codex.rs
+@@ -460,8 +460,10 @@ impl AgentProvider for Codex {
+     fn turn_reader(&self) -> Result<Box<dyn TurnReader>> {
+         Ok(Box::new(CodexTurnReader::reading(self.sessions_dir())))
+     }
+-    /// `codex exec --json --skip-git-repo-check --sandbox read-only -C <cwd>
+-    /// -- <prompt>` in `cwd` (ADR-t1063-1 decision 2, spike 1.): the job's
++    /// `codex exec --json --skip-git-repo-check --sandbox read-only -C <cwd>`
++    /// in `cwd` with the prompt as its standard input, never an argument
++    /// (`exec` with no prompt reads it there, so a prompt of any size
++    /// starts, task 1560) (ADR-t1063-1 decision 2, spike 1.): the job's
+     /// intent is read in [`JOB_SANDBOX`], its environment (role, queue) is
+     /// the caller's, and nothing of the person's Codex settings is changed.
+     /// `--skip-git-repo-check` because the cwd of the throughput review,
+@@ -489,8 +491,7 @@ impl AgentProvider for Codex {
+             .arg(JOB_SANDBOX)
+             .arg("-C")
+             .arg(cwd)
+-            .arg("--")
+-            .arg(prompt);
++            .stdin(prompt);
+         Ok(command)
+     }
+     /// A job's model only when it is Codex's (`-m`), and its effort as
+@@ -690,6 +691,32 @@ mod tests {
+         );
+     }
+ 
++    /// A prompt past the system's limit on the arguments (about 1 MB on
++    /// macOS) starts a headless job and a review: the stub `codex` reads it
++    /// whole on its standard input, and its arguments do not carry it (task
++    /// 1560).
++    #[test]
++    fn a_codex_job_starts_with_a_prompt_past_the_argument_limit() {
++        use crate::infrastructure::process::stub_agent;
++        let dir = tempfile::tempdir().unwrap();
++        let (worktree, run_dir) = (dir.path().join("worktree"), dir.path().join("run"));
++        fs::create_dir_all(&worktree).unwrap();
++        fs::create_dir_all(&run_dir).unwrap();
++        let codex = Codex::new(stub_agent::write(dir.path()));
++        let prompt = "p".repeat(2 << 20);
++        let job = codex
++            .headless_command(dir.path(), &prompt, JobAccess::ReadFilesAndQueueCli)
++            .unwrap();
++        let review = codex
++            .review_command(&run(&worktree, &run_dir), &prompt, JobAccess::ReadFiles)
++            .unwrap();
++        for command in [job, review] {
++            let (args, stdin) = stub_agent::run(&command, dir.path());
++            assert_eq!(stdin, prompt.len());
++            assert!(args < 4096, "{args} bytes of arguments");
++        }
++    }
++
+     /// A headless job (ADR-t1063-1): `codex exec --json` in the read-only
+     /// sandbox in its directory, no bypass flag, no session id, its model
+     /// only when Codex's and its effort as `-c`.
+@@ -731,10 +758,10 @@ mod tests {
+                 "/repo",
+                 "-c",
+                 r#"model_reasoning_effort="medium""#,
+-                "--",
+-                "review it"
+             ]
+         );
++        // The prompt is its standard input, never an argument (task 1560).
++        assert_eq!(command.get_stdin(), Some("review it"));
+         assert_eq!(
+             args(&chosen)[7..],
+             [
+@@ -742,8 +769,6 @@ mod tests {
+                 "gpt-6-astra",
+                 "-c",
+                 r#"model_reasoning_effort="xhigh""#,
+-                "--",
+-                "review it"
+             ]
+         );
+         // Reaching the queue service, the job runs in the profile that
+@@ -774,8 +799,8 @@ mod tests {
+         for config in &profile {
+             expected.extend(["-c".to_owned(), config.clone()]);
+         }
+-        expected.extend(["--".to_owned(), "review it".to_owned()]);
+         assert_eq!(args(&reaching), expected);
++        assert_eq!(reaching.get_stdin(), Some("review it"));
+         assert!(profile.contains(&r#"permissions.dagq_job.extends=":read-only""#.to_owned()));
+         assert!(profile.contains(&"features.network_proxy=true".to_owned()));
+         // A command without the read-only sandbox (a worker's turn) is left
+@@ -1046,10 +1071,9 @@ mod tests {
+                 "read-only",
+                 "-C",
+                 worktree_text.as_str(),
+-                "--",
+-                "p"
+             ]
+         );
++        assert_eq!(review.get_stdin(), Some("p"));
+         // Codex runs no review subagents (ADR-t1453-1 decision 8): it says
+         // so, refuses them, and its review command is as before.
+         assert!(!codex.runs_review_subagents());
+diff --git a/src/infrastructure/process.rs b/src/infrastructure/process.rs
+index 427c9250..f45a49ec 100644
+--- a/src/infrastructure/process.rs
++++ b/src/infrastructure/process.rs
+@@ -2,13 +2,14 @@
+ //! `Command`, started with the streams the caller asked for.
+ 
+ use std::{
++    io::{Seek, SeekFrom, Write},
+     process::{Child, Command, ExitStatus, Stdio},
+     sync::atomic::{AtomicI32, Ordering::SeqCst},
+ };
+ 
+ use anyhow::Result;
+ 
+-use crate::application::{CommandSpec, Exit, Spawned, Spawner, Streams};
++use crate::application::{CommandSpec, Exit, Spawned, Spawner, StdinUnprepared, Streams};
+ 
+ /// The `Command` that starts `spec`, its streams left to the caller.
+ pub fn command(spec: &CommandSpec) -> Command {
+@@ -38,6 +39,90 @@ pub fn command(spec: &CommandSpec) -> Command {
+     command
+ }
+ 
++/// The standard input of `spec`: its own text
++/// ([`CommandSpec::get_stdin`]) from a file of its own, which is unlinked
++/// at once and so goes with the process, or nothing. A file and not a pipe,
++/// so a text of any size is handed over without a writer waiting on the
++/// process to read it. Readable by this user only, as the prompt may say
++/// what others should not read. Its errors are [`StdinUnprepared`], so that
++/// a start that fails here is not taken for its program's
++/// ([`crate::application::job_start_failure`]).
++pub fn stdin(spec: &CommandSpec) -> Result<Stdio> {
++    stdin_in(spec, &std::env::temp_dir())
++}
++
++/// [`stdin`] with its file in `dir`.
++fn stdin_in(spec: &CommandSpec, dir: &std::path::Path) -> Result<Stdio> {
++    use std::os::unix::fs::OpenOptionsExt;
++    let Some(text) = spec.get_stdin() else {
++        return Ok(Stdio::null());
++    };
++    let path = dir.join(format!("dagq-stdin-{}", uuid::Uuid::new_v4()));
++    let failed = |what: &str, source: std::io::Error| {
++        anyhow::Error::new(StdinUnprepared {
++            what: format!("{what} the standard input {}", path.display()),
++            source,
++        })
++    };
++    let mut file = std::fs::OpenOptions::new()
++        .read(true)
++        .write(true)
++        .create_new(true)
++        .mode(0o600)
++        .open(&path)
++        .map_err(|error| failed("create", error))?;
++    let written = file
++        .write_all(text.as_bytes())
++        .and_then(|()| file.seek(SeekFrom::Start(0)));
++    std::fs::remove_file(&path).map_err(|error| failed("remove", error))?;
++    written.map_err(|error| failed("write", error))?;
++    Ok(Stdio::from(file))
++}
++
++/// A stub agent for the tests of a provider's command (task 1560): it
++/// writes how many bytes its arguments and its standard input had to
++/// `args` and `stdin` in the directory `OUT` names.
++#[cfg(test)]
++pub(crate) mod stub_agent {
++    use super::*;
++    use std::{fs, os::unix::fs::PermissionsExt, path::Path, path::PathBuf};
++
++    /// The stub's executable, written in `dir`.
++    pub(crate) fn write(dir: &Path) -> PathBuf {
++        let stub = dir.join("agent");
++        fs::write(
++            &stub,
++            "#!/bin/sh\nprintf '%s' \"$*\" | wc -c | tr -d ' ' > \"$OUT/args\"\nwc -c | tr -d ' ' > \"$OUT/stdin\"\n",
++        )
++        .unwrap();
++        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
++        stub
++    }
++
++    /// Start `command` (whose program is the stub) as a headless job is
++    /// started, wait for it, and read the bytes of its arguments and its
++    /// standard input from `dir`.
++    pub(crate) fn run(command: &CommandSpec, dir: &Path) -> (usize, usize) {
++        let mut command = command.clone();
++        command.env("OUT", dir);
++        let (out, err) = (dir.join("out"), dir.join("err"));
++        let streams = Streams::Files {
++            stdout: &out,
++            stderr: &err,
++        };
++        let mut child = LocalSpawner.spawn(&command, streams).unwrap();
++        assert!(child.wait().unwrap().success);
++        let read = |name: &str| {
++            fs::read_to_string(dir.join(name))
++                .unwrap()
++                .trim()
++                .parse()
++                .unwrap()
++        };
++        (read("args"), read("stdin"))
++    }
++}
++
+ /// How the process ended, in the port's terms.
+ pub fn exit(status: ExitStatus) -> Exit {
+     Exit {
+@@ -109,25 +194,21 @@ impl Spawner for LocalSpawner {
+         match streams {
+             Streams::Inherit => {}
+             Streams::Null => {
+-                command
+-                    .stdin(Stdio::null())
+-                    .stdout(Stdio::null())
+-                    .stderr(Stdio::null());
++                command.stdout(Stdio::null()).stderr(Stdio::null());
+             }
+             Streams::Files { stdout, stderr } => {
+                 command
+-                    .stdin(Stdio::null())
+                     .stdout(super::agent_dir::create_file(stdout)?)
+                     .stderr(super::agent_dir::create_file(stderr)?);
+             }
+             Streams::Log(log) => {
+                 let log = super::agent_dir::create_file(log)?;
+-                command
+-                    .stdin(Stdio::null())
+-                    .stdout(log.try_clone()?)
+-                    .stderr(log);
++                command.stdout(log.try_clone()?).stderr(log);
+             }
+         }
++        if spec.get_stdin().is_some() || !matches!(streams, Streams::Inherit) {
++            command.stdin(stdin(spec)?);
++        }
+         let child = command.spawn()?;
+         if spec.get_new_session() {
+             track(child.id() as i32);
+@@ -258,6 +339,56 @@ mod tests {
+         assert_eq!(fs::read_to_string(&err).unwrap(), "oops\n");
+     }
+ 
++    /// A text past the system's limit on the arguments (about 1 MB on
++    /// macOS, task 1560) reaches the process on its standard input whole,
++    /// where on its command line it fails to start with `E2BIG`.
++    #[test]
++    fn a_text_past_the_argument_limit_reaches_stdin_whole() {
++        let dir = tempfile::tempdir().unwrap();
++        let (out, err) = (dir.path().join("out"), dir.path().join("err"));
++        let text = "x".repeat(2 * 1024 * 1024);
++        let streams = || Streams::Files {
++            stdout: &out,
++            stderr: &err,
++        };
++        let mut spec = CommandSpec::new("/bin/sh");
++        spec.args(["-c", "wc -c | tr -d ' '"]).stdin(text.as_str());
++        let mut child = LocalSpawner.spawn(&spec, streams()).unwrap();
++        assert!(child.wait().unwrap().success);
++        assert_eq!(fs::read_to_string(&out).unwrap().trim(), "2097152");
++        let mut on_the_line = CommandSpec::new("/bin/echo");
++        on_the_line.arg(&text);
++        let error = LocalSpawner.spawn(&on_the_line, streams()).err().unwrap();
++        let error = error.downcast_ref::<std::io::Error>().unwrap();
++        assert_eq!(error.raw_os_error(), Some(libc::E2BIG), "{error}");
++        // Without a text of its own, the process reads nothing.
++        let mut empty = CommandSpec::new("/bin/sh");
++        empty.args(["-c", "wc -c | tr -d ' '"]);
++        let mut child = LocalSpawner.spawn(&empty, streams()).unwrap();
++        assert!(child.wait().unwrap().success);
++        assert_eq!(fs::read_to_string(&out).unwrap().trim(), "0");
++    }
++
++    /// A standard input whose file cannot be made (its directory gone, as
++    /// a `TMPDIR` that was removed) fails the start as the starter's
++    /// environment, which holds no provider (task 1560).
++    #[test]
++    fn a_stdin_that_cannot_be_prepared_is_no_providers_failure() {
++        use crate::{application::job_start_failure, domain::headless_job::JobFailure};
++        let dir = tempfile::tempdir().unwrap();
++        let gone = dir.path().join("gone");
++        let mut spec = CommandSpec::new("/bin/cat");
++        spec.stdin("the prompt");
++        let error = stdin_in(&spec, &gone).err().unwrap();
++        assert!(
++            format!("{error:#}").contains("create the standard input"),
++            "{error:#}"
++        );
++        assert_eq!(job_start_failure(&error), JobFailure::Other);
++        // Without a text of its own there is nothing to prepare.
++        assert!(stdin_in(&CommandSpec::new("/bin/cat"), &gone).is_ok());
++    }
++
+     #[test]
+     fn a_running_child_is_killed_and_reaped() {
+         let mut child = LocalSpawner
+diff --git a/tests/e2e.rs b/tests/e2e.rs
+index e23f90e8..f63c9bdc 100644
+--- a/tests/e2e.rs
++++ b/tests/e2e.rs
+@@ -192,7 +192,10 @@ if [ -n "$headless" ] && [ "$output" != stream-json ]; then
+   # verdict JSON on stdout. Only a task that says E2E-REVIEW-PASS passes;
+   # any other review fails, and its run waits in an approve_landing ask.
+   # The runtime names the review's own session (ADR-0048 decision 4), and
+-  # the review loads no setting sources (ADR-t1470-1).
++  # the review loads no setting sources (ADR-t1470-1). Its prompt comes on
++  # stdin, never as an argument (task 1560).
++  [ -z "$prompt" ] || { printf 'stub: the review prompt is an argument\n' >&2; exit 64; }
++  prompt=$(cat)
+   [ -n "$session_id" ] && [ -n "$debug_file" ] && [ -n "$add_dir" ] && [ -n "$settings" ] && [ -n "$prompt" ] \
+     && [ "$tools" = "Read,Grep,Glob" ] && [ "$denied" = "Bash,Edit,Write,NotebookEdit" ] \
+     && [ -z "$sources" ] || { printf 'stub: bad review arguments\n' >&2; exit 64; }
+diff --git a/tests/it/goal_review_codex.rs b/tests/it/goal_review_codex.rs
+index 407bebb5..97832971 100644
+--- a/tests/it/goal_review_codex.rs
++++ b/tests/it/goal_review_codex.rs
+@@ -48,6 +48,9 @@ pub(crate) fn stub_codex(fx: &Fixture, mode: &str, verdict: &Value) -> PathBuf {
+ DIR="${{0%/*}}"
+ [ "$1" = --version ] && {{ echo "codex-cli 0.155.1"; exit 0; }}
+ for arg in "$@"; do printf '%s|' "$arg" | tr '\n' ' '; done >> "$DIR/codex-args.txt"
++# The prompt comes on stdin, never as an argument (task 1560).
++printf '<stdin>|' >> "$DIR/codex-args.txt"
++tr '\n' ' ' >> "$DIR/codex-args.txt"
+ printf '\n' >> "$DIR/codex-args.txt"
+ printf '%s %s\n' "$DAGQ_ROLE" "$DAGQ_ACTOR_ID" >> "$DIR/codex-actors.txt"
+ THREAD="codex-thread-$(wc -l < "$DIR/codex-actors.txt" | tr -d ' ')"
+@@ -274,7 +277,7 @@ fn a_goal_review_on_codex_runs_read_only_and_records_its_thread_and_model() {
+         .collect();
+     assert!(profile.contains(r#"permissions.dagq_job.extends=":read-only""#));
+     let expected = format!(
+-        "exec|--json|--skip-git-repo-check|-C|{}|-m|gpt-6-astra|-c|model_reasoning_effort=\"high\"|{profile}--|",
++        "exec|--json|--skip-git-repo-check|-C|{}|-m|gpt-6-astra|-c|model_reasoning_effort=\"high\"|{profile}<stdin>|",
+         repo.display()
+     );
+     assert!(calls[0].starts_with(&expected), "{}", calls[0]);
+diff --git a/tests/it/main.rs b/tests/it/main.rs
+index 0f2d1a45..307e1efb 100644
+--- a/tests/it/main.rs
++++ b/tests/it/main.rs
+@@ -54,6 +54,7 @@ mod main_checkout;
+ mod plan_review;
+ mod plan_review_codex;
+ mod plan_review_concern;
++mod plan_review_launch;
+ mod plan_review_prompt_bytes;
+ mod plan_review_reasons;
+ mod planner_close;
+diff --git a/tests/it/plan_review.rs b/tests/it/plan_review.rs
+index f7af8dc5..c95da2d4 100644
+--- a/tests/it/plan_review.rs
++++ b/tests/it/plan_review.rs
+@@ -259,8 +259,16 @@ impl AgentProvider for StubReviewer {
+         let script = format!(
+             "printf '%s %s\\n' \"$DAGQ_ROLE\" \"$DAGQ_ACTOR_ID\" >> \"$(dirname \"$(dirname \"$(dirname \"$DAGQ_SERVICE_CREDENTIAL_FILE\")\")\")/{JOB_ACTORS}\"; {script}"
+         );
+-        let mut command = CommandSpec::new("/bin/sh");
++        let missing = verdict.trim_matches('"') == MISSING;
++        let mut command = CommandSpec::new(if missing {
++            "/nonexistent/sh"
++        } else {
++            "/bin/sh"
++        });
+         command.current_dir(cwd).arg("-c").arg(script);
++        if verdict.trim_matches('"') == TOO_LONG {
++            command.arg("x".repeat(2 << 20));
++        }
+         Ok(command)
+     }
+     fn review_command(&self, _: &TaskRun, _: &str, _: JobAccess) -> Result<CommandSpec> {
+@@ -279,6 +287,11 @@ impl AgentProvider for StubReviewer {
+ 
+ /// The verdict of a [`StubReviewer`] job that stops at the usage limit.
+ const LIMIT: &str = "LIMIT";
++/// The verdict of a [`StubReviewer`] job whose arguments pass the
++/// system's limit, so it fails to start with `E2BIG` (task 1560).
++pub(crate) const TOO_LONG: &str = "TOO_LONG";
++/// The verdict of a [`StubReviewer`] job whose executable is not there.
++pub(crate) const MISSING: &str = "MISSING";
+ 
+ /// Where [`StubReviewer`]'s jobs append their role and actor id, next to
+ /// the queue.
+diff --git a/tests/it/plan_review_codex.rs b/tests/it/plan_review_codex.rs
+index 23dfddfc..3225052a 100644
+--- a/tests/it/plan_review_codex.rs
++++ b/tests/it/plan_review_codex.rs
+@@ -138,7 +138,7 @@ fn a_plan_review_on_codex_runs_read_only_and_applies_its_verdicts() {
+         .collect();
+     assert!(profile.contains(r#"permissions.dagq_job.extends=":read-only""#));
+     let expected = format!(
+-        "exec|--json|--skip-git-repo-check|-C|{}|-m|gpt-6-astra|-c|model_reasoning_effort=\"high\"|{profile}--|",
++        "exec|--json|--skip-git-repo-check|-C|{}|-m|gpt-6-astra|-c|model_reasoning_effort=\"high\"|{profile}<stdin>|",
+         repo.display()
+     );
+     for call in &calls {
+diff --git a/tests/it/plan_review_launch.rs b/tests/it/plan_review_launch.rs
+new file mode 100644
+index 00000000..580f4f0f
+--- /dev/null
++++ b/tests/it/plan_review_launch.rs
+@@ -0,0 +1,103 @@
++//! A headless job that could not be started (task 1560): arguments or an
++//! environment past the system's limit (`E2BIG`, os error 7) are the job's
++//! own input, so the job fails alone and no provider is held; a provider
++//! whose executable is not there is held as before.
++
++use crate::goal_review_codex::{codex_home, queue_events, roles, stub_codex, stub_lines};
++use crate::plan_review::{
++    Fixture, MISSING, PlanWorkspace, StubReviewer, TOO_LONG, add, events, fixture, options, status,
++    submit, supervise_with,
++};
++
++use dagq::{
++    domain::{Priority, ProposalId, TaskId, TaskStatus},
++    infrastructure::sqlite::SqliteQueue,
++};
++use serde_json::{Value, json};
++use std::{path::Path, time::Duration};
++
++/// Supervise once with `codex` as the Codex CLI, and no runtime planner.
++fn supervise(fx: &Fixture, reviewer: &StubReviewer, codex: &Path) {
++    let mut options = options(0, Duration::from_secs(3600));
++    options.codex = codex.to_owned();
++    options.codex_home = Some(codex_home(fx));
++    supervise_with(fx, &PlanWorkspace::default(), reviewer, &options);
++}
++
++fn pass() -> Value {
++    json!({"verdict": "pass", "reasons": [], "summary": "pass it"})
++}
++
++/// A submitted proposal of one new task, waiting for the draft blocker.
++fn proposal(fx: &Fixture, title: &str) -> (TaskId, ProposalId) {
++    let mut queue = SqliteQueue::open(&fx.db).unwrap();
++    let task = add(&mut queue, title, &[TaskId::new(1)], Priority::Normal);
++    (task, submit(&mut queue, &[task], None))
++}
++
++/// The plan review of one proposal fails to start with `E2BIG`: that job
++/// fails as any failed job does, no provider is held, and the next
++/// proposal's job starts on the same provider and passes. Supervised
++/// again, the failed proposal is not started again, so no hold comes back.
++#[test]
++fn a_job_past_the_argument_limit_fails_alone_and_holds_no_provider() {
++    let fx = fixture();
++    roles(&fx, "[roles.plan_review]\nprovider = \"claude\"\n");
++    // Claude's role, with a Codex the job could move to: a provider that
++    // cannot be used would be held and the job moved.
++    let codex = stub_codex(&fx, "ok", &pass());
++    let (too_long, _) = proposal(&fx, "too long");
++    let (next, _) = proposal(&fx, "next");
++    let claude = StubReviewer::new(&[json!(TOO_LONG), pass()]);
++    supervise(&fx, &claude, &codex);
++    supervise(&fx, &claude, &codex);
++
++    let mut queue = SqliteQueue::open(&fx.db).unwrap();
++    let failed = events(&mut queue, too_long, "plan_review_failed");
++    assert_eq!(failed.len(), 1, "{failed:?}");
++    let error = failed[0]["error"].as_str().unwrap();
++    assert!(error.contains("os error 7"), "{error}");
++    assert!(failed[0]["provider_unusable"].is_null(), "{failed:?}");
++    assert_eq!(status(&mut queue, too_long), TaskStatus::Submitted);
++    assert!(queue_events(&fx, "provider_held").is_empty());
++    // The other proposal's job ran on Claude all the same.
++    assert_eq!(status(&mut queue, next), TaskStatus::Ready);
++    let started = events(&mut queue, next, "plan_review_started");
++    assert_eq!(started.len(), 1, "{started:?}");
++    assert_eq!(started[0]["launch"]["provider"], "claude");
++    assert!(
++        started[0]["launch"]["switched_from"].is_null(),
++        "{started:?}"
++    );
++    assert_eq!(claude.prompts().len(), 2, "each proposal started once");
++    assert!(
++        stub_lines(&fx, "codex-args.txt").is_empty(),
++        "nothing moved"
++    );
++}
++
++/// A provider whose executable is not there when its job starts is held
++/// (`executable_missing`) and the job moves to the other provider, as
++/// before task 1560.
++#[test]
++fn a_missing_executable_still_holds_its_provider() {
++    let fx = fixture();
++    roles(&fx, "[roles.plan_review]\nprovider = \"claude\"\n");
++    let codex = stub_codex(&fx, "ok", &pass());
++    let (task, _) = proposal(&fx, "moved");
++    let claude = StubReviewer::new(&[json!(MISSING), pass()]);
++    supervise(&fx, &claude, &codex);
++    supervise(&fx, &claude, &codex);
++    let held = queue_events(&fx, "provider_held");
++    assert_eq!(held.len(), 1, "{held:?}");
++    assert_eq!(
++        (&held[0]["provider"], &held[0]["reason"]),
++        (&json!("claude"), &json!("executable_missing"))
++    );
++    let mut queue = SqliteQueue::open(&fx.db).unwrap();
++    let started = events(&mut queue, task, "plan_review_started");
++    assert_eq!(started.len(), 2, "{started:?}");
++    assert_eq!(started[1]["launch"]["provider"], "codex");
++    assert_eq!(started[1]["launch"]["switch_reason"], "executable_missing");
++    assert_eq!(status(&mut queue, task), TaskStatus::Ready);
++}
+diff --git a/tests/it/review_subagents.rs b/tests/it/review_subagents.rs
+index 1f9a31dd..c3db2484 100644
+--- a/tests/it/review_subagents.rs
++++ b/tests/it/review_subagents.rs
+@@ -1016,12 +1016,15 @@ fn the_real_claude_review_runs_its_subagents_without_the_worktrees_settings() {
+                 .push(json!("Read(./secret.txt)"));
+         }
+         fs::write(&settings, written.to_string()).unwrap();
++        // The prompt is the review's standard input (task 1560).
++        let input = run_dir.join(format!("{name}-prompt.txt"));
++        fs::write(&input, command.get_stdin().unwrap()).unwrap();
+         let mut process = std::process::Command::new(command.get_program());
+         process
+             .args(&args)
+             .current_dir(command.get_current_dir().unwrap())
+             .env_remove("CLAUDECODE")
+-            .stdin(std::process::Stdio::null());
++            .stdin(fs::File::open(&input).unwrap());
+         let output = {
+             let _waiting =
+                 crate::common::within(Duration::from_secs(300), "the real Claude review");
+diff --git a/tests/it/runtime_observer.rs b/tests/it/runtime_observer.rs
+index e5348d5c..d2e52a95 100644
+--- a/tests/it/runtime_observer.rs
++++ b/tests/it/runtime_observer.rs
+@@ -572,7 +572,8 @@ fn observer_claude_stub(db: &Path) -> PathBuf {
+         r#"#!/bin/sh
+ if [ "$1" = "-p" ]; then
+   mode=hourly
+-  case "$*" in *"daily observation"*) mode=daily ;; esac
++  # The prompt comes on stdin (task 1560).
++  case "$(cat)" in *"daily observation"*) mode=daily ;; esac
+   exec dagq finding record --goal 1 --kind observed --subject "$mode" --summary "observed by $DAGQ_ROLE"
+ fi
+ printf 'test provider\n'
+diff --git a/tests/it/runtime_support/headless.rs b/tests/it/runtime_support/headless.rs
+index 47df6887..84ed6f68 100644
+--- a/tests/it/runtime_support/headless.rs
++++ b/tests/it/runtime_support/headless.rs
+@@ -197,6 +197,9 @@ impl<S: Spawner> Spawner for InheritingSpawner<S> {
+         if spec.get_new_session() {
+             inherited.new_session();
+         }
++        if let Some(text) = spec.get_stdin() {
++            inherited.stdin(text);
++        }
+         self.inner.spawn(&inherited, streams)
+     }
+ }
+diff --git a/tests/it/runtime_support/mod.rs b/tests/it/runtime_support/mod.rs
+index 188583ff..de882c9a 100644
+--- a/tests/it/runtime_support/mod.rs
++++ b/tests/it/runtime_support/mod.rs
+@@ -167,7 +167,8 @@ impl Spawner for StubSpawner {
+                 std::iter::once(fake_cmux_dir(&self.db)).chain(std::env::split_paths(&path)),
+             )?,
+         );
+-        command.stdin(Stdio::null());
++        // A headless job's prompt, or nothing (task 1560).
++        command.stdin(process::stdin(spec)?);
+         match streams {
+             // The agent's terminal.
+             Streams::Inherit => {
+@@ -1817,12 +1818,13 @@ pub fn stub_calls(run: &TaskRun) -> Vec<String> {
+ /// /bin/sh --version is not portable; a tiny standalone provider preflight stub.
+ pub fn claude_stub(db: &Path) -> PathBuf {
+     let stub = db.parent().unwrap().join("claude-stub");
+-    // A live session's recovery job escalates (so the alert's ask opens);
+-    // anything else prints no verdict.
++    // A live session's recovery job (its prompt on stdin in print mode)
++    // escalates (so the alert's ask opens); anything else prints no
++    // verdict.
+     crate::common::template::script(
+         &stub,
+         format!(
+-            "#!/bin/sh\ncase \"$*\" in *\"{LIVE_RECOVERY}\"*) printf '%s\\n' '{ESCALATE}' ;; *) printf 'test provider\\n' ;; esac\n"
++            "#!/bin/sh\nPROMPT=\"$*\"; [ \"$1\" = -p ] && PROMPT=$(cat)\ncase \"$PROMPT\" in *\"{LIVE_RECOVERY}\"*) printf '%s\\n' '{ESCALATE}' ;; *) printf 'test provider\\n' ;; esac\n"
+         ),
+     );
+ 
+diff --git a/tests/it/runtime_throughput_review.rs b/tests/it/runtime_throughput_review.rs
+index 4578c114..95012726 100644
+--- a/tests/it/runtime_throughput_review.rs
++++ b/tests/it/runtime_throughput_review.rs
+@@ -553,8 +553,8 @@ fn the_daily_and_weekly_reviews_of_inputs_of_mbs_start_their_agent_with_a_small_
+ }
+ 
+ /// A Claude Code stand-in for the supervisor's review: `--version` for the
+-/// preflight, and in print mode (`-p`) the review, or a failure when
+-/// `fail` is set.
++/// preflight, and in print mode (`-p`, its prompt on stdin) the review, or
++/// a failure when `fail` is set.
+ pub(crate) fn review_claude_stub(db: &Path, fail: bool) -> PathBuf {
+     let stub = db.parent().unwrap().join("claude-review-stub");
+     let review = if fail {
+@@ -565,7 +565,7 @@ pub(crate) fn review_claude_stub(db: &Path, fail: bool) -> PathBuf {
+     crate::common::template::script(
+         &stub,
+         format!(
+-            "#!/bin/sh\ncase \"$*\" in *\"You are the throughput review job\"*) {review} ;; esac\nprintf 'test provider\\n'\n"
++            "#!/bin/sh\n[ \"$1\" = -p ] && case \"$(cat)\" in *\"You are the throughput review job\"*) {review} ;; esac\nprintf 'test provider\\n'\n"
+         ),
+     );
+ 
+diff --git a/tests/it/throughput_review_codex.rs b/tests/it/throughput_review_codex.rs
+index d66f2e21..65fa09f7 100644
+--- a/tests/it/throughput_review_codex.rs
++++ b/tests/it/throughput_review_codex.rs
+@@ -59,6 +59,9 @@ else
+   fi
+ fi
+ for arg in "$@"; do printf '%s|' "$arg" | tr '\n' ' '; done >> "$DIR/codex-args.txt"
++# The prompt comes on stdin, never as an argument (task 1560).
++printf '<stdin>|' >> "$DIR/codex-args.txt"
++tr '\n' ' ' >> "$DIR/codex-args.txt"
+ printf '\n' >> "$DIR/codex-args.txt"
+ printf '%s %s\n' "$DAGQ_ROLE" "$DAGQ_ACTOR_ID" >> "$DIR/codex-actors.txt"
+ THREAD="codex-thread-$(wc -l < "$DIR/codex-actors.txt" | tr -d ' ')"
+@@ -178,7 +181,7 @@ fn a_throughput_review_on_codex_reads_its_last_message_like_claude_s_output() {
+         );
+         assert!(
+             call.contains(&format!(
+-                "|-m|{CODEX_MODEL}|-c|model_reasoning_effort=\"high\"|{profile}--|"
++                "|-m|{CODEX_MODEL}|-c|model_reasoning_effort=\"high\"|{profile}<stdin>|"
+             )),
+             "{call}"
+         );

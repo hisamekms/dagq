@@ -1,0 +1,1564 @@
+diff --git a/docs/design/authorization.md b/docs/design/authorization.md
+index b00e9b92..27ac4573 100644
+--- a/docs/design/authorization.md
++++ b/docs/design/authorization.md
+@@ -4,8 +4,8 @@ type: design
+ title: Authorization
+ status: current
+ created: 2026-09-27
+-updated: 2026-10-04 # task 1505
+-last_verified: 2026-10-04 # task 1505
++updated: 2026-10-04 # task 1509
++last_verified: 2026-10-04 # task 1509
+ scope: runtime
+ related:
+   - adr-t1394-1
+@@ -165,7 +165,7 @@ answerは誰の権限で書かれたか（`AnswerAuthority`）を記録する（
+ 
+ askの行には`answer_authority`と`answer_approval`（`0047_answer_authority.sql`）を、`ask_answered`のpayloadには`authority`と`approval`を書く。`answered_by`と`asked_by`の値の綴りは変えない（jobのaskの`asked_by`の改名とhumanからuserへの改名はgoal 48のtask 502が持つ）。eventのactorの列（roleとid）も同じ区別を持つ。migrationより前のanswerと古いバイナリのanswerは両方とも`NULL`で、JSONには出ない。
+ 
+-承認に当たるask（後のgoalで人だけに限るときの土台。ADR-t728-3の決定3）はdomainが分類する（`AskKind::is_approval`と`answer_approves`）: kindが`approve_landing`・`decide`・`approve_plan`・`approve_goal`・`approve_update`・`update_failed`のaskのanswer、または`blocked`・`stalled`のaskがoptionに出した`propose` / `dismiss`（runtimeがfindingに適用する答え）。そのanswerは`answer_approval`が`1`、payloadの`approval`が`true`になる。runtimeが自分で閉じる・取り下げる・置き換えるanswer（`authority`が`runtime`）は何も承認しないので、kindに関わらず`0` / `false`にする。この段では承認を人だけに限る強制はしない。
++承認に当たるask（後のgoalで人だけに限るときの土台。ADR-t728-3の決定3）はdomainが分類する（`AskKind::is_approval`と`answer_approves`）: kindが`approve_landing`・`decide`・`approve_plan`・`approve_goal`・`correct_goal`・`approve_update`・`update_failed`のaskのanswer、または`blocked`・`stalled`のaskがoptionに出した`propose` / `dismiss`（runtimeがfindingに適用する答え）。そのanswerは`answer_approval`が`1`、payloadの`approval`が`true`になる。runtimeが自分で閉じる・取り下げる・置き換えるanswer（`authority`が`runtime`）は何も承認しないので、kindに関わらず`0` / `false`にする。この段では承認を人だけに限る強制はしない。
+ 
+ ### runtimeの操作系のコマンド（application）
+ 
+diff --git a/docs/design/domain-model.md b/docs/design/domain-model.md
+index cbb9a292..bb1fe029 100644
+--- a/docs/design/domain-model.md
++++ b/docs/design/domain-model.md
+@@ -4,8 +4,8 @@ type: design
+ title: Domain model
+ status: current
+ created: 2026-09-21
+-updated: 2026-10-04 # task 1507
+-last_verified: 2026-10-04 # task 1507
++updated: 2026-10-04 # task 1509
++last_verified: 2026-10-04 # task 1509
+ scope: domain
+ related:
+   - adr-t1394-1
+@@ -292,6 +292,7 @@ domainの関数は業務上の拒否を`DomainError`（`src/domain/error.rs`）
+ | `FollowUpsNotArray` | `Receipt::check` | なし | `receipt follow_ups must be an array` |
+ | `MissingRunDirectory` | `TaskRun::idle_marker_path` | なし | `missing run directory` |
+ | `GoalNotDraft` | `goal::ready` | goal ID | `goal <id> is not a draft` |
++| `GoalNotReopenable` | `goal::reopen` | goal ID、verdict（無ければ開いている） | `goal <id> is <open\|closed as <verdict>>; only a goal closed as achieved is opened again` |
+ | `GoalClosed` | `goal::check_accepts_tasks`（`add --goal`と`set-goal`） | goal ID、記録済みのverdict | `goal <id> is closed as <verdict>; create a new goal for further work` |
+ | `GoalCloseInconsistent` | `Goal::restore` | goal ID | `goal <id> has a close time without a verdict or a verdict without a close time` |
+ | `TaskNotEditable` | `task::set_goal`、`task::set_paths`、`task::set_priority`、`task::check_dependencies_editable` | 変える対象（`the goal`、`the paths`、`the priority`、`dependencies`） | `<what> can only be changed for draft, submitted or ready tasks` |
+diff --git a/docs/design/follow-up-membership.md b/docs/design/follow-up-membership.md
+index 7bd794b2..33efa7f9 100644
+--- a/docs/design/follow-up-membership.md
++++ b/docs/design/follow-up-membership.md
+@@ -4,8 +4,8 @@ type: design
+ title: Follow-up membership judgements
+ status: current
+ created: 2026-10-04
+-updated: 2026-10-04 # task 1507
+-last_verified: 2026-10-04 # task 1507
++updated: 2026-10-04 # task 1509
++last_verified: 2026-10-04 # task 1509
+ scope: runtime
+ related:
+   - adr-t1504-2
+@@ -68,9 +68,9 @@ required/out_of_scopeの判断を持つtaskの`set-goal`は、最後の判断の
+ 判断の履歴・材料・深さを載せる（移動したfollow_upも含む）。`events`は
+ `follow_up_registered`の登録時の材料と`follow_up_judged`の判断を読める。
+ 
+-判断をsubmitの必須条件にする検査とplan reviewの資料、achieved後のaskと訂正の
+-適用はADR-t1504-2の後続の実装範囲である。閉じた元goalへのrequiredの記録は
+-達成のeventや閉じた状態を変更しない。
++判断をsubmitの必須条件にする検査とplan reviewの資料はADR-t1504-2の後続の
++実装範囲である。閉じた元goalへのrequiredの記録は達成のeventや閉じた状態を変更しない
++（下の「achievedの後の訂正」）。
+ 
+ ## 閉じる条件
+ 
+@@ -91,6 +91,20 @@ acceptanceを変えると判定時の版が古くなり、同じ分類を記録
+ answerの`achieved`が同じtransactionで同じ条件を使う。goal reviewの起動の条件と
+ fingerprintにも入る（[Goal review](supervisor-lifecycle/goal-review.md)の2・5）。
+ 
++## achievedの後の訂正
++
++閉じたgoalを元goalとするfollow_upの訂正も同じ`judge-follow-up`（user・inbox・
++runtimeのplanner）で記録し、前の行もgoalの`goal_closed`とverdictも消さない。
++out_of_scopeの訂正（所属先の誤りなど）は人に問わず、記録と開いた所属先への移動だけを行う。
++元goalがachievedで閉じた後のrequired（新しい判断かout_of_scope・undecidedからの訂正。
++requiredの確かめ直しは問わない。`follow_up::opens_correction`）は、同じtransactionで`correct_goal`のaskを開き、
++そのIDを`follow_up_judged`のpayloadと出力の`correction_ask_id`に残す。goalは
++自動で開き直さず、follow_upも動かさない。abandonedで閉じたgoalへのrequiredはaskを開かない。
++
++askが閉じるまで、そのfollow_upの`judge-follow-up`と`set-goal`は拒む。askの中身と
++`reopen` / `correct_verdict` / `keep_achieved`の適用は
++[Goal review](supervisor-lifecycle/goal-review.md)の9が持つ。
++
+ ## 旧schemaの移行
+ 
+ migration 0064は既存のfollow_upを未判定のまま残す。現在の所属と深さと
+diff --git a/docs/design/security.md b/docs/design/security.md
+index 0dc8eb41..1b697305 100644
+--- a/docs/design/security.md
++++ b/docs/design/security.md
+@@ -4,8 +4,8 @@ type: design
+ title: Security
+ status: current
+ created: 2026-09-28
+-updated: 2026-10-04 # task 1505
+-last_verified: 2026-10-04 # task 1505
++updated: 2026-10-04 # task 1509
++last_verified: 2026-10-04 # task 1509
+ scope: runtime
+ tags:
+   - security
+@@ -131,7 +131,7 @@ host実行ではIntegratorもsupervisorや`integrate`と同じプロセスとユ
+ inboxは全てのaskにanswerでき、`dagq-recover`の手作業（`integrate`・`recover`・`review`・`ready --bypass-review`・`cancel`・`up` / `down` / `install`など）も人の言葉で代行できる（ADR-t728-3の決定1）。そのかわり記録で人自身と区別する（決定2）。
+ 
+ - eventのactor: 人自身は`actor_role`が`user`、inboxの代行は`inbox`（`events --full`・`show --full`の`actor`）。Integratorが着地するときは`requested_by`が`user`か`inbox`
+-- answer: askの`answer_authority`（`ask_answered`のpayloadの`authority`）が、人自身は`user`、inboxは`delegated`、runtimeが閉じたものは`runtime`。承認に当たるask（`approve_landing`・`decide`・`approve_plan`・`approve_goal`・`approve_update`・`update_failed`と、`blocked` / `stalled`の`propose` / `dismiss`）は`answer_approval`が`1`
++- answer: askの`answer_authority`（`ask_answered`のpayloadの`authority`）が、人自身は`user`、inboxは`delegated`、runtimeが閉じたものは`runtime`。承認に当たるask（`approve_landing`・`decide`・`approve_plan`・`approve_goal`・`correct_goal`・`approve_update`・`update_failed`と、`blocked` / `stalled`の`propose` / `dismiss`）は`answer_approval`が`1`
+ - 区別はactorの型から決め、answerの文やpromptから推さない
+ - inboxのterminalで人が打つ`!`のコマンドも`DAGQ_ROLE=inbox`を継ぐので`delegated`として記録される。人自身の操作として残したいときは、`DAGQ_ROLE`の無い別のterminalで打つ
+ 
+diff --git a/docs/design/supervisor-lifecycle/ask.md b/docs/design/supervisor-lifecycle/ask.md
+index 17961935..87211542 100644
+--- a/docs/design/supervisor-lifecycle/ask.md
++++ b/docs/design/supervisor-lifecycle/ask.md
+@@ -4,8 +4,8 @@ type: design
+ title: "`ask` / `answer` / `asks`"
+ status: current
+ created: 2026-09-26
+-updated: 2026-10-04 # task 1424: approve_landing applies send_back: <reason>
+-last_verified: 2026-10-04 # task 1424
++updated: 2026-10-04 # task 1509: correct_goal
++last_verified: 2026-10-04 # task 1509
+ scope: runtime
+ related:
+   - adr-t451-1
+@@ -20,9 +20,9 @@ related:
+ 
+ [ADR-0022](../../adr/0022-ask-answer-inbox-planner-and-landing-on-doubt.md)の決定1。人の判断を要する相談を`asks`表の行にする（[persistence](../persistence.md#asks)）。
+ 
+-- askのkindにはほかに`stuck_exit`（schema v17）があり、CLIからは作れない。`follow_up`（schema v22）は退役したfollow-up triageのaskで、もう作られない（残ったものは人が読む）。`planner_question`（schema v28）はruntimeのplannerが`ask --kind planner_question --task ID`で作り、supervisorがanswerをそのplannerに届ける（[Draft planners (supervisor)](draft-planners.md#draft-planners-supervisor)）。findingのために立ったplannerは`--finding ID`で作り、taskもrunも無くてよい（[Finding planners (supervisor)](finding-planners.md)）。計画の依頼のために立ったplannerは`--request ID`で作り（`planner_question`だけ）、taskもrunも無くてよい（[inboxからの計画の依頼](plan-planners.md#inboxからの計画の依頼)の7）。findingに紐づけた`blocked`のaskにはruntimeが`propose`と`dismiss`を、`stalled`のaskには`propose`をoptionsに足し、その答えは`answer`がfindingに適用する（同じ文書の5）。`/exit`のtimeoutでsupervisorが作り、sessionの終了でsupervisorが閉じる（[Receipt and session exit](receipt-and-session-exit.md#receipt-and-session-exit)）。
++- askのkindにはほかに`stuck_exit`（schema v17）があり、CLIからは作れない。`follow_up`（schema v22）は退役したfollow-up triageのaskで、もう作られない（残ったものは人が読む）。`planner_question`（schema v28）はruntimeのplannerが`ask --kind planner_question --task ID`で作り、supervisorがanswerをそのplannerに届ける（[Draft planners (supervisor)](draft-planners.md#draft-planners-supervisor)）。`correct_goal`はachievedで閉じたgoalのfollow_upにrequiredが記録されたときにruntimeがそのfollow_upのtaskについて作り、supervisorがanswer（`reopen` / `correct_verdict` / `keep_achieved`）を適用する（[Goal review](goal-review.md)の9、ADR-t1504-2決定9）。CLIの`ask`の`--kind`には無い。findingのために立ったplannerは`--finding ID`で作り、taskもrunも無くてよい（[Finding planners (supervisor)](finding-planners.md)）。計画の依頼のために立ったplannerは`--request ID`で作り（`planner_question`だけ）、taskもrunも無くてよい（[inboxからの計画の依頼](plan-planners.md#inboxからの計画の依頼)の7）。findingに紐づけた`blocked`のaskにはruntimeが`propose`と`dismiss`を、`stalled`のaskには`propose`をoptionsに足し、その答えは`answer`がfindingに適用する（同じ文書の5）。`/exit`のtimeoutでsupervisorが作り、sessionの終了でsupervisorが閉じる（[Receipt and session exit](receipt-and-session-exit.md#receipt-and-session-exit)）。
+ - `dagq ask --kind <approve_landing|answer_prompt|decide|worker_question|planner_question|blocked> --because <scope|discard|recovery_failed> --question <text> [--option <text>]... [--task ID | --run RUN_ID]`は相談を登録してaskを返す（`Ask`の全列と`created`）。workerとjob（Codexの非対話のworkerを含む）の`dagq ask`はクライアントモードでqueue serviceに送られ、serviceが呼び出しのtokenのprincipalで同じ`Dialogue`の判定を通してから開く（`asked_by`はprincipalのrole。task 1236、[Queue service](../queue-service.md#クライアントモード)）。`--run`はそのrunのtaskも決める。`--task` / `--run`のどちらかは必須で、例外は`blocked`（observerが上げる閾値超え。ADR-0044の決定4）だけ: taskにもrunにも紐づかない閾値（`idle_slots`、`backend_failures`）は`task_id` / `run_id`の無いaskにし、その`ask_opened` / `ask_answered`もtaskの無いrun_eventsになる（schema v16）。`--finding ID`（`blocked`だけ、schema v30、ADR-0044の決定23）はaskを根拠のfindingに紐づけ、observerのblocked askには必須にする。同じ（task、run、kind、finding）でopenなaskがあれば登録せずにそれを`created: false`で返す（`--question`と`--option`は捨てる。taskの無い`blocked`はfindingごとに1件）。新しいaskは`ask_opened`（payloadは`ask_id`、`kind`、`asked_by`）を同じトランザクションで書き、commitの後にinboxへ`cmux notify`を1回送る（observerの`blocked`も同じ。出力に`notified`、失敗なら`notify_error`。[人への通知](cmux-notify.md#人への通知cmux-notify)）。`asked_by`はsessionの`DAGQ_ROLE`（無ければnoteの`by`と同じく`human`）。observer（`DAGQ_ROLE=observer`）は読み取りの`asks`と`status`と、`ask --kind blocked`だけを使え、それ以外の`ask`・`answer` / `ask close`は拒否される。`ask`・`answer`・`ask close`はapplicationの層（`Dialogue`）が呼び出し元のroleで判定してから書く（task 733）: workerは自分のrunか自分のtaskの`worker_question`だけ、plannerはrunに紐づかない`planner_question`だけを開け、answerはuserとinboxだけ、`ask close`はuser・inbox・supervisorだけ（[Authorization](../authorization.md#対話と記録のコマンドapplication)）。answerはaskの行の`answer_authority`（`user`・`delegated`・`runtime`）と`answer_approval`、`ask_answered`のpayloadの`authority`と`approval`に、権限の出どころと承認に当たるかを残す。
+-- **人が要る理由**（[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定41、task 361、schema v29）: askは`reason_category`（`authentication` / `cost` / `scope` / `discard` / `recovery_failed`）を必ず持つ。CLIの`ask`は`--because <reason>`が必須で、無いか一覧に無い値、`authentication` / `cost`（下のqueue_holdだけのもの）は拒否する。当てはまらない相談はaskにせず、noteかreceiptに書く。runtimeが作るaskはkindごとに決まった理由を書く: `approve_landing` / `approve_plan`は`scope`、`approve_goal`（[goal review](goal-review.md)）はverdictが`discard`ならそれ、ほかは`scope`、`decide`（triageとresumeの使い切り）・`stuck_exit`・`answer_prompt`・`stalled`は`recovery_failed`。`worker_question` / `planner_question` / `blocked`は作る者が`--because`で付ける。v29のmigrationは既存のaskをkindから埋める（`approve_landing` / `approve_plan` / `planner_question` / `worker_question` / `blocked` / `follow_up`は`scope`、ほかは`recovery_failed`）。`ask_opened` / `ask_answered`のpayload、`status`の`asks`とask由来のattention、`events` / `watch`のcompactな行に`reason_category`が載る。
++- **人が要る理由**（[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定41、task 361、schema v29）: askは`reason_category`（`authentication` / `cost` / `scope` / `discard` / `recovery_failed`）を必ず持つ。CLIの`ask`は`--because <reason>`が必須で、無いか一覧に無い値、`authentication` / `cost`（下のqueue_holdだけのもの）は拒否する。当てはまらない相談はaskにせず、noteかreceiptに書く。runtimeが作るaskはkindごとに決まった理由を書く: `approve_landing` / `approve_plan`は`scope`、`approve_goal`（[goal review](goal-review.md)）はverdictが`discard`ならそれ、ほかは`scope`、`correct_goal`は`scope`、`decide`（triageとresumeの使い切り）・`stuck_exit`・`answer_prompt`・`stalled`は`recovery_failed`。`worker_question` / `planner_question` / `blocked`は作る者が`--because`で付ける。v29のmigrationは既存のaskをkindから埋める（`approve_landing` / `approve_plan` / `planner_question` / `worker_question` / `blocked` / `follow_up`は`scope`、ほかは`recovery_failed`）。`ask_opened` / `ask_answered`のpayload、`status`の`asks`とask由来のattention、`events` / `watch`のcompactな行に`reason_category`が載る。
+ - **認証のaskは1件**（ADR-0047の決定42）: kind `queue_hold`のaskはtaskにもrunにも紐づかず、理由（`authentication` / `cost`）と`subject`ごとにopenなものが1件だけで、止めているrunとheadless jobを`affected`（run IDと、`review job of run <id>`のようなjobの項目の配列）に持つ。supervisorはworkerの画面にログインの切れ（最後の行のどれかが、枠と`⎿`を除いて`API Error: 401` / `Invalid API key` / `OAuth token has expired` / `OAuth token revoked`で始まり`/login`を含む。文言を含むだけの作業の出力は数えない。`infrastructure::claude::auth_required`）か利用上限（`usage limit reached`、`5-hour limit reached ∙ resets 3pm`など。`usage_limited`、task 438）を見つけると、dialogの確認（`watch_prompt`）でも受領の無いidleの判定（`StallWatch`、促しとstalledのaskの前）でも待ちの確認でも、そのrunをこのask（ログインは`authentication`、利用上限は`cost`で`subject: usage_limit`）に足す（無ければ開く。optionsは`done` / `cancel_affected`、通知は開いたときの1回だけ）。足したrunには`auth_required` / `usage_limited`（`workspace_id`、`excerpt`、`screen_hash`、`ask_id`）を、2件目以降には`ask_updated`（`ask_id`、`reason_category`、`affected`、`joined`）をそのrunに（runの無いjobならqueueに）書き、questionの末尾の`Affected:`（`run <id>`とjobの項目を並べる）を書き直す。失敗したheadless job（review・復旧job・plan review・goal review・observer）の出力にその文言があれば、jobの失敗を通常の`*_failed`のattentionにせずaskに足す（詳しくは[認証と利用上限のaskの待ちとanswer](queue-hold.md)の「検知」）。askにいるrunは促しもstalledのaskも受けない。ログインや上限の後も画面にはエラーが残るので、直近の同じ種類のeventと同じ`screen_hash`の画面で、そのaskがもうopenでなければ上げ直さない（`done`の後はruntimeが決まった文面で続きを頼み、送れなかったrunや別のsupervisorのrunはstallの促しが頼む）。openな間のclaimとheadless jobの控えと、`done` / `cancel_affected`のruntimeによる適用（`runtime_delivers: true`）は[認証と利用上限のaskの待ちとanswer](queue-hold.md)（task 437）、ディスクの`cost`のaskは[空き容量を確かめる](disk-space.md)（task 377）。
+ - `dagq answer ASK_ID --text <text>`はopenなaskに`answer`と`answered_at`を書き、`ask_opened`と同じtask / runに`ask_answered`（`ask_id`、`kind`）を書く。回答済みかcloseされたaskにはerror。task 325（schema v38）から、回答した者`answered_by`（sessionの`DAGQ_ROLE`、無ければ`person`）と、回答が`options`のどれかと（前後の空白を除いて）一致したときのその番号`option_index`（一致しなければnull）も行に書き、`ask_answered`のpayloadに`answered_by` / `option_index`と選んだ選択肢の文字列`option`を足す。`option_index`と`option`は選択肢との完全一致だけで、`approve_plan`と`approve_landing`の`<option>: <理由>`の形の答え（`send_back: split it`）は`option`を持たず、`:`の前（前後の空白を除く）が選択肢のどれかと一致すれば、その選択肢を`reasoned_option`として`ask_answered`のpayloadに足す（task 1389。`asks`の行には書かない。`stats`の`recommendations`が推奨との一致に読む）。ほかのkindの答えには付けない。どちらのkindでもsupervisorは`send_back: <理由>`を`send_back`として適用し人の理由を差し戻し先に渡す（`approve_plan`は`PlanAnswer`、`approve_landing`は`LandingAnswer`、task 1424）ので、`approve_landing`の`ask_answered`の`runtime_delivers`は、runが`awaiting_integration`で答えが`land` / `send_back` / `cancel`か`send_back: <理由>`のときtrueになる（`land: x`・`cancel: x`などはfalseのままinboxが読む。[Review](review.md#review-supervisor)の6）。runtimeが自分で閉じる回答（`runtime_closed: true`の`ask_answered`と、supervisorの取り下げ）は`answered_by: runtime`。出力の`Ask`には`answered_by` / `option_index`が常に載り、未回答とv38より前の回答ではnull。集計は[`stats`](stats.md)の`asks`。
+ - `dagq ask close ASK_ID`は回答済みのaskに`closed_at`を書き、`ask_closed`（`ask_id`、`kind`）を記録する。inboxが回答を読んで従った印（supervisorが答えを適用して閉じるときも同じ`close_ask`）で、`stats`の`asks.times`は回答の適用として読む（task 468）。runtimeが回答済みのaskを適用せずに閉じるとき（回答が当たらなくなった`approve_plan` / `approve_goal`、proposalの取り下げで閉じる`approve_plan`）も同じ`ask_closed`をcloseと同じトランザクションで書く（task 568）。attentionではない。未回答のaskはcloseできず（error）、取り下げは`answer`で取り下げた旨を書いてからcloseする。run_eventsでaskを終えるのは`ask_answered`だけで（`worker_question`の送信の`ask_delivered` / `ask_delivery_failed`は後から足したkindで、`stats`の対には使わない）、`stats`はこの2つを`ask_id`で対にして未回答のaskを数えるため、closeだけで閉じたaskが`stats`に残り続けないようにする。回答した時点で同じ（task、run、kind）の新しいaskを登録できる。
+diff --git a/docs/design/supervisor-lifecycle/goal-review.md b/docs/design/supervisor-lifecycle/goal-review.md
+index 31b9a266..3f1aa78a 100644
+--- a/docs/design/supervisor-lifecycle/goal-review.md
++++ b/docs/design/supervisor-lifecycle/goal-review.md
+@@ -4,8 +4,8 @@ type: design
+ title: "Goal review (supervisor)"
+ status: current
+ created: 2026-09-27
+-updated: 2026-10-04 # task 1507: follow-up membership in the start condition, the fingerprint, the close and the prompt (ADR-t1504-2)
+-last_verified: 2026-10-04 # task 1507
++updated: 2026-10-04 # task 1509: the correct_goal ask after an achieved close and its answers (ADR-t1504-2 decision 9)
++last_verified: 2026-10-04 # task 1509
+ scope: runtime
+ related:
+   - adr-t1504-2
+@@ -42,5 +42,6 @@ execの[引き継ぎ](handoff.md)を待つあいだに終わったjobと、`prep
+    - Codexのjobの`goal_review_failed`も、読めれば`session_id`・`model`・`model_unknown`を持つ
+ 7. **answer**（`goal_answers` → `decide_goal`、1トランザクション）: `GoalAnswer::parse`で`achieved` / `abandoned` / `keep_open` / `gaps` / `gaps: <足りないもの>`を読む。適用できるのは、goalが閉じておらず、`achieved`は所属taskがすべて終わりfollow_upの所属の判断が済んでいて（2と同じ条件）、`abandoned`は`in_progress`が無く、`gaps`はreviewのverdictにgapがあるとき（`gaps: <text>`はtextの1行目（100文字まで）をtitle、全文をdescriptionにした1件のgap）。適用するとaskを閉じ、`goal_decided`（`ask_id`、`goal_review_id`、`answer`、`decision`、`verdict`（閉じたとき）、`gap_tasks`）を記録する。`achieved` / `abandoned`はgoalを閉じ（`goal_closed`に`by: "person"`、`ask_id`、`goal_review_id`）、`gaps`は5と同じ手順でdraftを登録し、`keep_open`は何もしない（2のfingerprintが同じなので、2の入力（所属task・acceptanceの版・follow_upとその判断）が変わるまで起動しない）。goalが先に閉じていたらaskを閉じ、`ask_closed`（`ask_id`、`kind`。task 568）だけを記録する。適用できないanswer（verdictが足した独自のoption、書き足しの自由文、条件の崩れた`achieved`など）は閉じずに残し、inboxの人が読んで`ask close`する。`goal_answers`は答えた時点の`ask_answered`が`runtime_delivers: true`のaskだけを返すので、inboxに渡したanswerを後で条件がそろってからruntimeが適用することはない。`keep_open`はgoalの行の`rearmed_at`を消す（askの前に打たれた`goal review ID`で直ちに取り直さないため）。`ask_answered`の`runtime_delivers`と`status`のattention（`applying the answer of ask N (runtime)`）は同じ判定（`goal_answer_applies` / `applies_goal_answer`）で決まる。
+ 8. **plannerの役割**: plannerはgoalの完了を見てcloseする役を持たない（ADR-0047の決定16の最後の項）。`goal close`は人の判断（askのanswer、inboxに頼んだ計画の依頼のplanner、人が`DAGQ_ROLE`の無い自分のterminalで打つ`goal close`。人が開くplannerでの対話は[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)決定8で廃止した）のために残る。
++9. **achievedの後の訂正**（ADR-t1504-2決定9、`correct_goal`のask）: achievedで閉じたgoalを元goalとするfollow_upに、plannerか人が`judge-follow-up`でrequiredを記録すると（新しい判断か、out_of_scopeからの訂正。記録は[Follow-up membership judgements](../follow-up-membership.md)の「achievedの後の訂正」）、同じトランザクションでinbox宛ての`correct_goal`のaskをそのfollow_upのtaskについて作る（runは無い、`reason_category`は`scope`、`asked_by`は`supervisor`、optionsは`reopen` / `correct_verdict` / `keep_achieved`）。questionは元goal・判断の行のID・acceptanceの項目・理由・証拠と、goalを待っていて（`--goal-dep`）閉じたときに解放されたtaskの一覧（taskごとのstatus・title・run IDとそのstatus。runtimeはどれも止めない）を載せる。goalの閉じた状態とverdict、`goal_closed`と前の判断の行は変えない。answer（`correction_answers` → `decide_correction`、1トランザクション）は、goalがまだachievedで閉じていてanswerがoptionのどれかのときだけsupervisorが適用し（`ask_answered`の`runtime_delivers`は答えた時点の、`status`の`applying the answer of ask N (runtime)`は今の、同じ`correction_answer_applies` / `applies_correction_answer`の判定で決まる）、askを閉じて`goal_correction_decided`（`ask_id`・`goal_id`・`task_id`・`judgement_id`・`answer`・`decision`・`reopened`・`moved`）をgoalとfollow_upに記録する。`reopen`はgoalを開き直し（`goal::reopen`。statusを`open`に、`closed_at`と`verdict`を消す。`goal_reopened`に`by: "person"`・`ask_id`・`task_id`・`judgement_id`・`previous_verdict`・`previous_closed_at`。`goal_closed`は残る）、`draft` / `ready`のfollow_upをgoalに戻す（それより先のstatusのものと、goalを待つ依存があって移せないもの（`move_refused`に理由）は動かさず、閉じる条件の「requiredなのにgoalの外」で閉鎖を待たせる）。同じgoalについて閉じていないほかの`correct_goal`のaskと、閉じる前から残った`approve_goal`のaskは、runtimeが`goal <ID> was reopened by the answer to ask <ID>`と答えて（`runtime_closed: true`）か`ask_closed`で閉じ、`closed_asks`に載せる（そのfollow_upの所属は判断の記録か`set-goal`で開いたgoalへ移せるようになる）。開き直したgoalはまた閉じられ、それを待つtaskのうちまだclaimされていないものは閉じるまで待つ（走っているrunは止めない）。`correct_verdict`はgoalを閉じたまま、達成が誤りだった記録（このevent）を足し、修正はplannerが既存の適切なgoalを探すか修正のgoalを作って行う。`keep_achieved`はgoalを閉じたまま、人がacceptanceは満たされていたと判断した記録を足し、follow_upは範囲外として扱う（plannerは所属先を名指したout_of_scopeの訂正を記録できる）。ほかのanswerは閉じずにinboxの人が読む。適用の時にgoalがもうachievedで閉じていなければ、askを閉じて`ask_closed`だけを記録する。走っている依存taskの停止と過去のeventの書き換えはどの答えでもしない。
+ 
+-testは`tests/it/goal_review.rs`（plan reviewのstub providerがverdictを出す。achieved・gapsとその後の再起動・4回目のgapsのask・askのanswer（`gaps` / `keep_open` / `abandoned` / 適用しないoption）・失敗と`goal review ID`・起動しないgoal）、`tests/it/goal_review_codex.rs`（spikeのJSONLとrolloutを書くstubの`codex`。Codexで動いてverdict・thread・modelを読み適用する、認証の失敗からClaudeへ、Codexが無いときClaudeで、Claudeの利用上限からCodexへ移りCodexも利用上限なら待つ、Claudeの控えのaskが開いたままでもCodexで動く）と、`src/domain/goal_review.rs`・`src/application/supervise/goal_review.rs`のunit test。follow_upの所属の判断と閉じる条件（out_of_scopeだけが残るgoalの起動とclose、未判定・undecided・要再確認・goalの外のrequiredの拒否、reviewの間の登録・訂正・acceptanceの変更で`finish_goal_review`も`goal close`も閉じないこと、それらの後に条件がそろい直しても入力の変わったreviewのverdictを使わないこと、`failed`のreviewが判断やacceptanceの変更だけで取り直されること）は`tests/it/follow_up_membership.rs`と`src/domain/follow_up.rs`・`src/domain/goal.rs`のunit test。runtimeの他のtestが使う`TestReviewer`（`tests/it/runtime_support`）はgoal reviewを起動させず失敗にするので、goalのtaskを着地させるtestではgoalは開いたまま残る。
++testは`tests/it/goal_review.rs`（plan reviewのstub providerがverdictを出す。achieved・gapsとその後の再起動・4回目のgapsのask・askのanswer（`gaps` / `keep_open` / `abandoned` / 適用しないoption）・失敗と`goal review ID`・起動しないgoal）、`tests/it/goal_review_codex.rs`（spikeのJSONLとrolloutを書くstubの`codex`。Codexで動いてverdict・thread・modelを読み適用する、認証の失敗からClaudeへ、Codexが無いときClaudeで、Claudeの利用上限からCodexへ移りCodexも利用上限なら待つ、Claudeの控えのaskが開いたままでもCodexで動く）と、`src/domain/goal_review.rs`・`src/application/supervise/goal_review.rs`のunit test。follow_upの所属の判断と閉じる条件（out_of_scopeだけが残るgoalの起動とclose、未判定・undecided・要再確認・goalの外のrequiredの拒否、reviewの間の登録・訂正・acceptanceの変更で`finish_goal_review`も`goal close`も閉じないこと、それらの後に条件がそろい直しても入力の変わったreviewのverdictを使わないこと、`failed`のreviewが判断やacceptanceの変更だけで取り直されること）と、9のachievedの後の訂正（out_of_scopeの訂正はaskを開かないこと、requiredの訂正で閉じた状態・verdict・前の判断が残り解放済みのtaskとrunを載せたaskが開き、走っているtaskを止めず、askが開いている間は所属を変えないこと、3つのanswerの適用と適用しないanswer、requiredの確かめ直しは問わないこと、`reopen`がほかの`correct_goal`と残った`approve_goal`のaskを閉じ、移せないfollow_upを残すこと、権限の無いactorの訂正の拒否）は`tests/it/follow_up_membership.rs`（supervisorによる`reopen`の適用は`tests/it/goal_review.rs`の`the_supervisor_applies_a_reopen_answer_to_a_correction`）と`src/domain/follow_up.rs`・`src/domain/goal.rs`のunit test。runtimeの他のtestが使う`TestReviewer`（`tests/it/runtime_support`）はgoal reviewを起動させず失敗にするので、goalのtaskを着地させるtestではgoalは開いたまま残る。
+diff --git a/plugins/claude-dagq/skills/dagq-inbox/reference/asks.md b/plugins/claude-dagq/skills/dagq-inbox/reference/asks.md
+index 732a8957..d28d6d32 100644
+--- a/plugins/claude-dagq/skills/dagq-inbox/reference/asks.md
++++ b/plugins/claude-dagq/skills/dagq-inbox/reference/asks.md
+@@ -7,6 +7,7 @@ An ask an AI opened (a review's `approve_landing`, plan review's `approve_plan`,
+ - `approve_landing`: a review's doubt: `land` / `send_back` / `cancel`. A person may add their own reason as `send_back: <reason>` (write it as given); the supervisor applies it like `send_back` and puts the reason before the review's in the run's resume. When the run's last review was a `revise` or `concern` (not a failed review), the supervisor records the answer as `review_outcome` against that review's codes for `stats` `review_reasons` (ADR-t947-1); the codes come from the review, so never ask the person for one.
+ - `approve_plan`: plan review's concern: `ready` / `send_back: <reason>` / `cancel`. Recorded the same way as `plan_review_outcome`; never ask the person for a code.
+ - `approve_goal`: the goal review job's question about a goal whose tasks are all finished (ADR-0047 decision 43; it closes an achieved goal and turns gaps into drafts itself, and asks only when a person is needed: the acceptance changes, abandoning or splitting it, it cannot judge, or a fourth `gaps` in a row). On the goal's first task, no run; the question starts `Goal <ID>:` and lists the criteria not met and the gaps. Options: `achieved` (close it; refused while a task is unfinished or a follow-up from it is not settled, `${CLAUDE_PLUGIN_ROOT}/skills/dagq/reference/goal-close.md`), `abandoned` (close it given up; its `dependents` are never released), `gaps` (register the review's gaps as drafts on the goal) or `gaps: <what is missing>` (one gap in the person's words), `keep_open` (leave it open until its tasks, its acceptance or its follow-ups' judgements change), plus the job's own. The supervisor applies the first four (`goal_decided`) and closes the ask; an answer it cannot apply (the job's own option, other words) comes back to be carried out by hand. To have it reviewed again later: `goal review ID` on the person's word (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/goal-review-by-hand.md`).
++- `correct_goal`: a follow-up judged required after its source goal closed as achieved (ADR-t1504-2 decision 9), so the goal may not have met its acceptance. On the follow-up's task, no run; the question names the goal, the judgement (acceptance items, reason, evidence) and every task the goal released with its status and runs. The runtime reopened nothing and stopped nothing. Options: `reopen` (open the goal again and move the follow-up back into it; released tasks not yet claimed wait for it again, running ones go on), `correct_verdict` (keep it closed and record that achieved was wrong; a planner puts the fix in a fix goal), `keep_achieved` (the acceptance was met; the follow-up is out of scope). The supervisor applies the three (`goal_correction_decided`, and `goal_reopened` for `reopen`) and closes the ask; other words come back to be carried out by hand. While it is open the follow-up's `judge-follow-up` and `set-goal` are refused.
+ - `decide`: a failed, interrupted or resume-exhausted run the recovery job could not fix: `retry` / `resume` / `cancel`, no `resume` once resumes are used up, plus the job's options, which send the run back to the job.
+   When the run's integrate verification failed, the runtime adds the option `edit the task's --verify, then retry_inherit` (also to the ask that opens once the job's three tries are used up). If the verify itself is broken, show it to the person. On their instruction, use `dagq show ID --full` and the failed verify log, run `dagq edit ID --verify '...'` (repeat for every command to retain, or `--no-verify`), then answer with that exact option. The recovery job runs once more, even past its three tries, sees the current verify and the `task_edited` event and can carry the commit forward. Do not answer before editing: without the edit the answer counts like any other and the ask reopens once the tries are used up.
+ - `stalled`: a session idle without a receipt after one nudge (`reason: idle_without_receipt`), a typed text the session did not take (`reason: send_unconfirmed`), or a job's escalation; the question lists background work and screen: `wait` (the supervisor closes it, counts again), `intervene` (a person steps in; an instruction or text to send to the session goes in the answer as `intervene: <text>`, since only an ask's answer can be typed into it), `propose`. It closes itself once the session moves on (`reference/status.md` of this skill).
+diff --git a/plugins/claude-dagq/skills/dagq/reference/goal-close.md b/plugins/claude-dagq/skills/dagq/reference/goal-close.md
+index ce1d2d5c..2357c0dc 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/goal-close.md
++++ b/plugins/claude-dagq/skills/dagq/reference/goal-close.md
+@@ -16,7 +16,7 @@ A failed job (non-zero exit, timeout, no verdict) leaves the goal open and is no
+ "$DAGQ" goal review ID   # rearm the goal review; the person or the inbox, never a planner
+ ```
+ 
+-Follow it with `goal show ID` and `events --goal ID` (`goal_review_started`, `goal_review_finished`, `goal_review_failed`, `goal_review_rearmed`, `goal_decided`).
++Follow it with `goal show ID` and `events --goal ID` (`goal_review_started`, `goal_review_finished`, `goal_review_failed`, `goal_review_rearmed`, `goal_decided`, and after an achieved close `goal_correction_decided` / `goal_reopened` for a `correct_goal` ask).
+ 
+ ## What `goal close` is still for
+ 
+diff --git a/src/application/health.rs b/src/application/health.rs
+index 6bbfda5a..472f0362 100644
+--- a/src/application/health.rs
++++ b/src/application/health.rs
+@@ -1493,6 +1493,14 @@ pub fn attention(
+                 event_kind::ASK_ANSWERED,
+                 AttentionNext::ApplyingAnswer { ask_id: ask.id },
+             )
++        } else if ask.kind == AskKind::CorrectGoal && queue.applies_correction_answer(&ask)? {
++            // The supervisor reopens the goal, records that its achieved
++            // verdict was wrong, or keeps it (ADR-t1504-2 decision 9).
++            (
++                "answered",
++                event_kind::ASK_ANSWERED,
++                AttentionNext::ApplyingAnswer { ask_id: ask.id },
++            )
+         } else if ask.kind == AskKind::PlannerQuestion
+             && queue.planner_answer_route(&ask)? != PlannerAnswerRoute::Person
+         {
+diff --git a/src/application/ports.rs b/src/application/ports.rs
+index 44d81850..dfe55e77 100644
+--- a/src/application/ports.rs
++++ b/src/application/ports.rs
+@@ -3100,6 +3100,18 @@ pub trait GoalReviewStore {
+     fn decide_goal(&mut self, ask: AskId) -> Result<Option<GoalDecided>>;
+     /// Whether the supervisor applies the answer the `approve_goal` ask has.
+     fn applies_goal_answer(&self, ask: &Ask) -> Result<bool>;
++    /// Answered `correct_goal` asks (ADR-t1504-2 decision 9) nobody closed
++    /// whose answer the runtime took to apply when it was given
++    /// (`runtime_delivers`), oldest first.
++    fn correction_answers(&self) -> Result<Vec<Ask>>;
++    /// Apply a person's answer to a `correct_goal` ask and close it
++    /// (`goal_correction_decided`, and `goal_reopened` for `reopen`); the
++    /// event's payload, or `None` when the answer is not one the runtime
++    /// applies now (left open for the inbox) or the goal is no longer
++    /// closed as achieved (the ask is closed).
++    fn decide_correction(&mut self, ask: AskId) -> Result<Option<serde_json::Value>>;
++    /// Whether the supervisor applies the answer the `correct_goal` ask has.
++    fn applies_correction_answer(&self, ask: &Ask) -> Result<bool>;
+     /// The goals whose review failed, held for a person.
+     fn goal_review_holds(&self) -> Result<Vec<GoalReviewHold>>;
+     /// `goal review ID`: let the supervisor review the open goal again
+diff --git a/src/application/supervise/goal_review.rs b/src/application/supervise/goal_review.rs
+index 4d63871b..6d365bbb 100644
+--- a/src/application/supervise/goal_review.rs
++++ b/src/application/supervise/goal_review.rs
+@@ -508,7 +508,8 @@ impl Supervisor<'_> {
+         }
+     }
+ 
+-    /// Apply the answered `approve_goal` asks (ADR-0047 decision 43).
++    /// Apply the answered `approve_goal` asks (ADR-0047 decision 43) and
++    /// `correct_goal` asks (ADR-t1504-2 decision 9).
+     fn apply_goal_answers(&mut self) -> Result<bool> {
+         let mut applied = false;
+         for answered in self.queue.goal_answers()? {
+@@ -523,6 +524,20 @@ impl Supervisor<'_> {
+                 }
+             }
+         }
++        // A person's answer about a goal closed as achieved whose
++        // follow-up was judged required after it (ADR-t1504-2 decision 9).
++        for answered in self.queue.correction_answers()? {
++            match self.queue.decide_correction(answered.id) {
++                Ok(Some(decided)) => {
++                    applied = true;
++                    info!(ask_id = %answered.id, "goal {}: ask {} answered {} applied", decided["goal_id"], answered.id, decided["decision"])
++                }
++                Ok(None) => {}
++                Err(error) => {
++                    warn!(ask_id = %answered.id, error = %format_args!("{error:#}"), "the answer of ask {} could not be applied: {error:#}", answered.id)
++                }
++            }
++        }
+         Ok(applied)
+     }
+ }
+diff --git a/src/domain/error.rs b/src/domain/error.rs
+index 7c4cc932..d4cee154 100644
+--- a/src/domain/error.rs
++++ b/src/domain/error.rs
+@@ -175,6 +175,13 @@ pub enum DomainError {
+     GoalNotDraft {
+         goal_id: GoalId,
+     },
++    /// Only a goal closed as achieved is opened again, and only by a
++    /// person's `reopen` answer to a `correct_goal` ask (ADR-t1504-2
++    /// decision 9).
++    GoalNotReopenable {
++        goal_id: GoalId,
++        verdict: Option<GoalVerdict>,
++    },
+     /// A note kind that is not a lowercase slug.
+     InvalidNoteKind {
+         kind: String,
+@@ -532,6 +539,11 @@ impl fmt::Display for DomainError {
+             }
+             Self::RunInconsistent { run_id, reason } => write!(f, "run {run_id} {reason}"),
+             Self::GoalNotDraft { goal_id } => write!(f, "goal {goal_id} is not a draft"),
++            Self::GoalNotReopenable { goal_id, verdict } => write!(
++                f,
++                "goal {goal_id} is {}; only a goal closed as achieved is opened again",
++                verdict.map_or("open".to_owned(), |v| format!("closed as {}", v.as_str()))
++            ),
+             Self::InvalidNoteKind { kind } => write!(
+                 f,
+                 "note kind {kind:?} must be a slug of lowercase letters, digits, '-' and '_'"
+diff --git a/src/domain/event_kind.rs b/src/domain/event_kind.rs
+index b6cf4eaf..3abffdb5 100644
+--- a/src/domain/event_kind.rs
++++ b/src/domain/event_kind.rs
+@@ -91,10 +91,12 @@ event_kinds! {
+     FollowUpRegistered => "follow_up_registered",
+     ForecastRecorded => "forecast_recorded",
+     GoalClosed => "goal_closed",
++    GoalCorrectionDecided => "goal_correction_decided",
+     GoalCreated => "goal_created",
+     GoalDecided => "goal_decided",
+     GoalDependencyAdded => "goal_dependency_added",
+     GoalDependencyRemoved => "goal_dependency_removed",
++    GoalReopened => "goal_reopened",
+     GoalReviewFailed => "goal_review_failed",
+     GoalReviewFinished => "goal_review_finished",
+     GoalReviewRearmed => "goal_review_rearmed",
+@@ -904,10 +906,12 @@ mod tests {
+             (EventKind::FollowUpRegistered, "follow_up_registered"),
+             (EventKind::ForecastRecorded, "forecast_recorded"),
+             (EventKind::GoalClosed, "goal_closed"),
++            (EventKind::GoalCorrectionDecided, "goal_correction_decided"),
+             (EventKind::GoalCreated, "goal_created"),
+             (EventKind::GoalDecided, "goal_decided"),
+             (EventKind::GoalDependencyAdded, "goal_dependency_added"),
+             (EventKind::GoalDependencyRemoved, "goal_dependency_removed"),
++            (EventKind::GoalReopened, "goal_reopened"),
+             (EventKind::GoalReviewFailed, "goal_review_failed"),
+             (EventKind::GoalReviewFinished, "goal_review_finished"),
+             (EventKind::GoalReviewRearmed, "goal_review_rearmed"),
+diff --git a/src/domain/follow_up.rs b/src/domain/follow_up.rs
+index 24979adb..1b391ec0 100644
+--- a/src/domain/follow_up.rs
++++ b/src/domain/follow_up.rs
+@@ -519,6 +519,116 @@ pub fn unsettled_follow_ups(follow_ups: &[SourceFollowUp]) -> Vec<(super::TaskId
+     unsettled
+ }
+ 
++/// Whether recording `classification` for a follow-up whose source goal
++/// closed with `verdict` opens a `correct_goal` ask (ADR-t1504-2 decision
++/// 9): a required judgement after the goal closed as achieved says the
++/// goal did not meet its acceptance, which only a person settles. An
++/// out-of-scope correction is recorded and moved without one, and an
++/// abandoned goal claimed nothing. Recording required again over a
++/// `previous` required judgement (a recheck) changes nothing the close
++/// knew, so it asks nothing.
++pub fn opens_correction(
++    classification: MembershipClassification,
++    previous: Option<MembershipClassification>,
++    verdict: Option<super::GoalVerdict>,
++) -> bool {
++    classification == MembershipClassification::Required
++        && previous != Some(MembershipClassification::Required)
++        && verdict == Some(super::GoalVerdict::Achieved)
++}
++
++// A person's answer to a `correct_goal` ask (ADR-t1504-2 decision 9),
++// which the supervisor applies: open the goal again and move the follow-up
++// back into it, keep the goal closed and record that its achieved verdict
++// was wrong (the fix goes to a fix goal), or keep it achieved (the
++// acceptance was met; the follow-up is out of scope).
++string_enum!(CorrectionAnswer {
++    Reopen => "reopen",
++    CorrectVerdict => "correct_verdict",
++    KeepAchieved => "keep_achieved",
++});
++
++/// The options of every `correct_goal` ask, in [`CorrectionAnswer`]'s
++/// order.
++pub const CORRECTION_OPTIONS: &[&str] = &[
++    CorrectionAnswer::Reopen.as_str(),
++    CorrectionAnswer::CorrectVerdict.as_str(),
++    CorrectionAnswer::KeepAchieved.as_str(),
++];
++
++/// Who opens the `correct_goal` asks: the runtime, as the judgement is
++/// recorded.
++pub const CORRECTION_ASKER: &str = "supervisor";
++
++impl CorrectionAnswer {
++    /// The option `text` names, or `None` for any other answer (left for
++    /// the inbox to read).
++    pub fn parse(text: &str) -> Option<Self> {
++        text.trim().parse().ok()
++    }
++}
++
++/// A task that waits on the closed goal (`--goal-dep`) and so was released
++/// when it closed as achieved, with its runs (ID and status, oldest first):
++/// what a `correct_goal` ask shows a person, since the runtime stops none
++/// of them.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
++pub struct ReleasedDependent {
++    pub task: super::TaskId,
++    pub title: String,
++    pub status: super::TaskStatus,
++    pub runs: Vec<(String, String)>,
++}
++
++/// The question of the `correct_goal` ask about follow-up `task` of
++/// `goal`, judged required by the row `judgement_id` with `judgement`, and
++/// the tasks the goal released.
++pub fn correction_question(
++    goal: super::GoalId,
++    task: super::TaskId,
++    judgement_id: i64,
++    judgement: &MembershipJudgement,
++    released: &[ReleasedDependent],
++) -> String {
++    let mut question = format!(
++        "Goal {goal} was closed as achieved, but its follow-up task {task} is now judged required for its acceptance (judgement {judgement_id}). Was the acceptance met?"
++    );
++    question.push_str(&format!(
++        "\nAcceptance items: {}",
++        judgement.acceptance_items.join("; ")
++    ));
++    question.push_str(&format!("\nReason: {}", judgement.reason.trim()));
++    if !judgement.evidence.is_empty() {
++        question.push_str(&format!("\nEvidence: {}", judgement.evidence.join(", ")));
++    }
++    question.push_str("\nTasks released by the goal (the runtime stops none of them):");
++    if released.is_empty() {
++        question.push_str("\n- none");
++    }
++    for dependent in released {
++        let runs = if dependent.runs.is_empty() {
++            "no runs".to_owned()
++        } else {
++            let runs: Vec<String> = dependent
++                .runs
++                .iter()
++                .map(|(id, status)| format!("{id} {status}"))
++                .collect();
++            format!("runs {}", runs.join(", "))
++        };
++        question.push_str(&format!(
++            "\n- task {} ({}): {}; {runs}",
++            dependent.task,
++            dependent.status.as_str(),
++            dependent.title
++        ));
++    }
++    question.push_str(
++        "\nAnswer reopen (open the goal again and move the follow-up back into it; its released tasks not yet claimed wait for it again), correct_verdict (keep it closed and record that achieved was wrong; the fix goes to a fix goal), or keep_achieved (the acceptance was met; the follow-up is out of scope).",
++    );
++    question
++}
++
+ #[cfg(test)]
+ mod membership_tests {
+     use super::*;
+@@ -666,6 +776,82 @@ mod membership_tests {
+         assert_eq!(follow_up(open, true, None).fingerprint(), "5:-");
+     }
+ 
++    /// ADR-t1504-2 decision 9: only a required judgement after an achieved
++    /// close asks a person; the ask names the judgement and every released
++    /// task with its runs, and offers the three answers.
++    #[test]
++    fn a_required_judgement_after_achieved_asks_with_the_released_tasks() {
++        use super::super::{GoalVerdict, TaskId, TaskStatus};
++        use MembershipClassification::*;
++        let achieved = Some(GoalVerdict::Achieved);
++        for (class, previous, verdict, opens) in [
++            (Required, None, achieved, true),
++            (Required, Some(OutOfScope), achieved, true),
++            (Required, Some(Undecided), achieved, true),
++            // A recheck of a required judgement settles nothing new.
++            (Required, Some(Required), achieved, false),
++            (Required, None, Some(GoalVerdict::Abandoned), false),
++            (Required, None, None, false),
++            (OutOfScope, Some(Required), achieved, false),
++            (Undecided, None, achieved, false),
++        ] {
++            assert_eq!(
++                opens_correction(class, previous, verdict),
++                opens,
++                "{class:?} {previous:?} {verdict:?}"
++            );
++        }
++        assert_eq!(
++            CORRECTION_OPTIONS,
++            ["reopen", "correct_verdict", "keep_achieved"]
++        );
++        assert_eq!(
++            CorrectionAnswer::parse(" reopen "),
++            Some(CorrectionAnswer::Reopen)
++        );
++        assert_eq!(CorrectionAnswer::parse("reopen it"), None);
++        let released = [
++            ReleasedDependent {
++                task: TaskId::new(8),
++                title: "next step".into(),
++                status: TaskStatus::InProgress,
++                runs: vec![
++                    ("r1".into(), "failed".into()),
++                    ("r2".into(), "running".into()),
++                ],
++            },
++            ReleasedDependent {
++                task: TaskId::new(9),
++                title: "later".into(),
++                status: TaskStatus::Ready,
++                runs: Vec::new(),
++            },
++        ];
++        let question =
++            correction_question(GoalId::new(3), TaskId::new(5), 4, &required(), &released);
++        assert!(
++            question.starts_with("Goal 3 was closed as achieved, but its follow-up task 5"),
++            "{question}"
++        );
++        for part in [
++            "(judgement 4)",
++            "Acceptance items: (1)",
++            "Reason: cannot satisfy (1) without it",
++            "Evidence: receipt:r",
++            "- task 8 (in_progress): next step; runs r1 failed, r2 running",
++            "- task 9 (ready): later; no runs",
++            "reopen (",
++            "correct_verdict (",
++            "keep_achieved (",
++        ] {
++            assert!(question.contains(part), "{part}: {question}");
++        }
++        assert!(
++            correction_question(GoalId::new(3), TaskId::new(5), 4, &required(), &[])
++                .contains("\n- none")
++        );
++    }
++
+     #[test]
+     fn registration_facts_cannot_be_overridden_by_current_membership() {
+         for provenance in ["recorded", "restored", "unknown"] {
+diff --git a/src/domain/goal.rs b/src/domain/goal.rs
+index 9ae2de5a..f6e5ddce 100644
+--- a/src/domain/goal.rs
++++ b/src/domain/goal.rs
+@@ -216,6 +216,25 @@ pub fn ready(mut goal: Goal) -> Result<Goal, DomainError> {
+     Ok(goal)
+ }
+ 
++/// A person's `reopen` answer to a `correct_goal` ask (ADR-t1504-2
++/// decision 9, the one exception to ADR-0009's closed goal): a goal closed
++/// as achieved opens again, so it can be closed again. Its `goal_closed`
++/// event stays; the store adds the reopening one. A goal that is open, or
++/// was abandoned, is not reopened.
++pub fn reopen(mut goal: Goal, reopened_at: String) -> Result<Goal, DomainError> {
++    require(goal.verdict == Some(GoalVerdict::Achieved), || {
++        DomainError::GoalNotReopenable {
++            goal_id: goal.id,
++            verdict: goal.verdict,
++        }
++    })?;
++    goal.status = GoalStatus::Open;
++    goal.verdict = None;
++    goal.closed_at = None;
++    goal.updated_at = reopened_at;
++    Ok(goal)
++}
++
+ /// Whether the follow-ups whose source goal is `goal_id` let it close with
+ /// `verdict` (ADR-t1504-2 decision 8): `achieved` needs every one that is
+ /// not completed or canceled judged, rechecked after the last change of the
+@@ -322,6 +341,36 @@ mod tests {
+         Goal::restore(record(GoalStatus::Open, verdict)).unwrap()
+     }
+ 
++    /// ADR-t1504-2 decision 9: only an achieved goal opens again, without
++    /// its verdict, and it can be closed again.
++    #[test]
++    fn only_an_achieved_goal_is_reopened() {
++        let reopened = reopen(goal(Some(GoalVerdict::Achieved)), "later".into()).unwrap();
++        assert!(!reopened.is_closed());
++        assert_eq!(
++            (reopened.status(), reopened.verdict(), reopened.updated_at()),
++            (GoalStatus::Open, None, "later")
++        );
++        let counts = TaskStatusCounts::default();
++        assert!(close(reopened, GoalVerdict::Achieved, &counts, "again".into()).is_ok());
++        for verdict in [None, Some(GoalVerdict::Abandoned)] {
++            let refused = reopen(goal(verdict), "later".into()).unwrap_err();
++            assert_eq!(
++                refused,
++                DomainError::GoalNotReopenable {
++                    goal_id: GoalId::new(7),
++                    verdict
++                }
++            );
++        }
++        assert_eq!(
++            reopen(goal(Some(GoalVerdict::Abandoned)), "later".into())
++                .unwrap_err()
++                .to_string(),
++            "goal 7 is closed as abandoned; only a goal closed as achieved is opened again"
++        );
++    }
++
+     #[test]
+     fn a_stranded_dependency_names_its_task_goal_and_waiting_tasks() {
+         let stranded = StrandedDependency {
+diff --git a/src/domain/mod.rs b/src/domain/mod.rs
+index fcaa2527..8c2b3c82 100644
+--- a/src/domain/mod.rs
++++ b/src/domain/mod.rs
+@@ -199,6 +199,11 @@ known_ask_kinds!(AskKind {
+     // row names. The supervisor applies its answer, one of
+     // [`goal_review::GOAL_OPTIONS`].
+     ApproveGoal => "approve_goal",
++    // A follow-up judged required after its source goal closed as achieved
++    // (ADR-t1504-2 decision 9): about the follow-up's task and no run. The
++    // supervisor applies its answer, one of
++    // [`follow_up::CORRECTION_OPTIONS`].
++    CorrectGoal => "correct_goal",
+     // A planner of the runtime's that needs a person (ADR-0041 decision
+     // 13): about the draft (or the proposal's task) it works on and no run.
+     // The supervisor types the answer into that planner's workspace, as it
+@@ -251,6 +256,7 @@ impl AskKind {
+                 | Self::Decide
+                 | Self::ApprovePlan
+                 | Self::ApproveGoal
++                | Self::CorrectGoal
+                 | Self::ApproveUpdate
+                 | Self::UpdateFailed
+                 | Self::ApproveRelease
+@@ -2263,6 +2269,7 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
+                     || kind == AskKind::Decide.as_str()
+                     || kind == AskKind::ApprovePlan.as_str()
+                     || kind == AskKind::ApproveGoal.as_str()
++                    || kind == AskKind::CorrectGoal.as_str()
+                     || kind == AskKind::UpdateFailed.as_str()
+                     || kind == AskKind::ApproveRelease.as_str()
+                     || kind == AskKind::QueueHold.as_str()
+@@ -2590,6 +2597,7 @@ mod attention_tests {
+             (AskKind::Stalled, false, true),
+             (AskKind::ApprovePlan, true, false),
+             (AskKind::ApproveGoal, true, false),
++            (AskKind::CorrectGoal, true, false),
+             (AskKind::PlannerQuestion, false, false),
+             (AskKind::QueueHold, false, false),
+             (AskKind::UpdateFailed, true, false),
+diff --git a/src/infrastructure/asks.rs b/src/infrastructure/asks.rs
+index 2cf4f0d0..4a6be07d 100644
+--- a/src/infrastructure/asks.rs
++++ b/src/infrastructure/asks.rs
+@@ -324,6 +324,15 @@ impl SqliteQueue {
+             payload["runtime_delivers"] =
+                 json!(super::goal_reviews::goal_answer_applies(&tx, &ask, text)?);
+         }
++        if ask.kind == AskKind::CorrectGoal {
++            // The supervisor reopens the goal, records that its achieved
++            // verdict was wrong, or keeps it (ADR-t1504-2 decision 9); any
++            // other answer, or one for a goal no longer closed as achieved,
++            // is a person's to read.
++            payload["runtime_delivers"] = json!(
++                super::follow_up_membership::correction_answer_applies(&tx, &ask, text)?
++            );
++        }
+         if ask.kind == AskKind::QueueHold {
+             // The supervisor applies an option the ask offered: `done` /
+             // `cancel_affected` of an authentication or usage-limit ask
+@@ -843,6 +852,37 @@ impl SqliteQueue {
+     }
+ }
+ 
++/// Close the unclosed `ask` in the caller's write transaction at `now`: an
++/// open one gets `answer` from the runtime (`ask_answered` with
++/// `runtime_closed: true`), an answered one `ask_closed`.
++pub(super) fn close_by_runtime(tx: &Connection, ask: &Ask, answer: &str, now: i64) -> Result<()> {
++    if ask.is_open() {
++        let mut payload = json!({"ask_id": ask.id, "kind": ask.kind, "runtime_closed": true});
++        write_answer(tx, ask, answer, Answerer::RUNTIME, now, &mut payload)?;
++        ask_event(
++            tx,
++            ask.task_id,
++            ask.run_id.as_ref(),
++            EventKind::AskAnswered,
++            payload,
++        )?;
++    } else {
++        // An answer given before is applied by this close.
++        ask_event(
++            tx,
++            ask.task_id,
++            ask.run_id.as_ref(),
++            EventKind::AskClosed,
++            json!({"ask_id": ask.id, "kind": ask.kind}),
++        )?;
++    }
++    tx.execute(
++        "UPDATE asks SET closed_at=?2 WHERE id=?1",
++        params![ask.id, now],
++    )?;
++    Ok(())
++}
++
+ /// [`SqliteQueue::close_asks_of`] inside the caller's write transaction,
+ /// at `now`: an open ask gets `answer` from the runtime (`ask_answered`
+ /// with `runtime_closed: true`), an answered one `ask_closed`.
+@@ -863,30 +903,7 @@ pub(super) fn close_asks_in(
+         .collect::<rusqlite::Result<_>>()?;
+     let mut closed = Vec::with_capacity(unclosed.len());
+     for ask in unclosed {
+-        if ask.is_open() {
+-            let mut payload = json!({"ask_id": ask.id, "kind": ask.kind, "runtime_closed": true});
+-            write_answer(tx, &ask, answer, Answerer::RUNTIME, now, &mut payload)?;
+-            ask_event(
+-                tx,
+-                ask.task_id,
+-                ask.run_id.as_ref(),
+-                EventKind::AskAnswered,
+-                payload,
+-            )?;
+-        } else {
+-            // An answer given before is applied by this close.
+-            ask_event(
+-                tx,
+-                ask.task_id,
+-                ask.run_id.as_ref(),
+-                EventKind::AskClosed,
+-                json!({"ask_id": ask.id, "kind": ask.kind}),
+-            )?;
+-        }
+-        tx.execute(
+-            "UPDATE asks SET closed_at=?2 WHERE id=?1",
+-            params![ask.id, now],
+-        )?;
++        close_by_runtime(tx, &ask, answer, now)?;
+         closed.push(read_ask(tx, ask.id)?);
+     }
+     Ok(closed)
+diff --git a/src/infrastructure/follow_up_membership.rs b/src/infrastructure/follow_up_membership.rs
+index 8a06f7f8..cfd2c0fd 100644
+--- a/src/infrastructure/follow_up_membership.rs
++++ b/src/infrastructure/follow_up_membership.rs
+@@ -3,11 +3,16 @@ use anyhow::{Result, anyhow, ensure};
+ use rusqlite::{Connection, OptionalExtension, params};
+ use serde_json::{Value, json};
+ 
++use super::asks::{insert_ask, read_ask};
+ use super::sqlite::{SqliteQueue, enum_col, event, goal_event, read_goal, read_task, set_goal_in};
+ use crate::domain::follow_up::{
+-    MembershipClassification as Class, MembershipJudgement, SourceFollowUp,
++    self, CorrectionAnswer, MembershipClassification as Class, MembershipJudgement,
++    ReleasedDependent, SourceFollowUp,
++};
++use crate::domain::{
++    Ask, AskId, AskKind, AskReason, DraftOrigin, EventKind, GoalId, GoalVerdict, NewAsk, TaskId,
++    TaskStatus, goal,
+ };
+-use crate::domain::{DraftOrigin, EventKind, GoalId, TaskId, TaskStatus};
+ 
+ pub(super) fn acceptance_version(conn: &Connection, goal: GoalId) -> Result<i64> {
+     Ok(conn.query_row(
+@@ -61,7 +66,31 @@ pub(super) fn judgements(conn: &Connection, task: TaskId) -> Result<Vec<Value>>
+     Ok(result)
+ }
+ 
++/// The unclosed `correct_goal` ask about follow-up `task`, if any: while
++/// it is open the follow-up's membership waits for the person
++/// (ADR-t1504-2 decision 9).
++fn open_correction(conn: &Connection, task: TaskId) -> Result<Option<AskId>> {
++    Ok(conn
++        .query_row(
++            "SELECT id FROM asks WHERE kind=?1 AND task_id=?2 AND closed_at IS NULL
++             ORDER BY id LIMIT 1",
++            params![AskKind::CorrectGoal.as_str(), task],
++            |r| r.get(0),
++        )
++        .optional()?)
++}
++
++fn check_no_open_correction(conn: &Connection, task: TaskId) -> Result<()> {
++    if let Some(ask) = open_correction(conn, task)? {
++        anyhow::bail!(
++            "task {task} waits for a person's answer to correct_goal ask {ask}; its membership does not change until the supervisor applies it"
++        );
++    }
++    Ok(())
++}
++
+ pub(super) fn check_set_goal(conn: &Connection, task: TaskId, goal: Option<GoalId>) -> Result<()> {
++    check_no_open_correction(conn, task)?;
+     if let Some(last) = judgements(conn, task)?.last()
+         && last["classification"] != "undecided"
+     {
+@@ -101,6 +130,7 @@ impl SqliteQueue {
+             "only follow_up tasks have membership judgements"
+         );
+         let material: Value = serde_json::from_str(&material)?;
++        check_no_open_correction(&tx, task)?;
+         let history = judgements(&tx, task)?;
+         let last = history.last();
+         let recorded_source = material["source_goal_id"].as_i64().map(GoalId::new);
+@@ -161,7 +191,44 @@ impl SqliteQueue {
+         };
+         tx.execute("INSERT INTO follow_up_judgements(task_id,source_goal_id,source_kind,classification,acceptance_items,reason,evidence,destination_goal_id,acceptance_version,corrects,actor_role,created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)", params![task,source,source_kind,judgement.classification.as_str(),serde_json::to_string(&judgement.acceptance_items)?,judgement.reason,serde_json::to_string(&judgement.evidence)?,destination,version,judgement.corrects,role,self.generators.clock.timestamp()])?;
+-        let row = judgements(&tx, task)?.pop().unwrap();
++        let mut row = judgements(&tx, task)?.pop().unwrap();
++        // A required judgement after an achieved close keeps the close and
++        // its verdict, and asks a person (ADR-t1504-2 decision 9).
++        if follow_up::opens_correction(
++            judgement.classification,
++            previous.map(|(_, class)| class),
++            source_goal.verdict(),
++        ) {
++            let judgement_id = row["id"].as_i64().unwrap();
++            let question = follow_up::correction_question(
++                source,
++                task,
++                judgement_id,
++                &judgement,
++                &released_dependents(&tx, source)?,
++            );
++            let opened = insert_ask(
++                &tx,
++                &NewAsk {
++                    kind: AskKind::CorrectGoal,
++                    task_id: Some(task),
++                    run_id: None,
++                    question,
++                    options: follow_up::CORRECTION_OPTIONS
++                        .iter()
++                        .map(|o| (*o).to_owned())
++                        .collect(),
++                    asked_by: follow_up::CORRECTION_ASKER.to_owned(),
++                    reason_category: AskReason::Scope,
++                    topics: Vec::new(),
++                    recommendation: None,
++                    confidence: None,
++                    finding_id: None,
++                    request_id: None,
++                },
++            )?;
++            row["correction_ask_id"] = json!(opened.ask.id);
++        }
+         event(&tx, task, None, EventKind::FollowUpJudged, row.clone())?;
+         goal_event(&tx, source, EventKind::FollowUpJudged, row.clone())?;
+         tx.commit()?;
+@@ -169,6 +236,246 @@ impl SqliteQueue {
+     }
+ }
+ 
++/// The tasks that wait on `goal` (`task_goal_dependencies`), each with its
++/// runs: released when the goal closed as achieved, in ID order.
++fn released_dependents(conn: &Connection, goal: GoalId) -> Result<Vec<ReleasedDependent>> {
++    let tasks = conn
++        .prepare(
++            "SELECT t.id, t.title, t.status FROM task_goal_dependencies d
++             JOIN tasks t ON t.id = d.task_id WHERE d.goal_id=?1 ORDER BY t.id",
++        )?
++        .query_map([goal], |r| {
++            Ok((
++                r.get::<_, TaskId>(0)?,
++                r.get::<_, String>(1)?,
++                enum_col::<TaskStatus>(r, "status")?,
++            ))
++        })?
++        .collect::<rusqlite::Result<Vec<_>>>()?;
++    tasks
++        .into_iter()
++        .map(|(task, title, status)| {
++            let runs = conn
++                .prepare("SELECT id, status FROM task_runs WHERE task_id=?1 ORDER BY rowid")?
++                .query_map([task], |r| Ok((r.get(0)?, r.get(1)?)))?
++                .collect::<rusqlite::Result<_>>()?;
++            Ok(ReleasedDependent {
++                task,
++                title,
++                status,
++                runs,
++            })
++        })
++        .collect()
++}
++
++/// The judgement a `correct_goal` ask was opened for: its row's ID and
++/// source goal, from the `follow_up_judged` event that names the ask.
++fn correction_of(conn: &Connection, ask: &Ask) -> Result<Option<(i64, GoalId)>> {
++    if ask.kind != AskKind::CorrectGoal {
++        return Ok(None);
++    }
++    let Some(task) = ask.task_id else {
++        return Ok(None);
++    };
++    Ok(conn
++        .query_row(
++            "SELECT json_extract(payload,'$.id'), json_extract(payload,'$.source_goal_id')
++             FROM run_events WHERE kind=?1 AND task_id=?2
++               AND json_extract(payload,'$.correction_ask_id')=?3
++             ORDER BY id DESC LIMIT 1",
++            params![EventKind::FollowUpJudged.as_str(), task, ask.id],
++            |r| Ok((r.get(0)?, r.get(1)?)),
++        )
++        .optional()?)
++}
++
++/// Whether the goal is still closed as achieved, so a correction of it
++/// still has something to settle.
++fn still_achieved(conn: &Connection, goal: GoalId) -> Result<bool> {
++    Ok(read_goal(conn, goal)?.verdict() == Some(GoalVerdict::Achieved))
++}
++
++/// What the answer `text` of `ask` does when the supervisor applies it
++/// now: `None` when it is no option, the ask names no judgement, or the
++/// goal is no longer closed as achieved.
++fn correction_applicable(
++    conn: &Connection,
++    ask: &Ask,
++    text: &str,
++) -> Result<Option<(CorrectionAnswer, i64, GoalId)>> {
++    let Some(answer) = CorrectionAnswer::parse(text) else {
++        return Ok(None);
++    };
++    let Some((judgement, goal)) = correction_of(conn, ask)? else {
++        return Ok(None);
++    };
++    Ok(still_achieved(conn, goal)?.then_some((answer, judgement, goal)))
++}
++
++pub(super) fn correction_answer_applies(conn: &Connection, ask: &Ask, text: &str) -> Result<bool> {
++    Ok(ask.closed_at.is_none() && correction_applicable(conn, ask, text)?.is_some())
++}
++
++/// Answered `correct_goal` asks nobody closed whose answer the runtime
++/// took to apply when it was given (`runtime_delivers`), oldest first.
++pub(super) fn correction_answers(conn: &Connection) -> Result<Vec<Ask>> {
++    let ids: Vec<AskId> = conn
++        .prepare(
++            "SELECT a.id FROM asks a WHERE a.kind=?1 AND a.answered_at IS NOT NULL
++                 AND a.closed_at IS NULL AND (SELECT json_extract(e.payload, '$.runtime_delivers')
++                     FROM run_events e WHERE e.kind='ask_answered'
++                     AND json_extract(e.payload, '$.ask_id') = a.id
++                     ORDER BY e.id DESC LIMIT 1) = 1
++                 ORDER BY a.id",
++        )?
++        .query_map([AskKind::CorrectGoal.as_str()], |r| r.get(0))?
++        .collect::<rusqlite::Result<_>>()?;
++    ids.into_iter().map(|id| read_ask(conn, id)).collect()
++}
++
++/// Apply a person's answer to a `correct_goal` ask in one transaction
++/// and close it (ADR-t1504-2 decision 9): `reopen` opens the goal again
++/// (`goal_reopened`; its `goal_closed` stays) and moves a draft or
++/// ready follow-up back into it; `correct_verdict` and `keep_achieved`
++/// leave the goal closed. Each records `goal_correction_decided` on the
++/// goal and the follow-up; no running task is stopped and no event is
++/// rewritten. `None` when the answer is not one the runtime applies now
++/// (left for the inbox); a goal no longer closed as achieved closes the
++/// ask without a change.
++pub(super) fn decide_correction(
++    conn: &mut Connection,
++    ask_id: AskId,
++    stamp: String,
++    now: i64,
++) -> Result<Option<Value>> {
++    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
++    let ask = read_ask(&tx, ask_id)?;
++    ensure!(
++        ask.kind == AskKind::CorrectGoal,
++        "ask {ask_id} is not a correct_goal ask"
++    );
++    if ask.closed_at.is_some() {
++        return Ok(None);
++    }
++    let close = |tx: &Connection| -> Result<()> {
++        tx.execute(
++            "UPDATE asks SET closed_at=?2 WHERE id=?1",
++            params![ask_id, now],
++        )?;
++        Ok(())
++    };
++    if let Some((_, goal)) = correction_of(&tx, &ask)?
++        && !still_achieved(&tx, goal)?
++    {
++        // Reopened by another answer meanwhile: nothing left to settle.
++        close(&tx)?;
++        super::asks::record_ask_closed(&tx, &ask)?;
++        tx.commit()?;
++        return Ok(None);
++    }
++    let text = ask.answer.clone().unwrap_or_default();
++    let Some((answer, judgement, goal_id)) = correction_applicable(&tx, &ask, &text)? else {
++        return Ok(None);
++    };
++    let task = ask
++        .task_id
++        .ok_or_else(|| anyhow!("ask {ask_id} names no task"))?;
++    let mut moved = false;
++    let mut move_refused = None;
++    let mut closed_asks = Vec::new();
++    if answer == CorrectionAnswer::Reopen {
++        let closed = read_goal(&tx, goal_id)?;
++        let previous_closed_at = closed.closed_at().map(str::to_owned);
++        let reopened = goal::reopen(closed, stamp.clone())?;
++        tx.execute(
++            "UPDATE goals SET status=?2, closed_at=NULL, verdict=NULL, updated_at=?3 WHERE id=?1",
++            params![goal_id, reopened.status().as_str(), reopened.updated_at()],
++        )?;
++        goal_event(
++            &tx,
++            goal_id,
++            EventKind::GoalReopened,
++            json!({"by": "person", "ask_id": ask_id, "task_id": task,
++                    "judgement_id": judgement, "previous_verdict": GoalVerdict::Achieved,
++                    "previous_closed_at": previous_closed_at}),
++        )?;
++        let follow_up = read_task(&tx, task)?;
++        if matches!(follow_up.status(), TaskStatus::Draft | TaskStatus::Ready)
++            && follow_up.goal_id() != Some(goal_id)
++        {
++            // `set_goal_in` checks before it writes: a move the goal's
++            // dependencies refuse (the follow-up waits on the goal) leaves
++            // the follow-up where it is, and the goal waits for it as a
++            // required one outside, instead of failing the answer.
++            match set_goal_in(&tx, task, Some(goal_id), &stamp) {
++                Ok(_) => moved = true,
++                Err(error) => move_refused = Some(format!("{error:#}")),
++            }
++        }
++        // The goal's other open questions were asked of the closed goal:
++        // the other `correct_goal` asks about it and an `approve_goal` ask
++        // left from before its close. The runtime answers and closes them,
++        // so they neither hold their follow-ups nor apply to the open goal.
++        let reason = format!("goal {goal_id} was reopened by the answer to ask {ask_id}");
++        let mut stale = Vec::new();
++        for other in tx
++            .prepare("SELECT id FROM asks WHERE kind=?1 AND closed_at IS NULL AND id != ?2")?
++            .query_map(params![AskKind::CorrectGoal.as_str(), ask_id], |r| {
++                r.get::<_, AskId>(0)
++            })?
++            .collect::<rusqlite::Result<Vec<_>>>()?
++        {
++            let other = read_ask(&tx, other)?;
++            if correction_of(&tx, &other)?.is_some_and(|(_, goal)| goal == goal_id) {
++                stale.push(other);
++            }
++        }
++        for other in tx
++            .prepare(
++                "SELECT a.id FROM goal_reviews r JOIN asks a ON a.id = r.ask_id
++                 WHERE r.goal_id=?1 AND a.closed_at IS NULL",
++            )?
++            .query_map([goal_id], |r| r.get::<_, AskId>(0))?
++            .collect::<rusqlite::Result<Vec<_>>>()?
++        {
++            stale.push(read_ask(&tx, other)?);
++        }
++        for other in &stale {
++            super::asks::close_by_runtime(&tx, other, &reason, now)?;
++            closed_asks.push(other.id);
++        }
++    }
++    close(&tx)?;
++    let decided = json!({
++        "ask_id": ask_id,
++        "goal_id": goal_id,
++        "task_id": task,
++        "judgement_id": judgement,
++        "answer": text.trim(),
++        "decision": answer.as_str(),
++        "reopened": answer == CorrectionAnswer::Reopen,
++        "moved": moved,
++        "move_refused": move_refused,
++        "closed_asks": closed_asks,
++    });
++    goal_event(
++        &tx,
++        goal_id,
++        EventKind::GoalCorrectionDecided,
++        decided.clone(),
++    )?;
++    event(
++        &tx,
++        task,
++        None,
++        EventKind::GoalCorrectionDecided,
++        decided.clone(),
++    )?;
++    tx.commit()?;
++    Ok(Some(decided))
++}
++
+ pub(super) fn goal_memberships(conn: &Connection, goal: GoalId) -> Result<Vec<Value>> {
+     let ids = conn.prepare("SELECT o.task_id FROM draft_origins o JOIN tasks t ON t.id=o.task_id
+         WHERE o.origin='follow_up' AND (json_extract(o.material,'$.source_goal_id')=?1 OR t.goal_id=?1
+diff --git a/src/infrastructure/goal_reviews.rs b/src/infrastructure/goal_reviews.rs
+index e66b4356..9eeeec19 100644
+--- a/src/infrastructure/goal_reviews.rs
++++ b/src/infrastructure/goal_reviews.rs
+@@ -724,6 +724,23 @@ impl GoalReviewStore for SqliteQueue {
+         }
+     }
+ 
++    fn correction_answers(&self) -> Result<Vec<Ask>> {
++        follow_up_membership::correction_answers(&self.conn)
++    }
++
++    fn decide_correction(&mut self, ask: AskId) -> Result<Option<Value>> {
++        let stamp = self.generators.clock.timestamp();
++        let now = self.generators.clock.now();
++        follow_up_membership::decide_correction(&mut self.conn, ask, stamp, now)
++    }
++
++    fn applies_correction_answer(&self, ask: &Ask) -> Result<bool> {
++        match &ask.answer {
++            Some(text) => follow_up_membership::correction_answer_applies(&self.conn, ask, text),
++            None => Ok(false),
++        }
++    }
++
+     fn goal_review_holds(&self) -> Result<Vec<GoalReviewHold>> {
+         let goals: Vec<GoalId> = self
+             .conn
+diff --git a/tests/it/follow_up_membership.rs b/tests/it/follow_up_membership.rs
+index 2e69ce4b..e8b5991c 100644
+--- a/tests/it/follow_up_membership.rs
++++ b/tests/it/follow_up_membership.rs
+@@ -824,3 +824,359 @@ fn a_failed_review_is_taken_again_when_a_judgement_or_the_acceptance_changes() {
+     l.out_of_scope(first);
+     assert!(l.reviewable());
+ }
++
++impl Landed {
++    fn goal_events(&mut self, kind: &str) -> Vec<serde_json::Value> {
++        self.q
++            .show_goal(self.source)
++            .unwrap()
++            .events
++            .into_iter()
++            .filter(|e| e.kind == kind)
++            .map(|e| e.payload)
++            .collect()
++    }
++
++    /// The source goal closed as achieved with `follow_up` judged out of
++    /// scope, a task waiting on the goal released and claimed (its run
++    /// running), and `follow_up` then corrected to required: the
++    /// `correct_goal` ask it opened, and the released task with its run.
++    fn corrected_after_achieved(
++        &mut self,
++        follow_up: TaskId,
++    ) -> (dagq::domain::Ask, TaskId, String) {
++        let out = self.out_of_scope(follow_up);
++        assert_eq!(self.close_refused(), None);
++        self.correct_to_required(follow_up, &out)
++    }
++
++    /// A task waiting on the closed source goal released and claimed, and
++    /// `follow_up` corrected from `last` to required.
++    fn correct_to_required(
++        &mut self,
++        follow_up: TaskId,
++        last: &serde_json::Value,
++    ) -> (dagq::domain::Ask, TaskId, String) {
++        let dependent = self
++            .q
++            .add(dagq::domain::NewTask {
++                goal_dependencies: vec![self.source],
++                ..new_task("waits on the goal")
++            })
++            .unwrap()
++            .id();
++        self.q
++            .transition(dependent, TaskAction::BypassReview)
++            .unwrap();
++        let ClaimOutcome::Claimed { run, .. } = self.q.claim(&base()).unwrap() else {
++            panic!("the released task is claimed")
++        };
++        assert_eq!(run.task_id(), dependent);
++        let mut correction = judgement(Class::Required, None);
++        correction.corrects = last["id"].as_i64();
++        let row = self
++            .q
++            .judge_follow_up(follow_up, correction, "planner")
++            .unwrap();
++        let ask = self
++            .q
++            .read_ask(dagq::domain::AskId::new(
++                row["correction_ask_id"].as_i64().unwrap(),
++            ))
++            .unwrap();
++        (ask, dependent, run.id().to_string())
++    }
++}
++
++/// ADR-t1504-2 decision 9: after an achieved close, an out-of-scope
++/// correction is only recorded and moved; a correction to required keeps
++/// the close, its verdict and the earlier judgements, opens a `scope` ask
++/// listing the released tasks and their runs, stops none of them, and
++/// holds the follow-up's membership until the answer.
++#[test]
++fn a_correction_after_achieved_keeps_the_history_and_asks_a_person() {
++    let mut l = landed();
++    let follow_up = l.follow_up("missed requirement");
++    let first = l.out_of_scope(follow_up);
++    assert_eq!(l.close_refused(), None);
++    // Out of scope to another destination: no ask, recorded and moved.
++    let third = l.q.add_goal(new_goal("better destination")).unwrap().id();
++    let row =
++        l.q.judge_follow_up(
++            follow_up,
++            judgement(Class::OutOfScope, Some(third)),
++            "planner",
++        )
++        .unwrap();
++    assert!(row.get("correction_ask_id").is_none());
++    assert_eq!(l.q.show(follow_up).unwrap().task.goal_id(), Some(third));
++    assert!(l.q.asks(Default::default()).unwrap().is_empty());
++
++    let (ask, dependent, run) = l.correct_to_required(follow_up, &row);
++    assert_eq!(ask.kind, dagq::domain::AskKind::CorrectGoal);
++    assert_eq!(ask.task_id, Some(follow_up));
++    assert_eq!(ask.run_id, None);
++    assert_eq!(ask.reason_category, dagq::domain::AskReason::Scope);
++    assert_eq!(ask.options, ["reopen", "correct_verdict", "keep_achieved"]);
++    for part in [
++        format!("Goal {} was closed as achieved", l.source),
++        format!("follow-up task {follow_up}"),
++        format!("- task {dependent} (in_progress): waits on the goal; runs {run} "),
++        "Acceptance items: (1)".to_owned(),
++    ] {
++        assert!(ask.question.contains(&part), "{part}: {}", ask.question);
++    }
++    // The close and its verdict stay; every judgement is kept.
++    let goal = l.q.show_goal(l.source).unwrap();
++    assert!(goal.closed);
++    assert_eq!(
++        goal.goal.verdict(),
++        Some(dagq::domain::GoalVerdict::Achieved)
++    );
++    assert_eq!(l.goal_events("goal_closed").len(), 1);
++    assert!(l.goal_events("goal_reopened").is_empty());
++    let history = l.q.show(follow_up).unwrap().membership_judgements;
++    let classes: Vec<_> = history
++        .iter()
++        .map(|j| j["classification"].clone())
++        .collect();
++    assert_eq!(
++        classes,
++        [
++            json!("out_of_scope"),
++            json!("out_of_scope"),
++            json!("required")
++        ]
++    );
++    assert_eq!(history[0]["id"], first["id"]);
++    let judged = l.goal_events("follow_up_judged");
++    assert_eq!(judged.last().unwrap()["correction_ask_id"], json!(ask.id));
++    // Nothing that was released is stopped, and the follow-up stays put.
++    assert_eq!(
++        l.q.show(dependent).unwrap().task.status(),
++        dagq::domain::TaskStatus::InProgress
++    );
++    assert_eq!(l.q.show(follow_up).unwrap().task.goal_id(), Some(third));
++    // While the ask is open the follow-up's membership waits for it.
++    let refused = l.q.set_goal(follow_up, Some(l.other)).unwrap_err();
++    assert!(
++        refused.to_string().contains("correct_goal ask"),
++        "{refused}"
++    );
++    let refused =
++        l.q.judge_follow_up(follow_up, judgement(Class::Required, None), "planner")
++            .unwrap_err();
++    assert!(
++        refused.to_string().contains("correct_goal ask"),
++        "{refused}"
++    );
++}
++
++/// ADR-t1504-2 decision 9: the supervisor applies each answer of the
++/// `correct_goal` ask in one transaction and keeps the history; another
++/// answer is left for the inbox.
++#[test]
++fn each_answer_to_a_correction_is_applied_and_keeps_the_history() {
++    use dagq::application::GoalReviewStore;
++    for answer in ["reopen", "correct_verdict", "keep_achieved"] {
++        let mut l = landed();
++        let follow_up = l.follow_up("missed requirement");
++        let (ask, dependent, _) = l.corrected_after_achieved(follow_up);
++        l.q.answer(ask.id, answer).unwrap();
++        let answered = l.q.read_ask(ask.id).unwrap();
++        assert!(
++            l.q.applies_correction_answer(&answered).unwrap(),
++            "{answer}"
++        );
++        assert_eq!(l.q.correction_answers().unwrap()[0].id, ask.id);
++        let decided = l.q.decide_correction(ask.id).unwrap().unwrap();
++        assert_eq!(decided["decision"], answer);
++        assert!(l.q.read_ask(ask.id).unwrap().closed_at.is_some());
++        assert!(l.q.correction_answers().unwrap().is_empty());
++        assert_eq!(l.q.decide_correction(ask.id).unwrap(), None);
++        assert_eq!(
++            l.goal_events("goal_correction_decided"),
++            std::slice::from_ref(&decided)
++        );
++        // The close stays in the history, and the released task runs on.
++        assert_eq!(l.goal_events("goal_closed").len(), 1);
++        assert_eq!(
++            l.q.show(dependent).unwrap().task.status(),
++            dagq::domain::TaskStatus::InProgress
++        );
++        let goal = l.q.show_goal(l.source).unwrap();
++        if answer == "reopen" {
++            assert!(!goal.closed);
++            assert_eq!(goal.goal.verdict(), None);
++            let reopened = l.goal_events("goal_reopened");
++            assert_eq!(reopened[0]["previous_verdict"], "achieved");
++            assert_eq!(reopened[0]["ask_id"], json!(ask.id));
++            // The draft follow-up is back in the goal, which closes again
++            // once it ends.
++            assert_eq!(decided["moved"], true);
++            assert_eq!(l.q.show(follow_up).unwrap().task.goal_id(), Some(l.source));
++            assert!(l.close_refused().unwrap().contains("draft"));
++            l.set_status(follow_up, "completed");
++            assert_eq!(l.close_refused(), None);
++            assert_eq!(l.goal_events("goal_closed").len(), 2);
++        } else {
++            assert!(goal.closed);
++            assert_eq!(
++                goal.goal.verdict(),
++                Some(dagq::domain::GoalVerdict::Achieved)
++            );
++            assert!(l.goal_events("goal_reopened").is_empty());
++            assert_eq!(decided["moved"], false);
++            assert_eq!(l.q.show(follow_up).unwrap().task.goal_id(), Some(l.other));
++            // A recheck of the required judgement asks nothing again.
++            let row =
++                l.q.judge_follow_up(follow_up, judgement(Class::Required, None), "planner")
++                    .unwrap();
++            assert!(row.get("correction_ask_id").is_none());
++            // Answered, the follow-up may be judged again (here out of
++            // scope, as keep_achieved has it), and asks nothing.
++            let mut out = judgement(Class::OutOfScope, Some(l.other));
++            out.corrects = row["id"].as_i64();
++            let row = l.q.judge_follow_up(follow_up, out, "planner").unwrap();
++            assert!(row.get("correction_ask_id").is_none());
++        }
++    }
++
++    // Another answer is the inbox's to read and is never applied.
++    let mut l = landed();
++    let follow_up = l.follow_up("missed requirement");
++    let (ask, ..) = l.corrected_after_achieved(follow_up);
++    l.q.answer(ask.id, "split it").unwrap();
++    assert!(
++        !l.q.applies_correction_answer(&l.q.read_ask(ask.id).unwrap())
++            .unwrap()
++    );
++    assert!(l.q.correction_answers().unwrap().is_empty());
++    assert_eq!(l.q.decide_correction(ask.id).unwrap(), None);
++    assert!(l.q.read_ask(ask.id).unwrap().closed_at.is_none());
++    assert!(l.q.show_goal(l.source).unwrap().closed);
++}
++
++/// The correction is a membership judgement: a worker or a job may not
++/// record it on a follow-up of a closed goal (ADR-t1504-2 decisions 2 and
++/// 9), through the CLI or the store, and nothing is recorded or asked.
++#[test]
++fn a_correction_by_an_actor_without_the_authority_is_refused() {
++    use common::cli::invoke_as;
++    let mut l = landed();
++    let follow_up = l.follow_up("missed requirement");
++    let out = l.out_of_scope(follow_up);
++    assert_eq!(l.close_refused(), None);
++    let db = l.dir.path().join("queue.db");
++    let id = follow_up.to_string();
++    let corrects = out["id"].to_string();
++    let args = [
++        "judge-follow-up",
++        id.as_str(),
++        "--classification",
++        "required",
++        "--reason",
++        "acceptance (1) was not met",
++        "--acceptance-item",
++        "(1)",
++        "--evidence",
++        "task:1",
++        "--corrects",
++        corrects.as_str(),
++    ];
++    for role in ["worker", "review-job", "goal-review-job", "plan-review-job"] {
++        let refused = invoke_as(Some(role), &db, &args);
++        assert!(!refused.status.success(), "{role}");
++        let refusal: serde_json::Value = serde_json::from_slice(&refused.stderr).unwrap();
++        assert_eq!(refusal["denied"]["capability"], "follow_up.judge", "{role}");
++    }
++    for role in ["worker", "supervisor", "goal-review-job"] {
++        let mut correction = judgement(Class::Required, None);
++        correction.corrects = out["id"].as_i64();
++        assert!(
++            l.q.judge_follow_up(follow_up, correction, role).is_err(),
++            "{role}"
++        );
++    }
++    assert_eq!(l.q.show(follow_up).unwrap().membership_judgements.len(), 1);
++    assert!(l.q.asks(Default::default()).unwrap().is_empty());
++    assert!(l.q.show_goal(l.source).unwrap().closed);
++}
++
++/// A `reopen` answers and closes the goal's other questions asked of the
++/// closed goal (another follow-up's `correct_goal` ask and an `approve_goal`
++/// ask left from before the close), and a follow-up that waits on the goal
++/// stays where it is instead of failing the answer (ADR-t1504-2 decision 9).
++#[test]
++fn a_reopen_closes_the_goals_other_questions_and_keeps_a_follow_up_it_cannot_move() {
++    let mut l = landed();
++    let first = l.follow_up("first requirement");
++    let second = l.follow_up("second requirement");
++    // An approve_goal ask of a review of the goal, left open by a close.
++    let left =
++        l.q.ask(dagq::domain::NewAsk {
++            kind: dagq::domain::AskKind::ApproveGoal,
++            task_id: Some(l.task),
++            run_id: None,
++            question: "Goal 1: split it?".into(),
++            options: vec!["achieved".into(), "keep_open".into()],
++            asked_by: "supervisor".into(),
++            reason_category: dagq::domain::AskReason::Scope,
++            topics: Vec::new(),
++            recommendation: None,
++            confidence: None,
++            finding_id: None,
++            request_id: None,
++        })
++        .unwrap()
++        .ask;
++    Connection::open(l.dir.path().join("queue.db"))
++        .unwrap()
++        .execute(
++            "INSERT INTO goal_reviews(goal_id,attempt,supervisor_token,fingerprint,started_at,finished_at,outcome,ask_id)
++             VALUES (?1,1,'t','f',1,2,'ask',?2)",
++            params![l.source.as_i64(), left.id.as_i64()],
++        )
++        .unwrap();
++    let out_first = l.out_of_scope(first);
++    let out_second = l.out_of_scope(second);
++    // The first waits on the goal, so the goal cannot take it back.
++    l.q.add_goal_dependency(first, l.source).unwrap();
++    assert_eq!(l.close_refused(), None);
++    let mut asks = Vec::new();
++    for (task, out) in [(first, &out_first), (second, &out_second)] {
++        let mut correction = judgement(Class::Required, None);
++        correction.corrects = out["id"].as_i64();
++        let row = l.q.judge_follow_up(task, correction, "planner").unwrap();
++        asks.push(dagq::domain::AskId::new(
++            row["correction_ask_id"].as_i64().unwrap(),
++        ));
++    }
++    l.q.answer(asks[0], "reopen").unwrap();
++    use dagq::application::GoalReviewStore;
++    let decided = l.q.decide_correction(asks[0]).unwrap().unwrap();
++    assert!(!l.q.show_goal(l.source).unwrap().closed);
++    assert_eq!(decided["moved"], false);
++    assert!(
++        decided["move_refused"].as_str().unwrap().contains("goal"),
++        "{decided}"
++    );
++    assert_eq!(l.q.show(first).unwrap().task.goal_id(), Some(l.other));
++    assert_eq!(decided["closed_asks"], json!([asks[1], left.id]));
++    for ask in [asks[1], left.id] {
++        let closed = l.q.read_ask(ask).unwrap();
++        assert!(closed.closed_at.is_some());
++        assert!(closed.answer.unwrap().contains("was reopened"));
++    }
++    // The second follow-up's membership may move again: into the open goal.
++    l.q.judge_follow_up(second, judgement(Class::Required, None), "planner")
++        .unwrap();
++    assert_eq!(l.q.show(second).unwrap().task.goal_id(), Some(l.source));
++    // The first holds the goal as a required follow-up outside it.
++    l.set_status(second, "completed");
++    let refused = l.close_refused().unwrap();
++    assert!(
++        refused.contains(&format!("{first} required but outside the goal")),
++        "{refused}"
++    );
++}
+diff --git a/tests/it/goal_review.rs b/tests/it/goal_review.rs
+index 0324d3a7..91957fe6 100644
+--- a/tests/it/goal_review.rs
++++ b/tests/it/goal_review.rs
+@@ -760,3 +760,78 @@ fn handoff_reviews(keep_candidates: bool) {
+         if keep_candidates { 2 } else { 1 }
+     );
+ }
++
++/// ADR-t1504-2 decision 9: a follow-up registered after its goal closed as
++/// achieved and judged required opens a `correct_goal` ask; the supervisor
++/// applies the person's `reopen`, which opens the goal again with the
++/// follow-up in it and leaves the close in the history.
++#[test]
++fn the_supervisor_applies_a_reopen_answer_to_a_correction() {
++    use dagq::domain::follow_up::{MembershipClassification, MembershipJudgement};
++    let fx = fixture();
++    let (goal, _) = goal_done(&fx);
++    let mut queue = SqliteQueue::open(&fx.db).unwrap();
++    queue.close_goal(goal, GoalVerdict::Achieved).unwrap();
++    let follow_up = add(&mut queue, "missed requirement", &[], Priority::Normal);
++    assert_eq!(
++        queue.show(follow_up).unwrap().task.status(),
++        TaskStatus::Draft
++    );
++    queue
++        .record_draft_origin(
++            follow_up,
++            DraftOrigin::FollowUp,
++            &json!({"source_goal_id": goal, "source_goal_state": "closed",
++                "source_goal_provenance": "recorded"}),
++        )
++        .unwrap();
++    let row = queue
++        .judge_follow_up(
++            follow_up,
++            MembershipJudgement {
++                classification: MembershipClassification::Required,
++                acceptance_items: vec!["(2) docs say how".into()],
++                reason: "the docs were never written".into(),
++                evidence: vec!["task:1".into()],
++                destination_goal_id: None,
++                source_goal_id: None,
++                corrects: None,
++            },
++            "planner",
++        )
++        .unwrap();
++    let asks = queue.asks(Default::default()).unwrap();
++    assert_eq!(asks.len(), 1);
++    assert_eq!(asks[0].kind, AskKind::CorrectGoal);
++    assert_eq!(
++        asks[0].id.as_i64(),
++        row["correction_ask_id"].as_i64().unwrap()
++    );
++    queue.answer(asks[0].id, "reopen").unwrap();
++    let answered = queue
++        .show(follow_up)
++        .unwrap()
++        .events
++        .into_iter()
++        .rev()
++        .find(|e| e.kind == "ask_answered")
++        .unwrap()
++        .payload;
++    assert_eq!(answered["runtime_delivers"], true);
++
++    let idle = StubReviewer::new(&[json!({"verdict": "achieved"})]);
++    supervise(&fx, &idle);
++    let mut queue = SqliteQueue::open(&fx.db).unwrap();
++    assert!(queue.read_ask(asks[0].id).unwrap().closed_at.is_some());
++    let detail = queue.show_goal(goal).unwrap();
++    assert!(!detail.closed);
++    assert_eq!(goal_events(&mut queue, goal, "goal_closed").len(), 1);
++    assert_eq!(goal_events(&mut queue, goal, "goal_reopened").len(), 1);
++    assert_eq!(
++        goal_events(&mut queue, goal, "goal_correction_decided")[0]["decision"],
++        "reopen"
++    );
++    assert_eq!(queue.show(follow_up).unwrap().task.goal_id(), Some(goal));
++    // The goal now waits for its follow-up, so it is not reviewed.
++    assert!(idle.prompts().is_empty());
++}

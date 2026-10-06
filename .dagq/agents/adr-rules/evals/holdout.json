@@ -1,0 +1,234 @@
+{
+  "agent": "adr-rules",
+  "role": "review",
+  "codes": [
+    "A-150",
+    "A-152",
+    "A-155",
+    "A-156",
+    "A-159",
+    "A-160",
+    "A-161",
+    "A-162",
+    "A-163"
+  ],
+  "k": 3,
+  "cases": [
+    {
+      "id": "gen-add-tag-to-existing-adr",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "4e043b87eeaf3797cb121ce468d9c00b496c28f7cfc6d615f2d31eed8d4687e1",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-150"
+          ],
+          "note": "既存ADRに検索用のtagを追加する変更は、後から変更してよいfrontmatter欄の列挙にtagsが含まれないためA-150に違反する。tagsは文字列のリストを維持し、updatedも変更日に合わせるので、frontmatterの形式には違反しない。",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "gen-amend-majority-of-decisions",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "bf05046d98262345628e381647bfb458d6061dd66c6b43b983bd76f2e92d00c6",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-152"
+          ],
+          "note": "ADR-t616-1の3つの決定のうち決定1・2を変えるため、変更範囲は大半に当たる。amendsの欄・逆参照・design更新は揃っているが、大半を変える場合は有効な決定を引き継いで丸ごと置き換えるという規則に違反する。",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "gen-remove-required-design-title",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "211dd8068d5cd26ebe212ccaca2c9d2f8dd878083958153c432a74460bf00aae",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-155"
+          ],
+          "note": "docs/frontmatter.mdのCommon fieldsではtitleが必須であり、本文にH1が残っていてもfrontmatterのtitleを削除するとA-155に違反する。変更対象は編集可能なdesign文書で、ADRの決定や参照は変更しない。",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "gen-omit-filename-branch-number",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "87163b95dabfd32c0c2f745abc592bb272cf65ed6f725f05b3860e6042532d29",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-156"
+          ],
+          "note": "A-156は1本だけでも枝番「-1」をファイル名に要求する。この変更はfrontmatterのIDと索引を揃えているが、ファイル名の枝番を省いている。",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "gen-use-adr-as-current-prompt-specification",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "a2689fcbc0e4a0e6e00d4ce4ab2f7469e51a35068e5b764c7ffa4f0fd28f0beb",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-159"
+          ],
+          "note": "ADRの参照名は正しいが、現在のpromptの仕様の参照先をADRにしている。「今どうなっているかを指すときはdocs/design/の文書を」に反する。",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "gen-reserve-four-digit-number-for-new-task",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "6db69186cc42f532434519a17bae5f7395e43f8e7a407ac9b9071f9db1940993",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-160"
+          ],
+          "note": "A-160の「新しく登録するADRのtaskは新しい形にする」に反し、新規登録時に4桁の番号を予約させる。差分は登録手順の計画だけで、ADR自体のID・ファイル名・本文は変更しない。",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "gen-omit-original-adr-number-from-collision-summary",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "bfc334a0ce061377d663cb44d60c4227e64da5bb71c86593d2a9b7b8193d4f63",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-161"
+          ],
+          "note": "A-161は衝突からの書き直し時に、元の番号と新しいIDの両方をreceiptのsummaryへ書くよう求める。この手順は書き直しと参照更新を行うが、元の番号をsummaryから明示的に省いている。",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "gen-specify-bundle-cli-details-in-adr",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "2f266b43cbd07bcd77f1150278458f3ea4e3d0a5935e259d70fcd89bce81a1d5",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-162"
+          ],
+          "note": "A-162はCLIのflagの綴りと既定値・閾値の数値をdocs/design/に書くとしている。人が診断資料を確認して共有するという単一の方針に加え、ADR本文で具体的なflagと既定値を規定している点が違反。",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "gen-amend-without-current-design-update",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "a189ec89eb046ba881c9a00efb481dcad7352e27f4d72f8881485762f2bc994c",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-163"
+          ],
+          "note": "新しいADRのamendsと元のADRのamended_byは正しく対応しているが、保存確認を必須にする変更をdesignに反映していない。A-163はamendsと同じ変更でdocs/design/を今の姿に直すことを求める。",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "gen-add-adr-index-reading-guide",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "2c97249431e0fd21b21c7a00f2ecec322529e13374d007dfda304abe25846568",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "The ADR index is an editable design document, so adding navigation guidance and updating its content-change date is permitted. The guidance directs readers to design for the current state and ADRs for reasons without changing any decision, status, or legacy identifier.",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "gen-clarify-membership-rollback",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "6ff5333f74d2ae80dacfe85251fa4dd64798be6451ad9f01bcc0d1fe44f705f5",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "The design document may be edited to clarify current behavior, and its content-change date is updated. The clarification preserves the existing transaction semantics and introduces no new decision or ADR rewrite.",
+          "near_miss": false
+        }
+      }
+    }
+  ]
+}

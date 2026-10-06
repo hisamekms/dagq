@@ -1,0 +1,392 @@
+{
+  "agent": "migration-rules",
+  "role": "review",
+  "codes": [
+    "A-139",
+    "A-140",
+    "A-141",
+    "A-144",
+    "A-145"
+  ],
+  "k": 3,
+  "cases": [
+    {
+      "id": "prod-migration-rules-t1397-a7",
+      "source": "production",
+      "made_by": "production review (task 1397 attempt 7); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "303aeaf857fefed6359f694fa8fb55a0dca46839",
+      "patch": "0401ffacc95e1b968642f9fd9c488ec9114597954a1166b963a918757784f76f",
+      "adjudicated": {
+        "by": "majority of the production verdict and two Codex labels",
+        "votes": {
+          "production": "concern",
+          "judge": "clean",
+          "judge2": "clean"
+        }
+      },
+      "disputed": null,
+      "base_kind": "exact",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "The change updates planner behavior in src/application/supervise/ and src/infrastructure/planners.rs without changing the database schema, migrations/, or src/infrastructure/schema.rs. The test changes in tests/it/planner_headless.rs and tests/it/planner_headless_turns.rs do not hard-code the latest schema version, so none of the specified rules are broken.",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "concern",
+          "codes": [],
+          "run_id": "f4b8ea86-dff0-4086-a2c8-5eb760569be9",
+          "run_outcome": "after_review=ask; agent_route=ask; run=integrated; task=completed; asks=approve_landing=send_back,approve_landing=land; landed=2e9c6445e0f1"
+        }
+      }
+    },
+    {
+      "id": "prod-migration-rules-t1505-a2",
+      "source": "production",
+      "made_by": "production review (task 1505 attempt 2); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "076bbb727da3fcbd1c883d8e986c8599eee1408d",
+      "patch": "ebc865d4e0831392ed52522c3de9a93aabe6e7ae4a409a6ec08a6047e9af2182",
+      "adjudicated": {
+        "by": "majority of the production verdict and two Codex labels",
+        "votes": {
+          "production": "revise",
+          "judge": "clean",
+          "judge2": "clean"
+        }
+      },
+      "disputed": null,
+      "base_kind": "exact",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "The change adds migrations/0064_follow_up_membership.sql after the base’s 0063 migration, without editing src/infrastructure/schema.rs or any existing migration. tests/it/follow_up_membership.rs derives the prior schema version from MIGRATIONS.len() rather than hardcoding the latest schema number, so none of the specified rules are broken.",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "revise",
+          "codes": [],
+          "run_id": "0de6cd72-bb17-45b8-815a-67df22a1101b",
+          "run_outcome": "after_review=send_back; agent_route=send_back; run=integrated; task=completed; landed=4855bc84aef6"
+        }
+      }
+    },
+    {
+      "id": "prod-migration-rules-t1683-a1",
+      "source": "production",
+      "made_by": "production review (task 1683 attempt 1); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "d751a0c93304aece21c4de99fe41cc0bb3aac76b",
+      "patch": "31a3fededcbc13f418fffee0dff539d35efb0e39283b87d7bf1d4078a348628f",
+      "adjudicated": {
+        "by": "majority of the production verdict and two Codex labels",
+        "votes": {
+          "production": "revise",
+          "judge": "clean",
+          "judge2": "clean"
+        }
+      },
+      "disputed": null,
+      "base_kind": "exact",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "The change updates supervisor request recovery, src/domain/turn.rs, tests/it/runtime_review_conflict.rs, and lifecycle documentation; it changes no migrations or database schema and does not edit src/infrastructure/schema.rs. The added test numbers refer to request sequences and review attempts, not the latest schema version, so none of the specified rules are broken.",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "revise",
+          "codes": [],
+          "run_id": "ae1fdf72-6ec2-462f-8eaa-e80583371076",
+          "run_outcome": "after_review=send_back; agent_route=send_back; run=integrated; task=completed; landed=60972db31b70"
+        }
+      }
+    },
+    {
+      "id": "prod-migration-rules-t1660-a2",
+      "source": "production",
+      "made_by": "production review (task 1660 attempt 2); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "6f625decfdec3423484466371d892cd204db49a8",
+      "patch": "43fa8e10fc20397b67485fc9ad77013f1eefd2a7545c7c8b95fb341ad6b14049",
+      "adjudicated": {
+        "by": "majority of the production verdict and two Codex labels",
+        "votes": {
+          "production": "revise",
+          "judge": "clean",
+          "judge2": "clean"
+        }
+      },
+      "disputed": null,
+      "base_kind": "exact",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "The change does not modify migrations/ or src/infrastructure/schema.rs, and the SQL added in src/infrastructure/draft_planners.rs, follow_up_membership.rs, and goal_reviews.rs only queries existing tables. The added tests in tests/it/follow_up_membership.rs and src/domain/ do not hard-code the latest schema version, so none of the specified rules are broken.",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "revise",
+          "codes": [],
+          "run_id": "b826f03c-b395-4222-ae6e-367909c6e270",
+          "run_outcome": "after_review=send_back; agent_route=send_back; run=integrated; task=completed; asks=worker_question=(A) status の attention だけで (1) を満たしたとする。doctor に attention が無いことは receipt に書き、doctor に attention を足す件は必要なら別の follow_up にする。; landed=bdec18dc1914"
+        }
+      }
+    },
+    {
+      "id": "prod-migration-rules-t1641-a4",
+      "source": "production",
+      "made_by": "production review (task 1641 attempt 4); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "c622b375482ecad72a4f6533d444fd3915df536e",
+      "patch": "301033b16899a319fef2492299a340c8803397b29399c74ef922695e98867a06",
+      "adjudicated": null,
+      "disputed": null,
+      "base_kind": "exact",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "The change adds migrations/0067_goal_tags.sql after the existing 0066 migration, without editing src/infrastructure/schema.rs or changing any existing migration. The schema change is implemented through that new migration, and the changed tests do not hard-code the latest schema version.",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "pass",
+          "codes": [],
+          "run_id": "7c88cb42-5a3e-4da9-9c75-f804cd74cd1a",
+          "run_outcome": "after_review=land; agent_route=land; run=integrated; task=completed; landed=f78d2dfff43f"
+        }
+      }
+    },
+    {
+      "id": "prod-migration-rules-t1641-a3",
+      "source": "production",
+      "made_by": "production review (task 1641 attempt 3); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "c622b375482ecad72a4f6533d444fd3915df536e",
+      "patch": "c63de16b7a52c0e7f0d2de1a64f9e24d11ac9aaa90a373551919ac3d3d35183b",
+      "adjudicated": null,
+      "disputed": null,
+      "base_kind": "exact",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "The schema change is added through migrations/0067_goal_tags.sql, the next number after the base’s 0066, without editing src/infrastructure/schema.rs or any existing migration. The changed tests do not hard-code the latest schema version, so none of the specified rules is broken.",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "pass",
+          "codes": [],
+          "run_id": "7c88cb42-5a3e-4da9-9c75-f804cd74cd1a",
+          "run_outcome": "after_review=send_back; agent_route=land; run=integrated; task=completed; landed=f78d2dfff43f"
+        }
+      }
+    },
+    {
+      "id": "prod-migration-rules-t1223-a3",
+      "source": "production",
+      "made_by": "production review (task 1223 attempt 3); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "be148d59e014f42819363d02bbc076519cdac113",
+      "patch": "47206d5a0b61eed1e52be194e338703e884fb50a941e3606d34ec90062e8f111",
+      "adjudicated": null,
+      "disputed": null,
+      "base_kind": "exact",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "The change updates observer behavior and tests in files such as src/application/observer/mod.rs and tests/it/observer_codex.rs, without changing migrations/*.sql or src/infrastructure/schema.rs. It introduces no schema changes, migration numbering changes, or hardcoded latest schema version in tests.",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "pass",
+          "codes": [],
+          "run_id": "326b914c-8a4d-4415-a5e2-996bc07f7274",
+          "run_outcome": "after_review=send_back; agent_route=land; run=needs_session; task=in_progress; asks=approve_landing=send_back"
+        }
+      }
+    },
+    {
+      "id": "prod-migration-rules-t1641-a1",
+      "source": "production",
+      "made_by": "production review (task 1641 attempt 1); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "c622b375482ecad72a4f6533d444fd3915df536e",
+      "patch": "84dd28762e92db188e7627284783abd748d7ff58c8d47b6d362501e8f1acaf51",
+      "adjudicated": null,
+      "disputed": null,
+      "base_kind": "exact",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "The change adds migrations/0067_goal_tags.sql after the existing 0066 migration to update the schema, without editing src/infrastructure/schema.rs or any existing migration. Changes in tests/ introduce no hard-coded latest schema version, and the added migration number has no collision.",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "pass",
+          "codes": [],
+          "run_id": "7c88cb42-5a3e-4da9-9c75-f804cd74cd1a",
+          "run_outcome": "after_review=send_back; agent_route=land; run=integrated; task=completed; landed=f78d2dfff43f"
+        }
+      }
+    },
+    {
+      "id": "prod-migration-rules-t1515-a1",
+      "source": "production",
+      "made_by": "production review (task 1515 attempt 1); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "edb2e1fc210054a9e4ec9d95518573cd80125b70",
+      "patch": "22aee3582a7775dbe0f4eb24111e691eb5d0cca79ba9dcbccf33a519ff8715c5",
+      "adjudicated": null,
+      "disputed": null,
+      "base_kind": "exact",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "tests/it/runtime_waiting.rs changes only a wait condition to require a recorded run directory. It does not modify migrations or schema.rs, or hardcode the latest schema version; the numeric arguments identify runs.",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "pass",
+          "codes": [],
+          "run_id": "f0ead9ad-3dd1-4082-9eb6-90415e2588c0",
+          "run_outcome": "after_review=land; agent_route=land; run=integrated; task=completed; landed=d38fd929f11a"
+        }
+      }
+    },
+    {
+      "id": "prod-migration-rules-t1223-a2",
+      "source": "production",
+      "made_by": "production review (task 1223 attempt 2); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "be148d59e014f42819363d02bbc076519cdac113",
+      "patch": "040c1ab5fb9104edda8c49a56fb9addf87284c6474f651f703fb6e51cccbb9d2",
+      "adjudicated": null,
+      "disputed": null,
+      "base_kind": "exact",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "The change updates observer behavior and tests in files such as src/application/observer/mod.rs and tests/it/observer_codex.rs. It does not change migrations, src/infrastructure/schema.rs, or database schema definitions, and introduces no hard-coded latest schema number in tests.",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "pass",
+          "codes": [],
+          "run_id": "326b914c-8a4d-4415-a5e2-996bc07f7274",
+          "run_outcome": "after_review=send_back; agent_route=land; run=needs_session; task=in_progress; asks=approve_landing=send_back"
+        }
+      }
+    },
+    {
+      "id": "prod-migration-rules-t1223-a1",
+      "source": "production",
+      "made_by": "production review (task 1223 attempt 1); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "be148d59e014f42819363d02bbc076519cdac113",
+      "patch": "7852d2299bc40954b9ff1d339e93fbfefc67ffd44f6ede30bf26a893256d3ec9",
+      "adjudicated": null,
+      "disputed": null,
+      "base_kind": "exact",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "The diff changes observer-related code and tests, including tests/it/observer_codex.rs, but does not change migrations or src/infrastructure/schema.rs. It introduces no schema changes or hard-coded latest schema version in tests, so none of the specified rules are violated.",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "pass",
+          "codes": [],
+          "run_id": "326b914c-8a4d-4415-a5e2-996bc07f7274",
+          "run_outcome": "after_review=send_back; agent_route=land; run=needs_session; task=in_progress; asks=approve_landing=send_back"
+        }
+      }
+    },
+    {
+      "id": "prod-migration-rules-t1440-a3",
+      "source": "production",
+      "made_by": "production review (task 1440 attempt 3); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "5d22997f1487041e9d52b891e2fcc0dcfe351568",
+      "patch": "9501d6a7360bc8129fcb663aaf4002b6989746c4e3b2e9113fa67903b6eeaf51",
+      "adjudicated": null,
+      "disputed": null,
+      "base_kind": "exact",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "The change leaves migrations/, src/infrastructure/schema.rs, and migration numbering unchanged, and introduces no hard-coded latest schema version in tests. The workspace-to-background-session changes retain the existing database schema, so no new migration is required.",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "pass",
+          "codes": [],
+          "run_id": "14f3c0be-4f41-4cb5-8e40-1507286bbf93",
+          "run_outcome": "after_review=send_back; agent_route=land; run=needs_session; task=in_progress; asks=approve_landing=send_back"
+        }
+      }
+    },
+    {
+      "id": "prod-migration-rules-t1440-a2",
+      "source": "production",
+      "made_by": "production review (task 1440 attempt 2); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "5d22997f1487041e9d52b891e2fcc0dcfe351568",
+      "patch": "171b07f5c54f7abe0a1c6d317da1aff230c035b0acab3bf7a6aaa1b6f555c32d",
+      "adjudicated": null,
+      "disputed": null,
+      "base_kind": "exact",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "The diff leaves migrations/*.sql and src/infrastructure/schema.rs unchanged and introduces no schema changes or hard-coded latest schema numbers in tests. The edit to docs/design/persistence.md describes run screen behavior and does not alter the migration rules or database schema.",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "pass",
+          "codes": [],
+          "run_id": "14f3c0be-4f41-4cb5-8e40-1507286bbf93",
+          "run_outcome": "after_review=send_back; agent_route=land; run=needs_session; task=in_progress; asks=approve_landing=send_back"
+        }
+      }
+    },
+    {
+      "id": "prod-migration-rules-t1440-a1",
+      "source": "production",
+      "made_by": "production review (task 1440 attempt 1); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "5d22997f1487041e9d52b891e2fcc0dcfe351568",
+      "patch": "8898c0e99dcd8c77544e9ef8ce43a3f5845b1981945179cb272b18564cbdb1f9",
+      "adjudicated": null,
+      "disputed": null,
+      "base_kind": "exact",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "The diff does not change migrations/, src/infrastructure/schema.rs, or the migration-number checker, and introduces no schema changes or hardcoded latest schema versions in tests. The migrations/0001_x.sql reference in tests/e2e/other_repository.rs is unchanged fixture context.",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "pass",
+          "codes": [],
+          "run_id": "14f3c0be-4f41-4cb5-8e40-1507286bbf93",
+          "run_outcome": "after_review=send_back; agent_route=land; run=needs_session; task=in_progress; asks=approve_landing=send_back"
+        }
+      }
+    }
+  ]
+}

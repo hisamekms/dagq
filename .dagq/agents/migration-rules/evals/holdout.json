@@ -1,0 +1,203 @@
+{
+  "agent": "migration-rules",
+  "role": "review",
+  "codes": [
+    "A-139",
+    "A-140",
+    "A-141",
+    "A-144",
+    "A-145"
+  ],
+  "k": 3,
+  "cases": [
+    {
+      "id": "gen-add-index-through-migration-file-only",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "5dbf86a7ec3f0c6b922019ce4e17a8faf5532e3478f7a864295d9329cbdfc95d",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "Although the index changes the queue schema, A-139 expressly allows adding it solely through a numbered SQL file because build.rs generates MIGRATIONS. Using the next available number, 0065, also satisfies the numbering and schema-fix rules without altering released migrations.",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "gen-add-migration-specific-test-in-schema-module",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "86fb257b3aa5f3e74f8fb23a7719acfab708cd5cdf36c09c785bd6ad751ba753",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-139"
+          ],
+          "note": "ADR-0067 decision 1 says migration-adding tasks place the SQL file without editing schema.rs, but this task also adds a migration-specific test there. The test derives the migration from MIGRATIONS without hardcoding the latest version, and the new SQL file preserves numbering and released migrations.",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "gen-assert-historical-floor-migration-version",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "8caf3a7bff0dd846f14e24e722175d69cde9672bcd28ff2cbc91c840732202f7",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "The added assertion names historical migration 0024, which introduced the schema floor, rather than the latest schema. ADR-0067 decision 4 explicitly permits numbers identifying specific past migrations.",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "gen-pin-initialized-schema-version",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "676d4fabbc3abec70b11338c9e55fbcb03a954ca82df9922ef6c4fe5b74019a5",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-140"
+          ],
+          "note": "The initialization test replaces SqliteQueue::SCHEMA_VERSION with the current latest number, 64. ADR-0067 decision 4 prohibits numeric literals for the latest schema version.",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "gen-clarify-unreleased-migration-name",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "4657dbb8a9e5fa28f7f3b4df7de4a09a1febb5882bf8c2580a33eb9d7fc40d1a",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "未リリースの0064のslugだけを改名し、番号と中身は維持するので欠番や重複は生じません。ADR-0067決定3は既存migrationの改名を番号衝突と見なさず、このcheckoutの唯一のrelease tagであるv0.2.0にも0064は含まれません。",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "gen-skip-next-number-for-data-cleanup",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "12414bf0d8c3093971ba5c0a1a814342d3027b29718527e8e61bf4ab3c597b97",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-141"
+          ],
+          "acceptable_codes": [
+            "A-145"
+          ],
+          "note": "mainのmigrationは0064までなので次の空きは0065です。データ補正を0066として追加すると欠番になり、ADR-0067が明記する通りintegrateの振り直しは欠番を修復しません。schemaの変更や既存migrationの編集はありません。",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "gen-clarify-unreleased-membership-migration-comment",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "64cdee3b8bfe4180c20eeea8172c41b018048725643738343e14ae3f7a28183b",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "ADR-t614-2 permits editing unreleased migrations. This checkout has only the excluded v0.2.0 tag, which does not contain 0064; no eligible release baseline exists to support the two requested violation cases without inventing release history.",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "gen-clarify-unreleased-migration-comment",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "4ce537a3492026a66672ae0d3bc69893b41d00f556839ca53746b0843051c872",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "This changes only explanatory text in an unreleased migration, leaving the schema unchanged, so A-145 does not require a new migration. Migration 0062 is absent from the checkout's only release tag, v0.2.0, so the comment edit also respects A-144.",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "gen-add-event-kind-run-index",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "4af85deb8a4a7349830afd8301a595620d25abef245d0abfd8c3185a082fc262",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "Adds only a migration at 0065, main's next unused number, leaving schema.rs and all existing migrations unchanged. The non-unique index is an additive schema change delivered through the next numbered migration.",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "gen-assert-applied-migration-details",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "f004a836ffde2616b0b112ff7c0f85a0aeec8cfdb7aadcc0efe9088ad8e1cb48",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "Checks the applied migration versions and compatibility flags using pending_after, which derives expectations from MIGRATIONS. The retained 23 identifies a historical schema; ADR-0067 explicitly permits historical version literals.",
+          "near_miss": false
+        }
+      }
+    }
+  ]
+}

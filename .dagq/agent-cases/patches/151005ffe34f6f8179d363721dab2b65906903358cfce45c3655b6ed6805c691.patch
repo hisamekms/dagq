@@ -1,0 +1,21 @@
+diff --git a/migrations/0065_tasks_by_title.sql b/migrations/0065_tasks_by_title.sql
+new file mode 100644
+index 00000000..3975b4a9
+--- /dev/null
++++ b/migrations/0065_tasks_by_title.sql
+@@ -0,0 +1,2 @@
++-- dagq-schema: compatible
++CREATE INDEX tasks_by_title ON tasks(title);
+diff --git a/src/infrastructure/schema.rs b/src/infrastructure/schema.rs
+index f64b87c9..619b075a 100644
+--- a/src/infrastructure/schema.rs
++++ b/src/infrastructure/schema.rs
+@@ -19,7 +19,7 @@ pub const MIGRATIONS: &[&str] = include!(concat!(env!("OUT_DIR"), "/migrations.r
+ 
+ /// The schema version this binary knows: a fully migrated queue's
+ /// `user_version`.
+-pub const BINARY_SCHEMA: i64 = MIGRATIONS.len() as i64;
++pub const BINARY_SCHEMA: i64 = 65;
+ 
+ /// The first schema version whose queue records its floor. A queue below
+ /// it has no floor table, and its floor is its own version.

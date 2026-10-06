@@ -1,0 +1,1421 @@
+{
+  "agent": "adr-rules",
+  "role": "review",
+  "codes": [
+    "A-150",
+    "A-152",
+    "A-155",
+    "A-156",
+    "A-159",
+    "A-160",
+    "A-161",
+    "A-162",
+    "A-163"
+  ],
+  "k": 3,
+  "cases": [
+    {
+      "id": "a150-rewrite-accepted-decision",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "9d624c3e84f69727a4e044315b93eea6ec05d9f38c4553f74ef2ffb745bd8a75",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-150"
+          ],
+          "acceptable_codes": [
+            "A-152"
+          ],
+          "note": "受け入れ済みの ADR の Decision の文を書き換えて決定を除いている。append-only に反する。決定が 1 つの ADR なので、直し方として丸ごとの置き換え（A-152）を挙げるのは許す"
+        }
+      }
+    },
+    {
+      "id": "clean-design-wording",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "ba8378a850f4e4d6bc276bcee870f8e675898c8f36f780bf4cb737638cf6009e",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "design の文書の文言を足し、frontmatter の updated を進めただけ。ADR に触れず、規則に反しない"
+        }
+      }
+    },
+    {
+      "id": "hm-rewrite-accepted-consequences",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "baa6482cc6e53e75d1adaa9d6c0eea0fbed633b4d532c9fbe504c115c5528317",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-150"
+          ],
+          "note": "受け入れ済みの ADR-0008 の Consequences の箇条を書き換えている。append-only は Decision に限らず本文全体に効き、後から変えてよいのは状態の欄と H1 直後の注記 1 行だけ",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "hm-note-line-after-h1",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "4d17dacdfb310e1334bffa292f7e9340acec9edf8ed87b7ed7ef735601bc4ac4",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "受け入れ済みの ADR-0008 の H1 の直後に注記を 1 行足しただけ。documents.md の ADR の節が後から変えてよいとする箇所で、新しい ADR も updated の変更も要らない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "gen-clarify-superseded-adr-banner",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "01b0b44ce78c40ff2b3f28272d62adc505c5ea7892f06aadcb0e68d20d0a582b",
+      "adjudicated": {
+        "date": "2026-10-05",
+        "by": "hisamekms",
+        "decision": "clean。documents.md の「H1直後の注記1行」は、1行である限り中身を変えてよいと読む（frontmatter.md の Banner の文面は形の例で、足すことを禁じない）"
+      },
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "H1直後の注記1行は既存ADRでも変更でき、この変更だけでは新しいADRもupdatedの更新も不要と明記されている。注記の日付・後継リンク・状態を維持して保存目的を補足するだけなので、索引の状態変更も必要ない。",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "gen-rephrase-existing-adr-context",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "9b0b038c4610db41981dcf775843abcb93c7cd5030f75113624489be83b7b7fb",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-150"
+          ],
+          "note": "既存ADRのContextを読みやすく言い換える変更でも、許可された欄とH1直後の注記以外の書き換えはappend-only規則に違反する。決定の内容は変えず、内容変更日に合わせてupdatedを更新するため、置き換え・amendsの選択やfrontmatter仕様への違反はない。",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "gen-amend-one-decision-in-task-id-adr",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "a1bb83a09fdca02573547e5fe9e6d47842e9dc33193f0a772c78128b4078fe26",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "ADR-t616-1は新しい形式のIDだが、番号付きの3つの決定のうち決定1だけを変えるためamendsを使える。規則はIDの形式ではなく決定の数と変更範囲で選ぶとしており、新しいADRのamends・元のamended_by・design更新も揃っている。",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "gen-replace-whole-adr-for-one-decision",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "5239f30a0965cdb11180641367e93d9b6d2759e03846e24a91b9033a04c6ef0a",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-152"
+          ],
+          "acceptable_codes": [
+            "A-163"
+          ],
+          "note": "ADR-t616-1の3つの決定のうち決定1だけを変えるのに、元のADRを丸ごとsupersededにしている。番号付きの複数の決定の一部を変える場合は、IDの形式によらずamendsを使うという規則に違反する。",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "gen-remove-optional-design-scope",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "224f7119a3c762de16568aaee05fe2fa115e7a1eb2ebf6dfd075662174df0965",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "docs/frontmatter.mdのType-specific fieldsではdesignのscopeはoptionalなので、削除しても必須欄の欠落にはならない。編集可能なdesign文書のメタデータ変更に合わせてupdatedを更新し、last_verifiedは実装との照合日として維持する。",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "gen-use-adr-status-for-design",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "44eab438ac147710dce99e350fce8b7bdabd47743c0891f609723989377ffbee",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-155"
+          ],
+          "note": "docs/frontmatter.mdのType-specific fieldsではdesignのstatusはdraft・current・deprecated・supersededに限られる。ADR用のacceptedをdesign文書に使う変更はA-155に違反する。",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "gen-index-proposed-adr-with-creation-date",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "00014612717a8e4d656c39179cedafcd9c5b40d5e3c43a51558af6a7d1526047",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "A-156はproposedのADRには書いた日のファイル名を認め、acceptedにする変更で初めてaccepted_onへ合わせる。この新規ADRはproposedなのでaccepted_onがなくてもよく、正しいIDと枝番を持ち、索引でも有効なADRと区別している。",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "gen-keep-creation-date-in-accepted-filename",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "1856a5a340c03412ffe6008d8953c8a7e5aebfe130c73b596941db267cf31da2",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-156"
+          ],
+          "note": "A-156はacceptedにする変更でファイル名の日付とリンクをaccepted_onに合わせるよう要求する。このADRは10月5日にacceptedとなったのに、作成日の10月4日をファイル名に残している。",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "gen-link-adr-id-to-dated-file-for-rationale",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "a6995be56b5d066dcff6e80050fe45a53d897cfafb00f2c5bb51198afb153226",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "後続taskはADR-t1688-1という日付を含まない名前で理由を参照し、現在の仕様はdesignを指している。リンク先のファイル名に日付があっても、ADRの参照名に日付を含めたことにはならず、A-159に従う。",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "gen-reference-adr-by-dated-filename",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "20e5c6f3990cc690a5351033d5c1c078753b846a84270fcc37957fa7b58532c9",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-159"
+          ],
+          "note": "後続taskのdescription案がADRを日付付きファイル名だけで参照している。「後続のtaskはADRをADR-t<ID>-<N>で参照する」に反する。",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "gen-retain-grandfathered-four-digit-reservation",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "81b3d0ac7b800307bf7a285e99647e3f56b7272532c03f2d6e86d81e779cd5e7",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "A-160は既存の4桁ADRだけでなく、登録済みtaskが予約した4桁の番号もそのまま使うことを明示している。移行前の予約を維持し、新規登録にはtask ID形式を使う計画なので適合する。",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "gen-convert-uncontested-legacy-reservation",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "fa459673aa4c1eb170d9cbf4b578b0438d8fdbdfaa320ac50e66a285fdd36dd4",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-160"
+          ],
+          "note": "A-160は登録済みtaskが予約した4桁の番号をそのまま使い、振り直さないと定める。mainとの衝突がない予約を形式統一のために変更する計画なので、衝突時の例外にも該当しない。",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "gen-convert-colliding-reserved-adr-after-integration-resume",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "05f8818f59456c5a64339754768fb7631b312479b567155cc37c0c3d86427f6e",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "A-161は、integrateの重複検査で落ちてresumeされた場合も、衝突した予約番号を自分のtask IDの形へ書き直す対象としている。これはA-160の予約番号を維持する原則の明示的な例外であり、askを使わず参照を更新し両方の識別子をsummaryに記す手順は適合する。",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "gen-ask-before-resolving-reserved-adr-collision",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "2e1b5bff74500cd95dce54c5c5a9ed37db1029d0d0969305583ab8cd84b5029e",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-161"
+          ],
+          "note": "A-161は、予約した4桁番号がmainで埋まっている場合、workerがdagq askを使わず自分のtask IDの形へ直すよう求める。この手順は、正しく書き直す前に番号の衝突だけを理由として人の承認を求めている。",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "gen-group-linked-bundle-sharing-decisions",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "57810c4c8b73f8a804a96d90bdd6cab76c8a8ea5415026da6f22666f7075bb28",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "A-162は密に結びついた数個の決定を1本に書くことを認めている。生成場所・確認機会・共有主体は診断資料の共有境界を一緒に定める3つの判断で、本文は100行以内に収まり、実装の綴りや数値も規定していない。",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "gen-bundle-independent-policies",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "6f4517d3153f0b867e5353d138aec940776f30b1cdd2a72778fe8b13d5436d57",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-162"
+          ],
+          "note": "A-162は1 ADRに決定1つ、例外でも密に結びついた数個までとしている。診断資料の外部共有の権限とオフライン文書の配布方針は独立した判断であり、同じtaskで扱っても1本にまとめる根拠にならない。",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "gen-amend-task-id-adr-with-permitted-backlink",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "7bbdbb16bbad4936e3135edd360497ae5818ce4728f3dbb7a6e4b04bcf50e081",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "ADR-t1091-1はIDの形によらず、複数の番号付き決定の一部をamendsすることを認めており、amends・amended_by・同じ変更でのdesign更新がそろっている。元のADRへの変更も許可されたamended_byの追加だけで、本文とupdatedは保持している。",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "gen-amend-without-parent-backlink",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "2a60f97195bf6c87b0401161814e003d0022db14af366cd8cd253b5b7e536301",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-163"
+          ],
+          "note": "複数の番号付き決定を持つADRの決定4だけを小さな新しいADRでamendsし、designも更新しているが、元のADRのamended_byに新しいIDを足していない。A-163が定める逆参照の追加手順に違反する。",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "gen-propose-translation-source-authority",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "6535b861a2108900ba7c8f05140be4aa680355329a30dbe1ad656ba25103b3de",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "A new proposed ADR records one human policy choice without rewriting existing ADRs or making the proposal effective. Its task-based ID, creation-date filename, frontmatter, template sections, and proposed index row follow the documentation rules.",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "gen-plan-membership-document-check",
+      "source": "generated",
+      "made_by": "codex-cli 0.160.0 (rules only, verified by a second Codex call)",
+      "base_commit": "f46a7963cf708d621bf529eb855ecfb552f78b33",
+      "patch": "51cb9791a182102f300bc5ee34de1e93e73cadb62c1b9add86b18382489c4cb9",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "The proposed plan uses valid plan frontmatter and describes intended work rather than individual task status. It points to design for current behavior and references the reasons using the stable ADR-t1504-2 identifier, as required for follow-up work.",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "prod-adr-rules-t1560-a3",
+      "source": "production",
+      "made_by": "production review (task 1560 attempt 3); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "7da002932ffb410208b3a966e15b506daa99bc09",
+      "patch": "a5618aad27ac40b546e1a3ecbe575cea8172facc6bf8d983ec0daf32f047815f",
+      "adjudicated": {
+        "by": "claude-opus-5-5 (this session; adr-rules was already adopted)",
+        "reason": "本番の指摘は design の文書の古い記述（provider-lifecycle.md）で、adr-rules の規則コードに当たらない（design-consistency の担当）。Codex のラベルどおり",
+        "judge": {
+          "verdict": "clean",
+          "codes": []
+        }
+      },
+      "disputed": null,
+      "k": 1,
+      "base_kind": "exact",
+      "moved_from_production": "2026-10-05: the improving session read these after the production run (notes/iterations-adr-rules.md)",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "本番の指摘は design の文書の古い記述（provider-lifecycle.md）で、adr-rules の規則コードに当たらない（design-consistency の担当）。Codex のラベルどおり",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "revise",
+          "codes": [],
+          "run_id": "6c6542c9-f122-4667-8151-5ee3e944965b",
+          "run_outcome": "after_review=send_back; agent_route=send_back; run=integrated; task=completed; asks=approve_landing=send_back; landed=0c5f042ef4fc"
+        }
+      }
+    },
+    {
+      "id": "prod-adr-rules-t1560-a4",
+      "source": "production",
+      "made_by": "production review (task 1560 attempt 4); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "0045125d37c88e87f55b803efcc06a18ecb49b23",
+      "patch": "a6feef337642e8af775478fbebdf130a9297d878e5a7a3e33c8fbe56e429c452",
+      "adjudicated": {
+        "by": "claude-opus-5-5 (this session; adr-rules was already adopted)",
+        "reason": "本番の指摘は design の文書の古い記述（goal-review.md 等）で、adr-rules の規則コードに当たらない",
+        "judge": {
+          "verdict": "clean",
+          "codes": []
+        }
+      },
+      "disputed": {
+        "date": "2026-10-05",
+        "kind": "ambiguous",
+        "by": "hisamekms",
+        "reason": "iter5 が『ADR の決定を新しい ADR なしで変えた』（A-150・A-152・A-163）と指摘したが、人も規則と ADR の本文からは決定の変更かを判断できなかった。正解を置けないので主の指標から外す。変更: 起動できない job の provider を控える決定（ADR-t1063-1 決定 4 等）から、E2BIG と StdinUnprepared を外して other に分類した"
+      },
+      "k": 1,
+      "base_kind": "exact",
+      "moved_from_production": "2026-10-05: the improving session read these after the production run (notes/iterations-adr-rules.md)",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "本番の指摘は design の文書の古い記述（goal-review.md 等）で、adr-rules の規則コードに当たらない",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "revise",
+          "codes": [],
+          "run_id": "6c6542c9-f122-4667-8151-5ee3e944965b",
+          "run_outcome": "after_review=send_back; agent_route=send_back; run=integrated; task=completed; asks=approve_landing=send_back; landed=0c5f042ef4fc"
+        }
+      }
+    },
+    {
+      "id": "prod-adr-rules-t1232-a1",
+      "source": "production",
+      "made_by": "production review (task 1232 attempt 1); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "9a7c0627bf1ae6cc36fb65f03eb8e43fd9345d8c",
+      "patch": "9ab4b66016c9cdab4a848ebcc24f4e0b997b3d3c08adcbbff98b9e19cf4ae566",
+      "adjudicated": {
+        "by": "claude-opus-5-5 (this session; adr-rules was already adopted)",
+        "reason": "docs/development/operations.md の本文が変わったのに frontmatter の updated が変わっていない。frontmatter.md は updated を内容の最後の変更日とする。本番の判定（A-155）が正しく、Codex が見落とした",
+        "judge": {
+          "verdict": "clean",
+          "codes": []
+        }
+      },
+      "disputed": null,
+      "k": 1,
+      "base_kind": "exact",
+      "moved_from_production": "2026-10-05: the improving session read these after the production run (notes/iterations-adr-rules.md)",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-155"
+          ],
+          "note": "docs/development/operations.md の本文が変わったのに frontmatter の updated が変わっていない。frontmatter.md は updated を内容の最後の変更日とする。本番の判定（A-155）が正しく、Codex が見落とした",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "revise",
+          "codes": [
+            "A-155"
+          ],
+          "run_id": "5ebe4f16-ef40-4652-bfc5-ac4f9db28eda",
+          "run_outcome": "after_review=send_back; agent_route=send_back; run=integrated; task=completed; landed=7031121e3bc3"
+        }
+      }
+    },
+    {
+      "id": "prod-adr-rules-t1400-a1",
+      "source": "production",
+      "made_by": "production review (task 1400 attempt 1); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "7031121e3bc371707d2c362f4e3efe38073d4688",
+      "patch": "fb2500b150eaf805f0c571db6d4f5cdc7fc60903d7671f695e209a3388d78695",
+      "adjudicated": {
+        "by": "claude-opus-5-5 (this session; adr-rules was already adopted)",
+        "reason": "本番の指摘は overview.md と plugin-integration.md の記述の食い違いで、adr-rules の規則コードに当たらない",
+        "judge": {
+          "verdict": "clean",
+          "codes": []
+        }
+      },
+      "disputed": null,
+      "k": 1,
+      "base_kind": "exact",
+      "moved_from_production": "2026-10-05: the improving session read these after the production run (notes/iterations-adr-rules.md)",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "本番の指摘は overview.md と plugin-integration.md の記述の食い違いで、adr-rules の規則コードに当たらない",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "revise",
+          "codes": [],
+          "run_id": "a5a11fd2-e8ed-4082-a242-c4596dce3291",
+          "run_outcome": "after_review=send_back; agent_route=send_back; run=integrated; task=completed; asks=approve_landing=send_back; landed=8279f86b9d03"
+        }
+      }
+    },
+    {
+      "id": "prod-adr-rules-t1462-a2",
+      "source": "production",
+      "made_by": "production review (task 1462 attempt 2); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "bc282009bc5f6e736e8bc685d961a5d9b24a76ab",
+      "patch": "d712427ec74c541b087c91f669e388aeef64736aea3437a8351cb26c3274c21e",
+      "adjudicated": {
+        "by": "claude-opus-5-5 (this session; adr-rules was already adopted)",
+        "reason": "本番の指摘は棚卸しの表の集計の誤りで、adr-rules の規則コードに当たらない",
+        "judge": {
+          "verdict": "clean",
+          "codes": []
+        }
+      },
+      "disputed": null,
+      "k": 1,
+      "base_kind": "exact",
+      "moved_from_production": "2026-10-05: the improving session read these after the production run (notes/iterations-adr-rules.md)",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "本番の指摘は棚卸しの表の集計の誤りで、adr-rules の規則コードに当たらない",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "revise",
+          "codes": [],
+          "run_id": "fcbdd009-225d-4b2e-ac11-b75501e4751d",
+          "run_outcome": "after_review=send_back; agent_route=send_back; run=integrated; task=completed; asks=approve_landing=send_back; landed=d1288f237e2d"
+        }
+      }
+    },
+    {
+      "id": "prod-adr-rules-t1269-a1",
+      "source": "production",
+      "made_by": "production review (task 1269 attempt 1); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "b626e1317f09f9cb22c5c63fe9a9f7ffcb25dd28",
+      "patch": "972b677da71c9f54845fccf3537abc4d3bfa9521493b4036106c65122a4f3170",
+      "adjudicated": {
+        "by": "claude-opus-5-5 (this session; adr-rules was already adopted)",
+        "reason": "本番の指摘は install.md の記述とコードの食い違いで、adr-rules の規則コードに当たらない",
+        "judge": {
+          "verdict": "clean",
+          "codes": []
+        }
+      },
+      "disputed": null,
+      "k": 1,
+      "base_kind": "exact",
+      "moved_from_production": "2026-10-05: the improving session read these after the production run (notes/iterations-adr-rules.md)",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "本番の指摘は install.md の記述とコードの食い違いで、adr-rules の規則コードに当たらない",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "revise",
+          "codes": [],
+          "run_id": "18884f2f-8bf1-4d5b-a99d-5bad0332c2d7",
+          "run_outcome": "after_review=send_back; agent_route=send_back; run=integrated; task=completed; landed=a4452e971c7b"
+        }
+      }
+    },
+    {
+      "id": "prod-adr-rules-t1361-a1",
+      "source": "production",
+      "made_by": "production review (task 1361 attempt 1); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "a1ffea30ed6d809d1dda29bfb5fe8bb0a7116613",
+      "patch": "2245dd5d5694fdece4f25a706745df2ff467ee416adde7db114160b990e5a7d9",
+      "adjudicated": null,
+      "disputed": null,
+      "k": 1,
+      "base_kind": "exact",
+      "moved_from_production": "2026-10-05: the improving session read these after the production run (notes/iterations-adr-rules.md)",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-155"
+          ],
+          "note": "docs/design/supervisor-lifecycle/supervise.md は本文を変更していますが、frontmatter の updated が 2026-10-03 のままです。これは docs/frontmatter.md の「updated は最後の内容変更日」という規定に反します。ほかの指定ルールに違反するADRの変更や新しい判断はありません。",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "revise",
+          "codes": [],
+          "run_id": "a0155fb0-445e-4b9a-8313-01cc261e7e21",
+          "run_outcome": "after_review=ask; agent_route=send_back; run=integrated; task=completed; asks=approve_landing=send_back; landed=3c4f15deab22"
+        }
+      }
+    },
+    {
+      "id": "prod-adr-rules-t774-a1",
+      "source": "production",
+      "made_by": "production review (task 774 attempt 1); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "f549a9580b80ea33ba5ffe0fb4c9476f4db3da25",
+      "patch": "7ac8feba2cae9acf2b667af47faec2f85ac5a0b85bd98b11f67fe460970e2db7",
+      "adjudicated": null,
+      "disputed": null,
+      "k": 1,
+      "base_kind": "exact",
+      "moved_from_production": "2026-10-05: the improving session read these after the production run (notes/iterations-adr-rules.md)",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-162"
+          ],
+          "note": "docs/adr/2026-10-04-t774-1-confirm-conflicts-config-on-consecutive-passes.md の決定1・4に、event名 `conflicts_config_changed` と実装上の名前 `SuperviseOptions.conflicts` を記載している。これらの具体名はADRではなく docs/design/ に書くという規則に違反する。",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "revise",
+          "codes": [],
+          "run_id": "5b0f0eb3-59d8-4834-80ff-30f638519c90",
+          "run_outcome": "after_review=send_back; agent_route=send_back; run=integrated; task=completed; landed=a50117a52171"
+        }
+      }
+    },
+    {
+      "id": "prod-adr-rules-t655-a1",
+      "source": "production",
+      "made_by": "production review (task 655 attempt 1); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "eeb575c60513910128a1afd868548def0ad4253c",
+      "patch": "c73c6595edc7d1bfbc77c3610eb3dab5c441532bfb6473305810e56d3fb9e1e5",
+      "adjudicated": null,
+      "disputed": null,
+      "k": 1,
+      "base_kind": "exact",
+      "moved_from_production": "2026-10-05: the improving session read these after the production run (notes/iterations-adr-rules.md)",
+      "label_convention": "2026-10-05 ラベルの付け方を揃えた: 期待に A-150（決定を新しい ADR なしで変える・書き換える）がある違反では、直し方の手順の規則 A-152・A-163 を expected から acceptable_codes に移す（生成したケースの A-150 の書き換えと同じ付け方）。iter6 の結果を見た後に、agent の出力でなくこの規則で全ケースに当てた",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-150"
+          ],
+          "acceptable_codes": [
+            "A-152",
+            "A-163"
+          ],
+          "note": "src/infrastructure/sessions.rs と docs/design/provider-lifecycle.md は、ADR-0048決定8の「区間を閉じるときに残りのturnを取り込む」を、閉じた後のsupervisorによる取り込みに変更している。複数の決定を持つADRの一部を変更するため新しいamends ADRが必要だが、docs/adr/への追加も元ADRのamended_by更新もない。",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "revise",
+          "codes": [],
+          "run_id": "18bcb9c4-290d-492f-b593-6523ee2ad3ad",
+          "run_outcome": "after_review=send_back; agent_route=send_back; run=integrated; task=completed; asks=approve_landing=send_back; landed=577acc9ace34"
+        }
+      }
+    },
+    {
+      "id": "prod-adr-rules-t655-a2",
+      "source": "production",
+      "made_by": "production review (task 655 attempt 2); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "eeb575c60513910128a1afd868548def0ad4253c",
+      "patch": "ec8d2c609fa31bd7698e8295d22ca133704461026ee67475156683caf14b7003",
+      "adjudicated": null,
+      "disputed": null,
+      "k": 1,
+      "base_kind": "exact",
+      "moved_from_production": "2026-10-05: the improving session read these after the production run (notes/iterations-adr-rules.md)",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-162"
+          ],
+          "note": "docs/adr/2026-10-04-t655-1-hook-close-defers-transcript-intake-to-the-supervisor.md specifies event names and payload fields/values such as `session_turns`, `final: true`, and `active_unavailable: hook_intake_pending`, plus the default 10-minute intake interval. A-162 requires these implementation details to be documented in docs/design/ rather than in the ADR.",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "revise",
+          "codes": [],
+          "run_id": "18bcb9c4-290d-492f-b593-6523ee2ad3ad",
+          "run_outcome": "after_review=send_back; agent_route=send_back; run=integrated; task=completed; asks=approve_landing=send_back; landed=577acc9ace34"
+        }
+      }
+    },
+    {
+      "id": "prod-adr-rules-t1504-a2",
+      "source": "production",
+      "made_by": "production review (task 1504 attempt 2); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "f472f62797f27e4da937621f63320fcb12a814f0",
+      "patch": "06578eac3f6863a4d1712bad56c42ca5e73865ed969d1f9890e0baef907ea276",
+      "adjudicated": null,
+      "disputed": null,
+      "k": 1,
+      "base_kind": "exact",
+      "moved_from_production": "2026-10-05: the improving session read these after the production run (notes/iterations-adr-rules.md)",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-162",
+            "A-163"
+          ],
+          "note": "docs/adr/2026-10-04-t1504-2-runtime-records-and-enforces-follow-up-membership-judgements.md は、designに置くべきevent名（follow_up_registered、task_goal_changed）、関数名（register_follow_ups、check_adoptions）、flag（--bypass-review）を本文に記載している（A-162）。また、追加したADR-t1504-1・ADR-t1504-2は既存ADRをamendsしamended_byも追加しているが、同じ変更で必要なdocs/design/の更新を行わず、後続taskへ先送りしている（A-163）。",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "revise",
+          "codes": [],
+          "run_id": "22254e6a-db9d-4a25-abcb-75d3c04e0feb",
+          "run_outcome": "after_review=send_back; agent_route=send_back; run=integrated; task=completed; landed=b01d3d0b01f9"
+        }
+      }
+    },
+    {
+      "id": "prod-adr-rules-t1509-a1",
+      "source": "production",
+      "made_by": "production review (task 1509 attempt 1); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "bfeada1d1e46831221677af14aa4d512342f755f",
+      "patch": "32b9c9a9a9e1e85cbe79fbc3b01918fbd1bf46c7fe9c03212d2197d8bd75d9d7",
+      "adjudicated": {
+        "by": "claude-opus-5-5 (this session; adr-rules was already adopted)",
+        "reason": "本番の指摘は domain-model.md・goal-review.md の更新漏れで、adr-rules の規則コードに当たらない",
+        "judge": {
+          "verdict": "clean",
+          "codes": []
+        }
+      },
+      "disputed": null,
+      "k": 1,
+      "base_kind": "exact",
+      "moved_from_production": "2026-10-05: the improving session read these after the production run (notes/iterations-adr-rules.md)",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "本番の指摘は domain-model.md・goal-review.md の更新漏れで、adr-rules の規則コードに当たらない",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "revise",
+          "codes": [],
+          "run_id": "e6cc9e1f-9055-4d2c-beb5-df48acb81614",
+          "run_outcome": "after_review=send_back; agent_route=send_back; run=integrated; task=completed; landed=1035491baa59"
+        }
+      }
+    },
+    {
+      "id": "prod-adr-rules-t1570-a2",
+      "source": "production",
+      "made_by": "production review (task 1570 attempt 2); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "b5b234044d3a461678961cb6e66873e79eaffda2",
+      "patch": "3553e49ee0540ff28d92b758238ca0deda1b7327f56bec5b8d153d6c865cfe03",
+      "adjudicated": null,
+      "disputed": null,
+      "k": 1,
+      "base_kind": "exact",
+      "moved_from_production": "2026-10-05: the improving session read these after the production run (notes/iterations-adr-rules.md)",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-152",
+            "A-162",
+            "A-163"
+          ],
+          "note": "docs/adr/2026-10-04-t1570-1-codex-run-review-distrusts-the-worktree-project.md changes the Codex launch arguments protected by ADR-t1453-1 decision 10, but has no amends entry and does not add amended_by to that existing ADR. It also embeds detailed CLI flags, configuration keys, file names, and argument serialization instructions that A-162 assigns to design documents.",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "revise",
+          "codes": [],
+          "run_id": "a1b7032b-e911-42b9-950e-e5d6aa749a93",
+          "run_outcome": "after_review=send_back; agent_route=send_back; run=integrated; task=completed; landed=12286976b89c"
+        }
+      }
+    },
+    {
+      "id": "prod-adr-rules-t1596-a1",
+      "source": "production",
+      "made_by": "production review (task 1596 attempt 1); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "c68c3b1cf28127bca3d2943ef2d9221a2c41d1f6",
+      "patch": "4115043ddf54f269ed75d600f1d81417f0b2f97abb15137aec325e4446e6cc9d",
+      "adjudicated": {
+        "by": "claude-opus-5-5 (this session; adr-rules was already adopted)",
+        "reason": "本番の指摘は plan-planners.md の記述の古さで、adr-rules の規則コードに当たらない",
+        "judge": {
+          "verdict": "clean",
+          "codes": []
+        }
+      },
+      "disputed": {
+        "date": "2026-10-05",
+        "kind": "ambiguous",
+        "by": "hisamekms",
+        "reason": "iter5 が『ADR の決定を新しい ADR なしで変えた』（A-150・A-152・A-163）と指摘したが、人も規則と ADR の本文からは決定の変更かを判断できなかった。正解を置けないので主の指標から外す。変更: ADR-t1394-2 決定 3（idle は turn が終わり取られていない依頼が無いとき）に対し、壁に当たった planner を依頼が残っていても idle と表示する design にした"
+      },
+      "k": 1,
+      "base_kind": "exact",
+      "moved_from_production": "2026-10-05: the improving session read these after the production run (notes/iterations-adr-rules.md)",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "本番の指摘は plan-planners.md の記述の古さで、adr-rules の規則コードに当たらない",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "revise",
+          "codes": [],
+          "run_id": "6ad77ab1-2138-40c6-96a2-a406d5947bc4",
+          "run_outcome": "after_review=send_back; agent_route=send_back; run=integrated; task=completed; landed=8646ac612dff"
+        }
+      }
+    },
+    {
+      "id": "prod-adr-rules-t1707-a1",
+      "source": "production",
+      "made_by": "production review (task 1707 attempt 1); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "e70840a90ad29812c855146c54be13f18649b173",
+      "patch": "1060fe09531e0f3a27aa7b00a24cb7fa0ca016d207623cc8f00e0246a2d3de3c",
+      "adjudicated": {
+        "by": "hisamekms (2026-10-05)",
+        "reason": "新しい ADR adr-t1707-1（番号付きの決定 7 つ）の決定 7 が、決定 1 の一部（閾値の帯の基準）を変えるときに『このADRを置き換える』と書く。決定が複数の ADR の一部を変えるのは amends という規則（A-152）と矛盾する手順を ADR に書いている"
+      },
+      "disputed": null,
+      "k": 1,
+      "base_kind": "exact",
+      "moved_from_production": "2026-10-05: the improving session read these after the production run (notes/iterations-adr-rules.md)",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-152"
+          ],
+          "note": "新しい ADR adr-t1707-1（番号付きの決定 7 つ）の決定 7 が、決定 1 の一部（閾値の帯の基準）を変えるときに『このADRを置き換える』と書く。決定が複数の ADR の一部を変えるのは amends という規則（A-152）と矛盾する手順を ADR に書いている",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "revise",
+          "codes": [],
+          "run_id": "f2ff7df5-4fe1-41e7-8de7-afe6b8637ac7",
+          "run_outcome": "after_review=send_back; agent_route=send_back; run=integrated; task=completed; landed=1f9c9ad235fe"
+        }
+      }
+    },
+    {
+      "id": "prod-adr-rules-t840-a1",
+      "source": "production",
+      "made_by": "production review (task 840 attempt 1); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "3e74b981ce668a934caab639f5143276691efc30",
+      "patch": "7a7630034f80ce5583153aef8222cefc335ecbab0ad4a2761394ec254c8e9c07",
+      "adjudicated": null,
+      "disputed": null,
+      "k": 1,
+      "base_kind": "exact",
+      "moved_from_production": "2026-10-05: the improving session read these after the production run (notes/iterations-adr-rules.md)",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-155"
+          ],
+          "note": "docs/design/broker.mdとdocs/design/supervisor-lifecycle/run-environment.mdは本文を変更しているのに、frontmatterのupdatedが2026-10-04のままです。2026-10-05の変更に更新しておらず、docs/frontmatter.mdの「updatedは最後の内容変更の日」という規定に違反します。",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "revise",
+          "codes": [
+            "A-155"
+          ],
+          "run_id": "f3de8eb0-a0f2-4231-a8a9-7e78ae407a2c",
+          "run_outcome": "after_review=send_back; agent_route=send_back; run=integrated; task=completed; asks=approve_landing=send_back: ADRはたす、他の修正必要なところは直す。具体的には: (1) package バックエンドと package.install の capability を足したことを、ADR-t827-2 決定 1 と ADR-t827-4 決定 1・5 を amends する ADR に記録する（amends / amended_by の対を張る）。(2) src/application/prompt.rs の BROKER_TOOLS に package_install を足し、preferred の worker に設定された package のコマンドも broker を通ることを書き、その test も直す。(3) crates/dagq-broker/src/lib.rs:2、crates/dagq-broker/Cargo.toml の description、crates/dagq-broker-client/src/lib.rs:2、crates/dagq-broker/tests/serve.rs:2 の「fs・process・git」の説明を 4 つのバックエンドに直す。(4) backends/package.rs と config.rs で空の argv を argv[0] を読む前に拒む（panic させない）。(5) receipt の stress の証拠に、繰り返した test の名前を書く。; landed=051f1b654fa5"
+        }
+      }
+    },
+    {
+      "id": "prod-adr-rules-t840-a2",
+      "source": "production",
+      "made_by": "production review (task 840 attempt 2); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "3e74b981ce668a934caab639f5143276691efc30",
+      "patch": "341456e3c3e4a68b86006c1935335f07419d64f68adffcccf2b711e033e65874",
+      "adjudicated": null,
+      "disputed": null,
+      "k": 1,
+      "base_kind": "exact",
+      "moved_from_production": "2026-10-05: the improving session read these after the production run (notes/iterations-adr-rules.md)",
+      "label_convention": "2026-10-05 ラベルの付け方を揃えた: 期待に A-150（決定を新しい ADR なしで変える・書き換える）がある違反では、直し方の手順の規則 A-152・A-163 を expected から acceptable_codes に移す（生成したケースの A-150 の書き換えと同じ付け方）。iter6 の結果を見た後に、agent の出力でなくこの規則で全ケースに当てた",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-150"
+          ],
+          "acceptable_codes": [
+            "A-152",
+            "A-163"
+          ],
+          "note": "docs/design/broker.mdとbrokerの実装はpackage.installという新しい実行権限・backend・MCPの道具を追加していますが、docs/adr/に決定を記録していません。これはADR-t827-2決定1とADR-t827-4決定1など、複数決定を持つADRの一部を変えるため、新しいADRのamendsと元ADRのamended_byを伴う手順が必要です。",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "concern",
+          "codes": [],
+          "run_id": "f3de8eb0-a0f2-4231-a8a9-7e78ae407a2c",
+          "run_outcome": "after_review=ask; agent_route=ask; run=integrated; task=completed; asks=approve_landing=send_back: ADRはたす、他の修正必要なところは直す。具体的には: (1) package バックエンドと package.install の capability を足したことを、ADR-t827-2 決定 1 と ADR-t827-4 決定 1・5 を amends する ADR に記録する（amends / amended_by の対を張る）。(2) src/application/prompt.rs の BROKER_TOOLS に package_install を足し、preferred の worker に設定された package のコマンドも broker を通ることを書き、その test も直す。(3) crates/dagq-broker/src/lib.rs:2、crates/dagq-broker/Cargo.toml の description、crates/dagq-broker-client/src/lib.rs:2、crates/dagq-broker/tests/serve.rs:2 の「fs・process・git」の説明を 4 つのバックエンドに直す。(4) backends/package.rs と config.rs で空の argv を argv[0] を読む前に拒む（panic させない）。(5) receipt の stress の証拠に、繰り返した test の名前を書く。; landed=051f1b654fa5"
+        }
+      }
+    },
+    {
+      "id": "prod-adr-rules-t1632-a2",
+      "source": "production",
+      "made_by": "production review (task 1632 attempt 2); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "48e6aad79b97622b6863ec6b4921a47f58fce163",
+      "patch": "a5efd58b2ea156ccb438fcf493d0cf466dfd9acc73dfa6a1c74b7927e19d17ad",
+      "adjudicated": null,
+      "disputed": null,
+      "k": 1,
+      "base_kind": "exact",
+      "moved_from_production": "2026-10-05: the improving session read these after the production run (notes/iterations-adr-rules.md)",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-162"
+          ],
+          "note": "docs/adr/2026-10-05-t1632-1-claim-waits-for-a-build-that-contains-the-dependencies-landings.md は、designに書くべきCLI flagの綴り（`--depends-on`、`--auto-update`）、event名（`run_integrated`、`update_installed`、`supervisor_handed_off`）、既定値（宣言しない）をADR本文に記載しているため、A-162に違反する。",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "revise",
+          "codes": [],
+          "run_id": "1dc0d5cf-fe32-4579-ba47-616af532ec57",
+          "run_outcome": "after_review=send_back; agent_route=send_back; run=integrated; task=completed; asks=approve_landing=send_back; landed=055ab7219aed"
+        }
+      }
+    },
+    {
+      "id": "prod-adr-rules-t1794-a1",
+      "source": "production",
+      "made_by": "production review (task 1794 attempt 1); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "051f1b654fa5b064fdc3f5963fa50ac65d093832",
+      "patch": "d7f88dc43704e6326e36a47c3957a14a3a52295c85a43b790c3a2eb3ad27b951",
+      "adjudicated": null,
+      "disputed": null,
+      "k": 1,
+      "base_kind": "exact",
+      "moved_from_production": "2026-10-05: the improving session read these after the production run (notes/iterations-adr-rules.md)",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-155"
+          ],
+          "note": "docs/design/supervisor-lifecycle/headless-job-processes.md adds content about task 1794 but leaves frontmatter updated at 2026-10-03 for task 1560. docs/frontmatter.md defines updated as the date of the last content change.",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "revise",
+          "codes": [
+            "A-155"
+          ],
+          "run_id": "1db376a4-489a-478d-a932-969346224528",
+          "run_outcome": "after_review=send_back; agent_route=send_back; run=integrated; task=completed; landed=c7558779d290"
+        }
+      }
+    },
+    {
+      "id": "prod-adr-rules-t1537-a1",
+      "source": "production",
+      "made_by": "production review (task 1537 attempt 1); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "31d5b94f4fd6402673ba7bbe856a2240a7597a0c",
+      "patch": "2285e79020486e6cebb6adda21ebac50584ef3187e12b1ee3d27b0f6a67ab405",
+      "adjudicated": null,
+      "disputed": null,
+      "k": 1,
+      "base_kind": "exact",
+      "moved_from_production": "2026-10-05: the improving session read these after the production run (notes/iterations-adr-rules.md)",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "docs/plans/acceptance-check.mdとdocs/plans/README.mdの変更、および計測出力の追加は、観測結果と既存の判断の記録であり、新しいADRを要する決定や既存ADRの変更はありません。変更された文書のfrontmatterとADR-t1428-1への参照も指定の規則に従っています。",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "pass",
+          "codes": [],
+          "run_id": "ac65afb6-d7a4-4671-9b33-2995b569d083",
+          "run_outcome": "after_review=land; agent_route=land; run=integrated; task=completed; landed=030bb3a1e7cd"
+        }
+      }
+    },
+    {
+      "id": "prod-adr-rules-t1641-a4",
+      "source": "production",
+      "made_by": "production review (task 1641 attempt 4); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "c622b375482ecad72a4f6533d444fd3915df536e",
+      "patch": "301033b16899a319fef2492299a340c8803397b29399c74ef922695e98867a06",
+      "adjudicated": {
+        "by": "hisamekms (2026-10-05)",
+        "reason": "ADR-t1639-1 決定 6 は goal の tag を 0 個以上とし、語彙で拒むのは語彙の外のラベルだけとする。task 1641 は語彙があるときに tag の無い draft の goal の submit を拒み（1 個以上を要求）、決定を変えたが、amends の新しい ADR も元の ADR の amended_by も足していない"
+      },
+      "disputed": null,
+      "k": 1,
+      "base_kind": "exact",
+      "moved_from_production": "2026-10-05: the improving session read these after the production run (notes/iterations-adr-rules.md)",
+      "label_convention": "2026-10-05 ラベルの付け方を揃えた: 期待に A-150（決定を新しい ADR なしで変える・書き換える）がある違反では、直し方の手順の規則 A-152・A-163 を expected から acceptable_codes に移す（生成したケースの A-150 の書き換えと同じ付け方）。iter6 の結果を見た後に、agent の出力でなくこの規則で全ケースに当てた",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-150"
+          ],
+          "acceptable_codes": [
+            "A-152",
+            "A-163"
+          ],
+          "note": "ADR-t1639-1 決定 6 は goal の tag を 0 個以上とし、語彙で拒むのは語彙の外のラベルだけとする。task 1641 は語彙があるときに tag の無い draft の goal の submit を拒み（1 個以上を要求）、決定を変えたが、amends の新しい ADR も元の ADR の amended_by も足していない",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "pass",
+          "codes": [],
+          "run_id": "7c88cb42-5a3e-4da9-9c75-f804cd74cd1a",
+          "run_outcome": "after_review=land; agent_route=land; run=integrated; task=completed; landed=f78d2dfff43f"
+        }
+      }
+    },
+    {
+      "id": "prod-adr-rules-t1529-a1",
+      "source": "production",
+      "made_by": "production review (task 1529 attempt 1); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "d38fd929f11a4c03c362cbd8b9beb1fdce64f34b",
+      "patch": "d747373a9f17735b204eb18fd799c56c5b7df974f7a71e10ed16b286e16a3639",
+      "adjudicated": null,
+      "disputed": {
+        "date": "2026-10-05",
+        "kind": "ambiguous",
+        "by": "hisamekms",
+        "reason": "iter5 が『ADR の決定を新しい ADR なしで変えた』（A-150・A-152・A-163）と指摘したが、人も規則と ADR の本文からは決定の変更かを判断できなかった。正解を置けないので主の指標から外す。変更: ADR-t963-1 決定 3（supervise の判断を e2e の範囲に含めない）に対し、run をまたぐ振る舞いを変える task に --evidence e2e を求める手順を開発文書に足した"
+      },
+      "k": 1,
+      "base_kind": "exact",
+      "moved_from_production": "2026-10-05: the improving session read these after the production run (notes/iterations-adr-rules.md)",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "docs/development/task-registration.mdとdocs/development/testing.mdの変更は、既存の明示的なe2e要求の仕組みに沿ってplannerの判断目安を具体化するものです。ADRの決定やID・参照方式は変更しておらず、両文書のfrontmatterも指定の仕様に従っています。",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "pass",
+          "codes": [],
+          "run_id": "4424534f-7868-46a4-b43d-b7fff95acf1b",
+          "run_outcome": "after_review=land; agent_route=land; run=integrated; task=completed; landed=31d5b94f4fd6"
+        }
+      }
+    },
+    {
+      "id": "prod-adr-rules-t1641-a3",
+      "source": "production",
+      "made_by": "production review (task 1641 attempt 3); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "c622b375482ecad72a4f6533d444fd3915df536e",
+      "patch": "c63de16b7a52c0e7f0d2de1a64f9e24d11ac9aaa90a373551919ac3d3d35183b",
+      "adjudicated": {
+        "by": "hisamekms (2026-10-05, via the decision on t1641-a4; applied by this session for consistency)",
+        "reason": "t1641-a4 と同じ変更（語彙があるときに tag の無い draft の goal の submit を拒む。MissingGoalTag）を含む。人が a4 を ADR-t1639-1 決定 6 の ADR なしの変更（違反）と決めた（2026-10-05）ので、同じ内容のこの attempt にも当てる"
+      },
+      "disputed": null,
+      "k": 1,
+      "base_kind": "exact",
+      "moved_from_production": "2026-10-05: the improving session read these after the production run (notes/iterations-adr-rules.md)",
+      "label_convention": "2026-10-05 ラベルの付け方を揃えた: 期待に A-150（決定を新しい ADR なしで変える・書き換える）がある違反では、直し方の手順の規則 A-152・A-163 を expected から acceptable_codes に移す（生成したケースの A-150 の書き換えと同じ付け方）。iter6 の結果を見た後に、agent の出力でなくこの規則で全ケースに当てた",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-150"
+          ],
+          "acceptable_codes": [
+            "A-152",
+            "A-163"
+          ],
+          "note": "t1641-a4 と同じ変更（語彙があるときに tag の無い draft の goal の submit を拒む。MissingGoalTag）を含む。人が a4 を ADR-t1639-1 決定 6 の ADR なしの変更（違反）と決めた（2026-10-05）ので、同じ内容のこの attempt にも当てる",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "pass",
+          "codes": [],
+          "run_id": "7c88cb42-5a3e-4da9-9c75-f804cd74cd1a",
+          "run_outcome": "after_review=send_back; agent_route=land; run=integrated; task=completed; landed=f78d2dfff43f"
+        }
+      }
+    },
+    {
+      "id": "prod-adr-rules-t1223-a3",
+      "source": "production",
+      "made_by": "production review (task 1223 attempt 3); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "be148d59e014f42819363d02bbc076519cdac113",
+      "patch": "47206d5a0b61eed1e52be194e338703e884fb50a941e3606d34ec90062e8f111",
+      "adjudicated": null,
+      "disputed": null,
+      "k": 1,
+      "base_kind": "exact",
+      "moved_from_production": "2026-10-05: the improving session read these after the production run (notes/iterations-adr-rules.md)",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "docs/design/supervisor-lifecycle/observer.md and the related changes implement existing ADR-t1222-1 and ADR-t1063-1, keeping implementation details in design documents and referencing the ADRs for rationale. No ADR is added, rewritten, renumbered, replaced, or amended, and the changed frontmatter follows docs/frontmatter.md.",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "pass",
+          "codes": [],
+          "run_id": "326b914c-8a4d-4415-a5e2-996bc07f7274",
+          "run_outcome": "after_review=send_back; agent_route=land; run=needs_session; task=in_progress; asks=approve_landing=send_back"
+        }
+      }
+    },
+    {
+      "id": "prod-adr-rules-t1641-a1",
+      "source": "production",
+      "made_by": "production review (task 1641 attempt 1); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "c622b375482ecad72a4f6533d444fd3915df536e",
+      "patch": "84dd28762e92db188e7627284783abd748d7ff58c8d47b6d362501e8f1acaf51",
+      "adjudicated": {
+        "by": "hisamekms (2026-10-05, via the decision on t1641-a4; applied by this session for consistency)",
+        "reason": "t1641-a4 と同じ変更（語彙があるときに tag の無い draft の goal の submit を拒む。MissingGoalTag）を含む。人が a4 を ADR-t1639-1 決定 6 の ADR なしの変更（違反）と決めた（2026-10-05）ので、同じ内容のこの attempt にも当てる"
+      },
+      "disputed": null,
+      "k": 1,
+      "base_kind": "exact",
+      "moved_from_production": "2026-10-05: the improving session read these after the production run (notes/iterations-adr-rules.md)",
+      "label_convention": "2026-10-05 ラベルの付け方を揃えた: 期待に A-150（決定を新しい ADR なしで変える・書き換える）がある違反では、直し方の手順の規則 A-152・A-163 を expected から acceptable_codes に移す（生成したケースの A-150 の書き換えと同じ付け方）。iter6 の結果を見た後に、agent の出力でなくこの規則で全ケースに当てた",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-150"
+          ],
+          "acceptable_codes": [
+            "A-152",
+            "A-163"
+          ],
+          "note": "t1641-a4 と同じ変更（語彙があるときに tag の無い draft の goal の submit を拒む。MissingGoalTag）を含む。人が a4 を ADR-t1639-1 決定 6 の ADR なしの変更（違反）と決めた（2026-10-05）ので、同じ内容のこの attempt にも当てる",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "pass",
+          "codes": [],
+          "run_id": "7c88cb42-5a3e-4da9-9c75-f804cd74cd1a",
+          "run_outcome": "after_review=send_back; agent_route=land; run=integrated; task=completed; landed=f78d2dfff43f"
+        }
+      }
+    },
+    {
+      "id": "prod-adr-rules-t1223-a2",
+      "source": "production",
+      "made_by": "production review (task 1223 attempt 2); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "be148d59e014f42819363d02bbc076519cdac113",
+      "patch": "040c1ab5fb9104edda8c49a56fb9addf87284c6474f651f703fb6e51cccbb9d2",
+      "adjudicated": null,
+      "disputed": null,
+      "k": 1,
+      "base_kind": "exact",
+      "moved_from_production": "2026-10-05: the improving session read these after the production run (notes/iterations-adr-rules.md)",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "docs/design/supervisor-lifecycle/observer.mdなどの変更は、既存のADR-t1222-1・ADR-t1063-1に基づくCodex observerの実装と現在の仕様の更新であり、ADRの決定を書き換えていません。実装詳細とADRが明示的に委ねた判断はdesignに記載され、ADR参照と変更されたfrontmatterも指定の規則に従っています。",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "pass",
+          "codes": [],
+          "run_id": "326b914c-8a4d-4415-a5e2-996bc07f7274",
+          "run_outcome": "after_review=send_back; agent_route=land; run=needs_session; task=in_progress; asks=approve_landing=send_back"
+        }
+      }
+    },
+    {
+      "id": "prod-adr-rules-t1514-a1",
+      "source": "production",
+      "made_by": "production review (task 1514 attempt 1); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "c622b375482ecad72a4f6533d444fd3915df536e",
+      "patch": "d641e90df7928efed05de37a7bfe3d538c89a9af01534270382d57622e4221c2",
+      "adjudicated": null,
+      "disputed": null,
+      "k": 1,
+      "base_kind": "exact",
+      "moved_from_production": "2026-10-05: the improving session read these after the production run (notes/iterations-adr-rules.md)",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "docs/plans/landing-recheck-trigger-measurement.md adds a measurement report with valid plan frontmatter and references ADR-t1310-1 for the prior decision; docs/plans/README.md adds its index link. The change makes no new architectural decision and does not modify, replace, amend, or renumber any ADR.",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "pass",
+          "codes": [
+            "A-150",
+            "A-151",
+            "A-152",
+            "A-155",
+            "A-156",
+            "A-159",
+            "A-160",
+            "A-161",
+            "A-162",
+            "A-163"
+          ],
+          "run_id": "1bd54653-b8b1-4f7a-a2e7-b5656d942eaa",
+          "run_outcome": "after_review=land; agent_route=land; run=integrated; task=completed; landed=edb2e1fc2100"
+        }
+      }
+    },
+    {
+      "id": "prod-adr-rules-t1223-a1",
+      "source": "production",
+      "made_by": "production review (task 1223 attempt 1); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "be148d59e014f42819363d02bbc076519cdac113",
+      "patch": "7852d2299bc40954b9ff1d339e93fbfefc67ffd44f6ede30bf26a893256d3ec9",
+      "adjudicated": null,
+      "disputed": null,
+      "k": 1,
+      "base_kind": "exact",
+      "moved_from_production": "2026-10-05: the improving session read these after the production run (notes/iterations-adr-rules.md)",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "docs/design/supervisor-lifecycle/observer.md and the related design updates implement and reference ADR-t1222-1 and ADR-t1063-1; ADR-t1222-1 explicitly delegates the write-error handling choice to task 1223 for documentation in design. No existing ADR is rewritten or renumbered, and the changed frontmatter follows docs/frontmatter.md.",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "pass",
+          "codes": [],
+          "run_id": "326b914c-8a4d-4415-a5e2-996bc07f7274",
+          "run_outcome": "after_review=send_back; agent_route=land; run=needs_session; task=in_progress; asks=approve_landing=send_back"
+        }
+      }
+    },
+    {
+      "id": "prod-adr-rules-t1440-a3",
+      "source": "production",
+      "made_by": "production review (task 1440 attempt 3); label by codex-cli 0.160.0 (rules only, definition removed)",
+      "base_commit": "5d22997f1487041e9d52b891e2fcc0dcfe351568",
+      "patch": "9501d6a7360bc8129fcb663aaf4002b6989746c4e3b2e9113fa67903b6eeaf51",
+      "adjudicated": null,
+      "disputed": null,
+      "k": 1,
+      "base_kind": "exact",
+      "moved_from_production": "2026-10-05: the improving session read these after the production run (notes/iterations-adr-rules.md)",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "docs/design/supervisor-lifecycle/run-workspaces.mdなどの変更は、既存のADR-t1433-3で決定済みのbackground実行を実装し、現在の挙動をdesignに反映したものです。ADRの追加・書き換え・番号変更はなく、理由へのADR参照と変更されたfrontmatterも指定ルールに従っています。",
+          "near_miss": false
+        },
+        "production": {
+          "verdict": "pass",
+          "codes": [],
+          "run_id": "14f3c0be-4f41-4cb5-8e40-1507286bbf93",
+          "run_outcome": "after_review=send_back; agent_route=land; run=needs_session; task=in_progress; asks=approve_landing=send_back"
+        }
+      }
+    }
+  ]
+}

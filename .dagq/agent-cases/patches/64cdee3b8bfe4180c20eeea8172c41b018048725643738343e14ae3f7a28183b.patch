@@ -1,0 +1,13 @@
+diff --git a/migrations/0064_follow_up_membership.sql b/migrations/0064_follow_up_membership.sql
+index 267a3205..34d81987 100644
+--- a/migrations/0064_follow_up_membership.sql
++++ b/migrations/0064_follow_up_membership.sql
+@@ -22,7 +22,7 @@ CREATE TABLE follow_up_judgements (
+ );
+ CREATE INDEX judgements_by_task ON follow_up_judgements(task_id,id);
+ CREATE INDEX judgements_by_source ON follow_up_judgements(source_goal_id,task_id,id);
+--- Rewind BOTH the source and draft's membership histories. Validate every
++-- Rewind both the source task's and draft task's membership histories. Validate every
+ -- link against its successor (including the current task row). Missing or
+ -- conflicting evidence is unknown, never inferred from today's membership.
+ CREATE TEMP TABLE restored_follow_up AS

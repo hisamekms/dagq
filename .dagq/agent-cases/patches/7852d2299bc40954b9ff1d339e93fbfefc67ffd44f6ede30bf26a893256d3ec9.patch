@@ -1,0 +1,1873 @@
+diff --git a/docs/design/provider-lifecycle.md b/docs/design/provider-lifecycle.md
+index ddca3d46..cfbb6cf3 100644
+--- a/docs/design/provider-lifecycle.md
++++ b/docs/design/provider-lifecycle.md
+@@ -4,8 +4,8 @@ type: design
+ title: Agent provider lifecycle
+ status: current
+ created: 2026-09-21
+-updated: 2026-10-05 # task 838: required turns of a worker; task 839: the session, resume and headless settings carry the PreToolUse hooks of a run with the broker's tools; task 1713: the wall and review-route judgments are pure functions with unit tests; claim and decision 5 follow the headless-only route of task 1437 (after task 1596, task 1486, task 1570)
+-last_verified: 2026-10-05 # task 838; task 839; task 1713
++updated: 2026-10-05 # task 1223: the observer runs on Codex too; task 838: required turns of a worker; task 839: the session, resume and headless settings carry the PreToolUse hooks of a run with the broker's tools; task 1713: the wall and review-route judgments are pure functions with unit tests; claim and decision 5 follow the headless-only route of task 1437 (after task 1596, task 1486, task 1570)
++last_verified: 2026-10-05 # task 1223; task 838; task 839; task 1713
+ scope: provider
+ related:
+   - adr-t1486-1
+@@ -75,7 +75,7 @@ headlessのjob（review・triage・plan review・goal review・observer）のses
+ 
+ ## headless jobのinterface
+ 
+-[ADR-t1063-1](../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)の決定2〜4（task 1064、task 1065）。worker以外のheadless job（review・復旧・plan review・goal review・スループットの見直し・observer）は、providerに次のものだけでつながり、Claude Codeの道具名・出力の形・失敗の文言を持たない。どのproviderでjobを動かすかは`dagq.toml`の`[roles.<role>]`の`provider`（[Actor model](supervisor-lifecycle/actor-model.md#provider)）で、今Codexで動かせるのはgoal review・runのreview・plan review・スループットの見直し（[Codexのheadless job](#codexのheadless-job)）。使えないproviderからの切り替えは[Goal review](supervisor-lifecycle/goal-review.md)の3と6。
++[ADR-t1063-1](../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)の決定2〜4（task 1064、task 1065）。worker以外のheadless job（review・復旧・plan review・goal review・スループットの見直し・observer）は、providerに次のものだけでつながり、Claude Codeの道具名・出力の形・失敗の文言を持たない。どのproviderでjobを動かすかは`dagq.toml`の`[roles.<role>]`の`provider`（[Actor model](supervisor-lifecycle/actor-model.md#provider)）で、今Codexで動かせるのはgoal review・runのreview・plan review・スループットの見直し・observer（[Codexのheadless job](#codexのheadless-job)）。使えないproviderからの切り替えは[Goal review](supervisor-lifecycle/goal-review.md)の3と6。
+ 
+ - **権限の意図**（`domain::headless_job::JobAccess`）: jobは`HeadlessProgram::Job { cwd, prompt, access }` / `HeadlessProgram::Review { run, prompt, access }`で、許可の要らないこと（promptを読み、返答する）の他に何をしてよいかを意図で渡す。providerの実装が自分の仕組みに訳す。値:
+ 
+@@ -101,7 +101,7 @@ headlessのjob（review・triage・plan review・goal review・observer）のses
+ 
+ ### Codexのheadless job
+ 
+-ADR-t1063-1の決定2・3・6（task 1065）。`[roles.<role>]`の`provider = "codex"`の役割（今はgoal review・runのreview・plan review・スループットの見直し。runのreviewは[ADR-t1207-1](../adr/2026-09-30-t1207-1-codex-run-review.md)、plan reviewはtask 1218（[Plan review](supervisor-lifecycle/plan-review.md#codexで動かす)）、スループットの見直しはtask 1220（[Throughput review](supervisor-lifecycle/throughput-review.md#codexで動かす)。supervisorの子processの`dagq throughput-review`が、supervisorの渡したlaunchと`--codex`で同じ`Codex`を作って起動する））のjobは、supervisorが見つけて`--version`の通ったCodex（`supervise --codex`、workerと同じ実行ファイル。cmuxのshimを避けて実体に解決して固定する。`Ports::codex_jobs`）の`infrastructure::codex::Codex`で起動する。spike（[codex-headless-jobs-spike](../plans/codex-headless-jobs-spike.md)）の最小の設定のとおり:
++ADR-t1063-1の決定2・3・6（task 1065）。`[roles.<role>]`の`provider = "codex"`の役割（今はgoal review・runのreview・plan review・スループットの見直し。runのreviewは[ADR-t1207-1](../adr/2026-09-30-t1207-1-codex-run-review.md)、plan reviewはtask 1218（[Plan review](supervisor-lifecycle/plan-review.md#codexで動かす)）、スループットの見直しはtask 1220（[Throughput review](supervisor-lifecycle/throughput-review.md#codexで動かす)。supervisorの子processの`dagq throughput-review`が、supervisorの渡したlaunchと`--codex`で同じ`Codex`を作って起動する）、observerはtask 1223（[Observer](supervisor-lifecycle/observer.md#codexで動かす)。子processの`dagq observe`が同じく`--launch`と`--codex`で`Codex`を作り、jobの`dagq`はクライアントモードでqueue service経由でfindingと`blocked`のaskを書く。[ADR-t1222-1](../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)））のjobは、supervisorが見つけて`--version`の通ったCodex（`supervise --codex`、workerと同じ実行ファイル。cmuxのshimを避けて実体に解決して固定する。`Ports::codex_jobs`）の`infrastructure::codex::Codex`で起動する。spike（[codex-headless-jobs-spike](../plans/codex-headless-jobs-spike.md)）の最小の設定のとおり:
+ 
+ - **起動**（`headless_command`）: `codex exec --json --skip-git-repo-check --sandbox read-only -C <cwd> [-m <model>] [-c model_reasoning_effort="<effort>"]`をcwdで起動し、promptはstdinで渡す（[headless jobのinterface](#headless-jobのinterface)の「promptの渡し方」）。`--skip-git-repo-check`はどのjobにも付ける（task 1378）: `codex exec`はcwd（`-C`）がGitのrepositoryの中か、trustしたdirでないと`Not inside a trusted directory and --skip-git-repo-check was not specified.`をstderrに出してexit 1で起動を拒む。スループットの見直しとobserver（`infrastructure::observer::run_agent`）のcwdはjobのdir（`<queue dir>/reports/reviews/<mode>-<period>/`、`<queue dir>/observer/<started_at>/`）、復旧job（`recovery::start_job`）のcwdはrunのdir（`runs/<run-id>/`）で、どれもGitの外なので、flagが無いとこの検査で落ちる（2026-10-02の本番の最初のCodexの毎時の見直しが`exit_code` 1・0秒で落ちた）。goal review・plan review（main checkout）とrunのreview（worktree）はflagが無くても通るが、同じ引数にそろえる。このflagはGitのrepositoryの検査を飛ばすだけで（codex-cli 0.160.0の`codex exec --help`の`Allow running Codex outside a Git repository`。`exec`は、flagが無く、cwdのprojectがtrustされておらず、cwdからGitのrootが見つからないときだけ拒む）、sandbox（`--sandbox read-only`と、その`dagq_job`のprofileへの置き換え）・承認・projectのtrust・人の`~/.codex/config.toml`は変えない。jobには今までどおりtrust（`codex::trust_config`）を渡さない。runのreviewだけは`review_command`が`headless_command`の後に`-c projects={"<worktree>"={trust_level="untrusted"}}`（`codex::distrust_config`）を足す（下の「projectのtrust」、[ADR-t1570-1](../adr/2026-10-04-t1570-1-codex-run-review-distrusts-the-worktree-project.md)）。jobのcwdをmain checkoutに変えないのは、jobのdirの相対の読み書きと出力の置き場を変えずに済むため。unit test（`a_job_runs_in_the_read_only_sandbox`ほか）が引数を丸ごと比べ、`tests/it/throughput_review_codex.rs`のstubのcodexは実物と同じくGitのwork treeの外でflagが無ければ拒む。stdinはprompt、stdoutとstderrはjobのファイル（goal reviewとplan reviewはjobのdirの`review.out` / `review.err`、runのreviewはrunのdirの`review-<N>.out` / `.err`）。runのreviewのcwdはrunのworktree（`AgentProvider::review_command`）で、引数は`codex exec --json --skip-git-repo-check --sandbox read-only -C <worktree> -c projects={"<worktree>"={trust_level="untrusted"}} [-m <model>] [-c model_reasoning_effort="<effort>"]`になる（unit test `a_turn_starts_or_resumes_the_thread_with_the_same_sandbox`が丸ごと比べる）。`--sandbox read-only`（`codex::JOB_SANDBOX`）はどの`JobAccess`でも同じで、ファイルの読み取りは全域で許し、書き込みを拒む。`dagq`の読み取りのコマンドは、sandboxの中のshellが起動したprocessのenv（`actor_env`の`DAGQ_ROLE`・`DAGQ_ACTOR_ID`と、queue serviceの`DAGQ_SERVICE_SOCKET`・`DAGQ_SERVICE_CREDENTIAL_FILE`）を継ぎ、クライアントモードでserviceに送られて、Claudeのjobと同じroleのpolicyでservice側で判定される（spike 1.・2.、goal 82の段(3)）。serviceのsocketに届くよう、executorが`reach_queue_service`を呼ぶと`--sandbox read-only`は`:read-only`を継いでそのsocketだけを許すpermission profile `dagq_job`の`-c`に置き換わる（goal review・runのreview・plan review・スループットの見直しも同じ。[Queue service](queue-service.md#codexのsandboxからの到達adr-t1233-5決定4)）。writable roots・`shell_environment_policy`・承認の設定・`--dangerously-bypass-approvals-and-sandbox`などのbypassのflagは付けない。人の`~/.codex/config.toml`・`auth.json`・`CODEX_HOME`は変えない（設定は起動の引数だけ。ADR-t813-3の決定6と同じ）。`assign_session_id`は何もしない（Codexはthreadを自分で名付ける）
+ - **modelとeffort**（`apply_launch`）: launchの`model`がClaudeのもの（`claude`で始まる）でなければ`-m <model>`、`effort`があれば`-c model_reasoning_effort="<effort>"`（`max`は`xhigh`。`codex::reasoning_effort`）をoptionに足す（`--`があればその前、jobのようにpromptをstdinで渡して`--`が無ければ最後）。Codexのlaunchは`model`を省けばCodexの既定のmodel、`effort`は省けば`medium`（[Actor model](supervisor-lifecycle/actor-model.md#provider)）
+@@ -362,7 +362,8 @@ B3 / D3 で `~/.claude.json` に残った `projects` の key は repository root
+ - **plan review**: `[roles.plan_review] provider = "codex"` なら Codex の read-only job を起動し、通常の `plan_review_finished` と verdict の適用へ進む（task 1218）。Codex が使えない・失敗したときも Claude へ戻さず、`plan_review_failed`（理由付き）で plan review by hand に渡す。未設定で Claude を選ぶ plan review は job を起動せず、`plan_review_failed`（`provider_disabled`）で plan review by hand に渡す。記録にある launch は要求した値であり、agent は実行されない。plan review の失敗は自動で再試行しない。認証・費用の障害としては扱わない。
+ - **復旧**: 既存の job の開始手順が executor の `provider_disabled` によって拒まれ、既存の失敗時の手動対応へ渡る。記録にある launch は要求した値であり、agent は実行されない。復旧の失敗は既存の ask / attention になる。認証・費用の障害としては扱わない。
+ - **スループットの見直し**: `[roles.throughput_review] provider = "codex"` なら Codex の read-only job を起動し、Claude の job と同じ保存・週次の finding・`throughput_review_reported` へ進む（task 1220）。Codex が使えない・利用上限などで止まったときも Claude へ戻さず、見直しの要る期間の `throughput_review_finished`（`outcome: error`、理由付き）で `check the failed review` に渡す。未設定で Claude を選ぶ見直しは今までどおり自動で起動しない。
+-- **planner・observer・inbox**: 自動起動と既存の inbox への nudge を止め、手動代行する。Codex を設定済みの goal review は動き、Claude への fallback は拒む。
++- **observer**: `[roles.observer] provider = "codex"` なら Codex の read-only job（queue service の job の profile）を起動し、job の `dagq` がクライアントモードで queue service 経由で finding と `blocked` の ask を書く（ADR-t1222-1、task 1223）。Codex が使えない・利用上限などで止まったときも Claude へ戻さず、skip されない observation の `observe_finished`（`outcome: error`、`unavailable: true`、理由付き）を記録する（attention にはしない）。未設定で Claude を選ぶ observer は今までどおり自動で起動しない（ADR-t1204-1 決定2）。
++- **planner・inbox**: 自動起動と既存の inbox への nudge を止め、手動代行する。Codex を設定済みの goal review は動き、Claude への fallback は拒む。
+ - **表示**: supervisor の `providers` の Claude は `modes: []`、`error: provider_disabled`。`found` は実行ファイルの有無だけを表す。起動の mark に `no_claude` を残す。稼働中の `status` / `watch` は `provider_disabled` の attention（`handle disabled roles manually`）を出し、手動の役割と Codex が無い場合の待ちを示す。個々の review・plan review・復旧は既存の ask / attention も出す。
+ 
+ `HostActorExecutor` は workspace 作成と agent command の構築より前にも Claude を拒否する。通常の起動は既存の provider の振り分けのまま。この flag は当該 supervisor の配下と `up` に適用し、別に人が打つ `observe` を変更しない（`plan` は何も開かずに拒む）。手動差配中はこれらの Claude を起動するコマンドを打たない。
+diff --git a/docs/design/supervisor-lifecycle/actor-model.md b/docs/design/supervisor-lifecycle/actor-model.md
+index 74b15e50..48d63ca2 100644
+--- a/docs/design/supervisor-lifecycle/actor-model.md
++++ b/docs/design/supervisor-lifecycle/actor-model.md
+@@ -4,8 +4,8 @@ type: design
+ title: "Actor model"
+ status: current
+ created: 2026-09-27
+-updated: 2026-10-04 # task 1712: the goal review's role table is checked by a unit test
+-last_verified: 2026-10-04 # task 1712
++updated: 2026-10-05 # task 1223: the observer runs on Codex too
++last_verified: 2026-10-05 # task 1223
+ scope: runtime
+ related:
+   - adr-t1394-1
+@@ -61,9 +61,9 @@ effort = "high"         # 省けばmedium
+ ```
+ 
+ - **既定**: `provider`を書かない役割はClaude（`domain::actor_model::ROLE_PROVIDER`）で、起動も失敗のときの振る舞い（Claudeの控えのaskで待つ）も今までと同じ
+-- **Codexで動ける役割**: `domain::actor_model::CODEX_ROLES`（`goal_review`・`review`・`plan_review`（task 1218）・`throughput_review`（task 1220）。`runs_on(role, provider)`）。それ以外の役割に`codex`を書くと、`dagq.toml`を読むときの検査（`RoleModels::check`、`parse_config`の最後）がエラーにする（`dagq.toml: [roles.recovery]: provider codex cannot run the recovery role; Codex runs only goal_review, review, plan_review, throughput_review`）。warnを出してClaudeで起動する形にしなかったのは、ADR-t1063-1の決定1が「起動せずに設定の誤りとして知らせる」と決めたため。エラーの間は他の`dagq.toml`の誤りと同じく、supervisorとobserverは全ての役割を今までと同じ起動にし（`Supervisor::role_models`のwarn）、`doctor`の`roles.error`に出る。`codex`の表にClaudeのmodel（`claude`で始まる名前）を書いてもエラーにする（modelはproviderごとの名前で、CodexにClaudeのmodelを渡さない）
++- **Codexで動ける役割**: `domain::actor_model::CODEX_ROLES`（`goal_review`・`review`・`plan_review`（task 1218）・`throughput_review`（task 1220）・`observer`（task 1223、[ADR-t1222-1](../../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）。`runs_on(role, provider)`）。それ以外の役割に`codex`を書くと、`dagq.toml`を読むときの検査（`RoleModels::check`、`parse_config`の最後）がエラーにする（`dagq.toml: [roles.recovery]: provider codex cannot run the recovery role; Codex runs only goal_review, review, plan_review, throughput_review, observer`）。warnを出してClaudeで起動する形にしなかったのは、ADR-t1063-1の決定1が「起動せずに設定の誤りとして知らせる」と決めたため。エラーの間は他の`dagq.toml`の誤りと同じく、supervisorとobserverは全ての役割を今までと同じ起動にし（`Supervisor::role_models`のwarn）、`doctor`の`roles.error`に出る。`codex`の表にClaudeのmodel（`claude`で始まる名前）を書いてもエラーにする（modelはproviderごとの名前で、CodexにClaudeのmodelを渡さない）
+ - **launch**（`RoleModels::launch`）: Claudeの表は今までどおり（省いたmodel / effortは`claude-opus-5-5` / `medium`を明示）。Codexの表はmodelを省けば`null`（Codexの既定。`-m`を渡さない）、effortを省けば`medium`（`-c model_reasoning_effort`に渡す）。どちらも`source`は`dagq.toml`
+-- **切り替え**（`RoleModels::switchable`・`domain::actor_model::job_route`）: `provider`を書いた役割のjobは、そのproviderが使えない（supervisorにagentが無い＝`executable_missing`、または控えられている）とき、もう一方のproviderがその役割を動かせて使えれば、そのproviderの既定の起動（modelとeffortはproviderごとの名前なので渡さない。`ActorLaunch::switched`）で起動し、launchに`switched_from`（元のprovider）と`switch_reason`（`SwitchReason`の値）を残す。どちらも使えなければ起動せずに待つ。今これを使うのはgoal review（[Goal review](goal-review.md)の3と6）とrunのreview（`Supervisor::review_route`。[Review](review.md)、[ADR-t1207-1](../../adr/2026-09-30-t1207-1-codex-run-review.md)。`--no-claude`で切り替え先が無ければ待たずに手動reviewに渡す）とplan review（`Supervisor::plan_review_route`、task 1218。[Plan review](plan-review.md#codexで動かす)。`--no-claude`で切り替え先が無ければ待たずに`plan_review_failed`でplan review by handに渡す）とスループットの見直し（`Supervisor::throughput_review_route`、task 1220。[Throughput review](throughput-review.md#codexで動かす)。`--no-claude`で切り替え先が無ければ、見直しの要る期間の`throughput_review_finished`（`outcome: error`）に理由を残す）で、他の役割は`provider = "claude"`を書いても今までどおりの起動と控え
++- **切り替え**（`RoleModels::switchable`・`domain::actor_model::job_route`）: `provider`を書いた役割のjobは、そのproviderが使えない（supervisorにagentが無い＝`executable_missing`、または控えられている）とき、もう一方のproviderがその役割を動かせて使えれば、そのproviderの既定の起動（modelとeffortはproviderごとの名前なので渡さない。`ActorLaunch::switched`）で起動し、launchに`switched_from`（元のprovider）と`switch_reason`（`SwitchReason`の値）を残す。どちらも使えなければ起動せずに待つ。今これを使うのはgoal review（[Goal review](goal-review.md)の3と6）とrunのreview（`Supervisor::review_route`。[Review](review.md)、[ADR-t1207-1](../../adr/2026-09-30-t1207-1-codex-run-review.md)。`--no-claude`で切り替え先が無ければ待たずに手動reviewに渡す）とplan review（`Supervisor::plan_review_route`、task 1218。[Plan review](plan-review.md#codexで動かす)。`--no-claude`で切り替え先が無ければ待たずに`plan_review_failed`でplan review by handに渡す）とスループットの見直し（`Supervisor::job_start_route`、task 1220。[Throughput review](throughput-review.md#codexで動かす)。`--no-claude`で切り替え先が無ければ、見直しの要る期間の`throughput_review_finished`（`outcome: error`）に理由を残す）とobserver（同じ`Supervisor::job_start_route`、task 1223。[Observer](observer.md#codexで動かす)。`--no-claude`で切り替え先が無ければ、skipされないobservationの`observe_finished`（`outcome: error`、`unavailable: true`）に理由を残す）で、他の役割は`provider = "claude"`を書いても今までどおりの起動と控え
+ - **見え方**: `dagq doctor`の`roles`が役割ごとに`provider`・`source`（`dagq.toml` / `default`）・`model`・`effort`を出す（queueが束縛されたmain checkoutの`dagq.toml`。読めなければ`roles.error`に理由を足し、全ての役割は既定で出る。`compose::doctor_roles`）。jobごとに実際に動いたproviderは開始のeventの`launch.provider`と`headless_jobs.provider`
+ 
+ ## 差し戻しで開き直すplannerの段上げ
+@@ -93,7 +93,7 @@ plan reviewの`revise`（と`reopen`）の指摘を配るとき、持ち主のpl
+ - **goal review**（task 1062）: `goal_review_started`に`launch`と、runtimeが起動前に決めてjobに渡す`session_id`（ADR-0048の決定4。Claude Codeには`--session-id`）と`cwd`（jobを起動したrepositoryのcheckout）を記録する。これで他のjobと同じく区間（`session_opened` / `session_closed`、kind `goal_review`）を持ち、`session_closed`にtranscriptから読んだ実際の`model` / `effort`が入る（[Agent provider lifecycle](../provider-lifecycle.md#claude-sessionの区間)）。それより前の`goal_review_started`には`launch`も`session_id`も無い
+ - **スループットの見直し**（task 1086）: `throughput_review_started`の`session_id`・`launch`・`dir`で、observerと同じqueueの区間（kind `throughput_review`）を開き、同じ`session_id`の`throughput_review_finished`で閉じる。`session_closed`には他のjobと同じ経路（task 579）でtranscriptから読んだ実際の`model` / `effort`が入る。見直しは同時に複数走りうる（execの引き継ぎで前のprocessが残したjob、別のsupervisorのjob）ので、始まりは同じ`mode`と`period`の区間だけを、終わりは自分の区間だけを閉じ、終わりの無いまま35分（`RUNNING_MS`）を過ぎた区間は次の見直しのeventで`inferred`として閉じる（規則は[スループットの見直し](throughput-review.md#sessionの区間task-1086)）
+ - **実際のmodelをjobの終わりのeventに写さない**: 実際の`model` / `effort`は区間の`session_closed`だけが持ち、`review_finished`・`goal_review_finished`などjobの終わりのeventには写さない。`session_closed`はjobの終わりのeventと同じトランザクション・同じ時刻に書かれ、`opened_event_id`で開始のevent（`launch`）と、payloadの`plan_review_id` / `goal_review_id`・runでjobと結べるので、写すと同じ値を2か所に持つだけになる。`stats`の`sessions`（kindごと）と`kpi`の`model=` / `effort=`の層は既に`session_closed`を読む
+-- **Codexのjobの実際のmodelとthread**（task 1065）: Codexはsessionのidをrunを始める前に受け取らず（threadを自分で名付ける）、transcriptも無いので、Codexのgoal reviewは`goal_review_started`の`session_id`をnullにし（plan reviewも同じく`plan_review_started`の`session_id`をnullにし、`plan_review_finished` / `plan_review_failed`に同じ値を写す。task 1218。スループットの見直しも`throughput_review_started`の`session_id`をnullにし、`throughput_review_finished`に同じ値を写す。task 1220。runのreviewも`review_started`の`session_id`をnullにし、`review_finished`（pass / revise / concern）・`review_failed`・`review_retried`に同じ値を写す。task 1339）、終わりのevent（`goal_review_finished` / `goal_review_failed`）に`session_id`（threadのid）・`model`（rolloutから読んだ実際のmodel）・`model_unknown`（読めなかった理由。読めたときは無い）を写す（`domain::headless_job::JobSession::record`）。区間の`session_closed`も同じ値を持つ（[Agent provider lifecycle](../provider-lifecycle.md#claude-sessionの区間)）。上の「写さない」はClaudeのjobの話で、Codexのjobは終わりのeventしか値の出どころが無いので写す。`stats`のjobの`by_model`は、開始の`session_id`の`session_closed`が無ければ終わりのeventの`model`を読む
++- **Codexのjobの実際のmodelとthread**（task 1065）: Codexはsessionのidをrunを始める前に受け取らず（threadを自分で名付ける）、transcriptも無いので、Codexのgoal reviewは`goal_review_started`の`session_id`をnullにし（plan reviewも同じく`plan_review_started`の`session_id`をnullにし、`plan_review_finished` / `plan_review_failed`に同じ値を写す。task 1218。スループットの見直しも`throughput_review_started`の`session_id`をnullにし、`throughput_review_finished`に同じ値を写す。task 1220。runのreviewも`review_started`の`session_id`をnullにし、`review_finished`（pass / revise / concern）・`review_failed`・`review_retried`に同じ値を写す。task 1339。observerも`observe_started`の`session_id`をnullにし、`observe_finished`に同じ値を写す。task 1223）、終わりのevent（`goal_review_finished` / `goal_review_failed`）に`session_id`（threadのid）・`model`（rolloutから読んだ実際のmodel）・`model_unknown`（読めなかった理由。読めたときは無い）を写す（`domain::headless_job::JobSession::record`）。区間の`session_closed`も同じ値を持つ（[Agent provider lifecycle](../provider-lifecycle.md#claude-sessionの区間)）。上の「写さない」はClaudeのjobの話で、Codexのjobは終わりのeventしか値の出どころが無いので写す。`stats`のjobの`by_model`は、開始の`session_id`の`session_closed`が無ければ終わりのeventの`model`を読む
+ - **`headless_jobs.provider`**（schema v55、`migrations/0055_headless_job_provider.sql`）: supervisorが起動するheadlessのjob（review・復旧・plan review・goal review）のプロセスの行に、起動したprovider（`JobSubject::provider`。goal review・runのreview（ADR-t1207-1）・plan review（task 1218）は行き先で実際に起動したprovider（launchの`provider`。切り替えた後ならその先）、他（復旧）は`ROLE_PROVIDER`）を書く。`NOT NULL DEFAULT 'claude'`なので、migrationより前の行と、列を知らない古いバイナリが書く行は`claude`と読める（[Headless job processes](headless-job-processes.md)）
+ 
+ ## runtimeのplannerの経路<a id="runtimeのplannerの経路"></a>
+@@ -122,11 +122,12 @@ route = "headless"   # 省けばinteractive（評価まで）
+ - `domain::actor_model`の単体テスト（表が無い役割、表の値と既定、段上げと上限、記録の読み戻し、effortの検査、全ての役割の`launch`の`provider`と`provider`の無い過去の記録を`claude`と読むこと（`every_launch_records_its_provider_and_an_older_one_reads_as_claude`））
+ - `infrastructure::run_env`の`parses_the_route_of_the_runtimes_planners`（`route`の既定と`dagq.toml`、`route`だけの表が起動に何も渡さないこと、`[roles.runtime_planner]`の外の`route`と知らない値と重複のエラー）
+ - `tests/it/planner_headless.rs`: `doctor`の`roles.runtime_planner`の`route`と`route_source`（`headless` / `dagq.toml`、`interactive` / `default`と`dagq.toml`）
+-- `infrastructure::run_env`の`parses_the_role_tables`（`provider`の値、`CODEX_ROLES`以外の`codex`とCodexの表のClaudeのmodelのエラー、`plan_review`と`throughput_review`の`codex`を受け付けること）
++- `infrastructure::run_env`の`parses_the_role_tables`（`provider`の値、`CODEX_ROLES`以外の`codex`とCodexの表のClaudeのmodelのエラー、`plan_review`・`throughput_review`・`observer`の`codex`を受け付けること）
+ - `domain::actor_model`の`a_role_table_names_its_provider`と`a_job_moves_to_the_other_provider_or_waits`（task 1065）
+ - `tests/it/goal_review_codex.rs`（task 1065）: `provider = "codex"`でgoal reviewがstubの`codex exec --json`（`:read-only`を継ぐjobのpermission profile `dagq_job`。goal 82の段(3)）で動き、jobの`dagq`がqueue service経由で読み、verdict・thread・modelを読んで適用し、`doctor`の`roles`とgoal review以外の`codex`のエラー、Codexの認証の失敗からClaudeへの切り替え、両方控えられたときの待ち。providerの状態ごとの行き先（Codexが無いときのClaude、Claudeの控えのaskが開いたままのCodex、`--no-claude`）は`application::supervise::goal_review`のunit test `the_goal_review_starts_on_a_provider_it_can_use_or_waits`
+ - `tests/it/plan_review_codex.rs`（task 1218）: `provider = "codex"`でplan reviewがstubの`codex exec --json`（goal reviewと同じjobのpermission profile `dagq_job`）で動き、jobの`dagq`がqueue service経由で読み、pass・revise・concernをClaudeのjobと同じ経路で適用し、開始の`launch.provider`・終わりのthreadとmodel・`headless_jobs.provider`・`stats`と`kpi`のproviderごとの集計、Codexの認証の失敗からClaudeへの切り替え、Codexが無いときのClaude、`--no-claude`でCodexで動きClaudeに戻らず、Codexが使えなければ理由付きでplan review by handに渡ること
+ - `tests/it/throughput_review_codex.rs`（task 1220）: `provider = "codex"`で時間・日次・週次の見直しがstubの`codex exec --json`（jobのpermission profile `dagq_job`）で動き、jobの`dagq`がqueue service経由で読み、最後の返答をClaudeの出力と同じく`reports/reviews/`への保存・週次の次の一手のfinding・`throughput_review_reported`にし、開始の`launch.provider`・終わりと区間のthreadとmodel・`stats`と`kpi`のproviderごとの集計、利用上限で止まったCodexの`provider_unusable`、`--no-claude`でCodexで動き、失敗してもClaudeを起動せず理由を記録すること。`domain::stats::jobs`の`a_codex_throughput_review_is_counted_under_codex_and_its_model`
++- `tests/it/observer_codex.rs`（task 1223）: `provider = "codex"`で毎時と日次のobservationがstubの`codex exec --json`（jobのpermission profile `dagq_job`。書けるrootもsandboxを外すflagも無い）で動き、jobの`dagq`がクライアントモードでqueue service経由でfindingの記録・更新・resolveとfindingに紐づく`blocked`のaskを書き（帰属は`observer`、noteはserviceが拒む）、`observe_finished`の件数とid、開始の`launch.provider`・終わりと区間のthreadとmodel（rolloutが無ければ`model_unknown`）・`stats`と`kpi`のproviderごとの集計、利用上限で止まったCodexの`provider_unusable`、`--no-claude`でCodexで動き、失敗してもClaudeを起動せず理由を記録すること、Claudeが使えればClaudeで始め直すこと、表が無ければ今までどおりClaudeで動くこと。`domain::stats::jobs`の`a_codex_observation_is_counted_under_codex_and_its_model`
+ - `domain::sessions`の`a_hook_input_names_its_session_and_the_environment_its_span`（`DAGQ_LAUNCH`の読み取りと`session_opened`の`launch`）
+ - `tests/it/actor_model.rs`: 表が無いとき復旧のjobとreviewに何も渡さず`default`を記録し、`[roles.review]`・`[roles.recovery]`があれば渡して`dagq.toml`を記録する（区間の`launch`も）
+ - `tests/it/plan_review.rs`: `a_revise_without_a_live_planner_opens_planners_within_the_limit`（既定のplan reviewと、開き直したplannerの`high`への段上げ）、`a_revise_goes_to_the_live_planner_...`（生きているplannerは上げない）、`role_tables_set_the_plan_review_and_raise_the_revise_planner_from_them`（`[roles.plan_review]`と、`[roles.runtime_planner]`の`high`から`xhigh`）
+diff --git a/docs/design/supervisor-lifecycle/observer.md b/docs/design/supervisor-lifecycle/observer.md
+index 6a512467..762bc2d4 100644
+--- a/docs/design/supervisor-lifecycle/observer.md
++++ b/docs/design/supervisor-lifecycle/observer.md
+@@ -4,8 +4,8 @@ type: design
+ title: "Observer"
+ status: current
+ created: 2026-09-26
+-updated: 2026-10-04 # task 251: the observer's use case moved to application
+-last_verified: 2026-10-04 # task 251
++updated: 2026-10-05 # task 1223: the observer runs on Codex too
++last_verified: 2026-10-05 # task 1223
+ scope: runtime
+ related:
+   - adr-t1566-1
+@@ -20,30 +20,45 @@ related:
+   - adr-0070
+   - adr-t649-1
+   - adr-t1222-1
++  - adr-t1063-1
++  - adr-t1204-1
++  - design-supervisor-lifecycle-actor-model
+ ---
+ 
+ # Observer
+ 
+-[ADR-0044](../../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定4・18・23（task 292）。observerはnoteとdraft goalを書かず、findingを記録・更新し、見立てが人を要るfindingにだけ`blocked`のaskを上げる（`--because`は`scope` / `discard` / `recovery_failed`から選び、見立てを`--recommend`と`--confidence`で載せる。下の「人が要る見立てだけをblockedにする」）。前回から自分以外のeventが無ければagentを起動しないこと、MCPを読まないこと、`observe --history`はtask 294が実装した。同じADRの決定19〜22のうち、既定の間隔を3時間にすること、proposalを求める印からplannerを立てることはgoal 31の他のtaskが持つ。`events --full` / `timeline`はtask 293が足し、promptに示すのはtask 420。dagqが回っているかを観察して継続的改善の材料を残すjobで、個々の詰まりは解消しない。cmux workspaceを持たず、`AgentProvider::headless_command`に`assign_session_id`と`without_mcp`を足して起動する（Claudeでは`claude -p --allowedTools 'Bash(dagq:*)' --session-id <id> --strict-mcp-config`でpromptはstdin（task 1560）。`--mcp-config`を渡さない`--strict-mcp-config`で、user・project・plugin・claude.aiのどのMCP serverも読み込まない）。実装は`src/application/observer/`（ユースケース。`compose::observe`がqueueと`ObserverSources`・`ObserverHost`を組み立てて注入する）と`src/infrastructure/observer.rs`（cursorと観察のdir、`[roles.observer]`、headlessのagentのprocess）。
++[ADR-0044](../../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定4・18・23（task 292）。observerはnoteとdraft goalを書かず、findingを記録・更新し、見立てが人を要るfindingにだけ`blocked`のaskを上げる（`--because`は`scope` / `discard` / `recovery_failed`から選び、見立てを`--recommend`と`--confidence`で載せる。下の「人が要る見立てだけをblockedにする」）。前回から自分以外のeventが無ければagentを起動しないこと、MCPを読まないこと、`observe --history`はtask 294が実装した。同じADRの決定19〜22のうち、既定の間隔を3時間にすること、proposalを求める印からplannerを立てることはgoal 31の他のtaskが持つ。`events --full` / `timeline`はtask 293が足し、promptに示すのはtask 420。dagqが回っているかを観察して継続的改善の材料を残すjobで、個々の詰まりは解消しない。cmux workspaceを持たず、`AgentProvider::headless_command`に`assign_session_id`と`without_mcp`を足して起動する（Claudeでは`claude -p --allowedTools 'Bash(dagq:*)' --session-id <id> --strict-mcp-config`でpromptはstdin（task 1560）。`--mcp-config`を渡さない`--strict-mcp-config`で、user・project・plugin・claude.aiのどのMCP serverも読み込まない）。providerは`[roles.observer]`の`provider`で選び、既定はClaude、`codex`ならCodexの`codex exec --json`で動く（下の「Codexで動かす」、task 1223）。実装は`src/application/observer/`（ユースケース。`compose::observe`がqueueと`ObserverSources`・`ObserverHost`を組み立てて注入する）と`src/infrastructure/observer.rs`（cursorと観察のdir、`[roles.observer]`、headlessのagentのprocess）。
+ 
+-Codexのobserverは、jobのdagqをクライアントモードにしてqueue service経由でfindingとfindingに紐づく`blocked`のaskを書き、Claudeのobserverも同じ経路にする（[ADR-t1222-1](../../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）。serviceの側のユースケース（`finding_record`・`finding_resolve`、findingに紐づく`blocked`の`ask`、読み取りの`proposal_list`・`proposal_show`など）はtask 1235が足した（[Queue service](../queue-service.md#ユースケース)）。serviceはobserverのprincipal（tokenのrole `observer`とjobのactor id）をactorにしてCLIと同じ`Dialogue`で書くので、`finding_recorded` / `finding_updated` / `finding_status_changed`の`by`と`ask_opened`の`asked_by`は`observer`、eventのactorはjobのactor idになり、拒否の`authorization_denied`もactorのroleが`observer`で残る。そのため下の0の「observer自身のeventを数えない」判定（`SqliteQueue::events_besides`）はCLIで書いたときと同じに成り立つ（ADR-t1222-1決定4）。jobのdagqのクライアントモードはまだ無く、今のobserverはClaudeだけで動き、agentのdagqがqueueのDBに直接書く。jobへのtokenの渡し方・sandboxに足す設定はtask 1223がここに書く。
++Codexのobserverは、jobのdagqをクライアントモードにしてqueue service経由でfindingとfindingに紐づく`blocked`のaskを書き、Claudeのobserverも同じ経路にする（[ADR-t1222-1](../../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）。serviceの側のユースケース（`finding_record`・`finding_resolve`、findingに紐づく`blocked`の`ask`、読み取りの`proposal_list`・`proposal_show`など）はtask 1235が足した（[Queue service](../queue-service.md#ユースケース)）。serviceはobserverのprincipal（tokenのrole `observer`とjobのactor id）をactorにしてCLIと同じ`Dialogue`で書くので、`finding_recorded` / `finding_updated` / `finding_status_changed`の`by`と`ask_opened`の`asked_by`は`observer`、eventのactorはjobのactor idになり、拒否の`authorization_denied`もactorのroleが`observer`で残る。そのため下の0の「observer自身のeventを数えない」判定（`SqliteQueue::events_besides`）はCLIで書いたときと同じに成り立つ（ADR-t1222-1決定4）。jobのdagqのクライアントモードはtask 1236が入れ、providerによらず（Claudeのobserverも）agentの`dagq`はserviceに送り、queueのDBを開かない。tokenはjobの起動ごとに`HostActorExecutor`が発行してfileに書き、そのpathを`DAGQ_SERVICE_CREDENTIAL_FILE`で渡し、jobのprocessが終われば失効させる（4）。Codexのsandboxに足すのはserviceのsocketへの到達だけ（下の「Codexで動かす」）。書き込みがserviceのerror（serviceが居ない・`unreachable`など）で通らなかったことを、runtimeはobservationの失敗に数えない（ADR-t1222-1のConsequencesが委ねた判断。task 1223）: `outcome`は今までどおりagentの終わり方だけで決まり、agentはerrorのJSONを見て非0で終われば`failed`になって次のobservationが同じwindowを読み直し、0で終われば読み直さない。supervisorはserviceが居ない間observerを起動しない（ADR-t1233-4決定2）ので、書けないのは走っている間にserviceが落ちたときだけで、その件数とidは`observe_finished`に入らない（書かれていないので）。
+ 
+-- **`dagq observe [--since CURSOR] [--daily] [--dry-run] [--timeout SECS] [--claude PATH] [--cmux PATH]`**: 1回のobservation。
++- **`dagq observe [--since CURSOR] [--daily] [--dry-run] [--timeout SECS] [--claude PATH] [--codex PATH] [--cmux PATH]`**: 1回のobservation。supervisorはほかに隠したflagの`--launch`（行き先のlaunchのJSON）・`--codex-home`・`--switchable`・`--unavailable`を渡す（下の「Codexで動かす」）。
+   0. **変化が無ければ起動しない**: `--since`も`--dry-run`も無いとき、同じmodeの直前の（skippedでない）`observe_finished`が`succeeded`で、その入力が読んだ最後のevent（payloadの`cursor`。agentが走っている間に他が書いたeventも読んでいないので数える）より後にobserver自身のもの以外のeventが1件も無く、今の`stats`（1の`stats --since <cursor>`と同じもの）のalertに直前のobservationの`observe_finished`の`alerts`に無いものが無ければ（[ADR-t649-1](../../adr/2026-09-28-t649-1-new-time-driven-alerts-wake-the-observer.md)。task 649）、noteなどの残りの入力を集めず、dirも`observe_started`も作らず、`observe_finished`（`outcome: skipped`、`reason`、`previous_event_id`（直前のobservationの`observe_finished`）、`since`と`cursor`（どちらも読むはずだったcursor）、`cursor_saved: false`、件数0と空のid、`duration_secs: 0`、`dir: null`、今の`alerts`）だけを記録して返す。alertの比較は、eventを出さずに時間やその時点のsnapshotだけで閾値を超えるalert（`ask_unanswered`・`idle_slots`など。止まったsessionは`stall_nudged` / `recovery_requested`のeventでskipが破れる）を拾うため。alertの識別（`observer::alert_keys`）は`stats`の`alerts`と`running_alerts`の各項目の`kind`と、あれば対象の`task_id`・`run_id`・`path`・`ask_id`・`workspace_id`だけのobjectで（時間とともに伸びる`value`は含めない）、並べて重複を除いた配列にする。前回に無かった識別が1つでもあれば起動し、同じか減っただけなら起動しない。`alerts`を持たない古い（task 649より前の）`observe_finished`の後は、alertが1つでもあれば起動する。observer自身のものとして数えないのは、`observe_started` / `observe_finished`、KPIの記帳のevent（`domain::kpi::BOOKKEEPING_KINDS`: supervisorのcandidatesの標本の`candidates_sampled`（[`supervise`](supervise.md)の5）とレポートの`report_written`（[レポート](report.md)）と、見込みのsnapshotの`forecast_recorded`（[stats](stats.md#完了見込み)）と、pushの`kpi_push_sent` / `kpi_push_failed` / `kpi_push_abandoned`（[push](push.md)。失敗はattentionでinboxに届く）。目標割れの`kpi_breach_started` / `kpi_breach_resolved`は数える。ADR-0051の決定24。記帳のeventを足すtaskはこの一覧に足す。記帳のeventだけではobserverを起こさない）、payloadの`by`が`observer`の`finding_recorded` / `finding_updated` / `finding_status_changed`、`asked_by`が`observer`の`ask_opened`、payloadの`kind`が`observer`の`session_opened` / `session_closed` / `session_turns`（`SqliteQueue::events_besides`）。直前が`failed` / `error`なら（何も観察できていないので）起動する。skippedの`observe_finished`もtimerの期日の起点になる。
+   1. 入力を集める: `stats --since <cursor>`（`--since`が無ければ前回のobserveが保存した`<queue dir>/observer/cursor`、それも無ければ`stats`の既定の直近50件。`--daily`は24時間前より前の最後のevent id）、`open` / `proposed`のfinding（`findings`）、直近20件のnote（`notes`）、openなask（`asks --open`）、`graph`の`candidates`と`critical`、KPIの`kpi`と改善のproposalの`improvements`（下の「KPIの目標割れと改善の上限」）。入力のJSONは`observer::observer_input`が組み立て、キーは`stats`・`kpi`・`findings`・`improvements`・`notes`・`open_asks`・`graph`。promptが切る一覧はpromptが残す順に並べる（`kpi.breaches`は`streak`の長い順・同じなら`subject`の順、`findings`は`impact`のhigh・normal・low、`occurrences`の多い順、新しい順、`open_asks`は新しい順。下の「promptの入力の上限と選ぶ順」）ので、promptが省いたものは`input.json`のその一覧のoffsetから後になる（task 1567）。
+   2. promptを作る。役割は「dagqが回っているかを観察し、うまくいっていないことを`finding record`でfindingに記録し（根拠はrun_eventsのidを`--evidence`で渡し、本文に埋めない。同じ種類・対象・subjectは既存のfindingの更新になるので、持っていない根拠か読みの変化があるときだけ記録し直す）、remedyが要るfindingには`--propose`で理由を付け、もう起きていない問題は`finding resolve`し、見立てが「待てば解ける」「leave it」のものはaskにせずfindingの`--detail`に見立てを書いて記録・更新だけにし、見立てが人を要るものだけを`ask --kind blocked --finding ID --recommend ... --confidence ...`でinboxに上げる（openなaskのあるfindingには上げない。下の「人が要る見立てだけをblockedにする」）。note、goal、taskは書かず、個々の詰まりは解消しない。run / task / goalの状態は変えない」。promptは止まったsessionの閾値の読み方も持つ（ADR-0043の決定6、ADR-0044の決定21、task 408）: statsの`stall_thresholds`は`[stall]`の設定ごとの1項目で、`outcomes`の`answered_wait`が多ければ閾値が早すぎ、`preempted`が多ければ遅すぎの疑い、`resolved_by_nudge` / `resolved_by_enter` / `resolved_by_resend`は検知が効いている印、`pending`は未決で、`by_threshold_secs`で値の変更の前後を比べる。`running_alerts`の`idle_without_receipt`で`nudged: false`かつ`asked: false`のまま閾値を超えたものはsupervisorの検知の漏れの疑い。見直しが要ればkind `threshold`・subjectに設定名のfindingを記録し、繰り返すなら`--propose`を付け、閾値そのものは変えない。promptはflakyなtestの読み方も持つ（task 642）: statsの`failed_tests.flaky_candidates`（[stats](stats.md)。別々のrunの`integrate`の検証で`flaky_runs`回以上落ちたtestと、nextestの流し直しで通った（FLAKYの印の`flaky`が1以上の）test。task 768）の各testを、kind `flaky_test`・対象`--queue`・subjectにtestの名前・根拠（`--evidence`）にその`integrate_event_ids`で`finding record`し、同じ根拠を持つfindingは記録し直さない。workerのsessionだけで落ちたtestは作業中なのでfindingにしない。候補から消え、windowの`failed_tests.tests`でも`integrate`で落ちていないtestの`flaky_test`のfindingは`finding resolve`してよい。自動更新のe2eの関門のtestも同じくflakyなtestとして読む（task 1166、[ADR-t1165-1](../../adr/2026-09-30-t1165-1-e2e-gate-reruns-failed-e2e-once-and-records-quarantined-failures.md)決定4）: statsの`updates.e2e.tests`（[stats](stats.md)の`updates`）のtestごとの`failed`・`passed_on_rerun`・`quarantined`・`failed_gate`・`failures_in_a_row`・`event_ids`・`marked` / `mark_task`を読み、windowの関門で2回以上落ちた（流し直しで通ったもの・印で通したものを含む）testを、kind `flaky_test`・対象`--queue`・subjectにtestの名前・根拠にその`event_ids`で`finding record`する。安定化のtaskが要るもの（繰り返し落ちる、`failed_gate`か`failures_in_a_row`が1以上、印が付いたまま）には`--propose`を付け、runtimeのplannerが`search` / `related`で既存のtask（`mark_task`もその1つ）を確かめて重複させない。同じ根拠のfindingは記録し直さない。数えるのはstatsのwindowの中だけなので、2回の失敗は主に日次の観察の24時間で見える。promptはKPIの読み方も持つ（下の「KPIの目標割れと改善の上限」）。根拠を読むCLIとして、自由文ではなく記録を読む`events --full`と絞り込み（`--run` / `--task` / `--goal` / `--kind`（繰り返せる） / `--since` / `--until`。`--kind`が無ければattentionだけなので全種類は`--all`を足す）、`timeline RUN`、`observe --history`を示し、`events --all`だけの形は示さない（ADR-0044の決定22、task 420）。queueのコマンドは`dagq`の形で渡す（4）。`--daily`は24時間の傾向を見る別の文面にする。`--dry-run`はpromptを`{dry_run, mode, since, cursor, prompt, prompt_bytes, prompt_limit, prompt_sections}`で返し、dirを作らず何も起動・記録しない（promptが名指すobservationは`DRY-RUN`）。 promptの渡し方・節ごとと全体の上限・省いたことの明示・byte数の記録は[Prompt](prompt.md#headlessのjobのprompt)の「headlessのjobのprompt」の節が持つ（[ADR-t1566-1](../../adr/2026-10-03-t1566-1-headless-job-prompts-carry-decision-material-within-limits.md)）。入力は下の「promptの入力の上限と選ぶ順」の上限と順で載せる（task 1567。それまでは上限が無く、2026-10-01T13:54Zから約38時間、約1.2MBのpromptで起動できなかった）。省いたものを読む方法は`queue_cli`の権限で打てる読むコマンド（`observe --input`と既存の読むコマンド）に限り、3の`input.json`をファイルとして読ませない（observerはファイルを読めない）。
+-  3. promptを組む前に`<queue dir>/observer/<started_at>/`（同じ秒に既にあれば`-1`以降の接尾辞）を作り（promptはその名前を`observe --input`の読む先として名指す）、`prompt.md`と`input.json`（入力の全体）を書き、`observe_started`（`mode`: `hourly` / `daily`、`since`、`dir`、`session_id`、`launch`、promptの`prompt_bytes`・`prompt_limit`・`prompt_sections`（下の「promptの入力の上限と選ぶ順」の記録））をtaskの無いrun_eventsに記録する。
+-  4. そのdirをcwdに、env `DAGQ_ROLE=observer`、queue serviceの`DAGQ_SERVICE_SOCKET`とobserverのtokenのfileの`DAGQ_SERVICE_CREDENTIAL_FILE`（`DAGQ_QUEUE`は渡さない。tokenはjobの終わりで失効する）、PATHの先頭に`dagq`のdirを置いてagentを起動し（promptは`dagq --db <db>`ではなく`dagq`を名指し、agentの`dagq`はクライアントモードでserviceに送る。[Queue service](../queue-service.md#クライアントモード)）、stdoutを`output.out`、stderrを`output.err`に分けて書く（`Streams::Files`）。`--timeout`（既定1800秒）を過ぎたらkillする。killの前にagentの子孫（`ProcessControl::descendants`。agentのBashとそれが起動したもの）を読み、agentの後にそれらもSIGKILLするので、agentの子プロセスは残らない（task 245）。
+-  5. 終了後、`observe_started`より後にobserverが書いた`finding_recorded`と`finding_updated`（payloadの`by: observer`）のfindingと、observerが閉じたfinding（`finding_status_changed`のうち`by: observer`かつ`to`が`resolved`か`dismissed`のもの。再記録による開き直しの`to: open`と、人やplannerの`resolve` / `dismiss`は数えない。task 448）とobserverのaskを集め、`observe_finished`（`mode`、`outcome`: `succeeded` / `failed`（非0終了） / `error`（起動できない・timeout）、`exit_code`、`error`、`since`、`cursor`（`stats`の`next_cursor`）、`cursor_saved`、`findings_recorded`、`findings_updated`、`findings_closed`、`asks`、`findings_without_ask`（それぞれ件数）、`recorded_finding_ids`、`updated_finding_ids`、`closed_finding_ids`、`ask_ids`、`without_ask_finding_ids`、`duration_secs`、`dir`、見たalertの識別の`alerts`（0の比較に使う））を記録して返す。`succeeded`のhourlyのときだけ`cursor`を`<queue dir>/observer/cursor`に保存する（一時ファイルからrename）。失敗したobservationのwindowは次のobservationが読み直す。dailyはcursorを動かさない。保存する`cursor`は`stats`の`next_cursor`（runのpageの続き）のままなので、終わったrunを飛ばさない。`stats`の期間集計（`asks`・`jobs`・`waiting`など）はpageに依らず窓の終わりまで数える（[stats](stats.md)の期間集計の窓、task 1379）ので、1時間に50件を超えるrunが終わったときだけ、次のobservationの期間集計が前のobservationと重なる。observationごとの期間集計を足し合わせず、1回の値をその窓の値として読む。
++  3. promptを組む前に`<queue dir>/observer/<started_at>/`（同じ秒に既にあれば`-1`以降の接尾辞）を作り（promptはその名前を`observe --input`の読む先として名指す）、`prompt.md`と`input.json`（入力の全体）を書き、`observe_started`（`mode`: `hourly` / `daily`、`since`、`dir`、`session_id`、`launch`、promptの`prompt_bytes`・`prompt_limit`・`prompt_sections`（下の「promptの入力の上限と選ぶ順」の記録））をtaskの無いrun_eventsに記録する。`session_id`はClaudeのjobだけで、Codexのjobはnull（threadはCodexが名付け、5の終わりが記録する）。
++  4. そのdirをcwdに、env `DAGQ_ROLE=observer`、queue serviceの`DAGQ_SERVICE_SOCKET`とobserverのtokenのfileの`DAGQ_SERVICE_CREDENTIAL_FILE`（`DAGQ_QUEUE`は渡さない。tokenはjobの終わりで失効する）、PATHの先頭に`dagq`のdirを置いてagentを起動し（promptは`dagq --db <db>`ではなく`dagq`を名指し、agentの`dagq`はクライアントモードでserviceに送る。[Queue service](../queue-service.md#クライアントモード)）、stdoutを`output.out`、stderrを`output.err`に分けて書く（`Streams::Files`）。`--timeout`（既定1800秒）を過ぎたらkillする。killの前にagentの子孫（`ProcessControl::descendants`。agentのBashとそれが起動したもの）を読み、agentの後にそれらもSIGKILLするので、agentの子プロセスは残らない（task 245）。Codexのjobも同じ`run_agent`で止め、Codexがコマンドごとに別のprocess groupで走らせたものも、killの前に列挙した子孫としてpidで止まる（task 1085と同じ形）。
++  5. 終了後、`observe_started`より後にobserverが書いた`finding_recorded`と`finding_updated`（payloadの`by: observer`）のfindingと、observerが閉じたfinding（`finding_status_changed`のうち`by: observer`かつ`to`が`resolved`か`dismissed`のもの。再記録による開き直しの`to: open`と、人やplannerの`resolve` / `dismiss`は数えない。task 448）とobserverのaskを集め、`observe_finished`（`mode`、`outcome`: `succeeded` / `failed`（非0終了） / `error`（起動できない・timeout）、`exit_code`、`error`、`since`、`cursor`（`stats`の`next_cursor`）、`cursor_saved`、`findings_recorded`、`findings_updated`、`findings_closed`、`asks`、`findings_without_ask`（それぞれ件数）、`recorded_finding_ids`、`updated_finding_ids`、`closed_finding_ids`、`ask_ids`、`without_ask_finding_ids`、`duration_secs`、`dir`、見たalertの識別の`alerts`（0の比較に使う）。Codexのjobはほかにproviderの`job_session`の`session_id`（thread）・`model`・`model_unknown`（`JobSession::record`）、役割がproviderを書いたCodexのjobがCodexを使えずに止まったときは`provider_unusable`（下の「Codexで動かす」））を記録して返す。`succeeded`のhourlyのときだけ`cursor`を`<queue dir>/observer/cursor`に保存する（一時ファイルからrename）。失敗したobservationのwindowは次のobservationが読み直す。dailyはcursorを動かさない。保存する`cursor`は`stats`の`next_cursor`（runのpageの続き）のままなので、終わったrunを飛ばさない。`stats`の期間集計（`asks`・`jobs`・`waiting`など）はpageに依らず窓の終わりまで数える（[stats](stats.md)の期間集計の窓、task 1379）ので、1時間に50件を超えるrunが終わったときだけ、次のobservationの期間集計が前のobservationと重なる。observationごとの期間集計を足し合わせず、1回の値をその窓の値として読む。
+ - **`dagq observe --history [--limit N]`**: 過去のobservationを新しい順に`{observations: [...]}`で返す（既定20件。`observe_finished`ごとに1件で、読むだけなのでqueueを読み取り専用で開き、observerのenvからも打てる）。各件は`event_id`（`observe_finished`）、`mode`、`outcome`、`skipped`、`started_at`（同じ`dir`の`observe_started`の時刻。skippedは`finished_at`と同じ）、`finished_at`、`duration_secs`、入力の範囲の`input: {since, through}`（`since`より後から`through`（`stats`の`next_cursor`）までに終わったrunを読んだ。期間集計はpageに依らず窓の終わりまで）、`cursor_saved`、書いた・閉じたfindingの`findings: {recorded, updated, closed, recorded_ids, updated_ids, closed_ids}`、askの`asks: {count, ids}`、askにせずfindingだけにした`without_ask: {count, ids}`、`exit_code`、`error`、`dir`、同じ`dir`の`observe_started`のpromptの`prompt_bytes`・`prompt_limit`・`prompt_sections`（skippedとtask 1567より前のものは`null`）を持つ。idを記録する前のバイナリの`observe_finished`はidが`null`で件数だけになり、閉じた数を記録する前のバイナリのものは`closed` / `closed_ids`が`null`、task 1319より前のものは`without_ask`の両方が`null`になる。
+-  `dir`の出力は新しい観測では`output.out` / `output.err`。過去の`output.log`は移行も削除もしない。historyはeventの`dir`を返し本文を読まないため、過去の観測も同じように表示され、そのdirの`output.log`を人が読める。終了した観測の出力をruntimeが読み直して分類することはない。失敗時の分類は起動したproviderの`AgentSignals::job_failure`に両streamを改行でつないで渡す。成功時は分類しない。
+-- **`dagq observe --input OBSERVATION [--section PATH] [--offset N] [--limit N]`**（task 1567）: observation（`observe --history`の`dir`の名前。数字と`-`だけで、他は拒む）の`input.json`、promptが省いたものを含む入力の全体を読む。読むだけで、queue serviceの読み取りのユースケース`observe_input`（[Queue service](../queue-service.md#ユースケース)、`queue.read`）なので、observerのenv（クライアントモード）からも打てる。`--section`が無ければ2段までのpath（`stats`・`stats.runs`など）ごとの`bytes`と`items`の一覧、一覧の節は`--offset`（既定0）から`--limit`（既定`INPUT_PAGE`の10）件を`INPUT_READ_BYTES`（24,000 byte。少なくとも1件）の中で`{total, offset, items, next_offset}`、24,000 byteを超えるobjectはkeyごとの`bytes`の一覧（`--section <path>.<key>`で読む）、それ以外は`value`で返す。observerのClaudeは`Bash(dagq:*)`だけでファイルを読めないので、promptはファイルのpathではなくこのコマンドを読む方法として書く。
+-- **権限**: observerのenvからのCLIは許可一覧で判定する（`main.rs`の`check_access`が`StaticPolicy`に問い、計画系と対話・記録系（ask・answer・note・mark・finding）のコマンドはapplicationの層が判定して拒否を`authorization_denied`に記録する。policyの表は[Authorization](../authorization.md)、一覧は[domain-model](../domain-model.md#current-operations)）。読み取り（`findings`と`notes`、変更の印の`marks`、KPIの`kpi`、完了見込みの`forecast`、入力の全体の`observe --input`を含む）、`finding record` / `finding resolve`、`ask --kind blocked`だけが通り、`note`、`mark`、`goal add`（`--draft`を含む）、`add`、`finding dismiss`、`ready` / `integrate` / `recover` / `goal ready` / `answer` / `observe`（`--history`と`--input`は読み取りとして通る） / `supervise`などは`{"error":"observer may not change queue state","denied":{...}}`で拒否される。
+-- **timer**: `supervise --observe-interval SECS`（既定3600、`--once`のときは既定0。0でobserverを起動しない。dailyも含む）と`--observe-daily BOOL`（既定true）。ループの各passで、走っているobserverが無ければ、dailyが有効で最後のdailyの`observe_started` / `observe_finished`から24時間経っていればdailyを、そうでなく最後のhourlyから`--observe-interval`秒経っていればhourlyを、`<runner> --db <db> observe --claude <claude> --cmux <cmux> [--daily]`の子プロセスで起動する（cwdはcheckout、`DAGQ_ROLE`は外す）。一度も記録の無いmodeは期日が来ている。期日はqueueのrun_eventsで判定するので、別のsupervisorや手の`observe`も数える。加えて同じプロセスが同じmodeを起動してから間隔が経つまでは再起動しない（記録を書く前に落ちたobserverを毎passで起動しないため）。同時に走るobserverは1つで、run slotを使わない。子プロセスの終了はlogに1行残し、記録は`observe_finished`が持つ。supervisorのループがerrorで終わったときは（正常な停止はobserverの終了を待つ）、走っている`dagq observe`の子孫を読んでから`dagq observe`とその子孫（agentとそのBash）をSIGKILLし、logに1行残す。この`observe`は`observe_finished`を書かない（task 245）。execの引き継ぎ（`prepare_handoff`）でも同じく子孫ごとkillし、次のプロセスが期日に起動し直す。launchd modeでもin-cmux modeでも`supervise`の既定値で同じに動く（`up`はこのflagを渡さない）。
++  `dir`の出力は新しい観測では`output.out` / `output.err`。過去の`output.log`は移行も削除もしない。historyはeventの`dir`を返し本文を読まないため、過去の観測も同じように表示され、そのdirの`output.log`を人が読める。終了した観測の出力をruntimeが読み直して分類することはない。失敗時の分類は、Claudeのjobは`AgentSignals::job_failure`に両streamを改行でつないで渡し（壁ならqueueのhold askに入る）、Codexのjobは役割がproviderを書いたときだけ`AgentProvider::job_failure(stdout, stderr)`で読む（下の「Codexで動かす」の`provider_unusable`）。成功時は分類しない。
++- **`dagq observe --input OBSERVATION [--section PATH] [--offset N] [--limit N]`**（task 1567）: observation（`observe --history`の`dir`の名前。数字と`-`だけで、他は拒む）の`input.json`、promptが省いたものを含む入力の全体を読む。読むだけで、queue serviceの読み取りのユースケース`observe_input`（[Queue service](../queue-service.md#ユースケース)、`queue.read`）なので、observerのenv（クライアントモード）からも打てる。`--section`が無ければ2段までのpath（`stats`・`stats.runs`など）ごとの`bytes`と`items`の一覧、一覧の節は`--offset`（既定0）から`--limit`（既定`INPUT_PAGE`の10）件を`INPUT_READ_BYTES`（24,000 byte。少なくとも1件）の中で`{total, offset, items, next_offset}`、24,000 byteを超えるobjectはkeyごとの`bytes`の一覧（`--section <path>.<key>`で読む）、それ以外は`value`で返す。observerのClaudeは`Bash(dagq:*)`だけでファイルを読めないので、promptはファイルのpathではなくこのコマンドを読む方法として書く（Codexのobserverはread-onlyのsandboxでファイルを読めるが、promptはproviderに依らず同じ）。
++- **権限**: observerのenvからのCLIは許可一覧で判定する（`main.rs`の`check_access`が`StaticPolicy`に問い、計画系と対話・記録系（ask・answer・note・mark・finding）のコマンドはapplicationの層が判定して拒否を`authorization_denied`に記録する。policyの表は[Authorization](../authorization.md)、一覧は[domain-model](../domain-model.md#current-operations)）。読み取り（`findings`と`notes`、変更の印の`marks`、KPIの`kpi`、完了見込みの`forecast`、入力の全体の`observe --input`を含む）、`finding record` / `finding resolve`、`ask --kind blocked`だけが通り、`note`、`mark`、`goal add`（`--draft`を含む）、`add`、`finding dismiss`、`ready` / `integrate` / `recover` / `goal ready` / `answer` / `observe`（`--history`と`--input`は読み取りとして通る） / `supervise`などは`{"error":"observer may not change queue state","denied":{...}}`で拒否される。jobのagentはクライアントモードなので、実際にはserviceのユースケースの無いコマンドはクライアントの側で`no_use_case`、serviceに届いて認可されないもの（note・runに紐づくaskなど）はserviceが`authorization_denied`で拒んで記録する（[Queue service](../queue-service.md#クライアントモード)）。Codexのobserverには、Claudeのdagqだけを許す道具の代わりのhookやrulesを作らない: read-onlyのsandboxが書き込みと他のprocessへのsignalを拒み、queueへの書き込みはserviceの認可だけが通す。Claudeのobserverにhookと拒むコマンドの一覧の設定は無いので、その代わりも作らない（ADR-t1222-1決定5）。
++- **timer**: `supervise --observe-interval SECS`（既定3600、`--once`のときは既定0。0でobserverを起動しない。dailyも含む）と`--observe-daily BOOL`（既定true）。ループの各passで、走っているobserverが無ければ、dailyが有効で最後のdailyの`observe_started` / `observe_finished`から24時間経っていればdailyを、そうでなく最後のhourlyから`--observe-interval`秒経っていればhourlyを、`<runner> --db <db> observe --cmux <cmux> --claude <claude> --codex <codex> --launch <launch> [--codex-home DIR] [--switchable] [--unavailable WHY] [--daily]`の子プロセスで起動する（cwdはcheckout、`DAGQ_ROLE`は外す。`<codex>`はworkerと同じく`supervise --codex`で解決したもの。行き先と`--no-claude`は下の「Codexで動かす」）。一度も記録の無いmodeは期日が来ている。期日はqueueのrun_eventsで判定するので、別のsupervisorや手の`observe`も数える。加えて同じプロセスが同じmodeを起動してから間隔が経つまでは再起動しない（記録を書く前に落ちたobserverを毎passで起動しないため）。同時に走るobserverは1つで、run slotを使わない。子プロセスの終了はlogに1行残し、記録は`observe_finished`が持つ。supervisorのループがerrorで終わったときは（正常な停止はobserverの終了を待つ）、走っている`dagq observe`の子孫を読んでから`dagq observe`とその子孫（agentとそのBash）をSIGKILLし、logに1行残す。この`observe`は`observe_finished`を書かない（task 245）。execの引き継ぎ（`prepare_handoff`）でも同じく子孫ごとkillし、次のプロセスが期日に起動し直す。launchd modeでもin-cmux modeでも`supervise`の既定値で同じに動く（`up`はこのflagを渡さない）。起動するのはqueue serviceが居るときだけ。
+ - **出力の扱い**: findingは人とplannerが`findings`で影響の大きい順に読み、手当てしないと決めたものを`finding dismiss ID --reason`にする。proposalを求める印の付いたfindingには、supervisorがruntimeのplannerを立ててproposalを作らせる（[Finding planners (supervisor)](finding-planners.md)）。findingに紐づけた`blocked`のaskには、runtimeが`propose`と`dismiss`のoptionを足し、人のその答えをfindingに適用する。`blocked`のaskは`status --role inbox`に`ask_opened`として出る。導入前にobserverが書いたnoteとdraft goalは記録として残り、draft goalは、inboxがそのgoalを参照にした計画の依頼を記録して依頼のplannerが扱うか、人が`DAGQ_ROLE`の無い自分のterminalで扱う（人が開くplannerは[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)決定8で廃止した）。
+ 
+ - **cmux**: `observe --cmux PATH`（既定`cmux`、bare nameはPATHで解決）が、`stats`の`workspace_mismatch`のための`cmux workspace list`と、agentがloginの切れや利用上限で止まったときのholdのinboxへの通知（`application::ask::hold`）に使うcmuxを決める。見つからなければ一覧も通知もせず、`workspace_mismatch`だけを判定しないまま、holdの`auth_required`とaskは記録する。libraryの`ObserveOptions.cmux`が`None`のときも同じで、testはこれでhostのcmuxに届かない。supervisorは自分のcmux（`supervise --cmux`、`UpdateSettings.cmux`。無ければ`cmux`）を`Layout.cmux`で運び、observerの子プロセスに`--cmux`で渡す（task 1144）。
+ 
++## Codexで動かす
++
++[ADR-t1222-1](../../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)と[ADR-t1063-1](../../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)の決定1・4・5（task 1223）。`dagq.toml`の`[roles.observer]`に`provider = "codex"`を書くと、observerのjobはCodexの`codex exec --json`で動く（[Actor model](actor-model.md#provider)の`CODEX_ROLES`）。promptと打たせるコマンドと出力の形は変えず、Claudeのplugin・skill・hookに頼らない。
++
++- **sandbox**: 権限の意図`ACCESS`（`queue_cli`）のまま、Codexの実装が読み取りだけのsandboxに訳す。queue serviceが居れば、`:read-only`を継いでserviceのsocketへの到達だけを足したjobのpermission profile `dagq_job`（`codex::job_service_config`）で起動し、書けるroot・network・`--dangerously-bypass-approvals-and-sandbox`は渡さない（[Agent provider lifecycle](../provider-lifecycle.md#codexのheadless-job)）。queue dirとDBのファイルにも書けないので、queueへの書き込みはjobの`dagq`がクライアントモードでserviceに送るものだけで、serviceがobserverのprincipalで認可する（ADR-t1222-1決定1・2）。jobのcwdはobservationのdir（Gitの外）なので`--skip-git-repo-check`を付ける
++- **行き先**（`Supervisor::job_start_route`に`ModelRole::Observer`。スループットの見直しと共有）: providerを書かない役割は今までどおりClaudeで、queueのholdのあいだと`--no-claude`では起動しない（[ADR-t1204-1](../../adr/2026-09-30-t1204-1-explicit-no-claude-operation.md)の決定2）。providerを書いた役割は`job_route`で、そのproviderが使えればそこで、使えなければもう一方のproviderで（launchに`switched_from`・`switch_reason`）起動し、どちらも使えなければ待つ。`--no-claude`ではClaudeは使えないので、Codexを設定したobserverはCodexで起動し、Codexも使えなければ子プロセスに`--unavailable`で理由（`provider_disabled: Claude is disabled by --no-claude and codex cannot be used (<理由>); handle this role manually`）を渡す。子プロセスは0の判定でskipしなければ、agentを起動せずdirも`observe_started`も作らずに`observe_finished`（`outcome: error`、`error`に理由、`unavailable: true`、件数0、`dir: null`、`cursor_saved: false`）を記録する。`observe_finished`はattentionではなく、`stats`の`jobs`はこれをjobに数えない（agentが走っていない）。次のobservationは直前が`error`なので0でskipしない。そのため`--no-claude`でCodexが控えられている間は、何も起きていなくても間隔ごとにこの記録が1件ずつ残る（スループットの見直しが期間ごとに記録するのと同じく、どのobservationが起動できなかったかを残すため）
++- **子プロセス**: supervisorは行き先のlaunchを`--launch`で渡し、コマンドはその`provider`のagent（`ClaudeCode`か`Codex`）で起動する。`--launch`が無い（人が手で打つ）ときは束縛されたcheckoutの`[roles.observer]`（`compose::observer_launch`）。Codexの実行ファイルを解決できない（supervisorが見つけた後に消えた）ときもコマンドは失敗せず、与えられたpathのまま起動を試み、起動の失敗を`provider_unusable`（`executable_missing`、`application::job_start_failure`）として終わりに記録する。Claudeの実行ファイルは今までどおり解決できなければ失敗し、起動しない側のproviderの実行ファイルは解決しない
++- **記録**: `observe_started`の`launch.provider`は`codex`で`session_id`はnull、actorはobservationごとのid（`observer:<uuid>`）。`observe_finished`と区間の`session_closed`（区間は`dir`で閉じる）にthreadのid・rolloutの実際のmodel・読めなかったときの`model_unknown`が入り、`stats`の`jobs.observer`の`by_provider`・`by_model`と`kpi`の`job.*.observer`の`provider=codex`の層で分けて読める（[stats](stats.md#headlessのjob)）
++- **Codexが使えなかったとき**: `--switchable`（役割がproviderを書いた）でCodexのjobが成功しなかったとき、providerの`job_failure`（`output.out` / `output.err`。agentが起動しなかったときは起動のerror）が使えないこと（認証・利用上限・起動の失敗・実行ファイルが無い）を示せば、`observe_finished`に`provider_unusable`（`provider`・`reason`）を書く。Codexの失敗はClaudeのqueueのhold askに入れない（`wall`はnull）。supervisorは自分の子のその終わり（起動時のevent idより後の同じmodeの`observe_finished`）を見てCodexを控え（`hold_provider`。利用上限はCodexの出力から再開の時刻を読む）、そのmodeをこのprocessの起動の記録から外して期日にする（`observer_again`）ので、次のpassでもう一方のproviderで起動し、`--no-claude`では上の`--unavailable`で理由を記録する。控えを書けなかったときは間隔を待つ（同じCodexをすぐ起動し直さないため）。`--switchable`の無いCodexのjobと、Claudeのjobは今までどおり（Claudeは壁に当たればqueueのhold askに入る）
++- **時間の上限**: 4のとおりClaudeと同じ`run_agent`でjobと子孫をpidで止める。execの引き継ぎとsupervisorのerrorでは、timerの節のとおり`dagq observe`とその子孫（Codexとその子孫）をkillする
++- **test**: `tests/it/observer_codex.rs`（stubの`codex`で毎時と日次のobservationがjobのprofileで動き、書けるrootもsandboxを外すflagも無いこと、serviceのtokenがありDBのpathが無いこと、findingの記録・更新・resolveとfindingに紐づく`blocked`のaskがserviceを通って帰属が`observer`になり、noteが`authorization_denied`で拒まれ、`observe_finished`の件数とidが合い、observer自身のeventだけなら次の毎時がskipされること、threadとmodelの記録、rolloutが無いときの`model_unknown`、`stats`と`kpi`のproviderごとの集計、利用上限で止まったCodexの`provider_unusable`、起動しないCodexの`executable_missing`、`--unavailable`の記録、`--no-claude`のsupervisorでCodexで動きClaudeを起動しないこと、Codexが止まれば`--no-claude`では理由を記録しClaudeが使えればClaudeで始め直すこと、表が無ければ今までどおりClaudeで動くこと）、`domain::stats::jobs`の`a_codex_observation_is_counted_under_codex_and_its_model`、`domain::actor_model`の`a_role_table_names_its_provider`と`a_job_moves_to_the_other_provider_or_waits`、`infrastructure::run_env`の`parses_the_role_tables`。Claudeのobserverは`tests/it/runtime_observer.rs`が同じクライアントモードの経路で確かめる
++
+ ## promptの入力の上限と選ぶ順
+ 
+ [ADR-t1566-1](../../adr/2026-10-03-t1566-1-headless-job-prompts-carry-decision-material-within-limits.md)の決定2〜6（task 1567）。`observer::observer_prompt`が指示の後に入力を節ごとに載せる。実装は`src/application/observer/input.rs`の`fit`（`observe --input`のファイルの読み取りは`infrastructure::observer::read_input`）、値はその定数。
+diff --git a/docs/design/supervisor-lifecycle/run-environment.md b/docs/design/supervisor-lifecycle/run-environment.md
+index 85d5b7cc..2bc12d25 100644
+--- a/docs/design/supervisor-lifecycle/run-environment.md
++++ b/docs/design/supervisor-lifecycle/run-environment.md
+@@ -4,8 +4,8 @@ type: design
+ title: "Run environment"
+ status: current
+ created: 2026-09-26
+-updated: 2026-10-05 # task 840: [broker.package]; task 1591; task 1437
+-last_verified: 2026-10-05 # task 840
++updated: 2026-10-05 # task 1223: the observer runs on Codex too; task 840: [broker.package]; task 1591; task 1437
++last_verified: 2026-10-05 # task 1223; task 840
+ scope: runtime
+ related:
+   - adr-t963-1
+@@ -57,7 +57,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
+ - `[headless]`は`wrapper`だけを持ち、非対話のsessionのwrapperを動かす場所を`"workspace"`（既定）か`"background"`で書く（[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)決定7。`load_headless_wrapper`、`Verifier::headless_wrapper`）。他の値・keyの重複・他のkeyは行番号付きのエラーにする。supervisorがwrapperを起動するたびに読み、読めなければ警告を出してworkspaceで開く。`background`のwrapperには`[run.env]`がworkspaceの`--env`でなくprocessのenvで渡る（[非対話のworker](headless-worker.md#workspaceなしのbackgroundのwrapper)）。旧バイナリは表ごと拒むので、この repositoryの`dagq.toml`には固定バイナリがtask 1405・1406を含んでから`wrapper = "background"`を足した（task 1408。理由と戻し方は`dagq.toml`のcomment）。
+ - `[worker.trial]`はworkerのmodelの限定の試しの設定で、`enabled`（`true` / `false`、既定`false`）と`window`（正の整数、既定60。対象の判定で比べる直近の予測の件数）を持つ（[Worker model](worker-model.md)、[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定4。`load_worker_trial`、`Verifier::worker_trial`）。supervisorがclaimのpassごとに読み、読めなければ試しの外でclaimする。既定は無効で、有効にするのは人の判断。この repositoryの`dagq.toml`には置かない。旧バイナリは表ごと拒むので、足すのはそれを知るバイナリに入れ替えた後にする。taskに由来する失敗の後のworkerのsessionの段上げ（決定5、[Worker model](worker-model.md#段上げ決定5)）は設定を持たず、`[worker.trial]`の有無に関係なく働く。
+ 
+-- `[roles.<role>]`はworker以外のアクターのsessionのprovider・model・effortで、`<role>`は`plan_review` / `review` / `recovery` / `goal_review` / `observer` / `throughput_review` / `runtime_planner` / `planner`、keyは`provider`（`claude` / `codex`）・`model`（空でない文字列。providerのmodelの名前）・`effort`（`low` / `medium` / `high` / `xhigh` / `max`）のどれでも、`[roles.runtime_planner]`だけはplannerの経路の`route`（`interactive` / `headless`、[Actor model](actor-model.md#runtimeのplannerの経路)）も持つ（[Actor model](actor-model.md)、[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定7、[ADR-t1063-1](../../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)の決定1、`review`は[ADR-t1207-1](../../adr/2026-09-30-t1207-1-codex-run-review.md)、`plan_review`はtask 1218、`throughput_review`はtask 1220。`load_role_models`、`Verifier::role_models`）。知らないrole・key・provider・effort、空のmodel、重複はエラーにする。表を読み終えてから`RoleModels::check`で、その役割を動かす実装の無いprovider（今は`goal_review`・`review`・`plan_review`・`throughput_review`以外の`codex`）と、`codex`の表のClaudeのmodel（`claude`で始まる名前）もエラーにする（`dagq.toml: [roles.recovery]: provider codex cannot run the recovery role; Codex runs only goal_review, review, plan_review, throughput_review`）。keyの無い表と表の無い役割は今までと同じ起動（`--model` / `--effort`を渡さない）。supervisorとobserverはjobやplannerを起動するたびに読み、読めなければ今までと同じ起動にする。`[roles.planner]`は人が開いたplannerの表で、`dagq plan`は何も開かずに拒むようになったので（ADR-t1394-1、task 1399）、新しいplannerには読まれない（書いてあっても受け付ける）。この repositoryの`dagq.toml`には`[roles.goal_review]`（task 1067）と`[roles.review]`（task 1208）と`[roles.plan_review]`（task 1219）と`[roles.throughput_review]`（task 1221）の`provider = "codex"`と、`[roles.runtime_planner]`の`route = "headless"`（task 1402。固定バイナリがtask 1396・1397・1398を含んでから足した。[Actor model](actor-model.md#runtimeのplannerの経路)）だけを置く。`[roles.review]`は固定バイナリがtask 1207を、`[roles.plan_review]`はtask 1218を、`[roles.throughput_review]`はtask 1220を含んでから足した。旧バイナリは表ごと拒み、その役割を`CODEX_ROLES`に持たないバイナリは`codex`を拒むので、足すのはそれを知るバイナリに入れ替えた後にする。
++- `[roles.<role>]`はworker以外のアクターのsessionのprovider・model・effortで、`<role>`は`plan_review` / `review` / `recovery` / `goal_review` / `observer` / `throughput_review` / `runtime_planner` / `planner`、keyは`provider`（`claude` / `codex`）・`model`（空でない文字列。providerのmodelの名前）・`effort`（`low` / `medium` / `high` / `xhigh` / `max`）のどれでも、`[roles.runtime_planner]`だけはplannerの経路の`route`（`interactive` / `headless`、[Actor model](actor-model.md#runtimeのplannerの経路)）も持つ（[Actor model](actor-model.md)、[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定7、[ADR-t1063-1](../../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)の決定1、`review`は[ADR-t1207-1](../../adr/2026-09-30-t1207-1-codex-run-review.md)、`plan_review`はtask 1218、`throughput_review`はtask 1220、`observer`は[ADR-t1222-1](../../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)とtask 1223。`load_role_models`、`Verifier::role_models`）。知らないrole・key・provider・effort、空のmodel、重複はエラーにする。表を読み終えてから`RoleModels::check`で、その役割を動かす実装の無いprovider（今は`goal_review`・`review`・`plan_review`・`throughput_review`・`observer`以外の`codex`）と、`codex`の表のClaudeのmodel（`claude`で始まる名前）もエラーにする（`dagq.toml: [roles.recovery]: provider codex cannot run the recovery role; Codex runs only goal_review, review, plan_review, throughput_review, observer`）。keyの無い表と表の無い役割は今までと同じ起動（`--model` / `--effort`を渡さない）。supervisorとobserverはjobやplannerを起動するたびに読み、読めなければ今までと同じ起動にする。`[roles.planner]`は人が開いたplannerの表で、`dagq plan`は何も開かずに拒むようになったので（ADR-t1394-1、task 1399）、新しいplannerには読まれない（書いてあっても受け付ける）。この repositoryの`dagq.toml`には`[roles.goal_review]`（task 1067）と`[roles.review]`（task 1208）と`[roles.plan_review]`（task 1219）と`[roles.throughput_review]`（task 1221）の`provider = "codex"`と、`[roles.runtime_planner]`の`route = "headless"`（task 1402。固定バイナリがtask 1396・1397・1398を含んでから足した。[Actor model](actor-model.md#runtimeのplannerの経路)）だけを置く。`[roles.review]`は固定バイナリがtask 1207を、`[roles.plan_review]`はtask 1218を、`[roles.throughput_review]`はtask 1220を含んでから足した。旧バイナリは表ごと拒み、その役割を`CODEX_ROLES`に持たないバイナリは`codex`を拒むので、足すのはそれを知るバイナリに入れ替えた後にする。
+ 
+ - `[language]`はAIが人に向けて書く文の言語（`tag`、BCP 47の言語タグ、既定は無しで指示しない）を持ち、利用者ごとの`config.toml`の同じ表より優先する（[Language](language.md)、[ADR-t616-2](../../adr/2026-09-27-t616-2-language-of-text-ai-writes-for-people-is-configurable.md)）。旧バイナリは表ごと拒むので、足すのはそれを知るバイナリに入れ替えた後にする。
+ 
+diff --git a/docs/design/supervisor-lifecycle/throughput-review.md b/docs/design/supervisor-lifecycle/throughput-review.md
+index 8c53a66b..60adcf9a 100644
+--- a/docs/design/supervisor-lifecycle/throughput-review.md
++++ b/docs/design/supervisor-lifecycle/throughput-review.md
+@@ -4,8 +4,8 @@ type: design
+ title: "スループットの見直し（`throughput-review`）"
+ status: current
+ created: 2026-09-29
+-updated: 2026-10-04 # task 1615: the command moved into application, infrastructure and compose
+-last_verified: 2026-10-04 # task 1615
++updated: 2026-10-05 # task 1223: the observer runs on Codex too
++last_verified: 2026-10-05 # task 1223
+ scope: runtime
+ related:
+   - adr-t1566-1
+@@ -89,7 +89,7 @@ task 1099のとき、Claudeのheadlessのjobはpromptを`claude -p`の位置引
+ 
+ `dagq.toml`の`[roles.throughput_review]`に`provider = "codex"`を書くと、見直しのjobはCodexの`codex exec --json`で動く（[ADR-t1063-1](../../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)、[Actor model](actor-model.md)の`CODEX_ROLES`）。jobは状態を変えず読むだけ（[ADR-t996-1](../../adr/2026-09-29-t996-1-supervisor-runs-throughput-review-jobs-and-reports-to-inbox.md)の決定4）なので、権限の意図`ACCESS`（`queue_cli`）はそのままで、Codexの実装が読み取りだけのsandboxに訳す（queue serviceが動いていればgoal reviewと同じjobのpermission profile `dagq_job`。`:read-only`を継ぎ、jobの`dagq`はクライアントモードでserviceに読みに行く。[Agent provider lifecycle](../provider-lifecycle.md)）。promptは変えず、Claudeのplugin・skill・hookに頼らない。
+ 
+-- 行き先（`Supervisor::throughput_review_route`）: providerを書かない役割は今までどおりClaudeで、queueのholdのあいだと`--no-claude`では始めない（[ADR-t1204-1](../../adr/2026-09-30-t1204-1-explicit-no-claude-operation.md)の決定2）。providerを書いた役割は`job_route`で、そのproviderが使えれば（supervisorにagentがあり控えられていない）そこで、使えなければもう一方のproviderで（launchに`switched_from`・`switch_reason`）始め、どちらも使えなければ待つ。`--no-claude`ではClaudeは使えないので、Codexを設定した見直しはCodexで始まり、Codexも使えなければ子processに`--unavailable`で理由（`provider_disabled: Claude is disabled by --no-claude and codex cannot be used (<理由>); handle this role manually`）を渡す。子processは期間を決めて毎時の判定をした後（判定に当たらない時間はskippedのまま）、agentを起動せずに`throughput_review_finished`（`outcome: error`、`error`に理由）を記録し、inboxの`check the failed review`になる
++- 行き先（`Supervisor::job_start_route`に`ModelRole::ThroughputReview`。observerと共有する。task 1223）: providerを書かない役割は今までどおりClaudeで、queueのholdのあいだと`--no-claude`では始めない（[ADR-t1204-1](../../adr/2026-09-30-t1204-1-explicit-no-claude-operation.md)の決定2）。providerを書いた役割は`job_route`で、そのproviderが使えれば（supervisorにagentがあり控えられていない）そこで、使えなければもう一方のproviderで（launchに`switched_from`・`switch_reason`）始め、どちらも使えなければ待つ。`--no-claude`ではClaudeは使えないので、Codexを設定した見直しはCodexで始まり、Codexも使えなければ子processに`--unavailable`で理由（`provider_disabled: Claude is disabled by --no-claude and codex cannot be used (<理由>); handle this role manually`）を渡す。子processは期間を決めて毎時の判定をした後（判定に当たらない時間はskippedのまま）、agentを起動せずに`throughput_review_finished`（`outcome: error`、`error`に理由）を記録し、inboxの`check the failed review`になる
+ - 子process: supervisorは行き先のlaunchを`--launch`で渡し、コマンドはその`provider`のagent（`ClaudeCode`か`Codex`）で起動する。`--launch`が無い（人が手で打つ）ときは束縛されたcheckoutの`[roles.throughput_review]`（`compose::throughput_review_launch`）。実行ファイルを解決できない（supervisorが見つけた後に消えた）ときもコマンドは`review`の前で失敗せず、与えられたpathのまま起動を試み、起動の失敗を下の`provider_unusable`（`executable_missing`）として終わりに記録する（期間の記録が残らずにこのprocessで期間が落ちることがないように）。Codexのjobは`session_id`をnullで始め（`--session-id`を渡さない）、終わりにproviderの`job_session`（`thread.started`のthreadと、rolloutの実際のmodel）を`throughput_review_finished`の`session_id`・`model`・`model_unknown`に書く（`JobSession::record`）。結論はproviderの`job_reply`（Codexは最後の`agent_message`）を`parse_output`で読み、保存・週次のfinding・`throughput_review_reported`はClaudeと同じ
+ - Codexが使えなかったとき: `--switchable`（役割がproviderを書いた）でCodexのjobが成功しなかったとき、providerの`job_failure`（`output.out` / `output.err`。agentが起動しなかったときは出力が無いので起動のerrorを`application::job_start_failure`で分類する。引数・envの大きさによる`E2BIG`とstdinの一時ファイルを用意できない`StdinUnprepared`は`other`で、使えないことを示さない。task 1560）が使えないこと（認証・利用上限・起動の失敗・実行ファイルが無い）を示せば、`throughput_review_finished`に`provider_unusable`（`provider`・`reason`）を書く。これはattentionにならず（`domain::event_attention`）、その期間は`reviewed`に数えない。supervisorは自分の子のその終わりを見てCodexを控え（`hold_provider`。利用上限はCodexの出力から再開の時刻を読む）、このprocessが始めた期間の記録から外すので、次のpassでその期間はもう一方のproviderで始まる。execの引き継ぎで前のprocessから渡った見直し（`reap_handed_over_reviews`が回収するもの）の終わりも同じく`provider_unusable`を見てCodexを控える（`hold_codex_for`）ので、引き継ぎの間に止まったCodexの見直しの期間も、もう一度Codexでは始まらない。`--no-claude`ではClaudeに行かず、上の`--unavailable`で理由を記録する。控えを書けなかったときは期間をやり直さない（同じCodexをすぐ起動し直さないため）。ClaudeのjobはClaudeの壁に当たっても今までどおり失敗として記録する（queueのhold askには入れない）
+ - 起動の引数: jobのcwdはjobのdir（Gitの外）なので、`codex exec`の起動に`--skip-git-repo-check`を付ける（無いとCodexがGitのrepositoryの外での起動を拒み、jobは`exit_code` 1で落ちる。task 1378、[Codexのheadless job](../provider-lifecycle.md#codexのheadless-job)）。`tests/it/throughput_review_codex.rs`のstubのcodexは実物と同じく、Gitのwork treeの外でflagが無ければ拒む
+diff --git a/plugins/claude-dagq/skills/dagq-recover/reference/up-down.md b/plugins/claude-dagq/skills/dagq-recover/reference/up-down.md
+index 48e36784..4bf5c306 100644
+--- a/plugins/claude-dagq/skills/dagq-recover/reference/up-down.md
++++ b/plugins/claude-dagq/skills/dagq-recover/reference/up-down.md
+@@ -21,7 +21,7 @@ Read this when `up` or `down` returns something the `dagq-recover` skill (sectio
+ 
+ On the person's word, drain first and use `up --no-claude` (also accepted by `supervise`). This skips Claude's executable/plugin/trust preflights and inbox creation; keep a manually opened inbox. Workers use Codex, including tasks requesting Claude; when Codex is unavailable they wait without falling back to Claude. A live supervisor with another policy must be drained before changing it. Updates preserve the policy.
+ 
+-`status` lists `provider_disabled` / `handle disabled roles manually`. Handle review, plan review and recovery with this skill's manual procedures; no approval or policy bypass is implied by the flag. Reviews on Claude (no `[roles.review]` provider, or `claude`) release their leases, write material, and open `approve_landing` with `provider_disabled`; no review agent ran. Runtime planners, observer, inbox nudges and a throughput review on Claude stay off. Goal reviews, run reviews, plan reviews and throughput reviews configured for Codex (`[roles.goal_review]` / `[roles.review]` / `[roles.plan_review]` / `[roles.throughput_review]` with `provider = "codex"`) continue and never fall back to Claude; a run review whose Codex is missing, held or stopped at its limit opens `approve_landing` with why (`job_failed`, or `provider_disabled` with Codex's reason) instead of waiting, such a plan review goes to `plan review by hand` with why, and such a throughput review records its failure with why (`check the failed review`). Do not run `observe` to substitute these roles: it still starts Claude (`plan` is refused and opens nothing). Existing Claude workers must finish before switching; an old Claude run needing a resume waits for manual recovery.
++`status` lists `provider_disabled` / `handle disabled roles manually`. Handle review, plan review and recovery with this skill's manual procedures; no approval or policy bypass is implied by the flag. Reviews on Claude (no `[roles.review]` provider, or `claude`) release their leases, write material, and open `approve_landing` with `provider_disabled`; no review agent ran. Runtime planners, inbox nudges, and an observer or a throughput review on Claude stay off. Goal reviews, run reviews, plan reviews, throughput reviews and the observer configured for Codex (`[roles.goal_review]` / `[roles.review]` / `[roles.plan_review]` / `[roles.throughput_review]` / `[roles.observer]` with `provider = "codex"`) continue and never fall back to Claude; a run review whose Codex is missing, held or stopped at its limit opens `approve_landing` with why (`job_failed`, or `provider_disabled` with Codex's reason) instead of waiting, such a plan review goes to `plan review by hand` with why, such a throughput review records its failure with why (`check the failed review`), and such an observation records its `observe_finished` as an error with why. Do not run `observe` to substitute these roles: unless `[roles.observer]` names Codex it still starts Claude (`plan` is refused and opens nothing). Existing Claude workers must finish before switching; an old Claude run needing a resume waits for manual recovery.
+ 
+ ### A supervisor of another build
+ 
+diff --git a/plugins/claude-dagq/skills/dagq/reference/provider.md b/plugins/claude-dagq/skills/dagq/reference/provider.md
+index 5dabfbb1..9fedd04b 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/provider.md
++++ b/plugins/claude-dagq/skills/dagq/reference/provider.md
+@@ -4,7 +4,7 @@ Read this to choose which agent runs a task's worker and how, to read which one
+ 
+ ## Provider and route
+ 
+-A task's worker has a **provider** (`claude` or `codex`) and a **route** (`worker_mode`): `interactive` (a Claude Code session in the run's cmux terminal, read from its screen and idle marker, ended with `/exit`) or `headless` (one non-interactive call per turn; the call's exit and output are the turn's result, and an answer, a send-back or a resume is the next call on the same session id). Claude runs either way; Codex runs headless only. The task's provider changes only its worker. Four jobs can run on Codex, each only when its table in `dagq.toml` says `provider = "codex"` (a model, if given, is Codex's), and all run `codex exec --json` in the read-only sandbox. Each moves to Claude (`switched_from` and `switch_reason` in their start event's `launch`) while Codex cannot be used: Codex is missing, does not start, or is held after a job stopped at its login or usage limit (Codex's hold opens no ask). The goal review is `[roles.goal_review]` (ADR-t1063-1), the run's review `[roles.review]` (ADR-t1207-1), whose stopped Codex review records `review_retried` with `provider` and `switch_reason` and starts again on Claude, and the plan review `[roles.plan_review]`, whose stopped Codex plan review records `plan_review_failed` with `provider_unusable` (no `plan review by hand`: the proposal is not held) and starts again on Claude, and the throughput review `[roles.throughput_review]`, whose stopped Codex review records `throughput_review_finished` with `provider_unusable` (no `check the failed review`) and starts its period again on Claude. A Codex review or plan review does not wait for Claude's `queue_hold` ask. Under `--no-claude` none of them falls back to Claude: a run review with no provider left goes to a person in an `approve_landing` ask instead of waiting (`review_failed`), a plan review with no provider left goes to `plan review by hand` with why (`plan_review_failed`), and a throughput review with no provider left records why in its `throughput_review_finished` (`check the failed review`). `provider = "codex"` for any other role is an error in `dagq.toml`. Recovery jobs, the observer, planners and the inbox stay on Claude. `dagq doctor`'s `roles` shows each role's provider and where it comes from.
++A task's worker has a **provider** (`claude` or `codex`) and a **route** (`worker_mode`): `interactive` (a Claude Code session in the run's cmux terminal, read from its screen and idle marker, ended with `/exit`) or `headless` (one non-interactive call per turn; the call's exit and output are the turn's result, and an answer, a send-back or a resume is the next call on the same session id). Claude runs either way; Codex runs headless only. The task's provider changes only its worker. Five jobs can run on Codex, each only when its table in `dagq.toml` says `provider = "codex"` (a model, if given, is Codex's), and all run `codex exec --json` in the read-only sandbox. Each moves to Claude (`switched_from` and `switch_reason` in their start event's `launch`) while Codex cannot be used: Codex is missing, does not start, or is held after a job stopped at its login or usage limit (Codex's hold opens no ask). The goal review is `[roles.goal_review]` (ADR-t1063-1), the run's review `[roles.review]` (ADR-t1207-1), whose stopped Codex review records `review_retried` with `provider` and `switch_reason` and starts again on Claude, and the plan review `[roles.plan_review]`, whose stopped Codex plan review records `plan_review_failed` with `provider_unusable` (no `plan review by hand`: the proposal is not held) and starts again on Claude, and the throughput review `[roles.throughput_review]`, whose stopped Codex review records `throughput_review_finished` with `provider_unusable` (no `check the failed review`) and starts its period again on Claude, and the observer `[roles.observer]`, whose `dagq` writes its findings and `blocked` asks through the queue service as Claude's does, and whose stopped Codex observation records `observe_finished` with `provider_unusable` and starts again on Claude. A Codex review or plan review does not wait for Claude's `queue_hold` ask. Under `--no-claude` none of them falls back to Claude: a run review with no provider left goes to a person in an `approve_landing` ask instead of waiting (`review_failed`), a plan review with no provider left goes to `plan review by hand` with why (`plan_review_failed`), a throughput review with no provider left records why in its `throughput_review_finished` (`check the failed review`), and an observation with no provider left records why in its `observe_finished` (`outcome: error`, `unavailable: true`). `provider = "codex"` for any other role is an error in `dagq.toml`. Recovery jobs, planners and the inbox stay on Claude. `dagq doctor`'s `roles` shows each role's provider and where it comes from.
+ 
+ | registered with | provider | route |
+ | --- | --- | --- |
+diff --git a/src/application/observer/mod.rs b/src/application/observer/mod.rs
+index f2278c3b..0482c62c 100644
+--- a/src/application/observer/mod.rs
++++ b/src/application/observer/mod.rs
+@@ -31,7 +31,8 @@ use crate::{
+         dependency_graph, lifecycle::OBSERVER_ROLE,
+     },
+     domain::{
+-        ActorContext, ActorRole, AskId, EventId, FindingQuery, NewHold, NoteQuery, RunEvent,
++        ActorContext, ActorRole, AskId, EventId, FindingQuery, NewHold, NoteQuery, Provider,
++        RunEvent,
+         actor_model::ActorLaunch,
+         headless_job::JobAccess,
+         language::Language,
+@@ -73,6 +74,22 @@ pub struct ObserveOptions {
+     pub user_config: Option<PathBuf>,
+     /// The prompt's bytes ([`PROMPT_LIMIT`] but in tests).
+     pub prompt_limit: usize,
++    /// What the agent starts with: the provider the supervisor routed it
++    /// to (ADR-t1063-1 decisions 1 and 4, task 1223), the provider of
++    /// `provider`; `None` reads `[roles.observer]` of the bound checkout's
++    /// `dagq.toml` ([`ObserverHost::launch`]).
++    pub launch: Option<ActorLaunch>,
++    /// Whether `[roles.observer]` names its provider, so that a Codex
++    /// observation that stopped where Codex cannot be used (a login, the
++    /// usage limit, a launch that failed, the executable gone) records
++    /// `provider_unusable`, and the supervisor holds Codex and starts the
++    /// observation again on the other provider (ADR-t1063-1 decision 4).
++    pub switchable: bool,
++    /// Why no provider can run the observation (`--no-claude` with Codex
++    /// not usable, ADR-t1204-1): an observation that is not skipped records
++    /// its finish as an `error` with this reason instead of starting the
++    /// agent.
++    pub unavailable: Option<String>,
+ }
+ 
+ /// The reads of the queue the observer's input takes that the composition
+@@ -98,9 +115,9 @@ pub trait ObserverHost {
+     /// A new directory for the observation started at `started`.
+     fn observation_dir(&self, db: &Path, started: i64) -> Result<PathBuf>;
+     fn write(&self, path: &Path, contents: &str) -> Result<()>;
+-    /// What the agent printed in `dir`, stdout then stderr on a line of
+-    /// their own; empty for a stream it did not leave.
+-    fn output(&self, dir: &Path) -> String;
++    /// What the agent printed in `dir`: its stdout and its stderr, each
++    /// empty for a stream it did not leave.
++    fn output(&self, dir: &Path) -> (String, String);
+     /// What the observer's agent starts with (ADR-0079 decision 7).
+     fn launch(&self, checkout: Option<&Path>) -> ActorLaunch;
+     /// The language of the prompt (ADR-t616-2).
+@@ -127,13 +144,15 @@ pub struct ObserverEnvironment<'a, Q: ?Sized> {
+ /// Run one observation: gather the inputs, start the agent headless with
+ /// `DAGQ_ROLE=observer`, wait for it, then record `observe_finished` with
+ /// what it wrote and, for a succeeded hourly one, save the new cursor.
+-/// `signals` must belong to the provider that starts this observation.
+-/// `db` is the queue's canonical path, which names its directory.
++/// `signals` are Claude Code's, which read a Claude observation's failure
++/// (a Codex one is read by `provider`'s `job_failure`); they must belong to
++/// `provider` when it is Claude's. `db` is the queue's canonical path,
++/// which names its directory.
+ pub fn observe<Q: Queue + ObserverLog>(
+     queue: &mut Q,
+     db: &Path,
+     provider: &dyn AgentProvider,
+-    signals: &dyn AgentSignals,
++    signals: Option<&dyn AgentSignals>,
+     options: &ObserveOptions,
+     environment: &ObserverEnvironment<'_, Q>,
+ ) -> Result<Value> {
+@@ -165,6 +184,14 @@ pub fn observe<Q: Queue + ObserverLog>(
+         return Ok(payload);
+     }
+     let cursor = EventId::new(stats["next_cursor"].as_i64().unwrap_or_default());
++    // No provider can run it (`--no-claude`, Codex not usable): the
++    // observation records why and starts no agent (ADR-t1204-1, task
++    // 1223). Its window is read again by the next one.
++    if !options.dry_run
++        && let Some(why) = &options.unavailable
++    {
++        return unavailable(queue, options.mode, since, cursor, &alerts, why);
++    }
+     let notes = queue.notes(&NoteQuery {
+         goal_id: None,
+         task_id: None,
+@@ -241,9 +268,15 @@ pub fn observe<Q: Queue + ObserverLog>(
+         &serde_json::to_string_pretty(&input)?,
+     )?;
+     let ask_mark = queue.ask_high_water()?;
+-    // The job's Claude session id (ADR-0048 decision 4).
+-    let session_id = generators.ids.uuid();
+-    let launch = host.launch(checkout.as_deref());
++    let launch = options
++        .launch
++        .clone()
++        .unwrap_or_else(|| host.launch(checkout.as_deref()));
++    // The job's Claude session id (ADR-0048 decision 4); Codex names its
++    // thread itself, which the finish records (ADR-t1063-1 decision 6).
++    // The actor is one per observation either way.
++    let instance = generators.ids.uuid();
++    let session_id = (launch.provider == Provider::Claude).then(|| instance.clone());
+     let mut started_payload = json!({"mode": options.mode.as_str(), "since": since, "dir": dir, "session_id": session_id, "launch": launch.to_value()});
+     merge(&mut started_payload, &prompt_record);
+     let event_mark = queue.record_queue_event(EventKind::ObserveStarted, started_payload)?;
+@@ -254,16 +287,23 @@ pub fn observe<Q: Queue + ObserverLog>(
+         options.mode.as_str()
+     );
+     let clock = Instant::now();
++    let started_ms = generators
++        .clock
++        .system_time()
++        .duration_since(std::time::UNIX_EPOCH)
++        .ok()
++        .and_then(|since| i64::try_from(since.as_millis()).ok());
+     // `failed`: the agent exited non-zero or by a signal; `error`: it could
+     // not start or ran past the timeout.
++    let mut start_failure = None;
+     let (outcome, exit_code, error) = match host.run(
+         provider,
+         db,
+         &dir,
+         &prompt,
+         &HeadlessAgent {
+-            actor: observer_actor(&session_id),
+-            session_id: Some(&session_id),
++            actor: observer_actor(&instance),
++            session_id: session_id.as_deref(),
+             launch: &launch,
+             dagq: &options.dagq,
+             timeout: options.timeout,
+@@ -273,17 +313,37 @@ pub fn observe<Q: Queue + ObserverLog>(
+     ) {
+         Ok(Some(0)) => ("succeeded", Some(0), None),
+         Ok(code) => ("failed", code, None),
+-        Err(error) => ("error", None, Some(format!("{error:#}"))),
++        Err(error) => {
++            // An agent that did not start at all (its executable gone)
++            // left no output to read why: its start's error says.
++            if error.to_string() == "start the observer's agent" {
++                start_failure = Some(crate::application::job_start_failure(&error));
++            }
++            ("error", None, Some(format!("{error:#}")))
++        }
+     };
+-    // An agent stopped at a login that ran out or the usage limit joins
+-    // the queue's hold ask (ADR-0047 decision 42, task 438): no observer
+-    // starts again until a person answers it.
++    let (stdout, stderr) = host.output(&dir);
++    // A Claude agent stopped at a login that ran out or the usage limit
++    // joins the queue's hold ask (ADR-0047 decision 42, task 438): no
++    // observer starts again until a person answers it. A Codex one does
++    // not hold Claude: when its role names its provider, its finish says
++    // Codex could not be used, and the supervisor holds Codex and starts
++    // the observation again on the other provider (ADR-t1063-1 decision 4).
++    let mut provider_unusable = None;
+     let wall = if outcome == "succeeded" {
+         None
++    } else if launch.provider == Provider::Codex {
++        if options.switchable {
++            let failure = start_failure.unwrap_or_else(|| provider.job_failure(&stdout, &stderr));
++            provider_unusable = failure.switch_reason().map(
++                |reason| json!({"provider": launch.provider.as_str(), "reason": reason.as_str()}),
++            );
++        }
++        None
+     } else {
+-        // Read both streams as before, with a line boundary so stderr
+-        // diagnostics cannot be joined onto a partial stdout line.
+-        signals.job_failure(&host.output(&dir)).wall()
++        // Both streams, with a line boundary so stderr diagnostics cannot
++        // be joined onto a partial stdout line.
++        signals.and_then(|signals| signals.job_failure(&format!("{stdout}\n{stderr}")).wall())
+     };
+     // A hold that could not be written is logged: the observation's
+     // finish is recorded either way.
+@@ -306,7 +366,7 @@ pub fn observe<Q: Queue + ObserverLog>(
+     if saved {
+         host.write_cursor(db, cursor)?;
+     }
+-    let payload = json!({
++    let mut payload = json!({
+         "mode": options.mode.as_str(),
+         "outcome": outcome,
+         "exit_code": exit_code,
+@@ -330,6 +390,15 @@ pub fn observe<Q: Queue + ObserverLog>(
+         "hold_ask_id": hold,
+         "alerts": alerts,
+     });
++    // The span this observation's start opened closes by its directory;
++    // Codex's thread and the model of its rollout (ADR-t1063-1 decision 6)
++    // are the id and the model it and `stats` read.
++    if let Some(session) = provider.job_session(&stdout, started_ms) {
++        session.record(&mut payload);
++    }
++    if let Some(unusable) = provider_unusable {
++        payload["provider_unusable"] = unusable;
++    }
+     queue.record_queue_event(EventKind::ObserveFinished, payload.clone())?;
+     tracing::info!(
+         mode = options.mode.as_str(),
+@@ -347,6 +416,50 @@ pub fn observe<Q: Queue + ObserverLog>(
+     Ok(payload)
+ }
+ 
++/// Record the finish of an observation no provider can run (`why`), with
++/// no agent started and no directory, and return its payload: an `error`,
++/// so the next observation reads its window again.
++fn unavailable(
++    queue: &mut dyn Queue,
++    mode: ObserveMode,
++    since: Option<EventId>,
++    cursor: EventId,
++    alerts: &[Value],
++    why: &str,
++) -> Result<Value> {
++    let error = format!("the observer could not start: {why}");
++    let payload = json!({
++        "mode": mode.as_str(),
++        "outcome": "error",
++        "exit_code": null,
++        "error": error,
++        "unavailable": true,
++        "since": since,
++        "cursor": cursor,
++        "cursor_saved": false,
++        "findings_recorded": 0,
++        "findings_updated": 0,
++        "findings_closed": 0,
++        "asks": 0,
++        "findings_without_ask": 0,
++        "recorded_finding_ids": [],
++        "updated_finding_ids": [],
++        "closed_finding_ids": [],
++        "ask_ids": [],
++        "without_ask_finding_ids": [],
++        "duration_secs": 0,
++        "dir": null,
++        "alerts": alerts,
++    });
++    queue.record_queue_event(EventKind::ObserveFinished, payload.clone())?;
++    tracing::warn!(
++        mode = mode.as_str(),
++        "observer ({}) not started: {why}",
++        mode.as_str()
++    );
++    Ok(payload)
++}
++
+ /// `extra`'s keys set on the object `payload`.
+ fn merge(payload: &mut Value, extra: &Value) {
+     if let (Some(payload), Some(extra)) = (payload.as_object_mut(), extra.as_object()) {
+diff --git a/src/application/supervise/mod.rs b/src/application/supervise/mod.rs
+index deac3cc0..0942bbeb 100644
+--- a/src/application/supervise/mod.rs
++++ b/src/application/supervise/mod.rs
+@@ -121,6 +121,7 @@ mod idle;
+ mod inbox_nudge;
+ mod jobs;
+ mod landing;
++mod observer;
+ mod plan_review;
+ mod planner_turns;
+ mod provider;
+@@ -850,6 +851,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
+         provisioning_error: None,
+         observer: None,
+         observers_launched: Vec::new(),
++        observer_again: None,
+         throughput_review: throughput_review::ThroughputReviewWatch::default(),
+         last_sweep: None,
+         last_turns: None,
+@@ -996,10 +998,14 @@ struct Supervisor<'a> {
+     claiming: bool,
+     provisioning_error: Option<String>,
+     /// The observer job running now: one at a time, outside the run slots.
+-    observer: Option<(ObserveMode, Box<dyn Spawned>)>,
++    observer: Option<observer::ObserverJob>,
+     /// When this process last launched each observation, so one that dies
+     /// before it records anything is not relaunched on every pass.
+     observers_launched: Vec<(ObserveMode, Instant)>,
++    /// The observation due again now whatever the queue says: a Codex one
++    /// that found Codex unusable, which starts again on the other provider
++    /// (ADR-t1063-1 decision 4, task 1223).
++    observer_again: Option<ObserveMode>,
+     /// The throughput review running now (ADR-t996-1), and the periods this
+     /// process started.
+     throughput_review: throughput_review::ThroughputReviewWatch,
+@@ -1648,7 +1654,9 @@ impl Supervisor<'_> {
+             // (ADR-t1063-1 decision 5, ADR-t1204-1, task 1220).
+             self.throughput_review_pass(options, !stopping && self.claiming && self.service_up);
+             if !stopping && self.claiming {
+-                if !self.no_claude && self.queue_hold.is_none() && self.service_up {
++                // Its route decides on `--no-claude` and the hold as the
++                // throughput review's does (task 1223).
++                if self.service_up {
+                     self.start_observer_when_due(options);
+                 }
+                 self.auto_update_pass(options);
+@@ -2277,6 +2285,9 @@ impl Supervisor<'_> {
+         if options.observe_daily {
+             modes.insert(0, (ObserveMode::Daily, DAILY_WINDOW_SECS));
+         }
++        if let Some(mode) = self.observer_again {
++            return Ok(Some(mode));
++        }
+         for (mode, every) in modes {
+             let recorded = self
+                 .queue
+@@ -2306,8 +2317,29 @@ impl Supervisor<'_> {
+                 return;
+             }
+         };
++        let Some(route) = self.job_start_route(crate::domain::actor_model::ModelRole::Observer)
++        else {
++            return;
++        };
++        let (launch, switchable, unavailable) = match route {
++            throughput_review::JobStartRoute::Start(launch, switchable) => {
++                (launch, switchable, None)
++            }
++            throughput_review::JobStartRoute::Unavailable(launch, why) => {
++                (launch, false, Some(why))
++            }
++        };
++        // Its finish is the first `observe_finished` past this mark.
++        let mark = match self.queue.latest_event_id() {
++            Ok(mark) => mark,
++            Err(error) => {
++                warn!(error = %format_args!("{error:#}"), "observer schedule could not be read: {error:#}");
++                return;
++            }
++        };
+         // The observer reads the active time of the spans still open too.
+         self.record_session_turns(true);
++        self.observer_again = None;
+         self.observers_launched
+             .retain(|(launched, _)| *launched != mode);
+         self.observers_launched.push((mode, Instant::now()));
+@@ -2320,7 +2352,20 @@ impl Supervisor<'_> {
+             .arg(&self.layout.cmux)
+             .arg("--claude")
+             .arg(&self.layout.claude)
++            .arg("--codex")
++            .arg(&self.layout.codex)
++            .arg("--launch")
++            .arg(launch.to_value().to_string())
+             .current_dir(&self.layout.repo_root);
++        if let Some(home) = &self.layout.codex_home {
++            command.arg("--codex-home").arg(home);
++        }
++        if switchable {
++            command.arg("--switchable");
++        }
++        if let Some(why) = &unavailable {
++            command.arg("--unavailable").arg(why);
++        }
+         for name in &self.layout.observer_env_remove {
+             command.env_remove(name);
+         }
+@@ -2332,8 +2377,20 @@ impl Supervisor<'_> {
+         }
+         match self.spawner.spawn(&command, Streams::Null) {
+             Ok(child) => {
+-                info!("observer ({}) started: pid {}", mode.as_str(), child.id());
+-                self.observer = Some((mode, child));
++                info!(
++                    "observer ({}) started on {}: pid {}",
++                    mode.as_str(),
++                    launch.provider.as_str(),
++                    child.id()
++                );
++                self.observer = Some(observer::ObserverJob {
++                    mode,
++                    child,
++                    switchable_codex: switchable
++                        && unavailable.is_none()
++                        && launch.provider == Provider::Codex,
++                    mark,
++                });
+             }
+             Err(error) => {
+                 warn!(error = %format_args!("{error:#}"), "observer ({}) could not start: {error:#}", mode.as_str())
+@@ -2430,7 +2487,10 @@ impl Supervisor<'_> {
+     /// agent and that agent's Bash), so none outlives this supervisor or
+     /// runs on unwatched after its exec; `why` ends the log line.
+     pub(super) fn stop_observer(&mut self, why: &str) {
+-        let Some((mode, mut child)) = self.observer.take() else {
++        let Some(observer::ObserverJob {
++            mode, mut child, ..
++        }) = self.observer.take()
++        else {
+             return;
+         };
+         // Listed before the kill: once `observe` is gone, its agent is no
+@@ -2449,23 +2509,27 @@ impl Supervisor<'_> {
+         );
+     }
+     /// Reap the observer once it exited; its own `observe_finished` is the
+-    /// record.
++    /// record. A Codex one that found Codex unusable holds Codex and is
++    /// due again ([`Self::codex_observer_unusable`]).
+     fn poll_observer(&mut self) {
+-        let Some((mode, child)) = self.observer.as_mut() else {
++        let Some(job) = self.observer.as_mut() else {
+             return;
+         };
+-        let mode = *mode;
+-        match child.try_wait() {
+-            Ok(None) => {}
++        let mode = job.mode;
++        match job.child.try_wait() {
++            Ok(None) => return,
+             Ok(Some(status)) => {
+                 info!("observer ({}) exited: {status}", mode.as_str());
+-                self.observer = None;
+             }
+             Err(error) => {
+                 warn!(error = %format_args!("{error:#}"), "observer ({}) could not be waited for: {error:#}", mode.as_str());
+-                self.observer = None;
+             }
+         }
++        if let Some(job) = self.observer.take()
++            && job.switchable_codex
++        {
++            self.codex_observer_unusable(&job);
++        }
+     }
+     /// Whether this process still drives `id` in a slot. Such a run whose
+     /// lease another token holds now, stale or not, is adopted, resumed or
+diff --git a/src/application/supervise/observer.rs b/src/application/supervise/observer.rs
+new file mode 100644
+index 00000000..a54e5e4e
+--- /dev/null
++++ b/src/application/supervise/observer.rs
+@@ -0,0 +1,85 @@
++//! The observer job the supervisor starts on its timer, on the provider
++//! its route gives (ADR-t1063-1 decisions 1, 4 and 5, ADR-t1222-1, task
++//! 1223): a Codex one that found Codex unusable holds Codex and starts
++//! again on the other provider, or, under `--no-claude`, records why.
++
++use super::*;
++use crate::domain::event_kind::OBSERVE_FINISHED;
++use crate::domain::provider_switch::SwitchReason;
++
++/// The newest observations a supervisor reads for the finish of the one it
++/// waited on.
++const FINISH_EVENTS: usize = 10;
++
++/// An observation this process started and waits on.
++pub(super) struct ObserverJob {
++    pub(super) mode: ObserveMode,
++    pub(super) child: Box<dyn Spawned>,
++    /// Whether it runs on Codex for a role that names its provider: a
++    /// finish that says Codex could not be used holds Codex and makes the
++    /// observation due again.
++    pub(super) switchable_codex: bool,
++    /// The newest event when it started: its finish comes after.
++    pub(super) mark: EventId,
++}
++
++impl Supervisor<'_> {
++    /// After a Codex observation of a role that names its provider exited:
++    /// when its finish says Codex could not be used (`provider_unusable`),
++    /// hold Codex as a worker's or another job's failure does, and make
++    /// the observation due again, so that it starts on the other provider
++    /// (or, under `--no-claude`, records why). A hold that cannot be
++    /// written leaves the observation to its interval, so it is not
++    /// started again on Codex at once.
++    pub(super) fn codex_observer_unusable(&mut self, job: &ObserverJob) {
++        let finished = match self.queue.latest_events_of(OBSERVE_FINISHED, FINISH_EVENTS) {
++            Ok(finished) => finished,
++            Err(error) => {
++                warn!(error = %format_args!("{error:#}"), "the observer's finish could not be read: {error:#}");
++                return;
++            }
++        };
++        let Some(finish) = finished
++            .iter()
++            .find(|event| event.id > job.mark && event.payload["mode"] == job.mode.as_str())
++        else {
++            return;
++        };
++        let unusable = &finish.payload["provider_unusable"];
++        let Some(reason) = unusable["reason"]
++            .as_str()
++            .filter(|_| unusable["provider"] == Provider::Codex.as_str())
++            .and_then(|reason| reason.parse::<SwitchReason>().ok())
++        else {
++            return;
++        };
++        // Codex's own words may say when a usage limit resets.
++        let output = finish.payload["dir"]
++            .as_str()
++            .and_then(|dir| {
++                self.files
++                    .read_to_string(&Path::new(dir).join("output.out"))
++                    .ok()
++            })
++            .unwrap_or_default();
++        let said = format!(
++            "{}\n{output}",
++            finish.payload["error"].as_str().unwrap_or_default()
++        );
++        match self.hold_provider(Provider::Codex, reason, None, &said) {
++            Ok(()) => {
++                info!(
++                    "observer ({}): codex cannot be used ({}); the observation starts again on the other provider",
++                    job.mode.as_str(),
++                    reason.as_str()
++                );
++                self.observers_launched
++                    .retain(|(launched, _)| *launched != job.mode);
++                self.observer_again = Some(job.mode);
++            }
++            Err(error) => {
++                warn!(error = %format_args!("{error:#}"), "codex could not be held after the observer failed: {error:#}");
++            }
++        }
++    }
++}
+diff --git a/src/application/supervise/throughput_review.rs b/src/application/supervise/throughput_review.rs
+index 688abadb..71610eb5 100644
+--- a/src/application/supervise/throughput_review.rs
++++ b/src/application/supervise/throughput_review.rs
+@@ -33,14 +33,13 @@ struct ReviewJob {
+     switchable_codex: bool,
+ }
+ 
+-/// How the due review starts (ADR-t1063-1 decisions 1, 4 and 5,
+-/// ADR-t1204-1).
+-enum ReviewRoute {
+-    /// On this launch; `true` when `[roles.throughput_review]` names its
+-    /// provider.
++/// How a due job of the queue's (the throughput review, the observer)
++/// starts (ADR-t1063-1 decisions 1, 4 and 5, ADR-t1204-1).
++pub(super) enum JobStartRoute {
++    /// On this launch; `true` when its `[roles.<role>]` names its provider.
+     Start(ActorLaunch, bool),
+     /// Under `--no-claude`, no provider can run it: the command records
+-    /// why for the period that needs a review, starting no agent.
++    /// why, starting no agent.
+     Unavailable(ActorLaunch, String),
+ }
+ 
+@@ -96,28 +95,28 @@ impl Supervisor<'_> {
+         Ok(None)
+     }
+ 
+-    /// Where the due review goes, or `None` while it waits. A role that
+-    /// names no provider runs on Claude as before: it waits while the
+-    /// queue's hold ask holds Claude, and does not start under
+-    /// `--no-claude` (ADR-t1204-1 decision 2). One that names its provider
+-    /// starts there when it can be used, else on the other provider when
+-    /// that one can be, else waits, or, under `--no-claude`, records why
+-    /// (a Codex review never moves to Claude then).
+-    fn throughput_review_route(&self) -> Option<ReviewRoute> {
+-        let role = ModelRole::ThroughputReview;
++    /// Where the due job of `role` (the throughput review, the observer)
++    /// goes, or `None` while it waits. A role that names no provider runs
++    /// on Claude as before: it waits while the queue's hold ask holds
++    /// Claude, and does not start under `--no-claude` (ADR-t1204-1
++    /// decision 2). One that names its provider starts there when it can
++    /// be used, else on the other provider when that one can be, else
++    /// waits, or, under `--no-claude`, records why (a Codex job never
++    /// moves to Claude then).
++    pub(super) fn job_start_route(&self, role: ModelRole) -> Option<JobStartRoute> {
+         let models = self.role_models(role);
+         let launch = models.launch(role);
+         if !models.switchable(role) {
+             return (!self.no_claude && self.queue_hold.is_none())
+-                .then_some(ReviewRoute::Start(launch, false));
++                .then_some(JobStartRoute::Start(launch, false));
+         }
+         match job_route(&launch, true, |provider| self.job_unusable(provider)) {
+-            JobRoute::Start(launch) => Some(ReviewRoute::Start(launch, true)),
++            JobRoute::Start(launch) => Some(JobStartRoute::Start(launch, true)),
+             JobRoute::Wait { .. } if self.no_claude => {
+                 let codex = self
+                     .job_unusable(Provider::Codex)
+                     .map_or("unknown", SwitchReason::as_str);
+-                Some(ReviewRoute::Unavailable(
++                Some(JobStartRoute::Unavailable(
+                     launch,
+                     format!(
+                         "provider_disabled: Claude is disabled by --no-claude and codex cannot be used ({codex}); handle this role manually"
+@@ -126,7 +125,8 @@ impl Supervisor<'_> {
+             }
+             JobRoute::Wait { provider, reason } => {
+                 tracing::debug!(
+-                    "the throughput review waits: {} cannot be used ({}), nor can the other provider",
++                    "the {} job waits: {} cannot be used ({}), nor can the other provider",
++                    role.as_str(),
+                     provider.as_str(),
+                     reason.as_str()
+                 );
+@@ -173,12 +173,12 @@ impl Supervisor<'_> {
+                 return;
+             }
+         };
+-        let Some(route) = self.throughput_review_route() else {
++        let Some(route) = self.job_start_route(ModelRole::ThroughputReview) else {
+             return;
+         };
+         let (launch, switchable, unavailable) = match route {
+-            ReviewRoute::Start(launch, switchable) => (launch, switchable, None),
+-            ReviewRoute::Unavailable(launch, why) => (launch, false, Some(why)),
++            JobStartRoute::Start(launch, switchable) => (launch, switchable, None),
++            JobStartRoute::Unavailable(launch, why) => (launch, false, Some(why)),
+         };
+         self.throughput_review
+             .launched
+diff --git a/src/compose.rs b/src/compose.rs
+index 5b9b24f8..980c486a 100644
+--- a/src/compose.rs
++++ b/src/compose.rs
+@@ -3876,7 +3876,7 @@ pub fn open_queue_read_only(db: &Path) -> Result<SqliteQueue> {
+ pub fn observe(
+     db: &Path,
+     provider: &dyn AgentProvider,
+-    signals: &dyn crate::application::AgentSignals,
++    signals: Option<&dyn crate::application::AgentSignals>,
+     options: &crate::application::observer::ObserveOptions,
+ ) -> Result<Value> {
+     let db = db
+@@ -3982,6 +3982,19 @@ pub fn throughput_review_launch(db: &Path) -> Result<crate::domain::actor_model:
+     ))
+ }
+ 
++/// What the observer starts with when no supervisor routed it (a command
++/// typed by hand): `[roles.observer]` of the bound checkout's `dagq.toml`.
++pub fn observer_launch(db: &Path) -> Result<crate::domain::actor_model::ActorLaunch> {
++    let queue = SqliteQueue::open(
++        &db.canonicalize()
++            .context("queue must already be initialized")?,
++    )?;
++    let checkout = bound_checkout(&queue)?;
++    Ok(crate::infrastructure::observer::observer_launch(
++        checkout.as_deref(),
++    ))
++}
++
+ /// The throughput review's reads that [`OneShot`] gives on the opened
+ /// queue.
+ struct ThroughputReviewReads {
+diff --git a/src/domain/actor_model.rs b/src/domain/actor_model.rs
+index b7558859..296082c1 100644
+--- a/src/domain/actor_model.rs
++++ b/src/domain/actor_model.rs
+@@ -47,13 +47,14 @@ impl ModelRole {
+ pub const ROLE_PROVIDER: Provider = Provider::Claude;
+ 
+ /// The roles Codex has an implementation for (ADR-t1063-1 decisions 1
+-/// and 7): goal, run and plan reviews and the throughput review. Claude
+-/// runs every role.
+-pub const CODEX_ROLES: [ModelRole; 4] = [
++/// and 7): goal, run and plan reviews, the throughput review and the
++/// observer (ADR-t1222-1, task 1223). Claude runs every role.
++pub const CODEX_ROLES: [ModelRole; 5] = [
+     ModelRole::GoalReview,
+     ModelRole::Review,
+     ModelRole::PlanReview,
+     ModelRole::ThroughputReview,
++    ModelRole::Observer,
+ ];
+ 
+ /// Whether `provider` can run a session of `role`.
+@@ -494,7 +495,8 @@ mod tests {
+     }
+ 
+     /// `[roles.<role>]`'s `provider` (ADR-t1063-1 decision 1, ADR-t1207-1):
+-    /// Codex runs the goal, run, plan and throughput reviews, with a model of its own or its
++    /// Codex runs the goal, run, plan and throughput reviews and the
++    /// observer, with a model of its own or its
+     /// default, and the effort `medium` unless given; a role that names no
+     /// provider runs on Claude and does not move.
+     #[test]
+@@ -532,6 +534,7 @@ mod tests {
+         review.entry(ModelRole::Review).provider = Some(Provider::Codex);
+         review.entry(ModelRole::PlanReview).provider = Some(Provider::Codex);
+         review.entry(ModelRole::ThroughputReview).provider = Some(Provider::Codex);
++        review.entry(ModelRole::Observer).provider = Some(Provider::Codex);
+         assert!(review.check().is_ok());
+         review.entry(ModelRole::Recovery).provider = Some(Provider::Codex);
+         let error = review.check().unwrap_err();
+@@ -546,6 +549,7 @@ mod tests {
+                         | ModelRole::Review
+                         | ModelRole::PlanReview
+                         | ModelRole::ThroughputReview
++                        | ModelRole::Observer
+                 )
+             );
+         }
+@@ -620,8 +624,8 @@ mod tests {
+         assert_eq!(moved.provider, Provider::Codex);
+         // A run review whose `[roles.review]` names Claude moves to Codex
+         // when Claude cannot be used, as the supervisor's review route does
+-        // (ADR-t1207-1), and so do a plan review and a throughput review; a
+-        // recovery job, which Codex does not run, waits.
++        // (ADR-t1207-1), and so do a plan review, a throughput review and
++        // the observer; a recovery job, which Codex does not run, waits.
+         let review = ActorLaunch::default_of(ModelRole::Review);
+         let JobRoute::Start(moved) = job_route(&review, true, no_claude) else {
+             panic!("moved the review to Codex");
+@@ -637,6 +641,11 @@ mod tests {
+             panic!("moved the throughput review to Codex");
+         };
+         assert_eq!(moved.provider, Provider::Codex);
++        let observer = ActorLaunch::default_of(ModelRole::Observer);
++        let JobRoute::Start(moved) = job_route(&observer, true, no_claude) else {
++            panic!("moved the observer to Codex");
++        };
++        assert_eq!(moved.provider, Provider::Codex);
+         let recovery = ActorLaunch::default_of(ModelRole::Recovery);
+         assert!(matches!(
+             job_route(&recovery, true, no_claude),
+diff --git a/src/domain/stats/jobs.rs b/src/domain/stats/jobs.rs
+index 2d961d94..74fe7edb 100644
+--- a/src/domain/stats/jobs.rs
++++ b/src/domain/stats/jobs.rs
+@@ -149,7 +149,7 @@ fn review_key(event: &RunEvent) -> Option<String> {
+ 
+ /// The kind of job an event ends, its key, whether it failed and its
+ /// verdict; `None` for an event that ends no job (an observation skipped
+-/// without its agent).
++/// without its agent, or one no provider could run).
+ fn end_of(event: &RunEvent) -> Option<(&'static str, String, bool, Option<String>)> {
+     let run = || event.run_id.as_ref().map(|run| run.as_str().to_owned());
+     let payload = &event.payload;
+@@ -187,6 +187,9 @@ fn end_of(event: &RunEvent) -> Option<(&'static str, String, bool, Option<String
+         event_kind::GOAL_REVIEW_FAILED => {
+             Some(("goal_review", text(payload, "goal_review_id")?, true, None))
+         }
++        // An observation no provider could run started no agent either
++        // (task 1223).
++        event_kind::OBSERVE_FINISHED if payload["unavailable"] == true => None,
+         event_kind::OBSERVE_FINISHED => match payload["outcome"].as_str() {
+             Some("skipped") => None,
+             outcome => Some((
+@@ -646,6 +649,44 @@ mod tests {
+         assert_eq!(json["by_provider"], json!({}));
+     }
+ 
++    /// A Codex observation (task 1223): its start names no session and its
++    /// end the thread and the model, so it counts under Codex and its
++    /// model; one no provider could run (`--no-claude`, Codex unusable)
++    /// started no agent and is no job.
++    #[test]
++    fn a_codex_observation_is_counted_under_codex_and_its_model() {
++        let events = [
++            event(
++                1,
++                event_kind::OBSERVE_STARTED,
++                None,
++                json!({"mode": "hourly", "dir": "/q/observer/1", "session_id": null,
++                       "launch": {"provider": "codex"}}),
++            ),
++            event(
++                2,
++                event_kind::OBSERVE_FINISHED,
++                None,
++                json!({"mode": "hourly", "dir": "/q/observer/1", "outcome": "succeeded",
++                       "session_id": "codex-thread-1", "model": "gpt-6-astra",
++                       "duration_secs": 30}),
++            ),
++            event(
++                3,
++                event_kind::OBSERVE_FINISHED,
++                None,
++                json!({"mode": "hourly", "dir": null, "outcome": "error", "unavailable": true,
++                       "error": "the observer could not start: provider_disabled"}),
++            ),
++        ];
++        let stats = jobs(&events, EventId::new(0), EventId::new(3), |_| true);
++        let observer = &stats["observer"];
++        assert_eq!((observer.all.count, observer.all.failed), (1, 0));
++        assert_eq!(observer.by_provider["codex"].count, 1);
++        assert!(!observer.by_provider.contains_key("claude"));
++        assert_eq!(observer.by_model["gpt-6-astra"].count, 1);
++    }
++
+     /// A Codex throughput review (task 1220): its start names no session
+     /// (Codex names its thread itself) and its end the thread and the model;
+     /// the directory ties them, so it counts under Codex and its model.
+diff --git a/src/infrastructure/observer.rs b/src/infrastructure/observer.rs
+index 7c11193a..3d04de8f 100644
+--- a/src/infrastructure/observer.rs
++++ b/src/infrastructure/observer.rs
+@@ -75,9 +75,10 @@ fn observation_dir(db: &Path, started: i64) -> Result<PathBuf> {
+ }
+ 
+ /// What the observer's agent starts with (ADR-0079 decision 7):
+-/// `[roles.observer]` of the bound checkout's `dagq.toml`; none, no
+-/// checkout, or a file that cannot be read starts it as before.
+-fn observer_launch(checkout: Option<&Path>) -> ActorLaunch {
++/// `[roles.observer]` of the bound checkout's `dagq.toml` (its provider
++/// too, ADR-t1222-1); none, no checkout, or a file that cannot be read
++/// starts it as before.
++pub fn observer_launch(checkout: Option<&Path>) -> ActorLaunch {
+     let Some(checkout) = checkout else {
+         return ActorLaunch::default_of(ModelRole::Observer);
+     };
+@@ -204,12 +205,11 @@ impl ObserverHost for LocalObserver {
+     fn write(&self, path: &Path, contents: &str) -> Result<()> {
+         Ok(fs::write(path, contents)?)
+     }
+-    fn output(&self, dir: &Path) -> String {
+-        // Both streams as before, with a line boundary so stderr
+-        // diagnostics cannot be joined onto a partial stdout line.
+-        let stdout = fs::read_to_string(dir.join("output.out")).unwrap_or_default();
+-        let stderr = fs::read_to_string(dir.join("output.err")).unwrap_or_default();
+-        format!("{stdout}\n{stderr}")
++    fn output(&self, dir: &Path) -> (String, String) {
++        (
++            fs::read_to_string(dir.join("output.out")).unwrap_or_default(),
++            fs::read_to_string(dir.join("output.err")).unwrap_or_default(),
++        )
+     }
+     fn launch(&self, checkout: Option<&Path>) -> ActorLaunch {
+         observer_launch(checkout)
+diff --git a/src/infrastructure/run_env.rs b/src/infrastructure/run_env.rs
+index 69e1f599..2fb839d5 100644
+--- a/src/infrastructure/run_env.rs
++++ b/src/infrastructure/run_env.rs
+@@ -1828,8 +1828,8 @@ LITERAL = 'no \n escapes # here'
+             ),
+             ("[roles.review]\n[roles.review]", "is defined twice"),
+             ("[roles.review]\nprovider = 'gemini'", "provider"),
+-            // Codex runs goal, normal run, plan and throughput reviews
+-            // (ADR-t1207-1, tasks 1218 and 1220).
++            // Codex runs goal, normal run, plan and throughput reviews and
++            // the observer (ADR-t1207-1, tasks 1218, 1220 and 1223).
+             (
+                 "[roles.recovery]\nprovider = 'codex'",
+                 "[roles.recovery]: provider codex cannot run the recovery role",
+@@ -1871,6 +1871,12 @@ LITERAL = 'no \n escapes # here'
+             config.roles.provider(ModelRole::ThroughputReview).0,
+             crate::domain::Provider::Codex
+         );
++        // And the observer (task 1223, ADR-t1222-1).
++        let config = parse_config("[roles.observer]\nprovider = 'codex'\n").unwrap();
++        assert_eq!(
++            config.roles.provider(ModelRole::Observer).0,
++            crate::domain::Provider::Codex
++        );
+         let dir = tempfile::tempdir().unwrap();
+         assert_eq!(load_role_models(dir.path()).unwrap(), RoleModels::default());
+         fs::write(
+diff --git a/src/main.rs b/src/main.rs
+index 66ee1a33..dbac3785 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -808,9 +808,11 @@ enum Command {
+         #[arg(long)]
+         plugin_only: bool,
+     },
+-    /// Run the observer job once: headless Claude under DAGQ_ROLE=observer reads stats past the
+-    /// cursor, the open findings, the latest notes, the open asks and the graph, and writes
+-    /// findings and blocked asks on them only (ADR-0044 decision 4). Records observe_started / observe_finished and saves the new cursor.
++    /// Run the observer job once: a headless agent under DAGQ_ROLE=observer (Claude by default, or
++    /// Codex in its read-only sandbox when [roles.observer] of dagq.toml says provider = "codex"; the
++    /// supervisor passes the provider it routed the observer to) reads stats past the cursor, the open
++    /// findings, the latest notes, the open asks and the graph, and writes findings and blocked asks on
++    /// them only, through the queue service (ADR-0044 decision 4, ADR-t1222-1). Records observe_started / observe_finished and saves the new cursor.
+     /// When no event but the observer's own came since the last observation, starts no agent and records
+     /// observe_finished with outcome skipped (unless --since is given). The agent loads no MCP server.
+     Observe {
+@@ -845,13 +847,32 @@ enum Command {
+         /// Seconds the agent may run before it is killed.
+         #[arg(long, default_value_t = 1800)]
+         timeout: u64,
+-        /// Claude Code executable; a bare name is resolved on PATH.
++        /// Claude Code executable, for an observer on Claude; a bare name is resolved on PATH.
+         #[arg(long, default_value = "claude")]
+         claude: PathBuf,
++        /// Codex CLI executable, for `[roles.observer]`'s `provider = "codex"`; a bare name is
++        /// resolved on PATH outside cmux's shims.
++        #[arg(long, default_value = "codex")]
++        codex: PathBuf,
+         /// cmux executable for workspace listing and inbox notifications; bare names resolve
+         /// on PATH. If not found, neither listing nor notification is attempted.
+         #[arg(long, default_value = "cmux")]
+         cmux: PathBuf,
++        /// What the agent starts with, as the supervisor routed it (an actor launch as JSON);
++        /// `[roles.observer]` of dagq.toml without.
++        #[arg(long, hide = true)]
++        launch: Option<String>,
++        /// Codex's home, whose rollouts name the model (tests); Codex's own without.
++        #[arg(long, hide = true)]
++        codex_home: Option<PathBuf>,
++        /// The role names its provider: a Codex observation that cannot use Codex records
++        /// provider_unusable for the supervisor to start it again on the other provider.
++        #[arg(long, hide = true)]
++        switchable: bool,
++        /// No provider can run the observation (--no-claude, Codex not usable): one that is not
++        /// skipped records its finish as an error with this reason.
++        #[arg(long, hide = true)]
++        unavailable: Option<String>,
+     },
+     /// Run the throughput review once (ADR-t996-1): for the last whole hour (--mode hourly), yesterday
+     /// (daily) or the ISO week before this one (weekly). An hour the runtime's rules find unremarkable starts
+@@ -4020,22 +4041,59 @@ fn execute(cli: Cli) -> Result<Value> {
+             daily,
+             timeout,
+             claude,
++            codex,
+             cmux,
++            launch,
++            codex_home,
++            switchable,
++            unavailable,
+             ..
+         } => {
+             use dagq::application::observer::{ObserveMode, ObserveOptions};
+-            use dagq::infrastructure::adapters::{ClaudeCode, executable};
+-            // A dry run starts nothing, so it needs no Claude Code.
+-            let executable = if dry_run {
+-                claude
+-            } else {
++            use dagq::domain::{Provider, actor_model::ActorLaunch};
++            use dagq::infrastructure::{
++                adapters::{ClaudeCode, executable},
++                codex::Codex,
++            };
++            let launch: ActorLaunch = match launch {
++                Some(launch) => serde_json::from_str(&launch).context("parse --launch")?,
++                None => dagq::compose::observer_launch(&db)?,
++            };
++            // A dry run starts nothing, so it needs no executable; nor does
++            // an observation no provider can run, nor the provider it does
++            // not start. A Claude Code that cannot be resolved fails as
++            // before; a Codex one (gone since the supervisor found it) is
++            // kept as given, so the observation records its finish, whose
++            // start error says Codex cannot be used (task 1223).
++            let resolve = !dry_run && unavailable.is_none();
++            let claude = if resolve && launch.provider == Provider::Claude {
+                 executable(&claude)?
++            } else {
++                claude
++            };
++            let claude = ClaudeCode { executable: claude };
++            let codex = Codex {
++                executable: if resolve && launch.provider == Provider::Codex {
++                    dagq::infrastructure::codex::executable(&codex).unwrap_or_else(|error| {
++                        tracing::warn!(error = %format_args!("{error:#}"), "{} could not be resolved: {error:#}", codex.display());
++                        codex
++                    })
++                } else {
++                    codex
++                },
++                home: codex_home,
++            };
++            let (provider, signals): (
++                &dyn dagq::application::AgentProvider,
++                Option<&dyn dagq::application::AgentSignals>,
++            ) = match launch.provider {
++                Provider::Claude => (&claude, Some(&claude)),
++                Provider::Codex => (&codex, None),
+             };
+-            let provider = ClaudeCode { executable };
+             dagq::compose::observe(
+                 &db,
+-                &provider,
+-                &provider,
++                provider,
++                signals,
+                 &ObserveOptions {
+                     mode: if daily {
+                         ObserveMode::Daily
+@@ -4049,6 +4107,9 @@ fn execute(cli: Cli) -> Result<Value> {
+                     dagq: env::current_exe()?,
+                     user_config: dagq::infrastructure::language::user_config_file(),
+                     prompt_limit: dagq::application::observer::PROMPT_LIMIT,
++                    launch: Some(launch),
++                    switchable,
++                    unavailable,
+                 },
+             )?
+         }
+diff --git a/tests/it/main.rs b/tests/it/main.rs
+index 25734990..24b6620f 100644
+--- a/tests/it/main.rs
++++ b/tests/it/main.rs
+@@ -57,6 +57,7 @@ mod lifecycle_replace;
+ mod lifecycle_up;
+ mod location;
+ mod main_checkout;
++mod observer_codex;
+ mod plan_review;
+ mod plan_review_codex;
+ mod plan_review_concern;
+diff --git a/tests/it/observer_codex.rs b/tests/it/observer_codex.rs
+new file mode 100644
+index 00000000..ee97de7d
+--- /dev/null
++++ b/tests/it/observer_codex.rs
+@@ -0,0 +1,585 @@
++//! The observer on Codex (task 1223, ADR-t1222-1): `[roles.observer]`'s
++//! `provider = "codex"` starts the job as `codex exec --json` in the
++//! read-only sandbox (the queue service's job profile), played by a stub
++//! `codex` that writes the JSONL and the rollout codex-cli 0.155.1 writes.
++//! Its `dagq` runs in client mode and writes the findings, their updates and
++//! resolves and the finding's `blocked` ask through the queue service, as
++//! the observer, as Claude's does. Under `--no-claude` it still starts, and
++//! a Codex that cannot be used never moves it to Claude.
++use crate::runtime_observer::{observe, observe_options, queue_events};
++use crate::runtime_support;
++use dagq::application::observer::ObserveMode;
++use dagq::domain::{
++    FindingTarget, NewFinding, Provider,
++    actor_model::{ActorLaunch, ModelRole, RoleModels},
++};
++use dagq::infrastructure::codex::Codex;
++
++use runtime_support::*;
++
++/// The model the stub `codex` writes to its rollouts.
++const CODEX_MODEL: &str = "gpt-6-astra";
++
++/// A stub `codex` next to the queue: `--version` answers; `exec` appends
++/// its arguments (each ended by `|`, the prompt from stdin last) to
++/// `codex-args.txt`, its role and actor to `codex-actors.txt` and its
++/// environment to `codex-env-<call>.txt`, prints `thread.started` (thread
++/// `codex-thread-<call>`) and `turn.started`, then, as `codex-mode` says,
++/// fails at the usage limit (`limit`), or runs the observer's `dagq`
++/// commands of its call (the first, when `codex-writes` is there: record,
++/// update and record findings, resolve finding 1, raise a blocked ask on
++/// finding 3, try a note; else nothing), writes the thread's rollout with its model (not
++/// for `norollout`), and prints its last message and `turn.completed`.
++fn stub_codex(db: &Path, mode: &str) -> PathBuf {
++    let dir = db.parent().unwrap();
++    let stub = dir.join("codex");
++    fs::write(dir.join("codex-mode"), mode).unwrap();
++    let script = format!(
++        r#"#!/bin/sh
++DIR="${{0%/*}}"
++[ "$1" = --version ] && {{ echo "codex-cli 0.155.1"; exit 0; }}
++for arg in "$@"; do printf '%s|' "$arg" | tr '\n' ' '; done >> "$DIR/codex-args.txt"
++# The prompt comes on stdin, never as an argument (task 1560).
++printf '<stdin>|' >> "$DIR/codex-args.txt"
++tr '\n' ' ' >> "$DIR/codex-args.txt"
++printf '\n' >> "$DIR/codex-args.txt"
++printf '%s %s\n' "$DAGQ_ROLE" "$DAGQ_ACTOR_ID" >> "$DIR/codex-actors.txt"
++CALL="$(wc -l < "$DIR/codex-actors.txt" | tr -d ' ')"
++THREAD="codex-thread-$CALL"
++env > "$DIR/codex-env-$CALL.txt"
++printf '{{"type":"thread.started","thread_id":"%s"}}\n{{"type":"turn.started"}}\n' "$THREAD"
++MODE="$(cat "$DIR/codex-mode")"
++if [ "$MODE" = limit ]; then
++  printf '{{"type":"error","message":"You have hit your usage limit. Try again later."}}\n{{"type":"turn.failed","error":{{"message":"You have hit your usage limit."}}}}\n'
++  exit 1
++fi
++q() {{ {dagq} "$@" > /dev/null; }}
++if [ "$CALL" = 1 ] && [ -e "$DIR/codex-writes" ]; then
++  q finding record --kind stall --task 1 --summary 'task 1 waits for a slot' --evidence 1 || exit 2
++  q finding record --kind stall --task 1 --summary 'task 1 waits for a slot' --evidence 1 --evidence 2 || exit 3
++  q finding record --kind capacity --queue --subject idle_slots --summary 'slots idle' || exit 4
++  q finding resolve 1 --reason 'slots are busy again' || exit 5
++  q ask --kind blocked --because recovery_failed --finding 3 --question 'slots idle while task 1 is ready' --option 'restart the supervisor' --recommend 'restart the supervisor' --confidence high --cmux /usr/bin/true || exit 6
++  if {dagq} note --task 1 --text 'seen' 2> "$DIR/codex-note.err"; then exit 7; fi
++fi
++if [ "$MODE" != norollout ]; then
++  SESSIONS="$DIR/codex-home/sessions/2026/09/29"
++  mkdir -p "$SESSIONS"
++  printf '{{"timestamp":"%s","type":"turn_context","payload":{{"model":"{CODEX_MODEL}","effort":"high"}}}}\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" >> "$SESSIONS/rollout-2026-09-29T00-00-00-$THREAD.jsonl"
++fi
++printf '{{"type":"item.completed","item":{{"id":"m1","type":"agent_message","text":"recorded 2 findings, updated 1, closed 1, 1 ask"}}}}\n'
++printf '{{"type":"turn.completed","usage":{{"input_tokens":10,"output_tokens":2}}}}\n'
++"#,
++        dagq = crate::common::shell_path(env!("CARGO_BIN_EXE_dagq")),
++    );
++    crate::common::template::script(&stub, script);
++    stub
++}
++
++fn codex_home(db: &Path) -> PathBuf {
++    db.parent().unwrap().join("codex-home")
++}
++
++fn codex(db: &Path, mode: &str) -> Codex {
++    Codex {
++        executable: stub_codex(db, mode),
++        home: Some(codex_home(db)),
++    }
++}
++
++fn stub_lines(db: &Path, name: &str) -> Vec<String> {
++    fs::read_to_string(db.parent().unwrap().join(name))
++        .unwrap_or_default()
++        .lines()
++        .map(str::to_owned)
++        .collect()
++}
++
++/// `[roles.observer]` naming Codex, with a model and an effort.
++fn codex_launch() -> ActorLaunch {
++    let mut models = RoleModels::default();
++    let table = models.entry(ModelRole::Observer);
++    table.provider = Some(Provider::Codex);
++    table.model = Some(CODEX_MODEL.into());
++    table.effort = Some("high".into());
++    models.launch(ModelRole::Observer)
++}
++
++/// `observe_options(mode)` on the Codex launch of a role that names it.
++fn codex_options(mode: ObserveMode) -> dagq::application::observer::ObserveOptions {
++    dagq::application::observer::ObserveOptions {
++        launch: Some(codex_launch()),
++        switchable: true,
++        ..observe_options(mode)
++    }
++}
++
++/// Commit `dagq.toml` with `text` to the fixture's checkout and bind the
++/// queue to it, so the supervisor reads its role table.
++fn roles(db: &Path, repo: &Path, text: &str) {
++    fs::write(repo.join("dagq.toml"), text).unwrap();
++    for args in [
++        &["add", "dagq.toml"][..],
++        &["commit", "-q", "-m", "roles"][..],
++    ] {
++        let status = std::process::Command::new("git")
++            .args(args)
++            .current_dir(repo)
++            .status()
++            .unwrap();
++        assert!(status.success(), "git {args:?}");
++    }
++    let common = repo.join(".git").canonicalize().unwrap();
++    SqliteQueue::open(db)
++        .unwrap()
++        .bind_repository(common.to_str().unwrap())
++        .unwrap();
++}
++
++/// The hourly and the daily observation on Codex: each starts `codex exec
++/// --json` in the job's read-only profile (no writable root, no bypass of
++/// the sandbox) with the role's model and effort, as the observer with a
++/// token of the queue service and no queue path. Its `dagq` records a
++/// finding, updates it, records another, resolves an old one and raises a
++/// blocked ask on the new one through the service, attributed to the
++/// observer; a note is refused. `observe_finished` counts them with their
++/// ids, records the thread and the model as the span does, and the next
++/// hourly observation, with nothing new but the observer's own events,
++/// is skipped. `stats` and `kpi` count the observations under Codex.
++#[test]
++fn a_codex_observer_writes_findings_and_a_blocked_ask_through_the_queue_service() {
++    let (_dir, _repo, db) = fixture();
++    let old = SqliteQueue::open(&db)
++        .unwrap()
++        .record_finding(NewFinding {
++            kind: "capacity".into(),
++            target: FindingTarget::Queue,
++            subject: "busy".into(),
++            summary: "slots were busy".into(),
++            detail: None,
++            impact: None,
++            evidence: Vec::new(),
++            propose: None,
++            by: "observer".into(),
++        })
++        .unwrap()
++        .finding
++        .id;
++    assert_eq!(old.as_i64(), 1);
++    let codex = codex(&db, "ok");
++    fs::write(db.parent().unwrap().join("codex-writes"), "").unwrap();
++    let hourly = observe(&db, &codex, &codex_options(ObserveMode::Hourly)).unwrap();
++    assert_eq!(hourly["outcome"], "succeeded", "{hourly}");
++    assert_eq!(
++        (
++            &hourly["findings_recorded"],
++            &hourly["findings_updated"],
++            &hourly["findings_closed"],
++            &hourly["asks"],
++            &hourly["findings_without_ask"],
++        ),
++        (&json!(2), &json!(1), &json!(1), &json!(1), &json!(1)),
++        "{hourly}"
++    );
++    assert_eq!(hourly["recorded_finding_ids"], json!([2, 3]));
++    assert_eq!(hourly["updated_finding_ids"], json!([2]));
++    assert_eq!(hourly["closed_finding_ids"], json!([1]));
++    assert_eq!(hourly["without_ask_finding_ids"], json!([2]));
++    assert_eq!(hourly["session_id"], "codex-thread-1");
++    assert_eq!(hourly["model"], CODEX_MODEL);
++    assert!(hourly.get("provider_unusable").is_none(), "{hourly}");
++    assert!(hourly["wall"].is_null(), "{hourly}");
++    let daily = observe(&db, &codex, &codex_options(ObserveMode::Daily)).unwrap();
++    assert_eq!(daily["outcome"], "succeeded", "{daily}");
++    assert_eq!(daily["findings_recorded"], 0, "{daily}");
++    assert_eq!(daily["session_id"], "codex-thread-2");
++
++    // Started in the job's read-only profile, which reaches the socket
++    // only, with the role's model and effort and the prompt on stdin.
++    let calls = stub_lines(&db, "codex-args.txt");
++    assert_eq!(calls.len(), 2, "{calls:?}");
++    let socket = dagq::infrastructure::queue_service::socket_path(
++        db.canonicalize().unwrap().parent().unwrap(),
++    );
++    let profile: String = dagq::infrastructure::codex::job_service_config(&socket)
++        .unwrap()
++        .iter()
++        .map(|config| format!("-c|{config}|"))
++        .collect();
++    assert!(profile.contains(r#"permissions.dagq_job.extends=":read-only""#));
++    for call in &calls {
++        assert!(
++            call.starts_with("exec|--json|--skip-git-repo-check|-C|"),
++            "{call}"
++        );
++        assert!(call.contains("/observer/"), "{call}");
++        assert!(
++            call.contains(&format!(
++                "|-m|{CODEX_MODEL}|-c|model_reasoning_effort=\"high\"|{profile}<stdin>|"
++            )),
++            "{call}"
++        );
++        assert!(call.contains("You are the observer"), "{call}");
++        for refused in [
++            "dangerously",
++            "bypass",
++            "writable_roots",
++            "workspace-write",
++            "--session-id",
++        ] {
++            assert!(!call.contains(refused), "{refused}: {call}");
++        }
++    }
++    // As the observer, one actor per observation, with the service's
++    // socket and token and no queue path.
++    let actors = stub_lines(&db, "codex-actors.txt");
++    assert_eq!(actors.len(), 2);
++    for actor in &actors {
++        assert!(actor.starts_with("observer observer:"), "{actor}");
++    }
++    assert_ne!(actors[0], actors[1]);
++    let env = fs::read_to_string(db.parent().unwrap().join("codex-env-1.txt")).unwrap();
++    assert!(env.contains("DAGQ_SERVICE_SOCKET="), "{env}");
++    assert!(env.contains("DAGQ_SERVICE_CREDENTIAL_FILE="), "{env}");
++    assert!(!env.contains("DAGQ_QUEUE="), "{env}");
++    // The note is refused for the observer's principal by the service.
++    let note: Value = serde_json::from_str(
++        &fs::read_to_string(db.parent().unwrap().join("codex-note.err")).unwrap(),
++    )
++    .unwrap();
++    assert_eq!(note["queue_service"]["code"], "authorization_denied");
++
++    // The writes are the observer's.
++    let queue = SqliteQueue::open(&db).unwrap();
++    let findings = queue
++        .findings(&dagq::domain::FindingQuery::default())
++        .unwrap();
++    let stall = findings.iter().find(|f| f.finding.kind == "stall").unwrap();
++    assert_eq!(stall.finding.occurrences, 2);
++    assert_eq!(stall.finding.recorded_by, "observer");
++    for kind in ["finding_recorded", "finding_updated"] {
++        let events = queue_events(&db, kind);
++        assert!(!events.is_empty(), "{kind}");
++        assert!(events.iter().all(|e| e["by"] == "observer"), "{events:?}");
++    }
++    assert!(
++        queue_events(&db, "finding_status_changed")
++            .iter()
++            .any(|e| e["by"] == "observer" && e["to"] == "resolved")
++    );
++    let asks = queue
++        .asks(dagq::infrastructure::asks::AskQuery::default())
++        .unwrap();
++    assert_eq!(asks.len(), 1);
++    assert_eq!(asks[0].kind.as_str(), "blocked");
++    assert_eq!(asks[0].asked_by, "observer");
++    assert_eq!(asks[0].finding_id, Some(dagq::domain::FindingId::new(3)));
++    assert_eq!(hourly["ask_ids"], json!([asks[0].id]));
++    let opened = queue_events(&db, "ask_opened");
++    assert_eq!(opened.len(), 1);
++    assert_eq!(opened[0]["asked_by"], "observer");
++    // The events' actor is the observer's job (its role and actor id).
++    let written: Vec<(String, String)> = Connection::open(&db)
++        .unwrap()
++        .prepare(
++            "SELECT actor_role, actor_id FROM run_events
++             WHERE kind IN ('finding_recorded', 'finding_updated', 'ask_opened')
++               AND id > (SELECT min(id) FROM run_events WHERE kind = 'observe_started')",
++        )
++        .unwrap()
++        .query_map([], |r| {
++            Ok((
++                r.get::<_, Option<String>>(0)?.unwrap_or_default(),
++                r.get::<_, Option<String>>(1)?.unwrap_or_default(),
++            ))
++        })
++        .unwrap()
++        .map(Result::unwrap)
++        .collect();
++    assert_eq!(written.len(), 4, "{written:?}");
++    let first_actor = actors[0].split_once(' ').unwrap().1;
++    for (role, id) in &written {
++        assert_eq!(role, "observer", "{written:?}");
++        assert_eq!(id, first_actor, "{written:?}");
++    }
++
++    // The start records Codex and no session id; the finish and the span
++    // the thread and the model.
++    let started = queue_events(&db, "observe_started");
++    assert_eq!(started.len(), 2);
++    for start in &started {
++        assert_eq!(
++            start["launch"],
++            json!({"role": "observer", "provider": "codex", "model": CODEX_MODEL,
++                   "effort": "high", "source": "dagq.toml"})
++        );
++        assert!(start["session_id"].is_null(), "Codex names its thread");
++    }
++    let closed: Vec<Value> = queue_events(&db, "session_closed")
++        .into_iter()
++        .filter(|span| span["kind"] == "observer")
++        .collect();
++    assert_eq!(closed.len(), 2, "{closed:?}");
++    for (span, thread) in closed.iter().zip(1..) {
++        assert_eq!(span["reason"], "job_finished");
++        assert_eq!(span["session_id"], format!("codex-thread-{thread}"));
++        assert_eq!(span["model"], CODEX_MODEL);
++    }
++
++    // Nothing new but the observer's own events: the next hourly
++    // observation starts no agent.
++    let skipped = observe(&db, &codex, &codex_options(ObserveMode::Hourly)).unwrap();
++    assert_eq!(skipped["outcome"], "skipped", "{skipped}");
++    assert_eq!(stub_lines(&db, "codex-args.txt").len(), 2);
++
++    let stats = crate::common::cli::ok(&db, &["stats", "--full"]);
++    let jobs = &stats["jobs"]["observer"];
++    assert_eq!(jobs["by_provider"]["codex"]["count"], 2, "{jobs}");
++    assert!(jobs["by_provider"].get("claude").is_none(), "{jobs}");
++    assert_eq!(jobs["by_model"][CODEX_MODEL]["count"], 2, "{jobs}");
++    let kpi = crate::common::cli::ok(&db, &["kpi", "--last", "1"]);
++    let count = &kpi["periods"][0]["kpis"]["job.count.observer"];
++    assert_eq!(count["provider=codex"]["value"], 2.0, "{count}");
++}
++
++/// A rollout that names no model: the finish says why with
++/// `model_unknown`.
++#[test]
++fn a_codex_observation_without_its_rollout_says_the_model_is_unknown() {
++    let (_dir, _repo, db) = fixture();
++    let done = observe(
++        &db,
++        &codex(&db, "norollout"),
++        &codex_options(ObserveMode::Daily),
++    )
++    .unwrap();
++    assert_eq!(done["outcome"], "succeeded", "{done}");
++    assert_eq!(done["session_id"], "codex-thread-1");
++    assert!(done["model"].is_null(), "{done}");
++    assert!(done["model_unknown"].is_string(), "{done}");
++}
++
++/// A Codex observation stopped at the usage limit: with a role that names
++/// its provider, its finish says Codex could not be used and joins no
++/// hold ask of Claude's; without, it is a failure as any other.
++#[test]
++fn a_codex_observation_at_the_usage_limit_says_codex_cannot_be_used() {
++    for switchable in [true, false] {
++        let (_dir, _repo, db) = fixture();
++        let done = observe(
++            &db,
++            &codex(&db, "limit"),
++            &dagq::application::observer::ObserveOptions {
++                switchable,
++                ..codex_options(ObserveMode::Daily)
++            },
++        )
++        .unwrap();
++        assert_eq!(done["outcome"], "failed", "{done}");
++        assert_eq!(done["session_id"], "codex-thread-1");
++        assert!(done["wall"].is_null(), "{done}");
++        assert!(done["hold_ask_id"].is_null(), "{done}");
++        if switchable {
++            assert_eq!(
++                done["provider_unusable"],
++                json!({"provider": "codex", "reason": "usage_limit"})
++            );
++        } else {
++            assert!(done.get("provider_unusable").is_none(), "{done}");
++        }
++    }
++}
++
++/// A Codex that went away before the job started left no output: its
++/// start's error says Codex cannot be used.
++#[test]
++fn a_codex_observer_that_does_not_start_cannot_be_used() {
++    let (_dir, _repo, db) = fixture();
++    let gone = Codex {
++        executable: db.parent().unwrap().join("codex-gone"),
++        home: Some(codex_home(&db)),
++    };
++    let done = observe(&db, &gone, &codex_options(ObserveMode::Daily)).unwrap();
++    assert_eq!(done["outcome"], "error", "{done}");
++    assert_eq!(
++        done["provider_unusable"],
++        json!({"provider": "codex", "reason": "executable_missing"})
++    );
++}
++
++/// An observation no provider can run (`--no-claude`, Codex not usable)
++/// records its finish with why and starts no agent; `stats` counts no job.
++#[test]
++fn an_observation_no_provider_can_run_records_why() {
++    let (_dir, _repo, db) = fixture();
++    let done = observe(
++        &db,
++        &codex(&db, "ok"),
++        &dagq::application::observer::ObserveOptions {
++            unavailable: Some("provider_disabled: codex cannot be used (usage_limit)".into()),
++            ..codex_options(ObserveMode::Hourly)
++        },
++    )
++    .unwrap();
++    assert_eq!(done["outcome"], "error", "{done}");
++    assert_eq!(done["unavailable"], true, "{done}");
++    assert!(
++        done["error"]
++            .as_str()
++            .unwrap()
++            .contains("provider_disabled: codex cannot be used"),
++        "{done}"
++    );
++    assert!(done["dir"].is_null());
++    assert_eq!(done["cursor_saved"], false);
++    assert!(stub_lines(&db, "codex-args.txt").is_empty());
++    assert!(queue_events(&db, "observe_started").is_empty());
++    let stats = crate::common::cli::ok(&db, &["stats", "--full"]);
++    assert_eq!(stats["jobs"]["observer"]["count"], 0, "{stats}");
++}
++
++/// A Claude stub that leaves a mark when it is started at all, and in
++/// print mode (`-p`) records a finding through the queue CLI as the
++/// observer on Claude does.
++fn marking_claude(db: &Path) -> PathBuf {
++    let stub = db.parent().unwrap().join("claude-marking-stub");
++    crate::common::template::script(
++        &stub,
++        r#"#!/bin/sh
++if [ "$1" = "-p" ]; then
++  touch "${0%/*}/claude-started"
++  cat > /dev/null
++  exec dagq finding record --queue --kind observed --subject claude --summary "observed on claude"
++fi
++printf 'test provider\n'
++"#,
++    );
++    stub
++}
++
++/// A supervisor of the fixture whose task is cancelled, observing hourly
++/// and daily, with the stub `codex`; `--no-claude` as `no_claude` says.
++fn supervise_observing(db: &Path, repo: &Path, codex: &Path, no_claude: bool) -> Value {
++    crate::common::service::serve(db);
++    SqliteQueue::open(db)
++        .unwrap()
++        .transition(TaskId::new(1), TaskAction::Cancel)
++        .unwrap();
++    let backend = TestWorkspace::new(db, false, VALID_AGENT);
++    let options = SuperviseOptions {
++        no_claude,
++        observe_interval: Duration::from_secs(3600),
++        observe_daily: true,
++        codex: codex.to_owned(),
++        codex_home: Some(codex_home(db)),
++        ..supervise_options(1, true)
++    };
++    runtime::supervise(
++        db,
++        repo,
++        &backend,
++        &marking_claude(db),
++        Path::new(env!("CARGO_BIN_EXE_dagq")),
++        &options,
++    )
++    .unwrap()
++}
++
++/// `--no-claude` starts no observer whose role names no provider
++/// (ADR-t1204-1 decision 2), but one set to Codex runs there: the daily
++/// and the hourly observation, through the child `observe` the supervisor
++/// gives the Codex executable and the routed launch, and no Claude is
++/// started.
++#[test]
++fn a_no_claude_supervisor_runs_the_observer_set_to_codex() {
++    let (_dir, repo, db) = fixture();
++    roles(&db, &repo, "[roles.observer]\nprovider = \"codex\"\n");
++    let codex = stub_codex(&db, "ok");
++    supervise_observing(&db, &repo, &codex, true);
++    let finished = queue_events(&db, "observe_finished");
++    assert_eq!(
++        finished
++            .iter()
++            .map(|f| (f["mode"].as_str().unwrap(), f["outcome"].as_str().unwrap()))
++            .collect::<Vec<_>>(),
++        [("daily", "succeeded"), ("hourly", "succeeded")],
++        "{finished:?}"
++    );
++    for start in queue_events(&db, "observe_started") {
++        assert_eq!(start["launch"]["provider"], "codex", "{start}");
++    }
++    assert_eq!(stub_lines(&db, "codex-args.txt").len(), 2);
++    assert!(!db.parent().unwrap().join("claude-started").exists());
++}
++
++/// Without `--no-claude` and with no role table, the observer runs on
++/// Claude as before, and Codex is not started.
++#[test]
++fn a_supervisor_runs_the_observer_without_a_role_table_on_claude() {
++    let (_dir, repo, db) = fixture();
++    let codex = stub_codex(&db, "ok");
++    supervise_observing(&db, &repo, &codex, false);
++    let finished = queue_events(&db, "observe_finished");
++    assert_eq!(finished.len(), 2, "{finished:?}");
++    for start in queue_events(&db, "observe_started") {
++        assert_eq!(start["launch"]["provider"], "claude", "{start}");
++    }
++    assert!(stub_lines(&db, "codex-args.txt").is_empty());
++    assert!(db.parent().unwrap().join("claude-started").exists());
++}
++
++/// Under `--no-claude`, a Codex observation that stops at the usage limit
++/// is not moved to Claude: Codex is held, the observation is due again,
++/// and with no provider left it records why.
++#[test]
++fn a_no_claude_supervisor_never_moves_a_failed_codex_observer_to_claude() {
++    let (_dir, repo, db) = fixture();
++    roles(&db, &repo, "[roles.observer]\nprovider = \"codex\"\n");
++    let codex = stub_codex(&db, "limit");
++    supervise_observing(&db, &repo, &codex, true);
++    let finished = queue_events(&db, "observe_finished");
++    let first = &finished[0];
++    assert_eq!(first["mode"], "daily", "{finished:?}");
++    assert_eq!(
++        first["provider_unusable"],
++        json!({"provider": "codex", "reason": "usage_limit"})
++    );
++    let held = queue_events(&db, "provider_held");
++    assert!(
++        held.iter().any(|event| event["provider"] == "codex"),
++        "{held:?}"
++    );
++    // Codex ran once; the daily observation was due again and found no
++    // provider.
++    assert_eq!(stub_lines(&db, "codex-args.txt").len(), 1);
++    let again = &finished[1];
++    assert_eq!(again["mode"], "daily", "{finished:?}");
++    assert_eq!(again["outcome"], "error", "{again}");
++    assert_eq!(again["unavailable"], true, "{again}");
++    assert!(
++        again["error"]
++            .as_str()
++            .unwrap()
++            .contains("codex cannot be used (usage_limit)"),
++        "{again}"
++    );
++    assert!(!db.parent().unwrap().join("claude-started").exists());
++}
++
++/// With Claude usable, a Codex observation that stops at the usage limit
++/// holds Codex and the observation starts again on Claude.
++#[test]
++fn a_codex_observer_at_the_usage_limit_starts_again_on_claude() {
++    let (_dir, repo, db) = fixture();
++    roles(&db, &repo, "[roles.observer]\nprovider = \"codex\"\n");
++    let codex = stub_codex(&db, "limit");
++    supervise_observing(&db, &repo, &codex, false);
++    let started = queue_events(&db, "observe_started");
++    assert_eq!(started[0]["launch"]["provider"], "codex", "{started:?}");
++    let again = &started[1];
++    assert_eq!(again["mode"], "daily", "{started:?}");
++    assert_eq!(again["launch"]["provider"], "claude", "{again}");
++    assert_eq!(again["launch"]["switched_from"], "codex", "{again}");
++    assert_eq!(stub_lines(&db, "codex-args.txt").len(), 1);
++    assert!(db.parent().unwrap().join("claude-started").exists());
++}
+diff --git a/tests/it/runtime_observer.rs b/tests/it/runtime_observer.rs
+index a1292d51..031107bf 100644
+--- a/tests/it/runtime_observer.rs
++++ b/tests/it/runtime_observer.rs
+@@ -44,7 +44,7 @@ impl AgentProvider for ObserverProvider {
+ 
+ // The composition supplies the signals of the same provider that starts
+ // the job. These shell doubles emit Claude's diagnostics.
+-fn observe(
++pub(crate) fn observe(
+     db: &Path,
+     provider: &dyn AgentProvider,
+     options: &dagq::application::observer::ObserveOptions,
+@@ -55,14 +55,14 @@ fn observe(
+     dagq::compose::observe(
+         db,
+         provider,
+-        &ClaudeCode {
++        Some(&ClaudeCode {
+             executable: "/unused".into(),
+-        },
++        }),
+         options,
+     )
+ }
+ 
+-fn observe_options(
++pub(crate) fn observe_options(
+     mode: dagq::application::observer::ObserveMode,
+ ) -> dagq::application::observer::ObserveOptions {
+     dagq::application::observer::ObserveOptions {
+@@ -74,10 +74,13 @@ fn observe_options(
+         dagq: PathBuf::from(env!("CARGO_BIN_EXE_dagq")),
+         user_config: None,
+         prompt_limit: dagq::application::observer::PROMPT_LIMIT,
++        launch: None,
++        switchable: false,
++        unavailable: None,
+     }
+ }
+ 
+-fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
++pub(crate) fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
+     Connection::open(db)
+         .unwrap()
+         .prepare("SELECT payload FROM run_events WHERE kind=?1 ORDER BY id")
+@@ -1390,7 +1393,7 @@ fn observer_uses_the_supplied_providers_failure_signals() {
+     let done = dagq::compose::observe(
+         &db,
+         &provider,
+-        &Signals,
++        Some(&Signals),
+         &observe_options(dagq::application::observer::ObserveMode::Daily),
+     )
+     .unwrap();

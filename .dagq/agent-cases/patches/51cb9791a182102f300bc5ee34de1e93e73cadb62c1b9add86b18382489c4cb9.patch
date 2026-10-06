@@ -1,0 +1,33 @@
+diff --git a/docs/plans/follow-up-membership-doc-check.md b/docs/plans/follow-up-membership-doc-check.md
+new file mode 100644
+index 00000000..9cefc536
+--- /dev/null
++++ b/docs/plans/follow-up-membership-doc-check.md
+@@ -0,0 +1,27 @@
++---
++id: plan-follow-up-membership-doc-check
++type: plan
++title: Follow-up所属の説明例の照合
++status: proposed
++created: 2026-10-05
++updated: 2026-10-05
++related:
++  - design-follow-up-membership
++  - adr-t1504-2
++---
++
++# Follow-up所属の説明例の照合
++
++## 目的
++
++follow_upの所属判断について、現在の挙動は[design](../design/follow-up-membership.md)、判断の理由はADR-t1504-2を参照する。既存の決定と実装は変えず、説明例の不足だけを確認する。
++
++## 手順
++
++1. designの「transactionと所属」と「閉じる条件」を読み、未判定・required・out_of_scopeの説明を照合する。
++2. 誤解しやすい箇所があれば、現在の挙動を示す短い例をdesignに追加する。
++3. 例と説明の参照先を確認する。
++
++## 完了条件
++
++追加した例が現在の挙動と一致し、理由への参照がADR-t1504-2を指していること。個々のtaskの進捗はqueueで管理する。

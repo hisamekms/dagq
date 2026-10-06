@@ -1,0 +1,1814 @@
+diff --git a/.config/it-slow-allow.toml b/.config/it-slow-allow.toml
+new file mode 100644
+index 00000000..0533c968
+--- /dev/null
++++ b/.config/it-slow-allow.toml
+@@ -0,0 +1,799 @@
++# The allow list of the time gate of the tests in tests/it (ADR-t1707-1).
++# `sh scripts/check-it-test-time.sh` fails when a test of dagq::it that the
++# diff added or changed took longer than the threshold in the nextest output
++# and has no item here. The threshold, the format and the naming rule are in
++# docs/design/slow-tests.md, section "itのtestの時間の関門", and the rule on
++# which reasons may put a test here in docs/development/testing.md, section
++# "判断と境界のtest". The script reads this file (CI and the worker run it).
++#
++# Each item is one [[test]] with all three keys:
++#
++# [[test]]
++# name = "runtime_handoff::review_verdicts::reviews_that_ended_before_the_exec_are_applied_not_run_again"
++# reason = "the boundary it keeps, or the move it waits for and the goal or task that does it"
++# task = 1707          # the task that put the item here
++#
++# name is the full nextest name of the test in the binary dagq::it, mods and
++# all; an item with the fn's name alone allows nothing.
++#
++# The first items (task 1707): every dagq::it test whose median over the ten
++# latest production gate logs with a Summary (2026-10-04T20:32 to
++# 2026-10-05T00:06 +0900) was over 5 seconds, as summed by
++# scripts/slow-tests.sh. The class and the reason come from
++# docs/plans/it-reduction/it-tests.tsv (task 1706) when its module and test
++# columns match the name's first and last parts in exactly one row, and the
++# class is unknown otherwise. The comment above an item gives the median.
++
++# 5.376s, class B
++[[test]]
++name = "actor_model::jobs_with_a_role_table_are_given_its_model_and_effort"
++reason = "B 境界（守る境界）: config reaches spawned job args and span"
++task = 1707
++
++# 5.423s, class R
++[[test]]
++name = "actor_model::jobs_without_a_role_table_start_as_before"
++reason = "R 移し替えの予定（代表がある、goal 119 か 120）: default no-role path; role->model mapping is pure"
++task = 1707
++
++# 8.454s, class B
++[[test]]
++name = "background_logs::a_background_runs_log_is_followed_and_read_after_it_ended"
++reason = "B 境界（守る境界）: run log --follow over a live wrapper process and file"
++task = 1707
++
++# 7.182s, class B
++[[test]]
++name = "background_logs::a_closed_background_planners_log_is_read_by_its_id"
++reason = "B 境界（守る境界）: planner log CLI over background planner's session.log"
++task = 1707
++
++# 26.818s, class B
++[[test]]
++name = "cli_version::auto_update_installs_each_runtime_landing_and_puts_a_broken_build_back"
++reason = "B 境界（守る境界）: build/install/exec across processes and git"
++task = 1707
++
++# 10.764s, class B
++[[test]]
++name = "cli_version::install_hands_a_running_supervisor_over_under_its_pid_and_rolls_back"
++reason = "B 境界（守る境界）: exec handoff under same pid, file rename"
++task = 1707
++
++# 5.016s, class B
++[[test]]
++name = "cli_version::migrate_is_explicit_and_older_binaries_keep_working_within_the_floor"
++reason = "B 境界（守る境界）: real DB schema migration across binaries"
++task = 1707
++
++# 6.734s, class D
++[[test]]
++name = "draft_bundles::what_a_bundle_leaves_undecided_makes_the_next_and_the_outcomes_are_read"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: next bundle / third-planner exhaustion is decision"
++task = 1707
++
++# 30.331s, class B
++[[test]]
++name = "e2e_gate_podman::a_busy_machine_lock_skips_broker_and_records_why"
++reason = "B 境界（守る境界）: real flock with fake podman"
++task = 1707
++
++# 6.729s, class G
++[[test]]
++name = "finding_planner::a_planner_question_about_a_finding_is_typed_to_its_planner_and_undecided_planners_end_in_the_inbox"
++reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: types answer into planner cmux session"
++task = 1707
++
++# 8.637s, class B
++[[test]]
++name = "inbox_nudge::an_idle_inbox_is_nudged_twice_then_the_person_is_notified_then_nothing"
++reason = "B 境界（守る境界）: representative cmux send/notify wiring (inbox stays)"
++task = 1707
++
++# 6.611s, class D
++[[test]]
++name = "inbox_nudge::an_inbox_at_work_or_with_a_line_typed_is_not_nudged"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: screen-idle judgment from text"
++task = 1707
++
++# 7.422s, class D
++[[test]]
++name = "inbox_nudge::failed_submissions_are_recorded_once_and_advance_to_the_next_nudge"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: nudge step progression decision"
++task = 1707
++
++# 5.651s, class D
++[[test]]
++name = "inbox_nudge::nothing_is_typed_with_a_watcher_without_an_ask_or_without_the_workspace"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: precondition decision"
++task = 1707
++
++# 5.198s, class D
++[[test]]
++name = "landing_branch::no_push_records_the_configured_remote"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: which remote is recorded is a decision"
++task = 1707
++
++# 5.311s, class G
++[[test]]
++name = "plan_review::a_planner_question_answer_is_typed_into_its_planner_or_carried_by_a_new_one"
++reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: typed into cmux planner"
++task = 1707
++
++# 7.867s, class D
++[[test]]
++name = "plan_review::drafts_of_the_runtime_get_planners_within_the_limit_and_a_persons_draft_none"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: planner limit/origin rule"
++task = 1707
++
++# 10.708s, class R
++[[test]]
++name = "planner_headless::a_headless_draft_planner_takes_the_answer_of_its_question_as_its_next_turn"
++reason = "R 移し替えの予定（代表がある、goal 119 か 120）: same turn boundary; answer routing decision"
++task = 1707
++
++# 6.888s, class B
++[[test]]
++name = "planner_headless::a_headless_planner_opened_for_a_revise_runs_its_prompt_as_a_turn_and_ends_on_the_exit_request"
++reason = "B 境界（守る境界）: representative background wrapper + turns/"
++task = 1707
++
++# 10.044s, class R
++[[test]]
++name = "planner_headless::a_headless_request_planner_takes_the_answer_as_its_next_turn_and_declines"
++reason = "R 移し替えの予定（代表がある、goal 119 か 120）: same turn boundary; request decline decision"
++task = 1707
++
++# 8.392s, class B
++[[test]]
++name = "planner_headless::the_turn_a_killed_background_planner_wrapper_left_is_stopped_as_the_planner_closes"
++reason = "B 境界（守る境界）: orphan process group cleanup"
++task = 1707
++
++# 10.009s, class R
++[[test]]
++name = "planner_headless_stats::a_headless_planners_session_and_route_are_read_by_stats_and_kpi"
++reason = "R 移し替えの予定（代表がある、goal 119 か 120）: headless planner wiring elsewhere; span/stat counts decision"
++task = 1707
++
++# 12.025s, class D
++[[test]]
++name = "planner_headless_turns::a_headless_finding_planner_takes_the_answer_as_its_next_turn_and_closes_with_its_finding"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: answer routing / close decision"
++task = 1707
++
++# 13.264s, class D
++[[test]]
++name = "planner_headless_turns::a_headless_planner_at_a_login_failure_waits_in_the_hold_and_goes_on"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: failure kind → authentication hold"
++task = 1707
++
++# 14.538s, class D
++[[test]]
++name = "planner_headless_turns::a_headless_planner_at_the_usage_limit_waits_in_the_hold_and_makes_the_same_call_again"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: failure kind → hold mapping"
++task = 1707
++
++# 7.108s, class B
++[[test]]
++name = "planner_headless_turns::a_headless_planners_turn_stopped_at_its_limit_tells_the_inbox_and_the_planner_closes"
++reason = "B 境界（守る境界）: wrapper kills turn at time limit"
++task = 1707
++
++# 19.379s, class D
++[[test]]
++name = "planner_headless_turns::a_headless_request_planners_answer_reaches_a_new_one_and_undecided_ends_exhaust_the_request"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: exhaustion count, routing answer"
++task = 1707
++
++# 9.386s, class D
++[[test]]
++name = "planner_headless_turns::a_headless_request_planners_submission_proposes_the_request_and_its_end_closes_it"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: request state transition"
++task = 1707
++
++# 8.499s, class D
++[[test]]
++name = "planner_headless_turns::a_live_headless_planner_takes_the_next_revise_of_its_proposal_as_its_next_turn"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: live planner vs new planner choice"
++task = 1707
++
++# 14.313s, class unknown
++[[test]]
++name = "planner_headless_turns::a_request_written_during_a_turn_at_the_usage_limit_waits_for_the_retry_of_that_turn"
++reason = "unknown: TSV と一意に対応しない（TSV に 0 行）。class と行き先は移し替えの goal（119・120）が決める"
++task = 1707
++
++# 14.781s, class B
++[[test]]
++name = "queue_service_reads::the_read_roles_read_what_their_prompts_name_as_the_command_line_prints_it"
++reason = "B 境界（守る境界）: queue service socket per principal"
++task = 1707
++
++# 6.099s, class D
++[[test]]
++name = "request_planner::a_planner_question_about_a_request_reaches_its_planner_or_a_new_one_and_three_exhaust_it"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: routing and three-attempt limit"
++task = 1707
++
++# 6.696s, class D; not in tests/it at the base of task 1707
++[[test]]
++name = "review_subagents::an_agents_concern_a_person_decides_under_a_pass_asks_a_person"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: concern rule routing loop (7s)"
++task = 1707
++
++# 6.122s, class B
++[[test]]
++name = "review_subagents::the_worker_cannot_change_or_drop_its_required_review"
++reason = "B 境界（守る境界）: reads config from main commit via git, not worktree"
++task = 1707
++
++# 5.774s, class B
++[[test]]
++name = "runtime_adopt::a_supervisor_takes_back_a_run_it_lost_only_after_dropping_its_slot"
++reason = "B 境界（守る境界）: slot/lease race wiring"
++task = 1707
++
++# 5.097s, class B
++[[test]]
++name = "runtime_adopt::independent_tasks_run_concurrently_and_a_dependent_starts_after_integration"
++reason = "B 境界（守る境界）: concurrent runs, git integrate, supervisor loop"
++task = 1707
++
++# 5.397s, class B
++[[test]]
++name = "runtime_background_process::a_detached_wrapper_and_its_turn_outlive_a_killed_supervisor"
++reason = "B 境界（守る境界）: SIGKILL supervisor, adopt detached wrapper"
++task = 1707
++
++# 6.141s, class R
++[[test]]
++name = "runtime_background_process::a_stop_answer_stops_the_background_session"
++reason = "R 移し替えの予定（代表がある、goal 119 か 120）: duplicates runtime_headless stop answer"
++task = 1707
++
++# 9.316s, class B
++[[test]]
++name = "runtime_background_process::stop_processes_stops_a_background_sessions_orphan"
++reason = "B 境界（守る境界）: real orphan process stopped"
++task = 1707
++
++# 6.397s, class B
++[[test]]
++name = "runtime_broker::a_preferred_worker_gets_its_token_and_the_end_of_its_run_revokes_it"
++reason = "B 境界（守る境界）: token files 0600, MCP config, broker refusal"
++task = 1707
++
++# 6.785s, class B
++[[test]]
++name = "runtime_claim::resident_supervisor_without_runs_is_listed_until_it_stops"
++reason = "B 境界（守る境界）: resident thread heartbeat/registration"
++task = 1707
++
++# 5.986s, class D
++[[test]]
++name = "runtime_claim::supervisor_claims_by_effective_priority_like_candidates_and_graph"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: claim ordering by priority"
++task = 1707
++
++# 6.481s, class D
++[[test]]
++name = "runtime_claim::supervisor_claims_the_candidate_that_releases_the_most_tasks_first"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: claim ordering via supervise restarts"
++task = 1707
++
++# 6.056s, class B
++[[test]]
++name = "runtime_claim_defer::a_changed_conflicts_table_is_read_again_without_a_restart"
++reason = "B 境界（守る境界）: dagq.toml reread each pass from main checkout"
++task = 1707
++
++# 5.169s, class D
++[[test]]
++name = "runtime_claim_defer::a_run_waiting_for_its_owner_past_the_grace_lets_the_deferred_task_go"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: grace time judgment"
++task = 1707
++
++# 7.688s, class D
++[[test]]
++name = "runtime_claim_defer::a_task_meeting_a_run_on_a_hotspot_waits_and_the_next_one_is_claimed"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: path overlap → defer and next candidate"
++task = 1707
++
++# 10.000s, class B
++[[test]]
++name = "runtime_claim_spacing::a_resident_supervisor_waits_for_the_spacing_and_status_shows_it"
++reason = "B 境界（守る境界）: representative resident supervisor with real config reread"
++task = 1707
++
++# 5.545s, class D
++[[test]]
++name = "runtime_claim_spacing::no_load_hold_or_no_spacing_fills_the_free_slots_in_one_pass"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: claim count per pass"
++task = 1707
++
++# 5.030s, class D
++[[test]]
++name = "runtime_claim_spacing::one_claim_per_pass_spaced_from_the_queues_latest_claim"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: spacing time judgment"
++task = 1707
++
++# 12.373s, class R
++[[test]]
++name = "runtime_cleanup::a_drain_on_a_provisioning_failure_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing"
++reason = "R 移し替えの予定（代表がある、goal 119 か 120）: drain/cleanup wiring variant; decision of ordering"
++task = 1707
++
++# 5.297s, class D
++[[test]]
++name = "runtime_cleanup::a_skipped_resume_waits_for_the_cleanup_of_its_build_outputs"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: skip_resume gated on cleanup"
++task = 1707
++
++# 30.822s, class R
++[[test]]
++name = "runtime_cleanup::a_withdrawn_handoff_resumes_the_cleanup"
++reason = "R 移し替えの予定（代表がある、goal 119 か 120）: handoff/drain wiring variant (37s); decisions of ordering"
++task = 1707
++
++# 28.091s, class B
++[[test]]
++name = "runtime_cleanup::draining_finishes_disk_cleanup_before_deciding_a_landing"
++reason = "B 境界（守る境界）: representative drain/handoff + cleanup wiring"
++task = 1707
++
++# 38.897s, class R
++[[test]]
++name = "runtime_cleanup::draining_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing"
++reason = "R 移し替えの予定（代表がある、goal 119 か 120）: same drain wiring; pass ordering decisions (46s)"
++task = 1707
++
++# 33.659s, class D
++[[test]]
++name = "runtime_cleanup::the_rest_of_a_cleanup_for_room_holds_and_asks_nothing_until_it_is_done"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: disk ask/hold decision by readings (39s)"
++task = 1707
++
++# 5.450s, class B
++[[test]]
++name = "runtime_client_mode::the_worker_and_its_resume_reach_the_queue_only_through_the_service"
++reason = "B 境界（守る境界）: process env/argv + service socket"
++task = 1707
++
++# 5.342s, class R
++[[test]]
++name = "runtime_e2e::a_failed_e2e_parks_the_run_for_a_resume_and_its_fix_lands"
++reason = "R 移し替えの予定（代表がある、goal 119 か 120）: failure->park decision; spawn covered"
++task = 1707
++
++# 7.340s, class D
++[[test]]
++name = "runtime_e2e::an_e2e_past_its_timeout_is_run_again_instead_of_sending_the_run_back"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: timeout count -> retry/attention"
++task = 1707
++
++# 6.328s, class B
++[[test]]
++name = "runtime_e2e::the_runs_of_a_supervisor_run_their_e2e_one_at_a_time"
++reason = "B 境界（守る境界）: concurrency of host e2e"
++task = 1707
++
++# 5.628s, class D
++[[test]]
++name = "runtime_evidence::the_e2e_a_run_needs_is_recorded_and_its_receipt_backs_none"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: e2e need from diff paths; pure"
++task = 1707
++
++# 5.232s, class G; not in tests/it at the base of task 1707
++[[test]]
++name = "runtime_handoff::a_handoff_before_the_resume_request_lets_the_next_supervisor_send_it"
++reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive input box"
++task = 1707
++
++# 5.087s, class R
++[[test]]
++name = "runtime_handoff::a_handoff_during_a_resume_goes_on_watching_the_resumed_session"
++reason = "R 移し替えの予定（代表がある、goal 119 か 120）: handoff.json carryover; covered by continuation test"
++task = 1707
++
++# 6.493s, class G; not in tests/it at the base of task 1707
++[[test]]
++name = "runtime_handoff::a_handoff_without_its_state_after_the_resumed_session_ended_gives_the_lease_back"
++reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive resume"
++task = 1707
++
++# 5.338s, class D
++[[test]]
++name = "runtime_handoff::a_handoff_without_its_state_during_a_resume_still_watches_the_session"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: rebuild resume from events"
++task = 1707
++
++# 5.282s, class G; not in tests/it at the base of task 1707
++[[test]]
++name = "runtime_handoff::a_resume_handoff_before_exit_does_not_answer_background_work"
++reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive background-work dialog"
++task = 1707
++
++# 6.196s, class G; not in tests/it at the base of task 1707
++[[test]]
++name = "runtime_handoff::a_resume_handoff_preserves_the_exit_for_its_background_dialog"
++reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive dialog /exit"
++task = 1707
++
++# 6.149s, class G; not in tests/it at the base of task 1707
++[[test]]
++name = "runtime_handoff::a_resume_without_a_snapshot_recovers_the_exit_for_its_background_dialog"
++reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive dialog /exit"
++task = 1707
++
++# 5.577s, class B
++[[test]]
++name = "runtime_handoff::a_supervisor_that_stops_during_a_resume_leaves_the_session_to_its_adopter"
++reason = "B 境界（守る境界）: adoption after stale lease, other token"
++task = 1707
++
++# 6.254s, class D
++[[test]]
++name = "runtime_handoff::canceling_a_handoff_during_a_landing_resumes_claims_without_exec"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: withdrawn request → resume claims"
++task = 1707
++
++# 6.869s, class R
++[[test]]
++name = "runtime_handoff::review_verdicts::reviews_that_ended_before_the_exec_are_applied_not_run_again"
++reason = "R 移し替えの予定（代表がある、goal 119 か 120）: same review/handoff boundary"
++task = 1707
++
++# 6.162s, class B
++[[test]]
++name = "runtime_headless::a_later_turn_is_the_runs_agent_and_its_helper_no_idle_process"
++reason = "B 境界（守る境界）: process tree / agent pid"
++task = 1707
++
++# 8.404s, class B
++[[test]]
++name = "runtime_headless::a_turn_past_its_limit_is_stopped_with_its_command_outside_its_group"
++reason = "B 境界（守る境界）: process groups and signals"
++task = 1707
++
++# 6.159s, class unknown
++[[test]]
++name = "runtime_headless_stall::a_headless_stall_past_its_three_recovery_jobs_is_asked_without_a_fourth"
++reason = "unknown: TSV と一意に対応しない（TSV に 0 行）。class と行き先は移し替えの goal（119・120）が決める"
++task = 1707
++
++# 5.056s, class B
++[[test]]
++name = "runtime_integrate::a_refused_renumbering_commit_is_undone_and_needs_a_session"
++reason = "B 境界（守る境界）: git commit refusal and undo"
++task = 1707
++
++# 5.943s, class D
++[[test]]
++name = "runtime_landing_answers::a_land_answer_is_applied_while_the_slot_is_taken_and_lands_before_a_new_claim"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: answer application vs slot ordering"
++task = 1707
++
++# 9.576s, class D
++[[test]]
++name = "runtime_landing_release::a_process_that_outlives_its_stop_is_the_inboxs_once"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: attention once decision (10.7s)"
++task = 1707
++
++# 6.024s, class D
++[[test]]
++name = "runtime_light_slots::a_parked_run_waits_for_a_normal_slot_while_the_landing_queue_fills_it"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: slot allocation and resume ordering"
++task = 1707
++
++# 5.514s, class B
++[[test]]
++name = "runtime_observer::observe_kills_an_agent_past_its_timeout_with_its_children"
++reason = "B 境界（守る境界）: process group kill"
++task = 1707
++
++# 7.545s, class B
++[[test]]
++name = "runtime_observer::supervisor_starts_the_observer_on_its_interval_without_a_run_slot"
++reason = "B 境界（守る境界）: supervisor wiring of observer job"
++task = 1707
++
++# 8.518s, class B
++[[test]]
++name = "runtime_precheck::precheck_conflicts_up_to_the_conflict_only_limit_retry_the_task_with_its_branch"
++reason = "B 境界（守る境界）: real git rebase conflict precheck representative"
++task = 1707
++
++# 5.809s, class D
++[[test]]
++name = "runtime_precheck::the_conflict_only_limit_of_dagq_toml_retries_the_task_sooner"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: configured limit counting"
++task = 1707
++
++# 7.053s, class unknown
++[[test]]
++name = "runtime_recheck::a_run_held_in_its_slot_for_its_e2e_that_a_landing_conflicts_with_is_parked_before_it_lands"
++reason = "unknown: TSV と一意に対応しない（TSV に 0 行）。class と行き先は移し替えの goal（119・120）が決める"
++task = 1707
++
++# 5.641s, class G; not in tests/it at the base of task 1707
++[[test]]
++name = "runtime_recheck::a_run_held_in_its_slot_that_a_landing_conflicts_with_is_parked_before_it_lands"
++reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive held /exit"
++task = 1707
++
++# 5.544s, class B
++[[test]]
++name = "runtime_recheck::a_waiting_run_that_a_landing_conflicts_with_is_resumed_before_its_answer"
++reason = "B 境界（守る境界）: real git merge-tree conflict"
++task = 1707
++
++# 5.092s, class unknown
++[[test]]
++name = "runtime_recheck::another_supervisors_recheck_of_main_leaves_the_run_held_for_its_e2e_to_check"
++reason = "unknown: TSV と一意に対応しない（TSV に 0 行）。class と行き先は移し替えの goal（119・120）が決める"
++task = 1707
++
++# 6.037s, class D
++[[test]]
++name = "runtime_repair::a_live_escalation_is_recorded_at_the_recovery_jobs_request_unless_the_job_failed"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: attribution of events"
++task = 1707
++
++# 5.034s, class G; not in tests/it at the base of task 1707
++[[test]]
++name = "runtime_resume::a_request_lost_twice_is_asked_to_the_inbox"
++reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive send confirmation"
++task = 1707
++
++# 5.036s, class G; not in tests/it at the base of task 1707
++[[test]]
++name = "runtime_resume::a_request_stuck_in_the_input_box_is_asked_to_the_inbox"
++reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: cmux input box send confirmation"
++task = 1707
++
++# 7.486s, class R
++[[test]]
++name = "runtime_resume::a_resume_whose_lease_moved_is_resumed_again_only_after_its_slot_is_dropped"
++reason = "R 移し替えの予定（代表がある、goal 100 の task 1557・1558）: same lease/slot race as runtime_adopt takes_back"
++task = 1707
++
++# 6.921s, class G; not in tests/it at the base of task 1707
++[[test]]
++name = "runtime_resume::a_resumed_session_gets_its_request_only_once_its_input_box_is_ready"
++reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: cmux input box readiness"
++task = 1707
++
++# 6.833s, class G; not in tests/it at the base of task 1707
++[[test]]
++name = "runtime_resume::a_resumed_session_that_ignores_exit_is_let_go"
++reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive /exit timeout"
++task = 1707
++
++# 10.391s, class unknown
++[[test]]
++name = "runtime_resume::a_resumed_session_that_ignores_its_exit_request_is_let_go_after_the_exit_timeout"
++reason = "unknown: TSV と一意に対応しない（TSV に 0 行）。class と行き先は移し替えの goal（119・120）が決める"
++task = 1707
++
++# 5.763s, class unknown
++[[test]]
++name = "runtime_resume::a_resumed_session_whose_wrapper_goes_silent_is_asked_to_exit_once_then_let_go"
++reason = "unknown: TSV と一意に対応しない（TSV に 0 行）。class と行き先は移し替えの goal（119・120）が決める"
++task = 1707
++
++# 5.601s, class D
++[[test]]
++name = "runtime_resume::a_run_whose_conflict_only_resumes_are_used_up_is_retried_with_its_branch"
++reason = "D 移し替えの予定（判断を unit test へ、goal 100 の task 1557・1558）: counting already unit tested in domain::resume"
++task = 1707
++
++# 6.396s, class B
++[[test]]
++name = "runtime_resume::a_session_nobody_watches_blocks_the_resume_until_it_ends"
++reason = "B 境界（守る境界）: live process of dead supervisor's resume"
++task = 1707
++
++# 5.188s, class D
++[[test]]
++name = "runtime_resume::a_used_up_run_is_retried_with_its_branch_by_its_recovery_job"
++reason = "D 移し替えの予定（判断を unit test へ、goal 100 の task 1557・1558）: alert routing and retry_inherit decision"
++task = 1707
++
++# 6.535s, class R
++[[test]]
++name = "runtime_resume::approved_needs_session_run_is_resumed_until_the_runtime_lands_it"
++reason = "R 移し替えの予定（代表がある、goal 100 の task 1557・1558）: resume wiring covered by conflicting_run"
++task = 1707
++
++# 5.058s, class B
++[[test]]
++name = "runtime_resume::conflicting_run_needs_a_session_and_lands_after_the_session_resolves_it"
++reason = "B 境界（守る境界）: real git conflict, session resolves, lands"
++task = 1707
++
++# 5.424s, class D
++[[test]]
++name = "runtime_resume::resuming_stops_after_three_attempts"
++reason = "D 移し替えの予定（判断を unit test へ、goal 100 の task 1557・1558）: attempt limit"
++task = 1707
++
++# 6.420s, class D
++[[test]]
++name = "runtime_resume::stats_ties_a_deferred_landing_to_the_landing_that_broke_it"
++reason = "D 移し替えの予定（判断を unit test へ、goal 100 の task 1557・1558）: stats attribution computation"
++task = 1707
++
++# 5.322s, class R
++[[test]]
++name = "runtime_resume::unapproved_resumed_run_is_validated_and_reviewed_with_its_session_open"
++reason = "R 移し替えの予定（代表がある、goal 100 の task 1557・1558）: resume wiring covered; approval branching decision"
++task = 1707
++
++# 5.739s, class G; not in tests/it at the base of task 1707
++[[test]]
++name = "runtime_resume_adopt::a_resume_taken_over_after_a_handoff_in_its_slot_does_not_record_its_dialog_again"
++reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive screen watch"
++task = 1707
++
++# 5.925s, class G; not in tests/it at the base of task 1707
++[[test]]
++name = "runtime_resume_adopt::a_resume_taken_over_after_a_handoff_keeps_its_dialog_and_clears_it_at_its_end"
++reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive dialog carryover (module says goal 92)"
++task = 1707
++
++# 5.290s, class G; not in tests/it at the base of task 1707
++[[test]]
++name = "runtime_resume_adopt::an_adopted_resume_in_its_slot_does_not_record_its_dialog_again"
++reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive dialog"
++task = 1707
++
++# 5.909s, class G; not in tests/it at the base of task 1707
++[[test]]
++name = "runtime_resume_adopt::an_adopted_resume_keeps_its_dialog_and_clears_it_at_its_end"
++reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive dialog"
++task = 1707
++
++# 6.181s, class G; not in tests/it at the base of task 1707
++[[test]]
++name = "runtime_resume_exit_retry::a_resumed_sessions_held_exit_is_typed_again_into_a_ready_input_box"
++reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive exit typing"
++task = 1707
++
++# 5.701s, class G; not in tests/it at the base of task 1707
++[[test]]
++name = "runtime_resume_exit_retry::used_up_retries_of_an_unreviewed_resume_go_to_the_stuck_exit_ask"
++reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive exit retries"
++task = 1707
++
++# 6.696s, class G; not in tests/it at the base of task 1707
++[[test]]
++name = "runtime_resume_exit_retry::used_up_retries_over_a_dialog_close_a_reviewed_resume_and_judge_it"
++reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive exit retries"
++task = 1707
++
++# 5.268s, class G; not in tests/it at the base of task 1707
++[[test]]
++name = "runtime_review_background::background_work_holds_the_resumed_session_until_it_ends"
++reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive resumed session"
++task = 1707
++
++# 5.362s, class unknown
++[[test]]
++name = "runtime_review_conflict::a_conflict_request_that_cannot_be_written_is_withdrawn_and_the_run_lands"
++reason = "unknown: TSV と一意に対応しない（TSV に 0 行）。class と行き先は移し替えの goal（119・120）が決める"
++task = 1707
++
++# 5.114s, class D
++[[test]]
++name = "runtime_run_env::a_missing_run_env_program_holds_resumes_until_it_is_found"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: hold decision on missing program"
++task = 1707
++
++# 6.375s, class G; not in tests/it at the base of task 1707
++[[test]]
++name = "runtime_screen_idle_input::a_markerless_resumed_session_gets_its_answer_once_its_screen_rests"
++reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: cmux screen"
++task = 1707
++
++# 5.317s, class D
++[[test]]
++name = "runtime_stale_receipt::a_resumed_session_idle_after_its_rebase_with_the_old_receipt_is_asked_once"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: nudge on resume phase"
++task = 1707
++
++# 6.099s, class D
++[[test]]
++name = "runtime_stale_receipt::a_resumed_session_that_leaves_the_old_receipt_ends_its_attempt_as_before"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: attempt outcome unresolved"
++task = 1707
++
++# 6.768s, class D
++[[test]]
++name = "runtime_stale_receipt::a_stale_receipt_left_during_a_wait_is_unchanged"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: outcome judgement across wait"
++task = 1707
++
++# 5.873s, class D
++[[test]]
++name = "runtime_stale_receipt::a_stale_receipt_rewritten_during_a_wait_is_rewritten"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: outcome judgement across wait"
++task = 1707
++
++# 7.697s, class G; not in tests/it at the base of task 1707
++[[test]]
++name = "runtime_stall::an_input_the_supervisor_did_not_send_holds_the_nudge_and_is_preempted"
++reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: person typing into cmux session"
++task = 1707
++
++# 6.404s, class G; not in tests/it at the base of task 1707
++[[test]]
++name = "runtime_stall_recovery::a_stall_past_its_three_recovery_jobs_is_asked_without_a_fourth"
++reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive stall recovery (limit decision)"
++task = 1707
++
++# 5.627s, class B
++[[test]]
++name = "runtime_support::thread_stacks::supervise_timeout_prints_stacks_before_cleanup"
++reason = "B 境界（守る境界）: child process timeout prints stacks"
++task = 1707
++
++# 8.632s, class B
++[[test]]
++name = "runtime_sweep::ended_runs_lose_their_build_outputs_and_canceled_tasks_their_worktrees"
++reason = "B 境界（守る境界）: filesystem and git worktree removal"
++task = 1707
++
++# 6.127s, class D
++[[test]]
++name = "runtime_triage::a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: round limit decision"
++task = 1707
++
++# 5.119s, class G; not in tests/it at the base of task 1707
++[[test]]
++name = "runtime_triage::a_silent_wrapper_after_the_review_waits_for_the_exit_with_an_ask"
++reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: interactive /exit"
++task = 1707
++
++# 5.510s, class B
++[[test]]
++name = "runtime_triage::a_triage_whose_lease_moved_is_triaged_again_only_after_its_slot_is_dropped"
++reason = "B 境界（守る境界）: lease race between supervisors"
++task = 1707
++
++# 13.259s, class R
++[[test]]
++name = "runtime_waiting_stages::a_question_while_resuming_waits_outside_the_slot_and_gets_its_answer"
++reason = "R 移し替えの予定（代表がある、goal 119 か 120）: same wait wiring; clock/slot decisions (13s)"
++task = 1707
++
++# 11.141s, class B
++[[test]]
++name = "runtime_waiting_stages::a_question_while_revising_waits_outside_the_slot_with_its_clock_stopped"
++reason = "B 境界（守る境界）: representative slot/wait wiring with concurrent task"
++task = 1707
++
++# 15.070s, class D
++[[test]]
++name = "runtime_waiting_stages::a_resume_question_past_the_limit_waits_in_its_slot_with_its_clock_stopped"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: limit -> deferred decision (15s)"
++task = 1707
++
++# 5.786s, class G
++[[test]]
++name = "runtime_workspace_cleanup::ended_runs_workspaces_are_listed_then_closed_by_run_task_or_all"
++reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: cmux run workspaces cleanup"
++task = 1707
++
++# 5.179s, class B
++[[test]]
++name = "worker_escalation::a_raised_resume_starts_the_session_higher_and_stats_reads_it"
++reason = "B 境界（守る境界）: wrapper launched with raised model"
++task = 1707
++
++# 5.912s, class D
++[[test]]
++name = "worker_escalation::missing_evidence_and_a_scope_violation_keep_the_step"
++reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: loop of decision cases"
++task = 1707
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index ec538ec6..064302b7 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -107,6 +107,28 @@ jobs:
+             echo "no nextest output to summarise"
+           fi
+ 
++      # The time gate of the tests in tests/it (ADR-t1707-1): a test the diff
++      # from the base added or changed that took longer than the threshold
++      # fails the job unless .config/it-slow-allow.toml names it
++      # (scripts/check-it-test-time.sh, docs/design/slow-tests.md). The base
++      # is the commit before the push or the pull request's base; a push
++      # without one (the first push of a new branch) skips the gate. It reads
++      # the same nextest output and runs after a failed test step too.
++      - name: IT test time gate
++        if: ${{ !cancelled() }}
++        env:
++          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
++        run: |
++          if [ ! -s "$RUNNER_TEMP/nextest.log" ]; then
++            echo "skipped: no nextest output to read"
++          elif [ -z "$BASE" ] || ! printf '%s' "$BASE" | grep -q '[^0]'; then
++            echo "skipped: no base commit (the first push of a new branch: before is $BASE)"
++          elif ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
++            echo "skipped: the base commit $BASE is not in the history (a force push)"
++          else
++            sh scripts/check-it-test-time.sh --base "$BASE" "$RUNNER_TEMP/nextest.log"
++          fi
++
+   # Linux (ubuntu): cargo build and the whole test suite, the first step of
+   # goal 83 (docs/design/linux-ci.md). The job may fail while the tests that
+   # only hold on macOS are split out: continue-on-error keeps a Linux failure
+diff --git a/docs/adr/2026-10-05-t1707-1-time-gate-for-added-or-changed-integration-tests.md b/docs/adr/2026-10-05-t1707-1-time-gate-for-added-or-changed-integration-tests.md
+new file mode 100644
+index 00000000..ef4ecced
+--- /dev/null
++++ b/docs/adr/2026-10-05-t1707-1-time-gate-for-added-or-changed-integration-tests.md
+@@ -0,0 +1,61 @@
++---
++id: adr-t1707-1
++type: adr
++title: 差分で足した・変えたtests/itのtestの1本の時間を閾値と比べ、超えたものは許可の一覧に理由が無ければ落とす関門を、CIとworkerの手元とreviewに置く
++status: accepted
++created: 2026-10-05
++updated: 2026-10-05
++accepted_on: 2026-10-05
++owners:
++  - hisamekms
++tags:
++  - testing
++  - performance
++  - ci
++related:
++  - adr-t1410-1
++  - adr-t963-1
++  - adr-t598-1
++  - adr-0076
++  - design-slow-tests
++  - development-testing
++---
++
++# ADR-t1707-1: 差分で足した・変えたtests/itのtestの1本の時間を閾値と比べ、超えたものは許可の一覧に理由が無ければ落とす関門を、CIとworkerの手元とreviewに置く
++
++## Context
++
++本番の`integrate`の関門の直近10本（2026-10-04）で、testの時間の合計の95%はtests/itのintegration test（`dagq::it`）だった。goal 68の移し替えは変えたmoduleで時間を縮めたが、同じ時期に足されたintegration testがそれを上回り、全体は伸びた。新しい機能のtestがcaseをloopしてcaseごとにsupervisorを起動し直す形で足され続け、移し替えの後のmoduleも新しい機能のtestで増え直した（例: あるmoduleが200秒を超えた）。
++
++[ADR-t1410-1](2026-10-03-t1410-1-decisions-in-unit-tests-boundaries-in-integration-tests.md)は、判断はunit test、tests/itは境界の代表に絞る規則を決めたが、その規則とreviewの判断だけでは増え直しが止まっていない。規則に反した形を、人や読み手の注意に頼らず機械的に見つける場所が無い。この決定はADR-t1410-1の決定を変えず、それを守らせる関門を足す。
++
++## Decision
++
++1. **関門の方針**: tests/itのtestのうち、base（着地の前ならrunのbase、着地の後ならpushの前のcommit、pull requestならそのbase）からの差分で足したものと本文の行が変わったものについて、その1本の時間を閾値と比べる。閾値は本番の関門の1本の平均を基準に、その数倍の帯に置く。超えたtestは、許可の一覧に理由つきで載っていなければ関門を落とす。既存の遅いtestは導入のときに許可の一覧に載せ、関門は新しい増え直しだけを捕まえる。
++
++2. **許可の一覧に載せてよい理由**: 次のどちらかに当たるものだけ。(a) そのtestが守る境界を書けるもの: SQLite・Git・プロセス・supervisorの配線・復旧とadoptのどれか（ADR-t1410-1の境界）。(b) 移し替えの予定があり、その行き先のtask（かgoal）を書けるもの。判断のcaseを並べただけのtestは(a)に当たらない。項目は登録したtaskを持ち、testを直すか移すtaskは同じ変更で自分の項目を外すか直す。
++
++3. **関門の配置**: 3か所に置く。(1) CIのpushとpull_requestで、coverageの関門と同じnextestの出力を読む。(2) workerの手元で、変えたtestを流したnextestの出力に当ててreceiptの前に確かめる。(3) runのreviewのtestの規則を見るsubagentの検査項目で、許可の一覧に足した項目の理由が決定2に当たるかを見る。
++
++4. **落ちたときの扱い**: CIのmainへのpushで落ちれば、既存の仕組みでci-failureのissueが開き、plannerが直すtaskを作る。workerは、関門に当たったtestを直すか（判断をunit testへ移す・caseごとの起動をやめる）、決定2に当たる理由で許可の一覧に項目を足す。どちらもできなければ`failed`のreceiptに理由を書く。
++
++5. **integrateに段を足さない**: `integrate`の検証に関門の段を足さない。着地は直列で、全部のtestを流す検証にもう1段を足すと1本ずつの着地の上限が下がる（[ADR-t963-1](2026-09-29-t963-1-e2e-required-by-diff-and-run-in-full-before-auto-update.md)決定4がe2eをintegrateで流さないのと同じ考え）。着地の前はworkerの手元とreview、着地の後はCIで捕まえる。
++
++6. **限界**: (1) helperやfixtureだけの変更（`#[test]`の付かない関数、tests/common、stubのscript）は、それを使うtestを遅くしても対象にしない。差分から対象を機械的に決められるのはtestの本文だけだから。(2) CIのrunnerと本番の関門では並列度とmachineが違い、同じtestの秒が違う。CIの秒で落ちた・通ったことは本番の秒と一致しない。(3) workerの手元の秒もhostの負荷で揺れる。これらは日次の見直しで`dagq::it`の本数と合計を追うこと（goal 118）で補う。
++
++7. **変える手順**: 閾値と許可の理由の条件を変えるのは、日次の見直しや本番の関門のlogで、関門が増え直しを捕まえていない・正当なtestを止めすぎていると分かったとき。plannerかinboxが本番の関門の直近のlogの1本の平均と分布（遅いtestの集計）を見て提案し、閾値の帯の基準（本番の1本の平均の数倍）を変えるなら人が決めてこのADRを置き換える。基準の中で値だけを直すなら、`docs/design/slow-tests.md`の関門の節の値と決め方を直すtaskにする。
++
++## Alternatives
++
++- **`integrate`に関門の段を足す**: 本番の着地を最も確実に守るが、直列の着地の上限を下げる（決定5）。採らない。
++- **kpiや`stats`に記録して見るだけ**: 増え直しが見えるのは着地の後で、誰かが読むまで止まらない。追跡はgoal 118の日次の見直しが行い、関門は止める役に分ける。
++- **moduleやtest binary全体の時間の合計で比べる**: 既存の遅いtestと新しいtestを分けられず、移し替えで縮んだ分が増え直しを隠す。1本ずつにする。
++- **reviewの判断だけに任せる**: 今の形で止まっていない（Context）。
++- **既存の遅いtestも全部落とす**: 移し替えの前に全部の変更が止まる。既存のものは許可の一覧に載せ、移し替えのgoalが外す。
++
++## Consequences
++
++- 新しく足したtestと本文を変えたtestが閾値を超えると、着地の前にworkerとreviewが、着地の後にCIが気づく。既存の遅いtestを直すだけの変更は、その項目があるので落ちない。
++- 許可の一覧は、移し替えが終わるまでの遅いtestの台帳を兼ね、項目の理由がその行き先を示す。
++- helperだけの変更による遅れは捕まえず、CIと本番の秒の違いは残る（決定6）。日次の見直しが合計で補う。
++- 閾値・許可の一覧の書式と置き場所・scriptの名前と引数・CIのstepは`docs/design/slow-tests.md`が持ち、規則の本文は`docs/development/testing.md`の「判断と境界のtest」が持つ。
+diff --git a/docs/adr/README.md b/docs/adr/README.md
+index 02f045e2..4ce1fa6f 100644
+--- a/docs/adr/README.md
++++ b/docs/adr/README.md
+@@ -4,7 +4,7 @@ type: design
+ title: Architecture decision records
+ status: current
+ created: 2026-09-21
+-updated: 2026-10-04
++updated: 2026-10-05
+ last_verified: 2026-09-30
+ tags:
+   - architecture
+@@ -160,6 +160,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由
+ | [ADR-t1662-2](2026-10-04-t1662-2-measurement-stores-ssot-and-views.md) | 記録を論理ストア（SSOTのStateStore・EventStore・SessionStepStore・NodeSampleStore、ビューのLedgerStore・ReportStore）と消えてよい材料（run dir・log・CSV・transcript）に分け、今のアダプタはqueue.dbの表にし、StateStoreとEventStoreは今どおり同時に確定して計測はStateStoreを読まず、sessionのstepは90日だけ重複を除き抜けを検出して持ち、hostの負荷はNodeSampleStoreを恒久の記録にしてCSVを写しにし（保持の期間のCSVは一度取り込む）、`RunLog`・`EventReads`・`TaskStore`をEventStore・StateStoreにまとめ直してgoal 100のmoduleに置き、台帳と恒久の入力のストアを「新しい表は持たない」の例外にする（ADR-0049決定5をamends） | 2026-10-04 |
+ | [ADR-t1662-3](2026-10-04-t1662-3-executors-send-telemetry-and-commands-are-classified-by-shape.md) | sessionのstepはagentではなくexecutor（session wrapper・runner・非対話のjobを起動するプロセス・`integrate`とe2eの検証）がTelemetrySink（queue serviceの`telemetry_report`）に30秒ごとに送り、executorには`telemetry_report`だけを呼べるtelemetry専用のprincipal（対象はrunか、runを持たないplanner・plan review・goal review・throughput review。supervisorが発行・失効）を与え、runを持たない対象のstepはSessionStepStoreに90日だけ持ち、実行環境・資源・送る口を差し替えられる口にし、資源の単位・`blocker: infra`・適合test・OpenTelemetryのspanとの対応を決め、コマンドは汎用の形（shape: flagの名前は平文、値とwordはdigest）だけを持って台帳を作るときに`[[telemetry.commands]]`の規則で分類する（ADR-t614-1決定2・ADR-t1233-4決定4・6をamends） | 2026-10-04 |
+ | [ADR-t1688-1](2026-10-04-t1688-1-worker-searches-documents-by-changed-names.md) | workerは文書の候補を、taskが名指すものと作業中に見つけたものに加え、変えた名前（コマンド・flag・設定のkey・役割・fileのpath）でrepositoryの文書を探して拾い、summaryに照合したpath・節か不要の理由と探した名前を書く。探す手段は名指さず検査の工程にしない。repository固有の範囲は開発文書、確かめはreviewのsubagent（ADR-t1428-1決定4をamends） | 2026-10-04 |
++| [ADR-t1707-1](2026-10-05-t1707-1-time-gate-for-added-or-changed-integration-tests.md) | 差分で足した・変えたtests/itのtestの1本の時間を、本番の関門の1本の平均を基準にした閾値と比べ、超えたものは許可の一覧（守る境界か移し替えの行き先のtaskを理由に持つ項目）に無ければ落とす関門を、CIのpushとpull_request・workerの手元・reviewのtestの規則の検査に置き、`integrate`に段を足さない（ADR-t1410-1の規則を守らせる関門） | 2026-10-05 |
+ 
+ goal 82（goal 38の段(1)〜(3)）のADRはtask 1233が書いた5本で、決定の置き場所は次のとおり。制御側と実行側の分け方・queue service・ユースケース単位のAPIとservice側の認可・unix socket・broker・クライアントモード・段の順と置き場所はADR-t1233-1、serviceの起動・停止の責任・落ちたときの知らせ方・brokerより前のprincipalの認証（token）はADR-t1233-4、読み取りのユースケースとroleごとの読める範囲・workerの読める範囲・Codexのsandboxからの到達はADR-t1233-5、e2eをreviewのpassの後のhostの工程に移すことはADR-t1233-2、このrepositoryを先にLinuxで通すことはADR-t1233-3にある。
+ 
+diff --git a/docs/design/README.md b/docs/design/README.md
+index 629c4232..bbd25819 100644
+--- a/docs/design/README.md
++++ b/docs/design/README.md
+@@ -4,7 +4,7 @@ type: design
+ title: Current design documents
+ status: current
+ created: 2026-09-21
+-updated: 2026-10-04
++updated: 2026-10-05
+ last_verified: 2026-10-04
+ tags:
+   - architecture
+@@ -30,5 +30,5 @@ tags:
+ - [Manual smoke](manual-smoke.md)
+ - [Stress CI](stress-ci.md)（mainで直近に足した・変えたtestをGitHub Actionsの定時実行で繰り返し、落ちたらflaky-testのissueで知らせる）
+ - [CI failure issues](ci-failure-issues.md)（mainへのpushのCI（ci.yml）が落ちたらci-failureのissueを開くか追記し、次に通ったら閉じる。workflow全体の結論で決め、continue-on-errorのjobの失敗だけでは開かない）
+-- [Slow tests](slow-tests.md)（nextestの出力から遅いtestの上位と1秒・5秒・30秒を超えた本数と合計を出すscripts/slow-tests.sh。CIのjob summaryにも出す）
++- [Slow tests](slow-tests.md)（nextestの出力から遅いtestの上位と1秒・5秒・30秒を超えた本数と合計を出すscripts/slow-tests.sh。CIのjob summaryにも出す。差分で足した・変えたtests/itのtestの時間の関門scripts/check-it-test-time.shと許可の一覧.config/it-slow-allow.toml）
+ - [Linux CI](linux-ci.md)（CIのubuntuのjobでcargo buildと全体のtestを流し、落ちたtestの名前をjob summaryに出す。macOSに固有のtestを分けるまではcontinue-on-errorで失敗を通す。goal 83）
+diff --git a/docs/design/slow-tests.md b/docs/design/slow-tests.md
+index 94c3518c..eb3862cf 100644
+--- a/docs/design/slow-tests.md
++++ b/docs/design/slow-tests.md
+@@ -4,15 +4,17 @@ type: design
+ title: Slow tests summary from nextest output
+ status: current
+ created: 2026-09-30
+-updated: 2026-09-30
+-last_verified: 2026-09-30
++updated: 2026-10-05
++last_verified: 2026-10-05
+ scope: operations
+ tags:
+   - testing
+   - ci
+ related:
+   - adr-0076
++  - adr-t1707-1
+   - design-stress-ci
++  - development-testing
+ ---
+ 
+ # Slow tests summary
+@@ -56,3 +58,64 @@ cat nextest.log | sh scripts/slow-tests.sh --top 50
+ ## CI
+ 
+ `.github/workflows/ci.yml` の `cargo llvm-cov nextest` の step は、出力を `tee` で `$RUNNER_TEMP/nextest.log` にも残す（`shell: bash` の `-o pipefail` で、step の成否はコマンドの exit status のまま）。続く `Slow tests` の step が script に通して `$GITHUB_STEP_SUMMARY` に書くので、実行ごとの job summary に同じ表が出る。この step は test の step が落ちても（cancel のときを除き）走り、`continue-on-error: true` で自分の失敗では CI を落とさない。関門のコマンドと失敗の条件は変えていない。
++
++## itのtestの時間の関門
++
++差分で足した・変えた`tests/it`のtestの1本の時間を閾値と比べ、超えたものを許可の一覧の項目が無ければ落とす関門（[ADR-t1707-1](../adr/2026-10-05-t1707-1-time-gate-for-added-or-changed-integration-tests.md)）の今の値と形。許可の一覧に載せてよい理由と関門の場所の規則は[testの制約](../development/testing.md)の「判断と境界のtest」が持つ。
++
++### 閾値
++
++既定は1本**5秒**。本番の関門の`dagq::it`の1本の平均（goal 118の起点の直近10本で約2.6秒、task 1707の初期値を取った10本で約2.35秒＝1,222本・2,876.9秒）の2倍程度で、goal 68と`scripts/slow-tests.sh`の「5 秒を超える」の帯と同じ。test の秒は log の`PASS`と`FLKY-FL`（`FLAKY`）の行から上の「読む行」と同じに読み、1本のtestの行が複数あれば（複数のlog、stressの周回）その中央値と比べる。閾値ちょうどは超えない。
++
++CIのmacOSのrunner（`macos-14`）はnextestの既定（CPU数）の並列で流し、本番の関門は`dagq.toml`の`[run.env]`の`NEXTEST_TEST_THREADS`で絞って流すので、同じtestの秒が違う。今の値は本番の秒で決めたもので、CIで超えて本番で超えない（またはその逆の）testがありうる。CIで落ちたtestが本番では閾値の内なら、本番の関門のlogの秒を添えて直すか項目を足すかをplannerが決める。workerの手元の秒もhostの負荷で揺れる。
++
++### 許可の一覧
++
++`.config/it-slow-allow.toml`。1つの項目は`[[test]]`で、3つのkeyを全部持つ（書式は`.config/e2e-quarantine.toml`の流儀）。
++
++```toml
++[[test]]
++name = "runtime_handoff::review_verdicts::reviews_that_ended_before_the_exec_are_applied_not_run_again"
++reason = "R 移し替えの予定（代表がある、goal 119 か 120）: same review/handoff boundary"
++task = 1707
++```
++
++| key | 意味 |
++| --- | --- |
++| `name` | test binary `dagq::it`の中の完全なnextestの名前（下の「名前」）。末尾のfnの名前だけの項目は何も許さない |
++| `reason` | 守る境界か、移し替えの予定と行き先のtask・goal |
++| `task` | 項目を足したtaskのID |
++
++keyの欠けた項目・知らないkey・1つの項目の中で2回書いたkey・同じ`name`の2つの項目は読めない一覧として扱う（exit 2）。初期値（task 1707）は、本番の関門の直近10本（2026-10-04T20:32〜2026-10-05T00:06 +0900、Summaryを含む`integrate-*-verify-*.log`）を`scripts/slow-tests.sh`で集計し、中央値が5秒を超えた`dagq::it`のtest 129本。理由は[it-reduction](../plans/it-reduction.md)の`it-tests.tsv`のclassとreasonで、完全な名前の先頭の要素がTSVの`module`、末尾の要素が`test`と一致する行が1つのときだけ使い、0行か2行以上ならclassを`unknown`にする（TSVの`module`は入れ子のmodを落とし秒も当てにならないので、名前と秒はlogから取る）。各項目の上のcommentに中央値とclassを書く。
++
++### 名前
++
++対象のtestと許可の一覧とlogは、同じ完全なnextestの名前で照合する。
++
++- 対象は、HEADの`tests/it`の下の`.rs`のうち`#[test]`の付いたfnで、`git diff --unified=0 <base>...HEAD -- tests/it`が足した・変えた行が、その`#[test]`の行から閉じる`}`までに入るもの。消しただけの行は、消した位置の前後の行が両方その範囲に入るときだけ数える（testの直後のhelperを消してもそのtestは対象にならない）。
++- 名前は、fileの`tests/it`からのpathから`.rs`（と`/mod`）を除いて`/`を`::`にしたもの（`tests/it/runtime_handoff.rs`なら`runtime_handoff`、`tests/it/main.rs`なら無し）に、fnを囲む`mod NAME {`の入れ子とfnの名前を`::`でつなぐ。`tests/it/main.rs`に`#[path = "..."] mod NAME;`（1行でも2行に分けても）があってそのfileを指すなら、pathの代わりに`NAME`を使う。
++- signatureの`()`と`[]`の中の`;`（`-> [u8; 2]`）はitemの終わりと見ない。括弧の対応は、comment（入れ子の`/* */`を含む）・文字列・raw文字列・char literalの中の`{`と`}`を数えない。macroが展開するtestは見ない。
++- logの行の名前は、色を除いた`PASS [ 秒s] [i/N] (j/M) dagq::it <名前>`の末尾の2語（binaryと名前）で、binaryが`dagq::it`の行だけを読む。
++
++### script
++
++`scripts/check-it-test-time.sh`。`sh`とPOSIXの`awk`と`git`だけを使う。
++
++```sh
++sh scripts/check-it-test-time.sh --base REV [--threshold SECS] [--allow FILE] [LOG...]
++sh scripts/check-it-test-time.sh --self-test
++```
++
++| 引数 | 意味 |
++| --- | --- |
++| `--base REV` | 比べるcommit（必須、既定は無し）。`git diff REV...HEAD -- tests/it` |
++| `--threshold SECS` | 閾値の秒（既定5） |
++| `--allow FILE` | 許可の一覧（既定`.config/it-slow-allow.toml`） |
++| `LOG...` | nextestの出力のfile（複数可、`-`はstdin）。無ければstdin |
++| `--self-test` | `scripts/check-it-test-time-fixtures/`のbaseとheadから一時dirに2つのcommitを作り、超過・許可・変えていない遅いtest・logに無いtest・色の付いた行・入れ子のmodの中の既存のtestの本文の変更（と2行と1行の`#[path]`、signatureの`;`、testの直後のhelperを消すこと、閾値の内のexit 0、引数の誤り・読めないlog・理由の無い項目・2回書いたkeyのexit 2、このrepositoryの許可の一覧が読めること）を確かめる |
++
++exit statusは、閾値を超え許可の一覧に無い対象が無ければ0、あれば1（1本ずつ名前・秒・file:行をstderrに出す）、引数の誤り・読めないlogか許可の一覧・書式の誤り・gitの失敗は2。logに秒の無い対象（流さなかったtest、`#[ignore]`）は警告をstderrに出すだけ。最後の1行（stdout）に対象・超過・閾値の内か許可・秒の無いものの本数を出す。
++
++### CI
++
++`.github/workflows/ci.yml`のmacOSのjobの`Slow tests`の後の`IT test time gate`のstepが、同じ`$RUNNER_TEMP/nextest.log`をscriptに渡す。`--base`はpushでは`github.event.before`、pull_requestでは`github.event.pull_request.base.sha`。`before`が無い（新しいbranchの最初のpushで0の列）か、そのcommitが無いときは理由を出してskipする。checkoutは`fetch-depth: 0`なので`REV...HEAD`のmerge baseが求まる。nextestのstepが落ちても（cancelのときを除き）走り、`continue-on-error`を付けないので、超えればjobが落ち、mainへのpushではci-failureのissueが開く（[ci-failure-issues](ci-failure-issues.md)）。
+diff --git a/docs/development/local-checks.md b/docs/development/local-checks.md
+index 25d36ae8..0f3e1e29 100644
+--- a/docs/development/local-checks.md
++++ b/docs/development/local-checks.md
+@@ -4,7 +4,7 @@ type: development
+ title: このrepositoryの手元の検証（人とworkerが流すもの、testの範囲、stress、e2eを流さないこと、resumeでの再現、受け入れ条件の対応づけ、askにしないもの）
+ status: current
+ created: 2026-10-03
+-updated: 2026-10-04 # task 1463
++updated: 2026-10-05 # task 1707
+ owners:
+   - hisamekms
+ tags:
+@@ -16,6 +16,7 @@ related:
+   - development-task-registration
+   - plan-local-checks-history
+   - adr-t1420-1
++  - adr-t1707-1
+   - development-documents
+ ---
+ 
+@@ -42,6 +43,7 @@ dagqのworkerは全体の`cargo test --locked`を流さず、`cargo llvm-cov`（
+ - 変更に関係するtestだけの`cargo test`（次の「testの範囲」と「全体を比べるtest」）
+ - taskのverifyのうちcoverageの関門（`cargo llvm-cov nextest`。ADR-0076より前に登録されたtaskの`cargo llvm-cov`も同じ）と全体の`cargo test --locked`以外（`cargo test --locked --test plugin`など）
+ - 足した・変えたtestのstress（下の「stress」）
++- `tests/it`のtestを足した・変えたら、そのstressのnextestの出力に時間の関門のscript（下の「itのtestの時間の関門」）
+ 
+ 全部のtestは`integrate`の検証（runtimeのtaskでは`cargo llvm-cov nextest`（coverageの関門）、llvm-covを含めないtaskではverifyにあれば`cargo test --locked`）がrebase後に1回だけ流す（仕組みは[integrate](../design/supervisor-lifecycle/integrate.md)と[Validation](../design/supervisor-lifecycle/validation.md)）。workerのpromptがverification_commandsを`integrate`が流すものとして見せ、手元の検証をこの文書に委ねる仕組みは[prompt](../design/supervisor-lifecycle/prompt.md)の冒頭（`# Prompt`の節）のverification commandsの段落が持つ。例外は「resumeでの再現」の1つだけ。
+ 
+@@ -89,6 +91,21 @@ subagent reviewは該当するときに実行し、しないときは理由をre
+ - cargo-nextestはhostに入っている前提（[ADR-0076](../adr/0076-run-the-coverage-gate-tests-with-nextest.md)決定3。入れ方は[運用](operations.md)の「hostのツール」）で、無ければworkerは入れず、stressをしなかったことと理由（cargo-nextestが無い）をreceiptに書く。
+ - これは足した・変えたtestだけをworkerの手元で流すもので、全体の`cargo test --locked`と`cargo llvm-cov`をworkerが流さない規則はそのまま。
+ 
++## itのtestの時間の関門
++
++足した・本文を変えた`tests/it`のtestの時間を閾値と比べる（規則は[testの制約](testing.md)の「判断と境界のtest」、値と書式は[Slow tests](../design/slow-tests.md)の「itのtestの時間の関門」）。
++
++- 流すtestを増やさない。上の「stress」で足した・変えたtestを流したnextestの出力を`tee`でfileに残し、それにscriptを当てる。`--base`はrunのbase commit（workerのpromptのbase、またはmainとのmerge base）。
++
++  ```sh
++  cargo nextest run --locked --test it --stress-count 5 -E 'test(=<module>::<name>)' 2>&1 | tee "$TMPDIR/it-stress.log"
++  sh scripts/check-it-test-time.sh --base <base commit> "$TMPDIR/it-stress.log"
++  ```
++
++- exit 1なら、名指されたtestを直すか、testing.mdの条件に当たる理由で許可の一覧に項目を足し、もう一度当てる。どちらもできなければ`failed`のreceiptに理由を書く。
++- receiptの`tests`のevidenceに、コマンドとexit statusと最後の1行（対象・超過・秒の無いものの本数）を書く。足した項目があれば名前と理由も書く。
++- `tests/it`のtestを変えていないrun、stressをしなかったrun（cargo-nextestが無いなど）はscriptを当てず、当てなかったことと理由をevidenceに書く。
++
+ ## hostに触らない
+ 
+ - resumeされたrunで`cargo llvm-cov nextest`がcargo-nextestが見つからずに落ちていたら（`no such command: nextest`など）、workerはhostにツールを入れられないので直そうとせず、`failed`のreceiptに「cargo-nextestが無い」と理由を書いて返す（ADR-0076決定3）。`dagq ask`にはしない（[ADR-0047](../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)決定41の人が要る理由に当たらず、`failed`のreceiptは復旧jobを経て人に届く）。
+diff --git a/docs/development/task-registration.md b/docs/development/task-registration.md
+index 9672677c..29578b2e 100644
+--- a/docs/development/task-registration.md
++++ b/docs/development/task-registration.md
+@@ -4,7 +4,7 @@ type: development
+ title: このrepositoryのtaskの登録（verify・paths・evidence・changeの選び方、ADRを書くtask、plan reviewが当てはめる規則）
+ status: current
+ created: 2026-10-03
+-updated: 2026-10-04 # task 1510
++updated: 2026-10-05 # task 1707
+ owners:
+   - hisamekms
+ tags:
+@@ -36,6 +36,7 @@ related:
+ - migrationを足す（runtime）: 上のruntimeの組み合わせに`--verify 'sh scripts/check-migration-numbers.sh'`を足す
+ - e2eの印（`.config/e2e-quarantine.toml`）を変える: verifyに`sh scripts/check-e2e-quarantine.sh`を付ける（書式・重複・testの実在・上限を検査し、期限切れは警告だけ。CIも実行する。印の規則は[testの制約](testing.md)の「e2eの印」）
+ - pluginとバイナリのversionを変える: verifyに`sh scripts/check-plugin-version.sh`を付ける（検査の中身は[plugin integration](../design/plugin-integration.md)の「tagとversionの一致規則」）
++- itのtestの時間の関門の許可の一覧（`.config/it-slow-allow.toml`）か関門のscript（`scripts/check-it-test-time.sh`）を変える: verifyに`sh scripts/check-it-test-time.sh --self-test`を付ける（fixtureでscriptの照合を確かめ、このrepositoryの許可の一覧の書式を読む。関門そのものはCIが流す。許可の一覧に載せてよい理由は[testの制約](testing.md)の「判断と境界のtest」、書式は[Slow tests](../design/slow-tests.md)の「itのtestの時間の関門」）
+ - AGENTS.mdを変える: verifyに`sh scripts/check-agents-md-size.sh`を付ける（byteの上限を検査する。CIも実行する。上限と、規則の本文をAGENTS.mdに足さないことは[文書の規則](documents.md)の「AGENTS.md」）
+ - 対象が混ざるtaskは重い方の検証にする。
+ 
+diff --git a/docs/development/testing.md b/docs/development/testing.md
+index 3e7a002d..1d8e8cb9 100644
+--- a/docs/development/testing.md
++++ b/docs/development/testing.md
+@@ -4,7 +4,7 @@ type: development
+ title: このrepositoryのtestの制約（coverageの関門・test binary・置き場所・書き方・判断と境界のtest・ファイルの行数・待ちの上限・e2eとその印・手動スモーク）
+ status: current
+ created: 2026-10-03
+-updated: 2026-10-04
++updated: 2026-10-05 # task 1707
+ owners:
+   - hisamekms
+ tags:
+@@ -14,6 +14,8 @@ related:
+   - adr-t1453-2
+   - adr-t1582-1
+   - adr-t1410-1
++  - adr-t1707-1
++  - design-slow-tests
+   - development-local-checks
+   - development-task-registration
+   - development-migrations
+@@ -54,6 +56,11 @@ testを書く・置く・直すときの今の規則。読むのは、`tests/`
+ - `tests/it`はSQLite・Git・プロセス・supervisorの配線・復旧とadopt・cmuxの境界を代表の1 caseで確かめ、判断のcaseごとにfixtureとsupervisorを起動し直さない。
+ - e2eは実バイナリ・実Git・実cmuxのハッピーパスと境界だけにする（流し方は下の「e2e」）。
+ - integration testを減らすときは、確かめていた中身をunit testか残すintegration testに対応づけ、行き先の無いまま消さない。
++- 時間の関門（[ADR-t1707-1](../adr/2026-10-05-t1707-1-time-gate-for-added-or-changed-integration-tests.md)）: baseからの差分で足した・本文を変えた`tests/it`のtestの1本の時間が閾値を超えたら、許可の一覧に項目が無いかぎり関門が落ちる。閾値・許可の一覧の置き場所と書式・testの名前の求め方・scriptの引数は[Slow tests](../design/slow-tests.md)の「itのtestの時間の関門」が持つ。
++  - 超えたら、まずtestを直す（判断をunit testへ移す、caseごとにfixtureとsupervisorを起動し直さない）。直さずに許可の一覧に項目を足してよいのは、理由が次のどちらかのときだけ: (a) そのtestが守る境界（SQLite・Git・プロセス・supervisorの配線・復旧とadoptのどれか）を書ける、(b) 移し替えの予定があり、その行き先のtaskかgoalを書ける。判断のcaseを並べただけのtestは(a)に当たらない。項目には足したtaskのIDを書く。
++  - 項目のtestを直すか移すtaskは、同じ変更で自分の項目を外すか理由を直す。
++  - 関門の場所: workerの手元（[手元の検証](local-checks.md)の「itのtestの時間の関門」）、runのreviewのtestの規則の検査、CIのpushとpull_request（mainへのpushで落ちればci-failureのissue）。`integrate`の検証には足さない。
++  - helperやfixtureだけの変更は対象にならず（それを使うtestが遅くなっても捕まえない）、CIのrunnerと本番の関門では秒が違う。
+ 
+ ## testファイルの行数
+ 
+diff --git a/scripts/check-it-test-time-fixtures/allow.toml b/scripts/check-it-test-time-fixtures/allow.toml
+new file mode 100644
+index 00000000..35224e18
+--- /dev/null
++++ b/scripts/check-it-test-time-fixtures/allow.toml
+@@ -0,0 +1,12 @@
++# The allow list of the self-test.
++
++[[test]]
++name = "gate_fixture::an_allowed_slow_test"
++reason = "B: the boundary of the fixture"
++task = 1707
++
++# An item with the fn's name alone does not allow the nested test.
++[[test]]
++name = "nested_fixture::a_nested_test_whose_body_changed"
++reason = "B: the top-level test of the same fn name"
++task = 1707
+diff --git a/scripts/check-it-test-time-fixtures/base/tests/it/gate_fixture.rs b/scripts/check-it-test-time-fixtures/base/tests/it/gate_fixture.rs
+new file mode 100644
+index 00000000..55a0efa0
+--- /dev/null
++++ b/scripts/check-it-test-time-fixtures/base/tests/it/gate_fixture.rs
+@@ -0,0 +1,25 @@
++// Braces in strings, char literals and comments are not counted: { ' }
++#[test]
++fn an_unchanged_slow_test() {
++    let s = "an unbalanced { in a string";
++    let c = '{';
++    /* and in a /* nested */ comment { */
++    assert!(!s.is_empty() && c == '{');
++}
++fn a_helper_the_head_removes() -> u32 {
++    3
++}
++
++#[test]
++fn an_allowed_slow_test() {
++    assert_eq!(1, 1);
++}
++
++fn helper() -> u32 {
++    1
++}
++
++#[test]
++fn an_array_test() -> [u8; 2] {
++    [1, 2]
++}
+diff --git a/scripts/check-it-test-time-fixtures/base/tests/it/main.rs b/scripts/check-it-test-time-fixtures/base/tests/it/main.rs
+new file mode 100644
+index 00000000..81a54cad
+--- /dev/null
++++ b/scripts/check-it-test-time-fixtures/base/tests/it/main.rs
+@@ -0,0 +1,10 @@
++// The fixture of `sh scripts/check-it-test-time.sh --self-test`: the base
++// commit. It is never compiled.
++#[path = "../common/mod.rs"]
++mod common;
++mod gate_fixture;
++mod nested_fixture;
++#[path = "under_path.rs"]
++mod renamed_by_path;
++#[path = "one_line.rs"] mod one_liner;
++mod after_one_line;
+diff --git a/scripts/check-it-test-time-fixtures/base/tests/it/nested_fixture.rs b/scripts/check-it-test-time-fixtures/base/tests/it/nested_fixture.rs
+new file mode 100644
+index 00000000..e78ef100
+--- /dev/null
++++ b/scripts/check-it-test-time-fixtures/base/tests/it/nested_fixture.rs
+@@ -0,0 +1,14 @@
++mod review_verdicts {
++    mod inner {
++        #[test]
++        fn a_nested_test_whose_body_changed() {
++            let x = r#"a raw string with } and {"#;
++            assert!(!x.is_empty());
++        }
++    }
++}
++
++#[test]
++fn a_nested_test_whose_body_changed() {
++    assert_eq!(1, 1);
++}
+diff --git a/scripts/check-it-test-time-fixtures/base/tests/it/one_line.rs b/scripts/check-it-test-time-fixtures/base/tests/it/one_line.rs
+new file mode 100644
+index 00000000..f503e6a8
+--- /dev/null
++++ b/scripts/check-it-test-time-fixtures/base/tests/it/one_line.rs
+@@ -0,0 +1,4 @@
++#[test]
++fn a_test_after_a_one_line_path() {
++    assert_eq!(1, 1);
++}
+diff --git a/scripts/check-it-test-time-fixtures/base/tests/it/under_path.rs b/scripts/check-it-test-time-fixtures/base/tests/it/under_path.rs
+new file mode 100644
+index 00000000..2afa3ffd
+--- /dev/null
++++ b/scripts/check-it-test-time-fixtures/base/tests/it/under_path.rs
+@@ -0,0 +1,4 @@
++#[test]
++fn an_old_test_under_a_path_attribute() {
++    assert_eq!(1, 1);
++}
+diff --git a/scripts/check-it-test-time-fixtures/head/tests/it/gate_fixture.rs b/scripts/check-it-test-time-fixtures/head/tests/it/gate_fixture.rs
+new file mode 100644
+index 00000000..a770a897
+--- /dev/null
++++ b/scripts/check-it-test-time-fixtures/head/tests/it/gate_fixture.rs
+@@ -0,0 +1,44 @@
++// Braces in strings, char literals and comments are not counted: { ' }
++#[test]
++fn an_unchanged_slow_test() {
++    let s = "an unbalanced { in a string";
++    let c = '{';
++    /* and in a /* nested */ comment { */
++    assert!(!s.is_empty() && c == '{');
++}
++
++#[test]
++fn an_allowed_slow_test() {
++    assert_eq!(1, 1);
++    assert_eq!(2, 2);
++}
++
++fn helper() -> u32 {
++    2
++}
++
++#[test]
++fn a_new_slow_test() {
++    assert_eq!(helper(), 2);
++}
++
++#[test]
++fn a_new_fast_test() {
++    assert_eq!(helper(), 2);
++}
++
++#[test]
++fn a_test_the_log_does_not_time() {
++    let s = r#"a raw string with "quotes" and } a brace"#;
++    assert!(!s.is_empty());
++}
++
++#[test]
++fn a_coloured_slow_test() {
++    assert_eq!(helper(), 2);
++}
++
++#[test]
++fn an_array_test() -> [u8; 2] {
++    [2, 1]
++}
+diff --git a/scripts/check-it-test-time-fixtures/head/tests/it/main.rs b/scripts/check-it-test-time-fixtures/head/tests/it/main.rs
+new file mode 100644
+index 00000000..81a54cad
+--- /dev/null
++++ b/scripts/check-it-test-time-fixtures/head/tests/it/main.rs
+@@ -0,0 +1,10 @@
++// The fixture of `sh scripts/check-it-test-time.sh --self-test`: the base
++// commit. It is never compiled.
++#[path = "../common/mod.rs"]
++mod common;
++mod gate_fixture;
++mod nested_fixture;
++#[path = "under_path.rs"]
++mod renamed_by_path;
++#[path = "one_line.rs"] mod one_liner;
++mod after_one_line;
+diff --git a/scripts/check-it-test-time-fixtures/head/tests/it/nested_fixture.rs b/scripts/check-it-test-time-fixtures/head/tests/it/nested_fixture.rs
+new file mode 100644
+index 00000000..c6eee818
+--- /dev/null
++++ b/scripts/check-it-test-time-fixtures/head/tests/it/nested_fixture.rs
+@@ -0,0 +1,15 @@
++mod review_verdicts {
++    mod inner {
++        #[test]
++        fn a_nested_test_whose_body_changed() {
++            let x = r#"a raw string with } and {"#;
++            assert!(!x.is_empty());
++            assert!(x.len() > 1);
++        }
++    }
++}
++
++#[test]
++fn a_nested_test_whose_body_changed() {
++    assert_eq!(1, 1);
++}
+diff --git a/scripts/check-it-test-time-fixtures/head/tests/it/one_line.rs b/scripts/check-it-test-time-fixtures/head/tests/it/one_line.rs
+new file mode 100644
+index 00000000..c1757ef6
+--- /dev/null
++++ b/scripts/check-it-test-time-fixtures/head/tests/it/one_line.rs
+@@ -0,0 +1,4 @@
++#[test]
++fn a_test_after_a_one_line_path() {
++    assert_eq!(2, 2);
++}
+diff --git a/scripts/check-it-test-time-fixtures/head/tests/it/under_path.rs b/scripts/check-it-test-time-fixtures/head/tests/it/under_path.rs
+new file mode 100644
+index 00000000..f34e418f
+--- /dev/null
++++ b/scripts/check-it-test-time-fixtures/head/tests/it/under_path.rs
+@@ -0,0 +1,9 @@
++#[test]
++fn an_old_test_under_a_path_attribute() {
++    assert_eq!(1, 1);
++}
++
++#[test]
++fn a_test_under_a_path_attribute() {
++    assert_eq!(1, 1);
++}
+diff --git a/scripts/check-it-test-time-fixtures/nextest.log b/scripts/check-it-test-time-fixtures/nextest.log
+new file mode 100644
+index 00000000..22fe8374
+--- /dev/null
++++ b/scripts/check-it-test-time-fixtures/nextest.log
+@@ -0,0 +1,15 @@
++    Starting 11 tests across 1 binary
++        PASS [   9.000s] (1/9) dagq::it gate_fixture::an_unchanged_slow_test
++        PASS [   8.000s] (2/9) dagq::it gate_fixture::an_allowed_slow_test
++        PASS [   6.000s] [1/3] (3/9) dagq::it gate_fixture::a_new_slow_test
++        PASS [   8.000s] [2/3] (3/9) dagq::it gate_fixture::a_new_slow_test
++        PASS [   7.000s] [3/3] (3/9) dagq::it gate_fixture::a_new_slow_test
++        PASS [   0.500s] (4/9) dagq::it gate_fixture::a_new_fast_test
++\033[32;1m        PASS\033[0m [   6.500s] (5/9) \033[35;1mdagq::it\033[0m \033[36mgate_fixture\033[0m\033[36m::\033[0m\033[34;1ma_coloured_slow_test\033[0m
++        PASS [   8.000s] (6/9) dagq::it nested_fixture::review_verdicts::inner::a_nested_test_whose_body_changed
++        PASS [   9.500s] (7/9) dagq::it nested_fixture::a_nested_test_whose_body_changed
++        PASS [   9.000s] (8/9) dagq::it renamed_by_path::a_test_under_a_path_attribute
++        PASS [   9.000s] (9/9) dagq::it renamed_by_path::an_old_test_under_a_path_attribute
++        PASS [   9.000s] (10/11) dagq::it one_liner::a_test_after_a_one_line_path
++        PASS [   9.000s] (11/11) dagq::it gate_fixture::an_array_test
++     Summary [  20.000s] 11 tests run: 11 passed, 0 skipped
+diff --git a/scripts/check-it-test-time.sh b/scripts/check-it-test-time.sh
+new file mode 100644
+index 00000000..b748396a
+--- /dev/null
++++ b/scripts/check-it-test-time.sh
+@@ -0,0 +1,429 @@
++#!/bin/sh
++# The time gate of the tests in tests/it (ADR-t1707-1): a test of the one
++# integration test binary (dagq::it) that the diff from a base commit added or
++# changed, and that took longer than the threshold in the given cargo nextest
++# output, fails the check unless the allow list names it with a reason. The
++# threshold, the allow list's place and format, the naming rule and the CI
++# step are in docs/design/slow-tests.md, section "itのtestの時間の関門"; this
++# script only applies them.
++#
++# Usage: sh scripts/check-it-test-time.sh --base REV [--threshold SECS]
++#                                         [--allow FILE] [LOG...]
++#        sh scripts/check-it-test-time.sh --self-test
++#   --base REV        the commit to diff from (git diff REV...HEAD -- tests/it);
++#                     required
++#   --threshold SECS  the longest time a test may take (default 5)
++#   --allow FILE      the allow list (default .config/it-slow-allow.toml)
++#   LOG               nextest output (a file, or - for stdin); stdin when none
++#   --self-test       check the script on the fixtures under
++#                     scripts/check-it-test-time-fixtures/ in a temporary git
++#                     repository, and remove it
++#
++# A test is a fn with #[test] in a file under tests/it at HEAD. It is a target
++# when a line the diff added or changed (or the place of a removed line) lies
++# between its #[test] and its closing brace. Its name is the full nextest name:
++# the file's path under tests/it without .rs (a #[path] in tests/it/main.rs
++# wins), the mods around the fn and the fn's name, joined by ::, e.g.
++# runtime_handoff::review_verdicts::reviews_that_ended_before_the_exec_are_applied_not_run_again.
++# The log's tests and the allow list's items are matched by this full name,
++# never by the fn's name alone.
++#
++# Limits: a change to a helper or a fixture only (a fn without #[test], files
++# under tests/common, a stub's script) makes no test a target, even when it
++# makes the tests that use it slower. Braces are counted with comments,
++# strings, raw strings and char literals left out; a macro that expands to
++# tests is not seen. The seconds are the log's: a CI runner and the
++# production gate do not take the same time.
++#
++# A test's time is read from its PASS line and, for a test that passed on a
++# retry, its FLKY-FL (or FLAKY) line, as scripts/slow-tests.sh does; colour
++# codes are removed, and a stress run's lines ([i/N] before (j/M)) are read
++# too. With several lines of one test (several logs, a stress run) its time is
++# their median. Only sh, a POSIX awk and git are needed.
++#
++# Exit status: 0 when no target is over the threshold without an item, 1 when
++# one is (each with its name, seconds and file on stderr), 2 on a usage error,
++# an unreadable log or allow list, a malformed allow list or a git error. A
++# target the log does not time is only warned about.
++set -eu
++
++me=check-it-test-time
++here=$(cd "$(dirname "$0")" && pwd)
++script=$here/$(basename "$0")
++
++usage() {
++  echo "$me: $1" >&2
++  echo "usage: sh scripts/check-it-test-time.sh --base REV [--threshold SECS] [--allow FILE] [LOG...] | --self-test" >&2
++  exit 2
++}
++
++# targets prints one line per test the diff added or changed:
++# "name<TAB>path<TAB>line", from the git repository of the current directory.
++targets() {
++  top=$(git rev-parse --show-toplevel) || return 2
++  git -C "$top" rev-parse --verify --quiet "$base^{commit}" >/dev/null || {
++    echo "$me: not a commit: $base" >&2
++    return 2
++  }
++  diff=$(git -C "$top" diff --no-color --no-ext-diff --unified=0 "$base...HEAD" -- 'tests/it') || {
++    echo "$me: git diff $base...HEAD failed" >&2
++    return 2
++  }
++  # The changed lines of each file, at HEAD: "path<TAB>line", or
++  # "path<TAB>lined" for lines removed between line and line + 1.
++  changed=$(printf '%s\n' "$diff" | LC_ALL=C awk '
++/^\+\+\+ / {
++  file = substr($0, 5)
++  if (file == "/dev/null") file = ""
++  else { sub(/\t$/, "", file); sub(/^b\//, "", file) }
++  if (file !~ /\.rs$/) file = ""
++  next
++}
++/^@@ / && file != "" {
++  split($3, h, ",")
++  start = substr(h[1], 2) + 0
++  count = (2 in h) ? h[2] + 0 : 1
++  if (count == 0) { print file "\t" start "d"; next }
++  for (i = 0; i < count; i++) print file "\t" (start + i)
++}')
++  [ -n "$changed" ] || return 0
++  # The #[path] attributes of tests/it/main.rs: "path<TAB>mod".
++  paths=$(git -C "$top" show "HEAD:tests/it/main.rs" 2>/dev/null | LC_ALL=C awk '
++/#\[path *= *"/ {
++  p = $0; sub(/.*#\[path *= *"/, "", p); sub(/".*/, "", p)
++  if ($0 !~ /\][ \t]*(pub[ \t]+)?mod +[A-Za-z_][A-Za-z0-9_]* *;/) next
++}
++p != "" && /mod +[A-Za-z_][A-Za-z0-9_]* *;/ {
++  m = $0; sub(/.*mod +/, "", m); sub(/ *;.*/, "", m)
++  n = split(p, parts, "/"); out = ""
++  for (i = 1; i <= n; i++) {
++    if (parts[i] == "." || parts[i] == "") continue
++    if (parts[i] == ".." ) { sub(/\/?[^\/]*$/, "", out); continue }
++    out = (out == "" ? "" : out "/") parts[i]
++  }
++  print "tests/it/" out "\t" m
++  p = ""
++  next
++}
++/[^ \t]/ { p = "" }') || paths=""
++  for file in $(printf '%s\n' "$changed" | cut -f1 | LC_ALL=C sort -u); do
++    lines=$(printf '%s\n' "$changed" | awk -F'\t' -v f="$file" '$1 == f { printf "%s ", $2 }')
++    prefix=$(printf '%s\n' "$paths" | awk -F'\t' -v f="$file" '$1 == f { print $2; exit }')
++    if [ -z "$prefix" ]; then
++      prefix=${file#tests/it/}
++      prefix=${prefix%.rs}
++      prefix=${prefix%/mod}
++      [ "$prefix" = main ] && prefix=""
++      prefix=$(printf '%s' "$prefix" | sed 's|/|::|g')
++    fi
++    git -C "$top" show "HEAD:$file" | LC_ALL=C awk -v sq="'" -v file="$file" -v prefix="$prefix" -v lines="$lines" '
++function structural(c,    name, i, m, found) {
++  # a ; inside the brackets of a signature ([u8; 2]) does not end it
++  if (c == ";") { if (nest == 0) { buf = ""; bufstart = 0 } else add(c); return }
++  if (c == "{") {
++    if (match(buf, /(^|[^A-Za-z0-9_])mod[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*$/)) {
++      name = substr(buf, RSTART, RLENGTH)
++      sub(/^[^A-Za-z_]*mod[ \t]+/, "", name); sub(/[ \t]+$/, "", name)
++      stack[++depth] = "m:" name
++    } else if (index(buf, "#[test]") > 0 && match(buf, /(^|[^A-Za-z0-9_])fn[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) {
++      name = substr(buf, RSTART, RLENGTH)
++      sub(/^[^A-Za-z_]*fn[ \t]+/, "", name)
++      stack[++depth] = "t:" name
++      begin[depth] = bufstart
++    } else {
++      stack[++depth] = "o"
++    }
++    buf = ""; bufstart = 0; nest = 0
++    return
++  }
++  # c == "}"
++  if (depth > 0) {
++    if (substr(stack[depth], 1, 2) == "t:") {
++      name = prefix
++      for (i = 1; i < depth; i++)
++        if (substr(stack[i], 1, 2) == "m:")
++          name = (name == "" ? "" : name "::") substr(stack[i], 3)
++      name = (name == "" ? "" : name "::") substr(stack[depth], 3)
++      found = 0
++      for (i = begin[depth]; i <= NR; i++)
++        if ((i in hit) || (i < NR && (i in del))) { found = 1; break }
++      if (found) print name "\t" file "\t" begin[depth]
++    }
++    depth--
++  }
++  buf = ""; bufstart = 0; nest = 0
++}
++function add(c) {
++  if (c == "(" || c == "[") nest++
++  else if ((c == ")" || c == "]") && nest > 0) nest--
++  if (bufstart == 0 && c !~ /[ \t]/) bufstart = NR
++  buf = buf c
++}
++BEGIN {
++  n = split(lines, l, " ")
++  for (i = 1; i <= n; i++) {
++    if (l[i] ~ /d$/) del[l[i] + 0] = 1
++    else hit[l[i] + 0] = 1
++  }
++  state = 0  # 0 code, 1 block comment, 2 string, 3 raw string
++}
++{
++  line = $0; len = length(line); i = 1
++  while (i <= len) {
++    c = substr(line, i, 1)
++    if (state == 1) {
++      if (substr(line, i, 2) == "*/") { if (--bc == 0) state = 0; i += 2; continue }
++      if (substr(line, i, 2) == "/*") { bc++; i += 2; continue }
++      i++; continue
++    }
++    if (state == 2) {
++      if (c == "\\") { i += 2; continue }
++      if (c == "\"") state = 0
++      i++; continue
++    }
++    if (state == 3) {
++      if (c == "\"" && substr(line, i + 1, hashes) == rclose) { state = 0; i += 1 + hashes; continue }
++      i++; continue
++    }
++    if (substr(line, i, 2) == "//") break
++    if (substr(line, i, 2) == "/*") { state = 1; bc = 1; i += 2; continue }
++    if (c == "\"") { state = 2; add(" "); i++; continue }
++    if ((c == "r" || substr(line, i, 2) == "br") && (i == 1 || substr(line, i - 1, 1) !~ /[A-Za-z0-9_]/)) {
++      j = (c == "r") ? i + 1 : i + 2
++      if (c == "b" && substr(line, i + 1, 1) != "r") { add(c); i++; continue }
++      k = j; while (substr(line, k, 1) == "#") k++
++      if (substr(line, k, 1) == "\"") {
++        hashes = k - j; rclose = substr(line, j, hashes)
++        state = 3; add(" "); i = k + 1; continue
++      }
++    }
++    if (c == sq) {
++      if (substr(line, i + 1, 1) == "\\") {
++        k = i + 3; while (k <= len && substr(line, k, 1) != sq) k++
++        add(" "); i = k + 1; continue
++      }
++      if (substr(line, i + 2, 1) == sq) { add(" "); i += 3; continue }
++      add(c); i++; continue
++    }
++    if (c == "{" || c == "}" || c == ";") { structural(c); i++; continue }
++    add(c); i++
++  }
++  if (state == 0) add(" ")
++}'
++  done
++}
++
++# check reads the targets on stdin and the logs and the allow list as files,
++# and reports.
++check() {
++  tfile=$1; shift
++  LC_ALL=C awk -v me="$me" -v threshold="$threshold" -v allowfile="$allow" -v tfile="$tfile" '
++function fail_allow(msg) { printf "%s: %s:%d: %s\n", me, allowfile, FNR, msg > "/dev/stderr"; bad = 1 }
++function close_item() {
++  if (!initem) return
++  if (iname == "") fail_allow("an item has no name")
++  else if (ireason == "") fail_allow("item " iname " has no reason")
++  else if (itask == "") fail_allow("item " iname " has no task")
++  else if (iname in allowed) fail_allow("item " iname " is listed twice")
++  else allowed[iname] = 1
++  initem = 0
++}
++function strval(v) {
++  if (v !~ /^"([^"\\]|\\.)*"$/) return "\001"
++  return substr(v, 2, length(v) - 2)
++}
++FILENAME == allowfile {
++  line = $0
++  sub(/^[ \t]+/, "", line)
++  if (line == "" || substr(line, 1, 1) == "#") next
++  if (line ~ /^\[\[test\]\][ \t]*(#.*)?$/) { close_item(); initem = 1; iname = ""; ireason = ""; itask = ""; split("", seenkey); next }
++  if (!initem) { fail_allow("a key outside a [[test]] item"); next }
++  key = line; sub(/[ \t]*=.*/, "", key)
++  val = line; sub(/^[^=]*=[ \t]*/, "", val); sub(/[ \t]+#[^"]*$/, "", val); sub(/[ \t]+$/, "", val)
++  if (key in seenkey) fail_allow("key " key " is given twice in one item")
++  seenkey[key] = 1
++  if (key == "name") { iname = strval(val); if (iname == "\001" || iname == "") { fail_allow("name is not a string"); iname = "" } }
++  else if (key == "reason") { ireason = strval(val); if (ireason == "\001") { fail_allow("reason is not a string"); ireason = "" } }
++  else if (key == "task") { if (val ~ /^[0-9]+$/) itask = val; else fail_allow("task is not a number") }
++  else fail_allow("unknown key " key)
++  next
++}
++FILENAME == tfile {
++  if (!allowdone) { close_item(); allowdone = 1 }
++  split($0, t, "\t")
++  if (!(t[1] in tpath)) { tnames[++nt] = t[1]; tpath[t[1]] = t[2] ":" t[3] }
++  next
++}
++{
++  line = $0
++  gsub(/\033\[[0-9;]*[A-Za-z]/, "", line)
++  gsub(/\r/, "", line)
++  split(line, f, " ")
++  if (f[1] != "PASS" && f[1] != "FLKY-FL" && f[1] != "FLAKY") next
++  if (index(line, "[") == 0 || index(line, "[>") > 0) next
++  i = index(line, "["); j = index(line, "s]")
++  if (j <= i) next
++  s = substr(line, i + 1, j - i - 1) + 0
++  rest = substr(line, j + 2)
++  # the stress run iteration [i/N] and the test counter (j/M)
++  while (match(rest, /^[ \t]*(\[[^]]*\]|\([^)]*\))/)) rest = substr(rest, RLENGTH + 1)
++  n = split(rest, w, " ")
++  if (n < 2 || w[n - 1] != "dagq::it") next
++  name = w[n]
++  k = ++ns[name]
++  # insertion sort of the few samples of one test
++  for (m = k - 1; m >= 1 && sample[name, m] > s; m--) sample[name, m + 1] = sample[name, m]
++  sample[name, m + 1] = s
++}
++END {
++  if (!allowdone) close_item()
++  if (bad) exit 2
++  over = 0; missing = 0; ok = 0
++  for (x = 1; x <= nt; x++) {
++    name = tnames[x]
++    if (!(name in ns)) {
++      printf "%s: warning: %s (%s) was added or changed but the log has no time for it\n", me, name, tpath[name] > "/dev/stderr"
++      missing++
++      continue
++    }
++    k = ns[name]
++    med = (k % 2) ? sample[name, (k + 1) / 2] : (sample[name, k / 2] + sample[name, k / 2 + 1]) / 2
++    if (med > threshold + 0 && !(name in allowed)) {
++      printf "%s: dagq::it %s took %.3fs, over %ss, and is not in %s (%s)\n", me, name, med, threshold, allowfile, tpath[name] > "/dev/stderr"
++      over++
++    } else ok++
++  }
++  printf "%s: %d added or changed test(s) in tests/it: %d over %ss without an item, %d within the threshold or allowed, %d not timed\n", me, nt, over, threshold, ok, missing
++  exit over > 0 ? 1 : 0
++}' "$allow" "$tfile" "$@"
++}
++
++# self_test builds a small git history from the fixtures and checks the
++# script on it, case by case.
++self_test() {
++  fixtures=$here/check-it-test-time-fixtures
++  tmp=$(mktemp -d "${TMPDIR:-/tmp}/$me-self-test.XXXXXX")
++  trap 'rm -rf "$tmp"' EXIT
++  fail=0
++  repo=$tmp/repo
++  mkdir -p "$repo"
++  g() { git -C "$repo" -c user.name=self-test -c user.email=self-test@example.invalid -c commit.gpgsign=false -c core.hooksPath=/dev/null "$@"; }
++  g init -q
++  cp -R "$fixtures/base/." "$repo/"
++  g add -A && g commit -q -m base
++  cp -R "$fixtures/head/." "$repo/"
++  g add -A && g commit -q -m head
++  # The log: printf %b turns the \033 of the coloured line into escapes.
++  printf '%b' "$(cat "$fixtures/nextest.log")" > "$tmp/nextest.log"
++  cp "$fixtures/allow.toml" "$tmp/allow.toml"
++
++  set +e
++  (cd "$repo" && sh "$script" --base HEAD~1 --allow "$tmp/allow.toml" "$tmp/nextest.log") > "$tmp/out" 2> "$tmp/err"
++  status=$?
++  set -e
++  expect() { # case, then grep -q for (present) or absent
++    if grep -qF -- "$3" "$tmp/err"; then found=present; else found=absent; fi
++    if [ "$2" = "$found" ]; then
++      echo "$me --self-test: $1: ok"
++    else
++      echo "$me --self-test: $1: FAILED (want \"$3\" $2 in stderr)" >&2
++      fail=1
++    fi
++  }
++  if [ "$status" -eq 1 ]; then
++    echo "$me --self-test: exit 1 with tests over the threshold: ok"
++  else
++    echo "$me --self-test: exit $status, want 1" >&2; fail=1
++  fi
++  expect over_threshold present "dagq::it gate_fixture::a_new_slow_test took 7.000s"
++  expect allowed absent "gate_fixture::an_allowed_slow_test "
++  expect unchanged_slow_test absent "gate_fixture::an_unchanged_slow_test"
++  expect not_in_the_log present "warning: gate_fixture::a_test_the_log_does_not_time ("
++  expect not_in_the_log_is_not_over absent "dagq::it gate_fixture::a_test_the_log_does_not_time took"
++  expect coloured_line present "dagq::it gate_fixture::a_coloured_slow_test took 6.500s"
++  expect nested_mod_full_name present "dagq::it nested_fixture::review_verdicts::inner::a_nested_test_whose_body_changed took 8.000s"
++  expect nested_mod_not_by_fn_name absent "nested_fixture::a_nested_test_whose_body_changed"
++  expect path_attribute present "dagq::it renamed_by_path::a_test_under_a_path_attribute took 9.000s"
++  expect fast_test absent "gate_fixture::a_new_fast_test"
++  expect one_line_path_attribute present "dagq::it one_liner::a_test_after_a_one_line_path took 9.000s"
++  expect semicolon_in_the_signature present "dagq::it gate_fixture::an_array_test took 9.000s"
++  cat "$tmp/err" >&2
++
++  # Within a higher threshold nothing is over: exit 0.
++  set +e
++  (cd "$repo" && sh "$script" --base HEAD~1 --threshold 60 --allow "$tmp/allow.toml" "$tmp/nextest.log") > /dev/null 2>&1
++  status=$?
++  (cd "$repo" && sh "$script" --threshold 5 "$tmp/nextest.log") > /dev/null 2>&1
++  usage_status=$?
++  (cd "$repo" && sh "$script" --base HEAD~1 --allow "$tmp/allow.toml" "$tmp/no-such.log") > /dev/null 2>&1
++  unreadable_status=$?
++  printf '[[test]]\nname = "x"\n' > "$tmp/bad.toml"
++  printf '[[test]]\nname = "x"\nname = "y"\nreason = "r"\ntask = 1\n' > "$tmp/twice.toml"
++  (cd "$repo" && sh "$script" --base HEAD~1 --allow "$tmp/twice.toml" "$tmp/nextest.log") > /dev/null 2>&1
++  twice_status=$?
++  (cd "$repo" && sh "$script" --base HEAD~1 --allow "$tmp/bad.toml" "$tmp/nextest.log") > /dev/null 2>&1
++  bad_allow_status=$?
++  # The repository's own allow list reads without an error (no diff from
++  # HEAD, so no target).
++  (cd "$here/.." && sh "$script" --base HEAD --allow "$here/../.config/it-slow-allow.toml" /dev/null) > /dev/null
++  repo_allow_status=$?
++  set -e
++  for c in "within_the_threshold $status 0" "no_base $usage_status 2" "unreadable_log $unreadable_status 2" "item_without_reason $bad_allow_status 2" "key_given_twice $twice_status 2" "repository_allow_list $repo_allow_status 0"; do
++    set -- $c
++    if [ "$2" -eq "$3" ]; then echo "$me --self-test: $1: exit $2: ok"
++    else echo "$me --self-test: $1: exit $2, want $3" >&2; fail=1; fi
++  done
++
++  if [ "$fail" -eq 0 ]; then echo "$me --self-test: ok"; else exit 1; fi
++}
++
++base=""
++threshold=5
++allow=.config/it-slow-allow.toml
++
++if [ "${1:-}" = "--self-test" ]; then
++  [ $# -eq 1 ] || usage "--self-test takes no other argument"
++  self_test
++  exit 0
++fi
++
++while [ $# -gt 0 ]; do
++  case "$1" in
++    --base) [ $# -ge 2 ] || usage "--base needs a revision"; base=$2; shift 2 ;;
++    --threshold) [ $# -ge 2 ] || usage "--threshold needs a number"; threshold=$2; shift 2 ;;
++    --allow) [ $# -ge 2 ] || usage "--allow needs a file"; allow=$2; shift 2 ;;
++    -h|--help) sed -n '2,47p' "$0"; exit 0 ;;
++    --) shift; break ;;
++    -?*) usage "unknown argument: $1" ;;
++    *) break ;;
++  esac
++done
++
++[ -n "$base" ] || usage "--base is required"
++case "$threshold" in
++  ''|*[!0-9.]*|*.*.*|.) usage "--threshold is not a number: $threshold" ;;
++esac
++if [ ! -r "$allow" ] || [ -d "$allow" ]; then
++  echo "$me: cannot read $allow" >&2
++  exit 2
++fi
++for log in "$@"; do
++  if [ "$log" != - ] && { [ ! -r "$log" ] || [ -d "$log" ]; }; then
++    echo "$me: cannot read $log" >&2
++    exit 2
++  fi
++done
++
++work=$(mktemp -d "${TMPDIR:-/tmp}/$me.XXXXXX")
++trap 'rm -rf "$work"' EXIT
++set +e
++targets > "$work/targets"
++status=$?
++set -e
++[ "$status" -eq 0 ] || exit 2
++if [ $# -eq 0 ]; then set -- -; fi
++set +e
++check "$work/targets" "$@"
++status=$?
++set -e
++exit "$status"

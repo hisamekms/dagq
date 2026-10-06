@@ -1,0 +1,13 @@
+diff --git a/docs/adr/0004-agent-provider-abstraction.md b/docs/adr/0004-agent-provider-abstraction.md
+index 6bfbc9b8..0d1ce610 100644
+--- a/docs/adr/0004-agent-provider-abstraction.md
++++ b/docs/adr/0004-agent-provider-abstraction.md
+@@ -26,7 +26,7 @@ related:
+ 
+ ## Decision
+ 
+-application層はagent sessionのライフサイクル契約だけを使い、CLI引数・出力形式・セッション方式はprovider adapterに閉じ込める。TaskRunにはrequested providerとactual providerを記録する。
++application層はagent sessionのライフサイクル契約だけを使い、CLI引数・出力形式・セッション方式はprovider adapterに閉じ込める。TaskRunにはactual providerだけを記録する（requested providerは記録しない）。
+ 
+ ## Alternatives
+ 

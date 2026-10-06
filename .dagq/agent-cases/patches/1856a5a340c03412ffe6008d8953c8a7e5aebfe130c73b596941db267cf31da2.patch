@@ -1,0 +1,61 @@
+diff --git a/docs/adr/2026-10-04-t1901-1-translations-are-informative.md b/docs/adr/2026-10-04-t1901-1-translations-are-informative.md
+new file mode 100644
+index 00000000..f53fab89
+--- /dev/null
++++ b/docs/adr/2026-10-04-t1901-1-translations-are-informative.md
+@@ -0,0 +1,32 @@
++---
++id: adr-t1901-1
++type: adr
++title: ADRの翻訳は参考資料として扱う
++status: accepted
++created: 2026-10-04
++updated: 2026-10-04
++accepted_on: 2026-10-05
++owners:
++  - hisamekms
++tags:
++  - documentation
++related: []
++---
++
++# ADR-t1901-1: ADRの翻訳は参考資料として扱う
++
++## Context
++
++外部の協力者に判断の理由を伝えるため、ADRの翻訳を提供したい。翻訳と原文が食い違った際の判断基準が必要になる。
++
++## Decision
++
++ADRの翻訳は参考資料として扱い、解釈が食い違う場合は原文を正本とする。
++
++## Alternatives
++
++翻訳も正本にすると、翻訳の更新が判断の変更なのかを毎回確認する必要があるため採用しない。
++
++## Consequences
++
++翻訳を提供しやすくなる一方、判断を確定する読者は原文を確認する必要がある。
+diff --git a/docs/adr/README.md b/docs/adr/README.md
+index 02f045e2..add7a0e1 100644
+--- a/docs/adr/README.md
++++ b/docs/adr/README.md
+@@ -4,8 +4,8 @@ type: design
+ title: Architecture decision records
+ status: current
+ created: 2026-09-21
+-updated: 2026-10-04
+-last_verified: 2026-09-30
++updated: 2026-10-05
++last_verified: 2026-10-05
+ tags:
+   - architecture
+   - documentation
+@@ -160,6 +160,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由
+ | [ADR-t1662-2](2026-10-04-t1662-2-measurement-stores-ssot-and-views.md) | 記録を論理ストア（SSOTのStateStore・EventStore・SessionStepStore・NodeSampleStore、ビューのLedgerStore・ReportStore）と消えてよい材料（run dir・log・CSV・transcript）に分け、今のアダプタはqueue.dbの表にし、StateStoreとEventStoreは今どおり同時に確定して計測はStateStoreを読まず、sessionのstepは90日だけ重複を除き抜けを検出して持ち、hostの負荷はNodeSampleStoreを恒久の記録にしてCSVを写しにし（保持の期間のCSVは一度取り込む）、`RunLog`・`EventReads`・`TaskStore`をEventStore・StateStoreにまとめ直してgoal 100のmoduleに置き、台帳と恒久の入力のストアを「新しい表は持たない」の例外にする（ADR-0049決定5をamends） | 2026-10-04 |
+ | [ADR-t1662-3](2026-10-04-t1662-3-executors-send-telemetry-and-commands-are-classified-by-shape.md) | sessionのstepはagentではなくexecutor（session wrapper・runner・非対話のjobを起動するプロセス・`integrate`とe2eの検証）がTelemetrySink（queue serviceの`telemetry_report`）に30秒ごとに送り、executorには`telemetry_report`だけを呼べるtelemetry専用のprincipal（対象はrunか、runを持たないplanner・plan review・goal review・throughput review。supervisorが発行・失効）を与え、runを持たない対象のstepはSessionStepStoreに90日だけ持ち、実行環境・資源・送る口を差し替えられる口にし、資源の単位・`blocker: infra`・適合test・OpenTelemetryのspanとの対応を決め、コマンドは汎用の形（shape: flagの名前は平文、値とwordはdigest）だけを持って台帳を作るときに`[[telemetry.commands]]`の規則で分類する（ADR-t614-1決定2・ADR-t1233-4決定4・6をamends） | 2026-10-04 |
+ | [ADR-t1688-1](2026-10-04-t1688-1-worker-searches-documents-by-changed-names.md) | workerは文書の候補を、taskが名指すものと作業中に見つけたものに加え、変えた名前（コマンド・flag・設定のkey・役割・fileのpath）でrepositoryの文書を探して拾い、summaryに照合したpath・節か不要の理由と探した名前を書く。探す手段は名指さず検査の工程にしない。repository固有の範囲は開発文書、確かめはreviewのsubagent（ADR-t1428-1決定4をamends） | 2026-10-04 |
++| [ADR-t1901-1](2026-10-04-t1901-1-translations-are-informative.md) | ADRの翻訳は参考資料として扱う | 2026-10-05 |
+ 
+ goal 82（goal 38の段(1)〜(3)）のADRはtask 1233が書いた5本で、決定の置き場所は次のとおり。制御側と実行側の分け方・queue service・ユースケース単位のAPIとservice側の認可・unix socket・broker・クライアントモード・段の順と置き場所はADR-t1233-1、serviceの起動・停止の責任・落ちたときの知らせ方・brokerより前のprincipalの認証（token）はADR-t1233-4、読み取りのユースケースとroleごとの読める範囲・workerの読める範囲・Codexのsandboxからの到達はADR-t1233-5、e2eをreviewのpassの後のhostの工程に移すことはADR-t1233-2、このrepositoryを先にLinuxで通すことはADR-t1233-3にある。
+ 

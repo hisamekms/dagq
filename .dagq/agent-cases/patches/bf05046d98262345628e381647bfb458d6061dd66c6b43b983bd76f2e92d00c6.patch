@@ -1,0 +1,133 @@
+diff --git a/docs/adr/2026-09-27-t616-1-runtime-fixed-strings-are-english.md b/docs/adr/2026-09-27-t616-1-runtime-fixed-strings-are-english.md
+index c3e00c85..7cf9e9d5 100644
+--- a/docs/adr/2026-09-27-t616-1-runtime-fixed-strings-are-english.md
++++ b/docs/adr/2026-09-27-t616-1-runtime-fixed-strings-are-english.md
+@@ -6,6 +6,8 @@ status: accepted
+ created: 2026-09-27
+ updated: 2026-09-27
+ accepted_on: 2026-09-27
++amended_by:
++  - adr-t1800-1
+ owners:
+   - hisamekms
+ tags:
+diff --git a/docs/adr/2026-10-05-t1800-1-runtime-output-translation.md b/docs/adr/2026-10-05-t1800-1-runtime-output-translation.md
+new file mode 100644
+index 00000000..46434021
+--- /dev/null
++++ b/docs/adr/2026-10-05-t1800-1-runtime-output-translation.md
+@@ -0,0 +1,41 @@
++---
++id: adr-t1800-1
++type: adr
++title: 人向けの固定出力と引用文に翻訳表示を認める
++status: accepted
++created: 2026-10-05
++updated: 2026-10-05
++accepted_on: 2026-10-05
++amends:
++  - adr-t616-1 decision 1
++  - adr-t616-1 decision 2
++owners:
++  - hisamekms
++tags:
++  - runtime
++  - language
++related:
++  - adr-t616-1
++  - design-supervisor-lifecycle-language
++---
++
++# ADR-t1800-1: 人向けの固定出力と引用文に翻訳表示を認める
++
++## Context
++
++固定出力だけを翻訳しても、引用された文が読めなければ人の負担が残る。表示と保存の境界をまとめて決める。
++
++## Decision
++
++1. runtimeの固定文字列は英語を正本とするが、人向けの画面では、人が明示的に求めた場合に翻訳表示を認める。機械が読む記録とagentへの指示は英語のままにする。
++2. 人やAIが書いた文も、人が明示的に求めた場合に、人向けの画面で原文と翻訳を併記できる。保存・転送する原文は変更せず、入力の言語も制限しない。
++
++ADR-t616-1の決定3は変更しない。記録済みの文字列は書き換えず、新しい表示方針は実装後に適用する。
++
++## Alternatives
++
++固定出力だけを翻訳する案は、引用文を含む画面全体の読みやすさを改善できないため採らない。
++
++## Consequences
++
++原文と翻訳の区別を保ち、翻訳表示を保守する必要がある。現在の実装と実装待ちの境界は[Language](../design/supervisor-lifecycle/language.md)に書く。
+diff --git a/docs/adr/README.md b/docs/adr/README.md
+index 02f045e2..fb62150e 100644
+--- a/docs/adr/README.md
++++ b/docs/adr/README.md
+@@ -4,8 +4,8 @@ type: design
+ title: Architecture decision records
+ status: current
+ created: 2026-09-21
+-updated: 2026-10-04
+-last_verified: 2026-09-30
++updated: 2026-10-05
++last_verified: 2026-10-05
+ tags:
+   - architecture
+   - documentation
+@@ -160,6 +160,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由
+ | [ADR-t1662-2](2026-10-04-t1662-2-measurement-stores-ssot-and-views.md) | 記録を論理ストア（SSOTのStateStore・EventStore・SessionStepStore・NodeSampleStore、ビューのLedgerStore・ReportStore）と消えてよい材料（run dir・log・CSV・transcript）に分け、今のアダプタはqueue.dbの表にし、StateStoreとEventStoreは今どおり同時に確定して計測はStateStoreを読まず、sessionのstepは90日だけ重複を除き抜けを検出して持ち、hostの負荷はNodeSampleStoreを恒久の記録にしてCSVを写しにし（保持の期間のCSVは一度取り込む）、`RunLog`・`EventReads`・`TaskStore`をEventStore・StateStoreにまとめ直してgoal 100のmoduleに置き、台帳と恒久の入力のストアを「新しい表は持たない」の例外にする（ADR-0049決定5をamends） | 2026-10-04 |
+ | [ADR-t1662-3](2026-10-04-t1662-3-executors-send-telemetry-and-commands-are-classified-by-shape.md) | sessionのstepはagentではなくexecutor（session wrapper・runner・非対話のjobを起動するプロセス・`integrate`とe2eの検証）がTelemetrySink（queue serviceの`telemetry_report`）に30秒ごとに送り、executorには`telemetry_report`だけを呼べるtelemetry専用のprincipal（対象はrunか、runを持たないplanner・plan review・goal review・throughput review。supervisorが発行・失効）を与え、runを持たない対象のstepはSessionStepStoreに90日だけ持ち、実行環境・資源・送る口を差し替えられる口にし、資源の単位・`blocker: infra`・適合test・OpenTelemetryのspanとの対応を決め、コマンドは汎用の形（shape: flagの名前は平文、値とwordはdigest）だけを持って台帳を作るときに`[[telemetry.commands]]`の規則で分類する（ADR-t614-1決定2・ADR-t1233-4決定4・6をamends） | 2026-10-04 |
+ | [ADR-t1688-1](2026-10-04-t1688-1-worker-searches-documents-by-changed-names.md) | workerは文書の候補を、taskが名指すものと作業中に見つけたものに加え、変えた名前（コマンド・flag・設定のkey・役割・fileのpath）でrepositoryの文書を探して拾い、summaryに照合したpath・節か不要の理由と探した名前を書く。探す手段は名指さず検査の工程にしない。repository固有の範囲は開発文書、確かめはreviewのsubagent（ADR-t1428-1決定4をamends） | 2026-10-04 |
++| [ADR-t1800-1](2026-10-05-t1800-1-runtime-output-translation.md) | 人向けの固定出力と引用文に翻訳表示を認める（ADR-t616-1決定1・2をamends） | 2026-10-05 |
+ 
+ goal 82（goal 38の段(1)〜(3)）のADRはtask 1233が書いた5本で、決定の置き場所は次のとおり。制御側と実行側の分け方・queue service・ユースケース単位のAPIとservice側の認可・unix socket・broker・クライアントモード・段の順と置き場所はADR-t1233-1、serviceの起動・停止の責任・落ちたときの知らせ方・brokerより前のprincipalの認証（token）はADR-t1233-4、読み取りのユースケースとroleごとの読める範囲・workerの読める範囲・Codexのsandboxからの到達はADR-t1233-5、e2eをreviewのpassの後のhostの工程に移すことはADR-t1233-2、このrepositoryを先にLinuxで通すことはADR-t1233-3にある。
+ 
+diff --git a/docs/design/supervisor-lifecycle/language.md b/docs/design/supervisor-lifecycle/language.md
+index a8568b41..3ee5cf6e 100644
+--- a/docs/design/supervisor-lifecycle/language.md
++++ b/docs/design/supervisor-lifecycle/language.md
+@@ -4,8 +4,8 @@ type: design
+ title: "Language"
+ status: current
+ created: 2026-09-27
+-updated: 2026-10-04 # task 251
+-last_verified: 2026-10-04 # task 251
++updated: 2026-10-05
++last_verified: 2026-10-05
+ scope: runtime
+ related:
+   - design-supervisor-lifecycle
+@@ -20,7 +20,9 @@ related:
+ 
+ # Language
+ 
+-runtimeが出す固定の文字列は英語だけで持ち（[ADR-t616-1](../../adr/2026-09-27-t616-1-runtime-fixed-strings-are-english.md)）、AIが人に向けて書く文の言語は`[language]`の設定で指定できる（[ADR-t616-2](../../adr/2026-09-27-t616-2-language-of-text-ai-writes-for-people-is-configurable.md)）。
++採用した方針は、人が明示的に求めた場合に、人向けの固定出力を翻訳表示し、人やAIが書いた引用文も原文と翻訳を併記できるようにすること。機械向けの記録とagentへの指示は英語を維持し、引用文の保存・転送は原文のままにする。記録済みの文字列は書き換えない。理由は[ADR-t1800-1](../../adr/2026-10-05-t1800-1-runtime-output-translation.md)にある。
++
++翻訳表示は未実装で、以下の実装状況と固定文字列の節は現在の英語だけの実装を説明する。AIが人に向けて書く文の言語を`[language]`で指定する仕組み（[ADR-t616-2](../../adr/2026-09-27-t616-2-language-of-text-ai-writes-for-people-is-configurable.md)）は変更しない。
+ 
+ **実装状況**: ADR-t616-1は実装した（task 625。下の「日本語が残っていた固定の文字列」をすべて英語にした）。ADR-t616-2も実装した（task 626。読むのは`src/infrastructure/language.rs`、指示の文面と足し方は`src/domain/language.rs`）。
+ 
+diff --git a/docs/plans/runtime-output-translation.md b/docs/plans/runtime-output-translation.md
+new file mode 100644
+index 00000000..2066020b
+--- /dev/null
++++ b/docs/plans/runtime-output-translation.md
+@@ -0,0 +1,18 @@
++---
++id: plan-runtime-output-translation
++type: plan
++title: 出力の翻訳方針を記録する
++status: active
++created: 2026-10-05
++updated: 2026-10-05
++---
++
++# 出力の翻訳方針を記録する
++
++## plannerがtask 1800のdescriptionに書く内容
++
++ADR-t616-1の決定1・2をADR-t1800-1でamendsし、決定3は変更しない。元のADRにamended_byを足し、Languageに採用方針と未実装の境界を書く。翻訳表示の実装は後続のtaskに分ける。
++
++## plan reviewの確認
++
++元の決定の数と変更範囲に対して、descriptionのamendsの選択が文書の規則に合うかを見る。

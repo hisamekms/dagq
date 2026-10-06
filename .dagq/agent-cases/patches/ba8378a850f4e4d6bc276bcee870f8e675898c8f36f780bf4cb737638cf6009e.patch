@@ -1,0 +1,22 @@
+diff --git a/docs/design/linux-ci.md b/docs/design/linux-ci.md
+index 66553dd5..052f4d46 100644
+--- a/docs/design/linux-ci.md
++++ b/docs/design/linux-ci.md
+@@ -4,7 +4,7 @@ type: design
+ title: Linux build and test job in CI
+ status: current
+ created: 2026-10-02
+-updated: 2026-10-02
++updated: 2026-10-04
+ last_verified: 2026-10-02
+ scope: operations
+ tags:
+@@ -24,7 +24,7 @@ related:
+ 
+ | step | 中身 |
+ | --- | --- |
+-| `actions/checkout@v4` | checkout（履歴は既定の浅いもの。`scripts/` の検査は macOS の job が流す） |
++| `actions/checkout@v4` | checkout（履歴は既定の浅いもの（depth 1）。`scripts/` の検査は macOS の job が流す） |
+ | Install Rust | `rustup toolchain install --no-self-update`。`rust-toolchain.toml` の channel と components を入れる |
+ | Install cargo-nextest | `taiki-e/install-action@cargo-nextest` |
+ | `Swatinem/rust-cache@v2` | 依存の build の cache |
