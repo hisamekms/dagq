@@ -4,8 +4,8 @@ type: design
 title: 計測（SSOTとビュー・区間とタグ・台帳の形・畳む関数・台帳を作る係・送る口・コマンドの形と分類）
 status: draft
 created: 2026-10-04
-updated: 2026-10-06 # task 1923: IT coverage map artifact
-last_verified: 2026-10-05 # task 1689: view inventory; runtime redesign remains unimplemented
+updated: 2026-10-06 # task 1923: IT coverage map artifact; task 1511: follow-up baseline
+last_verified: 2026-10-05 # tasks 1689/1511: view inventory and baseline adapter; runtime redesign remains unimplemented
 scope: runtime
 related:
   - adr-t1662-1
@@ -46,6 +46,7 @@ related:
 | NodeSampleStore | nodeの資源の連続の値（load average・CPU・メモリ・swap・pageout・ファイルシステムの空き） | SSOT | 未実装（queue.dbの新しい表の予定）。今はsupervisorが`host/metrics-YYYYMMDD.csv`に書くだけ |
 | LedgerStore | 台帳（run・task・session・queue・nodeの行）。旧方式の行のlegacyのJSONは凍結して捨てない | ビュー | 未実装（queue.dbの新しい表の予定） |
 | ReportStore | 統計の出力（日次・週次のレポート） | ビュー | queueのdirの`reports/`のファイルと`report_written`のevent |
+| follow-up所属判断の基準値 | 登録cohortの時間・verdict・reviseとplanner sessionの集計、event ID付きCSV | ビュー | `scripts/follow-up-membership.py`がCLIのeventsとgoalのsnapshotから作る`docs/plans/follow-up-membership-evidence/`。現状の旧データのgoal残件はStateStoreのCLI snapshotをeventで巻き戻す暫定の分析（台帳の読み取り経路には入れない）。入力snapshotと`stats`・`kpi`・暫定tokenの出力はrun dirの`membership-evidence/`に置く採取材料。定義と再計算は[評価](../plans/follow-up-membership.md) |
 | （材料） | run dir（receipt・prompt・`worktime.jsonl`ほか）・log・hostのCSV・Claude Codeのtranscript・Codexのrollout | 材料 | queueのdirとrun dirのファイル、`~/.claude`。台帳と統計は読まない（取り込んだ値はEventStoreかSessionStepStoreに入る） |
 | 文書候補探索の比較出力 | `docs/plans/docs-candidate-search/out/` の run・層の CSV、選択 event の ID、ページ取得記録・定義/並行変更の一覧 | ビュー | `docs/plans/docs-candidate-search/` の Python script。既存 acceptance-check fetch を介して queue service の読み取り CLI（events/show/stats 等）と git を読み、初回 review 前の validation receipt を既存 compute と共有して集計。原文 snapshot は一時的な材料として TMPDIR のみ（台帳は読まない） |
 | 統合テストのcoverageの対応表 | 「repositoryのファイル → 当たった統合テスト」の対応表（ファイルの粒度。統合テストのbinaryのテストだけで、unit testとe2eは除く）・テストごとの所要時間と結果（nextestのJUnit）・作ったcommitと時刻 | ビュー | CIの夜間のjob（`.github/workflows/it-coverage-map.yml`。毎日・`workflow_dispatch`・jobかscriptを変えるmainへのpush）が統合テストをテストごとのcoverageつきで流して作り直せる。GitHub Actionsのartifact `it-coverage-map`（`it-coverage-map.json`の1ファイル）、保持30日で、過ぎて消えてもよい。作るのは`scripts/it-coverage-map.sh`（JSONの形・テストの名前・置き場はscriptの冒頭のcomment） |
