@@ -52,6 +52,14 @@ runtime_planners = 2
 # 待ちの上限 max_waiting は既定の 4 のままなので書かない。
 parallel = 3
 
+[provider_fallback]
+# worker は使えない provider から別の provider へ切り替えず、控えが解けるのを待って同じ provider で続ける。人の判断（2026-10-06）。
+# 振る舞いは ADR-t1857-1 と docs/design/provider-lifecycle.md の「切り替えを止める設定」、書式は run-environment.md の [provider_fallback] の項。
+# jobs は書かない（task 1858 が未着地で、job の切り替えを止めるかは人が決めていない）。
+# supervisor が各 pass で読み直すので、着地して main checkout に反映されれば up し直さずに効く。
+# [provider_fallback] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 1857 を含んでから足した。
+workers = false
+
 [tasks]
 # task が宣言する変更の種類（change）の値の集合（ADR-t980-1、task 983。書式は
 # docs/design/supervisor-lifecycle/run-environment.md、各値の意味と選び方は docs/development/task-registration.md の「change」）。
