@@ -4259,10 +4259,27 @@ mod tests {
 
     /// Task 1590: a child's executable is read by its pid, and none for a
     /// pid that runs nothing.
+    ///
+    /// Task 1907: on Linux `spawn` returns as soon as glibc's
+    /// `posix_spawn` (a `CLONE_VM | CLONE_VFORK` child) releases the
+    /// parent, which the kernel does in `exec_mmap` before the child
+    /// switches to the new image's memory; until then `/proc/<pid>/exe`
+    /// still names the parent's (this test's) binary. So the read waits,
+    /// up to a bound, for the child's executable to stop being the
+    /// parent's.
     #[test]
     fn a_childs_executable_is_read_and_none_for_a_pid_that_runs_nothing() {
         let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
-        let executable = process_executable(child.id());
+        let parent = process_executable(std::process::id());
+        assert!(parent.is_some());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let executable = loop {
+            let executable = process_executable(child.id());
+            if executable != parent || Instant::now() >= deadline {
+                break executable;
+            }
+            std::thread::yield_now();
+        };
         let _ = child.kill();
         let _ = child.wait();
         let executable = PathBuf::from(executable.unwrap());
