@@ -4,10 +4,11 @@ type: design
 title: "`ask` / `answer` / `asks`"
 status: current
 created: 2026-09-26
-updated: 2026-10-05 # task 1564: ask --request is the request's own planner's; task 1386: show の asks
+updated: 2026-10-05 # task 1564: ask --request is the request's own planner's; task 1386: show の asks; task 1521: planned task replanning (unimplemented)
 last_verified: 2026-10-05 # task 1564; task 1386
 scope: runtime
 related:
+  - design-supervisor-lifecycle-task-replanning
   - adr-t451-1
   - design-supervisor-lifecycle
   - adr-0022
@@ -59,3 +60,7 @@ related:
 - **表示**: `ask_opened`のpayloadと、`Ask`（`ask`・`asks`・`show`の`asks`の出力）、`status`の`asks`と`watch`の`ask_opened`の行に`recommendation`と`confidence`を載せる（無ければnull）。`show ID`の`asks`は、そのtaskに`task_id`で紐づくaskとtaskのrunに`run_id`で紐づくaskを、openも閉じたものも`Ask`の欄のまま古い順に並べ（`TaskDetail::asks`。taskもrunも持たないaskは載せない）、`--full`なしでは新しい方から10件（`view::DEFAULT_ASKS`）に絞って`question`・`answer`を300文字で切り（`truncated: true`）、全件の数を`asks_total`に出す。openか閉じたかは`answered_at`・`closed_at`で分かる。queue serviceのクライアントモードの`show`も同じview（task 1386）。inboxは人にaskを見せるとき、推奨と確信度があれば尋ねたAIのものとして添え、自分の推奨は足さない（`dagq-inbox` skill）。
 - **AIが決めたものの記録**: AIが推奨を適用してaskを作らなかった判断は、kindごとの記録に残す。今数えるのはruntimeのplannerが`planner_question`を経ずに採用したfollow_up（`follow_up_adopted`の`by: planner`で`ask_id`がnull。[Draft planners](draft-planners.md)）、runtimeが適用したplan reviewの`concern`（[Plan review](plan-review.md#aiが決めるconcern未実装)の`plan_concern_decided`の`applied: true`）、[Review](review.md#aiが決めるconcern未実装)がjobの推奨を適用したconcern（`concern_decided`の`applied: true`を`approve_landing`に。適用した`send_back`をsessionが直さずに`approve_landing`のaskになったものは`concern_send_back_escalated`を記録して数えない。task 1392）。[Observer](observer.md#人が要る見立てだけをblockedにする未実装)がaskにせずfindingだけにした件数（`observe_finished`の`findings_without_ask`を`blocked`に。task 1319）。
 - **集計**: [Stats](stats.md#aiの推奨と確信度の集計)の`recommendations`。askのkindごとの「推奨を持つaskの答えのうち、answerが`recommendation`と一致した割合」と、AIが決めてaskにしなかった件数を並べる（ADR-t451-1のContextの数え方を、question・optionsの文でなく欄から再導出する）。
+
+## 再計画中のaskの所有と配送（予定・未実装）
+
+[taskの再計画](task-replanning.md#askrequest再起動継続と撤回)ではaskの元run/requestの所有を維持し、保留中は旧workerへのanswer配送と古いapprove_landingの適用を止める。plannerは自分のrequestの問いだけを開き、置換時の旧askの結末と継続時の未配送answerをtrusted runtimeが記録する。現行の配送は上の各節のとおり。

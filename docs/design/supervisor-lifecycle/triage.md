@@ -4,10 +4,11 @@ type: design
 title: "Triage (supervisor)"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1225: the recovery job runs on Codex too; task 1850: resumes, recovery jobs and claims share one line by effective priority; task 1633: the recovery prompt carries the supervisor's build, its replacements and the dependencies it holds; task 1571 (after task 1361); task 1440: step 7 stops the run's background wrappers without cmux
+updated: 2026-10-06 # task 1225: the recovery job runs on Codex too; task 1850: resumes, recovery jobs and claims share one line by effective priority; task 1633: the recovery prompt carries the supervisor's build, its replacements and the dependencies it holds; task 1571 (after task 1361); task 1440: step 7 stops the run's background wrappers without cmux; task 1521: planned task replanning (unimplemented)
 last_verified: 2026-10-06 # task 1225; task 1850; task 1633; task 1571; task 1440
 scope: runtime
 related:
+  - design-supervisor-lifecycle-task-replanning
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-background-recovery-job
   - adr-0039
@@ -43,3 +44,7 @@ related:
 - **読み取り**: verdictはCodexの最終の`agent_message`のtext（`AgentProvider::job_reply`）から今の`RecoveryVerdict`として読む。threadとmodelは`AgentProvider::job_session`（`thread.started`のthreadと、rolloutの`turn_context`のmodel。読めなければ`model_unknown`）で、`triage_finished` / `triage_failed`と`recovery_finished`に書き、ラウンドの区間の`session_closed`もそれを取る。
 - **失敗**: 非0終了・timeout・読めないverdictは、Claudeのjobと同じ8の失敗（`triage_failed`のattention）にし、Claudeに回さない。providerが使えずに失敗したjob（ログイン・使用量の上限・agentが起動しない。`JobFailure::switch_reason`）は、役割がproviderを書いていれば（ADR-t1063-1の決定4）そのproviderを控え（`provider_held`。Claudeの壁はqueueのhold askにも加わる）、`triage_failed`に`provider_unusable`を書く。この`triage_failed`は人のものではない: `domain::triage_state`はこれを`Pending`と読み（`event_attention`もattentionにしない）、次のpassで同じrunの次のラウンドが行き先のproviderで始まる（控えの間はもう一方。`launch`の`switched_from`・`switch_reason`）。そのラウンドは新しい`recovery_requested`を持つのでalertの3回に数える。`--no-claude`で残るproviderが無ければ、次のラウンドは上の行き先のとおりjobを起動せずに理由付きの8の失敗（attention）になる。queueのhold askに加わるのはClaudeのjobの壁だけ（[Queue hold](queue-hold.md)）。時間の上限ではjobとCodexが走らせた子孫（別のprocess groupのものも）をpidで止める（`HeadlessJob::stop`、task 1085・1115）。
 - **test**: `tests/it/recovery_codex.rs`（読み取りだけの起動とverdictの適用・記録・`stats` / `kpi`のproviderごとの集計、終わったrunの取らない操作（`stop_processes`）がaskになること、失敗とtimeoutが`triage_failed`になりtimeoutで子孫が止まること、ログインで失敗したCodexのjobが控えられて次のラウンドがClaudeで始まり着地すること、`--no-claude`でCodexで起動しClaudeに回さず、ログインで失敗した後のラウンドが理由付きで人に渡ること。`confidence: low`は生きているrunのtest）と、`supervise::recovery`のunit test（行き先と終わりの記録）。検査そのもの（`plan_ended`・`check_live`・`Escalation`）はClaudeのjobと共有で、そのtestがproviderに依らず確かめる。
+
+## taskの再計画（予定・未実装）
+
+長期化の候補には原因別の読み取り診断を足し、継続か再計画を推奨する。jobは実行中taskを編集せず、trusted runtimeが安全な保留を担当する。保留guardのあるrunを通常のretry/recover/readyへ戻さない。 詳細は[taskの再計画](task-replanning.md)が持つ。現行の挙動は上の各節のとおりで、この追加だけではrunを保留しない。

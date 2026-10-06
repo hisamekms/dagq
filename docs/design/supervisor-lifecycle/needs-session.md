@@ -4,10 +4,11 @@ type: design
 title: "`needs_session`"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1850: resumes, recovery jobs and claims share one line by effective priority; task 1437; task 1440: the resume's wrapper starts only in the background, and leftover resume wrappers are stopped without cmux
+updated: 2026-10-06 # task 1850: resumes, recovery jobs and claims share one line by effective priority; task 1437; task 1440: the resume's wrapper starts only in the background, and leftover resume wrappers are stopped without cmux; task 1521: planned task replanning (unimplemented)
 last_verified: 2026-10-06 # task 1850; task 1437; task 1440
 scope: runtime
 related:
+  - design-supervisor-lifecycle-task-replanning
   - adr-t639-1
   - adr-t946-1
   - design-supervisor-lifecycle
@@ -63,3 +64,7 @@ resumeのwrapperを起動するのはsupervisorだけ。`status`のattentionは�
 - 解消依頼と終了依頼は file に書く。対話の打鍵・ダイアログ応答・exit_retried の再試行は廃止した。過去の記録と handoff の欄は読める。
 
 引き継がないもの: wrapperが終了を記録したか死んでいるrunは、今までどおり`resume_run`がstaleなleaseを置き換えて（`lease_acquired`の`previous_token`）次の試行を始める。試行の`workspace_created`が無い（wrapperを起動してhandleを記録する前にsupervisorが死んだ）runは監視する手段が無いので引き継がず、sessionが終わるまで次の試行を止める（人が wrapper の生存を確認する）。`resume_request_sent`を記録しないバイナリが始めたresumeを引き継ぐと、依頼を送ったかが分からないので、次の turn の依頼としてもう一度書く。依頼を書いてから`resume_request_sent`を記録するまでの間にsupervisorが死んだときも同じく2回目が送られる。
+
+## taskの再計画（予定・未実装）
+
+再計画の保留guardがあるrunは通常の自動resume・resolved_head・継承retryの対象から外す。継続や案の撤回は成果を保持した専用の解除からbackground wrapperを再開し、既存のresume/reviseの回数を引き継ぐ。 詳細は[taskの再計画](task-replanning.md)が持つ。現行の挙動は上の各節のとおりで、この追加だけではrunを保留しない。

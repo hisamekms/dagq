@@ -4,10 +4,11 @@ type: design
 title: "Review (supervisor)"
 status: current
 created: 2026-09-26
-updated: 2026-10-05 # task 1440: the e2e's sweep case is deleted, not left out; task 1547: the definitions also refer to design documents (architecture-boundaries); task 1437; task 1712; task 1683; task 1713: the Codex review cases of the test list moved to unit tests and runtime_provider_switch; task 1451: the broker's e2e is back
+updated: 2026-10-05 # task 1440: the e2e's sweep case is deleted, not left out; task 1547: the definitions also refer to design documents (architecture-boundaries); task 1437; task 1712; task 1683; task 1713: the Codex review cases of the test list moved to unit tests and runtime_provider_switch; task 1451: the broker's e2e is back; task 1521: planned task replanning (unimplemented)
 last_verified: 2026-10-05 # task 1440; task 1547; task 1437; task 1712; task 1683; task 1713; task 1451
 scope: runtime
 related:
+  - design-supervisor-lifecycle-task-replanning
   - adr-t1570-1
   - adr-t1566-1
   - design-supervisor-lifecycle-prompt
@@ -151,3 +152,7 @@ plannerが関連文書をtaskのcontextに書いてもreviewが読めるよう�
 - **引き継ぎ**: `review_finished`のconcernの後で止まったsupervisorのrunは、adoptした側がverdictから同じく決め直す（`adopted_concern`）。`land`は衝突の事前判定から（終了を依頼した後ならそのまま着地へ）、`send_back`は依頼が記録されていないのでreviseと同じく「the send_back could not go on when the supervisor was replaced」のaskに、ほかは同じ理由のaskにする。`concern_decided`が無ければreview jobを`requested_by`として記録する。適用した`send_back`の`revise_requested`（と`revise_unsent`）を記録した後、`concern_decided`の前で止まったときは、引き継ぎはreviseから続けるので、adoptした側が最後のconcernの後に`concern_decided`が無く`revise_requested`があることから、適用（`revise_unsent`があれば`unsent`）として補う（`backfill_sent_back_concern`）。reviseから続けたrunは、`revise_requested`の前のreviewがconcernで、その`attempt`の`applied: true`の`concern_decided`があれば（補ったものも）、適用したconcernとして`Fix::Revise`に持たせる（`sent_back_concern`）ので、sessionが直さなければ生きているsupervisorと同じaskと`concern_send_back_escalated`になる。
 - **prompt**: reviewのpromptのverdictの分類で、concernを「人の判断が要るfinding」ではなく「機械的な修正でなく判断の要るfinding」とし、それだけでは人に回らずjobが判断して確かで人の要らないもの（`high`・`reason_category`がnull）はruntimeが適用すると書く。続けて、concernの推奨と確信度の付け方、`scope` / `discard`の判断を人に残す基準（迷えば`low`）、runtimeが`high`で理由の無いものを適用することを書き、schemaに3つの欄を足す（`application::prompt::CONCERN_RECOMMENDATION`）。
 - **test**: `tests/it/runtime_review_concern.rs`（highの`land`（読めないverdictの1回のやり直しの後）・e2eが要るrunのhighの`land`・highの`send_back`・askの配線の代表の`discard`・引き継ぎ（highの`land`をconcernから決め直す・送れなかった`send_back`の`concern_decided`を補う）・適用した`send_back`をsessionが直さずに終わったaskの文面と`concern_send_back_escalated`と`stats`（生きているsupervisorと、reviseから続けた引き継ぎ。task 1392））、`src/application/supervise/landing.rs`のunit test（`low`/`scope`/`discard`/`unsent`・reviseの上限の`send_back`・推奨の無いconcernのaskの文面と理由。task 1414）、reviseの上限の`send_back`のaskは`tests/it/runtime_review.rs`の`a_third_review_that_does_not_pass_asks_a_person_and_land_lands_it`、jobの失敗のaskに推奨が無いことは`tests/it/runtime_review.rs`の`a_failed_review_closes_the_session_and_asks_a_person_in_the_same_step`、`--no-claude`で`provider_disabled`のask（reviewのagentが動かず、推奨が無い）は`tests/it/runtime_provider_switch.rs`の`no_claude_routes_a_worker_to_codex_and_releases_it_for_manual_landing`とreviewの行き先の`supervise::provider`のunit test（Codexのreviewのhighの`land`はproviderに依らない判断で、`runtime_review_concern.rs`と`concern.rs`が確かめる。task 1713）、`src/domain/concern.rs`と`src/domain/stats/recommendations.rs`のunit test。
+
+## taskの再計画（予定・未実装）
+
+原因別診断で継続か再計画を選ぶ経路を足す。review/e2e/integrateの途中の保留は終了境界とgenerationの柵を守り、古いpassやapprove_landingで置換先を着地させない。子はそれぞれ新しい検証・review・必要なe2e・integrateを通る。 詳細は[taskの再計画](task-replanning.md)が持つ。現行の挙動は上の各節のとおりで、この追加だけではrunを保留しない。

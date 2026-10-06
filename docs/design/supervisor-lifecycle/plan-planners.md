@@ -4,10 +4,11 @@ type: design
 title: "`plan` / `planners`"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1681; task 1564: only the request's own planner asks with --request, and its tests in item 9; task 1540: a request waits for a draft planner of a draft it names, and a kept draft returns at its revisit time; task 1646: planner request takes the words from --text-file and --text - as request add does; task 1711: the tests of the headless planners' turns and of the planning requests name the unit tests their decisions moved to; task 1596: a headless planner at the provider wall takes the provider retry before the requests behind it, and an answer is read only past the wall; task 1437; task 1440: runs no longer create workspaces; task 1704: planned human-answer wait release (unimplemented)
+updated: 2026-10-06 # task 1681; task 1564: only the request's own planner asks with --request, and its tests in item 9; task 1540: a request waits for a draft planner of a draft it names, and a kept draft returns at its revisit time; task 1646: planner request takes the words from --text-file and --text - as request add does; task 1711: the tests of the headless planners' turns and of the planning requests name the unit tests their decisions moved to; task 1596: a headless planner at the provider wall takes the provider retry before the requests behind it, and an answer is read only past the wall; task 1437; task 1440: runs no longer create workspaces; task 1704: planned human-answer wait release (unimplemented); task 1521: planned task replanning (unimplemented)
 last_verified: 2026-10-06 # task 1681; task 1564; task 1540; task 1646; task 1711; task 1596; task 1437; task 1440
 scope: runtime
 related:
+  - design-supervisor-lifecycle-task-replanning
   - adr-t1704-1
   - adr-t1582-1
   - design-supervisor-lifecycle
@@ -111,3 +112,7 @@ related:
 - 新しいplannerには元の質問・answer、前のplannerのnote（決めたこと・決めかけ・未決の理由・次の判断）と編集済みdraft、対象と関連goalの最新の記録を初期promptで引き継ぐ。収まらない材料は読む方法を示す。旧sessionのresumeには依存しない。
 - 依頼・draft・findingの回数上限では人だけの待ちによる終了を除く。answerを持つplannerは決めずに終わったときだけ数える。再検討のplannerにも待ちの除外を適用するが、通常の再検討の算入は残す。作業中の失敗・時間切れは質問の存在だけで除外しない。未回答のaskで通常の再起動を止める規則と、answerを上限を越えて運ぶ規則は残す。
 - 閉じたplannerは応答しない生きたplannerの検出対象から外れる。「答えを待つあいだは数えない」の規則は残す。対話の経路・Spikeの調査中の計画の枠と猶予は変更しない。
+
+## taskの再計画（予定・未実装）
+
+長期化した未達runの置換依頼も既存の永続requestとruntime plannerを使う。snapshotと診断をpromptに載せ、同じgoalのSpike再計画と直列化する。proposedは適用済みを意味せず、適用・継続・撤回の結末をoperationで追う。 詳細は[taskの再計画](task-replanning.md)が持つ。現行の挙動は上の各節のとおりで、この追加だけではrunを保留しない。

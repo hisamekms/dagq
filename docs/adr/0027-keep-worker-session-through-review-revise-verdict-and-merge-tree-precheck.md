@@ -7,6 +7,8 @@ created: 2026-09-23
 updated: 2026-09-23
 accepted_on: 2026-09-23
 amended_by:
+  - adr-t1521-2
+  - adr-t1521-1
   - adr-0050
   - adr-t813-1
   - adr-t451-1

@@ -4,10 +4,11 @@ type: design
 title: Supervisor and workspace lifecycle
 status: current
 created: 2026-09-21
-updated: 2026-10-05 # task 1225: a recovery job whose provider could not be used starts again on the other one; task 1437
+updated: 2026-10-05 # task 1225: a recovery job whose provider could not be used starts again on the other one; task 1437; task 1521: planned task replanning
 last_verified: 2026-10-05 # task 1225; task 1437
 scope: runtime
 related:
+  - design-supervisor-lifecycle-task-replanning
   - design-supervisor-lifecycle-throughput-review
   - design-supervisor-lifecycle-host-metrics
   - design-supervisor-lifecycle-actor-model
@@ -235,6 +236,10 @@ live worker alert (stalled, idle_process)
 
 - [`session` wrapper](supervisor-lifecycle/session-wrapper.md)
 - [非対話のworker](supervisor-lifecycle/headless-worker.md)（1 turnを1回の`claude -p`にする経路、`turns/`の依頼、turnの記録と停止、促しと復旧job）
+
+## Task replanning（予定・未実装）
+
+- [長期化した非対話taskの診断・保留・成果保存・置換](supervisor-lifecycle/task-replanning.md)
 
 ## Receipt and session exit
 

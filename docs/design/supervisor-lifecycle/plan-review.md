@@ -4,10 +4,11 @@ type: design
 title: "Plan review (supervisor)"
 status: current
 created: 2026-09-26
-updated: 2026-10-05 # task 1596: a headless planner at the provider wall takes the provider retry before the requests behind it, and an answer is read only past the wall; task 1704: planned human-answer wait release (unimplemented)
+updated: 2026-10-05 # task 1596: a headless planner at the provider wall takes the provider retry before the requests behind it, and an answer is read only past the wall; task 1704: planned human-answer wait release (unimplemented); task 1521: planned task replanning (unimplemented)
 last_verified: 2026-10-04 # task 1596
 scope: runtime
 related:
+  - design-supervisor-lifecycle-task-replanning
   - adr-t1704-1
   - adr-t1566-1
   - adr-t451-1
@@ -107,3 +108,7 @@ task 1218（goal 80）。goal reviewの仕組み（[ADR-t1063-1](../../adr/2026-
 ## 予定: 人の答え待ちでの終了とreviseの継続
 
 [ADR-t1704-1](../../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定1・2・4〜6（未実装）。上の9・10は実装前の挙動を記す。非対話のplannerは、進められる修正を済ませ、質問以外に仕事が無ければ記録を残して終了する。閉じた持ち主のreviseは既存の新規runtimeのplannerへの配送で扱うが、未回答の問いで止まった修正を答え無しで起動し続けない。answerとproposalの修正を同じ新しいplannerに引き継ぎ、二重に立てない。共通の終了・未読のanswerの保護は[予定: 人の答えだけを待つplannerの枠の解放](plan-planners.md#予定-人の答えだけを待つplannerの枠の解放)に従う。
+
+## taskの再計画（予定・未実装）
+
+置換proposalは元条件の対応表、保存成果、全後続依存、goalと権限ある削除/破棄の判断を検査する。passやhighのready推奨でも子をこの段でreadyにせず、trusted runtimeがversion/leaseを再検査して一括適用する。 詳細は[taskの再計画](task-replanning.md)が持つ。現行の挙動は上の各節のとおりで、この追加だけではrunを保留しない。
