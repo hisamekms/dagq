@@ -1,0 +1,7 @@
+    Starting 4 tests across 1 binary
+        PASS [   6.000s] (1/4) dagq::it example::passed
+  TRY 1 FAIL [ 100.000s] (───) dagq::it example::retry_a
+  TRY 1 TMT [ 100.000s] (───) dagq::it example::retry_b
+  TRY 1 SEGV [ 100.000s] (───) dagq::it example::retry_c
+        SLOW [> 60.000s] (2/4) dagq::it example::slow
+        SKIP [   0.000s] (3/4) dagq::it example::skipped

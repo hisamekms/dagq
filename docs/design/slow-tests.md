@@ -4,8 +4,8 @@ type: design
 title: Slow tests summary from nextest output
 status: current
 created: 2026-09-30
-updated: 2026-10-05 # task 1736
-last_verified: 2026-10-05 # task 1736
+updated: 2026-10-06 # task 1736, task 1825 revise 1
+last_verified: 2026-10-06 # task 1736, task 1825 revise 1
 scope: operations
 tags:
   - testing
@@ -39,7 +39,7 @@ sh scripts/slow-tests.sh --self-test
 | --- | --- |
 | `LOG...` | nextest の出力のファイル（`-` は stdin）。無ければ stdin を読む |
 | `--top N` | 上位に並べる本数（既定 20） |
-| `--min-ratio R` | 途中で止まった log を除く割合（既定 0.9）。時間の出た test の数が、その log の `Starting N tests` の N の R 倍に満たない log を数えない。`Starting` の行が無い log は、log の中で最も多い数の R 倍と比べる |
+| `--min-ratio R` | 途中で止まった log を除く割合（既定 0.9）。`Summary [` の行がある log は失敗の本数に依らず採用する。無い log は、成功・失敗を合わせた終了 test の数が、その log の `Starting N tests` の N の R 倍に満たなければ数えない。`Starting` の行も無い log は、log の中で最も多い終了本数の R 倍と比べる |
 | `--self-test` | 下の「self-test」の fixture で表を確かめる（ほかの引数と一緒には取らない） |
 
 `sh` と POSIX の `awk` だけを使うので、macOS と ubuntu の host にそのまま使える。読めない log と引数の誤りは exit 2、ほかは表を出して exit 0（数えた test が無くてもそう出して 0）。`--self-test` は合えば 0、違えば 1。
@@ -47,13 +47,15 @@ sh scripts/slow-tests.sh --self-test
 ## 読む行
 
 - `PASS [ 秒s] (i/N) <binary> <test>` の秒をその test の時間にする
-- 流し直して通った test は、最後の要約に出る `FLKY-FL 2/2 [ 秒s] ...`（古い nextest の `FLAKY`）の秒（通った回の時間）を使う。`TRY n PASS`・`TRY n FAIL`・`FAIL`・`SLOW [> 60.000s]`・`SKIP` は数えない（落ちた test は時間に入らない）
+- 流し直して通った test は、最後の要約に出る `FLKY-FL 2/2 [ 秒s] ...`（古い nextest の `FLAKY`）の秒（通った回の時間）を使う。時間の表には `TRY n PASS`・`TRY n FAIL`・`FAIL`・`SLOW [> 60.000s]`・`SKIP` を入れない（落ちた test は時間に入らない）
+- 完走判定の終了本数には、成功と `TRY n PASS` に加え、`FAIL`・`FAIL + LEAK`・`XFAIL`・`LEAK-FAIL`・`TIMEOUT`・`ABORT`・`SIGSEGV` などの signal・`ABORT SIG n` と、retry の短い status（`TRY n FAIL`・`FL+LK`・`LKFAIL`・`TMT`・`SEGV`・`SIG n` など）を使う（`src/domain/verify_failure.rs` と CI の失敗 status と同じ集合）。`TRY n` の途中の `(───)` は終了として数えない。同じ log の同じ test は最後の結果で 1 本とし、Summary 後の再掲も重複させない。`SLOW`・`SKIP` は終了本数に入れない
 - 色の制御コード（`CARGO_TERM_COLOR=always`）は取り除いてから読む。同じ log に同じ test が 2 回出たら後の方を使う
 - test の名前は nextest の `<binary id> <test 名>`（`dagq::it runtime_resume::...`、`dagq domain::...`、`dagq-broker ...`）
 
 ## 出力の読み方
 
-- 冒頭の行: test の時間の出た log の本数と、そのうち数えた本数（`fmt` や `clippy` の verify の log のように test の出ない log は数に入らない）
+- 冒頭の行: 終了した test のある log の本数と、そのうち採用した本数。失敗だけの log も終了 status があれば数え、時間の表に成功した test が無ければその旨を出す（`fmt` や `clippy` の verify の log のように test の出ない log は数に入らない）
+- 失敗を除いた本数の行: 採用した log の終了 status で失敗だった test の本数（同じ test でも log ごとに 1 本）。途中の retry の失敗や、採用しなかった log の失敗は含めない。失敗の秒はどの時間の表にも入れない
 - 範囲の表: `全体` は数えた test の本数と秒の合計、`N 秒を超える` はその test の時間が N 秒より長い本数・その秒の合計・全体の合計に占める割合。合計は test の時間の和で、並列に流れた実時間ではない。`integrate` の test 段の実時間はおおむね「合計 ÷ `NEXTEST_TEST_THREADS`」なので、合計の変化が test 段の変化の目安になる
 - 上位の表: 時間の長い順に N 本
 - test binary ごとの表（`### test binary ごと`、最後の表）: test の名前の先頭の語（nextest の binary id。`dagq::it`、lib の unit test の `dagq`、`dagq::plugin`、`dagq-broker` などの crate）ごとの本数・秒の合計・全体の合計に占める割合を、合計の長い順に並べる。log を複数渡したときの合計は test ごとの中央値の和。throughput-review の日次の見直しが `dagq::it` と `dagq` の行を日ごとに並べる（`.claude/skills/throughput-review/reference/daily.md`）。前の 3 つの表は足す前と同じで、この表は末尾に足しただけなので、CI の job summary の読み方は変わらない
@@ -61,7 +63,7 @@ sh scripts/slow-tests.sh --self-test
 
 ## self-test
 
-`sh scripts/slow-tests.sh --self-test` は `scripts/slow-tests-fixtures/` の nextest の出力（`PASS`・`TRY n FAIL`/`TRY n PASS`・最後の要約の `FLKY-FL` と古い `FLAKY`・`FAIL`・`SLOW`・色の付いた行・`dagq::it`・`dagq`・`dagq-broker` の 3 つの binary）を script に通し、出力の全体を同じ dir の期待の Markdown（`one.md`・`two.md`・`stopped.md`）と比べる。1 本の log、2 本の log の中央値（`--top 3`）、stdin、途中で止まった log を除くこと、と引数の誤り（`--self-test` とほかの引数の組を含む）と読めない log の exit 2 を確かめ、全部が合えば exit 0、どれかが違えば差分を stderr に出して exit 1。期待の Markdown は、表を変えるときに fixture の値から手で確かめて書き直す。
+`sh scripts/slow-tests.sh --self-test` は `scripts/slow-tests-fixtures/` の nextest の出力（`PASS`・`TRY n FAIL`/`TRY n PASS`・最後の要約の `FLKY-FL` と古い `FLAKY`・`FAIL`・`SLOW`・色の付いた行・`dagq::it`・`dagq`・`dagq-broker` の 3 つの binary）を script に通し、出力の全体を同じ dir の期待の Markdown（`one.md`・`two.md`・`stopped.md`・`failures.md`・`summary.md`・`retry-stopped.md`）と比べる。1 本の log、2 本の log の中央値（`--top 3`）、stdin、失敗の多い完走した log（Summary ありと終了本数による判定）、少ない終了行でも Summary があれば採用すること、Summary の無い途中で止まった log（retry の途中を含む）を除くこと、失敗の本数と成功だけの時間の表、と引数の誤り（`--self-test` とほかの引数の組を含む）と読めない log の exit 2 を確かめ、全部が合えば exit 0、どれかが違えば差分を stderr に出して exit 1。期待の Markdown は、表を変えるときに fixture の値から手で確かめて書き直す。
 
 ## CI
 

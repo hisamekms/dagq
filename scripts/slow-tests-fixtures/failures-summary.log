@@ -1,0 +1,15 @@
+    Starting 10 tests across 1 binary
+        PASS [   6.000s] (1/10) dagq::it example::passed
+        FAIL [ 100.000s] (2/10) dagq::it example::failed
+     TIMEOUT [ 200.000s] (3/10) dagq::it example::timeout
+     SIGSEGV [ 300.000s] (4/10) dagq::it example::signal
+  TRY 1 FAIL [ 400.000s] (───) dagq::it example::retry
+  TRY 2 FAIL [ 500.000s] (5/10) dagq::it example::retry
+ FAIL + LEAK [ 600.000s] (6/10) dagq::it example::leak
+   LEAK-FAIL [ 700.000s] (7/10) dagq::it example::leak_fail
+       XFAIL [ 800.000s] (8/10) dagq::it example::xfailed
+ABORT SIG 64 [ 900.000s] (9/10) dagq::it example::abort
+ TRY 2 FL+LK [1000.000s] (10/10) dagq::it example::retry_leak
+     Summary [2000.000s] 10 tests run: 1 passed, 9 failed, 0 skipped
+        FAIL [ 100.000s] (2/10) dagq::it example::failed
+  TRY 2 FAIL [ 500.000s] (5/10) dagq::it example::retry

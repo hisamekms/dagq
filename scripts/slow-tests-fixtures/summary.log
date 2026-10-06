@@ -1,0 +1,4 @@
+    Starting 100 tests across 1 binary
+        PASS [   6.000s] (1/100) dagq::it example::passed
+        FAIL [ 100.000s] (2/100) dagq::it example::failed
+     Summary [2000.000s] 100 tests run: 1 passed, 99 failed, 0 skipped

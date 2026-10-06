@@ -11,10 +11,10 @@
 #                  The dagq integrate logs <runs_dir>/*/integrate-*-verify-*.log
 #                  are read as they are
 #   --top N        how many of the slowest tests to list (default 20)
-#   --min-ratio R  leave out a log with fewer timed tests than R times the
+#   --min-ratio R  leave out a log with fewer finished tests than R times the
 #                  tests it started ("Starting N tests"), or, when it has no
-#                  such line, than R times the most timed tests of any log:
-#                  a run stopped midway (default 0.9)
+#                  such line, than R times the most finished tests of any log:
+#                  a run stopped midway (default 0.9); Summary logs are kept
 #   --self-test    check the tables against the fixtures under
 #                  scripts/slow-tests-fixtures/ (exit 0 when they match)
 #
@@ -52,6 +52,10 @@ self_test() {
   check one_log "$dir/one.md" "$dir/one.log"
   check two_logs_median "$dir/two.md" --top 3 "$dir/one.log" "$dir/two.log"
   check stdin "$dir/one.md" - < "$dir/one.log"
+  check failure_heavy_summary "$dir/failures.md" "$dir/failures-summary.log"
+  check failure_heavy_finished "$dir/failures.md" "$dir/failures-finished.log"
+  check summary_overrides_ratio "$dir/summary.md" "$dir/summary.log"
+  check retry_midway_left_out "$dir/retry-stopped.md" "$dir/retry-stopped.log"
   check stopped_log_left_out "$dir/stopped.md" --min-ratio 0.9 "$dir/one.log" "$dir/stopped.log"
   for bad in "--top x" "--min-ratio 1.2.3" "--unknown" "$dir/missing.log" "--top 3 --self-test"; do
     # shellcheck disable=SC2086 # the words of a case are its arguments
@@ -109,6 +113,10 @@ function name_of(line,    rest, k) {
   sub(/ +$/, "", rest)
   return rest
 }
+# Match the terminal statuses used by verify_failure.rs and ci.yml (task 1272).
+function failed_status(status) {
+  return status ~ /^(FAIL|FAIL \+ LEAK|XFAIL|LEAK-FAIL|TIMEOUT|ABORT|SIG(HUP|INT|QUIT|ILL|TRAP|ABRT|FPE|KILL|SEGV|PIPE|ALRM|TERM)|ABORT SIG [0-9]+|TRY [0-9]+ (FAIL|FL\+LK|XFAIL|LKFAIL|TMT|ABORT|HUP|INT|QUIT|ILL|TRAP|ABRT|FPE|KILL|SEGV|PIPE|ALRM|TERM|SIG [0-9]+))$/
+}
 function pct(part, whole) {
   return whole > 0 ? sprintf("%.0f%%", 100 * part / whole) : "-"
 }
@@ -122,28 +130,46 @@ FNR == 1 { nlogs++ }
     started[nlogs] = f[2] + 0
     next
   }
-  if (f[1] != "PASS" && f[1] != "FLKY-FL" && f[1] != "FLAKY") next
+  if (line ~ /^ *Summary \[/) { summary[nlogs] = 1; next }
   if (index(line, "[") == 0 || index(line, "[>") > 0) next
+  status = substr(line, 1, index(line, "[") - 1)
+  sub(/^ +/, "", status); sub(/ +$/, "", status)
+  success = (status == "PASS" || status ~ /^(FLKY-FL|FLAKY) [0-9]+\/[0-9]+$/)
+  retry_pass = (status ~ /^TRY [0-9]+ PASS$/)
+  failed = failed_status(status)
+  if (!success && !retry_pass && !failed) next
+  # Intermediate retry attempts have no completed-test counter: (───).
+  # They must not make a log stopped between attempts look complete.
+  if (f[1] == "TRY" && line ~ /\(───\)/) next
   s = secs_of(line)
   if (s == "") next
   name = name_of(line)
-  if (name == "") next
+  if (name !~ /^[^ ]+ [^ ]/) next
   key = nlogs SUBSEP name
-  if (!(key in t)) {
-    timed[nlogs]++
+  if (!(key in result)) finished[nlogs]++
+  result[key] = failed
+  # Only the final result of each test counts, including summary replays.
+  if (failed) delete t[key]
+  if (success) {
     if (!(name in seen)) { seen[name] = 1; names[++nnames] = name }
+    t[key] = s
   }
-  t[key] = s
 }
 END {
   most = 0
-  for (l = 1; l <= nlogs; l++) if (timed[l] > most) most = timed[l]
-  used = 0; withtimes = 0
+  for (l = 1; l <= nlogs; l++) if (finished[l] > most) most = finished[l]
+  used = 0; withfinished = 0
   for (l = 1; l <= nlogs; l++) {
-    if (timed[l] > 0) withtimes++
+    if (finished[l] > 0) withfinished++
     want = (l in started) ? started[l] : most
-    ok[l] = (timed[l] > 0 && timed[l] >= ratio * want)
+    ok[l] = (finished[l] > 0 && (summary[l] || finished[l] >= ratio * want))
     if (ok[l]) used++
+  }
+
+  failures = 0
+  for (key in result) {
+    split(key, parts, SUBSEP)
+    if (ok[parts[1]] && result[key]) failures++
   }
 
   n = 0; total = 0
@@ -169,12 +195,13 @@ END {
 
   print "## 遅い test（nextest）"
   print ""
-  printf "test の時間の出た log %d 本のうち %d 本を数えた（途中で止まった log を除く）。", withtimes, used
+  printf "終了した test のある log %d 本のうち %d 本を数えた（途中で止まった log を除く）。", withfinished, used
   if (used > 1) printf "test ごとの秒は log をまたいだ中央値。"
   print ""
+  printf "採用した log の失敗 %d 本（log ごとに数える）は時間の表に含めない。\n", failures
   print ""
   if (n == 0) {
-    print "数えた test がない（test の時間の出た log が無いか、どれも途中で止まっている）。"
+    print "数えた test がない（成功した test の時間が無いか、どれも途中で止まっている）。"
     exit 0
   }
   print "| 範囲 | 本数 | 合計（秒） | 全体の合計に占める割合 |"
