@@ -13,6 +13,8 @@ pub(super) struct ReviseWatch {
     pub(super) fix: Fix,
     /// A receipt or idle marker no newer than this predates the request.
     pub(super) sent_at: SystemTime,
+    /// When the request, or the last input that restarted its resume
+    /// timeout, was sent, on the injected monotonic clock.
     pub(super) sent: Instant,
     /// Whether the session took the request, or the last answer typed
     /// (task 285).
@@ -182,7 +184,26 @@ pub(super) fn rewritten_after(modified: SystemTime, sent_at: SystemTime) -> bool
     super::file_time::written_after(modified, sent_at)
 }
 
+/// What a revise that has neither a rewritten receipt nor an idle after
+/// its last input does at `now`: it waits until the resume `timeout` since
+/// `sent` (the request, or the last input that restarted the timeout), and
+/// ends at it.
+pub(super) fn revise_deadline(
+    now: Instant,
+    sent: Instant,
+    timeout: Duration,
+) -> Option<ReviseOutcome> {
+    passed(now, sent, timeout).then(|| {
+        ReviseOutcome::Ended(format!(
+            "did not rewrite the receipt within {} seconds",
+            timeout.as_secs()
+        ))
+    })
+}
+
 impl ReviseWatch {
+    /// `now` is the supervisor's monotonic clock: the resume timeout runs
+    /// from it.
     pub(super) fn new(
         run: &TaskRun,
         session: SessionRef,
@@ -190,8 +211,9 @@ impl ReviseWatch {
         fix: Fix,
         sent_at: SystemTime,
         start: Option<SystemTime>,
+        now: Instant,
     ) -> Result<Self> {
-        let mut live = Box::new(SessionWatch::fixing(run, &session.workspace, sent_at)?);
+        let mut live = Box::new(SessionWatch::fixing(run, &session.workspace, sent_at, now)?);
         // A question from before the request (asked during validation or
         // the review, or left open before the receipt) is the inbox's to
         // deliver by hand: it neither gets its answer typed here nor holds
@@ -202,7 +224,7 @@ impl ReviseWatch {
             attempt,
             fix,
             sent_at,
-            sent: Instant::now(),
+            sent: now,
             start,
             live,
             questions_from: 0,
@@ -288,12 +310,12 @@ impl ReviseWatch {
         // told to go on, like an answer typed into it.
         if let Some(typed) = self.live.continue_after_hold(sv, run)? {
             self.live.input_at = Some(typed);
-            self.sent = Instant::now();
+            self.sent = sv.generators.clock.monotonic();
             self.start = self.live.answer_start.take();
         }
         if let Some(typed) = self.live.deliver_answers(sv, run)? {
             self.live.input_at = Some(typed);
-            self.sent = Instant::now();
+            self.sent = sv.generators.clock.monotonic();
             self.delivered_closed = sv.queue.last_worker_question_closed(run.id())?;
             self.start = self.live.answer_start.take();
         }
@@ -322,7 +344,7 @@ impl ReviseWatch {
             let from = unix_seconds(modified) + 1;
             if from > self.questions_from {
                 self.questions_from = from;
-                self.sent = Instant::now();
+                self.sent = sv.generators.clock.monotonic();
             }
         }
         // A turn at its provider's wall (ADR-t813-2): the call went to the
@@ -330,7 +352,7 @@ impl ReviseWatch {
         match self.live.provider_wall(sv, run)? {
             WallGate::Held => return Ok(None),
             WallGate::Moved(_) => {
-                self.sent = Instant::now();
+                self.sent = sv.generators.clock.monotonic();
                 self.start = None;
             }
             WallGate::Open => (),
@@ -349,7 +371,7 @@ impl ReviseWatch {
             && self.delivered_closed.is_none_or(|own| closed > own)
         {
             self.live.input_at = Some(UNIX_EPOCH + Duration::from_secs(closed.max(0) as u64));
-            self.sent = Instant::now();
+            self.sent = sv.generators.clock.monotonic();
         }
         // The idle marker is read before the receipt: a receipt rewritten
         // after this read is judged at the next poll, never as idle without
@@ -403,13 +425,11 @@ impl ReviseWatch {
                 "went idle without rewriting the receipt".to_owned(),
             )));
         }
-        if self.sent.elapsed() >= sv.cmux.resume_timeout() {
-            return Ok(Some(ReviseOutcome::Ended(format!(
-                "did not rewrite the receipt within {} seconds",
-                sv.cmux.resume_timeout().as_secs()
-            ))));
-        }
-        Ok(None)
+        Ok(revise_deadline(
+            sv.generators.clock.monotonic(),
+            self.sent,
+            sv.cmux.resume_timeout(),
+        ))
     }
 }
 
@@ -417,6 +437,26 @@ impl ReviseWatch {
 mod tests {
     use super::super::file_time::at_ns;
     use super::*;
+
+    /// A revise ends at its resume timeout since its last send, not a
+    /// millisecond before; an input that restarted the timeout (a later
+    /// `sent`) gives it the whole timeout again. The moment is given as a
+    /// value: only offsets from the origin matter.
+    #[test]
+    fn a_revise_ends_at_its_resume_timeout_since_the_last_send() {
+        let ms = Duration::from_millis(1);
+        let timeout = Duration::from_secs(1800);
+        let sent = Instant::now();
+        assert!(revise_deadline(sent, sent, timeout).is_none());
+        assert!(revise_deadline(sent + timeout - ms, sent, timeout).is_none());
+        let Some(ReviseOutcome::Ended(why)) = revise_deadline(sent + timeout, sent, timeout) else {
+            panic!("a revise at its timeout ends");
+        };
+        assert_eq!(why, "did not rewrite the receipt within 1800 seconds");
+        let restarted = sent + timeout - ms;
+        assert!(revise_deadline(sent + timeout, restarted, timeout).is_none());
+        assert!(revise_deadline(restarted + timeout, restarted, timeout).is_some());
+    }
 
     /// Task 1197: an adopted request's `sent_at` is read back to the
     /// millisecond: a receipt written before it, in the same millisecond or

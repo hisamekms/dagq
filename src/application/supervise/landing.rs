@@ -867,6 +867,7 @@ impl Supervisor<'_> {
             },
             sent_at,
             Some(sent_at),
+            self.generators.clock.monotonic(),
         )?))
     }
 
@@ -1066,6 +1067,7 @@ impl Supervisor<'_> {
             Fix::Conflict(verdict),
             sent_at,
             Some(start),
+            self.generators.clock.monotonic(),
         )?))
     }
     /// Stop the session's wrapper after it exited ([`stop_run_session`]):

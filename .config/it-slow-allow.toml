@@ -690,15 +690,6 @@ name = "runtime_sweep::the_sweep_stops_the_wrappers_of_failed_runs_the_triage_do
 reason = "B 境界（守る境界）: supervisor の配線（終わった run の background の wrapper を掃除が止め、triage の run は残す）と Git（worktree と branch が残る）"
 task = 1440
 
-# 9.694s alone; 29.890s to 37.669s (median 32.627s) in 24 stress rounds
-# under load 24 to 104 (task 1360). The test waits out its 6 s resume
-# timeout before the answer: 1 s was outrun under load by the ask and by
-# the turn of the answer.
-[[test]]
-name = "runtime_review_questions::an_open_question_without_a_rewritten_receipt_holds_past_the_resume_timeout"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: timeout hold decision; waits out its 6 s resume_timeout"
-task = 1360
-
 # 5.09s in it-tests.tsv (class B); 5.343s to 8.283s in 7 stress rounds
 # (task 1641, which only added a tags field to its NewGoal literal).
 [[test]]

@@ -1566,6 +1566,10 @@ mod tests {
         fn system_time(&self) -> std::time::SystemTime {
             self.0
         }
+
+        fn monotonic(&self) -> std::time::Instant {
+            std::time::Instant::now()
+        }
     }
 
     /// The turns' stamps (milliseconds) and the `at` of

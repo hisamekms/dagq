@@ -25,6 +25,10 @@ impl Clock for Later {
     fn system_time(&self) -> SystemTime {
         SystemTime::now() + Duration::from_secs(self.0)
     }
+
+    fn monotonic(&self) -> std::time::Instant {
+        std::time::Instant::now()
+    }
 }
 
 fn later(secs: u64) -> OneShot {

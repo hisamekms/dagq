@@ -262,7 +262,7 @@ impl Supervisor<'_> {
             run_dir,
             receipt_path: PathBuf::from(plan.receipt_path),
             idle_marker: run.idle_marker_path()?,
-            startup: Instant::now(),
+            startup: self.generators.clock.monotonic(),
             receipt_seen: false,
             receipt_seen_at: None,
             exit_requested: None,
@@ -280,6 +280,33 @@ impl Supervisor<'_> {
             asks_from: 0,
         })
     }
+}
+
+/// Whether `limit` has passed at `now` (the supervisor's monotonic clock)
+/// since `since`: a wait of exactly `limit` is over. The waits of a
+/// session, a revise, a resume and a reopen are all judged by it, with the
+/// times read from the injected [`Clock`] (task 1557).
+pub(super) fn passed(now: Instant, since: Instant, limit: Duration) -> bool {
+    now.saturating_duration_since(since) >= limit
+}
+
+/// Whether the wrapper of a session started at `startup` may still
+/// register at `now`: within the registration `timeout`, after which the
+/// session (or the resumed one) is an error that retains the run.
+pub(super) fn registration_pending(now: Instant, startup: Instant, timeout: Duration) -> bool {
+    !passed(now, startup, timeout)
+}
+
+/// Whether background work the session left running after its receipt,
+/// first seen at `receipt_seen_at`, was waited for long enough at `now`:
+/// the resume `timeout`, after which an idle marker that stopped after the
+/// receipt is taken as the session's idle. No receipt seen is no wait.
+pub(super) fn waited_out_after_receipt(
+    now: Instant,
+    receipt_seen_at: Option<Instant>,
+    timeout: Duration,
+) -> bool {
+    receipt_seen_at.is_some_and(|at| passed(now, at, timeout))
 }
 
 /// Watches one session: wrapper registration and heartbeat, receipt and idle
@@ -334,14 +361,20 @@ impl SessionWatch {
     /// The watch of a live session asked at `input_at` to fix what its
     /// review or a conflict named ([`ReviseWatch`]), or what parked its run
     /// ([`ResumeWatch`]): only the answers of its `worker_question`s and its
-    /// recovery are followed (task 238, ADR-0071 decision 17).
-    pub(super) fn fixing(run: &TaskRun, workspace: &str, input_at: SystemTime) -> Result<Self> {
+    /// recovery are followed (task 238, ADR-0071 decision 17). `now` is
+    /// the supervisor's monotonic clock.
+    pub(super) fn fixing(
+        run: &TaskRun,
+        workspace: &str,
+        input_at: SystemTime,
+        now: Instant,
+    ) -> Result<Self> {
         Ok(SessionWatch {
             workspace: workspace.to_owned(),
             run_dir: PathBuf::from(run.run_dir().context("missing run directory")?),
             receipt_path: PathBuf::from(run.receipt_path().context("missing receipt path")?),
             idle_marker: run.idle_marker_path()?,
-            startup: Instant::now(),
+            startup: now,
             receipt_seen: false,
             receipt_seen_at: None,
             exit_requested: None,
@@ -388,7 +421,7 @@ impl SessionWatch {
         self.watch_first_commit(sv, run)?;
         if !self.receipt_seen && sv.files.is_file(&self.receipt_path) {
             self.receipt_seen = true;
-            self.receipt_seen_at = Some(Instant::now());
+            self.receipt_seen_at = Some(sv.generators.clock.monotonic());
             // The work interval ends here (`stats`' `work`); its load goes
             // with it (task 197).
             let mut payload = json!({"path": path_text(&self.receipt_path)?, "validated": false});
@@ -416,9 +449,11 @@ impl SessionWatch {
         // work that never ends must not hold the run without an attention.
         // Past it validation can proceed; any later shutdown uses the
         // wrapper exit request file.
-        let waited_out = self
-            .receipt_seen_at
-            .is_some_and(|at| at.elapsed() >= sv.cmux.resume_timeout());
+        let waited_out = waited_out_after_receipt(
+            sv.generators.clock.monotonic(),
+            self.receipt_seen_at,
+            sv.cmux.resume_timeout(),
+        );
         if self.receipt_seen
             && self.exit_requested.is_none()
             && !session_ended
@@ -506,7 +541,7 @@ impl SessionWatch {
                     let workspace = self.workspace.clone();
                     submit(sv, run, &workspace, Input::Exit, "/exit")?;
                     info!(run_id = %run.id(), "exit requested for {} after its wrapper went silent; waiting for session exit", run.id());
-                    self.exit_requested = Some(Instant::now());
+                    self.exit_requested = Some(sv.generators.clock.monotonic());
                     self.exit_for_silence = true;
                     // Background work, idle processes and a stall are
                     // followed only before the /exit.
@@ -553,7 +588,7 @@ impl SessionWatch {
         } else {
             let timeout = sv.cmux.registration_timeout();
             ensure!(
-                self.startup.elapsed() < timeout,
+                registration_pending(sv.generators.clock.monotonic(), self.startup, timeout),
                 "wrapper did not register within {} seconds",
                 timeout.as_secs()
             );
@@ -708,5 +743,59 @@ impl SessionWatch {
             }
         }
         Ok(typed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An origin for the monotonic times the decisions are given: only the
+    /// offsets from it matter, never what the clock read.
+    fn origin() -> Instant {
+        Instant::now()
+    }
+
+    const MS: Duration = Duration::from_millis(1);
+
+    /// A wait of exactly its limit is over; a millisecond before it is not,
+    /// and a time before the start (an adopted start) is no wait at all.
+    #[test]
+    fn a_wait_is_over_at_its_limit_and_not_a_millisecond_before() {
+        let t0 = origin() + Duration::from_secs(3600);
+        let limit = Duration::from_secs(30);
+        assert!(!passed(t0 + limit - MS, t0, limit));
+        assert!(passed(t0 + limit, t0, limit));
+        assert!(passed(t0 + limit + MS, t0, limit));
+        assert!(!passed(t0 - MS, t0, limit));
+        assert!(passed(t0, t0, Duration::ZERO));
+    }
+
+    /// A wrapper registers until the registration timeout since the
+    /// session's start; at the timeout itself it is too late.
+    #[test]
+    fn a_wrapper_may_register_until_its_timeout() {
+        let t0 = origin();
+        let timeout = Duration::from_secs(60);
+        assert!(registration_pending(t0, t0, timeout));
+        assert!(registration_pending(t0 + timeout - MS, t0, timeout));
+        assert!(!registration_pending(t0 + timeout, t0, timeout));
+        assert!(!registration_pending(t0 + timeout + MS, t0, timeout));
+    }
+
+    /// Background work after the receipt is waited for up to the resume
+    /// timeout from when the receipt was first seen; without a receipt
+    /// nothing is waited out.
+    #[test]
+    fn background_work_after_the_receipt_is_waited_out_at_the_resume_timeout() {
+        let t0 = origin();
+        let timeout = Duration::from_secs(900);
+        assert!(!waited_out_after_receipt(t0 + timeout * 2, None, timeout));
+        assert!(!waited_out_after_receipt(
+            t0 + timeout - MS,
+            Some(t0),
+            timeout
+        ));
+        assert!(waited_out_after_receipt(t0 + timeout, Some(t0), timeout));
     }
 }

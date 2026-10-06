@@ -76,6 +76,10 @@ mod tests {
         fn system_time(&self) -> SystemTime {
             self.0
         }
+
+        fn monotonic(&self) -> std::time::Instant {
+            std::time::Instant::now()
+        }
     }
 
     fn fixed() -> At {

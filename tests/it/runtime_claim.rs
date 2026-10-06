@@ -418,6 +418,10 @@ impl Clock for ManualClock {
     fn system_time(&self) -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(self.0.load(Ordering::SeqCst) as u64)
     }
+
+    fn monotonic(&self) -> std::time::Instant {
+        std::time::Instant::now()
+    }
 }
 
 /// IDs handed out in order.

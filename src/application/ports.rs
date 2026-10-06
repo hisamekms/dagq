@@ -10,7 +10,7 @@ use std::{
     fmt, io,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 use super::{GraphInput, TaskPage, TaskQuery, timestamp, unix_seconds};
@@ -1403,6 +1403,12 @@ pub trait ProcessControl {
 /// passes the value on, so its steps share one reference time.
 pub trait Clock: Send + Sync {
     fn system_time(&self) -> SystemTime;
+
+    /// The monotonic clock the supervisor's waits are measured on (the
+    /// registration, resume, exit and reopen timeouts): it does not move
+    /// with the wall clock. Read once where a wait starts or is judged,
+    /// and handed to the decision as a value (task 1557).
+    fn monotonic(&self) -> Instant;
 
     /// Unix seconds, the form of `heartbeat_at`, `closed_at` and the other
     /// INTEGER times.

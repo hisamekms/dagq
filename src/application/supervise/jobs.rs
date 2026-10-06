@@ -714,6 +714,10 @@ mod tests {
         fn system_time(&self) -> std::time::SystemTime {
             self.0
         }
+
+        fn monotonic(&self) -> std::time::Instant {
+            std::time::Instant::now()
+        }
     }
 
     /// A job's `started_at` is the injected clock's time in Unix

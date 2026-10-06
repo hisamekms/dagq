@@ -93,6 +93,10 @@ impl Clock for Ahead {
     fn system_time(&self) -> SystemTime {
         SystemTime::now() + Duration::from_secs(self.0.load(Ordering::SeqCst) as u64)
     }
+
+    fn monotonic(&self) -> std::time::Instant {
+        std::time::Instant::now()
+    }
 }
 
 fn supervise(fx: &Fixture, backend: &PlanWorkspace, clock: &Arc<Ahead>, at: i64) {

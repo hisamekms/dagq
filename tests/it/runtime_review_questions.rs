@@ -76,16 +76,6 @@ fn unix_now() -> i64 {
         .as_secs() as i64
 }
 
-fn unix_millis() -> i64 {
-    i64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis(),
-    )
-    .unwrap()
-}
-
 /// Waits for the revise request and checks that `ask` was created in an
 /// earlier second than it was sent.
 fn await_revise_after(db: &std::path::Path, ask: AskId) {
@@ -111,7 +101,22 @@ fn run_supervisor(
     backend: &Arc<TestWorkspace>,
     reviewer: &Arc<TestReviewer>,
 ) -> (thread::JoinHandle<Value>, Arc<AtomicU64>) {
-    let options = supervise_options(4, true);
+    let (supervisor, passes, _) = run_supervisor_ahead(db, repo, backend, reviewer);
+    (supervisor, passes)
+}
+
+/// [`run_supervisor`] with the [`MonotonicAhead`] of its clock: the test
+/// runs the revise's resume timeout out by moving the clock on, not by
+/// sleeping (task 1557). When the timeout ends a revise at which time is
+/// the unit tests' (`revise::tests`); these check that the revise reads
+/// the supervisor's clock and what the end does.
+fn run_supervisor_ahead(
+    db: &std::path::Path,
+    repo: &std::path::Path,
+    backend: &Arc<TestWorkspace>,
+    reviewer: &Arc<TestReviewer>,
+) -> (thread::JoinHandle<Value>, Arc<AtomicU64>, MonotonicAhead) {
+    let (options, ahead) = supervise_options_ahead(4, true);
     let passes = options.passes.clone();
     let (db, repo, backend, reviewer) = (
         db.to_owned(),
@@ -121,7 +126,7 @@ fn run_supervisor(
     );
     let supervisor =
         thread::spawn(move || supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options));
-    (supervisor, passes)
+    (supervisor, passes, ahead)
 }
 
 /// The revise's `approve_landing` ask, with the worker's question from
@@ -219,22 +224,32 @@ fn a_question_open_from_before_the_revise_does_not_hold_an_idle_session() {
 
 /// A question left open from the review does not stop the revise's
 /// resume timeout either: a session that neither rewrites its receipt nor
-/// goes idle runs out of it.
+/// goes idle runs out of it. The timeout is run out on the supervisor's
+/// clock (task 1557).
 #[test]
 fn a_question_open_from_before_the_revise_does_not_stop_its_resume_timeout() {
     let (_dir, repo, db) = fixture();
     // The turn of the revise runs on until it is stopped.
-    let mut backend = TestWorkspace::new(&db, false, &on_revise("while :; do sleep 0.05; done"));
-    backend.resume_timeout = Duration::from_secs(2);
+    let backend = TestWorkspace::new(&db, false, &on_revise("while :; do sleep 0.05; done"));
+    let timeout = backend.resume_timeout;
     let backend = Arc::new(backend);
     let reviewer = Arc::new(TestReviewer::new(&[slow_revise(&db)]));
-    let (supervisor, _) = run_supervisor(&db, &repo, &backend, &reviewer);
+    let (supervisor, passes, ahead) = run_supervisor_ahead(&db, &repo, &backend, &reviewer);
     let ask = ask_during_review(&db);
     await_revise_after(&db, ask);
+    // The pass that sent the request made its watch; the next one is after.
+    await_passes(&passes, 1);
+    ahead.by(timeout);
     let outcome = joined(supervisor, "the supervisor thread to return");
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let mut queue = SqliteQueue::open(&db).unwrap();
-    assert_revise_ended(&mut queue, "did not rewrite the receipt within 2 seconds");
+    assert_revise_ended(
+        &mut queue,
+        &format!(
+            "did not rewrite the receipt within {} seconds",
+            timeout.as_secs()
+        ),
+    );
 }
 
 /// What a worker does first in its turn of the revise request: it asks a
@@ -373,25 +388,18 @@ fn a_question_passed_by_a_rewritten_receipt_does_not_hold_its_fix() {
     );
 }
 
-/// How long [`an_open_question_without_a_rewritten_receipt_holds_past_the_resume_timeout`]
-/// gives the revise without its receipt rewritten. Its turn has to ask
-/// within it, and its turn of the answer to rewrite the receipt: with 1 s,
-/// under load (load 75 to 90, 4 nextest -j 16 at once) the ask opened 2.4 s
-/// after the revise request, after the timeout had ended the revise, and
-/// the turn of the answer ran out of it too (task 1360).
-const QUESTION_RESUME_TIMEOUT: Duration = Duration::from_secs(6);
-
 /// A session idle at a question it asked during its revise, its receipt
 /// not rewritten, still waits for the answer past the resume timeout (task
-/// 238): answered, it rewrites the receipt and the run lands. The question
-/// opens before the timeout runs out, and the checks that nothing ended the
-/// revise come after it ran out (task 1360).
+/// 238): answered, it rewrites the receipt and the run lands. The timeout
+/// is run out on the supervisor's clock once the session is idle at its
+/// question (task 1557): with the default timeout, neither the question
+/// nor the turn of the answer races a short one under load (task 1360).
 #[test]
 fn an_open_question_without_a_rewritten_receipt_holds_past_the_resume_timeout() {
     let (_dir, repo, db) = fixture();
     let _dump = EventsOnPanic(db.clone());
     let base = git_out(&repo, &["rev-parse", "main"]);
-    let mut backend = TestWorkspace::new(
+    let backend = TestWorkspace::new(
         &db,
         false,
         &asks_after_revise(
@@ -400,13 +408,13 @@ fn an_open_question_without_a_rewritten_receipt_holds_past_the_resume_timeout() 
              receipt \"$(git rev-parse HEAD)\"",
         ),
     );
-    backend.resume_timeout = QUESTION_RESUME_TIMEOUT;
+    let timeout = backend.resume_timeout;
     let backend = Arc::new(backend);
     let reviewer = Arc::new(TestReviewer::new(&[
         verdict("revise", &["add a line"], "one gap"),
         verdict("pass", &[], "fixed"),
     ]));
-    let (supervisor, passes) = run_supervisor(&db, &repo, &backend, &reviewer);
+    let (supervisor, passes, ahead) = run_supervisor_ahead(&db, &repo, &backend, &reviewer);
     wait_until(&db, Duration::from_secs(30), |queue| {
         queue
             .asks(AskQuery::default())
@@ -416,24 +424,12 @@ fn an_open_question_without_a_rewritten_receipt_holds_past_the_resume_timeout() 
     });
     let mut queue = SqliteQueue::open(&db).unwrap();
     let ask = open_question(&mut queue);
-    // The timeout runs from the turn of the revise request (its watch
-    // starts after `turn_requested`): a question opened past it would come
-    // after the revise ended, which is the test outrun by its load, not a
-    // question that did not hold.
     let detail = queue.show(TaskId::new(1)).unwrap();
-    let timeout_ms = i64::try_from(QUESTION_RESUME_TIMEOUT.as_millis()).unwrap();
-    let requested = first_event_millis(&detail, "turn_requested");
     let opened = first_event_millis(&detail, "ask_opened");
-    assert!(
-        opened < requested + timeout_ms,
-        "the question opened {} ms after the revise request, past its timeout",
-        opened - requested
-    );
     // Idle at its question past the resume timeout, and passes after it.
     await_written_after(&detail.runs[0].idle_marker_path().unwrap(), opened);
-    let left = requested + timeout_ms - unix_millis();
-    thread::sleep(Duration::from_millis(u64::try_from(left.max(0)).unwrap()));
-    thread::sleep(Duration::from_secs(1));
+    await_passes(&passes, 1);
+    ahead.by(timeout + Duration::from_secs(1));
     await_passes(&passes, SOME_PASSES);
     let detail = queue.show(TaskId::new(1)).unwrap();
     let kinds = event_kinds(&detail);

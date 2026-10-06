@@ -1201,7 +1201,11 @@ pub fn supervise_options(parallel: usize, once: bool) -> SuperviseOptions {
         tick: TEST_TICK,
         idle_poll: TEST_TICK,
         generators: Generators {
-            clock: Arc::new(SteadyClock(SystemTime::now(), Instant::now())),
+            clock: Arc::new(SteadyClock(
+                SystemTime::now(),
+                Instant::now(),
+                MonotonicAhead::default(),
+            )),
             ..clock::system()
         },
         // A development build never looks for a release (ADR-t618-1), so
@@ -1241,12 +1245,50 @@ pub fn scratchpad_of(root: &Path, worktree: &str) -> PathBuf {
 /// or stale" before the heartbeat caught up. This clock does not jump, and
 /// agrees with the wall clock again for the next supervisor, so the times
 /// a test writes with `unixepoch()` before it supervises still hold.
-pub struct SteadyClock(pub SystemTime, pub Instant);
+/// Its monotonic clock, which the supervisor's waits (registration, resume,
+/// exit, reopen) are measured on, is the host's moved on by the
+/// [`MonotonicAhead`] a test sets (task 1557).
+pub struct SteadyClock(pub SystemTime, pub Instant, pub MonotonicAhead);
 
 impl Clock for SteadyClock {
     fn system_time(&self) -> SystemTime {
         self.0 + self.1.elapsed()
     }
+
+    fn monotonic(&self) -> Instant {
+        Instant::now() + self.2.get()
+    }
+}
+
+/// How far a [`SteadyClock`]'s monotonic clock is ahead of the host's: a
+/// test moves it on to run a supervisor's wait out at once, instead of
+/// sleeping through it. Shared by the clock and the test.
+#[derive(Clone, Default)]
+pub struct MonotonicAhead(Arc<AtomicU64>);
+
+impl MonotonicAhead {
+    /// Move the clock on by `by` from where it is.
+    pub fn by(&self, by: Duration) {
+        let ms = u64::try_from(by.as_millis()).unwrap();
+        self.0.fetch_add(ms, Ordering::SeqCst);
+    }
+
+    fn get(&self) -> Duration {
+        Duration::from_millis(self.0.load(Ordering::SeqCst))
+    }
+}
+
+/// [`supervise_options`] whose clock's monotonic time the returned
+/// [`MonotonicAhead`] moves on.
+pub fn supervise_options_ahead(parallel: usize, once: bool) -> (SuperviseOptions, MonotonicAhead) {
+    let ahead = MonotonicAhead::default();
+    let mut options = supervise_options(parallel, once);
+    options.generators.clock = Arc::new(SteadyClock(
+        SystemTime::now(),
+        Instant::now(),
+        ahead.clone(),
+    ));
+    (options, ahead)
 }
 
 /// One pass of the parallel supervisor: claim whatever is ready, finish it, exit.

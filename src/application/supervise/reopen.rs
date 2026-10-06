@@ -84,6 +84,7 @@ struct LostSession<'a> {
 }
 
 /// What the wait does with its lost session.
+#[derive(Debug, PartialEq, Eq)]
 pub(super) enum Reopen {
     /// A session is being opened again, or will be after the interval:
     /// the wait goes on.
@@ -109,6 +110,40 @@ pub(super) fn attempts_in_a_row(events: &[RunEvent]) -> usize {
                     && e.payload["cause"] != NOT_REGISTERED)
         })
         .count()
+}
+
+/// Whether the workspace an attempt opened at `opened` still waits for its
+/// wrapper at `now`: within the registration `timeout`, unless a wrapper
+/// row of the run shows it `lost` (the new wrapper registered and was lost
+/// in turn). Past it, nothing registered and the next attempt closes it.
+pub(super) fn awaits_registration(
+    now: Instant,
+    opened: Instant,
+    lost: bool,
+    timeout: Duration,
+) -> bool {
+    !lost && !passed(now, opened, timeout)
+}
+
+/// What the reopen does at `now` with a turn that has outlived its lost
+/// wrapper since `since`: it waits for the turn to end within the turn's
+/// `limit` (as the wrapper would have), and gives the session up at it.
+pub(super) fn turn_outlived(now: Instant, since: Instant, limit: Duration) -> Reopen {
+    if passed(now, since, limit) {
+        Reopen::GiveUp
+    } else {
+        Reopen::Waiting
+    }
+}
+
+/// Whether the next attempt waits at `now` for the reopen `interval` since
+/// this process's `last_attempt`; the first attempt does not wait.
+pub(super) fn attempt_waits(
+    now: Instant,
+    last_attempt: Option<Instant>,
+    interval: Duration,
+) -> bool {
+    last_attempt.is_some_and(|at| !passed(now, at, interval))
 }
 
 impl Supervisor<'_> {
@@ -137,7 +172,7 @@ impl Supervisor<'_> {
             // (before a handoff or an adoption) forgot the processes for an
             // attempt whose wrapper may still be starting. It gets the
             // registration's time before the next attempt closes it.
-            reopen.opened = Some(Instant::now());
+            reopen.opened = Some(self.generators.clock.monotonic());
             return Ok(Reopen::Waiting);
         }
         let outcome = self.reopen_or_not(&run, watch, processes, lost)?;
@@ -164,9 +199,15 @@ impl Supervisor<'_> {
         processes: &[RunProcess],
         lost: Option<&RunProcess>,
     ) -> Result<Reopen> {
+        let now = self.generators.clock.monotonic();
         let reopen = self.reopens.entry(run.id().clone()).or_default();
         if let Some(opened) = reopen.opened {
-            if lost.is_none() && opened.elapsed() < self.cmux.registration_timeout() {
+            if awaits_registration(
+                now,
+                opened,
+                lost.is_some(),
+                self.cmux.registration_timeout(),
+            ) {
                 return Ok(Reopen::Waiting);
             }
             reopen.opened = None;
@@ -199,14 +240,14 @@ impl Supervisor<'_> {
                 Some(since) => since,
                 None => {
                     info!(run_id = %run.id(), "run {} lost its wrapper while its turn (pid {}) still runs; waiting for the turn to end before opening the session again", run.id(), agent.pid);
-                    *reopen.agent_since.insert(Instant::now())
+                    *reopen.agent_since.insert(now)
                 }
             };
-            if since.elapsed() < limit {
-                return Ok(Reopen::Waiting);
+            let outcome = turn_outlived(now, since, limit);
+            if let Reopen::GiveUp = outcome {
+                warn!(run_id = %run.id(), "the turn (pid {}) of run {} outlived its lost wrapper past the turn's limit; giving the session up", agent.pid, run.id());
             }
-            warn!(run_id = %run.id(), "the turn (pid {}) of run {} outlived its lost wrapper past the turn's limit; giving the session up", agent.pid, run.id());
-            return Ok(Reopen::GiveUp);
+            return Ok(outcome);
         }
         reopen.agent_since = None;
         let attempts = attempts_in_a_row(&self.queue.run_events(run.id())?);
@@ -215,13 +256,10 @@ impl Supervisor<'_> {
             return Ok(Reopen::GiveUp);
         }
         let reopen = self.reopens.entry(run.id().clone()).or_default();
-        if reopen
-            .last_attempt
-            .is_some_and(|at| at.elapsed() < self.cmux.reopen_interval())
-        {
+        if attempt_waits(now, reopen.last_attempt, self.cmux.reopen_interval()) {
             return Ok(Reopen::Waiting);
         }
-        reopen.last_attempt = Some(Instant::now());
+        reopen.last_attempt = Some(now);
         let attempt = attempts + 1;
         let given_up = || {
             if attempt >= REOPEN_ATTEMPTS {
@@ -260,11 +298,14 @@ impl Supervisor<'_> {
         match self.open_session_again(run, &lost_session) {
             Ok(workspace) => {
                 info!(run_id = %run.id(), "run {} lost its session ({cause}) while it waited; opened it again in workspace {workspace} (attempt {attempt})", run.id());
+                // The registration's time runs from the open, not from
+                // before it.
+                let opened = self.generators.clock.monotonic();
                 watch.workspace = workspace;
-                watch.startup = Instant::now();
+                watch.startup = opened;
                 watch.silent = false;
                 if let Some(reopen) = self.reopens.get_mut(run.id()) {
-                    reopen.opened = Some(Instant::now());
+                    reopen.opened = Some(opened);
                 }
                 Ok(Reopen::Waiting)
             }
@@ -466,6 +507,55 @@ impl Supervisor<'_> {
 mod tests {
     use super::*;
     use crate::domain::EventId;
+
+    const MS: Duration = Duration::from_millis(1);
+
+    /// The workspace an attempt opened waits for its wrapper until the
+    /// registration timeout, not at it; a lost wrapper row ends the wait at
+    /// once.
+    #[test]
+    fn an_opened_workspace_waits_for_its_wrapper_until_the_registration_timeout() {
+        let opened = Instant::now();
+        let timeout = Duration::from_secs(60);
+        assert!(awaits_registration(
+            opened + timeout - MS,
+            opened,
+            false,
+            timeout
+        ));
+        assert!(!awaits_registration(
+            opened + timeout,
+            opened,
+            false,
+            timeout
+        ));
+        assert!(!awaits_registration(opened, opened, true, timeout));
+    }
+
+    /// A turn that outlived its lost wrapper is waited for until the turn's
+    /// limit and given up at it; a limit of zero gives it up at once.
+    #[test]
+    fn a_turn_that_outlived_its_wrapper_is_given_up_at_the_turn_limit() {
+        let since = Instant::now();
+        let limit = Duration::from_secs(3600);
+        assert_eq!(
+            turn_outlived(since + limit - MS, since, limit),
+            Reopen::Waiting
+        );
+        assert_eq!(turn_outlived(since + limit, since, limit), Reopen::GiveUp);
+        assert_eq!(turn_outlived(since, since, Duration::ZERO), Reopen::GiveUp);
+    }
+
+    /// The first attempt does not wait; the next waits for the reopen
+    /// interval since the last one, and goes at it.
+    #[test]
+    fn the_next_attempt_waits_for_the_reopen_interval() {
+        let last = Instant::now();
+        let interval = Duration::from_secs(10);
+        assert!(!attempt_waits(last + interval * 100, None, interval));
+        assert!(attempt_waits(last + interval - MS, Some(last), interval));
+        assert!(!attempt_waits(last + interval, Some(last), interval));
+    }
 
     fn event(kind: &str, payload: Value) -> RunEvent {
         RunEvent {

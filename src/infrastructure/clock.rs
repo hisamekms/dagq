@@ -1,19 +1,26 @@
 //! The system's clock and UUIDs behind the application's [`Clock`] and
 //! [`IdGenerator`] ports.
 
-use std::{sync::Arc, time::SystemTime};
+use std::{
+    sync::Arc,
+    time::{Instant, SystemTime},
+};
 
 use uuid::Uuid;
 
 use crate::application::{Clock, Generators, IdGenerator};
 
-/// The wall clock.
+/// The wall clock, and the monotonic clock beside it.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemClock;
 
 impl Clock for SystemClock {
     fn system_time(&self) -> SystemTime {
         SystemTime::now()
+    }
+
+    fn monotonic(&self) -> Instant {
+        Instant::now()
     }
 }
 

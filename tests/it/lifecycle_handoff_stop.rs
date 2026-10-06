@@ -42,6 +42,10 @@ impl Clock for StopAt {
         }
         SystemTime::now()
     }
+
+    fn monotonic(&self) -> std::time::Instant {
+        std::time::Instant::now()
+    }
 }
 
 /// Hand `old` off while it stops and deregisters at the `at`-th reading of

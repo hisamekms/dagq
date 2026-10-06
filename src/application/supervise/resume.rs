@@ -467,6 +467,7 @@ impl Supervisor<'_> {
             });
         }
         self.record_launch(run, &workspace, &log)?;
+        let now = self.generators.clock.monotonic();
         Ok(ResumeWatch {
             workspace: workspace.clone(),
             attempt,
@@ -474,7 +475,7 @@ impl Supervisor<'_> {
             receipt_path: PathBuf::from(run.receipt_path().context("missing receipt path")?),
             idle_marker: run.idle_marker_path()?,
             started_at: self.files.now(),
-            startup: Instant::now(),
+            startup: now,
             message,
 
             message_sent: None,
@@ -490,7 +491,12 @@ impl Supervisor<'_> {
             stale: None,
             delivered_closed: None,
             recovery: RecoveryWatch::default(),
-            live: Box::new(SessionWatch::fixing(run, &workspace, self.files.now())?),
+            live: Box::new(SessionWatch::fixing(
+                run,
+                &workspace,
+                self.files.now(),
+                now,
+            )?),
         })
     }
     /// A [`ResumeWatch`] that goes on watching a resumed session another
@@ -515,13 +521,14 @@ impl Supervisor<'_> {
             approved,
         } = state;
         let task = self.queue.show(run.task_id())?.task;
-        let now = Instant::now();
+        let now = self.generators.clock.monotonic();
         // Answers are followed from the request on. A delivered answer
         // closes its ask and moves the last request time forward.
         let mut live = Box::new(SessionWatch::fixing(
             run,
             &workspace,
             message_sent_at.unwrap_or(started_at),
+            now,
         )?);
         // The recovery jobs the previous process recorded during this
         // resume carry over, as for an adopted revise: the
@@ -1054,6 +1061,41 @@ impl ResumeVerdict {
     }
 }
 
+/// What a session asked to exit does while it has not exited.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum ExitWait {
+    /// Within the exit timeout: the exit is waited for.
+    Waiting,
+    /// The exit timeout passed: the session is let go, still running, so
+    /// the slot and the lease are not held forever.
+    LetGo,
+}
+
+/// What a resumed session asked at `requested` to exit does at `now`: it
+/// is waited for until the exit `timeout`, and let go at it.
+pub(super) fn exit_wait(now: Instant, requested: Instant, timeout: Duration) -> ExitWait {
+    if passed(now, requested, timeout) {
+        ExitWait::LetGo
+    } else {
+        ExitWait::Waiting
+    }
+}
+
+/// Why a resumed session whose resolution request was sent at `sent` (or
+/// last restarted by an input) is asked to exit at `now` for its time: the
+/// resume `timeout` passed and no request to rewrite a stale receipt
+/// still waits for its answer (`stale_waits`, which has its own timeout).
+/// `None` while it is waited for.
+pub(super) fn resume_deadline(
+    now: Instant,
+    sent: Instant,
+    timeout: Duration,
+    stale_waits: bool,
+) -> Option<&'static str> {
+    (passed(now, sent, timeout) && !stale_waits)
+        .then_some("did not finish within the resume timeout")
+}
+
 impl ResumeWatch {
     /// Record the exit request before writing its file, and stop live recovery.
     fn request_exit(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun) -> Result<()> {
@@ -1063,7 +1105,7 @@ impl ResumeWatch {
             json!({"workspace_id": self.workspace, "resume_attempt": self.attempt}),
         )?;
         self.end_live(sv, run)?;
-        self.exit_requested = Some(Instant::now());
+        self.exit_requested = Some(sv.generators.clock.monotonic());
         submit(sv, run, &self.workspace, Input::Exit, "exit request")?;
         Ok(())
     }
@@ -1108,9 +1150,9 @@ impl ResumeWatch {
     /// An input typed into the session restarts them from when it was
     /// typed, not from after the send returned: a session that answered it
     /// at once wrote its idle marker in between, and a later start left
-    /// that idle unseen until the request's timeout (task 931).
-    pub(super) fn restart_clocks(&mut self, from: SystemTime) {
-        let now = Instant::now();
+    /// that idle unseen until the request's timeout (task 931). `now` is
+    /// the supervisor's monotonic clock.
+    pub(super) fn restart_clocks(&mut self, from: SystemTime, now: Instant) {
         if let Some((sent, _)) = &mut self.message_sent {
             *sent = now;
         }
@@ -1173,7 +1215,7 @@ impl ResumeWatch {
             Input::Text(&message),
             "resolution request",
         )?;
-        self.message_sent = Some((Instant::now(), sent_at));
+        self.message_sent = Some((sv.generators.clock.monotonic(), sent_at));
         self.live.input_at = Some(sent_at);
         // A supervisor that adopts this resume does not send it again; a
         // record that fails is only noted.
@@ -1203,7 +1245,7 @@ impl ResumeWatch {
         let Some(wrapper) = processes.iter().find(|p| p.role == "wrapper") else {
             let timeout = sv.cmux.registration_timeout();
             ensure!(
-                self.startup.elapsed() < timeout,
+                registration_pending(sv.generators.clock.monotonic(), self.startup, timeout),
                 "resumed session's wrapper did not register within {} seconds",
                 timeout.as_secs()
             );
@@ -1258,7 +1300,8 @@ impl ResumeWatch {
             self.exit_for_silence = true;
         }
         if let Some(requested) = self.exit_requested {
-            if requested.elapsed() < sv.cmux.exit_timeout() {
+            let now = sv.generators.clock.monotonic();
+            if let ExitWait::Waiting = exit_wait(now, requested, sv.cmux.exit_timeout()) {
                 return Ok(None);
             }
             return Ok(Some(ResumeVerdict {
@@ -1283,12 +1326,12 @@ impl ResumeWatch {
         // told to go on, like an answer typed into it.
         if let Some(typed) = self.live.continue_after_hold(sv, run)? {
             self.live.input_at = Some(typed);
-            self.restart_clocks(typed);
+            self.restart_clocks(typed, sv.generators.clock.monotonic());
             self.start = self.live.answer_start.take();
         }
         if let Some(typed) = self.live.deliver_answers(sv, run)? {
             self.live.input_at = Some(typed);
-            self.restart_clocks(typed);
+            self.restart_clocks(typed, sv.generators.clock.monotonic());
             self.delivered_closed = sv.queue.last_worker_question_closed(run.id())?;
             self.start = self.live.answer_start.take();
         }
@@ -1303,7 +1346,9 @@ impl ResumeWatch {
         // other provider, or the run waits in the hold ask.
         match self.live.provider_wall(sv, run)? {
             WallGate::Held => return Ok(None),
-            WallGate::Moved(_) => self.restart_clocks(sv.files.now()),
+            WallGate::Moved(_) => {
+                self.restart_clocks(sv.files.now(), sv.generators.clock.monotonic());
+            }
             WallGate::Open => (),
         }
         self.watch_idle_processes(sv, run)?;
@@ -1320,12 +1365,9 @@ impl ResumeWatch {
             && self.delivered_closed.is_none_or(|own| closed > own)
         {
             self.live.input_at = Some(UNIX_EPOCH + Duration::from_secs(closed.max(0) as u64));
-            self.restart_clocks(sv.files.now());
+            self.restart_clocks(sv.files.now(), sv.generators.clock.monotonic());
         }
         let input_at = self.live.input_at.unwrap_or(sent_at).max(sent_at);
-        let sent = self
-            .message_sent
-            .map_or_else(Instant::now, |(sent, _)| sent);
         // The idle marker is read before the receipt and the
         // worktree: a receipt rewritten after this read is judged
         // at the next poll, never as idle without it.
@@ -1399,12 +1441,18 @@ impl ResumeWatch {
             _ => idle_after_receipt.then_some("rewrote its receipt and went idle"),
         }
         .or_else(|| {
+            // The request's clock, restarted by the inputs above.
+            let (sent, _) = self.message_sent?;
             // A request to rewrite a stale receipt gets its own timeout.
-            (sent.elapsed() >= sv.cmux.resume_timeout()
-                && self
-                    .stale
-                    .is_none_or(|n| n.settled || n.waited_out(&*sv.files, sv.cmux)))
-            .then_some("did not finish within the resume timeout")
+            let stale_waits = self
+                .stale
+                .is_some_and(|n| !n.settled && !n.waited_out(&*sv.files, sv.cmux));
+            resume_deadline(
+                sv.generators.clock.monotonic(),
+                sent,
+                sv.cmux.resume_timeout(),
+                stale_waits,
+            )
         });
         if let Some(why) = why {
             self.settle_stale(sv, run)?;
@@ -1420,6 +1468,49 @@ impl ResumeWatch {
 mod tests {
     use super::*;
     use crate::domain::TaskId;
+
+    const MS: Duration = Duration::from_millis(1);
+
+    /// A resumed session asked to exit is waited for until its exit
+    /// timeout and let go at it, not a millisecond before.
+    #[test]
+    fn a_resumed_session_asked_to_exit_is_let_go_at_its_exit_timeout() {
+        let requested = Instant::now();
+        let timeout = Duration::from_secs(120);
+        assert_eq!(exit_wait(requested, requested, timeout), ExitWait::Waiting);
+        assert_eq!(
+            exit_wait(requested + timeout - MS, requested, timeout),
+            ExitWait::Waiting
+        );
+        assert_eq!(
+            exit_wait(requested + timeout, requested, timeout),
+            ExitWait::LetGo
+        );
+    }
+
+    /// A resumed session is asked to exit at its resume timeout since the
+    /// request (or the input that restarted it), not a millisecond before,
+    /// and not while a request to rewrite a stale receipt waits for its
+    /// own answer.
+    #[test]
+    fn a_resume_is_asked_to_exit_at_its_timeout_unless_a_stale_request_waits() {
+        let sent = Instant::now();
+        let timeout = Duration::from_secs(1800);
+        assert_eq!(
+            resume_deadline(sent + timeout - MS, sent, timeout, false),
+            None
+        );
+        assert_eq!(
+            resume_deadline(sent + timeout, sent, timeout, false),
+            Some("did not finish within the resume timeout")
+        );
+        assert_eq!(resume_deadline(sent + timeout, sent, timeout, true), None);
+        let restarted = sent + timeout - MS;
+        assert_eq!(
+            resume_deadline(sent + timeout, restarted, timeout, false),
+            None
+        );
+    }
 
     fn event(id: i64, kind: &str, payload: Value) -> RunEvent {
         RunEvent {

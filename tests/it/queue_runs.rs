@@ -157,6 +157,10 @@ impl Clock for FixedClock {
     fn system_time(&self) -> SystemTime {
         self.0
     }
+
+    fn monotonic(&self) -> std::time::Instant {
+        std::time::Instant::now()
+    }
 }
 
 /// IDs handed out in order.

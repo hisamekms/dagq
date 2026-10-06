@@ -199,7 +199,8 @@ impl Supervisor<'_> {
                 let history = RunHistory::from_events(&events);
                 let receipt_seen =
                     self.files.is_file(&receipt_path) && history.has(event_kind::RECEIPT_OBSERVED);
-                let now = Instant::now();
+                // The clock the session's waits are judged on (task 1557).
+                let now = self.generators.clock.monotonic();
                 let since = |event: &RunEvent| self.instant_of(event, now);
                 let exit_requested = self.exit_requested_at(&events, |_| true, now);
                 let first_commit_seen = history.has(event_kind::FIRST_COMMIT_OBSERVED);
@@ -330,6 +331,7 @@ impl Supervisor<'_> {
                         },
                         sent_at,
                         start,
+                        self.generators.clock.monotonic(),
                     )?;
                     watch.live.adopt(&*self.queue, run, anchor.id)?;
                     return Ok(Phase::Revise(watch));
@@ -363,6 +365,7 @@ impl Supervisor<'_> {
                         Fix::Conflict(verdict),
                         sent_at,
                         start,
+                        self.generators.clock.monotonic(),
                     )?;
                     watch.live.adopt(&*self.queue, run, anchor.id)?;
                     return Ok(Phase::Revise(watch));

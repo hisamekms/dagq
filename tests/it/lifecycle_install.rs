@@ -855,6 +855,10 @@ pub(crate) fn heartbeat_later(fixture: &Fixture, token: &str) {
         fn system_time(&self) -> std::time::SystemTime {
             std::time::SystemTime::now() + Duration::from_secs(1)
         }
+
+        fn monotonic(&self) -> std::time::Instant {
+            std::time::Instant::now()
+        }
     }
     use dagq::application::QueueOpener;
     let mut generators = dagq::infrastructure::clock::system();

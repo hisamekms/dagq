@@ -112,11 +112,12 @@ impl Slot {
 impl Phase {
     /// Start the clocks of a revise or a resume again once its run is back
     /// in a slot (ADR-0071 decision 15): the wait stopped them, and the
-    /// time left before it is not carried over.
-    fn restart_stage_clocks(&mut self, files: &dyn RunFiles) {
+    /// time left before it is not carried over. `now` is the supervisor's
+    /// monotonic clock.
+    fn restart_stage_clocks(&mut self, files: &dyn RunFiles, now: Instant) {
         match self {
-            Phase::Revise(watch) => watch.sent = Instant::now(),
-            Phase::Resume(watch) => watch.restart_clocks(files.now()),
+            Phase::Revise(watch) => watch.sent = now,
+            Phase::Resume(watch) => watch.restart_clocks(files.now(), now),
             _ => {}
         }
     }
@@ -534,7 +535,8 @@ impl Supervisor<'_> {
     fn regain_slot(&mut self, slot: &mut Slot, used: usize) -> Result<()> {
         match slot.waiting.take() {
             Some(waiting) => {
-                slot.phase.restart_stage_clocks(&*self.files);
+                slot.phase
+                    .restart_stage_clocks(&*self.files, self.generators.clock.monotonic());
                 self.record_regained(slot.run.id(), &waiting, used)
             }
             None => Ok(()),
@@ -579,7 +581,10 @@ impl Supervisor<'_> {
             let Some(waiting) = self.slots[index].waiting.take() else {
                 continue;
             };
-            self.slots[index].phase.restart_stage_clocks(&*self.files);
+            let now = self.generators.clock.monotonic();
+            self.slots[index]
+                .phase
+                .restart_stage_clocks(&*self.files, now);
             let run = self.slots[index].run.id().clone();
             let used = self.used_slots();
             if let Err(error) = self.record_regained(&run, &waiting, used) {
