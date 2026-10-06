@@ -4,7 +4,7 @@ type: plan
 title: スパイク：run の review job の中で review の subagent を Claude と Codex の非対話の呼び出しで動かせるか
 status: completed
 created: 2026-10-03
-updated: 2026-10-04
+updated: 2026-10-06
 owners:
   - hisamekms
 tags:
@@ -16,12 +16,15 @@ related:
   - adr-t1470-1
   - adr-t1570-1
   - plan-codex-headless-jobs-spike
+  - plan-review-agent-eval-spike
   - design-supervisor-lifecycle-review
 ---
 
 # スパイク：run の review job の中で review の subagent を Claude と Codex の非対話の呼び出しで動かせるか
 
 goal 94 の task 1453 が [ADR-t1453-1](../adr/2026-10-03-t1453-1-review-subagents-named-by-path-run-inside-the-review-job.md) を決めるために、provider の CLI の能力と許可の設定を確かめた記録。queue は使わず、`/tmp` の使い捨ての Git repository（`git init` だけ）で非対話の呼び出しを数回行った。`src/` は変えていない。
+
+その後、dagqの外のrepositoryでreviewのagentをevalで測って改善したSpike（Codexのsub-agentが実際に動くこと・sandboxを継ぐことの確認を含む）の結果と所見の行き先は[review-agent-eval-spike](review-agent-eval-spike.md)にある。
 
 ## 環境
 
