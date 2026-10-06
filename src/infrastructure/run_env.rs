@@ -28,7 +28,8 @@
 //! `[headless] wrapper` chooses where a headless session's wrapper runs:
 //! in a cmux workspace or as a background process (ADR-t1404-1).
 //! `[provider_fallback] workers` turns off a worker's move off a provider
-//! it cannot use (ADR-t1857-1).
+//! it cannot use, and `jobs` that of a headless job whose role names its
+//! provider (ADR-t1857-1).
 //! The file is parsed by
 //! hand: the format is these tables of `KEY = value` lines, a subset of
 //! TOML that needs no parser crate.
@@ -136,8 +137,8 @@ const REVIEW_SUBAGENT_PATHS: &str = "paths";
 const HEADLESS_TABLE: &str = "headless";
 /// The one key of `[headless]`.
 const HEADLESS_WRAPPER: &str = "wrapper";
-/// `[provider_fallback]`: whether a worker moves off a provider it
-/// cannot use (ADR-t1857-1).
+/// `[provider_fallback]`: whether a worker and a job move off a provider
+/// they cannot use (ADR-t1857-1).
 const PROVIDER_FALLBACK_TABLE: &str = "provider_fallback";
 /// `[ci_watch]`: the landing branch's CI the supervisor watches
 /// (ADR-t1920-1).
@@ -583,8 +584,13 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     !fallback_keys.iter().any(|existing| existing == key),
                     "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
                 );
-                config.provider_fallback.workers = parse_bool(rest.trim())
+                let on = parse_bool(rest.trim())
                     .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: value of {key}"))?;
+                if key == "jobs" {
+                    config.provider_fallback.jobs = on;
+                } else {
+                    config.provider_fallback.workers = on;
+                }
                 fallback_keys.push(key.to_owned());
             }
             Some(CI_WATCH_TABLE) => {
@@ -2702,41 +2708,55 @@ LITERAL = 'no \n escapes # here'
         );
     }
 
-    /// `[provider_fallback] workers` is a bool, on without it; the table
-    /// knows no other key (ADR-t1857-1).
+    /// `[provider_fallback] workers` and `jobs` are bools, each on without
+    /// it; the table knows no other key (ADR-t1857-1).
     #[test]
-    fn parses_the_workers_of_the_provider_fallback_table() {
-        assert!(parse_config("").unwrap().provider_fallback.workers);
-        assert!(
-            parse_config("[provider_fallback]\n")
-                .unwrap()
-                .provider_fallback
-                .workers
+    fn parses_the_workers_and_jobs_of_the_provider_fallback_table() {
+        let fallback = |text: &str| parse_config(text).unwrap().provider_fallback;
+        assert_eq!(fallback(""), ProviderFallback::default());
+        assert!(fallback("").workers && fallback("").jobs);
+        assert_eq!(
+            fallback("[provider_fallback]\n"),
+            ProviderFallback::default()
         );
-        assert!(
-            !parse_config("[provider_fallback]\nworkers = false # wait\n")
-                .unwrap()
-                .provider_fallback
-                .workers
+        assert_eq!(
+            fallback("[provider_fallback]\nworkers = false # wait\n"),
+            ProviderFallback {
+                workers: false,
+                jobs: true
+            }
         );
-        assert!(
-            parse_config("[provider_fallback]\nworkers = true\n")
-                .unwrap()
-                .provider_fallback
-                .workers
+        assert_eq!(
+            fallback("[provider_fallback]\njobs = false\n"),
+            ProviderFallback {
+                workers: true,
+                jobs: false
+            }
+        );
+        assert_eq!(
+            fallback("[provider_fallback]\nworkers = true\njobs = true\n"),
+            ProviderFallback::default()
         );
         for (text, expected) in [
             (
-                "[provider_fallback]\njobs = false\n",
-                "dagq.toml:2: unknown key jobs in [provider_fallback]; the keys are workers",
+                "[provider_fallback]\nlimit = false\n",
+                "dagq.toml:2: unknown key limit in [provider_fallback]; the keys are workers, jobs",
             ),
             (
                 "[provider_fallback]\nworkers = \"no\"\n",
                 "dagq.toml:2: value of workers: expected true or false",
             ),
             (
+                "[provider_fallback]\njobs = 1\n",
+                "dagq.toml:2: value of jobs: expected true or false",
+            ),
+            (
                 "[provider_fallback]\nworkers = false\nworkers = true\n",
                 "dagq.toml:3: workers is defined twice",
+            ),
+            (
+                "[provider_fallback]\njobs = false\njobs = true\n",
+                "dagq.toml:3: jobs is defined twice",
             ),
         ] {
             let error = format!("{:#}", parse_config(text).unwrap_err());
@@ -2746,12 +2766,15 @@ LITERAL = 'no \n escapes # here'
         assert_eq!(load_provider_fallback(dir.path()).unwrap(), None);
         fs::write(
             dir.path().join(CONFIG_FILE_NAME),
-            "[provider_fallback]\nworkers = false\n",
+            "[provider_fallback]\nworkers = false\njobs = false\n",
         )
         .unwrap();
         assert_eq!(
             load_provider_fallback(dir.path()).unwrap(),
-            Some(ProviderFallback { workers: false })
+            Some(ProviderFallback {
+                workers: false,
+                jobs: false
+            })
         );
     }
 

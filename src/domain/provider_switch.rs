@@ -121,20 +121,25 @@ impl SwitchPhase {
 }
 
 /// `[provider_fallback]` of `dagq.toml` (ADR-t1857-1): whether a worker
-/// moves off a provider it cannot use (`workers`, by default it does).
+/// moves off a provider it cannot use (`workers`), and whether a headless
+/// job whose role names its provider does (`jobs`); by default both do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderFallback {
     pub workers: bool,
+    pub jobs: bool,
 }
 
 impl ProviderFallback {
     /// The keys of `[provider_fallback]`.
-    pub const KEYS: [&str; 1] = ["workers"];
+    pub const KEYS: [&str; 2] = ["workers", "jobs"];
 }
 
 impl Default for ProviderFallback {
     fn default() -> Self {
-        Self { workers: true }
+        Self {
+            workers: true,
+            jobs: true,
+        }
     }
 }
 

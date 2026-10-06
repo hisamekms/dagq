@@ -204,10 +204,11 @@ impl RoleModels {
         }
     }
 
-    /// Whether a job of `role` moves to the other provider when its own
-    /// cannot be used (ADR-t1063-1 decision 4): only a role whose table
-    /// names its provider; one that names none runs and waits as before,
-    /// on Claude only.
+    /// Whether a job of `role` names its provider (ADR-t1063-1 decision
+    /// 4): only such a role has a failure of its provider classified as
+    /// that provider being unusable and held, and may move to the other
+    /// provider (when `[provider_fallback] jobs` lets it, ADR-t1857-1); one
+    /// that names none runs and waits as before, on Claude only.
     pub fn switchable(&self, role: ModelRole) -> bool {
         self.get(role).is_some_and(|table| table.provider.is_some())
     }
@@ -279,24 +280,51 @@ pub enum JobStartRoute {
 
 /// Where the job that `launch` starts goes, given why each provider cannot
 /// be used now (`unusable`, `None` when it can): on its own provider when
-/// it can be used; else, when the role moves (`switchable`), on the other
-/// provider when that one runs the role and can be used, its launch saying
-/// from which and why; else it waits.
+/// it can be used; else, when the role names its provider (`switchable`),
+/// on the other provider when that one runs the role and can be used, its
+/// launch saying from which and why; else it waits. With
+/// `[provider_fallback] jobs` off (`fallback` false, ADR-t1857-1) a
+/// provider that cannot be used ([`SwitchReason::unusable`]) is waited
+/// for instead; `--no-claude` ([`SwitchReason::Disabled`]) still moves.
 pub fn job_route(
     launch: &ActorLaunch,
     switchable: bool,
+    fallback: bool,
     unusable: impl Fn(Provider) -> Option<SwitchReason>,
 ) -> JobRoute {
     let Some(reason) = unusable(launch.provider) else {
         return JobRoute::Start(launch.clone());
     };
     let other = launch.provider.other();
-    if switchable && runs_on(launch.role, other) && unusable(other).is_none() {
+    let moves = switchable && (fallback || !reason.unusable());
+    if moves && runs_on(launch.role, other) && unusable(other).is_none() {
         return JobRoute::Start(launch.clone().switched(other, reason));
     }
     JobRoute::Wait {
         provider: launch.provider,
         reason,
+    }
+}
+
+/// Why a job [`job_route`] sent to [`JobRoute::Wait`] waits, as the log
+/// says it: with `[provider_fallback] jobs` off (`fallback` false) and
+/// `provider` unusable for `reason` ([`SwitchReason::unusable`]) it waits
+/// for `provider` whether or not the other one could run it
+/// (ADR-t1857-1); otherwise neither provider can run it.
+pub fn job_wait_text(provider: Provider, reason: SwitchReason, fallback: bool) -> String {
+    if !fallback && reason.unusable() {
+        format!(
+            "{} cannot be used ({}); [provider_fallback] jobs is false, so it waits for {}",
+            provider.as_str(),
+            reason.as_str(),
+            provider.as_str()
+        )
+    } else {
+        format!(
+            "{} cannot be used ({}), nor can the other provider",
+            provider.as_str(),
+            reason.as_str()
+        )
     }
 }
 
@@ -412,10 +440,38 @@ pub fn check_effort(effort: &str) -> Result<(), DomainError> {
     }
 }
 
+/// Whether a job on its timer (the observer, the throughput review) that
+/// ran on `provider` records `provider_unusable` when it could not use it:
+/// a Codex one of a role that names its provider (`switchable`,
+/// ADR-t1063-1 decision 4), and, with `[provider_fallback] jobs` off
+/// (`fallback` false, ADR-t1857-1), a Claude one of such a role too, so
+/// that the supervisor holds Claude and starts it again there once the
+/// hold ends.
+pub const fn records_unusable(provider: Provider, switchable: bool, fallback: bool) -> bool {
+    switchable
+        && match provider {
+            Provider::Codex => true,
+            Provider::Claude => !fallback,
+        }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A Codex job on its timer of a role that names its provider records
+    /// that Codex cannot be used, on or off; a Claude one only with the
+    /// fallback off; a role that names none never (ADR-t1857-1).
+    #[test]
+    fn a_timer_job_records_its_unusable_provider_as_its_role_and_fallback_say() {
+        assert!(records_unusable(Provider::Claude, true, false));
+        assert!(!records_unusable(Provider::Claude, true, true));
+        assert!(!records_unusable(Provider::Claude, false, false));
+        assert!(records_unusable(Provider::Codex, true, true));
+        assert!(records_unusable(Provider::Codex, true, false));
+        assert!(!records_unusable(Provider::Codex, false, false));
+    }
 
     #[test]
     fn a_role_without_a_table_is_started_as_before() {
@@ -594,13 +650,13 @@ mod tests {
         let codex = models.launch(ModelRole::GoalReview);
         let usable = |_: Provider| None;
         assert_eq!(
-            job_route(&codex, true, usable),
+            job_route(&codex, true, true, usable),
             JobRoute::Start(codex.clone())
         );
         let no_codex = |provider: Provider| {
             (provider == Provider::Codex).then_some(SwitchReason::ExecutableMissing)
         };
-        let JobRoute::Start(moved) = job_route(&codex, true, no_codex) else {
+        let JobRoute::Start(moved) = job_route(&codex, true, true, no_codex) else {
             panic!("moved to Claude");
         };
         assert_eq!(moved.provider, Provider::Claude);
@@ -621,7 +677,7 @@ mod tests {
             })
         };
         assert_eq!(
-            job_route(&codex, true, neither),
+            job_route(&codex, true, true, neither),
             JobRoute::Wait {
                 provider: Provider::Codex,
                 reason: SwitchReason::UsageLimit
@@ -632,13 +688,13 @@ mod tests {
         let no_claude =
             |provider: Provider| (provider == Provider::Claude).then_some(SwitchReason::UsageLimit);
         assert_eq!(
-            job_route(&claude, false, no_claude),
+            job_route(&claude, false, true, no_claude),
             JobRoute::Wait {
                 provider: Provider::Claude,
                 reason: SwitchReason::UsageLimit
             }
         );
-        let JobRoute::Start(moved) = job_route(&claude, true, no_claude) else {
+        let JobRoute::Start(moved) = job_route(&claude, true, true, no_claude) else {
             panic!("moved to Codex");
         };
         assert_eq!(moved.provider, Provider::Codex);
@@ -648,35 +704,118 @@ mod tests {
         // observer and a recovery job (task 1225); a planner, which Codex
         // does not run, waits.
         let review = ActorLaunch::default_of(ModelRole::Review);
-        let JobRoute::Start(moved) = job_route(&review, true, no_claude) else {
+        let JobRoute::Start(moved) = job_route(&review, true, true, no_claude) else {
             panic!("moved the review to Codex");
         };
         assert_eq!(moved.provider, Provider::Codex);
         let plan_review = ActorLaunch::default_of(ModelRole::PlanReview);
-        let JobRoute::Start(moved) = job_route(&plan_review, true, no_claude) else {
+        let JobRoute::Start(moved) = job_route(&plan_review, true, true, no_claude) else {
             panic!("moved the plan review to Codex");
         };
         assert_eq!(moved.provider, Provider::Codex);
         let throughput = ActorLaunch::default_of(ModelRole::ThroughputReview);
-        let JobRoute::Start(moved) = job_route(&throughput, true, no_claude) else {
+        let JobRoute::Start(moved) = job_route(&throughput, true, true, no_claude) else {
             panic!("moved the throughput review to Codex");
         };
         assert_eq!(moved.provider, Provider::Codex);
         let observer = ActorLaunch::default_of(ModelRole::Observer);
-        let JobRoute::Start(moved) = job_route(&observer, true, no_claude) else {
+        let JobRoute::Start(moved) = job_route(&observer, true, true, no_claude) else {
             panic!("moved the observer to Codex");
         };
         assert_eq!(moved.provider, Provider::Codex);
         let recovery = ActorLaunch::default_of(ModelRole::Recovery);
-        let JobRoute::Start(moved) = job_route(&recovery, true, no_claude) else {
+        let JobRoute::Start(moved) = job_route(&recovery, true, true, no_claude) else {
             panic!("moved the recovery job to Codex");
         };
         assert_eq!(moved.provider, Provider::Codex);
         let planner = ActorLaunch::default_of(ModelRole::RuntimePlanner);
         assert!(matches!(
-            job_route(&planner, true, no_claude),
+            job_route(&planner, true, true, no_claude),
             JobRoute::Wait { .. }
         ));
+    }
+
+    /// With `[provider_fallback] jobs` off a job whose role names its
+    /// provider waits for that provider when it cannot be used, whichever
+    /// provider and reason; `--no-claude` still moves a Claude role to
+    /// Codex (ADR-t1857-1).
+    /// A job that waits says why: with the fallback off, for its own
+    /// provider (the other one may be usable); otherwise because neither
+    /// provider can run it, as for `--no-claude` with the fallback off
+    /// (ADR-t1857-1).
+    #[test]
+    fn a_waiting_job_says_whether_the_fallback_keeps_it_on_its_provider() {
+        for provider in [Provider::Claude, Provider::Codex] {
+            for reason in [
+                SwitchReason::ExecutableMissing,
+                SwitchReason::LaunchFailed,
+                SwitchReason::Authentication,
+                SwitchReason::UsageLimit,
+            ] {
+                let p = provider.as_str();
+                let r = reason.as_str();
+                assert_eq!(
+                    job_wait_text(provider, reason, false),
+                    format!(
+                        "{p} cannot be used ({r}); [provider_fallback] jobs is false, so it waits for {p}"
+                    )
+                );
+                assert_eq!(
+                    job_wait_text(provider, reason, true),
+                    format!("{p} cannot be used ({r}), nor can the other provider")
+                );
+            }
+        }
+        assert_eq!(
+            job_wait_text(Provider::Claude, SwitchReason::Disabled, false),
+            "claude cannot be used (provider_disabled), nor can the other provider"
+        );
+    }
+
+    #[test]
+    fn with_the_fallback_off_a_job_waits_for_its_own_provider() {
+        let mut models = RoleModels::default();
+        models.entry(ModelRole::ThroughputReview).provider = Some(Provider::Codex);
+        let codex = models.launch(ModelRole::ThroughputReview);
+        let claude = ActorLaunch::default_of(ModelRole::GoalReview);
+        for launch in [&codex, &claude] {
+            for reason in [
+                SwitchReason::ExecutableMissing,
+                SwitchReason::LaunchFailed,
+                SwitchReason::Authentication,
+                SwitchReason::UsageLimit,
+            ] {
+                let own = |provider: Provider| (provider == launch.provider).then_some(reason);
+                assert_eq!(
+                    job_route(launch, true, false, own),
+                    JobRoute::Wait {
+                        provider: launch.provider,
+                        reason
+                    },
+                    "{} {}",
+                    launch.provider.as_str(),
+                    reason.as_str()
+                );
+                // On, the same job moves.
+                let JobRoute::Start(moved) = job_route(launch, true, true, own) else {
+                    panic!("moved with the fallback on");
+                };
+                assert_eq!(moved.provider, launch.provider.other());
+                // Usable, it starts on its own provider either way.
+                assert_eq!(
+                    job_route(launch, true, false, |_| None),
+                    JobRoute::Start(launch.clone())
+                );
+            }
+        }
+        // `--no-claude` is no unusable provider: a Claude role moves.
+        let disabled =
+            |provider: Provider| (provider == Provider::Claude).then_some(SwitchReason::Disabled);
+        let JobRoute::Start(moved) = job_route(&claude, true, false, disabled) else {
+            panic!("moved under --no-claude with the fallback off");
+        };
+        assert_eq!(moved.provider, Provider::Codex);
+        assert_eq!(moved.switch_reason, Some(SwitchReason::Disabled));
     }
 
     #[test]

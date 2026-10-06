@@ -34,7 +34,8 @@ use serde_json::{Value, json};
 
 use crate::{
     application::{
-        AgentProvider, AskQuery, EventReads, Generators, Queue, observer::HeadlessAgent,
+        AgentProvider, AgentSignals, AskQuery, EventReads, Generators, Queue,
+        observer::HeadlessAgent,
     },
     domain::{
         ActorContext, EventFilter, EventId, EventKind, FindingTarget, NewFinding, Provider,
@@ -144,6 +145,12 @@ pub struct ReviewOptions {
     /// that failed) records `provider_unusable` and is started again on the
     /// other provider (ADR-t1063-1 decision 4).
     pub switchable: bool,
+    /// `[provider_fallback] jobs` (ADR-t1857-1): with it off (`false`) a
+    /// Claude job of a role that names its provider that stopped where
+    /// Claude cannot be used (its start, a login, the usage limit) records
+    /// `provider_unusable` too, and the supervisor holds Claude and starts
+    /// the period again on Claude once Claude's hold ends.
+    pub fallback: bool,
     /// Why no provider can run the job (`--no-claude` with Codex not
     /// usable, ADR-t1204-1): a period that needs a review records its
     /// failure with this reason instead of starting the agent.
@@ -216,6 +223,9 @@ pub struct ThroughputReviewEnvironment<'a, Q: ?Sized> {
     pub sources: &'a dyn ThroughputReviewSources<Q>,
     pub host: &'a dyn ThroughputReviewHost,
     pub generators: &'a Generators,
+    /// Claude Code's reading of a job's output, for the walls of a Claude
+    /// job (task 438); `None` reads none.
+    pub signals: Option<&'a dyn AgentSignals>,
 }
 
 /// Run one review: judge the hour (hourly), gather the inputs, start the
@@ -289,6 +299,7 @@ fn review_period<Q: Queue + EventReads>(
         sources,
         host,
         generators,
+        signals,
     } = *environment;
     let landings = landings(queue, period)?;
     let judgment = match options.mode {
@@ -464,11 +475,20 @@ fn review_period<Q: Queue + EventReads>(
     // A Codex job that stopped where Codex cannot be used starts again on
     // the other provider (ADR-t1063-1 decision 4): the supervisor holds
     // Codex and starts the period again. Under `--no-claude` it finds no
-    // provider and records why, so Claude is never started.
-    if outcome != "succeeded" && options.switchable && launch.provider == Provider::Codex {
+    // provider and records why, so Claude is never started. With
+    // `[provider_fallback] jobs` off it starts again on the same provider
+    // once its hold ends, a Claude one too (ADR-t1857-1).
+    if outcome != "succeeded" {
         let stderr = host.read(&dir.join("output.err")).unwrap_or_default();
-        let failure = start_failure.unwrap_or_else(|| provider.job_failure(&stdout, &stderr));
-        if let Some(reason) = failure.switch_reason() {
+        let (_, unusable) = crate::application::observer::read_failure(
+            false,
+            launch.provider,
+            (options.switchable, options.fallback),
+            start_failure,
+            || start_failure.unwrap_or_else(|| provider.job_failure(&stdout, &stderr)),
+            || signals.map(|signals| signals.job_failure(&format!("{stdout}\n{stderr}"))),
+        );
+        if let Some(reason) = unusable {
             payload["provider_unusable"] =
                 json!({"provider": launch.provider.as_str(), "reason": reason.as_str()});
         }

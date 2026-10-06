@@ -17,6 +17,7 @@ pub use input::{
 };
 
 use crate::domain::EventKind;
+use crate::domain::actor_model::records_unusable;
 use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -86,6 +87,11 @@ pub struct ObserveOptions {
     /// `provider_unusable`, and the supervisor holds Codex and starts the
     /// observation again on the other provider (ADR-t1063-1 decision 4).
     pub switchable: bool,
+    /// `[provider_fallback] jobs` (ADR-t1857-1): with it off (`false`) a
+    /// Claude observation of a role that names its provider that stopped
+    /// where Claude cannot be used records `provider_unusable` too, and
+    /// the supervisor starts it again on Claude once Claude's hold ends.
+    pub fallback: bool,
     /// Why no provider can run the observation (`--no-claude` with Codex
     /// not usable, ADR-t1204-1): an observation that is not skipped records
     /// its finish as an `error` with this reason instead of starting the
@@ -327,7 +333,8 @@ pub fn observe<Q: Queue + ObserverLog>(
     let (wall, unusable) = read_failure(
         outcome == "succeeded",
         launch.provider,
-        options.switchable,
+        (options.switchable, options.fallback),
+        start_failure,
         || start_failure.unwrap_or_else(|| provider.job_failure(&stdout, &stderr)),
         // Both streams, with a line boundary so stderr diagnostics cannot
         // be joined onto a partial stdout line.
@@ -411,31 +418,46 @@ pub fn observe<Q: Queue + ObserverLog>(
 /// The observer as the errors of its agent name it.
 const OBSERVER_JOB: &str = "the observer";
 
-/// What the failure of an observation that did not succeed leads to: the
-/// wall of the queue's hold ask it joins, and the reason its provider
-/// cannot be used. A Claude agent stopped at a login that ran out or the
-/// usage limit joins the queue's hold ask (ADR-0047 decision 42, task
-/// 438): no observer starts again until a person answers it; `claude`
-/// reads it with Claude's signals (`None` without them). A Codex one does
-/// not hold Claude: when its role names its provider (`switchable`),
-/// `codex` (its start's error, or its provider's reading of its output)
-/// says whether Codex could not be used, and the supervisor holds Codex
-/// and starts the observation again on the other provider (ADR-t1063-1
-/// decision 4). Neither is read for a success.
-fn read_failure(
+/// What the failure of a headless job on its timer (an observation, a
+/// throughput review) that did not succeed leads to: the wall of the
+/// queue's hold ask it joins, and the reason its provider cannot be used.
+/// A Claude agent stopped at a login that ran out or the usage limit joins
+/// the queue's hold ask (ADR-0047 decision 42, task 438): no observer
+/// starts again until a person answers it; `claude` reads it with Claude's
+/// signals (`None` without them). A Codex one does not hold Claude: when
+/// its role names its provider (`switchable`), `codex` (its start's error,
+/// or its provider's reading of its output) says whether Codex could not
+/// be used, and the supervisor holds Codex and starts the job again on the
+/// other provider (ADR-t1063-1 decision 4), or, with `[provider_fallback]
+/// jobs` off (`fallback` false), on Codex once its hold ends. With the
+/// fallback off a Claude one of a role that names its provider says so
+/// too: its start's error (`start`) or its wall, and the supervisor holds
+/// Claude and starts it again on Claude once Claude's hold ends
+/// (ADR-t1857-1). Neither is read for a success.
+pub(crate) fn read_failure(
     succeeded: bool,
     provider: Provider,
-    switchable: bool,
+    (switchable, fallback): (bool, bool),
+    start: Option<JobFailure>,
     codex: impl FnOnce() -> JobFailure,
     claude: impl FnOnce() -> Option<JobFailure>,
 ) -> (Option<Wall>, Option<SwitchReason>) {
+    let records = records_unusable(provider, switchable, fallback);
     match (succeeded, provider) {
         (true, _) => (None, None),
         (false, Provider::Codex) => (
             None,
-            switchable.then(codex).and_then(JobFailure::switch_reason),
+            records.then(codex).and_then(JobFailure::switch_reason),
         ),
-        (false, Provider::Claude) => (claude().and_then(JobFailure::wall), None),
+        (false, Provider::Claude) => {
+            let failure = start.or_else(claude);
+            (
+                failure.and_then(JobFailure::wall),
+                failure
+                    .filter(|_| records)
+                    .and_then(JobFailure::switch_reason),
+            )
+        }
     }
 }
 
@@ -917,53 +939,159 @@ mod tests {
     /// its provider says why Codex cannot be used and joins no hold; one
     /// whose role names none, or whose failure is no reason, says nothing;
     /// a Claude one joins the hold of its wall; a success reads nothing.
+    /// The fallback on or off makes no difference to Codex (ADR-t1857-1).
     #[test]
     fn a_failure_holds_claude_or_says_codex_cannot_be_used() {
         let unread = || -> JobFailure { panic!("read Codex's failure") };
         let unread_claude = || -> Option<JobFailure> { panic!("read Claude's failure") };
-        for provider in [Provider::Claude, Provider::Codex] {
+        for fallback in [true, false] {
+            for provider in [Provider::Claude, Provider::Codex] {
+                assert_eq!(
+                    read_failure(
+                        true,
+                        provider,
+                        (true, fallback),
+                        None,
+                        unread,
+                        unread_claude
+                    ),
+                    (None, None)
+                );
+            }
+            for (failure, reason) in [
+                (JobFailure::UsageLimit, Some(SwitchReason::UsageLimit)),
+                (
+                    JobFailure::Authentication,
+                    Some(SwitchReason::Authentication),
+                ),
+                (JobFailure::LaunchFailed, Some(SwitchReason::LaunchFailed)),
+                (
+                    JobFailure::ExecutableMissing,
+                    Some(SwitchReason::ExecutableMissing),
+                ),
+                (JobFailure::Other, None),
+            ] {
+                assert_eq!(
+                    read_failure(
+                        false,
+                        Provider::Codex,
+                        (true, fallback),
+                        None,
+                        || failure,
+                        unread_claude
+                    ),
+                    (None, reason),
+                    "{failure:?}"
+                );
+            }
             assert_eq!(
-                read_failure(true, provider, true, unread, unread_claude),
+                read_failure(
+                    false,
+                    Provider::Codex,
+                    (false, fallback),
+                    None,
+                    unread,
+                    unread_claude
+                ),
+                (None, None)
+            );
+            // A role that names no provider: Claude's wall only.
+            assert_eq!(
+                read_failure(
+                    false,
+                    Provider::Claude,
+                    (false, fallback),
+                    None,
+                    unread,
+                    || { Some(JobFailure::UsageLimit) }
+                ),
+                (Some(Wall::UsageLimit), None)
+            );
+            assert_eq!(
+                read_failure(
+                    false,
+                    Provider::Claude,
+                    (false, fallback),
+                    None,
+                    unread,
+                    || { Some(JobFailure::LaunchFailed) }
+                ),
+                (None, None)
+            );
+            assert_eq!(
+                read_failure(
+                    false,
+                    Provider::Claude,
+                    (true, fallback),
+                    None,
+                    unread,
+                    || None
+                ),
                 (None, None)
             );
         }
-        for (failure, reason) in [
-            (JobFailure::UsageLimit, Some(SwitchReason::UsageLimit)),
-            (
-                JobFailure::Authentication,
-                Some(SwitchReason::Authentication),
-            ),
-            (JobFailure::LaunchFailed, Some(SwitchReason::LaunchFailed)),
-            (
-                JobFailure::ExecutableMissing,
-                Some(SwitchReason::ExecutableMissing),
-            ),
-            (JobFailure::Other, None),
-        ] {
-            assert_eq!(
-                read_failure(false, Provider::Codex, true, || failure, unread_claude),
-                (None, reason),
-                "{failure:?}"
-            );
-        }
+        // On, a Claude one of a role that names its provider says nothing
+        // of Claude: it joins the hold of its wall as before.
         assert_eq!(
-            read_failure(false, Provider::Codex, false, unread, unread_claude),
-            (None, None)
-        );
-        assert_eq!(
-            read_failure(false, Provider::Claude, true, unread, || Some(
-                JobFailure::UsageLimit
-            )),
+            read_failure(false, Provider::Claude, (true, true), None, unread, || {
+                Some(JobFailure::UsageLimit)
+            }),
             (Some(Wall::UsageLimit), None)
         );
         assert_eq!(
-            read_failure(false, Provider::Claude, false, unread, || Some(
-                JobFailure::LaunchFailed
-            )),
+            read_failure(
+                false,
+                Provider::Claude,
+                (true, true),
+                Some(JobFailure::LaunchFailed),
+                unread,
+                || None
+            ),
             (None, None)
         );
+    }
+
+    /// With `[provider_fallback] jobs` off a Claude observation of a role
+    /// that names its provider says why Claude could not be used: its wall
+    /// (which also joins the hold ask) or its start's error; Codex is never
+    /// read (ADR-t1857-1).
+    #[test]
+    fn with_the_fallback_off_a_claude_failure_says_claude_cannot_be_used() {
+        let unread = || -> JobFailure { panic!("read Codex's failure") };
+        for (wall, reason) in [
+            (Wall::UsageLimit, SwitchReason::UsageLimit),
+            (Wall::Authentication, SwitchReason::Authentication),
+        ] {
+            assert_eq!(
+                read_failure(false, Provider::Claude, (true, false), None, unread, || {
+                    Some(JobFailure::of_wall(wall))
+                }),
+                (Some(wall), Some(reason))
+            );
+        }
+        for (start, reason) in [
+            (JobFailure::LaunchFailed, SwitchReason::LaunchFailed),
+            (
+                JobFailure::ExecutableMissing,
+                SwitchReason::ExecutableMissing,
+            ),
+        ] {
+            assert_eq!(
+                read_failure(
+                    false,
+                    Provider::Claude,
+                    (true, false),
+                    Some(start),
+                    unread,
+                    || panic!("read Claude's output after a start that failed")
+                ),
+                (None, Some(reason))
+            );
+        }
         assert_eq!(
-            read_failure(false, Provider::Claude, false, unread, || None),
+            read_failure(false, Provider::Claude, (true, false), None, unread, || {
+                Some(JobFailure::Other)
+            }),
             (None, None)
         );
     }

@@ -7,13 +7,17 @@
 //! inbox; its events are the record. A review that failed is not started
 //! again for its period, but for one whose Codex could not be used
 //! (`provider_unusable`, task 1220): Codex is held and the period starts
-//! again on the other provider. Neither a failure nor a review in progress
-//! holds a claim or a landing.
+//! again on the other provider, or, with `[provider_fallback] jobs` off,
+//! on Codex once its hold ends; with the fallback off a Claude one of a
+//! role that names Claude holds Claude and starts again on Claude once
+//! Claude's hold ends (ADR-t1857-1). Neither a failure nor a review in
+//! progress holds a claim or a landing.
 
 use super::*;
-use crate::domain::actor_model::{JobRoute, JobStartRoute, ModelRole, job_route};
+use crate::domain::actor_model::{JobRoute, JobStartRoute, ModelRole, job_route, job_wait_text};
 use crate::domain::event_kind::{THROUGHPUT_REVIEW_FINISHED, THROUGHPUT_REVIEW_STARTED};
 use crate::domain::provider_switch::SwitchReason;
+use crate::domain::queue_hold::HoldJob;
 use crate::domain::throughput_review::{
     HISTORY_EVENTS, RUNNING_MS, ReviewMode, children_finished, reviewed, running, window,
 };
@@ -27,10 +31,12 @@ struct ReviewJob {
     mode: ReviewMode,
     period: String,
     child: Box<dyn Spawned>,
-    /// Whether it runs on Codex for a role that names its provider: a
-    /// finish that says Codex could not be used holds Codex and starts the
-    /// period again (ADR-t1063-1 decision 4).
-    switchable_codex: bool,
+    /// Whether a finish that says its provider could not be used holds that
+    /// provider and starts the period again ([`observer::retries_unusable`]:
+    /// a Codex one of a role that names its provider, ADR-t1063-1 decision
+    /// 4, and a Claude one too with `[provider_fallback] jobs` off,
+    /// ADR-t1857-1).
+    retries_unusable: bool,
 }
 
 /// The review running now and the periods this process started.
@@ -92,7 +98,9 @@ impl Supervisor<'_> {
     /// decision 2). One that names its provider starts there when it can
     /// be used, else on the other provider when that one can be, else
     /// waits, or, under `--no-claude`, records why (a Codex job never
-    /// moves to Claude then).
+    /// moves to Claude then). With `[provider_fallback] jobs` off it waits
+    /// for its own provider instead of moving off one it cannot use
+    /// (ADR-t1857-1); `--no-claude` still moves a Claude one to Codex.
     pub(super) fn job_start_route(&self, role: ModelRole) -> Option<JobStartRoute> {
         let models = self.role_models(role);
         let launch = models.launch(role);
@@ -100,7 +108,9 @@ impl Supervisor<'_> {
             return (!self.no_claude && self.queue_hold.is_none())
                 .then_some(JobStartRoute::Start(launch, false));
         }
-        match job_route(&launch, true, |provider| self.job_unusable(provider)) {
+        match job_route(&launch, true, self.fallback.jobs, |provider| {
+            self.job_unusable(provider)
+        }) {
             JobRoute::Start(launch) => Some(JobStartRoute::Start(launch, true)),
             JobRoute::Wait { .. } if self.no_claude => {
                 let codex = self
@@ -115,10 +125,9 @@ impl Supervisor<'_> {
             }
             JobRoute::Wait { provider, reason } => {
                 tracing::debug!(
-                    "the {} job waits: {} cannot be used ({}), nor can the other provider",
+                    "the {} job waits: {}",
                     role.as_str(),
-                    provider.as_str(),
-                    reason.as_str()
+                    job_wait_text(provider, reason, self.fallback.jobs)
                 );
                 None
             }
@@ -145,9 +154,9 @@ impl Supervisor<'_> {
                 }
             }
             if let Some(job) = self.throughput_review.job.take()
-                && job.switchable_codex
+                && job.retries_unusable
             {
-                self.codex_review_unusable(&job);
+                self.review_unusable(&job);
             }
         }
         if !start || !options.throughput_review {
@@ -197,6 +206,9 @@ impl Supervisor<'_> {
         }
         if switchable {
             command.arg("--switchable");
+            if !self.fallback.jobs {
+                command.arg("--no-provider-fallback");
+            }
         }
         if let Some(why) = &unavailable {
             command.arg("--unavailable").arg(why);
@@ -222,9 +234,12 @@ impl Supervisor<'_> {
                     mode,
                     period,
                     child,
-                    switchable_codex: switchable
-                        && unavailable.is_none()
-                        && launch.provider == Provider::Codex,
+                    retries_unusable: observer::retries_unusable(
+                        launch.provider,
+                        switchable,
+                        self.fallback.jobs,
+                        unavailable.is_some(),
+                    ),
                 });
             }
             Err(error) => {
@@ -266,14 +281,19 @@ impl Supervisor<'_> {
                 self.processes.reap(pid);
                 self.throughput_review.reaped.push(pid);
                 info!("throughput review handed over by the exec reaped: pid {pid}");
-                // One that found Codex unusable holds it here, as for a
-                // review this process started, so its period, due again,
-                // goes to the other provider rather than to Codex once more.
+                // One that found its provider unusable holds it here, as for
+                // a review this process started, so its period, due again,
+                // goes to the other provider (or waits for this one) rather
+                // than to it once more.
                 if let Some(finish) = finished
                     .iter()
                     .find(|event| event.payload["pid"].as_u64() == Some(u64::from(pid)))
                 {
-                    self.hold_codex_for(finish);
+                    self.hold_finish_unusable(
+                        finish,
+                        &HoldJob::ThroughputReview,
+                        &review_entry(finish),
+                    );
                 }
             }
         }
@@ -309,14 +329,16 @@ impl Supervisor<'_> {
         );
     }
 
-    /// After a Codex review of a role that names its provider exited: when
-    /// its finish says Codex could not be used (`provider_unusable`), hold
-    /// Codex as a worker's or another job's failure does, and let the
+    /// After a review whose finish is read for `provider_unusable`
+    /// ([`ReviewJob::retries_unusable`]) exited: when its finish says its
+    /// provider could not be used, hold that provider as a worker's or
+    /// another job's failure does ([`Self::hold_unusable`]), and let the
     /// period be due again, so that it starts on the other provider (or,
-    /// under `--no-claude`, records why) (ADR-t1063-1 decisions 4 and 5).
-    /// A hold that cannot be written keeps the period as started, so it
-    /// is not started again on Codex at once.
-    fn codex_review_unusable(&mut self, job: &ReviewJob) {
+    /// under `--no-claude`, records why), or, with `[provider_fallback]
+    /// jobs` off, on the same provider once its hold ends (ADR-t1063-1
+    /// decisions 4 and 5, ADR-t1857-1). A hold that cannot be written keeps
+    /// the period as started, so it is not started again at once.
+    fn review_unusable(&mut self, job: &ReviewJob) {
         let finished = match self
             .queue
             .latest_events_of(THROUGHPUT_REVIEW_FINISHED, HANDED_OVER_EVENTS)
@@ -335,56 +357,22 @@ impl Supervisor<'_> {
         }) else {
             return;
         };
-        if self.hold_codex_for(finish) {
+        if self
+            .hold_finish_unusable(finish, &HoldJob::ThroughputReview, &review_entry(finish))
+            .is_some()
+        {
             self.throughput_review
                 .launched
                 .retain(|(mode, period)| !(*mode == job.mode && *period == job.period));
         }
     }
+}
 
-    /// Hold Codex when the review `finish` ended says Codex could not be
-    /// used (`provider_unusable`), as a worker's or another job's failure
-    /// does; whether it is held now. Its period is due again then, and
-    /// starts on the other provider (or, under `--no-claude`, records
-    /// why).
-    fn hold_codex_for(&mut self, finish: &crate::domain::RunEvent) -> bool {
-        let unusable = &finish.payload["provider_unusable"];
-        let Some(reason) = unusable["reason"]
-            .as_str()
-            .filter(|_| unusable["provider"] == Provider::Codex.as_str())
-            .and_then(|reason| reason.parse::<SwitchReason>().ok())
-        else {
-            return false;
-        };
-        let (mode, period) = (
-            finish.payload["mode"].as_str().unwrap_or_default(),
-            finish.payload["period"].as_str().unwrap_or_default(),
-        );
-        // Codex's own words may say when a usage limit resets.
-        let output = finish.payload["dir"]
-            .as_str()
-            .and_then(|dir| {
-                self.files
-                    .read_to_string(&Path::new(dir).join("output.out"))
-                    .ok()
-            })
-            .unwrap_or_default();
-        let said = format!(
-            "{}\n{output}",
-            finish.payload["error"].as_str().unwrap_or_default()
-        );
-        match self.hold_provider(Provider::Codex, reason, None, &said) {
-            Ok(()) => {
-                info!(
-                    "throughput review ({mode} {period}): codex cannot be used ({}); the period starts again on the other provider",
-                    reason.as_str()
-                );
-                true
-            }
-            Err(error) => {
-                warn!(error = %format_args!("{error:#}"), "codex could not be held after the throughput review failed: {error:#}");
-                false
-            }
-        }
-    }
+/// The review `finish` ended, as the log names it.
+fn review_entry(finish: &crate::domain::RunEvent) -> String {
+    format!(
+        "throughput review ({} {})",
+        finish.payload["mode"].as_str().unwrap_or_default(),
+        finish.payload["period"].as_str().unwrap_or_default()
+    )
 }

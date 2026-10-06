@@ -904,6 +904,11 @@ enum Command {
         /// provider_unusable for the supervisor to start it again on the other provider.
         #[arg(long, hide = true)]
         switchable: bool,
+        /// [provider_fallback] jobs is false: a Claude observation of a role that names its
+        /// provider that cannot use Claude records provider_unusable too, for the supervisor to
+        /// start it again on Claude once Claude's hold ends.
+        #[arg(long, hide = true)]
+        no_provider_fallback: bool,
         /// No provider can run the observation (--no-claude, Codex not usable): one that is not
         /// skipped records its finish as an error with this reason.
         #[arg(long, hide = true)]
@@ -956,6 +961,11 @@ enum Command {
         /// provider_unusable for the supervisor to start it again on the other provider.
         #[arg(long, hide = true)]
         switchable: bool,
+        /// [provider_fallback] jobs is false: a Claude job of a role that names its provider
+        /// that cannot use Claude records provider_unusable too, for the supervisor to start the
+        /// period again on Claude once Claude's hold ends.
+        #[arg(long, hide = true)]
+        no_provider_fallback: bool,
         /// No provider can run the job (--no-claude, Codex not usable): a period that needs a
         /// review records its failure with this reason.
         #[arg(long, hide = true)]
@@ -4187,6 +4197,7 @@ fn execute(cli: Cli) -> Result<Value> {
             launch,
             codex_home,
             switchable,
+            no_provider_fallback,
             unavailable,
             ..
         } => {
@@ -4207,8 +4218,19 @@ fn execute(cli: Cli) -> Result<Value> {
             // kept as given, so the observation records its finish, whose
             // start error says Codex cannot be used (task 1223).
             let resolve = !dry_run && unavailable.is_none();
+            // With `[provider_fallback] jobs` off, a Claude that cannot be
+            // resolved is kept as given too, so that the observation
+            // records Claude's start error and waits for Claude
+            // (ADR-t1857-1).
             let claude = if resolve && launch.provider == Provider::Claude {
-                executable(&claude)?
+                if switchable && no_provider_fallback {
+                    executable(&claude).unwrap_or_else(|error| {
+                        tracing::warn!(error = %format_args!("{error:#}"), "{} could not be resolved: {error:#}", claude.display());
+                        claude
+                    })
+                } else {
+                    executable(&claude)?
+                }
             } else {
                 claude
             };
@@ -4250,6 +4272,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     prompt_limit: dagq::application::observer::PROMPT_LIMIT,
                     launch: Some(launch),
                     switchable,
+                    fallback: !no_provider_fallback,
                     unavailable,
                 },
             )?
@@ -4265,6 +4288,7 @@ fn execute(cli: Cli) -> Result<Value> {
             launch,
             codex_home,
             switchable,
+            no_provider_fallback,
             unavailable,
         } => {
             use dagq::domain::{Provider, actor_model::ActorLaunch};
@@ -4314,6 +4338,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     utc_offset,
                     launch: Some(launch),
                     switchable,
+                    fallback: !no_provider_fallback,
                     unavailable,
                 },
             )?

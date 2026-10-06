@@ -76,6 +76,7 @@ pub(crate) fn observe_options(
         prompt_limit: dagq::application::observer::PROMPT_LIMIT,
         launch: None,
         switchable: false,
+        fallback: true,
         unavailable: None,
     }
 }

@@ -32,7 +32,7 @@ use crate::{
     domain::{
         MAX_PLAN_REVISES, PLAN_OPTIONS, PLAN_REVIEW_ASKER, PlanReviewDecision, PlanReviewVerdict,
         PlannerCloseCode, PlannerOrigin, PlannerState, Proposal, ProposalId, Task, TaskDetail,
-        actor_model::{ActorLaunch, JobRoute, ModelRole, job_route},
+        actor_model::{ActorLaunch, JobRoute, ModelRole, job_route, job_wait_text},
         claim_defer::expected_files,
         next_to_review,
         plan_review::{PlanConcernDecision, PlanConcernEscalation, PlanRecommendation},
@@ -135,7 +135,8 @@ impl Supervisor<'_> {
     /// on Claude as before: it waits while the queue's hold ask holds
     /// Claude, and under `--no-claude` a person reviews it. One that names
     /// its provider starts there when it can be used, else on the other
-    /// provider when that one runs the role and can be used, else waits,
+    /// provider when that one runs the role and can be used (unless
+    /// `[provider_fallback] jobs` is off, ADR-t1857-1), else waits,
     /// or, under `--no-claude`, goes to a person told why; a Codex plan
     /// review that fails under `--no-claude` never moves to Claude.
     fn plan_review_route(&self) -> PlanReviewRoute {
@@ -153,7 +154,9 @@ impl Supervisor<'_> {
                 None => PlanReviewRoute::Start(launch, false),
             };
         }
-        match job_route(&launch, true, |provider| self.job_unusable(provider)) {
+        match job_route(&launch, true, self.fallback.jobs, |provider| {
+            self.job_unusable(provider)
+        }) {
             JobRoute::Start(launch) => PlanReviewRoute::Start(launch, true),
             JobRoute::Wait { .. } if self.no_claude => {
                 let codex = self
@@ -165,9 +168,8 @@ impl Supervisor<'_> {
             }
             JobRoute::Wait { provider, reason } => {
                 tracing::debug!(
-                    "the plan review waits: {} cannot be used ({}), nor can the other provider",
-                    provider.as_str(),
-                    reason.as_str()
+                    "the plan review waits: {}",
+                    job_wait_text(provider, reason, self.fallback.jobs)
                 );
                 PlanReviewRoute::Wait
             }
@@ -716,7 +718,8 @@ impl Supervisor<'_> {
         let error = &failure.error;
         match failure.unusable {
             Some((provider, reason)) => {
-                warn!(task_id = %job.anchor, error = %error, "proposal {} plan review {} failed: {error}; {} cannot be used ({}), and the proposal is reviewed again on the other provider", job.proposal_id, job.attempt, provider.as_str(), reason.as_str());
+                let next = super::goal_review::again_on(self.fallback.jobs, provider);
+                warn!(task_id = %job.anchor, error = %error, "proposal {} plan review {} failed: {error}; {} cannot be used ({}), and the proposal is reviewed again {next}", job.proposal_id, job.attempt, provider.as_str(), reason.as_str());
             }
             None => {
                 warn!(task_id = %job.anchor, error = %error, "proposal {} plan review {} failed: {error}; it waits for a person", job.proposal_id, job.attempt);

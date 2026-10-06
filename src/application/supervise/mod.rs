@@ -1061,9 +1061,11 @@ struct Supervisor<'a> {
     /// When this process last launched each observation, so one that dies
     /// before it records anything is not relaunched on every pass.
     observers_launched: Vec<(ObserveMode, Instant)>,
-    /// The observation due again now whatever the queue says: a Codex one
-    /// that found Codex unusable, which starts again on the other provider
-    /// (ADR-t1063-1 decision 4, task 1223).
+    /// The observation due again now whatever the queue says: one that
+    /// found its provider unusable, which starts again on the other
+    /// provider (ADR-t1063-1 decision 4, task 1223) or, with
+    /// `[provider_fallback] jobs` off, on the same one once its hold ends
+    /// (ADR-t1857-1).
     observer_again: Option<ObserveMode>,
     /// The throughput review running now (ADR-t996-1), and the periods this
     /// process started.
@@ -2568,6 +2570,9 @@ impl Supervisor<'_> {
         }
         if switchable {
             command.arg("--switchable");
+            if !self.fallback.jobs {
+                command.arg("--no-provider-fallback");
+            }
         }
         if let Some(why) = &unavailable {
             command.arg("--unavailable").arg(why);
@@ -2592,9 +2597,12 @@ impl Supervisor<'_> {
                 self.observer = Some(observer::ObserverJob {
                     mode,
                     child,
-                    switchable_codex: switchable
-                        && unavailable.is_none()
-                        && launch.provider == Provider::Codex,
+                    retries_unusable: observer::retries_unusable(
+                        launch.provider,
+                        switchable,
+                        self.fallback.jobs,
+                        unavailable.is_some(),
+                    ),
                     mark,
                 });
             }
@@ -2715,8 +2723,8 @@ impl Supervisor<'_> {
         );
     }
     /// Reap the observer once it exited; its own `observe_finished` is the
-    /// record. A Codex one that found Codex unusable holds Codex and is
-    /// due again ([`Self::codex_observer_unusable`]).
+    /// record. One that found its provider unusable holds that provider
+    /// and is due again ([`Self::observer_unusable`]).
     fn poll_observer(&mut self) {
         let Some(job) = self.observer.as_mut() else {
             return;
@@ -2732,9 +2740,9 @@ impl Supervisor<'_> {
             }
         }
         if let Some(job) = self.observer.take()
-            && job.switchable_codex
+            && job.retries_unusable
         {
-            self.codex_observer_unusable(&job);
+            self.observer_unusable(&job);
         }
     }
     /// Whether this process still drives `id` in a slot. Such a run whose

@@ -16,7 +16,7 @@ use super::file_time::recorded_at;
 use super::landing::{REVIEW_PROVIDER_DISABLED, ReviewRoute};
 use super::*;
 use crate::domain::{
-    actor_model::{ActorLaunch, JobRoute, job_route},
+    actor_model::{ActorLaunch, JobRoute, job_route, job_wait_text},
     claim_hold::QueueHold,
     provider_switch::{
         self, MAX_PROVIDER_SWITCHES, ProviderHold, SwitchPhase, SwitchReason, WallMove,
@@ -81,7 +81,7 @@ impl Supervisor<'_> {
             Err(error) => {
                 let message = format!("{error:#}");
                 if self.fallback_error.as_ref() != Some(&message) {
-                    warn!(error = %message, "[provider_fallback] of dagq.toml not read: {message}; keeping workers = {}", self.fallback.workers);
+                    warn!(error = %message, "[provider_fallback] of dagq.toml not read: {message}; keeping workers = {}, jobs = {}", self.fallback.workers, self.fallback.jobs);
                     self.fallback_error = Some(message);
                 }
                 return;
@@ -90,8 +90,8 @@ impl Supervisor<'_> {
         self.fallback_error = None;
         if to != self.fallback {
             info!(
-                "[provider_fallback] of dagq.toml changed: workers {} -> {}",
-                self.fallback.workers, to.workers
+                "[provider_fallback] of dagq.toml changed: workers {} -> {}, jobs {} -> {}",
+                self.fallback.workers, to.workers, self.fallback.jobs, to.jobs
             );
             self.fallback = to;
         }
@@ -474,11 +474,12 @@ pub(super) enum WallStep {
 /// before: under `--no-claude` the person reviews it, and it waits while
 /// the hold ask holds Claude (task 437). One that names its provider goes
 /// like the goal review (ADR-t1063-1 decisions 4 and 5): to its provider
-/// when it can be used, else to the other provider when that one can,
-/// else it waits, or, under `--no-claude`, goes to the person.
+/// when it can be used, else to the other provider when that one can and
+/// `[provider_fallback] jobs` is on (`fallback`, ADR-t1857-1), else it
+/// waits, or, under `--no-claude`, goes to the person.
 pub(super) fn review_route(
     no_claude: bool,
-    switchable: bool,
+    (switchable, fallback): (bool, bool),
     launch: ActorLaunch,
     queue_hold: Option<QueueHold>,
     unusable: impl Fn(Provider) -> Option<SwitchReason>,
@@ -496,7 +497,7 @@ pub(super) fn review_route(
             None => ReviewRoute::Start(launch, false),
         };
     }
-    match job_route(&launch, true, &unusable) {
+    match job_route(&launch, true, fallback, &unusable) {
         JobRoute::Start(launch) => ReviewRoute::Start(launch, true),
         JobRoute::Wait { .. } if no_claude => {
             let codex = unusable(Provider::Codex).map_or("unknown", |reason| reason.as_str());
@@ -504,23 +505,112 @@ pub(super) fn review_route(
                 "{REVIEW_PROVIDER_DISABLED} and codex cannot be used ({codex})"
             ))
         }
-        JobRoute::Wait { provider, reason } => ReviewRoute::Wait(format!(
-            "{} cannot be used ({}), nor can the other provider",
-            provider.as_str(),
-            reason.as_str()
-        )),
+        JobRoute::Wait { provider, reason } => {
+            ReviewRoute::Wait(job_wait_text(provider, reason, fallback))
+        }
     }
 }
 
 /// Whether a review whose attempt on `provider` could not run moves on
-/// `route`: to the other provider, or to wait for one; not when the route
-/// still sends it to `provider` (its hold was not written) or to the
-/// person, so that it fails to the person instead.
+/// `route`: to the other provider, or to wait for one (with
+/// `[provider_fallback] jobs` off the route waits for `provider` instead of
+/// choosing the other, ADR-t1857-1); not when the route still sends it to
+/// `provider` (its hold was not written) or to the person, so that it
+/// fails to the person instead.
 pub(super) fn review_moves(route: &ReviewRoute, provider: Provider) -> bool {
     match route {
         ReviewRoute::Start(next, _) => next.provider != provider,
         ReviewRoute::Wait(_) => true,
         ReviewRoute::Manual(_) => false,
+    }
+}
+
+/// How the supervisor holds the provider the finish of a job on its timer
+/// (a throughput review, an observation) says could not be used
+/// (`provider_unusable`), so that the job waits for that provider and
+/// starts again: never the other provider (ADR-t1063-1 decision 5,
+/// ADR-t1857-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum UnusableHold {
+    /// Record the provider's [`ProviderHold`] for the reason: Codex's, and
+    /// Claude's for an agent that did not start.
+    Provider(Provider, SwitchReason),
+    /// Claude's login or usage limit: the queue's hold ask, as for any
+    /// other Claude job (task 438).
+    Ask(Wall),
+    /// Claude's agent did not start while the hold ask already holds
+    /// Claude: nothing more is written.
+    Held,
+}
+
+/// How `provider`, which a job on its timer could not use for `reason`, is
+/// held, given whether the queue's hold ask holds Claude now
+/// (`claude_asked`); `None` for a reason that holds no provider.
+pub(super) fn unusable_hold(
+    provider: Provider,
+    reason: SwitchReason,
+    claude_asked: bool,
+) -> Option<UnusableHold> {
+    if !reason.unusable() {
+        return None;
+    }
+    Some(match (provider, reason) {
+        (Provider::Codex, _) => UnusableHold::Provider(provider, reason),
+        (Provider::Claude, SwitchReason::Authentication) => UnusableHold::Ask(Wall::Authentication),
+        (Provider::Claude, SwitchReason::UsageLimit) => UnusableHold::Ask(Wall::UsageLimit),
+        (Provider::Claude, _) if claude_asked => UnusableHold::Held,
+        (Provider::Claude, _) => UnusableHold::Provider(provider, reason),
+    })
+}
+
+impl Supervisor<'_> {
+    /// Hold `provider`, which a job on its timer (`job`, `what` in the
+    /// log) could not use for `reason`, as [`unusable_hold`] says: `error`
+    /// is the job's error and `output` its provider's words, which may say
+    /// when a usage limit resets. The provider held, when it is held now (a
+    /// hold that cannot be written is logged, and the job is not started
+    /// again at once). The job's own context reads its finish into these
+    /// values (`supervise::observer::UnusableFinish`).
+    pub(super) fn hold_unusable(
+        &mut self,
+        (provider, reason): (Provider, SwitchReason),
+        (error, output): (&str, &str),
+        job: &HoldJob,
+        what: &str,
+    ) -> Option<Provider> {
+        let hold = unusable_hold(provider, reason, self.queue_hold.is_some())?;
+        let held = match hold {
+            UnusableHold::Provider(provider, reason) => {
+                let said = format!("{error}\n{output}");
+                match self.hold_provider(provider, reason, None, &said) {
+                    Ok(()) => true,
+                    Err(held) => {
+                        warn!(error = %format_args!("{held:#}"), "{} could not be held after the {what} failed: {held:#}", provider.as_str());
+                        false
+                    }
+                }
+            }
+            UnusableHold::Ask(wall) => self.raise_job_wall(wall, job, error),
+            UnusableHold::Held => true,
+        };
+        if !held {
+            return None;
+        }
+        if self.fallback.jobs {
+            info!(
+                "{what}: {} cannot be used ({}); it starts again on the other provider",
+                provider.as_str(),
+                reason.as_str()
+            );
+        } else {
+            info!(
+                "{what}: {} cannot be used ({}); [provider_fallback] jobs is false, so it starts again on {} once its hold ends",
+                provider.as_str(),
+                reason.as_str(),
+                provider.as_str()
+            );
+        }
+        Some(provider)
     }
 }
 
@@ -730,7 +820,7 @@ mod tests {
     fn a_review_whose_role_names_no_provider_goes_to_claude_a_person_or_waits() {
         let route = review_route(
             false,
-            false,
+            (false, true),
             launch(Provider::Claude),
             None,
             unusable(None, None),
@@ -743,7 +833,7 @@ mod tests {
         // Under `--no-claude` the person reviews it: no review agent ran.
         let route = review_route(
             true,
-            false,
+            (false, true),
             launch(Provider::Claude),
             None,
             unusable(None, None),
@@ -756,7 +846,7 @@ mod tests {
         // Claude's hold ask holds it (task 437).
         let route = review_route(
             false,
-            false,
+            (false, true),
             launch(Provider::Claude),
             Some(HOLD),
             unusable(Some(SwitchReason::Authentication), None),
@@ -781,7 +871,7 @@ mod tests {
         let claude_held = Some(SwitchReason::Authentication);
         let route = review_route(
             false,
-            true,
+            (true, true),
             launch(Provider::Codex),
             Some(HOLD),
             unusable(claude_held, None),
@@ -795,7 +885,7 @@ mod tests {
         for reason in [SwitchReason::ExecutableMissing, SwitchReason::UsageLimit] {
             let route = review_route(
                 false,
-                true,
+                (true, true),
                 launch(Provider::Codex),
                 None,
                 unusable(None, Some(reason)),
@@ -811,7 +901,7 @@ mod tests {
         // Neither provider: it waits with the session open.
         let route = review_route(
             false,
-            true,
+            (true, true),
             launch(Provider::Codex),
             Some(HOLD),
             unusable(claude_held, Some(SwitchReason::UsageLimit)),
@@ -826,7 +916,7 @@ mod tests {
         // the review that could not run does not move.
         let route = review_route(
             true,
-            true,
+            (true, true),
             launch(Provider::Codex),
             None,
             unusable(Some(SwitchReason::Disabled), Some(SwitchReason::UsageLimit)),
@@ -841,13 +931,134 @@ mod tests {
         // was not written) does not move it either.
         let same = review_route(
             false,
-            true,
+            (true, true),
             launch(Provider::Codex),
             None,
             unusable(None, None),
         );
         assert!(!review_moves(&same, Provider::Codex));
         assert!(review_moves(&same, Provider::Claude));
+    }
+
+    /// With `[provider_fallback] jobs` off a review whose role names its
+    /// provider waits for that provider when it cannot be used: the review
+    /// that could not run moves to the wait, not to the other provider, and
+    /// starts on its own provider once it can be used. `--no-claude` still
+    /// sends a Claude one to Codex, and with no provider left goes to the
+    /// person as before (ADR-t1857-1).
+    #[test]
+    fn with_the_fallback_off_a_review_waits_for_its_own_provider() {
+        for provider in [Provider::Claude, Provider::Codex] {
+            for reason in [
+                SwitchReason::ExecutableMissing,
+                SwitchReason::LaunchFailed,
+                SwitchReason::Authentication,
+                SwitchReason::UsageLimit,
+            ] {
+                let own = |p: Provider| (p == provider).then_some(reason);
+                let route = review_route(false, (true, false), launch(provider), None, own);
+                assert!(
+                    matches!(&route, ReviewRoute::Wait(why) if why == &format!("{p} cannot be used ({r}); [provider_fallback] jobs is false, so it waits for {p}", p = provider.as_str(), r = reason.as_str())),
+                    "{}",
+                    describe(&route)
+                );
+                // The review moves to the wait (no `review_failed`)...
+                assert!(review_moves(&route, provider));
+                // ...where on it would have moved to the other provider.
+                let on = review_route(false, (true, true), launch(provider), None, own);
+                assert!(
+                    matches!(&on, ReviewRoute::Start(l, true) if l.provider == provider.other()),
+                    "{}",
+                    describe(&on)
+                );
+            }
+            // Its hold ended: on its own provider.
+            let route = review_route(
+                false,
+                (true, false),
+                launch(provider),
+                None,
+                unusable(None, None),
+            );
+            assert!(
+                matches!(&route, ReviewRoute::Start(l, true) if l.provider == provider && l.switched_from.is_none()),
+                "{}",
+                describe(&route)
+            );
+        }
+        // `--no-claude`: a Claude role still goes to Codex...
+        let route = review_route(
+            true,
+            (true, false),
+            launch(Provider::Claude),
+            None,
+            unusable(Some(SwitchReason::Disabled), None),
+        );
+        assert!(
+            matches!(&route, ReviewRoute::Start(l, true) if l.provider == Provider::Codex && l.switch_reason == Some(SwitchReason::Disabled)),
+            "{}",
+            describe(&route)
+        );
+        // ...and, Codex held, to the person as before.
+        let route = review_route(
+            true,
+            (true, false),
+            launch(Provider::Codex),
+            None,
+            unusable(Some(SwitchReason::Disabled), Some(SwitchReason::UsageLimit)),
+        );
+        assert!(
+            matches!(&route, ReviewRoute::Manual(why) if why == "provider_disabled: Claude is disabled by --no-claude and codex cannot be used (usage_limit)"),
+            "{}",
+            describe(&route)
+        );
+        assert!(!review_moves(&route, Provider::Codex));
+    }
+
+    /// The provider a timer job's finish says could not be used is held
+    /// the way any other job's is: Codex by its `ProviderHold`, Claude's
+    /// login or usage limit by the hold ask, and Claude's agent that did
+    /// not start by its `ProviderHold` unless the hold ask holds Claude;
+    /// the other provider is never held (ADR-t1857-1).
+    #[test]
+    fn a_timer_job_that_could_not_use_its_provider_holds_that_provider() {
+        use crate::domain::queue_hold::Wall;
+        for reason in [
+            SwitchReason::ExecutableMissing,
+            SwitchReason::LaunchFailed,
+            SwitchReason::Authentication,
+            SwitchReason::UsageLimit,
+        ] {
+            for asked in [false, true] {
+                assert_eq!(
+                    unusable_hold(Provider::Codex, reason, asked),
+                    Some(UnusableHold::Provider(Provider::Codex, reason))
+                );
+            }
+        }
+        for asked in [false, true] {
+            assert_eq!(
+                unusable_hold(Provider::Claude, SwitchReason::UsageLimit, asked),
+                Some(UnusableHold::Ask(Wall::UsageLimit))
+            );
+            assert_eq!(
+                unusable_hold(Provider::Claude, SwitchReason::Authentication, asked),
+                Some(UnusableHold::Ask(Wall::Authentication))
+            );
+        }
+        for reason in [SwitchReason::LaunchFailed, SwitchReason::ExecutableMissing] {
+            assert_eq!(
+                unusable_hold(Provider::Claude, reason, false),
+                Some(UnusableHold::Provider(Provider::Claude, reason))
+            );
+            assert_eq!(
+                unusable_hold(Provider::Claude, reason, true),
+                Some(UnusableHold::Held)
+            );
+        }
+        for reason in [SwitchReason::Disabled, SwitchReason::SubagentsUnsupported] {
+            assert_eq!(unusable_hold(Provider::Claude, reason, false), None);
+        }
     }
 
     fn describe(route: &ReviewRoute) -> String {

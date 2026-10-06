@@ -4030,6 +4030,11 @@ pub fn throughput_review(
             sources: &sources,
             host: &crate::infrastructure::throughput_review::LocalThroughputReview,
             generators: &generators,
+            // Claude Code's reading of the walls in a job's output, which
+            // starts nothing (task 438, ADR-t1857-1).
+            signals: Some(&crate::infrastructure::adapters::ClaudeCode {
+                executable: PathBuf::from("claude"),
+            }),
         },
     )
 }

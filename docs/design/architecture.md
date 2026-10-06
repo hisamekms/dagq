@@ -4,8 +4,8 @@ type: design
 title: レイヤーとコンテキストの境界（contextごとの所有・判断・操作・公開するport・依存の向き・境界をまたぐtransaction・検査できる規則・今の違反）
 status: current
 created: 2026-10-04
-updated: 2026-10-06
-last_verified: 2026-10-06
+updated: 2026-10-07
+last_verified: 2026-10-07
 scope: system
 related:
   - adr-t1545-1
@@ -110,6 +110,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 - `RunLog`の読み取り（`runs_with_status`・`run`・`run_events`・`all_runs`・`all_events`・`latest_*`・`events_of_between`）を全てのcontextに公開する。
 - `RunId`・`TaskRun`のview・型付きのeventを値として公開する。
 - 着地先のbranchの解決（`Repository::landing_branch`、`domain::landing_branch`）を読み取りとして観測と分析のCIの見張りに公開する（`supervise::ci_watch::ci_watch_pass`が`[ci_watch] branch`の無いときの見るbranchに使う。解決できなければ確かめを始めず、着地先の保留に任せる。task 1921）。
+- timerのjob（observer・スループットの見直し）が使えなかったproviderを控える操作`Supervisor::hold_unusable`（`supervise::provider`）を観測と分析に公開する。終わりのeventは観測と分析の側（`supervise::observer::UnusableFinish`）が読み、ここは値（providerと理由・errorと出力）だけを受けて、Codexと起動しなかったClaudeは`ProviderHold`（`provider_held`）で、`[provider_fallback] jobs = false`のClaudeの認証・利用上限はqueueのhold askに入れて（`jobs::raise_job_wall`、`HoldJob::Observer`・`HoldJob::ThroughputReview`）控える（task 1223、task 1858、ADR-t1857-1）。
 - `RunTransitions`・`RunRecovery`・`SessionRegistry`のworkerの部分・`RunCoordination`のleaseとprocessの部分は内部のport。
 
 **許す依存の向き**
@@ -130,7 +131,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 
 - table: `findings`。ファイルはqueueのdirの日次のKPIのreport（`report_written`が指す）とKPIのpushの待ち。
 - eventの種類: `observation`・`observe_*`、`finding_recorded`・`finding_updated`・`finding_status_changed`、`mark_recorded`・`mark_retracted`、`forecast_recorded`、`kpi_breach_*`・`kpi_push_*`、`report_written`、`throughput_review_*`、`candidates_sampled`、CIの見張りの`ci_checked`・`ci_turned_red`・`ci_turned_green`・`ci_watch_unavailable`・`ci_watch_available`・`ci_check_failed`（[CI watch](supervisor-lifecycle/ci-watch.md)、ADR-t1920-1）。
-- `Supervisor`の欄: `observer`・`observers_launched`・`observer_again`（Codexを使えなかったobservationを起動し直すmode。task 1223）・`throughput_review`・`report`・`reports`・`forecasts`・`forecast`・`push`（KPIのpush）・`candidates`・`ci_watch_port`・`ci`（CIの見張り。`ci`は`supervise::ci_watch`だけが変え、実行と着地のclaim・resume・着地は`ci_watch_held`・`ci_watch_unreadable`で読むだけ）。
+- `Supervisor`の欄: `observer`・`observers_launched`・`observer_again`（Codexを使えなかったobservationを起動し直すmode。`[provider_fallback] jobs = false`ではClaudeを使えなかったものも。task 1223、task 1858）・`throughput_review`・`report`・`reports`・`forecasts`・`forecast`・`push`（KPIのpush）・`candidates`・`ci_watch_port`・`ci`（CIの見張り。`ci`は`supervise::ci_watch`だけが変え、実行と着地のclaim・resume・着地は`ci_watch_held`・`ci_watch_unreadable`で読むだけ）。
 
 **判断**（domain）
 
@@ -138,7 +139,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 
 **操作**
 
-- application: `application::stats`・`application::areas`・`application::marks`（`mark`・`mark --retract`。`MarkLog`と注入した`Clock`越し。task 1548が`compose`から移した）・`application::kpi`・`application::forecast`・`application::report`・`application::push`、`application::supervise`の`forecast`・`report`・`push`・`throughput_review`（行き先の`job_start_route`はobserverと共有する。その結果の値`JobStartRoute`は共有の部品の`domain::actor_model`にあり、実行と着地の復旧jobも読む。task 1225）・`observer`（observerのjobの終わりの`provider_unusable`を読んでCodexを控える。task 1223）・`ci_watch`（CIの見張りのpassとjob。時刻は注入した`Clock`）。`application::ci_watch`（1回の確かめ`check`と、一覧の読み手`known_failures`・`status`・`doctor`。portは`RunLog`と`QueueRecords`だけを取る。task 1921）。`application::observer`（observerのjob）・`application::watch`（`events`・`timeline`・`watch`。task 251がレイヤーの外から移した）・`application::throughput_review`（スループットの見直しのjob。promptの組み立てと`ACCESS`。portは`ThroughputReviewSources`と`ThroughputReviewHost`。task 1615がレイヤーの外から移した）。組み立ては`compose::throughput_review`・`compose::throughput_review_launch`・`compose::observe`・`compose::observer_launch`（手で打つ`observe`の`[roles.observer]`。task 1223）。レイヤーの外の`src/view.rs`。
+- application: `application::stats`・`application::areas`・`application::marks`（`mark`・`mark --retract`。`MarkLog`と注入した`Clock`越し。task 1548が`compose`から移した）・`application::kpi`・`application::forecast`・`application::report`・`application::push`、`application::supervise`の`forecast`・`report`・`push`・`throughput_review`（行き先の`job_start_route`はobserverと共有する。その結果の値`JobStartRoute`は共有の部品の`domain::actor_model`にあり、実行と着地の復旧jobも読む。task 1225）・`observer`（observerとスループットの見直しのjobの終わりの`provider_unusable`・`error`・`output.out`を読んで値`UnusableFinish`にし（`Supervisor::unusable_of`）、読むかの判断`retries_unusable`（規則は`domain::actor_model::records_unusable`）を持つ。控えるのは実行と着地の`supervise::provider::hold_unusable`に値で渡し、Codexは`ProviderHold`、Claudeは`[provider_fallback] jobs = false`のときだけ認証・利用上限で控えのask（`jobs::raise_job_wall`、`HoldJob::Observer`・`HoldJob::ThroughputReview`）、起動の失敗で`ProviderHold`。task 1223、task 1858）・`ci_watch`（CIの見張りのpassとjob。時刻は注入した`Clock`）。`application::ci_watch`（1回の確かめ`check`と、一覧の読み手`known_failures`・`status`・`doctor`。portは`RunLog`と`QueueRecords`だけを取る。task 1921）。`application::observer`（observerのjob）・`application::watch`（`events`・`timeline`・`watch`。task 251がレイヤーの外から移した）・`application::throughput_review`（スループットの見直しのjob。promptの組み立てと`ACCESS`。portは`ThroughputReviewSources`と`ThroughputReviewHost`。task 1615がレイヤーの外から移した）。組み立ては`compose::throughput_review`・`compose::throughput_review_launch`・`compose::observe`・`compose::observer_launch`（手で打つ`observe`の`[roles.observer]`。task 1223）。レイヤーの外の`src/view.rs`。
 - CLI: `events`・`watch`・`stats`・`kpi`・`report`・`forecast`・`mark`・`marks`・`timeline`・`finding`・`findings`・`ci failures`・`observe`・`throughput-review`・`note`・`notes`、`status`の読み取り（`ci`の欄を含む）と`doctor`の`ci_watch`。
 - infrastructure: `findings`・`observer`（observerのファイル・設定・headlessのagentのprocess）・`throughput_review`（見直しのdirのファイル・`[roles.throughput_review]`・hostの時間帯・agentのprocess）・`runtime_store::queue_records`・`kpi_config`・`kpi_push`・`report_config`・`d2`・`transcripts`・`claude_turns`・`codex_turns`・`ci_watch`（hostの`gh`とmain checkoutのGitを読むadapter `GhSource`、`up`のpreflight、`doctor`の`ci_watch`の材料）・`ci_watch_store`（`SqliteQueue`のCIの見張りのeventと`findings`の書き込み）。
 
@@ -151,8 +152,8 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 
 **許す依存の向き**
 
-- 他のcontextの状態とeventを読むだけで、他のcontextのtableを書かず、他のcontextの操作（claim・遷移・answerの適用）を呼ばない（ADR-t1545-1決定2）。
-- 書くのは自分の種類のeventと`findings`と、findingに紐づく`blocked`のask（共有の部品）だけ。
+- 他のcontextの状態とeventを読むだけで、他のcontextのtableを書かず、他のcontextの操作（claim・遷移・answerの適用）を呼ばない（ADR-t1545-1決定2）。例外は1つ: timerのjobの終わりで使えなかったproviderを、実行と着地が公開する`Supervisor::hold_unusable`に値で渡して控えさせる（上の実行と着地の「公開するport」。task 1223、task 1858）。
+- 書くのは自分の種類のeventと`findings`と、findingに紐づく`blocked`のask（共有の部品）だけ。`hold_unusable`を通した`provider_held`とqueueのhold askへの参加は実行と着地が書く。
 
 **境界をまたぐtransaction**: 無い（T6はこのcontextの`findings`を計画管理が書くもの）。
 

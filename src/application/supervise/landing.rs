@@ -189,14 +189,15 @@ impl Supervisor<'_> {
     /// the person reviews it, and it waits while the queue's hold ask
     /// holds Claude (task 437). One that names its provider goes like the
     /// goal review (ADR-t1063-1 decisions 4 and 5): to its provider when
-    /// it can be used, else to the other provider when that one can, else
-    /// it waits, or, under `--no-claude`, goes to the person.
+    /// it can be used, else to the other provider when that one can (and
+    /// `[provider_fallback] jobs` is on, ADR-t1857-1), else it waits, or,
+    /// under `--no-claude`, goes to the person.
     pub(super) fn review_route(&self) -> ReviewRoute {
         let role = ModelRole::Review;
         let models = self.role_models(role);
         provider::review_route(
             self.no_claude,
-            models.switchable(role),
+            (models.switchable(role), self.fallback.jobs),
             models.launch(role),
             self.queue_hold,
             |provider| self.job_unusable(provider),
@@ -2247,6 +2248,41 @@ mod tests {
         assert_eq!(
             subagent_launch_of(claude, &required, |_| false, |_| true).unwrap_err(),
             "subagents_unsupported: the review requires the subagents design, tests, which claude cannot run, and no other provider that can run them can be used"
+        );
+    }
+
+    /// With `[provider_fallback] jobs` off a review that requires
+    /// subagents its provider cannot run still starts on the other
+    /// provider: a choice by ability, not a provider that cannot be used
+    /// (ADR-t1453-1 decision 8, ADR-t1857-1).
+    #[test]
+    fn with_the_fallback_off_a_review_still_moves_for_its_agents() {
+        use crate::domain::actor_model::RoleModels;
+        let required = ["design".to_owned()];
+        let mut models = RoleModels::default();
+        models.entry(ModelRole::Review).provider = Some(Provider::Codex);
+        let route = super::provider::review_route(
+            false,
+            (models.switchable(ModelRole::Review), false),
+            models.launch(ModelRole::Review),
+            None,
+            |_| None,
+        );
+        let ReviewRoute::Start(codex, true) = route else {
+            panic!("the review starts on Codex");
+        };
+        assert_eq!(codex.provider, Provider::Codex);
+        let moved = subagent_launch_of(
+            codex,
+            &required,
+            |provider| provider == Provider::Claude,
+            |_| true,
+        )
+        .unwrap();
+        assert_eq!(moved.provider, Provider::Claude);
+        assert_eq!(
+            moved.switch_reason,
+            Some(SwitchReason::SubagentsUnsupported)
         );
     }
 

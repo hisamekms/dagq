@@ -584,3 +584,92 @@ fn a_no_claude_supervisor_never_moves_a_failed_codex_review_to_claude() {
             .any(|event| event["next"] == "check the failed review")
     );
 }
+
+/// With `[provider_fallback] jobs = false` (ADR-t1857-1), a Codex review
+/// that stops at the usage limit is not moved to Claude: Codex is held,
+/// its period is not counted as reviewed and nothing starts while the hold
+/// is in place; once the hold ends the same period starts again on Codex.
+#[test]
+fn with_the_fallback_off_a_codex_review_at_its_limit_waits_and_retries_codex() {
+    let (_dir, repo, db) = fixture();
+    roles(
+        &repo,
+        "[roles.throughput_review]\nprovider = \"codex\"\n\n[provider_fallback]\njobs = false\n",
+    );
+    SqliteQueue::open(&db)
+        .unwrap()
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+    let codex = stub_codex(&db, "limit");
+    let supervise = |db: &Path| {
+        let backend = TestWorkspace::new(db, false, VALID_AGENT);
+        let options = SuperviseOptions {
+            throughput_review: true,
+            utc_offset: utc,
+            codex: codex.clone(),
+            codex_home: Some(codex_home(db)),
+            // The weekly next move would open a finding planner; this test
+            // is about the review alone.
+            runtime_planners: Some(0),
+            ..supervise_options(1, true)
+        };
+        runtime::supervise(
+            db,
+            &repo,
+            &backend,
+            &marking_claude(db),
+            Path::new(env!("CARGO_BIN_EXE_dagq")),
+            &options,
+        )
+        .unwrap();
+    };
+    supervise(&db);
+    let finished = queue_events(&db, "throughput_review_finished");
+    assert_eq!(finished.len(), 1, "{finished:?}");
+    let hour = finished[0]["period"].clone();
+    assert_eq!(finished[0]["mode"], "hourly", "{finished:?}");
+    assert_eq!(
+        finished[0]["provider_unusable"],
+        json!({"provider": "codex", "reason": "usage_limit"})
+    );
+    let held = queue_events(&db, "provider_held");
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0]["provider"], "codex");
+    assert_eq!(held[0]["reason"], "usage_limit");
+    // Nothing went to Claude, and nothing started while Codex is held.
+    let started = queue_events(&db, "throughput_review_started");
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert_eq!(started[0]["launch"]["provider"], "codex");
+    assert!(
+        queue_events(&db, "ask_opened")
+            .iter()
+            .all(|p| p["kind"] != "queue_hold")
+    );
+    // A pass while Codex is held starts nothing: not on Claude, not on Codex.
+    supervise(&db);
+    assert_eq!(queue_events(&db, "throughput_review_started").len(), 1);
+    assert_eq!(queue_events(&db, "throughput_review_finished").len(), 1);
+    // Codex's hold ends (its time is up), and Codex can be used again.
+    fs::write(db.parent().unwrap().join("codex-mode"), "ok").unwrap();
+    SqliteQueue::open(&db)
+        .unwrap()
+        .record_queue_event(
+            EventKind::ProviderReleased,
+            json!({"provider": "codex", "reason": "usage_limit",
+                   "since": held[0]["since"], "why": "retry_due"}),
+        )
+        .unwrap();
+    supervise(&db);
+    let finished = queue_events(&db, "throughput_review_finished");
+    let again = finished
+        .iter()
+        .skip(1)
+        .find(|finish| finish["mode"] == "hourly")
+        .unwrap_or_else(|| panic!("{finished:?}"));
+    assert_eq!(again["period"], hour, "{again}");
+    assert_eq!(again["outcome"], "succeeded", "{again}");
+    for start in queue_events(&db, "throughput_review_started") {
+        assert_eq!(start["launch"]["provider"], "codex", "{start}");
+        assert!(start["launch"].get("switched_from").is_none(), "{start}");
+    }
+}

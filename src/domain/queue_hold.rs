@@ -110,6 +110,9 @@ pub enum HoldJob {
     PlanReview(ProposalId),
     GoalReview(GoalId),
     Observer,
+    /// A throughput review of a role that names Claude with
+    /// `[provider_fallback] jobs` off (ADR-t1857-1).
+    ThroughputReview,
 }
 
 impl HoldJob {
@@ -121,6 +124,7 @@ impl HoldJob {
             Self::PlanReview(_) => "plan_review",
             Self::GoalReview(_) => "goal_review",
             Self::Observer => "observer",
+            Self::ThroughputReview => "throughput_review",
         }
     }
     /// The run it is about, if any.
@@ -138,6 +142,7 @@ impl HoldJob {
             Self::PlanReview(proposal) => format!("plan_review job of proposal {proposal}"),
             Self::GoalReview(goal) => format!("goal_review job of goal {goal}"),
             Self::Observer => "observer job".to_owned(),
+            Self::ThroughputReview => "throughput_review job".to_owned(),
         }
     }
 }
@@ -270,6 +275,7 @@ mod tests {
             HoldJob::PlanReview(ProposalId::new(3)),
             HoldJob::GoalReview(GoalId::new(5)),
             HoldJob::Observer,
+            HoldJob::ThroughputReview,
         ];
         let entries: Vec<String> = jobs.iter().map(HoldJob::entry).collect();
         assert_eq!(
@@ -280,6 +286,7 @@ mod tests {
                 "plan_review job of proposal 3",
                 "goal_review job of goal 5",
                 "observer job",
+                "throughput_review job",
             ]
         );
         assert!(entries.iter().all(|entry| !is_run_entry(entry)));
@@ -292,7 +299,8 @@ mod tests {
                 "recovery",
                 "plan_review",
                 "goal_review",
-                "observer"
+                "observer",
+                "throughput_review"
             ]
         );
         let mut held = ask(AskReason::Cost, Some(USAGE_LIMIT_SUBJECT));

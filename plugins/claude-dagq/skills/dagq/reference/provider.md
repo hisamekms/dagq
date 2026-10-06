@@ -46,12 +46,14 @@ What reaches the person (the inbox shows it):
 
 ### Turning the fallback off
 
-A person can stop the workers' move to the other provider with `[provider_fallback] workers = false` in the repository's `dagq.toml` (the default, or no table, is `true`: the moves above). The supervisor reads it again every pass, so it takes effect without a restart. Only a provider that cannot be used stops moving (missing, does not start, a login, a usage limit); `--no-claude` still sends a Claude task to Codex, and holds and asks are the same:
+A person can stop the workers' move to the other provider with `[provider_fallback] workers = false` in the repository's `dagq.toml`, and that of the headless jobs whose `[roles.<role>]` names a provider (goal review, plan review, a run's review, throughput review, observer) with `jobs = false` (the default, or no table, is `true` for both: the moves above). The supervisor reads it again every pass, so it takes effect without a restart. Only a provider that cannot be used stops moving (missing, does not start, a login, a usage limit); `--no-claude` still sends a Claude task to Codex, and holds and asks are the same:
 
 - **At the claim**: a task whose provider cannot be used is not claimed on the other one; it is deferred (`claim_deferred` and `status`'s `claim_deferrals` with `provider_fallback_off`) until its provider's hold ends.
 - **Mid-run**: the run does not switch. It records `provider_waiting` whose `blocked` says the fallback is off, and once its own provider's hold ends (`retry_at`, or `done` on Claude's `queue_hold` ask, which still opens for Claude's login or limit) the call goes again to the same session (`provider retry`, or the hold's `continue`). Codex's wall opens no ask even with Claude usable.
 
-Whether to turn it off is the person's call; do not edit `dagq.toml` to route around a wall. Jobs are not covered by `workers`.
+- **Jobs** (`jobs = false`): such a job does not start on the other provider while its own cannot be used; it waits and starts on the same provider once the hold ends. A job that failed that way is recorded and holds the provider that failed, as with the fallback on (Claude's login or limit opens the `queue_hold` ask, the job listed in `affected`); a run's review records `review_retried` and waits with its session open instead of failing, and a throughput review's period or an observation is not counted done and runs again on the same provider. `--no-claude` still sends a Claude job to Codex, and a review whose required subagents its provider cannot run still starts on the other provider (`subagents_unsupported`: a choice by ability, not a provider that cannot be used). Roles that name no provider, and the recovery job, are unchanged.
+
+Whether to turn it off is the person's call; do not edit `dagq.toml` to route around a wall.
 
 ## A headless run by hand
 

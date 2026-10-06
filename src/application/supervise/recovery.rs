@@ -355,7 +355,9 @@ pub(super) fn recovery_route_of(
         }
         return (!claude_held).then_some(JobStartRoute::Start(launch, false));
     }
-    match job_route(&launch, true, &unusable) {
+    // The recovery job is not among the jobs `[provider_fallback] jobs`
+    // turns off (ADR-t1857-1, task 1858): it moves as before.
+    match job_route(&launch, true, true, &unusable) {
         JobRoute::Start(launch) => Some(JobStartRoute::Start(launch, true)),
         JobRoute::Wait { .. } if no_claude => {
             let codex = unusable(Provider::Codex).map_or("unknown", SwitchReason::as_str);

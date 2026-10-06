@@ -102,6 +102,7 @@ pub(crate) fn options(mode: ReviewMode) -> ReviewOptions {
         utc_offset: Some(0),
         launch: None,
         switchable: false,
+        fallback: true,
         unavailable: None,
     }
 }
