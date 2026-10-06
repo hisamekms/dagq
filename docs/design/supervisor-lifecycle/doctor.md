@@ -4,8 +4,8 @@ type: design
 title: "`doctor`"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1921: CI watch implemented; task 1873: agents errors include the tools declaration (ADR-t1728-2); task 1866: agents (ADR-t1728-1); task 1225: recovery among the Codex roles; task 1223: the observer on Codex
-last_verified: 2026-10-06 # task 1921; task 1873; task 1866; task 1225; task 1223
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - adr-t1228-2

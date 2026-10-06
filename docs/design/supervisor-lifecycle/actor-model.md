@@ -4,8 +4,8 @@ type: design
 title: "Actor model"
 status: current
 created: 2026-09-27
-updated: 2026-10-06 # task 1441: runtime planners run headless only, the route key is ignored; task 1225: the recovery job runs on Codex too, JobStartRoute in domain::actor_model; task 1223: the observer runs on Codex too; task 1224: this repository sets observer to Codex
-last_verified: 2026-10-06 # task 1441; task 1225; task 1223; task 1224
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - adr-t1394-1

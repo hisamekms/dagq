@@ -4,8 +4,8 @@ type: design
 title: SQLite persistence
 status: current
 created: 2026-09-21
-updated: 2026-10-06 # task 1441: a runtime planner's workspace_id is its background wrapper's handle; task 1921: CI watch implemented; task 1783: live read-only watch and connection guard; task 1657: a wrapper is stopped by stop_background and each stop is recorded as wrapper_stopped; task 1564: ask --request reads request_planner; task 1540: draft_revisits (0068); task 1641: goals.tags (0067); task 1640; task 839; task 1709; task 1437; task 1609; task 1632; task 1481; task 1440; task 1704: planned human-answer wait accounting (unimplemented)
-last_verified: 2026-10-06 # task 1441; task 1921; task 1783; task 1657; task 1564; task 1540; task 1641; task 1640; task 839; task 1509; task 1437; task 1609; task 1632; task 1481; task 1440
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: persistence
 related:
   - adr-t1704-1

@@ -4,8 +4,8 @@ type: design
 title: System overview
 status: current
 created: 2026-09-21
-updated: 2026-10-06 # task 1438: the interactive worker retired from the text; task 1441: runtime planners run headless only in a background wrapper without a workspace, the planner e2e case is gone; task 1619: removed the resolved planner_handoff test violation clause; task 1617: domain::landing_branch no longer an anyhow violation; task 1223: the headless jobs run on the provider of their role table; task 1439: the runtime tests run the worker's wrapper in the background; task 1440: runs open no workspace, the e2e sweep case is gone
-last_verified: 2026-10-06 # task 1438; task 1441; task 1619; task 1617; task 1223; task 1439; task 1440
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: system
 related:
   - adr-t1545-1

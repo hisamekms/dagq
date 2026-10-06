@@ -4,7 +4,7 @@ type: design
 title: Architecture decision records
 status: current
 created: 2026-09-21
-updated: 2026-10-06
+updated: 2026-10-07
 last_verified: 2026-09-30
 tags:
   - architecture
@@ -183,6 +183,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-t1728-1](2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md) | agentの定義とケースを`.dagq/agents/<name>/`に置き（役割の区分のディレクトリは作らず、1つのagentは1つの役割）、定義の無いagentや複数の役割を名指す設定を誤りにする。splitはファイルで区分し、ケースは共通の欄と役割ごとのinput・expectedに分け、patchは内容のhashで共有して版ごとの成績はqueue側に残す。evalはqueue serviceのユースケースで、本番のrunのreviewのagentのjobと同じ経路でsupervisorだけが実行する。hold-out・productionの依頼は人・inbox・planner、hold-outは（agent・定義・ケースの集合）ごとに1回。費用は起動の前の見積もり・予約・実行中の判定で上限を守り、使った額を確定できない周は`cost_unknown`で起動しない。runのslotを使わない専用の枠で、定義を変えるrunは着地の前にlanding branchのケースのdevで採用を判定する。productionの見張りはsupervisorが時期のfindingを出しplannerが依頼する。各ケースにprogramのreviewを先に当てる（ADR-t1453-1決定2をamends） | 2026-10-06 |
 | [ADR-t1728-2](2026-10-06-t1728-2-agents-declare-their-tools-from-a-runtime-list.md) | agentが使う道具は定義のfrontmatterでruntimeの一覧から宣言し（任意のコマンドは書けない）、役割の権限を超える宣言を拒み、runtimeがproviderごとにADR-t1895-1の独立のagentのjobの起動の設定（Claudeはjobの引数、Codexは読み取りだけのsandbox・permission profile・ADR-t1570-1を変えず狭めるjobの設定）へ変換する。親のjobの中のsubagentの渡し方と`subagents_unsupported`には当てず、evalも同じ変換を使う。reviewの前の決まった検査はADR-t1895-2に一本化した（ADR-t1453-1決定2をamends） | 2026-10-06 |
 | [ADR-t1920-1](2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md) | 設定で有効にしたrepositoryでは、supervisorがhostのghで着地先のbranchのpushのCIの結果を定期的に確かめてeventに記録し、赤になったら新しく落ちたtestの組ごとにfindingを記録してruntimeのfindingのplannerとplan reviewで修正taskにし（直接のtaskの追加は採らない、優先度はADR-0051決定26のまま）、既に落ちているtestの一覧を持って着地の検証の除外とworker・reviewの材料に渡す（修正taskのrunでは外さない）。読む手段が無ければADR-0049決定9と同じく止めて知らせ、mainのCIの失敗のissueは残す。自動更新にCIの確かめを足さず、CIのconcurrencyを変えず、mainの前の関門とrevertの手順は作らない | 2026-10-06 |
+| [ADR-t1854-1](2026-10-07-t1854-1-frontmatter-date-lines-hold-only-the-date.md) | 文書のfrontmatterの`created`・`updated`・`last_verified`は`YYYY-MM-DD`の日付だけを持ち、行末にどのtaskが何を変えたかのコメントを書かない（同じ文書を変える2つのtaskがこの1行で必ず衝突するため）。どのtaskが変えたかはgitの履歴（`Dagq-Task` trailer）が持つ。既存のコメントは日付の値と本文を変えずに消す | 2026-10-07 |
 
 goal 82（goal 38の段(1)〜(3)）のADRはtask 1233が書いた5本で、決定の置き場所は次のとおり。制御側と実行側の分け方・queue service・ユースケース単位のAPIとservice側の認可・unix socket・broker・クライアントモード・段の順と置き場所はADR-t1233-1、serviceの起動・停止の責任・落ちたときの知らせ方・brokerより前のprincipalの認証（token）はADR-t1233-4、読み取りのユースケースとroleごとの読める範囲・workerの読める範囲・Codexのsandboxからの到達はADR-t1233-5、e2eをreviewのpassの後のhostの工程に移すことはADR-t1233-2、このrepositoryを先にLinuxで通すことはADR-t1233-3にある。
 

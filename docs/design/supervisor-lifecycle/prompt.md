@@ -4,8 +4,8 @@ type: design
 title: "Prompt"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1438: the worker's texts have no interactive route; task 1441: planner_prompt_written is recorded before the background wrapper starts; task 1681; task 1680 revise 1; task 1540: the revisit section of the draft planner; task 1633: the recovery job's binary sections and their limits; task 1688 (after task 1572)
-last_verified: 2026-10-06 # task 1438; task 1441; task 1681; task 1680 revise 1; task 1540; task 1633; task 1688 (after task 1572)
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - adr-t1566-1

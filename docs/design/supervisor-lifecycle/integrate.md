@@ -4,8 +4,8 @@ type: design
 title: "`integrate`"
 status: current
 created: 2026-09-26
-updated: 2026-10-04 # task 1508
-last_verified: 2026-10-04 # task 1508
+updated: 2026-10-04
+last_verified: 2026-10-04
 scope: runtime
 related:
   - adr-t728-2

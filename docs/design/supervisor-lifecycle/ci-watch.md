@@ -4,8 +4,8 @@ type: design
 title: "CI watch（supervisorが着地先のbranchのCIを見張る）"
 status: current
 created: 2026-10-06
-updated: 2026-10-06 # task 1921: CI watch implemented; task 1920
-last_verified: 2026-10-06 # task 1921
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - adr-t1920-1

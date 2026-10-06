@@ -4,8 +4,8 @@ type: design
 title: "ダイアログ待ちの検知"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1441: nothing is typed into the runtime's planners; task 1437
-last_verified: 2026-10-06 # task 1441; task 1437
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - adr-t1433-2

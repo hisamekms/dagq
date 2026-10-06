@@ -4,8 +4,8 @@ type: design
 title: "Goal review (supervisor)"
 status: current
 created: 2026-09-27
-updated: 2026-10-06 # task 1521 revise 1: planned replacement sources in goal review and close (unimplemented); task 1661: recorded goal answer selection; task 1660: how a goal held only by follow-up membership shows; task 1712
-last_verified: 2026-10-05 # task 1661; task 1660; task 1712
+updated: 2026-10-06
+last_verified: 2026-10-05
 scope: runtime
 related:
   - design-supervisor-lifecycle-task-replanning

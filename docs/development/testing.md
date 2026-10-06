@@ -4,7 +4,7 @@ type: development
 title: このrepositoryのtestの制約（coverageの関門・test binary・置き場所・書き方・macOSに固有のtest・判断と境界のtest・ファイルの行数・待ちの上限・e2eとその印・手動スモーク）
 status: current
 created: 2026-10-03
-updated: 2026-10-06 # task 1441: the planner's e2e case is deleted, not left out; task 1440: e2eのrunがbackgroundのwrapperで動くことと、sweepのケースの削除; task 1707; task 1451; task 1238; task 1352
+updated: 2026-10-06
 owners:
   - hisamekms
 tags:

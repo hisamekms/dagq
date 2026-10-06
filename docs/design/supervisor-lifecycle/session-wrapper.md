@@ -4,8 +4,8 @@ type: design
 title: "`session` wrapper"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1438: the wrapper runs only headless turns; task 1441: the runtime's planner wrappers start only in the background too; task 1440: the runtime starts a run's wrapper only with --background; task 1406
-last_verified: 2026-10-06 # task 1438; task 1441; task 1440
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - adr-t1433-3

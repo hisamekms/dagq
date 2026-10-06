@@ -4,8 +4,8 @@ type: design
 title: "`ask` / `answer` / `asks`"
 status: current
 created: 2026-09-26
-updated: 2026-10-05 # task 1564: ask --request is the request's own planner's; task 1386: show の asks; task 1521: planned task replanning (unimplemented)
-last_verified: 2026-10-05 # task 1564; task 1386
+updated: 2026-10-05
+last_verified: 2026-10-05
 scope: runtime
 related:
   - design-supervisor-lifecycle-task-replanning

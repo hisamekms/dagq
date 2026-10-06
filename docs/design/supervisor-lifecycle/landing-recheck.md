@@ -4,8 +4,8 @@ type: design
 title: "Landing recheck"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1850: resumes, recovery jobs and claims share one line by effective priority; task 1312; task 1311; task 1440: after a resume the wrapper is stopped, not a workspace closed
-last_verified: 2026-10-06 # task 1850; task 1312; task 1311; task 1440
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - design-supervisor-lifecycle

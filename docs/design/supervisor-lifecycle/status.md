@@ -4,8 +4,8 @@ type: design
 title: "`status`"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1921: CI watch implemented; task 1857: provider_fallback_off in claim_deferrals; task 1661: recorded goal answer selection; task 1225: a triage_failed with provider_unusable stays triaging (runtime); task 1660: goal_follow_ups_unsettled; task 838: broker_claims_held attention; task 1632; task 1481; task 1440
-last_verified: 2026-10-06 # task 1921; task 1857; task 1661; task 1225; task 1660; task 838; task 1632; task 1481; task 1440
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - adr-t1228-2

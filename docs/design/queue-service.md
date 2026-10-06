@@ -4,8 +4,8 @@ type: design
 title: Queue service
 status: current
 created: 2026-10-02
-updated: 2026-10-06 # task 1438: the wrapper starts only headless turns with the worker token; task 1921: CI watch implemented; task 1641: goal_list's tag; task 840: broker package backend in the name note; task 1352: a service a test started stops once the test's process is gone (DAGQ_SERVICE_OWNER_PID, owner_gone); task 1440: the worker's token is issued when its session wrapper starts in the background
-last_verified: 2026-10-06 # task 1438; task 1921; task 1641; task 840; task 1352; task 1440
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 tags:
   - security

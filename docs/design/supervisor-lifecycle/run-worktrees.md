@@ -4,8 +4,8 @@ type: design
 title: "Run worktrees"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1657: a wrapper is stopped by stop_background and each stop is recorded as wrapper_stopped; task 1605; task 1590; task 1627; task 1482; task 1478; task 1427; task 1440: the sweep stops leftover background wrappers instead of closing workspaces
-last_verified: 2026-10-06 # task 1657; task 1605, task 1590, task 1627, task 1482, task 1478, task 1427; task 1440
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - design-supervisor-lifecycle

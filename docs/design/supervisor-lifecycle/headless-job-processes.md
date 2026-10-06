@@ -4,8 +4,8 @@ type: design
 title: "Headless job processes"
 status: current
 created: 2026-09-27
-updated: 2026-10-05 # task 1225: the recovery job may run on Codex; task 1794: the ps listing is read as bytes and decoded lossily
-last_verified: 2026-10-05 # task 1225; task 1794
+updated: 2026-10-05
+last_verified: 2026-10-05
 scope: runtime
 related:
   - adr-t1566-1

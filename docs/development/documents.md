@@ -4,7 +4,7 @@ type: development
 title: このrepositoryの文書の規則（判断の記録・ADR・design・plans・frontmatter・workerの文書の照合・AGENTS.md・commit）
 status: current
 created: 2026-10-03
-updated: 2026-10-05 # task 1727
+updated: 2026-10-07
 owners:
   - hisamekms
 tags:
@@ -32,7 +32,7 @@ related:
 ## ADR
 
 - 将来の実装や運用に大きな影響を与える決定は`docs/adr/`にADRを追加する。アーキテクチャ全体に影響し手戻りが大きい決定は、実装より先にADRを作る。新しいADRは[template](../adr/0000-template.md)をコピーして作る。
-- 既存のADRは書き換えない（append-only）。後から変えてよいのは`status`・`accepted_on`・`superseded_by`・`superseded_on`・`deprecated_on`・`amended_by`とH1直後の注記1行だけで、これらだけの変更に新しいADRは要らず、`updated`も動かさない。`supersedes`と`amends`は置き換え・amendsの本文と一緒に書く。決定を足す・変える・除くのは、下の置き換えか`amends`の新しいADRで行う。
+- 既存のADRは書き換えない（append-only）。後から変えてよいのは`status`・`accepted_on`・`superseded_by`・`superseded_on`・`deprecated_on`・`amended_by`とH1直後の注記1行だけで、これらだけの変更に新しいADRは要らず、`updated`も動かさない。frontmatterの日付の行の行末のコメントは欄の値でも本文でもないので、値を変えずにコメントだけを消すのはこの制限に当たらない（下の「frontmatter」、[ADR-t1854-1](../adr/2026-10-07-t1854-1-frontmatter-date-lines-hold-only-the-date.md)決定3）。`supersedes`と`amends`は置き換え・amendsの本文と一緒に書く。決定を足す・変える・除くのは、下の置き換えか`amends`の新しいADRで行う。
 - どのADRが今の決定か（`accepted`・`amended_by`・`superseded_by`の辿り方・`deprecated`）は[frontmatter仕様](../frontmatter.md)の「ADR fields」の状態と欄の表が持つ。
 - 小さなADR: 1 ADRに決定1つ（密に結びついた数個まで）、本文はおおむね100行以内。書くのは変えるのに人の判断が要るもの（問題と文脈、方針・原則・境界・不変条件、退けた案、結果。目安は「これを変えるとき人に聞くか」）で、eventの種類と欄・CLIのflagの綴り・JSONの形・既定値や閾値の数値・関数やmoduleやファイルの名前・migrationの番号・testの名前は`docs/design/`に書く（ADR-t598-1決定2・3）。
 - 置き換えか`amends`か: 元のADRの決定の数と変える範囲で決め、IDの形（4桁か新しい形か）では決めない（[ADR-t1091-1](../adr/2026-09-30-t1091-1-amend-or-replace-by-number-of-decisions.md)）。番号付きの決定を複数持つADR（4桁でも新しい形でも。0047・0073・t813-2など）の一部の決定を変えるときは、小さな新しいADRの`amends`に変える決定（例: `adr-0047 decision 24`）を書き、元のADRの`amended_by`にそのIDを足し、同じ変更で`docs/design/`を今の姿に直す。決定が1つのADRを変えるときと、決定の大半を変えるときは、新しいADRで丸ごと置き換え、まだ有効な古い決定を書き直して引き継ぎ、古いADRを丸ごと`superseded`にする（1つのADRが複数を置き換えてもよい）。どちらにするかをtaskに書くことは[taskの登録](task-registration.md)の「ADRを書くtask」が持つ。
@@ -62,6 +62,8 @@ related:
 ## frontmatter
 
 frontmatterは[frontmatter仕様](../frontmatter.md)に従う。
+
+`created`・`updated`・`last_verified`の行は`YYYY-MM-DD`の日付だけを書き、行末にどのtaskが何を変えたかのコメント（`# task N`など）を書かない。どのtaskが変えたかはgitの履歴（着地のcommitの`Dagq-Task` trailer）が持つ。既存の文書（ADRも含む。決定と本文に触れないのでappend-onlyに当たらない）の日付の行にコメントがあれば、日付の値を変えずにコメントだけを消してよい。同じ文書を変える2つのtaskが日付の行で衝突しないためで、経緯は[ADR-t1854-1](../adr/2026-10-07-t1854-1-frontmatter-date-lines-hold-only-the-date.md)。
 
 ## 権限の表を写す文書
 

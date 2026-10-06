@@ -4,7 +4,7 @@ type: adr
 title: trusted runtimeが安全に保留し成果を保存して、plan reviewを経た置換を依存保護とともに原子的に適用する（ADR-0027決定1、ADR-0047決定8・43・44、ADR-t813-1決定2、ADR-t1394-1決定2・4・5・6をamends）
 status: accepted
 created: 2026-10-05
-updated: 2026-10-06 # task 1521 revise 1: replacement sources in goal review and close
+updated: 2026-10-06
 accepted_on: 2026-10-05
 amends:
   - adr-0027 decision 1

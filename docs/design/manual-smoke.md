@@ -4,8 +4,8 @@ type: design
 title: Manual smoke of the paths that include real Claude and Codex
 status: current
 created: 2026-09-25
-updated: 2026-10-05 # task 1703: Codex run review argv checked against the current code; task 841: the smoke of a required broker; task 1580: the e2e stub moved to tests/e2e/stub.rs (after task 1461); task 1437; task 1440: runs open no workspace, scenario 4 no longer runs; task 1205
-last_verified: 2026-10-05 # task 1703: Codex run review argv checked against the current code; task 841; task 1580; task 1437; task 1440; task 1205
+updated: 2026-10-05
+last_verified: 2026-10-05
 scope: operations
 related:
   - adr-0036

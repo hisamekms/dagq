@@ -4,8 +4,8 @@ type: design
 title: "`up` / `down`"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1441: no planner workspace gets the planner's look; task 1921: CI watch implemented; task 838: up preflight takes [broker] mode = "required" as preferred; task 1238 (after tasks 1579, 1232, 1518 and 1582); task 1440
-last_verified: 2026-10-06 # task 1441; task 1921; task 838; task 1579; task 1440
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - adr-t1582-1

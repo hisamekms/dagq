@@ -4,8 +4,8 @@ type: design
 title: "Auto-update"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1441: the planner's e2e case is deleted, not left out; task 1189; task 1451; task 1156; task 1632; task 1481; task 1600; task 1440: e2eの後始末がDAGQ_QUEUEだけで選ぶことと、sweepのケースの削除
-last_verified: 2026-10-06 # task 1441; task 1189; task 1451; task 1156; task 1632; task 1481; task 1600; task 1440
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - design-supervisor-lifecycle

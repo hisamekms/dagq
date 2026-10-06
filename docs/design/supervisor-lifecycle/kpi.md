@@ -4,8 +4,8 @@ type: design
 title: "`kpi`"
 status: current
 created: 2026-09-26
-updated: 2026-10-05 # task 663: compare pruned stops at the last heartbeat
-last_verified: 2026-10-05 # task 663
+updated: 2026-10-05
+last_verified: 2026-10-05
 scope: runtime
 related:
   - design-supervisor-lifecycle

@@ -4,8 +4,8 @@ type: design
 title: "空き容量を確かめる（claimと着地の検証の前）"
 status: current
 created: 2026-09-27
-updated: 2026-10-04 # task 1627; task 1482; task 1478; task 1426; task 1371: the free space is recorded; task 1289; task 1290
-last_verified: 2026-10-04 # task 1627, task 1482, task 1478, task 1426, task 1371, task 1289, task 1290
+updated: 2026-10-04
+last_verified: 2026-10-04
 scope: runtime
 related:
   - adr-t639-1

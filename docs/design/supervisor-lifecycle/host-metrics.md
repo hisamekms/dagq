@@ -4,8 +4,8 @@ type: design
 title: "hostの負荷の連続の記録"
 status: current
 created: 2026-09-28
-updated: 2026-10-02 # task 1371: disk free
-last_verified: 2026-10-02 # task 1371
+updated: 2026-10-02
+last_verified: 2026-10-02
 scope: runtime
 related:
   - design-supervisor-lifecycle

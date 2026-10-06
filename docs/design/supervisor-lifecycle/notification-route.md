@@ -4,8 +4,8 @@ type: design
 title: "人への通知経路（ADR-0016で決定、ADR-0022とADR-0024で改めた）"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1441: only a person's planner is typed a revise; task 1437
-last_verified: 2026-10-06 # task 1441; task 1437
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - design-supervisor-lifecycle

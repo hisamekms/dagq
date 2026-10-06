@@ -4,8 +4,8 @@ type: design
 title: "Observer"
 status: current
 created: 2026-09-26
-updated: 2026-10-05 # task 1574: observe_finished counts consecutive_failures, the second is attention; task 1223: the observer runs on Codex too; task 1224: this repository sets observer to Codex
-last_verified: 2026-10-05 # task 1574; task 1223; task 1224
+updated: 2026-10-05
+last_verified: 2026-10-05
 scope: runtime
 related:
   - adr-t1566-1

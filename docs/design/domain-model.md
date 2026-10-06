@@ -4,8 +4,8 @@ type: design
 title: Domain model
 status: current
 created: 2026-09-21
-updated: 2026-10-06 # task 1438: WorkerMode::Interactive is only read, add / edit refuse it; task 1921: CI watch implemented, ci failures in Current operations and the observer's reads; task 1657: a wrapper is stopped by stop_background and each stop is recorded as wrapper_stopped; task 1842: retired RunHistory queries removed; task 1225: a triage_failed with provider_unusable is Pending; task 1850: the effective priority orders resumes and recovery jobs too; task 1851: set-priority on in_progress tasks; task 1811: tasks without own priority follow the goal in every status (ADR-t1811-1); task 1551: RunHistory reads typed restored payloads (run/payload.rs); task 1540: DraftRevisit, origin revisit; task 1641: goal tags, [goals] tags, goal list order and --tag; task 1660: AttentionNext::DecideFollowUps; task 1640; task 1386: show lists asks; task 839: show's latest run carries broker_tool_use; task 1594; task 1507, task 1506, task 1508, task 1509; tasks 1505, 1437; task 1609; task 1632; task 1440; task 1704: planned human-answer wait accounting (unimplemented)
-last_verified: 2026-10-06 # task 1438; task 1921; task 1657; task 1842; task 1225; task 1850; task 1811; task 1551; task 1540; task 1641; task 1660; task 1640; task 1386; task 839; task 1594; task 1507, task 1506, task 1508, task 1509; tasks 1505, 1437; task 1609; task 1632; task 1440
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: domain
 related:
   - adr-t1704-1

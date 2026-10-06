@@ -4,8 +4,8 @@ type: design
 title: "人への通知（`cmux notify`）"
 status: current
 created: 2026-09-26
-updated: 2026-10-04 # task 1509: correct_goal is not notified; task 1437
-last_verified: 2026-10-04 # task 1509; task 1437
+updated: 2026-10-04
+last_verified: 2026-10-04
 scope: runtime
 related:
   - design-supervisor-lifecycle

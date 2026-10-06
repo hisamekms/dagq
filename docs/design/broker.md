@@ -4,8 +4,8 @@ type: design
 title: Resource broker
 status: current
 created: 2026-09-28
-updated: 2026-10-06 # task 1438: the interactive worker retired from the text; task 1550: the audit reads its day files through the AuditFiles port; task 842: current, Phase 3の前提, pluginのreference; task 841: the e2e of required; task 840: package.install and [broker.package]; task 838; task 839; task 1451
-last_verified: 2026-10-06 # task 1438; task 1550; task 842; task 841; task 840; task 838; task 839; task 1451
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 tags:
   - security

@@ -4,8 +4,8 @@ type: design
 title: "生きているsessionの復旧job"
 status: current
 created: 2026-09-26
-updated: 2026-10-05 # task 1225: the recovery job runs on Codex too; task 1633: the recovery prompt carries the supervisor's build, its replacements and the dependencies it holds; task 1571
-last_verified: 2026-10-05 # task 1225; task 1633; task 1571
+updated: 2026-10-05
+last_verified: 2026-10-05
 scope: runtime
 related:
   - adr-t1566-1

@@ -4,8 +4,8 @@ type: design
 title: "認証と利用上限のaskの待ちとanswer"
 status: current
 created: 2026-09-27
-updated: 2026-10-06 # task 1857: a Claude task waits for Claude with the fallback off; task 1225: the recovery job on Codex; task 1850: resumes, recovery jobs and claims share one line by effective priority; task 1223: the observer on Codex; task 1711: the headless planner's hold is a unit test with one test kept on the boundary; task 1437
-last_verified: 2026-10-06 # task 1857; task 1225; task 1850; task 1223; task 1711; task 1437
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - adr-0047

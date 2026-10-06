@@ -4,8 +4,8 @@ type: design
 title: "backendの呼び出しの失敗"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1441: /exit is typed only to a person's planner, and a runtime planner calls neither create_named nor ensure_group; task 1657: a wrapper is stopped by stop_background and each stop is recorded as wrapper_stopped; task 1440: runのsessionの起動をlaunch_backgroundで記録し、runのcreate・create_resume・ensure_groupを除いた
-last_verified: 2026-10-06 # task 1441; task 1657; task 1440
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - design-supervisor-lifecycle

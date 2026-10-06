@@ -4,8 +4,8 @@ type: design
 title: Supervisor and workspace lifecycle
 status: current
 created: 2026-09-21
-updated: 2026-10-06 # task 1921: CI watch implemented; task 1225: a recovery job whose provider could not be used starts again on the other one; task 1437; task 1521: planned task replanning
-last_verified: 2026-10-06 # task 1921; task 1225; task 1437
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - design-supervisor-lifecycle-task-replanning

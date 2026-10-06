@@ -4,8 +4,8 @@ type: design
 title: "Cleanup and recovery"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1657: a wrapper is stopped by stop_background and each stop is recorded as wrapper_stopped; task 1440: runのsessionの終わりをwrapperの停止にし、runのworkspaceのcloseとrun close-workspacesの片付けを除いた
-last_verified: 2026-10-06 # task 1657; task 1440
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - design-supervisor-lifecycle

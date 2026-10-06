@@ -4,8 +4,8 @@ type: design
 title: "errorと復旧"
 status: current
 created: 2026-09-26
-updated: 2026-10-04 # task 1345
-last_verified: 2026-10-04 # task 1345
+updated: 2026-10-04
+last_verified: 2026-10-04
 scope: runtime
 related:
   - design-supervisor-lifecycle

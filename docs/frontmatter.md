@@ -4,7 +4,7 @@ type: design
 title: Documentation frontmatter specification
 status: current
 created: 2026-09-21
-updated: 2026-10-03
+updated: 2026-10-07
 last_verified: 2026-10-03
 tags:
   - documentation
@@ -34,7 +34,7 @@ related:
 
 `id`, `type`, `title`, `status`, `created`, and `updated` are required. `owners`, `tags`, and `related` are optional lists of strings. Dates use ISO 8601 calendar dates (`YYYY-MM-DD`). IDs are stable and use lowercase kebab-case, except ADR IDs. ADR IDs (`adr-NNNN` and `adr-t<task ID>-<N>`), their filenames and how they are referenced follow [the documentation rules](development/documents.md) (「ADRのID」).
 
-`updated` is the last content change. Design documents also use `last_verified` for the date on which the document was checked against the implementation.
+`updated` is the last content change. Design documents also use `last_verified` for the date on which the document was checked against the implementation. The `created`, `updated` and `last_verified` lines hold only the date, with no trailing comment such as `# task N` naming the task or the change; which task changed a document is in the Git history (the `Dagq-Task` trailer of the landing commit), per [ADR-t1854-1](adr/2026-10-07-t1854-1-frontmatter-date-lines-hold-only-the-date.md).
 
 ## Type-specific fields
 

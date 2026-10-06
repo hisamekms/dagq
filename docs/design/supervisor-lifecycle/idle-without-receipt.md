@@ -4,8 +4,8 @@ type: design
 title: "receiptの無いidleの検知"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1441: the runtime's planners have no screen_idle; task 1437
-last_verified: 2026-10-06 # task 1441; task 1437
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - design-supervisor-lifecycle

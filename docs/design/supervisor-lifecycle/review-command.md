@@ -4,8 +4,8 @@ type: design
 title: "`review`"
 status: current
 created: 2026-09-26
-updated: 2026-10-03 # task 1429: the Task section carries the context
-last_verified: 2026-10-03 # task 1429
+updated: 2026-10-03
+last_verified: 2026-10-03
 scope: runtime
 related:
   - design-supervisor-lifecycle

@@ -4,8 +4,8 @@ type: design
 title: "Draft planners (supervisor)"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1441: runtime planners run headless only in the background (no workspace, answers and exits as turn requests, tests without a cmux double); task 1540: a draft's revisit time returns it to the runtime's planners (ADR-t1540-1); task 1704: planned human-answer wait release (unimplemented); task 487: recurring drafts planned (ADR-0072)
-last_verified: 2026-10-06 # task 1441; task 1540
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - adr-0072

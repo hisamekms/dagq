@@ -4,8 +4,8 @@ type: design
 title: Slow tests summary from nextest output
 status: current
 created: 2026-09-30
-updated: 2026-10-06 # task 1736, task 1825 revise 1
-last_verified: 2026-10-06 # task 1736, task 1825 revise 1
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: operations
 tags:
   - testing

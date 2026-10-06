@@ -4,8 +4,8 @@ type: design
 title: "`supervise`"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1921: CI watch implemented; task 1557: the session's registration and post-receipt waits are judged on Clock::monotonic; task 1657: a wrapper is stopped by stop_background and each stop is recorded as wrapper_stopped; task 1857: [provider_fallback] read each pass; task 1225: the recovery job's hold is its route's wait; task 1850: resumes, recovery jobs and claims share one line by effective priority; task 1640: a task inherits its goal's priority; task 1594: a non-zero exit with a receipt goes to validation; task 1591: the landing queue leaves room for light changes; task 1437; task 1632; task 1440: a run's session wrapper starts in the background and is stopped, no run workspace
-last_verified: 2026-10-06 # task 1921; task 1557; task 1657; task 1857; task 1225; task 1850; task 1640; task 1594; task 1591; task 1437; task 1632; task 1440
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - design-supervisor-lifecycle

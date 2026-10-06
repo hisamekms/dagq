@@ -4,7 +4,7 @@ type: development
 title: このrepositoryの本番queueの運用（固定バイナリ・使い捨てのqueue・hostのツール・dagq.toml・upのコマンド・KPIの印・secret・人への報告）
 status: current
 created: 2026-10-03
-updated: 2026-10-05 # task 842: [broker] stays out of dagq.toml; task 1440: the up section points to naming for workspaces and to run-workspaces for run sessions
+updated: 2026-10-05
 owners:
   - hisamekms
 tags:

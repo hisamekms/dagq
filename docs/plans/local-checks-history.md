@@ -4,7 +4,7 @@ type: plan
 title: AGENTS.mdの「変更後に必ず通す」「テストの制約」から移した手元の検証とtestの規則の経緯
 status: completed
 created: 2026-10-03
-updated: 2026-10-04 # task 1463
+updated: 2026-10-04
 owners:
   - hisamekms
 tags:

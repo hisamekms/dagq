@@ -4,8 +4,8 @@ type: design
 title: "Receipt and session exit"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1441: only a person's planner and the inbox infer idle from the screen; task 1594; task 1508; task 1437; task 1440: the wrapper runs only in the background and is stopped by its handle
-last_verified: 2026-10-06 # task 1441; task 1594; task 1508; task 1437; task 1440
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - adr-t1433-2

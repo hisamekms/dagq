@@ -4,8 +4,8 @@ type: design
 title: "`events` / `watch`"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1921: CI watch implemented; task 1783: live read-only watch and connection guard; task 1225: a triage_failed with provider_unusable is no attention; task 1574: observe_finished of the second failure in a row is attention (check the failed observer); task 838: broker_claims_held attention, broker_token_revoked reasons mode_disabled and unmarked; task 839: broker_tool_use is not attention; task 1424: approve_landing applies send_back: <reason>; task 1437; task 1440: the cleanup after validation stops the wrapper
-last_verified: 2026-10-06 # task 1921; task 1783; task 1225; task 1574; task 838; task 839; task 1424; task 1437; task 1440
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - design-supervisor-lifecycle-throughput-review

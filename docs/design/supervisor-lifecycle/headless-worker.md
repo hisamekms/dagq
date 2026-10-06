@@ -4,8 +4,8 @@ type: design
 title: "非対話のworker"
 status: current
 created: 2026-09-28
-updated: 2026-10-06 # task 1438: add / edit refuse --interactive, the worker's texts have no interactive branch; task 1441: runtime planners run headless only, their wrapper always in the background, planner screen/send read and type nothing; task 1557: the reopen's waits are judged on Clock::monotonic; task 1657: wrapper_stopped records how each background wrapper stop ended (stop_background, StopRoute); task 1857: a run waits on its own provider with the fallback off; task 1850: resumes, recovery jobs and claims share one line by effective priority; task 1439: SuperviseOptions::worker_wrapper and the runtime tests' background default; task 838: required turns start in dontAsk; task 839: the PreToolUse hooks counting the built-in tools of a run with the broker's tools; the broker_token row reads broker-direct-tools.log as a regular file; task 1594: a turn that failed after its receipt goes to validation whatever order the receipt and the exit were seen in; task 1109: the tests of the recovery job stopping a command outside the turn group; task 1711: the tests of the headless planners' turns kept as the boundary; task 1596: a headless planner at the provider wall takes the provider retry before the requests behind it, and an answer is read only past the wall; task 1437; task 1440: a worker's session wrapper always starts in the background, `[headless] wrapper` accepted and ignored for workers, the run's session stopped without cmux, run screen refused; task 1521: planned task replanning (unimplemented)
-last_verified: 2026-10-06 # task 1438; task 1441; task 1557; task 1657; task 1857; task 1850; task 1439; task 838; task 839; task 1594; task 1109; task 1711; task 1596; task 1437; task 1440
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - design-supervisor-lifecycle-task-replanning

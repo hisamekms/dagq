@@ -4,8 +4,8 @@ type: design
 title: "Session prompts"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1441: a runtime planner's wrapper runs in the background with prompt.txt as its first turn; task 1571: the limits of the four prompts of the runtime's planners and planner_prompt_written (ADR-t1566-1)
-last_verified: 2026-10-06 # task 1441; task 1571
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - adr-t1228-2

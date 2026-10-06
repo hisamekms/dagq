@@ -4,8 +4,8 @@ type: design
 title: "人の答えを待つrun（slotの外の待ち）"
 status: current
 created: 2026-09-26
-updated: 2026-10-05 # task 1591: the landing queue out of the slots for light changes; task 1437; task 1440: the reopen starts a background wrapper, no workspace
-last_verified: 2026-10-05 # task 1591; task 1437; task 1440
+updated: 2026-10-05
+last_verified: 2026-10-05
 scope: runtime
 related:
   - design-supervisor-lifecycle

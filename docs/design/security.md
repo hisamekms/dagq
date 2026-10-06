@@ -4,8 +4,8 @@ type: design
 title: Security
 status: current
 created: 2026-09-28
-updated: 2026-10-06 # task 1921: ci.read (ci failures); task 1564: ask --request is the request's own planner's; task 1540: revisit is task.write; task 840: broker package backend; task 1509; task 1440: run screen and run close-workspaces are refused after authorization
-last_verified: 2026-10-06 # task 1921; task 1564; task 1540; task 840; task 1440
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 tags:
   - security

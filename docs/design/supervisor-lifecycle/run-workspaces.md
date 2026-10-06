@@ -4,8 +4,8 @@ type: design
 title: "Run workspaces（runのsessionの記録と停止）"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1441: no workspaces_described path for planners either; task 1657: each stop of a wrapper is also recorded as wrapper_stopped; task 1440: a run's session is a background wrapper; the sweep stops leftover wrappers without cmux; run close-workspaces is refused
-last_verified: 2026-10-06 # task 1441; task 1657; task 1440
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - adr-t1433-3

@@ -4,8 +4,8 @@ type: design
 title: "`needs_session`"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1557: the resume's waits are judged on Clock::monotonic by exit_wait and resume_deadline; task 1657: a wrapper is stopped by stop_background and each stop is recorded as wrapper_stopped; task 1850: resumes, recovery jobs and claims share one line by effective priority; task 1437; task 1440: the resume's wrapper starts only in the background, and leftover resume wrappers are stopped without cmux; task 1521: planned task replanning (unimplemented)
-last_verified: 2026-10-06 # task 1557; task 1657; task 1850; task 1437; task 1440
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - design-supervisor-lifecycle-task-replanning

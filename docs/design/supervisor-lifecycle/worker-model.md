@@ -4,8 +4,8 @@ type: design
 title: "Worker model"
 status: current
 created: 2026-09-27
-updated: 2026-10-04 # task 1437
-last_verified: 2026-10-04 # task 1437
+updated: 2026-10-04
+last_verified: 2026-10-04
 scope: runtime
 related:
   - design-supervisor-lifecycle

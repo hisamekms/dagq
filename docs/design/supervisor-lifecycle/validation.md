@@ -4,8 +4,8 @@ type: design
 title: "Validation"
 status: current
 created: 2026-09-26
-updated: 2026-10-05 # task 1437; task 1440: the session's wrapper is stopped, no workspace; e2e runs start in the background
-last_verified: 2026-10-05 # task 1437; task 1440
+updated: 2026-10-05
+last_verified: 2026-10-05
 scope: runtime
 related:
   - design-supervisor-lifecycle

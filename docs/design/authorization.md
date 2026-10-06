@@ -4,8 +4,8 @@ type: design
 title: Authorization
 status: current
 created: 2026-09-27
-updated: 2026-10-06 # task 1921: CI watch implemented; task 1647; task 1851: set-priority on in_progress tasks is the user's and the inbox's; task 1564: ask --request is the request's own planner's; task 1540: revisit is task.write; task 838: required turns add the built-in file tools to deny and permissions.allow; task 1509; task 1437; task 1609; task 1440: run screen and run close-workspaces are refused after authorization
-last_verified: 2026-10-06 # task 1921; task 1647; task 1851; task 1564; task 1540; task 838; task 1509; task 1437; task 1609; task 1440
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - adr-t1394-1

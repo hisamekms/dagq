@@ -4,8 +4,8 @@ type: design
 title: "`stats`"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1438: the interactive worker retired from the text; task 1225: the Codex recovery job in jobs.recovery; task 1223: the observer on Codex; task 1312: landing_waits; task 1486: the gaps of today's token counts (ADR-t1486-1); task 1437; task 1712; task 1634; task 1632
-last_verified: 2026-10-06 # task 1438; task 1225; task 1223; task 1312; task 1486; task 1437; task 1712; task 1634; task 1632
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - adr-t1486-1

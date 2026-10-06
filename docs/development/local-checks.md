@@ -4,7 +4,7 @@ type: development
 title: このrepositoryの手元の検証（人とworkerが流すもの、testの範囲、stress、負荷の下で落ちるtestの再現、e2eを流さないこと、resumeでの再現、受け入れ条件の対応づけ、askにしないもの）
 status: current
 created: 2026-10-03
-updated: 2026-10-05 # task 1480
+updated: 2026-10-05
 owners:
   - hisamekms
 tags:

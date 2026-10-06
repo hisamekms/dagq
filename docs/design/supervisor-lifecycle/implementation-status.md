@@ -4,8 +4,8 @@ type: design
 title: "Implementation status"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1441: the runtime planner's interactive route is gone; task 1557: the supervisor's waits of the session, revise, resume and reopen read Clock::monotonic; task 1709; task 1437
-last_verified: 2026-10-06 # task 1441; task 1557; task 1437
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - design-supervisor-lifecycle

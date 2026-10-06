@@ -4,8 +4,8 @@ type: design
 title: "sessionへの送信と確認"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1441: planner screen/send read and type nothing, runtime planners are headless only; task 1440: run screenをturnのlogのCLIへの案内とともに拒む
-last_verified: 2026-10-06 # task 1441; task 1440
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - design-supervisor-lifecycle

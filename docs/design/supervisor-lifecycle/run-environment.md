@@ -4,8 +4,8 @@ type: design
 title: "Run environment"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1438: the interactive worker retired from the text; task 1441: [headless] wrapper and the route of [roles.runtime_planner] ignored for the runtime's planners; task 1921: CI watch implemented; [ci_watch] read; task 1866: review subagent definitions at .dagq/agents/<agent>/AGENT.md, doctor checks them (ADR-t1728-1); task 1920: planned [ci_watch]; task 1857: [provider_fallback] workers; task 1225: the recovery job runs on Codex too; task 1223: the observer runs on Codex too; task 1641: [goals] tags; task 1643: repository の語彙; task 840: [broker.package]; task 1591; task 1437; task 1440: [headless] wrapper ignored for workers, [run.env] in the wrapper's process env; task 487: recurring drafts planned (ADR-0072); task 1224: this repository sets observer to Codex
-last_verified: 2026-10-06 # task 1438; task 1441; task 1921; task 1866; task 1857; task 1225; task 1223; task 1641; task 1643; task 840; task 1440; task 1224
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - adr-0072

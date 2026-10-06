@@ -4,8 +4,8 @@ type: design
 title: "Finding planners (supervisor)"
 status: current
 created: 2026-09-27
-updated: 2026-10-06 # task 1441: runtime planners run headless only in the background (no workspace, submit owner from the planner's record, answers and exits as turn requests, tests without a cmux double); task 1921: CI watch implemented; ci_failure findings and their planner prompt; task 1640: an improvement task without --priority inherits its goal's; task 1596: a headless planner at the provider wall takes the provider retry before the requests behind it, and an answer is read only past the wall; task 1704: planned human-answer wait release (unimplemented)
-last_verified: 2026-10-06 # task 1441; task 1921; task 1640; task 1596
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - adr-t1920-1

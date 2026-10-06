@@ -4,8 +4,8 @@ type: design
 title: "claimを控える（衝突の多いファイル）"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1857; task 1634; task 1632
-last_verified: 2026-10-06 # task 1857; task 1634; task 1632
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - adr-0080

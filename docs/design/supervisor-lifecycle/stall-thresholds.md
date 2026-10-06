@@ -4,8 +4,8 @@ type: design
 title: "Stall thresholds"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1441: the runtime's planners use no screen threshold; task 1437
-last_verified: 2026-10-06 # task 1441; task 1437
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - design-supervisor-lifecycle

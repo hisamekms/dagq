@@ -4,8 +4,8 @@ type: design
 title: Claude Code and Codex plugin integration
 status: current
 created: 2026-09-21
-updated: 2026-10-06 # task 1441: every runtime planner is headless, so the session hook records only the inbox and a person's planner; task 1836: repository-aware push recovery assertions; task 1540: a kept draft returns to a runtime planner at its revisit time; task 842: reference/broker.md of dagq and dagq-recover; task 1468: the plugin test also checks for docs/design and docs/plans paths, relative links out of the plugin and "fixed binary"; task 1440: runs open no workspace
-last_verified: 2026-10-06 # task 1441; task 1836; task 1540; task 842; task 1468; task 1440
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: distribution
 related:
   - adr-t655-1

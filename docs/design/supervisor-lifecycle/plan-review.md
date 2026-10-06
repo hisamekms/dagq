@@ -4,8 +4,8 @@ type: design
 title: "Plan review (supervisor)"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1441: runtime planners take revises, answers and the exit as turn requests of a background wrapper (no workspace, nothing typed); task 1596: a headless planner at the provider wall takes the provider retry before the requests behind it, and an answer is read only past the wall; task 1704: planned human-answer wait release (unimplemented); task 1521: planned task replanning (unimplemented)
-last_verified: 2026-10-06 # task 1441; task 1596
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - design-supervisor-lifecycle-task-replanning

@@ -4,8 +4,8 @@ type: design
 title: "`plan` / `planners`"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1441: runtime planners start only as background headless wrappers with no workspace, the route key is ignored, the screen inference, typing and the silent-planner timeout are left to person planners or removed, and planner screen/send answer every planner as task 1533 did; task 1647; task 1681; task 1564: only the request's own planner asks with --request, and its tests in item 9; task 1540: a request waits for a draft planner of a draft it names, and a kept draft returns at its revisit time; task 1646: planner request takes the words from --text-file and --text - as request add does; task 1711: the tests of the headless planners' turns and of the planning requests name the unit tests their decisions moved to; task 1596: a headless planner at the provider wall takes the provider retry before the requests behind it, and an answer is read only past the wall; task 1437; task 1440: runs no longer create workspaces; task 1704: planned human-answer wait release (unimplemented); task 1521: planned task replanning (unimplemented)
-last_verified: 2026-10-06 # task 1441; task 1647; task 1681; task 1564; task 1540; task 1646; task 1711; task 1596; task 1437; task 1440
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - design-supervisor-lifecycle-task-replanning

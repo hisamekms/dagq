@@ -4,8 +4,8 @@ type: design
 title: 長期化した非対話taskの診断・保留・成果保存・置換（未実装）
 status: draft
 created: 2026-10-05
-updated: 2026-10-06 # task 1521 revise 1: goal review and close after replacement
-last_verified: 2026-10-06 # task 1521 revise 1: ADR consistency checked; entire design remains unimplemented
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - adr-t1521-1

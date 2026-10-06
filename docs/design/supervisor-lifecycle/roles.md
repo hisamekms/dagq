@@ -4,8 +4,8 @@ type: design
 title: "Roles"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1441: a runtime planner's wrapper starts in the background (PlannerSession) with headless turns, no workspace; NamedWorkspace is the inbox's only; task 1223: the observer on Codex; task 839: a worker run with the broker's tools gets the PreToolUse hooks counting the built-in tools; task 1437; task 1440: a worker's session wrapper starts in the background (RunSession), no run workspace
-last_verified: 2026-10-06 # task 1441; task 1223; task 839; task 1437; task 1440
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - adr-t1228-2

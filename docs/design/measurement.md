@@ -4,8 +4,8 @@ type: design
 title: 計測（SSOTとビュー・区間とタグ・台帳の形・畳む関数・台帳を作る係・送る口・コマンドの形と分類）
 status: draft
 created: 2026-10-04
-updated: 2026-10-06 # task 1924: landing IT selection measurement; task 1923: IT coverage map artifact; task 1511: follow-up baseline
-last_verified: 2026-10-05 # tasks 1689/1511: view inventory and baseline adapter; runtime redesign remains unimplemented
+updated: 2026-10-06
+last_verified: 2026-10-05
 scope: runtime
 related:
   - adr-t1662-1

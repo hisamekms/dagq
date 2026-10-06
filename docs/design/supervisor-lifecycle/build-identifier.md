@@ -4,8 +4,8 @@ type: design
 title: "Build identifier"
 status: current
 created: 2026-09-26
-updated: 2026-10-05 # task 1632
-last_verified: 2026-10-05 # task 1632
+updated: 2026-10-05
+last_verified: 2026-10-05
 scope: runtime
 related:
   - design-supervisor-lifecycle

@@ -4,8 +4,8 @@ type: design
 title: "Review (supervisor)"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1441: the planner's e2e case is deleted, not left out; task 1873: the definitions' tools declaration, its check and the per-provider conversion for agent jobs (ADR-t1728-2); task 1557: the revise's resume timeout is judged on Clock::monotonic by revise_deadline; task 1866: definitions at .dagq/agents/<agent>/AGENT.md with the old path as a fallback, doctor's agents check (ADR-t1728-1); task 1895: the planned review stage of agent and program jobs (ADR-t1895-1, ADR-t1895-2); task 1440: the e2e's sweep case is deleted, not left out; task 1547: the definitions also refer to design documents (architecture-boundaries); task 1437; task 1712; task 1683; task 1713: the Codex review cases of the test list moved to unit tests and runtime_provider_switch; task 1451: the broker's e2e is back; task 1521: planned task replanning (unimplemented)
-last_verified: 2026-10-06 # task 1441; task 1873; task 1557; task 1866; task 1440; task 1547; task 1437; task 1712; task 1683; task 1713; task 1451
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - adr-t1728-2

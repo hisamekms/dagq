@@ -4,8 +4,8 @@ type: design
 title: "スループットの見直し（`throughput-review`）"
 status: current
 created: 2026-09-29
-updated: 2026-10-05 # task 1223: the observer runs on Codex too
-last_verified: 2026-10-05 # task 1223
+updated: 2026-10-05
+last_verified: 2026-10-05
 scope: runtime
 related:
   - adr-t1566-1

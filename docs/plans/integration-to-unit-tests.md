@@ -4,7 +4,7 @@ type: plan
 title: 判断を unit test に移した着地（goal 68、task 1412〜1416）の前後の本番の coverage の関門の test の時間と Summary
 status: active
 created: 2026-10-03
-updated: 2026-10-05 # task 1785
+updated: 2026-10-05
 owners:
   - hisamekms
 tags:

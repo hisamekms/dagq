@@ -4,8 +4,8 @@ type: design
 title: "KPIのレポート（`report`）"
 status: current
 created: 2026-09-27
-updated: 2026-10-02 # task 1371: worker health
-last_verified: 2026-10-02 # task 1371
+updated: 2026-10-02
+last_verified: 2026-10-02
 scope: runtime
 related:
   - design-supervisor-lifecycle

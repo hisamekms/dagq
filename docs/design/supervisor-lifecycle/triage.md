@@ -4,8 +4,8 @@ type: design
 title: "Triage (supervisor)"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1657: a wrapper is stopped by stop_background and each stop is recorded as wrapper_stopped; task 1225: the recovery job runs on Codex too; task 1850: resumes, recovery jobs and claims share one line by effective priority; task 1633: the recovery prompt carries the supervisor's build, its replacements and the dependencies it holds; task 1571 (after task 1361); task 1440: step 7 stops the run's background wrappers without cmux; task 1521: planned task replanning (unimplemented)
-last_verified: 2026-10-06 # task 1657; task 1225; task 1850; task 1633; task 1571; task 1440
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - design-supervisor-lifecycle-task-replanning

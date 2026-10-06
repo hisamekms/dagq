@@ -4,8 +4,8 @@ type: design
 title: "Naming"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1441: runtime planners have no workspace name, description or group; their handle and env; task 1440: runのworkspaceの名前・description・groupとその閉じる経路を除いた
-last_verified: 2026-10-06 # task 1441; task 1440
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: runtime
 related:
   - design-supervisor-lifecycle

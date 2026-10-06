@@ -4,8 +4,8 @@ type: design
 title: Agent provider lifecycle
 status: current
 created: 2026-09-21
-updated: 2026-10-06 # task 1438: add / edit refuse --interactive and the worker's texts have no interactive route; task 1441: runtime_session_settings is the worker's only, a runtime planner runs headless turns; task 1857: [provider_fallback] workers turns the workers' fallback off; task 1225: the recovery job runs on Codex too, and the span table's triage and observer rows name the Codex thread; task 1574: the observer's second failure in a row under --no-claude reaches the inbox (check the failed observer); task 1223: the observer runs on Codex too; task 838: required turns of a worker; task 839: the session, resume and headless settings carry the PreToolUse hooks of a run with the broker's tools; task 1713: the wall and review-route judgments are pure functions with unit tests; claim and decision 5 follow the headless-only route of task 1437 (after task 1596, task 1486, task 1570); task 1440: a run's wrapper runs in the background
-last_verified: 2026-10-06 # task 1438; task 1441; task 1857; task 1225; task 1574; task 1223; task 838; task 839; task 1713; task 1440
+updated: 2026-10-06
+last_verified: 2026-10-06
 scope: provider
 related:
   - adr-t1857-1
