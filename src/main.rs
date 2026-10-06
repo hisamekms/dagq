@@ -313,9 +313,9 @@ enum Command {
         #[arg(long)]
         corrects: Option<i64>,
     },
-    /// Move a draft or ready task to an open goal, or out of its goal with --none.
+    /// Move a draft, submitted or ready task to an open goal, or out of its goal with --none.
     SetGoal {
-        /// Draft or ready task to move.
+        /// Draft, submitted or ready task to move.
         task: i64,
         /// Open goal to join; omit it and pass --none to leave the current goal.
         #[arg(required_unless_present = "none", conflicts_with = "none")]
@@ -324,9 +324,9 @@ enum Command {
         #[arg(long)]
         none: bool,
     },
-    /// Replace the paths a draft or ready task may change (`add --paths`), or remove the limit with --none.
+    /// Replace the paths a draft, submitted or ready task may change (`add --paths`), or remove the limit with --none.
     SetPaths {
-        /// Draft or ready task.
+        /// Draft, submitted or ready task.
         task: i64,
         /// Glob of a path the task may change; repeatable. Replaces every glob it had.
         #[arg(
@@ -401,7 +401,7 @@ enum Command {
         #[arg(long, group = "field")]
         no_wait_for_build: bool,
     },
-    /// Give a draft, ready or in-progress task a priority of its own (`add --priority`), or with
+    /// Give a draft, submitted, ready or in-progress task a priority of its own (`add --priority`), or with
     /// --inherit let it inherit its goal's again (ADR-t1639-1). It takes effect at the next claim,
     /// or for an in-progress task at the next resume or recovery job of its run (ADR-t1850-1; the
     /// user and the inbox only), and never stops a running run.
@@ -1880,8 +1880,10 @@ enum GoalCommand {
         /// New document path; an empty value clears it.
         #[arg(long, group = "field")]
         doc: Option<String>,
-        /// New priority of a draft or open goal; its draft, submitted and ready tasks without one
-        /// of their own take it at their next claim (ADR-t1639-1).
+        /// New priority of a draft or open goal; tasks without a priority of their own follow
+        /// the goal's current priority in every status. It takes effect at a ready task's next
+        /// claim or an in-progress task's next resume or recovery job, and never stops a running
+        /// run (ADR-t1811-1, ADR-t1850-1).
         #[arg(long, group = "field", value_parser = PRIORITIES)]
         priority: Option<String>,
         /// The tags that replace the goal's (ADR-t1639-1); repeatable. With `[goals] tags` in
