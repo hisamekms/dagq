@@ -526,3 +526,55 @@ fn two_inputs_none_or_unreadable_words_are_refused_and_hand_nothing() {
     assert!(events(&db, "turn_requested").is_empty());
     assert_eq!(calls(Path::new(cmux)), "", "nothing reached cmux");
 }
+
+#[test]
+fn an_ungranted_actor_is_refused_before_a_file_or_open_stdin_is_read() {
+    let (dir, db) = queue();
+    let missing = dir.path().join("missing.md");
+    for (n, input) in [["--text-file", missing.to_str().unwrap()], ["--text", "-"]]
+        .into_iter()
+        .enumerate()
+    {
+        let child = Command::new(env!("CARGO_BIN_EXE_dagq"))
+            .without_actor_env()
+            .env("DAGQ_ROLE", "planner")
+            .arg("--db")
+            .arg(&db)
+            .args(["planner", "request", "1"])
+            .args(input)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut child = common::KillOnDrop::new(child, "refusal before reading open stdin");
+        // Hold the writing end outside Child: wait_with_output must not
+        // close it and supply EOF, which would hide a read before refusal.
+        let stdin = child.child().stdin.take().unwrap();
+        let output = child.wait_with_output().unwrap();
+        drop(stdin);
+        assert!(!output.status.success(), "{input:?}");
+        let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(error["denied"]["capability"], "planner.request");
+        assert_eq!(error["denied"]["reason"], "not granted");
+        let denied = ok(
+            &db,
+            &[
+                "events",
+                "--after",
+                "0",
+                "--all",
+                "--full",
+                "--kind",
+                "authorization_denied",
+            ],
+        );
+        let denied = denied["events"].as_array().unwrap();
+        assert_eq!(denied.len(), n + 1, "one event per refusal");
+        assert_eq!(denied[n]["actor"]["role"], "planner");
+        assert_eq!(denied[n]["payload"]["capability"], "planner.request");
+    }
+    assert!(!planners_dir(&db).join("1").join("requests").exists());
+    assert!(events(&db, "planner_request_handed").is_empty());
+    assert!(events(&db, "turn_requested").is_empty());
+}

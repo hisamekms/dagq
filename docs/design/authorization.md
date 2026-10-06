@@ -4,8 +4,8 @@ type: design
 title: Authorization
 status: current
 created: 2026-09-27
-updated: 2026-10-06 # task 1851: set-priority on in_progress tasks is the user's and the inbox's; task 1564: ask --request is the request's own planner's; task 1540: revisit is task.write; task 838: required turns add the built-in file tools to deny and permissions.allow; task 1509; task 1437; task 1609; task 1440: run screen and run close-workspaces are refused after authorization
-last_verified: 2026-10-06 # task 1851; task 1564; task 1540; task 838; task 1509; task 1437; task 1609; task 1440
+updated: 2026-10-06 # task 1647; task 1851: set-priority on in_progress tasks is the user's and the inbox's; task 1564: ask --request is the request's own planner's; task 1540: revisit is task.write; task 838: required turns add the built-in file tools to deny and permissions.allow; task 1509; task 1437; task 1609; task 1440: run screen and run close-workspaces are refused after authorization
+last_verified: 2026-10-06 # task 1647; task 1851; task 1564; task 1540; task 838; task 1509; task 1437; task 1609; task 1440
 scope: runtime
 related:
   - adr-t1394-1
@@ -147,6 +147,8 @@ CLIのerrorは`{"error": ..., "denied": {"role", "capability", "reason"}}`で、
 | `finding resolve` / `finding dismiss` | `finding.resolve` / `finding.dismiss` | finding |
 
 計画の依頼（[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)の決定3・6）の`request add`と`request decline`は、`src/application/commands/requests.rs`の`Requests`が全てのroleについて判定してからstoreを呼ぶ（task 1395。port `RequestStore`は`SqliteQueue`が実装し、拒否は同じ`authorization_denied`に残る）。`ask --request ID`（`planner_question`）は上の`ask`と同じ`ask.open`で判定し、`request decline`と同じくその依頼のplannerをstoreから読んで（port `DialogueStore::request_planner`）、plannerにはその依頼のplanner自身だけを許す（task 1564）。`requests`は読み取り（`queue.read`）。
+
+`request add`はCLIの`check_access`でも同じ`request.record`（queue）を`Gate`に通し、`request_words`でファイルやstdinを読む前に拒む（task 1647）。拒否はそこで記録して直ちに返すため、`Requests::record`の検査は残しても`authorization_denied`は1回だけになる。権限を持つuserとinboxには今までどおり入力の検査を行う。
 
 | コマンド | capability | resource |
 | --- | --- | --- |

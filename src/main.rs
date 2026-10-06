@@ -2363,11 +2363,22 @@ fn authorized_in_application(command: &Command) -> bool {
 /// supervisor's headless jobs (ADR-0027, each job by its own role and the
 /// legacy `reviewer` as a review job) keep their limits (ADR-0044
 /// decision 4). A refusal is recorded as `authorization_denied` on the
-/// queue `db` names, opened only then (task 1151); a command allowed opens
+/// queue `db` names, opened only then (task 1151). `request add` also uses
+/// this check before reading its input; Requests::record still authorizes
+/// before recording. A command allowed opens
 /// nothing here, and reads keep the queue read-only (ADR-0073 decisions 5,
 /// 7 and 18).
 fn check_access(actor: &ActorContext, command: &Command, db: Option<&Path>) -> Result<()> {
-    if authorized_in_application(command) {
+    // `request add` must reject before reading words from a file or stdin.
+    // Keep Requests::record's application check too; a refusal here returns
+    // immediately, so only this Gate records it.
+    let request_add = matches!(
+        command,
+        Command::Request {
+            command: RequestCommand::Add { .. }
+        }
+    );
+    if authorized_in_application(command) && !request_add {
         return Ok(());
     }
     let gate = dagq::application::commands::Gate {
