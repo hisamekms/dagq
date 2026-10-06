@@ -109,8 +109,8 @@ impl WatcherRecord {
 }
 
 /// Seconds a watch's process may have started before its record's
-/// `started_at`: the watch writes the record after it has opened the
-/// queue, which a queue copied to read an older schema can take a while.
+/// `started_at`: allow for delays from starting the process to writing
+/// its record, including opening the queue.
 pub const PROCESS_START_LEAD_SECS: i64 = 60;
 
 /// Seconds a watch's process may seem to have started after its record's

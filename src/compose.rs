@@ -3789,6 +3789,11 @@ pub fn open_queue(db: &Path) -> Result<SqliteQueue> {
     SqliteQueue::open(db)
 }
 
+/// The live read-only connection for `watch`, refusing older schemas.
+pub fn open_queue_watch(db: &Path) -> Result<SqliteQueue> {
+    SqliteQueue::open_watch(db)
+}
+
 /// Open the queue at `db` read-only for the CLI's reads.
 pub fn open_queue_read_only(db: &Path) -> Result<SqliteQueue> {
     SqliteQueue::open_read_only(db)
@@ -3993,8 +3998,21 @@ pub fn timeline_in(queue: &SqliteQueue, run: &RunId, gap_secs: i64, full: bool) 
 /// `watch --role inbox` keeps its record in a file under the queue's
 /// directory, never in the queue (ADR-t906-1).
 pub fn watch(db: &Path, options: &crate::application::watch::WatchOptions) -> Result<Value> {
+    watch_in(db, &open_queue_watch(db)?, options)
+}
+
+/// `watch` using the live read-only queue already opened by the CLI.
+/// Callers must use [`open_queue_watch`], never a migrated snapshot.
+pub fn watch_in(
+    db: &Path,
+    queue: &SqliteQueue,
+    options: &crate::application::watch::WatchOptions,
+) -> Result<Value> {
     use crate::infrastructure::inbox_watchers;
-    let queue = SqliteQueue::open(db)?;
+    ensure!(
+        queue.is_read_only()?,
+        "watch requires a live read-only queue connection; use open_queue_watch"
+    );
     let clock = queue.generators().clock.clone();
     let mut record = (options.role == Some(SessionRole::Inbox))
         .then(|| {
@@ -4017,7 +4035,7 @@ pub fn watch(db: &Path, options: &crate::application::watch::WatchOptions) -> Re
         })
         .flatten();
     crate::application::watch::watch(
-        &queue,
+        queue,
         clock.as_ref(),
         &SystemProcesses,
         record

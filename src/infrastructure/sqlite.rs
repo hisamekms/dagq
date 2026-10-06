@@ -140,6 +140,27 @@ impl SqliteQueue {
         Ok(queue)
     }
 
+    /// Opens the live queue read-only for polling (`watch`). Unlike
+    /// `open_read_only`, never makes a snapshot: older schemas must be
+    /// migrated first so subsequent reads can see concurrent writes.
+    pub fn open_watch(path: impl AsRef<Path>) -> Result<Self> {
+        let queue = Self::connect_with(
+            path.as_ref(),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        queue
+            .state()?
+            .context("queue is not initialized; use init first")?
+            .check_opens()?;
+        Ok(queue)
+    }
+
+    /// Whether SQLite opened the queue database read-only. In-memory
+    /// migrated snapshots are writable and return false.
+    pub fn is_read_only(&self) -> Result<bool> {
+        Ok(self.conn.is_readonly(rusqlite::MAIN_DB)?)
+    }
+
     /// Opens an initialized queue for a command that only reads (`status`,
     /// `show`, `list`, `graph`, `stats` and the like, ADR-0045 decision 18):
     /// the connection is read-only, so opening writes no pragma, event or
@@ -149,7 +170,7 @@ impl SqliteQueue {
     /// newer binary (a development build) reads it and the file, the
     /// supervisor and the runs on it are left as they are; even a breaking
     /// migration only rewrites the copy. The copy is a snapshot: a command
-    /// that polls, like `watch`, opens the queue itself.
+    /// that polls, like `watch`, uses [`Self::open_watch`] instead.
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
         match Self::inspect_read_only(path)?.1 {
             ReadOnlyQueue::Readable(queue) => Ok(queue),

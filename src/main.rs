@@ -3096,10 +3096,13 @@ fn execute(cli: Cli) -> Result<Value> {
             }
         };
     }
+    // `watch` needs the live read-only file rather than a migrated snapshot.
     // `report` and `graph --out` write files but no queue state; `run log`
     // and `planner log` read a session's log, and `run screen` / `run send`
     // only read the run (task 1437), recording nothing.
-    let mut queue = if reads_only(&cli.command)
+    let mut queue = if matches!(cli.command, Command::Watch { .. }) {
+        dagq::compose::open_queue_watch(&db)?
+    } else if reads_only(&cli.command)
         || matches!(
             cli.command,
             Command::Report { .. }
@@ -3112,7 +3115,8 @@ fn execute(cli: Cli) -> Result<Value> {
                 | Command::Planner {
                     command: PlannerCommand::Log { .. }
                 }
-        ) {
+        )
+    {
         dagq::compose::open_queue_read_only(&db)?
     } else {
         dagq::compose::open_queue(&db)?
@@ -3680,8 +3684,9 @@ fn execute(cli: Cli) -> Result<Value> {
             until_attention,
             interval,
             role: r,
-        } => dagq::compose::watch(
+        } => dagq::compose::watch_in(
             &db,
+            &queue,
             &dagq::application::watch::WatchOptions {
                 after: after.map(EventId::new),
                 timeout: (!until_attention)
