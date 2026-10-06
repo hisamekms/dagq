@@ -29,9 +29,8 @@ use crate::{
 
 impl Supervisor<'_> {
     /// Deliver the answered `planner_question` asks: sent to the live
-    /// planner that works on the ask's task once it stopped after asking (as
-    /// its next turn; typed only into a person's planner opened before
-    /// `dagq plan` was abolished), handed to a new planner when the draft's
+    /// planner of the runtime's that works on the ask's task once it stopped
+    /// after asking (as its next turn), handed to a new planner when the draft's
     /// one is gone (within the limit, counted in `runtime_open`), or closed
     /// when the draft moved on. The sending is claimed first
     /// (`planner_answer_claimed`), so only one supervisor sends an answer. A

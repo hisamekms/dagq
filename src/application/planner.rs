@@ -4,9 +4,10 @@
 //! planner was closed ([`open_runtime_planner`]), and for a draft, a
 //! finding or a planning request the inbox recorded
 //! ([`open_draft_planner`]). `dagq plan`, which opened a planner a person
-//! talked with, is refused with [`PLAN_REFUSED`]; a person's planner opened
-//! before stays a `planners` row until it ends
-//! ([`close_exited_person_planners`]). Each is a `planners` row with its
+//! talked with, is refused with [`PLAN_REFUSED`]; the row of a person's
+//! planner opened before is closed without cmux, its workspace left to the
+//! person ([`close_person_planners`], ADR-t1433-2 decision 5). Each is a
+//! `planners` row with its
 //! own directory under the queue's `planners/` (its prompt, the wrapper
 //! binary, its `turns/`, log and idle marker).
 //!
@@ -17,10 +18,8 @@
 //! headless worker does ([`super::headless_session`]): its supervisor
 //! writes requests to its `turns/`, and its wrapper writes the idle marker
 //! when a turn ends. `[roles.runtime_planner] route` and `[headless]
-//! wrapper` of `dagq.toml` choose nothing for it any more. A person's
-//! planner ran its agent in the terminal of a workspace; its wrapper's
-//! agent `Stop` hook writes the idle marker. [`planner_view`] judges from
-//! these whether the planner is alive and idle.
+//! wrapper` of `dagq.toml` choose nothing for it any more. [`planner_view`]
+//! judges from these whether the planner is alive and idle.
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -43,12 +42,12 @@ use super::{
     naming::shell_join,
     path_text, planner_idle_marker,
     prompt::{FittedPrompt, runtime_planner_prompt},
-    screen_idle::{self, Inference, MarkerState, ScreenIdle, ScreenProbe},
+    screen_idle::{self, MarkerState},
     session::{OwnWorkspace, wrapper_refused},
 };
 use crate::domain::{
-    ActorContext, IdleProbe, PERSON_PLANNER_CLOSE_GRACE_SECS, PlannerCloseCode, PlannerId,
-    PlannerOrigin, PlannerProbe, PlannerRoute, PlannerSession, PlannerState, ProposalId, Task,
+    ActorContext, IdleProbe, PlannerCloseCode, PlannerId, PlannerOrigin, PlannerProbe,
+    PlannerRoute, PlannerSession, PlannerState, ProposalId, Task,
     actor_model::{ActorLaunch, ModelRole, REVISE_ESCALATION, RoleModels},
     background_wrapper::{BACKGROUND_FLAG, BackgroundSession},
     language::Language,
@@ -380,9 +379,6 @@ pub struct PlannerWrapper<'a> {
     /// the wrapper and records no such workspace (task 806); `None`
     /// outside cmux.
     pub own_workspace: Option<OwnWorkspace<'a>>,
-    /// The workspace's terminal (stderr), where the wrapper of a person's
-    /// planner says when its workspace closes (ADR-t1300-1).
-    pub terminal: &'a mut dyn std::io::Write,
     /// The clock a headless planner's turns read their times on.
     pub clock: &'a dyn Clock,
 }
@@ -411,7 +407,6 @@ pub fn run_planner_session(
         processes,
         pid,
         own_workspace,
-        terminal,
         clock,
     } = ctx;
     // A wrapper started for a planner already given up (its create
@@ -554,18 +549,6 @@ pub fn run_planner_session(
     };
     queue.planner_exited(id, pid, code)?;
     drop_own_runner(files, id, dir);
-    // A person's planner is closed by the supervisor after the grace
-    // (ADR-t1300-1); the terminal says so.
-    if queue
-        .planner(id)
-        .is_ok_and(|planner| planner.origin == PlannerOrigin::Person)
-    {
-        let notice = exited_notice(id, code, dir);
-        if let Err(error) = writeln!(terminal, "{notice}").and_then(|()| terminal.flush()) {
-            warn!(planner_id = %id, error = %error, "planner {id}: the closing notice could not be written: {error}");
-        }
-        return Ok(json!({"planner_id": id, "exit_code": code, "notice": notice}));
-    }
     Ok(json!({"planner_id": id, "exit_code": code}))
 }
 
@@ -589,9 +572,8 @@ pub(crate) fn remove_runner(files: &dyn RunFiles, path: &Path) -> Result<bool> {
 }
 
 /// A planner with how it stands now: its state, whether it is alive, and
-/// since when its agent is idle (Unix seconds of its idle marker, or of
-/// the first capture its screen was inferred idle from, while the state is
-/// `idle`).
+/// since when its agent is idle (Unix seconds of its idle marker, while
+/// the state is `idle`).
 #[derive(Debug, Clone, Serialize)]
 pub struct PlannerView {
     #[serde(flatten)]
@@ -599,11 +581,6 @@ pub struct PlannerView {
     pub state: PlannerState,
     pub alive: bool,
     pub idle_since: Option<i64>,
-    /// The idle inferred from the screen (ADR-t803-1), when the idle
-    /// marker could not tell: while the state is `idle`, or while the
-    /// screen shows background work, which keeps it `working`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub idle_inferred: Option<Inference>,
     pub dir: PathBuf,
     /// The wrapper of a planner started in the background (ADR-t1404-1
     /// decision 8): its pid and the log `planner log` reads.
@@ -615,12 +592,10 @@ pub struct PlannerView {
     pub bundle: Option<crate::domain::DraftBundleView>,
 }
 
-/// What judging a planner reads: cmux for the workspace and screen of a
-/// person's planner (a planner of the runtime's has neither, ADR-t1433-2),
-/// the processes for its wrapper, the files for its idle marker, the agent's
-/// signals for the marker and the screen, and the clock; and for a
-/// screen standing in for the marker (ADR-t803-1), how long it must look
-/// idle (`[stall].screen_idle_secs`) and whether its captures are kept.
+/// What judging a planner reads: the backend for its background wrapper's
+/// handle (no cmux workspace is looked up or read, ADR-t1433-2 decisions 3
+/// and 5), the processes for its wrapper, the files for its idle marker,
+/// the agent's signals for the marker, and the clock.
 pub struct PlannerProbes<'a> {
     pub cmux: &'a dyn WorkspaceBackend,
     pub processes: &'a dyn ProcessControl,
@@ -628,20 +603,15 @@ pub struct PlannerProbes<'a> {
     pub signals: &'a dyn AgentSignals,
     pub clock: &'a dyn Clock,
     pub planners_dir: &'a Path,
-    pub screen_idle_threshold: Duration,
-    pub screen_idle: ScreenIdle<'a>,
 }
 
 /// Judge `planner` the way a worker session is judged: its session (a
-/// background handle's process for a planner of the runtime's; for a
-/// person's planner, its workspace UUID in every window's `cmux workspace
-/// list`), its wrapper's pid and heartbeat, and the idle marker its agent's
-/// turn or `Stop` hook wrote. For a person's planner, with a marker,
-/// whether the screen shows the agent at work on a new turn; without a
-/// marker, or with one older than the planner's last input (its input
-/// marker, the supervisor's stamp of a text it typed, or its opening), the
-/// screen stands in ([`ScreenProbe::infer`]). A headless planner's screen
-/// is not read. A closed planner is not looked at.
+/// background handle's process; a row in a cmux workspace, see
+/// [`retired_workspace`], reads `closed`), its wrapper's pid and
+/// heartbeat, and the idle marker its agent's turn wrote, counted only
+/// when no older than the planner's last input (its input marker, the
+/// supervisor's stamp of a request, or its opening). No screen is read. A
+/// closed planner is not looked at.
 pub fn planner_view(probes: &PlannerProbes<'_>, planner: PlannerSession) -> Result<PlannerView> {
     let dir = planner_dir(probes.planners_dir, planner.id);
     let now = probes.clock.now();
@@ -653,13 +623,13 @@ pub fn planner_view(probes: &PlannerProbes<'_>, planner: PlannerSession) -> Resu
         working: None,
         screen_idle: None,
     };
-    let mut inferred = None;
     if planner.closed_at.is_none() {
         if let Some(workspace) = &planner.workspace_id {
             // A planner of the runtime's has no workspace: its handle is
-            // its background wrapper's, judged by its process. A row of the
-            // runtime's an older binary opened in a workspace is not looked
-            // up in cmux (ADR-t1433-2 decision 3): it reads `closed`.
+            // its background wrapper's, judged by its process. A row in a
+            // cmux workspace (an older binary's of the runtime's, or a
+            // person's) is not looked up in cmux (ADR-t1433-2 decisions 3
+            // and 5): it reads `closed`.
             probe.workspace_listed = if retired_workspace(&planner) {
                 false
             } else {
@@ -715,42 +685,6 @@ pub fn planner_view(probes: &PlannerProbes<'_>, planner: PlannerSession) -> Resu
                     background_running: false,
                     ..idle
                 });
-        } else if planner.origin == PlannerOrigin::Person
-            && probe.workspace_listed
-            && let Some(workspace) = &planner.workspace_id
-        {
-            // A person's planner, opened before `dagq plan` was abolished,
-            // in the terminal of its workspace.
-            match marker {
-                Ok((idle, _)) => {
-                    probe.idle = Some(idle);
-                    probe.working = probes
-                        .cmux
-                        .capture(workspace)
-                        .ok()
-                        .map(|screen| probes.signals.working(&screen));
-                }
-                Err(state) => {
-                    inferred = ScreenProbe {
-                        cmux: probes.cmux,
-                        signals: probes.signals,
-                        files: probes.files,
-                        mode: probes.screen_idle,
-                        threshold: probes.screen_idle_threshold,
-                    }
-                    .infer(
-                        workspace,
-                        &marker_path,
-                        state,
-                        super::unix_millis(probes.clock.system_time()),
-                        super::unix_millis(last_input),
-                    );
-                    probe.screen_idle = inferred.map(|inference| IdleProbe {
-                        since: inference.since,
-                        background_running: inference.background_running == Some(true),
-                    });
-                }
-            }
         } else if let Ok((idle, _)) = marker {
             probe.idle = Some(idle);
         }
@@ -760,15 +694,7 @@ pub fn planner_view(probes: &PlannerProbes<'_>, planner: PlannerSession) -> Resu
     Ok(PlannerView {
         state,
         alive: state.alive(),
-        idle_since: probe
-            .idle
-            .map(|idle| idle.since)
-            .or(probe.screen_idle.map(|idle| idle.since))
-            .filter(|_| idle),
-        // Also while the screen shows background work: it is why the
-        // planner is `working`, and its span is recorded.
-        idle_inferred: inferred
-            .filter(|inference| idle || inference.background_running == Some(true)),
+        idle_since: probe.idle.map(|idle| idle.since).filter(|_| idle),
         background: planner.workspace_id.as_deref().and_then(|handle| {
             BackgroundSession::of(handle, dir.join(PLANNER_SESSION_LOG).display().to_string())
         }),
@@ -778,18 +704,19 @@ pub fn planner_view(probes: &PlannerProbes<'_>, planner: PlannerSession) -> Resu
     })
 }
 
-/// Whether `planner` is a planner of the runtime's an older binary opened
-/// in a cmux workspace (interactive, or headless under `[headless] wrapper
-/// = "workspace"`): the runtime calls no cmux for its planners any more
-/// (ADR-t1433-2 decision 3, ADR-t1433-1), so it neither looks the
-/// workspace up nor types into it, and ends the row as a session that is
-/// gone, the workspace left for a person to close.
+/// Whether `planner`'s row records a cmux workspace: a planner of the
+/// runtime's an older binary opened in one (interactive, or headless under
+/// `[headless] wrapper = "workspace"`, ADR-t1433-2 decision 3), or a
+/// person's planner opened before `dagq plan` was abolished (decision 5).
+/// The runtime calls no cmux for planners any more (ADR-t1433-1), so it
+/// neither looks the workspace up nor types into it, and ends the row
+/// ([`close_person_planners`] for a person's), the workspace left for a
+/// person to close.
 pub fn retired_workspace(planner: &PlannerSession) -> bool {
-    planner.origin == PlannerOrigin::Runtime
-        && planner
-            .workspace_id
-            .as_deref()
-            .is_some_and(|workspace| !crate::domain::background_wrapper::is_background(workspace))
+    planner
+        .workspace_id
+        .as_deref()
+        .is_some_and(|workspace| !crate::domain::background_wrapper::is_background(workspace))
 }
 
 /// When anything was last seen of the planner whose directory is `dir`,
@@ -827,19 +754,17 @@ pub fn planner_views(
         .collect()
 }
 
-/// Close the rows of the planners whose session is over for good
-/// ([`PlannerSession::abandoned`]), a person's included: their wrapper is
-/// done and, for a person's, their workspace is not in cmux's one listing
-/// of all windows. The
-/// rows are read before the listing, so a workspace opened after it is not
-/// taken for gone. A listing cmux fails to give closes nothing (the error
-/// is returned): a passing failure gives no planner up. A headless
-/// planner's wrapper in the background (ADR-t1404-1 decision 8) is never
-/// listed: its handle is judged by its process (`exists`, which also holds
-/// while a turn its dead wrapper left runs), so a live one whose heartbeat
-/// is late keeps its row, and one whose agent's exit is recorded is closed
-/// as `runtime_exited`, as the supervisor's pass would. Returns the IDs
-/// closed.
+/// Close the rows of the planners of the runtime's whose session is over
+/// for good ([`PlannerSession::abandoned`]): their wrapper is done and their
+/// session is gone. A person's planner's row is left to
+/// [`close_person_planners`], so it closes as `person_retired` alone. No
+/// cmux workspace is listed (ADR-t1433-2 decisions 3 and 5): a row in one
+/// ([`retired_workspace`]) counts as not listed. A headless planner's wrapper in the background
+/// (ADR-t1404-1 decision 8) is judged by its process (`exists`, which also
+/// holds while a turn its dead wrapper left runs), so a live one whose
+/// heartbeat is late keeps its row, and one whose agent's exit is recorded
+/// is closed as `runtime_exited`, as the supervisor's pass would. Returns
+/// the IDs closed.
 pub fn close_abandoned_planners(
     queue: &dyn Queue,
     cmux: &dyn WorkspaceBackend,
@@ -850,36 +775,15 @@ pub fn close_abandoned_planners(
     let open: Vec<PlannerSession> = queue
         .planners(false)?
         .into_iter()
-        .filter(|planner| planner.workspace_id.is_some())
+        .filter(|planner| planner.workspace_id.is_some() && !planner.person_retired())
         .collect();
-    if open.is_empty() {
-        return Ok(Vec::new());
-    }
-    // Only a person's planner has a workspace cmux lists; one of the
-    // runtime's an older binary opened in a workspace is not looked up
-    // (ADR-t1433-2 decision 3).
-    let needs_listing = open.iter().any(|planner| {
-        !planner.workspace_id.as_deref().is_some_and(is_background) && !retired_workspace(planner)
-    });
-    let listed = if needs_listing {
-        cmux.listed_workspace_ids()
-            .context("the planners' workspaces could not be listed")?
-    } else {
-        Vec::new()
-    };
     let now = clock.now();
     let mut closed = Vec::new();
     for planner in open {
         let workspace = planner.workspace_id.as_deref().unwrap_or_default();
         let background = is_background(workspace);
-        let workspace_listed = if background {
-            // One that cannot be judged now is not given up.
-            cmux.exists(workspace).unwrap_or(true)
-        } else if retired_workspace(&planner) {
-            false
-        } else {
-            listed.iter().any(|id| id.eq_ignore_ascii_case(workspace))
-        };
+        // One that cannot be judged now is not given up.
+        let workspace_listed = background && cmux.exists(workspace).unwrap_or(true);
         let probe = PlannerProbe {
             now,
             workspace_listed,
@@ -889,10 +793,7 @@ pub fn close_abandoned_planners(
             screen_idle: None,
         };
         if planner.abandoned(&probe) {
-            let (code, reason) = if background
-                && planner.origin == PlannerOrigin::Runtime
-                && planner.exited_at.is_some()
-            {
+            let (code, reason) = if background && planner.exited_at.is_some() {
                 (
                     PlannerCloseCode::RuntimeExited,
                     format!(
@@ -944,80 +845,35 @@ pub fn planner_closed_payload(
     })
 }
 
-/// What [`close_exited_person_planners`] did: the planners it closed, and
-/// the workspaces it could not close (their rows stay open for the next
-/// try).
-#[derive(Debug, Default)]
-pub struct PersonPlannersClosed {
-    pub closed: Vec<PlannerId>,
-    pub failures: Vec<String>,
-}
-
-/// Close the person's planners whose agent exited more than
-/// [`PERSON_PLANNER_CLOSE_GRACE_SECS`] ago (ADR-t1300-1,
-/// [`PlannerSession::person_exit_closes`]): the workspace, when cmux's one
-/// listing of all windows has it, is closed (unpinned first; a planner of
-/// the runtime's has no workspace, ADR-t1433-2), then the row, with
-/// `planner_closed`. A workspace not listed is left to
-/// [`close_abandoned_planners`]. A listing cmux fails to give closes
-/// nothing (the error is returned); a close that fails keeps the row open
-/// and is reported in `failures`.
-pub fn close_exited_person_planners(
-    queue: &dyn Queue,
-    cmux: &dyn WorkspaceBackend,
-    clock: &dyn Clock,
-) -> Result<PersonPlannersClosed> {
-    let now = clock.now();
-    let due: Vec<PlannerSession> = queue
-        .planners(false)?
-        .into_iter()
-        .filter(|planner| planner.person_exit_closes(now))
-        .collect();
-    let mut done = PersonPlannersClosed::default();
-    if due.is_empty() {
-        return Ok(done);
-    }
-    let listed = cmux
-        .listed_workspace_ids()
-        .context("the planners' workspaces could not be listed")?;
-    for planner in due {
-        let Some(workspace) = planner.workspace_id.as_deref() else {
-            continue;
-        };
-        if !listed.iter().any(|id| id.eq_ignore_ascii_case(workspace)) {
-            continue;
-        }
-        if let Err(error) = cmux.close(workspace) {
-            done.failures.push(format!(
-                "planner {}: its workspace {workspace} could not be closed: {error:#}",
-                planner.id
-            ));
+/// Close the row of every person's planner still open
+/// ([`PlannerSession::person_retired`], ADR-t1433-2 decision 5), alive or
+/// not, with `planner_closed` (`person_retired`, the workspace not closed,
+/// ADR-t1300-1 decision 2). No cmux is called: its workspace is neither
+/// looked at, typed into nor closed, and a person closes it in their own
+/// terminal. A revise or an answer for what it owned then goes the way of
+/// an owner that closed (a new planner of the runtime's, ADR-0047 decision
+/// 12, ADR-t1394-1 decision 7). Returns the IDs closed.
+pub fn close_person_planners(queue: &dyn Queue) -> Result<Vec<PlannerId>> {
+    let mut closed = Vec::new();
+    for planner in queue.planners(false)? {
+        if !planner.person_retired() {
             continue;
         }
         let reason = format!(
-            "planner {} of a person: its agent exited (exit code {}) more than {PERSON_PLANNER_CLOSE_GRACE_SECS} seconds ago; its workspace and record are closed",
+            "planner {} of a person, opened before dagq plan was abolished: its record is closed without cmux; a person closes its workspace{} in their own terminal (ADR-t1433-2)",
             planner.id,
             planner
-                .exit_code
-                .map_or_else(|| "unknown".to_owned(), |code| code.to_string()),
+                .workspace_id
+                .as_deref()
+                .map_or_else(String::new, |workspace| format!(" {workspace}")),
         );
         let payload =
-            planner_closed_payload(&planner, PlannerCloseCode::PersonExited, true, &reason);
+            planner_closed_payload(&planner, PlannerCloseCode::PersonRetired, false, &reason);
         if queue.end_planner(planner.id, &payload)? {
-            done.closed.push(planner.id);
+            closed.push(planner.id);
         }
     }
-    Ok(done)
-}
-
-/// The line the wrapper of a person's planner prints once its agent exited
-/// (ADR-t1300-1): the supervisor, not the wrapper, closes the workspace
-/// after the grace.
-pub fn exited_notice(id: PlannerId, code: i32, dir: &Path) -> String {
-    format!(
-        "dagq closes this workspace in {PERSON_PLANNER_CLOSE_GRACE_SECS} seconds (planner {id}, exit code {code}, log at {})",
-        dir.join(PLANNER_DEBUG_LOG).display()
-    )
+    Ok(closed)
 }
 
 /// Remove the runner of every planner, closed or not, that nothing runs
@@ -1071,13 +927,13 @@ mod tests {
     use super::*;
     use crate::domain::{FindingId, PlannerRoute, RequestId};
 
-    /// A planner of the runtime's whose row records a cmux workspace (an
-    /// older binary opened it, interactive or headless under `[headless]
-    /// wrapper = "workspace"`) is retired: no cmux is called for it. One
-    /// with a background handle or with no session yet is not, and neither
-    /// is a person's planner in its workspace (task 1577's).
+    /// A row that records a cmux workspace is retired, whoever opened it:
+    /// a planner of the runtime's an older binary opened in one
+    /// (interactive, or headless under `[headless] wrapper = "workspace"`),
+    /// or a person's planner (ADR-t1433-2 decision 5). No cmux is called
+    /// for it. One with a background handle or with no session yet is not.
     #[test]
-    fn only_a_runtime_planners_row_in_a_cmux_workspace_is_retired() {
+    fn only_a_row_in_a_cmux_workspace_is_retired() {
         let row = |origin, route, workspace: Option<&str>| PlannerSession {
             id: PlannerId::new(1),
             origin,
@@ -1099,25 +955,17 @@ mod tests {
         let cmux = Some("01234567-89AB-4DEF-8123-000000000000");
         let handle = Some("background:7:start");
         for route in [PlannerRoute::Interactive, PlannerRoute::Headless] {
-            assert!(
-                retired_workspace(&row(PlannerOrigin::Runtime, route, cmux)),
-                "{route:?}"
-            );
-            assert!(!retired_workspace(&row(
-                PlannerOrigin::Runtime,
-                route,
-                handle
-            )));
-            assert!(!retired_workspace(&row(
-                PlannerOrigin::Runtime,
-                route,
-                None
-            )));
-            for workspace in [cmux, handle, None] {
+            for origin in [PlannerOrigin::Runtime, PlannerOrigin::Person] {
                 assert!(
-                    !retired_workspace(&row(PlannerOrigin::Person, route, workspace)),
-                    "{route:?} {workspace:?}"
+                    retired_workspace(&row(origin, route, cmux)),
+                    "{origin:?} {route:?}"
                 );
+                for workspace in [handle, None] {
+                    assert!(
+                        !retired_workspace(&row(origin, route, workspace)),
+                        "{origin:?} {route:?} {workspace:?}"
+                    );
+                }
             }
         }
     }

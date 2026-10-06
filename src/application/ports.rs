@@ -998,7 +998,7 @@ pub trait AgentSignals {
     fn job_failure(&self, _output: &str) -> crate::domain::headless_job::JobFailure {
         crate::domain::headless_job::JobFailure::Other
     }
-    /// The last lines of the screen of a person's planner or the inbox.
+    /// The last lines of the screen of the inbox.
     fn screen_excerpt(&self, screen: &str) -> String;
     /// What the idle marker's content says. A content the adapter cannot
     /// read still marks a stop.

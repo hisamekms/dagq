@@ -1,8 +1,9 @@
 //! A planner session (ADR-0041 decisions 1, 6, 12, 13): an on-demand cmux
 //! workspace where a planner writes goals and tasks and submits them as a
 //! proposal. The runtime opens one for a proposal it sends back, a draft, a
-//! finding or a planning request; a person's planner (`dagq plan`, abolished
-//! by ADR-t1394-1) opened before stays until it ends. Each is recorded apart
+//! finding or a planning request; the row of a person's planner (`dagq
+//! plan`, abolished by ADR-t1394-1) opened before is closed without cmux
+//! (ADR-t1433-2 decision 5). Each is recorded apart
 //! (`planners`), with the pids and heartbeat of its session wrapper, so its
 //! liveness and idleness are judged the way a worker's are.
 
@@ -53,11 +54,6 @@ pub struct PlannerSession {
 /// How long a planner may take from its record to its wrapper's
 /// registration before it counts as `lost`, as a run's startup is bounded.
 pub const PLANNER_STARTUP_SECS: i64 = 120;
-
-/// How long a person's planner stays open after its agent exited before the
-/// runtime closes its workspace and row (ADR-t1300-1): time for a person to
-/// read the last screen.
-pub const PERSON_PLANNER_CLOSE_GRACE_SECS: i64 = 60;
 
 /// What was looked at to judge a planner: whether cmux still lists its
 /// workspace, whether its wrapper's process is alive, the idle marker its
@@ -161,19 +157,12 @@ impl PlannerSession {
 }
 
 impl PlannerSession {
-    /// Whether the runtime closes this person's planner now (ADR-t1300-1):
-    /// opened by a person, not closed, its workspace and wrapper recorded,
-    /// and its agent's exit recorded more than
-    /// [`PERSON_PLANNER_CLOSE_GRACE_SECS`] before `now`. A planner whose
-    /// wrapper is lost, or that is alive, is not.
-    pub fn person_exit_closes(&self, now: i64) -> bool {
-        self.origin == PlannerOrigin::Person
-            && self.closed_at.is_none()
-            && self.workspace_id.is_some()
-            && self.wrapper_pid.is_some()
-            && self
-                .exited_at
-                .is_some_and(|at| now - at > PERSON_PLANNER_CLOSE_GRACE_SECS)
+    /// Whether the runtime closes this row as a person's planner opened
+    /// before `dagq plan` was abolished (ADR-t1433-2 decision 5): opened by
+    /// a person and not closed, alive or not. Its workspace is neither
+    /// looked at nor closed; a person closes it in their own terminal.
+    pub fn person_retired(&self) -> bool {
+        self.origin == PlannerOrigin::Person && self.closed_at.is_none()
     }
 }
 
@@ -264,37 +253,40 @@ mod tests {
     }
 
     #[test]
-    fn only_a_persons_planner_whose_agent_exited_past_the_grace_is_closed() {
+    fn every_open_row_of_a_persons_planner_is_retired_alive_or_not() {
         let exited = PlannerSession {
             exit_code: Some(0),
             exited_at: Some(100),
             ..session()
         };
-        let past = 100 + PERSON_PLANNER_CLOSE_GRACE_SECS + 1;
-        assert!(exited.person_exit_closes(past));
-        // Within the grace, alive, closed, without a wrapper or opened by
-        // the runtime: not by this rule.
-        assert!(!exited.person_exit_closes(100 + PERSON_PLANNER_CLOSE_GRACE_SECS));
-        assert!(!session().person_exit_closes(past));
+        // Alive, exited, lost, or never given a workspace or a wrapper: a
+        // person's row not closed is retired.
+        for open in [
+            session(),
+            exited.clone(),
+            PlannerSession {
+                wrapper_pid: None,
+                ..session()
+            },
+            PlannerSession {
+                workspace_id: None,
+                ..session()
+            },
+        ] {
+            assert!(open.person_retired(), "{open:?}");
+        }
+        // Closed already, or opened by the runtime: not by this rule.
         for other in [
             PlannerSession {
                 closed_at: Some(105),
                 ..exited.clone()
             },
             PlannerSession {
-                wrapper_pid: None,
-                ..exited.clone()
-            },
-            PlannerSession {
-                workspace_id: None,
-                ..exited.clone()
-            },
-            PlannerSession {
                 origin: PlannerOrigin::Runtime,
-                ..exited.clone()
+                ..exited
             },
         ] {
-            assert!(!other.person_exit_closes(past), "{other:?}");
+            assert!(!other.person_retired(), "{other:?}");
         }
     }
 

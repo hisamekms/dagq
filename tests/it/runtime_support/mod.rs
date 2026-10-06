@@ -657,6 +657,11 @@ pub struct TestWorkspace {
     pub texts: Mutex<Vec<(String, String)>>,
     /// `exists` (and the listing) fails, as asking about a session can.
     pub exists_fails: bool,
+    /// The sessions `exists` was asked about, in order, and how many times
+    /// every session was listed (`listed_workspace_ids`), so a test can
+    /// tell what the supervisor looked up.
+    pub asked: Mutex<Vec<String>>,
+    pub listings: AtomicUsize,
     /// Sessions the backend reports open although it did not start them (a
     /// run's wrapper from an earlier supervisor, a workspace from before
     /// ADR-t1433-3, a planner's workspace), until they are stopped.
@@ -710,6 +715,8 @@ impl TestWorkspace {
             stands: Mutex::new(Vec::new()),
             texts: Mutex::new(Vec::new()),
             exists_fails: false,
+            asked: Mutex::new(Vec::new()),
+            listings: AtomicUsize::new(0),
             listed: Mutex::new(Vec::new()),
             hidden: Mutex::new(Vec::new()),
             close_ends_session: false,
@@ -721,6 +728,24 @@ impl TestWorkspace {
             inherited_env: Vec::new(),
         }
     }
+    /// The sessions open: those it started and those `list` named, less
+    /// those closed or hidden.
+    fn open_sessions(&self) -> Result<Vec<String>> {
+        ensure!(!self.exists_fails, "injected session list failure");
+        let closed = self.closed();
+        let mut listed: Vec<String> = self
+            .sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect();
+        listed.extend(self.listed.lock().unwrap().iter().cloned());
+        let hidden = self.hidden.lock().unwrap();
+        listed.retain(|id| !closed.contains(id) && !hidden.contains(id));
+        Ok(listed)
+    }
+
     /// Report `session` open as if an earlier supervisor started it.
     pub fn list(&self, session: &str) {
         self.listed.lock().unwrap().push(session.into());
@@ -914,26 +939,15 @@ impl WorkspaceBackend for TestWorkspace {
     // wrapper runs until its stop; one this backend never started is not,
     // unless `list` names it.
     fn exists(&self, workspace_id: &str) -> Result<bool> {
-        ensure!(!self.exists_fails, "injected session list failure");
+        self.asked.lock().unwrap().push(workspace_id.to_owned());
         Ok(self
-            .listed_workspace_ids()?
+            .open_sessions()?
             .iter()
             .any(|listed| listed == workspace_id))
     }
     fn listed_workspace_ids(&self) -> Result<Vec<String>> {
-        ensure!(!self.exists_fails, "injected session list failure");
-        let closed = self.closed();
-        let mut listed: Vec<String> = self
-            .sessions
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(id, _)| id.clone())
-            .collect();
-        listed.extend(self.listed.lock().unwrap().iter().cloned());
-        let hidden = self.hidden.lock().unwrap();
-        listed.retain(|id| !closed.contains(id) && !hidden.contains(id));
-        Ok(listed)
+        self.listings.fetch_add(1, Ordering::SeqCst);
+        self.open_sessions()
     }
     fn create_named(&self, _: &str, _: &Path, _: &str, _: &WorkspaceTags) -> Result<String> {
         bail!("not used by the supervisor")

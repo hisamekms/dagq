@@ -15,9 +15,10 @@
 //! The supervisor keeps the captures in memory ([`Spans`],
 //! [`ScreenIdle::Record`]) and copies them to [`SCREEN_IDLE_FILE`] next to
 //! the idle marker as it can; a read-only command judges from that copy
-//! without writing ([`ScreenIdle::Peek`]). Nothing
-//! here knows the provider or the kind of session: planners and the worker's
-//! sessions (its first, resumed and revised ones) use it.
+//! without writing ([`ScreenIdle::Peek`]; no command does since task 1577).
+//! Nothing here knows the provider or the kind of session: only the
+//! inbox's nudge uses it now (no worker since task 1437, no runtime
+//! planner since task 1441, no person's planner since task 1577).
 
 use serde::{Deserialize, Serialize};
 use std::{

@@ -729,8 +729,8 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         "keep the queue outside the worktree or under its Git common directory"
     );
     ports.cmux.preflight()?;
-    // The screens of the inbox and of a person's planner and the idle
-    // markers are read with the interactive Claude adapter's signals.
+    // The screen of the inbox and the idle markers are read with the
+    // interactive Claude adapter's signals.
     let interactive = ports
         .workers
         .get(Worker::CLAUDE_INTERACTIVE)
@@ -1007,9 +1007,9 @@ struct Supervisor<'a> {
     reviewer: &'a dyn AgentProvider,
     /// Starts the headless jobs a role puts on Codex (ADR-t1063-1).
     codex_jobs: Option<&'a dyn AgentProvider>,
-    /// Reads the idle marker of the run sessions, and the screens of a
-    /// person's planner and the inbox (no worker screen since task 1437,
-    /// no screen of the runtime's planners since ADR-t1433-2).
+    /// Reads the idle marker of the run sessions, and the screen of the
+    /// inbox (no worker screen since task 1437, no planner's screen since
+    /// ADR-t1433-2).
     signals: &'a dyn AgentSignals,
     /// The workers this supervisor runs: a candidate whose worker is not
     /// one of them is not claimed (ADR-t813-2).

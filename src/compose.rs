@@ -2222,17 +2222,10 @@ same in one step",
         cmux: &dyn WorkspaceBackend,
         all: bool,
     ) -> Result<Value> {
-        // Claude Code's signals only read what its hook and screen show.
+        // Claude Code's signals only read what its hook shows.
         let signals = ClaudeCode {
             executable: PathBuf::from("claude"),
         };
-        // The screen stands in for a missing marker as the supervisor
-        // judges it, without keeping the capture (ADR-t803-1).
-        let stall = match bound_checkout(queue) {
-            Ok(Some(checkout)) => load_stall_config(&checkout).ok().flatten(),
-            _ => None,
-        }
-        .unwrap_or_default();
         let views = planner::planner_views(
             queue,
             &PlannerProbes {
@@ -2242,8 +2235,6 @@ same in one step",
                 signals: &signals,
                 clock: &*self.generators.clock,
                 planners_dir: &planners_dir(db),
-                screen_idle_threshold: stall.screen_idle(),
-                screen_idle: crate::application::screen_idle::ScreenIdle::Peek,
             },
             all,
         )?;
@@ -2264,11 +2255,6 @@ same in one step",
         let signals = ClaudeCode {
             executable: PathBuf::from("claude"),
         };
-        let stall = match bound_checkout(queue) {
-            Ok(Some(checkout)) => load_stall_config(&checkout).ok().flatten(),
-            _ => None,
-        }
-        .unwrap_or_default();
         let probes = PlannerProbes {
             cmux,
             processes: &SystemProcesses,
@@ -2276,8 +2262,6 @@ same in one step",
             signals: &signals,
             clock: &*self.generators.clock,
             planners_dir: &planners_dir(db),
-            screen_idle_threshold: stall.screen_idle(),
-            screen_idle: crate::application::screen_idle::ScreenIdle::Peek,
         };
         crate::application::planner_request::request_planner(queue, &probes, planner, words)
     }
@@ -3293,15 +3277,7 @@ pub fn planner_session(
     } else {
         own_workspace(&cmux)
     };
-    planner_session_with_provider(
-        db,
-        id,
-        &provider,
-        plugin_dir,
-        model,
-        own,
-        &mut std::io::stderr(),
-    )
+    planner_session_with_provider(db, id, &provider, plugin_dir, model, own)
 }
 
 /// How a planner's wrapper was started: for a headless planner
@@ -3314,8 +3290,7 @@ pub struct PlannerEntry {
 }
 
 /// [`planner_session`] with any provider, in the working directory, in the
-/// workspace `own` (`None` knows none), writing what it tells the
-/// workspace's terminal to `terminal`.
+/// workspace `own` (`None` knows none).
 pub fn planner_session_with_provider(
     db: &Path,
     id: PlannerId,
@@ -3323,7 +3298,6 @@ pub fn planner_session_with_provider(
     plugin_dir: Option<&Path>,
     model: Option<(&str, &str)>,
     own: Option<OwnWorkspace<'_>>,
-    terminal: &mut dyn std::io::Write,
 ) -> Result<Value> {
     let mut queue =
         SqliteQueue::open(db)?.with_actor(crate::domain::actor::ActorContext::instance(
@@ -3341,7 +3315,6 @@ pub fn planner_session_with_provider(
             processes: &SystemProcesses,
             pid: std::process::id(),
             own_workspace: own,
-            terminal,
             clock: &crate::infrastructure::clock::SystemClock,
         },
         id,

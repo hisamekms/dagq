@@ -4,8 +4,8 @@ type: design
 title: "receiptの無いidleの検知"
 status: current
 created: 2026-09-26
-updated: 2026-10-06
-last_verified: 2026-10-06
+updated: 2026-10-07
+last_verified: 2026-10-07
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -26,4 +26,4 @@ worker はすべて非対話の turn で動く（task 1437、[ADR-t1433-2](../..
 
 ## 過去の記録
 
-`idle_without_receipt`、`send_unconfirmed`、`stall_preempted`、`answered_intervene`、`prompt_waiting`、`answer_prompt` と画面由来の閾値の記録は読める。stats は過去の検知と結末を引き続き集計する。新しい worker の検知には画面・打鍵・Enter の確認を使わない。人の planner と inbox の screen_idle は別の処理として残る（task 1577・1442）。runtime の planner は task 1441 から画面を使わない。
+`idle_without_receipt`、`send_unconfirmed`、`stall_preempted`、`answered_intervene`、`prompt_waiting`、`answer_prompt` と画面由来の閾値の記録は読める。stats は過去の検知と結末を引き続き集計する。新しい worker の検知には画面・打鍵・Enter の確認を使わない。inbox の screen_idle は別の処理として残る（task 1442。planner の画面からは判定しない）。runtime の planner は task 1441 から画面を使わない。

@@ -4544,7 +4544,7 @@ pub fn goal_review_prompt(material: &GoalReviewMaterial<'_>) -> FittedPrompt {
 
 /// What the supervisor sends the live planner a revise goes back to
 /// (ADR-0041 decisions 12, 13): a planner of the runtime's gets it as its
-/// next turn (ADR-t1433-2); only a person's planner is typed it.
+/// next turn (ADR-t1433-2); nothing is typed into a planner.
 pub fn plan_revise_request(proposal: ProposalId, reasons: &[String]) -> String {
     let reasons = if reasons.is_empty() {
         "- (none given)".to_owned()

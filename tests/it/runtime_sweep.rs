@@ -608,14 +608,15 @@ fn the_supervisor_closes_the_session_spans_of_gone_inbox_and_planner_workspaces(
     assert_eq!(closed[0]["reason"], "inferred");
 }
 
-/// Goal 54 (1): the supervisor's sweep closes the record of a planner,
-/// a person's or the runtime's, whose workspace cmux does not list and
-/// whose wrapper is dead, so `planners` stops showing it; a planner whose
-/// wrapper is alive stays, and nothing is closed while cmux cannot list its
-/// workspaces.
+/// Goal 54 (1): the supervisor's sweep closes the record of a planner of
+/// the runtime's whose session is gone and whose wrapper is dead, so
+/// `planners` stops showing it. No cmux workspace is listed (ADR-t1433-2
+/// decisions 3 and 5): a backend whose listing fails closes the same. A
+/// person's planner's row, its wrapper dead too, is left to the pass, which
+/// closes it as `person_retired` (tests/it/planner_close.rs).
 #[test]
-fn the_sweep_closes_the_records_of_planners_whose_workspace_and_wrapper_are_gone() {
-    use dagq::domain::{PlannerId, PlannerOrigin};
+fn the_sweep_closes_the_records_of_planners_whose_wrapper_is_gone_without_listing_cmux() {
+    use dagq::domain::PlannerOrigin;
     let (_dir, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     queue
@@ -638,29 +639,18 @@ fn the_sweep_closes_the_records_of_planners_whose_workspace_and_wrapper_are_gone
     };
     let person = record(PlannerOrigin::Person, "W-PERSON", dead_pid);
     let runtime = record(PlannerOrigin::Runtime, "W-RUNTIME", dead_pid);
-    let alive = record(PlannerOrigin::Person, "W-ALIVE", std::process::id());
-    let listed = record(PlannerOrigin::Person, "W-LISTED", dead_pid);
-    let open = || -> Vec<PlannerId> {
-        queue
-            .planners(false)
-            .unwrap()
-            .into_iter()
-            .map(|planner| planner.id)
-            .collect()
-    };
+    let open = || queue.planners(false).unwrap();
 
     let mut failing = TestWorkspace::new(&db, false, "exit 0");
     failing.exists_fails = true;
+    failing.listed.lock().unwrap().push("W-PERSON".into());
     supervise_with(&db, &repo, &failing, &sweeping_options()).unwrap();
-    assert_eq!(open(), [person, runtime, alive, listed]);
-
-    let backend = TestWorkspace::new(&db, false, "exit 0");
-    backend.listed.lock().unwrap().push("w-listed".into());
-    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
-    assert_eq!(open(), [alive, listed]);
-    for id in [person, runtime] {
-        assert!(queue.planner(id).unwrap().closed_at.is_some());
-    }
+    assert!(open().is_empty());
+    assert!(failing.closed().is_empty());
+    assert_eq!(
+        failing.listings.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
     // Each close is recorded once, with why (ADR-t1300-1).
     let mut closes: Vec<(i64, String, String, bool)> = queue
         .latest_events_of("planner_closed", 10)
@@ -679,7 +669,12 @@ fn the_sweep_closes_the_records_of_planners_whose_workspace_and_wrapper_are_gone
     assert_eq!(
         closes,
         [
-            (person.as_i64(), "person".into(), "abandoned".into(), false),
+            (
+                person.as_i64(),
+                "person".into(),
+                "person_retired".into(),
+                false
+            ),
             (
                 runtime.as_i64(),
                 "runtime".into(),

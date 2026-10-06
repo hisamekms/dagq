@@ -18,8 +18,8 @@ use crate::{
         PlanReviewApply, PlanReviewFailure, PlanReviewJob, PlannerHold, RevisingProposal,
         StatusFilter, TaskListItem, TaskQuery, job_start_failure,
         planner::{
-            self, PLANNER_DEBUG_LOG, PlannerLaunch, PlannerProbes, PlannerView,
-            open_runtime_planner, planner_last_activity, planner_view, retired_workspace,
+            self, PlannerLaunch, PlannerProbes, PlannerView, open_runtime_planner,
+            planner_last_activity, planner_view, retired_workspace,
         },
         planner_idle_marker,
         prompt::{
@@ -27,7 +27,7 @@ use crate::{
             PlanReviewMaterial, PlanReviewPrompt, PromptBytes, plan_review_prompt,
             plan_revise_request, precedent_line,
         },
-        screen_idle::{self, Inference, ScreenIdle},
+        screen_idle,
     },
     domain::{
         MAX_PLAN_REVISES, PLAN_OPTIONS, PLAN_REVIEW_ASKER, PlanReviewDecision, PlanReviewVerdict,
@@ -753,7 +753,7 @@ impl Supervisor<'_> {
     /// delivered yet, and end the runtime's planners that are done
     /// (ADR-0041 decisions 12, 13).
     fn tend_planners(&mut self, options: &LoopSettings) -> Result<()> {
-        self.close_exited_person_planners();
+        self.close_person_planners();
         if self.no_claude {
             return Ok(());
         }
@@ -1087,10 +1087,7 @@ impl Supervisor<'_> {
         }
     }
 
-    /// The planners not closed, each judged by [`planner_view`], the
-    /// captures of a screen standing in for a missing idle marker kept
-    /// (ADR-t803-1). A span the screen was first inferred idle over is
-    /// recorded as `idle_inferred` once.
+    /// The planners not closed, each judged by [`planner_view`].
     pub(super) fn planner_views(&self) -> Result<Vec<PlannerView>> {
         let probes = PlannerProbes {
             cmux: self.cmux,
@@ -1099,78 +1096,23 @@ impl Supervisor<'_> {
             signals: self.signals,
             clock: &*self.generators.clock,
             planners_dir: &self.layout.planners_dir,
-            screen_idle_threshold: self.stall.screen_idle(),
-            screen_idle: ScreenIdle::Record(&self.screen_spans),
         };
-        let views = self
-            .queue
+        self.queue
             .planners(false)?
             .into_iter()
             .map(|planner| planner_view(&probes, planner))
-            .collect::<Result<Vec<_>>>()?;
-        for view in &views {
-            if let Some(inference) = view.idle_inferred.filter(|inference| inference.unrecorded)
-                && let Err(error) = self.record_planner_idle_inferred(view, &inference)
-            {
-                // A queue that cannot take the event holds up nothing
-                // else; the next pass records it.
-                warn!(error = %format_args!("{error:#}"), "planner {}: idle_inferred could not be recorded: {error:#}", view.planner.id);
-            }
-        }
-        Ok(views)
+            .collect()
     }
 
-    /// Stamp a text the supervisor is about to type into the planner of
-    /// `view`, so a marker from before it no longer counts and the screen
-    /// span restarts (ADR-t803-1). A stamp that cannot be written is
-    /// logged: the typed text still changes the transcript the span keeps.
+    /// Stamp a request the supervisor is about to write for the planner of
+    /// `view`, so an idle marker from before it no longer counts. A stamp
+    /// that cannot be written is logged.
     pub(super) fn stamp_planner_input(&self, view: &PlannerView) {
         if let Err(error) =
             screen_idle::record_supervisor_input(&*self.files, &planner_idle_marker(&view.dir))
         {
             warn!(error = %error, "planner {}: the stamp of the typed text could not be written: {error}", view.planner.id);
         }
-    }
-
-    /// Record `idle_inferred` for the planner of `view`, with the line of
-    /// its agent's debug log that says its idle hook failed, if there is
-    /// one, and note its span recorded.
-    fn record_planner_idle_inferred(
-        &self,
-        view: &PlannerView,
-        inference: &Inference,
-    ) -> Result<()> {
-        let marker = planner_idle_marker(&view.dir);
-        let mut payload = json!({
-            "planner_id": view.planner.id,
-            "origin": view.planner.origin.as_str(),
-            "workspace_id": view.planner.workspace_id,
-            "source": inference.source,
-            "marker": inference.marker.as_str(),
-            "since": inference.since,
-            "since_ms": inference.since_ms,
-            "observed_secs": inference.observed_secs,
-            "observed_ms": inference.observed_ms,
-            "captures": inference.captures,
-            "background_running": inference.background_running,
-        });
-        if let Some(line) = screen_idle::hook_failure(
-            &*self.files,
-            self.signals,
-            &view.dir.join(PLANNER_DEBUG_LOG),
-        ) {
-            payload["hook_error"] = json!(line);
-        }
-        self.queue
-            .record_queue_event(EventKind::IdleInferred, payload)?;
-        info!(
-            "planner {} has no fresh idle marker ({}); its screen looks idle since {}",
-            view.planner.id,
-            inference.marker.as_str(),
-            inference.since
-        );
-        self.screen_spans.mark_recorded(&*self.files, &marker);
-        Ok(())
     }
 
     /// Open a planner of the runtime's for `proposal` with its reasons.
@@ -1230,28 +1172,22 @@ impl Supervisor<'_> {
         }
     }
 
-    /// Close the person's planners whose agent exited past the grace
-    /// (ADR-t1300-1, [`planner::close_exited_person_planners`]). A listing
-    /// that fails, or a workspace that does not close, closes no row and is
-    /// logged; the next pass tries again.
-    fn close_exited_person_planners(&mut self) {
-        match planner::close_exited_person_planners(
-            &*self.queue,
-            self.cmux,
-            &*self.generators.clock,
-        ) {
-            Ok(done) => {
-                for id in done.closed {
+    /// Close the row of every person's planner still open, without cmux
+    /// (ADR-t1433-2 decision 5, [`planner::close_person_planners`]), so a
+    /// revise or an answer for what it owned goes to a new planner of the
+    /// runtime's. A queue that cannot close one is logged; the next pass
+    /// tries again.
+    fn close_person_planners(&mut self) {
+        match planner::close_person_planners(&*self.queue) {
+            Ok(closed) => {
+                for id in closed {
                     info!(
-                        "planner {id} of a person exited past the grace; closed its workspace and record"
+                        "planner {id} of a person, opened before dagq plan was abolished, is closed without cmux; a person closes its workspace"
                     );
-                }
-                for failure in done.failures {
-                    warn!("{failure}; tried again on the next pass");
                 }
             }
             Err(error) => {
-                warn!(error = %format_args!("{error:#}"), "the exited planners of a person could not be closed: {error:#}");
+                warn!(error = %format_args!("{error:#}"), "the planners of a person could not be closed: {error:#}");
             }
         }
     }
@@ -1264,7 +1200,7 @@ impl Supervisor<'_> {
     /// with `planner_closed` (ADR-t1300-1). One an older binary opened in a
     /// workspace is closed without cmux, its workspace left for a person to
     /// close (ADR-t1433-2 decision 3). A person's planner is closed by
-    /// [`Self::close_exited_person_planners`] once its agent exited.
+    /// [`Self::close_person_planners`] (decision 5).
     fn end_runtime_planners(&mut self, views: &[PlannerView]) -> Result<()> {
         let revising = self.queue.revising_proposals()?;
         for view in views
@@ -1417,12 +1353,11 @@ impl Supervisor<'_> {
     /// `planner_question` about its draft or finding: one not answered
     /// yet, one answered whose answer is not delivered yet, or one whose
     /// answer was delivered to this planner and not taken up yet (task 884):
-    /// a headless planner takes it up once a turn carrying it finished; a
-    /// person's planner, typed into in its workspace, once its agent stopped
-    /// after the typing. The typing is timed by its claim
-    /// (`planner_answer_claimed`), taken before it, not by the ask's close
-    /// after it, so an agent that took the answer up and stopped before the
-    /// close is done; an answer a new planner carried in its prompt is timed
+    /// a headless planner takes it up once a turn carrying it finished;
+    /// without a record of that request, once it stopped after the delivery,
+    /// timed by its claim (`planner_answer_claimed`), taken before it, not
+    /// by the ask's close after it, so an agent that took the answer up and
+    /// stopped before the close is done; an answer a new planner carried in its prompt is timed
     /// by the planner's opening. An ask closed without a delivery holds
     /// nothing.
     fn question_wait(&mut self, view: &PlannerView) -> Result<Option<PlannerBusy>> {

@@ -177,10 +177,11 @@ impl Supervisor<'_> {
             }
         }
     }
-    /// Close the rows of the planners, a person's included, whose workspace
-    /// cmux no longer lists and whose wrapper is done
-    /// ([`planner::close_abandoned_planners`]), so `planners` stops showing
-    /// them. A listing that fails closes nothing and is logged only.
+    /// Close the rows of the runtime's planners whose session is gone and
+    /// whose wrapper is done ([`planner::close_abandoned_planners`]; no cmux
+    /// workspace is listed, and a person's planner's row is left to
+    /// [`planner::close_person_planners`]), so `planners` stops showing
+    /// them. A failure is logged only.
     fn close_abandoned_planners(&mut self) {
         match planner::close_abandoned_planners(
             &*self.queue,

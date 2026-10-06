@@ -4,8 +4,8 @@ type: design
 title: "人への通知経路（ADR-0016で決定、ADR-0022とADR-0024で改めた）"
 status: current
 created: 2026-09-26
-updated: 2026-10-06
-last_verified: 2026-10-06
+updated: 2026-10-07
+last_verified: 2026-10-07
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -37,7 +37,7 @@ ADR-0016で次を決めた。`status`のattentionとcursor、`events --after`、
 - **閾値**: inbox宛て（`waits_for`がinbox）のopenなaskのうち、`max(created_at, last_seen_at)`から`NUDGE_AFTER_SECS`（300秒）以上たったものが1件でもあれば知らせる。watcherが見ていたあいだの時間は数えない。
 - **回数**: 同じ区間で、1回目を打ち、`NUDGE_AGAIN_SECS`（600秒）たっても`absent`ならもう1回打ち（`TYPED_NUDGES` = 2）、さらに600秒たっても戻らなければinboxのworkspaceへ`cmux notify`（[人への通知](cmux-notify.md#人への通知cmux-notify)）を1回送り、それ以上は何もしない。2回目を打てないまま（画面がidleにならない・入力欄が空にならない・1回目の文が欄に残った）前回から1200秒（間隔の2倍）たったら、2回目を飛ばしてnotify（`attempt` 3）にする。1回目を打てないあいだは何もしない。記録が一度も無いqueueの区間は`absent_since` 0で、最初のwatchが記録を書くまで同じ区間として数える。
 - **打つ条件**: `session_workspaces`にinboxのworkspaceが記録され、cmuxの`exists`が真であること（無い・閉じられていれば打たず、notifyもしない）。打ち込み（1・2回目）は、画面がidleと推定でき（[ADR-t803-1](../../adr/2026-09-27-t803-1-infer-idle-from-the-screen-when-the-idle-marker-is-missing-or-stale.md)の`ScreenProbe`。inboxにはidleの印が無いので`MarkerState::Missing`で、`[stall].screen_idle_secs`以上離れた2回以上のcaptureが同じtranscriptのinput box・作業なし・ダイアログなし）、かつ最後のcaptureで入力欄が空（`AgentSignals::input_empty`。Claude Codeでは`❯`の後が空か、空の欄のplaceholderの`Try "`だけ。shell modeの`!`や人が打ちかけた文は空でない。既定は`false`で打たない）のときだけ。Claudeが作業中・ダイアログ・人が入力中なら打たず次のpassで見る。captureの span と supervisorの打ち込みの印（`supervisor-input.json`）は、queueのディレクトリの`inbox/`（印の`idle.json`は名前だけで書かれない）に置く。notify（3回目）は画面を見ない。
-- **文**: `dagq: <N> open ask(s) wait for the inbox and no \`dagq watch --role inbox\` is running. Run \`dagq status --role inbox\`, then start the watch in the background as the dagq-inbox skill says.`の1行（`<N>`は閾値を超えて待ったaskの数）に、`status`の`language.instruction`と同じ言語の指示を`with_instruction`で付けて、人のplannerへのreviseと同じ`submit_input`で打つ（runtimeのplannerへのreviseは打たずturnの依頼にする）。answerやattentionの中身は打たない。
+- **文**: `dagq: <N> open ask(s) wait for the inbox and no \`dagq watch --role inbox\` is running. Run \`dagq status --role inbox\`, then start the watch in the background as the dagq-inbox skill says.`の1行（`<N>`は閾値を超えて待ったaskの数）に、`status`の`language.instruction`と同じ言語の指示を`with_instruction`で付けて、`submit_input`で打つ（plannerへのreviseはどれも打たずturnの依頼にする）。answerやattentionの中身は打たない。
 - **記録と排他**: 知らせる前に、queue eventの`inbox_nudged`を`claim_inbox_nudge`で書く。payloadは`{absent_since, attempt（1から）, action（typed / notified）, at, workspace_id, open_asks, waiting_asks, absent_secs}`で、同じ`absent_since`と`attempt`のeventがあれば書かずに`false`を返す（1つのwrite transaction）。書けたsupervisorだけが知らせるので、同じqueueの複数のsupervisorも、execの引き継ぎの後のprocessも同じ知らせを二度しない。回数と前回の時刻もこのeventから組み立てる（プロセスのメモリに持たない）。
 - **失敗**: 打ち込み（`submit_input`のerrorか、`Submitted`以外の結果）とnotifyの失敗はwarnを出し、queue eventの`inbox_nudge_failed`（`{absent_since, attempt, action, workspace_id, error}`）に残す。supervisorは止めず、その回は済んだものと数える（次の回は間隔の後）。
 

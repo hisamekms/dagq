@@ -616,11 +616,6 @@ impl dagq::application::AgentProvider for PlannerAgent {
     }
 }
 
-/// A terminal nobody reads.
-fn terminal_sink() -> std::io::Sink {
-    std::io::sink()
-}
-
 /// A provider without planner sessions (the default refusal).
 struct NoPlanner;
 
@@ -644,19 +639,19 @@ impl dagq::application::AgentProvider for NoPlanner {
     }
 }
 
-/// A planner's session wrapper registers itself and its agent, heartbeats
-/// and records the agent's exit, and its state is judged from those, its
-/// workspace and the idle marker the agent's `Stop` hook writes, as a
-/// worker's is: opening before the wrapper, working, idle, exited, lost
-/// when the wrapper is gone without an exit, closed with its workspace.
+/// A person's planner's session wrapper, in the terminal of the workspace
+/// it was opened in before `dagq plan` was abolished, registers itself and
+/// its agent, heartbeats and records the agent's exit, and tells the
+/// terminal nothing more (the grace and its notice went with ADR-t1433-2
+/// decision 5). Its row, in a cmux workspace, reads `closed` whatever its
+/// wrapper does, without a call to cmux: the runtime looks up no planner's
+/// workspace.
 #[test]
-fn a_planner_session_is_judged_alive_and_idle_like_a_worker() {
+fn a_persons_planners_wrapper_records_its_agent_and_its_row_reads_closed_without_cmux() {
     use dagq::application::planner::{PlannerProbes, planner_views};
     use dagq::domain::PlannerState;
     let fixture = fixture();
     let cmux = FakeCmux::default();
-    // A person's planner opened before `dagq plan` was abolished, whose
-    // wrapper still tells the person how it ends (ADR-t1300-1).
     let opened = workspace_planner(&fixture, &cmux, PlannerOrigin::Person).unwrap();
     let id = opened.planner.id;
     let queue = SqliteQueue::open(&fixture.location.db).unwrap();
@@ -672,8 +667,6 @@ fn a_planner_session_is_judged_alive_and_idle_like_a_worker() {
         signals: &signals,
         clock: &SystemClock,
         planners_dir: &planners,
-        screen_idle_threshold: dagq::domain::stall::StallConfig::default().screen_idle(),
-        screen_idle: dagq::application::screen_idle::ScreenIdle::Peek,
     };
     let state = |all: bool| -> Vec<(PlannerState, bool, bool)> {
         planner_views(&queue, &probes, all)
@@ -682,12 +675,11 @@ fn a_planner_session_is_judged_alive_and_idle_like_a_worker() {
             .map(|view| (view.state, view.alive, view.idle_since.is_some()))
             .collect()
     };
-    assert_eq!(state(false), [(PlannerState::Opening, true, false)]);
+    assert_eq!(state(false), [(PlannerState::Closed, false, false)]);
 
     // The wrapper runs the agent, which goes idle and exits.
     assert!(planners.join("1/runner").is_file());
     let db = fixture.location.db.canonicalize().unwrap();
-    let mut terminal = Vec::new();
     let result = dagq::compose::planner_session_with_provider(
         &db,
         id,
@@ -695,7 +687,6 @@ fn a_planner_session_is_judged_alive_and_idle_like_a_worker() {
         Some(Path::new("/plugins")),
         Some(("claude-opus-5-5", "high")),
         None,
-        &mut terminal,
     )
     .unwrap();
     // The wrapper gave its agent the model and effort (ADR-0079 decision 7).
@@ -703,25 +694,15 @@ fn a_planner_session_is_judged_alive_and_idle_like_a_worker() {
         fs::read_to_string(planners.join("1/model.txt")).unwrap(),
         "claude-opus-5-5 high"
     );
-    // A person's planner: once its agent exited, the wrapper tells the
-    // terminal, in one line, that the supervisor closes the workspace after
-    // the grace (ADR-t1300-1).
-    let notice = format!(
-        "dagq closes this workspace in 60 seconds (planner 1, exit code 3, log at {})",
-        planners.join("1/claude.log").display()
-    );
-    assert_eq!(String::from_utf8(terminal).unwrap(), format!("{notice}\n"));
-    assert_eq!(
-        result,
-        json!({"planner_id": 1, "exit_code": 3, "notice": notice})
-    );
+    // No notice of a close: the runtime does not close its workspace.
+    assert_eq!(result, json!({"planner_id": 1, "exit_code": 3}));
     let planner = queue.planner(id).unwrap();
     assert_eq!(planner.wrapper_pid, Some(std::process::id()));
     assert!(planner.agent_pid.is_some());
     assert_eq!(planner.exit_code, Some(3));
     assert!(planner.heartbeat_at.is_some());
     assert!(planners.join("1/idle.json").is_file());
-    assert_eq!(state(false), [(PlannerState::Exited, false, false)]);
+    assert_eq!(state(false), [(PlannerState::Closed, false, false)]);
     // Task 696: its exit recorded, the wrapper removed its runner and left
     // the rest of the directory.
     assert!(!planners.join("1/runner").exists());
@@ -731,16 +712,9 @@ fn a_planner_session_is_judged_alive_and_idle_like_a_worker() {
         .unwrap()
         .planner
         .id;
-    let error = dagq::compose::planner_session_with_provider(
-        &db,
-        third_id,
-        &NoPlanner,
-        None,
-        None,
-        None,
-        &mut terminal_sink(),
-    )
-    .unwrap_err();
+    let error =
+        dagq::compose::planner_session_with_provider(&db, third_id, &NoPlanner, None, None, None)
+            .unwrap_err();
     assert!(
         format!("{error:#}").contains("no planner session"),
         "{error:#}"
@@ -757,37 +731,21 @@ fn a_planner_session_is_judged_alive_and_idle_like_a_worker() {
             None,
             None,
             None,
-            &mut terminal_sink(),
         )
         .is_err()
     );
 
-    // A live session: working until the Stop hook marks it idle.
+    // A live, idle one in a workspace cmux lists reads `closed` too.
     let second = workspace_planner(&fixture, &cmux, PlannerOrigin::Person).unwrap();
     let second_id = second.planner.id;
     queue.register_planner_wrapper(second_id, 4242).unwrap();
     queue.register_planner_agent(second_id, 4242, 4242).unwrap();
     queue.heartbeat_planner(second_id, 4242).unwrap();
-    assert_eq!(state(false)[1], (PlannerState::Working, true, false));
     fs::write(
         planners.join(format!("{second_id}/idle.json")),
         r#"{"hook_event_name":"Stop","background_tasks":[]}"#,
     )
     .unwrap();
-    assert_eq!(state(false)[1], (PlannerState::Idle, true, true));
-    // Background work left running is not idle.
-    fs::write(
-        planners.join(format!("{second_id}/idle.json")),
-        r#"{"hook_event_name":"Stop","background_tasks":[{"status":"running"}]}"#,
-    )
-    .unwrap();
-    assert_eq!(state(false)[1], (PlannerState::Working, true, false));
-    // Its wrapper died without recording an exit.
-    processes.dead.lock().unwrap().insert(4242);
-    assert_eq!(state(false)[1], (PlannerState::Lost, false, false));
-    // A person closed its workspace.
-    cmux.close(second.planner.workspace_id.as_deref().unwrap())
-        .unwrap();
     assert_eq!(state(false)[1], (PlannerState::Closed, false, false));
     queue.close_planner(second_id, None).unwrap();
     assert_eq!(state(false).len(), 1);
@@ -801,12 +759,17 @@ fn a_planner_session_is_judged_alive_and_idle_like_a_worker() {
         .iter()
         .map(|planner| planner["state"].as_str().unwrap())
         .collect();
-    assert_eq!(states, ["exited", "closed", "closed"], "{listed}");
+    assert_eq!(states, ["closed", "closed", "closed"], "{listed}");
     assert_eq!(listed["planners"][0]["alive"], false);
     assert_eq!(
         listed["planners"][0]["workspace_id"],
         json!(opened.planner.workspace_id)
     );
+    // Judging them called cmux for nothing: only the creates of the three
+    // workspaces this test made did.
+    assert_eq!(cmux.workspaces.lock().unwrap().len(), 3);
+    assert_eq!(cmux.calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    assert!(cmux.closed.lock().unwrap().is_empty());
 }
 
 /// A pid no process has: a child that exited and was reaped.
@@ -817,12 +780,15 @@ fn dead_pid() -> u32 {
     pid
 }
 
-/// Goal 54 (1): the sweep closes the record of a person's planner opened
-/// before `dagq plan` was abolished whose workspace cmux does not list and
-/// whose wrapper is dead or exited, so `planners` stops showing it. A workspace still listed, a wrapper still alive, or a
-/// listing cmux fails to give, closes nothing.
+/// Goal 54 (1): the sweep closes the record of a planner of the runtime's
+/// an older binary opened in a cmux workspace whose wrapper is dead or
+/// exited, so `planners` stops showing it. Its workspace is not looked up
+/// in cmux (ADR-t1433-2 decisions 3 and 5): one cmux still lists counts as
+/// gone, and a listing cmux would fail to give does not matter. A wrapper
+/// still alive, or one not registered within its startup time yet, keeps
+/// its row; a person's planner's row is left to `close_person_planners`.
 #[test]
-fn the_records_of_planners_whose_workspace_and_wrapper_are_gone_are_closed() {
+fn the_records_of_planners_whose_wrapper_is_gone_are_closed_without_listing_cmux() {
     let fixture = fixture();
     let cmux = FakeCmux::default();
     let queue = SqliteQueue::open(&fixture.location.db).unwrap();
@@ -830,10 +796,12 @@ fn the_records_of_planners_whose_workspace_and_wrapper_are_gone_are_closed() {
         let opened = workspace_planner(&fixture, &cmux, origin).unwrap();
         (opened.planner.id, opened.planner.workspace_id.unwrap())
     };
-    let (dead, dead_ws) = open(PlannerOrigin::Person);
-    let (exited, exited_ws) = open(PlannerOrigin::Person);
-    let (alive, alive_ws) = open(PlannerOrigin::Person);
-    let (listed, _) = open(PlannerOrigin::Person);
+    let (dead, dead_ws) = open(PlannerOrigin::Runtime);
+    let (exited, exited_ws) = open(PlannerOrigin::Runtime);
+    let (alive, alive_ws) = open(PlannerOrigin::Runtime);
+    let (listed, _) = open(PlannerOrigin::Runtime);
+    let (person, _) = open(PlannerOrigin::Person);
+    queue.register_planner_wrapper(person, dead_pid()).unwrap();
     queue.register_planner_wrapper(dead, dead_pid()).unwrap();
     queue
         .register_planner_wrapper(exited, std::process::id())
@@ -861,22 +829,17 @@ fn the_records_of_planners_whose_workspace_and_wrapper_are_gone_are_closed() {
             .collect()
     };
 
-    // A listing that fails closes nothing.
+    let (fresh, _) = open(PlannerOrigin::Runtime);
+    // A cmux whose listing fails is not asked.
     let failing = FakeCmux {
         list_fails: true,
         ..FakeCmux::default()
     };
-    let error = sweep(&fixture, &failing).unwrap_err();
-    assert!(
-        format!("{error:#}").contains("workspace list failed"),
-        "{error:#}"
-    );
-    assert_eq!(open_ids(), [dead, exited, alive, listed]);
-
-    let (fresh, _) = open(PlannerOrigin::Person);
-    assert_eq!(sweep(&fixture, &cmux).unwrap(), [dead, exited]);
-    assert_eq!(open_ids(), [alive, listed, fresh]);
-    for id in [dead, exited] {
+    assert_eq!(sweep(&fixture, &failing).unwrap(), [dead, exited, listed]);
+    assert_eq!(failing.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(open_ids(), [alive, person, fresh]);
+    assert!(sweep(&fixture, &cmux).unwrap().is_empty());
+    for id in [dead, exited, listed] {
         let planner = queue.planner(id).unwrap();
         assert!(planner.closed_at.is_some());
         assert_eq!(planner.error, None);
@@ -897,9 +860,9 @@ fn the_records_of_planners_whose_workspace_and_wrapper_are_gone_are_closed() {
     closes.sort();
     assert_eq!(
         closes,
-        [(dead, "person"), (exited, "person")].map(|(id, origin)| (
+        [dead, exited, listed].map(|id| (
             id.as_i64(),
-            origin.to_owned(),
+            "runtime".to_owned(),
             "abandoned".to_owned()
         ))
     );
@@ -910,7 +873,7 @@ fn the_records_of_planners_whose_workspace_and_wrapper_are_gone_are_closed() {
             .iter()
             .map(|planner| planner["id"].as_i64().unwrap())
             .collect();
-    assert_eq!(shown, [alive, listed, fresh].map(PlannerId::as_i64));
+    assert_eq!(shown, [alive, person, fresh].map(PlannerId::as_i64));
     // Task 696: the runners of the planners whose wrapper is done went,
     // their row closed or not; a live wrapper's, and one not registered
     // within its startup time yet, stay with the rest of the directory.
@@ -973,8 +936,6 @@ fn a_new_planner_does_not_take_the_idle_marker_an_old_database_left() {
         signals: &signals,
         clock: &SystemClock,
         planners_dir: &planners,
-        screen_idle_threshold: dagq::domain::stall::StallConfig::default().screen_idle(),
-        screen_idle: dagq::application::screen_idle::ScreenIdle::Peek,
     };
     let views = planner_views(&queue, &probes, false).unwrap();
     assert_eq!(views.len(), 1);
@@ -1019,7 +980,6 @@ fn a_wrapper_refused_in_a_workspace_nothing_records_closes_it() {
             backend: &late,
             id: own.clone(),
         }),
-        &mut terminal_sink(),
     )
     .unwrap_err();
     let text = format!("{error:#}");
@@ -1054,7 +1014,6 @@ fn a_wrapper_refused_in_a_workspace_nothing_records_closes_it() {
             backend: &open,
             id: workspace.clone(),
         }),
-        &mut terminal_sink(),
     )
     .unwrap_err();
     assert!(
@@ -1065,26 +1024,14 @@ fn a_wrapper_refused_in_a_workspace_nothing_records_closes_it() {
     assert_eq!(open.workspaces.lock().unwrap()[0].2, workspace);
 }
 
-/// Move planner `id`'s recorded exit `secs` back, as if its agent exited
-/// that long ago.
-fn exited_ago(db: &Path, id: dagq::domain::PlannerId, secs: i64) {
-    rusqlite::Connection::open(db)
-        .unwrap()
-        .execute(
-            "UPDATE planners SET exited_at = exited_at - ?2 WHERE id = ?1",
-            rusqlite::params![id.as_i64(), secs],
-        )
-        .unwrap();
-}
-
-/// ADR-t1300-1, kept for a person's planner opened before `dagq plan` was
-/// abolished (ADR-t1394-1 decision 9): the runtime closes the workspace and
-/// the row of one whose agent exited past the grace, and records
-/// `planner_closed` once. One within the grace, one whose wrapper is lost,
-/// one alive, a planner of the runtime's, or a listing cmux fails to give,
-/// closes nothing.
+/// ADR-t1433-2 decision 5 (amending ADR-t1394-1 decisions 1, 7 and 9): the
+/// row of every person's planner still open, alive, exited, lost or never
+/// registered, is closed with `planner_closed` once (`person_retired`,
+/// `workspace_closed: false`, ADR-t1300-1 decision 2), and cmux is not
+/// called: its workspace is neither listed, typed into nor closed. A
+/// planner of the runtime's is not closed by this rule.
 #[test]
-fn a_persons_planner_whose_agent_exited_past_the_grace_is_closed() {
+fn every_open_row_of_a_persons_planner_is_closed_without_cmux() {
     let fixture = fixture();
     let cmux = FakeCmux::default();
     let queue = SqliteQueue::open(&fixture.location.db).unwrap();
@@ -1092,22 +1039,20 @@ fn a_persons_planner_whose_agent_exited_past_the_grace_is_closed() {
         let opened = workspace_planner(&fixture, &cmux, origin).unwrap();
         (opened.planner.id, opened.planner.workspace_id.unwrap())
     };
-    let (past, past_ws) = open(PlannerOrigin::Person);
-    let (fresh, _) = open(PlannerOrigin::Person);
+    let (exited, exited_ws) = open(PlannerOrigin::Person);
     let (lost, _) = open(PlannerOrigin::Person);
     let (alive, _) = open(PlannerOrigin::Person);
+    let (unregistered, _) = open(PlannerOrigin::Person);
     let (runtime, _) = open(PlannerOrigin::Runtime);
     let me = std::process::id();
-    for id in [past, fresh, alive, runtime] {
+    for id in [exited, alive, runtime] {
         queue.register_planner_wrapper(id, me).unwrap();
         queue.register_planner_agent(id, me, me).unwrap();
     }
     queue.register_planner_wrapper(lost, dead_pid()).unwrap();
-    queue.planner_exited(past, me, 2).unwrap();
-    queue.planner_exited(fresh, me, 0).unwrap();
-    queue.planner_exited(runtime, me, 0).unwrap();
-    exited_ago(&fixture.location.db, past, 61);
-    exited_ago(&fixture.location.db, runtime, 61);
+    queue.planner_exited(exited, me, 2).unwrap();
+    // The creates of the five workspaces are all cmux was asked for.
+    let made = cmux.calls.load(std::sync::atomic::Ordering::SeqCst);
     let open_ids = || -> Vec<PlannerId> {
         queue
             .planners(false)
@@ -1116,52 +1061,41 @@ fn a_persons_planner_whose_agent_exited_past_the_grace_is_closed() {
             .map(|planner| planner.id)
             .collect()
     };
-    let close = |cmux: &FakeCmux| planner::close_exited_person_planners(&queue, cmux, &SystemClock);
 
-    // A listing that fails closes nothing.
-    let failing = FakeCmux {
-        list_fails: true,
-        ..FakeCmux::default()
-    };
-    let error = close(&failing).unwrap_err();
-    assert!(
-        format!("{error:#}").contains("could not be listed"),
-        "{error:#}"
-    );
-    assert_eq!(open_ids(), [past, fresh, lost, alive, runtime]);
-    assert!(
-        queue
-            .latest_events_of("planner_closed", 10)
-            .unwrap()
-            .is_empty()
-    );
-
-    let done = close(&cmux).unwrap();
-    assert_eq!(done.closed, [past]);
-    assert!(done.failures.is_empty(), "{:?}", done.failures);
-    assert_eq!(open_ids(), [fresh, lost, alive, runtime]);
-    assert!(cmux.closed.lock().unwrap().contains(&past_ws));
-    let closes = queue.latest_events_of("planner_closed", 10).unwrap();
-    assert_eq!(closes.len(), 1, "{closes:?}");
-    let close_event = &closes[0].payload;
-    assert_eq!(close_event["planner_id"], past.as_i64());
-    assert_eq!(close_event["origin"], "person");
-    assert_eq!(close_event["code"], "person_exited");
-    assert_eq!(close_event["workspace_id"], past_ws.as_str());
-    assert_eq!(close_event["workspace_closed"], true);
+    let closed = planner::close_person_planners(&queue).unwrap();
+    assert_eq!(closed, [exited, lost, alive, unregistered]);
+    assert_eq!(open_ids(), [runtime]);
+    assert_eq!(cmux.calls.load(std::sync::atomic::Ordering::SeqCst), made);
+    assert!(cmux.closed.lock().unwrap().is_empty());
+    let mut closes: Vec<Value> = queue
+        .latest_events_of("planner_closed", 10)
+        .unwrap()
+        .into_iter()
+        .map(|event| event.payload)
+        .collect();
+    closes.sort_by_key(|close| close["planner_id"].as_i64());
+    assert_eq!(closes.len(), 4, "{closes:?}");
+    for (close, id) in closes.iter().zip([exited, lost, alive, unregistered]) {
+        assert_eq!(close["planner_id"], id.as_i64());
+        assert_eq!(close["origin"], "person");
+        assert_eq!(close["code"], "person_retired");
+        assert_eq!(close["workspace_closed"], false);
+    }
+    let close_event = &closes[0];
+    assert_eq!(close_event["workspace_id"], exited_ws.as_str());
     assert_eq!(close_event["exit_code"], 2);
     assert!(close_event["exited_at"].is_i64());
+    let reason = close_event["reason"].as_str().unwrap();
     assert!(
-        close_event["reason"]
-            .as_str()
-            .unwrap()
-            .contains("exited (exit code 2) more than 60 seconds ago")
+        reason.contains("closed without cmux")
+            && reason.contains(&format!("a person closes its workspace {exited_ws}")),
+        "{reason}"
     );
 
     // Once closed it is not closed again.
-    assert!(close(&cmux).unwrap().closed.is_empty());
+    assert!(planner::close_person_planners(&queue).unwrap().is_empty());
     assert_eq!(
         queue.latest_events_of("planner_closed", 10).unwrap().len(),
-        1
+        4
     );
 }

@@ -121,13 +121,13 @@ pub(crate) fn write_request(
 
 impl Supervisor<'_> {
     /// Send `input` (`what` names it) to the planner of `view` in
-    /// `workspace`: for a headless planner, every planner of the runtime's
-    /// (ADR-t1394-2 decision 2, ADR-t1433-2 decision 3), written as its
-    /// next request in its directory's `turns/` and recorded as
-    /// `turn_requested` naming it, and the exit as its exit request; for a
-    /// person's planner opened before `dagq plan` was abolished, typed into
-    /// its terminal. A planner of the runtime's is never typed into: one an
-    /// older binary opened in a workspace is refused.
+    /// `workspace`: a headless planner, every planner of the runtime's
+    /// (ADR-t1394-2 decision 2, ADR-t1433-2 decision 3), gets it written as
+    /// its next request in its directory's `turns/`, recorded as
+    /// `turn_requested` naming it, and the exit as its exit request. Nothing
+    /// is typed into a planner: a row in a cmux workspace (one of the
+    /// runtime's an older binary opened, or a person's, ADR-t1433-2
+    /// decision 5) is refused.
     pub(super) fn send_to_planner(
         &mut self,
         view: &PlannerView,
@@ -135,15 +135,11 @@ impl Supervisor<'_> {
         input: Input<'_>,
         what: &str,
     ) -> Result<()> {
-        if view.planner.route != PlannerRoute::Headless {
-            anyhow::ensure!(
-                view.planner.origin == crate::domain::PlannerOrigin::Person,
-                "planner {} of the runtime was opened in a workspace by an older binary: nothing is typed into it (ADR-t1433-2)",
-                view.planner.id
-            );
-            submit_input(self.cmux, self.signals, workspace, input)?;
-            return Ok(());
-        }
+        anyhow::ensure!(
+            view.planner.route == PlannerRoute::Headless,
+            "planner {} was opened in a workspace: nothing is typed into it (ADR-t1433-2)",
+            view.planner.id
+        );
         let id = view.planner.id;
         let text = match input {
             Input::Exit => {

@@ -1053,7 +1053,7 @@ enum Command {
         /// Include closed planners.
         #[arg(long)]
         all: bool,
-        /// cmux executable, used to look for the workspace of each person's planner (a planner of the runtime's has none).
+        /// cmux executable, accepted for older command lines: no planner's workspace is looked up in cmux (ADR-t1433-2).
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
     },

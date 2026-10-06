@@ -553,7 +553,7 @@ fn proposal_column(db: &Path, id: ProposalId, column: &str) -> Value {
 
 /// A person's planner in workspace `workspace`, alive (its wrapper is this
 /// test process) and idle.
-fn idle_person_planner(queue: &SqliteQueue, db: &Path, workspace: &str) {
+pub(crate) fn idle_person_planner(queue: &SqliteQueue, db: &Path, workspace: &str) {
     let planner = queue.open_planner(PlannerOrigin::Person, None).unwrap();
     queue
         .planner_workspace_created(planner.id, workspace)
@@ -666,8 +666,15 @@ fn a_passing_plan_review_readies_the_proposal_with_its_actions() {
     assert_eq!(reviewer.prompts().len(), 1);
 }
 
+/// ADR-t1433-2 decision 5: the proposal of a person's planner opened before
+/// `dagq plan` was abolished, alive and idle in its workspace, is sent back.
+/// The planner's row is closed without cmux (`person_retired`), nothing is
+/// typed into its workspace, and the revise, with the precedents, goes to a
+/// new planner of the runtime's, the way a revise whose planner closed goes
+/// (ADR-0047 decision 12); past the timeout, the inbox is told.
 #[test]
-fn a_revise_goes_to_the_live_planner_with_the_precedents_and_times_out_to_the_inbox() {
+fn a_revise_of_a_persons_planner_goes_to_a_new_planner_with_the_precedents_and_times_out_to_the_inbox()
+ {
     let fx = fixture();
     let mut queue = SqliteQueue::open(&fx.db).unwrap();
     let blocker = TaskId::new(1);
@@ -720,39 +727,41 @@ fn a_revise_goes_to_the_live_planner_with_the_precedents_and_times_out_to_the_in
     assert_eq!(revising.status(), ProposalStatus::Revising);
     assert_eq!(revising.revise_count(), 1);
     assert_eq!(status(&mut queue, task), TaskStatus::Draft);
-    // The planner that owns the proposal got the reasons and the precedent,
-    // and no planner was opened for it.
-    let texts = backend.texts();
-    assert_eq!(texts.len(), 1, "{texts:?}");
-    assert_eq!(texts[0].0, "PW");
+    // The person's planner's row is closed without cmux: nothing typed into
+    // its workspace, nothing closed.
+    assert!(backend.texts().is_empty(), "{:?}", backend.texts());
+    assert!(backend.closed().is_empty(), "{:?}", backend.closed());
+    let closes: Vec<Value> = queue
+        .latest_events_of("planner_closed", 10)
+        .unwrap()
+        .into_iter()
+        .map(|event| event.payload)
+        .collect();
+    assert_eq!(closes.len(), 1, "{closes:?}");
+    assert_eq!(closes[0]["origin"], "person");
+    assert_eq!(closes[0]["code"], "person_retired");
+    assert_eq!(closes[0]["workspace_id"], "PW");
+    assert_eq!(closes[0]["workspace_closed"], false);
+    // A new planner of the runtime's got the reasons and the precedent.
+    let launched = backend.launched();
+    assert_eq!(launched.len(), 1, "{launched:?}");
+    let planners = queue.planners(false).unwrap();
+    assert_eq!(planners.len(), 1, "{planners:?}");
+    assert_eq!(planners[0].origin, PlannerOrigin::Runtime);
+    assert_eq!(planners[0].proposal_id, Some(proposal));
+    let handle = planners[0].workspace_id.clone().unwrap();
+    assert_eq!(launched[0], handle);
+    let prompt = planner_prompt(&fx.db, planners[0].id);
     for expected in [
-        format!("Plan review sent proposal {proposal} back."),
         reason.clone(),
         format!("precedent: ask {earlier}"),
         "a person answered: drop that acceptance line".to_owned(),
-        format!("dagq submit --proposal {proposal}"),
     ] {
-        assert!(
-            texts[0].1.contains(&expected),
-            "{expected:?} not in {}",
-            texts[0].1
-        );
+        assert!(prompt.contains(&expected), "{expected:?} not in {prompt}");
     }
-    assert!(backend.launched().is_empty());
     let sent = events(&mut queue, task, "plan_revise_sent");
-    assert_eq!(sent[0]["opened"], false);
-    assert_eq!(sent[0]["workspace_id"], "PW");
-    // A live planner's effort is not switched (ADR-0079 decision 7 (c)).
-    assert_eq!(sent[0]["effort_raised"], false);
-    assert_eq!(sent[0]["launch"], Value::Null);
-    assert!(
-        sent[0]["effort_not_raised"]
-            .as_str()
-            .unwrap()
-            .contains("live"),
-        "{}",
-        sent[0]
-    );
+    assert_eq!(sent[0]["opened"], true);
+    assert_eq!(sent[0]["workspace_id"], handle.as_str());
 
     // Past the planner timeout without a resubmission, the inbox is told
     // once, and it shows as the planner's attention: the timeout of 0 is
@@ -786,7 +795,8 @@ fn a_revise_goes_to_the_live_planner_with_the_precedents_and_times_out_to_the_in
             .any(|e| e["kind"] == "planner_unresponsive" && e["next"] == "check the planner"),
         "{watched}"
     );
-    assert_eq!(backend.texts().len(), 1, "the revise is not sent twice");
+    assert!(backend.texts().is_empty());
+    assert_eq!(backend.launched().len(), 1, "the revise is not sent twice");
     assert_eq!(
         reviewer.prompts().len(),
         1,
@@ -800,8 +810,8 @@ fn a_revise_goes_to_the_live_planner_with_the_precedents_and_times_out_to_the_in
             goals: Vec::new(),
             proposal: Some(proposal),
             owner: PlannerOwner {
-                origin: PlannerOrigin::Person,
-                workspace_id: Some("PW".into()),
+                origin: PlannerOrigin::Runtime,
+                workspace_id: Some(handle.clone()),
             },
         })
         .unwrap();

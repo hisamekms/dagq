@@ -368,12 +368,13 @@ string_enum!(PlannerRoute {
 });
 
 // Why the runtime closed a planner (ADR-t1300-1), the `code` of its
-// `planner_closed`: a person's planner whose agent exited and whose grace
-// passed, a planner of the runtime's whose agent exited, whose wrapper was
+// `planner_closed`: a person's planner still open, closed without cmux
+// (ADR-t1433-2 decision 5; `person_exited`, the code of the grace this
+// replaced, stays only in older events), a planner of the runtime's whose agent exited, whose wrapper was
 // lost, whose session is gone with its workspace, or which did not exit in
 // time after `/exit`, and a row whose workspace and wrapper were found gone.
 string_enum!(PlannerCloseCode {
-    PersonExited => "person_exited",
+    PersonRetired => "person_retired",
     RuntimeExited => "runtime_exited",
     RuntimeLost => "runtime_lost",
     RuntimeSessionGone => "runtime_session_gone",
@@ -985,7 +986,7 @@ pub use plan_review::{
     MAX_PLAN_REVISES, PLAN_OPTIONS, PLAN_REVIEW_ASKER, PlanAnswer, PlanReviewAction,
     PlanReviewCandidate, PlanReviewDecision, PlanReviewVerdict, Reopen, next_to_review,
 };
-pub use planner::{IdleProbe, PERSON_PLANNER_CLOSE_GRACE_SECS, PlannerProbe, PlannerSession};
+pub use planner::{IdleProbe, PlannerProbe, PlannerSession};
 pub use proposal::{PlannerOwner, Proposal, ProposalRecord, Submission};
 pub use reason::{Reason, ReasonCode};
 pub use receipt::{Receipt, ReceiptCheck, evidence_missing_reason, required_of};
