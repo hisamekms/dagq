@@ -4,7 +4,7 @@ type: development
 title: このrepositoryのmigrationの規則（足し方・番号・リリース済みのmigrationの不変）
 status: current
 created: 2026-10-03
-updated: 2026-10-03
+updated: 2026-10-07
 owners:
   - hisamekms
 tags:
@@ -33,3 +33,10 @@ related:
 
 - リリース済みのmigrationは変えない（[ADR-t614-2](../adr/2026-09-27-t614-2-released-migrations-are-immutable.md)）。schemaを直すときは次の番号のmigrationを足す。
 - `scripts/check-migration-numbers.sh`は番号の規則に加えて、`v0.3.0`より新しい最新の`v<X.Y.Z>`のtagの`migrations/*.sql`が名前も中身も変わらず残っていることを検査し、変更・改名・削除を名前つきでexit 1にする（tagの無いcloneでは検査しなかったことを出して通す）。CIと`release.yml`が実行する。
+
+## persistence.mdに書くこと
+
+migrationを足すtaskは、[Persistence](../design/persistence.md)の、変えた表・列の今の姿を書く箇所だけを直す: 冒頭のschemaの木のその表の行（列・既定値・null可・意味）と、その表・列を説明する本文の節。足した表は木に1行と、要れば本文の節を足す。
+
+- 冒頭の段落にmigrationごとの経緯（どのmigrationが何を足したか、schemaの版）を足さず、木にmigrationごとの行（`-- 00NN: …`）を足さない。経緯は`migrations/*.sql`（先頭行の互換の宣言とコメント）とgitの履歴が持つ。
+- 本文で根拠を名指すときは、migrationの番号（`integrate`が振り直すと古くなる）でなくADRかmigrationのファイル名の`<name>`の部分を名指す。既にある番号の言及は書き直さなくてよい。
