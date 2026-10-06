@@ -4,7 +4,7 @@ type: design
 title: "Review (supervisor)"
 status: current
 created: 2026-09-26
-updated: 2026-10-05 # task 1440: the e2e's sweep case is deleted, not left out; task 1547: the definitions also refer to design documents (architecture-boundaries); task 1437; task 1712; task 1683; task 1713: the Codex review cases of the test list moved to unit tests and runtime_provider_switch; task 1451: the broker's e2e is back; task 1521: planned task replanning (unimplemented)
+updated: 2026-10-06 # task 1895: the planned review stage of agent and program jobs (ADR-t1895-1, ADR-t1895-2); task 1440: the e2e's sweep case is deleted, not left out; task 1547: the definitions also refer to design documents (architecture-boundaries); task 1437; task 1712; task 1683; task 1713: the Codex review cases of the test list moved to unit tests and runtime_provider_switch; task 1451: the broker's e2e is back; task 1521: planned task replanning (unimplemented)
 last_verified: 2026-10-05 # task 1440; task 1547; task 1437; task 1712; task 1683; task 1713; task 1451
 scope: runtime
 related:
@@ -23,6 +23,8 @@ related:
   - adr-t1582-1
   - adr-t1165-1
   - adr-t1453-1
+  - adr-t1895-1
+  - adr-t1895-2
   - adr-t1428-1
 ---
 
@@ -50,6 +52,8 @@ related:
 `integrate`はreview中のrun（supervisorのleaseがある）を拒否する。
 
 ## reviewのsubagent<a id="reviewのsubagent"></a>
+
+> **予定（goal 152〜154）**: [ADR-t1895-1](../../adr/2026-10-06-t1895-1-review-stage-runs-agent-and-program-jobs-in-a-fixed-shape.md)がADR-t1453-1決定5・8を置き換え、reviewの段をprogramのjob（順に流し、落ちればagentを起動せず差し戻す。範囲・読む元・envは[ADR-t1895-2](../../adr/2026-10-06-t1895-2-program-reviews-are-fast-format-checks-read-from-the-landing-branch.md)）と、全体のreview 1本とpathsで選んだagent 1本ずつのagentのjobの並列にする。親のjobの中のsubagent・集約・providerごとの渡し方（下の「Claudeへの渡し方」・「Codexとproviderの切り替え」の`subagents_unsupported`）は移行の後に無くなる。移行が終わるまでは、この節の今の実装が動く。
 
 [ADR-t1453-1](../../adr/2026-10-03-t1453-1-review-subagents-named-by-path-run-inside-the-review-job.md)の実装。設定・選び方・snapshot・jobへの受け渡し（task 1454）と、親のjobでの実行と集約・supervisorの結果のそろいの検査・判定ごとの行き先・providerごとの渡し方（task 1455）。
 
