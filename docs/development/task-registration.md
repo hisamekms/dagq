@@ -4,7 +4,7 @@ type: development
 title: このrepositoryのtaskの登録（verify・paths・evidence・changeの選び方、固定バイナリを待つ宣言、負荷の下で落ちるtestを直すtask、ADRを書くtask、plan reviewが当てはめる規則）
 status: current
 created: 2026-10-03
-updated: 2026-10-05 # task 842; task 1480; task 1635; task 1643: goal の優先度とラベル
+updated: 2026-10-05 # task 842; task 1480; task 1635; task 1643: goal の優先度とラベル; task 1792
 owners:
   - hisamekms
 tags:
@@ -43,7 +43,7 @@ related:
 - pluginとバイナリのversionを変える: verifyに`sh scripts/check-plugin-version.sh`を付ける（検査の中身は[plugin integration](../design/plugin-integration.md)の「tagとversionの一致規則」）
 - itのtestの時間の関門の許可の一覧（`.config/it-slow-allow.toml`）か関門のscript（`scripts/check-it-test-time.sh`）を変える: verifyに`sh scripts/check-it-test-time.sh --self-test`を付ける（fixtureでscriptの照合を確かめ、このrepositoryの許可の一覧の書式を読む。関門そのものはCIが流す。許可の一覧に載せてよい理由は[testの制約](testing.md)の「判断と境界のtest」、書式は[Slow tests](../design/slow-tests.md)の「itのtestの時間の関門」）
 - AGENTS.mdを変える: verifyに`sh scripts/check-agents-md-size.sh`を付ける（byteの上限を検査する。CIも実行する。上限と、規則の本文をAGENTS.mdに足さないことは[文書の規則](documents.md)の「AGENTS.md」）
-- configだけ（設定と運用）: 変えるものだけを`--paths`に挙げる（`--paths 'dagq.toml'`・`--paths 'scripts/**'`・`--paths '.github/**'`・`--paths '.config/**'`・`--paths '.dagq/**'`・`--paths 'rust-toolchain.toml'`から選ぶ。runtimeのpathは含めない。下の「plan reviewが当てはめる規則」）。verifyは変えるものの検査: `dagq.toml`なら読めることを確かめる`--verify 'python3 -c "import tomllib; tomllib.load(open(\"dagq.toml\", \"rb\"))"'`（task 942の先例。構文だけを見てkeyの意味は見ない。`tomllib`はPython 3.11以上なので、integrateのhostの`python3`が古いと着地に失敗する。[ADR-t883-1](../adr/2026-09-30-t883-1-edit-ended-run-verification-before-inherited-retry.md)のContext）、scriptと`.config/`の印・一覧はこの節のそれぞれの行の検査（`check-e2e-quarantine.sh`・`check-it-test-time.sh --self-test`など）。検査の無いもの（CIのworkflowなど）は検証なし。新しいkeyを足すのは本番の固定バイナリが読めるようになってから（[運用](operations.md)の「`dagq.toml`を変えるとき」）
+- configだけ（設定と運用）: 変えるものだけを`--paths`に挙げる（`--paths 'dagq.toml'`・`--paths 'scripts/**'`・`--paths '.github/**'`・`--paths '.config/**'`・`--paths '.dagq/**'`・`--paths 'rust-toolchain.toml'`から選ぶ。runtimeのpathは含めない。下の「plan reviewが当てはめる規則」）。verifyは変えるものの検査: `dagq.toml`なら読めることを確かめる`--verify '/Users/shinnosukeooyama/.local/share/mise/installs/python/3.12/bin/python3 -c "import tomllib; tomllib.load(open(\"dagq.toml\", \"rb\"))"'`（task 942・1593の先例と同じく、Python 3.11以上のpythonを絶対pathで名指す。構文だけを見てkeyの意味は見ない。integrateのhostの素の`python3`は3.9.6で`tomllib`が無く着地に失敗するので使わない。[ADR-t883-1](../adr/2026-09-30-t883-1-edit-ended-run-verification-before-inherited-retry.md)のContext）、scriptと`.config/`の印・一覧はこの節のそれぞれの行の検査（`check-e2e-quarantine.sh`・`check-it-test-time.sh --self-test`など）。検査の無いもの（CIのworkflowなど）は検証なし。新しいkeyを足すのは本番の固定バイナリが読めるようになってから（[運用](operations.md)の「`dagq.toml`を変えるとき」）
 - 対象が混ざるtaskは重い方の検証にする。
 
 llvm-covとcargo testの重ね方:
