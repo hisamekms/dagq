@@ -10,6 +10,7 @@ supersedes:
   - adr-0042
 amended_by:
   - adr-t1091-1
+  - adr-t1942-1
 owners:
   - hisamekms
 tags:
@@ -22,6 +23,8 @@ related:
 ---
 
 # ADR-t598-1: ADRのIDを書くtaskのIDにし、1 ADR 1決定・記載の粒度・今の姿はdesign・大きなADRはamendsで直すと決める（ADR-0042を置き換え）
+
+> **一部変更（2026-10-07）**: 決定5は[ADR-t1091-1](2026-09-30-t1091-1-amend-or-replace-by-number-of-decisions.md)、決定3・4（ADRに書かない細部の置き場と今の姿の持ち方）は[ADR-t1942-1](2026-10-07-t1942-1-design-docs-in-four-layers-with-size-budgets.md)がamendsした（細部はコードのdoc commentかdesignの地図、今の姿はコードとdesignが分けて持つ）。
 
 ## Context
 

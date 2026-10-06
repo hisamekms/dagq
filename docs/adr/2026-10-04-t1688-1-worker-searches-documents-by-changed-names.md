@@ -2,10 +2,12 @@
 id: adr-t1688-1
 type: adr
 title: workerは文書の候補を、変えた名前でrepositoryの文書を探して拾い、summaryに探した名前を書く。探す手段は名指さず検査の工程にしない（ADR-t1428-1決定4をamends）
-status: accepted
+status: superseded
 created: 2026-10-04
 updated: 2026-10-04
 accepted_on: 2026-10-04
+superseded_by: adr-t1942-2
+superseded_on: 2026-10-07
 amends:
   - adr-t1428-1 decision 4
 owners:
@@ -23,6 +25,8 @@ related:
 ---
 
 # ADR-t1688-1: workerは文書の候補を、変えた名前でrepositoryの文書を探して拾い、summaryに探した名前を書く。探す手段は名指さず検査の工程にしない（ADR-t1428-1決定4をamends）
+
+> **置き換え済み（2026-10-07）**: このADRの決定は現在有効ではない。現行の決定は[ADR-t1942-2](2026-10-07-t1942-2-document-check-and-review-in-both-directions.md)を読む。
 
 ## Context
 
