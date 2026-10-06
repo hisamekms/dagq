@@ -4,7 +4,7 @@ type: design
 title: Authorization
 status: current
 created: 2026-09-27
-updated: 2026-10-06 # task 1647; task 1851: set-priority on in_progress tasks is the user's and the inbox's; task 1564: ask --request is the request's own planner's; task 1540: revisit is task.write; task 838: required turns add the built-in file tools to deny and permissions.allow; task 1509; task 1437; task 1609; task 1440: run screen and run close-workspaces are refused after authorization
+updated: 2026-10-06 # task 1920: planned CI watch; task 1647; task 1851: set-priority on in_progress tasks is the user's and the inbox's; task 1564: ask --request is the request's own planner's; task 1540: revisit is task.write; task 838: required turns add the built-in file tools to deny and permissions.allow; task 1509; task 1437; task 1609; task 1440: run screen and run close-workspaces are refused after authorization
 last_verified: 2026-10-06 # task 1647; task 1851; task 1564; task 1540; task 838; task 1509; task 1437; task 1609; task 1440
 scope: runtime
 related:
@@ -252,3 +252,7 @@ queue service（[Queue service](queue-service.md)、ADR-t1233-1決定4）は、�
 3. 拒む判定はCLIの`Authorizer`がすでにする。guardrailは「間違いで打つのを先に止める」ためのもので、pathやglobal flagの形で打った呼び出しもCLIが拒み、`authorization_denied`に記録する。
 
 規則の形は`Bash(dagq <command>:*)`と識別の変数の書き換えのままにする。
+
+## 予定: CIの見張り（ADR-t1920-1）
+
+[ADR-t1920-1](../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)と[CI watch](supervisor-lifecycle/ci-watch.md)の予定（未実装、goal 157）。新しい読むコマンド`dagq ci failures`に読み取りのcapabilityを1つ足す（人・inbox・planner・observerに許し、workerとjobには許さない。workerにはpromptで渡す）。表を変える変更はpluginの`reference/authority.md`も同じ変更で直す（[文書の規則](../development/documents.md)の「権限の表を写す文書」）。`finding dismiss --covered-by`は今の`finding.dismiss`のままで、表は変えない。

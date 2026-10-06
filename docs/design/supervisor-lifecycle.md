@@ -4,7 +4,7 @@ type: design
 title: Supervisor and workspace lifecycle
 status: current
 created: 2026-09-21
-updated: 2026-10-05 # task 1225: a recovery job whose provider could not be used starts again on the other one; task 1437; task 1521: planned task replanning
+updated: 2026-10-06 # task 1920: planned CI watch; task 1225: a recovery job whose provider could not be used starts again on the other one; task 1437; task 1521: planned task replanning
 last_verified: 2026-10-05 # task 1225; task 1437
 scope: runtime
 related:
@@ -296,6 +296,7 @@ live worker alert (stalled, idle_process)
 ## Finding planners (supervisor)
 
 - [Finding planners (supervisor)](supervisor-lifecycle/finding-planners.md)（proposalを求める印の付いたfindingとaskの`propose`のanswerからplannerを立てる）
+- [CI watch](supervisor-lifecycle/ci-watch.md)（予定。設定で有効にしたrepositoryで、supervisorが着地先のbranchのCIを`gh`で見張り、既に落ちているtestの一覧を持ち、赤で`ci_failure`のfindingを記録する）
 
 ## Plan review (supervisor)
 

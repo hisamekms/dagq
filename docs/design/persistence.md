@@ -4,7 +4,7 @@ type: design
 title: SQLite persistence
 status: current
 created: 2026-09-21
-updated: 2026-10-06 # task 1783: live read-only watch and connection guard; task 1657: a wrapper is stopped by stop_background and each stop is recorded as wrapper_stopped; task 1564: ask --request reads request_planner; task 1540: draft_revisits (0068); task 1641: goals.tags (0067); task 1640; task 839; task 1709; task 1437; task 1609; task 1632; task 1481; task 1440; task 1704: planned human-answer wait accounting (unimplemented)
+updated: 2026-10-06 # task 1920: planned CI watch; task 1783: live read-only watch and connection guard; task 1657: a wrapper is stopped by stop_background and each stop is recorded as wrapper_stopped; task 1564: ask --request reads request_planner; task 1540: draft_revisits (0068); task 1641: goals.tags (0067); task 1640; task 839; task 1709; task 1437; task 1609; task 1632; task 1481; task 1440; task 1704: planned human-answer wait accounting (unimplemented)
 last_verified: 2026-10-06 # task 1783; task 1657; task 1564; task 1540; task 1641; task 1640; task 839; task 1509; task 1437; task 1609; task 1632; task 1481; task 1440
 scope: persistence
 related:
@@ -408,3 +408,7 @@ receipt検証結果はイベントとtask_runsの列で足りたため、`run_ar
 ## 予定: plannerの人だけの答え待ちの記録と回数
 
 [ADR-t1704-1](../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定3・5（未実装）。上のplannerの回数・束の結末の型と永続化は実装前の形である。人だけの答え待ちで終了したことを決めずに終わったことと区別し、draft・finding・依頼の上限から除く。answerを持つplannerは決めずに終わったときだけ数え、再検討のplannerも人だけの待ちの終了を除く。質問・answerとnote・編集済みdraftを新しいplannerへ引き継ぐ条件は[予定: 人の答えだけを待つplannerの枠の解放](supervisor-lifecycle/plan-planners.md#予定-人の答えだけを待つplannerの枠の解放)に従う。型・欄・記録の具体的な変更は後続の実装taskがここに書く。
+
+## 予定: CIの見張り（ADR-t1920-1）
+
+[ADR-t1920-1](../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)と[CI watch](supervisor-lifecycle/ci-watch.md)の予定（未実装、goal 157）。findingsに`covered_by_task INTEGER REFERENCES tasks(id)`（NULL可、CHECKなし）を足す互換のmigrationが要る（`finding dismiss --covered-by`が書き、修正taskのrunの見分けが読む）。eventの種類（`ci_checked`ほか）はkindのCHECKが無いのでmigrationを要しない。

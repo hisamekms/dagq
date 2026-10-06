@@ -4,7 +4,7 @@ type: design
 title: Domain model
 status: current
 created: 2026-09-21
-updated: 2026-10-06 # task 1657: a wrapper is stopped by stop_background and each stop is recorded as wrapper_stopped; task 1842: retired RunHistory queries removed; task 1225: a triage_failed with provider_unusable is Pending; task 1850: the effective priority orders resumes and recovery jobs too; task 1851: set-priority on in_progress tasks; task 1811: tasks without own priority follow the goal in every status (ADR-t1811-1); task 1551: RunHistory reads typed restored payloads (run/payload.rs); task 1540: DraftRevisit, origin revisit; task 1641: goal tags, [goals] tags, goal list order and --tag; task 1660: AttentionNext::DecideFollowUps; task 1640; task 1386: show lists asks; task 839: show's latest run carries broker_tool_use; task 1594; task 1507, task 1506, task 1508, task 1509; tasks 1505, 1437; task 1609; task 1632; task 1440; task 1704: planned human-answer wait accounting (unimplemented)
+updated: 2026-10-06 # task 1920: planned CI watch; task 1657: a wrapper is stopped by stop_background and each stop is recorded as wrapper_stopped; task 1842: retired RunHistory queries removed; task 1225: a triage_failed with provider_unusable is Pending; task 1850: the effective priority orders resumes and recovery jobs too; task 1851: set-priority on in_progress tasks; task 1811: tasks without own priority follow the goal in every status (ADR-t1811-1); task 1551: RunHistory reads typed restored payloads (run/payload.rs); task 1540: DraftRevisit, origin revisit; task 1641: goal tags, [goals] tags, goal list order and --tag; task 1660: AttentionNext::DecideFollowUps; task 1640; task 1386: show lists asks; task 839: show's latest run carries broker_tool_use; task 1594; task 1507, task 1506, task 1508, task 1509; tasks 1505, 1437; task 1609; task 1632; task 1440; task 1704: planned human-answer wait accounting (unimplemented)
 last_verified: 2026-10-06 # task 1657; task 1842; task 1225; task 1850; task 1811; task 1551; task 1540; task 1641; task 1660; task 1640; task 1386; task 839; task 1594; task 1507, task 1506, task 1508, task 1509; tasks 1505, 1437; task 1609; task 1632; task 1440
 scope: domain
 related:
@@ -494,3 +494,7 @@ runの`last_error`のコードは列を持たず、`domain::reason::last_error_c
 ## 予定: plannerの人だけの答え待ちの記録と回数
 
 [ADR-t1704-1](../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定3・5（未実装）。上のplannerの回数・束の結末の型と永続化は実装前の形である。人だけの答え待ちで終了したことを決めずに終わったことと区別し、draft・finding・依頼の上限から除く。answerを持つplannerは決めずに終わったときだけ数え、再検討のplannerも人だけの待ちの終了を除く。質問・answerとnote・編集済みdraftを新しいplannerへ引き継ぐ条件は[予定: 人の答えだけを待つplannerの枠の解放](supervisor-lifecycle/plan-planners.md#予定-人の答えだけを待つplannerの枠の解放)に従う。型・欄・記録の具体的な変更は後続の実装taskがここに書く。
+
+## 予定: CIの見張り（ADR-t1920-1）
+
+[ADR-t1920-1](../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)と[CI watch](supervisor-lifecycle/ci-watch.md)の予定（未実装、goal 157）。新しい読むコマンド`dagq ci failures [--task ID]`（既に落ちているtestの一覧のJSON）と、`finding dismiss <id> --reason R [--covered-by TASK]`（`ci_failure`のfindingにだけ。findingの`covered_by_task`に書く）が足りる。実装のtaskが「Current operations」と`finding dismiss`の項を直す。

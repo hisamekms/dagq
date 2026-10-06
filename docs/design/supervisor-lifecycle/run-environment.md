@@ -4,11 +4,13 @@ type: design
 title: "Run environment"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1857: [provider_fallback] workers; task 1225: the recovery job runs on Codex too; task 1223: the observer runs on Codex too; task 1641: [goals] tags; task 1643: repository の語彙; task 840: [broker.package]; task 1591; task 1437; task 1440: [headless] wrapper ignored for workers, [run.env] in the wrapper's process env; task 487: recurring drafts planned (ADR-0072); task 1224: this repository sets observer to Codex
+updated: 2026-10-06 # task 1920: planned [ci_watch]; task 1857: [provider_fallback] workers; task 1225: the recovery job runs on Codex too; task 1223: the observer runs on Codex too; task 1641: [goals] tags; task 1643: repository の語彙; task 840: [broker.package]; task 1591; task 1437; task 1440: [headless] wrapper ignored for workers, [run.env] in the wrapper's process env; task 487: recurring drafts planned (ADR-0072); task 1224: this repository sets observer to Codex
 last_verified: 2026-10-06 # task 1857; task 1225; task 1223; task 1641; task 1643; task 840; task 1440; task 1224
 scope: runtime
 related:
   - adr-0072
+  - adr-t1920-1
+  - design-supervisor-lifecycle-ci-watch
   - adr-t1857-1
   - adr-t963-1
   - design-supervisor-lifecycle
@@ -66,6 +68,17 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 - `[language]`はAIが人に向けて書く文の言語（`tag`、BCP 47の言語タグ、既定は無しで指示しない）を持ち、利用者ごとの`config.toml`の同じ表より優先する（[Language](language.md)、[ADR-t616-2](../../adr/2026-09-27-t616-2-language-of-text-ai-writes-for-people-is-configurable.md)）。旧バイナリは表ごと拒むので、足すのはそれを知るバイナリに入れ替えた後にする。
 
 - `[repository]`は着地先のbranch（`branch`、既定は推定）、pushのremote（`remote`、既定`"origin"`）、pushするか（`push`、既定`true`）を持つ（[Landing branch](landing-branch.md)、[ADR-t615-1](../../adr/2026-09-27-t615-1-landing-branch-and-push-remote-per-repository.md)）。3つのkeyはどれも読み（`load_repository_config`）、ほかのkeyは未知のkeyとして拒む。`[repository]`を知らない旧バイナリは表ごと拒むので、足すのはそれを知るバイナリに入れ替えた後にする。dagq自身のrepositoryは既定で今までどおり`main`と`origin`になるので足さない。
+
+- **予定（未実装、[ADR-t1920-1](../../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)、goal 157）**: `[ci_watch]`はsupervisorが着地先のbranchのCIの結果を`gh`で読む見張りの設定で（振る舞いは[CI watch](ci-watch.md)）、表があるときだけ有効になる（表が無ければ無効で、何も読まず何も記録しない）。今の読み手は`[ci_watch]`を知らず、表ごと拒む。旧バイナリは未知の表を拒むので、固定バイナリが対応してから足す（この repositoryの`dagq.toml`には、後続のconfigのtaskが`--wait-for-build`で足す）。
+
+  | key | 型 | 既定 | 意味 |
+  | --- | --- | --- | --- |
+  | `workflow` | 空でない文字列（必須） | なし | 見るworkflow。`gh run list --workflow`に渡すファイル名かworkflowの名前（この repositoryでは`"ci.yml"`） |
+  | `branch` | 空でない文字列 | `[repository] branch`の着地先のbranch（[Landing branch](landing-branch.md)） | 見るbranch。pushの実行だけを見る |
+  | `interval_secs` | 60以上の整数 | 600 | 確かめる間隔の秒。推奨は600（CIの1回の実行より短くしても、終わった実行が増えないので読むだけ無駄になる） |
+  | `junit_artifacts` | 文字列の配列 | `[]` | JUnitのXMLを持つ成果物の名前のglob（`gh run download --pattern`に渡す）。空ならtestの名前を取らず、落ちたjobとstepだけを使う |
+
+  `workflow`の無い表、範囲外や整数でない`interval_secs`、空の文字列、配列でない`junit_artifacts`・空の要素・重複、keyの重複、知らないkeyは行番号付きのエラーにする（`load_ci_watch`、`domain::ci_watch::CiWatchConfig`）。supervisorが各passで読み直し（[CI watch](ci-watch.md)の「いつ確かめるか」）、ファイルが無いときは黙って無効、読めない・値が誤っているときはerrorごとに1回logにwarnを出して使っている値のまま続ける。`up`は表があればpreflightで`gh`を確かめる（[CI watch](ci-watch.md)の「読む手段が無いとき」）。`[run.env]`は`gh`の呼び出しに渡さない（supervisorのenvのまま）。この repositoryで置く予定の値は`workflow = "ci.yml"`・`junit_artifacts = ["nextest-junit-*"]`（成果物はCIの変更のtaskが足し、名前を変えたらこのglobも合わせる）、`branch`と`interval_secs`は既定のまま。
 
 ## sccacheのserver
 

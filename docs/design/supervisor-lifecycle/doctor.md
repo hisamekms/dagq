@@ -4,7 +4,7 @@ type: design
 title: "`doctor`"
 status: current
 created: 2026-09-26
-updated: 2026-10-05 # task 1225: recovery among the Codex roles; task 1223: the observer on Codex
+updated: 2026-10-06 # task 1920: planned CI watch; task 1225: recovery among the Codex roles; task 1223: the observer on Codex
 last_verified: 2026-10-05 # task 1225; task 1223
 scope: runtime
 related:
@@ -39,3 +39,7 @@ related:
 - `schema`: `migrate --check`と同じqueueのschemaの状態（`schema_version`、`binary_schema_version`、`floor`、`migrate`が適用する`pending`とその`compatible`、このバイナリがそのまま開けるかの`opens`）。既定の出力にも含める。`migrate`が要るqueueでも、floorがこのバイナリを拒むqueueでも報告する（ADR-0045の決定5）。前者のrunとsupervisorはread-onlyのコピーを`migrate`した上で読む。後者は`supervisors`と`runs`を省き、拒む理由を`error`に書く。どちらでもrepositoryの束縛は先に検査する（`SqliteQueue::inspect_read_only`がschemaの状態と、読めるqueueか、floorが拒むときは束縛だけを読む接続と拒む理由を、1つの接続から返す）。
 
 cmux workspaceの存在は確認しない（cmuxなしで動く）。IDを見てユーザーが`cmux workspace list`で確認する。
+
+## 予定: CIの見張り（ADR-t1920-1）
+
+[ADR-t1920-1](../../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)と[CI watch](ci-watch.md)の予定（未実装、goal 157）。`[ci_watch]`があれば`ci_watch`の欄（`config`・`gh`・`authenticated`・`repo`・`supervisor_last`）を出す。状態は変えない。

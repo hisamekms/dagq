@@ -4,7 +4,7 @@ type: design
 title: "`supervise`"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1657: a wrapper is stopped by stop_background and each stop is recorded as wrapper_stopped; task 1857: [provider_fallback] read each pass; task 1225: the recovery job's hold is its route's wait; task 1850: resumes, recovery jobs and claims share one line by effective priority; task 1640: a task inherits its goal's priority; task 1594: a non-zero exit with a receipt goes to validation; task 1591: the landing queue leaves room for light changes; task 1437; task 1632; task 1440: a run's session wrapper starts in the background and is stopped, no run workspace
+updated: 2026-10-06 # task 1920: planned CI watch; task 1657: a wrapper is stopped by stop_background and each stop is recorded as wrapper_stopped; task 1857: [provider_fallback] read each pass; task 1225: the recovery job's hold is its route's wait; task 1850: resumes, recovery jobs and claims share one line by effective priority; task 1640: a task inherits its goal's priority; task 1594: a non-zero exit with a receipt goes to validation; task 1591: the landing queue leaves room for light changes; task 1437; task 1632; task 1440: a run's session wrapper starts in the background and is stopped, no run workspace
 last_verified: 2026-10-06 # task 1657; task 1857; task 1225; task 1850; task 1640; task 1594; task 1591; task 1437; task 1632; task 1440
 scope: runtime
 related:
@@ -57,3 +57,7 @@ related:
 14. active runも走っているobserverもなく、`--once`か停止要求（下記）か、provisioning失敗でclaimを止めていればループを抜ける（走っているobserverは自分のtimeoutまでで終わるので、runと同じく待つ）。それ以外はactive runがない間2秒ごとに（runかjobがある間は1秒のtickごとに）`candidates`を見る。testはhiddenの`--idle-poll-ms`と`--tick-ms`でこの間隔を短くする（引き継ぎの要求を早く拾うため。productionの既定は変えない。task 1048）。ループを抜けたら（claimやGitのエラーで抜ける場合も含む）自分の登録を消す（`deregister_supervisor`）。heartbeat失敗で終わるときだけは消さない。
 
 結果は`{"outcome": "finished" | "stopped", "runs": [休止したrun], "errors": [{run_id, task_id, message}], "triaged": [{run_id, task_id, status}]}`（`triaged`はこのプロセスがtriageを終えたrunとその後のstatus）。SIGINT/SIGTERMは1回目でclaimを止めてactive runの終了を待ち（graceful drain）、2回目で既定の動作（即終了）になる。即終了した（killされた）supervisorのleaseはPIDが死んだ時点で（遅くともheartbeatの30秒で）staleになり、wrapperが生きているrunは次のfill passで別のsupervisorが引き継ぐ（5）。登録はPIDが死んだ時点から`stale`として`status`/`doctor`に残る。`status` / `doctor` / `recover` / `integrate`は登録を消さず、次の`up`がPIDの死んだ登録だけを消す（[`up` / `down`](up-down.md#up--down)）。
+
+## 予定: CIの見張り（ADR-t1920-1）
+
+[ADR-t1920-1](../../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)と[CI watch](ci-watch.md)の予定（未実装、goal 157）。`dagq.toml`に`[ci_watch]`があれば、ループの各passで`[provider_fallback]`の後に`[ci_watch]`を読み直し、間隔ごとにjobのthreadで`gh`を読む。`gh`が無いか認証が無い間は、`[run.env]`のプログラムが見つからないときと同じく、fill passのclaimと新しいresumeをせず、passしたrunの着地を始めない（`ci_watch_unavailable` / `ci_watch_available`）。上の起動時と5・10・12の本文は実装のtaskが直す。

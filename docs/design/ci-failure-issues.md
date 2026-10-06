@@ -4,19 +4,21 @@ type: design
 title: Issue for failing CI on main
 status: current
 created: 2026-10-02
-updated: 2026-10-05
+updated: 2026-10-06 # task 1920: relation to the planned CI watch
 last_verified: 2026-10-02
 scope: operations
 tags:
   - ci
 related:
+  - adr-t1920-1
+  - design-supervisor-lifecycle-ci-watch
   - design-stress-ci
   - design-linux-ci
 ---
 
 # Issue for failing CI on main
 
-main への push ごとの CI（`.github/workflows/ci.yml`）が落ちたら、GitHub の issue（label `ci-failure`）で人と planner に知らせ、次に通ったら閉じる。以前は失敗を届ける経路が無く、2026-09-28〜29 の main の直近 100 回のうち 49 回の failure が誰にも見られていなかった（task 1053、[docs/plans/coverage-at-landing.md](../plans/coverage-at-landing.md) の 6 章）。dagq の finding は observer しか書けないので、[Stress CI](stress-ci.md) の `flaky-test` と同じく queue ではなく issue に残り、planner が issue から直す task を登録する。
+main への push ごとの CI（`.github/workflows/ci.yml`）が落ちたら、GitHub の issue（label `ci-failure`）で人と planner に知らせ、次に通ったら閉じる。以前は失敗を届ける経路が無く、2026-09-28〜29 の main の直近 100 回のうち 49 回の failure が誰にも見られていなかった（task 1053、[docs/plans/coverage-at-landing.md](../plans/coverage-at-landing.md) の 6 章）。dagq の finding は CLI では observer しか書けないので（runtime が記録する経路は [CI watch](supervisor-lifecycle/ci-watch.md) が予定する。下の「supervisorのCIの見張りとの関係」）、[Stress CI](stress-ci.md) の `flaky-test` と同じく queue ではなく issue に残り、planner が issue から直す task を登録する。
 
 ## 部品
 
@@ -48,3 +50,12 @@ workflow の `permissions` は空（`{}`）で、job `report` だけが `actions
 ## 確かめ方
 
 `workflow_run` は default branch にある workflow の定義で動くので、この workflow は main に着地してから効く。手元では YAML として読めることと、`gh run list` / `gh run view --json jobs` と jq の式の形を、実際の main の実行に対して確かめた。
+
+## supervisorのCIの見張りとの関係
+
+予定（未実装、[ADR-t1920-1](../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)決定8）。`dagq.toml`に`[ci_watch]`を書いたrepositoryでは、supervisorが同じmainのpushの実行を`gh`で読み、eventと既に落ちているtestの一覧と`ci_failure`のfindingをqueueに残し、修正taskはruntimeのfindingのplannerがplan reviewを通して作る（[CI watch](supervisor-lifecycle/ci-watch.md)）。
+
+- このworkflowとissueは変えずに残す。supervisorが止まっている間も、見張りの無いrepositoryでも、GitHubの上で人に届く知らせだから。2つは別々に動き、互いを読まない。
+- `[ci_watch]`を書いたrepositoryでは（`dagq ci failures`の`watch`が`available`でも`unavailable`でも）、plannerとinboxはissueから修正taskを登録しない。見張りが止まっている間はclaimと着地も止まり、戻れば見張りが同じ失敗を`ci_failure`のfindingにするので、issueから登録すると重なる。issueは人が読む知らせで、閉じるのは今までどおり次に通った実行。
+- `[ci_watch]`の無いrepository（`disabled`）では、今までどおりplannerがissueから直すtaskを登録する。
+- 判定の違い: issueはworkflow全体の`failure`だけで開くが、見張りは`timed_out`も赤とし、落ちたtestの組ごとにfindingを分ける。cancelされた実行を飛ばすのはどちらも同じ。

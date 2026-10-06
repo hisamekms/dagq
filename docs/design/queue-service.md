@@ -4,7 +4,7 @@ type: design
 title: Queue service
 status: current
 created: 2026-10-02
-updated: 2026-10-05 # task 1641: goal_list's tag; task 840: broker package backend in the name note; task 1352: a service a test started stops once the test's process is gone (DAGQ_SERVICE_OWNER_PID, owner_gone); task 1440: the worker's token is issued when its session wrapper starts in the background
+updated: 2026-10-06 # task 1920: planned CI watch; task 1641: goal_list's tag; task 840: broker package backend in the name note; task 1352: a service a test started stops once the test's process is gone (DAGQ_SERVICE_OWNER_PID, owner_gone); task 1440: the worker's token is issued when its session wrapper starts in the background
 last_verified: 2026-10-05 # task 1641; task 840; task 1352; task 1440
 scope: runtime
 tags:
@@ -209,3 +209,7 @@ queueのevent（`EventKind::is_queue`）: `queue_service_started`（`by`（`up`�
 - runの終わりでのworkerのtokenのfileの片付け（serviceはrunの終わったtokenを断るので使えないが、fileは次のresumeの発行し直しか手の片付けまで残る）
 - 実Codexでの読み取りだけのjobのsocketへの到達の確認（`codex sandbox`とstubのCodexまで。上の「Codexのsandboxからの到達」）
 - 段(4)〜(6)（goal 38）: queueのbroker、supervisor・wrapper・hook・CLIのservice経由化、integrateのverificationの隔離
+
+## 予定: CIの見張り（ADR-t1920-1）
+
+[ADR-t1920-1](../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)と[CI watch](supervisor-lifecycle/ci-watch.md)の予定（未実装、goal 157）。`finding_dismiss`の引数に`covered_by`（task ID、任意）が足りる（`dagq finding dismiss --covered-by`。互換は「API versionと互換」に従う）。`dagq ci failures`をserviceの読み取りのユースケースに載せるかは実装のtaskが決め、載せなければ「まだ無いもの」に書く。

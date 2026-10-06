@@ -4,10 +4,11 @@ type: design
 title: "Finding planners (supervisor)"
 status: current
 created: 2026-09-27
-updated: 2026-10-05 # task 1640: an improvement task without --priority inherits its goal's; task 1596: a headless planner at the provider wall takes the provider retry before the requests behind it, and an answer is read only past the wall; task 1704: planned human-answer wait release (unimplemented)
+updated: 2026-10-06 # task 1920: planned ci_failure findings from the CI watch; task 1640: an improvement task without --priority inherits its goal's; task 1596: a headless planner at the provider wall takes the provider retry before the requests behind it, and an answer is read only past the wall; task 1704: planned human-answer wait release (unimplemented)
 last_verified: 2026-10-05 # task 1640; task 1596
 scope: runtime
 related:
+  - adr-t1920-1
   - adr-t1704-1
   - adr-t1394-1
   - adr-t1394-2
@@ -51,3 +52,7 @@ related:
 ## 予定: 人の答え待ちでの終了
 
 [ADR-t1704-1](../../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定1〜6（未実装）。上の8〜10は実装前の挙動を記す。非対話のfindingのplannerも、人の答えだけを待つなら記録を保存して終了し、findingに結び付いた質問とanswerで新しいplannerが続ける。人だけの待ちによる終了を回数上限に含めず、answerを持つplannerは決めずに終わったときだけ数える。共通の条件・文脈・配送は[予定: 人の答えだけを待つplannerの枠の解放](plan-planners.md#予定-人の答えだけを待つplannerの枠の解放)に従う。改善の上限とanswerを運ぶ例外は変えない。
+
+## 予定: CIの見張りの`ci_failure`のfinding
+
+[ADR-t1920-1](../../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)決定4（未実装）。設定で有効にしたrepositoryでは、supervisorが着地先のbranchのCIの赤から`kind: ci_failure`・対象queueのfindingを印付きで記録し（記録者はobserverでなくruntime）、上の1〜11の経路でplannerが立つ。上限（11）と優先度（6の`normal`以下）は変えない。promptは`ci_failure`のときに`detail`（落ちたtest・commitの範囲・CIのURL・固定バイナリが範囲を含むか）をtaskの`description`に写すことと、同じtestを直すtaskが既にあれば`finding dismiss --covered-by <task>`でそのtaskを記録して閉じることを足す。findingの欄と鍵は[CI watch](ci-watch.md)の「finding（修正taskの材料）」。
