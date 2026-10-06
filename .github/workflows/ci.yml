@@ -64,6 +64,9 @@ jobs:
       - name: ADR numbers
         run: sh scripts/check-adr-numbers.sh
 
+      - name: Frontmatter date lines
+        run: sh scripts/check-frontmatter-dates.sh
+
       - name: Migration numbers and released migrations
         run: sh scripts/check-migration-numbers.sh
 
