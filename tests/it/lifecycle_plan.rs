@@ -482,9 +482,10 @@ fn the_runtime_opens_a_planner_for_a_proposal_with_its_reasons() {
         Some(proposal.id())
     );
     // Nothing to fix and no reasons still makes a prompt that says so.
-    let empty = dagq::application::prompt::runtime_planner_prompt(&db, proposal.id(), &[], &[])
-        .unwrap()
-        .text;
+    let empty =
+        dagq::application::prompt::runtime_planner_prompt(&db, proposal.id(), &[], &[], None)
+            .unwrap()
+            .text;
     assert!(
         empty.contains("(none given)") && empty.contains("(none)"),
         "{empty}"

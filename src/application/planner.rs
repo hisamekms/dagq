@@ -159,7 +159,24 @@ pub fn open_runtime_planner(
 ) -> Result<OpenedPlanner> {
     // The proposal must exist; its record is the one the planner opens for.
     launch.queue.show_proposal(proposal)?;
-    let prompt = runtime_planner_prompt(launch.db, proposal, tasks, reasons)?;
+    // Reopens have a proposal of their own: the finished review belongs
+    // to the proposal that reopened them, not to their current tasks.
+    let review_anchor = launch
+        .queue
+        .latest_events_of("plan_review_finished", usize::MAX >> 1)?
+        .into_iter()
+        .find(|event| {
+            event.payload["proposal_id"] == serde_json::json!(proposal)
+                || event.payload["reopened"]
+                    .as_array()
+                    .is_some_and(|reopened| {
+                        reopened
+                            .iter()
+                            .any(|task| task["proposal_id"] == serde_json::json!(proposal))
+                    })
+        })
+        .and_then(|event| event.task_id);
+    let prompt = runtime_planner_prompt(launch.db, proposal, tasks, reasons, review_anchor)?;
     let actor = launch
         .roles
         .launch(ModelRole::RuntimePlanner)

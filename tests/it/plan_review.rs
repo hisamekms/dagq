@@ -830,6 +830,13 @@ fn a_revise_without_a_live_planner_opens_planners_within_the_limit() {
     )
     .unwrap();
     assert!(prompt.contains("- split it"), "{prompt}");
+    assert!(
+        prompt.contains(&format!(
+            "dagq events --full --task {first} --kind plan_review_finished"
+        )),
+        "{prompt}"
+    );
+    assert!(!events(&mut queue, first, "plan_review_finished").is_empty());
     let sent = &events(&mut queue, first, "plan_revise_sent")[0];
     assert_eq!(sent["opened"], true);
     // Opened for the revise: one effort step above the default, and why
@@ -1463,6 +1470,15 @@ fn a_ready_task_the_review_reopens_leaves_the_claim_for_a_planner() {
     )
     .unwrap();
     assert!(prompt.contains("it must use the new API"), "{prompt}");
+    assert!(
+        prompt.contains(&format!(
+            "dagq events --full --task {running} --kind plan_review_finished"
+        )),
+        "{prompt}"
+    );
+    assert!(!prompt.contains(&format!(
+        "dagq events --full --task {ready} --kind plan_review_finished"
+    )));
     queue.remove_dependency(ready, blocker).unwrap();
     assert!(queue.candidates().unwrap().is_empty());
 

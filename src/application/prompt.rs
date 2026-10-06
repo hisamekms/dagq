@@ -993,6 +993,7 @@ pub fn runtime_planner_prompt(
     proposal: ProposalId,
     tasks: &[Task],
     reasons: &[String],
+    review_anchor: Option<TaskId>,
 ) -> Result<FittedPrompt> {
     let mut fit = Fit::new(RUNTIME_PLANNER_PROMPT_LIMIT);
     let goal_tasks: Vec<GoalTask> = tasks
@@ -1013,8 +1014,9 @@ pub fn runtime_planner_prompt(
         &format!("`dagq proposal show {proposal}`"),
     );
     fit.section("tasks", &tasks);
-    let reason_read = format!(
-        "read it whole with `dagq events --full --task ID --kind plan_review_finished` for a task of proposal {proposal}"
+    let reason_read = review_anchor.map_or_else(
+        || "the plan review anchor is unknown, so there is no known way to read the full reasons".to_owned(),
+        |anchor| format!("read it whole with `dagq events --full --task {anchor} --kind plan_review_finished`"),
     );
     let lines: Vec<String> = reasons
         .iter()
@@ -1053,13 +1055,13 @@ pub fn runtime_planner_prompt(
     };
     if left_out > 0 {
         reasons.push_str(&format!(
-            "\n({left_out} more reasons left out by this section's limit. To read them: `dagq events --full --task ID --kind plan_review_finished` for a task of proposal {proposal}.)"
+            "\n({left_out} more reasons left out by this section's limit. {reason_read}.)"
         ));
     }
     fit.section("reasons", &reasons);
     Ok(fit.finish(format!(
         "You are a planner the dagq runtime opened for proposal {proposal} of the queue at {db}; no person watches this session.\n\
-         Plan review sent the proposal back. Its reasons:\n{reasons}\n\
+         Plan review sent the proposal back. Its reasons:\n{reasons}\nFull reasons: {reason_read}.\n\
          Its tasks:\n{tasks}\n\
          Follow the dagq-planner skill of the dagq plugin: read the proposal with `dagq proposal show {proposal}` and each task with `dagq show ID`, fix what the reasons point at, and submit it again with `dagq submit --proposal {proposal}`.\n\
          {RECORD_READING}\n\
@@ -1920,13 +1922,12 @@ pub fn request_planner_prompt(material: &RequestPlannerMaterial<'_>) -> Result<F
     let mut refs = Vec::new();
     for reference in material.refs {
         let (label, read, text) = request_ref(reference)?;
-        let text = fit.text(
-            "refs",
-            &text,
-            REQUEST_REF_BYTES,
-            Keep::Start,
-            &format!("read it whole with {read}"),
-        );
+        let read_note = if matches!(reference, RequestRefMaterial::Unreadable { .. }) {
+            read.clone()
+        } else {
+            format!("read it whole with {read}")
+        };
+        let text = fit.text("refs", &text, REQUEST_REF_BYTES, Keep::Start, &read_note);
         refs.push((label, read, text));
     }
     let sizes: Vec<usize> = refs.iter().map(|(_, _, text)| text.len()).collect();
@@ -1944,7 +1945,7 @@ pub fn request_planner_prompt(material: &RequestPlannerMaterial<'_>) -> Result<F
     if !left_out.is_empty() {
         referred.push_str(&format!(
             "\n### Left out\n\n{}",
-            left_out_note("references", &left_out, "the command named with each")
+            left_out_note("references", &left_out, "the command named with each readable reference; unreadable references have no read method")
         ));
     }
     fit.section("refs", &referred);
@@ -1997,7 +1998,7 @@ pub fn request_planner_prompt(material: &RequestPlannerMaterial<'_>) -> Result<F
 
 /// One reference of a planning request as its planner's prompt shows it:
 /// how the prompt names it, the read-only dagq command that reads it
-/// whole, and its section.
+/// whole (or why none is available), and its section.
 fn request_ref(reference: &RequestRefMaterial) -> Result<(String, String, String)> {
     let mut out = String::new();
     let (label, read) = match reference {
@@ -2088,7 +2089,7 @@ fn request_ref(reference: &RequestRefMaterial) -> Result<(String, String, String
             ));
             (
                 reference.to_string(),
-                "nothing: it could not be read".to_owned(),
+                "it could not be read, so there is no way to read it".to_owned(),
             )
         }
     };
@@ -5273,9 +5274,15 @@ mod tests {
     fn prompts_take_the_rules_from_the_repository_in_order() {
         let db = Path::new("/q/queue.db");
         let (plan_review, _) = plan_prompt(4, 0);
-        let revise = runtime_planner_prompt(db, ProposalId::new(3), &[], &["fix".into()])
-            .unwrap()
-            .text;
+        let revise = runtime_planner_prompt(
+            db,
+            ProposalId::new(3),
+            &[],
+            &["fix".into()],
+            Some(TaskId::new(42)),
+        )
+        .unwrap()
+        .text;
         let review = review_prompt(
             &task(7, "work", TaskStatus::InProgress),
             &run(7, RunStatus::Succeeded, Some(SHA)),
@@ -7638,6 +7645,7 @@ mod tests {
             ProposalId::new(3),
             &tasks,
             &reasons,
+            Some(TaskId::new(42)),
         )
         .unwrap();
         within(&fitted, RUNTIME_PLANNER_PROMPT_LIMIT);
@@ -7648,10 +7656,30 @@ mod tests {
         );
         assert!(text.contains("tasks (the oldest) left out by this section's limit"));
         assert!(text.contains("To read them: `dagq proposal show 3`."));
-        assert!(text.contains("more reasons left out by this section's limit. To read them: `dagq events --full --task ID --kind plan_review_finished` for a task of proposal 3."));
+        assert!(text.contains("more reasons left out by this section's limit. read it whole with `dagq events --full --task 42 --kind plan_review_finished`."));
+        assert!(text.contains(
+            "read it whole with `dagq events --full --task 42 --kind plan_review_finished`]"
+        ));
+        assert!(!text.contains("for a task of proposal"));
         // The first reasons are kept, cut to their own limit.
         assert!(text.contains("- reason 1 reason 1"));
         assert!(text.contains("dagq submit --proposal 3"));
+    }
+
+    #[test]
+    fn a_runtime_planner_without_a_review_anchor_names_no_read_command() {
+        let fitted = runtime_planner_prompt(
+            Path::new("/q/queue.db"),
+            ProposalId::new(3),
+            &[],
+            &[big("reason", 5_000)],
+            None,
+        )
+        .unwrap();
+        assert!(fitted.text.contains(
+            "the plan review anchor is unknown, so there is no known way to read the full reasons"
+        ));
+        assert!(!fitted.text.contains("--kind plan_review_finished"));
     }
 
     /// The planner opened for a large bundle of follow_up drafts with a
@@ -7947,7 +7975,10 @@ mod tests {
             updated_at: 0,
         };
         let receipt = json!({"summary": big("summary", 20_000), "follow_ups": []});
-        let mut refs = Vec::new();
+        let mut refs = vec![RequestRefMaterial::Unreadable {
+            reference: crate::domain::plan_request::RequestRef::Task(TaskId::new(999)),
+            error: big("unreadable", 20_000),
+        }];
         for n in 1..=10 {
             refs.push(RequestRefMaterial::Task {
                 task: Box::new(big_task(n, 20_000)),
@@ -7985,6 +8016,9 @@ mod tests {
                 "{section}: {bytes:?}"
             );
         }
+        assert!(text.contains("it could not be read, so there is no way to read it"));
+        assert!(!text.contains("read it whole with nothing"));
+        assert!(!text.contains("read it whole with it could not be read"));
         assert!(text.contains("read it whole with `dagq requests 6`"));
         assert!(text.contains("references left out by this section's limit"));
         assert!(text.contains("read it whole with `dagq show 1 --full` and `dagq events --full --task 1 --kind integration_receipt`"));
