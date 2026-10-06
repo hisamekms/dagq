@@ -131,7 +131,8 @@ pub struct Task {
     /// `provider` and `worker_mode`, resolved.
     #[serde(flatten)]
     worker: Worker,
-    /// The mode the task names (`--interactive` / `--headless`); none
+    /// The mode the task names (`--headless`, or `interactive` recorded
+    /// before ADR-t1433-2); none
     /// leaves it to the provider's default, so a task registered without
     /// one follows a change of the default (ADR-t1340-1). Not shown.
     #[serde(skip)]

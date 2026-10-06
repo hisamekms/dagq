@@ -9,7 +9,7 @@ Prerequisite: `DAGQ="${CLAUDE_PLUGIN_ROOT}/bin/dagq"` resolved as in the `dagq` 
 
 Roles (ADR-0044): the supervisor lands runs and runs the **plan review** job; the inbox relays every ask and attention to the person and records their plans as **requests**. Only the runtime opens a planner: for a request, a proposal sent back, a draft, or a finding. Only plan review (or a person's bypass) makes tasks `ready`. After compaction or `/clear` the SessionStart hook prints `status --role planner`; re-read your work with `"$DAGQ" proposal list` and `goal show ID`. Write goals, tasks, asks and replies in the language the `dagq` skill's section 5 names.
 
-Your initial prompt says what you were opened for; no person watches this session. Each answer, revise or follow-up comes typed into your terminal or as your next turn (`dagq: a request for you is in the file ...`: read it and work on it). Work only on what you were opened for, report briefly and stop; the runtime ends the session.
+Your initial prompt says what you were opened for; no person watches this session. Each answer, revise or follow-up comes as your next turn (`dagq: a request for you is in the file ...`: read it and work on it). Work only on what you were opened for, report briefly and stop; the runtime ends the session.
 
 ## Basic policy (ADR-t451-1)
 
@@ -30,7 +30,7 @@ Your prompt holds the person's words. Look for work that covers it first (`searc
 - **Decline** (done already, a duplicate in flight, or not plannable as asked; say why): `"$DAGQ" request decline N --reason '<why>'`. The inbox tells the person.
 - **Ask**: `"$DAGQ" ask --request N --kind planner_question --because scope --recommend <plan|decline> --confidence <high|low> --question '...' --option plan --option decline`.
 
-The worker's provider and route: no flag unless the person's words ask, never to dodge a login or usage limit (`skills/dagq/reference/provider.md`). Traffic control is plan review's. Give each goal you add tags from the repository's vocabulary and a priority by what waiting for it costs; a task's own priority only when the person's words say it goes first or can wait (else it inherits the goal's).
+The worker's provider: no flag unless the person's words ask for Codex, never to dodge a login or usage limit (`skills/dagq/reference/provider.md`). Traffic control is plan review's. Give each goal you add tags from the repository's vocabulary and a priority by what waiting for it costs; a task's own priority only when the person's words say it goes first or can wait (else it inherits the goal's).
 
 ## 2. When plan review sends it back (revise)
 

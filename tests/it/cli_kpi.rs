@@ -744,13 +744,7 @@ fn kpi_cross_reaches_periods_and_compare_without_replacing_single_axes() {
     for args in [
         vec!["add", "codex", "--provider", "codex", "--change", "fix"],
         vec!["add", "claude headless", "--headless", "--change", "fix"],
-        vec![
-            "add",
-            "claude interactive",
-            "--interactive",
-            "--change",
-            "fix",
-        ],
+        vec!["add", "claude interactive", "--change", "fix"],
         vec!["add", "different change", "--headless", "--change", "test"],
     ] {
         ok(&db, &args);
@@ -788,8 +782,9 @@ fn kpi_cross_reaches_periods_and_compare_without_replacing_single_axes() {
             queue.record_runtime_event(run.id(), kind, payload).unwrap();
         }
     }
-    // Claims run headless since task 1437; the interactive task's claim
-    // stands for one recorded before, which kpi still reads by its route.
+    // `add --interactive` is refused and claims run headless (ADR-t1433-2);
+    // task 3's claim stands for one recorded before, which kpi still reads
+    // by its route.
     rusqlite::Connection::open(&db)
         .unwrap()
         .execute(

@@ -41,7 +41,7 @@ The plugin holds the skills the inbox and planner sessions follow, the launcher 
 **5. Decide what workers may do, in Claude Code's settings.** dagq has no permission policy of its own for workers. It adds only a few deny rules to each run: no signalling processes by name (`pkill`, `killall`), no `dagq` commands outside the worker's role, and no setting or unsetting the variables that name the worker's role and queue (`DAGQ_ROLE` and the like). Everything else comes from Claude Code:
 
 - A Claude worker runs headless by default, one `claude -p` call per turn, in Claude Code's auto mode (`--permission-mode auto`). Auto mode and your `permissions` rules (`allow` / `deny` in `~/.claude/settings.json` or the repository's `.claude/settings.json`) decide what a worker may do without a person. If the session does not start in auto mode (for example, a model that does not support it), dagq stops the turn as a launch failure instead of running it in another mode.
-- A task added with `--interactive` keeps that mark, but its runs are headless like every other worker's: the interactive worker was retired, and no run gets a cmux workspace. Read a run's session with `dagq run log`.
+- `add` and `edit` refuse `--interactive`: the interactive worker was retired, every worker runs headless, and no run gets a cmux workspace. A task added with it before keeps that mark, but its runs are headless too. Read a run's session with `dagq run log RUN --follow`; a worker reaches you only through its asks, which you `dagq answer`.
 
 Codex workers run in Codex's own sandbox ([provider lifecycle](docs/design/provider-lifecycle.md)). Set these up before the first run.
 

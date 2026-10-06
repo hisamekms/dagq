@@ -13,7 +13,7 @@ The resource broker (`dagq-broker`) is a long-lived container in dagq's own Podm
 | `required` | The worker's and resume's built-in file tools are denied, Bash runs only `dagq`, and the turn reads only the broker's MCP server; the receipt is written with the broker's `write_receipt`. The control side (`dagq ask` and the queue commands a worker may run, the receipt) stays outside the broker. When no worker can be given the tools, the supervisor claims and resumes nothing and tells the inbox (`broker_claims_held`); it never falls back to the built-in tools. |
 
 - Even `required` is a guardrail, not enforcement: the deny list and the permission mode are Claude Code's settings, and the worker is not isolated.
-- Under `required` only a Claude worker in headless turns can be given the tools; any other run (an interactive worker, a Codex worker) is refused with `broker_required: ...` instead of running without them.
+- Under `required` only a Claude worker in headless turns can be given the tools; any other run (a Codex worker) is refused with `broker_required: ...` instead of running without them.
 - `[broker.package]` names the only commands `package_install` may run (none by default); `exec_allow` names the programs `exec` may start (none by default).
 - `host.toml`'s `[broker] mode` can only lower a host to `"disabled"`; any other value there is a warning (`up`'s `broker.warnings`) and changes nothing. It also holds the host's podman path and the machine's and container's resources.
 - `up` refuses to start a supervisor whose mode is not `disabled` when podman cannot be found on its PATH.

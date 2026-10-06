@@ -176,12 +176,13 @@ enum Command {
         #[arg(long, value_parser = PROVIDERS)]
         provider: Option<String>,
         /// Run the worker non-interactively, one call per turn (ADR-t813-1), and store that mode.
-        /// Omitted (with no --interactive): the provider's default, headless for Claude
-        /// (ADR-t1340-1) and for codex (its only mode); the task follows a later change of it.
+        /// Omitted: the provider's default, headless for Claude (ADR-t1340-1) and for codex
+        /// (its only mode); the task follows a later change of it.
         #[arg(long, conflicts_with = "interactive")]
         headless: bool,
-        /// Run the worker in Claude's interactive session in the cmux terminal (Claude only:
-        /// refused with --provider codex), for a task a person wants to watch or step into.
+        /// Refused: the interactive worker was retired and every worker runs headless
+        /// (ADR-t1433-2). Read a run's turns with `run log --follow`; its questions come as
+        /// asks for `answer`.
         #[arg(long)]
         interactive: bool,
         /// Claim the task only once the supervisor's own build (its build identifier's commit)
@@ -382,15 +383,15 @@ enum Command {
         /// `[tasks] changes` of dagq.toml when it names them.
         #[arg(long, group = "field")]
         change: Option<String>,
-        /// The agent the worker runs on (`add --provider`): claude or codex. Without --headless or
-        /// --interactive, the worker takes that provider's default mode (headless for both) and
-        /// the task names none.
+        /// The agent the worker runs on (`add --provider`): claude or codex. Without --headless,
+        /// the worker takes that provider's default mode (headless for both) and the task names
+        /// none.
         #[arg(long, group = "field", value_parser = PROVIDERS)]
         provider: Option<String>,
         /// Run the worker non-interactively (`add --headless`), named on the task.
         #[arg(long, group = "field", conflicts_with = "interactive")]
         headless: bool,
-        /// Run the worker in the agent's interactive session (`add --interactive`; Claude only).
+        /// Refused, as `add --interactive` is: the interactive worker was retired (ADR-t1433-2).
         #[arg(long, group = "field")]
         interactive: bool,
         /// Claim it only once the supervisor's build contains its dependencies' landings

@@ -559,8 +559,11 @@ impl AgentProvider for TestProvider {
             "`dagq ask --run {} --kind worker_question --because scope --topic <code> --question '...'`",
             run.id()
         )));
-        // Background work is stopped before the receipt.
-        assert!(prompt.contains(runtime::STOP_BACKGROUND), "{prompt}");
+        // Processes the session started are stopped before its turn ends.
+        assert!(
+            prompt.contains(dagq::application::prompt::HEADLESS_STOP),
+            "{prompt}"
+        );
         let mut command = CommandSpec::new("/bin/sh");
         command
             .current_dir(run.worktree_path().unwrap())

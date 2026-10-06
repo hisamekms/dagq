@@ -241,6 +241,9 @@ pub enum DomainError {
         provider: super::Provider,
         mode: super::worker::WorkerMode,
     },
+    /// `add` or `edit` names the interactive worker mode, which no longer
+    /// runs (ADR-t1433-2): a run's worker is headless only.
+    InteractiveWorkerRetired,
     /// A finding status change its status does not allow.
     FindingNotInStatus {
         finding_id: FindingId,
@@ -641,6 +644,7 @@ impl fmt::Display for DomainError {
                 provider.as_str(),
                 mode.as_str()
             ),
+            Self::InteractiveWorkerRetired => f.write_str(super::worker::INTERACTIVE_WORKER_RETIRED),
             Self::FindingNotInStatus {
                 finding_id,
                 status,

@@ -389,7 +389,7 @@ fn nudged_text(nudge: Option<Nudge>, now: SystemTime) -> String {
         || "although its turns were refused permissions too often to get on".to_owned(),
         |nudge| {
             format!(
-                "although the supervisor nudged it {}s ago to write its receipt, ask a worker_question or say what it waits for",
+                "although the supervisor nudged it {}s ago to write its receipt, ask a worker_question or run again in the foreground what it ended the turn to wait for",
                 secs_between(nudge.at, now)
             )
         },
@@ -1326,8 +1326,8 @@ impl StallWatch {
         }
     }
 
-    /// Record `stall_nudged` and type the nudge, once in the phase. A nudge
-    /// that could not be typed is noted; the ask follows on the next tick.
+    /// Record `stall_nudged` and send the nudge as the next turn, once in the
+    /// phase. A nudge that could not be sent is noted; the ask follows on the next tick.
     fn send_nudge(
         &mut self,
         sv: &mut Supervisor<'_>,
@@ -1337,9 +1337,8 @@ impl StallWatch {
         idle_secs: i64,
         now: SystemTime,
     ) -> Result<Option<SystemTime>> {
-        let background = idle.background_tasks();
         self.nudged(sv, run, workspace, idle, idle_secs, now, None)?;
-        let text = stall_nudge(run, idle_secs, background, idle.background_running())?;
+        let text = stall_nudge(run)?;
         let sent_at = sv.files.now();
         match submit(sv, run, workspace, Input::Text(&text), "nudge") {
             Ok(_submission) => {

@@ -4,8 +4,8 @@ type: design
 title: System overview
 status: current
 created: 2026-09-21
-updated: 2026-10-06 # task 1441: runtime planners run headless only in a background wrapper without a workspace, the planner e2e case is gone; task 1619: removed the resolved planner_handoff test violation clause; task 1617: domain::landing_branch no longer an anyhow violation; task 1223: the headless jobs run on the provider of their role table; task 1439: the runtime tests run the worker's wrapper in the background; task 1440: runs open no workspace, the e2e sweep case is gone
-last_verified: 2026-10-06 # task 1441; task 1619; task 1617; task 1223; task 1439; task 1440
+updated: 2026-10-06 # task 1438: the interactive worker retired from the text; task 1441: runtime planners run headless only in a background wrapper without a workspace, the planner e2e case is gone; task 1619: removed the resolved planner_handoff test violation clause; task 1617: domain::landing_branch no longer an anyhow violation; task 1223: the headless jobs run on the provider of their role table; task 1439: the runtime tests run the worker's wrapper in the background; task 1440: runs open no workspace, the e2e sweep case is gone
+last_verified: 2026-10-06 # task 1438; task 1441; task 1619; task 1617; task 1223; task 1439; task 1440
 scope: system
 related:
   - adr-t1545-1
@@ -45,7 +45,7 @@ related:
 
 dagqは、依存関係を持つ開発タスクをSQLiteで管理し、着手可能なタスクをGit worktreeとsupervisorから切り離したbackgroundのsession wrapperで実行するRust runtimeである（cmuxはinboxのworkspaceに使う）。
 
-> **予定（goal 92）**: cmuxはinboxだけが使う形に移る（[ADR-t1433-1](../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)）。cmuxを呼ぶのは`up`がinboxのworkspaceを開く・確かめる・閉じることとinboxのsessionの中の操作だけになり、worker・runtimeのplanner・supervisor・queue service・observer・jobはcmuxを呼ばない。対話の経路（workerの`--interactive`とruntimeのplannerの対話）は廃止し（[ADR-t1433-2](../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）、非対話のsession wrapperはbackgroundのprocessだけで動き（[ADR-t1433-3](../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）、supervisorはin-cmux modeなしでlaunchdで常駐し（[ADR-t1433-4](../adr/2026-10-03-t1433-4-supervisor-resides-without-cmux.md)）、runtimeはinboxのterminalに打ち込まない（[ADR-t1433-5](../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)）。workerのsession wrapperはtask 1440から、runtimeのplannerはtask 1441からbackgroundだけで動き、runもruntimeのplannerもworkspaceを開かない。この文書の対話・in-cmux modeの記述は、goal 92の後続のtaskが実装するまでの今の姿である。
+> **予定（goal 92）**: cmuxはinboxだけが使う形に移る（[ADR-t1433-1](../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)）。cmuxを呼ぶのは`up`がinboxのworkspaceを開く・確かめる・閉じることとinboxのsessionの中の操作だけになり、worker・runtimeのplanner・supervisor・queue service・observer・jobはcmuxを呼ばない。対話の経路（workerの`--interactive`とruntimeのplannerの対話）は廃止し（[ADR-t1433-2](../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）、非対話のsession wrapperはbackgroundのprocessだけで動き（[ADR-t1433-3](../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）、supervisorはin-cmux modeなしでlaunchdで常駐し（[ADR-t1433-4](../adr/2026-10-03-t1433-4-supervisor-resides-without-cmux.md)）、runtimeはinboxのterminalに打ち込まない（[ADR-t1433-5](../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)）。workerのsession wrapperはtask 1440から、runtimeのplannerはtask 1441からbackgroundだけで動き、runもruntimeのplannerもworkspaceを開かない。workerの対話の経路はtask 1437で動かなくなり、`add` / `edit`の`--interactive`は理由付きで拒み、workerへの文面に対話の分岐は無い（task 1438）。この文書の対話・in-cmux modeの記述は、goal 92の後続のtaskが実装するまでの今の姿である。
 
 ## 用語集
 

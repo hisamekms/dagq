@@ -4,8 +4,8 @@ type: design
 title: Queue service
 status: current
 created: 2026-10-02
-updated: 2026-10-06 # task 1921: CI watch implemented; task 1641: goal_list's tag; task 840: broker package backend in the name note; task 1352: a service a test started stops once the test's process is gone (DAGQ_SERVICE_OWNER_PID, owner_gone); task 1440: the worker's token is issued when its session wrapper starts in the background
-last_verified: 2026-10-06 # task 1921; task 1641; task 840; task 1352; task 1440
+updated: 2026-10-06 # task 1438: the wrapper starts only headless turns with the worker token; task 1921: CI watch implemented; task 1641: goal_list's tag; task 840: broker package backend in the name note; task 1352: a service a test started stops once the test's process is gone (DAGQ_SERVICE_OWNER_PID, owner_gone); task 1440: the worker's token is issued when its session wrapper starts in the background
+last_verified: 2026-10-06 # task 1438; task 1921; task 1641; task 840; task 1352; task 1440
 scope: runtime
 tags:
   - security
@@ -66,7 +66,7 @@ queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）�
 serviceは呼び出しのprincipal（`role`・`actor_id`・workerなら`run_id`と`task_id`）をtokenから決め、クライアントが名乗るrole（`DAGQ_ROLE`）は認可に使わない（ADR-t1233-1決定4、ADR-t1233-4決定4）。
 
 - 発行: 制御側だけが`queue_service::issue`で発行する。AI actorにtokenを作るコマンドは無い。tokenは32 bytesの乱数のhex。発行できるprincipalはAI actor（`TrustLevel::UntrustedAgent`）だけで、人と制御側（user・supervisor・wrapper・integrator）は段(5)まで今のままDBを直接開く。同じactor idに発行し直すと前のtokenは失効する（resumeの発行し直し）。発行するのはactorの起動の1か所（`HostActorExecutor`、applicationのport `ServiceAccess`、hostの実装は`SystemServiceAccess`）:
-  - workerのtoken: supervisorがclaimとresumeでrunのsession wrapperをbackgroundで起動するとき（`ActorProgram::RunSession`）に発行する。wrapperの環境には入れず、session wrapperがagent（対話のsession・resume・非対話のturn）を起動するとき（`ActorProgram::SessionAgent`）にそのfileのpathを渡す。fileが無いとき（claimの発行を経ずに起動したwrapper）だけwrapperが発行する（wrapperも制御側）
+  - workerのtoken: supervisorがclaimとresumeでrunのsession wrapperをbackgroundで起動するとき（`ActorProgram::RunSession`）に発行する。wrapperの環境には入れず、session wrapperがagent（非対話のturn。最初のsessionもresumeもturnで動き、対話のsessionはtask 1437・1438から起動しない）を起動するとき（`ActorProgram::SessionAgent`）にそのfileのpathを渡す。fileが無いとき（claimの発行を経ずに起動したwrapper）だけwrapperが発行する（wrapperも制御側）
   - jobのtoken: jobを起動するプロセス（supervisor、`observe`・`throughput-review`のコマンド）が起動のとき（`ActorProgram::Headless`）に発行し、jobのプロセスが終わったとき（それを見たwaitか、handleを捨てたとき）に失効させる（`ServiceAccess::revoke_on_exit`）
 - 失効: `queue_service::revoke`（actor id）が値とprincipalの記録を消す。加えてserviceは、principalがrunを名指すtokenを、そのrunの状態が`integrated`・`succeeded`・`failed`・`interrupted`のとき、またはqueueに無いときに断る（runの終わりで失効。`run_holds_token`。workerのtokenのfileはresumeの発行し直しまで残るが、使えない）
 - 断り: tokenが無い（`missing_token`）・発行していない値か失効した（`unknown_token`）・runが終わった（`run_ended`）要求は`unauthenticated`で断り、queueのevent `queue_service_unauthenticated`（`use_case`・`reason`。tokenの値は書かない）に残す。actorはservice自身（role `supervisor`、id `queue-service:<pid>`。制御側の一部）

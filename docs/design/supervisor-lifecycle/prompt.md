@@ -4,8 +4,8 @@ type: design
 title: "Prompt"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1441: planner_prompt_written is recorded before the background wrapper starts; task 1681; task 1680 revise 1; task 1540: the revisit section of the draft planner; task 1633: the recovery job's binary sections and their limits; task 1688 (after task 1572)
-last_verified: 2026-10-06 # task 1441; task 1681; task 1680 revise 1; task 1540; task 1633; task 1688 (after task 1572)
+updated: 2026-10-06 # task 1438: the worker's texts have no interactive route; task 1441: planner_prompt_written is recorded before the background wrapper starts; task 1681; task 1680 revise 1; task 1540: the revisit section of the draft planner; task 1633: the recovery job's binary sections and their limits; task 1688 (after task 1572)
+last_verified: 2026-10-06 # task 1438; task 1441; task 1681; task 1680 revise 1; task 1540; task 1633; task 1688 (after task 1572)
 scope: runtime
 related:
   - adr-t1566-1
@@ -22,6 +22,7 @@ related:
   - design-supervisor-lifecycle-language
   - design-supervisor-lifecycle-headless-worker
   - adr-t813-1
+  - adr-t1433-2
 ---
 
 # Prompt
@@ -35,9 +36,9 @@ related:
 
 冒頭（worktreeだけで作業する指示の直後）に、最初に読むものを`WORKER_READING`の一文に限定する: repository instructions（AGENTS.mdかCLAUDE.md。`local_checks`と揃える）のworker節、この下のtask context（とそれが名指す文書）、goal doc、依存元のsummaryだけを読み、`dagq list` / `dagq show`は打たず、docs全体は読まず、他のファイルはtaskが必要とするときだけ開く（goal 11の決定4。runに要る情報はpromptに載っていて、queueの一覧やdocs全体を読むのは最初のcommitを遅らせるだけ）。
 
-判断が要るときの手順も載せる: terminalに質問を書いて待つのではなく、worktreeで`dagq ask --run <run-id> --kind worker_question --because scope --topic <code> --question '...'`を打ち、短く報告して止まる。askの前に、repositoryの指示（AGENTS.mdかCLAUDE.md）がその問いをaskにせず自分で決める・`failed`のreceiptにすると定めていないかを確かめ、定めていればそれに従うよう書く（`ASK_RULES_FIRST`。runtimeはrepositoryの規則を持たないので、ADRのIDの衝突など個別の規則は書かない。task 978）。対話と非対話の両方のpromptでaskの手順の文の前に置き、非対話の依頼の`HEADLESS_DONE`の`If you need a decision`の前と、receiptの無い促し（`stall_nudge`）の選択肢の2（`<ASK_RULES_FIRST> Otherwise, if you need a decision, run ...`）にも同じ文を置く。`--topic`には問いの中身の分類コード（[ADR-t947-2](../../adr/2026-09-28-t947-2-worker-questions-carry-topic-codes.md)）を主から付け、promptはコードの一覧と定義と主の選び方（`worker_question_topics_line`。一覧は`domain::WORKER_QUESTION_TOPICS`、[ask](ask.md#worker_questionの分類コード)）を載せる。回答は`answer to ask <id>: ...`としてterminalに届く（[workerの質問への回答の送信](worker-question-answer.md#workerの質問への回答の送信)）。
+判断が要るときの手順も載せる: 返事に質問を書いてturnを終えるのではなく、worktreeで`dagq ask --run <run-id> --kind worker_question --because scope --topic <code> --question '...'`を打ち、短く報告してturnを終える。askの前に、repositoryの指示（AGENTS.mdかCLAUDE.md）がその問いをaskにせず自分で決める・`failed`のreceiptにすると定めていないかを確かめ、定めていればそれに従うよう書く（`ASK_RULES_FIRST`。runtimeはrepositoryの規則を持たないので、ADRのIDの衝突など個別の規則は書かない。task 978）。promptのaskの手順の文の前に置き、依頼の`HEADLESS_DONE`の`If you need a decision`の前と、receiptの無い促し（`stall_nudge`）の選択肢の2（`<ASK_RULES_FIRST> Otherwise, if you need a decision, run ...`）にも同じ文を置く。`--topic`には問いの中身の分類コード（[ADR-t947-2](../../adr/2026-09-28-t947-2-worker-questions-carry-topic-codes.md)）を主から付け、promptはコードの一覧と定義と主の選び方（`worker_question_topics_line`。一覧は`domain::WORKER_QUESTION_TOPICS`、[ask](ask.md#worker_questionの分類コード)）を載せる。回答は`answer to ask <id>: ...`として同じsessionの次のturnのpromptで届く（[workerの質問への回答の送信](worker-question-answer.md#workerの質問への回答の送信)）。
 
-末尾の「receiptを書いたら短く報告して止まる」の前に STOP_BACKGROUND を置き、receipt 前に自分が始めた background の処理を止めるよう指示する。非対話の turn は終了時に子プロセスを片付ける。対話 worker の /exit の確認画面と answer_known_dialog の自動応答は廃止した。
+末尾の「receiptを書いたら短く報告してturnを終える」の前に`HEADLESS_STOP`を置き、turnを終える前に自分が始めてまだ走っている処理（`nohup … &`はturnの後も残る）をpidで止めるよう指示する（名前やパターンで送らない。`pkill` / `killall`の禁止。task 359）。対話のworkerに送った`STOP_BACKGROUND`（`/exit`の確認画面の説明つき）と`answer_known_dialog`の自動応答は、対話のworkerの廃止（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)、task 1437・1438）で消した。
 
 verification commandsは`Verification commands (integrate runs them once after rebasing onto main; that run is the verification of record for the commit):`の見出しで一覧を見せ、その直後に`local_checks`の一文を置く: worktreeで流すのはrepositoryの指示（AGENTS.mdかCLAUDE.md）がworkerに求める検証で、それはverification commandsの一部をintegrateに任せてよく、指示が何も求めないときはverification commandsを流す。同じ一文をresume（`evidence_missing`・`scope_violation`・`sent_back`・triage・rebase（`Landing`）・reviewのpass後の衝突（`Precheck`））とreviseの手順2にも載せ（そこではverification commandsをJSONの一覧で書く）、integrateのrebase（`Landing`）の手順2には「reasonがintegrateのrebase後に落ちた検証コマンドなら、そのコマンドを手元で流して再現して直してよい」を足す。retryが引き継いだrunの節も「上の検証を流し直す」と書く。runtimeはcargoやllvm-covなど特定のツールの名前を決め打ちしない（dagqは他のrepositoryでも動く。どの検証をintegrateだけに任せるかはrepositoryの指示が決める）（task 510）。新しいADRは作らない: [ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)決定1の「同じcommitのverificationはintegrateの1回が正」に沿ってpromptの文面を直すだけで、決定は変わらないため。
 
@@ -53,7 +54,7 @@ schemaとCLIは変えない。`tests/e2e.rs`のstubはpromptの1行目とreceipt
 
 ## 受け入れ条件の対応づけ
 
-[ADR-t1420-1](../../adr/2026-10-03-t1420-1-worker-maps-each-acceptance-criterion-before-the-receipt.md)（goal 90、task 1420）。workerのpromptは、receiptの書き方（`Write a completion receipt to ...`の行）の直前に`ACCEPTANCE_MAP`の1段落（英語で564文字）を置く: receiptの前に受け入れ条件の各項目を満たすもの（変えたファイル・testの名前・receiptのevidence・文書の節や測るコマンド）へ対応づけ、まだ何も満たしていない項目はその場で直す。満たせない項目を`follow_ups`に回して`succeeded`を書かず、人の判断が要れば`worker_question`（`--because scope`）、範囲の外ならfailedのreceiptにする。対応は`summary`に項目ごとの短い句で書く。対話・非対話、Claude・Codexのどのworkerのpromptも同じ文で、新しいtestの実行や検査のコマンドは求めない。
+[ADR-t1420-1](../../adr/2026-10-03-t1420-1-worker-maps-each-acceptance-criterion-before-the-receipt.md)（goal 90、task 1420）。workerのpromptは、receiptの書き方（`Write a completion receipt to ...`の行）の直前に`ACCEPTANCE_MAP`の1段落（英語で564文字）を置く: receiptの前に受け入れ条件の各項目を満たすもの（変えたファイル・testの名前・receiptのevidence・文書の節や測るコマンド）へ対応づけ、まだ何も満たしていない項目はその場で直す。満たせない項目を`follow_ups`に回して`succeeded`を書かず、人の判断が要れば`worker_question`（`--because scope`）、範囲の外ならfailedのreceiptにする。対応は`summary`に項目ごとの短い句で書く。Claude・Codexのどのworkerのpromptも同じ文で、新しいtestの実行や検査のコマンドは求めない。
 
 resumeの解消依頼（`resume_request`。全ての`ResumeKind`）とreviseの依頼（`revise_request`）は、receiptを書き直す手順5の末尾に`ACCEPTANCE_REMAP`（英語で237文字。task 1428で文書の照合の記録を含めて286文字）と、その後にfollow_upの所属の提案の短い形`FOLLOW_UP_PROPOSAL_AGAIN`（task 1508）を足す: 直した項目の対応を改めて満たすものへ対応づけて`summary`の句を（照合した文書とともに。下の[文書の照合](#文書の照合)）書き直し、taskの中で満たせない項目は`worker_question`（`--because scope`）かfailedのreceiptにしてfollow_upにしない。
 
@@ -61,31 +62,31 @@ Codexのworkerの`review_line`（下の[subagent review](#subagent-review)）は
 
 ## 文書の照合
 
-[ADR-t1428-1](../../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)（goal 91、task 1428）。workerのpromptは`ACCEPTANCE_MAP`の直後（`Write a completion receipt to ...`の行の前）に`DOCS_CHECK`の1段落（英語で466文字。task 1428で394文字、task 1688で候補の探し方と探した名前を足した）を置く: 変えた挙動を説明する文書（taskが名指すもの、作業中に見つけたもの、変えた名前（コマンド・flag・設定・役割・path）でrepositoryを探して見つけたもの。[ADR-t1688-1](../../adr/2026-10-04-t1688-1-worker-searches-documents-by-changed-names.md)）を差分と照合し、taskのpathsの中の古いものを直し、pathsの外のものは`docs_drift`のfollow_upにpathと節を書く（受け入れ条件が求める文書は上の対応づけの項目として扱い、直せなければ`worker_question`かfailedのreceipt）。`summary`に探した名前と、更新したpathと節か更新が要らない理由を書き、示すためだけに文書を触らない。探した名前は読んだことの申告ではなく、reviewが同じ名前で探し直すための根拠。探す手段（検索のツール）とrepository固有のpathは名指さず、このrepositoryの探す範囲は[documents.md](../../development/documents.md#workerの文書の照合)が持つ。対応づけの手順の続き（`Then ...`）で、受け入れ条件の対応づけを2度言わない。対話・非対話、Claude・Codexのどのworkerのpromptも同じ文で、Codexの`review_line`（自分のdiffを読む文）は文書に触れない。新しい検査のコマンドやtestの実行は求めない。
+[ADR-t1428-1](../../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)（goal 91、task 1428）。workerのpromptは`ACCEPTANCE_MAP`の直後（`Write a completion receipt to ...`の行の前）に`DOCS_CHECK`の1段落（英語で466文字。task 1428で394文字、task 1688で候補の探し方と探した名前を足した）を置く: 変えた挙動を説明する文書（taskが名指すもの、作業中に見つけたもの、変えた名前（コマンド・flag・設定・役割・path）でrepositoryを探して見つけたもの。[ADR-t1688-1](../../adr/2026-10-04-t1688-1-worker-searches-documents-by-changed-names.md)）を差分と照合し、taskのpathsの中の古いものを直し、pathsの外のものは`docs_drift`のfollow_upにpathと節を書く（受け入れ条件が求める文書は上の対応づけの項目として扱い、直せなければ`worker_question`かfailedのreceipt）。`summary`に探した名前と、更新したpathと節か更新が要らない理由を書き、示すためだけに文書を触らない。探した名前は読んだことの申告ではなく、reviewが同じ名前で探し直すための根拠。探す手段（検索のツール）とrepository固有のpathは名指さず、このrepositoryの探す範囲は[documents.md](../../development/documents.md#workerの文書の照合)が持つ。対応づけの手順の続き（`Then ...`）で、受け入れ条件の対応づけを2度言わない。Claude・Codexのどのworkerのpromptも同じ文で、Codexの`review_line`（自分のdiffを読む文）は文書に触れない。新しい検査のコマンドやtestの実行は求めない。
 
 resumeとreviseの依頼は別の文を足さず、`ACCEPTANCE_REMAP`の「`summary`の句を書き直す」に`, with the documents you checked against the diff`（英語で49文字。`ACCEPTANCE_REMAP`は286文字）を含める。runのreviewのpromptと資料の側（文書の照合とtaskのcontext）はtask 1429が足した（[Review](review.md#文書の照合)）。testは`src/application/prompt.rs`の`every_worker_text_that_writes_a_receipt_checks_the_documents_once`。
 
 ## 経路とproviderごとの文面
 
-workerに送る文（`prompt.txt`・resumeの解消依頼・revise・receiptの食い違い・古いreceiptの促し・receiptの無い促し・askの答え・復旧jobの`send_instruction`・queueのholdの後の「続けて」）は、runの経路とprovider（`Route::of(run)`: `worker_mode`が`interactive`なら`Interactive`、`headless`なら`actual_provider`の`Headless(provider)`）で分ける（task 817）。対話のrunの文面は前と同じで、上の説明はすべて対話のrunのもの（workerのrunはtask 1437からclaimとresumeで非対話に変わるので（[非対話のworker](headless-worker.md#対話と記録されたtaskのclaimとresume)）、今workerに送るのは下の非対話の列の文面で、対話の列は過去のrunの文面である）。非対話のrun（[非対話のworker](headless-worker.md)、[ADR-t813-1](../../adr/2026-09-28-t813-1-headless-worker-path.md)）は1 turnが1回の呼び出しで、`/exit`も画面への打ち込みも無いので、次のように替える。
+workerに送る文（`prompt.txt`・resumeの解消依頼・revise・receiptの食い違い・古いreceiptの促し・receiptの無い促し・答えが届かずに閉じたaskの知らせ・askの答え・復旧jobの`send_instruction`・queueのholdの後の「続けて」）は、どれも非対話のsession（[非対話のworker](headless-worker.md)、[ADR-t813-1](../../adr/2026-09-28-t813-1-headless-worker-path.md)）の文面で、1 turnが1回の呼び出しで、`/exit`も画面への打ち込みも無い。分けるのはprovider（`Route::of(run)`: runの`actual_provider`）だけで、違いは最後の段落のproviderの1行と下の[subagent review](#subagent-review)である（task 817）。対話のworkerの文面（`Route::Interactive`、`STOP_BACKGROUND`、`INTERACTIVE_DONE`、terminalに書いて待たず答えはterminalに届く、`/exit`を打たない）は、対話のworkerの廃止（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)、task 1438）で消した。`worker_mode`が`interactive`と記録されたrunはclaimとresumeで非対話に変わり（[非対話のworker](headless-worker.md#対話と記録されたtaskのclaimとresume)）、送る文面はClaudeの非対話のrunと同じになる（testは`src/application/prompt.rs`の`a_run_recorded_as_interactive_is_sent_the_headless_claude_texts`と`the_nudge_is_the_next_turn_whatever_mode_the_run_recorded`）。
 
-| 箇所 | 対話 | 非対話 |
-| --- | --- | --- |
-| 最後の段落 | なし | `HEADLESS_WORKER`（このturnで全部を終え、receiptかaskでturnを終える。答え・revise・続きの依頼は同じsessionの次のturnのpromptで届く。backgroundの処理に頼らず、build・test・待ちはforegroundで終わりまで待つ）と、providerの1行（Claude: turnの終わりにClaude Codeが`run_in_background`のshellを止めるので、それで待つためにturnを終えない。Codex: コマンドの終わりを待ってから答える） |
-| 自分の処理を止める一文 | `STOP_BACKGROUND`（`/exit`の確認画面の説明つき） | `HEADLESS_STOP`（turnを終える前に、自分が起動してまだ走っているもの（`nohup … &`は残る）をpidで止める。名前やパターンで送らない。`pkill` / `killall`の禁止は同じ） |
-| 判断が要るとき | terminalに書いて待たず`dagq ask`、短く報告して止まる。答えはこのterminalに届く | 返事に質問を書いてturnを終えず`dagq ask`、短く報告してturnを終える。答えは同じsessionの次のturnのpromptで届く |
-| receiptの後 | 短く報告して止まる。`/exit`を打たない | 短く報告してturnを終える。次のturnはreview・着地・人が差し戻したときだけ |
-| subagent review | 「unit test・subagent reviewを行う」 | Claudeは対話と同じ。Codexは下の[subagent review](#subagent-review) |
-| 依頼（resume・revise・食い違い・古いreceipt・促し） | `dagq: ...`で始まり、最後の手順は`INTERACTIVE_DONE`（`/exit`を打たない） | 先頭に`HEADLESS_NEXT_TURN`（前のturnは終わり、backgroundに残したものは止められた）の1行を置き、最後の手順は`HEADLESS_DONE`（repositoryのworker向けの指示（AGENTS.mdかCLAUDE.md）に従い、このturnで行い、askの前に`ASK_RULES_FIRST`を確かめ、判断が要れば`dagq ask --run <run> --kind worker_question`を打ってturnを終える（答えは次のturnのprompt）、終わったら短く報告してturnを終える）。receiptの無い促し（`stall_nudge`）は「前のturnがreceiptもaskも無く終わった」と書き、選択肢の3は「待つためにturnを終えたなら、それはturnと一緒に止められたのでforegroundで流し直す」にする |
-| askの答え・復旧jobの指示・holdの後の続き（`answer_text`・`recovery_instruction`・`continue_text`） | `answer to ask N: ...` / `dagq: the supervisor's recovery job ... asks: ...` / `CONTINUE_TEXT`のまま | 同じ文の後に`HEADLESS_GO_ON`（これは次のturnのprompt。このturnで続け、receiptかaskで終える）を足す。先頭の行は変えない |
+| 箇所 | 文面 |
+| --- | --- |
+| 最後の段落 | `HEADLESS_WORKER`（このturnで全部を終え、receiptかaskでturnを終える。答え・revise・続きの依頼は同じsessionの次のturnのpromptで届く。backgroundの処理に頼らず、build・test・待ちはforegroundで終わりまで待つ）と、providerの1行（Claude: turnの終わりにClaude Codeが`run_in_background`のshellを止めるので、それで待つためにturnを終えない。Codex: コマンドの終わりを待ってから答える） |
+| 自分の処理を止める一文 | `HEADLESS_STOP`（turnを終える前に、自分が起動してまだ走っているもの（`nohup … &`は残る）をpidで止める。名前やパターンで送らない。`pkill` / `killall`の禁止） |
+| 判断が要るとき | 返事に質問を書いてturnを終えず`dagq ask`、短く報告してturnを終える。答えは同じsessionの次のturnのpromptで届く |
+| receiptの後 | 短く報告してturnを終える。次のturnはreview・着地・人が差し戻したときだけ |
+| subagent review | Claudeは「unit test・subagent reviewを行う」。Codexは下の[subagent review](#subagent-review) |
+| 依頼（resume・revise・食い違い・古いreceipt・促し・閉じたaskの知らせ） | 先頭に`HEADLESS_NEXT_TURN`（前のturnは終わり、backgroundに残したものは止められた）の1行を置き、最後の手順は`HEADLESS_DONE`（repositoryのworker向けの指示（AGENTS.mdかCLAUDE.md）に従い、このturnで行い、askの前に`ASK_RULES_FIRST`を確かめ、判断が要れば`dagq ask --run <run> --kind worker_question`を打ってturnを終える（答えは次のturnのprompt）、終わったら短く報告してturnを終える）。古いreceiptの促しは「runがturnを終えたが、receiptが別のcommitを名指す」と書く。receiptの無い促し（`stall_nudge(run)`）は「前のturnがreceiptもaskも無く終わった」と書き、選択肢の3は「待つためにturnを終えたなら、それはturnと一緒に止められたのでforegroundで流し直す」にする。閉じたaskの知らせ（`closed_question_notice`）は「このturnで」自分で決めるかfailedのreceiptを書くよう頼み、続けばsupervisorが復旧jobに渡すと書く |
+| askの答え・復旧jobの指示・holdの後の続き（`answer_text`・`recovery_instruction`・`continue_text`） | `answer to ask N: ...` / `dagq: the supervisor's recovery job ... asks: ...` / `CONTINUE_TEXT`の後に`HEADLESS_GO_ON`（これは次のturnのprompt。このturnで続け、receiptかaskで終える）を足す。先頭の行は変えない |
 
-WORKER_READINGの「AGENTS.mdかCLAUDE.md」の指示は両方の経路で同じ（Codexは起動時にAGENTS.mdを読む）。
+WORKER_READINGの「AGENTS.mdかCLAUDE.md」の指示はどのproviderでも同じ（Codexは起動時にAGENTS.mdを読む）。
 
 ### subagent review
 
 providerごとに決める（task 817）。
 
-- **Claude（対話・非対話）**: 今までどおり、該当すればsubagent（Claude Codeのsubagent）でreviewし、receiptの`subagent_review`にevidenceか該当しない理由を書く。非対話でもsubagentは同じturnの中で動くので変えない。
+- **Claude**: 該当すればsubagent（Claude Codeのsubagent）でreviewし、receiptの`subagent_review`にevidenceか該当しない理由を書く。subagentは同じturnの中で動く。
 - **Codex**: `codex exec`の中にsubagentは無く、`codex exec review`を入れ子で起動すると、workspace-writeのsandboxでは`$CODEX_HOME`（`~/.codex`）のsessionを書けず、呼び出しと費用も倍になる（[spike](../../plans/headless-worker-spike.md)の1.と4.）。そこでCodexのworkerはsubagent reviewをしない。promptは代わりに、receiptの前の受け入れ条件の対応づけ（[受け入れ条件の対応づけ](#受け入れ条件の対応づけ)）のときに自分のdiff（`git diff <base commit>..HEAD`）を読んで見直して直し、`subagent_review`を`not_applicable`にして理由（`codex worker: no subagent review; self-reviewed the diff, the supervisor's review job reviews the commit`）と見直しで見つけたことを書くよう指示する。着地の前には全runと同じくsupervisorのheadlessのreview job（Claude）がcommitをreviewする。
 - **taskの`required_evidence`に`subagent_review`があるとき**: `domain::required_of(required, provider)`が、runの`actual_provider`がCodexなら`subagent_review`を要るevidenceから外す。validating（`check_receipt`）・`integrate`のreceiptの検査・resumeの解決の判定・promptの`Required evidence:`の行は、どれもこれで絞った一覧を使う。Codexのrunのreceiptの`subagent_review`は要らないcheckと同じ扱いになり、`failed`でなく理由のあることだけを見る（`not_applicable`と理由で通る）。runが途中でClaudeに切り替わった（ADR-t813-2のフォールバック）後は`actual_provider`がClaudeなので、要るevidenceに戻る。testは`src/domain/receipt.rs`の`a_codex_run_does_not_back_a_required_subagent_review`と`src/application/integrate.rs`の`a_codex_receipt_passes_without_a_subagent_review_the_task_requires`。
 

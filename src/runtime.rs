@@ -7,7 +7,7 @@ pub use crate::application::{
     integrate::{IntegrateTarget, integrate_verify_log, register_follow_ups},
     prompt::{
         GOAL_REVIEW_ACCESS, GoalPredecessorSummary, HEADLESS_WORKER, PLAN_REVIEW_ACCESS,
-        PredecessorSummary, REVIEW_ACCESS, STOP_BACKGROUND, TRIAGE_ACCESS, WORKER_READING,
+        PredecessorSummary, REVIEW_ACCESS, TRIAGE_ACCESS, WORKER_READING,
         follow_up_categories_line, inbox_prompt, prompt, review_prompt, siblings_in_progress,
         worker_question_topics_line,
     },

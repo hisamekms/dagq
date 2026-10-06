@@ -2,6 +2,7 @@ use crate::common;
 
 use common::cli::*;
 
+use dagq::domain::worker::INTERACTIVE_WORKER_RETIRED;
 use dagq::infrastructure::sqlite::SqliteQueue;
 use serde_json::{Value, json};
 
@@ -439,11 +440,13 @@ fn the_task_kind_is_gone_from_add_edit_show_and_list() {
     }
 }
 
-/// `add --provider`, `--headless` and `--interactive` store the task's
-/// worker (ADR-t813-2 decision 1, ADR-t1340-1), which `show`, `list` and
-/// `search` print; a task that names none runs Claude headless and stores
-/// no mode, Codex runs headless only, and `edit` changes the worker while
-/// the task is a draft.
+/// `add --provider` and `--headless` store the task's worker (ADR-t813-2
+/// decision 1, ADR-t1340-1), which `show`, `list` and `search` print; a
+/// task that names none runs Claude headless and stores no mode, and `edit`
+/// changes the worker while the task is a draft. `add` and `edit` refuse
+/// `--interactive` with its reason and what replaces it (ADR-t1433-2),
+/// changing nothing, and a task recorded as interactive before is still
+/// shown and edited as it was stored.
 #[test]
 fn the_worker_provider_and_mode_are_added_shown_and_edited() {
     let (_dir, db) = queue();
@@ -463,23 +466,17 @@ fn the_worker_provider_and_mode_are_added_shown_and_edited() {
         (&json!("claude"), &json!("headless"))
     );
     assert_eq!(stored(&plain["id"]), None);
-    let interactive = ok(&db, &["add", "watched worker", "--interactive"]);
-    assert_eq!(
-        (&interactive["provider"], &interactive["worker_mode"]),
-        (&json!("claude"), &json!("interactive"))
-    );
-    assert_eq!(stored(&interactive["id"]).as_deref(), Some("interactive"));
+    for args in [
+        &["add", "watched worker", "--interactive"][..],
+        &["add", "codex", "--provider", "codex", "--interactive"],
+    ] {
+        assert_eq!(refused(&db, args), INTERACTIVE_WORKER_RETIRED, "{args:?}");
+    }
+    assert_eq!(ok(&db, &["list"])["total"], 1, "a refused add adds nothing");
     assert!(
         !invoke(&db, &["add", "both", "--interactive", "--headless"])
             .status
             .success()
-    );
-    assert_eq!(
-        refused(
-            &db,
-            &["add", "codex", "--provider", "codex", "--interactive"]
-        ),
-        "the codex worker has no interactive mode (codex runs headless only)"
     );
     let codex = ok(&db, &["add", "codex worker", "--provider", "codex"]);
     assert_eq!(
@@ -511,11 +508,11 @@ fn the_worker_provider_and_mode_are_added_shown_and_edited() {
         (&json!("claude"), &json!("headless"))
     );
     assert_eq!(stored(&headless["id"]).as_deref(), Some("headless"));
-    // Codex has no interactive mode.
     assert_eq!(
         refused(&db, &["edit", &id, "--interactive"]),
-        "the codex worker has no interactive mode (codex runs headless only)"
+        INTERACTIVE_WORKER_RETIRED
     );
+    assert_eq!(stored(&codex["id"]).as_deref(), Some("headless"));
     // A new provider without a mode takes that provider's default and
     // names none.
     let edited = ok(&db, &["edit", &id, "--provider", "claude"]);
@@ -549,13 +546,21 @@ fn the_worker_provider_and_mode_are_added_shown_and_edited() {
     let event = last_edit();
     assert_eq!(event["payload"]["from"], json!({"worker_mode": null}));
     assert_eq!(event["payload"]["to"], json!({"worker_mode": "headless"}));
-    let edited = ok(&db, &["edit", &id, "--interactive"]);
-    assert_eq!(edited["worker_mode"], "interactive");
-    assert_eq!(stored(&codex["id"]).as_deref(), Some("interactive"));
+    // A task recorded as interactive before ADR-t1433-2 is read and
+    // edited as it was stored.
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE tasks SET worker_mode='interactive' WHERE id=?1",
+            [codex["id"].as_i64().unwrap()],
+        )
+        .unwrap();
     assert_eq!(
-        last_edit()["payload"]["to"],
-        json!({"worker_mode": "interactive"})
+        ok(&db, &["show", &id])["task"]["worker_mode"],
+        "interactive"
     );
+    let edited = ok(&db, &["edit", &id, "--title", "recorded worker"]);
+    assert_eq!(edited["worker_mode"], "interactive");
     let edited = ok(&db, &["edit", &id, "--headless"]);
     assert_eq!(edited["worker_mode"], "headless");
     let output = invoke(&db, &["add", "bad", "--provider", "gemini"]);

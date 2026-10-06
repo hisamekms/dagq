@@ -124,10 +124,12 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
         }
     }
 
-    /// `add`: a draft task, in `goal` when it names one.
+    /// `add`: a draft task, in `goal` when it names one. The retired
+    /// interactive worker mode is refused (ADR-t1433-2), as by `edit`.
     pub fn add(&mut self, task: NewTask) -> Result<Task> {
         let resource = task.goal_id.map_or(Resource::Queue, Resource::Goal);
         self.authorize(Capability::TaskWrite, resource)?;
+        crate::domain::worker::refuse_interactive(task.worker_mode)?;
         self.store.add(task)
     }
 
@@ -149,6 +151,7 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
                 status: Some(status),
             },
         )?;
+        crate::domain::worker::refuse_interactive(edit.worker_mode)?;
         self.store.edit_task(task, edit, status)
     }
 
@@ -347,7 +350,8 @@ mod tests {
     use anyhow::anyhow;
 
     use super::*;
-    use crate::domain::{ActorRole, PlannerOrigin, PlannerOwner, RunId, StaticPolicy};
+    use crate::domain::worker::WorkerMode;
+    use crate::domain::{ActorRole, DomainError, PlannerOrigin, PlannerOwner, RunId, StaticPolicy};
     use serde_json::json;
 
     /// A store that knows task statuses and proposal owners, records the
@@ -634,6 +638,60 @@ mod tests {
 
     fn planner(id: i64) -> ActorContext {
         ActorContext::instance(ActorRole::Planner, id)
+    }
+
+    /// ADR-t1433-2: `add` and `edit` refuse the interactive worker mode
+    /// with its reason and do not reach the store; `--headless` does.
+    #[test]
+    fn add_and_edit_refuse_the_interactive_worker_before_the_store() {
+        let user = ActorContext::user();
+        let interactive: [Command; 2] = [
+            |p| {
+                p.add(NewTask {
+                    worker_mode: Some(WorkerMode::Interactive),
+                    ..new_task()
+                })
+                .map(drop)
+            },
+            |p| {
+                p.edit(
+                    TASK,
+                    TaskEdit {
+                        worker_mode: Some(WorkerMode::Interactive),
+                        ..TaskEdit::default()
+                    },
+                )
+                .map(drop)
+            },
+        ];
+        for command in interactive {
+            let mut store = Store {
+                status: Some(TaskStatus::Draft),
+                ..Store::default()
+            };
+            let error = command(&mut Planning::new(&mut store, &user, &StaticPolicy)).unwrap_err();
+            assert!(
+                matches!(
+                    error.downcast_ref::<DomainError>(),
+                    Some(DomainError::InteractiveWorkerRetired)
+                ),
+                "{error:#}"
+            );
+        }
+        let headless: Command = |p| {
+            p.edit(
+                TASK,
+                TaskEdit {
+                    worker_mode: Some(WorkerMode::Headless),
+                    ..TaskEdit::default()
+                },
+            )
+            .map(drop)
+        };
+        assert!(matches!(
+            run(&user, TaskStatus::Draft, None, headless).0,
+            Outcome::Allowed
+        ));
     }
 
     #[test]

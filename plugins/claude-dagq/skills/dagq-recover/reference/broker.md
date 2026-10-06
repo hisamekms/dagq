@@ -27,7 +27,7 @@ Both have `next: dagq broker status`, no run or task, and `status` set to a code
 | `container_failed`, `unhealthy` | the container did not start, or its health stopped answering | `"$DAGQ" broker logs`; on the person's word restart it (below) |
 | `version_mismatch`, `client_missing` | the broker's or the client's build is not the dagq binary's (after an update, or a client missing beside `dagq`) | a broker of another build is kept while runs hold tokens on it and is replaced once they end; a client that is missing or of another build never clears by waiting: install again so both are in place (`reference/update.md`) |
 | `token_failed` (`broker_claims_held`) | no run's token can be issued: the signing key or the token dirs cannot be made, or the main checkout has no `git config user.name` / `user.email` | set the committer in the main checkout, or fix the queue dir's permissions; it clears next pass |
-| `grant_failed` (`broker_claims_held`) | one claimed run could not be given the tools (its branch names no committer, a Codex or interactive worker) | that run fails as below; other claims go on |
+| `grant_failed` (`broker_claims_held`) | one claimed run could not be given the tools (its branch names no committer, a Codex worker) | that run fails as below; other claims go on |
 
 ## Restart the broker
 

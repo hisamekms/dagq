@@ -4,8 +4,8 @@ type: design
 title: "非対話のworker"
 status: current
 created: 2026-09-28
-updated: 2026-10-06 # task 1441: runtime planners run headless only, their wrapper always in the background, planner screen/send read and type nothing; task 1557: the reopen's waits are judged on Clock::monotonic; task 1657: wrapper_stopped records how each background wrapper stop ended (stop_background, StopRoute); task 1857: a run waits on its own provider with the fallback off; task 1850: resumes, recovery jobs and claims share one line by effective priority; task 1439: SuperviseOptions::worker_wrapper and the runtime tests' background default; task 838: required turns start in dontAsk; task 839: the PreToolUse hooks counting the built-in tools of a run with the broker's tools; the broker_token row reads broker-direct-tools.log as a regular file; task 1594: a turn that failed after its receipt goes to validation whatever order the receipt and the exit were seen in; task 1109: the tests of the recovery job stopping a command outside the turn group; task 1711: the tests of the headless planners' turns kept as the boundary; task 1596: a headless planner at the provider wall takes the provider retry before the requests behind it, and an answer is read only past the wall; task 1437; task 1440: a worker's session wrapper always starts in the background, `[headless] wrapper` accepted and ignored for workers, the run's session stopped without cmux, run screen refused; task 1521: planned task replanning (unimplemented)
-last_verified: 2026-10-06 # task 1441; task 1557; task 1657; task 1857; task 1850; task 1439; task 838; task 839; task 1594; task 1109; task 1711; task 1596; task 1437; task 1440
+updated: 2026-10-06 # task 1438: add / edit refuse --interactive, the worker's texts have no interactive branch; task 1441: runtime planners run headless only, their wrapper always in the background, planner screen/send read and type nothing; task 1557: the reopen's waits are judged on Clock::monotonic; task 1657: wrapper_stopped records how each background wrapper stop ended (stop_background, StopRoute); task 1857: a run waits on its own provider with the fallback off; task 1850: resumes, recovery jobs and claims share one line by effective priority; task 1439: SuperviseOptions::worker_wrapper and the runtime tests' background default; task 838: required turns start in dontAsk; task 839: the PreToolUse hooks counting the built-in tools of a run with the broker's tools; the broker_token row reads broker-direct-tools.log as a regular file; task 1594: a turn that failed after its receipt goes to validation whatever order the receipt and the exit were seen in; task 1109: the tests of the recovery job stopping a command outside the turn group; task 1711: the tests of the headless planners' turns kept as the boundary; task 1596: a headless planner at the provider wall takes the provider retry before the requests behind it, and an answer is read only past the wall; task 1437; task 1440: a worker's session wrapper always starts in the background, `[headless] wrapper` accepted and ignored for workers, the run's session stopped without cmux, run screen refused; task 1521: planned task replanning (unimplemented)
+last_verified: 2026-10-06 # task 1438; task 1441; task 1557; task 1657; task 1857; task 1850; task 1439; task 838; task 839; task 1594; task 1109; task 1711; task 1596; task 1437; task 1440
 scope: runtime
 related:
   - design-supervisor-lifecycle-task-replanning
@@ -28,7 +28,7 @@ related:
 
 # 非対話のworker
 
-> **goal 92**: worker の対話の経路は task 1437 で廃止した（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）。非対話のsession wrapperをbackgroundの形だけにすることは [ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md) が決める。workerのsession wrapperは task 1440 からbackgroundだけで動き、runtimeはrunのworkspaceを作らない（下の「workspaceなしのbackgroundのwrapper」）。runtime の planner の対話とworkspaceは task 1441 で撤去した（下の「非対話のruntimeのplanner」）。inbox の促しは task 1442 が実装する予定であり、その節は現在の挙動を残す。
+> **goal 92・111**: worker の対話の経路は task 1437 で廃止し、task 1438 で `add` / `edit` の `--interactive` を拒み、workerへの文面から対話の分岐を消した（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）。非対話のsession wrapperをbackgroundの形だけにすることは [ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md) が決める。workerのsession wrapperは task 1440 からbackgroundだけで動き、runtimeはrunのworkspaceを作らない（下の「workspaceなしのbackgroundのwrapper」）。runtime の planner の対話とworkspaceは task 1441 で撤去した（下の「非対話のruntimeのplanner」）。inbox の促しは task 1442 が実装する予定であり、その節は現在の挙動を残す。
 
 [ADR-t813-1](../../adr/2026-09-28-t813-1-headless-worker-path.md)の実装（task 815）。worker の run はすべて、workerの1 turnを1回の非対話の呼び出しにする。動くのはClaude（`claude -p --output-format stream-json --verbose`）とCodex（`codex exec --json`と`codex exec resume --json`、task 816。[provider-lifecycle](../provider-lifecycle.md#codexの非対話のworker)）。providerの違いは`AgentProvider`の`turn_command`（呼び出しのargv）と`turn_reader`（出力を読む`TurnReader`）と`turn_permission_mode`に閉じ込め、supervisorとsession wrapperの流れはproviderを知らない。
 
@@ -139,11 +139,11 @@ worker の生きている run の復旧は `stalled`（`turn_without_receipt` / 
 
 ## workerへの文面
 
-非対話のrunのworkerに送るprompt・依頼・答え・復旧jobの指示は、`/exit`・画面への打ち込み・backgroundの処理に頼る指示を持たず、「このturnで終え、receiptかaskでturnを終える」「答えは次のturnのpromptで届く」「AGENTS.mdを読む」「`pkill` / `killall`を使わない」を書く。Codexはsubagent reviewをせず、taskの要る`subagent_review`はCodexのrunには要らない。どれも[Prompt](prompt.md#経路とproviderごとの文面)にまとめる（task 817）。
+workerに送るprompt・依頼・答え・復旧jobの指示は、どのrunでも非対話の文面で（`interactive`と記録されたrunにも同じ。対話の分岐はtask 1438で消した）、`/exit`・画面への打ち込み・backgroundの処理に頼る指示を持たず、「このturnで終え、receiptかaskでturnを終える」「答えは次のturnのpromptで届く」「AGENTS.mdを読む」「`pkill` / `killall`を使わない」を書く。Codexはsubagent reviewをせず、taskの要る`subagent_review`はCodexのrunには要らない。どれも[Prompt](prompt.md#経路とproviderごとの文面)にまとめる（task 817）。
 
 ## 対話と記録されたtaskのclaimとresume
 
-worker の対話の経路は [ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md) で廃止した（task 1437。runtime の planner の対話は task 1441 で廃止した）。
+worker の対話の経路は [ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md) で廃止した（task 1437。runtime の planner の対話は task 1441 で廃止した）。新しく `interactive` を選ぶ経路は無く、`add` / `edit` の `--interactive` は、対話の経路を廃止したことと代わり（`dagq run log RUN --follow` で turn を読み、ask に `answer` で答える）を示す理由で拒む（task 1438。[Provider lifecycle](../provider-lifecycle.md#workerのproviderと経路)）。下は task 1438 より前に `interactive` で記録された task と run の扱い。
 
 task の `worker_mode: interactive` は保存されたまま読めるが、claim は実際の run の `worker_mode` を `headless` にし、resume は過去の interactive run の mode を同じトランザクションで `headless` に更新する。どちらも worker は非対話の turn の経路で始まる。
 

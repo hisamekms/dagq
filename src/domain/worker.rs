@@ -1,11 +1,11 @@
 //! Which agent a task's worker runs on and how (ADR-t813-1 decision 7,
 //! ADR-t813-2 decision 1): the provider (`claude` / `codex`) and the mode
-//! (`interactive`: the agent's own session in the cmux terminal;
-//! `headless`: one non-interactive call per turn). A task that names
-//! neither runs Claude headless (ADR-t1340-1, amending ADR-t813-1
-//! decision 7); Claude runs interactively only when the task names that
-//! mode, and Codex runs headless only. A run carries the provider and mode
-//! its task asked for.
+//! (`headless`: one non-interactive call per turn). A task that names
+//! neither runs Claude headless (ADR-t1340-1). The interactive worker was
+//! retired (ADR-t1433-2): `add` and `edit` refuse to name it
+//! ([`refuse_interactive`]), and `interactive` stays only so that the tasks
+//! and runs recorded with it before are read; claim and resume start them
+//! headless. A run carries the provider and mode its task asked for.
 
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +16,21 @@ string_enum!(WorkerMode {
     Headless => "headless",
 });
 
+/// Why `add` and `edit` refuse `--interactive` (ADR-t1433-2), with what
+/// takes the place of watching and stepping into the worker's session.
+pub const INTERACTIVE_WORKER_RETIRED: &str = "--interactive is refused: the interactive worker was retired (ADR-t1433-2) and every worker runs headless, one non-interactive call per turn; read a run's turns with `dagq run log RUN --follow`, and its questions come as asks you reply to with `dagq answer`";
+
+/// Refuses a worker mode that `add` or `edit` gives when it is the retired
+/// interactive one (ADR-t1433-2); `headless` and none are accepted. A task
+/// or run already recorded as interactive is not checked here: it is read
+/// as it was stored, and claim and resume start it headless.
+pub fn refuse_interactive(mode: Option<WorkerMode>) -> Result<(), DomainError> {
+    match mode {
+        Some(WorkerMode::Interactive) => Err(DomainError::InteractiveWorkerRetired),
+        Some(WorkerMode::Headless) | None => Ok(()),
+    }
+}
+
 /// A worker's provider and mode, a pair the runtime can run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Worker {
@@ -25,8 +40,8 @@ pub struct Worker {
 }
 
 impl Worker {
-    /// Claude in its interactive session: what a task runs on when it
-    /// names the interactive mode.
+    /// Claude in its interactive session: what a task or run recorded
+    /// before ADR-t1433-2 may still name; no command chooses it now.
     pub const CLAUDE_INTERACTIVE: Self = Self {
         provider: Provider::Claude,
         mode: WorkerMode::Interactive,
@@ -182,6 +197,20 @@ mod tests {
             worker.with(None, Some(WorkerMode::Headless)).unwrap(),
             Worker::ALL[1]
         );
+    }
+
+    /// ADR-t1433-2: `--interactive` is refused with the reason and what
+    /// replaces it; `--headless` and no mode are accepted.
+    #[test]
+    fn the_interactive_mode_is_refused_with_its_replacement() {
+        let refused = refuse_interactive(Some(WorkerMode::Interactive)).unwrap_err();
+        assert!(matches!(refused, DomainError::InteractiveWorkerRetired));
+        let reason = refused.to_string();
+        for part in ["--interactive", "retired", "run log", "answer"] {
+            assert!(reason.contains(part), "{part} in {reason}");
+        }
+        assert!(refuse_interactive(Some(WorkerMode::Headless)).is_ok());
+        assert!(refuse_interactive(None).is_ok());
     }
 
     #[test]

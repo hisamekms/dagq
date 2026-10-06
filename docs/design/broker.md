@@ -4,8 +4,8 @@ type: design
 title: Resource broker
 status: current
 created: 2026-09-28
-updated: 2026-10-05 # task 1550: the audit reads its day files through the AuditFiles port; task 842: current, Phase 3の前提, pluginのreference; task 841: the e2e of required; task 840: package.install and [broker.package]; task 838; task 839; task 1451
-last_verified: 2026-10-05 # task 1550; task 842; task 841; task 840; task 838; task 839; task 1451
+updated: 2026-10-06 # task 1438: the interactive worker retired from the text; task 1550: the audit reads its day files through the AuditFiles port; task 842: current, Phase 3の前提, pluginのreference; task 841: the e2e of required; task 840: package.install and [broker.package]; task 838; task 839; task 1451
+last_verified: 2026-10-06 # task 1438; task 1550; task 842; task 841; task 840; task 838; task 839; task 1451
 scope: runtime
 tags:
   - security
@@ -522,7 +522,7 @@ task 836で測った（2026-09-28、podman 6.1.2、applehv）: 起点の値（CP
 ADR-t838-1（goal 59、Phase 2）。`[broker] mode = "required"`のqueueでは、workerに組み込みのファイルとコマンドの道具を使わせず、brokerの道具だけで作業させ、brokerが使えなければworkerを起こさない。制御側の操作（workerの`dagq`のコマンドとreceiptの書き込み）はbrokerの外に残す。**guardrailでありenforcementではない**: `permissions.deny`・permission mode・`permissions.allow`はClaude Codeの設定で、hostのプロセスを隔離しない（別のpathのコマンドやscriptは通る）。`status`と`doctor`の`backend: host`・`enforcement: advisory`は変えない。
 
 - **印**: supervisorは`broker_grant`（claimの`provision`・resume・reopen）と非対話のturnの依頼の前（`broker_before_turn`）に、`required`なら`<run dir>/broker-required`（空、`broker_run::REQUIRED_FILE`）を置き、他のmodeなら消す。tokenの失効は`<run dir>/broker/`を消すが印は残す。印のpathに何かあれば（fileでなくても）印とみなす（書けなかった印で組み込みの道具に戻らないため）。turnの前に印を書けなければ、runのtokenを失効させ（`reason: unmarked`）、turnを依頼しない（`BrokerRequiredRefused`。答えの届けなら`ask_delivery_failed`がinboxに出る。`domain::broker::turn_refused`）
-- **executor**（`HostActorExecutor::spawn`の`SessionAgent`、`broker_run::worker_broker`）: 印があり`mcp.json`が無いrunのworkerは、agentの起動の引数を作る前に`BrokerRequiredRefused`（`broker_required: ...`）で拒む。印のあるrunの対話のworkerとresume（`SessionAgent::Worker`・`Resume`）も拒む（settingsで組み込みの道具を拒めない）。印と`mcp.json`があれば、turnの`TurnTarget::broker_required`に`mcp.json`を渡し、`preferred`の`broker_tools`（`--mcp-config`と`--allowedTools`を足すだけ）は使わない。印が無ければ今までどおり
+- **executor**（`HostActorExecutor::spawn`の`SessionAgent`、`broker_run::worker_broker`）: 印があり`mcp.json`が無いrunのworkerは、agentの起動の引数を作る前に`BrokerRequiredRefused`（`broker_required: ...`）で拒む。印のあるrunの対話のagentの起動（`SessionAgent::Worker`・`Resume`。対話のworkerの廃止（ADR-t1433-2、task 1437・1438）以後どのrunもこの起動を使わないが、コードには残る）も拒む（settingsで組み込みの道具を拒めない）。印と`mcp.json`があれば、turnの`TurnTarget::broker_required`に`mcp.json`を渡し、`preferred`の`broker_tools`（`--mcp-config`と`--allowedTools`を足すだけ）は使わない。印が無ければ今までどおり
 - **turn**（Claude Codeの`turn_command`、新しいturnもresumeも）:
   - `--permission-mode dontAsk`（`BROKER_REQUIRED_PERMISSION_MODE`。allowに無い道具は問わずに拒まれる）。turnの`system/init`の`permissionMode`はこれと比べる（`turn_permission_mode(true)`。違えば`launch_mismatch`）
   - `--mcp-config <run dir>/broker/mcp.json --strict-mcp-config`（brokerのserverだけ。利用者・project・pluginのserverを読まない）と`--setting-sources ""`（`--settings`のrunのsettingsだけを読む。利用者やworktreeの`.claude/`のallowがBashを広げないように。worktreeの`.claude/`はbrokerの`write_file`で書ける）
