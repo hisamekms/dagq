@@ -4,7 +4,7 @@ type: design
 title: 計測（SSOTとビュー・区間とタグ・台帳の形・畳む関数・台帳を作る係・送る口・コマンドの形と分類）
 status: draft
 created: 2026-10-04
-updated: 2026-10-06 # task 1923: IT coverage map artifact; task 1511: follow-up baseline
+updated: 2026-10-06 # task 1924: landing IT selection measurement; task 1923: IT coverage map artifact; task 1511: follow-up baseline
 last_verified: 2026-10-05 # tasks 1689/1511: view inventory and baseline adapter; runtime redesign remains unimplemented
 scope: runtime
 related:
@@ -50,6 +50,7 @@ related:
 | （材料） | run dir（receipt・prompt・`worktime.jsonl`ほか）・log・hostのCSV・Claude Codeのtranscript・Codexのrollout | 材料 | queueのdirとrun dirのファイル、`~/.claude`。台帳と統計は読まない（取り込んだ値はEventStoreかSessionStepStoreに入る） |
 | 文書候補探索の比較出力 | `docs/plans/docs-candidate-search/out/` の run・層の CSV、選択 event の ID、ページ取得記録・定義/並行変更の一覧 | ビュー | `docs/plans/docs-candidate-search/` の Python script。既存 acceptance-check fetch を介して queue service の読み取り CLI（events/show/stats 等）と git を読み、初回 review 前の validation receipt を既存 compute と共有して集計。原文 snapshot は一時的な材料として TMPDIR のみ（台帳は読まない） |
 | 統合テストのcoverageの対応表 | 「repositoryのファイル → 当たった統合テスト」の対応表（ファイルの粒度。統合テストのbinaryのテストだけで、unit testとe2eは除く）・テストごとの所要時間と結果（nextestのJUnit）・作ったcommitと時刻 | ビュー | CIの夜間のjob（`.github/workflows/it-coverage-map.yml`。毎日・`workflow_dispatch`・jobかscriptを変えるmainへのpush）が統合テストをテストごとのcoverageつきで流して作り直せる。GitHub Actionsのartifact `it-coverage-map`（`it-coverage-map.json`の1ファイル）、保持30日で、過ぎて消えてもよい。作るのは`scripts/it-coverage-map.sh`（JSONの形・テストの名前・置き場はscriptの冒頭のcomment） |
+| 着地のITの絞り込みの測定 | 着地ごとの絞ったIT（本数・直列の和・見込みの壁時計・全部流したかと理由）・CIで新たに赤くなったテストと範囲の着地と見逃し・前N日の足されたテストと変わったsrcのファイル（古さの材料）のCSV | ビュー | queueのevent・git・CIの履歴・artifactから`docs/plans/landing-it-selection/`のscript（`collect.sh`が読むCLIは`dagq events`・`git`・`gh`、`analyze.py`が集計）で作り直せる。CSVは`docs/plans/landing-it-selection/`に置く。対応表のartifactの保持（30日）が切れると同じ表では作り直せない。定義は[測定](../plans/landing-it-selection.md) |
 
 **新しいストアやビューを足すときはこの節に区分を書く。** 新しい表・ファイル・外の記録を計測が読む・書くようにするtaskは、同じ変更でこの表に行（中身・区分・今のアダプタ）を足すか直す（ADR-t1662-2決定9、[文書の規則](../development/documents.md)の「design」）。
 

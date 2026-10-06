@@ -30,6 +30,7 @@ tags:
 - [遅いintegration testの時間が使われている待ちの内訳と、修正の候補の見積もり](slow-test-waits.md)（goal 68、task 975）
 - [判断を unit test に移した着地（task 1412〜1416）の前後の本番の coverage の関門の test の時間と Summary](integration-to-unit-tests.md)（goal 68、task 1417）
 - [tests/it の全 1,192 本の分類（境界・判断・代表あり・goal 92 で消える）と、it でないと担保できない test の見積もり](it-reduction.md)（goal 118、task 1706）
+- [過去の着地の差分に IT の対応表を当てた、絞った IT の時間と見逃しの測定と、全部流す閾値・共通のファイル・表の古さの上限](landing-it-selection.md)（goal 157、task 1924）
 - [夜の人の答え待ちが着地を遅らせた量](night-human-wait-measurement.md)（goal 62、task 919）
 - [スパイク：過去の run の再現で task の重さと手戻りの予測の担い手を比べる](spike-predictor-replay.md)
 - [review と plan review の revise と concern で差し戻された理由の分類と、ラベルの定義案](review-sendback-reasons.md)（goal 64、task 945）

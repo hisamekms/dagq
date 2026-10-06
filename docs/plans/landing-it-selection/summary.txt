@@ -1,0 +1,23 @@
+map: commit 8d208e2a3703e2624805f0ed6eab680c157052f2, generated_at 2026-10-06T04:54:42Z, 1138 tests, run https://github.com/hisamekms/dagq/actions/runs/37413267459
+all IT: serial 2632.5 s, wall 438.7 s
+threshold: wall 220.0 s, ratio None
+landings: 431 read, 0 not in git, 431 measured
+landings touching no test-relevant file (0 tests selected): 106
+all (n=431): serial median 2632.5 p90 2632.5; wall median 438.7 p90 438.7; tests median 1138.0 p90 1138.0
+narrowed only (n=184): serial median 0.0 p90 75.1; wall median 0.0 p90 13.3; tests median 0.0 p90 22.0
+full: 247 / 431 = 0.573; reasons {'common': 33, 'threshold': 196, 'other': 18}
+narrowed wall before the threshold (n=398): median 365.1 p90 428.2
+CI runs: 61 not cancelled; jobs with test results: linux 35, macos 61; jobs without: 0 ()
+tests newly red: 1940; by class {'it': 1655, 'it not in the table': 279, 'unit (always run)': 6}
+  all: it 1655; missed 0 (single-landing range 0, multi-landing 0); in a multi-landing range 1165, of them selected by some landing 1165 (by only part of the range 1155); missed and still red next run 0; unselected in a range with a direct commit 6
+  mass runs: it 1345; missed 0 (single-landing range 0, multi-landing 0); in a multi-landing range 869, of them selected by some landing 869 (by only part of the range 869); missed and still red next run 0; unselected in a range with a direct commit 0
+  other runs: it 310; missed 0 (single-landing range 0, multi-landing 0); in a multi-landing range 296, of them selected by some landing 296 (by only part of the range 286); missed and still red next run 0; unselected in a range with a direct commit 6
+stale all N=1 (n=431): added or moved tests median 96.0 p90 132.0; added test names median 89.0 p90 132.0; changed src median 133.0 p90 156.0; ratio median 0.400 p90 0.521
+stale all N=2 (n=431): added or moved tests median 188.0 p90 284.0; added test names median 188.0 p90 256.0; changed src median 186.0 p90 241.0; ratio median 0.550 p90 0.843
+stale all N=3 (n=431): added or moved tests median 265.0 p90 493.0; added test names median 265.0 p90 471.0; changed src median 207.0 p90 274.0; ratio median 0.625 p90 0.965
+stale all N=7 (n=431): added or moved tests median 912.0 p90 1103.0; added test names median 912.0 p90 1103.0; changed src median 307.0 p90 319.0; ratio median 0.991 p90 1.000
+stale landed from 2026-10-03 N=1 (n=199): added or moved tests median 90.0 p90 119.0; added test names median 90.0 p90 119.0; changed src median 132.0 p90 154.0; ratio median 0.392 p90 0.448
+stale landed from 2026-10-03 N=2 (n=199): added or moved tests median 190.0 p90 239.0; added test names median 190.0 p90 239.0; changed src median 187.0 p90 197.0; ratio median 0.558 p90 0.572
+stale landed from 2026-10-03 N=3 (n=199): added or moved tests median 274.0 p90 307.0; added test names median 274.0 p90 307.0; changed src median 218.0 p90 238.0; ratio median 0.630 p90 0.690
+stale landed from 2026-10-03 N=7 (n=199): added or moved tests median 702.0 p90 1113.0; added test names median 676.0 p90 1113.0; changed src median 314.0 p90 324.0; ratio median 0.924 p90 0.991
+older maps: none kept besides the one used (fewer than 2 artifacts)
