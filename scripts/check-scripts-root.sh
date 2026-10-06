@@ -35,7 +35,7 @@ set -u
 me=check-scripts-root
 
 # The check scripts that take their root from the cwd's git work tree.
-scripts="check-migration-numbers check-test-file-lines check-adr-numbers check-e2e-quarantine check-agents-md-size check-layer-deps check-frontmatter-dates"
+scripts="check-migration-numbers check-test-file-lines check-adr-numbers check-e2e-quarantine check-agents-md-size check-layer-deps check-frontmatter-dates check-design-docs"
 
 # "<script> <case>": each case puts one violation of the script into the
 # clone (the cwd) with violate_<case>.
@@ -46,7 +46,8 @@ check-e2e-quarantine e2e_quarantine_malformed
 check-agents-md-size agents_md_too_big
 check-layer-deps layer_forbidden_reference
 check-layer-deps layer_stale_allow_item
-check-frontmatter-dates frontmatter_date_comment"
+check-frontmatter-dates frontmatter_date_comment
+check-design-docs design_doc_too_big"
 
 violate_migration_gap() {
   echo 'SELECT 1;' >migrations/9999_scripts_root_gap.sql
@@ -80,6 +81,10 @@ violate_layer_stale_allow_item() {
 
 violate_frontmatter_date_comment() {
   printf -- '---\nupdated: 2026-10-07 # task 1899\n---\n\n# fixture\n' >docs/zz-scripts-root-fixture.md
+}
+
+violate_design_doc_too_big() {
+  awk 'BEGIN { print "# fixture"; for (i = 1; i <= 500; i++) print "padding line for check-scripts-root, over the size budget of a design document" }' >docs/design/zz-scripts-root-fixture.md
 }
 
 unset LAYER_DEPS_ROOT LAYER_DEPS_ALLOW_FILE E2E_QUARANTINE_FILE

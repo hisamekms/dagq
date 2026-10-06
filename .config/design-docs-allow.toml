@@ -1,0 +1,511 @@
+# The documents under docs/design over a budget today, for
+# scripts/check-design-docs.sh (ADR-t1942-1). The budgets and the boundaries
+# of what is measured are in docs/development/documents.md, section "design".
+# Each item names a document and, for each measure it is over the budget of,
+# the value it had, which is its limit:
+#
+# [[doc]]
+# path = "docs/design/x.md"
+# size = 50632    # bytes without the frontmatter (budget 30720, 16384 for a concept document)
+# line = 2071     # bytes of the longest line, without the newline (budget 1024)
+# tasks = 66      # task numbers in the body (budget 0)
+#
+# A value may go down or out but not up, and no item or value may be added
+# (the check compares this list with the base's). The change that brings a
+# document within a budget removes that value (or the whole item) in the same
+# change; a value within the budget, or an item of a document that is gone,
+# fails the check. The first list was made with
+# `sh scripts/check-design-docs.sh --print-allow` on the tree of 2026-10-07.
+
+[[doc]]
+path = "docs/design/README.md"
+tasks = 2
+
+[[doc]]
+path = "docs/design/agent-eval.md"
+tasks = 8
+
+[[doc]]
+path = "docs/design/architecture.md"
+size = 50606
+line = 2071
+tasks = 66
+
+[[doc]]
+path = "docs/design/authorization.md"
+size = 49549
+line = 2281
+tasks = 29
+
+[[doc]]
+path = "docs/design/broker.md"
+size = 156777
+line = 3916
+tasks = 85
+
+[[doc]]
+path = "docs/design/ci-failure-issues.md"
+tasks = 3
+
+[[doc]]
+path = "docs/design/domain-model.md"
+size = 154265
+line = 11022
+tasks = 56
+
+[[doc]]
+path = "docs/design/follow-up-membership.md"
+tasks = 1
+
+[[doc]]
+path = "docs/design/linux-ci.md"
+tasks = 6
+
+[[doc]]
+path = "docs/design/manual-smoke.md"
+size = 120371
+line = 1641
+tasks = 72
+
+[[doc]]
+path = "docs/design/measurement.md"
+line = 1148
+tasks = 5
+
+[[doc]]
+path = "docs/design/overview.md"
+size = 30324
+line = 6880
+tasks = 27
+
+[[doc]]
+path = "docs/design/persistence.md"
+size = 155989
+line = 5532
+tasks = 43
+
+[[doc]]
+path = "docs/design/plugin-integration.md"
+size = 55208
+line = 4652
+tasks = 19
+
+[[doc]]
+path = "docs/design/provider-lifecycle.md"
+size = 177862
+line = 7478
+tasks = 111
+
+[[doc]]
+path = "docs/design/queue-service.md"
+size = 35535
+line = 1502
+tasks = 16
+
+[[doc]]
+path = "docs/design/security.md"
+line = 1500
+tasks = 7
+
+[[doc]]
+path = "docs/design/slow-tests.md"
+line = 1123
+tasks = 3
+
+[[doc]]
+path = "docs/design/stress-ci.md"
+line = 1347
+tasks = 2
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle.md"
+tasks = 8
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/abandon.md"
+line = 2808
+tasks = 6
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/actor-model.md"
+size = 33708
+line = 3367
+tasks = 66
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/ask.md"
+line = 2679
+tasks = 24
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/auto-update.md"
+size = 50052
+line = 6480
+tasks = 21
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/backend-call-failures.md"
+line = 1597
+tasks = 10
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/background-recovery-job.md"
+line = 3871
+tasks = 14
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/build-identifier.md"
+tasks = 1
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/ci-watch.md"
+line = 1042
+tasks = 1
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/claim-defer.md"
+line = 1431
+tasks = 6
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/claim-hold.md"
+line = 1621
+tasks = 10
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/cleanup-and-recovery.md"
+line = 1782
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/cmux-notify.md"
+line = 2110
+tasks = 2
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/conflict-thresholds.md"
+line = 1565
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/dependency-diagram.md"
+tasks = 3
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/disk-space.md"
+line = 3087
+tasks = 23
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/doctor.md"
+line = 1381
+tasks = 3
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/draft-planners.md"
+size = 48695
+line = 4938
+tasks = 25
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/events-watch.md"
+line = 9002
+tasks = 23
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/finding-planners.md"
+line = 2824
+tasks = 12
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/first-commit.md"
+tasks = 1
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/goal-review.md"
+size = 31482
+line = 3988
+tasks = 18
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/handoff.md"
+line = 3519
+tasks = 13
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/headless-job-processes.md"
+line = 1125
+tasks = 10
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/headless-worker.md"
+size = 84644
+line = 4722
+tasks = 63
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/host-metrics.md"
+tasks = 7
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/idle-without-receipt.md"
+line = 1480
+tasks = 8
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/implementation-status.md"
+line = 6265
+tasks = 33
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/install.md"
+line = 5110
+tasks = 9
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/integrate-errors.md"
+line = 1188
+tasks = 5
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/integrate.md"
+size = 42841
+line = 11174
+tasks = 27
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/kpi.md"
+size = 56938
+line = 4573
+tasks = 40
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/landing-branch.md"
+line = 1388
+tasks = 8
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/landing-recheck.md"
+line = 2853
+tasks = 5
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/language.md"
+line = 1396
+tasks = 5
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/logs.md"
+line = 3447
+tasks = 2
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/marks.md"
+line = 1512
+tasks = 3
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/naming.md"
+line = 1424
+tasks = 6
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/needs-session.md"
+line = 3353
+tasks = 15
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/notification-route.md"
+line = 1177
+tasks = 7
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/observer.md"
+size = 55866
+line = 5229
+tasks = 41
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/plan-planners.md"
+size = 84313
+line = 5548
+tasks = 55
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/plan-review.md"
+size = 68947
+line = 9809
+tasks = 46
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/prompt-waiting.md"
+tasks = 3
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/prompt.md"
+size = 61635
+line = 2753
+tasks = 65
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/push.md"
+tasks = 3
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/queue-hold.md"
+line = 3217
+tasks = 25
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/rebind.md"
+tasks = 1
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/receipt-and-session-exit.md"
+line = 1439
+tasks = 15
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/recover.md"
+line = 1257
+tasks = 3
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/release-update.md"
+size = 31600
+line = 1661
+tasks = 2
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/report.md"
+line = 4104
+tasks = 9
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/review-command.md"
+line = 1604
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/review.md"
+size = 104368
+line = 9517
+tasks = 79
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/roles.md"
+line = 2012
+tasks = 18
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/run-environment.md"
+size = 53410
+line = 3559
+tasks = 65
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/run-workspaces.md"
+line = 2563
+tasks = 7
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/run-worktrees.md"
+line = 2575
+tasks = 27
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/session-prompts.md"
+line = 2227
+tasks = 6
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/session-send.md"
+line = 1086
+tasks = 10
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/session-wrapper.md"
+line = 1193
+tasks = 5
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/silent-wrapper.md"
+tasks = 3
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/source-repository.md"
+line = 1174
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/stall-thresholds.md"
+line = 1384
+tasks = 13
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/stats.md"
+size = 147066
+line = 4547
+tasks = 154
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/status.md"
+size = 34852
+line = 8752
+tasks = 17
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/supervise.md"
+size = 42997
+line = 5419
+tasks = 26
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/task-replanning.md"
+tasks = 3
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/throughput-review.md"
+size = 39731
+line = 3093
+tasks = 29
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/timeline.md"
+line = 1311
+tasks = 6
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/triage.md"
+line = 3615
+tasks = 10
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/up-down.md"
+size = 53638
+line = 5846
+tasks = 19
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/validation.md"
+line = 2027
+tasks = 4
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/waiting.md"
+line = 2014
+tasks = 14
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/worker-model.md"
+line = 1345
+tasks = 5
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/worker-question-answer.md"
+line = 1337
+tasks = 5
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/worktree-read-only-git.md"
+tasks = 2
+
+[[doc]]
+path = "docs/design/test-fixtures.md"
+tasks = 4

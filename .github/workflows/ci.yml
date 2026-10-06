@@ -82,6 +82,23 @@ jobs:
       - name: AGENTS.md size
         run: sh scripts/check-agents-md-size.sh
 
+      # The budgets of the documents under docs/design and the allow list of
+      # the documents over them (scripts/check-design-docs.sh,
+      # docs/development/documents.md, section "design"). The allow list is
+      # compared with the base: the pull request's base or the commit before
+      # the push; without one in the history (the first push of a new branch,
+      # a force push) the script takes the merge base with origin/main.
+      - name: Design docs budgets
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -n "$BASE" ] && printf '%s' "$BASE" | grep -q '[^0]' && git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            sh scripts/check-design-docs.sh --base "$BASE"
+          else
+            sh scripts/check-design-docs.sh
+          fi
+          sh scripts/check-design-docs.sh --self-test
+
       - name: Layer dependencies
         run: |
           sh scripts/check-layer-deps.sh
