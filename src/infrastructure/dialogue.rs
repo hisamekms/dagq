@@ -88,7 +88,9 @@ impl DialogueStore for DialogueQueue<'_> {
         to: FindingStatus,
         reason: &str,
         by: &str,
+        covered_by: Option<crate::domain::TaskId>,
     ) -> Result<Finding> {
-        self.queue.set_finding_status(id, to, reason, by)
+        self.queue
+            .set_finding_status_covered(id, to, reason, by, covered_by)
     }
 }

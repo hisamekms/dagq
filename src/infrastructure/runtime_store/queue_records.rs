@@ -183,4 +183,16 @@ impl QueueRecords for SqliteQueue {
     ) -> Result<Option<EventId>> {
         SqliteQueue::record_forecast(self, payload, previous)
     }
+    fn ci_watch_events(&self) -> Result<Vec<RunEvent>> {
+        SqliteQueue::ci_watch_events(self)
+    }
+    fn record_ci_check(
+        &self,
+        record: crate::domain::ci_watch::CiCheckRecord,
+    ) -> Result<Option<crate::domain::ci_watch::CiCheckRecorded>> {
+        SqliteQueue::record_ci_check(self, record)
+    }
+    fn ci_failure_findings_of(&self, task: TaskId) -> Result<Vec<crate::domain::FindingId>> {
+        SqliteQueue::ci_failure_findings_of(self, task)
+    }
 }

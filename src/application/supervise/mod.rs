@@ -104,6 +104,7 @@ use crate::domain::{
 mod adopt;
 mod background;
 mod broker;
+mod ci_watch;
 mod claim_defer;
 mod cleanup;
 mod deliver;
@@ -154,6 +155,7 @@ pub(crate) use self::background::{
 };
 use self::broker::broker_refused;
 pub use self::broker::{BROKER_FAILURES, BROKER_HEALTH_INTERVAL, BrokerPort};
+pub use self::ci_watch::{CiSourceMaker, CiWatchFile, CiWatchPort};
 pub use self::claim_defer::read_conflicts_at_start;
 pub(crate) use self::deliver::{Input, Submission, submit_input};
 pub use self::disk::CLEANUP_INTERVAL;
@@ -474,6 +476,9 @@ pub struct Ports<'a> {
     /// Looks at and starts the host's sccache server when `[run.env]`'s
     /// `RUSTC_WRAPPER` is sccache (ADR-t1215-1); `None` looks at none.
     pub sccache: Option<SccachePort>,
+    /// Watches the landing branch's CI when `[ci_watch]` is set
+    /// (ADR-t1920-1); `None` watches nothing.
+    pub ci_watch: Option<CiWatchPort>,
     pub layout: Layout,
 }
 
@@ -962,6 +967,8 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         e2e: e2e::E2eWaits::default(),
         sccache_port: ports.sccache.clone(),
         sccache: sccache::SccacheWatch::default(),
+        ci_watch_port: ports.ci_watch.clone(),
+        ci: ci_watch::CiWatchState::default(),
     };
     // Before any job starts again: the jobs a gone supervisor left, and
     // after an exec those the previous binary of this process started.
@@ -1236,6 +1243,9 @@ struct Supervisor<'a> {
     /// Looks at and starts the host's sccache server (ADR-t1215-1).
     sccache_port: Option<SccachePort>,
     sccache: sccache::SccacheWatch,
+    /// Watches the landing branch's CI (ADR-t1920-1).
+    ci_watch_port: Option<CiWatchPort>,
+    ci: ci_watch::CiWatchState,
 }
 
 /// One executing run between provisioning and rest.
@@ -1537,6 +1547,9 @@ impl Supervisor<'_> {
             // And `[provider_fallback]`: turning the workers' fallback on
             // or off takes effect without a restart (ADR-t1857-1).
             self.reread_provider_fallback();
+            // And `[ci_watch]`, whose check is reaped and started off the
+            // loop, draining and handing off too (ADR-t1920-1).
+            self.ci_watch_pass();
             // Every pass too, so a hold on landings ends as soon as there
             // is room (task 377).
             self.check_disk(options.disk_cleanup_interval)?;
@@ -1604,6 +1617,7 @@ impl Supervisor<'_> {
                         && !self.forecast.running()
                         && !self.release.running()
                         && !self.broker.running()
+                        && !self.ci.running()
                         && self.slots.iter().all(|slot| slot.phase.rebuildable())
                     {
                         if self.queue.take_handoff(&self.token, &binary)? {
@@ -1745,6 +1759,8 @@ impl Supervisor<'_> {
                     || self.report.running()
                     || self.forecast.running()
                     || self.release.running()
+                    // A CI check holds the claims until it answers.
+                    || self.ci.running()
                     // A message being sent is bounded by the command's
                     // timeout; `--once` also waits for those still to be
                     // tried, a stop does not.
@@ -1820,6 +1836,7 @@ impl Supervisor<'_> {
         let resumes = if self.used_slots() < parallel
             && !self.landing_unresolved
             && !self.run_env_missing
+            && !self.ci_watch_held()
             && !broker_held
         {
             self.resume_candidates()?
@@ -1873,7 +1890,10 @@ impl Supervisor<'_> {
         // that is down holds the new claims; the runs in flight go on
         // (ADR-t1233-4 decision 2).
         let mut claims = None;
-        if !(self.run_env_missing || self.landing_unresolved || broker_held) && self.service_up {
+        // Nor while the CI cannot be read (ADR-t1920-1 decision 2).
+        if !(self.run_env_missing || self.ci_watch_held() || self.landing_unresolved || broker_held)
+            && self.service_up
+        {
             // The runs in flight go on; only new claims wait (task 327).
             if self.hold_claims()? {
                 // Neither provider can take a worker: the candidates are
@@ -2902,33 +2922,32 @@ impl Supervisor<'_> {
                 // Judged again on each look: only the landing of another run
                 // keeps it in the landing queue (ADR-t1591-1).
                 slot.landing_turn = false;
-                // Its verification would fail on the missing program: the
-                // run stays awaiting integration, leased, and the
-                // integration slot stays free (ADR-0049 decision 9). A
-                // supervisor that drains or hands off cannot wait for it:
-                // it gives the lease back and leaves the run awaiting
-                // integration for a person (`review and integrate`).
-                // So would it, short of free disk space (task 377): it
-                // starts no verification until there is room.
-                if self.run_env_missing || self.landing_unresolved || self.disk.landing_short {
-                    // A drain must use the reading after the cleanup, and
-                    // the rest of one another job took on, not hand a
-                    // recoverable shortage to a person (task 648, task 1426).
-                    if !self.draining
-                        || (!self.run_env_missing && !self.landing_unresolved && self.disk.cleaning)
-                    {
-                        return Ok(Step::Continue);
+                // Its verification would fail on the missing program, an
+                // unreadable CI, an unresolved landing branch or short disk:
+                // the run stays awaiting integration, leased, and the
+                // integration slot stays free. A supervisor that drains or
+                // hands off gives the lease back for a hold that does not
+                // end by itself, leaving the run awaiting integration for a
+                // person (`review and integrate`)
+                // ([`crate::domain::landing_hold::judge`]).
+                match crate::domain::landing_hold::judge(
+                    crate::domain::landing_hold::LandingHoldInputs {
+                        run_env_missing: self.run_env_missing,
+                        ci_held: self.ci_watch_held(),
+                        ci_unreadable: self.ci_watch_unreadable(),
+                        landing_unresolved: self.landing_unresolved,
+                        landing_short: self.disk.landing_short,
+                        disk_cleaning: self.disk.cleaning,
+                        draining: self.draining,
+                    },
+                ) {
+                    crate::domain::landing_hold::LandingHold::Proceed => {}
+                    crate::domain::landing_hold::LandingHold::Wait => return Ok(Step::Continue),
+                    crate::domain::landing_hold::LandingHold::HandBack(why) => {
+                        warn!(run_id = %slot.run.id(), "run {} is left awaiting integration: {why} and this supervisor stops", slot.run.id());
+                        self.queue.release_lease(slot.run.id(), &self.token)?;
+                        return Ok(Step::Done(Box::new(self.queue.run(slot.run.id())?)));
                     }
-                    let why = if self.run_env_missing {
-                        "a program [run.env] names is missing"
-                    } else if self.landing_unresolved {
-                        "the landing branch does not resolve"
-                    } else {
-                        "the free disk space is short of what its verification needs"
-                    };
-                    warn!(run_id = %slot.run.id(), "run {} is left awaiting integration: {why} and this supervisor stops", slot.run.id());
-                    self.queue.release_lease(slot.run.id(), &self.token)?;
-                    return Ok(Step::Done(Box::new(self.queue.run(slot.run.id())?)));
                 }
                 // An e2e that could not run waits to be tried again; a
                 // supervisor that stops cannot wait for it, and leaves the

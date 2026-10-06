@@ -313,6 +313,10 @@ struct FindingRecordParams {
 struct FindingStatusParams {
     id: i64,
     reason: String,
+    /// `finding dismiss --covered-by` (ADR-t1920-1); absent from an older
+    /// client, which never covers.
+    #[serde(default)]
+    covered_by: Option<i64>,
 }
 
 /// Authorize reading the whole queue: every role reads it in goal 82
@@ -460,7 +464,7 @@ fn run(
             let finding = if use_case == UseCase::FindingResolve {
                 dialogue.resolve_finding(id, &p.reason)?
             } else {
-                dialogue.dismiss_finding(id, &p.reason)?
+                dialogue.dismiss_finding(id, &p.reason, p.covered_by.map(TaskId::new))?
             };
             Ok(serde_json::to_value(finding)?)
         }
@@ -507,8 +511,9 @@ impl DialogueStore for Store<'_> {
         to: FindingStatus,
         reason: &str,
         by: &str,
+        covered_by: Option<TaskId>,
     ) -> Result<Finding> {
-        self.0.set_finding_status(id, to, reason, by)
+        self.0.set_finding_status(id, to, reason, by, covered_by)
     }
 }
 
@@ -661,6 +666,7 @@ mod tests {
             to: FindingStatus,
             reason: &str,
             by: &str,
+            _covered_by: Option<TaskId>,
         ) -> Result<Finding> {
             self.log
                 .lock()

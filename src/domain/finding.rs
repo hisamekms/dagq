@@ -91,6 +91,9 @@ pub struct Finding {
     /// Why it was last resolved or dismissed.
     pub status_reason: Option<String>,
     pub proposal_id: Option<ProposalId>,
+    /// The open task a `ci_failure` finding was dismissed as covered by
+    /// (`finding dismiss --covered-by`, ADR-t1920-1); null for any other.
+    pub covered_by_task: Option<TaskId>,
     /// Why a proposal should remedy it (ADR-0044 decision 19); set once.
     pub propose_reason: Option<String>,
     pub propose_requested_at: Option<i64>,
@@ -278,6 +281,26 @@ pub fn check_transition(finding: &Finding, to: FindingStatus) -> Result<(), Doma
         finding_id: finding.id,
         status: finding.status,
         to,
+    })
+}
+
+/// Whether `finding` may be dismissed as covered by a task (`finding
+/// dismiss --covered-by`, ADR-t1920-1): only a `ci_failure` finding, and
+/// only by a task that is not closed (`task_closed`).
+pub fn check_covered_by(finding: &Finding, task_closed: bool) -> Result<(), DomainError> {
+    let refused = |why: String| DomainError::FindingCoverRefused {
+        finding_id: finding.id,
+        why,
+    };
+    require(finding.kind == super::ci_watch::FINDING_KIND, || {
+        refused(format!(
+            "only a {} finding takes it, not {}",
+            super::ci_watch::FINDING_KIND,
+            finding.kind
+        ))
+    })?;
+    require(!task_closed, || {
+        refused("the task is completed or canceled".to_owned())
     })
 }
 
@@ -508,6 +531,7 @@ mod tests {
             status,
             status_reason: None,
             proposal_id: None,
+            covered_by_task: None,
             propose_reason: None,
             propose_requested_at: None,
             recorded_by: "observer".into(),
@@ -882,5 +906,16 @@ mod tests {
             settle(ProposalStatus::Canceled, &[Draft]),
             Some((FindingStatus::Open, "its proposal was canceled".into()))
         );
+    }
+
+    #[test]
+    fn only_a_ci_failure_finding_is_covered_and_only_by_an_open_task() {
+        let mut finding = stored(FindingStatus::Open);
+        let error = check_covered_by(&finding, false).unwrap_err().to_string();
+        assert!(error.contains("only a ci_failure finding"), "{error}");
+        finding.kind = "ci_failure".into();
+        assert!(check_covered_by(&finding, false).is_ok());
+        let error = check_covered_by(&finding, true).unwrap_err().to_string();
+        assert!(error.contains("completed or canceled"), "{error}");
     }
 }

@@ -23,6 +23,9 @@ string_enum!(Capability {
     QueueRead => "queue.read",
     QueueWatch => "queue.watch",
     ExportFile => "queue.export",
+    // The tests that fail already on the watched branch (`ci failures`,
+    // ADR-t1920-1); a worker and a job get them in their prompt.
+    CiRead => "ci.read",
     // Planning.
     GoalWrite => "goal.write",
     GoalReady => "goal.ready",
@@ -88,10 +91,11 @@ string_enum!(Capability {
 });
 
 impl Capability {
-    pub const ALL: [Self; 49] = [
+    pub const ALL: [Self; 50] = [
         Self::QueueRead,
         Self::QueueWatch,
         Self::ExportFile,
+        Self::CiRead,
         Self::GoalWrite,
         Self::GoalReady,
         Self::GoalClose,
@@ -353,6 +357,7 @@ const USER: &[Capability] = &[
     C::QueueRead,
     C::QueueWatch,
     C::ExportFile,
+    C::CiRead,
     C::GoalWrite,
     C::GoalReady,
     C::GoalClose,
@@ -401,6 +406,7 @@ const PLANNER: &[Capability] = &[
     C::QueueRead,
     C::QueueWatch,
     C::ExportFile,
+    C::CiRead,
     C::GoalWrite,
     C::GoalClose,
     C::TaskWrite,
@@ -446,6 +452,7 @@ const READ_ONLY: &[Capability] = &[C::QueueRead];
 const OBSERVER: &[Capability] = &[
     C::QueueRead,
     C::QueueWatch,
+    C::CiRead,
     C::FindingRecord,
     C::FindingResolve,
     C::FindingAsk,
@@ -459,6 +466,7 @@ const SUPERVISOR: &[Capability] = &[
     C::QueueRead,
     C::QueueWatch,
     C::ExportFile,
+    C::CiRead,
     C::GoalClose,
     C::TaskCancel,
     C::TaskReady,
@@ -907,7 +915,7 @@ mod tests {
         ] {
             let actor = role(role_);
             assert!(allowed(&actor, C::QueueRead, &Resource::Queue), "{role_:?}");
-            for capability in [C::QueueWatch, C::ExportFile] {
+            for capability in [C::QueueWatch, C::ExportFile, C::CiRead] {
                 let error = StaticPolicy
                     .authorize(&actor, capability, &Resource::Queue)
                     .unwrap_err();
@@ -918,7 +926,7 @@ mod tests {
             }
         }
         for role_ in [ActorRole::User, ActorRole::Inbox, ActorRole::Planner] {
-            for capability in [C::QueueRead, C::QueueWatch, C::ExportFile] {
+            for capability in [C::QueueRead, C::QueueWatch, C::ExportFile, C::CiRead] {
                 assert!(
                     allowed(&role(role_), capability, &Resource::Queue),
                     "{role_:?} {capability:?}"
@@ -946,6 +954,7 @@ mod tests {
             C::FindingRecord,
             C::FindingResolve,
             C::QueueWatch,
+            C::CiRead,
             C::PrepareReview,
         ];
         for job in JOBS {

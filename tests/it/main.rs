@@ -96,6 +96,7 @@ mod runtime_background;
 mod runtime_background_process;
 mod runtime_broker;
 mod runtime_candidates;
+mod runtime_ci_watch;
 mod runtime_claim;
 mod runtime_claim_build;
 mod runtime_claim_defer;

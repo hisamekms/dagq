@@ -247,6 +247,12 @@ pub enum DomainError {
         status: FindingStatus,
         to: FindingStatus,
     },
+    /// `finding dismiss --covered-by` names a finding that is not a
+    /// `ci_failure`, or a task that is closed (ADR-t1920-1).
+    FindingCoverRefused {
+        finding_id: FindingId,
+        why: String,
+    },
     /// Only a `blocked` ask (ADR-0044 decision 23) or a `planner_question`
     /// (decision 19) may name a finding.
     AskFindingNotBlocked {
@@ -645,6 +651,9 @@ impl fmt::Display for DomainError {
                 status.as_str(),
                 to.as_str()
             ),
+            Self::FindingCoverRefused { finding_id, why } => {
+                write!(f, "finding {finding_id} cannot be dismissed --covered-by: {why}")
+            }
             Self::AskWithoutTopic => write!(
                 f,
                 "a worker_question needs --topic: the primary code of what is left undecided first ({}), then any secondary ones",

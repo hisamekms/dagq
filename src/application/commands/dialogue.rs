@@ -52,6 +52,7 @@ pub trait DialogueStore: DenialLog {
         to: FindingStatus,
         reason: &str,
         by: &str,
+        covered_by: Option<crate::domain::TaskId>,
     ) -> Result<Finding>;
 }
 
@@ -175,16 +176,25 @@ impl<'a, S: DialogueStore> Dialogue<'a, S> {
             id,
             FindingStatus::Resolved,
             reason,
+            None,
         )
     }
 
-    /// `finding dismiss`: nobody will remedy it.
-    pub fn dismiss_finding(&mut self, id: FindingId, reason: &str) -> Result<Finding> {
+    /// `finding dismiss`: nobody will remedy it, or (`covered_by`, a
+    /// `ci_failure` finding only) the open task named remedies it
+    /// (ADR-t1920-1).
+    pub fn dismiss_finding(
+        &mut self,
+        id: FindingId,
+        reason: &str,
+        covered_by: Option<crate::domain::TaskId>,
+    ) -> Result<Finding> {
         self.set_finding(
             Capability::FindingDismiss,
             id,
             FindingStatus::Dismissed,
             reason,
+            covered_by,
         )
     }
 
@@ -194,11 +204,13 @@ impl<'a, S: DialogueStore> Dialogue<'a, S> {
         id: FindingId,
         to: FindingStatus,
         reason: &str,
+        covered_by: Option<crate::domain::TaskId>,
     ) -> Result<Finding> {
         self.gate
             .authorize(&*self.store, capability, &Resource::Finding(id))?;
         let by = self.gate.actor.written_by();
-        self.store.set_finding_status(id, to, reason, by)
+        self.store
+            .set_finding_status(id, to, reason, by, covered_by)
     }
 
     /// Authorize `capability` on the ask `id`: a role without it is
@@ -315,6 +327,7 @@ mod tests {
             to: FindingStatus,
             _: &str,
             by: &str,
+            _covered_by: Option<crate::domain::TaskId>,
         ) -> Result<Finding> {
             self.writer = Some(by.to_owned());
             Err(reached(&format!("finding {to:?}")))
@@ -424,7 +437,7 @@ mod tests {
                 d.resolve_finding(FindingId::new(1), "gone").map(drop)
             }),
             ("finding dismiss", |d| {
-                d.dismiss_finding(FindingId::new(1), "no").map(drop)
+                d.dismiss_finding(FindingId::new(1), "no", None).map(drop)
             }),
         ]
     }

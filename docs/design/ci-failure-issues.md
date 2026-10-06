@@ -4,8 +4,8 @@ type: design
 title: Issue for failing CI on main
 status: current
 created: 2026-10-02
-updated: 2026-10-06 # task 1920: relation to the planned CI watch
-last_verified: 2026-10-02
+updated: 2026-10-06 # task 1921: CI watch implemented; task 1920: relation to the CI watch
+last_verified: 2026-10-06 # task 1921
 scope: operations
 tags:
   - ci
@@ -53,7 +53,7 @@ workflow の `permissions` は空（`{}`）で、job `report` だけが `actions
 
 ## supervisorのCIの見張りとの関係
 
-予定（未実装、[ADR-t1920-1](../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)決定8）。`dagq.toml`に`[ci_watch]`を書いたrepositoryでは、supervisorが同じmainのpushの実行を`gh`で読み、eventと既に落ちているtestの一覧と`ci_failure`のfindingをqueueに残し、修正taskはruntimeのfindingのplannerがplan reviewを通して作る（[CI watch](supervisor-lifecycle/ci-watch.md)）。
+[ADR-t1920-1](../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)決定8（見張りはtask 1921が実装した）。`dagq.toml`に`[ci_watch]`を書いたrepositoryでは、supervisorが同じmainのpushの実行を`gh`で読み、eventと既に落ちているtestの一覧と`ci_failure`のfindingをqueueに残し、修正taskはruntimeのfindingのplannerがplan reviewを通して作る（[CI watch](supervisor-lifecycle/ci-watch.md)）。
 
 - このworkflowとissueは変えずに残す。supervisorが止まっている間も、見張りの無いrepositoryでも、GitHubの上で人に届く知らせだから。2つは別々に動き、互いを読まない。
 - `[ci_watch]`を書いたrepositoryでは（`dagq ci failures`の`watch`が`available`でも`unavailable`でも）、plannerとinboxはissueから修正taskを登録しない。見張りが止まっている間はclaimと着地も止まり、戻れば見張りが同じ失敗を`ci_failure`のfindingにするので、issueから登録すると重なる。issueは人が読む知らせで、閉じるのは今までどおり次に通った実行。

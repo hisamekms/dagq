@@ -4,8 +4,8 @@ type: design
 title: Queue service
 status: current
 created: 2026-10-02
-updated: 2026-10-06 # task 1920: planned CI watch; task 1641: goal_list's tag; task 840: broker package backend in the name note; task 1352: a service a test started stops once the test's process is gone (DAGQ_SERVICE_OWNER_PID, owner_gone); task 1440: the worker's token is issued when its session wrapper starts in the background
-last_verified: 2026-10-05 # task 1641; task 840; task 1352; task 1440
+updated: 2026-10-06 # task 1921: CI watch implemented; task 1641: goal_list's tag; task 840: broker package backend in the name note; task 1352: a service a test started stops once the test's process is gone (DAGQ_SERVICE_OWNER_PID, owner_gone); task 1440: the worker's token is issued when its session wrapper starts in the background
+last_verified: 2026-10-06 # task 1921; task 1641; task 840; task 1352; task 1440
 scope: runtime
 tags:
   - security
@@ -87,7 +87,7 @@ serviceは呼び出しのprincipal（`role`・`actor_id`・workerなら`run_id`�
 | `proposal_show` | `id` | `dagq proposal show`の出力 | `queue.read`（queue）。全role。無いproposalは`failed` |
 | `finding_record` | `dagq finding record`と同じ: `kind`・対象を1つ（`task`・`run`・`goal`か`queue: true`）・`subject`（既定は空）・`summary`・`detail`・`impact`・`evidence`（eventのidの配列）・`propose` | `dagq finding record`の出力（findingと`created`・`changed`） | `finding.record`（対象）。tokenを発行するAI actorのうち今のpolicyで持つのはobserverとinboxで、plannerとworkerとjobには無い。同じ種類・対象・subjectのopenかproposedのfindingへの合流（新しい根拠で回数と根拠を足し、新しいものが無ければ何も書かない）と根拠の検査は、CLIと同じ`record_finding`の1つのtransaction。`by`はprincipalのもの |
 | `finding_resolve` | `id`・`reason` | `dagq finding resolve`の出力 | `finding.resolve`。今のpolicyで持つのはobserver・inbox・plannerで、workerとjobには無い。`by`はprincipalのもの |
-| `finding_dismiss` | `id`・`reason` | `dagq finding dismiss`の出力 | `finding.dismiss`。observerには無い（ADR-t1222-1決定2）。今のpolicyでこれを持つのはinboxとplannerで、workerとjobには無い |
+| `finding_dismiss` | `id`・`reason`・`covered_by`（任意。`--covered-by`のtask ID。下の「CIの見張り」） | `dagq finding dismiss`の出力 | `finding.dismiss`。observerには無い（ADR-t1222-1決定2）。今のpolicyでこれを持つのはinboxとplannerで、workerとjobには無い |
 | 読み取り（`list`・`events`・`timeline`・`stats`・`kpi`・`forecast`・`marks`・`search`・`related`・`findings`・`goal_show`など） | そのコマンドのoption | そのコマンドの出力 | `queue.read`（queue）。全role。[読み取りのユースケース](#読み取りのユースケース) |
 
 observerのfindingに紐づく`blocked`のaskは`ask`のユースケース（`kind: blocked`と`finding_id`。capabilityは`finding.ask`）で送る。findingの書き込みとそのaskはCLIと同じ`Dialogue`をprincipalのactorで通るので、`finding_recorded` / `finding_updated` / `finding_status_changed`の`by`と`ask_opened`の`asked_by`は`observer`、eventのactorはjobのactor idで、拒否の`authorization_denied`もobserverのものとして残る。そのため`observe_finished`の件数と、observer自身のeventを数えない判定（[Observer](supervisor-lifecycle/observer.md)の0、`SqliteQueue::events_besides`）は、CLIで書いたときと同じに成り立つ（ADR-t1222-1決定4）。
@@ -208,8 +208,9 @@ queueのevent（`EventKind::is_queue`）: `queue_service_started`（`by`（`up`�
 
 - runの終わりでのworkerのtokenのfileの片付け（serviceはrunの終わったtokenを断るので使えないが、fileは次のresumeの発行し直しか手の片付けまで残る）
 - 実Codexでの読み取りだけのjobのsocketへの到達の確認（`codex sandbox`とstubのCodexまで。上の「Codexのsandboxからの到達」）
+- `dagq ci failures`（`ci.read`。[CI watch](supervisor-lifecycle/ci-watch.md)）の読み取りのユースケース。clientのmodeでは`no_use_case`で断る
 - 段(4)〜(6)（goal 38）: queueのbroker、supervisor・wrapper・hook・CLIのservice経由化、integrateのverificationの隔離
 
-## 予定: CIの見張り（ADR-t1920-1）
+## CIの見張り（ADR-t1920-1）
 
-[ADR-t1920-1](../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)と[CI watch](supervisor-lifecycle/ci-watch.md)の予定（未実装、goal 157）。`finding_dismiss`の引数に`covered_by`（task ID、任意）が足りる（`dagq finding dismiss --covered-by`。互換は「API versionと互換」に従う）。`dagq ci failures`をserviceの読み取りのユースケースに載せるかは実装のtaskが決め、載せなければ「まだ無いもの」に書く。
+[ADR-t1920-1](../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)と[CI watch](supervisor-lifecycle/ci-watch.md)（task 1921）。`finding_dismiss`の引数に`covered_by`（task ID、任意。serdeの既定で省略できる）がある（`dagq finding dismiss --covered-by`。CLIは与えたときだけkeyを送る）。引数の追加なので`API_VERSION`は変えず、keyを知らない古いserviceは引数を読めず`bad_request`で拒む（「API versionと互換」）。`dagq ci failures`はserviceのユースケースに載せていない（clientのmodeでは`no_use_case`。上の「まだ無いもの」）。

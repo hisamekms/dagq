@@ -880,6 +880,7 @@ pub mod broker;
 pub mod broker_usage;
 pub mod build_wait;
 pub mod change;
+pub mod ci_watch;
 pub mod claim_defer;
 pub mod claim_hold;
 pub mod claim_spacing;
@@ -903,6 +904,7 @@ pub mod ids;
 mod input;
 pub mod kpi;
 pub mod landing_branch;
+pub mod landing_hold;
 pub mod landing_release;
 pub mod language;
 pub mod light_slots;
@@ -1926,6 +1928,15 @@ pub enum AttentionNext {
     /// it or has a task take it out of `dagq.toml`; the supervisor claims
     /// nothing and lands nothing until then.
     InstallTool,
+    /// The supervisor's `gh` is not logged in to github.com
+    /// (`ci_watch_unavailable` with `reason: gh_unauthenticated`,
+    /// ADR-t1920-1 decision 2): a person runs `gh auth login`; the
+    /// supervisor claims nothing and lands nothing until then.
+    LogInToGh,
+    /// `[ci_watch]` of `dagq.toml` cannot be watched as written
+    /// (`ci_watch_unavailable` with `reason: not_github`, ADR-t1920-1): a
+    /// person fixes the remote or has a task take the table out.
+    FixDagqToml,
     /// The automatic update put a new binary in place of the supervisor's
     /// (`update_installed`, ADR-0073 decision 17): a notice the inbox
     /// passes on to the person, who acts on nothing.
@@ -2037,6 +2048,8 @@ impl fmt::Display for AttentionNext {
             Self::RephraseRequest => f.write_str("rephrase or drop the request"),
             Self::DecideWaiting => f.write_str("request a plan for the waiting tasks"),
             Self::InstallTool => f.write_str("install tool"),
+            Self::LogInToGh => f.write_str("log in to gh"),
+            Self::FixDagqToml => f.write_str("fix dagq.toml"),
             Self::ReportUpdate => f.write_str("report the update"),
             Self::ReportReview => f.write_str("report the review"),
             Self::CheckReview => f.write_str("check the failed review"),
@@ -2087,6 +2100,7 @@ pub const ATTENTION_KINDS: &[&str] = &[
     event_kind::REQUEST_PLANNER_EXHAUSTED,
     event_kind::DEPENDENCY_STRANDED,
     run_env::RUN_ENV_PROGRAM_MISSING,
+    ci_watch::CI_WATCH_UNAVAILABLE,
     UPDATE_INSTALLED,
     event_kind::THROUGHPUT_REVIEW_REPORTED,
     event_kind::THROUGHPUT_REVIEW_FINISHED,
@@ -2297,6 +2311,11 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         // still runs (task 1129).
         (event_kind::LANDING_RELEASE_STUCK, _) => Some(AttentionNext::StopLandingProcesses),
         (run_env::RUN_ENV_PROGRAM_MISSING, _) => Some(AttentionNext::InstallTool),
+        // The means to read the CI went away (ADR-t1920-1 decision 2); its
+        // return is no attention.
+        (ci_watch::CI_WATCH_UNAVAILABLE, _) => Some(ci_watch::Unavailable::next_of(
+            payload.get("reason").and_then(serde_json::Value::as_str),
+        )),
         // The failure and the breaking build of the automatic update reach
         // the inbox as their asks; only the replaced binary is a notice.
         (UPDATE_INSTALLED, _) => Some(AttentionNext::ReportUpdate),
@@ -3380,6 +3399,22 @@ mod attention_tests {
                 None,
             ),
             (
+                "ci_watch_unavailable",
+                json!({"reason": "gh_missing"}),
+                Some(InstallTool),
+            ),
+            (
+                "ci_watch_unavailable",
+                json!({"reason": "gh_unauthenticated"}),
+                Some(LogInToGh),
+            ),
+            (
+                "ci_watch_unavailable",
+                json!({"reason": "not_github"}),
+                Some(FixDagqToml),
+            ),
+            ("ci_watch_available", json!({"program": "gh"}), None),
+            (
                 "kpi_push_abandoned",
                 json!({"push_kind": "daily", "period": "2026-09-26"}),
                 Some(FixPush),
@@ -3720,6 +3755,8 @@ mod attention_tests {
         );
         assert_eq!(PushMain.to_string(), "push main");
         assert_eq!(InstallTool.to_string(), "install tool");
+        assert_eq!(LogInToGh.to_string(), "log in to gh");
+        assert_eq!(FixDagqToml.to_string(), "fix dagq.toml");
         assert_eq!(CheckE2e.to_string(), "check the e2e host");
         assert_eq!(ReportUpdate.to_string(), "report the update");
         assert_eq!(ReportReview.to_string(), "report the review");

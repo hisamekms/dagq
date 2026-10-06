@@ -49,6 +49,7 @@ use crate::{
         areas::AreaMap,
         background_wrapper::HeadlessWrapper,
         broker::{BrokerConfig, BrokerMode},
+        ci_watch::{CiWatchConfig, DEFAULT_INTERVAL_SECS, MIN_INTERVAL_SECS},
         disk::DiskConfig,
         exit::ExitConfig,
         kpi::KpiSettings,
@@ -138,7 +139,10 @@ const HEADLESS_WRAPPER: &str = "wrapper";
 /// `[provider_fallback]`: whether a worker moves off a provider it
 /// cannot use (ADR-t1857-1).
 const PROVIDER_FALLBACK_TABLE: &str = "provider_fallback";
-const TABLES: [&str; 19] = [
+/// `[ci_watch]`: the landing branch's CI the supervisor watches
+/// (ADR-t1920-1).
+const CI_WATCH_TABLE: &str = "ci_watch";
+const TABLES: [&str; 20] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
@@ -158,6 +162,7 @@ const TABLES: [&str; 19] = [
     BROKER_PACKAGE_TABLE,
     HEADLESS_TABLE,
     PROVIDER_FALLBACK_TABLE,
+    CI_WATCH_TABLE,
 ];
 /// The one key of `[recheck]`.
 const RECHECK_COMMAND: &str = "command";
@@ -239,6 +244,9 @@ pub struct Config {
     /// `[provider_fallback]` (ADR-t1857-1), the default (on) for the keys
     /// it does not set.
     pub provider_fallback: ProviderFallback,
+    /// `[ci_watch]` (ADR-t1920-1); `None` without the table, which watches
+    /// nothing.
+    pub ci_watch: Option<CiWatchConfig>,
 }
 
 /// Parse the whole file.
@@ -258,6 +266,10 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut light_changes: Option<(Vec<TaskChange>, usize)> = None;
     let mut broker_keys: Vec<String> = Vec::new();
     let mut fallback_keys: Vec<String> = Vec::new();
+    // `[ci_watch]`'s header line and the keys read, the table checked once
+    // the file is read whole (its `workflow` is required).
+    let mut ci_watch: Option<(usize, CiWatchConfig)> = None;
+    let mut ci_watch_keys: Vec<String> = Vec::new();
     let mut role: Option<ModelRole> = None;
     let mut roles_seen: Vec<ModelRole> = Vec::new();
     let mut role_keys: Vec<String> = Vec::new();
@@ -340,7 +352,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{BROKER_TABLE}], [{BROKER_PACKAGE_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{BROKER_TABLE}], [{BROKER_PACKAGE_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{CI_WATCH_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -349,6 +361,17 @@ pub fn parse_config(text: &str) -> Result<Config> {
             );
             seen.push(known);
             table = Some(known);
+            if *known == CI_WATCH_TABLE {
+                ci_watch = Some((
+                    number,
+                    CiWatchConfig {
+                        workflow: String::new(),
+                        branch: None,
+                        interval_secs: DEFAULT_INTERVAL_SECS,
+                        junit_artifacts: Vec::new(),
+                    },
+                ));
+            }
             if *known == AREAS_TABLE {
                 areas.get_or_insert_with(Vec::new);
             }
@@ -563,6 +586,62 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 config.provider_fallback.workers = parse_bool(rest.trim())
                     .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: value of {key}"))?;
                 fallback_keys.push(key.to_owned());
+            }
+            Some(CI_WATCH_TABLE) => {
+                ensure!(
+                    CiWatchConfig::KEYS.contains(&key),
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{CI_WATCH_TABLE}]; the keys are {}",
+                    CiWatchConfig::KEYS.join(", ")
+                );
+                ensure!(
+                    !ci_watch_keys.iter().any(|existing| existing == key),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                ci_watch_keys.push(key.to_owned());
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                let config = &mut ci_watch.as_mut().expect("[ci_watch] was opened").1;
+                match key {
+                    "interval_secs" => {
+                        let secs = parse_positive(rest.trim(), "number of seconds")
+                            .with_context(with)?
+                            .unsigned_abs();
+                        ensure!(
+                            secs >= MIN_INTERVAL_SECS,
+                            "{CONFIG_FILE_NAME}:{number}: {key} must be at least {MIN_INTERVAL_SECS}, not {secs}"
+                        );
+                        config.interval_secs = secs;
+                    }
+                    "junit_artifacts" => {
+                        let globs = parse_string_array(rest.trim()).with_context(with)?;
+                        for (index, glob) in globs.iter().enumerate() {
+                            ensure!(
+                                !glob.trim().is_empty(),
+                                "{CONFIG_FILE_NAME}:{number}: {key} has an empty glob"
+                            );
+                            ensure!(
+                                !globs[..index].contains(glob),
+                                "{CONFIG_FILE_NAME}:{number}: {key} names {glob:?} twice"
+                            );
+                        }
+                        config.junit_artifacts = globs;
+                    }
+                    _ => {
+                        let value = parse_string(rest.trim()).with_context(with)?;
+                        ensure!(
+                            !value.trim().is_empty(),
+                            "{CONFIG_FILE_NAME}:{number}: {key} is blank"
+                        );
+                        if key == "workflow" {
+                            config.workflow = value;
+                        } else {
+                            ensure!(
+                                !value.starts_with("refs/"),
+                                "{CONFIG_FILE_NAME}:{number}: {key} is a branch name without refs/heads/, not {value}"
+                            );
+                            config.branch = Some(value);
+                        }
+                    }
+                }
             }
             Some(RECHECK_TABLE) => {
                 ensure!(
@@ -813,7 +892,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 stall_keys.push(key.to_owned());
             }
             None => bail!(
-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{BROKER_TABLE}], [{BROKER_PACKAGE_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}] or [{KPI_TABLE}]"
+                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{BROKER_TABLE}], [{BROKER_PACKAGE_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{CI_WATCH_TABLE}] or [{KPI_TABLE}]"
             ),
         }
     }
@@ -822,6 +901,13 @@ pub fn parse_config(text: &str) -> Result<Config> {
             "{CONFIG_FILE_NAME}:{line}: [{REVIEW_SUBAGENTS_PREFIX}{}] has no {REVIEW_SUBAGENT_PATHS}",
             config.review_subagents.last().expect("an open agent").name
         );
+    }
+    if let Some((line, watch)) = ci_watch {
+        ensure!(
+            !watch.workflow.is_empty(),
+            "{CONFIG_FILE_NAME}:{line}: [{CI_WATCH_TABLE}] has no workflow"
+        );
+        config.ci_watch = Some(watch);
     }
     config.kpi = kpi.finish().with_context(|| CONFIG_FILE_NAME.to_owned())?;
     // A provider is checked against its role once the table is read whole
@@ -1100,6 +1186,18 @@ pub fn load_provider_fallback(root: &Path) -> Result<Option<ProviderFallback>> {
             .with_context(|| format!("parse {}", path.display()))?
             .provider_fallback,
     ))
+}
+
+/// `[ci_watch]` of the `dagq.toml` in `root` (ADR-t1920-1); no file or
+/// no table is none, which watches nothing.
+pub fn load_ci_watch(root: &Path) -> Result<Option<CiWatchConfig>> {
+    let path = root.join(CONFIG_FILE_NAME);
+    let Some(text) = read_config(&path)? else {
+        return Ok(None);
+    };
+    Ok(parse_config(&text)
+        .with_context(|| format!("parse {}", path.display()))?
+        .ci_watch)
 }
 
 /// `[broker]` of the `dagq.toml` in `root` (ADR-t827-4 decision 4); no
@@ -2511,6 +2609,95 @@ LITERAL = 'no \n escapes # here'
         );
     }
 
+    /// `[ci_watch]` (ADR-t1920-1): `workflow` is required, the rest have
+    /// defaults; values out of range, unknown and repeated keys are errors
+    /// with their line.
+    #[test]
+    fn parses_the_ci_watch_table() {
+        assert_eq!(parse_config("").unwrap().ci_watch, None);
+        assert_eq!(
+            parse_config("[ci_watch]\nworkflow = \"ci.yml\"\n")
+                .unwrap()
+                .ci_watch,
+            Some(CiWatchConfig {
+                workflow: "ci.yml".into(),
+                branch: None,
+                interval_secs: 600,
+                junit_artifacts: Vec::new(),
+            })
+        );
+        assert_eq!(
+            parse_config(
+                "[ci_watch]\nworkflow = 'CI'\nbranch = 'trunk'\ninterval_secs = 60 # a minute\njunit_artifacts = ['junit-*', 'more'] # globs\n"
+            )
+            .unwrap()
+            .ci_watch,
+            Some(CiWatchConfig {
+                workflow: "CI".into(),
+                branch: Some("trunk".into()),
+                interval_secs: 60,
+                junit_artifacts: vec!["junit-*".into(), "more".into()],
+            })
+        );
+        for (text, expected) in [
+            ("[ci_watch]\n", "dagq.toml:1: [ci_watch] has no workflow"),
+            (
+                "[ci_watch]\nworkflow = 'a'\nkind = 'b'\n",
+                "dagq.toml:3: unknown key kind in [ci_watch]; the keys are workflow, branch, interval_secs, junit_artifacts",
+            ),
+            (
+                "[ci_watch]\nworkflow = 'a'\nworkflow = 'b'\n",
+                "dagq.toml:3: workflow is defined twice",
+            ),
+            (
+                "[ci_watch]\nworkflow = 'a'\ninterval_secs = 59\n",
+                "dagq.toml:3: interval_secs must be at least 60, not 59",
+            ),
+            (
+                "[ci_watch]\nworkflow = 'a'\ninterval_secs = 'x'\n",
+                "dagq.toml:3: value of interval_secs",
+            ),
+            (
+                "[ci_watch]\nworkflow = ' '\n",
+                "dagq.toml:2: workflow is blank",
+            ),
+            (
+                "[ci_watch]\nworkflow = 'a'\nbranch = 'refs/heads/main'\n",
+                "branch is a branch name without refs/heads/",
+            ),
+            (
+                "[ci_watch]\nworkflow = 'a'\njunit_artifacts = 'x'\n",
+                "dagq.toml:3: value of junit_artifacts",
+            ),
+            (
+                "[ci_watch]\nworkflow = 'a'\njunit_artifacts = ['']\n",
+                "dagq.toml:3: junit_artifacts has an empty glob",
+            ),
+            (
+                "[ci_watch]\nworkflow = 'a'\njunit_artifacts = ['x', 'x']\n",
+                "dagq.toml:3: junit_artifacts names \"x\" twice",
+            ),
+            (
+                "[ci_watch]\nworkflow = 'a'\n[ci_watch]\n",
+                "dagq.toml:3: [ci_watch] is defined twice",
+            ),
+        ] {
+            let error = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(error.contains(expected), "{text:?}: {error}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(load_ci_watch(dir.path()).unwrap(), None);
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[ci_watch]\nworkflow = 'ci.yml'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            load_ci_watch(dir.path()).unwrap().unwrap().workflow,
+            "ci.yml"
+        );
+    }
+
     /// `[provider_fallback] workers` is a bool, on without it; the table
     /// knows no other key (ADR-t1857-1).
     #[test]
@@ -2756,7 +2943,7 @@ LITERAL = 'no \n escapes # here'
         let error = format!("{:#}", load_supervisor_config(dir.path()).unwrap_err());
         assert!(
             error.contains(
-                "[supervisor], [areas], [tasks], [goals], [e2e], [broker], [broker.package], [headless], [provider_fallback] and [kpi]"
+                "[supervisor], [areas], [tasks], [goals], [e2e], [broker], [broker.package], [headless], [provider_fallback], [ci_watch] and [kpi]"
             ),
             "{error}"
         );

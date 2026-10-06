@@ -60,6 +60,12 @@ event_kinds! {
     BrokerUnhealthy => "broker_unhealthy",
     BuildOutputsRemoved => "build_outputs_removed",
     CandidatesSampled => "candidates_sampled",
+    CiCheckFailed => "ci_check_failed",
+    CiChecked => "ci_checked",
+    CiTurnedGreen => "ci_turned_green",
+    CiTurnedRed => "ci_turned_red",
+    CiWatchAvailable => "ci_watch_available",
+    CiWatchUnavailable => "ci_watch_unavailable",
     ClaimDeferralEnded => "claim_deferral_ended",
     ClaimDeferred => "claim_deferred",
     ClaimHeld => "claim_held",
@@ -360,6 +366,14 @@ impl EventKind {
                 | PlannerAnswerClaimed
                 | RunEnvProgramMissing
                 | RunEnvProgramFound
+                // The supervisor's watch of the landing branch's CI
+                // (ADR-t1920-1).
+                | CiChecked
+                | CiTurnedRed
+                | CiTurnedGreen
+                | CiWatchUnavailable
+                | CiWatchAvailable
+                | CiCheckFailed
                 | SessionOpened
                 | SessionClosed
                 // A planner's screen inferred idle without its idle marker
@@ -900,6 +914,12 @@ mod tests {
             (EventKind::BrokerUnhealthy, "broker_unhealthy"),
             (EventKind::BuildOutputsRemoved, "build_outputs_removed"),
             (EventKind::CandidatesSampled, "candidates_sampled"),
+            (EventKind::CiCheckFailed, "ci_check_failed"),
+            (EventKind::CiChecked, "ci_checked"),
+            (EventKind::CiTurnedGreen, "ci_turned_green"),
+            (EventKind::CiTurnedRed, "ci_turned_red"),
+            (EventKind::CiWatchAvailable, "ci_watch_available"),
+            (EventKind::CiWatchUnavailable, "ci_watch_unavailable"),
             (EventKind::ClaimDeferralEnded, "claim_deferral_ended"),
             (EventKind::ClaimDeferred, "claim_deferred"),
             (EventKind::ClaimHeld, "claim_held"),

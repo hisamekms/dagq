@@ -510,6 +510,11 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
+    /// The landing branch's CI as the supervisor's [ci_watch] reads it (ADR-t1920-1).
+    Ci {
+        #[command(subcommand)]
+        command: CiCommand,
+    },
     /// Record a finding (ADR-0044 decision 18), or resolve or dismiss one.
     Finding {
         #[command(subcommand)]
@@ -1518,11 +1523,30 @@ enum FindingCommand {
         #[arg(long)]
         reason: String,
     },
-    /// Mark a finding dismissed: nobody will remedy it. It still counts occurrences.
+    /// Mark a finding dismissed: nobody will remedy it, or (--covered-by) an open task already
+    /// does. It still counts occurrences.
     Dismiss {
         id: i64,
         #[arg(long)]
         reason: String,
+        /// The open task that already fixes the failure of a ci_failure finding (ADR-t1920-1):
+        /// that task's runs keep the finding's tests on the list of the tests that fail already.
+        #[arg(long = "covered-by", value_name = "TASK")]
+        covered_by: Option<i64>,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+enum CiCommand {
+    /// The tests (or failed jobs and steps) that fail already on the watched branch, each with
+    /// the CI run that added it and its ci_failure finding, read from the queue only. With
+    /// --task, the items of the findings that task fixes move to kept_for_task. Prints
+    /// {"enabled", "workflow", "branch", "state", "watch", "checked_at", "latest_run",
+    /// "failures", "kept_for_task"}.
+    Failures {
+        /// The task whose run gets the list: its own findings' tests are kept apart.
+        #[arg(long)]
+        task: Option<i64>,
     },
 }
 
@@ -2118,6 +2142,11 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
                 },
             ),
         },
+        // The list of the tests that fail already (ADR-t1920-1): not for
+        // a worker or a job, whose prompt carries it.
+        Command::Ci {
+            command: CiCommand::Failures { .. },
+        } => queue(C::CiRead),
         Command::Finding { command } => match command {
             FindingCommand::Record {
                 task, run, goal, ..
@@ -2753,8 +2782,21 @@ fn client_request(command: &Command) -> Result<Option<(UseCase, Value)>> {
             command: FindingCommand::Resolve { id, reason },
         } => (UseCase::FindingResolve, json!({"id": id, "reason": reason})),
         Command::Finding {
-            command: FindingCommand::Dismiss { id, reason },
-        } => (UseCase::FindingDismiss, json!({"id": id, "reason": reason})),
+            command:
+                FindingCommand::Dismiss {
+                    id,
+                    reason,
+                    covered_by,
+                },
+        } => (
+            UseCase::FindingDismiss,
+            // `covered_by` only when given: an older service refuses a
+            // key it does not know.
+            match covered_by {
+                Some(task) => json!({"id": id, "reason": reason, "covered_by": task}),
+                None => json!({"id": id, "reason": reason}),
+            },
+        ),
         _ => return Ok(None),
     }))
 }
@@ -3020,6 +3062,14 @@ fn execute(cli: Cli) -> Result<Value> {
     if let Command::Doctor { full } = cli.command {
         return one_shot.doctor(&db, full, common_dir.as_deref());
     }
+    // The CI watch's list reads the queue and the bound checkout's
+    // `[ci_watch]` (ADR-t1920-1).
+    if let Command::Ci {
+        command: CiCommand::Failures { task },
+    } = cli.command
+    {
+        return dagq::compose::ci_failures(&db, task.map(TaskId::new));
+    }
     // The broker's container needs no queue state, only its paths.
     if let Command::Service { command } = cli.command {
         use dagq::infrastructure::adapters::executable;
@@ -3194,6 +3244,7 @@ fn execute(cli: Cli) -> Result<Value> {
         | Command::Migrate { .. }
         | Command::Install { .. }
         | Command::Doctor { .. }
+        | Command::Ci { .. }
         | Command::Broker { .. }
         | Command::Service { .. } => {
             unreachable!()
@@ -3570,10 +3621,17 @@ fn execute(cli: Cli) -> Result<Value> {
             serde_json::to_value(dialogue!(&no_cmux).resolve_finding(FindingId::new(id), &reason)?)?
         }
         Command::Finding {
-            command: FindingCommand::Dismiss { id, reason },
-        } => {
-            serde_json::to_value(dialogue!(&no_cmux).dismiss_finding(FindingId::new(id), &reason)?)?
-        }
+            command:
+                FindingCommand::Dismiss {
+                    id,
+                    reason,
+                    covered_by,
+                },
+        } => serde_json::to_value(dialogue!(&no_cmux).dismiss_finding(
+            FindingId::new(id),
+            &reason,
+            covered_by.map(TaskId::new),
+        )?)?,
         Command::Request {
             command:
                 RequestCommand::Add {
@@ -3780,6 +3838,9 @@ fn execute(cli: Cli) -> Result<Value> {
                 // The sccache server [run.env] names, started outside any
                 // sandbox (ADR-t1215-1).
                 sccache: Some(dagq::compose::SccacheOptions::default()),
+                // The landing branch's CI when [ci_watch] is set
+                // (ADR-t1920-1); a one-shot pass does not watch it.
+                ci_watch: (!once).then(dagq::compose::CiWatchOptions::default),
                 // A supervisor at work keeps the queue's service (ADR-t1233-4
                 // decision 2); a one-shot pass does not.
                 queue_service: (!once).then(|| dagq::compose::QueueServiceOptions {
@@ -4744,6 +4805,12 @@ mod tests {
             ),
             ("finding resolve", &["1", "--reason", "r"]),
             ("finding dismiss", &["1", "--reason", "r"]),
+            (
+                "finding dismiss",
+                &["1", "--reason", "r", "--covered-by", "2"],
+            ),
+            ("ci failures", &[]),
+            ("ci failures", &["--task", "1"]),
             ("request add", &["--text", "plan it", "--ref", "task:1"]),
             ("request decline", &["1", "--reason", "r"]),
             (

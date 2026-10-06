@@ -16,9 +16,9 @@ pub use crate::application::{
     supervise::{RunError, SUPERVISOR_HANDED_OFF},
 };
 pub use crate::compose::{
-    OneShot, ProcessesPort, ReleaseIndexPort, RunE2eOptions, RunFilesPort, SccacheOptions,
-    SuperviseOptions, ask, doctor, ended_run_material, integrate, rebind, recover, review, session,
-    session_in_background, session_in_background_as, stats, status, status_for, supervise,
-    supervise_with_reviewer,
+    CiWatchOptions, OneShot, ProcessesPort, ReleaseIndexPort, RunE2eOptions, RunFilesPort,
+    SccacheOptions, SuperviseOptions, ask, ci_failures, doctor, ended_run_material, integrate,
+    rebind, recover, review, session, session_in_background, session_in_background_as, stats,
+    status, status_for, supervise, supervise_with_reviewer,
 };
 pub use crate::infrastructure::claude::{PromptKind, detect_prompt};

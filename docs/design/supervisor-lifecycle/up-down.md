@@ -4,8 +4,8 @@ type: design
 title: "`up` / `down`"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1920: planned CI watch; task 838: up preflight takes [broker] mode = "required" as preferred; task 1238 (after tasks 1579, 1232, 1518 and 1582); task 1440
-last_verified: 2026-10-05 # task 838; task 1579; task 1440
+updated: 2026-10-06 # task 1921: CI watch implemented; task 838: up preflight takes [broker] mode = "required" as preferred; task 1238 (after tasks 1579, 1232, 1518 and 1582); task 1440
+last_verified: 2026-10-06 # task 1921; task 838; task 1579; task 1440
 scope: runtime
 related:
   - adr-t1582-1
@@ -74,6 +74,6 @@ related:
 
 in-cmux modeのsupervisor workspaceは`down`が閉じる。閉じる相手は登録の`workspace_id`で決め、titleは見ない（閉じたworkspaceが`session_workspaces`の`supervisor`行と一致すれば行も消す）。判定はどの経路でも同じで、`supervisors`の全登録（`not_running`のときの死んだ登録も含む）が対象になる。`down`がその停止を見届けたとき——`--wait`はdrainの完了を待った後、`--force`はkillした後、`not_running`は最初から誰も生きていない——は無条件に閉じる。PIDの生死は見ない: `kill(2)`は対象が回収される前に返るのでSIGKILLの直後の`kill(pid,0)`はまだ成功し（実測20/20）、`--wait`もsupervisorが登録を消してから終了するので戻った時点ではまだPIDが見えている。ここで生死を条件にすると、止めたはずのworkspaceが開いたまま`left_open`として報告される。既定の`down`だけは別で、supervisorはまだdrain中かもしれない——cmuxのworkspaceを閉じるとその中のsupervisorも終わってdrainが途切れる——ので、`down`が何もsignalする前に判定した登録の生存とPIDの同一性を見て、既に終わっていたものだけを閉じる。結果の`supervisor_workspaces`は1件ずつ`{"workspace_id","outcome":"closed"}`、`{"workspace_id","outcome":"left_open","reason":"supervisor pid N is still draining; `down --wait` closes it"}`、`{"workspace_id","outcome":"close_failed","reason":…}`のいずれか。cmuxがcloseを拒んでも`down`はerrorにしない（止めるという仕事はもう終わっている）。既定の`down`でdrain中に残ったworkspaceは、人が閉じるか`down --wait`を打ち直す（閉じないまま`up --in-cmux`を打つと、上記のとおり止まる）。`--force`は生きた登録に加えて死んだ登録も消す。閉じたworkspaceを指す行が残ると、次の`down`が同じcloseをやり直して`close_failed`を報告するため。`--cmux`はこのcloseに使う実行ファイルで、解決できなくても`down`自体は進む（閉じる相手がいなければ使わない）。inboxとplannerのworkspaceは閉じない（inboxの`session_workspaces`の行も残り、次の`up`がreuseする）。
 
-## 予定: CIの見張り（ADR-t1920-1）
+## CIの見張り（ADR-t1920-1）
 
-[ADR-t1920-1](../../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)と[CI watch](ci-watch.md)の予定（未実装、goal 157）。`[ci_watch]`があれば、`up`のpreflightは`[run.env]`のプログラムの検査の後に、`up`のPATHで`gh`を解決して`gh auth status`を確かめ、だめならsupervisorを起動せず理由と対処を挙げたerrorで止まる。
+[ADR-t1920-1](../../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)と[CI watch](ci-watch.md)（task 1921）。`[ci_watch]`があれば、`up`のpreflightは`[run.env]`のプログラムの検査の後に（`lifecycle::Ports::ci_watch_preflight`、`infrastructure::ci_watch::preflight`）、`up`のPATHで`gh`を解決し、`[repository] remote`のURLがGitHubかと`gh auth status`を確かめ、だめならsupervisorを起動せず、理由と対処（`gh`を入れる・`gh auth login`・remoteを直す、または`[ci_watch]`を`dagq.toml`から外すtaskを登録する）を挙げ`; the supervisor was not started`で終わるerrorで止まる。

@@ -1,0 +1,11 @@
+-- dagq-schema: compatible
+-- The task a `ci_failure` finding is dismissed as covered by
+-- (ADR-t1920-1 decision 4; `finding dismiss <id> --covered-by <task>`):
+-- the fix task's run keeps that finding's tests on the list of the tests
+-- that fail already. Null for every other finding and for every finding
+-- before this migration. No CHECK (ADR-t876-1): `domain::finding` holds
+-- that only a `ci_failure` finding takes it, with its dismissal. No
+-- REFERENCES, which a compatible migration may not add: the runtime writes
+-- only the ID of a task it just read. An addition only: an older binary
+-- never names the column.
+ALTER TABLE findings ADD COLUMN covered_by_task INTEGER;

@@ -1206,6 +1206,32 @@ pub fn attention(
             next: AttentionNext::InstallTool,
         });
     }
+    // The CI the supervisor watches cannot be read: its claims and
+    // landings wait until a person installs or logs in `gh`, or fixes
+    // `dagq.toml` (ADR-t1920-1 decision 2).
+    if let Some(event) =
+        queue.latest_queue_event(&crate::domain::ci_watch::CI_WATCH_ACCESS_KINDS)?
+        && event.kind == crate::domain::ci_watch::CI_WATCH_UNAVAILABLE
+    {
+        attention.push(Attention {
+            run_id: None,
+            task_id: None,
+            pid: None,
+            ask_id: None,
+            reason_category: None,
+            status: "unavailable".into(),
+            kind: crate::domain::ci_watch::CI_WATCH_UNAVAILABLE.into(),
+            last_error: event
+                .payload
+                .get("message")
+                .and_then(Value::as_str)
+                .map(truncate_reason),
+            last_error_code: None,
+            next: crate::domain::ci_watch::Unavailable::next_of(
+                event.payload.get("reason").and_then(Value::as_str),
+            ),
+        });
+    }
     // The host's KPI push command that failed a message three times waits
     // for a person until a push succeeds (ADR-0051 decision 23).
     if let Some(event) = queue.latest_queue_event(&KPI_PUSH_ATTENTION_KINDS)?

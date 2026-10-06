@@ -4,8 +4,8 @@ type: design
 title: Security
 status: current
 created: 2026-09-28
-updated: 2026-10-05 # task 1564: ask --request is the request's own planner's; task 1540: revisit is task.write; task 840: broker package backend; task 1509; task 1440: run screen and run close-workspaces are refused after authorization
-last_verified: 2026-10-05 # task 1564; task 1540; task 840; task 1440
+updated: 2026-10-06 # task 1921: ci.read (ci failures); task 1564: ask --request is the request's own planner's; task 1540: revisit is task.write; task 840: broker package backend; task 1509; task 1440: run screen and run close-workspaces are refused after authorization
+last_verified: 2026-10-06 # task 1921; task 1564; task 1540; task 840; task 1440
 scope: runtime
 tags:
   - security
@@ -54,7 +54,7 @@ AI actorの出力は全てデータで、制御側が決定的に遷移へ写す
 | user | ○ | ○ | ○ / ○ | ○ | ○ | ○ / ○ | ○ | ○ / — | ○ | ○ | ○ | ○ | — |
 | inbox | ○ | ○ | ○ / ○ | ○ | ○ | ○ / ○ | ○ | ○ / — | ○ | ○ | ○ | ○ | — |
 | planner | ○ | △ draft・submitted・readyのtask（`revisit`はdraftだけで、上限に達したdraftは—）、全状態のfollow_upの所属判断、自分のproposalの取り下げ。`goal ready`・`goal review`は— | — / — | ○（runにはnoteだけ） | △ `planner_question`だけ（依頼に紐づくものは自分が立てられた依頼だけ）、runに紐づくものは— | — / — | resolve・dismiss（recordは—） | — / △ 自分が立てられた依頼だけ | △ 自分のplannerだけ | ○ | — | — | — |
-| worker | 読み取り（`watch`と`queue.export`は—） | — | — / — | △ noteだけ、自分のrunとtask | △ 自分のrunかtaskの`worker_question`だけ | — / — | — | — / — | △ 自分のrunだけ | — | — | — | — |
+| worker | 読み取り（`watch`・`queue.export`・`ci.read`は—） | — | — / — | △ noteだけ、自分のrunとtask | △ 自分のrunかtaskの`worker_question`だけ | — / — | — | — / — | △ 自分のrunだけ | — | — | — | — |
 | review-job | 読み取り | — | — / — | — | — | — / — | — | — / — | — | — | — | — | — |
 | recovery-job | 読み取り | — | — / — | — | — | — / — | — | — / — | — | — | — | — | — |
 | plan-review-job・goal-review-job・throughput-review-job | 読み取り | — | — / — | — | — | — / — | — | — / — | — | — | — | — | — |
@@ -64,7 +64,7 @@ AI actorの出力は全てデータで、制御側が決定的に遷移へ写す
 | integrator | 読み取り | — | — / — | — | — | — / — | — | — / — | — | — | — | — | ○ |
 
 - review-jobとrecovery-jobの`review.submit` / `triage.submit`は自分のrunだけのcapabilityだが、CLIのコマンドは無く、verdictはsupervisorがデータとして読む。jobの環境には`DAGQ_RUN_ID`が無いので、今は持ち主が分からず拒まれる
-- observerの`queue.export`（`graph --out`・`report`）は—。4つのjob・worker・wrapper・integratorは`watch`も`queue.export`も持たず、状態を変えないコマンド（`watch`・`graph --out`・`report`）も全roleで`StaticPolicy`が判定するので（下の「判定の場所」）拒まれる（task 859）。読み取り（`queue.read`）は全roleが持つ
+- observerの`queue.export`（`graph --out`・`report`）は—。`ci.read`（`ci failures`、[CI watch](supervisor-lifecycle/ci-watch.md)）はuser・inbox・planner・observer・supervisorが持つ。4つのjob・worker・wrapper・integratorは`watch`も`queue.export`も`ci.read`も持たず、状態を変えないコマンド（`watch`・`graph --out`・`report`・`ci failures`）も全roleで`StaticPolicy`が判定するので（下の「判定の場所」）拒まれる（task 859）。読み取り（`queue.read`）は全roleが持つ
 - `judge-follow-up`（`follow_up.judge`）はuser・inbox・plannerだけが全状態のfollow_upに記録でき、worker・job・supervisorは拒む。所属変更はdraft/readyだけ。表のplannerのtask変更の例外はこの判断の記録だけである。
 - draftの再検討の時刻（`revisit`、[ADR-t1540-1](../adr/2026-10-05-t1540-1-a-kept-draft-returns-to-runtime-planners-at-its-revisit-time.md)）は計画の列の`task.write`に含める（許すroleと拒むroleが開始前のtaskの変更と同じなので、新しいcapabilityにしない）。user・inbox・plannerが付け・変え・外し、worker・observer・job・supervisorは拒む。plannerは`draft_planner_exhausted`のあるdraftに付けられない（人・inboxが付けたものだけがplannerの上限を越えて1回立つため）
 - user・inboxの計画権限には、最新runが終了し生きているrunの無い`in_progress` taskの`--verify` / `--no-verify`だけを直す`task.verify_edit`も含む（ADR-t883-1）。planner・worker・jobは持たない。

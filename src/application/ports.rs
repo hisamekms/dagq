@@ -2335,6 +2335,17 @@ pub trait QueueRecords {
         payload: serde_json::Value,
         previous: Option<EventId>,
     ) -> Result<Option<EventId>>;
+    /// Every event of the CI watch (ADR-t1920-1), oldest first.
+    fn ci_watch_events(&self) -> Result<Vec<RunEvent>>;
+    /// Record one settled CI run in one write transaction unless another
+    /// supervisor recorded a run since `record.previous`; `None` then.
+    fn record_ci_check(
+        &self,
+        record: crate::domain::ci_watch::CiCheckRecord,
+    ) -> Result<Option<crate::domain::ci_watch::CiCheckRecorded>>;
+    /// The `ci_failure` findings `task` fixes (linked to its proposal, or
+    /// dismissed as covered by it).
+    fn ci_failure_findings_of(&self, task: TaskId) -> Result<Vec<crate::domain::FindingId>>;
 }
 
 /// The questions the runtime and its sessions put to a person (ADR-0022).

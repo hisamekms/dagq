@@ -406,6 +406,30 @@ pub struct SuperviseOptions {
     /// is sccache (ADR-t1215-1): the CLI's supervisor does; `None` (the
     /// tests unless they ask) looks at no server.
     pub sccache: Option<SccacheOptions>,
+    /// Watch the landing branch's CI when `[ci_watch]` is set
+    /// (ADR-t1920-1): the CLI's supervisor does but for `--once`; `None`
+    /// (the tests unless they ask) watches nothing.
+    pub ci_watch: Option<CiWatchOptions>,
+}
+
+/// How the supervisor watches the CI ([`SuperviseOptions::ci_watch`]).
+#[derive(Debug, Clone)]
+pub struct CiWatchOptions {
+    /// The GitHub CLI: `gh` on the supervisor's PATH, or a path (tests
+    /// give a fake).
+    pub program: String,
+    /// The time between checks instead of `[ci_watch] interval_secs`;
+    /// tests shorten it.
+    pub interval: Option<Duration>,
+}
+
+impl Default for CiWatchOptions {
+    fn default() -> Self {
+        Self {
+            program: crate::infrastructure::ci_watch::GH.to_owned(),
+            interval: None,
+        }
+    }
 }
 
 /// How the supervisor keeps the sccache server
@@ -586,6 +610,7 @@ impl SuperviseOptions {
             queue_service: None,
             passes: Arc::new(AtomicU64::new(0)),
             sccache: None,
+            ci_watch: None,
         }
     }
 
@@ -1103,6 +1128,38 @@ pub fn supervise_with_reviewer(
             None
         }
     };
+    // `[ci_watch]` read again each pass, its checks through the host's
+    // `gh` in the main checkout (ADR-t1920-1).
+    let ci_watch = options.ci_watch.as_ref().map(|settings| {
+        let checkout = main_checkout.clone();
+        let file = Arc::new(move || crate::infrastructure::run_env::load_ci_watch(&checkout))
+            as crate::application::supervise::CiWatchFile;
+        let checkout = main_checkout.clone();
+        let queue_dir = db.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let program = settings.program.clone();
+        let source = Arc::new(
+            move |config: &crate::domain::ci_watch::CiWatchConfig, branch: &str| {
+                let remote = crate::infrastructure::run_env::load_repository_config(&checkout)?
+                    .remote()
+                    .to_owned();
+                Ok(Arc::new(crate::infrastructure::ci_watch::GhSource::new(
+                    &program,
+                    std::env::var_os("PATH"),
+                    &checkout,
+                    &remote,
+                    config.clone(),
+                    branch,
+                    &queue_dir,
+                ))
+                    as Arc<dyn crate::application::ci_watch::CiSource>)
+            },
+        ) as crate::application::supervise::CiSourceMaker;
+        crate::application::supervise::CiWatchPort {
+            file,
+            source,
+            interval: settings.interval,
+        }
+    });
     let ports = Ports {
         // The supervisor's own transitions (ADR-t728-1 decision 4).
         queues: Arc::new(SqliteOpener {
@@ -1191,6 +1248,7 @@ pub fn supervise_with_reviewer(
                 ),
             ))
         }),
+        ci_watch,
         layout,
     };
     let settings = LoopSettings {
@@ -1407,6 +1465,10 @@ impl OneShot {
             &host_update(db).config,
             &live_builds,
         )?;
+        // The CI watch's state and list size (ADR-t1920-1); null until it
+        // recorded anything.
+        let enabled = bound_ci_watch(queue).is_ok_and(|config| config.is_some());
+        status["ci"] = crate::application::ci_watch::status(queue, enabled)?;
         if matches!(role, Some(SessionRole::Inbox | SessionRole::Planner)) {
             status["language"] = serde_json::to_value(self.language_report(queue)?)?;
         }
@@ -1486,6 +1548,10 @@ impl OneShot {
                     report["repository"] = repository;
                 }
                 report["roles"] = doctor_roles(&queue);
+                // The means the CI watch reads GitHub with (ADR-t1920-1).
+                if let Some(ci_watch) = doctor_ci_watch(&queue)? {
+                    report["ci_watch"] = ci_watch;
+                }
                 // The agents the landing branch's dagq.toml names and
                 // their definitions (ADR-t1728-1).
                 if let Some(agents) = doctor_agents(&queue)? {
@@ -2246,6 +2312,9 @@ same in one step",
             inspect_repository: &inspect_repository,
             trusts_repository: &claude_trusts_repository,
             run_env_programs: &up_run_env_programs,
+            ci_watch_preflight: &|checkout, path| {
+                crate::infrastructure::ci_watch::preflight(checkout, Some(path.into()))
+            },
             resolve_language: &|checkout, user_config| {
                 crate::infrastructure::language::resolve_language(Some(checkout), user_config)
             },
@@ -2774,6 +2843,45 @@ fn max_improvement_proposals(checkout: &Path) -> Result<usize> {
 
 /// The KPI reports' directory in the queue's (ADR-0051 decision 20).
 pub const REPORTS_DIR: &str = "reports";
+
+/// `[ci_watch]` of the checkout `queue` is bound to (ADR-t1920-1); none
+/// for a queue bound to none or a file without the table.
+fn bound_ci_watch(queue: &SqliteQueue) -> Result<Option<crate::domain::ci_watch::CiWatchConfig>> {
+    match bound_checkout(queue)? {
+        Some(checkout) => crate::infrastructure::run_env::load_ci_watch(&checkout),
+        None => Ok(None),
+    }
+}
+
+/// `ci failures [--task ID]` on the queue at `db`: see
+/// [`crate::application::ci_watch::known_failures`]. Reads only.
+pub fn ci_failures(db: &Path, task: Option<TaskId>) -> Result<Value> {
+    let queue = SqliteQueue::open_read_only(db)?;
+    let config = bound_ci_watch(&queue)?;
+    let branch = config.as_ref().and_then(|config| config.branch.clone());
+    crate::application::ci_watch::known_failures(&queue, config.as_ref(), branch.as_deref(), task)
+}
+
+/// `doctor`'s `ci_watch` (ADR-t1920-1): the table, the `gh` this PATH
+/// resolves, whether it is logged in, the repository, and the supervisor's
+/// last `ci_watch_unavailable` / `ci_watch_available`; none without the
+/// table, `error` when the file cannot be read.
+fn doctor_ci_watch(queue: &SqliteQueue) -> Result<Option<Value>> {
+    let Some(checkout) = bound_checkout(queue)? else {
+        return Ok(None);
+    };
+    crate::application::ci_watch::doctor(
+        queue,
+        crate::infrastructure::run_env::load_ci_watch(&checkout),
+        |config| {
+            crate::infrastructure::ci_watch::doctor_view(
+                &checkout,
+                config,
+                std::env::var_os("PATH").as_deref(),
+            )
+        },
+    )
+}
 
 /// The main checkout of the repository the queue is bound to; `None` for a
 /// queue bound to none, or to one without a main checkout.

@@ -9,6 +9,8 @@ pub mod broker_image;
 pub mod broker_podman;
 pub mod broker_queue;
 pub mod broker_token;
+pub mod ci_watch;
+mod ci_watch_store;
 pub mod claude;
 pub mod claude_turns;
 pub mod clock;

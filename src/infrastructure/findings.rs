@@ -37,11 +37,34 @@ impl SqliteQueue {
         reason: &str,
         by: &str,
     ) -> Result<Finding> {
+        self.set_finding_status_covered(id, to, reason, by, None)
+    }
+
+    /// [`Self::set_finding_status`], a dismissal with the open task that
+    /// covers a `ci_failure` finding (`finding dismiss --covered-by`,
+    /// ADR-t1920-1) written with it in the same transaction.
+    pub fn set_finding_status_covered(
+        &mut self,
+        id: FindingId,
+        to: FindingStatus,
+        reason: &str,
+        by: &str,
+        covered_by: Option<TaskId>,
+    ) -> Result<Finding> {
         let now = self.generators.clock.now();
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let changed = set_status_in(&tx, id, to, reason, by, now)?;
+        if let Some(task) = covered_by {
+            ensure!(
+                to == FindingStatus::Dismissed,
+                "--covered-by goes with a dismissal only"
+            );
+            let current = read_finding(&tx, id)?;
+            let closed = read_task(&tx, task)?.status().is_terminal();
+            finding::check_covered_by(&current, closed)?;
+        }
+        let changed = set_status_covered_in(&tx, id, to, reason, by, now, covered_by)?;
         tx.commit()?;
         Ok(changed)
     }
@@ -261,26 +284,40 @@ pub(super) fn set_status_in(
     by: &str,
     now: i64,
 ) -> Result<Finding> {
+    set_status_covered_in(tx, id, to, reason, by, now, None)
+}
+
+/// [`set_status_in`] with the task that covers the finding, written to
+/// `covered_by_task` and the event (checked by the caller).
+pub(super) fn set_status_covered_in(
+    tx: &Connection,
+    id: FindingId,
+    to: FindingStatus,
+    reason: &str,
+    by: &str,
+    now: i64,
+    covered_by: Option<TaskId>,
+) -> Result<Finding> {
     ensure!(!reason.trim().is_empty(), "reason must not be blank");
     let current = read_finding(tx, id)?;
     finding::check_transition(&current, to)?;
     tx.execute(
-        "UPDATE findings SET status=?2, status_reason=?3, updated_at=?4 WHERE id=?1",
-        params![id, to.as_str(), reason, now],
+        "UPDATE findings SET status=?2, status_reason=?3, updated_at=?4,
+           covered_by_task=coalesce(?5, covered_by_task) WHERE id=?1",
+        params![id, to.as_str(), reason, now, covered_by],
     )?;
     let changed = read_finding(tx, id)?;
-    finding_event(
-        tx,
-        &changed,
-        EventKind::FindingStatusChanged,
-        json!({
-            "finding_id": id,
-            "from": current.status,
-            "to": to,
-            "reason": reason,
-            "by": by,
-        }),
-    )?;
+    let mut payload = json!({
+        "finding_id": id,
+        "from": current.status,
+        "to": to,
+        "reason": reason,
+        "by": by,
+    });
+    if let Some(task) = covered_by {
+        payload["covered_by_task"] = json!(task);
+    }
+    finding_event(tx, &changed, EventKind::FindingStatusChanged, payload)?;
     Ok(changed)
 }
 
@@ -378,6 +415,7 @@ pub(super) fn finding_row(row: &Row<'_>) -> rusqlite::Result<Finding> {
         status: enum_col(row, "status")?,
         status_reason: row.get("status_reason")?,
         proposal_id: row.get("proposal_id")?,
+        covered_by_task: row.get("covered_by_task")?,
         propose_reason: row.get("propose_reason")?,
         propose_requested_at: row.get("propose_requested_at")?,
         recorded_by: row.get("recorded_by")?,

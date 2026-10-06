@@ -281,6 +281,10 @@ pub struct Ports<'a> {
     /// `[run.env]` of the `dagq.toml` in `checkout` names on `path`
     /// (ADR-0049 decision 9).
     pub run_env_programs: &'a dyn Fn(&Path, &Path, &str) -> Result<RunEnvCheck>,
+    /// `ci_watch_preflight(checkout, path)`: with `[ci_watch]` in the
+    /// `dagq.toml` in `checkout`, why `gh` on `path` cannot read the CI
+    /// (ADR-t1920-1 decision 2); `None` when it can or there is no table.
+    pub ci_watch_preflight: &'a dyn Fn(&Path, &str) -> Result<Option<String>>,
     /// `resolve_language(checkout, user_config)`: the language of the
     /// `dagq.toml` in `checkout` over the user's `config.toml`, or the
     /// mistake in either (ADR-t616-2).
@@ -451,6 +455,11 @@ pub fn up(
     // on it would fail every run's cargo (ADR-0049 decision 9).
     let run_env = (ports.run_env_programs)(trust_root, &db, &environment.path)?;
     if let Some(message) = run_env.missing_message() {
+        bail!("{message}; the supervisor was not started");
+    }
+    // So must the GitHub CLI `[ci_watch]` reads the CI with: without it the
+    // supervisor would claim and land nothing (ADR-t1920-1 decision 2).
+    if let Some(message) = (ports.ci_watch_preflight)(trust_root, &environment.path)? {
         bail!("{message}; the supervisor was not started");
     }
     // The supervisor keeps the broker of a mode other than `disabled`

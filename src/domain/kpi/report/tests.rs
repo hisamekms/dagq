@@ -144,6 +144,7 @@ fn finding(id: i64, summary: &str) -> Finding {
         status: FindingStatus::Open,
         status_reason: None,
         proposal_id: None,
+        covered_by_task: None,
         propose_reason: None,
         propose_requested_at: None,
         recorded_by: "observer".into(),

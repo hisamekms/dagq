@@ -1238,6 +1238,7 @@ impl Supervisor<'_> {
     /// supervisor is landed once, with its ask left closed (task 949).
     pub(super) fn start_approved_landings(&mut self, parallel: usize) -> Result<()> {
         if self.run_env_missing
+            || self.ci_watch_held()
             || self.landing_unresolved
             || self.disk.landing_short
             || self.used_slots() >= parallel

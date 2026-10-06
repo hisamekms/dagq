@@ -4,8 +4,8 @@ type: design
 title: "`doctor`"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1873: agents errors include the tools declaration (ADR-t1728-2); task 1866: agents (ADR-t1728-1); task 1920: planned CI watch; task 1225: recovery among the Codex roles; task 1223: the observer on Codex
-last_verified: 2026-10-06 # task 1873; task 1866; task 1225; task 1223
+updated: 2026-10-06 # task 1921: CI watch implemented; task 1873: agents errors include the tools declaration (ADR-t1728-2); task 1866: agents (ADR-t1728-1); task 1225: recovery among the Codex roles; task 1223: the observer on Codex
+last_verified: 2026-10-06 # task 1921; task 1873; task 1866; task 1225; task 1223
 scope: runtime
 related:
   - adr-t1228-2
@@ -41,6 +41,6 @@ related:
 
 cmux workspaceの存在は確認しない（cmuxなしで動く）。IDを見てユーザーが`cmux workspace list`で確認する。
 
-## 予定: CIの見張り（ADR-t1920-1）
+## CIの見張り（ADR-t1920-1）
 
-[ADR-t1920-1](../../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)と[CI watch](ci-watch.md)の予定（未実装、goal 157）。`[ci_watch]`があれば`ci_watch`の欄（`config`・`gh`・`authenticated`・`repo`・`supervisor_last`）を出す。状態は変えない。
+[ADR-t1920-1](../../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)と[CI watch](ci-watch.md)（task 1921）。結びついたcheckoutの`dagq.toml`に`[ci_watch]`があれば`ci_watch`の欄に`config`（読んだ表）・`gh`（`doctor`のPATHで解決したpathかnull）・`authenticated`（`gh auth status --hostname github.com`が0で終わるか）・`repo`（`<owner>/<name>`かnull）・`supervisor_last`（最後の`ci_watch_unavailable` / `ci_watch_available`の`{kind, created_at, payload}`かnull）を出す。ファイルが読めなければ`{error}`、表が無ければ欄を出さない。状態は変えない。

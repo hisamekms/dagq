@@ -1798,6 +1798,20 @@ pub fn finding_planner_prompt(material: &FindingPlannerMaterial<'_>) -> Result<F
         kind = finding.kind,
         rules = repository_rules(RUNTIME_PLANNER_ASK),
     ));
+    // A failure of the watched branch's CI (ADR-t1920-1): the fix task
+    // carries the finding's detail, and a task that already fixes the
+    // same tests covers it instead of a new one.
+    if finding.kind == crate::domain::ci_watch::FINDING_KIND {
+        let section = format!(
+            "\n## A CI failure\n\n\
+             The supervisor recorded this finding when the watched branch's CI turned up failures not on its list of the tests that fail already (`dagq ci failures`). Its detail is one JSON object: `tests` (the new failures; a `job:<job>/step:<step>` item is a failed step without a test name), `failed_jobs`, `range` (`from` the last green commit, `to` the first red one, `commits` between them), `url` (the CI run), `binary_contains` (whether the supervisor's build contains the range: `all`, `some`, `none` or `unknown`) and `binary_commit`.\n\
+             - Copy each of them into the fix task's `--description`.\n\
+             - Before you add a task, look for one that already fixes the same tests (`dagq search '<a test name>'`, `dagq list`). When one is open, add no task: run `dagq finding dismiss {id} --covered-by <task> --reason '<why>'`; that task's runs then keep these tests on their list.\n\
+             - Give the fix task `--priority normal`: it is an improvement.\n"
+        );
+        fit.section("ci_failure", &section);
+        out.push_str(&section);
+    }
     if let Some(answer) = material.answer {
         let (question, text) = planner_answer(&mut fit, answer);
         let carried = format!(
@@ -6786,6 +6800,7 @@ mod tests {
                 status: FindingStatus::Open,
                 status_reason: None,
                 proposal_id: None,
+                covered_by_task: None,
                 propose_reason: None,
                 propose_requested_at: None,
                 recorded_by: "observer".into(),
@@ -6827,6 +6842,32 @@ mod tests {
         );
         assert!(!prompt.contains("rules above do not settle"), "{prompt}");
         assert!(!prompt.contains("ADR"), "{prompt}");
+        assert!(!prompt.contains("## A CI failure"), "{prompt}");
+        // A CI failure's planner copies the detail into the fix task and
+        // covers it with a task that already fixes the same tests
+        // (ADR-t1920-1).
+        let mut ci = view.clone();
+        ci.finding.kind = "ci_failure".into();
+        let prompt = finding_planner_prompt(&FindingPlannerMaterial {
+            db: Path::new("/q/queue.db"),
+            finding: &ci,
+            attempt: 1,
+            asks: &[],
+            goal: None,
+            goal_closed: false,
+            siblings: &[],
+            answer: None,
+        })
+        .unwrap()
+        .text;
+        for part in [
+            "## A CI failure",
+            "Copy each of them into the fix task's `--description`.",
+            "`dagq finding dismiss 4 --covered-by <task> --reason '<why>'`",
+            "Give the fix task `--priority normal`",
+        ] {
+            assert!(prompt.contains(part), "{part} in {prompt}");
+        }
     }
 
     /// A task in progress with `goal` and `context`.
@@ -7902,6 +7943,7 @@ mod tests {
                 status: crate::domain::FindingStatus::Open,
                 status_reason: None,
                 proposal_id: None,
+                covered_by_task: None,
                 propose_reason: Some(big("why", 5_000)),
                 propose_requested_at: None,
                 recorded_by: "observer".into(),

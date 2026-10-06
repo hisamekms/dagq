@@ -866,8 +866,10 @@ impl DialogueStore for ServiceSqlite {
         to: FindingStatus,
         reason: &str,
         by: &str,
+        covered_by: Option<TaskId>,
     ) -> Result<Finding> {
-        self.dialogue().set_finding_status(id, to, reason, by)
+        self.dialogue()
+            .set_finding_status(id, to, reason, by, covered_by)
     }
 }
 

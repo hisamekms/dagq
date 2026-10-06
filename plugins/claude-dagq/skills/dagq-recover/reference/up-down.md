@@ -35,6 +35,10 @@ Opening a queue never migrates it (ADR-0073). If a command stops with "run `dagq
 
 `up` does not replace a supervisor that is alive but no longer heartbeating (it starts a new one beside it and `status` shows the old row as `stale`; the person stops it with `down --force`).
 
+### The CI watch needs gh
+
+With `[ci_watch]` in `dagq.toml`, `up` checks, after the programs of `[run.env]`, that `gh` resolves on `up`'s PATH, that the push remote (`[repository] remote`, default `origin`) is a GitHub URL and that `gh auth status` succeeds. If not, it starts no supervisor and fails with why and what to do, ending in `; the supervisor was not started`: the person installs `gh`, runs `gh auth login` in their own terminal, or fixes the remote; or the person asks, through a planning request, for a task that takes `[ci_watch]` out of `dagq.toml`. `doctor`'s `ci_watch` shows what resolved (`reference/doctor.md`).
+
 ### Runs waiting for a person
 
 `--max-waiting N` (default 4) is how many runs may wait for a person's answer outside the `--parallel` slots (ADR-0071): a run whose session only waits on a `worker_question`, `answer_prompt`, `stalled` or `stuck_exit` ask leaves its slot and another task is claimed; once its wait ends it returns to a free slot. Runs whose wait ended and that wait for a slot count toward the limit too; at the limit a new ask leaves its run in its slot (`run_waiting_deferred`). `0` keeps every run in its slot. `up` passes `--max-waiting` to the supervisor only when it is not the default, and `status` shows it as each registration's `waiting.limit`. To change it, `down --wait` and `up --max-waiting N` (a plain `up` reuses a supervisor of the same build as it is).
