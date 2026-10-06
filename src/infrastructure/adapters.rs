@@ -45,6 +45,7 @@ pub use crate::application::{
     path_text,
 };
 use crate::domain::background_wrapper::{BackgroundHandle, StopRoute, WrapperStop, is_background};
+use crate::domain::review_subagents::{AgentTool, AgentTools};
 use crate::domain::turn::TurnSession;
 use crate::infrastructure::claude_turns::{ClaudeTurnReader, HEADLESS_PERMISSION_MODE};
 use crate::infrastructure::run_env::load_repository_config;
@@ -3634,6 +3635,56 @@ pub fn claude_tools(access: JobAccess) -> Vec<&'static str> {
     tools
 }
 
+/// Claude Code's tools of the runtime's list (ADR-t1728-2), each with the
+/// tool of the list that gives it, in the order the run's review refuses
+/// them.
+const CLAUDE_AGENT_TOOLS: [(&str, AgentTool); 7] = [
+    ("Bash", AgentTool::Shell),
+    ("Edit", AgentTool::Edit),
+    ("Write", AgentTool::Write),
+    ("NotebookEdit", AgentTool::Edit),
+    ("Read", AgentTool::Read),
+    ("Grep", AgentTool::Grep),
+    ("Glob", AgentTool::Glob),
+];
+
+/// The `--allowedTools` and `--disallowedTools` of the launch of an
+/// agent's own job (ADR-t1728-2 decision 3, ADR-t1895-1's agent job): the
+/// Claude Code tools of the declared `tools` (or the role's default)
+/// allowed, in the list's order, and every other refused, so a
+/// declaration only narrows. Of a review's default they are the run's
+/// review's own of [`JobAccess::ReadFiles`] (`Read,Grep,Glob` and
+/// `Bash,Edit,Write,NotebookEdit`); no tool allowed leaves
+/// `--allowedTools` out. Only the tools: the job's `--setting-sources ""`
+/// and its settings (ADR-t1470-1) stay its launch's. No launch is given
+/// them yet: the eval's agent job (task 1869) and the run's review's
+/// (task 1903) will be.
+pub fn claude_agent_job_tool_args(tools: &AgentTools) -> Vec<String> {
+    let allowed: Vec<&str> = tools
+        .tools()
+        .iter()
+        .flat_map(|tool| {
+            CLAUDE_AGENT_TOOLS
+                .iter()
+                .filter(move |(_, of)| of == tool)
+                .map(|(name, _)| *name)
+        })
+        .collect();
+    let disallowed: Vec<&str> = CLAUDE_AGENT_TOOLS
+        .iter()
+        .filter(|(_, of)| !tools.has(*of))
+        .map(|(name, _)| *name)
+        .collect();
+    let mut args = Vec::new();
+    if !allowed.is_empty() {
+        args.extend(["--allowedTools".to_owned(), allowed.join(",")]);
+    }
+    if !disallowed.is_empty() {
+        args.extend(["--disallowedTools".to_owned(), disallowed.join(",")]);
+    }
+    args
+}
+
 /// The `--agents` JSON of the review's subagents: each definition's
 /// `description` and body (`prompt`), allowed only
 /// [`SUBAGENT_TOOLS`](crate::domain::review_subagents::SUBAGENT_TOOLS)
@@ -4955,6 +5006,57 @@ mod tests {
         let args: Vec<_> = command.get_args().collect();
         assert!(args.contains(&std::ffi::OsStr::new("Read,Grep,Glob,Bash(dagq:*)")));
         assert!(args.contains(&std::ffi::OsStr::new("Edit,Write,NotebookEdit")));
+    }
+
+    /// An agent's job's tools (ADR-t1728-2): a review's default is the run's
+    /// review's own `--allowedTools` and `--disallowedTools`; a narrower
+    /// declaration refuses the reads it leaves out, none allows nothing,
+    /// and a tool beyond the reads (no role allows one yet) is allowed and
+    /// no longer refused.
+    #[test]
+    fn an_agent_jobs_declared_tools_become_claudes_allowed_and_refused_tools() {
+        use crate::domain::review_subagents::{AgentRole, AgentTool, AgentTools};
+        assert_eq!(
+            claude_agent_job_tool_args(&AgentRole::Review.default_tools()),
+            [
+                "--allowedTools".to_owned(),
+                claude_tools(JobAccess::ReadFiles).join(","),
+                "--disallowedTools".to_owned(),
+                review_disallowed_tools(JobAccess::ReadFiles).join(","),
+            ]
+        );
+        assert_eq!(
+            claude_agent_job_tool_args(&AgentRole::Review.default_tools()),
+            [
+                "--allowedTools",
+                "Read,Grep,Glob",
+                "--disallowedTools",
+                "Bash,Edit,Write,NotebookEdit"
+            ]
+        );
+        assert_eq!(
+            claude_agent_job_tool_args(&AgentTools::new([AgentTool::Read])),
+            [
+                "--allowedTools",
+                "Read",
+                "--disallowedTools",
+                "Bash,Edit,Write,NotebookEdit,Grep,Glob"
+            ]
+        );
+        assert_eq!(
+            claude_agent_job_tool_args(&AgentTools::new([])),
+            [
+                "--disallowedTools",
+                "Bash,Edit,Write,NotebookEdit,Read,Grep,Glob"
+            ]
+        );
+        assert_eq!(
+            claude_agent_job_tool_args(&AgentTools::new(AgentTool::ALL)),
+            [
+                "--allowedTools",
+                "Read,Grep,Glob,Bash,Edit,NotebookEdit,Write"
+            ]
+        );
     }
 
     /// A review that requires subagents hands Claude their definitions as

@@ -305,6 +305,51 @@ fn a_selected_agent_without_its_definition_fails_the_review() {
     );
 }
 
+/// An agent the diff selects whose definition declares a tool beyond a
+/// review's reads (ADR-t1728-2) fails the review as a missing definition
+/// does: no job runs, the run does not land, and `review_failed` says
+/// why; `dagq doctor`'s `agents` reports the same declaration in
+/// `errors`. Which declarations are mistakes is
+/// `domain::review_subagents::tests`.
+#[test]
+fn a_definition_declaring_a_tool_beyond_the_reads_fails_the_review() {
+    let (_dir, repo, db) = fixture();
+    let main = commit_on_main(
+        &repo,
+        CONFIG,
+        Some("---\ndescription: d\ntools: [read, shell]\n---\nCheck.\n"),
+    );
+    let (reviewer, detail) = reviewed(
+        &repo,
+        &db,
+        IDLE_AGENT,
+        &[verdict("pass", &[], "would pass")],
+    );
+    assert!(reviewer.prompts().is_empty());
+    assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
+    assert!(payloads(&detail, "review_started").is_empty());
+    let failed = payloads(&detail, "review_failed");
+    assert_eq!(failed.len(), 1);
+    let why = "the frontmatter's tools declares shell is beyond what an agent of [review.subagents] may use (read, grep, glob)";
+    let error = failed[0]["error"].as_str().unwrap();
+    assert!(
+        error.contains(&format!(
+            "the review subagent design's definition {DEFINITION} in the landing branch's commit {main} is a mistake: {why}"
+        )),
+        "{failed:?}"
+    );
+    let doctor = crate::common::cli::ok(&db, &["doctor"]);
+    assert!(
+        doctor["agents"]["errors"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(format!(
+                "[review.subagents.design] {DEFINITION}: {why}"
+            ))),
+        "{doctor}"
+    );
+}
+
 /// (d) With `[review.subagents]` but a diff it does not select, the
 /// review is as before: the event records the empty selection, and no job
 /// input beside review.md, no word of subagents in the prompt or the

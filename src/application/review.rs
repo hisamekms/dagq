@@ -9,7 +9,7 @@ use std::path::Path;
 use super::{
     Repository, RunFiles, TaskStore, fenced, integrate::integrate_logs, or_none, path_text,
 };
-use crate::domain::review_subagents::{self, ReviewSubagent};
+use crate::domain::review_subagents::{self, AgentRole, AgentTools, ReviewSubagent};
 use crate::domain::{CommitSha, Goal, Receipt, RunStatus, Task, TaskId, TaskRun};
 use sha2::{Digest, Sha256};
 
@@ -169,8 +169,9 @@ pub struct ReviewRange {
 pub const CONFIG_FILE: &str = "dagq.toml";
 
 /// One required agent of a review as the snapshot holds it: its name,
-/// the changed paths that selected it, and its definition as committed on
-/// the landing branch with the definition's SHA-256.
+/// the changed paths that selected it, its definition as committed on the
+/// landing branch with the definition's SHA-256, and the tools the
+/// definition declares (ADR-t1728-2; no launch is given them yet).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotAgent {
     pub name: String,
@@ -178,6 +179,7 @@ pub struct SnapshotAgent {
     pub definition_path: String,
     pub definition: String,
     pub digest: String,
+    pub tools: AgentTools,
 }
 
 /// The review's subagents read from the landing branch's commit `commit`
@@ -232,9 +234,10 @@ impl SubagentSnapshot {
 /// decision 4), and select those the paths `<base>...<head>` changes
 /// require (decision 3). `Ok(None)` when the landing branch has no
 /// `dagq.toml` or one without `[review.subagents.*]`: the review goes as
-/// before. `Err` when the file cannot be read or parsed or a selected
-/// agent's definition is not in the tree: the required checks are not
-/// known, so the review must not pass.
+/// before. `Err` when the file cannot be read or parsed, a selected
+/// agent's definition is not in the tree, or its tools' declaration is a
+/// mistake (ADR-t1728-2): the required checks are not known, so the
+/// review must not pass.
 /// `range` gives `<base>` and `<head>` for the landing branch's commit it
 /// is given ([`review_range_at`]), the one the configuration is read
 /// from, and is called only when agents are configured: the landing
@@ -277,8 +280,15 @@ pub fn snapshot_subagents(
                 selected.name
             )
         })?;
+        let tools = AgentTools::declared(AgentRole::Review, &definition).map_err(|why| {
+            anyhow::anyhow!(
+                "the review subagent {}'s definition {definition_path} in the landing branch's commit {commit} is a mistake: {why}",
+                selected.name
+            )
+        })?;
         agents.push(SnapshotAgent {
             digest: format!("{:x}", Sha256::digest(definition.as_bytes())),
+            tools,
             name: selected.name,
             matched: selected.matched,
             definition_path,
@@ -295,8 +305,9 @@ pub fn snapshot_subagents(
 /// `doctor`'s check of the agents the role sections of the landing
 /// branch's `dagq.toml` name (ADR-t1728-1): each agent with its section
 /// and the definition read ([`review_subagents::find_definition`], `null`
-/// without one), and `errors`, an agent without a definition or named in
-/// more than one role's section. `Ok(None)` without `dagq.toml` or without
+/// without one), and `errors`, an agent without a definition, named in
+/// more than one role's section, or whose definition declares tools that
+/// are a mistake (ADR-t1728-2). `Ok(None)` without `dagq.toml` or without
 /// an agent named; `Err` when the file cannot be read or parsed. A review
 /// does not pass in either case meanwhile (ADR-t1453-1 decision 6).
 pub fn check_agents(
@@ -318,14 +329,19 @@ pub fn check_agents(
     }
     let mut agents = Vec::new();
     let mut defined = Vec::new();
+    let mut declared = Vec::new();
     for entry in &named {
         let found = review_subagents::find_definition(&entry.agent, |path| {
             repository
                 .file_in(&commit, path)
                 .with_context(|| format!("read {path} in the landing branch's commit {commit}"))
         })?;
-        if found.is_some() {
+        if let Some((path, text)) = &found {
             defined.push(entry.agent.clone());
+            // Today's one role section is the review's.
+            if let Err(why) = AgentTools::declared(AgentRole::Review, text) {
+                declared.push(format!("[{}.{}] {path}: {why}", entry.section, entry.agent));
+            }
         }
         agents.push(json!({
             "agent": entry.agent,
@@ -333,8 +349,9 @@ pub fn check_agents(
             "definition": found.map(|(path, _)| path),
         }));
     }
-    let errors =
+    let mut errors =
         review_subagents::config_problems(&named, &|agent| defined.iter().any(|d| d == agent));
+    errors.extend(declared);
     Ok(Some(
         json!({"commit": commit, "agents": agents, "errors": errors}),
     ))
@@ -859,6 +876,61 @@ mod tests {
             ".dagq/review-agents/design.md"
         );
         assert_eq!(old["errors"], json!([]));
+    }
+
+    /// The definition's tools (ADR-t1728-2): a declaration from the
+    /// runtime's list is kept with the agent, none is the review's reads,
+    /// and a name not in the list or a tool beyond a review's reads is a
+    /// mistake the review does not pass and `doctor` reports.
+    #[test]
+    fn a_definitions_tools_are_checked_by_the_snapshot_and_doctor() {
+        const READS: &str = "---\ndescription: d\ntools: [read]\n---\nCheck.\n";
+        const SHELL: &str = "---\ndescription: d\ntools: [read, shell]\n---\nCheck.\n";
+        let tools = |definition| {
+            snapshot(
+                vec![
+                    (CONFIG_FILE, CONFIG),
+                    (".dagq/agents/design/AGENT.md", definition),
+                ],
+                &["change.txt"],
+            )
+            .map(|found| found.unwrap().agents[0].tools.clone())
+        };
+        assert_eq!(
+            tools(READS).unwrap(),
+            AgentTools::new([review_subagents::AgentTool::Read])
+        );
+        assert_eq!(
+            tools(DEFINITION).unwrap(),
+            AgentRole::Review.default_tools()
+        );
+        let why = "shell is beyond what an agent of [review.subagents] may use (read, grep, glob)";
+        let refused = format!("{:#}", tools(SHELL).unwrap_err());
+        assert!(
+            refused.contains(&format!(
+                "the review subagent design's definition .dagq/agents/design/AGENT.md in the landing branch's commit {SHA} is a mistake: the frontmatter's tools declares {why}"
+            )),
+            "{refused}"
+        );
+        let checked = check_agents(
+            &Committed {
+                files: vec![
+                    (CONFIG_FILE, CONFIG),
+                    (".dagq/agents/design/AGENT.md", SHELL),
+                    (".dagq/agents/unused/AGENT.md", READS),
+                ],
+                changed: Vec::new(),
+            },
+            &parse,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            checked["errors"],
+            json!([format!(
+                "[review.subagents.design] .dagq/agents/design/AGENT.md: the frontmatter's tools declares {why}"
+            )])
+        );
     }
 
     /// The review's subagents as the landing branch's commit has them

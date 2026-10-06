@@ -189,6 +189,226 @@ pub const COMPLETED: &str = "completed";
 /// review job's own reads (ADR-t1453-1 decision 2).
 pub const SUBAGENT_TOOLS: &[&str] = &["Read", "Grep", "Glob"];
 
+/// A tool an agent may declare in its definition's frontmatter
+/// (ADR-t1728-2): the runtime's list, whose names a definition picks from;
+/// it cannot name a command. Each provider's own tools for it are the
+/// provider's adapter's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AgentTool {
+    /// Read a file.
+    Read,
+    /// Search files' contents.
+    Grep,
+    /// Find paths.
+    Glob,
+    /// Run a command.
+    Shell,
+    /// Edit a file.
+    Edit,
+    /// Write a file.
+    Write,
+}
+
+impl AgentTool {
+    /// The runtime's list, in the order a declaration is kept in.
+    pub const ALL: [Self; 6] = [
+        Self::Read,
+        Self::Grep,
+        Self::Glob,
+        Self::Shell,
+        Self::Edit,
+        Self::Write,
+    ];
+
+    /// The name a definition declares it by.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Grep => "grep",
+            Self::Glob => "glob",
+            Self::Shell => "shell",
+            Self::Edit => "edit",
+            Self::Write => "write",
+        }
+    }
+
+    /// The tool of the list named `name`, `None` for a name not in it.
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|tool| tool.name() == name)
+    }
+}
+
+/// The role an agent is used in (ADR-t1728-1: one agent, one role), which
+/// bounds the tools its definition may declare (ADR-t1728-2 decision 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentRole {
+    /// `[review.subagents.<agent>]`: it only reads.
+    Review,
+}
+
+impl AgentRole {
+    /// The configuration's section of the role.
+    pub const fn section(self) -> &'static str {
+        match self {
+            Self::Review => REVIEW_SECTION,
+        }
+    }
+
+    /// Whether the role may use `tool`: a review only reads.
+    pub const fn allows(self, tool: AgentTool) -> bool {
+        match self {
+            Self::Review => matches!(tool, AgentTool::Read | AgentTool::Grep | AgentTool::Glob),
+        }
+    }
+
+    /// The tools of a definition of the role that declares none: a
+    /// review's reads, as the review job's own (ADR-t1453-1 decision 2).
+    pub fn default_tools(self) -> AgentTools {
+        match self {
+            Self::Review => AgentTools(vec![AgentTool::Read, AgentTool::Grep, AgentTool::Glob]),
+        }
+    }
+}
+
+/// The tools an agent's job is given, as its definition declares them (or
+/// its role's default): each once, in the order of [`AgentTool::ALL`]. A
+/// provider's adapter turns it into the job's own setting (ADR-t1728-2
+/// decision 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentTools(Vec<AgentTool>);
+
+impl AgentTools {
+    pub fn new(tools: impl IntoIterator<Item = AgentTool>) -> Self {
+        let mut tools: Vec<AgentTool> = tools.into_iter().collect();
+        tools.sort();
+        tools.dedup();
+        Self(tools)
+    }
+
+    pub fn tools(&self) -> &[AgentTool] {
+        &self.0
+    }
+
+    pub fn has(&self, tool: AgentTool) -> bool {
+        self.0.contains(&tool)
+    }
+
+    /// The tools of the definition `text` of an agent of `role`
+    /// (ADR-t1728-2): its frontmatter's `tools`, a list of names from
+    /// [`AgentTool::ALL`] (`tools: [read, grep]` or one `- name` a line),
+    /// or the role's [`AgentRole::default_tools`] without it. `Err` says
+    /// why the declaration is a mistake: a name not in the list, a tool
+    /// the role may not use, or a `tools` that is no list. Such a
+    /// definition's agent is not started, and a review that requires it
+    /// does not pass (ADR-t1453-1 decision 6).
+    pub fn declared(role: AgentRole, text: &str) -> Result<Self, String> {
+        let Some(names) = declared_tool_names(text)? else {
+            return Ok(role.default_tools());
+        };
+        let mut tools = Vec::new();
+        let mut problems = Vec::new();
+        for name in &names {
+            match AgentTool::named(name) {
+                Some(tool) if role.allows(tool) => tools.push(tool),
+                Some(tool) => problems.push(format!(
+                    "{} is beyond what an agent of [{}] may use ({})",
+                    tool.name(),
+                    role.section(),
+                    AgentTool::ALL
+                        .into_iter()
+                        .filter(|tool| role.allows(*tool))
+                        .map(AgentTool::name)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+                None => problems.push(format!(
+                    "{name:?} is not a tool of the runtime's list ({})",
+                    AgentTool::ALL.map(AgentTool::name).join(", ")
+                )),
+            }
+        }
+        if problems.is_empty() {
+            Ok(Self::new(tools))
+        } else {
+            Err(format!(
+                "the frontmatter's tools declares {}",
+                problems.join("; ")
+            ))
+        }
+    }
+}
+
+/// The names the frontmatter's `tools` of `text` lists, `None` without a
+/// frontmatter or a `tools`; `Err` when `tools` is no list.
+fn declared_tool_names(text: &str) -> Result<Option<Vec<String>>, String> {
+    let normalized = text.replace("\r\n", "\n");
+    let Some((front, _)) = split_frontmatter(&normalized) else {
+        return Ok(None);
+    };
+    let mut lines = front.lines();
+    let Some(value) = lines.by_ref().find_map(|line| line.strip_prefix("tools:")) else {
+        return Ok(None);
+    };
+    let unquote = |name: &str| {
+        name.trim()
+            .trim_matches(|c| c == '"' || c == '\'')
+            .to_owned()
+    };
+    // A YAML comment ends the line's value.
+    let uncomment = |line: &str| -> String {
+        let cut = line
+            .char_indices()
+            .find(|&(at, c)| c == '#' && (at == 0 || line[..at].ends_with(char::is_whitespace)))
+            .map_or(line.len(), |(at, _)| at);
+        line[..cut].trim().to_owned()
+    };
+    let value = uncomment(value);
+    let value = value.as_str();
+    if let Some(flow) = value.strip_prefix('[') {
+        let inner = flow
+            .strip_suffix(']')
+            .ok_or_else(|| format!("the frontmatter's tools is not a list: [{flow}"))?;
+        return Ok(Some(
+            inner
+                .split(',')
+                .map(unquote)
+                .filter(|name| !name.is_empty())
+                .collect(),
+        ));
+    }
+    if !value.is_empty() {
+        return Err(format!(
+            "the frontmatter's tools is not a list: {value} (write tools: [{}] with names of the runtime's list)",
+            AgentTool::ALL.map(AgentTool::name).join(", ")
+        ));
+    }
+    let items: Vec<String> = lines
+        .map_while(|line| {
+            line.trim_start()
+                .strip_prefix("- ")
+                .map(|item| unquote(&uncomment(item)))
+        })
+        .collect();
+    if items.is_empty() {
+        return Err(
+            "the frontmatter's tools lists no tool: write tools: [] for none, or leave it out for the role's default"
+                .to_owned(),
+        );
+    }
+    Ok(Some(items))
+}
+
+/// The frontmatter and the body of `text` (with `\n` line ends): a `---`
+/// line, the frontmatter, and a `---` line; `None` without one.
+fn split_frontmatter(text: &str) -> Option<(&str, &str)> {
+    let rest = text.strip_prefix("---\n")?;
+    let (front_end, body_start) = rest.find("\n---\n").map(|at| (at, at + 5)).or_else(|| {
+        rest.strip_suffix("\n---")
+            .map(|front| (front.len(), rest.len()))
+    })?;
+    Some((&rest[..front_end], &rest[body_start..]))
+}
+
 /// One required agent's result in the review's verdict (ADR-t1453-1
 /// decision 5): its name, whether it completed, and a judgment of the
 /// verdict's own form.
@@ -459,12 +679,7 @@ impl AgentDefinition {
     pub fn read(name: &str, text: &str) -> Self {
         let fallback = || format!("The review subagent {name}");
         let normalized = text.replace("\r\n", "\n");
-        let parsed = normalized.strip_prefix("---\n").and_then(|rest| {
-            let end = rest.find("\n---\n").map(|at| (at, at + 5)).or_else(|| {
-                rest.strip_suffix("\n---")
-                    .map(|front| (front.len(), rest.len()))
-            })?;
-            let (front, body) = (&rest[..end.0], &rest[end.1..]);
+        let parsed = split_frontmatter(&normalized).map(|(front, body)| {
             let description = front.lines().find_map(|line| {
                 line.strip_prefix("description:").map(|value| {
                     value
@@ -473,7 +688,7 @@ impl AgentDefinition {
                         .to_owned()
                 })
             });
-            Some((description, body.trim_start_matches('\n').to_owned()))
+            (description, body.trim_start_matches('\n').to_owned())
         });
         match parsed {
             Some((description, body)) => Self {
@@ -884,5 +1099,62 @@ mod tests {
         let open = AgentDefinition::read("design", "---\ndescription: d\nno end\n");
         assert_eq!(open.prompt, "---\ndescription: d\nno end\n");
         assert_eq!(Destination::SendBack.as_str(), "send_back");
+    }
+
+    #[test]
+    fn a_definition_declares_its_tools_from_the_runtimes_list() {
+        let review = |text: &str| AgentTools::declared(AgentRole::Review, text);
+        let reads = AgentTools::new([AgentTool::Read, AgentTool::Grep, AgentTool::Glob]);
+        // No declaration: the role's default, a review's reads.
+        assert_eq!(
+            review("---\ndescription: d\n---\nCheck.\n"),
+            Ok(reads.clone())
+        );
+        assert_eq!(review("No frontmatter.\n"), Ok(reads.clone()));
+        assert_eq!(AgentRole::Review.default_tools(), reads);
+        // A flow or a block list, each tool once in the list's order.
+        assert_eq!(
+            review("---\ntools: [glob, \"read\", glob]\n---\n"),
+            Ok(AgentTools::new([AgentTool::Read, AgentTool::Glob]))
+        );
+        assert_eq!(
+            review(
+                "---\r\ndescription: d\r\ntools:\r\n  - grep\r\n  - 'read'\r\nother: x\r\n---\r\n"
+            ),
+            Ok(AgentTools::new([AgentTool::Read, AgentTool::Grep]))
+        );
+        assert_eq!(review("---\ntools: []\n---\n"), Ok(AgentTools::new([])));
+        assert_eq!(
+            review("---\ntools: [read]\n---\n").unwrap().tools(),
+            [AgentTool::Read]
+        );
+        // A name not in the list and a tool beyond a review's reads are
+        // mistakes, each named.
+        assert_eq!(
+            review("---\ntools: [read, shell, fetch, write]\n---\n"),
+            Err("the frontmatter's tools declares shell is beyond what an agent of [review.subagents] may use (read, grep, glob); \"fetch\" is not a tool of the runtime's list (read, grep, glob, shell, edit, write); write is beyond what an agent of [review.subagents] may use (read, grep, glob)".to_owned())
+        );
+        assert!(review("---\ntools: [edit]\n---\n").is_err());
+        // A `tools` that is no list.
+        assert_eq!(
+            review("---\ntools: read\n---\n"),
+            Err("the frontmatter's tools is not a list: read (write tools: [read, grep, glob, shell, edit, write] with names of the runtime's list)".to_owned())
+        );
+        // A YAML comment is not part of the value.
+        assert_eq!(
+            review("---\ntools: [read]  # reads only\n---\n"),
+            Ok(AgentTools::new([AgentTool::Read]))
+        );
+        assert_eq!(
+            review("---\ntools: # narrower\n  - grep # search\n---\n"),
+            Ok(AgentTools::new([AgentTool::Grep]))
+        );
+        assert!(review("---\ntools: [read\n---\n").is_err());
+        assert!(review("---\ntools:\n---\n").is_err());
+        for tool in AgentTool::ALL {
+            assert_eq!(AgentTool::named(tool.name()), Some(tool));
+        }
+        assert_eq!(AgentTool::named("Read"), None);
+        assert!(!AgentTools::new([AgentTool::Read]).has(AgentTool::Grep));
     }
 }

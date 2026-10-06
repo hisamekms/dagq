@@ -25,6 +25,7 @@ use crate::domain::{
     TaskRun,
     actor_model::ActorLaunch,
     headless_job::{JobAccess, JobFailure, JobSession},
+    review_subagents::{AgentTool, AgentTools},
     turn::{TurnFailure, TurnSession},
 };
 
@@ -320,6 +321,40 @@ pub fn job_service_config(socket: &Path) -> Result<Vec<String>> {
             serde_json::to_string(socket)?
         ),
     ])
+}
+
+/// The features of Codex's tools that run a command (codex-cli 0.160.0's
+/// `[features]`): the shell tool and the unified exec tool.
+pub const SHELL_FEATURES: [&str; 2] = ["shell_tool", "unified_exec"];
+
+/// The `-c` of the launch of an agent's own job that give it the declared
+/// `tools` (ADR-t1728-2 decision 3, ADR-t1895-1's agent job). Codex reads
+/// files, searches and finds paths only by running commands, which the
+/// job's [`JOB_SANDBOX`] (or [`JOB_PROFILE`]) keeps to reads: a job that
+/// declares a read (`read`, `grep`, `glob`) or `shell` keeps its shell and
+/// is given nothing, and one that declares none of them has the shell
+/// turned off ([`SHELL_FEATURES`] `=false`). These only add features off:
+/// the read-only sandbox, the permission profile and the run's review's
+/// [`distrust_config`] (ADR-t1570-1) stay as its launch gives them, so a
+/// declared `edit` or `write` writes nothing (no role allows one yet). No
+/// launch is given them yet: the eval's agent job (task 1869) and the
+/// run's review's (task 1903) will be.
+pub fn agent_job_tools_config(tools: &AgentTools) -> Vec<String> {
+    let runs_commands = [
+        AgentTool::Read,
+        AgentTool::Grep,
+        AgentTool::Glob,
+        AgentTool::Shell,
+    ]
+    .into_iter()
+    .any(|tool| tools.has(tool));
+    if runs_commands {
+        return Vec::new();
+    }
+    SHELL_FEATURES
+        .iter()
+        .map(|feature| format!("features.{feature}=false"))
+        .collect()
 }
 
 /// The last `agent_message` of a `codex exec --json` output, in full: the
@@ -1191,5 +1226,87 @@ mod tests {
             ..codex
         };
         assert_eq!(at.sessions_dir(), Some(PathBuf::from("/h/sessions")));
+    }
+
+    /// An agent's job's tools (ADR-t1728-2): a review's default (the
+    /// reads) and any declaration with a read or the shell keep Codex's
+    /// shell, which its reads go through, and one without them turns it
+    /// off; either way the read-only sandbox, the profile that reaches the
+    /// queue service in its place, and the run's review's distrust
+    /// (ADR-t1570-1) stay as they were.
+    #[test]
+    fn an_agent_jobs_declared_tools_only_narrow_codexs_job() {
+        use crate::domain::review_subagents::AgentRole;
+        let dir = tempfile::tempdir().unwrap();
+        let codex = Codex::new("/bin/codex".into());
+        let args = |command: &CommandSpec| -> Vec<String> {
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(
+            agent_job_tools_config(&AgentRole::Review.default_tools()),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            agent_job_tools_config(&AgentTools::new([AgentTool::Glob])),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            agent_job_tools_config(&AgentTools::new([AgentTool::Shell])),
+            Vec::<String>::new()
+        );
+        let none = agent_job_tools_config(&AgentTools::new([]));
+        assert_eq!(
+            none,
+            ["features.shell_tool=false", "features.unified_exec=false"]
+        );
+        assert_eq!(
+            agent_job_tools_config(&AgentTools::new([AgentTool::Edit, AgentTool::Write])),
+            none
+        );
+        // The run's review's launch, given the configs: only `-c`s are
+        // added after it, and the sandbox and the distrust stay.
+        let distrust = distrust_config(dir.path()).unwrap();
+        let mut review = codex
+            .headless_command(dir.path(), "p", JobAccess::ReadFiles)
+            .unwrap();
+        review.arg("-c").arg(&distrust);
+        let before = args(&review);
+        let mut narrowed = review.clone();
+        for config in &none {
+            narrowed.option_args(["-c".to_owned(), config.clone()]);
+        }
+        let after = args(&narrowed);
+        assert_eq!(after[..before.len()], before[..]);
+        assert_eq!(
+            after[before.len()..],
+            [
+                "-c",
+                "features.shell_tool=false",
+                "-c",
+                "features.unified_exec=false"
+            ]
+        );
+        assert!(
+            after
+                .windows(2)
+                .any(|pair| pair == ["--sandbox", JOB_SANDBOX])
+        );
+        // Reaching the queue service swaps the sandbox for the job's
+        // profile as before.
+        let socket = dir.path().join("queue.sock");
+        codex.reach_queue_service(&mut narrowed, &socket);
+        let reaching = args(&narrowed);
+        assert!(!reaching.contains(&"--sandbox".to_owned()));
+        for config in job_service_config(&socket)
+            .unwrap()
+            .into_iter()
+            .chain([distrust.clone()])
+            .chain(none.clone())
+        {
+            assert!(reaching.contains(&config), "{config} in {reaching:?}");
+        }
     }
 }

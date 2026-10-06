@@ -4,8 +4,8 @@ type: design
 title: agentのeval（定義とケースの置き場・ケースの欄・patchの共有・CLI・event・費用の上限と既定値・evalの枠・採用の判定・productionのケースと見張り・道具の宣言とproviderごとの変換・本番と共有する起動経路・programのreviewの当て方）
 status: draft
 created: 2026-10-06
-updated: 2026-10-06 # task 1866: the definition path and the configuration check are implemented; task 1728: the plan of ADR-t1728-1 and ADR-t1728-2
-last_verified: 2026-10-06 # task 1866: the definition path and the configuration check are implemented, the rest is not; task 1728
+updated: 2026-10-06 # task 1873: the tools declaration, its check and the per-provider conversion are implemented; task 1866: the definition path and the configuration check are implemented; task 1728: the plan of ADR-t1728-1 and ADR-t1728-2
+last_verified: 2026-10-06 # task 1873; task 1866: the definition path and the configuration check are implemented, the rest is not; task 1728
 scope: runtime
 related:
   - adr-t1728-1
@@ -24,7 +24,7 @@ related:
 
 # agentのeval
 
-> **一部だけ実装（2026-10-06）**: この文書はagentの定義とeval（goal 125）の今の予定で、実装したのは定義のpath（`.dagq/agents/<name>/AGENT.md`、移行の間は旧の`.dagq/review-agents/<agent>.md`にも戻る）と、名指すagentの定義の有無と複数の役割の検査（`dagq doctor`の`agents`。task 1866）だけ。今動いているreviewのagent（親のreview jobの中のsubagent）は[Review](supervisor-lifecycle/review.md#reviewのsubagent)と[Run environment](supervisor-lifecycle/run-environment.md)が持ち、この文書はそれらを変えない。後続のtask（1867〜1874）が実装したら、この注記と各節を今の姿に直す。
+> **一部だけ実装（2026-10-06）**: この文書はagentの定義とeval（goal 125）の今の予定で、実装したのは定義のpath（`.dagq/agents/<name>/AGENT.md`、移行の間は旧の`.dagq/review-agents/<agent>.md`にも戻る）と、名指すagentの定義の有無と複数の役割の検査（`dagq doctor`の`agents`。task 1866）と、下の「道具の宣言」の宣言の検査とproviderごとの変換の関数（task 1873。どの起動にもまだ当たらない）だけ。今動いているreviewのagent（親のreview jobの中のsubagent）は[Review](supervisor-lifecycle/review.md#reviewのsubagent)と[Run environment](supervisor-lifecycle/run-environment.md)が持ち、この文書はそれらを変えない。後続のtask（1867〜1874）が実装したら、この注記と各節を今の姿に直す。
 
 決めた理由は[ADR-t1728-1](../adr/2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md)（定義とケースの置き場・eval）と[ADR-t1728-2](../adr/2026-10-06-t1728-2-agents-declare-their-tools-from-a-runtime-list.md)（道具の宣言）、材料は[review-agent-evalのSpike](../plans/review-agent-eval-spike.md)が持つ。ここはpath・欄・コマンド・event・数値・設定のkeyの予定を持つ。名前と数値は実装のtaskが確かめて決め、変えたらここを直す。
 
@@ -133,12 +133,14 @@ related:
 
 ## 道具の宣言
 
-- frontmatterの`tools`: runtimeが持つ道具の一覧の名前の配列。無ければ役割の既定（reviewは`read`・`grep`・`glob`）。
-- runtimeの道具の一覧（予定）: `read`（fileを読む）・`grep`（中身を探す）・`glob`（pathを探す）・`shell`（コマンド）・`edit`・`write`。reviewの役割が許すのは`read`・`grep`・`glob`だけで、`shell`・`edit`・`write`と一覧に無い名前は定義の誤りにして、そのagentを起動しない（reviewはADR-t1453-1決定6の経路でpassにしない）。
-- providerごとの変換（ADR-t1895-1の独立のagentのjobの起動の設定。task 1873が関数、task 1903が起動への適用）:
-  - Claude: jobの起動の引数の`--allowedTools`に宣言した道具の名前（`read`→`Read`、`grep`→`Grep`、`glob`→`Glob`）だけを並べ、`--disallowedTools`は今のreviewの`Bash,Edit,Write,NotebookEdit`を保つ。`--setting-sources ""`とreviewの`--settings`（deny・`autoMemoryEnabled: false`）は変えない（ADR-t1470-1）。
-  - Codex: 今のreviewの`--sandbox read-only`・jobのpermission profile・worktreeのprojectの`untrusted`（ADR-t1570-1）を変えず、`shell`を宣言しないagentのjobではshellの道具を外す設定を足す（狭めるだけ）。設定のkeyの綴りはtask 1873がcodex-cliの版で確かめてここに書く。
-- 当てないもの: 親のjobの中のsubagentの渡し方（Claudeの`--agents`のJSONの`tools`、Codexの`-c agents.<name>.*`）と`subagents_unsupported`。全体のreviewのjobは定義を持たないので対象にしない。
+実装済み（task 1873）。今の姿の詳細は[Review](supervisor-lifecycle/review.md#reviewのsubagent)の「道具の宣言」が持つ。
+
+- frontmatterの`tools`: runtimeが持つ道具の一覧の名前のリスト（`tools: [read, grep]`か、1行に1つの`- read`）。無ければ役割の既定（reviewは`read`・`grep`・`glob`）。`tools: []`は道具を持たない宣言。
+- runtimeの道具の一覧（`domain::review_subagents::AgentTool::ALL`）: `read`（fileを読む）・`grep`（中身を探す）・`glob`（pathを探す）・`shell`（コマンド）・`edit`・`write`。reviewの役割が許すのは`read`・`grep`・`glob`だけで、`shell`・`edit`・`write`と一覧に無い名前とリストでない`tools`は定義の誤りにする（`AgentTools::declared`）。誤りの定義を選んだreviewはsnapshotが誤りにしてADR-t1453-1決定6の経路でpassにせず、`dagq doctor`の`agents`の`errors`にも出す。
+- providerごとの変換（ADR-t1895-1の独立のagentのjobの起動の設定を作る関数。evalのagentのjobにも本番のrunのreviewのagentのjobにも使える）:
+  - Claude（`infrastructure::adapters::claude_agent_job_tool_args`）: jobの起動の引数の`--allowedTools`に宣言した道具（`read`→`Read`、`grep`→`Grep`、`glob`→`Glob`、`shell`→`Bash`、`edit`→`Edit`・`NotebookEdit`、`write`→`Write`）を並べ、`--disallowedTools`に一覧の残りを並べる。reviewの既定は今のreviewと同じ`Read,Grep,Glob`と`Bash,Edit,Write,NotebookEdit`。`--setting-sources ""`とreviewの`--settings`（ADR-t1470-1）はjobの起動の側が持ち、変換は触らない。
+  - Codex（`infrastructure::codex::agent_job_tools_config`）: Codexはfileを読む・探す・pathを探すのもshellのコマンドで行うので、`read`・`grep`・`glob`・`shell`のどれかを宣言したjobには何も足さず（read-onlyのsandboxがコマンドを読み取りに留める）、どれも宣言しないjobには`-c features.shell_tool=false`と`-c features.unified_exec=false`（codex-cli 0.160.0の`[features]`）を足してshellを外す。`--sandbox read-only`・jobのpermission profile・worktreeのprojectの`untrusted`（ADR-t1570-1）は変えず、狭めるだけ。このためCodexでは`read`だけの宣言と`read`・`grep`・`glob`の宣言は同じ設定になる。
+- 当てないもの: 親のjobの中のsubagentの渡し方（Claudeの`--agents`のJSONの`tools`は`SUBAGENT_TOOLS`のまま、Codexの`-c agents.<name>.*`）と`subagents_unsupported`。全体のreviewのjobは定義を持たないので対象にしない。
 
 ## evalが本番と共有する起動経路
 
