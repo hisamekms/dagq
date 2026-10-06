@@ -11,9 +11,15 @@
 //! place. A changed migration names another template, made afresh. The
 //! queue is copied as a single file: its WAL is checkpointed and closed
 //! first. Tests of the migrations themselves migrate as before.
+//!
+//! A template is complete only when it holds [`COMPLETE`], written last:
+//! CI's rust-cache deletes every file under the target's temporary
+//! directory but keeps the directories, and an empty template judged by its
+//! directory alone broke main's CI from 2026-09-29 (docs/design/test-fixtures.md).
 
 use dagq::infrastructure::git_binary::git_executable;
 use std::{
+    cell::RefCell,
     fs,
     os::unix::io::AsRawFd,
     path::{Path, PathBuf},
@@ -28,7 +34,30 @@ use super::Bounded;
 
 /// Raised when what makes a template changes other than the migrations and
 /// the seed (the steps below, `init` itself), so no old template is used.
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
+
+/// The file `made` writes last in a template, after `make`: a template
+/// without it is incomplete, whatever else it holds.
+const COMPLETE: &str = ".complete";
+
+thread_local! {
+    /// The directory of the templates in place of the target's, set by
+    /// [`with_root`] for the tests of the templates themselves.
+    static ROOT: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+/// Runs `body` with the templates made and read under `root` on this
+/// thread, so a test can break its own templates and not the shared ones.
+pub fn with_root<T>(root: &Path, body: impl FnOnce() -> T) -> T {
+    struct Restore(Option<PathBuf>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            ROOT.with(|cell| *cell.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(ROOT.with(|cell| cell.borrow_mut().replace(root.to_path_buf())));
+    body()
+}
 
 /// A migrated queue at `db`, copied from the template and opened as
 /// `SqliteQueue::init` opens an existing queue.
@@ -74,8 +103,49 @@ pub fn repository(repo: &Path, seed: &str) {
         fs::write(repo.join("seed.txt"), seed).unwrap();
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-q", "-m", "seed"]);
+        // Before the mark, so a repository git cannot read is never complete.
+        if let Err(message) = git_repository(&repo) {
+            panic!("the repository template: {message}");
+        }
     });
     copy_tree(&template.join("repo"), repo);
+    if let Err(message) = git_repository(repo) {
+        panic!("the copy of the repository template: {message}");
+    }
+}
+
+/// Whether the git that `git_executable` resolves takes `dir` itself for a
+/// repository (`rev-parse --absolute-git-dir`, not searching above `dir`:
+/// the templates live inside the checkout); the error names the dir, that
+/// git and its stderr.
+pub fn git_repository(dir: &Path) -> Result<(), String> {
+    let git = git_executable().expect("git executable");
+    let canonical = dir
+        .canonicalize()
+        .map_err(|error| format!("{}: {error}", dir.display()))?;
+    let result = Command::new(&git)
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--absolute-git-dir"])
+        .env(
+            "GIT_CEILING_DIRECTORIES",
+            canonical.parent().unwrap_or(&canonical),
+        )
+        .bounded_output()
+        .unwrap();
+    let found = String::from_utf8_lossy(&result.stdout).trim().to_string();
+    let found = Path::new(&found).canonicalize().ok();
+    if result.status.success() && found.as_deref() == Some(canonical.join(".git").as_path()) {
+        return Ok(());
+    }
+    Err(format!(
+        "{} is not a git repository to {} ({}, git dir {:?}), git stderr: {}",
+        dir.display(),
+        git.display(),
+        result.status,
+        found,
+        String::from_utf8_lossy(&result.stderr).trim()
+    ))
 }
 
 /// Install an immutable, already executed shell stub. Hardlinks preserve the
@@ -89,7 +159,7 @@ pub fn script(path: &Path, script: impl AsRef<str>) {
     assert!(shebang.starts_with("#!/bin/sh"), "shell stub: {shebang}");
     let content =
         format!("{shebang}\nif [ \"${{DAGQ_TEST_STUB_WARMUP:-}}\" = 1 ]; then exit 0; fi\n{body}");
-    let name = format!("script-f1-{:x}", Sha256::digest(content.as_bytes()));
+    let name = format!("script-f{FORMAT}-{:x}", Sha256::digest(content.as_bytes()));
     let template = made(&name, |building| {
         let stub = building.join("stub");
         fs::write(&stub, &content).unwrap();
@@ -132,12 +202,16 @@ fn short(digest: &[u8]) -> String {
 }
 
 /// The directory of the template `name`, made by `make` in an empty
-/// directory by the one process that holds the template's lock, and renamed
-/// into place whole, so no process sees a template half made.
+/// directory by the one process that holds the template's lock, marked
+/// complete last, and renamed into place whole, so no process sees a
+/// template half made. A template without the mark (its files deleted by a
+/// cache's cleanup) is deleted and made again.
 fn made(name: &str, make: impl FnOnce(&Path)) -> PathBuf {
-    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("fixture-templates");
+    let root = ROOT
+        .with(|cell| cell.borrow().clone())
+        .unwrap_or_else(|| Path::new(env!("CARGO_TARGET_TMPDIR")).join("fixture-templates"));
     let template = root.join(name);
-    if template.exists() {
+    if template.join(COMPLETE).exists() {
         return template;
     }
     fs::create_dir_all(&root).unwrap();
@@ -146,7 +220,11 @@ fn made(name: &str, make: impl FnOnce(&Path)) -> PathBuf {
     // SAFETY: flock(2) takes the descriptor of a file this function holds
     // open; closing it at return releases the lock.
     assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
-    if !template.exists() {
+    if !template.join(COMPLETE).exists() {
+        // No process reads a template without the mark: it is safe to drop.
+        if template.exists() {
+            fs::remove_dir_all(&template).unwrap();
+        }
         // Left by a process that died making it; the lock says none is now.
         let building = root.join(format!("{name}.building"));
         if building.exists() {
@@ -154,6 +232,7 @@ fn made(name: &str, make: impl FnOnce(&Path)) -> PathBuf {
         }
         fs::create_dir(&building).unwrap();
         make(&building);
+        fs::write(building.join(COMPLETE), "").unwrap();
         fs::rename(&building, &template).unwrap();
     }
     template

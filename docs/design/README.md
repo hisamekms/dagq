@@ -4,8 +4,8 @@ type: design
 title: Current design documents
 status: current
 created: 2026-09-21
-updated: 2026-10-05
-last_verified: 2026-10-05
+updated: 2026-10-06
+last_verified: 2026-10-06
 tags:
   - architecture
 ---
@@ -32,3 +32,4 @@ tags:
 - [CI failure issues](ci-failure-issues.md)（mainへのpushのCI（ci.yml）が落ちたらci-failureのissueを開くか追記し、次に通ったら閉じる。workflow全体の結論で決め、continue-on-errorのjobの失敗だけでは開かない）
 - [Slow tests](slow-tests.md)（nextestの出力から遅いtestの上位と1秒・5秒・30秒を超えた本数と合計とtest binaryごとの本数と合計を出すscripts/slow-tests.sh。CIのjob summaryにも出す。差分で足した・変えたtests/itのtestの時間の関門scripts/check-it-test-time.shと許可の一覧.config/it-slow-allow.toml）
 - [Linux CI](linux-ci.md)（CIのubuntuのjobでcargo buildと全体のtestを流し、落ちたtestの名前をjob summaryに出す。失敗を通さず、task 1238で扱ったLinuxの失敗とmacOSに固有として分けたtestを挙げる。goal 83）
+- [Test fixture templates](test-fixtures.md)（tests/common/template.rsのqueue・repository・stubのtemplateの作り方（targetの一時ディレクトリ・file lockとrename・FORMAT・完成の印）と、CIのrust-cacheが残した中身の無いtemplateでmainのCIが赤くなった原因と直し方。task 1886）

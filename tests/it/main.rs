@@ -163,6 +163,7 @@ mod throughput_review_codex;
 mod worker_escalation;
 mod worker_model;
 
+mod fixture_templates;
 mod stub_templates;
 
 mod follow_up_membership;
