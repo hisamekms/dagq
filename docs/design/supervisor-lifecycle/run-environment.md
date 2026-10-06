@@ -4,10 +4,11 @@ type: design
 title: "Run environment"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1857: [provider_fallback] workers; task 1225: the recovery job runs on Codex too; task 1223: the observer runs on Codex too; task 1641: [goals] tags; task 1643: repository の語彙; task 840: [broker.package]; task 1591; task 1437; task 1440: [headless] wrapper ignored for workers, [run.env] in the wrapper's process env
+updated: 2026-10-06 # task 1857: [provider_fallback] workers; task 1225: the recovery job runs on Codex too; task 1223: the observer runs on Codex too; task 1641: [goals] tags; task 1643: repository の語彙; task 840: [broker.package]; task 1591; task 1437; task 1440: [headless] wrapper ignored for workers, [run.env] in the wrapper's process env; task 487: recurring drafts planned (ADR-0072)
 last_verified: 2026-10-06 # task 1857; task 1225; task 1223; task 1641; task 1643; task 840; task 1440
 scope: runtime
 related:
+  - adr-0072
   - adr-t1857-1
   - adr-t963-1
   - design-supervisor-lifecycle
@@ -111,3 +112,23 @@ main checkoutが無いとき、実行したcheckoutやrun worktreeの`dagq.toml`
 - workerのwrapperのPATHは`[run.env]`で変わりうるので、supervisorの検査と同じとは限らない。workerのPATHでだけ見つからない場合は、workerの検証が失敗してreceiptかtriageで分かる。
 - 2つのkindはtaskにもgoalにも紐づかない行なので、`0032_run_env_program_events.sql`が`run_events`を作り直してCHECKに足した（[persistence](../persistence.md)）。
 
+
+## 予定: 定期draft（未実装）
+
+[ADR-0072](../../adr/0072-recurring-drafts-from-dagq-toml.md)の決定1・2・5。現在の読み手は`[[recurring]]`を受け付けない。固定バイナリが対応してから設定を置く。読むのは上の「main checkoutの決め方」の作業ファイルで、supervisorが各passで読み直す。表が無ければ登録しない。
+
+| `[[recurring]]`の欄 | 型と意味 |
+| --- | --- |
+| `key` | 必須の空でない文字列。repositoryのqueue内で一意の恒久的な識別子 |
+| `interval_days` | 必須の正の整数。1日を24時間とした経過日数 |
+| `title`・`description`・`acceptance` | 必須の空でない文字列。draftの提案の材料 |
+| `verification` | 必須の文字列の配列。検証コマンドの提案 |
+| `paths` | 必須の文字列の配列。taskと同じglobの規則で検査する変更範囲 |
+| `evidence` | 必須の文字列の配列。taskのevidenceと同じ規則で検査する証拠の提案 |
+| `goal` | 任意の正の整数。draftに所属を提案するgoal ID |
+
+keyの重複、未知の欄、必須欄の欠け、型・値の不正を拒否する。設定を読めないpassは定期draftを登録せず、エラーを記録する。設定の誤りだけを人の判断のaskにはしない。既存のdraftの材料は登録時のsnapshotで、設定の変更は次の登録から効く。keyの削除で既存のdraftをcancelしない。
+
+期限はqueueの同じkeyの最後の登録時刻（UTC）に`interval_days × 86400`秒を足す。履歴が無ければ即時に対象。前の同じkeyのdraft/taskがcompletedかcanceledでなければ登録しない。終わった時点で既に期限を過ぎていれば次のpassで1件登録し、実際に登録した時刻から次を数える。停止中の複数の期限を1件にまとめるので、再起動時にも連続して取り戻さない。登録履歴はqueueが持ち、keyの再追加でも残す。登録時のtransactionとplannerへの材料は[定期draftの予定](draft-planners.md#予定-recurringのdraft未実装)。
+
+最初の設定の予定は`key = "rust-toolchain-upgrade"`、`interval_days = 42`。titleはRust stableへの引き上げ、descriptionは公式stableと今の固定版の比較、acceptanceは完全固定・MSRVの整合・fmt/clippy/test/CI/releaseの成功を求める。verification・paths・evidenceにはtoolchainの引き上げの検証と変更範囲・証拠を提案し、plannerが採用時にrepositoryの規則に照らして補う。恒久設定のgoalは省略し、goal 46の終了後も提案を続ける。具体的なコマンドとglobの配置は対応後の`dagq.toml`が持つ。

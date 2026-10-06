@@ -4,10 +4,11 @@ type: design
 title: "Draft planners (supervisor)"
 status: current
 created: 2026-09-26
-updated: 2026-10-05 # task 1540: a draft's revisit time returns it to the runtime's planners (ADR-t1540-1); task 1704: planned human-answer wait release (unimplemented)
+updated: 2026-10-05 # task 1540: a draft's revisit time returns it to the runtime's planners (ADR-t1540-1); task 1704: planned human-answer wait release (unimplemented); task 487: recurring drafts planned (ADR-0072)
 last_verified: 2026-10-05 # task 1540
 scope: runtime
 related:
+  - adr-0072
   - adr-t1704-1
   - adr-t1394-1
   - adr-t1394-2
@@ -86,3 +87,13 @@ related:
 ## 予定: 人の答え待ちでの終了
 
 [ADR-t1704-1](../../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定1〜5（未実装）。上の4・5・7と「再検討の時刻」の回数は実装前の挙動を記す。非対話の束のplannerは質問していないdraftの採否・依存・同梱を決め終え、残る仕事が人の答えだけなら終了する。質問したdraftは未回答のaskで起動を止め、answerでは既存の束ね直しで続ける。人だけの待ちと決めずに終わった結末をdraftごとに区別し、前者を上限に数えない。初期promptでの記録の引き継ぎ・終了と配送の競合・再検討の回数の扱いは[予定: 人の答えだけを待つplannerの枠の解放](plan-planners.md#予定-人の答えだけを待つplannerの枠の解放)に従う。
+
+## 予定: recurringのdraft（未実装）
+
+[ADR-0072](../../adr/0072-recurring-drafts-from-dagq-toml.md)の決定2〜4。supervisorが[定期設定](run-environment.md#予定-定期draft未実装)から登録したdraftも、上の2の対象に加える。現在の出どころの列挙と登録処理にはまだ`recurring`は無い。
+
+- **登録と記録**: `draft_origins.origin = recurring`とし、`material`に`key`、`previous_task_id`、`previous_registered_at`（初回はいずれもnull）、登録時の設定のsnapshotを持たせる。今の登録時刻は`draft_origins.created_at`に残す。queueの同じkeyの登録履歴から前回を引き、未完了のdraft/taskが無いことと期限を`BEGIN IMMEDIATE`で再検査して、draftと出どころを同じtransactionで書く。取り戻しも新規の登録も同じ経路を使う。
+- **planner**: recurringは各登録を1件の束（task IDの鍵）として扱い、別keyや別周期を時刻の近さで束ねない。初期promptにkey・前回の登録・設定のsnapshotとgoalの材料を載せる。同時数`runtime_planners`、同じdraftへの二重起動の防止、3回の上限と使い切った後の経路は既存のものを使う。上限や`keep_draft`で残ったdraftも非終端なので、次の周期を登録して迂回しない。
+- **採否**: 必要性を確認し、採用はedit・lint・submit、不採用はcancelとnote。採用の根拠はcontextに残し、通常のplan reviewを通る。Rustでは公式stableの版と確認日・今の固定版を記録し、更新が無ければcancelのnoteに根拠を残す。goalが未指定なら採用するplannerが適切な開いたgoalを探すか作り、閉じたgoalへの追加や再開は既存のgoalの規則に従う。
+- **深さと柵**: recurringのdraftは`follow_up_depth = 0`で、採用の記録は`draft_adopted`とする。recurring自体にはfollow_upの元goal・深さによるadoptの柵を当てない。派生するfollow_upには通常どおり深さ+1と登録時の元goalの記録・所属の判断・自動採用の柵を適用する。
+- **人への問い**: 上の「推奨が出せればplannerが決める」とADR-0047決定41を適用する。判断できる採否は自分で決め、材料で決めきれないscope/discard、低い確信度、既存の柵が求める判断だけを理由の分類・推奨・確信度つきの`planner_question`にする。不要な定期の提案をcancelすることだけで人に聞かない。
