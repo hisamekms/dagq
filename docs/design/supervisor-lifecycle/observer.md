@@ -4,8 +4,8 @@ type: design
 title: "Observer"
 status: current
 created: 2026-09-26
-updated: 2026-10-05 # task 1574: observe_finished counts consecutive_failures, the second is attention; task 1223: the observer runs on Codex too
-last_verified: 2026-10-05 # task 1574; task 1223
+updated: 2026-10-05 # task 1574: observe_finished counts consecutive_failures, the second is attention; task 1223: the observer runs on Codex too; task 1224: this repository sets observer to Codex
+last_verified: 2026-10-05 # task 1574; task 1223; task 1224
 scope: runtime
 related:
   - adr-t1566-1
@@ -50,6 +50,8 @@ Codexのobserverは、jobのdagqをクライアントモードにしてqueue ser
 ## Codexで動かす
 
 [ADR-t1222-1](../../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)と[ADR-t1063-1](../../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)の決定1・4・5（task 1223）。`dagq.toml`の`[roles.observer]`に`provider = "codex"`を書くと、observerのjobはCodexの`codex exec --json`で動く（[Actor model](actor-model.md#provider)の`CODEX_ROLES`）。promptと打たせるコマンドと出力の形は変えず、Claudeのplugin・skill・hookに頼らない。
+
+この repositoryの`dagq.toml`は`[roles.observer] provider = "codex"`を置き、`model` / `effort`は書かずCodexの既定のmodelとmediumに任せる（2026-10-01の人の決定、goal 80、task 1224）。固定バイナリがtask 1223とtask 1378（Gitの外のjobに`--skip-git-repo-check`を付ける）の両方の着地commitを含むことを、task 1224のverifyの関門で確かめる。設定は観測ごとに読み直すので、着地してmain checkoutに反映されればsupervisorの再起動は要らない。
 
 - **sandbox**: 権限の意図`ACCESS`（`queue_cli`）のまま、Codexの実装が読み取りだけのsandboxに訳す。queue serviceが居れば、`:read-only`を継いでserviceのsocketへの到達だけを足したjobのpermission profile `dagq_job`（`codex::job_service_config`）で起動し、書けるroot・network・`--dangerously-bypass-approvals-and-sandbox`は渡さない（[Agent provider lifecycle](../provider-lifecycle.md#codexのheadless-job)）。queue dirとDBのファイルにも書けないので、queueへの書き込みはjobの`dagq`がクライアントモードでserviceに送るものだけで、serviceがobserverのprincipalで認可する（ADR-t1222-1決定1・2）。jobのcwdはobservationのdir（Gitの外）なので`--skip-git-repo-check`を付ける
 - **行き先**（`Supervisor::job_start_route`に`ModelRole::Observer`。スループットの見直しと共有）: providerを書かない役割は今までどおりClaudeで、queueのholdのあいだと`--no-claude`では起動しない（[ADR-t1204-1](../../adr/2026-09-30-t1204-1-explicit-no-claude-operation.md)の決定2）。providerを書いた役割は`job_route`で、そのproviderが使えればそこで、使えなければもう一方のproviderで（launchに`switched_from`・`switch_reason`）起動し、どちらも使えなければ待つ。`--no-claude`ではClaudeは使えないので、Codexを設定したobserverはCodexで起動し、Codexも使えなければ子プロセスに`--unavailable`で理由（`provider_disabled: Claude is disabled by --no-claude and codex cannot be used (<理由>); handle this role manually`）を渡す。子プロセスは0の判定でskipしなければ、agentを起動せずdirも`observe_started`も作らずに`observe_finished`（`outcome: error`、`error`に理由、`unavailable: true`、件数0、`dir: null`、`cursor_saved: false`）を記録する。`observe_finished`はattentionではなく、`stats`の`jobs`はこれをjobに数えない（agentが走っていない）。次のobservationは直前が`error`なので0でskipしない。そのため`--no-claude`でCodexが控えられている間は、何も起きていなくても間隔ごとにこの記録が1件ずつ残る（スループットの見直しが期間ごとに記録するのと同じく、どのobservationが起動できなかったかを残すため）

@@ -115,6 +115,15 @@ provider = "codex"
 # （CODEX_ROLES に throughput_review が無い）は設定の誤りとして拒むので、固定バイナリが task 1220 を含んでから足した。
 provider = "codex"
 
+[roles.observer]
+# observer の job を Codex で動かす（人の 2026-10-01 の決定
+# 「inbox と worker は Claude、それ以外の actor は Codex」の observer の分。goal 80、task 1224）。
+# 書式と振る舞いは docs/design/supervisor-lifecycle/observer.md の「Codexで動かす」と actor-model.md の provider。
+# model と effort は書かず、Codex の既定の model と medium に任せる。
+# 固定バイナリが task 1223（observer の Codex 対応）と task 1378（Git の外の job に
+# --skip-git-repo-check を付ける）を両方含むことを verify の関門で確かめてから足す。
+provider = "codex"
+
 [roles.runtime_planner]
 # runtime の planner（revise・draft・finding・計画の依頼）を非対話（worker と同じ turn ごとの呼び出し）で動かす
 # （人の 2026-10-02 の決定「runtime の planner を非対話に切り替えて 1 週間測り、問題なければ非対話を続ける」。
