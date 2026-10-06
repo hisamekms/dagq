@@ -171,7 +171,7 @@ pub(crate) fn wait_for_listed(
 /// cmux confirms a `workspace close` before the workspace leaves its
 /// listing, so "gone" is waited for rather than asserted on the first look.
 /// A failed listing is "not yet", like in `wait_for_listed`.
-// Used only by the e2e cases out under ADR-t1582-1; goes with tasks 1441, 1443.
+// Used only by the e2e case out under ADR-t1582-1; goes with task 1443.
 #[cfg(any())]
 pub(crate) fn wait_until_not_listed(cmux: &Path, id: &str) {
     let deadline = Instant::now() + crate::WAIT_LIMIT;

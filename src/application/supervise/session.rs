@@ -48,8 +48,8 @@ impl Supervisor<'_> {
         }
     }
     /// The executor every AI actor the supervisor starts goes through: its
-    /// session wrappers and planner workspaces through the workspace
-    /// backend, its agents through the review provider and
+    /// session wrappers, the runs' and the planners', in the background
+    /// through the workspace backend, its agents through the review provider and
     /// the spawner, on the queue's environment.
     pub(super) fn actors(&self) -> HostActorExecutor<'_> {
         self.actors_on(self.reviewer)

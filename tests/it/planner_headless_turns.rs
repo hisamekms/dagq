@@ -93,7 +93,7 @@ say "turn $TURN""#,
     );
     assert_eq!(draft, TaskId::new(2));
     let reviewer = StubReviewer::new(&[]);
-    let backend = PlanWorkspace::default();
+    let backend = PlanWorkspace::running();
     let open_ask = |kind: AskKind| {
         SqliteQueue::open(&fx.db)
             .unwrap()
@@ -232,7 +232,7 @@ say "turn $TURN""#,
     let mut queue = SqliteQueue::open(&fx.db).unwrap();
     let request = record(&mut queue, "plan the landing rate back");
     let reviewer = StubReviewer::new(&[]);
-    let backend = PlanWorkspace::default();
+    let backend = PlanWorkspace::running();
     let settings = dagq::runtime::SuperviseOptions {
         stall: Some(
             dagq::domain::stall::StallConfig::default().with_millis("turn_limit_secs", 500),
@@ -292,7 +292,7 @@ say "turn $TURN""#,
     assert_eq!(task, TaskId::new(2));
     let request = record(&mut queue, "bring the landing rate back");
     let reviewer = StubReviewer::new(&[json!({"verdict": "pass", "reasons": [], "summary": "ok"})]);
-    let backend = PlanWorkspace::default();
+    let backend = PlanWorkspace::running();
     supervise_until(
         &fx,
         &backend,
@@ -356,7 +356,7 @@ say "turn $TURN""#,
         json!({"verdict": "revise", "reasons": ["name the test"], "summary": "not yet"}),
         json!({"verdict": "pass", "reasons": [], "summary": "ok"}),
     ]);
-    let backend = PlanWorkspace::default();
+    let backend = PlanWorkspace::running();
     supervise_until(
         &fx,
         &backend,
@@ -407,7 +407,6 @@ say "turn $TURN""#,
     assert_eq!(closed[0]["code"], "runtime_exited");
     assert_eq!(queue.planner(planner.id).unwrap().exit_code, Some(0));
     assert!(backend.texts().is_empty(), "nothing typed");
-    assert!(backend.opened().is_empty(), "no workspace");
 }
 
 /// Acceptance (ADR-t1394-2 decision 3, the sweep's path): a headless
@@ -420,7 +419,7 @@ fn the_sweep_tells_of_a_headless_planners_turn_stopped_at_its_limit_as_it_closes
     use dagq::application::WorkspaceBackend;
     let fx = crate::plan_review::fixture();
     let queue = SqliteQueue::open(&fx.db).unwrap();
-    let backend = PlanWorkspace::default();
+    let backend = PlanWorkspace::running();
     let log = fx.db.parent().unwrap().join("wrapper.log");
     let handle = backend
         .launch_background(fx.db.parent().unwrap(), "sleep 600", &[], &log)

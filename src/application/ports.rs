@@ -600,11 +600,14 @@ pub trait AgentProvider {
         let _ = (stdout, stderr);
         crate::domain::headless_job::JobFailure::Other
     }
-    /// The agent of a planner session (ADR-0041 decisions 1, 6): an
-    /// interactive agent in `planner.cwd` with `planner.prompt` as its first
-    /// message, whose `Stop` hook writes [`PlannerCommand::idle_marker`] the
-    /// way a worker's does, and that loads `planner.plugin_dir`. A provider
-    /// without one refuses.
+    /// The agent of a planner session in a terminal (ADR-0041 decisions 1,
+    /// 6): only a person's planner, opened before `dagq plan` was abolished
+    /// (ADR-t1394-1), runs one; a planner of the runtime's runs headless
+    /// turns ([`AgentProvider::turn_command`], ADR-t1433-2 decision 3). An
+    /// interactive agent in `planner.cwd` with `planner.prompt` as its
+    /// first message, whose `Stop` hook writes
+    /// [`PlannerCommand::idle_marker`] the way a worker's does, and that
+    /// loads `planner.plugin_dir`. A provider without one refuses.
     fn planner_command(&self, planner: &PlannerCommand<'_>) -> Result<CommandSpec> {
         let _ = planner;
         anyhow::bail!("this provider has no planner session")
@@ -957,14 +960,12 @@ impl<'a> TurnTarget<'a> {
     }
 }
 
-/// What the agent of a planner session is started with: the planner's
-/// directory (its prompt, settings, log and idle marker), the directory it
-/// works in (the repository's checkout), its first message and the plugin
-/// directory it loads, and who opened it (a person's planner keeps the
-/// session settings a person works with).
+/// What the agent of a person's planner session is started with: the
+/// planner's directory (its prompt, settings, log and idle marker), the
+/// directory it works in (the repository's checkout), its first message
+/// and the plugin directory it loads.
 #[derive(Debug, Clone, Copy)]
 pub struct PlannerCommand<'a> {
-    pub origin: PlannerOrigin,
     pub dir: &'a std::path::Path,
     pub cwd: &'a std::path::Path,
     pub prompt: &'a str,
@@ -997,7 +998,7 @@ pub trait AgentSignals {
     fn job_failure(&self, _output: &str) -> crate::domain::headless_job::JobFailure {
         crate::domain::headless_job::JobFailure::Other
     }
-    /// The last lines of a planner or inbox screen.
+    /// The last lines of the screen of a person's planner or the inbox.
     fn screen_excerpt(&self, screen: &str) -> String;
     /// What the idle marker's content says. A content the adapter cannot
     /// read still marks a stop.
@@ -2042,9 +2043,11 @@ pub trait SessionRegistry {
     fn register_planner_agent(&self, id: PlannerId, wrapper_pid: u32, agent: u32) -> Result<()>;
     fn heartbeat_planner(&self, id: PlannerId, wrapper_pid: u32) -> Result<()>;
     fn planner_exited(&self, id: PlannerId, wrapper_pid: u32, exit_code: i32) -> Result<()>;
-    /// Record `planner_unresponsive` about a planner of the runtime's
-    /// nothing was seen of within the planner timeout (task 805), once per
-    /// planner: `payload` names it by `planner_id` with `subject:
+    /// Record `planner_unresponsive` about a planner of the runtime's whose
+    /// turn its wrapper stopped at the turn's limit (`[stall]`, the
+    /// supervisor's `tell_of_stopped_planner_turns`; before task 1441 also
+    /// one nothing was seen of within the planner timeout, task 805), once
+    /// per planner: `payload` names it by `planner_id` with `subject:
     /// "planner"`. `false` when it was recorded before.
     fn planner_silent(&self, id: PlannerId, payload: serde_json::Value) -> Result<bool>;
     /// The planners not closed that such a `planner_unresponsive` names,
@@ -3424,15 +3427,10 @@ pub trait Verifier {
         let _ = text;
         Ok(Vec::new())
     }
-    /// Where a runtime planner's headless wrapper runs (`[headless]
-    /// wrapper` of `dagq.toml`, ADR-t1404-1 decision 7); a workspace by
-    /// default. A worker's wrapper always starts in the background and
-    /// ignores the setting (ADR-t1433-3 decision 2).
-    fn headless_wrapper(&self) -> Result<crate::domain::background_wrapper::HeadlessWrapper> {
-        Ok(crate::domain::background_wrapper::HeadlessWrapper::default())
-    }
     /// `[headless] wrapper` as `dagq.toml` writes it, `None` without the
-    /// key: only to tell that a worker ignores `"workspace"`.
+    /// key: only to tell that a worker and a planner of the runtime's
+    /// ignore `"workspace"` (ADR-t1433-3 decision 2, ADR-t1433-2 decision
+    /// 3): their wrappers always start in the background.
     fn headless_wrapper_setting(
         &self,
     ) -> Result<Option<crate::domain::background_wrapper::HeadlessWrapper>> {

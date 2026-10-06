@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use crate::domain::{Ask, PlannerId, ProposalId, RunId, SessionRole, TaskId};
+use crate::domain::{Ask, RunId, SessionRole, TaskId};
 
 /// Shell boundaries are cmux's terminal startup command and Claude's hook command.
 /// Quote every argument independently, including paths containing apostrophes.
@@ -63,25 +63,6 @@ pub fn ask_notification_title(repo_root: &Path, ask: &Ask) -> String {
 /// workspace at all.
 pub fn supervisor_workspace_name(repo_root: &Path) -> String {
     role_workspace_name(repo_root, SessionRole::Supervisor)
-}
-
-/// `[<repo>]planner#<planner-id>`, and ` - proposal <id>` for a planner the
-/// runtime opened for a proposal: a planner session, which ADR-0028's
-/// `[<repo>]planner` names apart from the others open at the same time
-/// (ADR-0041 decision 6), the way a worker's names its task.
-pub fn planner_workspace_name(
-    repo_root: &Path,
-    planner: PlannerId,
-    proposal: Option<ProposalId>,
-) -> String {
-    let mut name = format!(
-        "{}#{planner}",
-        role_workspace_name(repo_root, SessionRole::Planner)
-    );
-    if let Some(proposal) = proposal {
-        name.push_str(&format!(" - proposal {proposal}"));
-    }
-    name
 }
 
 /// `[<repo>]inbox`: the session where a person answers the queue's asks,

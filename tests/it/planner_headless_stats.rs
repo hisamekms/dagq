@@ -110,7 +110,7 @@ fn a_headless_planners_session_and_route_are_read_by_stats_and_kpi() {
         json!({"verdict": "revise", "reasons": ["split it"], "summary": "not yet"}),
         json!({"verdict": "pass", "reasons": [], "summary": "ok"}),
     ]);
-    let backend = PlanWorkspace::default();
+    let backend = PlanWorkspace::running();
     let settings = options(1, Duration::from_secs(3600));
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {

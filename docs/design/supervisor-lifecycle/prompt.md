@@ -4,8 +4,8 @@ type: design
 title: "Prompt"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1681; task 1680 revise 1; task 1540: the revisit section of the draft planner; task 1633: the recovery job's binary sections and their limits; task 1688 (after task 1572)
-last_verified: 2026-10-06 # task 1681; task 1680 revise 1; task 1540; task 1633; task 1688 (after task 1572)
+updated: 2026-10-06 # task 1441: planner_prompt_written is recorded before the background wrapper starts; task 1681; task 1680 revise 1; task 1540: the revisit section of the draft planner; task 1633: the recovery job's binary sections and their limits; task 1688 (after task 1572)
+last_verified: 2026-10-06 # task 1441; task 1681; task 1680 revise 1; task 1540; task 1633; task 1688 (after task 1572)
 scope: runtime
 related:
   - adr-t1566-1
@@ -159,7 +159,7 @@ task 1571。plan review（task 1561）とobserver（task 1567）と同じ形で�
 | goal review | `goal_review_finished`・`goal_review_failed`（goalのevent） | `prompt_bytes`（起動の前に失敗してpromptが無いときは`null`） |
 | runのreview | `review_started`（runのevent） | `prompt_bytes`（資料かpromptを書けなかったときは無い） |
 | 復旧job | `recovery_prompt_written`（runのevent。生きているsessionのjobも終わったrunのjobも`start_job`がpromptを書いた直後） | `alert`・`attempt`・`prompt_bytes` |
-| runtimeのplanner | `planner_prompt_written`（queueのevent。`launch_planner`がworkspaceを開く前） | `planner_id`・`subject: "planner"`・`prompt`（`runtime` / `draft` / `finding` / `request`）・`prompt_bytes` |
+| runtimeのplanner | `planner_prompt_written`（queueのevent。`launch_planner`がbackgroundのwrapperを起動する前） | `planner_id`・`subject: "planner"`・`prompt`（`runtime` / `draft` / `finding` / `request`）・`prompt_bytes` |
 
 値と理由（本番の大きさは2026-10-03T10:50Zにplannerが本番のqueue dirで`wc -c`と節の見出しで測った表。goal reviewは全27件、runのreviewは新しい200件、復旧jobは全146件、plannerは全844件）:
 

@@ -4,7 +4,7 @@ type: development
 title: このrepositoryのtestの制約（coverageの関門・test binary・置き場所・書き方・macOSに固有のtest・判断と境界のtest・ファイルの行数・待ちの上限・e2eとその印・手動スモーク）
 status: current
 created: 2026-10-03
-updated: 2026-10-05 # task 1440: e2eのrunがbackgroundのwrapperで動くことと、sweepのケースの削除; task 1707; task 1451; task 1238; task 1352
+updated: 2026-10-06 # task 1441: the planner's e2e case is deleted, not left out; task 1440: e2eのrunがbackgroundのwrapperで動くことと、sweepのケースの削除; task 1707; task 1451; task 1238; task 1352
 owners:
   - hisamekms
 tags:
@@ -93,8 +93,7 @@ testはmacOS（関門とCIの`checks`）とLinux（CIの`linux`、失敗を通�
 - e2eを流すのはworkerでなくruntimeがhostで、2つの場所: (1) 差分が`dagq.toml`の`[e2e] paths`に触れるrunと`--evidence e2e`のtaskのrunで、reviewのpassの後・着地の前（[Review](../design/supervisor-lifecycle/review.md)の「着地の前のe2e」、要否は[Validation](../design/supervisor-lifecycle/validation.md)の「runtimeが流すe2e」）。(2) 自動更新とsourceのcheckoutからの`install`が固定バイナリを入れ替える前（[Auto-update](../design/supervisor-lifecycle/auto-update.md)・[install](../design/supervisor-lifecycle/install.md)）。workerが流さないことと`e2e_failed`のresumeでの再現は[手元の検証](local-checks.md)の「e2eを流さない」。
 - `[e2e] paths`の外の変更が実cmuxとの組み合わせを壊しても本番のバイナリは(2)の関門が守るので、落ちたらplannerが直すtaskを作る。runをまたぐsupervisorの振る舞いを変え、`tests/e2e.rs`の複数passの筋書きを変えうるtaskは、関門で止まる前に捕まえるため登録の時に`--evidence e2e`を付ける（目安は[taskの登録](task-registration.md)の「e2e」）。
 - inboxもplannerもe2eを自分では再実行しない（落ちたときの汎用の手順はpluginの`dagq-recover`の`reference/review-by-hand.md`）。
-- 期間限定で登録から外したケース（[ADR-t1582-1](../adr/2026-10-04-t1582-1-temporarily-leave-broker-and-cmux-only-e2e-cases-out.md)）: 次の2ケース（cmux固有）は本文を残したまま`#[cfg(any())]`で`tests/e2e.rs`の登録から外れ、`--ignored`でも、(1)の着地の前のe2eでも(2)の関門でも流れない（登録に無いので結果の`skipped`には出ない。podmanに繋がらないときの`broker::`の省略とは別）。外したケースだけが使うhelperにも同じcfgと、一緒に消す・戻すtaskのIDのcommentを付け、ケースを削除・復帰するtaskは同じ変更でそのhelperのcfgも削除するか外す。crate全体の`dead_code`の許可は付けない。早期returnで成功に見せたり、`#[ignore]`だけで外したりしない。この2ケースの外に広げない。brokerの`broker::a_preferred_worker_does_its_task_through_the_broker_and_lands`は同じADRで外れた後、task 1451でcfgを外して登録に戻り、通常のe2eに含まれる。同じADRで外れた掃除（sweep）のケースは、runのworkspaceが無くなったのでtask 1440がそれだけが使うhelperごと削除した。
-  - `planner::the_runtime_opens_planners_side_by_side_that_submit_go_idle_and_exit`: task 1441が削除するか非対話のケースに置き換え、置き換えたらcfgを外して復帰する（先にtask 1399で置き換わっていればその実装に合わせる）。
+- 期間限定で登録から外したケース（[ADR-t1582-1](../adr/2026-10-04-t1582-1-temporarily-leave-broker-and-cmux-only-e2e-cases-out.md)）: 次の1ケース（cmux固有）は本文を残したまま`#[cfg(any())]`で`tests/e2e.rs`の登録から外れ、`--ignored`でも、(1)の着地の前のe2eでも(2)の関門でも流れない（登録に無いので結果の`skipped`には出ない。podmanに繋がらないときの`broker::`の省略とは別）。外したケースだけが使うhelperにも同じcfgと、一緒に消す・戻すtaskのIDのcommentを付け、ケースを削除・復帰するtaskは同じ変更でそのhelperのcfgも削除するか外す。crate全体の`dead_code`の許可は付けない。早期returnで成功に見せたり、`#[ignore]`だけで外したりしない。このケースの外に広げない。brokerの`broker::a_preferred_worker_does_its_task_through_the_broker_and_lands`は同じADRで外れた後、task 1451でcfgを外して登録に戻り、通常のe2eに含まれる。同じADRで外れた掃除（sweep）のケースは、runのworkspaceが無くなったのでtask 1440がそれだけが使うhelperごと削除した。plannerの`planner::the_runtime_opens_planners_side_by_side_that_submit_go_idle_and_exit`（対話のplannerのworkspace・画面・`/exit`を確かめるケース）は、runtimeのplannerの対話の経路が無くなったのでtask 1441が`tests/e2e/planner.rs`とstubのplannerの分岐ごと削除した（非対話のplannerは`tests/it/planner_headless.rs`が実バイナリのbackgroundのwrapperで確かめる。使っていたhelperはin-cmuxのケースも使うので、そのcfgのまま残る）。
   - `up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes`: task 1443が旧ケースとcfgを削除する。
 
 ## `[e2e] paths`

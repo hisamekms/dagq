@@ -709,13 +709,35 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     !role_keys.iter().any(|existing| existing == key),
                     "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
                 );
+                role_keys.push(key.to_owned());
+                let table = config.roles.entry(role);
+                if key == crate::domain::actor_model::ROUTE_KEY {
+                    // The route of the runtime's planners is not chosen
+                    // any more: they run headless only, and the key is
+                    // accepted, whatever its value (a string of any
+                    // content, a blank or another value), and ignored
+                    // (ADR-t1433-2 decision 3). Only [roles.runtime_planner]
+                    // ever took it.
+                    ensure!(
+                        role == crate::domain::actor_model::ModelRole::RuntimePlanner,
+                        "{CONFIG_FILE_NAME}:{number}: {key} is a key of [{ROLES_PREFIX}{}] only (and ignored there); the {} role has no route",
+                        crate::domain::actor_model::ModelRole::RuntimePlanner.as_str(),
+                        role.as_str()
+                    );
+                    // Kept only for the supervisor's warning that it is
+                    // ignored (ADR-t1433-3 decision 2's handling).
+                    let raw = rest.trim();
+                    config
+                        .roles
+                        .ignore_planner_route(parse_string(raw).unwrap_or_else(|_| raw.to_owned()));
+                    continue;
+                }
                 let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
                 let value = parse_string(rest.trim()).with_context(with)?;
                 ensure!(
                     !value.trim().is_empty(),
                     "{CONFIG_FILE_NAME}:{number}: {key} is blank"
                 );
-                let table = config.roles.entry(role);
                 if key == "provider" {
                     let provider = value
                         .parse::<crate::domain::Provider>()
@@ -724,25 +746,12 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     table.provider = Some(provider);
                 } else if key == "model" {
                     table.model = Some(value);
-                } else if key == crate::domain::actor_model::ROUTE_KEY {
-                    // Only [roles.runtime_planner] takes it, which the
-                    // check of the tables says (ADR-t1394-2 decision 1).
-                    let route = value
-                        .parse::<crate::domain::PlannerRoute>()
-                        .map_err(|_| {
-                            anyhow::anyhow!(
-                                "{value} is not a route; the routes are interactive and headless"
-                            )
-                        })
-                        .with_context(with)?;
-                    table.route = Some(route);
                 } else {
                     check_effort(&value)
                         .map_err(|error| anyhow::anyhow!("{error}"))
                         .with_context(with)?;
                     table.effort = Some(value);
                 }
-                role_keys.push(key.to_owned());
             }
             Some(WORKER_TRIAL_TABLE) => {
                 ensure!(
@@ -1266,14 +1275,6 @@ pub fn load_e2e_paths(root: &Path) -> Result<Vec<String>> {
         .e2e_paths)
 }
 
-/// `[headless] wrapper` of the `dagq.toml` in `root` (ADR-t1404-1
-/// decision 7); no file, no table or no key is the default, a workspace.
-/// Only a runtime planner follows it; a worker ignores it (ADR-t1433-3
-/// decision 2).
-pub fn load_headless_wrapper(root: &Path) -> Result<HeadlessWrapper> {
-    Ok(load_headless_wrapper_setting(root)?.unwrap_or_default())
-}
-
 /// `[headless] wrapper` of the `dagq.toml` in `root` as written: `None`
 /// for no file, no table or no key.
 pub fn load_headless_wrapper_setting(root: &Path) -> Result<Option<HeadlessWrapper>> {
@@ -1596,9 +1597,6 @@ impl Verifier for ShellVerifier {
     fn review_subagents_in(&self, text: &str) -> Result<Vec<ReviewSubagent>> {
         Ok(parse_config(text)?.review_subagents)
     }
-    fn headless_wrapper(&self) -> Result<HeadlessWrapper> {
-        load_headless_wrapper(&self.checkout)
-    }
     fn headless_wrapper_setting(&self) -> Result<Option<HeadlessWrapper>> {
         load_headless_wrapper_setting(&self.checkout)
     }
@@ -1889,10 +1887,6 @@ mod tests {
             assert!(error.contains(expected), "{text:?}: {error}");
         }
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(
-            load_headless_wrapper(dir.path()).unwrap(),
-            HeadlessWrapper::Workspace
-        );
         assert_eq!(load_headless_wrapper_setting(dir.path()).unwrap(), None);
         fs::write(
             dir.path().join(CONFIG_FILE_NAME),
@@ -1900,8 +1894,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            load_headless_wrapper(dir.path()).unwrap(),
-            HeadlessWrapper::Background
+            load_headless_wrapper_setting(dir.path()).unwrap(),
+            Some(HeadlessWrapper::Background)
         );
         // Written as it is, so that a worker can tell `"workspace"` it
         // ignores from no key (ADR-t1433-3 decision 2).
@@ -1919,7 +1913,7 @@ mod tests {
             "[headless]\nwrapper = 2\n",
         )
         .unwrap();
-        assert!(load_headless_wrapper(dir.path()).is_err());
+        assert!(load_headless_wrapper_setting(dir.path()).is_err());
     }
 
     /// `[goals] tags` names the repository's set of goal tags (ADR-t1639-1
@@ -2047,7 +2041,6 @@ LITERAL = 'no \n escapes # here'
                 provider: None,
                 model: None,
                 effort: Some("high".into()),
-                route: None,
             })
         );
         assert_eq!(
@@ -2056,7 +2049,6 @@ LITERAL = 'no \n escapes # here'
                 provider: None,
                 model: Some("claude-sonnet-5".into()),
                 effort: None,
-                route: None,
             })
         );
         // A table without a key is none.
@@ -2101,7 +2093,6 @@ LITERAL = 'no \n escapes # here'
                 provider: Some(crate::domain::Provider::Codex),
                 model: Some("gpt-6-astra".into()),
                 effort: None,
-                route: None,
             })
         );
         assert_eq!(
@@ -2143,40 +2134,53 @@ LITERAL = 'no \n escapes # here'
     }
 
     #[test]
-    fn parses_the_route_of_the_runtimes_planners() {
-        use crate::domain::actor_model::LaunchSource;
-        use crate::domain::{PlannerRoute, actor_model::ModelRole};
-        // Interactive until the table names it (ADR-t1394-2 decision 1).
+    fn the_old_route_of_the_runtimes_planners_is_accepted_and_ignored() {
+        use crate::domain::actor_model::{ModelRole, RoleModel};
+        // The runtime's planners run headless only (ADR-t1433-2 decision
+        // 3): `route` of [roles.runtime_planner], whatever its value, loads
+        // and gives the planner's agent nothing; its value is kept only for
+        // the supervisor's warning that it is ignored.
         assert_eq!(
-            parse_config("").unwrap().roles.planner_route(),
-            (PlannerRoute::Interactive, LaunchSource::Default)
-        );
-        let config = parse_config("[roles.runtime_planner]\nroute = \"headless\"\n").unwrap();
-        assert_eq!(
-            config.roles.planner_route(),
-            (PlannerRoute::Headless, LaunchSource::Config)
-        );
-        // The route alone gives the planner's agent no model or effort.
-        assert_eq!(
-            config.roles.launch(ModelRole::RuntimePlanner).arguments(),
+            parse_config("").unwrap().roles.ignored_planner_route(),
             None
         );
+        for (text, value) in [
+            (
+                "[roles.runtime_planner]\nroute = \"headless\"\n",
+                "headless",
+            ),
+            (
+                "[roles.runtime_planner]\nroute = 'interactive'\n",
+                "interactive",
+            ),
+            ("[roles.runtime_planner]\nroute = 'screen'\n", "screen"),
+            ("[roles.runtime_planner]\nroute = ''\n", ""),
+            ("[roles.runtime_planner]\nroute = true\n", "true"),
+        ] {
+            let config = parse_config(text).unwrap();
+            assert_eq!(
+                config.roles.launch(ModelRole::RuntimePlanner).arguments(),
+                None,
+                "{text:?}"
+            );
+            assert_eq!(config.roles.ignored_planner_route(), Some(value));
+        }
         let config =
             parse_config("[roles.runtime_planner]\nroute = 'interactive'\neffort = 'high'\n")
                 .unwrap();
         assert_eq!(
-            config.roles.planner_route(),
-            (PlannerRoute::Interactive, LaunchSource::Config)
+            config.roles.get(ModelRole::RuntimePlanner),
+            Some(&RoleModel {
+                provider: None,
+                model: None,
+                effort: Some("high".into()),
+            })
         );
         assert_eq!(
             config.roles.launch(ModelRole::RuntimePlanner).arguments(),
             Some(("claude-opus-5-5", "high"))
         );
         for (text, expected) in [
-            (
-                "[roles.runtime_planner]\nroute = 'screen'",
-                "is not a route",
-            ),
             (
                 "[roles.planner]\nroute = 'headless'",
                 "route is a key of [roles.runtime_planner] only",

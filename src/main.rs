@@ -1042,7 +1042,7 @@ enum Command {
         /// Include closed planners.
         #[arg(long)]
         all: bool,
-        /// cmux executable, used to look for each planner's workspace.
+        /// cmux executable, used to look for the workspace of each person's planner (a planner of the runtime's has none).
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
     },
@@ -1054,11 +1054,11 @@ enum Command {
         #[command(subcommand)]
         command: RunCommand,
     },
-    /// A planner's session, named by its planner id: read its screen, or
-    /// send it a key of a fixed set or the answer of an answered
-    /// `planner_question` (ADR-t1228-1); or hand a headless planner of the
-    /// runtime's a follow-up request as its next turn (ADR-t1533-1). Each
-    /// is recorded with its actor.
+    /// A planner's session, named by its planner id: `screen` says it has
+    /// no screen and where its turns are, and `send` is refused
+    /// (ADR-t1433-2); `log` prints a background planner's log; `request`
+    /// hands a headless planner of the runtime's a follow-up request as its
+    /// next turn, recorded with its actor (ADR-t1533-1).
     Planner {
         #[command(subcommand)]
         command: PlannerCommand,
@@ -1738,15 +1738,17 @@ enum RunCommand {
 
 #[derive(Subcommand, Clone)]
 enum PlannerCommand {
-    /// Print the last lines of the screen of the planner's session (at
-    /// most 200), recorded as `screen_read` without its text. A headless
-    /// planner has none: where its turns are is printed instead.
+    /// Print that the planner's session has no screen and where its turns
+    /// are (`turns/` of its directory): a planner of the runtime's runs
+    /// headless, and the terminal of a person's planner is not read any
+    /// more (ADR-t1433-2). Read its turns with `planner log`. Nothing is
+    /// read or recorded, and cmux is not needed.
     Screen {
         planner: i64,
-        /// How many lines, from the bottom; more than 200 is cut to 200.
+        /// Accepted and ignored: there is no screen to read.
         #[arg(long, default_value_t = dagq::application::screen::DEFAULT_LINES)]
         lines: usize,
-        /// cmux executable.
+        /// Accepted and ignored: cmux is not used.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
     },
@@ -1754,7 +1756,8 @@ enum PlannerCommand {
     /// background (ADR-t1404-1 decision 8): the `[dagq]` summary of each
     /// turn in `session.log` of its directory, a closed planner's too.
     /// With --follow, keep printing what the wrapper appends until it
-    /// ends. A planner in a workspace is refused (`planner screen`).
+    /// ends. A planner in a workspace (a person's, or one an older binary
+    /// opened for the runtime) is refused: its screen is not read any more.
     Log {
         planner: i64,
         /// Only the last N lines; without it, the whole log.
@@ -1764,20 +1767,20 @@ enum PlannerCommand {
         #[arg(long, short = 'f')]
         follow: bool,
     },
-    /// Type into the planner's session one or more keys of the set (enter,
-    /// escape, up, down, 1-9, or exit alone for `/exit`), or the answer of
-    /// an answered `planner_question` that goes to this planner; no other
-    /// text. Recorded as `screen_input_sent`. A headless planner is
-    /// refused: the supervisor delivers its answers as turns.
+    /// Refused for every planner, with the reason (ADR-t1433-2): nothing
+    /// is typed into a planner's session. Answer its `planner_question`
+    /// with `answer`, and the supervisor delivers the answer (to a headless
+    /// planner as its next turn); hand a headless planner a follow-up with
+    /// `planner request`. Nothing is recorded, and cmux is not needed.
     Send {
         planner: i64,
-        /// A key to send; repeat for several, sent in order.
+        /// Accepted and ignored.
         #[arg(long = "key", conflicts_with = "answer")]
         keys: Vec<String>,
-        /// The answered ask whose answer is typed.
+        /// Accepted and ignored.
         #[arg(long)]
         answer: Option<i64>,
-        /// cmux executable.
+        /// Accepted and ignored: cmux is not used.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
     },
@@ -4060,21 +4063,15 @@ fn execute(cli: Cli) -> Result<Value> {
             }
         }
         Command::Planner { command } => {
-            use dagq::application::screen::{self, ScreenPorts, Sending};
-            use dagq::infrastructure::adapters::{ClaudeCode, Cmux, executable};
+            use dagq::application::screen;
+            use dagq::infrastructure::adapters::{Cmux, executable};
             match command {
-                PlannerCommand::Screen {
-                    planner,
-                    lines,
-                    cmux,
-                } => screen::planner_screen(
-                    &mut queue,
-                    &Cmux {
-                        executable: executable(&cmux)?,
-                    },
+                // Neither reads a screen nor types: no cmux is built
+                // (ADR-t1433-2).
+                PlannerCommand::Screen { planner, .. } => screen::planner_screen(
+                    &queue,
                     &dagq::infrastructure::location::planners_dir(&db),
                     PlannerId::new(planner),
-                    lines,
                 )?,
                 PlannerCommand::Log {
                     planner,
@@ -4088,26 +4085,8 @@ fn execute(cli: Cli) -> Result<Value> {
                     )?;
                     print_session_log(&log, lines, follow)?
                 }
-                PlannerCommand::Send {
-                    planner,
-                    keys,
-                    answer,
-                    cmux,
-                } => {
-                    let sending = Sending::parse(&keys, answer)?;
-                    screen::planner_send(
-                        &mut queue,
-                        &ScreenPorts {
-                            cmux: &Cmux {
-                                executable: executable(&cmux)?,
-                            },
-                            signals: &ClaudeCode {
-                                executable: PathBuf::from("claude"),
-                            },
-                        },
-                        PlannerId::new(planner),
-                        &sending,
-                    )?
+                PlannerCommand::Send { planner, .. } => {
+                    screen::planner_send(&queue, PlannerId::new(planner))?
                 }
                 PlannerCommand::Request {
                     planner,

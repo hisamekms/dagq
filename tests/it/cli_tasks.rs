@@ -191,15 +191,15 @@ fn reads_do_not_create_a_queue_and_unknown_tasks_fail() {
             expected["claim_deferrals"] = serde_json::json!([]);
         } else {
             // Every role on Claude with nothing given (ADR-t1063-1), the
-            // runtime's planners interactive (ADR-t1394-2 decision 1).
+            // runtime's planners on their one route, headless (ADR-t1433-2
+            // decision 3).
             expected["roles"] = dagq::domain::actor_model::ModelRole::ALL
                 .iter()
                 .map(|role| {
                     let mut entry = serde_json::json!({"provider": "claude", "source": "default",
                                                        "model": null, "effort": null});
                     if *role == dagq::domain::actor_model::ModelRole::RuntimePlanner {
-                        entry["route"] = "interactive".into();
-                        entry["route_source"] = "default".into();
+                        entry["route"] = "headless".into();
                     }
                     (role.as_str().to_owned(), entry)
                 })

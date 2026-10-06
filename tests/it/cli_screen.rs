@@ -1,6 +1,8 @@
 //! Worker screen/send/close-workspaces commands are refused without
-//! touching cmux. Planner screen/send commands keep their screen, key,
-//! answer delivery and actor authorization behavior.
+//! touching cmux. A planner has no screen to read and takes no keys or
+//! answers either (ADR-t1433-2): `planner screen` says so and where its
+//! turns are, and `planner send` is refused, without cmux; who may run
+//! them stays the actors' authorization.
 
 use crate::common;
 
@@ -248,66 +250,66 @@ fn runs_refuse_their_screen_and_typing_without_cmux() {
     );
 }
 
+/// A planner in a workspace (a person's, opened before `dagq plan` was
+/// abolished) has its screen read no more and takes no keys or answers
+/// (ADR-t1433-2): `planner screen` says so, with where a planner's turns
+/// are, and `planner send` is refused with what to do instead; neither
+/// calls cmux or records anything. An unknown planner is the queue's error.
 #[test]
-fn a_planners_screen_is_read_and_sent_keys_by_its_id() {
+fn a_planner_in_a_workspace_has_no_screen_read_and_takes_no_keys_or_answers() {
     let (_dir, db) = queue();
     let queue = SqliteQueue::open(&db).unwrap();
     let planner = queue.open_planner(PlannerOrigin::Person, None).unwrap();
     queue.planner_workspace_created(planner.id, "PW-1").unwrap();
     drop(queue);
     let run = run_in(&db, "asked", false, "WS-1");
-    let long: String = (1..=300).map(|n| format!("line {n}\n")).collect();
-    let cmux = stub_cmux(&db, &format!("{long}\n\n"));
+    let cmux = stub_cmux(&db, READY);
     let cmux = cmux.to_str().unwrap();
     let id = planner.id.to_string();
 
-    let read = ok_as("inbox", &db, &["planner", "screen", &id, "--cmux", cmux]);
-    assert_eq!(
-        read["planner_id"],
-        planner.id.to_string().parse::<i64>().unwrap()
-    );
-    assert_eq!(read["lines"], 40);
-    assert_eq!(read["truncated"], true);
-    let screen = read["screen"].as_str().unwrap();
-    assert!(screen.starts_with("line 261\n") && screen.ends_with("line 300"));
-    let read = ok(
-        &db,
-        &["planner", "screen", &id, "--lines", "1000", "--cmux", cmux],
-    );
-    assert_eq!(read["lines_requested"], 1000);
-    assert_eq!(read["lines_limit"], 200);
-    assert_eq!(read["lines"], 200);
-    assert_eq!(read["screen"].as_str().unwrap().lines().count(), 200);
-    ok(
-        &db,
-        &["planner", "send", &id, "--key", "escape", "--cmux", cmux],
-    );
-    assert!(calls(Path::new(cmux)).contains("send-key --workspace PW-1 -- escape\n"));
-    // A worker's answer is no answer for a planner.
+    for args in [
+        vec!["planner", "screen", &id, "--cmux", cmux],
+        vec!["planner", "screen", &id, "--lines", "1000", "--cmux", cmux],
+    ] {
+        let read = ok_as("inbox", &db, &args);
+        assert_eq!(read["planner_id"], planner.id.as_i64());
+        assert_eq!(read["screen"], Value::Null, "{read}");
+        assert_eq!(read["route"], "interactive");
+        assert!(
+            read["reason"]
+                .as_str()
+                .unwrap()
+                .contains("is not read any more"),
+            "{read}"
+        );
+        assert!(
+            read["turns"]
+                .as_str()
+                .unwrap()
+                .ends_with(&format!("planners/{id}/turns")),
+            "{read}"
+        );
+    }
     let ask = answered_ask(&db, &run, "yes");
-    let failed = failed_with(
-        &[],
-        &db,
-        &["planner", "send", &id, "--answer", &ask, "--cmux", cmux],
-    );
-    assert!(
-        failed["error"]
-            .as_str()
-            .unwrap()
-            .contains("is not a question"),
-        "{failed}"
-    );
+    for args in [
+        vec!["planner", "send", &id, "--key", "escape", "--cmux", cmux],
+        vec!["planner", "send", &id, "--key", "exit", "--cmux", cmux],
+        vec!["planner", "send", &id, "--answer", &ask, "--cmux", cmux],
+    ] {
+        let failed = failed_with(&[], &db, &args);
+        let error = failed["error"].as_str().unwrap();
+        assert!(error.contains("takes no keys or answers"), "{failed}");
+        assert!(error.contains("`answer`"), "{failed}");
+    }
     assert!(
         failed_with(&[], &db, &["planner", "screen", "99", "--cmux", cmux])["error"]
             .as_str()
             .is_some()
     );
-    let reads = events(&db, "screen_read");
-    assert_eq!(reads.len(), 2);
-    assert_eq!(reads[0]["actor"]["role"], "inbox");
-    assert_eq!(reads[0]["payload"]["target"], "planner");
-    assert_eq!(reads[0]["payload"]["workspace_id"], "PW-1");
-    assert_eq!(events(&db, "screen_input_sent").len(), 1);
+    assert_eq!(calls(Path::new(cmux)), "", "nothing read or typed");
+    assert!(events(&db, "screen_read").is_empty());
+    assert!(events(&db, "screen_input_sent").is_empty());
+    assert!(events(&db, "ask_delivered").is_empty());
 }
 
 #[test]
@@ -365,63 +367,4 @@ fn a_planner_a_worker_and_the_jobs_are_refused_and_recorded() {
     assert_eq!(denied[0]["actor"]["role"], "planner");
     assert_eq!(denied[0]["payload"]["capability"], "screen.read");
     assert!(events(&db, "screen_read").is_empty());
-}
-
-/// The answer of a `planner_question` about a task of the proposal a
-/// planner of the runtime's works on is typed into that planner, once: the
-/// ask is claimed and closed, so the supervisor does not type it again.
-#[test]
-fn a_planner_question_is_answered_into_its_planner_once() {
-    let (_dir, db) = queue();
-    ok(&db, &["add", "drafted"]);
-    let proposal = ok(&db, &["submit", "1"])["id"].as_i64().unwrap();
-    let queue = SqliteQueue::open(&db).unwrap();
-    let planner = queue
-        .open_planner(
-            PlannerOrigin::Runtime,
-            Some(dagq::domain::ProposalId::new(proposal)),
-        )
-        .unwrap();
-    queue.planner_workspace_created(planner.id, "PW-R").unwrap();
-    drop(queue);
-    let cmux = stub_cmux(&db, READY);
-    let cmux = cmux.to_str().unwrap();
-    let ask = ok(
-        &db,
-        &[
-            "ask",
-            "--task",
-            "1",
-            "--kind",
-            "planner_question",
-            "--because",
-            "scope",
-            "--question",
-            "Which goal?",
-        ],
-    )["id"]
-        .to_string();
-    ok(&db, &["answer", &ask, "--text", "goal 3"]);
-    let id = planner.id.to_string();
-    let sent = ok_as(
-        "inbox",
-        &db,
-        &["planner", "send", &id, "--answer", &ask, "--cmux", cmux],
-    );
-    assert_eq!(sent["outcome"], "submitted");
-    assert!(
-        calls(Path::new(cmux)).contains(&format!(
-            "send --workspace PW-R -- answer to ask {ask}: goal 3\n"
-        )),
-        "{}",
-        calls(Path::new(cmux))
-    );
-    assert_eq!(events(&db, "ask_delivered").len(), 1);
-    // Delivered and closed, it is typed no more.
-    let failed = failed_with(
-        &[],
-        &db,
-        &["planner", "send", &id, "--answer", &ask, "--cmux", cmux],
-    );
-    assert!(failed["error"].as_str().is_some(), "{failed}");
 }

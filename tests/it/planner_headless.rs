@@ -1,12 +1,11 @@
-//! The route of the runtime's planners (ADR-t1394-2 decisions 1 and 2):
-//! under `[roles.runtime_planner] route = "headless"` a planner the
-//! supervisor opens runs one call of the agent (the stub `claude` of
-//! [`headless_claude`]) per turn, its revise comes as the next request in
-//! its directory's `turns/`, its turns are events of the queue that name
-//! it, and its wrapper, started in the background under `[headless]
-//! wrapper = "background"` (ADR-t1404-1 decision 8), ends on the exit
-//! request. Without the key, and with `route = "interactive"`, the planner
-//! opens in a workspace and is typed into as before.
+//! The runtime's planners run headless only (ADR-t1394-2 decision 2,
+//! ADR-t1433-2 decision 3): a planner the supervisor opens runs one call
+//! of the agent (the stub `claude` of [`headless_claude`]) per turn, its
+//! revise comes as the next request in its directory's `turns/`, its turns
+//! are events of the queue that name it, and its wrapper, started in the
+//! background without a workspace (ADR-t1404-1 decision 8), ends on the
+//! exit request. `[roles.runtime_planner] route` and `[headless] wrapper`
+//! of `dagq.toml`, whatever they say, are accepted and ignored.
 
 use crate::plan_review::{
     PlanWorkspace, StubReviewer, add, events, fixture, git, open_goal, options, runtime_draft,
@@ -98,14 +97,16 @@ fn revise(reasons: &[&str]) -> Value {
     json!({"verdict": "revise", "reasons": reasons, "summary": "not yet"})
 }
 
-/// A fixture whose runtime's planners run headless in the background, and
-/// whose planner's agent is the stub of [`headless_claude`] running `turns`
-/// (with `$DB` naming the queue, which is not the checkout's).
+/// A fixture whose planner's agent is the stub of [`headless_claude`]
+/// running `turns` (with `$DB` naming the queue, which is not the
+/// checkout's). Its `dagq.toml` still names the interactive route and a
+/// workspace for the wrapper, which the runtime's planners ignore: they
+/// run headless in the background (ADR-t1433-2 decision 3).
 pub(crate) fn headless_fixture(turns: &str) -> crate::plan_review::Fixture {
     let mut fx = fixture();
     configure(
         &fx.repo,
-        "[roles.runtime_planner]\nroute = \"headless\"\n\n[headless]\nwrapper = \"background\"\n",
+        "[roles.runtime_planner]\nroute = \"interactive\"\n\n[headless]\nwrapper = \"workspace\"\n",
     );
     let stub = headless_claude(fx.db.parent().unwrap(), &fx.db);
     set_turns(fx.db.parent().unwrap(), turns);
@@ -142,13 +143,13 @@ pub(crate) fn supervise_until(
     }
 }
 
-/// Acceptance: with the route set to headless, the planner the supervisor
-/// opens for a revise runs in the background without a workspace, its
-/// prompt as its first turn; its turn's output is kept in `turns/`, the
+/// Acceptance: the planner the supervisor opens for a revise runs in the
+/// background without a workspace, its prompt as its first turn, though
+/// `dagq.toml` names the interactive route; its turn's output is kept in `turns/`, the
 /// turn is recorded on the queue with its ID, and once it submitted the
 /// proposal again the exit request ends its wrapper and the runtime closes
-/// it. Nothing is typed and no workspace is opened; `doctor` reads the
-/// route.
+/// it. Nothing is typed and no workspace is opened; `doctor` shows the
+/// one route.
 #[test]
 fn a_headless_planner_opened_for_a_revise_runs_its_prompt_as_a_turn_and_ends_on_the_exit_request() {
     let fx = headless_fixture(
@@ -162,7 +163,7 @@ fn a_headless_planner_opened_for_a_revise_runs_its_prompt_as_a_turn_and_ends_on_
         revise(&["split it"]),
         json!({"verdict": "pass", "reasons": [], "summary": "ok"}),
     ]);
-    let backend = PlanWorkspace::default();
+    let backend = PlanWorkspace::running();
     supervise_until(
         &fx,
         &backend,
@@ -182,7 +183,6 @@ fn a_headless_planner_opened_for_a_revise_runs_its_prompt_as_a_turn_and_ends_on_
     let handle = planner.workspace_id.clone().unwrap();
     assert!(is_background(&handle), "{handle}");
     // Started in the background, as a headless planner of the runtime's.
-    assert!(backend.opened().is_empty(), "no workspace");
     assert!(backend.texts().is_empty(), "nothing typed");
     let launched = backend.background.launched();
     assert_eq!(launched.len(), 1, "{launched:?}");
@@ -240,10 +240,7 @@ fn a_headless_planner_opened_for_a_revise_runs_its_prompt_as_a_turn_and_ends_on_
     assert!(!dagq::application::WorkspaceBackend::exists(&backend, &handle).unwrap());
     let doctor = crate::common::cli::ok(&fx.db, &["doctor"]);
     assert_eq!(doctor["roles"]["runtime_planner"]["route"], "headless");
-    assert_eq!(
-        doctor["roles"]["runtime_planner"]["route_source"],
-        "dagq.toml"
-    );
+    assert_eq!(doctor["roles"]["runtime_planner"].get("route_source"), None);
 }
 
 /// Acceptance: a headless draft planner that asks a `planner_question`
@@ -270,7 +267,7 @@ say "turn $TURN""#,
     );
     assert_eq!(draft, TaskId::new(2));
     let reviewer = StubReviewer::new(&[json!({"verdict": "pass", "reasons": [], "summary": "ok"})]);
-    let backend = PlanWorkspace::default();
+    let backend = PlanWorkspace::running();
     // Its first turn asks, and it waits for the answer without an exit.
     let open_question = || {
         SqliteQueue::open(&fx.db)
@@ -314,7 +311,6 @@ say "turn $TURN""#,
     );
 
     assert!(backend.texts().is_empty(), "nothing typed");
-    assert!(backend.opened().is_empty(), "no workspace");
     let turns = dir.join("turns");
     let request: Value =
         serde_json::from_str(&fs::read_to_string(turns.join("request-000001.taken.json")).unwrap())
@@ -349,72 +345,82 @@ say "turn $TURN""#,
     assert_eq!(queue.planner(planner.id).unwrap().exit_code, Some(0));
 }
 
-/// Acceptance: without the key, and with `route = "interactive"`, the
-/// planner the supervisor opens for a revise is interactive as before: a
-/// workspace whose wrapper is not headless, no `turns/`, and the next
-/// revise typed into its terminal once it is idle.
+/// Acceptance (ADR-t1433-2 decision 3): with the old `route =
+/// "interactive"` of `[roles.runtime_planner]`, the planner the supervisor
+/// opens for a revise runs headless: its wrapper starts in the background
+/// (`--headless --background`) and no workspace opens, its directory has
+/// `turns/`, and once it is idle the next revise is written as its next
+/// request (`turn_requested`), never typed. The supervisor warns, once,
+/// that the key is ignored (handled as ADR-t1433-3 decision 2 handles a
+/// switch key). `doctor` shows the one route. That the key loads whatever
+/// its value is the unit test
+/// `run_env::tests::the_old_route_of_the_runtimes_planners_is_accepted_and_ignored`.
 #[test]
-fn without_the_route_or_with_interactive_the_runtimes_planner_opens_a_workspace() {
-    for config in [
-        None,
-        Some("[roles.runtime_planner]\nroute = \"interactive\"\n"),
-    ] {
-        let fx = fixture();
-        if let Some(text) = config {
-            configure(&fx.repo, text);
-        }
-        let mut queue = SqliteQueue::open(&fx.db).unwrap();
-        let task = add(&mut queue, "change", &[TaskId::new(1)], Priority::Normal);
-        let proposal = submit(&mut queue, &[task], None);
-        let reviewer = StubReviewer::new(&[revise(&["split it"]), revise(&["name the test"])]);
-        let backend = PlanWorkspace::default();
-        let settings = options(1, Duration::from_secs(3600));
-        supervise_with(&fx, &backend, &reviewer, &settings);
-        let planners = queue.planners(false).unwrap();
-        assert_eq!(planners.len(), 1, "{config:?}: {planners:?}");
-        let planner = &planners[0];
-        assert_eq!(planner.route, PlannerRoute::Interactive, "{config:?}");
-        assert_eq!(planner.workspace_id.as_deref(), Some("RT1"));
-        assert!(backend.background.launched().is_empty());
-        let commands = backend.commands.lock().unwrap().clone();
-        assert_eq!(commands.len(), 1, "{commands:?}");
-        assert!(commands[0].contains("'planner-session'"), "{commands:?}");
-        assert!(!commands[0].contains("--headless"), "{commands:?}");
-        let dir = planners_dir(&fx.db).join(planner.id.to_string());
-        assert!(!dir.join("turns").exists());
+fn the_old_route_key_is_ignored_and_the_runtimes_planner_runs_headless() {
+    let fx = fixture();
+    configure(
+        &fx.repo,
+        "[roles.runtime_planner]\nroute = \"interactive\"\n",
+    );
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let task = add(&mut queue, "change", &[TaskId::new(1)], Priority::Normal);
+    let proposal = submit(&mut queue, &[task], None);
+    let reviewer = StubReviewer::new(&[revise(&["split it"]), revise(&["name the test"])]);
+    // Parked: the test plays the planner.
+    let backend = PlanWorkspace::default();
+    let settings = options(1, Duration::from_secs(3600));
+    let (telemetry, captured) = dagq::infrastructure::telemetry::Telemetry::capture();
+    telemetry.in_scope(|| supervise_with(&fx, &backend, &reviewer, &settings));
+    let log = captured.text();
+    let warning = "[roles.runtime_planner] route = \\\"interactive\\\" of dagq.toml is ignored";
+    assert_eq!(log.matches(warning).count(), 1, "{log}");
+    let planners = queue.planners(false).unwrap();
+    assert_eq!(planners.len(), 1, "{planners:?}");
+    let planner = &planners[0];
+    assert_eq!(planner.route, PlannerRoute::Headless);
+    let handle = planner.workspace_id.clone().unwrap();
+    assert!(is_background(&handle), "{handle}");
+    let launched = backend.background.launched();
+    assert_eq!(launched.len(), 1, "{launched:?}");
+    assert_eq!(launched[0].0, handle);
+    assert!(launched[0].1.contains("'planner-session'"), "{launched:?}");
+    assert!(launched[0].1.contains("'--headless'"), "{launched:?}");
+    assert!(launched[0].1.contains("'--background'"), "{launched:?}");
+    let dir = planners_dir(&fx.db).join(planner.id.to_string());
+    assert!(dir.join("turns").join("limits.json").is_file());
 
-        // The planner resubmits as its own and is idle: the next revise
-        // is typed into its workspace, not written as a request.
-        crate::plan_review::idle(&queue, &fx.db, planner.id);
-        queue
-            .submit(dagq::domain::Submission {
-                tasks: Vec::new(),
-                goals: Vec::new(),
-                proposal: Some(proposal),
-                owner: dagq::domain::PlannerOwner {
-                    origin: dagq::domain::PlannerOrigin::Runtime,
-                    workspace_id: Some("RT1".into()),
-                },
-            })
-            .unwrap();
-        supervise_with(&fx, &backend, &reviewer, &settings);
-        let texts = backend.texts();
-        assert_eq!(texts.len(), 1, "{config:?}: {texts:?}");
-        assert_eq!(texts[0].0, "RT1");
-        assert!(texts[0].1.contains("name the test"), "{texts:?}");
-        assert!(!dir.join("turns").exists());
-        assert!(queue_events(&fx.db, "turn_requested").is_empty());
-        let doctor = crate::common::cli::ok(&fx.db, &["doctor"]);
-        assert_eq!(doctor["roles"]["runtime_planner"]["route"], "interactive");
-        assert_eq!(
-            doctor["roles"]["runtime_planner"]["route_source"],
-            if config.is_some() {
-                "dagq.toml"
-            } else {
-                "default"
-            }
-        );
-    }
+    // The planner resubmits as its own and is idle: the next revise
+    // is written as its next request, not typed.
+    crate::runtime_support::planner_turns::idle(&queue, &fx.db, planner.id);
+    queue
+        .submit(dagq::domain::Submission {
+            tasks: Vec::new(),
+            goals: Vec::new(),
+            proposal: Some(proposal),
+            owner: dagq::domain::PlannerOwner {
+                origin: dagq::domain::PlannerOrigin::Runtime,
+                workspace_id: Some(handle.clone()),
+            },
+        })
+        .unwrap();
+    supervise_with(&fx, &backend, &reviewer, &settings);
+    assert!(backend.texts().is_empty(), "nothing typed");
+    let requests = crate::runtime_support::planner_turns::turn_requests(&fx.db, planner.id);
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(requests[0]["what"], "revise");
+    assert!(
+        requests[0]["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("name the test"),
+        "{requests:?}"
+    );
+    let requested = queue_events(&fx.db, "turn_requested");
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    assert_eq!(requested[0]["planner_id"], planner.id.as_i64());
+    let doctor = crate::common::cli::ok(&fx.db, &["doctor"]);
+    assert_eq!(doctor["roles"]["runtime_planner"]["route"], "headless");
+    assert_eq!(doctor["roles"]["runtime_planner"].get("route_source"), None);
 }
 
 /// Stops, when the test ends, the turn a test left running: its group and
@@ -453,7 +459,7 @@ say "turn $TURN""#,
     let task = add(&mut queue, "change", &[TaskId::new(1)], Priority::Normal);
     submit(&mut queue, &[task], None);
     let reviewer = StubReviewer::new(&[revise(&["split it"])]);
-    let backend = PlanWorkspace::default();
+    let backend = PlanWorkspace::running();
     let dir = planners_dir(&fx.db).join("1");
     supervise_until(
         &fx,
@@ -510,7 +516,7 @@ fn the_sweep_keeps_a_live_background_planner_and_closes_an_ended_one_as_exited()
     use dagq::application::{ProcessControl, WorkspaceBackend, planner::close_abandoned_planners};
     let fx = fixture();
     let queue = SqliteQueue::open(&fx.db).unwrap();
-    let backend = PlanWorkspace::default();
+    let backend = PlanWorkspace::running();
     let log = fx.db.parent().unwrap().join("wrapper.log");
     let handle = backend
         .launch_background(fx.db.parent().unwrap(), "sleep 600", &[], &log)
@@ -579,7 +585,7 @@ say "turn $TURN""#,
         .unwrap()
         .id;
     let reviewer = StubReviewer::new(&[]);
-    let backend = PlanWorkspace::default();
+    let backend = PlanWorkspace::running();
     let open_question = || {
         SqliteQueue::open(&fx.db)
             .unwrap()

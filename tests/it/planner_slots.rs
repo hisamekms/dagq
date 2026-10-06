@@ -10,6 +10,7 @@ use crate::plan_review::{
     PlanWorkspace, StubReviewer, add, fixture, open_goal, options, runtime_draft, submit,
     supervise_with,
 };
+use crate::runtime_support::planner_turns::{exit_requested, take_turns, turn_requests};
 use dagq::{
     application::{Clock, Generators, TaskStore, planner_idle_marker},
     domain::{
@@ -112,9 +113,10 @@ fn events(queue: &SqliteQueue, kind: &str) -> Vec<Value> {
         .collect()
 }
 
-/// A draft of the runtime's gets its planner (in workspace `RT1`) at
-/// clock 0, which asks a `planner_question`, stops, and is typed the
-/// person's answer at clock 10. Returns the planner and its directory.
+/// A draft of the runtime's gets its headless planner (its wrapper parked)
+/// at clock 0, which asks a `planner_question`, stops, and is sent the
+/// person's answer as its next turn's request at clock 10. Returns the
+/// planner and its directory.
 fn answered_draft_planner(
     fx: &crate::plan_review::Fixture,
     queue: &mut SqliteQueue,
@@ -162,39 +164,50 @@ fn answered_draft_planner(
     touch_ahead(&planner_idle_marker(&dir), 1);
     queue.answer(asked.id, "adopt").unwrap();
     supervise(fx, backend, reviewer, clock, 10);
+    let requests = turn_requests(&fx.db, planner.id);
+    assert_eq!(requests.len(), 1, "{requests:?}");
     assert_eq!(
-        backend.texts(),
-        [(
-            "RT1".to_owned(),
-            format!("answer to ask {}: adopt", asked.id)
-        )]
+        requests[0]["prompt"],
+        format!("answer to ask {}: adopt", asked.id)
     );
+    assert!(backend.texts().is_empty(), "nothing typed");
     (planner.id, dir)
 }
 
-/// Ask 150 and planner 338 of 2026-09-27: the answer was claimed and typed,
-/// the planner took it up and stopped, and the ask closed two seconds
-/// after that. The planner is done: asked to exit, and its row closes once
-/// its session ends. One idle since before the typing (its stamp lost) has
-/// not taken the answer up and is left alone.
+/// The wrapper took the requests waiting in `dir`'s `turns/`, and no turn
+/// of them is recorded yet.
+fn taken_without_a_turn(dir: &Path) {
+    let turns = dir.join("turns");
+    for entry in fs::read_dir(&turns).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_str().unwrap().to_owned();
+        if let Some((seq, false)) = dagq::domain::turn::request_seq(&name) {
+            fs::rename(&path, dagq::domain::turn::taken_path(dir, seq)).unwrap();
+        }
+    }
+}
+
+/// Ask 150 and planner 338 of 2026-09-27: the answer was claimed and sent
+/// as the planner's next turn, the planner took it up in that turn and
+/// stopped, and the ask closed after that. The planner is done: asked to
+/// exit, and its row closes once its session ends. One whose request with
+/// the answer waits in its `turns/` is at work and left alone.
 #[test]
-fn a_planner_idle_after_its_typed_answer_is_ended_even_when_the_ask_closed_later() {
+fn a_planner_that_took_its_answer_in_a_turn_is_ended_even_when_the_ask_closed_later() {
     let fx = fixture();
     let mut queue = SqliteQueue::open(&fx.db).unwrap();
     let backend = PlanWorkspace::default();
     let reviewer = StubReviewer::new(&[json!({"verdict": "pass", "reasons": [], "summary": "ok"})]);
     let clock = Arc::new(Ahead::default());
-    let (planner, dir) = answered_draft_planner(&fx, &mut queue, &backend, &reviewer, &clock);
+    let (planner, _) = answered_draft_planner(&fx, &mut queue, &backend, &reviewer, &clock);
 
-    // Idle since before the typing (clock 5, the claim at 10), the stamp
-    // of the typing lost: it has not taken the answer up.
-    fs::remove_file(dir.join("supervisor-input.json")).unwrap();
-    touch_ahead(&planner_idle_marker(&dir), 5);
+    // The request with the answer waits: it is at work.
     supervise(&fx, &backend, &reviewer, &clock, 20);
-    assert!(backend.exits.lock().unwrap().is_empty());
+    assert!(!exit_requested(&fx.db, planner));
 
-    // It took the answer up and stopped at clock 12; the ask closed at 14.
-    touch_ahead(&planner_idle_marker(&dir), 12);
+    // It took the answer up in a turn and stopped; the ask closed four
+    // seconds after the claim.
+    take_turns(&queue, &fx.db, planner);
     let claimed = events(&queue, "planner_answer_claimed")[0]["claimed_at"]
         .as_i64()
         .unwrap();
@@ -206,7 +219,8 @@ fn a_planner_idle_after_its_typed_answer_is_ended_even_when_the_ask_closed_later
         )
         .unwrap();
     supervise(&fx, &backend, &reviewer, &clock, 20);
-    assert_eq!(*backend.exits.lock().unwrap(), ["RT1".to_owned()]);
+    assert!(exit_requested(&fx.db, planner));
+    assert!(backend.exits.lock().unwrap().is_empty(), "nothing typed");
 
     // Its session ends: the row closes.
     queue
@@ -218,10 +232,11 @@ fn a_planner_idle_after_its_typed_answer_is_ended_even_when_the_ask_closed_later
 }
 
 /// A revise whose owner is gone waits at the limit behind an idle planner
-/// of the runtime's the supervisor takes for busy (idle since before the
-/// typing of its answer, the stamp lost). Past the timeout the inbox is
-/// told which planner holds the limit and why, the planner is asked to
-/// exit, and once it ended the revise gets a planner of the runtime's.
+/// of the runtime's the supervisor takes for busy (its wrapper took the
+/// request with the answer, and no turn of it is recorded). Past the
+/// timeout the inbox is told which planner holds the limit and why, the
+/// planner is asked to exit, and once it ended the revise gets a planner
+/// of the runtime's.
 #[test]
 fn a_revise_at_the_limit_names_its_holders_and_frees_a_place_past_the_timeout() {
     let fx = fixture();
@@ -232,7 +247,7 @@ fn a_revise_at_the_limit_names_its_holders_and_frees_a_place_past_the_timeout() 
     })]);
     let clock = Arc::new(Ahead::default());
     let (planner, dir) = answered_draft_planner(&fx, &mut queue, &backend, &reviewer, &clock);
-    fs::remove_file(dir.join("supervisor-input.json")).unwrap();
+    taken_without_a_turn(&dir);
     touch_ahead(&planner_idle_marker(&dir), 5);
 
     let task = add(&mut queue, "split", &[TaskId::new(1)], Priority::Normal);
@@ -242,13 +257,13 @@ fn a_revise_at_the_limit_names_its_holders_and_frees_a_place_past_the_timeout() 
         queue.show_proposal(proposal).unwrap().status(),
         ProposalStatus::Revising
     );
-    assert_eq!(backend.opened().len(), 1);
-    assert!(backend.exits.lock().unwrap().is_empty());
+    assert_eq!(backend.launched().len(), 1);
+    assert!(!exit_requested(&fx.db, planner));
 
     // Within the timeout, the revise waits and the planner is kept.
     supervise(&fx, &backend, &reviewer, &clock, 60);
     assert!(events(&queue, "planner_unresponsive").is_empty());
-    assert!(backend.exits.lock().unwrap().is_empty());
+    assert!(!exit_requested(&fx.db, planner));
 
     // Past it: the inbox is told of the holder and why it holds.
     supervise(
@@ -273,7 +288,8 @@ fn a_revise_at_the_limit_names_its_holders_and_frees_a_place_past_the_timeout() 
         "{reason}"
     );
     // And the idle planner is asked to exit to free its place.
-    assert_eq!(*backend.exits.lock().unwrap(), ["RT1".to_owned()]);
+    assert!(exit_requested(&fx.db, planner));
+    assert!(backend.exits.lock().unwrap().is_empty(), "nothing typed");
     let released = events(&queue, "planner_released");
     assert_eq!(released.len(), 1, "{released:?}");
     assert_eq!(released[0]["planner_id"], json!(planner));
@@ -289,7 +305,7 @@ fn a_revise_at_the_limit_names_its_holders_and_frees_a_place_past_the_timeout() 
     let open = queue.planners(false).unwrap();
     assert_eq!(open.len(), 1, "{open:?}");
     assert_eq!(open[0].proposal_id, Some(proposal));
-    assert_eq!(backend.opened().len(), 2);
+    assert_eq!(backend.launched().len(), 2);
 }
 
 /// A planner whose `planner_question` waits on a person holds its place
@@ -357,9 +373,57 @@ fn a_planner_waiting_on_a_person_keeps_its_place_past_the_timeout() {
         told[0]["holders"][0]["busy"],
         json!(["planner_question_open"])
     );
-    assert!(backend.exits.lock().unwrap().is_empty());
+    assert!(!exit_requested(&fx.db, planner.id));
     assert!(events(&queue, "planner_released").is_empty());
-    assert_eq!(backend.opened().len(), 1);
+    assert_eq!(backend.launched().len(), 1);
+}
+
+/// A runtime's planner whose wrapper runs but has not recorded its agent's
+/// pid is `opening`, whatever its idle marker shows, and is not asked to
+/// exit; once the agent is recorded it is `idle` with its pid (task 1329:
+/// `dagq planners` showed idle planners without `agent_pid`). Moved here
+/// from `planner_screen_idle` by task 1441, without the screen.
+#[test]
+fn a_runtime_planner_is_idle_only_once_its_agent_is_recorded() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let goal = open_goal(&mut queue);
+    runtime_draft(
+        &mut queue,
+        "gap",
+        Some(goal),
+        DraftOrigin::GoalGap,
+        json!({"findings": ["the acceptance names a check nobody runs"]}),
+    );
+    let backend = PlanWorkspace::default();
+    let reviewer = StubReviewer::new(&[]);
+    let clock = Arc::new(Ahead::default());
+    supervise(&fx, &backend, &reviewer, &clock, 0);
+    let planner = queue.planners(false).unwrap().remove(0);
+    assert_eq!(planner.origin, PlannerOrigin::Runtime);
+    let me = std::process::id();
+    queue.register_planner_wrapper(planner.id, me).unwrap();
+    heartbeat_ahead(&fx.db);
+    let dir = planners_dir(&fx.db).join(planner.id.to_string());
+    fs::write(planner_idle_marker(&dir), "{}").unwrap();
+    let listed =
+        || dagq::lifecycle::planners(&fx.db, &backend, false).unwrap()["planners"][0].clone();
+
+    for at in [1, 7] {
+        supervise(&fx, &backend, &reviewer, &clock, at);
+        let view = listed();
+        assert_eq!(view["state"], "opening", "{view}");
+        assert_eq!(view["alive"], true);
+        assert_eq!(view["idle_since"], Value::Null);
+        assert_eq!(view["agent_pid"], Value::Null);
+    }
+    assert!(!exit_requested(&fx.db, planner.id));
+
+    queue.register_planner_agent(planner.id, me, me).unwrap();
+    let view = listed();
+    assert_eq!(view["state"], "idle", "{view}");
+    assert!(view["idle_since"].is_i64(), "{view}");
+    assert_eq!(view["agent_pid"], json!(me));
 }
 
 /// Without `--runtime-planners`, `[supervisor] runtime_planners` of the

@@ -70,7 +70,7 @@ What the `dagq-planner` skill's sections 1 to 3 name in short.
 
 `"$DAGQ" ask --task ID --kind planner_question --because scope --question '...'` (everything the person needs, the recommendation), report and stop. The answer arrives as `answer to ask <id>: ...`; apply it. A revise left unanswered is told to the inbox (`check the planner`).
 
-People no longer open planners (ADR-t1394-1: `dagq plan` is refused). A person's planner opened before keeps running until it ends: once its agent has exited (`/exit`, or `planner send --key exit`), the supervisor closes the workspace and its record 60 seconds later, recorded as `planner_closed` (ADR-t1300-1).
+People no longer open planners (ADR-t1394-1: `dagq plan` is refused). A person's planner opened before keeps running until it ends: once its agent has exited (the person types `/exit` in that workspace; `planner send` is refused), the supervisor closes the workspace and its record 60 seconds later, recorded as `planner_closed` (ADR-t1300-1).
 
 A ready task plan review must change is moved back to `submitted` (never claimed) into a proposal of its own for a runtime planner, with the reasons: fix it and `submit --proposal N`. A person's concern (`approve_plan`) goes to the inbox, never to a planner; its `send_back` returns as a revise.
 

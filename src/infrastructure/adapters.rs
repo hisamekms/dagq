@@ -7,7 +7,7 @@ use crate::{
         stats::WorkspaceListing,
     },
     domain::{
-        ActorRole, CommitSha, PlannerOrigin, TaskId, TaskRun,
+        ActorRole, CommitSha, TaskId, TaskRun,
         disk::ProcessExecutable,
         headless_job::JobAccess,
         landing_branch::{self, LandingBranch, PushTarget, RepositoryConfig, RepositorySettings},
@@ -39,8 +39,8 @@ use std::{
 pub use crate::application::{
     SOCKET_PASSWORD_ENV,
     naming::{
-        ask_notification_title, inbox_workspace_name, planner_workspace_name, shell_join,
-        shell_quote, supervisor_workspace_name, workspace_description, workspace_group_name,
+        ask_notification_title, inbox_workspace_name, shell_join, shell_quote,
+        supervisor_workspace_name, workspace_description, workspace_group_name,
     },
     path_text,
 };
@@ -3168,7 +3168,6 @@ impl AgentProvider for ClaudeCode {
         write_settings(
             &settings,
             ActorRole::Worker,
-            None,
             &run.idle_marker_path()?,
             direct_tools_log(run_dir).as_deref(),
         )?;
@@ -3196,7 +3195,6 @@ impl AgentProvider for ClaudeCode {
         write_settings(
             &settings,
             ActorRole::Worker,
-            None,
             &run.idle_marker_path()?,
             direct_tools_log(run_dir).as_deref(),
         )?;
@@ -3216,18 +3214,13 @@ impl AgentProvider for ClaudeCode {
 
     /// `claude` in the checkout with the planner directory's settings (its
     /// `Stop` hook writes the idle marker there), its debug file, the
-    /// directory added, and the plugin directory when one was given. The
-    /// settings of a planner the runtime started also turn the prompt
-    /// suggestions off; a person's planner keeps them.
+    /// directory added, and the plugin directory when one was given. Only a
+    /// person's planner runs it, whose settings keep the prompt
+    /// suggestions; a planner of the runtime's runs headless turns
+    /// ([`Self::turn_command`], ADR-t1433-2 decision 3).
     fn planner_command(&self, planner: &PlannerCommand<'_>) -> Result<CommandSpec> {
         let settings = planner.dir.join("claude-settings.json");
-        write_settings(
-            &settings,
-            ActorRole::Planner,
-            Some(planner.origin),
-            &planner.idle_marker(),
-            None,
-        )?;
+        write_settings(&settings, ActorRole::Planner, &planner.idle_marker(), None)?;
         let mut command = CommandSpec::new(&self.executable);
         command
             .current_dir(planner.cwd)
@@ -3295,7 +3288,6 @@ impl AgentProvider for ClaudeCode {
         write_settings(
             &settings,
             ActorRole::ReviewJob,
-            None,
             // The review has no hook to write a marker with.
             run_dir,
             None,
@@ -3606,16 +3598,14 @@ pub enum AgentSettings {
     Session { suggestions: bool },
 }
 
-/// The settings of the agent of `role`, a planner's by its `origin`: a
-/// worker and a planner the runtime opened are sessions without
-/// suggestions, a person's planner keeps them, the review has its own, and
-/// the rest none.
-pub fn agent_settings(role: ActorRole, origin: Option<PlannerOrigin>) -> AgentSettings {
+/// The settings of the agent of `role`: a worker's session is without
+/// suggestions, the session of a planner in a terminal (only a person's,
+/// ADR-t1433-2 decision 3) keeps them, the review has its own, and the
+/// rest none.
+pub fn agent_settings(role: ActorRole) -> AgentSettings {
     match role {
         ActorRole::Worker => AgentSettings::Session { suggestions: false },
-        ActorRole::Planner => AgentSettings::Session {
-            suggestions: origin == Some(PlannerOrigin::Person),
-        },
+        ActorRole::Planner => AgentSettings::Session { suggestions: true },
         ActorRole::ReviewJob => AgentSettings::Review,
         _ => AgentSettings::None,
     }
@@ -3720,8 +3710,7 @@ fn review_disallowed_tools(access: JobAccess) -> Vec<&'static str> {
     tools
 }
 
-/// Write the settings of the agent of `role` (a planner's by its
-/// `origin`) whose idle marker is `idle_marker` to `path`: the one place
+/// Write the settings of the agent of `role` whose idle marker is `idle_marker` to `path`: the one place
 /// the role's settings ([`agent_settings`]) and the `permissions.deny` of
 /// its policy ([`permission_deny`]) become Claude Code's, with the hooks
 /// counting the built-in tools to `direct_tools` when it is given
@@ -3729,12 +3718,11 @@ fn review_disallowed_tools(access: JobAccess) -> Vec<&'static str> {
 fn write_settings(
     path: &Path,
     role: ActorRole,
-    origin: Option<PlannerOrigin>,
     idle_marker: &Path,
     direct_tools: Option<&Path>,
 ) -> Result<()> {
     let deny = permission_deny(role);
-    let text = match agent_settings(role, origin) {
+    let text = match agent_settings(role) {
         AgentSettings::None => return Ok(()),
         AgentSettings::Review => review_settings(&deny)?,
         AgentSettings::Session { suggestions: true } => stop_hook_settings(idle_marker, &deny)?,
@@ -3938,12 +3926,13 @@ pub fn stop_hook_settings(idle_marker: &Path, deny: &[String]) -> Result<String>
     }))?)
 }
 
-/// The settings of a session the runtime starts (a worker, its resume and
-/// a planner the runtime starts): [`stop_hook_settings`] with Claude Code's
-/// prompt suggestions off (`promptSuggestionEnabled: false`). A suggestion
-/// fills the input box with grey text that reads on the screen like a
-/// half-typed message, and nobody types in these sessions (goal 48). The
-/// sessions a person works in (the inbox, a person's planner) keep them.
+/// The settings of a session the runtime starts (a worker and its resume):
+/// [`stop_hook_settings`] with Claude Code's prompt suggestions off
+/// (`promptSuggestionEnabled: false`). A suggestion fills the input box
+/// with grey text that reads on the screen like a half-typed message, and
+/// nobody types in these sessions (goal 48). The sessions a person works
+/// in (the inbox, a person's planner) keep them; a planner of the
+/// runtime's has no screen (ADR-t1433-2).
 pub fn runtime_session_settings(idle_marker: &Path, deny: &[String]) -> Result<String> {
     let mut settings: serde_json::Value =
         serde_json::from_str(&stop_hook_settings(idle_marker, deny)?)?;
@@ -3970,9 +3959,7 @@ pub const HEADLESS_DENIED_TOOLS: [&str; 1] = ["AskUserQuestion"];
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{
-        PlannerId, PlannerOrigin, ProposalId, Provider, RunId, RunStatus, SessionRole,
-    };
+    use crate::domain::{Provider, RunId, RunStatus, SessionRole};
 
     #[test]
     fn worktree_remove_and_repair_commands_fix_the_message_locale() {
@@ -4809,44 +4796,35 @@ mod tests {
         assert!(report.error.is_none() && report.reason.is_none());
     }
 
-    /// A planner the runtime started turns Claude Code's prompt
-    /// suggestions off like a worker; a person's planner keeps them (goal
-    /// 48), with the same hooks either way.
+    /// The planner a person works in keeps Claude Code's prompt
+    /// suggestions (goal 48), with the session's hooks and the planner's
+    /// policy; a planner of the runtime's runs headless turns and never
+    /// gets these settings (ADR-t1433-2).
     #[test]
-    fn only_a_runtime_planner_turns_the_prompt_suggestions_off() {
+    fn a_persons_planner_keeps_the_prompt_suggestions() {
         let claude = ClaudeCode {
             executable: "/bin/claude".into(),
         };
-        let settings_of = |origin| {
-            let dir = tempfile::tempdir().unwrap();
-            let planner = PlannerCommand {
-                origin,
-                dir: dir.path(),
-                cwd: dir.path(),
-                prompt: "plan",
-                plugin_dir: None,
-            };
-            let command = claude.planner_command(&planner).unwrap();
-            let path = dir.path().join("claude-settings.json");
-            assert!(command.get_args().any(|arg| arg == path.as_os_str()));
-            let settings: Value =
-                serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-            let expected: Value = serde_json::from_str(
-                &stop_hook_settings(&planner.idle_marker(), &permission_deny(ActorRole::Planner))
-                    .unwrap(),
-            )
-            .unwrap();
-            (settings, expected)
+        let dir = tempfile::tempdir().unwrap();
+        let planner = PlannerCommand {
+            dir: dir.path(),
+            cwd: dir.path(),
+            prompt: "plan",
+            plugin_dir: None,
         };
-        let (runtime, mut expected) = settings_of(PlannerOrigin::Runtime);
-        assert_eq!(runtime["promptSuggestionEnabled"], Value::Bool(false));
-        expected["promptSuggestionEnabled"] = Value::Bool(false);
-        assert_eq!(runtime, expected);
-        let (person, expected) = settings_of(PlannerOrigin::Person);
-        assert_eq!(person.get("promptSuggestionEnabled"), None);
-        assert_eq!(person, expected);
-        // Either way the planner's policy denies it landing and answering.
-        let deny = person["permissions"]["deny"].as_array().unwrap();
+        let command = claude.planner_command(&planner).unwrap();
+        let path = dir.path().join("claude-settings.json");
+        assert!(command.get_args().any(|arg| arg == path.as_os_str()));
+        let settings: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let expected: Value = serde_json::from_str(
+            &stop_hook_settings(&planner.idle_marker(), &permission_deny(ActorRole::Planner))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(settings.get("promptSuggestionEnabled"), None);
+        assert_eq!(settings, expected);
+        // The planner's policy denies it landing and answering.
+        let deny = settings["permissions"]["deny"].as_array().unwrap();
         for rule in [
             "Bash(pkill:*)",
             "Bash(dagq integrate:*)",
@@ -5359,7 +5337,6 @@ mod tests {
         let planner_dir = dir.path().join("session");
         fs::create_dir_all(&planner_dir).unwrap();
         let planner = PlannerCommand {
-            origin: PlannerOrigin::Runtime,
             dir: &planner_dir,
             cwd: &planner_dir,
             prompt: "plan",
@@ -5505,20 +5482,12 @@ mod tests {
         for role in ActorRole::ALL {
             let expected = match role {
                 ActorRole::Worker => AgentSettings::Session { suggestions: false },
-                ActorRole::Planner => AgentSettings::Session { suggestions: false },
+                ActorRole::Planner => AgentSettings::Session { suggestions: true },
                 ActorRole::ReviewJob => AgentSettings::Review,
                 _ => AgentSettings::None,
             };
-            assert_eq!(agent_settings(role, None), expected, "{role:?}");
+            assert_eq!(agent_settings(role), expected, "{role:?}");
         }
-        assert_eq!(
-            agent_settings(ActorRole::Planner, Some(PlannerOrigin::Person)),
-            AgentSettings::Session { suggestions: true }
-        );
-        assert_eq!(
-            agent_settings(ActorRole::Planner, Some(PlannerOrigin::Runtime)),
-            AgentSettings::Session { suggestions: false }
-        );
     }
 
     /// A run whose worktree and run directory are under `dir`.
@@ -5559,21 +5528,10 @@ mod tests {
     #[test]
     fn workspace_names_carry_the_repository() {
         // A root with no basename falls back to the path itself.
-        assert_eq!(
-            planner_workspace_name(Path::new("/"), PlannerId::new(1), None),
-            "[/]planner#1"
-        );
+        assert_eq!(supervisor_workspace_name(Path::new("/")), "[/]supervisor");
         assert_eq!(
             supervisor_workspace_name(Path::new("/home/u/ghq/dagq")),
             "[dagq]supervisor"
-        );
-        assert_eq!(
-            planner_workspace_name(
-                Path::new("/home/u/ghq/dagq"),
-                PlannerId::new(3),
-                Some(ProposalId::new(7))
-            ),
-            "[dagq]planner#3 - proposal 7"
         );
         assert_eq!(
             inbox_workspace_name(Path::new("/tmp/my repo/")),

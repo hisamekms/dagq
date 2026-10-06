@@ -30,8 +30,8 @@ impl Supervisor<'_> {
     /// that still has it keeps loading (ADR-t1433-3 decision 2). Until the
     /// warning is given, the setting is read as each session starts, so a
     /// `dagq.toml` that comes to say `"workspace"` later is warned of too.
-    /// A runtime planner still follows it until its own workspace route
-    /// goes.
+    /// A planner of the runtime's ignores it as well: its wrapper always
+    /// starts in the background (ADR-t1433-2 decision 3).
     pub(super) fn warn_ignored_wrapper_setting(&mut self) {
         let warn = warns_of_ignored_setting(self.wrapper_setting_warned, || {
             self.verifier.headless_wrapper_setting()

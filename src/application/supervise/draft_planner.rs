@@ -28,13 +28,15 @@ use crate::{
 };
 
 impl Supervisor<'_> {
-    /// Deliver the answered `planner_question` asks: typed into the live
-    /// planner that works on the ask's task once it stopped after asking,
-    /// handed to a new planner when the draft's one is gone (within the
-    /// limit, counted in `runtime_open`), or closed when the draft moved on.
-    /// The typing is claimed first (`planner_answer_claimed`), so only one
-    /// supervisor types an answer. A typing that fails records
-    /// `ask_delivery_failed` and leaves the answer to the inbox.
+    /// Deliver the answered `planner_question` asks: sent to the live
+    /// planner that works on the ask's task once it stopped after asking (as
+    /// its next turn; typed only into a person's planner opened before
+    /// `dagq plan` was abolished), handed to a new planner when the draft's
+    /// one is gone (within the limit, counted in `runtime_open`), or closed
+    /// when the draft moved on. The sending is claimed first
+    /// (`planner_answer_claimed`), so only one supervisor sends an answer. A
+    /// sending that fails records `ask_delivery_failed` and leaves the
+    /// answer to the inbox.
     pub(super) fn deliver_planner_answers(
         &mut self,
         views: &[PlannerView],

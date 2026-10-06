@@ -142,7 +142,8 @@ impl fmt::Display for FindingId {
 }
 
 /// The ID of a planning request: the `plan_requests.id` rowid
-/// (ADR-t1394-1 decision 2). Its planner's workspace title carries it.
+/// (ADR-t1394-1 decision 2). Its planner's row carries it
+/// (`planners.request_id`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RequestId(i64);
@@ -164,7 +165,9 @@ impl fmt::Display for RequestId {
 }
 
 /// The ID of a planner session: the `planners.id` rowid (ADR-0041
-/// decisions 1, 6). Its workspace title and directory carry it.
+/// decisions 1, 6). Its directory carries it, and so does the workspace
+/// title of a person's planner opened before ADR-t1394-1 (a planner of the
+/// runtime's has no workspace, ADR-t1433-2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PlannerId(i64);

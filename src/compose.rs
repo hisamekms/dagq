@@ -2675,12 +2675,11 @@ fn doctor_roles(queue: &SqliteQueue) -> serde_json::Value {
             "model": launch.model,
             "effort": launch.effort,
         });
-        // The route the runtime's planners open on, and where it comes
-        // from (ADR-t1394-2 decision 1).
+        // The runtime's planners run headless only (ADR-t1433-2 decision
+        // 3): there is no route to choose, and `route` of the table is
+        // ignored.
         if role == ModelRole::RuntimePlanner {
-            let (route, route_source) = models.planner_route();
-            entry["route"] = serde_json::json!(route);
-            entry["route_source"] = serde_json::json!(route_source);
+            entry["route"] = serde_json::json!(crate::domain::PlannerRoute::Headless);
         }
         roles.insert(role.as_str().to_owned(), entry);
     }
@@ -3257,10 +3256,13 @@ pub fn planners(db: &Path, cmux: &dyn WorkspaceBackend, all: bool) -> Result<Val
     OneShot::system().planners(db, cmux, all)
 }
 
-/// The session wrapper of a planner (`planner-session`), run from its cmux
-/// workspace: stdout must remain a terminal for Claude. Refused, it closes
-/// its own workspace (`CMUX_WORKSPACE_ID`) through `cmux` when the planner
-/// records no such workspace (task 806).
+/// The session wrapper of a planner (`planner-session`). A planner of the
+/// runtime's starts it with `--headless --background`, a process of its
+/// own with no terminal and no workspace (ADR-t1433-2). Without them it is
+/// a person's planner's wrapper, run from its cmux workspace: stdout must
+/// remain a terminal for Claude, and, refused, it closes its own workspace
+/// (`CMUX_WORKSPACE_ID`) through `cmux` when the planner records no such
+/// workspace (task 806).
 pub fn planner_session(
     db: &Path,
     id: PlannerId,

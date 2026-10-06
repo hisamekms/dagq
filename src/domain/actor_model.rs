@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    DomainError, PlannerRoute, Provider,
+    DomainError, Provider,
     provider_switch::SwitchReason,
     worker_model::{MEDIUM, OPUS},
 };
@@ -97,17 +97,18 @@ pub fn raise(effort: &str) -> &str {
 
 /// `[roles.<role>]` of `dagq.toml`: a provider, a model and an effort, any
 /// of which may be left out (the default's then). The model is a name of
-/// the role's provider's. `[roles.runtime_planner]` may also name the
-/// route its planners run on (ADR-t1394-2 decision 1).
+/// the role's provider's.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RoleModel {
     pub provider: Option<Provider>,
     pub model: Option<String>,
     pub effort: Option<String>,
-    pub route: Option<PlannerRoute>,
 }
 
-/// The key of `[roles.runtime_planner]` that names its planners' route.
+/// The key of `[roles.runtime_planner]` that named its planners' route
+/// (ADR-t1394-2 decision 1). The runtime's planners run headless only
+/// (ADR-t1433-2 decision 3): the key is accepted, whatever its value, and
+/// ignored, so a `dagq.toml` that still has it keeps loading.
 pub const ROUTE_KEY: &str = "route";
 
 impl RoleModel {
@@ -117,13 +118,6 @@ impl RoleModel {
     /// provider with no implementation for the role is refused, and so is
     /// a Claude model given to Codex (a model is the provider's own name).
     pub fn check(&self, role: ModelRole) -> Result<(), String> {
-        if self.route.is_some() && role != ModelRole::RuntimePlanner {
-            return Err(format!(
-                "{ROUTE_KEY} is a key of [roles.{}] only; the {} role has no route to choose",
-                ModelRole::RuntimePlanner.as_str(),
-                role.as_str()
-            ));
-        }
         let Some(provider) = self.provider else {
             return Ok(());
         };
@@ -151,9 +145,26 @@ impl RoleModel {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RoleModels {
     roles: Vec<(ModelRole, RoleModel)>,
+    /// The value of `[roles.runtime_planner] route` as `dagq.toml` writes
+    /// it, accepted and ignored (ADR-t1433-2 decision 3): only to warn that
+    /// it chooses nothing.
+    ignored_planner_route: Option<String>,
 }
 
 impl RoleModels {
+    /// Note that `[roles.runtime_planner] route` says `value`, which is
+    /// ignored ([`ROUTE_KEY`]).
+    pub fn ignore_planner_route(&mut self, value: String) {
+        self.ignored_planner_route = Some(value);
+    }
+
+    /// `[roles.runtime_planner] route` as `dagq.toml` writes it, `None`
+    /// without the key: it chooses nothing, the runtime's planners running
+    /// headless only (ADR-t1433-2 decision 3).
+    pub fn ignored_planner_route(&self) -> Option<&str> {
+        self.ignored_planner_route.as_deref()
+    }
+
     /// The table of `role`, empty until a key is set.
     pub fn entry(&mut self, role: ModelRole) -> &mut RoleModel {
         let at = match self.roles.iter().position(|(known, _)| *known == role) {
@@ -193,19 +204,6 @@ impl RoleModels {
         }
     }
 
-    /// The route the runtime's planners open on and where it comes from
-    /// (ADR-t1394-2 decision 1): `[roles.runtime_planner] route`
-    /// (`dagq.toml`), else interactive (`default`) until the evaluation.
-    pub fn planner_route(&self) -> (PlannerRoute, LaunchSource) {
-        match self
-            .get(ModelRole::RuntimePlanner)
-            .and_then(|table| table.route)
-        {
-            Some(route) => (route, LaunchSource::Config),
-            None => (PlannerRoute::Interactive, LaunchSource::Default),
-        }
-    }
-
     /// Whether a job of `role` moves to the other provider when its own
     /// cannot be used (ADR-t1063-1 decision 4): only a role whose table
     /// names its provider; one that names none runs and waits as before,
@@ -220,7 +218,8 @@ impl RoleModels {
     /// the model or effort it leaves out; on Codex a model left out is
     /// Codex's own default, and the effort `medium`.
     pub fn launch(&self, role: ModelRole) -> ActorLaunch {
-        // A table that names only the route gives the session nothing.
+        // A table that names only the ignored route gives the session
+        // nothing.
         let table = self.get(role).filter(|table| {
             table.provider.is_some() || table.model.is_some() || table.effort.is_some()
         });

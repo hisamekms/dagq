@@ -74,7 +74,7 @@ pub fn planner_log(
             }
         }
         Some(_) => bail!(
-            "planner {planner} runs in a workspace, not the background: read it with `planner screen` (a headless planner's turns are in {})",
+            "planner {planner} runs in a workspace, not the background: its screen is not read any more (ADR-t1433-2), so read it in its workspace in your own terminal (a headless planner's turns are in {})",
             turns_dir(&dir).display()
         ),
         None => bail!("planner {planner} has started no session yet"),

@@ -125,13 +125,12 @@ provider = "codex"
 provider = "codex"
 
 [roles.runtime_planner]
-# runtime の planner（revise・draft・finding・計画の依頼）を非対話（worker と同じ turn ごとの呼び出し）で動かす
-# （人の 2026-10-02 の決定「runtime の planner を非対話に切り替えて 1 週間測り、問題なければ非対話を続ける」。
-# goal 87、ADR-t1394-2 の決定 1、task 1396・1402。書式と振る舞いは docs/design/supervisor-lifecycle/actor-model.md の
-# 「runtimeのplannerの経路」と plan-planners.md の同じ節）。runtime の既定（書かなければ interactive）は変えず、この repository だけを切り替える。
-# supervisor が planner を開くたびに読むので、着地して main checkout に反映された後に開く planner から効き、動いている planner の経路は変えない。
-# 基準値・評価のコマンド・対話に戻す基準は docs/plans/headless-planner-evaluation.md（戻すときはこの節を消すか route = "interactive" にする）。
-# route を知らない旧バイナリは設定の誤りとして拒むので、固定バイナリが task 1396・1397・1398 を含んでから足した。
+# runtime の planner（revise・draft・finding・計画の依頼）の経路の欄（goal 87、ADR-t1394-2 の決定 1、task 1396・1402 で足した）。
+# task 1441（ADR-t1433-2 の決定 3）から runtime の planner は非対話だけで動き、route は値に関わらず受け付けて無視する
+# （無視することを supervisor が warning で 1 回言う。対話に戻す経路は無い。書式と振る舞いは docs/design/supervisor-lifecycle/actor-model.md の
+# 「runtimeのplannerの経路」と plan-planners.md の同じ節）。欄を残すのは、route を知っていて task 1441 を含まない固定バイナリが、
+# 欄が無ければ runtime の planner を既定の interactive（cmux の workspace）で開くため。欄を消すのは、固定バイナリが task 1441 を
+# 含んだことを確かめてからの別の task（それより前に消すと本番の planner が黙って対話に戻る）。評価（退行の確認）は docs/plans/headless-planner-evaluation.md。
 # provider・model・effort は書かず、Claude の既定のまま（Codex の planner は別の goal）。
 route = "headless"
 
@@ -139,7 +138,7 @@ route = "headless"
 # 非対話の session wrapper を cmux の workspace でなく、supervisor から切り離した background の process として動かす
 # （人の 2026-10-02 の提起、goal 89、ADR-t1404-1 の決定 7、task 1405・1408）。task 1440（ADR-t1433-3 の決定 1・2）から、
 # worker の wrapper はこの欄を受け付けて無視し、値に関わらず background で動く（"workspace" なら警告を出す。戻す経路は無い）。
-# runtime の planner はその workspace の経路を消す task 1441 まで、この欄に従う。書式と振る舞いは
+# runtime の planner も task 1441（ADR-t1433-2 の決定 3）から、この欄を読まずに常に background で動く。書式と振る舞いは
 # docs/design/supervisor-lifecycle/headless-worker.md の「workspaceなしのbackgroundのwrapper」と run-environment.md の [headless] の項。
 # 出力は `dagq run log` / `planner log` で読む。評価（退行の確認）は docs/plans/headless-background-evaluation.md。
 # 欄を消すのは、古い固定バイナリが欄の無い dagq.toml を読めることを確かめてからの別の task（ADR-t1433-3 の決定 2）。

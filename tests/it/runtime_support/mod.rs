@@ -504,6 +504,7 @@ pub use headless_stubs::*;
 mod lost_lease;
 pub use lost_lease::*;
 pub mod planner_prompt_bytes;
+pub mod planner_turns;
 
 pub struct TestProvider {
     pub script: String,

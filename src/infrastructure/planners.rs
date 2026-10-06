@@ -1,7 +1,9 @@
 //! Planner sessions (ADR-0041 decisions 1, 6, 12, 13): one `planners` row
-//! per on-demand planner workspace, with its origin, the proposal the
-//! runtime opened it for, its workspace UUID and what its session wrapper
-//! records (pids, heartbeat, the agent's exit).
+//! per on-demand planner session, with its origin, the proposal the
+//! runtime opened it for, its session's handle in `workspace_id` (the
+//! background wrapper's of a planner of the runtime's, ADR-t1433-2; the
+//! workspace UUID of a person's planner opened before ADR-t1394-1) and
+//! what its session wrapper records (pids, heartbeat, the agent's exit).
 use anyhow::{Result, ensure};
 use rusqlite::{OptionalExtension, Row, params};
 
@@ -106,7 +108,8 @@ impl SqliteQueue {
             .collect::<rusqlite::Result<_>>()?)
     }
 
-    /// The wrapper `pid` started in the planner's workspace. A planner has
+    /// The wrapper `pid` started for the planner (in the background, or in
+    /// the workspace of a person's planner). A planner has
     /// one session: a second wrapper, or one for a closed planner, is refused.
     pub fn register_planner_wrapper(&self, id: PlannerId, pid: u32) -> Result<()> {
         ensure!(

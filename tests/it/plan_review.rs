@@ -1,8 +1,12 @@
 //! Plan review (ADR-0041 decisions 11-15, 17) through the supervisor loop,
 //! with the headless plan review played by a stub provider that prints a
-//! scripted verdict and a cmux double that only records what it is asked.
-//! No task is claimed in these tests: every task that becomes ready waits
-//! for a draft blocker.
+//! scripted verdict. A planner of the runtime's runs headless in the
+//! background (ADR-t1433-2): by default its wrapper is parked and the test
+//! plays the planner (its registration, its idle marker, the turns it
+//! takes); the headless tests run the real wrapper. Only a person's
+//! planner, opened before `dagq plan` was abolished, has a workspace the
+//! double lists and types into. No task is claimed in these tests: every
+//! task that becomes ready waits for a draft blocker.
 
 use crate::common;
 use crate::runtime_support::background_wrappers::BackgroundWrappers;
@@ -311,13 +315,15 @@ pub(crate) fn job_actors(db: &Path) -> Vec<String> {
         .collect()
 }
 
-/// cmux as far as plan review uses it: workspaces it lists (the ones
-/// `listed` and those it opened, until closed), texts typed, workspaces
-/// opened by name, exits sent and notifications.
-#[derive(Default)]
+/// The backend as far as plan review uses it: the wrappers of the
+/// runtime's planners started in the background (ADR-t1404-1 decision 8,
+/// parked unless [`Self::running`]), and, for a person's planner opened
+/// before `dagq plan` was abolished, the workspaces cmux lists (the ones
+/// `listed`, until closed), texts typed into them, exits sent and
+/// notifications. It opens no workspace: the runtime opens none for a
+/// planner any more (ADR-t1433-2).
 pub(crate) struct PlanWorkspace {
     listed: Mutex<Vec<String>>,
-    opened: Mutex<Vec<(String, String)>>,
     texts: Mutex<Vec<(String, String)>>,
     pub(crate) exits: Mutex<Vec<String>>,
     closed: Mutex<Vec<String>>,
@@ -327,13 +333,34 @@ pub(crate) struct PlanWorkspace {
     pub(crate) screen: Mutex<Option<Result<String, String>>>,
     /// Fail text submission after recording the attempted call.
     pub(crate) send_text_error: Option<String>,
-    /// The command line each workspace opened by name runs.
-    pub(crate) commands: Mutex<Vec<String>>,
     /// The wrappers started in the background (ADR-t1404-1 decision 8).
     pub(crate) background: BackgroundWrappers,
 }
 
+impl Default for PlanWorkspace {
+    /// The runtime's planners' wrappers parked: the test plays them.
+    fn default() -> Self {
+        Self {
+            listed: Mutex::default(),
+            texts: Mutex::default(),
+            exits: Mutex::default(),
+            closed: Mutex::default(),
+            notifications: Mutex::default(),
+            screen: Mutex::default(),
+            send_text_error: None,
+            background: BackgroundWrappers::parked(),
+        }
+    }
+}
+
 impl PlanWorkspace {
+    /// The runtime's planners' wrappers run as they do on a host.
+    pub(crate) fn running() -> Self {
+        Self {
+            background: BackgroundWrappers::default(),
+            ..Self::default()
+        }
+    }
     pub(crate) fn listing(workspaces: &[&str]) -> Self {
         let backend = Self::default();
         *backend.listed.lock().unwrap() = workspaces.iter().map(|w| (*w).to_owned()).collect();
@@ -342,8 +369,16 @@ impl PlanWorkspace {
     pub(crate) fn texts(&self) -> Vec<(String, String)> {
         self.texts.lock().unwrap().clone()
     }
-    pub(crate) fn opened(&self) -> Vec<(String, String)> {
-        self.opened.lock().unwrap().clone()
+    /// The handles of the wrappers started in the background, in order.
+    pub(crate) fn launched(&self) -> Vec<String> {
+        self.background
+            .launched()
+            .into_iter()
+            .map(|(handle, ..)| handle)
+            .collect()
+    }
+    pub(crate) fn closed(&self) -> Vec<String> {
+        self.closed.lock().unwrap().clone()
     }
     pub(crate) fn notifications(&self) -> Vec<(String, String)> {
         self.notifications.lock().unwrap().clone()
@@ -420,19 +455,8 @@ impl WorkspaceBackend for PlanWorkspace {
     ) -> Result<String> {
         self.background.launch(cwd, command, env, log)
     }
-    fn create_named(
-        &self,
-        name: &str,
-        _: &Path,
-        command: &str,
-        _: &WorkspaceTags,
-    ) -> Result<String> {
-        self.commands.lock().unwrap().push(command.to_owned());
-        let mut opened = self.opened.lock().unwrap();
-        let id = format!("RT{}", opened.len() + 1);
-        opened.push((id.clone(), name.into()));
-        self.listed.lock().unwrap().push(id.clone());
-        Ok(id)
+    fn create_named(&self, name: &str, _: &Path, _: &str, _: &WorkspaceTags) -> Result<String> {
+        bail!("plan review opens no workspace ({name}): a planner runs in the background")
     }
     fn ensure_group(&self, _: &str, _: &str) -> Result<String> {
         Ok("GROUP".into())
@@ -714,7 +738,7 @@ fn a_revise_goes_to_the_live_planner_with_the_precedents_and_times_out_to_the_in
             texts[0].1
         );
     }
-    assert!(backend.opened().is_empty());
+    assert!(backend.launched().is_empty());
     let sent = events(&mut queue, task, "plan_revise_sent");
     assert_eq!(sent[0]["opened"], false);
     assert_eq!(sent[0]["workspace_id"], "PW");
@@ -812,13 +836,9 @@ fn a_revise_without_a_live_planner_opens_planners_within_the_limit() {
         );
     }
     // One runtime planner at a time: the older proposal got it, the other
-    // waits.
-    let opened = backend.opened();
-    assert_eq!(opened.len(), 1, "{opened:?}");
-    assert!(
-        opened[0].1.ends_with(&format!("proposal {one}")),
-        "{opened:?}"
-    );
+    // waits. It runs in the background, without a workspace.
+    let launched = backend.launched();
+    assert_eq!(launched.len(), 1, "{launched:?}");
     let planners = queue.planners(false).unwrap();
     assert_eq!(planners.len(), 1);
     assert_eq!(planners[0].origin, PlannerOrigin::Runtime);
@@ -856,14 +876,16 @@ fn a_revise_without_a_live_planner_opens_planners_within_the_limit() {
     assert!(events(&mut queue, second, "plan_revise_sent").is_empty());
     assert_eq!(proposal_column(&fx.db, two, "revise_sent_at"), Value::Null);
 
-    // The planner's session ends without submitting: its workspace is
-    // closed and the revise of proposal one goes to a new planner first;
-    // the limit still holds for proposal two.
+    // The planner's session ends without submitting: its background
+    // wrapper is stopped and the revise of proposal one goes to a new
+    // planner first; the limit still holds for proposal two.
+    let handle = planners[0].workspace_id.clone().unwrap();
+    assert_eq!(launched[0], handle);
     queue.register_planner_wrapper(planners[0].id, 1).unwrap();
     queue.register_planner_agent(planners[0].id, 1, 1).unwrap();
     queue.planner_exited(planners[0].id, 1, 0).unwrap();
     supervise(&fx, &backend, &reviewer);
-    assert!(backend.closed.lock().unwrap().contains(&"RT1".to_owned()));
+    assert!(backend.closed().contains(&handle), "{:?}", backend.closed());
     assert!(queue.planner(planners[0].id).unwrap().closed_at.is_some());
     // The close is recorded once, with why (ADR-t1300-1).
     let closes: Vec<Value> = queue
@@ -876,14 +898,14 @@ fn a_revise_without_a_live_planner_opens_planners_within_the_limit() {
     assert_eq!(closes[0]["planner_id"], planners[0].id.as_i64());
     assert_eq!(closes[0]["origin"], "runtime");
     assert_eq!(closes[0]["code"], "runtime_exited");
-    assert_eq!(closes[0]["workspace_id"], "RT1");
+    assert_eq!(closes[0]["workspace_id"], handle.as_str());
     assert_eq!(closes[0]["workspace_closed"], true);
     assert_eq!(closes[0]["exit_code"], 0);
     assert_eq!(events(&mut queue, first, "plan_revise_lost").len(), 1);
     let open = queue.planners(false).unwrap();
     assert_eq!(open.len(), 1, "{open:?}");
     assert_eq!(open[0].proposal_id, Some(one));
-    assert_eq!(backend.opened().len(), 2);
+    assert_eq!(backend.launched().len(), 2);
     assert_eq!(events(&mut queue, first, "plan_revise_sent").len(), 2);
     assert!(events(&mut queue, second, "plan_revise_sent").is_empty());
 
@@ -899,48 +921,6 @@ fn a_revise_without_a_live_planner_opens_planners_within_the_limit() {
     let waiting = events(&mut queue, second, "planner_unresponsive");
     assert_eq!(waiting.len(), 1, "{waiting:?}");
     assert_eq!(waiting[0]["planner_id"], Value::Null);
-}
-
-/// `[roles.plan_review]` and `[roles.runtime_planner]` of `dagq.toml`
-/// (ADR-0079 decision 7): the plan review is given its model and effort,
-/// and the planner opened for its revise starts one step above its role's
-/// effort, `xhigh` at most; its span records the same.
-#[test]
-fn role_tables_set_the_plan_review_and_raise_the_revise_planner_from_them() {
-    let fx = fixture();
-    fs::write(
-        fx.repo.join("dagq.toml"),
-        "[roles.plan_review]\neffort = \"high\"\n\n[roles.runtime_planner]\nmodel = \"claude-sonnet-5\"\neffort = \"high\"\n",
-    )
-    .unwrap();
-    git(&fx.repo, &["add", "dagq.toml"]);
-    git(&fx.repo, &["commit", "-m", "roles"]);
-    let mut queue = SqliteQueue::open(&fx.db).unwrap();
-    let task = add(&mut queue, "change", &[TaskId::new(1)], Priority::Normal);
-    submit(&mut queue, &[task], None);
-    let reviewer = StubReviewer::new(&[json!({
-        "verdict": "revise", "reasons": ["split it"], "summary": "too big"
-    })]);
-    let backend = PlanWorkspace::default();
-    supervise(&fx, &backend, &reviewer);
-    assert_eq!(
-        reviewer.models(),
-        [("claude-opus-5-5".to_owned(), "high".to_owned())]
-    );
-    let started = &events(&mut queue, task, "plan_review_started")[0];
-    assert_eq!(
-        started["launch"],
-        json!({"role": "plan_review", "provider": "claude", "model": "claude-opus-5-5", "effort": "high",
-               "source": "dagq.toml"})
-    );
-    let span = &events(&mut queue, task, "session_opened")[0];
-    assert_eq!(span["kind"], "plan_review");
-    assert_eq!(span["launch"], started["launch"]);
-    let sent = &events(&mut queue, task, "plan_revise_sent")[0];
-    assert_eq!(sent["launch"]["model"], "claude-sonnet-5");
-    assert_eq!(sent["launch"]["effort"], "xhigh");
-    assert_eq!(sent["launch"]["escalated_from"], "high");
-    assert_eq!(backend.opened().len(), 1);
 }
 
 #[test]
@@ -1025,7 +1005,7 @@ fn a_concern_asks_the_inbox_and_the_supervisor_applies_the_answers() {
         "ready"
     );
     // The one sent back went to a planner of the runtime's.
-    assert_eq!(backend.opened().len(), 1);
+    assert_eq!(backend.launched().len(), 1);
 
     // Withdrawn while revising, it drops the revise: no planner is sent
     // it again, and its draft joins a new proposal.
@@ -1035,7 +1015,7 @@ fn a_concern_asks_the_inbox_and_the_supervisor_applies_the_answers() {
         Value::Null
     );
     supervise(&fx, &backend, &reviewer);
-    assert_eq!(backend.opened().len(), 1);
+    assert_eq!(backend.launched().len(), 1);
     assert_eq!(status(&mut queue, returned), TaskStatus::Draft);
     let again = submit(&mut queue, &[returned], None);
     assert_ne!(again, proposals[2]);
@@ -1509,10 +1489,8 @@ fn a_ready_task_the_review_reopens_leaves_the_claim_for_a_planner() {
         .unwrap();
     fs::write(planner_idle_marker(&dir), "{}").unwrap();
     supervise(&fx, &backend, &passing);
-    assert_eq!(
-        *backend.exits.lock().unwrap(),
-        [planners[0].workspace_id.clone().unwrap()]
-    );
+    assert!(exit_requested(&fx.db, planners[0].id));
+    assert!(backend.exits.lock().unwrap().is_empty(), "nothing typed");
 }
 
 /// A reopened task whose proposal is withdrawn goes back to `draft` with
@@ -1626,6 +1604,8 @@ pub(crate) fn open_goal(queue: &mut SqliteQueue) -> dagq::domain::GoalId {
         .id()
 }
 
+use crate::runtime_support::planner_turns::{exit_requested, idle, turn_requests};
+
 pub(crate) fn planner_prompt(db: &Path, planner: dagq::domain::PlannerId) -> String {
     fs::read_to_string(
         planners_dir(db)
@@ -1633,18 +1613,6 @@ pub(crate) fn planner_prompt(db: &Path, planner: dagq::domain::PlannerId) -> Str
             .join("prompt.txt"),
     )
     .unwrap()
-}
-
-/// Make `planner` alive (its wrapper is this test process) and idle.
-pub(crate) fn idle(queue: &SqliteQueue, db: &Path, planner: dagq::domain::PlannerId) {
-    queue
-        .register_planner_wrapper(planner, std::process::id())
-        .unwrap();
-    queue
-        .register_planner_agent(planner, std::process::id(), std::process::id())
-        .unwrap();
-    let dir = planners_dir(db).join(planner.to_string());
-    fs::write(planner_idle_marker(&dir), "{}").unwrap();
 }
 
 #[test]
@@ -1679,10 +1647,9 @@ fn drafts_of_the_runtime_get_planners_within_the_limit_and_a_persons_draft_none(
     assert_eq!(planners.len(), 1, "{planners:?}");
     assert_eq!(planners[0].origin, PlannerOrigin::Runtime);
     assert_eq!(planners[0].draft_task_id, Some(follow_up));
-    let opened = backend.opened();
-    assert!(
-        opened[0].1.ends_with(&format!("draft task {follow_up}")),
-        "{opened:?}"
+    assert_eq!(
+        backend.launched(),
+        [planners[0].workspace_id.clone().unwrap()]
     );
     let prompt = planner_prompt(&fx.db, planners[0].id);
     for expected in [
@@ -1744,7 +1711,8 @@ fn drafts_of_the_runtime_get_planners_within_the_limit_and_a_persons_draft_none(
     queue.transition(follow_up, TaskAction::Cancel).unwrap();
     idle(&queue, &fx.db, planners[0].id);
     supervise(&fx, &backend, &reviewer);
-    assert_eq!(*backend.exits.lock().unwrap(), ["RT1".to_owned()]);
+    assert!(exit_requested(&fx.db, planners[0].id));
+    assert!(backend.exits.lock().unwrap().is_empty(), "nothing typed");
     queue
         .planner_exited(planners[0].id, std::process::id(), 0)
         .unwrap();
@@ -1803,7 +1771,7 @@ fn drafts_of_the_runtime_get_planners_within_the_limit_and_a_persons_draft_none(
 }
 
 #[test]
-fn a_planner_question_answer_is_typed_into_its_planner_or_carried_by_a_new_one() {
+fn a_planner_question_answer_goes_to_its_planner_as_a_turn_or_is_carried_by_a_new_one() {
     let fx = fixture();
     let mut queue = SqliteQueue::open(&fx.db).unwrap();
     let goal = open_goal(&mut queue);
@@ -1819,6 +1787,7 @@ fn a_planner_question_answer_is_typed_into_its_planner_or_carried_by_a_new_one()
     supervise(&fx, &backend, &reviewer);
     let planner = queue.planners(false).unwrap()[0].clone();
     assert_eq!(planner.draft_task_id, Some(first));
+    let handle = planner.workspace_id.clone().unwrap();
 
     // The planner cannot decide: it asks and stops.
     let asked = queue
@@ -1841,17 +1810,19 @@ fn a_planner_question_answer_is_typed_into_its_planner_or_carried_by_a_new_one()
     idle(&queue, &fx.db, planner.id);
     // Waiting for the answer, it is not asked to exit.
     supervise(&fx, &backend, &reviewer);
-    assert!(backend.exits.lock().unwrap().is_empty());
-    assert!(backend.texts().is_empty());
+    assert!(!exit_requested(&fx.db, planner.id));
+    assert!(turn_requests(&fx.db, planner.id).is_empty());
     queue.answer(asked.id, "cancel").unwrap();
     supervise(&fx, &backend, &reviewer);
+    // The answer is its next turn's request; nothing is typed.
+    let requests = turn_requests(&fx.db, planner.id);
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(requests[0]["what"], format!("answer of ask {}", asked.id));
     assert_eq!(
-        backend.texts(),
-        [(
-            "RT1".to_owned(),
-            format!("answer to ask {}: cancel", asked.id)
-        )]
+        requests[0]["prompt"],
+        format!("answer to ask {}: cancel", asked.id)
     );
+    assert!(backend.texts().is_empty());
     assert!(queue.asks(Default::default()).unwrap().is_empty());
     assert_eq!(events(&mut queue, first, "ask_delivered").len(), 1);
     assert_eq!(
@@ -1859,12 +1830,13 @@ fn a_planner_question_answer_is_typed_into_its_planner_or_carried_by_a_new_one()
         [json!({
             "ask_id": asked.id,
             "planner_id": planner.id,
-            "workspace_id": "RT1",
+            "workspace_id": handle,
             "claimed_at": events(&mut queue, first, "planner_answer_claimed")[0]["claimed_at"],
         })]
     );
     // It is at work on the answer: not asked to exit yet.
-    assert!(backend.exits.lock().unwrap().is_empty());
+    supervise(&fx, &backend, &reviewer);
+    assert!(!exit_requested(&fx.db, planner.id));
 
     // A draft whose planner is gone before the answer: a new planner
     // carries it.
@@ -1948,7 +1920,7 @@ fn a_planner_question_answer_is_typed_into_its_planner_or_carried_by_a_new_one()
 }
 
 #[test]
-fn a_planner_question_answer_another_supervisor_claimed_is_not_typed_again() {
+fn a_planner_question_answer_another_supervisor_claimed_is_not_sent_again() {
     let fx = fixture();
     let mut queue = SqliteQueue::open(&fx.db).unwrap();
     let goal = open_goal(&mut queue);
@@ -1963,6 +1935,7 @@ fn a_planner_question_answer_another_supervisor_claimed_is_not_typed_again() {
     let backend = PlanWorkspace::default();
     supervise(&fx, &backend, &reviewer);
     let planner = queue.planners(false).unwrap()[0].clone();
+    let handle = planner.workspace_id.clone().unwrap();
     let asked = queue
         .ask(NewAsk {
             recommendation: None,
@@ -1983,7 +1956,7 @@ fn a_planner_question_answer_another_supervisor_claimed_is_not_typed_again() {
     // An open ask is nobody's to type yet.
     assert!(
         !queue
-            .claim_planner_answer(asked.id, planner.id, "RT1")
+            .claim_planner_answer(asked.id, planner.id, &handle)
             .unwrap()
     );
     idle(&queue, &fx.db, planner.id);
@@ -1991,7 +1964,7 @@ fn a_planner_question_answer_another_supervisor_claimed_is_not_typed_again() {
     // Not to a planner the answer does not go to.
     assert!(
         !queue
-            .claim_planner_answer(asked.id, dagq::domain::PlannerId::new(99), "RT1")
+            .claim_planner_answer(asked.id, dagq::domain::PlannerId::new(99), &handle)
             .unwrap()
     );
     // The other supervisor of a handoff claims it first, on its own
@@ -1999,22 +1972,26 @@ fn a_planner_question_answer_another_supervisor_claimed_is_not_typed_again() {
     let mut other = SqliteQueue::open(&fx.db).unwrap();
     assert!(
         other
-            .claim_planner_answer(asked.id, planner.id, "RT1")
+            .claim_planner_answer(asked.id, planner.id, &handle)
             .unwrap()
     );
     assert!(
         !queue
-            .claim_planner_answer(asked.id, planner.id, "RT1")
+            .claim_planner_answer(asked.id, planner.id, &handle)
             .unwrap()
     );
-    // This supervisor then leaves the typing to the claimer.
+    // This supervisor then leaves the delivery to the claimer.
     supervise(&fx, &backend, &reviewer);
-    assert!(backend.texts().is_empty(), "{:?}", backend.texts());
+    assert!(
+        turn_requests(&fx.db, planner.id).is_empty(),
+        "{:?}",
+        turn_requests(&fx.db, planner.id)
+    );
     assert_eq!(events(&mut queue, draft, "planner_answer_claimed").len(), 1);
     assert!(events(&mut queue, draft, "ask_delivered").is_empty());
 
-    // The claimer ended before typing: once its claim is older than the
-    // lease, the next pass takes it over and types the answer once.
+    // The claimer ended before the delivery: once its claim is older than
+    // the lease, the next pass takes it over and sends the answer once.
     Connection::open(&fx.db)
         .unwrap()
         .execute(
@@ -2024,17 +2001,17 @@ fn a_planner_question_answer_another_supervisor_claimed_is_not_typed_again() {
         )
         .unwrap();
     supervise(&fx, &backend, &reviewer);
+    let requests = turn_requests(&fx.db, planner.id);
+    assert_eq!(requests.len(), 1, "{requests:?}");
     assert_eq!(
-        backend.texts(),
-        [(
-            "RT1".to_owned(),
-            format!("answer to ask {}: cancel", asked.id)
-        )]
+        requests[0]["prompt"],
+        format!("answer to ask {}: cancel", asked.id)
     );
     assert_eq!(events(&mut queue, draft, "planner_answer_claimed").len(), 2);
     assert_eq!(events(&mut queue, draft, "ask_delivered").len(), 1);
     supervise(&fx, &backend, &reviewer);
-    assert_eq!(backend.texts().len(), 1);
+    assert_eq!(turn_requests(&fx.db, planner.id).len(), 1);
+    assert!(backend.texts().is_empty());
 }
 
 #[test]
@@ -2971,7 +2948,7 @@ fn no_claude_plan_review_waits_for_manual_handling_and_opens_no_planner() {
     };
     supervise_with(&fx, &backend, &reviewer, &opts);
     assert!(reviewer.prompts().is_empty());
-    assert!(backend.opened().is_empty());
+    assert!(backend.launched().is_empty());
     assert!(backend.texts().is_empty());
     let failed = events(&mut queue, task, "plan_review_failed");
     assert_eq!(failed.len(), 1, "{failed:?}");

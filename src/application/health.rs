@@ -1377,9 +1377,11 @@ pub fn attention(
             next: AttentionNext::DecideWaiting,
         });
     }
-    // A planner of the runtime's nothing was seen of within the planner
-    // timeout waits for a person to look at it until its row closes (task
-    // 805); it is shown on its draft's task, if it has one.
+    // A planner of the runtime's whose turn its wrapper stopped at the
+    // turn's limit (`planner_unresponsive` with `subject: "planner"`;
+    // before task 1441 also one nothing was seen of within the planner
+    // timeout, task 805) waits for a person to look at it until its row
+    // closes; it is shown on its draft's task, if it has one.
     for (planner, event) in queue.silent_planners()? {
         attention.push(Attention {
             run_id: None,
@@ -1623,9 +1625,9 @@ pub fn attention(
         } else if ask.kind == AskKind::PlannerQuestion
             && queue.planner_answer_route(&ask)? != PlannerAnswerRoute::Person
         {
-            // The supervisor types the answer into the runtime's planner
-            // that works on the task, or opens one with it (ADR-0041
-            // decision 13).
+            // The supervisor delivers the answer to the runtime's planner
+            // that works on the task as its next turn, or opens one with it
+            // (ADR-0041 decision 13, ADR-t1433-2).
             (
                 "answered",
                 event_kind::ASK_ANSWERED,

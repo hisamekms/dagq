@@ -4,8 +4,8 @@ type: design
 title: "`session` wrapper"
 status: current
 created: 2026-09-26
-updated: 2026-10-05 # task 1440: the runtime starts a run's wrapper only with --background; task 1406
-last_verified: 2026-10-05 # task 1440
+updated: 2026-10-06 # task 1441: the runtime's planner wrappers start only in the background too; task 1440: the runtime starts a run's wrapper only with --background; task 1406
+last_verified: 2026-10-06 # task 1441; task 1440
 scope: runtime
 related:
   - adr-t1433-3
@@ -15,9 +15,9 @@ related:
 
 # `session` wrapper
 
-> **goal 92**: [ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)で対話の経路を廃止し、[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)（task 1440）でruntimeはrunのsession wrapperを、cmux workspaceなしで、supervisorから切り離したbackgroundのprocess（下の「backgroundのwrapper」）としてだけ起動する。`dagq.toml`の`[headless] wrapper`はworkerには効かない（[非対話のworker](headless-worker.md#workspaceなしのbackgroundのwrapper)の「設定」）。runtimeのplannerのwrapper（`planner-session`）はtask 1441まで今の姿。
+> **goal 92**: [ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)で対話の経路を廃止し、[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)（task 1440）でruntimeはrunのsession wrapperを、cmux workspaceなしで、supervisorから切り離したbackgroundのprocess（下の「backgroundのwrapper」）としてだけ起動する。`dagq.toml`の`[headless] wrapper`はworkerには効かない（[非対話のworker](headless-worker.md#workspaceなしのbackgroundのwrapper)の「設定」）。runtimeのplannerのwrapper（`planner-session`）もtask 1441から`--headless --background`でだけ起動し、workspaceを開かない（[Plan planners](plan-planners.md)）。
 
-runtimeが`--background`を付けて起動する隠しコマンド（`session`）。ユースケースは`src/application/session.rs`の`run_session`で、queue（`Queue`）、agentのコマンド（`AgentProvider`）、その起動（`Spawner`）、`prompt.txt`の読み取り（`RunFiles`）とwrapperのpidを`Session`として受け取る。`runtime::session`は`SqliteQueue`、`ClaudeCode`、`LocalSpawner`、`LocalRunFiles`を渡す入口だけ。`--background`でない入口（TTYを確かめ、パイプからは起動しない。cmux workspaceの中でworkspaceの記録を待つ）はコードに残るが、runtimeはworkerのwrapperをそれで起動しない。通るのは`dagq session`を`--background`なしで打ったとき（端末が無ければ拒む）と、task 1441までのruntimeのplannerのwrapperだけ。workerのwrapperをそれで動かすtestとcomposeの入口は消した（入口そのものを消すのは後続のtask）。
+runtimeが`--background`を付けて起動する隠しコマンド（`session`）。ユースケースは`src/application/session.rs`の`run_session`で、queue（`Queue`）、agentのコマンド（`AgentProvider`）、その起動（`Spawner`）、`prompt.txt`の読み取り（`RunFiles`）とwrapperのpidを`Session`として受け取る。`runtime::session`は`SqliteQueue`、`ClaudeCode`、`LocalSpawner`、`LocalRunFiles`を渡す入口だけ。`--background`でない入口（TTYを確かめ、パイプからは起動しない。cmux workspaceの中でworkspaceの記録を待つ）はコードに残るが、runtimeはworkerのwrapperもplannerのwrapperもそれで起動しない。通るのは`dagq session`を`--background`なしで打ったとき（端末が無ければ拒む）だけ。workerのwrapperをそれで動かすtestとcomposeの入口は消した（入口そのものを消すのは後続のtask）。
 
 1. supervisorが記録した自分の起動（runの最後の`wrapper_launched`の`pid`と`start`が自分のもの）を待ち（45秒以内）、wrapperのPIDを一度だけ登録する。leaseが無効なら登録できない。
 2. `prompt.txt`を読み、providerのコマンドでagentを起動して`agent_started`を記録し、runを`running`にする。agentの環境は、workerのactorの変数に、queue serviceのsocket（`DAGQ_SERVICE_SOCKET`）とsupervisorがclaimかresumeで発行したworkerのtokenのfile（`DAGQ_SERVICE_CREDENTIAL_FILE`。無ければwrapperが発行する）を足し、`DAGQ_QUEUE`を外したもので、agentの`dagq`はクライアントモードで動く（goal 82の段(3)、[Queue service](../queue-service.md#クライアントモード)）。wrapper自身は`--db`でqueueを開き、wrapperのprocessのenvにはどちらも無い。非対話のturnも同じ環境で起動する。

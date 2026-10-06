@@ -1,29 +1,26 @@
-//! Planner sessions (ADR-0041 decisions 1, 6, 12, 13): on-demand cmux
-//! workspaces where a planner writes goals and tasks and submits them as a
-//! proposal. Only the runtime opens one (ADR-t1394-1): for a proposal plan
-//! review sent back while its own planner was closed
-//! ([`open_runtime_planner`]), and for a draft, a finding or a planning
-//! request the inbox recorded ([`open_draft_planner`]). `dagq plan`, which
-//! opened a planner a person talked with, is refused with
-//! [`PLAN_REFUSED`]; a person's planner opened before stays a `planners`
-//! row until it ends ([`close_exited_person_planners`]). Each is a
-//! `planners` row with its own directory under the queue's `planners/`
-//! (its prompt, the wrapper binary, the agent's settings, log and idle
-//! marker).
+//! Planner sessions (ADR-0041 decisions 1, 6, 12, 13): planners that write
+//! goals and tasks and submit them as a proposal. Only the runtime opens
+//! one (ADR-t1394-1): for a proposal plan review sent back while its own
+//! planner was closed ([`open_runtime_planner`]), and for a draft, a
+//! finding or a planning request the inbox recorded
+//! ([`open_draft_planner`]). `dagq plan`, which opened a planner a person
+//! talked with, is refused with [`PLAN_REFUSED`]; a person's planner opened
+//! before stays a `planners` row until it ends
+//! ([`close_exited_person_planners`]). Each is a `planners` row with its
+//! own directory under the queue's `planners/` (its prompt, the wrapper
+//! binary, its `turns/`, log and idle marker).
 //!
-//! The workspace runs the session wrapper `planner-session`, which starts
-//! the agent, registers itself and its agent, heartbeats and records the
-//! agent's exit, the way a run's wrapper does; the agent's `Stop` hook
-//! writes the idle marker. [`planner_view`] judges from these whether the
-//! planner is alive and idle.
-//!
-//! A planner of the runtime's opened under `[roles.runtime_planner] route
-//! = "headless"` (ADR-t1394-2) runs its agent one call per turn instead,
-//! the way a headless worker does ([`super::headless_session`]): its
-//! directory holds the `turns/` its supervisor writes requests to, its
-//! wrapper writes the idle marker when a turn ends, and the wrapper runs in
-//! a workspace or, under `[headless] wrapper = "background"`, as a process
-//! detached from the supervisor (ADR-t1404-1 decision 8).
+//! A planner of the runtime's runs headless only (ADR-t1433-2 decision 3):
+//! its session wrapper `planner-session --headless` starts as a process
+//! detached from the supervisor, without a workspace (ADR-t1404-1 decision
+//! 8), registers itself, and runs its agent one call per turn the way a
+//! headless worker does ([`super::headless_session`]): its supervisor
+//! writes requests to its `turns/`, and its wrapper writes the idle marker
+//! when a turn ends. `[roles.runtime_planner] route` and `[headless]
+//! wrapper` of `dagq.toml` choose nothing for it any more. A person's
+//! planner ran its agent in the terminal of a workspace; its wrapper's
+//! agent `Stop` hook writes the idle marker. [`planner_view`] judges from
+//! these whether the planner is alive and idle.
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -40,11 +37,10 @@ use super::{
     WorkspaceBackend,
     actor_executor::{
         ActorExecutionSpec, ActorExecutor, ActorProgram, HostActorExecutor, SessionAgent,
-        WorkspaceAccess, WorkspaceCommand,
+        WorkspaceAccess,
     },
     headless_session::{TurnOwner, Turns},
-    lifecycle::{QueueWorkspaces, ROLE_STATUS_KEY, session_look},
-    naming::{planner_workspace_name, shell_join},
+    naming::shell_join,
     path_text, planner_idle_marker,
     prompt::{FittedPrompt, runtime_planner_prompt},
     screen_idle::{self, Inference, MarkerState, ScreenIdle, ScreenProbe},
@@ -52,11 +48,10 @@ use super::{
 };
 use crate::domain::{
     ActorContext, IdleProbe, PERSON_PLANNER_CLOSE_GRACE_SECS, PlannerCloseCode, PlannerId,
-    PlannerOrigin, PlannerProbe, PlannerRoute, PlannerSession, PlannerState, ProposalId,
-    SessionRole, Task,
+    PlannerOrigin, PlannerProbe, PlannerRoute, PlannerSession, PlannerState, ProposalId, Task,
     actor_model::{ActorLaunch, ModelRole, REVISE_ESCALATION, RoleModels},
-    background_wrapper::{BACKGROUND_FLAG, BackgroundSession, HeadlessWrapper},
-    language::{Language, with_instruction},
+    background_wrapper::{BACKGROUND_FLAG, BackgroundSession},
+    language::Language,
     turn::{self, LIMITS_FILE, TurnLimits, TurnMark, exit_path, request_path, turns_dir},
 };
 
@@ -65,10 +60,10 @@ pub const PLANNER_PROMPT_FILE: &str = "prompt.txt";
 /// The agent's debug log in the planner's directory, where a failed idle
 /// hook shows (ADR-t803-1).
 pub const PLANNER_DEBUG_LOG: &str = "claude.log";
-/// The snapshot of the binary the planner's workspace runs as its wrapper,
-/// so rebuilding the binary does not change a running one.
+/// The snapshot of the binary the planner's wrapper runs, so rebuilding the
+/// binary does not change a running one.
 pub const PLANNER_RUNNER_FILE: &str = "runner";
-/// The log of a headless planner's wrapper started in the background
+/// The log of a planner's wrapper, which starts in the background
 /// (ADR-t1404-1 decision 6), in the planner's directory.
 pub const PLANNER_SESSION_LOG: &str = "session.log";
 /// The flag of `planner-session` that runs the planner's agent one call
@@ -80,16 +75,17 @@ pub fn planner_dir(planners_dir: &Path, id: PlannerId) -> PathBuf {
     planners_dir.join(id.to_string())
 }
 
-/// What opening a planner works with: the queue and cmux, the files, the
-/// queue's database, hash and `planners/` directory, the checkout the
-/// planner works in, and what its workspace runs (this binary as the
-/// wrapper, the agent's executable, the plugin directory it loads).
+/// What opening a planner of the runtime's works with: the queue, the
+/// backend that starts its wrapper in the background
+/// ([`WorkspaceBackend::launch_background`]; no workspace is opened), the
+/// files, the queue's database and `planners/` directory, the checkout the
+/// planner works in, and what its wrapper runs (this binary, the agent's
+/// executable, the plugin directory it loads).
 pub struct PlannerLaunch<'a> {
     pub queue: &'a dyn Queue,
-    pub cmux: &'a dyn WorkspaceBackend,
+    pub backend: &'a dyn WorkspaceBackend,
     pub files: &'a dyn RunFiles,
     pub db: &'a Path,
-    pub queue_hash: &'a str,
     pub planners_dir: &'a Path,
     pub repo_root: &'a Path,
     pub runner: &'a Path,
@@ -100,25 +96,19 @@ pub struct PlannerLaunch<'a> {
     pub language: Option<Language>,
     /// `[roles.<role>]` of `dagq.toml` (ADR-0079 decision 7), read when
     /// the launch is made: the model and effort a planner's agent starts
-    /// with, and the route a planner of the runtime's opens on
-    /// (ADR-t1394-2 decision 1).
+    /// with.
     pub roles: RoleModels,
-    /// `[headless] wrapper` of `dagq.toml`: where a headless planner's
-    /// wrapper runs (ADR-t1404-1 decision 8).
-    pub headless_wrapper: HeadlessWrapper,
-    /// The limits of a headless planner's turns, from the supervisor's
-    /// `[stall]` settings, as a headless worker's.
+    /// The limits of a planner's turns, from the supervisor's `[stall]`
+    /// settings, as a headless worker's.
     pub turn_limits: TurnLimits,
 }
 
-/// A planner whose workspace just opened: its record, the workspace's
-/// title, its directory, and what cmux refused about its look.
+/// A planner whose wrapper just started: its record (with the handle of
+/// its background wrapper), its directory, and what its agent starts with.
 #[derive(Debug, Clone, Serialize)]
 pub struct OpenedPlanner {
     pub planner: PlannerSession,
-    pub name: String,
     pub dir: PathBuf,
-    pub warnings: Vec<String>,
     /// What its agent starts with (ADR-0079 decision 7).
     pub launch: ActorLaunch,
 }
@@ -133,16 +123,6 @@ at a terminal without DAGQ_ROLE may run too), and the supervisor opens a planner
 for it, which submits a proposal or declines the request with a reason (follow it with \
 `dagq requests`). A planner already open keeps running until it ends (`dagq planners`); no planner \
 was opened";
-
-/// The route a planner of `origin` opens on: a person's is interactive, one
-/// of the runtime's takes `[roles.runtime_planner] route` (ADR-t1394-2
-/// decision 1).
-fn route_of(launch: &PlannerLaunch<'_>, origin: PlannerOrigin) -> PlannerRoute {
-    match origin {
-        PlannerOrigin::Person => PlannerRoute::Interactive,
-        PlannerOrigin::Runtime => launch.roles.planner_route().0,
-    }
-}
 
 /// Open a planner of the runtime's for `proposal` (ADR-0041 decision 12):
 /// its initial prompt carries the proposal, its `tasks` (as the caller read
@@ -184,154 +164,77 @@ pub fn open_runtime_planner(
     let planner = launch
         .queue
         .open_planner(PlannerOrigin::Runtime, Some(proposal))?;
-    launch_planner(
-        launch,
-        planner,
-        (&prompt.text, Some(("runtime", &prompt))),
-        &actor,
-    )
+    launch_planner(launch, planner, ("runtime", &prompt), &actor)
 }
 
-/// Record a planner, write its directory and open its workspace running
-/// the wrapper, with `DAGQ_ROLE=planner`, `DAGQ_QUEUE`, the origin and the
-/// planner's ID in the workspace's environment and the queue's group
-/// (ADR-0026). A workspace cmux does not open closes the record with the
-/// error. The look (Blue, the `map` pill) is a warning when refused; a
-/// planner is not pinned, being on demand. Its agent starts as `actor`
-/// says.
-pub fn open_planner(
-    launch: &PlannerLaunch<'_>,
-    origin: PlannerOrigin,
-    proposal: Option<ProposalId>,
-    prompt: &str,
-    actor: &ActorLaunch,
-) -> Result<OpenedPlanner> {
-    let planner = launch.queue.open_planner(origin, proposal)?;
-    launch_planner(launch, planner, (prompt, None), actor)
-}
-
-/// Open the workspace of a planner the runtime recorded for a draft
+/// Start the wrapper of a planner the runtime recorded for a draft
 /// (ADR-0041 decision 16, [`super::DraftPlannerStore::open_draft_planner`]),
 /// a finding or a planning request (`kind`: `draft`, `finding`, `request`)
-/// with `prompt`, the way [`open_planner`] does, its agent starting with
-/// `[roles.runtime_planner]`.
+/// with `prompt`, its agent starting with `[roles.runtime_planner]`.
 pub fn open_draft_planner(
     launch: &PlannerLaunch<'_>,
     planner: PlannerSession,
     (kind, prompt): (&'static str, &FittedPrompt),
 ) -> Result<OpenedPlanner> {
     let actor = launch.roles.launch(ModelRole::RuntimePlanner);
-    launch_planner(
-        launch,
-        planner,
-        (&prompt.text, Some((kind, prompt))),
-        &actor,
-    )
+    launch_planner(launch, planner, (kind, prompt), &actor)
 }
 
-/// Open the workspace of `planner` with `prompt`. A prompt the runtime
-/// held to its limits (`fitted`, with its kind) has its bytes recorded as
-/// `planner_prompt_written` (task 1571, ADR-t1566-1 decision 6).
+/// Record `planner` headless, write its directory and start its wrapper in
+/// the background with `prompt` as its first turn (ADR-t1394-2 decision 2,
+/// ADR-t1433-2 decision 3), with `DAGQ_ROLE=planner`, `DAGQ_QUEUE`, the
+/// origin and the planner's ID in the wrapper's environment, and record
+/// the wrapper's handle as the planner's session. A wrapper that does not
+/// start, or whose handle cannot be recorded, closes the record with the
+/// error. The bytes of the prompt the runtime held to its limits (with
+/// its kind) are recorded as `planner_prompt_written` (task 1571,
+/// ADR-t1566-1 decision 6). Its agent starts as `actor` says.
 fn launch_planner(
     launch: &PlannerLaunch<'_>,
     planner: PlannerSession,
-    (prompt, fitted): (&str, Option<(&'static str, &FittedPrompt)>),
+    (kind, prompt): (&'static str, &FittedPrompt),
     actor: &ActorLaunch,
 ) -> Result<OpenedPlanner> {
     let queue = launch.queue;
-    // The route is read as the planner opens and kept with it: a planner
-    // that runs keeps its route (ADR-t1394-2 decision 1).
-    let planner = match route_of(launch, planner.origin) {
-        PlannerRoute::Interactive => planner,
-        route => {
-            if let Err(error) = queue.set_planner_route(planner.id, route) {
-                queue.close_planner(planner.id, Some(&format!("{error:#}")))?;
-                return Err(error);
-            }
-            queue.planner(planner.id)?
-        }
-    };
-    let proposal = planner.proposal_id;
+    // A planner of the runtime's runs headless only, whatever `dagq.toml`
+    // says of its route (ADR-t1433-2 decision 3).
+    if let Err(error) = queue.set_planner_route(planner.id, PlannerRoute::Headless) {
+        queue.close_planner(planner.id, Some(&format!("{error:#}")))?;
+        return Err(error);
+    }
+    let planner = queue.planner(planner.id)?;
     let dir = planner_dir(launch.planners_dir, planner.id);
-    let workspaces = QueueWorkspaces::new(
-        launch.cmux,
-        launch.db,
-        launch.queue_hash.to_owned(),
-        launch.repo_root,
-    );
-    let mut name = planner_workspace_name(launch.repo_root, planner.id, proposal);
-    if let Some(draft) = planner.draft_task_id {
-        name.push_str(&format!(" - draft task {draft}"));
-    }
-    if let Some(finding) = planner.finding_id {
-        name.push_str(&format!(" - finding {finding}"));
-    }
-    if let Some(request) = planner.request_id {
-        name.push_str(&format!(" - request {request}"));
-    }
-    let prompt = match fitted {
-        Some((kind, fitted)) => {
-            let fitted = fitted.clone().with_language(launch.language.as_ref());
-            record_prompt_bytes(queue, &planner, kind, &fitted);
-            fitted.text
-        }
-        None => with_instruction(prompt.to_owned(), launch.language.as_ref()),
-    };
-    let opened = create_workspace(launch, &workspaces, &planner, &dir, &name, &prompt, actor);
-    let workspace_id = match opened {
-        Ok(id) => id,
+    let prompt = prompt.clone().with_language(launch.language.as_ref());
+    record_prompt_bytes(queue, &planner, kind, &prompt);
+    let handle = match start_wrapper(launch, &planner, &dir, &prompt.text, actor) {
+        Ok(handle) => handle,
         Err(error) => {
             queue.close_planner(planner.id, Some(&format!("{error:#}")))?;
             return Err(error);
         }
     };
-    if let Err(error) = queue.planner_workspace_created(planner.id, &workspace_id) {
-        // Unrecorded, the workspace would be left open with nothing to
-        // find it by, and its wrapper is refused (task 806).
+    if let Err(error) = queue.planner_workspace_created(planner.id, &handle) {
+        // Unrecorded, the wrapper would run with nothing to find it by,
+        // and it is refused (task 806); its stop is recorded as
+        // `wrapper_stopped` (task 1657).
         let error = match super::supervise::stop_session(
-            launch.cmux,
-            &workspace_id,
+            launch.backend,
+            &handle,
             crate::domain::background_wrapper::StopRoute::Planner,
         ) {
             Ok(()) => error.context(format!(
-                "the planner workspace {workspace_id} could not be recorded and was closed"
+                "the planner's wrapper {handle} could not be recorded and was stopped"
             )),
-            Err(close) => error.context(format!(
-                "the planner workspace {workspace_id} could not be recorded, and closing it failed: {close:#}"
+            Err(stop) => error.context(format!(
+                "the planner's wrapper {handle} could not be recorded, and stopping it failed: {stop:#}"
             )),
         };
         queue.close_planner(planner.id, Some(&format!("{error:#}")))?;
         return Err(error);
     }
-    let mut warnings = workspaces.take_warnings();
-    // A wrapper in the background has no workspace to look at.
-    let look = session_look(SessionRole::Planner)
-        .filter(|_| !crate::domain::background_wrapper::is_background(&workspace_id));
-    if let Some((color, icon)) = look {
-        for (what, result) in [
-            ("color", launch.cmux.set_color(&workspace_id, color)),
-            (
-                "status pill",
-                launch.cmux.set_status(
-                    &workspace_id,
-                    ROLE_STATUS_KEY,
-                    SessionRole::Planner.as_str(),
-                    icon,
-                ),
-            ),
-        ] {
-            if let Err(error) = result {
-                warnings.push(format!(
-                    "cmux could not set the {what} of the planner workspace {workspace_id}: {error:#}"
-                ));
-            }
-        }
-    }
     Ok(OpenedPlanner {
         planner: queue.planner(planner.id)?,
-        name,
         dir,
-        warnings,
         launch: actor.clone(),
     })
 }
@@ -359,12 +262,13 @@ fn record_prompt_bytes(
     }
 }
 
-fn create_workspace(
+/// Write the directory `dir` of `planner` (its prompt, its turn limits, a
+/// snapshot of the runner) and start its wrapper in the background; the
+/// wrapper's handle.
+fn start_wrapper(
     launch: &PlannerLaunch<'_>,
-    workspaces: &QueueWorkspaces<'_>,
     planner: &PlannerSession,
     dir: &Path,
-    name: &str,
     prompt: &str,
     actor: &ActorLaunch,
 ) -> Result<String> {
@@ -384,10 +288,7 @@ fn create_workspace(
         }
     }
     files.write(&dir.join(PLANNER_PROMPT_FILE), prompt.as_bytes())?;
-    let headless = planner.route == PlannerRoute::Headless;
-    if headless {
-        prepare_planner_turns(files, dir, launch.turn_limits)?;
-    }
+    prepare_planner_turns(files, dir, launch.turn_limits)?;
     let runner = dir.join(PLANNER_RUNNER_FILE);
     files
         .copy(launch.runner, &runner)
@@ -407,7 +308,7 @@ fn create_workspace(
         argv.push(path_text(plugin_dir)?);
     }
     // The wrapper gives its agent the model and effort; the session's hook
-    // records what it was started with from the workspace's environment.
+    // records what it was started with from the wrapper's environment.
     if let Some((model, effort)) = actor.arguments() {
         argv.extend([
             "--model".into(),
@@ -416,34 +317,20 @@ fn create_workspace(
             effort.to_owned(),
         ]);
     }
-    // A headless planner's wrapper runs its turns, in a workspace or in
-    // the background (ADR-t1404-1 decision 8).
-    let background = (headless && launch.headless_wrapper == HeadlessWrapper::Background)
-        .then(|| dir.join(PLANNER_SESSION_LOG));
-    if headless {
-        argv.push(HEADLESS_FLAG.into());
-    }
-    if background.is_some() {
-        argv.push(BACKGROUND_FLAG.into());
-    }
-    let mut description = workspaces.description(SessionRole::Planner);
-    if let Some(description) = &mut description {
-        description.push_str(&format!(" planner={}", planner.id));
-    }
+    argv.push(HEADLESS_FLAG.into());
+    argv.push(BACKGROUND_FLAG.into());
+    let log = dir.join(PLANNER_SESSION_LOG);
     HostActorExecutor::new(launch.db)
-        .with_workspaces(launch.cmux)
+        .with_workspaces(launch.backend)
         .spawn(ActorExecutionSpec::new(
             ActorContext::instance(crate::domain::ActorRole::Planner, planner.id),
             WorkspaceAccess::Write(launch.repo_root.to_path_buf()),
-            ActorProgram::NamedWorkspace {
-                name,
+            ActorProgram::PlannerSession {
                 cwd: launch.repo_root,
-                command: WorkspaceCommand::Wrapper(shell_join(&argv)),
-                planner: Some((planner.origin, planner.id)),
+                wrapper: shell_join(&argv),
+                planner: (planner.origin, planner.id),
                 launch: Some(actor),
-                description,
-                group: workspaces.group(),
-                background: background.as_deref(),
+                log: &log,
             },
         ))?
         .workspace()
@@ -551,8 +438,8 @@ pub fn run_planner_session(
     };
     if planner.route == PlannerRoute::Headless {
         // Its turns submit as the owner its record names: the opener
-        // records the workspace (or the background handle) after it
-        // started this wrapper, so the first turn waits for it.
+        // records the background handle after it started this wrapper, so
+        // the first turn waits for it.
         let recorded = super::session::WrapperStart::Workspace
             .wait(|| Ok(queue.planner(id)?.workspace_id.is_some()));
         if let Err(error) = recorded {
@@ -561,7 +448,8 @@ pub fn run_planner_session(
             return Err(error);
         }
         let session = turn::planner_session_name(&dir.display().to_string(), planner.created_at);
-        // Started in the background, its record is its handle.
+        // Started in the background, its record is its handle (a row an
+        // older binary started in a workspace is not).
         let background = queue
             .planner(id)
             .ok()
@@ -606,15 +494,14 @@ pub fn run_planner_session(
         drop_own_runner(files, id, dir);
         return Ok(json!({"planner_id": id, "exit_code": code, "route": PlannerRoute::Headless}));
     }
-    // An agent that never starts is an exit too, or the planner would look
-    // lost rather than over.
+    // A planner in a terminal: only a person's runs here (ADR-t1394-1); the
+    // runtime's run headless (ADR-t1433-2 decision 3). An agent that never
+    // starts is an exit too, or the planner would look lost rather than
+    // over.
     let started = queue
         .planner(id)
-        .and_then(|planner| {
-            let prompt = files.read_to_string(&dir.join(PLANNER_PROMPT_FILE))?;
-            Ok((planner.origin, prompt))
-        })
-        .and_then(|(origin, prompt)| {
+        .and_then(|_| Ok(files.read_to_string(&dir.join(PLANNER_PROMPT_FILE))?))
+        .and_then(|prompt: String| {
             HostActorExecutor::new(queue_path)
                 .with_provider(provider)
                 .with_spawner(spawner)
@@ -623,7 +510,6 @@ pub fn run_planner_session(
                     WorkspaceAccess::Write(cwd.to_path_buf()),
                     ActorProgram::SessionAgent {
                         agent: SessionAgent::Planner(PlannerCommand {
-                            origin,
                             dir,
                             cwd,
                             prompt: &prompt,
@@ -729,8 +615,9 @@ pub struct PlannerView {
     pub bundle: Option<crate::domain::DraftBundleView>,
 }
 
-/// What judging a planner reads: cmux for its workspace and screen, the
-/// processes for its wrapper, the files for its idle marker, the agent's
+/// What judging a planner reads: cmux for the workspace and screen of a
+/// person's planner (a planner of the runtime's has neither, ADR-t1433-2),
+/// the processes for its wrapper, the files for its idle marker, the agent's
 /// signals for the marker and the screen, and the clock; and for a
 /// screen standing in for the marker (ADR-t803-1), how long it must look
 /// idle (`[stall].screen_idle_secs`) and whether its captures are kept.
@@ -745,13 +632,16 @@ pub struct PlannerProbes<'a> {
     pub screen_idle: ScreenIdle<'a>,
 }
 
-/// Judge `planner` the way a worker session is judged: its workspace UUID
-/// in every window's `cmux workspace list`, its wrapper's pid and heartbeat, the idle
-/// marker its agent's `Stop` hook wrote and, with a marker, whether the
-/// screen shows the agent at work on a new turn. Without a marker, or with
-/// one older than the planner's last input (its input marker, the
-/// supervisor's stamp of a text it typed, or its opening), the screen
-/// stands in ([`ScreenProbe::infer`]). A closed planner is not looked at.
+/// Judge `planner` the way a worker session is judged: its session (a
+/// background handle's process for a planner of the runtime's; for a
+/// person's planner, its workspace UUID in every window's `cmux workspace
+/// list`), its wrapper's pid and heartbeat, and the idle marker its agent's
+/// turn or `Stop` hook wrote. For a person's planner, with a marker,
+/// whether the screen shows the agent at work on a new turn; without a
+/// marker, or with one older than the planner's last input (its input
+/// marker, the supervisor's stamp of a text it typed, or its opening), the
+/// screen stands in ([`ScreenProbe::infer`]). A headless planner's screen
+/// is not read. A closed planner is not looked at.
 pub fn planner_view(probes: &PlannerProbes<'_>, planner: PlannerSession) -> Result<PlannerView> {
     let dir = planner_dir(probes.planners_dir, planner.id);
     let now = probes.clock.now();
@@ -766,7 +656,15 @@ pub fn planner_view(probes: &PlannerProbes<'_>, planner: PlannerSession) -> Resu
     let mut inferred = None;
     if planner.closed_at.is_none() {
         if let Some(workspace) = &planner.workspace_id {
-            probe.workspace_listed = probes.cmux.exists(workspace)?;
+            // A planner of the runtime's has no workspace: its handle is
+            // its background wrapper's, judged by its process. A row of the
+            // runtime's an older binary opened in a workspace is not looked
+            // up in cmux (ADR-t1433-2 decision 3): it reads `closed`.
+            probe.workspace_listed = if retired_workspace(&planner) {
+                false
+            } else {
+                probes.cmux.exists(workspace)?
+            };
         }
         probe.wrapper_alive = planner
             .wrapper_pid
@@ -817,9 +715,12 @@ pub fn planner_view(probes: &PlannerProbes<'_>, planner: PlannerSession) -> Resu
                     background_running: false,
                     ..idle
                 });
-        } else if probe.workspace_listed
+        } else if planner.origin == PlannerOrigin::Person
+            && probe.workspace_listed
             && let Some(workspace) = &planner.workspace_id
         {
+            // A person's planner, opened before `dagq plan` was abolished,
+            // in the terminal of its workspace.
             match marker {
                 Ok((idle, _)) => {
                     probe.idle = Some(idle);
@@ -877,6 +778,20 @@ pub fn planner_view(probes: &PlannerProbes<'_>, planner: PlannerSession) -> Resu
     })
 }
 
+/// Whether `planner` is a planner of the runtime's an older binary opened
+/// in a cmux workspace (interactive, or headless under `[headless] wrapper
+/// = "workspace"`): the runtime calls no cmux for its planners any more
+/// (ADR-t1433-2 decision 3, ADR-t1433-1), so it neither looks the
+/// workspace up nor types into it, and ends the row as a session that is
+/// gone, the workspace left for a person to close.
+pub fn retired_workspace(planner: &PlannerSession) -> bool {
+    planner.origin == PlannerOrigin::Runtime
+        && planner
+            .workspace_id
+            .as_deref()
+            .is_some_and(|workspace| !crate::domain::background_wrapper::is_background(workspace))
+}
+
 /// When anything was last seen of the planner whose directory is `dir`,
 /// opened at `created_at` (Unix seconds): the latest of its last input
 /// ([`screen_idle::last_input`]) and its idle marker, fresh or stale. The
@@ -913,8 +828,9 @@ pub fn planner_views(
 }
 
 /// Close the rows of the planners whose session is over for good
-/// ([`PlannerSession::abandoned`]), a person's included: their workspace is
-/// not in cmux's one listing of all windows and their wrapper is done. The
+/// ([`PlannerSession::abandoned`]), a person's included: their wrapper is
+/// done and, for a person's, their workspace is not in cmux's one listing
+/// of all windows. The
 /// rows are read before the listing, so a workspace opened after it is not
 /// taken for gone. A listing cmux fails to give closes nothing (the error
 /// is returned): a passing failure gives no planner up. A headless
@@ -939,9 +855,12 @@ pub fn close_abandoned_planners(
     if open.is_empty() {
         return Ok(Vec::new());
     }
-    let needs_listing = open
-        .iter()
-        .any(|planner| !planner.workspace_id.as_deref().is_some_and(is_background));
+    // Only a person's planner has a workspace cmux lists; one of the
+    // runtime's an older binary opened in a workspace is not looked up
+    // (ADR-t1433-2 decision 3).
+    let needs_listing = open.iter().any(|planner| {
+        !planner.workspace_id.as_deref().is_some_and(is_background) && !retired_workspace(planner)
+    });
     let listed = if needs_listing {
         cmux.listed_workspace_ids()
             .context("the planners' workspaces could not be listed")?
@@ -956,6 +875,8 @@ pub fn close_abandoned_planners(
         let workspace_listed = if background {
             // One that cannot be judged now is not given up.
             cmux.exists(workspace).unwrap_or(true)
+        } else if retired_workspace(&planner) {
+            false
         } else {
             listed.iter().any(|id| id.eq_ignore_ascii_case(workspace))
         };
@@ -1035,11 +956,12 @@ pub struct PersonPlannersClosed {
 /// Close the person's planners whose agent exited more than
 /// [`PERSON_PLANNER_CLOSE_GRACE_SECS`] ago (ADR-t1300-1,
 /// [`PlannerSession::person_exit_closes`]): the workspace, when cmux's one
-/// listing of all windows has it, is closed the way a planner of the
-/// runtime's is (unpinned first), then the row, with `planner_closed`. A
-/// workspace not listed is left to [`close_abandoned_planners`]. A listing
-/// cmux fails to give closes nothing (the error is returned); a close that
-/// fails keeps the row open and is reported in `failures`.
+/// listing of all windows has it, is closed (unpinned first; a planner of
+/// the runtime's has no workspace, ADR-t1433-2), then the row, with
+/// `planner_closed`. A workspace not listed is left to
+/// [`close_abandoned_planners`]. A listing cmux fails to give closes
+/// nothing (the error is returned); a close that fails keeps the row open
+/// and is reported in `failures`.
 pub fn close_exited_person_planners(
     queue: &dyn Queue,
     cmux: &dyn WorkspaceBackend,
@@ -1148,6 +1070,57 @@ pub fn remove_unused_planner_runners(
 mod tests {
     use super::*;
     use crate::domain::{FindingId, PlannerRoute, RequestId};
+
+    /// A planner of the runtime's whose row records a cmux workspace (an
+    /// older binary opened it, interactive or headless under `[headless]
+    /// wrapper = "workspace"`) is retired: no cmux is called for it. One
+    /// with a background handle or with no session yet is not, and neither
+    /// is a person's planner in its workspace (task 1577's).
+    #[test]
+    fn only_a_runtime_planners_row_in_a_cmux_workspace_is_retired() {
+        let row = |origin, route, workspace: Option<&str>| PlannerSession {
+            id: PlannerId::new(1),
+            origin,
+            proposal_id: None,
+            draft_task_id: None,
+            finding_id: None,
+            request_id: None,
+            workspace_id: workspace.map(str::to_owned),
+            wrapper_pid: Some(1),
+            agent_pid: Some(2),
+            heartbeat_at: Some(0),
+            exit_code: None,
+            exited_at: None,
+            closed_at: None,
+            error: None,
+            created_at: 0,
+            route,
+        };
+        let cmux = Some("01234567-89AB-4DEF-8123-000000000000");
+        let handle = Some("background:7:start");
+        for route in [PlannerRoute::Interactive, PlannerRoute::Headless] {
+            assert!(
+                retired_workspace(&row(PlannerOrigin::Runtime, route, cmux)),
+                "{route:?}"
+            );
+            assert!(!retired_workspace(&row(
+                PlannerOrigin::Runtime,
+                route,
+                handle
+            )));
+            assert!(!retired_workspace(&row(
+                PlannerOrigin::Runtime,
+                route,
+                None
+            )));
+            for workspace in [cmux, handle, None] {
+                assert!(
+                    !retired_workspace(&row(PlannerOrigin::Person, route, workspace)),
+                    "{route:?} {workspace:?}"
+                );
+            }
+        }
+    }
 
     // Moved here by task 1711 from the tests/it cases it removed:
     // planner_headless_turns::a_headless_finding_planner_takes_the_answer_as_its_next_turn_and_closes_with_its_finding

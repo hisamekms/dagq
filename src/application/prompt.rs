@@ -1287,7 +1287,7 @@ pub const DRAFT_RECEIPT_FOLLOW_UPS_BYTES: usize = 6_000;
 /// the runtime or a job registered (ADR-0041 decision 16, ADR-t807-1): the
 /// material, and the three things it may do with each draft — submit it
 /// completed (adopt), cancel it with a note (drop), or ask the inbox a
-/// `planner_question` and apply the answer typed into its terminal — and,
+/// `planner_question` and apply the answer it gets as its next turn — and,
 /// for a bundle of more than one, what to weigh between its drafts. Each
 /// section is held to its limit and the whole to
 /// [`DRAFT_PLANNER_PROMPT_LIMIT`]; what is left out is counted and named
@@ -4647,8 +4647,9 @@ pub fn goal_review_prompt(material: &GoalReviewMaterial<'_>) -> FittedPrompt {
     ))
 }
 
-/// What the supervisor types into the live planner a revise goes back to
-/// (ADR-0041 decisions 12, 13).
+/// What the supervisor sends the live planner a revise goes back to
+/// (ADR-0041 decisions 12, 13): a planner of the runtime's gets it as its
+/// next turn (ADR-t1433-2); only a person's planner is typed it.
 pub fn plan_revise_request(proposal: ProposalId, reasons: &[String]) -> String {
     let reasons = if reasons.is_empty() {
         "- (none given)".to_owned()

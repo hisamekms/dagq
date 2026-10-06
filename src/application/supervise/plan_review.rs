@@ -10,6 +10,7 @@
 
 use super::*;
 use crate::domain::EventKind;
+use crate::domain::actor_model::RoleModels;
 use crate::domain::language::with_instruction;
 use crate::domain::{ActorContext, AskConfidence};
 use crate::{
@@ -18,7 +19,7 @@ use crate::{
         StatusFilter, TaskListItem, TaskQuery, job_start_failure,
         planner::{
             self, PLANNER_DEBUG_LOG, PlannerLaunch, PlannerProbes, PlannerView,
-            open_runtime_planner, planner_last_activity, planner_view,
+            open_runtime_planner, planner_last_activity, planner_view, retired_workspace,
         },
         planner_idle_marker,
         prompt::{
@@ -40,6 +41,7 @@ use crate::{
     },
 };
 use std::collections::BTreeMap;
+use std::sync::atomic::Ordering;
 
 /// Files that conflict often the plan review prompt lists at most.
 const HOTSPOT_FILES: usize = 15;
@@ -919,7 +921,6 @@ impl Supervisor<'_> {
         // (ADR-t1394-2 decisions 3 and 5).
         self.tend_planner_walls(&views)?;
         self.tell_of_stopped_planner_turns(&views)?;
-        self.tell_of_silent_planners(timeout, &views)?;
         self.end_runtime_planners(&views)?;
         if let Some(proposal) = starved {
             self.release_runtime_planner(proposal, timeout, &views)?;
@@ -985,9 +986,8 @@ impl Supervisor<'_> {
                 continue;
             };
             let busy = self.busy_reasons(view, &revising)?;
-            // An answer not typed yet may be left to the inbox (its typing
-            // failed), which types it into this workspace by hand.
-            // One that waits for Claude is not done either (ADR-t1394-2
+            // An answer not sent yet (its delivery failed) is left to the
+            // inbox to settle. One that waits for Claude is not done either (ADR-t1394-2
             // decision 5).
             if busy.is_empty()
                 || busy.contains(&PlannerBusy::QuestionOpen)
@@ -1063,63 +1063,17 @@ impl Supervisor<'_> {
         Ok(busy)
     }
 
-    /// Tell the inbox, once per planner, of a planner of the runtime's
-    /// (for a draft, a finding or a revise) nothing was seen of within
-    /// `timeout` seconds (task 805): at work by what the runtime can tell,
-    /// with no input, no idle marker and no idle screen since. It is the
-    /// backstop for an idle marker its hook could not write on a screen
-    /// cmux cannot read, or reads in a state it does not know. It is not
-    /// closed: a person looks at it. A planner a revise went to is timed by
-    /// its revise, and one that waits on its `planner_question` waits on a
-    /// person; a person's planner is never timed. A headless planner is
-    /// timed by its turn's limits instead
-    /// ([`Self::tell_of_stopped_planner_turns`], ADR-t1394-2 decision 3).
-    fn tell_of_silent_planners(&mut self, timeout: i64, views: &[PlannerView]) -> Result<()> {
-        let now = self.generators.clock.now();
-        let revising = self.queue.revising_proposals()?;
-        for view in views.iter().filter(|view| {
-            view.planner.origin == PlannerOrigin::Runtime
-                && view.planner.route != crate::domain::PlannerRoute::Headless
-                && view.alive
-                && view.state != PlannerState::Idle
-        }) {
-            let id = view.planner.id;
-            if revising.iter().any(|revise| revise.planner_id == Some(id)) {
-                continue;
-            }
-            let last = planner_last_activity(&*self.files, &view.dir, view.planner.created_at)?;
-            let waited = now - last;
-            if waited <= timeout || self.question_wait(view)?.is_some() {
-                continue;
-            }
-            let reason = format!(
-                "planner {id} of the runtime showed nothing (no input, no idle marker, no idle screen) for {waited} seconds; it is left open for a person to look at"
-            );
-            let payload = json!({
-                "subject": "planner",
-                "planner_id": id,
-                "origin": view.planner.origin.as_str(),
-                "workspace_id": view.planner.workspace_id,
-                "draft_task_id": view.planner.draft_task_id,
-                "finding_id": view.planner.finding_id,
-                "request_id": view.planner.request_id,
-                "state": view.state.as_str(),
-                "last_activity": last,
-                "waited_secs": waited,
-                "reason": reason,
-            });
-            if self.queue.planner_silent(id, payload)? {
-                warn!("{reason}; the inbox is told");
-            }
-        }
-        Ok(())
-    }
-
     /// Whether a planner's session is over: it exited, its wrapper stopped
-    /// heartbeating, or its workspace is not listed and its wrapper is dead
-    /// (a workspace not listed alone is no evidence: its session is judged
-    /// by its wrapper, as a worker's is).
+    /// heartbeating, or its session (its background wrapper, or a person's
+    /// workspace) is gone and its wrapper is dead (a session not found
+    /// alone is no evidence: it is judged by its wrapper, as a worker's
+    /// is). A planner of the runtime's an older binary opened in a
+    /// workspace is over: the interactive route is retired (ADR-t1433-2
+    /// decision 3) and nothing is sent to it.
     fn planner_gone(&self, view: &PlannerView) -> bool {
+        if retired_workspace(&view.planner) {
+            return true;
+        }
         match view.state {
             PlannerState::Exited | PlannerState::Lost => true,
             PlannerState::Closed => view
@@ -1230,30 +1184,46 @@ impl Supervisor<'_> {
         open_runtime_planner(&self.planner_launch(), proposal.id(), &tasks, reasons)
     }
 
-    /// What opening a planner of the runtime's works with.
+    /// What opening a planner of the runtime's works with. `[roles]` is
+    /// read as each planner opens; an old `[roles.runtime_planner] route`
+    /// in it is warned of once per supervisor
+    /// ([`Self::warn_ignored_route_setting`]).
     pub(super) fn planner_launch(&self) -> PlannerLaunch<'_> {
         let layout = self.layout;
+        let roles = self.verifier.role_models().unwrap_or_else(|error| {
+            warn!(error = %format_args!("{error:#}"), "[roles] could not be read; the planner starts as before: {error:#}");
+            Default::default()
+        });
+        self.warn_ignored_route_setting(&roles);
         PlannerLaunch {
             queue: &*self.queue,
-            cmux: self.cmux,
+            backend: self.cmux,
             files: &*self.files,
             db: &layout.db,
-            queue_hash: &layout.queue_hash,
             planners_dir: &layout.planners_dir,
             repo_root: &layout.repo_root,
             runner: &layout.runner,
             claude: &layout.claude,
             plugin_dir: layout.plugin_dir.as_deref(),
             language: self.verifier.language(),
-            roles: self.verifier.role_models().unwrap_or_else(|error| {
-                warn!(error = %format_args!("{error:#}"), "[roles] could not be read; the planner starts as before: {error:#}");
-                Default::default()
-            }),
-            headless_wrapper: self.verifier.headless_wrapper().unwrap_or_else(|error| {
-                warn!(error = %format_args!("{error:#}"), "[headless] could not be read; a headless planner's wrapper opens in a workspace: {error:#}");
-                Default::default()
-            }),
+            roles,
             turn_limits: self.stall.turn_limits(),
+        }
+    }
+
+    /// Warn once per supervisor that `[roles.runtime_planner] route` of
+    /// `dagq.toml`, which `roles` was read with, chooses nothing: the key is
+    /// accepted and ignored, whatever its value, and the runtime's planners
+    /// run headless only (ADR-t1433-2 decision 3, handled as ADR-t1433-3
+    /// decision 2 handles `[headless] wrapper`).
+    fn warn_ignored_route_setting(&self, roles: &RoleModels) {
+        let warned = self.route_setting_warned.load(Ordering::Relaxed);
+        if let Some(route) = warns_of_ignored_route(warned, roles)
+            && !self.route_setting_warned.swap(true, Ordering::Relaxed)
+        {
+            warn!(
+                "[roles.runtime_planner] route = {route:?} of dagq.toml is ignored: the runtime's planners run headless only, in the background (ADR-t1433-2)"
+            );
         }
     }
 
@@ -1284,11 +1254,14 @@ impl Supervisor<'_> {
     }
 
     /// End the runtime's planners that are done: one idle with no revise of
-    /// its own left is asked to `/exit` once, and closed after the exit
-    /// timeout if it does not; one whose session is over is given up and
-    /// its workspace closed, with `planner_closed` (ADR-t1300-1). A
-    /// person's planner is closed by [`Self::close_exited_person_planners`]
-    /// once its agent exited.
+    /// its own left is asked to exit once (the exit request in its
+    /// `turns/`, ADR-t1394-2 decision 2), and its background wrapper is
+    /// stopped after the exit timeout if it does not; one whose session is
+    /// over is given up, its background wrapper stopped if it still runs,
+    /// with `planner_closed` (ADR-t1300-1). One an older binary opened in a
+    /// workspace is closed without cmux, its workspace left for a person to
+    /// close (ADR-t1433-2 decision 3). A person's planner is closed by
+    /// [`Self::close_exited_person_planners`] once its agent exited.
     fn end_runtime_planners(&mut self, views: &[PlannerView]) -> Result<()> {
         let revising = self.queue.revising_proposals()?;
         for view in views
@@ -1306,22 +1279,33 @@ impl Supervisor<'_> {
             if self.planner_gone(view) || overdue {
                 if overdue {
                     warn!(
-                        "planner {id} of the runtime did not exit within {} seconds of /exit; its workspace is closed",
+                        "planner {id} of the runtime did not exit within {} seconds of its exit request; its wrapper is stopped",
                         self.cmux.exit_timeout().as_secs()
                     );
                 }
+                // Only a background wrapper is stopped: the runtime does
+                // not close a workspace (ADR-t1433-2 decision 3).
                 let mut workspace_closed = false;
-                if let Some(workspace) = &workspace
-                    && self.cmux.exists(workspace)?
+                if let Some(handle) = workspace
+                    .as_deref()
+                    .filter(|handle| crate::domain::background_wrapper::is_background(handle))
+                    && self.cmux.exists(handle)?
                 {
-                    stop_session(self.cmux, workspace, StopRoute::Planner)?;
+                    stop_session(self.cmux, handle, StopRoute::Planner)?;
                     workspace_closed = true;
                 }
-                let (code, reason) = if overdue {
+                let (code, reason) = if retired_workspace(&view.planner) {
+                    (
+                        PlannerCloseCode::RuntimeSessionGone,
+                        format!(
+                            "planner {id} of the runtime was opened in a workspace by an older binary; the runtime calls no cmux for its planners any more (ADR-t1433-2), so its record is closed and its workspace is left for a person to close"
+                        ),
+                    )
+                } else if overdue {
                     (
                         PlannerCloseCode::RuntimeExitTimedOut,
                         format!(
-                            "planner {id} of the runtime did not exit within {} seconds of /exit",
+                            "planner {id} of the runtime did not exit within {} seconds of its exit request",
                             self.cmux.exit_timeout().as_secs()
                         ),
                     )
@@ -1353,7 +1337,7 @@ impl Supervisor<'_> {
                         _ => (
                             PlannerCloseCode::RuntimeSessionGone,
                             format!(
-                                "planner {id} of the runtime: its workspace is not listed and its wrapper is done"
+                                "planner {id} of the runtime: its background wrapper is gone and its wrapper is done"
                             ),
                         ),
                     }
@@ -1428,14 +1412,16 @@ impl PlannerBusy {
 impl Supervisor<'_> {
     /// Whether, and how, a planner of the runtime's still waits on a
     /// `planner_question` about its draft or finding: one not answered
-    /// yet, one answered whose answer is not typed yet, or one whose answer
-    /// was typed into this planner's workspace and its agent has not
-    /// stopped since the typing (task 884). The typing is timed by its
-    /// claim (`planner_answer_claimed`), taken before it, not by the ask's
-    /// close after it, so an agent that took the answer up and stopped
-    /// before the close is done; an answer a new planner carried in its
-    /// prompt is timed by the planner's opening. An ask closed without a
-    /// typing holds nothing.
+    /// yet, one answered whose answer is not delivered yet, or one whose
+    /// answer was delivered to this planner and not taken up yet (task 884):
+    /// a headless planner takes it up once a turn carrying it finished; a
+    /// person's planner, typed into in its workspace, once its agent stopped
+    /// after the typing. The typing is timed by its claim
+    /// (`planner_answer_claimed`), taken before it, not by the ask's close
+    /// after it, so an agent that took the answer up and stopped before the
+    /// close is done; an answer a new planner carried in its prompt is timed
+    /// by the planner's opening. An ask closed without a delivery holds
+    /// nothing.
     fn question_wait(&mut self, view: &PlannerView) -> Result<Option<PlannerBusy>> {
         let (draft, finding, request) = (
             view.planner.draft_task_id,
@@ -1561,4 +1547,30 @@ It recommends {recommended} (confidence {confidence}); left to a person: {becaus
         job.dir.display()
     ));
     question
+}
+
+/// The value of `[roles.runtime_planner] route` that `roles` was read with,
+/// when it calls for the warning that it is ignored (ADR-t1433-2 decision
+/// 3): once per supervisor (`warned`), and whatever the value, `headless`
+/// included, since no value chooses anything.
+fn warns_of_ignored_route(warned: bool, roles: &RoleModels) -> Option<&str> {
+    roles.ignored_planner_route().filter(|_| !warned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Any value of the old key is warned of, and only once; no key is
+    /// not.
+    #[test]
+    fn the_old_route_key_is_warned_of_whatever_its_value_and_only_once() {
+        assert_eq!(warns_of_ignored_route(false, &RoleModels::default()), None);
+        for value in ["interactive", "headless", "screen"] {
+            let mut roles = RoleModels::default();
+            roles.ignore_planner_route(value.to_owned());
+            assert_eq!(warns_of_ignored_route(false, &roles), Some(value));
+            assert_eq!(warns_of_ignored_route(true, &roles), None);
+        }
+    }
 }

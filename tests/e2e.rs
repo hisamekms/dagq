@@ -13,7 +13,7 @@
 //! `DAGQ_E2E_LAUNCHD=1` is set; the in-cmux `up` / `down` test is out for
 //! now under ADR-t1582-1 (see the last paragraph).
 //!
-//! ADR-t1582-1 keeps two cases, and the helpers only they use, out under `#[cfg(any())]`.
+//! ADR-t1582-1 keeps one case, and the helpers only it uses, out under `#[cfg(any())]`.
 #[path = "e2e/broker.rs"]
 mod broker;
 #[path = "e2e/cleanup.rs"]
@@ -25,16 +25,12 @@ mod headless;
 mod other_repository;
 #[path = "e2e/stub.rs"]
 mod stub;
-// Out until task 1441 deletes it or brings back a headless one (ADR-t1582-1).
-#[cfg(any())]
-#[path = "e2e/planner.rs"]
-mod planner;
 
 use cleanup::{
     GroupGuard, WorkspaceGuard, claim_fixture_dir, cmux_retrying, listed_group,
     sweep_abandoned_fixtures, workspace_listed,
 };
-#[cfg(any())] // Goes with tasks 1441, 1443 (ADR-t1582-1).
+#[cfg(any())] // Goes with task 1443 (ADR-t1582-1).
 use cleanup::{
     cmux_attempt, listed_workspace, try_listed_workspace, wait_for_listed, wait_until_not_listed,
 };
@@ -248,7 +244,7 @@ fn assert_look(cmux: &Path, id: &str, color: &str, pill: &str) {
 
 /// `cmux workspace env <id> --json`: the environment the workspace was
 /// created with.
-#[cfg(any())] // Goes with tasks 1441, 1443 (ADR-t1582-1).
+#[cfg(any())] // Goes with task 1443 (ADR-t1582-1).
 fn workspace_env(cmux: &Path, id: &str) -> Value {
     let output = Command::new(cmux)
         .args(["workspace", "env", id, "--json"])

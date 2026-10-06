@@ -6,8 +6,8 @@
 //! revises and drafts), the oldest mark first. The planner submits a
 //! proposal that remedies it (linking the finding, which becomes
 //! `proposed`), dismisses it, or asks the inbox a `planner_question`,
-//! whose answer the supervisor types into its workspace (or hands to a new
-//! planner when that one is gone). A planner that ends with the finding
+//! whose answer the supervisor delivers to it as its next turn (or hands
+//! to a new planner when that one is gone). A planner that ends with the finding
 //! undecided is followed by another, at most
 //! [`crate::domain::MAX_FINDING_PLANNERS`] per mark. The end of a linked
 //! proposal resolves the finding, or opens it again.
@@ -56,8 +56,9 @@ impl Supervisor<'_> {
         Ok(())
     }
 
-    /// Deliver the answer of a `planner_question` about `finding`: typed
-    /// into the live planner opened for it once it stopped after asking,
+    /// Deliver the answer of a `planner_question` about `finding`: sent to
+    /// the live planner opened for it, as its next turn, once it stopped
+    /// after asking,
     /// handed to a new planner when that one is gone (within the limit), or
     /// closed when the finding moved on.
     pub(super) fn deliver_finding_answer(
@@ -72,7 +73,7 @@ impl Supervisor<'_> {
                 let Some(view) = views.iter().find(|view| view.planner.id == planner.id) else {
                     return Ok(());
                 };
-                // The planner that asked is typed to once it stopped after
+                // The planner that asked gets it once it stopped after
                 // asking; a question someone else opened waits only for it
                 // to be idle.
                 // One that waits for Claude gets it after its retry
@@ -186,7 +187,8 @@ impl Supervisor<'_> {
     }
 
     /// Record a planner for `finding` (carrying `answer`), write its prompt
-    /// and open its workspace; the workspace's UUID, or `None` when the
+    /// and start its wrapper in the background; the handle its row records
+    /// (`workspace_id`), or `None` when the
     /// finding was not taken (another supervisor took it, it moved on, or
     /// its planners are used up), or the error [`ImprovementsAtLimit`].
     /// `limit` is ignored when the planner carries `answer`.

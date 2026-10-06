@@ -5,54 +5,15 @@
 /// A worker's turn (`claude -p --output-format stream-json`, ADR-t813-1)
 /// follows its prompt: work in the cwd worktree, commit, publish the receipt
 /// by atomic rename and print the turn's stream; the session wrapper writes
-/// the idle marker when the turn ends. A planner session behaves like an
-/// idle interactive session: it writes the idle marker the Stop hook would
-/// write and waits for `/exit` on its terminal, which the runtime types
-/// through cmux.
+/// the idle marker when the turn ends. No e2e case opens a planner: the
+/// runtime's planners run headless (ADR-t1433-2), and the case that drove
+/// an interactive one in cmux went with task 1441.
 pub(crate) const STUB: &str = concat!(
     r#"#!/bin/sh
 set -eu
 "#,
     crate::await_file_fn!(),
     r#"
-# An idle session waits for `/exit` the way Claude Code does: its input box
-# is drawn at the bottom of the screen with what is typed in it, so the
-# supervisor's checks of a `/exit` read it as with Claude Code (task 1008):
-# typed but not submitted (Enter again), or lost to a cmux timeout (an
-# empty box: typed again). Without the box every read was `not_ready` and a
-# lost `/exit` was never sent again. The wait line names no `/exit`, which
-# would read as a trace of one.
-wait_for_exit() {
-  printf 'idle; waiting for the exit request\n'
-  rule=──────────────────────────────────────────────────
-  typed=
-  nl=$(printf '\nx')
-  nl=${nl%x}
-  cr=$(printf '\r')
-  stty -icanon -echo min 1 2>/dev/null || true
-  while :; do
-    printf '%s\n\342\235\257 %s\n%s\n  ? for shortcuts\n' "$rule" "$typed" "$rule"
-    key=$(dd bs=1 count=1 2>/dev/null; printf x)
-    key=${key%x}
-    # The terminal is gone.
-    [ -n "$key" ] || exit 0
-    case "$key" in
-      "$nl"|"$cr")
-        # Submitted: the box is drawn empty again. A `/exit` typed again
-        # over one that arrived late still exits.
-        line=$typed
-        typed=
-        case "$line" in */exit)
-          printf '%s\n\342\235\257 \n%s\n  ? for shortcuts\n' "$rule" "$rule"
-          break ;;
-        esac ;;
-      *) typed=$typed$key ;;
-    esac
-  done
-  stty icanon echo 2>/dev/null || true
-  printf 'bye\n'
-  exit 0
-}
 if [ "${1:-}" = "--version" ]; then
   printf 'claude-stub 0.0.0\n'
   exit 0
@@ -88,29 +49,6 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ $# -eq 0 ] || { printf 'stub: trailing arguments after the prompt\n' >&2; exit 64; }
-if [ "${DAGQ_ROLE:-}" = planner ]; then
-  # A planner session the runtime opened for a planning request
-  # (ADR-t1394-1): register a task, submit it as this planner's proposal, go
-  # idle the way the Stop hook marks it, and wait for /exit on the terminal.
-  [ -z "$session_id" ] && [ -n "$debug_file" ] && [ -n "$add_dir" ] && [ -n "$settings" ] && [ -n "$prompt" ] \
-    || { printf 'stub: bad planner arguments\n' >&2; exit 64; }
-  grep -q '"Stop"' "$settings" || { printf 'stub: planner settings lack a Stop hook\n' >&2; exit 64; }
-  case "$prompt" in 'You are a planner the dagq runtime opened for planning request '*) ;; *) printf 'stub: not a planner prompt\n' >&2; exit 65 ;; esac
-  {
-    printf 'argv: --debug-file %s --add-dir %s --settings %s --plugin-dir %s\n' "$debug_file" "$add_dir" "$settings" "$plugin_dir"
-    printf 'cwd: %s\n' "$(pwd)"
-    printf 'env: DAGQ_ROLE=%s DAGQ_PLANNER_ORIGIN=%s DAGQ_PLANNER_ID=%s\n' "$DAGQ_ROLE" "${DAGQ_PLANNER_ORIGIN:-}" "${DAGQ_PLANNER_ID:-}"
-  } > "$debug_file"
-  "$add_dir/runner" --db "$DAGQ_QUEUE" add "planned by planner ${DAGQ_PLANNER_ID:-}" --acceptance 'the e2e planner wrote it' > "$add_dir/added.json"
-  task=$(sed -n 's/^  "id": \([0-9]*\),$/\1/p' "$add_dir/added.json")
-  [ -n "$task" ] || { printf 'stub: add printed no task id\n' >&2; exit 66; }
-  "$add_dir/runner" --db "$DAGQ_QUEUE" submit "$task" > "$add_dir/submitted.json"
-  printf 'submitted task %s\n' "$task"
-  idle="$add_dir/idle.json"
-  printf '{"hook_event_name":"Stop","stop_hook_active":false}\n' > "$idle.tmp"
-  mv "$idle.tmp" "$idle"
-  wait_for_exit
-fi
 if [ -n "$headless" ] && [ "$output" != stream-json ]; then
   # The supervisor's headless review (ADR-0027): read review.md, print the
   # verdict JSON on stdout. Only a task that says E2E-REVIEW-PASS passes;

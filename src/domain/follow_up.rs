@@ -41,8 +41,8 @@ pub fn reopened_material(
 
 /// The options of the `planner_question` ask a planner of the runtime's
 /// opens about its draft when it cannot decide (ADR-0041 decision 16). The
-/// answer is typed into that planner's workspace and the planner applies
-/// it; `keep_draft` leaves the draft as it is until a person has the inbox
+/// answer goes to that planner as its next turn (ADR-t1433-2), or to a new
+/// planner when that one is gone, and the planner applies it; `keep_draft` leaves the draft as it is until a person has the inbox
 /// record a planning request that names it (`request add --ref task:N`,
 /// ADR-t1394-1 decision 8), and no planner of the runtime's is opened for it
 /// again, unless it was given a revisit time (`revisit --at`, ADR-t1540-1):

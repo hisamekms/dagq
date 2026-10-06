@@ -96,7 +96,7 @@ fn a_kept_draft_gets_a_headless_planner_at_its_revisit_time_with_the_last_decisi
         &["note", "--task", "2", "--text", "fill it in at noon UTC"],
     );
     let reviewer = StubReviewer::new(&[]);
-    let backend = PlanWorkspace::default();
+    let backend = PlanWorkspace::running();
     pass(&fx, &backend, &reviewer);
     assert!(queue.planners(true).unwrap().is_empty(), "kept: no planner");
 
@@ -142,7 +142,6 @@ fn a_kept_draft_gets_a_headless_planner_at_its_revisit_time_with_the_last_decisi
     let planner = &planners[0];
     assert_eq!(planner.route, PlannerRoute::Headless);
     assert_eq!(planner.draft_task_id, Some(draft));
-    assert!(backend.opened().is_empty(), "no workspace");
     assert!(backend.texts().is_empty(), "nothing typed");
     let dir = planners_dir(&fx.db).join(planner.id.to_string());
     let first = fs::read_to_string(dir.join("prompt-turn-1.txt")).unwrap();
@@ -216,7 +215,7 @@ fn a_persons_draft_gets_a_planner_only_at_its_revisit_time() {
     let left = queue.add(mine("leave me")).unwrap().id();
     assert_eq!(revisited, TaskId::new(2));
     let reviewer = StubReviewer::new(&[]);
-    let backend = PlanWorkspace::default();
+    let backend = PlanWorkspace::running();
     pass(&fx, &backend, &reviewer);
     assert!(queue.planners(true).unwrap().is_empty(), "a person's draft");
 

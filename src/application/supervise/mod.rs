@@ -729,8 +729,8 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         "keep the queue outside the worktree or under its Git common directory"
     );
     ports.cmux.preflight()?;
-    // The planner and inbox screens and the idle markers are read with the
-    // interactive Claude adapter's signals.
+    // The screens of the inbox and of a person's planner and the idle
+    // markers are read with the interactive Claude adapter's signals.
     let interactive = ports
         .workers
         .get(Worker::CLAUDE_INTERACTIVE)
@@ -907,6 +907,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         generators: ports.generators.clone(),
         stall: settings.stall,
         wrapper_setting_warned: false,
+        route_setting_warned: std::sync::atomic::AtomicBool::new(false),
         conflicts: settings.conflicts,
         conflicts_file: ports.conflicts_file.clone(),
         conflicts_error: settings.conflicts_error.clone(),
@@ -1006,8 +1007,9 @@ struct Supervisor<'a> {
     reviewer: &'a dyn AgentProvider,
     /// Starts the headless jobs a role puts on Codex (ADR-t1063-1).
     codex_jobs: Option<&'a dyn AgentProvider>,
-    /// Reads the idle marker of the run sessions, and the screens of the
-    /// planner and inbox sessions (no worker screen since task 1437).
+    /// Reads the idle marker of the run sessions, and the screens of a
+    /// person's planner and the inbox (no worker screen since task 1437,
+    /// no screen of the runtime's planners since ADR-t1433-2).
     signals: &'a dyn AgentSignals,
     /// The workers this supervisor runs: a candidate whose worker is not
     /// one of them is not claimed (ADR-t813-2).
@@ -1095,6 +1097,10 @@ struct Supervisor<'a> {
     /// Whether `[headless] wrapper = "workspace"`, which a worker ignores,
     /// was warned of (ADR-t1433-3 decision 2).
     wrapper_setting_warned: bool,
+    /// Whether `[roles.runtime_planner] route`, which the runtime's planners
+    /// ignore, was warned of (ADR-t1433-2 decision 3). Set where a planner
+    /// opens, which reads `[roles]` through `&self`.
+    route_setting_warned: std::sync::atomic::AtomicBool,
     /// The `[conflicts]` thresholds the plan review's hotspots and the
     /// claims deferred on them are judged by, as last read (ADR-0080).
     conflicts: crate::domain::stats::ConflictConfigReport,
@@ -1115,7 +1121,8 @@ struct Supervisor<'a> {
     /// Whether this process looked for the jobs a gone supervisor left,
     /// its own token's included (after an exec), already.
     jobs_swept: bool,
-    /// The runtime's planners this process asked to `/exit`, and when.
+    /// The runtime's planners this process asked to exit (their exit
+    /// request), and when.
     planner_exits: Vec<(crate::domain::PlannerId, Instant)>,
     /// The screen's idle spans of the sessions without a fresh idle marker
     /// (ADR-t803-1), kept here so a disk that takes no file loses none.

@@ -400,7 +400,7 @@ fn what_a_bundle_leaves_undecided_makes_the_next_and_the_outcomes_are_read() {
 
 /// A `planner_question` stays per draft: one about a draft of the bundle
 /// other than its first holds the bundle's planner from exiting and its
-/// answer is typed into that planner's workspace.
+/// answer goes to that planner as its next turn.
 #[test]
 fn a_question_about_any_draft_of_the_bundle_goes_to_its_planner() {
     let fx = fixture();
@@ -431,16 +431,20 @@ fn a_question_about_any_draft_of_the_bundle_goes_to_its_planner() {
         })
         .unwrap()
         .ask;
-    crate::plan_review::idle(&queue, &fx.db, planner.id);
+    crate::runtime_support::planner_turns::idle(&queue, &fx.db, planner.id);
     pass(&fx, &backend, &reviewer);
-    assert!(backend.exits.lock().unwrap().is_empty());
+    assert!(!crate::runtime_support::planner_turns::exit_requested(
+        &fx.db, planner.id
+    ));
     queue.answer(asked.id, "keep_draft").unwrap();
     pass(&fx, &backend, &reviewer);
-    let workspace = planner.workspace_id.clone().unwrap();
+    let requests = crate::runtime_support::planner_turns::turn_requests(&fx.db, planner.id);
+    assert_eq!(requests.len(), 1, "{requests:?}");
     assert_eq!(
-        backend.texts(),
-        [(workspace, format!("answer to ask {}: keep_draft", asked.id))]
+        requests[0]["prompt"],
+        format!("answer to ask {}: keep_draft", asked.id)
     );
+    assert!(backend.texts().is_empty(), "nothing typed");
     assert_eq!(
         events(&mut queue, a[1], "planner_answer_claimed")[0]["planner_id"],
         planner.id.as_i64()

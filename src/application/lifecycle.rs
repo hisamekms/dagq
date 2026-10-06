@@ -75,13 +75,14 @@ pub const QUEUE_ENV: &str = "DAGQ_QUEUE";
 /// `DAGQ_ROLE` of a run's session wrapper (and of its resumes').
 pub const WORKER_ROLE: &str = ActorRole::Worker.as_str();
 /// `DAGQ_ROLE` of a planner session, which writes goals and tasks and
-/// submits them as a proposal. The runtime opens one in a workspace
-/// `[<repo>]planner#<id>`; `up` opens none, and `dagq plan` no longer opens
-/// one a person talks with (ADR-t1394-1).
+/// submits them as a proposal. The runtime starts one as a background
+/// wrapper with no workspace (ADR-t1433-2); `up` opens none, and `dagq
+/// plan` no longer opens one a person talks with (ADR-t1394-1).
 pub const PLANNER_ROLE: &str = ActorRole::Planner.as_str();
 pub use crate::domain::actor::{PLANNER_ID_ENV, PLANNER_ORIGIN_ENV, SESSION_KIND_ENV};
 /// The cmux workspace a session runs in, set by cmux in every terminal:
-/// the planner workspace that owns the proposals it submits.
+/// a person's planner's workspace owns the proposals it submits (a planner
+/// of the runtime's has none: its record's background handle owns them).
 pub const CMUX_WORKSPACE_ENV: &str = "CMUX_WORKSPACE_ID";
 /// `DAGQ_ROLE` of the session where a person answers the queue's asks. `up`
 /// opens its workspace `[<repo>]inbox`.
@@ -779,11 +780,9 @@ impl Sessions<'_> {
                         prompt: prompt()?,
                         plugin_dir: self.plugin_dir,
                     },
-                    planner: None,
                     launch: None,
                     description: self.workspaces.description(role),
                     group: self.workspaces.group(),
-                    background: None,
                 },
             ))?
             .workspace()?;

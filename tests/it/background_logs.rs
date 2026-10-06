@@ -176,7 +176,7 @@ fn a_closed_background_planners_log_is_read_by_its_id() {
         json!({"verdict": "revise", "reasons": ["split it"], "summary": "not yet"}),
         json!({"verdict": "pass", "reasons": [], "summary": "ok"}),
     ]);
-    let backend = PlanWorkspace::default();
+    let backend = PlanWorkspace::running();
     supervise_until(
         &fx,
         &backend,

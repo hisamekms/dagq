@@ -3,14 +3,16 @@
 //! the runtime's for each `open` request within the limit it shares with
 //! the other planners of the runtime's, and the planner submits a proposal
 //! of it (the request becomes `proposed`), declines it, or asks a
-//! `planner_question` whose answer reaches it or a new planner. The cmux
-//! double and the stub reviewer are plan review's.
+//! `planner_question` whose answer reaches it (as its next turn) or a new
+//! planner. The backend (the planners' wrappers parked in the background)
+//! and the stub reviewer are plan review's.
 
 use crate::common::cli::{invoke_as, invoke_with, ok_as};
 use crate::plan_review::{
-    PlanWorkspace, StubReviewer, fixture, idle, open_goal, options, planner_prompt, supervise,
+    PlanWorkspace, StubReviewer, fixture, open_goal, options, planner_prompt, supervise,
     supervise_with,
 };
+use crate::runtime_support::planner_turns::{exit_requested, idle, turn_requests};
 use dagq::{
     application::{PlanRequestStore, RequestPlannerStart, TaskStore},
     domain::{
@@ -195,11 +197,8 @@ fn a_request_the_inbox_records_gets_one_planner_whose_submission_proposes_it() {
     assert_eq!(planners.len(), 1, "{planners:?}");
     assert_eq!(planners[0].origin, PlannerOrigin::Runtime);
     assert_eq!(planners[0].request_id, Some(id));
-    let opened = backend.opened();
-    assert!(
-        opened[0].1.ends_with(&format!("request {id}")),
-        "{opened:?}"
-    );
+    let handle = planners[0].workspace_id.clone().unwrap();
+    assert_eq!(backend.launched(), std::slice::from_ref(&handle));
     // The words are handed over as a file in the planner's directory, and
     // the prompt points at it rather than carrying them.
     let handed = planners_dir(&fx.db)
@@ -259,10 +258,10 @@ fn a_request_the_inbox_records_gets_one_planner_whose_submission_proposes_it() {
         RequestPlannerStart::Skipped
     ));
 
-    // The planner submits from its workspace: the request is proposed with
-    // the proposal, and the inbox is told.
+    // The planner submits as its own: the request is proposed with the
+    // proposal, and the inbox is told.
     let task = draft(&mut queue, goal, "bring it back");
-    let proposal = submit_from(&mut queue, "RT1", task);
+    let proposal = submit_from(&mut queue, &handle, task);
     let proposed = queue.plan_request(id).unwrap();
     assert_eq!(proposed.status, RequestStatus::Proposed);
     assert_eq!(proposed.proposals, vec![proposal.id()]);
@@ -271,7 +270,7 @@ fn a_request_the_inbox_records_gets_one_planner_whose_submission_proposes_it() {
     assert_eq!(told[0]["next"], "report the request's proposal");
     // A second proposal of it is linked too, and tells nobody again.
     let more = draft(&mut queue, goal, "and more");
-    let second = submit_from(&mut queue, "RT1", more);
+    let second = submit_from(&mut queue, &handle, more);
     assert_eq!(
         queue.plan_request(id).unwrap().proposals,
         vec![proposal.id(), second.id()]
@@ -291,7 +290,7 @@ fn a_request_the_inbox_records_gets_one_planner_whose_submission_proposes_it() {
     // Done and idle, the planner is asked to exit.
     idle(&queue, &fx.db, planners[0].id);
     supervise(&fx, &backend, &reviewer);
-    assert_eq!(*backend.exits.lock().unwrap(), ["RT1".to_owned()]);
+    assert!(exit_requested(&fx.db, planners[0].id));
 }
 
 #[test]
@@ -497,16 +496,16 @@ fn a_planner_question_about_a_request_reaches_its_planner_or_a_new_one_and_three
     assert_eq!(asked.request_id, Some(id));
     idle(&queue, &fx.db, first);
     supervise(&fx, &backend, &reviewer);
-    assert!(backend.exits.lock().unwrap().is_empty());
+    assert!(!exit_requested(&fx.db, first));
     queue.answer(asked.id, "plan").unwrap();
     supervise(&fx, &backend, &reviewer);
+    let requests = turn_requests(&fx.db, first);
+    assert_eq!(requests.len(), 1, "{requests:?}");
     assert_eq!(
-        backend.texts(),
-        [(
-            "RT1".to_owned(),
-            format!("answer to ask {}: plan", asked.id)
-        )]
+        requests[0]["prompt"],
+        format!("answer to ask {}: plan", asked.id)
     );
+    assert!(backend.texts().is_empty(), "nothing typed");
     assert!(queue.asks(Default::default()).unwrap().is_empty());
 
     // A question about the request names nothing else.

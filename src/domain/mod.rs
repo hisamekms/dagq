@@ -206,8 +206,8 @@ known_ask_kinds!(AskKind {
     CorrectGoal => "correct_goal",
     // A planner of the runtime's that needs a person (ADR-0041 decision
     // 13): about the draft (or the proposal's task) it works on and no run.
-    // The supervisor types the answer into that planner's workspace, as it
-    // does a `worker_question`'s into a worker's.
+    // The supervisor delivers the answer to that planner as its next turn
+    // (ADR-t1433-2), as it does a `worker_question`'s to a worker's session.
     PlannerQuestion => "planner_question",
     // An authentication or cost ask (ADR-0047 decision 42): one open per
     // queue, reason and subject, about no task or run. The runs it holds
@@ -1880,9 +1880,10 @@ pub enum AttentionNext {
     GoalReviewByHand,
     /// The planner a revise went to did not submit its proposal again
     /// within the planner timeout (`planner_unresponsive`, ADR-0041
-    /// decision 13), or a planner of the runtime's showed nothing (no
-    /// input, no idle marker, no idle screen) within it (task 805): a
-    /// person looks at its workspace.
+    /// decision 13), or a planner of the runtime's had a turn stopped at
+    /// the turn's limit (`[stall]`, the supervisor's
+    /// `tell_of_stopped_planner_turns`; task 1441 removed the backstop on a
+    /// silent planner, task 805): a person reads it with `planner log`.
     CheckPlanner,
     /// The runtime opened its planners for a draft the runtime or a job
     /// registered, and none decided it (`draft_planner_exhausted`,
@@ -2378,8 +2379,9 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         // finding (ADR-0044 decision 19).
         ("ask_answered", _) if payload.get("finding_applied").is_some() => None,
         // The supervisor types the answer of a `worker_question` into the
-        // worker's terminal, and that of a `planner_question` into the
-        // planner's workspace (ADR-0041 decision 13).
+        // worker's terminal, and delivers that of a `planner_question` to its
+        // planner (ADR-0041 decision 13): to a planner of the runtime's as
+        // its next turn (ADR-t1433-2).
         ("ask_answered", _)
             if matches!(
                 payload.get("kind").and_then(serde_json::Value::as_str),

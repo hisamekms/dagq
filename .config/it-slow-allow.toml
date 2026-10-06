@@ -78,11 +78,11 @@ name = "e2e_gate_podman::a_busy_machine_lock_skips_broker_and_records_why"
 reason = "B 境界（守る境界）: real flock with fake podman"
 task = 1707
 
-# 6.729s, class G
+# 7.971s (median of 5 stress rounds under load, task 1441), class B
 [[test]]
-name = "finding_planner::a_planner_question_about_a_finding_is_typed_to_its_planner_and_undecided_planners_end_in_the_inbox"
-reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: types answer into planner cmux session"
-task = 1707
+name = "finding_planner::a_planner_question_about_a_finding_reaches_its_planner_as_a_turn_and_undecided_planners_end_in_the_inbox"
+reason = "B 境界（守る境界）: supervisor passes with the plan review job deliver the answer to a background planner's turns/ and reopen planners up to the limit (task 1441 moved it off cmux)"
+task = 1441
 
 # 8.637s, class B
 [[test]]
@@ -114,11 +114,11 @@ name = "landing_branch::no_push_records_the_configured_remote"
 reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: which remote is recorded is a decision"
 task = 1707
 
-# 5.311s, class G
+# 7.305s (median of 5 stress rounds under load, task 1441), class B
 [[test]]
-name = "plan_review::a_planner_question_answer_is_typed_into_its_planner_or_carried_by_a_new_one"
-reason = "G 移し替えの予定（goal 92 の対話・cmux の廃止で消える）: typed into cmux planner"
-task = 1707
+name = "plan_review::a_planner_question_answer_goes_to_its_planner_as_a_turn_or_is_carried_by_a_new_one"
+reason = "B 境界（守る境界）: supervisor passes deliver the answer as a background planner's next turn or carry it in a new planner's prompt (task 1441 moved it off cmux)"
+task = 1441
 
 # 7.867s, class D
 [[test]]
@@ -750,3 +750,15 @@ task = 1225
 name = "recovery_codex::a_failed_codex_recovery_job_of_a_stalled_run_asks_a_person"
 reason = "B 境界（守る境界）: supervisor wiring and process: a stalled headless session's recovery job fails as the stub codex exec, and the failure opens the alert's recovery_failed ask, whose stop ends the run (the escalation's note is a unit test in application::supervise::recovery)"
 task = 1225
+
+# 6.024s (median of 5 stress rounds under load, task 1441), class B
+[[test]]
+name = "planner_slots::a_revise_at_the_limit_names_its_holders_and_frees_a_place_past_the_timeout"
+reason = "B 境界（守る境界）: supervisor passes over the planner timeout with a parked background planner holding the runtime planners' limit"
+task = 1441
+
+# 5.557s (median of 5 stress rounds under load, task 1441; 3.9s in a lighter round), class B
+[[test]]
+name = "finding_planner::a_marked_finding_gets_one_planner_whose_proposal_plan_review_readies"
+reason = "B 境界（守る境界）: supervisor passes open a background planner for a marked finding, the plan review job readies its proposal and the planner is asked to exit through its turns/ (task 1441 moved it off cmux)"
+task = 1441

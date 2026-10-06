@@ -24,7 +24,7 @@ pub const TASK_ID_ENV: &str = "DAGQ_TASK_ID";
 /// `runtime_planner`. A workspace without it (opened before it) is taken
 /// from its `DAGQ_ROLE`.
 pub const SESSION_KIND_ENV: &str = "DAGQ_SESSION_KIND";
-/// The ID of the planner session a planner workspace runs (`planners.id`).
+/// The ID of the planner session a planner's wrapper runs (`planners.id`).
 pub const PLANNER_ID_ENV: &str = "DAGQ_PLANNER_ID";
 /// Who opened a planner session (ADR-0041 decision 7): `person` (the
 /// default when unset) or `runtime`, recorded as the owner of the

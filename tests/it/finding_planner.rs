@@ -2,13 +2,15 @@
 //! the supervisor loop: a finding the observer marked for a proposal, or
 //! one a person answered `propose` about, gets one planner of the
 //! runtime's; its submission makes the finding `proposed` with the
-//! proposal, which plan review (a stub provider) readies. The cmux double
-//! and the stub reviewer are plan review's.
+//! proposal, which plan review (a stub provider) readies. The backend (the
+//! planners' wrappers parked in the background) and the stub reviewer are
+//! plan review's.
 
 use crate::plan_review::{
-    PlanWorkspace, StubReviewer, add, events, fixture, idle, open_goal, options, planner_prompt,
-    status, supervise, supervise_with,
+    PlanWorkspace, StubReviewer, add, events, fixture, open_goal, options, planner_prompt, status,
+    supervise, supervise_with,
 };
+use crate::runtime_support::planner_turns::{exit_requested, idle, turn_requests};
 use dagq::{
     application::TaskStore,
     domain::{
@@ -137,11 +139,8 @@ fn a_marked_finding_gets_one_planner_whose_proposal_plan_review_readies() {
     assert_eq!(planners.len(), 1, "{planners:?}");
     assert_eq!(planners[0].origin, PlannerOrigin::Runtime);
     assert_eq!(planners[0].finding_id, Some(marked));
-    let opened = backend.opened();
-    assert!(
-        opened[0].1.ends_with(&format!("finding {marked}")),
-        "{opened:?}"
-    );
+    let handle = planners[0].workspace_id.clone().unwrap();
+    assert_eq!(backend.launched(), std::slice::from_ref(&handle));
     let prompt = planner_prompt(&fx.db, planners[0].id);
     crate::runtime_support::planner_prompt_bytes::assert_planner_prompt_bytes(
         &fx.db,
@@ -184,8 +183,8 @@ fn a_marked_finding_gets_one_planner_whose_proposal_plan_review_readies() {
         dagq::application::FindingPlannerStart::Skipped
     ));
 
-    // The planner adds a task to the open goal and submits it from its
-    // workspace: the finding is proposed with that proposal.
+    // The planner adds a task to the open goal and submits it as its own:
+    // the finding is proposed with that proposal.
     let task = draft(&mut queue, goal, "split main");
     let proposal = queue
         .submit_linking(
@@ -193,7 +192,7 @@ fn a_marked_finding_gets_one_planner_whose_proposal_plan_review_readies() {
                 tasks: vec![task],
                 goals: Vec::new(),
                 proposal: None,
-                owner: runtime_owner("RT1"),
+                owner: runtime_owner(&handle),
             },
             &[],
         )
@@ -227,7 +226,7 @@ fn a_marked_finding_gets_one_planner_whose_proposal_plan_review_readies() {
     supervise(&fx, &backend, &reviewer);
     assert_eq!(status(&mut queue, task), TaskStatus::Ready);
     assert_eq!(reviewer.prompts().len(), 1);
-    assert_eq!(*backend.exits.lock().unwrap(), ["RT1".to_owned()]);
+    assert!(exit_requested(&fx.db, planners[0].id));
 
     // Its task canceled, the proposal came to nothing: the finding is open
     // again without its mark, and no planner is opened for it until it is
@@ -309,7 +308,7 @@ fn improvement_planners_wait_at_the_limit_and_their_tasks_are_normal_at_most() {
                 tasks: vec![task],
                 goals: Vec::new(),
                 proposal: None,
-                owner: runtime_owner("RT1"),
+                owner: runtime_owner(planners[0].workspace_id.as_deref().unwrap()),
             },
             &[],
         )
@@ -526,7 +525,7 @@ fn a_propose_answer_marks_the_finding_and_a_planner_takes_it() {
 }
 
 #[test]
-fn a_planner_question_about_a_finding_is_typed_to_its_planner_and_undecided_planners_end_in_the_inbox()
+fn a_planner_question_about_a_finding_reaches_its_planner_as_a_turn_and_undecided_planners_end_in_the_inbox()
  {
     let fx = fixture();
     let mut queue = SqliteQueue::open(&fx.db).unwrap();
@@ -562,7 +561,7 @@ fn a_planner_question_about_a_finding_is_typed_to_its_planner_and_undecided_plan
     idle(&queue, &fx.db, planner.id);
     supervise(&fx, &backend, &reviewer);
     // Waiting for the answer, it is not asked to exit.
-    assert!(backend.exits.lock().unwrap().is_empty());
+    assert!(!exit_requested(&fx.db, planner.id));
     let answered = queue.answer(asked.id, "propose").unwrap();
     // The planner's question is the planner's to act on, not the finding's.
     assert!(answered.closed_at.is_none());
@@ -580,15 +579,15 @@ fn a_planner_question_about_a_finding_is_typed_to_its_planner_and_undecided_plan
         format!("delivering the answer of ask {} (runtime)", asked.id)
     );
     supervise(&fx, &backend, &reviewer);
+    let requests = turn_requests(&fx.db, planner.id);
+    assert_eq!(requests.len(), 1, "{requests:?}");
     assert_eq!(
-        backend.texts(),
-        [(
-            "RT1".to_owned(),
-            format!("answer to ask {}: propose", asked.id)
-        )]
+        requests[0]["prompt"],
+        format!("answer to ask {}: propose", asked.id)
     );
+    assert!(backend.texts().is_empty(), "nothing typed");
     assert!(queue.asks(Default::default()).unwrap().is_empty());
-    assert!(backend.exits.lock().unwrap().is_empty());
+    assert!(!exit_requested(&fx.db, planner.id));
 
     // The planners end without deciding it: another is opened each time,
     // three in all, and then the inbox is told.

@@ -7,7 +7,7 @@ You describe a problem to a planner session, which writes it down as a goal and 
 ## Requirements
 
 - **macOS on Apple Silicon (`aarch64-apple-darwin`).** No other platform is built, released, or tested.
-- **cmux.** The inbox and the planners get a cmux workspace. Workers run in the background without one, and their output is read with `dagq run log`.
+- **cmux.** The inbox gets a cmux workspace. Workers and planners run in the background without one, and their output is read with `dagq run log` and `dagq planner log`.
 - **Claude Code**, signed in, on PATH. The inbox, the planners and the headless jobs (plan review, run review, recovery, goal review, observer) are Claude Code sessions, and workers are too unless a task asks for Codex. The Codex CLI is optional (`up --codex`, `add --provider codex`).
 - **Git.** The repository needs at least one commit on the branch dagq lands on ([Landing branch, remote and push](#landing-branch-remote-and-push)).
 - **Rust and a C compiler** for `cargo install` (the crate's `rust-version`, now 1.98; the C compiler builds the bundled SQLite). The release update also runs `cargo install` ([Update](#update)).
@@ -58,7 +58,7 @@ Each Git repository has one queue, at `~/.local/share/dagq/<hash>/queue.db` (`$X
 
 `up` is idempotent. It checks cmux, Claude Code, the plugin, folder trust, the landing branch, `dagq.toml`, and the programs `[run.env]` names. Then it starts one supervisor (launchd, or `--in-cmux`) and opens the inbox session in the cmux workspace `[<repo>]inbox`. Run it again and it reuses what is already running. It hands a supervisor of another build over to its own binary without stopping the runs in flight. `dagq down` stops the supervisor after it drains (`--wait` waits for that); it leaves the inbox and planner sessions open.
 
-When you have something to plan, ask the inbox in your own words. It records them as a planning request, and the supervisor opens a planner for it, `[<repo>]planner#<id>`, which submits a proposal or declines the request with a reason. From a terminal without `DAGQ_ROLE` you can record one yourself:
+When you have something to plan, ask the inbox in your own words. It records them as a planning request, and the supervisor opens a planner for it in the background, which submits a proposal or declines the request with a reason. From a terminal without `DAGQ_ROLE` you can record one yourself:
 
 ```sh
 dagq request add --text 'what you want planned'
@@ -150,7 +150,7 @@ Every command prints JSON on stdout (except `graph --format d2|svg`, and `run lo
 | Goals | `goal add`, `goal list`, `goal show`, `goal edit`, `goal ready` (open a draft goal), `goal close --verdict achieved\|abandoned`, `goal review` |
 | Tasks | `add`, `edit`, `list`, `show`, `search`, `related`, `draft`, `cancel`, `dependency add\|remove`, `set-goal`, `set-paths`, `set-priority`, `revisit` |
 | Plans | `lint`, `submit`, `proposal list\|show\|withdraw`, `ready ID --bypass-review` (a person only) |
-| Watching | `status [--role inbox]`, `doctor [--full]`, `watch [--role inbox] [--until-attention]`, `events`, `timeline RUN`, `candidates`, `graph`, `run send\|log`, `planner screen\|send\|log` (`run screen` is refused: a run's session has no screen, so read it with `run log`) |
+| Watching | `status [--role inbox]`, `doctor [--full]`, `watch [--role inbox] [--until-attention]`, `events`, `timeline RUN`, `candidates`, `graph`, `run send\|log`, `planner screen\|send\|log` (`run screen` is refused: a run's session has no screen, so read it with `run log`; likewise `planner screen` shows no screen and `planner send` is refused, so read a planner with `planner log`) |
 | Asks and notes | `asks [--open]`, `ask`, `answer ID --text TEXT`, `ask close`, `note`, `notes`, `findings`, `finding` |
 | Landing and recovery | `review ID`, `integrate ID\|--next`, `recover RUN_ID` (`run close-workspaces` is refused: the runtime opens no workspace for a run and stops a run's background wrapper itself) |
 | Measuring | `stats`, `kpi`, `forecast`, `report`, `mark`, `marks` |

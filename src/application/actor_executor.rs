@@ -30,7 +30,6 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use tracing::warn;
 
 use super::queue_service::ServiceAccess;
 use super::{
@@ -103,7 +102,10 @@ pub enum SessionAgent<'a> {
         stderr: &'a Path,
         without_env: &'a [&'a str],
     },
-    /// A planner (ADR-0041).
+    /// A planner in a terminal (ADR-0041): only a person's, opened before
+    /// `dagq plan` was abolished (ADR-t1394-1). The runtime's planners run
+    /// headless only (ADR-t1433-2 decision 3), each turn a
+    /// [`SessionAgent::PlannerTurn`].
     Planner(PlannerCommand<'a>),
     /// One turn of a headless planner of the runtime's (ADR-t1394-2
     /// decision 2), in `target` (the planner's directory and checkout), as
@@ -119,9 +121,6 @@ pub enum SessionAgent<'a> {
 
 /// What a workspace not tied to a run runs.
 pub enum WorkspaceCommand<'a> {
-    /// A session wrapper (a planner's `planner-session`), which starts its
-    /// agent through the executor in turn.
-    Wrapper(String),
     /// The agent itself with `prompt` as its first message, loading
     /// `plugin_dir`: the inbox.
     Agent {
@@ -168,21 +167,30 @@ pub enum ActorProgram<'a> {
         run_env: Vec<(String, String)>,
         log: &'a Path,
     },
-    /// A workspace of its own: the inbox, a planner. `planner` names the
-    /// planner and its origin, `launch` the model its agent starts with.
+    /// A workspace of its own: the inbox. `launch` names the model its
+    /// agent starts with.
     NamedWorkspace {
         name: &'a str,
         cwd: &'a Path,
         command: WorkspaceCommand<'a>,
-        planner: Option<(PlannerOrigin, PlannerId)>,
         launch: Option<&'a ActorLaunch>,
         description: Option<String>,
         group: Option<String>,
-        /// The log a headless planner's wrapper writes to when it is
-        /// started without a workspace (ADR-t1404-1 decision 8): a process
-        /// detached from the supervisor with the workspace's environment,
-        /// whose handle is the workspace's ID.
-        background: Option<&'a Path>,
+    },
+    /// The session wrapper `wrapper` (`planner-session --headless`) of a
+    /// planner of the runtime's, which runs its agent one call per turn
+    /// (ADR-t1394-2 decision 2): started without a workspace as a process
+    /// detached from the supervisor, in `cwd`, with the planner's
+    /// variables (`planner` names it and its origin, `launch` the model its
+    /// agent starts with) and its output in `log` (ADR-t1404-1 decision 8,
+    /// ADR-t1433-2 decision 3). Its handle is what the planner records as
+    /// its session.
+    PlannerSession {
+        cwd: &'a Path,
+        wrapper: String,
+        planner: (PlannerOrigin, PlannerId),
+        launch: Option<&'a ActorLaunch>,
+        log: &'a Path,
     },
     /// The agent of a session wrapper, with the terminal of its workspace,
     /// and the model and effort it was opened with.
@@ -218,7 +226,9 @@ impl ActorProgram<'_> {
                 | SessionAgent::Turn { run, .. } => run.actual_provider(),
                 SessionAgent::Planner(_) | SessionAgent::PlannerTurn { .. } => Provider::Claude,
             },
-            Self::NamedWorkspace { launch, .. } | Self::Headless { launch, .. } => {
+            Self::NamedWorkspace { launch, .. }
+            | Self::PlannerSession { launch, .. }
+            | Self::Headless { launch, .. } => {
                 launch.map_or(Provider::Claude, |launch| launch.provider)
             }
         }
@@ -239,14 +249,8 @@ impl ActorProgram<'_> {
                 agent: SessionAgent::Planner(_) | SessionAgent::PlannerTurn { .. },
                 ..
             }
-            | Self::NamedWorkspace {
-                command: WorkspaceCommand::Wrapper(_),
-                ..
-            } => &[ActorRole::Planner],
-            Self::NamedWorkspace {
-                command: WorkspaceCommand::Agent { .. },
-                ..
-            } => &[ActorRole::Inbox],
+            | Self::PlannerSession { .. } => &[ActorRole::Planner],
+            Self::NamedWorkspace { .. } => &[ActorRole::Inbox],
             Self::Headless {
                 program: HeadlessProgram::Review { .. },
                 ..
@@ -577,44 +581,6 @@ impl<'a> HostActorExecutor<'a> {
     }
 }
 
-/// A create cmux reported failed may have made the workspace all the same
-/// (a create that timed out while cmux went on, task 806). Nothing records
-/// its UUID and its wrapper is refused, so it would be left open: the
-/// workspaces listed with `description`, which names only this planner's
-/// workspace, are closed, and the create's `error` says what
-/// became of them. A listing that fails leaves the error as it was; the
-/// wrapper closes its own workspace when refused.
-fn close_unrecorded(
-    cmux: &dyn WorkspaceBackend,
-    description: &str,
-    error: anyhow::Error,
-) -> anyhow::Error {
-    let found = match cmux.workspaces_described(description) {
-        Ok(found) => found,
-        Err(list) => {
-            warn!(description, error = %format_args!("{list:#}"), "workspaces described {description:?} could not be listed after a failed create: {list:#}");
-            return error;
-        }
-    };
-    if found.is_empty() {
-        return error;
-    }
-    let closed: Vec<String> = found
-        .into_iter()
-        .map(|id| match cmux.close(&id) {
-            Ok(()) => {
-                warn!(workspace_id = %id, description, "closed workspace {id} cmux made although its create failed");
-                format!("{id} was closed")
-            }
-            Err(close) => format!("{id} could not be closed: {close:#}"),
-        })
-        .collect();
-    error.context(format!(
-        "cmux made the workspace described {description:?} although the create failed; {}",
-        closed.join(", ")
-    ))
-}
-
 impl ActorExecutor for HostActorExecutor<'_> {
     fn backend(&self) -> ExecutorBackend {
         ExecutorBackend::Host
@@ -676,44 +642,38 @@ impl ActorExecutor for HostActorExecutor<'_> {
             ActorProgram::NamedWorkspace {
                 name,
                 cwd,
-                command,
-                planner,
+                command: WorkspaceCommand::Agent { prompt, plugin_dir },
                 launch,
                 description,
                 group,
-                background,
             } => {
-                let command = match command {
-                    WorkspaceCommand::Wrapper(command) => command,
-                    WorkspaceCommand::Agent { prompt, plugin_dir } => {
-                        command_line(&self.provider()?.inbox_command(
-                            &prompt,
-                            plugin_dir,
-                            self.queue.parent().unwrap_or(Path::new(".")),
-                        )?)?
-                    }
-                };
-                let env = actor_env(self.queue, &actor, planner, launch)?;
-                let cmux = self.workspaces()?;
-                if let Some(log) = background {
-                    return Ok(ActorHandle::Workspace(
-                        cmux.launch_background(cwd, &command, &env, log)?,
-                    ));
-                }
+                let command = command_line(&self.provider()?.inbox_command(
+                    &prompt,
+                    plugin_dir,
+                    self.queue.parent().unwrap_or(Path::new(".")),
+                )?)?;
                 let tags = WorkspaceTags {
-                    env,
+                    env: actor_env(self.queue, &actor, None, launch)?,
                     description,
                     group,
                 };
-                let id = cmux
-                    .create_named(name, cwd, &command, &tags)
-                    .map_err(|error| match (planner, &tags.description) {
-                        // Only a planner's description names one workspace
-                        // (`planner=<id>`); the inbox's is the queue's.
-                        (Some(_), Some(description)) => close_unrecorded(cmux, description, error),
-                        _ => error,
-                    })?;
-                Ok(ActorHandle::Workspace(id))
+                Ok(ActorHandle::Workspace(
+                    self.workspaces()?
+                        .create_named(name, cwd, &command, &tags)?,
+                ))
+            }
+            ActorProgram::PlannerSession {
+                cwd,
+                wrapper,
+                planner,
+                launch,
+                log,
+            } => {
+                let env = actor_env(self.queue, &actor, Some(planner), launch)?;
+                Ok(ActorHandle::Workspace(
+                    self.workspaces()?
+                        .launch_background(cwd, &wrapper, &env, log)?,
+                ))
             }
             ActorProgram::SessionAgent { agent, model } => {
                 let provider = self.provider()?;
@@ -941,12 +901,6 @@ mod tests {
     struct Fake {
         workspaces: Mutex<Vec<(String, String, WorkspaceTags)>>,
         spawned: Mutex<Vec<CommandSpec>>,
-        /// Every create reports failing although cmux makes the workspace
-        /// (a create that timed out, task 806).
-        create_times_out: bool,
-        /// The workspaces cmux lists, as (ID, description).
-        listed: Mutex<Vec<(String, String)>>,
-        closed: Mutex<Vec<String>>,
         /// The actors a token was issued for, in order.
         issued: Mutex<Vec<String>>,
         /// The actors whose token a job's end revokes, in order.
@@ -979,20 +933,6 @@ mod tests {
         ) -> Box<dyn Spawned> {
             self.revoked.lock().unwrap().push(actor_id.to_owned());
             child
-        }
-    }
-
-    impl Fake {
-        /// Make the workspace `id` the way cmux does, and fail the create
-        /// when it times out.
-        fn made(&self, id: &str, tags: &WorkspaceTags) -> Result<String> {
-            if !self.create_times_out {
-                return Ok(id.into());
-            }
-            let mut listed = self.listed.lock().unwrap();
-            let made = format!("{id}-{}", listed.len());
-            listed.push((made, tags.description.clone().unwrap_or_default()));
-            bail!("Error: Command timed out")
         }
     }
 
@@ -1136,23 +1076,8 @@ mod tests {
         fn capture(&self, _: &str) -> Result<String> {
             unreachable!()
         }
-        fn close(&self, id: &str) -> Result<()> {
-            let mut listed = self.listed.lock().unwrap();
-            let before = listed.len();
-            listed.retain(|(listed, _)| listed != id);
-            ensure!(listed.len() < before, "no such workspace: {id}");
-            self.closed.lock().unwrap().push(id.to_owned());
-            Ok(())
-        }
-        fn workspaces_described(&self, description: &str) -> Result<Vec<String>> {
-            Ok(self
-                .listed
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|(_, listed)| listed == description)
-                .map(|(id, _)| id.clone())
-                .collect())
+        fn close(&self, _: &str) -> Result<()> {
+            unreachable!()
         }
         fn set_color(&self, _: &str, _: &str) -> Result<()> {
             unreachable!()
@@ -1184,7 +1109,7 @@ mod tests {
                 command.to_owned(),
                 tags.clone(),
             ));
-            self.made("w-named", tags)
+            Ok("w-named".into())
         }
         fn ensure_group(&self, _: &str, _: &str) -> Result<String> {
             unreachable!()
@@ -1536,68 +1461,43 @@ mod tests {
         assert_eq!(*fake.issued.lock().unwrap(), ["worker:r1", "worker:r1"]);
     }
 
-    /// Task 806: a create that reports failing although cmux made the
-    /// workspace (a create that timed out) closes the workspaces listed
-    /// with the description of the planner's workspace, and the error says
-    /// so; another workspace, and the inbox's, whose description is the
-    /// queue's, are left open.
+    /// A planner of the runtime's opens no workspace (ADR-t1433-2
+    /// decision 3): its wrapper starts in the background in the checkout
+    /// with the planner's variables and its log, and its handle is the
+    /// background wrapper's.
     #[test]
-    fn a_workspace_cmux_made_although_its_create_failed_is_closed() {
-        let fake = Fake {
-            create_times_out: true,
-            ..Fake::default()
-        };
-        fake.listed
-            .lock()
-            .unwrap()
-            .push(("other".into(), "dagq role=worker run=r2".into()));
-        let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
+    fn a_planners_wrapper_starts_in_the_background_with_the_planner_env() {
+        let fake = Fake::default();
+        let handle = HostActorExecutor::new(Path::new("/q/queue.db"))
             .with_workspaces(&fake)
-            .with_provider(&fake)
-            .with_queue_service(&fake);
-        let planner = |planner: Option<(PlannerOrigin, PlannerId)>, description: &str| {
-            executor.spawn(ActorExecutionSpec::new(
-                match planner {
-                    Some(_) => ActorContext::instance(ActorRole::Planner, 4),
-                    None => ActorContext::new(ActorRole::Inbox, "inbox"),
-                },
+            .spawn(ActorExecutionSpec::new(
+                ActorContext::instance(ActorRole::Planner, 4),
                 WorkspaceAccess::Write("/repo".into()),
-                ActorProgram::NamedWorkspace {
-                    name: "[repo]planner#4",
+                ActorProgram::PlannerSession {
                     cwd: Path::new("/repo"),
-                    command: match planner {
-                        Some(_) => WorkspaceCommand::Wrapper("wrapper".into()),
-                        None => WorkspaceCommand::Agent {
-                            prompt: "p".into(),
-                            plugin_dir: None,
-                        },
-                    },
-                    planner,
+                    wrapper: "planner-session --headless --background".into(),
+                    planner: (PlannerOrigin::Runtime, PlannerId::new(4)),
                     launch: None,
-                    description: Some(description.into()),
-                    group: None,
-                    background: None,
+                    log: Path::new("/q/planners/4/session.log"),
                 },
             ))
-        };
-        let error = planner(
-            Some((PlannerOrigin::Runtime, PlannerId::new(4))),
-            "dagq role=planner planner=4",
-        )
-        .err()
-        .unwrap();
-        assert!(format!("{error:#}").contains("was closed"), "{error:#}");
-        let error = planner(None, "dagq role=inbox").err().unwrap();
-        assert!(!format!("{error:#}").contains("closed"), "{error:#}");
-        assert_eq!(*fake.closed.lock().unwrap(), ["w-named-1"]);
-        let listed: Vec<String> = fake
-            .listed
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(id, _)| id.clone())
-            .collect();
-        assert_eq!(listed, ["other", "w-named-1"]);
+            .unwrap();
+        assert_eq!(handle.workspace().unwrap(), "background:7:start");
+        let made = fake.workspaces.lock().unwrap();
+        assert_eq!(made.len(), 1);
+        assert_eq!(made[0].0, "background /repo /q/planners/4/session.log");
+        assert_eq!(made[0].1, "planner-session --headless --background");
+        assert_eq!(
+            made[0].2.env,
+            pairs(&[
+                ("DAGQ_ROLE", "planner"),
+                ("DAGQ_QUEUE", "/q/queue.db"),
+                ("DAGQ_ACTOR_ID", "planner:4"),
+                ("DAGQ_SESSION_KIND", "runtime_planner"),
+                ("DAGQ_PLANNER_ORIGIN", "runtime"),
+                ("DAGQ_PLANNER_ID", "4"),
+            ])
+        );
     }
 
     #[test]
@@ -1616,11 +1516,9 @@ mod tests {
                         prompt: "You are the inbox".into(),
                         plugin_dir: Some(Path::new("/p")),
                     },
-                    planner: None,
                     launch: None,
                     description: Some("d".into()),
                     group: None,
-                    background: None,
                 },
             ))
             .unwrap()

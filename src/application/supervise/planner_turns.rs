@@ -4,8 +4,7 @@
 //! waiting in the queue's hold, neither ended nor counted as a planner that
 //! ended undecided, and once the hold is gone the call it failed at is made
 //! again as its next turn; a turn its wrapper stopped at the `[stall]`
-//! limits tells the inbox, as an interactive planner nothing was seen of
-//! does.
+//! limits tells the inbox.
 
 use super::headless::{last_turn, provider_failure};
 use super::provider::{PROVIDER_RETRY, retry_text};
