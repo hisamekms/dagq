@@ -1,0 +1,59 @@
+{
+ "commit": "0123456789abcdef0123456789abcdef01234567",
+ "files": {
+  "crates/dagq-broker/src/lib.rs": [
+   "dagq-broker::serve::serve::starts_and_stops"
+  ],
+  "src/app/claim.rs": [
+   "dagq::it::runtime_claim::claims_the_ready_task"
+  ],
+  "src/domain/task.rs": [
+   "dagq::it::cli_read::reads_the_status",
+   "dagq::it::runtime_claim::claims_the_ready_task"
+  ],
+  "src/main.rs": [
+   "dagq::it::cli_read::reads_the_status"
+  ],
+  "tests/it/runtime_claim.rs": [
+   "dagq::it::runtime_claim::claims_the_ready_task"
+  ]
+ },
+ "filter": "kind(test) - binary(e2e)",
+ "generated_at": "2026-10-06T18:00:00Z",
+ "run_url": null,
+ "tests": {
+  "dagq-broker::serve::serve::starts_and_stops": {
+   "binary_id": "dagq-broker::serve",
+   "coverage": true,
+   "duration_secs": 0.75,
+   "files": 1,
+   "name": "serve::starts_and_stops",
+   "status": "flaky"
+  },
+  "dagq::it::cli_read::did_not_run": {
+   "binary_id": "dagq::it",
+   "coverage": false,
+   "duration_secs": null,
+   "files": 0,
+   "name": "cli_read::did_not_run",
+   "status": "not_run"
+  },
+  "dagq::it::cli_read::reads_the_status": {
+   "binary_id": "dagq::it",
+   "coverage": true,
+   "duration_secs": 2.5,
+   "files": 2,
+   "name": "cli_read::reads_the_status",
+   "status": "failed"
+  },
+  "dagq::it::runtime_claim::claims_the_ready_task": {
+   "binary_id": "dagq::it",
+   "coverage": true,
+   "duration_secs": 1.234,
+   "files": 3,
+   "name": "runtime_claim::claims_the_ready_task",
+   "status": "passed"
+  }
+ },
+ "version": 1
+}

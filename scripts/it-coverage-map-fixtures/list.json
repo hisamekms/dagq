@@ -1,0 +1,95 @@
+{
+ "rust-build-meta": {
+  "base-output-directories": [
+   "debug"
+  ],
+  "non-test-binaries": {
+   "path+file:///work/dagq#0.1.0": [
+    {
+     "build-platform": "target",
+     "kind": "bin-exe",
+     "name": "dagq",
+     "path": "debug/dagq"
+    },
+    {
+     "build-platform": "target",
+     "kind": "dylib",
+     "name": "dagq",
+     "path": "debug/libdagq.dylib"
+    }
+   ]
+  },
+  "target-directory": "/work/dagq/target"
+ },
+ "rust-suites": {
+  "dagq": {
+   "binary-id": "dagq",
+   "binary-path": "/work/dagq/target/debug/deps/dagq-0",
+   "kind": "lib",
+   "status": "skipped",
+   "testcases": {
+    "app::claim::tests::unit": {
+     "filter-match": {
+      "reason": "expression",
+      "status": "mismatch"
+     },
+     "ignored": false
+    }
+   }
+  },
+  "dagq-broker::serve": {
+   "binary-id": "dagq-broker::serve",
+   "binary-path": "/work/dagq/target/debug/deps/serve-0",
+   "kind": "test",
+   "status": "listed",
+   "testcases": {
+    "serve::starts_and_stops": {
+     "filter-match": {
+      "status": "matches"
+     },
+     "ignored": false
+    }
+   }
+  },
+  "dagq::e2e": {
+   "binary-id": "dagq::e2e",
+   "binary-path": "/work/dagq/target/debug/deps/e2e-0",
+   "kind": "test",
+   "status": "skipped",
+   "testcases": {}
+  },
+  "dagq::it": {
+   "binary-id": "dagq::it",
+   "binary-path": "/work/dagq/target/debug/deps/it-0",
+   "kind": "test",
+   "status": "listed",
+   "testcases": {
+    "cli_read::did_not_run": {
+     "filter-match": {
+      "status": "matches"
+     },
+     "ignored": false
+    },
+    "cli_read::ignored_one": {
+     "filter-match": {
+      "status": "matches"
+     },
+     "ignored": true
+    },
+    "cli_read::reads_the_status": {
+     "filter-match": {
+      "status": "matches"
+     },
+     "ignored": false
+    },
+    "runtime_claim::claims_the_ready_task": {
+     "filter-match": {
+      "status": "matches"
+     },
+     "ignored": false
+    }
+   }
+  }
+ },
+ "test-count": 4
+}

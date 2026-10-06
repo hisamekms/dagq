@@ -1,0 +1,89 @@
+name: IT coverage map
+
+# The map from the repository's files to the integration tests that run them,
+# with each test's time, the commit and the time it was built
+# (scripts/it-coverage-map.sh, whose top comment has the table's format, the
+# artifact and the time this job is expected to take; goal 157, stage 2). The
+# landing's narrowed IT reads the latest artifact with gh run download. A
+# separate workflow from ci.yml, so ci.yml's runs, concurrency and the
+# ci-failure issue (keyed on the workflow name CI) stay as they are.
+on:
+  schedule:
+    # Once a day, 19:00 UTC (04:00 JST), after stress.yml's 18:00 UTC.
+    - cron: "0 19 * * *"
+  workflow_dispatch:
+  # The first table right after this job or its script lands, and a new one
+  # whenever they change.
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/it-coverage-map.yml
+      - scripts/it-coverage-map.sh
+      - scripts/it-coverage-map.py
+      - scripts/it-coverage-map-fixtures/**
+
+concurrency:
+  # Only the latest table of a ref matters: a newer run supersedes an older
+  # one (a manual run on another branch does not cancel main's).
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  map:
+    name: file -> IT test map
+    # Apple Silicon, as ci.yml's checks job: the tests that only hold on
+    # macOS run here too.
+    runs-on: macos-14
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        # rust-toolchain.toml pins the toolchain and llvm-tools-preview
+        # (llvm-profdata and llvm-cov, which the script calls).
+        run: |
+          set -euo pipefail
+          rustup toolchain install --no-self-update
+          rustup show active-toolchain
+          cargo --version
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@cargo-nextest
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The fixture templates under the tests' CARGO_TARGET_TMPDIR that a
+      # restored cache can leave empty (the same step as ci.yml's).
+      - name: Remove the target's tmp restored from the cache
+        run: rm -rf target/tmp target/llvm-cov-target/tmp
+
+      - name: Self-test
+        run: sh scripts/it-coverage-map.sh --self-test
+
+      - name: Build the map
+        env:
+          IT_COVERAGE_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: sh scripts/it-coverage-map.sh --run "$RUNNER_TEMP/it-coverage-map.json"
+
+      - name: Upload the map
+        uses: actions/upload-artifact@v4
+        with:
+          name: it-coverage-map
+          path: ${{ runner.temp }}/it-coverage-map.json
+          if-no-files-found: error
+          retention-days: 30
+
+      # Keep the per-test profiles and exports and the templates out of the
+      # saved cache.
+      - name: Remove the work directory and the target's tmp before the cache is saved
+        if: always()
+        run: rm -rf target/it-coverage target/tmp target/llvm-cov-target/tmp

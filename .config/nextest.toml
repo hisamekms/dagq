@@ -22,3 +22,9 @@ fail-fast = false
 # tests/common/mod.rs の within（TEST_LIMIT 600 秒・STEP_LIMIT 300 秒）が持つので、
 # terminate-after は置かず、その上限より先に nextest が test を止めることはない。
 slow-timeout = { period = "60s" }
+
+# scripts/it-coverage-map.sh の夜間の job（.github/workflows/it-coverage-map.yml）が
+# 統合テストを coverage つきで流す profile。default の設定を継ぎ、テストごとの時間を
+# 表に入れるため JUnit を target/nextest/it-coverage/junit.xml に書く。
+[profile.it-coverage.junit]
+path = "junit.xml"

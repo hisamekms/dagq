@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="4" skipped="1" failures="1" errors="0" time="9.000">
+    <testsuite name="dagq::it" tests="3" skipped="1" errors="0" failures="1">
+        <testcase name="runtime_claim::claims_the_ready_task" classname="dagq::it" time="1.2345"/>
+        <testcase name="cli_read::reads_the_status" classname="dagq::it" time="2.5">
+            <failure type="test failure">assertion failed</failure>
+            <rerunFailure type="test failure" time="2.4">assertion failed</rerunFailure>
+        </testcase>
+        <testcase name="cli_read::ignored_one" classname="dagq::it" time="0">
+            <skipped/>
+        </testcase>
+    </testsuite>
+    <testsuite name="dagq-broker::serve" tests="1" skipped="0" errors="0" failures="0">
+        <testcase name="serve::starts_and_stops" classname="dagq-broker::serve" time="0.75">
+            <failure message="test passed on attempt 2/2 but is configured to fail when flaky" type="flaky failure"/>
+            <flakyFailure type="test failure" time="0.7">timed out</flakyFailure>
+        </testcase>
+    </testsuite>
+</testsuites>

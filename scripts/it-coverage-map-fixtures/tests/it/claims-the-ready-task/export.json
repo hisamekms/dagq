@@ -1,0 +1,173 @@
+{
+ "data": [
+  {
+   "files": [
+    {
+     "filename": "/work/dagq/src/app/claim.rs",
+     "summary": {
+      "branches": {
+       "count": 0,
+       "covered": 0,
+       "notcovered": 0,
+       "percent": 0
+      },
+      "functions": {
+       "count": 1,
+       "covered": 1,
+       "percent": 0
+      },
+      "lines": {
+       "count": 10,
+       "covered": 3,
+       "percent": 0
+      },
+      "regions": {
+       "count": 3,
+       "covered": 3,
+       "notcovered": 0,
+       "percent": 0
+      }
+     }
+    },
+    {
+     "filename": "/work/dagq/src/domain/task.rs",
+     "summary": {
+      "branches": {
+       "count": 0,
+       "covered": 0,
+       "notcovered": 0,
+       "percent": 0
+      },
+      "functions": {
+       "count": 1,
+       "covered": 1,
+       "percent": 0
+      },
+      "lines": {
+       "count": 10,
+       "covered": 1,
+       "percent": 0
+      },
+      "regions": {
+       "count": 3,
+       "covered": 1,
+       "notcovered": 0,
+       "percent": 0
+      }
+     }
+    },
+    {
+     "filename": "/work/dagq/src/app/other.rs",
+     "summary": {
+      "branches": {
+       "count": 0,
+       "covered": 0,
+       "notcovered": 0,
+       "percent": 0
+      },
+      "functions": {
+       "count": 1,
+       "covered": 0,
+       "percent": 0
+      },
+      "lines": {
+       "count": 10,
+       "covered": 0,
+       "percent": 0
+      },
+      "regions": {
+       "count": 3,
+       "covered": 0,
+       "notcovered": 0,
+       "percent": 0
+      }
+     }
+    },
+    {
+     "filename": "/Users/runner/.cargo/registry/src/index.crates.io-0/serde-1.0.0/src/lib.rs",
+     "summary": {
+      "branches": {
+       "count": 0,
+       "covered": 0,
+       "notcovered": 0,
+       "percent": 0
+      },
+      "functions": {
+       "count": 1,
+       "covered": 1,
+       "percent": 0
+      },
+      "lines": {
+       "count": 10,
+       "covered": 5,
+       "percent": 0
+      },
+      "regions": {
+       "count": 3,
+       "covered": 5,
+       "notcovered": 0,
+       "percent": 0
+      }
+     }
+    },
+    {
+     "filename": "/work/dagq/target/debug/build/dagq-0/out/gen.rs",
+     "summary": {
+      "branches": {
+       "count": 0,
+       "covered": 0,
+       "notcovered": 0,
+       "percent": 0
+      },
+      "functions": {
+       "count": 1,
+       "covered": 1,
+       "percent": 0
+      },
+      "lines": {
+       "count": 10,
+       "covered": 2,
+       "percent": 0
+      },
+      "regions": {
+       "count": 3,
+       "covered": 2,
+       "notcovered": 0,
+       "percent": 0
+      }
+     }
+    },
+    {
+     "filename": "/work/dagq/tests/it/runtime_claim.rs",
+     "summary": {
+      "branches": {
+       "count": 0,
+       "covered": 0,
+       "notcovered": 0,
+       "percent": 0
+      },
+      "functions": {
+       "count": 1,
+       "covered": 1,
+       "percent": 0
+      },
+      "lines": {
+       "count": 10,
+       "covered": 4,
+       "percent": 0
+      },
+      "regions": {
+       "count": 3,
+       "covered": 4,
+       "notcovered": 0,
+       "percent": 0
+      }
+     }
+    }
+   ],
+   "totals": {}
+  }
+ ],
+ "type": "llvm.coverage.json.export",
+ "version": "3.1.0"
+}
