@@ -14,10 +14,14 @@
 # gate's e2e_quarantine::LIMIT). A mark whose until is past only warns: the
 # gate simply does not hold it.
 #
-# Meant to be run from the repository root (`sh scripts/check-e2e-quarantine.sh`).
-# When run from anywhere else it changes to the repository root found from the
-# script's own location. E2E_QUARANTINE_FILE names another file to check
-# (relative to the repository root or absolute).
+# The tree checked is the git work tree of the cwd (`git rev-parse
+# --show-toplevel`), so a copy of the script run elsewhere with the cwd in a
+# worktree checks that worktree (the program review of a run;
+# docs/development/task-registration.md, section "推奨の組み合わせ").
+# Outside a git work tree it is the repository found from the script's own
+# location. Run it from the repository root (`sh scripts/check-e2e-quarantine.sh`).
+# E2E_QUARANTINE_FILE names another file to check (relative to that tree's
+# root or absolute).
 #
 # Exit 0 when the file is absent or valid, 1 when it has a violation (each
 # goes to stderr with the test's name or the line), 2 when tests/e2e.rs is
@@ -26,7 +30,7 @@ set -eu
 
 limit=3
 
-root=$(cd "$(dirname "$0")/.." && pwd)
+root=$(git rev-parse --show-toplevel 2>/dev/null) || root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 
 file=${E2E_QUARANTINE_FILE:-.config/e2e-quarantine.toml}

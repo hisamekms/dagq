@@ -8,9 +8,12 @@
 # (crates/*/tests, ADR-t827-1) are held to the same limit. src/ is not
 # checked yet.
 #
-# Meant to be run from the repository root (`sh scripts/check-test-file-lines.sh`).
-# When run from anywhere else it changes to the repository root found from the
-# script's own location, so the result does not depend on the cwd.
+# The tree checked is the git work tree of the cwd (`git rev-parse
+# --show-toplevel`), so a copy of the script run elsewhere with the cwd in a
+# worktree checks that worktree (the program review of a run;
+# docs/development/task-registration.md, section "推奨の組み合わせ").
+# Outside a git work tree it is the repository found from the script's own
+# location. Run it from the repository root (`sh scripts/check-test-file-lines.sh`).
 #
 # Exit 0 when every file is within the limit, 1 when a file is over it (each
 # offending file and its line count go to stderr), 2 when tests/ is not found.
@@ -18,7 +21,7 @@ set -eu
 
 limit=3000
 
-root=$(cd "$(dirname "$0")/.." && pwd)
+root=$(git rev-parse --show-toplevel 2>/dev/null) || root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 
 if [ ! -d tests ]; then

@@ -14,16 +14,18 @@
 # `created: YYYY-MM-DD` and `updated: YYYY-MM-DD` are the template's
 # placeholders, not dates. Any other file with YYYY-MM-DD fails.
 #
-# Meant to be run from the repository root
-# (`sh scripts/check-frontmatter-dates.sh`). When run from anywhere else it
-# changes to the repository root found from the script's own location, so the
-# result does not depend on the cwd.
+# The tree checked is the git work tree of the cwd (`git rev-parse
+# --show-toplevel`), so a copy of the script run elsewhere with the cwd in a
+# worktree checks that worktree (the program review of a run;
+# docs/development/task-registration.md, section "推奨の組み合わせ").
+# Outside a git work tree it is the repository found from the script's own
+# location. Run it from the repository root (`sh scripts/check-frontmatter-dates.sh`).
 #
 # Exit 0 when every date line is fine, 1 when any is not (each offending file,
 # line number and line go to stderr), 2 when docs/ is not found.
 set -eu
 
-root=$(cd "$(dirname "$0")/.." && pwd)
+root=$(git rev-parse --show-toplevel 2>/dev/null) || root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 
 if [ ! -d docs ]; then

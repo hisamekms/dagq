@@ -21,9 +21,12 @@
 #   --release TAG  compare with the latest release tag before TAG instead of
 #                  the latest one (release.yml, which runs on TAG itself).
 #
-# Meant to be run from the repository root (`sh scripts/check-migration-numbers.sh`).
-# When run from anywhere else it changes to the repository root found from the
-# script's own location, so the result does not depend on the cwd.
+# The tree checked is the git work tree of the cwd (`git rev-parse
+# --show-toplevel`), so a copy of the script run elsewhere with the cwd in a
+# worktree checks that worktree (the program review of a run;
+# docs/development/task-registration.md, section "推奨の組み合わせ").
+# Outside a git work tree it is the repository found from the script's own
+# location. Run it from the repository root (`sh scripts/check-migration-numbers.sh`).
 #
 # Exit 0 when the numbers are fine and the released migrations are unchanged,
 # 1 when a file is misnamed, a number is shared or missing, a migration after
@@ -47,7 +50,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-root=$(cd "$(dirname "$0")/.." && pwd)
+root=$(git rev-parse --show-toplevel 2>/dev/null) || root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 
 if [ ! -d migrations ]; then

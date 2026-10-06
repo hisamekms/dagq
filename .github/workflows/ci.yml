@@ -87,6 +87,11 @@ jobs:
           sh scripts/check-layer-deps.sh
           sh scripts/check-layer-deps.sh --self-test
 
+      # The check scripts check the tree of the cwd, as the program review of
+      # a run runs them (docs/development/task-registration.md).
+      - name: Check scripts' root
+        run: sh scripts/check-scripts-root.sh
+
       - name: cargo clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 

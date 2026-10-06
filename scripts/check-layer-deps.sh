@@ -10,11 +10,17 @@
 # and every item of the allow list must still match an occurrence, so the
 # task that fixes a violation also removes its item.
 #
-# Meant to be run from the repository root (`sh scripts/check-layer-deps.sh`).
-# When run from anywhere else it changes to the repository root found from the
-# script's own location. LAYER_DEPS_ROOT names another tree to check (its
-# src/ is read); --self-test checks the script itself on small fixtures in a
-# temporary directory under ${TMPDIR:-target/} and removes them.
+# The tree checked, and the allow list read, are those of the git work tree of
+# the cwd (`git rev-parse --show-toplevel`), so a copy of the script run
+# elsewhere with the cwd in a worktree checks that worktree and its allow list
+# (the program review of a run; docs/development/task-registration.md,
+# section "推奨の組み合わせ"). Outside a git work tree it is the repository
+# found from the script's own location. Run it from the repository root
+# (`sh scripts/check-layer-deps.sh`).
+# LAYER_DEPS_ROOT names another tree to check (its src/ is read) and
+# LAYER_DEPS_ALLOW_FILE another allow list; --self-test checks the script
+# itself on small fixtures in a temporary directory under ${TMPDIR:-target/}
+# and removes them.
 #
 # Exit 0 when every occurrence is allowed and no item is stale, 1 when an
 # occurrence is not allowed, an item is stale or the allow list is malformed
@@ -23,7 +29,7 @@ set -eu
 
 me=check-layer-deps
 script=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
-repo=$(cd "$(dirname "$0")/.." && pwd)
+repo=$(git rev-parse --show-toplevel 2>/dev/null) || repo=$(cd "$(dirname "$0")/.." && pwd)
 
 # scan prints one line per occurrence: "rule<TAB>path<TAB>reference<TAB>line",
 # with paths relative to the tree's root.
