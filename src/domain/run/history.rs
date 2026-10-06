@@ -356,79 +356,6 @@ impl<'a> RunHistory<'a> {
         .is_some_and(|e| e.kind == event_kind::EXIT_REQUEST_TIMED_OUT)
     }
 
-    /// Whether the run's latest `/exit` request timed out: an
-    /// `exit_request_timed_out` after its last `exit_requested`. A timeout
-    /// of an earlier request, before the run was resumed and asked to exit
-    /// again, does not count (task 240).
-    pub fn latest_exit_timed_out(&self) -> bool {
-        self.last(event_kind::EXIT_REQUESTED)
-            .is_some_and(|requested| {
-                self.has_after(requested.id, event_kind::EXIT_REQUEST_TIMED_OUT)
-            })
-    }
-
-    /// The timeout of the run's latest `/exit` request: its last
-    /// `exit_request_timed_out` after the last `exit_requested`, if any.
-    pub fn latest_exit_timeout(&self) -> Option<&'a RunEvent> {
-        let requested = self.last(event_kind::EXIT_REQUESTED)?;
-        self.events
-            .iter()
-            .rev()
-            .find(|e| e.id > requested.id && e.kind == event_kind::EXIT_REQUEST_TIMED_OUT)
-    }
-
-    /// The retries of the run's latest `/exit` request (ADR-0047 decision
-    /// 25): its `exit_retried` after the last `exit_requested`, oldest
-    /// first. Retries of an earlier request, before the run was resumed and
-    /// asked to exit again, do not count.
-    pub fn latest_exit_retries(&self) -> Vec<&'a RunEvent> {
-        let Some(requested) = self.last(event_kind::EXIT_REQUESTED) else {
-            return Vec::new();
-        };
-        self.events
-            .iter()
-            .filter(|e| e.id > requested.id && e.kind == event_kind::EXIT_RETRIED)
-            .collect()
-    }
-
-    /// Whether a `stuck_exit` ask was opened about the run's latest `/exit`
-    /// request: an `ask_opened` of that kind after its last
-    /// `exit_requested`. One about an earlier request does not count, so a
-    /// run resumed and stuck again is asked again (task 240).
-    pub fn latest_exit_asked(&self) -> bool {
-        self.last(event_kind::EXIT_REQUESTED)
-            .is_some_and(|requested| {
-                self.events.iter().any(|e| {
-                    e.id > requested.id
-                        && e.kind == event_kind::ASK_OPENED
-                        && restore::<AskOpened>(&e.payload).kind == Some("stuck_exit")
-                })
-            })
-    }
-
-    /// Whether the run's latest `/exit` request never reached the session
-    /// and was to close the workspace and land (`exit_unsent` with `action:
-    /// close_and_land` after the last `exit_requested`), with neither the
-    /// workspace's close (`workspace_closed`) nor a timeout
-    /// (`exit_request_timed_out`) recorded after it: the supervisor that
-    /// decided it died in between (task 464). An adopter's `session_gone`
-    /// (task 757) with no `workspace_closed` after it counts too: that
-    /// adopter died before recording the close. That `exit_unsent`, if so.
-    pub fn latest_exit_unsent_to_land(&self) -> Option<&'a RunEvent> {
-        let requested = self.last(event_kind::EXIT_REQUESTED)?;
-        self.events
-            .iter()
-            .rev()
-            .find(|e| e.id > requested.id && e.kind == event_kind::EXIT_UNSENT)
-            .filter(|unsent| {
-                matches!(
-                    unsent.payload["action"].as_str(),
-                    Some("close_and_land" | "session_gone")
-                ) && !self.has_after(unsent.id, event_kind::WORKSPACE_CLOSED)
-                    && !self.has_after(unsent.id, event_kind::EXIT_REQUEST_TIMED_OUT)
-            })
-    }
-
     /// Why the run waits for a session: its latest `integration_deferred`
     /// / `integration_error` / `evidence_missing` / `scope_violation` /
     /// `landing_decided` / `triage_finished` / `triage_decided`, or a
@@ -523,49 +450,6 @@ impl<'a> RunHistory<'a> {
             }
         }
         ResumedSession::Closed
-    }
-
-    /// The `screen_hash` of the dialog the session waits at: a
-    /// `prompt_waiting` with no `prompt_cleared` or `receipt_observed` since.
-    pub fn waiting_prompt_hash(&self) -> Option<&'a str> {
-        self.last_of(&[
-            event_kind::PROMPT_WAITING,
-            event_kind::PROMPT_CLEARED,
-            event_kind::RECEIPT_OBSERVED,
-        ])
-        .filter(|e| e.kind == event_kind::PROMPT_WAITING)
-        .and_then(|e| e.payload["screen_hash"].as_str())
-    }
-
-    /// [`RunHistory::waiting_prompt_hash`] counted only after `anchor` (the
-    /// event that started the stage whose watch is adopted, such as the
-    /// revise's `revise_requested` or `conflict_precheck`): a dialog
-    /// recorded before it is left behind, since some paths end a dialog
-    /// without recording `prompt_cleared` (task 742).
-    pub fn waiting_prompt_hash_after(&self, anchor: EventId) -> Option<&'a str> {
-        self.last_of(&[
-            event_kind::PROMPT_WAITING,
-            event_kind::PROMPT_CLEARED,
-            event_kind::RECEIPT_OBSERVED,
-        ])
-        .filter(|e| e.kind == event_kind::PROMPT_WAITING && e.id > anchor)
-        .and_then(|e| e.payload["screen_hash"].as_str())
-    }
-
-    /// The `screen_hash` of the dialog the session waited at when its
-    /// receipt was observed: a `prompt_waiting` with no `prompt_cleared`
-    /// since and a `receipt_observed` after it. Its `answer_prompt` ask is
-    /// closed by the receipt, also by a supervisor that adopted the run
-    /// after the receipt (task 239).
-    pub fn prompt_hash_at_receipt(&self) -> Option<&'a str> {
-        let waiting = self
-            .last_of(&[event_kind::PROMPT_WAITING, event_kind::PROMPT_CLEARED])
-            .filter(|e| e.kind == event_kind::PROMPT_WAITING)?;
-        self.events
-            .iter()
-            .any(|e| e.id > waiting.id && e.kind == event_kind::RECEIPT_OBSERVED)
-            .then(|| waiting.payload["screen_hash"].as_str())
-            .flatten()
     }
 
     /// The asks whose answer the supervisor could not type into the
@@ -958,106 +842,6 @@ mod tests {
         assert!(!pending(&[]));
         assert!(pending(&["exit_requested", "exit_request_timed_out"]));
         assert!(!pending(&["exit_request_timed_out", "session_exited"]));
-    }
-
-    #[test]
-    fn only_the_latest_exit_request_counts_for_its_timeout_and_ask() {
-        let stuck = |id| event(id, "ask_opened", json!({"kind": "stuck_exit"}));
-        let other = |id| event(id, "ask_opened", json!({"kind": "worker_question"}));
-        let plain = |id, kind| event(id, kind, json!({}));
-        let history = |events: &[RunEvent]| {
-            let h = RunHistory::from_events(events);
-            (h.latest_exit_timed_out(), h.latest_exit_asked())
-        };
-        assert_eq!(history(&[]), (false, false));
-        assert_eq!(
-            history(&[plain(1, "exit_request_timed_out"), stuck(2)]),
-            (false, false)
-        );
-        let first = [
-            plain(1, "exit_requested"),
-            plain(2, "exit_request_timed_out"),
-            stuck(3),
-        ];
-        assert_eq!(history(&first), (true, true));
-        // Resumed and asked to exit again: the old timeout and ask are
-        // behind the new request.
-        let mut again = first.to_vec();
-        again.push(plain(4, "resume_started"));
-        again.push(plain(5, "exit_requested"));
-        assert_eq!(history(&again), (false, false));
-        again.push(plain(6, "exit_request_timed_out"));
-        again.push(other(7));
-        assert_eq!(history(&again), (true, false));
-        again.push(stuck(8));
-        assert_eq!(history(&again), (true, true));
-    }
-
-    #[test]
-    fn exit_retries_count_from_the_latest_exit_request() {
-        let plain = |id, kind| event(id, kind, json!({}));
-        let retries = |events: &[RunEvent]| {
-            let history = RunHistory::from_events(events);
-            (
-                history.latest_exit_retries().len(),
-                history.latest_exit_timeout().map(|e| e.id.as_i64()),
-            )
-        };
-        assert_eq!(retries(&[]), (0, None));
-        assert_eq!(retries(&[plain(1, "exit_retried")]), (0, None));
-        let mut events = vec![
-            plain(1, "exit_requested"),
-            plain(2, "exit_request_timed_out"),
-            plain(3, "exit_retried"),
-            plain(4, "exit_retried"),
-        ];
-        assert_eq!(retries(&events), (2, Some(2)));
-        events.push(plain(5, "resume_started"));
-        events.push(plain(6, "exit_requested"));
-        assert_eq!(retries(&events), (0, None));
-        events.push(plain(7, "exit_request_timed_out"));
-        events.push(plain(8, "exit_retried"));
-        assert_eq!(retries(&events), (1, Some(7)));
-    }
-
-    #[test]
-    fn an_unsent_exit_to_land_is_pending_until_its_close_or_timeout() {
-        let plain = |id, kind| event(id, kind, json!({}));
-        let unsent = |id, action| event(id, "exit_unsent", json!({"action": action}));
-        let pending = |events: &[RunEvent]| {
-            RunHistory::from_events(events)
-                .latest_exit_unsent_to_land()
-                .map(|e| e.id.as_i64())
-        };
-        assert_eq!(pending(&[]), None);
-        assert_eq!(pending(&[unsent(1, "close_and_land")]), None);
-        let landing = [plain(1, "exit_requested"), unsent(2, "close_and_land")];
-        assert_eq!(pending(&landing), Some(2));
-        assert_eq!(
-            pending(&[plain(1, "exit_requested"), unsent(2, "recover")]),
-            None
-        );
-        // An adopter that found the workspace gone and died before
-        // recording the close (task 757).
-        let gone = [
-            plain(1, "exit_requested"),
-            unsent(2, "close_and_land"),
-            unsent(3, "session_gone"),
-        ];
-        assert_eq!(pending(&gone), Some(3));
-        let mut closed = gone.to_vec();
-        closed.push(plain(4, "workspace_closed"));
-        assert_eq!(pending(&closed), None);
-        for after in ["workspace_closed", "exit_request_timed_out"] {
-            let mut done = landing.to_vec();
-            done.push(plain(3, after));
-            assert_eq!(pending(&done), None, "{after}");
-        }
-        // One about an earlier request does not count.
-        let mut again = landing.to_vec();
-        again.push(plain(3, "resume_started"));
-        again.push(plain(4, "exit_requested"));
-        assert_eq!(pending(&again), None);
     }
 
     #[test]
@@ -1460,66 +1244,15 @@ mod tests {
                 json!({"workspace_id": "b", "workspace_closed": false}),
             ),
             event(3, "resume_finished", json!({"workspace_id": "c"})),
-            event(4, "prompt_waiting", json!({"screen_hash": "h"})),
             event(5, "ask_delivery_failed", json!({"ask_id": 7})),
             event(6, "follow_up_registered", json!({"index": 0})),
             event(7, "push_failed", json!({"error": "old"})),
             event(8, "push_failed", json!({"error": "new"})),
         ];
         let history = RunHistory::from_events(&events);
-        assert_eq!(history.waiting_prompt_hash(), Some("h"));
         assert_eq!(history.failed_deliveries(), [AskId::new(7)]);
         assert_eq!(history.registered_follow_ups(), [0]);
         assert_eq!(history.push_failure(), Some("new"));
-        let events = kinds(&["prompt_waiting", "prompt_cleared"]);
-        assert_eq!(RunHistory::from_events(&events).waiting_prompt_hash(), None);
-    }
-
-    #[test]
-    fn a_dialog_is_carried_over_only_after_the_anchor() {
-        let hash = |events: &[RunEvent], anchor: i64| {
-            RunHistory::from_events(events)
-                .waiting_prompt_hash_after(EventId::new(anchor))
-                .map(str::to_owned)
-        };
-        let old = event(1, "prompt_waiting", json!({"screen_hash": "old"}));
-        let anchor = event(2, "revise_requested", json!({}));
-        // A dialog left open before the anchor is not carried over.
-        assert_eq!(hash(&[old.clone(), anchor.clone()], 2), None);
-        let new = event(3, "prompt_waiting", json!({"screen_hash": "new"}));
-        let events = [old.clone(), anchor.clone(), new.clone()];
-        assert_eq!(hash(&events, 2), Some("new".into()));
-        // Ended after the anchor by `prompt_cleared` or the receipt.
-        for kind in ["prompt_cleared", "receipt_observed"] {
-            let end = event(4, kind, json!({}));
-            let events = [old.clone(), anchor.clone(), new.clone(), end];
-            assert_eq!(hash(&events, 2), None);
-        }
-        assert_eq!(hash(&[], 2), None);
-    }
-
-    #[test]
-    fn a_dialog_the_receipt_ended_keeps_its_hash_for_the_receipt() {
-        let hash = |events: &[RunEvent]| {
-            RunHistory::from_events(events)
-                .prompt_hash_at_receipt()
-                .map(str::to_owned)
-        };
-        let waiting = event(1, "prompt_waiting", json!({"screen_hash": "h"}));
-        let receipt = event(2, "receipt_observed", json!({}));
-        let cleared = event(3, "prompt_cleared", json!({}));
-        assert_eq!(hash(&[waiting.clone(), receipt.clone()]), Some("h".into()));
-        assert_eq!(
-            RunHistory::from_events(&[waiting.clone(), receipt.clone()]).waiting_prompt_hash(),
-            None
-        );
-        // No receipt yet, or the dialog cleared before or after it.
-        assert_eq!(hash(std::slice::from_ref(&waiting)), None);
-        assert_eq!(hash(&[waiting.clone(), receipt.clone(), cleared]), None);
-        let cleared = event(2, "prompt_cleared", json!({}));
-        let receipt = event(3, "receipt_observed", json!({}));
-        assert_eq!(hash(&[waiting, cleared, receipt.clone()]), None);
-        assert_eq!(hash(&[receipt]), None);
     }
 
     #[test]
@@ -1633,7 +1366,7 @@ mod tests {
     /// read them (task 1551): a missing key, an extra key, `null`, a value
     /// of another type or a payload that is not an object reads as the
     /// key's absence; `checks` and `scope_violation` count when present at
-    /// all, and old values such as a `stuck_exit` ask are still read.
+    /// all.
     #[test]
     fn recorded_payloads_with_missing_extra_null_or_mistyped_keys_are_read_as_before() {
         fn history(events: &[RunEvent]) -> RunHistory<'_> {
@@ -1660,8 +1393,7 @@ mod tests {
             assert_eq!(h.landing_pushes(), pushes, "{payload}");
         }
 
-        // ask_opened: an old `stuck_exit` ask is still read; a kind of
-        // another type moves nothing on.
+        // ask_opened: a kind of another type moves nothing on.
         let approved = event(1, "integration_approved", json!({"ask_id": 7}));
         for (kind, moved) in [
             (json!("approve_landing"), true),
@@ -1674,11 +1406,6 @@ mod tests {
             ];
             assert_eq!(history(&events).queued_approval().is_none(), moved);
         }
-        let events = [
-            event(1, "exit_requested", json!({})),
-            event(2, "ask_opened", json!({"kind": "stuck_exit", "extra": 1})),
-        ];
-        assert!(history(&events).latest_exit_asked());
 
         // run_recovered with no or a mistyped previous status is not a
         // landing given up.
