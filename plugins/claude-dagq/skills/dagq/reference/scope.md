@@ -44,8 +44,8 @@ The list is a forecast, not a limit: the worker may change other files as the wo
 
 ## What happens outside the paths
 
-- Validation compares the receipt's commit with where the branch forked from the current `main` (`git merge-base`; the base commit unless a resumed session rebased), so paths other tasks landed are never counted. A changed path no glob matches parks the run as `needs_session` with a `scope_violation` event (`paths`, `allowed`, `reason`); the supervisor resumes the session to restore those paths to their state at `git merge-base HEAD <main>`.
-- `integrate` checks the diff it would squash onto `main` after its rebase the same way. Outside paths defer the run (`integration_deferred` with `scope_violation`) without moving `main` or running the verification.
+- Validation compares the receipt's commit with where the branch forked from the current resolved landing branch (`git merge-base`; the base commit unless a resumed session rebased), so paths other tasks landed are never counted. A changed path no glob matches parks the run as `needs_session` with a `scope_violation` event (`paths`, `allowed`, `reason`); the supervisor resumes the session to restore those paths to their state at `git merge-base HEAD <branch>`.
+- `integrate` checks the diff it would squash onto the resolved landing branch after its rebase the same way. Outside paths defer the run (`integration_deferred` with `scope_violation`) without moving the resolved landing branch or running the verification.
 - If the task truly needs another path, the session writes a `failed` receipt naming it. Register the task again with wider `--paths` and the verification that path needs.
 
 ## Change the paths

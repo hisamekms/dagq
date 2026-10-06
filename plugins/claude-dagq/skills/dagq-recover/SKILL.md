@@ -1,6 +1,6 @@
 ---
 name: dagq-recover
-description: What a person does by hand in a dagq queue, from the inbox or their own terminal, only on the person's word, once the runtime and the recovery job could not fix it. Recover a run no supervisor serves; decide on a run whose recovery job failed; review and integrate a run whose headless review failed, or push main; carry out a stuck_exit, answer_prompt or stalled (intervene) answer with run screen / run send; bypass or resubmit a plan review; start, stop or update the runtime. Use when status or watch shows "recover run", "exit the session", "triage by hand", "recover by hand", "review by hand", "plan review by hand", "goal review by hand", "review and integrate", "push main", "restart supervisor", "dagq broker status", "send the answer of ask <id> to the worker", an answered stuck_exit, answer_prompt or stalled ask, or when the person asks to start, stop, update or recover. Entries ending in "(runtime)" need nothing.
+description: What a person does by hand in a dagq queue, from the inbox or their own terminal, only on the person's word, once the runtime and the recovery job could not fix it. Recover a run no supervisor serves; decide on a run whose recovery job failed; review and integrate a run whose headless review failed, or retry a failed push; carry out a stuck_exit, answer_prompt or stalled (intervene) answer with run screen / run send; bypass or resubmit a plan review; start, stop or update the runtime. Use when status or watch shows "recover run", "exit the session", "triage by hand", "recover by hand", "review by hand", "plan review by hand", "goal review by hand", "review and integrate", "push main", "restart supervisor", "dagq broker status", "send the answer of ask <id> to the worker", an answered stuck_exit, answer_prompt or stalled ask, or when the person asks to start, stop, update or recover. Entries ending in "(runtime)" need nothing.
 ---
 
 # dagq: what a person does by hand
@@ -51,7 +51,7 @@ Attention `triage by hand` (`triage_failed`): an ended run's recovery job failed
 
 ## 6. Review by hand, and a failed push
 
-Attention `review by hand` (`review_failed`: the supervisor's headless review failed) or `review and integrate` (a run accepted without a review): review it in a subagent from the file `review ID` writes, and on the person's word `integrate` it; on doubt, register an `approve_landing` ask. `push main` (`push_failed`): fix the cause, then `git push origin main`. Follow `reference/review-by-hand.md`.
+Attention `review by hand` (`review_failed`: the supervisor's headless review failed) or `review and integrate` (a run accepted without a review): review it in a subagent from the file `review ID` writes, and on the person's word `integrate` it; on doubt, register an `approve_landing` ask. `push main` (`push_failed`): read `branch` and `remote` from the `repository` field of `"$DAGQ" doctor`, fix the cause, then `git push <remote> <branch>`. Follow `reference/review-by-hand.md`.
 
 ## 7. A run's session: dialogs, stalls, stuck exits, undelivered answers
 

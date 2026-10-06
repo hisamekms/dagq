@@ -190,7 +190,11 @@ fn skills_point_at_their_reference_files() {
     assert!(review.contains("\"$DAGQ\" review ID"));
     assert!(review.contains("On `pass` and their word, `\"$DAGQ\" integrate ID`"));
     assert!(review.contains("--option land --option send_back --option cancel"));
-    assert!(review.contains("git push origin main"));
+    assert!(review.contains(
+        "run `\"$DAGQ\" doctor` and read `branch` and `remote` from its `repository` field"
+    ));
+    assert!(review.contains("then run `git push <remote> <branch>` using those values"));
+    assert!(!review.contains("git push origin main"));
 }
 
 /// Where a word like `task` is followed by its number (`task 528`,
