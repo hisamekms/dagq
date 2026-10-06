@@ -45,6 +45,19 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # The tests' CARGO_TARGET_TMPDIR, where tests/common/template.rs keeps
+      # the fixture templates (fixture-templates/). rust-cache's cleanTargetDir
+      # deletes the files there before it saves but keeps the directories, so a
+      # restored cache can hold empty templates that fail the tests (main's CI
+      # was red from 9/29 for this). Remove it right after the restore, before
+      # any test runs. The paths: plain cargo builds in target/, whose tmp is
+      # target/tmp; cargo llvm-cov builds in its own target directory
+      # target/llvm-cov-target (cargo-llvm-cov's default; a local cargo
+      # llvm-cov nextest leaves target/llvm-cov-target/tmp), so the tests here
+      # get target/llvm-cov-target/tmp as CARGO_TARGET_TMPDIR.
+      - name: Remove the target's tmp restored from the cache
+        run: rm -rf target/tmp target/llvm-cov-target/tmp
+
       - name: cargo fmt
         run: cargo fmt --all --check
 
@@ -129,6 +142,15 @@ jobs:
             sh scripts/check-it-test-time.sh --base "$BASE" "$RUNNER_TEMP/nextest.log"
           fi
 
+      # The same directories again before rust-cache's post step saves the
+      # cache: an if: always() step at the end of the job runs before the post
+      # steps, and rust-cache has no input to leave out a directory inside
+      # target/ (cache-targets keeps or drops the whole of it), so this keeps
+      # the templates out of the saved cache.
+      - name: Remove the target's tmp before the cache is saved
+        if: always()
+        run: rm -rf target/tmp target/llvm-cov-target/tmp
+
   # Linux (ubuntu): cargo build and the whole test suite (goal 83,
   # docs/design/linux-ci.md). A Linux failure fails the workflow like a macOS
   # one; the tests that only hold on macOS are split out with
@@ -155,6 +177,16 @@ jobs:
         uses: taiki-e/install-action@cargo-nextest
 
       - uses: Swatinem/rust-cache@v2
+
+      # The tests' CARGO_TARGET_TMPDIR, where tests/common/template.rs keeps
+      # the fixture templates (fixture-templates/). rust-cache's cleanTargetDir
+      # deletes the files there before it saves but keeps the directories, so a
+      # restored cache can hold empty templates that fail the tests (main's CI
+      # was red from 9/29 for this). Remove it right after the restore, before
+      # any test runs. The path: cargo nextest run builds in target/, so
+      # CARGO_TARGET_TMPDIR is target/tmp.
+      - name: Remove the target's tmp restored from the cache
+        run: rm -rf target/tmp
 
       - name: cargo build
         run: cargo build --locked
@@ -206,3 +238,12 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
           cat "$GITHUB_STEP_SUMMARY"
+
+      # The same directories again before rust-cache's post step saves the
+      # cache: an if: always() step at the end of the job runs before the post
+      # steps, and rust-cache has no input to leave out a directory inside
+      # target/ (cache-targets keeps or drops the whole of it), so this keeps
+      # the templates out of the saved cache.
+      - name: Remove the target's tmp before the cache is saved
+        if: always()
+        run: rm -rf target/tmp

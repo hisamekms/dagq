@@ -60,6 +60,16 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # The tests' CARGO_TARGET_TMPDIR, where tests/common/template.rs keeps
+      # the fixture templates (fixture-templates/). rust-cache's cleanTargetDir
+      # deletes the files there before it saves but keeps the directories, so a
+      # restored cache can hold empty templates that fail the tests (main's CI
+      # was red from 9/29 for this). Remove it right after the restore, before
+      # any test runs. The path: scripts/stress-recent-tests.sh runs cargo
+      # nextest in target/, so CARGO_TARGET_TMPDIR is target/tmp.
+      - name: Remove the target's tmp restored from the cache
+        run: rm -rf target/tmp
+
       - name: Choose the range
         id: range
         env:
@@ -134,3 +144,12 @@ jobs:
               echo "opened: $title"
             fi
           done < "$failed"
+
+      # The same directories again before rust-cache's post step saves the
+      # cache: an if: always() step at the end of the job runs before the post
+      # steps, and rust-cache has no input to leave out a directory inside
+      # target/ (cache-targets keeps or drops the whole of it), so this keeps
+      # the templates out of the saved cache.
+      - name: Remove the target's tmp before the cache is saved
+        if: always()
+        run: rm -rf target/tmp
